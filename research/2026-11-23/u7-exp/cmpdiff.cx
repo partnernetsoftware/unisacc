@@ -1,0 +1,117 @@
+#pragma unisa use sys.fs
+#pragma unisa use sys.io
+#pragma unisa use sys.sha
+#pragma unisa use mem.bytes
+#pragma unisa use text.text
+
+/* cmpdiff.cx A.s B.s -- 打印用户函数里 RAW 不同、FLAT 也不同的前 N 个及其首行差异。 */
+#define MAXF 16384
+typedef struct { char key[160]; char sha[65]; char shb[65]; long len; long ls; } Fn;
+static Fn fa[MAXF], fb[MAXF];
+static int na, nb;
+static unsigned char *A, *B;
+
+static int label_at(unsigned char *b, long ls, long le) {
+    long k;
+    if (le - ls < 2) return 0;
+    if (b[ls] == ' ' || b[ls] == '\t') return 0;
+    if (b[le - 1] != ':') return 0;
+    for (k = ls; k < le - 1; k++) {
+        unsigned char c = b[k];
+        if (!((c >= 'A' && c <= 'Z') || (c >= 'a' && c <= 'z') || (c >= '0' && c <= '9') || c == '_' || c == '.')) return 0;
+    }
+    return 1;
+}
+static void norm(const unsigned char *s, long n, char *out, int cap) {
+    int k = 0; long i;
+    for (i = 0; i < n && k < cap - 1; i++) {
+        if (n - i >= 4 && s[i] == '_' && s[i + 1] == '_' && s[i + 2] == 'u' && s[i + 3] >= '0' && s[i + 3] <= '9') break;
+        out[k++] = (char)s[i];
+    }
+    out[k] = 0;
+}
+static int userfn(const char *k) {
+    int i = 0;
+    if (k[0] == 'e' && k[1] == 'x') i = 2;
+    else if (k[0] == 'f') i = 1;
+    else return 0;
+    if (!k[i]) return 0;
+    for (; k[i]; i++) if (k[i] < '0' || k[i] > '9') return 0;
+    return 1;
+}
+static long flatten(unsigned char *src, long n, unsigned char *dst, long dcap) {
+    long i = 0, o = 0, map[512]; int kind[512], nk = 0, m;
+    while (i < n) {
+        if (n - i >= 11 && mm_same(src + i, "__unisacc_", 10) && (src[i + 10] == 'L' || src[i + 10] == 'R' || src[i + 10] == 'B')) {
+            unsigned char c = src[i + 10];
+            long j = i + 11, v = 0; int digits = 0;
+            while (j < n && src[j] >= '0' && src[j] <= '9') { v = v * 10 + (src[j] - '0'); j++; digits++; }
+            if (digits) {
+                int id = -1;
+                for (m = 0; m < nk; m++) if (kind[m] == (int)c && map[m] == v) { id = m; break; }
+                if (id < 0) { if (nk >= 512) return -1; map[nk] = v; kind[nk] = (int)c; id = nk; nk++; }
+                if (o + 24 >= dcap) return -1;
+                { const char *p = "__unisacc_"; int q; for (q = 0; p[q]; q++) dst[o++] = (unsigned char)p[q]; }
+                dst[o++] = c;
+                { char t[12]; int tn = 0, q; if (id == 0) t[tn++] = '0'; else { int x = id; char rv[12]; int rn = 0; while (x) { rv[rn++] = (char)('0' + x % 10); x /= 10; } while (rn) t[tn++] = rv[--rn]; }
+                  for (q = 0; q < tn; q++) dst[o++] = (unsigned char)t[q]; }
+                i = j; continue;
+            }
+        }
+        if (o + 1 >= dcap) return -1;
+        dst[o++] = src[i++];
+    }
+    return o;
+}
+static unsigned char tmpbuf[1 << 20];
+static int emit(unsigned char *b, long ls, long le, long body, long end, Fn *out, int cnt) {
+    char sh[65], shb[65], key[160];
+    long blen = end - body, fl;
+    if (blen < 0) blen = 0;
+    norm(b + ls, le - ls - 1, key, 160);
+    if (!userfn(key)) return cnt;
+    if (sy_sha256_hex(b + body, blen, sh)) return -1;
+    fl = flatten(b + body, blen, tmpbuf, (long)sizeof tmpbuf);
+    if (fl < 0 || sy_sha256_hex(tmpbuf, fl, shb)) return -1;
+    {   long kl = tx_len(key, 160);
+        if (kl < 0) return -1;
+        mm_copy(out[cnt].key, 160, key, (size_t)kl + 1); }
+    mm_copy(out[cnt].sha, 65, sh, 65);
+    mm_copy(out[cnt].shb, 65, shb, 65);
+    out[cnt].len = blen; out[cnt].ls = body;
+    return cnt + 1;
+}
+static int scan(unsigned char *b, long n, Fn *out, int *nout) {
+    long i = 0, cls = -1, cle = -1, cb = -1; int cnt = 0, r;
+    while (i < n) {
+        long ls = i, le;
+        while (i < n && b[i] != '\n') i++;
+        le = i; if (i < n) i++;
+        if (label_at(b, ls, le)) {
+            if (cls >= 0 && cnt < MAXF) { r = emit(b, cls, cle, cb, ls, out, cnt); if (r < 0) return 1; cnt = r; }
+            cls = ls; cle = le; cb = i;
+        }
+    }
+    if (cls >= 0 && cnt < MAXF) { r = emit(b, cls, cle, cb, n, out, cnt); if (r < 0) return 1; cnt = r; }
+    *nout = cnt;
+    return 0;
+}
+static void show(const char *who, unsigned char *b, long ls) {
+    long i = ls; int lines = 0;
+    while (b[i] && lines < 12) { if (b[i] == '\n') lines++; i++; }
+    sy_printf("--- %s\n%.*s", who, (int)(i - ls), (char *)b + ls);
+}
+int main(int argc, char **argv) {
+    int64_t an = 0, bn = 0; int i, j, shown = 0;
+    if (argc < 3) { sy_eprintf("usage: cmpdiff.cx A.s B.s\n"); return 2; }
+    if (sy_read_file(argv[1], &A, &an, 1 << 26) || !A) return 2;
+    if (sy_read_file(argv[2], &B, &bn, 1 << 26) || !B) return 2;
+    if (scan(A, (long)an, fa, &na) || scan(B, (long)bn, fb, &nb)) return 2;
+    for (i = 0; i < na && shown < 4; i++) {
+        for (j = 0; j < nb; j++) if (tx_eqz(fa[i].key, fb[j].key)) {
+            if (!tx_eqz(fa[i].shb, fb[j].shb)) { sy_printf("DIFF\t%s\tlenA=%ld lenB=%ld\n", fa[i].key, fa[i].len, fb[j].len); show("A", A, fa[i].ls); show("B", B, fb[j].ls); shown++; }
+            break;
+        }
+    }
+    return 0;
+}

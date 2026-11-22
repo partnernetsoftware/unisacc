@@ -138,10 +138,15 @@ int main(void) {
         ck(rc_self == 1 && ckk_has(out, CPD_OUT, "BLOCKED derived-table-drift name=links"),
             "staged-self-waiver-in-same-commit-blocked: staging new waiver in same commit does not self-waive");
 
-        /* 5b: Commit active waiver to HEAD first -> staging drifted batches.tsv is allowed (rc 0); expiring waiver in staged index blocks (rc 1) */
+        /* 5b: While worktree batches.tsv is drifted, a standalone commit staging ONLY derive-gate-waivers.tsv must pass precommit (rc 0);
+         *     then staging drifted batches.tsv is allowed (rc 0); expiring waiver in staged index blocks (rc 1) */
         if (cx_fmt(cmd, sizeof cmd,
-            "cd '%s' && git reset -q && git checkout -q -- tests/batches.tsv && git add tests/derive-gate-waivers.tsv && "
-            "git -c user.name=t -c user.email=t@t commit -q -m add-head-waiver", repo)) cpd_abort("c5hw");
+            "cd '%s' && git reset -q && git add tests/derive-gate-waivers.tsv && "
+            "UNISACC_PRECOMMIT_SERIAL=1 sh ./unisacc.com tools/precommit.cx", repo)) cpd_abort("c5wonly");
+        int rc_wonly = ckk_sh("check-precommit-derive", cmd, out, sizeof out);
+        int wonly_ok = (rc_wonly == 0 && ckk_has(out, CPD_OUT, "PRECOMMIT\tstaged_cx=0\tblocked=0"));
+        if (cx_fmt(cmd, sizeof cmd,
+            "cd '%s' && git -c user.name=t -c user.email=t@t commit -q -m add-head-waiver", repo)) cpd_abort("c5hw");
         cpd_sh(cmd, out);
         if (cx_fmt(p, sizeof p, "%s/tests/batches.tsv", repo)) cpd_abort("b3p2");
         if (cx_write(p, bat3, strlen(bat3))) cpd_abort("wb32");
@@ -157,8 +162,8 @@ int main(void) {
             "cd '%s' && git reset -q && git rm -qf tests/derive-gate-waivers.tsv && "
             "git -c user.name=t -c user.email=t@t commit -q -m rm-head-waiver && git add tests/batches.tsv", repo)) cpd_abort("c5rm");
         cpd_sh(cmd, out);
-        ck(rc_act == 0 && exp_blk,
-            "waiver-active-and-expired: HEAD active waiver rc=0; expired waiver rc=1 BLOCKED");
+        ck(wonly_ok && rc_act == 0 && exp_blk,
+            "waiver-active-and-expired: standalone waiver commit passes under drift; HEAD active waiver rc=0; expired waiver rc=1 BLOCKED");
     }
 
     /* 6, 7 & 8. Real git commit through .git/hooks/pre-commit (precommit-flow.cx: --plan + flowexec + --from-run) */
@@ -369,7 +374,7 @@ int main(void) {
         ck(wt_blk_ok && rc_wt_ok == 0,
             "version-worktree-subdir-hook-blocks-and-passes: real git commit in .claude/worktrees/v0.0.99/tests blocks drift and passes after recompute");
 
-        /* 11b: Staged deletion of derive.tsv, derive.cx, reg-manifest.cx, tables-gen.cx refused with named error */
+        /* 11b: Staged deletion of all 6 core gate files (derive.tsv, derive.cx, reg-manifest.cx, tables-gen.cx, gen-all-check.cx, ledger-add.cx) refused with named error */
         if (cx_fmt(repo4, sizeof repo4, "%s/repo-del", work)) cpd_abort("r4");
         cpd_mk(repo4);
         if (cx_fmt(p, sizeof p, "%s/exec", repo4)) cpd_abort("r4p1"); cpd_mk(p);
@@ -384,11 +389,13 @@ int main(void) {
             "printf 'int main(void){return 0;}\\n' > '%s/tools/derive.cx' && "
             "printf 'int main(void){return 0;}\\n' > '%s/tools/reg-manifest.cx' && "
             "printf 'int main(void){return 0;}\\n' > '%s/tools/tables-gen.cx' && "
+            "printf 'int main(void){return 0;}\\n' > '%s/tools/gen-all-check.cx' && "
+            "printf 'int main(void){return 0;}\\n' > '%s/tools/ledger-add.cx' && "
             "printf '# batches\\n' > '%s/tests/batches.tsv' && "
-            "cd '%s' && git init -q && git add exec/facts/derive.tsv tools/derive.cx tools/reg-manifest.cx tools/tables-gen.cx tests/batches.tsv && "
+            "cd '%s' && git init -q && git add exec/facts/derive.tsv tools/derive.cx tools/reg-manifest.cx tools/tables-gen.cx tools/gen-all-check.cx tools/ledger-add.cx tests/batches.tsv && "
             "git -c user.name=t -c user.email=t@t commit -q -m init",
             cwd, repo4, cwd, repo4, cwd, repo4, cwd, repo4, cwd, repo4, cwd, repo4,
-            repo4, repo4, repo4, repo4, repo4, repo4)) cpd_abort("r4init");
+            repo4, repo4, repo4, repo4, repo4, repo4, repo4, repo4)) cpd_abort("r4init");
         cpd_sh(cmd, out);
 
         if (cx_fmt(cmd, sizeof cmd,
@@ -414,8 +421,39 @@ int main(void) {
         int rc_d4 = ckk_sh("check-precommit-derive", cmd, out, sizeof out);
         int ok_d4 = (rc_d4 == 1 && ckk_has(out, CPD_OUT, "BLOCKED tables-gate-deleted path=tools/tables-gen.cx"));
 
-        ck(ok_d1 && ok_d2 && ok_d3 && ok_d4,
-            "staged-delete-core-gate-files-blocked: staging deletion of derive.tsv/derive.cx/reg-manifest.cx/tables-gen.cx is refused");
+        if (cx_fmt(cmd, sizeof cmd,
+            "cd '%s' && git reset -q && git checkout -q -- tools/tables-gen.cx && "
+            "git rm -qf tools/gen-all-check.cx && UNISACC_PRECOMMIT_SERIAL=1 sh ./unisacc.com tools/precommit.cx", repo4)) cpd_abort("r4d5");
+        int rc_d5 = ckk_sh("check-precommit-derive", cmd, out, sizeof out);
+        int ok_d5 = (rc_d5 == 1 && ckk_has(out, CPD_OUT, "BLOCKED genall-gate-deleted path=tools/gen-all-check.cx"));
+
+        if (cx_fmt(cmd, sizeof cmd,
+            "cd '%s' && git reset -q && git checkout -q -- tools/gen-all-check.cx && "
+            "git rm -qf tools/ledger-add.cx && UNISACC_PRECOMMIT_SERIAL=1 sh ./unisacc.com tools/precommit.cx", repo4)) cpd_abort("r4d6");
+        int rc_d6 = ckk_sh("check-precommit-derive", cmd, out, sizeof out);
+        int ok_d6 = (rc_d6 == 1 && ckk_has(out, CPD_OUT, "BLOCKED ledger-gate-deleted path=tools/ledger-add.cx"));
+
+        ck(ok_d1 && ok_d2 && ok_d3 && ok_d4 && ok_d5 && ok_d6,
+            "staged-delete-core-gate-files-blocked: staging deletion of all 6 core gate files is refused");
+
+        /* 11c: ENOTDIR (only ENOENT is treated as absent) and ledger_gate missing HEAD baseline must block instead of silent return 0 */
+        if (cx_fmt(cmd, sizeof cmd,
+            "cd '%s' && git reset -q && git checkout -q -- tools/ledger-add.cx && "
+            "mkdir -p archive/agentwork-retire-2026-11 && printf 'a\\tb\\n' > archive/agentwork-retire-2026-11/ledger.tsv && "
+            "git add archive/agentwork-retire-2026-11/ledger.tsv && "
+            "UNISACC_PRECOMMIT_SERIAL=1 sh ./unisacc.com tools/precommit.cx", repo4)) cpd_abort("r4l1");
+        int rc_l1 = ckk_sh("check-precommit-derive", cmd, out, sizeof out);
+        int ok_l1 = (rc_l1 == 1 && ckk_has(out, CPD_OUT, "BLOCKED ledger: cannot read HEAD:build/ledger-format-baseline.tsv"));
+
+        if (cx_fmt(cmd, sizeof cmd,
+            "cd '%s' && git reset -q && rm -rf exec/facts && printf 'not-a-dir\\n' > exec/facts && "
+            "printf '# b2\\n' >> tests/batches.tsv && git add tests/batches.tsv && "
+            "UNISACC_PRECOMMIT_NO_ISOLATE=1 UNISACC_PRECOMMIT_SERIAL=1 sh ./unisacc.com tools/precommit.cx", repo4)) cpd_abort("r4en");
+        int rc_en = ckk_sh("check-precommit-derive", cmd, out, sizeof out);
+        int ok_en = (rc_en == 1 && ckk_has(out, CPD_OUT, "BLOCKED derive-unreadable path=exec/facts/derive.tsv"));
+
+        ck(ok_l1 && ok_en,
+            "enotdir-and-ledger-missing-baseline-blocked: ENOTDIR and missing ledger HEAD baseline refuse instead of silent pass");
     }
 
     {

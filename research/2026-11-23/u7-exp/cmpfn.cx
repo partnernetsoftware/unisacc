@@ -1,0 +1,158 @@
+#pragma unisa use sys.fs
+#pragma unisa use sys.io
+#pragma unisa use sys.sha
+#pragma unisa use mem.bytes
+#pragma unisa use text.text
+
+/* cmpfn.cx A.s B.s -- 只比用户函数(f<digits>/ex<digits>)的函数体。
+ * 两个口径:(a) RAW = 函数体原始字节;(b) FLAT = 去掉 .unit 身份行、
+ * 并把 __unisacc_L/R/B<digits> 局部标号按函数内出现顺序重编后的字节。 */
+#define MAXF 16384
+#define CMPCAP (1L << 20)
+typedef struct { char key[160]; char sha[65]; char shb[65]; long len; } Fn;
+static Fn fa[MAXF], fb[MAXF];
+static int na, nb;
+
+static int label_at(unsigned char *b, long ls, long le) {
+    long k;
+    if (le - ls < 2) return 0;
+    if (b[ls] == ' ' || b[ls] == '\t') return 0;
+    if (b[le - 1] != ':') return 0;
+    for (k = ls; k < le - 1; k++) {
+        unsigned char c = b[k];
+        if (!((c >= 'A' && c <= 'Z') || (c >= 'a' && c <= 'z') || (c >= '0' && c <= '9') || c == '_' || c == '.')) return 0;
+    }
+    return 1;
+}
+
+static void norm(const unsigned char *s, long n, char *out, int cap) {
+    int k = 0; long i;
+    for (i = 0; i < n && k < cap - 1; i++) {
+        if (n - i >= 4 && s[i] == '_' && s[i + 1] == '_' && s[i + 2] == 'u' && s[i + 3] >= '0' && s[i + 3] <= '9') break;
+        out[k++] = (char)s[i];
+    }
+    out[k] = 0;
+}
+
+static int userfn(const char *k) {
+    int i = 0;
+    if (k[0] == 'e' && k[1] == 'x') i = 2;
+    else if (k[0] == 'f') i = 1;
+    else return 0;
+    for (; k[i]; i++) if (k[i] < '0' || k[i] > '9') return 0;
+    return 1;
+}
+
+/* 去掉模块身份行(.unit N hash):它是单元身份不是生成指令 */
+static long strip_unit(unsigned char *src, long n, unsigned char *dst, long dcap) {
+    long i = 0, o = 0;
+    while (i < n) {
+        long ls = i, le;
+        while (i < n && src[i] != '\n') i++;
+        le = i; if (i < n) i++;
+        if (!(le - ls >= 5 && mm_same(src + ls, ".unit", 5))) {
+            if (o + (le - ls) + 1 >= dcap) return -1;
+            mm_copy(dst + o, (size_t)(dcap - o), src + ls, (size_t)(le - ls));
+            o += le - ls;
+            if (o + 1 < dcap) dst[o++] = '\n';
+        }
+    }
+    return o;
+}
+
+/* 把局部标号编号抹平:__unisacc_<K><digits> -> __unisacc_<K><顺序号> */
+static long flatten(unsigned char *src, long n, unsigned char *dst, long dcap) {
+    long i = 0, o = 0;
+    long map[512]; int kind[512], nk = 0, m;
+    while (i < n) {
+        if (n - i >= 11 && mm_same(src + i, "__unisacc_", 10) && (src[i + 10] == 'L' || src[i + 10] == 'R' || src[i + 10] == 'B')) {
+            unsigned char c = src[i + 10];
+            long j = i + 11, v = 0; int digits = 0;
+            while (j < n && src[j] >= '0' && src[j] <= '9') { v = v * 10 + (src[j] - '0'); j++; digits++; }
+            if (digits) {
+                int id = -1;
+                for (m = 0; m < nk; m++) if (kind[m] == (int)c && map[m] == v) { id = m; break; }
+                if (id < 0) { if (nk >= 512) return -1; map[nk] = v; kind[nk] = (int)c; id = nk; nk++; }
+                if (o + 24 >= dcap) return -1;
+                { const char *p = "__unisacc_"; int q; for (q = 0; p[q]; q++) dst[o++] = (unsigned char)p[q]; }
+                dst[o++] = c;
+                {   char t[12]; int tn = 0, q;
+                    if (id == 0) t[tn++] = '0';
+                    else { int x = id; char rv[12]; int rn = 0; while (x) { rv[rn++] = (char)('0' + x % 10); x /= 10; } while (rn) t[tn++] = rv[--rn]; }
+                    for (q = 0; q < tn; q++) dst[o++] = (unsigned char)t[q]; }
+                i = j; continue;
+            }
+        }
+        if (o + 1 >= dcap) return -1;
+        dst[o++] = src[i++];
+    }
+    return o;
+}
+
+static unsigned char tmpbuf[1 << 20];
+
+static int emit(unsigned char *b, long ls, long le, long body, long end, Fn *out, int cnt) {
+    char sh[65], shb[65], key[160];
+    long blen = end - body, fl, kl;
+    if (blen < 0) blen = 0;
+    norm(b + ls, le - ls - 1, key, 160);
+    if (!userfn(key)) return cnt;
+    {   long sl;
+        sl = strip_unit(b + body, blen, tmpbuf, (long)sizeof tmpbuf);
+        if (sl < 0 || sy_sha256_hex(tmpbuf, sl, sh)) return -1;
+        fl = flatten(tmpbuf, sl, tmpbuf + (1 << 19), (long)(sizeof tmpbuf) - (1 << 19));
+        if (fl < 0 || sy_sha256_hex(tmpbuf + (1 << 19), fl, shb)) return -1; }
+    kl = tx_len(key, 160);
+    if (kl < 0) return -1;
+    mm_copy(out[cnt].key, 160, key, (size_t)kl + 1);
+    mm_copy(out[cnt].sha, 65, sh, 65);
+    mm_copy(out[cnt].shb, 65, shb, 65);
+    out[cnt].len = blen;
+    return cnt + 1;
+}
+
+static int scan(unsigned char *b, long n, Fn *out, int *nout) {
+    long i = 0, cur_ls = -1, cur_le = -1, cur_body = -1;
+    int cnt = 0, r;
+    while (i < n) {
+        long ls = i, le;
+        while (i < n && b[i] != '\n') i++;
+        le = i; if (i < n) i++;
+        if (label_at(b, ls, le)) {
+            if (cur_ls >= 0 && cnt < MAXF) { r = emit(b, cur_ls, cur_le, cur_body, ls, out, cnt); if (r < 0) return 1; cnt = r; }
+            cur_ls = ls; cur_le = le; cur_body = i;
+        }
+    }
+    if (cur_ls >= 0 && cnt < MAXF) { r = emit(b, cur_ls, cur_le, cur_body, n, out, cnt); if (r < 0) return 1; cnt = r; }
+    *nout = cnt;
+    return 0;
+}
+
+int main(int argc, char **argv) {
+    unsigned char *A = 0, *B = 0; int64_t an = 0, bn = 0;
+    int i, j, same = 0, diff = 0, sameb = 0, diffb = 0, onlya = 0, onlyb = 0;
+    if (argc < 3) { sy_eprintf("usage: cmpfn.cx A.s B.s\n"); return 2; }
+    if (sy_read_file(argv[1], &A, &an, CMPCAP) || !A) { sy_eprintf("read fail %s\n", argv[1]); return 2; }
+    if (sy_read_file(argv[2], &B, &bn, CMPCAP) || !B) { sy_eprintf("read fail %s\n", argv[2]); return 2; }
+    if (scan(A, (long)an, fa, &na) || scan(B, (long)bn, fb, &nb)) { sy_eprintf("scan fail\n"); return 2; }
+    for (i = 0; i < na; i++) {
+        int found = 0;
+        for (j = 0; j < nb; j++) if (tx_eqz(fa[i].key, fb[j].key)) {
+            found = 1;
+            if (fa[i].len == fb[j].len && tx_eqz(fa[i].sha, fb[j].sha)) same++; else diff++;
+            if (tx_eqz(fa[i].shb, fb[j].shb)) sameb++; else diffb++;
+            break;
+        }
+        if (!found) onlya++;
+    }
+    for (j = 0; j < nb; j++) {
+        int found = 0;
+        for (i = 0; i < na; i++) if (tx_eqz(fa[i].key, fb[j].key)) { found = 1; break; }
+        if (!found) onlyb++;
+    }
+    sy_printf("CMPFN\tA=%s\tB=%s\nFUNCS_A\t%d\nFUNCS_B\t%d\n", argv[1], argv[2], na, nb);
+    sy_printf("RAW\tsame=%d\tdiff=%d\trate=%d.%02d%%\n", same, diff, same + diff ? same * 100 / (same + diff) : 0, same + diff ? (same * 10000 / (same + diff)) % 100 : 0);
+    sy_printf("FLAT\tsame=%d\tdiff=%d\trate=%d.%02d%%\n", sameb, diffb, sameb + diffb ? sameb * 100 / (sameb + diffb) : 0, sameb + diffb ? (sameb * 10000 / (sameb + diffb)) % 100 : 0);
+    sy_printf("ONLY_A\t%d\nONLY_B\t%d\n", onlya, onlyb);
+    return 0;
+}
