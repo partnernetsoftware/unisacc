@@ -1,0 +1,129 @@
+/* tools/check-freeze-broadcast.cx -- fixture for freeze-broadcast (fake tmux/mux).
+ *
+ * --dry targets+body; whitelist excludes include=0; fake mux fail then resend;
+ * mutant-no-resend leaves FAIL; ledger line written. Ends CHECK_FREEZE_BROADCAST. */
+#pragma unisa use cxlib.ckassert
+#pragma unisa use cxlib.ckrun
+#pragma unisa use sys.fs
+#pragma unisa use sys.env
+#pragma unisa use sys.time
+#pragma unisa use sys.posix
+#pragma unisa use text.text
+#pragma unisa use mem.heap
+
+static char out[1 << 16];
+static char root[900], cwd[800], tab[900], fake_tmux[900], fake_mux[900], led[900];
+
+static int run_fb(const char *extra) {
+    char cmd[3200];
+    if (cx_fmt(cmd, sizeof cmd,
+        "sh '%s/unisacc.com' '%s/tools/freeze-broadcast.cx' -- --windows-table '%s' --tmux 'sh %s' --mux 'sh %s' --ledger-dir '%s' %s",
+        cwd, cwd, tab, fake_tmux, fake_mux, led, extra && extra[0] ? extra : "")) return -1;
+    return ckk_sh_t("check-freeze-broadcast", cmd, out, (int)sizeof out, 55);
+}
+
+int main(void) {
+    char cmd[5000]; int rc; long now;
+    const char *td = sy_env("TMPDIR");
+    if (!td || !td[0]) td = "/tmp";
+    if (ckk_sh_t("check-freeze-broadcast", "pwd", out, (int)sizeof out, 20) != 0) return 2;
+    cx_fmt(cwd, sizeof cwd, "%s", out);
+    { long n = tx_len(cwd, sizeof cwd); while (n > 0 && cwd[n - 1] == '\n') cwd[--n] = 0; }
+    now = sy_wall_s();
+    if (cx_fmt(root, sizeof root, "%s/fb-check-%ld", td, now % 1000000000)) return 2;
+    sy_remove_all(root);
+    if (sy_mkdir_all(root, 0700)) return 2;
+    if (cx_fmt(tab, sizeof tab, "%s/wins.tsv", root) ||
+        cx_fmt(fake_tmux, sizeof fake_tmux, "%s/fake-tmux.sh", root) ||
+        cx_fmt(fake_mux, sizeof fake_mux, "%s/fake-mux.sh", root) ||
+        cx_fmt(led, sizeof led, "%s/ledger", root)) return 2;
+
+    /* whitelist */
+    if (cx_fmt(cmd, sizeof cmd,
+        "printf 'window\\tinclude\\tlane_note\\n"
+        "agyneon\\t1\\tok\\n"
+        "csr\\t1\\tok\\n"
+        "cdx2\\t0\\tujs\\n"
+        "ccapi\\t0\\tother\\n' > '%s'", tab)) return 2;
+    ck(ckk_sh_t("check-freeze-broadcast", cmd, out, (int)sizeof out, 10) == 0, "seed-table");
+
+    /* fake tmux lists agyneon,csr,cdx2,ccapi */
+    {
+        static const char tm[] =
+            "#!/bin/sh\n"
+            "echo agyneon\n"
+            "echo csr\n"
+            "echo cdx2\n"
+            "echo ccapi\n";
+        if (sy_write_file(fake_tmux, tm, (int64_t)(sizeof tm - 1), 0700)) return 2;
+    }
+    /* fake mux: fail once for csr then succeed; always submit for others.
+       Uses a stamp file under ledger dir's parent. */
+    {
+        char stamp[950];
+        if (cx_fmt(stamp, sizeof stamp, "%s/csr-fail-once", root)) return 2;
+        if (cx_fmt(cmd, sizeof cmd,
+            "printf '#!/bin/sh\\n"
+            "stamp=%s\\n"
+            "# argv: ... envelope --body-file BODY -- SPEC TITLE\\n"
+            "spec=\"\"\\n"
+            "prev=\"\"\\n"
+            "for a in \"$@\"; do\\n"
+            "  if [ \"$prev\" = \"--\" ]; then spec=\"$a\"; break; fi\\n"
+            "  prev=\"$a\"\\n"
+            "done\\n"
+            "base=`basename \"$spec\"`\\n"
+            "case \"$base\" in\\n"
+            "  csr)\\n"
+            "    if [ ! -f \"$stamp\" ]; then touch \"$stamp\"; echo fail-csr; exit 1; fi\\n"
+            "    echo submitted; exit 0;;\\n"
+            "  *) echo submitted; exit 0;;\\n"
+            "esac\\n' > '%s' && chmod 700 '%s'", stamp, fake_mux, fake_mux)) return 2;
+        ck(ckk_sh_t("check-freeze-broadcast", cmd, out, (int)sizeof out, 10) == 0, "seed-fake-mux");
+    }
+
+    /* dry: only include=1, no cdx2/ccapi, no send */
+    rc = run_fb("start --dry --lock cc --until T0+2h --load-ceil 8");
+    ck(rc == 0, "dry-rc");
+    ck(ckk_has(out, (int)sizeof out, "FREEZE_BROADCAST_TARGET\tagyneon"), "dry-agyneon");
+    ck(ckk_has(out, (int)sizeof out, "FREEZE_BROADCAST_TARGET\tcsr"), "dry-csr");
+    ck(!ckk_has(out, (int)sizeof out, "FREEZE_BROADCAST_TARGET\tcdx2"), "dry-exclude-cdx2");
+    ck(!ckk_has(out, (int)sizeof out, "FREEZE_BROADCAST_TARGET\tccapi"), "dry-exclude-ccapi");
+    ck(ckk_has(out, (int)sizeof out, "FREEZE_BROADCAST\tDRY"), "dry-mark");
+    ck(ckk_has(out, (int)sizeof out, "静默开始"), "dry-body");
+
+    /* real send with resend: csr fails once then ok */
+    {
+        char stamp[950];
+        if (cx_fmt(stamp, sizeof stamp, "%s/csr-fail-once", root)) return 2;
+        sy_unlink(stamp);
+    }
+    rc = run_fb("start --lock cc --until T0+2h");
+    ck(rc == 0, "send-rc");
+    ck(ckk_has(out, (int)sizeof out, "FREEZE_BROADCAST_RESEND\tcount=1"), "resend-once");
+    ck(ckk_has(out, (int)sizeof out, "FREEZE_BROADCAST\tDONE\tok=2\tfail=0"), "send-all-ok");
+    ck(ckk_has(out, (int)sizeof out, "FREEZE_BROADCAST_LEDGER\t"), "ledger-line");
+
+    /* phase */
+    rc = run_fb("phase S3 --dry");
+    ck(rc == 0 && ckk_has(out, (int)sizeof out, "PHASE S3"), "phase-s3-dry");
+
+    /* mutant: no resend leaves fail */
+    {
+        char stamp[950];
+        if (cx_fmt(stamp, sizeof stamp, "%s/csr-fail-once", root)) return 2;
+        sy_unlink(stamp);
+    }
+    rc = run_fb("start --mutant-no-resend");
+    ck(rc != 0 && ckk_has(out, (int)sizeof out, "FREEZE_BROADCAST_RETRY\tcsr") &&
+       !ckk_has(out, (int)sizeof out, "FREEZE_BROADCAST_RESEND\t"), "mutant-no-resend");
+
+    sy_remove_all(root);
+    {
+        int failed = ck_failures();
+        int total = ck_assertions();
+        printf("FREEZE_BROADCAST_SUMMARY\tfailed=%d\tpassed=%d\n", failed, total - failed);
+        if (!failed) printf("CHECK_FREEZE_BROADCAST\n");
+        return failed ? 1 : 0;
+    }
+}
