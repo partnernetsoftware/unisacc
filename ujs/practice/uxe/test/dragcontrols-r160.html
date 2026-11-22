@@ -1,0 +1,101 @@
+<!doctype html>
+<meta charset="utf-8">
+<div id="viewport" style="width:256px;height:256px"></div>
+<pre id="r160">pending</pre>
+<script type="importmap">{"imports":{"three":"../../web/game/three.module.js"}}</script>
+<script type="module">
+import { BoxGeometry, Group, Mesh, MeshBasicMaterial, OrthographicCamera, REVISION, Vector3 } from "three";
+
+const status = document.querySelector("#r160");
+try {
+  if (REVISION !== "160") throw new Error("Three.js revision");
+  const root = new URLSearchParams(location.search).get("package");
+  const { DragControls } = await import(`file://${root}/examples/jsm/controls/DragControls.js`);
+  const viewport = document.querySelector("#viewport");
+  const geometry = new BoxGeometry(2, 2, 2);
+  const material = new MeshBasicMaterial();
+
+  function scene(tilted) {
+    const parent = new Group();
+    parent.position.set(5, -3, 2);
+    parent.rotation.z = Math.PI / 2;
+    parent.scale.set(2, 4, 3);
+    const object = new Mesh(geometry, material);
+    object.userData.reference = 17;
+    object.position.set(1, 2, 0.5);
+    parent.add(object);
+    const second = new Mesh(geometry, material);
+    second.userData.reference = 29;
+    second.position.set(-1.5, 0.5, 0.5);
+    parent.add(second);
+    parent.updateMatrixWorld(true);
+    const world = object.getWorldPosition(new Vector3());
+    const camera = new OrthographicCamera(-8, 8, 8, -8, 0.1, 100);
+    const away = tilted ? new Vector3(0, 3, 4).normalize() : new Vector3(0, 0, 1);
+    camera.position.copy(world).addScaledVector(away, 10);
+    camera.lookAt(world);
+    camera.updateMatrixWorld(true);
+    const controls = new DragControls([object, second], camera, viewport);
+    const bounds = viewport.getBoundingClientRect();
+    const events = [];
+    for (const type of ["dragstart", "drag", "dragend"]) {
+      controls.addEventListener(type, event => events.push([type, event.object.userData.reference]));
+    }
+    function send(type, point) {
+      const projected = point.clone().project(camera);
+      viewport.dispatchEvent(new PointerEvent(type, {
+        clientX: bounds.left + (projected.x + 1) * bounds.width / 2,
+        clientY: bounds.top + (1 - projected.y) * bounds.height / 2,
+        pointerId: 7, pointerType: "mouse", button: 0
+      }));
+    }
+    function relative(type, x, y, z = 0) {
+      send(type, world.clone().add(new Vector3(x, y, z)));
+    }
+    function pop(type) {
+      const event = events.shift();
+      if (event?.[0] !== type) throw new Error(`expected ${type}: ${JSON.stringify(event)}`);
+      return event[1];
+    }
+    return { object, second, controls, events, send, relative, pop };
+  }
+
+  const basic = scene(false);
+  const values = [basic.events.length];
+  basic.relative("pointerdown", 7, 7);
+  values.push(basic.events.length);
+  basic.relative("pointerdown", 0.5, 0.25);
+  values.push(basic.pop("dragstart"));
+  values.push(basic.object.userData.reference);
+  basic.relative("pointermove", 2.5, -1.75);
+  values.push(...basic.object.position.toArray(), basic.pop("drag"));
+  basic.relative("pointermove", -1.5, 2.25);
+  values.push(...basic.object.position.toArray());
+  basic.pop("drag");
+  basic.relative("pointerup", -1.5, 2.25);
+  values.push(basic.pop("dragend"), basic.events.length);
+  basic.relative("pointermove", 0, 0);
+  values.push(basic.events.length);
+  const secondWorld = basic.second.getWorldPosition(new Vector3());
+  basic.send("pointerdown", secondWorld);
+  values.push(basic.pop("dragstart"));
+  basic.send("pointerleave", secondWorld);
+  values.push(basic.pop("dragend"));
+  basic.controls.dispose();
+
+  const tilted = scene(true);
+  tilted.relative("pointerdown", 0, 0);
+  tilted.pop("dragstart");
+  tilted.relative("pointermove", 1, 2, -1.5);
+  values.push(...tilted.object.position.toArray());
+  tilted.pop("drag");
+  tilted.controls.dispose();
+
+  // These additional slots assert the native memory and pointer-ownership ABI.
+  // Their expected values are also specified independently by the CX gate.
+  values.push(-1, -1, -1, 0, 0, 0, 1, 17, 0, 17, -1, -1, 17, 1, -1, 17, -1, 17);
+  status.textContent = JSON.stringify(values);
+} catch (error) {
+  status.textContent = `error:${error.message}`;
+}
+</script>

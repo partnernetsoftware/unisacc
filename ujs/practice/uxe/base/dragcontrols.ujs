@@ -1,0 +1,173 @@
+struct DragControlsState {
+  selected: u32;
+  pointer: u32;
+  normalX: f64;
+  normalY: f64;
+  normalZ: f64;
+  constant: f64;
+  offsetX: f64;
+  offsetY: f64;
+  offsetZ: f64;
+  localX: f64;
+  localY: f64;
+  localZ: f64;
+}
+
+// The state header is followed by the captured 16-element inverse matrix.
+native function DragControls_size() i64 {
+  return DragControlsState.size+128;
+}
+
+native function drag_controls_span(address:i64,size:i64) i64 {
+  return address>=0 && address%8==0 && address<=6291456-size;
+}
+
+native function drag_controls_external(state:i64,address:i64,size:i64) i64 {
+  return drag_controls_span(address,size) &&
+    (address+size<=state || address>=state+DragControls_size());
+}
+
+native function drag_controls_finite(start:i64,size:i64) i64 {
+  let i=0;
+  while(i<size) {
+    let value=ux_f64(start+i);
+    if(value-value!=0.0) { return 0; }
+    i=i+8;
+  }
+  return 1;
+}
+
+native function drag_controls_direction(x:f64,y:f64,z:f64) i64 {
+  return x!=0.0 || y!=0.0 || z!=0.0;
+}
+
+native function drag_controls_ray_valid(ray:i64) i64 {
+  return drag_controls_finite(ray,48) &&
+    drag_controls_direction(ux_f64(ray+24),ux_f64(ray+32),ux_f64(ray+40));
+}
+
+native function drag_controls_parameter(ray:i64,nx:f64,ny:f64,nz:f64,constant:f64) f64 {
+  let numerator=0.0-(nx*ux_f64(ray)+ny*ux_f64(ray+8)+nz*ux_f64(ray+16))-constant;
+  let denominator=nx*ux_f64(ray+24)+ny*ux_f64(ray+32)+nz*ux_f64(ray+40);
+  if(numerator-numerator!=0.0 || denominator-denominator!=0.0) { return 0.0/0.0; }
+  if(denominator==0.0) {
+    if(numerator==0.0) { return 0.0; }
+    return 0.0-1.0;
+  }
+  return numerator/denominator;
+}
+
+native function drag_controls_hit(ray:i64,t:f64,lane:i64) f64 {
+  return ux_f64(ray+lane)+t*ux_f64(ray+24+lane);
+}
+
+native function drag_controls_parent_local(inverse:i64,x:f64,y:f64,z:f64,lane:i64) f64 {
+  return ux_f64(inverse+lane)*x+ux_f64(inverse+32+lane)*y+
+    ux_f64(inverse+64+lane)*z+ux_f64(inverse+96+lane);
+}
+
+native function drag_controls_put3(address:i64,x:f64,y:f64,z:f64) i64 {
+  let a=ux_f64_put(address,x);
+  let b=ux_f64_put(address+8,y);
+  let c=ux_f64_put(address+16,z);
+  return address;
+}
+
+native function DragControls_init(state:i64) i64 {
+  if(!drag_controls_span(state,DragControls_size())) { return 0-1; }
+  let clear=ux_u32_put(state+DragControlsState.selected,0);
+  let unown=ux_u32_put(state+DragControlsState.pointer,0);
+  let pose=drag_controls_put3(state+DragControlsState.localX,0.0,0.0,0.0);
+  return state;
+}
+
+native function DragControls_selected(state:i64) i64 {
+  if(!drag_controls_span(state,DragControls_size())) { return 0-1; }
+  return ux_u32(state+DragControlsState.selected);
+}
+
+// Position is a borrowed, read-only parent-local float64 triplet.
+native function DragControls_position(state:i64) i64 {
+  if(!drag_controls_span(state,DragControls_size())) { return 0-1; }
+  return state+DragControlsState.localX;
+}
+
+// The host provides a picked object reference, a world-space ray,
+// camera direction, world pivot and column-major affine inverse parent matrix.
+// A positive return is the selected reference, 0 is a miss or busy state,
+// and -1 indicates invalid input. A failed begin leaves the state intact.
+native function DragControls_begin(state:i64,pointer:i64,object:i64,ray:i64,normal:i64,world:i64,inverse:i64) i64 {
+  if(!drag_controls_span(state,DragControls_size()) ||
+     pointer<0 || pointer>4294967295 || object<0 || object>4294967295) { return 0-1; }
+  if(object==0 || ux_u32(state+DragControlsState.selected)!=0) { return 0; }
+  if(!drag_controls_external(state,ray,48) || !drag_controls_external(state,normal,24) ||
+     !drag_controls_external(state,world,24) || !drag_controls_external(state,inverse,128) ||
+     !drag_controls_ray_valid(ray) || !drag_controls_finite(normal,24) ||
+     !drag_controls_finite(world,24) || !drag_controls_finite(inverse,128) ||
+     ux_f64(inverse+24)!=0.0 || ux_f64(inverse+56)!=0.0 ||
+     ux_f64(inverse+88)!=0.0 || ux_f64(inverse+120)!=1.0) { return 0-1; }
+  let nx=ux_f64(normal);
+  let ny=ux_f64(normal+8);
+  let nz=ux_f64(normal+16);
+  if(!drag_controls_direction(nx,ny,nz)) { return 0-1; }
+  let wx=ux_f64(world);
+  let wy=ux_f64(world+8);
+  let wz=ux_f64(world+16);
+  let constant=0.0-(nx*wx+ny*wy+nz*wz);
+  let t=drag_controls_parameter(ray,nx,ny,nz,constant);
+  if(t-t!=0.0) { return 0-1; }
+  if(t<0.0) { return 0; }
+  let ox=drag_controls_hit(ray,t,0)-wx;
+  let oy=drag_controls_hit(ray,t,8)-wy;
+  let oz=drag_controls_hit(ray,t,16)-wz;
+  let x=drag_controls_parent_local(inverse,wx,wy,wz,0);
+  let y=drag_controls_parent_local(inverse,wx,wy,wz,8);
+  let z=drag_controls_parent_local(inverse,wx,wy,wz,16);
+  if(ox-ox!=0.0 || oy-oy!=0.0 || oz-oz!=0.0 ||
+     x-x!=0.0 || y-y!=0.0 || z-z!=0.0) { return 0-1; }
+  let plane=drag_controls_put3(state+DragControlsState.normalX,nx,ny,nz);
+  let distance=ux_f64_put(state+DragControlsState.constant,constant);
+  let offset=drag_controls_put3(state+DragControlsState.offsetX,ox,oy,oz);
+  let i=0;
+  while(i<128) {
+    let saved=ux_f64_put(state+DragControlsState.size+i,ux_f64(inverse+i));
+    i=i+8;
+  }
+  let local=drag_controls_put3(state+DragControlsState.localX,x,y,z);
+  let owner=ux_u32_put(state+DragControlsState.pointer,pointer);
+  let selection=ux_u32_put(state+DragControlsState.selected,object);
+  return object;
+}
+
+// An owning pointer moves the selected object only when its ray hits the plane.
+native function DragControls_move(state:i64,pointer:i64,ray:i64) i64 {
+  let selected=DragControls_selected(state);
+  if(selected<0 || pointer<0 || pointer>4294967295) { return 0-1; }
+  if(selected==0 || pointer!=ux_u32(state+DragControlsState.pointer)) { return 0; }
+  if(!drag_controls_external(state,ray,48) || !drag_controls_ray_valid(ray)) { return 0-1; }
+  let t=drag_controls_parameter(ray,ux_f64(state+DragControlsState.normalX),
+    ux_f64(state+DragControlsState.normalY),ux_f64(state+DragControlsState.normalZ),
+    ux_f64(state+DragControlsState.constant));
+  if(t-t!=0.0) { return 0-1; }
+  if(t<0.0) { return 0; }
+  let wx=drag_controls_hit(ray,t,0)-ux_f64(state+DragControlsState.offsetX);
+  let wy=drag_controls_hit(ray,t,8)-ux_f64(state+DragControlsState.offsetY);
+  let wz=drag_controls_hit(ray,t,16)-ux_f64(state+DragControlsState.offsetZ);
+  let inverse=state+DragControlsState.size;
+  let x=drag_controls_parent_local(inverse,wx,wy,wz,0);
+  let y=drag_controls_parent_local(inverse,wx,wy,wz,8);
+  let z=drag_controls_parent_local(inverse,wx,wy,wz,16);
+  if(x-x!=0.0 || y-y!=0.0 || z-z!=0.0) { return 0-1; }
+  let local=drag_controls_put3(state+DragControlsState.localX,x,y,z);
+  return selected;
+}
+
+// Pointer up, leave or cancellation releases the reference and retains position.
+native function DragControls_end(state:i64,pointer:i64) i64 {
+  let selected=DragControls_selected(state);
+  if(selected<0 || pointer<0 || pointer>4294967295) { return 0-1; }
+  if(selected==0 || pointer!=ux_u32(state+DragControlsState.pointer)) { return 0; }
+  let released=ux_u32_put(state+DragControlsState.selected,0);
+  let unown=ux_u32_put(state+DragControlsState.pointer,0);
+  return selected;
+}
