@@ -1,0 +1,419 @@
+/* tools/merge-version.cx -- one full merge of a version branch into the base, in a private index, by a rule table.
+ *
+ *   sh ./unisacc.com tools/merge-version.cx -- preview --branch REF [--base main] [--repo DIR] [--rules FILE] [--work DIR]
+ *   sh ./unisacc.com tools/merge-version.cx -- gate NAME --branch REF [--repo DIR] [--work DIR]    NAME: traps | derive-write | derive-check | ratchets | tests
+ *   sh ./unisacc.com tools/merge-version.cx -- rules [--rules FILE] [--branch REF]                   the rows that apply to REF
+ *
+ * preview: merge-base BASE..BRANCH, `git read-tree -i -m --aggressive BASE-MB BASE BRANCH` into a private index
+ * (WORK/idx; the shared index, the work tree and every ref are untouched; only blob and tree objects are written),
+ * then every path the three-way read left unmerged is settled in this order:
+ *   (1) a clean `git merge-file` three-way merge: auto-resolved, rule=clean-3way;
+ *   (2) the first matching RULES row (branch glob, path pattern, when=conflict, action): take-ours (the BASE side),
+ *       take-theirs (the BRANCH side), union (git merge-file --union: both sides' lines), regen (BASE side now, the
+ *       derived table is recomputed by the derive gates);
+ *   (3) no row: needs-human, the path stays unmerged.
+ * Then every `when=always` row with an exact path is forced to the BRANCH side (the file is removed when the branch
+ * has none) whether or not git saw a conflict: that is the silent trap, a path only the other side changed (or deleted)
+ * that a plain merge takes without a word.  Output:
+ *   MERGE_VERSION_TREE  base=.. branch=.. merge_base=.. unmerged=N rules=M
+ *   MERGE_PATH          path TAB auto-resolved|needs-human TAB action TAB rule=ID TAB reason
+ *   MERGE_VERSION       verdict=READY|NEEDS_HUMAN conflicts_left=N forced=F regen=R tree=HASH   (no tree when conflicts remain)
+ * READY means no path is left; the gates are separate shards, each bounded to 55 s: `gate traps` (premerge-union
+ * --shard merge-traps on the resolved tree), `gate derive-write` (derive --write in the checked-out tree, then the
+ * result is staged into WORK/idx and tree_after_derive is printed), `gate derive-check`, `gate ratchets` (tools/ratchets.cx, fail=0), `gate tests` (tests/run.cx
+ * --list, metadata_valid=1).  A gate prints MERGE_GATE TAB name TAB OK|FAIL|UNMEASURED TAB detail.
+ * RULES (default tests/merge-rules.tsv), TAB separated, '#' lines ignored:
+ *   id  branch-glob  path-pattern  when  action  evidence
+ *   branch-glob and path-pattern: exact, `*` alone, `PREFIX*` or `*SUFFIX`.  Evidence names the page that justifies the
+ *   rule (research/2026-11-23/v096-merge-preview-2026-11-23.md for the first set).
+ * Nothing is pushed and no branch moves: resolving into a real branch is a separate, ordered step.
+ * Check: tools/check-merge-version.cx. */
+#pragma unisa use sys.env
+#pragma unisa use sys.fs
+#pragma unisa use sys.posix
+#pragma unisa use text.text
+#pragma unisa use mem.heap
+#pragma unisa use mem.bytes
+#pragma unisa use cxlib.procrun
+#pragma unisa use cxlib.die
+
+#define TOOL "merge-version"
+#define MAXRULE 256
+#define MAXPATH 480
+#define MAXUN 1024
+
+static const char *g_repo = ".";
+static const char *g_work = 0;
+
+typedef struct { char id[48], branch[96], pat[MAXPATH], when[16], action[16], evidence[300]; } Rule;
+static Rule rules[MAXRULE];
+static int nrules;
+
+static void mv_need(int ok, const char *why) {
+    if (ok) return;
+    tool_die(TOOL, "refused", why, 2);
+}
+static const char *opt(int argc, char **argv, const char *name, const char *dflt) {
+    const char *h = dflt;
+    for (int i = 0; i + 1 < argc; i++) if (!strcmp(argv[i], name)) h = argv[i + 1];
+    return h;
+}
+
+/* glob: exact, "*", "PREFIX*", "*SUFFIX" */
+static int globm(const char *pat, const char *s) {
+    size_t pl = strlen(pat), sl = strlen(s);
+    if (!strcmp(pat, "*")) return 1;
+    if (pl && pat[pl - 1] == '*') return sl >= pl - 1 && !memcmp(s, pat, pl - 1);
+    if (pat[0] == '*') return sl >= pl - 1 && !memcmp(s + sl - (pl - 1), pat + 1, pl - 1);
+    return !strcmp(pat, s);
+}
+
+/* git -C REPO ARGS... with an optional private index; returns the rc, out/outn filled (caller pr_free) */
+static int git_run(const char *idx, pr_result *r, int secs, char **args) {
+    char *av[40], envi[1100];
+    int n = 0;
+    av[n++] = "git"; av[n++] = "-C"; av[n++] = (char *)g_repo; av[n++] = "-c"; av[n++] = "core.quotepath=off";
+    for (int i = 0; args[i] && n < 38; i++) av[n++] = args[i];
+    av[n] = 0;
+    char *env[2] = {0, 0};
+    if (idx) { mv_need(!cx_fmt(envi, sizeof envi, "GIT_INDEX_FILE=%s", idx), "index path too long"); env[0] = envi; }
+    if (pr_run("git", av, 0, env[0] ? env : 0, secs, r) != 0) { r->rc = r->rc ? r->rc : -1; return r->rc; }
+    return r->rc;
+}
+static int git1(const char *idx, pr_result *r, char *a0, char *a1, char *a2, char *a3, char *a4, char *a5) {
+    char *args[8] = {a0, a1, a2, a3, a4, a5, 0, 0};
+    return git_run(idx, r, 50, args);
+}
+/* trim trailing newline in place */
+static void chomp(pr_result *r) { while (r->outn && (r->out[r->outn - 1] == '\n' || r->out[r->outn - 1] == '\r')) r->out[--r->outn] = 0; }
+
+static void load_rules(const char *file, const char *branch) {
+    size_t n = 0;
+    char *t = cx_read(file, &n);
+    mv_need(t != 0, "cannot read the rules file");
+    for (char *q = t; q < t + n; ) {
+        char *e = memchr(q, '\n', (size_t)(t + n - q));
+        if (!e) e = t + n;
+        *e = 0;
+        if (*q && *q != '#') {
+            char *f[8];
+            int k = 0;
+            f[k++] = q;
+            for (char *p = q; *p && k < 8; p++) if (*p == '\t') { *p = 0; f[k++] = p + 1; }
+            mv_need(k >= 6 && nrules < MAXRULE, "a rules row needs 6 TAB fields: id branch path when action evidence");
+            mv_need(!strcmp(f[3], "conflict") || !strcmp(f[3], "always"), "rule when must be conflict or always");
+            mv_need(!strcmp(f[4], "take-ours") || !strcmp(f[4], "take-theirs") || !strcmp(f[4], "union") || !strcmp(f[4], "regen") || !strcmp(f[4], "human"), "unknown rule action");
+            if (globm(f[1], branch)) {
+                Rule *r = &rules[nrules++];
+                mv_need(!cx_fmt(r->id, sizeof r->id, "%s", f[0]) && !cx_fmt(r->branch, sizeof r->branch, "%s", f[1]) && !cx_fmt(r->pat, sizeof r->pat, "%s", f[2]) &&
+                     !cx_fmt(r->when, sizeof r->when, "%s", f[3]) && !cx_fmt(r->action, sizeof r->action, "%s", f[4]) && !cx_fmt(r->evidence, sizeof r->evidence, "%s", f[5]), "rule field too long");
+            }
+        }
+        q = e + 1;
+    }
+}
+
+typedef struct { char path[MAXPATH]; char mode[3][8]; char sha[3][48]; int has[3]; } Un;
+static Un un[MAXUN];
+static int nun;
+
+static void list_unmerged(const char *idx) {
+    pr_result r;
+    char *a[] = {"ls-files", "-u", 0};
+    mv_need(git_run(idx, &r, 50, a) == 0, "git ls-files -u failed");
+    nun = 0;
+    for (char *q = r.out; q < r.out + r.outn; ) {
+        char *e = memchr(q, '\n', (size_t)(r.out + r.outn - q));
+        if (!e) e = r.out + r.outn;
+        *e = 0;
+        char *tab = strchr(q, '\t');
+        if (tab && *q) {
+            char mode[8], sha[48]; int stage = 0;
+            char *p = q, *sp;
+            sp = strchr(p, ' '); mv_need(sp != 0, "ls-files line"); *sp = 0; cx_fmt(mode, sizeof mode, "%s", p); p = sp + 1;
+            sp = strchr(p, ' '); mv_need(sp != 0, "ls-files line"); *sp = 0; cx_fmt(sha, sizeof sha, "%s", p); p = sp + 1;
+            stage = atoi(p);
+            const char *path = tab + 1;
+            int i;
+            for (i = 0; i < nun; i++) if (!strcmp(un[i].path, path)) break;
+            if (i == nun) { mv_need(nun < MAXUN, "too many unmerged paths"); memset(&un[nun], 0, sizeof un[nun]); cx_fmt(un[nun].path, sizeof un[nun].path, "%s", path); nun++; }
+            if (stage >= 1 && stage <= 3) { cx_fmt(un[i].mode[stage - 1], 8, "%s", mode); cx_fmt(un[i].sha[stage - 1], 48, "%s", sha); un[i].has[stage - 1] = 1; }
+        }
+        q = e + 1;
+    }
+    pr_free(&r);
+}
+
+static void blob_to(const char *sha, const char *file) {
+    pr_result r;
+    char *a[] = {"cat-file", "blob", (char *)sha, 0};
+    mv_need(git_run(0, &r, 50, a) == 0, "git cat-file blob failed");
+    mv_need(!cx_write(file, r.out, r.outn), "cannot write a work file");
+    pr_free(&r);
+}
+static void blob_of_rev(const char *rev, const char *path, char *sha, size_t cap, char *mode, size_t mcap, int *has) {
+    pr_result r;
+    char *a[] = {"ls-tree", (char *)rev, "--", (char *)path, 0};
+    *has = 0; sha[0] = 0; mode[0] = 0;
+    if (git_run(0, &r, 50, a) == 0 && r.outn > 0) {
+        /* "MODE blob SHA\tpath" */
+        char *sp1 = strchr(r.out, ' '), *sp2 = sp1 ? strchr(sp1 + 1, ' ') : 0, *tab = sp2 ? strchr(sp2, '\t') : 0;
+        if (sp1 && sp2 && tab) { *sp1 = 0; *tab = 0; cx_fmt(mode, mcap, "%s", r.out); cx_fmt(sha, cap, "%s", sp2 + 1); *has = 1; }
+    }
+    pr_free(&r);
+}
+
+static void index_set(const char *idx, const char *mode, const char *sha, const char *path) {
+    pr_result r;
+    char cinfo[160];
+    mv_need(!cx_fmt(cinfo, sizeof cinfo, "%s,%s,%s", mode, sha, path), "cacheinfo too long");
+    char *rm[] = {"update-index", "--force-remove", "--", (char *)path, 0};
+    git_run(idx, &r, 50, rm); pr_free(&r);
+    char *ad[] = {"update-index", "--add", "--cacheinfo", cinfo, 0};
+    mv_need(git_run(idx, &r, 50, ad) == 0, "update-index --cacheinfo failed"); pr_free(&r);
+}
+static void index_remove(const char *idx, const char *path) {
+    pr_result r;
+    char *rm[] = {"update-index", "--force-remove", "--", (char *)path, 0};
+    git_run(idx, &r, 50, rm); pr_free(&r);
+}
+static int hash_file(const char *file, char *sha, size_t cap) {
+    pr_result r;
+    char *a[] = {"hash-object", "-w", (char *)file, 0};
+    int rc = git_run(0, &r, 50, a);
+    if (rc == 0) { chomp(&r); cx_fmt(sha, cap, "%s", r.out); }
+    pr_free(&r);
+    return rc;
+}
+
+static const Rule *find_rule(const char *path, const char *when) {
+    for (int i = 0; i < nrules; i++) if (!strcmp(rules[i].when, when) && globm(rules[i].pat, path)) return &rules[i];
+    return 0;
+}
+
+static int cmd_preview(int argc, char **argv) {
+    const char *branch = opt(argc, argv, "--branch", 0), *base = opt(argc, argv, "--base", "main");
+    const char *rfile = opt(argc, argv, "--rules", "tests/merge-rules.tsv");
+    mv_need(branch != 0 && g_work != 0, "preview needs --branch REF and --work DIR (a private directory)");
+    mv_need(sy_mkdir_all(g_work, 0700) == 0, "cannot create --work");
+    load_rules(rfile, branch);
+    char idx[1100], wb[1100], wo[1100], wt[1100], wm[1100];
+    mv_need(!cx_fmt(idx, sizeof idx, "%s/idx", g_work) && !cx_fmt(wb, sizeof wb, "%s/f.base", g_work) && !cx_fmt(wo, sizeof wo, "%s/f.ours", g_work) &&
+         !cx_fmt(wt, sizeof wt, "%s/f.theirs", g_work) && !cx_fmt(wm, sizeof wm, "%s/f.merged", g_work), "work path too long");
+    (void)sy_unlink(idx);
+    pr_result r;
+    char mb[64];
+    char *a1[] = {"merge-base", (char *)base, (char *)branch, 0};
+    mv_need(git_run(0, &r, 50, a1) == 0, "no merge base"); chomp(&r); cx_fmt(mb, sizeof mb, "%s", r.out); pr_free(&r);
+    char *a2[] = {"read-tree", "-i", "-m", "--aggressive", mb, (char *)base, (char *)branch, 0};
+    mv_need(git_run(idx, &r, 50, a2) == 0, "read-tree failed"); pr_free(&r);
+    list_unmerged(idx);
+    printf("MERGE_VERSION_TREE\tbase=%s\tbranch=%s\tmerge_base=%.10s\tunmerged=%d\trules=%d\n", base, branch, mb, nun, nrules);
+    int left = 0, forced = 0, regen = 0;
+    for (int i = 0; i < nun; i++) {
+        Un *u = &un[i];
+        int settled = 0;
+        const char *why = "", *action = "", *rid = "-";
+        char sha[48], mode[8];
+        if (u->has[1] && u->has[2]) {
+            if (u->has[0]) blob_to(u->sha[0], wb); else mv_need(!cx_write(wb, "", 0), "work file");
+            blob_to(u->sha[1], wo); blob_to(u->sha[2], wt);
+            char *mf[] = {"merge-file", "-p", wo, wb, wt, 0};
+            pr_result m;
+            int rc = git_run(0, &m, 50, mf);
+            if (rc == 0) {
+                mv_need(!cx_write(wm, m.out, m.outn), "work file");
+                mv_need(hash_file(wm, sha, sizeof sha) == 0, "hash-object failed");
+                index_set(idx, u->mode[1], sha, u->path);
+                settled = 1; action = "merge"; rid = "clean-3way"; why = "textual three-way merge is clean";
+            }
+            pr_free(&m);
+        }
+        const Rule *ru = 0;
+        if (!settled) {
+            ru = find_rule(u->path, "conflict");
+            if (ru && strcmp(ru->action, "human")) {
+                const char *ac = ru->action;
+                rid = ru->id; why = ru->evidence; action = ac;
+                if (!strcmp(ac, "take-ours") || !strcmp(ac, "regen")) {
+                    if (u->has[1]) index_set(idx, u->mode[1], u->sha[1], u->path); else index_remove(idx, u->path);
+                    if (!strcmp(ac, "regen")) regen++;
+                    settled = 1;
+                } else if (!strcmp(ac, "take-theirs")) {
+                    if (u->has[2]) index_set(idx, u->mode[2], u->sha[2], u->path); else index_remove(idx, u->path);
+                    settled = 1;
+                } else if (!strcmp(ac, "union") && u->has[1] && u->has[2]) {
+                    if (u->has[0]) blob_to(u->sha[0], wb); else mv_need(!cx_write(wb, "", 0), "work file");
+                    blob_to(u->sha[1], wo); blob_to(u->sha[2], wt);
+                    char *mf[] = {"merge-file", "-p", "--union", wo, wb, wt, 0};
+                    pr_result m;
+                    git_run(0, &m, 50, mf);
+                    mv_need(!cx_write(wm, m.out, m.outn), "work file");
+                    pr_free(&m);
+                    mv_need(hash_file(wm, sha, sizeof sha) == 0, "hash-object failed");
+                    index_set(idx, u->mode[1], sha, u->path);
+                    settled = 1;
+                }
+            }
+        }
+        if (settled) printf("MERGE_PATH\t%s\tauto-resolved\t%s\trule=%s\t%s\n", u->path, action, rid, why);
+        else {
+            left++;
+            printf("MERGE_PATH\t%s\tneeds-human\t-\trule=%s\t%s\n", u->path, ru ? ru->id : "none",
+                   ru ? "rule says human" : "unmatched conflict: no rule row and the three-way merge is not clean");
+        }
+        (void)mode;
+    }
+    /* the silent traps: when=always rows with an exact path are forced to the branch side */
+    for (int i = 0; i < nrules; i++) {
+        if (strcmp(rules[i].when, "always") || strchr(rules[i].pat, '*')) continue;
+        const Rule *ru = &rules[i];
+        char bsha[48], bmode[8], csha[48], cmode[8];
+        int bhas = 0, chas = 0;
+        blob_of_rev(branch, ru->pat, bsha, sizeof bsha, bmode, sizeof bmode, &bhas);
+        pr_result s;
+        char *ls[] = {"ls-files", "-s", "--", (char *)ru->pat, 0};
+        csha[0] = 0; cmode[0] = 0;
+        if (git_run(idx, &s, 50, ls) == 0 && s.outn > 0) {
+            char *sp1 = strchr(s.out, ' '), *sp2 = sp1 ? strchr(sp1 + 1, ' ') : 0;
+            if (sp1 && sp2) { *sp1 = 0; *sp2 = 0; cx_fmt(cmode, sizeof cmode, "%s", s.out); cx_fmt(csha, sizeof csha, "%s", sp1 + 1); chas = 1; }
+        }
+        pr_free(&s);
+        int same = (bhas == chas) && (!bhas || !strcmp(bsha, csha));
+        int stillun = 0;
+        for (int k = 0; k < nun; k++) if (!strcmp(un[k].path, ru->pat)) stillun = 1;
+        if (same && !stillun) continue;
+        if (bhas) index_set(idx, bmode, bsha, ru->pat); else index_remove(idx, ru->pat);
+        forced++;
+        if (stillun && left > 0) {
+            /* a forced path no longer counts as a conflict: recount below from the index */
+        }
+        printf("MERGE_PATH\t%s\tauto-resolved\tforce-branch\trule=%s\t%s%s\n", ru->pat, ru->id, bhas ? "" : "removed (the branch has none): ", ru->evidence);
+    }
+    list_unmerged(idx);
+    left = nun;
+    char tree[64] = "-";
+    if (left == 0) {
+        char *wt2[] = {"write-tree", 0};
+        mv_need(git_run(idx, &r, 50, wt2) == 0, "write-tree failed");
+        chomp(&r); cx_fmt(tree, sizeof tree, "%s", r.out); pr_free(&r);
+        char tf[1100];
+        mv_need(!cx_fmt(tf, sizeof tf, "%s/resolved.tree", g_work), "work path");
+        mv_need(!cx_write(tf, tree, strlen(tree)), "cannot write resolved.tree");
+    }
+    printf("MERGE_VERSION\tverdict=%s\tconflicts_left=%d\tforced=%d\tregen=%d\ttree=%s\n", left ? "NEEDS_HUMAN" : "READY", left, forced, regen, tree);
+    return left ? 1 : 0;
+}
+
+/* ---- gates, each one bounded to 55 s ---- */
+static char *tree_dir(char *buf, size_t cap) { mv_need(!cx_fmt(buf, cap, "%s/tree", g_work), "work path"); return buf; }
+static void ensure_checkout(const char *idx, char *tdir, size_t cap) {
+    tree_dir(tdir, cap);
+    char mark[1200];
+    mv_need(!cx_fmt(mark, sizeof mark, "%s/.checked-out", tdir), "work path");
+    if (sy_is_reg(mark) == 1) return;
+    pr_result r;
+    char pref[1200];
+    mv_need(!cx_fmt(pref, sizeof pref, "--prefix=%s/", tdir), "work path");
+    mv_need(sy_mkdir_all(tdir, 0700) == 0, "cannot create the tree dir");
+    char *a[] = {"checkout-index", "-a", "-f", "-q", pref, 0};
+    mv_need(git_run(idx, &r, 55, a) == 0, "checkout-index failed (the tree checkout is its own shard: run the gate again)"); pr_free(&r);
+    char lnk[1200], src[1200];
+    pr_result top;
+    char *tp[] = {"rev-parse", "--show-toplevel", 0};
+    mv_need(git_run(0, &top, 50, tp) == 0, "git rev-parse --show-toplevel failed");
+    chomp(&top);
+    mv_need(!cx_fmt(lnk, sizeof lnk, "%s/unisacc.com", tdir) && !cx_fmt(src, sizeof src, "%s/unisacc.com", top.out), "work path");
+    pr_free(&top);
+    char *ln[] = {"ln", "-sf", src, lnk, 0};
+    pr_result l;
+    if (pr_run("ln", ln, 0, 0, 10, &l) != 0) tool_die(TOOL, "cannot link unisacc.com", 0, 2);
+    pr_free(&l);
+    mv_need(!cx_write(mark, "ok\n", 3), "cannot write the checkout mark");
+}
+static int run_in(const char *dir, const char *label, int secs, char **av, pr_result *r) { return pr_run(label, av, dir, 0, secs, r); }
+static int gate_result(const char *name, pr_result *r, int t, const char *okneedle) {
+    if (t != 0) { printf("MERGE_GATE\t%s\tUNMEASURED\t%s\n", name, r->why[0] ? r->why : "did not finish"); return 2; }
+    int ok = r->rc == 0 && (!okneedle || (r->out && strstr(r->out, okneedle)));
+    char tail[240]; tail[0] = 0;
+    const char *last = r->out ? r->out : "";
+    for (const char *p = last; *p; p++) if (*p == '\n' && p[1]) last = p + 1;
+    size_t ll = strlen(last); if (ll && last[ll - 1] == '\n') ll--;
+    if (ll >= sizeof tail) ll = sizeof tail - 1;
+    mm_copy(tail, sizeof tail, last, (long)ll); tail[ll] = 0;
+    printf("MERGE_GATE\t%s\t%s\trc=%d\t%s\n", name, ok ? "OK" : "FAIL", r->rc, tail);
+    return ok ? 0 : 1;
+}
+static int cmd_gate(int argc, char **argv) {
+    const char *branch = opt(argc, argv, "--branch", 0);
+    mv_need(argc >= 1 && g_work != 0 && branch != 0, "gate needs NAME, --branch REF and --work DIR");
+    const char *name = argv[0];
+    char idx[1100], tdir[1200];
+    mv_need(!cx_fmt(idx, sizeof idx, "%s/idx", g_work), "work path");
+    mv_need(sy_is_reg(idx) == 1, "no WORK/idx: run preview first");
+    char tf[1100];
+    mv_need(!cx_fmt(tf, sizeof tf, "%s/resolved.tree", g_work), "work path");
+    mv_need(sy_is_reg(tf) == 1, "no resolved tree (preview left conflicts)");
+    pr_result r;
+    int t, rc;
+    if (!strcmp(name, "traps")) {
+        ensure_checkout(idx, tdir, sizeof tdir);
+        char *av[] = {"sh", "./unisacc.com", "tools/premerge-union.cx", "--", "--shard", "merge-traps", "--branch", (char *)branch, "--tree", tdir, "--repo", (char *)g_repo, 0};
+        t = pr_run("merge-traps", av, g_repo, 0, 55, &r);
+        rc = gate_result("traps", &r, t, "verdict=PASS");
+    } else if (!strcmp(name, "derive-write") || !strcmp(name, "derive-check")) {
+        ensure_checkout(idx, tdir, sizeof tdir);
+        int w = !strcmp(name, "derive-write");
+        char *av[] = {"sh", "./unisacc.com", "tools/derive.cx", "--", w ? "--write" : "--check", 0};
+        t = run_in(tdir, name, 55, av, &r);
+        rc = gate_result(name, &r, t, "drift=0");
+        if (w && rc == 0) {
+            pr_result s;
+            char wtree[1200];
+            mv_need(!cx_fmt(wtree, sizeof wtree, "--work-tree=%s", tdir), "work path");
+            /* git --work-tree must precede the subcommand: build the argv by hand */
+            char *av2[] = {"git", "-C", (char *)g_repo, wtree, "add", "-u", 0};
+            char envi[1100]; mv_need(!cx_fmt(envi, sizeof envi, "GIT_INDEX_FILE=%s", idx), "path");
+            char *env[] = {envi, 0};
+            mv_need(pr_run("git add -u", av2, 0, env, 50, &s) == 0 && s.rc == 0, "staging the regenerated tables failed");
+            pr_free(&s);
+            char *wt2[] = {"write-tree", 0};
+            pr_result w2;
+            mv_need(git_run(idx, &w2, 50, wt2) == 0, "write-tree failed");
+            chomp(&w2);
+            printf("MERGE_GATE\tderive-write\ttree_after_derive\t%s\n", w2.out);
+            pr_free(&w2);
+        }
+    } else if (!strcmp(name, "ratchets")) {
+        ensure_checkout(idx, tdir, sizeof tdir);
+        char *av[] = {"sh", "./unisacc.com", "tools/ratchets.cx", 0};
+        t = run_in(tdir, "ratchets", 55, av, &r);
+        rc = gate_result("ratchets", &r, t, "fail=0");
+    } else if (!strcmp(name, "tests")) {
+        ensure_checkout(idx, tdir, sizeof tdir);
+        char *av[] = {"sh", "./unisacc.com", "tests/run.cx", "--", "--list", 0};
+        t = run_in(tdir, "tests", 55, av, &r);
+        rc = gate_result("tests", &r, t, "metadata_valid=1");
+    } else tool_die(TOOL, "unknown gate (traps|derive-write|derive-check|ratchets|tests)", name, 2);
+    if (t == 0) pr_free(&r);
+    return rc == 0 ? 0 : 1;
+}
+
+static int cmd_rules(int argc, char **argv) {
+    const char *branch = opt(argc, argv, "--branch", "*"), *rfile = opt(argc, argv, "--rules", "tests/merge-rules.tsv");
+    load_rules(rfile, branch);
+    for (int i = 0; i < nrules; i++) printf("MERGE_RULE\t%s\t%s\t%s\t%s\t%s\n", rules[i].id, rules[i].branch, rules[i].pat, rules[i].when, rules[i].action);
+    printf("MERGE_RULES\tbranch=%s\trows=%d\n", branch, nrules);
+    return 0;
+}
+
+int main(int argc, char **argv) {
+    mv_need(argc >= 2, "usage: merge-version.cx -- preview|gate NAME|rules ...");
+    g_repo = opt(argc, argv, "--repo", ".");
+    g_work = opt(argc, argv, "--work", 0);
+    if (!strcmp(argv[1], "preview")) return cmd_preview(argc - 2, argv + 2);
+    if (!strcmp(argv[1], "gate")) return cmd_gate(argc - 2, argv + 2);
+    if (!strcmp(argv[1], "rules")) return cmd_rules(argc - 2, argv + 2);
+    tool_die(TOOL, "unknown subcommand", argv[1], 2);
+    return 2;
+}
