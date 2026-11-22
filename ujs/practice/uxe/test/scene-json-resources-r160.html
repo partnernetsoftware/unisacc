@@ -1,0 +1,55 @@
+<!doctype html>
+<meta charset="utf-8">
+<pre id="r160">pending</pre>
+<script type="module">
+import { Color, Fog, FogExp2, Scene, Texture, REVISION } from "../../web/game/three.module.js";
+const status = document.querySelector("#r160");
+try {
+  if (REVISION !== "160") throw new Error("revision mismatch");
+  const options = new URLSearchParams(location.search);
+  const response = await fetch("file://" + options.get("wasm"));
+  const { instance } = await WebAssembly.instantiate(await response.arrayBuffer());
+  const api = instance.exports;
+  const base = Number(api.uxe_scene_json(0n, 0n));
+  const memory = new Uint8Array(api.memory.buffer, base, 12288);
+  const hash = text => [...text].reduce((value, ch) => (value * 131 + ch.charCodeAt(0)) % 16777213, 0);
+  const results = [];
+  const scene = new Scene();
+  scene.background = new Color(0x112233);
+  scene.fog = new Fog(0x334455, 2, 24);
+  scene.fog.name = "valley";
+  scene.environment = new Texture();
+  scene.environment.uuid = "env-map";
+  scene.backgroundBlurriness = 0.25;
+  const alternate = new Scene();
+  alternate.background = new Texture();
+  alternate.background.uuid = "sky-map";
+  alternate.fog = new FogExp2(0x223344, 0.125);
+  for (const [index, source] of [scene, alternate, new Scene()].entries()) {
+    const document = source.toJSON().object;
+    const expected = {};
+    for (const key of ["background", "fog", "environment", "backgroundBlurriness"]) {
+      if (key in document) expected[key] = document[key];
+    }
+    const input = new TextEncoder().encode(JSON.stringify(document));
+    memory.set(input, 0);
+    const end = Number(api.uxe_scene_json(BigInt(input.length), BigInt(index === 0 ? options.get("mutate") : 0)));
+    if (end < 8192 || end > 12288) throw new Error("Scene JSON refused");
+    const serialized = new TextDecoder().decode(memory.subarray(8192, end));
+    const wanted = index === 0 && options.get("mutate") === "1"
+      ? { ...expected, backgroundBlurriness: 0.5 } : expected;
+    const decoded = JSON.parse(serialized);
+    if ("backgroundBlurriness" in wanted) {
+      if (!Number.isFinite(decoded.backgroundBlurriness) ||
+          Math.abs(decoded.backgroundBlurriness - wanted.backgroundBlurriness) > 1e-12) {
+        throw new Error(serialized);
+      }
+      decoded.backgroundBlurriness = wanted.backgroundBlurriness;
+    }
+    results.push(hash(JSON.stringify(expected)), hash(JSON.stringify(decoded)));
+  }
+  status.textContent = JSON.stringify(results);
+} catch (error) {
+  status.textContent = "error:" + error.message;
+}
+</script>

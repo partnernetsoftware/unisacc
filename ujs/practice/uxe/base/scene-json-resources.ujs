@@ -1,0 +1,144 @@
+// Each resource is a bounded span in an immutable Scene object document.
+// Scene loading resolves texture UUIDs with the same resource table as its children.
+struct SceneJsonResources {
+  background: u32;
+  backgroundBytes: u32;
+  fog: u32;
+  fogBytes: u32;
+  environment: u32;
+  environmentBytes: u32;
+  backgroundBlurriness: f64;
+}
+
+native function scene_json_span(at:i64,size:i64,dst:i64,end:i64,scratch:i64) i64 {
+  return at>=0 && size>=0 && at<=6291456-size &&
+    (at>=end || at+size<=dst) && (at>=scratch+1104 || at+size<=scratch);
+}
+
+native function scene_json_name(dst:i64,end:i64,field:i64) i64 {
+  if(dst<0 || end>6291456 || end<dst) { return 0-1; }
+  if(field==0) {
+    if(end-dst<10) { return 0-1; }
+    let text=[98,97,99,107,103,114,111,117,110,100];
+    let i=0;
+    while(i<10) { let put=ux_u8_put(dst+i,text[i]); i=i+1; }
+    return dst+10;
+  }
+  if(field==1) {
+    if(end-dst<3) { return 0-1; }
+    let text=[102,111,103];
+    let i=0;
+    while(i<3) { let put=ux_u8_put(dst+i,text[i]); i=i+1; }
+    return dst+3;
+  }
+  if(field==2) {
+    if(end-dst<11) { return 0-1; }
+    let text=[101,110,118,105,114,111,110,109,101,110,116];
+    let i=0;
+    while(i<11) { let put=ux_u8_put(dst+i,text[i]); i=i+1; }
+    return dst+11;
+  }
+  if(field==3) {
+    if(end-dst<20) { return 0-1; }
+    let text=[98,97,99,107,103,114,111,117,110,100,66,108,117,114,114,105,110,101,115,115];
+    let i=0;
+    while(i<20) { let put=ux_u8_put(dst+i,text[i]); i=i+1; }
+    return dst+20;
+  }
+  return 0-1;
+}
+
+native function scene_json_field(input:i64,end:i64,scratch:i64,field:i64) i64 {
+  let after=scene_json_name(scratch,scratch+24,field);
+  if(after<0) { return 0-1; }
+  return json_find_key(input,end,scratch,after-scratch);
+}
+
+native function scene_json_resource(at:i64,end:i64,field:i64) i64 {
+  if(at==0-2) { return 0; }
+  if(at<0 || at>=end) { return 0-1; }
+  let token=ux_u8(at);
+  let close=json_value_end(at,end);
+  if(close<0) { return 0-1; }
+  if(field==1) {
+    if(token!=123) { return 0-1; }
+  } else {
+    if(token==34) {
+      if(close-at<=2) { return 0-1; }
+    } else {
+      if(field!=0) { return 0-1; }
+      let color=json_read_number(at,close);
+      if(!(color>=0.0 && color<=16777215.0)) { return 0-1; }
+      let integer=f64_floor_i64(color);
+      if(color!=0.0+integer) { return 0-1; }
+    }
+  }
+  return close-at;
+}
+
+native function Scene_readResourcesJSON(input:i64,end:i64,record:i64,scratch:i64) i64 {
+  if(input<0 || end<=input || end>6291456 || record%8!=0 ||
+     !scene_json_span(scratch,1104,input,end,6291456) ||
+     !scene_json_span(record,SceneJsonResources.size,input,end,scratch)) { return 0-1; }
+  let close=json_value_end(input,end);
+  if(close<0 || json_space(close,end)!=end) { return 0-1; }
+  let background=scene_json_field(input,close,scratch,0);
+  let fog=scene_json_field(input,close,scratch,1);
+  let environment=scene_json_field(input,close,scratch,2);
+  let blurAt=scene_json_field(input,close,scratch,3);
+  let backgroundBytes=scene_json_resource(background,close,0);
+  let fogBytes=scene_json_resource(fog,close,1);
+  let environmentBytes=scene_json_resource(environment,close,2);
+  if(backgroundBytes<0 || fogBytes<0 || environmentBytes<0 || blurAt==0-1) { return 0-1; }
+  let blur=0.0;
+  if(blurAt>=0) { blur=json_read_number(blurAt,close); }
+  if(!(blur>=0.0 && blur-blur==0.0)) { return 0-1; }
+  if(backgroundBytes==0) { background=0; }
+  if(fogBytes==0) { fog=0; }
+  if(environmentBytes==0) { environment=0; }
+  let a=ux_u32_put(record+SceneJsonResources.background,background);
+  let b=ux_u32_put(record+SceneJsonResources.backgroundBytes,backgroundBytes);
+  let c=ux_u32_put(record+SceneJsonResources.fog,fog);
+  let d=ux_u32_put(record+SceneJsonResources.fogBytes,fogBytes);
+  let e=ux_u32_put(record+SceneJsonResources.environment,environment);
+  let f=ux_u32_put(record+SceneJsonResources.environmentBytes,environmentBytes);
+  let g=ux_f64_put(record+SceneJsonResources.backgroundBlurriness,blur);
+  return record;
+}
+
+native function scene_json_key(dst:i64,end:i64,kind:i64,comma:i64) i64 {
+  if(comma!=0) { dst=json_byte(dst,end,44); }
+  dst=json_byte(dst,end,34);
+  dst=scene_json_name(dst,end,kind);
+  dst=json_byte(dst,end,34);
+  return json_byte(dst,end,58);
+}
+
+native function Scene_writeResourcesJSON(record:i64,dst:i64,end:i64,scratch:i64) i64 {
+  if(dst<0 || end<=dst || end>6291456 || record%8!=0 || scratch%8!=0 ||
+     !scene_json_span(scratch,1104,dst,end,6291456) ||
+     !scene_json_span(record,SceneJsonResources.size,dst,end,scratch)) { return 0-1; }
+  let p=json_byte(dst,end,123);
+  let comma=0;
+  let field=0;
+  while(field<3 && p>=0) {
+    let at=ux_u32(record+field*8);
+    let size=ux_u32(record+field*8+4);
+    if(size>0) {
+      if(!scene_json_span(at,size,dst,end,scratch) ||
+         scene_json_resource(at,at+size,field)!=size) { return 0-1; }
+      p=scene_json_key(p,end,field,comma);
+      let i=0;
+      while(i<size && p>=0) { p=json_byte(p,end,ux_u8(at+i)); i=i+1; }
+      comma=1;
+    }
+    field=field+1;
+  }
+  let blur=ux_f64(record+SceneJsonResources.backgroundBlurriness);
+  if(!(blur>=0.0 && blur-blur==0.0)) { return 0-1; }
+  if(blur>0.0) {
+    p=scene_json_key(p,end,3,comma);
+    p=json_write_f64(p,end,blur,scratch);
+  }
+  return json_byte(p,end,125);
+}
