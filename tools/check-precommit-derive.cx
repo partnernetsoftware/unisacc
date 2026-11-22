@@ -781,6 +781,40 @@ int main(void) {
         if (!ok_s0) fprintf(stderr, "11k FAIL rc=%d out:\n%s\n", rc_s0, out);
         ck(ok_s0,
             "s0-1000-file-merge-waive-and-verify-deferred-per-gate-turns-chain-ready-green: 1000-file merge waived in freeze records dual anchors, per-gate verify-deferred clears both, chain-ready 1-rev PASS");
+
+        /* 11l (Gatekeeper items 5, 3, 4, 13):
+         * - (13) --verify-deferred --gate bogus refused with rc=2 (verify-deferred-unknown-gate)
+         * - (4) waiving only derive while both derive and genall fail refuses genall (BLOCKS tx_same->1 mutation)
+         * - (5) control-char (\n) or all-whitespace waive reason is refused; TAB in waive reason is sanitized to 9-column ledger and verifiable
+         * - (3) --verify-deferred --gate derive when derive fails (FAKE_GATE_RC=1) exits rc=1 and does not append VERIFIED row (BLOCKS if(!pass)->if(0) mutation) */
+        if (cx_fmt(cmd, sizeof cmd,
+            "cd '%s' && rm -rf build/deferred-gates.tsv .git/unisacc-deferred-gates.tsv && "
+            "sh ./unisacc.com tools/precommit.cx -- --verify-deferred --gate bogus >/dev/null 2>&1; "
+            "if [ $? -ne 2 ]; then echo FAIL_13_BOGUS; exit 1; fi; "
+            "printf '/* l1 */\\n' >> include/a.h && printf '# l1\\n' >> tests/batches.tsv && "
+            "git add include/a.h tests/batches.tsv && "
+            "if FAKE_GATE_RC=1 UNISACC_PRECOMMIT_NO_ISOLATE=1 UNISACC_INTEGRATOR=cdx UNISACC_GATE_WAIVE='derive:only-derive' UNISACC_PRECOMMIT_SERIAL=1 sh ./unisacc.com tools/precommit.cx >/dev/null 2>&1; then echo FAIL_4_PARTIAL_WAIVE; exit 1; fi; "
+            "rm -rf build/deferred-gates.tsv .git/unisacc-deferred-gates.tsv && "
+            "if FAKE_GATE_RC=1 UNISACC_PRECOMMIT_NO_ISOLATE=1 UNISACC_INTEGRATOR=cdx UNISACC_GATE_WAIVE='derive:   ,genall:   ' UNISACC_PRECOMMIT_SERIAL=1 sh ./unisacc.com tools/precommit.cx >/dev/null 2>&1; then echo FAIL_5_WS_WAIVE; exit 1; fi; "
+            "if FAKE_GATE_RC=1 UNISACC_PRECOMMIT_NO_ISOLATE=1 UNISACC_INTEGRATOR=cdx UNISACC_GATE_WAIVE=\"$(printf 'derive:a\\nb,genall:ok')\" UNISACC_PRECOMMIT_SERIAL=1 sh ./unisacc.com tools/precommit.cx >/dev/null 2>&1; then echo FAIL_5_NL_WAIVE; exit 1; fi; "
+            "rm -rf build/deferred-gates.tsv .git/unisacc-deferred-gates.tsv && "
+            "FAKE_GATE_RC=1 UNISACC_PRECOMMIT_NO_ISOLATE=1 UNISACC_INTEGRATOR=cdx UNISACC_GATE_WAIVE=\"$(printf 'derive:a\\tb,genall:c\\td')\" UNISACC_PRECOMMIT_SERIAL=1 sh ./unisacc.com tools/precommit.cx && "
+            "git -c user.name=t -c user.email=t@t commit -q --no-verify -m gk-tab-waive && "
+            "test \"$(wc -l < build/deferred-gates.tsv)\" = 2 && "
+            "while IFS= read -r ln; do nf=$(printf '%%s\\n' \"$ln\" | tr -cd '\\t' | wc -c); [ \"$nf\" -eq 8 ] || { echo FAIL_5_COLS_$nf; exit 1; }; done < build/deferred-gates.tsv && "
+            "if FAKE_GATE_RC=1 sh ./unisacc.com tools/precommit.cx -- --verify-deferred --gate derive >/dev/null 2>&1; then echo FAIL_3_VERIFY_PASS_ON_FAIL; exit 1; fi; "
+            "test \"$(wc -l < build/deferred-gates.tsv)\" = 2 && "
+            "sh ./unisacc.com tools/precommit.cx -- --verify-deferred --gate derive && "
+            "sh ./unisacc.com tools/precommit.cx -- --verify-deferred --gate genall && "
+            "(cd '%s' && sh ./unisacc.com tools/chain-ready.cx -- --repo '%s' --only 1-rev)",
+            repo4, cwd, repo4)) cpd_abort("r4gkl");
+        {
+            int rc_gkl = ckk_sh("check-precommit-derive", cmd, out, sizeof out);
+            int ok_gkl = (rc_gkl == 0 && ckk_has(out, CPD_OUT, "READY\tyes"));
+            if (!ok_gkl) fprintf(stderr, "11l FAIL rc=%d out:\n%s\n", rc_gkl, out);
+            ck(ok_gkl,
+                "gk-tab-sanitization-unknown-gate-partial-waive-and-verify-fail-closed: TAB in waive reason keeps 9 cols, --gate bogus rc=2, partial waive blocks unwaived gate, failed verify does not append VERIFIED");
+        }
     }
 
     {

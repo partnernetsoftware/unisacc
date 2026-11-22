@@ -716,10 +716,24 @@ static int pc_gate_waive_reason(const char *gate, char *why_out, size_t wcap) {
         long e = at;
         while (e < wl && w[e] != ',' && w[e] != ';') e++;
         if (e - at > gl + 1 && tx_same(w + at, gl, gate, gl) && w[at + gl] == ':') {
-            long rl = e - (at + gl + 1);
+            const char * raw = w + at + gl + 1;
+            long rl = e - (at + gl + 1), k;
+            int non_ws = 0;
             if (rl > 0 && rl < (long)wcap) {
-                mm_copy(why_out, wcap, w + at + gl + 1, (size_t)rl);
+                for (k = 0; k < rl; k++) {
+                    unsigned char uc = (unsigned char)raw[k];
+                    if ((uc < 32 && uc != '\t') || uc == 127) {
+                        if (why_out && wcap > 0) why_out[0] = 0;
+                        return 0;
+                    }
+                    if (uc != ' ' && uc != '\t') non_ws++;
+                    why_out[k] = (uc == '\t') ? '_' : raw[k];
+                }
                 why_out[rl] = 0;
+                if (!non_ws) {
+                    why_out[0] = 0;
+                    return 0;
+                }
                 return 1;
             }
         }
@@ -1013,27 +1027,46 @@ static int pc_deferred_scan_dual(const char *top, const char *dfp, const char *a
     return 0;
 }
 
+static void pc_sanitize_ledger_col(char *dst, size_t dcap, const char *src, char tab_rep) {
+    long i, sl = src ? tx_len(src, (long)dcap - 1) : 0;
+    int non_ws = 0;
+    if (dcap == 0) return;
+    if (sl <= 0) {
+        mm_copy(dst, dcap, "-", 2);
+        return;
+    }
+    for (i = 0; i < sl; i++) {
+        unsigned char uc = (unsigned char)src[i];
+        char outc;
+        if (uc == '\t' || uc == '\n' || uc == '\r' || uc < 32 || uc == 127) outc = tab_rep;
+        else outc = src[i];
+        if (outc != ' ') non_ws = 1;
+        dst[i] = outc;
+    }
+    dst[sl] = 0;
+    if (!non_ws) mm_copy(dst, dcap, "-", 2);
+}
+
 static int pc_append_deferred_record(const char *rec_type, const char *gate, const char *reason,
                                      const char *tree_sha, const char *head_sha, const char *detail,
                                      char *dfp_used, size_t dcap) {
-    char top[1024], dfp[1200], afp[1200], prev_sha[65], csha[65], clean_dtl[384], body[1800], hin[2000], rec[2048], err[256];
+    char top[1024], dfp[1200], afp[1200], prev_sha[65], csha[65], err[256];
+    char c_type[32], c_top[1024], c_gate[64], c_reason[256], c_tree[64], c_head[64], clean_dtl[384];
+    char body[1800], hin[2000], rec[2048];
     static PcDefRow rows[128];
     int nrows = 0;
-    long i, dl = detail ? tx_len(detail, sizeof clean_dtl - 1) : 0;
     if (dfp_used && dcap > 0) dfp_used[0] = 0;
     if (pc_deferred_anchors(top, sizeof top, dfp, sizeof dfp, afp, sizeof afp, 1) != 0) return -1;
     if (pc_deferred_scan_dual(top, dfp, afp, prev_sha, rows, 128, &nrows, err, sizeof err) < 0) return -1;
-    if (dl <= 0) {
-        mm_copy(clean_dtl, sizeof clean_dtl, "-", 2);
-    } else {
-        for (i = 0; i < dl; i++) {
-            char c = detail[i];
-            clean_dtl[i] = (c == '\t' || c == '\n' || c == '\r') ? ' ' : c;
-        }
-        clean_dtl[dl] = 0;
-    }
+    pc_sanitize_ledger_col(c_type, sizeof c_type, rec_type, '_');
+    pc_sanitize_ledger_col(c_top, sizeof c_top, top, '_');
+    pc_sanitize_ledger_col(c_gate, sizeof c_gate, gate, '_');
+    pc_sanitize_ledger_col(c_reason, sizeof c_reason, reason, '_');
+    pc_sanitize_ledger_col(c_tree, sizeof c_tree, tree_sha, '_');
+    pc_sanitize_ledger_col(c_head, sizeof c_head, head_sha, '_');
+    pc_sanitize_ledger_col(clean_dtl, sizeof clean_dtl, detail, ' ');
     if (cx_fmt(body, sizeof body, "%s\t%ld\t%s\t%s\t%s\t%s\t%s\t%s",
-               rec_type, sy_wall_s(), top, gate, reason, tree_sha, head_sha, clean_dtl)) return -1;
+               c_type, sy_wall_s(), c_top, c_gate, c_reason, c_tree, c_head, clean_dtl)) return -1;
     if (cx_fmt(hin, sizeof hin, "%s\t%s", prev_sha, body) ||
         sy_sha256_hex(hin, tx_len(hin, sizeof hin), csha) ||
         cx_fmt(rec, sizeof rec, "%s\t%s\n", body, csha)) return -1;
@@ -1074,7 +1107,15 @@ static int pc_verify_deferred(int argc, char **argv) {
     static const char *all_gates[5] = {"derive", "genall", "tlibfrozen", "lint", "ratchets"};
     for (i = 2; i < argc; i++) {
         if (tx_eqz(argv[i], "--gate") && i + 1 < argc) {
+            int known = 0;
             only_gate = argv[++i];
+            for (g = 0; g < 5; g++) {
+                if (tx_eqz(only_gate, all_gates[g])) { known = 1; break; }
+            }
+            if (!known) {
+                sy_eprintf("precommit: REFUSE verify-deferred-unknown-gate gate=%s (expected derive|genall|tlibfrozen|lint|ratchets)\n", only_gate);
+                return 2;
+            }
         } else {
             sy_eprintf("precommit: usage: precommit.cx -- --verify-deferred [--gate derive|genall|tlibfrozen|lint|ratchets]\n");
             return 2;
