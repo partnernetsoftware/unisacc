@@ -4,8 +4,10 @@
  *       [--fixture FILE] [--tail-lines K] [--mutant-no-stall]
  *
  * Windows table (default skills/unisacc-orch-supervise/team-windows.tsv):
- *   window model lane write_prefix kind
- *   kind=commit|analysis; write_prefix may be comma-separated path prefixes.
+ *   window model lane write_prefix kind git_ref
+ *   kind=commit|analysis; write_prefix comma paths or - (no commit); git_ref=-|branch.
+ *   Status by model family: Codex/omp/Cursor markers; UNKNOWN only when no marker.
+ *   Cursor (cursor*) ctx always - (Auto N% is not context).
  *
  * Live: tmux capture-pane -p -t WINDOW. Fixture: === PANE NAME === panels.
  * tmux missing/fail -> status UNKNOWN. Read-only.
@@ -32,7 +34,7 @@
 #define TP_CAP (1 << 16)
 
 typedef struct {
-    char window[64], model[64], lane[32], prefix[512], kind[16];
+    char window[64], model[64], lane[32], prefix[1024], kind[16], git_ref[64];
 } Win;
 static Win g_w[TP_MAXW];
 static int g_nw, g_stall_min = 45, g_tail = 80, g_mutant;
@@ -46,29 +48,30 @@ static int load_table(const char *path) {
     unsigned char *b; int64_t n; long i = 0, row = 0;
     if (sy_read_file(path, &b, &n, 1 << 20) < 0 || !b) return die("read windows-table");
     while (i < n && g_nw < TP_MAXW) {
-        long s = i, e, c[4], nc = 0, j;
+        long s = i, e, c[5], nc = 0, j;
         while (i < n && b[i] != '\n') i++;
         e = i; if (i < n) i++;
         if (e > s && b[s] == '#') continue;
         if (e == s) continue;
         row++;
         if (row == 1) continue;
-        c[0] = c[1] = c[2] = c[3] = -1;
+        for (j = 0; j < 5; j++) c[j] = -1;
         for (j = s; j < e; j++) {
             if (b[j] != '\t') continue;
-            if (nc < 4) c[nc++] = j;
+            if (nc < 5) c[nc++] = j;
         }
-        if (nc != 4) { mm_free(b); return die("bad windows-table row (need 5 cols)"); }
+        if (nc != 5) { mm_free(b); return die("bad windows-table row (need 6 cols)"); }
         if (c[0] - s >= (long)sizeof g_w[0].window || c[1] - c[0] >= (long)sizeof g_w[0].model ||
             c[2] - c[1] >= (long)sizeof g_w[0].lane || c[3] - c[2] >= (long)sizeof g_w[0].prefix ||
-            e - c[3] >= (long)sizeof g_w[0].kind) {
+            c[4] - c[3] >= (long)sizeof g_w[0].kind || e - c[4] >= (long)sizeof g_w[0].git_ref) {
             mm_free(b); return die("windows-table field too long");
         }
         mm_copy(g_w[g_nw].window, (long)sizeof g_w[0].window, b + s, c[0] - s); g_w[g_nw].window[c[0] - s] = 0;
         mm_copy(g_w[g_nw].model, (long)sizeof g_w[0].model, b + c[0] + 1, c[1] - c[0] - 1); g_w[g_nw].model[c[1] - c[0] - 1] = 0;
         mm_copy(g_w[g_nw].lane, (long)sizeof g_w[0].lane, b + c[1] + 1, c[2] - c[1] - 1); g_w[g_nw].lane[c[2] - c[1] - 1] = 0;
         mm_copy(g_w[g_nw].prefix, (long)sizeof g_w[0].prefix, b + c[2] + 1, c[3] - c[2] - 1); g_w[g_nw].prefix[c[3] - c[2] - 1] = 0;
-        mm_copy(g_w[g_nw].kind, (long)sizeof g_w[0].kind, b + c[3] + 1, e - c[3] - 1); g_w[g_nw].kind[e - c[3] - 1] = 0;
+        mm_copy(g_w[g_nw].kind, (long)sizeof g_w[0].kind, b + c[3] + 1, c[4] - c[3] - 1); g_w[g_nw].kind[c[4] - c[3] - 1] = 0;
+        mm_copy(g_w[g_nw].git_ref, (long)sizeof g_w[0].git_ref, b + c[4] + 1, e - c[4] - 1); g_w[g_nw].git_ref[e - c[4] - 1] = 0;
         if (!tx_eqz(g_w[g_nw].kind, "commit") && !tx_eqz(g_w[g_nw].kind, "analysis")) {
             mm_free(b); return die("kind must be commit|analysis");
         }
@@ -117,15 +120,25 @@ static int is_filtered(const char *t, long tn) {
     return 0;
 }
 
-/* parse remaining context into *ctx (0..100); note into note[cap] as left|codex-left|codex-used|omp-used|claude-used */
-static void parse_ctx(const char *t, long tn, int *ctx, char *note, long ncap) {
+/* model family: cursor | codex | omp | other */
+static int fam_cursor(const char *m) { return has_ci(m, tx_len(m, 64), "cursor"); }
+static int fam_codex(const char *m) {
+    return has_ci(m, tx_len(m, 64), "gpt-sol") || has_ci(m, tx_len(m, 64), "codex") || has_ci(m, tx_len(m, 64), "gpt-");
+}
+static int fam_omp(const char *m) {
+    return has_ci(m, tx_len(m, 64), "sonnet") || has_ci(m, tx_len(m, 64), "deepseek") ||
+           has_ci(m, tx_len(m, 64), "gemini") || has_ci(m, tx_len(m, 64), "omp");
+}
+
+/* parse remaining context; Cursor never yields a number (Auto N% is not context). */
+static void parse_ctx(const char *t, long tn, const char *model, int *ctx, char *note, long ncap) {
     long i;
     *ctx = -1; note[0] = 0;
-    /* Codex: Context NN% left */
+    if (fam_cursor(model)) return;
+    /* Codex: Context NN% left / used — skip "Auto · N%" (no "context" word) */
     for (i = 0; i + 8 < tn; i++) {
-        long j, v; int dig;
+        long j, v, dig;
         if (!has_ci(t + i, tn - i > 20 ? 20 : tn - i, "context")) continue;
-        /* scan forward up to 24 bytes for NN% left or NN% used */
         for (j = i; j + 2 < tn && j < i + 48; j++) {
             if (t[j] < '0' || t[j] > '9') continue;
             v = 0; dig = j;
@@ -141,8 +154,8 @@ static void parse_ctx(const char *t, long tn, int *ctx, char *note, long ncap) {
             }
         }
     }
-    /* Claude: ctx NN%  -> used */
-    for (i = 0; i + 4 < tn; i++) {
+    /* Claude: ctx NN% -> used (not for cursor) */
+    if (!fam_codex(model)) for (i = 0; i + 4 < tn; i++) {
         long j, v;
         if (!(t[i] == 'c' || t[i] == 'C') || (i > 0 && ((t[i-1] >= 'a' && t[i-1] <= 'z') || (t[i-1] >= 'A' && t[i-1] <= 'Z')))) continue;
         if (!has_ci(t + i, tn - i > 4 ? 4 : tn - i, "ctx")) continue;
@@ -151,14 +164,19 @@ static void parse_ctx(const char *t, long tn, int *ctx, char *note, long ncap) {
         v = 0; while (j < tn && t[j] >= '0' && t[j] <= '9') { v = v * 10 + (t[j] - '0'); j++; if (v > 100) break; }
         if (j < tn && t[j] == '%' && v <= 100) { *ctx = 100 - (int)v; cx_fmt(note, ncap, "claude-used"); return; }
     }
-    /* omp progress bar: glyph/box then NN% treated as used */
-    for (i = 0; i + 2 < tn; i++) {
+    /* omp progress bar NN% as used */
+    if (fam_omp(model) || !fam_codex(model)) for (i = 0; i + 2 < tn; i++) {
         long j, v; unsigned char c;
         if (t[i] < '0' || t[i] > '9') continue;
+        /* reject Auto · 41.7% : look back for Auto */
+        {
+            long b = i > 16 ? i - 16 : 0;
+            if (has_ci(t + b, i - b, "auto")) continue;
+        }
         j = i; v = 0;
         while (j < tn && t[j] >= '0' && t[j] <= '9') { v = v * 10 + (t[j] - '0'); j++; if (v > 100) break; }
+        if (j < tn && t[j] == '.') continue; /* skip 41.7% decimals from Cursor */
         if (j >= tn || t[j] != '%' || v > 100) continue;
-        /* look back for progress-ish bytes (UTF-8 box or play) within 12 chars */
         {
             long b = i > 12 ? i - 12 : 0, k, hit = 0;
             for (k = b; k < i; k++) {
@@ -170,25 +188,99 @@ static void parse_ctx(const char *t, long tn, int *ctx, char *note, long ncap) {
     }
 }
 
-static const char *classify(const char *text, long n, int *ctx_pct, char *ctx_note, long ncap) {
+static int has_omp_spinner(const char *t, long tn) {
+    /* Braille spinner block U+2800.. (E2 A0 xx) near a duration Nd+[smh] */
+    long i;
+    for (i = 0; i + 4 < tn; i++) {
+        unsigned char c0 = (unsigned char)t[i], c1, c2;
+        if (c0 != 0xE2) continue;
+        c1 = (unsigned char)t[i + 1]; c2 = (unsigned char)t[i + 2];
+        if (c1 != 0xA0) continue; /* braille */
+        /* look ahead 12 for duration */
+        {
+            long j, k;
+            for (j = i + 3; j + 1 < tn && j < i + 16; j++) {
+                if (t[j] < '0' || t[j] > '9') continue;
+                k = j; while (k < tn && t[k] >= '0' && t[k] <= '9') k++;
+                if (k < tn && (t[k] == 's' || t[k] == 'm' || t[k] == 'h')) return 1;
+            }
+        }
+    }
+    return 0;
+}
+
+static const char *classify(const char *text, long n, const char *model, int *ctx_pct, char *ctx_note, long ncap) {
     char t[TP_CAP]; long tn;
     *ctx_pct = -1; ctx_note[0] = 0;
     tn = tail_text(text, n, g_tail, t, sizeof t);
-    parse_ctx(t, tn, ctx_pct, ctx_note, ncap);
+    parse_ctx(t, tn, model, ctx_pct, ctx_note, ncap);
     if (is_filtered(t, tn)) return "FILTERED";
-    if (has_ci(t, tn, "esc to cancel") || has_ci(t, tn, "working")) return "WORKING";
     if (has_ci(t, tn, "waiting for input") || has_ci(t, tn, "do you want to")) return "WAITING_INPUT";
+
+    /* Codex family */
+    if (fam_codex(model)) {
+        if (has_ci(t, tn, "esc to interrupt") || has_ci(t, tn, "working (")) return "WORKING";
+        if (has_ci(t, tn, "ask codex")) return "IDLE";
+    }
+    /* omp family */
+    if (fam_omp(model)) {
+        if (has_omp_spinner(t, tn)) return "WORKING";
+        if (has_ci(t, tn, "esc to cancel") || has_ci(t, tn, "working")) return "WORKING";
+        if (has_ci(t, tn, "\xe2\x95\xb0\xe2\x94\x80") || /* ╰─ */
+            has_ci(t, tn, "当前请求已仅回执结束")) return "IDLE";
+        {
+            long at = 0;
+            while (at < tn) {
+                long s = at, e, k;
+                while (at < tn && t[at] != '\n') at++;
+                e = at; if (at < tn) at++;
+                k = s; while (k < e && (t[k] == ' ' || t[k] == '\t')) k++;
+                /* line starts with ╰ (e2 95 b0) */
+                if (k + 2 < e && (unsigned char)t[k] == 0xE2 && (unsigned char)t[k+1] == 0x95 && (unsigned char)t[k+2] == 0xB0)
+                    return "IDLE";
+            }
+        }
+    }
+    /* Cursor family: Running + ctrl+c to stop; Auto status without Running -> IDLE */
+    if (fam_cursor(model)) {
+        if (has_ci(t, tn, "ctrl+c to stop") || has_ci(t, tn, " running")) return "WORKING";
+        if (has_ci(t, tn, "auto")) return "IDLE";
+    }
+    /* Claude Code: empty ❯ prompt or Brewed ... done -> IDLE; busy markers -> WORKING */
+    if (has_ci(t, tn, "esc to cancel") || has_ci(t, tn, "esc to interrupt")) return "WORKING";
+    if (has_ci(t, tn, "working")) return "WORKING";
+    if (has_ci(t, tn, "brewed for") && has_ci(t, tn, "done")) {
+        /* still busy if "still running" without empty prompt? treat done as idle signal */
+    }
     {
-        long at = 0; int saw_prompt = 0;
+        long at = 0; int saw_prompt = 0, saw_claude_q = 0;
         while (at < tn) {
-            long s = at, e, k;
+            long s = at, e, k, rest;
             while (at < tn && t[at] != '\n') at++;
             e = at; if (at < tn) at++;
             k = s; while (k < e && (t[k] == ' ' || t[k] == '\t')) k++;
             if (k < e && t[k] == '>' && k + 1 == e) saw_prompt = 1;
+            /* ❯ = e2 9d af ; rest only spaces/nbsp */
+            if (k + 2 < e && (unsigned char)t[k] == 0xE2 && (unsigned char)t[k+1] == 0x9D &&
+                (unsigned char)t[k+2] == 0xAF) {
+                rest = k + 3;
+                while (rest < e) {
+                    unsigned char c = (unsigned char)t[rest];
+                    if (c == ' ' || c == '\t' || c == 0xC2 /* lead of nbsp */) {
+                        if (c == 0xC2 && rest + 1 < e && (unsigned char)t[rest+1] == 0xA0) rest += 2;
+                        else rest++;
+                        continue;
+                    }
+                    break;
+                }
+                if (rest >= e) saw_claude_q = 1;
+            }
         }
-        if (saw_prompt) return "IDLE";
+        if (saw_prompt || saw_claude_q) return "IDLE";
     }
+    if (has_ci(t, tn, "ask codex")) return "IDLE";
+    if (has_ci(t, tn, "当前请求已仅回执结束")) return "IDLE";
+    if (has_ci(t, tn, "brewed for") && has_ci(t, tn, " done")) return "IDLE";
     return "UNKNOWN";
 }
 
@@ -232,18 +324,35 @@ static int fixture_get(const char *path, const char *window, char *out, long cap
     mm_free(b); return -1;
 }
 
-static int latest_commit(const char *prefixes, char *hash, long hcap, long *age_min) {
-    char pref[512]; long best_ct = -1; char best_h[80]; char *p;
+static int latest_commit(const char *prefixes, const char *git_ref, char *hash, long hcap, long *age_min) {
+    char pref[1100]; long best_ct = -1; char best_h[80]; char *p;
     hash[0] = 0; *age_min = -1; best_h[0] = 0;
+    if (!prefixes || !prefixes[0] || tx_eqz(prefixes, "-")) return 0;
     if (cx_fmt(pref, sizeof pref, "%s", prefixes)) return -1;
     for (p = pref; ; ) {
-        char *tok = p, script[1400], out[400]; int rc; long ct = 0;
+        char *tok = p, script[1600], out[400]; int rc; long ct = 0;
         while (*p && *p != ',') p++;
         if (*p) { *p = 0; p++; } else p = 0;
         while (*tok == ' ') tok++;
-        if (tok[0]) {
+        if (tok[0] && !tx_eqz(tok, "-")) {
             char h[80]; long i = 0, j = 0;
-            if (cx_fmt(script, sizeof script, "git log -1 --format='%%H %%ct' -- '%s' 2>/dev/null", tok)) return -1;
+            {
+                char pspec[700];
+                long tl = tx_len(tok, 600);
+                if (tl > 0 && tok[tl - 1] == '/') {
+                    if (cx_fmt(pspec, sizeof pspec, "%s", tok)) return -1;
+                } else {
+                    /* exclusive write-domain prefix -> git pathspec glob */
+                    if (cx_fmt(pspec, sizeof pspec, ":(glob)%s*", tok)) return -1;
+                }
+                if (git_ref && git_ref[0] && !tx_eqz(git_ref, "-")) {
+                    if (cx_fmt(script, sizeof script,
+                        "git log -1 --format='%%H %%ct' '%s' -- '%s' 2>/dev/null", git_ref, pspec)) return -1;
+                } else {
+                    if (cx_fmt(script, sizeof script,
+                        "git log -1 --format='%%H %%ct' -- '%s' 2>/dev/null", pspec)) return -1;
+                }
+            }
             out[0] = 0;
             rc = ckk_sh_t("team-pulse-git", script, out, (int)sizeof out, 20);
             if (rc == 0 && out[0]) {
@@ -281,8 +390,8 @@ static void pulse_one(Win *w) {
     } else if (capture_tmux(w->window, capbuf, sizeof capbuf, &n)) {
         printf("PULSE\t%s\tUNKNOWN\t-\t-\t-\t-\n", w->window); return;
     }
-    st = classify(capbuf, n, &ctx, note, sizeof note);
-    latest_commit(w->prefix, hash, sizeof hash, &age);
+    st = classify(capbuf, n, w->model, &ctx, note, sizeof note);
+    latest_commit(w->prefix, w->git_ref, hash, sizeof hash, &age);
     flags[0] = 0;
     if (!g_mutant && tx_eqz(st, "IDLE") && age >= 0 && age >= g_stall_min) {
         if (tx_eqz(w->kind, "commit")) { flags_add(flags, sizeof flags, &nflag, "STALLED"); g_n_stalled++; }
@@ -296,6 +405,8 @@ static void pulse_one(Win *w) {
         else cx_fmt(ctxs, sizeof ctxs, "left=%d", ctx);
     } else cx_fmt(ctxs, sizeof ctxs, "-");
     if (age >= 0) cx_fmt(ages, sizeof ages, "%ld", age); else cx_fmt(ages, sizeof ages, "-");
+    /* analysis windows: no exclusive commit column; age still used for IDLE_LONG */
+    if (tx_eqz(w->kind, "analysis")) hash[0] = 0;
     printf("PULSE\t%s\t%s\t%s\t%s\t%s\t%s\n", w->window, st, ctxs, hash[0] ? hash : "-", ages, flags);
 }
 
