@@ -19,7 +19,7 @@ static const char *sources[]={
     BASE "bufferattribute.ujs",BASE "buffergeometry.ujs",BASE "mesh.ujs",BASE "json-read.ujs",
     BASE "json-bytes.ujs",BASE "loader-json.ujs",BASE "record-copy.ujs",
     BASE "camera-object-json.ujs",BASE "mesh-object-json.ujs",
-    BASE "line-object-json.ujs",TEST "mesh-object-json-base.ujs",0
+    BASE "line-object-json.ujs",BASE "linesegments-object-json.ujs",TEST "mesh-object-json-base.ujs",0
 };
 
 static int module_lines(char *program,int used,int capacity,const char *path) {
@@ -71,14 +71,22 @@ static int compile(char **command,int seconds) {
     return rc;
 }
 
-static int base_ready(const char *base,int prepare) {
+static int base_ready(const char *base,int prepare,const char *fixture) {
     const char *cache=sy_env("UXE_MESH_OBJECT_CACHE");
     char key[65],sha[65],record[512];
     if(!cache || !cache[0]) {
         printf("MESH_OBJECT 基座缓存缺失，先运行 --prepare\n");
         return 1;
     }
-    if(wasm_test_cache_key(sources,key)) return 1;
+    char cases[180];
+    int n=tx_snprintf(cases,sizeof cases,TEST "%s-cases.ujs",fixture);
+    if(n<0 || n>=(int)sizeof cases) return 1;
+    const char *inputs[32];
+    int count=0;
+    while(sources[count]) { inputs[count]=sources[count]; count++; }
+    inputs[count++]=cases;
+    inputs[count]=0;
+    if(wasm_test_cache_key(inputs,key)) return 1;
     int size=tx_snprintf(record,sizeof record,"%s/%s.bin",cache,key);
     if(size<0 || size>=(int)sizeof record) return 1;
     int rc=wasm_test_cache_read(record,key,prepare?0:base,sha);
@@ -93,9 +101,12 @@ static int base_ready(const char *base,int prepare) {
     char input[380],program[100000];
     if(tx_snprintf(input,sizeof input,"%s.ujs",base)>=(int)sizeof input) return 1;
     int used=0;
-    for(int n=0;sources[n];n++) {
-        used=module_lines(program,used,sizeof program,sources[n]);
-        if(used<0) return 1;
+    for(int i=0;inputs[i];i++) {
+        used=module_lines(program,used,sizeof program,inputs[i]);
+        if(used<0) {
+            printf("MESH_OBJECT source_pack_failed=%s\n",inputs[i]);
+            return 1;
+        }
     }
     if(sy_write_file(input,program,used,0600)) return 1;
     char *command[]={"./ujs/ujs2wasm.com",input,"-o",(char *)base,0};
@@ -108,16 +119,17 @@ int main(int argc,char **argv) {
         if(tx_eqz(argv[i],"--prepare") && !prepare) prepare=1;
         else if(tx_eqz(argv[i],"--mutate") && !mutate) mutate=1;
         else if(tx_eqz(argv[i],"--line") && !offset) offset=7;
+        else if(tx_eqz(argv[i],"--linesegments") && !offset) offset=14;
         else return 2;
     }
-    const char *fixture=offset?"line-object-json":"mesh-object-json";
+    const char *fixture=offset==14?"linesegments-object-json":offset?"line-object-json":"mesh-object-json";
     char dir[256],base[320],probe[320],page[320],url[360];
     if(sy_mkdtemp("/tmp","uxe-mesh-object-",dir,sizeof dir)) return 2;
     tx_snprintf(base,sizeof base,"%s/base.wasm",dir);
     tx_snprintf(probe,sizeof probe,"%s/probe.wasm",dir);
     tx_snprintf(page,sizeof page,"%s/probe.html",dir);
-    tx_snprintf(url,sizeof url,"file://%s?offset=%d%s",page,offset,mutate?"&mutate":"");
-    int failed=base_ready(base,prepare);
+    tx_snprintf(url,sizeof url,"file://%s%s",page,mutate?"?mutate":"");
+    int failed=base_ready(base,prepare,fixture);
     if(!failed && !prepare) {
         char *command[]={"./ujs/ujs2wasm.com",TEST "mesh-object-json-probe.ujs","-o",probe,0};
         const double gold[]={2,0,7000,19,-2,1};
