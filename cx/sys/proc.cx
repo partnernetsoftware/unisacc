@@ -209,6 +209,41 @@ static int syp_pipe_os(int fds[2]) {
 }
 int sy_pipe(int fds[2]) { return syp_pipe_os(fds); }
 
+/* Create a pipe with FLAGS applied to both ends (SY_PIPE_CLOEXEC, SY_PIPE_NONBLOCK, from
+   sys.posix) into FDS[0] = read end, FDS[1] = write end.  0, or -errno (both ends closed on
+   any failure): -EINVAL for a null FDS or an unknown flag bit.  Linux creates the pipe and
+   sets the flags in one pipe2 system call, so no other thread can fork between the two.
+   macOS has no pipe2: it creates the pipe and then sets each flag with fcntl, which is NOT
+   atomic -- a fork in another thread between the two steps lets the child inherit the end.
+   Windows has no pipe2 contract here and returns -ENOSYS (sy_pipe, whose handles are never
+   inherited, is the Windows call). */
+static int syp_pipe2_os(int fds[2], int flags) {
+#if defined(_WIN32)
+    (void)fds; (void)flags;
+    return -ENOSYS;
+#else
+    int r, i, e, fl;
+    r = sy_pipe2_sys(fds, flags);
+    if (r != -ENOSYS) return r;
+    errno = 0;
+    if (pipe(fds) != 0) return -errno;
+    for (i = 0; i < 2; i++) {
+        if (flags & SY_PIPE_CLOEXEC) {
+            if (fcntl(fds[i], F_SETFD, FD_CLOEXEC) != 0) { e = errno; close(fds[0]); close(fds[1]); return -e; }
+        }
+        if (flags & SY_PIPE_NONBLOCK) {
+            fl = fcntl(fds[i], F_GETFL);
+            if (fl < 0 || fcntl(fds[i], F_SETFL, fl | O_NONBLOCK) != 0) { e = errno; close(fds[0]); close(fds[1]); return -e; }
+        }
+    }
+    return 0;
+#endif
+}
+int sy_pipe2(int fds[2], int flags) {
+    if (!fds || (flags & ~(SY_PIPE_CLOEXEC | SY_PIPE_NONBLOCK))) return -EINVAL;
+    return syp_pipe2_os(fds, flags);
+}
+
 /* ---- the one spawn-options struct (build/std-surface.tsv area process) ---- */
 
 enum {

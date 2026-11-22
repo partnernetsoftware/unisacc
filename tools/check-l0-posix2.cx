@@ -1,0 +1,158 @@
+/* tools/check-l0-posix2.cx -- sy_fchmod, sy_umask, sy_chown and sy_pipe2 against the kernel, plus
+   the syscall-table rows behind them.  Linux and macOS run every case; a case that needs a
+   non-root caller (chown to someone else's id) prints SKIP, not PASS, when run as root.
+   Nothing is written outside a private directory under /tmp. */
+#pragma unisa use sys.posix
+#pragma unisa use sys.proc
+#pragma unisa use sys.fs
+#pragma unisa use sys.env
+
+static int passed, failed;
+static void ck(int ok, const char *name) {
+    printf("%s\tl0-posix2.%s\n", ok ? "PASS" : "FAIL", name);
+    if (ok) passed++; else failed++;
+}
+
+static char dir[256], file[300];
+
+static void cleanup(void) {
+    if (file[0]) sy_unlink(file);
+    if (dir[0]) rmdir(dir);
+}
+
+/* DIR/LEAF into B; a name that does not fit is a harness bug, so stop. */
+static void join(char *b, size_t n, const char *d, const char *leaf) {
+    int r = snprintf(b, n, "%s/%s", d, leaf);
+    if (r < 0 || (size_t)r >= n) { printf("FAIL\tl0-posix2.path-too-long\n"); exit(2); }
+}
+
+/* Linux and macOS: does a child exec'd from here still hold descriptor FD?  1 yes, 0 no. */
+static int child_sees(int fd) {
+    char cmd[64];
+    char *argv[4];
+    sy_spawn_t o;
+    sy_exit_t st;
+    int n = snprintf(cmd, sizeof cmd, "test -e /dev/fd/%d", fd);
+    if (n < 0 || (size_t)n >= sizeof cmd) return 0;
+    argv[0] = "sh"; argv[1] = "-c"; argv[2] = cmd; argv[3] = 0;
+    sy_spawn_init(&o);
+    o.argv = argv; o.out_fd = SY_STDIO_NULL; o.err_fd = SY_STDIO_NULL;
+    o.pgroup = -1; o.deadline_ms = 5000;
+    if (sy_proc_run(&o, &st) != 0) return 0;
+    return st.exited && st.code == 0;
+}
+
+static int has_flag(int fd, int cmd, int flag) {
+    int v = fcntl(fd, cmd);
+    return v >= 0 && (v & flag) != 0;
+}
+
+/* Table facts for the new numbers: Windows columns zero, arm64 chown absent with fchownat
+   present, macOS pipe2 absent.  Run from the repository root. */
+static int table_row(const char *name, long col[7]) {
+    unsigned char *buf = 0; int64_t n = 0; int64_t i = 0; int len = (int)strlen(name);
+    if (sy_read_file("exec/facts/sys-syscalls.tsv", &buf, &n, 1 << 20) != 0) return 0;
+    while (i < n) {
+        int64_t e = i, k; int c, ok = 1;
+        while (e < n && buf[e] != '\n') e++;
+        if (e - i > len && !memcmp(buf + i, name, (size_t)len) && buf[i + len] == '\t') {
+            k = i + len + 1;
+            for (c = 0; c < 7 && ok; c++) {
+                long v = 0; int neg = 0;
+                if (k < e && buf[k] == '-') { neg = 1; k++; }
+                if (k >= e || buf[k] < '0' || buf[k] > '9') { ok = 0; break; }
+                while (k < e && buf[k] >= '0' && buf[k] <= '9') { v = v * 10 + (buf[k] - '0'); k++; }
+                col[c] = neg ? -v : v;
+                if (c < 6) { if (k >= e || buf[k] != '\t') { ok = 0; break; } k++; }
+            }
+            free(buf);
+            return ok && k == e;
+        }
+        i = e + 1;
+    }
+    free(buf);
+    return 0;
+}
+
+int main(void) {
+    sy_stat_t st;
+    int fd, old, r, fds[2], me = sy_uid(), i;
+    long col[7];
+
+    if (sy_mkdtemp("/tmp", "l0posix2-", dir, sizeof dir) != 0) { printf("FAIL\tl0-posix2.mkdtemp\n"); return 2; }
+    join(file, sizeof file, dir, "f");
+
+    /* fchmod: mode bits read back equal through fstat and stat; bad arguments */
+    fd = sy_open(file, O_RDWR | O_CREAT | O_EXCL, 0600);
+    ck(fd >= 0, "open-private-file");
+    ck(sy_fchmod(fd, 0640) == 0 && sy_fstat(fd, &st) == 0 && st.mode == 0640, "fchmod-0640-fstat-equal");
+    ck(sy_stat(file, &st) == 0 && st.mode == 0640, "fchmod-0640-stat-equal");
+    ck(sy_fchmod(fd, 0444) == 0 && sy_fstat(fd, &st) == 0 && st.mode == 0444, "fchmod-0444-fstat-equal");
+    ck(sy_fchmod(fd, 0600) == 0 && sy_fstat(fd, &st) == 0 && st.mode == 0600, "fchmod-back-0600");
+    ck(sy_fchmod(-1, 0600) == -EINVAL, "fchmod-neg-fd-einval");
+    ck(sy_fchmod(fd, 010000) == -EINVAL, "fchmod-mode-too-big-einval");
+    ck(sy_fchmod(fd, -1) == -EINVAL, "fchmod-mode-neg-einval");
+    ck(sy_fchmod(1000000, 0600) == -EBADF, "fchmod-closed-fd-ebadf");
+
+    /* chown: own ids succeed, -1 keeps an id, bad arguments, someone else's owner is refused */
+    ck(sy_chown(file, me, (int)sy_gid()) == 0 && sy_stat(file, &st) == 0 && st.uid == me && st.gid == (long)sy_gid(), "chown-self-ids-ok");
+    ck(sy_chown(file, -1, -1) == 0 && sy_stat(file, &st) == 0 && st.uid == me && st.gid == (long)sy_gid(), "chown-minus-one-keeps-ids");
+    ck(sy_chown(0, me, me) == -EINVAL, "chown-null-path-einval");
+    ck(sy_chown("", me, me) == -EINVAL, "chown-empty-path-einval");
+    ck(sy_chown(file, -2, -1) == -EINVAL, "chown-uid-below-minus-one-einval");
+    { char missing[320]; join(missing, sizeof missing, dir, "none");
+      ck(sy_chown(missing, me, -1) == -ENOENT, "chown-missing-enoent"); }
+    if (me != 0) {
+        ck(sy_chown(file, 0, -1) == -EPERM, "chown-other-owner-eperm");
+        ck(sy_chown(file, me + 1, -1) == -EPERM, "chown-other-uid-eperm");
+    } else {
+        printf("SKIP\tl0-posix2.chown-other-owner-eperm\trunning as root\n");
+    }
+
+    /* umask: round trip, effect on creation, bad arguments */
+    old = sy_umask(022);
+    ck(old >= 0 && old <= 0777, "umask-first-returns-old-mask");
+    ck(sy_umask(077) == 022, "umask-returns-set-022");
+    ck(sy_umask(old) == 077, "umask-returns-set-077");
+    ck(sy_umask(old) == old, "umask-restored");
+    sy_umask(077);
+    { char mf[320]; int g;
+      join(mf, sizeof mf, dir, "m");
+      g = sy_open(mf, O_WRONLY | O_CREAT | O_EXCL, 0666);
+      ck(g >= 0 && sy_fstat(g, &st) == 0 && st.mode == 0600, "umask-077-masks-create-0666-to-0600");
+      if (g >= 0) sy_close(g);
+      sy_unlink(mf); }
+    sy_umask(old);
+    ck(sy_umask(01000) == -EINVAL, "umask-too-big-einval");
+    ck(sy_umask(-1) == -EINVAL, "umask-neg-einval");
+    ck(sy_umask(old) == old, "umask-unchanged-after-einval");
+
+    /* pipe2: flags on both ends, invisible after exec only when CLOEXEC, bad arguments */
+    ck(sy_pipe2(fds, SY_PIPE_CLOEXEC) == 0, "pipe2-cloexec-ok");
+    ck(has_flag(fds[0], F_GETFD, FD_CLOEXEC) && has_flag(fds[1], F_GETFD, FD_CLOEXEC), "pipe2-cloexec-both-ends-flagged");
+    ck(!child_sees(fds[0]) && !child_sees(fds[1]), "pipe2-cloexec-invisible-after-exec");
+    close(fds[0]); close(fds[1]);
+    ck(sy_pipe2(fds, 0) == 0 && !has_flag(fds[0], F_GETFD, FD_CLOEXEC) && !has_flag(fds[1], F_GETFD, FD_CLOEXEC), "pipe2-zero-flags-inheritable");
+    ck(child_sees(fds[0]) && child_sees(fds[1]), "pipe2-zero-flags-visible-after-exec");
+    close(fds[0]); close(fds[1]);
+    ck(sy_pipe2(fds, SY_PIPE_NONBLOCK) == 0 && has_flag(fds[0], F_GETFL, O_NONBLOCK) && has_flag(fds[1], F_GETFL, O_NONBLOCK) && !has_flag(fds[0], F_GETFD, FD_CLOEXEC), "pipe2-nonblock-only");
+    close(fds[0]); close(fds[1]);
+    ck(sy_pipe2(fds, SY_PIPE_CLOEXEC | SY_PIPE_NONBLOCK) == 0 && has_flag(fds[0], F_GETFL, O_NONBLOCK) && has_flag(fds[1], F_GETFD, FD_CLOEXEC), "pipe2-both-flags");
+    { char b = 'x'; ck(write(fds[1], &b, 1) == 1 && read(fds[0], &b, 1) == 1 && b == 'x', "pipe2-pair-carries-a-byte"); }
+    close(fds[0]); close(fds[1]);
+    ck(sy_pipe2(fds, 4) == -EINVAL, "pipe2-unknown-flag-einval");
+    ck(sy_pipe2(0, 0) == -EINVAL, "pipe2-null-einval");
+
+    /* syscall table: Windows columns 0 (named -ENOSYS), arm64 chown absent with fchownat present, macOS pipe2 absent */
+    for (i = 0; i < 7; i++) col[i] = -999;
+    ck(table_row("syp_fchmod", col) && col[0] == 91 && col[1] == 52 && col[2] == 124 && col[3] == 124 && col[4] == 0 && col[5] == 0, "table-fchmod");
+    ck(table_row("syp_umask", col) && col[0] == 95 && col[1] == 166 && col[2] == 60 && col[3] == 60 && col[4] == 0 && col[5] == 0, "table-umask");
+    ck(table_row("syp_chown", col) && col[0] == 92 && col[1] == 0 && col[2] == 16 && col[3] == 16 && col[4] == 0 && col[5] == 0, "table-chown-arm64-absent");
+    ck(table_row("syp_fchownat", col) && col[0] == 260 && col[1] == 54 && col[2] == 0 && col[3] == 0 && col[4] == 0 && col[5] == 0, "table-fchownat-arm64-present");
+    ck(table_row("syp_pipe2", col) && col[0] == 293 && col[1] == 59 && col[2] == 0 && col[3] == 0 && col[4] == 0 && col[5] == 0, "table-pipe2-osx-absent");
+
+    if (fd >= 0) sy_close(fd);
+    cleanup();
+    printf("CHECK_L0_POSIX2\tpassed=%d\tfailed=%d\n", passed, failed);
+    return failed ? 1 : 0;
+}

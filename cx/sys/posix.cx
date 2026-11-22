@@ -38,6 +38,10 @@ static const long syp_setpgid = SYP_NUM(sy_setpgid),
     syp_utimensat = SYP_NUM(syp_utimensat), syp_prlimit64 = SYP_NUM(syp_prlimit64),
     syp_getrlimit = SYP_NUM(syp_getrlimit), syp_setrlimit = SYP_NUM(syp_setrlimit),
     syp_rlim_as = SYP_NUM(syp_rlim_as), syp_rlim_nofile = SYP_NUM(syp_rlim_nofile);
+static const long syp_fchmod = SYP_NUM(syp_fchmod), syp_umask = SYP_NUM(syp_umask),
+    syp_chown = SYP_NUM(syp_chown), syp_fchownat = SYP_NUM(syp_fchownat),
+    syp_pipe2 = SYP_NUM(syp_pipe2), syp_o_cloexec = SYP_NUM(syp_o_cloexec),
+    syp_o_nonblock = SYP_NUM(syp_o_nonblock);
 #undef SYP_NUM
 
 /* __syscall6 returns -errno on failure on every target (the carried headers
@@ -432,4 +436,52 @@ long sy_pwrite(int fd, const void *buf, long n, int64_t off) {
     if (!buf || n < 0 || off < 0) return -EINVAL;
     if (!syp_pwrite) return -ENOSYS;
     return syp(syp_pwrite, fd, (long)buf, n, (long)off, 0);
+}
+
+/* Set the permission bits of the open file FD to MODE (0..07777).  0, or -errno:
+   -EINVAL for a negative fd or a mode outside 0..07777, -EBADF, -EPERM when the caller
+   does not own the file; -ENOSYS on Windows. */
+int sy_fchmod(int fd, int mode) {
+    if (fd < 0 || mode < 0 || mode > 07777) return -EINVAL;
+    if (!syp_fchmod) return -ENOSYS;
+    return (int)syp(syp_fchmod, fd, mode, 0, 0, 0);
+}
+
+/* Set the process file-creation mask to MASK (0..0777) and return the previous mask
+   (0..0777), so a read is two calls: old = sy_umask(0); sy_umask(old).  umask(2) cannot
+   fail; -EINVAL for a MASK outside 0..0777, -ENOSYS on Windows. */
+int sy_umask(int mask) {
+    if (mask < 0 || mask > 0777) return -EINVAL;
+    if (!syp_umask) return -ENOSYS;
+    return (int)syp(syp_umask, mask, 0, 0, 0, 0);
+}
+
+/* Change the owner and group of PATH (symbolic links followed).  UID or GID of -1 leaves
+   that id unchanged, as in POSIX.  0, or -errno: -EINVAL for a null or empty PATH or an id
+   below -1, -EPERM when a non-root caller names an owner other than its own or a group it
+   is not in, -ENOENT; -ENOSYS on Windows.  Linux arm64 has no chown number: every target
+   with no chown number goes through fchownat relative to the current directory instead. */
+int sy_chown(const char *path, int uid, int gid) {
+    if (!path || !path[0] || uid < -1 || gid < -1) return -EINVAL;
+    if (syp_chown) return (int)syp(syp_chown, (long)path, (long)(unsigned)uid, (long)(unsigned)gid, 0, 0);
+    if (!syp_fchownat) return -ENOSYS;
+    return (int)syp(syp_fchownat, sy_at_fdcwd(), (long)path, (long)(unsigned)uid, (long)(unsigned)gid, 0);
+}
+
+enum {
+    SY_PIPE_CLOEXEC = 1,    /* both ends close-on-exec */
+    SY_PIPE_NONBLOCK = 2    /* both ends O_NONBLOCK */
+};
+
+/* The pipe2 system call where the target has one (Linux): both ends created with FLAGS
+   (SY_PIPE_CLOEXEC, SY_PIPE_NONBLOCK) applied atomically.  0, or -errno: -EINVAL for a null
+   FDS or an unknown flag bit, -EMFILE; -ENOSYS where there is no pipe2 number (macOS,
+   Windows), which is the signal for sy_pipe2 in sys.proc to take its own path. */
+int sy_pipe2_sys(int fds[2], int flags) {
+    long osflags = 0;
+    if (!fds || (flags & ~(SY_PIPE_CLOEXEC | SY_PIPE_NONBLOCK))) return -EINVAL;
+    if (!syp_pipe2) return -ENOSYS;
+    if (flags & SY_PIPE_CLOEXEC) osflags |= syp_o_cloexec;
+    if (flags & SY_PIPE_NONBLOCK) osflags |= syp_o_nonblock;
+    return (int)syp(syp_pipe2, (long)fds, osflags, 0, 0, 0);
 }
