@@ -4,7 +4,6 @@
 #pragma unisa use sys.posix
 #pragma unisa use sys.time
 #pragma unisa use sys.env
-#pragma unisa use sysx.reaper
 #pragma unisa use text.text
 #pragma unisa use text.fmt
 /* Checks sysx.process: tree cleanup and np_run's monotonic bounded wait,
@@ -211,12 +210,6 @@ static int capture_child(const char *mode) {
         return 0;
     }
     if (!strcmp(mode, "nonzero")) return 7;
-    if (!strcmp(mode, "reaped-pipe")) {
-        d = fork();
-        if (d < 0) return 6;
-        if (d == 0) _exit(capture_sleeper("capture-reaped-orphan"));
-        return 0;
-    }
     if (strcmp(mode, "closed")) return 2;
     if (write_pid("capture-root") != 0) return 3;
     if (sy_getpgid(0) != sy_pid()) return 4;
@@ -268,14 +261,6 @@ static void check_capture(void) {
        sy_killpg(group, 0) == -ESRCH && sy_killpg(d, 0) == -ESRCH,
        "np_run: real root PID, PGID and detached descendant leave no residue");
     np_free(&r);
-    av[3] = "reaped-pipe";
-    rc = np_run(av, 0, 0, 1, &r, why, sizeof why);
-    pid_path(p, sizeof p, "capture-reaped-orphan");
-    d = read_pid(p);
-    ok(rc == -1 && r.timed_out && r.residue == 0 && d > 0 && !alive(d),
-       "np_run: an orphan holding stdout is cleaned after wait reaps the root");
-    if (alive(d)) remember(d);
-    np_free(&r);
     pid_path(p, sizeof p, "no-such-executable"); av[0] = p;
     rc = np_run(av, 0, 0, 2, &r, why, sizeof why);
     ok(rc == -1 && strstr(why, "FileNotFoundError:") == why && !r.out && !r.err,
@@ -288,74 +273,9 @@ static void check_capture(void) {
     np_free(&r);
 }
 
-/* The orphan holds the output pipe after its root exits. In a private PID
-   namespace, make the next child reuse the exact pid of the reaped root.
-   The ordinary batch supplies the sentinel's live pid at the same boundary. */
-static int check_reaped_root(int exact) {
-    int fds[2], root, orphan = 0, sentinel, st, w, res;
-    char report[256];
-    if (exact && sy_pid() != 1) return 2;
-    if (rp_subreaper() || pipe(fds)) return 2;
-    root = fork();
-    if (root < 0) return 2;
-    if (root == 0) {
-        close(fds[0]);
-        int child = fork();
-        if (child == 0) {
-            sy_sleep_ms(3000);
-            _exit(0);
-        }
-        long wrote = write(fds[1], &child, sizeof child);
-        _exit(wrote == sizeof child && child > 0 ? 0 : 1);
-    }
-    close(fds[1]);
-    long long root_start = rp_root_start(root);
-    long got = read(fds[0], &orphan, sizeof orphan);
-    if (waitpid(root, &st, 0) != root || st || got != sizeof orphan || orphan <= 1) return 2;
-    if (exact) {
-        char pid_text[32];
-        int n = tx_snprintf(pid_text, sizeof pid_text, "%d\n", root - 1);
-        int fd = sy_open("/proc/sys/kernel/ns_last_pid", O_WRONLY, 0);
-        if (fd < 0) return 2;
-        int rc = sy_write_all(fd, pid_text, n);
-        sy_close(fd);
-        if (rc) return 2;
-    }
-    sentinel = fork();
-    if (sentinel < 0) return 2;
-    if (sentinel == 0) {
-        sy_setpgid(0, 0);
-        sy_sleep_ms(3000);
-        _exit(0);
-    }
-    sy_setpgid(sentinel, sentinel);
-    if (exact) ok(sentinel == root, "reaped-root: replacement owns the reused pid");
-    res = rp_kill_tree_after_wait(sentinel, 1, root_start, 1000, 0, 0, report, sizeof report);
-    w = waitpid(sentinel, &st, WNOHANG | WUNTRACED);
-    ok(w == 0, "reaped-root: replacement neither stopped nor killed");
-    if (w == 0 || (w == sentinel && WIFSTOPPED(st))) {
-        sy_kill(sentinel);
-        (void)waitpid(sentinel, &st, 0);
-    }
-    w = waitpid(orphan, &st, WNOHANG);
-    ok(res == 0 && (w == orphan || (w < 0 && errno == ECHILD)),
-       "reaped-root: orphan holding the output pipe is gone");
-    if (w == 0) {
-        sy_kill(orphan);
-        (void)waitpid(orphan, &st, 0);
-    }
-    sy_close(fds[0]);
-    return 0;
-}
-
 int main(int argc, char **argv) {
     char rep[256];
     int root, g1, g2, keep_pid, eroot, d, res, dead, fds[2];
-    if (argc == 2 && !strcmp(argv[1], "--reaped-root-pidns")) {
-        int rc = check_reaped_root(1);
-        printf("CX_REAPER_PIDNS\tok=%d\tfailed=%d\trc=%d\n", nok, nfail, rc);
-        return rc ? rc : nfail != 0;
-    }
     if (argc == 4 && !strcmp(argv[1], "--np-child")) {
         tx_snprintf(fxdir, sizeof fxdir, "%s", argv[2]);
         return capture_child(argv[3]);
@@ -367,7 +287,6 @@ int main(int argc, char **argv) {
     }
     cap_nproc();
     ok(sy_child_subreaper() == 0, "child_subreaper: this process adopts the orphans of a job");
-    ok(check_reaped_root(0) == 0, "reaped-root: fixture completed");
     ok(sy_kill_tree(1, 500, 0, 0, rep, sizeof rep) == -EINVAL, "kill_tree: pid 1 is not a job root");
 
     /* A pid that already exited has no tree and nothing to prove. */

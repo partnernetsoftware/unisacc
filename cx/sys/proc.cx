@@ -3,9 +3,6 @@
 #pragma unisa use sys.posix
 #pragma unisa use sys.time
 #pragma unisa use sys.env
-#pragma unisa use sys.fs
-#pragma unisa use mem.grow
-#pragma unisa use mem.heap
 /* L0 sys/proc: child processes (plans/cx-layers.md). Windows does not provide
    the fork/exec or process-group contracts below; those operations return -ENOSYS.
    Exit status as one int:
@@ -266,28 +263,14 @@ typedef struct {
     long deadline_ms;     /* 0: none; otherwise kill the process group on expiry */
 } sy_spawn_t;
 
-typedef struct { int exited; int code; int sig; int timed_out; int raw; } sy_exit_t;
-
-/* Handle state (plans/v0.0.94.md 八).  LIVE is 0 so a memset handle is LIVE.  REAPED means the
-   child was waited for here: the pid is no longer ours, and no call below signals or waits on
-   it again.  This is a runtime check, not compile-time ownership: it cannot stop another path
-   (sy_wait_any on a bare pid) from reaping the child first, nor does it cover the bare-pid
-   entry points sy_kill/sy_signal/sy_wait. */
-enum { SY_CHILD_LIVE = 0, SY_CHILD_REAPED = 1 };
-
 typedef struct {
     int pid;
     int in_fd, out_fd, err_fd;   /* parent ends of PIPE stdio, else -1 */
     long deadline_at_ms;         /* sy_now_ms() at expiry, 0 none */
     int h;                       /* process group to signal (0: the pid alone) */
-    int state;                   /* SY_CHILD_LIVE (0, a memset handle) or SY_CHILD_REAPED */
-    sy_exit_t exit;              /* the status kept once REAPED; see sy_proc_wait */
 } sy_child_t;
 
-/* Both capture streams of one call (plans/v0.0.94.md 七).  The caller mg_init's the two
-   buffers before the call and mg_free's them after; SPLIT 1 sends stderr to ERR, 0 merges
-   it into OUT.  See sy_proc_capture below. */
-typedef struct { mg_buf out; mg_buf err; int split; } sy_capture_t;
+typedef struct { int exited; int code; int sig; int timed_out; int raw; } sy_exit_t;
 
 /* All inherit, no deadline. */
 void sy_spawn_init(sy_spawn_t *o) {
@@ -341,13 +324,6 @@ static void syp_child_exec_os(const sy_spawn_t *o, int group, int *pi, int *po, 
     else if (o->err_fd == SY_STDIO_NULL) syp_dup_null_os(2, O_WRONLY);
     else if (o->err_fd == SY_STDIO_PIPE) dup2(pe[1], 2);
     else if (o->err_fd >= 0) dup2(o->err_fd, 2);
-    /* Close the pipe originals that are still open in this child.  dup2 clears close-on-exec on
-       its target only, so without this a child that does `exec 1>&-` keeps the capture pipe
-       writable and the parent never sees end of stream.  Only plain fds above 2 are closed: a
-       value at or below 2 is one of the targets itself, and closing it would close the target. */
-    if (pi[0] > 2) close(pi[0]);
-    if (po[1] > 2) close(po[1]);
-    if (pe[1] > 2) close(pe[1]);
     if (o->cwd && chdir(o->cwd) != 0) e = errno;
     else if (o->env) {
         const char *path = sy_env("PATH");
@@ -388,8 +364,6 @@ static void syp_child_exec_os(const sy_spawn_t *o, int group, int *pi, int *po, 
 static int syp_proc_spawn_os(const sy_spawn_t *o, sy_child_t *c) {
     if (!o || !c || !o->argv || !o->argv[0]) return -EINVAL;
     c->pid = 0; c->in_fd = c->out_fd = c->err_fd = -1; c->deadline_at_ms = 0; c->h = 0;
-    c->state = SY_CHILD_LIVE;
-    c->exit.exited = 0; c->exit.code = 0; c->exit.sig = 0; c->exit.timed_out = 0; c->exit.raw = 0;
 #if defined(_WIN32)
     return -ENOSYS;
 #else
@@ -445,43 +419,25 @@ static int syp_proc_spawn_os(const sy_spawn_t *o, sy_child_t *c) {
 }
 int sy_proc_spawn(const sy_spawn_t *o, sy_child_t *c) { return syp_proc_spawn_os(o, c); }
 
-/* Signal the child (its whole group when it has one). 0, or -errno.  A REAPED handle never
-   falls back to the bare pid: that pid may already belong to another process.  Its GROUP is
-   still signalled -- a non-empty group is the job's own and cannot be a reused pid -- so a
-   group whose leader was reaped but whose descendants still hold the pipes can be cleared
-   (plans/v0.0.94.md 八,九; same rule as cdx's reaper). */
+/* Signal the child (its whole group when it has one). 0, or -errno (-ESRCH once gone). */
 int sy_proc_kill(sy_child_t *c, int sig) {
-    int reaped;
     if (!c || c->pid <= 0) return -EINVAL;
-    reaped = c->state == SY_CHILD_REAPED;
     errno = 0;
     if (c->h > 0) { if (kill(-(pid_t)c->h, sig) == 0) return 0; if (errno != ESRCH) return -errno; }
-    if (reaped) return -ESRCH;   /* group gone and the pid is not ours any more */
     errno = 0;
     return kill((pid_t)c->pid, sig) == 0 ? 0 : (errno ? -errno : -EIO);
 }
 
-/* Wait once for the child.  1 reaped (the status is kept in C->exit), 0 still running, -errno.
-   A REAPED handle answers from the kept status and never calls waitpid on the old pid. */
 static int syp_reap(sy_child_t *c, int nohang, sy_exit_t *st) {
     int raw;
     pid_t w;
-    if (c->state == SY_CHILD_REAPED) {
-        if (st) *st = c->exit;
-        return 1;
-    }
     for (;;) {
         w = waitpid((pid_t)c->pid, &raw, nohang ? WNOHANG : 0);
         if (w == (pid_t)c->pid) break;
         if (w == 0) return 0;
         if (errno != EINTR) return -errno;
     }
-    if (sy_exit_decode(raw, &c->exit) != 0) {
-        c->exit.exited = 0; c->exit.code = 0; c->exit.sig = 0;
-        c->exit.timed_out = 0; c->exit.raw = raw;
-    }
-    c->state = SY_CHILD_REAPED;
-    if (st) *st = c->exit;
+    if (st) sy_exit_decode(raw, st);
     return 1;
 }
 
@@ -514,10 +470,7 @@ int sy_proc_wait(sy_child_t *c, sy_exit_t *st) {
     }
     r = syp_reap(c, 0, st);
     if (r < 0) return r;
-    /* The timeout flag lives in the handle too: a second wait reads c->exit (syp_reap's REAPED
-       path), so it must carry timed_out or the caller loses it (cc review 2026-11-22). */
-    if (timed) { c->exit.timed_out = 1; if (st) st->timed_out = 1; }
-    return 0;
+    if (st && timed) st->timed_out = 1;
     return 0;
 }
 
@@ -686,177 +639,3 @@ int sy_kill(int pid) {
 
 /* This process's pid. */
 int sy_pid(void) { return (int)getpid(); }
-
-
-/* Two-stream capture, the L0 entity that ext.sysx np_exec wraps.
-   Run the child with stdout and stderr on separate pipes and read both to the end, so that
-   neither stream can fill a 64 KiB pipe and block the child.  The parent never blocks on a
-   read: both fds are non-blocking and waited on with sy_readable (sys.time).
-   The caller mg_init's CAP.out and CAP.err and mg_free's them after the call.  CAP.split 1
-   sends stderr to CAP.err, 0 merges it into CAP.out.
-   CAP_BYTES bounds the new bytes appended to each stream in this call.  A negative value is
-   -EINVAL.  A stream that would go over gives -EMSGSIZE with exactly CAP_BYTES of it kept.
-   Success is 0 with ST filled.
-   O.deadline_ms above 0 gives a whole-call deadline.  On expiry the child group gets SIGTERM,
-   a 200 ms grace drains the pipes, then SIGKILL, and the call returns -ETIMEDOUT with
-   ST.timed_out set and the prefixes read so far kept.
-   Descendants that leave the group are outside this contract, as in sy_proc_wait.
-   Windows returns -ENOSYS: sy_readable (the poll(2) wrapper) is a named refusal there,
-   so the no-deadlock promise
-   cannot be kept and a refusal is returned instead of a wrong answer. */
-/* 1 when PID has finished (a zombie or absent): it can no longer write.  A non-consuming
-   probe -- it never reaps, so the status is still collected by the one wait the call makes
-   later.  0 while it is alive, and 0 when the answer is unknown (no /proc), which keeps the
-   caller on its normal path.  /proc/PID/stat field 3 is the state letter; Z/X/x is finished. */
-static int syp_proc_finished(int pid) {
-    char p[64];
-    unsigned char *d = 0;
-    int64_t n = 0;
-    long i, sp = 0;
-    int fin;
-    if (pid <= 0) return 1;
-    if (snprintf(p, sizeof p, "/proc/%d/stat", pid) <= 0) return 0;
-    if (sy_read_file(p, &d, &n, 4096) != 0 || !d || n <= 0) return 0;
-    /* the command name is in parentheses and may contain spaces: the state is the first
-       non-space character after the LAST ')'. */
-    for (i = n - 1; i >= 0; i--) if (d[i] == ')') break;
-    if (i < 0) { mm_free(d); return 0; }
-    for (i = i + 1; i < n && (d[i] == ' ' || d[i] == '\t'); i++) sp++;
-    fin = i < n && (d[i] == 'Z' || d[i] == 'X' || d[i] == 'x');
-    mm_free(d);
-    (void)sp;
-    return fin;
-}
-
-
-static int syp_cap_pump(int *fd, mg_buf *b, long *used, long cap) {
-    unsigned char tmp[16384];
-    long k = sy_read(*fd, tmp, (long)sizeof tmp);
-    int r;
-    if (k < 0) {
-        if (k == -EAGAIN || k == -EINTR) return 0;
-        sy_close(*fd); *fd = -1;
-        return (int)k;
-    }
-    if (k == 0) { sy_close(*fd); *fd = -1; return 0; }
-    if (*used + k > cap) {
-        long room = cap - *used;
-        if (room > 0) { r = mg_append(b, tmp, room); if (r != 0) return r; }
-        *used = cap;
-        return -EMSGSIZE;
-    }
-    r = mg_append(b, tmp, k);
-    if (r != 0) return r;
-    *used += k;
-    return 0;
-}
-
-static int syp_capture_os(sy_spawn_t *o, sy_exit_t *st, sy_capture_t *cap, long cap_bytes) {
-#if defined(_WIN32)
-    (void)o; (void)st; (void)cap; (void)cap_bytes;
-    return -ENOSYS;
-#else
-    sy_spawn_t s;
-    sy_child_t c;
-    long uo = 0, ue = 0, end = 0;
-    int r, rc = 0, timed = 0, killed = 0, k, reaped = 0, split, pgid, ro = 0, re = 0;
-    split = cap->split != 0;
-    s = *o;
-    s.out_fd = SY_STDIO_PIPE;
-    if (split) { s.err_fd = SY_STDIO_PIPE; s.flags &= ~SY_SPAWN_ERR_TO_OUT; }
-    else { s.err_fd = SY_STDIO_INHERIT; s.flags |= SY_SPAWN_ERR_TO_OUT; }
-    if (s.pgroup == 0) s.pgroup = -1;
-    s.deadline_ms = 0;
-    r = sy_proc_spawn(&s, &c);
-    if (r != 0) return r;
-    /* The group that must be signalled is remembered here: the leader may exit long before the
-       deadline while its descendants keep the pipes open.  A later kill goes to this pgid, never
-       to a pid that may already have been reused.  This call is the single wait owner of the
-       leader: nothing else below waits for it (plans/v0.0.94.md 九; agreed with cdx 2026-11-22). */
-    pgid = c.h > 0 ? c.h : c.pid;
-    if (o->deadline_ms > 0) end = sy_now_ms() + o->deadline_ms;
-    k = fcntl(c.out_fd, F_GETFL);
-    if (k >= 0) fcntl(c.out_fd, F_SETFL, k | O_NONBLOCK);
-    if (c.err_fd >= 0) { k = fcntl(c.err_fd, F_GETFL); if (k >= 0) fcntl(c.err_fd, F_SETFL, k | O_NONBLOCK); }
-    for (;;) {
-        long now;
-        if (c.out_fd < 0 && c.err_fd < 0) {
-            /* Both streams ended.  The leader may still run (it closed 1/2 and works on): probe
-               without consuming -- no reap, no status collection -- and stop as soon as it is
-               gone.  With a deadline keep the clock so a still-running leader is killed at the
-               deadline.  The single consuming wait happens once, after the group work below. */
-            if (syp_proc_finished(c.pid)) break;
-            if (end > 0) {
-                long now = sy_now_ms();
-                if (now >= end) { timed = 1; break; }
-                sy_sleep_ms(end - now < 20 ? end - now : 20);
-                continue;
-            }
-            break;
-        }
-        if (end > 0) {
-            now = sy_now_ms();
-            if (now >= end) { timed = 1; break; }   /* checked on every path, streams closed or not */
-        }
-        {
-            long slice = 50;
-            if (end > 0) { now = sy_now_ms(); if (end - now < slice) slice = end - now; }
-            /* One readiness wait for both streams: sy_readable is the poll(2) the L0 poll unit
-               wraps, so proc.cx needs no second lexical entry of that module.  A silent stdout
-               does not hold stderr back: after the wait both fds are drained without blocking. */
-            r = sy_readable2(c.out_fd, c.err_fd, slice, &ro, &re);
-            if (r == 1 && (ro || re)) {
-                if (ro && c.out_fd >= 0) {
-                    r = syp_cap_pump(&c.out_fd, &cap->out, &uo, cap_bytes);
-                    if (r < 0) rc = r;
-                }
-                if (rc == 0 && re && c.err_fd >= 0) {
-                    r = syp_cap_pump(&c.err_fd, &cap->err, &ue, cap_bytes);
-                    if (r < 0) rc = r;
-                }
-            } else if (r < 0) { rc = r; break; }   /* a refused wait is an error, not an idle tick */
-        }
-        if (rc != 0) break;   /* over cap: stop reading and go kill; the fd stays open on purpose */
-    }
-    if (rc != 0 || timed) {
-        /* Deadline or over cap: terminate the whole group first, the leader last.  The grace
-           loop only drains the pipes and watches the clock -- no consuming wait, so the leader
-           is not reaped while its group may still be alive, and a leader exit is never taken
-           for the end of the group. */
-        long g;
-        unsigned char sink[16384];
-        errno = 0;
-        kill(-(pid_t)pgid, SIGTERM);
-        for (g = 0; g < 200; g += 5) {
-            if (c.out_fd >= 0 && sy_readable(c.out_fd, 0) == 1 && sy_read(c.out_fd, sink, (long)sizeof sink) <= 0) { sy_close(c.out_fd); c.out_fd = -1; }
-            if (c.err_fd >= 0 && sy_readable(c.err_fd, 0) == 1 && sy_read(c.err_fd, sink, (long)sizeof sink) <= 0) { sy_close(c.err_fd); c.err_fd = -1; }
-            if (c.out_fd < 0 && c.err_fd < 0) { killed = 1; break; }   /* every writer gone: group done */
-            sy_sleep_ms(5);
-        }
-        if (!killed) kill(-(pid_t)pgid, SIGKILL);   /* TERM ignored by a descendant: KILL the group */
-        for (g = 0; g < 400 && !(c.out_fd < 0 && c.err_fd < 0); g += 5) {
-            if (c.out_fd >= 0 && sy_readable(c.out_fd, 0) == 1 && sy_read(c.out_fd, sink, (long)sizeof sink) <= 0) { sy_close(c.out_fd); c.out_fd = -1; }
-            if (c.err_fd >= 0 && sy_readable(c.err_fd, 0) == 1 && sy_read(c.err_fd, sink, (long)sizeof sink) <= 0) { sy_close(c.err_fd); c.err_fd = -1; }
-            if (c.out_fd < 0 && c.err_fd < 0) break;
-            sy_sleep_ms(5);
-        }
-    }
-    /* Reap the leader now: the group work is finished, so this is the one consuming wait. */
-    if (!reaped) {
-        r = sy_proc_wait(&c, st);
-        if (r != 0 && r != -ECHILD) { if (rc == 0) rc = r; }
-        else if (r == -ECHILD) { reaped = 1; if (!st->exited && !st->sig) st->exited = 1; }
-        else reaped = 1;
-    }
-    sy_proc_close(&c);
-    if (timed && rc == 0) { st->timed_out = 1; return -ETIMEDOUT; }
-    return rc;
-#endif
-}
-
-int sy_proc_capture(const sy_spawn_t *o, sy_exit_t *st, sy_capture_t *cap, long cap_bytes) {
-    sy_spawn_t s;
-    if (!o || !st || !cap || cap_bytes < 0 || o->in_fd == SY_STDIO_PIPE) return -EINVAL;
-    s = *o;
-    return syp_capture_os(&s, st, cap, cap_bytes);
-}

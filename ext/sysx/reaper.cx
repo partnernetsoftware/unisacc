@@ -5,7 +5,8 @@
  *   sy_kill_tree() in ext/sysx/process.cx, and netpack's np_run calling rp_kill_tree().
 // ENOSYS: refusal contract documented in this comment
  * The contract is the one documented on the block below: 0 survivors is the only clean answer; -ENOSYS
- * where the platform lacks /proc tree support. A caller cannot report an unverified cleanup as clean. */
+ * where /proc is absent, and the caller keeps its previous group kill ("a residue it cannot see is not a
+ * residue it may claim clean"). */
 #pragma unisa module reaper
 #pragma unisa use sys.posix
 #pragma unisa use sys.proc
@@ -40,7 +41,9 @@
  * the kernel has no such setting.
  *
 // ENOSYS: refusal contract documented in this comment
- * Only Linux /proc is scanned. Elsewhere sy_kill_tree answers -ENOSYS. */
+ * Only Linux /proc is scanned. Elsewhere sy_kill_tree answers -ENOSYS and the
+ * caller keeps its previous group kill: a residue it cannot see is not a
+ * residue it may claim clean. */
 
 #define SY_KT_MAX 1024
 #define SY_KT_FREEZE_ROUNDS 64
@@ -110,13 +113,6 @@ static int kt_stat(int pid, int *ppid, int *pgrp, long long *start, char *state)
     return 0;
 }
 
-/* Capture the orphan sweep's lower bound while the caller still owns ROOT. */
-long long rp_root_start(int root) {
-    long long start = 0;
-    if (kt_stat(root, 0, 0, &start, 0) != 0) return -1;
-    return start;
-}
-
 static int kt_held(const sy_kt_ent *e, int n, int pid) {
     int i;
     for (i = 0; i < n; i++) if (e[i].pid == pid) return 1;
@@ -161,52 +157,47 @@ static void kt_pass(int *n, sy_kt_ent *e, int rg, int root, const int *keep, int
 // ENOSYS: refusal contract documented in this comment
    that is not a job root, or -ENOSYS where there is no /proc. REP gets
    "pid(start) ..." for the survivors, at most CAP bytes. KEEP entries (the
-   caller's other live children) are never stopped, killed or swept.
-   When ROOT_REAPED is set, ROOT_START must have been captured before wait.
-   Only the orphan sweep runs, and it excludes ROOT even if the pid is live. */
+   caller's other live children) are never stopped, killed or swept. */
 
-int rp_kill_tree_after_wait(int root, int root_reaped, long long root_start,
-                           int deadline_ms, const int *keep, int nkeep, char *rep, int cap) {
+int rp_kill_tree(int root, int deadline_ms, const int *keep, int nkeep, char *rep, int cap) {
     sy_kt_ent e[SY_KT_MAX];
-    int n = 0, rg = 0, i, round, residue = 0, added, freeze_rounds, sweep_rounds;
-    long long rst = root_start;
+    int n = 0, rg = 0, rp = 0, i, round, residue = 0, added, freeze_rounds, sweep_rounds;
+    long long rst = 0;
+    char rs = 0;
     if (!tx_eqz(sy_os_name(), "linux")) return -ENOSYS; /* ENOSYS: refuse, cap=proc-tree unavailable */
     if (root <= 1) return -EINVAL;
     if (rep && cap > 0) rep[0] = 0;
     if (deadline_ms <= 0) deadline_ms = 2000;
+    if (kt_stat(root, &rp, &rg, &rst, &rs) != 0) return 0; /* already gone: nothing to prove */
+    freeze_rounds = deadline_ms / 4;
+    if (freeze_rounds < 8) freeze_rounds = 8;
+    if (freeze_rounds > SY_KT_FREEZE_ROUNDS) freeze_rounds = SY_KT_FREEZE_ROUNDS;
     sweep_rounds = deadline_ms / 8;
     if (sweep_rounds < 4) sweep_rounds = 4;
     if (sweep_rounds > SY_KT_SWEEP_ROUNDS) sweep_rounds = SY_KT_SWEEP_ROUNDS;
-    if (!root_reaped) {
-        if (kt_stat(root, 0, &rg, &rst, 0) != 0) return 0; /* already gone */
-        freeze_rounds = deadline_ms / 4;
-        if (freeze_rounds < 8) freeze_rounds = 8;
-        if (freeze_rounds > SY_KT_FREEZE_ROUNDS) freeze_rounds = SY_KT_FREEZE_ROUNDS;
-        sy_signal(root, sn_lnx_SIGSTOP);
-        e[n].pid = root; e[n].start = rst; n++;
-        for (round = 0; round < freeze_rounds; round++) {
-            kt_pass(&n, e, rg, root, keep, nkeep, &added);
-            if (!added) break;
-            sy_sleep_ms(2);
-        }
-        for (i = 0; i < n; i++) sy_signal(e[i].pid, SIGKILL);
-        if (rg == root && rg > 1) sy_killpg(rg, SIGKILL); /* root's own group */
-        round = 0;
-        while (round++ < SY_KT_ROOT_WAIT) {
-            if (sy_wait_status(root, SY_WAIT_NOHANG, 0, 0, 0) == root) break;
-            sy_sleep_ms(2);
-        }
+    sy_signal(root, sn_lnx_SIGSTOP);
+    e[n].pid = root; e[n].start = rst; n++;
+    for (round = 0; round < freeze_rounds; round++) {
+        kt_pass(&n, e, rg, root, keep, nkeep, &added);
+        if (!added) break;
+        sy_sleep_ms(2);
     }
-    if (rst < 0) return -EIO; /* no pre-reap cutoff: cannot identify the orphans */
+    for (i = 0; i < n; i++) sy_signal(e[i].pid, SIGKILL);
+    if (rg == root && rg > 1) sy_killpg(rg, SIGKILL);     /* the group, only when it is root's own */
+    round = 0;
+    while (round++ < SY_KT_ROOT_WAIT) {
+        if (sy_wait_status(root, SY_WAIT_NOHANG, 0, 0, 0) == root) break;
+        sy_sleep_ms(2);
+    }
     /* Orphans stop being descendants when their parent dies: with the subreaper
        set they are children of this process and carry a starttime not before
        the root's. Freeze and kill them too, then look again. */
     for (round = 0; round < sweep_rounds; round++) {
         int pid = 0;
-        int first = n;
+        int hits = 0;
         {
             sy_dir_t d;
-            if (sy_dir_open(&d, "/proc") != 0) return -EIO;
+            if (sy_dir_open(&d, "/proc") != 0) break;
             while (sy_dir_next(&d) == 1) {
                 int pp = 0, pg = 0;
                 int64_t entry_pid = 0;
@@ -214,7 +205,7 @@ int rp_kill_tree_after_wait(int root, int root_reaped, long long root_start,
                 char stt = 0;
                 if (tx_to_i64(d.name, d.name_n, 10, &entry_pid) != 0 || entry_pid <= 1 || entry_pid > INT_MAX) continue;
                 pid = (int)entry_pid;
-                if (pid == root || pid == sy_pid()) continue;
+                if (pid == sy_pid()) continue;
                 if (kt_held(e, n, pid) || kt_kept(keep, nkeep, pid)) continue;
                 if (kt_stat(pid, &pp, &pg, &st, &stt) != 0) continue;
                 if (stt == 'Z' || stt == 'X') continue;
@@ -222,23 +213,21 @@ int rp_kill_tree_after_wait(int root, int root_reaped, long long root_start,
                 if (n >= SY_KT_MAX) break;
                 sy_signal(pid, sn_lnx_SIGSTOP);
                 e[n].pid = pid; e[n].start = st; n++;
+                hits++;
             }
             sy_dir_close(&d);
         }
-        if (n == first) break;
-        for (i = first; i < n; i++) sy_signal(e[i].pid, SIGKILL);
+        if (hits) for (i = 0; i < n; i++) sy_signal(e[i].pid, SIGKILL);
+        if (!hits) break;
         sy_sleep_ms(2);
     }
     for (i = 0; i < n; i++) {
         int pp = 0, pg = 0;
         long long st = 0;
         char stt = 0;
+        while (sy_wait_status(e[i].pid, SY_WAIT_NOHANG, 0, 0, 0) == e[i].pid) ;
         if (kt_stat(e[i].pid, &pp, &pg, &st, &stt) != 0) continue;
-        if (st != e[i].start) continue;
-        if (stt == 'Z' || stt == 'X') {
-            (void)sy_wait_status(e[i].pid, SY_WAIT_NOHANG, 0, 0, 0);
-            continue;
-        }
+        if (st != e[i].start || stt == 'Z' || stt == 'X') continue;
         residue++;
         if (rep && cap > 0) {
             int u = (int)tx_len(rep, cap), k;
@@ -255,10 +244,6 @@ int rp_kill_tree_after_wait(int root, int root_reaped, long long root_start,
         }
     }
     return residue;
-}
-
-int rp_kill_tree(int root, int deadline_ms, const int *keep, int nkeep, char *rep, int cap) {
-    return rp_kill_tree_after_wait(root, 0, 0, deadline_ms, keep, nkeep, rep, cap);
 }
 
 int rp_subreaper(void) {
