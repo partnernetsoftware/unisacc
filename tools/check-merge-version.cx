@@ -21,6 +21,7 @@
 #pragma unisa use mem.heap
 #pragma unisa use mem.bytes
 #pragma unisa use cxlib.ckrun
+#pragma unisa use testx.check
 #pragma unisa use cxlib.die
 
 static char T[600], out[1 << 16], root[600];
@@ -33,7 +34,6 @@ static void put(const char *rel, const char *body) {
     cx_fmt(p, sizeof p, "%s/%s", T, rel);
     if (cx_write(p, body, strlen(body))) { printf("FAIL\twrite %s\n", rel); exit(1); }
 }
-static int has(const char *w) { return strstr(out, w) != 0; }
 static int run_mv(const char *branch, const char *rules, const char *work) {
     char cmd[3000];
     cx_fmt(cmd, sizeof cmd, "cd %s && sh ./unisacc.com tools/merge-version.cx -- preview --repo %s/repo --base main --branch %s --rules %s/%s --work %s/%s 2>&1", root, T, branch, T, rules, T, work);
@@ -67,7 +67,7 @@ int main(void) {
         "git checkout -q feat && printf 'l1\\nl2\\nFEAT3\\nl4\\nl5\\n' > derive.cx && printf 'h\\nrow0\\nrowF\\n' > table.tsv && printf 'd1\\nFEAT-D2\\nd3\\n' > del.cx && printf 'u1\\nFEAT-U\\nu3\\n' > unknown.txt && "
         "git add -A && git commit -q -m feat-side && git checkout -q -b feat2 feat~0 && printf 'u1\\nu2\\nu3\\n' > unknown.txt && git add -A && git commit -q -m feat2-reset-unknown && git branch other feat2 && git checkout -q main && echo REPO_OK", T);
     int rc = sh(cmd);
-    CK(rc == 0 && has("REPO_OK"), "synthetic-repo-built");
+    CK(rc == 0 && tk_has(out, "REPO_OK"), "synthetic-repo-built");
     const char *rules_head = "# id\tbranch\tpath\twhen\taction\tevidence\n";
     char rules[2000];
     cx_fmt(rules, sizeof rules, "%sr-derive\tfeat*\tderive.cx\tconflict\ttake-ours\tfixture\nr-table\t*\ttable.tsv\tconflict\tunion\tfixture\nr-trap\tfeat*\ttrap.cx\talways\ttake-theirs\tfixture\nr-del\tfeat*\tdel.cx\talways\ttake-theirs\tfixture\n", rules_head);
@@ -80,24 +80,24 @@ int main(void) {
 
     /* run 1: unknown.txt conflicts with no rule */
     rc = run_mv("feat", "rules.tsv", "w1");
-    CK(rc == 1 && has("MERGE_VERSION\tverdict=NEEDS_HUMAN\tconflicts_left=1\tforced=2") && has("tree=-"), "unknown-conflict-needs-human-no-tree-rc1");
-    CK(has("MERGE_PATH\tunknown.txt\tneeds-human") && has("MERGE_PATH\tderive.cx\tauto-resolved\ttake-ours\trule=r-derive") && has("MERGE_PATH\ttable.tsv\tauto-resolved\tunion\trule=r-table"), "rule-rows-settle-known-classes-unknown-left");
-    CK(has("MERGE_PATH\ttrap.cx\tauto-resolved\tforce-branch\trule=r-trap") && has("MERGE_PATH\tdel.cx\tauto-resolved\tforce-branch\trule=r-del"), "always-rows-force-silent-trap-paths");
+    CK(rc == 1 && tk_has(out, "MERGE_VERSION\tverdict=NEEDS_HUMAN\tconflicts_left=1\tforced=2") && tk_has(out, "tree=-"), "unknown-conflict-needs-human-no-tree-rc1");
+    CK(tk_has(out, "MERGE_PATH\tunknown.txt\tneeds-human") && tk_has(out, "MERGE_PATH\tderive.cx\tauto-resolved\ttake-ours\trule=r-derive") && tk_has(out, "MERGE_PATH\ttable.tsv\tauto-resolved\tunion\trule=r-table"), "rule-rows-settle-known-classes-unknown-left");
+    CK(tk_has(out, "MERGE_PATH\ttrap.cx\tauto-resolved\tforce-branch\trule=r-trap") && tk_has(out, "MERGE_PATH\tdel.cx\tauto-resolved\tforce-branch\trule=r-del"), "always-rows-force-silent-trap-paths");
 
     /* run 2: feat2 resets unknown.txt: ready */
     rc = run_mv("feat2", "rules.tsv", "w2");
     char tree[64];
     tree_of(tree);
-    CK(rc == 0 && has("verdict=READY\tconflicts_left=0") && strlen(tree) == 40, "ready-when-nothing-left-with-a-tree-hash");
+    CK(rc == 0 && tk_has(out, "verdict=READY\tconflicts_left=0") && strlen(tree) == 40, "ready-when-nothing-left-with-a-tree-hash");
     char tpath[200], cmd2[900];
     git_show(tree, "derive.cx");
-    CK(has("MAIN3") && !has("FEAT3"), "take-ours-keeps-the-base-side");
+    CK(tk_has(out, "MAIN3") && !tk_has(out, "FEAT3"), "take-ours-keeps-the-base-side");
     git_show(tree, "table.tsv");
-    CK(has("rowM") && has("rowF") && has("row0"), "union-keeps-both-appended-rows");
+    CK(tk_has(out, "rowM") && tk_has(out, "rowF") && tk_has(out, "row0"), "union-keeps-both-appended-rows");
     git_show(tree, "trap.cx");
-    CK(has("t2") && !has("MAIN-T2"), "silent-trap-closed-trap-file-is-the-branch-version");
+    CK(tk_has(out, "t2") && !tk_has(out, "MAIN-T2"), "silent-trap-closed-trap-file-is-the-branch-version");
     git_show(tree, "del.cx");
-    CK(has("FEAT-D2"), "base-deleted-file-comes-back-as-the-branch-has-it");
+    CK(tk_has(out, "FEAT-D2"), "base-deleted-file-comes-back-as-the-branch-has-it");
     cx_fmt(tpath, sizeof tpath, "%s", "x"); (void)tpath;
     cx_fmt(cmd2, sizeof cmd2, "git -C %s/repo status --short | wc -l; git -C %s/repo rev-parse main feat feat2 | tr '\\n' ' '", T, T);
     sh(cmd2);
@@ -109,17 +109,17 @@ int main(void) {
     rc = run_mv("feat2", "rules-no-trap.tsv", "w3");
     tree_of(tree);
     git_show(tree, "trap.cx");
-    CK(has("MAIN-T2"), "mutation-no-trap-row-silently-keeps-the-other-side");
+    CK(tk_has(out, "MAIN-T2"), "mutation-no-trap-row-silently-keeps-the-other-side");
     cx_fmt(rules, sizeof rules, "%sr-table\t*\ttable.tsv\tconflict\tunion\tfixture\nr-trap\tfeat*\ttrap.cx\talways\ttake-theirs\tfixture\nr-del\tfeat*\tdel.cx\talways\ttake-theirs\tfixture\n", rules_head);
     put("rules-no-derive.tsv", rules);
     rc = run_mv("feat2", "rules-no-derive.tsv", "w4");
-    CK(rc == 1 && has("MERGE_PATH\tderive.cx\tneeds-human") && has("verdict=NEEDS_HUMAN"), "mutation-no-derive-row-needs-human");
+    CK(rc == 1 && tk_has(out, "MERGE_PATH\tderive.cx\tneeds-human") && tk_has(out, "verdict=NEEDS_HUMAN"), "mutation-no-derive-row-needs-human");
     rc = run_mv("other", "rules.tsv", "w5");
-    CK(rc == 1 && has("MERGE_PATH\tderive.cx\tneeds-human") && !has("force-branch"), "mutation-branch-glob-excludes-rules");
+    CK(rc == 1 && tk_has(out, "MERGE_PATH\tderive.cx\tneeds-human") && !tk_has(out, "force-branch"), "mutation-branch-glob-excludes-rules");
     cx_fmt(rules, sizeof rules, "%sr-bad\t*\tx\tconflict\tsmash\tfixture\n", rules_head);
     put("rules-bad.tsv", rules);
     rc = run_mv("feat2", "rules-bad.tsv", "w6");
-    CK(rc == 2 && has("unknown rule action"), "unknown-rule-action-refused-rc2");
+    CK(rc == 2 && tk_has(out, "unknown rule action"), "unknown-rule-action-refused-rc2");
     printf("CHECK_MERGE_VERSION\tfailed=%d\n", failed);
     sy_remove_all(T);
     return failed ? 1 : 0;
