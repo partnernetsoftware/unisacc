@@ -1,0 +1,114 @@
+struct GltfExportMesh {
+  vertices:u32;
+  vertexCount:u32;
+  indices:u32;
+  indexCount:u32;
+  translation:u32;
+  color:u32;
+}
+
+native function gltf_export_span(at:i64,bytes:i64) i64 {
+  return at>=0 && bytes>=0 && bytes<=6291456 && at<=6291456-bytes;
+}
+
+native function gltf_export_disjoint(at:i64,bytes:i64,b:i64,size:i64) i64 {
+  return at+bytes<=b || b+size<=at;
+}
+
+native function gltf_export_read(at:i64,bytes:i64,out:i64,capacity:i64,work:i64) i64 {
+  return gltf_export_span(at,bytes) && gltf_export_disjoint(at,bytes,out,capacity) &&
+    gltf_export_disjoint(at,bytes,work,8192);
+}
+
+// Export one indexed triangle primitive, translated node and metallic-roughness
+// material as a binary glTF 2.0 file. No destination bytes change on failure.
+native function GLTFExporter_exportMesh(mesh:i64,out:i64,capacity:i64,work:i64) i64 {
+  if(!gltf_export_span(out,capacity) || !gltf_export_span(work,8192) || work%8!=0 ||
+     !gltf_export_disjoint(out,capacity,work,8192) ||
+     !gltf_export_read(mesh,GltfExportMesh.size,out,capacity,work)) { return 0-1; }
+  let vn=ux_u32(mesh+GltfExportMesh.vertexCount);
+  let nn=ux_u32(mesh+GltfExportMesh.indexCount);
+  let positions=ux_u32(mesh+GltfExportMesh.vertices);
+  let indices=ux_u32(mesh+GltfExportMesh.indices);
+  let translation=ux_u32(mesh+GltfExportMesh.translation);
+  let color=ux_u32(mesh+GltfExportMesh.color);
+  let vb=vn*12;
+  let ib=nn*2;
+  if(vn<3 || vn>65536 || nn<3 || nn%3!=0 ||
+     !gltf_export_read(positions,vb,out,capacity,work) ||
+     !gltf_export_read(indices,ib,out,capacity,work) ||
+     !gltf_export_read(translation,24,out,capacity,work) ||
+     !gltf_export_read(color,32,out,capacity,work)) { return 0-1; }
+  let i=0;
+  while(i<nn) {
+    if(ux_u16(indices+2*i)>=vn) { return 0-2; }
+    i=i+1;
+  }
+  i=0;
+  while(i<7) {
+    let value=0.0;
+    if(i<3) { value=ux_f64(translation+8*i); }
+    else {
+      value=ux_f64(color+8*(i-3));
+      if(value<0.0 || value>1.0 || (i==6 && value!=1.0)) { return 0-2; }
+    }
+    if(value-value!=0.0) { return 0-2; }
+    let put=ux_f64_put(work+8*i,value);
+    i=i+1;
+  }
+  let b0=ux_f64_put(work+56,(vb+ib)*1.0);
+  let b1=ux_f64_put(work+64,vb*1.0);
+  let b2=ux_f64_put(work+72,vb*1.0);
+  let b3=ux_f64_put(work+80,ib*1.0);
+  let n0=ux_f64_put(work+88,vn*1.0);
+  let n1=ux_f64_put(work+144,nn*1.0);
+  let axis=0;
+  while(axis<3) {
+    let minimum=ux_f32(positions+4*axis);
+    let maximum=minimum;
+    i=0;
+    while(i<vn) {
+      let value=ux_f32(positions+12*i+4*axis);
+      if(value-value!=0.0) { return 0-2; }
+      if(value<minimum) { minimum=value; }
+      if(value>maximum) { maximum=value; }
+      i=i+1;
+    }
+    let low=ux_f64_put(work+96+8*axis,minimum);
+    let high=ux_f64_put(work+120+8*axis,maximum);
+    axis=axis+1;
+  }
+  let from=work+1280;
+  let jsonEnd=gltf_export_manifest(from,work+8192,work,work+160);
+  if(jsonEnd<0) { return 0-3; }
+  let js=jsonEnd-from;
+  let jsPad=(js+3)/4*4;
+  let bs=vb+ib;
+  let bsPad=(bs+3)/4*4;
+  let total=28+jsPad+bsPad;
+  if(total>capacity) { return 0-3; }
+  let magic=ux_u32_put(out,1179937895);
+  let version=ux_u32_put(out+4,2);
+  let length=ux_u32_put(out+8,total);
+  let manifest=ux_u32_put(out+12,jsPad);
+  let jt=ux_u32_put(out+16,1313821514);
+  i=0;
+  while(i<jsPad) {
+    let jsonByte=32;
+    if(i<js) { jsonByte=ux_u8(from+i); }
+    let put=ux_u8_put(out+20+i,jsonByte);
+    i=i+1;
+  }
+  let bin=out+20+jsPad;
+  let dataLength=ux_u32_put(bin,bsPad);
+  let format=ux_u32_put(bin+4,5130562);
+  i=0;
+  while(i<bsPad) {
+    let binByte=0;
+    if(i<vb) { binByte=ux_u8(positions+i); }
+    else if(i<bs) { binByte=ux_u8(indices+i-vb); }
+    let put=ux_u8_put(bin+8+i,binByte);
+    i=i+1;
+  }
+  return total;
+}
