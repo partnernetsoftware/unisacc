@@ -147,6 +147,72 @@ int main(void) {
     put("rules-bad.tsv", rules);
     rc = run_mv("feat2", "rules-bad.tsv", "w6");
     CK(rc == 2 && tk_has(out, "unknown rule action"), "unknown-rule-action-refused-rc2");
+
+    /* derive gates on a repository with a fake derive.cx and ref-job-paths.cx that log their calls into the checkout: order of warm-up and full check,
+     * a failed warm-up not deciding the verdict, a drift not retried, the baseline step only after a good derive-write, the load precheck */
+    static const char *fake_derive =
+        "static void lg(const char *s) { FILE *f = fopen(\"calls.txt\", \"a\"); if (f) { fputs(s, f); fputs(\"\\n\", f); fclose(f); } }\n"
+        "static int has(const char *p) { FILE *f = fopen(p, \"r\"); if (f) { fclose(f); return 1; } return 0; }\n"
+        "int main(int argc, char **argv) {\n"
+        "    int only = 0, wr = 0;\n"
+        "    for (int i = 1; i < argc; i++) { if (!strcmp(argv[i], \"--only\")) only = 1; if (!strcmp(argv[i], \"--write\")) wr = 1; }\n"
+        "    lg(wr ? \"WRITE\" : only ? \"WARM\" : \"FULL\");\n"
+        "    if (only && has(\"warm-fails\")) { printf(\"DERIVE\\tproduct-map\\tREFUSED\\t1\\n\"); return 2; }\n"
+        "    if (wr && has(\"write-fails\")) { printf(\"DERIVE_SUMMARY ok=0 drift=1 refused=0 skipped=0 elapsed_ms=1\\n\"); return 1; }\n"
+        "    if (!only && !wr && has(\"drift\")) { printf(\"DERIVE\\tlinks\\tDRIFT\\t1\\nDERIVE_SUMMARY ok=0 drift=1 refused=0 skipped=0 elapsed_ms=1\\n\"); return 1; }\n"
+        "    if (!only) printf(\"DERIVE_SUMMARY ok=1 drift=0 refused=0 skipped=0 elapsed_ms=1\\n\");\n"
+        "    return 0;\n"
+        "}\n";
+
+    static const char *fake_rjp = "int main(int argc, char **argv) { FILE *f = fopen(\"calls.txt\", \"a\"); if (f) { fputs(\"RJP\\n\", f); fclose(f); } printf(\"fake ref-job-paths ok\\n\"); return 0; }\n";
+    put("fake-derive.cx", fake_derive);
+    put("fake-rjp.cx", fake_rjp);
+    cx_fmt(cmd, sizeof cmd,
+        "set -e; cd %s && mkdir repo2 && cd repo2 && git init -q -b main . && git config user.email t@t && git config user.name t && mkdir tools && "
+        "cp ../fake-derive.cx tools/derive.cx && cp ../fake-rjp.cx tools/ref-job-paths.cx && printf 'a\\n' > a.txt && git add -A && git commit -q -m base && git branch fb && "
+        "git checkout -q fb && printf 'b\\n' > b.txt && git add -A && git commit -q -m fb && git checkout -q main && printf 'c\\n' > c.txt && git add -A && git commit -q -m main-side && echo REPO2_OK", T);
+    rc = sh(cmd);
+    CK(rc == 0 && tk_has(out, "REPO2_OK"), "derive-fixture-repo-built");
+    cx_fmt(cmd, sizeof cmd, "cd %s && sh ./unisacc.com tools/merge-version.cx -- preview --repo %s/repo2 --base main --branch fb --rules %s/rules.tsv --work %s/g1 2>&1", root, T, T, T);
+    rc = sh(cmd);
+    CK(rc == 0 && tk_has(out, "verdict=READY"), "derive-fixture-preview-ready");
+    {
+        char g[1500], calls[300];
+        cx_fmt(calls, sizeof calls, "cat %s/g1/tree/calls.txt 2>&1 | tr '\\n' ','", T);
+        /* 1. good tree: warm-up first, then the full check, verdict OK */
+        cx_fmt(g, sizeof g, "cd %s && sh ./unisacc.com tools/merge-version.cx -- gate derive-check --repo %s/repo2 --branch fb --work %s/g1 --max-load 1000 2>&1", root, T, T);
+        rc = sh(g);
+        CK(rc == 0 && tk_has(out, "derive-check-warm\tDONE\trc=0") && tk_has(out, "MERGE_GATE\tderive-check\tOK"), "derive-check-warms-then-judges-the-full-check");
+        sh(calls);
+        CK(!strcmp(out, "WARM,FULL,"), "warm-up-runs-before-the-full-check-once-each");
+        /* 2. the warm-up fails: still only a warm-up, the full check decides */
+        cx_fmt(g, sizeof g, "touch %s/g1/tree/warm-fails && cd %s && sh ./unisacc.com tools/merge-version.cx -- gate derive-check --repo %s/repo2 --branch fb --work %s/g1 --max-load 1000 2>&1", T, root, T, T);
+        rc = sh(g);
+        CK(rc == 0 && tk_has(out, "derive-check-warm\tDONE\trc=2") && tk_has(out, "MERGE_GATE\tderive-check\tOK") && !tk_has(out, "retry"), "failed-warm-up-does-not-decide-the-verdict");
+        /* 3. a drift stays a failure and is not rerun */
+        cx_fmt(g, sizeof g, "touch %s/g1/tree/drift && cd %s && sh ./unisacc.com tools/merge-version.cx -- gate derive-check --repo %s/repo2 --branch fb --work %s/g1 --max-load 1000 2>&1", T, root, T, T);
+        rc = sh(g);
+        CK(rc == 1 && tk_has(out, "MERGE_GATE\tderive-check\tFAIL") && !tk_has(out, "OK-after-retry") && !tk_has(out, "derive-check-retry"), "drift-fails-and-is-not-retried");
+        sh(calls);
+        CK(!strcmp(out, "WARM,FULL,WARM,FULL,WARM,FULL,"), "drift-run-called-the-full-check-once");
+        /* 4. derive-write: the baseline step runs after a good write, not after a failed one */
+        cx_fmt(g, sizeof g, "rm %s/g1/tree/drift %s/g1/tree/warm-fails; rm -f %s/g1/tree/calls.txt; cd %s && sh ./unisacc.com tools/merge-version.cx -- gate derive-write --repo %s/repo2 --branch fb --work %s/g1 --max-load 1000 2>&1", T, T, T, root, T, T);
+        rc = sh(g);
+        CK(rc == 0 && tk_has(out, "derive-write\tref-job-paths-baseline\twritten") && tk_has(out, "tree_after_derive"), "derive-write-then-baseline-step");
+        sh(calls);
+        CK(!strcmp(out, "WRITE,RJP,"), "baseline-step-runs-after-the-write-and-once");
+        cx_fmt(g, sizeof g, "touch %s/g1/tree/write-fails; rm -f %s/g1/tree/calls.txt; cd %s && sh ./unisacc.com tools/merge-version.cx -- gate derive-write --repo %s/repo2 --branch fb --work %s/g1 --max-load 1000 2>&1", T, T, root, T, T);
+        rc = sh(g);
+        CK(rc == 1 && !tk_has(out, "ref-job-paths-baseline"), "failed-write-skips-the-baseline-step");
+        sh(calls);
+        CK(!strcmp(out, "WRITE,"), "failed-write-ran-no-baseline-step");
+        /* 5. load precheck: refuses before touching the tree */
+        cx_fmt(g, sizeof g, "rm -f %s/g1/tree/calls.txt; cd %s && sh ./unisacc.com tools/merge-version.cx -- gate derive-check --repo %s/repo2 --branch fb --work %s/g1 --max-load 0 2>&1", T, root, T, T);
+        rc = sh(g);
+        CK(rc == 3 && tk_has(out, "MERGE_GATE\tderive-check\tREFUSED\tload1="), "load-above-max-refuses-with-rc3");
+        sh(calls);
+        CK(strstr(out, "No such file") != 0, "refused-gate-ran-nothing");
+    }
     printf("CHECK_MERGE_VERSION\tfailed=%d\n", failed);
     sy_remove_all(T);
     return failed ? 1 : 0;

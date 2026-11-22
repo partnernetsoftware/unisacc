@@ -1,7 +1,7 @@
 /* tools/merge-version.cx -- one full merge of a version branch into the base, in a private index, by a rule table.
  *
  *   sh ./unisacc.com tools/merge-version.cx -- preview --branch REF [--base main] [--repo DIR] [--rules FILE] [--work DIR]
- *   sh ./unisacc.com tools/merge-version.cx -- gate NAME --branch REF [--repo DIR] [--work DIR]    NAME: traps | derive-write | derive-check | ratchets | tests
+ *   sh ./unisacc.com tools/merge-version.cx -- gate NAME --branch REF [--repo DIR] [--work DIR] [--max-load N]    NAME: traps | derive-write | derive-check | ratchets | tests
  *       gate ratchets [--shard K/N | --shards N]: one slice of the ratchets per call (--shard, each under 55 s), or all N slices
  *       one after the other (--shards, each bounded 55 s) with a total line `MERGE_GATE ratchets-total ok=A fail=B shards=N`
  *   sh ./unisacc.com tools/merge-version.cx -- rules [--rules FILE] [--branch REF]                   the rows that apply to REF
@@ -391,6 +391,26 @@ static int cmd_gate(int argc, char **argv) {
     const char *branch = opt(argc, argv, "--branch", 0);
     mv_need(argc >= 1 && g_work != 0 && branch != 0, "gate needs NAME, --branch REF and --work DIR");
     const char *name = argv[0];
+    /* load precheck: the gates are tuned to the 55 s step bound (derive-check cold is about 54 s on a quiet machine), so on a busy one they
+     * refuse to start rather than report a timeout that is only load; --max-load N (default 8) is a wait signal, not a relaxation of any bound */
+    {
+        int maxl = atoi(opt(argc, argv, "--max-load", "8"));
+        size_t ln = 0;
+        char *la = cx_read("/proc/loadavg", &ln);
+        if (la && ln > 0) {
+            size_t dot = 0;
+            while (dot < ln && la[dot] != '.' && la[dot] != ' ') dot++;
+            int tenths = atoi(la) * 10 + (dot + 1 < ln && la[dot] == '.' && la[dot + 1] >= '0' && la[dot + 1] <= '9' ? la[dot + 1] - '0' : 0);
+            if (tenths > maxl * 10) {
+                char lb[32]; size_t k = 0;
+                while (k < ln && k < 31 && la[k] != ' ') { lb[k] = la[k]; k++; }
+                lb[k] = 0;
+                printf("MERGE_GATE\t%s\tREFUSED\tload1=%s\tmax=%d\twait for the machine to quieten, then run the gate again\n", name, lb, maxl);
+                return 3;
+            }
+        }
+        if (la) mm_free(la);
+    }
     char idx[1100], tdir[1200];
     mv_need(!cx_fmt(idx, sizeof idx, "%s/idx", g_work), "work path");
     mv_need(sy_is_reg(idx) == 1, "no WORK/idx: run preview first");
