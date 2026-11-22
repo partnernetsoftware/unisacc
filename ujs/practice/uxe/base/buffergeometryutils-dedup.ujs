@@ -1,0 +1,101 @@
+native function merge_vertex_span(at:i64,bytes:i64) i64 {
+  return at>=0 && at%4==0 && bytes>=0 && bytes<=6291456 && at<=6291456-bytes;
+}
+
+native function merge_vertex_overlap(a:i64,an:i64,b:i64,bn:i64) i64 {
+  return an>0 && bn>0 && a<b+bn && b<a+an;
+}
+
+native function merge_vertex_source(out:i64,bytes:i64,source:i64,vertices:i64,vn:i64,indices:i64,nn:i64) i64 {
+  return merge_vertex_overlap(out,bytes,source,GeometryBuffers.size) ||
+    merge_vertex_overlap(out,bytes,vertices,vn) || merge_vertex_overlap(out,bytes,indices,nn);
+}
+
+native function merge_vertex_quant(value:f64,tolerance:f64) i64 {
+  let scaled=value/tolerance+0.5;
+  if(scaled-scaled!=0.0 || scaled<=0.0-2147483648.0 || scaled>=2147483648.0) { return 0-2147483649; }
+  if(scaled<0.0) { return 0-f64_floor_i64(0.0-scaled); }
+  return f64_floor_i64(scaled);
+}
+
+native function merge_vertex_equal(a:i64,b:i64,tolerance:f64) i64 {
+  let lane=0;
+  while(lane<32) {
+    let x=merge_vertex_quant(ux_f32(a+lane),tolerance);
+    let y=merge_vertex_quant(ux_f32(b+lane),tolerance);
+    if(x!=y) { return 0; }
+    lane=lane+4;
+  }
+  return 1;
+}
+
+// Deduplicate all eight fixed-layout channels and preserve first-use order.
+// Slot table has at least twice the number of source vertices.
+native function BufferGeometryUtils_mergeV(out:i64,source:i64,slots:i64,slotCount:i64,tolerance:f64) i64 {
+  if(!merge_vertex_span(out,GeometryBuffers.size) || !merge_vertex_span(source,GeometryBuffers.size) ||
+     tolerance<=0.0 || tolerance-tolerance!=0.0 || slotCount<2 || slotCount>65536 ||
+     !merge_vertex_span(slots,slotCount*4)) { return 0-1; }
+  let vn=ux_u32(source+GeometryBuffers.vertexCount);
+  let nn=ux_u32(source+GeometryBuffers.indexCount);
+  let sv=ux_u32(source+GeometryBuffers.vertices);
+  let si=ux_u32(source+GeometryBuffers.indices);
+  let ov=ux_u32(out+GeometryBuffers.vertices);
+  let oi=ux_u32(out+GeometryBuffers.indices);
+  let count=nn;
+  if(nn==0) { count=vn; }
+  if(vn<1 || vn>slotCount/2 || !GeometryBuffers_fits(source,vn,nn) ||
+     !GeometryBuffers_fits(out,vn,count) || !merge_vertex_span(sv,vn*32) ||
+     !merge_vertex_span(si,nn*4) || !merge_vertex_span(ov,vn*32) || !merge_vertex_span(oi,count*4)) { return 0-1; }
+  if(merge_vertex_source(out,GeometryBuffers.size,source,sv,vn*32,si,nn*4) ||
+     merge_vertex_source(ov,vn*32,source,sv,vn*32,si,nn*4) ||
+     merge_vertex_source(oi,count*4,source,sv,vn*32,si,nn*4) ||
+     merge_vertex_source(slots,slotCount*4,source,sv,vn*32,si,nn*4) ||
+     merge_vertex_overlap(out,GeometryBuffers.size,ov,vn*32) ||
+     merge_vertex_overlap(out,GeometryBuffers.size,oi,count*4) ||
+     merge_vertex_overlap(ov,vn*32,oi,count*4) ||
+     merge_vertex_overlap(slots,slotCount*4,out,GeometryBuffers.size) ||
+     merge_vertex_overlap(slots,slotCount*4,ov,vn*32) || merge_vertex_overlap(slots,slotCount*4,oi,count*4)) { return 0-1; }
+  let i=0;
+  while(i<nn) { if(ux_u32(si+4*i)>=vn) { return 0-2; } i=i+1; }
+  i=0;
+  while(i<vn*32) {
+    if(merge_vertex_quant(ux_f32(sv+i),tolerance)<0-2147483648) { return 0-2; }
+    i=i+4;
+  }
+  i=0;
+  while(i<slotCount) { let clear=ux_u32_put(slots+4*i,0); i=i+1; }
+  i=0;
+  let unique=0;
+  while(i<count) {
+    let index=i;
+    if(nn!=0) { index=ux_u32(si+4*i); }
+    let vertex=sv+32*index;
+    let h=2166136261;
+    let lane=0;
+    while(lane<32) {
+      let component=merge_vertex_quant(ux_f32(vertex+lane),tolerance);
+      h=u32_mul(u32_xor(h,component),16777619);
+      lane=lane+4;
+    }
+    let bucket=h%slotCount;
+    let found=ux_u32(slots+4*bucket);
+    while(found!=0 && !merge_vertex_equal(vertex,ov+32*(found-1),tolerance)) {
+      bucket=(bucket+1)%slotCount;
+      found=ux_u32(slots+4*bucket);
+    }
+    if(found==0) {
+      lane=0;
+      while(lane<32) {
+        let bits=ux_u32(vertex+lane);
+        let put=ux_u32_put(ov+32*unique+lane,bits);
+        lane=lane+4;
+      }
+      unique=unique+1;
+      found=unique;
+      let insert=ux_u32_put(slots+4*bucket,found);
+    }
+    let mapped=ux_u32_put(oi+4*i,found-1);
+    i=i+1;
+  }
+  return GeometryBuffers_commit(out,unique,count);
+}
