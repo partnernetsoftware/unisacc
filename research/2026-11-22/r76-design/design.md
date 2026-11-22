@@ -58,10 +58,10 @@ typedef struct hs_config {
     int max_children;          /* <=0 使用 HS_DEFAULT_MAX_CHILDREN (63); 可配至 128/256 等更高值 */
     long max_header_bytes;     /* <=0 使用 64 KiB */
     long max_body_bytes;       /* <=0 使用 16 MiB */
-    long header_timeout_ms;    /* <=0 使用 10000 ms */
+    long header_timeout_ms;    /* <=0 使用 10000 ms; 管新连接首请求(含连上未发任何字节的静默连接)及每次请求头读完前的总时限 */
     long body_read_timeout_ms; /* <=0 使用 30000 ms */
     long write_timeout_ms;     /* <=0 使用 30000 ms */
-    long idle_timeout_ms;      /* 可配至 255000 ms 及以上; <=0 使用 255000 ms */
+    long idle_timeout_ms;      /* 可配至 255000 ms 及以上; <=0 使用 255000 ms; 管首请求完成后 keep-alive 等待下一请求首字节的空闲窗口(测试连上不发首请求字节的超时须配 header_timeout_ms) */
 } hs_config_t;
 
 typedef struct hs_server hs_server;

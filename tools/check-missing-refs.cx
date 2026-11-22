@@ -1,0 +1,84 @@
+/* tools/check-missing-refs.cx -- checks tools/missing-refs.cx (report mode with a down-only ratchet).
+ *
+ *   sh ./unisacc.com tools/check-missing-refs.cx          (run from the repo root; ./unisacc.com and ./tools/bound needed)
+ *
+ * red:    fixture plans/p.md cites tools/ok.cx (exists), tools/link.cx (symbolic link to ok.cx), tools/gone.cx (missing,
+ *         ghost), tools/moved.cx (exists as tools/sub/moved.cx: renamed), archive/tools/old.cx and ~/x/tools/old2.cx (prefix
+ *         matches, not citations), tools/NAME.cx (template).  Expected summary: unique=2 ghost=1 renamed=1 template=1;
+ *         with baseline 1 --check exits 1 (growth), with baseline 2 exits 0, with baseline 5 exits 0 and says it can drop.
+ * mutant: (1) existence replaced by "always missing" -> the symbolic link and ok.cx get reported, killed; (2) prefix guard
+ *         removed -> archive/tools/old.cx is cited, killed.
+ * Ends with CHECK_MISSING_REFS<TAB>failed=N. */
+#pragma unisa use sys.proc
+#pragma unisa use sys.fs
+#pragma unisa use sys.io
+#pragma unisa use sys.env
+#pragma unisa use sys.posix
+#pragma unisa use text.text
+#pragma unisa use text.fmt
+#pragma unisa use mem.heap
+#pragma unisa use mem.bytes
+
+static int mr_failed;
+static char mr_out[1 << 16];
+static void mr_ck(int ok, const char *name) { if (!ok) mr_failed++; printf("%s\tmissing-refs.%s\n", ok ? "PASS" : "FAIL", name); }
+static int mr_has(const char *s) { long n = tx_len(mr_out, sizeof mr_out), sn = tx_len(s, 400), i; for (i = 0; i + sn <= n; i++) if (mm_same(mr_out + i, s, sn)) return 1; return 0; }
+static int mr_exec(char **v) {
+    int fd, pid, ex = 0, code = 0, sig = 0, bound = 50; long n = 0, r; (void)bound;
+    pid = sy_spawn_pipe(v, 0, 0, &fd, 0);
+    if (pid < 0) return -1;
+    while ((r = sy_read(fd, mr_out + n, (long)sizeof mr_out - 1 - n)) > 0) n += r;
+    mr_out[n] = 0; sy_close(fd);
+    if (sy_wait_status(pid, 0, &ex, &code, &sig) != pid || !ex) return -1;
+    return code;
+}
+static int mr_tool(const char *tool, const char *root, const char *chk) {
+    char *v[] = {"./tools/bound", "50", "sh", "./unisacc.com", (char *)tool, "--", "--root", (char *)root, (char *)chk, 0};
+    if (!chk) v[8] = 0;
+    return mr_exec(v);
+}
+static void mr_put(const char *root, const char *rel, const char *s) { char p[700]; if (!cx_fmt(p, sizeof p, "%s/%s", root, rel)) cx_write(p, s, tx_len(s, 1 << 16)); }
+static void mr_dir(const char *root, const char *rel) { char p[700]; cx_fmt(p, sizeof p, "%s/%s", root, rel); sy_mkdir(p, 0700); }
+static void mr_baseline(const char *root, const char *n) { char s[64]; cx_fmt(s, sizeof s, "unique\t%s\n", n); mr_put(root, "build/missing-refs-baseline.tsv", s); }
+static int mr_mutant(const char *dst, const char *from, const char *to) {
+    size_t n = 0, i, fl = tx_len(from, 400), tl = tx_len(to, 400); char *b = (char *)cx_read("tools/missing-refs.cx", &n), *m; long at = -1;
+    if (!b) return -1;
+    for (i = 0; i + fl <= n; i++) if (mm_same(b + i, from, fl)) { at = (long)i; break; }
+    if (at < 0) { mm_free(b); return -1; }
+    m = (char *)mm_alloc(n - fl + tl + 1);
+    mm_copy(m, at + 1, b, at); mm_copy(m + at, tl + 1, to, tl); mm_copy(m + at + tl, n - at - fl + 1, b + at + fl, n - at - fl);
+    { int r = cx_write(dst, m, n - fl + tl); mm_free(m); mm_free(b); return r; }
+}
+
+int main(void) {
+    char root[600], mp[300], lk[700]; int rc;
+    char *gi[5], *ga[5];
+    cx_fmt(root, sizeof root, "%s/missrefs-%d", sy_tmpdir(), (int)sy_pid());
+    sy_mkdir(root, 0700); mr_dir(root, "plans"); mr_dir(root, "tools"); mr_dir(root, "tools/sub"); mr_dir(root, "build");
+    mr_put(root, "tools/ok.cx", "x\n"); mr_put(root, "tools/sub/moved.cx", "x\n");
+    cx_fmt(lk, sizeof lk, "%s/tools/link.cx", root); sy_symlink("ok.cx", lk);
+    mr_put(root, "plans/p.md", "Use tools/ok.cx and tools/link.cx.\nGone: tools/gone.cx.\nMoved: tools/moved.cx.\nOld: archive/tools/old.cx and ~/x/tools/old2.cx.\nTemplate tools/NAME.cx.\n");
+    gi[0] = "git"; gi[1] = "-C"; gi[2] = root; gi[3] = "init"; gi[4] = 0; mr_exec(gi);
+    ga[0] = "git"; ga[1] = "-C"; ga[2] = root; ga[3] = "add"; ga[4] = "-A"; { char *v[] = {"git", "-C", root, "add", "-A", 0}; (void)ga; mr_exec(v); }
+    mr_baseline(root, "2");
+
+    mr_tool("tools/missing-refs.cx", root, 0);
+    mr_ck(mr_has("unique=2\trenamed=1\tplanned=0\tdir=0\tghost=1") && mr_has("template=1"), "red-summary");
+    mr_ck(mr_has("plans/p.md:2\ttools/gone.cx\tghost") && mr_has("plans/p.md:3\ttools/moved.cx\trenamed"), "red-rows");
+    mr_ck(!mr_has("tools/link.cx\t") && !mr_has("tools/ok.cx\t") && !mr_has("old.cx") && !mr_has("old2.cx"), "green-symlink-exists-prefix-skipped");
+    mr_baseline(root, "1"); rc = mr_tool("tools/missing-refs.cx", root, "--check");
+    mr_ck(rc == 1 && mr_has("FAIL: unique=2 exceeds baseline 1"), "ratchet-grow-fails");
+    mr_baseline(root, "2"); rc = mr_tool("tools/missing-refs.cx", root, "--check"); mr_ck(rc == 0 && mr_has("ok: unique=2"), "ratchet-equal-ok");
+    mr_baseline(root, "5"); rc = mr_tool("tools/missing-refs.cx", root, "--check"); mr_ck(rc == 0 && mr_has("baseline can drop to 2"), "ratchet-drop-reports");
+
+    cx_fmt(mp, sizeof mp, "tools/missing-refs-mut1.cx");
+    mr_ck(mr_mutant(mp, "if (sy_stat(p, &st) == 0)", "if (0 && sy_stat(p, &st) == 0)") == 0, "mut1-built");
+    mr_tool(mp, root, 0); mr_ck(mr_has("tools/link.cx\t") && !mr_has("unique=2\t"), "mut1-killed");
+    sy_unlink(mp);
+    cx_fmt(mp, sizeof mp, "tools/missing-refs-mut2.cx");
+    mr_ck(mr_mutant(mp, "(i == 0 || !idch(fb[i - 1]))", "1") == 0, "mut2-built");
+    mr_tool(mp, root, 0); mr_ck(mr_has("old.cx") && !mr_has("unique=2\t"), "mut2-killed");
+    sy_unlink(mp);
+    printf("CHECK_MISSING_REFS\tfailed=%d\n", mr_failed);
+    return mr_failed ? 1 : 0;
+}

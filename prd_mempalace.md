@@ -12,7 +12,7 @@
 
 ## 地图
 
-当前:0.0.90 已公开(冻结 F 5d1e492d7e,源构造 T2 9109473641,APE 46fd3db9,CI 44973535033,Root 已升级),下一版 0.0.91(plans/v0.0.91.md,身份与构建边界)。固定前缀 P0 因 E2 快照含后续源字节判 NO-GO；重开条件与对拍见 plans/roadmap-0.0.83-0.0.99.md 的 0.0.100 前结构性备忘。
+当前:0.0.91 已公开(冻结 F a7b8ffe328,源构造 T 7be3cc5d4b,APE eb18eb43,CI 44997990448,Y2 6a270c9ae7,Root 已升级),下一版 0.0.92(plans/v0.0.92.md,产品与工具 cx 迁移收尾)。固定前缀 P0 因 E2 快照含后续源字节判 NO-GO；重开条件与对拍见 plans/roadmap-0.0.83-0.0.99.md 的 0.0.100 前结构性备忘。
 
 ```mermaid
 flowchart LR
@@ -30,7 +30,7 @@ flowchart LR
     V76["0.0.76 已公开 Latest(冻结 F debb8f43f9)<br/>release/evidence/0.0.76/"]
     V77["0.0.77 cxmod 内存安全乙期一段,分支 v0.0.77<br/>archive/plans/v0.0.77.md"]
     ECO["0.0.78 至 0.0.81 已公开(0.0.81 冻结 F 8b46bf21ee,对象产出二期,NOT_QUALIFIED)<br/>release/notes-0.0.81.md、release/evidence/0.0.81/"]
-    PERF["0.0.82 前端诊断二期与 ref 判据替换、0.0.83 Q-P 首次尝试、0.0.84 执行器与模型包,0.0.100 起汇编级精修(入口准则在 0.0.99 封板前满足)<br/>plans/roadmap-rev3.md、plans/roadmap-0.0.83-0.0.99.md、plans/v0.0.82.md、plans/v0.0.83.md、plans/nn-migration-rev3.md"]
+    PERF["0.0.82 前端诊断二期与 ref 判据替换、0.0.83 Q-P 首次尝试、0.0.84 执行器与模型包,0.0.100 起汇编级精修(入口准则在 0.0.99 封板前满足)<br/>plans/roadmap-rev3.md、plans/roadmap-0.0.83-0.0.99.md、archive/plans-pre086/v0.0.82.md、archive/plans-pre086/v0.0.83.md、plans/nn-migration-rev3.md"]
     V66 --> V67 --> V68 --> V69 --> V70 --> V71 --> V72 --> V73 --> V74 --> V75 --> V76 --> V77 --> ECO --> PERF
   end
   subgraph 发布
@@ -262,7 +262,7 @@ flowchart LR
 
 ### (4) 0.0.90 已知缺口与未验证项
 - 资格:0.0.90 整体裁决 NOT_QUALIFIED,全套 `s9` 的 `daily`/`release` 未跑通;`daily` 仅有 15 片编译冒烟,完整运行态未验。 入口:`release/notes-0.0.90.md`
-- R75:`tools/tsv-lint.cx` 未解析引用 11277 超上限 11050 且无门执行;排 0.0.92 修表并入门,`ucn-pp-gen` 六表比对口径同批确认。 入口:`build/owner-reqs.tsv` R75
+- R75:`tools/tsv-lint.cx` 未解析引用实测 11351(0.0.89 的 11277 到 0.0.90 涨 74,来自 U4 新增的动态绑定表行,每个新行必计一条),上限由所有者 2026-11-22 从 11050 放宽到 13260(11050 加 20%,为不阻塞版本);0.0.92 只做门执行(上限必须有门拦)加 asm volatile 行列号,削表(F 绑定)延后;增长必须拦:基线固化为实测值只降不升。 入口:`build/owner-reqs.tsv` R75
 - R78:变异门真实杀伤率已由 0.0.90 四补丁补 `--expect-fail` 与 `release-chain.cx` `sy_realpath>0` 补强至 `[57/82,59/82]=[69.51%,71.95%]` 高于 0.60 线(`release-chain` 20/26=0.77 PASS)。 入口:`tools/mutation-gate.cx`、`research/2026-11-22/r78-v090-named/summary.md`
 - 诊断行列号:U4 差异项与 `asm volatile` 拒绝缺 `file:line:col`,排 0.0.92。 入口:`build/owner-reqs.tsv` R55
 - 字面量长度:41 条真缺陷的全套补丁未落(顺序:检查器与棘轮 -> 越界读 -> 工具 -> 检查 -> 注解;`gate` 须在 `annotations` 之后)。 入口:`plans/v0.0.91.md`、`research/2026-11-22/litlen-089/handoff.md`、`research/2026-11-22/litlen/real-bugs-41.tsv`

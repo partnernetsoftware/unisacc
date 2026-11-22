@@ -1,0 +1,266 @@
+/* tools/check-dangling-links.cx -- 全仓悬空符号链接检查(含内置先红后绿夹具).
+ *
+ *   sh ./unisacc.com tools/check-dangling-links.cx [-- [--root DIR] [--allow FILE] [--no-fixtures]]
+ *
+ * 规则:
+ *   (1) 递归扫描 ROOT 下全部符号链接(跳过 .git / out / .claude / .cache), 对每个符号链接执行 sy_stat:
+ *       任何目标不存在/非目录/循环(ENOENT/ENOTDIR/ELOOP/其它错误)且未在白名单登记 -> DANGLING (FAIL, rc=1)。
+ *   (2) 白名单表(默认 ROOT/build/dangling-links-allow.tsv, 列: path<TAB>target<TAB>reason):
+ *       仅允许登记 archive/ 前缀的历史归档项(活跃树 cx/ src/ ext/ tools/ tests/ exec/ apps/ 禁止豁免 -> BADALLOW, rc=1);
+ *       每行必须 3 列且 reason 非空; 已修复不再悬空的白名单行报 STALE 提示。
+ *   (3) 内置 6 组隔离临时树夹具(在 sy_tmpdir() 执行并清理):
+ *       先红(ext 悬空软链/循环软链 ELOOP/活跃树非法豁免) + 转绿(删/修软链/归档白名单放行/陈旧提示)。
+ * 末行: CHECK_DANGLING_LINKS<TAB>failed=F<TAB>total=T<TAB>dangling=D<TAB>allowed=A<TAB>badallow=B<TAB>stale=S
+ */
+#pragma unisa use sys.fs
+#pragma unisa use sys.posix
+#pragma unisa use sys.env
+#pragma unisa use sys.io
+#pragma unisa use sys.time
+#pragma unisa use text.text
+#pragma unisa use mem.bytes
+
+#define DL_MAX_ALLOW 256
+#define DL_TABLE "build/dangling-links-allow.tsv"
+
+typedef struct {
+    char path[300];
+    char target[300];
+    char reason[200];
+    int seen;
+} DlAllow;
+
+static DlAllow dl_allow[DL_MAX_ALLOW];
+static int dl_nallow, dl_badallow;
+static int failed;
+
+static void ck(int ok, const char *name) {
+    if (!ok) failed++;
+    sy_printf("%s\tdangling-links.%s\n", ok ? "PASS" : "FAIL", name);
+}
+
+static int dl_skip_dir(const char *rel) {
+    return !strcmp(rel, ".git") || !strcmp(rel, "out") || !strcmp(rel, ".claude") || !strcmp(rel, ".cache");
+}
+
+static int dl_load_allow(const char *path, int quiet) {
+    size_t n = 0, i = 0;
+    char *b;
+    int ln = 0;
+    dl_nallow = 0;
+    dl_badallow = 0;
+    b = cx_read(path, &n);
+    if (!b) return 1;
+    while (i < n) {
+        size_t s = i;
+        char line[1024], *f[3], *q;
+        int nf = 1, bad = 0;
+        while (i < n && b[i] != '\n') i++;
+        ln++;
+        if (i - s >= sizeof line) { bad = 1; line[0] = 0; }
+        else if (mm_copy(line, sizeof line, b + s, (long)(i - s))) bad = 1;
+        else line[i - s] = 0;
+        i++;
+        if (ln == 1) {
+            if (bad || strcmp(line, "path\ttarget\treason")) {
+                if (!quiet) sy_printf("BADALLOW\t%s:1\theader\n", path);
+                dl_badallow++;
+            }
+            continue;
+        }
+        if (!bad && (!line[0] || line[0] == '#')) continue;
+        f[0] = line;
+        for (q = line; !bad && *q; q++) {
+            if (*q == '\t') {
+                *q = 0;
+                if (nf < 3) f[nf] = q + 1;
+                nf++;
+            }
+        }
+        if (!bad && nf != 3) bad = 1;
+        /* 只允许 archive/ 历史归档树豁免, 活跃树零容忍 */
+        if (!bad && (strncmp(f[0], "archive/", 8) != 0 || strstr(f[0], "..") != 0 || !f[1][0] || !f[2][0])) bad = 1;
+        if (!bad && (strlen(f[0]) >= sizeof dl_allow[0].path || strlen(f[1]) >= sizeof dl_allow[0].target || strlen(f[2]) >= sizeof dl_allow[0].reason)) bad = 1;
+        for (int j = 0; !bad && j < dl_nallow; j++) if (!strcmp(dl_allow[j].path, f[0])) bad = 1;
+        if (!bad && dl_nallow < DL_MAX_ALLOW) {
+            DlAllow *r = &dl_allow[dl_nallow++];
+            cx_fmt(r->path, sizeof r->path, "%s", f[0]);
+            cx_fmt(r->target, sizeof r->target, "%s", f[1]);
+            cx_fmt(r->reason, sizeof r->reason, "%s", f[2]);
+            r->seen = 0;
+        } else {
+            if (!quiet) sy_printf("BADALLOW\t%s:%d\t%s\n", path, ln, f[0] ? f[0] : "-");
+            dl_badallow++;
+        }
+    }
+    free(b);
+    return 0;
+}
+
+static DlAllow *dl_find_allow(const char *rel) {
+    for (int i = 0; i < dl_nallow; i++) if (!strcmp(dl_allow[i].path, rel)) return &dl_allow[i];
+    return 0;
+}
+
+typedef struct {
+    int total, dangling, allowed, badallow, stale, broken;
+} DlResult;
+
+static void dl_walk(const char *root, const char *rel, int depth, int quiet, DlResult *res) {
+    char dirp[4400];
+    sy_dir_t d;
+    static char names[34][512][128];
+    int nn = 0;
+    if (depth >= 32) { res->broken++; return; }
+    if (rel[0]) {
+        if (cx_fmt(dirp, sizeof dirp, "%s/%s", root, rel)) { res->broken++; return; }
+    } else {
+        if (cx_fmt(dirp, sizeof dirp, "%s", root)) { res->broken++; return; }
+    }
+    if (sy_dir_open(&d, dirp)) return;
+    while (sy_dir_next(&d) > 0) {
+        if (!strcmp(d.name, ".") || !strcmp(d.name, "..")) continue;
+        if (nn < 512 && !cx_fmt(names[depth][nn], 128, "%s", d.name)) nn++;
+    }
+    sy_dir_close(&d);
+
+    for (int i = 0; i < nn; i++) {
+        char sub[4400], full[4600];
+        sy_stat_t st;
+        if (rel[0]) {
+            if (cx_fmt(sub, sizeof sub, "%s/%s", rel, names[depth][i])) continue;
+        } else {
+            if (cx_fmt(sub, sizeof sub, "%s", names[depth][i])) continue;
+        }
+        if (dl_skip_dir(sub)) continue;
+        if (cx_fmt(full, sizeof full, "%s/%s", root, sub)) continue;
+        if (sy_lstat(full, &st)) continue;
+        if (st.kind == 'd') {
+            dl_walk(root, sub, depth + 1, quiet, res);
+        } else if (st.kind == 'l') {
+            sy_stat_t tst;
+            int trc;
+            res->total++;
+            trc = sy_stat(full, &tst);
+            if (trc != 0) {
+                char target[512];
+                long rn = sy_readlink(full, target, sizeof target - 1);
+                if (rn < 0) cx_fmt(target, sizeof target, "<err>");
+                else target[rn] = 0;
+                DlAllow *al = dl_find_allow(sub);
+                if (al && !strcmp(al->target, target)) {
+                    al->seen = 1;
+                    res->allowed++;
+                } else {
+                    res->dangling++;
+                    if (!quiet) sy_printf("DANGLING\t%s\ttarget=%s\terrno=%d\n", sub, target, trc);
+                }
+            }
+        }
+    }
+}
+
+static DlResult dl_run(const char *root, const char *allow_path, int quiet) {
+    DlResult res;
+    mm_fill(&res, (long)sizeof res, 0, (long)sizeof res);
+    if (dl_load_allow(allow_path, quiet)) {
+        if (!quiet) sy_printf("BROKEN\t%s unreadable\n", allow_path);
+        res.broken++;
+    }
+    res.badallow = dl_badallow;
+    dl_walk(root, "", 0, quiet, &res);
+    for (int i = 0; i < dl_nallow; i++) {
+        if (!dl_allow[i].seen) {
+            res.stale++;
+            if (!quiet) sy_printf("STALE\t%s\tno longer dangling; drop row from allow table\n", dl_allow[i].path);
+        }
+    }
+    return res;
+}
+
+static int dl_put(const char *base, const char *rel, const char *text) {
+    char p[4800];
+    if (cx_fmt(p, sizeof p, "%s/%s", base, rel)) return 1;
+    return sy_write_file(p, text, (long)strlen(text), 0600);
+}
+
+static int dl_fixtures(void) {
+    char tc[4096], fx[4400], p[4600], ap[4600];
+    DlResult r;
+    if (sy_realpath(sy_tmpdir(), tc, sizeof tc) < 0 || cx_fmt(fx, sizeof fx, "%s/dangling-fx-%ld-%d", tc, sy_now_ms(), (int)getpid())) return 2;
+    if (sy_mkdir(fx, 0700)) return 2;
+    if (cx_fmt(p, sizeof p, "%s/build", fx) || sy_mkdir(p, 0700) ||
+        cx_fmt(p, sizeof p, "%s/ext", fx) || sy_mkdir(p, 0700) ||
+        cx_fmt(p, sizeof p, "%s/ext/fsx", fx) || sy_mkdir(p, 0700) ||
+        cx_fmt(p, sizeof p, "%s/ext/path", fx) || sy_mkdir(p, 0700) ||
+        cx_fmt(p, sizeof p, "%s/archive", fx) || sy_mkdir(p, 0700)) return 2;
+    if (cx_fmt(ap, sizeof ap, "%s/%s", fx, DL_TABLE)) return 2;
+    if (dl_put(fx, DL_TABLE, "path\ttarget\treason\n")) return 2;
+
+    /* 夹具 1(先红): ext/fsx/path -> ../../cx/path 目标不存在 */
+    cx_fmt(p, sizeof p, "%s/ext/fsx/path", fx);
+    if (sy_symlink("../../cx/path", p)) return 2;
+    r = dl_run(fx, ap, 1);
+    ck(r.dangling == 1 && r.total == 1 && !r.badallow && !r.broken, "fixture-dangling-ext-red");
+
+    /* 夹具 2(转绿): 改指有效目录 ../path */
+    (void)sy_unlink(p);
+    if (sy_symlink("../path", p)) return 2;
+    r = dl_run(fx, ap, 1);
+    ck(r.dangling == 0 && r.total == 1 && !r.badallow && !r.broken, "fixture-fixed-green");
+
+    /* 夹具 3(先红): 循环软链 ELOOP */
+    cx_fmt(p, sizeof p, "%s/ext/a", fx); (void)sy_symlink("b", p);
+    cx_fmt(p, sizeof p, "%s/ext/b", fx); (void)sy_symlink("a", p);
+    r = dl_run(fx, ap, 1);
+    ck(r.dangling == 2, "fixture-eloop-red");
+    cx_fmt(p, sizeof p, "%s/ext/a", fx); (void)sy_unlink(p);
+    cx_fmt(p, sizeof p, "%s/ext/b", fx); (void)sy_unlink(p);
+
+    /* 夹具 4(归档白名单放行): archive/old.cx 登记后放行 */
+    cx_fmt(p, sizeof p, "%s/archive/old.cx", fx); (void)sy_symlink("../gone.cx", p);
+    if (dl_put(fx, DL_TABLE, "path\ttarget\treason\narchive/old.cx\t../gone.cx\t归档树冻结\n")) return 2;
+    r = dl_run(fx, ap, 1);
+    ck(r.dangling == 0 && r.allowed == 1 && !r.badallow && !r.stale, "fixture-allow-archive-green");
+
+    /* 夹具 5(活跃树禁止豁免): ext/fsx/dead 写入白名单必报 BADALLOW + DANGLING */
+    cx_fmt(p, sizeof p, "%s/ext/fsx/dead", fx); (void)sy_symlink("../nope", p);
+    if (dl_put(fx, DL_TABLE, "path\ttarget\treason\narchive/old.cx\t../gone.cx\t归档树冻结\next/fsx/dead\t../nope\t试图豁免活跃树\n")) return 2;
+    r = dl_run(fx, ap, 1);
+    ck(r.badallow == 1 && r.dangling == 1, "fixture-allow-active-rejected");
+    (void)sy_unlink(p);
+
+    /* 夹具 6(陈旧白名单提示): 删掉 archive/old.cx 后报 STALE */
+    cx_fmt(p, sizeof p, "%s/archive/old.cx", fx); (void)sy_unlink(p);
+    if (dl_put(fx, DL_TABLE, "path\ttarget\treason\narchive/old.cx\t../gone.cx\t归档树冻结\n")) return 2;
+    r = dl_run(fx, ap, 1);
+    ck(r.dangling == 0 && r.stale == 1 && !r.badallow, "fixture-allow-stale-hint");
+
+    (void)cx_rmtree(fx);
+    return 0;
+}
+
+int main(int argc, char **argv) {
+    const char *rootarg = ".", *allowarg = 0;
+    int no_fx = 0;
+    char root[4096], ap[4600];
+    DlResult r;
+    for (int i = 1; i < argc; i++) {
+        if (!strcmp(argv[i], "--root") && i + 1 < argc) rootarg = argv[++i];
+        else if (!strcmp(argv[i], "--allow") && i + 1 < argc) allowarg = argv[++i];
+        else if (!strcmp(argv[i], "--no-fixtures")) no_fx = 1;
+        else { sy_eprintf("check-dangling-links: unknown option %s\n", argv[i]); return 2; }
+    }
+    if (sy_realpath(rootarg, root, sizeof root) < 0) return 2;
+    if (allowarg) { if (cx_fmt(ap, sizeof ap, "%s", allowarg)) return 2; }
+    else if (cx_fmt(ap, sizeof ap, "%s/%s", root, DL_TABLE)) return 2;
+
+    if (!no_fx && dl_fixtures()) { sy_printf("FAIL\tdangling-links.fixture-setup\n"); failed++; }
+    r = dl_run(root, ap, 0);
+    ck(!r.broken, "tree-inputs-readable");
+    ck(!r.badallow, "tree-allow-table-valid");
+    ck(!r.dangling, "tree-no-unlisted-dangling-links");
+    sy_printf("CHECK_DANGLING_LINKS\tfailed=%d\ttotal=%d\tdangling=%d\tallowed=%d\tbadallow=%d\tstale=%d\n",
+              failed, r.total, r.dangling, r.allowed, r.badallow, r.stale);
+    return failed ? 1 : 0;
+}

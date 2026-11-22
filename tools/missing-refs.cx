@@ -1,0 +1,123 @@
+/* tools/missing-refs.cx -- report mode: tools/ (or another prefix) paths cited in plans/ and prd*.md that do not exist.
+ *
+ *   sh ./unisacc.com tools/missing-refs.cx [-- [PREFIX] [--root DIR] [--check]]      PREFIX defaults to "tools/"
+ *
+ * Existence is asked of the file system (sy_stat, follows symbolic links), not of git.  Scope: git ls-files of plans/ and
+ * prd*.md at the root, minus the archive/ tree.  A citation is PREFIX plus path characters, found where the previous
+ * character is not an identifier character or '/' (so archive/tools/x.cx, ~/repos/unisacc/tools/x.cx and
+ * release/evidence/.../tools/x.cx style prefix matches are not citations of ROOT/tools/x.cx).
+ * Classes of a missing citation:
+ *   renamed:  a tracked file elsewhere has the same basename (moved or renamed);
+ *   planned:  the cited line says it is planned or proposed (words: 规划 计划 拟 新增 待建 将新增 候选 提案 R8, or "(new)");
+ *   dir:      cited with a trailing slash, no such directory;
+ *   ghost:    nothing like it (never created, or deleted without a trace).
+ * Template citations (NAME, FILE, X, globs, <...>) are counted as template and never judged.
+ * Rows:    MISSING<TAB>file:line<TAB>path<TAB>class
+ * Summary: MISSING_SUMMARY<TAB>prefix<TAB>files=N<TAB>cites=C<TAB>template=T<TAB>missing=M<TAB>unique=U<TAB>renamed=a<TAB>planned=b<TAB>dir=c<TAB>ghost=d
+ * Ratchet: the baseline is build/missing-refs-baseline.tsv (one line "unique<TAB>N").  --check exits 1 when unique > N and
+ * prints how many to remove; unique < N prints "baseline can drop to U" and exits 0.  Without --check the exit is 0. */
+#pragma unisa use sys.fs
+#pragma unisa use sys.proc
+#pragma unisa use text.text
+#pragma unisa use text.fmt
+#pragma unisa use mem.heap
+#pragma unisa use mem.bytes
+
+static char *tracked; static long tn;
+static int tokch(char c) { return (c >= 'a' && c <= 'z') || (c >= 'A' && c <= 'Z') || (c >= '0' && c <= '9') || c == '.' || c == '_' || c == '-' || c == '/'; }
+static int idch(char c) { return (c >= 'a' && c <= 'z') || (c >= 'A' && c <= 'Z') || (c >= '0' && c <= '9') || c == '_' || c == '-' || c == '/' || c == '~'; }
+
+static int moved(const char *p, long n) {
+    char needle[4400]; long b = n, k = 0;
+    while (b > 0 && p[b - 1] != '/') b--;
+    if (n - b < 3) return 0;
+    needle[k++] = '/'; mm_copy(needle + 1, sizeof needle - 1, p + b, n - b); k += n - b; needle[k++] = '\n';
+    return tx_find(tracked, tn, needle, k) >= 0;
+}
+static int template_ref(const char *p, long n, char next) {
+    static const char *w[] = {"NAME", "OTHER", "FILE", "X", "Y", "A", "B", "FOO", "BAR", "PATH", "DIR", "NEW", "OLD", "TOOL", "XXX", 0};
+    long b = n, e = n; int i;
+    while (b > 0 && p[b - 1] != '/') b--;
+    while (e > b && p[e - 1] != '.') e--;
+    if (e <= b) e = n; else e--;
+    for (i = 0; w[i]; i++) { long l = tx_len(w[i], 16); if (e - b == l && mm_same(p + b, w[i], l)) return 1; }
+    return next == '*' || next == '<' || next == '{' || next == '$' || next == '[' || next == '(' || (n > 0 && p[n - 1] == '-');
+}
+static int line_planned(const char *s, long n) {
+    static const char *w[] = {"规划", "计划", "拟", "新增", "待建", "候选", "提案", "(new)", "to be added", "planned", 0}; int i;
+    for (i = 0; w[i]; i++) if (tx_find(s, n, w[i], tx_len(w[i], 32)) >= 0) return 1;
+    return 0;
+}
+
+int main(int argc, char **argv) {
+    const char *pfx = "tools/", *root = "."; int check = 0, a;
+    static char buf[1 << 21], seen[400000]; int cut = 0; char *gv[] = {"./tools/bound", "30", "git", "-C", 0, "ls-files", 0};
+    char *lv[] = {"./tools/bound", "30", "git", "-C", 0, "ls-files", "--", "plans", ":(glob)prd*.md", ":!archive", ":!plans/archive", 0};
+    long n, at = 0, files = 0, cites = 0, tmpl = 0, miss = 0, uniq = 0, sn = 0, cls_n[4] = {0, 0, 0, 0}; long base = -1;
+    for (a = 1; a < argc; a++) {
+        if (tx_eqz(argv[a], "--root") && a + 1 < argc) root = argv[++a];
+        else if (tx_eqz(argv[a], "--check")) check = 1;
+        else if (argv[a][0] != '-') pfx = argv[a];
+        else { fprintf(stderr, "usage: missing-refs.cx [-- [PREFIX] [--root DIR] [--check]]\n"); return 2; }
+    }
+    gv[4] = (char *)root; lv[4] = (char *)root;
+    if (sy_run(gv, buf, sizeof buf - 1, &cut) != 0 || cut) return 2;
+    tn = tx_len(buf, sizeof buf); tracked = (char *)mm_alloc(tn + 2); tracked[0] = '\n'; mm_copy(tracked + 1, tn + 1, buf, tn); tn++; tracked[tn] = 0;
+    if (sy_run(lv, buf, sizeof buf - 1, &cut) != 0 || cut) return 2;
+    n = tx_len(buf, sizeof buf);
+    { long pl = tx_len(pfx, 64);
+    while (at < n) {
+        long e = tx_chr(buf + at, n - at, '\n'), ln = e < 0 ? n - at : e; char fname[4300], full[4400];
+        if (ln > 0 && ln < 4200 && !(ln > 8 && mm_same(buf + at, "archive/", 8))) {
+            char *fb; size_t fn = 0; long i, line = 1, ls = 0;
+            mm_copy(fname, sizeof fname, buf + at, ln); fname[ln] = 0;
+            cx_fmt(full, sizeof full, "%s/%s", root, fname);
+            fb = (char *)cx_read(full, &fn);
+            if (fb) {
+                files++;
+                for (i = 0; i < (long)fn; i++) {
+                    if (fb[i] == '\n') { line++; ls = i + 1; continue; }
+                    if (i + pl < (long)fn && fb[i] == pfx[0] && mm_same(fb + i, pfx, pl) && (i == 0 || !idch(fb[i - 1]))) {
+                        long j = i + pl; char next; int dirref = 0;
+                        while (j < (long)fn && tokch(fb[j])) j++;
+                        while (j > i + pl && (fb[j - 1] == '.' || fb[j - 1] == ',')) j--;
+                        if (j > i + pl && fb[j - 1] == '/') dirref = 1;
+                        next = j < (long)fn ? fb[j] : 0;
+                        if (j > i + pl) {
+                            long len = j - i, le = ls; char p[4400]; sy_stat_t st; int cl;
+                            if (dirref) len--;
+                            cites++;
+                            if (template_ref(fb + i, len, next)) { tmpl++; i = j - 1; continue; }
+                            if (len < 4000) {
+                                cx_fmt(p, sizeof p, "%s/%.*s", root, (int)len, fb + i);
+                                if (sy_stat(p, &st) == 0) { i = j - 1; continue; }
+                            }
+                            while (le < (long)fn && fb[le] != '\n') le++;
+                            if (moved(fb + i, len)) cl = 0; else if (line_planned(fb + ls, le - ls)) cl = 1; else if (dirref) cl = 2; else cl = 3;
+                            cls_n[cl]++; miss++;
+                            printf("MISSING\t%s:%ld\t%.*s\t%s\n", fname, line, (int)len, fb + i, cl == 0 ? "renamed" : cl == 1 ? "planned" : cl == 2 ? "dir" : "ghost");
+                            { char key[4400]; long kl = cx_fmt(key, sizeof key, "\n%.*s\n", (int)len, fb + i) ? 0 : tx_len(key, sizeof key);
+                              if (kl && tx_find(seen, sn + 1, key, kl) < 0 && sn + kl < (long)sizeof seen) { mm_copy(seen + sn, sizeof seen - sn, key, kl); sn += kl - 1; uniq++; } }
+                        }
+                        i = j - 1;
+                    }
+                }
+                mm_free(fb);
+            }
+        }
+        at += ln + 1;
+    } }
+    printf("MISSING_SUMMARY\t%s\tfiles=%ld\tcites=%ld\ttemplate=%ld\tmissing=%ld\tunique=%ld\trenamed=%ld\tplanned=%ld\tdir=%ld\tghost=%ld\n", pfx, files, cites, tmpl, miss, uniq, cls_n[0], cls_n[1], cls_n[2], cls_n[3]);
+    if (check) {
+        char bp[4400]; size_t bn = 0; char *bb;
+        cx_fmt(bp, sizeof bp, "%s/build/missing-refs-baseline.tsv", root);
+        bb = (char *)cx_read(bp, &bn);
+        if (!bb) { fprintf(stderr, "missing-refs: no baseline %s\n", bp); return 2; }
+        { size_t k; for (k = 0; k + 7 < bn; k++) if (mm_same(bb + k, "unique\t", 7)) { base = 0; k += 7; while (k < bn && bb[k] >= '0' && bb[k] <= '9') base = base * 10 + (bb[k++] - '0'); break; } }
+        mm_free(bb);
+        if (base < 0) { fprintf(stderr, "missing-refs: baseline has no unique row\n"); return 2; }
+        if (uniq > base) { printf("missing-refs: FAIL: unique=%ld exceeds baseline %ld by %ld (fix the new citations, do not raise the baseline)\n", uniq, base, uniq - base); return 1; }
+        if (uniq < base) printf("missing-refs: ok: baseline can drop to %ld (from %ld)\n", uniq, base); else printf("missing-refs: ok: unique=%ld\n", uniq);
+    }
+    return 0;
+}

@@ -15,7 +15,8 @@
 #pragma unisa use mem.bytes
 
 static int checks, failed;
-static char fx[2048], out[1 << 16];
+static char **prepared;
+static char fx[2048], instance[2048], out[1 << 16];
 static void ck(int ok, const char *name) { checks++; if (!ok) failed++; printf("%s\t%s\n", ok ? "PASS" : "FAIL", name); if (!ok) printf("--- output ---\n%s\n", out); }
 static int has(const char *s) { return strstr(out, s) != 0; }
 static long num(const char *key) { const char *q = strstr(out, key); return q ? atol(q + strlen(key)) : -1; }
@@ -36,18 +37,48 @@ static int runv(char **v, const char *cwd) {
 /* sh ./unisacc.com tools/dcheck.cx -- --root FX --home . --runner R --node-timeout-ms MS ARGS... */
 static int dcheck(const char *ms, char **args) {
     char *v[32]; int n = 0;
-    v[n++] = "sh"; v[n++] = "./unisacc.com"; v[n++] = "tools/dcheck.cx"; v[n++] = "--"; v[n++] = "--root"; v[n++] = fx; v[n++] = "--home"; v[n++] = ".";
+    if (prepared) {
+        v[n++] = prepared[0]; v[n++] = "--prepared-tools";
+        for (int i = 0; i < 3; i++) v[n++] = prepared[i];
+    } else { v[n++] = "sh"; v[n++] = "./unisacc.com"; v[n++] = "tools/dcheck.cx"; v[n++] = "--"; }
+    v[n++] = "--root"; v[n++] = fx; v[n++] = "--home"; v[n++] = ".";
     v[n++] = "--runner"; v[n++] = "sh tools/run-{id}.sh"; v[n++] = "--node-timeout-ms"; v[n++] = (char *)ms;
     for (int k = 0; args[k] && n < 31; k++) v[n++] = args[k];
     v[n] = 0;
     return runv(v, 0);
 }
 
-int main(void) {
+static int wait_job(char **argv, const char *id) {
+    if (!prepared) return runv(argv, 0);
+    char *native[] = {prepared[2], "wait", (char *)id, "--timeout-ms", "30000", 0};
+    return runv(native, 0);
+}
+
+int main(int argc, char **argv) {
     static const char *bid[] = {"pass", "fail", "slow", "daily", 0};
     char reg[4096], cov[2048], p[2400]; long rn = 0, cn = 0; int rc; unsigned char *td = 0; int64_t tn = 0; long t0 = sy_now_ms();
+    int run_select = 1, run_bg = 1, run_manifest = 1;
+    if (argc != 1) {
+        if (argc != 6 || strcmp(argv[1], "--cases")) return 2;
+        int all = !strcmp(argv[2], "all");
+        run_select = all || !strcmp(argv[2], "select");
+        run_bg = all || !strcmp(argv[2], "bg");
+        run_manifest = all || !strcmp(argv[2], "manifest");
+        if (!run_select && !run_bg && !run_manifest) return 2;
+        prepared = argv + 3;
+        for (int i = 0; i < 3; i++)
+            if (prepared[i][0] != '/' || sy_is_reg(prepared[i]) != 1) {
+                fprintf(stderr, "REFUSE\tcheck-dcheck\tprepared-tool-required\n");
+                return 2;
+            }
+        (void)unsetenv("DEVSVC_REPO_TABLE_PIN");
+        (void)unsetenv("DEVSVC_REPO_TABLE");
+        if (setenv("DEVSVC_SELF_BIN", prepared[2], 1)) return 2;
+    }
     if (sy_is_reg("tools/dcheck.cx") != 1 || sy_is_reg("exec/pipeline/table-deps.tsv") != 1) { printf("FAIL\trun-from-repo-root\nCHECK_DCHECK\tchecks=1\tfailed=1\n"); return 2; }
     if (cx_fmt(fx, sizeof fx, "%s/check-dcheck-%d", sy_tmpdir(), sy_pid())) return 2;
+    if (prepared && (cx_fmt(instance, sizeof instance, "%s/check-dcheck-dv-%d", sy_tmpdir(), sy_pid()) ||
+                     setenv("UNISACC_DEVSVC_DIR", instance, 1))) return 2;
     {   const char *sub[] = {"", "/tests", "/tools", "/exec", "/exec/pipeline", 0};
         for (int i = 0; sub[i]; i++) { if (cx_fmt(p, sizeof p, "%s%s", fx, sub[i]) || sy_mkdir(p, 0755) < 0) { printf("FAIL\tfixture-mkdir\t%s\nCHECK_DCHECK\tchecks=1\tfailed=1\n", p); return 2; } }
     }
@@ -71,6 +102,7 @@ int main(void) {
     } else rc = 1;
     if (rc) { printf("FAIL\tfixture-write\nCHECK_DCHECK\tchecks=1\tfailed=1\n"); return 2; }
 
+    if (run_select) {
     {   /* three commit batches selected, run together; the daily one is left out */
         char *a[] = {"--par", "3", "tools/fxsrc.cx", 0};
         rc = dcheck("2500", a);
@@ -125,7 +157,8 @@ int main(void) {
         rc = dcheck("55001", b); ck(rc == 2 && !has("\nCHECK\t"), "node-bound-never-widened");
         rc = dcheck("4000", c); ck(rc == 2, "unknown-tier-rc2");
     }
-    {   /* --bg hands back a devsvc job at once; devsvc wait shows the same result lines */
+    }
+    if (run_bg) {   /* --bg hands back a devsvc job at once; devsvc wait shows the same result lines */
         char *a[] = {"--bg", "--only", "fx-pass", "tools/fxsrc.cx", 0}; char id[128] = ""; const char *q; long b0 = sy_now_ms(), bms;
         rc = dcheck("4000", a); bms = sy_now_ms() - b0;
         q = strstr(out, "JOB\t");
@@ -134,11 +167,11 @@ int main(void) {
         (void)bms;
         if (id[0]) {
             char *w[] = {"sh", "./unisacc.com", "tools/devsvc.cx", "--", "wait", id, "--timeout-ms", "30000", 0};
-            rc = runv(w, 0);
+            rc = wait_job(w, id);
             ck(rc == 0 && has("CHECK\tfx-pass\tPASS\t") && has("DCHECK\ttotal=1\tpass=1\tfail=0\tdeferred=0\tnot_run=0\t") && has("JOB_DONE\t"), "bg-wait-shows-result");
         } else ck(0, "bg-wait-shows-result");
     }
-    {   /* selection and run as two jobs: --select-only --out writes the manifest, --from runs only its batches */
+    if (run_manifest) {   /* selection and run as two jobs: --select-only --out writes the manifest, --from runs only its batches */
         char m1[2400], m2[2400], m3[2400], bad1[2400]; char *a[8]; unsigned char *mb = 0; int64_t mn = 0; char mt[2048];
         (void)cx_fmt(m1, sizeof m1, "%s/m1.tsv", fx); (void)cx_fmt(m2, sizeof m2, "%s/m2.tsv", fx); (void)cx_fmt(m3, sizeof m3, "%s/m3.tsv", fx);
         a[0] = "--select-only"; a[1] = "--out"; a[2] = m1; a[3] = "tools/fxsrc.cx"; a[4] = 0;
@@ -196,11 +229,11 @@ int main(void) {
             a[0] = "--bg"; a[1] = "--select-only"; a[2] = "--out"; a[3] = mb2; a[4] = "--only"; a[5] = "fx-pass"; a[6] = "tools/fxsrc.cx"; a[7] = 0;
             rc = dcheck("4000", a); q = strstr(out, "JOB\t");
             if (q) { long k = 0; q += 4; while (q[k] && q[k] != '\t' && q[k] != '\n' && k < (long)sizeof id1 - 1) { id1[k] = q[k]; k++; } id1[k] = 0; }
-            if (rc == 0 && id1[0]) { rc = runv(w, 0); ck(rc == 0 && has("DCHECK_MANIFEST\tfile=") && has("JOB_DONE\t") && sy_is_reg(mb2) == 1, "bg-select-only-writes-manifest"); } else ck(0, "bg-select-only-writes-manifest");
+            if (rc == 0 && id1[0]) { rc = wait_job(w, id1); ck(rc == 0 && has("DCHECK_MANIFEST\tfile=") && has("JOB_DONE\t") && sy_is_reg(mb2) == 1, "bg-select-only-writes-manifest"); } else ck(0, "bg-select-only-writes-manifest");
             a[0] = "--bg"; a[1] = "--from"; a[2] = mb2; a[3] = "--par"; a[4] = "2"; a[5] = 0;
             rc = dcheck("4000", a); q = strstr(out, "JOB\t");
             if (q) { long k = 0; q += 4; while (q[k] && q[k] != '\t' && q[k] != '\n' && k < (long)sizeof id2 - 1) { id2[k] = q[k]; k++; } id2[k] = 0; }
-            if (rc == 0 && id2[0]) { char *w2[] = {"sh", "./unisacc.com", "tools/devsvc.cx", "--", "wait", id2, "--timeout-ms", "30000", 0}; rc = runv(w2, 0); ck(rc == 0 && has("CHECK\tfx-pass\tPASS\t") && has("DCHECK\ttotal=1\tpass=1\t"), "bg-from-runs-manifest-batches"); } else ck(0, "bg-from-runs-manifest-batches");
+            if (rc == 0 && id2[0]) { char *w2[] = {"sh", "./unisacc.com", "tools/devsvc.cx", "--", "wait", id2, "--timeout-ms", "30000", 0}; rc = wait_job(w2, id2); ck(rc == 0 && has("CHECK\tfx-pass\tPASS\t") && has("DCHECK\ttotal=1\tpass=1\t"), "bg-from-runs-manifest-batches"); } else ck(0, "bg-from-runs-manifest-batches");
         }
         {   char *a2[] = {"--only", "fx-pass", "tools/fxsrc.cx", 0};
             rc = dcheck("4000", a2);
@@ -208,6 +241,11 @@ int main(void) {
         }
     }
     {   char *rm[] = {"rm", "-rf", fx, 0}; (void)runv(rm, 0); }
+    if (prepared) {
+        char *stop[] = {prepared[2], "stop", 0};
+        (void)runv(stop, 0);
+        (void)sy_remove_all(instance);
+    }
     printf("CHECK_DCHECK\tchecks=%d\tfailed=%d\telapsed_ms=%ld\n", checks, failed, sy_now_ms() - t0);
     return failed ? 1 : 0;
 }

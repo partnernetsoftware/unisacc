@@ -1,0 +1,226 @@
+/* tools/dup-signature.cx -- report mode: external function names declared or defined in two places with different signatures.
+ *
+ *   sh ./unisacc.com tools/dup-signature.cx [-- [--root DIR] [--dirs "cx ext src"] [--summary]]
+ *
+ * Origin: sy_tcp_connect_to existed in cx/sys/net.cx and ext/net/tcp.cx with different signatures; both compiled, so
+ * a caller got whichever module its use line pulled in.  This is interface consistency, not code duplication
+ * (tools/dup-census.cx measures duplicated static function text in tools/).
+ *
+ * Scope: tracked .cx, .c, .h files under the --dirs directories (default cx ext src), found with git ls-files.  Comments,
+ * string and character literals and preprocessor lines are blanked first.  At brace depth 0 a statement that ends in
+ * ';' or '{' and has "NAME(" before any '=' is a function declaration or definition.  Skipped: static functions,
+ * typedefs, function-pointer declarators, the name main.  A signature is the normalised return type plus the list of
+ * parameter types (parameter names, array sizes, extern/inline dropped; "(void)" and "()" are the same; a function
+ * pointer parameter is the token FNPTR).  Typedef aliases are not resolved, so an alias against its expansion is
+ * reported (advisory, never blocking).
+ *
+ * Rows:  DUPSIG<TAB>name<TAB>kind<TAB>file:line<TAB>signature      (one row per place; kind = ret|count|type|ret+args)
+ * Last:  DUPSIG_SUMMARY<TAB>files=F<TAB>places=P<TAB>names=N<TAB>mismatched=M<TAB>sy_=a<TAB>hs_=b<TAB>tx_=c<TAB>mm_=d
+ * --summary prints only the last row.  Exit 0 always (report mode); exit 2 on usage or read errors. */
+#pragma unisa use sys.fs
+#pragma unisa use sys.proc
+#pragma unisa use text.text
+#pragma unisa use text.fmt
+#pragma unisa use mem.heap
+#pragma unisa use mem.bytes
+
+#define MAXP 80000
+#define POOL (12 << 20)
+
+typedef struct { const char *name, *file, *sig, *ret; int line, argc; } Place;
+static Place pl[MAXP];
+static int np;
+static char *pool; static long pooln;
+
+static const char *keep(const char *s, long n) {
+    char *r; if (pooln + n + 1 > POOL) { fprintf(stderr, "dup-signature: pool full\n"); exit(2); }
+    r = pool + pooln; mm_copy(r, n + 1, s, n); r[n] = 0; pooln += n + 1; return r;
+}
+static int idc(char c) { return (c >= 'a' && c <= 'z') || (c >= 'A' && c <= 'Z') || (c >= '0' && c <= '9') || c == '_'; }
+static int isws(char c) { return c == ' ' || c == '\t' || c == '\n' || c == '\r'; }
+
+/* blank comments, literals and preprocessor lines, keeping every newline */
+static void blank(char *b, long n) {
+    long i = 0; int bol = 1;
+    while (i < n) {
+        char c = b[i];
+        if (bol) { long j = i; while (j < n && (b[j] == ' ' || b[j] == '\t')) j++;
+            if (j < n && b[j] == '#') {
+                for (;;) { while (i < n && b[i] != '\n') { b[i] = ' '; i++; }
+                    if (i > 0 && i - 1 >= 0) { long k = i - 1; while (k > 0 && b[k] == ' ') k--; if (k >= 0 && b[k] == '\\' ) { if (i < n) i++; continue; } }
+                    break; }
+                continue; } }
+        if (c == '\n') { bol = 1; i++; continue; }
+        if (c != ' ' && c != '\t') bol = 0;
+        if (c == '/' && i + 1 < n && b[i + 1] == '*') { b[i] = ' '; b[i + 1] = ' '; i += 2; while (i < n && !(b[i] == '*' && i + 1 < n && b[i + 1] == '/')) { if (b[i] != '\n') b[i] = ' '; i++; } if (i < n) { b[i] = ' '; if (i + 1 < n) b[i + 1] = ' '; i += 2; } continue; }
+        if (c == '/' && i + 1 < n && b[i + 1] == '/') { while (i < n && b[i] != '\n') { b[i] = ' '; i++; } continue; }
+        if (c == '"' || c == '\'') { char q = c; i++; while (i < n && b[i] != q) { if (b[i] == '\\' && i + 1 < n) { b[i] = ' '; i++; } if (b[i] != '\n') b[i] = ' '; i++; } if (i < n) i++; continue; }
+        i++;
+    }
+}
+
+/* collapse whitespace runs and put spaces around '*'; result in out */
+static long norm(const char *s, long n, char *out, long cap) {
+    long w = 0, i; int sp = 0;
+    for (i = 0; i < n && w + 4 < cap; i++) {
+        char c = s[i];
+        if (isws(c)) { sp = 1; continue; }
+        if (c == '*') { if (w && out[w - 1] != ' ' && out[w - 1] != '*') out[w++] = ' '; out[w++] = '*'; sp = 1; continue; }
+        if (sp && w && out[w - 1] != ' ' && out[w - 1] != '*') out[w++] = ' ';
+        else if (sp && w && out[w - 1] == '*') out[w++] = ' ';
+        sp = 0; out[w++] = c;
+    }
+    while (w && out[w - 1] == ' ') w--;
+    out[w] = 0; return w;
+}
+static int word_is(const char *t, long n, const char *w) { long l = tx_len(w, 32); return n == l && mm_same(t, w, l); }
+static int basetype(const char *t, long n) {
+    static const char *w[] = {"int", "char", "void", "long", "short", "unsigned", "signed", "double", "float", "const", "volatile", "_Bool", "struct", "union", "enum", "size_t", 0};
+    int i; for (i = 0; w[i]; i++) if (word_is(t, n, w[i])) return 1; return 0;
+}
+/* parameter type: drop a trailing identifier that is a parameter name, array brackets become '*' */
+static void ptype(const char *s, long n, char *out, long cap) {
+    char tmp[1024], t2[1024]; long m = 0, i, w = 0, tl; long ts[64], te[64]; int nt = 0;
+    for (i = 0; i < n && m < (long)sizeof tmp - 4; i++) {
+        if (s[i] == '[') { while (i < n && s[i] != ']') i++; tmp[m++] = '*'; continue; }
+        tmp[m++] = s[i];
+    }
+    tmp[m] = 0;
+    if (tx_find(tmp, m, "(*", 2) >= 0 || tx_find(tmp, m, "( *", 3) >= 0) { cx_fmt(out, cap, "FNPTR"); return; }
+    tl = norm(tmp, m, t2, sizeof t2);
+    i = 0;
+    while (i < tl && nt < 62) { long b = i; while (i < tl && t2[i] != ' ') i++; ts[nt] = b; te[nt] = i; nt++; while (i < tl && t2[i] == ' ') i++; }
+    if (nt >= 2) {
+        long lb = ts[nt - 1], ln = te[nt - 1] - lb; int isid = ln > 0 && idc(t2[lb]) && !basetype(t2 + lb, ln);
+        if (isid) { long pb = ts[nt - 2], pn = te[nt - 2] - pb; if (word_is(t2 + pb, pn, "struct") || word_is(t2 + pb, pn, "union") || word_is(t2 + pb, pn, "enum") || word_is(t2 + pb, pn, "unsigned") || word_is(t2 + pb, pn, "signed")) isid = 0; }
+        if (isid) nt--;
+    }
+    for (i = 0; i < nt; i++) { long k = te[i] - ts[i]; if (w + k + 2 >= cap) break; if (w) out[w++] = ' '; mm_copy(out + w, k + 1, t2 + ts[i], k); w += k; }
+    out[w] = 0;
+}
+
+static int startsw(const char *s, long n, const char *w) { long l = tx_len(w, 32); return n >= l && mm_same(s, w, l) && (n == l || !idc(s[l])); }
+
+static void analyze(const char *file, int line, const char *st, long sn) {
+    char s[8192], head[512], sig[2048], tmp[1024]; long n = 0, i, p = -1, nb, ne, close, depth, argb, w = 0, hl; int argc = 0;
+    if (sn >= (long)sizeof s - 1) return;
+    n = norm(st, sn, s, sizeof s);
+    if (!n || startsw(s, n, "typedef")) return;
+    for (i = 0; i < n; i++) { if (s[i] == '=') return; if (s[i] == '(') { p = i; break; } }
+    if (p <= 0) return;
+    ne = p; while (ne > 0 && s[ne - 1] == ' ') ne--;
+    nb = ne; while (nb > 0 && idc(s[nb - 1])) nb--;
+    if (nb == ne || nb == 0) return;
+    if (s[nb] >= '0' && s[nb] <= '9') return;
+    /* head = text before the name; reject when it holds a '(' (function-pointer return, attribute junk) */
+    hl = nb; while (hl > 0 && s[hl - 1] == ' ') hl--;
+    if (!hl) return;
+    for (i = 0; i < hl; i++) if (s[i] == '(' || s[i] == ')') return;
+    { long m = 0, k = 0; char word[64];
+      for (i = 0; i <= hl; i++) {
+          if (i < hl && s[i] != ' ') { if (k < 63) word[k++] = s[i]; continue; }
+          if (k) { word[k] = 0;
+              if (tx_eqz(word, "static")) return;
+              if (!tx_eqz(word, "extern") && !tx_eqz(word, "inline") && !tx_eqz(word, "__inline") && !tx_eqz(word, "__inline__")) { if (m && m + 1 < (long)sizeof head) head[m++] = ' '; if (m + k < (long)sizeof head) { mm_copy(head + m, k + 1, word, k); m += k; } }
+              k = 0; }
+      }
+      head[m] = 0; if (!m) return; }
+    { char *nm = (char *)keep(s + nb, ne - nb); if (tx_eqz(nm, "main")) return; }
+    /* matching ')' */
+    depth = 0; close = -1;
+    for (i = p; i < n; i++) { if (s[i] == '(') depth++; else if (s[i] == ')') { depth--; if (depth == 0) { close = i; break; } } }
+    if (close < 0) return;
+    if (cx_fmt(sig, sizeof sig, "%s(", head)) return;
+    w = tx_len(sig, sizeof sig);
+    argb = p + 1; depth = 0;
+    for (i = p + 1; i <= close; i++) {
+        char c = s[i];
+        if (c == '(') depth++; else if (c == ')' && i < close) depth--;
+        if ((c == ',' && depth == 0) || i == close) {
+            long a = argb, b = i; while (a < b && s[a] == ' ') a++; while (b > a && s[b - 1] == ' ') b--;
+            if (b > a) {
+                if (!(b - a == 4 && mm_same(s + a, "void", 4)) || argc > 0) {
+                    ptype(s + a, b - a, tmp, sizeof tmp);
+                    if (argc) { sig[w++] = ','; }
+                    { long k = tx_len(tmp, sizeof tmp); if (w + k + 4 < (long)sizeof sig) { mm_copy(sig + w, k + 1, tmp, k); w += k; } }
+                    argc++;
+                }
+            }
+            argb = i + 1;
+        }
+    }
+    sig[w++] = ')'; sig[w] = 0;
+    if (np >= MAXP) { fprintf(stderr, "dup-signature: too many places\n"); exit(2); }
+    pl[np].name = keep(s + nb, ne - nb); pl[np].file = file; pl[np].line = line; pl[np].sig = keep(sig, w); pl[np].ret = keep(head, tx_len(head, sizeof head)); pl[np].argc = argc; np++;
+}
+
+static void scan(const char *file, char *b, long n) {
+    long i = 0, sl = 0, sn = 0; int depth = 0, pd = 0, line = 1, sline = 0; static char st[16384];
+    const char *fkeep = keep(file, tx_len(file, 4096));
+    blank(b, n);
+    for (i = 0; i < n; i++) {
+        char c = b[i];
+        if (c == '\n') line++;
+        if (depth > 0) { if (c == '{') depth++; else if (c == '}') { depth--; if (!depth) { sn = 0; sline = 0; } } continue; }
+        if (c == '(') pd++; else if (c == ')') { if (pd > 0) pd--; }
+        if (pd == 0 && c == ';') { if (sn) analyze(fkeep, sline, st, sn); sn = 0; sline = 0; continue; }
+        if (pd == 0 && c == '{') { if (sn) analyze(fkeep, sline, st, sn); sn = 0; sline = 0; depth = 1; continue; }
+        if (pd == 0 && c == '}') { sn = 0; sline = 0; continue; }
+        if (!sline && !isws(c)) sline = line;
+        if (sn < (long)sizeof st - 1) st[sn++] = c;
+        (void)sl;
+    }
+}
+
+static int cmp(const void *a, const void *b) {
+    const Place *x = a, *y = b; int r = strcmp(x->name, y->name);
+    if (r) return r; r = strcmp(x->file, y->file); if (r) return r; return x->line - y->line;
+}
+static int prefixed(const char *n, const char *p) { long l = tx_len(p, 8); return tx_len(n, 4096) >= l && mm_same(n, p, l); }
+
+int main(int argc, char **argv) {
+    const char *root = ".", *dirs = "cx ext src"; int summary = 0, a, i, j;
+    char *gv[40]; int gn = 0; static char list[1 << 22]; int cut = 0; long ln, at = 0, files = 0, names = 0, mism = 0, c_sy = 0, c_hs = 0, c_tx = 0, c_mm = 0;
+    for (a = 1; a < argc; a++) {
+        if (tx_eqz(argv[a], "--root") && a + 1 < argc) root = argv[++a];
+        else if (tx_eqz(argv[a], "--dirs") && a + 1 < argc) dirs = argv[++a];
+        else if (tx_eqz(argv[a], "--summary")) summary = 1;
+        else { fprintf(stderr, "usage: dup-signature.cx [-- [--root DIR] [--dirs \"cx ext src\"] [--summary]]\n"); return 2; }
+    }
+    pool = (char *)mm_alloc(POOL);
+    { static char dcopy[512]; char *p; long k = tx_len(dirs, 500); mm_copy(dcopy, sizeof dcopy, dirs, k); dcopy[k] = 0;
+      gv[gn++] = "./tools/bound"; gv[gn++] = "30"; gv[gn++] = "git"; gv[gn++] = "-C"; gv[gn++] = (char *)root; gv[gn++] = "ls-files"; gv[gn++] = "--";
+      p = dcopy; while (*p && gn < 36) { while (*p == ' ') p++; if (!*p) break; gv[gn++] = p; while (*p && *p != ' ') p++; if (*p) *p++ = 0; }
+      gv[gn] = 0;
+      if (sy_run(gv, list, sizeof list - 1, &cut) != 0 || cut) { fprintf(stderr, "dup-signature: git ls-files failed\n"); return 2; } }
+    ln = tx_len(list, sizeof list);
+    while (at < ln) {
+        long e = tx_chr(list + at, ln - at, '\n'), l = e < 0 ? ln - at : e; char rel[4300], full[4400];
+        if (l > 3 && l < 4200) {
+            mm_copy(rel, sizeof rel, list + at, l); rel[l] = 0;
+            if ((rel[l - 3] == '.' && rel[l - 2] == 'c' && rel[l - 1] == 'x') || (rel[l - 2] == '.' && (rel[l - 1] == 'c' || rel[l - 1] == 'h'))) {
+                size_t fn = 0; char *fb; cx_fmt(full, sizeof full, "%s/%s", root, rel);
+                fb = (char *)cx_read(full, &fn);
+                if (fb) { files++; scan(rel, fb, (long)fn); free(fb); }
+            }
+        }
+        at += l + 1;
+    }
+    qsort(pl, np, sizeof pl[0], cmp);
+    for (i = 0; i < np; i = j) {
+        int diff = 0, rdiff = 0, cdiff = 0, tdiff = 0, files_n = 1, k;
+        for (j = i + 1; j < np && tx_eqz(pl[j].name, pl[i].name); j++) {}
+        if (j - i < 2) continue;
+        for (k = i + 1; k < j; k++) {
+            if (!tx_eqz(pl[k].file, pl[i].file)) files_n = 2;
+            if (!tx_eqz(pl[k].sig, pl[i].sig)) { diff = 1; if (!tx_eqz(pl[k].ret, pl[i].ret)) rdiff = 1; if (pl[k].argc != pl[i].argc) cdiff = 1; else if (!tx_eqz(pl[k].sig + tx_len(pl[k].ret, 512), pl[i].sig + tx_len(pl[i].ret, 512))) tdiff = 1; }
+        }
+        if (!diff || files_n < 2) continue;
+        names++; mism += j - i;
+        if (prefixed(pl[i].name, "sy_")) c_sy++; else if (prefixed(pl[i].name, "hs_")) c_hs++; else if (prefixed(pl[i].name, "tx_")) c_tx++; else if (prefixed(pl[i].name, "mm_")) c_mm++;
+        if (!summary) for (k = i; k < j; k++)
+            printf("DUPSIG\t%s\t%s%s%s\t%s:%d\t%s\n", pl[i].name, rdiff ? "ret" : "", rdiff && (cdiff || tdiff) ? "+" : "", cdiff ? "count" : (tdiff ? "type" : ""), pl[k].file, pl[k].line, pl[k].sig);
+    }
+    printf("DUPSIG_SUMMARY\tfiles=%ld\tplaces=%d\tnames=%ld\tmismatched=%ld\tsy_=%ld\ths_=%ld\ttx_=%ld\tmm_=%ld\n", files, np, names, mism, c_sy, c_hs, c_tx, c_mm);
+    return 0;
+}
