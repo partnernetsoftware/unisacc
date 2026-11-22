@@ -51,7 +51,7 @@ T-0 小时 chain-ready 逐项:11-version-slot 实测 FAIL(candidate.tsv 仍是 0
 
 ## 三、链期间写入规则与红灯规则
 
-禁写(T0 到 Y2,所有窗口):产品输入(src/、cx/、ext/、exec/、include/、seed/、kernel/);harness(tests/、被链/预跑/release-* 读取的 tools/ 及其 check、tests/batches.tsv、coverage.tsv、build/ 派生表);release/ 下除集成者外任何人不写。仅集成者写 main,只写 release/ 与 prd_mempalace.md;其他车道(ujs、apps/csih)照常提交自己路径,但每次推进 origin/main 都会让 release-exec 的 MAIN_ANCESTOR 门要求再合一次(0.0.93 链期间 main 上有二十余次他车道提交),建议 S7 到 S9 这 20 分钟全仓静默推送。写窗口锁:待核,本次未在 tools/devsvc.cx 中找到具名的写窗口锁子命令,若确无则提为 devsvc 缺口,链期间暂由提交门 freeze_gate 兜底。
+禁写(T0 到 Y2,所有窗口):产品输入(src/、cx/、ext/、exec/、include/、seed/、kernel/);harness(tests/、被链/预跑/release-* 读取的 tools/ 及其 check、tests/batches.tsv、coverage.tsv、build/ 派生表);release/ 下除集成者外任何人不写。仅集成者写 main,只写 release/ 与 prd_mempalace.md;其他车道(ujs、apps/csih)照常提交自己路径,但每次推进 origin/main 都会让 release-exec 的 MAIN_ANCESTOR 门要求再合一次(0.0.93 链期间 main 上有二十余次他车道提交),建议 S7 到 S9 这 20 分钟全仓静默推送。写窗口锁与提交门分工(已落地): `devsvc lock acquire freeze --owner <owner> --ttl 7200` (定义于 `tools/devsvc-repo.tsv` `lock freeze`, 写域 `src/,cx/,ext/,include/,seed/,exec/,kernel/,weights/,tests/,release/,build/freeze.tsv`, 全仓及 worktree 共享同一锁, 缺省 `ttl=7200` 且上限 `7200`) 管 **`devsvc` 写入通道** (`devsvc git commit`/`add`/`merge`/`pull`/`push`/`f write`/`f edit`/`flow`/`register`/`derive --write`/`doc`/`run --write`, 优先直读 `locks.tsv` 并在锁不可读或冻结期服务不可达时 fail-closed, 非持锁属主立即拒绝 `LOCK_HELD freeze owner=<owner>`, 到期自动恢复或经 `devsvc lock release freeze --owner <owner>` 释放; 合法 `DEVSVC_OWNER` 或 `--owner` 经 `devsvc git commit` 提交时自动追加小写 `X-Unisacc-Window: <owner>` trailer); `build/freeze.tsv` (`tools/precommit.cx` `freeze_gate`) 管 **`git` 提交通道** (含直接 `git commit`)。两者不重复判据, 并存时以更严者为准(任一拒绝即阻断)。防误操作边界与冻结日使用约定: `DEVSVC_OWNER` 可由任意窗口设置, `devsvc freeze` 锁仅防误操作不防恶意冒充, 冻结期真正的强拦截以 `precommit` 的 `build/freeze.tsv` 为准; 集成者全程使用同一小写窗名(`DEVSVC_OWNER`、`lock acquire --owner`、`build/freeze.tsv` 第 3 列三处完全一致), 显式带 `--ttl 7200` 并在运行超过 90 分钟前由同属主重跑 `devsvc lock acquire freeze --owner <owner> --ttl 7200` 续期(7200s 相对 111 分钟预算余 9 分钟); 另注 `devsvc git merge` 不接受 `--no-ff` 参数(分叉分支默认产生双父合并提交 `ff=0`)。
 
 红灯:判瞬态之前先读发码行,rc 2 与 REFUSE 默认确定性;同一失败连续两次即停手;需要改产品输入才能修的红灯使 T0 作废回 T-1;只需改测试或 harness 的红灯(C 类)允许一次,记为 F 提交并写入 rollback.txt,第二次即作废重排;终止进程只按真实 PID/PGID,先在账本记一行。
 
@@ -95,3 +95,90 @@ T-0 小时 chain-ready 逐项:11-version-slot 实测 FAIL(candidate.tsv 仍是 0
 1. release-chain plan 不带 --inputs/--state/--layout 直接拒绝(REFUSE CHAIN_USAGE),无参只读形态不存在;相位取自源码头注释与 show_prerun。
 2. tools/devsvc.cx 里没有具名的 lock/claim 子命令,build/*.tsv 里也搜不到 U31/U32/U33。
 3. build/version-seq.tsv 的 0.0.96 行主题是"执行核每步成本",与"Z3/Z5/Z6 迁入 v0.0.96"不一致;0.0.94 行状态仍为"建议"。
+
+
+## 附录:冻结日广播正文
+
+来源:csr 2026-11-23 `--dry` 实跑 `tools/freeze-broadcast.cx`(补齐手册对齐项后;检查 `check-freeze-broadcast` 20/0)。白名单表 `skills/unisacc-orch-supervise/freeze-broadcast-windows.tsv`。
+
+### 收件清单(--dry targets=10)
+
+tmux 现窗与白名单 `include=1` 交集(排序):`agy-cage` `agy-flow` `agyneon` `cage` `cagemon` `ccogweco` `cdx` `csr` `omp-go` `omp-sonnet`。
+
+核对(cc 点名 7 窗):`agyneon` `agy-flow` `cdx` `omp-sonnet` `csr` `ccogweco` `omp-go` 均在收件清单。`cdx2`/`ccapi` 为 `include=0`,未入清单。额外在线且 include=1:`agy-cage` `cagemon` `cage`(保留广播)。
+
+### START(--dry --lock cc --until T0+120m --load-ceil 8)
+
+```
+冻结广播 START
+静默开始:S1 前起至结束广播前,除集成者外暂停重检查(derive/ratchets/批量 tests/构造/全量 premerge-union);只读与轻编辑可保留。
+禁写域:src/ cx/ ext/ exec/ include/ seed/ kernel/;harness(tests/ 与链/预跑/release-* 相关 tools);release/ 除集成者外不写。
+负载阈值:起 S2/S3 前 uptime 1 分钟负载 < 8;过高先等或收尾,禁止硬起。运行中负载超 12 时 S3 重跑/续跑降为 --window-lanes 2 --max-jobs 6。
+持锁/集成者:cc(devsvc lock acquire freeze --ttl 7200;同属主续期;强拦截以 precommit freeze.tsv 为准)。
+提交 trailer:域内提交须带 X-Unisacc-Window 对齐 freeze owner;裸 git 无 trailer 一律 VIOLATION(freeze-watch)。
+预计结束:T0+120m
+结束条件:收到 END(公开读回完成)或 ABORT(中止)广播后才可恢复重检查;未收到前不得恢复。
+```
+
+### PHASE S2 / S3 / S9(--dry --lock cc)
+
+```
+冻结广播 PHASE S2
+请按手册该阶段动作推进;禁写域与静默规则仍有效;持锁/集成者:cc。
+```
+
+(S3/S9 同形,仅相位名替换。)
+
+### END(--dry)
+
+```
+冻结广播 END
+静默结束:可恢复重检查与常规提交纪律;禁写域随 freeze.tsv 解除一并失效(以 precommit freeze_gate 为准)。
+```
+
+### ABORT(--dry --why dry-rehearsal)
+
+```
+冻结广播 ABORT
+本次冻结中止。原因:dry-rehearsal
+静默结束;勿继续按冻结期节奏推进,等待集成者下一指令。
+```
+
+### 与手册一致性核对
+
+| 规则 | 手册位置 | 广播正文 | 结论 |
+|---|---|---|---|
+| 负载静默阈值 8 | 第三节 / S3 护栏 | START 负载 < 8 | 一致 |
+| 负载超 12 降配 lanes2/j6 | S3 护栏 | START 已写 | 一致(本轮补进) |
+| 禁写域 | 第三节 | START 列出 | 一致(harness 表述略压缩) |
+| trailer 要求 | freeze-watch 方案A | START 已写 | 一致(本轮补进) |
+| 持锁 owner + ttl 7200 | devsvc freeze 锁 | START `cc` + `ttl 7200` | 一致(本轮补进) |
+| 结束条件 END/ABORT | 第三节静默结束 | START 结束条件 + END/ABORT 正文 | 一致(本轮补进) |
+
+### 冻结日监视命令(Monitor 友好)
+
+总上限 2 小时,每 120 秒一次,单次 `tools/bound 55`;只在 VIOLATION 或非 CLEAN 状态变化时出行,CLEAN 不刷屏:
+
+```sh
+cd ~/repos/unisacc
+PREV=/tmp/unisacc-freeze-watch.prev; : > "$PREV"
+DEADLINE=$(( $(date +%s) + 7200 ))
+while [ "$(date +%s)" -lt "$DEADLINE" ]; do
+  OUT=$(./tools/bound 55 sh ./unisacc.com tools/team-pulse.cx -- --freeze-watch --since-min 180 2>&1) || true
+  LINE=$(printf '%s\n' "$OUT" | grep '^FREEZE_WATCH' | head -n 1)
+  OLD=$(cat "$PREV" 2>/dev/null || true)
+  printf '%s' "$LINE" > "$PREV"
+  case "$LINE" in
+    *VIOLATION*) printf '%s\t%s\n' "$(date -Iseconds)" "$LINE" ;;
+    *CLEAN*|"") ;;
+    *) [ "$LINE" != "$OLD" ] && printf '%s\t%s\n' "$(date -Iseconds)" "$LINE" ;;
+  esac
+  sleep 120
+done
+```
+
+私有目录模拟(造无 trailer 域内提交):出行原行
+`2026-11-23T05:23:41+08:00	FREEZE_WATCH	VIOLATION	window=shared	path=src/leak.c	kind=commit	...	author=-`
+(复验命令:`sh ./unisacc.com tools/team-pulse.cx -- --freeze-watch --root /tmp/csr-freeze-day/fw-sim --since-min 120`。)
+
+实质检查:`sh ./unisacc.com tools/check-freeze-broadcast.cx --` -> `FREEZE_BROADCAST_SUMMARY failed=0 passed=20` + `CHECK_FREEZE_BROADCAST`。
