@@ -1,6 +1,6 @@
 /* tools/check-dup-census.cx -- checks tools/dup-census.cx (the 15th ratchet).
  *
- *   sh ./unisacc.com tools/check-dup-census.cx [-- --group a|b|c|d]     (no group: all)
+ *   sh ./unisacc.com tools/check-dup-census.cx [-- --group a|b|c|d|e]     (no group: all)
  *
  * a counts: a fixture root (tools/a.cx, tools/b.cx, tools/cxlib/c.cx) with foo byte-identical in 3 files, bar
  *   with the same name but different bodies in 2, a brace inside a string literal and one "%s/%s"; --print
@@ -29,8 +29,8 @@ static char dc_out[1 << 16];
 static char dc_root[600];
 static void dc_ck(int ok, const char *name) { if (!ok) dc_failed++; printf("%s\tdup-census.%s\n", ok ? "PASS" : "FAIL", name); }
 static int dc_has(const char *s) { long n = tx_len(dc_out, sizeof dc_out), sn = tx_len(s, 400), i; for (i = 0; i + sn <= n; i++) if (mm_same(dc_out + i, s, sn)) return 1; return 0; }
-static int dc_run_tool(const char *tool, char *a1, char *a2, char *a3) {
-    char *v[] = {"./tools/bound", "50", "sh", "./unisacc.com", (char *)tool, "--", a1, a2, a3, 0};
+static int dc_run_tool4(const char *tool, char *a1, char *a2, char *a3, char *a4) {
+    char *v[] = {"./tools/bound", "50", "sh", "./unisacc.com", (char *)tool, "--", a1, a2, a3, a4, 0};
     int fd, pid, ex = 0, code = 0, sig = 0; long n = 0, r;
     pid = sy_spawn_pipe(v, 0, 0, &fd, 0);
     if (pid < 0) return -1;
@@ -38,6 +38,9 @@ static int dc_run_tool(const char *tool, char *a1, char *a2, char *a3) {
     dc_out[n] = 0; sy_close(fd);
     if (sy_wait_status(pid, 0, &ex, &code, &sig) != pid || !ex) return -1;
     return code;
+}
+static int dc_run_tool(const char *tool, char *a1, char *a2, char *a3) {
+    return dc_run_tool4(tool, a1, a2, a3, 0);
 }
 static int dc_run(char *a1, char *a2, char *a3) {
     return dc_run_tool("tools/dup-census.cx", a1, a2, a3);
@@ -65,7 +68,7 @@ static void dc_cleanup(void) {
     dc_rm("tools/a.cx"); dc_rm("tools/b.cx"); dc_rm("tools/d.cx"); dc_rm("tools/e.cx"); dc_rm("tools/f.cx"); dc_rm("tools/cxlib/c.cx");
     dc_rm("build/dup-census-baseline.tsv");
     dc_rm("build/dup-census-whitelist.tsv");
-    dc_rm("mut1.cx"); dc_rm("mut2.cx"); dc_rm("cxroot.tsv"); dc_rm("r");
+    dc_rm("mut1.cx"); dc_rm("mut2.cx"); dc_rm("mut3.cx"); dc_rm("mut4.cx"); dc_rm("cxroot.tsv"); dc_rm("r");
     cx_fmt(p, sizeof p, "%s/tools/cxlib", dc_root); sy_rmdir(p);
     cx_fmt(p, sizeof p, "%s/tools", dc_root); sy_rmdir(p);
     cx_fmt(p, sizeof p, "%s/build", dc_root); sy_rmdir(p);
@@ -262,14 +265,113 @@ static void group_c(void) {
     dc_ck(rc == 0 && dc_has("\nDUP_SUMMARY files="), "repo-print-summary");
 }
 
+static int dc_rg_symbol_exists(const char *sym) {
+    char pat[256];
+    char *v[] = {"./tools/bound", "15", "rg", "-q", "--glob", "*.cx", pat, "tools/cxlib", "ext", 0};
+    int fd, pid, ex = 0, code = 0, sig = 0; char junk[64];
+    if (cx_fmt(pat, sizeof pat, "^[a-zA-Z_][a-zA-Z0-9_ *]*\\b%s\\s*\\(", sym)) return 0;
+    pid = sy_spawn_pipe(v, 0, 0, &fd, 0);
+    if (pid < 0) return 0;
+    while (sy_read(fd, junk, sizeof junk) > 0) {}
+    sy_close(fd);
+    if (sy_wait_status(pid, 0, &ex, &code, &sig) != pid || !ex) return 0;
+    return code == 0;
+}
+
+static int dc_verify_hints_tool(const char *tool) {
+    char seen[32][64]; int nseen = 0, count = 0;
+    long n, at = 0;
+    if (dc_run_tool(tool, "--list-hints", 0, 0) != 0) return 1;
+    n = tx_len(dc_out, sizeof dc_out);
+    while (at < n) {
+        long e = tx_chr(dc_out + at, n - at, '\n'), ln = e < 0 ? n - at : e;
+        long o0, l0, o2, l2;
+        if (ln > 11 && mm_same(dc_out + at, "HINT_ENTRY\t", 11) &&
+            !tx_field(dc_out + at, ln, '\t', 0, &o0, &l0) &&
+            !tx_field(dc_out + at, ln, '\t', 2, &o2, &l2) && l2 > 0 && l2 < 64) {
+            char sym[64]; int i, dup = 0;
+            mm_copy(sym, sizeof sym, dc_out + at + o2, l2);
+            sym[l2] = 0;
+            count++;
+            for (i = 0; i < nseen; i++) if (tx_eqz(seen[i], sym)) { dup = 1; break; }
+            if (!dup) {
+                if (!dc_rg_symbol_exists(sym)) return 1;
+                if (nseen < 32) { mm_copy(seen[nseen], sizeof seen[0], sym, l2 + 1); nseen++; }
+            }
+        }
+        at += ln + 1;
+    }
+    return count > 0 ? 0 : 1;
+}
+
+static void group_e(void) {
+    int rc;
+    char epath[750], mut3[750], mut4[750];
+    dc_fixture();
+    rc = dc_run("--write", "--root", dc_root);
+    dc_ck(rc == 0, "anon-setup-baseline");
+
+    // 1. Same body, different names: old --check stays green; new DUP_ANON count is non-zero
+    dc_put("tools/d.cx", "static int nfds_alpha(int x) {\n    return x + 42;\n}\n");
+    dc_put("tools/e.cx", "static int nfds_beta(int x) {\n    return x + 42;\n}\n");
+    rc = dc_run("--check", "--root", dc_root);
+    dc_ck(rc == 0 && dc_has("dup-census: ok: verbatim_groups=1 (baseline 1)") &&
+          dc_has("dup-census: info: anon_groups=1 anon_defs=2 anon_redundant=3\n"),
+          "anon-renamed-old-check-green-info-printed");
+    rc = dc_run("--print", "--root", dc_root);
+    dc_ck(rc == 0 && dc_has("ANON_GROUP\tnfds_alpha,nfds_beta\t2\t3\t3\n") &&
+          dc_has("DUP_ANON\tgroups=1\tdefs=2\tredundant=3\n"),
+          "anon-renamed-counted-nonzero");
+
+    // 2. Failure message prints cxlib/ext alternative hint for known pattern
+    dc_put("tools/d.cx", "static int nfds_alpha(int x) {\n    return x + 42;\n}\nstatic int run_cmd(int x) {\n    return x;\n}\n");
+    dc_put("tools/e.cx", "static int nfds_beta(int x) {\n    return x + 42;\n}\nstatic int run_cmd(int x) {\n    return x;\n}\n");
+    rc = dc_run("--check", "--root", dc_root);
+    dc_ck(rc == 1 && dc_has("dup-census: run_cmd has 2 verbatim copies, baseline 0\n") &&
+          dc_has("dup-census: hint: run_cmd -> pr_run ("),
+          "fail-prints-alternative-hint");
+
+    // 3. --hint-file incremental read-only hint mode (always rc 0, reports both alt and anon dup)
+    cx_fmt(epath, sizeof epath, "%s/tools/e.cx", dc_root);
+    rc = dc_run_tool4("tools/dup-census.cx", "--hint-file", epath, "--root", dc_root);
+    dc_ck(rc == 0 && dc_has("DUP_HINT\talt\trun_cmd\tpr_run\t") &&
+          dc_has("DUP_HINT\tdup\tnfds_beta\ttools/d.cx\tnfds_alpha\n"),
+          "hint-file-reports-alt-and-anon-dup");
+
+    // 4. Mutation: removing name placeholder in dc_hash_anon loses anon detection (mutant killed)
+    dc_prep_mut_root();
+    if (!dc_write_mutant("mut3.cx",
+            "for (t = 0; t < 4; t++) { nh ^= (unsigned char)ph[t]; nh *= 1099511628211ul; }",
+            "for (t = q; t < qe; t++) { nh ^= (unsigned char)b[t]; nh *= 1099511628211ul; }",
+            mut3, sizeof mut3)) {
+        rc = dc_run_tool(mut3, "--print", "--root", dc_root);
+        dc_ck(rc == 0 && dc_has("DUP_ANON\tgroups=0\tdefs=0\tredundant=0\n"), "mutant-drop-anon-placeholder-killed");
+    } else {
+        dc_ck(0, "mutant-drop-anon-placeholder-killed");
+    }
+
+    // 5. Anti-rot check: every hint target symbol must exist in tools/cxlib/ or ext/ (rg check)
+    dc_ck(dc_verify_hints_tool("tools/dup-census.cx") == 0, "hints-symbols-exist-in-cxlib-or-ext");
+
+    // 6. Mutation: renaming a hint target to a nonexistent symbol must fail anti-rot check (mutant killed)
+    if (!dc_write_mutant("mut4.cx", "\"pr_run\"", "\"pr_run_deleted_sym\"", mut4, sizeof mut4)) {
+        dc_ck(dc_verify_hints_tool(mut4) != 0, "mutant-stale-hint-symbol-killed");
+    } else {
+        dc_ck(0, "mutant-stale-hint-symbol-killed");
+    }
+
+    dc_cleanup();
+}
+
 int main(int argc, char **argv) {
     const char *g = argc == 3 && tx_eqz(argv[1], "--group") ? argv[2] : 0;
-    if (argc != 1 && !g) { fprintf(stderr, "usage: tools/check-dup-census.cx [--group a|b|c|d]\n"); return 2; }
+    if (argc != 1 && !g) { fprintf(stderr, "usage: tools/check-dup-census.cx [--group a|b|c|d|e]\n"); return 2; }
     if (!sy_env("CC")) sy_setenv("CC", "/usr/bin/cc", 1);
     if (!g || tx_eqz(g, "a")) group_a();
     if (!g || tx_eqz(g, "b")) group_b();
     if (!g || tx_eqz(g, "c")) group_c();
     if (!g || tx_eqz(g, "c") || tx_eqz(g, "d")) group_d();
+    if (!g || tx_eqz(g, "e")) group_e();
     printf("CHECK_DUP_CENSUS\tfailed=%d\n", dc_failed);
     return dc_failed ? 1 : 0;
 }

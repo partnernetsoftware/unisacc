@@ -56,4 +56,5 @@ description: 编排者督导多个执行者窗口与后台作业、做定期巡�
 - 复测别人报的数字再采纳;rc=124 与 refused 是具名结果,读发码源码行再定性;行为变更(如双 fd poll 改顺序等待)必须补最坏用例与变异自证。
 - 版本分支只放产品输入类改动;tools/、devsvc 与 plans/devsvc.md 等开发基础设施一律在 main 上改(0.0.94 合入诊断:唯一的源码双改文件 tools/derive.cx 来自版本分支上的 derive 池提交,合并时语义未证)。
 - 冻结前做一次"并集树只读预合并检查"(归档 main 加分支独有文件,逐个跑生成器 --check 与 derive --check、check-derive),把语义冲突提前暴露。
+- `git revert` 带 `merge=union` 表的陷阱:`tests/batches.tsv`、`tests/coverage.tsv`、`build/links.tsv` 等在 `.gitattributes` 配了 `merge=union`,当待回退提交的增删行与后续追加行发生上下文重叠时,`git revert` 的 union 合并驱动会静默保留本应删除的行(即使 `tests/manifests/*.tsv` 已删),回退后必须显式核对并剔除残留行再跑 `links-gen --write` 与 `derive --check`。
 - 工具:devsvc f write/edit 在版本工作目录下相对路径会落到主检出,一律用绝对路径;改文件不用 sed -i;主调度自己的提交也走 devsvc 或 commit-own,原生 git commit 会使 devsvc 因 unowned-pending 拒绝推送。

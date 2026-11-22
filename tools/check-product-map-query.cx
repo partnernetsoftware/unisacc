@@ -6,6 +6,7 @@
 #pragma unisa use sys.fs
 #pragma unisa use sys.posix
 #pragma unisa use sys.proc
+#pragma unisa use sys.time
 #pragma unisa use sys.sig
 #pragma unisa use mem.heap
 #pragma unisa use mem.bytes
@@ -159,10 +160,57 @@ static int no_strace(void){
     v[6]=cold;rc=run(v,root,&missing);ck(rc==2&&missing.err&&strstr(missing.err,"PRODUCT_MAP_READSET_NEEDS_STRACE"),"cold-query-without-strace-named-refusal");
     np_free(&before);np_free(&hit);np_free(&missing);printf("CHECK_PRODUCT_MAP_QUERY\tfailed=%d\tpassed=%d\tcase=no-strace\n",failed,passed);cleanup();return failed?1:0;
 }
+/* The checkout is shared: another window may edit a declared input or any read-set file while a query runs, and the query then
+ * refuses (source-changed-* / readset-changed-before-output naming some other path).  That is the guard working, not a defect in
+ * what this case checks, so the phases below repeat at most three times on exactly those two refusals and fail on anything else. */
+static const char*pq_has(const char*h,const char*w){if(!h)return 0;size_t n=strlen(w);for(;*h;h++)if(!strncmp(h,w,n))return h;return 0;}
+static int external_change(const char*err){return err&&(pq_has(err,"REFUSE source-changed-")||pq_has(err,"REFUSE readset-changed-before-output"));}
+static int run_retry(char**v,const char*cwd,np_result*r){int rc=0;for(int a=0;a<3;a++){if(a){np_free(r);np_result z={0};*r=z;}rc=run(v,cwd,r);if(rc!=2||!external_change(r->err))return rc;}return rc;}
+/* A read-set file that is not a declared repository input (a PATH tool, here uname) is replaced while the independent
+ * producer of a --check run is working: the query must refuse with rc 2 and name that path.  The control run with
+ * nothing replaced must pass, so the refusal is not a property of the environment. */
+static int readset_race(void){
+    char base[4400],bin[4400],tmp[4400],image[4400],env[4400],patharg[4500],tmparg[4500],warm[4400],link[4400],copyp[4400],newl[4400],errp[4400],found[4400],uname_real[4400];
+    if(cx_fmt(base,sizeof base,"%s/product-map-race-XXXXXX",sy_tmpdir())||!mkdtemp(base))die("race-tmp");
+    guard(mm_copy(aux_tmp,sizeof aux_tmp,base,strlen(base)+1),"copy-bound");
+    join(bin,sizeof bin,base,"bin");join(tmp,sizeof tmp,base,"tmp");if(sy_mkdir(bin,0700)||sy_mkdir(tmp,0700))die("race-dirs");
+    join(image,sizeof image,base,"query.native");if(tq_native(root,query_source,image,why,sizeof why))die("race-query-prepare");resolve("env",env);
+    const char*tools[]={"git","sh","bash","uname","chmod","tail","dd","cat","head","tr","grep","sed","cut","dirname","readlink","mkdir","rm","mv","wc","sort","gzip","strace"};
+    for(int i=0;i<22;i++){char target[4400];resolve(tools[i],target);join(link,sizeof link,bin,tools[i]);if(sy_symlink(target,link))die("race-link");}
+    PQ_FMT(patharg,sizeof patharg,"PATH=%s",bin);PQ_FMT(tmparg,sizeof tmparg,"TMPDIR=%s",tmp);join(warm,sizeof warm,base,"warm");
+    char*prime[]={env,patharg,tmparg,image,"--root",root,"--cache",warm,0};np_result r0={0},r1={0};
+    int rc=run_retry(prime,root,&r0);ck(rc==0,"race-cache-prepared");if(rc){fprintf(stderr,"%s\n",r0.err?r0.err:"");np_free(&r0);cleanup();return 1;}
+    char*control[]={env,patharg,tmparg,image,"--root",root,"--cache",warm,"--check",0};
+    rc=run_retry(control,root,&r1);ck(rc==0&&r1.out&&strstr(r1.out,"PRODUCT_MAP_QUERY_CHECK OK"),"unchanged-readset-check-passes");if(rc!=0)fprintf(stderr,"control rc=%d err=%.800s\n",rc,r1.err?r1.err:"(none)");
+    resolve("uname",uname_real);join(copyp,sizeof copyp,base,"uname-copy");copy(uname_real,copyp);join(newl,sizeof newl,bin,"uname.new");join(link,sizeof link,bin,"uname");join(errp,sizeof errp,base,"race.err");
+    char*argv[]={env,"-u","GIT_DIR","-u","GIT_WORK_TREE","-u","GIT_INDEX_FILE","-u","GIT_OBJECT_DIRECTORY","-u","GIT_ALTERNATE_OBJECT_DIRECTORIES",patharg,tmparg,image,"--root",root,"--cache",warm,"--check",0};
+    int swapped=0,named=0,refused=0;char*err=0;sy_exit_t st;st.exited=0;st.code=-1;int wrc=-1;
+    for(int attempt=0;attempt<3;attempt++){
+        /* reset: the original symlink target, and an empty TMPDIR so the poll can only see this attempt's independent.trace */
+        mm_free(err);err=0;sy_unlink(link);if(sy_symlink(uname_real,link))die("race-reset-link");sy_remove_all(tmp);if(sy_mkdir(tmp,0700))die("race-tmp-reset");sy_unlink(errp);
+        sy_spawn_t o;sy_child_t child;sy_spawn_init(&o);o.argv=argv;o.cwd=root;o.out_fd=SY_STDIO_NULL;o.err_fd=sy_open_new(errp,0600);o.pgroup=-1;o.deadline_ms=55000;if(o.err_fd<0)die("race-err-file");
+        if(sy_proc_spawn(&o,&child))die("race-spawn");
+        swapped=0;found[0]=0;
+        for(int t=0;t<500&&!swapped;t++){
+            sy_dir_t d;if(!sy_dir_open(&d,tmp)){while(sy_dir_next(&d)==1){if(strncmp(d.name,"product-map-query-",18))continue;char w[4400],tr[4400];join(w,sizeof w,tmp,d.name);join(tr,sizeof tr,w,"independent.trace");if(sy_is_reg(tr)==1){guard(mm_copy(found,sizeof found,tr,strlen(tr)+1),"copy-bound");break;}}sy_dir_close(&d);}
+            if(found[0]){if(sy_symlink(copyp,newl)||sy_rename(newl,link))die("race-swap");swapped=1;}else sy_sleep_ms(100);
+        }
+        wrc=sy_proc_wait(&child,&st);sy_close(o.err_fd);size_t en=0;err=cx_read(errp,&en);
+        refused=wrc==0&&st.exited&&st.code==2&&err&&pq_has(err,"REFUSE readset-changed-before-output");
+        named=refused&&pq_has(pq_has(err,"readset-changed-before-output"),"/bin/uname")!=0;
+        if(named||!external_change(err))break;
+    }
+    ck(swapped,"independent-producer-window-observed");
+    ck(refused,"readset-file-replaced-mid-run-refused");
+    ck(named,"refusal-names-the-changed-path");
+    if(!named)fprintf(stderr,"race wrc=%d exited=%d code=%d err=%.700s\n",wrc,st.exited,st.code,err?err:"(none)");
+    mm_free(err);np_free(&r0);np_free(&r1);printf("CHECK_PRODUCT_MAP_QUERY\tfailed=%d\tpassed=%d\tcase=readset-race\n",failed,passed);cleanup();return failed?1:0;
+}
 int main(int argc,char**argv){
     const char*which=0,*alternate=0;for(int i=1;i<argc;i++){if(!strcmp(argv[i],"--case")&&i+1<argc)which=argv[++i];else if(!strcmp(argv[i],"--query-source")&&i+1<argc)alternate=argv[++i];else die("usage");}if(!which)die("case-required");
     if(sy_cwd(root,sizeof root)<0||sy_realpath("unisacc.com",product,sizeof product)<0)die("root");if(alternate){if(sy_realpath(alternate,query_source,sizeof query_source)<0)die("query-source");}else join(query_source,sizeof query_source,root,"tools/product-map-query.cx");
     if(!strcmp(which,"no-strace"))return no_strace();
+    if(!strcmp(which,"readset-race"))return readset_race();
     if(!strcmp(which,"key-context"))return key_context();
     if(!strcmp(which,"candidate-key"))return candidate_key();
     if(!strcmp(which,"recovery")){grouped=1;in_subcase=1;const char*cases[]={"corrupt","missing","readset","sidecar"};int rfail=0;for(int i=0;i<4;i++){char*v[]={argv[0],"--case",(char*)cases[i],0};if(main(3,v)){rfail=1;break;}}in_subcase=0;cleanup();if(rfail)return 1;printf("CHECK_PRODUCT_MAP_QUERY\tfailed=%d\tpassed=%d\tcase=recovery\n",failed,passed);return failed?1:0;}

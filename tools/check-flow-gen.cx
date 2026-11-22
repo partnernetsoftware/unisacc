@@ -36,31 +36,20 @@
 #pragma unisa use text.text
 #pragma unisa use mem.heap
 
-/* ARGV under cx_runv_timeout (SECS, process group killed on expiry), stdout and stderr merged into OUT. */
-static int bounded_run(char **argv, int secs, char *out, int cap) {
-    char *w[64], *b = 0;
-    size_t n = 0, j;
-    int k = 0, i, rc;
-    w[k++] = "sh"; w[k++] = "-c"; w[k++] = "exec \"$@\" 2>&1"; w[k++] = "sh";
-    for (i = 0; argv[i] && k < 63; i++) w[k++] = argv[i];
-    if (argv[i]) return -E2BIG;
-    w[k] = 0;
-    rc = cx_runv_timeout(w, secs, &b, &n);
-    if (n > (size_t)cap - 1) n = (size_t)cap - 1;
-    for (j = 0; b && j < n; j++) out[j] = b[j];
-    out[b ? n : 0] = 0;
-    free(b);
-    return rc;
-}
+#pragma unisa use cxlib.procrun
 
 static int failed;
 static void ck(int ok, const char *name) { if (ok) sy_printf("PASS\tcheck-flow-gen.%s\n", name); else { failed++; sy_printf("FAIL\tcheck-flow-gen.%s\n", name); } }
 static void die(const char *s) { sy_eprintf("check-flow-gen: REFUSE %s\n", s); sy_exit(2); }
-static long pos(const char *s, const char *w) { return tx_find(s, tx_len(s, 1 << 20), w, tx_len(w, 1 << 16)); }
+static long pos(const char *s, const char *w) {
+    long sn = tx_len(s, 1 << 20), wn = tx_len(w, 1 << 16), i;
+    for (i = 0; i + wn <= sn; i++) if (tx_same(s + i, wn, w, wn)) return i;
+    return -1;
+}
 static int has(const char *s, const char *w) { return pos(s, w) >= 0; }
 static long numafter(const char *s, const char *key) { long p = pos(s, key), v = 0; if (p < 0) return -1; p += tx_len(key, 128); while (s[p] >= '0' && s[p] <= '9') v = v * 10 + (s[p++] - '0'); return v; }
 static char root[4096], com[4500], gen[4500], frun[4500], wd[1024];
-static int runtool(char *tool, char **args, char *out, int cap) { char *v[24]; int k = 0; v[k++] = "sh"; v[k++] = com; v[k++] = tool; v[k++] = "--"; for (; *args && k < 23; args++) v[k++] = *args; v[k] = 0; return bounded_run(v, 50, out, cap); }
+static int runtool(char *tool, char **args, char *out, int cap) { char *v[24]; int k = 0; v[k++] = "sh"; v[k++] = com; v[k++] = tool; v[k++] = "--"; for (; *args && k < 23; args++) v[k++] = *args; v[k] = 0; return pr_run_merged(v, 50, out, cap, 0); }
 static char *rd(const char *name) {
     static char p[16][1200]; static int k; char *q = p[k++ & 15];
     if (cx_fmt(q, 1200, "%s/%s", wd, name)) die("path");
