@@ -464,14 +464,13 @@ static int freeze_gate(void) {
     size_t wtn = 0, idxn = 0;
     char *z_wt = 0, *z_idx = 0, *z_head = 0, *names = 0;
     long fn = 0, hdn = 0;
-    char *dv[] = {"git", "diff", "--cached", "--name-only", "--diff-filter=ACMRD", "-z", 0};
+    char *dv[] = {"git", "diff", "--cached", "--no-renames", "--name-only", "--diff-filter=ACMRD", "-z", 0};
     int blocked = 0, freeze_staged = 0;
     if (pc_work_top[0]) {
         char fp[1200];
         if (!cx_fmt(fp, sizeof fp, "%s/build/freeze.tsv", pc_work_top)) z_wt = (char *)cx_read(fp, &wtn);
     }
     z_idx = (char *)cx_read("build/freeze.tsv", &idxn);
-    if (!z_wt && !z_idx) return 0;                       /* 无标记文件=无冻结(ENOENT) */
     names = slurp(dv, &fn);
     for (long at = 0; names && at < fn; ) {
         long nl = tx_len(names + at, fn - at);
@@ -479,19 +478,23 @@ static int freeze_gate(void) {
         if (nl == 16 && tx_same(names + at, 16, "build/freeze.tsv", 16)) { freeze_staged = 1; break; }
         at += nl + 1;
     }
-    /* 合同: 冻结标记是协调锁,以工作区文件为准(优先读),缺失时才用暂存版;
-     * 暂存版比工作区更严或同一提交里暂存改 freeze.tsv 把截止改成过期试图自我解冻时,以更严者为准. */
-    if (z_wt) blocked = freeze_eval_buf(z_wt, names, fn);
-    else if (z_idx) blocked = freeze_eval_buf(z_idx, names, fn);
-    if (!blocked && z_wt && z_idx) blocked = freeze_eval_buf(z_idx, names, fn);
-    if (!blocked && freeze_staged) {
+    if (freeze_staged || !z_wt || !z_idx) {
         char *hv[] = {"git", "show", "HEAD:build/freeze.tsv", 0};
         z_head = slurp(hv, &hdn);
-        if (z_head && hdn > 0) blocked = freeze_eval_buf(z_head, names, fn);
-        if (z_head) mm_free(z_head);
     }
+    if (!z_wt && !z_idx && (!z_head || hdn <= 0)) {
+        if (z_head) mm_free(z_head);
+        if (names) mm_free(names);
+        return 0;                       /* 无标记文件=无冻结(ENOENT) */
+    }
+    /* 合同: 冻结标记是协调锁,以工作区文件为准(优先读),缺失时回退暂存版/HEAD版;
+     * 暂存版或HEAD版比工作区更严,或同一提交里暂存改/删/移名 freeze.tsv 试图自我解冻时,以更严者为准. */
+    if (z_wt) blocked = freeze_eval_buf(z_wt, names, fn);
+    if (!blocked && z_idx) blocked = freeze_eval_buf(z_idx, names, fn);
+    if (!blocked && z_head && hdn > 0) blocked = freeze_eval_buf(z_head, names, fn);
     if (z_wt) mm_free(z_wt);
     if (z_idx) mm_free(z_idx);
+    if (z_head) mm_free(z_head);
     if (names) mm_free(names);
     return blocked;
 }
