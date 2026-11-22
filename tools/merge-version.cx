@@ -413,6 +413,35 @@ static int cmd_gate(int argc, char **argv) {
         char *av[] = {"sh", "./unisacc.com", "tools/derive.cx", "--", w ? "--write" : "--check", 0};
         t = run_in(tdir, name, 55, av, &r);
         rc = gate_result(name, &r, t, "drift=0");
+        char bad[400]; bad[0] = 0;
+        if (t == 0 && r.out) {   /* name every node that is not OK, so a refusal is not just a count */
+            for (const char *p = r.out; *p; ) {
+                const char *e = strchr(p, '\n');
+                size_t ll = e ? (size_t)(e - p) : strlen(p);
+                char ln[300];
+                if (cx_fmt(ln, sizeof ln, "%.*s", (int)ll, p)) { p += ll + (e ? 1 : 0); continue; }   /* an overlong line is not a node row */
+                int isdrift = strstr(ln, "\tDRIFT\t") != 0, iscold = strstr(ln, "\tREFUSED\t") || strstr(ln, "\tTIMEOUT\t");
+                if (!strncmp(ln, "DERIVE\t", 7) && (isdrift || iscold)) {
+                    printf("MERGE_GATE\t%s\t%.*s\n", name, (int)(ll > 230 ? 230 : ll), p);
+                    char nm[64]; int nl = 0;
+                    for (const char *q = ln + 7; *q && *q != '\t' && nl < 63; q++) nm[nl++] = *q;
+                    nm[nl] = 0;
+                    /* a drift is a real finding and stays; a refusal or timeout may be a cold cache (native generator compile, readset race), so those nodes get one rerun */
+                    if (iscold && !w) { size_t bl = strlen(bad); (void)cx_fmt(bad + bl, sizeof bad - bl, "%s%s", bl ? "," : "", nm); }
+                }
+                p += ll + (e ? 1 : 0);
+            }
+        }
+        if (!w && rc == 1 && bad[0] && t == 0) {
+            pr_result r2;
+            char *av2[] = {"sh", "./unisacc.com", "tools/derive.cx", "--", "--check", "--only", bad, 0};
+            int t2 = run_in(tdir, "derive-check-retry", 55, av2, &r2);
+            int ok2 = t2 == 0 && r2.rc == 0 && r2.out && strstr(r2.out, "drift=0") && strstr(r2.out, "refused=0");
+            printf("MERGE_GATE\tderive-check-retry\t%s\tnodes=%s\n", ok2 ? "OK" : "FAIL", bad);
+            if (t2 == 0) pr_free(&r2);
+            /* only the refused nodes were rerun: the first run's drift (if any) still decides */
+            if (ok2 && strstr(r.out, "drift=0")) { rc = 0; printf("MERGE_GATE\tderive-check\tOK-after-retry\tnodes=%s\n", bad); }
+        }
         if (w && rc == 0) {
             pr_result s;
             char *up[] = {"add", "-u", 0};
