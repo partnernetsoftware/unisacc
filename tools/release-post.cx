@@ -1,0 +1,299 @@
+/* tools/release-post.cx -- orchestrate S10 post-publish steps (handbook section 4).
+ *
+ *   sh ./unisacc.com tools/release-post.cx -- plan --version V
+ *   sh ./unisacc.com tools/release-post.cx -- run --version V --dry|--execute
+ *       [--step N] [--root-upgrade] [--repo DIR] [--evidence-dir DIR]
+ *       [--chain-dir DIR] [--prerun-dir DIR] [--backup-dir DIR]
+ *       [--state-file PATH] [--cleanup-doc PATH]
+ *       [--chain-bin CMD] [--metrics-bin CMD] [--day-bin CMD] [--install-bin CMD]
+ *       [--install-root DIR] [--ape PATH] [--ape-sha SHA] [--mutant-dry-write]
+ *
+ * Orchestrates only: mark-version-seq / backup-evidence live in release-chain.cx;
+ * version-metrics-gen, day-metrics, install-ape are existing tools. Never --push.
+ * Writes require --execute. --dry is read-only (state file untouched). Each child
+ * under tools/bound 55. Re-run skips DONE steps in the state file (--execute).
+ * Step 5 (root) only with --execute --root-upgrade. Step 6 prints cleanup cmds only.
+ * Lines: POST_STEP<TAB>n<TAB>name<TAB>OK|FAIL|SKIP<TAB>detail ; final
+ * RELEASE_POST<TAB>status=DONE|BLOCKED:name .
+ */
+#pragma unisa use cxlib.ckrun
+#pragma unisa use sys.fs
+#pragma unisa use sys.env
+#pragma unisa use sys.time
+#pragma unisa use sys.proc
+#pragma unisa use text.text
+#pragma unisa use mem.heap
+#pragma unisa use mem.bytes
+
+#define RP_STEPS 6
+
+static char g_ver[40], g_repo[900], g_evdir[1100], g_state[1100];
+static char g_chain_dir[900], g_prerun_dir[900], g_backup_dir[900];
+static char g_chain_bin[900], g_metrics_bin[900], g_day_bin[900], g_install_bin[900];
+static char g_install_root[900], g_ape[900], g_ape_sha[80], g_cleanup_doc[1100];
+static int g_dry, g_exec, g_root_up, g_step_only, g_mutant_dry_write;
+static int g_done[RP_STEPS + 1];
+
+static const char *step_name(int n) {
+    static const char *nm[] = {
+        "-", "index-seal", "mark-version-seq", "backup-evidence",
+        "metrics", "root-upgrade", "worktree-cleanup-print"
+    };
+    if (n < 1 || n > RP_STEPS) return "-";
+    return nm[n];
+}
+
+static int die_usage(const char *m) {
+    fprintf(stderr, "release-post: %s\n", m);
+    fprintf(stderr, "usage: plan|run --version V --dry|--execute [--step N] [--root-upgrade] ...\n");
+    return 2;
+}
+
+static void post_step(int n, const char *st, const char *detail) {
+    printf("POST_STEP\t%d\t%s\t%s\t%s\n", n, step_name(n), st, detail && detail[0] ? detail : "-");
+}
+
+static int run_bound(const char *tag, const char *cmd, char *out, int ocap) {
+    char full[3200];
+    if (cx_fmt(full, sizeof full, "./tools/bound 55 %s", cmd)) return -1;
+    out[0] = 0;
+    return ckk_sh_t(tag, full, out, ocap, 55);
+}
+
+static int has_line_prefix(const char *buf, const char *pref) {
+    long n = tx_len(buf, 1 << 20), pl = tx_len(pref, 200), at = 0;
+    while (at < n) {
+        long e = at; while (e < n && buf[e] != '\n') e++;
+        if (e - at >= pl && tx_same(buf + at, pl, pref, pl)) return 1;
+        at = e + (e < n ? 1 : 0);
+    }
+    return 0;
+}
+
+static void load_state(void) {
+    unsigned char *b; int64_t n; long i = 0; int k;
+    for (k = 1; k <= RP_STEPS; k++) g_done[k] = 0;
+    if (!g_state[0] || sy_exists(g_state) != 1) return;
+    if (sy_read_file(g_state, &b, &n, 1 << 16) < 0 || !b) return;
+    while (i < n) {
+        long s = i, e; int step = 0;
+        while (i < n && b[i] != '\n') i++;
+        e = i; if (i < n) i++;
+        if (e <= s || b[s] == '#') continue;
+        if (s + 2 <= e && b[s] >= '1' && b[s] <= '6' && b[s + 1] == '\t') {
+            step = b[s] - '0';
+            if (tx_find((char *)b + s, e - s, "\tDONE", 5) >= 0) g_done[step] = 1;
+        }
+    }
+    mm_free(b);
+}
+
+static int save_state(void) {
+    char body[400]; long n = 0; int k;
+    if (!g_exec || !g_state[0]) return 0;
+    if (g_dry) return 0;
+    body[0] = 0;
+    for (k = 1; k <= RP_STEPS; k++) {
+        char line[40];
+        if (cx_fmt(line, sizeof line, "%d\t%s\n", k, g_done[k] ? "DONE" : "PEND")) return -1;
+        { long l = tx_len(line, sizeof line); if (n + l >= (long)sizeof body) return -1;
+          mm_copy(body + n, sizeof body - n, line, l); n += l; }
+    }
+    return sy_write_file(g_state, body, (int64_t)n, 0600);
+}
+
+static int mark_done(int n) {
+    g_done[n] = 1;
+    return save_state();
+}
+
+static int step_index_seal(void) {
+    char path[1200]; size_t n = 0; char *b;
+    if (cx_fmt(path, sizeof path, "%s/INDEX.tsv", g_evdir)) return -1;
+    if (sy_exists(path) != 1) { post_step(1, "FAIL", "missing-INDEX"); return 1; }
+    b = cx_read(path, &n);
+    if (!b) { post_step(1, "FAIL", "read-INDEX"); return 1; }
+    if (!has_line_prefix(b, "exec-7-Y2-done")) {
+        free(b); post_step(1, "FAIL", "missing-exec-7-Y2-done"); return 1;
+    }
+    free(b);
+    post_step(1, "OK", "INDEX-has-Y2-done");
+    return 0;
+}
+
+static int step_mark_version_seq(void) {
+    char cmd[2000], out[1 << 15]; int rc;
+    if (cx_fmt(cmd, sizeof cmd, "%s mark-version-seq --version %s --repo %s --dry",
+               g_chain_bin, g_ver, g_repo)) return -1;
+    rc = run_bound("rp-mark-dry", cmd, out, (int)sizeof out);
+    if (rc != 0) { post_step(2, "FAIL", "mark-version-seq-dry"); return 1; }
+    if (!g_exec) { post_step(2, "OK", "mark-version-seq-dry-only"); return 0; }
+    if (cx_fmt(cmd, sizeof cmd, "%s mark-version-seq --version %s --repo %s --commit",
+               g_chain_bin, g_ver, g_repo)) return -1;
+    rc = run_bound("rp-mark-commit", cmd, out, (int)sizeof out);
+    if (rc != 0) { post_step(2, "FAIL", "mark-version-seq-commit"); return 1; }
+    post_step(2, "OK", "mark-version-seq-commit-no-push");
+    return 0;
+}
+
+static int step_backup(void) {
+    char cmd[2400], out[1 << 15]; int rc;
+    if (cx_fmt(cmd, sizeof cmd,
+               "%s backup-evidence --version %s --repo %s --chain-dir %s --prerun-dir %s --backup-dir %s --verify",
+               g_chain_bin, g_ver, g_repo, g_chain_dir, g_prerun_dir, g_backup_dir)) return -1;
+    rc = run_bound("rp-backup", cmd, out, (int)sizeof out);
+    if (rc != 0 || !has_line_prefix(out, "BACKUP_VERIFY\tPASS")) {
+        post_step(3, "FAIL", "backup-evidence-verify"); return 1;
+    }
+    post_step(3, "OK", "BACKUP_VERIFY-PASS");
+    return 0;
+}
+
+static int step_metrics(void) {
+    char cmd[1600], out[1 << 14]; int rc;
+    if (g_mutant_dry_write) { post_step(4, "FAIL", "mutant-dry-write"); return 1; }
+    if (!g_exec) { post_step(4, "OK", "dry-skip-metrics-write"); return 0; }
+    if (cx_fmt(cmd, sizeof cmd, "%s -- --write-history --root %s", g_metrics_bin, g_repo)) return -1;
+    rc = run_bound("rp-met-hist", cmd, out, (int)sizeof out);
+    if (rc != 0) { post_step(4, "FAIL", "version-metrics-write-history"); return 1; }
+    if (cx_fmt(cmd, sizeof cmd, "%s -- --write --root %s", g_metrics_bin, g_repo)) return -1;
+    rc = run_bound("rp-met-write", cmd, out, (int)sizeof out);
+    if (rc != 0) { post_step(4, "FAIL", "version-metrics-write"); return 1; }
+    if (cx_fmt(cmd, sizeof cmd, "%s -- --write", g_day_bin)) return -1;
+    rc = run_bound("rp-day", cmd, out, (int)sizeof out);
+    if (rc != 0) { post_step(4, "FAIL", "day-metrics-write"); return 1; }
+    post_step(4, "OK", "metrics-written");
+    return 0;
+}
+
+static int step_root_upgrade(void) {
+    char cmd[2000], out[1 << 14]; int rc;
+    if (!g_root_up) { post_step(5, "SKIP", "no-root-upgrade-flag"); return 0; }
+    if (!g_exec) { post_step(5, "SKIP", "dry-no-root-upgrade"); return 0; }
+    if (cx_fmt(cmd, sizeof cmd, "%s -- %s --rollback", g_install_bin, g_install_root)) return -1;
+    rc = run_bound("rp-root-gate", cmd, out, (int)sizeof out);
+    if (rc != 0 || !has_line_prefix(out, "INSTALL_APE\tROLLBACK_DRYRUN")) {
+        printf("POST_ROOT_BACKUP_GATE\tFAIL\n");
+        post_step(5, "FAIL", "POST_ROOT_BACKUP_GATE");
+        return 1;
+    }
+    printf("POST_ROOT_BACKUP_GATE\tPASS\n");
+    if (!g_ape[0] || !g_ape_sha[0]) { post_step(5, "FAIL", "missing-ape-or-sha"); return 1; }
+    if (cx_fmt(cmd, sizeof cmd, "%s -- %s %s %s --write",
+               g_install_bin, g_install_root, g_ape, g_ape_sha)) return -1;
+    rc = run_bound("rp-install", cmd, out, (int)sizeof out);
+    if (rc != 0) { post_step(5, "FAIL", "install-ape-write"); return 1; }
+    post_step(5, "OK", "root-upgraded");
+    return 0;
+}
+
+static int step_worktree_print(void) {
+    printf("POST_WORKTREE_CMD\t# see %s ; print-only, never execute\n",
+           g_cleanup_doc[0] ? g_cleanup_doc : "research/2026-11-23/s10-old-worktrees-cleanup.md");
+    printf("POST_WORKTREE_CMD\tgit worktree remove .claude/worktrees/v0.0.88\n");
+    printf("POST_WORKTREE_CMD\tgit worktree remove .claude/worktrees/v0.0.89-old\n");
+    printf("POST_WORKTREE_CMD\tgit worktree remove .claude/worktrees/v0.0.93\n");
+    printf("POST_WORKTREE_CMD\t# after publish: git worktree remove .claude/worktrees/v%s\n", g_ver);
+    post_step(6, "OK", "printed-cleanup-cmds");
+    return 0;
+}
+
+static int run_one(int n) {
+    int rc;
+    if (g_exec && g_done[n] && !(g_step_only > 0 && g_step_only == n)) {
+        post_step(n, "SKIP", "already-DONE");
+        return 0;
+    }
+    if (g_step_only > 0 && n != g_step_only) return 0;
+    switch (n) {
+    case 1: rc = step_index_seal(); break;
+    case 2: rc = step_mark_version_seq(); break;
+    case 3: rc = step_backup(); break;
+    case 4: rc = step_metrics(); break;
+    case 5: rc = step_root_upgrade(); break;
+    case 6: rc = step_worktree_print(); break;
+    default: return 2;
+    }
+    if (rc == 0 && g_exec) mark_done(n);
+    return rc;
+}
+
+static void print_plan(void) {
+    int i;
+    printf("RELEASE_POST_PLAN\tversion=%s\n", g_ver);
+    for (i = 1; i <= RP_STEPS; i++) printf("POST_PLAN\t%d\t%s\n", i, step_name(i));
+    printf("RELEASE_POST\tstatus=PLAN\n");
+}
+
+static int cmd_run(void) {
+    int i, rc;
+    if (!g_dry && !g_exec) return die_usage("run needs --dry or --execute");
+    if (g_dry && g_exec) return die_usage("--dry and --execute conflict");
+    if (!g_ver[0]) return die_usage("--version required");
+    if (!g_repo[0] && cx_fmt(g_repo, sizeof g_repo, ".")) return 2;
+    if (!g_evdir[0] && cx_fmt(g_evdir, sizeof g_evdir, "%s/release/evidence/%s", g_repo, g_ver)) return 2;
+    if (!g_state[0] && cx_fmt(g_state, sizeof g_state, "%s/release-post-state.tsv", g_evdir)) return 2;
+    if (!g_chain_dir[0] && cx_fmt(g_chain_dir, sizeof g_chain_dir, "%s/chain", g_evdir)) return 2;
+    if (!g_prerun_dir[0] && cx_fmt(g_prerun_dir, sizeof g_prerun_dir, "%s/prerun", g_evdir)) return 2;
+    if (!g_backup_dir[0] && cx_fmt(g_backup_dir, sizeof g_backup_dir, "%s/backup", g_evdir)) return 2;
+    if (!g_chain_bin[0] && cx_fmt(g_chain_bin, sizeof g_chain_bin, "sh ./unisacc.com tools/release-chain.cx --")) return 2;
+    if (!g_metrics_bin[0] && cx_fmt(g_metrics_bin, sizeof g_metrics_bin, "sh ./unisacc.com tools/version-metrics-gen.cx")) return 2;
+    if (!g_day_bin[0] && cx_fmt(g_day_bin, sizeof g_day_bin, "sh ./unisacc.com tools/day-metrics.cx")) return 2;
+    if (!g_install_bin[0] && cx_fmt(g_install_bin, sizeof g_install_bin, "sh ./unisacc.com tools/install-ape.cx")) return 2;
+    if (!g_install_root[0] && cx_fmt(g_install_root, sizeof g_install_root, "%s", g_repo)) return 2;
+    if (g_exec) load_state();
+    for (i = 1; i <= RP_STEPS; i++) {
+        if (g_step_only > 0 && i != g_step_only) continue;
+        rc = run_one(i);
+        if (rc != 0) {
+            printf("RELEASE_POST\tstatus=BLOCKED:%s\n", step_name(i));
+            printf("RELEASE_POST_RETRY\tsh ./unisacc.com tools/release-post.cx -- run --version %s --execute --step %d\n",
+                   g_ver, i);
+            return 1;
+        }
+    }
+    printf("RELEASE_POST\tstatus=DONE\n");
+    return 0;
+}
+
+int main(int argc, char **argv) {
+    const char *cmd = 0; int a = 1;
+    g_dry = 0; g_exec = 0; g_root_up = 0; g_step_only = 0; g_mutant_dry_write = 0;
+    g_ver[0] = g_repo[0] = g_evdir[0] = g_state[0] = 0;
+    g_chain_dir[0] = g_prerun_dir[0] = g_backup_dir[0] = 0;
+    g_chain_bin[0] = g_metrics_bin[0] = g_day_bin[0] = g_install_bin[0] = 0;
+    g_install_root[0] = g_ape[0] = g_ape_sha[0] = g_cleanup_doc[0] = 0;
+    if (argc < 2) return die_usage("need plan|run");
+    cmd = argv[a++];
+    for (; a < argc; a++) {
+        if (tx_eqz(argv[a], "--version") && a + 1 < argc) {
+            if (cx_fmt(g_ver, sizeof g_ver, "%s", argv[++a])) return 2;
+        } else if (tx_eqz(argv[a], "--dry")) g_dry = 1;
+        else if (tx_eqz(argv[a], "--execute")) g_exec = 1;
+        else if (tx_eqz(argv[a], "--root-upgrade")) g_root_up = 1;
+        else if (tx_eqz(argv[a], "--mutant-dry-write")) g_mutant_dry_write = 1;
+        else if (tx_eqz(argv[a], "--step") && a + 1 < argc) g_step_only = (int)strtol(argv[++a], 0, 10);
+        else if (tx_eqz(argv[a], "--repo") && a + 1 < argc) { if (cx_fmt(g_repo, sizeof g_repo, "%s", argv[++a])) return 2; }
+        else if (tx_eqz(argv[a], "--evidence-dir") && a + 1 < argc) { if (cx_fmt(g_evdir, sizeof g_evdir, "%s", argv[++a])) return 2; }
+        else if (tx_eqz(argv[a], "--chain-dir") && a + 1 < argc) { if (cx_fmt(g_chain_dir, sizeof g_chain_dir, "%s", argv[++a])) return 2; }
+        else if (tx_eqz(argv[a], "--prerun-dir") && a + 1 < argc) { if (cx_fmt(g_prerun_dir, sizeof g_prerun_dir, "%s", argv[++a])) return 2; }
+        else if (tx_eqz(argv[a], "--backup-dir") && a + 1 < argc) { if (cx_fmt(g_backup_dir, sizeof g_backup_dir, "%s", argv[++a])) return 2; }
+        else if (tx_eqz(argv[a], "--state-file") && a + 1 < argc) { if (cx_fmt(g_state, sizeof g_state, "%s", argv[++a])) return 2; }
+        else if (tx_eqz(argv[a], "--cleanup-doc") && a + 1 < argc) { if (cx_fmt(g_cleanup_doc, sizeof g_cleanup_doc, "%s", argv[++a])) return 2; }
+        else if (tx_eqz(argv[a], "--chain-bin") && a + 1 < argc) { if (cx_fmt(g_chain_bin, sizeof g_chain_bin, "%s", argv[++a])) return 2; }
+        else if (tx_eqz(argv[a], "--metrics-bin") && a + 1 < argc) { if (cx_fmt(g_metrics_bin, sizeof g_metrics_bin, "%s", argv[++a])) return 2; }
+        else if (tx_eqz(argv[a], "--day-bin") && a + 1 < argc) { if (cx_fmt(g_day_bin, sizeof g_day_bin, "%s", argv[++a])) return 2; }
+        else if (tx_eqz(argv[a], "--install-bin") && a + 1 < argc) { if (cx_fmt(g_install_bin, sizeof g_install_bin, "%s", argv[++a])) return 2; }
+        else if (tx_eqz(argv[a], "--install-root") && a + 1 < argc) { if (cx_fmt(g_install_root, sizeof g_install_root, "%s", argv[++a])) return 2; }
+        else if (tx_eqz(argv[a], "--ape") && a + 1 < argc) { if (cx_fmt(g_ape, sizeof g_ape, "%s", argv[++a])) return 2; }
+        else if (tx_eqz(argv[a], "--ape-sha") && a + 1 < argc) { if (cx_fmt(g_ape_sha, sizeof g_ape_sha, "%s", argv[++a])) return 2; }
+        else return die_usage(argv[a]);
+    }
+    if (tx_eqz(cmd, "plan")) {
+        if (!g_ver[0]) return die_usage("--version required");
+        print_plan();
+        return 0;
+    }
+    if (tx_eqz(cmd, "run")) return cmd_run();
+    return die_usage("need plan|run");
+}

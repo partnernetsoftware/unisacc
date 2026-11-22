@@ -1,0 +1,152 @@
+/* tools/check-release-post.cx -- fixture for tools/release-post.cx
+ *
+ * Synthetic evidence dir + fake chain/metrics/day/install bins.
+ * Covers: plan lines, dry zero-write, step OK/FAIL, resume skip DONE,
+ * root-upgrade gate, mutant-dry-write red. Ends CHECK_RELEASE_POST. */
+#pragma unisa use cxlib.ckassert
+#pragma unisa use cxlib.ckrun
+#pragma unisa use sys.fs
+#pragma unisa use sys.env
+#pragma unisa use sys.time
+#pragma unisa use sys.posix
+#pragma unisa use text.text
+#pragma unisa use mem.heap
+
+static char out[1 << 16];
+static char root[900], cwd[800], ev[950], stf[950];
+static char chain[950], met[950], day[950], inst[950];
+static char cdir[950], pdir[950], bdir[950];
+
+static int run_rp(const char *extra) {
+    char cmd[4000];
+    if (cx_fmt(cmd, sizeof cmd,
+        "sh '%s/unisacc.com' '%s/tools/release-post.cx' -- %s"
+        " --repo '%s' --evidence-dir '%s' --state-file '%s'"
+        " --chain-dir '%s' --prerun-dir '%s' --backup-dir '%s'"
+        " --chain-bin 'sh %s' --metrics-bin 'sh %s' --day-bin 'sh %s' --install-bin 'sh %s'"
+        " --install-root '%s' --ape '%s/ape.bin' --ape-sha deadbeefdeadbeefdeadbeefdeadbeefdeadbeefdeadbeefdeadbeefdeadbeef",
+        cwd, cwd, extra, root, ev, stf, cdir, pdir, bdir,
+        chain, met, day, inst, root, root)) return -1;
+    return ckk_sh_t("check-release-post", cmd, out, (int)sizeof out, 55);
+}
+
+static int has(const char *s) { return ckk_has(out, (int)sizeof out, s); }
+
+static int seed_ok_bins(void) {
+    char cmd[5000];
+    /* chain: dry/commit/verify ok */
+    if (cx_fmt(cmd, sizeof cmd,
+        "printf '#!/bin/sh\\n"
+        "echo CHAIN_FAKE\\n"
+        "for a in \"$@\"; do\\n"
+        "  case \"$a\" in\\n"
+        "    --verify) echo \"BACKUP_VERIFY\\tPASS\\tversion=9.9.9\\tfiles=7\"; exit 0;;\\n"
+        "    --dry) echo MARK_DRY; exit 0;;\\n"
+        "    --commit) echo MARK_COMMIT; exit 0;;\\n"
+        "  esac\\n"
+        "done\\n"
+        "exit 0\\n' > '%s' && chmod 700 '%s'", chain, chain)) return 2;
+    if (ckk_sh_t("check-release-post", cmd, out, (int)sizeof out, 10) != 0) return 2;
+    if (cx_fmt(cmd, sizeof cmd,
+        "printf '#!/bin/sh\\necho MET\\nexit 0\\n' > '%s' && chmod 700 '%s' && "
+        "printf '#!/bin/sh\\necho DAY\\nexit 0\\n' > '%s' && chmod 700 '%s' && "
+        "printf '#!/bin/sh\\n"
+        "for a in \"$@\"; do\\n"
+        "  case \"$a\" in\\n"
+        "    --rollback) echo \"INSTALL_APE\\tROLLBACK_DRYRUN\\tabc\"; exit 0;;\\n"
+        "    --write) echo INSTALL_WRITE; exit 0;;\\n"
+        "  esac\\n"
+        "done\\n"
+        "exit 0\\n' > '%s' && chmod 700 '%s'",
+        met, met, day, day, inst, inst)) return 2;
+    return ckk_sh_t("check-release-post", cmd, out, (int)sizeof out, 10) == 0 ? 0 : 2;
+}
+
+int main(void) {
+    char cmd[5000]; int rc; long now;
+    const char *td = sy_env("TMPDIR");
+    if (!td || !td[0]) td = "/tmp";
+    if (ckk_sh_t("check-release-post", "pwd", out, (int)sizeof out, 20) != 0) return 2;
+    cx_fmt(cwd, sizeof cwd, "%s", out);
+    { long n = tx_len(cwd, sizeof cwd); while (n > 0 && cwd[n - 1] == '\n') cwd[--n] = 0; }
+    now = sy_wall_s();
+    if (cx_fmt(root, sizeof root, "%s/rp-check-%ld", td, now % 1000000000)) return 2;
+    sy_remove_all(root);
+    if (sy_mkdir_all(root, 0700)) return 2;
+    if (cx_fmt(ev, sizeof ev, "%s/ev", root) ||
+        cx_fmt(stf, sizeof stf, "%s/state.tsv", root) ||
+        cx_fmt(cdir, sizeof cdir, "%s/chain", root) ||
+        cx_fmt(pdir, sizeof pdir, "%s/prerun", root) ||
+        cx_fmt(bdir, sizeof bdir, "%s/backup", root) ||
+        cx_fmt(chain, sizeof chain, "%s/fake-chain.sh", root) ||
+        cx_fmt(met, sizeof met, "%s/fake-met.sh", root) ||
+        cx_fmt(day, sizeof day, "%s/fake-day.sh", root) ||
+        cx_fmt(inst, sizeof inst, "%s/fake-inst.sh", root)) return 2;
+    sy_mkdir_all(ev, 0700); sy_mkdir_all(cdir, 0700); sy_mkdir_all(pdir, 0700); sy_mkdir_all(bdir, 0700);
+
+    /* INDEX with Y2-done */
+    if (cx_fmt(cmd, sizeof cmd,
+        "printf 'exec-7-Y2-done\\tnow\\t-\\tabc\\tdone\\n' > '%s/INDEX.tsv' && "
+        "printf 'APE\\n' > '%s/ape.bin'", ev, root)) return 2;
+    ck(ckk_sh_t("check-release-post", cmd, out, (int)sizeof out, 10) == 0, "seed-index");
+    ck(seed_ok_bins() == 0, "seed-bins");
+
+    rc = run_rp("plan --version 9.9.9");
+    ck(rc == 0 && has("RELEASE_POST_PLAN\tversion=9.9.9") && has("POST_PLAN\t1\tindex-seal") &&
+       has("POST_PLAN\t6\tworktree-cleanup-print") && has("RELEASE_POST\tstatus=PLAN"), "plan-lines");
+
+    /* dry success, no state file */
+    rc = run_rp("run --version 9.9.9 --dry");
+    ck(rc == 0 && has("RELEASE_POST\tstatus=DONE") && has("POST_STEP\t1\tindex-seal\tOK") &&
+       has("POST_STEP\t4\tmetrics\tOK\tdry-skip-metrics-write") &&
+       has("POST_STEP\t5\troot-upgrade\tSKIP"), "dry-ok");
+    ck(sy_exists(stf) != 1, "dry-zero-state-write");
+
+    /* fail index */
+    if (cx_fmt(cmd, sizeof cmd, "printf 'no-seal\\n' > '%s/INDEX.tsv'", ev)) return 2;
+    ck(ckk_sh_t("check-release-post", cmd, out, (int)sizeof out, 10) == 0, "seed-bad-index");
+    rc = run_rp("run --version 9.9.9 --dry");
+    ck(rc != 0 && has("BLOCKED:index-seal") && has("RELEASE_POST_RETRY"), "fail-index-seal");
+    if (cx_fmt(cmd, sizeof cmd, "printf 'exec-7-Y2-done\\tnow\\t-\\tabc\\tdone\\n' > '%s/INDEX.tsv'", ev)) return 2;
+    ck(ckk_sh_t("check-release-post", cmd, out, (int)sizeof out, 10) == 0, "restore-index");
+
+    /* backup fail: mark still ok; --verify fails */
+    if (cx_fmt(cmd, sizeof cmd,
+        "printf '#!/bin/sh\n"
+        "for a in \"$@\"; do\n"
+        "  case \"$a\" in\n"
+        "    --verify) echo \"BACKUP_VERIFY\tFAIL\"; exit 1;;\n"
+        "    --dry) echo MARK_DRY; exit 0;;\n"
+        "    --commit) echo MARK_COMMIT; exit 0;;\n"
+        "  esac\n"
+        "done\n"
+        "exit 0\n' > '%s' && chmod 700 '%s'", chain, chain)) return 2;
+    ck(ckk_sh_t("check-release-post", cmd, out, (int)sizeof out, 10) == 0, "seed-backup-fail");
+    rc = run_rp("run --version 9.9.9 --dry");
+    ck(rc != 0 && has("BLOCKED:backup-evidence") && has("backup-evidence-verify"), "fail-backup");
+    ck(seed_ok_bins() == 0, "restore-bins");
+
+    /* execute + resume */
+    rc = run_rp("run --version 9.9.9 --execute");
+    ck(rc == 0 && has("status=DONE") && sy_exists(stf) == 1, "execute-ok");
+    rc = run_rp("run --version 9.9.9 --execute");
+    ck(rc == 0 && has("POST_STEP\t1\tindex-seal\tSKIP\talready-DONE"), "resume-skip");
+
+    /* root upgrade path */
+    sy_unlink(stf);
+    rc = run_rp("run --version 9.9.9 --execute --root-upgrade --step 5");
+    ck(rc == 0 && has("POST_ROOT_BACKUP_GATE\tPASS") && has("POST_STEP\t5\troot-upgrade\tOK"), "root-upgrade-ok");
+
+    /* mutant: dry-write hook must not be used to claim dry wrote metrics OK via fail path */
+    rc = run_rp("run --version 9.9.9 --dry --mutant-dry-write --step 4");
+    ck(rc != 0 && has("mutant-dry-write"), "mutant-dry-write-red");
+
+    sy_remove_all(root);
+    {
+        int failed = ck_failures();
+        int total = ck_assertions();
+        printf("RELEASE_POST_SUMMARY\tfailed=%d\tpassed=%d\n", failed, total - failed);
+        if (!failed) printf("CHECK_RELEASE_POST\n");
+        return failed ? 1 : 0;
+    }
+}
