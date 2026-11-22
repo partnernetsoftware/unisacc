@@ -64,6 +64,7 @@ static int offending_span(const char *l, long n, long *ps, long *pe, int *softp)
     long c, s = -1, t, w, e;
     int is_core = 0;
     if (softp) *softp = 0;
+    if (n > 0 && l[n - 1] == '\r') n--;
     if (tx_prefix(l, n, "CORE-NEW ", 9) || tx_prefix(l, n, "CORE-SIG ", 9)) { s = 9; is_core = 1; }
     else if (tx_prefix(l, n, "CORE-MISSING ", 13)) { s = 13; is_core = 1; }
     else if (tx_prefix(l, n, "CORE-ALIAS-CALLERS ", 19)) { s = 19; is_core = 1; }
@@ -101,13 +102,15 @@ static int offending_span(const char *l, long n, long *ps, long *pe, int *softp)
         *ps = s; *pe = s + e;
         return 1;
     }
-    if (tx_prefix(l + s, n - s, "module ", 7)) s += 7;   /* cxinclude: "module PATH has N include lines" */
-    else if (tx_prefix(l + s, n - s, "move target ", 12)) s += 12;
-    e = rk_rfind(l + s, n - s, " has ", 5);
-    if (e < 0) e = rk_rfind(l + s, n - s, " total lines ", 13);
-    if (e < 0 && tx_find(l + s, n - s, " != move ", 9) >= 0) {
+    if (tx_prefix(l + s, n - s, "move target ", 12) && tx_find(l + s, n - s, " != move ", 9) >= 0) {
+        s += 12;
         e = rk_rfind(l + s, n - s, " baseline ", 10);
         if (softp) *softp = 0;
+    } else {
+        if (tx_prefix(l + s, n - s, "module ", 7)) s += 7;   /* cxinclude: "module PATH has N include lines" */
+        else if (tx_prefix(l + s, n - s, "move target ", 12)) s += 12;
+        e = rk_rfind(l + s, n - s, " has ", 5);
+        if (e < 0) e = rk_rfind(l + s, n - s, " total lines ", 13);
     }
     if (e <= 0) return 0;
     *ps = s; *pe = s + e;
@@ -135,19 +138,30 @@ static const char *rk_script(const char *name, char *buf, long cap) {
     return buf;
 }
 
+static int rk_own_tool_or_table(const char *name, const char *p, long pl) {
+    char b[96];
+    if (!cx_fmt(b, sizeof b, "tests/%s.cx", name) && pl == tx_len(b, sizeof b) && tx_same(p, pl, b, pl)) return 1;
+    if (!cx_fmt(b, sizeof b, "tests/%s.tsv", name) && pl == tx_len(b, sizeof b) && tx_same(p, pl, b, pl)) return 1;
+    if (!cx_fmt(b, sizeof b, "tools/%s.cx", name) && pl == tx_len(b, sizeof b) && tx_same(p, pl, b, pl)) return 1;
+    if (!cx_fmt(b, sizeof b, "tools/check-%s.cx", name) && pl == tx_len(b, sizeof b) && tx_same(p, pl, b, pl)) return 1;
+    if (!cx_fmt(b, sizeof b, "build/%s-baseline.tsv", name) && pl == tx_len(b, sizeof b) && tx_same(p, pl, b, pl)) return 1;
+    if (!cx_fmt(b, sizeof b, "build/%s-exempt.tsv", name) && pl == tx_len(b, sizeof b) && tx_same(p, pl, b, pl)) return 1;
+    return 0;
+}
+
 static int rk_path_hits(const char *name, const char *p, long pl, int precommit_soft) {
-    long nl = tx_len(name, 64);
     if (pl <= 0) return 0;
     if ((pl == 17 && tx_same(p, 17, "tools/ratchets.cx", 17)) ||
         (pl == 18 && tx_same(p, 18, "tools/precommit.cx", 18)) ||
         (pl == 23 && tx_same(p, 23, "tools/precommit-flow.cx", 23)) ||
         (pl == 25 && tx_same(p, 25, "tests/precommit-gates.tsv", 25))) return 1;
-    if (nl > 0 && tx_find(p, pl, name, nl) >= 0) return 1;
+    if (rk_own_tool_or_table(name, p, pl)) return 1;
     if (tx_eqz(name, "srcshape")) return tx_prefix(p, pl, "src/", 4);
     if (tx_eqz(name, "coreapi")) return tx_prefix(p, pl, "cx/", 3) || tx_prefix(p, pl, "tools/symindex", 14);
-    if (tx_eqz(name, "notcovered")) return tx_prefix(p, pl, "exec/", 5);
+    if (tx_eqz(name, "notcovered")) return tx_prefix(p, pl, "exec/", 5) || tx_prefix(p, pl, "tools/notcovered-census", 23);
     if (tx_eqz(name, "tsv-lint")) return tx_prefix(p, pl, "exec/", 5) || tx_prefix(p, pl, "tools/tsv-lint", 14) || (pl == 27 && tx_same(p, 27, "build/tsv-lint-baseline.tsv", 27));
     if (tx_eqz(name, "dup-census")) return tx_prefix(p, pl, "tools/", 6);
+    if (tx_eqz(name, "ref-job-paths")) return (pl == 16 && tx_same(p, 16, "prd_mempalace.md", 16));
     if (tx_eqz(name, "aluiwidth") || tx_eqz(name, "net-deps"))
         return tx_prefix(p, pl, "src/", 4) || tx_prefix(p, pl, "cx/", 3) ||
                tx_prefix(p, pl, "exec/", 5) || tx_prefix(p, pl, "seed/", 5) || tx_prefix(p, pl, "include/", 8);
@@ -224,9 +238,10 @@ static int rk_precommit_match(const char *rows_file, const char *paths_file) {
     if (!rows || !names) return 2;
     cur_rk_name[0] = 0; cur_rk_sum[0] = 0;
     while (at < rn) {
-        long e = tx_chr(rows + at, rn - at, '\n'), l = e < 0 ? rn - at : e, ps = 0, pe = 0, a2;
+        long e = tx_chr(rows + at, rn - at, '\n'), raw_l = e < 0 ? rn - at : e, l = raw_l, ps = 0, pe = 0, a2;
         const char *r = rows + at;
         int soft = 0;
+        if (l > 0 && r[l - 1] == '\r') l--;
         if (l > 8 && tx_prefix(r, l, "RATCHET\t", 8)) {
             long o1, l1, o2, l2, o3, l3;
             cur_rk_name[0] = 0; cur_rk_sum[0] = 0; cur_rk_fail = 0; cur_rk_gblk = 0;
@@ -271,7 +286,7 @@ static int rk_precommit_match(const char *rows_file, const char *paths_file) {
                 }
             }
         }
-        at += l + 1;
+        at += raw_l + 1;
     }
     printf("RATCHETS_PRECOMMIT\tblocked=%d\n", blocked);
     return 0;
