@@ -1,4 +1,5 @@
 /* tools/dup-census.cx -- census of duplicated static functions in tools/*.cx and tools/cxlib/*.cx (the 15th ratchet).
+ * 重复是测量,合并是决定(须权衡间接成本、平台是否已有、副本们是契约一致还是仅文字一致;已核实契约不同或合并净亏的重复组登记入白名单,不计入棘轮,防止为降数字做净亏合并)
  *
  *   sh ./unisacc.com tools/dup-census.cx [-- --print | --check | --write] [--root DIR]
  *
@@ -9,15 +10,18 @@
  *                lines / defs per name: an upper bound of what one shared copy would save);
  *   verbatim:    a group is 2 or more definitions with the same name and byte-identical text; per group the
  *                copies, lines of one copy, total lines (copies x lines) and redundant lines ((copies-1) x lines);
- *   fragments:   counts of hand-written snippets (information only, never judged).
+ *   fragments:   counts of hand-written snippets (information only, never judged);
+ *   whitelist:   optional build/dup-census-whitelist.tsv (columns: name<TAB>reason<TAB>verified_date).  Matched
+ *                function names are marked whitelisted=N in output and excluded from ratchet failure counts.
  * --print writes the report (stable: no time, no absolute path) to stdout:
  *   GROUP<TAB>name<TAB>copies<TAB>lines<TAB>total<TAB>redundant     one row per verbatim group, by name
+ *   WHITELIST<TAB>name<TAB>whitelisted=N<TAB>copies=C<TAB>redundant=R   matched whitelisted function rows
  *   FRAG<TAB>label<TAB>occurrences<TAB>files                         information rows
- *   DUP_SUMMARY files=.. static_fn=.. dup_names=.. dup_defs=.. excess_lines=.. verbatim_groups=.. verbatim_defs=.. verbatim_lines=.. verbatim_redundant=..
+ *   DUP_SUMMARY files=.. static_fn=.. dup_names=.. dup_defs=.. excess_lines=.. verbatim_groups=.. verbatim_defs=.. verbatim_lines=.. verbatim_redundant=.. [whitelisted=..]
  * --write replaces build/dup-census-baseline.tsv (rows total<TAB>verbatim_groups|verbatim_redundant<TAB>N and
  * group<TAB>name<TAB>copies<TAB>lines).  --check compares with it and prints
- *   dup-census: ok: verbatim_groups=N (baseline M) verbatim_redundant=R (baseline S)
- *   dup-census: FAIL: new=A grown=B groups=N baseline=M redundant=R baseline=S
+ *   dup-census: ok: verbatim_groups=N (baseline M) verbatim_redundant=R (baseline S) whitelisted=W
+ *   dup-census: FAIL: new=A grown=B groups=N baseline=M redundant=R baseline=S whitelisted=W
  * preceded by rows "dup-census: NAME has N verbatim copies, baseline M" for a group the baseline lacks (M 0) or
  * one with more copies, and "dup-census: tools total lines verbatim_redundant R, baseline S" when that total grew.
  * Fewer groups, copies or lines pass (only go down); --write then lowers the baseline.  rc 0 ok, 1 FAIL, 2 error. */
@@ -32,11 +36,13 @@
 #define MAXF 4096
 #define MAXE 80000
 #define MAXG 4096
+#define MAXWL 256
 static const char *root = ".";
 static char *fname[MAXF]; static char *fbuf[MAXF]; static long flen[MAXF]; static int nf;
 static int e_file[MAXE], e_lines[MAXE]; static long e_s[MAXE], e_e[MAXE], e_ns[MAXE], e_nl[MAXE];
 static unsigned long e_h[MAXE]; static int ne, idx[MAXE];
 static int g_rep[MAXG], g_copies[MAXG], g_lines[MAXG], g_i0[MAXG]; static int ng;
+static char wl_name[MAXWL][128]; static int nwl;
 
 static const char *frag[][2] = {
     {"path.fmt-join", "\"%s/%s\""}, {"tsv.hand-tabchr", "'\\t'"}, {"fmt.snprintf", "snprintf("},
@@ -152,6 +158,85 @@ static void census(void) {
 static void gname(int g, const char **s, long *l) { int e = g_rep[g]; *s = fbuf[e_file[e]] + e_ns[e]; *l = e_nl[e]; }
 static long num(const char *s, long n) { long v = 0, x; for (x = 0; x < n && s[x] >= '0' && s[x] <= '9'; x++) v = v * 10 + (s[x] - '0'); return v; }
 
+static int dc_wl_date(const char *s, long n) {
+    int i;
+    if (n != 10 || s[4] != '-' || s[7] != '-') return 0;
+    for (i = 0; i < 10; i++) {
+        if (i == 4 || i == 7) continue;
+        if (s[i] < '0' || s[i] > '9') return 0;
+    }
+    return 1;
+}
+static int dc_wl_has(const char *nm, long nl) {
+    int i;
+    for (i = 0; i < nwl; i++) {
+        if (tx_len(wl_name[i], 128) == nl && mm_same(wl_name[i], nm, nl)) return 1;
+    }
+    return 0;
+}
+static int dc_wl_load(const char *rdir) {
+    char wpath[1300]; size_t m = 0; char *t; long at = 0; int st;
+    nwl = 0;
+    if (cx_fmt(wpath, sizeof wpath, "%s/build/dup-census-whitelist.tsv", rdir)) return -1;
+    st = sy_is_reg(wpath);
+    if (st == -ENOENT) return 0;
+    if (st != 1) { fprintf(stderr, "dup-census: cannot stat %s\n", wpath); return -1; }
+    t = cx_read(wpath, &m);
+    if (!t) { fprintf(stderr, "dup-census: cannot read %s\n", wpath); return -1; }
+    while (at < (long)m) {
+        long e = tx_chr(t + at, (long)m - at, '\n'), ln = e < 0 ? (long)m - at : e;
+        long o0, l0, o1, l1, o2, l2, o3, l3, k; int has_nonws = 0;
+        if (ln > 0 && t[at] != '#') {
+            if (ln == 25 && mm_same(t + at, "name\treason\tverified_date", 25)) { at += ln + 1; continue; }
+            if (tx_field(t + at, ln, '\t', 0, &o0, &l0) ||
+                tx_field(t + at, ln, '\t', 1, &o1, &l1) ||
+                tx_field(t + at, ln, '\t', 2, &o2, &l2) ||
+                !tx_field(t + at, ln, '\t', 3, &o3, &l3)) {
+                fprintf(stderr, "dup-census: whitelist row requires 3 columns (name, reason, verified_date) in %s\n", wpath);
+                mm_free(t); return -1;
+            }
+            if (l0 <= 0 || l0 >= 128) { fprintf(stderr, "dup-census: invalid whitelist name in %s\n", wpath); mm_free(t); return -1; }
+            for (k = 0; k < l0; k++) if (!isid((unsigned char)t[at + o0 + k])) { fprintf(stderr, "dup-census: invalid whitelist identifier in %s\n", wpath); mm_free(t); return -1; }
+            for (k = 0; k < l1; k++) if (t[at + o1 + k] != ' ' && t[at + o1 + k] != '\t' && t[at + o1 + k] != '\r') has_nonws = 1;
+            if (l1 <= 0 || !has_nonws || (l1 == 1 && t[at + o1] == '-')) {
+                fprintf(stderr, "dup-census: missing whitelist reason in %s\n", wpath);
+                mm_free(t); return -1;
+            }
+            if (!dc_wl_date(t + at + o2, l2)) {
+                fprintf(stderr, "dup-census: missing or invalid whitelist verified_date (YYYY-MM-DD required) in %s\n", wpath);
+                mm_free(t); return -1;
+            }
+            if (dc_wl_has(t + at + o0, l0) || nwl >= MAXWL) {
+                fprintf(stderr, "dup-census: duplicate or excess whitelist name in %s\n", wpath);
+                mm_free(t); return -1;
+            }
+            mm_copy(wl_name[nwl], sizeof wl_name[0], t + at + o0, l0);
+            wl_name[nwl][l0] = 0;
+            nwl++;
+        }
+        at += ln + 1;
+    }
+    mm_free(t);
+    return 0;
+}
+static void dc_wl_base(const char *t, long tn, int *bg_wl, long *br_wl) {
+    long at = 0;
+    *bg_wl = 0; *br_wl = 0;
+    while (at < tn) {
+        long e = tx_chr(t + at, tn - at, '\n'), ln = e < 0 ? tn - at : e, o1, l1, o2, l2, o3, l3;
+        if (ln > 6 && mm_same(t + at, "group\t", 6) &&
+            !tx_field(t + at, ln, '\t', 1, &o1, &l1) &&
+            !tx_field(t + at, ln, '\t', 2, &o2, &l2) &&
+            !tx_field(t + at, ln, '\t', 3, &o3, &l3) &&
+            dc_wl_has(t + at + o1, l1)) {
+            long c = num(t + at + o2, l2), l = num(t + at + o3, l3);
+            (*bg_wl)++;
+            if (c > 1 && l > 0) *br_wl += (c - 1) * l;
+        }
+        at += ln + 1;
+    }
+}
+
 /* baseline: one name may carry more than one verbatim group; compare per name, copies summed */
 static int base_find(const char *t, long tn, const char *nm, long nl, long *copies) {
     long at = 0; int found = 0;
@@ -187,6 +272,7 @@ int main(int argc, char **argv) {
     }
     if (list_dir("tools")) { fprintf(stderr, "dup-census: cannot list %s/tools\n", root); return 2; }
     list_dir("tools/cxlib");   /* optional */
+    if (dc_wl_load(root)) return 2;
     census();
     if (cx_fmt(bpath, sizeof bpath, "%s/build/dup-census-baseline.tsv", root)) return 2;
     if (mode == 3) {   /* --where NAME: the files of every verbatim group of that name, one row per copy */
@@ -198,10 +284,29 @@ int main(int argc, char **argv) {
         return 0;
     }
     if (mode == 0) {
+        int wl_groups = 0;
         for (g = 0; g < ng; g++) { const char *s; long l; gname(g, &s, &l); printf("GROUP\t%.*s\t%d\t%d\t%ld\t%ld\n", (int)l, s, g_copies[g], g_lines[g], (long)g_copies[g] * g_lines[g], (long)(g_copies[g] - 1) * g_lines[g]); }
+        for (g = 0; g < ng; g = h) {
+            const char *s; long l, copies = 0, wred = 0;
+            gname(g, &s, &l);
+            for (h = g; h < ng; h++) {
+                const char *s2; long l2; gname(h, &s2, &l2);
+                if (l2 != l || !mm_same(s, s2, l)) break;
+                copies += g_copies[h];
+                wred += (long)(g_copies[h] - 1) * g_lines[h];
+            }
+            if (dc_wl_has(s, l)) {
+                wl_groups += h - g;
+                printf("WHITELIST\t%.*s\twhitelisted=%d\tcopies=%ld\tredundant=%ld\n", (int)l, s, h - g, copies, wred);
+            }
+        }
         for (a = 0; a < NFRAG; a++) printf("FRAG\t%s\t%ld\t%d\n", frag[a][0], fr_occ[a], fr_files[a]);
-        printf("DUP_SUMMARY files=%d static_fn=%d dup_names=%ld dup_defs=%ld excess_lines=%ld verbatim_groups=%d verbatim_defs=%ld verbatim_lines=%ld verbatim_redundant=%ld\n",
-               nf, ne, s_dupnames, s_dupdefs, s_excess, ng, s_vdefs, s_vlines, s_vred);
+        if (wl_groups > 0)
+            printf("DUP_SUMMARY files=%d static_fn=%d dup_names=%ld dup_defs=%ld excess_lines=%ld verbatim_groups=%d verbatim_defs=%ld verbatim_lines=%ld verbatim_redundant=%ld whitelisted=%d\n",
+                   nf, ne, s_dupnames, s_dupdefs, s_excess, ng, s_vdefs, s_vlines, s_vred, wl_groups);
+        else
+            printf("DUP_SUMMARY files=%d static_fn=%d dup_names=%ld dup_defs=%ld excess_lines=%ld verbatim_groups=%d verbatim_defs=%ld verbatim_lines=%ld verbatim_redundant=%ld\n",
+                   nf, ne, s_dupnames, s_dupdefs, s_excess, ng, s_vdefs, s_vlines, s_vred);
         return 0;
     }
     if (mode == 2) {
@@ -213,21 +318,34 @@ int main(int argc, char **argv) {
         printf("DUP_CENSUS_WRITE\tgroups=%d\tredundant=%ld\n", ng, s_vred);
         return 0;
     }
-    {   size_t m = 0; char *t = cx_read(bpath, &m); long bg, br; int nw = 0, gr = 0, bad;
+    {   size_t m = 0; char *t = cx_read(bpath, &m); long bg, br, wl_red = 0, base_wl_r = 0, eff_bg, eff_vred, eff_br;
+        int nw = 0, gr = 0, wl_groups = 0, base_wl_g = 0, eff_ng, bad;
         if (!t) { fprintf(stderr, "dup-census: cannot read %s\n", bpath); return 2; }
         bg = base_total(t, (long)m, "verbatim_groups"); br = base_total(t, (long)m, "verbatim_redundant");
         if (bg < 0 || br < 0) { fprintf(stderr, "dup-census: baseline lacks total rows\n"); return 2; }
+        dc_wl_base(t, (long)m, &base_wl_g, &base_wl_r);
         for (g = 0; g < ng; g = h) {
-            const char *s; long l, copies = 0, bc = 0; int found;
+            const char *s; long l, copies = 0, wred = 0, bc = 0; int found;
             gname(g, &s, &l);
-            for (h = g; h < ng; h++) { const char *s2; long l2; gname(h, &s2, &l2); if (l2 != l || !mm_same(s, s2, l)) break; copies += g_copies[h]; }
+            for (h = g; h < ng; h++) {
+                const char *s2; long l2; gname(h, &s2, &l2);
+                if (l2 != l || !mm_same(s, s2, l)) break;
+                copies += g_copies[h];
+                wred += (long)(g_copies[h] - 1) * g_lines[h];
+            }
+            if (dc_wl_has(s, l)) { wl_groups += h - g; wl_red += wred;
+                printf("dup-census: %.*s whitelisted=%d (copies=%ld)\n", (int)l, s, h - g, copies);
+                continue;
+            }
             found = base_find(t, (long)m, s, l, &bc);
             if (!found || copies > bc) { printf("dup-census: %.*s has %ld verbatim copies, baseline %ld\n", (int)l, s, copies, bc); if (found) gr++; else nw++; }
         }
-        if (s_vred > br) printf("dup-census: tools total lines verbatim_redundant %ld, baseline %ld\n", s_vred, br);
-        bad = nw || gr || ng > bg || s_vred > br;
-        if (bad) printf("dup-census: FAIL: new=%d grown=%d groups=%d baseline=%ld redundant=%ld baseline=%ld\n", nw, gr, ng, bg, s_vred, br);
-        else printf("dup-census: ok: verbatim_groups=%d (baseline %ld) verbatim_redundant=%ld (baseline %ld)\n", ng, bg, s_vred, br);
+        eff_ng = ng - wl_groups; eff_bg = bg - base_wl_g;
+        eff_vred = s_vred - wl_red; eff_br = br - base_wl_r;
+        if (eff_vred > eff_br) printf("dup-census: tools total lines verbatim_redundant %ld, baseline %ld\n", eff_vred, eff_br);
+        bad = nw || gr || eff_ng > eff_bg || eff_vred > eff_br;
+        if (bad) printf("dup-census: FAIL: new=%d grown=%d groups=%d baseline=%ld redundant=%ld baseline=%ld whitelisted=%d\n", nw, gr, eff_ng, eff_bg, eff_vred, eff_br, wl_groups);
+        else printf("dup-census: ok: verbatim_groups=%d (baseline %ld) verbatim_redundant=%ld (baseline %ld) whitelisted=%d\n", eff_ng, eff_bg, eff_vred, eff_br, wl_groups);
         return bad ? 1 : 0;
     }
 }

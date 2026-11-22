@@ -2,12 +2,31 @@
 #pragma unisa use mem.heap
 #pragma unisa use mem.bytes
 #pragma unisa use mem.grow
+#pragma unisa use mem.vec
 #pragma unisa use text.text
 #pragma unisa use text.edit
 #pragma unisa use text.conv
+#pragma unisa use text.fmt
+#pragma unisa use textx.chunked
+#pragma unisa use addr
+#pragma unisa use tcp
+#pragma unisa use sock
+#pragma unisa use sys.netraw
+#pragma unisa use sys.netpoll
+#pragma unisa use sys.netnb
+#pragma unisa use sys.fs
+#pragma unisa use sys.fd
+#pragma unisa use sys.io
+#pragma unisa use sys.proc
+#pragma unisa use sys.posix
+#pragma unisa use sys.sig
+#pragma unisa use sys.sigwatch
+#pragma unisa use sys.sysinfo
+#pragma unisa use sys.time
 /* ext.net HTTP/1.1 plaintext server core (pure cx: no #include, no #if, no dock, no libc).
- * Slice 2: config, incremental header framing, request line/header parser, smuggling guards,
- * and hs_req_* accessors. */
+// ENOSYS: refusal contract documented in this comment (non-Linux targets return -ENOSYS at hs_listen_cfg / hs_serve / hs_step).
+ * Slices 2-4: config, parser, smuggling guards, hs_server lifecycle, sy_fork_session workers,
+ * pipe/fd closure, zombie reaping, and hs_close(drain_ms) process-group kill. */
 
 enum {
     HS_OK = 0,
@@ -31,7 +50,8 @@ enum {
     HS_DEFAULT_BODY_TIMEOUT_MS = 30000,
     HS_DEFAULT_WRITE_TIMEOUT_MS = 30000,
     HS_DEFAULT_CHUNK_WRITE_TIMEOUT_MS = 5000,
-    HS_DEFAULT_IDLE_TIMEOUT_MS = 255000
+    HS_DEFAULT_IDLE_TIMEOUT_MS = 255000,
+    HS_DEFAULT_KEEP_ALIVE_MAX = 100
 };
 
 typedef struct hs_config {
@@ -40,6 +60,7 @@ typedef struct hs_config {
     int reuse_port;
     int backlog;
     int max_children;
+    int keep_alive_max;
     long max_header_bytes;
     long max_body_bytes;
     long max_total_body_bytes;
@@ -59,6 +80,12 @@ typedef struct hs_header {
     long val_len;
 } hs_header_t;
 
+typedef struct hs_conn_state {
+    int fd;
+    mg_buf *rbuf;
+    const hs_config_t *cfg;
+} hs_conn_state;
+
 typedef struct hs_request {
     mg_buf raw;
     char *method;
@@ -74,6 +101,11 @@ typedef struct hs_request {
     long hdr_end;
     int nheaders;
     hs_header_t headers[HS_DEFAULT_MAX_HEADERS];
+    hs_conn_state *conn;
+    int body_done;
+    int sent_100;
+    int body_err_status;
+    int force_close;
 } hs_request;
 
 void hs_config_init(hs_config_t *cfg) {
@@ -83,6 +115,7 @@ void hs_config_init(hs_config_t *cfg) {
     cfg->reuse_port = 1;
     cfg->backlog = HS_DEFAULT_BACKLOG;
     cfg->max_children = HS_DEFAULT_MAX_CHILDREN;
+    cfg->keep_alive_max = HS_DEFAULT_KEEP_ALIVE_MAX;
     cfg->max_header_bytes = HS_DEFAULT_MAX_HEADER_BYTES;
     cfg->max_body_bytes = HS_DEFAULT_MAX_BODY_BYTES;
     cfg->max_total_body_bytes = HS_DEFAULT_MAX_TOTAL_BODY_BYTES;
@@ -110,6 +143,11 @@ void hs_req_init(hs_request *req) {
     req->err_status = 0;
     req->hdr_end = 0;
     req->nheaders = 0;
+    req->conn = 0;
+    req->body_done = 0;
+    req->sent_100 = 0;
+    req->body_err_status = 0;
+    req->force_close = 0;
 }
 
 void hs_req_free(hs_request *req) {
@@ -127,6 +165,11 @@ void hs_req_free(hs_request *req) {
     req->err_status = 0;
     req->hdr_end = 0;
     req->nheaders = 0;
+    req->conn = 0;
+    req->body_done = 0;
+    req->sent_100 = 0;
+    req->body_err_status = 0;
+    req->force_close = 0;
 }
 
 void hs_req_reset(hs_request *req) {
@@ -432,7 +475,991 @@ int hs_req_expect_continue(const void *req_p) {
     const hs_request *r = (const hs_request *)req_p;
     return r ? r->expect_continue : 0;
 }
+typedef int (*hs_handler)(void *ud, void *req, void *res);
+
+typedef struct hs_server {
+    int listen_fd;
+    int port;
+    int max_children;
+    int active_children;
+    int crashed_children;
+    int closing;
+    long emfile_until_ms;
+    int *child_pids;
+    hs_config_t cfg;
+} hs_server;
+
+typedef struct hs_res_hdr {
+    char *name;
+    char *value;
+} hs_res_hdr;
+
+typedef struct hs_response {
+    int fd;
+    int status_code;
+    char *reason;
+    int sent;
+    int close_after;
+    int keep_alive;
+    int is_head;
+    int http_ver;
+    int streaming;
+    int stream_chunked;
+    int stream_nobody;
+    int stream_ended;
+    long write_timeout_ms;
+    long chunk_write_timeout_ms;
+    long (*now_ms_fn)(void);
+    int nhdrs;
+    hs_res_hdr hdrs[64];
+} hs_response;
+
 int hs_req_err_status(const void *req_p) {
     const hs_request *r = (const hs_request *)req_p;
     return r ? r->err_status : 0;
+}
+
+/* Slice 3+4: hs_server lifecycle, sy_fork_session workers, pipe/fd closure,
+ * zombie reaping, non-blocking accept/quota/EMFILE, basic response writer, and hs_close(drain_ms). */
+
+static long hs_now(const hs_config_t *cfg) {
+    if (cfg && cfg->now_ms_fn) return cfg->now_ms_fn();
+    return sy_now_ms();
+}
+
+static const char *hs_default_reason(int code) {
+    switch (code) {
+    case 200: return "OK";
+    case 201: return "Created";
+    case 204: return "No Content";
+    case 400: return "Bad Request";
+    case 404: return "Not Found";
+    case 408: return "Request Timeout";
+    case 413: return "Payload Too Large";
+    case 417: return "Expectation Failed";
+    case 431: return "Request Header Fields Too Large";
+    case 500: return "Internal Server Error";
+    case 501: return "Not Implemented";
+    case 503: return "Service Unavailable";
+    case 505: return "HTTP Version Not Supported";
+    }
+    return "OK";
+}
+
+static int hs_send_timeout(int fd, const void *buf, long n, long timeout_ms, long (*now_fn)(void)) {
+    const unsigned char *p = (const unsigned char *)buf;
+    long done = 0;
+    long to = timeout_ms > 0 ? timeout_ms : HS_DEFAULT_WRITE_TIMEOUT_MS;
+    long start = now_fn ? now_fn() : sy_now_ms();
+    long dl = start + to;
+    if (n == 0) return 0;
+    if (!p || n < 0) return -EINVAL;
+    while (done < n) {
+        long r = sy_sock_send(fd, p + done, n - done);
+        if (r > 0) {
+            done += r;
+            continue;
+        }
+        if (r == 0) return -EPIPE;
+        if (r == -EINTR) continue;
+        if (r == -EAGAIN || r == -EWOULDBLOCK) {
+            long cur = now_fn ? now_fn() : sy_now_ms();
+            long left = dl - cur;
+            int pr;
+            if (left <= 0) return -ETIMEDOUT;
+            pr = sy_sock_poll(fd, SY_POLLOUT | SY_POLLERR | SY_POLLHUP, left);
+            if (pr == 0) return -ETIMEDOUT;
+            if (pr < 0 && pr != -EINTR) return pr;
+            continue;
+        }
+        return (int)r;
+    }
+    return 0;
+}
+
+static void hs_send_503_and_close(int cfd) {
+    const char *msg = "HTTP/1.1 503 Service Unavailable\r\nContent-Length: 19\r\nConnection: close\r\nRetry-After: 1\r\n\r\nService Unavailable";
+    long mlen = (long)tx_len(msg, 512);
+    (void)sy_snb_set_nonblock(cfd, 1);
+    (void)hs_send_timeout(cfd, msg, mlen, 500, 0);
+    (void)sy_shutdown(cfd, SY_SHUT_WR);
+    (void)sy_close(cfd);
+}
+
+static int hs_res_is_nobody(int code) {
+    return (code >= 100 && code < 200) || code == 204 || code == 304;
+}
+
+static void hs_res_init(hs_response *r, int fd, int keep_alive, int is_head, int http_ver, const hs_config_t *cfg) {
+    r->fd = fd;
+    r->status_code = 200;
+    r->reason = 0;
+    r->sent = 0;
+    r->close_after = 0;
+    r->keep_alive = keep_alive;
+    r->is_head = is_head;
+    r->http_ver = http_ver ? http_ver : 11;
+    r->streaming = 0;
+    r->stream_chunked = 0;
+    r->stream_nobody = 0;
+    r->stream_ended = 0;
+    r->write_timeout_ms = cfg ? cfg->write_timeout_ms : HS_DEFAULT_WRITE_TIMEOUT_MS;
+    r->chunk_write_timeout_ms = cfg ? cfg->chunk_write_timeout_ms : HS_DEFAULT_CHUNK_WRITE_TIMEOUT_MS;
+    r->now_ms_fn = cfg ? cfg->now_ms_fn : 0;
+    r->nhdrs = 0;
+}
+
+static void hs_res_free(hs_response *r) {
+    int i;
+    if (!r) return;
+    if (r->reason) { mm_free(r->reason); r->reason = 0; }
+    for (i = 0; i < r->nhdrs; i++) {
+        if (r->hdrs[i].name) mm_free(r->hdrs[i].name);
+        if (r->hdrs[i].value) mm_free(r->hdrs[i].value);
+        r->hdrs[i].name = 0;
+        r->hdrs[i].value = 0;
+    }
+    r->nhdrs = 0;
+}
+
+int hs_res_status(void *res_p, int status_code, const char *reason) {
+    hs_response *r = (hs_response *)res_p;
+    long i, rlen;
+    if (!r || r->sent || status_code < 100 || status_code > 599) return -EINVAL;
+    if (reason) {
+        rlen = tx_len(reason, 4096);
+        if (rlen < 0) return -EINVAL;
+        for (i = 0; i < rlen; i++) {
+            unsigned char ch = (unsigned char)reason[i];
+            if (ch == '\r' || ch == '\n' || ch < 0x20 || ch == 0x7f) return -EINVAL;
+        }
+        if (r->reason) mm_free(r->reason);
+        r->reason = hs_dup_span(reason, rlen);
+        if (!r->reason) return -ENOMEM;
+    } else {
+        if (r->reason) { mm_free(r->reason); r->reason = 0; }
+    }
+    r->status_code = status_code;
+    return 0;
+}
+
+int hs_res_header(void *res_p, const char *name, const char *value) {
+    hs_response *r = (hs_response *)res_p;
+    long nlen, vlen, i;
+    char *ns, *vs;
+    if (!r || r->sent || !name || !name[0] || !value) return -EINVAL;
+    nlen = tx_len(name, 4096);
+    vlen = tx_len(value, 65536);
+    if (nlen <= 0 || vlen < 0) return -EINVAL;
+    for (i = 0; i < nlen; i++) {
+        if (!hs_is_tchar((unsigned char)name[i])) return -EINVAL;
+    }
+    for (i = 0; i < vlen; i++) {
+        unsigned char ch = (unsigned char)value[i];
+        if (ch == '\r' || ch == '\n' || (ch < 0x20 && ch != '\t') || ch == 0x7f) return -EINVAL;
+    }
+    if (tx_ieq(name, nlen, "Content-Length", 14) || tx_ieq(name, nlen, "Transfer-Encoding", 17)) return 0;
+    if (tx_ieq(name, nlen, "Connection", 10)) {
+        if (tx_ieq(value, vlen, "close", 5)) r->close_after = 1;
+        return 0;
+    }
+    if (r->nhdrs >= 64) return -ENOSPC;
+    ns = hs_dup_span(name, nlen);
+    vs = hs_dup_span(value, vlen);
+    if (!ns || !vs) {
+        if (ns) mm_free(ns);
+        if (vs) mm_free(vs);
+        return -ENOMEM;
+    }
+    r->hdrs[r->nhdrs].name = ns;
+    r->hdrs[r->nhdrs].value = vs;
+    r->nhdrs++;
+    return 0;
+}
+
+int hs_res_send(void *res_p, const void *body, long len) {
+    hs_response *r = (hs_response *)res_p;
+    mg_buf hbuf;
+    char sline[512], clbuf[64];
+    const char *rsn, *conn;
+    int i, rc, nobody;
+    if (!r || r->sent || r->streaming || len < 0 || (len > 0 && !body)) return -EINVAL;
+    nobody = hs_res_is_nobody(r->status_code);
+    mg_init(&hbuf);
+    rsn = r->reason ? r->reason : hs_default_reason(r->status_code);
+    if (tx_snprintf(sline, sizeof sline, "HTTP/1.1 %d %s\r\n", r->status_code, rsn) < 0) {
+        mg_free(&hbuf);
+        return -EINVAL;
+    }
+    if (mg_append(&hbuf, sline, tx_len(sline, sizeof sline)) != 0) { mg_free(&hbuf); return -ENOMEM; }
+    for (i = 0; i < r->nhdrs; i++) {
+        long nl = tx_len(r->hdrs[i].name, 4096);
+        long vl = tx_len(r->hdrs[i].value, 65536);
+        if (mg_append(&hbuf, r->hdrs[i].name, nl) != 0 ||
+            mg_append(&hbuf, ": ", 2) != 0 ||
+            mg_append(&hbuf, r->hdrs[i].value, vl) != 0 ||
+            mg_append(&hbuf, "\r\n", 2) != 0) {
+            mg_free(&hbuf);
+            return -ENOMEM;
+        }
+    }
+    if (!nobody) {
+        if (tx_snprintf(clbuf, sizeof clbuf, "Content-Length: %ld\r\n", len) < 0) {
+            mg_free(&hbuf);
+            return -EINVAL;
+        }
+        if (mg_append(&hbuf, clbuf, tx_len(clbuf, sizeof clbuf)) != 0) { mg_free(&hbuf); return -ENOMEM; }
+    }
+    conn = (!r->keep_alive || r->close_after) ? "Connection: close\r\n\r\n" : "Connection: keep-alive\r\n\r\n";
+    if (mg_append(&hbuf, conn, tx_len(conn, 64)) != 0) { mg_free(&hbuf); return -ENOMEM; }
+
+    rc = hs_send_timeout(r->fd, hbuf.data, hbuf.len, r->write_timeout_ms, r->now_ms_fn);
+    mg_free(&hbuf);
+    if (rc < 0) { r->close_after = 1; return rc; }
+    if (len > 0 && !nobody && !r->is_head) {
+        rc = hs_send_timeout(r->fd, body, len, r->write_timeout_ms, r->now_ms_fn);
+        if (rc < 0) { r->close_after = 1; return rc; }
+    }
+    r->sent = 1;
+    return 0;
+}
+
+static void hs_send_err_close(int fd, int status, const hs_config_t *cfg) {
+    hs_response res;
+    const char *msg = hs_default_reason(status);
+    hs_res_init(&res, fd, 0, 0, 11, cfg);
+    res.close_after = 1;
+    (void)hs_res_status(&res, status, msg);
+    (void)hs_res_send(&res, msg, tx_len(msg, 128));
+    hs_res_free(&res);
+}
+
+typedef struct hs_child_ctx {
+    int listen_fd;
+    int client_fd;
+    int saved_stderr_fd;
+    hs_handler fn;
+    void *ud;
+    hs_config_t cfg;
+} hs_child_ctx;
+
+static int hs_child_entry(void *ud) {
+    hs_child_ctx *ctx = (hs_child_ctx *)ud;
+    mg_buf rbuf;
+    hs_request req;
+    hs_response res;
+    int req_idx = 0;
+
+    (void)sy_close(ctx->listen_fd);
+    ctx->listen_fd = -1;
+    {
+        int dn = sy_open("/dev/null", O_WRONLY, 0);
+        if (dn >= 0) {
+            if (dn != 1) { (void)sy_dup2(dn, 1); (void)sy_close(dn); }
+        }
+    }
+    if (ctx->saved_stderr_fd >= 0) {
+        if (ctx->saved_stderr_fd != 2) (void)sy_dup2(ctx->saved_stderr_fd, 2);
+        (void)sy_close(ctx->saved_stderr_fd);
+        ctx->saved_stderr_fd = -1;
+    }
+    {
+        int sterm = sy_sig_number("SIGTERM");
+        int sint = sy_sig_number("SIGINT");
+        if (sterm > 0) (void)sy_sig_default(sterm);
+        if (sint > 0) (void)sy_sig_default(sint);
+    }
+    (void)sy_snb_set_nonblock(ctx->client_fd, 1);
+
+    mg_init(&rbuf);
+    hs_req_init(&req);
+    hs_res_init(&res, ctx->client_fd, 0, 0, 11, &ctx->cfg);
+
+    for (;;) {
+        long start = hs_now(&ctx->cfg);
+        long dl = start + (req_idx == 0 ? ctx->cfg.header_timeout_ms : ctx->cfg.idle_timeout_ms);
+        int have_first_byte = (rbuf.len > 0) ? 1 : 0;
+        long hend = 0;
+        int parse_rc = HS_PARSE_NEED_MORE;
+        int fatal = 0;
+
+        if (have_first_byte) {
+            long hdr_dl = start + ctx->cfg.header_timeout_ms;
+            if (hdr_dl < dl) dl = hdr_dl;
+            parse_rc = hs_parse_request(&req, (const char *)rbuf.data, rbuf.len, ctx->cfg.max_header_bytes, &hend);
+        }
+
+        while (parse_rc == HS_PARSE_NEED_MORE) {
+            unsigned char tmp[4096];
+            long r = sy_sock_recv(ctx->client_fd, tmp, (long)sizeof tmp);
+            if (r > 0) {
+                if (!have_first_byte) {
+                    long hdr_dl = hs_now(&ctx->cfg) + ctx->cfg.header_timeout_ms;
+                    have_first_byte = 1;
+                    if (hdr_dl < dl) dl = hdr_dl;
+                }
+                if (rbuf.len + r > ctx->cfg.max_header_bytes + 4096) {
+                    hs_send_err_close(ctx->client_fd, 431, &ctx->cfg);
+                    fatal = 1;
+                    break;
+                }
+                if (mg_append(&rbuf, tmp, r) != 0) { fatal = 1; break; }
+                parse_rc = hs_parse_request(&req, (const char *)rbuf.data, rbuf.len, ctx->cfg.max_header_bytes, &hend);
+                if (parse_rc != HS_PARSE_NEED_MORE) break;
+                continue;
+            }
+            if (r == 0) {
+                if (rbuf.len > 0) hs_send_err_close(ctx->client_fd, 400, &ctx->cfg);
+                fatal = 1;
+                break;
+            }
+            if (r == -EINTR) continue;
+            if (r == -EAGAIN || r == -EWOULDBLOCK) {
+                long left = dl - hs_now(&ctx->cfg);
+                int pr;
+                if (left <= 0) {
+                    if (rbuf.len > 0) hs_send_err_close(ctx->client_fd, 408, &ctx->cfg);
+                    fatal = 1;
+                    break;
+                }
+                pr = sy_sock_poll(ctx->client_fd, SY_POLLIN | SY_POLLERR | SY_POLLHUP, left);
+                if (pr == 0) {
+                    if (rbuf.len > 0) hs_send_err_close(ctx->client_fd, 408, &ctx->cfg);
+                    fatal = 1;
+                    break;
+                }
+                if (pr < 0 && pr != -EINTR) { fatal = 1; break; }
+                continue;
+            }
+            fatal = 1;
+            break;
+        }
+
+        if (fatal) break;
+        if (parse_rc < 0) {
+            int es = hs_req_err_status(&req);
+            hs_send_err_close(ctx->client_fd, es > 0 ? es : 400, &ctx->cfg);
+            break;
+        }
+
+        if (hend > 0 && hend <= rbuf.len) {
+            long rem = rbuf.len - hend;
+            if (rem > 0) (void)mm_move(rbuf.data, rbuf.cap, rbuf.data + hend, rem);
+            (void)mg_truncate(&rbuf, rem);
+            if (rem == 0 && rbuf.cap > 65536) mg_free(&rbuf);
+        }
+
+        if (req.content_length > ctx->cfg.max_body_bytes) {
+            hs_send_err_close(ctx->client_fd, 413, &ctx->cfg);
+            break;
+        }
+
+        {
+            hs_conn_state cstate;
+            int effective_ka = (req.keep_alive && (req_idx + 1 < ctx->cfg.keep_alive_max)) ? 1 : 0;
+            int is_head = tx_eqz(hs_req_method(&req), "HEAD") ? 1 : 0;
+            int hrc;
+            cstate.fd = ctx->client_fd;
+            cstate.rbuf = &rbuf;
+            cstate.cfg = &ctx->cfg;
+            req.conn = &cstate;
+
+            hs_res_free(&res);
+            hs_res_init(&res, ctx->client_fd, effective_ka, is_head, req.version, &ctx->cfg);
+            hrc = ctx->fn(ctx->ud, &req, &res);
+            req.conn = 0;
+
+            if (req.body_err_status != 0 && !res.sent) {
+                hs_send_err_close(ctx->client_fd, req.body_err_status, &ctx->cfg);
+                break;
+            }
+            if (!res.sent) {
+                if (hrc == HS_DEFAULT_404) {
+                    (void)hs_res_status(&res, 404, "Not Found");
+                    (void)hs_res_send(&res, "Not Found", 9);
+                } else if (hrc < 0) {
+                    res.close_after = 1;
+                    (void)hs_res_status(&res, 500, "Internal Server Error");
+                    (void)hs_res_send(&res, "Internal Server Error", 21);
+                }
+            }
+            if (!effective_ka || res.close_after || req.force_close || hrc < 0 || !res.sent ||
+                (!req.body_done && (req.content_length > 0 || req.is_chunked))) {
+                break;
+            }
+        }
+        hs_req_free(&req);
+        req_idx++;
+    }
+
+    hs_res_free(&res);
+    hs_req_free(&req);
+    mg_free(&rbuf);
+    (void)sy_shutdown(ctx->client_fd, SY_SHUT_WR);
+    (void)sy_close(ctx->client_fd);
+    ctx->client_fd = -1;
+    return 0;
+}
+
+static int hs_dup_stderr_safe(void) {
+    int tmp[3];
+    int nt = 0, fd = -1, i;
+    for (;;) {
+        int d = sy_dup(2);
+        if (d < 0) break;
+        if (d >= 3) { fd = d; break; }
+        if (nt < 3) tmp[nt++] = d;
+        else { (void)sy_close(d); break; }
+    }
+    for (i = 0; i < nt; i++) (void)sy_close(tmp[i]);
+    if (fd >= 0) (void)sy_fd_cloexec(fd, 1);
+    return fd;
+}
+
+static int hs_reap_children(hs_server *srv) {
+    int reaped = 0;
+    if (!srv) return -EINVAL;
+    for (;;) {
+        int exited = 0, code = 0, sig = 0;
+        int pid = sy_wait_any(SY_WAIT_NOHANG, &exited, &code, &sig);
+        if (pid <= 0) break;
+        reaped++;
+        if (exited == 0 && sig > 0 && !srv->closing) {
+            srv->crashed_children++;
+            (void)sy_eprintf("httpd: child pid=%d crashed sig=%d\n", pid, sig);
+        }
+        {
+            int i;
+            for (i = 0; i < srv->max_children; i++) {
+                if (srv->child_pids[i] == pid) {
+                    srv->child_pids[i] = 0;
+                    if (srv->active_children > 0) srv->active_children--;
+                    break;
+                }
+            }
+        }
+    }
+    return reaped;
+}
+
+int hs_listen_cfg(hs_server **out, const hs_config_t *cfg) {
+    hs_config_t c;
+    const char *bind;
+    sy_addr_t addr;
+    int lflags, lfd, bport;
+    hs_server *srv;
+    int *pids;
+
+    if (!sy_sock_have()) return -ENOSYS; /* ENOSYS: refuse, no socket backend on this platform */
+    if (!out) return -EINVAL;
+    *out = 0;
+
+    hs_config_init(&c);
+    if (cfg) {
+        if (cfg->bind_addr && cfg->bind_addr[0]) c.bind_addr = cfg->bind_addr;
+        c.port = cfg->port;
+        c.reuse_port = cfg->reuse_port;
+        if (cfg->backlog > 0) c.backlog = cfg->backlog;
+        if (cfg->max_children > 0) c.max_children = cfg->max_children;
+        if (cfg->keep_alive_max > 0) c.keep_alive_max = cfg->keep_alive_max;
+        if (cfg->max_header_bytes > 0) c.max_header_bytes = cfg->max_header_bytes;
+        if (cfg->max_body_bytes > 0) c.max_body_bytes = cfg->max_body_bytes;
+        if (cfg->max_total_body_bytes > 0) c.max_total_body_bytes = cfg->max_total_body_bytes;
+        if (cfg->header_timeout_ms > 0) c.header_timeout_ms = cfg->header_timeout_ms;
+        if (cfg->body_read_timeout_ms > 0) c.body_read_timeout_ms = cfg->body_read_timeout_ms;
+        if (cfg->write_timeout_ms > 0) c.write_timeout_ms = cfg->write_timeout_ms;
+        if (cfg->chunk_write_timeout_ms > 0) c.chunk_write_timeout_ms = cfg->chunk_write_timeout_ms;
+        if (cfg->idle_timeout_ms > 0) c.idle_timeout_ms = cfg->idle_timeout_ms;
+        c.allow_non_loopback = cfg->allow_non_loopback;
+        c.now_ms_fn = cfg->now_ms_fn;
+    }
+
+    bind = (c.bind_addr && c.bind_addr[0]) ? c.bind_addr : "127.0.0.1";
+    if (!c.allow_non_loopback && !tx_eqz(bind, "127.0.0.1") && !tx_eqz(bind, "::1")) return -EACCES;
+    if (sy_addr_parse(&addr, bind, c.port) < 0) return -EINVAL;
+
+    lflags = SY_LISTEN_REUSEADDR | (c.reuse_port ? SY_LISTEN_REUSEPORT : 0);
+    if (addr.family == SY_AF_INET6) lflags |= SY_LISTEN_V6ONLY;
+    lfd = sy_tcp_listen_at(&addr, c.backlog, lflags);
+    if (lfd < 0) return lfd;
+    if (sy_snb_set_nonblock(lfd, 1) < 0) { (void)sy_close(lfd); return -EIO; }
+    bport = sy_tcp_port(lfd);
+    if (bport <= 0) { (void)sy_close(lfd); return bport < 0 ? bport : -EIO; }
+
+    srv = (hs_server *)mm_zalloc((long)sizeof(hs_server));
+    pids = (int *)mm_alloc_n(c.max_children, (long)sizeof(int));
+    if (!srv || !pids) {
+        if (pids) mm_free(pids);
+        if (srv) mm_free(srv);
+        (void)sy_close(lfd);
+        return -ENOMEM;
+    }
+    srv->listen_fd = lfd;
+    srv->port = bport;
+    srv->max_children = c.max_children;
+    srv->active_children = 0;
+    srv->crashed_children = 0;
+    srv->closing = 0;
+    srv->emfile_until_ms = 0;
+    srv->child_pids = pids;
+    srv->cfg = c;
+    srv->cfg.bind_addr = bind;
+    *out = srv;
+    return 0;
+}
+
+int hs_listen(hs_server **out, const char *bind, int port, int reuse_port, long idle_ms) {
+    hs_config_t cfg;
+    hs_config_init(&cfg);
+    cfg.bind_addr = bind;
+    cfg.port = port;
+    cfg.reuse_port = reuse_port;
+    if (idle_ms > 0) cfg.idle_timeout_ms = idle_ms;
+    return hs_listen_cfg(out, &cfg);
+}
+
+int hs_port(const hs_server *srv) { return srv ? srv->port : -EINVAL; }
+int hs_listen_fd(const hs_server *srv) { return srv ? srv->listen_fd : -1; }
+int hs_active_children(const hs_server *srv) { return srv ? srv->active_children : 0; }
+int hs_crashed_children(const hs_server *srv) { return srv ? srv->crashed_children : 0; }
+
+int hs_step(hs_server *srv, hs_handler fn, void *ud, long timeout_ms) {
+    long step_ms, now;
+    int pr, cfd, fds[2], saved_stderr_fd, pid, i;
+    hs_child_ctx ctx;
+
+    if (!sy_sock_have()) return -ENOSYS; /* ENOSYS: refuse, no socket backend on this platform */
+    if (!srv || !fn || srv->listen_fd < 0) return -EINVAL;
+    if (srv->closing) return 0;
+
+    if (hs_reap_children(srv) > 0) srv->emfile_until_ms = 0;
+    now = hs_now(&srv->cfg);
+    if (srv->emfile_until_ms > 0 && now < srv->emfile_until_ms) {
+        long w = srv->emfile_until_ms - now;
+        if (timeout_ms >= 0 && timeout_ms < w) w = timeout_ms;
+        if (w > 200) w = 200;
+        if (w > 0) (void)sy_sleep_ms(w);
+        if (hs_reap_children(srv) > 0) srv->emfile_until_ms = 0;
+        return 0;
+    }
+
+    step_ms = timeout_ms;
+    if (step_ms < 0 || step_ms > 200) step_ms = 200;
+    pr = sy_sock_poll(srv->listen_fd, SY_POLLIN, step_ms);
+    if (pr < 0) return pr;
+    (void)hs_reap_children(srv);
+    if (pr == 0) return 0;
+
+    cfd = sy_sock_accept(srv->listen_fd, 0, 0);
+    if (cfd < 0) {
+        if (cfd == -EAGAIN || cfd == -EWOULDBLOCK || cfd == -EINTR) return 0;
+        if (cfd == -EMFILE || cfd == -ENFILE) {
+            (void)hs_reap_children(srv);
+            srv->emfile_until_ms = hs_now(&srv->cfg) + 100;
+            return 0;
+        }
+        return cfd;
+    }
+
+    (void)hs_reap_children(srv);
+    if (srv->active_children >= srv->max_children) {
+        hs_send_503_and_close(cfd);
+        return 1;
+    }
+
+    saved_stderr_fd = hs_dup_stderr_safe();
+    ctx.listen_fd = srv->listen_fd;
+    ctx.client_fd = cfd;
+    ctx.saved_stderr_fd = saved_stderr_fd;
+    ctx.fn = fn;
+    ctx.ud = ud;
+    ctx.cfg = srv->cfg;
+    fds[0] = -1;
+    fds[1] = -1;
+
+    pid = sy_fork_session(hs_child_entry, &ctx, fds);
+    if (pid < 0) {
+        if (saved_stderr_fd >= 0) (void)sy_close(saved_stderr_fd);
+        if (pid == -ENOSYS) { (void)sy_close(cfd); return -ENOSYS; }
+        hs_send_503_and_close(cfd);
+        return 1;
+    }
+
+    sy_close(fds[0]); sy_close(fds[1]);
+    if (saved_stderr_fd >= 0) (void)sy_close(saved_stderr_fd);
+    (void)sy_close(cfd);
+
+    for (i = 0; i < srv->max_children; i++) {
+        if (srv->child_pids[i] == 0) {
+            srv->child_pids[i] = pid;
+            srv->active_children++;
+            return 1;
+        }
+    }
+    (void)sy_kill(pid);
+    return 1;
+}
+
+static void hs_signal_and_drain(hs_server *srv, int drain_ms) {
+    int sterm = sy_sig_number("SIGTERM");
+    int i;
+    if (sterm <= 0) sterm = 15;
+    (void)hs_reap_children(srv);
+    for (i = 0; i < srv->max_children; i++) {
+        if (srv->child_pids[i] > 0) {
+            (void)sy_killpg(srv->child_pids[i], sterm);
+            (void)sy_signal(srv->child_pids[i], sterm);
+        }
+    }
+    if (drain_ms > 0 && srv->active_children > 0) {
+        sy_deadline_t dl = sy_deadline_in(drain_ms);
+        for (;;) {
+            long left;
+            (void)hs_reap_children(srv);
+            if (srv->active_children <= 0) break;
+            left = sy_deadline_left(&dl);
+            if (left <= 0) break;
+            (void)sy_sleep_ms(left > 20 ? 20 : left);
+        }
+    }
+    (void)hs_reap_children(srv);
+    for (i = 0; i < srv->max_children; i++) {
+        if (srv->child_pids[i] > 0) {
+            (void)sy_kill(srv->child_pids[i]);
+            srv->child_pids[i] = 0;
+            if (srv->active_children > 0) srv->active_children--;
+        }
+    }
+}
+
+int hs_serve(hs_server *srv, hs_handler fn, void *ud) {
+    int sterm, sint;
+    if (!sy_sock_have()) return -ENOSYS; /* ENOSYS: refuse, no socket backend on this platform */
+    if (!srv || !fn || srv->listen_fd < 0) return -EINVAL;
+    sterm = sy_sig_number("SIGTERM");
+    sint = sy_sig_number("SIGINT");
+    if (sterm > 0) (void)sy_sig_watch(sterm);
+    if (sint > 0) (void)sy_sig_watch(sint);
+
+    while (!srv->closing) {
+        int r;
+        if ((sterm > 0 && sy_sig_taken(sterm) > 0) || (sint > 0 && sy_sig_taken(sint) > 0)) {
+            srv->closing = 1;
+            break;
+        }
+        r = hs_step(srv, fn, ud, 200);
+        if (r < 0 && r != -EINTR) {
+            if (srv->closing) break;
+            return r;
+        }
+    }
+    hs_signal_and_drain(srv, 1000);
+    return 0;
+}
+
+int hs_close(hs_server *srv, int drain_ms) {
+    if (!srv) return -EINVAL;
+    srv->closing = 1;
+    if (srv->listen_fd >= 0) {
+        (void)sy_close(srv->listen_fd);
+        srv->listen_fd = -1;
+    }
+    hs_signal_and_drain(srv, drain_ms);
+    if (srv->child_pids) {
+        mm_free(srv->child_pids);
+        srv->child_pids = 0;
+    }
+    mm_free(srv);
+    return 0;
+}
+
+static int hs_recv_body_chunk(int fd, void *buf, long cap, long timeout_ms, long (*now_fn)(void)) {
+    long to = timeout_ms > 0 ? timeout_ms : HS_DEFAULT_BODY_TIMEOUT_MS;
+    long dl = (now_fn ? now_fn() : sy_now_ms()) + to;
+    for (;;) {
+        long r = sy_sock_recv(fd, buf, cap);
+        if (r > 0) return (int)r;
+        if (r == 0) return 0;
+        if (r == -EINTR) continue;
+        if (r == -EAGAIN || r == -EWOULDBLOCK) {
+            long left = dl - (now_fn ? now_fn() : sy_now_ms());
+            int pr;
+            if (left <= 0) return -ETIMEDOUT;
+            pr = sy_sock_poll(fd, SY_POLLIN | SY_POLLERR | SY_POLLHUP, left);
+            if (pr == 0) return -ETIMEDOUT;
+            if (pr < 0 && pr != -EINTR) return pr;
+            continue;
+        }
+        return (int)r;
+    }
+}
+
+int hs_req_body(const void *req_p, char **out, long *outlen, long cap) {
+    hs_request *req = (hs_request *)req_p;
+    hs_conn_state *conn;
+    const hs_config_t *cfg;
+    long max_b, max_tot, body_to;
+    long (*now_fn)(void);
+
+    if (!req || !out) return -EINVAL;
+    *out = 0;
+    if (outlen) *outlen = 0;
+
+    if (req->content_length <= 0 && !req->is_chunked) {
+        char *empty = (char *)mm_alloc(1);
+        if (!empty) return -ENOMEM;
+        empty[0] = 0;
+        *out = empty;
+        req->body_done = 1;
+        return 0;
+    }
+
+    conn = req->conn;
+    if (!conn || !conn->rbuf || conn->fd < 0) return -EINVAL;
+    cfg = conn->cfg;
+    max_b = cfg && cfg->max_body_bytes > 0 ? cfg->max_body_bytes : HS_DEFAULT_MAX_BODY_BYTES;
+    if (cap > 0 && cap < max_b) max_b = cap;
+    max_tot = cfg && cfg->max_total_body_bytes > 0 ? cfg->max_total_body_bytes : HS_DEFAULT_MAX_TOTAL_BODY_BYTES;
+    body_to = cfg && cfg->body_read_timeout_ms > 0 ? cfg->body_read_timeout_ms : HS_DEFAULT_BODY_TIMEOUT_MS;
+    now_fn = cfg ? cfg->now_ms_fn : 0;
+
+    if (req->content_length > 0 && req->content_length > max_b) {
+        req->body_err_status = 413;
+        req->force_close = 1;
+        return -EFBIG;
+    }
+
+    if (req->expect_continue && !req->sent_100) {
+        const char *c100 = "HTTP/1.1 100 Continue\r\n\r\n";
+        int rc100 = hs_send_timeout(conn->fd, c100, 25, cfg ? cfg->write_timeout_ms : HS_DEFAULT_WRITE_TIMEOUT_MS, now_fn);
+        if (rc100 < 0) { req->force_close = 1; return rc100; }
+        req->sent_100 = 1;
+    }
+
+    if (!req->is_chunked) {
+        long want = req->content_length;
+        long got = 0, take;
+        char *buf = (char *)mm_alloc(want + 1);
+        if (!buf) return -ENOMEM;
+        if (conn->rbuf->len > 0) {
+            take = conn->rbuf->len < want ? conn->rbuf->len : want;
+            if (mm_copy(buf, want + 1, conn->rbuf->data, take) != 0) { mm_free(buf); return -EIO; }
+            got = take;
+            {
+                long rem = conn->rbuf->len - take;
+                if (rem > 0) (void)mm_move(conn->rbuf->data, conn->rbuf->cap, conn->rbuf->data + take, rem);
+                (void)mg_truncate(conn->rbuf, rem);
+            }
+        }
+        while (got < want) {
+            long r = hs_recv_body_chunk(conn->fd, buf + got, want - got, body_to, now_fn);
+            if (r == 0) { mm_free(buf); req->force_close = 1; return -EPIPE; }
+            if (r < 0) {
+                mm_free(buf);
+                req->force_close = 1;
+                if (r == -ETIMEDOUT) req->body_err_status = 408;
+                return (int)r;
+            }
+            got += r;
+        }
+        buf[want] = 0;
+        *out = buf;
+        if (outlen) *outlen = want;
+        req->body_done = 1;
+        return 0;
+    }
+
+    /* Chunked body decoding via textx.chunked dk_feed */
+    {
+        dk_state dk;
+        mg_buf outb;
+        long raw_total = conn->rbuf->len;
+        dk_init(&dk);
+        mg_init(&outb);
+        for (;;) {
+            while (conn->rbuf->len > 0) {
+                unsigned char tmp_out[8192];
+                long cons = 0, olen = 0;
+                long drc = dk_feed(&dk, conn->rbuf->data, conn->rbuf->len, &cons, tmp_out, (long)sizeof tmp_out, &olen);
+                if (cons > 0) {
+                    long rem = conn->rbuf->len - cons;
+                    if (rem > 0) (void)mm_move(conn->rbuf->data, conn->rbuf->cap, conn->rbuf->data + cons, rem);
+                    (void)mg_truncate(conn->rbuf, rem);
+                }
+                if (olen > 0) {
+                    if (outb.len + olen > max_b) {
+                        mg_free(&outb);
+                        req->body_err_status = 413;
+                        req->force_close = 1;
+                        return -EFBIG;
+                    }
+                    if (mg_append(&outb, tmp_out, olen) != 0) { mg_free(&outb); return -ENOMEM; }
+                }
+                if (drc < 0) {
+                    mg_free(&outb);
+                    req->body_err_status = 400;
+                    req->force_close = 1;
+                    return -EINVAL;
+                }
+                if (drc == DK_END) {
+                    unsigned char *rawp = 0;
+                    long rlen = 0, rcap = 0;
+                    if (dk_end(&dk) != 0) {
+                        mg_free(&outb);
+                        req->body_err_status = 400;
+                        req->force_close = 1;
+                        return -EINVAL;
+                    }
+                    if (mg_reserve(&outb, outb.len + 1) != 0) { mg_free(&outb); return -ENOMEM; }
+                    outb.data[outb.len] = 0;
+                    (void)mg_take(&outb, &rawp, &rlen, &rcap);
+                    *out = (char *)rawp;
+                    if (outlen) *outlen = rlen;
+                    req->body_done = 1;
+                    return 0;
+                }
+                if (drc == DK_NEED_IN) break;
+            }
+            {
+                unsigned char rtmp[8192];
+                long r = hs_recv_body_chunk(conn->fd, rtmp, (long)sizeof rtmp, body_to, now_fn);
+                if (r == 0) {
+                    mg_free(&outb);
+                    req->body_err_status = 400;
+                    req->force_close = 1;
+                    return -EPIPE;
+                }
+                if (r < 0) {
+                    mg_free(&outb);
+                    req->force_close = 1;
+                    req->body_err_status = (r == -ETIMEDOUT) ? 408 : 400;
+                    return (int)r;
+                }
+                raw_total += r;
+                if (raw_total > max_tot) {
+                    mg_free(&outb);
+                    req->body_err_status = 413;
+                    req->force_close = 1;
+                    return -EFBIG;
+                }
+                if (mg_append(conn->rbuf, rtmp, r) != 0) { mg_free(&outb); return -ENOMEM; }
+            }
+        }
+    }
+}
+
+int hs_res_begin_stream(void *res_p) {
+    hs_response *r = (hs_response *)res_p;
+    mg_buf hbuf;
+    char sline[512];
+    const char *rsn, *conn;
+    int i, rc, nobody;
+    if (!r || r->sent || r->streaming) return -EINVAL;
+    nobody = hs_res_is_nobody(r->status_code);
+    (void)sy_sockopt_set(r->fd, SY_SO_NODELAY, 1);
+
+    mg_init(&hbuf);
+    rsn = r->reason ? r->reason : hs_default_reason(r->status_code);
+    if (tx_snprintf(sline, sizeof sline, "HTTP/1.1 %d %s\r\n", r->status_code, rsn) < 0) {
+        mg_free(&hbuf);
+        return -EINVAL;
+    }
+    if (mg_append(&hbuf, sline, tx_len(sline, sizeof sline)) != 0) { mg_free(&hbuf); return -ENOMEM; }
+    for (i = 0; i < r->nhdrs; i++) {
+        long nl = tx_len(r->hdrs[i].name, 4096);
+        long vl = tx_len(r->hdrs[i].value, 65536);
+        if (mg_append(&hbuf, r->hdrs[i].name, nl) != 0 ||
+            mg_append(&hbuf, ": ", 2) != 0 ||
+            mg_append(&hbuf, r->hdrs[i].value, vl) != 0 ||
+            mg_append(&hbuf, "\r\n", 2) != 0) {
+            mg_free(&hbuf);
+            return -ENOMEM;
+        }
+    }
+    if (!nobody) {
+        if (r->http_ver == 11) {
+            r->stream_chunked = 1;
+            if (mg_append(&hbuf, "Transfer-Encoding: chunked\r\n", 28) != 0) { mg_free(&hbuf); return -ENOMEM; }
+        } else {
+            r->stream_chunked = 0;
+            r->keep_alive = 0;
+            r->close_after = 1;
+        }
+    } else {
+        r->stream_nobody = 1;
+    }
+    conn = (!r->keep_alive || r->close_after) ? "Connection: close\r\n\r\n" : "Connection: keep-alive\r\n\r\n";
+    if (mg_append(&hbuf, conn, tx_len(conn, 64)) != 0) { mg_free(&hbuf); return -ENOMEM; }
+
+    rc = hs_send_timeout(r->fd, hbuf.data, hbuf.len, r->chunk_write_timeout_ms, r->now_ms_fn);
+    mg_free(&hbuf);
+    if (rc < 0) { r->close_after = 1; return rc; }
+    r->streaming = 1;
+    r->sent = 1;
+    return 0;
+}
+
+int hs_res_write_chunk(void *res_p, const void *data, long len) {
+    hs_response *r = (hs_response *)res_p;
+    int rc;
+    if (!r || !r->streaming || r->stream_ended || len < 0 || (len > 0 && !data)) return -EINVAL;
+    if (len == 0) return 0;
+    if (r->is_head || r->stream_nobody) return 0;
+
+    if (r->stream_chunked) {
+        char hbuf[32];
+        int hlen = tx_from_u64(hbuf, sizeof hbuf, (uint64_t)len, 16);
+        if (hlen <= 0 || hlen + 2 >= (int)sizeof hbuf) return -EINVAL;
+        hbuf[hlen++] = '\r';
+        hbuf[hlen++] = '\n';
+        if (len <= 16384) {
+            mg_buf frame;
+            mg_init(&frame);
+            if (mg_reserve(&frame, hlen + len + 2) != 0) { mg_free(&frame); return -ENOMEM; }
+            (void)mg_append(&frame, hbuf, hlen);
+            (void)mg_append(&frame, data, len);
+            (void)mg_append(&frame, "\r\n", 2);
+            rc = hs_send_timeout(r->fd, frame.data, frame.len, r->chunk_write_timeout_ms, r->now_ms_fn);
+            mg_free(&frame);
+        } else {
+            rc = hs_send_timeout(r->fd, hbuf, hlen, r->chunk_write_timeout_ms, r->now_ms_fn);
+            if (rc == 0) rc = hs_send_timeout(r->fd, data, len, r->chunk_write_timeout_ms, r->now_ms_fn);
+            if (rc == 0) rc = hs_send_timeout(r->fd, "\r\n", 2, r->chunk_write_timeout_ms, r->now_ms_fn);
+        }
+    } else {
+        rc = hs_send_timeout(r->fd, data, len, r->chunk_write_timeout_ms, r->now_ms_fn);
+    }
+    if (rc < 0) r->close_after = 1;
+    return rc;
+}
+
+int hs_res_stream_write(void *res_p, const void *data, long len) {
+    return hs_res_write_chunk(res_p, data, len);
+}
+
+int hs_res_flush(void *res_p) {
+    hs_response *r = (hs_response *)res_p;
+    if (!r || r->fd < 0) return -EINVAL;
+    return 0;
+}
+
+int hs_res_end_stream(void *res_p) {
+    hs_response *r = (hs_response *)res_p;
+    int rc = 0;
+    if (!r || !r->streaming) return -EINVAL;
+    if (r->stream_ended) return 0;
+    r->stream_ended = 1;
+    if (!r->is_head && !r->stream_nobody) {
+        if (r->stream_chunked) {
+            rc = hs_send_timeout(r->fd, "0\r\n\r\n", 5, r->chunk_write_timeout_ms, r->now_ms_fn);
+            if (rc < 0) r->close_after = 1;
+        } else {
+            r->close_after = 1;
+        }
+    }
+    return rc;
+}
+
+int hs_res_stream_end(void *res_p) {
+    return hs_res_end_stream(res_p);
 }

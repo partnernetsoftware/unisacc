@@ -1,16 +1,29 @@
-/* Checks ext/net/httpd.cx (Slice 2: config, incremental header parser, smuggling protection,
- * request accessors, and 3 behavioral mutations).
+/* Checks ext/net/httpd.cx (Slices 2-4: config, parser, smuggling, hs_server lifecycle,
+ * sy_fork_session workers, pipe/fd closure probes, zombie reaping, process-group kill,
+ * and 5 behavioral mutations).
  *   sh ./unisacc.com tools/check-ext-net-httpd.cx [-- --mut] */
 #pragma unisa use net.httpd
-#pragma unisa use sys.env
+#pragma unisa use net.tcp
+#pragma unisa use net.addr
+#pragma unisa use sys.netraw
+#pragma unisa use sys.netpoll
 #pragma unisa use sys.fs
+#pragma unisa use sys.fd
 #pragma unisa use sys.io
+#pragma unisa use sys.env
 #pragma unisa use sys.proc
 #pragma unisa use sys.posix
+#pragma unisa use sys.sig
+#pragma unisa use sys.sysinfo
+#pragma unisa use sys.time
 #pragma unisa use mem.heap
 #pragma unisa use mem.bytes
+#pragma unisa use mem.grow
 #pragma unisa use text.text
+#pragma unisa use text.edit
+#pragma unisa use text.conv
 #pragma unisa use text.fmt
+#pragma unisa use textx.chunked
 #pragma unisa use cxlib.muthelp
 
 static int nok, nfail;
@@ -68,12 +81,10 @@ static void test_framing_and_view(void) {
     char nulbuf[32];
 
     hs_req_init(&r);
-    /* incomplete framing + trailing \r split boundary */
     ckv(hs_parse_request(&r, s_part1, (long)strlen(s_part1), 4096, &hend), HS_PARSE_NEED_MORE, "frame-split-cr-need-more");
     ckv(hs_parse_request(&r, s_part2, (long)strlen(s_part2), 4096, &hend), HS_PARSE_OK, "frame-split-complete-ok");
     cks(hs_req_path(&r), "/ok", "frame-split-path");
 
-    /* full HTTP/1.1 request with query, header lookup, pipeline tail */
     ckv(hs_parse_request(&r, s1, (long)strlen(s1), 4096, &hend), HS_PARSE_OK, "req1-ok");
     ckv(hend, (long)strlen(s1) - 4, "req1-hdr-end-before-tail");
     cks(hs_req_method(&r), "GET", "req1-method");
@@ -90,18 +101,15 @@ static void test_framing_and_view(void) {
     ckv(hs_req_header(&r, "X-Missing", vbuf, sizeof vbuf), -ENOENT, "req1-hdr-missing");
     ckv(hs_req_header(&r, "x-api-key", vbuf, 5), -ERANGE, "req1-hdr-erange");
 
-    /* bare \n\n + HTTP/1.0 + Connection: keep-alive + no Host allowed in 1.0 */
     ckv(hs_parse_request(&r, s_lf, (long)strlen(s_lf), 4096, &hend), HS_PARSE_OK, "lf-10-ok");
     ckv(hs_req_version(&r), 10, "lf-10-ver");
     ckv(hs_req_keep_alive(&r), 1, "lf-10-keepalive");
 
-    /* OPTIONS * */
     ckv(hs_parse_request(&r, s_opt, (long)strlen(s_opt), 4096, &hend), HS_PARSE_OK, "options-star-ok");
     cks(hs_req_target(&r), "*", "options-star-target");
     cks(hs_req_path(&r), "*", "options-star-path");
     cks(hs_req_query(&r), "", "options-star-query");
 
-    /* embedded NUL and bare CR rejected 400 */
     mm_copy(nulbuf, sizeof nulbuf, s_nul, (long)strlen(s_nul) + 1);
     nulbuf[16] = 0;
     ckv(hs_parse_request(&r, nulbuf, (long)strlen(s_nul), 4096, &hend), -EINVAL, "nul-in-hdr-rc");
@@ -112,7 +120,6 @@ static void test_framing_and_view(void) {
         ckv(hs_req_err_status(&r), 400, "bare-cr-400");
     }
 
-    /* max_header_bytes 431 and >128 headers 431 */
     ckv(hs_parse_request(&r, s_part1, (long)strlen(s_part1), 16, &hend), -ENOSPC, "max-hdr-bytes-rc");
     ckv(hs_req_err_status(&r), 431, "max-hdr-bytes-431");
     {
@@ -140,7 +147,6 @@ static void test_request_line_and_smuggling(void) {
 
     hs_req_init(&r);
 
-    /* bad targets / methods / versions */
     s = "GET * HTTP/1.1\r\nHost: a\r\n\r\n";
     ckv(hs_parse_request(&r, s, (long)strlen(s), 4096, &hend), -EINVAL, "get-star-rc");
     ckv(hs_req_err_status(&r), 400, "get-star-400");
@@ -161,7 +167,6 @@ static void test_request_line_and_smuggling(void) {
     ckv(hs_parse_request(&r, s, (long)strlen(s), 4096, &hend), -EINVAL, "bad-method-tchar-rc");
     ckv(hs_req_err_status(&r), 400, "bad-method-tchar-400");
 
-    /* obs-fold & whitespace in header name */
     s = "GET / HTTP/1.1\r\nHost: a\r\n continued: 1\r\n\r\n";
     ckv(hs_parse_request(&r, s, (long)strlen(s), 4096, &hend), -EINVAL, "obs-fold-sp-rc");
     ckv(hs_req_err_status(&r), 400, "obs-fold-sp-400");
@@ -174,12 +179,10 @@ static void test_request_line_and_smuggling(void) {
     ckv(hs_parse_request(&r, s, (long)strlen(s), 4096, &hend), -EINVAL, "hdr-name-sp-rc");
     ckv(hs_req_err_status(&r), 400, "hdr-name-sp-400");
 
-    /* CL + TE smuggling */
     s = "POST / HTTP/1.1\r\nHost: a\r\nContent-Length: 5\r\nTransfer-Encoding: chunked\r\n\r\n";
     ckv(hs_parse_request(&r, s, (long)strlen(s), 4096, &hend), -EINVAL, "smuggle-cl-te-rc");
     ckv(hs_req_err_status(&r), 400, "smuggle-cl-te-400");
 
-    /* Transfer-Encoding case-insensitive chunked vs non-chunked */
     s = "POST / HTTP/1.1\r\nHost: a\r\nTransfer-Encoding: CHUNKED\r\n\r\n";
     ckv(hs_parse_request(&r, s, (long)strlen(s), 4096, &hend), HS_PARSE_OK, "te-upper-chunked-ok");
     ckv(hs_req_is_chunked(&r), 1, "te-upper-chunked-flag");
@@ -189,7 +192,6 @@ static void test_request_line_and_smuggling(void) {
     ck(hs_parse_request(&r, s, (long)strlen(s), 4096, &hend) < 0, "te-gzip-chunked-rc");
     ck(hs_req_err_status(&r) == 501 || hs_req_err_status(&r) == 400, "te-gzip-chunked-501");
 
-    /* Content-Length checks */
     s = "POST / HTTP/1.1\r\nHost: a\r\nContent-Length: +5\r\n\r\n";
     ckv(hs_parse_request(&r, s, (long)strlen(s), 4096, &hend), -EINVAL, "cl-plus-400");
     s = "POST / HTTP/1.1\r\nHost: a\r\nContent-Length: -1\r\n\r\n";
@@ -202,7 +204,6 @@ static void test_request_line_and_smuggling(void) {
     ckv(hs_parse_request(&r, s, (long)strlen(s), 4096, &hend), HS_PARSE_OK, "cl-dup-equal-ok");
     ckv(hs_req_content_length(&r), 5, "cl-dup-equal-val");
 
-    /* Host checks & Expect & Connection: close */
     s = "GET / HTTP/1.1\r\n\r\n";
     ckv(hs_parse_request(&r, s, (long)strlen(s), 4096, &hend), -EINVAL, "missing-host-11-400");
     s = "GET / HTTP/1.1\r\nHost: a\r\nHost: b\r\n\r\n";
@@ -216,6 +217,948 @@ static void test_request_line_and_smuggling(void) {
     ckv(hs_req_err_status(&r), 417, "expect-unknown-417");
 
     hs_req_free(&r);
+}
+
+typedef struct srv_test_ctx {
+    int listen_fd;
+    long listen_ino;
+    int parent_base_fds;
+    int parent_base_pipes;
+    const char *smuggle_sentinel;
+} srv_test_ctx;
+
+static int count_self_fds_and_pipes(int *pipes_out) {
+    sy_dir_t d;
+    char lp[128], tgt[256];
+    int n = 0, np = 0;
+    if (sy_dir_open(&d, "/proc/self/fd") < 0) return -1;
+    while (sy_dir_next(&d) > 0) {
+        long rl;
+        n++;
+        if (cx_fmt(lp, sizeof lp, "/proc/self/fd/%s", d.name) == 0) {
+            rl = sy_readlink(lp, tgt, (long)sizeof tgt - 1);
+            if (rl > 0) {
+                tgt[rl] = 0;
+                if (tx_prefixz(tgt, "pipe:[", 6)) np++;
+            }
+        }
+    }
+    sy_dir_close(&d);
+    if (pipes_out) *pipes_out = np;
+    return n;
+}
+
+static int count_self_fds(void) {
+    return count_self_fds_and_pipes(0);
+}
+
+static int child_fds_clean(const srv_test_ctx *tctx, char *diag, long dcap) {
+    sy_dir_t d;
+    char lp[128], tgt[256], lfd_str[32], ino_str[64];
+    int total = 0, np = 0, bad = 0;
+    long doff = 0;
+    int lfd = tctx ? tctx->listen_fd : -1;
+    long lino = tctx ? tctx->listen_ino : 0;
+    tx_from_i64(lfd_str, sizeof lfd_str, lfd, 10);
+    cx_fmt(ino_str, sizeof ino_str, "socket:[%ld]", lino);
+    if (diag && dcap > 0) diag[0] = 0;
+    if (sy_dir_open(&d, "/proc/self/fd") < 0) return 0;
+    while (sy_dir_next(&d) > 0) {
+        long rl;
+        total++;
+        if (cx_fmt(lp, sizeof lp, "/proc/self/fd/%s", d.name) == 0) {
+            rl = sy_readlink(lp, tgt, (long)sizeof tgt - 1);
+            if (rl > 0) {
+                tgt[rl] = 0;
+                if (lfd >= 0 && tx_eqz(d.name, lfd_str) && tx_prefixz(tgt, "socket:[", 8)) bad |= 1;
+                if (tx_prefixz(tgt, "pipe:[", 6)) np++;
+                if (lino > 0 && tx_eqz(tgt, ino_str)) bad |= 2;
+                if (diag && doff + 64 < dcap) {
+                    int w = tx_snprintf(diag + doff, (size_t)(dcap - doff), " %s=%s", d.name, tgt);
+                    if (w > 0) doff += w;
+                }
+            }
+        }
+    }
+    sy_dir_close(&d);
+    if (tctx && tctx->parent_base_fds > 0 && total > tctx->parent_base_fds + 2) bad |= 4;
+    if (tctx && np > tctx->parent_base_pipes) bad |= 8;
+    if (diag && doff + 64 < dcap) {
+        (void)tx_snprintf(diag + doff, (size_t)(dcap - doff), " total=%d base=%d np=%d bnp=%d bad=%d",
+                          total, tctx ? tctx->parent_base_fds : -1, np, tctx ? tctx->parent_base_pipes : -1, bad);
+    }
+    return !bad;
+}
+
+static int test_handler(void *ud, void *req, void *res) {
+    srv_test_ctx *tctx = (srv_test_ctx *)ud;
+    const char *path = hs_req_path(req);
+    if (tx_eqz(path, "/_health")) {
+        hs_res_status(res, 200, "OK");
+        hs_res_header(res, "X-Test", "ok");
+        hs_res_send(res, "healthy", 7);
+        return HS_HANDLED;
+    }
+    if (tx_eqz(path, "/_pid")) {
+        char pbuf[64];
+        cx_fmt(pbuf, sizeof pbuf, "{\"pid\":%d}", sy_pid());
+        hs_res_status(res, 200, "OK");
+        hs_res_header(res, "Content-Type", "application/json");
+        hs_res_send(res, pbuf, (long)strlen(pbuf));
+        return HS_HANDLED;
+    }
+    if (tx_eqz(path, "/_smuggle-probe")) {
+        if (tctx && tctx->smuggle_sentinel) (void)cx_write(tctx->smuggle_sentinel, "REACHED", 7);
+        hs_res_status(res, 200, "OK");
+        hs_res_send(res, "bad-reached", 11);
+        return HS_HANDLED;
+    }
+    if (tx_eqz(path, "/echo-body")) {
+        char *body = 0;
+        long blen = 0;
+        int rc = hs_req_body(req, &body, &blen, 0);
+        if (rc < 0) {
+            if (body) mm_free(body);
+            return rc;
+        }
+        hs_res_status(res, 200, "OK");
+        hs_res_header(res, "X-Body-Len", "ok");
+        hs_res_send(res, body ? body : "", blen);
+        if (body) mm_free(body);
+        return HS_HANDLED;
+    }
+    if (tx_eqz(path, "/echo-body-cap64")) {
+        char *body = 0;
+        long blen = 0;
+        int rc = hs_req_body(req, &body, &blen, 64);
+        if (rc < 0) {
+            if (body) mm_free(body);
+            return rc;
+        }
+        hs_res_status(res, 200, "OK");
+        hs_res_send(res, body ? body : "", blen);
+        if (body) mm_free(body);
+        return HS_HANDLED;
+    }
+    if (tx_eqz(path, "/sse")) {
+        hs_res_status(res, 200, "OK");
+        hs_res_header(res, "Content-Type", "text/event-stream");
+        if (hs_res_begin_stream(res) < 0) return -EIO;
+        if (hs_res_write_chunk(res, "data: a\n\n", 9) < 0) return -EIO;
+        if (hs_res_write_chunk(res, "", 0) < 0) return -EIO;
+        if (hs_res_write_chunk(res, "data: b\n\n", 9) < 0) return -EIO;
+        if (hs_res_write_chunk(res, "data: c\n\n", 9) < 0) return -EIO;
+        (void)hs_res_flush(res);
+        (void)hs_res_end_stream(res);
+        return HS_HANDLED;
+    }
+    if (tx_eqz(path, "/sse-slow")) {
+        hs_res_status(res, 200, "OK");
+        hs_res_header(res, "Content-Type", "text/event-stream");
+        if (hs_res_begin_stream(res) < 0) return -EIO;
+        if (hs_res_write_chunk(res, "data: first\n\n", 13) < 0) return -EIO;
+        (void)hs_res_flush(res);
+        sy_sleep_ms(120);
+        if (hs_res_write_chunk(res, "data: second\n\n", 14) < 0) return -EIO;
+        (void)hs_res_end_stream(res);
+        return HS_HANDLED;
+    }
+    if (tx_eqz(path, "/sse-10")) {
+        hs_res_status(res, 200, "OK");
+        hs_res_header(res, "Content-Type", "text/plain");
+        if (hs_res_begin_stream(res) < 0) return -EIO;
+        if (hs_res_write_chunk(res, "part1", 5) < 0) return -EIO;
+        if (hs_res_write_chunk(res, "part2", 5) < 0) return -EIO;
+        (void)hs_res_end_stream(res);
+        return HS_HANDLED;
+    }
+    if (tx_eqz(path, "/no-content")) {
+        hs_res_status(res, 204, "No Content");
+        hs_res_send(res, "ignored-body", 12);
+        return HS_HANDLED;
+    }
+    if (tx_eqz(path, "/not-modified")) {
+        hs_res_status(res, 304, "Not Modified");
+        hs_res_send(res, "ignored-body", 12);
+        return HS_HANDLED;
+    }
+    if (tx_eqz(path, "/sse-epipe")) {
+        int k;
+        hs_res_status(res, 200, "OK");
+        hs_res_header(res, "Content-Type", "text/event-stream");
+        if (hs_res_begin_stream(res) < 0) return -EIO;
+        if (hs_res_write_chunk(res, "first\n", 6) < 0) return -EIO;
+        for (k = 0; k < 64; k++) {
+            char chunk[1024];
+            mm_fill(chunk, sizeof chunk, 'X', sizeof chunk);
+            sy_sleep_ms(15);
+            if (hs_res_write_chunk(res, chunk, (long)sizeof chunk) < 0) return -EPIPE;
+        }
+        (void)hs_res_end_stream(res);
+        return HS_HANDLED;
+    }
+    if (tx_eqz(path, "/slow")) {
+        sy_sleep_ms(300);
+        hs_res_status(res, 200, "OK");
+        hs_res_send(res, "slow-ok", 7);
+        return HS_HANDLED;
+    }
+    if (tx_eqz(path, "/pipe1mb")) {
+        enum { MB = 1048576 };
+        char *buf = (char *)mm_alloc(MB);
+        const char *tag = "STDERR_PASSTHROUGH_MARKER_R76\n";
+        long tlen = (long)strlen(tag);
+        int r1, r2;
+        if (!buf) { hs_res_status(res, 500, "ERR"); hs_res_send(res, "oom", 3); return HS_HANDLED; }
+        mm_fill(buf, MB, 'A', MB);
+        mm_copy(buf, MB, tag, tlen);
+        r1 = sy_write_all(1, buf, MB);
+        r2 = sy_write_all(2, buf, MB);
+        mm_free(buf);
+        if (r1 == 0 && r2 == 0) {
+            hs_res_status(res, 200, "OK");
+            hs_res_send(res, "pipe-1mb-ok", 11);
+        } else {
+            hs_res_status(res, 500, "ERR");
+            hs_res_send(res, "pipe-fail", 9);
+        }
+        return HS_HANDLED;
+    }
+    if (tx_eqz(path, "/check-fds")) {
+        char diag[512];
+        char rbody[600];
+        int clean = child_fds_clean(tctx, diag, sizeof diag);
+        cx_fmt(rbody, sizeof rbody, "%s|%s", clean ? "fds-clean" : "fds-dirty", diag);
+        hs_res_status(res, clean ? 200 : 500, clean ? "OK" : "ERR");
+        hs_res_send(res, rbody, (long)strlen(rbody));
+        return HS_HANDLED;
+    }
+    if (tx_eqz(path, "/crash")) {
+        int sk = sy_sig_number("SIGKILL");
+        sy_raise(sk > 0 ? sk : 9);
+        return HS_HANDLED;
+    }
+    if (tx_eqz(path, "/orphan-hang")) {
+        sy_spawn_t sp;
+        sy_child_t ch;
+        char *av[4];
+        char body[64];
+        int sterm = sy_sig_number("SIGTERM");
+        av[0] = "sleep"; av[1] = "30"; av[2] = 0;
+        sy_spawn_init(&sp);
+        sp.argv = av;
+        sp.pgroup = 0;
+        sp.in_fd = SY_STDIO_NULL;
+        sp.out_fd = SY_STDIO_NULL;
+        sp.err_fd = SY_STDIO_NULL;
+        if (sy_proc_spawn(&sp, &ch) == 0) {
+            cx_fmt(body, sizeof body, "GPID=%d", ch.pid);
+            hs_res_status(res, 200, "OK");
+            hs_res_send(res, body, (long)strlen(body));
+            if (sterm > 0) sy_sig_ignore(sterm);
+            sy_sleep_ms(5000);
+        } else {
+            hs_res_status(res, 500, "ERR");
+            hs_res_send(res, "spawn-fail", 10);
+        }
+        return HS_HANDLED;
+    }
+    return HS_DEFAULT_404;
+}
+
+static int send_req(int fd, const char *s) {
+    return sy_send_all(fd, s, (long)strlen(s));
+}
+
+static long client_read_all(int fd, char *out, long cap, long timeout_ms) {
+    long total = 0;
+    sy_deadline_t dl = sy_deadline_in(timeout_ms);
+    if (!out || cap <= 1) return -EINVAL;
+    while (total < cap - 1) {
+        long left = sy_deadline_left(&dl);
+        int pr;
+        long r;
+        if (left <= 0) break;
+        pr = sy_sock_poll(fd, SY_POLLIN | SY_POLLHUP | SY_POLLERR, left);
+        if (pr <= 0) break;
+        r = sy_sock_recv(fd, out + total, cap - 1 - total);
+        if (r <= 0) break;
+        total += r;
+    }
+    out[total] = 0;
+    return total;
+}
+
+static long pump_until_client(hs_server *srv, srv_test_ctx *tctx, int cfd, char *out, long cap, long max_ms) {
+    sy_deadline_t dl = sy_deadline_in(max_ms);
+    while (sy_deadline_left(&dl) > 0) {
+        int pr = sy_sock_poll(cfd, SY_POLLIN | SY_POLLHUP | SY_POLLERR, 0);
+        if (pr > 0) return client_read_all(cfd, out, cap, sy_deadline_left(&dl));
+        (void)hs_step(srv, test_handler, tctx, 5);
+    }
+    return 0;
+}
+
+static void pump_until_children_zero(hs_server *srv, srv_test_ctx *tctx, long max_ms) {
+    sy_deadline_t dl = sy_deadline_in(max_ms);
+    while (hs_active_children(srv) > 0 && sy_deadline_left(&dl) > 0) {
+        (void)hs_step(srv, test_handler, tctx, 10);
+    }
+}
+
+static void test_server_loopback_and_fork_conns(void) {
+    hs_config_t cfg;
+    hs_server *srv = 0;
+    srv_test_ctx tctx;
+    sy_stat_t st;
+    int port, c1, c2, c3, gpid = 0;
+    char buf[1024];
+    long t0, dt, rn;
+
+    hs_config_init(&cfg);
+    cfg.bind_addr = "0.0.0.0";
+    cfg.allow_non_loopback = 0;
+    ckv(hs_listen_cfg(&srv, &cfg), -EACCES, "non-loopback-eacces");
+    if (srv) hs_close(srv, 0);
+    srv = 0;
+
+    tctx.parent_base_fds = count_self_fds_and_pipes(&tctx.parent_base_pipes);
+    tctx.smuggle_sentinel = 0;
+    hs_config_init(&cfg);
+    cfg.max_children = 2;
+    ckv(hs_listen_cfg(&srv, &cfg), 0, "listen-cfg-ok");
+    if (!srv) return;
+    port = hs_port(srv);
+    ck(port > 0, "listen-port-pos");
+    tctx.listen_fd = hs_listen_fd(srv);
+    tctx.listen_ino = (sy_fstat(tctx.listen_fd, &st) == 0) ? st.ino : 0;
+
+    /* 1. Concurrent /slow (300ms) + /_health & /_pid JSON (<150ms) */
+    c1 = sy_tcp_connect(port);
+    ck(c1 >= 0, "conc-c1");
+    send_req(c1, "GET /slow HTTP/1.1\r\nHost: a\r\nConnection: close\r\n\r\n");
+    (void)hs_step(srv, test_handler, &tctx, 50);
+    ckv(hs_active_children(srv), 1, "conc-c1-forked");
+
+    t0 = sy_now_ms();
+    c2 = sy_tcp_connect(port);
+    send_req(c2, "GET /_health HTTP/1.1\r\nHost: a\r\nConnection: close\r\n\r\n");
+    rn = pump_until_client(srv, &tctx, c2, buf, sizeof buf, 500);
+    dt = sy_now_ms() - t0;
+    ck(rn > 0 && tx_contains(buf, rn, "200 OK", 6) && tx_contains(buf, rn, "healthy", 7), "conc-health-200");
+    ck(dt < 150, "conc-health-unblocked-fast");
+    sy_close(c2);
+
+    t0 = sy_now_ms();
+    c2 = sy_tcp_connect(port);
+    send_req(c2, "GET /_pid HTTP/1.1\r\nHost: a\r\nConnection: close\r\n\r\n");
+    rn = pump_until_client(srv, &tctx, c2, buf, sizeof buf, 500);
+    dt = sy_now_ms() - t0;
+    ck(rn > 0 && tx_contains(buf, rn, "200 OK", 6) && tx_contains(buf, rn, "{\"pid\":", 7), "conc-pid-200-json");
+    ck(dt < 150, "conc-pid-unblocked-fast");
+    sy_close(c2);
+
+    rn = pump_until_client(srv, &tctx, c1, buf, sizeof buf, 1500);
+    ck(rn > 0 && tx_contains(buf, rn, "slow-ok", 7), "conc-slow-200");
+    sy_close(c1);
+    pump_until_children_zero(srv, &tctx, 500);
+    ckv(hs_active_children(srv), 0, "conc-reaped-0");
+
+    /* 1b. Live loopback smuggling request returns 400 and NEVER invokes hs_handler */
+    {
+        char sdir[512], spath[600];
+        if (sy_mkdtemp(sy_tmpdir(), "httpd-smug-", sdir, sizeof sdir) == 0 &&
+            cx_fmt(spath, sizeof spath, "%s/reached", sdir) == 0) {
+            tctx.smuggle_sentinel = spath;
+            c1 = sy_tcp_connect(port);
+            send_req(c1, "POST /_smuggle-probe HTTP/1.1\r\nHost: a\r\nContent-Length: 5\r\nTransfer-Encoding: chunked\r\n\r\n");
+            rn = pump_until_client(srv, &tctx, c1, buf, sizeof buf, 1000);
+            sy_close(c1);
+            pump_until_children_zero(srv, &tctx, 500);
+            ck(rn > 0 && tx_contains(buf, rn, "400 Bad Request", 15) && tx_contains(buf, rn, "Connection: close", 17),
+               "live-smuggle-400-close");
+            ckv(sy_exists(spath), 0, "live-smuggle-never-invokes-handler");
+            tctx.smuggle_sentinel = 0;
+            sy_remove_all(sdir);
+        } else {
+            ck(0, "live-smuggle-400-close");
+            ck(0, "live-smuggle-never-invokes-handler");
+        }
+    }
+
+    /* 2. max_children=2 quota + 503 */
+    c1 = sy_tcp_connect(port);
+    send_req(c1, "GET /slow HTTP/1.1\r\nHost: a\r\nConnection: close\r\n\r\n");
+    (void)hs_step(srv, test_handler, &tctx, 50);
+    c2 = sy_tcp_connect(port);
+    send_req(c2, "GET /slow HTTP/1.1\r\nHost: a\r\nConnection: close\r\n\r\n");
+    (void)hs_step(srv, test_handler, &tctx, 50);
+    ckv(hs_active_children(srv), 2, "quota-2-active");
+
+    c3 = sy_tcp_connect(port);
+    send_req(c3, "GET /_health HTTP/1.1\r\nHost: a\r\nConnection: close\r\n\r\n");
+    rn = pump_until_client(srv, &tctx, c3, buf, sizeof buf, 500);
+    ck(rn > 0 && tx_contains(buf, rn, "503 Service Unavailable", 23), "quota-503-immediate");
+    sy_close(c3);
+
+    (void)pump_until_client(srv, &tctx, c1, buf, sizeof buf, 1500);
+    (void)pump_until_client(srv, &tctx, c2, buf, sizeof buf, 1500);
+    sy_close(c1); sy_close(c2);
+    pump_until_children_zero(srv, &tctx, 500);
+
+    /* 3. Child /proc/self/fd clean check */
+    c1 = sy_tcp_connect(port);
+    send_req(c1, "GET /check-fds HTTP/1.1\r\nHost: a\r\nConnection: close\r\n\r\n");
+    rn = pump_until_client(srv, &tctx, c1, buf, sizeof buf, 1000);
+    if (!(rn > 0 && tx_contains(buf, rn, "fds-clean", 9))) printf("NOTE\tchild-fds\t%s\n", buf);
+    ck(rn > 0 && tx_contains(buf, rn, "fds-clean", 9), "child-proc-self-fd-clean");
+    sy_close(c1);
+    pump_until_children_zero(srv, &tctx, 500);
+
+    /* 4. Child crash isolation */
+    c1 = sy_tcp_connect(port);
+    send_req(c1, "GET /crash HTTP/1.1\r\nHost: a\r\nConnection: close\r\n\r\n");
+    (void)pump_until_client(srv, &tctx, c1, buf, sizeof buf, 1000);
+    sy_close(c1);
+    pump_until_children_zero(srv, &tctx, 500);
+    ck(hs_crashed_children(srv) >= 1, "child-crash-recorded");
+    c2 = sy_tcp_connect(port);
+    send_req(c2, "GET /_health HTTP/1.1\r\nHost: a\r\nConnection: close\r\n\r\n");
+    rn = pump_until_client(srv, &tctx, c2, buf, sizeof buf, 1000);
+    ck(rn > 0 && tx_contains(buf, rn, "healthy", 7), "after-crash-still-healthy");
+    sy_close(c2);
+    pump_until_children_zero(srv, &tctx, 500);
+
+    /* 5. hs_close(drain_ms) kills process group + grandchild (zero orphans/zombies) */
+    c1 = sy_tcp_connect(port);
+    send_req(c1, "GET /orphan-hang HTTP/1.1\r\nHost: a\r\nConnection: close\r\n\r\n");
+    rn = pump_until_client(srv, &tctx, c1, buf, sizeof buf, 1000);
+    sy_close(c1);
+    {
+        long p = tx_find(buf, rn, "GPID=", 5);
+        if (p >= 0) {
+            long k = p + 5;
+            while (k < rn && buf[k] >= '0' && buf[k] <= '9') { gpid = gpid * 10 + (buf[k] - '0'); k++; }
+        }
+    }
+    ck(gpid > 0 && sy_signal(gpid, 0) == 0, "orphan-grandchild-alive");
+    t0 = sy_now_ms();
+    ckv(hs_close(srv, 150), 0, "close-drain-ok");
+    dt = sy_now_ms() - t0;
+    ck(dt < 1000, "close-drain-bounded");
+    {
+        int w;
+        for (w = 0; w < 30 && gpid > 0 && sy_signal(gpid, 0) == 0; w++) sy_sleep_ms(10);
+    }
+    ck(gpid > 0 && sy_signal(gpid, 0) == -ESRCH, "orphan-grandchild-killed");
+    ckv(sy_wait_any(SY_WAIT_NOHANG, 0, 0, 0), -ECHILD, "close-zero-zombies");
+}
+
+static void test_pipe_and_fd_closure(void) {
+    hs_config_t cfg;
+    hs_server *srv = 0;
+    srv_test_ctx tctx;
+    char errdir[512], errlog[600], buf[1024];
+    int port, errfd, old2, c, i, base_fds, after_fds, ok200 = 0;
+    long rn;
+    unsigned char *ebuf = 0;
+    int64_t en = 0;
+
+    hs_config_init(&cfg);
+    cfg.max_children = 16;
+    if (hs_listen_cfg(&srv, &cfg) != 0 || !srv) { ck(0, "pipe-listen"); return; }
+    port = hs_port(srv);
+    tctx.listen_fd = hs_listen_fd(srv);
+    tctx.listen_ino = 0;
+    tctx.parent_base_fds = 0;
+    tctx.parent_base_pipes = 0;
+    tctx.smuggle_sentinel = 0;
+
+    /* Probe 1 + 3: 1 MiB stdout + stderr non-blocking + daemon stderr passthrough */
+    if (sy_mkdtemp(sy_tmpdir(), "httpd-err-", errdir, sizeof errdir) == 0 &&
+        cx_fmt(errlog, sizeof errlog, "%s/stderr.log", errdir) == 0) {
+        errfd = sy_open(errlog, O_WRONLY | O_CREAT | O_TRUNC, 0600);
+        old2 = sy_dup(2);
+        if (errfd >= 0 && old2 >= 0) {
+            sy_dup2(errfd, 2);
+            c = sy_tcp_connect(port);
+            send_req(c, "GET /pipe1mb HTTP/1.1\r\nHost: a\r\nConnection: close\r\n\r\n");
+            rn = pump_until_client(srv, &tctx, c, buf, sizeof buf, 4000);
+            sy_close(c);
+            sy_dup2(old2, 2);
+            sy_close(old2);
+            sy_close(errfd);
+            ck(rn > 0 && tx_contains(buf, rn, "pipe-1mb-ok", 11), "pipe-1mb-ok");
+            pump_until_children_zero(srv, &tctx, 1000);
+            if (sy_read_file(errlog, &ebuf, &en, 2 * 1048576) == 0 && ebuf) {
+                ck(en >= 1048576 && tx_contains((const char *)ebuf, (long)en, "STDERR_PASSTHROUGH_MARKER_R76", 29),
+                   "pipe-stderr-passthrough-1mb");
+                mm_free(ebuf);
+            } else {
+                ck(0, "pipe-stderr-passthrough-1mb");
+            }
+        } else {
+            if (errfd >= 0) sy_close(errfd);
+            if (old2 >= 0) sy_close(old2);
+            ck(0, "pipe-1mb-ok");
+            ck(0, "pipe-stderr-passthrough-1mb");
+        }
+        sy_remove_all(errdir);
+    } else {
+        ck(0, "pipe-1mb-ok");
+        ck(0, "pipe-stderr-passthrough-1mb");
+    }
+
+    /* Probe 2: 200 connections /proc/self/fd baseline zero-leak */
+    pump_until_children_zero(srv, &tctx, 500);
+    base_fds = count_self_fds();
+    ck(base_fds > 0, "pipe-200-base-fds");
+    for (i = 0; i < 200; i++) {
+        c = sy_tcp_connect(port);
+        if (c < 0) break;
+        send_req(c, "GET /_health HTTP/1.1\r\nHost: a\r\nConnection: close\r\n\r\n");
+        rn = pump_until_client(srv, &tctx, c, buf, sizeof buf, 1000);
+        if (rn > 0 && tx_contains(buf, rn, "200 OK", 6)) ok200++;
+        sy_close(c);
+        (void)hs_step(srv, test_handler, &tctx, 0);
+    }
+    ckv(ok200, 200, "pipe-200-all-200");
+    pump_until_children_zero(srv, &tctx, 2000);
+    after_fds = count_self_fds();
+    ckv(after_fds, base_fds, "pipe-200-fd-baseline");
+
+    hs_close(srv, 200);
+}
+
+static long pump_until_pattern(hs_server *srv, srv_test_ctx *tctx, int cfd, char *out, long cap, const char *pat, long max_ms) {
+    long total = 0;
+    long plen = (long)strlen(pat);
+    sy_deadline_t dl = sy_deadline_in(max_ms);
+    if (!out || cap <= 1) return -EINVAL;
+    out[0] = 0;
+    while (sy_deadline_left(&dl) > 0 && total < cap - 1) {
+        int pr = sy_sock_poll(cfd, SY_POLLIN | SY_POLLHUP | SY_POLLERR, 0);
+        if (pr > 0) {
+            long r = sy_sock_recv(cfd, out + total, cap - 1 - total);
+            if (r > 0) {
+                total += r;
+                out[total] = 0;
+                {
+                    long j;
+                    for (j = 0; j + plen <= total; j++) {
+                        if (mm_same(out + j, plen, pat, plen)) return total;
+                    }
+                }
+                continue;
+            }
+            if (r == 0) break;
+        }
+        (void)hs_step(srv, test_handler, tctx, 5);
+    }
+    return total;
+}
+
+static long parse_resp_cl(const char *hdr, long hlen) {
+    long i = 0;
+    while (i < hlen) {
+        long e = i, colon = -1;
+        while (e < hlen && hdr[e] != '\n') e++;
+        {
+            long ll = (e > i && hdr[e - 1] == '\r') ? e - i - 1 : e - i;
+            long k;
+            for (k = 0; k < ll; k++) if (hdr[i + k] == ':') { colon = k; break; }
+            if (colon == 14 && tx_ieq(hdr + i, 14, "Content-Length", 14)) {
+                long vs = colon + 1;
+                uint64_t uv = 0;
+                while (vs < ll && (hdr[i + vs] == ' ' || hdr[i + vs] == '\t')) vs++;
+                if (tx_to_u64(hdr + i + vs, ll - vs, 10, &uv) == 0) return (long)uv;
+            }
+        }
+        i = e + 1;
+    }
+    return -1;
+}
+
+static int client_read_http_resp(hs_server *srv, srv_test_ctx *tctx, int cfd,
+                                 char *hdr_out, long hcap, char *body_out, long bcap, long *blen_out,
+                                 int is_head, long max_ms) {
+    mg_buf raw;
+    long hend = -1, cl = -1, blen = 0;
+    int chunked = 0, status = 0;
+    sy_deadline_t dl = sy_deadline_in(max_ms);
+    mg_init(&raw);
+    if (blen_out) *blen_out = 0;
+    if (hdr_out && hcap > 0) hdr_out[0] = 0;
+    if (body_out && bcap > 0) body_out[0] = 0;
+
+    while (sy_deadline_left(&dl) > 0) {
+        int pr = sy_sock_poll(cfd, SY_POLLIN | SY_POLLHUP | SY_POLLERR, 0);
+        if (pr > 0) {
+            char tmp[4096];
+            long r = sy_sock_recv(cfd, tmp, (long)sizeof tmp);
+            if (r > 0) {
+                (void)mg_append(&raw, tmp, r);
+                hend = tx_find((const char *)raw.data, raw.len, "\r\n\r\n", 4);
+                if (hend >= 0) { hend += 4; break; }
+                continue;
+            }
+            if (r == 0) break;
+        }
+        (void)hs_step(srv, test_handler, tctx, 5);
+    }
+    if (hend < 0) { mg_free(&raw); return -ETIMEDOUT; }
+    if (hdr_out && hcap > 0) {
+        long cp = hend < hcap - 1 ? hend : hcap - 1;
+        mm_copy(hdr_out, hcap, raw.data, cp);
+        hdr_out[cp] = 0;
+    }
+    if (raw.len >= 12) {
+        uint64_t sc = 0;
+        if (tx_to_u64((const char *)raw.data + 9, 3, 10, &sc) == 0) status = (int)sc;
+    }
+    cl = parse_resp_cl((const char *)raw.data, hend);
+    chunked = tx_contains((const char *)raw.data, hend, "Transfer-Encoding: chunked", 26);
+
+    if (is_head || (status >= 100 && status < 200) || status == 204 || status == 304) {
+        blen = raw.len - hend;
+        if (blen > 0 && body_out && bcap > 0) {
+            long cp = blen < bcap - 1 ? blen : bcap - 1;
+            mm_copy(body_out, bcap, raw.data + hend, cp);
+            body_out[cp] = 0;
+        }
+        if (blen_out) *blen_out = blen;
+        mg_free(&raw);
+        return status;
+    }
+
+    if (chunked) {
+        dk_state dk;
+        long off = hend;
+        dk_init(&dk);
+        for (;;) {
+            while (off < raw.len) {
+                unsigned char tmp_o[4096];
+                long cons = 0, olen = 0;
+                long drc = dk_feed(&dk, raw.data + off, raw.len - off, &cons, tmp_o, (long)sizeof tmp_o, &olen);
+                off += cons;
+                if (olen > 0 && body_out && blen + olen < bcap) {
+                    mm_copy(body_out + blen, bcap - blen, tmp_o, olen);
+                    blen += olen;
+                }
+                if (drc < 0) { mg_free(&raw); return -EINVAL; }
+                if (drc == DK_END) {
+                    if (body_out && blen < bcap) body_out[blen] = 0;
+                    if (blen_out) *blen_out = blen;
+                    mg_free(&raw);
+                    return status;
+                }
+                if (drc == DK_NEED_IN) break;
+            }
+            if (sy_deadline_left(&dl) <= 0) { mg_free(&raw); return -ETIMEDOUT; }
+            if (sy_sock_poll(cfd, SY_POLLIN | SY_POLLHUP | SY_POLLERR, 0) > 0) {
+                char tmp[4096];
+                long r = sy_sock_recv(cfd, tmp, (long)sizeof tmp);
+                if (r > 0) { (void)mg_append(&raw, tmp, r); continue; }
+                if (r == 0) { mg_free(&raw); return -EPIPE; }
+            }
+            (void)hs_step(srv, test_handler, tctx, 5);
+        }
+    } else if (cl >= 0) {
+        while (raw.len - hend < cl && sy_deadline_left(&dl) > 0) {
+            if (sy_sock_poll(cfd, SY_POLLIN | SY_POLLHUP | SY_POLLERR, 0) > 0) {
+                char tmp[4096];
+                long r = sy_sock_recv(cfd, tmp, (long)sizeof tmp);
+                if (r > 0) { (void)mg_append(&raw, tmp, r); continue; }
+                if (r == 0) break;
+            }
+            (void)hs_step(srv, test_handler, tctx, 5);
+        }
+        blen = raw.len - hend;
+        if (body_out && blen > 0 && bcap > 0) {
+            long cp = blen < bcap - 1 ? blen : bcap - 1;
+            mm_copy(body_out, bcap, raw.data + hend, cp);
+            body_out[cp] = 0;
+        }
+        if (blen_out) *blen_out = blen;
+        mg_free(&raw);
+        return status;
+    } else {
+        /* EOF-delimited HTTP/1.0 stream */
+        while (sy_deadline_left(&dl) > 0) {
+            if (sy_sock_poll(cfd, SY_POLLIN | SY_POLLHUP | SY_POLLERR, 0) > 0) {
+                char tmp[4096];
+                long r = sy_sock_recv(cfd, tmp, (long)sizeof tmp);
+                if (r > 0) { (void)mg_append(&raw, tmp, r); continue; }
+                if (r == 0) break;
+            }
+            (void)hs_step(srv, test_handler, tctx, 5);
+        }
+        blen = raw.len - hend;
+        if (body_out && blen > 0 && bcap > 0) {
+            long cp = blen < bcap - 1 ? blen : bcap - 1;
+            mm_copy(body_out, bcap, raw.data + hend, cp);
+            body_out[cp] = 0;
+        }
+        if (blen_out) *blen_out = blen;
+        mg_free(&raw);
+        return status;
+    }
+}
+
+static void test_body_stream_keepalive_timeouts(void) {
+    hs_config_t cfg;
+    hs_server *srv = 0;
+    srv_test_ctx tctx;
+    char hdr[2048], body[4096];
+    long blen = 0, t0, dt;
+    int port, c, c2, st, pids[5], k;
+
+    tctx.listen_fd = -1;
+    tctx.listen_ino = 0;
+    tctx.parent_base_fds = 0;
+    tctx.parent_base_pipes = 0;
+    tctx.smuggle_sentinel = 0;
+
+    hs_config_init(&cfg);
+    cfg.max_children = 16;
+    cfg.max_body_bytes = 256;
+    cfg.keep_alive_max = 5;
+    cfg.header_timeout_ms = 180;
+    cfg.idle_timeout_ms = 280;
+    cfg.body_read_timeout_ms = 300;
+    if (hs_listen_cfg(&srv, &cfg) != 0 || !srv) { ck(0, "s567-listen"); return; }
+    port = hs_port(srv);
+    tctx.listen_fd = hs_listen_fd(srv);
+
+    /* 1. Fixed-length POST with pre-read body in same send */
+    c = sy_tcp_connect(port);
+    send_req(c, "POST /echo-body HTTP/1.1\r\nHost: a\r\nContent-Length: 11\r\nConnection: close\r\n\r\nhello world");
+    st = client_read_http_resp(srv, &tctx, c, hdr, sizeof hdr, body, sizeof body, &blen, 0, 1000);
+    sy_close(c);
+    ckv(st, 200, "body-fixed-200");
+    ck(blen == 11 && tx_eqz(body, "hello world"), "body-fixed-echo");
+
+    /* 2. Fixed-length Content-Length > max_body_bytes -> 413 */
+    c = sy_tcp_connect(port);
+    send_req(c, "POST /echo-body HTTP/1.1\r\nHost: a\r\nContent-Length: 300\r\nConnection: close\r\n\r\n");
+    st = client_read_http_resp(srv, &tctx, c, hdr, sizeof hdr, body, sizeof body, &blen, 0, 1000);
+    sy_close(c);
+    ckv(st, 413, "body-cl-over-limit-413");
+    ck(tx_contains(hdr, (long)strlen(hdr), "Connection: close", 17), "body-cl-413-close");
+
+    /* 3. Chunked POST split across sends -> dk_feed decoded */
+    c = sy_tcp_connect(port);
+    send_req(c, "POST /echo-body HTTP/1.1\r\nHost: a\r\nTransfer-Encoding: chunked\r\nConnection: close\r\n\r\n5\r\nhello");
+    (void)hs_step(srv, test_handler, &tctx, 20);
+    sy_sleep_ms(10);
+    send_req(c, "\r\n6\r\n world\r\n0\r\n\r\n");
+    st = client_read_http_resp(srv, &tctx, c, hdr, sizeof hdr, body, sizeof body, &blen, 0, 1000);
+    sy_close(c);
+    ckv(st, 200, "body-chunked-200");
+    ck(blen == 11 && tx_eqz(body, "hello world"), "body-chunked-dkfeed-echo");
+
+    /* 4. Malformed chunked POST -> 400 + close */
+    c = sy_tcp_connect(port);
+    send_req(c, "POST /echo-body HTTP/1.1\r\nHost: a\r\nTransfer-Encoding: chunked\r\nConnection: close\r\n\r\nZZ\r\nbad\r\n0\r\n\r\n");
+    st = client_read_http_resp(srv, &tctx, c, hdr, sizeof hdr, body, sizeof body, &blen, 0, 1000);
+    sy_close(c);
+    ckv(st, 400, "body-chunked-malformed-400");
+
+    /* 5. Chunked POST exceeding max_body_bytes (256) -> 413 + close */
+    {
+        char c300[350];
+        mm_fill(c300, 300, 'Z', 300);
+        c300[300] = 0;
+        c = sy_tcp_connect(port);
+        send_req(c, "POST /echo-body HTTP/1.1\r\nHost: a\r\nTransfer-Encoding: chunked\r\nConnection: close\r\n\r\n12c\r\n");
+        sy_send_all(c, c300, 300);
+        send_req(c, "\r\n0\r\n\r\n");
+        st = client_read_http_resp(srv, &tctx, c, hdr, sizeof hdr, body, sizeof body, &blen, 0, 1000);
+        sy_close(c);
+        ckv(st, 413, "body-chunked-over-limit-413");
+    }
+
+    /* 6. Expect: 100-continue normal flow AND > max_body_bytes flow (no 100!) */
+    c = sy_tcp_connect(port);
+    send_req(c, "POST /echo-body HTTP/1.1\r\nHost: a\r\nExpect: 100-continue\r\nContent-Length: 5\r\nConnection: close\r\n\r\n");
+    blen = pump_until_pattern(srv, &tctx, c, body, sizeof body, "100 Continue\r\n\r\n", 1000);
+    ck(blen > 0 && tx_contains(body, blen, "HTTP/1.1 100 Continue\r\n\r\n", 25), "expect-100-received");
+    send_req(c, "12345");
+    st = client_read_http_resp(srv, &tctx, c, hdr, sizeof hdr, body, sizeof body, &blen, 0, 1000);
+    sy_close(c);
+    ckv(st, 200, "expect-100-then-200");
+    ck(blen == 5 && tx_eqz(body, "12345"), "expect-100-echo");
+
+    c = sy_tcp_connect(port);
+    send_req(c, "POST /echo-body HTTP/1.1\r\nHost: a\r\nExpect: 100-continue\r\nContent-Length: 300\r\nConnection: close\r\n\r\n");
+    blen = pump_until_client(srv, &tctx, c, body, sizeof body, 600);
+    sy_close(c);
+    ck(blen > 0 && tx_contains(body, blen, "413 Payload Too Large", 21) &&
+       !tx_contains(body, blen, "100 Continue", 12), "expect-413-no-100");
+
+    c = sy_tcp_connect(port);
+    send_req(c, "POST /echo-body-cap64 HTTP/1.1\r\nHost: a\r\nExpect: 100-continue\r\nContent-Length: 100\r\nConnection: close\r\n\r\n");
+    blen = pump_until_client(srv, &tctx, c, body, sizeof body, 600);
+    sy_close(c);
+    ck(blen > 0 && tx_contains(body, blen, "413 Payload Too Large", 21) &&
+       !tx_contains(body, blen, "100 Continue", 12), "expect-413-cap-no-100");
+
+    /* 7. HTTP/1.1 chunked SSE stream + progressive flush timing */
+    c = sy_tcp_connect(port);
+    send_req(c, "GET /sse HTTP/1.1\r\nHost: a\r\nConnection: close\r\n\r\n");
+    st = client_read_http_resp(srv, &tctx, c, hdr, sizeof hdr, body, sizeof body, &blen, 0, 1000);
+    sy_close(c);
+    ckv(st, 200, "sse-11-200");
+    ck(tx_contains(hdr, (long)strlen(hdr), "Transfer-Encoding: chunked", 26), "sse-11-te-chunked");
+    ck(tx_contains(hdr, (long)strlen(hdr), "text/event-stream", 17), "sse-11-ct");
+    ck(blen == 27 && tx_eqz(body, "data: a\n\ndata: b\n\ndata: c\n\n"), "sse-11-3chunks-exact");
+
+    c = sy_tcp_connect(port);
+    t0 = sy_now_ms();
+    send_req(c, "GET /sse-slow HTTP/1.1\r\nHost: a\r\nConnection: close\r\n\r\n");
+    blen = pump_until_pattern(srv, &tctx, c, body, sizeof body, "data: first\n\n", 1000);
+    dt = sy_now_ms() - t0;
+    ck(blen > 0 && tx_contains(body, blen, "data: first\n\n", 13) && dt < 90, "sse-slow-first-chunk-flushed-early");
+    blen = pump_until_pattern(srv, &tctx, c, body, sizeof body, "0\r\n\r\n", 1000);
+    sy_close(c);
+    ck(blen > 0 && tx_contains(body, blen, "data: second\n\n", 14), "sse-slow-second-chunk");
+
+    /* 8. HTTP/1.0 stream: NO Transfer-Encoding: chunked, Connection: close, EOF raw concatenation */
+    c = sy_tcp_connect(port);
+    send_req(c, "GET /sse-10 HTTP/1.0\r\nHost: a\r\n\r\n");
+    st = client_read_http_resp(srv, &tctx, c, hdr, sizeof hdr, body, sizeof body, &blen, 0, 1000);
+    sy_close(c);
+    ckv(st, 200, "http10-stream-200");
+    ck(!tx_contains(hdr, (long)strlen(hdr), "Transfer-Encoding", 17), "http10-stream-no-te");
+    ck(tx_contains(hdr, (long)strlen(hdr), "Connection: close", 17), "http10-stream-conn-close");
+    ck(blen == 10 && tx_eqz(body, "part1part2"), "http10-stream-raw-body");
+
+    /* 9. HEAD + 204 + 304 zero response body bytes */
+    c = sy_tcp_connect(port);
+    send_req(c, "HEAD /_health HTTP/1.1\r\nHost: a\r\nConnection: close\r\n\r\n");
+    st = client_read_http_resp(srv, &tctx, c, hdr, sizeof hdr, body, sizeof body, &blen, 1, 1000);
+    sy_close(c);
+    ckv(st, 200, "head-200");
+    ck(tx_contains(hdr, (long)strlen(hdr), "Content-Length: 7", 17), "head-keeps-cl");
+    ckv(blen, 0, "head-zero-body-bytes");
+
+    c = sy_tcp_connect(port);
+    send_req(c, "GET /no-content HTTP/1.1\r\nHost: a\r\nConnection: close\r\n\r\n");
+    st = client_read_http_resp(srv, &tctx, c, hdr, sizeof hdr, body, sizeof body, &blen, 0, 1000);
+    sy_close(c);
+    ckv(st, 204, "status-204");
+    ck(!tx_contains(hdr, (long)strlen(hdr), "Content-Length:", 15) &&
+       !tx_contains(hdr, (long)strlen(hdr), "Transfer-Encoding:", 18), "status-204-no-cl-te");
+    ckv(blen, 0, "status-204-zero-body");
+
+    c = sy_tcp_connect(port);
+    send_req(c, "GET /not-modified HTTP/1.1\r\nHost: a\r\nConnection: close\r\n\r\n");
+    st = client_read_http_resp(srv, &tctx, c, hdr, sizeof hdr, body, sizeof body, &blen, 0, 1000);
+    sy_close(c);
+    ckv(st, 304, "status-304");
+    ck(!tx_contains(hdr, (long)strlen(hdr), "Content-Length:", 15) &&
+       !tx_contains(hdr, (long)strlen(hdr), "Transfer-Encoding:", 18), "status-304-no-cl-te");
+    ckv(blen, 0, "status-304-zero-body");
+
+    /* 10. Keep-Alive reuse: 5 requests on single TCP connection, same PID, 5th closes */
+    c = sy_tcp_connect(port);
+    for (k = 0; k < 5; k++) {
+        pids[k] = -1;
+        if (k == 1) {
+            send_req(c, "POST /echo-body HTTP/1.1\r\nHost: a\r\nContent-Length: 3\r\n\r\nabc");
+            st = client_read_http_resp(srv, &tctx, c, hdr, sizeof hdr, body, sizeof body, &blen, 0, 1000);
+            ck(st == 200 && blen == 3 && tx_eqz(body, "abc"), "keepalive-req2-fixed");
+            pids[k] = pids[0];
+        } else if (k == 2) {
+            send_req(c, "POST /echo-body HTTP/1.1\r\nHost: a\r\nTransfer-Encoding: chunked\r\n\r\n3\r\nxyz\r\n0\r\n\r\n");
+            st = client_read_http_resp(srv, &tctx, c, hdr, sizeof hdr, body, sizeof body, &blen, 0, 1000);
+            ck(st == 200 && blen == 3 && tx_eqz(body, "xyz"), "keepalive-req3-chunked");
+            pids[k] = pids[0];
+        } else {
+            send_req(c, "GET /_pid HTTP/1.1\r\nHost: a\r\n\r\n");
+            st = client_read_http_resp(srv, &tctx, c, hdr, sizeof hdr, body, sizeof body, &blen, 0, 1000);
+            if (st == 200) {
+                long p = tx_find(body, blen, "\"pid\":", 6);
+                if (p >= 0) {
+                    int val = 0;
+                    long j = p + 6;
+                    while (j < blen && body[j] >= '0' && body[j] <= '9') { val = val * 10 + (body[j] - '0'); j++; }
+                    pids[k] = val;
+                }
+            }
+            if (k < 4) ck(tx_contains(hdr, (long)strlen(hdr), "Connection: keep-alive", 22), "keepalive-1-4-alive");
+            else ck(tx_contains(hdr, (long)strlen(hdr), "Connection: close", 17), "keepalive-5th-conn-close");
+        }
+    }
+    ck(pids[0] > 0 && pids[0] == pids[3] && pids[0] == pids[4], "keepalive-same-child-pid");
+    {
+        char eofb[16];
+        long er = -999;
+        sy_deadline_t dl = sy_deadline_in(500);
+        while (sy_deadline_left(&dl) > 0) {
+            if (sy_sock_poll(c, SY_POLLIN | SY_POLLHUP | SY_POLLERR, 0) > 0) {
+                er = sy_sock_recv(c, eofb, sizeof eofb);
+                break;
+            }
+            (void)hs_step(srv, test_handler, &tctx, 5);
+        }
+        ckv(er, 0, "keepalive-5th-eof");
+    }
+    sy_close(c);
+    pump_until_children_zero(srv, &tctx, 500);
+
+    /* 11. Slowloris header timeout + concurrent healthy + Keep-Alive idle timeout */
+    c = sy_tcp_connect(port);
+    send_req(c, "GET / HTTP/1.1\r\n");
+    (void)hs_step(srv, test_handler, &tctx, 20);
+    c2 = sy_tcp_connect(port);
+    send_req(c2, "GET /_health HTTP/1.1\r\nHost: a\r\nConnection: close\r\n\r\n");
+    st = client_read_http_resp(srv, &tctx, c2, hdr, sizeof hdr, body, sizeof body, &blen, 0, 500);
+    sy_close(c2);
+    ckv(st, 200, "slowloris-does-not-block-health");
+    blen = pump_until_client(srv, &tctx, c, body, sizeof body, 600);
+    sy_close(c);
+    ck(blen > 0 && tx_contains(body, blen, "408 Request Timeout", 19), "slowloris-408");
+    pump_until_children_zero(srv, &tctx, 500);
+
+    c = sy_tcp_connect(port);
+    send_req(c, "GET /_health HTTP/1.1\r\nHost: a\r\n\r\n");
+    st = client_read_http_resp(srv, &tctx, c, hdr, sizeof hdr, body, sizeof body, &blen, 0, 500);
+    ckv(st, 200, "idle-setup-200");
+    {
+        char ibuf[32];
+        long ir = -999;
+        sy_deadline_t dl = sy_deadline_in(700);
+        while (sy_deadline_left(&dl) > 0) {
+            if (sy_sock_poll(c, SY_POLLIN | SY_POLLHUP | SY_POLLERR, 0) > 0) {
+                ir = sy_sock_recv(c, ibuf, sizeof ibuf);
+                break;
+            }
+            (void)hs_step(srv, test_handler, &tctx, 10);
+        }
+        ckv(ir, 0, "idle-timeout-silent-eof");
+    }
+    sy_close(c);
+    pump_until_children_zero(srv, &tctx, 500);
+
+    /* 12. Mid-stream EPIPE/ECONNRESET handled cleanly without crashing parent */
+    {
+        int crashed_before = hs_crashed_children(srv);
+        c = sy_tcp_connect(port);
+        send_req(c, "GET /sse-epipe HTTP/1.1\r\nHost: a\r\nConnection: close\r\n\r\n");
+        blen = pump_until_pattern(srv, &tctx, c, body, sizeof body, "first\n", 1000);
+        ck(blen > 0 && tx_contains(body, blen, "first\n", 6), "epipe-got-first-chunk");
+        sy_close(c);
+        pump_until_children_zero(srv, &tctx, 1500);
+        ckv(hs_crashed_children(srv), crashed_before, "epipe-no-crash");
+        c2 = sy_tcp_connect(port);
+        send_req(c2, "GET /_health HTTP/1.1\r\nHost: a\r\nConnection: close\r\n\r\n");
+        st = client_read_http_resp(srv, &tctx, c2, hdr, sizeof hdr, body, sizeof body, &blen, 0, 500);
+        sy_close(c2);
+        ckv(st, 200, "epipe-parent-continues");
+    }
+
+    hs_close(srv, 200);
 }
 
 static int run_one_mut(const char *tag, const char *old_s, const char *new_s, const char *expect_fail) {
@@ -321,6 +1264,26 @@ static int run_muts(void) {
                      "if (tx_ieq(vptr, vlen, \"chunked\", 7) && seen_te == 0)",
                      "if (tx_same(vptr, vlen, \"chunked\", 7) && seen_te == 0)",
                      "FAIL\thttpd.te-upper-chunked-ok");
+    f += run_one_mut("mut4-pipe-fd1-redirect",
+                     "if (dn != 1) { (void)sy_dup2(dn, 1); (void)sy_close(dn); }",
+                     "if (0 && dn != 1) { (void)sy_dup2(dn, 1); (void)sy_close(dn); }",
+                     "FAIL\thttpd.pipe-1mb-ok");
+    f += run_one_mut("mut5-parent-close-pipe-fds",
+                     "sy_close(fds[0]); sy_close(fds[1]);",
+                     "(void)fds;",
+                     "FAIL\thttpd.pipe-200-fd-baseline");
+    f += run_one_mut("mut6-expect-100-skip-413-check",
+                     "if (req->content_length > 0 && req->content_length > max_b)",
+                     "if (0 && req->content_length > 0 && req->content_length > max_b)",
+                     "FAIL\thttpd.expect-413-cap-no-100");
+    f += run_one_mut("mut7-http10-chunked-forbidden",
+                     "if (r->http_ver == 11)",
+                     "if (1 || r->http_ver == 11)",
+                     "FAIL\thttpd.http10-stream-no-te");
+    f += run_one_mut("mut8-keepalive-max-ignored",
+                     "int effective_ka = (req.keep_alive && (req_idx + 1 < ctx->cfg.keep_alive_max)) ? 1 : 0;",
+                     "int effective_ka = req.keep_alive ? 1 : 0;",
+                     "FAIL\thttpd.keepalive-5th-conn-close");
     printf("EXT_NET_HTTPD_MUT\tfailed=%d\n", f);
     return f ? 1 : 0;
 }
@@ -330,6 +1293,9 @@ int main(int argc, char **argv) {
     test_config();
     test_framing_and_view();
     test_request_line_and_smuggling();
+    test_server_loopback_and_fork_conns();
+    test_pipe_and_fd_closure();
+    test_body_stream_keepalive_timeouts();
     printf("EXT_NET_HTTPD\tok=%d\tfailed=%d\n", nok, nfail);
     return nfail ? 1 : 0;
 }

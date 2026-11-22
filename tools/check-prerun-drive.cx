@@ -927,6 +927,145 @@ int main(void) {
            "r74-refuses-out-of-range-unmeasured-ms");
     }
 
+    /* (14) R74 followup:
+     *   14a: relative --root . normalized via sy_realpath so frozen-root/unisacc.com is never a self-referential dead symlink;
+     *   14b: prepare defaults --times-file to latest release/evidence/v*-strict-*.tsv when ~/.cache/unisacc/batch-times.tsv
+     *        is absent (falling back to build/phase-times.tsv only when no strict TSV exists), and unmeasured daily-compile-smoke-*
+     *        uses conservative estimate >= 15000ms;
+     *   14c: window target budget <= 45000ms (reserve_ms=13000, >45000ms single batch gets exclusive 1-batch window) and
+     *        measured outer_overhead_ms = window_wall_ms - sum_batch_ms in estimate and run;
+     *   14d: prepare/run default keep_going=1 (allows UNKNOWN rc=3, hard-stops on product-qualification FAIL, disabled by
+     *        --no-keep-going / --fail-fast-unknown) and W0000 warmup picks lightest single batch instead of unit-frontcache-equiv3-split. */
+    {
+        char f14[CPD_PW];
+        if (cx_fmt(f14, sizeof f14, "%s/r74f", work) || sy_mkdir_all(f14, 0700)) return 2;
+
+        /* 14a: --root . relative path normalization */
+        if (cx_fmt(cmd, sizeof cmd,
+            "set -e; R='%s/relroot'; O='%s/relout'; M='%s/relmock.sh'; IDS='%s/rel.ids'; "
+            "mkdir -p \"$R\"; printf 'b-rel\\n' > \"$IDS\"; "
+            "printf '#!/bin/sh\\necho launcher\\n' > \"$R/unisacc.com\" && chmod +x \"$R/unisacc.com\"; "
+            "printf '#!/bin/sh\\nmode=$1; wid=$2; jobs=$3; ids=$4; out=$5\\n"
+            "printf \"# devsvc qualify\\\\nbatch\\\\tdomain\\\\tstatus\\\\trc\\\\tcandidate\\\\tms\\\\tload1\\\\tretries\\\\tnote\\\\n\" > \"$out\"\\n"
+            "printf \"b-rel\\\\tproduct-qualification\\\\tPASS\\\\t0\\\\taaa\\\\t120\\\\t1.0\\\\t0\\\\t-\\\\n\" >> \"$out\"\\n"
+            "exit 0\\n' > \"$M\" && chmod +x \"$M\"; "
+            "cd \"$R\" && git init -q && git config user.name r74 && git config user.email r74@localhost && "
+            "printf 'x\\n' > a.txt && git add a.txt && git commit -qm init && "
+            "sh '%s/unisacc.com' '%s/tools/prerun-drive.cx' -- plan --ids-file \"$IDS\" --out \"$O\" --warmup 1 && "
+            "sh '%s/unisacc.com' '%s/tools/prerun-drive.cx' -- run --root . --out \"$O\" --mock-runner \"$M\" && "
+            "[ -e \"$O/frozen-root/unisacc.com\" ] && sh \"$O/frozen-root/unisacc.com\" | grep -q '^launcher$' && "
+            "echo REL_ROOT_SYMLINK_OK",
+            f14, f14, f14, f14, cwd, cwd, cwd, cwd)) return 2;
+        int rc14a = ckk_sh("check-prerun-drive", cmd, out, sizeof out);
+        ck(rc14a == 0 &&
+           ckk_has(out, CPD_OUT, "REL_ROOT_SYMLINK_OK") &&
+           ckk_has(out, CPD_OUT, "outer_overhead_ms="),
+           "r74f-relative-root-realpath-and-run-outer-overhead: normalizes --root . so frozen-root/unisacc.com is valid and logs outer_overhead_ms");
+
+        /* 14b: prepare --times-file fallback to latest_strict and unmeasured daily-compile-smoke-* >= 15000ms */
+        if (cx_fmt(cmd, sizeof cmd,
+            "set -e; H='%s/empty-home'; R='%s/p-root'; C='%s/p-chain'; O1='%s/p-out1'; O2='%s/p-out2'; O3='%s/p-out3'; "
+            "mkdir -p \"$H\" \"$R/tests\" \"$R/build\" \"$R/release/evidence/0.0.90\"; "
+            "printf 'id\\timplementation\\tlayer\\tsource\\tmode\\tplatform\\tbudget_seconds\\tmaterials\\tentry\\targs\\tcoverage\\texpect\\theaders\\ttier\\n"
+            "win-argv-facts\\tIMPLEMENTED\\tcontract\\tt.cx\\tSOURCE\\tlnx/x86_64\\t55\\t-\\tt.cx\\t-\\tc1\\trc0:M\\tproduct\\tcommit\\n"
+            "unit-frontcache-equiv3-split\\tIMPLEMENTED\\tcontract\\tt.cx\\tSOURCE\\tlnx/x86_64\\t55\\t-\\tt.cx\\t-\\tc2\\trc0:M\\tproduct\\tcommit\\n"
+            "check-gen-all-hang\\tIMPLEMENTED\\tcontract\\tt.cx\\tSOURCE\\tlnx/x86_64\\t55\\t-\\tt.cx\\t-\\tc3\\trc0:M\\tproduct\\tcommit\\n"
+            "daily-compile-smoke-01\\tIMPLEMENTED\\tcontract\\tt.cx\\tSOURCE\\tlnx/x86_64\\t55\\t-\\tt.cx\\t-\\tc4\\trc0:M\\tproduct\\tdaily\\n"
+            "daily-compile-smoke-02\\tIMPLEMENTED\\tcontract\\tt.cx\\tSOURCE\\tlnx/x86_64\\t55\\t-\\tt.cx\\t-\\tc5\\trc0:M\\tproduct\\tdaily\\n"
+            "daily-compile-smoke-03\\tIMPLEMENTED\\tcontract\\tt.cx\\tSOURCE\\tlnx/x86_64\\t55\\t-\\tt.cx\\t-\\tc6\\trc0:M\\tproduct\\tdaily\\n"
+            "daily-compile-smoke-04\\tIMPLEMENTED\\tcontract\\tt.cx\\tSOURCE\\tlnx/x86_64\\t55\\t-\\tt.cx\\t-\\tc7\\trc0:M\\tproduct\\tdaily\\n' > \"$R/tests/batches.tsv\"; "
+            "printf 'id\\tdomain\\n"
+            "win-argv-facts\\tproduct-qualification\\n"
+            "unit-frontcache-equiv3-split\\tproduct-qualification\\n"
+            "check-gen-all-hang\\tproduct-qualification\\n"
+            "daily-compile-smoke-01\\tproduct-qualification\\n"
+            "daily-compile-smoke-02\\tproduct-qualification\\n"
+            "daily-compile-smoke-03\\tproduct-qualification\\n"
+            "daily-compile-smoke-04\\tproduct-qualification\\n' > \"$R/tests/batch-domain-index.tsv\"; "
+            "printf '# devsvc qualify\\nbatch\\tdomain\\tstatus\\trc\\tcandidate\\tms\\tload1\\tretries\\tnote\\n"
+            "win-argv-facts\\tproduct-qualification\\tPASS\\t0\\taaa\\t2217\\t1.0\\t0\\t-\\n"
+            "unit-frontcache-equiv3-split\\tproduct-qualification\\tPASS\\t0\\taaa\\t2063\\t1.0\\t0\\t-\\n"
+            "check-gen-all-hang\\tproduct-qualification\\tPASS\\t0\\taaa\\t53281\\t1.0\\t0\\t-\\n"
+            "SUMMARY\\tbatches=3\\tPASS=3\\tFAIL=0\\tUNKNOWN=0\\tINVALID=0\\n' > \"$R/release/evidence/v0.0.90-strict-2026-11-22.tsv\"; "
+            "printf 'PRERUN_WINDOW\\twindow=W0000\\tphase=warmup\\tattempt=1\\tjobs=1\\trc=0\\twall_ms=3000\\n"
+            "PRERUN_WINDOW\\twindow=W0001\\tphase=normal\\tattempt=1\\tjobs=2\\trc=0\\twall_ms=3500\\n"
+            "PRERUN_WINDOW\\twindow=W0002\\tphase=heavy\\tattempt=1\\tjobs=1\\trc=0\\twall_ms=57061\\n' > \"$R/release/evidence/0.0.90/prerun-supervise.log\"; "
+            "printf 'win-argv-facts\\t2217\\n' > \"$R/build/phase-times.tsv\"; "
+            "printf 'win-argv-facts\\n' > \"$R/tests/commit-tier-selection.tsv\"; "
+            "cd \"$R\" && git init -q -b main && git config user.name r74 && git config user.email r74@localhost && "
+            "git add . && git commit -qm init && REV=$(git rev-parse HEAD); "
+            "mkdir -p \"$C/$REV/ape-final\"; "
+            "printf '#!/bin/sh\\necho unisacc 0.0.91\\n' > \"$C/$REV/ape-final/unisacc-next.com\" && chmod +x \"$C/$REV/ape-final/unisacc-next.com\"; "
+            "printf 'rev=%%s\\nroot=%%s\\n' \"$REV\" \"$R\" > \"$C/$REV/chain-run.identity\"; "
+            "HOME=\"$H\" sh '%s/unisacc.com' '%s/tools/prerun-drive.cx' -- prepare --from-chain-dir \"$C\" --root \"$R\" --version 0.0.91 --ids-file \"$R/tests/batch-domain-index.tsv\" --priority-file \"$R/tests/commit-tier-selection.tsv\" --normal-jobs 2 --unmeasured-ms 5000 --out \"$O1\" && "
+            "grep -q 'times_file\t.*/release/evidence/v0.0.90-strict-2026-11-22.tsv$' \"$O1/prerun-env.tsv\" && "
+            "grep -q '^W0000\t1\twarmup\t1\twin-argv-facts$' \"$O1/windows.tsv\" && "
+            "grep -q '^W0001\t2\tnormal\t2\tdaily-compile-smoke-01,daily-compile-smoke-02$' \"$O1/windows.tsv\" && "
+            "grep -q '^W0002\t2\tnormal\t2\tdaily-compile-smoke-03,daily-compile-smoke-04$' \"$O1/windows.tsv\" && "
+            "rm -f \"$R/release/evidence/v0.0.90-strict-2026-11-22.tsv\" && "
+            "HOME=\"$H\" sh '%s/unisacc.com' '%s/tools/prerun-drive.cx' -- prepare --from-chain-dir \"$C\" --root \"$R\" --version 0.0.91 --out \"$O2\" && "
+            "grep -q 'times_file\t.*/build/phase-times.tsv$' \"$O2/prerun-env.tsv\" && "
+            "echo PREPARE_LATEST_STRICT_AND_SMOKE_OK",
+            f14, f14, f14, f14, f14, f14, cwd, cwd, cwd, cwd)) return 2;
+        int rc14b = ckk_sh("check-prerun-drive", cmd, out, sizeof out);
+        ck(rc14b == 0 &&
+           ckk_has(out, CPD_OUT, "PREPARE_LATEST_STRICT_AND_SMOKE_OK") &&
+           ckk_has(out, CPD_OUT, "max_window_ms=45000\t") &&
+           ckk_has(out, CPD_OUT, "outer_overhead_ms=6000\t") &&
+           ckk_has(out, CPD_OUT, "reserve_ms=13000"),
+           "r74f-prepare-latest-strict-smoke-15s-target-45s-overhead-and-w0000-lightest");
+
+        /* 14d: default keep_going=1 allows UNKNOWN rc=3, --no-keep-going stops on UNKNOWN, and product FAIL always stops */
+        char m1p[CPD_PW], m2p[CPD_PW];
+        if (cx_fmt(m1p, sizeof m1p, "%s/m-unk.sh", f14) ||
+            cx_fmt(m2p, sizeof m2p, "%s/m-red.sh", f14)) return 2;
+        const char *m1_s =
+            "#!/bin/sh\n"
+            "mode=$1; wid=$2; jobs=$3; ids=$4; out=$5\n"
+            "echo \"# devsvc qualify\" > \"$out\"\n"
+            "printf 'batch\\tdomain\\tstatus\\trc\\tcandidate\\tms\\tload1\\tretries\\tnote\\n' >> \"$out\"\n"
+            "for id in $(printf '%s' \"$ids\" | tr ',' ' '); do\n"
+            "  if [ \"$id\" = cx-booter-ape ]; then\n"
+            "    printf 'cx-booter-ape\\tproduct-qualification\\tUNKNOWN\\t3\\t-\\t100\\t1.0\\t0\\tno-BATCH_RUN rc=3\\n' >> \"$out\"\n"
+            "  else\n"
+            "    printf '%s\\tproduct-qualification\\tPASS\\t0\\taaa\\t50\\t1.0\\t0\\t-\\n' \"$id\" >> \"$out\"\n"
+            "  fi\n"
+            "done\n"
+            "case \"$ids\" in *cx-booter-ape*) exit 1 ;; esac\n"
+            "exit 0\n";
+        const char *m2_s =
+            "#!/bin/sh\n"
+            "mode=$1; wid=$2; jobs=$3; ids=$4; out=$5\n"
+            "echo \"# devsvc qualify\" > \"$out\"\n"
+            "printf 'batch\\tdomain\\tstatus\\trc\\tcandidate\\tms\\tload1\\tretries\\tnote\\n' >> \"$out\"\n"
+            "for id in $(printf '%s' \"$ids\" | tr ',' ' '); do\n"
+            "  if [ \"$id\" = cx-booter-ape ]; then\n"
+            "    printf 'cx-booter-ape\\tproduct-qualification\\tFAIL\\t2\\taaa\\t100\\t1.0\\t0\\tprod-fail\\n' >> \"$out\"\n"
+            "  else\n"
+            "    printf '%s\\tproduct-qualification\\tPASS\\t0\\taaa\\t50\\t1.0\\t0\\t-\\n' \"$id\" >> \"$out\"\n"
+            "  fi\n"
+            "done\n"
+            "case \"$ids\" in *cx-booter-ape*) exit 1 ;; esac\n"
+            "exit 0\n";
+        if (cx_write(m1p, m1_s, strlen(m1_s)) || cx_write(m2p, m2_s, strlen(m2_s))) return 2;
+        if (cx_fmt(cmd, sizeof cmd,
+            "set -e; D1='%s/kg-def'; D2='%s/kg-off'; D3='%s/kg-red'; IDS='%s/kg.ids'; "
+            "printf 'w-light\\ncx-booter-ape\\nafter-unk\\n' > \"$IDS\"; "
+            "sh '%s/unisacc.com' '%s/tools/prerun-drive.cx' -- plan --ids-file \"$IDS\" --out \"$D1\" --warmup 1 && "
+            "cp -r \"$D1\" \"$D2\" && cp -r \"$D1\" \"$D3\" && "
+            "sh '%s/unisacc.com' '%s/tools/prerun-drive.cx' -- run --root '%s' --out \"$D1\" --mock-runner '%s' --max-retries 1 && "
+            "if sh '%s/unisacc.com' '%s/tools/prerun-drive.cx' -- run --root '%s' --out \"$D2\" --mock-runner '%s' --max-retries 1 --no-keep-going; then exit 1; fi && "
+            "if sh '%s/unisacc.com' '%s/tools/prerun-drive.cx' -- run --root '%s' --out \"$D3\" --mock-runner '%s' --max-retries 1; then exit 1; fi && "
+            "echo DEFAULT_KEEP_GOING_UNKNOWN_OK",
+            f14, f14, f14, f14, cwd, cwd, cwd, cwd, work, m1p, cwd, cwd, work, m1p, cwd, cwd, work, m2p)) return 2;
+        int rc14d = ckk_sh("check-prerun-drive", cmd, out, sizeof out);
+        ck(rc14d == 0 &&
+           ckk_has(out, CPD_OUT, "PRERUN_KEEP_GOING\tbatch=cx-booter-ape\t") &&
+           ckk_has(out, CPD_OUT, "PRERUN_PRODUCT_RED_STOP\tbatch=cx-booter-ape\tdomain=product-qualification\tstatus=FAIL\t") &&
+           ckk_has(out, CPD_OUT, "DEFAULT_KEEP_GOING_UNKNOWN_OK"),
+           "r74f-default-keep-going-unknown-and-hard-stop-product-red");
+    }
+
     { char *rmv[] = {"rm", "-rf", work, 0}; (void)ck_run(rmv, out, sizeof out); }
     printf("CHECK_PRERUN_DRIVE\tok=%d\tfailed=%d\tms=%ld\n", ck_assertions() - ck_failures(), ck_failures(), sy_now_ms() - t0);
     return ck_failures() ? 1 : 0;

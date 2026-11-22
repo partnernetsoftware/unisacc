@@ -1,6 +1,6 @@
 /* tools/check-dup-census.cx -- checks tools/dup-census.cx (the 15th ratchet).
  *
- *   sh ./unisacc.com tools/check-dup-census.cx [-- --group a|b|c]     (no group: all three)
+ *   sh ./unisacc.com tools/check-dup-census.cx [-- --group a|b|c|d]     (no group: all)
  *
  * a counts: a fixture root (tools/a.cx, tools/b.cx, tools/cxlib/c.cx) with foo byte-identical in 3 files, bar
  *   with the same name but different bodies in 2, a brace inside a string literal and one "%s/%s"; --print
@@ -10,6 +10,9 @@
  *   and an unknown option exit 2.
  * c verbatim: a copy differing by one space or by name is not in the group; a comment line before the function
  *   does not split it; on this checkout --check is ok and --print ends with DUP_SUMMARY.
+ * d whitelist: build/dup-census-whitelist.tsv (name<TAB>reason<TAB>verified_date) marks matched functions
+ *   whitelisted=N and excludes them from ratchet failure without masking other duplicates; missing reason or
+ *   verified_date exits 2; source mutations disabling whitelist lookup or date validation are killed.
  * Ends with CHECK_DUP_CENSUS<TAB>failed=N. */
 #pragma unisa use sys.proc
 #pragma unisa use sys.fs
@@ -26,8 +29,8 @@ static char dc_out[1 << 16];
 static char dc_root[600];
 static void dc_ck(int ok, const char *name) { if (!ok) dc_failed++; printf("%s\tdup-census.%s\n", ok ? "PASS" : "FAIL", name); }
 static int dc_has(const char *s) { long n = tx_len(dc_out, sizeof dc_out), sn = tx_len(s, 400), i; for (i = 0; i + sn <= n; i++) if (mm_same(dc_out + i, s, sn)) return 1; return 0; }
-static int dc_run(char *a1, char *a2, char *a3) {
-    char *v[] = {"./tools/bound", "50", "sh", "./unisacc.com", "tools/dup-census.cx", "--", a1, a2, a3, 0};
+static int dc_run_tool(const char *tool, char *a1, char *a2, char *a3) {
+    char *v[] = {"./tools/bound", "50", "sh", "./unisacc.com", (char *)tool, "--", a1, a2, a3, 0};
     int fd, pid, ex = 0, code = 0, sig = 0; long n = 0, r;
     pid = sy_spawn_pipe(v, 0, 0, &fd, 0);
     if (pid < 0) return -1;
@@ -36,10 +39,16 @@ static int dc_run(char *a1, char *a2, char *a3) {
     if (sy_wait_status(pid, 0, &ex, &code, &sig) != pid || !ex) return -1;
     return code;
 }
+static int dc_run(char *a1, char *a2, char *a3) {
+    return dc_run_tool("tools/dup-census.cx", a1, a2, a3);
+}
 static void dc_put(const char *rel, const char *s) { char p[700]; if (!cx_fmt(p, sizeof p, "%s/%s", dc_root, rel)) cx_write(p, s, tx_len(s, 1 << 16)); }
 static void dc_rm(const char *rel) { char p[700]; if (!cx_fmt(p, sizeof p, "%s/%s", dc_root, rel)) sy_unlink(p); }
 
 #define FOO "static int foo(int x) {\n    return x;\n}\n"
+#define FITS "static int fits(int n) {\n    return n < 8;\n}\n"
+#define PUT_FN "static void put(const char *p) {\n    (void)p;\n}\n"
+
 static void dc_fixture(void) {
     char p[700];
     cx_fmt(dc_root, sizeof dc_root, "%s/dupcensus-%d", sy_tmpdir(), (int)sy_pid());
@@ -55,10 +64,68 @@ static void dc_cleanup(void) {
     char p[700];
     dc_rm("tools/a.cx"); dc_rm("tools/b.cx"); dc_rm("tools/d.cx"); dc_rm("tools/e.cx"); dc_rm("tools/f.cx"); dc_rm("tools/cxlib/c.cx");
     dc_rm("build/dup-census-baseline.tsv");
+    dc_rm("build/dup-census-whitelist.tsv");
+    dc_rm("mut1.cx"); dc_rm("mut2.cx"); dc_rm("cxroot.tsv"); dc_rm("r");
     cx_fmt(p, sizeof p, "%s/tools/cxlib", dc_root); sy_rmdir(p);
     cx_fmt(p, sizeof p, "%s/tools", dc_root); sy_rmdir(p);
     cx_fmt(p, sizeof p, "%s/build", dc_root); sy_rmdir(p);
     sy_rmdir(dc_root);
+}
+
+static int dc_write_mutant(const char *rel, const char *needle, const char *repl, char *out_path, long cap) {
+    size_t n = 0;
+    char *src = cx_read("tools/dup-census.cx", &n);
+    long sn, nn, rn, pos = -1, i;
+    char *mut;
+    if (!src) return -1;
+    sn = (long)n;
+    nn = tx_len(needle, 512);
+    rn = tx_len(repl, 512);
+    for (i = 0; i + nn <= sn; i++) {
+        if (mm_same(src + i, needle, nn)) { pos = i; break; }
+    }
+    if (pos < 0) { mm_free(src); return -1; }
+    mut = mm_alloc((size_t)(sn - nn + rn + 1));
+    if (!mut) { mm_free(src); return -1; }
+    mm_copy(mut, (size_t)(sn - nn + rn + 1), src, pos);
+    mm_copy(mut + pos, (size_t)(sn - nn + rn + 1 - pos), repl, rn);
+    mm_copy(mut + pos + rn, (size_t)(sn - pos - nn + 1), src + pos + nn, sn - pos - nn);
+    mut[sn - nn + rn] = 0;
+    mm_free(src);
+    if (cx_fmt(out_path, (size_t)cap, "%s/%s", dc_root, rel)) { mm_free(mut); return -1; }
+    if (cx_write(out_path, mut, (size_t)(sn - nn + rn))) { mm_free(mut); return -1; }
+    mm_free(mut);
+    return 0;
+}
+
+static void dc_prep_mut_root(void) {
+    char cwd[1024], rlink[700];
+    if (sy_realpath(".", cwd, sizeof cwd) >= 0 && !cx_fmt(rlink, sizeof rlink, "%s/r", dc_root)) {
+        sy_unlink(rlink);
+        sy_symlink(cwd, rlink);
+    }
+    dc_put("cxroot.tsv",
+        "CXROOT1\n"
+        "R\tsys\tr/cx/sys\n"
+        "R\tmem\tr/cx/mem\n"
+        "R\ttext\tr/cx/text\n"
+        "R\tcore\tr/cx/core\n"
+        "R\truntime\tr/cx/runtime\n"
+        "R\tdriver\tr/cx/driver\n"
+        "R\tcompiler\tr/cx/compiler\n"
+        "R\tworkspace\tr/cx/workspace\n"
+        "R\tcx0\tr/cx/cx0\n"
+        "R\tstream\tr/cx/stream\n"
+        "R\tpath\tr/cx/path\n"
+        "R\tos\tr/cx/os\n"
+        "R\tsysx\tr/ext/sysx\n"
+        "R\tcrypto\tr/ext/crypto\n"
+        "R\tcxlib\tr/tools/cxlib\n"
+        "R\ttsvx\tr/ext/tsvx\n"
+        "R\ttestx\tr/ext/testx\n"
+        "R\ttextx\tr/ext/textx\n"
+        "R\tsqlite\tr/ext/sqlite\n"
+        "R\tnet\tr/ext/net\n");
 }
 
 static void group_a(void) {
@@ -93,6 +160,93 @@ static void group_b(void) {
     dc_ck(rc == 2, "unknown-option-exit-2");
     dc_cleanup();
 }
+static void group_d(void) {
+    int rc;
+    char mut1[750], mut2[750];
+    dc_fixture();
+    rc = dc_run("--write", "--root", dc_root);
+    dc_ck(rc == 0, "whitelist-setup-baseline");
+
+    dc_put("tools/d.cx", FOO FITS PUT_FN);
+    dc_put("tools/e.cx", FITS PUT_FN);
+    rc = dc_run("--check", "--root", dc_root);
+    dc_ck(rc == 1 && dc_has("FAIL: new=2 grown=1"), "unwhitelisted-fits-put-foo-fails");
+
+    dc_put("build/dup-census-whitelist.tsv",
+        "# surface duplicates and net-loss merges\n"
+        "name\treason\tverified_date\n"
+        "foo\tfixture growth exempted for net-loss merge test\t2026-11-22\n"
+        "fits\t31 份一行一致合并净亏\t2026-11-22\n"
+        "put\t三种契约有的建父目录有的不建不可合并\t2026-11-22\n");
+    rc = dc_run("--check", "--root", dc_root);
+    dc_ck(rc == 0 &&
+          dc_has("dup-census: fits whitelisted=1 (copies=2)\n") &&
+          dc_has("dup-census: foo whitelisted=1 (copies=4)\n") &&
+          dc_has("dup-census: put whitelisted=1 (copies=2)\n") &&
+          dc_has("dup-census: ok: verbatim_groups=0 (baseline 0) verbatim_redundant=0 (baseline 0) whitelisted=3\n"),
+          "whitelist-exempts-fits-put-foo");
+
+    rc = dc_run("--print", "--root", dc_root);
+    dc_ck(rc == 0 &&
+          dc_has("WHITELIST\tfits\twhitelisted=1\tcopies=2\tredundant=3\n") &&
+          dc_has("WHITELIST\tput\twhitelisted=1\tcopies=2\tredundant=3\n") &&
+          dc_has(" whitelisted=3\n"),
+          "whitelist-print-marks-whitelisted");
+
+    // Non-whitelisted duplicate must still fail ratchet
+    dc_put("tools/f.cx", "static int rogue_dup(void) {\n    return 9;\n}\n");
+    dc_put("tools/e.cx", FITS PUT_FN "static int rogue_dup(void) {\n    return 9;\n}\n");
+    rc = dc_run("--check", "--root", dc_root);
+    dc_ck(rc == 1 && dc_has("dup-census: rogue_dup has 2 verbatim copies, baseline 0\n") && dc_has("FAIL: new=1 grown=0") && dc_has("whitelisted=3\n"),
+          "whitelist-does-not-mask-other-duplicates");
+    dc_rm("tools/f.cx");
+    dc_put("tools/e.cx", FITS PUT_FN);
+
+    // Mutation 1: disable whitelist check in --check -> must fail on whitelisted fixture (mutant killed)
+    dc_prep_mut_root();
+    if (!dc_write_mutant("mut1.cx", "if (dc_wl_has(s, l)) { wl_groups += h - g; wl_red += wred;", "if (0 && dc_wl_has(s, l)) { wl_groups += h - g; wl_red += wred;", mut1, sizeof mut1)) {
+        rc = dc_run_tool(mut1, "--check", "--root", dc_root);
+        dc_ck(rc == 1 && dc_has("FAIL: new=2 grown=1"), "mutant-disable-whitelist-killed");
+    } else {
+        dc_ck(0, "mutant-disable-whitelist-killed");
+    }
+
+    // Missing reason / missing verified_date / malformed verified_date refusals (rc 2)
+    dc_put("build/dup-census-whitelist.tsv", "name\treason\tverified_date\nfits\t\t2026-11-22\n");
+    rc = dc_run("--check", "--root", dc_root);
+    dc_ck(rc == 2, "whitelist-empty-reason-refused");
+
+    dc_put("build/dup-census-whitelist.tsv", "name\treason\tverified_date\nfits\t-\t2026-11-22\n");
+    rc = dc_run("--check", "--root", dc_root);
+    dc_ck(rc == 2, "whitelist-dash-reason-refused");
+
+    dc_put("build/dup-census-whitelist.tsv", "name\treason\tverified_date\nfits\tmerge net loss\t\n");
+    rc = dc_run("--check", "--root", dc_root);
+    dc_ck(rc == 2, "whitelist-empty-date-refused");
+
+    dc_put("build/dup-census-whitelist.tsv", "name\treason\tverified_date\nfits\tmerge net loss\t20261122\n");
+    rc = dc_run("--check", "--root", dc_root);
+    dc_ck(rc == 2, "whitelist-malformed-date-refused");
+
+    dc_put("build/dup-census-whitelist.tsv", "name\treason\tverified_date\nfits\tmerge net loss\n");
+    rc = dc_run("--check", "--root", dc_root);
+    dc_ck(rc == 2, "whitelist-missing-column-refused");
+
+    // Mutation 2: disable verified_date check -> accepts malformed date instead of rc 2 (mutant killed)
+    dc_put("build/dup-census-whitelist.tsv",
+        "name\treason\tverified_date\n"
+        "foo\tnet loss\tbad-date\n"
+        "fits\tnet loss\tbad-date\n"
+        "put\tdistinct contracts\tbad-date\n");
+    if (!dc_write_mutant("mut2.cx", "if (!dc_wl_date(t + at + o2, l2)) {", "if (0 && !dc_wl_date(t + at + o2, l2)) {", mut2, sizeof mut2)) {
+        rc = dc_run_tool(mut2, "--check", "--root", dc_root);
+        dc_ck(rc == 0, "mutant-disable-date-check-killed");
+    } else {
+        dc_ck(0, "mutant-disable-date-check-killed");
+    }
+
+    dc_cleanup();
+}
 static void group_c(void) {
     int rc;
     dc_fixture();
@@ -110,10 +264,12 @@ static void group_c(void) {
 
 int main(int argc, char **argv) {
     const char *g = argc == 3 && tx_eqz(argv[1], "--group") ? argv[2] : 0;
-    if (argc != 1 && !g) { fprintf(stderr, "usage: tools/check-dup-census.cx [--group a|b|c]\n"); return 2; }
+    if (argc != 1 && !g) { fprintf(stderr, "usage: tools/check-dup-census.cx [--group a|b|c|d]\n"); return 2; }
+    if (!sy_env("CC")) sy_setenv("CC", "/usr/bin/cc", 1);
     if (!g || tx_eqz(g, "a")) group_a();
     if (!g || tx_eqz(g, "b")) group_b();
     if (!g || tx_eqz(g, "c")) group_c();
+    if (!g || tx_eqz(g, "c") || tx_eqz(g, "d")) group_d();
     printf("CHECK_DUP_CENSUS\tfailed=%d\n", dc_failed);
     return dc_failed ? 1 : 0;
 }
