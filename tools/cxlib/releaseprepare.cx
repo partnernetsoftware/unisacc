@@ -69,13 +69,18 @@ static int rp_capture(char **argv,const char *cwd,long end,np_buf *o,np_buf *e,i
  if(pid==0){setpgid(0,0);close(po[0]);close(pe[0]);close(pf[0]);dup2(po[1],1);dup2(pe[1],2);close(po[1]);close(pe[1]);
  if(cwd&&chdir(cwd)){err[0]=1;err[1]=errno;k=write(pf[1],err,sizeof err);_exit(255);}execvp(argv[0],argv);err[0]=2;err[1]=errno;k=write(pf[1],err,sizeof err);(void)k;_exit(255);}
  setpgid(pid,pid);close(po[1]);close(pe[1]);close(pf[1]);fcntl(pf[0],F_SETFL,O_NONBLOCK);fcntl(po[0],F_SETFL,O_NONBLOCK);fcntl(pe[0],F_SETFL,O_NONBLOCK);
+ long long root_start=rp_root_start(pid);
  np_puts(o,"");np_puts(e,"");
  while(oo||oe||of||!reaped){
  if(of){k=read(pf[0],(char*)err+en,sizeof err-en);if(k>0)en+=(size_t)k;if(en==sizeof err||k==0||(k<0&&errno!=EAGAIN&&errno!=EINTR)){close(pf[0]);of=0;}}
  int got=0;if(oo){k=read(po[0],buf,sizeof buf);if(k>0){np_put(o,buf,(size_t)k);got=1;}else if(k==0||(errno!=EAGAIN&&errno!=EINTR)){oo=0;close(po[0]);}}
  if(oe){k=read(pe[0],buf,sizeof buf);if(k>0){np_put(e,buf,(size_t)k);got=1;}else if(k==0||(errno!=EAGAIN&&errno!=EINTR)){oe=0;close(pe[0]);}}
  if(!reaped&&waitpid(pid,&st,WNOHANG)==pid)reaped=1;if(!oo&&!oe&&!of&&reaped)break;
- long now=sy_now_ms();if(now<0||now>=end){char rep[512];*residue=rp_kill_tree(pid,2000,0,0,rep,sizeof rep);if(*residue<0){kill(-pid,SIGKILL);kill(pid,SIGKILL);}int ws=waitpid(pid,&st,WNOHANG);if(!reaped&&ws!=pid&&!(ws<0&&errno==ECHILD))*residue=1;if(oo)close(po[0]);if(oe)close(pe[0]);if(of)close(pf[0]);return *residue?125:142;}
+ long now=sy_now_ms();if(now<0||now>=end){
+  char rep[512];*residue=rp_kill_tree_after_wait(pid,reaped,root_start,2000,0,0,rep,sizeof rep);
+  if(!reaped){int ws=waitpid(pid,&st,WNOHANG);if(ws!=pid&&!(ws<0&&errno==ECHILD))*residue=1;}
+  if(oo)close(po[0]);if(oe)close(pe[0]);if(of)close(pf[0]);return *residue?125:142;
+ }
  if(!got){long left=end-now;usleep((unsigned int)(left<2?left:2)*1000);}
  }
  if(en==sizeof err){np_puts(e,"exec/cwd handshake failed\n");return 127;}return WIFSIGNALED(st)?128+WTERMSIG(st):WEXITSTATUS(st);
