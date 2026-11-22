@@ -11,8 +11,10 @@
 #pragma unisa use sys.env
 #pragma unisa use sys.time
 #pragma unisa use sys.posix
+#pragma unisa use sys.sig
 #pragma unisa use cxlib.netpack
 #pragma unisa use mem.bytes
+#pragma unisa use mem.heap
 
 static char root[4096], tmp[4096], prod[4200], src_core[4200], bin[4200], repo[4200], wt[4200], inst[4200];
 static char out[65536];
@@ -34,6 +36,45 @@ static int has(const char *hay, const char *s) {
         if (hay[i] == s[0] && mm_same(hay + i, s, sn)) return 1;
     }
     return 0;
+}
+
+static int read_pid_file(const char *path) {
+    unsigned char *b = 0; int64_t n = 0;
+    if (sy_read_file(path, &b, &n, 64) != 0 || !b || n <= 0) { mm_free(b); return 0; }
+    int pid = 0;
+    for (int64_t i = 0; i < n && b[i] >= '0' && b[i] <= '9'; i++) pid = pid * 10 + (int)(b[i] - '0');
+    mm_free(b);
+    return pid;
+}
+
+/* 1 when PID does not exist (-ESRCH) or is already a zombie (State:\tZ awaiting ancestor subreaper). */
+static int pid_is_gone_or_zombie(int pid) {
+    if (pid <= 0) return 1;
+    if (sy_signal(pid, 0) == -ESRCH) return 1;
+    char sp[64];
+    unsigned char *b = 0; int64_t n = 0;
+    if (cx_fmt(sp, sizeof sp, "/proc/%d/status", pid)) return 0;
+    int rc = sy_read_file(sp, &b, &n, 4096);
+    if (rc == -ENOENT) { mm_free(b); return 1; }
+    if (rc != 0 || !b || n <= 0) { mm_free(b); return 0; }
+    int z = 0;
+    for (int64_t i = 0; i + 8 <= n; i++) {
+        if (b[i] == 'S' && mm_same(b + i, "State:\tZ", 8)) { z = 1; break; }
+    }
+    mm_free(b);
+    return z;
+}
+
+/* Bounded poll (every 50ms up to timeout_ms) until sock is removed and daemon PID is gone/zombie. */
+static int wait_daemon_gone(const char *pid_file, const char *sock_path, int timeout_ms) {
+    int pid = read_pid_file(pid_file);
+    long deadline = sy_now_ms() + (long)timeout_ms;
+    for (;;) {
+        if (sy_exists(sock_path) == 0 && pid_is_gone_or_zombie(pid)) return 1;
+        if (sy_now_ms() >= deadline) break;
+        sy_sleep_ms(50);
+    }
+    return (sy_exists(sock_path) == 0 && pid_is_gone_or_zombie(pid)) ? 1 : 0;
 }
 
 static int runv(char **v, const char *cwd, char **env, int secs, int *rc) {
@@ -374,21 +415,43 @@ int main(int argc, char **argv) {
                (out[0] == '3' && (out[1] == '\n' || out[1] == 0));
       ck("trailer-single-line-with-commit-own", ok); }
 
-    /* (19) CONFIRMED (C): verify stopped daemon leaves no socket and no live residual process */
-    { char pcmd[4600];
-      int ok = !cx_fmt(pcmd, sizeof pcmd,
-                       "P=$(cat '%s/serve.pid' 2>/dev/null || true); "
-                       "i=0; while [ -n \"$P\" ] && kill -0 \"$P\" 2>/dev/null && [ $i -lt 20 ]; do sleep 0.1; i=$((i+1)); done; "
-                       "[ ! -S '%s/sock' ] && { [ -z \"$P\" ] || ! kill -0 \"$P\" 2>/dev/null; }",
-                       tmp, inst) && sh_in(repo, pcmd);
+    /* (19) CONFIRMED (C): bounded poll (5000ms / 50ms) verifying stopped daemon leaves no socket and no live process
+     *      (handles zombie state when run-batch enables PR_SET_CHILD_SUBREAPER). */
+    { char pidf[4400], sockp[4400];
+      int ok = !cx_fmt(pidf, sizeof pidf, "%s/serve.pid", tmp) &&
+               !cx_fmt(sockp, sizeof sockp, "%s/sock", inst) &&
+               wait_daemon_gone(pidf, sockp, 5000);
       ck("cleanup-no-residual-daemon", ok); }
+
+    /* (20) Slow-exiting fake daemon fixture: short bound (50ms) must fail, 5000ms bounded poll must succeed */
+    { char spid[4400], ssock[4400], pbuf[32];
+      int ok = 0;
+      if (!cx_fmt(spid, sizeof spid, "%s/slow.pid", tmp) &&
+          !cx_fmt(ssock, sizeof ssock, "%s/slow.sock", tmp)) {
+          (void)sy_write_file(ssock, "1", 1, 0600);
+          int fpid = fork();
+          if (fpid == 0) {
+              sy_sleep_ms(350);
+              (void)sy_unlink(ssock);
+              sy_exit(0);
+          }
+          if (fpid > 0 && !cx_fmt(pbuf, sizeof pbuf, "%d\n", fpid) &&
+              !sy_write_file(spid, pbuf, (long)strlen(pbuf), 0600)) {
+              int short_rc = wait_daemon_gone(spid, ssock, 50);
+              int long_rc = wait_daemon_gone(spid, ssock, 5000);
+              sy_wait_status(fpid, 0, 0, 0, 0);
+              ok = (short_rc == 0 && long_rc == 1);
+          }
+      }
+      ck("wait-daemon-gone-slow-exit", ok); }
 
 done:
     { char *st[] = {"stop", 0}; (void)run_dv(repo, "integ", st, &rc); }
-    { char kcmd[4600];
+    { char kcmd[4600], pidf[4400], sockp[4400];
       if (!cx_fmt(kcmd, sizeof kcmd, "P=$(cat '%s/serve.pid' 2>/dev/null || true); [ -n \"$P\" ] && kill -9 \"$P\" 2>/dev/null || true", tmp))
-          (void)sh_in(root, kcmd); }
-    sy_sleep_ms(100);
+          (void)sh_in(root, kcmd);
+      if (!cx_fmt(pidf, sizeof pidf, "%s/serve.pid", tmp) && !cx_fmt(sockp, sizeof sockp, "%s/sock", inst))
+          (void)wait_daemon_gone(pidf, sockp, 5000); }
     { char *rm[] = {"rm", "-rf", tmp, 0}; (void)runv(rm, 0, 0, 30, &rc); }
     if (sy_exists(tmp) != 0) (void)sy_remove_all(tmp);
     ck("cleanup-tmp-and-pin-removed", sy_exists(tmp) == 0);
