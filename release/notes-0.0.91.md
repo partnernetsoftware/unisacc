@@ -46,13 +46,13 @@
 - L.1 源身份升级 `source-packages-v3`:
   - `seed/ident.c` 升级为 `source-packages-v3`: `cx/` 与 `src/` 下指向 7 棵产品树之外的类甲符号链接仅记录别名拓扑、不再把外部目标拉入源身份(`ext/textx/{build,json,num}.cx` 退出 SID); `build/core-closure.tsv`、`cxroot.tsv` 与打包支持源 `ext/textx/deflate.cx` 强制纳入支持集合; `collect()` 改为单一返回出口;
   - `tools/lane-inputs-gen.cx` 增加 `build/core-closure.tsv` 全部真实单元必须在 SID 中的硬断言, 并使 `ext/` 下所有非 SID 常规文件归 `lane B ext-non-sid`;
-  - 新增并登记守门批次 `ident-v3`(`tools/check-ident-v3.cx`, 先红 `15/21` -> 转绿 `21/21`, 证据入仓 `plans/v0.0.91-l1-evidence.md`), 独立双层包 oracle `tests/identity.cx` 同步升级(`303/303 PASS`)。
+  - 新增并登记守门批次 `ident-v3`(`tools/check-ident-v3.cx`, 先红 `15/21` -> 转绿 `21/21`, 证据已入仓(其后已归档)), 独立双层包 oracle `tests/identity.cx` 同步升级(`303/303 PASS`)。
 - Z5 层次整理收尾:
   - 删除 `cx/text/{build,deflate,json,num}.cx` 4 条类甲反向软链与 `cx/workspace/{mem,sys}`, 将 `cx/stream/rw.cx`、`cx/path/path.cx`、`cx/os/{osx,utc}.cx`、`cx/workspace/*` 迁入 `ext/`(`build/product-links.tsv` 类甲软链清零: `total=18 class_a=0 class_b=18`), 并在 `7be3cc5d4b` 修正 `ext/fsx/path`、`tests/workspace`、`tools/workspace` 3 处目录软链;
   - `cxroot.tsv` 更新模块映射并保留 `text.{build,deflate,json,num}` 兼容映射供 `apps/csih` 28 个文件过渡;
   - `ext/path/path.cx` 改用 `sy_os_name()` 消除 `#ifdef _WIN32`, `ext/os/{osx,utc}.cx` 与 `ext/path/path.cx` 去除无用 `#pragma unisa dock`。
 - B3 收回无用 `dock` 授权与 `ext-dock-exceptions.tsv` 清零:
-  - 收回 `cx/` 下 12 个零宿主依赖(`includes=0, libc_calls=0, plat_if=0`)文件的无用 `#pragma unisa dock`(含改 `tools/cap-gen.cx` 与 `tools/refusals-gen.cx` 生成器), 判定表入仓 `plans/v0.0.91-b3-verdicts.tsv`, `build/dock-audit.tsv` 降至 42 行;
+  - 收回 `cx/` 下 12 个零宿主依赖(`includes=0, libc_calls=0, plat_if=0`)文件的无用 `#pragma unisa dock`(含改 `tools/cap-gen.cx` 与 `tools/refusals-gen.cx` 生成器), 判定表已入仓(其后已归档), `build/dock-audit.tsv` 降至 42 行;
   - `ext/` 下 20 条 0.0.90 到期项已在 `main`(`5a36143766`)清零处置(14 个去 `dock`、6 个带 `0.0.93` 迁移条件续期), `check-ext-dock.cx -- --version 0.0.91` 实测 `failed=0 expired=0`。
 - 字面量长度注解(`litlen` A 类 3 文件):
   - 并入 `cx/runtime/source_frame.cx`、`cx/sys/sha.cx`、`src/drive.cx` 3 个 A 类文件的字面量长度注解。
