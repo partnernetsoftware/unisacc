@@ -99,9 +99,24 @@ static int sh_in(const char *cwd, const char *cmd) {
 }
 
 int main(int argc, char **argv) {
-    char f_new[4400], f_old[4400], f_rep[4400], cmd[4800];
+    char f_new[4400], f_old[4400], f_rep[4400], cmd[4800], gitp[4200];
     int rc = -1;
-    if (sy_cwd(root, sizeof root) < 0 || sy_mkdtemp("/tmp", "dvfreeze", tmp, sizeof tmp)) return 2;
+    if (sy_cwd(root, sizeof root) < 0) return 2;
+    if (argc >= 3 && !strcmp(argv[1], "--prepare-only")) {
+        if (cx_fmt(prod, sizeof prod, "%s/unisacc.com", root) || /* lint:allow R1-product test harness invokes checkout product directly */
+            cx_fmt(src_core, sizeof src_core, "%s/tools/devsvc-core.cx", root)) return 2;
+        char *bv[] = {"sh", prod, src_core, "-o", argv[2], 0};
+        if (!runv(bv, root, 0, 55, &rc) || rc != 0) { fprintf(stderr, "prepare devsvc-core failed rc=%d: %s\n", rc, out); return 2; }
+        printf("PREPARED\tdevsvc-core\tbin=%s\n", argv[2]);
+        return 0;
+    }
+    if (cx_fmt(gitp, sizeof gitp, "%s/.git", root)) return 2;
+    if (sy_exists(gitp) == 0) {
+        printf("UNMEASURED\tdevsvc-freeze\tno-.git-in-root\n");
+        printf("CHECK_DEVSVC_FREEZE\tpass=0\tfail=0\tunmeasured=1\n");
+        return 0;
+    }
+    if (sy_mkdtemp("/tmp", "dvfreeze", tmp, sizeof tmp)) return 2;
     if (cx_fmt(prod, sizeof prod, "%s/unisacc.com", root) || /* lint:allow R1-product test harness invokes checkout product directly */
         cx_fmt(src_core, sizeof src_core, "%s/tools/devsvc-core.cx", root) ||
         cx_fmt(repo, sizeof repo, "%s/repo", tmp) ||
@@ -159,14 +174,14 @@ int main(int argc, char **argv) {
          has(out, "CFG\tlock\tfreeze\n") &&
          has(out, "CFG\tlockdomain\tfreeze\tsrc/,cx/,ext/,include/,seed/,exec/,kernel/,weights/,tests/,release/,build/freeze.tsv\n")); }
 
-    /* Start isolated devsvc instance via prepared native binary */
+    /* Start isolated devsvc instance via prepared native binary and record its PID */
     {
         char scmd[4800];
         if (cx_fmt(scmd, sizeof scmd,
                    "UNISACC_DEVSVC_DIR='%s' DEVSVC_REPO_TABLE='%s/tools/devsvc-repo.tsv' DEVSVC_OWNER=integ "
-                   "nohup '%s' serve --ttl 120 --idle 60 >'%s/serve.log' 2>&1 & "
+                   "nohup '%s' serve --ttl 120 --idle 60 >'%s/serve.log' 2>&1 & echo $! > '%s/serve.pid'; "
                    "i=0; while [ $i -lt 50 ]; do [ -S '%s/sock' ] && exit 0; sleep 0.1; i=$((i+1)); done; cat '%s/serve.log'; exit 1",
-                   inst, repo, bin, tmp, inst, tmp) || !sh_in(repo, scmd)) {
+                   inst, repo, bin, tmp, tmp, inst, tmp) || !sh_in(repo, scmd)) {
             fprintf(stderr, "start failed: %s\n", out);
             failed++;
             goto done;
@@ -302,12 +317,14 @@ int main(int argc, char **argv) {
       int ok2 = ok1 && run_dv(repo, "worker1", ac, &rc) && rc == 1 && has(out, "LOCK_HELD freeze owner=integ");
       ck("worktree-shared-lock-refuses-non-owner", ok2); }
 
-    /* (13) release freeze recovers worktree & main */
-    { char *ar[] = {"lock", "release", "freeze", "--owner", "INTEG", 0};
+    /* (13) non-owner cannot release freeze; holder release recovers worktree & main */
+    { char *ab[] = {"lock", "release", "freeze", "--owner", "worker1", 0};
+      char *ar[] = {"lock", "release", "freeze", "--owner", "INTEG", 0};
       char *aw[] = {"f", "write", "src/a.txt", "--from", f_new, 0};
-      int ok1 = run_dv(repo, "integ", ar, &rc) && rc == 0 && has(out, "OK\treleased\tfreeze");
+      int ok0 = run_dv(repo, "worker1", ab, &rc) && rc == 1 && has(out, "ERR\tnot-owner\tfreeze\towner=integ");
+      int ok1 = ok0 && run_dv(repo, "integ", ar, &rc) && rc == 0 && has(out, "OK\treleased\tfreeze");
       int ok2 = ok1 && run_dv(wt, "worker1", aw, &rc) && rc == 0;
-      ck("release-recovers-worktree", ok2); }
+      ck("release-owner-only-and-recovers-worktree", ok2); }
 
     /* (14) ttl expiry automatically recovers */
     { char *aq[] = {"lock", "acquire", "freeze", "--owner", "integ", "--ttl", "1", 0};
@@ -330,7 +347,7 @@ int main(int argc, char **argv) {
     { char *aq[] = {"lock", "acquire", "freeze", "--owner", "integ", 0};
       ck("freeze-default-ttl-7200", run_dv(repo, "integ", aq, &rc) && rc == 0 && has(out, "expires_in_s=7200")); }
 
-    /* (17) PLAUSIBLE: fail-closed when daemon stopped (direct locks.tsv read) and when locks.tsv unreadable (chmod 000) */
+    /* (17) PLAUSIBLE + M3 killer: fail-closed when daemon stopped, and chmod 000 locks.tsv refuses BOTH non-owner AND integrator */
     { char *st[] = {"stop", 0};
       char *af[] = {"f", "write", "src/a.txt", "--from", f_new, 0};
       char lcmd[4600], flw[4600];
@@ -342,17 +359,30 @@ int main(int argc, char **argv) {
       int ok3 = ok2 && run_dv(repo, "worker1", afl, &rc) && rc == 1 && has(out, "LOCK_HELD freeze owner=integ");
       int ok4 = ok3 && !cx_fmt(lcmd, sizeof lcmd, "chmod 000 '%s/locks.tsv'", inst) && sh_in(repo, lcmd);
       int ok5 = ok4 && run_dv(repo, "worker1", af, &rc) && rc == 1 && has(out, "LOCK_HELD freeze owner=locks-unreadable");
+      int ok6 = ok5 && run_dv(repo, "integ", af, &rc) && rc == 1 && has(out, "LOCK_HELD freeze owner=locks-unreadable");
       (void)cx_fmt(lcmd, sizeof lcmd, "chmod 600 '%s/locks.tsv'", inst);
       (void)sh_in(repo, lcmd);
-      ck("freeze-fail-closed-stopped-and-unreadable", ok5); }
+      ck("freeze-fail-closed-stopped-and-unreadable", ok6); }
 
     /* (18) PLAUSIBLE: trailer叠加 real commit-own (tr_strip + tr_window_put) produces exactly one X-Unisacc-Window line per commit */
     { int ok = sh_in(repo, "git log -n 6 --format='%(trailers)' | grep -c '^X-Unisacc-Window: integ$'") &&
                (out[0] == '3' && (out[1] == '\n' || out[1] == 0));
       ck("trailer-single-line-with-commit-own", ok); }
 
+    /* (19) CONFIRMED (C): verify stopped daemon leaves no socket and no live residual process */
+    { char pcmd[4600];
+      int ok = !cx_fmt(pcmd, sizeof pcmd,
+                       "P=$(cat '%s/serve.pid' 2>/dev/null || true); "
+                       "i=0; while [ -n \"$P\" ] && kill -0 \"$P\" 2>/dev/null && [ $i -lt 20 ]; do sleep 0.1; i=$((i+1)); done; "
+                       "[ ! -S '%s/sock' ] && { [ -z \"$P\" ] || ! kill -0 \"$P\" 2>/dev/null; }",
+                       tmp, inst) && sh_in(repo, pcmd);
+      ck("cleanup-no-residual-daemon", ok); }
+
 done:
     { char *st[] = {"stop", 0}; (void)run_dv(repo, "integ", st, &rc); }
+    { char kcmd[4600];
+      if (!cx_fmt(kcmd, sizeof kcmd, "P=$(cat '%s/serve.pid' 2>/dev/null || true); [ -n \"$P\" ] && kill -9 \"$P\" 2>/dev/null || true", tmp))
+          (void)sh_in(root, kcmd); }
     { char *rm[] = {"rm", "-rf", tmp, 0}; (void)runv(rm, 0, 0, 30, &rc); }
     printf("CHECK_DEVSVC_FREEZE\tpass=%d\tfail=%d\n", passed, failed);
     return failed ? 1 : 0;
