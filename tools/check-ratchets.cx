@@ -5,6 +5,8 @@
    keeps only the cxinclude and the srcshape total row, --only apps/ only the cxraw row.  A full run prints
    seventeen RATCHET lines including net-deps (gate 14), notcovered, dup-census, no-home-path and ref-job-paths, excluding retired toolsloc, and a RATCHETS line whose ok+fail is 17, with
    exit 0 exactly when fail is 0.
+   --only-paths aliases --only. When --from-run fails only on untracked
+   no-baseline .cx, expects RATCHET_HINT foreign-untracked (no move tip).
    Prints PASS/FAIL lines and CHECK_RATCHETS<TAB>failed=N. */
 #pragma unisa use sys.fs
 #pragma unisa use sys.proc
@@ -71,6 +73,10 @@ int main(int argc, char **argv) {
     ck(rc == 0 && lines(o) == 2 && has(o, "module src/host.cx") && has(o, "src/ total lines 5352"), "only-src-through-module-word-and-total-row");
     rc = run(apps, o, sizeof o);
     ck(rc == 0 && lines(o) == 1 && has(o, "apps/csih/probes/context_preview.cx"), "only-apps");
+    {   char *op[] = {"--rows", "tools/ratchets/sample.txt", "--only-paths", "src/", 0};
+        rc = run(op, o, sizeof o);
+        ck(rc == 0 && lines(o) == 2 && has(o, "module src/host.cx") && has(o, "src/ total lines 5352"), "only-paths-alias-src");
+    }
     {   char d[4096], fb[4400], fg[4400], fc[4400]; char ob[1 << 14];
         const char *bad = "#pragma unisa use text.text\n#pragma unisa use sys.fs::*\nint x;\n";
         const char *good = "#pragma unisa use text.text\n#pragma unisa use sys.fs\n";
@@ -108,7 +114,27 @@ int main(int argc, char **argv) {
             cx_fmt(p, sizeof p, "%s/events.tsv", d); cx_write(p, ev, en);
             rc = run(fr, o, sizeof o);
             ck(rc == 1 && has(o, "RATCHET\tcxraw\tFAIL\tcxraw: FAIL: 1 file above baseline\n") && has(o, "  cxraw: apps/x.cx has 3 raw lines, baseline 1\n")
-               && has(o, "RATCHET\tnet-deps\tok\tr: ok: fine\n") && has(o, "RATCHET\tnotcovered\tok\tr: ok: fine\n") && has(o, "RATCHET\tdup-census\tok\tr: ok: fine\n") && has(o, "RATCHET\tno-home-path\tok\tr: ok: fine\n") && has(o, "RATCHET\tref-job-paths\tok\tr: ok: fine\n") && has(o, "RATCHET\ttsv-lint\tok\tr: ok: fine\n") && has(o, "RATCHETS\tok=17\tfail=1\t") && lines(o) == 20, "from-run-over-baseline-fixture");
+               && has(o, "RATCHET\tnet-deps\tok\tr: ok: fine\n") && has(o, "RATCHET\tnotcovered\tok\tr: ok: fine\n") && has(o, "RATCHET\tdup-census\tok\tr: ok: fine\n") && has(o, "RATCHET\tno-home-path\tok\tr: ok: fine\n") && has(o, "RATCHET\tref-job-paths\tok\tr: ok: fine\n") && has(o, "RATCHET\ttsv-lint\tok\tr: ok: fine\n") && has(o, "RATCHETS\tok=17\tfail=1\t") && lines(o) == 20 && !has(o, "RATCHET_HINT"), "from-run-over-baseline-fixture");
+            /* foreign-untracked tip: only cxtrunc no-baseline on our own untracked fixture path */
+            {
+                const char *fxp = "tools/zz-ratchets-hint-fixture.cx";
+                const char *fxbody = "int zz_ratchets_hint_fixture(void) { return 0; }\n";
+                const char *tip = "RATCHET_HINT\tforeign-untracked\t这些未跟踪文件不属于你,等所有者处理,或用 --only-paths 限定\ttools/zz-ratchets-hint-fixture.cx\n";
+                char *frh[] = {"--from-run", d, 0}; long en2 = 0; char ev2[1 << 12], line2[320]; int k2;
+                cx_write(fxp, fxbody, tx_len(fxbody, 128));
+                for (k2 = 0; k2 < 18; k2++) {
+                    const char *body = k2 == 3
+                        ? "cxtrunc: tools/zz-ratchets-hint-fixture.cx has 1 calls and no baseline row (a new .cx must have 0)\ncxtrunc: FAIL: 1 above baseline\n"
+                        : "r: ok: fine\n";
+                    cx_fmt(p, sizeof p, "%s/rk-%s.out", od, nm[k2]); cx_write(p, body, tx_len(body, 256));
+                    cx_fmt(line2, sizeof line2, "EVT\t%d\trk-%s\tstart\t0\t0\texec\nEVT\t%d\trk-%s\t%s\t5\t%d\tout=1 err=0\n", 2 * k2 + 1, nm[k2], 2 * k2 + 2, nm[k2], k2 == 3 ? "fail" : "ok", k2 == 3 ? 1 : 0);
+                    if (en2 + tx_len(line2, 320) < (long)sizeof ev2) { long l = tx_len(line2, 320); for (long j = 0; j < l; j++) ev2[en2 + j] = line2[j]; en2 += l; }
+                }
+                cx_fmt(p, sizeof p, "%s/events.tsv", d); cx_write(p, ev2, en2);
+                rc = run(frh, o, sizeof o);
+                ck(rc == 1 && has(o, tip) && has(o, "RATCHETS\tok=17\tfail=1\t") && !has(o, "mv ") && !has(o, "暂移"), "from-run-foreign-untracked-hint");
+                sy_unlink(fxp);
+            }
             /* Z2 coreapi 5-symbol replay: ratchets --rows, ratchets --from-run, and precommit --from-run must block all 5 CORE-NEW rows */
             {
                 const char *z2_core =
