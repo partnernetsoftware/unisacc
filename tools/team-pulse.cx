@@ -3,12 +3,17 @@
  *   sh ./unisacc.com tools/team-pulse.cx -- [--windows-table PATH] [--stall-min N]
  *       [--fixture FILE] [--tail-lines K] [--mutant-no-stall]
  *   sh ./unisacc.com tools/team-pulse.cx -- --freeze-watch [--root DIR] [--freeze-file P]
- *       [--since-min N] [--lock-author NAME] [--now EPOCH] [--mutant-no-freeze-watch]
+ *       [--since-min N] [--lock-author NAME] [--now EPOCH] [--hardlink-tmp DIR]
+ *       [--mutant-no-freeze-watch]
  *
  * freeze-watch commit check (2026-11-23): domain paths require trailer
  * X-Unisacc-Window matching freeze.tsv owner (or --lock-author). Missing trailer
  * or other window => VIOLATION. Does not stop a forged trailer (trusts commit-own /
  * devsvc writers; catches raw git and mistaken windows). Dirty trees still author=-.
+ * HARDLINK_TREES (2026-11-23, agyneon prototype): scan --hardlink-tmp (default /tmp)
+ * top dirs for .cx with nlink>1; print FREEZE_WATCH HARDLINK_TREES n oldest_min;
+ * n>0 and oldest_min>60 => VIOLATION kind=hardlink-trees (hourly cleanup at 120m).
+ * sy_stat_t lacks nlink: uses prelude lstat (build/pkg-gaps.tsv).
  *
  * Shared-checkout discipline (2026-11-23, after csr moved foreign untracked tools/
  * files to silence ratchets -- forbidden): never mv/cp/rsync/stash/clean another
@@ -60,6 +65,7 @@ static Win g_w[TP_MAXW];
 static int g_nw, g_stall_min = 45, g_wait_cc_min = 10, g_tail = 80, g_mutant, g_mutant_run, g_mutant_wcc;
 static int g_freeze_watch, g_mutant_fw, g_since_min = 10, g_n_fw_viol;
 static char g_table[1100], g_fix[1100], g_root[1100], g_freeze_file[1100], g_lock_author[80], g_owner[80];
+static char g_hl_tmp[1100];
 static long g_now;
 static int g_n_stalled, g_n_idle_long, g_n_ctxlow, g_n_filtered, g_n_waiting_cc;
 static char g_waiting[TP_MAXW][64];
@@ -660,6 +666,69 @@ static void fw_window_name(const char *root, char *out, long cap) {
     else cx_fmt(out, cap, "%s", root);
 }
 
+
+/* ---- /tmp hardlink .cx trees (agyneon; print-only count + age; VIOLATION if old) ---- */
+typedef struct { int count; char sample[512]; } hl_scan;
+static int hl_ends_cx(const char *name, long n) {
+    return n >= 3 && name[n - 3] == '.' && name[n - 2] == 'c' && name[n - 1] == 'x';
+}
+static void hl_walk(const char *path, int depth, hl_scan *ctx) {
+    sy_dir_t d;
+    if (depth > 8) return;
+    if (sy_dir_open(&d, path) != 0) return;
+    while (sy_dir_next(&d) == 1) {
+        char child[1024];
+        struct stat sb;
+        long nl;
+        if (tx_eqz(d.name, ".") || tx_eqz(d.name, "..")) continue;
+        if (cx_fmt(child, sizeof child, "%s/%s", path, d.name)) continue;
+        /* L0 gap: sy_stat_t has no nlink; prelude lstat (pkg-gaps). */
+        if (lstat(child, &sb) != 0) continue;
+        if (S_ISDIR(sb.st_mode)) hl_walk(child, depth + 1, ctx);
+        else if (S_ISREG(sb.st_mode)) {
+            nl = tx_len(d.name, 256);
+            if (hl_ends_cx(d.name, nl) && (long)sb.st_nlink > 1) {
+                if (ctx->count == 0) cx_fmt(ctx->sample, sizeof ctx->sample, "%s", child);
+                ctx->count++;
+            }
+        }
+    }
+    sy_dir_close(&d);
+}
+static void fw_hardlink_trees(void) {
+    const char *tmp_root;
+    sy_dir_t d;
+    int n_dirs = 0;
+    long oldest_min = 0;
+    tmp_root = g_hl_tmp[0] ? g_hl_tmp : "/tmp";
+    if (sy_dir_open(&d, tmp_root) != 0) {
+        printf("FREEZE_WATCH\tHARDLINK_TREES\t-1\t0\n");
+        return;
+    }
+    while (sy_dir_next(&d) == 1) {
+        char top[1024];
+        struct stat st;
+        hl_scan ctx;
+        long age_min;
+        if (d.name[0] == '.') continue;
+        if (cx_fmt(top, sizeof top, "%s/%s", tmp_root, d.name)) continue;
+        if (lstat(top, &st) != 0 || !S_ISDIR(st.st_mode)) continue;
+        mm_fill(&ctx, sizeof ctx, 0, sizeof ctx);
+        hl_walk(top, 0, &ctx);
+        if (ctx.count <= 0) continue;
+        age_min = (g_now > (long)st.st_mtime) ? (g_now - (long)st.st_mtime) / 60L : 0L;
+        if (n_dirs == 0 || age_min > oldest_min) oldest_min = age_min;
+        n_dirs++;
+        printf("HARDLINK_DIR\t%s\tcx_nlink_gt1=%d\tage_min=%ld\tsample=%s\n",
+               top, ctx.count, age_min, ctx.sample);
+    }
+    sy_dir_close(&d);
+    printf("FREEZE_WATCH\tHARDLINK_TREES\t%d\t%ld\n", n_dirs, oldest_min);
+    /* Hourly cleanup rewrites inodes after 120m; warn earlier at >60. */
+    if (n_dirs > 0 && oldest_min > 60)
+        fw_emit("shared", tmp_root, "hardlink-trees", "-", "-");
+}
+
 static int run_freeze_watch(void) {
     char freeze_path[1200], owner[80], wt_out[1 << 15], cmd[1200];
     char roots[16][1100]; int nroot = 0, i, st, rc, first_wt = 1;
@@ -701,6 +770,7 @@ static int run_freeze_watch(void) {
         fw_scan_dirty(roots[i], win);
         fw_scan_commits(roots[i], win);
     }
+    fw_hardlink_trees();
     if (g_n_fw_viol == 0) printf("FREEZE_WATCH\tCLEAN\towner=%s\tsince_min=%d\n", g_owner, g_since_min);
     else printf("FREEZE_WATCH\tSUMMARY\tviolations=%d\towner=%s\n", g_n_fw_viol, g_owner);
     return g_n_fw_viol ? 1 : 0;
@@ -710,6 +780,7 @@ static int run_freeze_watch(void) {
 int main(int argc, char **argv) {
     int i, a = 1;
     g_table[0] = 0; g_fix[0] = 0; g_root[0] = 0; g_freeze_file[0] = 0; g_lock_author[0] = 0;
+    g_hl_tmp[0] = 0;
     g_now = sy_wall_s();
     while (a < argc) {
         if (tx_eqz(argv[a], "--windows-table") && a + 1 < argc) {
@@ -735,7 +806,9 @@ int main(int argc, char **argv) {
         } else if (tx_eqz(argv[a], "--lock-author") && a + 1 < argc) {
             if (cx_fmt(g_lock_author, sizeof g_lock_author, "%s", argv[++a])) return die("lock-author");
         } else if (tx_eqz(argv[a], "--mutant-no-freeze-watch")) g_mutant_fw = 1;
-        else if (tx_eqz(argv[a], "--now") && a + 1 < argc) g_now = tx_strtol(argv[++a], 0, 10);
+        else if (tx_eqz(argv[a], "--hardlink-tmp") && a + 1 < argc) {
+            if (cx_fmt(g_hl_tmp, sizeof g_hl_tmp, "%s", argv[++a])) return die("hardlink-tmp");
+        } else if (tx_eqz(argv[a], "--now") && a + 1 < argc) g_now = tx_strtol(argv[++a], 0, 10);
         else return die("usage: [--windows-table P] [--stall-min N] [--wait-cc-min N] [--fixture F] [--tail-lines K] [--mutant-no-stall|--mutant-no-running-shell|--mutant-no-wait-cc]");
         a++;
     }

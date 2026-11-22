@@ -209,9 +209,15 @@ int main(void) {
     /* ---- freeze-watch synthetic repo (trailer X-Unisacc-Window; author always wanjo) ---- */
     {
         char repo[900], cmd[5200], extra[400]; long dl;
+        char hl_empty[900], hl_hit[900], hl_old[900];
         if (!root[0]) { fprintf(stderr, "check-team-pulse: empty root before fw-repo\n"); return 2; }
         if (cx_fmt(repo, sizeof repo, "%s/fw-repo", root)) return 2;
         if (!repo[0]) { fprintf(stderr, "check-team-pulse: empty fw-repo path refused\n"); return 2; }
+        if (cx_fmt(hl_empty, sizeof hl_empty, "%s/hl-empty", root)) return 2;
+        if (cx_fmt(hl_hit, sizeof hl_hit, "%s/hl-hit", root)) return 2;
+        if (cx_fmt(hl_old, sizeof hl_old, "%s/hl-old", root)) return 2;
+        if (cx_fmt(cmd, sizeof cmd, "mkdir -p '%s'", hl_empty)) return 2;
+        ck(ckk_sh_t("check-team-pulse", cmd, out, (int)sizeof out, 10) == 0, "fw-hl-empty-mkdir");
         dl = now + 86400; /* active freeze */
         /* base: wanjo author, freeze owner=cc; domain=src cx; tools/ outside */
         if (cx_fmt(cmd, sizeof cmd,
@@ -230,16 +236,17 @@ int main(void) {
             "git commit -q -m \"owner-ok\n\nX-Unisacc-Window: cc\n\" && "
             "rm -f src/leak.c 2>/dev/null; true", repo)) return 2;
         ck(ckk_sh_t("check-team-pulse", cmd, out, (int)sizeof out, 30) == 0, "fw-seed-trailer-ok");
-        if (cx_fmt(extra, sizeof extra, "--freeze-watch --root '%s' --since-min 60 --now %ld", repo, now)) return 2;
+        if (cx_fmt(extra, sizeof extra, "--freeze-watch --root '%s' --since-min 60 --now %ld --hardlink-tmp '%s'", repo, now, hl_empty)) return 2;
         rc = run_tp(extra);
-        ck(rc == 0 && ckk_has(out, (int)sizeof out, "FREEZE_WATCH\tCLEAN\t"), "fw-trailer-match-clean");
+        ck(rc == 0 && ckk_has(out, (int)sizeof out, "FREEZE_WATCH\tCLEAN\t") &&
+           ckk_has(out, (int)sizeof out, "FREEZE_WATCH\tHARDLINK_TREES\t0\t0"), "fw-trailer-match-clean");
 
         /* (2) domain commit with other window trailer -> VIOLATION author=agyneon */
         if (cx_fmt(cmd, sizeof cmd,
             "cd '%s' && printf 'x\\n' > cx/other.c && git add cx/other.c && "
             "git commit -q -m \"other-win\n\nX-Unisacc-Window: agyneon\n\"", repo)) return 2;
         ck(ckk_sh_t("check-team-pulse", cmd, out, (int)sizeof out, 30) == 0, "fw-seed-trailer-other");
-        if (cx_fmt(extra, sizeof extra, "--freeze-watch --root '%s' --since-min 60 --now %ld", repo, now)) return 2;
+        if (cx_fmt(extra, sizeof extra, "--freeze-watch --root '%s' --since-min 60 --now %ld --hardlink-tmp '%s'", repo, now, hl_empty)) return 2;
         rc = run_tp(extra);
         ck(ckk_has(out, (int)sizeof out, "FREEZE_WATCH\tVIOLATION\t") &&
            ckk_has(out, (int)sizeof out, "path=cx/other.c") &&
@@ -253,7 +260,7 @@ int main(void) {
             "printf 'y\\n' > src/raw.c && git add src/raw.c && "
             "git commit -q -m raw-no-trailer", repo)) return 2;
         ck(ckk_sh_t("check-team-pulse", cmd, out, (int)sizeof out, 30) == 0, "fw-seed-no-trailer");
-        if (cx_fmt(extra, sizeof extra, "--freeze-watch --root '%s' --since-min 60 --now %ld", repo, now)) return 2;
+        if (cx_fmt(extra, sizeof extra, "--freeze-watch --root '%s' --since-min 60 --now %ld --hardlink-tmp '%s'", repo, now, hl_empty)) return 2;
         rc = run_tp(extra);
         ck(ckk_has(out, (int)sizeof out, "path=src/raw.c") &&
            ckk_has(out, (int)sizeof out, "kind=commit") &&
@@ -266,7 +273,7 @@ int main(void) {
             "printf 't\\n' > tools/out.txt && git add tools/out.txt && "
             "git commit -q -m tools-no-trailer", repo)) return 2;
         ck(ckk_sh_t("check-team-pulse", cmd, out, (int)sizeof out, 30) == 0, "fw-seed-outside");
-        if (cx_fmt(extra, sizeof extra, "--freeze-watch --root '%s' --since-min 60 --now %ld", repo, now)) return 2;
+        if (cx_fmt(extra, sizeof extra, "--freeze-watch --root '%s' --since-min 60 --now %ld --hardlink-tmp '%s'", repo, now, hl_empty)) return 2;
         rc = run_tp(extra);
         ck(rc == 0 && ckk_has(out, (int)sizeof out, "FREEZE_WATCH\tCLEAN\t") &&
            !ckk_has(out, (int)sizeof out, "path=tools/out.txt"), "fw-outside-domain-quiet");
@@ -275,7 +282,7 @@ int main(void) {
         if (cx_fmt(cmd, sizeof cmd,
             "cd '%s' && printf 'bad\\n' > src/leak.c", repo)) return 2;
         ck(ckk_sh_t("check-team-pulse", cmd, out, (int)sizeof out, 10) == 0, "fw-seed-dirty");
-        if (cx_fmt(extra, sizeof extra, "--freeze-watch --root '%s' --since-min 60 --now %ld", repo, now)) return 2;
+        if (cx_fmt(extra, sizeof extra, "--freeze-watch --root '%s' --since-min 60 --now %ld --hardlink-tmp '%s'", repo, now, hl_empty)) return 2;
         rc = run_tp(extra);
         ck(ckk_has(out, (int)sizeof out, "path=src/leak.c") &&
            ckk_has(out, (int)sizeof out, "kind=dirty"), "fw-dirty-violation");
@@ -286,7 +293,7 @@ int main(void) {
             "cd '%s' && rm -f src/leak.c && printf 'FW-TEST\\tabcdef\\tcc\\t1\\tsrc\\n' > build/freeze.tsv",
             repo)) return 2;
         ck(ckk_sh_t("check-team-pulse", cmd, out, (int)sizeof out, 10) == 0, "fw-inactive-seed");
-        if (cx_fmt(extra, sizeof extra, "--freeze-watch --root '%s' --now %ld", repo, now)) return 2;
+        if (cx_fmt(extra, sizeof extra, "--freeze-watch --root '%s' --now %ld --hardlink-tmp '%s'", repo, now, hl_empty)) return 2;
         rc = run_tp(extra);
         ck(rc == 0 && ckk_has(out, (int)sizeof out, "FREEZE_WATCH\tINACTIVE"), "fw-inactive");
 
@@ -296,13 +303,49 @@ int main(void) {
             "printf 'bad\\n' > src/leak2.c", repo, dl)) return 2;
         ck(ckk_sh_t("check-team-pulse", cmd, out, (int)sizeof out, 10) == 0, "fw-mutant-seed");
         if (cx_fmt(extra, sizeof extra,
-            "--freeze-watch --root '%s' --since-min 60 --now %ld --mutant-no-freeze-watch", repo, now)) return 2;
+            "--freeze-watch --root '%s' --since-min 60 --now %ld --mutant-no-freeze-watch --hardlink-tmp '%s'",
+            repo, now, hl_empty)) return 2;
         rc = run_tp(extra);
         ck(rc == 0 && ckk_has(out, (int)sizeof out, "FREEZE_WATCH\tCLEAN\t") &&
            !ckk_has(out, (int)sizeof out, "VIOLATION"), "mutant-no-freeze-watch");
-        if (cx_fmt(extra, sizeof extra, "--freeze-watch --root '%s' --since-min 60 --now %ld", repo, now)) return 2;
+        if (cx_fmt(extra, sizeof extra, "--freeze-watch --root '%s' --since-min 60 --now %ld --hardlink-tmp '%s'",
+            repo, now, hl_empty)) return 2;
         rc = run_tp(extra);
         ck(rc != 0 && ckk_has(out, (int)sizeof out, "path=src/leak2.c"), "fw-mutant-contrast-red");
+
+        /* (8) hardlink trees: empty -> 0; synth hit age0 no VIOLATION; old age>60 VIOLATION */
+        if (cx_fmt(cmd, sizeof cmd,
+            "cd '%s' && rm -f src/leak2.c && "
+            "printf 'FW-TEST\tabcdef\tcc\t%ld\tsrc\n' > build/freeze.tsv", repo, dl)) return 2;
+        ck(ckk_sh_t("check-team-pulse", cmd, out, (int)sizeof out, 10) == 0, "fw-hl-clean-seed");
+        if (cx_fmt(extra, sizeof extra, "--freeze-watch --root '%s' --since-min 60 --now %ld --hardlink-tmp '%s'",
+            repo, now, hl_empty)) return 2;
+        rc = run_tp(extra);
+        ck(rc == 0 && ckk_has(out, (int)sizeof out, "FREEZE_WATCH\tHARDLINK_TREES\t0\t0") &&
+           ckk_has(out, (int)sizeof out, "FREEZE_WATCH\tCLEAN\t"), "fw-hardlink-zero");
+
+        if (cx_fmt(cmd, sizeof cmd,
+            "mkdir -p '%s/t1' && printf 'x\n' > '%s/t1/a.cx' && ln '%s/t1/a.cx' '%s/t1/b.cx'",
+            hl_hit, hl_hit, hl_hit, hl_hit)) return 2;
+        ck(ckk_sh_t("check-team-pulse", cmd, out, (int)sizeof out, 10) == 0, "fw-hl-hit-seed");
+        if (cx_fmt(extra, sizeof extra, "--freeze-watch --root '%s' --since-min 60 --now %ld --hardlink-tmp '%s'",
+            repo, now, hl_hit)) return 2;
+        rc = run_tp(extra);
+        ck(rc == 0 && ckk_has(out, (int)sizeof out, "FREEZE_WATCH\tHARDLINK_TREES\t1\t") &&
+           ckk_has(out, (int)sizeof out, "HARDLINK_DIR\t") &&
+           !ckk_has(out, (int)sizeof out, "kind=hardlink-trees"), "fw-hardlink-hit-young");
+
+        if (cx_fmt(cmd, sizeof cmd,
+            "mkdir -p '%s/t1' && printf 'x\n' > '%s/t1/a.cx' && ln '%s/t1/a.cx' '%s/t1/b.cx' && "
+            "touch -d '@%ld' '%s/t1'",
+            hl_old, hl_old, hl_old, hl_old, now - 7200, hl_old)) return 2;
+        ck(ckk_sh_t("check-team-pulse", cmd, out, (int)sizeof out, 10) == 0, "fw-hl-old-seed");
+        if (cx_fmt(extra, sizeof extra, "--freeze-watch --root '%s' --since-min 60 --now %ld --hardlink-tmp '%s'",
+            repo, now, hl_old)) return 2;
+        rc = run_tp(extra);
+        ck(rc != 0 && ckk_has(out, (int)sizeof out, "FREEZE_WATCH\tHARDLINK_TREES\t1\t") &&
+           ckk_has(out, (int)sizeof out, "kind=hardlink-trees") &&
+           ckk_has(out, (int)sizeof out, "FREEZE_WATCH\tVIOLATION\t"), "fw-hardlink-old-violation");
     }
 
     sy_remove_all(root);
