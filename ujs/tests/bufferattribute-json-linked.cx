@@ -39,6 +39,9 @@ static int attribute_base(const char *wasm,int prepare,int check) {
         "ujs/practice/uxe/base/geometry-json-load.ujs",
         "ujs/practice/uxe/base/bufferattribute-family-json-read.ujs",
         "ujs/practice/uxe/base/instancedbufferattribute-json.ujs",
+        "ujs/practice/uxe/base/interleavedbuffer.ujs",
+        "ujs/practice/uxe/base/interleavedbufferattribute.ujs",
+        "ujs/practice/uxe/base/interleavedbufferattribute-json.ujs",
         "ujs/practice/uxe/test/bufferattribute-json-linked-base.ujs",
         0
     };
@@ -67,11 +70,11 @@ static int attribute_base(const char *wasm,int prepare,int check) {
         printf("ATTRIBUTE_JSON_LINK cache=refused rc=%d key=%s\n",rc,key);
         return 1;
     }
-    char *args[24]={"./ujs/ujs2wasm.com"};
+    char *args[28]={"/bin/sh","./ujs/ujs2wasm.com"};
     int n=0;
-    while(sources[n]) { args[n+1]=(char *)sources[n]; n++; }
-    args[n+1]="-o";
-    args[n+2]=(char *)wasm;
+    while(sources[n]) { args[n+2]=(char *)sources[n]; n++; }
+    args[n+2]="-o";
+    args[n+3]=(char *)wasm;
     if(attribute_compile(args,"base_prepare",50)) return 1;
     if(check) return wasm_test_cache_verify(wasm,sha);
     return wasm_test_cache_write(cache,record,key,wasm);
@@ -113,20 +116,22 @@ int main(int argc,char **argv) {
     int mutate=argc==2 && tx_eqz(argv[1],"--mutate");
     int mutate_instanced=argc==2 && tx_eqz(argv[1],"--mutate-instanced");
     int verify=argc==2 && tx_eqz(argv[1],"--verify-instanced-negative");
-    if(argc!=1 && !mutate && !mutate_instanced && !verify) return 2;
+    int verify_shared=argc==2 && tx_eqz(argv[1],"--verify-interleaved-negative");
+    if(argc!=1 && !mutate && !mutate_instanced && !verify && !verify_shared) return 2;
     char dir[256],base[320],probe[320],page[320],url[360];
     if(sy_mkdtemp("/tmp","uxe-attribute-json-",dir,sizeof dir)) return 2;
     tx_snprintf(base,sizeof base,"%s/base.wasm",dir);
     tx_snprintf(probe,sizeof probe,"%s/probe.wasm",dir);
     tx_snprintf(page,sizeof page,"%s/probe.html",dir);
-    tx_snprintf(url,sizeof url,"file://%s%s",page,mutate?"?mutate":(mutate_instanced || verify)?"?mutate-instanced":"");
+    tx_snprintf(url,sizeof url,"file://%s%s",page,mutate?"?mutate":(mutate_instanced || verify)?"?mutate-instanced":verify_shared?"?mutate-interleaved":"");
     const char *fixture="ujs/practice/uxe/test/bufferattribute-json-linked-wasm.html";
-    char *args[]={"./ujs/ujs2wasm.com","ujs/practice/uxe/test/bufferattribute-json-linked-probe.ujs","-o",probe,0};
-    double ref[16],actual[12],instanced[1];
+    char *args[]={"/bin/sh","./ujs/ujs2wasm.com","ujs/practice/uxe/test/bufferattribute-json-linked-probe.ujs","-o",probe,0};
+    double ref[16],actual[13],instanced[1],interleaved[1];
     int failed=attribute_base(base,0,0) || attribute_compile(args,"probe",6) ||
         sy_copy(fixture,page,0600) || r160_wait_ref("bufferattribute-family",ref,16,dir) ||
         r160_wait_ref("instancedbufferattribute-json",instanced,1,dir) ||
-        r160_wait_read(url,"#wasm-cases",actual,12,dir);
+        r160_wait_ref("interleavedbufferattribute-json",interleaved,1,dir) ||
+        r160_wait_read(url,"#wasm-cases",actual,13,dir);
     if(!failed) for(int i=0;i<11;i++) {
         double gold=json_gold(i);
         if(actual[i]!=gold || ref[i+5]!=gold) {
@@ -137,6 +142,20 @@ int main(int argc,char **argv) {
     const char *example="{\"itemSize\":2,\"type\":\"Float32Array\",\"array\":[1,2,3,4],\"normalized\":false,\"meshPerAttribute\":3,\"isInstancedBufferAttribute\":true}";
     uint64_t hash=0;
     for(int i=0;example[i];i++) hash=(hash*131+(unsigned char)example[i])%16777213;
+    const char *shared="{\"isInterleavedBufferAttribute\":true,\"itemSize\":2,\"data\":\"abc\",\"offset\":1,\"normalized\":false}";
+    uint64_t shared_hash=0;
+    for(int i=0;shared[i];i++) shared_hash=(shared_hash*131+(unsigned char)shared[i])%16777213;
+    if(verify_shared) {
+        const int rejected=!failed && instanced[0]==(double)hash && actual[11]==(double)hash &&
+            interleaved[0]==(double)shared_hash && actual[12]>=0 && actual[12]!=(double)shared_hash;
+        const int cleaned=sy_remove_all(dir)==0;
+        printf("ATTRIBUTE_JSON_LINK interleaved_negative_expected=1 observed=%d\n",rejected);
+        return !(rejected && cleaned);
+    }
+    if(!failed && (interleaved[0]!=(double)shared_hash || actual[12]!=(double)shared_hash)) {
+        printf("ATTRIBUTE_JSON_LINK interleaved actual=%g r160=%g gold=%g\n",actual[12],interleaved[0],(double)shared_hash);
+        failed++;
+    }
     if(verify) {
         const int rejected=!failed && instanced[0]==(double)hash &&
             actual[11]>=0 && actual[11]!=(double)hash;
@@ -150,6 +169,6 @@ int main(int argc,char **argv) {
         failed++;
     }
     if(sy_remove_all(dir)) failed++;
-    printf("G_STRUCT BufferAttribute class JSON linked cases=12 failed=%d\n",failed);
+    printf("G_STRUCT BufferAttribute class JSON linked cases=13 failed=%d\n",failed);
     return failed!=0;
 }
