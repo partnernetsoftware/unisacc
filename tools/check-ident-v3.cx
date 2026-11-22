@@ -1,0 +1,270 @@
+/* tools/check-ident-v3.cx -- L.1 source-packages-v3 守门检查 (I1/I2/I3).
+ *
+ *   sh ./unisacc.com tools/check-ident-v3.cx
+ *
+ * 验证三项身份不变式:
+ *   I1 (链接不出产品树):
+ *     - seed/ident.c 协议头为 source-packages-v3
+ *     - 类甲外链目标 ext/textx/{build,json,num}.cx 不在 list-current 中
+ *     - 打包支持源 ext/textx/deflate.cx 显式在 list-current 中
+ *     - 隔离快照变异: 改 ext/textx/num.cx 不改 SID; 改 ext/textx/deflate.cx 必改 SID
+ *   I2 (build/core-closure.tsv 与 cxroot.tsv 强制入身份):
+ *     - build/core-closure.tsv 与 cxroot.tsv 出现在 list-current 中
+ *     - build/core-closure.tsv 全部去重 real 单元(>=99)均在 list-current 中
+ *     - 隔离快照变异: 改 build/core-closure.tsv 1 字节必改 SID; 删之必非零拒绝
+ *     - 隔离快照变异: 改 cxroot.tsv 1 字节必改 SID
+ *   I3 (build/lane-inputs.tsv 与闭包/SID 一致):
+ *     - tools/lane-inputs-gen.cx --check 返回 SAME
+ *     - ext/textx/{build,json,num}.cx 在 build/lane-inputs.tsv 为 lane B
+ *     - build/core-closure.tsv 与全部闭包 real 单元在 build/lane-inputs.tsv 为 lane A
+ *
+ * 所有变异仅在 sy_tmpdir() 隔离快照执行, 不改工作树, 退出前清理。
+ * 末行: CHECK_IDENT_V3<TAB>assertions=N<TAB>failed=M
+ */
+#pragma unisa use sys.fs
+#pragma unisa use sys.env
+#pragma unisa use sys.posix
+#pragma unisa use sys.proc
+#pragma unisa use sys.time
+#pragma unisa use mem.heap
+#pragma unisa use mem.bytes
+#pragma unisa use text.text
+#pragma unisa use cxlib.netpack
+
+static int n_ok, n_fail;
+static char workdir[4200];
+
+static void die(const char *m) {
+    fprintf(stderr, "check-ident-v3: REFUSE %s\n", m);
+    exit(2);
+}
+
+static void ck(int ok, const char *name, const char *detail) {
+    if (ok) n_ok++; else n_fail++;
+    printf("%s\tident-v3.%s\t%s\n", ok ? "PASS" : "FAIL", name, detail ? detail : "-");
+}
+
+static int has_line_prefix(const char *buf, size_t n, const char *key) {
+    size_t p = 0, kl = strlen(key);
+    while (p < n) {
+        size_t e = p;
+        while (e < n && buf[e] != '\n') e++;
+        if (e - p >= kl && !memcmp(buf + p, key, kl)) return 1;
+        p = e + 1;
+    }
+    return 0;
+}
+
+static int run_ident_hex(const char *ident_bin, const char *target_root, char out[65]) {
+    char *av[] = { (char *)ident_bin, (char *)target_root, 0 };
+    np_result r = {0};
+    char why[256];
+    int tr = np_run(av, ".", 0, 30, &r, why, sizeof why);
+    int ok = !tr && r.rc == 0 && r.out && r.outn >= 64;
+    if (ok) {
+        mm_copy(out, 65, r.out, 64);
+        out[64] = 0;
+    }
+    np_free(&r);
+    return ok ? 0 : 1;
+}
+
+static void rm_tree(const char *dir) {
+    if (!dir || !dir[0]) return;
+    char *av[] = { "rm", "-rf", "--", (char *)dir, 0 };
+    np_result r = {0};
+    char why[256];
+    (void)np_run(av, "/", 0, 30, &r, why, sizeof why);
+    np_free(&r);
+}
+
+static int append_comment_and_check_sid(const char *ident_bin, const char *snap, const char *rel,
+                                        const char *base_sid, int want_change, const char *label) {
+    char full[4600];
+    if (cx_fmt(full, sizeof full, "%s/%s", snap, rel)) die("snap-path");
+    size_t n = 0;
+    char *orig = cx_read(full, &n);
+    if (!orig) { ck(0, label, "read-failed"); return 1; }
+    const char *add = "\n/* ident-v3-mutation */\n";
+    size_t an = strlen(add);
+    char *mut = (char *)mm_alloc((long)(n + an));
+    if (!mut) { free(orig); die("oom"); }
+    if (n) mm_copy(mut, (long)(n + an), orig, (long)n);
+    mm_copy(mut + n, (long)an, add, (long)an);
+    if (cx_write(full, mut, n + an)) { mm_free(mut); free(orig); die("write-mut"); }
+    mm_free(mut);
+
+    char s1[65], s2[65];
+    int e1 = run_ident_hex(ident_bin, snap, s1);
+    if (cx_write(full, orig, n)) { free(orig); die("restore"); }
+    free(orig);
+    int e2 = run_ident_hex(ident_bin, snap, s2);
+
+    int chg = !e1 && strcmp(s1, base_sid) != 0;
+    int restored = !e2 && strcmp(s2, base_sid) == 0;
+    char det[160];
+    cx_fmt(det, sizeof det, "mutated=%s sid_chg=%d(want %d) restored=%d", rel, chg, want_change, restored);
+    ck(!e1 && chg == want_change && restored, label, det);
+    return (!e1 && chg == want_change && restored) ? 0 : 1;
+}
+
+int main(void) {
+    char root[4096], ident_bin[4400], snap[4400], why[512];
+    if (sy_realpath(".", root, sizeof root) < 0) die("realpath");
+    if (cx_fmt(workdir, sizeof workdir, "%s/check-ident-v3-%ld-%d", sy_tmpdir(), sy_now_ms(), (int)getpid())) die("workpath");
+    if (sy_mkdir(workdir, 0700)) die("mkdir-work");
+    if (cx_fmt(ident_bin, sizeof ident_bin, "%s/ident.bin", workdir)) die("ident-bin");
+    if (cx_fmt(snap, sizeof snap, "%s/snap", workdir)) die("snap-dir");
+
+    /* 编译当前工作树的 seed/ident.c */
+    {
+        char *av[] = { "sh", "./unisacc.com", "-o", ident_bin, "seed/ident.c", 0 };
+        np_result r = {0};
+        int tr = np_run(av, root, 0, 50, &r, why, sizeof why);
+        int ok = !tr && r.rc == 0;
+        np_free(&r);
+        ck(ok, "build-ident", ok ? "compiled" : "compile-failed");
+        if (!ok) { rm_tree(workdir); printf("CHECK_IDENT_V3\tassertions=%d\tfailed=%d\n", n_ok + n_fail, n_fail); return 1; }
+    }
+
+    /* I1-1: packages 输出头为 source-packages-v3 */
+    {
+        char *av[] = { ident_bin, root, "packages", 0 };
+        np_result r = {0};
+        int tr = np_run(av, root, 0, 30, &r, why, sizeof why);
+        int ok = !tr && r.rc == 0 && r.out && r.outn >= 19 && !memcmp(r.out, "source-packages-v3\n", 19);
+        char det[64];
+        cx_fmt(det, sizeof det, "hdr=%.18s", (r.out && r.outn >= 18) ? r.out : "none");
+        ck(ok, "I1-schema-v3", det);
+        np_free(&r);
+    }
+
+    /* 取 list-current */
+    char *lc_buf = 0; size_t lc_n = 0;
+    {
+        char *av[] = { ident_bin, root, "list-current", 0 };
+        np_result r = {0};
+        int tr = np_run(av, root, 0, 30, &r, why, sizeof why);
+        if (tr || r.rc != 0 || !r.out) { np_free(&r); rm_tree(workdir); die("list-current-failed"); }
+        lc_buf = (char *)mm_alloc((long)r.outn + 1);
+        if (!lc_buf) { np_free(&r); rm_tree(workdir); die("oom"); }
+        mm_copy(lc_buf, (long)r.outn + 1, r.out, (long)r.outn);
+        lc_buf[r.outn] = 0;
+        lc_n = r.outn;
+        np_free(&r);
+    }
+
+    /* I1-2: 类甲外链目标不在 list-current, 支持源 ext/textx/deflate.cx 在 list-current */
+    ck(!has_line_prefix(lc_buf, lc_n, "ext/textx/build.cx\t"), "I1-no-ext-build", "ext/textx/build.cx excluded");
+    ck(!has_line_prefix(lc_buf, lc_n, "ext/textx/json.cx\t"), "I1-no-ext-json", "ext/textx/json.cx excluded");
+    ck(!has_line_prefix(lc_buf, lc_n, "ext/textx/num.cx\t"), "I1-no-ext-num", "ext/textx/num.cx excluded");
+    ck(has_line_prefix(lc_buf, lc_n, "ext/textx/deflate.cx\t"), "I1-keep-ext-deflate", "ext/textx/deflate.cx support kept");
+
+    /* I2-1: build/core-closure.tsv 与 cxroot.tsv 强制入身份 */
+    ck(has_line_prefix(lc_buf, lc_n, "build/core-closure.tsv\t"), "I2-core-closure-in-sid", "build/core-closure.tsv in list-current");
+    ck(has_line_prefix(lc_buf, lc_n, "cxroot.tsv\t"), "I2-cxroot-in-sid", "cxroot.tsv in list-current");
+
+    /* I2-2: build/core-closure.tsv 全部去重 real 单元均在 list-current 与 build/lane-inputs.tsv lane A */
+    size_t cn = 0, ln = 0;
+    char *cb = cx_read("build/core-closure.tsv", &cn);
+    char *lb = cx_read("build/lane-inputs.tsv", &ln);
+    if (!cb || !lb) { mm_free(lc_buf); rm_tree(workdir); die("read-tables"); }
+
+    int missing_sid = 0, missing_lane = 0, checked_rows = 0;
+    {
+        size_t p = 0;
+        while (p < cn) {
+            size_t e = p;
+            while (e < cn && cb[e] != '\n') e++;
+            if (e > p && cb[p] != '#') {
+                size_t t1 = p; while (t1 < e && cb[t1] != '\t') t1++;
+                if (t1 < e) {
+                    size_t t2 = t1 + 1; while (t2 < e && cb[t2] != '\t') t2++;
+                    if (t2 < e) {
+                        size_t r0 = t2 + 1, t3 = r0; while (t3 < e && cb[t3] != '\t') t3++;
+                        if (t3 > r0 && t3 - r0 < 300) {
+                            char key_sid[320], key_la[320];
+                            char realp[304];
+                            mm_copy(realp, sizeof realp, cb + r0, (long)(t3 - r0));
+                            realp[t3 - r0] = 0;
+                            if (!strcmp(realp, "UNMEASURED")) { p = e + 1; continue; }
+                            cx_fmt(key_sid, sizeof key_sid, "%s\t", realp);
+                            cx_fmt(key_la, sizeof key_la, "%s\tA\t", realp);
+                            if (!has_line_prefix(lc_buf, lc_n, key_sid)) missing_sid++;
+                            if (!has_line_prefix(lb, ln, key_la)) missing_lane++;
+                            checked_rows++;
+                        }
+                    }
+                }
+            }
+            p = e + 1;
+        }
+    }
+    {
+        char det[128];
+        cx_fmt(det, sizeof det, "rows=%d missing_sid=%d missing_lane_a=%d", checked_rows, missing_sid, missing_lane);
+        ck(checked_rows >= 99 && missing_sid == 0, "I2-all-closure-units-in-sid", det);
+        ck(checked_rows >= 99 && missing_lane == 0, "I3-all-closure-units-in-lane-a", det);
+    }
+
+    /* I3-1: lane-inputs-gen --check SAME 且 ext/textx/{build,json,num} 为 lane B */
+    {
+        char *av[] = { "sh", "./unisacc.com", "tools/lane-inputs-gen.cx", "--", "--check", 0 };
+        np_result r = {0};
+        int tr = np_run(av, root, 0, 50, &r, why, sizeof why);
+        int ok = !tr && r.rc == 0 && r.out && strstr(r.out, "LANE_INPUTS_GEN\tSAME") != 0;
+        ck(ok, "I3-lane-inputs-same", ok ? "SAME" : "DIFF-or-FAIL");
+        np_free(&r);
+    }
+    ck(has_line_prefix(lb, ln, "ext/textx/build.cx\tB\t"), "I3-ext-build-lane-b", "ext/textx/build.cx lane B");
+    ck(has_line_prefix(lb, ln, "ext/textx/json.cx\tB\t"), "I3-ext-json-lane-b", "ext/textx/json.cx lane B");
+    ck(has_line_prefix(lb, ln, "ext/textx/num.cx\tB\t"), "I3-ext-num-lane-b", "ext/textx/num.cx lane B");
+    ck(has_line_prefix(lb, ln, "ext/textx/deflate.cx\tA\t"), "I3-ext-deflate-lane-a", "ext/textx/deflate.cx lane A");
+    ck(has_line_prefix(lb, ln, "build/core-closure.tsv\tA\t"), "I3-core-closure-lane-a", "build/core-closure.tsv lane A");
+
+    /* 构造隔离快照做真实变异检验 (不改工作树) */
+    if (sy_mkdir(snap, 0700)) die("mkdir-snap");
+    {
+        /* 复制必要树到快照: 用 cp -a 保留符号链接拓扑 */
+        char cmd[4800];
+        cx_fmt(cmd, sizeof cmd,
+               "cp -a cx src exec seed weights include kernel iterate tools build cxroot.tsv ext '%s/'", snap);
+        char *av[] = { "sh", "-c", cmd, 0 };
+        np_result r = {0};
+        int tr = np_run(av, root, 0, 50, &r, why, sizeof why);
+        int ok = !tr && r.rc == 0;
+        np_free(&r);
+        if (!ok) { free(cb); free(lb); mm_free(lc_buf); rm_tree(workdir); die("snap-copy-failed"); }
+    }
+
+    char base_sid[65];
+    if (run_ident_hex(ident_bin, snap, base_sid)) {
+        ck(0, "snap-base-sid", "failed");
+    } else {
+        /* 变异 1: 改 ext/textx/num.cx 不改 SID */
+        append_comment_and_check_sid(ident_bin, snap, "ext/textx/num.cx", base_sid, 0, "I1-mut-ext-num-no-sid-change");
+        /* 变异 2: 改 ext/textx/deflate.cx 必改 SID */
+        append_comment_and_check_sid(ident_bin, snap, "ext/textx/deflate.cx", base_sid, 1, "I1-mut-ext-deflate-changes-sid");
+        /* 变异 3: 改 build/core-closure.tsv 必改 SID */
+        append_comment_and_check_sid(ident_bin, snap, "build/core-closure.tsv", base_sid, 1, "I2-mut-core-closure-changes-sid");
+        /* 变异 4: 改 cxroot.tsv 必改 SID */
+        append_comment_and_check_sid(ident_bin, snap, "cxroot.tsv", base_sid, 1, "I2-mut-cxroot-changes-sid");
+        /* 变异 5: 删 build/core-closure.tsv 必非零拒绝 */
+        {
+            char ccp[4600];
+            cx_fmt(ccp, sizeof ccp, "%s/build/core-closure.tsv", snap);
+            (void)sy_unlink(ccp);
+            char *av[] = { ident_bin, snap, 0 };
+            np_result r = {0};
+            int tr = np_run(av, root, 0, 30, &r, why, sizeof why);
+            int ok = !tr && r.rc != 0;
+            ck(ok, "I2-mut-delete-core-closure-refused", ok ? "refused-nonzero" : "unexpected-rc0");
+            np_free(&r);
+        }
+    }
+
+    free(cb); free(lb); mm_free(lc_buf);
+    rm_tree(workdir);
+    printf("CHECK_IDENT_V3\tassertions=%d\tfailed=%d\n", n_ok + n_fail, n_fail);
+    return n_fail ? 1 : 0;
+}
