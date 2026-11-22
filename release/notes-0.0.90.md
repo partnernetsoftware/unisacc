@@ -51,16 +51,16 @@
 
 ## U4 与 GCC 11.4 的语言行为差异
 
-- 裸 `asm` 拼写不支持: 严格 C 下 `asm` 非关键字(GCC 默认 gnu 模式接受裸 `asm`, 但吃掉用户标识符 `int asm = 1;` 属回归); `cx` 声明标签仅支持 `__asm__` 与 `__asm`, 声明位置写裸 `asm("label")` 具名拒绝(`error: not covered: bare asm label; use __asm__ or __asm`), 普通变量名 `asm` 正常可用;
+- 裸 `asm` 拼写不支持: 严格 C 下 `asm` 非关键字(GCC 默认 gnu 模式接受裸 `asm`, 但吃掉用户标识符 `int asm = 1;` 属回归); `cx` 声明标签仅支持 `__asm__` 与 `__asm`, 声明或顶层位置写裸 `asm("lbl")` 在词法侧具名拒绝(`reject: not covered: inline asm`), 不带 `(` 的普通变量名 `asm` 正常可用;
 - 对象/变量声明贴标签拒绝: 对文件作用域全局变量(`a03`)与 `static` 变量贴 `__asm__` 标签, 按本版范围裁定具名拒绝(`error: not covered: asm label on an object declaration`);
 - 4 处比 GCC 11.4 更严的具名拒绝(GCC 11.4 严格 C 模式下 `rc=0` 接受或仅告警, U4 均具名拒绝 `rc=1` 且无产物):
-  - (1) `a05`(同一函数两次声明给出冲突汇编标签, 如 `__asm__("a1")` 后再声明 `__asm__("a2")`): U4 拒绝(`error: not covered: conflicting asm label on redeclaration`), GCC 11.4 `rc=0` 保留第一个标签并告警;
-  - (2) `a06`(函数定义之后才补汇编标签, 如 `int f(void){...}` 后再声明 `int f(void) __asm__("late");`): U4 拒绝(`error: not covered: asm label after function definition`), GCC 11.4 `rc=0` 忽略改名并告警;
-  - (3) `a07`(块作用域局部非 `static` 变量带汇编标签, 如 `int x __asm__("rax_reg") = 1;`): U4 拒绝(`error: not covered: asm label on a block-scope declaration`), GCC 11.4 `rc=0` 忽略标签并告警;
-  - (4) 块作用域 `extern` 函数声明加汇编标签(如块内 `extern int g(void) __asm__("g2");`): U4 拒绝(`error: not covered: asm label on a block-scope declaration`), GCC 11.4 `rc=0` 并生成改名后的外部符号引用(`UND`);
+  - (1) `a05`(同一函数两次声明给出冲突汇编标签, 如 `__asm__("a1")` 后再声明 `__asm__("a2")`): U4 拒绝(`error: not covered: conflicting asm labels on function declarations`), GCC 11.4 `rc=0` 保留第一个标签(`T a1`)并告警;
+  - (2) `a06`(函数定义之后才补汇编标签, 如 `int f(void){...}` 后再声明 `int f(void) __asm__("late");`): U4 拒绝(`error: not covered: asm label after function definition`), GCC 11.4 `rc=0` 忽略改名(`T f`)并告警;
+  - (3) `a07`(块作用域局部非 `static` 变量带汇编标签, 如 `int x __asm__("rax_reg") = 1;`): U4 拒绝(`error: not covered: asm label on a block-scope object declaration`), GCC 11.4 `rc=0` 忽略 `asm` 说明符并告警;
+  - (4) 块作用域 `extern` 函数声明加汇编标签(如块内 `extern int g(void) __asm__("g2");`): U4 拒绝(`error: not covered: asm label on a block-scope function declaration`), GCC 11.4 `rc=0` 并生成改名后的外部符号引用(`U g2`);
 - 与 GCC 11.4 一致同拒及 `p08` 语法边界子例:
-  - `a08`(非字符串字面量标签 `__asm__(sym)`): U4 与 GCC 11.4 一致同拒(`rc=1`);
-  - `p08` 独立验证语法子例: 空串 `__asm__("")`、相邻字符串拼接 `__asm__("a" "b")`、括号包裹 `__asm__(("x"))` 均具名拒绝(`rc=1`, 无产物);
+  - `a08`(非字符串字面量标签 `__asm__(sym)`): U4(`error: not covered: asm label requires one ordinary string literal in a declaration`)与 GCC 11.4 一致同拒(`rc=1`);
+  - `p08` 独立验证语法子例: 空串 `__asm__("")` 与相邻字符串拼接 `__asm__("a" "b")` 具名拒绝(`error: not covered: asm label requires a plain ELF symbol name`), 括号包裹 `__asm__(("x"))` 具名拒绝(`error: not covered: asm label requires one ordinary string literal in a declaration`), 均 `rc=1` 且无产物;
 - 非 ELF 四目标具名拒绝: `osx/x86_64`、`osx/arm64`、`win/x86_64`、`win/arm64` 上对函数贴汇编标签执行 `-c` 或 `-o` 均具名拒绝(`error: not covered: asm label unsupported for target`), 无残留产物;
 - `-c` 单单元对象符号类别: `unisacc -c`(非 `-funit`)单单元对象将非 `main`/`_start` 函数发为本地文本符号 `t`(既有单单元封装行为, 与 GCC `-c` 的全局 `T` 不同, 非 U4 引入)。
 
