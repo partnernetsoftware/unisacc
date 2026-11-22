@@ -2,7 +2,7 @@
  *
  *   sh ./unisacc.com tools/handoff-check.cx -- [--root DIR] [--base REV] [--files A,B,..] [--item NAME]
  *       [--static] [--skip-batches] [--candidate ABS_DEV_PRODUCT_DIR] [--allow-product] [--patch FILE]
- *       [--strict] [--profiles TSV] [--help]
+ *       [--strict] [--profiles TSV] [--defer NAME=REASON]... [--vs REV --cmd 'ARGV...'] [--help]
  *
  * Changed set: git diff --name-only BASE (default HEAD, i.e. the uncommitted work; pass --base HEAD~1 for
  * the last commit) plus untracked files, or --files.  Items (profile names from tests/accept-profiles.tsv):
@@ -19,10 +19,17 @@
  *                    passes and says so                                     patch-first-for-product
  *   registry     (h) new tools/X.cx without tools/check-X.cx, a tools-compile-sources row or a prd.md row:
  *                    UNMEASURED, FAIL with --strict                         tool-registered
- * --static and --skip-batches turn the heavy items (a b c d / d) into UNMEASURED.  One line per item:
- *   ITEM<TAB>name<TAB>PASS|FAIL|NOT_APPLICABLE|UNMEASURED|REVIEW_REQUIRED<TAB>ms<TAB>detail
- * Last line: HANDOFF passed=N failed=N unmeasured=N review=N scope=LOCAL.  The result is local evidence only;
- * it is never a release qualification.  Exit 1 when failed > 0, 2 on usage, else 0.
+ *   deferred     (i) work not done: a batch row added to tests/batches.tsv whose status is not IMPLEMENTED, and each
+ *                    --defer NAME=REASON, are DEFERRED (one counted item each); none -> PASS deferred=0   (no profile)
+ *   vs-base      (j) with --vs REV --cmd 'ARGV...' (whitespace-split, no shell): the same command runs in the work
+ *                    tree and in a git archive of REV, both original last lines pasted.  Current passes -> PASS;
+ *                    current fails and REV passes -> FAIL; both fail with the same last line -> REVIEW_REQUIRED
+ *                    (pre-existing, a reviewer must agree); both fail with different lines -> FAIL
+ * --static and --skip-batches turn the heavy items (a b c d / d) into UNMEASURED; --static also vs-base.  One line per item:
+ *   ITEM<TAB>name<TAB>PASS|FAIL|NOT_APPLICABLE|UNMEASURED|DEFERRED|REVIEW_REQUIRED<TAB>ms<TAB>detail
+ * Last line: HANDOFF passed=N failed=N unmeasured=N deferred=N review=N scope=LOCAL.  The result is local evidence only;
+ * it is never a release qualification.  Exit 1 when failed > 0, else 3 when unmeasured, deferred or review > 0,
+ * 2 on usage, else 0.  A report is exactly this output: nothing is claimed that no ITEM line shows.
  *   sh ./unisacc.com tools/handoff-check.cx -- batch CASES.tsv   (fixtures: one TAB-separated argument line per
  *   case, CASE<TAB>i ... END<TAB>i<TAB>rc=N, one process for the table; used by tools/check-handoff-check.cx) */
 #pragma unisa use sys.proc
@@ -38,7 +45,9 @@
 #define MAXF 512
 static const char *root = ".", *base = "HEAD", *only = 0, *cand = 0, *patchf = 0, *profiles = "tests/accept-profiles.tsv";
 static int st_static, skip_batches, allow_product, strict;
-static int passed, failed, unmeasured, review;
+static int passed, failed, unmeasured, deferred, review;
+static const char *vsrev = 0, *vscmd = 0;
+static char *defers[16]; static int ndefer;
 static char *files[MAXF]; static int nfiles;
 static char *added[MAXF]; static int nadded;
 static char *core[64], *prod[64]; static int ncore, nprod;
@@ -48,6 +57,7 @@ static void item(const char *name, const char *st, long ms, const char *detail) 
     if (!strcmp(st, "PASS")) passed++;
     else if (!strcmp(st, "FAIL")) failed++;
     else if (!strcmp(st, "UNMEASURED")) unmeasured++;
+    else if (!strcmp(st, "DEFERRED")) deferred++;
     else if (!strcmp(st, "REVIEW_REQUIRED")) review++;
     printf("ITEM\t%s\t%s\t%ld\t%s\n", name, st, ms, detail && detail[0] ? detail : "-");
 }
@@ -168,13 +178,19 @@ static int new_batches(char ids[][128], int cap) {
     return k;
 }
 static int why_(char *why, int wcap, const char *s) { if (cx_fmt(why, (size_t)wcap, "%s", s)) why[0] = 0; return -1; }
+/* extract git archive REV of ROOT into a fresh temp dir named PREFIX-XXXXXX; the product symlink is the caller's */
+static int archive_rev(const char *rev, char *dir, int cap, char *why, int wcap, const char *prefix) {
+    static char out[16384]; char tar[1300];
+    if (sy_mkdtemp(sy_tmpdir(), prefix, dir, (size_t)cap)) return why_(why, wcap, "mkdtemp");
+    if (cx_fmt(tar, sizeof tar, "%s.tar", dir)) return why_(why, wcap, "tar-name");
+    { char *v[] = {"./tools/bound", "50", "git", "-C", (char *)root, "archive", "-o", tar, (char *)rev, 0}; if (run(v, 0, out, sizeof out)) return why_(why, wcap, "git archive"); }
+    { char *v[] = {"./tools/bound", "50", "tar", "-xf", tar, "-C", dir, 0}; if (run(v, 0, out, sizeof out)) return why_(why, wcap, "tar"); }
+    sy_unlink(tar);
+    return 0;
+}
 static int layout(char *dir, int cap, char *why, int wcap) {
     static char out[16384]; char tar[1300], abs[1200], uc[1300], lk[1300];
-    if (sy_mkdtemp(sy_tmpdir(), "handoff-layout-", dir, (size_t)cap)) return why_(why, wcap,"mkdtemp");
-    if (cx_fmt(tar, sizeof tar, "%s.tar", dir)) return -1;
-    { char *v[] = {"./tools/bound", "50", "git", "-C", (char *)root, "archive", "-o", tar, "HEAD", 0}; if (run(v, 0, out, sizeof out)) return why_(why, wcap,"git archive"); }
-    { char *v[] = {"./tools/bound", "50", "tar", "-xf", tar, "-C", dir, 0}; if (run(v, 0, out, sizeof out)) return why_(why, wcap,"tar"); }
-    sy_unlink(tar);
+    if (archive_rev("HEAD", dir, cap, why, wcap, "handoff-layout-")) return -1;
     { char *v[] = {"./tools/bound", "30", "git", "-C", dir, "init", "-q", 0}; if (run(v, 0, out, sizeof out)) return why_(why, wcap,"git init"); }
     { char *v[] = {"./tools/bound", "50", "git", "-C", dir, "add", "-A", 0}; if (run(v, 0, out, sizeof out)) return why_(why, wcap,"git add"); }
     { char *v[] = {"./tools/bound", "50", "git", "-C", dir, "-c", "user.name=handoff", "-c", "user.email=handoff@localhost", "commit", "-qm", "layout", "--no-gpg-sign", 0};
@@ -251,22 +267,74 @@ static void it_registry(void) {
     else if (!miss[0]) item("registry", "PASS", 0, "check, tools-compile row and prd.md row present");
     else item("registry", strict ? "FAIL" : "UNMEASURED", 0, miss);
 }
+static void it_deferred(void) {
+    static char out[262144]; int n = 0;
+    if (git(out, sizeof out, "diff", "--unified=0", base, "--", "tests/batches.tsv") == 0) {
+        for (char *p = out, *e; *p; p = e) {
+            e = strchr(p, '\n'); if (e) *e++ = 0; else e = p + strlen(p);
+            if (p[0] != '+' || p[1] == '+') continue;
+            char *id = p + 1, *t1 = strchr(id, '\t'); if (!t1) continue;
+            char *st = t1 + 1, *t2 = strchr(st, '\t'); if (t2) *t2 = 0;
+            *t1 = 0;
+            if (!strcmp(st, "IMPLEMENTED") || !strcmp(st, "status")) continue;
+            char nm[300], d[300];
+            if (cx_fmt(nm, sizeof nm, "deferred:batch:%s", id) || cx_fmt(d, sizeof d, "tests/batches.tsv status=%s", st)) continue;
+            item(nm, "DEFERRED", 0, d); n++;
+        }
+    }
+    for (int i = 0; i < ndefer; i++) {
+        char nm[300], *eq = strchr(defers[i], '=');
+        if (cx_fmt(nm, sizeof nm, "deferred:%.*s", (int)(eq ? eq - defers[i] : (long)strlen(defers[i])), defers[i])) continue;
+        item(nm, "DEFERRED", 0, eq ? eq + 1 : "declared with --defer"); n++;
+    }
+    if (!n) item("deferred", "PASS", 0, "deferred=0");
+}
+static void trunc_line(char *dst, int cap, const char *s) { if (cx_fmt(dst, (size_t)cap, "%.300s", s)) dst[0] = 0; }
+/* run the whitespace-split command CMD (private copy) in DIR through the bound; last line of stdout+stderr into LINE */
+static int vs_side(const char *dir, const char *cmd, char *line, int lcap) {
+    static char out[65536]; char *cp = strdup(cmd), *v[40]; int c = 0, rc;
+    v[c++] = "./tools/bound"; v[c++] = "40"; v[c++] = "sh"; v[c++] = "-c"; v[c++] = "cd \"$1\" && shift && exec \"$@\""; v[c++] = "sh"; v[c++] = (char *)dir;
+    for (char *p = cp; *p && c < 39; ) { while (*p == ' ') p++; if (!*p) break; v[c++] = p; while (*p && *p != ' ') p++; if (*p) *p++ = 0; }
+    v[c] = 0;
+    rc = run(v, 0, out, sizeof out);
+    trunc_line(line, lcap, lastline(out));
+    free(cp);
+    return rc;
+}
+static void it_vsbase(void) {
+    char dir[1024], why[200] = "", cur_l[320], rev_l[320], d[900], chk[300]; static char out[4096]; long t0 = sy_now_ms(); int rc_cur, rc_rev;
+    if (!vsrev) { item("vs-base", "NOT_APPLICABLE", 0, "no --vs"); return; }
+    if (st_static) { item("vs-base", "UNMEASURED", 0, "--static"); return; }
+    if (cx_fmt(chk, sizeof chk, "%s^{commit}", vsrev)) return;
+    { char *v[] = {"./tools/bound", "30", "git", "-C", (char *)root, "rev-parse", "--verify", "-q", chk, 0};
+      if (run(v, 0, out, sizeof out)) { item("vs-base", "FAIL", 0, "--vs REV is not a commit"); return; } }
+    if (archive_rev(vsrev, dir, sizeof dir, why, sizeof why, "handoff-vs-")) { item("vs-base", "FAIL", 0, why); return; }
+    { char lk[1300], abs[1200];   /* the product is optional: only tools run under it need it */
+      if (!cx_fmt(lk, sizeof lk, "%s/unisacc.com", root) && sy_realpath(lk, abs, sizeof abs) >= 0 && !cx_fmt(lk, sizeof lk, "%s/unisacc.com", dir)) sy_symlink(abs, lk); }
+    rc_cur = vs_side(root, vscmd, cur_l, sizeof cur_l);
+    rc_rev = vs_side(dir, vscmd, rev_l, sizeof rev_l);
+    { char *v[] = {"./tools/bound", "30", "rm", "-rf", dir, 0}; run(v, 0, out, sizeof out); }
+    const char *st = rc_cur == 0 ? "PASS" : rc_rev == 0 ? "FAIL" : !strcmp(cur_l, rev_l) ? "REVIEW_REQUIRED" : "FAIL";
+    const char *kind = rc_cur == 0 ? (rc_rev == 0 ? "both-pass" : "fixed-since-rev") : rc_rev == 0 ? "regression" : !strcmp(cur_l, rev_l) ? "pre-existing-same-line" : "different-failure";
+    if (cx_fmt(d, sizeof d, "%s cur[rc=%d]: %s || rev %.12s[rc=%d]: %s", kind, rc_cur, cur_l, vsrev, rc_rev, rev_l)) d[0] = 0;
+    item("vs-base", st, sy_now_ms() - t0, d);
+}
 static void help(void) {
-    puts("handoff-check items: newcx ratchets shards fresh-cold core-review no-bypass patch-first registry");
+    puts("handoff-check items: newcx ratchets shards fresh-cold core-review no-bypass patch-first registry deferred vs-base");
     puts("profiles: cold-fresh-layout-33s fresh-layout-no-history ratchets-15-0 newcx-0 shards-consistent no-gate-bypass");
     puts("          patch-first-for-product core-path-review e2e-latency new-tool-name-history tool-registered thaw-on-fail local-evidence-only");
-    puts("options: --root DIR --base REV --files A,B --item NAME --static --skip-batches --candidate DIR --allow-product --patch FILE --strict --profiles TSV");
-    puts("last line: HANDOFF passed=N failed=N unmeasured=N review=N scope=LOCAL (local evidence only)");
+    puts("options: --root DIR --base REV --files A,B --item NAME --static --skip-batches --candidate DIR --allow-product --patch FILE --strict --profiles TSV --defer NAME=REASON --vs REV --cmd 'ARGV...'");
+    puts("last line: HANDOFF passed=N failed=N unmeasured=N deferred=N review=N scope=LOCAL (local evidence only); rc 1 failed, 3 unmeasured/deferred/review, 0 clean");
 }
 static void reset(void) {
-    root = "."; base = "HEAD"; only = 0; cand = 0; patchf = 0; profiles = "tests/accept-profiles.tsv";
+    root = "."; base = "HEAD"; only = 0; cand = 0; patchf = 0; profiles = "tests/accept-profiles.tsv"; vsrev = vscmd = 0;
     st_static = skip_batches = allow_product = strict = 0;
-    passed = failed = unmeasured = review = 0;
+    passed = failed = unmeasured = deferred = review = 0;
     for (int i = 0; i < nfiles; i++) free(files[i]);
     for (int i = 0; i < nadded; i++) free(added[i]);
     for (int i = 0; i < ncore; i++) free(core[i]);
     for (int i = 0; i < nprod; i++) free(prod[i]);
-    nfiles = nadded = ncore = nprod = 0;
+    nfiles = nadded = ncore = nprod = ndefer = 0;
 }
 static int dispatch(int argc, char **argv) {
     const char *list = 0;
@@ -285,8 +353,12 @@ static int dispatch(int argc, char **argv) {
         else if (more && !strcmp(a, "--candidate")) cand = argv[++i];
         else if (more && !strcmp(a, "--patch")) patchf = argv[++i];
         else if (more && !strcmp(a, "--profiles")) profiles = argv[++i];
+        else if (more && !strcmp(a, "--vs")) vsrev = argv[++i];
+        else if (more && !strcmp(a, "--cmd")) vscmd = argv[++i];
+        else if (more && !strcmp(a, "--defer")) { if (ndefer < 16) defers[ndefer++] = strdup(argv[++i]); else { fprintf(stderr, "handoff-check: more than 16 --defer\n"); return 2; } }
         else { fprintf(stderr, "handoff-check: usage: see --help (%s)\n", a); return 2; }
     }
+    if (!vsrev != !vscmd) { fprintf(stderr, "handoff-check: --vs and --cmd go together\n"); return 2; }
     load_profiles();
     collect(list);
     printf("HANDOFF_SCOPE\troot=%s\tbase=%s\tchanged=%d\tnew=%d\n", root, base, nfiles, nadded);
@@ -298,8 +370,10 @@ static int dispatch(int argc, char **argv) {
     if (want("no-bypass")) it_bypass();
     if (want("patch-first")) it_patch();
     if (want("registry")) it_registry();
-    printf("HANDOFF\tpassed=%d\tfailed=%d\tunmeasured=%d\treview=%d\tscope=LOCAL\n", passed, failed, unmeasured, review);
-    return failed ? 1 : 0;
+    if (want("deferred")) it_deferred();
+    if (want("vs-base")) it_vsbase();
+    printf("HANDOFF\tpassed=%d\tfailed=%d\tunmeasured=%d\tdeferred=%d\treview=%d\tscope=LOCAL\n", passed, failed, unmeasured, deferred, review);
+    return failed ? 1 : (unmeasured || deferred || review) ? 3 : 0;
 }
 /* batch FILE: one case per line, arguments TAB-separated; each case prints CASE<TAB>i, its output, then
  * END<TAB>i<TAB>rc=N.  One process (one compile) for a fixture table. */
