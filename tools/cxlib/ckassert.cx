@@ -4,14 +4,59 @@
 #pragma unisa module ckassert
 #pragma unisa use sysx.processcore
 #pragma unisa use mem.bytes
+#pragma unisa use sys.fs
+#pragma unisa use sys.env
+#pragma unisa use cxlib.ckreceipt
 static int ca_total, ca_failed;
+static int ca_receipt = -1, ca_begun, ca_events, ca_lost;
+
+/* Consume the final runner-owned arguments before the entry parses its own CLI. */
+int ck_receipt_begin(int *argc, char **argv) {
+    if (!argc || *argc < 4 || strcmp(argv[*argc-3], "--ck-receipt-v1")) return 0;
+    if (ca_begun || ca_total) return -1;
+    ca_begun = 1;
+    const char *path = argv[*argc-2], *attempt = argv[*argc-1];
+    *argc -= 3;
+    argv[*argc] = 0;
+    char root[4096], header[80];
+    if (strlen(attempt) != 64 || strspn(attempt, "0123456789abcdef") != 64 ||
+        sy_cwd(root, sizeof root) || !ckr_receipt_path(root, path) ||
+        cx_fmt(header, sizeof header, "H\tCKREC1\t%s\n", attempt)) return -1;
+    int fd = sy_open_new(path, 0600);
+    if (fd < 0) return -1;
+    if (sy_write_all(fd, header, (long)strlen(header))) {
+        sy_close(fd);
+        return -1;
+    }
+    ca_receipt = fd;
+    return 1;
+}
+
+void ck_observe(int ok) {
+    ca_total++;
+    if (!ok) ca_failed++;
+    if (ca_receipt < 0 || ca_lost) return;
+    char row[32];
+    if (ca_events == 4096 || cx_fmt(row, sizeof row, "E\t%d\t%d\n", ++ca_events, !!ok) ||
+        sy_write_all(ca_receipt, row, (long)strlen(row))) ca_lost = 1;
+}
+
+void ck_receipt_finish(void) {
+    if (ca_receipt < 0) return;
+    char row[32];
+    if (!ca_lost && !cx_fmt(row, sizeof row, "T\t%d\t%d\n", ca_events, ca_failed))
+        (void)sy_write_all(ca_receipt, row, (long)strlen(row));
+    close(ca_receipt);
+    ca_receipt = -1;
+}
+
 void ck_record(int *failures, int ok, const char *label) {
     printf("%s\t%s\n", ok ? "PASS" : "FAIL", label);
     if (!ok) (*failures)++;
 }
 void ck(int ok, const char *label) {
-    ca_total++;
-    ck_record(&ca_failed, ok, label);
+    ck_observe(ok);
+    printf("%s\t%s\n", ok ? "PASS" : "FAIL", label);
 }
 int ck_assertions(void) { return ca_total; }
 int ck_failures(void) { return ca_failed; }

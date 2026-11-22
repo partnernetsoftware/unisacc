@@ -1,0 +1,96 @@
+/* Shadow assertion wire. The receiver owns the attempt identity. */
+#pragma unisa module ckreceipt
+#pragma unisa use cxlib.sessionroot
+#pragma unisa use sys.fs
+#pragma unisa use sys.env
+
+int ckr_session_path(const char *root, const char *path) {
+    char tmp[4096];
+    if (sr_ok(root, path, 0, 0) || sy_realpath(sy_tmpdir(), tmp, sizeof tmp) < 0) return 0;
+    size_t n = strlen(tmp);
+    if (strcmp(tmp, "/") == 0) n = 0;
+    if (strncmp(path, tmp, n) || path[n] != '/') return 0;
+    const char *leaf = path+n+1;
+    static const char session[] = "unisacc-session-", affected[] = "unisacc-affected-";
+    size_t prefix = !strncmp(leaf, session, sizeof session-1) ? sizeof session-1 :
+                    !strncmp(leaf, affected, sizeof affected-1) ? sizeof affected-1 : 0;
+    return prefix && leaf[prefix] && leaf[prefix] != '/';
+}
+
+int ckr_private_dir(const char *path) {
+    sy_stat_t st;
+    return !sy_lstat(path, &st) && st.kind == 'd' && st.uid == sy_uid() && st.mode == 0700;
+}
+
+int ckr_receipt_path(const char *root, const char *path) {
+    char dir[4096];
+    if (!ckr_session_path(root, path) || cx_fmt(dir, sizeof dir, "%s", path)) return 0;
+    char *leaf = strrchr(dir, '/');
+    if (!leaf || strcmp(leaf+1, "assertions.tsv")) return 0;
+    *leaf = 0;
+    if (!ckr_private_dir(dir)) return 0;
+    leaf = strrchr(dir, '/');
+    if (!leaf || strncmp(leaf+1, "attempt-", sizeof "attempt-"-1) || !leaf[sizeof "attempt-"]) return 0;
+    *leaf = 0;
+    leaf = strrchr(dir, '/');
+    return leaf && !strcmp(leaf+1, "receipts") && ckr_private_dir(dir);
+}
+
+static int ckr_consume(const char **cursor, const char *end, const char *word) {
+    const char *p = *cursor;
+    while (*word) {
+        if (p == end || *p != *word) return 0;
+        ++p;
+        ++word;
+    }
+    *cursor = p;
+    return 1;
+}
+
+static int ckr_number(const char **cursor, const char *end, char delim, unsigned long *value) {
+    const char *p = *cursor;
+    if (p == end || *p < '0' || *p > '9') return 0;
+    unsigned long number = 0;
+    if (*p == '0') {
+        ++p;
+    } else {
+        while (p != end && *p >= '0' && *p <= '9') {
+            number = number * 10 + (*p - '0');
+            if (number > 4096) return 0;
+            ++p;
+        }
+    }
+    if (p == end || *p != delim) return 0;
+    *cursor = p + 1;
+    *value = number;
+    return 1;
+}
+
+int ckr_verify(const char *bytes, long length, const char *attempt,
+               unsigned long *passes, unsigned long *failures) {
+    *passes = 0;
+    *failures = 0;
+    if (length == 0) return 0;
+    if (length < 0 || length > 65536 || !attempt || !*attempt) return -1;
+    const char *cursor = bytes;
+    const char *end = bytes + length;
+    if (!ckr_consume(&cursor, end, "H\tCKREC1\t") ||
+        !ckr_consume(&cursor, end, attempt) || !ckr_consume(&cursor, end, "\n")) return -1;
+    unsigned long total = 0, failed = 0;
+    while (cursor != end && *cursor == 'E') {
+        unsigned long serial;
+        if (total == 4096 || !ckr_consume(&cursor, end, "E\t") ||
+            !ckr_number(&cursor, end, '\t', &serial) || serial != total + 1) return -1;
+        if (ckr_consume(&cursor, end, "0\n")) ++failed;
+        else if (!ckr_consume(&cursor, end, "1\n")) return -1;
+        ++total;
+    }
+    unsigned long reported_total, reported_failed;
+    if (!ckr_consume(&cursor, end, "T\t") ||
+        !ckr_number(&cursor, end, '\t', &reported_total) ||
+        !ckr_number(&cursor, end, '\n', &reported_failed) ||
+        cursor != end || reported_total != total || reported_failed != failed) return -1;
+    *passes = total - failed;
+    *failures = failed;
+    return 1;
+}
