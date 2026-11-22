@@ -11,12 +11,12 @@
  * Rows are walked cursor-style by index: for (r = 0; r < tt_rows(t); r++).
  */
 #pragma unisa module table
-#pragma unisa dock
 #pragma unisa use mem.heap
 #pragma unisa use mem.bytes
 #pragma unisa use sys.fs
 #pragma unisa use sys.posix
 #pragma unisa use text.iter
+#pragma unisa use text.text
 #pragma unisa use tsvx.read
 
 enum { TT_HEADER_ROW = 1, TT_HEADER_COMMENT = 2, TT_NO_HEADER = 4, TT_STRICT_COLS = 8 };
@@ -39,8 +39,8 @@ static void tt_seterr(const char *what, const char *name, long nn, long a, long 
     for (p = what; *p && k < 300; p++) tt_errbuf[k++] = *p;
     if (name) { for (i = 0; i < nn && k < 480; i++) tt_errbuf[k++] = name[i]; }
     tt_errbuf[k] = 0;
-    if (a > 0) k += snprintf(tt_errbuf + k, sizeof tt_errbuf - (size_t)k, " line %ld", a);
-    if (b > 0 && k < 500) k += snprintf(tt_errbuf + k, sizeof tt_errbuf - (size_t)k, " (first at line %ld)", b);
+    if (a > 0 && cx_fmt(tt_errbuf + k, sizeof tt_errbuf - (size_t)k, " line %ld", a) == 0) k += tx_len(tt_errbuf + k, 64);
+    if (b > 0 && k < 500) (void)cx_fmt(tt_errbuf + k, sizeof tt_errbuf - (size_t)k, " (first at line %ld)", b);
 }
 
 const char *tt_err(void) { return tt_errbuf; }
@@ -137,7 +137,7 @@ int tt_load(int *t, const char *path, long max, int flags) {
     if (!t || !path) return -EINVAL;
     *t = 0;
     r = sy_read_file(path, &b, &n, max);
-    if (r) { tt_seterr("cannot read ", path, (long)strlen(path), 0, 0); return r; }
+    if (r) { tt_seterr("cannot read ", path, tx_len(path, 4096), 0, 0); return r; }
     return tt_build(t, (char *)b, (long)n, flags);
 }
 
@@ -156,10 +156,10 @@ int tt_col(int t, const char *name) {
     long nn, fo, fl; int i;
     if (!p) return -EBADF;
     if (!name) return -EINVAL;
-    nn = (long)strlen(name);
+    nn = tx_len(name, 4096);
     if (p->hoff >= 0)
         for (i = 0; tt_span_field(p->buf, p->hoff, p->hlen, i, &fo, &fl) == 0; i++)
-            if (fl == nn && memcmp(p->buf + fo, name, (size_t)nn) == 0) return i;
+            if (fl == nn && mm_same(p->buf + fo, name, nn)) return i;
     tt_seterr("missing column: ", name, nn, 0, 0);
     return -ENOENT;
 }
@@ -203,7 +203,7 @@ static int tt_keycmp(tt_tab_t *p, long a, long b) {
         if (tt_span_field(p->buf, p->roff[b], p->rlen[b], p->key[k], &bo, &bl)) bl = -1;
         if (al < 0 || bl < 0) { if (al != bl) return al < bl ? -1 : 1; continue; }
         m = al < bl ? al : bl;
-        c = m ? memcmp(p->buf + ao, p->buf + bo, (size_t)m) : 0;
+        c = m ? mm_cmp(p->buf + ao, p->buf + bo, m) : 0;
         if (c) return c < 0 ? -1 : 1;
         if (al != bl) return al < bl ? -1 : 1;
     }
@@ -267,7 +267,7 @@ static int tt_cmpkeys(tt_tab_t *p, long r, const char *const *keys, const long *
     for (k = 0; k < p->nkey; k++) {
         tt_span_field(p->buf, p->roff[r], p->rlen[r], p->key[k], &fo, &fl);
         m = fl < kns[k] ? fl : kns[k];
-        c = m ? memcmp(p->buf + fo, keys[k], (size_t)m) : 0;
+        c = m ? mm_cmp(p->buf + fo, keys[k], m) : 0;
         if (c) return c < 0 ? -1 : 1;
         if (fl != kns[k]) return fl < kns[k] ? -1 : 1;
     }
@@ -299,7 +299,7 @@ long tt_find(int t, int col, const char *key, long kn) {
     if (!key || kn < 0 || col < 0) return -EINVAL;
     if (p->have_ix && p->nkey == 1 && p->key[0] == col) return tt_find_keys(t, &key, &kn);
     for (r = 0; r < p->nrows; r++)
-        if (tt_span_field(p->buf, p->roff[r], p->rlen[r], col, &fo, &fl) == 0 && fl == kn && (kn == 0 || memcmp(p->buf + fo, key, (size_t)kn) == 0)) return r;
+        if (tt_span_field(p->buf, p->roff[r], p->rlen[r], col, &fo, &fl) == 0 && fl == kn && (kn == 0 || mm_same(p->buf + fo, key, kn))) return r;
     return -ENOENT;
 }
 
