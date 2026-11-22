@@ -12,7 +12,7 @@
 | 现行版本计划 | v0.0.90.md 及以后各版(已公开版本的计划随下一轮归档);0.0.86 到 0.0.89 已公开并归档到 archive/plans-pre090/(清单见其 README.tsv) |
 | 设计与规范 | devsvc.md、cx-layers.md、cx-modules.md、cx-dock-pragma.md、cx-dev.md、q-p-design.md、root-identity.md、test-loader-com.md、m7-material-spec.md、macos-signing.md、notcovered-plan.md、dev-methodology-2026-10-28.md |
 | 表(被工具读取或跟踪) | slice-units.tsv、unit-text.tsv(slice-migration-gen 输入)、slice-nn-migration.md(其产出)、v0.0.73-speed-tracker.tsv |
-| 审阅记录 | nn-table-review-2026-11-18.md、reviews/(2026-11-20 起 fable 报告正文拷贝:asm-acceleration、core-layer-marking、devsvc-evolution、chain-incremental、gate-086-edit-rerun、table-construction、layer-lanes、core-ext-matrix、fast-iteration);分车道条文改写稿 claude-md-layer-lanes-draft.md(暂不生效);团队编排骨架 layer-orchestration.md(第 (12) 节主调度流程改进规则) |
+| 审阅记录 | nn-table-review-2026-11-18.md、reviews/(2026-11-20 起 fable 报告正文拷贝:asm-acceleration、core-layer-marking、devsvc-evolution、chain-incremental、table-construction、layer-lanes、core-ext-matrix、fast-iteration;gate-086-edit-rerun 已归档);分车道条文改写稿 claude-md-layer-lanes-draft.md(暂不生效);团队编排骨架 layer-orchestration.md(第 (12) 节主调度流程改进规则) |
 | 历史但留原位(有工具或登记表字面量) | release-0.0.43.md(tools/release-board.cx 等读取)、v0.0.78.md(tools/tests/cx 引用) |
 | 子目录 | briefs/(简报规范与模板)、pending/、patches/、w5-patches/ |
 | 历史归档指针 | `archive/plans/`(2026-11 首轮 58 个)、`archive/plans-pre082/`(0.0.82 前已公开版本的计划与设计,清单见其 README.tsv)、`archive/plans-pre086/`(0.0.82 到 0.0.85 已公开版本的计划,清单见其 README.tsv)、`archive/plans-pre090/`(0.0.86 到 0.0.89 已公开版本的计划,清单见其 README.tsv)、`archive/plans-2026-11/`(2026-11-21 P1 批 7 个旧版计划与方案) |
@@ -55,7 +55,7 @@
 | [archive/plans/nn-nf-b-prep-2026-11-05.md](../archive/plans/nn-nf-b-prep-2026-11-05.md) | 已归档 | v0.0.48+ | NN-NF-B 开工依据(SBOUT 长序列实测) |
 | [plans/nn-table-review-2026-11-18.md](nn-table-review-2026-11-18.md) | 现行 | - | 2026-11-18 NN TSV 表审阅与体检摘要 |
 | [plans/notcovered-plan.md](notcovered-plan.md) | 现行 | - | notcovered 编译覆盖缺口分期修复计划 |
-| [archive/plans/patches/README.md](../archive/plans/patches/README.md) | 已归档 | v0.0.48+ | 旧补丁提案目录说明(与 archive/plans/README.md 重名) |
+| [archive/plans/patches/README.md](../archive/plans/patches/README.md) | 已归档 | v0.0.48+ | 旧补丁提案目录说明(与 archive/plans 根说明重名) |
 | [archive/plans/patches/driver-diagnostics.diff](../archive/plans/patches/driver-diagnostics.diff) | 已归档 | v0.0.48+ | 10-28 旧诊断补丁提案 |
 | [archive/plans/patches/x1-runcache-key-v2.patch](../archive/plans/patches/x1-runcache-key-v2.patch) | 已归档 | v0.0.69+ | 11-16 X1 运行缓存键补丁 v2(0 活引用) |
 | [archive/plans/patches/x1-runcache-key.patch](../archive/plans/patches/x1-runcache-key.patch) | 已归档 | v0.0.69+ | 11-16 X1 运行缓存键补丁 v1(0 活引用) |
