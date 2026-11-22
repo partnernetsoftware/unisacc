@@ -1,0 +1,91 @@
+// Khronos Data Format 1.4, sections 22.3 and 22.5 through 22.8.
+native function eac_modifier(table:i64,index:i64) i64 {
+  let row=63843;
+  if(table==1) { row=55923; }
+  if(table==2) { row=55378; }
+  if(table==3) { row=54850; }
+  if(table==4) { row=51299; }
+  if(table==5) { row=47475; }
+  if(table==6) { row=47220; }
+  if(table==7) { row=47187; }
+  if(table==8) { row=43106; }
+  if(table==9) { row=43090; }
+  if(table==10) { row=43074; }
+  if(table==11) { row=42834; }
+  if(table==12) { row=42819; }
+  if(table==13) { row=41761; }
+  if(table==14) { row=39012; }
+  if(table==15) { row=38739; }
+  let magnitude=u32_shr(row,4*(index%4))%16;
+  if(index<4) { return 0-magnitude; }
+  return magnitude-1;
+}
+
+native function eac_texel11(block:i64,position:i64,signed:i64) i64 {
+  let bit=position*3;
+  let address=block+2+bit/8;
+  let bits=ux_u8(address)*256;
+  if(address<block+7) { bits=bits+ux_u8(address+1); }
+  let selector=u32_shr(bits,13-bit%8)%8;
+  let flags=ux_u8(block+1);
+  let multiplier=flags/16*8;
+  if(multiplier==0) { multiplier=1; }
+  let delta=eac_modifier(flags%16,selector)*multiplier;
+  let base=ux_u8(block);
+  let min=0;
+  let max=2047;
+  let value=base*8+4+delta;
+  if(signed) {
+    if(base>=128) { base=base-256; }
+    if(base<0-127) { base=0-127; }
+    min=0-1023;
+    max=1023;
+    value=base*8+delta;
+  }
+  if(value<min) { return min; }
+  if(value>max) { return max; }
+  return value;
+}
+
+// Each texel is one or two interleaved little-endian 16-bit samples.
+// Values retain the exact decoded 11-bit integer range, including signed zero.
+native function CompressedTexture_decodeEAC(level:i64,dst:i64,capacity:i64) i64 {
+  if(!loading_span(level,CompressedMip.size)) { return 0-1; }
+  let format=ux_u32(level+CompressedMip.format);
+  if(format<37488 || format>37491) { return 0-2; }
+  let channels=1+(format-37488)/2;
+  let signed=format%2;
+  let width=ux_u32(level+CompressedMip.width);
+  let height=ux_u32(level+CompressedMip.height);
+  let data=ux_u32(level+CompressedMip.data);
+  let size=ux_u32(level+CompressedMip.bytes);
+  let columns=(width+3)/4;
+  let blockBytes=channels*8;
+  if(width<1 || width>16384 || height<1 || height>16384 ||
+     size!=columns*((height+3)/4)*blockBytes || data>6291456-size) { return 0-3; }
+  let output=width*height*channels*2;
+  if(dst<0 || dst>6291456-output || capacity<output ||
+     !file_disjoint(level,CompressedMip.size,data,size) ||
+     !file_disjoint(dst,output,level,CompressedMip.size) ||
+     !file_disjoint(dst,output,data,size)) { return 0-1; }
+  let y=0;
+  while(y<height) {
+    let x=0;
+    while(x<width) {
+      let block=data+(y/4*columns+x/4)*blockBytes;
+      let position=x%4*4+y%4;
+      let channel=0;
+      while(channel<channels) {
+        let value=eac_texel11(block+channel*8,position,signed);
+        if(value<0) { value=value+65536; }
+        let pixel=dst+((y*width+x)*channels+channel)*2;
+        let low=ux_u8_put(pixel,value%256);
+        let high=ux_u8_put(pixel+1,value/256);
+        channel=channel+1;
+      }
+      x=x+1;
+    }
+    y=y+1;
+  }
+  return output;
+}

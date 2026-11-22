@@ -1,0 +1,62 @@
+// The destination is initialized with independent level storage.
+native function LOD_copy(dst:i64,dstArena:i64,src:i64,srcArena:i64) i64 {
+  if(!lod_valid(dst) || !lod_valid(src) || (dst<src+LOD.size && src<dst+LOD.size)) { return 0-1; }
+  let from=ux_u32(src+LOD.node);
+  let to=ux_u32(dst+LOD.node);
+  let fromNode=Object3D_address(srcArena,from);
+  let toNode=Object3D_address(dstArena,to);
+  if(fromNode<0 || toNode<0 || fromNode==toNode) { return 0-1; }
+  let count=ux_u32(src+LOD.count);
+  let used=ux_u32(dst+LOD.count);
+  let fromRows=ux_u32(src+LOD.levels);
+  let toRows=ux_u32(dst+LOD.levels);
+  let capacity=ux_u32(dst+LOD.capacity);
+  if(count>ux_u32(src+LOD.capacity) || used>capacity ||
+     fromRows>6291456-count*LODLevel.size || toRows>6291456-capacity*LODLevel.size) { return 0-1; }
+  if(count>capacity-used) { return 0-2; }
+  if(count>0 && fromRows<toRows+capacity*LODLevel.size &&
+     toRows<fromRows+count*LODLevel.size) { return 0-1; }
+
+  let need=0;
+  let i=0;
+  while(i<count) {
+    let row=fromRows+i*LODLevel.size;
+    let child=ux_u32(row+LODLevel.node);
+    let record=Object3D_address(srcArena,child);
+    if(record<0 || ux_u32(record+Object3D.parent)!=from) { return 0-1; }
+    let forbidden=0;
+    if(srcArena==dstArena) { forbidden=to; }
+    let nodes=object_clone_count(srcArena,child,forbidden,1);
+    if(nodes<0) { return nodes; }
+    need=need+nodes;
+    i=i+1;
+  }
+  if(!object_clone_room(dstArena,need)) { return 0-2; }
+  let pose=Object3D_copy(dstArena,to,srcArena,from,0);
+  if(pose<0) { return pose; }
+  i=0;
+  while(i<count) {
+    let row=fromRows+i*LODLevel.size;
+    let child=Object3D_clone(dstArena,srcArena,ux_u32(row+LODLevel.node),1);
+    if(child<0) { return child; }
+    let result=LOD_addLevel(dst,dstArena,child,ux_f64(row+LODLevel.distance),ux_f64(row+LODLevel.hysteresis));
+    if(result<0) { return result; }
+    i=i+1;
+  }
+  let autoUpdate=ux_u32_put(dst+LOD.autoUpdate,ux_u32(src+LOD.autoUpdate));
+  return dst;
+}
+
+native function LOD_clone(dst:i64,dstArena:i64,src:i64,srcArena:i64) i64 {
+  if(!lod_valid(dst) || ux_u32(dst+LOD.count)!=0 || ux_u32(dst+LOD.current)!=0) { return 0-1; }
+  return LOD_copy(dst,dstArena,src,srcArena);
+}
+
+native function LOD_dispose(lod:i64,arena:i64) i64 {
+  if(!lod_valid(lod)) { return 0-1; }
+  let freed=Object3D_destroy(arena,ux_u32(lod+LOD.node));
+  if(freed<0) { return freed; }
+  let node=ux_u32_put(lod+LOD.node,0);
+  let count=ux_u32_put(lod+LOD.count,0);
+  return freed;
+}

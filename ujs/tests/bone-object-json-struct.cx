@@ -1,0 +1,35 @@
+#pragma unisa use g_wasm_batch
+#pragma unisa use text.text
+
+#define ROUNDTRIP "let end=Bone_toJSON(arena,source,8000,1,8192,9216,9408);" \
+    "let restored=Bone_fromJSON(arena,target,8192,end,10800);if(restored<0){return 0.0+restored;}"
+
+int main(int argc,char **argv) {
+    const int mutate=argc==2 && tx_eqz(argv[1],"--mutate");
+    if(argc!=1 && !mutate) return 2;
+    const char *modules[]={"f64-math","views","matrix4","object-layouts","object3d",
+        "object3d-lifecycle","camera","json-read","json-bytes","loader-json","record-copy",
+        "camera-object-json","bone","bone-object-json",0};
+    const char *setup="let arena=Object3D_initArena(0,8);let source=Bone_create(arena);"
+        "let target=Bone_create(arena);let node=Object3D_address(arena,source);"
+        "let dest=Object3D_address(arena,target);let id=ux_u8_put(8000,98);"
+        "let x=ux_f64_put(7800,3.0);let pose=Object3D_setPosition(arena,source,7800);"
+        "let updated=Object3D_updateMatrixWorld(arena,source,0);"
+        "let shown=ux_u32_put(node+Object3D.visible,0);"
+        "let layers=ux_u32_put(node+Object3D.layerMask,8);";
+    const char *cases[]={
+        ROUNDTRIP "return ux_f64(ux_u32(dest+Object3D.localMatrix)+96);",
+        ROUNDTRIP "return 0.0+ux_u32(dest+Object3D.visible);",
+        ROUNDTRIP "return 0.0+ux_u32(dest+Object3D.layerMask);",
+        "let child=Bone_create(arena);let joined=Object3D_add(arena,source,child);"
+        "let cloned=Bone_clone(arena,arena,source,1);let record=Object3D_address(arena,cloned);"
+        "if(record<0){return 0.0+record;}let branch=ux_u32(record+Object3D.firstChild);"
+        "return 0.0+(cloned!=source && branch!=child && Bone_isBone(arena,cloned) && Bone_isBone(arena,branch));",
+        "let dead=Bone_dispose(arena,target);return 0.0+(dead==0 && !Bone_isBone(arena,target) && Bone_isBone(arena,source));",
+        "let end=Bone_toJSON(arena,source,8000,1,8192,9216,9408);"
+        "return 0.0+Bone_fromJSON(arena,target,8192,end-1,10800);",
+    };
+    const double gold[]={3,0,8,1,1,-2};
+    return g_wasm_batch("G_STRUCT Bone object JSON","bone-object-json",modules,setup,cases,gold,6,mutate?2:-1,
+        "let layer=ux_u32_put(node+Object3D.layerMask,4);" ROUNDTRIP "return 0.0+ux_u32(dest+Object3D.layerMask);");
+}
