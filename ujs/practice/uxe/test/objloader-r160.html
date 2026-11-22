@@ -1,0 +1,80 @@
+<!doctype html>
+<meta charset="utf-8">
+<pre id="r160">pending</pre>
+<script>
+const params = new URLSearchParams(location.search);
+const packageURL = "file://" + params.get("package");
+const imports = document.createElement("script");
+imports.type = "importmap";
+imports.textContent = JSON.stringify({imports:{three:packageURL + "/build/three.module.js"}});
+document.head.append(imports);
+</script>
+<script type="module">
+const result = document.querySelector("#r160");
+const vertices = "v 0 0 0\r\nv +2 0e1 0\nv 2 2. 0\nv 0 2 0\n";
+const attributes = "vt 0 0\nvt 1 0\nvt 1 1\nvt 0 1\nvn 0 0 -1\n";
+const single = "# triangle\n\t" + vertices + "f 1 2 3";
+const grouped = vertices + attributes + "usemtl discard\nusemtl plain\nf 1 2 3\nusemtl painted red\nf -4/-4/-1 -3/-3/-1 -2/-2/-1 -1/-1/-1\nusemtl unused\n";
+const slash = vertices + attributes + "f 1//1 2//1 3//1\nf 1/1 2/2 3/3\n";
+const names = ["", "plain", "painted red"];
+
+try {
+  const {REVISION} = await import("three");
+  const {OBJLoader} = await import(packageURL + "/examples/jsm/loaders/OBJLoader.js");
+  if (REVISION !== "160") throw Error("revision mismatch");
+  const module = await WebAssembly.compile(await (await fetch("file://" + params.get("wasm"))).arrayBuffer());
+  const enc = new TextEncoder();
+  const dec = new TextDecoder();
+  const read = (input, mode = 1) => {
+    const api = new WebAssembly.Instance(module).exports;
+    const origin = Number(api.uxe_obj(0n, 0n));
+    const mem = new Uint8Array(api.memory.buffer, origin, 60000);
+    const view = new DataView(mem.buffer, origin, 60000);
+    const bytes = enc.encode(input);
+    mem.fill(0x5a, 128, 2432);
+    mem.set(bytes, 4096);
+    const count = Number(api.uxe_obj(BigInt(mode), BigInt(bytes.length)));
+    if (count < 0) return [count, Number(mem.slice(128, 2432).every(byte => byte === 0x5a))];
+    const u32 = offset => view.getUint32(offset, true);
+    const corners = Array.from({length:count}, (_, i) =>
+      Array.from({length:8}, (_, j) => view.getFloat32(128 + i * 32 + j * 4, true)));
+    const materials = Array.from({length:u32(2304)}, (_, i) => {
+      const row = 2312 + i * 16;
+      const begin = 4096 + u32(row + 8);
+      return {start:u32(row), count:u32(row + 4), name:dec.decode(mem.slice(begin, begin + u32(row + 12)))};
+    });
+    return {count, corners, materials, uv:u32(2308)};
+  };
+  const values = [];
+  for (const [i, input] of [single, grouped, slash].entries()) {
+    const expected = new OBJLoader().parse(input);
+    if (expected.children.length !== 1 || !expected.children[0].isMesh) throw Error("expected one reference mesh");
+    const {geometry, material} = expected.children[0];
+    const {position, normal, uv} = geometry.attributes;
+    const native = read(params.get("mutate") === "1" && i === 0 ? input.replace("f 1", "f 4") : input);
+    if (Array.isArray(native)) throw Error("native parse " + i + ": " + native);
+    const groups = (Array.isArray(material) ? geometry.groups : [{start:0, count:position.count, materialIndex:0}])
+      .map(({start,count,materialIndex}) => ({start,count,name:[material].flat()[materialIndex].name}));
+    const equal = native.count === position.count && native.uv === Number(Boolean(uv)) &&
+      JSON.stringify(native.materials) === JSON.stringify(groups) &&
+      native.corners.every((row, j) => {
+        const at = j * 3, uvAt = j * 2;
+        const reference = [...position.array.slice(at,at+3), ...normal.array.slice(at,at+3), ...(uv ? uv.array.slice(uvAt,uvAt+2) : [0,0])];
+        return row.every((value, k) => Math.abs(value - reference[k]) < 1e-6);
+      });
+    values.push(Number(equal), native.count, native.uv, native.materials.length,
+      ...native.materials.flatMap(({start,count,name}) => [start,count,names.indexOf(name)]),
+      ...native.corners.flat());
+  }
+  values.push(
+    ...read(vertices + "f 0 2 3"), ...read(vertices + "f -5 2 3"),
+    ...read(vertices + "f 1 2 5"), ...read(vertices + "f 1 2"),
+    ...read(vertices + "f 1 2 3/1"), ...read(vertices + "v . 0 0"),
+    ...read(vertices + "l 1 2"), ...read(grouped, 2), ...read(grouped, 3),
+    ...read(grouped, 4), ...read(grouped, 5)
+  );
+  result.textContent = JSON.stringify(values);
+} catch (error) {
+  result.textContent = "error:" + error.message;
+}
+</script>
