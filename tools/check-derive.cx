@@ -226,13 +226,13 @@ int main(int argc,char**argv) {
     if (cx_fmt(dir, sizeof dir, "%s/derive-check-XXXXXX", sy_tmpdir()) || !mkdtemp(dir)) { ck(0, "tmpdir"); return 1; }
     cx_fmt(mf, sizeof mf, "%s/derive.tsv", dir);
     put("gen.sh", GEN);
-    /* 全清与顺序:c 的 order 最大,即使写在清单最前也最后跑 */
+    /* 全清:--check 只读,order 无语义(--write 才按 order 串行);三行都跑且按清单顺序报告 */
     m_begin(); m_row("c", "ok", 2, "20", "x/y.tsv", 0, 0); m_row("a", "ok", 1, "20", "src/*.c", 0, 0); m_row("b", "ok", 1, "-", "tools/*", 0, 0); m_end();
     rc = runm("--check");
     ck(rc == 0, "all-clean-rc0");
     ck(hasl(out, "DERIVE\ta\tOK\t") && hasl(out, "DERIVE\tb\tOK\t") && hasl(out, "DERIVE\tc\tOK\t"), "all-clean-lines");
     ck(hasl(out, "DERIVE_SUMMARY\tok=3\tdrift=0\trefused=0\tskipped=0\telapsed_ms="), "all-clean-summary");
-    ck(file_is("log", "a\nb\nc\n") || file_is("log", "b\na\nc\n"), "order-low-first");
+    ck(file_is("log", "a\nb\nc\n") || file_is("log", "a\nc\nb\n") || file_is("log", "b\na\nc\n") || file_is("log", "b\nc\na\n") || file_is("log", "c\na\nb\n") || file_is("log", "c\nb\na\n"), "all-three-ran");
     ck(hasl(out, "DERIVE\tb\tOK") && !hasl(out, "DERIVE\tc\tOK\t0\nDERIVE\ta"), "report-in-order");
     ck(file_is("a.out", 0) && file_is("b.out", 0), "check-writes-nothing");
     /* 漂移 */
@@ -260,7 +260,7 @@ int main(int argc,char**argv) {
     ck(rc == 0 && ms >= 2000 && ms < 4500 && hasl(out, "ok=5"), "at-most-four-at-once");
     m_begin(); m_row("s1", "slow", 1, "20", "-", 0, 0); m_row("s2", "slow", 2, "20", "-", 0, 0); m_end();
     rc = runm("--check"); ms = elapsed();
-    ck(rc == 0 && ms >= 2000, "different-order-serial");
+    ck(rc == 0 && ms >= 1000 && ms < 2700, "different-order-parallel");
     /* --only */
     m_begin(); m_row("a", "ok", 1, "20", "src/*.c", 0, 0); m_row("b", "drift", 1, "20", "tools/*", 0, 0); m_row("tool-index", "ok", 3, "20", "x/y.tsv", 0, 0); m_end();
     rc = runm("--check --only a");
@@ -325,6 +325,21 @@ int main(int argc,char**argv) {
     bad("a\tg\t-\tsh y\to\ti\t1\t20\n", "no-check-argv", "refuse-no-check-argv");
     bad("a\tg\tsh x\tsh y\t\ti\t1\t20\n", "empty-or-long-field", "refuse-empty-outputs");
     bad("# only comments\n", "no-rows", "refuse-empty-manifest");
+    /* derive-weights.tsv next to the manifest: exact rows, each within bound; absent file means equal weights */
+    put("derive.tsv", "a\tg\tsh x\tsh y\to\ti\t1\t20\nb\tg\tsh x\tsh y\to2\ti\t1\t20\n");
+    put("derive-weights.tsv", "a\t5\n");
+    rc = runm("--check");
+    ck(rc == 2 && hasl(out, "missing-rows") && !hasl(out, "DERIVE_SUMMARY"), "weights-refuse-missing-row");
+    put("derive-weights.tsv", "a\t5\nb\t21\n");
+    rc = runm("--check");
+    ck(rc == 2 && hasl(out, "weight-above-bound") && !hasl(out, "DERIVE_SUMMARY"), "weights-refuse-above-bound");
+    put("derive-weights.tsv", "a\t5\nz\t1\n");
+    rc = runm("--check");
+    ck(rc == 2 && hasl(out, "unknown-name") && !hasl(out, "DERIVE_SUMMARY"), "weights-refuse-unknown-name");
+    put("derive-weights.tsv", "a\t5\na\t5\n");
+    rc = runm("--check");
+    ck(rc == 2 && hasl(out, "duplicate-name") && !hasl(out, "DERIVE_SUMMARY"), "weights-refuse-duplicate");
+    rm("derive-weights.tsv");
     rm("derive.tsv");
     rc = runm("--check");
     ck(rc == 2 && hasl(out, "unreadable"), "refuse-missing-manifest");

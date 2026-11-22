@@ -14,7 +14,9 @@
  *   bound_s 为 - 时取 30。每个子进程都经 ./tools/bound bound_s 启动。
  * --prepare-native: compile the selected native generators into the runner cache without running them.
  * Native preparation and generator execution have separate deadlines. The manifest bounds execution.
- * --check   只读。order 相同的行并发(最多 4 路),order 小的先跑。生成器 rc 0 记 OK,1 记 DRIFT,142(bound 超时)记 TIMEOUT,其它记 REFUSED。
+ * --check   只读。order 对 --check 无语义:所有选中行进同一个 4 路池,按 exec/facts/derive-weights.tsv 的静态权重(秒,0..bound_s,
+ *           与清单行一一对应;文件缺失则权重相等)从大到小起跑,不用上次运行结果;输出仍按清单顺序。
+ *           生成器 rc 0 记 OK,1 记 DRIFT,142(bound 超时)记 TIMEOUT,其它记 REFUSED。
  * --write   按 order 串行。先快照该行登记的 outputs,生成器非 0 就把本轮已写的全部还原(原本不存在的文件删掉)并 rc 2,其后的行记 NOTRUN;
  *           write_argv 为 - 的行改跑 check_argv,有漂移记 NEEDS_BUMP。只碰清单登记的 outputs。
  * --only    只跑列出的名字;--changed 只跑 inputs_glob 命中任一 PATH 的行;--index 额外选中 tool-index 行。未选中的记 SKIPPED,不记 OK。
@@ -52,7 +54,7 @@ enum { ST_SKIPPED, ST_OK, ST_DRIFT, ST_REFUSED, ST_TIMEOUT, ST_WROTE, ST_NEEDS_B
 static const char *stname[] = {"SKIPPED", "OK", "DRIFT", "REFUSED", "TIMEOUT", "WROTE", "NEEDS_BUMP", "NOTRUN", "IDENTICAL"};
 typedef struct {
     char name[64], gen[200], chk[500], wr[500], outs[700], ins[2048], why[300];
-    int order, bound, sel, pid, fd, rc, status, done, pathset;
+    int order, bound, sel, pid, fd, rc, status, done, pathset, weight;
     char *out; long n, cap, t0, ms;
 } Row;
 static Row rows[MAXR]; static int nr, ord[MAXR];
@@ -126,6 +128,56 @@ static int to_int(const char *s, long n, int *v) {
 }
 static int refuse(const char *mf, int line, const char *why) { sy_printf("REFUSE\t%s\tline=%d\t%s\n", mf, line, why); return 2; }
 
+static int start(Row *r, const char *argv_s);
+static int pump(Row *r);
+/* Selected rows, started longest weight first, at most 4 alive at once; a finished row frees its slot at once. */
+static void run_pool(void) {
+    Row *q[MAXR], *live[4]; int nq = 0, nl = 0, i, j;
+    for (i = 0; i < nr; i++) if (rows[ord[i]].sel) q[nq++] = &rows[ord[i]];
+    for (i = 1; i < nq; i++) {   /* stable: equal weights keep manifest order */
+        Row *k = q[i];
+        for (j = i - 1; j >= 0 && q[j]->weight < k->weight; j--) q[j + 1] = q[j];
+        q[j + 1] = k;
+    }
+    i = 0;
+    while (i < nq || nl > 0) {
+        while (nl < 4 && i < nq) { Row *r = q[i++]; if (!start(r, r->chk)) live[nl++] = r; }
+        if (nl == 0) continue;
+        {
+            sy_pollfd_t pf[4]; int w;
+            for (w = 0; w < nl; w++) { pf[w].fd = live[w]->fd; pf[w].events = 1; pf[w].revents = 0; }
+            if (sy_poll(pf, nl, 1000) < 0) { for (w = 0; w < nl; w++) pf[w].revents = 1; }
+            for (w = nl - 1; w >= 0; w--) {
+                if (pf[w].revents && pump(live[w])) { live[w] = live[nl - 1]; nl--; }
+            }
+        }
+    }
+}
+
+/* exec/facts/derive-weights.tsv next to the manifest: name TAB weight_seconds.  Absent file: every weight equal (manifest
+   order).  Present file: exactly the manifest's rows, each weight 0..bound_s (a hint above the bound could never finish). */
+static int load_weights(const char *mf) {
+    char path[700]; long dl = 0, k, n2 = (long)tx_len(mf, 600); size_t n = 0; char *b; long at = 0; int line = 0, i, seen = 0;
+    for (i = 0; i < nr; i++) rows[i].weight = -1;
+    for (k = 0; k < n2; k++) if (mf[k] == '/') dl = k + 1;
+    if (cx_fmt(path, sizeof path, "%.*sderive-weights.tsv", (int)dl, mf)) return 0;
+    b = cx_read(path, &n);
+    if (!b) { sy_stat_t st; int rc = sy_lstat(path, &st); if (rc == -ENOENT) return 0; sy_printf("REFUSE\t%s\tline=0\tunreadable\n", path); return 2; }
+    while (at < (long)n) {
+        long e = tx_chr(b + at, (long)n - at, '\n'), ln = e < 0 ? (long)n - at : e, tab; const char *l = b + at; int w = 0;
+        at += ln + 1; line++;
+        if (ln == 0 || l[0] == '#') continue;
+        tab = tx_chr(l, ln, '\t');
+        if (tab <= 0 || to_int(l + tab + 1, ln - tab - 1, &w)) return refuse(path, line, "bad-line");
+        for (i = 0; i < nr; i++) if ((long)tx_len(rows[i].name, 100) == tab && !strncmp(rows[i].name, l, (size_t)tab)) break;
+        if (i == nr) return refuse(path, line, "unknown-name");
+        if (rows[i].weight >= 0) return refuse(path, line, "duplicate-name");
+        if (w > rows[i].bound) return refuse(path, line, "weight-above-bound");
+        rows[i].weight = w; seen++;
+    }
+    if (seen != nr) return refuse(path, line, "missing-rows");
+    return 0;
+}
 static int load(const char *mf) {
     size_t n = 0; char *b = cx_read(mf, &n); long at = 0; int line = 0, i;
     if (!b) { sy_printf("REFUSE\t%s\tline=0\tunreadable\n", mf); return 2; }
@@ -159,7 +211,7 @@ static int load(const char *mf) {
         for (j = i - 1; j >= 0 && rows[ord[j]].order > rows[k].order; j--) ord[j + 1] = ord[j];
         ord[j + 1] = k;
     }
-    return 0;
+    return load_weights(mf);
 }
 
 static int native_generator(Row *r) {
@@ -576,14 +628,15 @@ int main(int argc, char **argv) {
         return summary(t0);
     }
     if (mode == 1) {
-        i = 0;
-        while (i < nr) {
-            Row *g[4]; int ng = 0, j = i, o = rows[ord[i]].order, first = i;
-            while (j < nr && rows[ord[j]].order == o && ng < 4) { if (rows[ord[j]].sel) g[ng++] = &rows[ord[j]]; j++; }
-            run_group(g, ng);
-            for (a = 0; a < ng; a++) g[a]->status = classify(g[a]->rc);
-            for (a = first; a < j; a++) report(&rows[ord[a]]);
-            i = j;
+        /* --check is read-only on the frozen tree: no table's check reads another's output as it is being written,
+           so the old order barrier is gone and one 4-way pool runs every selected row, longest declared weight
+           first (exec/facts/derive-weights.tsv; a static hint, never a previous run's result).  Rows are
+           reported in manifest order afterwards, so the output is unchanged. */
+        run_pool();
+        for (a = 0; a < nr; a++) {
+            Row *r = &rows[ord[a]];
+            if (r->sel) r->status = classify(r->rc);
+            report(r);
         }
     } else {
         int failed_at = -1;
