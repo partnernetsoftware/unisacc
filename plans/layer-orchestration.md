@@ -1,6 +1,6 @@
 # 核心层与扩展应用层团队编排(主调度自主编排,所有者 2026-11-20 要求)
 
-状态:补全(2026-11-20,依据 fable 矩阵报告 plans/reviews/2026-11-20-core-ext-matrix.md)。相关:plans/reviews/2026-11-20-layer-lanes.md、plans/claude-md-layer-lanes-draft.md、plans/roadmap-0.0.83-0.0.99.md 修订注"核心层与扩展应用层矩阵与版本调整"。
+状态:补全(2026-11-20,依据 fable 矩阵报告 plans/reviews/2026-11-20-core-ext-matrix.md)。相关:plans/reviews/2026-11-20-layer-lanes.md、archive/plans-pre094/claude-md-layer-lanes-draft.md、plans/roadmap-0.0.83-0.0.99.md 修订注"核心层与扩展应用层矩阵与版本调整"。
 
 ## (1) 三组
 

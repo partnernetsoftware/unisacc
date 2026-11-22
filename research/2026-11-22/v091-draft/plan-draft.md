@@ -1,6 +1,6 @@
 # 0.0.91 计划草案:身份与构建边界(L.1 + Z5 + B3,产品车道)
 
-说明:仓内 plans/v0.0.91.md 已有 29 行占位(2026-11-21 版本序调整提交 7a75c62553),本草案是开版评审版,待编排者拍板后合并替换。注意 version-seq 已把 0.0.91 定为"身份与构建边界",本草案不推翻该裁定。
+说明:仓内 archive/plans-pre094/v0.0.91.md 已有 29 行占位(2026-11-21 版本序调整提交 7a75c62553),本草案是开版评审版,待编排者拍板后合并替换。注意 version-seq 已把 0.0.91 定为"身份与构建边界",本草案不推翻该裁定。
 
 planned_units=5
 a_class=身份与构建边界
@@ -9,7 +9,7 @@ freeze_at=2026-11-30T12:00(沿用占位)
 
 ## 开版评审(待编排者拍板)
 
-依据:build/version-seq.tsv 第 26 行;build/owner-reqs.tsv R60/R70/R72-R81;prd_mempalace.md 0.0.90 发布交接节;plans/v0.0.90.md 已知缺口 (1)-(5);csr/tsv-lint-F、zero-assert、mut-audit、flow-next/r71-design.md。
+依据:build/version-seq.tsv 第 26 行;build/owner-reqs.tsv R60/R70/R72-R81;prd_mempalace.md 0.0.90 发布交接节;archive/plans-pre094/v0.0.90.md 已知缺口 (1)-(5);csr/tsv-lint-F、zero-assert、mut-audit、flow-next/r71-design.md。
 
 ## 一、范围候选与归类
 

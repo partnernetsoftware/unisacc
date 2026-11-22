@@ -1,6 +1,6 @@
 # 速度项前置重排(rev4 草稿,2026-11-19,未入仓,未评审)
 
-读过:CLAUDE.md、prd_mempalace.md(地图与"决定"段)、plans/roadmap-rev3.md、plans/roadmap-0.0.83-0.0.99.md(B、C、D、F、G 节与末尾 POSIX 与 asm 调整节的可见部分)、archive/plans-pre086/v0.0.82.md、archive/plans-pre086/v0.0.83.md、build/version-seq.tsv 第 16 到 24 行、tools/speed-ledger.cx 与四个发布工具的头注释、build/pkg-gaps.tsv 相关三条。未细读:archive/plans-2026-11/changes-rev3.md、plans/nn-migration-rev3.md、plans/q-p-design.md 只看了被引用处(见末节)。
+读过:CLAUDE.md、prd_mempalace.md(地图与"决定"段)、archive/plans-pre094/roadmap-rev3.md、plans/roadmap-0.0.83-0.0.99.md(B、C、D、F、G 节与末尾 POSIX 与 asm 调整节的可见部分)、archive/plans-pre086/v0.0.82.md、archive/plans-pre086/v0.0.83.md、build/version-seq.tsv 第 16 到 24 行、tools/speed-ledger.cx 与四个发布工具的头注释、build/pkg-gaps.tsv 相关三条。未细读:archive/plans-2026-11/changes-rev3.md、plans/nn-migration-rev3.md、plans/q-p-design.md 只看了被引用处(见末节)。
 
 ## A 一句结论
 

@@ -7,7 +7,7 @@
  *   tsvcount<TAB>PATH<TAB>PASS<TAB>FAIL[<TAB>FIELD] rows of PATH whose FIELD (1-based, default 1) is PASS / FAIL
  *   receipts<TAB>SESSION_TSV<TAB>PASS               lines starting with RECEIPT that carry verdict=PASS
  *   sha256<TAB>PATH<TAB>HEX                         sha256 of PATH (via sha256sum) equals HEX
- *   ratchets                                        tools/ratchets.cx prints RATCHETS ok=13
+ *   ratchets                                        tools/ratchets.cx prints RATCHETS ok=N fail=0, N = the ratchet count of its --plan
  * Prints VERIFY<TAB>kind<TAB>OK|MISMATCH|MISSING<TAB>detail per claim, then REPORT_VERIFY<TAB>total=N<TAB>bad=M;
  * exit 1 when M > 0, 2 on usage.  MISSING = the evidence file / object is absent; a bad row is MISMATCH. */
 #pragma unisa use sys.fs
@@ -159,17 +159,31 @@ static void do_sha(const char *path, const char *hex, long hn) {
     else { o[64] = 0; out("sha256", "MISMATCH", "actual %s", o, 0, 0); }
 }
 
+#define UC "./unisacc.com" /* lint:allow R1 report-verify runs tools/ratchets.cx under the installed product */
+/* how many ratchets tools/ratchets.cx runs: the PLAN lines of its own --plan output (one per ratchet); -1 when it did not run */
+static long ratchet_count(void) {
+    static char o[1 << 16]; char *v[] = {"timeout", "30", "sh", UC, "tools/ratchets.cx", "--", "--plan", 0}; long n = 0;
+    if (run(v, o, sizeof o) != 0) return -1;
+    for (const char *p = o; p; ) { if (tx_same(p, 5, "PLAN\t", 5)) n++; p = strchr(p, '\n'); if (p) p++; }
+    return n;
+}
+
 static void do_ratchets(void) {
-    static char o[1 << 17]; char *v[] = {"timeout", "55", "sh", "./unisacc.com", "tools/ratchets.cx", 0};
-    int rc = run(v, o, sizeof o);
+    static char o[1 << 17]; char exp[64]; char *v[] = {"timeout", "55", "sh", UC, "tools/ratchets.cx", 0};
+    long n = ratchet_count();
+    int rc;
+    if (n <= 0) { out("ratchets", "MISSING", "ratchets --plan gave no ratchet count", 0, 0, 0); return; }
+    if (cx_fmt(exp, sizeof exp, "RATCHETS\tok=%ld\tfail=0", n)) return;
+    rc = run(v, o, sizeof o);
     if (rc < 0) { out("ratchets", "MISSING", "ratchets did not run", 0, 0, 0); return; }
-    if (tx_find(o, tx_len(o, sizeof o), "RATCHETS\tok=13\tfail=0", 21) >= 0 && rc == 0) out("ratchets", "OK", "ok=13", 0, 0, 0);
-    else out("ratchets", "MISMATCH", "rc=%ld, not ok=13 fail=0", 0, rc, 0);
+    if (tx_find(o, tx_len(o, sizeof o), exp, (long)strlen(exp)) >= 0 && rc == 0) out("ratchets", "OK", "ok=%ld", 0, n, 0);
+    else out("ratchets", "MISMATCH", "rc=%ld, not ok=N fail=0 for the plan count N=%ld", 0, rc, n);
 }
 
 int main(int argc, char **argv) {
     size_t sz; char *b; long at = 0;
-    if (argc < 2) { fprintf(stderr, "usage: report-verify CLAIMS.tsv\n"); return 2; }
+    if (argc == 2 && !strcmp(argv[1], "--ratchet-count")) { printf("%ld\n", ratchet_count()); return 0; }
+    if (argc < 2) { fprintf(stderr, "usage: report-verify CLAIMS.tsv | --ratchet-count\n"); return 2; }
     b = cx_read(argv[1], &sz);
     if (!b) { fprintf(stderr, "report-verify: cannot read %s\n", argv[1]); return 2; }
     while (at < (long)sz) {

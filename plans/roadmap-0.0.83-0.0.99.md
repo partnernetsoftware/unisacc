@@ -268,7 +268,7 @@
 
 ### 三层分车道(主调度 2026-11-20,依据 plans/reviews/2026-11-20-layer-lanes.md)
 
-所有者诊断成立,症结不是 ext 目录本身而是产品输入有四套互不一致的口径(候选触发键八棵树只被 tools/dvreact.cx 用、seed/ident.c 的 SID、tools/dev-lane.cx 五棵树、build/freeze.tsv 手写路径)。0.0.75 到 0.0.85 共 604 个非合并提交:A 类 32、纯 ext 1、C 类 476,近三版每版都有 A 类提交,没有一次整链只因 ext 而跑;分车道收益在未来不在历史。采纳:以 SID 的 list-current 为唯一事实源生成 build/lane-inputs.tsv,其余口径都读它;promote 改为 A 键相同即复用候选(近三版 273 个提交里只有 14 个会使候选失效),收益大于整个 B 车道,是 T3 推测链的直接前置;B 车道最小验收为六目标实编、layer-api 版本同步、affected 选批、上一公开 APE 兼容实编,目标 15 分钟内,交付是 main 提交号加 build/pkg-release.tsv 一行;ext 不合并给应用层。编排(共约 7 单位):0.0.86 工具线 lane-inputs 生成器与探针 1(agyneon);0.0.87 promote 按 A 键复用 2(cdx)、去别名搬实体 1.5(agyneon,A 类随整链)、包门工具 1.5(agy-flow)、条文生效 0.5(主调度)、复核 0.5(opus)。CLAUDE.md 改写稿存 plans/claude-md-layer-lanes-draft.md,暂不生效。未核项见 prd_mempalace.md 决定"三层分车道"。本小节不改上文其它内容;回滚:撤本小节。
+所有者诊断成立,症结不是 ext 目录本身而是产品输入有四套互不一致的口径(候选触发键八棵树只被 tools/dvreact.cx 用、seed/ident.c 的 SID、tools/dev-lane.cx 五棵树、build/freeze.tsv 手写路径)。0.0.75 到 0.0.85 共 604 个非合并提交:A 类 32、纯 ext 1、C 类 476,近三版每版都有 A 类提交,没有一次整链只因 ext 而跑;分车道收益在未来不在历史。采纳:以 SID 的 list-current 为唯一事实源生成 build/lane-inputs.tsv,其余口径都读它;promote 改为 A 键相同即复用候选(近三版 273 个提交里只有 14 个会使候选失效),收益大于整个 B 车道,是 T3 推测链的直接前置;B 车道最小验收为六目标实编、layer-api 版本同步、affected 选批、上一公开 APE 兼容实编,目标 15 分钟内,交付是 main 提交号加 build/pkg-release.tsv 一行;ext 不合并给应用层。编排(共约 7 单位):0.0.86 工具线 lane-inputs 生成器与探针 1(agyneon);0.0.87 promote 按 A 键复用 2(cdx)、去别名搬实体 1.5(agyneon,A 类随整链)、包门工具 1.5(agy-flow)、条文生效 0.5(主调度)、复核 0.5(opus)。CLAUDE.md 改写稿存 archive/plans-pre094/claude-md-layer-lanes-draft.md,暂不生效。未核项见 prd_mempalace.md 决定"三层分车道"。本小节不改上文其它内容;回滚:撤本小节。
 
 ## 修订注 2026-11-20(汇编支持基本需求)
 
