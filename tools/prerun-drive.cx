@@ -1,8 +1,9 @@
 /* tools/prerun-drive.cx -- bounded window-granularity qualification prerun driver and offline replay verifier.
  * Subcommands:
  *   plan   --ids-file FILE --out DIR [--win-size 8..12] [--heavy-file FILE] [--warmup N]
- *          [--times-file FILE --normal-jobs 1..16] [--priority-file FILE]
+ *          [--times-file FILE --normal-jobs 1..16] [--priority-file FILE] [--window-lanes 1..8]
  *   run    --root DIR --candidate APE --out DIR [--resume] [--max-jobs N] [--max-retries 2]
+ *          [--window-lanes 1..8] (defaults to the new plan's width, 1 on legacy plans)
  *          (--load-cap N is still accepted but ignored with a PRERUN_DEPRECATED line: load gates retired 2026-11-20)
  *   merge  --in-dir DIR --out DIR [--version VER] [--skip-name FILE]
  *   archive --in-dir RUN_DIR --repo DIR --version V  (after the supervisor closes its log)
@@ -12,10 +13,12 @@
  * evidence in single-batch runs, each with its own deadline. */
 #pragma unisa use sys.fs
 #pragma unisa use sys.posix
+#pragma unisa use sys.proc
 #pragma unisa use sys.env
 #pragma unisa use sys.time
 #pragma unisa use sys.sha
 #pragma unisa use sysx.process
+#pragma unisa use sysx.reaper
 #pragma unisa use mem.bytes
 #pragma unisa use mem.heap
 #pragma unisa use text.text
@@ -26,6 +29,9 @@
 #define PD_MAX_WINS 2048
 #define PD_MAX_FILES (PD_MAX_WINS + PD_MAX_IDS)
 #define PD_CHILD_SECONDS 58
+#define PD_MAX_LANES 8
+#define PD_DEFAULT_LANES 4
+#define PD_DEFAULT_NORMAL_JOBS 8
 /* Reserve 13 seconds before the 58s outer cutoff for dvqualify startup/layout overhead:
  * window packing target budget ceiling is <= 45000ms. Single batches with historical time
  * > 45000ms (up to the 54000ms single-window split limit) run in exclusive 1-batch windows. */
@@ -78,7 +84,8 @@ static int pd_nheavy_extra = 0;
 static int pd_has_times = 0;
 static int pd_has_priority = 0;
 static int pd_mut_times_use_nonpass = 0;
-static int pd_normal_jobs = 2;
+static int pd_normal_jobs = PD_DEFAULT_NORMAL_JOBS;
+static int pd_plan_lanes = PD_DEFAULT_LANES;
 static int pd_keep_going = 1;
 static int pd_max_wins = PD_MAX_WINS;
 static long pd_unmeasured_ms = 0;
@@ -135,6 +142,22 @@ static int pd_is_heavy_id(const char *id) {
     if (pd_starts(id, "netregen-")) return 1;
     for (int i = 0; i < pd_nheavy_extra; i++) if (tx_eqz(id, pd_heavy_extra[i])) return 1;
     return 0;
+}
+
+/* Explicit heavy declarations are exclusive unless the material contract is known.
+ * Each netregen uses its own out/material paths. Early canaries keep their barriers. */
+static int pd_can_share_window(const char *phase, const char *ids, int jobs) {
+    if (jobs != 1 || !ids[0] || strchr(ids, ',') || pd_is_early_canary_id(ids)) return 0;
+    return tx_eqz(phase, "long") || (tx_eqz(phase, "heavy") && pd_starts(ids, "netregen-"));
+}
+
+static int pd_width(const char *s, int max) {
+    int n = 0;
+    for (; *s >= '0' && *s <= '9'; s++) {
+        n = n * 10 + *s - '0';
+        if (n > max) return 0;
+    }
+    return *s ? 0 : n;
 }
 
 static int pd_load_heavy_file(const char *path) {
@@ -750,10 +773,14 @@ static int pd_build_plan(int win_size, int warmup_n, const char *out_dir) {
     }
 
     int planned = 0;
-    long estimated = 0, max_window = 0;
+    long estimated = 0, max_window = 0, lane_wall = 0, lane_peak = 0;
+    int lane_count = 0, lane_groups = 0;
     for (int wi = 0; wi < pd_nwins; wi++) {
         PdWin *w = &pd_wins[wi];
-        if (tx_eqz(w->phase, "prebuild-self")) continue;
+        if (tx_eqz(w->phase, "prebuild-self")) {
+            if(lane_count){lane_wall+=lane_peak;lane_groups++;lane_peak=0;lane_count=0;}
+            continue;
+        }
         planned += w->count;
         long wall = 0;
         for (int k = 0; k < w->count; k += w->jobs)
@@ -763,7 +790,16 @@ static int pd_build_plan(int win_size, int warmup_n, const char *out_dir) {
         long target_wall = wall > PD_WINDOW_TARGET_MS ? PD_WINDOW_TARGET_MS : wall;
         if (target_wall > max_window) max_window = target_wall;
         estimated += wall;
+        if (w->count == 1 && pd_can_share_window(w->phase, pd_ids[w->idxs[0]].id, w->jobs)) {
+            if (wall > lane_peak) lane_peak = wall;
+            if (++lane_count < pd_plan_lanes) continue;
+        } else {
+            lane_wall += wall;
+            lane_groups++;
+        }
+        if (lane_count) { lane_wall += lane_peak; lane_groups++; lane_peak = 0; lane_count = 0; }
     }
+    if (lane_count) { lane_wall += lane_peak; lane_groups++; }
     if (planned != pd_nids) {
         fprintf(stderr, "PRERUN_MAX_WINS_EXCEEDED\twindows=%d\tmax_wins=%d\tplanned=%d\ttotal=%d\n",
                 pd_nwins, pd_max_wins, planned, pd_nids);
@@ -776,12 +812,13 @@ static int pd_build_plan(int win_size, int warmup_n, const char *out_dir) {
     char *buf = (char *)mm_alloc(cap);
     if (!buf) return pd_refuse("oom");
     size_t bp = 0;
-    const char *hdr = "# prerun-drive windows\nwindow\tjobs\tphase\tcount\tids\n";
     char timed_hdr[160];
+    const char *hdr = timed_hdr;
     if (pd_has_times) {
-        if (cx_fmt(timed_hdr, sizeof timed_hdr, PD_TIMED_HEADER "%d budget_ms=%d\nwindow\tjobs\tphase\tcount\tids\n",
-                   pd_normal_jobs, PD_TIMED_BUDGET_MS)) { mm_free(buf); return pd_refuse("timed-header-bound"); }
-        hdr = timed_hdr;
+        if (cx_fmt(timed_hdr, sizeof timed_hdr, PD_TIMED_HEADER "%d budget_ms=%d\n# window-lanes=%d\nwindow\tjobs\tphase\tcount\tids\n",
+                   pd_normal_jobs, PD_TIMED_BUDGET_MS,pd_plan_lanes)) { mm_free(buf); return pd_refuse("timed-header-bound"); }
+    } else if (cx_fmt(timed_hdr,sizeof timed_hdr,"# prerun-drive windows\n# window-lanes=%d\nwindow\tjobs\tphase\tcount\tids\n",pd_plan_lanes)) {
+        mm_free(buf);return pd_refuse("window-header-bound");
     }
     size_t hl = strlen(hdr);
     mm_copy(buf + bp, cap - bp, hdr, hl); bp += hl;
@@ -807,6 +844,8 @@ static int pd_build_plan(int win_size, int warmup_n, const char *out_dir) {
     printf("PRERUN_PLAN\ttotal=%d\twindows=%d\twarmup=%d\theavy=%d\tnormal=%d\tout=%s\n",
            pd_nids, pd_nwins, w_warmup, w_heavy, w_normal, wpath);
     if (pd_has_times) {
+        printf("PRERUN_LANE_ESTIMATE\twindow_lanes=%d\tnormal_jobs=%d\tgroups=%d\twall_ms=%ld\tserial_ms=%ld\tscope=batch-timing-only-no-contention\n",
+               pd_plan_lanes,pd_normal_jobs,lane_groups,lane_wall,estimated);
         if (pd_has_overhead)
             printf("PRERUN_ESTIMATE\twave_ms=%ld\tmax_window_ms=%ld\tbudget_ms=%d\tscope=batch-timing-only\touter_overhead=%ldms\touter_overhead_ms=%ld\twindow_wall_ms=%ld\tsum_batch_ms=%ld\treserve_ms=%d\n",
                    estimated, max_window, PD_TIMED_BUDGET_MS, pd_outer_overhead_ms, pd_outer_overhead_ms, pd_measured_wall_ms, pd_measured_batch_ms, PD_WINDOW_RESERVE_MS);
@@ -1052,9 +1091,9 @@ static int pd_sum_window_batch_ms(const char *outp, long *out_sum) {
     return count;
 }
 
-static int pd_window_attempt(const char *root, const char *cand, const char *mock_runner,
-                             const char *wid, const char *phase, const char *ids,
-                             const char *outp, int jobs, int attempt) {
+static int pd_call_window(const char *root, const char *cand, const char *mock_runner,
+                          const char *wid, const char *ids, const char *outp,
+                          int jobs, int attempt, char *temp_env) {
     char size[12], seq[12], why[256];
     if (cx_fmt(size, sizeof size, "%d", jobs) || cx_fmt(seq, sizeof seq, "%d", attempt)) return 2;
     char *real[] = {"sh", "./unisacc.com", "tools/dvqualify.cx", "--", ".",
@@ -1063,11 +1102,15 @@ static int pd_window_attempt(const char *root, const char *cand, const char *moc
     char *mock[] = {"sh", (char *)mock_runner, "window", (char *)wid, size,
                     (char *)ids, (char *)outp, seq, 0};
     np_result r = {0};
-    long started = sy_now_ms();
-    int tr = np_run(mock_runner ? mock : real, root, 0, PD_CHILD_SECONDS, &r, why, sizeof why);
+    char *env[] = {temp_env, 0};
+    int tr = np_run(mock_runner ? mock : real, root, temp_env ? env : 0, PD_CHILD_SECONDS, &r, why, sizeof why);
     int rc = tr ? 124 : r.rc;
     np_free(&r);
-    long wall_ms = sy_now_ms() - started;
+    return rc;
+}
+
+static void pd_log_window(const char *wid, const char *phase, const char *outp,
+                          int jobs, int attempt, int rc, long wall_ms) {
     long sum_batch_ms = 0;
     if (pd_sum_window_batch_ms(outp, &sum_batch_ms) > 0) {
         long overhead_ms = wall_ms - sum_batch_ms;
@@ -1081,6 +1124,14 @@ static int pd_window_attempt(const char *root, const char *cand, const char *moc
                wid, phase, attempt, jobs, rc, wall_ms);
     }
     fflush(stdout);
+}
+
+static int pd_window_attempt(const char *root, const char *cand, const char *mock_runner,
+                             const char *wid, const char *phase, const char *ids,
+                             const char *outp, int jobs, int attempt) {
+    long started = sy_now_ms();
+    int rc = pd_call_window(root, cand, mock_runner, wid, ids, outp, jobs, attempt, 0);
+    pd_log_window(wid, phase, outp, jobs, attempt, rc, sy_now_ms() - started);
     return rc;
 }
 
@@ -1339,7 +1390,133 @@ static int pd_verify_window_source(const char *outp, const char *wid, int attemp
     return 0;
 }
 
-static int pd_cmd_run(const char *root, const char *cand, const char *out_dir, int resume, int max_jobs, int load_cap, int max_retries, const char *mock_runner) {
+typedef struct {
+    char wid[32], phase[24], ids[4096], done[PD_PW], strict[PD_PW];
+    int jobs;
+} PdWindow;
+
+static int pd_next_window(const unsigned char *wb, int64_t wn, int64_t *offset,
+                          const char *out_dir, PdWindow *w) {
+    while (*offset < wn) {
+        int64_t ls = *offset, le = ls;
+        while (le < wn && wb[le] != '\n') le++;
+        *offset = le < wn ? le + 1 : le;
+        if (le > ls && wb[le - 1] == '\r') le--;
+        if (le == ls || wb[ls] == '#' || (le - ls >= 7 && memcmp(wb + ls, "window\t", 7) == 0)) continue;
+        const unsigned char *pos = wb + ls, *end = wb + le;
+        char jobs[3], count[16];
+        char *fields[] = {w->wid, jobs, w->phase, count, w->ids};
+        size_t caps[] = {sizeof w->wid, sizeof jobs, sizeof w->phase, sizeof count, sizeof w->ids};
+        for (int i = 0; i < 5; i++) {
+            const unsigned char *at = pos;
+            while (at < end && *at != '\t') at++;
+            size_t n = (size_t)(at - pos);
+            if (n == 0 || n >= caps[i] || (i < 4 && at == end) || (i == 4 && at != end)) return -1;
+            if (mm_copy(fields[i], caps[i], pos, n)) return -1;
+            fields[i][n] = 0;
+            pos = at == end ? end : at + 1;
+        }
+        w->jobs = pd_width(jobs, 16);
+        if (!w->jobs) return -2;
+        if (strpbrk(w->wid, "/\\") ||
+            cx_fmt(w->done, sizeof w->done, "%s/done.%s", out_dir, w->wid) ||
+            cx_fmt(w->strict, sizeof w->strict, "%s/strict-%s.tsv", out_dir, w->wid)) return -1;
+        return 1;
+    }
+    return 0;
+}
+
+typedef struct {
+    PdWindow window;
+    const char *root, *cand, *mock;
+    char env[PD_PW + 8];
+    int pid, fds[2], rc;
+    long wall_ms;
+} PdLane;
+
+typedef struct { int rc; long wall_ms; } PdLaneResult;
+
+static int pd_lane_child(void *opaque) {
+    PdLane *lane = (PdLane *)opaque;
+    PdWindow *w = &lane->window;
+    PdLaneResult result = {0};
+    long start = sy_now_ms();
+    result.rc = pd_call_window(lane->root, lane->cand, lane->mock,
+                               w->wid, w->ids, w->strict, 1, 1, lane->env);
+    result.wall_ms = sy_now_ms() - start;
+    return write(1, &result, sizeof result) != sizeof result;
+}
+
+static volatile sig_atomic_t pd_lane_interrupted;
+
+static void pd_lane_interrupt(int signal_number) { pd_lane_interrupted = signal_number; }
+
+static int pd_first_attempts(PdLane *group, int count, const char *dir,
+                             const char *root, const char *cand, const char *mock) {
+    for (int i = 0; i < count; i++) {
+        PdLane *lane = &group[i];
+        char tmp[PD_PW];
+        sy_stat_t st;
+        if (cx_fmt(tmp, sizeof tmp, "%s/.lane-tmp-%d", dir, i + 1) ||
+            (sy_mkdir(tmp, 0700) && (sy_lstat(tmp, &st) || st.kind != 'd' ||
+                                    st.mode != 0700 || st.uid != sy_uid())) ||
+            cx_fmt(lane->env, sizeof lane->env, "TMPDIR=%s", tmp)) return -1;
+        lane->root = root;
+        lane->cand = cand;
+        lane->mock = mock;
+        lane->pid = 0;
+    }
+    fflush(stdout);
+    pd_lane_interrupted = 0;
+    void (*term)(int) = signal(SIGTERM, pd_lane_interrupt);
+    void (*intr)(int) = signal(SIGINT, pd_lane_interrupt);
+    long deadline = sy_now_ms() + PD_CHILD_SECONDS * 1000 + 500;
+    int active = 0, bad = 0;
+    for (int i = 0; i < count && !pd_lane_interrupted; i++) {
+        PdLane *lane = &group[i];
+        int rm = sy_unlink(lane->window.strict);
+        if (rm && rm != -ENOENT) { bad = 1; break; }
+        lane->pid = sy_fork_session(pd_lane_child, lane, lane->fds);
+        if (lane->pid <= 0) { bad = 1; break; }
+        active++;
+    }
+    while (active && !bad && !pd_lane_interrupted && sy_now_ms() < deadline) {
+        for (int i = 0; i < count; i++) {
+            PdLane *lane = &group[i];
+            if (lane->pid <= 0) continue;
+            int status = 0;
+            int got = waitpid(lane->pid, &status, WNOHANG);
+            if (!got || (got < 0 && errno == EINTR)) continue;
+            lane->pid = 0;
+            active--;
+            PdLaneResult result;
+            int n = WIFEXITED(status) && WEXITSTATUS(status) == 0 && got > 0 ?
+                    read(lane->fds[0], &result, sizeof result) : -1;
+            sy_close(lane->fds[0]);
+            sy_close(lane->fds[1]);
+            if (n != sizeof result) { bad = 1; break; }
+            lane->rc = result.rc;
+            lane->wall_ms = result.wall_ms;
+        }
+        if (active && !bad) sy_sleep_ms(10);
+    }
+    if (active || pd_lane_interrupted) bad = 1;
+    for (int i = 0; i < count; i++) {
+        PdLane *lane = &group[i];
+        if (lane->pid <= 0) continue;
+        char report[256];
+        rp_kill_tree(lane->pid, 100, 0, 0, report, sizeof report);
+        int status;
+        waitpid(lane->pid, &status, WNOHANG);
+        sy_close(lane->fds[0]);
+        sy_close(lane->fds[1]);
+    }
+    signal(SIGTERM, term);
+    signal(SIGINT, intr);
+    return bad ? -1 : 0;
+}
+
+static int pd_cmd_run(const char *root, const char *cand, const char *out_dir, int resume, int max_jobs, int load_cap, int max_retries, int lanes, const char *mock_runner) {
     char wpath[PD_PW], real_root[PD_PW];
     unsigned char *wb = 0; int64_t wn = 0;
     pd_run_wall_ms = 0;
@@ -1350,11 +1527,28 @@ static int pd_cmd_run(const char *root, const char *cand, const char *out_dir, i
     if (cx_fmt(wpath, sizeof wpath, "%s/windows.tsv", out_dir) || sy_read_file(wpath, &wb, &wn, 4 << 20))
         return pd_refuse("read-windows-tsv");
     int timed = tx_prefix((char *)wb, wn, PD_TIMED_HEADER, sizeof PD_TIMED_HEADER - 1);
+    if (!lanes) {
+        const char *key = "\n# window-lanes=";
+        long at = tx_find((const char *)wb, wn, key, strlen(key));
+        lanes = 1;
+        if (at >= 0) {
+            const char *start = (const char *)wb + at + strlen(key);
+            if (start + 1 >= (const char *)wb + wn ||
+                start[0] < '1' || start[0] > '8' || start[1] != '\n') {
+                mm_free(wb); return pd_refuse("invalid-window-lanes");
+            }
+            lanes = start[0] - '0';
+        }
+    }
     if (timed && atoi((char *)wb + sizeof PD_TIMED_HEADER - 1) > max_jobs) {
         mm_free(wb);
         return pd_refuse("timed-plan-exceeds-max-jobs");
     }
-    char frozen_root[PD_PW], frozen_rev[64];
+    char frozen_root[PD_PW], frozen_rev[64], canonical_dir[PD_PW];
+    if (sy_realpath(out_dir, canonical_dir, sizeof canonical_dir) <= 0) {
+        mm_free(wb); return pd_refuse("run-output-directory");
+    }
+    out_dir = canonical_dir;
     const char *eff_root = root;
     frozen_root[0] = 0;
     frozen_rev[0] = 0;
@@ -1402,38 +1596,64 @@ static int pd_cmd_run(const char *root, const char *cand, const char *out_dir, i
     int retry_counts[PD_MAX_IDS];
     char retry_ids[PD_MAX_IDS][128];
     int nretry = 0;
-    while (pos < wn) {
-        int64_t ls = pos;
-        while (pos < wn && wb[pos] != '\n') pos++;
-        int64_t le = pos;
-        if (pos < wn) pos++;
-        if (le > ls && wb[le - 1] == '\r') le--;
-        if (le <= ls || wb[ls] == '#' || (le - ls >= 7 && memcmp(wb + ls, "window\t", 7) == 0)) continue;
-        const char *cols[8]; int64_t clens[8]; int nc = 0; int64_t p = ls;
-        while (nc < 8) {
-            int64_t cs = p;
-            while (p < le && wb[p] != '\t') p++;
-            cols[nc] = (const char *)wb + cs; clens[nc] = p - cs; nc++;
-            if (p >= le) break;
-            p++;
+    static PdLane group[PD_MAX_LANES];
+    int queued = 0, next = 0;
+    while (pos < wn || next < queued) {
+        PdWindow current;
+        PdLane *prefetched = 0;
+        if (next < queued) {
+            prefetched = &group[next++];
+            current = prefetched->window;
+        } else {
+            int row = pd_next_window(wb, wn, &pos, out_dir, &current);
+            if (row == 0) break;
+            if (row < 0) {
+                mm_free(wb); return pd_refuse(row == -2 ? "invalid-window-jobs" : "invalid-window-row");
+            }
         }
-        if (nc < 5) continue;
-        char wid[32], phase[24], ids[4096], donep[PD_PW], outp[PD_PW];
-        if (clens[0] >= 31 || clens[2] >= 23 || clens[4] >= 4095) continue;
-        mm_copy(wid, sizeof wid, cols[0], (size_t)clens[0]); wid[clens[0]] = 0;
-        mm_copy(phase, sizeof phase, cols[2], (size_t)clens[2]); phase[clens[2]] = 0;
-        mm_copy(ids, sizeof ids, cols[4], (size_t)clens[4]); ids[clens[4]] = 0;
-        int jobs = 1;
-        if (clens[1] > 0 && clens[1] <= 2) jobs = atoi(cols[1]);
-        if (jobs < 1 || jobs > 16) { mm_free(wb); return pd_refuse("invalid-window-jobs"); }
+        char *wid = current.wid, *phase = current.phase, *ids = current.ids;
+        char *donep = current.done, *outp = current.strict;
+        int jobs = current.jobs;
         if (!timed && tx_eqz(phase, "normal") && jobs > 1) jobs = max_jobs;
         else if (jobs > max_jobs) jobs = max_jobs;
-        if (cx_fmt(donep, sizeof donep, "%s/done.%s", out_dir, wid) ||
-            cx_fmt(outp, sizeof outp, "%s/strict-%s.tsv", out_dir, wid)) { mm_free(wb); return pd_refuse("path-bound"); }
         sy_stat_t st;
         if (resume && sy_lstat(donep, &st) == 0) {
             skipped++;
             continue;
+        }
+        if (!prefetched && lanes > 1 && pd_can_share_window(phase, ids, current.jobs) &&
+            (!resume || (sy_exists(outp) == 0 && sy_exists(donep) == 0))) {
+            group[0].window = current;
+            queued = 1;
+            int64_t look = pos;
+            while (queued < lanes) {
+                PdWindow *w = &group[queued].window;
+                if (pd_next_window(wb, wn, &look, out_dir, w) != 1 ||
+                    !pd_can_share_window(w->phase, w->ids, w->jobs) ||
+                    (resume && (sy_exists(w->strict) != 0 || sy_exists(w->done) != 0))) break;
+                int distinct = 1;
+                for (int i = 0; i < queued; i++) {
+                    if (tx_eqz(w->wid, group[i].window.wid) || tx_eqz(w->ids, group[i].window.ids)) distinct = 0;
+                }
+                if (!distinct) break;
+                queued++;
+                pos = look;
+            }
+            next = queued;
+            if (queued > 1) {
+                if (!mock_runner && !frozen_rev[0]) {
+                    mm_free(wb); return pd_refuse("window-lanes-require-frozen-source");
+                }
+                printf("PRERUN_LANES\tfirst=%s\twindows=%d\n", wid, queued);
+                long wave_start = sy_now_ms();
+                if (pd_first_attempts(group, queued, canonical_dir, eff_root, cand, mock_runner)) {
+                    mm_free(wb); return pd_refuse("window-lane-worker-failed");
+                }
+                printf("PRERUN_LANE_WALL\tfirst=%s\twindows=%d\twall_ms=%ld\n",
+                       wid, queued, sy_now_ms() - wave_start);
+                prefetched = &group[0];
+                next = 1;
+            }
         }
         (void)load_cap;   /* load gates retired 2026-11-20: --max-jobs is the fixed bound, load1 never lowers it */
         if (tx_eqz(phase, "prebuild-self")) {
@@ -1498,7 +1718,10 @@ static int pd_cmd_run(const char *root, const char *cand, const char *out_dir, i
         saved_hdr[0] = 0;
         saved_rows[0] = 0;
         cx_fmt(rem_ids, sizeof rem_ids, "%s", ids);
-        if (resume && sy_lstat(outp, &st) == 0) {
+        if (!prefetched && resume && sy_lstat(outp, &st) == 0) {
+            if (pd_verify_window_source(outp, wid, 0, eff_root, frozen_rev)) {
+                mm_free(wb); return 1;
+            }
             pd_harvest_passed(outp, ids, saved_hdr, sizeof saved_hdr, saved_rows, sizeof saved_rows, &saved_len,
                               passed_flags, win_ids, nwin, rem_ids, sizeof rem_ids);
             if (!rem_ids[0]) {
@@ -1535,9 +1758,21 @@ static int pd_cmd_run(const char *root, const char *cand, const char *out_dir, i
             }
             attempt++;
             size_t prev_saved_len = saved_len;
-            sy_unlink(outp);
             const char *run_ids = rem_ids[0] ? rem_ids : ids;
-            int rc = pd_window_attempt(eff_root, cand, mock_runner, wid, phase, run_ids, outp, jobs, attempt);
+            int rc;
+            if (prefetched && attempt == 1) {
+                rc = prefetched->rc;
+                pd_log_window(wid, phase, outp, jobs, attempt, rc, prefetched->wall_ms);
+            } else {
+                sy_unlink(outp);
+                if (prefetched) {
+                    long start = sy_now_ms();
+                    rc = pd_call_window(eff_root, cand, mock_runner, wid, run_ids, outp, jobs, attempt, prefetched->env);
+                    pd_log_window(wid, phase, outp, jobs, attempt, rc, sy_now_ms() - start);
+                } else {
+                    rc = pd_window_attempt(eff_root, cand, mock_runner, wid, phase, run_ids, outp, jobs, attempt);
+                }
+            }
             if (pd_verify_window_source(outp, wid, attempt, eff_root, frozen_rev)) {
                 mm_free(wb);
                 return 1;
@@ -2484,7 +2719,6 @@ int main(int argc, char **argv) {
     if (tx_eqz(sub, "prepare")) {
         const char *chain_d = 0, *root_d = 0, *ver = 0, *out_d = 0, *ids_f = 0, *times_f = 0, *prio_f = 0, *heavy_f = 0;
         int win_sz = 10, warmup = -1;
-        pd_normal_jobs = 4;
         pd_keep_going = 1;
         pd_unmeasured_ms = PD_DEFAULT_UNMEASURED_MS;
         for (int i = 2; i < argc; i++) {
@@ -2497,6 +2731,10 @@ int main(int argc, char **argv) {
             else if (tx_eqz(argv[i], "--priority-file") && i + 1 < argc) prio_f = argv[++i];
             else if (tx_eqz(argv[i], "--heavy-file") && i + 1 < argc) heavy_f = argv[++i];
             else if (tx_eqz(argv[i], "--normal-jobs") && i + 1 < argc) { pd_normal_jobs = atoi(argv[++i]); if (pd_normal_jobs < 1) pd_normal_jobs = 2; }
+            else if (tx_eqz(argv[i], "--window-lanes") && i + 1 < argc) {
+                pd_plan_lanes = pd_width(argv[++i], PD_MAX_LANES);
+                if (!pd_plan_lanes) return pd_refuse("invalid-window-lanes");
+            }
             else if (tx_eqz(argv[i], "--win-size") && i + 1 < argc) win_sz = atoi(argv[++i]);
             else if (tx_eqz(argv[i], "--warmup") && i + 1 < argc) warmup = atoi(argv[++i]);
             else if (tx_eqz(argv[i], "--max-wins") && i + 1 < argc) { pd_max_wins = atoi(argv[++i]); if (pd_max_wins <= 0) pd_max_wins = -1; }
@@ -2517,6 +2755,10 @@ int main(int argc, char **argv) {
             else if (tx_eqz(argv[i], "--times-file") && i + 1 < argc) times_f = argv[++i];
             else if (tx_eqz(argv[i], "--priority-file") && i + 1 < argc) prio_f = argv[++i];
             else if (tx_eqz(argv[i], "--normal-jobs") && i + 1 < argc) { pd_normal_jobs = atoi(argv[++i]); if (pd_normal_jobs < 1) pd_normal_jobs = 2; }
+            else if (tx_eqz(argv[i], "--window-lanes") && i + 1 < argc) {
+                pd_plan_lanes = pd_width(argv[++i], PD_MAX_LANES);
+                if (!pd_plan_lanes) return pd_refuse("invalid-window-lanes");
+            }
             else if (tx_eqz(argv[i], "--win-size") && i + 1 < argc) win_sz = atoi(argv[++i]);
             else if (tx_eqz(argv[i], "--warmup") && i + 1 < argc) warmup = atoi(argv[++i]);
             else if (tx_eqz(argv[i], "--max-wins") && i + 1 < argc) { pd_max_wins = atoi(argv[++i]); if (pd_max_wins <= 0) pd_max_wins = -1; }
@@ -2535,7 +2777,7 @@ int main(int argc, char **argv) {
     if (tx_eqz(sub, "run")) {
         const char *root = 0, *cand = 0, *out_d = 0, *mock_r = 0;
         char env_root[PD_PW] = {0}, env_cand[PD_PW] = {0}, env_jobs[32] = {0}, env_kg[32] = {0}, real_root[PD_PW] = {0};
-        int resume = 0, max_j = 2, has_max_j = 0, load_cap = 6, max_ret = 2, has_kg = 0;
+        int resume = 0, max_j = PD_DEFAULT_NORMAL_JOBS, has_max_j = 0, load_cap = 6, max_ret = 2, has_kg = 0, lanes = 0;
         pd_keep_going = 1;
         for (int i = 2; i < argc; i++) {
             if (tx_eqz(argv[i], "--root") && i + 1 < argc) root = argv[++i];
@@ -2543,6 +2785,10 @@ int main(int argc, char **argv) {
             else if ((tx_eqz(argv[i], "--out") || tx_eqz(argv[i], "--dir")) && i + 1 < argc) out_d = argv[++i];
             else if (tx_eqz(argv[i], "--resume")) resume = 1;
             else if (tx_eqz(argv[i], "--max-jobs") && i + 1 < argc) { max_j = atoi(argv[++i]); has_max_j = 1; }
+            else if (tx_eqz(argv[i], "--window-lanes") && i + 1 < argc) {
+                lanes = pd_width(argv[++i], PD_MAX_LANES);
+                if (!lanes) return pd_refuse("invalid-window-lanes");
+            }
             else if (tx_eqz(argv[i], "--load-cap") && i + 1 < argc) { load_cap = atoi(argv[++i]); fprintf(stderr, "PRERUN_DEPRECATED\t--load-cap\tignored: load gates retired 2026-11-20, use --max-jobs\n"); }
             else if (tx_eqz(argv[i], "--max-retries") && i + 1 < argc) max_ret = atoi(argv[++i]);
             else if (tx_eqz(argv[i], "--keep-going")) { pd_keep_going = 2; has_kg = 1; }
@@ -2562,7 +2808,7 @@ int main(int argc, char **argv) {
         if (sy_realpath(root, real_root, sizeof real_root) > 0 && real_root[0]) root = real_root;
         if (!out_d || (!cand && !mock_r)) return pd_refuse("run-requires-out-and-candidate");
         if (max_ret < 1 || max_ret > 3) return pd_refuse("invalid-max-retries");
-        return pd_cmd_run(root, cand ? cand : "-", out_d, resume, max_j, load_cap, max_ret, mock_r);
+        return pd_cmd_run(root, cand ? cand : "-", out_d, resume, max_j, load_cap, max_ret, lanes, mock_r);
     }
     if (tx_eqz(sub, "merge")) {
         const char *in_d = 0, *out_d = 0, *ver = 0;
