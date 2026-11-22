@@ -1,0 +1,593 @@
+/* tools/uaf-census.cx -- R79 report-mode same-function use-after-free coarse census.
+ *
+ *   sh ./unisacc.com tools/uaf-census.cx -- [--root DIR] [--dirs LIST] [--report]
+ *       [--no-strip-comments] [--no-uaf-read] [--no-x-handle] [--no-x-label]
+ *       [--no-x-outparam] [--no-x-shadow] [--no-x-nullcmp] [--max-findings N]
+ *
+ * Strips comments via cxlib.cscan, splits top-level functions by brace balance, then flags
+ * free/mm_free of a simple identifier followed by same-block use without reassignment.
+ * Free-call census still counts all 14 APIs; UAF candidates only track free+mm_free unless
+ * --no-x-handle. Exclusions (on by default): handle APIs, label barrier after free+return,
+ * &p out-param clear, shadowing decl clear, p==0/!p null-cmp not a use.
+ * Report mode only. Mutations: --no-uaf-read / --no-strip-comments / --no-x-* must go red.
+ *
+ * LIMIT: same-function only. Cross-function / global / struct-field UAF is out of scope.
+ * Index OOB / litlen overread / non-.cx are out of scope. Zero candidates != zero defects.
+ * Do not claim 'no UAF'.
+ *
+ * Retrospective (historical fix parents, 2026-11-22): in-scope same-fn simple-ident UAF
+ * from fcf9398dd8 parent: 5/5 HIT (chain-run old?, check-cand tb&& x2, lower-row m?,
+ * p3-swap memcmp raw). Out-of-scope samples MISS: 8b4c5511af free(t.b) field, 1520a08bfc
+ * index OOB, 0dff6077db litlen, 2ae13bad52 .c ASan. Overall sampled defects 5/9.
+ * Cost vs prior tighten: full-tree candidates 0 -> 27 (tools 0 -> 26). Widened: value use
+ * for p?/&&/||; seed frees inside loops; weak-brace keeps value across if-block free.
+ */
+#pragma unisa use cxlib.cscan
+#pragma unisa use sys.posix
+#pragma unisa use sys.fs
+#pragma unisa use sys.io
+#pragma unisa use text.text
+#pragma unisa use text.fmt
+#pragma unisa use mem.heap
+#pragma unisa use mem.bytes
+
+#define UC_MAXFIND 4000
+#define UC_MAXFREE 64
+#define UC_PW 4400
+
+static const char *g_root = ".";
+static int g_strip = 1, g_uaf_read = 1, g_max_find = UC_MAXFIND;
+static int g_x_handle = 1, g_x_label = 1, g_x_outparam = 1, g_x_shadow = 1, g_x_nullcmp = 1;
+static const char *g_dirs_raw = "cx,ext,src,tools";
+
+/* All 14 counted as free_calls; only free+mm_free seed UAF when g_x_handle. */
+static const char *const FREE_API[] = {
+    "free", "mm_free", "np_free", "ff_out_free", "js_free", "pr_free", "sb_free",
+    "mg_free", "hs_free", "as_free", "fl_free", "uo_free", "ds_free", "dt_free", 0
+};
+
+typedef struct {
+    char path[256];
+    char ptr[64];
+    char api[32];
+    char kind[8];
+    int use_line, free_line;
+} UcFind;
+
+typedef struct {
+    char name[16];
+    long files, free_calls, candidates;
+} UcDir;
+
+static UcFind g_find[UC_MAXFIND];
+static int g_nfind;
+static UcDir g_dir[8];
+static int g_ndir;
+static long g_files_total, g_free_total, g_cand_total;
+
+static int idst(int c) { return (c >= 'a' && c <= 'z') || (c >= 'A' && c <= 'Z') || c == '_'; }
+static int idch(int c) { return idst(c) || (c >= '0' && c <= '9'); }
+
+static void die(const char *s) { fprintf(stderr, "uaf-census: REFUSE %s\n", s); exit(2); }
+
+static long line_of(const char *b, long n, long off) {
+    long i, ln = 1;
+    if (off < 0) off = 0;
+    if (off > n) off = n;
+    for (i = 0; i < off; i++) if (b[i] == '\n') ln++;
+    return ln;
+}
+
+static int word_at(const char *b, long n, long i, const char *w) {
+    long wn = tx_len(w, 64), j = i + wn;
+    if (i < 0 || i + wn > n || !mm_same(b + i, w, wn)) return 0;
+    if (i > 0 && idch(b[i - 1])) return 0;
+    if (j < n && idch(b[j])) return 0;
+    return 1;
+}
+
+static int match_free_api(const char *b, long n, long i, long *api_len) {
+    int k;
+    for (k = 0; FREE_API[k]; k++) {
+        long wn = tx_len(FREE_API[k], 32);
+        if (word_at(b, n, i, FREE_API[k])) { *api_len = wn; return k; }
+    }
+    return -1;
+}
+
+static int is_heap_free_api(int api) {
+    /* 0=free 1=mm_free */
+    return api == 0 || api == 1;
+}
+
+static long skip_ws(const char *b, long n, long i) {
+    while (i < n && (b[i] == ' ' || b[i] == '\t' || b[i] == '\n' || b[i] == '\r')) i++;
+    return i;
+}
+
+static int is_kw_before_brace(const char *b, long n, long brace_i, const char *kw) {
+    long i = brace_i - 1, wn = tx_len(kw, 16), j;
+    while (i >= 0 && (b[i] == ' ' || b[i] == '\t' || b[i] == '\n' || b[i] == '\r')) i--;
+    if (i < 0 || b[i] != ')') return 0;
+    {
+        int par = 1; i--;
+        while (i >= 0 && par) {
+            if (b[i] == ')') par++;
+            else if (b[i] == '(') par--;
+            i--;
+        }
+    }
+    while (i >= 0 && (b[i] == ' ' || b[i] == '\t' || b[i] == '\n' || b[i] == '\r')) i--;
+    j = i - wn + 1;
+    if (j < 0) return 0;
+    return word_at(b, n, j, kw);
+}
+
+static int looks_loop_open(const char *b, long n, long brace_i) {
+    long i = brace_i - 1;
+    while (i >= 0 && (b[i] == ' ' || b[i] == '\t' || b[i] == '\n' || b[i] == '\r')) i--;
+    if (i >= 1 && word_at(b, n, i - 1, "do")) return 1;
+    if (is_kw_before_brace(b, n, brace_i, "for") || is_kw_before_brace(b, n, brace_i, "while")) return 1;
+    return 0;
+}
+
+static int next_is_return_or_goto(const char *b, long n, long i) {
+    i = skip_ws(b, n, i);
+    return word_at(b, n, i, "return") || word_at(b, n, i, "goto");
+}
+
+/* 1 when NAME: appears as a label between lo and hi (line-start after ws). */
+static int label_between(const char *b, long n, long lo, long hi) {
+    long i = lo;
+    int bol = 1;
+    if (!g_x_label) return 0;
+    while (i < hi && i < n) {
+        if (b[i] == '\n') { bol = 1; i++; continue; }
+        if (bol) {
+            long j = i;
+            while (j < hi && (b[j] == ' ' || b[j] == '\t')) j++;
+            if (j < hi && idst(b[j])) {
+                long k = j;
+                while (k < hi && idch(b[k])) k++;
+                while (k < hi && (b[k] == ' ' || b[k] == '\t')) k++;
+                if (k < hi && b[k] == ':') return 1;
+            }
+            bol = 0;
+        }
+        i++;
+    }
+    return 0;
+}
+
+static int dir_slot(const char *rel) {
+    long i;
+    char top[16];
+    int k = 0;
+    while (rel[k] && rel[k] != '/' && k < 15) { top[k] = rel[k]; k++; }
+    top[k] = 0;
+    for (i = 0; i < g_ndir; i++) if (tx_eqz(g_dir[i].name, top)) return (int)i;
+    if (g_ndir >= 8) return -1;
+    if (cx_fmt(g_dir[g_ndir].name, sizeof g_dir[0].name, "%s", top)) return -1;
+    g_dir[g_ndir].files = 0; g_dir[g_ndir].free_calls = 0; g_dir[g_ndir].candidates = 0;
+    return g_ndir++;
+}
+
+static void add_find(const char *rel, const char *ptr, long pn, const char *api, long an,
+                     const char *kind, int use_line, int free_line, int di) {
+    UcFind *f;
+    if (!g_uaf_read) return;
+    if (g_nfind >= g_max_find) return;
+    f = &g_find[g_nfind++];
+    if (cx_fmt(f->path, sizeof f->path, "%s", rel)) f->path[0] = 0;
+    if (pn >= (long)sizeof f->ptr) pn = (long)sizeof f->ptr - 1;
+    mm_copy(f->ptr, sizeof f->ptr, ptr, pn); f->ptr[pn] = 0;
+    if (an >= (long)sizeof f->api) an = (long)sizeof f->api - 1;
+    mm_copy(f->api, sizeof f->api, api, an); f->api[an] = 0;
+    if (cx_fmt(f->kind, sizeof f->kind, "%s", kind)) f->kind[0] = 0;
+    f->use_line = use_line; f->free_line = free_line;
+    if (di >= 0) g_dir[di].candidates++;
+    g_cand_total++;
+}
+
+typedef struct {
+    char name[64];
+    long nlen;
+    int depth;
+    int line;
+    int api;
+    long free_off;
+    int weak; /* 1 after leaving the brace where free ran: only ternary/&&/|| value uses count */
+} Freed;
+
+static void drop_freed(Freed *fr, int *nfreed, int f) {
+    fr[f] = fr[*nfreed - 1];
+    (*nfreed)--;
+}
+
+static int null_cmp_use(const char *b, long n, long a0, long a1) {
+    long p, k;
+    if (!g_x_nullcmp) return 0;
+    /* !p */
+    p = a0 - 1;
+    while (p >= 0 && (b[p] == ' ' || b[p] == '\t')) p--;
+    if (p >= 0 && b[p] == '!') return 1;
+    /* p == 0 / p != 0 / p == NULL */
+    k = skip_ws(b, n, a1);
+    if (k + 1 < n && b[k] == '=' && b[k + 1] == '=') {
+        k = skip_ws(b, n, k + 2);
+        if (word_at(b, n, k, "0") || word_at(b, n, k, "NULL")) return 1;
+    }
+    if (k + 1 < n && b[k] == '!' && b[k + 1] == '=') {
+        k = skip_ws(b, n, k + 2);
+        if (word_at(b, n, k, "0") || word_at(b, n, k, "NULL")) return 1;
+    }
+    return 0;
+}
+
+/* Shadowing decl: char b[N] / Type *b / Type b = after free of b. */
+static int looks_shadow_decl(const char *b, long n, long a0, long a1) {
+    long p, k;
+    if (!g_x_shadow) return 0;
+    k = skip_ws(b, n, a1);
+    if (k < n && b[k] == '[') {
+        /* name[ -> could be use OR decl `char name[`; look left for type-ish */
+        p = a0 - 1;
+        while (p >= 0 && (b[p] == ' ' || b[p] == '\t')) p--;
+        if (p >= 0 && (idch(b[p]) || b[p] == '*')) return 1;
+    }
+    p = a0 - 1;
+    while (p >= 0 && (b[p] == ' ' || b[p] == '\t')) p--;
+    if (p >= 0 && b[p] == '*') {
+        p--;
+        while (p >= 0 && (b[p] == ' ' || b[p] == '\t')) p--;
+        if (p >= 0 && idch(b[p])) return 1; /* Type *name */
+    }
+    return 0;
+}
+
+static void scan_fn(const char *rel, const char *b, long n, long body0, long body1, int di) {
+    Freed fr[UC_MAXFREE];
+    int nfreed = 0;
+    int depth = 1;
+    int loop_depth[64], nloop = 0;
+    long i = body0 + 1;
+
+    while (i < body1 && i < n) {
+        long api_len = 0;
+        int api;
+
+        if (b[i] == '{') {
+            if (nloop < 64 && looks_loop_open(b, n, i)) loop_depth[nloop++] = depth + 1;
+            depth++; i++; continue;
+        }
+        if (b[i] == '}') {
+            int f;
+            depth--;
+            while (nloop > 0 && loop_depth[nloop - 1] > depth) nloop--;
+            /* free(p) inside if(p){...} still dangles outer p (S1 chain-run).  Mark weak
+             * instead of drop: only ternary/&&/|| value uses fire across the brace; arg/read
+             * /write stay block-local to avoid tools/ FP explosion. */
+            for (f = 0; f < nfreed; f++) {
+                if (fr[f].depth > depth) { fr[f].weak = 1; fr[f].depth = depth; }
+            }
+            i++; continue;
+        }
+
+        /* out-param &name clears freed name */
+        if (g_x_outparam && b[i] == '&' && i + 1 < n) {
+            long j = skip_ws(b, n, i + 1), a0, a1, f;
+            if (j < n && idst(b[j])) {
+                a0 = j; while (j < n && idch(b[j])) j++; a1 = j;
+                for (f = 0; f < nfreed; ) {
+                    if (fr[f].nlen == a1 - a0 && mm_same(b + a0, fr[f].name, fr[f].nlen))
+                        drop_freed(fr, &nfreed, f);
+                    else f++;
+                }
+                i = a1; continue;
+            }
+        }
+
+        api = match_free_api(b, n, i, &api_len);
+        if (api >= 0) {
+            long j = skip_ws(b, n, i + api_len);
+            if (j < n && b[j] == '(') {
+                long a0, a1;
+                int in_loop = 0, li;
+                j = skip_ws(b, n, j + 1);
+                a0 = j;
+                while (j < n && idch(b[j])) j++;
+                a1 = j;
+                j = skip_ws(b, n, j);
+                if (di >= 0) g_dir[di].free_calls++;
+                g_free_total++;
+                if (a1 > a0 && j < n && b[j] == ')') {
+                    j = skip_ws(b, n, j + 1);
+                    if (j < n && b[j] == ';') j++;
+                    for (li = 0; li < nloop; li++) if (loop_depth[li] <= depth) { in_loop = 1; break; }
+                    (void)in_loop; /* loop frees stay seeded: S1 lower-row free(m) was inside for */
+                    /* seed UAF for heap free APIs when handle exclusion on (including inside loops) */
+                    if (!next_is_return_or_goto(b, n, j) && nfreed < UC_MAXFREE
+                        && (!g_x_handle || is_heap_free_api(api))) {
+                        Freed *x = &fr[nfreed++];
+                        long pn = a1 - a0;
+                        if (pn >= (long)sizeof x->name) pn = (long)sizeof x->name - 1;
+                        mm_copy(x->name, sizeof x->name, b + a0, pn); x->name[pn] = 0;
+                        x->nlen = pn; x->depth = depth; x->line = (int)line_of(b, n, i);
+                        x->api = api; x->free_off = i; x->weak = 0;
+                    }
+                }
+                i = a1 > a0 ? a1 : i + api_len;
+                continue;
+            }
+        }
+
+        if (idst(b[i])) {
+            long a0 = i, a1, f;
+            while (i < n && idch(b[i])) i++;
+            a1 = i;
+            /* shadowing decl of a freed name clears it */
+            if (looks_shadow_decl(b, n, a0, a1)) {
+                for (f = 0; f < nfreed; ) {
+                    if (fr[f].nlen == a1 - a0 && mm_same(b + a0, fr[f].name, fr[f].nlen))
+                        drop_freed(fr, &nfreed, f);
+                    else f++;
+                }
+            }
+            for (f = 0; f < nfreed; f++) {
+                if (fr[f].nlen == a1 - a0 && mm_same(b + a0, fr[f].name, fr[f].nlen)) {
+                    long k = skip_ws(b, n, a1), pre;
+                    /* member name after . or -> is not the freed pointer */
+                    pre = a0 - 1;
+                    while (pre >= 0 && (b[pre] == ' ' || b[pre] == '\t')) pre--;
+                    if (pre >= 0 && b[pre] == '.') break;
+                    if (pre >= 1 && b[pre] == '>' && b[pre - 1] == '-') break;
+                    if (k < n && b[k] == '=' && !(k + 1 < n && b[k + 1] == '=')) {
+                        drop_freed(fr, &nfreed, f); break;
+                    }
+                    if (null_cmp_use(b, n, a0, a1)) break;
+                    if (label_between(b, n, fr[f].free_off, a0)) break;
+                    if (k < n && (b[k] == '[' || (b[k] == '-' && k + 1 < n && b[k + 1] == '>'))) {
+                        long t = k;
+                        const char *kind = "read";
+                        /* array decl char name[N] already cleared via shadow; remaining is use */
+                        if (looks_shadow_decl(b, n, a0, a1)) { drop_freed(fr, &nfreed, f); break; }
+                        if (fr[f].weak) break; /* cross-brace: only value uses */
+                        while (t < n && b[t] != ';' && b[t] != '\n') {
+                            if (b[t] == '=' && !(t > 0 && (b[t - 1] == '=' || b[t - 1] == '!' || b[t - 1] == '<' || b[t - 1] == '>'))) {
+                                kind = "write"; break;
+                            }
+                            t++;
+                        }
+                        add_find(rel, fr[f].name, fr[f].nlen, FREE_API[fr[f].api],
+                                 tx_len(FREE_API[fr[f].api], 32), kind,
+                                 (int)line_of(b, n, a0), fr[f].line, di);
+                        break;
+                    }
+                    {
+                        long p = a0 - 1, nx = skip_ws(b, n, a1);
+                        while (p >= 0 && (b[p] == ' ' || b[p] == '\t' || b[p] == '\n' || b[p] == '\r')) p--;
+                        if (p >= 0 && b[p] == '&') break;
+                        if (p >= 0 && (b[p] == '(' || b[p] == ',') && nx < n && (b[nx] == ',' || b[nx] == ')')) {
+                            if (fr[f].weak) break;
+                            add_find(rel, fr[f].name, fr[f].nlen, FREE_API[fr[f].api],
+                                     tx_len(FREE_API[fr[f].api], 32), "arg",
+                                     (int)line_of(b, n, a0), fr[f].line, di);
+                            break;
+                        }
+                        while (p >= 0 && (b[p] == ' ' || b[p] == '\t')) p--;
+                        if (p >= 5 && word_at(b, n, p - 5, "return")) {
+                            if (fr[f].weak) break;
+                            add_find(rel, fr[f].name, fr[f].nlen, FREE_API[fr[f].api],
+                                     tx_len(FREE_API[fr[f].api], 32), "arg",
+                                     (int)line_of(b, n, a0), fr[f].line, di);
+                            break;
+                        }
+                    }
+                    /* Narrow value use only: p?.. ternary, or p && / p || truthiness.
+                     * Broad "any leftover id" exploded tools/ to hundreds of FPs; S1 history
+                     * (fcf9398dd8 parent) was specifically old?/tb&&/m?. */
+                    {
+                        long nx = skip_ws(b, n, a1);
+                        int is_val = 0;
+                        if (nx < n && b[nx] == '?') is_val = 1;
+                        else if (nx + 1 < n && b[nx] == '&' && b[nx + 1] == '&') is_val = 1;
+                        else if (nx + 1 < n && b[nx] == '|' && b[nx + 1] == '|') is_val = 1;
+                        if (is_val) {
+                            add_find(rel, fr[f].name, fr[f].nlen, FREE_API[fr[f].api],
+                                     tx_len(FREE_API[fr[f].api], 32), "value",
+                                     (int)line_of(b, n, a0), fr[f].line, di);
+                        }
+                    }
+                    break;
+                }
+            }
+            continue;
+        }
+
+        if (b[i] == '*' && i + 1 < n) {
+            long j, a0, a1, f, p;
+            if (i > 0 && b[i - 1] == '/') { i++; continue; }
+            /* Type *name / , *name (declarator list) is not a dereference */
+            p = i - 1;
+            while (p >= 0 && (b[p] == ' ' || b[p] == '\t')) p--;
+            if (p >= 0 && (idch(b[p]) || b[p] == ',')) { i++; continue; }
+            j = skip_ws(b, n, i + 1);
+            if (j < n && idst(b[j])) {
+                a0 = j; while (j < n && idch(b[j])) j++; a1 = j;
+                for (f = 0; f < nfreed; f++) {
+                    if (fr[f].nlen == a1 - a0 && mm_same(b + a0, fr[f].name, fr[f].nlen)) {
+                        long t = skip_ws(b, n, a1);
+                        const char *kind = "read";
+                        if (label_between(b, n, fr[f].free_off, i)) break;
+                        if (fr[f].weak) break; /* cross-brace: only value uses */
+                        while (t < n && b[t] != ';' && b[t] != '\n') {
+                            if (b[t] == '=' && !(t > 0 && (b[t - 1] == '=' || b[t - 1] == '!' || b[t - 1] == '<' || b[t - 1] == '>'))) {
+                                kind = "write"; break;
+                            }
+                            t++;
+                        }
+                        add_find(rel, fr[f].name, fr[f].nlen, FREE_API[fr[f].api],
+                                 tx_len(FREE_API[fr[f].api], 32), kind,
+                                 (int)line_of(b, n, i), fr[f].line, di);
+                        break;
+                    }
+                }
+                i = a1; continue;
+            }
+        }
+        i++;
+    }
+}
+
+static void scan_file(const char *rel, const char *path, int di) {
+    long n = 0, i = 0, last = -1, hsp = -1;
+    int depth = 0, infn = 0;
+    long body0 = -1;
+    char *b = cs_slurp(path, &n);
+    if (!b) return;
+    if (g_strip) cs_strip_comments(b, n);
+    g_files_total++;
+    if (di >= 0) g_dir[di].files++;
+    while (i < n) {
+        char c = b[i];
+        if (c == ' ' || c == '\t' || c == '\n' || c == '\r') { i++; continue; }
+        if (depth == 0 && hsp < 0) hsp = i;
+        if (c == '{') {
+            if (depth == 0 && last == ')' && hsp >= 0) { infn = 1; body0 = i; }
+            depth++; i++; continue;
+        }
+        if (c == '}') {
+            depth--;
+            if (depth == 0 && infn && body0 >= 0) {
+                scan_fn(rel, b, n, body0, i, di);
+                infn = 0; body0 = -1; hsp = -1;
+            }
+            i++; continue;
+        }
+        if (c == ';' && depth == 0) { hsp = -1; last = c; i++; continue; }
+        last = c; i++;
+    }
+    mm_free(b);
+}
+
+static int ends_cx(const char *nm, long n) {
+    return n >= 4 && mm_same(nm + n - 3, ".cx", 3);
+}
+
+static void walk(const char *root, const char *rel, int depth) {
+    char dirp[UC_PW];
+    static char names[16][2048][128];
+    static int nn_at[16];
+    sy_dir_t d;
+    int nn = 0, i;
+    if (depth >= 16) return;
+    if (rel[0]) {
+        if (cx_fmt(dirp, sizeof dirp, "%s/%s", root, rel)) return;
+    } else {
+        if (cx_fmt(dirp, sizeof dirp, "%s", root)) return;
+    }
+    if (sy_dir_open(&d, dirp)) return;
+    while (sy_dir_next(&d) == 1) {
+        if (d.name[0] == '.') continue;
+        if (nn < 2048 && !cx_fmt(names[depth][nn], 128, "%s", d.name)) nn++;
+    }
+    sy_dir_close(&d);
+    nn_at[depth] = nn;
+    for (i = 0; i < nn_at[depth]; i++) {
+        char sub[UC_PW], full[UC_PW + 64];
+        sy_stat_t st;
+        long nl = tx_len(names[depth][i], 128);
+        if (rel[0]) {
+            if (cx_fmt(sub, sizeof sub, "%s/%s", rel, names[depth][i])) continue;
+        } else {
+            if (cx_fmt(sub, sizeof sub, "%s", names[depth][i])) continue;
+        }
+        if (cx_fmt(full, sizeof full, "%s/%s", root, sub)) continue;
+        if (sy_lstat(full, &st)) continue;
+        if (st.kind == 'd') {
+            /* skip .../archive/... without tx_find (R4 source-anchor) */
+            {
+                long sn = tx_len(sub, UC_PW), si, hit = 0;
+                for (si = 0; si + 8 <= sn; si++)
+                    if (mm_same(sub + si, "/archive", 8)) { hit = 1; break; }
+                if (hit) continue;
+            }
+            walk(root, sub, depth + 1);
+        } else if ((st.kind == 'f' || st.kind == 'l') && ends_cx(names[depth][i], nl)) {
+            int di = dir_slot(sub);
+            scan_file(sub, full, di);
+        }
+    }
+}
+
+static void parse_dirs_and_walk(void) {
+    char buf[256];
+    long n, i = 0, s;
+    if (cx_fmt(buf, sizeof buf, "%s", g_dirs_raw)) die("dirs-too-long");
+    n = tx_len(buf, sizeof buf);
+    while (i < n) {
+        char one[64], path[UC_PW];
+        long e;
+        while (i < n && (buf[i] == ',' || buf[i] == ' ')) i++;
+        s = i;
+        while (i < n && buf[i] != ',') i++;
+        e = i;
+        while (e > s && buf[e - 1] == ' ') e--;
+        if (e <= s) continue;
+        if (e - s >= (long)sizeof one) die("dir-name");
+        mm_copy(one, sizeof one, buf + s, e - s); one[e - s] = 0;
+        if (tx_eqz(one, ".")) { walk(g_root, "", 0); continue; }
+        if (cx_fmt(path, sizeof path, "%s/%s", g_root, one)) die("dir-path");
+        {
+            sy_stat_t st;
+            if (sy_lstat(path, &st) == 0 && st.kind == 'd') walk(g_root, one, 0);
+            else if (sy_lstat(path, &st) == 0 && (st.kind == 'f' || st.kind == 'l')) {
+                int di = dir_slot(one);
+                scan_file(one, path, di);
+            }
+        }
+    }
+}
+
+static void print_report(void) {
+    int i;
+    for (i = 0; i < g_nfind; i++) {
+        printf("UAF\t%s:%d\tkind=%s\tptr=%s\tfree_api=%s\tfree_line=%d\n",
+               g_find[i].path, g_find[i].use_line, g_find[i].kind,
+               g_find[i].ptr, g_find[i].api, g_find[i].free_line);
+    }
+    for (i = 0; i < g_ndir; i++) {
+        printf("UAF_SUMMARY\tdir=%s\tfiles=%ld\tfree_calls=%ld\tcandidates=%ld\n",
+               g_dir[i].name, g_dir[i].files, g_dir[i].free_calls, g_dir[i].candidates);
+    }
+    printf("UAF_TOTAL\tfiles=%ld\tfree_calls=%ld\tcandidates=%ld\tfindings=%d\tstrip=%d\tuaf_read=%d\tx_handle=%d\tx_label=%d\tx_outparam=%d\tx_shadow=%d\tx_nullcmp=%d\n",
+           g_files_total, g_free_total, g_cand_total, g_nfind, g_strip, g_uaf_read,
+           g_x_handle, g_x_label, g_x_outparam, g_x_shadow, g_x_nullcmp);
+}
+
+int main(int argc, char **argv) {
+    int a;
+    for (a = 1; a < argc; a++) {
+        if (tx_eqz(argv[a], "--root") && a + 1 < argc) g_root = argv[++a];
+        else if (tx_eqz(argv[a], "--dirs") && a + 1 < argc) g_dirs_raw = argv[++a];
+        else if (tx_eqz(argv[a], "--report")) { /* keep */ }
+        else if (tx_eqz(argv[a], "--no-strip-comments")) g_strip = 0;
+        else if (tx_eqz(argv[a], "--no-uaf-read")) g_uaf_read = 0;
+        else if (tx_eqz(argv[a], "--no-x-handle")) g_x_handle = 0;
+        else if (tx_eqz(argv[a], "--no-x-label")) g_x_label = 0;
+        else if (tx_eqz(argv[a], "--no-x-outparam")) g_x_outparam = 0;
+        else if (tx_eqz(argv[a], "--no-x-shadow")) g_x_shadow = 0;
+        else if (tx_eqz(argv[a], "--no-x-nullcmp")) g_x_nullcmp = 0;
+        else if (tx_eqz(argv[a], "--max-findings") && a + 1 < argc) g_max_find = atoi(argv[++a]);
+        else if (tx_eqz(argv[a], "--help") || tx_eqz(argv[a], "-h")) {
+            fprintf(stderr, "usage: uaf-census [--root DIR] [--dirs LIST] [--report] [--no-strip-comments] [--no-uaf-read] [--no-x-handle|--no-x-label|--no-x-outparam|--no-x-shadow|--no-x-nullcmp]\n");
+            return 2;
+        } else {
+            fprintf(stderr, "uaf-census: REFUSE unknown %s\n", argv[a]);
+            return 2;
+        }
+    }
+    parse_dirs_and_walk();
+    print_report();
+    return 0;
+}
