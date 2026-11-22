@@ -1,0 +1,85 @@
+struct SkinnedDrawSource {
+  positions:u32;
+  joints:u32;
+  weights:u32;
+  indices:u32;
+  vertexCount:u32;
+  indexCount:u32;
+}
+
+native function skin_draw_span(at:i64,bytes:i64) i64 {
+  return at>=0 && bytes>=0 && at<=6291456-bytes && at%4==0;
+}
+
+native function skin_draw_disjoint(at:i64,bytes:i64,out:i64,length:i64,scratch:i64) i64 {
+  return skin_draw_span(at,bytes) && !skeleton_overlap(at,bytes,out,length) &&
+      !skeleton_overlap(at,bytes,scratch,24);
+}
+
+// Expand indexed triangles to the packed float32 XYZ consumed by SceneDrawStream.
+// The caller updates the skeleton palette before preparing the draw stream.
+native function SkinnedMesh_preparePositions(skin:i64,source:i64,out:i64,scratch:i64) i64 {
+  if(!skinned_valid(skin) || !skin_draw_span(source,SkinnedDrawSource.size) ||
+     !skin_draw_span(scratch,24) || scratch%8!=0) { return 0-1; }
+  let count=ux_u32(source+SkinnedDrawSource.vertexCount);
+  let indexed=ux_u32(source+SkinnedDrawSource.indices);
+  let drawCount=ux_u32(source+SkinnedDrawSource.indexCount);
+  if(indexed==0) { drawCount=count; }
+  if(count<3 || count>2340 || drawCount<3 || drawCount>2340 || drawCount%3!=0) { return 0-1; }
+  let size=drawCount*12;
+  if(!skin_draw_span(out,size) || skeleton_overlap(out,size,scratch,24) ||
+     !skin_draw_disjoint(source,SkinnedDrawSource.size,out,size,scratch) ||
+     !skin_draw_disjoint(skin,SkinnedMesh.size,out,size,scratch)) { return 0-1; }
+  let positions=ux_u32(source+SkinnedDrawSource.positions);
+  let joints=ux_u32(source+SkinnedDrawSource.joints);
+  let weights=ux_u32(source+SkinnedDrawSource.weights);
+  if(!skin_draw_disjoint(positions,count*12,out,size,scratch) ||
+     !skin_draw_disjoint(joints,count*16,out,size,scratch) ||
+     !skin_draw_disjoint(weights,count*16,out,size,scratch) ||
+     (indexed!=0 && !skin_draw_disjoint(indexed,drawCount*4,out,size,scratch))) { return 0-1; }
+  let skeleton=ux_u32(skin+SkinnedMesh.skeleton);
+  if(skeleton==0 || !skeleton_valid(skeleton) ||
+     !skin_draw_disjoint(skeleton,Skeleton.size,out,size,scratch)) { return 0-1; }
+  let palette=ux_u32(skeleton+Skeleton.palette);
+  let boneCount=ux_u32(skeleton+Skeleton.count);
+  let bind=ux_u32(skin+SkinnedMesh.bindMatrix);
+  let inverse=ux_u32(skin+SkinnedMesh.bindInverse);
+  if(bind%8!=0 || inverse%8!=0 || boneCount<1 ||
+     !skin_draw_disjoint(bind,128,out,size,scratch) ||
+     !skin_draw_disjoint(inverse,128,out,size,scratch) ||
+     !skin_draw_disjoint(palette,boneCount*64,out,size,scratch)) { return 0-1; }
+
+  let i=0;
+  while(i<drawCount) {
+    let index=i;
+    if(indexed!=0) { index=ux_u32(indexed+4*i); }
+    if(index>=count) { return 0-1; }
+    let lane=0;
+    while(lane<4) {
+      let weight=ux_f32(weights+16*index+4*lane);
+      if(!(weight>=0.0 && weight<=1.0) ||
+         (weight!=0.0 && ux_u32(joints+16*index+4*lane)>=boneCount)) { return 0-1; }
+      lane=lane+1;
+    }
+    i=i+1;
+  }
+
+  i=0;
+  while(i<drawCount) {
+    let index=i;
+    if(indexed!=0) { index=ux_u32(indexed+4*i); }
+    let lane=0;
+    while(lane<3) {
+      let input=ux_f64_put(scratch+8*lane,ux_f32(positions+12*index+4*lane));
+      lane=lane+1;
+    }
+    let deformed=SkinnedMesh_applyBoneTransform(skin,scratch,joints+16*index,weights+16*index);
+    lane=0;
+    while(lane<3) {
+      let output=ux_f32_put(out+12*i+4*lane,ux_f64(deformed+8*lane));
+      lane=lane+1;
+    }
+    i=i+1;
+  }
+  return drawCount;
+}

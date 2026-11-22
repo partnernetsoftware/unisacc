@@ -8,14 +8,14 @@
 | B 常量与枚举 | 200 | 0 | 0 | 1 | 200 | 100.00% |
 | C 扩展能力 | 24 | 2 | 4 | 0 | 30 | 80.00% |
 | C 栏其中保留重大缺口 5 项 | 19 | | | | 30 | 全量口径 19/30（63.3%） |
-| A 栏其中至少保留重大缺口 10 项 | 至多 202 | | | | 214 | 全量口径至多 202/214（94.4%） |
+| A 栏其中至少保留重大缺口 9 项 | 至多 203 | | | | 214 | 全量口径至多 203/214（94.9%） |
 | B 栏其中至少保留重大缺口 25 项 | 至多 175 | | | | 200 | 全量口径至多 175/200（87.5%） |
 
 清单口径以同名实现、独立金值或 r160 对照及篡改反例为准，全量口径只计无已知重大缺口的条目。
 
 (1) C 栏扣除 DRACOLoader、KTX2Loader、GLTFExporter、OutlinePass 和 SSAOPass，具体缺口见下表。
 
-(2) A 栏扣除三类 CompressedTexture（设备直传及 ASTC 非常色块）、WebGLRenderer（上下文恢复）、MeshPhysicalMaterial（GPU 透射等）、RectAreaLight（镜面 LTC）、PMREMGenerator（完整预滤链）、Raycaster（混合对象递归分派）、SkinnedMesh（通用渲染接线）和 ShaderLib（额外物理着色语义）。
+(2) A 栏扣除三类 CompressedTexture（设备直传及 ASTC 非常色块）、WebGLRenderer（上下文恢复）、MeshPhysicalMaterial（GPU 透射等）、RectAreaLight（镜面 LTC）、PMREMGenerator（完整预滤链）、Raycaster（混合对象递归分派）和 ShaderLib（额外物理着色语义）。
 
 (3) B 栏扣除 BC7 与 BC6H 三项、PVRTC1 四项、ASTC 十四项、ETC 三项及 DisplayP3ColorSpace 一项，涉及未覆盖的解码模式、设备上传或浏览器画布读回。
 
@@ -33,6 +33,7 @@
 | BC6H | 两种符号格式的模式 11，HDR 位模式保留 | 其他模式与设备直传 |
 | PVRTC1 | 四种枚举、位深、通道、块足迹与字节预算 | 软件解码、真实扩展上的压缩上传与像素读回 |
 | ETC 与 ASTC | ETC 软件解码，ASTC 14 种 LDR 常色足迹 | 压缩原样上传，ASTC 非常色块与 HDR |
+| SkinnedMesh | 索引位置蒙皮接场景绘制。UXE 一张材质纹理，r160 另用四张骨骼调色板纹理。位姿和计数反例各自转红 | 带法线的蒙皮及骨架资源表 |
 | VideoTexture | r160 清单条目保留为缺 | 真实视频元素解码帧、刷新与渲染读回 |
 | createCanvasElement | r160 清单条目保留为缺 | 真实浏览器创建画布、命名空间、上下文和绘制读回 |
 | Display P3 | 色域变换 | 真实浏览器 Display P3 画布读回 |
