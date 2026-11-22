@@ -1,0 +1,61 @@
+struct EffectComposerGpuResize {
+  nextComposer:EffectComposer;
+  nextTargets:EffectComposerGpuTargets;
+  descriptor:GpuTarget;
+  read:u32;
+  write:u32;
+  width:u32;
+  height:u32;
+}
+
+// Replace the pair only after both new targets exist. The scratch block is
+// caller-owned and its nextTargets record starts zeroed.
+native function EffectComposerGpu_resizePair(composer:i64,targets:i64,packet:i64,capacity:i64,work:i64,restore:i64) i64 {
+  if(!composer_gpu_packet(targets,packet,capacity,64) ||
+     !composer_gpu_compatible(composer,packet,capacity,targets) ||
+     !composer_span(work,EffectComposerGpuResize.size) ||
+     composer_alias(work,EffectComposerGpuResize.size,packet,capacity) ||
+     composer_alias(work,EffectComposerGpuResize.size,targets,EffectComposerGpuTargets.size) ||
+     composer_alias(work,EffectComposerGpuResize.size,composer,EffectComposer.size) ||
+     composer_alias(work,EffectComposerGpuResize.size,ux_u32(composer+EffectComposer.passes),
+       ux_u32(composer+EffectComposer.capacity)*ComposerPass.size) ||
+     ux_u32(composer+EffectComposer.epoch)==4294967295) { return 0-1; }
+  let first=ux_u32(targets+EffectComposerGpuTargets.first);
+  let second=ux_u32(targets+EffectComposerGpuTargets.second);
+  let generation=ux_u32(targets+EffectComposerGpuTargets.generation);
+  let read=ux_u32(work+EffectComposerGpuResize.read);
+  let write=ux_u32(work+EffectComposerGpuResize.write);
+  let width=ux_u32(work+EffectComposerGpuResize.width);
+  let height=ux_u32(work+EffectComposerGpuResize.height);
+  let oldRead=ux_u32(composer+EffectComposer.read);
+  let oldWrite=ux_u32(composer+EffectComposer.write);
+  if(first<1 || first>1024 || second<1 || second>1024 || first==second || generation==0 ||
+     !((first==oldRead && second==oldWrite) || (first==oldWrite && second==oldRead)) ||
+     read==first || read==second || write==first || write==second ||
+     restore<0 || restore>1024 || restore==first || restore==second || restore==read || restore==write) { return 0-1; }
+  let staged=work+EffectComposerGpuResize.nextComposer;
+  let stagedTargets=work+EffectComposerGpuResize.nextTargets;
+  let descriptor=work+EffectComposerGpuResize.descriptor;
+  let initialized=EffectComposer_init(staged,read,write,0,0,width,height);
+  if(initialized<0) { return initialized; }
+  let created=EffectComposerGpu_create(staged,stagedTargets,packet,capacity,descriptor,generation);
+  if(created!=0) { return created; }
+  let released=EffectComposerGpu_release(targets,packet,capacity,restore);
+  if(released!=0) {
+    let rollback=EffectComposerGpu_release(stagedTargets,packet,capacity,restore);
+    return released;
+  }
+  let i=0;
+  while(i<EffectComposerGpuTargets.size) {
+    let saved=ux_u32_put(targets+i,ux_u32(stagedTargets+i));
+    i=i+4;
+  }
+  let cleared=composer_gpu_clear(stagedTargets);
+  let epoch=composer_advance(composer);
+  let a=ux_u32_put(composer+EffectComposer.read,read);
+  let b=ux_u32_put(composer+EffectComposer.write,write);
+  let c=ux_u32_put(composer+EffectComposer.width,width);
+  let d=ux_u32_put(composer+EffectComposer.height,height);
+  return 0;
+}
+

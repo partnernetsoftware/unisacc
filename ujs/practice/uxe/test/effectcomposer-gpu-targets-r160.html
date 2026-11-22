@@ -112,6 +112,39 @@ try {
   });
   composer.render(0);
   const refPixels = [composer.readBuffer, composer.writeBuffer, outer].map(pixel);
+  const resizeGl = context().gl;
+  const resizeFrames = track(resizeGl, "createFramebuffer");
+  const resizeEngine = engine(resizeGl);
+  const resizeStatus = Number(resizeEngine.uxe_composer_gpu(query.get("mode") === "1" ? 7n : 6n));
+  const resized = new DataView(resizeEngine.memory.buffer, 2097152);
+  const extent = [20,24].map(offset => resized.getUint32(3200+offset,true));
+  const resizeResult = [resizeStatus, ...extent,
+    ...resizeFrames.resources.slice(0,2).map(f => Number(!resizeGl.isFramebuffer(f))),
+    Number(resizeGl.getParameter(resizeGl.FRAMEBUFFER_BINDING) === resizeFrames.resources[2])];
+  resizeFrames.restore();
+  const resizeFaultGl = context().gl;
+  const resizeFaultFrames = track(resizeFaultGl, "createFramebuffer");
+  const resizeFaultTextures = track(resizeFaultGl, "createTexture",4);
+  const resizeFaultEngine = engine(resizeFaultGl);
+  const resizeFailure = Number(resizeFaultEngine.uxe_composer_gpu(8n));
+  const faultView = new DataView(resizeFaultEngine.memory.buffer,2097152);
+  const resizeFault = [resizeFailure,faultView.getUint32(3220,true),faultView.getUint32(3224,true),
+    ...resizeFaultFrames.resources.slice(0,2).map(f => Number(resizeFaultGl.isFramebuffer(f))),
+    ...resizeFaultFrames.resources.slice(2).map(f => Number(!resizeFaultGl.isFramebuffer(f)))];
+  resizeFaultTextures.restore();
+  resizeFaultFrames.restore();
+
+  const refResize = new EffectComposer(renderer,new WebGLRenderTarget(4,4));
+  const refPair = [refResize.readBuffer,refResize.writeBuffer];
+  refPair.forEach(target => clear(target,0));
+  const replaced = refPair.map(target => renderer.properties.get(target).__webglFramebuffer);
+  refResize.setSize(6,3);
+  renderer.setRenderTarget(refResize.readBuffer);
+  const resizeRef = [0,refResize.readBuffer.width,refResize.readBuffer.height,
+    ...replaced.map(f => Number(!ref.gl.isFramebuffer(f))),
+    Number(ref.gl.getParameter(ref.gl.FRAMEBUFFER_BINDING) === renderer.properties.get(refResize.readBuffer).__webglFramebuffer)];
+  refResize.dispose();
+  renderer.setRenderTarget(outer);
   composer.dispose();
   const refReleased = [
     ...refFrames.map(resource => Number(!ref.gl.isFramebuffer(resource))),
@@ -125,6 +158,7 @@ try {
   renderer.dispose();
   output.textContent = JSON.stringify([
     ...actualPixels, ...actualReleased, ...refPixels, ...refReleased, ...refused, ...rollbackResults,
+    ...resizeResult, ...resizeRef, ...resizeFault,
   ]);
 } catch (error) {
   output.textContent = `error:${error.message}`;
