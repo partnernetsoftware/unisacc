@@ -159,6 +159,56 @@ static int run_to_file(char **v, const char *cwd, int timeout_s, const char *pat
     return rc;
 }
 
+static int ce_home_nm_ch(char c) {
+    return (c >= 'a' && c <= 'z') || (c >= 'A' && c <= 'Z') ||
+           (c >= '0' && c <= '9') || c == '.' || c == '_' || c == '-';
+}
+
+static long ce_home_prefix_at(const char *s, long n, long i) {
+    const char *h0 = "/ho" "me/", *u0 = "/Us" "ers/", *hm = sy_env("HOME");
+    const char *px[2] = {h0, u0};
+    long hl = hm ? (long)strlen(hm) : 0, k, j;
+    if (i > 0 && ce_home_nm_ch(s[i - 1])) return 0;
+    if (hl > 1 && i + hl < n && !memcmp(s + i, hm, (size_t)hl) && s[i + hl] == '/') return hl + 1;
+    for (k = 0; k < 2; k++) {
+        long pl = (long)strlen(px[k]);
+        if (i + pl < n && !memcmp(s + i, px[k], (size_t)pl)) {
+            j = i + pl;
+            while (j < n && ce_home_nm_ch(s[j])) j++;
+            if (j > i + pl && j < n && s[j] == '/') return j + 1 - i;
+        }
+    }
+    return 0;
+}
+
+static int ce_scrub_home_file(const char *path, long *redacted_out) {
+    size_t n = 0;
+    char *s = cx_read(path, &n);
+    char *out;
+    long i = 0, w = 0, red = 0;
+    if (redacted_out) *redacted_out = 0;
+    if (!s) return -1;
+    out = malloc(n + 8);
+    if (!out) { free(s); return -1; }
+    while (i < (long)n) {
+        long h = ce_home_prefix_at(s, (long)n, i);
+        if (h > 0) {
+            out[w++] = '~';
+            out[w++] = '/';
+            i += h;
+            red++;
+        } else {
+            out[w++] = s[i++];
+        }
+    }
+    out[w] = 0;
+    free(s);
+    if (cx_write(path, out, (size_t)w)) { free(out); return -1; }
+    free(out);
+    if (redacted_out) *redacted_out = red;
+    return 0;
+}
+
 /* ---- Offline / Post-poll CI JSON & Log Parser ---------------------------------------------- */
 
 static const char *target_names[6] = {
@@ -879,7 +929,7 @@ int main(int argc, char **argv) {
     const char *out_arg = 0, *root_arg = ".", *ci_json = 0, *ci_log = 0, *ape_sha_arg = 0;
     const char *lint_wf_arg = 0;
     long poll_ms = 30000;
-    int poll_max = 50, parse_only = 0, lint_wf = 0, dry = 0, keep_draft = 0, i;
+    int poll_max = 50, parse_only = 0, scrub_log = 0, lint_wf = 0, dry = 0, keep_draft = 0, i;
     char root[CE_PATH], out_dir[CE_PATH], stage_dir[CE_PATH], cdir_buf[CE_PATH];
     char version[32], tag[128], ape_sha[65], rb_file[CE_PATH], rb_text[1024];
 
@@ -887,6 +937,7 @@ int main(int argc, char **argv) {
         const char *a = argv[i];
         if (tx_eqz(a, "--")) continue;
         if (tx_eqz(a, "--parse-only")) { parse_only = 1; continue; }
+        if (tx_eqz(a, "--scrub-log")) { scrub_log = 1; continue; }
         if (tx_eqz(a, "--lint-workflows")) {
             lint_wf = 1;
             if (i + 1 < argc && argv[i + 1][0] != '-') lint_wf_arg = argv[++i];
@@ -926,6 +977,11 @@ int main(int argc, char **argv) {
 
     if (parse_only) {
         if (!ci_json) return usage("--parse-only requires --ci-json FILE");
+        if (scrub_log && ci_log && ci_log[0]) {
+            long red = 0;
+            if (ce_scrub_home_file(ci_log, &red) != 0) refuse("CI_EARLY_LOG_MISSING", ci_log);
+            sy_printf("CI_EARLY_LOG_SCRUBBED\thome_paths_redacted=%ld\n", red);
+        }
         return parse_ci_files(root, ci_json, ci_log, rev, ape_sha_arg);
     }
 
@@ -1117,6 +1173,11 @@ int main(int argc, char **argv) {
         if (run_to_file(cmd_log, root, 55, log_out)) {
             if (!keep_draft) (void)run_trimmed(cmd_delete, root, 30, lout, sizeof lout);
             refuse("CI_EARLY_FETCH_LOG", "gh run view --log failed");
+        }
+        {
+            long red = 0;
+            (void)ce_scrub_home_file(log_out, &red);
+            sy_printf("CI_EARLY_LOG_SCRUBBED\thome_paths_redacted=%ld\n", red);
         }
     }
 

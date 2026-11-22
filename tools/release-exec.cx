@@ -1111,6 +1111,40 @@ static void ci_paths(char *json, char *log) {
     cx_fmt(json, 4500, "%s/ci-%s.json", evdir, runid);
     cx_fmt(log, 4500, "%s/ci-%s.log", evdir, runid);
 }
+static int home_nm_ch(char c) {
+    return (c >= 'a' && c <= 'z') || (c >= 'A' && c <= 'Z') || (c >= '0' && c <= '9') || c == '.' || c == '_' || c == '-';
+}
+static long home_prefix_at(const char *s, long n, long i) {
+    const char *h0 = "/ho" "me/", *u0 = "/Us" "ers/", *hm = sy_env("HOME");
+    const char *px[2] = {h0, u0};
+    long hl = hm ? tlen(hm) : 0, k, j;
+    if (i > 0 && home_nm_ch(s[i - 1])) return 0;
+    if (hl > 1 && i + hl < n && tx_same(s + i, hl, hm, hl) && s[i + hl] == '/') return hl + 1;
+    for (k = 0; k < 2; k++) {
+        long pl = tlen(px[k]);
+        if (i + pl < n && tx_same(s + i, pl, px[k], pl)) {
+            j = i + pl;
+            while (j < n && home_nm_ch(s[j])) j++;
+            if (j > i + pl && j < n && s[j] == '/') return j + 1 - i;
+        }
+    }
+    return 0;
+}
+static void scrub_home_put(np_buf *b, const char *s, long n) {
+    long i = 0;
+    while (i < n) {
+        long h = home_prefix_at(s, n, i);
+        if (h > 0) { np_puts(b, "~/"); i += h; }
+        else { np_put(b, s + i, 1); i++; }
+    }
+}
+static void scrub_home_file(const char *path) {
+    long n = 0; char *t = slurp(path, &n); np_buf b = {0};
+    if (!t) return;
+    scrub_home_put(&b, t, n);
+    if (cx_write(path, b.p ? b.p : "", b.n)) die("home scrub write");
+    free(b.p); free(t);
+}
 static void ci_fetch_and_verify(void) {
     char json[4500], log[4500], o[256]; int i, max = 50; long ms = 30000; const char *e;
     char *w[] = {"gh", "-R", REPO, "run", "watch", runid, 0};
@@ -1138,7 +1172,8 @@ static void ci_fetch_and_verify(void) {
       if (run_to(v, 30, json)) refuse("CI_SUCCESS", "gh run view --json failed"); }
     { char *v[] = {"gh", "-R", REPO, "run", "view", runid, "--log", 0};
       show(v, "READ");
-      if (run_to(v, 55, log)) refuse("CI_VERDICT", "gh run view --log failed"); }
+      if (run_to(v, 55, log)) refuse("CI_VERDICT", "gh run view --log failed");
+      scrub_home_file(log); }
     ci_verify_files(json, log);
     index_row("ci", "PASS", runid, "six targets success, CANDIDATE_QUALIFY no fail/invalid");
 }
@@ -1363,33 +1398,6 @@ static void step_publish(void) {
 
 /* ---- step 6: readback ------------------------------------------------------------------------- */
 static void warm_note(void);
-static int home_nm_ch(char c) {
-    return (c >= 'a' && c <= 'z') || (c >= 'A' && c <= 'Z') || (c >= '0' && c <= '9') || c == '.' || c == '_' || c == '-';
-}
-static long home_prefix_at(const char *s, long n, long i) {
-    const char *h0 = "/ho" "me/", *u0 = "/Us" "ers/", *hm = sy_env("HOME");
-    const char *px[2] = {h0, u0};
-    long hl = hm ? tlen(hm) : 0, k, j;
-    if (i > 0 && home_nm_ch(s[i - 1])) return 0;
-    if (hl > 1 && i + hl < n && tx_same(s + i, hl, hm, hl) && s[i + hl] == '/') return hl + 1;
-    for (k = 0; k < 2; k++) {
-        long pl = tlen(px[k]);
-        if (i + pl < n && tx_same(s + i, pl, px[k], pl)) {
-            j = i + pl;
-            while (j < n && home_nm_ch(s[j])) j++;
-            if (j > i + pl && j < n && s[j] == '/') return j + 1 - i;
-        }
-    }
-    return 0;
-}
-static void scrub_home_put(np_buf *b, const char *s, long n) {
-    long i = 0;
-    while (i < n) {
-        long h = home_prefix_at(s, n, i);
-        if (h > 0) { np_puts(b, "~/"); i += h; }
-        else { np_put(b, s + i, 1); i++; }
-    }
-}
 static void step_readback(void) {
     char fresh[4500], p[4800], hex[65], o[400], nout[4500]; long sn; char *s; int rc = -1, attempt;
     char *dl[] = {"gh", "-R", REPO, "release", "download", cand.tag, "-p", cand.name[0], "-p", cand.name[6], "-D", fresh, "--clobber", 0};
