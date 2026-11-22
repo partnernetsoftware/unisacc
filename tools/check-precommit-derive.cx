@@ -454,6 +454,88 @@ int main(void) {
 
         ck(ok_l1 && ok_en,
             "enotdir-and-ledger-missing-baseline-blocked: ENOTDIR and missing ledger HEAD baseline refuse instead of silent pass");
+
+        /* 11d: Audit item 4 -- tlib_frozen_gate (!rows on check-tlib-frozen timeout/error) must NOT short-circuit tlib_api_gate */
+        if (cx_fmt(cmd, sizeof cmd,
+            "cd '%s' && git reset -q && rm -rf exec/facts && mkdir -p exec/facts build pkgdemo && "
+            "git checkout -q -- exec/facts/derive.tsv tests/batches.tsv && "
+            "printf 'pkg\\tver\\tlayer\\troots\\tdeps\\towner\\tstatus\\tnote\\tapi_sha\\n' > build/tlib-packages.tsv && "
+            "printf 'pkgdemo\\t0.1.0\\tL2\\tpkgdemo\\t-\\tcore\\tfrozen\\t-\\t0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef\\n' >> build/tlib-packages.tsv && "
+            "printf 'int main(void){return 2;}\\n' > tools/check-tlib-frozen.cx && "
+            "printf '#pragma unisa use sys.io\\nint main(void){sy_printf(\"API_SHA\\\\tpkgdemo\\\\tdiffers\\\\told\\\\tnew\\\\n\");return 1;}\\n' > tools/layer-api.cx && "
+            "git add build/tlib-packages.tsv tools/check-tlib-frozen.cx tools/layer-api.cx && "
+            "git -c user.name=t -c user.email=t@t commit -q --no-verify -m setup-tlib && "
+            "printf 'int x;\\n' > pkgdemo/foo.cx && git add pkgdemo/foo.cx && "
+            "UNISACC_PRECOMMIT_SERIAL=1 sh ./unisacc.com tools/precommit.cx", repo4)) cpd_abort("r4tlib");
+        int rc_tlib = ckk_sh("check-precommit-derive", cmd, out, sizeof out);
+        int ok_tlib = (rc_tlib == 1 && ckk_has(out, CPD_OUT, "TLIB_API_STALE") &&
+                       ckk_has(out, CPD_OUT, "TLIB_FROZEN_GATE_UNAVAILABLE"));
+        ck(ok_tlib,
+            "tlib-frozen-unavailable-does-not-bypass-tlib-api-gate: check-tlib-frozen failure still runs blocking tlib_api_gate");
+
+        /* 11e: Audit items 1 & 3 -- GATE_TIMEOUT vs UNAVAILABLE, non-freeze WARN DEFERRED_GATE + build/deferred-gates.tsv ledger, and chain-ready refusal */
+        if (cx_fmt(cmd, sizeof cmd,
+            "cd '%s' && git reset -q && rm -rf pkgdemo build/deferred-gates.tsv && "
+            "git rm -qf build/tlib-packages.tsv tools/check-tlib-frozen.cx tools/layer-api.cx && "
+            "printf '# name\\tgenerator\\tcheck_argv\\twrite_argv\\toutputs\\tinputs_glob\\torder\\tbound_s\\n' > exec/facts/derive.tsv && "
+            "printf 'links\\ttools/links.cx\\ttrue\\ttrue\\tbuild/links.tsv\\ttests/batches.tsv\\t1\\t10\\n' >> exec/facts/derive.tsv && "
+            "printf 'int main(void){return 142;}\\n' > tools/derive.cx && "
+            "mkdir -p include && printf '/* h */\\n' > include/a.h && "
+            "printf 'int main(void){return 142;}\\n' > tools/gen-all-check.cx && "
+            "git add exec/facts/derive.tsv tools/derive.cx tools/gen-all-check.cx include/a.h && "
+            "git -c user.name=t -c user.email=t@t commit -q --no-verify -m setup-timeout && "
+            "printf '# b-to\\n' >> tests/batches.tsv && printf '/* h2 */\\n' >> include/a.h && "
+            "git add tests/batches.tsv include/a.h && "
+            "UNISACC_PRECOMMIT_SERIAL=1 sh ./unisacc.com tools/precommit.cx", repo4)) cpd_abort("r4to");
+        int rc_to = ckk_sh("check-precommit-derive", cmd, out, sizeof out);
+        int ok_to = (rc_to == 0 &&
+                     ckk_has(out, CPD_OUT, "GATE_TIMEOUT gate=derive") &&
+                     ckk_has(out, CPD_OUT, "GATE_TIMEOUT gate=genall") &&
+                     ckk_has(out, CPD_OUT, "WARN DEFERRED_GATE gate=derive reason=GATE_TIMEOUT") &&
+                     ckk_has(out, CPD_OUT, "WARN DEFERRED_GATE gate=genall reason=GATE_TIMEOUT"));
+
+        if (cx_fmt(cmd, sizeof cmd,
+            "test -s '%s/build/deferred-gates.tsv' && "
+            "sh '%s/unisacc.com' '%s/tools/chain-ready.cx' -- --repo '%s' --only 1-rev",
+            repo4, cwd, cwd, repo4)) cpd_abort("r4cr1");
+        int rc_cr1 = ckk_sh("check-precommit-derive", cmd, out, sizeof out);
+        int ok_cr1 = (rc_cr1 != 0 && ckk_has(out, CPD_OUT, "deferred-gates-unverified"));
+
+        ck(ok_to && ok_cr1,
+            "timeout-emits-gate-timeout-records-deferred-ledger-and-chain-ready-fails: non-freeze timeout records build/deferred-gates.tsv and chain-ready 1-rev refuses");
+
+        /* 11f: Audit items 1, 2, 3, 6 -- active build/freeze.tsv makes GATE_TIMEOUT, *_GATE_UNAVAILABLE, gen-all ERROR-without-DIFF, and missing core tool fail-closed */
+        if (cx_fmt(cmd, sizeof cmd,
+            "cd '%s' && rm -f build/deferred-gates.tsv && "
+            "printf 'c0\\tdeadbeef\\tother\\t4102444800\\tsrc\\n' > build/freeze.tsv && "
+            "UNISACC_PRECOMMIT_SERIAL=1 sh ./unisacc.com tools/precommit.cx", repo4)) cpd_abort("r4fz1");
+        int rc_fz1 = ckk_sh("check-precommit-derive", cmd, out, sizeof out);
+        int ok_fz1 = (rc_fz1 == 1 &&
+                      ckk_has(out, CPD_OUT, "BLOCKED freeze-gate-unavailable gate=derive") &&
+                      ckk_has(out, CPD_OUT, "sh ./unisacc.com tools/derive.cx -- --check --only links") &&
+                      ckk_has(out, CPD_OUT, "BLOCKED freeze-gate-unavailable gate=genall") &&
+                      ckk_has(out, CPD_OUT, "sh ./unisacc.com tools/gen-all-check.cx -- --root ."));
+
+        /* Item 2: gen-all generator ERROR without DIFF: outside freeze allows (H1 contract), inside freeze refuses */
+        if (cx_fmt(cmd, sizeof cmd,
+            "cd '%s' && git reset -q && git checkout -q -- tests/batches.tsv && "
+            "printf '#pragma unisa use sys.io\\nint main(void){sy_printf(\"GEN_CHECK\\\\tfacts-gen\\\\tERROR\\\\t5\\\\tboom\\\\nGEN_ALL_SUMMARY\\\\ttotal=1\\\\tpass=0\\\\tdiff=0\\\\terror=1\\\\tuncovered=0\\\\tms=5\\\\n\");return 2;}\\n' > tools/gen-all-check.cx && "
+            "git add tools/gen-all-check.cx && git -c user.name=t -c user.email=t@t commit -q --no-verify -m genall-err && "
+            "printf '/* h3 */\\n' >> include/a.h && git add include/a.h && "
+            "UNISACC_PRECOMMIT_SERIAL=1 sh ./unisacc.com tools/precommit.cx", repo4)) cpd_abort("r4fz2");
+        int rc_fz2 = ckk_sh("check-precommit-derive", cmd, out, sizeof out);
+        int ok_fz2 = (rc_fz2 == 1 && ckk_has(out, CPD_OUT, "BLOCKED freeze-gate-unavailable gate=genall"));
+
+        /* Item 6: core gate tool ENOENT in worktree during active freeze window refuses */
+        if (cx_fmt(cmd, sizeof cmd,
+            "cd '%s' && git reset -q && git checkout -q -- include/a.h && "
+            "rm -f tools/derive.cx && printf '# b-fz\\n' >> tests/batches.tsv && git add tests/batches.tsv && "
+            "UNISACC_PRECOMMIT_NO_ISOLATE=1 UNISACC_PRECOMMIT_SERIAL=1 sh ./unisacc.com tools/precommit.cx", repo4)) cpd_abort("r4fz3");
+        int rc_fz3 = ckk_sh("check-precommit-derive", cmd, out, sizeof out);
+        int ok_fz3 = (rc_fz3 == 1 && ckk_has(out, CPD_OUT, "BLOCKED freeze-gate-unavailable gate=derive"));
+
+        ck(ok_fz1 && ok_fz2 && ok_fz3,
+            "freeze-window-fail-closed-on-timeout-unavailable-error-and-enoent: active freeze.tsv blocks all fail-open exits with rerun commands");
     }
 
     {
