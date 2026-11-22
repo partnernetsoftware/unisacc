@@ -322,45 +322,98 @@ static void bench(const char *which) {
     }
 }
 
-/* PC: commit gate evaluates staged tree only (immune to unstaged foreign edits in shared worktree). */
+/* PC: commit gate evaluates staged tree only (immune to unstaged foreign edits in shared worktree),
+ * never shares inodes/hardlinks (st_nlink==1) in precommit-tree.* or cov_link_dir, cleans up all
+ * precommit-* dirs on normal/fail/timeout(SIGTERM)/flow exits, and sweeps >30min dead-PID stale dirs on startup. */
 static void group_tree_isolate(void) {
-    char out[16384], cmd[4096], root[2048], tmp[256];
+    char out[16384], cmd[8192], root[2048], tmp[256];
     if (sy_realpath(".", root, sizeof root) < 0) { ck(0, "tree-isolate.realpath"); return; }
     if (cx_fmt(tmp, sizeof tmp, "%s/pc-iso-%d-%ld", sy_tmpdir(), sy_pid(), sy_now_ms() % 100000L)) { ck(0, "tree-isolate.tmp"); return; }
     if (cx_fmt(cmd, sizeof cmd,
-        "mkdir -p '%s/repo/tools' '%s/repo/archive' '%s/isotmp' '%s/nogit' && "
-        "sh '%s/unisacc.com' -o '%s/pc.bin' '%s/tools/precommit.cx' && "
-        "git -C '%s/repo' init -q && git -C '%s/repo' config user.email t@t && git -C '%s/repo' config user.name t && "
-        "ln -s '%s/unisacc.com' '%s/repo/unisacc.com' && "
-        "printf 'int main(void){FILE*fa=fopen(\"archive/old.md\",\"r\");if(!fa){printf(\"  cxraw: a.cx archive-missing\\\\nRATCHETS\\\\tok=0\\\\tfail=1\\\\n\");return 1;}fclose(fa);FILE*f=fopen(\"other.cx\",\"r\");char b[256]={0};if(f){fread(b,1,255,f);fclose(f);}if(strstr(b,\"DIRTY_FOREIGN\")){printf(\"  cxraw: a.cx has dirty worktree bleed\\\\nRATCHETS\\\\tok=0\\\\tfail=1\\\\n\");return 1;}printf(\"RATCHETS\\\\tok=1\\\\tfail=0\\\\n\");return 0;}\\n' > '%s/repo/tools/ratchets.cx' && "
-        "printf 'historical doc\\n' > '%s/repo/archive/old.md' && "
-        "printf 'int ok(void){return 0;}\\n' > '%s/repo/a.cx' && "
-        "printf 'int clean(void){return 1;}\\n' > '%s/repo/other.cx' && "
-        "git -C '%s/repo' add a.cx other.cx archive/old.md tools/ratchets.cx && git -C '%s/repo' commit -q -m init && "
-        "printf 'int ok(void){return 2;}\\n' > '%s/repo/a.cx' && git -C '%s/repo' add a.cx && "
-        "printf '/* DIRTY_FOREIGN */\\n' > '%s/repo/other.cx' && "
-        "(cd '%s/repo' && TMPDIR='%s/isotmp' UNISACC_PRECOMMIT_IN_TREE=0 UNISACC_PRECOMMIT_SERIAL=1 '%s/pc.bin' > '%s/g1.out' 2>&1; echo G1RC=$?; cat '%s/g1.out') && "
-        "test -z \"$(ls -d '%s/isotmp'/precommit-tree.* 2>/dev/null)\" && echo ISO_CLEAN=0 || echo ISO_CLEAN=1 && "
-        "(cd '%s/repo' && UNISACC_PRECOMMIT_NO_ISOLATE=1 UNISACC_PRECOMMIT_SERIAL=1 '%s/pc.bin' > '%s/n1.out' 2>&1; echo N1RC=$?; grep 'dirty worktree bleed' '%s/n1.out' || true) && "
-        "(cd '%s/nogit' && UNISACC_PRECOMMIT_SERIAL=1 '%s/pc.bin' > '%s/ng.out' 2>&1; echo NGRC=$?; cat '%s/ng.out') && "
-        "git -C '%s/repo' add other.cx && "
-        "(cd '%s/repo' && UNISACC_PRECOMMIT_SERIAL=1 '%s/pc.bin' > '%s/s1.out' 2>&1; echo S1RC=$?; grep -E 'PRECOMMIT|PRECOMMIT_GATE_FAIL' '%s/s1.out' || true); "
-        "rm -rf '%s'",
-        tmp, tmp, tmp, tmp, root, tmp, root, tmp, tmp, tmp, root, tmp, tmp, tmp, tmp, tmp, tmp, tmp, tmp, tmp, tmp,
-        tmp, tmp, tmp, tmp, tmp,
-        tmp,
-        tmp, tmp, tmp, tmp,
-        tmp, tmp, tmp, tmp,
-        tmp, tmp, tmp, tmp, tmp, tmp)) {
+        "R='%s'; T='%s'; "
+        "mkdir -p \"$T/repo/tools\" \"$T/repo/tests\" \"$T/repo/archive\" \"$T/isotmp\" \"$T/nogit\" && "
+        "sh \"$R/unisacc.com\" -o \"$T/pc.bin\" \"$R/tools/precommit.cx\" && "
+        "sh \"$R/unisacc.com\" -o \"$T/pcf.bin\" \"$R/tools/precommit-flow.cx\" && "
+        "git -C \"$T/repo\" init -q && git -C \"$T/repo\" config user.email t@t && git -C \"$T/repo\" config user.name t && "
+        "printf '#!/bin/sh\\nif [ \"$1\" = \"tools/precommit.cx\" ]; then shift; [ \"$1\" = \"--\" ] && shift; exec \"%%s/pc.bin\" \"$@\"; fi\\nexec \"%%s/unisacc.com\" \"$@\"\\n' \"$T\" \"$R\" > \"$T/repo/unisacc.com\" && chmod +x \"$T/repo/unisacc.com\" && "
+        "cat << 'EOF' > \"$T/repo/tools/ratchets.cx\"\n"
+        "#include <stdio.h>\n#include <string.h>\n#include <sys/stat.h>\n#include <stdlib.h>\n"
+        "int main(int argc,char **argv){\n"
+        "if(argc>=4&&!strcmp(argv[1],\"--precommit\")){\n"
+        "FILE*rf=fopen(argv[2],\"r\");char rb[1024]={0};if(rf){fread(rb,1,1023,rf);fclose(rf);}\n"
+        "if(strstr(rb,\"dirty worktree bleed\")){\n"
+        "printf(\"precommit: blocked: cxraw: a.cx has dirty worktree bleed\\nRATCHETS_PRECOMMIT\\tblocked=1\\n\");return 0;}\n"
+        "if(strstr(rb,\"archive-missing\")||strstr(rb,\"hardlink-detected\")){\n"
+        "printf(\"precommit: blocked: cxraw: a.cx violation\\nRATCHETS_PRECOMMIT\\tblocked=1\\n\");return 0;}\n"
+        "printf(\"RATCHETS_PRECOMMIT\\tblocked=0\\n\");return 0;}\n"
+        "if(argc>=2&&!strcmp(argv[1],\"--plan\")){printf(\"PLAN\\trk-cxraw\\ttrue\\n\");return 0;}\n"
+        "if(argc>=3&&!strcmp(argv[1],\"--from-run\")){printf(\"RATCHETS\\tok=1\\tfail=0\\telapsed_ms=1\\n\");return 0;}\n"
+        "struct stat st_a,st_t;const char *orig_i=getenv(\"ORIG_A_INO\"),*mf=getenv(\"ISO_MARK_FILE\");\n"
+        "if(stat(\"a.cx\",&st_a)!=0||st_a.st_nlink!=1||(orig_i&&atol(orig_i)>0&&atol(orig_i)==(long)st_a.st_ino)||\n"
+        "(stat(\"tests/t1.cx\",&st_t)==0&&st_t.st_nlink!=1)){\n"
+        "printf(\"  cxraw: a.cx hardlink-detected\\nRATCHETS\\tok=0\\tfail=1\\n\");return 1;}\n"
+        "if(mf&&*mf){FILE*fp=fopen(mf,\"a\");if(fp){fprintf(fp,\"ISO_NLINK_OK=1\\n\");fclose(fp);}}\n"
+        "if(getenv(\"SLEEP_FOR_SIGTERM\")){fflush(stdout);system(\"sleep 5\");}\n"
+        "FILE*fa=fopen(\"archive/old.md\",\"r\");if(!fa){printf(\"  cxraw: a.cx archive-missing\\nRATCHETS\\tok=0\\tfail=1\\n\");return 1;}fclose(fa);\n"
+        "FILE*f=fopen(\"other.cx\",\"r\");char b[256]={0};if(f){fread(b,1,255,f);fclose(f);}\n"
+        "if(strstr(b,\"DIRTY_FOREIGN\")){printf(\"  cxraw: a.cx has dirty worktree bleed\\nRATCHETS\\tok=0\\tfail=1\\n\");return 1;}\n"
+        "printf(\"RATCHETS\\tok=1\\tfail=0\\n\");return 0;}\n"
+        "EOF\n"
+        "cat << 'EOF' > \"$T/repo/tests/run.cx\"\n"
+        "#include <stdio.h>\n#include <string.h>\n#include <sys/stat.h>\n#include <stdlib.h>\n"
+        "int main(int argc,char **argv){\n"
+        "char tp[512]={0};const char *s=argv[0],*sl=strrchr(s,47);struct stat st;\n"
+        "const char *oi=getenv(\"ORIG_T1_INO\"),*mf=getenv(\"ISO_MARK_FILE\");\n"
+        "(void)argc;\n"
+        "if(sl&&(size_t)(sl-s)<sizeof tp-10){memcpy(tp,s,(size_t)(sl-s));strcpy(tp+(sl-s),\"/t1.cx\");\n"
+        "if(stat(tp,&st)==0){\n"
+        "if(st.st_nlink!=1||(s[0]==47&&oi&&atol(oi)>0&&atol(oi)==(long)st.st_ino)){\n"
+        "printf(\"REFUSE\\tcov-hardlink-detected\\n\");return 2;}\n"
+        "if(s[0]==47&&mf&&*mf){FILE*fp=fopen(mf,\"a\");if(fp){fprintf(fp,\"COV_NLINK_OK=1\\n\");fclose(fp);}}}}\n"
+        "printf(\"PLAN\\tmetadata_valid=1\\n\");return 0;}\n"
+        "EOF\n"
+        "printf 'int t1(void){return 0;}\\n' > \"$T/repo/tests/t1.cx\" && "
+        "printf '# batches\\n' > \"$T/repo/tests/batches.tsv\" && "
+        "printf '# coverage\\n' > \"$T/repo/tests/coverage.tsv\" && "
+        "printf 'historical doc\\n' > \"$T/repo/archive/old.md\" && "
+        "printf 'int ok(void){return 0;}\\n' > \"$T/repo/a.cx\" && "
+        "printf 'int clean(void){return 1;}\\n' > \"$T/repo/other.cx\" && "
+        "git -C \"$T/repo\" add a.cx other.cx archive/old.md tools/ratchets.cx tests/run.cx tests/t1.cx tests/batches.tsv tests/coverage.tsv && "
+        "git -C \"$T/repo\" commit -q -m init && "
+        "printf 'int ok(void){return 2;}\\n' > \"$T/repo/a.cx\" && printf '# c2\\n' >> \"$T/repo/tests/coverage.tsv\" && "
+        "git -C \"$T/repo\" add a.cx tests/coverage.tsv && "
+        "ORIG_A_INO=$(stat -c %%i \"$T/repo/a.cx\") && ORIG_T1_INO=$(stat -c %%i \"$T/repo/tests/t1.cx\") && ISO_MARK_FILE=\"$T/mark.out\" && export ORIG_A_INO ORIG_T1_INO ISO_MARK_FILE && "
+        "printf '/* DIRTY_FOREIGN */\\n' > \"$T/repo/other.cx\" && "
+        "mkdir -p \"$T/isotmp/precommit-tree.999999.stale1\" \"$T/isotmp/precommit-flow-999999-100\" "
+        "\"$T/isotmp/precommit-tree.999999.fresh1\" \"$T/isotmp/precommit-tree.$$.live1\" && "
+        "touch -d '@1000000000' \"$T/isotmp/precommit-tree.999999.stale1\" \"$T/isotmp/precommit-flow-999999-100\" \"$T/isotmp/precommit-tree.$$.live1\" && "
+        "(cd \"$T/repo\" && TMPDIR=\"$T/isotmp\" UNISACC_PRECOMMIT_IN_TREE=0 UNISACC_PRECOMMIT_SERIAL=1 \"$T/pc.bin\" > \"$T/g1.out\" 2>&1; echo G1RC=$?; cat \"$T/g1.out\"); "
+        "cat \"$T/mark.out\" 2>/dev/null || true; "
+        "{ test ! -e \"$T/isotmp/precommit-tree.999999.stale1\" && test ! -e \"$T/isotmp/precommit-flow-999999-100\" && echo STALE_SWEPT=1 || echo STALE_SWEPT=0; }; "
+        "{ test -d \"$T/isotmp/precommit-tree.999999.fresh1\" && test -d \"$T/isotmp/precommit-tree.$$.live1\" && echo LIVE_FRESH_KEPT=1 || echo LIVE_FRESH_KEPT=0; }; "
+        "rm -rf \"$T/isotmp/precommit-tree.999999.fresh1\" \"$T/isotmp/precommit-tree.$$.live1\"; "
+        "(cd \"$T/repo\" && TMPDIR=\"$T/isotmp\" \"$T/pcf.bin\" > \"$T/fl.out\" 2>&1; echo FLRC=$?); "
+        "(cd \"$T/repo\" && TMPDIR=\"$T/isotmp\" SLEEP_FOR_SIGTERM=1 UNISACC_PRECOMMIT_IN_TREE=0 UNISACC_PRECOMMIT_SERIAL=1 timeout -s TERM 1 \"$T/pc.bin\" > \"$T/to.out\" 2>&1; echo TORC=$?); "
+        "(cd \"$T/repo\" && UNISACC_PRECOMMIT_NO_ISOLATE=1 UNISACC_PRECOMMIT_SERIAL=1 ORIG_A_INO=0 ORIG_T1_INO=0 \"$T/pc.bin\" > \"$T/n1.out\" 2>&1; echo N1RC=$?; grep 'dirty worktree bleed' \"$T/n1.out\" || true); "
+        "(cd \"$T/nogit\" && TMPDIR=\"$T/isotmp\" UNISACC_PRECOMMIT_SERIAL=1 \"$T/pc.bin\" > \"$T/ng.out\" 2>&1; echo NGRC=$?; cat \"$T/ng.out\"); "
+        "git -C \"$T/repo\" add other.cx; "
+        "(cd \"$T/repo\" && TMPDIR=\"$T/isotmp\" UNISACC_PRECOMMIT_IN_TREE=0 UNISACC_PRECOMMIT_SERIAL=1 \"$T/pc.bin\" > \"$T/s1.out\" 2>&1; echo S1RC=$?; grep -E 'PRECOMMIT|PRECOMMIT_GATE_FAIL' \"$T/s1.out\" || true); "
+        "LEAK_CNT=$(find \"$T/isotmp\" -mindepth 1 -maxdepth 1 \\( -name 'precommit-*' -o -name 'unisacc-session-precommit-*' \\) 2>/dev/null | wc -l); "
+        "echo LEAK_CNT=$LEAK_CNT; "
+        "rm -rf \"$T\"",
+        root, tmp)) {
         ck(0, "tree-isolate.fmt"); return;
     }
     sh(cmd, out, sizeof out, 0);
     ck(has(out, "G1RC=0\n") && has(out, "PRECOMMIT\tstaged_cx=1\tblocked=0\n"), "tree-isolate.full-tree-with-archive-and-foreign-ignored");
-    ck(has(out, "ISO_CLEAN=0\n"), "tree-isolate.temp-dir-cleaned");
+    ck(has(out, "ISO_NLINK_OK=1\n") && has(out, "COV_NLINK_OK=1\n") && !has(out, "cov-hardlink-detected"), "tree-isolate.no-hardlinks-st-nlink-1-distinct-inode");
+    ck(has(out, "STALE_SWEPT=1\n") && has(out, "LIVE_FRESH_KEPT=1\n"), "tree-isolate.startup-sweeps-stale-30m-preserves-fresh-and-live");
+    ck(has(out, "LEAK_CNT=0\n"), "tree-isolate.temp-dir-cleaned-all-exits-and-flow");
     ck(has(out, "N1RC=1\n") && has(out, "dirty worktree bleed"), "tree-isolate.no-isolate-control-fails");
     ck(has(out, "NGRC=1\n") && has(out, "PRECOMMIT_GATE_FAIL\tgate=isolate\treason=staged-tree-setup\n"), "tree-isolate.non-git-fails-closed-with-gate");
     ck(has(out, "S1RC=1\n") && has(out, "PRECOMMIT\tstaged_cx=2\tblocked=1\n") &&
        has(out, "PRECOMMIT_GATE_FAIL\tgate=ratchets\treason=ratchet-over\n"), "tree-isolate.staged-dirty-blocked-with-gate-reason");
+    if (failed) sy_printf("%s\n", out);
 }
 
 /* PC: commit-own reclaims stale slot index locks (0-byte no-holder, dead PID, btime mismatch, expired)

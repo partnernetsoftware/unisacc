@@ -22,8 +22,31 @@
 #pragma unisa use text.text
 #pragma unisa use mem.heap
 #pragma unisa use mem.bytes
+#pragma unisa use sys.posix
+#pragma unisa use sys.sig
 
 enum { PLAN_MS = 60000 };
+
+static char pcf_own_dir[1200];
+static volatile int pcf_active_child_pid = 0;
+
+static void pcf_cleanup(void) {
+    if (pcf_active_child_pid > 0) {
+        int cpid = pcf_active_child_pid;
+        pcf_active_child_pid = 0;
+        (void)sy_kill(cpid);
+    }
+    if (pcf_own_dir[0]) {
+        (void)sy_chdir("/");
+        (void)sy_remove_all(pcf_own_dir);
+        pcf_own_dir[0] = 0;
+    }
+}
+
+static void pcf_sig_cleanup(int sig) {
+    pcf_cleanup();
+    _exit(128 + sig);
+}
 
 static char *slurp(char **argv, long *n) {   /* stdout+stderr merged, bounded by PLAN_MS */
     int ofd, pid; long cap = 1 << 16, r, deadline; char *b = mm_alloc(cap);
@@ -72,7 +95,16 @@ int main(int argc, char **argv) {
         else { sy_eprintf("precommit-flow: usage: precommit-flow.cx [-- --run DIR] [--jobs N] [--verdict FILE]\n"); return 2; }
     }
     if (rdir) { if (tx_copy(dir, sizeof dir, rdir, tx_len(rdir, 1100))) return 2; }
-    else if (cx_fmt(dir, sizeof dir, "%s/precommit-flow-%d-%ld", sy_tmpdir(), sy_pid(), sy_now_ms())) return 2;
+    else {
+        if (cx_fmt(dir, sizeof dir, "%s/precommit-flow-%d-%ld", sy_tmpdir(), sy_pid(), sy_now_ms())) return 2;
+        (void)tx_copy(pcf_own_dir, sizeof pcf_own_dir, dir, tx_len(dir, 1100));
+        (void)sy_atexit(pcf_cleanup);
+        (void)sy_sig_handle(1, pcf_sig_cleanup);
+        (void)sy_sig_handle(2, pcf_sig_cleanup);
+        (void)sy_sig_handle(3, pcf_sig_cleanup);
+        (void)sy_sig_handle(14, pcf_sig_cleanup);
+        (void)sy_sig_handle(15, pcf_sig_cleanup);
+    }
     if (sy_mkdir(dir, 0700) && sy_exists(dir) != 1) { sy_eprintf("precommit-flow: cannot make %s\n", dir); return 2; }
     pv[0] = "sh"; pv[1] = "./unisacc.com"; pv[2] = "tools/precommit.cx"; pv[3] = "--"; pv[4] = "--plan"; pv[5] = dir; pv[6] = 0;
     plan = slurp(pv, &pn);

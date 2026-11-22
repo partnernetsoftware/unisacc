@@ -35,9 +35,11 @@
 #pragma unisa use sys.time
 #pragma unisa use sys.poll
 #pragma unisa use sys.posix
+#pragma unisa use sys.sig
 
 static int slurp_okrc = 0;   /* 允许的最大退出码:0=仅成功;ratchets.cx 用 1 表示「跑完了但有红行」 */
 static int slurp_last_timeout = 0, slurp_last_rc = 0, slurp_from_run_unplanned = 0;
+static volatile int pc_active_child_pid = 0;
 #define SLURP_DEADLINE_MS 55000   /* 每个子进程(含 ratchets/cx-lint/verify-deferred)最多 55 s:超时杀进程组,统一按 GATE_TIMEOUT 处理 */
 /* --plan DIR / --from-run DIR (tools/precommit-flow.cx): the gate subprocesses become flow nodes.
  * cur_gate names the gate about to call slurp (manifest, tables, runlist, facts, tlibfrozen, lint, lintr1,
@@ -112,6 +114,7 @@ static char *slurp_run(char **argv, long *n) {
     if (!b) return 0;
     pid = sy_spawn_pipe(argv, 0, 0, &ofd, 0);
     if (pid < 0) return 0;
+    pc_active_child_pid = pid;
     deadline = sy_now_ms() + SLURP_DEADLINE_MS;
     for (;;) {
         sy_pollfd_t pf; long left = deadline - sy_now_ms();
@@ -121,6 +124,7 @@ static char *slurp_run(char **argv, long *n) {
                        cur_gate ? cur_gate : "subproc", argv[0], SLURP_DEADLINE_MS / 1000);
             slurp_last_timeout = 1;
             slurp_last_rc = 124;
+            pc_active_child_pid = 0;
             sy_close(ofd); sy_kill(pid); mm_free(b); return 0;
         }
         r = sy_read(ofd, b + *n, cap - 1 - *n);
@@ -130,6 +134,7 @@ static char *slurp_run(char **argv, long *n) {
     }
     { int ex = 0, code = 0, sig = 0;
       sy_close(ofd);
+      pc_active_child_pid = 0;
       if (sy_wait_status(pid, 0, &ex, &code, &sig) != pid) {
           slurp_last_rc = -1;
           mm_free(b); *n = 0; return 0;
@@ -423,6 +428,7 @@ static int freeze_in_lane_a(const char *path, long nl) {
 }
 
 static char pc_orig_cwd[1024], pc_work_top[1024], pc_local_top[1024], pc_outer_idx[1024];
+static char pc_lint_dir[1200], pc_cov_idx_dir[1200], pc_cov_head_dir[1200], pc_genall_dir[1200], pc_flow_dir[1200];
 static int pc_is_temp_idx = 0;
 
 static int freeze_read_path(const char *path, char **out, size_t *outn, int *err_out) {
@@ -823,12 +829,12 @@ static int pc_deferred_anchors(char *top_out, size_t tcap, char *dfp_out, size_t
     const char *env_commit = sy_env("UNISACC_DEFERRED_GATES_COMMIT");
     long tl;
     if (!raw_top || !raw_top[0] || (raw_top[0] == '.' && !raw_top[1])) {
-        if (!getcwd(top_out, tcap)) return -1;
+        if (sy_cwd(top_out, (int)tcap) < 0) return -1;
     } else if (raw_top[0] == '/') {
         if (cx_fmt(top_out, tcap, "%s", raw_top)) return -1;
     } else {
         char cwd[1024];
-        if (!getcwd(cwd, sizeof cwd) || cx_fmt(top_out, tcap, "%s/%s", cwd, raw_top)) return -1;
+        if (sy_cwd(cwd, (int)sizeof cwd) < 0 || cx_fmt(top_out, tcap, "%s/%s", cwd, raw_top)) return -1;
     }
     tl = tx_len(top_out, (long)tcap);
     while (tl > 1 && top_out[tl - 1] == '/') top_out[--tl] = 0;
@@ -1186,7 +1192,7 @@ static int pc_verify_deferred(int argc, char **argv) {
         sy_eprintf("precommit: REFUSE verify-deferred-requires-gate: %d unverified record(s); run each pending gate individually with --gate <G> (<=55s per gate)\n", unv_total);
         return 2;
     }
-    if (top[0]) (void)chdir(top);
+    if (top[0]) (void)sy_chdir(top);
     if (sy_exists("./unisacc.com") == 1) {
         (void)cx_fmt(uc, sizeof uc, "./unisacc.com"); /* lint:allow R1-product precommit --verify-deferred runs gate verification via checkout product */
     } else if (pc_work_top[0] && !cx_fmt(uc, sizeof uc, "%s/unisacc.com", pc_work_top) && sy_exists(uc) == 1) { /* lint:allow R1-product precommit --verify-deferred runs gate verification via checkout product */
@@ -1662,8 +1668,9 @@ static int lint_gate(const char *names, long sn, int *absent) {
     if (plan_dir || from_run) {   /* plan stages the blobs into DIR/lintdir; from-run reuses the same paths */
         if (cx_fmt(dir, sizeof dir, "%s/lintdir", plan_dir ? plan_dir : from_run) || (sy_mkdir(dir, 0700) && sy_exists(dir) != 1)) { sy_eprintf("precommit: lint scratch dir\n"); return 1; }
     } else if (sr_scratch("precommit-lint-", dir, sizeof dir)) { sy_eprintf("precommit: lint scratch dir\n"); return 1; }
+    if (private_lint) (void)tx_copy(pc_lint_dir, sizeof pc_lint_dir, dir, tx_len(dir, 1100));
     paths = mm_alloc((size_t)(sn + 8) * sizeof *paths);
-    if (!paths) { if (private_lint) (void)sy_remove_all(dir); return 1; }
+    if (!paths) { if (private_lint) { (void)sy_remove_all(dir); pc_lint_dir[0] = 0; } return 1; }
     for (at = 0; at < sn; ) {
         long nl = tx_len(names + at, sn - at), bn; char spec[4410], *blob, *p; char *sv[] = {"git", "show", spec, 0}; int fd;
         if (nl <= 0) break;
@@ -1707,7 +1714,10 @@ static int lint_gate(const char *names, long sn, int *absent) {
     }
     for (i = 0; i < np; i++) { if (from_run) sy_unlink(paths[i]); mm_free(paths[i]); }
     mm_free(paths);
-    if (private_lint && sy_remove_all(dir)) sy_eprintf("precommit: lint scratch cleanup failed %s\n", dir);
+    if (private_lint) {
+        if (sy_remove_all(dir)) sy_eprintf("precommit: lint scratch cleanup failed %s\n", dir);
+        pc_lint_dir[0] = 0;
+    }
     return blocked;
 }
 
@@ -1728,10 +1738,13 @@ static int cov_link_dir(const char *src, const char *dst, const char *skip1, con
         char s[1500], t[1500];
         if (tx_eqz(d.name, skip1) || tx_eqz(d.name, skip2) || tx_eqz(d.name, skip3) || tx_eqz(d.name, ".git")) continue;
         if (cx_fmt(s, sizeof s, "%s/%s", src, d.name) || cx_fmt(t, sizeof t, "%s/%s", dst, d.name)) continue;
-        if (regs) {   /* tests/ 下的普通文件(批次源)须以普通文件出现:tp_visit 用 lstat 拒软链(source-not-regular) */
+        if (regs) {   /* tests/ 下的普通文件(批次源)须以独立新 inode 普通文件拷贝,严禁用 sy_link 硬链接共享仓内 inode */
             sy_stat_t st;
             if (!sy_lstat(s, &st) && st.kind == 'f') {
-                if (sy_link(s, t)) { size_t sz = 0; char *c = (char *)cx_read(s, &sz); if (c) { cx_write(t, c, sz); mm_free(c); } }
+                size_t sz = 0;
+                char *c = (char *)cx_read(s, &sz);
+                if (c) { (void)cx_write(t, c, sz); mm_free(c); }
+                else (void)cx_write(t, "", 0);
                 continue;
             }
         }
@@ -1749,13 +1762,12 @@ static int cov_dir(const char *tag, char *dir, size_t cap) {
     return cx_fmt(dir, cap, "%s/precommit-cov-%d-%s", sy_tmpdir(), sy_pid(), tag);
 }
 static void cov_clean(const char *tag) {
-    sy_dir_t d; char dir[1200], t[1500], u[1500];
+    char dir[1200];
     if (plan_dir && cov_flow(tag)) return;   /* the coveval flow node still has to run in it */
-    if (cov_dir(tag, dir, sizeof dir) || cx_fmt(t, sizeof t, "%s/tests", dir)) return;
-    if (!sy_dir_open(&d, t)) { while (sy_dir_next(&d) == 1) if (!cx_fmt(u, sizeof u, "%s/%s", t, d.name)) sy_unlink(u); sy_dir_close(&d); }
-    sy_rmdir(t);
-    if (!sy_dir_open(&d, dir)) { while (sy_dir_next(&d) == 1) if (!cx_fmt(u, sizeof u, "%s/%s", dir, d.name)) sy_unlink(u); sy_dir_close(&d); }
-    sy_rmdir(dir);
+    if (cov_dir(tag, dir, sizeof dir)) return;
+    (void)sy_remove_all(dir);
+    if (tx_eqz(tag, "idx")) pc_cov_idx_dir[0] = 0;
+    else if (tx_eqz(tag, "head")) pc_cov_head_dir[0] = 0;
 }
 /* 求值一版:返回 0=解析通过;1=unknown-coverage,*idv 放首个 id;2=其他行首 REFUSE(环境类如 source-not-regular),*idv 放原因;-1=没跑.
  * cov_gate 对 2 与 -1 一律具名拦截,不静默放行;只有夹具仓(工作树根无 tests/run.cx)跳过并打印 COVGATE skipped=1.
@@ -1790,6 +1802,10 @@ static int cov_eval(const char *tag, const char *reg, long rn, const char *cov, 
         cur_gate = "coveval"; slurp_okrc = 255; b = gate_slurp(0, &total); slurp_okrc = 0; cur_gate = 0;
         if (!b) return -1;
     } else {
+    if (!cov_flow(tag)) {
+        if (tx_eqz(tag, "idx")) (void)tx_copy(pc_cov_idx_dir, sizeof pc_cov_idx_dir, dir, tx_len(dir, 1100));
+        else if (tx_eqz(tag, "head")) (void)tx_copy(pc_cov_head_dir, sizeof pc_cov_head_dir, dir, tx_len(dir, 1100));
+    }
     if (cx_fmt(tdir, sizeof tdir, "%s/tests", dir) || sy_mkdir(dir, 0700) || sy_mkdir(tdir, 0700)) return -1;
     cov_link_dir(cwd, dir, "tests", "", "", 0);
     { char s[1300]; if (cx_fmt(s, sizeof s, "%s/tests", cwd)) return -1; cov_link_dir(s, tdir, "batches.tsv", "coverage.tsv", "run.cx", 1); }
@@ -1810,10 +1826,12 @@ static int cov_eval(const char *tag, const char *reg, long rn, const char *cov, 
       if (!b) return -1;
       pid = sy_spawn_pipe(ev, 0, 0, &ofd, 0);
       if (pid < 0) { mm_free(b); return -1; }
+      pc_active_child_pid = pid;
       { long deadline = sy_now_ms() + 30000;
         for (;;) { sy_pollfd_t pf; long left = deadline - sy_now_ms(); pf.fd = ofd; pf.events = SY_POLLIN; pf.revents = 0;
-          if (left <= 0 || sy_poll(&pf, 1, left) <= 0) { sy_close(ofd); sy_kill(pid); mm_free(b); return -1; }
+          if (left <= 0 || sy_poll(&pf, 1, left) <= 0) { pc_active_child_pid = 0; sy_close(ofd); sy_kill(pid); mm_free(b); return -1; }
           r = sy_read(ofd, b + total, (1 << 20) - 1 - total); if (r <= 0) break; total += r; if (total >= (1 << 20) - 2) break; } }
+      pc_active_child_pid = 0;
       sy_close(ofd); sy_wait_status(pid, 0, &ex, &code, &sig); b[total] = 0; }
     }
     { a = tx_find(b, total, "unknown-coverage row=", 21);
@@ -2118,32 +2136,37 @@ static int dg_genall_gate(const char *wt, const char *allz, long alln, const cha
     {
         const char *td = sy_tmpdir();
         const char *base_td = (td && td[0] == '/') ? td : "/tmp";
+        if (cx_fmt(pc_genall_dir, sizeof pc_genall_dir, "%s/precommit-genall-%d", base_td, sy_pid()))
+            pc_genall_dir[0] = 0;
+        if (pc_genall_dir[0]) (void)sy_remove_all(pc_genall_dir);
         if (tool_only && only_list[0]) {
             if (cx_fmt(scmd, sizeof scmd,
                 "top=$(git rev-parse --show-toplevel) || exit 2; [ -e \"$top/unisacc.com\" ] || exit 2; "
-                "t=$(git write-tree) || exit 2; d=$(mktemp -d '%s/precommit-genall.XXXXXX') || exit 2; "
-                "trap 'rm -rf \"$d\"' 0; git archive \"$t\" | tar -x -C \"$d\" || exit 2; "
+                "t=$(git write-tree) || exit 2; d='%s'; sy_mk=0; "
+                "trap 'rm -rf \"$d\"' 0 1 2 3 14 15; git archive \"$t\" | tar -x -C \"$d\" || exit 2; "
                 "ln -sf \"$top/unisacc.com\" \"$d/unisacc.com\" || exit 2; "
                 "if [ -x ./tools/bound ] && [ -f ./tools/bound.c ]; then ./tools/bound %d sh ./unisacc.com tools/gen-all-check.cx -- --root \"$d\" --only '%s'; "
                 "else sh ./unisacc.com tools/gen-all-check.cx -- --root \"$d\" --only '%s'; fi",
-                base_td, bound_s, only_list, only_list)) {
+                pc_genall_dir, bound_s, only_list, only_list)) {
                 tool_only = 0;
             }
         }
         if (!tool_only || !only_list[0]) {
             if (cx_fmt(scmd, sizeof scmd,
                 "top=$(git rev-parse --show-toplevel) || exit 2; [ -e \"$top/unisacc.com\" ] || exit 2; "
-                "t=$(git write-tree) || exit 2; d=$(mktemp -d '%s/precommit-genall.XXXXXX') || exit 2; "
-                "trap 'rm -rf \"$d\"' 0; git archive \"$t\" | tar -x -C \"$d\" || exit 2; "
+                "t=$(git write-tree) || exit 2; d='%s'; "
+                "trap 'rm -rf \"$d\"' 0 1 2 3 14 15; git archive \"$t\" | tar -x -C \"$d\" || exit 2; "
                 "ln -sf \"$top/unisacc.com\" \"$d/unisacc.com\" || exit 2; "
                 "if [ -x ./tools/bound ] && [ -f ./tools/bound.c ]; then ./tools/bound %d sh ./unisacc.com tools/gen-all-check.cx -- --root \"$d\"; "
                 "else sh ./unisacc.com tools/gen-all-check.cx -- --root \"$d\"; fi",
-                base_td, bound_s)) {
+                pc_genall_dir, bound_s)) {
+                pc_genall_dir[0] = 0;
                 return pc_handle_gate_unavailable("genall", "GEN_ALL_GATE_UNAVAILABLE", 0, bound_s, staged_total,
                                                   "(genall command buffer overflow)",
                                                   "sh ./unisacc.com tools/gen-all-check.cx -- --root .");
             }
         }
+        if (!plan_dir && pc_genall_dir[0]) (void)sy_mkdir(pc_genall_dir, 0700);
     }
     {
         char *gv[] = {"sh", "-c", scmd, 0}; /* lint:allow R1-product precommit runs tools/gen-all-check.cx bounded on staged index tree */
@@ -2153,6 +2176,7 @@ static int dg_genall_gate(const char *wt, const char *allz, long alln, const cha
         is_to = slurp_last_timeout;
         slurp_okrc = 0;
         cur_gate = 0;
+        if (pc_genall_dir[0]) { (void)sy_remove_all(pc_genall_dir); pc_genall_dir[0] = 0; }
     }
     if (plan_dir) {
         if (gout) mm_free(gout);
@@ -2505,7 +2529,7 @@ static int flow_route(void) {
     static const char *g[3] = {"manifest", "tables", "runlist"};
     const char *ser = sy_env("UNISACC_PRECOMMIT_SERIAL");
     char vf[1200], want[40], *vb; size_t vn = 0;
-    char *fv[] = {"/bin/sh", "./unisacc.com", "tools/precommit-flow.cx", "--", "--verdict", vf, 0};
+    char *fv[] = {"/bin/sh", "./unisacc.com", "tools/precommit-flow.cx", "--", "--run", pc_flow_dir, "--verdict", vf, 0};
     int i, hit = 0, pid, ex = 0, code = 0, sig = 0, judged;
     if (ser && ser[0] && ser[0] != '0') return -1;
     if (sy_exists("./unisacc.com") != 1 || sy_exists("tools/precommit-flow.cx") != 1 || sy_exists("tools/cxlib/flowexec.cx") != 1 ||
@@ -2518,16 +2542,23 @@ static int flow_route(void) {
     }
     gt_na = 0; gt_nal[0] = 0;   /* probing only: the real pass counts NOT_AFFECTED again */
     if (hit <= 0) return -1;
-    if (cx_fmt(vf, sizeof vf, "%s/precommit-route-%d.rc", sy_tmpdir(), sy_pid())) return -1;
+    if (cx_fmt(vf, sizeof vf, "%s/precommit-route-%d.rc", sy_tmpdir(), sy_pid()) ||
+        cx_fmt(pc_flow_dir, sizeof pc_flow_dir, "%s/precommit-flow-%d-%ld", sy_tmpdir(), sy_pid(), sy_now_ms())) {
+        pc_flow_dir[0] = 0;
+        return -1;
+    }
     sy_unlink(vf);
     pid = sy_spawn_inherit(fv, -1);   /* bounded: FLOW_ROUTE_MS deadline below, then killed and counted as no verdict */
     if (pid < 0) { ex = 0; code = -1; }
     else {
         long deadline = sy_now_ms() + FLOW_ROUTE_MS; int w = 0;
+        pc_active_child_pid = pid;
         while ((w = sy_wait_status(pid, 1, &ex, &code, &sig)) == 0 && sy_now_ms() < deadline) sy_sleep_ms(20);
+        pc_active_child_pid = 0;
         if (w == 0) { sy_eprintf("precommit: tools/precommit-flow.cx timed out after %d ms\n", FLOW_ROUTE_MS); sy_kill(pid); sy_wait_status(pid, 0, 0, 0, 0); }
         if (w != pid) { ex = 0; code = -1; }
     }
+    if (pc_flow_dir[0]) { (void)sy_remove_all(pc_flow_dir); pc_flow_dir[0] = 0; }
     /* a verdict counts only when the judge pass ran: precommit-flow.cx then leaves RC<TAB>code in vf, equal to its exit code.
        Anything else (it did not compile, the flow engine failed, it was killed) is no verdict: run the same gates serially. */
     vb = (char *)cx_read(vf, &vn); sy_unlink(vf);
@@ -2615,7 +2646,7 @@ static int precheck(int argc, char **argv) {
 #define PC_ISOLATE_SETUP_SH \
     "g=$(git rev-parse --absolute-git-dir 2>/dev/null) || exit 1; " \
     "idx=''; if [ -n \"$GIT_INDEX_FILE\" ]; then case \"$GIT_INDEX_FILE\" in /*) idx=\"$GIT_INDEX_FILE\" ;; *) idx=\"$PWD/$GIT_INDEX_FILE\" ;; esac; fi; " \
-    "d=$(mktemp -d \"${TMPDIR:-/tmp}/precommit-tree.XXXXXX\") || exit 1; " \
+    "d=$(mktemp -d \"${TMPDIR:-/tmp}/precommit-tree.${UNISACC_PRECOMMIT_OWNER_PID:-$$}.XXXXXX\") || exit 1; " \
     "si=\"$d.idx\"; src=\"${idx:-$g/index}\"; " \
     "if [ -f \"$src\" ]; then cp \"$src\" \"$si\" && t=$(GIT_DIR=\"$g\" GIT_INDEX_FILE=\"$si\" git write-tree 2>/dev/null) || { rm -rf \"$d\" \"$si\"; exit 1; }; " \
     "else t=$(GIT_DIR=\"$g\" git write-tree 2>/dev/null) || { rm -rf \"$d\" \"$si\"; exit 1; }; fi; " \
@@ -2626,22 +2657,9 @@ static int precheck(int argc, char **argv) {
     "fi; " \
     "rm -f \"$si\"; " \
     "[ -e \"$d/.git\" ] || [ -L \"$d/.git\" ] || ln -s \"$g\" \"$d/.git\"; " \
-    "wt_top=$(git rev-parse --show-toplevel 2>/dev/null || printf '%s' \"$PWD\"); " \
-    "w=\"${UNISACC_PRECOMMIT_WORK_TOP:-$wt_top}\"; " \
-    "for _f in unisacc.com unisacc.com.build.json .devsvc cx ext cxroot.tsv tools; do " \
-    "  if [ ! -e \"$d/$_f\" ] && [ ! -L \"$d/$_f\" ]; then " \
-    "    if [ -e \"$w/$_f\" ] || [ -L \"$w/$_f\" ]; then ln -s \"$w/$_f\" \"$d/$_f\"; " \
-    "    elif [ -e \"$wt_top/$_f\" ] || [ -L \"$wt_top/$_f\" ]; then ln -s \"$wt_top/$_f\" \"$d/$_f\"; fi; " \
-    "  fi; " \
-    "done; " \
-    "for _sd in tools tests; do " \
-    "  if [ -d \"$w/$_sd\" ] && [ ! -L \"$w/$_sd\" ] && [ -d \"$d/$_sd\" ] && [ ! -L \"$d/$_sd\" ]; then " \
-    "    for _tf in \"$w/$_sd\"/*; do _bn=${_tf#\"$w/$_sd\"/}; [ ! -L \"$_tf\" ] || [ -e \"$d/$_sd/$_bn\" ] || [ -L \"$d/$_sd/$_bn\" ] || ln -s \"$_tf\" \"$d/$_sd/$_bn\"; done; " \
-    "  fi; " \
-    "done; " \
     "printf '%s\\t%s\\t%s\\n' \"$d\" \"$g\" \"$idx\""
 
-static char pc_iso_dir[1024];
+static char pc_iso_dir[1024], pc_iso_idx[1040], pc_toolsreg_dir[1200];
 static char pc_blk_gate[32], pc_blk_reason[48];
 
 static void pc_mark_block(const char *gate, const char *reason) {
@@ -2861,19 +2879,226 @@ static int conflict_marker_gate(void) {
     return bad;
 }
 
+static void pc_cleanup_all_tmp(void) {
+    char f1[1200], f2[1200];
+    const char *td = sy_tmpdir();
+    const char *base_td = (td && td[0] == '/') ? td : "/tmp";
+    int pid = sy_pid();
+    if (pc_active_child_pid > 0) {
+        int cpid = pc_active_child_pid;
+        pc_active_child_pid = 0;
+        (void)sy_kill(cpid);
+    }
+    (void)sy_chdir("/");
+    if (pc_lint_dir[0]) { (void)sy_remove_all(pc_lint_dir); pc_lint_dir[0] = 0; }
+    if (pc_cov_idx_dir[0]) { (void)sy_remove_all(pc_cov_idx_dir); pc_cov_idx_dir[0] = 0; }
+    if (pc_cov_head_dir[0]) { (void)sy_remove_all(pc_cov_head_dir); pc_cov_head_dir[0] = 0; }
+    if (pc_genall_dir[0]) { (void)sy_remove_all(pc_genall_dir); pc_genall_dir[0] = 0; }
+    if (pc_toolsreg_dir[0]) { (void)sy_remove_all(pc_toolsreg_dir); pc_toolsreg_dir[0] = 0; }
+    if (pc_flow_dir[0]) { (void)sy_remove_all(pc_flow_dir); pc_flow_dir[0] = 0; }
+    if (pc_iso_idx[0]) { (void)sy_unlink(pc_iso_idx); pc_iso_idx[0] = 0; }
+    if (pc_iso_dir[0]) { (void)sy_remove_all(pc_iso_dir); pc_iso_dir[0] = 0; }
+    if (!cx_fmt(f1, sizeof f1, "%s/precommit-rk-%d.rows", base_td, pid)) (void)sy_unlink(f1);
+    if (!cx_fmt(f2, sizeof f2, "%s/precommit-rk-%d.paths", base_td, pid)) (void)sy_unlink(f2);
+    if (!cx_fmt(f1, sizeof f1, "%s/precommit-ledger-%d.tsv", base_td, pid)) (void)sy_unlink(f1);
+    if (!cx_fmt(f2, sizeof f2, "%s/precommit-ledger-%d.base", base_td, pid)) (void)sy_unlink(f2);
+    if (!cx_fmt(f1, sizeof f1, "%s/precommit-newtool-%d.o", base_td, pid)) (void)sy_unlink(f1);
+    if (!cx_fmt(f2, sizeof f2, "%s/precommit-route-%d.rc", base_td, pid)) (void)sy_unlink(f2);
+}
+
 static void pc_iso_cleanup(void) {
-    if (!pc_iso_dir[0]) return;
-    char *rv[] = { "rm", "-rf", pc_iso_dir, 0 };
-    long rn = 0;
-    (void)chdir("/");
-    char *o = slurp_run(rv, &rn);
-    if (o) mm_free(o);
-    pc_iso_dir[0] = 0;
+    pc_cleanup_all_tmp();
+}
+
+static void pc_sig_cleanup(int sig) {
+    pc_cleanup_all_tmp();
+    _exit(128 + sig);
+}
+
+static void pc_register_cleanup_hooks(void) {
+    (void)sy_atexit(pc_cleanup_all_tmp);
+    (void)sy_sig_handle(1, pc_sig_cleanup);
+    (void)sy_sig_handle(2, pc_sig_cleanup);
+    (void)sy_sig_handle(3, pc_sig_cleanup);
+    (void)sy_sig_handle(14, pc_sig_cleanup);
+    (void)sy_sig_handle(15, pc_sig_cleanup);
+}
+
+static int pc_is_own_tmp_prefix(const char *name, long nl, int *pid_off_out) {
+    static const struct { const char *pre; long len; int has_pid; } tbl[] = {
+        { "precommit-tree.", 15, 1 },
+        { "precommit-flow-", 15, 1 },
+        { "precommit-cov-", 14, 1 },
+        { "precommit-genall.", 17, 0 },
+        { "precommit-genall-", 17, 1 },
+        { "precommit-toolsreg.", 19, 0 },
+        { "precommit-toolsreg-", 19, 1 },
+        { "precommit-rk-", 13, 1 },
+        { "precommit-ledger-", 17, 1 },
+        { "precommit-newtool-", 18, 1 },
+        { "precommit-route-", 16, 1 },
+        { "unisacc-session-precommit-lint-", 31, 0 },
+        { 0, 0, 0 }
+    };
+    int i;
+    if (pid_off_out) *pid_off_out = -1;
+    for (i = 0; tbl[i].pre; i++) {
+        if (nl > tbl[i].len && tx_prefix(name, nl, tbl[i].pre, tbl[i].len)) {
+            if (tbl[i].has_pid && pid_off_out) *pid_off_out = (int)tbl[i].len;
+            return 1;
+        }
+    }
+    return 0;
+}
+
+static void pc_sweep_stale_tmp(void) {
+    const char *td = sy_tmpdir();
+    const char *base_td = (td && td[0] == '/') ? td : "/tmp";
+    sy_stat_t self_st, st;
+    sy_dir_t d;
+    long now = sy_wall_s(), my_uid = -1;
+    int my_pid = sy_pid();
+    if (sy_lstat(base_td, &self_st) == 0 && base_td != (const char *)"/tmp") my_uid = self_st.uid;
+    else if (sy_lstat(".", &self_st) == 0) my_uid = self_st.uid;
+    if (my_uid < 0 || sy_dir_open(&d, base_td) != 0) return;
+    while (sy_dir_next(&d) == 1) {
+        int pid_off = -1, opid = 0;
+        char full[1400];
+        if (!pc_is_own_tmp_prefix(d.name, d.name_n, &pid_off)) continue;
+        if (cx_fmt(full, sizeof full, "%s/%s", base_td, d.name)) continue;
+        if (sy_lstat(full, &st) != 0 || st.uid != my_uid) continue;
+        if (now - st.mtime < 1800) continue;
+        if (pid_off >= 0 && pid_off < d.name_n) {
+            long k = pid_off;
+            while (k < d.name_n && d.name[k] >= '0' && d.name[k] <= '9' && opid < 100000000) {
+                opid = opid * 10 + (d.name[k] - '0');
+                k++;
+            }
+            if (opid > 1 && (opid == my_pid || sy_getpgid(opid) >= 0 || sy_signal(opid, 0) == 0))
+                continue;
+        }
+        (void)sy_remove_all(full);
+    }
+    sy_dir_close(&d);
+}
+
+static int pc_copy_tree(const char *src, const char *dst, int depth) {
+    sy_stat_t st;
+    if (!src || !dst || depth > 8) return -1;
+    if (sy_stat(src, &st) != 0) return -1;
+    if (st.kind == 'f') {
+        size_t sz = 0;
+        char *b = (char *)cx_read(src, &sz);
+        int fd, mode = (st.mode & 0111) ? 0700 : 0600;
+        (void)sy_unlink(dst);
+        fd = sy_open_new(dst, mode);
+        if (fd < 0) { if (b) mm_free(b); return -1; }
+        if (b && sz > 0) (void)sy_write_all(fd, b, (long)sz);
+        sy_close(fd);
+        if (b) mm_free(b);
+        return 0;
+    }
+    if (st.kind == 'd') {
+        sy_dir_t d;
+        (void)sy_unlink(dst);
+        if (sy_mkdir(dst, 0700) != 0 && sy_exists(dst) != 1) return -1;
+        if (sy_dir_open(&d, src) != 0) return -1;
+        while (sy_dir_next(&d) == 1) {
+            char cs[1400], cd[1400];
+            if (tx_eqz(d.name, ".git") || tx_eqz(d.name, ".devsvc")) continue;
+            if (!cx_fmt(cs, sizeof cs, "%s/%s", src, d.name) &&
+                !cx_fmt(cd, sizeof cd, "%s/%s", dst, d.name)) {
+                (void)pc_copy_tree(cs, cd, depth + 1);
+            }
+        }
+        sy_dir_close(&d);
+        return 0;
+    }
+    return -1;
+}
+
+static void pc_populate_isolated_tree(const char *iso) {
+    const char *w = pc_work_top[0] ? pc_work_top : (pc_local_top[0] ? pc_local_top : pc_orig_cwd);
+    const char *wt = pc_local_top[0] ? pc_local_top : (pc_orig_cwd[0] ? pc_orig_cwd : w);
+    static const char * const link_items[] = { "unisacc.com", ".devsvc", 0 };
+    static const char * const copy_items[] = { "unisacc.com.build.json", "cxroot.tsv", "cx", "ext", 0 };
+    static const char * const core_tools[] = {
+        "cxlib", "bound", "bound.c", "precommit.cx", "precommit-flow.cx", "derive.cx",
+        "gen-all-check.cx", "ratchets.cx", "cx-lint.cx", "check-tlib-frozen.cx",
+        "layer-api.cx", "bump.cx", "reg-manifest.cx", "tables-gen.cx", "facts-gen.cx",
+        "ledger-add.cx", "tool-index.cx", "links-gen.cx", 0
+    };
+    static const char * const subdirs[] = { "tools", "tests", 0 };
+    int i;
+    for (i = 0; link_items[i]; i++) {
+        char dp[1400], sp[1400];
+        sy_stat_t st;
+        if (cx_fmt(dp, sizeof dp, "%s/%s", iso, link_items[i])) continue;
+        if (sy_lstat(dp, &st) == 0) continue;
+        if (w[0] && !cx_fmt(sp, sizeof sp, "%s/%s", w, link_items[i]) && sy_lstat(sp, &st) == 0) {
+            (void)sy_symlink(sp, dp);
+        } else if (wt[0] && !cx_fmt(sp, sizeof sp, "%s/%s", wt, link_items[i]) && sy_lstat(sp, &st) == 0) {
+            (void)sy_symlink(sp, dp);
+        }
+    }
+    for (i = 0; copy_items[i]; i++) {
+        char dp[1400], sp[1400];
+        sy_stat_t st;
+        if (cx_fmt(dp, sizeof dp, "%s/%s", iso, copy_items[i])) continue;
+        if (sy_lstat(dp, &st) == 0 && st.kind != 'l') continue;
+        if (w[0] && !cx_fmt(sp, sizeof sp, "%s/%s", w, copy_items[i]) && sy_stat(sp, &st) == 0) {
+            (void)pc_copy_tree(sp, dp, 0);
+        } else if (wt[0] && !cx_fmt(sp, sizeof sp, "%s/%s", wt, copy_items[i]) && sy_stat(sp, &st) == 0) {
+            (void)pc_copy_tree(sp, dp, 0);
+        }
+    }
+    {
+        char tdp[1400], tsp[1400];
+        sy_stat_t st;
+        if (!cx_fmt(tdp, sizeof tdp, "%s/tools", iso)) {
+            if (sy_lstat(tdp, &st) != 0 || st.kind == 'l') {
+                const char *base = (wt[0] && !cx_fmt(tsp, sizeof tsp, "%s/tools", wt) && sy_stat(tsp, &st) == 0) ? wt : w;
+                (void)sy_unlink(tdp);
+                (void)sy_mkdir(tdp, 0700);
+                for (i = 0; base && base[0] && core_tools[i]; i++) {
+                    char cs[1400], cd[1400];
+                    if (!cx_fmt(cs, sizeof cs, "%s/tools/%s", base, core_tools[i]) &&
+                        !cx_fmt(cd, sizeof cd, "%s/tools/%s", iso, core_tools[i]) &&
+                        sy_stat(cs, &st) == 0) {
+                        (void)pc_copy_tree(cs, cd, 0);
+                    }
+                }
+            }
+        }
+    }
+    for (i = 0; subdirs[i]; i++) {
+        char dsd[1400], ssd[1400];
+        sy_stat_t dst_st, src_st;
+        sy_dir_t d;
+        const char *base = wt[0] ? wt : w;
+        if (!base || !base[0]) continue;
+        if (cx_fmt(dsd, sizeof dsd, "%s/%s", iso, subdirs[i]) ||
+            cx_fmt(ssd, sizeof ssd, "%s/%s", base, subdirs[i])) continue;
+        if (sy_lstat(dsd, &dst_st) != 0 || dst_st.kind != 'd') continue;
+        if (sy_lstat(ssd, &src_st) != 0 || src_st.kind != 'd') continue;
+        if (sy_dir_open(&d, ssd) != 0) continue;
+        while (sy_dir_next(&d) == 1) {
+            char sp[1400], dp[1400];
+            sy_stat_t lst;
+            if (cx_fmt(sp, sizeof sp, "%s/%s", ssd, d.name) ||
+                cx_fmt(dp, sizeof dp, "%s/%s", dsd, d.name)) continue;
+            if (sy_lstat(sp, &lst) == 0 && lst.kind == 'l') {
+                if (sy_lstat(dp, &lst) != 0 || lst.kind == 'l')
+                    (void)pc_copy_tree(sp, dp, 0);
+            }
+        }
+        sy_dir_close(&d);
+    }
 }
 
 static int pc_capture_work_top(void) {
     const char *env_top = sy_env("UNISACC_PRECOMMIT_WORK_TOP");
-    if (!getcwd(pc_orig_cwd, sizeof pc_orig_cwd)) {
+    if (sy_cwd(pc_orig_cwd, (int)sizeof pc_orig_cwd) < 0) {
         sy_eprintf("precommit: getcwd failed\n");
         return -1;
     }
@@ -2950,8 +3175,9 @@ static int isolate_staged_tree(void) {
     const char *in_tree = sy_env("UNISACC_PRECOMMIT_IN_TREE");
     const char *no_iso  = sy_env("UNISACC_PRECOMMIT_NO_ISOLATE");
     const char *devmeta = sy_env("UNISACC_DEVMETA_DIR");
-    char cwd_chk[1024];
+    char cwd_chk[1024], pbuf[32];
     if ((in_tree && in_tree[0] == '1') || (no_iso && no_iso[0] == '1') || (devmeta && devmeta[0])) return 0;
+    if (!cx_fmt(pbuf, sizeof pbuf, "%d", sy_pid())) sy_setenv("UNISACC_PRECOMMIT_OWNER_PID", pbuf, 1);
     char *iv[] = { "/bin/sh", "-c", PC_ISOLATE_SETUP_SH, 0 };
     long on = 0;
     char *o = slurp_run(iv, &on);
@@ -2970,18 +3196,20 @@ static int isolate_staged_tree(void) {
     }
     char gdir[1024], idxp[1024];
     mm_copy(pc_iso_dir, sizeof pc_iso_dir, o + o0, (size_t)l0); pc_iso_dir[l0] = 0;
+    (void)cx_fmt(pc_iso_idx, sizeof pc_iso_idx, "%s.idx", pc_iso_dir);
     mm_copy(gdir, sizeof gdir, o + o1, (size_t)l1); gdir[l1] = 0;
     idxp[0] = 0;
     if (!tx_field(o, on, '\t', 2, &o2, &l2) && l2 > 0 && l2 < (long)sizeof idxp) {
         mm_copy(idxp, sizeof idxp, o + o2, (size_t)l2); idxp[l2] = 0;
     }
     mm_free(o);
-    if (!getcwd(cwd_chk, sizeof cwd_chk)) {
+    pc_populate_isolated_tree(pc_iso_dir);
+    if (sy_cwd(cwd_chk, (int)sizeof cwd_chk) < 0) {
         sy_eprintf("precommit: isolate_staged_tree getcwd failed\n");
         pc_iso_cleanup();
         return -1;
     }
-    if (chdir(pc_iso_dir) != 0) {
+    if (sy_chdir(pc_iso_dir) != 0) {
         sy_eprintf("precommit: isolate_staged_tree chdir failed\n");
         pc_iso_cleanup();
         return -1;
@@ -2990,12 +3218,13 @@ static int isolate_staged_tree(void) {
     sy_setenv("GIT_WORK_TREE", pc_iso_dir, 1);
     sy_setenv("UNISACC_PRECOMMIT_IN_TREE", "1", 1);
     if (idxp[0]) sy_setenv("GIT_INDEX_FILE", idxp, 1);
-    atexit(pc_iso_cleanup);
     return 0;
 }
 
 int main(int argc, char **argv) {
     long sn, rn, at; int staged = 0, blocked = 0, lint_absent = 0;
+    pc_register_cleanup_hooks();
+    pc_sweep_stale_tmp();
     if (argc >= 2 && tx_eqz(argv[1], "--precheck")) return precheck(argc, argv);
     if (argc >= 2 && tx_eqz(argv[1], "--verify-deferred")) {
         if (pc_capture_work_top() != 0) return 1;
