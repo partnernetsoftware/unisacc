@@ -23,7 +23,15 @@
 GPU_STENCIL_OPS ops=8 variants=3 stencil_values=24 failed=0
 ```
 
-先前浏览器读回失败的成因仍未知。本次主线复验覆盖全部 24 组模板值。
+同一归档副本追加三次单路复验，每次间隔约 2 秒，退出码和原始输出如下。
+
+```text
+第 1 次 rc=0  GPU_STENCIL_OPS ops=8 variants=3 stencil_values=24 failed=0
+第 2 次 rc=0  GPU_STENCIL_OPS ops=8 variants=3 stencil_values=24 failed=0
+第 3 次 rc=0  GPU_STENCIL_OPS ops=8 variants=3 stencil_values=24 failed=0
+```
+
+状态为已关闭。先前浏览器读回失败的成因未查明，可能为偶发。
 
 ## A 栏 35 项分组
 
