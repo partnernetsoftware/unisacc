@@ -4,13 +4,18 @@
  *       [--fixture FILE] [--tail-lines K] [--mutant-no-stall]
  *
  * Windows table (default skills/unisacc-orch-supervise/team-windows.tsv):
- *   window model lane write_prefix   (write_prefix may be comma-separated path prefixes)
+ *   window model lane write_prefix kind
+ *   kind=commit|analysis; write_prefix may be comma-separated path prefixes.
  *
- * Live: tmux capture-pane -p -t WINDOW. Fixture: === PANE NAME === panels (observe-agents style).
- * tmux missing/fail -> status UNKNOWN. Read-only: no mail, no window mutation.
+ * Live: tmux capture-pane -p -t WINDOW. Fixture: === PANE NAME === panels.
+ * tmux missing/fail -> status UNKNOWN. Read-only.
+ *
+ * ctx_pct is always remaining, annotated as left=NN (Codex left/used, omp bar used,
+ * Claude ctx used are converted). STALLED only for kind=commit IDLE overdue;
+ * analysis IDLE overdue -> IDLE_LONG.
  *
  * Output: PULSE<TAB>window<TAB>status<TAB>ctx_pct<TAB>commit<TAB>age_min<TAB>flags
- * then TEAM_PULSE<TAB>windows=W<TAB>stalled=S<TAB>ctx_low=C<TAB>filtered=F */
+ * then TEAM_PULSE<TAB>windows=W<TAB>stalled=S<TAB>idle_long=L<TAB>ctx_low=C<TAB>filtered=F */
 #pragma unisa use cxlib.ckrun
 #pragma unisa use cxlib.procrun
 #pragma unisa use sys.fs
@@ -27,13 +32,13 @@
 #define TP_CAP (1 << 16)
 
 typedef struct {
-    char window[64], model[64], lane[32], prefix[512];
+    char window[64], model[64], lane[32], prefix[512], kind[16];
 } Win;
 static Win g_w[TP_MAXW];
 static int g_nw, g_stall_min = 45, g_tail = 80, g_mutant;
 static char g_table[1100], g_fix[1100];
 static long g_now;
-static int g_n_stalled, g_n_ctxlow, g_n_filtered;
+static int g_n_stalled, g_n_idle_long, g_n_ctxlow, g_n_filtered;
 
 static int die(const char *m) { fprintf(stderr, "team-pulse: %s\n", m); return 2; }
 
@@ -41,28 +46,32 @@ static int load_table(const char *path) {
     unsigned char *b; int64_t n; long i = 0, row = 0;
     if (sy_read_file(path, &b, &n, 1 << 20) < 0 || !b) return die("read windows-table");
     while (i < n && g_nw < TP_MAXW) {
-        long s = i, e, c1 = -1, c2 = -1, c3 = -1, j;
+        long s = i, e, c[4], nc = 0, j;
         while (i < n && b[i] != '\n') i++;
         e = i; if (i < n) i++;
         if (e > s && b[s] == '#') continue;
         if (e == s) continue;
         row++;
         if (row == 1) continue;
+        c[0] = c[1] = c[2] = c[3] = -1;
         for (j = s; j < e; j++) {
             if (b[j] != '\t') continue;
-            if (c1 < 0) c1 = j;
-            else if (c2 < 0) c2 = j;
-            else if (c3 < 0) { c3 = j; break; }
+            if (nc < 4) c[nc++] = j;
         }
-        if (c1 < 0 || c2 < 0 || c3 < 0) { mm_free(b); return die("bad windows-table row"); }
-        if (c1 - s >= (long)sizeof g_w[0].window || c2 - c1 >= (long)sizeof g_w[0].model ||
-            c3 - c2 >= (long)sizeof g_w[0].lane || e - c3 >= (long)sizeof g_w[0].prefix) {
+        if (nc != 4) { mm_free(b); return die("bad windows-table row (need 5 cols)"); }
+        if (c[0] - s >= (long)sizeof g_w[0].window || c[1] - c[0] >= (long)sizeof g_w[0].model ||
+            c[2] - c[1] >= (long)sizeof g_w[0].lane || c[3] - c[2] >= (long)sizeof g_w[0].prefix ||
+            e - c[3] >= (long)sizeof g_w[0].kind) {
             mm_free(b); return die("windows-table field too long");
         }
-        mm_copy(g_w[g_nw].window, (long)sizeof g_w[0].window, b + s, c1 - s); g_w[g_nw].window[c1 - s] = 0;
-        mm_copy(g_w[g_nw].model, (long)sizeof g_w[0].model, b + c1 + 1, c2 - c1 - 1); g_w[g_nw].model[c2 - c1 - 1] = 0;
-        mm_copy(g_w[g_nw].lane, (long)sizeof g_w[0].lane, b + c2 + 1, c3 - c2 - 1); g_w[g_nw].lane[c3 - c2 - 1] = 0;
-        mm_copy(g_w[g_nw].prefix, (long)sizeof g_w[0].prefix, b + c3 + 1, e - c3 - 1); g_w[g_nw].prefix[e - c3 - 1] = 0;
+        mm_copy(g_w[g_nw].window, (long)sizeof g_w[0].window, b + s, c[0] - s); g_w[g_nw].window[c[0] - s] = 0;
+        mm_copy(g_w[g_nw].model, (long)sizeof g_w[0].model, b + c[0] + 1, c[1] - c[0] - 1); g_w[g_nw].model[c[1] - c[0] - 1] = 0;
+        mm_copy(g_w[g_nw].lane, (long)sizeof g_w[0].lane, b + c[1] + 1, c[2] - c[1] - 1); g_w[g_nw].lane[c[2] - c[1] - 1] = 0;
+        mm_copy(g_w[g_nw].prefix, (long)sizeof g_w[0].prefix, b + c[2] + 1, c[3] - c[2] - 1); g_w[g_nw].prefix[c[3] - c[2] - 1] = 0;
+        mm_copy(g_w[g_nw].kind, (long)sizeof g_w[0].kind, b + c[3] + 1, e - c[3] - 1); g_w[g_nw].kind[e - c[3] - 1] = 0;
+        if (!tx_eqz(g_w[g_nw].kind, "commit") && !tx_eqz(g_w[g_nw].kind, "analysis")) {
+            mm_free(b); return die("kind must be commit|analysis");
+        }
         g_nw++;
     }
     mm_free(b);
@@ -81,13 +90,13 @@ static long tail_text(const char *src, long sn, int k, char *dst, long cap) {
 }
 
 static int has_ci(const char *s, long n, const char *needle) {
-    long nl = tx_len(needle, 128), i, j;
+    long nl = tx_len(needle, 160), i, j;
     if (nl <= 0 || n < nl) return 0;
     for (i = 0; i + nl <= n; i++) {
         for (j = 0; j < nl; j++) {
-            char a = s[i + j], b = needle[j];
-            if (a >= 'A' && a <= 'Z') a = (char)(a - 'A' + 'a');
-            if (b >= 'A' && b <= 'Z') b = (char)(b - 'A' + 'a');
+            unsigned char a = (unsigned char)s[i + j], b = (unsigned char)needle[j];
+            if (a >= 'A' && a <= 'Z') a = (unsigned char)(a - 'A' + 'a');
+            if (b >= 'A' && b <= 'Z') b = (unsigned char)(b - 'A' + 'a');
             if (a != b) break;
         }
         if (j == nl) return 1;
@@ -95,22 +104,78 @@ static int has_ci(const char *s, long n, const char *needle) {
     return 0;
 }
 
-static const char *classify(const char *text, long n, int *ctx_pct) {
-    char t[TP_CAP]; long tn, i;
-    *ctx_pct = -1;
-    tn = tail_text(text, n, g_tail, t, sizeof t);
-    for (i = 0; i + 2 < tn; i++) {
-        if (t[i] >= '0' && t[i] <= '9') {
-            long j = i, v = 0;
-            while (j < tn && t[j] >= '0' && t[j] <= '9') { v = v * 10 + (t[j] - '0'); j++; if (v > 100) break; }
-            if (j < tn && t[j] == '%' && v <= 100) {
-                long b = i > 40 ? i - 40 : 0;
-                if (has_ci(t + b, i - b, "context") || has_ci(t + b, i - b, "left")) { *ctx_pct = (int)v; break; }
+/* return 1 if FILTERED markers present (curly/straight/can not + cybersecurity care line) */
+static int is_filtered(const char *t, long tn) {
+    /* This content can't be shown  (U+2019) */
+    static const char curly[] = "this content can\xe2\x80\x99t be shown";
+    if (has_ci(t, tn, curly)) return 1;
+    if (has_ci(t, tn, "this content can't be shown")) return 1;
+    if (has_ci(t, tn, "this content can not be shown")) return 1;
+    if (has_ci(t, tn, "content can not be shown")) return 1;
+    if (has_ci(t, tn, "content filtered")) return 1;
+    if (has_ci(t, tn, "extra care with some cybersecurity")) return 1;
+    return 0;
+}
+
+/* parse remaining context into *ctx (0..100); note into note[cap] as left|codex-left|codex-used|omp-used|claude-used */
+static void parse_ctx(const char *t, long tn, int *ctx, char *note, long ncap) {
+    long i;
+    *ctx = -1; note[0] = 0;
+    /* Codex: Context NN% left */
+    for (i = 0; i + 8 < tn; i++) {
+        long j, v; int dig;
+        if (!has_ci(t + i, tn - i > 20 ? 20 : tn - i, "context")) continue;
+        /* scan forward up to 24 bytes for NN% left or NN% used */
+        for (j = i; j + 2 < tn && j < i + 48; j++) {
+            if (t[j] < '0' || t[j] > '9') continue;
+            v = 0; dig = j;
+            while (dig < tn && t[dig] >= '0' && t[dig] <= '9') { v = v * 10 + (t[dig] - '0'); dig++; if (v > 100) break; }
+            if (dig >= tn || t[dig] != '%' || v > 100) continue;
+            if (has_ci(t + dig, tn - dig > 12 ? 12 : tn - dig, "% left") ||
+                (dig + 1 < tn && has_ci(t + dig + 1, tn - dig - 1 > 8 ? 8 : tn - dig - 1, " left"))) {
+                *ctx = (int)v; cx_fmt(note, ncap, "codex-left"); return;
+            }
+            if (has_ci(t + dig, tn - dig > 12 ? 12 : tn - dig, "% used") ||
+                (dig + 1 < tn && has_ci(t + dig + 1, tn - dig - 1 > 8 ? 8 : tn - dig - 1, " used"))) {
+                *ctx = 100 - (int)v; cx_fmt(note, ncap, "codex-used"); return;
             }
         }
     }
-    if (has_ci(t, tn, "this content can not be shown") || has_ci(t, tn, "content filtered") ||
-        has_ci(t, tn, "content can not be shown")) return "FILTERED";
+    /* Claude: ctx NN%  -> used */
+    for (i = 0; i + 4 < tn; i++) {
+        long j, v;
+        if (!(t[i] == 'c' || t[i] == 'C') || (i > 0 && ((t[i-1] >= 'a' && t[i-1] <= 'z') || (t[i-1] >= 'A' && t[i-1] <= 'Z')))) continue;
+        if (!has_ci(t + i, tn - i > 4 ? 4 : tn - i, "ctx")) continue;
+        j = i + 3; while (j < tn && (t[j] == ' ' || t[j] == '\t')) j++;
+        if (j >= tn || t[j] < '0' || t[j] > '9') continue;
+        v = 0; while (j < tn && t[j] >= '0' && t[j] <= '9') { v = v * 10 + (t[j] - '0'); j++; if (v > 100) break; }
+        if (j < tn && t[j] == '%' && v <= 100) { *ctx = 100 - (int)v; cx_fmt(note, ncap, "claude-used"); return; }
+    }
+    /* omp progress bar: glyph/box then NN% treated as used */
+    for (i = 0; i + 2 < tn; i++) {
+        long j, v; unsigned char c;
+        if (t[i] < '0' || t[i] > '9') continue;
+        j = i; v = 0;
+        while (j < tn && t[j] >= '0' && t[j] <= '9') { v = v * 10 + (t[j] - '0'); j++; if (v > 100) break; }
+        if (j >= tn || t[j] != '%' || v > 100) continue;
+        /* look back for progress-ish bytes (UTF-8 box or play) within 12 chars */
+        {
+            long b = i > 12 ? i - 12 : 0, k, hit = 0;
+            for (k = b; k < i; k++) {
+                c = (unsigned char)t[k];
+                if (c == 0xE2 || c == '>' || c == '|') { hit = 1; break; }
+            }
+            if (hit) { *ctx = 100 - (int)v; cx_fmt(note, ncap, "omp-used"); return; }
+        }
+    }
+}
+
+static const char *classify(const char *text, long n, int *ctx_pct, char *ctx_note, long ncap) {
+    char t[TP_CAP]; long tn;
+    *ctx_pct = -1; ctx_note[0] = 0;
+    tn = tail_text(text, n, g_tail, t, sizeof t);
+    parse_ctx(t, tn, ctx_pct, ctx_note, ncap);
+    if (is_filtered(t, tn)) return "FILTERED";
     if (has_ci(t, tn, "esc to cancel") || has_ci(t, tn, "working")) return "WORKING";
     if (has_ci(t, tn, "waiting for input") || has_ci(t, tn, "do you want to")) return "WAITING_INPUT";
     {
@@ -206,7 +271,7 @@ static void flags_add(char *flags, long cap, int *nflag, const char *f) {
 }
 
 static void pulse_one(Win *w) {
-    char capbuf[TP_CAP], hash[80], flags[80], ctxs[16], ages[24];
+    char capbuf[TP_CAP], hash[80], flags[80], ctxs[40], ages[24], note[24];
     long n = 0, age = -1; int ctx = -1, nflag = 0;
     const char *st;
     if (g_fix[0]) {
@@ -216,16 +281,20 @@ static void pulse_one(Win *w) {
     } else if (capture_tmux(w->window, capbuf, sizeof capbuf, &n)) {
         printf("PULSE\t%s\tUNKNOWN\t-\t-\t-\t-\n", w->window); return;
     }
-    st = classify(capbuf, n, &ctx);
+    st = classify(capbuf, n, &ctx, note, sizeof note);
     latest_commit(w->prefix, hash, sizeof hash, &age);
     flags[0] = 0;
     if (!g_mutant && tx_eqz(st, "IDLE") && age >= 0 && age >= g_stall_min) {
-        flags_add(flags, sizeof flags, &nflag, "STALLED"); g_n_stalled++;
+        if (tx_eqz(w->kind, "commit")) { flags_add(flags, sizeof flags, &nflag, "STALLED"); g_n_stalled++; }
+        else if (tx_eqz(w->kind, "analysis")) { flags_add(flags, sizeof flags, &nflag, "IDLE_LONG"); g_n_idle_long++; }
     }
     if (ctx >= 0 && ctx < 15) { flags_add(flags, sizeof flags, &nflag, "CTX_LOW"); g_n_ctxlow++; }
     if (tx_eqz(st, "FILTERED")) { flags_add(flags, sizeof flags, &nflag, "FILTERED"); g_n_filtered++; }
     if (!flags[0]) { flags[0] = '-'; flags[1] = 0; }
-    if (ctx >= 0) cx_fmt(ctxs, sizeof ctxs, "%d", ctx); else cx_fmt(ctxs, sizeof ctxs, "-");
+    if (ctx >= 0) {
+        if (note[0]) cx_fmt(ctxs, sizeof ctxs, "left=%d(%s)", ctx, note);
+        else cx_fmt(ctxs, sizeof ctxs, "left=%d", ctx);
+    } else cx_fmt(ctxs, sizeof ctxs, "-");
     if (age >= 0) cx_fmt(ages, sizeof ages, "%ld", age); else cx_fmt(ages, sizeof ages, "-");
     printf("PULSE\t%s\t%s\t%s\t%s\t%s\t%s\n", w->window, st, ctxs, hash[0] ? hash : "-", ages, flags);
 }
@@ -253,6 +322,7 @@ int main(int argc, char **argv) {
     }
     if (load_table(g_table)) return 2;
     for (i = 0; i < g_nw; i++) pulse_one(&g_w[i]);
-    printf("TEAM_PULSE\twindows=%d\tstalled=%d\tctx_low=%d\tfiltered=%d\n", g_nw, g_n_stalled, g_n_ctxlow, g_n_filtered);
+    printf("TEAM_PULSE\twindows=%d\tstalled=%d\tidle_long=%d\tctx_low=%d\tfiltered=%d\n",
+           g_nw, g_n_stalled, g_n_idle_long, g_n_ctxlow, g_n_filtered);
     return 0;
 }
