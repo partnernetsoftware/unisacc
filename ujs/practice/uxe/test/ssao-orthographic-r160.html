@@ -4,7 +4,7 @@
 <script type="importmap">{"imports":{"three":"../../web/game/three.module.js"}}</script>
 <script type="module">
 import { DataTexture, FloatType, OrthographicCamera, RedFormat, REVISION, Scene,
-  Vector3, WebGLRenderer, WebGLRenderTarget } from "three";
+  PerspectiveCamera, Vector3, WebGLRenderer, WebGLRenderTarget } from "three";
 
 const output = document.querySelector("#r160");
 try {
@@ -25,9 +25,16 @@ try {
   if (!gl) throw new Error("WebGL2 required");
   const renderer = new WebGLRenderer({ canvas, context: gl });
   renderer.setSize(width, height, false);
-  const camera = new OrthographicCamera(-1, 1, 1, -1, 1, 9);
+  const mode = Number(query.get("mode"));
+  const perspective = mode >= 2;
+  const camera = perspective ? new PerspectiveCamera(90, width / height, 1, 9)
+    : new OrthographicCamera(-1, 1, 1, -1, 1, 9);
   const pass = new SSAOPass(new Scene(), camera, width, height, 8);
-  const depth = new DataTexture(Float32Array.from([128,112,88,256,144,112,120,96], x => x / 256),
+  const units = mode === 3 ? Array(8).fill(128) : [128,112,88,256,144,112,120,96];
+  const depth = new DataTexture(Float32Array.from(units, x => {
+    const distance = 1 + x / 32;
+    return perspective ? (1 - 1 / distance) * 9 / 8 : x / 256;
+  }),
     width, height, RedFormat, FloatType);
   const normal = new DataTexture(Float32Array.of(0.5, 0.5, 1, 1), 1, 1, undefined, FloatType);
   const noise = new DataTexture(Float32Array.of(0.5), 1, 1, RedFormat, FloatType);
@@ -36,11 +43,11 @@ try {
   uniform.tNormal.value = normal;
   uniform.tDepth.value = depth;
   uniform.tNoise.value = noise;
-  pass.ssaoMaterial.defines.PERSPECTIVE_CAMERA = 0;
+  pass.ssaoMaterial.defines.PERSPECTIVE_CAMERA = perspective ? 1 : 0;
   // The normal and noise above give tangent (+X,+Y) and bitangent (-X,+Y).
   uniform.kernel.value = [[1,0,0],[1,0,8],[0,0,8],[-1,0,0],[0,1,4],[0,-1,4],[0,0,0],[1,1,4]]
-    .map(([x,y,z]) => new Vector3((x / width + y / height) * Math.SQRT2,
-      (y / height - x / width) * Math.SQRT2, z * (camera.far - camera.near) / 256));
+    .map(([x,y,z]) => new Vector3((x / width + y / height) * Math.SQRT2 * (perspective ? 5 * width / height : 1),
+      (y / height - x / width) * Math.SQRT2 * (perspective ? 5 * width / height : 1), z * (camera.far - camera.near) / 256));
   pass.kernelRadius = 1;
   pass.minDistance = 4 / 256;
   pass.maxDistance = 16 / 256;

@@ -5,9 +5,17 @@
 #pragma unisa use text.fmt
 #pragma unisa use text.text
 
+static float gold_view_distance(int units) {
+    const double distance=1+units/32.0;
+    const float depth=(float)((1-1/distance)*9/8);
+    const float divisor=8.0f*depth-9.0f;
+    return -9.0f/divisor;
+}
+
 int main(int argc,char **argv) {
     const int mutate=argc==3 && tx_eqz(argv[2],"--mutate");
-    if((argc!=2 && !mutate) || argv[1][0]!='/') return 2;
+    const int perspective=argc==3 && tx_eqz(argv[2],"--perspective");
+    if((argc!=2 && !mutate && !perspective) || argv[1][0]!='/') return 2;
     char dir[256],cwd[390],abi[300],wasm[300],url[750];
     if(sy_cwd(cwd,sizeof cwd) || sy_mkdtemp("/tmp","uxe-ssao-orthographic-",dir,sizeof dir)) return 2;
     tx_snprintf(abi,sizeof abi,"%s/abi.ujs",dir);
@@ -32,14 +40,43 @@ int main(int argc,char **argv) {
         if(rc) { printf("C_PIXEL SSAO compiler_rc=%d %s\n",rc,output?output:""); failed++; }
         mm_free(output); output=0;
     }
-    if(!failed) failed=r160_wait_read(url,"#r160",actual,pixels*2,dir);
-    if(!failed) for(int i=0;i<pixels;i++) {
-        const int gray=((8-covered[i])*255+4)/8;
-        const double gold=4278190080.0+65793.0*gray;
-        if(actual[i]!=gold || actual[pixels+i]!=gold) {
-            printf("C_PIXEL SSAO index=%d ujs=%.0f r160=%.0f gold=%.0f\n",
-                i,actual[i],actual[pixels+i],gold);
-            failed++;
+    const int depths[]={128,112,88,256,144,112,120,96};
+    const int kernel[][3]={{1,0,0},{1,0,8},{0,0,8},{-1,0,0},{0,1,4},{0,-1,4},{0,0,0},{1,1,4}};
+    for(int frame=0;!failed && frame<(perspective?3:1);frame++) {
+        const int mode=perspective?2+frame:mutate;
+        tx_snprintf(url,sizeof url,
+            "file://%s/ujs/practice/uxe/test/ssao-orthographic-r160.html?package=%s&wasm=%s&mode=%d",
+            cwd,argv[1],wasm,mode);
+        failed=r160_wait_read(url,"#r160",actual,pixels*2,dir);
+        int changes=0;
+        if(!failed) for(int i=0;i<pixels;i++) {
+            int count=covered[i];
+            if(perspective) {
+                count=0;
+                if(frame!=1 && depths[i]!=256) for(int j=0;j<8;j++) {
+                    const double distance=1+depths[i]/32.0;
+                    const double sampled=distance-kernel[j][2]/32.0;
+                    const int x=(int)(2+((i%4-1.5)*distance+5*kernel[j][0])/sampled);
+                    const int y=(int)(1+((i/4-0.5)*distance+5*kernel[j][1])/sampled);
+                    const int xc=x<0?0:x>3?3:x, yc=y<0?0:y>1?1:y;
+                    const float sample=gold_view_distance(depths[i])-kernel[j][2]/32.0f;
+                    const float neighbor=gold_view_distance(depths[yc*4+xc]);
+                    const float delta=(sample-neighbor)*32.0f;
+                    count+=delta>4 && delta<16;
+                }
+            }
+            const int gray=((8-count)*255+4)/8;
+            const double gold=4278190080.0+65793.0*gray;
+            if(actual[i]!=gold) changes++;
+            if((actual[i]!=gold && frame!=2) || actual[pixels+i]!=gold) {
+                printf("C_PIXEL SSAO mode=%d index=%d ujs=%.0f r160=%.0f gold=%.0f\n",
+                    mode,i,actual[i],actual[pixels+i],gold);
+                failed++;
+            }
+        }
+        if(frame==2) {
+            printf("C_PIXEL SSAO perspective mutation differences=%d\n",changes);
+            if(!changes) failed++;
         }
     }
     char *clean[]={"rm","-rf","--",dir,0};

@@ -32,7 +32,21 @@ native function ssao_clamp_index(value:i64, size:i64) i64 {
 // Depth and distance use units of 1/256 of camera range. Sample XY shifts
 // are preprojected whole texels encoded with bias 8. The Z shift is toward the camera.
 // A power-of-two sample count keeps the raw value exact in an RGBA16F target.
-native function SSAO_rawOrthographic(input:i64, out:i64) i64 {
+native function ssao_texel(at:f64,size:i64) i64 {
+  let i=0;
+  while(i+1<size && at>=1.0*(i+1)) { i=i+1; }
+  return i;
+}
+
+// Model the float depth texture and shader arithmetic at comparison boundaries.
+native function ssao_distance(z:i64, scratch:i64) f64 {
+  let a=ux_f32_put(scratch,(1.0-32.0/(32+z))*1.125);
+  let b=ux_f32_put(scratch,8.0*ux_f32(scratch)-9.0);
+  let c=ux_f32_put(scratch,-9.0/ux_f32(scratch));
+  return ux_f32(scratch);
+}
+
+native function ssao_raw(input:i64, out:i64, perspective:i64) i64 {
   if(!ssao_range(input,SSAOOrthographicInput.size)) { return 0-1; }
   let width=ux_u32(input+SSAOOrthographicInput.width);
   let height=ux_u32(input+SSAOOrthographicInput.height);
@@ -61,6 +75,20 @@ native function SSAO_rawOrthographic(input:i64, out:i64) i64 {
        ux_u32(s+SSAOProjectedSample.towardCamera)>256) { return 0-1; }
     i=i+1;
   }
+  if(perspective!=0) {
+    let nearest=288;
+    i=0;
+    while(i<area) {
+      let z=ux_u32(depth+i*4);
+      if(z<nearest) { nearest=z; }
+      i=i+1;
+    }
+    i=0;
+    while(i<count) {
+      if(ux_u32(samples+i*SSAOProjectedSample.size+SSAOProjectedSample.towardCamera)>=32+nearest) { return 0-1; }
+      i=i+1;
+    }
+  }
   let y=0;
   while(y<height) {
     let x=0;
@@ -74,8 +102,31 @@ native function SSAO_rawOrthographic(input:i64, out:i64) i64 {
           let s=samples+i*SSAOProjectedSample.size;
           let sx=ssao_clamp_index(x+ux_u32(s+SSAOProjectedSample.xBiased)-8,width);
           let sy=ssao_clamp_index(y+ux_u32(s+SSAOProjectedSample.yBiased)-8,height);
-          let delta=center-ux_u32(s+SSAOProjectedSample.towardCamera)-ux_u32(depth+(sy*width+sx)*4);
-          if(delta>minimum && delta<maximum) { covered=covered+1; }
+          let shift=ux_u32(s+SSAOProjectedSample.towardCamera);
+          if(perspective!=0) {
+            let view=32+center;
+            let sampleView=view-shift;
+            let ux=ux_u32(s+SSAOProjectedSample.xBiased);
+            let uy=ux_u32(s+SSAOProjectedSample.yBiased);
+            if(sampleView<=0) { return 0-1; }
+            let px=0.5*width+(0.5*(2*x+1-width)*view+160.0*(ux-8))/(1.0*sampleView);
+            let py=0.5*height+(0.5*(2*y+1-height)*view+160.0*(uy-8))/(1.0*sampleView);
+            sx=ssao_texel(px,width);
+            sy=ssao_texel(py,height);
+          }
+          let neighbor=ux_u32(depth+(sy*width+sx)*4);
+          if(perspective==0) {
+            let delta=center-shift-neighbor;
+            if(delta>minimum && delta<maximum) { covered=covered+1; }
+          } else {
+            let sampleDistance=ssao_distance(center,out+at);
+            let sampledDepth=ssao_distance(neighbor,out+at);
+            let rounded=ux_f32_put(out+at,sampleDistance-0.03125*shift);
+            let difference=ux_f32_put(out+at,ux_f32(out+at)-sampledDepth);
+            let deltaF=32.0*ux_f32(out+at);
+            if(perspective==2) { deltaF=0.0-deltaF; }
+            if(deltaF>1.0*minimum && deltaF<1.0*maximum) { covered=covered+1; }
+          }
           i=i+1;
         }
       }
@@ -86,4 +137,16 @@ native function SSAO_rawOrthographic(input:i64, out:i64) i64 {
     y=y+1;
   }
   return 0;
+}
+
+native function SSAO_rawOrthographic(input:i64, out:i64) i64 {
+  let status=ssao_raw(input,out,0);
+  return status;
+}
+
+// Perspective projection uses a symmetric frustum with a 90 degree vertical
+// field of view and aspect width/height, with near 1 and far 9.
+native function SSAO_rawPerspective(input:i64, out:i64) i64 {
+  let status=ssao_raw(input,out,1);
+  return status;
 }
