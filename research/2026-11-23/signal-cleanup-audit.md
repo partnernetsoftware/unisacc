@@ -42,11 +42,21 @@
 - `tools/s9-shards.cx:707`: 走 `sy_sig_handle(SIGINT/SIGTERM, stop_requested)` 真实 `rt_sigaction`。
 - `tools/check-old-product-material.cx:56-57`: 已走 `sy_sig_handle`, 且接入 `fsx_scratch` 库层保护。
 
-## 3. `ext/fsx/fs.cx` (`fsx_scratch`) 单点修复与 SIGKILL 兜底
+## 3. `ext/fsx/fs.cx` (`fsx_scratch`) 提交甲加固与消费者/合同核对
 
-1. **`SIGTERM` / `SIGINT` 内核清理**: `fsx_scratch` 首次初始化时同时注册 `sy_atexit(fsx_sc_atexit)`、`sy_sig_handle(15, fsx_sc_on_sig)` 与 `sy_sig_handle(2, fsx_sc_on_sig)`。
-2. **`fork()` 隔离 (`owner_pid`)**: 每个槽位记录创建者 `owner_pid = sy_pid()`, 退出/信号清理只移除当前进程拥有的槽位, 修复此前 `fork()` 子进程退出误删父进程 `fsx_scratch` 目录的缺陷。
-3. **`SIGKILL` 不可捕获兜底 (启动时超龄回收)**:
-   - 目录名编码创建者 PID (`<prefix>p<pid>-XXXXXX`), 目录内部保持 100% 空目录 (不破坏 `sy_rmdir` 合同)。
-   - 每次 `fsx_scratch` 启动时扫描 `sy_tmpdir()` 下同前缀 `<prefix>p<pid>-*` 目录, 仅当同时满足: (a) 普通目录且属主为当前用户 `sy_euid()`, (b) `now - mtime > 1800` (超过 30 分钟), (c) `pid != sy_pid()` 且 `sy_signal(pid, 0) == -ESRCH` (进程已死), (d) 非本进程活跃槽位时, 调用 `fsx_rmtree` 自动清除。
-4. **`build/pkg-gaps.tsv` 登记**: 已追加 `PRELUDE-SIGNAL-NO-KERNEL-HANDLER` 条目, 归属 `cx/sys 或 prelude`。
+1. **仅默认 disposition 信号清理 (`SIGHUP`/`SIGINT`/`SIGPIPE`/`SIGTERM`)**:
+   - 首次调用 `fsx_scratch` (按 `fsx_sc_hooked_pid != sy_pid()` 判定以兼容 `fork`) 读取 `/proc/self/status` 的 `SigIgn:` 与 `SigCgt:` 位掩码, 仅当目标信号处于内核 `SIG_DFL` 时安装 `fsx_sc_on_sig`。
+   - 已有自定义 handler 或继承 `SIG_IGN` 时保持不动, 清理责任仍归调用方。
+   - `fsx_sc_on_sig` 带 `static volatile int fsx_sc_in_sig` 防重入标志, 清理本进程槽位后执行 `sy_sig_default(sig); sy_raise(sig);`, 保持真实 `WIFSIGNALED` 终态。
+2. **`fork()` 隔离 (`owner_pid`)**: 每个槽位记录 `owner_pid = sy_pid()`, 退出/信号清理只移除当前进程拥有的槽位。
+3. **启动超龄回收暂摘 (移至提交乙)**: 恢复原 `sy_mkdtemp(sy_tmpdir(), prefix, ...)` 目录命名, 零消费者目录名变更; 提交乙再按墙钟 (`sy_wall_s`)、严格 mkdtemp 6 字符后缀与 1-10 位无前导零 PID、目录树最新 mtime、节流与全量变异夹具单独落库。
+4. **全仓 `fsx_scratch` 消费者与前缀通配表 (共 4 个调用方)**:
+   - `tools/check-ext-fsx.cx`: 前缀 `fsx-check-` / `fsx-check2-` (断言 `strstr(D, "fsx-check-") != 0`, 兼容新旧后缀)
+   - `tools/check-old-product-material.cx`: 前缀 `check-opm` (仅通过 `fsx_scratch_dir(scratch)` 使用返回路径, 不解析后缀)
+   - `tools/check-affected-oldproduct.cx`: 前缀 `check-aop` (仅通过 `fsx_scratch_dir(scratch)` 使用返回路径, 不解析后缀)
+   - `tools/check-opt-frame4-material.cx`: 前缀 `check-of4` (仅通过 `fsx_scratch_dir(scratch)` 使用返回路径, 不解析后缀)
+   - `tools/posix-census.cx:93`: 仅静态字面量统计 `"fsx_scratch"`, 不解析目录名。
+   - `~/repos/moltbaby/systemd/scripts/system-cleanup.sh`: 白名单不含任何 `fsx_scratch` 前缀, 不受目录名变化影响。
+5. **旧合同核对 (`e47a8812d6~1:tools/check-ext-fsx.cx`)**:
+   - `git show e47a8812d6~1:tools/check-ext-fsx.cx | grep -n 'ck(' | wc -l` 为 73 行 (1 行 `static void ck(...)` 定义 + 72 次 `ck(...)` 调用; 静态正则提取到 67 个名字是因为有 5 处多行/同行 `ck()` 调用格式), 全部 72 条旧断言均原样保留, 叠加本次 6 条新断言合计 `checks=78`。
+6. **`build/pkg-gaps.tsv` 登记**: 已保留 `PRELUDE-SIGNAL-NO-KERNEL-HANDLER` 条目, 归属 `cx/sys 或 prelude`。
