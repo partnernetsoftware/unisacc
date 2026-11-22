@@ -699,6 +699,77 @@ int main(void) {
                          !ckk_has(out, CPD_OUT, "ledger="));
         ck(ok_c4_fz && ok_c4_nfz,
             "c4-ledger-write-failure-blocks-in-freeze-and-warns-without-ledger-path-outside-freeze: write error refuses in freeze and emits WARN without ledger= outside freeze");
+
+        /* 11j (Constraint 4): Two worktrees sharing git-common-dir are isolated by top column in dual-anchor ledger */
+        if (cx_fmt(cmd, sizeof cmd,
+            "cd '%s' && git checkout -q -B main && git reset -q && "
+            "git checkout -q -- exec/facts/derive.tsv include/a.h tests/batches.tsv && "
+            "printf '/cx\\n/ext\\n' > .gitignore && "
+            "cp '%s/tools/derive.cx' tools/derive.cx && "
+            "cp '%s/genall-stub.cx' tools/gen-all-check.cx && "
+            "git add .gitignore tools/derive.cx tools/gen-all-check.cx && git -c user.name=t -c user.email=t@t commit --allow-empty -q --no-verify -m wt2-base && "
+            "rm -rf build/deferred-gates.tsv .git/unisacc-deferred-gates.tsv && "
+            "git worktree add -q -b v0.0.98 '%s/wt2' HEAD && "
+            "ln -s '%s/unisacc.com' '%s/wt2/unisacc.com' && "
+            "ln -sn '%s/cx' '%s/wt2/cx' && ln -sn '%s/ext' '%s/wt2/ext' && ln -s '%s/cxroot.tsv' '%s/wt2/cxroot.tsv' && "
+            "ln -sf '%s/tools/precommit.cx' '%s/wt2/tools/precommit.cx' && "
+            "rm -rf '%s/wt2/tools/cxlib' && ln -s '%s/tools/cxlib' '%s/wt2/tools/cxlib' && "
+            "cd '%s/wt2' && printf '# wt2-def\\n' >> tests/batches.tsv && git add tests/batches.tsv && "
+            "FAKE_GATE_RC=1 UNISACC_PRECOMMIT_NO_ISOLATE=1 UNISACC_PRECOMMIT_SERIAL=1 sh ./unisacc.com tools/precommit.cx && "
+            "git reset -q && git checkout -q -- tests/batches.tsv && "
+            "test -s '%s/wt2/build/deferred-gates.tsv' && test -s '%s/.git/unisacc-deferred-gates.tsv' && "
+            "! (cd '%s' && sh ./unisacc.com tools/chain-ready.cx -- --repo '%s/wt2' --only 1-rev >/dev/null 2>&1) && "
+            "(cd '%s' && sh ./unisacc.com tools/chain-ready.cx -- --repo '%s' --only 1-rev >/dev/null 2>&1) && "
+            "cd '%s/wt2' && sh ./unisacc.com tools/precommit.cx -- --verify-deferred --gate derive && "
+            "(cd '%s' && sh ./unisacc.com tools/chain-ready.cx -- --repo '%s/wt2' --only 1-rev >/dev/null 2>&1)",
+            repo4, repo2, work, work, cwd, work,
+            cwd, work, cwd, work, cwd, work, cwd, work,
+            work, cwd, work, work, work, repo4,
+            cwd, work, cwd, repo4, work, cwd, work)) cpd_abort("r4wt2");
+        int rc_wt2 = ckk_sh("check-precommit-derive", cmd, out, sizeof out);
+        if (rc_wt2 != 0) fprintf(stderr, "11j FAIL rc=%d out:\n%s\n", rc_wt2, out);
+        ck(rc_wt2 == 0,
+            "c3-two-worktrees-sharing-git-common-dir-isolated-by-top-column: unverified deferred gate in wt2 fails wt2 1-rev without failing main repo4, and verify-deferred clears wt2");
+
+        /* 11k (Constraints 2 & 3): Simulate 1000-file S0 merge commit in active freeze window:
+         * - GATE_TIMEOUT / UNAVAILABLE blocks without UNISACC_GATE_WAIVE
+         * - Integrator owner UNISACC_GATE_WAIVE="derive:s0-merge,genall:s0-merge" waives and records dual-anchor ledger
+         * - chain-ready 1-rev fails before verification
+         * - --verify-deferred --gate derive and --verify-deferred --gate genall verify each within 55s and turn chain-ready 1-rev PASS */
+        {
+            char sdir[CPD_PW], mf[CPD_PW];
+            int mi;
+            if (cx_fmt(sdir, sizeof sdir, "%s/src", repo4)) cpd_abort("s0dir");
+            cpd_mk(sdir);
+            for (mi = 0; mi < 1000; mi++) {
+                if (cx_fmt(mf, sizeof mf, "%s/src/m%d.c", repo4, mi) ||
+                    cx_write(mf, "int m;\n", 7)) cpd_abort("s0mf");
+            }
+        }
+        if (cx_fmt(cmd, sizeof cmd,
+            "cd '%s' && rm -rf build/deferred-gates.tsv .git/unisacc-deferred-gates.tsv && "
+            "printf 'c0\\tdeadbeef\\tcdx\\t4102444800\\tsrc\\n' > build/freeze.tsv && "
+            "git add build/freeze.tsv && "
+            "git -c user.name=t -c user.email=t@t commit -q --no-verify -m s0-prep && "
+            "printf '/* s0 */\\n' >> include/a.h && printf '# s0\\n' >> tests/batches.tsv && "
+            "git add src include/a.h tests/batches.tsv && "
+            "! FAKE_GATE_RC=1 UNISACC_PRECOMMIT_NO_ISOLATE=1 UNISACC_INTEGRATOR=cdx UNISACC_PRECOMMIT_SERIAL=1 sh ./unisacc.com tools/precommit.cx >/dev/null 2>&1 && "
+            "FAKE_GATE_RC=1 UNISACC_PRECOMMIT_NO_ISOLATE=1 UNISACC_INTEGRATOR=cdx UNISACC_GATE_WAIVE='derive:s0-merge-1000,genall:s0-merge-1000' UNISACC_PRECOMMIT_SERIAL=1 sh ./unisacc.com tools/precommit.cx && "
+            "git -c user.name=t -c user.email=t@t commit -q --no-verify -m s0-merge-1000 && "
+            "! (cd '%s' && sh ./unisacc.com tools/chain-ready.cx -- --repo '%s' --only 1-rev >/dev/null 2>&1) && "
+            "sh ./unisacc.com tools/precommit.cx -- --verify-deferred --gate derive && "
+            "! (cd '%s' && sh ./unisacc.com tools/chain-ready.cx -- --repo '%s' --only 1-rev >/dev/null 2>&1) && "
+            "sh ./unisacc.com tools/precommit.cx -- --verify-deferred --gate genall && "
+            "(cd '%s' && sh ./unisacc.com tools/chain-ready.cx -- --repo '%s' --only 1-rev)",
+            repo4, cwd, repo4, cwd, repo4, cwd, repo4)) cpd_abort("r4s0");
+        int rc_s0 = ckk_sh("check-precommit-derive", cmd, out, sizeof out);
+        int ok_s0 = (rc_s0 == 0 &&
+                     ckk_has(out, CPD_OUT, "VERIFY_DEFERRED\tgate=derive\tstatus=PASS") &&
+                     ckk_has(out, CPD_OUT, "VERIFY_DEFERRED\tgate=genall\tstatus=PASS") &&
+                     ckk_has(out, CPD_OUT, "READY\tyes"));
+        if (!ok_s0) fprintf(stderr, "11k FAIL rc=%d out:\n%s\n", rc_s0, out);
+        ck(ok_s0,
+            "s0-1000-file-merge-waive-and-verify-deferred-per-gate-turns-chain-ready-green: 1000-file merge waived in freeze records dual anchors, per-gate verify-deferred clears both, chain-ready 1-rev PASS");
     }
 
     {

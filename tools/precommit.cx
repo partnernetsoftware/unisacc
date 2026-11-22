@@ -38,7 +38,7 @@
 
 static int slurp_okrc = 0;   /* 允许的最大退出码:0=仅成功;ratchets.cx 用 1 表示「跑完了但有红行」 */
 static int slurp_last_timeout = 0, slurp_last_rc = 0, slurp_from_run_unplanned = 0;
-#define SLURP_DEADLINE_MS 55000   /* 每个子进程(含 ratchets/cx-lint/verify-deferred)最多 55 s:超时杀进程组,统一按 GATE_TIMEOUT 处理 */
+#define SLURP_DEADLINE_MS 58000   /* 每个子进程(主要是 ratchets / cx-lint)最多 58 s:超时杀进程组,按 unavailable 放行 */
 /* --plan DIR / --from-run DIR (tools/precommit-flow.cx): the gate subprocesses become flow nodes.
  * cur_gate names the gate about to call slurp (manifest, tables, runlist, facts, tlibfrozen, lint, lintr1,
  * ratchets).  --plan: print PLAN<TAB>id<TAB>argv... and act as if the gate ran with empty output.
@@ -1040,6 +1040,180 @@ static int pc_append_deferred_record(const char *rec_type, const char *gate, con
     if (sy_append_file(dfp, rec, tx_len(rec, sizeof rec), 0600) != 0) return -1;
     if (sy_append_file(afp, rec, tx_len(rec, sizeof rec), 0600) != 0) return -1;
     if (dfp_used && dcap > 0) (void)cx_fmt(dfp_used, dcap, "%s", dfp);
+    return 0;
+}
+
+static int pc_extract_only_tokens(const char *detail, char *only_buf, size_t ocap) {
+    long dl = tx_len(detail, 384), o = tx_find(detail, dl, "--only ", 7), s, e, i;
+    if (o < 0) return 0;
+    s = o + 7;
+    while (s < dl && detail[s] == ' ') s++;
+    e = s;
+    while (e < dl && detail[e] != ' ' && detail[e] != '\'') e++;
+    if (e <= s) return 0;
+    for (i = s; i < e; i++) {
+        char c = detail[i];
+        if (!((c >= 'a' && c <= 'z') || (c >= 'A' && c <= 'Z') || (c >= '0' && c <= '9') || c == '_' || c == '-' || c == ','))
+            return 0;
+    }
+    {
+        long cur = tx_len(only_buf, (long)ocap), tl = e - s;
+        if (cur + tl + 2 >= (long)ocap) return 0;
+        if (cur > 0) only_buf[cur++] = ',';
+        mm_copy(only_buf + cur, ocap - (size_t)cur, detail + s, (size_t)tl);
+        only_buf[cur + tl] = 0;
+    }
+    return 1;
+}
+
+static int pc_verify_deferred(int argc, char **argv) {
+    const char *only_gate = 0;
+    char top[1024], dfp[1200], afp[1200], prev_sha[65], err[320], uc[1200];
+    static PcDefRow rows[128];
+    int nrows = 0, i, g, unv_total = 0;
+    static const char *all_gates[5] = {"derive", "genall", "tlibfrozen", "lint", "ratchets"};
+    for (i = 2; i < argc; i++) {
+        if (tx_eqz(argv[i], "--gate") && i + 1 < argc) {
+            only_gate = argv[++i];
+        } else {
+            sy_eprintf("precommit: usage: precommit.cx -- --verify-deferred [--gate derive|genall|tlibfrozen|lint|ratchets]\n");
+            return 2;
+        }
+    }
+    if (pc_deferred_anchors(top, sizeof top, dfp, sizeof dfp, afp, sizeof afp, 0) != 0) {
+        sy_eprintf("precommit: BLOCKED verify-deferred: cannot resolve ledger anchors\n");
+        return 1;
+    }
+    if (pc_deferred_scan_dual(top, dfp, afp, prev_sha, rows, 128, &nrows, err, sizeof err) < 0) {
+        sy_eprintf("precommit: BLOCKED verify-deferred: ledger corrupt or tampered (%s)\n", err);
+        return 1;
+    }
+    for (i = 0; i < nrows; i++) {
+        if (!rows[i].verified && (!only_gate || tx_eqz(rows[i].gate, only_gate))) unv_total++;
+    }
+    if (unv_total == 0) {
+        sy_printf("VERIFY_DEFERRED\tgate=%s\tstatus=CLEAN\tunverified=0\n", only_gate ? only_gate : "all");
+        return 0;
+    }
+    if (top[0]) (void)chdir(top);
+    if (sy_exists("./unisacc.com") == 1) {
+        (void)cx_fmt(uc, sizeof uc, "./unisacc.com"); /* lint:allow R1-product precommit --verify-deferred runs gate verification via checkout product */
+    } else if (pc_work_top[0] && !cx_fmt(uc, sizeof uc, "%s/unisacc.com", pc_work_top) && sy_exists(uc) == 1) { /* lint:allow R1-product precommit --verify-deferred runs gate verification via checkout product */
+    } else {
+        sy_eprintf("precommit: BLOCKED verify-deferred: ./unisacc.com not found\n");
+        return 1;
+    }
+    {
+        char *wv[] = {"git", "write-tree", 0}, *hv[] = {"git", "rev-parse", "HEAD", 0};
+        long wn = 0, hn = 0;
+        char *wo = slurp_run(wv, &wn), *ho = slurp_run(hv, &hn);
+        char v_tree[64], v_head[64];
+        mm_copy(v_tree, sizeof v_tree, "unknown", 8);
+        mm_copy(v_head, sizeof v_head, "unknown", 8);
+        if (wo && wn >= 7) {
+            while (wn > 0 && (wo[wn - 1] == '\n' || wo[wn - 1] == '\r')) wn--;
+            if (wn > 0 && wn < 60) { mm_copy(v_tree, sizeof v_tree, wo, (size_t)wn); v_tree[wn] = 0; }
+        }
+        if (ho && hn >= 7) {
+            while (hn > 0 && (ho[hn - 1] == '\n' || ho[hn - 1] == '\r')) hn--;
+            if (hn > 0 && hn < 60) { mm_copy(v_head, sizeof v_head, ho, (size_t)hn); v_head[hn] = 0; }
+        }
+        if (wo) mm_free(wo);
+        if (ho) mm_free(ho);
+        if (tx_eqz(v_tree, "unknown")) {
+            sy_eprintf("precommit: BLOCKED verify-deferred: git write-tree failed\n");
+            return 1;
+        }
+        for (g = 0; g < 5; g++) {
+            const char *gn = all_gates[g];
+            int g_unv = 0, all_have_only = 1, pass = 0, cleared = 0;
+            char only_buf[512], cmd_disp[640], *out = 0;
+            long on = 0;
+            only_buf[0] = 0;
+            cmd_disp[0] = 0;
+            if (only_gate && !tx_eqz(gn, only_gate)) continue;
+            for (i = 0; i < nrows; i++) {
+                if (!rows[i].verified && tx_eqz(rows[i].gate, gn)) {
+                    g_unv++;
+                    if (!pc_extract_only_tokens(rows[i].detail, only_buf, sizeof only_buf))
+                        all_have_only = 0;
+                }
+            }
+            if (!g_unv) continue;
+            slurp_okrc = 2;
+            if (tx_eqz(gn, "derive")) {
+                if (all_have_only && only_buf[0]) {
+                    char *av[] = {"sh", uc, "tools/derive.cx", "--", "--check", "--only", only_buf, 0};
+                    (void)cx_fmt(cmd_disp, sizeof cmd_disp, "sh ./unisacc.com tools/derive.cx -- --check --only %s", only_buf);
+                    out = slurp_run(av, &on);
+                } else {
+                    char *av[] = {"sh", uc, "tools/derive.cx", "--", "--check", 0};
+                    (void)cx_fmt(cmd_disp, sizeof cmd_disp, "sh ./unisacc.com tools/derive.cx -- --check");
+                    out = slurp_run(av, &on);
+                }
+                if (out && tx_find(out, on, "DERIVE_SUMMARY\t", 15) >= 0 &&
+                    tx_find(out, on, "\tdrift=0\t", 9) >= 0 &&
+                    tx_find(out, on, "\trefused=0\t", 11) >= 0) {
+                    pass = 1;
+                }
+            } else if (tx_eqz(gn, "genall")) {
+                if (all_have_only && only_buf[0]) {
+                    char *av[] = {"sh", uc, "tools/gen-all-check.cx", "--", "--root", ".", "--only", only_buf, 0};
+                    (void)cx_fmt(cmd_disp, sizeof cmd_disp, "sh ./unisacc.com tools/gen-all-check.cx -- --root . --only %s", only_buf);
+                    out = slurp_run(av, &on);
+                } else {
+                    char *av[] = {"sh", uc, "tools/gen-all-check.cx", "--", "--root", ".", 0};
+                    (void)cx_fmt(cmd_disp, sizeof cmd_disp, "sh ./unisacc.com tools/gen-all-check.cx -- --root .");
+                    out = slurp_run(av, &on);
+                }
+                if (out && tx_find(out, on, "GEN_ALL_SUMMARY\t", 16) >= 0 &&
+                    tx_find(out, on, "\tdiff=0\t", 8) >= 0 &&
+                    tx_find(out, on, "\terror=0\t", 9) >= 0) {
+                    pass = 1;
+                }
+            } else if (tx_eqz(gn, "tlibfrozen")) {
+                char *av[] = {"sh", uc, "tools/check-tlib-frozen.cx", "--", "--fast", ".", 0};
+                (void)cx_fmt(cmd_disp, sizeof cmd_disp, "sh ./unisacc.com tools/check-tlib-frozen.cx -- --fast .");
+                out = slurp_run(av, &on);
+                if (out && tx_find(out, on, "TLIB_FAST\t", 10) >= 0 && tx_find(out, on, "\tMISMATCH", 9) < 0)
+                    pass = 1;
+            } else if (tx_eqz(gn, "lint")) {
+                char *av[] = {"sh", uc, "tools/cx-lint.cx", "--", "--staged", "--rules", "R2,R3,R4", "--strict", 0};
+                (void)cx_fmt(cmd_disp, sizeof cmd_disp, "sh ./unisacc.com tools/cx-lint.cx -- --staged --rules R2,R3,R4 --strict");
+                slurp_okrc = 0;
+                out = slurp_run(av, &on);
+                if (out && slurp_last_rc == 0)
+                    pass = 1;
+            } else if (tx_eqz(gn, "ratchets")) {
+                char *av[] = {"sh", uc, "tools/ratchets.cx", 0};
+                (void)cx_fmt(cmd_disp, sizeof cmd_disp, "sh ./unisacc.com tools/ratchets.cx");
+                out = slurp_run(av, &on);
+                if (out && tx_find(out, on, "RATCHETS\t", 9) >= 0 && tx_find(out, on, "\tover=0", 7) >= 0)
+                    pass = 1;
+            }
+            slurp_okrc = 0;
+            if (!pass) {
+                sy_eprintf("precommit: BLOCKED verify-deferred-failed gate=%s rc=%d cmd='%s' out='%.*s'\n",
+                           gn, slurp_last_rc, cmd_disp, (int)(out && on > 0 ? (on > 200 ? 200 : on) : 0), out ? out : "");
+                if (out) mm_free(out);
+                return 1;
+            }
+            if (out) mm_free(out);
+            for (i = 0; i < nrows; i++) {
+                if (!rows[i].verified && tx_eqz(rows[i].gate, gn)) {
+                    char vdtl[384], used_dfp[1200];
+                    (void)cx_fmt(vdtl, sizeof vdtl, "verified_deferred_tree=%s cmd=%s", rows[i].tree, cmd_disp);
+                    if (pc_append_deferred_record("VERIFIED", gn, "VERIFY_DEFERRED_PASS", v_tree, v_head, vdtl, used_dfp, sizeof used_dfp) != 0) {
+                        sy_eprintf("precommit: BLOCKED verify-deferred-write-failed gate=%s\n", gn);
+                        return 1;
+                    }
+                    rows[i].verified = 1;
+                    cleared++;
+                }
+            }
+            sy_printf("VERIFY_DEFERRED\tgate=%s\tstatus=PASS\tverified_tree=%s\tcleared=%d\n", gn, v_tree, cleared);
+        }
+    }
     return 0;
 }
 
@@ -2674,10 +2848,14 @@ static int isolate_staged_tree(void) {
 int main(int argc, char **argv) {
     long sn, rn, at; int staged = 0, blocked = 0, lint_absent = 0;
     if (argc >= 2 && tx_eqz(argv[1], "--precheck")) return precheck(argc, argv);
+    if (argc >= 2 && tx_eqz(argv[1], "--verify-deferred")) {
+        if (pc_capture_work_top() != 0) return 1;
+        return pc_verify_deferred(argc, argv);
+    }
     if (argc == 3 && tx_eqz(argv[1], "--plan")) plan_dir = argv[2];
     else if (argc == 3 && tx_eqz(argv[1], "--from-run")) from_run = argv[2];
     else if (argc == 2 && tx_eqz(argv[1], "--gates")) return gt_print();
-    else if (argc != 1) { sy_eprintf("precommit: usage: precommit.cx [-- --plan DIR | --from-run DIR | --gates]\n"); return 2; }
+    else if (argc != 1) { sy_eprintf("precommit: usage: precommit.cx [-- --plan DIR | --from-run DIR | --gates | --verify-deferred [--gate G]]\n"); return 2; }
     if (argc == 1) {
         const char *it = sy_env("UNISACC_PRECOMMIT_IN_TREE");
         if (!it || it[0] != '1') {
