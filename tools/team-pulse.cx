@@ -2,6 +2,8 @@
  *
  *   sh ./unisacc.com tools/team-pulse.cx -- [--windows-table PATH] [--stall-min N]
  *       [--fixture FILE] [--tail-lines K] [--mutant-no-stall]
+ *   sh ./unisacc.com tools/team-pulse.cx -- --freeze-watch [--root DIR] [--freeze-file P]
+ *       [--since-min N] [--lock-author NAME] [--now EPOCH] [--mutant-no-freeze-watch]
  *
  * Windows table (default skills/unisacc-orch-supervise/team-windows.tsv):
  *   window model lane write_prefix kind git_ref
@@ -43,7 +45,8 @@ typedef struct {
 } Win;
 static Win g_w[TP_MAXW];
 static int g_nw, g_stall_min = 45, g_wait_cc_min = 10, g_tail = 80, g_mutant, g_mutant_run, g_mutant_wcc;
-static char g_table[1100], g_fix[1100];
+static int g_freeze_watch, g_mutant_fw, g_since_min = 10, g_n_fw_viol;
+static char g_table[1100], g_fix[1100], g_root[1100], g_freeze_file[1100], g_lock_author[80], g_owner[80];
 static long g_now;
 static int g_n_stalled, g_n_idle_long, g_n_ctxlow, g_n_filtered, g_n_waiting_cc;
 static char g_waiting[TP_MAXW][64];
@@ -489,9 +492,188 @@ static void pulse_one(Win *w) {
     printf("PULSE\t%s\t%s\t%s\t%s\t%s\t%s\n", w->window, st, ctxs, hash[0] ? hash : "-", ages, flags);
 }
 
+/* ---- freeze-watch (S0..S9 read-only commit discipline) ---- */
+static int fw_domain(const char *path) {
+    static const char *pref[] = {
+        "src/", "cx/", "ext/", "exec/", "include/", "seed/", "kernel/", "tests/", "release/", 0
+    };
+    long i, pl = tx_len(path, 800);
+    for (i = 0; pref[i]; i++) {
+        long n = tx_len(pref[i], 32);
+        if (pl >= n && tx_same(path, n, pref[i], n)) return 1;
+    }
+    return 0;
+}
+
+static int fw_author_ok(const char *author) {
+    long al;
+    if (!author || !author[0]) return 0;
+    al = tx_len(author, 200);
+    if (g_owner[0] && has_ci(author, al, g_owner)) return 1;
+    if (g_lock_author[0] && has_ci(author, al, g_lock_author)) return 1;
+    return 0;
+}
+
+/* Parse first data row of freeze.tsv; 1=active, 0=inactive, 2=bad. */
+static int fw_parse_freeze(const char *path, char *owner, long ocap) {
+    unsigned char *b; int64_t n; long i = 0;
+    owner[0] = 0;
+    if (sy_read_file(path, &b, &n, 1 << 20) < 0 || !b) return 0;
+    while (i < n) {
+        long s = i, e, j, dl = 0; int nf = 0; char line[1200]; char *f[6];
+        while (i < n && b[i] != '\n') i++;
+        e = i; if (i < n) i++;
+        if (e <= s || b[s] == '#') continue;
+        if (e - s >= (long)sizeof line) { mm_free(b); return 2; }
+        mm_copy(line, sizeof line, b + s, e - s); line[e - s] = 0;
+        f[nf++] = line;
+        for (j = 0; line[j] && nf < 6; j++) if (line[j] == '\t') { line[j] = 0; f[nf++] = line + j + 1; }
+        mm_free(b);
+        if (nf != 5) return 2;
+        for (j = 0; f[3][j] >= '0' && f[3][j] <= '9'; j++) dl = dl * 10 + (f[3][j] - '0');
+        if (j > 0 && g_now < dl) {
+            if (cx_fmt(owner, ocap, "%s", f[2])) return 2;
+            return 1;
+        }
+        return 0;
+    }
+    mm_free(b);
+    return 0;
+}
+
+static void fw_emit(const char *window, const char *path, const char *kind, const char *when, const char *author) {
+    if (g_mutant_fw) return;
+    printf("FREEZE_WATCH\tVIOLATION\twindow=%s\tpath=%s\tkind=%s\ttime=%s\tauthor=%s\n",
+           window, path, kind, when && when[0] ? when : "-", author && author[0] ? author : "-");
+    g_n_fw_viol++;
+}
+
+static int fw_scan_dirty(const char *root, const char *window) {
+    char cmd[1600], out[1 << 16]; int rc; long i = 0, n;
+    if (cx_fmt(cmd, sizeof cmd, "git -C '%s' status --porcelain -uall 2>/dev/null", root)) return -1;
+    out[0] = 0;
+    rc = ckk_sh_t("fw-status", cmd, out, (int)sizeof out, 30);
+    if (rc != 0) return 0;
+    n = tx_len(out, sizeof out);
+    while (i < n) {
+        long s = i, e, k; char path[900];
+        while (i < n && out[i] != '\n') i++;
+        e = i; if (i < n) i++;
+        if (e - s < 4 || out[s + 2] != ' ') continue;
+        k = s + 3;
+        {
+            long j, arrow = -1;
+            for (j = k; j + 3 < e; j++)
+                if (out[j] == ' ' && out[j + 1] == '-' && out[j + 2] == '>' && out[j + 3] == ' ')
+                { arrow = j + 4; break; }
+            if (arrow > 0) k = arrow;
+        }
+        if (e - k >= (long)sizeof path || e <= k) continue;
+        mm_copy(path, sizeof path, out + k, e - k); path[e - k] = 0;
+        if (path[0] == '"') continue;
+        if (fw_domain(path)) fw_emit(window, path, "dirty", "-", "-");
+    }
+    return 0;
+}
+
+static int fw_scan_commits(const char *root, const char *window) {
+    char cmd[1800], out[1 << 16]; int rc; long i = 0, n;
+    char cur_t[32], cur_a[120];
+    if (cx_fmt(cmd, sizeof cmd,
+        "git -C '%s' log --since='%d minutes ago' --name-only --pretty=format:'COMMIT%%x09%%ct%%x09%%an' 2>/dev/null",
+        root, g_since_min)) return -1;
+    out[0] = 0; cur_t[0] = '-'; cur_t[1] = 0; cur_a[0] = '-'; cur_a[1] = 0;
+    rc = ckk_sh_t("fw-log", cmd, out, (int)sizeof out, 40);
+    if (rc != 0) return 0;
+    n = tx_len(out, sizeof out);
+    while (i < n) {
+        long s = i, e;
+        while (i < n && out[i] != '\n') i++;
+        e = i; if (i < n) i++;
+        if (e <= s) continue;
+        if (e - s > 7 && tx_same(out + s, 7, "COMMIT\t", 7)) {
+            long p1 = s + 7, p2 = p1, al;
+            while (p2 < e && out[p2] != '\t') p2++;
+            if (p2 - p1 > 0 && p2 - p1 < (long)sizeof cur_t) {
+                mm_copy(cur_t, sizeof cur_t, out + p1, p2 - p1); cur_t[p2 - p1] = 0;
+            }
+            if (p2 < e) {
+                al = e - (p2 + 1);
+                if (al > 0 && al < (long)sizeof cur_a) {
+                    mm_copy(cur_a, sizeof cur_a, out + p2 + 1, al); cur_a[al] = 0;
+                }
+            }
+            continue;
+        }
+        {
+            char path[900];
+            if (e - s >= (long)sizeof path) continue;
+            mm_copy(path, sizeof path, out + s, e - s); path[e - s] = 0;
+            if (!fw_domain(path)) continue;
+            if (fw_author_ok(cur_a)) continue;
+            fw_emit(window, path, "commit", cur_t, cur_a);
+        }
+    }
+    return 0;
+}
+
+static void fw_window_name(const char *root, char *out, long cap) {
+    long n = tx_len(root, 1000), i, last = -1;
+    for (i = 0; i < n; i++) if (root[i] == '/') last = i;
+    if (last >= 0 && last + 1 < n) cx_fmt(out, cap, "%s", root + last + 1);
+    else cx_fmt(out, cap, "%s", root);
+}
+
+static int run_freeze_watch(void) {
+    char freeze_path[1200], owner[80], wt_out[1 << 15], cmd[1200];
+    char roots[16][1100]; int nroot = 0, i, st, rc, first_wt = 1;
+    g_owner[0] = 0; g_n_fw_viol = 0;
+    if (!g_root[0] && cx_fmt(g_root, sizeof g_root, ".")) return die("root");
+    if (!g_freeze_file[0] && cx_fmt(g_freeze_file, sizeof g_freeze_file, "build/freeze.tsv")) return die("freeze");
+    if (g_freeze_file[0] == '/') {
+        if (cx_fmt(freeze_path, sizeof freeze_path, "%s", g_freeze_file)) return die("fp");
+    } else if (cx_fmt(freeze_path, sizeof freeze_path, "%s/%s", g_root, g_freeze_file)) return die("fp");
+    st = fw_parse_freeze(freeze_path, owner, sizeof owner);
+    if (st == 2) { printf("FREEZE_WATCH\tERROR\treason=freeze-malformed\n"); return 2; }
+    if (st == 0) { printf("FREEZE_WATCH\tINACTIVE\n"); return 0; }
+    if (cx_fmt(g_owner, sizeof g_owner, "%s", owner)) return die("owner");
+    if (cx_fmt(roots[0], sizeof roots[0], "%s", g_root)) return die("root0");
+    nroot = 1;
+    if (cx_fmt(cmd, sizeof cmd, "git -C '%s' worktree list --porcelain 2>/dev/null", g_root) == 0) {
+        wt_out[0] = 0;
+        rc = ckk_sh_t("fw-wt", cmd, wt_out, (int)sizeof wt_out, 20);
+        if (rc == 0) {
+            long at = 0, wn = tx_len(wt_out, sizeof wt_out);
+            while (at < wn && nroot < 16) {
+                long s = at, e, pl;
+                while (at < wn && wt_out[at] != '\n') at++;
+                e = at; if (at < wn) at++;
+                if (e - s <= 9 || !tx_prefix(wt_out + s, e - s, "worktree ", 9)) continue;
+                pl = e - (s + 9);
+                if (pl <= 0 || pl >= (long)sizeof roots[0]) continue;
+                if (first_wt) { first_wt = 0; continue; }
+                mm_copy(roots[nroot], sizeof roots[0], wt_out + s + 9, pl);
+                roots[nroot][pl] = 0;
+                nroot++;
+            }
+        }
+    }
+    for (i = 0; i < nroot; i++) {
+        char win[200];
+        if (i == 0) cx_fmt(win, sizeof win, "shared");
+        else fw_window_name(roots[i], win, sizeof win);
+        fw_scan_dirty(roots[i], win);
+        fw_scan_commits(roots[i], win);
+    }
+    if (g_n_fw_viol == 0) printf("FREEZE_WATCH\tCLEAN\towner=%s\tsince_min=%d\n", g_owner, g_since_min);
+    else printf("FREEZE_WATCH\tSUMMARY\tviolations=%d\towner=%s\n", g_n_fw_viol, g_owner);
+    return g_n_fw_viol ? 1 : 0;
+}
+
+
 int main(int argc, char **argv) {
     int i, a = 1;
-    g_table[0] = 0; g_fix[0] = 0;
+    g_table[0] = 0; g_fix[0] = 0; g_root[0] = 0; g_freeze_file[0] = 0; g_lock_author[0] = 0;
     g_now = sy_wall_s();
     while (a < argc) {
         if (tx_eqz(argv[a], "--windows-table") && a + 1 < argc) {
@@ -507,10 +689,21 @@ int main(int argc, char **argv) {
         else if (tx_eqz(argv[a], "--mutant-no-wait-cc")) g_mutant_wcc = 1;
         else if (tx_eqz(argv[a], "--wait-cc-min") && a + 1 < argc) {
             g_wait_cc_min = (int)tx_strtol(argv[++a], 0, 10); if (g_wait_cc_min < 1) return die("wait-cc-min");
-        } else if (tx_eqz(argv[a], "--now") && a + 1 < argc) g_now = tx_strtol(argv[++a], 0, 10);
+        } else if (tx_eqz(argv[a], "--freeze-watch")) g_freeze_watch = 1;
+        else if (tx_eqz(argv[a], "--root") && a + 1 < argc) {
+            if (cx_fmt(g_root, sizeof g_root, "%s", argv[++a])) return die("root");
+        } else if (tx_eqz(argv[a], "--freeze-file") && a + 1 < argc) {
+            if (cx_fmt(g_freeze_file, sizeof g_freeze_file, "%s", argv[++a])) return die("freeze-file");
+        } else if (tx_eqz(argv[a], "--since-min") && a + 1 < argc) {
+            g_since_min = (int)tx_strtol(argv[++a], 0, 10); if (g_since_min < 1) return die("since-min");
+        } else if (tx_eqz(argv[a], "--lock-author") && a + 1 < argc) {
+            if (cx_fmt(g_lock_author, sizeof g_lock_author, "%s", argv[++a])) return die("lock-author");
+        } else if (tx_eqz(argv[a], "--mutant-no-freeze-watch")) g_mutant_fw = 1;
+        else if (tx_eqz(argv[a], "--now") && a + 1 < argc) g_now = tx_strtol(argv[++a], 0, 10);
         else return die("usage: [--windows-table P] [--stall-min N] [--wait-cc-min N] [--fixture F] [--tail-lines K] [--mutant-no-stall|--mutant-no-running-shell|--mutant-no-wait-cc]");
         a++;
     }
+    if (g_freeze_watch) return run_freeze_watch();
     if (!g_table[0]) {
         if (cx_fmt(g_table, sizeof g_table, "skills/unisacc-orch-supervise/team-windows.tsv")) return die("default table");
     }

@@ -2,7 +2,8 @@
  *
  * Real-shaped captures: Codex Ask/Working, omp ╰─/spinner, Cursor Auto/Running,
  * Claude ❯ idle, FILTERED curly+care, exclusive write_prefix "-", analysis IDLE_LONG,
- * Gemini agy ● Bash duration WORKING, 回报发 cc WAITING_CC footer, mutants must red.
+ * Gemini agy ● Bash duration WORKING, 回报发 cc WAITING_CC footer,
+ * --freeze-watch synth repo VIOLATION/CLEAN/INACTIVE, mutants must red.
  * Ends with CHECK_TEAM_PULSE. */
 #pragma unisa use cxlib.ckassert
 #pragma unisa use cxlib.ckrun
@@ -172,6 +173,63 @@ int main(void) {
         rc = run_tp(extra);
         ck(rc == 0 && !ckk_has(out, (int)sizeof out, "PULSE\tw-agy-wait\tWAITING_CC\t") &&
            !ckk_has(out, (int)sizeof out, "WAITING_CC\tw-agy-wait"), "mutant-no-wait-cc");
+    }
+
+    /* ---- freeze-watch synthetic repo ---- */
+    {
+        char repo[900], cmd[4500], extra[400]; long dl;
+        if (cx_fmt(repo, sizeof repo, "%s/fw-repo", root)) return 2;
+        dl = now + 86400; /* active freeze */
+        if (cx_fmt(cmd, sizeof cmd,
+            "mkdir -p '%s/build' '%s/src' '%s/cx' '%s/tools' && "
+            "cd '%s' && git init -q && git config user.name cc && git config user.email cc@t && "
+            "printf '# candidate_sid\\tbase_commit\\towner\\tdeadline_epoch_s\\tpaths\\n"
+            "FW-TEST\\tabcdef\\tcc\\t%ld\\tsrc cx\\n' > build/freeze.tsv && "
+            "printf 'ok\\n' > tools/keep.txt && git add tools/keep.txt build/freeze.tsv && "
+            "git -c user.name=cc -c user.email=cc@t commit -q -m base && "
+            "printf 'bad\\n' > src/leak.c && "
+            "printf 'x\\n' > cx/other.c && git add cx/other.c && "
+            "git -c user.name=agyneon -c user.email=agy@t commit -q -m bad-commit",
+            repo, repo, repo, repo, repo, dl)) return 2;
+        ck(ckk_sh_t("check-team-pulse", cmd, out, (int)sizeof out, 40) == 0, "fw-seed-repo");
+        if (cx_fmt(extra, sizeof extra, "--freeze-watch --root '%s' --since-min 60 --now %ld", repo, now)) return 2;
+        rc = run_tp(extra);
+        /* run_tp always passes windows-table+fixture; freeze-watch ignores them */
+        ck(ckk_has(out, (int)sizeof out, "FREEZE_WATCH\tVIOLATION\t") &&
+           ckk_has(out, (int)sizeof out, "path=src/leak.c") &&
+           ckk_has(out, (int)sizeof out, "kind=dirty"), "fw-dirty-violation");
+        ck(ckk_has(out, (int)sizeof out, "path=cx/other.c") &&
+           ckk_has(out, (int)sizeof out, "kind=commit") &&
+           ckk_has(out, (int)sizeof out, "author=agyneon"), "fw-commit-violation");
+        ck(rc != 0, "fw-rc-nonzero");
+        /* drop non-owner commit and dirty files -> CLEAN */
+        if (cx_fmt(cmd, sizeof cmd,
+            "cd '%s' && git reset -q --hard HEAD~1 && rm -f src/leak.c", repo)) return 2;
+        ck(ckk_sh_t("check-team-pulse", cmd, out, (int)sizeof out, 30) == 0, "fw-clean-seed");
+        if (cx_fmt(extra, sizeof extra, "--freeze-watch --root '%s' --since-min 60 --now %ld", repo, now)) return 2;
+        rc = run_tp(extra);
+        ck(rc == 0 && ckk_has(out, (int)sizeof out, "FREEZE_WATCH\tCLEAN\t"), "fw-clean");
+        /* inactive freeze */
+        if (cx_fmt(cmd, sizeof cmd,
+            "cd '%s' && printf 'FW-TEST\\tabcdef\\tcc\\t1\\tsrc\\n' > build/freeze.tsv", repo)) return 2;
+        ck(ckk_sh_t("check-team-pulse", cmd, out, (int)sizeof out, 10) == 0, "fw-inactive-seed");
+        if (cx_fmt(extra, sizeof extra, "--freeze-watch --root '%s' --now %ld", repo, now)) return 2;
+        rc = run_tp(extra);
+        ck(rc == 0 && ckk_has(out, (int)sizeof out, "FREEZE_WATCH\tINACTIVE"), "fw-inactive");
+        /* restore active + dirty for mutant */
+        if (cx_fmt(cmd, sizeof cmd,
+            "cd '%s' && printf 'FW-TEST\\tabcdef\\tcc\\t%ld\\tsrc\\n' > build/freeze.tsv && "
+            "printf 'bad\\n' > src/leak2.c", repo, dl)) return 2;
+        ck(ckk_sh_t("check-team-pulse", cmd, out, (int)sizeof out, 10) == 0, "fw-mutant-seed");
+        if (cx_fmt(extra, sizeof extra,
+            "--freeze-watch --root '%s' --since-min 60 --now %ld --mutant-no-freeze-watch", repo, now)) return 2;
+        rc = run_tp(extra);
+        ck(rc == 0 && ckk_has(out, (int)sizeof out, "FREEZE_WATCH\tCLEAN\t") &&
+           !ckk_has(out, (int)sizeof out, "VIOLATION"), "mutant-no-freeze-watch");
+        /* without mutant must see violation again */
+        if (cx_fmt(extra, sizeof extra, "--freeze-watch --root '%s' --since-min 60 --now %ld", repo, now)) return 2;
+        rc = run_tp(extra);
+        ck(rc != 0 && ckk_has(out, (int)sizeof out, "path=src/leak2.c"), "fw-mutant-contrast-red");
     }
 
     sy_remove_all(root);
