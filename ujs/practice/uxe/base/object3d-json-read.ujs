@@ -1,0 +1,101 @@
+native function object3d_json_find(input:i64,end:i64,scratch:i64,field:i64) i64 {
+  let keyEnd=object3d_json_key(scratch,scratch+32,field);
+  if(keyEnd<0) { return 0-1; }
+  return json_find_key(input,end,scratch+1,keyEnd-scratch-3);
+}
+
+native function object3d_json_numbers(input:i64,end:i64,out:i64,count:i64) i64 {
+  if(input<0 || input>=end || ux_u8(input)!=91) { return 0-1; }
+  let p=json_space(input+1,end);
+  let i=0;
+  while(i<count && p>=0 && p<end) {
+    let number=json_read_number(p,end);
+    if(number-number!=0.0) { return 0-1; }
+    let saved=ux_f64_put(out+i*8,number);
+    p=json_space(json_value_end(p,end),end);
+    i=i+1;
+    if(i<count) {
+      if(p<0 || p>=end || ux_u8(p)!=44) { return 0-1; }
+      p=json_space(p+1,end);
+    }
+  }
+  if(i!=count || p<0 || p>=end || ux_u8(p)!=93) { return 0-1; }
+  return out;
+}
+
+native function object3d_json_flag(p:i64,defaultValue:i64) i64 {
+  if(p==0-2) { return defaultValue; }
+  if(p<0) { return 0-1; }
+  if(ux_u8(p)==116) { return 1; }
+  if(ux_u8(p)==102) { return 0; }
+  return 0-1;
+}
+
+// Payload holds the three decoded strings and up vector. Children borrow the input bytes.
+native function Object3D_fromJSON(node:i64,fields:i64,input:i64,end:i64,payload:i64,scratch:i64) i64 {
+  if(input<0 || end<=input || end>6291456 || payload%8!=0 || scratch%8!=0 ||
+     !object3d_json_span(node,Object3D.size,input,end,scratch) ||
+     !object3d_json_span(fields,Object3DJsonFields.size,input,end,scratch) ||
+     !object3d_json_span(payload,792,input,end,scratch) ||
+     !object3d_json_span(scratch,1104,input,end,6291456)) { return 0-1; }
+  let matrix=ux_u32(node+Object3D.localMatrix);
+  if(matrix%8!=0 || !object3d_json_span(matrix,128,input,end,scratch) ||
+     !object3d_json_span(matrix,128,payload,payload+792,6291456) ||
+     !object3d_json_span(matrix,128,fields,fields+Object3DJsonFields.size,6291456) ||
+     !object3d_json_span(matrix,128,node,node+Object3D.size,6291456) ||
+     !object3d_json_span(payload,792,node,node+Object3D.size,6291456) ||
+     !object3d_json_span(payload,792,fields,fields+Object3DJsonFields.size,6291456) ||
+     !object3d_json_span(fields,Object3DJsonFields.size,node,node+Object3D.size,6291456)) { return 0-1; }
+  let close=json_value_end(input,end);
+  if(close<0 || json_space(close,end)!=end) { return 0-1; }
+  let uuidAt=object3d_json_find(input,close,scratch,0);
+  let typeAt=object3d_json_find(input,close,scratch,1);
+  let nameAt=object3d_json_find(input,close,scratch,2);
+  let castAt=object3d_json_find(input,close,scratch,3);
+  let receiveAt=object3d_json_find(input,close,scratch,4);
+  let visibleAt=object3d_json_find(input,close,scratch,5);
+  let layersAt=object3d_json_find(input,close,scratch,6);
+  let matrixAt=object3d_json_find(input,close,scratch,7);
+  let upAt=object3d_json_find(input,close,scratch,8);
+  let childrenAt=object3d_json_find(input,close,scratch,9);
+  let cast=object3d_json_flag(castAt,0);
+  let receive=object3d_json_flag(receiveAt,0);
+  let visible=object3d_json_flag(visibleAt,1);
+  let layer=json_read_number(layersAt,close);
+  if(uuidAt<0 || typeAt<0 || cast<0 || receive<0 || visible<0 ||
+     !(layer>=0.0-2147483648.0 && layer<=2147483647.0)) { return 0-1; }
+  let mask=f64_floor_i64(layer);
+  if(layer!=0.0+mask) { return 0-1; }
+  let childrenBytes=0;
+  if(childrenAt>=0) {
+    if(ux_u8(childrenAt)!=91) { return 0-1; }
+    let childrenEnd=json_value_end(childrenAt,close);
+    if(childrenEnd<0) { return 0-1; }
+    childrenBytes=childrenEnd-childrenAt;
+  } else if(childrenAt!=0-2) { return 0-1; }
+  let uuidBytes=Json_decodeString(uuidAt,close,payload,256);
+  let typeBytes=Json_decodeString(typeAt,close,payload+256,256);
+  let nameBytes=0;
+  if(nameAt>=0) { nameBytes=Json_decodeString(nameAt,close,payload+512,256); }
+  else if(nameAt!=0-2) { return 0-1; }
+  let matrixRead=object3d_json_numbers(matrixAt,close,scratch+32,16);
+  let upRead=object3d_json_numbers(upAt,close,payload+768,3);
+  if(uuidBytes<=0 || typeBytes<=0 || nameBytes<0 || matrixRead<0 || upRead<0) { return 0-1; }
+  let copied=uxe_copy_record(matrix,scratch+32,128);
+  let layerSaved=ux_u32_put(node+Object3D.layerMask,u32_and(mask,4294967295));
+  let visibleSaved=ux_u32_put(node+Object3D.visible,visible);
+  let dirty=ux_u32_put(node+Object3D.dirty,2);
+  let uuidSaved=ux_u32_put(fields+Object3DJsonFields.uuid,payload);
+  let uuidLength=ux_u32_put(fields+Object3DJsonFields.uuidBytes,uuidBytes);
+  let typeSaved=ux_u32_put(fields+Object3DJsonFields.type,payload+256);
+  let typeLength=ux_u32_put(fields+Object3DJsonFields.typeBytes,typeBytes);
+  let nameSaved=ux_u32_put(fields+Object3DJsonFields.name,payload+512);
+  let nameLength=ux_u32_put(fields+Object3DJsonFields.nameBytes,nameBytes);
+  let casts=ux_u32_put(fields+Object3DJsonFields.castShadow,cast);
+  let receives=ux_u32_put(fields+Object3DJsonFields.receiveShadow,receive);
+  let upSaved=ux_u32_put(fields+Object3DJsonFields.up,payload+768);
+  if(childrenAt<0) { childrenAt=0; }
+  let childrenSaved=ux_u32_put(fields+Object3DJsonFields.children,childrenAt);
+  let childrenLength=ux_u32_put(fields+Object3DJsonFields.childrenBytes,childrenBytes);
+  return node;
+}

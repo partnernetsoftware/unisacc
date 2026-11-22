@@ -1,0 +1,157 @@
+// Caller-owned metadata and child references accompany an Object3D arena record.
+struct Object3DJsonFields {
+  uuid: u32;
+  uuidBytes: u32;
+  type: u32;
+  typeBytes: u32;
+  name: u32;
+  nameBytes: u32;
+  castShadow: u32;
+  receiveShadow: u32;
+  up: u32;
+  children: u32;
+  childrenBytes: u32;
+}
+
+native function object3d_json_word(p:i64,end:i64,word:i64,bytes:i64) i64 {
+  if(p<0 || end-p<bytes || end>6291456) { return 0-1; }
+  let i=0;
+  while(i<bytes) {
+    let put=ux_u8_put(p+i,word%256);
+    word=word/256;
+    i=i+1;
+  }
+  return p+bytes;
+}
+
+native function object3d_json_key(p:i64,end:i64,field:i64) i64 {
+  if(field==0) {
+    p=object3d_json_word(p,end,16363363310597410,7);
+    return p;
+  }
+  if(field==1) {
+    p=object3d_json_word(p,end,16363367723267106,7);
+    return p;
+  }
+  if(field==2) {
+    p=object3d_json_word(p,end,16363367671361058,7);
+    return p;
+  }
+  if(field==3) {
+    p=object3d_json_word(p,end,29365157194982178,7);
+    p=object3d_json_word(p,end,63919707087969,6);
+    return p;
+  }
+  if(field==4) {
+    p=object3d_json_word(p,end,33329931432063522,7);
+    p=object3d_json_word(p,end,33617999150207845,7);
+    p=object3d_json_word(p,end,14882,2);
+    return p;
+  }
+  if(field==5) {
+    p=object3d_json_word(p,end,30507502532130338,7);
+    p=object3d_json_word(p,end,3809893,3);
+    return p;
+  }
+  if(field==6) {
+    p=object3d_json_word(p,end,32495402475416610,7);
+    p=object3d_json_word(p,end,14882,2);
+    return p;
+  }
+  if(field==7) {
+    p=object3d_json_word(p,end,33892937505008930,7);
+    p=object3d_json_word(p,end,14882,2);
+    return p;
+  }
+  if(field==8) {
+    p=object3d_json_word(p,end,249685898530,5);
+    return p;
+  }
+  if(field==9) {
+    p=object3d_json_word(p,end,32198564132709154,7);
+    p=object3d_json_word(p,end,975335013,4);
+    return p;
+  }
+  return 0-1;
+}
+
+native function object3d_json_vector(p:i64,end:i64,values:i64,count:i64,scratch:i64) i64 {
+  p=json_byte(p,end,91);
+  let i=0;
+  while(i<count && p>=0) {
+    if(i>0) { p=json_byte(p,end,44); }
+    p=json_write_f64(p,end,ux_f64(values+i*8),scratch);
+    i=i+1;
+  }
+  return json_byte(p,end,93);
+}
+
+native function object3d_json_span(at:i64,size:i64,dst:i64,end:i64,scratch:i64) i64 {
+  return at>=0 && size>=0 && at<=6291456-size &&
+    (at>=end || at+size<=dst) && (at>=scratch+1104 || at+size<=scratch);
+}
+
+native function Object3D_toJSON(node:i64,fields:i64,dst:i64,end:i64,scratch:i64) i64 {
+  if(dst<0 || end<=dst || end>6291456 || scratch%8!=0 ||
+     !object3d_json_span(scratch,1104,dst,end,6291456) ||
+     !object3d_json_span(node,Object3D.size,dst,end,scratch) ||
+     !object3d_json_span(fields,Object3DJsonFields.size,dst,end,scratch)) { return 0-1; }
+  let uuid=ux_u32(fields+Object3DJsonFields.uuid);
+  let uuidBytes=ux_u32(fields+Object3DJsonFields.uuidBytes);
+  let type=ux_u32(fields+Object3DJsonFields.type);
+  let typeBytes=ux_u32(fields+Object3DJsonFields.typeBytes);
+  let name=ux_u32(fields+Object3DJsonFields.name);
+  let nameBytes=ux_u32(fields+Object3DJsonFields.nameBytes);
+  let up=ux_u32(fields+Object3DJsonFields.up);
+  let matrix=ux_u32(node+Object3D.localMatrix);
+  let children=ux_u32(fields+Object3DJsonFields.children);
+  let childrenBytes=ux_u32(fields+Object3DJsonFields.childrenBytes);
+  if(uuidBytes==0 || typeBytes==0 || up%8!=0 || matrix%8!=0 ||
+     !object3d_json_span(uuid,uuidBytes,dst,end,scratch) ||
+     !object3d_json_span(type,typeBytes,dst,end,scratch) ||
+     !object3d_json_span(name,nameBytes,dst,end,scratch) ||
+     !object3d_json_span(up,24,dst,end,scratch) ||
+     !object3d_json_span(matrix,128,dst,end,scratch) ||
+     !object3d_json_span(children,childrenBytes,dst,end,scratch)) { return 0-1; }
+  if(childrenBytes>0 && (ux_u8(children)!=91 || json_value_end(children,children+childrenBytes)!=children+childrenBytes)) {
+    return 0-1;
+  }
+  let p=json_byte(dst,end,123);
+  p=object3d_json_key(p,end,0);
+  p=json_write_string(p,end,uuid,uuidBytes);
+  p=object3d_json_key(json_byte(p,end,44),end,1);
+  p=json_write_string(p,end,type,typeBytes);
+  if(nameBytes>0) {
+    p=object3d_json_key(json_byte(p,end,44),end,2);
+    p=json_write_string(p,end,name,nameBytes);
+  }
+  if(ux_u32(fields+Object3DJsonFields.castShadow)!=0) {
+    p=object3d_json_key(json_byte(p,end,44),end,3);
+    p=json_write_token(p,end,ObjectJsonToken.boolTrue);
+  }
+  if(ux_u32(fields+Object3DJsonFields.receiveShadow)!=0) {
+    p=object3d_json_key(json_byte(p,end,44),end,4);
+    p=json_write_token(p,end,ObjectJsonToken.boolTrue);
+  }
+  if(ux_u32(node+Object3D.visible)==0) {
+    p=object3d_json_key(json_byte(p,end,44),end,5);
+    p=json_write_token(p,end,ObjectJsonToken.boolFalse);
+  }
+  p=object3d_json_key(json_byte(p,end,44),end,6);
+  let mask=ux_u32(node+Object3D.layerMask);
+  if(mask>2147483647) { mask=mask-4294967296; }
+  p=json_write_f64(p,end,0.0+mask,scratch);
+  p=object3d_json_key(json_byte(p,end,44),end,7);
+  p=object3d_json_vector(p,end,matrix,16,scratch);
+  p=object3d_json_key(json_byte(p,end,44),end,8);
+  p=object3d_json_vector(p,end,up,3,scratch);
+  if(childrenBytes>0) {
+    p=object3d_json_key(json_byte(p,end,44),end,9);
+    let i=0;
+    while(i<childrenBytes && p>=0) {
+      p=json_byte(p,end,ux_u8(children+i));
+      i=i+1;
+    }
+  }
+  return json_byte(p,end,125);
+}
