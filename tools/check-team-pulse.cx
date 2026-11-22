@@ -1,0 +1,94 @@
+/* tools/check-team-pulse.cx -- fixture tests for tools/team-pulse.cx (no real tmux).
+ *
+ *   sh ./unisacc.com tools/check-team-pulse.cx
+ *
+ * Feeds fake capture panels via --fixture; asserts status classify, CTX_LOW, STALLED,
+ * and --mutant-no-stall drops STALLED. Ends with CHECK_TEAM_PULSE. */
+#pragma unisa use cxlib.ckassert
+#pragma unisa use cxlib.ckrun
+#pragma unisa use sys.fs
+#pragma unisa use sys.env
+#pragma unisa use sys.time
+#pragma unisa use sys.posix
+#pragma unisa use text.text
+
+static char out[1 << 16];
+static char root[900], fx[950], tab[950], cwd[800];
+
+static int run_tp(const char *extra) {
+    char cmd[2400];
+    if (cx_fmt(cmd, sizeof cmd,
+        "sh '%s/unisacc.com' '%s/tools/team-pulse.cx' -- --windows-table '%s' --fixture '%s' %s",
+        cwd, cwd, tab, fx, extra && extra[0] ? extra : "")) return -1;
+    return ckk_sh_t("check-team-pulse", cmd, out, (int)sizeof out, 55);
+}
+
+int main(void) {
+    char cmd[3200]; int rc; long now;
+    const char *td = sy_env("TMPDIR");
+    if (!td || !td[0]) td = "/tmp";
+    if (ckk_sh_t("check-team-pulse", "pwd", out, (int)sizeof out, 20) != 0) return 2;
+    cx_fmt(cwd, sizeof cwd, "%s", out);
+    { long n = tx_len(cwd, sizeof cwd); while (n > 0 && cwd[n - 1] == '\n') cwd[--n] = 0; }
+    now = sy_wall_s();
+    if (cx_fmt(root, sizeof root, "%s/tp-check-%ld", td, now % 1000000000)) return 2;
+    if (cx_fmt(fx, sizeof fx, "%s/fixture.txt", root) || cx_fmt(tab, sizeof tab, "%s/wins.tsv", root)) return 2;
+    sy_remove_all(root);
+    if (sy_mkdir_all(root, 0700)) return 2;
+
+    if (cx_fmt(cmd, sizeof cmd,
+        "printf 'window\\tmodel\\tlane\\twrite_prefix\\n"
+        "w-work\\tm\\tmain\\ttools/\\n"
+        "w-idle\\tm\\tmain\\ttools/\\n"
+        "w-filt\\tm\\tmain\\ttools/\\n"
+        "w-wait\\tm\\tmain\\ttools/\\n"
+        "w-low\\tm\\tmain\\ttools/\\n' > '%s'", tab)) return 2;
+    ck(ckk_sh_t("check-team-pulse", cmd, out, (int)sizeof out, 10) == 0, "seed-table");
+
+    /* write fixture with python-free shell; %% -> % for context percents */
+    if (cx_fmt(cmd, sizeof cmd,
+        "{ echo '=== PANE w-work ==='; echo 'doing'; echo 'Working...'; echo 'esc to cancel'; "
+        "echo 'Context left until auto-compact: 42%%'; "
+        "echo '=== PANE w-idle ==='; echo 'done.'; echo '>'; "
+        "echo '=== PANE w-filt ==='; echo 'This content can not be shown'; "
+        "echo '=== PANE w-wait ==='; echo 'Waiting for input'; echo 'Do you want to continue?'; "
+        "echo '=== PANE w-low ==='; echo '>'; echo 'Context left until auto-compact: 9%%'; "
+        "} > '%s'", fx)) return 2;
+    ck(ckk_sh_t("check-team-pulse", cmd, out, (int)sizeof out, 10) == 0, "seed-fixture");
+
+    rc = run_tp("--stall-min 99999");
+    ck(rc == 0, "run-rc");
+    ck(ckk_has(out, (int)sizeof out, "PULSE\tw-work\tWORKING\t42\t"), "status-working-ctx");
+    ck(ckk_has(out, (int)sizeof out, "PULSE\tw-idle\tIDLE\t"), "status-idle");
+    ck(ckk_has(out, (int)sizeof out, "PULSE\tw-filt\tFILTERED\t"), "status-filtered");
+    ck(ckk_has(out, (int)sizeof out, "PULSE\tw-wait\tWAITING_INPUT\t"), "status-waiting");
+    ck(ckk_has(out, (int)sizeof out, "PULSE\tw-low\tIDLE\t9\t"), "status-idle-ctx9");
+    ck(ckk_has(out, (int)sizeof out, "CTX_LOW"), "flag-ctx-low");
+    ck(ckk_has(out, (int)sizeof out, "TEAM_PULSE\twindows=5\t"), "summary");
+
+    {
+        char extra[220];
+        if (cx_fmt(extra, sizeof extra, "--stall-min 1 --now %ld", now + 86400 * 365)) return 2;
+        rc = run_tp(extra);
+        ck(rc == 0 && ckk_has(out, (int)sizeof out, "STALLED"), "stalled-idle");
+        if (cx_fmt(extra, sizeof extra, "--stall-min 1 --now %ld --mutant-no-stall", now + 86400 * 365)) return 2;
+        rc = run_tp(extra);
+        ck(rc == 0 && !ckk_has(out, (int)sizeof out, "STALLED"), "mutant-no-stall");
+    }
+
+    if (cx_fmt(cmd, sizeof cmd,
+        "printf 'window\\tmodel\\tlane\\twrite_prefix\\nmiss\\tm\\tmain\\ttools/\\n' > '%s'", tab)) return 2;
+    ck(ckk_sh_t("check-team-pulse", cmd, out, (int)sizeof out, 10) == 0, "seed-miss-table");
+    /* restore fixture still has no miss pane */
+    rc = run_tp("--stall-min 99999");
+    ck(rc == 0 && ckk_has(out, (int)sizeof out, "PULSE\tmiss\tUNKNOWN\t"), "missing-pane-unknown");
+
+    sy_remove_all(root);
+    {
+        int failed = ck_failures();
+        int total = ck_assertions();
+        printf("TEAM_PULSE_SUMMARY\tfailed=%d\tpassed=%d\n", failed, total - failed);
+        if (!failed) printf("CHECK_TEAM_PULSE\n");
+        return failed ? 1 : 0;
+    }
+}
