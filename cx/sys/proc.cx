@@ -807,20 +807,20 @@ static int syp_capture_os(sy_spawn_t *o, sy_exit_t *st, sy_capture_t *cap, long 
     for (;;) {
         long now;
         if (c.out_fd < 0 && c.err_fd < 0) {
-            /* Both streams ended.  The leader may still run (it closed 1/2 and works on): ask
-               without consuming -- waitid+WNOWAIT, no reap, no status collected -- and stop as
-               soon as it is finished.  -1 (unconfirmed on this host) is treated as "not
-               finished" so the deadline path still ends the group; the anchoring rule keeps the
-               leader unreaped until sy_proc_end either way. */
-            if (syp_proc_finished_os(c.pid) == 1) break;
+            /* Both streams ended.  Ask without consuming (waitid+WNOWAIT) whether the leader is
+               done; on a host where that cannot be answered (-1: non-Linux, no such call) treat
+               the streams ending as the end of the capture: sy_proc_end below cleans and reaps
+               with a bounded grace, so an already-exited child returns 0, not -ETIMEDOUT.
+               Answering "cannot tell" must never be turned into "still running until the
+               deadline" -- that reported normal exits as timeouts (cc review 2026-11-22). */
+            int fin = syp_proc_finished_os(c.pid);
+            if (fin != 0) break;   /* finished, or unconfirmed: let sy_proc_end decide */
             if (end > 0) {
                 long now = sy_now_ms();
                 if (now >= end) { timed = 1; break; }
                 sy_sleep_ms(end - now < 20 ? end - now : 20);
                 continue;
             }
-            /* no deadline and no confirmation the leader is done: wait for it, bounded by the
-               cleaning primitive's grace rather than blocking forever */
             break;
         }
         if (end > 0) {
