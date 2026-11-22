@@ -12,8 +12,14 @@
 1. **pgid 归句柄独有**:带组 spawn 的 pgid 在 `sy_child_t` 里(`h`),对外不另存、不缓存副本。
 2. **锚定规则**:组清理完成前不回收组长。僵尸组长钉住 pid 与 pgid,这是"清理先于回收"的
    物理保证。提前探测用**不消费**的 `waitid(P_PID, pid, &si, WEXITED|WNOHANG|WNOWAIT)`,
-   放 `_os` 静态帮手;不读 `/proc`。Linux 先实跑验证;osx 标 UNMEASURED 并写明风险
-   (osx 的 waitid 存在但 WNOWAIT 语义需核;不能确认时退化为不探测)。
+   放 `_os` 静态帮手;不读 `/proc`。Linux 先实跑验证(live 时 si_pid=0,退出后 si_pid=pid,
+   两次探测都不消费,之后 waitpid 仍取到 code=7);osx 标 UNMEASURED 并写明风险
+   (osx 的 waitid 存在但 WNOWAIT 语义需核;不能确认时探测返回 -1,调用方不再等截止)。
+   **可观测性(UNVERIFIED)**:锚定的存在理由是"组长提前回收后组号被复用,再对 -pgid 发信号
+   会误伤";本项目验收机上 `unshare --pid` 返回 Operation not permitted(内核未开 pid
+   namespace),无法用 ns_last_pid 造"组长号被哨兵进程复用并自建同号组"的夹具,故
+   "提前回收"变异无法转红。当前由代码结构(组长只在 sy_proc_end 末尾回收、探测不消费)保证,
+   登记为 UNVERIFIED,待具备 pid namespace 的环境补夹具。
 3. **REAPED 精确含义**:禁止一切以该 pid 或以该 pgid 为目标的信号与等待;
    `sy_proc_try_wait`/`sy_proc_wait` 返回已存状态;`sy_proc_kill` 返回 `-ESRCH`。
    前提是规则 2 保证清理先于回收。**不得**为了清后代而绕开句柄直发 `kill(-pgid)`。
