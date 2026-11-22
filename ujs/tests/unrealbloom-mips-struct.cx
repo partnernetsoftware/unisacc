@@ -1,0 +1,38 @@
+#pragma unisa use g_wasm_batch
+#pragma unisa use text.fmt
+#pragma unisa use text.text
+
+int main(int argc,char **argv) {
+    const int mutate=argc==3 && tx_eqz(argv[2],"--mutate");
+    if(argc!=2 && !mutate) return 2;
+    const char *modules[]={"unrealbloom-mips",0};
+    const int widths[]={31,1};
+    const int heights[]={17,63};
+    char expressions[30][144];
+    const char *cases[33];
+    const char *fields[]={"width","height","radius"};
+    double gold[33];
+    for(int shape=0;shape<2;shape++) {
+        for(int mip=0;mip<5;mip++) {
+            const int divisor=2<<mip;
+            const int expected[]={(widths[shape]+divisor-1)/divisor,
+                (heights[shape]+divisor-1)/divisor,3+2*mip};
+            for(int field=0;field<3;field++) {
+                int index=shape*15+mip*3+field;
+                int len=tx_snprintf(expressions[index],sizeof expressions[index],
+                    "let r=UnrealBloom_planMips(32,5,%d,%d);return 0.0+ux_u32(32+%d*UnrealBloomMip.size+UnrealBloomMip.%s);",
+                    widths[shape],heights[shape],mip,fields[field]);
+                if(len<0 || len>=(int)sizeof expressions[index]) return 2;
+                cases[index]=expressions[index];
+                gold[index]=expected[field];
+            }
+        }
+    }
+    cases[30]="return 0.0+UnrealBloom_planMips(32,4,31,17);";
+    cases[31]="let put=ux_u32_put(32,77);let bad=UnrealBloom_planMips(32,5,0,17);return 0.0+ux_u32(32);";
+    cases[32]="return 0.0+UnrealBloom_planMips(32,5,31,17);";
+    gold[30]=-1; gold[31]=77; gold[32]=5;
+    return g_wasm_batch_addon("G_STRUCT UnrealBloomPass pyramid","unrealbloom-mips",
+        argv[1],modules,"",cases,gold,33,mutate?1:-1,
+        "let r=UnrealBloom_planMips(32,5,31,16);return 0.0+ux_u32(32+UnrealBloomMip.height);");
+}
