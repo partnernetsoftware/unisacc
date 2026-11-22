@@ -1,0 +1,67 @@
+<!doctype html>
+<meta charset="utf-8">
+<pre id="r160">pending</pre>
+<script type="importmap">{"imports":{"three":"../../web/game/three.module.js"}}</script>
+<script type="module">
+import { Color, LinearSRGBColorSpace, Mesh, MeshStandardMaterial, PerspectiveCamera, PlaneGeometry,
+  RectAreaLight, REVISION, Scene, UniformsLib, WebGLRenderer } from "three";
+const output=document.querySelector("#r160");
+try {
+  if(REVISION!=="160") throw Error("three revision");
+  const query=new URLSearchParams(location.search);
+  const {RectAreaLightUniformsLib}=await import("file://"+query.get("package")+"/examples/jsm/lights/RectAreaLightUniformsLib.js");
+  RectAreaLightUniformsLib.init();
+  const bytes=await (await fetch("file://"+query.get("wasm"))).arrayBuffer();
+  const {instance}=await WebAssembly.instantiate(bytes);
+  if(instance.exports.uxe_abi_version()!==1) throw Error("LTC ABI");
+  const tables=[UniformsLib.LTC_FLOAT_1.image.data,UniformsLib.LTC_FLOAT_2.image.data];
+  const nativeMemory=new Uint8Array(instance.exports.memory.buffer,2097152);
+  for(const [i,table] of tables.entries()) {
+    if(table.length!==16384) throw Error("LTC table size");
+    const source=new Uint8Array(table.buffer,table.byteOffset,table.byteLength);
+    const at=4096+65536*i;
+    nativeMemory.set(source,at);
+    if(source.some((value,j)=>nativeMemory[at+j]!==value)) throw Error("LTC table bytes");
+  }
+  if(query.has("mutate")) {
+    const first=nativeMemory.slice(4096,69632);
+    nativeMemory.copyWithin(4096,69632,135168);
+    nativeMemory.set(first,69632);
+  }
+  const canvas=document.createElement("canvas");
+  const ctx=canvas.getContext("webgl2",{antialias:false,preserveDrawingBuffer:true});
+  if(!ctx) throw Error("WebGL2 required");
+  const renderer=new WebGLRenderer({canvas,context:ctx});
+  renderer.outputColorSpace=LinearSRGBColorSpace;
+  renderer.setSize(16,16,false);
+  const scene=new Scene();
+  const material=new MeshStandardMaterial({color:new Color(0.25,0.25,0.25)});
+  const geometry=new PlaneGeometry(2,2);
+  const receiver=new Mesh(geometry,material);
+  const light=new RectAreaLight(0xffffff,1,1,1);
+  light.position.z=1;
+  light.lookAt(0,0,0);
+  scene.add(receiver,light);
+  const camera=new PerspectiveCamera(90,1,0.01,2);
+  camera.position.z=1;
+  const result=[];
+  for(const [roughness,metalness] of [[0.65,0],[0.35,1]]) {
+    material.roughness=roughness;
+    material.metalness=metalness;
+    renderer.render(scene,camera);
+    for(const [x,y] of [[8,8],[4,10],[11,12],[1,2]]) {
+      const pixel=new Uint8Array(4);
+      ctx.readPixels(x,y,1,1,ctx.RGBA,ctx.UNSIGNED_BYTE,pixel);
+      const linear=instance.exports.uxe_area_ltc((x+0.5)/8-1,(y+0.5)/8-1,roughness,metalness,0.25);
+      result.push(Math.round(linear*255),pixel[0],pixel[1],pixel[2]);
+    }
+  }
+  const digest=await crypto.subtle.digest("SHA-256",nativeMemory.slice(4096,135168));
+  const fingerprint=Array.from(new Uint8Array(digest));
+  renderer.dispose();
+  material.dispose();
+  geometry.dispose();
+  for(const texture of [UniformsLib.LTC_FLOAT_1,UniformsLib.LTC_FLOAT_2,UniformsLib.LTC_HALF_1,UniformsLib.LTC_HALF_2]) texture.dispose();
+  output.textContent=JSON.stringify([...result,...fingerprint]);
+} catch(error) { output.textContent="error:"+error.message; }
+</script>

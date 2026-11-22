@@ -1,0 +1,90 @@
+// Two RGBA32F 64 x 64 LTC fit tables stored consecutively.
+native function rect_ltc_sample(table:i64,u:f64,v:f64,channel:i64) f64 {
+  let x=f64_floor_i64(u);
+  let y=f64_floor_i64(v);
+  let dx=u-1.0*x;
+  let dy=v-1.0*y;
+  let nx=x+(x<63);
+  let ny=y+(y<63);
+  let a=ux_f32(table+16*(y*64+x)+4*channel);
+  let b=ux_f32(table+16*(y*64+nx)+4*channel);
+  let c=ux_f32(table+16*(ny*64+x)+4*channel);
+  let d=ux_f32(table+16*(ny*64+nx)+4*channel);
+  return (a+(b-a)*dx)*(1.0-dy)+(c+(d-c)*dx)*dy;
+}
+
+// Integrate a rectangle centered at (0,0,1), spanning one unit in X and Y,
+// over the hemisphere of a +Z receiver. Input positions are on z=0.
+// The view basis is horizontal towards a camera at (0,0,1).
+native function rect_ltc_form(x:f64,y:f64,m00:f64,m20:f64,m02:f64,m22:f64,work:i64) f64 {
+  let length=f64_sqrt(x*x+y*y);
+  let tx=1.0;
+  let ty=0.0;
+  if(length>0.0) { tx=-x/length; ty=-y/length; }
+  let i=0;
+  while(i<4) {
+    let cx=0.5-x;
+    let cy=-0.5-y;
+    if(i==1 || i==2) { cx=-0.5-x; }
+    if(i>=2) { cy=0.5-y; }
+    let tangent=tx*cx+ty*cy;
+    let bx=m00*tangent+m02;
+    let by=ty*cx-tx*cy;
+    let bz=m20*tangent+m22;
+    let inv=1.0/f64_sqrt(bx*bx+by*by+bz*bz);
+    let a=ux_f64_put(work+i*24,bx*inv);
+    let b=ux_f64_put(work+i*24+8,by*inv);
+    let c=ux_f64_put(work+i*24+16,bz*inv);
+    i=i+1;
+  }
+  let sx=0.0;
+  let sy=0.0;
+  let sz=0.0;
+  i=0;
+  while(i<4) {
+    let a=work+i*24;
+    let b=work+((i+1)%4)*24;
+    let ax=ux_f64(a);
+    let ay=ux_f64(a+8);
+    let az=ux_f64(a+16);
+    let bx=ux_f64(b);
+    let by=ux_f64(b+8);
+    let bz=ux_f64(b+16);
+    let cosine=ax*bx+ay*by+az*bz;
+    let p=ux_math_abs(cosine);
+    let edge=(0.8543985+(0.4965155+0.0145206*p)*p)/(3.4175940+(4.1616724+p)*p);
+    if(cosine<=0.0) {
+      let divisor=1.0-cosine*cosine;
+      if(divisor<0.0000001) { divisor=0.0000001; }
+      edge=0.5/f64_sqrt(divisor)-edge;
+    }
+    sx=sx+(ay*bz-az*by)*edge;
+    sy=sy+(az*bx-ax*bz)*edge;
+    sz=sz+(ax*by-ay*bx)*edge;
+    i=i+1;
+  }
+  let squared=sx*sx+sy*sy+sz*sz;
+  let form=(squared+sz)/(f64_sqrt(squared)+1.0);
+  if(form<0.0) { return 0.0; }
+  return form;
+}
+
+// Return one linear output channel with unit achromatic light intensity.
+native function RectAreaLight_ltc(table:i64,work:i64,x:f64,y:f64,roughness:f64,metalness:f64,albedo:f64) f64 {
+  if(table<0 || table>6291456-131072 || work<0 || work>6291456-96 || work%8!=0 ||
+     (work<table+131072 && table<work+96) || !(roughness>=0.0 && roughness<=1.0) ||
+     !(metalness>=0.0 && metalness<=1.0) || !(albedo>=0.0 && albedo<=1.0) ||
+     x-x!=0.0 || y-y!=0.0) { return -1.0; }
+  let u=roughness*63.0;
+  let v=63.0*f64_sqrt(1.0-1.0/f64_sqrt(1.0+x*x+y*y));
+  let m00=rect_ltc_sample(table,u,v,0);
+  let m20=rect_ltc_sample(table,u,v,1);
+  let m02=rect_ltc_sample(table,u,v,2);
+  let m22=rect_ltc_sample(table,u,v,3);
+  let specular=rect_ltc_form(x,y,m00,m20,m02,m22,work);
+  let diffuse=rect_ltc_form(x,y,1.0,0.0,0.0,1.0,work);
+  let f0=0.04+(albedo-0.04)*metalness;
+  let scale=rect_ltc_sample(table+65536,u,v,0);
+  let bias=rect_ltc_sample(table+65536,u,v,1);
+  return (f0*scale+(1.0-f0)*bias)*specular+albedo*(1.0-metalness)*diffuse;
+}

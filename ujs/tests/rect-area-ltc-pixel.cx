@@ -1,0 +1,54 @@
+#pragma unisa use r160_wait
+#pragma unisa use mem.heap
+#pragma unisa use sys.env
+#pragma unisa use sys.fs
+#pragma unisa use sys.posix
+#pragma unisa use text.fmt
+#pragma unisa use text.text
+
+int main(int argc,char **argv) {
+    const int mutate=argc==3 && tx_eqz(argv[2],"--mutate");
+    if((argc!=2 && !mutate) || argv[1][0]!='/') return 2;
+    char dir[256],cwd[460],abi[300],wasm[300],url[1200];
+    if(sy_cwd(cwd,sizeof cwd) || sy_mkdtemp("/tmp","uxe-ltc-",dir,sizeof dir)) return 2;
+    tx_snprintf(abi,sizeof abi,"%s/abi.ujs",dir);
+    tx_snprintf(wasm,sizeof wasm,"%s/ltc.wasm",dir);
+    const int length=tx_snprintf(url,sizeof url,
+        "file://%s/ujs/practice/uxe/test/rect-area-ltc-r160.html?wasm=%s&package=%s%s",
+        cwd,wasm,argv[1],mutate?"&mutate=1":"");
+    const char entry[]="export uxe_area_ltc(x:f64,y:f64,roughness:f64,metalness:f64,albedo:f64) f64 version 1;\n";
+    char *compile[]={"./ujs/ujs2wasm.com",abi,"ujs/practice/uxe/base/f64-math.ujs",
+        "ujs/practice/uxe/base/rect-area-ltc.ujs","ujs/practice/uxe/test/rect-area-ltc-probe.ujs","-o",wasm,0};
+    char *log=0;
+    size_t bytes=0;
+    int failed=length<=0 || length>=(int)sizeof url || sy_write_file(abi,entry,sizeof entry-1,0600);
+    if(!failed) {
+        int rc=cx_runv_timeout(compile,6,&log,&bytes);
+        if(rc) { printf("RECT_LTC compile_rc=%d %s\n",rc,log?log:""); failed=1; }
+        mm_free(log);
+    }
+    enum { pixels=8, channels=4, shaBytes=32, count=pixels*channels+shaBytes };
+    double actual[count]={0};
+    if(!failed) failed=r160_wait_read(url,"#r160",actual,count,dir);
+    if(!failed) {
+        const int gold[]={18,12,10,5,51,3,1,0};
+        const unsigned char tableSha[]={0x8e,0x89,0x7c,0xb7,0x2b,0xfa,0x6a,0x20,
+            0xf7,0x73,0x7d,0x21,0xbc,0x9e,0x9d,0x6d,0x47,0xbb,0x14,0x05,0xc2,0xcb,0x06,0x7a,
+            0xab,0xe4,0xb0,0x2a,0x8b,0xa6,0x82,0x63};
+        for(int i=0;i<pixels;i++) {
+            const double *pixel=actual+i*channels;
+            printf("RECT_LTC pixel=%d uxe=%.0f r160=%.0f,%.0f,%.0f\n",i,pixel[0],pixel[1],pixel[2],pixel[3]);
+            for(int c=0;c<channels;c++) if(pixel[c]!=gold[i]) failed++;
+        }
+        printf("RECT_LTC table_sha256=");
+        for(int i=0;i<shaBytes;i++) {
+            const double value=actual[pixels*channels+i];
+            printf("%02x",(int)value);
+            if(value!=tableSha[i]) failed++;
+        }
+        printf("\n");
+    }
+    if(sy_remove_all(dir)) failed++;
+    printf("G_PIXEL RectAreaLight LTC pixels=%d failed=%d\n",pixels,failed);
+    return failed!=0;
+}
