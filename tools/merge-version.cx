@@ -38,6 +38,7 @@
 #pragma unisa use mem.bytes
 #pragma unisa use cxlib.procrun
 #pragma unisa use cxlib.die
+#pragma unisa use cxlib.mergebranch
 #pragma unisa use sys.time
 
 #define TOOL "merge-version"
@@ -62,14 +63,8 @@ static const char *opt(int argc, char **argv, const char *name, const char *dflt
     return h;
 }
 
-/* glob: exact, "*", "PREFIX*", "*SUFFIX" */
-static int globm(const char *pat, const char *s) {
-    size_t pl = strlen(pat), sl = strlen(s);
-    if (!strcmp(pat, "*")) return 1;
-    if (pl && pat[pl - 1] == '*') return sl >= pl - 1 && !memcmp(s, pat, pl - 1);
-    if (pat[0] == '*') return sl >= pl - 1 && !memcmp(s + sl - (pl - 1), pat + 1, pl - 1);
-    return !strcmp(pat, s);
-}
+/* branch patterns and path globs: cxlib.mergebranch (exact, "*", "PREFIX*", "*SUFFIX", ">=vA.B.C") */
+
 
 /* git -C REPO ARGS... with an optional private index; returns the rc, out/outn filled (caller pr_free) */
 static int git_run(const char *idx, pr_result *r, int secs, char **args) {
@@ -106,7 +101,7 @@ static void load_rules(const char *file, const char *branch) {
             mv_need(k >= 6 && nrules < MAXRULE, "a rules row needs 6 TAB fields: id branch path when action evidence");
             mv_need(!strcmp(f[3], "conflict") || !strcmp(f[3], "always"), "rule when must be conflict or always");
             mv_need(!strcmp(f[4], "take-ours") || !strcmp(f[4], "take-theirs") || !strcmp(f[4], "union") || !strcmp(f[4], "regen") || !strcmp(f[4], "human"), "unknown rule action");
-            if (globm(f[1], branch)) {
+            if (mbr_match(f[1], branch)) {
                 Rule *r = &rules[nrules++];
                 mv_need(!cx_fmt(r->id, sizeof r->id, "%s", f[0]) && !cx_fmt(r->branch, sizeof r->branch, "%s", f[1]) && !cx_fmt(r->pat, sizeof r->pat, "%s", f[2]) &&
                      !cx_fmt(r->when, sizeof r->when, "%s", f[3]) && !cx_fmt(r->action, sizeof r->action, "%s", f[4]) && !cx_fmt(r->evidence, sizeof r->evidence, "%s", f[5]), "rule field too long");
@@ -190,7 +185,7 @@ static int hash_file(const char *file, char *sha, size_t cap) {
 }
 
 static const Rule *find_rule(const char *path, const char *when) {
-    for (int i = 0; i < nrules; i++) if (!strcmp(rules[i].when, when) && globm(rules[i].pat, path)) return &rules[i];
+    for (int i = 0; i < nrules; i++) if (!strcmp(rules[i].when, when) && mbr_glob(rules[i].pat, path)) return &rules[i];
     return 0;
 }
 
@@ -425,7 +420,11 @@ static int cmd_gate(int argc, char **argv) {
         char top[1100], com[1200], src[1200];
         self_top(top, sizeof top);
         mv_need(!cx_fmt(com, sizeof com, "%s/unisacc.com", top) && !cx_fmt(src, sizeof src, "%s/tools/premerge-union.cx", top), "work path");
-        char *av[] = {"sh", com, src, "--", "--shard", "merge-traps", "--branch", (char *)branch, "--tree", tdir, "--repo", (char *)g_repo, 0};
+        /* the same table that drives the preview names the trap files (its `always` rows) and the version line each belongs to */
+        const char *rf = opt(argc, argv, "--rules", "tests/merge-rules.tsv");
+        char rabs[1300];
+        mv_need(!cx_fmt(rabs, sizeof rabs, rf[0] == '/' ? "%s%s" : "%s/%s", rf[0] == '/' ? "" : top, rf), "work path");
+        char *av[] = {"sh", com, src, "--", "--shard", "merge-traps", "--branch", (char *)branch, "--tree", tdir, "--repo", (char *)g_repo, "--rules", rabs, 0};
         t = pr_run("merge-traps", av, g_repo, 0, 55, &r);
         rc = gate_result("traps", &r, t, "verdict=PASS");
     } else if (!strcmp(name, "derive-write") || !strcmp(name, "derive-check")) {

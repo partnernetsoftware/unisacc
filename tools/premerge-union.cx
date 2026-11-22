@@ -22,6 +22,7 @@
 #pragma unisa use mem.bytes
 #pragma unisa use mem.heap
 #pragma unisa use cxlib.sessionroot
+#pragma unisa use cxlib.mergebranch
 
 #define MAX_CHG 1024
 #define MAX_LINES 16384
@@ -279,29 +280,36 @@ static int mt_waiver_find(const char *wb, long wn, const char *path, char *reaso
     return 0;
 }
 
-/* the trap files are the v0.0.96 line's (reaper, exec, layer-api rows): a version branch older than that has the older content on purpose, and the base
- * side's newer one is the right merge, so for a branch named v0.0.NN with NN below this the traps do not apply */
-#define TRAP_SINCE_PATCH 96
-static int trap_applies(const char *branch) {
-    const char *p = branch;
-    if (p[0] != 'v' || p[1] != '0' || p[2] != '.' || p[3] != '0' || p[4] != '.') return 1;
-    int v = 0, d = 0;
-    for (p += 5; *p >= '0' && *p <= '9'; p++) { v = v * 10 + (*p - '0'); d++; }
-    if (d == 0 || *p) return 1;
-    return v >= TRAP_SINCE_PATCH;
+/* The trap files are the `always` rows of the merge table (tests/merge-rules.tsv, or --rules FILE): path = field 3, the version line the row belongs to =
+ * field 2 (cxlib.mergebranch: ">=v0.0.96" is that line and newer). tools/merge-version.cx forces the same paths to the branch side; one table says both.
+ * A trap whose line starts after the branch is not applicable: an older branch has the older content on purpose and the base side's newer one is right.
+ *   sh ./unisacc.com tools/premerge-union.cx -- --shard merge-traps --branch REF [--rules FILE] [--tree DIR] [--waiver FILE] */
+#define MAXTRAP 64
+static char tr_path[MAXTRAP][320], tr_pat[MAXTRAP][64];
+static int tr_n;
+static int load_traps(const char *file) {
+    size_t n = 0;
+    char *b = (char *)cx_read(file, &n);
+    if (!b) return -1;
+    for (size_t i = 0; i < n; ) {
+        size_t e = i;
+        while (e < n && b[e] != '\n') e++;
+        char *f[6];
+        int k = 0;
+        char row[1100];
+        if (b[i] != '#' && e - i > 0 && e - i < sizeof row && !cx_fmt(row, sizeof row, "%.*s", (int)(e - i), b + i)) {
+            f[k++] = row;
+            for (char *p = row; *p && k < 6; p++) if (*p == '\t') { *p = 0; f[k++] = p + 1; }
+            if (k >= 5 && !strcmp(f[3], "always") && tr_n < MAXTRAP && !cx_fmt(tr_path[tr_n], sizeof tr_path[0], "%s", f[2]) && !cx_fmt(tr_pat[tr_n], sizeof tr_pat[0], "%s", f[1])) tr_n++;
+        }
+        i = e + 1;
+    }
+    mm_free(b);
+    return tr_n;
 }
 
-static int run_merge_traps(const char *repo_arg, const char *tree_arg, const char *br_ref, const char *base_ref, const char *waiver_path) {
-    static const char *const traps[8] = {
-        "tests/manifests/l0-capture.tsv",
-        "ext/sysx/exec.cx",
-        "ext/sysx/processcore.cx",
-        "ext/sysx/reaper.cx",
-        "tools/check-reaper.cx",
-        "build/layer-api/ext.sysx.tsv",
-        "tools/cxlib/releaseexec.cx",
-        "tools/cxlib/releaseprepare.cx"
-    };
+static int run_merge_traps(const char *repo_arg, const char *tree_arg, const char *br_ref, const char *base_ref, const char *waiver_path, const char *rules_path) {
+    if (load_traps(rules_path && rules_path[0] ? rules_path : "tests/merge-rules.tsv") < 0) { sy_eprintf("premerge-union: unreadable trap table %s\n", rules_path && rules_path[0] ? rules_path : "tests/merge-rules.tsv"); return 2; }
     if (!br_ref || !br_ref[0]) { sy_eprintf("premerge-union: --shard merge-traps requires --branch REF\n"); return 2; }
     const char *branch = br_ref;
     const char *tree = (tree_arg && tree_arg[0]) ? tree_arg : ".";
@@ -313,14 +321,14 @@ static int run_merge_traps(const char *repo_arg, const char *tree_arg, const cha
     char tmpf[4400];
     if (cx_fmt(tmpf, sizeof tmpf, "/tmp/premerge-trap-%d.bin", sy_pid())) { if (wb) mm_free(wb); return 2; }
     int ok = 0, waived = 0, fail = 0, na = 0;
-    if (!trap_applies(branch)) {
-        for (int i = 0; i < 8; i++) sy_printf("MERGE_TRAP\tNA\t%s\treason=branch-older-than-the-trap-line\n", traps[i]);
-        sy_printf("MERGE_TRAPS_SUMMARY\tverdict=PASS\tbranch=%s\tok=0\twaived=0\tfail=0\tna=8\ttotal=8\n", branch);
-        return 0;
-    }
-    for (int i = 0; i < 8; i++) {
-        const char *rel = traps[i];
+    for (int i = 0; i < tr_n; i++) {
+        const char *rel = tr_path[i];
         char reason[256];
+        if (!mbr_match(tr_pat[i], branch)) {
+            sy_printf("MERGE_TRAP\tNA\t%s\treason=branch-older-than-the-trap-line\n", rel);
+            na++;
+            continue;
+        }
         if (mt_waiver_find(wb, (long)wn, rel, reason, sizeof reason)) {
             sy_printf("MERGE_TRAP\tWAIVED\t%s\treason=%s\n", rel, reason[0] ? reason : "waived");
             waived++;
@@ -370,13 +378,13 @@ static int run_merge_traps(const char *repo_arg, const char *tree_arg, const cha
         mm_free(tb); mm_free(bb);
     }
     if (wb) mm_free(wb);
-    sy_printf("MERGE_TRAPS_SUMMARY\tverdict=%s\tbranch=%s\tok=%d\twaived=%d\tfail=%d\tna=%d\ttotal=8\n",
-              fail ? "FAIL" : "PASS", branch, ok, waived, fail, na);
+    sy_printf("MERGE_TRAPS_SUMMARY\tverdict=%s\tbranch=%s\tok=%d\twaived=%d\tfail=%d\tna=%d\ttotal=%d\n",
+              fail ? "FAIL" : "PASS", branch, ok, waived, fail, na, tr_n);
     return fail ? 1 : 0;
 }
 
 int main(int argc, char **argv) {
-    const char *repo_arg = ".", *base_ref = "main", *br_ref = 0, *dir_arg = 0, *shard = "all", *mutate = 0, *tree_arg = 0, *waiver_arg = 0;
+    const char *repo_arg = ".", *base_ref = "main", *br_ref = 0, *dir_arg = 0, *shard = "all", *mutate = 0, *tree_arg = 0, *waiver_arg = 0, *rules_arg = 0;
     int keep = 0;
     long T0 = sy_now_ms();
     for (int i = 1; i < argc; i++) {
@@ -386,6 +394,7 @@ int main(int argc, char **argv) {
         else if (streq(argv[i], "--dir") && i + 1 < argc) dir_arg = argv[++i];
         else if (streq(argv[i], "--tree") && i + 1 < argc) tree_arg = argv[++i];
         else if (streq(argv[i], "--waiver") && i + 1 < argc) waiver_arg = argv[++i];
+        else if (streq(argv[i], "--rules") && i + 1 < argc) rules_arg = argv[++i];
         else if (streq(argv[i], "--keep")) keep = 1;
         else if (streq(argv[i], "--shard") && i + 1 < argc) shard = argv[++i];
         else if (streq(argv[i], "--mutate-drift") && i + 1 < argc) mutate = argv[++i];
@@ -394,7 +403,7 @@ int main(int argc, char **argv) {
             return 2;
         }
     }
-    if (streq(shard, "merge-traps")) return run_merge_traps(repo_arg, tree_arg, br_ref, base_ref, waiver_arg);
+    if (streq(shard, "merge-traps")) return run_merge_traps(repo_arg, tree_arg, br_ref, base_ref, waiver_arg, rules_arg);
     if (!streq(shard, "all") && !streq(shard, "derive") && !streq(shard, "check-derive") &&
         !streq(shard, "prep") && !streq(shard, "derive-a") && !streq(shard, "derive-b") && !streq(shard, "derive-c")) {
         sy_eprintf("premerge-union: invalid --shard %s\n", shard);

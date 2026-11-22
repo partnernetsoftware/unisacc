@@ -275,9 +275,18 @@ int main(void) {
 
     /* Merge-traps shard: synthetic git merge reproducing 3970fc6d5a silent delete & silent revert */
     {
-        char mdir[600], wfile[640], mcmd[4096];
+        char mdir[600], wfile[640], mcmd[4096], rfile[640], ldir[600], lrules[640];
         cx_fmt(mdir, sizeof mdir, "%s/mt-repo", tmpd);
         cx_fmt(wfile, sizeof wfile, "%s/mt-waiver.tsv", tmpd);
+        cx_fmt(rfile, sizeof rfile, "%s/mt-rules.tsv", tmpd);
+        {   /* the trap table: the eight `always` rows of the product table, from v0.0.96 on */
+            static const char *rows = "# id\tbranch\tpath\twhen\taction\tevidence\n"
+                "t1\t>=v0.0.96\ttests/manifests/l0-capture.tsv\talways\ttake-theirs\tfixture\n" "t2\t>=v0.0.96\text/sysx/exec.cx\talways\ttake-theirs\tfixture\n"
+                "t3\t>=v0.0.96\text/sysx/processcore.cx\talways\ttake-theirs\tfixture\n" "t4\t>=v0.0.96\text/sysx/reaper.cx\talways\ttake-theirs\tfixture\n"
+                "t5\t>=v0.0.96\ttools/check-reaper.cx\talways\ttake-theirs\tfixture\n" "t6\t>=v0.0.96\tbuild/layer-api/ext.sysx.tsv\talways\ttake-theirs\tfixture\n"
+                "t7\t>=v0.0.96\ttools/cxlib/releaseexec.cx\talways\ttake-theirs\tfixture\n" "t8\t>=v0.0.96\ttools/cxlib/releaseprepare.cx\talways\ttake-theirs\tfixture\n";
+            (void)sy_write_atomic(rfile, rows, (int64_t)tx_len(rows, 4096), 0644);
+        }
         cx_fmt(mcmd, sizeof mcmd,
             "mkdir -p '%s'/tests/manifests '%s'/ext/sysx '%s'/tools/cxlib '%s'/build/layer-api && "
             "cd '%s' && git init -q -b main && "
@@ -296,7 +305,7 @@ int main(void) {
         rc = run_sh(mcmd, 30, out, sizeof out);
         ck(rc == 0, "merge-traps-fixture-setup");
         /* 1. Silent delete + silent revert accepted by 3-way merge -> MUST FAIL rc=1 */
-        cx_fmt(cmd, sizeof cmd, "sh ./unisacc.com tools/premerge-union.cx -- --shard merge-traps --repo '%s' --tree '%s' --branch v0.0.96", mdir, mdir);
+        cx_fmt(cmd, sizeof cmd, "sh ./unisacc.com tools/premerge-union.cx -- --shard merge-traps --rules '%s' --repo '%s' --tree '%s' --branch v0.0.96", rfile, mdir, mdir);
         rc = run_sh(cmd, 30, out, sizeof out);
         ck(rc == 1 &&
            has(out, "MERGE_TRAP\tFAIL\ttests/manifests/l0-capture.tsv\treason=missing-in-tree") &&
@@ -306,7 +315,7 @@ int main(void) {
         /* 2. Named waiver allows the 2 differences -> PASS rc=0 */
         const char *wv = "# relpath\treason\ntests/manifests/l0-capture.tsv\ttest-waiver-del\next/sysx/reaper.cx\ttest-waiver-rev\n";
         (void)sy_write_atomic(wfile, wv, (int64_t)tx_len(wv, 512), 0644);
-        cx_fmt(cmd, sizeof cmd, "sh ./unisacc.com tools/premerge-union.cx -- --shard merge-traps --repo '%s' --tree '%s' --branch v0.0.96 --waiver '%s'", mdir, mdir, wfile);
+        cx_fmt(cmd, sizeof cmd, "sh ./unisacc.com tools/premerge-union.cx -- --shard merge-traps --rules '%s' --repo '%s' --tree '%s' --branch v0.0.96 --waiver '%s'", rfile, mdir, mdir, wfile);
         rc = run_sh(cmd, 30, out, sizeof out);
         ck(rc == 0 &&
            has(out, "MERGE_TRAP\tWAIVED\ttests/manifests/l0-capture.tsv\treason=test-waiver-del") &&
@@ -316,28 +325,56 @@ int main(void) {
         /* 3. Explicitly restoring v0.0.96 side for all 8 files -> PASS rc=0 ok=8 */
         cx_fmt(mcmd, sizeof mcmd, "git -C '%s' checkout v0.0.96 -- tests/manifests/l0-capture.tsv ext/sysx/reaper.cx", mdir);
         (void)run_sh(mcmd, 15, out, sizeof out);
-        cx_fmt(cmd, sizeof cmd, "sh ./unisacc.com tools/premerge-union.cx -- --shard merge-traps --repo '%s' --tree '%s' --branch v0.0.96", mdir, mdir);
+        cx_fmt(cmd, sizeof cmd, "sh ./unisacc.com tools/premerge-union.cx -- --shard merge-traps --rules '%s' --repo '%s' --tree '%s' --branch v0.0.96", rfile, mdir, mdir);
         rc = run_sh(cmd, 30, out, sizeof out);
         ck(rc == 0 && has(out, "MERGE_TRAPS_SUMMARY\tverdict=PASS\tbranch=v0.0.96\tok=8\twaived=0\tfail=0\tna=0\ttotal=8"),
            "merge-traps-restored-branch-side-passes");
         /* 3b. a branch older than the trap line (v0.0.95 and below) is not held to the trap files; v0.0.96 and newer, and unversioned names, are */
         cx_fmt(mcmd, sizeof mcmd, "git -C '%s' checkout v0.0.96 -- . && git -C '%s' rm -q -f tests/manifests/l0-capture.tsv && git -C '%s' branch -f v0.0.95 v0.0.96", mdir, mdir, mdir);
         (void)run_sh(mcmd, 15, out, sizeof out);
-        cx_fmt(cmd, sizeof cmd, "sh ./unisacc.com tools/premerge-union.cx -- --shard merge-traps --repo '%s' --tree '%s' --branch v0.0.95", mdir, mdir);
+        cx_fmt(cmd, sizeof cmd, "sh ./unisacc.com tools/premerge-union.cx -- --shard merge-traps --rules '%s' --repo '%s' --tree '%s' --branch v0.0.95", rfile, mdir, mdir);
         rc = run_sh(cmd, 30, out, sizeof out);
         ck(rc == 0 && has(out, "MERGE_TRAP\tNA\ttests/manifests/l0-capture.tsv\treason=branch-older-than-the-trap-line") && has(out, "verdict=PASS\tbranch=v0.0.95\tok=0\twaived=0\tfail=0\tna=8\ttotal=8"), "merge-traps-do-not-apply-to-a-branch-older-than-the-trap-line");
-        cx_fmt(cmd, sizeof cmd, "sh ./unisacc.com tools/premerge-union.cx -- --shard merge-traps --repo '%s' --tree '%s' --branch v0.0.100", mdir, mdir);
+        cx_fmt(cmd, sizeof cmd, "sh ./unisacc.com tools/premerge-union.cx -- --shard merge-traps --rules '%s' --repo '%s' --tree '%s' --branch v0.0.100", rfile, mdir, mdir);
         rc = run_sh(cmd, 30, out, sizeof out);
         ck(has(out, "branch=v0.0.100") && !has(out, "branch-older-than-the-trap-line"), "mutation-newer-version-branch-is-still-held-to-the-traps");
+        /* 5. the table names the files AND the line each belongs to: a trap row for a later line (>=v0.0.98) binds v0.0.98, v0.0.100, not v0.0.97 or v0.0.95;
+         * an empty table holds nothing (so the assertions above are the table's, not the code's) */
+        cx_fmt(ldir, sizeof ldir, "%s/lt-repo", tmpd);
+        cx_fmt(lrules, sizeof lrules, "%s/lt-rules.tsv", tmpd);
+        {   static const char *lr = "# id\tbranch\tpath\twhen\taction\tevidence\n" "early\t>=v0.0.96\ttools/early.cx\talways\ttake-theirs\tfixture\n" "later\t>=v0.0.98\ttools/later.cx\talways\ttake-theirs\tfixture\n";
+            (void)sy_write_atomic(lrules, lr, (int64_t)tx_len(lr, 1024), 0644);
+        }
+        cx_fmt(mcmd, sizeof mcmd, "mkdir -p '%s'/tools && cd '%s' && git init -q -b main && git config user.name test && git config user.email test@local && printf 'BR\\n' > tools/early.cx && printf 'BR\\n' > tools/later.cx && git add -A && git commit -qm base && "
+            "for b in v0.0.95 v0.0.97 v0.0.98 v0.0.100; do git branch $b; done && printf 'MAIN\\n' > tools/early.cx && printf 'MAIN\\n' > tools/later.cx && git add -A && git commit -qm main", ldir, ldir);
+        rc = run_sh(mcmd, 30, out, sizeof out);
+        ck(rc == 0, "merge-traps-later-line-fixture-setup");
+        {   static const char *br[4] = {"v0.0.95", "v0.0.97", "v0.0.98", "v0.0.100"};
+            static const char *want[4] = {"verdict=PASS\tbranch=v0.0.95\tok=0\twaived=0\tfail=0\tna=2\ttotal=2", "verdict=FAIL\tbranch=v0.0.97\tok=0\twaived=0\tfail=1\tna=1\ttotal=2",
+                "verdict=FAIL\tbranch=v0.0.98\tok=0\twaived=0\tfail=2\tna=0\ttotal=2", "verdict=FAIL\tbranch=v0.0.100\tok=0\twaived=0\tfail=2\tna=0\ttotal=2"};
+            static const char *nm[4] = {"table-line-v0.0.95-bound-by-neither-row", "table-line-v0.0.97-bound-by-the-early-row-only", "table-line-v0.0.98-bound-by-both-rows-boundary-inclusive", "table-line-v0.0.100-bound-by-both-rows-numeric-order"};
+            for (int i = 0; i < 4; i++) {
+                cx_fmt(cmd, sizeof cmd, "sh ./unisacc.com tools/premerge-union.cx -- --shard merge-traps --rules '%s' --repo '%s' --tree '%s' --branch %s", lrules, ldir, ldir, br[i]);
+                rc = run_sh(cmd, 30, out, sizeof out);
+                ck(has(out, want[i]), nm[i]);
+            }
+            (void)sy_write_atomic(wfile, "# no trap rows\n", 15, 0644);
+            cx_fmt(cmd, sizeof cmd, "sh ./unisacc.com tools/premerge-union.cx -- --shard merge-traps --rules '%s' --repo '%s' --tree '%s' --branch v0.0.100", wfile, ldir, ldir);
+            rc = run_sh(cmd, 30, out, sizeof out);
+            ck(rc == 0 && has(out, "verdict=PASS\tbranch=v0.0.100\tok=0\twaived=0\tfail=0\tna=0\ttotal=0"), "mutation-empty-table-holds-nothing");
+            cx_fmt(cmd, sizeof cmd, "sh ./unisacc.com tools/premerge-union.cx -- --shard merge-traps --rules '%s/none.tsv' --repo '%s' --tree '%s' --branch v0.0.100 2>&1", tmpd, ldir, ldir);
+            rc = run_sh(cmd, 30, out, sizeof out);
+            ck(rc == 2 && has(out, "unreadable trap table"), "missing-trap-table-is-refused-rc2");
+        }
         /* 4. A trap path that neither the base nor the branch has (a later version's file) is NA, not a failure; if the base has it, the branch lacking it is still a failure */
         cx_fmt(mcmd, sizeof mcmd, "cd '%s' && git checkout -q -b nabranch v0.0.96 && git rm -q tests/manifests/l0-capture.tsv && git commit -qm na-branch && git branch nabase", mdir);
         rc = run_sh(mcmd, 15, out, sizeof out);
         ck(rc == 0, "merge-traps-na-fixture-setup");
-        cx_fmt(cmd, sizeof cmd, "sh ./unisacc.com tools/premerge-union.cx -- --shard merge-traps --repo '%s' --tree '%s' --branch nabranch --base nabase", mdir, mdir);
+        cx_fmt(cmd, sizeof cmd, "sh ./unisacc.com tools/premerge-union.cx -- --shard merge-traps --rules '%s' --repo '%s' --tree '%s' --branch nabranch --base nabase", rfile, mdir, mdir);
         rc = run_sh(cmd, 30, out, sizeof out);
         ck(rc == 0 && has(out, "MERGE_TRAP\tNA\ttests/manifests/l0-capture.tsv") && has(out, "MERGE_TRAPS_SUMMARY\tverdict=PASS\tbranch=nabranch\tok=7\twaived=0\tfail=0\tna=1\ttotal=8"),
            "merge-traps-path-absent-in-base-and-branch-is-na");
-        cx_fmt(cmd, sizeof cmd, "sh ./unisacc.com tools/premerge-union.cx -- --shard merge-traps --repo '%s' --tree '%s' --branch nabranch --base v0.0.96", mdir, mdir);
+        cx_fmt(cmd, sizeof cmd, "sh ./unisacc.com tools/premerge-union.cx -- --shard merge-traps --rules '%s' --repo '%s' --tree '%s' --branch nabranch --base v0.0.96", rfile, mdir, mdir);
         rc = run_sh(cmd, 30, out, sizeof out);
         ck(rc == 1 && has(out, "MERGE_TRAP\tFAIL\ttests/manifests/l0-capture.tsv\treason=missing-in-branch") && has(out, "fail=1\tna=0\ttotal=8"),
            "mutation-base-has-the-path-then-missing-in-branch-fails");
