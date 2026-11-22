@@ -215,9 +215,9 @@ int main(int argc, char **argv) {
       mm_copy(h1, sizeof h1, out, 40); h1[40] = 0;
       ck("non-owner-commit-multi-whole-refused", ok2 && mm_same(h0, h1, 40)); }
 
-    /* (8) CONFIRMED (4): other write channels (git add, git merge, register, derive --write) refused for non-owner */
+    /* (8) CONFIRMED (4) + --no-ff: other write channels (git add, git merge --no-ff, register, derive --write) refused for non-owner */
     { char *aa[] = {"git", "add", "src/a.txt", 0};
-      char *am[] = {"git", "merge", "side-br", "-m", "blocked merge", 0};
+      char *am[] = {"git", "merge", "--no-ff", "side-br", "-m", "blocked merge", 0};
       char *ar[] = {"register", "dummy", "tools/check-dummy.cx", "DUMMY", "desc", "tools/dummy.cx", 0};
       char *ad[] = {"derive", "--write", "--only", "table-index", 0};
       int ok1 = run_dv(repo, "worker1", aa, &rc) && rc == 1 && has(out, "LOCK_HELD freeze owner=integ");
@@ -225,6 +225,12 @@ int main(int argc, char **argv) {
       int ok3 = ok2 && run_dv(repo, "worker1", ar, &rc) && rc == 1 && has(out, "LOCK_HELD freeze owner=integ");
       int ok4 = ok3 && run_dv(repo, "worker1", ad, &rc) && rc == 1 && has(out, "LOCK_HELD freeze owner=integ");
       ck("non-owner-other-write-channels-refused", ok4); }
+
+    /* (8b) holder integrator devsvc git merge --no-ff creates real 2-parent merge commit (ff=0) */
+    { char *am[] = {"git", "merge", "--no-ff", "side-br", "-m", "S0 merge side-br", 0};
+      int ok1 = run_dv(repo, "integ", am, &rc) && rc == 0 && has(out, "GIT_MERGE\trc=0\t") && has(out, "\tff=0\t");
+      int ok2 = ok1 && sh_in(repo, "git rev-list --parents -n 1 HEAD | wc -w") && (out[0] == '3' || has(out, " 3\n"));
+      ck("integrator-git-merge-no-ff-creates-merge-commit", ok2); }
 
     /* (9) CONFIRMED (9) M1 killer: outside-domain & mid-segment paths (docs/src/x.txt, tests2/x.txt, release-x/y.txt) allowed */
     { char *a1[] = {"f", "write", "docs/src/x.txt", "--from", f_new, 0};
@@ -287,6 +293,31 @@ int main(int argc, char **argv) {
       int ok2 = ok1 && run_dv(repo, 0, ac, &rc) && rc == 0;
       int ok3 = ok2 && sh_in(repo, "git log -1 --format='%(trailers)'") && !has(out, "X-Unisacc-Window:");
       ck("missing-owner-no-forged-trailer", ok3); }
+
+    /* (16) PLAUSIBLE: freeze default ttl is 7200 when --ttl omitted */
+    { char *aq[] = {"lock", "acquire", "freeze", "--owner", "integ", 0};
+      ck("freeze-default-ttl-7200", run_dv(repo, "integ", aq, &rc) && rc == 0 && has(out, "expires_in_s=7200")); }
+
+    /* (17) PLAUSIBLE: fail-closed when daemon stopped (direct locks.tsv read) and when locks.tsv unreadable (chmod 000) */
+    { char *st[] = {"stop", 0};
+      char *af[] = {"f", "write", "src/a.txt", "--from", f_new, 0};
+      char lcmd[4600], flw[4600];
+      if (wr(tmp, "flow-stdout.tsv", "n1\texec\t-\ta0=echo;a1=hi;stdout_to=src/flow-out.txt\n") ||
+          cx_fmt(flw, sizeof flw, "%s/flow-stdout.tsv", tmp)) return 2;
+      char *afl[] = {"flow", "run", flw, "--par", "1", 0};
+      int ok1 = run_dv(repo, "integ", st, &rc) && rc == 0;
+      int ok2 = ok1 && run_dv(repo, "worker1", af, &rc) && rc == 1 && has(out, "LOCK_HELD freeze owner=integ");
+      int ok3 = ok2 && run_dv(repo, "worker1", afl, &rc) && rc == 1 && has(out, "LOCK_HELD freeze owner=integ");
+      int ok4 = ok3 && !cx_fmt(lcmd, sizeof lcmd, "chmod 000 '%s/locks.tsv'", inst) && sh_in(repo, lcmd);
+      int ok5 = ok4 && run_dv(repo, "worker1", af, &rc) && rc == 1 && has(out, "LOCK_HELD freeze owner=locks-unreadable");
+      (void)cx_fmt(lcmd, sizeof lcmd, "chmod 600 '%s/locks.tsv'", inst);
+      (void)sh_in(repo, lcmd);
+      ck("freeze-fail-closed-stopped-and-unreadable", ok5); }
+
+    /* (18) PLAUSIBLE: trailer叠加 real commit-own (tr_strip + tr_window_put) produces exactly one X-Unisacc-Window line */
+    { int ok = sh_in(repo, "git log -n 5 --format='%(trailers)' | grep -c '^X-Unisacc-Window: integ$'") &&
+               (out[0] == '2' && (out[1] == '\n' || out[1] == 0));
+      ck("trailer-single-line-with-commit-own", ok); }
 
 done:
     { char *st[] = {"stop", 0}; (void)run_dv(repo, "integ", st, &rc); }
