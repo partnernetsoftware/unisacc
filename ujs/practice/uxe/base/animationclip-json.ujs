@@ -1,0 +1,73 @@
+// JSON metadata augments the existing runtime clip layout without changing
+// its ABI. The arena owns parsed track kinds, UUID, name, and track storage.
+struct AnimationClipJson {
+  kinds: u32;
+  uuid: u32;
+  uuidBytes: u32;
+}
+
+native function clip_json_field(obj:i64,end:i64,work:i64,id:i64) i64 {
+  if(id==1) { return LoaderJson_find(obj,end,work,1634891108,1852795252,0,8); }
+  if(id==2) { return LoaderJson_find(obj,end,work,1667330676,29547,0,6); }
+  if(id==3) { return LoaderJson_find(obj,end,work,1684632949,0,0,4); }
+  return LoaderJson_find(obj,end,work,1852140642,1685015908,101,9);
+}
+
+native function clip_json_tracks(array:i64,end:i64,work:i64) i64 {
+  if(array<0 || array>=end || ux_u8(array)!=91) { return 0-1; }
+  let at=json_space(array+1,end);
+  let count=0;
+  while(at>=0 && at<end && ux_u8(at)!=93) {
+    if(count>=8) { return 0-1; }
+    let next=json_value_end(at,end);
+    if(next<0) { return 0-1; }
+    let track=work+512+count*KeyframeTrack.size;
+    let type=KeyframeTrack_fromJSON(track,at,next,work+1024+4096*count);
+    if(type<0) { return type; }
+    let p=ux_u32_put(work+384+count*4,track);
+    let k=ux_u32_put(work+416+count*4,type);
+    at=json_space(next,end);
+    if(at<0 || at>=end) { return 0-1; }
+    if(ux_u8(at)==44) { at=json_space(at+1,end); }
+    else if(ux_u8(at)!=93) { return 0-1; }
+    count=count+1;
+  }
+  if(at<0 || at>=end) { return 0-1; }
+  return count;
+}
+
+native function AnimationClip_fromJSON(clip:i64,meta:i64,input:i64,end:i64,work:i64) i64 {
+  if(input<0 || end<=input || end>6291456 || !animation_span(work,33792) || work%8!=0 ||
+     !animation_span(clip,AnimationClip.size) || clip%8!=0 || !animation_span(meta,AnimationClipJson.size) ||
+     animation_json_overlap(input,end-input,work,33792) ||
+     animation_json_overlap(input,end-input,clip,AnimationClip.size) ||
+     animation_json_overlap(input,end-input,meta,AnimationClipJson.size) ||
+     animation_json_overlap(clip,AnimationClip.size,work,33792) ||
+     animation_json_overlap(meta,AnimationClipJson.size,work,33792) ||
+     animation_json_overlap(clip,AnimationClip.size,meta,AnimationClipJson.size)) { return 0-1; }
+  let obj=json_space(input,end);
+  let limit=json_value_end(obj,end);
+  if(limit<0 || ux_u8(obj)!=123 || json_space(limit,end)!=end) { return 0-2; }
+  let name=track_json_field(obj,limit,work,7);
+  let n=Json_stringBytes(name,limit);
+  if(n<0 || n>127 || Json_decodeString(name,limit,work+64,n)!=n) { return 0-2; }
+  let uuid=clip_json_field(obj,limit,work,3);
+  let u=Json_stringBytes(uuid,limit);
+  if(u<1 || u>127 || Json_decodeString(uuid,limit,work+192,u)!=u) { return 0-2; }
+  let time=clip_json_field(obj,limit,work,1);
+  let duration=LoaderJson_number(time,limit,0.0-1.0);
+  let mode=clip_json_field(obj,limit,work,4);
+  let blend=LoaderJson_uint(mode,limit,2500);
+  let fps=LoaderJson_find(obj,limit,work,7565414,0,0,3);
+  let rate=LoaderJson_number(fps,limit,1.0);
+  if(rate!=1.0 || duration-duration!=0.0 || (blend!=2500 && blend!=2501)) { return 0-2; }
+  let array=clip_json_field(obj,limit,work,2);
+  let count=clip_json_tracks(array,limit,work);
+  if(count<0) { return 0-2; }
+  let result=AnimationClip_init(clip,work+64,n,work+384,count,duration,blend);
+  if(result<0) { return result; }
+  let k=ux_u32_put(meta+AnimationClipJson.kinds,work+416);
+  let p=ux_u32_put(meta+AnimationClipJson.uuid,work+192);
+  let l=ux_u32_put(meta+AnimationClipJson.uuidBytes,u);
+  return clip;
+}
