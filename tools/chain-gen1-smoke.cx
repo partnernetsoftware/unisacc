@@ -119,6 +119,38 @@ static void gs_first_line(const char *path, char *out, size_t cap) {
     free(buf);
 }
 
+static void gs_first_fail_line(const char *path, char *out, size_t cap) {
+    char *buf;
+    size_t n;
+    size_t i;
+    buf = gs_read_all(path, &n);
+    if (buf) {
+        i = 0;
+        while (i < n) {
+            size_t e;
+            e = i;
+            while (e < n && buf[e] != '\n' && buf[e] != '\r') e++;
+            if (e - i >= 5 && memcmp(buf + i, "FAIL\t", 5) == 0) {
+                size_t w;
+                size_t k;
+                w = 0;
+                k = i;
+                while (k < e && w + 1 < cap) {
+                    out[w++] = (buf[k] == '\t') ? ' ' : buf[k];
+                    k++;
+                }
+                out[w] = 0;
+                free(buf);
+                return;
+            }
+            i = e;
+            while (i < n && (buf[i] == '\n' || buf[i] == '\r')) i++;
+        }
+        free(buf);
+    }
+    gs_first_line(path, out, cap);
+}
+
 static int gs_run_capture(const char *cmd, const char *log_path) {
     char full[8192];
     int rc;
@@ -305,7 +337,7 @@ int main(int argc, char **argv) {
             }
             if (cx_fmt(bin, sizeof bin, "%s/case_%d.bin", out_dir, c) != 0) return gs_die2("path");
             if (cx_fmt(log_p, sizeof log_p, "%s/case_%d.log", out_dir, c) != 0) return gs_die2("path");
-            if (cx_fmt(cmd, sizeof cmd, "\"%s\" --models \"%s\" -b lnx/x86_64 -o \"%s\" \"%s\"", cand, pkg, bin, src) != 0) return gs_die2("cmd");
+            if (cx_fmt(cmd, sizeof cmd, "timeout 60 \"%s\" --models \"%s\" -b lnx/x86_64 -o \"%s\" \"%s\"", cand, pkg, bin, src) != 0) return gs_die2("cmd");
             rc = gs_run_capture(cmd, log_p);
             if (rc != 0) {
                 gs_first_line(log_p, err_line, sizeof err_line);
@@ -390,7 +422,15 @@ int main(int argc, char **argv) {
                 int st;
                 int wp;
                 wp = waitpid(-1, &st, 0);
-                if (wp > 0) {
+                if (wp <= 0) {
+                    infra_shards++;
+                    if (first_infra_shard < 0) {
+                        first_infra_shard = cur;
+                        cx_fmt(first_infra_err, sizeof first_infra_err, "waitpid-failed");
+                    }
+                    break;
+                }
+                {
                     int s;
                     s = 0;
                     while (s < par) {
@@ -408,17 +448,9 @@ int main(int argc, char **argv) {
                                     char n_log[4096];
                                     first_fail_shard = sh_id;
                                     cx_fmt(n_log, sizeof n_log, "%s/new_s%d.log", out_dir, sh_id);
-                                    gs_first_line(n_log, first_fail_err, sizeof first_fail_err);
+                                    gs_first_fail_line(n_log, first_fail_err, sizeof first_fail_err);
                                 }
-                            } else if (ec == 2) {
-                                infra_shards++;
-                                if (first_infra_shard < 0) {
-                                    char n_log[4096];
-                                    first_infra_shard = sh_id;
-                                    cx_fmt(n_log, sizeof n_log, "%s/new_s%d.log", out_dir, sh_id);
-                                    gs_first_line(n_log, first_infra_err, sizeof first_infra_err);
-                                }
-                            } else {
+                            } else if (ec == 0 || ec == 3) {
                                 if (ec == 3) old_fail++;
                                 if (!no_diff) {
                                     char o_out[4096];
@@ -426,6 +458,14 @@ int main(int argc, char **argv) {
                                     cx_fmt(o_out, sizeof o_out, "%s/old_s%d", out_dir, sh_id);
                                     cx_fmt(n_out, sizeof n_out, "%s/new_s%d", out_dir, sh_id);
                                     gs_compare_shard_objs(o_out, n_out, &same_c, &diff_c);
+                                }
+                            } else {
+                                infra_shards++;
+                                if (first_infra_shard < 0) {
+                                    char n_log[4096];
+                                    first_infra_shard = sh_id;
+                                    cx_fmt(n_log, sizeof n_log, "%s/new_s%d.log", out_dir, sh_id);
+                                    gs_first_line(n_log, first_infra_err, sizeof first_infra_err);
                                 }
                             }
                             break;

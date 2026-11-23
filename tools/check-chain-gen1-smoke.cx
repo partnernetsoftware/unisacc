@@ -100,9 +100,9 @@ int main(void) {
            base, base);
     system(cmd);
 
-    /* S5: quick-smoke passes (-b lnx/x86_64), shard compile fails (-c) */
+    /* S5: quick-smoke passes (-b lnx/x86_64), shard compile passes 1st file then fails 2nd (-c) */
     cx_fmt(cmd, sizeof cmd,
-           "printf '#!/bin/sh\\nfor a in \"$@\"; do if [ \"$a\" = \"-c\" ]; then echo \"reject: shard0\" >&2; exit 1; fi; done\\nexit 0\\n' > %s/c_sred/gen1/lnx-x86_64/candidate && chmod +x %s/c_sred/gen1/lnx-x86_64/candidate",
+           "printf '#!/bin/sh\\nis_c=0; out=\"\"\\nwhile [ $# -gt 0 ]; do if [ \"$1\" = \"-c\" ]; then is_c=1; fi; if [ \"$1\" = \"-o\" ]; then out=\"$2\"; fi; shift; done\\nif [ \"$is_c\" = \"1\" ]; then case \"$out\" in *0000.o) echo x > \"$out\"; exit 0 ;; *) echo \"reject: shard0\" >&2; exit 1 ;; esac; fi\\nexit 0\\n' > %s/c_sred/gen1/lnx-x86_64/candidate && chmod +x %s/c_sred/gen1/lnx-x86_64/candidate",
            base, base);
     system(cmd);
 
@@ -130,22 +130,54 @@ int main(void) {
     cx_fmt(logp, sizeof logp, "%s/s4.log", base);
     cs_ck(rc == 2 && cs_contains(logp, "cwd missing ./unisacc.com"), "S4-bad-cwd-refused");
 
-    /* S5: shard red -> rc=1 */
+    /* S5: shard red -> rc=1 and err=FAIL ... */
     cx_fmt(cmd, sizeof cmd, "sh ./unisacc.com tools/chain-gen1-smoke.cx -- --chain-dir %s/c_sred --root . --out %s/o5 --shard-from 0 --shard-to 0 --no-diff >%s/s5.log 2>&1", base, base, base);
     rc = cs_exit_code(system(cmd));
     cx_fmt(logp, sizeof logp, "%s/s5.log", base);
-    cs_ck(rc == 1 && cs_contains(logp, "GEN1_SMOKE\tRED\tshard=0"), "S5-shard-red-rc");
+    cs_ck(rc == 1 && cs_contains(logp, "GEN1_SMOKE\tRED\tshard=0") && cs_contains(logp, "err=FAIL ") && cs_contains(logp, ".stderr\n"), "S5-shard-red-rc");
 
     /* S6: --dry-shards computes total_shards dynamically */
     cx_fmt(cmd, sizeof cmd, "N=$(sh ./unisacc.com tests/tools-compile.cx -- --shards .); sh ./unisacc.com tools/chain-gen1-smoke.cx -- --chain-dir %s/c_green --root . --out %s/o6 --dry-shards | grep -q \"total_shards=$N\"", base, base);
     rc = cs_exit_code(system(cmd));
     cs_ck(rc == 0, "S6-shards-computed");
 
-    /* S7: infra rc=2 (relative --root .? No, bad --root fails early; pass missing smoke source in fake root) */
+    /* S7: bad root fails shard query -> rc=2 ERROR msg= */
     cx_fmt(cmd, sizeof cmd, "mkdir -p %s/badroot/tests && cp tests/tools-compile.cx tests/tools-compile-sources.tsv %s/badroot/tests/ && sh ./unisacc.com tools/chain-gen1-smoke.cx -- --chain-dir %s/c_infra --root %s/badroot --out %s/o7 >%s/s7.log 2>&1", base, base, base, base, base, base);
     rc = cs_exit_code(system(cmd));
     cx_fmt(logp, sizeof logp, "%s/s7.log", base);
-    cs_ck(rc == 2 && (cs_contains(logp, "GEN1_SMOKE\tINFRA") || cs_contains(logp, "GEN1_SMOKE\tERROR")), "S7-infra-rc2-not-red");
+    cs_ck(rc == 2 && cs_contains(logp, "GEN1_SMOKE\tERROR\tmsg="), "S7-badroot-error-msg");
+
+    /* S8: bad --par 0 and x -> rc=2 ERROR msg= */
+    cx_fmt(cmd, sizeof cmd, "sh ./unisacc.com tools/chain-gen1-smoke.cx -- --chain-dir %s/c_green --root . --out %s/o8a --par 0 >%s/s8a.log 2>&1", base, base, base);
+    rc = cs_exit_code(system(cmd));
+    cx_fmt(logp, sizeof logp, "%s/s8a.log", base);
+    {
+        int ok8a;
+        ok8a = (rc == 2 && cs_contains(logp, "GEN1_SMOKE\tERROR\tmsg="));
+        cx_fmt(cmd, sizeof cmd, "sh ./unisacc.com tools/chain-gen1-smoke.cx -- --chain-dir %s/c_green --root . --out %s/o8b --par x >%s/s8b.log 2>&1", base, base, base);
+        rc = cs_exit_code(system(cmd));
+        cx_fmt(logp, sizeof logp, "%s/s8b.log", base);
+        cs_ck(ok8a && rc == 2 && cs_contains(logp, "GEN1_SMOKE\tERROR\tmsg="), "S8-bad-par-refused");
+    }
+
+    /* S9: missing chain-dir or root -> rc=2 ERROR msg= */
+    cx_fmt(cmd, sizeof cmd, "sh ./unisacc.com tools/chain-gen1-smoke.cx -- --chain-dir %s/no_such --root . --out %s/o9a >%s/s9a.log 2>&1", base, base, base);
+    rc = cs_exit_code(system(cmd));
+    cx_fmt(logp, sizeof logp, "%s/s9a.log", base);
+    {
+        int ok9a;
+        ok9a = (rc == 2 && cs_contains(logp, "GEN1_SMOKE\tERROR\tmsg="));
+        cx_fmt(cmd, sizeof cmd, "sh ./unisacc.com tools/chain-gen1-smoke.cx -- --chain-dir %s/c_green --root %s/no_such --out %s/o9b >%s/s9b.log 2>&1", base, base, base, base);
+        rc = cs_exit_code(system(cmd));
+        cx_fmt(logp, sizeof logp, "%s/s9b.log", base);
+        cs_ck(ok9a && rc == 2 && cs_contains(logp, "GEN1_SMOKE\tERROR\tmsg="), "S9-missing-chain-or-root");
+    }
+
+    /* S10: inner tools-compile rc=2 (existing out dir) -> INFRA rc=2 */
+    cx_fmt(cmd, sizeof cmd, "mkdir -p %s/o10/new_s0 && sh ./unisacc.com tools/chain-gen1-smoke.cx -- --chain-dir %s/c_green --root . --out %s/o10 --shard-from 0 --shard-to 0 --no-diff >%s/s10.log 2>&1", base, base, base, base);
+    rc = cs_exit_code(system(cmd));
+    cx_fmt(logp, sizeof logp, "%s/s10.log", base);
+    cs_ck(rc == 2 && cs_contains(logp, "GEN1_SMOKE\tINFRA\tshard=0") && cs_contains(logp, "err=tools-compile:"), "S10-inner-rc2-infra");
 
     cx_fmt(cmd, sizeof cmd, "rm -rf %s", base);
     system(cmd);
