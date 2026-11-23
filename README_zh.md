@@ -81,7 +81,7 @@ sh ./unisacc.com tests/run.cx -- --smoke      # 测试入口;另有 --all、--li
 
 | 主题 | 去哪里 |
 |---|---|
-| 当前状态、思维树(每轮先读) | [prd.md 9.1 思维树](prd.md#work-tree) |
+| 当前状态、思维树(每轮先读) | [prd_mempalace.md](prd_mempalace.md)(原 prd.md 9.1) |
 | 记忆宫殿(全部入口的唯一索引) | [prd.md 9.2 记忆宫殿](prd.md) |
 | 构造与链工具、能力速查 | [prd.md 2 能力速查](prd.md#2-有什么功能已实现能力速查) |
 | 测试、棘轮(13 项)、批次 | [prd.md 2.2 测试](prd.md#22-测试棘轮门禁批次)、[prd.md 7 测试套件设计](prd.md#7-测试套件设计)、[tests/README.md](tests/README.md) |
