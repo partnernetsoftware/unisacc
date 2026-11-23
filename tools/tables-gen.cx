@@ -32,6 +32,47 @@ static const int TG_COLS[TG_NT] = {14, 5, 2};
 static int tg_index, tg_write, tg_stale, tg_written, tg_hard;
 static char *tg_buf[TG_NT]; static size_t tg_n[TG_NT]; static int tg_dirty[TG_NT], tg_absent[TG_NT];
 
+static char *tg_all; static size_t tg_alln, tg_cur;   /* index mode: output of one git grep over tests/manifests; tg_cur = scan position */
+
+/* the lines of manifest REL in tg_all, without the "REL:" prefix, each ended by a newline (a manifest with no line there comes back
+   empty, which pass 1 rejects).  Called in index byte order of REL, so the cursor only moves forward. */
+static char *tg_manifest(const char *rel, size_t *n) {
+    size_t rl = strlen(rel), at = tg_cur, cap = 0, off = 0; char *b;
+    *n = 0;
+    while (at < tg_alln) {   /* skip the files that sort before REL (no line of theirs was wanted) */
+        size_t e = at, c; int cmp;
+        while (e < tg_alln && tg_all[e] != '\n') e++;
+        for (c = at; c < e && tg_all[c] != ':'; c++) {}
+        { size_t pl = c - at, m = pl < rl ? pl : rl; cmp = memcmp(tg_all + at, rel, m); if (!cmp) cmp = pl < rl ? -1 : pl > rl ? 1 : 0; }
+        if (cmp >= 0) break;
+        at = e + 1;
+    }
+    tg_cur = at;
+    b = (char *)mm_alloc(1);
+    if (!b) return 0;
+    while (at < tg_alln) {
+        size_t e = at, c, pl, ll;
+        while (e < tg_alln && tg_all[e] != '\n') e++;
+        for (c = at; c < e && tg_all[c] != ':'; c++) {}
+        pl = c - at;
+        if (pl != rl || memcmp(tg_all + at, rel, rl) || c >= e) break;
+        ll = e - c - 1;
+        if (off + ll + 2 > cap) {
+            size_t nc = cap ? cap * 2 : 4096; char *nb;
+            while (nc < off + ll + 2) nc *= 2;
+            nb = (char *)mm_alloc(nc);
+            if (!nb) { mm_free(b); return 0; }
+            if (off) mm_copy(nb, nc, b, off);
+            mm_free(b); b = nb; cap = nc;
+        }
+        mm_copy(b + off, cap - off, tg_all + c + 1, ll); off += ll; b[off++] = '\n';
+        at = e + 1;
+    }
+    tg_cur = at;
+    *n = off;
+    return b;
+}
+
 static char *tg_read(const char *root, const char *rel, size_t *n) {
     char p[4400];
     *n = 0;
@@ -89,7 +130,7 @@ static int tg_apply(int t, const char *row) {
 static void tg_one(const char *root, const char *file, const char *stem) {
     char path[4400], ln[8300]; size_t sz = 0, i = 0, sl = strlen(stem); char *m; int got[TG_NT] = {0, 0, 0}, k;
     if (cx_fmt(path, sizeof path, "tests/manifests/%s", file)) { tg_hard++; return; }
-    m = tg_read(root, path, &sz);
+    m = tg_index ? tg_manifest(path, &sz) : tg_read(root, path, &sz);
     if (!m) { sy_printf("MALFORMED\t%s\tunreadable\n", file); tg_hard++; return; }
     /* pass 1 validates the whole manifest, pass 2 applies it: a malformed manifest changes nothing */
     for (k = 0; k < 2; k++) {
@@ -141,6 +182,11 @@ int main(int argc, char **argv) {
     if (tg_index) {
         char *lv[] = {"git", "ls-files", "--", "tests/manifests", 0}, *o = 0; size_t on = 0, i = 0; const char *pre = "tests/manifests/"; size_t pl = strlen(pre);
         if (cx_runv_timeout(lv, 20, &o, &on) != 0) { sy_printf("TABLES_GEN\tindex listing failed\n"); return 2; }
+        /* every manifest of the index in one process: "path:line" per line, files in index (byte) order, the same order as ls-files above.
+           (a "git show :path" per manifest cost about 13 ms each, 742 of them, ten seconds of the gate); a failed or timed-out run leaves
+           the manifests empty, and an empty manifest is MALFORMED, so the gate fails closed */
+        { char *gw[] = {"git", "grep", "--cached", "-I", "-e", "", "--", "tests/manifests", 0};
+          if (cx_runv_timeout(gw, 20, &tg_all, &tg_alln) != 0 && !tg_alln) { mm_free(tg_all); tg_all = 0; tg_alln = 0; } }
         while (i < on) {
             size_t e = i; while (e < on && o[e] != '\n') e++;
             if (e - i > pl && e - i - pl < sizeof file && !memcmp(o + i, pre, pl)) {
