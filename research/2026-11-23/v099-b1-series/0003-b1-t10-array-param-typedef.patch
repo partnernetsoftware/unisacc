@@ -1,0 +1,189 @@
+diff --git a/exec/parse2/control-result.tsv b/exec/parse2/control-result.tsv
+index 9752cf7c40..b36c299b95 100644
+--- a/exec/parse2/control-result.tsv
++++ b/exec/parse2/control-result.tsv
+@@ -1251,7 +1251,7 @@ function0-common	$fn_function0_781_FN_r_1	*	FN.type	[["PUSH",["constant","fn_fun
+ function0-common	$fn_function0_781_FN_r_2	*	FPA.namedtail	[]
+ function2-common	FN.array	*	FN.array.typedefcheck	[["CMPI","fn_alias_arr",0]]
+ function2-common	FN.array.typedefcheck	1	NEXT	[["ALUI","add","td","td",1],["PUSH",["constant","fn_function2_783_FN_r_1"]]]
+-function2-common	FN.array.typedefcheck	*	DEAD	[["@","fn_reject_array_typedef"]]
++function2-common	FN.array.typedefcheck	*	SH.PREFIX	[["LDI","fn_alias_arr",0],["ALUI","sub","td","td",1],["PUSH","FN.array"]]
+ function2-common	$fn_function2_783_FN_r_1	*	FN.aqual	[]
+ function2-common	FN.aqual	*	$fn_function2_784_FN_b_1	[["RLD","tk"]]
+ function2-common	$fn_function2_784_FN_b_1	*	DEAD	[["@","fn_reject2"]]
+diff --git a/exec/parse2/shape-result.tsv b/exec/parse2/shape-result.tsv
+index ac48dad0f5..fb0a2384e0 100644
+--- a/exec/parse2/shape-result.tsv
++++ b/exec/parse2/shape-result.tsv
+@@ -100,7 +100,7 @@ parameter-dimensions	FN.shiftloop	*	$label3	[["CMPI","dk",0]]
+ parameter-dimensions	$label3	2	FN.shiftone	[]
+ parameter-dimensions	$label3	*	FN.shiftdone	[]
+ parameter-dimensions	FN.shiftone	*	FN.shiftloop	[["ALUI","sub","dj","dk",1],["LDX","dt","dj",["constant","TDIM"]],["STX","dk",["constant","TDIM"],"dt"],["COPYW","dk","dj"]]
+-parameter-dimensions	FN.shiftdone	*	RET	[["LDI","dk",0],["STX","dk",["constant","TDIM"],"dk"],["ALUI","add","drk","drk",1]]
++parameter-dimensions	FN.shiftdone	*	RET	[["LDI","dk",0],["STX","dk",["constant","TDIM"],"dk"],["ALUI","add","drk","drk",1],["COPYW","parrank","drk"]]
+ descriptor-storage	FN.shape	*	$label0	[["CMPI","parrank",1]]
+ descriptor-storage	$label0	2	FN.shapesave	[]
+ descriptor-storage	$label0	*	RET	[]
+diff --git a/tests/batches.tsv b/tests/batches.tsv
+index 3f1f61c314..f36233395c 100644
+--- a/tests/batches.tsv
++++ b/tests/batches.tsv
+@@ -1955,3 +1955,4 @@ freeze-readiness	IMPLEMENTED	interfaces	tools/check-freeze-readiness.cx	SOURCE	l
+ freeze-day	IMPLEMENTED	interfaces	tools/check-freeze-day.cx	SOURCE	lnx/x86_64	55	-	tools/check-freeze-day.cx	-	interfaces.freeze-day	rc0:CHECK_FREEZE_DAY	product	commit
+ c99-global-redecl-conflict	IMPLEMENTED	contract	tests/check-global-redecl-conflict.cx	SOURCE	lnx/x86_64	45	-	tests/check-global-redecl-conflict.cx	{candidate}	c99.global-redecl-conflict	rc0:GREDECL_SUMMARY	product	commit
+ c99-tentative-array-incomplete	IMPLEMENTED	contract	tests/check-tentative-array-incomplete.cx	SOURCE	lnx/x86_64	45	-	tests/check-tentative-array-incomplete.cx	{candidate}	c99.tentative-array-incomplete	rc0:TENTARR_SUMMARY	product	commit
++c99-array-param-typedef	IMPLEMENTED	contract	tests/check-array-param-typedef.cx	SOURCE	lnx/x86_64	45	-	tests/check-array-param-typedef.cx	{candidate}	c99.array-param-typedef	rc0:ARRPARAM_SUMMARY	product	commit
+diff --git a/tests/check-array-param-typedef.cx b/tests/check-array-param-typedef.cx
+new file mode 100644
+index 0000000000..6981952f62
+--- /dev/null
++++ b/tests/check-array-param-typedef.cx
+@@ -0,0 +1,117 @@
++/* Red-before-green fixture for 0.0.99 B1-3 (t10: array parameter whose element is a typedef array).
++ * Covers 5 positive controls (P1..P2 RED rc=1 on 0.0.93 baseline -> GREEN rc=0 with runtime stride check on 0.0.99;
++ * P3..P5 regression guards) + 4 negatives (N1..N2 parameter bound/bracket syntax errors + N3..N4 t04/t05 guards retained).
++ * Usage: sh ./unisacc.com tests/check-array-param-typedef.cx -- [COMPILER_PATH] */
++#pragma unisa use sys.fs
++#pragma unisa use sys.io
++#pragma unisa use sys.proc
++#pragma unisa use text.text
++#pragma unisa use cxlib.netpack
++
++static char prod[4096], tdir[4096];
++static int use_sh, passed, failed;
++
++static int apt_exec(char **argv, char *out, long cap) {
++    np_result r = {0}; char why[256] = {0};
++    int tr = np_run(argv, 0, 0, 30, &r, why, sizeof why);
++    long n = 0;
++    if (r.out && r.outn > 0) {
++        long k = (long)r.outn < cap - 1 ? (long)r.outn : cap - 1;
++        for (long i = 0; i < k; i++) out[n++] = r.out[i];
++    }
++    if (r.err && r.errn > 0 && n < cap - 1) {
++        long k = (long)r.errn < (cap - 1 - n) ? (long)r.errn : (cap - 1 - n);
++        for (long i = 0; i < k; i++) out[n++] = r.err[i];
++    }
++    out[n] = 0;
++    int rc = (tr || r.residue) ? -1 : r.rc;
++    np_free(&r);
++    return rc;
++}
++
++static void apt_head(const char *s, char *dst, size_t cap) {
++    size_t i = 0;
++    for (; s[i] && s[i] != '\n' && s[i] != '\r' && i + 1 < cap; i++)
++        dst[i] = (s[i] == '\t') ? ' ' : s[i];
++    dst[i] = 0;
++    if (!i) { dst[0] = '-'; dst[1] = 0; }
++}
++
++static void check_compile(const char *id, const char *src, int expect_rc0, const char *want_err) {
++    char sp[4200], op[4200], buf[4096], fl[180];
++    cx_fmt(sp, sizeof sp, "%s/%s.c", tdir, id);
++    cx_fmt(op, sizeof op, "%s/%s.o", tdir, id);
++    cx_write(sp, src, strlen(src));
++    char *v_sh[] = {"sh", prod, "-c", sp, "-o", op, 0};
++    char *v_bin[] = {prod, "-c", sp, "-o", op, 0};
++    int rc = apt_exec(use_sh ? v_sh : v_bin, buf, sizeof buf);
++    apt_head(buf, fl, sizeof fl);
++    int ok = expect_rc0 ? (rc == 0) : (rc != 0 && (!want_err || strstr(buf, want_err) != 0));
++    if (ok) passed++; else failed++;
++    sy_printf("ARRPARAM_CASE\t%s\t%s\twant_rc0=%d\tgot_rc=%d\terr=%s\n",
++              id, ok ? "PASS" : "FAIL", expect_rc0, rc, fl);
++}
++
++static void check_run(const char *id, const char *src) {
++    char sp[4200], bin[4200], buf[4096], fl[180];
++    cx_fmt(sp, sizeof sp, "%s/%s.c", tdir, id);
++    cx_fmt(bin, sizeof bin, "%s/%s.bin", tdir, id);
++    cx_write(sp, src, strlen(src));
++    char *v_sh[] = {"sh", prod, sp, "-o", bin, 0};
++    char *v_bin[] = {prod, sp, "-o", bin, 0};
++    char *vr[] = {bin, 0};
++    int rc = apt_exec(use_sh ? v_sh : v_bin, buf, sizeof buf);
++    apt_head(buf, fl, sizeof fl);
++    int rcr = (rc == 0) ? apt_exec(vr, buf, sizeof buf) : -1;
++    int ok = (rc == 0 && rcr == 0);
++    if (ok) passed++; else failed++;
++    sy_printf("ARRPARAM_CASE\t%s\t%s\twant_rc0=1\tgot_rc=%d,%d\terr=%s\n",
++              id, ok ? "PASS" : "FAIL", rc, rcr, fl);
++}
++
++int main(int argc, char **argv) {
++    const char *p = (argc >= 2) ? argv[1] : "./unisacc.com";
++    if (sy_realpath(p, prod, sizeof prod) < 0) return 2;
++    size_t pl = strlen(prod);
++    use_sh = (pl >= 4 && strcmp(prod + pl - 4, ".com") == 0);
++    cx_fmt(tdir, sizeof tdir, "/tmp/v099-apt-%d", sy_pid());
++    if (sy_mkdir_all(tdir, 0700) != 0) return 2;
++
++    /* Positive controls: P1..P2 RED on 0.0.93 baseline -> GREEN on 0.0.99 (with runtime stride check) */
++    check_run("P1-t10-bounded-2d-run",
++              "typedef int row_t[4];\n"
++              "static int h(row_t rows[2]) { return rows[1][0] + rows[1][3]; }\n"
++              "int main(void) { int m[2][4] = {{1,2,3,4},{8,9,10,11}}; return h(m) == 19 ? 0 : 1; }\n");
++    check_run("P2-typedef-arr-incomplete-param",
++              "typedef int row[3];\n"
++              "static int f(row r[]) { return r[1][2]; }\n"
++              "int main(void) { int a[2][3] = {{1,2,3},{4,5,6}}; return f(a) == 6 ? 0 : 1; }\n");
++    check_run("P3-typedef-arr-1d-param",
++              "typedef int row[3];\n"
++              "static int f(row r) { return r[2]; }\n"
++              "int main(void) { row a = {7,8,9}; return f(a) == 9 ? 0 : 1; }\n");
++    check_run("P4-typedef-arr-ptr-param",
++              "typedef int row[3];\n"
++              "static int f(row *r) { return (*r)[1]; }\n"
++              "int main(void) { row a = {7,8,9}; return f(&a) == 8 ? 0 : 1; }\n");
++    check_run("P5-plain-2d-param",
++              "static int f(int r[][3]) { return r[1][2]; }\n"
++              "int main(void) { int a[2][3] = {{1,2,3},{4,5,6}}; return f(a) == 6 ? 0 : 1; }\n");
++
++    /* Negative controls: must remain REJECTED (rc!=0) */
++    check_compile("N1-param-neg-bound",
++                  "typedef int row[3];\nvoid f(row r[-1]);\n",
++                  0, "array parameter bound");
++    check_compile("N2-param-unclosed-bracket",
++                  "typedef int row[3];\nvoid f(row r[2);\n",
++                  0, "expected ]");
++    check_compile("N3-t04-still-rejected",
++                  "int main(void) { int x[3] = {1,2,3}; int (*p[2])[3]; p[0] = &x; return (*p[0])[0]; }\n",
++                  0, "array of pointers to arrays");
++    check_compile("N4-t05-still-rejected",
++                  "void f(int (**p)[4]) { (void)p; }\n",
++                  0, "pointer to pointer to array");
++
++    sy_printf("ARRPARAM_SUMMARY\tpassed=%d\tfailed=%d\ttotal=%d\n", passed, failed, passed + failed);
++    return failed ? 1 : 0;
++}
+diff --git a/tests/coverage.tsv b/tests/coverage.tsv
+index 6ab702941a..227e6a2ec8 100644
+--- a/tests/coverage.tsv
++++ b/tests/coverage.tsv
+@@ -1578,3 +1578,4 @@ interfaces.freeze-readiness	interfaces	IMPLEMENTED_SEPARATE_BATCH	freeze-readine
+ interfaces.freeze-day	interfaces	IMPLEMENTED_SEPARATE_BATCH	freeze-day: read-only S0..S10 ordered checklist with live values, readiness gates, and log check	tools/freeze-day.cx tools/check-freeze-day.cx
+ c99.global-redecl-conflict	contract	IMPLEMENTED_SEPARATE_BATCH	0.0.94 G-redecl: 全局对象重声明类型/尺寸冲突与函数/对象双向种类冲突(18 例正负控, 先红基点 0.0.92 9/18 -> 修后 18/18)	exec/parse2/control-result.tsv exec/parse2/tentative-result.tsv tests/check-global-redecl-conflict.cx
+ c99.tentative-array-incomplete	contract	IMPLEMENTED_SEPARATE_BATCH	0.0.99 B1-2 (7.2): 文件域不完整数组暂定定义跨定义前瞻与末尾 1 元素补齐(10 例正负控, 先红基点 0.0.93 2/10 -> 修后 10/10)	exec/parse2/tentative-result.tsv tests/check-tentative-array-incomplete.cx
++c99.array-param-typedef	contract	IMPLEMENTED_SEPARATE_BATCH	0.0.99 B1-3 (t10): 元素为 typedef 数组的数组形参退化与 SH.PREFIX 维度平移(9 例正负控含运行期步长校验, 先红基点 0.0.93 5/9 -> 修后 9/9)	exec/parse2/control-result.tsv exec/parse2/shape-result.tsv tests/check-array-param-typedef.cx
+diff --git a/tests/manifests/c99-array-param-typedef.tsv b/tests/manifests/c99-array-param-typedef.tsv
+new file mode 100644
+index 0000000000..20c28be82e
+--- /dev/null
++++ b/tests/manifests/c99-array-param-typedef.tsv
+@@ -0,0 +1,3 @@
++batch	c99-array-param-typedef	IMPLEMENTED	contract	tests/check-array-param-typedef.cx	SOURCE	lnx/x86_64	45	-	tests/check-array-param-typedef.cx	{candidate}	c99.array-param-typedef	rc0:ARRPARAM_SUMMARY	product	commit
++coverage	c99.array-param-typedef	contract	IMPLEMENTED_SEPARATE_BATCH	0.0.99 B1-3 (t10): 元素为 typedef 数组的数组形参退化与 SH.PREFIX 维度平移(9 例正负控含运行期步长校验, 先红基点 0.0.93 5/9 -> 修后 9/9)	exec/parse2/control-result.tsv exec/parse2/shape-result.tsv tests/check-array-param-typedef.cx
++packages	batch	c99-array-param-typedef	all	-	-	-	-	-	-
+diff --git a/tests/notcovered.tsv b/tests/notcovered.tsv
+index 539d655e83..78038f2b55 100644
+--- a/tests/notcovered.tsv
++++ b/tests/notcovered.tsv
+@@ -41,7 +41,7 @@ not covered: array initialiser	array-init	gap	2	exec/facts/k2,exec/parse2/contro
+ not covered: array of pointers to arrays	array-init	gap	1	exec/parse2/control	REJECT	t04_arr_of_ptr_to_arr
+ not covered: array parameter bound	array-init	gap	2	exec/facts/k2,exec/parse2/control	UNMEASURED	-
+ not covered: array parameter suffix	array-init	gap	2	exec/facts/k2,exec/parse2/control	UNMEASURED	-
+-not covered: array parameter whose element is a typedef array	array-init	gap	2	exec/facts/k2,exec/parse2/control	REJECT	t10_array_param_typedef
++not covered: array parameter whose element is a typedef array	array-init	gap	1	exec/facts/k2	REJECT	t10_array_param_typedef
+ not covered: array rank	array-init	gap	2	exec/parse2/gen2,exec/parse2/shape	ACCEPT	r18_array_rank
+ not covered: array typedef pointer member	array-init	gap	2	exec/parse2/gen2,exec/parse2/shape	UNMEASURED	-
+ not covered: array typedef with extra suffix	array-init	gap	2	exec/parse2/gen2,exec/parse2/shape	UNMEASURED	-

@@ -1,0 +1,165 @@
+diff --git a/exec/parse2/tentative-result.tsv b/exec/parse2/tentative-result.tsv
+index 7355a2e48a..553ed3acc8 100644
+--- a/exec/parse2/tentative-result.tsv
++++ b/exec/parse2/tentative-result.tsv
+@@ -40,13 +40,13 @@ main	DM.tent.test2	*	DM.tent.semi1	[]
+ main	DM.tent.test3	62	DM.tent.semi2	[]
+ main	DM.tent.test3	*	DM.tent.extern	[]
+ main	DM.tent.test4	61	DM.tent.next	[]
+-main	DM.tent.test4	*	DEAD	[["REJECT","not covered: incomplete array declaration before another definition"]]
++main	DM.tent.test4	*	DM.tent.next	[]
+ main	DM.tent.test5	0	DM.tent.bro0	[]
+ main	DM.tent.test5	*	DM.tent.broin	[]
+ main	DM.tent.test6	1	DM.tent.broin	[]
+ main	DM.tent.test6	*	DM.tent.extern.body	[]
+ main	DM.tent.test7	1	DM.tent.broin	[]
+-main	DM.tent.test7	*	DEAD	[["REJECT","not covered: incomplete array declaration before another definition"]]
++main	DM.tent.test7	*	DM.tent.broin	[]
+ main	DM.tent.test8	0	DM.tent.idset	[]
+ main	DM.tent.test8	*	DM.tent.next	[]
+ main	DM.tent.test9	0	DM.tent.eqname	[]
+@@ -56,12 +56,13 @@ main	DM.tent.test10	*	DM.tent.other	[]
+ main	DM.tent.test11	1	DM.tent.nexteq	[]
+ main	DM.tent.test11	*	DM.tent.extern	[]
+ main	DM.tent.test12	1	DM.tent.nexteq	[]
+-main	DM.tent.test12	*	DEAD	[["REJECT","not covered: incomplete array declaration before another definition"]]
++main	DM.tent.test12	*	DM.tent.nexteq	[]
+ main	DM.tent.test13	12	DM.o2	[]
+ main	DM.tent.test13	104	DM.s	[]
+ main	DM.tent.test13	*	DM.tent.none	[]
+-main	DM.tent.test14	1	DM.cd	[]
+-main	DM.tent.test14	*	DEAD	[["REJECT","not covered: incomplete array declaration without an initializer"]]
++main	DM.tent.test14	1	DM.tent.cd	[]
++main	DM.tent.test14	*	DM.tent.cd	[["LDI","dm_n",1]]
++main	DM.tent.cd	*	DM.cd	[]
+ main	GV.compat	*	GV.compat.fnd	[["INTERN","v","fns","fne"],["LDX","u","v",2000000],["CMPI","u",1]]
+ main	GV.compat.fnd	1	GV.compat.kindfail	[]
+ main	GV.compat.fnd	*	GV.compat.loc	[["LDX","u","v",1000000],["CMP","u","gc_gmark"]]
+diff --git a/tests/batches.tsv b/tests/batches.tsv
+index 2175635ea9..3f1f61c314 100644
+--- a/tests/batches.tsv
++++ b/tests/batches.tsv
+@@ -1954,3 +1954,4 @@ mergebranch	IMPLEMENTED	interfaces	tools/check-mergebranch.cx	SOURCE	lnx/x86_64
+ freeze-readiness	IMPLEMENTED	interfaces	tools/check-freeze-readiness.cx	SOURCE	lnx/x86_64	55	-	tools/check-freeze-readiness.cx	-	interfaces.freeze-readiness	rc0:CHECK_FREEZE_READINESS	product	commit
+ freeze-day	IMPLEMENTED	interfaces	tools/check-freeze-day.cx	SOURCE	lnx/x86_64	55	-	tools/check-freeze-day.cx	-	interfaces.freeze-day	rc0:CHECK_FREEZE_DAY	product	commit
+ c99-global-redecl-conflict	IMPLEMENTED	contract	tests/check-global-redecl-conflict.cx	SOURCE	lnx/x86_64	45	-	tests/check-global-redecl-conflict.cx	{candidate}	c99.global-redecl-conflict	rc0:GREDECL_SUMMARY	product	commit
++c99-tentative-array-incomplete	IMPLEMENTED	contract	tests/check-tentative-array-incomplete.cx	SOURCE	lnx/x86_64	45	-	tests/check-tentative-array-incomplete.cx	{candidate}	c99.tentative-array-incomplete	rc0:TENTARR_SUMMARY	product	commit
+diff --git a/tests/check-tentative-array-incomplete.cx b/tests/check-tentative-array-incomplete.cx
+new file mode 100644
+index 0000000000..09107e8159
+--- /dev/null
++++ b/tests/check-tentative-array-incomplete.cx
+@@ -0,0 +1,81 @@
++/* Red-before-green fixture for 0.0.99 B1-2 (7.2 file-scope incomplete array tentative definition).
++ * Covers 7 positive controls (must PASS rc=0 on 0.0.99 candidate; P1..P6 RED rc=1 on 0.0.93 baseline)
++ * + 3 conflict/constraint negatives (must FAIL rc!=0).
++ * Usage: sh ./unisacc.com tests/check-tentative-array-incomplete.cx -- [COMPILER_PATH] */
++#pragma unisa use sys.fs
++#pragma unisa use sys.io
++#pragma unisa use sys.proc
++#pragma unisa use text.text
++#pragma unisa use cxlib.netpack
++
++static char prod[4096], tdir[4096];
++static int use_sh, passed, failed;
++
++static int tai_exec(char **argv, char *out, long cap) {
++    np_result r = {0}; char why[256] = {0};
++    int tr = np_run(argv, 0, 0, 30, &r, why, sizeof why);
++    long n = 0;
++    if (r.out && r.outn > 0) {
++        long k = (long)r.outn < cap - 1 ? (long)r.outn : cap - 1;
++        for (long i = 0; i < k; i++) out[n++] = r.out[i];
++    }
++    if (r.err && r.errn > 0 && n < cap - 1) {
++        long k = (long)r.errn < (cap - 1 - n) ? (long)r.errn : (cap - 1 - n);
++        for (long i = 0; i < k; i++) out[n++] = r.err[i];
++    }
++    out[n] = 0;
++    int rc = (tr || r.residue) ? -1 : r.rc;
++    np_free(&r);
++    return rc;
++}
++
++static void tai_head(const char *s, char *dst, size_t cap) {
++    size_t i = 0;
++    for (; s[i] && s[i] != '\n' && s[i] != '\r' && i + 1 < cap; i++)
++        dst[i] = (s[i] == '\t') ? ' ' : s[i];
++    dst[i] = 0;
++    if (!i) { dst[0] = '-'; dst[1] = 0; }
++}
++
++static void check_case(const char *id, const char *src, int expect_rc0, const char *want_err) {
++    char sp[4200], op[4200], buf[4096], fl[180];
++    cx_fmt(sp, sizeof sp, "%s/%s.c", tdir, id);
++    cx_fmt(op, sizeof op, "%s/%s.o", tdir, id);
++    cx_write(sp, src, strlen(src));
++    char *v_sh[] = {"sh", prod, "-c", sp, "-o", op, 0};
++    char *v_bin[] = {prod, "-c", sp, "-o", op, 0};
++    int rc = tai_exec(use_sh ? v_sh : v_bin, buf, sizeof buf);
++    tai_head(buf, fl, sizeof fl);
++    int ok = expect_rc0 ? (rc == 0) : (rc != 0 && (!want_err || strstr(buf, want_err) != 0));
++    if (ok) passed++; else failed++;
++    sy_printf("TENTARR_CASE\t%s\t%s\twant_rc0=%d\tgot_rc=%d\terr=%s\n",
++              id, ok ? "PASS" : "FAIL", expect_rc0, rc, fl);
++}
++
++int main(int argc, char **argv) {
++    const char *p = (argc >= 2) ? argv[1] : "./unisacc.com";
++    if (sy_realpath(p, prod, sizeof prod) < 0) return 2;
++    size_t pl = strlen(prod);
++    use_sh = (pl >= 4 && strcmp(prod + pl - 4, ".com") == 0);
++    cx_fmt(tdir, sizeof tdir, "/tmp/v099-tai-%d", sy_pid());
++    if (sy_mkdir_all(tdir, 0700) != 0) return 2;
++
++    /* Positive controls: RED on 0.0.93 baseline (P1..P6 fail with incomplete array declaration) -> GREEN on 0.0.99 */
++    check_case("P1-static-before-global", "static int t[];\nint g;\n", 1, 0);
++    check_case("P2-static-eof", "static int t[];\n", 1, 0);
++    check_case("P3-tentative-eof", "int t[];\n", 1, 0);
++    check_case("P4-static-before-main", "static int t[];\nint main(void) { return t[0]; }\n", 1, 0);
++    check_case("P5-tentative-use-write", "int t[];\nint main(void) { t[0] = 1; return t[0] - 1; }\n", 1, 0);
++    check_case("P6-static-forward-init-after-fn",
++               "static int t[];\nint helper(void) { return t[1]; }\nstatic int t[] = {10, 20, 30};\nint main(void) { return helper() == 20 ? 0 : 1; }\n",
++               1, 0);
++    check_case("P7-static-init-then-global", "static int t[] = {1, 2, 3};\nint g;\n", 1, 0);
++
++    /* Negative controls: must remain REJECTED (rc!=0) */
++    check_case("N1-tentative-type-conflict", "int t[];\ndouble t;\n", 0, "conflicting types");
++    check_case("N2-static-init-size-conflict", "static int t[] = {1, 2};\nstatic int t[4];\n", 0, "conflicting types");
++    check_case("N3-zero-size-array", "int t[0];\n", 0, "greater than zero");
++
++    sy_printf("TENTARR_SUMMARY\tpassed=%d\tfailed=%d\ttotal=%d\n", passed, failed, passed + failed);
++    return failed ? 1 : 0;
++}
+diff --git a/tests/coverage.tsv b/tests/coverage.tsv
+index 49f5d6bfd8..6ab702941a 100644
+--- a/tests/coverage.tsv
++++ b/tests/coverage.tsv
+@@ -1577,3 +1577,4 @@ interfaces.mergebranch	interfaces	IMPLEMENTED_SEPARATE_BATCH	mergebranch branch
+ interfaces.freeze-readiness	interfaces	IMPLEMENTED_SEPARATE_BATCH	freeze-readiness board: command-computed status + manual TSV; CONFLICT when done vs fail; FREEZE_READINESS ready	tools/freeze-readiness.cx tools/check-freeze-readiness.cx tests/freeze-readiness-items.tsv
+ interfaces.freeze-day	interfaces	IMPLEMENTED_SEPARATE_BATCH	freeze-day: read-only S0..S10 ordered checklist with live values, readiness gates, and log check	tools/freeze-day.cx tools/check-freeze-day.cx
+ c99.global-redecl-conflict	contract	IMPLEMENTED_SEPARATE_BATCH	0.0.94 G-redecl: 全局对象重声明类型/尺寸冲突与函数/对象双向种类冲突(18 例正负控, 先红基点 0.0.92 9/18 -> 修后 18/18)	exec/parse2/control-result.tsv exec/parse2/tentative-result.tsv tests/check-global-redecl-conflict.cx
++c99.tentative-array-incomplete	contract	IMPLEMENTED_SEPARATE_BATCH	0.0.99 B1-2 (7.2): 文件域不完整数组暂定定义跨定义前瞻与末尾 1 元素补齐(10 例正负控, 先红基点 0.0.93 2/10 -> 修后 10/10)	exec/parse2/tentative-result.tsv tests/check-tentative-array-incomplete.cx
+diff --git a/tests/manifests/c99-tentative-array-incomplete.tsv b/tests/manifests/c99-tentative-array-incomplete.tsv
+new file mode 100644
+index 0000000000..a466b0187f
+--- /dev/null
++++ b/tests/manifests/c99-tentative-array-incomplete.tsv
+@@ -0,0 +1,3 @@
++batch	c99-tentative-array-incomplete	IMPLEMENTED	contract	tests/check-tentative-array-incomplete.cx	SOURCE	lnx/x86_64	45	-	tests/check-tentative-array-incomplete.cx	{candidate}	c99.tentative-array-incomplete	rc0:TENTARR_SUMMARY	product	commit
++coverage	c99.tentative-array-incomplete	contract	IMPLEMENTED_SEPARATE_BATCH	0.0.99 B1-2 (7.2): 文件域不完整数组暂定定义跨定义前瞻与末尾 1 元素补齐(10 例正负控, 先红基点 0.0.93 2/10 -> 修后 10/10)	exec/parse2/tentative-result.tsv tests/check-tentative-array-incomplete.cx
++packages	batch	c99-tentative-array-incomplete	all	-	-	-	-	-	-
+diff --git a/tests/notcovered.tsv b/tests/notcovered.tsv
+index 1a33c3ad06..539d655e83 100644
+--- a/tests/notcovered.tsv
++++ b/tests/notcovered.tsv
+@@ -120,8 +120,7 @@ not covered: host intrinsic argument count	library-abi	gap	1	exec/parse2/callcon
+ not covered: host-forwarded call count exceeds 8192	library-abi	cap	1	exec/parse2/forward	UNMEASURED	-
+ not covered: identifier is not a local	scope-decl	gap	3	exec/facts/k2,exec/parse2/gen2,exec/parse2/update	UNMEASURED	-
+ not covered: incompatible semantic declaration type	type-decl	gap	1	exec/parse2/functiontypes	ACCEPT	s01_mu_fnptr_struct
+-not covered: incomplete array declaration before another definition	array-init	diag	3	exec/parse2/tentative	UNMEASURED	-
+-not covered: incomplete array declaration without an initializer	array-init	diag	3	exec/facts/k2,exec/parse2/control,exec/parse2/tentative	UNMEASURED	-
++not covered: incomplete array declaration without an initializer	array-init	diag	2	exec/facts/k2,exec/parse2/control	UNMEASURED	-
+ not covered: incomplete enum type	type-decl	diag	1	exec/parse2/enumtypes	UNMEASURED	-
+ not covered: incomplete struct	type-decl	diag	1	exec/parse2/gen2	UNMEASURED	-
+ not covered: increment of array member	array-init	gap	2	exec/parse2/gen2,exec/parse2/update	UNMEASURED	-

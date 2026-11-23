@@ -79,3 +79,101 @@
 ## 3. 版本分支提交门禁说明
 
 当前 `main` 头 `d21f46dccf` 含提交 `9cf59a4cae` 写入的 `build/freeze.tsv`(`0.0.94-FREEZE ... cc 1795402800 src cx ext exec include seed kernel tests release`)。因 `tools/precommit.cx` 的 `freeze_gate()` 同时读取 `HEAD:build/freeze.tsv` 且未对非 `main` 的未来版本分支(`v0.0.NN`)做豁免,在不伪造 `UNISACC_INTEGRATOR`、不绕过门禁的前提下,本轮将已验证的完整组合补丁 `research/2026-11-23/v099-b1-combined.patch` 与本核查报告先行提交于 `v0.0.99` 分支;待 `0.0.94` 解冻或 `freeze_gate` 放行未来版本分支后直接 `git apply research/2026-11-23/v099-b1-combined.patch` 即可落表。
+
+## 4. 三份可独立回退的提交草案序列(`research/2026-11-23/v099-b1-series/`)
+
+已将组合补丁拆为三份按序正交、可独立 `git apply -R` 回退的补丁序列,并附合入 `0.0.98` 后对 `tests/check-extern-array-incomplete.cx` `AN1`/`AN4` 负控预期的同步补丁:
+
+| 序号 | 补丁文件 | 行数 | 触及产品表(行号) | 配套夹具与清单 |
+|---|---|---|---|---|
+| 1 | `0001-b1-3775a03c71-gredecl.patch` | 184 | `exec/parse2/control-result.tsv`(1181, 1767), `exec/parse2/tentative-result.tsv`(65..99 追加 `GV.compat*`) | `tests/check-global-redecl-conflict.cx`, `tests/manifests/c99-global-redecl-conflict.tsv` |
+| 2 | `0002-b1-72-incomplete-array.patch` | 165 | `exec/parse2/tentative-result.tsv`(43, 49, 59, 63..65), `tests/notcovered.tsv`(278 -> 277) | `tests/check-tentative-array-incomplete.cx`, `tests/manifests/c99-tentative-array-incomplete.tsv` |
+| 2b | `0002b-after-v0098-an1-an4.patch` | 20 | 无(仅在合入 `0.0.98` 后更新 `tests/check-extern-array-incomplete.cx` 第 142/147 行 `AN1`/`AN4` 的 `expect_rc0` `0 -> 1` 并写明理由注释,不删断言) | `tests/check-extern-array-incomplete.cx` |
+| 3 | `0003-b1-t10-array-param-typedef.patch` | 189 | `exec/parse2/control-result.tsv`(1254), `exec/parse2/shape-result.tsv`(103) | `tests/check-array-param-typedef.cx`, `tests/manifests/c99-array-param-typedef.tsv` |
+
+正向依次应用与逆向逐个回退实测(在干净 `.claude/worktrees/v0.0.99` 上):
+`APPLY_0001=OK -> APPLY_0002=OK -> APPLY_0003=OK -> REVERT_0003=OK -> REVERT_0002=OK -> REVERT_0001=OK`(回退后工作树零残留差异)。此外,`0003` 与 `0002` 的产品表改动完全不相交(`0003` 只动 `control-result.tsv:1254` 与 `shape-result.tsv:103`;`0002` 只动 `tentative-result.tsv:43..65` 与 `notcovered.tsv`),任意一项可单独回退而不破坏另一项的状态机闭环。
+
+### 4.1 提交草案 1:`0001-b1-3775a03c71-gredecl.patch`
+
+- 提交说明草案:`0.0.99 B1-1 (3775a03c71): 全局对象重声明类型/尺寸冲突与函数/对象双向种类冲突修复及夹具登记`
+- 最小正负用例(18 例:8 正例 `P1..P8` + 10 负控 `C1..C10`)与已装产品 `0.0.93` 先红实测原行(`9/18`):
+  ```
+  GREDECL_CASE	P1-ext-incomp-complete	PASS	want_rc0=1	got_rc=0	err=-
+  GREDECL_CASE	P2-ext-same-arr	PASS	want_rc0=1	got_rc=0	err=-
+  GREDECL_CASE	P3-ext-same-scalar	PASS	want_rc0=1	got_rc=0	err=-
+  GREDECL_CASE	P4-def-then-ext-incomp	PASS	want_rc0=1	got_rc=0	err=-
+  GREDECL_CASE	P5-tentative-same	PASS	want_rc0=1	got_rc=0	err=-
+  GREDECL_CASE	P6-ext-same-ptr	PASS	want_rc0=1	got_rc=0	err=-
+  GREDECL_CASE	P7-tentative-arr	PASS	want_rc0=1	got_rc=0	err=-
+  GREDECL_CASE	P8-typedef-arr-same	PASS	want_rc0=1	got_rc=0	err=-
+  GREDECL_CASE	C1-ext-arr-size	FAIL	want_rc0=0	got_rc=0	err=-
+  GREDECL_CASE	C2-ext-arr-double	FAIL	want_rc0=0	got_rc=0	err=-
+  GREDECL_CASE	C3-ext-scalar-double	FAIL	want_rc0=0	got_rc=0	err=-
+  GREDECL_CASE	C4-def-arr-size	FAIL	want_rc0=0	got_rc=0	err=-
+  GREDECL_CASE	C5-ext-arr-elemtype	FAIL	want_rc0=0	got_rc=0	err=-
+  GREDECL_CASE	C6-ext-ptr-vs-int	FAIL	want_rc0=0	got_rc=0	err=-
+  GREDECL_CASE	C7-ext-then-static	PASS	want_rc0=0	got_rc=1	err=...: error: static declaration follows a non-static declaration of this name (C99 6.2.2p7)
+  GREDECL_CASE	C8-fn-obj-same-name	FAIL	want_rc0=0	got_rc=0	err=-
+  GREDECL_CASE	C9-typedef-arr-conflict	FAIL	want_rc0=0	got_rc=0	err=-
+  GREDECL_CASE	C10-obj-then-fn	FAIL	want_rc0=0	got_rc=0	err=-
+  GREDECL_SUMMARY	passed=9	failed=9	total=18
+  ```
+- 候选重建后预期转绿原行:`GREDECL_SUMMARY	passed=18	failed=0	total=18`(`rc=0`)。
+
+### 4.2 提交草案 2:`0002-b1-72-incomplete-array.patch`(+ 合入 0.0.98 后附 `0002b-after-v0098-an1-an4.patch`)
+
+- 提交说明草案:`0.0.99 B1-2 (7.2): 文件域不完整数组暂定定义跨定义前瞻与末尾 1 元素补齐及夹具登记`
+- 最小正负用例(10 例:7 正例 `P1..P7` 含 Lua 跨函数前向声明 + 3 负控 `N1..N3`)与已装产品 `0.0.93` 先红实测原行(`2/10`):
+  ```
+  TENTARR_CASE	P1-static-before-global	FAIL	want_rc0=1	got_rc=1	err=...: error: not covered: incomplete array declaration before another definition
+  TENTARR_CASE	P2-static-eof	FAIL	want_rc0=1	got_rc=1	err=...: error: not covered: incomplete array declaration without an initializer
+  TENTARR_CASE	P3-tentative-eof	FAIL	want_rc0=1	got_rc=1	err=...: error: not covered: incomplete array declaration without an initializer
+  TENTARR_CASE	P4-static-before-main	FAIL	want_rc0=1	got_rc=1	err=...: error: not covered: incomplete array declaration before another definition
+  TENTARR_CASE	P5-tentative-use-write	FAIL	want_rc0=1	got_rc=1	err=...: error: not covered: incomplete array declaration before another definition
+  TENTARR_CASE	P6-static-forward-init-after-fn	FAIL	want_rc0=1	got_rc=1	err=...: error: not covered: incomplete array declaration before another definition
+  TENTARR_CASE	P7-static-init-then-global	PASS	want_rc0=1	got_rc=0	err=-
+  TENTARR_CASE	N1-tentative-type-conflict	FAIL	want_rc0=0	got_rc=1	err=...: error: not covered: incomplete array declaration without an initializer
+  TENTARR_CASE	N2-static-init-size-conflict	FAIL	want_rc0=0	got_rc=0	err=-
+  TENTARR_CASE	N3-zero-size-array	PASS	want_rc0=0	got_rc=1	err=...: error: array size must be greater than zero (C99 6.7.5.2p1)
+  TENTARR_SUMMARY	passed=2	failed=8	total=10
+  ```
+- 候选重建后预期转绿原行:`TENTARR_SUMMARY	passed=10	failed=0	total=10`(`rc=0`,且 `N1` 改由 `GV.compat` 报 `conflicting types for object (C99 6.7p4)` 命中 `want_err="conflicting types"`);合入 `0.0.98` 后应用 `0002b-after-v0098-an1-an4.patch` 使 `c99-extern-array-incomplete` 保持 `A0_SUMMARY	passed=14	failed=0	total=14`(`rc=0`)。
+
+### 4.3 提交草案 3:`0003-b1-t10-array-param-typedef.patch`
+
+- 提交说明草案:`0.0.99 B1-3 (t10): 元素为 typedef 数组的数组形参退化与 SH.PREFIX 维度平移及夹具登记`
+- 最小正负用例(9 例:5 正例 `P1..P5` 含运行期步长校验 `rows[1][0]+rows[1][3]==19` + 4 负控 `N1..N4` 含 `t04`/`t05` 守卫保持拒绝断言)与已装产品 `0.0.93` 先红实测原行(`5/9`):
+  ```
+  ARRPARAM_CASE	P1-t10-bounded-2d-run	FAIL	want_rc0=1	got_rc=1,-1	err=...: error: not covered: array parameter whose element is a typedef array
+  ARRPARAM_CASE	P2-typedef-arr-incomplete-param	FAIL	want_rc0=1	got_rc=1,-1	err=...: error: not covered: array parameter whose element is a typedef array
+  ARRPARAM_CASE	P3-typedef-arr-1d-param	PASS	want_rc0=1	got_rc=0,0	err=-
+  ARRPARAM_CASE	P4-typedef-arr-ptr-param	PASS	want_rc0=1	got_rc=0,0	err=-
+  ARRPARAM_CASE	P5-plain-2d-param	PASS	want_rc0=1	got_rc=0,0	err=-
+  ARRPARAM_CASE	N1-param-neg-bound	FAIL	want_rc0=0	got_rc=1	err=...: error: not covered: array parameter whose element is a typedef array
+  ARRPARAM_CASE	N2-param-unclosed-bracket	FAIL	want_rc0=0	got_rc=1	err=...: error: not covered: array parameter whose element is a typedef array
+  ARRPARAM_CASE	N3-t04-still-rejected	PASS	want_rc0=0	got_rc=1	err=...: error: not covered: array of pointers to arrays
+  ARRPARAM_CASE	N4-t05-still-rejected	PASS	want_rc0=0	got_rc=1	err=...: error: not covered: pointer to pointer to array
+  ARRPARAM_SUMMARY	passed=5	failed=4	total=9
+  ```
+- 候选重建后预期转绿原行:`ARRPARAM_SUMMARY	passed=9	failed=0	total=9`(`rc=0`,其中 `N1` 转报 `not covered: array parameter bound`、`N2` 转报 `not covered: expected ]`)。
+
+## 5. 0.0.100 B2(17 个上限入 `exec/facts/k2-caps.tsv`)与 0.0.99 B1 的文件交集与并行开发判定
+
+### 5.1 文件交集明细
+
+| 类别 | 文件路径 | 0.0.99 B1 触及范围 | 0.0.100 B2 触及范围 | 是否交集与行距 |
+|---|---|---|---|---|
+| 产品表 | `exec/parse2/control-result.tsv` | 第 `1181` 行(`function0-common`)、第 `1254` 行(`function2-common`)、第 `1767` 行(`global5-common`),均为 `+1/-1` 原位替换 | 第 `510` 行(`structure` `STRUCT_LIMIT`)、第 `575` 行(`structure` `512`)、第 `2232` 行(`startup-guard` `POSSPAN`) | **交集 #1**:最小行距 **465 行**(`1767` vs `2232` 差 465 行;`575` vs `1181` 差 606 行),且 B1 行号零偏移,无 hunk 重叠 |
+| 产品表 | `exec/parse2/shape-result.tsv` | 第 `103` 行(`parameter-dimensions` `FN.shiftdone`),`+1/-1` 原位替换 | 第 `121` 行(`descriptor-storage` `SH.NEW` `POSSPAN`) | **交集 #2**:相距 **18 行**(跨不同 section),且 B1 行号零偏移,远超 3 行 diff 上下文窗口,无 hunk 重叠 |
+| 产品表 | `exec/parse2/tentative-result.tsv` | 第 `43, 49, 59, 63..65` 行 + 追加 35 行 `GV.compat*` | 不触及 | **不相交**(B1 独有) |
+| 产品表/事实表 | `exec/facts/k2-caps.tsv`、`tools/facts-gen.cx` 及另外 11 张 `exec/` result/byte 表与对应 `*-manifest.tsv` | 不触及 | 新增 `k2-caps.tsv`、登记 `facts-gen.cx`、改 11 张表(`directive-scan-result`、`directive-body-byte`、`directive-body-result`、`unarycontrol-result`、`enumtypes-result`、`functiontypes-result`、`forward-result`、`layoutfacts-result`、`setjmpcontrol-result`、`modelgraphequality-result`、`x86object-result`)及 manifest `CAPS` 绑定 | **不相交**(B2 独有) |
+| 棘轮基线表 | `tests/notcovered.tsv` | `rows 278 -> 277`(消去 `incomplete array declaration before another definition`) | 不触及(B2 仅把阈值字面量/常量迁入 `k2-caps.tsv`,不改拒绝文案) | **不相交**(B1 独有) |
+| 登记表 | `tests/batches.tsv`、`tests/coverage.tsv` | 尾追 3 批(`c99-global-redecl-conflict`、`c99-tentative-array-incomplete`、`c99-array-param-typedef`) | 尾追 B2 检查批次 | **交集 #3**:纯表尾追加,由各自 `tests/manifests/*.tsv` 经 `tools/reg-manifest.cx -- --write` 自动重算,无手工合并冲突 |
+
+### 5.2 并行开发判定
+
+- **结论:快车道开发与补丁验证可完全并行;慢车道冻结与整链重建必须按版本序(`0.0.99` -> `0.0.100`)串行。**
+- **依据**:
+  - `(1)` **工作树开发零冲突**:在独立版本工作树 `.claude/worktrees/v0.0.99` 与 `.claude/worktrees/v0.0.100` 中并行开发时,仅有的两张交集产品表(`exec/parse2/control-result.tsv` 与 `exec/parse2/shape-result.tsv`)在 B1 中均为 `+1/-1` 原位替换(总行数不变),且与 B2 修改行的最小距离分别为 **465 行** 与 **18 行**,`git apply` / `git rebase` 零上下文冲突;两张登记表(`tests/batches.tsv`、`tests/coverage.tsv`)由各自独立的 `tests/manifests/*.tsv` 经 `reg-manifest.cx -- --write` 自动生成。
+  - `(2)` **慢车道整链串行约束**:B1 与 B2 均修改 `exec/` 下 A 类产品输入(改变候选 SID,且 B2 新增 `exec/facts/k2-caps.tsv` 需 `derive --write` 更新 `build/table-index.tsv`),受「一个候选只含一类大改」与 `main` 单一冻结锁约束,必须待 `0.0.99` 合入 `main` 完成整链发布后,再将 `0.0.100` 变基合入 `main` 起链。
