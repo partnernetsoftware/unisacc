@@ -112,6 +112,26 @@ int main(void) {
         if (cx_write(sc, "CX_FOO\tok\n", 10)) return 2;
     }
 
+    /* fourth fixture set (item 11): two copies of r whose tree has a stand-in tools/precommit-preview.cx, one answering blocked=0 and one blocked=2 */
+    const char *T_G = "good", *T_PA = "pv-ok", *T_PB = "pv-bad"; /* receipt tags of the item-11 runs */
+    {   static const char *pvsrc[2] = {
+            "int main(void){ printf(\"%s\\n\", \"GATE\\tfake\\tPASS\\tok\\t-\"); printf(\"%s\\n\", \"PRECOMMIT_PREVIEW\\tblocked=0\"); return 0; }\n",
+            "int main(void){ printf(\"%s\\n\", \"GATE\\tratchet:fake\\tBLOCK\\tfake gate refuses reason=x\\t-\"); printf(\"%s\\n\", \"PRECOMMIT_PREVIEW\\tblocked=2\"); return 1; }\n" };
+        static const char *pvdir[2] = { "rp-ok", "rp-bad" };
+        int pi;
+        for (pi = 0; pi < 2; pi++) {
+            char pp[1300], sc4[1800];
+            cx_fmt(sc4, sizeof sc4, "cd %s && rm -rf %s && cp -a r %s", tmp, pvdir[pi], pvdir[pi]);
+            rc = ckk_sh_t("check-premerge-selfcheck", sc4, out, sizeof out, 30);
+            if (rc != 0) { printf("fixture 4 setup failed: %.300s\n", out); return 2; }
+            cx_fmt(pp, sizeof pp, "%s/%s/tools/precommit-preview.cx", tmp, pvdir[pi]);
+            if (cx_write(pp, pvsrc[pi], strlen(pvsrc[pi]))) return 2;
+            cx_fmt(sc4, sizeof sc4, "cd %s/%s && git add -A && git -c user.name=x -c user.email=x@x commit -qm pv", tmp, pvdir[pi]);
+            rc = ckk_sh_t("check-premerge-selfcheck", sc4, out, sizeof out, 30);
+            if (rc != 0) { printf("fixture 4 commit failed: %.300s\n", out); return 2; }
+        }
+    }
+
     /* warm the compile cache once so the parallel runs start from the cached binary */
     cx_fmt(sc, sizeof sc, "TMPDIR=%s/td sh ./unisacc.com tools/premerge-selfcheck.cx -- --no-such-argument >/dev/null 2>&1; true", tmp);
     sh(sc, 0, 0, 30);
@@ -154,6 +174,8 @@ int main(void) {
     qraw("( R=$(pwd); mkdir \"$T/cw\" && cd \"$T/cw\" && git init -q . && echo x > a && git add -A && git -c user.name=x -c user.email=x@x commit -qm c0 && echo u > u && "
          "n1=$(git rev-list --count HEAD) && rc=0 && TMPDIR=\"$T/td\" sh \"$R/unisacc.com\" \"$R/tools/premerge-selfcheck.cx\" -- --patch \"$T/good.patch\" --repo \"$T/no-such-repo\" --check true --out \"$T/cw.rec\" >/dev/null 2>&1 || rc=$?; "
          "n2=$(git rev-list --count HEAD) && test \"$rc\" = 2 && test \"$n1\" = \"$n2\" && test -f u && git status --porcelain | grep -q '^?? u' && test ! -e \"$T/cw.rec\" && echo CWD_UNTOUCHED > \"$T/o/cw.txt\" ) & ");
+    q("pv-ok", "--patch %s/good.patch --repo %s/rp-ok --base main --check true --out %s/pv-ok.rec");
+    q("pv-bad", "--patch %s/good.patch --repo %s/rp-bad --base main --check true --out %s/pv-bad.rec");
     q("nobase", "--patch %s/good.patch --repo %s/r --check true --out %s/nobase.rec");
     q("lit-ok", "--patch %s/lit-ok.patch --repo %s/r --base main --check true --sample %s/sample-ok.txt --out %s/lit-ok.rec");
     q("lit-nosample", "--patch %s/lit-ok.patch --repo %s/r --base main --check true --out %s/lit-ns.rec");
@@ -201,6 +223,9 @@ int main(void) {
     ok(has("cw", "CWD_UNTOUCHED"), "a nonexistent --repo is refused (rc 2) and the caller's repository gets no commit and keeps its untracked files");
     ok(has("hk", "SELFCHECK_SUMMARY patch_sha256=") && !has("hk", "REFUSE"), "with GIT_DIR, GIT_INDEX_FILE and GIT_WORK_TREE set to an outer repository (a git hook) the source repository is still read correctly");
     ok(has("nobase", "SELFCHECK_SUMMARY patch_sha256=") && has("nobase", "base_commit=") && !has("nobase", "REFUSE"), "without --base the default revision main is used");
+    ok(has(T_G, "item=11 name=commit-gate-preview verdict=NA"), "item 11: a tree without tools/precommit-preview.cx is NA");
+    ok(has(T_PA, "item=11 name=commit-gate-preview verdict=PASS") && has(T_PA, "blocked=0 over") && has(T_PA, "head="), "item 11: the gate answering blocked=0 passes and the receipt names the head");
+    ok(rcof(T_PB) == 1 && has(T_PB, "commit-gate-preview") && has(T_PB, "blocked=2 over") && has(T_PB, "BLOCK"), "item 11: the gate answering blocked=2 fails and the first BLOCK row is quoted");
     ok(has("b1", "REFUSE repo or base revision invalid"), "an invalid --base is refused before any tree is built");
     ok(has("o1", "REFUSE overlay copy failed") && !has("o1", "SELFCHECK"), "a missing --overlay directory is refused, not ignored");
     ok(has("a1", "REFUSE patch does not apply") && !has("a1", "SELFCHECK"), "a patch that does not apply to the base is refused, no receipt");
