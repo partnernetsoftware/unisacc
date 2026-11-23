@@ -7,6 +7,7 @@
  * missing overlay, patch that does not apply, --check-timeout above 55, nonexistent --repo.
  * The tool runs are independent, so they are queued and started together to keep the whole check inside one 55 s command. */
 #pragma unisa use cxlib.ckrun
+#pragma unisa use cxlib.faultinj
 #pragma unisa use sys.env
 #pragma unisa use sys.fs
 #pragma unisa use mem.bytes
@@ -184,9 +185,14 @@ int main(void) {
     q("lit-prod", "--patch %s/lit-prod.patch --repo %s/r --base main --check true --out %s/lit-prod.rec");
     q("lit-noprod", "--patch %s/lit-noprod.patch --repo %s/r --base main --check true --out %s/lit-noprod.rec");
     q("lit-none", "--patch %s/lit-none.patch --repo %s/r --base main --check true --out %s/lit-none.rec");
-    /* inside a git hook GIT_DIR, GIT_INDEX_FILE and GIT_WORK_TREE name the outer repository: the reads of the source repository must not see them */
-    qraw("( GIT_DIR=\"$T/no-outer-gitdir\" GIT_INDEX_FILE=\"$T/no-outer-index\" GIT_WORK_TREE=\"$T/no-outer-tree\" TMPDIR=\"$T/td\" sh ./unisacc.com tools/premerge-selfcheck.cx -- "
-         "--patch \"$T/good.patch\" --repo \"$T/r\" --base main --check true --out \"$T/hk.rec\" > \"$T/o/hk.txt\" 2>&1; echo $? > \"$T/o/hk.rc\" ) & ");
+    /* inside a git hook GIT_DIR, GIT_INDEX_FILE and GIT_WORK_TREE name the outer repository: the reads of the source repository must not see them
+       (cxlib.faultinj sets all three to a path that does not exist, so a read that honours them fails) */
+    {   char hkp[3000], hkc[3600];
+        if (fi_gitenv(1, 0, hkp, sizeof hkp) != 0 ||
+            cx_fmt(hkc, sizeof hkc, "( %sTMPDIR=\"$T/td\" sh ./unisacc.com tools/premerge-selfcheck.cx -- "
+                   "--patch \"$T/good.patch\" --repo \"$T/r\" --base main --check true --out \"$T/hk.rec\" > \"$T/o/hk.txt\" 2>&1; echo $? > \"$T/o/hk.rc\" ) & ", hkp)) exit(2);
+        qraw(hkc);
+    }
     flush();
 
     ok(rcof("good") == 0 && has("good", "SELFCHECK_SUMMARY patch_sha256=") && has("good", "verdict=PASS"), "good patch: verdict PASS, rc 0");
