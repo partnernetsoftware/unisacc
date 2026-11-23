@@ -1,0 +1,151 @@
+/* Private red-first fixture for v0.0.94 frontend phase 1: A0 (extern incomplete array + X-array).
+ * Usage: sh ./unisacc.com check-v094-a0-draft.cx -- [PRODUCT_APE] */
+#pragma unisa use sys.fs
+#pragma unisa use sys.io
+#pragma unisa use sys.proc
+#pragma unisa use text.text
+#pragma unisa use cxlib.netpack
+
+static char prod[4096];
+static char tdir[4096];
+static int use_sh, passed, failed;
+
+static void write_src(const char *name, const char *body, char *outp, size_t cap) {
+    cx_fmt(outp, cap, "%s/%s", tdir, name);
+    if (cx_write(outp, body, strlen(body)) != 0) {
+        sy_eprintf("a0-draft: write failed %s\n", outp);
+        exit(2);
+    }
+}
+
+static int run_v(char **argv, char *out, long cap, int merge_err) {
+    np_result r = {0}; char why[256] = {0};
+    int tr = np_run(argv, 0, 0, 30, &r, why, sizeof why);
+    long n = 0;
+    if (r.out && r.outn > 0) {
+        long take = (long)r.outn < cap - 1 ? (long)r.outn : cap - 1;
+        for (long i = 0; i < take; i++) out[n++] = r.out[i];
+    }
+    if (merge_err && r.err && r.errn > 0 && n < cap - 1) {
+        long take = (long)r.errn < (cap - 1 - n) ? (long)r.errn : (cap - 1 - n);
+        for (long i = 0; i < take; i++) out[n++] = r.err[i];
+    }
+    out[n] = 0;
+    int rc = (tr || r.residue) ? -1 : r.rc;
+    np_free(&r);
+    return rc;
+}
+
+static void first_line(const char *s, char *dst, size_t cap) {
+    size_t i = 0;
+    while (s[i] && s[i] != '\n' && s[i] != '\r' && i + 1 < cap) {
+        dst[i] = (s[i] == '\t') ? ' ' : s[i];
+        i++;
+    }
+    dst[i] = 0;
+    if (i == 0) cx_fmt(dst, cap, "-");
+}
+
+static void check_compile(const char *id, const char *src_name, const char *src_body, int expect_rc0) {
+    char sp[4200], op[4200], buf[4096], fl[180];
+    write_src(src_name, src_body, sp, sizeof sp);
+    cx_fmt(op, sizeof op, "%s/%s.o", tdir, id);
+    char *v_sh[] = {"sh", prod, "-c", sp, "-o", op, 0};
+    char *v_bin[] = {prod, "-c", sp, "-o", op, 0};
+    int rc = run_v(use_sh ? v_sh : v_bin, buf, sizeof buf, 1);
+    first_line(buf, fl, sizeof fl);
+    int ok = expect_rc0 ? (rc == 0) : (rc != 0);
+    if (ok) passed++; else failed++;
+    sy_printf("A0_CASE\t%s\t%s\twant_rc0=%d\tgot_rc=%d\terr=%s\n",
+              id, ok ? "PASS" : "FAIL", expect_rc0, rc, fl);
+}
+
+static void check_x_array(void) {
+    char s1[4200], s2[4200], o1[4200], o2[4200], bin[4200], buf[4096], fl[180];
+    write_src("x-n1.c", "extern int a[];\n", s1, sizeof s1);
+    write_src("x-n2.c", "static int s[4];\nint main(void) { return s[0]; }\n", s2, sizeof s2);
+    cx_fmt(bin, sizeof bin, "%s/x-multi.bin", tdir);
+    char *vm_sh[] = {"sh", prod, s1, s2, "-o", bin, 0};
+    char *vm_bin[] = {prod, s1, s2, "-o", bin, 0};
+    int rcm = run_v(use_sh ? vm_sh : vm_bin, buf, sizeof buf, 1);
+    first_line(buf, fl, sizeof fl);
+    int okm = (rcm == 0);
+    if (okm) passed++; else failed++;
+    sy_printf("A0_CASE\tX-multi\t%s\twant_rc0=1\tgot_rc=%d\terr=%s\n",
+              okm ? "PASS" : "FAIL", rcm, fl);
+
+    cx_fmt(o1, sizeof o1, "%s/x-n1.o", tdir);
+    cx_fmt(o2, sizeof o2, "%s/x-n2.o", tdir);
+    cx_fmt(bin, sizeof bin, "%s/x-sep.bin", tdir);
+    char *v1_sh[] = {"sh", prod, "-c", s1, "-o", o1, 0};
+    char *v1_bin[] = {prod, "-c", s1, "-o", o1, 0};
+    char *v2_sh[] = {"sh", prod, "-c", s2, "-o", o2, 0};
+    char *v2_bin[] = {prod, "-c", s2, "-o", o2, 0};
+    char *vl_sh[] = {"sh", prod, o1, o2, "-o", bin, 0};
+    char *vl_bin[] = {prod, o1, o2, "-o", bin, 0};
+    char *vr[] = {bin, 0};
+    int rc1 = run_v(use_sh ? v1_sh : v1_bin, buf, sizeof buf, 1);
+    int rc2 = run_v(use_sh ? v2_sh : v2_bin, buf, sizeof buf, 1);
+    int rcl = (rc1 == 0 && rc2 == 0) ? run_v(use_sh ? vl_sh : vl_bin, buf, sizeof buf, 1) : -1;
+    int rcr = (rcl == 0) ? run_v(vr, buf, sizeof buf, 1) : -1;
+    int oks = (rc1 == 0 && rc2 == 0 && rcl == 0 && rcr == 0);
+    if (oks) passed++; else failed++;
+    sy_printf("A0_CASE\tX-separate-link\t%s\twant_rc0=1\tgot_rc=%d,%d,%d,%d\terr=-\n",
+              oks ? "PASS" : "FAIL", rc1, rc2, rcl, rcr);
+}
+
+static void check_two_unit_extern_link(void) {
+    char s1[4200], s2[4200], o1[4200], o2[4200], bin[4200], buf[4096], fl[180];
+    write_src("u1.c", "extern int ext_arr[];\nint other_def[2] = {1, 2};\nint get_v(void) { return ext_arr[1] + other_def[0]; }\n", s1, sizeof s1);
+    write_src("u2.c", "int ext_arr[3] = {7, 8, 9};\nint get_v(void);\nint main(void) { return get_v() == 9 ? 0 : 1; }\n", s2, sizeof s2);
+    cx_fmt(o1, sizeof o1, "%s/u1.o", tdir);
+    cx_fmt(o2, sizeof o2, "%s/u2.o", tdir);
+    cx_fmt(bin, sizeof bin, "%s/u12.bin", tdir);
+    char *v1_sh[] = {"sh", prod, "-c", s1, "-o", o1, 0};
+    char *v1_bin[] = {prod, "-c", s1, "-o", o1, 0};
+    char *v2_sh[] = {"sh", prod, "-c", s2, "-o", o2, 0};
+    char *v2_bin[] = {prod, "-c", s2, "-o", o2, 0};
+    char *vl_sh[] = {"sh", prod, o1, o2, "-o", bin, 0};
+    char *vl_bin[] = {prod, o1, o2, "-o", bin, 0};
+    char *vr[] = {bin, 0};
+    int rc1 = run_v(use_sh ? v1_sh : v1_bin, buf, sizeof buf, 1);
+    first_line(buf, fl, sizeof fl);
+    int rc2 = run_v(use_sh ? v2_sh : v2_bin, buf, sizeof buf, 1);
+    int rcl = (rc1 == 0 && rc2 == 0) ? run_v(use_sh ? vl_sh : vl_bin, buf, sizeof buf, 1) : -1;
+    int rcr = (rcl == 0) ? run_v(vr, buf, sizeof buf, 1) : -1;
+    int ok = (rc1 == 0 && rc2 == 0 && rcl == 0 && rcr == 0);
+    if (ok) passed++; else failed++;
+    sy_printf("A0_CASE\tA-two-unit-link\t%s\twant_rc0=1\tgot_rc=%d,%d,%d,%d\terr=%s\n",
+              ok ? "PASS" : "FAIL", rc1, rc2, rcl, rcr, fl);
+}
+
+int main(int argc, char **argv) {
+    const char *p = (argc >= 2) ? argv[1] : "./unisacc.com";
+    if (sy_realpath(p, prod, sizeof prod) < 0) {
+        sy_eprintf("a0-draft: product not found: %s\n", p);
+        return 2;
+    }
+    size_t pl = strlen(prod);
+    use_sh = (pl >= 4 && strcmp(prod + pl - 4, ".com") == 0);
+    cx_fmt(tdir, sizeof tdir, "/tmp/v094-a0-%d", sy_pid());
+    if (sy_mkdir_all(tdir, 0700) != 0) {
+        sy_eprintf("a0-draft: mkdir failed %s\n", tdir);
+        return 2;
+    }
+    check_compile("A1-extern-before-arr", "a1.c", "extern int a[];\nint b[4];\n", 1);
+    check_compile("A2-extern-before-static", "a2.c", "extern int a[];\nstatic int b[4];\n", 1);
+    check_compile("A3-extern-before-arr-init", "a3.c", "extern int a[];\nint b[2] = {1, 2};\n", 1);
+    check_compile("A4-extern-before-extern", "a4.c", "extern int a[];\nextern int b[];\n", 1);
+    check_compile("A5-extern-same-init", "a5.c", "extern int a[];\nint a[4] = {1, 2, 3, 4};\n", 1);
+    check_compile("A6-def-before-extern", "a6.c", "int b[4];\nextern int a[];\n", 1);
+    check_compile("A7-extern-same-complete", "a7.c", "extern int a[];\nint a[4];\n", 1);
+    check_x_array();
+    check_two_unit_extern_link();
+    check_compile("AN1-static-incomplete", "an1.c", "static int a[];\nint b[4];\n", 0);
+    check_compile("AN2-zero-size", "an2.c", "extern int a[0];\n", 0);
+    check_compile("AN3-neg-size", "an3.c", "extern int a[-1];\n", 0);
+    check_compile("AN4-non-extern-tentative", "an4.c", "int a[];\nint b[4];\n", 0);
+
+    sy_printf("A0_SUMMARY\tpassed=%d\tfailed=%d\ttotal=%d\n", passed, failed, passed + failed);
+    return failed ? 1 : 0;
+}
