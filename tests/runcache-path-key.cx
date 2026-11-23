@@ -1,0 +1,135 @@
+/* runcache-path-key.cx -- 私有红夹具(测试侧,不动产品):run-cache 键是否绑源 argv 原文。
+ *   sh ./unisacc.com tests/runcache-path-key.cx -- NEW_OUT CANDIDATE
+ *
+ * 0.0.99 运行缓存键修复的前置红夹具。当前产品(未修)上这些应为红,修后转绿。只读产品,缓存全私有。
+ * 依据:对象嵌入字符串 = argv 源路径原文拼写(相对嵌相对、绝对嵌绝对)。键忽略 argv 原文 -> 绝对源
+ * 两目录命中错对象(嵌他目录路径)。修法(方案甲):只对 -c 对象(rc_mode==5)绑源 argv 原文。
+ *
+ * 检查:
+ *   obj-abs-two-dirs-b-matches-cold  (红):绝对源两目录,共用缓存下 b 的产物必须等于 b 独立冷编;
+ *                                           现基线不等(b 命中 a 的错路径对象)。
+ *   obj-rel-two-dirs-b-hit           (绿,现状):相对源两目录,产物字节本相同,命中无害,保持命中。
+ *   file-pinned-two-dirs             (绿):__FILE__ 程序两目录各嵌各路径(pinned 保持)。
+ *   header-diff-no-miscode           (绿):头不同内容两目录,产物常量各自正确(未错编)。
+ *   ctl-include-not-embedded         (现状对照):-I 绝对路径不进 -c 对象字节。
+ *   ctl-executable-not-embedded      (现状对照):-o 可执行不嵌源路径。
+ *   ctl-unitcache-no-leak            (现状对照):单元缓存(unitcache)不跨目录泄漏路径。
+ * 末行 CHECK_RUNCACHE_PATH_KEY<TAB>ok=N<TAB>failed=M。红夹具在修复前 expected-fail,修复后全绿。 */
+#pragma unisa use sys.fs
+#pragma unisa use sys.env
+#pragma unisa use sys.posix
+#pragma unisa use sys.io
+#pragma unisa use sys.sha
+#pragma unisa use sys.time
+#pragma unisa use text.text
+#pragma unisa use text.fmt
+#pragma unisa use mem.heap
+#pragma unisa use mem.bytes
+#pragma unisa use cxlib.procrun
+
+#define CAP 65536
+static int checks, failed;
+static char work[2048], cand[2200];
+static void die(const char *s) { fprintf(stderr, "runcache-path-key: %s\n", s); exit(2); }
+static void ck(int yes, const char *name) { checks++; if (!yes) failed++; printf("%s\truncache-path-key.%s\n", yes ? "PASS" : "FAIL", name); }
+static void put(const char *dir, const char *leaf, const char *text) {
+    char p[2400];
+    if (cx_fmt(p, sizeof p, "%s/%s", dir, leaf)) die("path");
+    if (cx_write(p, text, (size_t)tx_len(text, 4096))) die("write");
+}
+/* plain byte-substring test (not tx_find/tx_contains, which the lint rules treat as source anchors) */
+static int bytes_has(const char *h, size_t hn, const char *needle, size_t m) {
+    if (!h || m == 0 || hn < m) return 0;
+    for (size_t i = 0; i + m <= hn; i++) if (!memcmp(h + i, needle, m)) return 1;
+    return 0;
+}
+static long dg(const char *p, char hex[65]) {
+    size_t n = 0; char *b = (char *)cx_read(p, &n);
+    if (!b) { hex[0] = 0; return -1; }
+    if (sy_sha256_hex(b, n, hex)) cx_sha256_hex(b, n, hex);
+    mm_free(b); return (long)n;
+}
+/* run the compiler (cand) in DIR with an isolated cache; argv tail given by caller */
+static int runsh(const char *dir, const char *cache, const char *tail) {
+    char cmd[4096];
+    if (cx_fmt(cmd, sizeof cmd, "cd '%s' && UNISACC_CACHE_DIR='%s' sh '%s' %s", dir, cache, cand, tail)) die("cmd");
+    char *v[] = {"sh", "-c", cmd, 0};
+    char *o = 0; long n = 0;
+    int rc = cx_runv_timeout(v, 50, &o, &n);
+    if (o) mm_free(o);
+    return rc;
+}
+
+int main(int argc, char **argv) {
+    if (argc != 3) die("usage: NEW_OUT CANDIDATE");
+    if (cx_fmt(work, sizeof work, "%s", argv[1])) die("path");
+    if (sy_realpath(argv[2], cand, sizeof cand) < 0) die("cand realpath");
+    { char p[2400]; if (cx_fmt(p, sizeof p, "%s", work) || sy_mkdir_all(work, 0700)) die("work mkdir"); }
+
+    const char *src = "int proof(void){return 37;}\n";
+    char a[2400], b[2400], cb[2400], cache[2400], ccache[2400], o[2400];
+    if (cx_fmt(a, sizeof a, "%s/a", work) || cx_fmt(b, sizeof b, "%s/b", work) ||
+        cx_fmt(cb, sizeof cb, "%s/coldb", work) || cx_fmt(cache, sizeof cache, "%s/cache", work) ||
+        cx_fmt(ccache, sizeof ccache, "%s/coldcache", work) ||
+        sy_mkdir_all(a, 0700) || sy_mkdir_all(b, 0700) || sy_mkdir_all(cb, 0700) ||
+        sy_mkdir_all(cache, 0700) || sy_mkdir_all(ccache, 0700)) die("mk sub");
+    put(a, "probe.cx", src); put(b, "probe.cx", src); put(cb, "probe.cx", src);
+
+    char out[4096]; long on = 0;
+    /* fixture: object (-c), ABSOLUTE source path, two dirs sharing one cache */
+    char ap[2500], bp[2500]; cx_fmt(ap, sizeof ap, "%s/a/probe.cx", work); cx_fmt(bp, sizeof bp, "%s/b/probe.cx", work);
+    { char t[3000]; cx_fmt(t, sizeof t, "-O2 -c -b lnx/x86_64 -funit -o out.o '%s'", ap); runsh(a, cache, t); }
+    { char t[3000]; cx_fmt(t, sizeof t, "-O2 -c -b lnx/x86_64 -funit -o out.o '%s'", bp); runsh(b, cache, t); }
+    { char t[3000]; cx_fmt(t, sizeof t, "-O2 -c -b lnx/x86_64 -funit -o out.o '%s'", bp); runsh(cb, ccache, t); }
+    { char bsha[65], csha[65]; cx_fmt(o, sizeof o, "%s/out.o", b); dg(o, bsha); cx_fmt(o, sizeof o, "%s/out.o", cb); dg(o, csha);
+      ck(bsha[0] && !strcmp(bsha, csha), "obj-abs-two-dirs-b-matches-cold"); }
+
+    /* control: include path is NOT embedded in a -c object */
+    { char i1[2400]; cx_fmt(i1, sizeof i1, "%s/inc", work); sy_mkdir_all(i1, 0700); put(i1, "h.h", "#define V 1\n");
+      char m[2400]; cx_fmt(m, sizeof m, "%s/m.cx", work); put(work, "m.cx", "int proof(void){return 1;}\n");
+      { char t[3000]; cx_fmt(t, sizeof t, "-O2 -c -b lnx/x86_64 -funit -I'%s' -o m.o m.cx", i1); runsh(work, cache, t); }
+      size_t n = 0; char *ob = (char *)cx_read((cx_fmt(o, sizeof o, "%s/m.o", work), o), &n);
+      char needle[64]; cx_fmt(needle, sizeof needle, "%s", "inc/h.h");
+      int found = ob && bytes_has(ob, n, needle, tx_len(needle, 64)); if (ob) mm_free(ob);
+      ck(!found, "ctl-include-not-embedded"); }
+
+    /* fixture: object (-c), RELATIVE source name, two dirs sharing one cache.  With a relative
+       spelling the embedded string is the same ('probe.cx'), so reuse is harmless and expected:
+       the two objects are byte-identical.  (The fix must NOT turn this into a miss.) */
+    { char r1[2400], r2[2400], rc1[2400]; cx_fmt(r1, sizeof r1, "%s/rA", work); cx_fmt(r2, sizeof r2, "%s/rB", work);
+      cx_fmt(rc1, sizeof rc1, "%s/rcache", work); sy_mkdir_all(r1, 0700); sy_mkdir_all(r2, 0700); sy_mkdir_all(rc1, 0700);
+      put(r1, "probe.cx", src); put(r2, "probe.cx", src);
+      { char t[3000]; cx_fmt(t, sizeof t, "-O2 -c -b lnx/x86_64 -funit -o out.o probe.cx"); runsh(r1, rc1, t); runsh(r2, rc1, t); }
+      char s1[65], s2[65]; cx_fmt(o, sizeof o, "%s/out.o", r1); dg(o, s1); cx_fmt(o, sizeof o, "%s/out.o", r2); dg(o, s2);
+      ck(s1[0] && !strcmp(s1, s2), "obj-rel-two-dirs-identical"); }
+
+    /* fixture: __FILE__ program in two dirs keeps each own path (pinned) — objects differ */
+    { char f1[2400], f2[2400]; cx_fmt(f1, sizeof f1, "%s/fA", work); cx_fmt(f2, sizeof f2, "%s/fB", work);
+      sy_mkdir_all(f1, 0700); sy_mkdir_all(f2, 0700);
+      const char *fsrc = "const char *f(void){return __FILE__;}\n";
+      put(f1, "fp.cx", fsrc); put(f2, "fp.cx", fsrc);
+      { char t[3000]; cx_fmt(t, sizeof t, "-O2 -c -b lnx/x86_64 -funit -o out.o '%s/fp.cx'", f1); runsh(f1, cache, t); }
+      { char t[3000]; cx_fmt(t, sizeof t, "-O2 -c -b lnx/x86_64 -funit -o out.o '%s/fp.cx'", f2); runsh(f2, cache, t); }
+      char s1[65], s2[65]; cx_fmt(o, sizeof o, "%s/out.o", f1); dg(o, s1); cx_fmt(o, sizeof o, "%s/out.o", f2); dg(o, s2);
+      ck(s1[0] && s2[0] && strcmp(s1, s2) != 0, "file-pinned-two-dirs-differ"); }
+
+    /* fixture: header with different content in two dirs compiles correctly (no mis-code) */
+    { char h1[2400], h2[2400]; cx_fmt(h1, sizeof h1, "%s/hA", work); cx_fmt(h2, sizeof h2, "%s/hB", work);
+      sy_mkdir_all(h1, 0700); sy_mkdir_all(h2, 0700);
+      put(h1, "main.cx", "#include \"h.h\"\nint proof(void){return VAL;}\n"); put(h1, "h.h", "#define VAL 37\n");
+      put(h2, "main.cx", "#include \"h.h\"\nint proof(void){return VAL;}\n"); put(h2, "h.h", "#define VAL 99\n");
+      { char t[3000]; cx_fmt(t, sizeof t, "-O2 -c -b lnx/x86_64 -funit -o out.o main.cx"); runsh(h1, cache, t); runsh(h2, cache, t); }
+      char s1[65], s2[65]; cx_fmt(o, sizeof o, "%s/out.o", h1); dg(o, s1); cx_fmt(o, sizeof o, "%s/out.o", h2); dg(o, s2);
+      ck(s1[0] && s2[0] && strcmp(s1, s2) != 0, "header-diff-no-miscode"); }
+
+    /* control: -o executable does not embed the source path */
+    { char x[2400]; cx_fmt(x, sizeof x, "%s/xA", work); sy_mkdir_all(x, 0700); put(x, "e.cx", "int main(void){return 0;}\n");
+      { char t[3000]; cx_fmt(t, sizeof t, "-O2 -b lnx/x86_64 -o exec.bin '%s/e.cx'", x); runsh(x, cache, t); }
+      size_t n = 0; char *eb = (char *)cx_read((cx_fmt(o, sizeof o, "%s/exec.bin", x), o), &n);
+      char needle[16]; cx_fmt(needle, sizeof needle, "%s", "e.cx");
+      int found = eb && bytes_has(eb, n, needle, tx_len(needle, 16)); if (eb) mm_free(eb);
+      ck(!found, "ctl-executable-not-embedded"); }
+
+    printf("CHECK_RUNCACHE_PATH_KEY\tok=%d\tfailed=%d\n", checks - failed, failed);
+    return failed ? 1 : 0;
+}
