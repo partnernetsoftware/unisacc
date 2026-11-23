@@ -1142,16 +1142,22 @@ static int pd_call_window(const char *root, const char *cand, const char *mock_r
                     (char *)ids, (char *)outp, seq, 0};
     np_result r = {0};
     char *env[] = {temp_env, 0};
+    char ep[PD_PW];
+    int have_ep = (outp && outp[0] && !cx_fmt(ep, sizeof ep, "%s.stderr", outp));
+    /* A retry reuses the same <outp>.stderr path; drop any sidecar from the previous attempt first,
+       so a later silent pass never leaves the earlier attempt's refusal reason next to the window. */
+    if (have_ep) (void)sy_unlink(ep);
     int tr = np_run(mock_runner ? mock : real, root, temp_env ? env : 0, PD_CHILD_SECONDS, &r, why, sizeof why);
     int rc = tr ? 124 : r.rc;
     /* Keep the child's stderr next to the window output: the candidate refusal reason (e.g. a
      * duplicate label), PRECHECK/LAYOUT/KIT evidence.  Only adds a file; never changes the verdict,
      * the budget or rc. A failed write is ignored (the window result is already in outp).  r.err is
-     * a byte buffer of r.errn bytes; sy_write_file writes exactly that many, no NUL needed. */
-    if (r.errn > 0 && r.err && outp && outp[0]) {
-        char ep[PD_PW];
-        if (!cx_fmt(ep, sizeof ep, "%s.stderr", outp))
-            (void)sy_write_file(ep, r.err, (int64_t)r.errn, 0644);
+     * a byte buffer of r.errn bytes; sy_write_file writes exactly that many, no NUL needed.  A
+     * sidecar is diagnostic, so cap it at the last 1 MiB: the tail carries the refusal/exit reason
+     * and this keeps a runaway child's stderr from filling the window directory. */
+    if (r.errn > 0 && r.err && have_ep) {
+        long keep = (long)r.errn > (1L << 20) ? (1L << 20) : (long)r.errn;
+        (void)sy_write_file(ep, r.err + ((long)r.errn - keep), (int64_t)keep, 0644);
     }
     np_free(&r);
     return rc;
