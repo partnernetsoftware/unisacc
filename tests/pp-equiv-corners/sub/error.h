@@ -1,0 +1,2 @@
+#error EXPECTED_ORACLE_HEADER_REJECT
+int bad;

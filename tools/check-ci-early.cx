@@ -407,6 +407,77 @@ int main(void) {
                   killed, 3 - killed, killed, killed == 3 ? "1.00" : "0.00", killed == 3 ? "PASS" : "FAIL");
     }
 
+    /* Pre-dispatch read-only --preflight self-check: workflow missing, gh auth fail, all-ok pass */
+    {
+        char pf_dir[4400], pf_lay[4400], pf_out[4400], pf_gh_ok[4400], pf_gh_bad[4400], pf_cmd[9000], pf_nowf[4400];
+        char *po = 0; size_t pon = 0;
+        if (!cx_fmt(pf_dir, sizeof pf_dir, "%s/pf-test", tmp) &&
+            !cx_fmt(pf_lay, sizeof pf_lay, "%s/layout", pf_dir) &&
+            !cx_fmt(pf_out, sizeof pf_out, "%s/out", pf_dir) &&
+            !cx_fmt(pf_gh_ok, sizeof pf_gh_ok, "%s/gh-ok.sh", pf_dir) &&
+            !cx_fmt(pf_gh_bad, sizeof pf_gh_bad, "%s/gh-bad.sh", pf_dir) &&
+            !cx_fmt(pf_nowf, sizeof pf_nowf, "%s/nowf-root", pf_dir) &&
+            sy_mkdir_all(pf_lay, 0700) == 0 && sy_mkdir_all(pf_nowf, 0700) == 0) {
+            char ape_fx[4400], pkg_fx[4400], sw_fx[4400], bj_fx[4400], bj2_fx[4400], sh_fx[4400], script[256];
+            cx_fmt(ape_fx, sizeof ape_fx, "%s/unisacc.com", pf_lay);
+            cx_fmt(pkg_fx, sizeof pkg_fx, "%s/pkg.bin", pf_lay);
+            cx_fmt(sw_fx, sizeof sw_fx, "%s/slice-win-arm64", pf_lay);
+            cx_fmt(bj_fx, sizeof bj_fx, "%s/build.json", pf_lay);
+            cx_fmt(bj2_fx, sizeof bj2_fx, "%s/unisacc.com.build.json", pf_lay);
+            cx_fmt(sh_fx, sizeof sh_fx, "%s/SHA256SUMS", pf_lay);
+            cx_fmt(script, sizeof script, "#!/bin/sh\necho 'unisacc %s'\n", head_ver);
+            (void)cx_write(ape_fx, script, strlen(script)); (void)sy_chmod(ape_fx, 0755);
+            (void)cx_write(pkg_fx, "pkg\n", 4);
+            (void)cx_write(sw_fx, "sw\n", 3);
+            (void)cx_write(bj_fx, "{}\n", 3);
+            (void)cx_write(bj2_fx, "{}\n", 3);
+            (void)cx_write(sh_fx, "0000\n", 5);
+            (void)cx_write(pf_gh_ok, "#!/bin/sh\nexit 0\n", 17); (void)sy_chmod(pf_gh_ok, 0755);
+            (void)cx_write(pf_gh_bad, "#!/bin/sh\necho 'not logged in' >&2\nexit 1\n", 42); (void)sy_chmod(pf_gh_bad, 0755);
+
+            /* 1. gh auth failure -> refused with CI_EARLY_GH_AUTH */
+            cx_fmt(pf_cmd, sizeof pf_cmd,
+                "CI_EARLY_GH='%s' '%s' --preflight --rev '%s' --layout '%s' --version '%s' --out '%s' --root '%s' 2>&1",
+                pf_gh_bad, bin, head_rev, pf_lay, head_ver, pf_out, root);
+            { char *av[] = {"sh", "-c", pf_cmd, 0}; int r = cx_runv_timeout(av, 25, &po, &pon);
+              int ok = (r == 2 && po && tx_find(po, (long)pon, "CI_EARLY_GH_AUTH", 16) >= 0);
+              if (ok) { passed++; sy_printf("PASS\tpreflight-gh-auth-refused\n"); }
+              else { failed++; sy_printf("FAIL\tpreflight-gh-auth-refused\trc=%d\n", r); }
+              free(po); po = 0; }
+
+            /* 2. missing workflow file -> refused with CI_EARLY_WORKFLOW_MISSING */
+            cx_fmt(pf_cmd, sizeof pf_cmd,
+                "CI_EARLY_GH='%s' '%s' --preflight --rev '%s' --layout '%s' --version '%s' --out '%s' --root '%s' 2>&1",
+                pf_gh_ok, bin, head_rev, pf_lay, head_ver, pf_out, pf_nowf);
+            { char *av[] = {"sh", "-c", pf_cmd, 0}; int r = cx_runv_timeout(av, 25, &po, &pon);
+              int ok = (r == 2 && po && tx_find(po, (long)pon, "CI_EARLY_WORKFLOW_MISSING", 25) >= 0);
+              if (ok) { passed++; sy_printf("PASS\tpreflight-missing-workflow-refused\n"); }
+              else { failed++; sy_printf("FAIL\tpreflight-missing-workflow-refused\trc=%d\n", r); }
+              free(po); po = 0; }
+
+            /* 3. all 4 checks ok (use origin/main rev so git branch -r --contains passes) -> PASS rc=0 */
+            {
+                char orev[64]; orev[0] = 0;
+                char *gv[] = {"git", "-C", root, "rev-parse", "origin/main", 0};
+                if (cx_runv_timeout(gv, 10, &po, &pon) == 0 && po && pon >= 40) {
+                    mm_copy(orev, sizeof orev, po, 40); orev[40] = 0;
+                }
+                free(po); po = 0;
+                if (orev[0]) {
+                    cx_fmt(pf_cmd, sizeof pf_cmd,
+                        "CI_EARLY_GH='%s' '%s' --preflight --rev '%s' --layout '%s' --version '%s' --out '%s' --root '%s' 2>&1",
+                        pf_gh_ok, bin, orev, pf_lay, head_ver, pf_out, root);
+                    char *av[] = {"sh", "-c", pf_cmd, 0}; int r = cx_runv_timeout(av, 25, &po, &pon);
+                    int ok = (r == 0 && po && tx_find(po, (long)pon, "CI_EARLY_PREFLIGHT\t", 19) >= 0 &&
+                              tx_find(po, (long)pon, "workflow=OK\tgh_auth=OK\tstatus=PASS", 34) >= 0);
+                    if (ok) { passed++; sy_printf("PASS\tpreflight-all-ok-passes\n"); }
+                    else { failed++; sy_printf("FAIL\tpreflight-all-ok-passes\trc=%d\n", r); }
+                    free(po); po = 0;
+                }
+            }
+        }
+    }
+
     sy_printf("CHECK_CI_EARLY\tpassed=%d\tfailed=%d\tverdict=%s\n",
               passed, failed, failed == 0 ? "PASS" : "FAIL");
     return failed == 0 ? 0 : 1;

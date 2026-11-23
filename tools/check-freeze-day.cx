@@ -1,0 +1,263 @@
+/* tools/check-freeze-day.cx -- contract check for tools/freeze-day.cx (batch freeze-day).
+ * Synthetic git repo verifies live values (candidate.tsv, branch SHA, HEAD^{tree} vs merge_tree, templates),
+ * 23-step ordering, READY vs BLOCKED gating, S1 3-batch split, S3 load/l0-posix2 rules, lock renewals,
+ * read-only guarantee, and check subcommand pass/fail/refuse paths.
+ * Final line: CHECK_FREEZE_DAY\tpass=N\tfail=0
+ */
+#pragma unisa use fsx.fs
+#pragma unisa use sys.fs
+#pragma unisa use sys.io
+#pragma unisa use sys.proc
+#pragma unisa use sys.posix
+#pragma unisa use text.text
+#pragma unisa use text.fmt
+#pragma unisa use mem.heap
+#pragma unisa use mem.bytes
+#pragma unisa use cxlib.netpack
+
+static int g_pass, g_fail;
+static char g_root[4096];
+
+static void ck(int ok, const char *name) {
+    if (ok) { g_pass++; printf("PASS\t%s\n", name); }
+    else { g_fail++; printf("FAIL\t%s\n", name); }
+}
+
+static int run_sh(const char *cwd, const char *cmd, int timeout_s, np_result *r) {
+    char *av[4];
+    char why[256];
+    av[0] = "sh"; av[1] = "-c"; av[2] = (char *)cmd; av[3] = 0;
+    mm_fill(r, sizeof *r, 0, sizeof *r);
+    if (np_run(av, cwd, 0, timeout_s, r, why, sizeof why) != 0) return -1;
+    return r->rc;
+}
+
+static long pos_of(const np_result *r, const char *lit) {
+    long ll = tx_len(lit, 512);
+    if (r->out && r->outn > 0) {
+        long p = tx_find(r->out, (long)r->outn, lit, ll);
+        if (p >= 0) return p;
+    }
+    return -1;
+}
+
+static int has(const np_result *r, const char *lit) {
+    long ll = tx_len(lit, 512);
+    if (r->out && r->outn > 0 && tx_find(r->out, (long)r->outn, lit, ll) >= 0) return 1;
+    if (r->err && r->errn > 0 && tx_find(r->err, (long)r->errn, lit, ll) >= 0) return 1;
+    return 0;
+}
+
+static int run_fd(const char *args, np_result *r) {
+    char cmd[4096];
+    if (cx_fmt(cmd, sizeof cmd, "sh '%s/unisacc.com' '%s/tools/freeze-day.cx' -- %s", g_root, g_root, args)) return -1;
+    return run_sh(g_root, cmd, 30, r);
+}
+
+int main(void) {
+    if (sy_realpath(".", g_root, sizeof g_root) < 0) return 2;
+    int sc = 0;
+    if (fsx_scratch(&sc, "check-fday-") != 0) return 2;
+    const char *dir = fsx_scratch_dir(sc);
+    if (!dir) return 2;
+
+    char repo[1024], rdp[1024], rdmis[1024], rdf[1024], shcmd[4096];
+    cx_fmt(repo, sizeof repo, "%s/synrepo", dir);
+    cx_fmt(rdp, sizeof rdp, "%s/rd-pass.sh", dir);
+    cx_fmt(rdmis, sizeof rdmis, "%s/rd-mismatch.sh", dir);
+    cx_fmt(rdf, sizeof rdf, "%s/rd-fail.sh", dir);
+
+    cx_fmt(shcmd, sizeof shcmd,
+        "set -e; mkdir -p '%s/release/evidence/9.9.9'; cd '%s'; "
+        "git init -q; git config user.name test; git config user.email t@local; "
+        "printf 'repo\\ttag\\tcommit\\tversion\\tworkflow\\tworkflow_ref\\tci_run_id\\tape\\n"
+        "org/repo\\tv9.9.8\\t11223344556677889900aabbccddeeff00112233\\t9.9.8\\tcandidate-native.yml\\tv9.9.8\\t1\\tunisacc.com\\n' > release/candidate.tsv; "
+        "printf '# Notes 9.9.9\\n' > release/notes-9.9.9.md; "
+        "printf 'rollback 9.9.9\\n' > release/rollback.txt; "
+        "printf 'decision 9.9.9\\n' > release/decision.txt; "
+        "git add -A; git commit -qm init; git branch -M main; "
+        "git checkout -qb v9.9.9; printf 'br\\n' > br.txt; git add br.txt; git commit -qm br; "
+        "git checkout -q main; printf '%%s\\t%%s\\n' \"$(git rev-parse --short v9.9.9)\" \"$(git rev-parse HEAD^{tree})\"",
+        repo, repo);
+    np_result r;
+    int rc = run_sh(g_root, shcmd, 20, &r);
+    char br_sha[64], head_tree[64];
+    br_sha[0] = head_tree[0] = 0;
+    if (rc == 0 && r.out && r.outn > 0) {
+        long ln = (long)r.outn;
+        while (ln > 0 && (r.out[ln - 1] == '\n' || r.out[ln - 1] == '\r')) ln--;
+        long tab = tx_chr(r.out, ln, '\t');
+        if (tab > 0 && tab + 1 < ln) {
+            long bl = tab < 63 ? tab : 63;
+            long tl = (ln - tab - 1) < 63 ? (ln - tab - 1) : 63;
+            mm_copy(br_sha, sizeof br_sha, r.out, bl); br_sha[bl] = 0;
+            mm_copy(head_tree, sizeof head_tree, r.out + tab + 1, tl); head_tree[tl] = 0;
+        }
+    }
+    np_free(&r);
+    if (rc != 0 || !br_sha[0] || !head_tree[0]) { fsx_scratch_drop(sc); return 2; }
+
+    char rd_pass_body[2048];
+    cx_fmt(rd_pass_body, sizeof rd_pass_body,
+        "#!/bin/sh\n"
+        "printf 'FR_ITEM\\tdevsvc-freeze\\tpass\\tok\\tdone\\tcc\\t-\\t-\\tPASS\\n'\n"
+        "printf 'FR_ITEM\\thardlink-trees\\tpass\\tok\\tdone\\tcc\\t-\\t-\\tPASS\\n'\n"
+        "printf 'FR_ITEM\\tdirty-freeze-domain\\tpass\\tok\\tdone\\tcc\\t-\\t-\\tPASS\\n'\n"
+        "printf 'FR_ITEM\\tcx-mode-drift\\tpass\\tok\\tdone\\tcc\\t-\\t-\\tPASS\\n'\n"
+        "printf 'FR_ITEM\\tmerge-s0-tree\\tpass\\ttree=%s\\tdone\\tcc\\t-\\t-\\tPASS\\n'\n"
+        "printf 'FR_ITEM\\tahead-origin\\tpass\\tok\\tdone\\tcc\\t-\\t-\\tPASS\\n'\n"
+        "printf 'FR_ITEM\\tchain-1rev\\tpass\\tok\\tdone\\tcc\\t-\\t-\\tPASS\\n'\n"
+        "printf 'FR_ITEM\\tverseq\\tpass\\tok\\tdone\\tcc\\t-\\t-\\tPASS\\n'\n"
+        "printf 'FR_ITEM\\tplan-freeze-at\\tpass\\tok\\tdone\\tcc\\t-\\t-\\tPASS\\n'\n"
+        "printf 'FR_ITEM\\trelease-prep-notes\\tpass\\tok\\tdone\\tcc\\t-\\t-\\tPASS\\n'\n"
+        "printf 'FR_ITEM\\trelease-prep-rollback\\tpass\\tok\\tdone\\tcc\\t-\\t-\\tPASS\\n'\n"
+        "printf 'FREEZE_READINESS\\tready=yes\\tblockers=0\\n'\n",
+        head_tree);
+    const char *rd_mis_body =
+        "#!/bin/sh\n"
+        "printf 'FR_ITEM\\tmerge-s0-tree\\tpass\\ttree=deadbeef1234\\tdone\\tcc\\t-\\t-\\tPASS\\n'\n"
+        "printf 'FREEZE_READINESS\\tready=yes\\tblockers=0\\n'\n";
+    const char *rd_fail_body =
+        "#!/bin/sh\n"
+        "printf 'FR_ITEM\\tdevsvc-freeze\\tfail\\tno-lock\\topen\\tcc\\t-\\t-\\tFAIL\\n'\n"
+        "printf 'FR_ITEM\\tdirty-freeze-domain\\tfail\\tdirty\\topen\\tcc\\t-\\t-\\tFAIL\\n'\n"
+        "printf 'FR_ITEM\\tverseq\\tfail\\tdrift\\topen\\tcc\\t-\\t-\\tFAIL\\n'\n"
+        "printf 'FR_ITEM\\trelease-prep-notes\\tfail\\ttbd\\topen\\tcc\\t-\\t-\\tFAIL\\n'\n"
+        "printf 'FREEZE_READINESS\\tready=no\\tblockers=4\\n'\n"
+        "exit 1\n";
+    sy_write_file(rdp, rd_pass_body, tx_len(rd_pass_body, sizeof rd_pass_body), 0700);
+    sy_write_file(rdmis, rd_mis_body, tx_len(rd_mis_body, 2048), 0700);
+    sy_write_file(rdf, rd_fail_body, tx_len(rd_fail_body, 2048), 0700);
+
+    /* (1) All-green plan on synthetic repo (HEAD^{tree} == merge_tree -> blocked=0) */
+    char args[2048];
+    cx_fmt(args, sizeof args, "plan --version 9.9.9 --branch v9.9.9 --repo '%s' --owner integ --readiness-bin '%s'", repo, rdp);
+    rc = run_fd(args, &r);
+    ck(rc == 0 && has(&r, "FREEZE_DAY\tplan\tsteps=24\tblocked=0"), "plan-all-green-steps24-blocked0");
+
+    /* (2) Live values from synthetic repo */
+    char want_sha[96], want_tree[96];
+    cx_fmt(want_sha, sizeof want_sha, "branch_sha=%s", br_sha);
+    cx_fmt(want_tree, sizeof want_tree, "merge_tree=%s", head_tree);
+    ck(has(&r, "prev_version=9.9.8") && has(&r, "prev_commit=11223344556677889900aabbccddeeff00112233") &&
+       has(&r, want_sha) && has(&r, want_tree) && has(&r, "owner=integ") &&
+       has(&r, "notes-9.9.9.md") && has(&r, "tools/prerun-inputs.cx") &&
+       has(&r, "tools/freeze-broadcast.cx") && has(&r, "tools/release-post.cx"),
+       "plan-values-from-synthetic-repo");
+
+    /* (3) Ordering of new steps including S0-devsvc-alive before S0-lock */
+    long p0 = pos_of(&r, "id=S0-preview\t");
+    long p1 = pos_of(&r, "id=S0-gates\t");
+    long p1b = pos_of(&r, "id=S0-devsvc-alive\t");
+    long p2 = pos_of(&r, "id=S0-lock\t");
+    long p3 = pos_of(&r, "id=S0-merge\t");
+    long p4 = pos_of(&r, "id=S0-verify-tree\t");
+    long p5 = pos_of(&r, "id=S0-freeze-slot\t");
+    long p6 = pos_of(&r, "id=S1-light\t");
+    long p7 = pos_of(&r, "id=S1-mid\t");
+    long p8 = pos_of(&r, "id=S1-chain\t");
+    long p9 = pos_of(&r, "id=S4b-renew-lock\t");
+    long p10 = pos_of(&r, "id=S5\t");
+    long p11 = pos_of(&r, "id=S8b-renew-lock\t");
+    long p12 = pos_of(&r, "id=S9\t");
+    ck(p0 >= 0 && p0 < p1 && p1 < p1b && p1b < p2 && p2 < p3 && p3 < p4 && p4 < p5 && p5 < p6 &&
+       p6 < p7 && p7 < p8 && p8 < p9 && p9 < p10 && p10 < p11 && p11 < p12,
+       "plan-new-steps-order");
+
+    /* (4) S3-run parameters, load guard, l0-posix2 and expected-unmeasured.tsv */
+    ck(has(&r, "--normal-jobs 8 --window-lanes 3") && has(&r, "--max-jobs 8 --window-lanes 3") &&
+       has(&r, "load1<8") && has(&r, "load1>12") && has(&r, "l0-posix2") && has(&r, "expected-unmeasured.tsv"),
+       "plan-s3-run-knobs-and-judge");
+    np_free(&r);
+
+    /* (5) Tree hash mismatch blocks S0-verify-tree */
+    cx_fmt(args, sizeof args, "plan --version 9.9.9 --branch v9.9.9 --repo '%s' --owner integ --readiness-bin '%s'", repo, rdmis);
+    rc = run_fd(args, &r);
+    ck(rc == 0 && has(&r, "FREEZE_DAY\tplan\tsteps=24\tblocked=1") &&
+       has(&r, "id=S0-verify-tree\twho=integrator\tbudget_s=15\tgate=BLOCKED\treason=head-tree-mismatch"),
+       "plan-head-tree-mismatch-blocked");
+    np_free(&r);
+
+    /* (6) Blocked plan via readiness failures */
+    cx_fmt(args, sizeof args, "plan --version 9.9.9 --branch v9.9.9 --repo '%s' --owner integ --readiness-bin '%s'", repo, rdf);
+    rc = run_fd(args, &r);
+    ck(rc == 0 && has(&r, "FREEZE_DAY\tplan\tsteps=24\tblocked=5") &&
+       has(&r, "id=S0-lock\twho=integrator\tbudget_s=60\tgate=BLOCKED\treason=devsvc-freeze") &&
+       has(&r, "id=S0-merge\twho=integrator\tbudget_s=300\tgate=BLOCKED\treason=dirty-freeze-domain") &&
+       has(&r, "id=S0-freeze-slot\twho=integrator\tbudget_s=120\tgate=BLOCKED\treason=verseq") &&
+       has(&r, "id=S1-light\twho=integrator\tbudget_s=45\tgate=BLOCKED\treason=verseq") &&
+       has(&r, "id=S3c\twho=docs\tbudget_s=600\tgate=BLOCKED\treason=release-prep-notes"),
+       "plan-readiness-blocks-exact-steps");
+    np_free(&r);
+
+    /* (7) Missing branch and missing notes template */
+    char notesp[1024];
+    cx_fmt(notesp, sizeof notesp, "%s/release/notes-9.9.9.md", repo);
+    sy_unlink(notesp);
+    cx_fmt(args, sizeof args, "plan --version 9.9.9 --branch v-no-such --repo '%s' --no-readiness", repo);
+    rc = run_fd(args, &r);
+    ck(rc == 0 && has(&r, "FREEZE_DAY\tplan\tsteps=24\tblocked=8") &&
+       has(&r, "reason=branch-missing") && has(&r, "reason=missing-notes-template"),
+       "plan-missing-branch-and-template-blocked");
+    np_free(&r);
+
+    /* (8) Read-only guarantee: repo HEAD and branch unchanged */
+    cx_fmt(shcmd, sizeof shcmd, "git -C '%s' rev-parse --short v9.9.9", repo);
+    rc = run_sh(g_root, shcmd, 10, &r);
+    ck(rc == 0 && has(&r, br_sha), "plan-readonly-branch-unchanged");
+    np_free(&r);
+
+    /* (9..15) check subcommand: PASS / FAIL / S0-verify-tree PASS / S10 PASS / unknown step / missing log / refusals */
+    char log_ok[1024], log_bad[1024], log_vt[1024], log_s10[1024], log_abs[1024];
+    cx_fmt(log_ok, sizeof log_ok, "%s/s0.ok.log", dir);
+    cx_fmt(log_bad, sizeof log_bad, "%s/s0.bad.log", dir);
+    cx_fmt(log_vt, sizeof log_vt, "%s/vt.ok.log", dir);
+    cx_fmt(log_s10, sizeof log_s10, "%s/s10.ok.log", dir);
+    cx_fmt(log_abs, sizeof log_abs, "%s/no-such.log", dir);
+    sy_write_file(log_ok, "step output\nGIT_COMMIT\trc=0\tcommit=abc\n", 38, 0600);
+    sy_write_file(log_bad, "step output\nGIT_COMMIT\trc=1\treason=blocked\n", 43, 0600);
+    sy_write_file(log_vt, "MERGE_TREE_MATCH 3888236d\n", 26, 0600);
+    sy_write_file(log_s10, "POST_STEP\t1\tmark\tOK\nRELEASE_POST\tstatus=DONE\n", 45, 0600);
+
+    cx_fmt(args, sizeof args, "check --step S0-merge --log '%s'", log_ok);
+    rc = run_fd(args, &r);
+    ck(rc == 0 && has(&r, "FREEZE_DAY\tcheck\tstep=S0-merge\tstatus=PASS"), "check-s0-merge-pass");
+    np_free(&r);
+
+    cx_fmt(args, sizeof args, "check --step S0-merge --log '%s'", log_bad);
+    rc = run_fd(args, &r);
+    ck(rc == 1 && has(&r, "FREEZE_DAY\tcheck\tstep=S0-merge\tstatus=FAIL"), "check-s0-merge-fail");
+    np_free(&r);
+
+    cx_fmt(args, sizeof args, "check --step S0-verify-tree --log '%s'", log_vt);
+    rc = run_fd(args, &r);
+    ck(rc == 0 && has(&r, "FREEZE_DAY\tcheck\tstep=S0-verify-tree\tstatus=PASS"), "check-s0-verify-tree-pass");
+    np_free(&r);
+
+    cx_fmt(args, sizeof args, "check --step S10 --log '%s'", log_s10);
+    rc = run_fd(args, &r);
+    ck(rc == 0 && has(&r, "FREEZE_DAY\tcheck\tstep=S10\tstatus=PASS"), "check-s10-pass");
+    np_free(&r);
+
+    cx_fmt(args, sizeof args, "check --step NO-STEP --log '%s'", log_ok);
+    rc = run_fd(args, &r);
+    ck(rc == 2 && has(&r, "REFUSE"), "check-unknown-step-refused");
+    np_free(&r);
+
+    cx_fmt(args, sizeof args, "check --step S1-light --log '%s'", log_abs);
+    rc = run_fd(args, &r);
+    ck(rc == 2 && has(&r, "REFUSE"), "check-missing-log-refused");
+    np_free(&r);
+
+    rc = run_fd("plan", &r);
+    ck(rc == 2 && has(&r, "REFUSE"), "plan-missing-version-refused");
+    np_free(&r);
+
+    rc = run_fd("bogus", &r);
+    ck(rc == 2 && has(&r, "REFUSE"), "unknown-subcommand-refused");
+    np_free(&r);
+
+    fsx_scratch_drop(sc);
+    printf("CHECK_FREEZE_DAY\tpass=%d\tfail=%d\n", g_pass, g_fail);
+    return g_fail ? 1 : 0;
+}

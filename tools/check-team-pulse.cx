@@ -1,7 +1,16 @@
 /* tools/check-team-pulse.cx -- fixture tests for tools/team-pulse.cx (no real tmux).
  *
  * Real-shaped captures: Codex Ask/Working, omp ╰─/spinner, Cursor Auto/Running,
- * Claude ❯ idle, FILTERED curly+care, exclusive write_prefix "-", analysis IDLE_LONG.
+ * Claude ❯ idle, FILTERED curly+care, exclusive write_prefix "-", analysis IDLE_LONG,
+ * Gemini agy ● Bash duration WORKING, 回报发 cc WAITING_CC footer,
+ * --freeze-watch synth repo: trailer match CLEAN / wrong or missing VIOLATION /
+ *   outside-domain no trailer quiet / dirty / INACTIVE; mutants must red.
+ *   Forged trailer is not git-prevented (documented); fixtures cover mismatch.
+ * Fixture root: mktemp -d only; empty path refused. Before/after fixture,
+ * real-repo git status --porcelain and git diff --summary must match
+ * (ck fixture-real-repo-status-unchanged = 不移动非自己路径).
+ * Ratchet hygiene: never mv/cp/rsync/stash/clean foreign untracked; use
+ * git archive HEAD into a private dir or path-limited private tree.
  * Ends with CHECK_TEAM_PULSE. */
 #pragma unisa use cxlib.ckassert
 #pragma unisa use cxlib.ckrun
@@ -25,7 +34,7 @@ static int run_tp(const char *extra) {
 }
 
 static int write_fixture(void) {
-    /* Real capture shapes from tmux 2026-11-23 */
+    /* Real capture shapes from tmux 2026-11-23 (incl. live agyneon/agy-flow tails) */
     static const char body[] =
         "=== PANE w-codex-idle ===\n"
         "last reply\n"
@@ -38,7 +47,7 @@ static int write_fixture(void) {
         "\xe2\x95\xb0\xe2\x94\x80\n"
         "\xe2\x96\xb6\xe2\x94\x80\xe2\x94\x80\xe2\x94\x80" "8%\n"
         "=== PANE w-omp-done ===\n"
-        "当前请求已仅回执结束\n"
+        "\xe5\xbd\x93\xe5\x89\x8d\xe8\xaf\xb7\xe6\xb1\x82\xe5\xb7\xb2\xe4\xbb\x85\xe5\x9b\x9e\xe6\x89\xa7\xe7\xbb\x93\xe6\x9d\x9f\n"
         "\xe2\x95\xb0\xe2\x94\x80\n"
         "=== PANE w-omp-busy ===\n"
         "\xe2\xa0\xbb 17m\n"
@@ -59,22 +68,70 @@ static int write_fixture(void) {
         "=== PANE w-anal ===\n"
         "\xe2\x80\xba Ask Codex to do anything\n"
         "=== PANE w-none ===\n"
-        "random noise without markers\n";
+        "random noise without markers\n"
+        /* agy: long bash, footer only auto·model (no esc to cancel) -> WORKING */
+        "=== PANE w-agy-busy ===\n"
+        "\xe2\x97\x8f Bash(sh ./unisacc.com tools/check-precommit-derive.cx) 2m 14s\n"
+        "  running in background\n"
+        ">\n"
+        "auto \xc2\xb7 Gemini 4 Neon \xc2\xb7 medium\n"
+        /* live-shaped: spinner + Running command + esc to cancel */
+        "=== PANE w-agy-run ===\n"
+        "\xe2\x97\x8f Edited 1 file (check-release-prep.cx)\n"
+        "\xe2\x97\x8b Running (CC=/usr/bin/cc ./tools/bound 55 sh ./unisacc.com tools/check-x.cx) (ctrl+o to expand)\n"
+        "\xe2\xa0\xbb  Running command...\n"
+        ">\n"
+        "esc to cancel                                                                                                                       auto \xc2\xb7 Gemini 4 Argon \xc2\xb7 high\n"
+        /* true idle agy */
+        "=== PANE w-agy-idle ===\n"
+        "done\n"
+        ">\n"
+        "auto \xc2\xb7 Gemini 4 Neon \xc2\xb7 medium\n"
+        /* wait for cc */
+        "=== PANE w-agy-wait ===\n"
+        "\xe6\x94\xb9\xe5\xae\x8c\xe6\x8f\x90\xe4\xba\xa4\xef\xbc\x8c\xe8\xb4\xb4\xe5\x8e\x9f\xe8\xa1\x8c\xe3\x80\x82\xe6\x8a\xa5\xe5\x91\x8a\xe5\x8f\x91 cc\xe3\x80\x82\n"
+        "  [ReplyCmd] bin/mux envelope \"1:cc\" \"<title>\" \"<body>\"\n"
+        ">\n"
+        "auto \xc2\xb7 Gemini 4 Neon \xc2\xb7 medium\n";
     return sy_write_file(fx, body, (int64_t)(sizeof body - 1), 0600);
 }
 
+static int snap_repo(const char *label, char *buf, int cap) {
+    char cmd[900];
+    if (!cwd[0]) return -1;
+    if (cx_fmt(cmd, sizeof cmd,
+        "git -C '%s' status --porcelain; echo '---'; git -C '%s' diff --summary",
+        cwd, cwd)) return -1;
+    buf[0] = 0;
+    if (ckk_sh_t(label, cmd, buf, cap, 30) != 0) return -1;
+    return 0;
+}
+
 int main(void) {
-    char cmd[4200]; int rc; long now;
-    const char *td = sy_env("TMPDIR");
-    if (!td || !td[0]) td = "/tmp";
+    char cmd[5200], before[1 << 16], after[1 << 16]; int rc; long now;
     if (ckk_sh_t("check-team-pulse", "pwd", out, (int)sizeof out, 20) != 0) return 2;
     cx_fmt(cwd, sizeof cwd, "%s", out);
     { long n = tx_len(cwd, sizeof cwd); while (n > 0 && cwd[n - 1] == '\n') cwd[--n] = 0; }
+    if (!cwd[0]) { fprintf(stderr, "check-team-pulse: empty cwd refused\n"); return 2; }
+    /* Real checkout must not be the fixture root; snap before any write. */
+    if (snap_repo("fw-snap-before", before, (int)sizeof before) != 0) return 2;
     now = sy_wall_s();
-    if (cx_fmt(root, sizeof root, "%s/tp-check-%ld", td, now % 1000000000)) return 2;
+    /* mktemp -d under TMPDIR or /tmp; refuse empty path */
+    {
+        char mk[200]; const char *td = sy_env("TMPDIR");
+        if (td && !td[0]) { fprintf(stderr, "check-team-pulse: empty TMPDIR refused\n"); return 2; }
+        if (cx_fmt(mk, sizeof mk, "mktemp -d '%s/tp-check-XXXXXX'", (td && td[0]) ? td : "/tmp")) return 2;
+        out[0] = 0;
+        if (ckk_sh_t("check-team-pulse", mk, out, (int)sizeof out, 10) != 0 || !out[0]) {
+            fprintf(stderr, "check-team-pulse: mktemp failed\n"); return 2;
+        }
+        { long n = tx_len(out, sizeof out); while (n > 0 && out[n - 1] == '\n') out[--n] = 0; }
+        if (!out[0] || out[0] != '/') { fprintf(stderr, "check-team-pulse: fixture root not absolute\n"); return 2; }
+        if (cx_fmt(root, sizeof root, "%s", out)) return 2;
+    }
+    if (!root[0]) { fprintf(stderr, "check-team-pulse: empty fixture root refused\n"); return 2; }
     if (cx_fmt(fx, sizeof fx, "%s/fixture.txt", root) || cx_fmt(tab, sizeof tab, "%s/wins.tsv", root)) return 2;
-    sy_remove_all(root);
-    if (sy_mkdir_all(root, 0700)) return 2;
+    if (!fx[0] || !tab[0]) { fprintf(stderr, "check-team-pulse: empty fixture path refused\n"); return 2; }
 
     if (cx_fmt(cmd, sizeof cmd,
         "printf 'window\\tmodel\\tlane\\twrite_prefix\\tkind\\tgit_ref\\n"
@@ -88,11 +145,15 @@ int main(void) {
         "w-claude\\tdeepseek-eco\\tmain\\tcx/sys/proc\\tcommit\\tv0.0.96\\n"
         "w-filt\\tcursor-auto\\tmain\\ttools/team-pulse.cx\\tcommit\\t-\\n"
         "w-anal\\tgpt-sol\\tmain\\ttools/team-pulse.cx\\tanalysis\\t-\\n"
-        "w-none\\tsonnet\\tmain\\ttools/team-pulse.cx\\tcommit\\t-\\n' > '%s'", tab)) return 2;
+        "w-none\\tsonnet\\tmain\\ttools/team-pulse.cx\\tcommit\\t-\\n"
+        "w-agy-busy\\tgemini-neon\\tmain\\ttools/team-pulse.cx\\tcommit\\t-\\n"
+        "w-agy-run\\tgemini-argon\\tmain\\ttools/team-pulse.cx\\tcommit\\t-\\n"
+        "w-agy-idle\\tgemini-neon\\tmain\\ttools/team-pulse.cx\\tcommit\\t-\\n"
+        "w-agy-wait\\tgemini-neon\\tmain\\ttools/team-pulse.cx\\tcommit\\t-\\n' > '%s'", tab)) return 2;
     ck(ckk_sh_t("check-team-pulse", cmd, out, (int)sizeof out, 10) == 0, "seed-table");
     ck(write_fixture() == 0, "seed-fixture");
 
-    rc = run_tp("--stall-min 99999");
+    rc = run_tp("--stall-min 99999 --wait-cc-min 99999");
     ck(rc == 0, "run-rc");
     ck(ckk_has(out, (int)sizeof out, "PULSE\tw-codex-idle\tIDLE\tleft=11(codex-left)\t-\t"), "codex-idle-ask");
     ck(ckk_has(out, (int)sizeof out, "PULSE\tw-codex-busy\tWORKING\tleft=40(codex-left)\t-\t"), "codex-busy-working");
@@ -105,6 +166,10 @@ int main(void) {
     ck(ckk_has(out, (int)sizeof out, "PULSE\tw-filt\tFILTERED\t"), "filtered-curly");
     ck(ckk_has(out, (int)sizeof out, "PULSE\tw-anal\tIDLE\t-\t-\t"), "anal-no-commit");
     ck(ckk_has(out, (int)sizeof out, "PULSE\tw-none\tUNKNOWN\t"), "unknown-only-noise");
+    ck(ckk_has(out, (int)sizeof out, "PULSE\tw-agy-busy\tWORKING\t"), "agy-bash-duration-working");
+    ck(ckk_has(out, (int)sizeof out, "PULSE\tw-agy-run\tWORKING\t"), "agy-running-command");
+    ck(ckk_has(out, (int)sizeof out, "PULSE\tw-agy-idle\tIDLE\t"), "agy-true-idle");
+    ck(ckk_has(out, (int)sizeof out, "PULSE\tw-agy-wait\tIDLE\t"), "agy-wait-still-idle-when-fresh");
     {
         const char *p = out; int csr_low = 0;
         while ((p = strstr(p, "PULSE\tw-csr\t"))) {
@@ -116,20 +181,176 @@ int main(void) {
     }
 
     {
-        char extra[220];
-        if (cx_fmt(extra, sizeof extra, "--stall-min 1 --now %ld", now + 86400 * 365)) return 2;
+        char extra[320];
+        if (cx_fmt(extra, sizeof extra, "--stall-min 1 --wait-cc-min 1 --now %ld", now + 86400 * 365)) return 2;
         rc = run_tp(extra);
         ck(rc == 0 && ckk_has(out, (int)sizeof out, "PULSE\tw-omp-idle\tIDLE\t") &&
            ckk_has(out, (int)sizeof out, "STALLED"), "stalled-commit-idle");
         ck(rc == 0 && ckk_has(out, (int)sizeof out, "PULSE\tw-anal\tIDLE\t") &&
            ckk_has(out, (int)sizeof out, "IDLE_LONG"), "idle-long-analysis");
-        if (cx_fmt(extra, sizeof extra, "--stall-min 1 --now %ld --mutant-no-stall", now + 86400 * 365)) return 2;
+        ck(rc == 0 && ckk_has(out, (int)sizeof out, "PULSE\tw-agy-wait\tWAITING_CC\t"), "waiting-cc-status");
+        ck(rc == 0 && ckk_has(out, (int)sizeof out, "WAITING_CC\tw-agy-wait"), "waiting-cc-footer");
+        ck(rc == 0 && ckk_has(out, (int)sizeof out, "waiting_cc=1"), "waiting-cc-summary");
+        /* busy bash must not become STALLED while WORKING */
+        ck(rc == 0 && ckk_has(out, (int)sizeof out, "PULSE\tw-agy-busy\tWORKING\t"), "agy-busy-not-stalled");
+        if (cx_fmt(extra, sizeof extra, "--stall-min 1 --wait-cc-min 1 --now %ld --mutant-no-stall", now + 86400 * 365)) return 2;
         rc = run_tp(extra);
         ck(rc == 0 && !ckk_has(out, (int)sizeof out, "STALLED") &&
            !ckk_has(out, (int)sizeof out, "IDLE_LONG"), "mutant-no-stall");
+        if (cx_fmt(extra, sizeof extra, "--stall-min 99999 --wait-cc-min 99999 --mutant-no-running-shell")) return 2;
+        rc = run_tp(extra);
+        ck(rc == 0 && !ckk_has(out, (int)sizeof out, "PULSE\tw-agy-busy\tWORKING\t"), "mutant-no-running-shell");
+        if (cx_fmt(extra, sizeof extra, "--stall-min 1 --wait-cc-min 1 --now %ld --mutant-no-wait-cc", now + 86400 * 365)) return 2;
+        rc = run_tp(extra);
+        ck(rc == 0 && !ckk_has(out, (int)sizeof out, "PULSE\tw-agy-wait\tWAITING_CC\t") &&
+           !ckk_has(out, (int)sizeof out, "WAITING_CC\tw-agy-wait"), "mutant-no-wait-cc");
+    }
+
+    /* ---- freeze-watch synthetic repo (trailer X-Unisacc-Window; author always wanjo) ---- */
+    {
+        char repo[900], cmd[5200], extra[400]; long dl;
+        char hl_empty[900], hl_hit[900], hl_old[900];
+        if (!root[0]) { fprintf(stderr, "check-team-pulse: empty root before fw-repo\n"); return 2; }
+        if (cx_fmt(repo, sizeof repo, "%s/fw-repo", root)) return 2;
+        if (!repo[0]) { fprintf(stderr, "check-team-pulse: empty fw-repo path refused\n"); return 2; }
+        if (cx_fmt(hl_empty, sizeof hl_empty, "%s/hl-empty", root)) return 2;
+        if (cx_fmt(hl_hit, sizeof hl_hit, "%s/hl-hit", root)) return 2;
+        if (cx_fmt(hl_old, sizeof hl_old, "%s/hl-old", root)) return 2;
+        if (cx_fmt(cmd, sizeof cmd, "mkdir -p '%s'", hl_empty)) return 2;
+        ck(ckk_sh_t("check-team-pulse", cmd, out, (int)sizeof out, 10) == 0, "fw-hl-empty-mkdir");
+        dl = now + 86400; /* active freeze */
+        /* base: wanjo author, freeze owner=cc; domain=src cx; tools/ outside */
+        if (cx_fmt(cmd, sizeof cmd,
+            "mkdir -p '%s/build' '%s/src' '%s/cx' '%s/tools' && "
+            "cd '%s' && git init -q && git config user.name wanjo && git config user.email wanjo@t && "
+            "printf '# candidate_sid\\tbase_commit\\towner\\tdeadline_epoch_s\\tpaths\\n"
+            "FW-TEST\\tabcdef\\tcc\\t%ld\\tsrc cx\\n' > build/freeze.tsv && "
+            "printf 'ok\\n' > tools/keep.txt && git add tools/keep.txt build/freeze.tsv && "
+            "git commit -q -m base",
+            repo, repo, repo, repo, repo, dl)) return 2;
+        ck(ckk_sh_t("check-team-pulse", cmd, out, (int)sizeof out, 40) == 0, "fw-seed-base");
+
+        /* (1) domain commit with matching trailer -> CLEAN (no dirty) */
+        if (cx_fmt(cmd, sizeof cmd,
+            "cd '%s' && printf 'ok\\n' > src/ok.c && git add src/ok.c && "
+            "git commit -q -m \"owner-ok\n\nX-Unisacc-Window: cc\n\" && "
+            "rm -f src/leak.c 2>/dev/null; true", repo)) return 2;
+        ck(ckk_sh_t("check-team-pulse", cmd, out, (int)sizeof out, 30) == 0, "fw-seed-trailer-ok");
+        if (cx_fmt(extra, sizeof extra, "--freeze-watch --root '%s' --since-min 60 --now %ld --hardlink-tmp '%s'", repo, now, hl_empty)) return 2;
+        rc = run_tp(extra);
+        ck(rc == 0 && ckk_has(out, (int)sizeof out, "FREEZE_WATCH\tCLEAN\t") &&
+           ckk_has(out, (int)sizeof out, "FREEZE_WATCH\tHARDLINK_TREES\t0\t0"), "fw-trailer-match-clean");
+
+        /* (2) domain commit with other window trailer -> VIOLATION author=agyneon */
+        if (cx_fmt(cmd, sizeof cmd,
+            "cd '%s' && printf 'x\\n' > cx/other.c && git add cx/other.c && "
+            "git commit -q -m \"other-win\n\nX-Unisacc-Window: agyneon\n\"", repo)) return 2;
+        ck(ckk_sh_t("check-team-pulse", cmd, out, (int)sizeof out, 30) == 0, "fw-seed-trailer-other");
+        if (cx_fmt(extra, sizeof extra, "--freeze-watch --root '%s' --since-min 60 --now %ld --hardlink-tmp '%s'", repo, now, hl_empty)) return 2;
+        rc = run_tp(extra);
+        ck(ckk_has(out, (int)sizeof out, "FREEZE_WATCH\tVIOLATION\t") &&
+           ckk_has(out, (int)sizeof out, "path=cx/other.c") &&
+           ckk_has(out, (int)sizeof out, "kind=commit") &&
+           ckk_has(out, (int)sizeof out, "author=agyneon"), "fw-trailer-other-violation");
+        ck(rc != 0, "fw-trailer-other-rc");
+
+        /* (3) drop other; domain commit with NO trailer (raw git) -> VIOLATION author=- */
+        if (cx_fmt(cmd, sizeof cmd,
+            "cd '%s' && git reset -q --hard HEAD~1 && "
+            "printf 'y\\n' > src/raw.c && git add src/raw.c && "
+            "git commit -q -m raw-no-trailer", repo)) return 2;
+        ck(ckk_sh_t("check-team-pulse", cmd, out, (int)sizeof out, 30) == 0, "fw-seed-no-trailer");
+        if (cx_fmt(extra, sizeof extra, "--freeze-watch --root '%s' --since-min 60 --now %ld --hardlink-tmp '%s'", repo, now, hl_empty)) return 2;
+        rc = run_tp(extra);
+        ck(ckk_has(out, (int)sizeof out, "path=src/raw.c") &&
+           ckk_has(out, (int)sizeof out, "kind=commit") &&
+           ckk_has(out, (int)sizeof out, "author=-"), "fw-no-trailer-domain-violation");
+        ck(rc != 0, "fw-no-trailer-rc");
+
+        /* (4) outside domain (tools/) no trailer: reset raw, commit tools only -> CLEAN */
+        if (cx_fmt(cmd, sizeof cmd,
+            "cd '%s' && git reset -q --hard HEAD~1 && "
+            "printf 't\\n' > tools/out.txt && git add tools/out.txt && "
+            "git commit -q -m tools-no-trailer", repo)) return 2;
+        ck(ckk_sh_t("check-team-pulse", cmd, out, (int)sizeof out, 30) == 0, "fw-seed-outside");
+        if (cx_fmt(extra, sizeof extra, "--freeze-watch --root '%s' --since-min 60 --now %ld --hardlink-tmp '%s'", repo, now, hl_empty)) return 2;
+        rc = run_tp(extra);
+        ck(rc == 0 && ckk_has(out, (int)sizeof out, "FREEZE_WATCH\tCLEAN\t") &&
+           !ckk_has(out, (int)sizeof out, "path=tools/out.txt"), "fw-outside-domain-quiet");
+
+        /* (5) dirty domain file */
+        if (cx_fmt(cmd, sizeof cmd,
+            "cd '%s' && printf 'bad\\n' > src/leak.c", repo)) return 2;
+        ck(ckk_sh_t("check-team-pulse", cmd, out, (int)sizeof out, 10) == 0, "fw-seed-dirty");
+        if (cx_fmt(extra, sizeof extra, "--freeze-watch --root '%s' --since-min 60 --now %ld --hardlink-tmp '%s'", repo, now, hl_empty)) return 2;
+        rc = run_tp(extra);
+        ck(ckk_has(out, (int)sizeof out, "path=src/leak.c") &&
+           ckk_has(out, (int)sizeof out, "kind=dirty"), "fw-dirty-violation");
+        ck(rc != 0, "fw-dirty-rc");
+
+        /* (6) inactive freeze */
+        if (cx_fmt(cmd, sizeof cmd,
+            "cd '%s' && rm -f src/leak.c && printf 'FW-TEST\\tabcdef\\tcc\\t1\\tsrc\\n' > build/freeze.tsv",
+            repo)) return 2;
+        ck(ckk_sh_t("check-team-pulse", cmd, out, (int)sizeof out, 10) == 0, "fw-inactive-seed");
+        if (cx_fmt(extra, sizeof extra, "--freeze-watch --root '%s' --now %ld --hardlink-tmp '%s'", repo, now, hl_empty)) return 2;
+        rc = run_tp(extra);
+        ck(rc == 0 && ckk_has(out, (int)sizeof out, "FREEZE_WATCH\tINACTIVE"), "fw-inactive");
+
+        /* (7) mutant suppresses violations */
+        if (cx_fmt(cmd, sizeof cmd,
+            "cd '%s' && printf 'FW-TEST\\tabcdef\\tcc\\t%ld\\tsrc\\n' > build/freeze.tsv && "
+            "printf 'bad\\n' > src/leak2.c", repo, dl)) return 2;
+        ck(ckk_sh_t("check-team-pulse", cmd, out, (int)sizeof out, 10) == 0, "fw-mutant-seed");
+        if (cx_fmt(extra, sizeof extra,
+            "--freeze-watch --root '%s' --since-min 60 --now %ld --mutant-no-freeze-watch --hardlink-tmp '%s'",
+            repo, now, hl_empty)) return 2;
+        rc = run_tp(extra);
+        ck(rc == 0 && ckk_has(out, (int)sizeof out, "FREEZE_WATCH\tCLEAN\t") &&
+           !ckk_has(out, (int)sizeof out, "VIOLATION"), "mutant-no-freeze-watch");
+        if (cx_fmt(extra, sizeof extra, "--freeze-watch --root '%s' --since-min 60 --now %ld --hardlink-tmp '%s'",
+            repo, now, hl_empty)) return 2;
+        rc = run_tp(extra);
+        ck(rc != 0 && ckk_has(out, (int)sizeof out, "path=src/leak2.c"), "fw-mutant-contrast-red");
+
+        /* (8) hardlink trees: empty -> 0; synth hit age0 no VIOLATION; old age>60 VIOLATION */
+        if (cx_fmt(cmd, sizeof cmd,
+            "cd '%s' && rm -f src/leak2.c && "
+            "printf 'FW-TEST\tabcdef\tcc\t%ld\tsrc\n' > build/freeze.tsv", repo, dl)) return 2;
+        ck(ckk_sh_t("check-team-pulse", cmd, out, (int)sizeof out, 10) == 0, "fw-hl-clean-seed");
+        if (cx_fmt(extra, sizeof extra, "--freeze-watch --root '%s' --since-min 60 --now %ld --hardlink-tmp '%s'",
+            repo, now, hl_empty)) return 2;
+        rc = run_tp(extra);
+        ck(rc == 0 && ckk_has(out, (int)sizeof out, "FREEZE_WATCH\tHARDLINK_TREES\t0\t0") &&
+           ckk_has(out, (int)sizeof out, "FREEZE_WATCH\tCLEAN\t"), "fw-hardlink-zero");
+
+        if (cx_fmt(cmd, sizeof cmd,
+            "mkdir -p '%s/t1' && printf 'x\n' > '%s/t1/a.cx' && ln '%s/t1/a.cx' '%s/t1/b.cx'",
+            hl_hit, hl_hit, hl_hit, hl_hit)) return 2;
+        ck(ckk_sh_t("check-team-pulse", cmd, out, (int)sizeof out, 10) == 0, "fw-hl-hit-seed");
+        if (cx_fmt(extra, sizeof extra, "--freeze-watch --root '%s' --since-min 60 --now %ld --hardlink-tmp '%s'",
+            repo, now, hl_hit)) return 2;
+        rc = run_tp(extra);
+        ck(rc == 0 && ckk_has(out, (int)sizeof out, "FREEZE_WATCH\tHARDLINK_TREES\t1\t") &&
+           ckk_has(out, (int)sizeof out, "HARDLINK_DIR\t") &&
+           !ckk_has(out, (int)sizeof out, "kind=hardlink-trees"), "fw-hardlink-hit-young");
+
+        if (cx_fmt(cmd, sizeof cmd,
+            "mkdir -p '%s/t1' && printf 'x\n' > '%s/t1/a.cx' && ln '%s/t1/a.cx' '%s/t1/b.cx' && "
+            "touch -d '@%ld' '%s/t1'",
+            hl_old, hl_old, hl_old, hl_old, now - 7200, hl_old)) return 2;
+        ck(ckk_sh_t("check-team-pulse", cmd, out, (int)sizeof out, 10) == 0, "fw-hl-old-seed");
+        if (cx_fmt(extra, sizeof extra, "--freeze-watch --root '%s' --since-min 60 --now %ld --hardlink-tmp '%s'",
+            repo, now, hl_old)) return 2;
+        rc = run_tp(extra);
+        ck(rc != 0 && ckk_has(out, (int)sizeof out, "FREEZE_WATCH\tHARDLINK_TREES\t1\t") &&
+           ckk_has(out, (int)sizeof out, "kind=hardlink-trees") &&
+           ckk_has(out, (int)sizeof out, "FREEZE_WATCH\tVIOLATION\t"), "fw-hardlink-old-violation");
     }
 
     sy_remove_all(root);
+    if (snap_repo("fw-snap-after", after, (int)sizeof after) != 0) return 2;
+    ck(tx_eqz(before, after), "fixture-real-repo-status-unchanged");
     {
         int failed = ck_failures();
         int total = ck_assertions();

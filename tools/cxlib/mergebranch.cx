@@ -1,0 +1,43 @@
+#pragma unisa module mergebranch
+/* Branch patterns of the merge tables (tests/merge-rules.tsv): shared by tools/merge-version.cx and tools/premerge-union.cx so that one table says
+ * which version line a row (and a trap file) belongs to.
+ *   "*"          every branch;  "feat*" prefix;  "*x" suffix;  "NAME" exactly
+ *   ">=v0.0.96"  that version line and every newer one (compared as numbers: v0.0.100 is newer than v0.0.96);
+ *                a branch name that is not vA.B.C (feat2, other) matches, because a trap must not be switched off by an odd name
+ * Not named mb_: the cx_ and sy_ prefixes belong to the prelude; mbr_ is this module's. */
+
+int mbr_glob(const char *pat, const char *s) {
+    size_t pl = strlen(pat), sl = strlen(s);
+    if (!strcmp(pat, "*")) return 1;
+    if (pl && pat[pl - 1] == '*') return sl >= pl - 1 && !memcmp(s, pat, pl - 1);
+    if (pat[0] == '*') return sl >= pl - 1 && !memcmp(s + sl - (pl - 1), pat + 1, pl - 1);
+    return !strcmp(pat, s);
+}
+
+/* "vA.B.C" -> 1 and v[0..2]; anything else (a fourth part, a missing digit, a suffix) -> 0 */
+static int mbr_ver(const char *s, long v[3]) {
+    if (s[0] != 'v') return 0;
+    s++;
+    for (int i = 0; i < 3; i++) {
+        long x = 0;
+        int d = 0;
+        for (; *s >= '0' && *s <= '9'; s++) { x = x * 10 + (*s - '0'); d++; }
+        if (d == 0) return 0;
+        v[i] = x;
+        if (i < 2) { if (*s != '.') return 0; s++; }
+    }
+    return *s == 0;
+}
+
+int mbr_match(const char *pat, const char *branch) {
+    if (pat[0] == '>' && pat[1] == '=') {
+        long lo[3], b[3];
+        if (!mbr_ver(pat + 2, lo)) return 0;   /* a malformed threshold matches nothing, so the row cannot silently widen */
+        if (!mbr_ver(branch, b)) return 1;
+        for (int i = 0; i < 3; i++) {
+            if (b[i] != lo[i]) return b[i] > lo[i];
+        }
+        return 1;
+    }
+    return mbr_glob(pat, branch);
+}

@@ -1,6 +1,17 @@
 /* tools/ratchets.cx -- run sixteen repo ratchets and show only what is wrong.
  *
- *   sh ./unisacc.com tools/ratchets.cx [-- --only PATH-PREFIX]
+ *   sh ./unisacc.com tools/ratchets.cx [-- --only PATH-PREFIX | --only-paths PATH-PREFIX]
+ *   sh ./unisacc.com tools/ratchets.cx -- --shard K/N     ratchet i (0-based, in the order below) runs when i % N == K-1;
+ *       the others print `ok: skipped (not in shard K/N)` and count as skipped. Every shard K=1..N is its own call, so a
+ *       slow tree can be checked in pieces of at most 55 s each; sum the ok= and fail= of the N RATCHETS lines (skipped
+ *       adds up to (N-1) times the total) to get the whole run's ok= and fail=.
+ *
+ * Shared-checkout discipline (2026-11-23): never mv/cp/rsync/stash/clean another
+ * window's untracked files to silence a ratchet. Prefer git archive HEAD into a
+ * private dir, or --only / --only-paths on your own prefix. When every offender is
+ * an untracked .cx with no baseline row, prints
+ *   RATCHET_HINT<TAB>foreign-untracked<TAB>这些未跟踪文件不属于你,等所有者处理,或用 --only-paths 限定<TAB>paths...
+ * (no move option).
  *
  * Starts tests/cxraw.cx, tests/cxinclude.cx, tests/cxapis.cx, tests/cxtrunc.cx, tests/cxlibc.cx, tests/cxplatform.cx
  * (platform #if branches and raw syscalls outside L0), tests/srcshape.cx (src/ lines, longest block and `if`
@@ -127,6 +138,55 @@ static int offending(const char *l, long n, const char *only) {
     return 1;
 }
 
+/* 1 when PATH is untracked (git ls-files --others); 0 tracked/missing/error. */
+static int rk_path_untracked(const char *path) {
+    char *sv[] = {"./tools/bound", "10", "git", "ls-files", "--others", "--exclude-standard", "--", (char *)path, 0};
+    char *sv_nb[] = {"git", "ls-files", "--others", "--exclude-standard", "--", (char *)path, 0};
+    int ofd, pid, ex = 0, code = 0, sig = 0; char *b = 0; long n = 0;
+    pid = sy_spawn_pipe(sy_exists("./tools/bound") == 1 ? sv : sv_nb, 0, 0, &ofd, 0);
+    if (pid < 0) return 0;
+    slurp(ofd, &b, &n); sy_close(ofd);
+    if (sy_wait_status(pid, 0, &ex, &code, &sig) != pid || !ex || code != 0) return 0;
+    return b && n > 0;
+}
+
+/* When fail>0 and every offender is "PATH ... no baseline row" on an untracked file,
+ * print the named tip (never suggest moving others' files). */
+static void rk_hint_foreign_untracked(Rk *rk, int fail) {
+    char paths[24][520]; int np = 0, other = 0, k, i;
+    if (fail <= 0) return;
+    for (k = 0; k < NRK; k++) {
+        const char *o = rk[k].out ? rk[k].out : ""; long at = 0;
+        while (at < rk[k].n) {
+            long e = tx_chr(o + at, rk[k].n - at, '\n'), ln = e < 0 ? rk[k].n - at : e;
+            long ps = 0, pe = 0;
+            if (offending_span(o + at, ln, &ps, &pe, 0)) {
+                if (tx_find(o + at, ln, " and no baseline row", 20) >= 0) {
+                    char pbuf[520]; long pl = pe - ps;
+                    if (pl > 0 && pl < (long)sizeof pbuf) {
+                        for (i = 0; i < (int)pl; i++) pbuf[i] = o[at + ps + i];
+                        pbuf[pl] = 0;
+                        if (rk_path_untracked(pbuf)) {
+                            int dup = 0;
+                            for (i = 0; i < np; i++) if (tx_eqz(paths[i], pbuf)) { dup = 1; break; }
+                            if (!dup && np < 24) {
+                                for (i = 0; i < (int)pl; i++) paths[np][i] = pbuf[i];
+                                paths[np][pl] = 0; np++;
+                            }
+                        } else other++;
+                    } else other++;
+                } else other++;
+            }
+            at += ln + 1;
+        }
+    }
+    if (np > 0 && other == 0) {
+        printf("RATCHET_HINT\tforeign-untracked\t这些未跟踪文件不属于你,等所有者处理,或用 --only-paths 限定");
+        for (i = 0; i < np; i++) printf("\t%s", paths[i]);
+        printf("\n");
+    }
+}
+
 /* the script of a ratchet: tests/NAME.cx, except notcovered, whose census tool lives in tools/ */
 static const char *rk_script(const char *name, char *buf, long cap) {
     if (tx_eqz(name, "notcovered")) return "tools/notcovered-census.cx";
@@ -172,6 +232,8 @@ static int rk_path_hits(const char *name, const char *p, long pl, int precommit_
     return 1;
 }
 
+static int g_shard_k, g_shard_n;   /* --shard K/N: run ratchet i only when i % N == K - 1 */
+
 static int rk_affected(const char *name) {
     const char *env = sy_env("UNISACC_RATCHETS_PATHS");
     const char *soft = sy_env("UNISACC_RATCHETS_PRECOMMIT");
@@ -193,7 +255,7 @@ static int rk_affected(const char *name) {
 
 static char *rk_skip_msg(const char *name, long *out_n) {
     char buf[160];
-    if (cx_fmt(buf, sizeof buf, "%s: ok: skipped (unaffected by staged paths)\n", name)) return 0;
+    if (g_shard_n > 0 ? cx_fmt(buf, sizeof buf, "%s: ok: skipped (not in shard %d/%d)\n", name, g_shard_k, g_shard_n) : cx_fmt(buf, sizeof buf, "%s: ok: skipped (unaffected by staged paths)\n", name)) return 0;
     long l = tx_len(buf, sizeof buf);
     char *m = mm_alloc(l + 1);
     if (!m) return 0;
@@ -204,8 +266,88 @@ static char *rk_skip_msg(const char *name, long *out_n) {
 
 static int rk_is_global_only(const char *name) {
     return tx_eqz(name, "net-deps") || tx_eqz(name, "notcovered") ||
-           tx_eqz(name, "tsv-lint") || tx_eqz(name, "dup-census") ||
-           tx_eqz(name, "ref-job-paths");
+           tx_eqz(name, "tsv-lint") || tx_eqz(name, "ref-job-paths");
+}
+
+static int rk_is_ident_char(char c) {
+    return (c >= 'a' && c <= 'z') || (c >= 'A' && c <= 'Z') || (c >= '0' && c <= '9') || c == '_';
+}
+
+static int rk_buf_has_ident(const char *b, long bn, const char *fn, long fl) {
+    long pos = 0;
+    if (!b || bn < fl || fl <= 0) return 0;
+    while (pos + fl <= bn) {
+        long hit = tx_find(b + pos, bn - pos, fn, fl);
+        if (hit < 0) break;
+        hit += pos;
+        if ((hit == 0 || !rk_is_ident_char(b[hit - 1])) &&
+            (hit + fl == bn || !rk_is_ident_char(b[hit + fl]))) {
+            return 1;
+        }
+        pos = hit + 1;
+    }
+    return 0;
+}
+
+static int rk_staged_has_ident(const char *path, long pl, const char *fn, long fl) {
+    char spec[1100], pbuf[1100];
+    char *sv[] = {"./tools/bound", "10", "git", "show", spec, 0};
+    char *sv_nb[] = {"git", "show", spec, 0};
+    int ofd = -1, pid, ex = 0, code = 0, sig = 0, found = 0;
+    long deadline = sy_now_ms() + 10000;
+    if (pl <= 0 || pl >= 1024 || fl <= 0) return 0;
+    spec[0] = ':';
+    for (long i = 0; i < pl; i++) spec[i + 1] = path[i];
+    spec[pl + 1] = 0;
+    pid = sy_spawn_pipe(sy_exists("./tools/bound") == 1 ? sv : sv_nb, 0, 0, &ofd, 0);
+    if (pid > 0 && ofd >= 0) {
+        long cap = 1 << 16, n = 0, r;
+        char *b = mm_alloc(cap);
+        while (b && sy_now_ms() < deadline && (r = sy_read(ofd, b + n, cap - 1 - n)) > 0) {
+            n += r;
+            if (n + 1 >= cap) {
+                char *g = mm_grow(b, cap * 2);
+                if (!g) break;
+                b = g;
+                cap *= 2;
+            }
+        }
+        sy_close(ofd);
+        if (sy_now_ms() >= deadline) sy_kill(pid);
+        if (sy_wait_status(pid, 0, &ex, &code, &sig) == pid && ex && code == 0 && b && n > 0) {
+            found = rk_buf_has_ident(b, n, fn, fl);
+            mm_free(b);
+            return found;
+        }
+        if (b) mm_free(b);
+    }
+    for (long i = 0; i < pl; i++) pbuf[i] = path[i];
+    pbuf[pl] = 0;
+    {
+        size_t fsz = 0;
+        char *fb = cx_read(pbuf, &fsz);
+        if (fb) {
+            found = rk_buf_has_ident(fb, (long)fsz, fn, fl);
+            mm_free(fb);
+        }
+    }
+    return found;
+}
+
+static int rk_dup_fn_hits_staged(const char *fn, long fl, const char *see_p, long see_l, const char *names, long sn) {
+    long a2;
+    for (a2 = 0; a2 < sn; ) {
+        long nl = tx_len(names + a2, sn - a2);
+        const char *p = names + a2;
+        if (nl <= 0) break;
+        if (rk_own_tool_or_table("dup-census", p, nl)) return 1;
+        if (see_l > 0 && nl == see_l && tx_same(p, nl, see_p, see_l)) return 1;
+        if (tx_prefix(p, nl, "tools/", 6) && nl > 3 && tx_same(p + nl - 3, 3, ".cx", 3)) {
+            if (rk_staged_has_ident(p, nl, fn, fl)) return 1;
+        }
+        a2 += nl + 1;
+    }
+    return 0;
 }
 
 static int rk_any_hit(const char *name, const char *names, long sn) {
@@ -234,7 +376,7 @@ static int rk_precommit_match(const char *rows_file, const char *paths_file) {
     char *rows = cx_read(rows_file, &rsz), *names = cx_read(paths_file, &psz);
     long rn = (long)rsz, sn = (long)psz, at = 0;
     char cur_rk_name[64], cur_rk_sum[256];
-    int cur_rk_fail = 0, cur_rk_gblk = 0, blocked = 0;
+    int cur_rk_fail = 0, cur_rk_gblk = 0, cur_dup_has_fn = 0, blocked = 0;
     if (!rows || !names) return 2;
     cur_rk_name[0] = 0; cur_rk_sum[0] = 0;
     while (at < rn) {
@@ -244,7 +386,7 @@ static int rk_precommit_match(const char *rows_file, const char *paths_file) {
         if (l > 0 && r[l - 1] == '\r') l--;
         if (l > 8 && tx_prefix(r, l, "RATCHET\t", 8)) {
             long o1, l1, o2, l2, o3, l3;
-            cur_rk_name[0] = 0; cur_rk_sum[0] = 0; cur_rk_fail = 0; cur_rk_gblk = 0;
+            cur_rk_name[0] = 0; cur_rk_sum[0] = 0; cur_rk_fail = 0; cur_rk_gblk = 0; cur_dup_has_fn = 0;
             if (!tx_field(r, l, '\t', 1, &o1, &l1) && l1 > 0 && l1 < (long)sizeof cur_rk_name &&
                 !tx_field(r, l, '\t', 2, &o2, &l2)) {
                 for (long j = 0; j < l1; j++) cur_rk_name[j] = r[o1 + j];
@@ -263,7 +405,23 @@ static int rk_precommit_match(const char *rows_file, const char *paths_file) {
             }
         } else if (l > 2 && r[0] == ' ' && r[1] == ' ') {
             const char *b = r + 2; long bn = l - 2;
-            if (cur_rk_fail && !cur_rk_gblk &&
+            if (cur_rk_fail && tx_eqz(cur_rk_name, "dup-census") &&
+                tx_prefix(b, bn, "dup-census: ", 12) &&
+                tx_find(b + 12, bn - 12, " verbatim copies across ", 24) >= 0) {
+                long h = tx_find(b + 12, bn - 12, " has ", 5);
+                long see = tx_find(b, bn, "; see ", 6);
+                const char *see_p = (see >= 0 && bn > see + 7 && b[bn - 1] == ')') ? (b + see + 6) : 0;
+                long see_l = see_p ? (bn - (see + 6) - 1) : 0;
+                cur_dup_has_fn = 1;
+                if (h > 0 && rk_dup_fn_hits_staged(b + 12, h, see_p, see_l, names, sn)) {
+                    printf("precommit: blocked: RATCHET dup-census FAIL (%s):%.*s\n", cur_rk_sum, (int)(l - 1), r + 1);
+                    blocked++;
+                    cur_rk_gblk = 1;
+                }
+                at += raw_l + 1;
+                continue;
+            }
+            if (cur_rk_fail && !cur_rk_gblk && !(tx_eqz(cur_rk_name, "dup-census") && cur_dup_has_fn) &&
                 (tx_find(b, bn, " total lines ", 13) >= 0 || tx_find(b, bn, "total debt ", 11) >= 0 || tx_find(b, bn, "expired exempt row", 18) >= 0) &&
                 rk_any_hit(cur_rk_name, names, sn)) {
                 printf("precommit: blocked: RATCHET %s FAIL (%s):%.*s\n", cur_rk_name, cur_rk_sum, (int)(l - 1), r + 1);
@@ -302,7 +460,7 @@ int main(int argc, char **argv) {
     if ((argc == 3 || argc == 5) && tx_eqz(argv[1], "--rows")) {   /* --rows SAVED [--only P]: the filter alone, on a saved ratchet output */
         size_t n; char *b = cx_read(argv[2], &n); long at = 0;
         if (!b) { fprintf(stderr, "ratchets: cannot read %s\n", argv[2]); return 2; }
-        if (argc == 5) { if (!tx_eqz(argv[3], "--only")) return 2; only = argv[4]; }
+        if (argc == 5) { if (!tx_eqz(argv[3], "--only") && !tx_eqz(argv[3], "--only-paths")) return 2; only = argv[4]; }
         while (at < (long)n) {
             long e = tx_chr(b + at, (long)n - at, '\n'), ln = e < 0 ? (long)n - at : e;
             if (offending(b + at, ln, only)) printf("%.*s\n", (int)ln, b + at);
@@ -321,9 +479,10 @@ int main(int argc, char **argv) {
     if ((argc == 3 || argc == 5) && tx_eqz(argv[1], "--from-run")) {   /* judge a flow run of the --plan nodes */
         const char *soft = sy_env("UNISACC_RATCHETS_PRECOMMIT");
         int precommit_soft = (soft && soft[0] == '1');
-        if (argc == 5) { if (!tx_eqz(argv[3], "--only")) return 2; only = argv[4]; }
+        if (argc == 5) { if (!tx_eqz(argv[3], "--only") && !tx_eqz(argv[3], "--only-paths")) return 2; only = argv[4]; }
         from_run(rk, argv[2]);
         fail = judge(rk, only, &ok, &skipped);
+        rk_hint_foreign_untracked(rk, fail);
         if (skipped > 0 || precommit_soft) printf("RATCHETS\tok=%d\tfail=%d\tskipped=%d\telapsed_ms=%ld\n", ok, fail, skipped, sy_now_ms() - t0);
         else printf("RATCHETS\tok=%d\tfail=%d\telapsed_ms=%ld\n", ok, fail, sy_now_ms() - t0);
         return fail ? 1 : 0;
@@ -340,8 +499,16 @@ int main(int argc, char **argv) {
         abuf[ap] = 0;
         sy_setenv("UNISACC_RATCHETS_PATHS", abuf, 1);
         sy_setenv("UNISACC_RATCHETS_PRECOMMIT", "1", 1);
-    } else if (argc == 3 && tx_eqz(argv[1], "--only")) only = argv[2];
-    else if (argc != 1) { fprintf(stderr, "usage: tools/ratchets.cx [--only PATH-PREFIX | --affected PATH... | --rows SAVED [--only PATH-PREFIX] | --plan | --from-run DIR [--only PATH-PREFIX]]\n"); return 2; }
+    } else if (argc == 3 && (tx_eqz(argv[1], "--only") || tx_eqz(argv[1], "--only-paths"))) only = argv[2];
+    else if (argc == 3 && tx_eqz(argv[1], "--shard")) {
+        long sk = 0, sn = 0; const char *a = argv[2]; int i = 0;
+        while (a[i] >= '0' && a[i] <= '9') sk = sk * 10 + (a[i++] - '0');
+        if (a[i++] != '/') { fprintf(stderr, "ratchets: --shard needs K/N\n"); return 2; }
+        while (a[i] >= '0' && a[i] <= '9') sn = sn * 10 + (a[i++] - '0');
+        if (a[i] || sn < 1 || sn > NRK || sk < 1 || sk > sn) { fprintf(stderr, "ratchets: --shard K/N needs 1 <= K <= N <= %d\n", NRK); return 2; }
+        g_shard_k = (int)sk; g_shard_n = (int)sn;
+    }
+    else if (argc != 1) { fprintf(stderr, "usage: tools/ratchets.cx [--only|--only-paths PATH-PREFIX | --affected PATH... | --rows SAVED [--only|--only-paths PATH-PREFIX] | --plan | --from-run DIR [--only|--only-paths PATH-PREFIX]]\n"); return 2; }
     char lsf[4200]; int lsfd = -1, lspid; lsf[0] = 0;
     if (!sy_env("UNISACC_CX_LSFILES")) {   /* one tracked-.cx listing for the round; symindex (cxlibc, coreapi: 28 queries) reuses it; fall back to its own query when absent */
         char *gv[] = {"git", "ls-files", "-s", "-z", "--", "*.cx", 0}; char *lb; long ln;
@@ -354,7 +521,7 @@ int main(int argc, char **argv) {
     }
     for (k = 0; k < NRK; k++) {
         char sb[64], *script;
-        if (!rk_affected(rk[k].name)) {
+        if (!rk_affected(rk[k].name) || (g_shard_n > 0 && k % g_shard_n != g_shard_k - 1)) {
             rk[k].pid = -2;
             rk[k].rc = 0;
             rk[k].out = rk_skip_msg(rk[k].name, &rk[k].n);
@@ -375,6 +542,7 @@ int main(int argc, char **argv) {
         rk[k].rc = sy_wait_status(rk[k].pid, 0, &ex, &code, &sig) == rk[k].pid && ex ? code : -1;
     }
     fail = judge(rk, only, &ok, &skipped);
+    rk_hint_foreign_untracked(rk, fail);
     if (lsf[0]) sy_unlink(lsf);
     {   const char *soft = sy_env("UNISACC_RATCHETS_PRECOMMIT");
         int precommit_soft = (soft && soft[0] == '1');

@@ -208,10 +208,142 @@ out:
     return loc_fail;
 }
 
+static const char *find_sub(const char *hay, size_t hn, const char *s) {
+    if (!hay || !s) return 0;
+    size_t sn = strlen(s);
+    if (sn == 0) return hay;
+    if (sn > hn) return 0;
+    for (size_t i = 0; i + sn <= hn; i++) {
+        if (hay[i] == s[0] && mm_same(hay + i, s, sn)) return hay + i;
+    }
+    return 0;
+}
+
+static int claim_is_negated(const char *line, size_t len, size_t pos, size_t clen) {
+    static const char *neg_pre[] = {
+        "\xe6\x9c\xaa",                 /* wei (not yet) */
+        "\xe4\xb8\x8d\xe5\xbe\x97",     /* bu-de (must not) */
+        "\xe4\xb8\x8d\xe5\x8f\xaf",     /* bu-ke (cannot) */
+        "\xe4\xb8\x8d\xe5\xa3\xb0\xe7\xa7\xb0", /* bu-sheng-cheng (do not claim) */
+        "\xe4\xb8\x8d\xe8\x83\xbd",     /* bu-neng (cannot) */
+        "\xe5\xb0\x9a\xe6\x9c\xaa",     /* shang-wei (not yet) */
+        "\xe9\x9d\x9e",                 /* fei (non-) */
+        0
+    };
+    size_t win_start = pos > 24 ? pos - 24 : 0;
+    size_t win_len = pos - win_start;
+    for (int i = 0; neg_pre[i]; i++) {
+        if (find_sub(line + win_start, win_len, neg_pre[i])) return 1;
+    }
+    if (pos + clen + 3 <= len) {
+        if (mm_same(line + pos + clen, "\xe5\x89\x8d", 3) || /* qian (before) */
+            mm_same(line + pos + clen, "\xe5\x90\x8e", 3))   /* hou (after) */
+            return 1;
+    }
+    return 0;
+}
+
+static int line_has_evidence(const char *line, size_t len) {
+    static const char *ev[] = {
+        "release/evidence/", "~/.cache/", "build/", "tools/", "tests/", "plans/",
+        "run_id=", "sha256=", "PRERUN_MERGE", "SUMMARY", "RATCHETS",
+        "DERIVE_SUMMARY", "READY ", "rc=0", "git rev-parse", "sh ./unisacc.com",
+        "PASS",
+        0
+    };
+    if (find_sub(line, len, "TBD") || find_sub(line, len, "<CI_RUN_ID>")) return 0;
+    for (int i = 0; ev[i]; i++) {
+        if (find_sub(line, len, ev[i])) return 1;
+    }
+    return 0;
+}
+
+static int notes_audit(const char *notesp, int emit) {
+    char *nt = 0, *rb = 0;
+    size_t nn = 0, rn = 0;
+    char vbuf[64], nbuf[320];
+    int loc_fail = 0, bad_claims = 0;
+    if (!notesp || !*notesp) {
+        rb = cx_read("release/rollback.txt", &rn);
+        if (rb && rn > 4 && rb[0] == '#' && rb[1] == ' ') {
+            size_t k = 2, j = 0;
+            while (k < rn && rb[k] != ' ' && rb[k] != '\t' && rb[k] != '\n' && j + 1 < sizeof vbuf) vbuf[j++] = rb[k++];
+            vbuf[j] = 0;
+            if (vbuf[0] && !cx_fmt(nbuf, sizeof nbuf, "release/notes-%s.md", vbuf)) notesp = nbuf;
+        }
+        free(rb);
+    }
+    if (notesp && *notesp) nt = cx_read(notesp, &nn);
+    if (emit) check("notes-readable", nt && nn > 0);
+    if (!nt || nn == 0) { loc_fail++; goto out; }
+    {
+        int ok1 = only_not_qualified(nt);
+        int ok2 = has(nt, "## \xe5\xb7\xb2\xe7\x9f\xa5\xe7\xbc\xba\xe5\x8f\xa3");
+        int ok3 = has(nt, "release/rollback.txt");
+        if (emit) {
+            check("notes-only-not-qualified", ok1);
+            check("notes-has-gaps-section", ok2);
+            check("notes-has-rollback-ref", ok3);
+        }
+        if (!(ok1 && ok2 && ok3)) loc_fail++;
+    }
+    {
+        static const char *claims[] = {
+            "\xe5\xb7\xb2\xe9\xaa\x8c\xe8\xaf\x81",                         /* yi-yan-zheng */
+            "\xe5\xae\x9e\xe6\xb5\x8b\xe9\x80\x9a\xe8\xbf\x87",             /* shi-ce-tong-guo */
+            "\xe7\xbb\x8f\xe5\xae\x9e\xe6\x9c\xba\xe8\xbf\x90\xe8\xa1\x8c\xe9\xaa\x8c\xe8\xaf\x81", /* jing-shi-ji-yun-xing-yan-zheng */
+            "\xe7\xbb\x8f\xe5\xae\x9e\xe6\x9c\xba\xe9\xaa\x8c\xe8\xaf\x81", /* jing-shi-ji-yan-zheng */
+            "\xe5\xb7\xb2\xe5\xae\x9e\xe8\xb7\x91",                         /* yi-shi-pao */
+            "\xe5\xb7\xb2\xe9\x80\x9a\xe8\xbf\x87",                         /* yi-tong-guo */
+            0
+        };
+        static const char *tags[] = {
+            "verified", "tested-pass", "host-run-verified", "host-verified", "ran", "passed"
+        };
+        const char *p = nt;
+        int lineno = 1;
+        while (*p) {
+            const char *e = strchr(p, '\n');
+            size_t ll = e ? (size_t)(e - p) : strlen(p);
+            int line_bad = 0;
+            const char *bad_tag = 0;
+            for (int c = 0; claims[c] && !line_bad; c++) {
+                size_t clen = strlen(claims[c]);
+                size_t off = 0;
+                while (off + clen <= ll) {
+                    const char *m = find_sub(p + off, ll - off, claims[c]);
+                    if (!m) break;
+                    size_t pos = (size_t)(m - p);
+                    if (!claim_is_negated(p, ll, pos, clen)) {
+                        if (!line_has_evidence(p, ll)) {
+                            line_bad = 1;
+                            bad_tag = tags[c];
+                            break;
+                        }
+                    }
+                    off = pos + clen;
+                }
+            }
+            if (line_bad) {
+                bad_claims++;
+                if (emit) printf("NOTES_UNVERIFIED_CLAIM\tline=%d\tclaim=%s\n", lineno, bad_tag);
+            }
+            if (!e) break;
+            p = e + 1;
+            lineno++;
+        }
+        if (emit) check("notes-claims-evidenced", bad_claims == 0);
+        if (bad_claims > 0) loc_fail++;
+    }
+out:
+    free(nt);
+    return loc_fail;
+}
+
 int main(int argc, char **argv) {
     char why[512], d1[4400], d2[4400], d3[4400], d4[4400], d5[4400], d6[4400], rat1[4500], s_unk[4400], s_new[4400], s_cnt[4400]; int rc = -1;
     if (sy_cwd(root, sizeof root) < 0 || sy_mkdtemp("/tmp", "release-prep-check", tmp, sizeof tmp)) return 2;
-    /* --part pos|neg|structure|ratchets|rollback splits into separate checks */
+    /* --part pos|neg|structure|ratchets|rollback|notes splits into separate checks */
     if (argc >= 3 && !strcmp(argv[1], "--part")) {
         const char *name = argv[2];
         if (!strcmp(name, "pos")) part = 1;
@@ -232,6 +364,15 @@ int main(int argc, char **argv) {
                 else { fprintf(stderr, "check-release-prep: unknown rollback arg %s\n", argv[a]); return 2; }
             }
             rb_audit(ver, prev, candp, rbp, decp, notesp, allow_pass, 1);
+            goto done;
+        }
+        else if (!strcmp(name, "notes")) {
+            const char *notesp = 0;
+            for (int a = 3; a < argc; a++) {
+                if (!strcmp(argv[a], "--notes") && a + 1 < argc) notesp = argv[++a];
+                else { fprintf(stderr, "check-release-prep: unknown notes arg %s\n", argv[a]); return 2; }
+            }
+            notes_audit(notesp, 1);
             goto done;
         }
         else return 2;
@@ -391,6 +532,21 @@ negatives:
       check("rollback-audit-neg-pre-pass", rb_audit("0.0.99", "0.0.98", fcand, frb, fbad, fnt, 0, 0) > 0);
       if (wr(rdir, "bad.txt", nt_qual)) return 2;
       check("rollback-audit-neg-bare-qualified", rb_audit("0.0.99", "0.0.98", fcand, frb, fdec, fbad, 0, 0) > 0);
+    }
+    /* (8) notes honesty audit self-test: evidenced claim passes, bare/TBD verified claims fail, negated wording passes */
+    { char ndir[4400], f1[4500], f2[4500], f3[4500], f4[4500];
+      if (cx_fmt(ndir, sizeof ndir, "%s/notes-fx", tmp) || sy_mkdir(ndir, 0700) ||
+          cx_fmt(f1, sizeof f1, "%s/ok.md", ndir) || cx_fmt(f2, sizeof f2, "%s/bare.md", ndir) ||
+          cx_fmt(f3, sizeof f3, "%s/tbd.md", ndir) || cx_fmt(f4, sizeof f4, "%s/neg.md", ndir)) return 2;
+      const char *n_ok = "# unisacc 0.0.99 notes\nNOT_QUALIFIED\n- osx probe \xe5\xb7\xb2\xe9\xaa\x8c\xe8\xaf\x81 (release/evidence/0.0.99/ci-12345.log)\n## \xe5\xb7\xb2\xe7\x9f\xa5\xe7\xbc\xba\xe5\x8f\xa3\nrelease/rollback.txt\n";
+      const char *n_bare = "# unisacc 0.0.99 notes\nNOT_QUALIFIED\n- osx probe \xe5\xb7\xb2\xe9\xaa\x8c\xe8\xaf\x81\n## \xe5\xb7\xb2\xe7\x9f\xa5\xe7\xbc\xba\xe5\x8f\xa3\nrelease/rollback.txt\n";
+      const char *n_tbd = "# unisacc 0.0.99 notes\nNOT_QUALIFIED\n- osx probe \xe5\xb7\xb2\xe9\xaa\x8c\xe8\xaf\x81 (release/evidence/0.0.99/ci-TBD.log)\n## \xe5\xb7\xb2\xe7\x9f\xa5\xe7\xbc\xba\xe5\x8f\xa3\nrelease/rollback.txt\n";
+      const char *n_neg = "# unisacc 0.0.99 notes\nNOT_QUALIFIED\n- \xe4\xb8\x8d\xe5\xbe\x97\xe5\xa3\xb0\xe7\xa7\xb0\xe7\xbb\x8f\xe5\xae\x9e\xe6\x9c\xba\xe8\xbf\x90\xe8\xa1\x8c\xe9\xaa\x8c\xe8\xaf\x81\n## \xe5\xb7\xb2\xe7\x9f\xa5\xe7\xbc\xba\xe5\x8f\xa3\nrelease/rollback.txt\n";
+      if (wr(ndir, "ok.md", n_ok) || wr(ndir, "bare.md", n_bare) || wr(ndir, "tbd.md", n_tbd) || wr(ndir, "neg.md", n_neg)) return 2;
+      check("notes-audit-pos-evidenced", notes_audit(f1, 0) == 0);
+      check("notes-audit-neg-bare-verified", notes_audit(f2, 0) > 0);
+      check("notes-audit-neg-tbd-verified", notes_audit(f3, 0) > 0);
+      check("notes-audit-pos-negated-wording", notes_audit(f4, 0) == 0);
     }
 done:
     { char *v[] = {"rm", "-rf", tmp, 0}; runv(v, 30, &rc); }

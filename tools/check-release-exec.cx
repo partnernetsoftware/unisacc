@@ -223,6 +223,16 @@ static int fake_unisacc(int argc, char **argv) {
         sy_printf("OK\tfake devsvc\n"); return 0;
     }
     if (tx_eqz(argv[3], "tools/release-decide.cx")) { cx_fmt(q, sizeof q, "%s/decision.txt", fdir); t = slurp(q); if (t) sy_printf("%s", t); free(t); return 0; }
+    if (tx_eqz(argv[3], "tools/install-ape.cx")) {
+        if (argi(argc, argv, "--write") > 0) { put(fdir, "install-ape-wrote", "1\n"); return 99; }
+        if (argi(argc, argv, "--backup") > 0) { sy_printf("INSTALL_APE\tBACKUP_DRYRUN\t1111111111111111111111111111111111111111111111111111111111111111\t100\tfiles=unisacc.com\n"); return 0; }
+        if (argi(argc, argv, "--rollback") > 0) {
+            cx_fmt(q, sizeof q, "%s/root-backup-ready", fdir);
+            if (sy_exists(q) == 1) { sy_printf("INSTALL_APE\tROLLBACK_DRYRUN\t1111111111111111111111111111111111111111111111111111111111111111\n"); return 0; }
+            sy_printf("INSTALL_APE\tREFUSED\tno-candidate-backup\tmissing\n"); return 1;
+        }
+        return 2;
+    }
     if (tx_eqz(argv[3], "release/tools/c47-1-readback.cx")) {
         if(argi(argc,argv,"--list-steps")>0){sy_printf("metadata\nzip-members\n");return 0;}
         cx_fmt(q,sizeof q,"%s/readback-timeout-once",fdir);
@@ -681,7 +691,7 @@ static void part_b(void) {
     /* R1 resume from step 7: verify-only for 1..6 */
     put(td, "calls.log", "");
     rc = rx("--from-step", "7", 0, 0); c = calls();
-    ck(rc == 0 && has(out, "STEP\t1\tX-commit\tVERIFY") && has(out, "SKIP\t7\tY2 already recorded"), "R1.resume-ok");
+    ck(rc == 0 && has(out, "STEP\t1\tX-commit\tVERIFY") && has(out, "SKIP\t7\tY2 already recorded") && has(out, "下一步:release-post run --version 0.0.99 --dry"), "R1.resume-ok");
     ck(c && !has(c, "gh -R example/fixture release create") && !has(c, "gh -R example/fixture release upload") && !has(c, "gh -R example/fixture workflow run") &&
        !has(c, "gh -R example/fixture release edit") && !has(c, "unisacc tools/devsvc -- git commit"), "R1.no-repeated-external-action");
     free(c);
@@ -1160,11 +1170,23 @@ static void part_c(void) {
         /* Real execute must sync release/evidence/0.0.85/evidence-rows.tsv -> release/evidence.tsv and pass steps 4..7 */
         rc = rx(0, 0, 0, 0);
         {
-            char evp[4600]; cx_fmt(evp, sizeof evp, "%s/release/evidence.tsv", fx);
+            char evp[4600], wrp[4600]; cx_fmt(evp, sizeof evp, "%s/release/evidence.tsv", fx);
+            cx_fmt(wrp, sizeof wrp, "%s/install-ape-wrote", td);
             char *after_exec = slurp(evp);
             ck(rc == 0 && has(out, "GATE\t7\tDECISION\tPASS") && after_exec && has(after_exec, "0.0.85/pack-run.out"),
                "G7.e2e-prep-rows-sync-0085-exec-ok");
+            /* Without backup slot: Y2 still succeeds (rc==0), emits WARN + fix command, never passes --write */
+            ck(rc == 0 && has(out, "POST_ROOT_BACKUP_GATE\tWARN\t") && tx_find(out, tlen(out), "--backup --write", 16) >= 0 && sy_exists(wrp) != 1,
+               "G7.post-root-backup-missing-warns-no-write");
             free(after_exec);
+        }
+        /* With backup slot ready: Y2 emits PASS with ROLLBACK_DRYRUN and never passes --write */
+        put(td, "root-backup-ready", "1\n");
+        rc = rx("--from-step", "7", 0, 0);
+        {
+            char wrp[4600]; cx_fmt(wrp, sizeof wrp, "%s/install-ape-wrote", td);
+            ck(rc == 0 && has(out, "POST_ROOT_BACKUP_GATE\tPASS\t") && tx_find(out, tlen(out), "ROLLBACK_DRYRUN", 15) >= 0 && sy_exists(wrp) != 1,
+               "G7.post-root-backup-ready-passes-no-write");
         }
     }
 }

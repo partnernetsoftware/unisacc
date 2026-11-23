@@ -306,7 +306,7 @@ static void concurrent_tools(const char *dir,const char *one,const char *two,int
 }
 static int tool_check(void) {
     static char out[1 << 15], src[4096]; char hold[4400], a[4400], b[4400], sp[4400], bp[4400], pp[4400], hs[65], hb[65], hp[65], h[65], hex[65], pinrow[400];
-    const char *links[] = { "cx", "ext", "cxroot.tsv", "unisacc.com" }, *copies[] = { "tools/bound", "tools/bound.c", "tests/tools-compile.cx" };
+    const char *links[] = { "cx", "ext", "cxroot.tsv", "unisacc.com", "tools/cxlib" }, *copies[] = { "tools/bound", "tools/bound.c", "tests/tools-compile.cx" };
     const char *old[] = { "ta", "tb", "tc", "td", "te", "tf", "tg" };
     int i, rc;
     char *gi[] = {"git", "init", "-q", ".", 0}, *ga[] = {"git", "add", "--", "tools/ta.cx", "tools/tb.cx", "tools/tc.cx", "tools/td.cx", "tools/te.cx", "tools/tf.cx", "tools/tg.cx", 0};
@@ -320,7 +320,7 @@ static int tool_check(void) {
     if (cx_fmt(hold, sizeof hold, "%s/check-register-tool-XXXXXX", output) || !mkdtemp(hold)) die("mkdtemp", "tool");
     pjoin(a, sizeof a, hold, "tools"); if (sy_mkdir(a, 0700)) die("mkdir", a);
     pjoin(a, sizeof a, hold, "tests"); if (sy_mkdir(a, 0700)) die("mkdir", a);
-    for (i = 0; i < 4; i++) { pjoin(a, sizeof a, root, links[i]); pjoin(b, sizeof b, hold, links[i]); if (symlink(a, b)) die("symlink", b); }
+    for (i = 0; i < 5; i++) { pjoin(a, sizeof a, root, links[i]); pjoin(b, sizeof b, hold, links[i]); if (symlink(a, b)) die("symlink", b); }
     for (i = 0; i < 3; i++) { pjoin(a, sizeof a, root, copies[i]); pjoin(b, sizeof b, hold, copies[i]); if (copy_file(a, b)) die("copy", b); }
     pjoin(a, sizeof a, hold, "tools/bound"); if (chmod(a, 0755)) die("chmod", a);
     src[0] = 0;
@@ -361,7 +361,6 @@ static int tool_check(void) {
         char cv[4500],decl[4500],idx[4500],c0[65],d0[65],i0[65];
         pjoin(cv,sizeof cv,hold,"tests/coverage.tsv");pjoin(decl,sizeof decl,hold,"tests/batch-product-inputs.tsv");
         pjoin(idx,sizeof idx,hold,".git/index");
-        pjoin(a,sizeof a,root,"tools/cxlib");pjoin(b,sizeof b,hold,"tools/cxlib");if(symlink(a,b))die("fixture library",b);
         pjoin(a,sizeof a,root,"tools/batch-packages-gen.cx");pjoin(b,sizeof b,hold,"tools/batch-packages-gen.cx");if(copy_file(a,b))die("fixture query",b);
         put_file(hold,"tests/coverage.tsv","coverage\tuntouched\ntools.compile-all\tcontract\tIMPLEMENTED_SEPARATE_BATCH\tfixture oracle\ttests/tools-compile.cx\n");
         put_file(hold,"tests/batch-product-inputs.tsv","id\tkeep\ttools/fx.cx\tfixture\n");
@@ -400,6 +399,32 @@ static int tool_check(void) {
     ok(rc == 0 && strstr(out, "REGISTER_TOOL\tstatus=UNCHANGED") && strstr(out, "pins_added=0\tpins_needed=0"), "repeating with --pin-owner ends UNCHANGED");
     sha_of(sp, h); ok(!strcmp(h, hs), "repeat calls left tools-compile-sources.tsv byte-identical");
     sha_of(bp, h); ok(!strcmp(h, hb), "repeat calls left batches.tsv byte-identical");
+    /* REGISTRY_SHRANK: against a HEAD commit, a table with fewer lines or a deleted manifest shard refuses every write;
+       growth does not.  HEAD is dropped again afterwards so the later fixtures run unguarded. */
+    { char md[4400]; pjoin(md, sizeof md, hold, "tests/manifests"); if (sy_mkdir(md, 0700) && sy_exists(md) != 1) die("mkdir", md); }
+    {   char *gA[] = {"git", "add", "-A", ".", 0};
+        char *gC[] = {"git", "-c", "user.name=t", "-c", "user.email=t@t", "commit", "-q", "-m", "fx", 0};
+        char *gD[] = {"git", "update-ref", "-d", "HEAD", 0};
+        char mp[4400]; size_t sn, keep = 0, lines = 0, k; char *saved;
+        put_file(hold, "tests/manifests/tools-compile-000.tsv", "m\n");
+        pjoin(mp, sizeof mp, hold, "tests/manifests/tools-compile-000.tsv");
+        if (run_in(hold, gA, out, sizeof out) || run_in(hold, gC, out, sizeof out)) die("git commit fixture", out);
+        saved = cx_read(bp, &sn); if (!saved) die("read", bp);
+        { FILE *g = fopen(bp, "ab"); if (!g || fputs("grown\tx\n", g) < 0 || fclose(g)) die("grow", bp); }
+        rc = run_in(hold, r2, out, sizeof out);
+        ok(!strstr(out, "REGISTRY_SHRANK") && strstr(out, "REGISTER_TOOL"), "a registry table that only grew past HEAD is not refused as shrunk");
+        for (k = 0; k < sn && !keep; k++) if (saved[k] == '\n' && ++lines == 3) keep = k + 1;
+        if (cx_write(bp, saved, keep)) die("shrink", bp);
+        rc = run_in(hold, r2, out, sizeof out);
+        ok(rc == 2 && strstr(out, "REGISTRY_SHRANK path=tests/batches.tsv head_lines=") && strstr(out, "git show HEAD:tests/batches.tsv"), "a batches table with fewer lines than HEAD is refused by name");
+        if (cx_write(bp, saved, sn)) die("restore", bp);
+        free(saved);
+        if (unlink(mp)) die("unlink", mp);
+        rc = run_in(hold, r2, out, sizeof out);
+        ok(rc == 2 && strstr(out, "REGISTRY_SHRANK path=tests/manifests/tools-compile-000.tsv") && strstr(out, "missing=1"), "a deleted manifest shard refuses with missing=1");
+        put_file(hold, "tests/manifests/tools-compile-000.tsv", "m\n");
+        if (run_in(hold, gD, out, sizeof out)) die("drop HEAD", out);
+    }
     sha_of(pp, h); ok(!strcmp(h, hp), "repeat calls left pins.tsv byte-identical");
     /* a failing verification (a tracked tool that is in no registry row) is rolled back completely */
     put_file(hold, "tools/stray.cx", "int main(void){return 0;}\n"); put_file(hold, "tools/tq.cx", "int main(void){return 0;}\n");

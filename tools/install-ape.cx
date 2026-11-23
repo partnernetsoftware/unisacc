@@ -385,6 +385,27 @@ static void ia_backup(const char *root) {
     sy_printf("INSTALL_APE\tBACKUP\t%s\t%ld\tkept=%d\n", cur, cb, k);
 }
 
+static int ia_backup_cmd(const char *root, int write) {
+    char com[4400], cur[65], s[4400], flist[512];
+    long cb = 0, fw = 0; int i;
+    if (ia_join(com, (int)sizeof com, root, "unisacc.com")) ia_die("path");
+    if (sy_exists(com) != 1 || ia_has_footer(com) != 1 || ia_sha(com, cur, &cb)) ia_refuse("backup-no-ape-root", com);
+    flist[0] = 0;
+    for (i = 0; i < IA_NSAVED; i++) {
+        if (ia_join(s, (int)sizeof s, root, ia_saved[i])) ia_die("path");
+        if (sy_exists(s) != 1) continue;
+        if (fw > 0 && fw + 2 < (long)sizeof flist) flist[fw++] = ',';
+        long nl = tx_len(ia_saved[i], 64);
+        if (fw + nl + 1 < (long)sizeof flist) { mm_copy(flist + fw, (long)sizeof flist - fw, ia_saved[i], nl); fw += nl; flist[fw] = 0; }
+    }
+    if (!write) {
+        sy_printf("INSTALL_APE\tBACKUP_DRYRUN\t%s\t%ld\tfiles=%s\n", cur, cb, flist);
+        return 0;
+    }
+    ia_backup(root);
+    return 0;
+}
+
 static void ia_mark(const char *root, const char *sha, long bytes) {
     char p[4400], t[4400], line[9000];
     if (ia_join(p, (int)sizeof p, root, IA_MARK) || cx_fmt(t, sizeof t, "%s.%d", p, sy_pid())) ia_die("path");
@@ -619,7 +640,7 @@ static int ia_install(const char *root, const char *ape, const char *want, int w
         if (ia_join(bj, (int)sizeof bj, root, "unisacc.com.build.json") || ia_join(bp, (int)sizeof bp, root, "unisacc.com.build.json.split-prev")) ia_die("path");
         if (sy_exists(bj) == 1 && sy_exists(bp) != 1 && sy_copy(bj, bp, 0600)) ia_die("cannot keep the build record as .split-prev");
     }
-    if (g_cand_rev) ia_backup(root);
+    if (g_cand_rev || (sy_exists(com) == 1 && ia_has_footer(com) == 1)) ia_backup(root);
     if (sy_copy(ape, tmp, 0755)) { (void)sy_unlink(tmp); ia_die("cannot copy the ape beside unisacc.com"); }
     if (ia_sha(tmp, cur, &cb) || !tx_eqz(cur, got) || cb != bytes) { (void)sy_unlink(tmp); ia_refuse("copy-differs-from-source", tmp); }
     if (cx_fmt(line, sizeof line, "%s\t%ld\t%s\n", got, bytes, "unisacc.com")) { (void)sy_unlink(tmp); ia_die("record"); }
@@ -658,18 +679,24 @@ static int ia_rollback(const char *root, int write) {
 
 int main(int argc, char **argv) {
     char root[4096];
-    int write = 0, rollback = 0, gate = 0, i;
+    int write = 0, rollback = 0, gate = 0, backup = 0, i;
     const char *cand = 0;
     const char *pos[3];
     int np = 0;
     for (i = 1; i < argc; i++) {
         if (tx_eqz(argv[i], "--")) continue;
         if (tx_eqz(argv[i], "--write")) { write = 1; continue; }
+        if (tx_eqz(argv[i], "--backup")) { backup = 1; continue; }
         if (tx_eqz(argv[i], "--rollback")) { if (rollback) ia_die("usage: one of --rollback | --rollback-split"); rollback = 1; continue; }
         if (tx_eqz(argv[i], "--rollback-split")) { if (rollback) ia_die("usage: one of --rollback | --rollback-split"); rollback = 2; continue; }
         if (tx_eqz(argv[i], "--release-gate")) { gate = 1; continue; }
         if (tx_eqz(argv[i], "--candidate")) { if (cand || i + 1 >= argc) ia_die("usage: ROOT --candidate DIR [--write]"); cand = argv[++i]; continue; }
-        if (np < 3) pos[np++] = argv[i]; else ia_die("usage: ROOT APE SHA256 [--write] | ROOT --candidate DIR [--write] | ROOT --rollback [--write] | ROOT --release-gate");
+        if (np < 3) pos[np++] = argv[i]; else ia_die("usage: ROOT APE SHA256 [--write] | ROOT --candidate DIR [--write] | ROOT --backup [--write] | ROOT --rollback [--write] | ROOT --release-gate");
+    }
+    if (backup) {
+        if (np != 1 || rollback || gate || cand) ia_die("usage: ROOT --backup [--write]");
+        if (sy_realpath(pos[0], root, (int)sizeof root) < 0) ia_die("root");
+        return ia_backup_cmd(root, write);
     }
     if (gate || cand) {
         if (np != 1 || rollback || (gate && (cand || write))) ia_die("usage: ROOT --candidate DIR [--write] | ROOT --release-gate");

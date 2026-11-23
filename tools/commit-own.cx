@@ -1,5 +1,10 @@
 /* tools/commit-own.cx -- commit only your own files and your own lines of shared files, in a shared checkout.
  *
+ * Shared-checkout discipline (2026-11-23): never mv/cp/rsync/stash/clean another window's
+ * untracked files to silence ratchets; use git archive HEAD into a private dir or
+ * tools/ratchets.cx --only-paths PREFIX. Ratchets print RATCHET_HINT foreign-untracked when
+ * red only from others' untracked no-baseline .cx (no move option).
+ *
  *   sh ./unisacc.com tools/commit-own.cx -- -m MSG [--whole PATH...] [--keyed PATH KEY[,KEY...]]...
  *
  * --whole PATH: the working-tree file as it is.  --keyed PATH KEYS: only the lines of PATH you changed, i.e.
@@ -54,6 +59,10 @@
  * other agents' added or removed rows stay as they were (an added row lands after its work-tree predecessor).  The
  * shared index entry moves as for any committed path.  COMMIT_OWN_DERIVE<TAB>rc=<TAB>stage=<TAB>files=<TAB>ms= is
  * printed.  UNISACC_COMMIT_OWN_DERIVE_MANIFEST=FILE passes --manifest FILE to derive.cx (tests).
+ * Window trailer (2026-11-23): when $DEVSVC_OWNER is a legitimate window name (tr_window_ok),
+ * the landed message gains X-Unisacc-Window: <owner>; missing/auto-/pane-/flow- owners leave
+ * the message unchanged (no forge). freeze-watch reads that trailer; raw git commits without it
+ * are VIOLATION inside the freeze domain.
  * --derive-selected (opt-in, off by default; --derive is unchanged): the same private root, but the table set comes from
  * derive.cx --touched (git diff --cached --name-status HEAD of the commit's paths, so A/D reach pathset rows; real read
  * sets plus the outputs -> inputs closure inside derive.cx), one --write --touched, and --check --only NAME for EVERY
@@ -574,6 +583,17 @@ static int co_merge(const char *path, const char *oldb, const char *newb) {
 out:
     if (ob) mm_free(ob); if (nb) mm_free(nb); if (wb) mm_free(wb);
     return rc;
+}
+
+/* Augment MSG with X-Unisacc-Window when DEVSVC_OWNER is a real window name.
+ * Never invents an owner; never overwrites an existing trailer. */
+static char co_msgwin[4000];
+static const char *co_window_msg(const char *msg) {
+    const char *ow = getenv("DEVSVC_OWNER");
+    int r = tr_window_put(co_msgwin, sizeof co_msgwin, msg, (ow && ow[0]) ? ow : "");
+    if (r < 0) co_die("setup", "commit message with window trailer too long");
+    if (r > 0) fprintf(stderr, "commit-own: appended X-Unisacc-Window: %s\n", ow);
+    return co_msgwin;
 }
 /* the commit itself, after the gates passed on the private tree: write-tree of the private index, commit-tree on
    BASE, then one compare-and-swap of HEAD (git update-ref HEAD NEW BASE).  No hook runs here and nothing is locked
@@ -1178,7 +1198,7 @@ static int co_mergecont(int mcont, const char *msg, int np, const char **paths, 
     mh[40] = 0;
     if (dry) { sy_printf("COMMIT_OWN_DRY\trc=0\tmerge_head=%s\n", mh); return 0; }
     g_bound_s = 55;
-    {   char *cv[] = {"sh", "-c", "exec \"$@\" 2>&1", "sh", "git", "commit", "-q", "-m", (char *)msg, 0};
+    {   char *cv[] = {"sh", "-c", "exec \"$@\" 2>&1", "sh", "git", "commit", "-q", "-m", (char *)co_window_msg(msg), 0};
         if (run(cv, out, sizeof out) != 0) { fprintf(stderr, "COMMIT_OWN_FAIL\tclass=git-or-hook\ncommit-own: git commit (merge) failed: %s\n", out); return 1; } }
     g_bound_s = 30;
     {   char *rv[] = {"git", "rev-list", "--parents", "-n", "1", "HEAD", 0};
@@ -1813,7 +1833,7 @@ again:  /* Retry against the same HEAD whose paths were compared. */
                 gate_ms = sy_now_ms() - tc0;
                 gate_rc = rc;
                 co_ref_ms = 0; co_ref_rc = -1;
-                if (rc == 0) rc = co_land(msg, basec, newfull, out, sizeof out);
+                if (rc == 0) rc = co_land(co_window_msg(msg), basec, newfull, out, sizeof out);
                 while (rc != 0 && tx_find(out, tx_len(out, sizeof out), "cannot lock ref 'HEAD'", 22) >= 0 &&
                        co_replay_wait(replay_deadline, att)) {
                     char new_head[64]; int own_same = 1, all_same = 1;
@@ -1834,7 +1854,7 @@ again:  /* Retry against the same HEAD whose paths were compared. */
                         if (co_build_idx(idx, new_head, path, np, link, del, blob, out, sizeof out, &ew, &ep) != 0) {
                             sy_unsetenv("GIT_INDEX_FILE"); sy_unlink(idx); co_die(ew, ep);
                         }
-                        rc = co_land(msg, new_head, newfull, out, sizeof out);
+                        rc = co_land(co_window_msg(msg), new_head, newfull, out, sizeof out);
                         if (rc == 0) {
                             cas_skipped = 1;
                             tx_copy(basec, sizeof basec, new_head, 40); basec[40] = 0;

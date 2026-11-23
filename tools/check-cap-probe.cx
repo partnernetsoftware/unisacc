@@ -1,0 +1,204 @@
+/* tools/check-cap-probe.cx -- checks tools/cap-probe.cx.
+ *
+ *   sh ./unisacc.com tools/check-cap-probe.cx [-- --no-real]
+ *
+ * The tool is compiled ONCE into the work directory and every case runs that binary (a fresh
+ * `sh ./unisacc.com tools/...` per case would cost another 11 s of product compile each).
+ *
+ * (1) --list: exit 0, caps=17 fast=8 slow=1 unreachable=8; all 17 cap texts appear in
+ *     tests/notcovered.tsv and in the list; each of the 8 unreachable caps carries a CAP_WHY reason.
+ * (2) the judging logic has teeth, proven with fixture products (shell stubs: fixture data, not an algorithm):
+ *       accept-all            past-cap run exits 0            -> the row must FAIL "past-cap was accepted";
+ *       refuse-all-with-cap   at-cap run carries the cap text -> the row must FAIL "at-cap refused";
+ *       refuse-all-other      at-cap run exits 1 with other text -> the row must FAIL "at-cap rc=1";
+ *       marker stub           accepts the at-cap source, refuses the past-cap source with other text
+ *                             -> the row must FAIL "past-cap rc=1" (the message must match, not just the rc).
+ * (3) usage: an unknown option exits 2; an unknown --only id measures nothing and exits 1.
+ * (4) the real product: the eight reachable fast caps are MEASURED with failed=0 (about 15 s); --no-real skips
+ *     that step and prints UNMEASURED instead of a PASS.
+ * Ends with CHECK_CAP_PROBE<TAB>assertions=N<TAB>failed=N.  Exit 0 only when every assertion passed. */
+#pragma unisa use sys.fs
+#pragma unisa use sys.io
+#pragma unisa use sys.env
+#pragma unisa use sys.proc
+#pragma unisa use sys.posix
+#pragma unisa use text.text
+#pragma unisa use text.fmt
+#pragma unisa use mem.heap
+#pragma unisa use mem.bytes
+#pragma unisa use cxlib.procrun
+
+#define CKC_DIR 4000
+#define CKC_OUT (1 << 20)
+
+static int failed, assertions;
+static char out[CKC_OUT];
+static char root[CKC_DIR], tool[CKC_DIR], work[CKC_DIR], product[CKC_DIR], bin[CKC_DIR];
+
+static void ck(int ok, const char *what) {
+    assertions++;
+    if (!ok) failed++;
+    printf("%s\t%s\n", ok ? "PASS" : "FAIL", what);
+}
+static void die(const char *what, const char *why) {
+    fprintf(stderr, "check-cap-probe: REFUSE %s%s%s\n", what, why && *why ? ": " : "", why ? why : "");
+    exit(2);
+}
+static void join(char *o, long cap, const char *a, const char *b) {
+    if (cx_fmt(o, (int)cap, "%s/%s", a, b)) die("path too long", b);
+}
+static int has(const char *s, const char *needle) {
+    return tx_find(s, (long)strlen(s), needle, (long)strlen(needle)) >= 0;
+}
+static int exists(const char *p) { sy_stat_t st; return sy_stat(p, &st) == 0; }
+
+/* Run the compiled tool; capture stdout+stderr into OUT, return the exit code. */
+static int run_tool(const char *a1, const char *a2, const char *a3, const char *a4, const char *a5) {
+    char *v[10]; int n = 0;
+    v[n++] = bin;
+    if (a1) v[n++] = (char *)a1;
+    if (a2) v[n++] = (char *)a2;
+    if (a3) v[n++] = (char *)a3;
+    if (a4) v[n++] = (char *)a4;
+    if (a5) v[n++] = (char *)a5;
+    v[n] = 0;
+    int cut = 0;
+    int rc = pr_run_merged(v, 55, out, (int)sizeof out, &cut);
+    if (cut) die("tool output truncated", a1);
+    return rc;
+}
+
+/* A fixture product: a shell stub that writes BODY to a file and runs it.  argv is ignored by the stub. */
+static void stub(const char *leaf, const char *body) {
+    char p[CKC_DIR];
+    join(p, sizeof p, work, leaf);
+    char text[CKC_DIR];
+    if (cx_fmt(text, (int)sizeof text, "#!/bin/sh\n%s\n", body)) die("stub too long", leaf);
+    if (cx_write(p, text, strlen(text))) die("cannot write", p);
+    if (sy_chmod(p, 0755)) die("cannot chmod", p);
+}
+
+int main(int argc, char **argv) {
+    int skip_real = 0;
+    for (int i = 1; i < argc; i++) {
+        if (!strcmp(argv[i], "--no-real")) skip_real = 1;
+        else { fprintf(stderr, "check-cap-probe: REFUSE unknown argument %s\n", argv[i]); return 2; }
+    }
+    if (sy_cwd(root, (int)sizeof root)) die("cannot read the working directory", 0);
+    if (cx_fmt(tool, sizeof tool, "%s/tools/cap-probe.cx", root)) die("path too long", "tool");
+    if (cx_fmt(product, sizeof product, "%s/unisacc.com", root)) die("path too long", "product");
+    if (cx_fmt(work, sizeof work, "%s/cap-probe-check-%d", sy_tmpdir(), (int)sy_pid())) die("path too long", "work");
+    if (sy_mkdir_all(work, 0700)) die("cannot create the work directory", work);
+    join(bin, sizeof bin, work, "cap-probe");
+
+    /* compile the tool once */
+    {
+        char *v[6];
+        v[0] = "sh"; v[1] = product; v[2] = tool; v[3] = "-o"; v[4] = bin; v[5] = 0;
+        int cut = 0;
+        int rc = pr_run_merged(v, 55, out, (int)sizeof out, &cut);
+        if (rc || cut || !exists(bin)) {
+            printf("FAIL\tthe tool compiles\n%s\n", out);
+            printf("CHECK_CAP_PROBE\tassertions=1\tfailed=1\n");
+            return 1;
+        }
+        ck(1, "the tool compiles");
+    }
+
+    /* (1) --list */
+    int rc = run_tool("--list", 0, 0, 0, 0);
+    ck(rc == 0, "list exits 0");
+    ck(has(out, "CAP_PROBE_LIST\tcaps=17\tfast=8\tslow=1\tunreachable=8"), "list counts 17/8/1/8");
+    {
+        size_t tn = 0; char *tb = cx_read("tests/notcovered.tsv", &tn);
+        ck(tb != 0, "notcovered table readable");
+        if (tb) {
+            static const char *msgs[] = {
+                "not covered: #error text longer than 283 bytes",
+                "not covered: more than 4000 #include splices",
+                "not covered: more than 4096 continuation lines in headers",
+                "not covered: constant beyond int",
+                "not covered: enum descriptor pool exhausted",
+                "not covered: function signature pool exhausted",
+                "not covered: setjmp inside an expression nested too deeply",
+                "not covered: structure id capacity",
+                "not covered: structure member capacity",
+                "not covered: host-forwarded call count exceeds 8192",
+                "not covered: object relocation capacity",
+                "not covered: ordered source layout facts limit or resource",
+                "not covered: recursive signature equality limit",
+                "not covered: setjmp temporary depth",
+                "not covered: shape descriptor capacity",
+                "not covered: signature graph equality budget",
+                "not covered: token input exceeds position domain",
+            };
+            int all_in_table = 1, all_in_list = 1;
+            for (int i = 0; i < 17; i++) {
+                if (!has(tb, msgs[i])) all_in_table = 0;
+                if (!has(out, msgs[i])) all_in_list = 0;
+            }
+            ck(all_in_table, "all 17 cap texts appear in tests/notcovered.tsv");
+            ck(all_in_list, "all 17 cap texts appear in --list");
+            mm_free(tb);
+        }
+        int reasons = 1;
+        const char *ids[] = { "forward-calls-8192", "relocation-capacity", "layoutfacts-sid", "signature-eq-depth",
+                              "setjmp-temp-depth", "shape-span", "modelgraph-budget", "token-position-span" };
+        for (int i = 0; i < 8; i++) {
+            char row[CKC_DIR];
+            if (cx_fmt(row, (int)sizeof row, "CAP_WHY\t%s\t", ids[i])) { reasons = 0; break; }
+            if (!has(out, row)) reasons = 0;
+        }
+        ck(reasons, "every unreachable cap names a reason");
+    }
+
+    /* (2) judging logic with fixture products */
+    {
+        char sp[CKC_DIR];
+        stub("accept.sh", "exit 0");
+        join(sp, sizeof sp, work, "accept.sh");
+        rc = run_tool("--only", "error-text-283", "--product", sp, 0);
+        ck(rc == 1 && has(out, "past-cap was accepted"), "an always-accepting product is caught as past-cap accepted");
+
+        stub("refuse.sh", "printf '%s\\n' 'not covered: #error text longer than 283 bytes' >&2\nexit 1");
+        join(sp, sizeof sp, work, "refuse.sh");
+        rc = run_tool("--only", "error-text-283", "--product", sp, 0);
+        ck(rc == 1 && has(out, "at-cap refused"), "an always-refusing product is caught as at-cap refused");
+
+        stub("other.sh", "printf '%s\\n' 'not covered: something else entirely' >&2\nexit 1");
+        join(sp, sizeof sp, work, "other.sh");
+        rc = run_tool("--only", "constant-beyond-int", "--product", sp, 0);
+        ck(rc == 1 && has(out, "at-cap rc=1"), "refusing the at-cap input is caught");
+
+        /* accepts the at-cap source, refuses the past-cap source with the WRONG words: rc alone must not pass */
+        stub("marker.sh",
+             "last=; for a in \"$@\"; do last=$a; done\n"
+             "if grep -q 9223372036854775808 \"$last\" 2>/dev/null; then\n"
+             "  printf '%s\\n' 'not covered: something else entirely' >&2\n  exit 1\n"
+             "fi\n"
+             "obj=; prev=; for a in \"$@\"; do if [ \"$prev\" = \"-o\" ]; then obj=$a; fi; prev=$a; done\n"
+             ": > \"$obj\"\nexit 0");
+        join(sp, sizeof sp, work, "marker.sh");
+        rc = run_tool("--only", "constant-beyond-int", "--product", sp, 0);
+        ck(rc == 1 && has(out, "past-cap rc=1"), "a refusal with the wrong words is caught (rc alone is not enough)");
+    }
+
+    /* (3) usage */
+    rc = run_tool("--bogus", 0, 0, 0, 0);
+    ck(rc == 2 && has(out, "REFUSE unknown argument"), "unknown option exits 2");
+    rc = run_tool("--only", "no-such-cap", 0, 0, 0);
+    ck(rc == 1 && has(out, "measured=0"), "an unknown --only id measures nothing and exits 1");
+
+    /* (4) the real product: the eight reachable fast caps still have a live edge (about 15 s) */
+    if (skip_real) {
+        printf("UNMEASURED\treal-product\t--no-real was passed; the eight fast caps were not run\n");
+    } else if (exists(product)) {
+        rc = run_tool("--work", work, 0, 0, 0);
+        ck(rc == 0 && has(out, "measured=8\tunreachable=8\tskipped=1\tfailed=0"), "real product: 8 fast caps MEASURED, none failed");
+    } else {
+        printf("UNMEASURED\treal-product\t%s absent\n", product);
+    }
+
+    printf("CHECK_CAP_PROBE\tassertions=%d\tfailed=%d\n", assertions, failed);
+    return failed ? 1 : 0;
+}

@@ -142,7 +142,79 @@ Lua 不完整数组:`static int t[];` 报 `not covered: incomplete array declara
 未查项:
 
 - Lua 到底用哪种不完整数组形状(realprog 源不在仓内,只有 `tools/realprog-fetch.cx`);
-- 库模式 64 的全部消费者未核(只确认 `librarytypes-result.tsv:69` 一处判定);
-- x16 的第二条 repro `v03_unclosed_main_fs` 未跑;
+- 库模式 64 的全部消费者:**已核**(2026-11-23)。见第 5 节补充。
+- x16 的第二条 repro `v03_unclosed_main_fs`:**已造并实跑**,原包 0.0.93 拒绝。见第 6 节。
 - shape 网 30 处 `CMPI` 与三项声明符的逐条对应未核;
 - 17 条 cap 的「实际可达性」全部 UNMEASURED,未造最小复现。
+
+## 5. 0.0.98 前端 A / 0.0.99 前端 B 的定稿拆法(cc 2026-11-23 采纳)
+
+| 版 | 内容 | 触及产品表 |
+|---|---|---|
+| 0.0.98 前端 A | f7ce6cf561(不完整 extern 数组前瞻早退)+ ffbb722538(括号内可修改左值后缀)+ x16 块作用域 extern + 库模式成员 64 -> 512 | `tentative-result.tsv`(头部)、`membercontrol-result.tsv`、`membercontrol-manifest.tsv`、`unarycontrol-result.tsv`、`control-result.tsv`(BX 段)、`librarytypes-result.tsv` |
+| 0.0.99 前端 B | 3775a03c71(全局对象重声明冲突)+ 不完整数组 `static int t[];` + 声明符三项 t04/t05/t10 + 17 条 cap 读 k2-caps | `control-result.tsv`(1181/1767/922/926)、`control-reject.tsv`(38/60)、`tentative-result.tsv`(尾部追加)、`unarycontrol-result.tsv`(185 常量上限)、另 10 张 cap 表 |
+
+两版不共行:
+
+| 表 | A 的行 | B 的行 |
+|---|---|---|
+| `tentative-result.tsv` | 第 2 行改写 + 新增 `DM.tent.ext` 2 行 | 原第 64 行之后追加 `GV.compat*` 35 行 + `DM.tent.test14` 分叉 |
+| `unarycontrol-result.tsv` | 第 48、50 行 | 第 185 行 `DEAD.big` |
+| `membercontrol-result.tsv` / `membercontrol-manifest.tsv` | 全部 | 无 |
+| `control-result.tsv` | 2410-2432 行 BX 段 | 1181、1767、922、926 行 |
+| `control-reject.tsv` | 无 | 38、60 行 |
+| `librarytypes-result.tsv` | 69 行(64 -> 512) | 无 |
+
+补丁落点实测(main 头 `998dc44aa6` 的 `git archive` 干净副本,`git apply --check`):
+
+- 三份补丁的 `exec/parse2/*` 产品表与三份新增 check/manifest **全部 rc=0**;
+- `tests/batches.tsv` 与 `tests/coverage.tsv` **全部 rc=1**,原因是 hunk 锚在分支表尾(`uaf-census`/`ckreceipt`/`core-abi-gen`),main 表尾已是 `e2steps`;纯位置漂移,不应用补丁而改尾追三行。
+- 三份补丁按 f7ce -> 3775 -> ffbb 顺序生成(ffbb 与 3775 的 coverage hunk 上下文已含前两者的行),单独应用会因上下文缺行失败。
+- 按 f7ce -> 3775 -> ffbb 依次 `git apply --include='exec/parse2/*'` 三次全 rc=0;最终 `tentative-result.tsv` 101 行 = 64 + 2 + 35,行区间不相交。
+
+备料产物(不入仓):`~/.local/share/unisacc/research/frontend-a-prep/` 下三份 `.patch` 与 `README.md`。
+
+### 5.1 库模式成员 64 的消费者(已核)
+
+结论:**库模式成员存储与默认路径共用同一槽位布局 `sid*512+i` 与同一 `SMEM`/`SMN` 常量,上限 64 只是一处纯判定,改 512 不需要改存储路径。**
+
+证据行:
+
+| 位置 | 原文片段 |
+|---|---|
+| `exec/parse2/librarytypes-result.tsv:69` | `[["CMPI","d_members",64]]`,b18==2 -> `LX.fail` |
+| `exec/parse2/librarytypes-result.tsv:90` | `[["ALUI","mul","d_key","d_sid",512],["ALU","add","d_key","d_key","d_i"],["LDX","d_key","d_key",["constant","b.SMEM"]]]` |
+| `exec/parse2/control-result.tsv:578` | `SB.memberput` 尾部 `[["ALUI","mul","u","sid",512],["ALU","add","u","u","t"],["STX","u",["constant","SMEM"],"k"]]` |
+| `exec/parse2/control-result.tsv:575` | 默认路径判定 `[["CMPI","t",512]]` |
+| `exec/facts/gen2-constants.tsv:52,53` | `SMN 40000000`、`SMEM 41000000` |
+
+因此 A 版只改 `librarytypes-result.tsv:69` 一处 64 -> 512,不需要动 `librarytypesv3-*`。
+
+**但有一处仍需注意**:`librarytypesv3-result.tsv:12` 另有一条 `[["CMPI","d_members",["constant","LF.ENTRY_LIMIT"]]]`,上限来自 `exec/facts/layoutfacts.tsv:23` `ENTRY_LIMIT 128`。这是 layoutfacts 路径的独立上限(128,不是 64),不属 A 版 64->512 范围;若 Lua 走 v3 路径,128 是否够需单独评估(**未核**)。
+
+## 6. x16 第二条复现 `v03_unclosed_main_fs`(已造,原包实跑)
+
+文件内容(1 行,已存 `~/.local/share/unisacc/research/frontend-a-prep/x16/v03_unclosed_main_fs.cx`,不入仓):
+
+```c
+int main(void){ extern int nowhere_defined; nowhere_defined = 3; printf("%d\n", nowhere_defined); return 0; }
+```
+
+与 `tests/notcovered-cases/x16_block_extern_decl.cx` 的区别:x16 的文件域**有** `int shared_v = 5;` 但声明在函数之后(不可见);v03 的文件域**完全没有**该对象,是「真正无文件域声明」的最简形。
+
+已装产品 0.0.93 实跑:
+
+```
+$ sh ./unisacc.com -c -b lnx/x86_64 v03_unclosed_main_fs.cx -o v03.o
+rc=1
+stdout: (空)
+stderr: v03_unclosed_main_fs.cx:1:43: error: not covered: block-scope extern object without a visible file-scope declaration
+          int main(void){ extern int nowhere_defined; nowhere_defined = 3; ...
+                                                      ^
+        1 error generated.
+产物: 无 v03.o
+```
+
+拒绝点 `1:43` 是 `nowhere_defined = 3` 的赋值位置(声明本身通过,使用处拒绝),与 `control-result.tsv:2415` `BX.unknown` 的语义一致:声明扫描网走完 `BX.token/equal/comma/end` 后落到 `BX.unknown`。
+
+因此 x16 修复后这两条都应转为接受(只要文件域存在可见声明);v03 这种「确实没有文件域声明」的用例按 C99 6.2.2p2 应当是合法 extern 声明,链接期才失败 —— 故修复后 v03 也应编译通过,链接时才报 undefined。这是 A 版验收必须覆盖的一条边界。

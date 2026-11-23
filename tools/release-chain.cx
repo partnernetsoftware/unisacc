@@ -84,14 +84,14 @@ static void show_prerun_version(void) {
     sy_printf("'\n");
 }
 static void show_prerun(void) {
-    sy_printf("CHAIN\tINPUT\tprerun\tfrom the version worktree after chain DONE, set absolute PRERUN_APE, PRERUN_IDS, PRERUN_TIMES, PRERUN_PRIORITY and persistent PRERUN_DIR\n");
+    sy_printf("CHAIN\tINPUT\tprerun\tfrom the version worktree after chain DONE, generate the inputs with release-chain prerun-inputs (it prints PRERUN_CMD), or set absolute PRERUN_APE, PRERUN_IDS, PRERUN_TIMES, PRERUN_PRIORITY and persistent PRERUN_DIR\n");
     sy_printf("CHAIN\tCMD\tP0\tprerun-plan\tsh ./unisacc.com tools/prerun-drive.cx -- plan "
               "--ids-file \"${PRERUN_IDS:?}\" --times-file \"${PRERUN_TIMES:?}\" "
-              "--priority-file \"${PRERUN_PRIORITY:?}\" --out \"${PRERUN_DIR:?}\" --normal-jobs 4\n");
+              "--priority-file \"${PRERUN_PRIORITY:?}\" --out \"${PRERUN_DIR:?}\" --normal-jobs 8 --window-lanes 3\n");
     sy_printf("CHAIN\tCMD\tP1\tprerun-start\tnohup timeout -k 10s 3600s sh -c '"
               "for attempt in 1 2; do "
               "sh ./unisacc.com tools/prerun-drive.cx -- run --root . --candidate \"$1\" --out \"$2\" "
-              "--resume --max-jobs 4 --keep-going && exit 0; "
+              "--window-lanes 3 --resume --max-jobs 4 --keep-going && exit 0; "
               "done; exit 1' sh \"${PRERUN_APE:?}\" \"${PRERUN_DIR:?}\" "
               ">> \"${PRERUN_DIR:?}/supervise.log\" 2>&1 &\n");
     sy_printf("CHAIN\tCMD\tP1b\tprerun-parallel-docs\twhile P1 and ci-early run in parallel, draft release/rollback.txt and release/notes-%s.md before P2 merge\n", version);
@@ -1469,13 +1469,29 @@ static int cmd_backup_evidence(int argc, char **argv) {
     return 0;
 }
 
+/* prerun-inputs: forwards to tools/prerun-inputs.cx (freezes PRERUN_IDS/TIMES/PRIORITY/DIR, prints PRERUN_CMD). */
+static int cmd_prerun_inputs(int argc, char **argv) {
+    char *v[64]; int n = 0;
+    if (argc > 56) usage("prerun-inputs: too many arguments");
+    v[n++] = "sh"; v[n++] = "./unisacc.com"; v[n++] = "tools/prerun-inputs.cx"; v[n++] = "--";
+    for (int i = 0; i < argc; i++) v[n++] = argv[i];
+    v[n] = 0;
+    np_result r = {0}; char why[512];
+    if (np_run(v, 0, 0, 55, &r, why, sizeof why)) usage(why);
+    if (r.out) sy_printf("%s", r.out);
+    if (r.err && r.err[0]) sy_eprintf("%s", r.err);
+    int rc = r.rc; np_free(&r);
+    return rc;
+}
+
 int main(int argc, char **argv) {
     if (argc >= 2 && !strcmp(argv[1], "retry-ci")) return cmd_retry_ci(argc - 2, argv + 2);
     if (argc >= 2 && !strcmp(argv[1], "check-ef-counts")) return cmd_check_ef_counts(argc - 2, argv + 2);
     if (argc >= 2 && !strcmp(argv[1], "freeze-conflicts")) return cmd_freeze_conflicts(argc - 2, argv + 2);
     if (argc >= 2 && !strcmp(argv[1], "mark-version-seq")) return cmd_mark_version_seq(argc - 2, argv + 2);
     if (argc >= 2 && !strcmp(argv[1], "backup-evidence")) return cmd_backup_evidence(argc - 2, argv + 2);
-    if (argc < 2 || (strcmp(argv[1], "run") && strcmp(argv[1], "plan"))) usage("run|plan|retry-ci|check-ef-counts|freeze-conflicts|mark-version-seq|backup-evidence");
+    if (argc >= 2 && !strcmp(argv[1], "prerun-inputs")) return cmd_prerun_inputs(argc - 2, argv + 2);
+    if (argc < 2 || (strcmp(argv[1], "run") && strcmp(argv[1], "plan"))) usage("run|plan|retry-ci|check-ef-counts|freeze-conflicts|mark-version-seq|backup-evidence|prerun-inputs");
     planning = !strcmp(argv[1], "plan");
     for (int i = 2; i < argc; i++) {
         const char *k = argv[i], *v = i + 1 < argc ? argv[i + 1] : 0;

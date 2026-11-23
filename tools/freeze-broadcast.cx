@@ -1,0 +1,305 @@
+/* tools/freeze-broadcast.cx -- freeze-day mux broadcasts (start/phase/end/abort).
+ *
+ *   sh ./unisacc.com tools/freeze-broadcast.cx -- start|end|abort|phase NAME
+ *       [--windows-table PATH] [--mux CMD] [--tmux CMD] [--dry]
+ *       [--lock NAME] [--until TEXT] [--load-ceil N] [--why TEXT]
+ *       [--ledger-dir DIR] [--from NAME] [--session S]
+ *
+ * Recipients: tmux list-windows names intersect include=1 rows of the windows table
+ * (default skills/unisacc-orch-supervise/freeze-broadcast-windows.tsv). Each send uses
+ * mux envelope --body-file; stdout must contain "submitted". Failures listed for resend.
+ * Ledger line under sr_default(freeze-broadcast)/ledger.tsv (not in-repo). --dry prints only. */
+#pragma unisa use cxlib.ckrun
+#pragma unisa use cxlib.procrun
+#pragma unisa use cxlib.sessionroot
+#pragma unisa use sys.fs
+#pragma unisa use sys.env
+#pragma unisa use sys.time
+#pragma unisa use sys.proc
+#pragma unisa use text.text
+#pragma unisa use text.num
+#pragma unisa use mem.heap
+#pragma unisa use mem.bytes
+
+#define FB_MAX 64
+#define FB_CAP 900
+
+static char g_table[1100], g_mux[900], g_tmux[900], g_ledger[1100], g_from[80], g_session[40];
+static char g_lock[80], g_until[120], g_why[400], g_cmd[40], g_phase[40];
+static int g_dry, g_mutant_no_resend, g_load_ceil = 8;
+static char g_inc[FB_MAX][64]; static int g_ninc;
+static char g_ok[FB_MAX][64]; static int g_nok;
+static char g_fail[FB_MAX][64]; static int g_nfail;
+
+static int die(const char *m) { fprintf(stderr, "freeze-broadcast: %s\n", m); return 2; }
+
+static int load_whitelist(const char *path) {
+    unsigned char *b; int64_t n; long i = 0, row = 0;
+    g_ninc = 0;
+    if (sy_read_file(path, &b, &n, 1 << 20) < 0 || !b) return die("read windows-table");
+    while (i < n && g_ninc < FB_MAX) {
+        long s = i, e, t1 = -1, t2 = -1, j;
+        while (i < n && b[i] != '\n') i++;
+        e = i; if (i < n) i++;
+        if (e <= s || b[s] == '#') continue;
+        row++;
+        if (row == 1) continue;
+        for (j = s; j < e; j++) {
+            if (b[j] != '\t') continue;
+            if (t1 < 0) t1 = j;
+            else if (t2 < 0) { t2 = j; break; }
+        }
+        if (t1 < 0 || t2 < 0) { mm_free(b); return die("windows-table need 3 cols"); }
+        if (t2 + 1 < e && b[t1 + 1] == '1' && (t1 + 2 == t2)) {
+            long wl = t1 - s;
+            if (wl <= 0 || wl >= 64) { mm_free(b); return die("window name"); }
+            mm_copy(g_inc[g_ninc], 64, b + s, wl); g_inc[g_ninc][wl] = 0;
+            g_ninc++;
+        }
+    }
+    mm_free(b);
+    return g_ninc > 0 ? 0 : die("whitelist empty");
+}
+
+static int name_included(const char *name) {
+    int i;
+    for (i = 0; i < g_ninc; i++) if (tx_eqz(g_inc[i], name)) return 1;
+    return 0;
+}
+
+static int list_targets(char out[][64], int *nout) {
+    char cmd[1200], buf[1 << 16]; int rc; long i = 0, n;
+    *nout = 0;
+    if (cx_fmt(cmd, sizeof cmd, "%s list-windows -a -F '#{window_name}' 2>/dev/null", g_tmux)) return -1;
+    buf[0] = 0;
+    rc = ckk_sh_t("fb-tmux", cmd, buf, (int)sizeof buf, 20);
+    if (rc != 0) return -1;
+    n = tx_len(buf, sizeof buf);
+    while (i < n && *nout < FB_MAX) {
+        long s = i, e, k; char name[64]; int dup = 0, j;
+        while (i < n && buf[i] != '\n') i++;
+        e = i; if (i < n) i++;
+        if (e <= s || e - s >= 64) continue;
+        mm_copy(name, sizeof name, buf + s, e - s); name[e - s] = 0;
+        if (!name_included(name)) continue;
+        for (j = 0; j < *nout; j++) if (tx_eqz(out[j], name)) dup = 1;
+        if (dup) continue;
+        cx_fmt(out[*nout], 64, "%s", name);
+        (*nout)++;
+        (void)k;
+    }
+    return 0;
+}
+
+static void build_body(char *body, long cap) {
+    body[0] = 0;
+    if (tx_eqz(g_cmd, "start")) {
+        cx_fmt(body, cap,
+            "冻结广播 START\n"
+            "静默开始:S1 前起至结束广播前,除集成者外暂停重检查(derive/ratchets/批量 tests/构造/全量 premerge-union);只读与轻编辑可保留。\n"
+            "禁写域:src/ cx/ ext/ exec/ include/ seed/ kernel/;harness(tests/ 与链/预跑/release-* 相关 tools);release/ 除集成者外不写。\n"
+            "负载阈值:起 S2/S3 前 uptime 1 分钟负载 < %d;过高先等或收尾,禁止硬起。运行中负载超 12 时 S3 重跑/续跑降为 --window-lanes 2 --max-jobs 6。\n"
+            "持锁/集成者:%s(devsvc lock acquire freeze --ttl 7200;同属主续期;强拦截以 precommit freeze.tsv 为准)。\n"
+            "提交 trailer:域内提交须带 X-Unisacc-Window 对齐 freeze owner;裸 git 无 trailer 一律 VIOLATION(freeze-watch)。\n"
+            "预计结束:%s\n"
+            "结束条件:收到 END(公开读回完成)或 ABORT(中止)广播后才可恢复重检查;未收到前不得恢复。\n",
+            g_load_ceil, g_lock[0] ? g_lock : "cc", g_until[0] ? g_until : "(见 freeze.tsv deadline)");
+    } else if (tx_eqz(g_cmd, "phase")) {
+        if (tx_eqz(g_phase, "S10")) {
+            cx_fmt(body, cap,
+                "冻结广播 PHASE S10\n"
+                "请按手册该阶段动作推进;禁写域与静默规则仍有效;持锁/集成者:%s。\n"
+                "S10 编排: sh ./unisacc.com tools/release-post.cx -- run --version V --dry\n"
+                "(先 dry 全绿再 --execute; Root 升级另加 --root-upgrade;不自动执行)。\n",
+                g_lock[0] ? g_lock : "cc");
+        } else {
+            cx_fmt(body, cap,
+                "冻结广播 PHASE %s\n"
+                "请按手册该阶段动作推进;禁写域与静默规则仍有效;持锁/集成者:%s。\n",
+                g_phase, g_lock[0] ? g_lock : "cc");
+        }
+    } else if (tx_eqz(g_cmd, "end")) {
+        cx_fmt(body, cap,
+            "冻结广播 END\n"
+            "静默结束:可恢复重检查与常规提交纪律;禁写域随 freeze.tsv 解除一并失效(以 precommit freeze_gate 为准)。\n");
+    } else if (tx_eqz(g_cmd, "abort")) {
+        cx_fmt(body, cap,
+            "冻结广播 ABORT\n"
+            "本次冻结中止。原因:%s\n"
+            "静默结束;勿继续按冻结期节奏推进,等待集成者下一指令。\n",
+            g_why[0] ? g_why : "(未写)");
+    }
+}
+
+static int has_ci_local(const char *s, long n, const char *needle) {
+    long nl = tx_len(needle, 80), i, j;
+    if (nl <= 0 || n < nl) return 0;
+    for (i = 0; i + nl <= n; i++) {
+        for (j = 0; j < nl; j++) {
+            unsigned char a = (unsigned char)s[i + j], b = (unsigned char)needle[j];
+            if (a >= 'A' && a <= 'Z') a = (unsigned char)(a - 'A' + 'a');
+            if (b >= 'A' && b <= 'Z') b = (unsigned char)(b - 'A' + 'a');
+            if (a != b) break;
+        }
+        if (j == nl) return 1;
+    }
+    return 0;
+}
+
+static int send_one(const char *window, const char *title, const char *body_path, int *ok) {
+    char cmd[2400], out[4000], spec[120]; int rc;
+    *ok = 0;
+    if (g_session[0]) cx_fmt(spec, sizeof spec, "%s:%s", g_session, window);
+    else cx_fmt(spec, sizeof spec, "%s", window);
+    if (g_from[0]) {
+        if (cx_fmt(cmd, sizeof cmd, "%s envelope --from '%s' --body-file '%s' -- '%s' '%s'",
+                   g_mux, g_from, body_path, spec, title)) return -1;
+    } else {
+        if (cx_fmt(cmd, sizeof cmd, "%s envelope --body-file '%s' -- '%s' '%s'",
+                   g_mux, body_path, spec, title)) return -1;
+    }
+    out[0] = 0;
+    rc = ckk_sh_t("fb-mux", cmd, out, (int)sizeof out, 30);
+    if (rc == 0 && has_ci_local(out, tx_len(out, sizeof out), "submitted")) { *ok = 1; return 0; }
+    return 0;
+}
+
+static int append_ledger(const char *title) {
+    char path[1200], line[2000], wins[800], fails[800]; long now; int i, n;
+    if (!g_ledger[0]) return 0;
+    sy_mkdir_all(g_ledger, 0700);
+    if (cx_fmt(path, sizeof path, "%s/ledger.tsv", g_ledger)) return -1;
+    wins[0] = 0; fails[0] = 0; n = 0;
+    for (i = 0; i < g_nok; i++) {
+        if (n) { if (n + 1 < (int)sizeof wins) wins[n++] = ','; }
+        { long wl = tx_len(g_ok[i], 64); if (n + wl < (int)sizeof wins) { mm_copy(wins + n, sizeof wins - n, g_ok[i], wl); n += (int)wl; wins[n] = 0; } }
+    }
+    n = 0;
+    for (i = 0; i < g_nfail; i++) {
+        if (n) { if (n + 1 < (int)sizeof fails) fails[n++] = ','; }
+        { long wl = tx_len(g_fail[i], 64); if (n + wl < (int)sizeof fails) { mm_copy(fails + n, sizeof fails - n, g_fail[i], wl); n += (int)wl; fails[n] = 0; } }
+    }
+    now = sy_wall_s();
+    if (cx_fmt(line, sizeof line, "%ld\t%s\t%s\tok=%d\tfail=%d\tok_windows=%s\tfail_windows=%s\n",
+               now, g_cmd[0] ? g_cmd : "-", title, g_nok, g_nfail,
+               wins[0] ? wins : "-", fails[0] ? fails : "-")) return -1;
+    {
+        /* append */
+        unsigned char *old; int64_t on = 0; char *nb; long nn, ol = 0;
+        if (sy_exists(path) == 1) sy_read_file(path, &old, &on, 1 << 22);
+        else { old = 0; on = 0; }
+        ol = (long)on; nn = ol + tx_len(line, sizeof line);
+        nb = (char *)mm_alloc(nn + 1);
+        if (!nb) { if (old) mm_free(old); return -1; }
+        if (ol > 0) mm_copy(nb, nn + 1, old, ol);
+        mm_copy(nb + ol, nn + 1 - ol, line, tx_len(line, sizeof line));
+        nb[nn] = 0;
+        if (old) mm_free(old);
+        if (sy_write_file(path, nb, (int64_t)nn, 0600)) { mm_free(nb); return -1; }
+        mm_free(nb);
+    }
+    printf("FREEZE_BROADCAST_LEDGER\tpath=%s\n", path);
+    return 0;
+}
+
+static int run_broadcast(void) {
+    char targets[FB_MAX][64]; int nt = 0, i, round, title_ok = 0;
+    char body[4000], body_path[1200], title[200], tmpdir[900];
+    const char *td;
+    g_nok = 0; g_nfail = 0;
+    if (list_targets(targets, &nt)) return die("tmux list-windows failed");
+    build_body(body, sizeof body);
+    if (tx_eqz(g_cmd, "start")) cx_fmt(title, sizeof title, "冻结广播 START");
+    else if (tx_eqz(g_cmd, "phase")) cx_fmt(title, sizeof title, "冻结广播 PHASE %s", g_phase);
+    else if (tx_eqz(g_cmd, "end")) cx_fmt(title, sizeof title, "冻结广播 END");
+    else if (tx_eqz(g_cmd, "abort")) cx_fmt(title, sizeof title, "冻结广播 ABORT");
+    else return die("cmd");
+    printf("FREEZE_BROADCAST\tcmd=%s\ttargets=%d\tdry=%d\n", g_cmd, nt, g_dry);
+    for (i = 0; i < nt; i++) printf("FREEZE_BROADCAST_TARGET\t%s\n", targets[i]);
+    if (g_dry) {
+        printf("FREEZE_BROADCAST_BODY\n%s", body);
+        printf("FREEZE_BROADCAST\tDRY\tok=0\tfail=0\n");
+        return 0;
+    }
+    td = sy_env("TMPDIR"); if (!td || !td[0]) td = "/tmp";
+    if (cx_fmt(tmpdir, sizeof tmpdir, "%s/fb-body-%d", td, sy_pid())) return die("tmpdir");
+    sy_mkdir_all(tmpdir, 0700);
+    if (cx_fmt(body_path, sizeof body_path, "%s/body.txt", tmpdir)) return die("body");
+    if (sy_write_file(body_path, body, (int64_t)tx_len(body, sizeof body), 0600)) return die("write body");
+    /* first pass */
+    for (i = 0; i < nt; i++) {
+        int ok = 0;
+        send_one(targets[i], title, body_path, &ok);
+        if (ok) { cx_fmt(g_ok[g_nok], 64, "%s", targets[i]); g_nok++; printf("FREEZE_BROADCAST_SENT\t%s\n", targets[i]); }
+        else { cx_fmt(g_fail[g_nfail], 64, "%s", targets[i]); g_nfail++; printf("FREEZE_BROADCAST_FAIL\t%s\n", targets[i]); }
+    }
+    /* one resend pass for failures */
+    if (g_nfail > 0 && !g_mutant_no_resend) {
+        char retry[FB_MAX][64]; int nr = g_nfail, j;
+        for (j = 0; j < nr; j++) cx_fmt(retry[j], 64, "%s", g_fail[j]);
+        g_nfail = 0;
+        printf("FREEZE_BROADCAST_RESEND\tcount=%d\n", nr);
+        for (j = 0; j < nr; j++) {
+            int ok = 0;
+            send_one(retry[j], title, body_path, &ok);
+            if (ok) { cx_fmt(g_ok[g_nok], 64, "%s", retry[j]); g_nok++; printf("FREEZE_BROADCAST_SENT\t%s\tresend\n", retry[j]); }
+            else { cx_fmt(g_fail[g_nfail], 64, "%s", retry[j]); g_nfail++; printf("FREEZE_BROADCAST_FAIL\t%s\tresend\n", retry[j]); }
+        }
+    }
+    append_ledger(title);
+    printf("FREEZE_BROADCAST\tDONE\tok=%d\tfail=%d\n", g_nok, g_nfail);
+    if (g_nfail > 0) {
+        printf("FREEZE_BROADCAST_RETRY\t");
+        for (i = 0; i < g_nfail; i++) { if (i) printf(","); printf("%s", g_fail[i]); }
+        printf("\n");
+    }
+    (void)title_ok; (void)round;
+    return g_nfail ? 1 : 0;
+}
+
+int main(int argc, char **argv) {
+    int a = 1;
+    g_table[0] = g_mux[0] = g_tmux[0] = g_ledger[0] = g_from[0] = g_session[0] = 0;
+    g_lock[0] = g_until[0] = g_why[0] = g_cmd[0] = g_phase[0] = 0;
+    cx_fmt(g_tmux, sizeof g_tmux, "tmux");
+    cx_fmt(g_mux, sizeof g_mux, "mux");
+    cx_fmt(g_lock, sizeof g_lock, "cc");
+    while (a < argc) {
+        if (tx_eqz(argv[a], "start") || tx_eqz(argv[a], "end") || tx_eqz(argv[a], "abort")) {
+            if (cx_fmt(g_cmd, sizeof g_cmd, "%s", argv[a])) return die("cmd");
+        } else if (tx_eqz(argv[a], "phase") && a + 1 < argc) {
+            if (cx_fmt(g_cmd, sizeof g_cmd, "phase")) return die("cmd");
+            if (cx_fmt(g_phase, sizeof g_phase, "%s", argv[++a])) return die("phase");
+        } else if (tx_eqz(argv[a], "--windows-table") && a + 1 < argc) {
+            if (cx_fmt(g_table, sizeof g_table, "%s", argv[++a])) return die("table");
+        } else if (tx_eqz(argv[a], "--mux") && a + 1 < argc) {
+            if (cx_fmt(g_mux, sizeof g_mux, "%s", argv[++a])) return die("mux");
+        } else if (tx_eqz(argv[a], "--tmux") && a + 1 < argc) {
+            if (cx_fmt(g_tmux, sizeof g_tmux, "%s", argv[++a])) return die("tmux");
+        } else if (tx_eqz(argv[a], "--dry")) g_dry = 1;
+        else if (tx_eqz(argv[a], "--mutant-no-resend")) g_mutant_no_resend = 1;
+        else if (tx_eqz(argv[a], "--lock") && a + 1 < argc) {
+            if (cx_fmt(g_lock, sizeof g_lock, "%s", argv[++a])) return die("lock");
+        } else if (tx_eqz(argv[a], "--until") && a + 1 < argc) {
+            if (cx_fmt(g_until, sizeof g_until, "%s", argv[++a])) return die("until");
+        } else if (tx_eqz(argv[a], "--why") && a + 1 < argc) {
+            if (cx_fmt(g_why, sizeof g_why, "%s", argv[++a])) return die("why");
+        } else if (tx_eqz(argv[a], "--load-ceil") && a + 1 < argc) {
+            g_load_ceil = (int)tx_strtol(argv[++a], 0, 10); if (g_load_ceil < 1) return die("load-ceil");
+        } else if (tx_eqz(argv[a], "--ledger-dir") && a + 1 < argc) {
+            if (cx_fmt(g_ledger, sizeof g_ledger, "%s", argv[++a])) return die("ledger");
+        } else if (tx_eqz(argv[a], "--from") && a + 1 < argc) {
+            if (cx_fmt(g_from, sizeof g_from, "%s", argv[++a])) return die("from");
+        } else if (tx_eqz(argv[a], "--session") && a + 1 < argc) {
+            if (cx_fmt(g_session, sizeof g_session, "%s", argv[++a])) return die("session");
+        } else return die("usage: start|end|abort|phase NAME [--dry] [--windows-table P] [--mux C] [--tmux C]");
+        a++;
+    }
+    if (!g_cmd[0]) return die("need start|end|abort|phase");
+    if (!g_table[0] && cx_fmt(g_table, sizeof g_table, "skills/unisacc-orch-supervise/freeze-broadcast-windows.tsv")) return die("table");
+    if (!g_ledger[0]) {
+        if (sr_default("freeze-broadcast", g_ledger, sizeof g_ledger)) return die("sr_default");
+    }
+    if (load_whitelist(g_table)) return 2;
+    return run_broadcast();
+}

@@ -337,6 +337,58 @@ static void cand_cases(const char *work, const char *cwork, const char *ape, con
     ck(tx_eqz(rg0, rg1), "cand-real-root-untouched", rg1);
 }
 
+static void pub_backup_cases(const char *work, const char *ape, const char *real) {
+    char proot[4400], com[4400], bj[4400], rcp[4400], bk[4400], man[4500], out[8192], hprev[65];
+    char *ba[4], *ra[4];
+    if (cx_fmt(proot, sizeof proot, "%s/pub-backup-root", work) || sy_mkdir(proot, 0755) ||
+        cx_fmt(com, sizeof com, "%s/unisacc.com", proot) ||
+        cx_fmt(bj, sizeof bj, "%s/unisacc.com.build.json", proot) ||
+        cx_fmt(rcp, sizeof rcp, "%s/ape-receipt.txt", proot) ||
+        cx_fmt(bk, sizeof bk, "%s/.unisacc-root-backups", proot)) return;
+    if (sy_copy(ape, com, 0755) || write_file(bj, "{\"product_kind\":\"ape1\"}\n", 0600) ||
+        write_file(rcp, "unisacc.com\tAPE\tsha=00\tbytes=1\n", 0644)) return;
+    /* 1. --backup dryrun writes nothing */
+    ba[0] = proot; ba[1] = "--backup"; ba[2] = 0;
+    ck(tool_args(ba, out, (int)sizeof out) == 0 && has(out, "BACKUP_DRYRUN") && json_has(out, tx_len(out, (long)sizeof out), real, 64) && index_lines(proot) < 0,
+       "pub-backup-dryrun-writes-nothing", out);
+    /* 2. --backup --write creates compliant slot and --rollback dryrun passes */
+    ba[2] = "--write"; ba[3] = 0;
+    ck(tool_args(ba, out, (int)sizeof out) == 0 && has(out, "BACKUP") && index_lines(proot) == 1,
+       "pub-backup-write-creates-slot", out);
+    ra[0] = proot; ra[1] = "--rollback"; ra[2] = 0;
+    ck(tool_args(ra, out, (int)sizeof out) == 0 && has(out, "ROLLBACK_DRYRUN") && json_has(out, tx_len(out, (long)sizeof out), real, 64),
+       "pub-backup-rollback-dryrun-passes", out);
+    /* 3. 1-byte tamper in manifest.tsv causes --rollback to refuse */
+    if (!cx_fmt(man, sizeof man, "%s/%s/manifest.tsv", bk, real)) {
+        size_t mn = 0; char *mb = cx_read(man, &mn);
+        if (mb && mn > 20) {
+            mb[mn - 2] = (mb[mn - 2] == '0') ? '1' : '0';
+            (void)cx_write(man, mb, mn);
+            ck(tool_args(ra, out, (int)sizeof out) == 1 && (has(out, "backup-file-differs-from-manifest") || has(out, "backup-manifest-malformed")),
+               "pub-backup-tampered-manifest-refused", out);
+            mm_free(mb);
+        } else { ck(0, "pub-backup-tampered-manifest-refused", "missing manifest"); if (mb) mm_free(mb); }
+    }
+    /* 4. public install over an existing APE Root automatically creates a backup slot */
+    {
+        char proot2[4400], com2[4400];
+        if (cx_fmt(proot2, sizeof proot2, "%s/pub-auto-root", work) || sy_mkdir(proot2, 0755) ||
+            cx_fmt(com2, sizeof com2, "%s/unisacc.com", proot2)) return;
+        size_t an = 0; char *ab = cx_read(ape, &an);
+        if (!ab || an < 64) { if (ab) mm_free(ab); return; }
+        /* Flip one byte in the leading shell comment so UNIPKG1 footer stays intact while sha256 differs */
+        ab[2] = (ab[2] == 'x') ? 'y' : 'x';
+        int wbad = cx_write(com2, ab, an);
+        mm_free(ab);
+        if (wbad || sha_of(com2, hprev)) return;
+        ck(tool(proot2, ape, real, 1, out, (int)sizeof out) == 0 && has(out, "BACKUP") && has(out, "INSTALLED") && index_lines(proot2) == 1,
+           "pub-install-over-ape-auto-backs-up", out);
+        ra[0] = proot2; ra[1] = "--rollback"; ra[2] = 0;
+        ck(tool_args(ra, out, (int)sizeof out) == 0 && has(out, "ROLLBACK_DRYRUN") && json_has(out, tx_len(out, (long)sizeof out), hprev, 64),
+           "pub-install-auto-backup-rollback-dryrun", out);
+    }
+}
+
 int main(int argc, char **argv) {
     char work[4400], ape[4400], root[4400], com[4400], dev[4400], rec[4400], junk[4400], fake[4400];
     char want[65], h0[65], h1[65], out[2048], launcher[4400], cwork[4400];
@@ -581,6 +633,7 @@ int main(int argc, char **argv) {
                 ck(unisa_safedel(cwork, SAFEDEL_PURGE | SAFEDEL_RECURSIVE | SAFEDEL_DRYRUN, 10, why, (int)sizeof why) == SAFEDEL_REFUSED,
                    "cand-fixture-outside-removal-whitelist", cwork);
                 cand_cases(work, cwork, ape, real, ape_bytes);
+                pub_backup_cases(work, ape, real);
                 /* bring the private fixture under the temp scratch, then remove both with the bounded safedel below */
                 if (cx_fmt(cache, sizeof cache, "%s/croot-moved", work) || sy_rename(cwork, cache)) sy_eprintf("check-install-ape: private fixture %s kept\n", cwork);
             }

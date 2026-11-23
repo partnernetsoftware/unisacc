@@ -1,0 +1,350 @@
+/* tools/e2-evidence-receipt.cx -- one receipt over the persistent e2 equivalence ledgers of a model-pack pair.
+ *
+ *   sh ./unisacc.com tools/e2-evidence-receipt.cx -- --root DIR [--spec FILE] [--out FILE]
+ *
+ * DIR is the persistent evidence directory (outside the repository); every path in the spec is relative to it.
+ * SPEC (default DIR/e2-evidence-sources.tsv), one source per line, TAB separated, '#' lines ignored:
+ *   name  kind  manifest  ledgers  pack-a  pack-b  claim
+ *     kind      ppeq    pp-equiv ledger rows  PPEQ msha stratum mode path id-a id-b status reason detail
+ *               uec     unit-e2-compare rows  UEC msha stratum path id-a id-b status reason detail
+ *               oracle  -o replay rows        ORACLE status mode path ...  (no manifest: manifest is "-", the
+ *                       denominator is claim total=N and rows not yet seen count as pending; a rerun row for a
+ *                       path replaces an UNMEASURED one, repeats are ignored, two different decided verdicts for one
+ *                       path are a conflict; the replay's WORKER_DONE / CUMULATIVE / ORACLE_SUMMARY lines are skipped)
+ *     manifest  the frozen manifest file; its sha256 must be the msha of every ledger row (oracle: -)
+ *     ledgers   comma separated ledger files
+ *     pack-a/b  the two model pack files; their sha256 must be the id-a / id-b of every row (oracle: -)
+ *     claim     the summary under audit, comma separated key=N over total,same,refuse,diff,unmeasured,pending
+ *               (or -).  Existing summary lines are never trusted: every count is recomputed from the rows.
+ * Recomputed per source: manifest sha256, total (manifest rows), same / refuse (REFUSE_PP, REFUSE_SAME) / diff /
+ * unmeasured (UNMEASURED, REFUSE_PRE), pending (manifest rows without a ledger row), the e2 step totals of the
+ * rows that carry " steps=A/B" (shared fold, cxlib.e2steps) with the drop in permille, the pack sha256 pair and
+ * the sha256 of the ledger files concatenated in spec order.
+ * A source is INCOMPLETE:REASON,.. when a file is missing, a row has a foreign manifest sha / pack id / tag or an
+ * unknown status (foreign), a row's key is not in the manifest (extra) or repeats (dup), pending > 0, diff > 0,
+ * unmeasured > 0, or a claim differs from the recomputed value.  Output (stdout and --out FILE):
+ *   E2_EVIDENCE_COLS ..., one E2_EVIDENCE_ROW per source, then the last line
+ *   E2_EVIDENCE status=COMPLETE|INCOMPLETE:name=reason,.. sources=N
+ * rc 0 only for COMPLETE.  The receipt is a candidate for release/evidence/; the integrator copies it at the freeze.
+ * Check: tools/check-e2-evidence-receipt.cx. */
+#pragma unisa use sys.fs
+#pragma unisa use sys.sha
+#pragma unisa use text.text
+#pragma unisa use mem.heap
+#pragma unisa use mem.bytes
+#pragma unisa use cxlib.e2steps
+#pragma unisa use cxlib.die
+
+#define TOOL "e2-evidence-receipt"
+#define MAXSRC 32
+#define MAXMROW 8192
+#define HSIZE 32768
+#define MAXLED 128
+
+typedef struct { char *key; int idx; } Slot;
+static Slot tab[HSIZE];
+static char *mkey[MAXMROW];
+static unsigned char mst[MAXMROW];   /* 0 none, 1 same, 2 refuse, 3 diff, 4 unmeasured */
+static int nm;
+
+static void need(int ok, const char *why) { if (!ok) tool_die(TOOL, why, 0, 2); }
+
+static unsigned long hs(const char *s) { unsigned long h = 5381; while (*s) h = h * 33 + (unsigned char)*s++; return h; }   /* djb2 */
+static int find_slot(const char *key, int add, int idx) {
+    unsigned long h = hs(key) & (HSIZE - 1);
+    for (int n = 0; n < HSIZE; n++, h = (h + 1) & (HSIZE - 1)) {
+        if (!tab[h].key) { if (add) { tab[h].key = (char *)key; tab[h].idx = idx; return idx; } return -1; }
+        if (!strcmp(tab[h].key, key)) return tab[h].idx;
+    }
+    return -1;
+}
+static char *sdup(const char *s) { size_t n = strlen(s); char *d = mm_alloc(n + 1); mm_copy(d, (long)n + 1, s, (long)n + 1); return d; }
+
+static void sha_hex(const void *p, size_t n, char out[65]) { sy_sha256_hex(p, (long)n, out); }
+
+/* a tab-split of one line in place: returns the field count (at most MAXF) */
+#define MAXF 16
+static int split(char *line, char *f[MAXF]) {
+    int n = 0;
+    f[n++] = line;
+    for (char *p = line; *p && n < MAXF; p++) if (*p == '\t') { *p = 0; f[n++] = p + 1; }
+    return n;
+}
+
+typedef struct {
+    char name[64], kind[16], manifest[512], ledgers[8192], pa[512], pb[512], claim[512];
+    char msha[65], ida[65], idb[65], lsha[65];
+    long total, same, refuse, diff, unmeasured, pending, foreign, extra, dup;
+    long acc[5];
+    char why[600];
+} Src;
+
+static void why_add(Src *s, const char *w) {
+    size_t n = strlen(s->why);
+    if (n + strlen(w) + 2 >= sizeof s->why) return;
+    if (n) s->why[n++] = ',';
+    mm_copy(s->why + n, (long)(sizeof s->why - n), w, (long)strlen(w) + 1);
+}
+static void why_addf(Src *s, const char *w, const char *arg) {
+    char one[600];
+    if (cx_fmt(one, sizeof one, "%s:%s", w, arg)) return;
+    why_add(s, one);
+}
+
+static int status_code(const char *st) {
+    if (!strcmp(st, "SAME")) return 1;
+    if (!strcmp(st, "REFUSE_PP") || !strcmp(st, "REFUSE_SAME")) return 2;
+    if (!strcmp(st, "DIFF")) return 3;
+    if (!strcmp(st, "UNMEASURED") || !strcmp(st, "REFUSE_PRE")) return 4;
+    return 0;
+}
+static void count_status(Src *s, int c) {
+    if (c == 1) s->same++; else if (c == 2) s->refuse++; else if (c == 3) s->diff++; else if (c == 4) s->unmeasured++;
+}
+
+static char *path_in(const char *root, const char *rel, char *buf, size_t cap) {
+    if (cx_fmt(buf, cap, "%s/%s", root, rel)) tool_die(TOOL, "path too long", rel, 2);
+    return buf;
+}
+
+static void load_manifest(Src *s, const char *root, int ppeq) {
+    char p[2600]; size_t n = 0;
+    char *text = cx_read(path_in(root, s->manifest, p, sizeof p), &n);
+    if (!text) { why_addf(s, "missing-file", s->manifest); return; }
+    sha_hex(text, n, s->msha);
+    nm = 0;
+    memset(tab, 0, sizeof tab);
+    for (char *q = text; q < text + n; ) {
+        char *e = memchr(q, '\n', (size_t)(text + n - q));
+        if (!e) e = text + n;
+        *e = 0;
+        if (*q && *q != '#') {
+            char *f[MAXF];
+            int k = split(q, f);
+            if ((ppeq && k < 4) || (!ppeq && k < 3)) { why_add(s, "bad-manifest-row"); }
+            else {
+                char key[1400];
+                if (ppeq) cx_fmt(key, sizeof key, "%s\t%s\t%s", f[0], f[3], f[1]);   /* stratum mode path */
+                else cx_fmt(key, sizeof key, "%s\t%s", f[0], f[1]);               /* stratum path */
+                if (nm >= MAXMROW) { why_add(s, "manifest-too-large"); break; }
+                if (find_slot(key, 0, 0) >= 0) why_add(s, "dup-manifest-row");
+                else { mkey[nm] = sdup(key); find_slot(mkey[nm], 1, nm); nm++; }
+            }
+        }
+        q = e + 1;
+    }
+    s->total = nm;
+}
+
+static int read_pack(Src *s, const char *root, const char *rel, char out[65]) {
+    char p[2600]; size_t n = 0;
+    char *b = cx_read(path_in(root, rel, p, sizeof p), &n);
+    if (!b) { why_addf(s, "missing-file", rel); return 0; }
+    sha_hex(b, n, out);
+    mm_free(b);
+    return 1;
+}
+
+static void audit_rows(Src *s, const char *root, int kind) {   /* kind 1 ppeq, 2 uec, 3 oracle */
+    char list[8192];
+    cx_fmt(list, sizeof list, "%s", s->ledgers);
+    static char *bufs[MAXLED]; static size_t lens[MAXLED]; int nb = 0;
+    for (char *q = list; *q; ) {
+        if (nb >= MAXLED) { why_add(s, "too-many-ledger-files"); break; }
+        char *c = strchr(q, ','), *next = c ? c + 1 : q + strlen(q);
+        if (c) *c = 0;
+        char p[2600]; size_t n = 0;
+        char *t = cx_read(path_in(root, q, p, sizeof p), &n);
+        if (!t) why_addf(s, "missing-file", q);
+        else { bufs[nb] = t; lens[nb] = n; nb++; }
+        q = next;
+    }
+    /* sha256 of the files concatenated in spec order */
+    size_t all = 0;
+    for (int i = 0; i < nb; i++) all += lens[i];
+    char *cat = mm_alloc(all + 1);
+    size_t at = 0;
+    for (int i = 0; i < nb; i++) { mm_copy(cat + at, (long)(all + 1 - at), bufs[i], (long)lens[i]); at += lens[i]; }
+    sha_hex(cat, all, s->lsha);
+    mm_free(cat);
+    static unsigned char seen[MAXMROW];
+    memset(seen, 0, sizeof seen);
+    static char *okeys[16384]; int nok = 0;   /* oracle: seen (mode path) keys */
+    memset(okeys, 0, sizeof okeys);
+    static Slot otab[32768];
+    memset(otab, 0, sizeof otab);
+    for (int i = 0; i < nb; i++) {
+        char *text = bufs[i];
+        for (char *q = text; q < text + lens[i]; ) {
+            char *e = memchr(q, '\n', (size_t)(text + lens[i] - q));
+            if (!e) e = text + lens[i];
+            *e = 0;
+            if (*q && *q != '#') {
+                char *f[MAXF];
+                int k = split(q, f);
+                if (kind == 3) {
+                    /* WORKER_DONE, CUMULATIVE and ORACLE_SUMMARY are the replay's own summaries, never counted as rows */
+                    if (!strncmp(f[0], "WORKER_DONE", 11) || !strcmp(f[0], "CUMULATIVE") || !strcmp(f[0], "ORACLE_SUMMARY")) { }
+                    else if (k < 4 || strcmp(f[0], "ORACLE")) { s->foreign++; }
+                    else {
+                        int c = status_code(f[1]);
+                        char key[1400];
+                        cx_fmt(key, sizeof key, "%s\t%s", f[2], f[3]);
+                        unsigned long h = hs(key) & 32767; int prev = -1;
+                        for (int n = 0; n < 32768; n++, h = (h + 1) & 32767) {
+                            if (!otab[h].key) { if (nok < 16384) { okeys[nok] = sdup(key); otab[h].key = okeys[nok++]; otab[h].idx = 0; } break; }
+                            if (!strcmp(otab[h].key, key)) { prev = otab[h].idx; break; }
+                        }
+                        /* a rerun: same verdict again is ignored, a decided verdict replaces UNMEASURED, an UNMEASURED never
+                         * replaces a decided one, two different decided verdicts for one key are a conflict (dup) */
+                        if (!c) s->foreign++;
+                        else if (prev < 0) { count_status(s, c); if (nok < 16384) { unsigned long g = hs(key) & 32767; while (strcmp(otab[g].key, key)) g = (g + 1) & 32767; otab[g].idx = c; } }
+                        else if (prev == c || c == 4) { }
+                        else if (prev == 4) { s->unmeasured--; count_status(s, c); unsigned long g = hs(key) & 32767; while (strcmp(otab[g].key, key)) g = (g + 1) & 32767; otab[g].idx = c; }
+                        else s->dup++;
+                    }
+                } else {
+                    int ppeq = kind == 1, o = ppeq ? 8 : 7;
+                    if (k < o || strcmp(f[0], ppeq ? "PPEQ" : "UEC")) s->foreign++;
+                    else {
+                        const char *ida = ppeq ? f[5] : f[4], *idb = ppeq ? f[6] : f[5], *st = ppeq ? f[7] : f[6];
+                        const char *detail = k > (ppeq ? 9 : 8) ? f[ppeq ? 9 : 8] : "";
+                        int c = status_code(st);
+                        char key[1400];
+                        if (ppeq) cx_fmt(key, sizeof key, "%s\t%s\t%s", f[2], f[3], f[4]);
+                        else cx_fmt(key, sizeof key, "%s\t%s", f[2], f[3]);
+                        int idx = find_slot(key, 0, 0);
+                        if (strcmp(f[1], s->msha) || (s->pa[0] != '-' && strcmp(ida, s->ida)) || (s->pb[0] != '-' && strcmp(idb, s->idb)) || !c) s->foreign++;
+                        else if (idx < 0) s->extra++;
+                        else if (seen[idx]) s->dup++;
+                        else {
+                            seen[idx] = 1;
+                            mst[idx] = (unsigned char)c;
+                            count_status(s, c);
+                            e2s_ledger_sum(detail, strlen(detail), s->acc);
+                        }
+                    }
+                }
+            }
+            q = e + 1;
+        }
+    }
+    if (kind != 3) {
+        s->pending = 0;
+        for (int i = 0; i < nm; i++) if (!seen[i]) s->pending++;
+    }
+}
+
+static long num_of(const char *s) { long v = 0; while (*s >= '0' && *s <= '9') v = v * 10 + (*s++ - '0'); return v; }
+
+static void check_claim(Src *s) {
+    if (!strcmp(s->claim, "-") || !s->claim[0]) return;
+    char c[512];
+    cx_fmt(c, sizeof c, "%s", s->claim);
+    for (char *q = c; *q; ) {
+        char *comma = strchr(q, ','), *next = comma ? comma + 1 : q + strlen(q);
+        if (comma) *comma = 0;
+        char *eq = strchr(q, '=');
+        if (!eq) why_addf(s, "bad-claim", q);
+        else {
+            *eq = 0;
+            long want = num_of(eq + 1), got = -1;
+            if (!strcmp(q, "total")) got = s->total; else if (!strcmp(q, "same")) got = s->same;
+            else if (!strcmp(q, "refuse")) got = s->refuse; else if (!strcmp(q, "diff")) got = s->diff;
+            else if (!strcmp(q, "unmeasured")) got = s->unmeasured; else if (!strcmp(q, "pending")) got = s->pending;
+            if (got < 0 || got != want) { char m[80]; cx_fmt(m, sizeof m, "claim-%s=%ld", q, got); why_add(s, m); }
+        }
+        q = next;
+    }
+}
+
+static int audit_source(Src *s, const char *root, char *line_out, size_t cap) {
+    int kind = !strcmp(s->kind, "ppeq") ? 1 : !strcmp(s->kind, "uec") ? 2 : !strcmp(s->kind, "oracle") ? 3 : 0;
+    s->msha[0] = s->ida[0] = s->idb[0] = s->lsha[0] = 0;
+    if (!kind) why_addf(s, "bad-kind", s->kind);
+    if (kind == 1 || kind == 2) {
+        load_manifest(s, root, kind == 1);
+        read_pack(s, root, s->pa, s->ida);
+        read_pack(s, root, s->pb, s->idb);
+    } else if (kind == 3) {
+        char t[64]; (void)t;
+        /* the denominator of an oracle source is its claim total */
+        const char *tp = strstr(s->claim, "total=");
+        s->total = tp ? num_of(tp + 6) : 0;
+        if (!tp) why_add(s, "oracle-needs-claim-total");
+        s->msha[0] = '-'; s->msha[1] = 0; s->ida[0] = s->idb[0] = '-';
+    }
+    if (kind) audit_rows(s, root, kind);
+    if (kind == 3) s->pending = s->total - (s->same + s->refuse + s->diff + s->unmeasured);
+    if (s->foreign) { char m[40]; cx_fmt(m, sizeof m, "foreign=%ld", s->foreign); why_add(s, m); }
+    if (s->extra) { char m[40]; cx_fmt(m, sizeof m, "extra=%ld", s->extra); why_add(s, m); }
+    if (s->dup) { char m[40]; cx_fmt(m, sizeof m, "dup=%ld", s->dup); why_add(s, m); }
+    if (s->pending) { char m[40]; cx_fmt(m, sizeof m, "pending=%ld", s->pending); why_add(s, m); }
+    if (s->diff) { char m[40]; cx_fmt(m, sizeof m, "diff=%ld", s->diff); why_add(s, m); }
+    if (s->unmeasured) { char m[40]; cx_fmt(m, sizeof m, "unmeasured=%ld", s->unmeasured); why_add(s, m); }
+    check_claim(s);
+    long permille = s->acc[3] > 0 ? ((s->acc[3] - s->acc[4]) * 1000 + s->acc[3] / 2) / s->acc[3] : 0;
+    cx_fmt(line_out, cap, "E2_EVIDENCE_ROW\t%s\t%s\t%s\t%ld\t%ld\t%ld\t%ld\t%ld\t%ld\t%ld\t%ld\t%ld\t%ld\t%s\t%s\t%s\t%s",
+           s->name, s->kind, s->msha[0] ? s->msha : "-", s->total, s->same, s->refuse, s->diff, s->unmeasured, s->pending,
+           s->acc[0], s->acc[3], s->acc[4], permille, s->ida[0] ? s->ida : "-", s->idb[0] ? s->idb : "-",
+           s->lsha[0] ? s->lsha : "-", s->why[0] ? "INCOMPLETE" : "COMPLETE");
+    return s->why[0] ? 1 : 0;
+}
+
+int main(int argc, char **argv) {
+    const char *root = 0, *spec = 0, *out = 0;
+    for (int i = 1; i + 1 < argc; i++) {
+        if (!strcmp(argv[i], "--root")) root = argv[i + 1];
+        else if (!strcmp(argv[i], "--spec")) spec = argv[i + 1];
+        else if (!strcmp(argv[i], "--out")) out = argv[i + 1];
+    }
+    need(root != 0, "usage: e2-evidence-receipt.cx -- --root DIR [--spec FILE] [--out FILE]");
+    char sp[2600], head[600], rows[MAXSRC][1100], fin[2400];
+    if (!spec) { cx_fmt(sp, sizeof sp, "%s/e2-evidence-sources.tsv", root); spec = sp; }
+    size_t n = 0;
+    char *text = cx_read(spec, &n);
+    need(text != 0, "cannot read the spec file");
+    static Src srcs[MAXSRC];
+    int ns = 0, bad = 0;
+    char reasons[1800]; reasons[0] = 0;
+    for (char *q = text; q < text + n; ) {
+        char *e = memchr(q, '\n', (size_t)(text + n - q));
+        if (!e) e = text + n;
+        *e = 0;
+        if (*q && *q != '#') {
+            char *f[MAXF];
+            int k = split(q, f);
+            need(k >= 7 && ns < MAXSRC, "spec row needs 7 TAB fields: name kind manifest ledgers pack-a pack-b claim");
+            Src *s = &srcs[ns];
+            memset(s, 0, sizeof *s);
+            cx_fmt(s->name, sizeof s->name, "%s", f[0]); cx_fmt(s->kind, sizeof s->kind, "%s", f[1]);
+            need(!cx_fmt(s->manifest, sizeof s->manifest, "%s", f[2]) && !cx_fmt(s->ledgers, sizeof s->ledgers, "%s", f[3]), "spec field too long");
+            cx_fmt(s->pa, sizeof s->pa, "%s", f[4]); cx_fmt(s->pb, sizeof s->pb, "%s", f[5]); cx_fmt(s->claim, sizeof s->claim, "%s", f[6]);
+            if (audit_source(s, root, rows[ns], sizeof rows[ns])) {
+                bad++;
+                size_t rl = strlen(reasons);
+                char one[700];
+                cx_fmt(one, sizeof one, "%s%s=%s", rl ? ";" : "", s->name, s->why);
+                if (rl + strlen(one) < sizeof reasons) mm_copy(reasons + rl, (long)(sizeof reasons - rl), one, (long)strlen(one) + 1);
+            }
+            ns++;
+        }
+        q = e + 1;
+    }
+    need(ns > 0, "spec has no source rows");
+    cx_fmt(head, sizeof head, "E2_EVIDENCE_COLS\tsource\tkind\tmanifest_sha\ttotal\tsame\trefuse\tdiff\tunmeasured\tpending\tsteps_rows\tsteps_a\tsteps_b\tdrop_permille\tpack_a\tpack_b\tledger_sha\tverdict");
+    if (bad) cx_fmt(fin, sizeof fin, "E2_EVIDENCE\tstatus=INCOMPLETE:%s\tsources=%d", reasons, ns);
+    else cx_fmt(fin, sizeof fin, "E2_EVIDENCE\tstatus=COMPLETE\tsources=%d", ns);
+    printf("%s\n", head);
+    for (int i = 0; i < ns; i++) printf("%s\n", rows[i]);
+    printf("%s\n", fin);
+    if (out) {
+        size_t cap = 600 + (size_t)ns * 1100 + 2400, at = 0;
+        char *b = mm_alloc(cap);
+        at += (size_t)snprintf(b + at, cap - at, "%s\n", head);
+        for (int i = 0; i < ns; i++) at += (size_t)snprintf(b + at, cap - at, "%s\n", rows[i]);
+        at += (size_t)snprintf(b + at, cap - at, "%s\n", fin);
+        need(!cx_write(out, b, at), "cannot write --out");
+    }
+    return bad ? 1 : 0;
+}

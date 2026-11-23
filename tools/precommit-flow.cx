@@ -22,8 +22,108 @@
 #pragma unisa use text.text
 #pragma unisa use mem.heap
 #pragma unisa use mem.bytes
+#pragma unisa use sys.posix
+#pragma unisa use sys.sig
 
 enum { PLAN_MS = 60000 };
+
+static char pcf_own_dir[1200];
+static volatile int pcf_active_child_pid = 0;
+static volatile int pcf_in_sig = 0;
+static int pcf_owner_pid = 0;
+static fl_flow *pcf_active_flow = 0;
+
+static int pcf_owner_dead(void) {
+    return (pcf_owner_pid >= 2 && sy_signal(pcf_owner_pid, 0) == -ESRCH);
+}
+
+static void pcf_cleanup(void) {
+    if (pcf_active_child_pid > 0) {
+        int cpid = pcf_active_child_pid;
+        pcf_active_child_pid = 0;
+        (void)sy_kill(cpid);
+    }
+    if (pcf_active_flow) {
+        int i;
+        for (i = 0; i < pcf_active_flow->count; i++) {
+            if (pcf_active_flow->n[i].state == FL_RUNNING)
+                (void)sy_proc_kill(&pcf_active_flow->n[i].child, 9);
+        }
+    }
+    if (pcf_own_dir[0]) {
+        (void)sy_chdir("/");
+        (void)sy_remove_all(pcf_own_dir);
+        pcf_own_dir[0] = 0;
+    }
+}
+
+static void pcf_sig_cleanup(int sig) {
+    if (pcf_in_sig) {
+        (void)sy_sig_default(sig);
+        (void)sy_raise(sig);
+        _exit(128 + sig);
+    }
+    pcf_in_sig = 1;
+    pcf_cleanup();
+    (void)sy_sig_default(sig);
+    (void)sy_raise(sig);
+    _exit(128 + sig);
+}
+
+static int pcf_sig_hex_mask(const char *buf, long n, const char *key, long kl, unsigned long long *out) {
+    long at = 0;
+    while (at < n) {
+        long e = tx_chr(buf + at, n - at, '\n');
+        long ln = e < 0 ? n - at : e;
+        if (ln > kl && tx_prefix(buf + at, ln, key, kl)) {
+            long j = kl;
+            unsigned long long v = 0;
+            int got = 0;
+            while (j < ln && (buf[at + j] == ' ' || buf[at + j] == '\t')) j++;
+            while (j < ln) {
+                char c = buf[at + j];
+                unsigned long long d;
+                if (c >= '0' && c <= '9') d = (unsigned long long)(c - '0');
+                else if (c >= 'a' && c <= 'f') d = (unsigned long long)(c - 'a' + 10);
+                else if (c >= 'A' && c <= 'F') d = (unsigned long long)(c - 'A' + 10);
+                else break;
+                v = (v << 4) | d;
+                got = 1;
+                j++;
+            }
+            if (got) { *out = v; return 0; }
+        }
+        at += ln + 1;
+    }
+    return -1;
+}
+
+static int pcf_is_default_sig(int sig) {
+    unsigned char *raw = 0;
+    int64_t n = 0;
+    unsigned long long ign = 0, cgt = 0;
+    int ok;
+    if (sig <= 0 || sig > 64) return 0;
+    if (sy_read_file("/proc/self/status", &raw, &n, 65536) != 0 || !raw || n <= 0) {
+        if (raw) mm_free(raw);
+        return 0;
+    }
+    ok = (pcf_sig_hex_mask((const char *)raw, (long)n, "SigIgn:", 7, &ign) == 0 &&
+          pcf_sig_hex_mask((const char *)raw, (long)n, "SigCgt:", 7, &cgt) == 0);
+    mm_free(raw);
+    if (!ok) return 0;
+    return (((ign | cgt) >> (unsigned)(sig - 1)) & 1ULL) == 0;
+}
+
+static void pcf_register_cleanup_hooks(void) {
+    static const int sigs[6] = { 1, 2, 3, 13, 14, 15 };
+    int k;
+    (void)sy_atexit(pcf_cleanup);
+    for (k = 0; k < 6; k++) {
+        if (pcf_is_default_sig(sigs[k]))
+            (void)sy_sig_handle(sigs[k], pcf_sig_cleanup);
+    }
+}
 
 static char *slurp(char **argv, long *n) {   /* stdout+stderr merged, bounded by PLAN_MS */
     int ofd, pid; long cap = 1 << 16, r, deadline; char *b = mm_alloc(cap);
@@ -31,17 +131,22 @@ static char *slurp(char **argv, long *n) {   /* stdout+stderr merged, bounded by
     if (!b) return 0;
     pid = sy_spawn_pipe(argv, 0, 0, &ofd, 0);
     if (pid < 0) { mm_free(b); return 0; }
+    pcf_active_child_pid = pid;
     deadline = sy_now_ms() + PLAN_MS;
     for (;;) {
-        sy_pollfd_t pf; long left = deadline - sy_now_ms();
+        sy_pollfd_t pf; long left = deadline - sy_now_ms(), slice; int pr;
         pf.fd = ofd; pf.events = SY_POLLIN; pf.revents = 0;
-        if (left <= 0 || sy_poll(&pf, 1, left) <= 0) { sy_close(ofd); sy_kill(pid); mm_free(b); return 0; }
+        if (left <= 0 || pcf_owner_dead()) { pcf_active_child_pid = 0; sy_close(ofd); sy_kill(pid); mm_free(b); return 0; }
+        slice = left > 100 ? 100 : left;
+        pr = sy_poll(&pf, 1, slice);
+        if (pr == 0) continue;
+        if (pr < 0) { pcf_active_child_pid = 0; sy_close(ofd); sy_kill(pid); mm_free(b); return 0; }
         r = sy_read(ofd, b + *n, cap - 1 - *n);
         if (r <= 0) break;
         *n += r;
-        if (*n + 1 >= cap) { char *g = mm_grow(b, cap * 2); if (!g) { mm_free(b); return 0; } b = g; cap *= 2; }
+        if (*n + 1 >= cap) { char *g = mm_grow(b, cap * 2); if (!g) { pcf_active_child_pid = 0; sy_close(ofd); sy_kill(pid); mm_free(b); return 0; } b = g; cap *= 2; }
     }
-    { int ex = 0, code = 0, sig = 0; sy_close(ofd); sy_wait_status(pid, 0, &ex, &code, &sig); }
+    { int ex = 0, code = 0, sig = 0; sy_close(ofd); pcf_active_child_pid = 0; sy_wait_status(pid, 0, &ex, &code, &sig); }
     b[*n] = 0;
     return b;
 }
@@ -71,8 +176,20 @@ int main(int argc, char **argv) {
         else if (tx_eqz(argv[a], "--verdict") && a + 1 < argc) vfile = argv[++a];   /* written once the judge pass has run: tools/precommit.cx flow_route tells a verdict from a flow that never got there */
         else { sy_eprintf("precommit-flow: usage: precommit-flow.cx [-- --run DIR] [--jobs N] [--verdict FILE]\n"); return 2; }
     }
+    {
+        const char *op = sy_env("UNISACC_PRECOMMIT_OWNER_PID");
+        if (op && *op >= '1' && *op <= '9') {
+            long v = 0;
+            while (*op >= '0' && *op <= '9' && v < 2147483647L) v = v * 10 + (*op++ - '0');
+            if (!*op && v >= 2 && v != sy_pid()) pcf_owner_pid = (int)v;
+        }
+    }
+    pcf_register_cleanup_hooks();
     if (rdir) { if (tx_copy(dir, sizeof dir, rdir, tx_len(rdir, 1100))) return 2; }
-    else if (cx_fmt(dir, sizeof dir, "%s/precommit-flow-%d-%ld", sy_tmpdir(), sy_pid(), sy_now_ms())) return 2;
+    else {
+        if (cx_fmt(dir, sizeof dir, "%s/precommit-flow-%d-%ld", sy_tmpdir(), sy_pid(), sy_now_ms())) return 2;
+        (void)tx_copy(pcf_own_dir, sizeof pcf_own_dir, dir, tx_len(dir, 1100));
+    }
     if (sy_mkdir(dir, 0700) && sy_exists(dir) != 1) { sy_eprintf("precommit-flow: cannot make %s\n", dir); return 2; }
     pv[0] = "sh"; pv[1] = "./unisacc.com"; pv[2] = "tools/precommit.cx"; pv[3] = "--"; pv[4] = "--plan"; pv[5] = dir; pv[6] = 0;
     plan = slurp(pv, &pn);
@@ -123,8 +240,13 @@ int main(int argc, char **argv) {
     if (nodes) {
         if (fl_load(fp, &f, why, (int)sizeof why)) { sy_eprintf("precommit-flow: REFUSE %s\n", why); return 2; }
         if (jobs < 1) { jobs = sy_ncpu(); if (jobs < 1) jobs = 4; if (jobs > 32) jobs = 32; }
+        fl_set_cancel(pcf_owner_dead);
+        pcf_active_flow = &f;
         r = fl_run(&f, dir, jobs, 0, 0, &s);
+        pcf_active_flow = 0;
+        fl_set_cancel(0);
         fl_free(&f);
+        if (pcf_owner_dead()) return 143;
         if (r < 0) { sy_eprintf("precommit-flow: run dir %s unusable (%d)\n", dir, r); return 2; }
     }
     if (rkx) {   /* ratchets --from-run DIR -> DIR/out/ratchets.out and an ok/fail event for the gate */
@@ -143,10 +265,13 @@ int main(int argc, char **argv) {
         }
         if (xo) mm_free(xo);
     }
+    if (pcf_owner_dead()) return 143;
     t2 = sy_now_ms();
     jv[0] = "/bin/sh"; jv[1] = "./unisacc.com"; jv[2] = "tools/precommit.cx"; jv[3] = "--"; jv[4] = "--from-run"; jv[5] = dir; jv[6] = 0;
     pid = sy_spawn_inherit(jv, -1);
-    if (pid < 0 || sy_wait_status(pid, 0, &ex, &code, &sig) != pid || !ex) { sy_eprintf("precommit-flow: precommit --from-run did not run\n"); return 1; }
+    pcf_active_child_pid = pid > 0 ? pid : 0;
+    if (pid < 0 || sy_wait_status(pid, 0, &ex, &code, &sig) != pid || !ex) { pcf_active_child_pid = 0; sy_eprintf("precommit-flow: precommit --from-run did not run\n"); return 1; }
+    pcf_active_child_pid = 0;
     sy_eprintf("FLOWPC\tnodes=%d\tplan_ms=%ld\tflow_ms=%ld\tjudge_ms=%ld\trun=%s\n", nodes, t1 - t0, t2 - t1, sy_now_ms() - t2, dir);
     if (vfile) { char vb[40]; if (cx_fmt(vb, sizeof vb, "RC\t%d\n", code) || cx_write(vfile, vb, tx_len(vb, 40))) { sy_eprintf("precommit-flow: cannot write %s\n", vfile); return 2; } }
     return code;
