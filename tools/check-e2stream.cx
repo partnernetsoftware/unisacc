@@ -49,12 +49,28 @@ int main(void) {
           ok(!strncmp(err, "subprocess.TimeoutExpired: Command '[", 37), "B: the TimeoutExpired prefix is unchanged");
           ok(strstr(err, "]' timed out after 1 seconds") != 0, "B: the duration text is unchanged");
           ok(strstr(err, " survived)") == 0, "A: no survivor suffix on a clean timeout");
+          ok(strstr(err, "cleanup unconfirmed") == 0, "A: a provable timeout cleanup is not labelled cleanup unconfirmed");
           esc = read_pid(pidf);
           ok(esc > 10, "A: the setsid descendant reported its pid");
           reap();
           ok(gone(esc, 1500), "A: the setsid descendant is dead (the old kill(pid) missed it)");
           if (esc > 10 && alive(esc)) sy_signal(esc, 9);
         }
+    }
+    /* D: the middle process exits at once, so the sleeper is reparented to the subreaper (the child driver):
+       it is no longer provably the root's, the reaper answers negative and signals nothing for it. */
+    {   char pidf[4400], script[2048]; int rc, orphan;
+        if (cx_fmt(pidf, sizeof pidf, "%s/orphan.pid", tmp)) return 2;
+        if (cx_fmt(script, sizeof script, "sh -c 'setsid sleep 300 >/dev/null 2>&1 & echo $! > %s'; sleep 300", pidf)) return 2;
+        { char *cmd[] = { "sh", "-c", script, 0 };
+          rc = child(cmd, err, sizeof err, 0, 0);
+          ok(rc == 1, "D: the orphan case still times out through e2s_raise");
+          ok(strstr(err, "(cleanup unconfirmed)") != 0 && strstr(err, " survived)") == 0, "D: an unprovable orphan is reported as cleanup unconfirmed, not clean and not a survivor count");
+          orphan = read_pid(pidf);
+          ok(orphan > 10 && alive(orphan), "D: the unprovable orphan was not signalled");
+          if (orphan > 10) { sy_signal(orphan, 9); reap(); }
+        }
+        if (!cx_fmt(pidf, sizeof pidf, "%s/orphan.pid", tmp)) sy_unlink(pidf);
     }
     {   char *cmd[] = { "sh", "-c", "printf abc; printf def 1>&2; exit 7", 0 };
         int rc = child(cmd, err, sizeof err, outbuf, sizeof outbuf);
