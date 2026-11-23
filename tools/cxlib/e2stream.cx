@@ -172,7 +172,12 @@ int e2s_run(char *const argv[], const char *cwd, double secs, char **out, size_t
         if (polls++ >= limit) {
             e2s_buf m = { 0, 0, 0 }; char *l = e2s_args_repr(argv); char rep[256];
             int sv = rp_kill_tree_pid(pid, 2000, 0, 0, rep, sizeof rep);   /* freeze, kill, re-check; -ENOSYS off /proc */
-            if (sv < 0) { kill(-pid, SIGKILL); kill(pid, SIGKILL); }   /* no /proc: the pre-reaper group kill */
+            /* sv < 0 means the reaper could not prove the cleanup (no /proc, missing subreaper, or a
+               reused pid it refused to signal); the old fallback here fired a bare kill(-pid) that
+               the reaper had just declined to make, which is exactly the unsafe shortcut the
+               lifecycle rule forbids.  A negative now only marks the timeout text "cleanup
+               unconfirmed" (below); it does not signal around the reaper. */
+            if (sv < 0) { /* unconfirmed: reported in the exception text, no bare group kill */ }
             { int w; do { w = waitpid(pid, &st, WNOHANG); } while (w < 0 && errno == EINTR); }
             close(of); close(ef);
             e2s_puts(&m, "subprocess.TimeoutExpired: Command '"); e2s_puts(&m, l); e2s_puts(&m, "' timed out after ");
