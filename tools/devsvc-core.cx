@@ -2406,11 +2406,22 @@ static int freeze_tsv_state(const char *root) {
     return active;
 }
 
+static int freeze_outside_main(const char *root) {
+    char ref[PW];
+    char *bv[] = {"git", "-C", (char *)root, "symbolic-ref", "--quiet", "HEAD", 0};
+    if (runcap(bv, ref, sizeof ref) != 0) return 0;
+    chomp(ref);
+    if (strncmp(ref, "refs/heads/", 11) || !ref[11] || !strcmp(ref, "refs/heads/main")) return 0;
+    fprintf(stderr, "FREEZE_SCOPE skip=worktree branch=%s\n", ref + 11);
+    return 1;
+}
+
 static int freeze_check(const char *root, const char *owner, char *holder, size_t hcap) {   /* 1 表示 freeze 锁被他人持有或损坏/不可读闭锁; 0 放行 */
+    if (holder && hcap > 0) holder[0] = 0;
+    if (freeze_outside_main(root)) return 0;
     int rc; const char *s, *e; char nown[64], nhold[64], lp[PW];
     int has_own = norm_owner(owner, nown, sizeof nown);
     int fz_state = freeze_tsv_state(root);
-    if (holder && hcap > 0) holder[0] = 0;
     char fhold[64]; int have_fhold = 0;
     fhold[0] = 0;
     /* Direct read of persisted locks.tsv: malformed/truncated/unreadable fails closed;
@@ -3427,17 +3438,33 @@ static int git_merge(const char *root, int argc, char **argv) {
     }
     if (cont && (br || use_wt)) { fprintf(stderr, "devsvc: git merge --continue: takes no BRANCH or --worktree\n"); git_argerr = 1; return 2; }
     if (!cont && !br) { fprintf(stderr, "devsvc: git merge BRANCH [-m MSG] [--cwd WORKTREE] [--worktree]: missing BRANCH\n"); git_argerr = 1; return 2; }
-    if (freeze_refuse_if_held(root, argc, argv)) { printf("GIT_MERGE\trc=1\treason=lock-held\tlock=freeze\n"); return 1; }
     if (msg) { const char *s = msg; while (*s == ' ' || *s == '\t' || *s == '\r') s++;
         if (!*s || *s == '\n' || git_ci_prefix(s, "co-authored-by:") || git_ci_prefix(s, "signed-off-by:")) {
             fprintf(stderr, "devsvc: git merge -m: first line must be body text (not empty, not a trailer)\n"); git_argerr = 1; return 2; } }
     if (d != root && d[0] != '/') { F(top, sizeof top, "%s/%s", root, d); d = top; }
     if (!realpath(d, rd)) { fprintf(stderr, "devsvc: REFUSE git merge --cwd %s: no such directory\n", d); return 2; }
+    if (freeze_refuse_if_held(rd, argc, argv)) { printf("GIT_MERGE\trc=1\treason=lock-held\tlock=freeze\n"); return 1; }
     {   char *bv[] = {"git", "-C", rd, "symbolic-ref", "--short", "-q", "HEAD", 0};
         if (runcap(bv, cur, sizeof cur) != 0) { fprintf(stderr, "devsvc: REFUSE git merge: %s is not on a branch\n", rd); return 2; }
         chomp(cur); }
     if (cont) {
         char mpath[PW], mmsg[2048];
+        char target_path[PW], target_file[PW], target_dir[PW] = "", target_branch[200], target_old[128];
+        char *tv[] = {"git", "-C", rd, "rev-parse", "--git-path", "DEVSVC_MERGE_TARGET", 0};
+        if (runcap(tv, target_path, sizeof target_path) == 0) {
+            unsigned char *tb = 0; int64_t tn = 0;
+            chomp(target_path);
+            if (target_path[0] == '/') F(target_file, sizeof target_file, "%s", target_path);
+            else F(target_file, sizeof target_file, "%s/%s", rd, target_path);
+            if (!ovf && sy_read_file(target_file, &tb, &tn, 2048) == 0 && tb && tn > 0 &&
+                (sscanf((char *)tb, "%1023[^\t]\t%199[^\t]\t%127[^\n\r]", target_dir, target_branch, target_old) != 3 ||
+                 !strcmp(target_dir, rd))) target_dir[0] = 0;
+            free(tb);
+        }
+        if (target_dir[0] && freeze_refuse_if_held(target_dir, argc, argv)) {
+            printf("GIT_MERGE\trc=1\treason=lock-held\tlock=freeze\n");
+            return 1;
+        }
         if (!msg) {
             char *pv[] = {"git", "-C", rd, "rev-parse", "--git-path", "MERGE_MSG", 0};
             mmsg[0] = 0;
@@ -3473,39 +3500,25 @@ static int git_merge(const char *root, int argc, char **argv) {
             if (rc != 0) { err_tail(x_last_err, 20); return rc; }
             if (mg_rev(rd, "HEAD", nw, sizeof nw)) nw[0] = 0;
             if (nw[0]) {
-                char tpath[PW], fullt[PW];
-                char *pv[] = {"git", "-C", rd, "rev-parse", "--git-path", "DEVSVC_MERGE_TARGET", 0};
-                if (runcap(pv, tpath, sizeof tpath) == 0) {
-                    unsigned char *tb = 0; int64_t tn = 0;
-                    chomp(tpath);
-                    if (tpath[0] == '/') F(fullt, sizeof fullt, "%s", tpath);
-                    else F(fullt, sizeof fullt, "%s/%s", rd, tpath);
-                    if (!ovf && sy_read_file(fullt, &tb, &tn, 2048) == 0 && tb && tn > 0) {
-                        char trd[PW] = "", tcur[200] = "", told[128] = "";
-                        if (sscanf((char *)tb, "%1023[^\t]\t%199[^\t]\t%127[^\n\r]", trd, tcur, told) == 3 &&
-                            trd[0] && tcur[0] && told[0] && strcmp(trd, rd) != 0) {
-                            sy_unlink(fullt);
-                            if (mg_lock(root) == 0) {
-                                char mark[320], owner[65]; int sy2 = 0, kp2 = 0;
-                                const char *note = "devsvc git merge";
-                                if (merge_owner_key(owner) && !cx_fmt(mark, sizeof mark, "devsvc merge v1 %s refs/heads/%s", owner, tcur)) note = mark;
-                                char *uv[] = {"git", "-C", trd, "update-ref", "-m", (char *)note, "HEAD", nw, told, 0};
-                                if (runcap(uv, buf, sizeof buf) == 0) {
-                                    (void)mg_sync(trd, told, nw, "GIT_MERGE_SYNC", &sy2, &kp2);
-                                    mg_unlock(root);
-                                    { char *rmv[] = {"git", "-C", trd, "worktree", "remove", "--force", rd, 0}; (void)runcap(rmv, buf, sizeof buf); }
-                                    { char *bdv[] = {"git", "-C", trd, "branch", "-D", cur, 0}; (void)runcap(bdv, buf, sizeof buf); }
-                                    pin_prepare_kick(trd);
-                                    free(tb);
-                                    printf("GIT_MERGE\trc=0\tcommit=%s\tbranch=%s\tcwd=%s\tcontinued=1\tfrom_worktree=%s\tsynced=%d\tkept=%d\n",
-                                           nw, tcur, trd, rd, sy2, kp2);
-                                    return 0;
-                                }
-                                mg_unlock(root);
-                            }
+                if (target_dir[0]) {
+                    sy_unlink(target_file);
+                    if (mg_lock(root) == 0) {
+                        char mark[320], owner[65]; int sy2 = 0, kp2 = 0;
+                        const char *note = "devsvc git merge";
+                        if (merge_owner_key(owner) && !cx_fmt(mark, sizeof mark, "devsvc merge v1 %s refs/heads/%s", owner, target_branch)) note = mark;
+                        char *uv[] = {"git", "-C", target_dir, "update-ref", "-m", (char *)note, "HEAD", nw, target_old, 0};
+                        if (runcap(uv, buf, sizeof buf) == 0) {
+                            (void)mg_sync(target_dir, target_old, nw, "GIT_MERGE_SYNC", &sy2, &kp2);
+                            mg_unlock(root);
+                            { char *rmv[] = {"git", "-C", target_dir, "worktree", "remove", "--force", rd, 0}; (void)runcap(rmv, buf, sizeof buf); }
+                            { char *bdv[] = {"git", "-C", target_dir, "branch", "-D", cur, 0}; (void)runcap(bdv, buf, sizeof buf); }
+                            pin_prepare_kick(target_dir);
+                            printf("GIT_MERGE\trc=0\tcommit=%s\tbranch=%s\tcwd=%s\tcontinued=1\tfrom_worktree=%s\tsynced=%d\tkept=%d\n",
+                                   nw, target_branch, target_dir, rd, sy2, kp2);
+                            return 0;
                         }
+                        mg_unlock(root);
                     }
-                    if (tb) free(tb);
                 }
                 pin_prepare_kick(rd);
             }
@@ -3586,9 +3599,9 @@ static int git_pull(const char *root, int argc, char **argv) {
         else if (!strcmp(argv[i], "--owner") && i + 1 < argc) i++;
         else { fprintf(stderr, "devsvc: git pull [--cwd WORKTREE]: unexpected %s\n", argv[i]); git_argerr = 1; return 2; }
     }
-    if (freeze_refuse_if_held(root, argc, argv)) { printf("GIT_PULL\trc=1\treason=lock-held\tlock=freeze\n"); return 1; }
     if (d != root && d[0] != '/') { F(top, sizeof top, "%s/%s", root, d); d = top; }
     if (!realpath(d, rd)) { fprintf(stderr, "devsvc: REFUSE git pull --cwd %s: no such directory\n", d); return 2; }
+    if (freeze_refuse_if_held(rd, argc, argv)) { printf("GIT_PULL\trc=1\treason=lock-held\tlock=freeze\n"); return 1; }
     {   char *bv[] = {"git", "-C", rd, "symbolic-ref", "--short", "-q", "HEAD", 0};
         if (runcap(bv, cur, sizeof cur) != 0) { fprintf(stderr, "devsvc: REFUSE git pull: %s is not on a branch\n", rd); return 2; }
         chomp(cur); }
@@ -3906,8 +3919,8 @@ static int cmd_git(const char *root, int argc, char **argv) {
                 cwd = cwd_buf;
             }
         }
-        if (freeze_refuse_if_held(root, argc, argv)) { printf("GIT_PUSH_REFUSE\treason=lock-held\tlock=freeze\n"); return 1; }
         work = cwd ? cwd : root;
+        if (freeze_refuse_if_held(work, argc, argv)) { printf("GIT_PUSH_REFUSE\treason=lock-held\tlock=freeze\n"); return 1; }
         {   char *bv[] = {"git", "-C", (char *)work, "symbolic-ref", "--short", "-q", "HEAD", 0};
             if (runcap(bv, cur, sizeof cur) != 0) { fprintf(stderr, "GIT_PUSH_REFUSE\treason=detached-head\tcwd=%s\n", work); return 2; }
             chomp(cur);
@@ -4062,7 +4075,7 @@ static int cmd_git(const char *root, int argc, char **argv) {
     if (freeze_hit) {
         char fh[64];
         const char *who = has_ci_own ? ci_own : auto_owner();
-        if (freeze_check(root, who, fh, sizeof fh)) {
+        if (freeze_check(froot, who, fh, sizeof fh)) {
             fprintf(stderr, "LOCK_HELD freeze owner=%s\n", fh);
             printf("GIT_COMMIT\trc=1\treason=lock-held\tlock=freeze\towner=%s\n", fh);
             return 1;

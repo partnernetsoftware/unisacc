@@ -95,11 +95,60 @@ static char *host_zones(char *body,const char *tsv,const char *dir,int cx){
   first=0;p=*e?e+1:e;}
  return body;
 }
+/* ---- constant drift: the projection replaces each CX0_HOST zone in plan.cx with a fragment
+ * (proj/head.c, proj/head.cx, ...), so a numeric constant written in a plan.cx zone (#define
+ * or enum) is discarded at generation and the fragment's value wins.  Editing only plan.cx's
+ * zone then leaves the fragment stale, generation reproduces the old value, and the byte-wise
+ * --check still reports EXACT.  This check compares the constants a zone declares in plan.cx
+ * with the constants the same zone's fragment declares and refuses on any mismatch, so the
+ * blind spot reports DRIFT instead of EXACT.  Only names present in BOTH are compared (a
+ * constant that legitimately lives in the body is generated from plan.cx verbatim and cannot
+ * drift this way). ---- */
+typedef struct{char name[64];long val;} Kone;
+static void kones_in(const char *p,size_t n,Kone *out,int max,int *nk){
+ const char *e=p+n;*nk=0;
+ for(const char *q=p;q<e;q++){
+  if(*q=='#'&&q+7<e&&!strncmp(q+1,"define ",7)){const char *r=q+7;while(r<e&&(*r==' '||*r=='\t'))r++;const char *a=r;while(r<e&&(isalnum((unsigned char)*r)||*r=='_'))r++;size_t nl=(size_t)(r-a);if(!nl||nl>=64)continue;while(r<e&&(*r==' '||*r=='\t'))r++;int neg=0;if(r<e&&*r=='-'){neg=1;r++;}if(r>=e||!isdigit((unsigned char)*r))continue;long v=0;while(r<e&&isdigit((unsigned char)*r)){v=v*10+(*r-'0');r++;}if(*nk<max){cpyn(out[*nk].name,a,nl);out[*nk].name[nl]=0;out[*nk].val=neg?-v:v;(*nk)++;}continue;}
+  if(*q=='e'&&q+5<e&&!strncmp(q,"enum",4)&&(q==p||!(isalnum((unsigned char)q[-1])||q[-1]=='_'))){const char *r=q+4;while(r<e&&(*r==' '||*r=='\t'))r++;if(r>=e||*r!='{')continue;r++;while(r<e&&*r!='}'){while(r<e&&(*r==' '||*r=='\t'||*r==','||*r=='\n'||*r=='\r'))r++;const char *a=r;while(r<e&&(isalnum((unsigned char)*r)||*r=='_'))r++;size_t nl=(size_t)(r-a);if(!nl||nl>=64){while(r<e&&*r!=','&&*r!='}')r++;continue;}while(r<e&&(*r==' '||*r=='\t'))r++;if(r<e&&*r=='='){r++;while(r<e&&(*r==' '||*r=='\t'))r++;int neg=0;if(r<e&&*r=='-'){neg=1;r++;}if(r<e&&isdigit((unsigned char)*r)){long v=0;while(r<e&&isdigit((unsigned char)*r)){v=v*10+(*r-'0');r++;}if(*nk<max){cpyn(out[*nk].name,a,nl);out[*nk].name[nl]=0;out[*nk].val=neg?-v:v;(*nk)++;}}}while(r<e&&*r!=','&&*r!='}')r++;}
+   while(r<e&&*r!='}')r++;q=r;continue;}
+ }
+}
+/* zone body (between the whole CX0_HOST_BEGIN/END marker lines) in the raw plan source */
+static int zone_body_raw(const char *src,const char *name,const char **out,size_t *outn){
+ const char *B="/* CX0_HOST_BEGIN ",*E="/* CX0_HOST_END ";char want[160],endm[160];
+ int wz=snprintf(want,sizeof want,"%s%s */\n",B,name);int ez=snprintf(endm,sizeof endm,"%s%s */\n",E,name);
+ if(wz<0||(size_t)wz>=sizeof want||ez<0||(size_t)ez>=sizeof endm)return 0;
+ const char *a=strstr(src,want);if(!a)return 0;const char *c=a+strlen(want);const char *e=strstr(c,endm);if(!e)return 0;
+ *out=c;*outn=(size_t)(e-c);return 1;
+}
+/* Compare every zone's plan.cx constants with that target's fragment constants; returns the
+ * number of drifts found (0 = consistent).  Prints one CX0_EXTRACT DRIFT line per mismatch. */
+static int constant_drift(const char *src,const char *tsv,const char *dir,int tgt){
+ const char *B="/* CX0_HOST_BEGIN ";char seen[32][64];int nseen=0;int drifts=0;
+ /* collect zone names from the source so @tail and body-only rows are skipped */
+ {const char *q=src;for(;;){const char *a=strstr(q,B);if(!a)break;const char *r=a+strlen(B);char nm[64];size_t nl=0;while(r[nl]&&r[nl]!=' '&&r[nl]!='\n'&&nl<63){nm[nl]=r[nl];nl++;}nm[nl]=0;if(nl&&nseen<32){int dup=0;for(int i=0;i<nseen;i++)if(!strcmp(seen[i],nm))dup=1;if(!dup){cpyn(seen[nseen],nm,nl+1);nseen++;}}q=r;}
+ }
+ for(int i=0;i<nseen;i++){
+  char cf[128],xf[128];if(!zone_row(tsv,seen[i],cf,xf))continue;   /* zone not in table: host_zones already refuses */
+  const char *zb=0;size_t zn=0;if(!zone_body_raw(src,seen[i],&zb,&zn))continue;
+  char *frag=fragment(dir,tgt?xf:cf,seen[i]);if(!frag)continue;
+  Kone zk[64],fk[64];int nzk=0,nfk=0;kones_in(zb,zn,zk,64,&nzk);kones_in(frag,strlen(frag),fk,64,&nfk);
+  for(int a=0;a<nzk;a++)for(int b=0;b<nfk;b++)if(!strcmp(zk[a].name,fk[b].name)&&zk[a].val!=fk[b].val){
+   printf("CX0_EXTRACT\tDRIFT\tzone=%s\tname=%s\tplan=%ld\tfragment=%ld\tfragfile=%s\n",seen[i],zk[a].name,zk[a].val,fk[b].val,tgt?xf:cf);drifts++;}
+  free(frag);
+ }
+ return drifts;
+}
+
 /* One target: tgt 0 = classic C (src/cxmod.c), 1 = product CX (cx/compiler/cxmod.cx). Prints one CX0_EXTRACT line. */
 static void project(int tgt,int check,const char *output,const char *source,const char *prefix,const char *tsv_path,const char *dir){
  struct stat a,b,c;int have_output=!lstat(output,&a);if(!have_output&&errno!=ENOENT)bad("output-stat");if(have_output&&(!S_ISREG(a.st_mode)||stat(source,&b)||stat(prefix,&c)||(a.st_dev==b.st_dev&&a.st_ino==b.st_ino)||(a.st_dev==c.st_dev&&a.st_ino==c.st_ino)))bad("regular-output-must-not-alias-source-or-prefix");
- size_t sn,pn=0,tn;char *src=read_regular(source,&sn,0),*pre=tgt?0:read_regular(prefix,&pn,0),*body=private_body(src);free(src);
+ size_t sn,pn=0,tn;char *src=read_regular(source,&sn,0),*pre=tgt?0:read_regular(prefix,&pn,0),*body=private_body(src);
  char *tsv=read_regular(tsv_path,&tn,0);
+ /* --check also verifies host-zone constants: a plan.cx zone constant the fragment overrides
+  * would otherwise regenerate the stale fragment value and still report EXACT. */
+ if(check){int dr=constant_drift(src,tsv,dir,tgt);if(dr){free(src);free(pre);free(body);free(tsv);bad("host-zone-constant-drift");}}
+ free(src);
  body=classic_visibility(body,tgt);body=host_zones(body,tsv,dir,tgt);
  char *tail=0;size_t tl=0;
  if(tgt){char cf[128],xf[128];if(!zone_row(tsv,"@tail",cf,xf))bad_zone("projection-row-missing","@tail");tail=fragment(dir,xf,"@tail");tl=strlen(tail);}

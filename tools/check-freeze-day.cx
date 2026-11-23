@@ -1,7 +1,8 @@
 /* tools/check-freeze-day.cx -- contract check for tools/freeze-day.cx (batch freeze-day).
  * Synthetic git repo verifies live values (candidate.tsv, branch SHA, HEAD^{tree} vs merge_tree, templates),
- * 23-step ordering, READY vs BLOCKED gating, S1 3-batch split, S3 load/l0-posix2 rules, lock renewals,
- * read-only guarantee, and check subcommand pass/fail/refuse paths.
+ * 25-step prove-then-freeze ordering (合入后后台证明 then freeze-promote), READY vs BLOCKED gating,
+ * S1 3-batch split, prove-run load/l0-posix2 rules, S4-scrub, S9 timeout-ms/--from-step 3,
+ * lock renewals, read-only guarantee, and check subcommand pass/fail/refuse paths.
  * Final line: CHECK_FREEZE_DAY\tpass=N\tfail=0
  */
 #pragma unisa use fsx.fs
@@ -133,7 +134,7 @@ int main(void) {
     char args[2048];
     cx_fmt(args, sizeof args, "plan --version 9.9.9 --branch v9.9.9 --repo '%s' --owner integ --readiness-bin '%s'", repo, rdp);
     rc = run_fd(args, &r);
-    ck(rc == 0 && has(&r, "FREEZE_DAY\tplan\tsteps=24\tblocked=0"), "plan-all-green-steps24-blocked0");
+    ck(rc == 0 && has(&r, "FREEZE_DAY\tplan\tsteps=25\tblocked=0"), "plan-all-green-steps25-blocked0");
 
     /* (2) Live values from synthetic repo */
     char want_sha[96], want_tree[96];
@@ -145,31 +146,43 @@ int main(void) {
        has(&r, "tools/freeze-broadcast.cx") && has(&r, "tools/release-post.cx"),
        "plan-values-from-synthetic-repo");
 
-    /* (3) Ordering of new steps including S0-devsvc-alive before S0-lock */
+    /* (3) prove-then-freeze order: merge -> prove-* -> freeze-promote -> S1 -> S4-scrub -> S9 */
     long p0 = pos_of(&r, "id=S0-preview\t");
     long p1 = pos_of(&r, "id=S0-gates\t");
     long p1b = pos_of(&r, "id=S0-devsvc-alive\t");
     long p2 = pos_of(&r, "id=S0-lock\t");
     long p3 = pos_of(&r, "id=S0-merge\t");
     long p4 = pos_of(&r, "id=S0-verify-tree\t");
-    long p5 = pos_of(&r, "id=S0-freeze-slot\t");
+    long p_sec = pos_of(&r, "FREEZE_SECTION\t合入后后台证明\t");
+    long p_bg = pos_of(&r, "id=prove-bg\t");
+    long p_in = pos_of(&r, "id=prove-inputs\t");
+    long p_run = pos_of(&r, "id=prove-run\t");
+    long p_ci = pos_of(&r, "id=prove-ci\t");
+    long p_fz = pos_of(&r, "id=freeze-promote\t");
     long p6 = pos_of(&r, "id=S1-light\t");
     long p7 = pos_of(&r, "id=S1-mid\t");
     long p8 = pos_of(&r, "id=S1-chain\t");
+    long p_s4 = pos_of(&r, "id=S4\t");
+    long p_sc = pos_of(&r, "id=S4-scrub\t");
     long p9 = pos_of(&r, "id=S4b-renew-lock\t");
     long p10 = pos_of(&r, "id=S5\t");
     long p11 = pos_of(&r, "id=S8b-renew-lock\t");
     long p12 = pos_of(&r, "id=S9\t");
-    ck(p0 >= 0 && p0 < p1 && p1 < p1b && p1b < p2 && p2 < p3 && p3 < p4 && p4 < p5 && p5 < p6 &&
-       p6 < p7 && p7 < p8 && p8 < p9 && p9 < p10 && p10 < p11 && p11 < p12,
-       "plan-new-steps-order");
+    ck(p0 >= 0 && p0 < p1 && p1 < p1b && p1b < p2 && p2 < p3 && p3 < p4 &&
+       p4 < p_sec && p_sec < p_bg && p_bg < p_in && p_in < p_run && p_run < p_ci &&
+       p_ci < p_fz && p_fz < p6 && p6 < p7 && p7 < p8 && p8 < p_s4 && p_s4 < p_sc &&
+       p_sc < p9 && p9 < p10 && p10 < p11 && p11 < p12,
+       "plan-prove-then-freeze-order");
 
-    /* (4) S3-run parameters, load guard, l0-posix2 and expected-unmeasured.tsv */
+    /* (4) prove-run knobs, scrub, S9 timeout-ms + from-step 3, promote --check */
     ck(has(&r, "--normal-jobs 8 --window-lanes 3") && has(&r, "--max-jobs 8 --window-lanes 3") &&
        has(&r, "load1<8") && has(&r, "load1>12") && has(&r, "l0-posix2") && has(&r, "expected-unmeasured.tsv") &&
        !has(&r, "--only 1-rev,2-worktree") && has(&r, "bg-candidate.cx -- start --rev ") &&
-       has(&r, "merge --in-dir ") && has(&r, "devsvc.cx -- x --bg --par 1 -- "),
-       "plan-s3-run-knobs-and-judge");
+       has(&r, "bg-candidate.cx -- promote --check --rev ") &&
+       has(&r, "merge --in-dir ") && has(&r, "devsvc.cx -- x --bg --par 1 --timeout-ms 300000 -- ") &&
+       has(&r, "--from-step 3") && has(&r, "scrub-home-paths.cx -- --write release/evidence/") &&
+       has(&r, "FREEZE_SECTION\t冻结\t") && !has(&r, "id=S0-freeze-slot\t"),
+       "plan-prove-scrub-s9-knobs");
     np_free(&r);
 
     /* (4b) plan --selfcheck covers all target tools and real chain-ready --only prefixes with 0 failures */
@@ -183,7 +196,7 @@ int main(void) {
        has(&r, "tool=prerun-inputs\tstatus=OK") && has(&r, "tool=prerun-drive\tstatus=OK") &&
        has(&r, "tool=ci-early\tstatus=OK") && has(&r, "tool=release-run\tstatus=OK") &&
        has(&r, "tool=release-chain\tstatus=OK") && has(&r, "tool=release-exec\tstatus=OK") &&
-       has(&r, "tool=devsvc\tstatus=OK"),
+       has(&r, "tool=devsvc\tstatus=OK") && has(&r, "tool=scrub-home-paths\tstatus=OK"),
        "plan-selfcheck-all-tools-ok");
     np_free(&r);
 
@@ -211,7 +224,7 @@ int main(void) {
     /* (5) Tree hash mismatch blocks S0-verify-tree */
     cx_fmt(args, sizeof args, "plan --version 9.9.9 --branch v9.9.9 --repo '%s' --owner integ --readiness-bin '%s'", repo, rdmis);
     rc = run_fd(args, &r);
-    ck(rc == 0 && has(&r, "FREEZE_DAY\tplan\tsteps=24\tblocked=1") &&
+    ck(rc == 0 && has(&r, "FREEZE_DAY\tplan\tsteps=25\tblocked=1") &&
        has(&r, "id=S0-verify-tree\twho=integrator\tbudget_s=15\tgate=BLOCKED\treason=head-tree-mismatch"),
        "plan-head-tree-mismatch-blocked");
     np_free(&r);
@@ -219,10 +232,10 @@ int main(void) {
     /* (6) Blocked plan via readiness failures */
     cx_fmt(args, sizeof args, "plan --version 9.9.9 --branch v9.9.9 --repo '%s' --owner integ --readiness-bin '%s'", repo, rdf);
     rc = run_fd(args, &r);
-    ck(rc == 0 && has(&r, "FREEZE_DAY\tplan\tsteps=24\tblocked=5") &&
+    ck(rc == 0 && has(&r, "FREEZE_DAY\tplan\tsteps=25\tblocked=5") &&
        has(&r, "id=S0-lock\twho=integrator\tbudget_s=60\tgate=BLOCKED\treason=devsvc-freeze") &&
        has(&r, "id=S0-merge\twho=integrator\tbudget_s=300\tgate=BLOCKED\treason=dirty-freeze-domain") &&
-       has(&r, "id=S0-freeze-slot\twho=integrator\tbudget_s=120\tgate=BLOCKED\treason=verseq") &&
+       has(&r, "id=freeze-promote\twho=integrator\tbudget_s=120\tgate=BLOCKED\treason=verseq") &&
        has(&r, "id=S1-light\twho=integrator\tbudget_s=45\tgate=BLOCKED\treason=verseq") &&
        has(&r, "id=S3c\twho=docs\tbudget_s=600\tgate=BLOCKED\treason=release-prep-notes"),
        "plan-readiness-blocks-exact-steps");
@@ -234,7 +247,7 @@ int main(void) {
     sy_unlink(notesp);
     cx_fmt(args, sizeof args, "plan --version 9.9.9 --branch v-no-such --repo '%s' --no-readiness", repo);
     rc = run_fd(args, &r);
-    ck(rc == 0 && has(&r, "FREEZE_DAY\tplan\tsteps=24\tblocked=8") &&
+    ck(rc == 0 && has(&r, "FREEZE_DAY\tplan\tsteps=25\tblocked=8") &&
        has(&r, "reason=branch-missing") && has(&r, "reason=missing-notes-template"),
        "plan-missing-branch-and-template-blocked");
     np_free(&r);

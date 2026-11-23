@@ -358,12 +358,50 @@ int main(int argc, char **argv) {
       if (bak) { (void)sy_write_file(lp, bak, bn, 0600); free(bak); }
       ck("locks-tsv-corruptions-and-mismatch-fail-closed", ok); }
 
-    /* (12) worktree shares the same freeze lock: non-owner f write & git commit --cwd refused */
+    /* (12) The same freeze lock follows main across worktrees. */
     { char *af[] = {"f", "write", "src/a.txt", "--from", f_new, 0};
-      char *ac[] = {"git", "commit", "--cwd", wt, "-m", "wt blocked", "--whole", "src/a.txt", 0};
-      int ok1 = run_dv(wt, "worker1", af, &rc) && rc == 1 && has(out, "LOCK_HELD freeze owner=integ");
-      int ok2 = ok1 && run_dv(repo, "worker1", ac, &rc) && rc == 1 && has(out, "LOCK_HELD freeze owner=integ");
-      ck("worktree-shared-lock-refuses-non-owner", ok2); }
+      char *ac[] = {"git", "commit", "--cwd", wt, "-m", "linked worktree commit", "--whole", "src/a.txt", 0};
+      char *as[] = {"git", "commit", "--cwd", repo, "-m", "primary non-main commit", "--whole", "src/a.txt", 0};
+      int ok1 = run_dv(wt, "worker1", af, &rc) && rc == 0 && has(out, "FREEZE_SCOPE skip=worktree branch=wt-branch");
+      ck("linked-worktree-write-skips-freeze-lock", ok1);
+      if (!ok1) (void)wr(wt, "src/a.txt", "updated\n");
+      ck("linked-worktree-commit-skips-freeze-lock",
+         run_dv(repo, "worker1", ac, &rc) && rc == 0 && has(out, "FREEZE_SCOPE skip=worktree branch=wt-branch"));
+      printf("SCOPE_PROBE linked rc=%d\n%s", rc, out);
+      int side_ready = sh_in(repo, "git switch -qc freeze-scope-side") && !wr(repo, "src/a.txt", "side edit\n");
+      ck("primary-non-main-commit-skips-freeze-lock",
+         side_ready && run_dv(repo, "worker1", as, &rc) && rc == 0 && has(out, "FREEZE_SCOPE skip=worktree branch=freeze-scope-side"));
+      printf("SCOPE_PROBE non-main rc=%d\n%s", rc, out);
+      char *am[] = {"git", "merge", "freeze-scope-side", "--cwd", wt, "--no-ff", 0};
+      int linked_main = side_ready &&
+          !cx_fmt(cmd, sizeof cmd, "git -C '%s' symbolic-ref HEAD refs/heads/main", wt) && sh_in(repo, cmd);
+      /* The clean path isolates the lock decision from commit-own validation. */
+      ck("worktree-shared-lock-refuses-non-owner",
+         linked_main && run_dv(repo, "worker1", ac, &rc) && rc == 1 &&
+         has(out, "LOCK_HELD freeze owner=integ") && !has(out, "FREEZE_SCOPE skip="));
+      ck("linked-main-merge-refuses-non-owner",
+         linked_main && run_dv(repo, "worker1", am, &rc) && rc == 1 &&
+         has(out, "LOCK_HELD freeze owner=integ") && has(out, "GIT_MERGE\trc=1\treason=lock-held\tlock=freeze"));
+      char *apull[] = {"git", "pull", "--cwd", wt, 0};
+      char *apush[] = {"git", "push", "--cwd", wt, 0};
+      ck("linked-main-pull-refuses-non-owner",
+         linked_main && run_dv(repo, "worker1", apull, &rc) && rc == 1 &&
+         has(out, "GIT_PULL\trc=1\treason=lock-held\tlock=freeze"));
+      ck("linked-main-push-refuses-non-owner",
+         linked_main && run_dv(repo, "worker1", apush, &rc) && rc == 1 &&
+         has(out, "GIT_PUSH_REFUSE\treason=lock-held\tlock=freeze"));
+      char *amc[] = {"git", "merge", "--continue", 0};
+      int recorded = linked_main && !cx_fmt(cmd, sizeof cmd,
+          "printf '%%s\\tmain\\t%%s\\n' '%s' \"$(git rev-parse main)\" > .git/DEVSVC_MERGE_TARGET", wt) &&
+          sh_in(repo, cmd);
+      ck("linked-main-merge-continue-refuses-non-owner",
+         recorded && run_dv(repo, "worker1", amc, &rc) && rc == 1 &&
+         has(out, "LOCK_HELD freeze owner=integ") && has(out, "GIT_MERGE\trc=1\treason=lock-held\tlock=freeze"));
+      if (recorded) (void)sh_in(repo, "rm .git/DEVSVC_MERGE_TARGET");
+      int linked_restored = !linked_main ||
+          (!cx_fmt(cmd, sizeof cmd, "git -C '%s' symbolic-ref HEAD refs/heads/wt-branch", wt) && sh_in(repo, cmd));
+      ck("freeze-scope-fixture-returns-to-main", linked_restored && (!side_ready ||
+         sh_in(repo, "git restore --worktree src/a.txt && git switch -q main"))); }
 
     /* (13) non-owner cannot release freeze; holder release recovers worktree & main */
     { char *ab[] = {"lock", "release", "freeze", "--owner", "worker1", 0};

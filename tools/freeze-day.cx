@@ -1,4 +1,4 @@
-/* tools/freeze-day.cx -- read-only S0..S10 ordered command checklist with live repo values and readiness gates.
+/* tools/freeze-day.cx -- read-only prove-then-freeze checklist with live repo values and readiness gates.
  *
  *   sh ./unisacc.com tools/freeze-day.cx -- plan --version V [--branch REF] [--repo DIR] [--owner NAME]
  *       [--prerun-dir ABS_DIR] [--chain-dir ABS_DIR] [--ape ABS_APE]
@@ -6,13 +6,13 @@
  *   sh ./unisacc.com tools/freeze-day.cx -- check --step STEP_ID --log FILE
  *
  * Read-only checklist generator: never merges, commits, pushes, or publishes.
- * Plan reads current values from --repo (release/candidate.tsv, git HEAD, HEAD^{tree}, branch SHA,
- * release/ templates, optional freeze-readiness --skip-slow) and prints copyable S0..S10 commands
- * with gate READY/BLOCKED (including S0-preview, S0-gates, S0-verify-tree HEAD^{tree}==merge_tree,
- * S0-freeze-slot, S1 split into 3 --only batches, S3 load guard + l0-posix2 judge, and S4b/S8b lock renewals).
- * Check reads a step log file and verifies the step's expected completion marker without executing anything.
+ * Flow is prove-first: after S0-merge/verify-tree comes section 合入后后台证明
+ * (prove-bg / prove-inputs / prove-run / prove-ci on the merge commit), then freeze-promote
+ * (SID + APE sha核对 + bg-candidate promote --check only). S1 3-batch, S4 prerun archive,
+ * S4-scrub (scrub-home-paths on backup-evidence.tsv), S4b/S8b lock renewals, S9 with
+ * --timeout-ms 300000 and --from-step 3 resume note follow.
  * Final lines:
- *   FREEZE_DAY<TAB>plan<TAB>steps=23<TAB>blocked=M
+ *   FREEZE_DAY<TAB>plan<TAB>steps=25<TAB>blocked=M
  *   FREEZE_DAY<TAB>check<TAB>step=ID<TAB>status=PASS|FAIL<TAB>expect=...<TAB>log=...
  * Check: tools/check-freeze-day.cx (batch freeze-day).
  */
@@ -27,7 +27,7 @@
 #pragma unisa use mem.bytes
 #pragma unisa use cxlib.netpack
 
-enum { FD_MAX_FR = 32, FD_STEPS = 24 };
+enum { FD_MAX_FR = 32, FD_STEPS = 25 };
 
 typedef struct {
     char id[64];
@@ -47,26 +47,27 @@ static const step_spec_t g_specs[FD_STEPS] = {
     { "S0-gates",        "integrator",  300,  "MERGE_GATE\tratchets-total" },
     { "S0-devsvc-alive", "integrator",  30,   "OK\tpong" },
     { "S0-lock",         "integrator",  60,   "FREEZE_BROADCAST" },
-    { "S0-merge",       "integrator",  300,  "GIT_COMMIT\trc=0" },
-    { "S0-verify-tree", "integrator",  15,   "MERGE_TREE_MATCH" },
-    { "S0-freeze-slot", "integrator",  120,  "11-version-slot\tPASS" },
-    { "S1-light",       "integrator",  45,   "READY\tyes" },
-    { "S1-mid",         "integrator",  50,   "READY\tyes" },
-    { "S1-chain",       "integrator",  55,   "5-candidate-chain\tPASS" },
-    { "S2",             "integrator",  1800, "CHAIN_DONE" },
-    { "S3-inputs",      "prerun",      60,   "PRERUN_INPUTS_SUMMARY" },
-    { "S3-run",         "prerun",      2280, "PRERUN_SUMMARY" },
-    { "S3b",            "ci",          600,  "conclusion=success" },
-    { "S3c",            "docs",        600,  "CHECK_RELEASE_PREP" },
-    { "S4",             "prerun",      180,  "PRERUN_ARCHIVE" },
-    { "S4b-renew-lock", "integrator",  30,   "LOCK_ACQUIRED" },
-    { "S5",             "integrator",  300,  "RELEASE_EXEC_WARM" },
-    { "S6",             "integrator",  180,  "RELEASE_CHAIN" },
-    { "S7",             "integrator",  180,  "RELEASE_CHAIN" },
-    { "S8",             "integrator",  180,  "RELEASE_CHAIN" },
-    { "S8b-renew-lock", "integrator",  30,   "LOCK_ACQUIRED" },
-    { "S9",             "integrator",  720,  "exec-7-Y2-done" },
-    { "S10",            "integrator",  480,  "RELEASE_POST\tstatus=DONE" }
+    { "S0-merge",        "integrator",  300,  "GIT_COMMIT\trc=0" },
+    { "S0-verify-tree",  "integrator",  15,   "MERGE_TREE_MATCH" },
+    { "prove-bg",        "integrator",  1800, "CHAIN_DONE" },
+    { "prove-inputs",    "prerun",      60,   "PRERUN_INPUTS_SUMMARY" },
+    { "prove-run",       "prerun",      2280, "PRERUN_SUMMARY" },
+    { "prove-ci",        "ci",          600,  "conclusion=success" },
+    { "freeze-promote",  "integrator",  120,  "PROMOTE_CHECK\tPASS" },
+    { "S1-light",        "integrator",  45,   "READY\tyes" },
+    { "S1-mid",          "integrator",  50,   "READY\tyes" },
+    { "S1-chain",        "integrator",  55,   "5-candidate-chain\tPASS" },
+    { "S3c",             "docs",        600,  "CHECK_RELEASE_PREP" },
+    { "S4",              "prerun",      180,  "PRERUN_ARCHIVE" },
+    { "S4-scrub",        "integrator",  30,   "SCRUB\tfiles=" },
+    { "S4b-renew-lock",  "integrator",  30,   "LOCK_ACQUIRED" },
+    { "S5",              "integrator",  300,  "RELEASE_EXEC_WARM" },
+    { "S6",              "integrator",  180,  "RELEASE_CHAIN" },
+    { "S7",              "integrator",  180,  "RELEASE_CHAIN" },
+    { "S8",              "integrator",  180,  "RELEASE_CHAIN" },
+    { "S8b-renew-lock",  "integrator",  30,   "LOCK_ACQUIRED" },
+    { "S9",              "integrator",  720,  "exec-7-Y2-done" },
+    { "S10",             "integrator",  480,  "RELEASE_POST\tstatus=DONE" }
 };
 
 static fr_row_t g_fr[FD_MAX_FR];
@@ -563,6 +564,21 @@ static int sc_validate_tool(const char *tool, char toks[][256], int nt, char *wh
         static const char *const bf[] = {"--dry", "--execute", "--root-upgrade", 0};
         return sc_check_flags(toks, 1, nt, vf, bf, 0, 0, why, wcap);
     }
+    if (tx_eqz(tool, "scrub-home-paths")) {
+        static const char *const bf[] = {"--check", "--write", "--list", "--tracked-docs", 0};
+        int npos = 0;
+        if (sc_check_flags(toks, 0, nt, 0, bf, 1, &npos, why, wcap)) return 1;
+        if (!sc_has_flag(toks, 0, nt, "--check", 0, 0) && !sc_has_flag(toks, 0, nt, "--write", 0, 0) &&
+            !sc_has_flag(toks, 0, nt, "--list", 0, 0)) {
+            cx_fmt(why, wcap, "scrub-home-paths-needs-mode");
+            return 1;
+        }
+        if (npos < 1 && !sc_has_flag(toks, 0, nt, "--tracked-docs", 0, 0)) {
+            cx_fmt(why, wcap, "scrub-home-paths-needs-file");
+            return 1;
+        }
+        return 0;
+    }
     return 0;
 }
 
@@ -727,6 +743,10 @@ static int cmd_plan(int argc, char **argv) {
         cx_fmt(why, sizeof why, "-");
         int is_blk = 0;
 
+        /* Section markers: 合入后后台证明 after verify-tree; 冻结 at freeze-promote. */
+        if (i == 6) printf("FREEZE_SECTION\t合入后后台证明\tafter=S0-verify-tree\tmerge_rev=HEAD_after_merge\n");
+        if (i == 10) printf("FREEZE_SECTION\t冻结\tonly=SID+APE-sha+promote\n");
+
         if (i == 0) { /* S0-preview */
             cx_fmt(cmd, sizeof cmd,
                 "sh ./unisacc.com tools/merge-version.cx -- preview --branch %s --base main --work %s/mv-work # expect MERGE_VERSION verdict=READY tree=%s",
@@ -775,17 +795,43 @@ static int cmd_plan(int argc, char **argv) {
                 is_blk = 1;
                 add_reason(why, sizeof why, "head-tree-mismatch");
             }
-        } else if (i == 6) { /* S0-freeze-slot */
+        } else if (i == 6) { /* prove-bg: 合入后后台证明 / bg-candidate on merge commit */
             cx_fmt(cmd, sizeof cmd,
-                "# write build/freeze.tsv %s row (col3==DEVSVC_OWNER==UNISACC_INTEGRATOR==%s lowercase); "
-                "update release/candidate.tsv (%s -> %s); fill freeze_at in plans/v%s.md; "
-                "DEVSVC_OWNER=%s sh ./unisacc.com tools/devsvc.cx -- git commit --derive -m \"freeze: %s freeze row, candidate slot and freeze_at\" --whole build/freeze.tsv --whole release/candidate.tsv --whole plans/v%s.md && "
-                "sh ./unisacc.com tools/chain-ready.cx -- --only 11-version-slot --version %s",
-                ver, owner, prev_ver, ver, ver, owner, ver, ver, ver);
+                "# MERGE_REV=$(git rev-parse HEAD) after S0-merge; "
+                "sh ./unisacc.com tools/bg-candidate.cx -- start --rev %s "
+                "# 合入提交; wait status DONE before prove-inputs",
+                rev_full);
+            if (!has_branch) { is_blk = 1; add_reason(why, sizeof why, "branch-missing"); }
+        } else if (i == 7) { /* prove-inputs: after prove-bg DONE */
+            cx_fmt(cmd, sizeof cmd,
+                "# after prove-bg DONE; MERGE_REV as --rev: "
+                "sh ./unisacc.com tools/prerun-inputs.cx -- --rev %s --version %s --prev %s --prev-rev %s --ape %s --dir %s",
+                rev_full, ver, prev_ver, prev_sha, ape_path, prerun_dir);
+            if (!has_cand) { is_blk = 1; add_reason(why, sizeof why, "candidate-tsv-missing"); }
+            if (!has_branch) { is_blk = 1; add_reason(why, sizeof why, "branch-missing"); }
+        } else if (i == 8) { /* prove-run */
+            cx_fmt(cmd, sizeof cmd,
+                "# precheck uptime load1<8 (if load1>12 downgrade to --window-lanes 2 --max-jobs 6); after prove-bg DONE; "
+                "sh ./unisacc.com tools/prerun-drive.cx -- plan --ids-file %s/ids.txt --times-file %s/times.tsv --priority-file %s/priority.tsv --out %s --normal-jobs 8 --window-lanes 3 && "
+                "sh ./unisacc.com tools/prerun-drive.cx -- run --root . --candidate %s --out %s --resume --max-jobs 8 --window-lanes 3 --keep-going "
+                "# judge: PRERUN_SUMMARY 0 FAIL, UNKNOWN only in expected-unmeasured.tsv, verify l0-posix2 first-run result",
+                prerun_dir, prerun_dir, prerun_dir, prerun_dir, ape_path, prerun_dir);
+        } else if (i == 9) { /* prove-ci */
+            cx_fmt(cmd, sizeof cmd,
+                "# MERGE_REV after S0-merge: "
+                "sh ./unisacc.com tools/ci-early.cx -- --rev %s --version %s",
+                rev_full, ver);
+            if (!has_branch) { is_blk = 1; add_reason(why, sizeof why, "branch-missing"); }
+        } else if (i == 10) { /* freeze-promote: SID + APE sha核对 + 提升 only */
+            cx_fmt(cmd, sizeof cmd,
+                "# 冻结段只核 SID 与 APE sha 并提升(冻结行/freeze_at 不进 APE); MERGE_REV after prove DONE: "
+                "sh ./unisacc.com tools/bg-candidate.cx -- promote --check --rev %s "
+                "# expect NEED ape sha=... and NEED source_sid=...; then register freeze row + freeze_at only",
+                rev_full);
             if (!has_cand) { is_blk = 1; add_reason(why, sizeof why, "candidate-tsv-missing"); }
             if (fr_is_bad("verseq")) { is_blk = 1; add_reason(why, sizeof why, "verseq"); }
             if (fr_is_bad("plan-freeze-at")) { is_blk = 1; add_reason(why, sizeof why, "plan-freeze-at"); }
-        } else if (i == 7) { /* S1-light */
+        } else if (i == 11) { /* S1-light */
             cx_fmt(cmd, sizeof cmd,
                 "for p in 1-rev 6-affected 7-recipe 8-inflight 9-ledger 10-envhygiene 11-version-slot 12-root-files 12p-preflight-entry 13-snap-cache 14-root-record 16-disk-free 17-root-public 20-ident-helper 21-verseq-gen; do "
                 "sh ./unisacc.com tools/chain-ready.cx -- --version %s --only \"$p\" || exit 1; done",
@@ -793,35 +839,16 @@ static int cmd_plan(int argc, char **argv) {
             if (fr_is_bad("chain-1rev")) { is_blk = 1; add_reason(why, sizeof why, "chain-1rev"); }
             if (fr_is_bad("verseq")) { is_blk = 1; add_reason(why, sizeof why, "verseq"); }
             if (fr_is_bad("plan-freeze-at")) { is_blk = 1; add_reason(why, sizeof why, "plan-freeze-at"); }
-        } else if (i == 8) { /* S1-mid */
+        } else if (i == 12) { /* S1-mid */
             cx_fmt(cmd, sizeof cmd,
                 "for p in 2a-derive 2b-ratchets 3a-cxmod-tri 3b-cx0-extract 4-p1 15-gen-all 18-parse2-gen 19-chain-preflight 22-premerge-union; do "
                 "sh ./unisacc.com tools/chain-ready.cx -- --version %s --only \"$p\" || exit 1; done",
                 ver);
             if (fr_is_bad("ratchets")) { is_blk = 1; add_reason(why, sizeof why, "ratchets"); }
-        } else if (i == 9) { /* S1-chain */
+        } else if (i == 13) { /* S1-chain */
             cx_fmt(cmd, sizeof cmd,
                 "sh ./unisacc.com tools/chain-ready.cx -- --version %s --only 5-candidate-chain # solo <=55s (baseline 53.5s)",
                 ver);
-        } else if (i == 10) { /* S2 */
-            cx_fmt(cmd, sizeof cmd, "sh ./unisacc.com tools/bg-candidate.cx -- start --rev %s", rev_full);
-            if (!has_branch) { is_blk = 1; add_reason(why, sizeof why, "branch-missing"); }
-        } else if (i == 11) { /* S3-inputs */
-            cx_fmt(cmd, sizeof cmd,
-                "sh ./unisacc.com tools/prerun-inputs.cx -- --rev %s --version %s --prev %s --prev-rev %s --ape %s --dir %s",
-                branch_sha, ver, prev_ver, prev_sha, ape_path, prerun_dir);
-            if (!has_cand) { is_blk = 1; add_reason(why, sizeof why, "candidate-tsv-missing"); }
-            if (!has_branch) { is_blk = 1; add_reason(why, sizeof why, "branch-missing"); }
-        } else if (i == 12) { /* S3-run */
-            cx_fmt(cmd, sizeof cmd,
-                "# precheck uptime load1<8 (if load1>12 downgrade to --window-lanes 2 --max-jobs 6); "
-                "sh ./unisacc.com tools/prerun-drive.cx -- plan --ids-file %s/ids.txt --times-file %s/times.tsv --priority-file %s/priority.tsv --out %s --normal-jobs 8 --window-lanes 3 && "
-                "sh ./unisacc.com tools/prerun-drive.cx -- run --root . --candidate %s --out %s --resume --max-jobs 8 --window-lanes 3 --keep-going "
-                "# judge: PRERUN_SUMMARY 0 FAIL, UNKNOWN only in expected-unmeasured.tsv, verify l0-posix2 first-run result",
-                prerun_dir, prerun_dir, prerun_dir, prerun_dir, ape_path, prerun_dir);
-        } else if (i == 13) { /* S3b */
-            cx_fmt(cmd, sizeof cmd, "sh ./unisacc.com tools/ci-early.cx -- --rev %s --version %s", rev_full, ver);
-            if (!has_branch) { is_blk = 1; add_reason(why, sizeof why, "branch-missing"); }
         } else if (i == 14) { /* S3c */
             cx_fmt(cmd, sizeof cmd,
                 "sh ./unisacc.com tools/check-release-prep.cx -- --part notes --notes release/notes-%s.md && "
@@ -836,20 +863,25 @@ static int cmd_plan(int argc, char **argv) {
                 "sh ./unisacc.com tools/prerun-drive.cx -- merge --in-dir %s --out %s --version %s && "
                 "sh ./unisacc.com tools/prerun-drive.cx -- archive --in-dir %s --version %s",
                 prerun_dir, prerun_dir, ver, prerun_dir, ver);
-        } else if (i == 16) { /* S4b-renew-lock */
+        } else if (i == 16) { /* S4-scrub: backup-evidence.tsv home paths */
+            cx_fmt(cmd, sizeof cmd,
+                "sh ./unisacc.com tools/scrub-home-paths.cx -- --write release/evidence/%s/backup-evidence.tsv && "
+                "sh ./unisacc.com tools/scrub-home-paths.cx -- --check release/evidence/%s/backup-evidence.tsv",
+                ver, ver);
+        } else if (i == 17) { /* S4b-renew-lock */
             cx_fmt(cmd, sizeof cmd,
                 "DEVSVC_OWNER=%s sh ./unisacc.com tools/devsvc.cx -- lock acquire freeze --owner %s --ttl 7200 # renew before S5 (<90m)",
                 owner, owner);
-        } else if (i == 17) { /* S5 */
+        } else if (i == 18) { /* S5 */
             cx_fmt(cmd, sizeof cmd,
                 "sh ./unisacc.com tools/release-run.cx -- --pack . release/candidate.tsv %s/src %s/pack --chain-out %s && "
                 "sh ./unisacc.com tools/release-exec.cx -- --warm %s/pack/candidate.tsv --layout %s/pack/layout --out %s/warm",
                 chain_dir, chain_dir, chain_dir, chain_dir, chain_dir, chain_dir);
-        } else if (i == 18) { /* S6 */
+        } else if (i == 19) { /* S6 */
             cx_fmt(cmd, sizeof cmd,
                 "sh ./unisacc.com tools/release-chain.cx -- run --inputs %s/inputs.tsv --state %s/state --layout %s/pack/layout --from 1",
                 prerun_dir, chain_dir, chain_dir);
-        } else if (i == 19) { /* S7 */
+        } else if (i == 20) { /* S7 */
             cx_fmt(cmd, sizeof cmd,
                 "sh ./unisacc.com tools/release-chain.cx -- run --inputs %s/inputs.tsv --state %s/state --layout %s/pack/layout --from 3 "
                 "# stage release/notes-%s.md release/rollback.txt release/decision.txt",
@@ -857,19 +889,21 @@ static int cmd_plan(int argc, char **argv) {
             if (!has_notes) { is_blk = 1; add_reason(why, sizeof why, "missing-notes-template"); }
             if (!has_rb) { is_blk = 1; add_reason(why, sizeof why, "missing-rollback-template"); }
             if (!has_dec) { is_blk = 1; add_reason(why, sizeof why, "missing-decision-template"); }
-        } else if (i == 20) { /* S8 */
+        } else if (i == 21) { /* S8 */
             cx_fmt(cmd, sizeof cmd,
                 "sh ./unisacc.com tools/release-chain.cx -- run --inputs %s/inputs.tsv --state %s/state --layout %s/pack/layout --from 4",
                 prerun_dir, chain_dir, chain_dir);
-        } else if (i == 21) { /* S8b-renew-lock */
+        } else if (i == 22) { /* S8b-renew-lock */
             cx_fmt(cmd, sizeof cmd,
                 "DEVSVC_OWNER=%s sh ./unisacc.com tools/devsvc.cx -- lock acquire freeze --owner %s --ttl 7200 # renew before S9 execute",
                 owner, owner);
-        } else if (i == 22) { /* S9 */
+        } else if (i == 23) { /* S9: bg node max 300000ms; on timeout continue --from-step 3 */
             cx_fmt(cmd, sizeof cmd,
-                "DEVSVC_OWNER=%s sh ./unisacc.com tools/devsvc.cx -- x --bg --par 1 -- sh ./unisacc.com tools/release-exec.cx -- --execute release/candidate.tsv --layout %s/pack/layout --out %s/exec",
+                "DEVSVC_OWNER=%s sh ./unisacc.com tools/devsvc.cx -- x --bg --par 1 --timeout-ms 300000 -- "
+                "sh ./unisacc.com tools/release-exec.cx -- --execute release/candidate.tsv --layout %s/pack/layout --out %s/exec "
+                "# on timeout (CI poll >5m): re-run same with --from-step 3",
                 owner, chain_dir, chain_dir);
-        } else if (i == 23) { /* S10 */
+        } else if (i == 24) { /* S10 */
             cx_fmt(cmd, sizeof cmd,
                 "sh ./unisacc.com tools/release-post.cx -- run --version %s --dry && "
                 "sh ./unisacc.com tools/freeze-broadcast.cx -- end --dry --from %s",
