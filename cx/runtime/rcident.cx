@@ -137,26 +137,35 @@ static int ri_is_frag(const char *s, long tl) {
     for (k = 0; k < 12; k++) if ((long)tx_len(fr[k], 8) == tl && tx_same(s, tl, fr[k], tl)) return 1;
     return 0;
 }
-static int ri_pin_scan(const char *b, long n) {
+/* Bitmask over one byte buffer: 1 = a direct __FILE__ token, 2 = a ## operator,
+   4 = a fragment token (__F, LE__, ...). Comments and string/char literals are skipped.
+   Splitting the flags lets a CAT split across files (## in one file, fragment in another)
+   still pin once both appear somewhere in the unit. */
+static int ri_pin_bits(const char *b, long n) {
     long i = 0, ts;
-    int hashhash = 0, frag = 0;
+    int bits = 0;
     if (!b || n <= 0) return 0;
     while (i < n) {
         char c = b[i];
         if (c == '/' && i + 1 < n && b[i + 1] == '/') { i += 2; while (i < n && b[i] != '\n') i++; continue; }
         if (c == '/' && i + 1 < n && b[i + 1] == '*') { i += 2; while (i + 1 < n && !(b[i] == '*' && b[i + 1] == '/')) i++; i = (i + 1 < n) ? i + 2 : n; continue; }
-        if (c == '"' || c == '\'') { char q = c; i++; while (i < n) { if (b[i] == '\\' && i + 1 < n) { i += 2; continue; } if (b[i] == q) { i++; break; } i++; } continue; }
-        if (c == '#' && i + 1 < n && b[i + 1] == '#') { hashhash = 1; i += 2; continue; }
+        if (c == '"' || c == '\'') { char q = c; i++; while (i < n) { if (b[i] == '\\' && i + 1 < n) { i += 2; continue; } if (b[i] == q) { i++; break; } if (b[i] == '\n') break; i++; } continue; }
+        if (c == '#' && i + 1 < n && b[i + 1] == '#') { bits |= 2; i += 2; continue; }
         if ((c >= 'a' && c <= 'z') || (c >= 'A' && c <= 'Z') || c == '_') {
             ts = i;
             while (i < n && ((b[i] >= 'a' && b[i] <= 'z') || (b[i] >= 'A' && b[i] <= 'Z') || (b[i] >= '0' && b[i] <= '9') || b[i] == '_')) i++;
-            if (i - ts == 8 && tx_same(b + ts, 8, "__FILE__", 8)) return 1;    /* M1 */
-            if (i - ts >= 1 && i - ts <= 7 && ri_is_frag(b + ts, i - ts)) frag = 1; /* M2' fragment */
+            if (i - ts == 8 && tx_same(b + ts, 8, "__FILE__", 8)) bits |= 1;    /* M1 */
+            else if (i - ts >= 1 && i - ts <= 7 && ri_is_frag(b + ts, i - ts)) bits |= 4; /* M2' fragment */
             continue;
         }
         i++;
     }
-    return hashhash && frag;
+    return bits;
+}
+/* Single-buffer pin decision: a direct __FILE__, or a ## together with a fragment. */
+static int ri_pin_scan(const char *b, long n) {
+    int bits = ri_pin_bits(b, n);
+    return (bits & 1) || ((bits & 2) && (bits & 4));
 }
 /* M3: an argv token (before "--") that is __FILE__ or a fragment, or any ## substring -> pin.
    Conservative catch for CAT(__FI,X) with X from -D and for -DW=__FILE__. */
@@ -254,6 +263,7 @@ int rk_sources(int argc, char **argv, const char **sources, int nsrc, char hex[6
     long ln2;
     long cap2;
     int j;
+    int anyhh = 0, anyfrag = 0;
     acc = 0;
     n = 0;
     cap = 0;
@@ -299,7 +309,10 @@ int rk_sources(int argc, char **argv, const char **sources, int nsrc, char hex[6
             mm_free(body);
             goto bad;
         }
-        if (ri_pin_scan(body, (long)bn)) *pin = 1;
+        { int bits = ri_pin_bits(body, (long)bn);
+          if (bits & 1) *pin = 1;
+          if (bits & 2) anyhh = 1;
+          if (bits & 4) anyfrag = 1; }
         if (ri_app(&acc, &n, &cap, body, (long)bn)) {
             mm_free(body);
             goto bad;
@@ -307,6 +320,8 @@ int rk_sources(int argc, char **argv, const char **sources, int nsrc, char hex[6
         mm_free(body);
         j = j + 1;
     }
+    /* cross-file CAT: a ## in one file plus a fragment in another still pins the unit. */
+    if (anyhh && anyfrag) *pin = 1;
     if (rk_hex(acc ? (const void *)acc : (const void *)"", n, hex)) goto bad;
     if (ri_app(&leg, &ln2, &cap2, hex, 64)) goto bad;
     cx_sha256_hex(leg, (size_t)ln2, raw);
