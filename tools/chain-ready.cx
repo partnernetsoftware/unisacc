@@ -7,7 +7,15 @@
  *   READY  yes|no  failed=<names>  ms
  * READY=yes needs every row PASS or UNMEASURED-by-design (the two manual items: recipe steps (7), ledger line (9));
  * a SKIPPED P1 (--fast) or a FAIL makes it no.  Items:
- *   1-rev          git status --short on src cx ext exec/facts is empty and the branch is main
+ *   1-rev          git status --short on src cx ext exec/facts is empty, the branch is main (or v0.0.NN),
+ *                  and the dual-anchor 9-column SHA-256 hash-chained deferred-gates ledger
+ *                  (<top>/build/deferred-gates.tsv + <git-common-dir>/unisacc-deferred-gates.tsv,
+ *                  genesis DEFERRED_GENESIS_SHA = "0000000000000000000000000000000000000000000000000000000000000000",
+ *                  columns: rec_type\ttimestamp_s\ttop\tgate\treason\ttree_sha\thead_sha\tdetail\tchain_sha256)
+ *                  is intact and has 0 unverified DEFERRED rows for <top>.
+ *                  Semantic contract (7): a VERIFIED row proves the deferred gate passed on verified_deferred_tree=<orig_tree>;
+ *                  if the VERIFIED row's tree_sha differs from current HEAD^{tree} (a commit landed after verify-deferred),
+ *                  1-rev stays PASS and emits WARN deferred-verified-tree-not-head (runbook S8 requires verify-deferred on the final tree).
  *   2a-derive      tools/derive.cx -- --check: DERIVE_SUMMARY drift=0 refused=0
  *   2b-ratchets    tools/ratchets.cx last line ok=13 fail=0
  *   3a-cxmod-tri   tools/check-cxmod-tri.cx CXMOD_TRI failed=0 (GAP rows are named by the tool)
@@ -24,6 +32,9 @@
  *                  UNISACC_CACHE_DIR forces the build the chain reads, and an UNISACC_BOUND_DEADLINE_MONO that is
  *                  past or not a number is the residue of an earlier bounded command.  Either is a FAIL naming
  *                  the variable; a usable future instant is a normal chain inside a bound window and passes.
+ *  21-verseq-gen   tools/verseq-gen.cx -- --check: VERSEQ_SUMMARY fail=0 (plans 标题/主题/宫殿/工作树版本序四处口径)。
+ *  22-premerge-union  tools/premerge-union.cx -- --repo REPO --shard derive|check-derive (two 55s shards):
+ *                  read-only union tree of main + version branch verifies generator --check, derive --check, and check-derive.
  *  11-version-slot tools/release-packcheck.cx -- slot REPO [--version V]: release/candidate.tsv has exactly one
  *                  data row whose version equals the target (--version V, else branch vX.Y.Z; on main --version
  *                  is required), so the chain APE self-reports that version and release-run --pack reproduces its
@@ -40,8 +51,9 @@
  *  14-root-record  build.json product_digest and bytes match the APE (else root-record-digest-mismatch); the
  *                  commit equals the release/candidate.tsv row of the APE's --version (else
  *                  root-record-commit-mismatch); no row, or sources_sha256: WARN root-record-stale-fields, PASS.
- *  15-gen-all      tools/gen-all-check.cx -- --root REPO: GEN_ALL_SUMMARY diff=0 error=0 (rc 0); any product
- *                  table generator DIFF or ERROR blocks the chain with its --write fix.
+ *  15-gen-all      tools/gen-all-check.cx -- --root REPO: GEN_ALL_SUMMARY diff=0 error=0 (rc 0), uncovered<=2
+ *                  (two 0.0.86 waivers expiring at 0.0.87: rt-shared-gen, ucn-pp-gen), and total=N synchronized
+ *                  with CGAC_GENERATORS in tools/check-gen-all-check.cx; any DIFF/ERROR/drift blocks the chain.
  *  17-root-public  ROOT has no unisacc.com.candidate.tsv (tools/install-ape.cx --candidate).  With one the row is
  *                  PASS with WARN root-candidate ... RELEASE_BLOCKED: the chain may start, release-exec and
  *                  release-run --pack refuse that Root as a baseline.
@@ -82,7 +94,6 @@ typedef struct { const char *name; char *argv[24]; int pid, ofd; char *out; long
 static const char *newmsg[NEWMSG_N] = {"bad symbol name", "does not export", "undeclared function"};
 
 static int has(const char *h, long n, const char *w) { return tx_find(h, n, w, (long)tx_len(w, 4096)) >= 0; }
-
 /* the first line of H (len n) holding W, copied into DST (sanitised), or "" */
 static void line_with(const char *h, long n, const char *w, char *dst, int cap) {
     long at = 0; dst[0] = 0;
@@ -97,6 +108,17 @@ static void line_with(const char *h, long n, const char *w, char *dst, int cap) 
     }
 }
 static void put_ev(char *ev, int cap, const char *s) { cx_fmt(ev, (size_t)cap, "%s", s); }
+static int j_versq(const char *o, long n, int rc, char *ev, int cap) {
+    char l[200];
+    line_with(o, n, "VERSEQ_SUMMARY", l, sizeof l);
+    if (rc == 0 && l[0] && has(l, (long)tx_len(l, 200), "fail=0")) { put_ev(ev, cap, l); return 1; }
+    {   char f[200];
+        line_with(o, n, "FAIL\t", f, sizeof f);
+        cx_fmt(ev, (size_t)cap, "rc=%d %s; first: %s", rc, l[0] ? l : "no VERSEQ_SUMMARY", f[0] ? f : "none");
+    }
+    return 0;
+}
+
 
 /* ---- pure judges: 1 PASS, 0 FAIL; ev gets the evidence sentence ---- */
 static int j_rev(const char *o, long n, int rc, char *ev, int cap) {
@@ -109,6 +131,264 @@ static int j_rev(const char *o, long n, int rc, char *ev, int cap) {
     }
     if (dirty) { cx_fmt(ev, (size_t)cap, "%ld uncommitted or untracked paths under src cx ext exec/facts, first: %s", dirty, first); return 0; }
     put_ev(ev, cap, "no uncommitted or untracked paths under src cx ext exec/facts"); return 1;
+}
+
+#define DEFERRED_GENESIS_SHA "0000000000000000000000000000000000000000000000000000000000000000"
+
+static int cr_deferred_audit_one(const char *path, const char *top, int only_this_top,
+                                 const char *head_tree, char *stale_vtree_out, size_t svcap,
+                                 int *present_out, long *top_rows_out, char *chain_tip_out,
+                                 long *unv_cnt_out, char *first_unv_out, size_t fcap,
+                                 char *why_out, size_t wcap) {
+    sy_stat_t st;
+    size_t bn = 0;
+    char *b;
+    long pos = 0, lno = 0, top_len = (long)tx_len(top, 1024);
+    char open_gate[128][32], open_tree[128][64], open_desc[128][180];
+    int open_cleared[128], nopen = 0, j;
+    *present_out = 0;
+    *top_rows_out = 0;
+    *unv_cnt_out = 0;
+    if (stale_vtree_out && svcap > 0) stale_vtree_out[0] = 0;
+    if (first_unv_out && fcap > 0) first_unv_out[0] = 0;
+    if (why_out && wcap > 0) why_out[0] = 0;
+    mm_copy(chain_tip_out, 65, DEFERRED_GENESIS_SHA, 65);
+    if (sy_lstat(path, &st) != 0) {
+        int ex = sy_exists(path);
+        if (ex == 0) return 0;
+        cx_fmt(why_out, wcap, "deferred-gates-corrupt: lstat failed on %s (ex=%d)", path, ex);
+        return -1;
+    }
+    *present_out = 1;
+    if (st.kind == 'l') {
+        cx_fmt(why_out, wcap, "deferred-gates-corrupt: symlink not allowed at %s", path);
+        return -1;
+    }
+    if (st.kind != 'f') {
+        cx_fmt(why_out, wcap, "deferred-gates-corrupt: non-regular path %s", path);
+        return -1;
+    }
+    if (st.size <= 0) {
+        cx_fmt(why_out, wcap, "deferred-gates-corrupt: empty 0-byte ledger %s", path);
+        return -1;
+    }
+    b = (char *)cx_read(path, &bn);
+    if (!b || (long)bn != (long)st.size) {
+        if (b) mm_free(b);
+        cx_fmt(why_out, wcap, "deferred-gates-corrupt: unreadable ledger %s", path);
+        return -1;
+    }
+    if (b[bn - 1] != '\n') {
+        mm_free(b);
+        cx_fmt(why_out, wcap, "deferred-gates-corrupt: missing trailing newline in %s", path);
+        return -1;
+    }
+    while (pos < (long)bn) {
+        long nl = tx_chr(b + pos, (long)bn - pos, '\n');
+        const char *row = b + pos;
+        long col_o[9], col_l[9], idx;
+        int col, kind_def, kind_ver, match_top;
+        if (nl < 0) {
+            mm_free(b);
+            cx_fmt(why_out, wcap, "deferred-gates-corrupt: truncated line in %s", path);
+            return -1;
+        }
+        lno++;
+        if (nl == 0 || row[0] == '#') {
+            mm_free(b);
+            cx_fmt(why_out, wcap, "deferred-gates-corrupt: %s at line %ld in %s", nl == 0 ? "empty line" : "comment line", lno, path);
+            return -1;
+        }
+        if (tx_fields(row, nl, '\t') != 9) {
+            mm_free(b);
+            cx_fmt(why_out, wcap, "deferred-gates-corrupt: line %ld in %s has %ld fields (expected 9)", lno, path, tx_fields(row, nl, '\t'));
+            return -1;
+        }
+        for (col = 0; col < 9; col++) {
+            if (tx_field(row, nl, '\t', col, &col_o[col], &col_l[col]) || col_l[col] <= 0) {
+                mm_free(b);
+                cx_fmt(why_out, wcap, "deferred-gates-corrupt: empty field %d at line %ld in %s", col + 1, lno, path);
+                return -1;
+            }
+        }
+        kind_def = (col_l[0] == 8 && tx_same(row + col_o[0], 8, "DEFERRED", 8));
+        kind_ver = (col_l[0] == 8 && tx_same(row + col_o[0], 8, "VERIFIED", 8));
+        if (!kind_def && !kind_ver) {
+            mm_free(b);
+            cx_fmt(why_out, wcap, "deferred-gates-corrupt: unknown rec_type at line %ld in %s", lno, path);
+            return -1;
+        }
+        for (idx = 0; idx < col_l[1]; idx++) {
+            if (row[col_o[1] + idx] < '0' || row[col_o[1] + idx] > '9') {
+                mm_free(b);
+                cx_fmt(why_out, wcap, "deferred-gates-corrupt: non-numeric timestamp at line %ld in %s", lno, path);
+                return -1;
+            }
+        }
+        if (col_l[8] != 64) {
+            mm_free(b);
+            cx_fmt(why_out, wcap, "deferred-gates-corrupt: chain_sha256 length != 64 at line %ld in %s", lno, path);
+            return -1;
+        }
+        for (idx = 0; idx < 64; idx++) {
+            char hc = row[col_o[8] + idx];
+            if (!((hc >= '0' && hc <= '9') || (hc >= 'a' && hc <= 'f'))) {
+                mm_free(b);
+                cx_fmt(why_out, wcap, "deferred-gates-corrupt: non-hex chain_sha256 at line %ld in %s", lno, path);
+                return -1;
+            }
+        }
+        match_top = (col_l[2] == top_len && tx_same(row + col_o[2], col_l[2], top, top_len));
+        if (only_this_top && !match_top) {
+            mm_free(b);
+            cx_fmt(why_out, wcap, "deferred-gates-tampered: foreign top at line %ld in %s", lno, path);
+            return -1;
+        }
+        if (match_top) {
+            char preimage[2400], digest[65];
+            if (col_o[8] <= 1 ||
+                cx_fmt(preimage, sizeof preimage, "%s\t%.*s", chain_tip_out, (int)(col_o[8] - 1), row) ||
+                sy_sha256_hex(preimage, (long)tx_len(preimage, sizeof preimage), digest) ||
+                !tx_same(digest, 64, row + col_o[8], 64)) {
+                mm_free(b);
+                cx_fmt(why_out, wcap, "deferred-gates-tampered: sha256 chain mismatch at line %ld in %s", lno, path);
+                return -1;
+            }
+            mm_copy(chain_tip_out, 65, digest, 65);
+            (*top_rows_out)++;
+            if (kind_def) {
+                if (nopen >= 128) {
+                    mm_free(b);
+                    cx_fmt(why_out, wcap, "deferred-gates-corrupt: >128 deferred rows in %s", path);
+                    return -1;
+                }
+                long gl = col_l[3] < 31 ? col_l[3] : 31, tl2 = col_l[5] < 63 ? col_l[5] : 63;
+                mm_copy(open_gate[nopen], 32, row + col_o[3], (size_t)gl); open_gate[nopen][gl] = 0;
+                mm_copy(open_tree[nopen], 64, row + col_o[5], (size_t)tl2); open_tree[nopen][tl2] = 0;
+                cx_fmt(open_desc[nopen], 180, "gate=%.*s reason=%.*s tree=%.*s",
+                       (int)col_l[3], row + col_o[3], (int)col_l[4], row + col_o[4], (int)col_l[5], row + col_o[5]);
+                open_cleared[nopen] = 0;
+                nopen++;
+            } else {
+                long tag = tx_find(row + col_o[7], col_l[7], "verified_deferred_tree=", 23);
+                long ts, tl2 = 0;
+                int hit = 0;
+                if (tag < 0) {
+                    mm_free(b);
+                    cx_fmt(why_out, wcap, "deferred-gates-tampered: VERIFIED row missing verified_deferred_tree at line %ld in %s", lno, path);
+                    return -1;
+                }
+                ts = col_o[7] + tag + 23;
+                while (ts + tl2 < col_o[7] + col_l[7] && row[ts + tl2] != ' ') tl2++;
+                for (j = 0; j < nopen; j++) {
+                    if (!open_cleared[j] &&
+                        (long)tx_len(open_gate[j], 32) == col_l[3] && tx_same(open_gate[j], col_l[3], row + col_o[3], col_l[3]) &&
+                        (long)tx_len(open_tree[j], 64) == tl2 && tx_same(open_tree[j], tl2, row + ts, tl2)) {
+                        open_cleared[j] = 1;
+                        hit = 1;
+                        break;
+                    }
+                }
+                if (!hit) {
+                    mm_free(b);
+                    cx_fmt(why_out, wcap, "deferred-gates-tampered: orphan VERIFIED row at line %ld in %s", lno, path);
+                    return -1;
+                }
+                if (only_this_top && head_tree && head_tree[0] && stale_vtree_out && svcap > 0 && !stale_vtree_out[0]) {
+                    long htl = (long)tx_len(head_tree, 64);
+                    if (col_l[5] != htl || !tx_same(row + col_o[5], col_l[5], head_tree, htl)) {
+                        long vtl = col_l[5] < 63 ? col_l[5] : 63;
+                        cx_fmt(stale_vtree_out, svcap, "gate=%.*s verified_tree=%.*s", (int)col_l[3], row + col_o[3], (int)vtl, row + col_o[5]);
+                    }
+                }
+            }
+        }
+        pos += nl + 1;
+    }
+    mm_free(b);
+    for (j = 0; j < nopen; j++) {
+        if (!open_cleared[j]) {
+            if (*unv_cnt_out == 0 && first_unv_out && fcap > 0)
+                cx_fmt(first_unv_out, fcap, "%s", open_desc[j]);
+            (*unv_cnt_out)++;
+        }
+    }
+    return 0;
+}
+
+static int cr_deferred_verify(const char *repo, char *why_out, size_t wcap) {
+    char top[1024], dfp[1200], afp[1200], gitp[1200], gd[1200];
+    char tip1[65], tip2[65], first1[200], first2[200];
+    int ex1 = 0, ex2 = 0;
+    long tr1 = 0, tr2 = 0, unv1 = 0, unv2 = 0, tl;
+    sy_stat_t st;
+    if (!repo || !repo[0] || (repo[0] == '.' && !repo[1])) {
+        if (!getcwd(top, sizeof top)) { cx_fmt(why_out, wcap, "deferred-gates-corrupt: getcwd failed"); return -1; }
+    } else if (repo[0] == '/') {
+        cx_fmt(top, sizeof top, "%s", repo);
+    } else {
+        char cwd[1024];
+        if (!getcwd(cwd, sizeof cwd)) { cx_fmt(why_out, wcap, "deferred-gates-corrupt: getcwd failed"); return -1; }
+        cx_fmt(top, sizeof top, "%s/%s", cwd, repo);
+    }
+    tl = (long)tx_len(top, sizeof top);
+    while (tl > 1 && top[tl - 1] == '/') top[--tl] = 0;
+    cx_fmt(dfp, sizeof dfp, "%s/build/deferred-gates.tsv", top);
+    cx_fmt(gitp, sizeof gitp, "%s/.git", top);
+    cx_fmt(afp, sizeof afp, "%s/.git/unisacc-deferred-gates.tsv", top);
+    if (sy_lstat(gitp, &st) == 0 && st.kind == 'f') {
+        size_t gn = 0;
+        char *gb = (char *)cx_read(gitp, &gn);
+        if (gb && gn > 8 && tx_prefix(gb, (long)gn, "gitdir: ", 8)) {
+            long s = 8, e = 8, wo = -1, i;
+            while (e < (long)gn && gb[e] != '\n' && gb[e] != '\r') e++;
+            if (e > s && e - s < 1000) {
+                if (gb[s] == '/') { mm_copy(gd, sizeof gd, gb + s, (size_t)(e - s)); gd[e - s] = 0; }
+                else cx_fmt(gd, sizeof gd, "%s/%.*s", top, (int)(e - s), gb + s);
+                for (i = 0; gd[i]; i++) if (tx_prefix(gd + i, (long)tx_len(gd + i, 1000), "/worktrees/", 11)) wo = i;
+                if (wo > 0) gd[wo] = 0;
+                cx_fmt(afp, sizeof afp, "%s/unisacc-deferred-gates.tsv", gd);
+            }
+        }
+        if (gb) mm_free(gb);
+    }
+    {
+        char *tv[] = {"git", "-C", top, "rev-parse", "HEAD^{tree}", 0};
+        char htree[64], nwhy[160], stale_vtree[200];
+        np_result nr = {0};
+        htree[0] = 0;
+        stale_vtree[0] = 0;
+        if (!np_run(tv, top, 0, 4, &nr, nwhy, sizeof nwhy) && !nr.rc && nr.out && nr.outn >= 7) {
+            long hl = (long)nr.outn;
+            while (hl > 0 && (nr.out[hl - 1] == '\n' || nr.out[hl - 1] == '\r')) hl--;
+            if (hl > 0 && hl < 60) { mm_copy(htree, sizeof htree, nr.out, (size_t)hl); htree[hl] = 0; }
+        }
+        np_free(&nr);
+        if (cr_deferred_audit_one(dfp, top, 1, htree, stale_vtree, sizeof stale_vtree, &ex1, &tr1, tip1, &unv1, first1, sizeof first1, why_out, wcap) < 0)
+            return -1;
+        if (cr_deferred_audit_one(afp, top, 0, 0, 0, 0, &ex2, &tr2, tip2, &unv2, first2, sizeof first2, why_out, wcap) < 0)
+            return -1;
+        if (ex1 == 0 && tr2 > 0) {
+            cx_fmt(why_out, wcap, "deferred-gates-tampered: %s deleted while git-common-dir anchor %s has %ld records", dfp, afp, tr2);
+            return -1;
+        }
+        if (ex1 == 1 && (ex2 == 0 || tr2 == 0)) {
+            cx_fmt(why_out, wcap, "deferred-gates-tampered: git-common-dir anchor %s missing records present in %s", afp, dfp);
+            return -1;
+        }
+        if (tr1 != tr2 || !tx_same(tip1, 64, tip2, 64)) {
+            cx_fmt(why_out, wcap, "deferred-gates-tampered: anchor divergence between %s (rows=%ld) and %s (rows=%ld)", dfp, tr1, afp, tr2);
+            return -1;
+        }
+        if (unv1 > 0) {
+            cx_fmt(why_out, wcap, "deferred-gates-unverified count=%ld in %s (first: %s; run: sh ./unisacc.com tools/precommit.cx -- --verify-deferred --gate <G>)", unv1, dfp, first1);
+            return 1;
+        }
+        if (tr1 > 0 && stale_vtree[0] && htree[0] && why_out && wcap > 0) {
+            cx_fmt(why_out, wcap, "WARN deferred-verified-tree-not-head (%s head_tree=%s; 核销只证明被延迟那棵树的门通过,S8核销须在最终树上做)", stale_vtree, htree);
+        }
+    }
+    return 0;
 }
 static int j_branch(const char *o, long n, char *ev, int cap) {
     long l = n;
@@ -337,10 +617,62 @@ static int j_slot(const char *o, long n, int rc, char *ev, int cap) {
     line_with(o, n, "CHAIN_READY_VERSION_SLOT", l, sizeof l);
     cx_fmt(ev, (size_t)cap, "rc=%d %s", rc, l[0] ? l : "REFUSE CHAIN_READY_VERSION_SLOT no verdict line"); return 0;
 }
+static const char *cr_repo = ".";
+static long j_genall_field(const char *l, long ln, const char *key) {
+    long kl = (long)tx_len(key, 64), at = tx_find(l, ln, key, kl);
+    int64_t v = -1;
+    if (at < 0) return -1;
+    {
+        const char *p = l + at + kl;
+        long d = 0;
+        while (at + kl + d < ln && p[d] >= '0' && p[d] <= '9') d++;
+        if (d <= 0 || tx_to_i64(p, d, 10, &v) != 0) return -1;
+    }
+    return (long)v;
+}
+static long j_cgac_generators(const char *repo) {
+    char p[512]; size_t n = 0; char *b; long v = -1;
+    const char *needle = "#define CGAC_GENERATORS ";
+    long nl = (long)tx_len(needle, 64), at;
+    if (cx_fmt(p, sizeof p, "%s/tools/check-gen-all-check.cx", (repo && repo[0]) ? repo : ".")) return -1;
+    b = (char *)cx_read(p, &n);
+    if (!b) return -1;
+    at = tx_find(b, (long)n, needle, nl);
+    if (at >= 0) {
+        const char *s = b + at + nl;
+        long d = 0; int64_t iv = -1;
+        while (at + nl + d < (long)n && s[d] >= '0' && s[d] <= '9') d++;
+        if (d > 0 && tx_to_i64(s, d, 10, &iv) == 0) v = (long)iv;
+    }
+    free(b);
+    return v;
+}
+/* Hard pin on uncovered<=2: tools/gen-all-check.cx:225-232 and tools/check-gen-all-check.cx:426-438
+ * declare exactly two 0.0.86 waivers (tools/rt-shared-gen.cx known-gap:unlisted-stdlib-state;expires=0.0.87
+ * and tools/ucn-pp-gen.cx needs-pristine-root;expires=0.0.87). Any new tools/*-gen.cx without --check
+ * raises uncovered>2 (or emits an unwaived GEN_UNCOVERED line) and must fail 15-gen-all before freeze. */
 static int j_genall(const char *o, long n, int rc, char *ev, int cap) {
     char l[200];
     line_with(o, n, "GEN_ALL_SUMMARY\t", l, sizeof l);
     if (rc == 0 && l[0] && has(l, (long)tx_len(l, 200), "diff=0") && has(l, (long)tx_len(l, 200), "error=0")) {
+        long ln = (long)tx_len(l, 200);
+        long tot = j_genall_field(l, ln, "total=");
+        long unc = j_genall_field(l, ln, "uncovered=");
+        if (unc > 2) {
+            char u[200];
+            line_with(o, n, "GEN_UNCOVERED\t", u, sizeof u);
+            cx_fmt(ev, (size_t)cap, "rc=%d %s; uncovered-generator: uncovered=%ld > 2 (waivers: rt-shared-gen,ucn-pp-gen expires=0.0.87); first: %s",
+                   rc, l, unc, u[0] ? u : "none");
+            return 0;
+        }
+        if (tot > 1) {
+            long cgac = j_cgac_generators(cr_repo);
+            if (cgac > 0 && tot != cgac) {
+                cx_fmt(ev, (size_t)cap, "rc=%d %s; cgac-generator-count-drift: gen-all total=%ld != check-gen-all-check CGAC_GENERATORS=%ld; fix: sync CGAC_GENERATORS in tools/check-gen-all-check.cx and run check-gen-all-check/part2/split",
+                       rc, l, tot, cgac);
+                return 0;
+            }
+        }
         put_ev(ev, cap, l); return 1;
     }
     {
@@ -348,6 +680,30 @@ static int j_genall(const char *o, long n, int rc, char *ev, int cap) {
         line_with(o, n, "\tDIFF\t", d, sizeof d);
         if (!d[0]) line_with(o, n, "\tERROR\t", d, sizeof d);
         cx_fmt(ev, (size_t)cap, "rc=%d %s; first: %s", rc, l[0] ? l : "no GEN_ALL_SUMMARY", d[0] ? d : "none");
+    }
+    return 0;
+}
+static int j_premerge(const char *o, long n, int rc, char *ev, int cap) {
+    char l[240];
+    line_with(o, n, "PREMERGE_UNION_SUMMARY\t", l, sizeof l);
+    if (rc == 0 && l[0] && has(l, (long)tx_len(l, 240), " verdict=PASS ") &&
+        has(l, (long)tx_len(l, 240), " conflict=0 ") &&
+        has(l, (long)tx_len(l, 240), " gen_fail=0 ") &&
+        has(l, (long)tx_len(l, 240), " derive_drift=0 ") &&
+        has(l, (long)tx_len(l, 240), " derive_refused=0 ") &&
+        has(l, (long)tx_len(l, 240), " check_derive_fail=0 ")) {
+        put_ev(ev, cap, l);
+        return 1;
+    }
+    {
+        char d[200];
+        d[0] = 0;
+        line_with(o, n, "\tCONFLICT\t", d, sizeof d);
+        if (!d[0]) line_with(o, n, "\tDRIFT\t", d, sizeof d);
+        if (!d[0]) line_with(o, n, "\tREFUSED\t", d, sizeof d);
+        if (!d[0]) line_with(o, n, "\tTIMEOUT\t", d, sizeof d);
+        if (!d[0]) line_with(o, n, "PREMERGE_CHECK_DERIVE\tFAIL\t", d, sizeof d);
+        cx_fmt(ev, (size_t)cap, "rc=%d %s%s%s", rc, l[0] ? l : "no PREMERGE_UNION_SUMMARY", d[0] ? "; first: " : "", d);
     }
     return 0;
 }
@@ -373,6 +729,8 @@ static int judge_kind(const char *kind, const char *o, long n, int rc, char *ev,
     if (tx_eqz(kind, "inflight")) return j_inflight(o, n, ev, cap);
     if (tx_eqz(kind, "slot")) return j_slot(o, n, rc, ev, cap);
     if (tx_eqz(kind, "genall")) return j_genall(o, n, rc, ev, cap);
+    if (tx_eqz(kind, "versq")) return j_versq(o, n, rc, ev, cap);
+    if (tx_eqz(kind, "premerge") || (kl > 9 && tx_prefix(kind, kl, "premerge:", 9))) return j_premerge(o, n, rc, ev, cap);
     if (tx_eqz(kind, "p1file")) { put_ev(ev, cap, "p1file"); return j_p1file(o, n); }
     put_ev(ev, cap, "unknown judge kind"); return -1;
 }
@@ -1059,7 +1417,7 @@ int main(int argc, char **argv) {
     }
     for (a = 1; a < argc; a++) {
         if (tx_eqz(argv[a], "--fast")) fast = 1;
-        else if (tx_eqz(argv[a], "--repo") && a + 1 < argc) repo = argv[++a];
+        else if (tx_eqz(argv[a], "--repo") && a + 1 < argc) { repo = argv[++a]; cr_repo = repo; }
         else if (tx_eqz(argv[a], "--since") && a + 1 < argc) since = argv[++a];
         else if (tx_eqz(argv[a], "--pgrep-pat") && a + 1 < argc) pat = argv[++a];
         else if (tx_eqz(argv[a], "--only") && a + 1 < argc) only = argv[++a];
@@ -1105,19 +1463,27 @@ int main(int argc, char **argv) {
     static char *g_pg[] = {"./tools/bound", "20", "pgrep", "-af", 0, 0};
     static char *g_slot[] = {"./tools/bound", "40", "sh", UC, "tools/release-packcheck.cx", "--", "slot", 0, 0, 0, 0};
     static char *g_genall[] = {"./tools/bound", "60", "sh", UC, "tools/gen-all-check.cx", "--", "--root", 0, 0};
+    static char *g_versq[] = {"./tools/bound", "45", "sh", UC, "tools/verseq-gen.cx", "--", "--check", 0};
+    static char *g_premerge0[] = {"./tools/bound", "55", "sh", UC, "tools/premerge-union.cx", "--", "--repo", 0, "--shard", "prep", 0};
+    static char *g_premerge1[] = {"./tools/bound", "55", "sh", UC, "tools/premerge-union.cx", "--", "--repo", 0, "--shard", "derive-a", 0};
+    static char *g_premerge2[] = {"./tools/bound", "55", "sh", UC, "tools/premerge-union.cx", "--", "--repo", 0, "--shard", "derive-b", 0};
+    static char *g_premerge3[] = {"./tools/bound", "55", "sh", UC, "tools/premerge-union.cx", "--", "--repo", 0, "--shard", "derive-c", 0};
+    static char *g_premerge4[] = {"./tools/bound", "55", "sh", UC, "tools/premerge-union.cx", "--", "--repo", 0, "--shard", "check-derive", 0};
     static char **tab[] = {
         g_status, g_branch,
         g_derive1, g_derive2, g_derive3, g_derive4, g_derive5, g_derive6,
         g_rat, g_tri, g_ext,
         g_chain1, g_chain2, g_chain3, g_chain4, g_chain5,
-        g_pg, g_slot, g_genall
+        g_pg, g_slot, g_genall, g_versq,
+        g_premerge0, g_premerge1, g_premerge2, g_premerge3, g_premerge4
     };
     static const char *nm[] = {
         "1-rev", "1-branch",
         "2a-derive", "2a-derive2", "2a-derive3", "2a-derive4", "2a-derive5", "2a-derive6",
         "2b-ratchets", "3a-cxmod-tri", "3b-cx0-extract",
         "5-candidate-chain", "5-candidate-chain2", "5-candidate-chain3", "5-candidate-chain4", "5-candidate-chain5",
-        "8-inflight", "11-version-slot", "15-gen-all"
+        "8-inflight", "11-version-slot", "15-gen-all", "21-verseq-gen",
+        "22-premerge-union", "22-premerge-union2", "22-premerge-union3", "22-premerge-union4", "22-premerge-union5"
     };
     static const char *kd[] = {
         "rev", "branch",
@@ -1129,14 +1495,16 @@ int main(int argc, char **argv) {
         "derive:doc-links,tool-index,table-index",
         "ratchets", "tri", "extract",
         "chain:core-a", "chain:core-b", "chain:core-c", "chain:objects", "chain:watch",
-        "inflight", "slot", "genall"
+        "inflight", "slot", "genall", "versq",
+        "premerge:prep", "premerge:derive-a", "premerge:derive-b", "premerge:derive-c", "premerge:check-derive"
     };
     static const int pr[] = {
         9, 9,
         2, 1, 2, 1, 0, 2,
         5, 4, 6,
         3, 3, 3, 3, 2,
-        8, 7, 4
+        8, 7, 4, 6,
+        0, 1, 1, 0, 2
     };
     g_status[5] = (char *)repo; g_branch[5] = (char *)repo; g_pg[4] = (char *)pat;
     g_chain1[6] = outd[0]; g_chain1[7] = cached;
@@ -1148,9 +1516,14 @@ int main(int argc, char **argv) {
     if (!tver && seq_next_version(repo, auto_ver)) tver = auto_ver;
     g_slot[7] = (char *)repo; if (tver) { g_slot[8] = "--version"; g_slot[9] = (char *)tver; }
     g_genall[7] = (char *)repo;
-    for (k = 0; k < 19; k++) {
-        int c, is_der = (k >= 2 && k <= 7), is_ch = (k >= 11 && k <= 15);
-        if (!WANT(nm[k]) && !(k == 1 && WANT("1-rev")) && !(is_der && WANT("2a-derive")) && !(is_ch && WANT("5-candidate-chain"))) continue;
+    g_premerge0[7] = (char *)repo;
+    g_premerge1[7] = (char *)repo;
+    g_premerge2[7] = (char *)repo;
+    g_premerge3[7] = (char *)repo;
+    g_premerge4[7] = (char *)repo;
+    for (k = 0; k < 25; k++) {
+        int c, is_der = (k >= 2 && k <= 7), is_ch = (k >= 11 && k <= 15), is_pm = (k >= 20 && k <= 24);
+        if (!WANT(nm[k]) && !(k == 1 && WANT("1-rev")) && !(is_der && WANT("2a-derive")) && !(is_ch && WANT("5-candidate-chain")) && !(is_pm && WANT("22-premerge-union"))) continue;
         if (is_ch && !have_tmp) continue;
         for (c = 0; tab[k][c]; c++) J[nj].argv[c] = tab[k][c];
         J[nj].argv[c] = 0; J[nj].name = nm[k]; items[nj] = (char *)kd[k]; prios[nj] = pr[k];
@@ -1241,9 +1614,9 @@ int main(int argc, char **argv) {
             for (j = i - 1; j >= 0 && prios[ord[j]] > prios[cur]; j--) ord[j + 1] = ord[j];
             ord[j + 1] = cur;
         }
-        /* Run 8-inflight synchronously first before 5-candidate-chain prepares or spawns any fixture child. */
+        /* Run 8-inflight and premerge:prep synchronously first before spawning parallel shards that reuse their state. */
         for (i = 0; i < nj; i++) {
-            if (J[i].state == 0 && tx_eqz(items[i], "inflight")) {
+            if (J[i].state == 0 && (tx_eqz(items[i], "inflight") || tx_eqz(items[i], "premerge:prep"))) {
                 start(&J[i]);
                 finish(&J[i]);
                 done++;
@@ -1322,11 +1695,11 @@ int main(int argc, char **argv) {
             }
         }
     }
-    {   char ev[640], rev_ev[640], der_pass_ev[640], der_fail_ev[640], aff_pass_ev[640], aff_fail_ev[640];
-        int ok, rev_ok = -1, der_ok = 1, der_cnt = 0, aff_ok = 1, aff_cnt = 0;
-        long rev_ms = 0, der_ms = 0, dfn = 0, aff_ms = 0, afn = 0;
+    {   char ev[640], rev_ev[640], der_pass_ev[640], der_fail_ev[640], aff_pass_ev[640], aff_fail_ev[640], pm_pass_ev[640], pm_fail_ev[640];
+        int ok, rev_ok = -1, der_ok = 1, der_cnt = 0, aff_ok = 1, aff_cnt = 0, pm_ok = 1, pm_cnt = 0;
+        long rev_ms = 0, der_ms = 0, dfn = 0, aff_ms = 0, afn = 0, pm_ms = 0, pfn = 0;
         const char *ch_names[8], *ch_outs[8]; long ch_lens[8], ch_ms = 0; int ch_rcs[8], ch_cnt = 0;
-        der_pass_ev[0] = 0; der_fail_ev[0] = 0; aff_pass_ev[0] = 0; aff_fail_ev[0] = 0;
+        der_pass_ev[0] = 0; der_fail_ev[0] = 0; aff_pass_ev[0] = 0; aff_fail_ev[0] = 0; pm_pass_ev[0] = 0; pm_fail_ev[0] = 0;
         for (k = 0; k < nj; k++) {
             long il = (long)tx_len(items[k], 256);
             if (il > 6 && tx_prefix(items[k], il, "chain:", 6)) {
@@ -1350,7 +1723,20 @@ int main(int argc, char **argv) {
             if (tx_eqz(items[k], "rev")) { rev_ok = ok; put_ev(rev_ev, sizeof rev_ev, ev); rev_ms = J[k].ms; continue; }
             if (tx_eqz(items[k], "branch")) {
                 int bok = ok;   /* merged row 1-rev: status and branch */
-                if (rev_ok >= 0) { char both[700]; cx_fmt(both, sizeof both, "%s; %s", rev_ev, ev); row_judged("1-rev", rev_ok && bok, both, rev_ms + J[k].ms); }
+                if (rev_ok >= 0) {
+                    char both[700], dwhy[520];
+                    dwhy[0] = 0;
+                    if (cr_deferred_verify(repo, dwhy, sizeof dwhy) != 0) {
+                        rev_ok = 0;
+                        cx_fmt(rev_ev, sizeof rev_ev, "%s", dwhy);
+                    } else if (dwhy[0]) {
+                        char rev_warn[680];
+                        cx_fmt(rev_warn, sizeof rev_warn, "%s; %s", rev_ev, dwhy);
+                        put_ev(rev_ev, sizeof rev_ev, rev_warn);
+                    }
+                    cx_fmt(both, sizeof both, "%s; %s", rev_ev, ev);
+                    row_judged("1-rev", rev_ok && bok, both, rev_ms + J[k].ms);
+                }
                 continue;
             }
             if (il > 7 && tx_prefix(items[k], il, "derive:", 7)) {
@@ -1401,6 +1787,30 @@ int main(int argc, char **argv) {
                 }
                 continue;
             }
+            if (il > 9 && tx_prefix(items[k], il, "premerge:", 9)) {
+                pm_cnt++;
+                if (J[k].ms > pm_ms) pm_ms = J[k].ms;
+                if (!ok) {
+                    char one[320]; long ol;
+                    pm_ok = 0;
+                    cx_fmt(one, sizeof one, "%s[shard%d] %s", pfn ? "; " : "", pm_cnt, ev);
+                    ol = (long)tx_len(one, sizeof one);
+                    if (pfn + ol < (long)sizeof pm_fail_ev - 1) {
+                        mm_copy(pm_fail_ev + pfn, sizeof pm_fail_ev - (size_t)pfn, one, (size_t)ol + 1);
+                        pfn += ol;
+                    }
+                } else if (!pm_pass_ev[0]) {
+                    put_ev(pm_pass_ev, sizeof pm_pass_ev, ev);
+                }
+                if (k + 1 >= nj || tx_len(items[k + 1], 256) <= 9 || !tx_prefix(items[k + 1], (long)tx_len(items[k + 1], 256), "premerge:", 9)) {
+                    char merged[700];
+                    if (pm_ok) cx_fmt(merged, sizeof merged, "shards=%d/%d (%s)", pm_cnt, pm_cnt, pm_pass_ev);
+                    else cx_fmt(merged, sizeof merged, "shards=%d %s", pm_cnt, pm_fail_ev);
+                    row_judged("22-premerge-union", pm_ok, merged, pm_ms);
+                    pm_cnt = 0; pm_ok = 1; pm_ms = 0; pfn = 0;
+                }
+                continue;
+            }
             row_judged(J[k].name, ok, ev, J[k].ms);
         }
     }
@@ -1422,6 +1832,27 @@ int main(int argc, char **argv) {
             for (li = 0; li < 2; li++) {
                 const char *v = getenv(leak[li]);
                 if (v && *v) { char one[140]; long l; cx_fmt(one, sizeof one, "%s%s", n2 ? ", " : "", leak[li]); l = (long)tx_len(one, sizeof one); if (n2 + l < (long)sizeof bad) { tx_copy(bad + n2, sizeof bad - (size_t)n2, one, l); n2 += l; } }
+            }
+        }
+        /* an UNISACC_* variable that tools/release-chain.cx (allowed_unisacc_env) would refuse at run time is a leak too:
+           keep this list equal to that one (UNISACC_CACHE_DIR is already judged above; the bound deadline variable is
+           judged by be_deadline). Seen: an exported UNISACC_PPEQ_PKG_ORIGINAL passed this gate and then failed release-chain run. */
+        {   extern char **environ;
+            static const char *ok[] = {"UNISACC_IDENT_HELPER", "UNISACC_PREP_CACHE", "UNISACC_DEVSVC_DIR", "UNISACC_TMPDIR",
+                                       "UNISACC_BATCH_TIMES", "UNISACC_COMMIT_OWN_RUN", "UNISACC_RUN_CACHE", "UNISACC_CACHE_DIR", 0};
+            char **ep; int oi;
+            for (ep = environ; ep && *ep; ep++) {
+                const char *eq; long kl; int known = 0;
+                if (strncmp(*ep, "UNISACC_", 8)) continue;
+                eq = strchr(*ep, '='); kl = eq ? (long)(eq - *ep) : (long)strlen(*ep);
+                for (oi = 0; ok[oi]; oi++) if ((long)strlen(ok[oi]) == kl && !memcmp(*ep, ok[oi], (size_t)kl)) known = 1;
+                if ((long)strlen(be_name()) == kl && !memcmp(*ep, be_name(), (size_t)kl)) known = 1;
+                if (!known) {
+                    char one[200]; long l;
+                    cx_fmt(one, sizeof one, "%s%.*s (unregistered, release-chain run refuses it)", n2 ? ", " : "", (int)kl, *ep);
+                    l = (long)tx_len(one, sizeof one);
+                    if (n2 + l < (long)sizeof bad) { tx_copy(bad + n2, sizeof bad - (size_t)n2, one, l); n2 += l; }
+                }
             }
         }
         if (n2) {

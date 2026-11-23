@@ -33,7 +33,7 @@ int cxm_say(int fd, char *s, int n);
 #define CXM_SRCMAX 1048576
 #define CXM_IFMAX 262144
 #define CXM_ITEMS 8192
-#define CXM_SYMS 2048
+#define CXM_SYMS 4096
 #define CXM_SYMW 64
 #define CXM_MACROS 1024
 

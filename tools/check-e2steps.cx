@@ -1,0 +1,64 @@
+/* tools/check-e2steps.cx -- the e2 step-count side channel shared by unit-e2-compare and pp-equiv.
+ *
+ * Judging logic only: no product run.  e2s_steps_of must read the LAST RR_TIME line that carries
+ * stage=e2 and steps=N (-1 when there is none), e2s_err_norm must drop every RR_TIME line and keep the
+ * rest byte for byte, and e2s_ledger_sum must fold "... steps=A/B ..." rows into rows/moved/grew/sum_a/sum_b.
+ * Negative controls: a line without steps, a non-e2 stage, a row with no steps field, and a stderr that
+ * is nothing but RR_TIME lines (normalizes to empty).  Prints PASS/FAIL lines and
+ * CHECK_E2STEPS TAB failed=N. */
+#pragma unisa use text.text
+#pragma unisa use cxlib.e2steps
+#pragma unisa use cxlib.die
+
+static const char *CK = "check-e2steps";
+static int failed;
+static void eck(int ok, const char *what) { printf("%s\t%s\n", ok ? "PASS" : "FAIL", what); if (!ok) failed++; }
+
+int main(void) {
+    /* steps_of: the last e2 inference line wins; other stages do not count */
+    {
+        const char *err = "RR_TIME\tmodel\tstage=e2\tsource=raw\tns=7325263\n"
+                          "RR_TIME\tinference\tstage=e3\trc=0\tns=1\tsteps=999\n"
+                          "RR_TIME\tinference\tstage=e2\trc=0\tns=58934689\tsteps=1200813\n";
+        eck(e2s_steps_of(err, strlen(err)) == 1200813, "steps_of reads the e2 inference line");
+        const char *two = "RR_TIME\tinference\tstage=e2\trc=0\tns=1\tsteps=10\n"
+                          "RR_TIME\tinference\tstage=e2\trc=0\tns=2\tsteps=20\n";
+        eck(e2s_steps_of(two, strlen(two)) == 20, "steps_of takes the last one");
+        const char *none = "refused: fixture\n";
+        eck(e2s_steps_of(none, strlen(none)) == -1, "steps_of is -1 without the line");
+        const char *garbled = "RR_TIME\tinference\tstage=e2\trc=0\tns=1\tsteps=x\n";
+        eck(e2s_steps_of(garbled, strlen(garbled)) == -1, "steps_of rejects a non-numeric count");
+    }
+    /* err_norm: RR_TIME lines vanish, everything else survives verbatim */
+    {
+        const char *err = "first\nRR_TIME\tinference\tstage=e2\trc=0\tns=1\tsteps=7\nsecond\n";
+        char out[256];
+        size_t n = e2s_err_norm(err, strlen(err), out, sizeof out);
+        eck(n == 13 && !strcmp(out, "first\nsecond\n"), "err_norm drops RR_TIME lines only");
+        const char *only = "RR_TIME\ta\nRR_TIME\tb\n";
+        eck(e2s_err_norm(only, strlen(only), out, sizeof out) == 0 && !out[0], "err_norm of RR_TIME only is empty");
+        const char *clean = "alpha\nbeta\n";
+        eck(e2s_err_norm(clean, strlen(clean), out, sizeof out) == 11 && !strcmp(out, clean), "err_norm keeps clean stderr");
+        /* a line that merely starts with R is not an RR_TIME line */
+        const char *near = "RR_TIMEX\tkept\n";
+        eck(e2s_err_norm(near, strlen(near), out, sizeof out) == 14 && !strcmp(out, near), "err_norm keeps RR_TIMEX");
+    }
+    /* ledger_sum: rows, moved, grew, sum_a, sum_b */
+    {
+        const char *text = "UEC\tk\tSAME\t-\trc=0/0 steps=100/100\n"
+                           "UEC\tk\tSAME\t-\trc=0/0 steps=200/150\n"
+                           "UEC\tk\tDIFF\tstdout\trc=0/0 steps=10/12\n"
+                           "UEC\tk\tSAME\t-\tno counts here\n";
+        long s[5] = {0, 0, 0, 0, 0};
+        e2s_ledger_sum(text, strlen(text), s);
+        eck(s[0] == 3, "ledger_sum counts three rows with steps");
+        eck(s[1] == 2, "ledger_sum counts two moved");
+        eck(s[2] == 1, "ledger_sum counts one grown");
+        eck(s[3] == 310 && s[4] == 262, "ledger_sum sums both sides");
+        long z[5] = {0, 0, 0, 0, 0};
+        e2s_ledger_sum("nothing\n", 8, z);
+        eck(z[0] == 0 && z[3] == 0 && z[4] == 0, "ledger_sum ignores rows without steps");
+    }
+    printf("CHECK_E2STEPS\tfailed=%d\n", failed);
+    return failed ? 1 : 0;
+}

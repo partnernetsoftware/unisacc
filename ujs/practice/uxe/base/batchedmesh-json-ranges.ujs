@@ -1,0 +1,138 @@
+native function batch_json_token(p:i64,end:i64,kind:i64) i64 {
+  if(p<0 || end<p || end>6291456) { return 0-1; }
+  if(kind==0) {
+    let data=[123,34,100,114,97,119,82,97,110,103,101,115,34,58,91];
+    if(end-p<15) { return 0-1; }
+    let i=0;
+    while(i<15) { let saved=ux_u8_put(p+i,data[i]); i=i+1; }
+    return p+15;
+  }
+  if(kind==1) {
+    let data=[93,44,34,114,101,115,101,114,118,101,100,82,97,110,103,101,115,34,58,91];
+    if(end-p<20) { return 0-1; }
+    let i=0;
+    while(i<20) { let saved=ux_u8_put(p+i,data[i]); i=i+1; }
+    return p+20;
+  }
+  if(kind==2) {
+    let data=[93,44,34,118,105,115,105,98,105,108,105,116,121,34,58,91];
+    if(end-p<16) { return 0-1; }
+    let i=0;
+    while(i<16) { let saved=ux_u8_put(p+i,data[i]); i=i+1; }
+    return p+16;
+  }
+  if(kind==3) {
+    let data=[93,44,34,97,99,116,105,118,101,34,58,91];
+    if(end-p<12) { return 0-1; }
+    let i=0;
+    while(i<12) { let saved=ux_u8_put(p+i,data[i]); i=i+1; }
+    return p+12;
+  }
+  if(kind==4) {
+    let data=[123,34,115,116,97,114,116,34,58];
+    if(end-p<9) { return 0-1; }
+    let i=0;
+    while(i<9) { let saved=ux_u8_put(p+i,data[i]); i=i+1; }
+    return p+9;
+  }
+  if(kind==5) {
+    let data=[44,34,99,111,117,110,116,34,58];
+    if(end-p<9) { return 0-1; }
+    let i=0;
+    while(i<9) { let saved=ux_u8_put(p+i,data[i]); i=i+1; }
+    return p+9;
+  }
+  if(kind==6) {
+    let data=[123,34,118,101,114,116,101,120,83,116,97,114,116,34,58];
+    if(end-p<15) { return 0-1; }
+    let i=0;
+    while(i<15) { let saved=ux_u8_put(p+i,data[i]); i=i+1; }
+    return p+15;
+  }
+  if(kind==7) {
+    let data=[44,34,118,101,114,116,101,120,67,111,117,110,116,34,58];
+    if(end-p<15) { return 0-1; }
+    let i=0;
+    while(i<15) { let saved=ux_u8_put(p+i,data[i]); i=i+1; }
+    return p+15;
+  }
+  if(kind==8) {
+    let data=[44,34,105,110,100,101,120,83,116,97,114,116,34,58];
+    if(end-p<14) { return 0-1; }
+    let i=0;
+    while(i<14) { let saved=ux_u8_put(p+i,data[i]); i=i+1; }
+    return p+14;
+  }
+  if(kind==9) {
+    let data=[44,34,105,110,100,101,120,67,111,117,110,116,34,58];
+    if(end-p<14) { return 0-1; }
+    let i=0;
+    while(i<14) { let saved=ux_u8_put(p+i,data[i]); i=i+1; }
+    return p+14;
+  }
+  return 0-1;
+}
+
+native function batch_json_number(p:i64,end:i64,kind:i64,number:i64,scratch:i64) i64 {
+  p=batch_json_token(p,end,kind);
+  if(number==4294967295) { number=0-1; }
+  return json_write_f64(p,end,0.0+number,scratch);
+}
+
+native function batch_json_range(p:i64,end:i64,row:i64,indexed:i64,reserved:i64,scratch:i64) i64 {
+  let vertexStart=ux_u32(row+BatchGeometry.vertexStart);
+  let vertexCount=ux_u32(row+BatchGeometry.vertexCount);
+  let indexStart=ux_u32(row+BatchGeometry.indexStart);
+  let indexCount=ux_u32(row+BatchGeometry.indexCount);
+  if(reserved!=0) {
+    p=batch_json_number(p,end,6,vertexStart,scratch);
+    p=batch_json_number(p,end,7,vertexCount,scratch);
+    p=batch_json_number(p,end,8,indexStart,scratch);
+    p=batch_json_number(p,end,9,indexCount,scratch);
+  } else {
+    if(indexed!=0) {
+      vertexStart=indexStart;
+      vertexCount=indexCount;
+    }
+    p=batch_json_number(p,end,4,vertexStart,scratch);
+    p=batch_json_number(p,end,5,vertexCount,scratch);
+  }
+  return json_byte(p,end,125);
+}
+
+// This projection represents batches whose draw ranges use the full reservation.
+native function Batch_writeRangesJSON(batch:i64,dst:i64,end:i64,scratch:i64) i64 {
+  if(!batch_valid(batch) || dst<0 || end<=dst || end>6291456 || scratch<0 ||
+     scratch%8!=0 || scratch>6290352 ||
+     (dst<scratch+1104 && scratch<end) ||
+     (dst<batch+BatchedMesh.size && batch<end) ||
+     (scratch<batch+BatchedMesh.size && batch<scratch+1104)) { return 0-1; }
+  let rows=ux_u32(batch+BatchedMesh.rows);
+  let count=ux_u32(batch+BatchedMesh.count);
+  let size=count*BatchGeometry.size;
+  if(count>ux_u32(batch+BatchedMesh.capacity) || rows>6291456-size || rows%4!=0 ||
+     (dst<rows+size && rows<end) || (scratch<rows+size && rows<scratch+1104)) { return 0-1; }
+  let p=dst;
+  let section=0;
+  let indexed=ux_u32(batch+BatchedMesh.indexed);
+  while(section<4 && p>=0) {
+    p=batch_json_token(p,end,section);
+    let i=0;
+    while(i<count && p>=0) {
+      if(i>0) { p=json_byte(p,end,44); }
+      let row=rows+i*BatchGeometry.size;
+      if(section<2) { p=batch_json_range(p,end,row,indexed,section,scratch); }
+      else {
+        let bit=ux_u32(row+BatchGeometry.visible);
+        if(section==3) { bit=ux_u32(row+BatchGeometry.active); }
+        let token=ObjectJsonToken.boolFalse;
+        if(bit!=0) { token=ObjectJsonToken.boolTrue; }
+        p=json_write_token(p,end,token);
+      }
+      i=i+1;
+    }
+    section=section+1;
+  }
+  p=json_byte(p,end,93);
+  return json_byte(p,end,125);
+}

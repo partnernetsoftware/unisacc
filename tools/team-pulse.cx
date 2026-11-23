@@ -1,0 +1,944 @@
+/* tools/team-pulse.cx -- read-only stall/context pulse over orchestrated agent windows.
+ *
+ *   sh ./unisacc.com tools/team-pulse.cx -- [--windows-table PATH] [--stall-min N]
+ *       [--fixture FILE] [--tail-lines K] [--mutant-no-stall]
+ *   sh ./unisacc.com tools/team-pulse.cx -- --idle [--idle-min N] [--windows-table PATH]
+ *       [--fixture FILE] [--now EPOCH]
+ *   sh ./unisacc.com tools/team-pulse.cx -- --freeze-watch [--root DIR] [--freeze-file P]
+ *       [--since-min N] [--lock-author NAME] [--now EPOCH] [--hardlink-tmp DIR]
+ *       [--mutant-no-freeze-watch]
+ *
+ * freeze-watch commit check (2026-11-23): domain paths require trailer
+ * X-Unisacc-Window matching freeze.tsv owner (or --lock-author). Missing trailer
+ * or other window => VIOLATION. Does not stop a forged trailer (trusts commit-own /
+ * devsvc writers; catches raw git and mistaken windows). Dirty trees still author=-.
+ * HARDLINK_TREES (2026-11-23, agyneon prototype): scan --hardlink-tmp (default /tmp)
+ * top dirs for .cx with nlink>1; print FREEZE_WATCH HARDLINK_TREES n oldest_min;
+ * n>0 and oldest_min>60 => VIOLATION kind=hardlink-trees (hourly cleanup at 120m).
+ * sy_stat_t lacks nlink: uses prelude lstat (build/pkg-gaps.tsv).
+ *
+ * Shared-checkout discipline (2026-11-23, after csr moved foreign untracked tools/
+ * files to silence ratchets -- forbidden): never mv/cp/rsync/stash/clean another
+ * window's paths. Ratchet checks that choke on foreign untracked files must use
+ * git archive HEAD into a private dir, or run under a path-limited private tree;
+ * do not move others' files. check-team-pulse asserts the real repo porcelain and
+ * diff --summary are unchanged across its fixture (covers "do not move non-own paths").
+ *
+ * Windows table (default skills/unisacc-orch-supervise/team-windows.tsv):
+ *   window model lane write_prefix kind git_ref
+ *   kind=commit|analysis; write_prefix comma paths or - (no commit); git_ref=-|branch.
+ *   Status by model family: Codex/omp/Cursor markers; UNKNOWN only when no marker.
+ *   Cursor (cursor*) ctx always - (Auto N% is not context).
+ *
+ * Live: tmux capture-pane -p -t WINDOW. Fixture: === PANE NAME === panels.
+ * tmux missing/fail -> status UNKNOWN. Read-only.
+ *
+ * ctx_pct is always remaining, annotated as left=NN (Codex left/used, omp bar used,
+ * Claude ctx used are converted). STALLED only for kind=commit IDLE overdue;
+ * analysis IDLE overdue -> IDLE_LONG.
+ *
+ * Running shell/bash frames (● + duration, Running command, braille+Running) => WORKING
+ * even when footer is only auto·model. Last ask-cc ("回报发 cc"/ReplyCmd 1:cc) + IDLE
+ * + age>=wait-cc-min (default 10) => status WAITING_CC; footer lists them.
+ *
+ * Output: PULSE<TAB>window<TAB>status<TAB>ctx_pct<TAB>commit<TAB>age_min<TAB>flags
+ * then TEAM_PULSE<TAB>windows=W<TAB>stalled=S<TAB>idle_long=L<TAB>ctx_low=C<TAB>filtered=F<TAB>waiting_cc=N
+ * then optional WAITING_CC<TAB>w1,w2,...
+ *
+ * --idle: TEAM_IDLE window IDLE|BUSY age_min=K for each registered window.
+ * Only whether the window is working: prompt-idle AND quiet >= idle-min
+ * (default 10). Does not read or report context/quota fields. Live age from
+ * tmux window_activity (3.3a has empty pane_last_activity); fixture
+ * #tp_age_min=N. Prompt WORKING->BUSY; prompt IDLE+age ok->IDLE; else UNKNOWN
+ * (never default BUSY on unknown). Footer TEAM_IDLE_SUMMARY. */
+#pragma unisa use cxlib.ckrun
+#pragma unisa use cxlib.trailer
+#pragma unisa use cxlib.procrun
+#pragma unisa use sys.fs
+#pragma unisa use sys.proc
+#pragma unisa use sys.time
+#pragma unisa use sys.env
+#pragma unisa use text.text
+#pragma unisa use text.num
+#pragma unisa use mem.heap
+#pragma unisa use mem.bytes
+#pragma unisa use sys.posix
+
+#define TP_MAXW 32
+#define TP_CAP (1 << 16)
+
+typedef struct {
+    char window[64], model[64], lane[32], prefix[1024], kind[16], git_ref[64];
+} Win;
+static Win g_w[TP_MAXW];
+static int g_nw, g_stall_min = 45, g_wait_cc_min = 10, g_tail = 80, g_mutant, g_mutant_run, g_mutant_wcc;
+static int g_freeze_watch, g_mutant_fw, g_since_min = 10, g_n_fw_viol;
+static int g_idle_mode, g_idle_min = 10, g_n_idle_ok, g_n_idle_busy;
+static char g_table[1100], g_fix[1100], g_root[1100], g_freeze_file[1100], g_lock_author[80], g_owner[80];
+static char g_hl_tmp[1100];
+static long g_now;
+static int g_n_stalled, g_n_idle_long, g_n_ctxlow, g_n_filtered, g_n_waiting_cc;
+static char g_waiting[TP_MAXW][64];
+static int g_n_wait_list;
+
+static int die(const char *m) { fprintf(stderr, "team-pulse: %s\n", m); return 2; }
+
+static int load_table(const char *path) {
+    unsigned char *b; int64_t n; long i = 0, row = 0;
+    if (sy_read_file(path, &b, &n, 1 << 20) < 0 || !b) return die("read windows-table");
+    while (i < n && g_nw < TP_MAXW) {
+        long s = i, e, c[5], nc = 0, j;
+        while (i < n && b[i] != '\n') i++;
+        e = i; if (i < n) i++;
+        if (e > s && b[s] == '#') continue;
+        if (e == s) continue;
+        row++;
+        if (row == 1) continue;
+        for (j = 0; j < 5; j++) c[j] = -1;
+        for (j = s; j < e; j++) {
+            if (b[j] != '\t') continue;
+            if (nc < 5) c[nc++] = j;
+        }
+        if (nc != 5) { mm_free(b); return die("bad windows-table row (need 6 cols)"); }
+        if (c[0] - s >= (long)sizeof g_w[0].window || c[1] - c[0] >= (long)sizeof g_w[0].model ||
+            c[2] - c[1] >= (long)sizeof g_w[0].lane || c[3] - c[2] >= (long)sizeof g_w[0].prefix ||
+            c[4] - c[3] >= (long)sizeof g_w[0].kind || e - c[4] >= (long)sizeof g_w[0].git_ref) {
+            mm_free(b); return die("windows-table field too long");
+        }
+        mm_copy(g_w[g_nw].window, (long)sizeof g_w[0].window, b + s, c[0] - s); g_w[g_nw].window[c[0] - s] = 0;
+        mm_copy(g_w[g_nw].model, (long)sizeof g_w[0].model, b + c[0] + 1, c[1] - c[0] - 1); g_w[g_nw].model[c[1] - c[0] - 1] = 0;
+        mm_copy(g_w[g_nw].lane, (long)sizeof g_w[0].lane, b + c[1] + 1, c[2] - c[1] - 1); g_w[g_nw].lane[c[2] - c[1] - 1] = 0;
+        mm_copy(g_w[g_nw].prefix, (long)sizeof g_w[0].prefix, b + c[2] + 1, c[3] - c[2] - 1); g_w[g_nw].prefix[c[3] - c[2] - 1] = 0;
+        mm_copy(g_w[g_nw].kind, (long)sizeof g_w[0].kind, b + c[3] + 1, c[4] - c[3] - 1); g_w[g_nw].kind[c[4] - c[3] - 1] = 0;
+        mm_copy(g_w[g_nw].git_ref, (long)sizeof g_w[0].git_ref, b + c[4] + 1, e - c[4] - 1); g_w[g_nw].git_ref[e - c[4] - 1] = 0;
+        if (!tx_eqz(g_w[g_nw].kind, "commit") && !tx_eqz(g_w[g_nw].kind, "analysis")) {
+            mm_free(b); return die("kind must be commit|analysis");
+        }
+        g_nw++;
+    }
+    mm_free(b);
+    return g_nw > 0 ? 0 : die("windows-table empty");
+}
+
+static long tail_text(const char *src, long sn, int k, char *dst, long cap) {
+    long i, cuts = 0, start;
+    if (sn < 0) sn = 0;
+    for (i = sn; i > 0 && cuts < k; ) { i--; if (src[i] == '\n') cuts++; }
+    start = (cuts >= k) ? i + 1 : 0;
+    if (sn - start >= cap) sn = start + cap - 1;
+    if (sn > start) mm_copy(dst, cap, src + start, sn - start);
+    dst[sn - start] = 0;
+    return sn - start;
+}
+
+static int has_ci(const char *s, long n, const char *needle) {
+    long nl = tx_len(needle, 160), i, j;
+    if (nl <= 0 || n < nl) return 0;
+    for (i = 0; i + nl <= n; i++) {
+        for (j = 0; j < nl; j++) {
+            unsigned char a = (unsigned char)s[i + j], b = (unsigned char)needle[j];
+            if (a >= 'A' && a <= 'Z') a = (unsigned char)(a - 'A' + 'a');
+            if (b >= 'A' && b <= 'Z') b = (unsigned char)(b - 'A' + 'a');
+            if (a != b) break;
+        }
+        if (j == nl) return 1;
+    }
+    return 0;
+}
+
+/* return 1 if FILTERED markers present (curly/straight/can not + cybersecurity care line) */
+static int is_filtered(const char *t, long tn) {
+    /* This content can't be shown  (U+2019) */
+    static const char curly[] = "this content can\xe2\x80\x99t be shown";
+    if (has_ci(t, tn, curly)) return 1;
+    if (has_ci(t, tn, "this content can't be shown")) return 1;
+    if (has_ci(t, tn, "this content can not be shown")) return 1;
+    if (has_ci(t, tn, "content can not be shown")) return 1;
+    if (has_ci(t, tn, "content filtered")) return 1;
+    if (has_ci(t, tn, "extra care with some cybersecurity")) return 1;
+    return 0;
+}
+
+/* model family: cursor | codex | omp | other */
+static int fam_cursor(const char *m) { return has_ci(m, tx_len(m, 64), "cursor"); }
+static int fam_codex(const char *m) {
+    return has_ci(m, tx_len(m, 64), "gpt-sol") || has_ci(m, tx_len(m, 64), "codex") || has_ci(m, tx_len(m, 64), "gpt-");
+}
+static int fam_omp(const char *m) {
+    return has_ci(m, tx_len(m, 64), "sonnet") || has_ci(m, tx_len(m, 64), "deepseek") ||
+           has_ci(m, tx_len(m, 64), "gemini") || has_ci(m, tx_len(m, 64), "omp");
+}
+
+/* parse remaining context; Cursor never yields a number (Auto N% is not context). */
+static void parse_ctx(const char *t, long tn, const char *model, int *ctx, char *note, long ncap) {
+    long i;
+    *ctx = -1; note[0] = 0;
+    if (fam_cursor(model)) return;
+    /* Codex: Context NN% left / used — skip "Auto · N%" (no "context" word) */
+    for (i = 0; i + 8 < tn; i++) {
+        long j, v, dig;
+        if (!has_ci(t + i, tn - i > 20 ? 20 : tn - i, "context")) continue;
+        for (j = i; j + 2 < tn && j < i + 48; j++) {
+            if (t[j] < '0' || t[j] > '9') continue;
+            v = 0; dig = j;
+            while (dig < tn && t[dig] >= '0' && t[dig] <= '9') { v = v * 10 + (t[dig] - '0'); dig++; if (v > 100) break; }
+            if (dig >= tn || t[dig] != '%' || v > 100) continue;
+            if (has_ci(t + dig, tn - dig > 12 ? 12 : tn - dig, "% left") ||
+                (dig + 1 < tn && has_ci(t + dig + 1, tn - dig - 1 > 8 ? 8 : tn - dig - 1, " left"))) {
+                *ctx = (int)v; cx_fmt(note, ncap, "codex-left"); return;
+            }
+            if (has_ci(t + dig, tn - dig > 12 ? 12 : tn - dig, "% used") ||
+                (dig + 1 < tn && has_ci(t + dig + 1, tn - dig - 1 > 8 ? 8 : tn - dig - 1, " used"))) {
+                *ctx = 100 - (int)v; cx_fmt(note, ncap, "codex-used"); return;
+            }
+        }
+    }
+    /* Claude: ctx NN% -> used (not for cursor) */
+    if (!fam_codex(model)) for (i = 0; i + 4 < tn; i++) {
+        long j, v;
+        if (!(t[i] == 'c' || t[i] == 'C') || (i > 0 && ((t[i-1] >= 'a' && t[i-1] <= 'z') || (t[i-1] >= 'A' && t[i-1] <= 'Z')))) continue;
+        if (!has_ci(t + i, tn - i > 4 ? 4 : tn - i, "ctx")) continue;
+        j = i + 3; while (j < tn && (t[j] == ' ' || t[j] == '\t')) j++;
+        if (j >= tn || t[j] < '0' || t[j] > '9') continue;
+        v = 0; while (j < tn && t[j] >= '0' && t[j] <= '9') { v = v * 10 + (t[j] - '0'); j++; if (v > 100) break; }
+        if (j < tn && t[j] == '%' && v <= 100) { *ctx = 100 - (int)v; cx_fmt(note, ncap, "claude-used"); return; }
+    }
+    /* omp progress bar NN% as used */
+    if (fam_omp(model) || !fam_codex(model)) for (i = 0; i + 2 < tn; i++) {
+        long j, v; unsigned char c;
+        if (t[i] < '0' || t[i] > '9') continue;
+        /* reject Auto · 41.7% : look back for Auto */
+        {
+            long b = i > 16 ? i - 16 : 0;
+            if (has_ci(t + b, i - b, "auto")) continue;
+        }
+        j = i; v = 0;
+        while (j < tn && t[j] >= '0' && t[j] <= '9') { v = v * 10 + (t[j] - '0'); j++; if (v > 100) break; }
+        if (j < tn && t[j] == '.') continue; /* skip 41.7% decimals from Cursor */
+        if (j >= tn || t[j] != '%' || v > 100) continue;
+        {
+            long b = i > 12 ? i - 12 : 0, k, hit = 0;
+            for (k = b; k < i; k++) {
+                c = (unsigned char)t[k];
+                if (c == 0xE2 || c == '>' || c == '|') { hit = 1; break; }
+            }
+            if (hit) { *ctx = 100 - (int)v; cx_fmt(note, ncap, "omp-used"); return; }
+        }
+    }
+}
+
+static int has_omp_spinner(const char *t, long tn) {
+    /* Braille spinner block U+2800.. (E2 A0 xx) near a duration Nd+[smh] */
+    long i;
+    for (i = 0; i + 4 < tn; i++) {
+        unsigned char c0 = (unsigned char)t[i], c1, c2;
+        if (c0 != 0xE2) continue;
+        c1 = (unsigned char)t[i + 1]; c2 = (unsigned char)t[i + 2];
+        if (c1 != 0xA0) continue; /* braille */
+        /* look ahead 12 for duration */
+        {
+            long j, k;
+            for (j = i + 3; j + 1 < tn && j < i + 16; j++) {
+                if (t[j] < '0' || t[j] > '9') continue;
+                k = j; while (k < tn && t[k] >= '0' && t[k] <= '9') k++;
+                if (k < tn && (t[k] == 's' || t[k] == 'm' || t[k] == 'h')) return 1;
+            }
+        }
+    }
+    return 0;
+}
+
+/* ● (U+25CF) line with duration Nd+[smh], or Running command / hollow Running. */
+static int has_running_shell(const char *t, long tn) {
+    long i, at;
+    if (g_mutant_run) return 0;
+    if (has_ci(t, tn, "running command")) return 1;
+    if (has_ci(t, tn, "esc to cancel")) return 1;
+    /* hollow ○ Running (e2 97 8b) */
+    for (i = 0; i + 10 < tn; i++) {
+        if ((unsigned char)t[i] == 0xE2 && (unsigned char)t[i+1] == 0x97 && (unsigned char)t[i+2] == 0x8B) {
+            if (has_ci(t + i, tn - i > 24 ? 24 : tn - i, "running")) return 1;
+        }
+    }
+    /* braille spinner near Running */
+    if (has_omp_spinner(t, tn) && has_ci(t, tn, "running")) return 1;
+    /* filled ● with duration or bash/shell */
+    at = 0;
+    while (at < tn) {
+        long s = at, e, k, has_dot = 0, has_dur = 0, j;
+        while (at < tn && t[at] != '\n') at++;
+        e = at; if (at < tn) at++;
+        k = s; while (k < e && (t[k] == ' ' || t[k] == '\t')) k++;
+        if (k + 2 >= e) continue;
+        if (!((unsigned char)t[k] == 0xE2 && (unsigned char)t[k+1] == 0x97 && (unsigned char)t[k+2] == 0x8F))
+            continue;
+        has_dot = 1;
+        for (j = k + 3; j + 1 < e; j++) {
+            if (t[j] < '0' || t[j] > '9') continue;
+            {
+                long d = j;
+                while (d < e && t[d] >= '0' && t[d] <= '9') d++;
+                if (d < e && (t[d] == 's' || t[d] == 'm' || t[d] == 'h')) { has_dur = 1; break; }
+            }
+        }
+        if (has_dot && (has_dur || has_ci(t + k, e - k, "bash") || has_ci(t + k, e - k, "shell")))
+            return 1;
+    }
+    /* shell count line: shells: N with N>0 */
+    for (i = 0; i + 8 < tn; i++) {
+        if (!has_ci(t + i, tn - i > 10 ? 10 : tn - i, "shells:")) continue;
+        {
+            long j = i;
+            while (j < tn && t[j] != ':') j++;
+            if (j >= tn) continue;
+            j++; while (j < tn && (t[j] == ' ' || t[j] == '\t')) j++;
+            if (j < tn && t[j] >= '1' && t[j] <= '9') return 1;
+        }
+    }
+    return 0;
+}
+
+static int asks_cc(const char *t, long tn) {
+    if (has_ci(t, tn, "\xe6\x8a\xa5\xe5\x91\x8a\xe5\x8f\x91 cc")) return 1; /* 回报发 cc */
+    if (has_ci(t, tn, "replycmd") && has_ci(t, tn, "1:cc")) return 1;
+    if (has_ci(t, tn, "bin/mux envelope") && has_ci(t, tn, "1:cc")) return 1;
+    if (has_ci(t, tn, "\xe5\x90\x91 cc \xe8\xaf\xb7\xe7\xa4\xba") /* 向 cc 请示 */) return 1;
+    if (has_ci(t, tn, "\xe8\xaf\xb7\xe7\xa4\xba cc")) return 1; /* 请示 cc */
+    return 0;
+}
+
+static const char *classify(const char *text, long n, const char *model, int *ctx_pct, char *ctx_note, long ncap) {
+    char t[TP_CAP]; long tn;
+    tn = tail_text(text, n, g_tail, t, sizeof t);
+    /* --idle passes ctx_pct=0: do not read context/quota at all */
+    if (ctx_pct) {
+        *ctx_pct = -1;
+        if (ctx_note) ctx_note[0] = 0;
+        parse_ctx(t, tn, model, ctx_pct, ctx_note, ncap);
+    }
+    if (is_filtered(t, tn)) return "FILTERED";
+    if (has_ci(t, tn, "waiting for input") || has_ci(t, tn, "do you want to")) return "WAITING_INPUT";
+    /* running shell/bash frame beats idle auto·model footer */
+    if (has_running_shell(t, tn)) return "WORKING";
+
+    /* Codex family */
+    if (fam_codex(model)) {
+        if (has_ci(t, tn, "esc to interrupt") || has_ci(t, tn, "working (")) return "WORKING";
+        if (has_ci(t, tn, "ask codex")) return "IDLE";
+    }
+    /* omp family */
+    if (fam_omp(model)) {
+        if (has_omp_spinner(t, tn)) return "WORKING";
+        if (has_ci(t, tn, "esc to cancel") || has_ci(t, tn, "working")) return "WORKING";
+        if (has_ci(t, tn, "\xe2\x95\xb0\xe2\x94\x80") || /* ╰─ */
+            has_ci(t, tn, "当前请求已仅回执结束")) return "IDLE";
+        {
+            long at = 0;
+            while (at < tn) {
+                long s = at, e, k;
+                while (at < tn && t[at] != '\n') at++;
+                e = at; if (at < tn) at++;
+                k = s; while (k < e && (t[k] == ' ' || t[k] == '\t')) k++;
+                /* line starts with ╰ (e2 95 b0) */
+                if (k + 2 < e && (unsigned char)t[k] == 0xE2 && (unsigned char)t[k+1] == 0x95 && (unsigned char)t[k+2] == 0xB0)
+                    return "IDLE";
+            }
+        }
+    }
+    /* Cursor family: Running + ctrl+c to stop; Add a follow-up / Auto without Running -> IDLE */
+    if (fam_cursor(model)) {
+        if (has_ci(t, tn, "ctrl+c to stop") || has_ci(t, tn, " running")) return "WORKING";
+        if (has_ci(t, tn, "add a follow-up")) return "IDLE";
+        if (has_ci(t, tn, "auto")) return "IDLE";
+    }
+    /* Claude Code: empty ❯ prompt or Brewed ... done -> IDLE; busy markers -> WORKING */
+    if (has_ci(t, tn, "esc to cancel") || has_ci(t, tn, "esc to interrupt")) return "WORKING";
+    if (has_ci(t, tn, "to interrupt")) return "WORKING";
+    if (has_ci(t, tn, "working")) return "WORKING";
+    if (has_ci(t, tn, "brewed for") && has_ci(t, tn, "done")) {
+        /* still busy if "still running" without empty prompt? treat done as idle signal */
+    }
+    {
+        long at = 0; int saw_prompt = 0, saw_claude_q = 0;
+        while (at < tn) {
+            long s = at, e, k, rest;
+            while (at < tn && t[at] != '\n') at++;
+            e = at; if (at < tn) at++;
+            k = s; while (k < e && (t[k] == ' ' || t[k] == '\t')) k++;
+            if (k < e && t[k] == '>' && k + 1 == e) saw_prompt = 1;
+            /* ❯ = e2 9d af ; rest only spaces/nbsp */
+            if (k + 2 < e && (unsigned char)t[k] == 0xE2 && (unsigned char)t[k+1] == 0x9D &&
+                (unsigned char)t[k+2] == 0xAF) {
+                rest = k + 3;
+                while (rest < e) {
+                    unsigned char c = (unsigned char)t[rest];
+                    if (c == ' ' || c == '\t' || c == 0xC2 /* lead of nbsp */) {
+                        if (c == 0xC2 && rest + 1 < e && (unsigned char)t[rest+1] == 0xA0) rest += 2;
+                        else rest++;
+                        continue;
+                    }
+                    break;
+                }
+                if (rest >= e) saw_claude_q = 1;
+            }
+        }
+        if (saw_prompt || saw_claude_q) return "IDLE";
+    }
+    if (has_ci(t, tn, "ask codex")) return "IDLE";
+    if (has_ci(t, tn, "当前请求已仅回执结束")) return "IDLE";
+    if (has_ci(t, tn, "brewed for") && has_ci(t, tn, " done")) return "IDLE";
+    return "UNKNOWN";
+}
+
+static int capture_tmux(const char *window, char *out, long cap, long *outn) {
+    char *av[] = {"tmux", "capture-pane", "-p", "-t", (char *)window, "-S", "-80", 0};
+    pr_result r; int rc;
+    *outn = 0; out[0] = 0;
+    rc = pr_run("team-pulse-tmux", av, 0, 0, 15, &r);
+    if (rc != 0 || r.rc != 0) { pr_free(&r); return -1; }
+    if (r.outn > 0 && r.out) {
+        long n = (long)r.outn < cap - 1 ? (long)r.outn : cap - 1;
+        mm_copy(out, cap, r.out, n); out[n] = 0; *outn = n;
+    }
+    pr_free(&r);
+    return 0;
+}
+
+static int fixture_get(const char *path, const char *window, char *out, long cap, long *outn) {
+    unsigned char *b; int64_t n; long i = 0; char mark[120];
+    *outn = 0; out[0] = 0;
+    if (cx_fmt(mark, sizeof mark, "=== PANE %s ===", window)) return -1;
+    if (sy_read_file(path, &b, &n, 1 << 22) < 0 || !b) return -1;
+    while (i < n) {
+        long s = i, e, ml = tx_len(mark, sizeof mark);
+        while (i < n && b[i] != '\n') i++;
+        e = i; if (i < n) i++;
+        if (e - s == ml && tx_same((const char *)b + s, e - s, mark, ml)) {
+            long body = i, end = n, j;
+            for (j = i; j < n; ) {
+                long ls = j, le;
+                while (j < n && b[j] != '\n') j++;
+                le = j; if (j < n) j++;
+                if (le - ls >= 10 && tx_prefix((const char *)b + ls, le - ls, "=== PANE ", 9)) { end = ls; break; }
+            }
+            if (end - body >= cap) end = body + cap - 1;
+            if (end > body) mm_copy(out, cap, b + body, end - body);
+            out[end - body] = 0; *outn = end - body;
+            mm_free(b); return 0;
+        }
+    }
+    mm_free(b); return -1;
+}
+
+static int latest_commit(const char *prefixes, const char *git_ref, char *hash, long hcap, long *age_min) {
+    char pref[1100]; long best_ct = -1; char best_h[80]; char *p;
+    hash[0] = 0; *age_min = -1; best_h[0] = 0;
+    if (!prefixes || !prefixes[0] || tx_eqz(prefixes, "-")) return 0;
+    if (cx_fmt(pref, sizeof pref, "%s", prefixes)) return -1;
+    for (p = pref; ; ) {
+        char *tok = p, script[1600], out[400]; int rc; long ct = 0;
+        while (*p && *p != ',') p++;
+        if (*p) { *p = 0; p++; } else p = 0;
+        while (*tok == ' ') tok++;
+        if (tok[0] && !tx_eqz(tok, "-")) {
+            char h[80]; long i = 0, j = 0;
+            {
+                char pspec[700];
+                long tl = tx_len(tok, 600);
+                if (tl > 0 && tok[tl - 1] == '/') {
+                    if (cx_fmt(pspec, sizeof pspec, "%s", tok)) return -1;
+                } else {
+                    /* exclusive write-domain prefix -> git pathspec glob */
+                    if (cx_fmt(pspec, sizeof pspec, ":(glob)%s*", tok)) return -1;
+                }
+                if (git_ref && git_ref[0] && !tx_eqz(git_ref, "-")) {
+                    if (cx_fmt(script, sizeof script,
+                        "git log -1 --format='%%H %%ct' '%s' -- '%s' 2>/dev/null", git_ref, pspec)) return -1;
+                } else {
+                    if (cx_fmt(script, sizeof script,
+                        "git log -1 --format='%%H %%ct' -- '%s' 2>/dev/null", pspec)) return -1;
+                }
+            }
+            out[0] = 0;
+            rc = ckk_sh_t("team-pulse-git", script, out, (int)sizeof out, 20);
+            if (rc == 0 && out[0]) {
+                while (out[i] && out[i] != ' ' && out[i] != '\t' && j + 1 < (long)sizeof h) h[j++] = out[i++];
+                h[j] = 0;
+                while (out[i] == ' ' || out[i] == '\t') i++;
+                ct = 0; while (out[i] >= '0' && out[i] <= '9') { ct = ct * 10 + (out[i] - '0'); i++; }
+                if (h[0] && ct > best_ct) { best_ct = ct; if (cx_fmt(best_h, sizeof best_h, "%s", h)) return -1; }
+            }
+        }
+        if (!p) break;
+    }
+    if (best_ct < 0 || !best_h[0]) return 0;
+    if (cx_fmt(hash, hcap, "%s", best_h)) return -1;
+    *age_min = g_now > best_ct ? (g_now - best_ct) / 60 : 0;
+    return 0;
+}
+
+static void flags_add(char *flags, long cap, int *nflag, const char *f) {
+    if (*nflag) {
+        if (*nflag + 1 < cap) { flags[*nflag] = ','; (*nflag)++; flags[*nflag] = 0; }
+    }
+    { long fl = tx_len(f, 32); long room = cap - 1 - *nflag; if (fl > room) fl = room;
+      if (fl > 0) { mm_copy(flags + *nflag, cap - *nflag, f, fl); *nflag += fl; flags[*nflag] = 0; } }
+}
+
+static long extract_tp_age_min(char *buf, long *n) {
+    long i = 0, v = 0, nn = *n;
+    if (nn < 12) return -1;
+    if (!(buf[0] == '#' && buf[1] == 't' && buf[2] == 'p' && buf[3] == '_' &&
+          buf[4] == 'a' && buf[5] == 'g' && buf[6] == 'e' && buf[7] == '_' &&
+          buf[8] == 'm' && buf[9] == 'i' && buf[10] == 'n' && buf[11] == '=')) return -1;
+    i = 12;
+    if (i >= nn || buf[i] < '0' || buf[i] > '9') return -1;
+    while (i < nn && buf[i] >= '0' && buf[i] <= '9') { v = v * 10 + (buf[i] - '0'); i++; }
+    if (i < nn && buf[i] == '\r') i++;
+    if (i >= nn || buf[i] != '\n') return -1;
+    i++;
+    { long rest = nn - i; if (rest > 0) mm_copy(buf, nn + 1, buf + i, rest); buf[rest] = 0; *n = rest; }
+    return v;
+}
+
+static long capture_pane_age_min(const char *window, int *strict) {
+    /* strict=1: pane_idle_for (sec/60) or pane_last_activity. strict=0: window_activity advisory
+     * (tmux 3.3a leaves pane_* empty; status redraws keep window_activity young). */
+    char *avs[3][7];
+    int kind; /* 0 idle_for 1 last_activity 2 window_activity */
+    pr_result r; int rc; long val, i;
+    *strict = 0;
+    avs[0][0] = "tmux"; avs[0][1] = "display-message"; avs[0][2] = "-p"; avs[0][3] = "-t";
+    avs[0][4] = (char *)window; avs[0][5] = "#{pane_idle_for}"; avs[0][6] = 0;
+    avs[1][0] = "tmux"; avs[1][1] = "display-message"; avs[1][2] = "-p"; avs[1][3] = "-t";
+    avs[1][4] = (char *)window; avs[1][5] = "#{pane_last_activity}"; avs[1][6] = 0;
+    avs[2][0] = "tmux"; avs[2][1] = "display-message"; avs[2][2] = "-p"; avs[2][3] = "-t";
+    avs[2][4] = (char *)window; avs[2][5] = "#{window_activity}"; avs[2][6] = 0;
+    for (kind = 0; kind < 3; kind++) {
+        val = 0; i = 0;
+        rc = pr_run("team-pulse-idle-age", avs[kind], 0, 0, 15, &r);
+        if (rc != 0 || r.rc != 0 || !r.out || r.outn <= 0) { pr_free(&r); continue; }
+        while (i < (long)r.outn && (r.out[i] == ' ' || r.out[i] == '\t' || r.out[i] == '\n')) i++;
+        if (i >= (long)r.outn || r.out[i] < '0' || r.out[i] > '9') { pr_free(&r); continue; }
+        while (i < (long)r.outn && r.out[i] >= '0' && r.out[i] <= '9') {
+            val = val * 10 + (r.out[i] - '0'); i++;
+        }
+        pr_free(&r);
+        if (kind == 0) { *strict = 1; return val / 60; }
+        if (kind == 1) {
+            if (val <= 0) continue;
+            *strict = 1;
+            return g_now > val ? (g_now - val) / 60 : 0;
+        }
+        /* kind == 2 advisory */
+        if (val <= 0) continue;
+        *strict = 0;
+        return g_now > val ? (g_now - val) / 60 : 0;
+    }
+    return -1;
+}
+
+static void idle_one(Win *w) {
+    char capbuf[TP_CAP], ages[24];
+    long n = 0, age = -1;
+    const char *st, *outst;
+    int strict = 1;
+    if (g_fix[0]) {
+        if (fixture_get(g_fix, w->window, capbuf, sizeof capbuf, &n)) {
+            printf("TEAM_IDLE\t%s\tUNKNOWN\tage_min=-\n", w->window); return;
+        }
+        age = extract_tp_age_min(capbuf, &n);
+        strict = 1;
+    } else {
+        if (capture_tmux(w->window, capbuf, sizeof capbuf, &n)) {
+            printf("TEAM_IDLE\t%s\tUNKNOWN\tage_min=-\n", w->window); return;
+        }
+        age = capture_pane_age_min(w->window, &strict);
+    }
+    st = classify(capbuf, n, w->model, 0, 0, 0);
+    if (tx_eqz(st, "WORKING") || tx_eqz(st, "WAITING_INPUT") || tx_eqz(st, "FILTERED")) {
+        outst = "BUSY"; g_n_idle_busy++;
+    } else if (tx_eqz(st, "IDLE")) {
+        if (age < 0) outst = "UNKNOWN";
+        else if (!strict) { outst = "IDLE"; g_n_idle_ok++; }
+        else if (age >= g_idle_min) { outst = "IDLE"; g_n_idle_ok++; }
+        else { outst = "BUSY"; g_n_idle_busy++; }
+    } else outst = "UNKNOWN";
+    if (age >= 0) cx_fmt(ages, sizeof ages, "%ld", age); else cx_fmt(ages, sizeof ages, "-");
+    printf("TEAM_IDLE\t%s\t%s\tage_min=%s\n", w->window, outst, ages);
+}
+
+static int run_idle(void) {
+    int i;
+    g_n_idle_ok = 0; g_n_idle_busy = 0;
+    for (i = 0; i < g_nw; i++) idle_one(&g_w[i]);
+    printf("TEAM_IDLE_SUMMARY\tidle=%d\tbusy=%d\n", g_n_idle_ok, g_n_idle_busy);
+    return 0;
+}
+
+static void pulse_one(Win *w) {
+    char capbuf[TP_CAP], hash[80], flags[80], ctxs[40], ages[24], note[24];
+    long n = 0, age = -1; int ctx = -1, nflag = 0;
+    const char *st;
+    if (g_fix[0]) {
+        if (fixture_get(g_fix, w->window, capbuf, sizeof capbuf, &n)) {
+            printf("PULSE\t%s\tUNKNOWN\t-\t-\t-\t-\n", w->window); return;
+        }
+    } else if (capture_tmux(w->window, capbuf, sizeof capbuf, &n)) {
+        printf("PULSE\t%s\tUNKNOWN\t-\t-\t-\t-\n", w->window); return;
+    }
+    st = classify(capbuf, n, w->model, &ctx, note, sizeof note);
+    latest_commit(w->prefix, w->git_ref, hash, sizeof hash, &age);
+    flags[0] = 0;
+    /* ask-cc + idle + no progress => WAITING_CC (takes priority over STALLED) */
+    if (!g_mutant_wcc && tx_eqz(st, "IDLE") && asks_cc(capbuf, n) &&
+        age >= 0 && age >= g_wait_cc_min) {
+        st = "WAITING_CC";
+        flags_add(flags, sizeof flags, &nflag, "WAITING_CC");
+        g_n_waiting_cc++;
+        if (g_n_wait_list < TP_MAXW) {
+            if (cx_fmt(g_waiting[g_n_wait_list], sizeof g_waiting[0], "%s", w->window) == 0)
+                g_n_wait_list++;
+        }
+    }
+    if (!g_mutant && tx_eqz(st, "IDLE") && age >= 0 && age >= g_stall_min) {
+        if (tx_eqz(w->kind, "commit")) { flags_add(flags, sizeof flags, &nflag, "STALLED"); g_n_stalled++; }
+        else if (tx_eqz(w->kind, "analysis")) { flags_add(flags, sizeof flags, &nflag, "IDLE_LONG"); g_n_idle_long++; }
+    }
+    if (ctx >= 0 && ctx < 15) { flags_add(flags, sizeof flags, &nflag, "CTX_LOW"); g_n_ctxlow++; }
+    if (tx_eqz(st, "FILTERED")) { flags_add(flags, sizeof flags, &nflag, "FILTERED"); g_n_filtered++; }
+    if (!flags[0]) { flags[0] = '-'; flags[1] = 0; }
+    if (ctx >= 0) {
+        if (note[0]) cx_fmt(ctxs, sizeof ctxs, "left=%d(%s)", ctx, note);
+        else cx_fmt(ctxs, sizeof ctxs, "left=%d", ctx);
+    } else cx_fmt(ctxs, sizeof ctxs, "-");
+    if (age >= 0) cx_fmt(ages, sizeof ages, "%ld", age); else cx_fmt(ages, sizeof ages, "-");
+    /* analysis windows: no exclusive commit column; age still used for IDLE_LONG */
+    if (tx_eqz(w->kind, "analysis")) hash[0] = 0;
+    printf("PULSE\t%s\t%s\t%s\t%s\t%s\t%s\n", w->window, st, ctxs, hash[0] ? hash : "-", ages, flags);
+}
+
+/* ---- freeze-watch (S0..S9 read-only commit discipline) ---- */
+static int fw_domain(const char *path) {
+    static const char *pref[] = {
+        "src/", "cx/", "ext/", "exec/", "include/", "seed/", "kernel/", "tests/", "release/", 0
+    };
+    long i, pl = tx_len(path, 800);
+    for (i = 0; pref[i]; i++) {
+        long n = tx_len(pref[i], 32);
+        if (pl >= n && tx_same(path, n, pref[i], n)) return 1;
+    }
+    return 0;
+}
+
+/* Window identity is the X-Unisacc-Window trailer, not git %an (all windows share wanjo). */
+static int fw_author_ok(const char *window) {
+    long al;
+    if (!window || !window[0]) return 0;
+    al = tx_len(window, 200);
+    if (g_owner[0] && has_ci(window, al, g_owner)) return 1;
+    if (g_lock_author[0] && has_ci(window, al, g_lock_author)) return 1;
+    return 0;
+}
+
+/* Parse first data row of freeze.tsv; 1=active, 0=inactive, 2=bad. */
+static int fw_parse_freeze(const char *path, char *owner, long ocap) {
+    unsigned char *b; int64_t n; long i = 0;
+    owner[0] = 0;
+    if (sy_read_file(path, &b, &n, 1 << 20) < 0 || !b) return 0;
+    while (i < n) {
+        long s = i, e, j, dl = 0; int nf = 0; char line[1200]; char *f[6];
+        while (i < n && b[i] != '\n') i++;
+        e = i; if (i < n) i++;
+        if (e <= s || b[s] == '#') continue;
+        if (e - s >= (long)sizeof line) { mm_free(b); return 2; }
+        mm_copy(line, sizeof line, b + s, e - s); line[e - s] = 0;
+        f[nf++] = line;
+        for (j = 0; line[j] && nf < 6; j++) if (line[j] == '\t') { line[j] = 0; f[nf++] = line + j + 1; }
+        mm_free(b);
+        if (nf != 5) return 2;
+        for (j = 0; f[3][j] >= '0' && f[3][j] <= '9'; j++) dl = dl * 10 + (f[3][j] - '0');
+        if (j > 0 && g_now < dl) {
+            if (cx_fmt(owner, ocap, "%s", f[2])) return 2;
+            return 1;
+        }
+        return 0;
+    }
+    mm_free(b);
+    return 0;
+}
+
+static void fw_emit(const char *window, const char *path, const char *kind, const char *when, const char *author) {
+    if (g_mutant_fw) return;
+    printf("FREEZE_WATCH\tVIOLATION\twindow=%s\tpath=%s\tkind=%s\ttime=%s\tauthor=%s\n",
+           window, path, kind, when && when[0] ? when : "-", author && author[0] ? author : "-");
+    g_n_fw_viol++;
+}
+
+static int fw_scan_dirty(const char *root, const char *window) {
+    char cmd[1600], out[1 << 16]; int rc; long i = 0, n;
+    if (cx_fmt(cmd, sizeof cmd, "git -C '%s' status --porcelain -uall 2>/dev/null", root)) return -1;
+    out[0] = 0;
+    rc = ckk_sh_t("fw-status", cmd, out, (int)sizeof out, 30);
+    if (rc != 0) return 0;
+    n = tx_len(out, sizeof out);
+    while (i < n) {
+        long s = i, e, k; char path[900];
+        while (i < n && out[i] != '\n') i++;
+        e = i; if (i < n) i++;
+        if (e - s < 4 || out[s + 2] != ' ') continue;
+        k = s + 3;
+        {
+            long j, arrow = -1;
+            for (j = k; j + 3 < e; j++)
+                if (out[j] == ' ' && out[j + 1] == '-' && out[j + 2] == '>' && out[j + 3] == ' ')
+                { arrow = j + 4; break; }
+            if (arrow > 0) k = arrow;
+        }
+        if (e - k >= (long)sizeof path || e <= k) continue;
+        mm_copy(path, sizeof path, out + k, e - k); path[e - k] = 0;
+        if (path[0] == '"') continue;
+        if (fw_domain(path)) fw_emit(window, path, "dirty", "-", "-");
+    }
+    return 0;
+}
+
+static int fw_scan_commits(const char *root, const char *window) {
+    char cmd[1800], out[1 << 16]; int rc; long i = 0, n;
+    char cur_t[32], cur_a[120], cur_w[120], body[1 << 14];
+    int in_body = 0; long bn = 0;
+    /* COMMIT\tct\tan then body until ENDCOMMIT; name-only paths follow. Trailer via tr_window_get. */
+    if (cx_fmt(cmd, sizeof cmd,
+        "git -C '%s' log --since='%d minutes ago' --name-only --pretty=format:'COMMIT%%x09%%ct%%x09%%an%%n%%B%%nENDCOMMIT' 2>/dev/null",
+        root, g_since_min)) return -1;
+    out[0] = 0; cur_t[0] = '-'; cur_t[1] = 0; cur_a[0] = '-'; cur_a[1] = 0; cur_w[0] = 0;
+    rc = ckk_sh_t("fw-log", cmd, out, (int)sizeof out, 40);
+    if (rc != 0) return 0;
+    n = tx_len(out, sizeof out);
+    while (i < n) {
+        long s = i, e;
+        while (i < n && out[i] != '\n') i++;
+        e = i; if (i < n) i++;
+        if (e <= s) {
+            if (in_body && bn + 1 < (long)sizeof body) body[bn++] = '\n';
+            continue;
+        }
+        if (e - s > 7 && tx_same(out + s, 7, "COMMIT\t", 7)) {
+            long p1 = s + 7, p2 = p1, p3, al;
+            while (p2 < e && out[p2] != '\t') p2++;
+            cur_t[0] = '-'; cur_t[1] = 0; cur_a[0] = '-'; cur_a[1] = 0; cur_w[0] = 0;
+            body[0] = 0; bn = 0; in_body = 1;
+            if (p2 - p1 > 0 && p2 - p1 < (long)sizeof cur_t) {
+                mm_copy(cur_t, sizeof cur_t, out + p1, p2 - p1); cur_t[p2 - p1] = 0;
+            }
+            if (p2 < e) {
+                p3 = p2 + 1; al = e - p3;
+                if (al > 0 && al < (long)sizeof cur_a) {
+                    mm_copy(cur_a, sizeof cur_a, out + p3, al); cur_a[al] = 0;
+                }
+            }
+            continue;
+        }
+        if (in_body && e - s == 9 && tx_same(out + s, 9, "ENDCOMMIT", 9)) {
+            body[bn] = 0;
+            if (!tr_window_get(body, cur_w, sizeof cur_w)) cur_w[0] = 0;
+            in_body = 0; bn = 0;
+            continue;
+        }
+        if (in_body) {
+            long need = (e - s) + (bn ? 1 : 0);
+            if (bn + need + 1 < (long)sizeof body) {
+                if (bn) body[bn++] = '\n';
+                mm_copy(body + bn, sizeof body - bn, out + s, e - s);
+                bn += e - s;
+            }
+            continue;
+        }
+        {
+            char path[900];
+            if (e - s >= (long)sizeof path) continue;
+            mm_copy(path, sizeof path, out + s, e - s); path[e - s] = 0;
+            if (!fw_domain(path)) continue;
+            if (fw_author_ok(cur_w)) continue;
+            fw_emit(window, path, "commit", cur_t, cur_w[0] ? cur_w : "-");
+        }
+    }
+    return 0;
+}
+
+static void fw_window_name(const char *root, char *out, long cap) {
+    long n = tx_len(root, 1000), i, last = -1;
+    for (i = 0; i < n; i++) if (root[i] == '/') last = i;
+    if (last >= 0 && last + 1 < n) cx_fmt(out, cap, "%s", root + last + 1);
+    else cx_fmt(out, cap, "%s", root);
+}
+
+
+/* ---- /tmp hardlink .cx trees (agyneon; print-only count + age; VIOLATION if old) ---- */
+typedef struct { int count; char sample[512]; } hl_scan;
+static int hl_ends_cx(const char *name, long n) {
+    return n >= 3 && name[n - 3] == '.' && name[n - 2] == 'c' && name[n - 1] == 'x';
+}
+static void hl_walk(const char *path, int depth, hl_scan *ctx) {
+    sy_dir_t d;
+    if (depth > 8) return;
+    if (sy_dir_open(&d, path) != 0) return;
+    while (sy_dir_next(&d) == 1) {
+        char child[1024];
+        struct stat sb;
+        long nl;
+        if (tx_eqz(d.name, ".") || tx_eqz(d.name, "..")) continue;
+        if (cx_fmt(child, sizeof child, "%s/%s", path, d.name)) continue;
+        /* L0 gap: sy_stat_t has no nlink; prelude lstat (pkg-gaps). */
+        if (lstat(child, &sb) != 0) continue;
+        if (S_ISDIR(sb.st_mode)) hl_walk(child, depth + 1, ctx);
+        else if (S_ISREG(sb.st_mode)) {
+            nl = tx_len(d.name, 256);
+            if (hl_ends_cx(d.name, nl) && (long)sb.st_nlink > 1) {
+                if (ctx->count == 0) cx_fmt(ctx->sample, sizeof ctx->sample, "%s", child);
+                ctx->count++;
+            }
+        }
+    }
+    sy_dir_close(&d);
+}
+static void fw_hardlink_trees(void) {
+    const char *tmp_root;
+    sy_dir_t d;
+    int n_dirs = 0;
+    long oldest_min = 0;
+    tmp_root = g_hl_tmp[0] ? g_hl_tmp : "/tmp";
+    if (sy_dir_open(&d, tmp_root) != 0) {
+        printf("FREEZE_WATCH\tHARDLINK_TREES\t-1\t0\n");
+        return;
+    }
+    while (sy_dir_next(&d) == 1) {
+        char top[1024];
+        struct stat st;
+        hl_scan ctx;
+        long age_min;
+        if (d.name[0] == '.') continue;
+        if (cx_fmt(top, sizeof top, "%s/%s", tmp_root, d.name)) continue;
+        if (lstat(top, &st) != 0 || !S_ISDIR(st.st_mode)) continue;
+        mm_fill(&ctx, sizeof ctx, 0, sizeof ctx);
+        hl_walk(top, 0, &ctx);
+        if (ctx.count <= 0) continue;
+        age_min = (g_now > (long)st.st_mtime) ? (g_now - (long)st.st_mtime) / 60L : 0L;
+        if (n_dirs == 0 || age_min > oldest_min) oldest_min = age_min;
+        n_dirs++;
+        printf("HARDLINK_DIR\t%s\tcx_nlink_gt1=%d\tage_min=%ld\tsample=%s\n",
+               top, ctx.count, age_min, ctx.sample);
+    }
+    sy_dir_close(&d);
+    printf("FREEZE_WATCH\tHARDLINK_TREES\t%d\t%ld\n", n_dirs, oldest_min);
+    /* Hourly cleanup rewrites inodes after 120m; warn earlier at >60. */
+    if (n_dirs > 0 && oldest_min > 60)
+        fw_emit("shared", tmp_root, "hardlink-trees", "-", "-");
+}
+
+static int run_freeze_watch(void) {
+    char freeze_path[1200], owner[80], wt_out[1 << 15], cmd[1200];
+    char roots[16][1100]; int nroot = 0, i, st, rc, first_wt = 1;
+    g_owner[0] = 0; g_n_fw_viol = 0;
+    if (!g_root[0] && cx_fmt(g_root, sizeof g_root, ".")) return die("root");
+    if (!g_freeze_file[0] && cx_fmt(g_freeze_file, sizeof g_freeze_file, "build/freeze.tsv")) return die("freeze");
+    if (g_freeze_file[0] == '/') {
+        if (cx_fmt(freeze_path, sizeof freeze_path, "%s", g_freeze_file)) return die("fp");
+    } else if (cx_fmt(freeze_path, sizeof freeze_path, "%s/%s", g_root, g_freeze_file)) return die("fp");
+    st = fw_parse_freeze(freeze_path, owner, sizeof owner);
+    if (st == 2) { printf("FREEZE_WATCH\tERROR\treason=freeze-malformed\n"); return 2; }
+    if (st == 0) { printf("FREEZE_WATCH\tINACTIVE\n"); return 0; }
+    if (cx_fmt(g_owner, sizeof g_owner, "%s", owner)) return die("owner");
+    if (cx_fmt(roots[0], sizeof roots[0], "%s", g_root)) return die("root0");
+    nroot = 1;
+    if (cx_fmt(cmd, sizeof cmd, "git -C '%s' worktree list --porcelain 2>/dev/null", g_root) == 0) {
+        wt_out[0] = 0;
+        rc = ckk_sh_t("fw-wt", cmd, wt_out, (int)sizeof wt_out, 20);
+        if (rc == 0) {
+            long at = 0, wn = tx_len(wt_out, sizeof wt_out);
+            while (at < wn && nroot < 16) {
+                long s = at, e, pl;
+                while (at < wn && wt_out[at] != '\n') at++;
+                e = at; if (at < wn) at++;
+                if (e - s <= 9 || !tx_prefix(wt_out + s, e - s, "worktree ", 9)) continue;
+                pl = e - (s + 9);
+                if (pl <= 0 || pl >= (long)sizeof roots[0]) continue;
+                if (first_wt) { first_wt = 0; continue; }
+                mm_copy(roots[nroot], sizeof roots[0], wt_out + s + 9, pl);
+                roots[nroot][pl] = 0;
+                nroot++;
+            }
+        }
+    }
+    for (i = 0; i < nroot; i++) {
+        char win[200];
+        if (i == 0) cx_fmt(win, sizeof win, "shared");
+        else fw_window_name(roots[i], win, sizeof win);
+        fw_scan_dirty(roots[i], win);
+        fw_scan_commits(roots[i], win);
+    }
+    fw_hardlink_trees();
+    if (g_n_fw_viol == 0) printf("FREEZE_WATCH\tCLEAN\towner=%s\tsince_min=%d\n", g_owner, g_since_min);
+    else printf("FREEZE_WATCH\tSUMMARY\tviolations=%d\towner=%s\n", g_n_fw_viol, g_owner);
+    return g_n_fw_viol ? 1 : 0;
+}
+
+
+int main(int argc, char **argv) {
+    int i, a = 1;
+    g_table[0] = 0; g_fix[0] = 0; g_root[0] = 0; g_freeze_file[0] = 0; g_lock_author[0] = 0;
+    g_hl_tmp[0] = 0;
+    g_idle_mode = 0; g_n_idle_ok = 0; g_n_idle_busy = 0;
+    g_now = sy_wall_s();
+    while (a < argc) {
+        if (tx_eqz(argv[a], "--windows-table") && a + 1 < argc) {
+            if (cx_fmt(g_table, sizeof g_table, "%s", argv[++a])) return die("table path");
+        } else if (tx_eqz(argv[a], "--fixture") && a + 1 < argc) {
+            if (cx_fmt(g_fix, sizeof g_fix, "%s", argv[++a])) return die("fixture path");
+        } else if (tx_eqz(argv[a], "--stall-min") && a + 1 < argc) {
+            g_stall_min = (int)tx_strtol(argv[++a], 0, 10); if (g_stall_min < 1) return die("stall-min");
+        } else if (tx_eqz(argv[a], "--tail-lines") && a + 1 < argc) {
+            g_tail = (int)tx_strtol(argv[++a], 0, 10); if (g_tail < 5 || g_tail > 500) return die("tail-lines");
+        } else if (tx_eqz(argv[a], "--mutant-no-stall")) g_mutant = 1;
+        else if (tx_eqz(argv[a], "--mutant-no-running-shell")) g_mutant_run = 1;
+        else if (tx_eqz(argv[a], "--mutant-no-wait-cc")) g_mutant_wcc = 1;
+        else if (tx_eqz(argv[a], "--wait-cc-min") && a + 1 < argc) {
+            g_wait_cc_min = (int)tx_strtol(argv[++a], 0, 10); if (g_wait_cc_min < 1) return die("wait-cc-min");
+        } else if (tx_eqz(argv[a], "--idle")) g_idle_mode = 1;
+        else if (tx_eqz(argv[a], "--idle-min") && a + 1 < argc) {
+            g_idle_min = (int)tx_strtol(argv[++a], 0, 10); if (g_idle_min < 1) return die("idle-min");
+        } else if (tx_eqz(argv[a], "--freeze-watch")) g_freeze_watch = 1;
+        else if (tx_eqz(argv[a], "--root") && a + 1 < argc) {
+            if (cx_fmt(g_root, sizeof g_root, "%s", argv[++a])) return die("root");
+        } else if (tx_eqz(argv[a], "--freeze-file") && a + 1 < argc) {
+            if (cx_fmt(g_freeze_file, sizeof g_freeze_file, "%s", argv[++a])) return die("freeze-file");
+        } else if (tx_eqz(argv[a], "--since-min") && a + 1 < argc) {
+            g_since_min = (int)tx_strtol(argv[++a], 0, 10); if (g_since_min < 1) return die("since-min");
+        } else if (tx_eqz(argv[a], "--lock-author") && a + 1 < argc) {
+            if (cx_fmt(g_lock_author, sizeof g_lock_author, "%s", argv[++a])) return die("lock-author");
+        } else if (tx_eqz(argv[a], "--mutant-no-freeze-watch")) g_mutant_fw = 1;
+        else if (tx_eqz(argv[a], "--hardlink-tmp") && a + 1 < argc) {
+            if (cx_fmt(g_hl_tmp, sizeof g_hl_tmp, "%s", argv[++a])) return die("hardlink-tmp");
+        } else if (tx_eqz(argv[a], "--now") && a + 1 < argc) g_now = tx_strtol(argv[++a], 0, 10);
+        else return die("usage: [--idle [--idle-min N]] [--windows-table P] [--stall-min N] [--wait-cc-min N] [--fixture F] [--tail-lines K] [--mutant-no-stall|--mutant-no-running-shell|--mutant-no-wait-cc]");
+        a++;
+    }
+    if (g_freeze_watch) return run_freeze_watch();
+    if (!g_table[0]) {
+        if (cx_fmt(g_table, sizeof g_table, "skills/unisacc-orch-supervise/team-windows.tsv")) return die("default table");
+    }
+    if (load_table(g_table)) return 2;
+    if (g_idle_mode) return run_idle();
+    for (i = 0; i < g_nw; i++) pulse_one(&g_w[i]);
+    printf("TEAM_PULSE\twindows=%d\tstalled=%d\tidle_long=%d\tctx_low=%d\tfiltered=%d\twaiting_cc=%d\n",
+           g_nw, g_n_stalled, g_n_idle_long, g_n_ctxlow, g_n_filtered, g_n_waiting_cc);
+    if (g_n_wait_list > 0) {
+        printf("WAITING_CC\t");
+        for (i = 0; i < g_n_wait_list; i++) {
+            if (i) printf(",");
+            printf("%s", g_waiting[i]);
+        }
+        printf("\n");
+    }
+    return 0;
+}

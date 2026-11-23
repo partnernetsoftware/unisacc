@@ -19,27 +19,7 @@
 #pragma unisa use sys.sig
 #pragma unisa use text.text
 
-/* sy_run with a bound: ARGV runs under cx_runv_timeout (SECS, process group killed on expiry), stdout and stderr
-   merged into OUT (CAP, NUL-terminated, *CUT set when it did not fit; CUT may be 0). */
-static int bounded_run(char **argv, int secs, char *out, int cap, int *cut) {
-    char *w[64], *b = 0;
-    size_t n = 0, j;
-    int k = 0, i, rc;
-    if (cut) *cut = 0;
-    if (!argv) return -EINVAL;
-    w[k++] = "sh"; w[k++] = "-c"; w[k++] = "exec \"$@\" 2>&1"; w[k++] = "sh";
-    for (i = 0; argv[i] && k < 63; i++) w[k++] = argv[i];
-    if (argv[i]) return -E2BIG;
-    w[k] = 0;
-    rc = cx_runv_timeout(w, secs, &b, &n);
-    if (cap > 0) {
-        if (n > (size_t)cap - 1) { n = (size_t)cap - 1; if (cut) *cut = 1; }
-        for (j = 0; b && j < n; j++) out[j] = b[j];
-        out[b ? n : 0] = 0;
-    }
-    free(b);
-    return rc;
-}
+#pragma unisa use cxlib.procrun
 
 static char upw[4400];
 #define UPW upw
@@ -60,7 +40,7 @@ static int run(const char *name, const char *s, char *out, int cap) {
     char *b;
     if (cx_fmt(path, sizeof path, "%s/%s", upw, name)) die("path");
     if (cx_write(path, s, (size_t)sl) < 0) die("cannot write the fixture");
-    rc = bounded_run(av, 50, got, (int)sizeof got, 0);
+    rc = pr_run_merged(av, 50, got, (int)sizeof got, 0);
     b = cx_read(path, &n);                          /* the tool rewrote the file in place */
     if (!b) die("cannot read the fixture back");
     if (n >= (size_t)cap) die("fixture grew past the buffer");
@@ -74,7 +54,7 @@ int main(void) {
     char *mk[] = {"sh", "-c", mkbuf, 0};
     size_t n;
     if (cx_fmt(upw, sizeof upw, "%s/check-use-path-%d", sy_tmpdir(), sy_pid()) || cx_fmt(path, sizeof path, "%s/plain.cx", upw) || cx_fmt(mkbuf, sizeof mkbuf, "rm -rf %s && mkdir -p %s", upw, upw)) die("path");
-    if (bounded_run(mk, 50, got, (int)sizeof got, 0) != 0) die("cannot prepare the fixture directory");
+    if (pr_run_merged(mk, 50, got, (int)sizeof got, 0) != 0) die("cannot prepare the fixture directory");
 
     ck(run("plain.cx", "#pragma unisa use " OLD "\nint main(void){return 0;}\n", out, sizeof out) == 0
        && tx_eqz(out, "#pragma unisa use " NEW "\nint main(void){return 0;}\n"), "plain");
@@ -93,7 +73,7 @@ int main(void) {
 
     /* The summary line of the plain case says changed=1, so a no-op run is not mistaken for a rewrite. */
     {   char *av[] = {"sh", "./unisacc.com", "tools/use-path.cx", "--", OLD, NEW, path, 0};
-        if (bounded_run(av, 50, got, (int)sizeof got, 0) != 0) die("cannot run the tool on the plain fixture");
+        if (pr_run_merged(av, 50, got, (int)sizeof got, 0) != 0) die("cannot run the tool on the plain fixture");
         n = tx_len(got, sizeof got);
         ck(tx_find(got, (long)n, "changed=0", 9) >= 0, "count"); }   /* already rewritten: nothing left to change */
 

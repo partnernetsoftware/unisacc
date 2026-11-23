@@ -1,0 +1,117 @@
+native function batch_json_member(obj:i64,end:i64,scratch:i64,kind:i64) i64 {
+  let after=batch_json_token(scratch,scratch+64,kind);
+  if(after<0) { return 0-1; }
+  let skip=2;
+  let suffix=2;
+  if(kind>=1 && kind<=3) { skip=3; }
+  if(kind<4) { suffix=3; }
+  return json_find_key(obj,end,scratch+skip,after-scratch-skip-suffix);
+}
+
+native function batch_json_u32(obj:i64,end:i64,scratch:i64,kind:i64) i64 {
+  let at=batch_json_member(obj,end,scratch,kind);
+  let value=json_read_number(at,end);
+  if(!(value>=0.0-1.0 && value<=4294967294.0)) { return 0-2; }
+  let number=f64_floor_i64(value);
+  if(value!=0.0+number) { return 0-2; }
+  return number;
+}
+
+native function batch_json_array(at:i64,end:i64) i64 {
+  if(at<0 || at>=end || ux_u8(at)!=91) { return 0-1; }
+  return json_space(at+1,end);
+}
+
+native function batch_json_next(at:i64,end:i64) i64 {
+  let finish=json_value_end(at,end);
+  if(finish<0) { return 0-1; }
+  let separator=json_space(finish,end);
+  if(separator<0 || separator>=end) { return 0-1; }
+  if(ux_u8(separator)==93) { return separator; }
+  if(ux_u8(separator)!=44) { return 0-1; }
+  let next=json_space(separator+1,end);
+  if(next<0 || next>=end || ux_u8(next)==93) { return 0-1; }
+  return next;
+}
+
+native function batch_json_bool(at:i64,end:i64) i64 {
+  if(at<0 || at>=end) { return 0-1; }
+  if(ux_u8(at)==116) { return 1; }
+  if(ux_u8(at)==102) { return 0; }
+  return 0-1;
+}
+
+// The receiver already contains the batch's geometry handles and storage.
+native function batch_json_read_pass(batch:i64,doc:i64,end:i64,scratch:i64,commit:i64) i64 {
+  let draw=batch_json_array(batch_json_member(doc,end,scratch,0),end);
+  let reserve=batch_json_array(batch_json_member(doc,end,scratch,1),end);
+  let visible=batch_json_array(batch_json_member(doc,end,scratch,2),end);
+  let active=batch_json_array(batch_json_member(doc,end,scratch,3),end);
+  let count=ux_u32(batch+BatchedMesh.count);
+  let rows=ux_u32(batch+BatchedMesh.rows);
+  let vertices=0;
+  let indices=0;
+  let indexed=ux_u32(batch+BatchedMesh.indexed);
+  let i=0;
+  while(i<count) {
+    if(draw<0 || reserve<0 || ux_u8(draw)!=123 || ux_u8(reserve)!=123) { return 0-1; }
+    let drawEnd=json_value_end(draw,end);
+    let reserveEnd=json_value_end(reserve,end);
+    let first=batch_json_u32(draw,drawEnd,scratch,4);
+    let length=batch_json_u32(draw,drawEnd,scratch,5);
+    let vertexStart=batch_json_u32(reserve,reserveEnd,scratch,6);
+    let vertexCount=batch_json_u32(reserve,reserveEnd,scratch,7);
+    let indexStart=batch_json_u32(reserve,reserveEnd,scratch,8);
+    let indexCount=batch_json_u32(reserve,reserveEnd,scratch,9);
+    let shown=batch_json_bool(visible,end);
+    let enabled=batch_json_bool(active,end);
+    if(vertexStart!=vertices || vertexCount<=0 || shown<0 || enabled<0) { return 0-1; }
+    if(indexed!=0) {
+      if(indexStart!=indices || indexCount<0 || first!=indexStart || length!=indexCount) { return 0-1; }
+      indices=indices+indexCount;
+    } else if(indexStart!=0-1 || indexCount!=0-1 || first!=vertexStart || length!=vertexCount) {
+      return 0-1;
+    }
+    vertices=vertices+vertexCount;
+    if(vertices>ux_u32(batch+BatchedMesh.vertexLimit) || indices>ux_u32(batch+BatchedMesh.indexLimit)) { return 0-1; }
+    if(commit!=0) {
+      let row=rows+i*BatchGeometry.size;
+      let a=ux_u32_put(row+BatchGeometry.vertexStart,vertexStart);
+      let b=ux_u32_put(row+BatchGeometry.vertexCount,vertexCount);
+      let c=ux_u32_put(row+BatchGeometry.indexStart,u32_and(indexStart,4294967295));
+      let d=ux_u32_put(row+BatchGeometry.indexCount,u32_and(indexCount,4294967295));
+      let e=ux_u32_put(row+BatchGeometry.visible,shown);
+      let f=ux_u32_put(row+BatchGeometry.active,enabled);
+    }
+    draw=batch_json_next(draw,end);
+    reserve=batch_json_next(reserve,end);
+    visible=batch_json_next(visible,end);
+    active=batch_json_next(active,end);
+    i=i+1;
+  }
+  if(draw<0 || reserve<0 || visible<0 || active<0 || ux_u8(draw)!=93 ||
+     ux_u8(reserve)!=93 || ux_u8(visible)!=93 || ux_u8(active)!=93) { return 0-1; }
+  if(commit!=0) {
+    let v=ux_u32_put(batch+BatchedMesh.vertexUsed,vertices);
+    let ix=ux_u32_put(batch+BatchedMesh.indexUsed,indices);
+  }
+  return batch;
+}
+
+native function Batch_readRangesJSON(batch:i64,doc:i64,end:i64,scratch:i64) i64 {
+  if(!batch_valid(batch) || doc<0 || end<=doc || end>6291456 ||
+     scratch<0 || scratch>6291392 ||
+     (doc<scratch+64 && scratch<end) ||
+     (doc<batch+BatchedMesh.size && batch<end) ||
+     (scratch<batch+BatchedMesh.size && batch<scratch+64)) { return 0-1; }
+  let rows=ux_u32(batch+BatchedMesh.rows);
+  let count=ux_u32(batch+BatchedMesh.count);
+  let size=count*BatchGeometry.size;
+  if(count>ux_u32(batch+BatchedMesh.capacity) || rows>6291456-size || rows%4!=0 ||
+     (doc<rows+size && rows<end) || (scratch<rows+size && rows<scratch+64)) { return 0-1; }
+  let close=json_value_end(doc,end);
+  if(close<0 || json_space(close,end)!=end) { return 0-1; }
+  let accepted=batch_json_read_pass(batch,doc,close,scratch,0);
+  if(accepted<0) { return accepted; }
+  return batch_json_read_pass(batch,doc,close,scratch,1);
+}

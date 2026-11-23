@@ -1,7 +1,7 @@
 /* tools/dup-census.cx -- census of duplicated static functions in tools/*.cx and tools/cxlib/*.cx (the 15th ratchet).
  * 重复是测量,合并是决定(须权衡间接成本、平台是否已有、副本们是契约一致还是仅文字一致;已核实契约不同或合并净亏的重复组登记入白名单,不计入棘轮,防止为降数字做净亏合并)
  *
- *   sh ./unisacc.com tools/dup-census.cx [-- --print | --check | --write] [--root DIR]
+ *   sh ./unisacc.com tools/dup-census.cx [-- --print | --check | --write | --where NAME | --hint-file PATH | --list-hints] [--root DIR]
  *
  * Scans ROOT/tools/*.cx and ROOT/tools/cxlib/*.cx (direct children, file names sorted).  A static function is a
  * line starting "static " with "NAME(" before any '=' or ';', whose parameter list is followed by '{'; its text
@@ -40,9 +40,46 @@
 static const char *root = ".";
 static char *fname[MAXF]; static char *fbuf[MAXF]; static long flen[MAXF]; static int nf;
 static int e_file[MAXE], e_lines[MAXE]; static long e_s[MAXE], e_e[MAXE], e_ns[MAXE], e_nl[MAXE];
-static unsigned long e_h[MAXE]; static int ne, idx[MAXE];
+static unsigned long e_h[MAXE], e_nh[MAXE]; static int ne, idx[MAXE], aidx[MAXE], amem[MAXE], aseen[MAXE];
 static int g_rep[MAXG], g_copies[MAXG], g_lines[MAXG], g_i0[MAXG]; static int ng;
+static int ag_rep[MAXG], ag_copies[MAXG], ag_lines[MAXG], ag_i0[MAXG]; static int nag, nam;
 static char wl_name[MAXWL][128]; static int nwl;
+
+static const char *dc_hints[][3] = {
+    {"run",      "pr_run",   "tools/cxlib/procrun.cx (or px_run in ext/sysx/run.cx)"},
+    {"exec",     "px_run",   "ext/sysx/run.cx (or pr_run in tools/cxlib/procrun.cx)"},
+    {"spawn",    "px_run",   "ext/sysx/run.cx (or pr_run in tools/cxlib/procrun.cx)"},
+    {"sh",       "ckk_sh_t", "tools/cxlib/ckrun.cx (or pr_run in tools/cxlib/procrun.cx)"},
+    {"ck_run",   "ck_run",   "tools/cxlib/ckassert.cx (or tk_run in ext/testx/check.cx)"},
+    {"check",    "tk_ok",    "ext/testx/check.cx (or ck_run in tools/cxlib/ckassert.cx)"},
+    {"has",      "tk_has",   "ext/testx/check.cx (or tx_find in cx/text/text.cx)"},
+    {"contains", "tk_has",   "ext/testx/check.cx (or tx_find in cx/text/text.cx)"},
+    {"append",   "sb_puts",  "ext/textx/build.cx (or cx_fmt / tx_*)"},
+    {"join",     "sb_join",  "ext/textx/build.cx (or cx_fmt / tx_*)"},
+    {"cat",      "sb_puts",  "ext/textx/build.cx (or cx_fmt / tx_*)"},
+    {"fmt",      "sb_putn",  "ext/textx/build.cx (or cx_fmt / tx_*)"},
+    {"put",      "sb_puts",  "ext/textx/build.cx (or cx_fmt / tx_*)"},
+    {"str",      "sb_puts",  "ext/textx/build.cx (or cx_fmt / tx_*)"},
+};
+#define NHINTS 14
+
+static int dc_hint_for(const char *nm, long nl) {
+    int h; long i;
+    for (h = 0; h < NHINTS; h++) {
+        long pl = tx_len(dc_hints[h][0], 64);
+        if (nl == pl && mm_same(nm, dc_hints[h][0], pl)) return h;
+    }
+    for (h = 0; h < NHINTS; h++) {
+        long pl = tx_len(dc_hints[h][0], 64);
+        if (pl > nl) continue;
+        for (i = 0; i + pl <= nl; i++) {
+            int l_ok = (i == 0 || nm[i - 1] == '_');
+            int r_ok = (i + pl == nl || nm[i + pl] == '_' || (nm[i + pl] >= '0' && nm[i + pl] <= '9'));
+            if (l_ok && r_ok && mm_same(nm + i, dc_hints[h][0], pl)) return h;
+        }
+    }
+    return -1;
+}
 
 static const char *frag[][2] = {
     {"path.fmt-join", "\"%s/%s\""}, {"tsv.hand-tabchr", "'\\t'"}, {"fmt.snprintf", "snprintf("},
@@ -53,6 +90,15 @@ static const char *frag[][2] = {
 static long fr_occ[NFRAG]; static int fr_files[NFRAG];
 
 static int isid(int c) { return (c >= 'a' && c <= 'z') || (c >= 'A' && c <= 'Z') || (c >= '0' && c <= '9') || c == '_'; }
+
+static unsigned long dc_hash_anon(const char *b, long ls, long q, long qe, long k) {
+    unsigned long nh = 1469598103934665603ul; long t;
+    const char *ph = "_FN_";
+    for (t = ls; t < q; t++) { nh ^= (unsigned char)b[t]; nh *= 1099511628211ul; }
+    for (t = 0; t < 4; t++) { nh ^= (unsigned char)ph[t]; nh *= 1099511628211ul; }
+    for (t = qe; t < k; t++) { nh ^= (unsigned char)b[t]; nh *= 1099511628211ul; }
+    return nh;
+}
 
 static void scan(int fi) {
     const char *b = fbuf[fi]; long n = flen[fi], i = 0;
@@ -79,7 +125,7 @@ static void scan(int fi) {
         }
         if (k > n) k = n;
         for (t = ls; t < k; t++) { if (b[t] == '\n') lines++; h ^= (unsigned char)b[t]; h *= 1099511628211ul; }
-        if (ne < MAXE) { e_file[ne] = fi; e_s[ne] = ls; e_e[ne] = k; e_ns[ne] = q; e_nl[ne] = qe - q; e_lines[ne] = lines; e_h[ne] = h; ne++; }
+        if (ne < MAXE) { e_file[ne] = fi; e_s[ne] = ls; e_e[ne] = k; e_ns[ne] = q; e_nl[ne] = qe - q; e_lines[ne] = lines; e_h[ne] = h; e_nh[ne] = dc_hash_anon(b, ls, q, qe, k); ne++; }
         i = k; while (i < n && b[i] != '\n') i++;
         if (i < n) i++;
     }
@@ -92,14 +138,31 @@ static int ecmp(int a, int b) {
     if (e_h[a] != e_h[b]) return e_h[a] < e_h[b] ? -1 : 1;
     return e_file[a] - e_file[b];
 }
+static int acmp(int a, int b) {
+    if (e_nh[a] != e_nh[b]) return e_nh[a] < e_nh[b] ? -1 : 1;
+    if (e_file[a] != e_file[b]) return e_file[a] - e_file[b];
+    return e_s[a] < e_s[b] ? -1 : (e_s[a] > e_s[b] ? 1 : 0);
+}
 static int same_body(int a, int b) {
     long la = e_e[a] - e_s[a];
     return e_h[a] == e_h[b] && la == e_e[b] - e_s[b] && mm_same(fbuf[e_file[a]] + e_s[a], fbuf[e_file[b]] + e_s[b], la);
+}
+static int same_body_anon(int a, int b) {
+    long pa = e_ns[a] - e_s[a], pb = e_ns[b] - e_s[b];
+    long sa = e_e[a] - (e_ns[a] + e_nl[a]), sb = e_e[b] - (e_ns[b] + e_nl[b]);
+    if (e_nh[a] != e_nh[b] || pa != pb || sa != sb) return 0;
+    return mm_same(fbuf[e_file[a]] + e_s[a], fbuf[e_file[b]] + e_s[b], pa) &&
+           mm_same(fbuf[e_file[a]] + e_ns[a] + e_nl[a], fbuf[e_file[b]] + e_ns[b] + e_nl[b], sa);
 }
 static void sort_e(void) {
     int gap, i, j, t;
     for (i = 0; i < ne; i++) idx[i] = i;
     for (gap = ne / 2; gap > 0; gap /= 2) for (i = gap; i < ne; i++) { t = idx[i]; for (j = i; j >= gap && ecmp(idx[j - gap], t) > 0; j -= gap) idx[j] = idx[j - gap]; idx[j] = t; }
+}
+static void sort_a(void) {
+    int gap, i, j, t;
+    for (i = 0; i < ne; i++) aidx[i] = i;
+    for (gap = ne / 2; gap > 0; gap /= 2) for (i = gap; i < ne; i++) { t = aidx[i]; for (j = i; j >= gap && acmp(aidx[j - gap], t) > 0; j -= gap) aidx[j] = aidx[j - gap]; aidx[j] = t; }
 }
 static void sort_names(int lo, int hi) {   /* the file names of one directory, by bytes */
     int i, j; char *t;
@@ -121,15 +184,17 @@ static int list_dir(const char *rel) {
     return 0;
 }
 
-static long s_dupnames, s_dupdefs, s_excess, s_vdefs, s_vlines, s_vred;
+static long s_dupnames, s_dupdefs, s_excess, s_vdefs, s_vlines, s_vred, s_adefs, s_ared;
 
 static void census(void) {
     int i, j, k, f;
     for (f = 0; f < nf; f++) {
         char p[1300]; size_t m = 0; char *b;
-        if (cx_fmt(p, sizeof p, "%s/%s", root, fname[f])) continue;
-        b = cx_read(p, &m);
-        fbuf[f] = b ? b : (char *)""; flen[f] = b ? (long)m : 0;
+        if (!fbuf[f]) {
+            if (cx_fmt(p, sizeof p, "%s/%s", root, fname[f])) continue;
+            b = cx_read(p, &m);
+            fbuf[f] = b ? b : (char *)""; flen[f] = b ? (long)m : 0;
+        }
         scan(f);
         for (k = 0; k < NFRAG; k++) {
             long pl = tx_len(frag[k][1], 64), c = 0, at;
@@ -151,6 +216,32 @@ static void census(void) {
                 s_vdefs += m - k; s_vlines += (long)(m - k) * e_lines[idx[k]]; s_vred += (long)(m - k - 1) * e_lines[idx[k]];
             }
             k = m;
+        }
+    }
+    sort_a();
+    for (i = 0; i < ne; i = j) {
+        for (j = i + 1; j < ne && e_nh[aidx[j]] == e_nh[aidx[i]]; j++) {}
+        if (j - i < 2) continue;
+        for (k = i; k < j; k++) aseen[k] = 0;
+        for (k = i; k < j; k++) {
+            int m, cnt = 0, diff_name = 0, base_m = nam;
+            if (aseen[k]) continue;
+            aseen[k] = 1;
+            if (nam < MAXE) amem[nam++] = aidx[k];
+            cnt = 1;
+            for (m = k + 1; m < j; m++) {
+                if (aseen[m] || !same_body_anon(aidx[k], aidx[m])) continue;
+                aseen[m] = 1;
+                if (ncmp(aidx[k], aidx[m])) diff_name = 1;
+                if (nam < MAXE) amem[nam++] = aidx[m];
+                cnt++;
+            }
+            if (cnt >= 2 && diff_name && nag < MAXG) {
+                ag_rep[nag] = aidx[k]; ag_i0[nag] = base_m; ag_copies[nag] = cnt; ag_lines[nag] = e_lines[aidx[k]]; nag++;
+                s_adefs += cnt; s_ared += (long)(cnt - 1) * e_lines[aidx[k]];
+            } else {
+                nam = base_m;
+            }
         }
     }
 }
@@ -260,20 +351,85 @@ static long base_total(const char *t, long tn, const char *key) {
     return -1;
 }
 
+static int dc_find_or_add_file(const char *path) {
+    int f; long pl = tx_len(path, 1300), rl = tx_len(root, 1200);
+    const char *rel = path;
+    size_t m = 0; char *b;
+    if (rl > 0 && pl > rl + 1 && mm_same(path, root, rl) && path[rl] == '/') rel = path + rl + 1;
+    for (f = 0; f < nf; f++) {
+        if (tx_eqz(fname[f], rel) || tx_eqz(fname[f], path)) return f;
+    }
+    if (nf >= MAXF) return -1;
+    b = cx_read(path, &m);
+    if (!b) return -1;
+    fname[nf] = mm_alloc(pl + 1);
+    if (!fname[nf]) { mm_free(b); return -1; }
+    mm_copy(fname[nf], pl + 1, path, pl + 1);
+    fbuf[nf] = b; flen[nf] = (long)m;
+    nf++;
+    return nf - 1;
+}
+
+static void dc_print_anon_groups(void) {
+    int g, t;
+    for (g = 0; g < nag; g++) {
+        printf("ANON_GROUP\t");
+        for (t = 0; t < ag_copies[g]; t++) {
+            int e = amem[ag_i0[g] + t], prev = 0, u;
+            for (u = 0; u < t; u++) {
+                if (!ncmp(amem[ag_i0[g] + u], e)) { prev = 1; break; }
+            }
+            if (prev) continue;
+            if (t > 0) printf(",");
+            printf("%.*s", (int)e_nl[e], fbuf[e_file[e]] + e_ns[e]);
+        }
+        printf("\t%d\t%d\t%ld\n", ag_copies[g], ag_lines[g], (long)(ag_copies[g] - 1) * ag_lines[g]);
+    }
+    printf("DUP_ANON\tgroups=%d\tdefs=%ld\tredundant=%ld\n", nag, s_adefs, s_ared);
+}
+
 int main(int argc, char **argv) {
-    int mode = 0, a, g, h; char bpath[1300]; const char *where = 0;
+    int mode = 0, a, g, h, target_fi = -1; char bpath[1300]; const char *where = 0, *hint_file = 0;
     for (a = 1; a < argc; a++) {
         if (tx_eqz(argv[a], "--print")) mode = 0;
         else if (tx_eqz(argv[a], "--check")) mode = 1;
         else if (tx_eqz(argv[a], "--write")) mode = 2;
         else if (tx_eqz(argv[a], "--where") && a + 1 < argc) { mode = 3; where = argv[++a]; }
+        else if (tx_eqz(argv[a], "--list-hints")) mode = 4;
+        else if (tx_eqz(argv[a], "--hint-file") && a + 1 < argc) { mode = 5; hint_file = argv[++a]; }
         else if (tx_eqz(argv[a], "--root") && a + 1 < argc) root = argv[++a];
-        else { fprintf(stderr, "usage: tools/dup-census.cx [--print | --check | --write | --where NAME] [--root DIR]\n"); return 2; }
+        else { fprintf(stderr, "usage: tools/dup-census.cx [--print | --check | --write | --where NAME | --hint-file PATH | --list-hints] [--root DIR]\n"); return 2; }
+    }
+    if (mode == 4) {
+        for (a = 0; a < NHINTS; a++) printf("HINT_ENTRY\t%s\t%s\t%s\n", dc_hints[a][0], dc_hints[a][1], dc_hints[a][2]);
+        return 0;
     }
     if (list_dir("tools")) { fprintf(stderr, "dup-census: cannot list %s/tools\n", root); return 2; }
     list_dir("tools/cxlib");   /* optional */
+    if (mode == 5) {
+        target_fi = dc_find_or_add_file(hint_file);
+        if (target_fi < 0) { fprintf(stderr, "dup-census: cannot read %s\n", hint_file); return 2; }
+    }
     if (dc_wl_load(root)) return 2;
     census();
+    if (mode == 5) {
+        int e, o;
+        for (e = 0; e < ne; e++) {
+            const char *nm; long nl; int hi;
+            if (e_file[e] != target_fi) continue;
+            nm = fbuf[e_file[e]] + e_ns[e]; nl = e_nl[e];
+            hi = dc_hint_for(nm, nl);
+            if (hi >= 0) printf("DUP_HINT\talt\t%.*s\t%s\t%s\n", (int)nl, nm, dc_hints[hi][1], dc_hints[hi][2]);
+            for (o = 0; o < ne; o++) {
+                if (e_file[o] == target_fi) continue;
+                if (same_body_anon(e, o)) {
+                    printf("DUP_HINT\tdup\t%.*s\t%s\t%.*s\n", (int)nl, nm, fname[e_file[o]], (int)e_nl[o], fbuf[e_file[o]] + e_ns[o]);
+                    break;
+                }
+            }
+        }
+        return 0;
+    }
     if (cx_fmt(bpath, sizeof bpath, "%s/build/dup-census-baseline.tsv", root)) return 2;
     if (mode == 3) {   /* --where NAME: the files of every verbatim group of that name, one row per copy */
         for (g = 0; g < ng; g++) {
@@ -307,6 +463,7 @@ int main(int argc, char **argv) {
         else
             printf("DUP_SUMMARY files=%d static_fn=%d dup_names=%ld dup_defs=%ld excess_lines=%ld verbatim_groups=%d verbatim_defs=%ld verbatim_lines=%ld verbatim_redundant=%ld\n",
                    nf, ne, s_dupnames, s_dupdefs, s_excess, ng, s_vdefs, s_vlines, s_vred);
+        dc_print_anon_groups();
         return 0;
     }
     if (mode == 2) {
@@ -338,7 +495,12 @@ int main(int argc, char **argv) {
                 continue;
             }
             found = base_find(t, (long)m, s, l, &bc);
-            if (!found || copies > bc) { printf("dup-census: %.*s has %ld verbatim copies, baseline %ld\n", (int)l, s, copies, bc); if (found) gr++; else nw++; }
+            if (!found || copies > bc) {
+                int hi = dc_hint_for(s, l);
+                printf("dup-census: %.*s has %ld verbatim copies, baseline %ld\n", (int)l, s, copies, bc);
+                if (hi >= 0) printf("dup-census: hint: %.*s -> %s (%s)\n", (int)l, s, dc_hints[hi][1], dc_hints[hi][2]);
+                if (found) gr++; else nw++;
+            }
         }
         eff_ng = ng - wl_groups; eff_bg = bg - base_wl_g;
         eff_vred = s_vred - wl_red; eff_br = br - base_wl_r;
@@ -346,6 +508,7 @@ int main(int argc, char **argv) {
         bad = nw || gr || eff_ng > eff_bg || eff_vred > eff_br;
         if (bad) printf("dup-census: FAIL: new=%d grown=%d groups=%d baseline=%ld redundant=%ld baseline=%ld whitelisted=%d\n", nw, gr, eff_ng, eff_bg, eff_vred, eff_br, wl_groups);
         else printf("dup-census: ok: verbatim_groups=%d (baseline %ld) verbatim_redundant=%ld (baseline %ld) whitelisted=%d\n", eff_ng, eff_bg, eff_vred, eff_br, wl_groups);
+        if (nag > 0) printf("dup-census: info: anon_groups=%d anon_defs=%ld anon_redundant=%ld\n", nag, s_adefs, s_ared);
         return bad ? 1 : 0;
     }
 }

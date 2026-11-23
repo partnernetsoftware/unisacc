@@ -8,6 +8,7 @@
  */
 #pragma unisa use sys.fs
 #pragma unisa use sys.posix
+#pragma unisa use sys.proc
 #pragma unisa use sys.io
 #pragma unisa use cxlib.surf
 #pragma unisa use text.fmt
@@ -43,11 +44,43 @@ int main(int argc, char **argv) {
     if (is_win) emit("cx.os", "sy_fsync", target, (fs == -38) ? "refuse" : (fs == 0 ? "ok" : "fail"));
     else emit("cx.os", "sy_fsync", target, (fs == 0) ? "ok" : "fail");
 
+    int fc = open_ok ? sy_fchmod(fd, 0600) : -1;
+    if (is_win) emit("cx.os", "sy_fchmod", target, (fc == -38) ? "refuse" : "fail");
+    else emit("cx.os", "sy_fchmod", target, (fc == 0) ? "ok" : "fail");
+
     if (open_ok) (void)sy_close(fd);
 
     int ut = sy_utimes(p, 1700000000L, 0, 1700000000L, 0);
     if (is_win) emit("cx.os", "sy_utimes", target, (ut == -38) ? "refuse" : "fail");
     else emit("cx.os", "sy_utimes", target, (ut == 0) ? "ok" : "fail");
+
+    int ch = sy_chown(p, -1, -1);
+    if (is_win) emit("cx.os", "sy_chown", target, (ch == -38) ? "refuse" : "fail");
+    else emit("cx.os", "sy_chown", target, (ch == 0) ? "ok" : "fail");
+
+    int u0 = sy_umask(077);
+    if (is_win) {
+        emit("cx.os", "sy_umask", target, (u0 == -38) ? "refuse" : "fail");
+    } else {
+        int u1 = (u0 >= 0) ? sy_umask(u0) : -1;
+        emit("cx.os", "sy_umask", target, (u0 >= 0 && u1 == 077) ? "ok" : "fail");
+    }
+
+    int pfds[2] = {-1, -1};
+    int p2 = sy_pipe2(pfds, SY_PIPE_CLOEXEC);
+    if (is_win) {
+        emit("cx.os", "sy_pipe2", target, (p2 == -38) ? "refuse" : "fail");
+    } else {
+        int p2_ok = 0;
+        if (p2 == 0 && pfds[0] >= 0 && pfds[1] >= 0) {
+            char pb = 0;
+            if (sy_write_all(pfds[1], "P", 1) == 0 && sy_read(pfds[0], &pb, 1) == 1 && pb == 'P')
+                p2_ok = 1;
+            (void)sy_close(pfds[0]);
+            (void)sy_close(pfds[1]);
+        }
+        emit("cx.os", "sy_pipe2", target, p2_ok ? "ok" : "fail");
+    }
 
     /* Note: sy_rlimit_as() returns >=0 on bounded limit or -1 on unlimited/error.
      * On lnx/arm64, posix.cx:227 passes x86_64 #97 (unshare on arm64), which fails and is
@@ -57,6 +90,6 @@ int main(int argc, char **argv) {
     else emit("cx.os", "sy_rlimit_as", target, (rl >= -1) ? "ok" : "fail");
 
     (void)sy_unlink(p);
-    printf("SURF_PROBE\ttarget=%s\temitted=6\n", target);
+    printf("SURF_PROBE\ttarget=%s\temitted=10\n", target);
     return 0;
 }

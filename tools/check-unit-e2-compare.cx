@@ -1,0 +1,301 @@
+/* Checks tools/unit-e2-compare.cx: sh ./unisacc.com tools/check-unit-e2-compare.cx   (from the repo root)
+ *
+ * Judging logic on a stand-in engine: a small sh script plays the APE.  What it prints depends only on the model
+ * pack it is given (a pack containing MUTANT emits another frame, one containing SLEEPY sleeps), so every verdict
+ * can be provoked without a real pack.  A fixture git repo in TMPDIR supplies the corner corpus and the manifest.
+ *
+ * Negative controls (both required):
+ *   same-pack   --models-a X --models-b X   -> every item SAME, status COMPLETE=yes, rc 0
+ *   mutant      one byte of the pack changed -> at least one DIFF, status rc 1
+ * Other cases: manifest row count and sha, resume (a second run starts nothing), a sleeping side -> UNMEASURED,
+ * a refusal both sides agree on -> REFUSE_SAME, unknown subcommand -> rc 2.
+ * Real engine: the installed ./unisacc.com on the corner corpus, same pack on both sides (all SAME); with
+ * UNISACC_PPEQ_PKG_ORIGINAL / UNISACC_PPEQ_PKG_PATCHED set, original vs patched, printing the pack sha256 and
+ * the verdict line.  Absent packs print UNMEASURED naming them; never a PASS.
+ * Prints PASS/FAIL lines and CHECK_UNIT_E2_COMPARE TAB failed=N. */
+#pragma unisa use sys.env
+#pragma unisa use sys.fs
+#pragma unisa use sys.posix
+#pragma unisa use sys.sha
+#pragma unisa use text.text
+#pragma unisa use mem.heap
+#pragma unisa use mem.bytes
+#pragma unisa use cxlib.ckassert
+#pragma unisa use cxlib.ckrun
+#pragma unisa use cxlib.die
+#pragma unisa use cxlib.procrun
+static const char *CK = "check-unit-e2-compare";
+static char W[512];
+static char buf[1 << 16];
+static int failed;
+
+static void uec_ck(int ok, const char *what) { printf("%s\t%s\n", ok ? "PASS" : "FAIL", what); if (!ok) failed++; }
+
+static void wput(const char *rel, const char *body) {
+    char p[1024], d[1024];
+    if (cx_fmt(p, sizeof p, "%s/%s", W, rel) || cx_fmt(d, sizeof d, "%s", p)) tool_die(CK, "path", rel, 2);
+    char *s = strrchr(d, '/');
+    if (s) { *s = 0; if (sy_mkdir_all(d, 0755)) tool_die(CK, "mkdir", d, 2); }
+    if (cx_write(p, body, strlen(body))) tool_die(CK, "write", rel, 2);
+}
+/* run /bin/sh -c SCRIPT with cwd W; stdout+stderr land in buf */
+static int wat(const char *script) {
+    char *v[] = {"/bin/sh", "-c", (char *)script, 0};
+    pr_result r;
+    buf[0] = 0;
+    if (pr_run("fixture sh", v, W, 0, 20, &r)) return -1;
+    size_t at = 0;
+    if (r.outn && r.outn < sizeof buf) { mm_copy(buf, (long)sizeof buf, r.out, (long)r.outn); at += r.outn; }
+    if (r.errn && at + r.errn < sizeof buf) mm_copy(buf + at, (long)(sizeof buf - at), r.err, (long)r.errn);
+    buf[sizeof buf - 1] = 0;
+    int rc = r.rc;
+    pr_free(&r);
+    return rc;
+}
+static int run_uec(const char *const *extra, int n) {
+    char *v[48];
+    int k = 0;
+    v[k++] = "sh"; v[k++] = "./unisacc.com"; v[k++] = "tools/unit-e2-compare.cx"; v[k++] = "--";
+    for (int i = 0; i < n && k < 47; i++) v[k++] = (char *)extra[i];
+    v[k] = 0;
+    buf[0] = 0;
+    return ck_run(v, buf, sizeof buf);
+}
+static int last_line(const char *tag, char *out, size_t cap) {
+    const char *hit = 0;
+    size_t hl = strlen(tag);
+    for (const char *p = buf; *p; ) {
+        const char *e = strchr(p, '\n');
+        size_t n = e ? (size_t)(e - p) : strlen(p);
+        if (tx_prefix(p, (long)n, tag, (long)hl)) hit = p;
+        p += n + (e ? 1 : 0);
+    }
+    if (cap) out[0] = 0;
+    if (!hit) return 0;
+    size_t n = strlen(hit);
+    if (n >= cap) n = cap - 1;
+    if (mm_copy(out, (long)cap, hit, (long)n)) return 0;
+    out[n] = 0;
+    return 1;
+}
+/* rows of the manifest file: a newline count (the tool's own rows=N must agree) */
+static long line_count(const char *path) {
+    size_t n = 0;
+    char *text = cx_read(path, &n);
+    if (!text) return -1;
+    long rows = 0;
+    for (size_t i = 0; i < n; i++) if (text[i] == '\n') rows++;
+    mm_free(text);
+    return rows;
+}
+static int run_case(const char *pa, const char *pb, const char *man, const char *led, const char *secs) {
+    const char *a[] = {"run", "--ape", "./fake.sh", "--models-a", pa, "--models-b", pb, "--manifest", man,
+                       "--ledger", led, "--root", W, "--exec-root", ".", "--side-secs", secs};
+    return run_uec(a, 17);
+}
+static int status_case(const char *pa, const char *pb, const char *man, const char *led) {
+    const char *a[] = {"status", "--manifest", man, "--ledger", led, "--models-a", pa, "--models-b", pb};
+    return run_uec(a, 9);
+}
+/* a one-row manifest for a real repo file: stratum, path, and the file's own sha */
+static void file_put_manifest(const char *out, const char *rel) {
+    size_t n = 0;
+    char *body = cx_read(rel, &n);
+    if (!body) tool_die(CK, "read unit", rel, 2);
+    char h[65];
+    if (sy_sha256_hex(body, n, h)) tool_die(CK, "sha256", rel, 2);
+    mm_free(body);
+    char text[1024];
+    if (cx_fmt(text, sizeof text, "corners\t%s\t%s\n", rel, h)) tool_die(CK, "manifest row", rel, 2);
+    if (cx_write(out, text, strlen(text))) tool_die(CK, "write manifest", out, 2);
+}
+
+static const char *FAKE =
+    "#!/bin/sh\n"
+    "pack=; prev=;\n"
+    "for a in \"$@\"; do if [ \"$prev\" = \"--models\" ]; then pack=\"$a\"; fi; prev=\"$a\"; done\n"
+    "body=$(cat)\n"
+    "case \"$body\" in *REFUSE*) echo 'refused: fixture' >&2; exit 1;; esac\n"
+    "if [ -n \"$pack\" ] && grep -q SLEEPY \"$pack\" 2>/dev/null; then sleep 10; fi\n"
+    "if [ -n \"$UNISACC_RR_TIME\" ]; then\n"
+    "  if grep -q MUTANT \"$pack\" 2>/dev/null; then echo 'RR_TIME\tinference\tstage=e2\trc=0\tns=1\tsteps=200' >&2; else echo 'RR_TIME\tinference\tstage=e2\trc=0\tns=1\tsteps=100' >&2; fi\n"
+    "fi\n"
+    "if [ -n \"$pack\" ] && grep -q MUTANT \"$pack\" 2>/dev/null; then printf 'UNIPP2\\000MUTANT-PAYLOAD-0123456789abcdef0123'; exit 0; fi\n"
+    "printf 'UNIPP2\\000PAYLOAD-0123456789abcdef0123456789';\n";
+
+int main(void) {
+    char tmp[1024], man[1200], man2[1200], led[1200], led2[1200], led3[1200], led4[1200];
+    char pa[1200], mut[1200], sleepy[1200], line[2048];
+    long n = 0;
+    if (sy_mkdtemp(sy_tmpdir(), "uec-check-", tmp, sizeof tmp)) tool_die(CK, "tmp dir", 0, 2);
+    if (cx_fmt(W, sizeof W, "%s", tmp)) tool_die(CK, "tmp path", 0, 2);
+    wput("fake.sh", FAKE);
+    wput("tests/pp-equiv-corners/a.c", "int a;\n");
+    wput("tests/pp-equiv-corners/b.c", "int b;\n");
+    wput("src/r.c", "/* REFUSE */\n");
+    wput("packs/good.pkg", "pack-good\n");
+    wput("packs/mutant.pkg", "pack-good\nMUTANT\n");
+    wput("packs/sleepy.pkg", "pack-good\nSLEEPY\n");
+    wput("m.tsv", "corners\ttests/pp-equiv-corners/a.c\t0000000000000000000000000000000000000000000000000000000000000000\n"
+                  "corners\ttests/pp-equiv-corners/b.c\t0000000000000000000000000000000000000000000000000000000000000000\n");
+    wput("m2.tsv", "corners\tsrc/r.c\t0000000000000000000000000000000000000000000000000000000000000000\n");
+    if (cx_fmt(man, sizeof man, "%s/m.tsv", W) || cx_fmt(man2, sizeof man2, "%s/m2.tsv", W)
+        || cx_fmt(led, sizeof led, "%s/led", W) || cx_fmt(led2, sizeof led2, "%s/led2", W)
+        || cx_fmt(led3, sizeof led3, "%s/led3", W) || cx_fmt(led4, sizeof led4, "%s/led4", W)
+        || cx_fmt(pa, sizeof pa, "%s/packs/good.pkg", W) || cx_fmt(mut, sizeof mut, "%s/packs/mutant.pkg", W)
+        || cx_fmt(sleepy, sizeof sleepy, "%s/packs/sleepy.pkg", W)) tool_die(CK, "path", 0, 2);
+    if (wat("git init -q . && git add -A && git -c user.email=c@x -c user.name=c commit -qm f")) {
+        tool_die(CK, "fixture git repo", 0, 2);
+    }
+
+    /* manifest: the two fixture units, a sha, and the row shape */
+    {
+        const char *a[] = {"manifest", "--root", W, "--strata", "corners", "--out", man};
+        int rc = run_uec(a, 7);
+        uec_ck(rc == 0, "manifest rc 0");
+        uec_ck(line_count(man) == 2, "manifest rows=2");
+        uec_ck(last_line("UEC_MANIFEST", line, sizeof line) && ckk_has(line, (int)sizeof line, "rows=2"), "manifest reports rows=2");
+    }
+    /* negative control 1: the same pack on both sides is all SAME */
+    {
+        int rc = run_case(pa, pa, man, led, "5");
+        uec_ck(rc == 0 && ckk_has(buf, (int)sizeof buf, "done=2") && ckk_has(buf, (int)sizeof buf, "skipped=0"), "same-pack run does both items");
+        int sr = status_case(pa, pa, man, led);
+        uec_ck(sr == 0 && ckk_has(buf, (int)sizeof buf, "same=2") && ckk_has(buf, (int)sizeof buf, "diff=0") && ckk_has(buf, (int)sizeof buf, "COMPLETE=yes"), "same-pack status: same=2 diff=0 COMPLETE=yes");
+    }
+    /* resume: the ledger carries the identity, so a second run starts nothing */
+    {
+        int rc = run_case(pa, pa, man, led, "5");
+        uec_ck(rc == 0 && ckk_has(buf, (int)sizeof buf, "done=0") && ckk_has(buf, (int)sizeof buf, "skipped=2"), "second run resumes (done=0 skipped=2)");
+    }
+    /* negative control 2: a pack whose bytes differ turns items DIFF */
+    {
+        int rc = run_case(pa, mut, man, led2, "5");
+        uec_ck(rc == 0 && ckk_has(buf, (int)sizeof buf, "done=2"), "mutant-pack run does both items");
+        int sr = status_case(pa, mut, man, led2);
+        uec_ck(sr == 1 && ckk_has(buf, (int)sizeof buf, "diff=2") && ckk_has(buf, (int)sizeof buf, "COMPLETE=no"), "mutant pack is caught: diff=2 rc 1");
+    }
+    /* --steps: the step column is recorded, and the ns-bearing RR_TIME lines never decide the verdict */
+    {
+        char led7[1200];
+        if (cx_fmt(led7, sizeof led7, "%s/led7", W)) tool_die(CK, "path", 0, 2);
+        const char *a[] = {"run", "--ape", "./fake.sh", "--models-a", pa, "--models-b", mut, "--manifest", man,
+                           "--ledger", led7, "--root", W, "--exec-root", ".", "--side-secs", "5", "--steps", "1"};
+        int rc = run_uec(a, 19);
+        char lf[1300];
+        if (cx_fmt(lf, sizeof lf, "%s/corners.tsv", led7)) tool_die(CK, "path", 0, 2);
+        size_t ln = 0;
+        char *lb = cx_read(lf, &ln);
+        int has_steps = lb && ckk_has(lb, (int)ln + 1, "steps=100/200");
+        mm_free(lb);
+        uec_ck(rc == 0 && ckk_has(buf, (int)sizeof buf, "steps=1") && ckk_has(buf, (int)sizeof buf, "step_moved=2") && has_steps,
+               "--steps records both counts and notices the move");
+    }
+    /* run-all: the whole batch driver in one call -- one SHARD line per shard, then the verdict */
+    {
+        char led5[1200], led6[1200];
+        if (cx_fmt(led5, sizeof led5, "%s/led5", W) || cx_fmt(led6, sizeof led6, "%s/led6", W)) tool_die(CK, "path", 0, 2);
+        const char *a[] = {"run-all", "--ape", "./fake.sh", "--models-a", pa, "--models-b", pa, "--manifest", man,
+                           "--ledger", led5, "--root", W, "--exec-root", ".", "--side-secs", "5", "--shards", "2"};
+        int rc = run_uec(a, 19);
+        uec_ck(rc == 0 && ckk_has(buf, (int)sizeof buf, "SHARD\t0/2") && ckk_has(buf, (int)sizeof buf, "SHARD\t1/2") && ckk_has(buf, (int)sizeof buf, "same=2") && ckk_has(buf, (int)sizeof buf, "COMPLETE=yes"),
+               "run-all: two SHARD lines and a complete verdict");
+        const char *b[] = {"run-all", "--ape", "./fake.sh", "--models-a", pa, "--models-b", mut, "--manifest", man,
+                           "--ledger", led6, "--root", W, "--exec-root", ".", "--side-secs", "5", "--shards", "2"};
+        rc = run_uec(b, 19);
+        uec_ck(rc == 1 && ckk_has(buf, (int)sizeof buf, "diff=2") && ckk_has(buf, (int)sizeof buf, "FIRST_DIFF\t"), "run-all: a DIFF is rc 1 and names the first row");
+    }
+    /* a side that never answers is UNMEASURED, never SAME */
+    {
+        int rc = run_case(pa, sleepy, man, led3, "1");
+        uec_ck(rc == 0 && ckk_has(buf, (int)sizeof buf, "done=2"), "slow-side run does both items");
+        int sr = status_case(pa, sleepy, man, led3);
+        uec_ck(sr == 2 && ckk_has(buf, (int)sizeof buf, "unmeasured=2"), "timeout is UNMEASURED=2 (status rc 2)");
+    }
+    /* a refusal both sides agree on is REFUSE_SAME, not DIFF */
+    {
+        int rc = run_case(pa, pa, man2, led4, "5");
+        int sr = status_case(pa, pa, man2, led4);
+        uec_ck(rc == 0 && sr == 0 && ckk_has(buf, (int)sizeof buf, "refuse_same=1"), "same refusal on both sides is REFUSE_SAME");
+    }
+    {
+        const char *a[] = {"bogus"};
+        uec_ck(run_uec(a, 1) == 2, "unknown subcommand rc 2");
+    }
+    /* 0.0.95 rescan fixture: the fix must save steps on #include and only cost a constant on plain units.
+     * Assertions are relations, not absolute counts: plain within [0,+2], inc1/inc2 strictly smaller,
+     * inc2 saving more than inc1.  No packs -> UNMEASURED, named. */
+    {
+        const char *orig = sy_env("UNISACC_PPEQ_PKG_ORIGINAL"), *pat = sy_env("UNISACC_PPEQ_PKG_PATCHED");
+        if (!orig || !pat || sy_is_reg(orig) != 1 || sy_is_reg(pat) != 1)
+            printf("UNMEASURED\trescan-fixture\tUNISACC_PPEQ_PKG_ORIGINAL/PATCHED not both set\n");
+        else {
+            static const char *files[] = {"tests/unit-e2-rescan/plain.c", "tests/unit-e2-rescan/inc1.c", "tests/unit-e2-rescan/inc2.c"};
+            long st[3] = {-1, -1, -1};
+            for (int i = 0; i < 3; i++) {
+                char fman[1200], fled[1200];
+                if (cx_fmt(fman, sizeof fman, "%s/rescan-%d.tsv", W, i) || cx_fmt(fled, sizeof fled, "%s/rescan-led-%d", W, i))
+                    tool_die(CK, "path", 0, 2);
+                file_put_manifest(fman, files[i]);
+                const char *a[] = {"run", "--ape", "./unisacc.com", "--models-a", orig, "--models-b", pat, "--manifest", fman,
+                                   "--ledger", fled, "--side-secs", "20", "--steps", "1"};
+                int rc = run_uec(a, 15);
+                char lf[1300];
+                if (cx_fmt(lf, sizeof lf, "%s/corners.tsv", fled)) tool_die(CK, "path", 0, 2);
+                size_t ln = 0;
+                char *lb = cx_read(lf, &ln);
+                const char *sp = lb ? strstr(lb, " steps=") : 0;
+                if (rc == 0 && sp) {   /* steps=A/B, A = original pack */
+                    long x = 0, y = 0;
+                    const char *q = sp + 7;
+                    while (*q >= '0' && *q <= '9') x = x * 10 + (*q++ - '0');
+                    if (*q == '/') q++;
+                    while (*q >= '0' && *q <= '9') y = y * 10 + (*q++ - '0');
+                    st[i] = x - y;   /* steps saved */
+                }
+                mm_free(lb);
+            }
+            uec_ck(st[0] >= -2 && st[0] <= 0, "rescan fixture: plain unit costs at most 2 steps");
+            uec_ck(st[1] >= 1, "rescan fixture: one #include saves steps");
+            uec_ck(st[2] >= 1 && st[2] > st[1], "rescan fixture: two levels save more than one");
+            printf("INFO\trescan-fixture\tsaved plain=%ld inc1=%ld inc2=%ld\n", -st[0], st[1], st[2]);
+        }
+    }
+    /* real engine: the same pack on both sides over the corner corpus must be all SAME */
+    {
+        const char *orig = sy_env("UNISACC_PPEQ_PKG_ORIGINAL"), *pat = sy_env("UNISACC_PPEQ_PKG_PATCHED");
+        char rman[1200], rled[1200], rled2[1200];
+        if (cx_fmt(rman, sizeof rman, "%s/real.tsv", W) || cx_fmt(rled, sizeof rled, "%s/real-led", W)
+            || cx_fmt(rled2, sizeof rled2, "%s/real-led2", W)) tool_die(CK, "path", 0, 2);
+        const char *a[] = {"manifest", "--root", ".", "--strata", "corners", "--sample", "5", "--out", rman};
+        int rc = run_uec(a, 9);
+        if (rc != 0) uec_ck(0, "real manifest");
+        else if (!orig || sy_is_reg(orig) != 1) printf("UNMEASURED\treal-same-pack\tUNISACC_PPEQ_PKG_ORIGINAL not set or unreadable\n");
+        else {
+            const char *b[] = {"run", "--ape", "./unisacc.com", "--models-a", orig, "--models-b", orig, "--manifest", rman,
+                               "--ledger", rled, "--side-secs", "20"};
+            rc = run_uec(b, 13);
+            const char *c[] = {"status", "--manifest", rman, "--ledger", rled, "--models-a", orig, "--models-b", orig};
+            int sr = run_uec(c, 9);
+            uec_ck(rc == 0 && sr == 0 && ckk_has(buf, (int)sizeof buf, "diff=0") && ckk_has(buf, (int)sizeof buf, "COMPLETE=yes"), "real engine, same pack both sides: all SAME");
+        }
+        if (orig && pat && sy_is_reg(orig) == 1 && sy_is_reg(pat) == 1) {
+            size_t pn;
+            char h[65];
+            char *bytes = cx_read(pat, &pn);
+            if (bytes && !sy_sha256_hex(bytes, pn, h)) printf("INFO\tpatched-pack\tsha=%s\tbytes=%zu\n", h, pn);
+            mm_free(bytes);
+            const char *d[] = {"run", "--ape", "./unisacc.com", "--models-a", orig, "--models-b", pat, "--manifest", rman,
+                               "--ledger", rled2, "--side-secs", "20"};
+            rc = run_uec(d, 13);
+            const char *e[] = {"status", "--manifest", rman, "--ledger", rled2, "--models-a", orig, "--models-b", pat};
+            int sr = run_uec(e, 9);
+            if (rc == 0 && last_line("UEC_STATUS", line, sizeof line)) printf("INFO\treal-original-vs-patched\t%s\n", line);
+            else uec_ck(0, "real original-vs-patched run");
+            (void)sr;
+        } else printf("UNMEASURED\treal-original-vs-patched\tUNISACC_PPEQ_PKG_ORIGINAL/PATCHED not both set\n");
+    }
+    (void)sy_remove_all(W);
+    printf("CHECK_UNIT_E2_COMPARE\tfailed=%d\n", failed);
+    return failed ? 1 : 0;
+}

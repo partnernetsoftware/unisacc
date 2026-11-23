@@ -1,0 +1,250 @@
+/* tools/check-freeze-broadcast.cx -- fixture for freeze-broadcast (fake tmux/mux).
+ *
+ * --dry targets+body; default recipients exactly the seven unisacc windows;
+ * other-repo (agy-cage/cage/cagemon) and include=0 never targeted; flipping
+ * other-repo to include=1 makes them appear (mutant red for the exclude property);
+ * start requires --assign covering every include=1 window (red then green);
+ * start body has no "静默" and carries per-window task line;
+ * fake mux fail then resend; mutant-no-resend leaves FAIL; ledger line written.
+ * Ends CHECK_FREEZE_BROADCAST. */
+#pragma unisa use cxlib.ckassert
+#pragma unisa use cxlib.ckrun
+#pragma unisa use sys.fs
+#pragma unisa use sys.env
+#pragma unisa use sys.time
+#pragma unisa use sys.posix
+#pragma unisa use text.text
+#pragma unisa use mem.heap
+
+static char out[1 << 16];
+static char root[900], cwd[800], tab[900], fake_tmux[900], fake_mux[900], led[900], asg[900];
+
+static int run_fb(const char *extra) {
+    char cmd[3200];
+    if (cx_fmt(cmd, sizeof cmd,
+        "sh '%s/unisacc.com' '%s/tools/freeze-broadcast.cx' -- --windows-table '%s' --tmux 'sh %s' --mux 'sh %s' --ledger-dir '%s' %s",
+        cwd, cwd, tab, fake_tmux, fake_mux, led, extra && extra[0] ? extra : "")) return -1;
+    return ckk_sh_t("check-freeze-broadcast", cmd, out, (int)sizeof out, 55);
+}
+
+static int count_targets(void) {
+    int n = 0; long at = 0, on = tx_len(out, (long)sizeof out);
+    const char *p = "FREEZE_BROADCAST_TARGET\t"; long pl = 24;
+    while (at + pl <= on) {
+        if (tx_same(out + at, pl, p, pl)) n++;
+        while (at < on && out[at] != '\n') at++;
+        if (at < on) at++;
+    }
+    return n;
+}
+
+static int seed_full_assign(void) {
+    char cmd[4000];
+    if (cx_fmt(cmd, sizeof cmd,
+        "printf 'window\\tworktree\\ttask\\n"
+        "agyneon\\t.claude/worktrees/v0.0.97\\t私有补丁加执行核诊断\\n"
+        "agy-flow\\t.claude/worktrees/v0.0.99\\t前端B1预备\\n"
+        "cdx\\t.claude/worktrees/v0.0.100\\t退役待命\\n"
+        "omp-sonnet\\t.claude/worktrees/v0.0.96\\t0.0.96收尾\\n"
+        "csr\\t.claude/worktrees/v0.0.101\\tx16设计\\n"
+        "ccogweco\\t.claude/worktrees/v0.0.96\\t退役待命\\n"
+        "omp-go\\t.claude/worktrees/v0.0.98\\t前端A\\n' > '%s'", asg)) return -1;
+    return ckk_sh_t("check-freeze-broadcast", cmd, out, (int)sizeof out, 10);
+}
+
+int main(void) {
+    char cmd[5000]; int rc; long now;
+    const char *td = sy_env("TMPDIR");
+    if (!td || !td[0]) td = "/tmp";
+    if (ckk_sh_t("check-freeze-broadcast", "pwd", out, (int)sizeof out, 20) != 0) return 2;
+    cx_fmt(cwd, sizeof cwd, "%s", out);
+    { long n = tx_len(cwd, sizeof cwd); while (n > 0 && cwd[n - 1] == '\n') cwd[--n] = 0; }
+    now = sy_wall_s();
+    if (cx_fmt(root, sizeof root, "%s/fb-check-%ld", td, now % 1000000000)) return 2;
+    sy_remove_all(root);
+    if (sy_mkdir_all(root, 0700)) return 2;
+    if (cx_fmt(tab, sizeof tab, "%s/wins.tsv", root) ||
+        cx_fmt(fake_tmux, sizeof fake_tmux, "%s/fake-tmux.sh", root) ||
+        cx_fmt(fake_mux, sizeof fake_mux, "%s/fake-mux.sh", root) ||
+        cx_fmt(led, sizeof led, "%s/ledger", root) ||
+        cx_fmt(asg, sizeof asg, "%s/assign.tsv", root)) return 2;
+
+    if (cx_fmt(cmd, sizeof cmd,
+        "printf 'window\\tinclude\\tlane_note\\n"
+        "agyneon\\t1\\tunisacc\\n"
+        "agy-flow\\t1\\tunisacc\\n"
+        "cdx\\t1\\tunisacc-analysis\\n"
+        "omp-sonnet\\t1\\tunisacc\\n"
+        "csr\\t1\\tunisacc\\n"
+        "ccogweco\\t1\\tunisacc\\n"
+        "omp-go\\t1\\tunisacc\\n"
+        "agy-cage\\t0\\tother-repo\\n"
+        "cagemon\\t0\\tother-repo\\n"
+        "cage\\t0\\tother-repo\\n"
+        "cdx2\\t0\\tujs\\n"
+        "ccapi\\t0\\tother\\n' > '%s'", tab)) return 2;
+    ck(ckk_sh_t("check-freeze-broadcast", cmd, out, (int)sizeof out, 10) == 0, "seed-table");
+
+    {
+        static const char tm[] =
+            "#!/bin/sh\n"
+            "echo agyneon\n"
+            "echo agy-flow\n"
+            "echo cdx\n"
+            "echo omp-sonnet\n"
+            "echo csr\n"
+            "echo ccogweco\n"
+            "echo omp-go\n"
+            "echo agy-cage\n"
+            "echo cagemon\n"
+            "echo cage\n"
+            "echo cdx2\n"
+            "echo ccapi\n";
+        if (sy_write_file(fake_tmux, tm, (int64_t)(sizeof tm - 1), 0700)) return 2;
+    }
+    {
+        char stamp[950];
+        if (cx_fmt(stamp, sizeof stamp, "%s/csr-fail-once", root)) return 2;
+        if (cx_fmt(cmd, sizeof cmd,
+            "printf '#!/bin/sh\\n"
+            "stamp=%s\\n"
+            "spec=\"\"\\n"
+            "prev=\"\"\\n"
+            "for a in \"$@\"; do\\n"
+            "  if [ \"$prev\" = \"--\" ]; then spec=\"$a\"; break; fi\\n"
+            "  prev=\"$a\"\\n"
+            "done\\n"
+            "base=`basename \"$spec\"`\\n"
+            "case \"$base\" in\\n"
+            "  csr)\\n"
+            "    if [ ! -f \"$stamp\" ]; then touch \"$stamp\"; echo fail-csr; exit 1; fi\\n"
+            "    echo submitted; exit 0;;\\n"
+            "  *) echo submitted; exit 0;;\\n"
+            "esac\\n' > '%s' && chmod 700 '%s'", stamp, fake_mux, fake_mux)) return 2;
+        ck(ckk_sh_t("check-freeze-broadcast", cmd, out, (int)sizeof out, 10) == 0, "seed-fake-mux");
+    }
+
+    /* red: start without --assign */
+    rc = run_fb("start --dry --lock cc --until T0+2h --load-ceil 8");
+    ck(rc != 0, "red-start-no-assign");
+
+    /* red: assign missing one include=1 window (csr) */
+    if (cx_fmt(cmd, sizeof cmd,
+        "printf 'window\\tworktree\\ttask\\n"
+        "agyneon\\t.claude/worktrees/v0.0.97\\t私有补丁\\n"
+        "agy-flow\\t.claude/worktrees/v0.0.99\\t前端B1\\n"
+        "cdx\\t.claude/worktrees/v0.0.100\\t待命\\n"
+        "omp-sonnet\\t.claude/worktrees/v0.0.96\\t收尾\\n"
+        "ccogweco\\t.claude/worktrees/v0.0.96\\t待命\\n"
+        "omp-go\\t.claude/worktrees/v0.0.98\\t前端A\\n' > '%s'", asg)) return 2;
+    ck(ckk_sh_t("check-freeze-broadcast", cmd, out, (int)sizeof out, 10) == 0, "seed-assign-missing-csr");
+    if (cx_fmt(cmd, sizeof cmd, "start --dry --lock cc --until T0+2h --load-ceil 8 --assign %s", asg)) return 2;
+    rc = run_fb(cmd);
+    ck(rc != 0, "red-assign-missing-window");
+
+    /* green: full assign */
+    ck(seed_full_assign() == 0, "seed-assign-full");
+    if (cx_fmt(cmd, sizeof cmd, "start --dry --lock cc --until T0+2h --load-ceil 8 --assign %s", asg)) return 2;
+    rc = run_fb(cmd);
+    ck(rc == 0, "dry-rc");
+    ck(ckk_has(out, (int)sizeof out, "targets=7\t"), "dry-targets-eq-7");
+    ck(count_targets() == 7, "dry-target-lines-eq-7");
+    ck(ckk_has(out, (int)sizeof out, "FREEZE_BROADCAST_TARGET\tagyneon"), "dry-agyneon");
+    ck(ckk_has(out, (int)sizeof out, "FREEZE_BROADCAST_TARGET\tagy-flow"), "dry-agy-flow");
+    ck(ckk_has(out, (int)sizeof out, "FREEZE_BROADCAST_TARGET\tcdx\n"), "dry-cdx-exact");
+    ck(ckk_has(out, (int)sizeof out, "FREEZE_BROADCAST_TARGET\tomp-sonnet"), "dry-omp-sonnet");
+    ck(ckk_has(out, (int)sizeof out, "FREEZE_BROADCAST_TARGET\tcsr"), "dry-csr");
+    ck(ckk_has(out, (int)sizeof out, "FREEZE_BROADCAST_TARGET\tccogweco"), "dry-ccogweco");
+    ck(ckk_has(out, (int)sizeof out, "FREEZE_BROADCAST_TARGET\tomp-go"), "dry-omp-go");
+    ck(!ckk_has(out, (int)sizeof out, "FREEZE_BROADCAST_TARGET\tagy-cage"), "dry-exclude-agy-cage");
+    ck(!ckk_has(out, (int)sizeof out, "FREEZE_BROADCAST_TARGET\tcagemon"), "dry-exclude-cagemon");
+    ck(!ckk_has(out, (int)sizeof out, "FREEZE_BROADCAST_TARGET\tcage\n"), "dry-exclude-cage");
+    ck(!ckk_has(out, (int)sizeof out, "FREEZE_BROADCAST_TARGET\tcdx2"), "dry-exclude-cdx2");
+    ck(!ckk_has(out, (int)sizeof out, "FREEZE_BROADCAST_TARGET\tccapi"), "dry-exclude-ccapi");
+    ck(ckk_has(out, (int)sizeof out, "FREEZE_BROADCAST\tDRY"), "dry-mark");
+    ck(ckk_has(out, (int)sizeof out, "继续在版本工作树做:"), "dry-body-continue-task");
+    ck(ckk_has(out, (int)sizeof out, "继续在版本工作树做:x16设计"), "dry-body-csr-task");
+    ck(!ckk_has(out, (int)sizeof out, "静默"), "dry-body-no-silent");
+    ck(ckk_has(out, (int)sizeof out, "负载 < 8"), "dry-load-ceil");
+    ck(ckk_has(out, (int)sizeof out, "负载超 12"), "dry-load-12-downscale");
+    ck(ckk_has(out, (int)sizeof out, "ttl 7200"), "dry-lock-ttl-7200");
+    ck(ckk_has(out, (int)sizeof out, "X-Unisacc-Window"), "dry-trailer-rule");
+    ck(ckk_has(out, (int)sizeof out, "结束条件"), "dry-end-condition");
+
+    /* mutant: flip other-repo to include=1 -> they appear; assign incomplete for new windows -> refuse */
+    if (cx_fmt(cmd, sizeof cmd,
+        "printf 'window\\tinclude\\tlane_note\\n"
+        "agyneon\\t1\\tunisacc\\n"
+        "agy-flow\\t1\\tunisacc\\n"
+        "cdx\\t1\\tunisacc-analysis\\n"
+        "omp-sonnet\\t1\\tunisacc\\n"
+        "csr\\t1\\tunisacc\\n"
+        "ccogweco\\t1\\tunisacc\\n"
+        "omp-go\\t1\\tunisacc\\n"
+        "agy-cage\\t1\\tother-repo\\n"
+        "cagemon\\t1\\tother-repo\\n"
+        "cage\\t1\\tother-repo\\n"
+        "cdx2\\t0\\tujs\\n"
+        "ccapi\\t0\\tother\\n' > '%s'", tab)) return 2;
+    ck(ckk_sh_t("check-freeze-broadcast", cmd, out, (int)sizeof out, 10) == 0, "seed-mutant-other-repo");
+    if (cx_fmt(cmd, sizeof cmd, "start --dry --lock cc --until T0+2h --load-ceil 8 --assign %s", asg)) return 2;
+    rc = run_fb(cmd);
+    ck(rc != 0, "mutant-other-repo-assign-incomplete");
+    /* restore default table for send tests */
+    if (cx_fmt(cmd, sizeof cmd,
+        "printf 'window\\tinclude\\tlane_note\\n"
+        "agyneon\\t1\\tunisacc\\n"
+        "agy-flow\\t1\\tunisacc\\n"
+        "cdx\\t1\\tunisacc-analysis\\n"
+        "omp-sonnet\\t1\\tunisacc\\n"
+        "csr\\t1\\tunisacc\\n"
+        "ccogweco\\t1\\tunisacc\\n"
+        "omp-go\\t1\\tunisacc\\n"
+        "agy-cage\\t0\\tother-repo\\n"
+        "cagemon\\t0\\tother-repo\\n"
+        "cage\\t0\\tother-repo\\n"
+        "cdx2\\t0\\tujs\\n"
+        "ccapi\\t0\\tother\\n' > '%s'", tab)) return 2;
+    ck(ckk_sh_t("check-freeze-broadcast", cmd, out, (int)sizeof out, 10) == 0, "restore-default-table");
+    ck(seed_full_assign() == 0, "restore-assign-full");
+
+    {
+        char stamp[950];
+        if (cx_fmt(stamp, sizeof stamp, "%s/csr-fail-once", root)) return 2;
+        sy_unlink(stamp);
+    }
+    if (cx_fmt(cmd, sizeof cmd, "start --lock cc --until T0+2h --assign %s", asg)) return 2;
+    rc = run_fb(cmd);
+    ck(rc == 0, "send-rc");
+    ck(ckk_has(out, (int)sizeof out, "FREEZE_BROADCAST_RESEND\tcount=1"), "resend-once");
+    ck(ckk_has(out, (int)sizeof out, "FREEZE_BROADCAST\tDONE\tok=7\tfail=0"), "send-all-ok");
+    ck(ckk_has(out, (int)sizeof out, "FREEZE_BROADCAST_LEDGER\t"), "ledger-line");
+
+    rc = run_fb("phase S3 --dry");
+    ck(rc == 0 && ckk_has(out, (int)sizeof out, "PHASE S3") &&
+       !ckk_has(out, (int)sizeof out, "静默"), "phase-s3-dry");
+    rc = run_fb("phase S10 --dry");
+    ck(rc == 0 && ckk_has(out, (int)sizeof out, "PHASE S10") &&
+       ckk_has(out, (int)sizeof out, "release-post.cx") &&
+       ckk_has(out, (int)sizeof out, "--dry") &&
+       !ckk_has(out, (int)sizeof out, "静默"), "phase-s10-release-post");
+
+    {
+        char stamp[950];
+        if (cx_fmt(stamp, sizeof stamp, "%s/csr-fail-once", root)) return 2;
+        sy_unlink(stamp);
+    }
+    if (cx_fmt(cmd, sizeof cmd, "start --mutant-no-resend --assign %s", asg)) return 2;
+    rc = run_fb(cmd);
+    ck(rc != 0 && ckk_has(out, (int)sizeof out, "FREEZE_BROADCAST_RETRY\tcsr") &&
+       !ckk_has(out, (int)sizeof out, "FREEZE_BROADCAST_RESEND\t"), "mutant-no-resend");
+
+    sy_remove_all(root);
+    {
+        int failed = ck_failures();
+        int total = ck_assertions();
+        printf("FREEZE_BROADCAST_SUMMARY\tfailed=%d\tpassed=%d\n", failed, total - failed);
+        if (!failed) printf("CHECK_FREEZE_BROADCAST\n");
+        return failed ? 1 : 0;
+    }
+}

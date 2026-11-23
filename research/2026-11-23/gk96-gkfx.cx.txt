@@ -1,0 +1,62 @@
+#pragma unisa use sysx.process
+#pragma unisa use sys.proc
+#pragma unisa use sys.posix
+#pragma unisa use sys.time
+#pragma unisa use sysx.reaper
+/* gatekeeper private fixture: f1 f2 f3 f3b f4 */
+static int spawn_escape(int root_sleep, int *spid) {
+    int pf[2]; int r; if (pipe(pf)) return -1;
+    r = fork();
+    if (r == 0) {
+        setpgid(0, 0);
+        int m = fork();
+        if (m == 0) { sy_setsid(); int s = fork(); if (s == 0) { close(pf[0]); close(pf[1]); sleep(40); _exit(0); }
+            write(pf[1], &s, sizeof s); _exit(0); }
+        waitpid(m, 0, 0);
+        close(pf[0]); close(pf[1]);
+        if (root_sleep) sleep(40);
+        _exit(0);
+    }
+    close(pf[1]); *spid = 0; read(pf[0], spid, sizeof *spid); close(pf[0]);
+    return r;
+}
+int main(int argc, char **argv) {
+    char rep[256]; int st = 0; const char *m = argc > 1 ? argv[1] : "";
+    if (!strcmp(m, "f1")) {
+        int s = 0, sub = rp_subreaper(); int r = spawn_escape(0, &s);
+        waitpid(r, &st, 0); usleep(50000);
+        int res = rp_kill_tree_pid(r, 1000, 0, 0, rep, sizeof rep);
+        int alive = kill(s, 0) == 0;
+        printf("GKFX\tf1\tsubreaper=%d\tentryC_on_reaped_root_ret=%d\torphan_alive=%d\t%s\n", sub, res, alive, (res == 0 && alive) ? "FALSE_CLEAN" : "ok");
+        kill(s, SIGKILL); waitpid(s, 0, 0);
+    } else if (!strcmp(m, "f2")) {
+        rp_subreaper();
+        int r = fork(); if (r == 0) { setpgid(0, 0); sleep(40); _exit(0); }
+        setpgid(r, r); usleep(50000);
+        int res = rp_kill_tree_pid(r, 1000, 0, 0, rep, sizeof rep);
+        int w = waitpid(r, &st, WNOHANG); int e = errno;
+        printf("GKFX\tf2\tret=%d\twaitpid_after=%d\terrno=%d\t%s\n", res, w, w < 0 ? e : 0, (w < 0 && e == ECHILD) ? "ROOT_REAPED_BY_SWEEP" : "root-still-waitable");
+    } else if (!strcmp(m, "f3") || !strcmp(m, "f3b")) {
+        rp_subreaper();
+        int by0 = fork(); if (by0 == 0) { sleep(40); _exit(0); }
+        usleep(30000);
+        int r = fork(); if (r == 0) { setpgid(0, 0); usleep(100000); _exit(0); }
+        long long rs = rp_root_start(r);
+        usleep(30000);
+        int by1 = fork(); if (by1 == 0) { sleep(40); _exit(0); }
+        waitpid(r, &st, 0); usleep(30000);
+        int res = rp_kill_tree_pid_after_wait(r, 1, !strcmp(m, "f3") ? 0 : rs, 1000, 0, 0, rep, sizeof rep);
+        usleep(50000);
+        int w0 = waitpid(by0, &st, WNOHANG), w1 = waitpid(by1, &st, WNOHANG);
+        printf("GKFX\t%s\troot_start_passed=%lld\tret=%d\tbystander_before_root_killed=%d\tbystander_after_root_killed=%d\n", m, !strcmp(m, "f3") ? 0LL : rs, res, w0 != 0, w1 != 0);
+        kill(by0, SIGKILL); kill(by1, SIGKILL);
+    } else if (!strcmp(m, "f4")) {
+        int s = 0; int r = spawn_escape(1, &s); usleep(80000);
+        int res = rp_kill_tree_pid(r, 1000, 0, 0, rep, sizeof rep);
+        usleep(50000);
+        int alive = kill(s, 0) == 0;
+        printf("GKFX\tf4\tno_subreaper\tret=%d\tescaped_alive=%d\t%s\n", res, alive, (res == 0 && alive) ? "FALSE_CLEAN" : "ok");
+        kill(s, SIGKILL); waitpid(r, 0, WNOHANG);
+    }
+    return 0;
+}

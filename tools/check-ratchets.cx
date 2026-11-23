@@ -5,74 +5,23 @@
    keeps only the cxinclude and the srcshape total row, --only apps/ only the cxraw row.  A full run prints
    seventeen RATCHET lines including net-deps (gate 14), notcovered, dup-census, no-home-path and ref-job-paths, excluding retired toolsloc, and a RATCHETS line whose ok+fail is 17, with
    exit 0 exactly when fail is 0.
+   --only-paths aliases --only. When --from-run fails only on untracked
+   no-baseline .cx, expects RATCHET_HINT foreign-untracked (no move tip).
    Prints PASS/FAIL lines and CHECK_RATCHETS<TAB>failed=N. */
 #pragma unisa use sys.fs
 #pragma unisa use sys.proc
 #pragma unisa use text.text
 #pragma unisa use sys.time
-#pragma unisa use sysx.poll
+#pragma unisa use sysx.run
 #pragma unisa use sys.posix
 #pragma unisa use sys.env
-
-/* an unlinked spool file the drained output of a bounded child goes to */
-static int spool_open(void) {
-    char t[4096];
-    int fd;
-    if (cx_fmt(t, sizeof t, "%s/r2b-XXXXXX", sy_tmpdir())) return -1;
-    fd = mkstemp(t);
-    if (fd >= 0) sy_unlink(t);
-    return fd;
-}
-
-/* sy_spawn_pipe with a 50 s deadline: the child's stdout (and stderr when EFD is given) is drained here with sy_poll
-   into spool files; past the deadline its process group is killed.  OFD/EFD come back as the spool files, rewound,
-   and the child is NOT reaped: the caller's sy_wait_status(pid) still reports its real status (128+9 when killed). */
-static int spawn_pipe_bounded(char **argv, const char *cwd, int flags, int *ofd, int *efd) {
-    int po = -1, pe = -1, pid, fo, fe = -1, open_o = 1, open_e = efd ? 1 : 0, killed = 0;
-    long deadline = sy_now_ms() + 50000;
-    char chunk[16384];
-    pid = sy_spawn_pipe(argv, cwd, flags, &po, efd ? &pe : 0);
-    if (pid < 0) return pid;
-    fo = spool_open();
-    if (efd) fe = spool_open();
-    if (fo < 0 || (efd && fe < 0)) { sy_killpg(pid, 9); sy_signal(pid, 9); sy_close(po); if (efd) sy_close(pe); return -EIO; }
-    while (open_o || open_e) {
-        sy_pollfd_t p[2];
-        int n = 0, io = -1, ie = -1, r;
-        long left = deadline - sy_now_ms(), g;
-        if (left <= 0) {
-            if (killed) break;
-            sy_killpg(pid, 9); sy_signal(pid, 9); killed = 1; deadline = sy_now_ms() + 2000;
-            continue;
-        }
-        if (open_o) { io = n; p[n].fd = po; p[n].events = SY_POLLIN; p[n].revents = 0; n++; }
-        if (open_e) { ie = n; p[n].fd = pe; p[n].events = SY_POLLIN; p[n].revents = 0; n++; }
-        r = sy_poll(p, n, left > 200 ? 200 : left);
-        if (r < 0) break;
-        if (io >= 0 && p[io].revents) {
-            g = sy_read(po, chunk, sizeof chunk);
-            if (g > 0) { if (sy_write_all(fo, chunk, g)) break; } else open_o = 0;
-        }
-        if (ie >= 0 && p[ie].revents) {
-            g = sy_read(pe, chunk, sizeof chunk);
-            if (g > 0) { if (sy_write_all(fe, chunk, g)) break; } else open_e = 0;
-        }
-    }
-    if (open_o || open_e) { sy_killpg(pid, 9); sy_signal(pid, 9); }
-    sy_close(po);
-    if (efd) sy_close(pe);
-    sy_lseek(fo, 0, 0);
-    *ofd = fo;
-    if (efd) { sy_lseek(fe, 0, 0); *efd = fe; }
-    return pid;
-}
 
 static int failed;
 static void ck(int ok, const char *name) { if (!ok) failed++; printf("%s\tratchets.%s\n", ok ? "PASS" : "FAIL", name); }
 
 static int run_argv(char **argv, char *out, long cap) {
     int ofd, pid, ex = 0, code = 0, sig = 0; long n = 0, r; char junk[4096];
-    pid = spawn_pipe_bounded(argv, 0, 0, &ofd, 0);
+    pid = px_spawn_spool(argv, 0, SY_SPAWN_ERR_TO_OUT, &ofd, 0);
     if (pid < 0) return -1;
     while ((r = sy_read(ofd, out + n, cap - 1 - n)) > 0) n += r;
     out[n] = 0;
@@ -124,6 +73,10 @@ int main(int argc, char **argv) {
     ck(rc == 0 && lines(o) == 2 && has(o, "module src/host.cx") && has(o, "src/ total lines 5352"), "only-src-through-module-word-and-total-row");
     rc = run(apps, o, sizeof o);
     ck(rc == 0 && lines(o) == 1 && has(o, "apps/csih/probes/context_preview.cx"), "only-apps");
+    {   char *op[] = {"--rows", "tools/ratchets/sample.txt", "--only-paths", "src/", 0};
+        rc = run(op, o, sizeof o);
+        ck(rc == 0 && lines(o) == 2 && has(o, "module src/host.cx") && has(o, "src/ total lines 5352"), "only-paths-alias-src");
+    }
     {   char d[4096], fb[4400], fg[4400], fc[4400]; char ob[1 << 14];
         const char *bad = "#pragma unisa use text.text\n#pragma unisa use sys.fs::*\nint x;\n";
         const char *good = "#pragma unisa use text.text\n#pragma unisa use sys.fs\n";
@@ -161,7 +114,419 @@ int main(int argc, char **argv) {
             cx_fmt(p, sizeof p, "%s/events.tsv", d); cx_write(p, ev, en);
             rc = run(fr, o, sizeof o);
             ck(rc == 1 && has(o, "RATCHET\tcxraw\tFAIL\tcxraw: FAIL: 1 file above baseline\n") && has(o, "  cxraw: apps/x.cx has 3 raw lines, baseline 1\n")
-               && has(o, "RATCHET\tnet-deps\tok\tr: ok: fine\n") && has(o, "RATCHET\tnotcovered\tok\tr: ok: fine\n") && has(o, "RATCHET\tdup-census\tok\tr: ok: fine\n") && has(o, "RATCHET\tno-home-path\tok\tr: ok: fine\n") && has(o, "RATCHET\tref-job-paths\tok\tr: ok: fine\n") && has(o, "RATCHET\ttsv-lint\tok\tr: ok: fine\n") && has(o, "RATCHETS\tok=17\tfail=1\t") && lines(o) == 20, "from-run-over-baseline-fixture");
+               && has(o, "RATCHET\tnet-deps\tok\tr: ok: fine\n") && has(o, "RATCHET\tnotcovered\tok\tr: ok: fine\n") && has(o, "RATCHET\tdup-census\tok\tr: ok: fine\n") && has(o, "RATCHET\tno-home-path\tok\tr: ok: fine\n") && has(o, "RATCHET\tref-job-paths\tok\tr: ok: fine\n") && has(o, "RATCHET\ttsv-lint\tok\tr: ok: fine\n") && has(o, "RATCHETS\tok=17\tfail=1\t") && lines(o) == 20 && !has(o, "RATCHET_HINT"), "from-run-over-baseline-fixture");
+            /* foreign-untracked tip: only cxtrunc no-baseline on our own untracked fixture path */
+            {
+                const char *fxp = "tools/zz-ratchets-hint-fixture.cx";
+                const char *fxbody = "int zz_ratchets_hint_fixture(void) { return 0; }\n";
+                const char *tip = "RATCHET_HINT\tforeign-untracked\t这些未跟踪文件不属于你,等所有者处理,或用 --only-paths 限定\ttools/zz-ratchets-hint-fixture.cx\n";
+                char *frh[] = {"--from-run", d, 0}; long en2 = 0; char ev2[1 << 12], line2[320]; int k2;
+                cx_write(fxp, fxbody, tx_len(fxbody, 128));
+                for (k2 = 0; k2 < 18; k2++) {
+                    const char *body = k2 == 3
+                        ? "cxtrunc: tools/zz-ratchets-hint-fixture.cx has 1 calls and no baseline row (a new .cx must have 0)\ncxtrunc: FAIL: 1 above baseline\n"
+                        : "r: ok: fine\n";
+                    cx_fmt(p, sizeof p, "%s/rk-%s.out", od, nm[k2]); cx_write(p, body, tx_len(body, 256));
+                    cx_fmt(line2, sizeof line2, "EVT\t%d\trk-%s\tstart\t0\t0\texec\nEVT\t%d\trk-%s\t%s\t5\t%d\tout=1 err=0\n", 2 * k2 + 1, nm[k2], 2 * k2 + 2, nm[k2], k2 == 3 ? "fail" : "ok", k2 == 3 ? 1 : 0);
+                    if (en2 + tx_len(line2, 320) < (long)sizeof ev2) { long l = tx_len(line2, 320); for (long j = 0; j < l; j++) ev2[en2 + j] = line2[j]; en2 += l; }
+                }
+                cx_fmt(p, sizeof p, "%s/events.tsv", d); cx_write(p, ev2, en2);
+                rc = run(frh, o, sizeof o);
+                ck(rc == 1 && has(o, tip) && has(o, "RATCHETS\tok=17\tfail=1\t") && !has(o, "mv ") && !has(o, "暂移"), "from-run-foreign-untracked-hint");
+                sy_unlink(fxp);
+            }
+            /* Z2 coreapi 5-symbol replay: ratchets --rows, ratchets --from-run, and precommit --from-run must block all 5 CORE-NEW rows */
+            {
+                const char *z2_core =
+                    "CORE-NEW cx/sys/posix.cx\tsy_fchmod\tint (int fd,int mode)\n"
+                    "CORE-NEW cx/sys/posix.cx\tsy_umask\tint (int mask)\n"
+                    "CORE-NEW cx/sys/posix.cx\tsy_chown\tint (const char*path,int uid,int gid)\n"
+                    "CORE-NEW cx/sys/posix.cx\tsy_pipe2_sys\tint (int fds[2],int flags)\n"
+                    "CORE-NEW cx/sys/proc.cx\tsy_pipe2\tint (int fds[2],int flags)\n"
+                    "CORE-SIG cx/mem/heap.cx\tmm_alloc\tbaseline void *(long n)\tnow void *(size_t n)\n"
+                    "CORE-MISSING cx/text/text.cx\ttx_old\t(no non-static definition in any frozen module)\n"
+                    "CORE-ALIAS-CALLERS cx/sys/fs.cx\tcx_read\tcaller files 12 > baseline 10\n"
+                    "cxinclude: cx-wildcard-product: src/drive.cx uses a use X::* wildcard (product layer must name imports)\n"
+                    "FAIL\texec/pp/start-result.tsv\t4 above 2\n"
+                    "coreapi: FAIL: 37 modules, 256 exported symbols (baseline 251); new 5, missing 0, signature 0, alias callers 0 (--write ratchets down)\n"
+                    "CORE_INTERFACE\tok=0\tnew=5\tmissing=0\tsignature=0\talias=0\n";
+                char sf[4400], *ra[] = {"--rows", sf, 0}, *rp[] = {"--rows", sf, "--only", "cx/sys/posix.cx", 0};
+                cx_fmt(sf, sizeof sf, "%s/z2-core.txt", d);
+                cx_write(sf, z2_core, tx_len(z2_core, 4096));
+                rc = run(ra, o, sizeof o);
+                ck(rc == 0 && lines(o) == 10 && has(o, "CORE-NEW cx/sys/posix.cx\tsy_fchmod") && has(o, "CORE-NEW cx/sys/proc.cx\tsy_pipe2")
+                   && has(o, "CORE-SIG cx/mem/heap.cx\tmm_alloc") && has(o, "CORE-MISSING cx/text/text.cx\ttx_old")
+                   && has(o, "CORE-ALIAS-CALLERS cx/sys/fs.cx\tcx_read") && has(o, "cx-wildcard-product: src/drive.cx")
+                   && has(o, "FAIL\texec/pp/start-result.tsv\t4 above 2") && !has(o, "coreapi: FAIL:"), "coreapi-and-extended-rows-kept");
+                rc = run(rp, o, sizeof o);
+                ck(rc == 0 && lines(o) == 4 && has(o, "sy_fchmod") && has(o, "sy_pipe2_sys") && !has(o, "cx/sys/proc.cx"), "coreapi-rows-only-posix");
+                sy_unlink(sf);
+            }
+            /* Field/phrase delimiter extraction: paths with spaces + verwriter/outdep exact path (tools/a.cx.bak must not false-block tools/a.cx) */
+            {
+                const char *sp_txt =
+                    "CORE-NEW cx/sys/my posix.cx\tsy_fchmod\tint (int fd,int mode)\n"
+                    "cxtrunc: tools/my tool.cx has 2 calls and no baseline row (a new .cx must have 0)\n"
+                    "verwriter: job-v1 has writer tools/a.cx.bak and no baseline row (one writer per record tag)\n"
+                    "outdep: b1 has 1 out/ literals in tools/b.cx.bak, baseline 0\n"
+                    "cxraw: move target src/drive.cx baseline 3 != move 2\n"
+                    "cxlibc: move target cx/sys/posix.cx baseline 5 != move 4\n";
+                char sf[4400];
+                char *r_all[] = {"--rows", sf, 0};
+                char *r_sp[] = {"--rows", sf, "--only", "cx/sys/my posix.cx", 0};
+                char *r_vw[] = {"--rows", sf, "--only", "tools/a.cx.bak", 0};
+                char *r_tag[] = {"--rows", sf, "--only", "job-v1", 0};
+                char *r_mv[] = {"--rows", sf, "--only", "src/drive.cx", 0};
+                cx_fmt(sf, sizeof sf, "%s/sp-vw.txt", d);
+                cx_write(sf, sp_txt, tx_len(sp_txt, 4096));
+                rc = run(r_all, o, sizeof o);
+                ck(rc == 0 && lines(o) == 6 && has(o, "cxraw: move target src/drive.cx baseline 3 != move 2")
+                   && has(o, "cxlibc: move target cx/sys/posix.cx baseline 5 != move 4"), "space-and-verwriter-outdep-move-rows-6");
+                rc = run(r_sp, o, sizeof o);
+                ck(rc == 0 && lines(o) == 1 && has(o, "CORE-NEW cx/sys/my posix.cx\tsy_fchmod"), "space-path-only-exact");
+                rc = run(r_vw, o, sizeof o);
+                ck(rc == 0 && lines(o) == 1 && has(o, "verwriter: job-v1 has writer tools/a.cx.bak"), "verwriter-only-matches-writer-path");
+                rc = run(r_tag, o, sizeof o);
+                ck(rc == 0 && lines(o) == 0, "verwriter-only-ignores-tag-field");
+                rc = run(r_mv, o, sizeof o);
+                ck(rc == 0 && lines(o) == 1 && has(o, "cxraw: move target src/drive.cx baseline 3 != move 2"), "move-target-mismatch-only-matches-target-path");
+                {
+                    const char *has_txt =
+                        "cxraw: apps/my has dir/my has probe.cx has 3 raw lines, baseline 1\n"
+                        "cxraw: move target src/a has b.cx baseline 3 != move 2\n"
+                        "CORE-NEW cx/sys/no_tab_posix.cx\r\n";
+                    char *r_has[] = {"--rows", sf, "--only", "apps/my has dir/my has probe.cx", 0};
+                    char *r_mvh[] = {"--rows", sf, "--only", "src/a has b.cx", 0};
+                    char *r_nt[] = {"--rows", sf, "--only", "cx/sys/no_tab_posix.cx", 0};
+                    int ok_has, ok_mvh, ok_nt;
+                    cx_write(sf, has_txt, tx_len(has_txt, 1024));
+                    rc = run(r_has, o, sizeof o);
+                    ok_has = (rc == 0 && lines(o) == 1 && has(o, "cxraw: apps/my has dir/my has probe.cx has 3 raw lines, baseline 1"));
+                    rc = run(r_mvh, o, sizeof o);
+                    ok_mvh = (rc == 0 && lines(o) == 1 && has(o, "cxraw: move target src/a has b.cx baseline 3 != move 2"));
+                    rc = run(r_nt, o, sizeof o);
+                    ok_nt = (rc == 0 && lines(o) == 1 && has(o, "CORE-NEW cx/sys/no_tab_posix.cx"));
+                    ck(ok_has && ok_mvh && ok_nt, "has-in-path-and-core-no-tab-only-exact");
+                }
+                sy_unlink(sf);
+            }
+            {
+                const char *z2_out =
+                    "CORE-NEW cx/sys/posix.cx\tsy_fchmod\tint (int fd,int mode)\n"
+                    "CORE-NEW cx/sys/posix.cx\tsy_umask\tint (int mask)\n"
+                    "CORE-NEW cx/sys/posix.cx\tsy_chown\tint (const char*path,int uid,int gid)\n"
+                    "CORE-NEW cx/sys/posix.cx\tsy_pipe2_sys\tint (int fds[2],int flags)\n"
+                    "CORE-NEW cx/sys/proc.cx\tsy_pipe2\tint (int fds[2],int flags)\n"
+                    "coreapi: FAIL: 37 modules, 256 exported symbols (baseline 251); new 5, missing 0, signature 0, alias callers 0 (--write ratchets down)\n";
+                en = 0;
+                for (k = 0; k < 18; k++) {
+                    const char *body = (k == 7) ? z2_out : "r: ok: fine\n";
+                    int bad = (k == 7);
+                    cx_fmt(p, sizeof p, "%s/rk-%s.out", od, nm[k]); cx_write(p, body, tx_len(body, 1024));
+                    cx_fmt(line, sizeof line, "EVT\t%d\trk-%s\tstart\t0\t0\texec\nEVT\t%d\trk-%s\t%s\t5\t%d\tout=1 err=0\n",
+                           2 * k + 1, nm[k], 2 * k + 2, nm[k], bad ? "fail" : "ok", bad ? 1 : 0);
+                    if (en + tx_len(line, 256) < (long)sizeof ev) { long l = tx_len(line, 256); for (long j = 0; j < l; j++) ev[en + j] = line[j]; en += l; }
+                }
+                cx_fmt(p, sizeof p, "%s/events.tsv", d); cx_write(p, ev, en);
+                rc = run(fr, o, sizeof o);
+                ck(rc == 1 && has(o, "RATCHET\tcoreapi\tFAIL\tcoreapi: FAIL: 37 modules, 256 exported symbols")
+                   && has(o, "  CORE-NEW cx/sys/posix.cx\tsy_fchmod\tint (int fd,int mode)\n")
+                   && has(o, "  CORE-NEW cx/sys/proc.cx\tsy_pipe2\tint (int fds[2],int flags)\n")
+                   && lines(o) == 24, "coreapi-z2-from-run-emits-5-indented-offenders");
+                /* Save ratchets output as DIR/out/ratchets.out and judge via precommit.cx -- --from-run DIR with staged posix.cx & proc.cx */
+                cx_fmt(p, sizeof p, "%s/rk-ratchets-save.out", od);
+                {
+                    char rout[4400], idx[4400], lintd[4400], lp1[4400], lp2[4400];
+                    const char *ev_pc =
+                        "EVT\t1\tlint\tstart\t0\t0\texec\nEVT\t2\tlint\tok\t5\t0\tout=1\n"
+                        "EVT\t3\tlintr1\tstart\t0\t0\texec\nEVT\t4\tlintr1\tok\t5\t0\tout=1\n"
+                        "EVT\t5\ttlibfrozen\tstart\t0\t0\texec\nEVT\t6\ttlibfrozen\tok\t5\t0\tout=1\n"
+                        "EVT\t7\tfacts\tstart\t0\t0\texec\nEVT\t8\tfacts\tok\t5\t0\tout=1\n"
+                        "EVT\t99999\tratchets\tfail\t5\t1\tfrom-run\n";
+                    const char *lint_ok = "CX_LINT\tfiles=2\tfindings=0\telapsed_ms=1\n";
+                    const char *tlib_ok = "TLIB_FAST\tchecked=1\tmismatch=0\n";
+                    const char *facts_ok = "OK\n";
+                    cx_fmt(rout, sizeof rout, "%s/ratchets.out", od); cx_write(rout, o, tx_len(o, sizeof o));
+                    cx_fmt(p, sizeof p, "%s/lint.out", od); cx_write(p, lint_ok, tx_len(lint_ok, 128));
+                    cx_fmt(p, sizeof p, "%s/lintr1.out", od); cx_write(p, lint_ok, tx_len(lint_ok, 128));
+                    cx_fmt(p, sizeof p, "%s/tlibfrozen.out", od); cx_write(p, tlib_ok, tx_len(tlib_ok, 128));
+                    cx_fmt(p, sizeof p, "%s/facts.out", od); cx_write(p, facts_ok, tx_len(facts_ok, 32));
+                    cx_fmt(p, sizeof p, "%s/events.tsv", d); cx_write(p, ev_pc, tx_len(ev_pc, 1024));
+                    cx_fmt(lintd, sizeof lintd, "%s/lintdir", d); sy_mkdir(lintd, 0700);
+                    cx_fmt(lp1, sizeof lp1, "%s/cx", lintd); sy_mkdir(lp1, 0700);
+                    cx_fmt(lp1, sizeof lp1, "%s/cx/sys", lintd); sy_mkdir(lp1, 0700);
+                    cx_fmt(lp1, sizeof lp1, "%s/cx/sys/posix.cx", lintd); cx_write(lp1, "/* x */\n", 8);
+                    cx_fmt(lp2, sizeof lp2, "%s/cx/sys/proc.cx", lintd); cx_write(lp2, "/* x */\n", 8);
+                    cx_fmt(idx, sizeof idx, "%s/test.idx", d);
+                    sy_setenv("GIT_INDEX_FILE", idx, 1);
+                    {
+                        char *rt[] = {"git", "read-tree", "HEAD", 0};
+                        char *ci1[] = {"git", "update-index", "--cacheinfo", "100644,e69de29bb2d1d6434b8b29ae775ad8c2e48c5391,cx/sys/posix.cx", 0};
+                        char *ci2[] = {"git", "update-index", "--cacheinfo", "100644,e69de29bb2d1d6434b8b29ae775ad8c2e48c5391,cx/sys/proc.cx", 0};
+                        char *pc_fr[] = {"--from-run", d, 0};
+                        (void)run_argv(rt, o, sizeof o);
+                        (void)run_argv(ci1, o, sizeof o);
+                        (void)run_argv(ci2, o, sizeof o);
+                        rc = run_script("tools/precommit.cx", pc_fr, o, sizeof o);
+                        sy_unsetenv("GIT_INDEX_FILE");
+                        ck(rc == 1 && has(o, "precommit: blocked: CORE-NEW cx/sys/posix.cx\tsy_fchmod")
+                           && has(o, "precommit: blocked: CORE-NEW cx/sys/proc.cx\tsy_pipe2")
+                           && has(o, "PRECOMMIT\tstaged_cx=2\tblocked=5")
+                           && has(o, "PRECOMMIT_GATE_FAIL\tgate=ratchets\treason=ratchet-over"),
+                           "precommit-blocks-z2-coreapi-5-symbols");
+                    }
+                    /* Now verify verwriter/outdep src/drive.cx.bak does NOT false-block staged src/drive.cx, and space path IS blocked */
+                    {
+                        const char *vw_rat =
+                            "RATCHET\tcoreapi\tFAIL\tcoreapi: FAIL: 1 new\n"
+                            "  CORE-NEW apps/my dir/my probe.cx\tsy_fchmod\tint (int fd,int mode)\n"
+                            "RATCHET\tverwriter\tFAIL\tverwriter: FAIL: 1 above\n"
+                            "  verwriter: job-v1 has writer src/drive.cx.bak and no baseline row (one writer per record tag)\n"
+                            "RATCHET\toutdep\tFAIL\toutdep: FAIL: 1 above\n"
+                            "  outdep: b1 has 1 out/ literals in src/host.cx.bak, baseline 0\n"
+                            "RATCHETS\tok=15\tfail=3\telapsed_ms=10\n";
+                        char lt[4400], la[4400], lb[4400], lap[4400], lmd[4400], ls[4400];
+                        cx_write(rout, vw_rat, tx_len(vw_rat, 2048));
+                        cx_fmt(lt, sizeof lt, "%s/src", lintd); sy_mkdir(lt, 0700);
+                        cx_fmt(la, sizeof la, "%s/src/drive.cx", lintd); cx_write(la, "/* a */\n", 8);
+                        cx_fmt(lb, sizeof lb, "%s/src/host.cx", lintd); cx_write(lb, "/* b */\n", 8);
+                        cx_fmt(lap, sizeof lap, "%s/apps", lintd); sy_mkdir(lap, 0700);
+                        cx_fmt(lmd, sizeof lmd, "%s/apps/my dir", lintd); sy_mkdir(lmd, 0700);
+                        cx_fmt(ls, sizeof ls, "%s/apps/my dir/my probe.cx", lintd); cx_write(ls, "/* s */\n", 8);
+                        sy_setenv("GIT_INDEX_FILE", idx, 1);
+                        {
+                            char *rt[] = {"git", "read-tree", "HEAD", 0};
+                            char *ca[] = {"git", "update-index", "--cacheinfo", "100644,e69de29bb2d1d6434b8b29ae775ad8c2e48c5391,src/drive.cx", 0};
+                            char *cb[] = {"git", "update-index", "--cacheinfo", "100644,e69de29bb2d1d6434b8b29ae775ad8c2e48c5391,src/host.cx", 0};
+                            char *cs[] = {"git", "update-index", "--add", "--cacheinfo", "100644,e69de29bb2d1d6434b8b29ae775ad8c2e48c5391,apps/my dir/my probe.cx", 0};
+                            char *pc_fr[] = {"--from-run", d, 0};
+                            (void)run_argv(rt, o, sizeof o);
+                            (void)run_argv(ca, o, sizeof o);
+                            (void)run_argv(cb, o, sizeof o);
+                            rc = run_script("tools/precommit.cx", pc_fr, o, sizeof o);
+                            ck(rc == 0 && has(o, "PRECOMMIT\tstaged_cx=2\tblocked=0") && !has(o, "drive.cx.bak") && !has(o, "host.cx.bak"),
+                               "precommit-verwriter-outdep-bak-does-not-false-block-prefix");
+                            (void)run_argv(cs, o, sizeof o);
+                            rc = run_script("tools/precommit.cx", pc_fr, o, sizeof o);
+                            ck(rc == 1 && has(o, "precommit: blocked: CORE-NEW apps/my dir/my probe.cx\tsy_fchmod")
+                               && has(o, "PRECOMMIT\tstaged_cx=3\tblocked=1"),
+                               "precommit-blocks-path-with-space");
+                            {
+                                const char *mv_rat =
+                                    "RATCHET\tcxraw\tFAIL\tcxraw: FAIL: 1 move mismatch\n"
+                                    "  cxraw: move target src/drive.cx baseline 3 != move 2\n"
+                                    "RATCHET\tcxlibc\tFAIL\tcxlibc: FAIL: 1 move mismatch\n"
+                                    "  cxlibc: move target src/host.cx baseline 5 != move 4\n"
+                                    "RATCHETS\tok=16\tfail=2\telapsed_ms=10\n";
+                                cx_write(rout, mv_rat, tx_len(mv_rat, 1024));
+                                rc = run_script("tools/precommit.cx", pc_fr, o, sizeof o);
+                                ck(rc == 1 && has(o, "precommit: blocked: cxraw: move target src/drive.cx baseline 3 != move 2")
+                                   && has(o, "precommit: blocked: cxlibc: move target src/host.cx baseline 5 != move 4")
+                                   && has(o, "PRECOMMIT\tstaged_cx=3\tblocked=2"),
+                                   "precommit-blocks-cxraw-cxlibc-move-target-baseline-mismatch");
+                            }
+                            {
+                                const char *gl_rat =
+                                    "RATCHET\tsrcshape\tFAIL\tsrcshape: FAIL: 1 over baseline\n"
+                                    "  srcshape: src/ total lines 5352, baseline 5331\n"
+                                    "RATCHET\tnet-deps\tFAIL\tnet-deps: FAIL: 1 class over baseline\n"
+                                    "  net-deps: pp has 15 affected nets of 42, baseline 12 of 42\n"
+                                    "RATCHET\tnotcovered\tFAIL\tnotcovered-census: FAIL: 1 new\n"
+                                    "RATCHET\ttsv-lint\tFAIL\ttsv-lint: FAIL: 1 unresolved\n"
+                                    "RATCHET\tdup-census\tFAIL\tdup-census: FAIL: 1 function over baseline\n"
+                                    "  dup-census: tools total lines verbatim_redundant 500, baseline 400\n"
+                                    "RATCHET\tref-job-paths\tFAIL\tref-job-paths: FAIL: expired=1\n"
+                                    "RATCHETS\tok=12\tfail=6\telapsed_ms=10\n";
+                                char *c_ex[] = {"git", "update-index", "--add", "--cacheinfo", "100644,e69de29bb2d1d6434b8b29ae775ad8c2e48c5391,exec/probe.txt", 0};
+                                char *c_tl[] = {"git", "update-index", "--cacheinfo", "100644,e69de29bb2d1d6434b8b29ae775ad8c2e48c5391,tools/check-tsv-lint.cx", 0};
+                                char *c_rj[] = {"git", "update-index", "--cacheinfo", "100644,e69de29bb2d1d6434b8b29ae775ad8c2e48c5391,prd_mempalace.md", 0};
+                                char *c_pa[] = {"git", "update-index", "--add", "--cacheinfo", "100644,e69de29bb2d1d6434b8b29ae775ad8c2e48c5391,plans/a.md", 0};
+                                char *c_d1[] = {"git", "update-index", "--add", "--cacheinfo", "100644,e69de29bb2d1d6434b8b29ae775ad8c2e48c5391,docs/net-deps-notes.md", 0};
+                                char *c_d2[] = {"git", "update-index", "--add", "--cacheinfo", "100644,e69de29bb2d1d6434b8b29ae775ad8c2e48c5391,docs/tsv-lint-notes.md", 0};
+                                char *c_d3[] = {"git", "update-index", "--add", "--cacheinfo", "100644,e69de29bb2d1d6434b8b29ae775ad8c2e48c5391,docs/dup-census-notes.md", 0};
+                                char *c_d4[] = {"git", "update-index", "--add", "--cacheinfo", "100644,e69de29bb2d1d6434b8b29ae775ad8c2e48c5391,docs/notcovered-notes.md", 0};
+                                char *c_d5[] = {"git", "update-index", "--add", "--cacheinfo", "100644,e69de29bb2d1d6434b8b29ae775ad8c2e48c5391,docs/ref-job-paths-notes.md", 0};
+                                cx_write(rout, gl_rat, tx_len(gl_rat, 1024));
+                                /* First: only src/drive.cx, src/host.cx, apps/my dir/my probe.cx staged -> hits srcshape & net-deps only (blocked=2) */
+                                rc = run_script("tools/precommit.cx", pc_fr, o, sizeof o);
+                                ck(rc == 1 && has(o, "precommit: blocked: RATCHET srcshape FAIL (srcshape: FAIL: 1 over baseline)")
+                                   && has(o, "precommit: blocked: RATCHET net-deps FAIL (net-deps: FAIL: 1 class over baseline)")
+                                   && !has(o, "RATCHET notcovered FAIL")
+                                   && !has(o, "RATCHET tsv-lint FAIL")
+                                   && !has(o, "RATCHET dup-census FAIL")
+                                   && !has(o, "RATCHET ref-job-paths FAIL")
+                                   && has(o, "PRECOMMIT\tstaged_cx=3\tblocked=2"),
+                                   "precommit-global-ceiling-blocks-when-readset-hit");
+                                /* Second: stage exec/facts/derive.tsv, tools/tsv-lint.cx, build/ref-job-paths-exempt.tsv -> all 6 read sets hit (blocked=6) */
+                                (void)run_argv(c_ex, o, sizeof o);
+                                (void)run_argv(c_tl, o, sizeof o);
+                                (void)run_argv(c_rj, o, sizeof o);
+                                rc = run_script("tools/precommit.cx", pc_fr, o, sizeof o);
+                                ck(rc == 1 && has(o, "precommit: blocked: RATCHET srcshape FAIL")
+                                   && has(o, "precommit: blocked: RATCHET net-deps FAIL")
+                                   && has(o, "precommit: blocked: RATCHET notcovered FAIL")
+                                   && has(o, "precommit: blocked: RATCHET tsv-lint FAIL")
+                                   && has(o, "precommit: blocked: RATCHET dup-census FAIL")
+                                   && has(o, "precommit: blocked: RATCHET ref-job-paths FAIL")
+                                   && has(o, "PRECOMMIT\tstaged_cx=4\tblocked=6"),
+                                   "precommit-global-ceiling-all-six-block-when-readsets-hit");
+                                /* Third: stage only apps/my dir/my probe.cx, plans/a.md, and docs/<ratchet>-notes.md -> 0 read sets hit (blocked=0) */
+                                (void)run_argv(rt, o, sizeof o);
+                                (void)run_argv(cs, o, sizeof o);
+                                (void)run_argv(c_pa, o, sizeof o);
+                                (void)run_argv(c_d1, o, sizeof o);
+                                (void)run_argv(c_d2, o, sizeof o);
+                                (void)run_argv(c_d3, o, sizeof o);
+                                (void)run_argv(c_d4, o, sizeof o);
+                                (void)run_argv(c_d5, o, sizeof o);
+                                rc = run_script("tools/precommit.cx", pc_fr, o, sizeof o);
+                                ck(rc == 0 && has(o, "PRECOMMIT\tstaged_cx=1\tblocked=0"),
+                                   "precommit-global-ceiling-ignores-unaffected-readset");
+                                {
+                                    const char *hn_rat =
+                                        "RATCHET\tcxraw\tFAIL\tcxraw: FAIL: 2 above\n"
+                                        "  cxraw: apps/my has dir/my has probe.cx has 3 raw lines, baseline 1\n"
+                                        "  cxraw: move target src/a has b.cx baseline 3 != move 2\n"
+                                        "RATCHET\tcoreapi\tFAIL\tcoreapi: FAIL: 1 new\n"
+                                        "  CORE-NEW cx/sys/no_tab_posix.cx\r\n"
+                                        "RATCHETS\tok=16\tfail=2\telapsed_ms=10\n";
+                                    char *ch1[] = {"git", "update-index", "--add", "--cacheinfo", "100644,e69de29bb2d1d6434b8b29ae775ad8c2e48c5391,apps/my has dir/my has probe.cx", 0};
+                                    char *ch2[] = {"git", "update-index", "--add", "--cacheinfo", "100644,e69de29bb2d1d6434b8b29ae775ad8c2e48c5391,cx/sys/no_tab_posix.cx", 0};
+                                    char *ch3[] = {"git", "update-index", "--add", "--cacheinfo", "100644,e69de29bb2d1d6434b8b29ae775ad8c2e48c5391,src/a has b.cx", 0};
+                                    cx_write(rout, hn_rat, tx_len(hn_rat, 1024));
+                                    (void)run_argv(rt, o, sizeof o);
+                                    (void)run_argv(ch1, o, sizeof o);
+                                    (void)run_argv(ch2, o, sizeof o);
+                                    (void)run_argv(ch3, o, sizeof o);
+                                    rc = run_script("tools/precommit.cx", pc_fr, o, sizeof o);
+                                    ck(rc == 1 && has(o, "precommit: blocked: cxraw: apps/my has dir/my has probe.cx has 3 raw lines, baseline 1")
+                                       && has(o, "precommit: blocked: cxraw: move target src/a has b.cx baseline 3 != move 2")
+                                       && has(o, "precommit: blocked: CORE-NEW cx/sys/no_tab_posix.cx")
+                                       && has(o, "PRECOMMIT\tstaged_cx=3\tblocked=3"),
+                                       "precommit-blocks-path-with-has-and-core-no-tab");
+                                    /* Test 27: dup-census anti-collateral: when dup-census names specific offending function(s),
+                                     * staging an unrelated tools/*.cx without that function passes (blocked=0), while staging
+                                     * a tools/*.cx containing that function (or matching the named file) blocks (blocked=1). */
+                                    {
+                                        const char *dup_rat =
+                                            "RATCHET\tdup-census\tFAIL\tdup-census: FAIL: 1 offending functions, redundant 500/400\n"
+                                            "  dup-census: my_offending_dup_fn has 3 verbatim copies across 3 tools/*.cx files (15 redundant lines; see tools/other_offender.cx)\n"
+                                            "  dup-census: tools total lines verbatim_redundant 500, baseline 400\n"
+                                            "RATCHETS\tok=17\tfail=1\telapsed_ms=10\n";
+                                        char f_clean[4400], f_dirty[4400], sha_clean[64], sha_dirty[64], ci_clean[200], ci_dirty[200];
+                                        char *ho_c[] = {"git", "hash-object", "-w", f_clean, 0};
+                                        char *ho_d[] = {"git", "hash-object", "-w", f_dirty, 0};
+                                        long sl;
+                                        cx_fmt(f_clean, sizeof f_clean, "%s/dup-clean.cx", d);
+                                        cx_fmt(f_dirty, sizeof f_dirty, "%s/dup-dirty.cx", d);
+                                        cx_write(f_clean, "/* clean tool */\nint main(void){return 0;}\n", 43);
+                                        cx_write(f_dirty, "static void my_offending_dup_fn(void){}\nint main(void){return 0;}\n", 66);
+                                        (void)run_argv(ho_c, sha_clean, sizeof sha_clean);
+                                        sl = tx_len(sha_clean, sizeof sha_clean);
+                                        while (sl > 0 && (sha_clean[sl - 1] == '\n' || sha_clean[sl - 1] == '\r')) sha_clean[--sl] = 0;
+                                        (void)run_argv(ho_d, sha_dirty, sizeof sha_dirty);
+                                        sl = tx_len(sha_dirty, sizeof sha_dirty);
+                                        while (sl > 0 && (sha_dirty[sl - 1] == '\n' || sha_dirty[sl - 1] == '\r')) sha_dirty[--sl] = 0;
+                                        cx_fmt(ci_clean, sizeof ci_clean, "100644,%s,tools/check-tsv-lint.cx", sha_clean);
+                                        cx_fmt(ci_dirty, sizeof ci_dirty, "100644,%s,tools/check-tsv-lint.cx", sha_dirty);
+                                        cx_write(rout, dup_rat, tx_len(dup_rat, 1024));
+                                        {
+                                            char *u_clean[] = {"git", "update-index", "--cacheinfo", ci_clean, 0};
+                                            char *u_dirty[] = {"git", "update-index", "--cacheinfo", ci_dirty, 0};
+                                            int rc_clean, rc_dirty, ok_clean, ok_dirty;
+                                            (void)run_argv(rt, o, sizeof o);
+                                            (void)run_argv(u_clean, o, sizeof o);
+                                            rc_clean = run_script("tools/precommit.cx", pc_fr, o, sizeof o);
+                                            ok_clean = (rc_clean == 0 && has(o, "PRECOMMIT\tstaged_cx=1\tblocked=0"));
+                                            (void)run_argv(rt, o, sizeof o);
+                                            (void)run_argv(u_dirty, o, sizeof o);
+                                            rc_dirty = run_script("tools/precommit.cx", pc_fr, o, sizeof o);
+                                            ok_dirty = (rc_dirty == 1 && has(o, "precommit: blocked: RATCHET dup-census FAIL") &&
+                                                        has(o, "my_offending_dup_fn") &&
+                                                        has(o, "PRECOMMIT\tstaged_cx=1\tblocked=1"));
+                                            ck(ok_clean && ok_dirty,
+                                               "precommit-dup-census-anti-collateral-blocks-only-offender");
+                                        }
+                                        sy_unlink(f_clean); sy_unlink(f_dirty);
+                                    }
+                                    /* Test 28: ratchet_baseline_gate: raising existing keys in tests/*.tsv or build/*-baseline.tsv
+                                     * is refused with BLOCKED ratchet-baseline-raised, while lowering existing keys or adding new keys passes. */
+                                    {
+                                        const char *ok_rat = "RATCHETS\tok=18\tfail=0\telapsed_ms=10\n";
+                                        char f_ss_up[4400], f_tl_up[4400], f_dc_up[4400], f_ss_dn[4400], f_tl_dn[4400];
+                                        char s_ss_up[64], s_tl_up[64], s_dc_up[64], s_ss_dn[64], s_tl_dn[64];
+                                        char c_ss_up[200], c_tl_up[200], c_dc_up[200], c_ss_dn[200], c_tl_dn[200];
+                                        char *h1[] = {"git", "hash-object", "-w", f_ss_up, 0};
+                                        char *h2[] = {"git", "hash-object", "-w", f_tl_up, 0};
+                                        char *h3[] = {"git", "hash-object", "-w", f_dc_up, 0};
+                                        char *h4[] = {"git", "hash-object", "-w", f_ss_dn, 0};
+                                        char *h5[] = {"git", "hash-object", "-w", f_tl_dn, 0};
+                                        long sl;
+                                        cx_fmt(f_ss_up, sizeof f_ss_up, "%s/ss-up.tsv", d);
+                                        cx_fmt(f_tl_up, sizeof f_tl_up, "%s/tl-up.tsv", d);
+                                        cx_fmt(f_dc_up, sizeof f_dc_up, "%s/dc-up.tsv", d);
+                                        cx_fmt(f_ss_dn, sizeof f_ss_dn, "%s/ss-dn.tsv", d);
+                                        cx_fmt(f_tl_dn, sizeof f_tl_dn, "%s/tl-dn.tsv", d);
+                                        cx_write(f_ss_up, "src/bind.cx\t999\t3\t0\n", 20);
+                                        cx_write(f_tl_up, "unresolved\t99999\n", 17);
+                                        cx_write(f_dc_up, "total\tverbatim_groups\t99999\n", 28);
+                                        cx_write(f_ss_dn, "src/bind.cx\t1\t1\t0\nsrc/brand_new_unit.cx\t50\t20\t5\n", 48);
+                                        cx_write(f_tl_dn, "unresolved\t100\nbrand_new_metric\t50\n", 35);
+                                        (void)run_argv(h1, s_ss_up, sizeof s_ss_up); sl = tx_len(s_ss_up, 64); while (sl > 0 && (s_ss_up[sl - 1] == '\n' || s_ss_up[sl - 1] == '\r')) s_ss_up[--sl] = 0;
+                                        (void)run_argv(h2, s_tl_up, sizeof s_tl_up); sl = tx_len(s_tl_up, 64); while (sl > 0 && (s_tl_up[sl - 1] == '\n' || s_tl_up[sl - 1] == '\r')) s_tl_up[--sl] = 0;
+                                        (void)run_argv(h3, s_dc_up, sizeof s_dc_up); sl = tx_len(s_dc_up, 64); while (sl > 0 && (s_dc_up[sl - 1] == '\n' || s_dc_up[sl - 1] == '\r')) s_dc_up[--sl] = 0;
+                                        (void)run_argv(h4, s_ss_dn, sizeof s_ss_dn); sl = tx_len(s_ss_dn, 64); while (sl > 0 && (s_ss_dn[sl - 1] == '\n' || s_ss_dn[sl - 1] == '\r')) s_ss_dn[--sl] = 0;
+                                        (void)run_argv(h5, s_tl_dn, sizeof s_tl_dn); sl = tx_len(s_tl_dn, 64); while (sl > 0 && (s_tl_dn[sl - 1] == '\n' || s_tl_dn[sl - 1] == '\r')) s_tl_dn[--sl] = 0;
+                                        cx_fmt(c_ss_up, sizeof c_ss_up, "100644,%s,tests/srcshape.tsv", s_ss_up);
+                                        cx_fmt(c_tl_up, sizeof c_tl_up, "100644,%s,build/tsv-lint-baseline.tsv", s_tl_up);
+                                        cx_fmt(c_dc_up, sizeof c_dc_up, "100644,%s,build/dup-census-baseline.tsv", s_dc_up);
+                                        cx_fmt(c_ss_dn, sizeof c_ss_dn, "100644,%s,tests/srcshape.tsv", s_ss_dn);
+                                        cx_fmt(c_tl_dn, sizeof c_tl_dn, "100644,%s,build/tsv-lint-baseline.tsv", s_tl_dn);
+                                        cx_write(rout, ok_rat, tx_len(ok_rat, 256));
+                                        {
+                                            char *u1[] = {"git", "update-index", "--cacheinfo", c_ss_up, 0};
+                                            char *u2[] = {"git", "update-index", "--cacheinfo", c_tl_up, 0};
+                                            char *u3[] = {"git", "update-index", "--cacheinfo", c_dc_up, 0};
+                                            char *u4[] = {"git", "update-index", "--cacheinfo", c_ss_dn, 0};
+                                            char *u5[] = {"git", "update-index", "--cacheinfo", c_tl_dn, 0};
+                                            int rc_up, rc_dn, ok_up, ok_dn;
+                                            (void)run_argv(rt, o, sizeof o);
+                                            (void)run_argv(u1, o, sizeof o);
+                                            (void)run_argv(u2, o, sizeof o);
+                                            (void)run_argv(u3, o, sizeof o);
+                                            rc_up = run_script("tools/precommit.cx", pc_fr, o, sizeof o);
+                                            ok_up = (rc_up == 1 &&
+                                                     has(o, "BLOCKED ratchet-baseline-raised table=tests/srcshape.tsv key=src/bind.cx") &&
+                                                     has(o, "BLOCKED ratchet-baseline-raised table=build/tsv-lint-baseline.tsv key=unresolved") &&
+                                                     has(o, "BLOCKED ratchet-baseline-raised table=build/dup-census-baseline.tsv key=total/verbatim_groups"));
+                                            (void)run_argv(rt, o, sizeof o);
+                                            (void)run_argv(u4, o, sizeof o);
+                                            (void)run_argv(u5, o, sizeof o);
+                                            rc_dn = run_script("tools/precommit.cx", pc_fr, o, sizeof o);
+                                            ok_dn = (rc_dn == 0 && has(o, "blocked=0"));
+                                            ck(ok_up && ok_dn,
+                                               "precommit-ratchet-baseline-only-goes-down-blocks-raise-allows-lower-and-new");
+                                        }
+                                        sy_unlink(f_ss_up); sy_unlink(f_tl_up); sy_unlink(f_dc_up);
+                                        sy_unlink(f_ss_dn); sy_unlink(f_tl_dn);
+                                    }
+                                    sy_unsetenv("GIT_INDEX_FILE");
+                                }
+                            }
+                        }
+                        sy_unlink(la); sy_unlink(lb); sy_unlink(ls);
+                        sy_rmdir(lmd); sy_rmdir(lap); sy_rmdir(lt);
+                    }
+                    sy_unlink(idx); sy_unlink(lp1); sy_unlink(lp2);
+                    cx_fmt(lp1, sizeof lp1, "%s/cx/sys", lintd); sy_rmdir(lp1);
+                    cx_fmt(lp1, sizeof lp1, "%s/cx", lintd); sy_rmdir(lp1);
+                    sy_rmdir(lintd); sy_unlink(rout);
+                    cx_fmt(p, sizeof p, "%s/lint.out", od); sy_unlink(p);
+                    cx_fmt(p, sizeof p, "%s/lintr1.out", od); sy_unlink(p);
+                    cx_fmt(p, sizeof p, "%s/tlibfrozen.out", od); sy_unlink(p);
+                    cx_fmt(p, sizeof p, "%s/facts.out", od); sy_unlink(p);
+                }
+            }
             for (k = 0; k < 18; k++) { cx_fmt(p, sizeof p, "%s/rk-%s.out", od, nm[k]); sy_unlink(p); }
             cx_fmt(p, sizeof p, "%s/events.tsv", d); sy_unlink(p); sy_rmdir(od); sy_rmdir(d);
         }
@@ -174,6 +539,15 @@ full_run:
         ck(has(o, "RATCHET\tcxraw\t") && has(o, "RATCHET\tcxinclude\t") && has(o, "RATCHET\tcxapis\t") && has(o, "RATCHET\tcxtrunc\t")
            && has(o, "RATCHET\tcxlibc\t") && has(o, "RATCHET\tcxplatform\t") && has(o, "RATCHET\tsrcshape\t") && has(o, "RATCHET\tcoreapi\t") && !has(o, "RATCHET\ttoolsloc\t")
            && has(o, "RATCHET\tverwriter\t") && has(o, "RATCHET\taluiwidth\t") && has(o, "RATCHET\toutdep\t") && has(o, "RATCHET\tcheck-literal\t") && has(o, "RATCHET\tnet-deps\t") && has(o, "RATCHET\tnotcovered\t") && has(o, "RATCHET\tdup-census\t") && has(o, "RATCHET\tno-home-path\t") && has(o, "RATCHET\tref-job-paths\t") && has(o, "RATCHET\ttsv-lint\t") && okn + failn == 18 && (rc == 0) == (failn == 0), "full-run-fifteen-with-gate14-notcovered-dup-census-without-toolsloc-and-exit");
+    }
+    {   /* --shard K/N: ratchet i runs when i % N == K-1, the others are counted skipped; bad specs are refused */
+        char *s1[] = {"--shard", "1/18", 0}, *s2[] = {"--shard", "2/18", 0}, *s0[] = {"--shard", "0/3", 0}, *s4[] = {"--shard", "4/3", 0}, *sx[] = {"--shard", "1/19", 0};
+        char sb[1 << 14];
+        rc = run(s1, sb, sizeof sb);
+        ck(rc == 0 && has(sb, "RATCHETS\tok=1\tfail=0\tskipped=17") && has(sb, "RATCHET\tcxraw\tok\tcxraw: ok: 1") && has(sb, "cxinclude: ok: skipped (not in shard 1/18)"), "shard-1-of-18-runs-only-the-first-ratchet");
+        rc = run(s2, sb, sizeof sb);
+        ck(rc == 0 && has(sb, "RATCHETS\tok=1\tfail=0\tskipped=17") && has(sb, "cxraw: ok: skipped (not in shard 2/18)") && has(sb, "RATCHET\tcxinclude\tok\tcxinclude: ok: 3"), "shard-2-of-18-runs-only-the-second-ratchet");
+        ck(run(s0, sb, sizeof sb) == 2 && run(s4, sb, sizeof sb) == 2 && run(sx, sb, sizeof sb) == 2, "bad-shard-specs-are-refused-rc2");
     }
     printf("CHECK_RATCHETS\tfailed=%d\n", failed);
     return failed ? 1 : 0;

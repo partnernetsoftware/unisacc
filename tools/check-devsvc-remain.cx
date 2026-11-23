@@ -80,13 +80,39 @@ int main(void) {
     F(ppin, sizeof ppin, "%s/ppin", fx);
     F(dvcore, sizeof dvcore, "/tmp/dvrck-core-%s", chash);
     F(dvlaunch, sizeof dvlaunch, "/tmp/dvrck-launch-%s", lhash);
+    /* U7: 按 devsvc 递归闭包内容哈希加产品身份复用预构建执行体; 无关脏文件仍 HIT, 闭包内改任一字节即 MISS 并按新闭包键自编 */
+    {   char ckey[24], cbin[240]; int crc;
+        ckey[0] = 0; cbin[0] = 0;
+        F(c, sizeof c, "cd %s && sh ./unisacc.com tools/devsvc.cx -- --dev closure-bin", root);
+        crc = sh(c);
+        if (crc == 0 || crc == 1) {
+            const char *kp = strstr(out, "\tkey="), *bp = strstr(out, "\tbin=");
+            if (kp) {
+                int ki; kp += 5;
+                for (ki = 0; ki < 20 && ((kp[ki] >= '0' && kp[ki] <= '9') || (kp[ki] >= 'a' && kp[ki] <= 'f')); ki++) ckey[ki] = kp[ki];
+                ckey[ki] = 0;
+            }
+            if (bp) {
+                int bi = 0; bp += 5;
+                while (bp[bi] && bp[bi] != '\n' && bp[bi] != '\t' && bi + 1 < (int)sizeof cbin) { cbin[bi] = bp[bi]; bi++; }
+                cbin[bi] = 0;
+            }
+            if (crc == 0 && !strncmp(out, "CLOSURE_BIN\tHIT\t", 16) && cbin[0] == '/' && sy_exists(cbin) == 1)
+                F(dvcore, sizeof dvcore, "%s", cbin);
+            else if (strlen(ckey) == 20)
+                F(dvcore, sizeof dvcore, "/tmp/dvrck-core-%s", ckey);
+        }
+    }
     F(c, sizeof c,
       "mkdir -p %s/work %s/tools %s/in %s %s %s && cd %s && git init -q -b main && "
       "printf 'a\\n' > in/a.txt && cp %s/tools/devsvc-repo.tsv tools/devsvc-repo.tsv && "
       "printf '#!/bin/sh\\ncase \"$1\" in\\n  *tools/commit-own.cx)\\n    printf \"COMMIT_OWN_FAIL\\\\tclass=precommit\\\\nXCOMMIT_OWN_FAIL\\\\tclass=wrong\\\\nPRECOMMIT_GATE_FAIL\\\\tgate=precommit\\\\treason=blocked\\\\n\" >&2\\n    exit 1;;\\n  *tools/devsvc-core.cx)\\n    shift; [ \"$1\" = \"--\" ] && shift; exec %s \"$@\";;\\nesac\\nexec sh %s/unisacc.com \"$@\"\\n' > unisacc.com && "
       "chmod +x unisacc.com && git add . && git -c user.name=t -c user.email=t@t commit -qm init && "
-      "{ [ -x %s ] || { sh %s/unisacc.com -o %s.%d %s/tools/devsvc-core.cx && mv -f %s.%d %s; }; } && "
-      "{ [ -x %s ] || { sh %s/unisacc.com -o %s.%d %s/tools/devsvc.cx && mv -f %s.%d %s; }; }",
+      "p1=''; p2=''; "
+      "if [ ! -x %s ]; then (sh %s/unisacc.com -o %s.%d %s/tools/devsvc-core.cx && mv -f %s.%d %s) & p1=$!; fi; "
+      "if [ ! -x %s ]; then (sh %s/unisacc.com -o %s.%d %s/tools/devsvc.cx && mv -f %s.%d %s) & p2=$!; fi; "
+      "r1=0; r2=0; [ -n \"$p1\" ] && { wait \"$p1\"; r1=$?; }; [ -n \"$p2\" ] && { wait \"$p2\"; r2=$?; }; "
+      "[ \"$r1\" -eq 0 ] && [ \"$r2\" -eq 0 ]",
       fx, repo, repo, fhome, phome, ppin, repo, root, dvcore, root,
       dvcore, root, dvcore, sy_pid(), root, dvcore, sy_pid(), dvcore,
       dvlaunch, root, dvlaunch, sy_pid(), root, dvlaunch, sy_pid(), dvlaunch);
@@ -204,6 +230,49 @@ int main(void) {
         F(c, sizeof c, "cd %s && env -u UNISACC_DEVSVC_DIR -u DEVSVC_HOME -u DV_PIN_DIR HOME=%s DEVSVC_SELF_BIN=%s %s stop >/dev/null 2>&1 || true",
           repo, fhome, dvcore, dvcore);
         (void)sh(c);
+    }
+
+    /* (6) U7 闭包内容哈希复用: 无关暂存改动仍 HIT, 闭包内任一文件改 1 字节必须 MISS 且换键 */
+    {   char clrepo[240], clpin[240], k0[24], k1[24], b0[260];
+        F(clrepo, sizeof clrepo, "%s/clrepo", fx);
+        F(clpin, sizeof clpin, "%s/clpin", fx);
+        F(c, sizeof c,
+          "mkdir -p %s/tools/cxlib %s && cd %s && git init -q -b main && "
+          "ln -s %s/unisacc.com unisacc.com && cp %s/tools/devsvc-repo.tsv tools/devsvc-repo.tsv && "
+          "printf 'CXROOT1\\nR\\tcxlib\\ttools/cxlib\\n' > cxroot.tsv && "
+          "printf '#pragma unisa module sub\\nint sub_v(void){return 1;}\\n' > tools/cxlib/sub.cx && "
+          "printf '#pragma unisa use cxlib.sub\\nint main(void){return sub_v();}\\n' > tools/devsvc-core.cx && "
+          "printf 'orig\\n' > unrelated.txt && git add . && git -c user.name=t -c user.email=t@t commit -qm init",
+          clrepo, clpin, clrepo, root, root);
+        rc = sh(c);
+        k0[0] = 0; b0[0] = 0;
+        if (rc == 0) {
+            F(c, sizeof c, "cd %s && env -u UNISACC_DEVSVC_DIR -u DEVSVC_REPO_TABLE -u DEVSVC_REPO_TABLE_PIN DV_PIN_DIR=%s %s --dev closure-bin", clrepo, clpin, dvlaunch);
+            rc = sh(c);
+            const char *kp = strstr(out, "\tkey="), *bp = strstr(out, "\tbin=");
+            if (kp) { int ki; kp += 5; for (ki = 0; ki < 20 && kp[ki]; ki++) k0[ki] = kp[ki]; k0[ki] = 0; }
+            if (bp) { int bi = 0; bp += 5; while (bp[bi] && bp[bi] != '\n' && bp[bi] != '\t' && bi + 1 < (int)sizeof b0) { b0[bi] = bp[bi]; bi++; } b0[bi] = 0; }
+        }
+        ck(rc == 1 && !strncmp(out, "CLOSURE_BIN\tMISS\t", 17) && strstr(out, "\tunits=2\t") != 0 && strlen(k0) == 20 && b0[0] == '/', "closure-bin-initial-miss-2units");
+        /* 放入已构造执行体(同键封签), 随后在工作区制造他人无关暂存改动, 必须仍 HIT 同键 */
+        F(c, sizeof c, "mkdir -p $(dirname %s) && cp %s %s && chmod 700 %s && cd %s && printf 'dirty-staged\\n' > unrelated.txt && git add unrelated.txt && env -u UNISACC_DEVSVC_DIR -u DEVSVC_REPO_TABLE -u DEVSVC_REPO_TABLE_PIN DV_PIN_DIR=%s %s --dev closure-bin",
+          b0, dvlaunch, b0, b0, clrepo, clpin, dvlaunch);
+        rc = sh(c);
+        ck(rc == 0 && !strncmp(out, "CLOSURE_BIN\tHIT\t", 16) && strstr(out, k0) != 0, "closure-bin-unrelated-staged-still-hit");
+        /* 变异 1: 改闭包内深层单元 sub.cx 1 字节, 必须 MISS 且换键 */
+        k1[0] = 0;
+        F(c, sizeof c, "cd %s && printf '#pragma unisa module sub\\nint sub_v(void){return 2;}\\n' > tools/cxlib/sub.cx && env -u UNISACC_DEVSVC_DIR -u DEVSVC_REPO_TABLE -u DEVSVC_REPO_TABLE_PIN DV_PIN_DIR=%s %s --dev closure-bin",
+          clrepo, clpin, dvlaunch);
+        rc = sh(c);
+        { const char *kp = strstr(out, "\tkey="); if (kp) { int ki; kp += 5; for (ki = 0; ki < 20 && kp[ki]; ki++) k1[ki] = kp[ki]; k1[ki] = 0; } }
+        ck(rc == 1 && !strncmp(out, "CLOSURE_BIN\tMISS\t", 17) && strlen(k1) == 20 && strcmp(k0, k1) != 0, "closure-bin-mutate-sub-1byte-miss");
+        /* 变异 2: 恢复 sub.cx 后改 devsvc-core.cx 1 字节, 必须 MISS 且换键 */
+        k1[0] = 0;
+        F(c, sizeof c, "cd %s && printf '#pragma unisa module sub\\nint sub_v(void){return 1;}\\n' > tools/cxlib/sub.cx && printf '#pragma unisa use cxlib.sub\\nint main(void){return sub_v()+0;}\\n' > tools/devsvc-core.cx && env -u UNISACC_DEVSVC_DIR -u DEVSVC_REPO_TABLE -u DEVSVC_REPO_TABLE_PIN DV_PIN_DIR=%s %s --dev closure-bin",
+          clrepo, clpin, dvlaunch);
+        rc = sh(c);
+        { const char *kp = strstr(out, "\tkey="); if (kp) { int ki; kp += 5; for (ki = 0; ki < 20 && kp[ki]; ki++) k1[ki] = kp[ki]; k1[ki] = 0; } }
+        ck(rc == 1 && !strncmp(out, "CLOSURE_BIN\tMISS\t", 17) && strlen(k1) == 20 && strcmp(k0, k1) != 0, "closure-bin-mutate-core-1byte-miss");
     }
 
     F(c, sizeof c, "rm -rf %s", fx); (void)sh(c);

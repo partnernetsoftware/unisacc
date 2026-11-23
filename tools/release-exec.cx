@@ -1502,6 +1502,26 @@ static void gate_y1_frozen(void) {
     }
     gate_pass("Y1_FROZEN", "release/evidence.tsv and release/decision.txt equal Y1");
 }
+static void post_root_backup_gate(void) {
+    char bk_out[512], rb_out[512];
+    char *bv[] = {"sh", checkout_product, "tools/install-ape.cx", "--", ".", "--backup", 0};
+    char *rv[] = {"sh", checkout_product, "tools/install-ape.cx", "--", ".", "--rollback", 0};
+    bk_out[0] = 0; rb_out[0] = 0;
+    (void)run(bv, 20, bk_out, sizeof bk_out);
+    int rrc = run(rv, 20, rb_out, sizeof rb_out);
+    char *nl = strchr(rb_out, '\n');
+    if (nl) *nl = 0;
+    if (rrc == 0 && strstr(rb_out, "ROLLBACK_DRYRUN") != 0) {
+        sy_printf("POST_ROOT_BACKUP_GATE\tPASS\t%s\n", rb_out);
+    } else {
+        sy_printf("POST_ROOT_BACKUP_GATE\tWARN\tfix=sh %s tools/install-ape.cx -- . --backup --write\t%s\n",
+                  checkout_product, rb_out[0] ? rb_out : "no-rollback-dryrun");
+    }
+}
+static void hint_release_post(void) {
+    /* S10 orchestrator: print only; never run release-post from execute. */
+    sy_printf("下一步:release-post run --version %s --dry\n", cand.version);
+}
 static void step_y2(void) {
     char dp[4500], evpath[4500], refdp[4500], msg[200], ref[200]; long a, b; char *ta, *tb; int same;
     cx_fmt(evpath, sizeof evpath, "%s/evidence.tsv", outdir);
@@ -1527,7 +1547,7 @@ static void step_y2(void) {
     free(ta); free(tb);
     if (!same) refuse("DECISION", "release-decide recompute differs from release/decision.txt");
     gate_pass("DECISION", "recompute equals release/decision.txt");
-    if (index_ref("exec-7-Y2-done", 0, ref, sizeof ref)) { show(v, "DONE"); say("SKIP", "Y2 already recorded", ref); return; }
+    if (index_ref("exec-7-Y2-done", 0, ref, sizeof ref)) { show(v, "DONE"); say("SKIP", "Y2 already recorded", ref); post_root_backup_gate(); hint_release_post(); return; }
     if (!dry) index_row("Y2", "-", "pending", "evidence INDEX and decision recomputed equal; Y2 commit follows");
     if (act(v, 55, 0, 0)) refuse("Y2", "devsvc git commit Y2 failed");
     if (!dry) {
@@ -1535,6 +1555,8 @@ static void step_y2(void) {
         if (run(g, 10, ref, sizeof ref) || !is_hex(ref, 40)) refuse("Y2", "Y2 commit lookup");
         index_row("Y2-done", "-", ref, "Y2 committed; this row rides with the next commit");
     }
+    post_root_backup_gate();
+    hint_release_post();
 }
 
 /* ---- N4: readback warm-up ------------------------------------------------------------------------ */

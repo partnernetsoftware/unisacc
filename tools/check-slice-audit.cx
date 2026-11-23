@@ -1,0 +1,85 @@
+/* tools/check-slice-audit.cx -- self-check + negative/mutation gate for tools/slice-audit.cx.
+ * Verifies:
+ *   (1) real ./unisacc.com byte-exact accounting (ok=1, accounted==total, real_pad<256, win_arm64_gz>0, cm_gz>0)
+ *   (2) HEAD_GZ9 measurement present and smaller than raw head
+ *   (3) UNIT_TEXT_REF parses plans/unit-text.tsv (units=99)
+ *   (4) negative: truncated/non-APE file rejected with rc=2
+ *   (5) negative: bad Mach-O magic rejected with rc=2
+ *   (6) mutation: corrupting embedded win/arm64 gzip magic turns accounting audit off hidden_slice_win_arm64 */
+#pragma unisa use sys.fs
+#pragma unisa use sys.proc
+#pragma unisa use text.text
+#pragma unisa use mem.heap
+#pragma unisa use cxlib.netpack
+#pragma unisa use cxlib.ckassert
+
+static int run_sa(char **v, char *out, long cap) {
+    np_result r = {0}; char why[128] = {0};
+    int tr = np_run(v, 0, 0, 30, &r, why, sizeof why);
+    long n = 0;
+    if (r.out && r.outn > 0) {
+        long m = (long)r.outn < cap - 1 ? (long)r.outn : cap - 1;
+        for (long i = 0; i < m; i++) out[n++] = r.out[i];
+    }
+    if (r.err && r.errn > 0 && n < cap - 1) {
+        long m = (long)r.errn < (cap - 1 - n) ? (long)r.errn : (cap - 1 - n);
+        for (long i = 0; i < m; i++) out[n++] = r.err[i];
+    }
+    out[n] = 0;
+    int rc = (tr || r.residue) ? -1 : r.rc;
+    np_free(&r);
+    return rc;
+}
+
+int main(void) {
+    char tmp[256], badf[320], mutf[320], out[65536];
+    const char *uc = "./unisacc.com";
+    cx_fmt(tmp, sizeof tmp, "/tmp/check-slice-audit-%d", sy_pid());
+    if (sy_mkdir_all(tmp, 0700) != 0) return 2;
+
+    /* (1)-(3) positive on real APE + plans/unit-text.tsv */
+    {
+        char *v[] = {"sh", (char *)uc, "tools/slice-audit.cx", "--", "--ape", (char *)uc, "--unit-tsv", "plans/unit-text.tsv", 0};
+        int rc = run_sa(v, out, sizeof out);
+        ck(rc == 0 && strstr(out, "SLICE_AUDIT\tok=1\t") != 0, "real-ape-exact-accounting");
+        ck(strstr(out, "AUDIT_SEG\thidden_slice_win_arm64\t") != 0 && strstr(out, "inflates=4575744") != 0, "real-ape-win-arm64-attributed");
+        ck(strstr(out, "AUDIT_SEG\tcache_manager_Darwinx86_64\t") != 0 && strstr(out, "AUDIT_SEG\tcache_manager_Darwinarm64\t") != 0, "real-ape-cm-attributed");
+        ck(strstr(out, "HEAD_GZ9\traw=") != 0 && strstr(out, "\tgz9=") != 0, "real-ape-head-gz9-measured");
+        ck(strstr(out, "UNIT_TEXT_REF\tfile=plans/unit-text.tsv\tunits=99\t") != 0, "unit-text-tsv-parsed");
+    }
+
+    /* (4) negative: non-APE file -> rc=2 */
+    cx_fmt(badf, sizeof badf, "%s/not-an-ape.bin", tmp);
+    cx_write(badf, "not an ape or macho file at all -- padded past 64 bytes for header check\n", 73);
+    {
+        char *v[] = {"sh", (char *)uc, "tools/slice-audit.cx", "--", "--ape", badf, "--no-gz", 0};
+        int rc = run_sa(v, out, sizeof out);
+        ck(rc == 2, "neg-non-ape-refused");
+    }
+
+    /* (5) negative: bad Mach-O magic -> rc=2 */
+    {
+        char *v[] = {"sh", (char *)uc, "tools/slice-audit.cx", "--", "--ape", (char *)uc, "--macho", badf, "--no-gz", 0};
+        int rc = run_sa(v, out, sizeof out);
+        ck(rc == 2 && strstr(out, "not Mach-O 64-bit") != 0, "neg-bad-macho-refused");
+    }
+
+    /* (6) mutation: zeroing embedded win/arm64 gzip magic prevents hidden_slice_win_arm64 attribution */
+    size_t sz = 0;
+    unsigned char *buf = (unsigned char *)cx_read(uc, &sz);
+    if (buf && sz > 5460330) {
+        buf[5460320] = 0; buf[5460321] = 0;
+        cx_fmt(mutf, sizeof mutf, "%s/mut-ape.com", tmp);
+        cx_write(mutf, (const char *)buf, sz);
+        char *v[] = {"sh", (char *)uc, "tools/slice-audit.cx", "--", "--ape", mutf, "--no-gz", 0};
+        int rc = run_sa(v, out, sizeof out);
+        ck(rc == 0 && strstr(out, "hidden_slice_win_arm64") == 0 && strstr(out, "gap_unclassified") != 0, "mut-corrupt-win-arm64-magic-detected");
+        mm_free(buf);
+    } else {
+        ck(0, "mut-corrupt-win-arm64-magic-detected");
+    }
+
+    cx_rmtree(tmp);
+    printf("CHECK_SLICE_AUDIT\tpassed=%d\tfailed=%d\n", ck_assertions() - ck_failures(), ck_failures());
+    return ck_failures() ? 1 : 0;
+}

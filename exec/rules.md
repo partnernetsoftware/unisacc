@@ -73,7 +73,7 @@ Each generated δ is checked against its table over the finite observation domai
 
 ## 残余直接改图与理由（0.0.23 K）
 
-**口径（2026-10-03 扩大）**：tests/decisionledger.py 现在统计 exec/*.py（finite_rules.py 除外）里所有直接改图的写法：`.on(` `.branch(` `.goto(`、lex 的 `Delta.put(`，以及对图对象的 `st`/`els`/`r`/`seqs`/`states`/`rows` 的写入（赋值、删除、pop/append/update 等）——改名、挂钩、别名这类 Python 图编辑都算在内，不能换个写法绕过。基线见 research/decision-ledger.json，只降不升。
+**口径（2026-10-03 扩大）**：tests/decisionledger.py 现在统计 exec/*.py（finite_rules.py 除外）里所有直接改图的写法：`.on(` `.branch(` `.goto(`、lex 的 `Delta.put(`，以及对图对象的 `st`/`els`/`r`/`seqs`/`states`/`rows` 的写入（赋值、删除、pop/append/update 等）——改名、挂钩、别名这类 Python 图编辑都算在内，不能换个写法绕过。基线见 decision-ledger(已归档)，只降不升。
 
 **理由**：每个仍被计数的文件都必须在 tests/decisionledger.allow 里有一行 `keep FILE CATEGORY reason`，门禁检查。类别：test-tool（检查脚本内部的探针图）、generic-assembly（通用组装：汇编器 P 的原语等，所有表都经它展开）、pending-migration（0.0.23 K 的欠账，用参数化模板迁移，不是被接受的残余）、cdx-pending。主人规则：“表行目标列不能由事实生成”不算理由，参数化模板（finite_rules.install_template）能表达事实生成的控制；保留必须说明为什么连模板也表达不了。
 

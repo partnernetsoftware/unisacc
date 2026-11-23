@@ -8,9 +8,17 @@
  *          sibling temporary + fsync + rename; on failure nothing is left behind), fsx_exists
  *          (1 / 0 only for ENOENT / -errno for ENOTDIR, EACCES, ...), fsx_is_dir and fsx_is_file
  *          (links followed: 1 that kind / 0 absent (ENOENT only) or another kind / -errno).
- * Scratch: fsx_scratch makes PREFIXxxxx under sy_tmpdir() (never a hard-coded /tmp); drop removes
- *          the tree only when the path is still the directory it made (dev+ino, not a symlink);
- *          every live scratch is dropped at process exit.
+ * Scratch: fsx_scratch makes PREFIXp<pid>-xxxxxxxx (8-char [0-9a-z] suffix) under sy_tmpdir()
+ *          (never a hard-coded /tmp); drop removes the tree only when the path is still the
+ *          directory it made (dev+ino, not a symlink); every live scratch owned by this pid is
+ *          dropped at process exit and on SIGHUP/SIGINT/SIGPIPE/SIGTERM when that signal still has
+ *          its default disposition (pre-existing custom handlers or SIG_IGN are preserved and
+ *          remain the caller's responsibility; after cleanup the handler restores SIG_DFL and
+ *          re-raises so WIFSIGNALED termination is preserved). For uncatchable SIGKILL, startup
+ *          reaps same-prefix dirs matching PREFIXp<pid>-<[0-9a-z]{8}> owned by sy_euid() whose
+ *          tree latest wall-clock mtime is >30 min old and whose pid is dead (-ESRCH), throttled
+ *          once per (process, prefix). Note: callers sharing TMPDIR across PID namespaces should
+ *          isolate TMPDIR because a foreign-namespace live PID appears as -ESRCH locally.
  * Walk:    fsx_walk_open collects, sorts (bytewise) and hands out entries one by one; recursion,
  *          link following, .git skipping and a glob filter are flags; depth is capped (link loops).
  * Glob:    fsx_glob_match: '*' and '?' never cross '/', '**' does ("**" + "/" also matches zero dirs).
@@ -24,6 +32,7 @@
  * stale or doubled close is -EBADF.  Only L0 sy_/tx_/mm_/pt_ calls and the implicit runtime. */
 #pragma unisa module fs
 #pragma unisa use sys.fs
+#pragma unisa use sys.io
 #pragma unisa use sys.env
 #pragma unisa use sys.posix
 #pragma unisa use sys.proc
@@ -150,8 +159,14 @@ int fsx_rmtree(const char *path) {
 }
 
 /* ---- scratch directories ---- */
-static struct { int used, gen; unsigned long dev; long ino; char path[FSX_PATH]; } fsx_sc[FSX_SLOTS];
-static int fsx_sc_hooked;
+enum { FSX_STALE_SEC = 1800, FSX_REAP_SLOTS = 8 };   /* 30 min wall-clock age; per-process prefix throttle table */
+static struct { int used, gen, owner_pid; unsigned long dev; long ino; char path[FSX_PATH]; } fsx_sc[FSX_SLOTS];
+static int fsx_sc_hooked_pid;
+static int fsx_sc_reaped_pid;
+static int fsx_sc_reaped_n;
+static char fsx_sc_reaped_pfxs[FSX_REAP_SLOTS][256];
+static int fsx_sc_warned_pid;
+static volatile int fsx_sc_in_sig;
 
 static int fsx_sc_get(int h) {
     int i = fsx_slot(h);
@@ -173,24 +188,201 @@ int fsx_scratch_drop(int h) {
 }
 
 static void fsx_sc_atexit(void) {
-    int i;
-    for (i = 0; i < FSX_SLOTS; i++) if (fsx_sc[i].used) fsx_scratch_drop(fsx_mkh(i, fsx_sc[i].gen));
+    int i, me = sy_pid();
+    for (i = 0; i < FSX_SLOTS; i++) {
+        if (fsx_sc[i].used && fsx_sc[i].owner_pid == me) fsx_scratch_drop(fsx_mkh(i, fsx_sc[i].gen));
+    }
+}
+
+static void fsx_sc_on_sig(int sig) {
+    if (fsx_sc_in_sig) {
+        (void)sy_sig_default(sig);
+        (void)sy_raise(sig);
+        return;
+    }
+    fsx_sc_in_sig = 1;
+    fsx_sc_atexit();
+    (void)sy_sig_default(sig);
+    (void)sy_raise(sig);
+}
+
+static int fsx_sc_hex_mask(const char *buf, long n, const char *key, long kl, unsigned long long *out) {
+    long at = 0;
+    while (at < n) {
+        long e = tx_chr(buf + at, n - at, '\n');
+        long ln = e < 0 ? n - at : e;
+        if (ln > kl && tx_prefix(buf + at, ln, key, kl)) {
+            long j = kl;
+            unsigned long long v = 0;
+            int got = 0;
+            while (j < ln && (buf[at + j] == ' ' || buf[at + j] == '\t')) j++;
+            while (j < ln) {
+                char c = buf[at + j];
+                unsigned long long d;
+                if (c >= '0' && c <= '9') d = (unsigned long long)(c - '0');
+                else if (c >= 'a' && c <= 'f') d = (unsigned long long)(c - 'a' + 10);
+                else if (c >= 'A' && c <= 'F') d = (unsigned long long)(c - 'A' + 10);
+                else break;
+                v = (v << 4) | d;
+                got = 1;
+                j++;
+            }
+            if (got) { *out = v; return 0; }
+        }
+        at += ln + 1;
+    }
+    return -1;
+}
+
+/* 1 only when the kernel's current disposition for SIG is SIG_DFL (neither ignored nor caught). */
+static int fsx_sc_is_default_sig(int sig) {
+    unsigned char *raw = 0;
+    int64_t n = 0;
+    unsigned long long ign = 0, cgt = 0;
+    if (sig <= 0 || sig > 64) return 0;
+    if (sy_read_file("/proc/self/status", &raw, &n, 65536) != 0 || !raw || n <= 0) {
+        mm_free(raw);
+        return 0;
+    }
+    int ok = (fsx_sc_hex_mask((const char *)raw, (long)n, "SigIgn:", 7, &ign) == 0 &&
+              fsx_sc_hex_mask((const char *)raw, (long)n, "SigCgt:", 7, &cgt) == 0);
+    mm_free(raw);
+    if (!ok) return 0;
+    return (((ign | cgt) >> (unsigned)(sig - 1)) & 1ULL) == 0;
+}
+
+static long fsx_sc_latest_mtime(const char *path, int depth, long best) {
+    sy_dir_t d;
+    if (depth > 2 || sy_dir_open(&d, path) != 0) return best;
+    while (sy_dir_next(&d) == 1) {
+        if (tx_eqz(d.name, ".") || tx_eqz(d.name, "..")) continue;
+        char child[FSX_PATH];
+        sy_stat_t st;
+        if (fsx_join(child, sizeof child, path, d.name) < 0) continue;
+        if (sy_lstat(child, &st) != 0) continue;
+        if (st.mtime > best) best = st.mtime;
+        if (st.kind == 'd' && depth < 2) best = fsx_sc_latest_mtime(child, depth + 1, best);
+    }
+    sy_dir_close(&d);
+    return best;
+}
+
+static int fsx_sc_parse_name(const char *nm, long nl, const char *pfx, long pl, int *pid_out) {
+    long k, digits = 0;
+    unsigned long long pid = 0;
+    if (pl <= 0 || nl < pl + 11) return 0;
+    if (!tx_prefix(nm, nl, pfx, pl) || nm[pl] != 'p') return 0;
+    k = pl + 1;
+    if (k >= nl || nm[k] < '1' || nm[k] > '9') return 0;   /* no leading zero */
+    while (k < nl && nm[k] >= '0' && nm[k] <= '9') {
+        digits++;
+        if (digits > 10) return 0;
+        pid = pid * 10ULL + (unsigned long long)(nm[k] - '0');
+        if (pid > 2147483647ULL) return 0;
+        k++;
+    }
+    if (k >= nl || nm[k] != '-') return 0;
+    k++;
+    if (nl - k != 8) return 0;   /* exact 8-char sy_mkdtemp suffix */
+    while (k < nl) {
+        char c = nm[k];
+        if (!((c >= 'a' && c <= 'z') || (c >= '0' && c <= '9'))) return 0;
+        k++;
+    }
+    *pid_out = (int)pid;
+    return 1;
+}
+
+static void fsx_sc_reap_stale(const char *tdir, const char *pfx) {
+    sy_dir_t d;
+    long pl = tx_len(pfx, 255), now_s = sy_wall_s(), uid = sy_euid();
+    int me = sy_pid(), k;
+    if (pl <= 0 || now_s <= 0) return;
+    if (sy_exists("/proc/self") != 1) return;   /* conservative when /proc is absent */
+    if (fsx_sc_reaped_pid != me) { fsx_sc_reaped_pid = me; fsx_sc_reaped_n = 0; }
+    for (k = 0; k < fsx_sc_reaped_n; k++) {
+        if (tx_eqz(fsx_sc_reaped_pfxs[k], pfx)) return;
+    }
+    if (fsx_sc_reaped_n < FSX_REAP_SLOTS) {
+        mm_copy(fsx_sc_reaped_pfxs[fsx_sc_reaped_n], sizeof fsx_sc_reaped_pfxs[0], pfx, pl);
+        fsx_sc_reaped_pfxs[fsx_sc_reaped_n][pl] = 0;
+        fsx_sc_reaped_n++;
+    }
+    if (sy_dir_open(&d, tdir) != 0) return;
+    while (sy_dir_next(&d) == 1) {
+        const char *nm = d.name;
+        long nl = tx_len(nm, 512);
+        int pid = 0, active = 0, j;
+        char full[FSX_PATH];
+        sy_stat_t st;
+        if (!fsx_sc_parse_name(nm, nl, pfx, pl, &pid) || pid == me) continue;
+        if (fsx_join(full, sizeof full, tdir, nm) < 0) continue;
+        if (sy_lstat(full, &st) != 0 || st.kind != 'd' || st.uid != uid) continue;
+        if (now_s - st.mtime <= FSX_STALE_SEC) continue;
+        if (sy_signal(pid, 0) != -ESRCH) continue;
+        long latest = fsx_sc_latest_mtime(full, 0, st.mtime);
+        if (now_s - latest <= FSX_STALE_SEC) continue;
+        for (j = 0; j < FSX_SLOTS; j++) {
+            if (fsx_sc[j].used && fsx_sc[j].dev == st.dev && fsx_sc[j].ino == st.ino) { active = 1; break; }
+        }
+        if (!active) {
+            int rrc = fsx_rmtree(full);
+            if (rrc != 0 && fsx_sc_warned_pid != me) {
+                fsx_sc_warned_pid = me;
+                sy_eprintf("fsx_scratch: reap-failed path=%s rc=%d\n", full, rrc);
+            }
+        }
+    }
+    sy_dir_close(&d);
 }
 
 int fsx_scratch(int *h, const char *prefix) {
     sy_stat_t st;
-    int i, rc;
+    int i, rc, me = sy_pid();
+    const char *tdir = sy_tmpdir();
+    const char *pfx = (prefix && prefix[0]) ? prefix : "fsx-";
+    char mkpfx[320], pbuf[32];
+    long pl, pn = 0;
     if (!h) return -EINVAL;
     *h = 0;
     for (i = 0; i < FSX_SLOTS && fsx_sc[i].used; i++) {}
     if (i == FSX_SLOTS) return -EMFILE;
-    rc = sy_mkdtemp(sy_tmpdir(), prefix && prefix[0] ? prefix : "fsx-", fsx_sc[i].path, FSX_PATH);
+    fsx_sc_reap_stale(tdir, pfx);
+    pl = tx_len(pfx, 255);
+    {
+        int v = me > 0 ? me : 1;
+        char rev[32]; long r = 0;
+        while (v > 0 && r < 20) { rev[r++] = (char)('0' + (v % 10)); v /= 10; }
+        while (r > 0) pbuf[pn++] = rev[--r];
+        pbuf[pn] = 0;
+    }
+    if (pl + 1 + pn + 2 <= (long)sizeof mkpfx) {
+        mm_copy(mkpfx, sizeof mkpfx, pfx, pl);
+        mkpfx[pl] = 'p';
+        mm_copy(mkpfx + pl + 1, sizeof mkpfx - (pl + 1), pbuf, pn);
+        mkpfx[pl + 1 + pn] = '-';
+        mkpfx[pl + 1 + pn + 1] = 0;
+        rc = sy_mkdtemp(tdir, mkpfx, fsx_sc[i].path, FSX_PATH);
+    } else {
+        rc = sy_mkdtemp(tdir, pfx, fsx_sc[i].path, FSX_PATH);
+    }
     if (rc < 0) return rc;
     rc = sy_lstat(fsx_sc[i].path, &st);
     if (rc < 0) { sy_rmdir(fsx_sc[i].path); return rc; }
-    if (!fsx_sc_hooked) { fsx_sc_hooked = 1; sy_atexit(fsx_sc_atexit); }
+    if (fsx_sc_hooked_pid != me) {
+        int sigs[4];
+        int k;
+        fsx_sc_hooked_pid = me;
+        fsx_sc_in_sig = 0;
+        (void)sy_atexit(fsx_sc_atexit);
+        sigs[0] = 1; sigs[1] = 2; sigs[2] = 13; sigs[3] = 15;
+        for (k = 0; k < 4; k++) {
+            if (fsx_sc_is_default_sig(sigs[k])) (void)sy_sig_handle(sigs[k], fsx_sc_on_sig);
+        }
+    }
     fsx_sc[i].used = 1;
     fsx_sc[i].gen++;
+    fsx_sc[i].owner_pid = me;
     fsx_sc[i].dev = st.dev;
     fsx_sc[i].ino = st.ino;
     *h = fsx_mkh(i, fsx_sc[i].gen);

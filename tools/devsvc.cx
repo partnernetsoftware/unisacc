@@ -265,6 +265,142 @@ static int wc_key(const char *root, const char *ph, char hex[65]) {
     {   int k = snprintf(cat + cn, sizeof cat - cn, "wc-v1\tproduct\t%s\n", ph); if (k < 0 || k >= (int)(sizeof cat - cn)) return -1; cn += k; }
     return sy_sha256_hex(cat, cn, hex) ? -1 : 0;
 }
+/* 闭包内容身份(U7): 从 self 递归展开全部 #pragma unisa use 单元(按 CX-U-4 同级优先 + CX-U-7 cxroot.tsv 最长前缀),
+ * 排序后连同 cxroot.tsv 与产品 sha256 取摘要;与工作区无关脏文件解耦,闭包内改任一字节即换键。 */
+#define CL_MAX_RULES 64
+#define CL_MAX_UNITS 256
+typedef struct { char pre[64], dir[128]; int plen; } cl_rule_t;
+typedef struct { char rel[256], sha[65]; } cl_unit_t;
+static cl_rule_t cl_rules[CL_MAX_RULES]; static int cl_nrules;
+static cl_unit_t cl_units[CL_MAX_UNITS]; static int cl_nunits;
+
+static int cl_norm_rel(const char *in, char out[256]) {
+    char seg[32][128]; int ns = 0, i = 0, k = 0;
+    while (in[i]) {
+        while (in[i] == '/') i++;
+        if (!in[i]) break;
+        int s = i; while (in[i] && in[i] != '/') i++;
+        int l = i - s;
+        if (l == 1 && in[s] == '.') continue;
+        if (l == 2 && in[s] == '.' && in[s + 1] == '.') { if (ns == 0) return -1; ns--; continue; }
+        if (ns >= 32 || l >= 128) return -1;
+        mm_copy(seg[ns], sizeof seg[ns], in + s, l); seg[ns][l] = 0; ns++;
+    }
+    if (ns == 0) return -1;
+    for (i = 0; i < ns; i++) {
+        int l = (int)strlen(seg[i]);
+        if (k + (i ? 1 : 0) + l >= 256) return -1;
+        if (i) out[k++] = '/';
+        mm_copy(out + k, 256 - k, seg[i], l); k += l;
+    }
+    out[k] = 0; return 0;
+}
+static int cl_load_cxroot(const char *root, char cxsha[65]) {
+    char p[2 * PW]; unsigned char *b = 0; int64_t n = 0; long i = 8;
+    cl_nrules = 0;
+    if (cx_fmt(p, sizeof p, "%s/cxroot.tsv", root)) return -1;
+    if (sy_read_file(p, &b, &n, 1 << 16) || !b || n < 8 || memcmp(b, "CXROOT1\n", 8) || sy_sha256_hex(b, (long)n, cxsha)) {
+        if (b) free(b); return -1;
+    }
+    while (i < n) {
+        long ls = i, le; while (i < n && b[i] != '\n') i++; le = i; if (i < n) i++;
+        if (le == ls || b[ls] == '#') continue;
+        if (le - ls < 5 || b[ls] != 'R' || b[ls + 1] != '\t') { free(b); return -1; }
+        long pb = ls + 2, pe = pb; while (pe < le && b[pe] != '\t') pe++;
+        if (pe >= le || pe - pb <= 0 || pe - pb >= 64 || le - (pe + 1) <= 0 || le - (pe + 1) >= 128 || cl_nrules >= CL_MAX_RULES) { free(b); return -1; }
+        mm_copy(cl_rules[cl_nrules].pre, 64, b + pb, pe - pb); cl_rules[cl_nrules].pre[pe - pb] = 0;
+        cl_rules[cl_nrules].plen = (int)(pe - pb);
+        mm_copy(cl_rules[cl_nrules].dir, 128, b + pe + 1, le - (pe + 1)); cl_rules[cl_nrules].dir[le - (pe + 1)] = 0;
+        cl_nrules++;
+    }
+    free(b); return 0;
+}
+static int cl_resolve_use(const char *root, const char *user_rel, const char *name, int nn, char out_rel[256]) {
+    char cand[512], full[2 * PW], npath[192]; int i, dl = (int)strlen(user_rel), best = -1, bestl = -1;
+    if (nn <= 0 || nn >= 180) return -1;
+    for (i = 0; i < nn; i++) npath[i] = name[i] == '.' ? '/' : name[i];
+    npath[nn] = 0;
+    while (dl > 0 && user_rel[dl - 1] != '/') dl--;
+    if (cx_fmt(cand, sizeof cand, "%.*s%s.cx", dl, user_rel, npath) == 0 && cl_norm_rel(cand, out_rel) == 0 &&
+        cx_fmt(full, sizeof full, "%s/%s", root, out_rel) == 0 && sy_exists(full) == 1) return 0;
+    for (i = 0; i < cl_nrules; i++) {
+        int pl = cl_rules[i].plen;
+        if ((pl == nn || (pl < nn && name[pl] == '.')) && !memcmp(name, cl_rules[i].pre, (size_t)pl) && pl > bestl) {
+            best = i; bestl = pl;
+        }
+    }
+    if (best < 0) return -1;
+    if (bestl == nn) { if (cx_fmt(cand, sizeof cand, "%s.cx", cl_rules[best].dir)) return -1; }
+    else { if (cx_fmt(cand, sizeof cand, "%s/%s.cx", cl_rules[best].dir, npath + bestl + 1)) return -1; }
+    if (cl_norm_rel(cand, out_rel) || cx_fmt(full, sizeof full, "%s/%s", root, out_rel) || sy_exists(full) != 1) return -1;
+    return 0;
+}
+static int cl_unit_cmp(const void *a, const void *b) { return strcmp(((const cl_unit_t *)a)->rel, ((const cl_unit_t *)b)->rel); }
+static int closure_compute(const char *root, const char *self_rel, const char *ph, char hex[65], int *n_out) {
+    char cxsha[65], norm0[256], cat[1 << 16]; int head = 0, i; long cn = 0;
+    cl_nunits = 0;
+    if (cl_load_cxroot(root, cxsha) || cl_norm_rel(self_rel, norm0)) return -1;
+    mm_copy(cl_units[0].rel, 256, norm0, strlen(norm0) + 1); cl_units[0].sha[0] = 0; cl_nunits = 1;
+    while (head < cl_nunits) {
+        char full[2 * PW]; unsigned char *b = 0; int64_t n = 0; long pos = 0;
+        const char *cur = cl_units[head].rel;
+        if (cx_fmt(full, sizeof full, "%s/%s", root, cur) || sy_read_file(full, &b, &n, 1LL << 26) || !b || sy_sha256_hex(b, (long)n, cl_units[head].sha)) {
+            if (b) free(b); return -1;
+        }
+        while (pos < n) {
+            long ls = pos, le, p; while (pos < n && b[pos] != '\n') pos++; le = pos; if (pos < n) pos++;
+            p = ls; while (p < le && (b[p] == ' ' || b[p] == '\t')) p++;
+            if (p >= le || b[p] != '#') continue; p++;
+            while (p < le && (b[p] == ' ' || b[p] == '\t')) p++;
+            if (le - p < 6 || memcmp(b + p, "pragma", 6) || (p + 6 < le && b[p + 6] != ' ' && b[p + 6] != '\t')) continue; p += 6;
+            while (p < le && (b[p] == ' ' || b[p] == '\t')) p++;
+            if (le - p < 5 || memcmp(b + p, "unisa", 5) || (p + 5 < le && b[p + 5] != ' ' && b[p + 5] != '\t')) continue; p += 5;
+            while (p < le && (b[p] == ' ' || b[p] == '\t')) p++;
+            if (le - p < 3 || memcmp(b + p, "use", 3) || (p + 3 < le && b[p + 3] != ' ' && b[p + 3] != '\t')) continue; p += 3;
+            while (p < le && (b[p] == ' ' || b[p] == '\t')) p++;
+            long nb = p; while (p < le && ((b[p] >= 'a' && b[p] <= 'z') || (b[p] >= '0' && b[p] <= '9') || b[p] == '_' || b[p] == '.')) p++;
+            int nn = (int)(p - nb);
+            if (nn <= 0) continue;
+            if ((nn == 3 && !memcmp(b + nb, "std", 3)) || (nn > 4 && !memcmp(b + nb, "std.", 4))) continue;
+            char next_rel[256];
+            if (cl_resolve_use(root, cur, (const char *)(b + nb), nn, next_rel)) { free(b); return -1; }
+            int dup = 0; for (i = 0; i < cl_nunits; i++) if (!strcmp(cl_units[i].rel, next_rel)) { dup = 1; break; }
+            if (!dup) {
+                if (cl_nunits >= CL_MAX_UNITS) { free(b); return -1; }
+                mm_copy(cl_units[cl_nunits].rel, 256, next_rel, strlen(next_rel) + 1);
+                cl_units[cl_nunits].sha[0] = 0; cl_nunits++;
+            }
+        }
+        free(b); head++;
+    }
+    qsort(cl_units, (size_t)cl_nunits, sizeof cl_units[0], cl_unit_cmp);
+    { int k = snprintf(cat, sizeof cat, "closure-v1\nproduct\t%s\ncxroot\t%s\n", ph, cxsha);
+      if (k <= 0 || k >= (int)sizeof cat) return -1; cn = k; }
+    for (i = 0; i < cl_nunits; i++) {
+        int k = snprintf(cat + cn, sizeof cat - cn, "%s\t%s\n", cl_units[i].rel, cl_units[i].sha);
+        if (k <= 0 || k >= (int)(sizeof cat - cn)) return -1; cn += k;
+    }
+    if (sy_sha256_hex(cat, cn, hex)) return -1;
+    if (n_out) *n_out = cl_nunits;
+    return 0;
+}
+static int closure_base(char *out, int cap, const char *override) {
+    char home[PW];
+    if (override && *override) return cx_fmt(out, cap, "%s/closure", override);
+    if (sy_homedir(home, sizeof home) < 0) return -1;
+    return cx_fmt(out, cap, "%s/%s/pinned/closure", home, c_cache);
+}
+static int closure_publish(const char *src_bin, const char *cdir, const char *cbin) {
+    char tmp[PW + 32]; unsigned char *b = 0; int64_t n = 0;
+    if (sy_mkdir_all(cdir, 0700)) return -1;
+    if (cx_fmt(tmp, sizeof tmp, "%s.tmp%d", cbin, sy_pid())) return -1;
+    if (sy_read_file(src_bin, &b, &n, 1LL << 28) || !b || n <= 0) { if (b) free(b); return -1; }
+    if (sy_write_atomic(tmp, (char *)b, (long)n, 0700)) { free(b); sy_unlink(tmp); return -1; }
+    free(b);
+    if (sy_rename(tmp, cbin)) { sy_unlink(tmp); return -1; }
+    bin_seal(cbin);
+    return bin_ok(cbin) ? 0 : -1;
+}
 /* 从 HEAD 构造固定版本到 bin;0 成功。日志在 logp。 */
 static int build(const char *root, const char *prod, const char *bin, const char *logp) {
     char tmp[128], src[PW], scratch[256]; int rc;
@@ -278,6 +414,17 @@ static int build(const char *root, const char *prod, const char *bin, const char
         rc = runcap(v, root, scratch, sizeof scratch); }
     if (rc == 0 && sy_exists(src) != 1) rc = -3;
     if (rc == 0) rc = compile_to(prod, src, tmp, bin, logp);
+    if (rc == 0) {
+        char preal[PW], ph[65], chex[65], cbase[PW], cdir[PW], cbin[PW]; int nu = 0;
+        if (sy_realpath(prod, preal, sizeof preal) >= 0 && !bin_sha(preal, ph) &&
+            !closure_compute(tmp, c_self, ph, chex, &nu)) {
+            chex[20] = 0;
+            if (!closure_base(cbase, sizeof cbase, getenv("DV_PIN_DIR")) &&
+                !cx_fmt(cdir, sizeof cdir, "%s/%s", cbase, chex) &&
+                !cx_fmt(cbin, sizeof cbin, "%s/devsvc", cdir) && !bin_ok(cbin))
+                (void)closure_publish(bin, cdir, cbin);
+        }
+    }
     (void)sy_remove_all(tmp);
     return rc;
 }
@@ -654,6 +801,63 @@ int main(int argc, char **argv) {
         for (i = a + 1; i < argc; i++) v[n++] = argv[i];
         v[n] = 0;
         return run_through(v, 60000);
+    }
+    if (argc == a + 1 && !strcmp(argv[a], "closure-bin")) {   /* U7: 按 devsvc 递归闭包单元内容哈希加产品身份复用预构建执行体 */
+        char ph[65], chex[65], cbase[PW], cdir[PW], cbin[PW], stbuf[64]; int nu = 0;
+        if (sy_realpath(prod, real, sizeof real) < 0 || sy_file_size(real, &psz) || prod_sha(real, ph) ||
+            closure_compute(root, c_self, ph, chex, &nu)) return 2;
+        chex[20] = 0;
+        if (closure_base(cbase, sizeof cbase, dvdir) || cx_fmt(cdir, sizeof cdir, "%s/%s", cbase, chex) ||
+            cx_fmt(cbin, sizeof cbin, "%s/devsvc", cdir)) return 2;
+        if (bin_ok(cbin)) {
+            printf("CLOSURE_BIN\tHIT\tkey=%s\tunits=%d\tbin=%s\n", chex, nu, cbin);
+            return 0;
+        }
+        /* 若闭包内全部单元与 cxroot.tsv 均与 HEAD 逐字节一致(忽略工作区其余无关脏文件), 桥接已构建的 HEAD pinned 执行体 */
+        {   static char *sv[CL_MAX_UNITS + 10]; int sk = 0;
+            sv[sk++] = "git"; sv[sk++] = "--no-optional-locks"; sv[sk++] = "--literal-pathspecs";
+            sv[sk++] = "status"; sv[sk++] = "--porcelain=v1"; sv[sk++] = "--"; sv[sk++] = "cxroot.tsv";
+            for (i = 0; i < nu; i++) sv[sk++] = cl_units[i].rel;
+            sv[sk] = 0;
+            if (runcap(sv, root, stbuf, sizeof stbuf) == 0 && stbuf[0] == 0) {
+                char rev[80], htrees[800], hkey[65], hbase[PW], hbin[PW], htab_spec[200];
+                char *rv[] = {"git", "rev-parse", "--verify", "HEAD", 0};
+                if (fr == 0 && fg_commit[0]) F(hd, sizeof hd, "%s", fg_commit);
+                else if (runcap(rv, root, rev, sizeof rev) == 0 && strlen(rev) == 41 && rev[40] == '\n' && fg_hex40(rev)) F(hd, sizeof hd, "%.40s", rev);
+                if (fg_hex40(hd)) {
+                    char *gv[9 + MAXSIB]; int gk = 0; char hh[4 + MAXSIB][200]; char map[160];
+                    char *tv[] = {"git", "show", htab_spec, 0};
+                    F(htab_spec, sizeof htab_spec, "%s:%s", hd, CFG_TABLE);
+                    if (runcap(tv, root, headtab, sizeof headtab) == 0) {
+                        headtab_n = (long)strlen(headtab);
+                        siblings(root, 0);
+                        gv[gk++] = "git"; gv[gk++] = "rev-parse";
+                        F(hh[0], sizeof hh[0], "%s:%s", hd, c_self); gv[gk++] = hh[0];
+                        for (i = 0; i < 3; i++) { F(hh[i + 1], sizeof hh[0], "%s:%s", hd, c_lib[i]); gv[gk++] = hh[i + 1]; }
+                        for (i = 0; i < nsib; i++) { F(hh[i + 4], sizeof hh[0], "%s:%s", hd, sib[i]); gv[gk++] = hh[i + 4]; }
+                        gv[gk++] = htab_spec; gv[gk] = 0;
+                        if (runcap(gv, root, htrees, sizeof htrees) == 0) {
+                            char *ls[] = {"git", "ls-tree", hd, "--", "cxroot.tsv", 0};
+                            int used = (int)strlen(htrees), left = (int)sizeof htrees - used;
+                            if (runcap(ls, root, map, sizeof map) == 0 && snprintf(htrees + used, left, "cxroot\t%s", map) < left) {
+                                F(keysrc, sizeof keysrc, "%s|%s|%ld|%ld", htrees, ph, (long)psz, headtab_n);
+                                if (!ovf && !sy_sha256_hex(keysrc, strlen(keysrc), hkey)) {
+                                    hkey[20] = 0;
+                                    if (!pin_base(hbase, sizeof hbase, dvdir, fg_common[0] ? fg_common : root, 0) &&
+                                        !cx_fmt(hbin, sizeof hbin, "%s/%s/devsvc", hbase, hkey) && bin_ok(hbin) &&
+                                        closure_publish(hbin, cdir, cbin) == 0) {
+                                        printf("CLOSURE_BIN\tHIT\tkey=%s\tunits=%d\tbin=%s\n", chex, nu, cbin);
+                                        return 0;
+                                    }
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+        }
+        printf("CLOSURE_BIN\tMISS\tkey=%s\tunits=%d\tbin=%s\n", chex, nu, cbin);
+        return 1;
     }
     if (!dev) {
         int got = memo;

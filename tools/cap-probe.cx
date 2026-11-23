@@ -1,0 +1,323 @@
+/* tools/cap-probe.cx -- does every "not covered: ..." capacity still have a reachable edge?
+ *
+ *   sh ./unisacc.com tools/cap-probe.cx [-- --list|--slow|--only ID] [--product PATH] [--work DIR]
+ *
+ * The table below is the single source; its 17 rows are the kind=cap rows of tests/notcovered.tsv (the 18th,
+ * "more than 6 arguments", is ACCEPT today and has its own repro r14_seven_args).  For each cap the tool
+ * writes the minimal input that sits AT the cap and the one a step PAST it, runs the installed product on
+ * both and asserts
+ *   at-cap    stderr never carries the cap message, and the at-cap form is accepted by its own contract:
+ *             rc 0 with the object written (compile modes), rc 0 (preprocess mode), or "not the cap message"
+ *             only (#error, whose at-cap form is itself a diagnostic);
+ *   past-cap  rc is non-zero, no object is left, and the first stderr line carries the cap message verbatim.
+ * A cap whose inputs cannot be built at a cost this tool can pay is reported UNREACHABLE with the reason, and
+ * that reason is a finding: 0.0.100 must not assume such a cap keeps its behaviour when it moves to a table.
+ *
+ * Modes: 0 = -c compile, 1 = -l -c library compile, 2 = -E preprocess with -include.
+ * --list prints the table and exits (the batch registration runs this form, so it costs no compile).
+ * --slow adds the caps whose fixtures need a large compile (include splices: about 27 s per side).
+ * Exit 0 when every run cap is MEASURED and passes, 1 when a measured cap fails or nothing was measured,
+ * 2 on usage or I/O.
+ *
+ * Check: tools/check-cap-probe.cx (batch cap-probe). */
+#pragma unisa use sys.fs
+#pragma unisa use sys.io
+#pragma unisa use sys.env
+#pragma unisa use sys.posix
+#pragma unisa use text.text
+#pragma unisa use text.fmt
+#pragma unisa use mem.heap
+#pragma unisa use mem.bytes
+#pragma unisa use cxlib.procrun
+#pragma unisa use cxlib.sessionroot
+
+#define CP_DIR 4000
+#define CP_LINE 1024
+#define CP_MAXFAIL 24
+
+/* ---- growing text buffer for one generated input ---- */
+static char *gb;
+static long gn, gcap;
+static void gneed(long extra) {
+    if (gn + extra + 1 <= gcap) return;
+    long want = gcap ? gcap : 8192;
+    while (want < gn + extra + 1) want *= 2;
+    char *p = mm_alloc((size_t)want);
+    if (!p) { fprintf(stderr, "cap-probe: REFUSE out-of-memory\n"); exit(2); }
+    if (gn) mm_copy(p, (size_t)want, gb, (size_t)gn);
+    if (gb) mm_free(gb);
+    gb = p; gcap = want;
+    gb[gn] = 0;
+}
+static void gput(const char *s, long n) { gneed(n); mm_copy(gb + gn, (size_t)(gcap - gn), s, (size_t)n); gn += n; gb[gn] = 0; }
+static void gputs(const char *s) { gput(s, (long)strlen(s)); }
+static void gfmt(const char *fmt, ...) {
+    char b[CP_LINE];
+    va_list ap; va_start(ap, fmt);
+    int n = tx_vsnprintf(b, sizeof b, fmt, ap);
+    va_end(ap);
+    if (n < 0 || n >= (int)sizeof b) { fprintf(stderr, "cap-probe: REFUSE line-too-long\n"); exit(2); }
+    gput(b, n);
+}
+static void greset(void) { gn = 0; if (gb) gb[0] = 0; }
+
+static char product[CP_DIR], work[CP_DIR], src[CP_DIR], obj[CP_DIR], hdr[CP_DIR];
+
+static void die(const char *what, const char *why) {
+    fprintf(stderr, "cap-probe: REFUSE %s%s%s\n", what, why && *why ? ": " : "", why ? why : "");
+    exit(2);
+}
+static void join(char *out, long cap, const char *dir, const char *leaf) {
+    if (cx_fmt(out, (int)cap, "%s/%s", dir, leaf)) die("path too long", leaf);
+}
+static void put_file(const char *path, const char *s, long n) {
+    if (cx_write(path, s, (size_t)n)) die("cannot write", path);
+}
+static int present(const char *path) { sy_stat_t st; return sy_stat(path, &st) == 0; }
+static int has(const char *hay, const char *needle) {
+    return tx_find(hay, (long)strlen(hay), needle, (long)strlen(needle)) >= 0;
+}
+/* The product is run with CWD set to the work directory, so a relative path would not resolve. */
+static void default_product(void) {
+    char cwd[CP_DIR];
+    if (sy_cwd(cwd, (int)sizeof cwd)) die("cannot read the working directory", 0);
+    if (cx_fmt(product, sizeof product, "%s/unisacc.com", cwd)) die("path too long", "unisacc.com");
+}
+
+/* ---- one product run; mode 0 compile, 1 library compile, 2 preprocess with -include ---- */
+static pr_result pr;
+static int run_once(const char *label, int mode, char *first, long cap) {
+    char *v[14]; int n = 0;
+    v[n++] = "sh"; v[n++] = product;
+    if (mode == 2) {
+        v[n++] = "-E"; v[n++] = "-include"; v[n++] = hdr; v[n++] = src;
+    } else {
+        v[n++] = "-c"; v[n++] = "-b"; v[n++] = "lnx/x86_64";
+        if (mode == 1) v[n++] = "-l";
+        v[n++] = "-o"; v[n++] = obj; v[n++] = src;
+    }
+    v[n] = 0;
+    char why[512];
+    if (pr_run(label, v, work, 0, 55, &pr)) {
+        if (cap > 0) cx_fmt(first, (int)cap, "%s", why);
+        return -1;
+    }
+    if (cap > 0) {
+        long k = 0;
+        while (k < (long)pr.errn && pr.err[k] != '\n' && k + 1 < cap) { first[k] = pr.err[k]; k++; }
+        first[k] = 0;
+    }
+    return pr.rc;
+}
+
+/* ---- result bookkeeping ---- */
+static int nmeas, nunreach, nfail, nskip, nlisted;
+static char failrows[CP_MAXFAIL][200]; static int nfailrows;
+static void row(const char *id, const char *status, const char *detail) {
+    printf("CAP\t%s\t%s\t%s\n", id, status, detail);
+}
+static void bad(const char *id, const char *detail) {
+    nfail++;
+    if (nfailrows < CP_MAXFAIL) cx_fmt(failrows[nfailrows++], 200, "%s: %s", id, detail);
+    row(id, "FAIL", detail);
+}
+
+/* ---- the table ---- */
+typedef struct {
+    const char *id;
+    const char *capmsg;
+    int slow;         /* at-cap fixture needs a large compile */
+    int mode;         /* 0 compile, 1 library compile, 2 preprocess */
+    int at_may_fail;  /* the at-cap form is itself a diagnostic (#error) */
+    const char *srcname;  /* 0 = probe.cx; a .c name selects the host path, a .cx name the product path */
+    const char *why_unreachable;
+} cap_t;
+typedef void (*gen_fn)(int side);
+
+static void gen_error_text(int side) {
+    int n = side ? 284 : 283;
+    greset(); gputs("#error ");
+    for (int i = 0; i < n; i++) gputs("x");
+    gputs("\n");
+}
+static void gen_include_splices(int side) {
+    join(hdr, sizeof hdr, work, "splice.h");
+    put_file(hdr, "extern int splice_hv;\n", 22);
+    int n = side ? 4000 : 3999;
+    greset();
+    for (int i = 0; i < n; i++) gputs("#include \"splice.h\"\n");
+    gputs("int splice_hv = 1;\nint main(void){ return splice_hv - 1; }\n");
+}
+static void gen_continuation(int side) {
+    join(hdr, sizeof hdr, work, "cont.h");
+    int n = side ? 4097 : 4096;
+    greset();
+    for (int i = 0; i < n; i++) gputs("/* x\\\n y */\n");
+    put_file(hdr, gb, gn);
+    greset();
+    gputs("int continuation_line = __LINE__;\n");
+}
+static void gen_const_beyond_int(int side) {
+    greset();
+    if (side) gputs("int main(void){ return 9223372036854775808; }\n");
+    else gputs("int main(void){ return 9223372036854775807; }\n");
+}
+static void gen_enum_pool(int side) {
+    int n = side ? 60 : 59;
+    greset();
+    for (int i = 0; i < n; i++) gfmt("enum e%d { E%d };\n", i, i);
+    gputs("int main(void){ return 0; }\n");
+}
+static void gen_signature_pool(int side) {
+    int n = side ? 8025 : 8024;
+    greset();
+    for (int i = 0; i < n; i++) gfmt("typedef int (*t%d)(int);\n", i);
+    gputs("int main(void){ return 0; }\n");
+}
+static void gen_setjmp_expr(int side) {
+    int depth = side ? 6 : 5;
+    greset(); gputs("int main(void){ int x = 0; x = (");
+    for (int i = 0; i < depth; i++) gputs("(setjmp((void*)0) + ");
+    gputs("0");
+    for (int i = 0; i < depth; i++) gputs(")");
+    gputs("); return x; }\n");
+}
+static void gen_struct_id(int side) {
+    int n = side ? 2037 : 2036;
+    greset();
+    for (int i = 1; i <= n; i++) gfmt("struct s%d { int x; };\n", i);
+    gputs("int main(void){ return 0; }\n");
+}
+static void gen_struct_member(int side) {
+    int n = side ? 513 : 512;
+    greset(); gputs("struct T {\n");
+    for (int i = 1; i <= n; i++) gfmt("  int m%d;\n", i);
+    gputs("};\nint main(void){ return 0; }\n");
+}
+
+static const cap_t caps[] = {
+    { "error-text-283", "not covered: #error text longer than 283 bytes", 0, 0, 1, 0, 0 },
+    { "include-splices-4000", "not covered: more than 4000 #include splices", 1, 0, 0, 0, 0 },
+    /* .c source: the product adds a prelude to .cx input, and 4096 continuation lines already exceed the cap
+     * on that path (4008 lines refused); the cap itself is pp-only, so the host-path source is the honest one. */
+    { "continuation-4096", "not covered: more than 4096 continuation lines in headers", 0, 2, 0, "probe.c", 0 },
+    { "constant-beyond-int", "not covered: constant beyond int", 0, 0, 0, 0, 0 },
+    { "enum-pool", "not covered: enum descriptor pool exhausted", 0, 0, 0, 0, 0 },
+    { "signature-pool", "not covered: function signature pool exhausted", 0, 0, 0, 0, 0 },
+    { "setjmp-expr-depth", "not covered: setjmp inside an expression nested too deeply", 0, 0, 0, 0, 0 },
+    { "struct-id", "not covered: structure id capacity", 0, 0, 0, 0, 0 },
+    { "struct-member", "not covered: structure member capacity", 0, 0, 0, 0, 0 },
+    { "forward-calls-8192", "not covered: host-forwarded call count exceeds 8192", 0, 0, 0, 0,
+      "0.0.93 compiles 8193 distinct host-forwarded calls clean: FW.name compares fw_count with 8192 and takes the reject branch only on observation 2, which a monotonically growing count never yields" },
+    { "relocation-capacity", "not covered: object relocation capacity", 0, 0, 0, 0,
+      "needs 262144 relocation records in one object (CMPI obj_nrel 262144); 262144 distinct symbol references and a multi-minute encode" },
+    { "layoutfacts-sid", "not covered: ordered source layout facts limit or resource", 0, 0, 0, 0,
+      "needs lf_sid 128 source units in one link (CMPI lf_sid 128); a 128-unit library fixture is a separate chain job" },
+    { "signature-eq-depth", "not covered: recursive signature equality limit", 0, 0, 0, 0,
+      "needs fs_eqdepth 31 through recursive type equality; no minimal source input known, the counter is internal to signature comparison" },
+    { "setjmp-temp-depth", "not covered: setjmp temporary depth", 0, 0, 0, 0,
+      "SJ.b27 rejects sj_depth < 0, a temporary-stack underflow; no source-level input drives the counter negative" },
+    { "shape-span", "not covered: shape descriptor capacity", 0, 0, 0, 0,
+      "POSSPAN is 67108864 shape ids; the fixture would need that many distinct array shapes" },
+    { "modelgraph-budget", "not covered: signature graph equality budget", 0, 0, 0, 0,
+      "needs mg_next 17409 graph nodes or mg_framelevel 66; the counter only grows on distinct signature graph nodes" },
+    { "token-position-span", "not covered: token input exceeds position domain", 0, 0, 0, 0,
+      "toklen >= POSSPAN means a 67108864-byte source, outside a single-run budget" },
+};
+static const gen_fn gens[] = {
+    gen_error_text, gen_include_splices, gen_continuation, gen_const_beyond_int, gen_enum_pool,
+    gen_signature_pool, gen_setjmp_expr, gen_struct_id, gen_struct_member,
+};
+#define CP_NCAP ((int)(sizeof caps / sizeof caps[0]))
+#define CP_NGEN ((int)(sizeof gens / sizeof gens[0]))
+
+static int reachable(int i) { return i < CP_NGEN && !caps[i].why_unreachable; }
+static int count_kind(int slow) {
+    int n = 0;
+    for (int i = 0; i < CP_NCAP; i++) if (reachable(i) && caps[i].slow == slow) n++;
+    return n;
+}
+/* A .c source name selects the host path, a .cx name the product path (the product prepends a prelude to
+ * .cx input).  A cap that lives in pp or on the host path therefore names a .c file. */
+static void pick_src(const cap_t *c) { join(src, sizeof src, work, c->srcname ? c->srcname : "probe.cx"); }
+
+static void measure(const cap_t *c, gen_fn gen) {
+    char first[CP_LINE]; int rc;
+    pick_src(c);
+
+    /* at the cap */
+    gen(0);
+    put_file(src, gb, gn);
+    if (present(obj)) sy_unlink(obj);
+    rc = run_once(c->id, c->mode, first, sizeof first);
+    if (rc < 0) { bad(c->id, first); return; }
+    if (has(first, c->capmsg)) { char d[300]; cx_fmt(d, 300, "at-cap refused: %s", first); bad(c->id, d); return; }
+    if (!c->at_may_fail) {
+        if (rc != 0) { char d[300]; cx_fmt(d, 300, "at-cap rc=%d first=%s", rc, first); bad(c->id, d); return; }
+        if (c->mode != 2 && !present(obj)) { bad(c->id, "at-cap wrote no object"); return; }
+    }
+
+    /* one step past the cap */
+    gen(1);
+    put_file(src, gb, gn);
+    if (present(obj)) sy_unlink(obj);
+    rc = run_once(c->id, c->mode, first, sizeof first);
+    if (rc < 0) { bad(c->id, first); return; }
+    if (rc == 0) { bad(c->id, "past-cap was accepted"); return; }
+    if (c->mode != 2 && present(obj)) { bad(c->id, "past-cap left an object"); return; }
+    if (!has(first, c->capmsg)) { char d[400]; cx_fmt(d, 400, "past-cap rc=%d first=%s", rc, first); bad(c->id, d); return; }
+    nmeas++;
+    row(c->id, "MEASURED", "ok");
+}
+
+int main(int argc, char **argv) {
+    int want_slow = 0;
+    const char *only = 0;
+    for (int i = 1; i < argc; i++) {
+        if (!strcmp(argv[i], "--list")) nlisted = 1;
+        else if (!strcmp(argv[i], "--slow") || !strcmp(argv[i], "--all")) want_slow = 1;
+        else if (!strcmp(argv[i], "--only") && i + 1 < argc) only = argv[++i];
+        else if (!strcmp(argv[i], "--product") && i + 1 < argc) cx_fmt(product, sizeof product, "%s", argv[++i]);
+        else if (!strcmp(argv[i], "--work") && i + 1 < argc) cx_fmt(work, sizeof work, "%s", argv[++i]);
+        else { fprintf(stderr, "cap-probe: REFUSE unknown argument %s\n", argv[i]); return 2; }
+    }
+    if (!product[0]) default_product();
+
+    if (nlisted) {
+        for (int i = 0; i < CP_NCAP; i++) {
+            int r = reachable(i);
+            printf("CAP\t%s\t%s\t%s\n", caps[i].id, r ? (caps[i].slow ? "SLOW" : "FAST") : "UNREACHABLE",
+                   caps[i].capmsg);
+            if (!r) printf("CAP_WHY\t%s\t%s\n", caps[i].id, caps[i].why_unreachable);
+        }
+        printf("CAP_PROBE_LIST\tcaps=%d\tfast=%d\tslow=%d\tunreachable=%d\n", CP_NCAP,
+               count_kind(0), count_kind(1), CP_NCAP - count_kind(0) - count_kind(1));
+        return 0;
+    }
+
+    if (!work[0]) {
+        char base[CP_DIR];
+        if (sr_default("cap-probe", base, sizeof base)) die("cannot pick a session root", 0);
+        cx_fmt(work, sizeof work, "%s", base);
+        if (sy_mkdir_all(work, 0700)) die("cannot create the work directory", work);
+    }
+    /* .cx, not .c: a .c name selects the host path (hostcc/prelude), a .cx name selects the product path, and
+     * only the product path has the signature/enum/struct caps under test. */
+    join(src, sizeof src, work, "probe.cx");
+    join(obj, sizeof obj, work, "probe.o");
+
+    for (int i = 0; i < CP_NCAP; i++) {
+        const cap_t *c = &caps[i];
+        if (only && strcmp(only, c->id)) continue;
+        if (c->why_unreachable) { nunreach++; row(c->id, "UNREACHABLE", c->why_unreachable); continue; }
+        if (i >= CP_NGEN) { nunreach++; row(c->id, "UNREACHABLE", "no generator"); continue; }
+        if (c->slow && !want_slow) { nskip++; row(c->id, "SKIPPED", "slow fixture, pass --slow"); continue; }
+        measure(c, gens[i]);
+    }
+
+    printf("CAP_PROBE\tmeasured=%d\tunreachable=%d\tskipped=%d\tfailed=%d\twork=%s\n",
+           nmeas, nunreach, nskip, nfail, work);
+    for (int i = 0; i < nfailrows; i++) printf("CAP_FAIL\t%s\n", failrows[i]);
+    if (gb) mm_free(gb);
+    return nfail ? 1 : (nmeas ? 0 : 1);
+}

@@ -177,10 +177,26 @@ int main(int argc, char **argv) {
     body = cx_read(cand, &bn);
     if (!body) die("read candidate");
     if (!shell_parse(body, (long)bn)) {
-        /* single file: the file is compiler body and container at once */
+        /* single file: the file is compiler body and container at once.
+           With K4 UPI1 pid in the first 8 KiB, a verbatim copy preserves product
+           identity (hit), while flipping one hex char of UPI1 pid changes
+           compiler identity (miss); legacy files without UPI1 fall back to stat (miss). */
+        long lim = bn < 8192 ? (long)bn : 8192, upos = -1, u;
+        for (u = 0; u + 75 <= lim; u++) {
+            if (body[u] == '#' && body[u + 1] == ' ' && lit_at(body, lim, u + 2, "UPI1 pid=")) { upos = u; break; }
+        }
         if (cx_write(cand2, body, bn) || sy_chmod(cand2, 0755)) die("copy candidate");
-        rc = run(cand2, ra, 1, "t.cx", 0, &out);
-        ck(rc == 0 && has(out, "v=7 k=1") && miss(out), "identity-miss");
+        if (upos >= 0) {
+            int rc_same = run(cand2, ra, 1, "t.cx", 0, &out);
+            int same_hit = (rc_same == 0 && has(out, "v=7 k=1") && hit(out));
+            body[upos + 11] = (body[upos + 11] == '0') ? '1' : '0';
+            if (cx_write(cand2, body, bn) || sy_chmod(cand2, 0755)) die("flip candidate pid");
+            rc = run(cand2, ra, 1, "t.cx", 0, &out);
+            ck(same_hit && rc == 0 && has(out, "v=7 k=1") && miss(out), "identity-miss");
+        } else {
+            rc = run(cand2, ra, 1, "t.cx", 0, &out);
+            ck(rc == 0 && has(out, "v=7 k=1") && miss(out), "identity-miss");
+        }
         printf("NA\truncache-roots.body-only-miss\tsingle-file candidate: body and container are one file, not run\n");
     } else {
         /* split shape: copying the shell alone changes nothing the key reads */

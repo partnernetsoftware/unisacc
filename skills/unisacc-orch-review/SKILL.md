@@ -17,6 +17,10 @@ description: 对执行者交付做对抗复核并裁决能否落库时调用;覆
   - 贴 `MUTATION_GATE` 与 `MUTATION_COVERAGE` 行。
 - 断言只迁移不删;无新开关时行为逐字节对拍;冷环境耗时测三次。
 - 新增行家目录绝对路径命中 0(`tools/no-home-path.cx --staged`)。
+- 回报由 `tools/handoff-check.cx` 生成,编排者只收其输出,执行者自述的"完成""无回归""既有失败"不作证据:
+  - 末行 `HANDOFF passed= failed= unmeasured= deferred= review=`;rc 0 才算干净,rc 1 有失败,rc 3 有未测、延后或待复核项,逐项处理不得略过。
+  - 声称"既有失败"时用 `--vs REV --cmd '命令'`:同命令在工作树与 REV 的 git archive 各跑一次并贴两侧原行;当前失败而 REV 通过判 FAIL,两侧同一行失败判 REVIEW_REQUIRED 由复核者裁定。
+  - 没做完的事用 `--defer 名称=原因` 声明,或让 tests/batches.tsv 新增行带非 IMPLEMENTED 状态,都计入 `deferred=`。原因:自述会漏报延后项,机械输出不会。
 
 ## (2) 检查必须真实
 

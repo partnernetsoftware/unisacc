@@ -142,6 +142,7 @@ static int rg_marker_ok(const char *m) {
     for (; *m; m++) if (!((*m >= 'A' && *m <= 'Z') || (*m >= '0' && *m <= '9') || *m == '_')) return 0;
     return 1;
 }
+static int rg_registry_shrank(void);
 /* The two untracked things a root needs before a registration can be tried; every missing one is named
    with its fix.  0 when the root is usable. */
 static int rg_root_missing(void) {
@@ -152,6 +153,7 @@ static int rg_root_missing(void) {
     }
     /* no out/ requirement any more (project owner 2026-11-13: nothing may be created under out/ in the
        checkout): the runner cache and the trial run directory live under sy_tmpdir() */
+    bad += rg_registry_shrank();
     return bad;
 }
 
@@ -266,6 +268,62 @@ static int run(char **argv, char *out, long cap) {
     sy_close(ofd);
     if (sy_wait_status(pid, 0, &ex, &code, &sig) != pid || !ex) return -1;
     return code;
+}
+
+/* REGISTRY_SHRANK guard: a registry table with fewer lines than its git HEAD copy, or missing, means
+   rows were lost before this run (register's own rollback only removes its own rows).  Every writing
+   mode refuses.  A root without a commit, or a path HEAD does not hold, is not guarded. */
+static int rg_shrank_one(const char *path) {
+    static char head[1 << 23];
+    char spec[4400], *now; size_t nn = 0; long hl = 0, nl = 0;
+    if (cx_fmt(spec, sizeof spec, "HEAD:%s", path)) return 0;
+    char *sv[] = {"./tools/bound", "20", "git", "show", spec, 0};
+    if (run(sv, head, sizeof head) != 0) return 0;
+    for (const char *s = head; *s; s++) if (*s == '\n') hl++;
+    now = cx_read(path, &nn);
+    if (now) { for (size_t i = 0; i < nn; i++) if (now[i] == '\n') nl++; free(now); }
+    if (now && nl >= hl) return 0;
+    fprintf(stderr, "register: REGISTRY_SHRANK path=%s head_lines=%ld now_lines=%ld%s (recover: git show HEAD:%s > %s)\n",
+            path, hl, nl, now ? "" : " missing=1", path, path);
+    return 1;
+}
+static int rg_registry_shrank(void) {
+    static char ls[1 << 16], path[4400];
+    int bad = 0;
+    char *lt[] = {"./tools/bound", "20", "git", "ls-tree", "--name-only", "HEAD", "tests/manifests/", 0};
+    bad += rg_shrank_one("tests/tools-compile-sources.tsv");
+    bad += rg_shrank_one("tests/batches.tsv");
+    bad += rg_shrank_one("tests/coverage.tsv");
+    if (run(lt, ls, sizeof ls) != 0) return bad;
+    for (char *p = ls; *p;) {
+        char *e = p; while (*e && *e != '\n') e++;
+        char c = *e; *e = 0;
+        if (!strncmp(p, "tests/manifests/tools-compile-", 30) && cx_fmt(path, sizeof path, "%s", p) == 0) bad += rg_shrank_one(path);
+        if (!c) break;
+        p = e + 1;
+    }
+    return bad;
+}
+
+static void rg_dup_hint(const char *path) {
+    static char hbuf[16384];
+    long pl, at = 0, n;
+    const char *u;
+    if (!path) return;
+    pl = tx_len(path, 1200);
+    if (pl < 10 || !mm_same(path, "tools/", 6) || !tx_eqz(path + pl - 3, ".cx")) return;
+    u = getenv("UNISACC");
+    if (!u || !*u) u = "./unisacc.com";
+    {
+        char *v[] = {"./tools/bound", "15", "sh", (char *)u, "tools/dup-census.cx", "--", "--hint-file", (char *)path, 0};
+        if (run(v, hbuf, sizeof hbuf) != 0) return;
+    }
+    n = tx_len(hbuf, sizeof hbuf);
+    while (at < n) {
+        long e = tx_chr(hbuf + at, n - at, '\n'), ln = e < 0 ? n - at : e;
+        if (ln > 9 && mm_same(hbuf + at, "DUP_HINT\t", 9)) printf("%.*s\n", (int)ln, hbuf + at);
+        at += ln + 1;
+    }
 }
 
 /* ---- --tool mode: one command for the inventory side of "a new tools/NAME.cx" ----
@@ -1278,7 +1336,10 @@ static int rg_tool_mode(int argc, char **argv) {
     for (i = 0; i < nt; i++) printf("REGISTER_TOOL\ttool=%s\tkind=%s\tgit=%s\n", tools[i], kinds[i], staged[i] ? "ADDED" : "TRACKED");
     printf("REGISTER_TOOL\tsources_added=%ld\tinventory=%ld\tshards=%ld\tshard_rows_added=%ld\tshard_rows_removed=%ld\tpins_added=%ld\tpins_needed=%ld\n", added_src, rows, shards, added_sh, removed_sh, added_pin, need_pin);
     printf("REGISTER_TOOL\tstatus=%s\n", ch_s || ch_b || ch_p || did ? "REGISTERED" : "UNCHANGED");
-    if (ch_s || ch_b || ch_p || did) printf("REGISTER_NEXT\tderive --write --only links,batch-domains\n");
+    if (ch_s || ch_b || ch_p || did) {
+        for (i = 0; i < nt; i++) rg_dup_hint(tools[i]);
+        printf("REGISTER_NEXT\tderive --write --only links,batch-domains\n");
+    }
     return 0;
 }
 
@@ -1460,6 +1521,7 @@ int main(int argc, char **argv) {
     if (lk >= 0) rg_unlock(lk);
     printf("REGISTER\tid=%s\tstatus=%s\n", id, norun ? "REGISTERED_NORUN" : "REGISTERED");
     rg_timing_warn(id);
+    rg_dup_hint(check);
     /* For a real registration obtain its canonical manifest row from the current registry. */
     if (!getenv("UNISACC_TABLES") || !*getenv("UNISACC_TABLES")) {
         char *v[] = {"./tools/bound", "58", "sh", "./unisacc.com", "tools/batch-packages-gen.cx", "--", "--query","--row",(char*)id,0};

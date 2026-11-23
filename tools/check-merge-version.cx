@@ -1,0 +1,231 @@
+/* tools/check-merge-version.cx -- tools/merge-version.cx on a synthetic repository (preview, rules, gates are not run).
+ *
+ *   sh ./unisacc.com tools/check-merge-version.cx   (from the repo root)
+ *
+ * The repository: base commit B with derive.cx, table.tsv, trap.cx, del.cx, plan.md, unknown.txt; branch main edits
+ * derive.cx line 3, appends a row to table.tsv, edits trap.cx, deletes del.cx and edits unknown.txt line 2; branch feat
+ * (from B) edits derive.cx line 3 differently, appends another row, leaves trap.cx alone, edits del.cx and edits
+ * unknown.txt line 2 differently.  Rules: derive.cx take-ours, table.tsv union, trap.cx and del.cx always take-theirs.
+ *   run 1 (unknown.txt conflicts, no rule): derive.cx, table.tsv resolved by rule, trap.cx and del.cx forced to feat,
+ *           unknown.txt needs-human, MERGE_VERSION verdict=NEEDS_HUMAN conflicts_left=1 tree=-, rc 1
+ *   run 2 (feat resets unknown.txt): READY, conflicts_left=0, tree hash; the tree holds main's derive.cx line, both table
+ *           rows, trap.cx as B had it (the silent trap closed), del.cx as feat has it; the shared index is untouched
+ *   mutations: without the trap row trap.cx stays main's edit (what a plain merge does silently); without the derive.cx
+ *           row derive.cx is needs-human; a branch glob that does not match leaves every rule out (all needs-human);
+ *           an unknown action in the rules file is refused (rc 2)
+ * Prints PASS/FAIL lines and CHECK_MERGE_VERSION TAB failed=N. */
+#pragma unisa use sys.env
+#pragma unisa use sys.fs
+#pragma unisa use sys.posix
+#pragma unisa use text.text
+#pragma unisa use mem.heap
+#pragma unisa use mem.bytes
+#pragma unisa use cxlib.ckrun
+#pragma unisa use testx.check
+#pragma unisa use cxlib.die
+
+static char T[600], out[1 << 16], root[600];
+static int failed;
+static void ck_(int ok, const char *what) { printf("%s\tcheck-merge-version.%s\n", ok ? "PASS" : "FAIL", what); if (!ok) failed++; }
+#define CK(c, w) do { int ok_ = (c); ck_(ok_, w); } while (0)
+static int sh(const char *script) { return ckk_sh_t("check-merge-version", script, out, sizeof out, 50); }
+static void put(const char *rel, const char *body) {
+    char p[1100];
+    cx_fmt(p, sizeof p, "%s/%s", T, rel);
+    if (cx_write(p, body, strlen(body))) { printf("FAIL\twrite %s\n", rel); exit(1); }
+}
+static int run_mv(const char *branch, const char *rules, const char *work) {
+    char cmd[3000];
+    cx_fmt(cmd, sizeof cmd, "cd %s && sh ./unisacc.com tools/merge-version.cx -- preview --repo %s/repo --base main --branch %s --rules %s/%s --work %s/%s 2>&1", root, T, branch, T, rules, T, work);
+    return sh(cmd);
+}
+static int git_show(const char *tree, const char *path) {
+    char cmd[1500];
+    cx_fmt(cmd, sizeof cmd, "git -C %s/repo show %s:%s 2>&1", T, tree, path);
+    return sh(cmd);
+}
+static void tree_of(char tree[64]) {
+    const char *p = strstr(out, "tree=");
+    tree[0] = 0;
+    if (!p) return;
+    p += 5;
+    size_t n = 0;
+    while (p[n] && p[n] != '\n' && n < 63) { tree[n] = p[n]; n++; }
+    tree[n] = 0;
+}
+
+int main(void) {
+    cx_fmt(root, sizeof root, ".");   /* the check runs from the repo root */
+    if (sy_mkdtemp(sy_tmpdir(), "check-merge-version-", T, sizeof T)) { printf("FAIL\tmkdtemp\n"); return 1; }
+    char cmd[6000];
+    cx_fmt(cmd, sizeof cmd,
+        "set -e; cd %s && mkdir repo && cd repo && git init -q -b main . && git config user.email t@t && git config user.name t && "
+        "printf 'l1\\nl2\\nl3\\nl4\\nl5\\n' > derive.cx && printf 'h\\nrow0\\n' > table.tsv && printf 't1\\nt2\\nt3\\n' > trap.cx && printf 'd1\\nd2\\nd3\\n' > del.cx && printf 'p\\n' > plan.md && printf 'u1\\nu2\\nu3\\n' > unknown.txt && "
+        "git add -A && git commit -q -m base && git branch feat && "
+        "printf 'l1\\nl2\\nMAIN3\\nl4\\nl5\\n' > derive.cx && printf 'h\\nrow0\\nrowM\\n' > table.tsv && printf 't1\\nMAIN-T2\\nt3\\n' > trap.cx && git rm -q del.cx && printf 'u1\\nMAIN-U\\nu3\\n' > unknown.txt && "
+        "git add -A && git commit -q -m main-side && "
+        "git checkout -q feat && printf 'l1\\nl2\\nFEAT3\\nl4\\nl5\\n' > derive.cx && printf 'h\\nrow0\\nrowF\\n' > table.tsv && printf 'd1\\nFEAT-D2\\nd3\\n' > del.cx && printf 'u1\\nFEAT-U\\nu3\\n' > unknown.txt && "
+        "git add -A && git commit -q -m feat-side && git checkout -q -b feat2 feat~0 && printf 'u1\\nu2\\nu3\\n' > unknown.txt && git add -A && git commit -q -m feat2-reset-unknown && git branch other feat2 && git checkout -q main && echo REPO_OK", T);
+    int rc = sh(cmd);
+    CK(rc == 0 && tk_has(out, "REPO_OK"), "synthetic-repo-built");
+    const char *rules_head = "# id\tbranch\tpath\twhen\taction\tevidence\n";
+    char rules[2000];
+    cx_fmt(rules, sizeof rules, "%sr-derive\tfeat*\tderive.cx\tconflict\ttake-ours\tfixture\nr-table\t*\ttable.tsv\tconflict\tunion\tfixture\nr-trap\tfeat*\ttrap.cx\talways\ttake-theirs\tfixture\nr-del\tfeat*\tdel.cx\talways\ttake-theirs\tfixture\n", rules_head);
+    put("rules.tsv", rules);
+    char before[200];
+    sh("true");
+    cx_fmt(cmd, sizeof cmd, "git -C %s/repo status --short | wc -l; git -C %s/repo rev-parse main feat feat2 | tr '\\n' ' '", T, T);
+    sh(cmd);
+    cx_fmt(before, sizeof before, "%s", out);
+
+    /* run 1: unknown.txt conflicts with no rule */
+    rc = run_mv("feat", "rules.tsv", "w1");
+    CK(rc == 1 && tk_has(out, "MERGE_VERSION\tverdict=NEEDS_HUMAN\tconflicts_left=1\tforced=2") && tk_has(out, "tree=-"), "unknown-conflict-needs-human-no-tree-rc1");
+    CK(tk_has(out, "MERGE_PATH\tunknown.txt\tneeds-human") && tk_has(out, "MERGE_PATH\tderive.cx\tauto-resolved\ttake-ours\trule=r-derive") && tk_has(out, "MERGE_PATH\ttable.tsv\tauto-resolved\tunion\trule=r-table"), "rule-rows-settle-known-classes-unknown-left");
+    CK(tk_has(out, "MERGE_PATH\ttrap.cx\tauto-resolved\tforce-branch\trule=r-trap") && tk_has(out, "MERGE_PATH\tdel.cx\tauto-resolved\tforce-branch\trule=r-del"), "always-rows-force-silent-trap-paths");
+
+    /* run 2: feat2 resets unknown.txt: ready */
+    rc = run_mv("feat2", "rules.tsv", "w2");
+    char tree[64];
+    tree_of(tree);
+    CK(rc == 0 && tk_has(out, "verdict=READY\tconflicts_left=0") && strlen(tree) == 40, "ready-when-nothing-left-with-a-tree-hash");
+    char tpath[200], cmd2[900];
+    git_show(tree, "derive.cx");
+    CK(tk_has(out, "MAIN3") && !tk_has(out, "FEAT3"), "take-ours-keeps-the-base-side");
+    git_show(tree, "table.tsv");
+    CK(tk_has(out, "rowM") && tk_has(out, "rowF") && tk_has(out, "row0"), "union-keeps-both-appended-rows");
+    git_show(tree, "trap.cx");
+    CK(tk_has(out, "t2") && !tk_has(out, "MAIN-T2"), "silent-trap-closed-trap-file-is-the-branch-version");
+    git_show(tree, "del.cx");
+    CK(tk_has(out, "FEAT-D2"), "base-deleted-file-comes-back-as-the-branch-has-it");
+    cx_fmt(tpath, sizeof tpath, "%s", "x"); (void)tpath;
+    cx_fmt(cmd2, sizeof cmd2, "git -C %s/repo status --short | wc -l; git -C %s/repo rev-parse main feat feat2 | tr '\\n' ' '", T, T);
+    sh(cmd2);
+    CK(!strcmp(out, before), "shared-index-and-refs-untouched");
+
+    /* gate checkout: a private git repository of the resolved tree; the shared repository keeps refs, index, worktrees */
+    char gcmd[3500], refs0[3000];
+    cx_fmt(gcmd, sizeof gcmd, "git -C %s/repo for-each-ref | md5sum && git -C %s/repo worktree list | wc -l && ls %s/repo/.git | tr '\\n' ' '", T, T, T);
+    sh(gcmd);
+    cx_fmt(refs0, sizeof refs0, "%s", out);
+    cx_fmt(gcmd, sizeof gcmd, "cd %s && sh ./unisacc.com tools/merge-version.cx -- gate traps --repo %s/repo --branch feat2 --work %s/w2 2>&1", root, T, T);
+    rc = sh(gcmd);
+    CK(rc == 0 && tk_has(out, "MERGE_GATE\ttraps\tOK"), "gate-traps-runs-in-the-private-checkout");
+    cx_fmt(gcmd, sizeof gcmd, "test -d %s/w2/tree/.git && echo GITDIR; cat %s/w2/tree/.git/objects/info/alternates; echo ALT=%s/repo/.git/objects; git -C %s/w2/tree rev-parse 'HEAD^{tree}'; cat %s/w2/resolved.tree; echo; git -C %s/w2/tree ls-files | wc -l", T, T, T, T, T, T);
+    sh(gcmd);
+    CK(tk_has(out, "GITDIR") && tk_has(out, "derive.cx") == 0, "gate-tree-has-a-git-dir");
+    {
+        char alt[1200], want[1200];
+        cx_fmt(gcmd, sizeof gcmd, "cat %s/w2/tree/.git/objects/info/alternates", T);
+        sh(gcmd);
+        cx_fmt(alt, sizeof alt, "%s", out);
+        cx_fmt(want, sizeof want, "%s/repo/.git/objects", T);
+        CK(tk_has(alt, want), "gate-tree-alternates-point-at-the-shared-object-store");
+    }
+    cx_fmt(gcmd, sizeof gcmd, "a=$(git -C %s/w2/tree rev-parse 'HEAD^{tree}'); b=$(cat %s/w2/resolved.tree); test \"$a\" = \"$b\" && echo TREE-SAME; git -C %s/repo for-each-ref | md5sum && git -C %s/repo worktree list | wc -l && ls %s/repo/.git | tr '\\n' ' '", T, T, T, T, T);
+    sh(gcmd);
+    CK(tk_has(out, "TREE-SAME"), "gate-tree-head-tree-is-the-resolved-tree");
+    CK(tk_has(out, refs0), "gate-leaves-shared-refs-worktrees-and-gitdir-entries-as-before");
+    cx_fmt(gcmd, sizeof gcmd, "rm -rf %s/w2 && git -C %s/repo fsck --no-dangling 2>&1 | wc -l; ls %s/repo/.git | tr '\\n' ' '", T, T, T);
+    sh(gcmd);
+    CK(tk_has(out, "0\n") && !tk_has(out, "worktrees"), "removing-the-work-dir-leaves-the-shared-repo-clean");
+
+    /* mutations */
+    cx_fmt(rules, sizeof rules, "%sr-derive\tfeat*\tderive.cx\tconflict\ttake-ours\tfixture\nr-table\t*\ttable.tsv\tconflict\tunion\tfixture\nr-del\tfeat*\tdel.cx\talways\ttake-theirs\tfixture\n", rules_head);
+    put("rules-no-trap.tsv", rules);
+    rc = run_mv("feat2", "rules-no-trap.tsv", "w3");
+    tree_of(tree);
+    git_show(tree, "trap.cx");
+    CK(tk_has(out, "MAIN-T2"), "mutation-no-trap-row-silently-keeps-the-other-side");
+    cx_fmt(rules, sizeof rules, "%sr-table\t*\ttable.tsv\tconflict\tunion\tfixture\nr-trap\tfeat*\ttrap.cx\talways\ttake-theirs\tfixture\nr-del\tfeat*\tdel.cx\talways\ttake-theirs\tfixture\n", rules_head);
+    put("rules-no-derive.tsv", rules);
+    rc = run_mv("feat2", "rules-no-derive.tsv", "w4");
+    CK(rc == 1 && tk_has(out, "MERGE_PATH\tderive.cx\tneeds-human") && tk_has(out, "verdict=NEEDS_HUMAN"), "mutation-no-derive-row-needs-human");
+    rc = run_mv("other", "rules.tsv", "w5");
+    CK(rc == 1 && tk_has(out, "MERGE_PATH\tderive.cx\tneeds-human") && !tk_has(out, "force-branch"), "mutation-branch-glob-excludes-rules");
+    cx_fmt(rules, sizeof rules, "%sr-bad\t*\tx\tconflict\tsmash\tfixture\n", rules_head);
+    put("rules-bad.tsv", rules);
+    rc = run_mv("feat2", "rules-bad.tsv", "w6");
+    CK(rc == 2 && tk_has(out, "unknown rule action"), "unknown-rule-action-refused-rc2");
+
+    /* derive gates on a repository with a fake derive.cx and ref-job-paths.cx that log their calls into the checkout: order of warm-up and full check,
+     * a failed warm-up not deciding the verdict, a drift not retried, the baseline step only after a good derive-write, the load precheck */
+    static const char *fake_derive =
+        "static void lg(const char *s) { FILE *f = fopen(\"calls.txt\", \"a\"); if (f) { fputs(s, f); fputs(\"\\n\", f); fclose(f); } }\n"
+        "static int has(const char *p) { FILE *f = fopen(p, \"r\"); if (f) { fclose(f); return 1; } return 0; }\n"
+        "int main(int argc, char **argv) {\n"
+        "    int only = 0, wr = 0;\n"
+        "    for (int i = 1; i < argc; i++) { if (!strcmp(argv[i], \"--only\")) only = 1; if (!strcmp(argv[i], \"--write\")) wr = 1; }\n"
+        "    lg(wr ? \"WRITE\" : only ? \"WARM\" : \"FULL\");\n"
+        "    if (only && has(\"warm-fails\")) { printf(\"DERIVE\\tproduct-map\\tREFUSED\\t1\\n\"); return 2; }\n"
+        "    if (wr && has(\"write-fails\")) { printf(\"DERIVE_SUMMARY ok=0 drift=1 refused=0 skipped=0 elapsed_ms=1\\n\"); return 1; }\n"
+        "    if (!only && !wr && has(\"drift\")) { printf(\"DERIVE\\tlinks\\tDRIFT\\t1\\nDERIVE_SUMMARY ok=0 drift=1 refused=0 skipped=0 elapsed_ms=1\\n\"); return 1; }\n"
+        "    if (!only) printf(\"DERIVE_SUMMARY ok=1 drift=0 refused=0 skipped=0 elapsed_ms=1\\n\");\n"
+        "    return 0;\n"
+        "}\n";
+
+    static const char *fake_rjp = "int main(int argc, char **argv) { FILE *f = fopen(\"calls.txt\", \"a\"); if (f) { fputs(\"RJP\\n\", f); fclose(f); } printf(\"fake ref-job-paths ok\\n\"); return 0; }\n";
+    put("fake-derive.cx", fake_derive);
+    put("fake-rjp.cx", fake_rjp);
+    cx_fmt(cmd, sizeof cmd,
+        "set -e; cd %s && mkdir repo2 && cd repo2 && git init -q -b main . && git config user.email t@t && git config user.name t && mkdir tools && "
+        "cp ../fake-derive.cx tools/derive.cx && cp ../fake-rjp.cx tools/ref-job-paths.cx && printf 'a\\n' > a.txt && git add -A && git commit -q -m base && git branch fb && "
+        "git checkout -q fb && printf 'b\\n' > b.txt && git add -A && git commit -q -m fb && git checkout -q main && printf 'c\\n' > c.txt && git add -A && git commit -q -m main-side && echo REPO2_OK", T);
+    rc = sh(cmd);
+    CK(rc == 0 && tk_has(out, "REPO2_OK"), "derive-fixture-repo-built");
+    cx_fmt(cmd, sizeof cmd, "cd %s && sh ./unisacc.com tools/merge-version.cx -- preview --repo %s/repo2 --base main --branch fb --rules %s/rules.tsv --work %s/g1 2>&1", root, T, T, T);
+    rc = sh(cmd);
+    CK(rc == 0 && tk_has(out, "verdict=READY"), "derive-fixture-preview-ready");
+    {
+        char g[1500], calls[300];
+        cx_fmt(calls, sizeof calls, "cat %s/g1/tree/calls.txt 2>&1 | tr '\\n' ','", T);
+        /* 1. good tree: warm-up first, then the full check, verdict OK */
+        cx_fmt(g, sizeof g, "cd %s && sh ./unisacc.com tools/merge-version.cx -- gate derive-check --repo %s/repo2 --branch fb --work %s/g1 --max-load 1000 2>&1", root, T, T);
+        rc = sh(g);
+        CK(rc == 0 && tk_has(out, "derive-check-warm\tDONE\trc=0") && tk_has(out, "MERGE_GATE\tderive-check\tOK"), "derive-check-warms-then-judges-the-full-check");
+        sh(calls);
+        CK(!strcmp(out, "WARM,FULL,"), "warm-up-runs-before-the-full-check-once-each");
+        /* 2. the warm-up fails: still only a warm-up, the full check decides */
+        cx_fmt(g, sizeof g, "touch %s/g1/tree/warm-fails && cd %s && sh ./unisacc.com tools/merge-version.cx -- gate derive-check --repo %s/repo2 --branch fb --work %s/g1 --max-load 1000 2>&1", T, root, T, T);
+        rc = sh(g);
+        CK(rc == 0 && tk_has(out, "derive-check-warm\tDONE\trc=2") && tk_has(out, "MERGE_GATE\tderive-check\tOK") && !tk_has(out, "retry"), "failed-warm-up-does-not-decide-the-verdict");
+        /* 3. a drift stays a failure and is not rerun */
+        cx_fmt(g, sizeof g, "touch %s/g1/tree/drift && cd %s && sh ./unisacc.com tools/merge-version.cx -- gate derive-check --repo %s/repo2 --branch fb --work %s/g1 --max-load 1000 2>&1", T, root, T, T);
+        rc = sh(g);
+        CK(rc == 1 && tk_has(out, "MERGE_GATE\tderive-check\tFAIL") && !tk_has(out, "OK-after-retry") && !tk_has(out, "derive-check-retry"), "drift-fails-and-is-not-retried");
+        sh(calls);
+        CK(!strcmp(out, "WARM,FULL,WARM,FULL,WARM,FULL,"), "drift-run-called-the-full-check-once");
+        /* 4. derive-write: the baseline step runs after a good write, not after a failed one */
+        cx_fmt(g, sizeof g, "rm %s/g1/tree/drift %s/g1/tree/warm-fails; rm -f %s/g1/tree/calls.txt; cd %s && sh ./unisacc.com tools/merge-version.cx -- gate derive-write --repo %s/repo2 --branch fb --work %s/g1 --max-load 1000 2>&1", T, T, T, root, T, T);
+        rc = sh(g);
+        CK(rc == 0 && tk_has(out, "derive-write\tref-job-paths-baseline\twritten") && tk_has(out, "tree_after_derive"), "derive-write-then-baseline-step");
+        sh(calls);
+        CK(!strcmp(out, "WRITE,RJP,"), "baseline-step-runs-after-the-write-and-once");
+        cx_fmt(g, sizeof g, "touch %s/g1/tree/write-fails; rm -f %s/g1/tree/calls.txt; cd %s && sh ./unisacc.com tools/merge-version.cx -- gate derive-write --repo %s/repo2 --branch fb --work %s/g1 --max-load 1000 2>&1", T, T, root, T, T);
+        rc = sh(g);
+        CK(rc == 1 && !tk_has(out, "ref-job-paths-baseline"), "failed-write-skips-the-baseline-step");
+        sh(calls);
+        CK(!strcmp(out, "WRITE,"), "failed-write-ran-no-baseline-step");
+        /* 5. load precheck: refuses before touching the tree */
+        cx_fmt(g, sizeof g, "rm -f %s/g1/tree/calls.txt; cd %s && sh ./unisacc.com tools/merge-version.cx -- gate derive-check --repo %s/repo2 --branch fb --work %s/g1 --max-load 0 2>&1", T, root, T, T);
+        rc = sh(g);
+        CK(rc == 3 && tk_has(out, "MERGE_GATE\tderive-check\tREFUSED\tload1="), "load-above-max-refuses-with-rc3");
+        sh(calls);
+        CK(strstr(out, "No such file") != 0, "refused-gate-ran-nothing");
+    }
+    /* branch patterns: ">=vA.B.C" is a version line and newer (numeric: v0.0.100 is newer than v0.0.96), an odd branch name is matched so a trap cannot be switched off by it */
+    put("rules-since.tsv", "# id\tbranch\tpath\twhen\taction\tevidence\ns1\t>=v0.0.96\tsince.cx\talways\ttake-theirs\tfixture\ns2\tfeat*\tfeatonly.cx\tconflict\ttake-ours\tfixture\ns3\t>=v0.0\tbad.cx\tconflict\ttake-ours\tfixture\n");
+    {
+        static const char *br[5] = {"v0.0.100", "v0.0.95", "v0.0.96", "feat2", "v0.0.96.1"};
+        static const char *want[5] = {"MERGE_RULES\tbranch=v0.0.100\trows=1", "MERGE_RULES\tbranch=v0.0.95\trows=0", "MERGE_RULES\tbranch=v0.0.96\trows=1", "MERGE_RULES\tbranch=feat2\trows=2", "MERGE_RULES\tbranch=v0.0.96.1\trows=1"};
+        static const char *nm[5] = {"since-pattern-matches-a-newer-three-digit-version", "since-pattern-skips-an-older-version", "since-pattern-boundary-is-inclusive", "since-pattern-matches-an-odd-branch-name-and-globs-still-work", "since-pattern-matches-a-non-version-name"};
+        for (int i = 0; i < 5; i++) {
+            cx_fmt(cmd, sizeof cmd, "cd %s && sh ./unisacc.com tools/merge-version.cx -- rules --rules %s/rules-since.tsv --branch %s 2>&1 | tail -1", root, T, br[i]);
+            sh(cmd);
+            CK(tk_has(out, want[i]), nm[i]);
+        }
+    }
+    printf("CHECK_MERGE_VERSION\tfailed=%d\n", failed);
+    sy_remove_all(T);
+    return failed ? 1 : 0;
+}

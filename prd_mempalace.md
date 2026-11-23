@@ -12,7 +12,7 @@
 
 ## 地图
 
-当前:0.0.92 已公开(冻结 F e30496b653,源构造 T 96d0c6dd2e,APE de8d48f5,CI 45012036481,Y2 8c55646041,Root 已升级),下一版 0.0.93(plans/v0.0.93.md,执行器内核产品化)。固定前缀 P0 因 E2 快照含后续源字节判 NO-GO；重开条件与对拍见 plans/roadmap-0.0.83-0.0.99.md 的 0.0.100 前结构性备忘。
+当前:0.0.93 已公开(冻结 F2 78346c972b,APE c561e7e0,CI 45030069872,Y1 46952060e3,Y2 39331f08e1,本机 Root 已升 0.0.93);开发中 0.0.94(分支 v0.0.94,cx-L0 库面;2026-11-23 fable 裁定只冻结 Z1a、Z1b、Z2、Z4 与 std-surface 修补,撤出 Z3/Z3b/Z5/Z6 与前端三项,进程生命周期统一单独成新 0.0.96,分支 v0.0.96,ccogweco 唯一所有者),并行 0.0.95(分支 v0.0.95,e2 重扫修复主线,L5(a) 前导 e2 预制移出回候选池,计划 plans/v0.0.95.md)。新 0.0.97 大单元冷编译(U7,后端按单元复用)与原 0.0.96 起各顺延两号,机械顺延在 0.0.94 公开后的例行重排点一次做(见 prd.md 候选池 U7)。固定前缀 P0 因 E2 快照含后续源字节判 NO-GO；重开条件与对拍见 plans/roadmap-0.0.83-0.0.99.md 的 0.0.100 前结构性备忘。
 
 ```mermaid
 flowchart LR
@@ -30,7 +30,7 @@ flowchart LR
     V76["0.0.76 已公开 Latest(冻结 F debb8f43f9)<br/>release/evidence/0.0.76/"]
     V77["0.0.77 cxmod 内存安全乙期一段,分支 v0.0.77<br/>archive/plans/v0.0.77.md"]
     ECO["0.0.78 至 0.0.81 已公开(0.0.81 冻结 F 8b46bf21ee,对象产出二期,NOT_QUALIFIED)<br/>release/notes-0.0.81.md、release/evidence/0.0.81/"]
-    PERF["0.0.82 前端诊断二期与 ref 判据替换、0.0.83 Q-P 首次尝试、0.0.84 执行器与模型包,0.0.100 起汇编级精修(入口准则在 0.0.99 封板前满足)<br/>plans/roadmap-rev3.md、plans/roadmap-0.0.83-0.0.99.md、archive/plans-pre086/v0.0.82.md、archive/plans-pre086/v0.0.83.md、plans/nn-migration-rev3.md"]
+    PERF["0.0.82 前端诊断二期与 ref 判据替换、0.0.83 Q-P 首次尝试、0.0.84 执行器与模型包,0.0.100 起汇编级精修(入口准则在 0.0.99 封板前满足)<br/>archive/plans-pre094/roadmap-rev3.md、plans/roadmap-0.0.83-0.0.99.md、archive/plans-pre086/v0.0.82.md、archive/plans-pre086/v0.0.83.md、plans/nn-migration-rev3.md"]
     V66 --> V67 --> V68 --> V69 --> V70 --> V71 --> V72 --> V73 --> V74 --> V75 --> V76 --> V77 --> ECO --> PERF
   end
   subgraph 发布
@@ -137,9 +137,11 @@ flowchart LR
 - 造工具护栏(试行到 2026-12-04):(1) 优先并入现有工具的子命令,不新开文件;(2) 一次性分析脚本仍用 .cx,留会话临时目录不入库;(3) 每天度量 tools 顶层 .cx 净增数,只度量不拦。依据:每个新工具同时改四到五张共享表,是提交冲突主源。
 - 派工:执行类工作由主调度经 devsvc flow 并发自己做,子代理只开 fable 级(设计、难题);给常驻窗口派整块任务,不派一次一个小样例;不因上下文占用高要求 cdx 交接或改派。待核:"omp-cdx 停止派工"(2026-11-16)与其后给 cdx 派版本项不一致。
 - 三层分车道(已采纳):产品输入口径以 SID 的 list-current 为唯一事实源生成 build/lane-inputs.tsv,其余口径都读它;promote 按 A 键相同即复用候选;ext 不是纯 B(ext/memx/arena.cx、ext/textx 四文件、ext/sysx 九文件实为 A);B 车道交付不做 submodule 不发 tar。入口:plans/reviews/2026-11-20-layer-lanes.md。
-- 三层分车道条文未生效:CLAUDE.md 改写稿在 plans/claude-md-layer-lanes-draft.md,待 lane-inputs 生成器与包门工具就位后由主调度改 CLAUDE.md 并记决定,此前版本分支规则不变。入口:plans/layer-orchestration.md。待核:build/pkg-release.tsv 尚不存在。
+- 三层分车道条文未生效:CLAUDE.md 改写稿在 archive/plans-pre094/claude-md-layer-lanes-draft.md,待 lane-inputs 生成器与包门工具就位后由主调度改 CLAUDE.md 并记决定,此前版本分支规则不变。入口:plans/layer-orchestration.md。待核:build/pkg-release.tsv 尚不存在。
 
 ### 仍未验证或未关闭
+
+- 会话与记忆被 moltbaby 清理脚本整目录删除(2026-11-23 编排者查明,待所有者裁定清理策略):~/repos/moltbaby/systemd/scripts/system-cleanup.sh 第 147 到 154 行,每小时(system-cleanup.timer)对 ~/.claude/projects/* 超 100M 即整目录 rm -rf,含全部会话转录与 memory/;近 7 天 16 次(日志 journalctl --user -u system-cleanup.service,00:00:12 一行为证)。unisacc 侧不改他车道:已建镜像兜底(硬链接转录加拷贝 memory,见 tools 下镜像工具)并把记分表权威副本进仓;修正补丁 $CLAUDE_JOB_DIR/tmp/system-cleanup.patch 存在两处已知缺陷(会话子目录 mtime 不随深层追加刷新、管道缺 || true 在 pipefail 下会中止后续清理),不可直接应用。入口:所有者裁定后经 moltbaby 车道维护者落。
 
 - 分车道未核项:APE 字节对 ext 改动不变只是推断;14 个链接目标文件是否进隐式运行库前缀;四个 sysx 别名是否有非 use 形式使用者(去别名前必须先查)。入口:plans/reviews/2026-11-20-layer-lanes.md。
 - 缺口 OBJABI-ARM64-X7-STACK-BELOW-SP-SIGNAL(arm64 -funit 单元 x7 栈在 sp 之下,异步信号可覆盖):build/pkg-gaps.tsv 仍记 OPEN。待核:0.0.82 版本行写有 x7 修复,是否可关。
@@ -218,7 +220,7 @@ flowchart LR
 - 版本序与各版主题只以 build/version-seq.tsv 为准;改序须同步 plans/vX.md 与路线图修订注。回滚:按提交还原这些文件。入口:plans/roadmap-0.0.83-0.0.99.md。
 - 所有者需求(2026-11-20,不得静默砍):汇编支持是 C99 加 POSIX 基本需求,内联 asm、.s/.S 与 gcc .o 混编、汇编标签、原子内建不延到 0.0.100 之后;核心层对 asm 的支持应更完善。入口:build/owner-reqs.tsv R20。
 - 汇编范围:接受 A1 到 A4,达标线为 lnx 两 ISA 对 gcc 对拍通过;SIMD 内建与 -S 输出 GAS 文本不进基本需求;A4 在 A1 到 A3 对拍通过后重过采用门。入口:plans/reviews/2026-11-20-asm-acceleration.md。
-- U4 asm 标签只做 lnx ELF 函数改名,变量改名砍,osx 与 win 具名拒绝;A1 与 K2 不同版(一个候选只含一类大改,产品大改超过 3 单位拆两版)。入口:plans/v0.0.90.md。
+- U4 asm 标签只做 lnx ELF 函数改名,变量改名砍,osx 与 win 具名拒绝;A1 与 K2 不同版(一个候选只含一类大改,产品大改超过 3 单位拆两版)。入口:archive/plans-pre094/v0.0.90.md。
 - 核心层强制:层列放 cxroot.tsv 并由编译器强制(dock、upper、tool、非模块脚本四档),不用换后缀;sys.dl、sys.ffi、sys.dlcall 标特权接口;K2 须排在 sy_syscall6 之后;裸 libc 编译期拒绝先出设计。入口:plans/reviews/2026-11-20-core-layer-marking.md。
 - 核心层范围:只含 cx 语言支持、libc 对接、系统调用与宿主 ABI 对接、posix 封装,其余归扩展层。依据:核心越小 A 类输入越窄。入口:plans/layer-orchestration.md。
 - 核心层需求流程:需求单复用 build/pkg-gaps.tsv,每版开槽前对每条需求四选一响应;接口变更前用 layer-api 判类并列受影响使用者;仓外使用者登记 build/external-users.tsv。入口:plans/reviews/2026-11-20-core-ext-matrix.md。
@@ -231,6 +233,18 @@ flowchart LR
 #### 清理留痕
 
 - 归档找回:archive/plans-2026-11g/README.tsv 记原路径与原因,git mv 回去或 git log --follow。清理候选(仓根 .o、tools 疑似无用清单、未逐份审的 plans)只列不动。待核(旧版本工作树 v0.0.67 至 v0.0.70 是否仍在)。
+
+#### pp-equiv 对拍证据包(2026-11-23)
+
+- 身份:`oracle-original.pkg` sha256 `50bf450063e8bd1acc186957c11de23b6a0174dd776e5afce558fc1d553667f8`(2904461 字节),`oracle-patched.pkg` sha256 `4ac1180a9fb9cd204222382947e24e510b4ef4cf5b24c289b08699b5295a4b82`(2904810 字节);0.0.95 重扫修复补丁 sha256 `25ab7a4f9e9ff82841952ae291752a2246c97e38351a12b03265b7ef2a4f19b0` 前后各一包,由 cdx 在私有副本里用 `CXDEV_RELOAD`(nets=3 built=3)实造。
+- 位置:原件在 `/tmp/unisacc-v095-oracle.cNgFT6T6/`(易失),已复制到 `~/.local/share/unisacc/research/v095-rescan-review/` 同名(仓外,不入库)。构造日志 `reload.log`、`rebuild.log`、`inc-sub-reload.log` 在同目录。
+- 用法:`tools/check-pp-equiv.cx` 靠环境变量 `UNISACC_PPEQ_PKG_ORIGINAL` 与 `UNISACC_PPEQ_PKG_PATCHED` 指向两包才跑 0.0.95 对拍;未设置或文件不在时该例打印 UNMEASURED 并具名,不算 PASS。重建办法:包不由 pp-equiv 重建,须 cdx 在 0.0.93 基线的私有副本上重做 `CXDEV_RELOAD`(改前包为未打补丁树,改后包为打补丁树),重建后 sha256 须在本条更新;包身份对不上不得当同一次证据。
+- 全量对拍(5128 项:headers 2415 与 c-tests 136 各 e2/E,加 corners 13 各 e2/E)尚未用这两包跑完,当前只对 corners 13 例 E 模式对拍得 diff=0。
+- 全量对拍结果(2026-11-23,0.0.95 e2 重扫修复,四片串行 --jobs 6 --budget-ms 45000 --side-secs 4):清单 sha256 `1ea9694a22111a7f63c36c44792d9de7aea4eea8706ace9a50d7c4d51224f922`,末行 `PP_EQUIV total=5128 same=5078 refuse_pp=50 diff=0 unmeasured=0 waived=0 pending=0 COMPLETE=yes`;分层 headers e2 与 E 各 SAME 2415,c-tests 各 SAME 116 REFUSE_PP 20,corners 各 SAME 8 REFUSE_PP 5,与 cdx 对得上。证据 ledger 在 `~/.local/share/unisacc/research/v095-rescan-review/pp-equiv-full/`(不入仓);复跑 `sh ./unisacc.com tools/pp-equiv.cx -- run --ape ./unisacc.com --models-a oracle-original.pkg --models-b oracle-patched.pkg --manifest pp-equiv-full/full.manifest --ledger 新目录 --jobs 6 --budget-ms 45000` 重复到 COMPLETE=yes;清单重建 `manifest --out FILE` 须同 sha,依赖 include/、tests/*.c、tests/pp-equiv-corners 未变。`-o` 模式不在此清单,由 csr 复核(1154 项,账本 o-replay.tsv)。
+- 0.0.95 e2 重扫修复证据汇总(2026-11-23,omp-go、csr、omp-sonnet):(a) `-o` 双包复核 1154 项由 csr 出,`same=1146 refuse_same=8 diff=0 unmeasured=0`,未取步数;(b) pp-equiv 全量 5128 项见上条,未取步数;(c) 单元层 113 项 `UEC_STATUS total=113 same=106 refuse_same=7 diff=0 unmeasured=0 pending=0 COMPLETE=yes`,分层 tools 40、cx 25、ext 20、examples 8、tests 7、corners 13;(d) 阳性对照(0.0.95 修的是 e2 重扫步数,字节相同是合同,所以分辨力要看步数):`run-all --steps 1` 末行 `STEPS_SUM rows=113 step_moved=112 step_grew=4`,步数合计 455988310 -> 265763887(降 41.7%);永久夹具 `tests/unit-e2-rescan/{plain,inc1,inc2}.c` 用关系断言守住(plain 至多贵 2 步、inc1 与 inc2 严格省且 inc2 省得更多,实测 34 与 112)。限制:5128 与 1154 两条未取步数(工具只比字节);4 个极短 include 单元步数升 2 到 3 步,属 INC_SUB 固定开销;墙钟 39 单元各 7 轮中位实测只降 19.0%(中位比值 0.974,p75 1.007,13/39 更慢),原因是 e2 墙钟含模型装载、verify、layout,所以发布说明不得把步数降幅 41.7% 当墙钟收益。证据位置:`~/.local/share/unisacc/research/v095-rescan-review/`(uec-113、pp-equiv-full 与两个 oracle 包),记录 `research/2026-11-23/e2-rescan-positive-control.md` 与 `v095-o-replay-result.md`。
+- 0.0.95 步数证据补充(2026-11-23,omp-sonnet):pp-equiv 的 e2 对拍加 `--steps` 后,原包 oracle-original 对修复包 oracle-patched 均 diff=0 且步数全部变化,三个口径各自标注、不可混比:(a) headers 层(corners 13 加 headers 2415 对,偏深 include 的合成源)步数 3817530546 降到 1505176669,降 60.6%,2427/2427 项变化,3 项变多;(b) c-tests 层(tests/*.c 的 e2 模式 139 项)272973547 降到 93710463,降 65.7%,139/139 变化,59 项变多(小文件固定开销),20 个 refuse_pp 两包同样拒绝;(c) 113 个真实编译单元(unit-e2-compare)降 41.7%,真实单元最能代表产品。E 模式无步数概念,不适用。清单口径:全量 5128 项 = 每模式 2564(headers 2415、c-tests 136、corners 13)乘 e2 与 E 两模式;本次步数只跑 e2 模式,所以 c-tests 行数以各自 manifest 为准。
+- 事件与残余风险(2026-11-23):(1) 整点 `system-cleanup`(moltbaby 车道)对 /tmp 下空闲超 120 分钟的目录先 `chmod -R u+rwx` 再 `rm -rf`,经硬链接树改了仓内文件的权限位(05:00:07 的 276 个 cx/ 文件、06:00:03 的 55 个 ext/ 文件,600/644/664 变 700/744/764),肇事者是 precommit.cx 与 check-old-product-material.cx 的硬链接隔离树(泄漏 234 个目录);已止血并改拷贝,脚本侧建议(chmod 只对目录)须经 moltbaby 维护者处理;同一清理 00:00:12 与 06:00:04 两次清空 `~/.claude/projects`,靠 tools/session-mirror.cx 恢复(恢复副本在 ~/.local/share/unisacc/session-restore-gen1-2026-11-23/)。(2) fsx_scratch 回收残余风险(gatekeeper d3764544ef):属主被 SIGKILL 后后代只在目录树第 4 层以下写入超过 30 分钟会被同前缀进程回收;跨 PID 命名空间共用 TMPDIR 时对方活进程表现为 ESRCH 可能被误删(头注释已写明,代码不防);回收失败被吞不报告。(3) tests/tools-compile-sources.tsv、tests/batches.tsv 与 tools-compile-185 分片曾在 05:59 到 06:29 间被不明来源删行(19 行加分片),已按 HEAD 写回;register.cx 回滚经复现无缺陷;来源待查,护栏 REGISTRY_SHRANK 在做。
+- 库模式 v3 签名通路缺口(2026-11-23,omp-go 实测):`LF.ENTRY_LIMIT` 128 是 v3 wire 格式规格上限(`exec/c/librarysignature-v3.md`: entry_count <=128),不是可调阈值,三条入口(-c、-l -c、stream --res library/signatureversion)都走不到该判定;原因:(1) v3 资源只能由宿主库 `exec/c/libunisacc.c` 注入,该文件不在树内(`build/owner-reqs.tsv:5` R04 libunisacc 记 LOST/UNVERIFIED);(2) `src/drivestream.cx:127` 对每个 `--res` 键无条件加 `cli/` 前缀,与模型键 `library/*`(`exec/facts/k2-libraryresources.tsv:4`)对不上,stream 注不进库资源。cap-probe 对该 cap 应记 UNREACHABLE。后续:`--res` 前缀缺陷须单独评估(会改所有 `--res` 键名),R04 补回树内是 v3 通路唯一前置。
 
 ## 编排稳定约定与近两版发布事实(原"编排交接 2026-11-21 21:10")
 
@@ -265,14 +279,14 @@ flowchart LR
 - R75:`tools/tsv-lint.cx` 未解析引用实测 11351(0.0.89 的 11277 到 0.0.90 涨 74,来自 U4 新增的动态绑定表行,每个新行必计一条),上限由所有者 2026-11-22 从 11050 放宽到 13260(11050 加 20%,为不阻塞版本);0.0.92 只做门执行(上限必须有门拦)加 asm volatile 行列号,削表(F 绑定)延后;增长必须拦:基线固化为实测值只降不升。 入口:`build/owner-reqs.tsv` R75
 - R78:变异门真实杀伤率已由 0.0.90 四补丁补 `--expect-fail` 与 `release-chain.cx` `sy_realpath>0` 补强至 `[57/82,59/82]=[69.51%,71.95%]` 高于 0.60 线(`release-chain` 20/26=0.77 PASS)。 入口:`tools/mutation-gate.cx`、`research/2026-11-22/r78-v090-named/summary.md`
 - 诊断行列号:U4 差异项与 `asm volatile` 拒绝缺 `file:line:col`,排 0.0.92。 入口:`build/owner-reqs.tsv` R55
-- 字面量长度:41 条真缺陷的全套补丁未落(顺序:检查器与棘轮 -> 越界读 -> 工具 -> 检查 -> 注解;`gate` 须在 `annotations` 之后)。 入口:`plans/v0.0.91.md`、`research/2026-11-22/litlen-089/handoff.md`、`research/2026-11-22/litlen/real-bugs-41.tsv`
+- 字面量长度:41 条真缺陷的全套补丁未落(顺序:检查器与棘轮 -> 越界读 -> 工具 -> 检查 -> 注解;`gate` 须在 `annotations` 之后)。 入口:`archive/plans-pre094/v0.0.91.md`、`research/2026-11-22/litlen-089/handoff.md`、`research/2026-11-22/litlen/real-bugs-41.tsv`
 - R69 普查余项:24 个不可达 `*-gen` 待核,约 22 个二级死传递进候选清理;28 批未接线检查已登记。 入口:`build/owner-reqs.tsv` R69、`research/2026-11-22/r69-report/report.md`
 - 共享写治理:`tools/check-shared-writes.cx`、预提交门与 `build/shared-writes-baseline.tsv`(27 行只减不增)均未落库(ls 核不存在);R71 的 M3/M4/M6 未收口。 入口:`build/owner-reqs.tsv` R71、R73
 - `textx.isotime`:缺 JS 引擎对拍夹具(`tests/fixtures/textx-isotime/` 不存在),解析取舍(无时区返 `-EINVAL`、越界严格拒绝)仅按规范编写;未经 `affected --run` 整批。 入口:`tools/check-textx-isotime.cx`
 - 死 C 源码:`tools/cx-pipeline-stage.c:5`、`tools/cx0-e2.c:9,44` 引用已迁走的 `../exec/c/`;须先查调用与批次再决定退役,不自动删。 入口:`tools/refactor.cx sites`
 
 ### (5) 后续版本与评审要点
-- 0.0.91 范围:只收"身份与构建边界"(L.1 + Z5 + B3),A 类封顶 20;L.1 + Z5 + B3 不超过 17 文件时才并入 litlen 注解补丁(3 个 A 类文件)。 依据:开版拍板 入口:`plans/v0.0.91.md`
+- 0.0.91 范围:只收"身份与构建边界"(L.1 + Z5 + B3),A 类封顶 20;L.1 + Z5 + B3 不超过 17 文件时才并入 litlen 注解补丁(3 个 A 类文件)。 依据:开版拍板 入口:`archive/plans-pre094/v0.0.91.md`
 - 0.0.92 至 0.0.94 主题:两处口径不一致,见 report-C;以 `build/version-seq.tsv` 为准,待核。 入口:`build/version-seq.tsv`
 - R69.6 零断言守卫:第一阶段 `run-batch`/`allsession` 影子计数 `assertions=N` 已落 `22b2c76688`;第二阶段路线定为 0.0.92 十批试点(`cdx` 主刀)、0.0.93 迁移与首轮影子、0.0.94 继续影子、最早 0.0.96 满足总量门 268 加分层数据门槛后对新批强制;豁免须写可核查条件,未报存量只降不升。 依据:守门人评审 入口:`tests/run-batch.cx`、`research/2026-11-22/zero-assert/phase2-design-v2.md`
 - R69.6 计数自保:`assertions=N` 须在共享断言库自增,不许手写常量;变异须覆盖"删总结字段必红""删自增必红";流式计数须对任意切分点不变;区分"只报失败"与"真零断言",存量分阶段迁。 入口:`build/owner-reqs.tsv` R69、`research/2026-11-22/r69-6-shadow/report.md`

@@ -99,6 +99,71 @@ static void pc_cases(void) {
     if (cx_fmt(cmd, sizeof cmd, "rm -rf '%s'", td) || shq(cmd)) fatal("cleanup");
 }
 
+static void index_batch_cases(void) {
+    char td[400], cwd[400], cmd[2400]; char *o = 0, *wt_out = 0; size_t n = 0, wt_n = 0; int rc, wt_rc, i; char *v[] = {"pwd", 0};
+    const char *m_a = "batch\tfa\tIMPLEMENTED\tl\ta.cx\tSOURCE\tp\t55\t-\ta.cx\t-\tl.fa\trc0:FA\tproduct\tcommit\n"
+                      "coverage\tl.fa\tl\tIMPLEMENTED_SEPARATE_BATCH\ttext\tfiles\n"
+                      "packages\tbatch\tfa\tall\t-\t-\t-\t-\t-\t-\n";
+    const char *m_b = "batch\tfb\tIMPLEMENTED\tl\tb.cx\tSOURCE\tp\t55\t-\tb.cx\t-\tl.fb\trc0:FB\tproduct\tcommit\n"
+                      "coverage\tl.fb\tl\tIMPLEMENTED_SEPARATE_BATCH\ttext\tfiles\n"
+                      "packages\tbatch\tfb\tall\t-\t-\t-\t-\t-\t-\n";
+    const char *m_b_mut = "batch\tfb\tIMPLEMENTED\tl\tb.cx\tSOURCE\tp\t55\t-\tb.cx\t-\tl.fb\trc0:FB\tproduct\tcommit\n"
+                          "coverage\tl.fb\tl\tIMPLEMENTED_SEPARATE_BATCH\tmutated\tfiles\n"
+                          "packages\tbatch\tfb\tall\t-\t-\t-\t-\t-\t-\n";
+    const char *m_c = "batch\tfc\tIMPLEMENTED\tl\tc.cx\tSOURCE\tp\t55\t-\tc.cx\t-\tl.fc\trc0:FC\tproduct\tcommit\n"
+                      "coverage\tl.fc\tl\tIMPLEMENTED_SEPARATE_BATCH\ttext\tfiles\n"
+                      "packages\tbatch\tfc\tall\t-\t-\t-\t-\t-\t-\n";
+    if (cx_runv_timeout(v, 10, &o, &n) != 0 || n < 2 || n >= sizeof cwd) fatal("pwd");
+    mm_copy(cwd, sizeof cwd, o, n); cwd[n] = 0; mm_free(o);
+    for (i = 0; cwd[i]; i++) if (cwd[i] == '\n') cwd[i] = 0;
+    if (cx_fmt(td, sizeof td, "%s/rm-ib-XXXXXX", sy_tmpdir()) || !mkdtemp(td)) fatal("tmpdir");
+    if (cx_fmt(cmd, sizeof cmd, "cd '%s' && git init -q . && git config user.email a@b && git config user.name t && mkdir -p tests/manifests build && "
+               "ln -s '%s/unisacc.com' unisacc.com && ln -sn '%s/tools' tools && ln -sn '%s/cx' cx && ln -s '%s/cxroot.tsv' cxroot.tsv", td, cwd, cwd, cwd, cwd) || shq(cmd)) fatal("ib fixture");
+    put(td, "tests/batches.tsv",
+        "id\n"
+        "fa\tIMPLEMENTED\tl\ta.cx\tSOURCE\tp\t55\t-\ta.cx\t-\tl.fa\trc0:FA\tproduct\tcommit\n"
+        "fb\tIMPLEMENTED\tl\tb.cx\tSOURCE\tp\t55\t-\tb.cx\t-\tl.fb\trc0:FB\tproduct\tcommit\n"
+        "fc\tIMPLEMENTED\tl\tc.cx\tSOURCE\tp\t55\t-\tc.cx\t-\tl.fc\trc0:FC\tproduct\tcommit\n");
+    put(td, "tests/coverage.tsv",
+        "id\n"
+        "l.fa\tl\tIMPLEMENTED_SEPARATE_BATCH\ttext\tfiles\n"
+        "l.fb\tl\tIMPLEMENTED_SEPARATE_BATCH\ttext\tfiles\n"
+        "l.fc\tl\tIMPLEMENTED_SEPARATE_BATCH\ttext\tfiles\n");
+    put(td, "tests/manifests/fa.tsv", m_a);
+    put(td, "tests/manifests/fb.tsv", m_b);
+    put(td, "tests/manifests/fc.tsv", m_c);
+    if (cx_fmt(cmd, sizeof cmd, "cd '%s' && git add tests/batches.tsv tests/coverage.tsv tests/manifests/fa.tsv tests/manifests/fb.tsv tests/manifests/fc.tsv", td) || shq(cmd)) fatal("ib add");
+    /* (1) byte-for-byte parity between --check (worktree) and --check --index (batched cat-file) on 3 clean manifests */
+    if (cx_fmt(cmd, sizeof cmd, "cd '%s' && sh ./unisacc.com tools/reg-manifest.cx -- --check 2>&1", td)) fatal("ib wt");
+    wt_rc = shq(cmd);
+    wt_n = out_n; wt_out = (char *)mm_alloc(wt_n + 1);
+    if (!wt_out) fatal("oom");
+    if (wt_n) mm_copy(wt_out, wt_n + 1, out_buf, wt_n);
+    wt_out[wt_n] = 0;
+    if (cx_fmt(cmd, sizeof cmd, "cd '%s' && sh ./unisacc.com tools/reg-manifest.cx -- --check --index 2>&1", td)) fatal("ib idx");
+    rc = shq(cmd);
+    ck(wt_rc == 0 && rc == 0 && out_n == wt_n && !memcmp(out_buf, wt_out, wt_n) && has("REG_MANIFEST\tmanifests=3\tbad=0\thard=0"),
+       "index-batch-byte-parity-clean");
+    mm_free(wt_out);
+    /* (2) negative control: mutate one staged manifest while restoring worktree; --check --index must fail byte-for-byte */
+    put(td, "tests/manifests/fb.tsv", m_b_mut);
+    if (cx_fmt(cmd, sizeof cmd, "cd '%s' && git add tests/manifests/fb.tsv", td) || shq(cmd)) fatal("ib mut add");
+    put(td, "tests/manifests/fb.tsv", m_b);   /* restore worktree so only index has the mutation */
+    if (cx_fmt(cmd, sizeof cmd, "cd '%s' && sh ./unisacc.com tools/reg-manifest.cx -- --check --index 2>&1", td)) fatal("ib mut idx");
+    rc = shq(cmd);
+    { const char *exp = "MISMATCH\ttests/coverage.tsv\tfb\nREG_MANIFEST\tmanifests=3\tbad=1\thard=0\n";
+      size_t el = strlen(exp);
+      ck(rc == 1 && out_n == el && !memcmp(out_buf, exp, el), "index-batch-negative-mutated-manifest"); }
+    /* (3) negative control: malformed middle manifest in index still parses subsequent manifest cleanly */
+    put(td, "tests/manifests/fb.tsv", "batch\tfb\tshort\n");
+    if (cx_fmt(cmd, sizeof cmd, "cd '%s' && git add tests/manifests/fb.tsv", td) || shq(cmd)) fatal("ib mal add");
+    put(td, "tests/manifests/fb.tsv", m_b);
+    if (cx_fmt(cmd, sizeof cmd, "cd '%s' && sh ./unisacc.com tools/reg-manifest.cx -- --check --index 2>&1", td)) fatal("ib mal idx");
+    rc = shq(cmd);
+    ck(rc == 2 && has("MALFORMED\tfb.tsv\t") && has("REG_MANIFEST\tmanifests=3\tbad=0\thard=1"), "index-batch-negative-malformed-middle");
+    if (cx_fmt(cmd, sizeof cmd, "rm -rf '%s'", td) || shq(cmd)) fatal("ib cleanup");
+}
+
 int main(void) {
     char root[600], d[800]; int rc;
     if (cx_fmt(root, sizeof root, "%s/check-reg-manifest-%d", sy_tmpdir(), sy_pid())) fatal("root");
@@ -122,6 +187,7 @@ int main(void) {
     put(root, "tests/manifests/fx.tsv", "batch\tfx\tonly\n");
     rc = run("--check", root); ck(rc == 2 && has("MALFORMED"), "malformed-manifest-exit2");
     pc_cases();
+    index_batch_cases();
     sy_printf("CHECK_REG_MANIFEST\tfailed=%d\n", failed);
     return failed ? 1 : 0;
 }

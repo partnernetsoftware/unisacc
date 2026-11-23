@@ -1,0 +1,218 @@
+native function chunk_loop_token(at:i64,end:i64,kind:i64) i64 {
+  if(at<0 || at>=end) { return 0-1; }
+  if(kind==0) {
+    let data=[35,112,114,97,103,109,97,32,117,110,114,111,108,108,95,108,111,111,112,95,115,116,97,114,116];
+    if(end-at<25) { return 0-1; }
+    let i=0;
+    while(i<25) {
+      if(ux_u8(at+i)!=data[i]) { return 0-1; }
+      i=i+1;
+    }
+    return at+25;
+  }
+  if(kind==1) {
+    let data=[102,111,114];
+    if(end-at<3) { return 0-1; }
+    let i=0;
+    while(i<3) {
+      if(ux_u8(at+i)!=data[i]) { return 0-1; }
+      i=i+1;
+    }
+    return at+3;
+  }
+  if(kind==2) {
+    let data=[105,110,116];
+    if(end-at<3) { return 0-1; }
+    let i=0;
+    while(i<3) {
+      if(ux_u8(at+i)!=data[i]) { return 0-1; }
+      i=i+1;
+    }
+    return at+3;
+  }
+  if(kind==3) {
+    let data=[43,43];
+    if(end-at<2) { return 0-1; }
+    let i=0;
+    while(i<2) {
+      if(ux_u8(at+i)!=data[i]) { return 0-1; }
+      i=i+1;
+    }
+    return at+2;
+  }
+  if(kind==4) {
+    let data=[35,112,114,97,103,109,97,32,117,110,114,111,108,108,95,108,111,111,112,95,101,110,100];
+    if(end-at<23) { return 0-1; }
+    let i=0;
+    while(i<23) {
+      if(ux_u8(at+i)!=data[i]) { return 0-1; }
+      i=i+1;
+    }
+    return at+23;
+  }
+  if(kind==5) {
+    let data=[85,78,82,79,76,76,69,68,95,76,79,79,80,95,73,78,68,69,88];
+    if(end-at<19) { return 0-1; }
+    let i=0;
+    while(i<19) {
+      if(ux_u8(at+i)!=data[i]) { return 0-1; }
+      i=i+1;
+    }
+    return at+19;
+  }
+  return 0-1;
+}
+
+native function chunk_loop_space(p:i64,end:i64) i64 {
+  if(p<0) { return p; }
+  while(p<end) {
+    let code=ux_u8(p);
+    if(code!=32 && (code<9 || code>13)) { return p; }
+    p=p+1;
+  }
+  return p;
+}
+
+native function chunk_loop_char(p:i64,end:i64,code:i64) i64 {
+  p=chunk_loop_space(p,end);
+  if(p<0 || p>=end || ux_u8(p)!=code) { return 0-1; }
+  return p+1;
+}
+
+native function chunk_loop_digit(p:i64,end:i64,scratch:i64) i64 {
+  p=chunk_loop_space(p,end);
+  if(p<0 || p>=end || ux_u8(p)<48 || ux_u8(p)>57) { return 0-1; }
+  let value=0;
+  while(p<end && ux_u8(p)>=48 && ux_u8(p)<=57) {
+    value=value*10+ux_u8(p)-48;
+    if(value>4096) { return 0-2; }
+    p=p+1;
+  }
+  let saved=ux_u32_put(scratch,value);
+  return p;
+}
+
+native function chunk_loop_parse(at:i64,end:i64,scratch:i64) i64 {
+  let p=chunk_loop_token(at,end,0);
+  if(p<0) { return p; }
+  let after=chunk_loop_space(p,end);
+  if(after==p) { return 0-1; }
+  p=chunk_loop_token(after,end,1);
+  p=chunk_loop_char(p,end,40);
+  p=chunk_loop_token(chunk_loop_space(p,end),end,2);
+  after=chunk_loop_space(p,end);
+  if(p<0 || after==p) { return 0-1; }
+  p=chunk_loop_char(after,end,105);
+  p=chunk_loop_char(p,end,61);
+  p=chunk_loop_digit(p,end,scratch);
+  if(p==0-2) { return p; }
+  p=chunk_loop_char(p,end,59);
+  p=chunk_loop_char(p,end,105);
+  p=chunk_loop_char(p,end,60);
+  p=chunk_loop_digit(p,end,scratch+4);
+  if(p==0-2) { return p; }
+  p=chunk_loop_char(p,end,59);
+  p=chunk_loop_char(p,end,105);
+  p=chunk_loop_token(chunk_loop_space(p,end),end,3);
+  p=chunk_loop_char(p,end,41);
+  p=chunk_loop_char(p,end,123);
+  if(p<0) { return p; }
+  let body=p;
+  while(p<end) {
+    if(ux_u8(p)==125 && p>body) {
+      after=chunk_loop_space(p+1,end);
+      if(after>p+1) {
+        let close=chunk_loop_token(after,end,4);
+        if(close>=0) {
+          let a=ux_u32_put(scratch+8,body);
+          let b=ux_u32_put(scratch+12,p);
+          return close;
+        }
+      }
+    }
+    p=p+1;
+  }
+  return 0-1;
+}
+
+native function chunk_loop_byte(p:i64,end:i64,byte:i64,emit:i64) i64 {
+  if(p<0 || p>=end) { return 0-1; }
+  if(emit!=0) { let saved=ux_u8_put(p,byte); }
+  return p+1;
+}
+
+native function chunk_loop_index(p:i64,end:i64,index:i64,emit:i64) i64 {
+  let power=1;
+  while(power*10<=index) { power=power*10; }
+  while(power>0 && p>=0) {
+    p=chunk_loop_byte(p,end,48+index/power%10,emit);
+    power=power/10;
+  }
+  return p;
+}
+
+native function chunk_loop_body(out:i64,limit:i64,p:i64,end:i64,index:i64,emit:i64) i64 {
+  while(p<end && out>=0) {
+    let code=ux_u8(p);
+    let close=0-1;
+    if(code==91) {
+      close=chunk_loop_char(p+1,end,105);
+      close=chunk_loop_char(close,end,93);
+    }
+    if(close>=0) {
+      out=chunk_loop_byte(out,limit,91,emit);
+      out=chunk_loop_byte(out,limit,32,emit);
+      out=chunk_loop_index(out,limit,index,emit);
+      out=chunk_loop_byte(out,limit,32,emit);
+      out=chunk_loop_byte(out,limit,93,emit);
+      p=close;
+    } else {
+      close=chunk_loop_token(p,end,5);
+      if(close>=0) {
+        out=chunk_loop_index(out,limit,index,emit);
+        p=close;
+      } else {
+        out=chunk_loop_byte(out,limit,code,emit);
+        p=p+1;
+      }
+    }
+  }
+  return out;
+}
+
+native function chunk_loop_run(out:i64,limit:i64,p:i64,end:i64,scratch:i64,emit:i64) i64 {
+  while(p<end && out>=0) {
+    let close=0-1;
+    if(ux_u8(p)==35) { close=chunk_loop_parse(p,end,scratch); }
+    if(close==0-2) { return close; }
+    if(close>=0) {
+      let first=ux_u32(scratch);
+      let last=ux_u32(scratch+4);
+      let body=ux_u32(scratch+8);
+      let finish=ux_u32(scratch+12);
+      while(first<last && out>=0) {
+        out=chunk_loop_body(out,limit,body,finish,first,emit);
+        first=first+1;
+      }
+      p=close;
+    } else {
+      out=chunk_loop_byte(out,limit,ux_u8(p),emit);
+      p=p+1;
+    }
+  }
+  return out;
+}
+
+// r160's normalized pragma syntax, with finite iteration and output bounds.
+native function ShaderChunk_unrollLoops(dst:i64,capacity:i64,src:i64,bytes:i64,scratch:i64) i64 {
+  if(!shader_chunk_range(dst,capacity) || !shader_chunk_range(src,bytes) ||
+     !shader_chunk_range(scratch,16) || scratch%4!=0 ||
+     shader_chunk_overlap(dst,capacity,src,bytes) ||
+     shader_chunk_overlap(scratch,16,src,bytes) ||
+     shader_chunk_overlap(scratch,16,dst,capacity)) { return 0-1; }
+  let count=chunk_loop_run(dst,dst+capacity,src,src+bytes,scratch,0);
+  if(count<0) { return count; }
+  let finish=chunk_loop_run(dst,dst+capacity,src,src+bytes,scratch,1);
+  if(finish<0) { return finish; }
+  return finish-dst;
+}

@@ -4,7 +4,7 @@
  *   sh ./unisacc.com tools/devsvc.cx -- config                         打印所读配置表(CFG 行含 lock、lockdomain 写域、doc 规则、table 身份,末行 DEVSVC_CONFIG);表缺失或缺键 rc 3
  *   sh ./unisacc.com tools/devsvc.cx -- start [--ttl S] [--idle S]     起实例(已在则报 already);默认 ttl 1800 s、idle 300 s
  *   sh ./unisacc.com tools/devsvc.cx -- ping | stop
- *   sh ./unisacc.com tools/devsvc.cx -- lock acquire NAME --owner O [--ttl S]   (默认 600 s,上限 3600 s;同属主再拿即续期)
+ *   sh ./unisacc.com tools/devsvc.cx -- lock acquire NAME --owner O [--ttl S]   (默认 600 s,freeze 锁默认 7200 s,上限 7200 s;同属主再拿即续期;freeze 为全仓共享防误操作写窗口锁,不防恶意冒充,冻结强拦截以 precommit build/freeze.tsv 为准)
  *   sh ./unisacc.com tools/devsvc.cx -- lock release NAME --owner O
  *   sh ./unisacc.com tools/devsvc.cx -- lock list
  *   sh ./unisacc.com tools/devsvc.cx -- run [--local] TOOL.cx [ARGS...]   用缓存的原生执行体跑已有工具;stdout/rc 即工具自己的
@@ -96,7 +96,7 @@
 #define RING 256
 #define EVW 512
 #define TTL_MAX 7200
-#define LOCK_TTL_MAX 3600
+#define LOCK_TTL_MAX 7200
 
 /* ---- 本仓配置层:仓专有知识只在配置表(ROOT/CFG_TABLE,或 $DEVSVC_REPO_TABLE 所指)里,核心(生命周期、锁、run、events)
    只经 cfg 读取。没有内置缺省:表缺失或缺键即拒绝(rc 3),不拿过期的缺省冒充。 ---- */
@@ -373,6 +373,47 @@ static void locks_expire(void) {
 }
 static int lock_find(const char *name) { int i; for (i = 0; i < nlock; i++) if (!strcmp(locks[i].name, name)) return i; return -1; }
 static int okname(const char *s) { long n = s ? (long)strlen(s) : 0; return n > 0 && n < 64 && !strchr(s, ' '); }
+static int norm_owner(const char *raw, char *out, size_t cap) {
+    const char *s, *e; size_t n = 0;
+    if (!raw || !out || cap < 2) return 0;
+    s = raw;
+    while (*s == ' ' || *s == '\t' || *s == '\r' || *s == '\n') s++;
+    e = s + strlen(s);
+    while (e > s && (e[-1] == ' ' || e[-1] == '\t' || e[-1] == '\r' || e[-1] == '\n')) e--;
+    if (e <= s || (size_t)(e - s) >= 64 || (size_t)(e - s) >= cap) return 0;
+    for (const char *p = s; p < e; p++) {
+        unsigned char c = (unsigned char)*p;
+        if (c < 0x21 || c == 0x7f) return 0;
+        if (c >= 'A' && c <= 'Z') c = (unsigned char)(c + 32);
+        out[n++] = (char)c;
+    }
+    out[n] = 0;
+    return n > 0;
+}
+static int resolve_owner_raw(int argc, char **argv, char *out, size_t cap, int lower) {
+    const char *raw = 0, *s, *e; size_t n = 0;
+    for (int i = 0; i + 1 < argc; i++) {
+        if (!strcmp(argv[i], "--owner")) { raw = argv[i + 1]; break; }
+    }
+    if (!raw || !*raw) raw = getenv("DEVSVC_OWNER");
+    if (!raw || !*raw) { if (out && cap > 0) out[0] = 0; return 0; }
+    if (lower) return norm_owner(raw, out, cap);
+    s = raw;
+    while (*s == ' ' || *s == '\t' || *s == '\r' || *s == '\n') s++;
+    e = s + strlen(s);
+    while (e > s && (e[-1] == ' ' || e[-1] == '\t' || e[-1] == '\r' || e[-1] == '\n')) e--;
+    if (e <= s || (size_t)(e - s) >= 64 || (size_t)(e - s) >= cap) { if (out && cap > 0) out[0] = 0; return 0; }
+    for (const char *p = s; p < e; p++) {
+        unsigned char c = (unsigned char)*p;
+        if (c < 0x21 || c == 0x7f) { if (out && cap > 0) out[0] = 0; return 0; }
+        out[n++] = (char)c;
+    }
+    out[n] = 0;
+    return n > 0;
+}
+static int resolve_owner(int argc, char **argv, char *out, size_t cap) {
+    return resolve_owner_raw(argc, argv, out, cap, 1);
+}
 
 /* ---- 原生执行体缓存(服务端与 --local 共用) ---- */
 static char nlog[PW + 32];   /* 最近一次构造失败的完整日志路径;空串即没有 */
@@ -570,17 +611,21 @@ static int handle(char *line) {   /* 返回 1 表示收到 stop */
     if (!strcmp(f[0], "ping")) { radd("OK\tpong\tpid=%d\tseq=%ld\tlocks=%d\n", sy_pid(), seq, nlock); return 0; }
     if (!strcmp(f[0], "stop")) { radd("OK\tstopping\tpid=%d\n", sy_pid()); return 1; }
     if (!strcmp(f[0], "lock-acquire")) {
-        long ttl = atol(f[3]); char t[256]; pi_id_t rid;
+        long ttl = atol(f[3]); char t[256], owbuf[64]; const char *ow = f[2]; pi_id_t rid;
         int automatic = !strcmp(f[5], "auto");
         memset(&rid, 0, sizeof rid);
-        if (!okname(f[1]) || !okname(f[2]) || ttl <= 0 || ttl > LOCK_TTL_MAX) { radd("ERR\tusage\tlock-acquire NAME OWNER TTL(1..%d)\n", LOCK_TTL_MAX); return 0; }
+        if (!strcmp(f[1], "freeze")) {
+            if (!norm_owner(f[2], owbuf, sizeof owbuf)) { radd("ERR\tusage\tlock-acquire freeze OWNER TTL(1..%d)\n", LOCK_TTL_MAX); return 0; }
+            ow = owbuf;
+        }
+        if (!okname(f[1]) || !okname(ow) || ttl <= 0 || ttl > LOCK_TTL_MAX) { radd("ERR\tusage\tlock-acquire NAME OWNER TTL(1..%d)\n", LOCK_TTL_MAX); return 0; }
         if (f[4][0] && pi_parse_tag_ex(f[4], &rid) != 0) memset(&rid, 0, sizeof rid);
         if (automatic && rid.pid <= 0) { radd("ERR\tusage\tauto-lock-requires-process\n"); return 0; }
         i = lock_find(f[1]);
         /* A window owner can be shared by simultaneous Git commands. Only
          * the process that holds an automatic lease may renew it. A manual
          * lease still allows its owner to run a wrapped command under it. */
-        if (i >= 0 && (strcmp(locks[i].owner, f[2]) ||
+        if (i >= 0 && (strcmp(locks[i].owner, ow) ||
                        (locks[i].automatic && (!automatic || locks[i].holder.pid != rid.pid ||
                          locks[i].holder.ticks != rid.ticks || locks[i].holder.btime != rid.btime ||
                          locks[i].holder.ns_ino != rid.ns_ino)))) {
@@ -588,24 +633,25 @@ static int handle(char *line) {   /* 返回 1 表示收到 stop */
         }
         if (i < 0) {
             if (nlock >= MAXLOCK) { radd("ERR\tfull\tmax=%d\n", MAXLOCK); return 0; }
-            i = nlock++; F(locks[i].name, 64, "%s", f[1]); F(locks[i].owner, 64, "%s", f[2]);
-            radd("OK\tacquired\t%s\towner=%s\texpires_in_s=%ld\n", f[1], f[2], ttl);
-            if (rid.pid > 0) F(t, sizeof t, "%s\towner=%s\tttl=%ld\tpid=%d", f[1], f[2], ttl, rid.pid);
-            else F(t, sizeof t, "%s\towner=%s\tttl=%ld", f[1], f[2], ttl);
+            i = nlock++; F(locks[i].name, 64, "%s", f[1]); F(locks[i].owner, 64, "%s", ow);
+            radd("OK\tacquired\t%s\towner=%s\texpires_in_s=%ld\n", f[1], ow, ttl);
+            if (rid.pid > 0) F(t, sizeof t, "%s\towner=%s\tttl=%ld\tpid=%d", f[1], ow, ttl, rid.pid);
+            else F(t, sizeof t, "%s\towner=%s\tttl=%ld", f[1], ow, ttl);
             ev_add("lock.acquire", t);
             locks[i].exp = now + ttl; locks[i].holder = rid; locks[i].automatic = automatic;
         } else {   /* 续期只延长不缩短:包装器用短 ttl 续调用方的长租约时不得把它截短; 且仅同 PID 或原持有者已确认死亡才改绑(P1) */
             if (locks[i].exp < now + ttl) locks[i].exp = now + ttl;
             if (rid.pid > 0 && locks[i].holder.pid > 0 && (rid.pid == locks[i].holder.pid || !pi_alive_ex(&locks[i].holder, 0, 0))) locks[i].holder = rid;
-            radd("OK\trenewed\t%s\towner=%s\texpires_in_s=%ld\n", f[1], f[2], locks[i].exp - now);
+            radd("OK\trenewed\t%s\towner=%s\texpires_in_s=%ld\n", f[1], ow, locks[i].exp - now);
         }
         locks_save(); return 0;
     }
     if (!strcmp(f[0], "lock-release")) {
-        char t[200];
+        char t[200], owbuf[64]; const char *ow = f[2];
+        if (!strcmp(f[1], "freeze") && norm_owner(f[2], owbuf, sizeof owbuf)) ow = owbuf;
         i = lock_find(f[1]);
-        if (i < 0) { if (expd_find(f[1], f[2]) >= 0) radd("ERR\texpired\t%s\towner=%s\n", f[1], f[2]); else radd("ERR\tnot-held\t%s\n", f[1]); return 0; }
-        if (strcmp(locks[i].owner, f[2])) { radd("ERR\tnot-owner\t%s\towner=%s\n", f[1], locks[i].owner); return 0; }
+        if (i < 0) { if (expd_find(f[1], ow) >= 0) radd("ERR\texpired\t%s\towner=%s\n", f[1], ow); else radd("ERR\tnot-held\t%s\n", f[1]); return 0; }
+        if (strcmp(locks[i].owner, ow)) { radd("ERR\tnot-owner\t%s\towner=%s\n", f[1], locks[i].owner); return 0; }
         if (f[3][0]) {
             pi_id_t rid;
             if (pi_parse_tag_ex(f[3], &rid) != 0 || rid.pid != locks[i].holder.pid ||
@@ -614,7 +660,7 @@ static int handle(char *line) {   /* 返回 1 表示收到 stop */
                 radd("ERR\tnot-holder\t%s\n", f[1]); return 0;
             }
         }
-        F(t, sizeof t, "%s\towner=%s", f[1], f[2]); ev_add("lock.release", t);
+        F(t, sizeof t, "%s\towner=%s", f[1], ow); ev_add("lock.release", t);
         locks[i] = locks[--nlock]; locks_save(); radd("OK\treleased\t%s\n", f[1]); return 0;
     }
     if (!strcmp(f[0], "lock-list")) {
@@ -937,8 +983,10 @@ static int request(const char *root, const char *line, int autostart) {
     }
     rn = 0; resp[0] = 0;
     if (c < 0) return 3;
-    if (lkpfx[0] && (!strncmp(line, "lock-acquire\t", 13) || !strncmp(line, "lock-release\t", 13))) {   /* 非主工作树:锁名加工作树前缀 */
-        static char pl[1024]; F(pl, sizeof pl, "%.13s%s%s", line, lkpfx, line + 13); line = pl;
+    if (lkpfx[0] && (!strncmp(line, "lock-acquire\t", 13) || !strncmp(line, "lock-release\t", 13))) {   /* 非主工作树:普通锁加工作树前缀,freeze 为全仓共享锁不加前缀 */
+        if (strncmp(line + 13, "freeze\t", 7)) {
+            static char pl[1024]; F(pl, sizeof pl, "%.13s%s%s", line, lkpfx, line + 13); line = pl;
+        }
     }
     d = sy_deadline_in(58000);
     if (sy_send_all_until(c, line, strlen(line), d) || sy_send_all_until(c, "\n", 1, d)) { sy_close(c); return 3; }
@@ -1065,6 +1113,7 @@ static int report_tool(const char *p) {
     const char *base=strrchr(p,'/');base=base?base+1:p;
     return !strcmp(base,"candidate-chain.cx") || !strcmp(base,"release-run.cx");
 }
+static int freeze_refuse_if_held(const char *root, int argc, char **argv);
 static int cmd_run(const char *root, int argc, char **argv) {   /* argv[0] = TOOL 或 --local */
     char bin[PW], req[2 * PW]; const char *cache = "?"; long prep = 0, t0, t1; int local = 0, rc, i; char *v[64];
     sy_spawn_t o; sy_exit_t ex;
@@ -1077,6 +1126,14 @@ static int cmd_run(const char *root, int argc, char **argv) {   /* argv[0] = TOO
     }
     if (argc > 3 && !strcmp(argv[1], "--par") && !strcmp(argv[3], "--")) { argv[2] = argv[0]; argc -= 2; argv += 2; }   /* TOOL --par N -- ARGS */
     if (argc < 1 || argc > 60) return 2;
+    {
+        int is_wr_tool = !strcmp(argv[0], "tools/edit-span.cx") || !strcmp(argv[0], "tools/refactor.cx") ||
+                         !strcmp(argv[0], "tools/scrub-home-paths.cx") || !strcmp(argv[0], "tools/register.cx") ||
+                         !strcmp(argv[0], "tools/derive.cx") || !strcmp(argv[0], "tools/install-ape.cx");
+        int has_wr_flag = 0;
+        for (i = 1; i < argc; i++) if (!strcmp(argv[i], "--write") || !strcmp(argv[i], "apply") || !strcmp(argv[i], "rename") || !strcmp(argv[i], "sweep")) { has_wr_flag = 1; break; }
+        if ((is_wr_tool || has_wr_flag) && freeze_refuse_if_held(root, argc, argv)) return 1;
+    }
     t0 = sy_now_ms(); bin[0] = 0;
     if (!local) {
         F(req, sizeof req, "native\t%s\t%s", root, argv[0]);
@@ -1399,6 +1456,9 @@ static void oc_sum(AB *a, const char *rdir, const char *id, int rc, const char *
 }
 static int flow_txn;   /* flow --txn:事务化(同节点表首行 txn 1),引擎见 cxlib.flowexec 头注 Transaction 段 */
 static const char *lock_for(const char *p);
+static int freeze_in_domain(const char *root, const char *p);
+static int freeze_check(const char *root, const char *owner, char *holder, size_t hcap);
+static int freeze_refuse_if_held(const char *root, int argc, char **argv);
 static const char *auto_owner(void);
 
 static int chain_proc_find_holder(const char *dir_path) {
@@ -1598,6 +1658,24 @@ static int flow_go(const char *root, const char *file, const char *text, const c
     {   int cg = chain_admission_gate(root, fl_owner, &f);
         if (cg) { fl_free(&f); return cg; }
     }
+    {
+        static char fpth[PW]; char fh[64];
+        for (i = 0; i < f.count; i++) {
+            int is_wr = f.n[i].lock[0] != 0 || !strncmp(f.n[i].op, "file.write", 10) || !strncmp(f.n[i].op, "file.edit", 9) || !strncmp(f.n[i].op, "doc.", 4);
+            if (is_wr && fl_arg_get(f.n[i].args, "path", 0, fpth, sizeof fpth) > 0 && freeze_in_domain(root, fpth)) {
+                if (freeze_check(root, fl_owner, fh, sizeof fh)) {
+                    fprintf(stderr, "LOCK_HELD freeze owner=%s\ndevsvc: REFUSE flow node %s: LOCK_HELD freeze owner=%s\n", fh, f.n[i].id, fh);
+                    fl_free(&f); return 1;
+                }
+            }
+            if (fl_arg_get(f.n[i].args, "stdout_to", 0, fpth, sizeof fpth) > 0 && freeze_in_domain(root, fpth)) {
+                if (freeze_check(root, fl_owner, fh, sizeof fh)) {
+                    fprintf(stderr, "LOCK_HELD freeze owner=%s\ndevsvc: REFUSE flow node %s: LOCK_HELD freeze owner=%s\n", fh, f.n[i].id, fh);
+                    fl_free(&f); return 1;
+                }
+            }
+        }
+    }
     long lock_begin=sy_now_ms();
     {   /* 写节点(file.write/edit、doc 写、stdout_to、lock 键、事务)必须持锁:无实例先拉起,拉不起具名拒绝,不静默转本地无锁写 */
         int needw = f.txn; char tb[8];
@@ -1718,8 +1796,7 @@ static int flow_go(const char *root, const char *file, const char *text, const c
 }
 static long numarg(const char *s) { long n = 0; if (!s || !*s) return -1; while (*s >= '0' && *s <= '9') { n = n * 10 + (*s++ - '0'); if (n > 100000000L) return -1; } return *s ? -1 : n; }
 static void set_owner(int argc, char **argv) {
-    const char *o = opt(argc, argv, "--owner", getenv("DEVSVC_OWNER"));
-    if (okname(o)) F(fl_owner, sizeof fl_owner, "%s", o); else F(fl_owner, sizeof fl_owner, "flow-%d", sy_pid());
+    if (!resolve_owner_raw(argc, argv, fl_owner, sizeof fl_owner, 0)) F(fl_owner, sizeof fl_owner, "flow-%d", sy_pid());
 }
 
 static int x_ran;   /* cmd_x/cmd_flow 已把命令交给 flow 执行(子命令或节点非零 rc 不是参数错) */
@@ -1859,6 +1936,16 @@ static int cmd_f(const char *root, int argc, char **argv) {
     tmpf[0] = 0;
     if (strcmp(op, "read") && strcmp(op, "write") && strcmp(op, "edit") && strcmp(op, "edits")) return 2;
     wr = strcmp(op, "read") != 0;
+    /* 相对路径必须落在调用者自己的工作树根:继承来的 UNISACC_FLOW_ROOT 指向别的检出时具名拒绝,
+       否则 f write cx/x.cx 会静默写进他人工作树(2026-11-22 复现:worktree 内调用落到主检出)。 */
+    if (wr && path[0] != '/') {
+        const char *fr = getenv("UNISACC_FLOW_ROOT");
+        char rr[PW], frr[PW];
+        if (fr && *fr && sy_realpath(fr, frr, sizeof frr) >= 0 && sy_realpath(root, rr, sizeof rr) >= 0 && strcmp(rr, frr)) {
+            fprintf(stderr, "F\t%s\trefused\tREFUSE flow-root-other-worktree: UNISACC_FLOW_ROOT=%s but this worktree is %s; give an absolute path or unset it (nothing written)\n", op, frr, rr);
+            return 1;
+        }
+    }
     F(fop, sizeof fop, "file.%s", !strcmp(op, "edits") ? "write" : op);
     ab_kv(&b, "path", path, strlen(path));
     xs = opt(argc, argv, "--expect-sha", "");
@@ -1943,6 +2030,14 @@ static int cmd_f(const char *root, int argc, char **argv) {
     if (ovf || !b.p) return 2;
     set_owner(argc, argv);
     wait = numarg(opt(argc, argv, "--lock-wait-ms", "0")); if (wait < 0 || wait > 60000) return 2;
+    if (wr && freeze_in_domain(root, path)) {
+        char fh[64];
+        if (freeze_check(root, fl_owner, fh, sizeof fh)) {
+            fprintf(stderr, "LOCK_HELD freeze owner=%s\nF\t%s\trefused\tLOCK_HELD freeze owner=%s\n", fh, op, fh);
+            if (tmpf[0]) sy_unlink(tmpf);
+            return 1;
+        }
+    }
     if ((svc_on = wr_svc(root, wr)) < 0) return 1;
     if (wr && svc_on) {
         lk_name(root, path, nm);
@@ -2053,6 +2148,7 @@ static int cmd_doc(const char *root, int argc, char **argv) {
     if (*xs) ab_kv(&b, "expect_sha", xs, strlen(xs));
     if (ovf || !b.p) return 2;
     set_owner(argc, argv);
+    if (wr && freeze_in_domain(root, path) && freeze_refuse_if_held(root, argc, argv)) return 1;
     if ((svc_on = wr_svc(root, wr)) < 0) return 1;
     if (wr && svc_on) {
         F(nm, sizeof nm, "doc:%s", path);
@@ -2087,7 +2183,7 @@ static int owner_tok(const char *s, int dash) {
 }
 static const char *auto_owner(void) {
     static char o[64]; const char *e = getenv("DEVSVC_OWNER"), *j = getenv("CLAUDE_JOB_ID"), *t = getenv("TMUX"), *p = getenv("TMUX_PANE");
-    if (e && okname(e)) F(o, sizeof o, "%s", e);
+    if (e && norm_owner(e, o, sizeof o)) return o;
     else if (owner_tok(j, 1)) F(o, sizeof o, "%s", j);
     else if (t && *t && p && p[0] == '%' && owner_tok(p + 1, 0)) F(o, sizeof o, "pane-%s", p + 1);
     else F(o, sizeof o, "auto-%d", sy_pid());
@@ -2165,15 +2261,268 @@ static void commit_stale_locks_emit(const char *root, const char *err_path, cons
     }
     free(b);
 }
-static const char *lock_for(const char *p) {   /* 路径 -> 锁名;无匹配返回 0 */
+static const char *lock_for(const char *p) {   /* 路径 -> 自动互斥锁名(跳过显式守门锁 freeze);无匹配返回 0 */
     int i; long pn = (long)strlen(p);
     for (i = 0; i < cfg.nlockname; i++) {
         const char *s = cfg.lockpfx[i];
+        if (!strcmp(cfg.lockname[i], "freeze")) continue;
         while (*s) {
             const char *c = strchr(s, ','); long l = c ? c - s : (long)strlen(s);
             if (l > 0 && (s[l - 1] == '/' ? !strncmp(p, s, l) : (pn == l && !strncmp(p, s, l)))) return cfg.lockname[i];
             s += l; if (*s) s++;
         }
+    }
+    return 0;
+}
+static int norm_lex_path(const char *in, char *out, size_t cap) {
+    const char *segs[128]; size_t lens[128]; int ns = 0;
+    const char *p = in; size_t k = 0;
+    if (!in || !in[0] || in[0] != '/' || cap < 2) return 0;
+    while (*p) {
+        while (*p == '/') p++;
+        if (!*p) break;
+        const char *s = p;
+        while (*p && *p != '/') p++;
+        size_t l = (size_t)(p - s);
+        if (l == 1 && s[0] == '.') continue;
+        if (l == 2 && s[0] == '.' && s[1] == '.') { if (ns > 0) ns--; continue; }
+        if (ns >= 128) return 0;
+        segs[ns] = s; lens[ns] = l; ns++;
+    }
+    if (ns == 0) { out[0] = '/'; out[1] = 0; return 1; }
+    for (int i = 0; i < ns; i++) {
+        if (k + 1 + lens[i] >= cap) return 0;
+        out[k++] = '/';
+        mm_copy(out + k, cap - k, segs[i], lens[i]);
+        k += lens[i];
+    }
+    out[k] = 0;
+    return 1;
+}
+static int freeze_in_domain(const char *root, const char *p) {   /* 路径经 realpath/祖先realpath/..折叠归一后再判 freeze 写域前缀 */
+    int i; char abs[PW * 2], rreal[PW], preal[PW * 2], norm[PW * 2]; const char *rp = 0; long rpn;
+    if (!p || !*p) return 0;
+    if (p[0] == '/') {
+        if (snprintf(abs, sizeof abs, "%s", p) >= (int)sizeof abs) return 1;
+    } else if (root && root[0]) {
+        if (snprintf(abs, sizeof abs, "%s/%s", root, p) >= (int)sizeof abs) return 1;
+    } else {
+        return 0;
+    }
+    if (!root || !root[0]) return 0;
+    if (sy_realpath(root, rreal, sizeof rreal) < 0) {
+        if (!norm_lex_path(root, rreal, sizeof rreal)) return 1;
+    }
+    if (sy_realpath(abs, preal, sizeof preal) >= 0) {
+        if (!norm_lex_path(preal, norm, sizeof norm)) return 1;
+    } else {
+        /* Resolve longest existing ancestor (handles symlinks like lnk/new-file.txt) then fold .. lexically */
+        char anc[PW * 2], areal[PW], comb[PW * 2]; int resolved = 0;
+        if (!norm_lex_path(abs, anc, sizeof anc)) return 1;
+        size_t al = strlen(anc);
+        while (al > 1) {
+            while (al > 1 && anc[al - 1] != '/') al--;
+            if (al <= 1) break;
+            anc[al - 1] = 0;
+            if (sy_realpath(anc, areal, sizeof areal) >= 0) {
+                const char *tail = abs;
+                /* Re-apply lexical normalization on abs first to match anc split point */
+                char lex_abs[PW * 2];
+                if (!norm_lex_path(abs, lex_abs, sizeof lex_abs)) return 1;
+                tail = lex_abs + (al - 1);
+                if (snprintf(comb, sizeof comb, "%s%s", areal, tail) >= (int)sizeof comb) return 1;
+                if (!norm_lex_path(comb, norm, sizeof norm)) return 1;
+                resolved = 1;
+                break;
+            }
+            al--;
+        }
+        if (!resolved && !norm_lex_path(abs, norm, sizeof norm)) return 1;
+    }
+    {
+        long rrl = (long)strlen(rreal);
+        if (!strncmp(norm, rreal, (size_t)rrl) && norm[rrl] == '/') rp = norm + rrl + 1;
+        else return 0;
+    }
+    rpn = (long)strlen(rp);
+    for (i = 0; i < cfg.nlockname; i++) {
+        const char *s;
+        if (strcmp(cfg.lockname[i], "freeze")) continue;
+        s = cfg.lockpfx[i];
+        while (*s) {
+            const char *c = strchr(s, ','); long l = c ? c - s : (long)strlen(s);
+            if (l > 0 && (s[l - 1] == '/' ? !strncmp(rp, s, (size_t)l) : (rpn == l && !strncmp(rp, s, (size_t)l)))) return 1;
+            s += l; if (*s) s++;
+        }
+    }
+    return 0;
+}
+static int parse_pos_long(const char *s, size_t len, long *out) {
+    long v = 0;
+    if (!s || len == 0 || len > 18) return 0;
+    for (size_t i = 0; i < len; i++) {
+        if (s[i] < '0' || s[i] > '9') return 0;
+        v = v * 10 + (s[i] - '0');
+    }
+    if (v <= 0) return 0;
+    if (out) *out = v;
+    return 1;
+}
+/* 0: absent or only expired/comment rows; 1: at least one unexpired freeze row; -1: unreadable or malformed. */
+static int freeze_tsv_state(const char *root) {
+    char fzp[PW];
+    if (!root || !root[0] || cx_fmt(fzp, sizeof fzp, "%s/build/freeze.tsv", root)) return 0;
+    int fx = sy_exists(fzp);
+    if (fx == 0) return 0;
+    if (fx < 0) return -1;
+    unsigned char *b = 0; int64_t bn = 0;
+    if (sy_read_file(fzp, &b, &bn, 1 << 16) || !b) return -1;
+    long now = sy_wall_s();
+    int active = 0;
+    for (const char *p = (const char *)b, *end = (const char *)b + bn; p < end; ) {
+        const char *nl = memchr(p, '\n', (size_t)(end - p));
+        size_t ll = nl ? (size_t)(nl - p) : (size_t)(end - p);
+        while (ll > 0 && p[ll - 1] == '\r') ll--;
+        if (ll > 0 && p[0] != '#') {
+            /* columns: 0=sid, 1=base, 2=owner, 3=deadline_epoch_s, 4=paths */
+            const char *q = p, *le = p + ll;
+            int col = 0;
+            const char *ds = 0; size_t dl = 0;
+            while (q <= le) {
+                const char *tab = memchr(q, '\t', (size_t)(le - q));
+                const char *ce = tab ? tab : le;
+                if (col == 3) { ds = q; dl = (size_t)(ce - q); break; }
+                col++;
+                if (!tab) break;
+                q = tab + 1;
+            }
+            long dl_s = 0;
+            if (!ds || !parse_pos_long(ds, dl, &dl_s)) { free(b); return -1; }
+            if (dl_s > now) active = 1;
+        }
+        p = nl ? nl + 1 : end;
+    }
+    free(b);
+    return active;
+}
+
+static int freeze_check(const char *root, const char *owner, char *holder, size_t hcap) {   /* 1 表示 freeze 锁被他人持有或损坏/不可读闭锁; 0 放行 */
+    int rc; const char *s, *e; char nown[64], nhold[64], lp[PW];
+    int has_own = norm_owner(owner, nown, sizeof nown);
+    int fz_state = freeze_tsv_state(root);
+    if (holder && hcap > 0) holder[0] = 0;
+    char fhold[64]; int have_fhold = 0;
+    fhold[0] = 0;
+    /* Direct read of persisted locks.tsv: malformed/truncated/unreadable fails closed;
+       valid freeze row is cross-checked against live daemon memory when reachable (locks-mismatch fails closed). */
+    if (dir[0] && snprintf(lp, sizeof lp, "%s/locks.tsv", dir) < (int)sizeof lp) {
+        int ex = sy_exists(lp);
+        if (ex < 0) {
+            if (holder && hcap > 0) snprintf(holder, hcap, "locks-unreadable");
+            return 1;
+        }
+        if (ex == 1) {
+            unsigned char *b = 0; int64_t bn = 0;
+            if (sy_read_file(lp, &b, &bn, 1 << 16) || !b) {
+                if (holder && hcap > 0) snprintf(holder, hcap, "locks-unreadable");
+                return 1;
+            }
+            if (bn > 0) {
+                if (b[bn - 1] != '\n') {
+                    free(b);
+                    if (holder && hcap > 0) snprintf(holder, hcap, "locks-corrupt");
+                    return 1;
+                }
+                long now = sy_wall_s();
+                for (const char *p = (const char *)b, *end = (const char *)b + bn; p < end; ) {
+                    const char *nl = memchr(p, '\n', (size_t)(end - p));
+                    size_t ll = nl ? (size_t)(nl - p) : (size_t)(end - p);
+                    if ((ll == 6 && !strncmp(p, "freeze", 6)) || (ll > 6 && !strncmp(p, "freeze\t", 7))) {
+                        char rawh[64]; long exp = 0;
+                        const char *os = (ll > 7) ? p + 7 : 0;
+                        const char *oe = os ? memchr(os, '\t', ll - 7) : 0;
+                        if (!os || !oe || oe == os) {
+                            free(b);
+                            if (holder && hcap > 0) snprintf(holder, hcap, "locks-corrupt");
+                            return 1;
+                        }
+                        const char *es = oe + 1;
+                        const char *ee = memchr(es, '\t', (size_t)((p + ll) - es));
+                        size_t el = ee ? (size_t)(ee - es) : (size_t)((p + ll) - es);
+                        if (!parse_pos_long(es, el, &exp)) {
+                            free(b);
+                            if (holder && hcap > 0) snprintf(holder, hcap, "locks-corrupt");
+                            return 1;
+                        }
+                        size_t ol = (size_t)(oe - os);
+                        if (ol >= sizeof rawh) ol = sizeof rawh - 1;
+                        mm_copy(rawh, sizeof rawh, os, ol);
+                        rawh[ol] = 0;
+                        if (!norm_owner(rawh, nhold, sizeof nhold)) {
+                            free(b);
+                            if (holder && hcap > 0) snprintf(holder, hcap, "locks-corrupt");
+                            return 1;
+                        }
+                        if (exp > now) {
+                            size_t fl = strlen(nhold);
+                            if (fl >= sizeof fhold) fl = sizeof fhold - 1;
+                            if (fl > 0) mm_copy(fhold, sizeof fhold, nhold, fl);
+                            fhold[fl] = 0;
+                            have_fhold = 1;
+                        }
+                    }
+                    p = nl ? nl + 1 : end;
+                }
+            }
+            free(b);
+        }
+    }
+    rc = request(root, "lock-list", 0);
+    if (rc != 0 && fz_state != 0) {
+        const char *no_as = getenv("DEVSVC_NO_AUTOSTART");
+        if (!no_as || !no_as[0]) rc = request(root, "lock-list", 1);
+    }
+    if (rc == 0) {
+        for (s = resp; s && *s; s = e ? e + 1 : 0) {
+            e = strchr(s, '\n');
+            if (!strncmp(s, "LOCK\tfreeze\towner=", 18)) {
+                const char *os = s + 18, *oe = os; char rawh[64];
+                while (*oe && *oe != '\t' && *oe != '\n' && *oe != '\r') oe++;
+                size_t ol = (size_t)(oe - os);
+                if (ol >= sizeof rawh) ol = sizeof rawh - 1;
+                if (ol > 0) mm_copy(rawh, sizeof rawh, os, ol);
+                rawh[ol] = 0;
+                if (!norm_owner(rawh, nhold, sizeof nhold)) mm_copy(nhold, sizeof nhold, rawh, ol + 1);
+                if (have_fhold && strcmp(fhold, nhold)) {
+                    if (holder && hcap > 0) snprintf(holder, hcap, "locks-mismatch");
+                    return 1;
+                }
+                if (holder && hcap > 0) snprintf(holder, hcap, "%s", nhold);
+                if (has_own && !strcmp(nhold, nown)) return 0;
+                return 1;
+            }
+        }
+    }
+    if (have_fhold) {
+        if (holder && hcap > 0) snprintf(holder, hcap, "%s", fhold);
+        if (has_own && !strcmp(fhold, nown)) return 0;
+        return 1;
+    }
+    if (rc != 0 && fz_state != 0) {
+        if (holder && hcap > 0) snprintf(holder, hcap, "freeze-svc-unreachable");
+        return 1;
+    }
+    return 0;
+}
+static int freeze_refuse_if_held(const char *root, int argc, char **argv) {
+    char ow[64], fh[64];
+    const char *who = resolve_owner(argc, argv, ow, sizeof ow) ? ow : auto_owner();
+    if (freeze_check(root, who, fh, sizeof fh)) {
+        if (!strcmp(fh, "freeze-svc-unreachable"))
+            fprintf(stderr, "LOCK_HELD freeze owner=%s reason=autostart-failed recover=\"sh ./unisacc.com tools/devsvc.cx -- start\"\n", fh);
+        else
+            fprintf(stderr, "LOCK_HELD freeze owner=%s\n", fh);
+        return 1;
     }
     return 0;
 }
@@ -2215,6 +2564,7 @@ static int cmd_derive(const char *root, int argc, char **argv) {
     if (!ft || !ft[0]) ft = "tools/derive-flow.cx";
     if (flag(argc, argv, "--write")) {
         if (dry && dry[0] == '1') { printf("DEVSVC_DERIVE\tplan=tools/derive.cx\tlock=derive\n"); return 0; }
+        if (freeze_refuse_if_held(root, argc, argv)) return 1;
         printf("DEVSVC_DERIVE\tvia=serial\n"); fflush(stdout);
         return tool_locked(root, "derive", "tools/derive.cx", argc, argv);
     }
@@ -2261,20 +2611,74 @@ static int git_commit_check(int argc, char **argv) {
             continue; }
         if (!strcmp(a, "--push") || !strcmp(a, "--dry-run") || !strcmp(a, "--bg") || !strcmp(a, "--derive") || !strcmp(a, "--derive-selected")) continue;   /* --derive/--derive-selected: commit-own recomputes the derived tables the commit feeds */
         if (!strcmp(a, "--cwd")) { if (i + 1 >= argc || !argv[i + 1][0]) { fprintf(stderr, "devsvc: git commit: --cwd needs a work tree directory\n"); return 2; } i++; continue; }
+        if (!strcmp(a, "--owner")) { if (i + 1 >= argc || !okname(argv[i + 1])) { fprintf(stderr, "devsvc: git commit: --owner needs a valid owner name\n"); return 2; } i++; continue; }
         if (!strcmp(a, "--keyed") && i+3 < argc && argv[i+1][0]!='-' && argv[i+2][0]!='-' && argv[i+3][0]!='-') {
             fprintf(stderr,"devsvc: REFUSE keys-need-comma-separated: use --keyed TABLE KEY1,KEY2\n");
             return 2;
         }
-        if (!strcmp(a, "--whole") || !strcmp(a, "--keyed") || !strcmp(a, "--registered") || !strcmp(a, "--new-tool") || !strcmp(a, "--batch") || !strcmp(a, "--merge-continue")) { has_src = 1; continue; }   /* --merge-continue: commit-own co_mergecont (whole staged merge, two parents) */
+        if (!strcmp(a, "--whole") || !strcmp(a, "--staged") || !strcmp(a, "--keyed") || !strcmp(a, "--registered") || !strcmp(a, "--new-tool") || !strcmp(a, "--batch") || !strcmp(a, "--merge-continue")) { has_src = 1; continue; }   /* --merge-continue: commit-own co_mergecont (whole staged merge, two parents); --staged: commit-own takes the index blobs */
         if (!strcmp(a, "--")) { fprintf(stderr, "devsvc: REFUSE paths-need-whole-or-keyed: use --whole PATH or --keyed TABLE KEY, not -- PATH (nothing committed)\n"); return 2; }
         if (a[0] == '-' && a[1]) { fprintf(stderr, "devsvc: git commit: unknown option %s (nothing committed)\n", a); return 2; }
         if (!has_src) { fprintf(stderr, "devsvc: git commit: argument %s before any --whole/--keyed/--registered (nothing committed)\n", a); return 2; }
     }
     if (!has_m) { fprintf(stderr, "devsvc: git commit: -m MSG is required (nothing committed)\n"); return 2; }
-    if (!has_src) { fprintf(stderr, "devsvc: git commit: need a path source: --whole PATH... | --keyed PATH KEYS | --registered ID... (nothing committed)\n"); return 2; }
+    if (!has_src) { fprintf(stderr, "devsvc: git commit: need a path source: --whole PATH... | --staged PATH... | --keyed PATH KEYS | --registered ID... (nothing committed)\n"); return 2; }
     {   const char *s = msg; while (*s == ' ' || *s == '\t' || *s == '\r') s++;
         if (!*s || *s == '\n') { fprintf(stderr, "devsvc: git commit: empty message (nothing committed)\n"); return 2; } }
     return 0;
+}
+static const char *devsvc_owner_env(void) {
+    const char *e = getenv("DEVSVC_OWNER"), *p;
+    if (!e || !okname(e)) return 0;
+    for (p = e; *p; p++) {
+        unsigned char c = (unsigned char)*p;
+        if (c < 0x21 || c == 0x7f) return 0;
+    }
+    return e;
+}
+static int msg_has_window_trailer(const char *m) {
+    const char *s = m, *e;
+    while (s && *s) {
+        e = strchr(s, '\n');
+        if (!e) e = s + strlen(s);
+        if ((e - s) >= 17 && git_ci_prefix(s, "x-unisacc-window:")) return 1;
+        s = *e ? e + 1 : 0;
+    }
+    return 0;
+}
+static int line_is_trailer(const char *s, const char *e) {
+    const char *c = memchr(s, ':', (size_t)(e - s)), *p;
+    if (!c || c == s || c + 1 >= e || c[1] != ' ') return 0;
+    for (p = s; p < c; p++) {
+        char ch = *p;
+        if (!((ch >= 'A' && ch <= 'Z') || (ch >= 'a' && ch <= 'z') || (ch >= '0' && ch <= '9') || ch == '-')) return 0;
+    }
+    return 1;
+}
+static int msg_ends_with_trailers(const char *m, size_t n) {
+    const char *p = m + n, *para = m, *s, *e;
+    while (p > m) {
+        if (p - m >= 2 && p[-1] == '\n' && p[-2] == '\n') { para = p; break; }
+        p--;
+    }
+    if (para == m) return 0;
+    for (s = para; s < m + n; s = e < m + n ? e + 1 : m + n) {
+        e = memchr(s, '\n', (size_t)(m + n - s));
+        if (!e) e = m + n;
+        if (e == s || !line_is_trailer(s, e)) return 0;
+    }
+    return 1;
+}
+static char *msg_with_window_trailer(const char *msg, const char *win, char *buf, size_t cap) {
+    size_t n = strlen(msg);
+    while (n > 0 && (msg[n - 1] == '\n' || msg[n - 1] == '\r')) n--;
+    if (!win || !*win || msg_has_window_trailer(msg)) return (char *)msg;
+    {
+        const char *sep = msg_ends_with_trailers(msg, n) ? "\n" : "\n\n";
+        int w = snprintf(buf, cap, "%.*s%sX-Unisacc-Window: %s", (int)n, msg, sep, win);
+        if (w < 0 || (size_t)w >= cap) return (char *)msg;
+    }
+    return buf;
 }
 /* 合并冲突处理。冲突文件全部是 exec/facts/derive.tsv 登记的 outputs(派生表;末尾带 / 的目录只管其下一层)时自动解决:
    逐个取本侧(checkout --ours),derive --write --only 受影响名,再 derive --check --only 同名须无漂移,git add -A 这些行的
@@ -3008,18 +3412,22 @@ land_back:
 
 static int git_merge(const char *root, int argc, char **argv) {
     const char *br = 0, *d = root, *msg = 0; char rd[PW], top[PW], cur[200], buf[1 << 15], theirs[128], old[128], nw[128], tree[128], dm[600], why[PW + 32];
-    int i, rc, att, nu = 0, ff = 0, sy = 0, kp = 0, cont = 0, use_wt = 0;
+    int i, rc, att, nu = 0, ff = 0, sy = 0, kp = 0, cont = 0, use_wt = 0, no_ff = 1;
     mg_root = root;
     for (i = 1; i < argc; i++) {
         if (!strcmp(argv[i], "--cwd") && i + 1 < argc) d = argv[++i];
+        else if (!strcmp(argv[i], "--owner") && i + 1 < argc) i++;
         else if (!strcmp(argv[i], "-m") && i + 1 < argc) { msg = argv[++i]; tr_strip(argv[i]); }
         else if (!strcmp(argv[i], "--continue")) cont = 1;
         else if (!strcmp(argv[i], "--worktree")) use_wt = 1;
-        else if (argv[i][0] == '-' || br) { fprintf(stderr, "devsvc: git merge BRANCH|--continue [--worktree] [-m MSG] [--cwd WORKTREE]: unexpected %s\n", argv[i]); git_argerr = 1; return 2; }
+        else if (!strcmp(argv[i], "--no-ff")) no_ff = 1;
+        else if (!strcmp(argv[i], "--ff")) no_ff = 0;
+        else if (argv[i][0] == '-' || br) { fprintf(stderr, "devsvc: git merge BRANCH|--continue [--no-ff] [--worktree] [-m MSG] [--cwd WORKTREE]: unexpected %s\n", argv[i]); git_argerr = 1; return 2; }
         else br = argv[i];
     }
     if (cont && (br || use_wt)) { fprintf(stderr, "devsvc: git merge --continue: takes no BRANCH or --worktree\n"); git_argerr = 1; return 2; }
     if (!cont && !br) { fprintf(stderr, "devsvc: git merge BRANCH [-m MSG] [--cwd WORKTREE] [--worktree]: missing BRANCH\n"); git_argerr = 1; return 2; }
+    if (freeze_refuse_if_held(root, argc, argv)) { printf("GIT_MERGE\trc=1\treason=lock-held\tlock=freeze\n"); return 1; }
     if (msg) { const char *s = msg; while (*s == ' ' || *s == '\t' || *s == '\r') s++;
         if (!*s || *s == '\n' || git_ci_prefix(s, "co-authored-by:") || git_ci_prefix(s, "signed-off-by:")) {
             fprintf(stderr, "devsvc: git merge -m: first line must be body text (not empty, not a trailer)\n"); git_argerr = 1; return 2; } }
@@ -3112,7 +3520,7 @@ static int git_merge(const char *root, int argc, char **argv) {
     for (att = 0; att < 4; att++) {
         if (mg_rev(rd, "HEAD", old, sizeof old)) { mg_teardown(); fprintf(stderr, "devsvc: git merge: no HEAD\n"); return 1; }
         if (mg_anc(rd, theirs, old)) { mg_teardown(); printf("GIT_MERGE\trc=0\tcommit=%s\tbranch=%s\tcwd=%s\tup_to_date=1\n", old, cur, rd); return 0; }
-        if (mg_anc(rd, old, theirs)) { ff = 1; F(nw, sizeof nw, "%s", theirs); }
+        if (!no_ff && mg_anc(rd, old, theirs)) { ff = 1; F(nw, sizeof nw, "%s", theirs); }
         else {
             ff = 0; why[0] = 0;
             rc = mg_try(rd, old, theirs, tree, sizeof tree, &nu, why, sizeof why);
@@ -3121,7 +3529,7 @@ static int git_merge(const char *root, int argc, char **argv) {
                 mg_teardown();
                 if (use_wt) return merge_worktree_run(root, rd, br, cur, msg, old);
                 if (mg_clean_tree(rd)) {   /* 旧路径,行为不变:派生表自动解,否则停在合并中 */
-                    char *mv[] = {"git", "-C", rd, "merge", "--no-edit", "-m", (char *)msg, "--", (char *)br, 0};
+                    char *mv[] = {"git", "-C", rd, "merge", no_ff ? "--no-ff" : "--ff", "--no-edit", "-m", (char *)msg, "--", (char *)br, 0};
                     if (runcap(mv, buf, sizeof buf) != 0) {
                         rc = merge_conflicts(root, rd, br, cur);
                         if (!rc) pin_prepare_kick(rd);
@@ -3175,8 +3583,10 @@ static int git_pull(const char *root, int argc, char **argv) {
     mg_root = root;
     for (i = 1; i < argc; i++) {
         if (!strcmp(argv[i], "--cwd") && i + 1 < argc) d = argv[++i];
+        else if (!strcmp(argv[i], "--owner") && i + 1 < argc) i++;
         else { fprintf(stderr, "devsvc: git pull [--cwd WORKTREE]: unexpected %s\n", argv[i]); git_argerr = 1; return 2; }
     }
+    if (freeze_refuse_if_held(root, argc, argv)) { printf("GIT_PULL\trc=1\treason=lock-held\tlock=freeze\n"); return 1; }
     if (d != root && d[0] != '/') { F(top, sizeof top, "%s/%s", root, d); d = top; }
     if (!realpath(d, rd)) { fprintf(stderr, "devsvc: REFUSE git pull --cwd %s: no such directory\n", d); return 2; }
     {   char *bv[] = {"git", "-C", rd, "symbolic-ref", "--short", "-q", "HEAD", 0};
@@ -3243,19 +3653,27 @@ static int git_fetch(const char *root, int argc, char **argv) {
 /* git add PATH...:把这些路径的 index 同步到工作树内容(清残留暂存用)。拒绝(rc 2,什么都不加):
    绝对路径、含 ..、以 - 开头、out/ 下、被 .gitignore 忽略的路径。成功 GIT_ADD rc=0 n=N。 */
 static int git_add(const char *root, int argc, char **argv) {
-    char *v[FL_MAX_ARGV]; char buf[256]; int i, n = 0, rc;
+    char *v[FL_MAX_ARGV]; char buf[256]; int i, n = 0, rc, npath = 0, fhit = 0;
     if (argc < 2 || argc + 6 > FL_MAX_ARGV) { fprintf(stderr, "devsvc: git add PATH...: need 1..%d paths\n", FL_MAX_ARGV - 7); git_argerr = 1; return 2; }
     for (i = 1; i < argc; i++) {
         const char *p = argv[i];
+        if (!strcmp(p, "--owner") && i + 1 < argc) { i++; continue; }
         if (!*p || p[0] == '/' || p[0] == '-' || strstr(p, "..") || !strncmp(p, "out/", 4) || !strcmp(p, "out")) { fprintf(stderr, "devsvc: REFUSE git add %s: absolute, .., option-like or out/ path (nothing added)\n", p); return 2; }
+        if (freeze_in_domain(root, p)) fhit = 1;
         {   char *cv[] = {"git", "-C", (char *)root, "check-ignore", "-q", "--", (char *)p, 0};
             if (runcap(cv, buf, sizeof buf) == 0) { fprintf(stderr, "devsvc: REFUSE git add %s: ignored path (nothing added)\n", p); return 2; } }
+        npath++;
     }
+    if (!npath) { fprintf(stderr, "devsvc: git add PATH...: need 1..%d paths\n", FL_MAX_ARGV - 7); git_argerr = 1; return 2; }
+    if (fhit && freeze_refuse_if_held(root, argc, argv)) { printf("GIT_ADD\trc=1\treason=lock-held\tlock=freeze\n"); return 1; }
     v[n++] = "git"; v[n++] = "-C"; v[n++] = (char *)root; v[n++] = "add"; v[n++] = "--";
-    for (i = 1; i < argc; i++) v[n++] = argv[i];
+    for (i = 1; i < argc; i++) {
+        if (!strcmp(argv[i], "--owner") && i + 1 < argc) { i++; continue; }
+        v[n++] = argv[i];
+    }
     v[n] = 0;
     rc = runcap(v, buf, sizeof buf);
-    printf("GIT_ADD\trc=%d\tn=%d\n", rc, argc - 1);
+    printf("GIT_ADD\trc=%d\tn=%d\n", rc, npath);
     return rc ? 1 : 0;
 }
 static int git_full_oid(const char *id) {
@@ -3479,6 +3897,7 @@ static int cmd_git(const char *root, int argc, char **argv) {
         const char *cwd = 0, *work;
         int count = 0, overflow = 0, nranges = 0, max_c = FL_MAX_ARGV - 20;
         for (int j = 1; j < argc; j++) {
+            if (!strcmp(argv[j], "--owner") && j + 1 < argc) { j++; continue; }
             if (!strcmp(argv[j], "--cwd")) {
                 if (cwd || j + 1 >= argc || !argv[j + 1][0]) { git_argerr = 1; return 2; }
                 const char *d = argv[++j];
@@ -3487,6 +3906,7 @@ static int cmd_git(const char *root, int argc, char **argv) {
                 cwd = cwd_buf;
             }
         }
+        if (freeze_refuse_if_held(root, argc, argv)) { printf("GIT_PUSH_REFUSE\treason=lock-held\tlock=freeze\n"); return 1; }
         work = cwd ? cwd : root;
         {   char *bv[] = {"git", "-C", (char *)work, "symbolic-ref", "--short", "-q", "HEAD", 0};
             if (runcap(bv, cur, sizeof cur) != 0) { fprintf(stderr, "GIT_PUSH_REFUSE\treason=detached-head\tcwd=%s\n", work); return 2; }
@@ -3494,7 +3914,7 @@ static int cmd_git(const char *root, int argc, char **argv) {
             F(bfull, sizeof bfull, "refs/heads/%s", cur); }
         for (int j = 1; j < argc; j++) {
             const char *a = argv[j];
-            if (!strcmp(a, "--cwd")) { j++; continue; }
+            if (!strcmp(a, "--cwd") || !strcmp(a, "--owner")) { j++; continue; }
             int is_range = 0;
             if (!strcmp(a, "--range")) {
                 if (j + 1 >= argc || !argv[j + 1][0]) { git_argerr = 1; return 2; }
@@ -3600,12 +4020,53 @@ static int cmd_git(const char *root, int argc, char **argv) {
         if (access(pp, R_OK) != 0) { fprintf(stderr, "devsvc: REFUSE git commit --cwd %s: no unisacc.com at the work tree top (ln -s %s/unisacc.com there; nothing committed)\n", d, root); return 2; }
         F(wcwd, sizeof wcwd, "%s", rd); cwd = wcwd;
     }
+    int freeze_hit = 0, pmode = 0;
+    static char msg_tr[16384];
+    char ci_own[64];
+    int has_ci_own = resolve_owner(argc, argv, ci_own, sizeof ci_own);
+    const char *froot = cwd ? cwd : root;
     for (i = 1; i < argc; i++) {
-        if (!strcmp(argv[i], "--push")) { push = 1; continue; }
-        if (!strcmp(argv[i], "--cwd")) { i++; continue; }
-        if (!strcmp(argv[i], "--registered")) need = "registry"; else if ((lf = lock_for(argv[i]))) need = lf;
+        if (!strcmp(argv[i], "--push")) { push = 1; freeze_hit = 1; continue; }
+        if (!strcmp(argv[i], "--cwd") || !strcmp(argv[i], "--owner")) { i++; continue; }
+        if (!strcmp(argv[i], "-m") && i + 1 < argc) {
+            if (n + 1 >= FL_MAX_ARGV - 8) { fprintf(stderr, "devsvc: git commit: too many arguments (nothing committed)\n"); git_argerr = 1; return 2; }
+            v[n++] = argv[i++];
+            v[n++] = msg_with_window_trailer(argv[i], has_ci_own ? ci_own : 0, msg_tr, sizeof msg_tr);
+            continue;
+        }
+        if (!strcmp(argv[i], "--registered") || !strcmp(argv[i], "--new-tool") || !strcmp(argv[i], "--batch") || !strcmp(argv[i], "--merge-continue")) {
+            if (!strcmp(argv[i], "--registered")) need = "registry";
+            freeze_hit = 1; pmode = 0;
+        } else if (!strcmp(argv[i], "--whole") || !strcmp(argv[i], "--staged")) {
+            pmode = 1;
+        } else if (!strcmp(argv[i], "--keyed")) {
+            pmode = 2;
+        } else if (argv[i][0] == '-') {
+            /* Non-path switches (--derive, --dry-run, --bg, --derive-selected, etc.) do NOT reset pmode */
+        } else {
+            if ((lf = lock_for(argv[i]))) need = lf;
+            if (pmode == 2) {
+                if (freeze_in_domain(froot, argv[i])) freeze_hit = 1;
+                pmode = 3;
+            } else if (pmode == 3) {
+                if (strchr(argv[i], '/') && freeze_in_domain(froot, argv[i])) freeze_hit = 1;
+                pmode = 0;
+            } else {
+                /* Check every non-option positional argument forwarded to commit-own */
+                if (freeze_in_domain(froot, argv[i])) freeze_hit = 1;
+            }
+        }
         if (n >= FL_MAX_ARGV - 8) { fprintf(stderr, "devsvc: git commit: too many arguments (nothing committed)\n"); git_argerr = 1; return 2; }
         v[n++] = argv[i];
+    }
+    if (freeze_hit) {
+        char fh[64];
+        const char *who = has_ci_own ? ci_own : auto_owner();
+        if (freeze_check(root, who, fh, sizeof fh)) {
+            fprintf(stderr, "LOCK_HELD freeze owner=%s\n", fh);
+            printf("GIT_COMMIT\trc=1\treason=lock-held\tlock=freeze\towner=%s\n", fh);
+            return 1;
+        }
     }
     /* devsvc 拥有索引,第一阶段:commit 不再取 git-index 锁。commit-own 每个请求用私有索引(HEAD 加本请求路径)建树,
      * 门在私有树的检出上求值(不读共享索引与共享工作树),只在最后对 HEAD 做一次比较并交换(git update-ref NEW OLD);
@@ -4222,17 +4683,22 @@ static int main2(int argc, char **argv) {
         return r;
     }
     if (!strcmp(cmd, "git")) { int r = cmd_git(root, argc, argv); return r == 2 && git_argerr ? usage() : r; }   /* 只有参数解析错才贴 usage;已启动的 git 动作保留真实 rc 与诊断 */
-    if (!strcmp(cmd, "register")) return tool_locked(root, "registry", "tools/register.cx", argc, argv);
+    if (!strcmp(cmd, "register")) { if (freeze_refuse_if_held(root, argc, argv)) return 1; return tool_locked(root, "registry", "tools/register.cx", argc, argv); }
     if (!strcmp(cmd, "derive")) return cmd_derive(root, argc, argv);
     if (!strcmp(cmd, "lock") && argc >= 1) {
-        const char *ow = opt(argc, argv, "--owner", "");
+        char ow[64];
         if (!strcmp(argv[0], "list")) return say(request(root, "lock-list", 1));
-        if (argc < 2 || !okname(argv[1]) || !okname(ow)) { fprintf(stderr, "devsvc: REFUSE lock-args: need lock acquire|release NAME --owner O (NAME and O non-empty, under 64 bytes, no spaces)\n"); return usage(); }
+        int is_freeze = argc >= 2 && !strcmp(argv[1], "freeze");
+        if (argc < 2 || !okname(argv[1]) || !resolve_owner_raw(argc, argv, ow, sizeof ow, is_freeze)) {
+            fprintf(stderr, "devsvc: REFUSE lock-args: need lock acquire|release NAME [--owner O] (NAME and O/DEVSVC_OWNER non-empty, under 64 bytes, no spaces)\n");
+            return usage();
+        }
         if (!strcmp(argv[0], "acquire")) {
             const char *lp = opt(argc, argv, "--pid", getenv("DEVSVC_LOCK_PID"));
+            const char *def_ttl = is_freeze ? "7200" : "600";
             int bp = (lp && lp[0]) ? atoi(lp) : 0;
-            if (bp > 0) { char pt[96]; pi_self_tag(bp, pt, sizeof pt); F(req, sizeof req, "lock-acquire\t%s\t%s\t%s\t%s", argv[1], ow, opt(argc, argv, "--ttl", "600"), pt); }
-            else F(req, sizeof req, "lock-acquire\t%s\t%s\t%s", argv[1], ow, opt(argc, argv, "--ttl", "600"));
+            if (bp > 0) { char pt[96]; pi_self_tag(bp, pt, sizeof pt); F(req, sizeof req, "lock-acquire\t%s\t%s\t%s\t%s", argv[1], ow, opt(argc, argv, "--ttl", def_ttl), pt); }
+            else F(req, sizeof req, "lock-acquire\t%s\t%s\t%s", argv[1], ow, opt(argc, argv, "--ttl", def_ttl));
         }
         else if (!strcmp(argv[0], "release")) F(req, sizeof req, "lock-release\t%s\t%s", argv[1], ow);
         else { fprintf(stderr, "devsvc: REFUSE lock-args: unknown lock action %s (acquire|release|list)\n", argv[0]); return usage(); }

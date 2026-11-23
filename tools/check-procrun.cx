@@ -18,7 +18,13 @@ static char work[4400];
 
 static void die(const char *s) { fprintf(stderr, "check-procrun: %s\n", s); exit(2); }
 static void ck(int ok, const char *name) { printf("%s\tcheck-procrun.%s\n", ok ? "PASS" : "FAIL", name); if (!ok) failed++; }
-static int has(const char *s, const char *t) { return s && strstr(s, t) != 0; }
+static int has(const char *s, const char *t) {
+    long sn, tn, i;
+    if (!s || !t) return 0;
+    sn = tx_len(s, 4096); tn = tx_len(t, 512);
+    for (i = 0; i + tn <= sn; i++) if (tx_same(s + i, tn, t, tn)) return 1;
+    return 0;
+}
 /* /proc/PID/stat exists and its state field is not Z. */
 static int alive(const char *stat) {
     size_t n = 0;
@@ -85,6 +91,18 @@ int main(void) {
         t = pr_run("lbl-sig", av, 0, 0, 10, &r);
         ck(t == 0 && r.rc == -15, "signal-exit-negative-rc");
         pr_free(&r);
+    }
+    {   char *av[] = {"sh", "-c", "printf out-123; printf err-456 >&2; exit 5", 0};
+        char buf[64], small[8]; int cut = 0, rc1, rc2;
+        rc1 = pr_run_merged(av, 10, buf, (int)sizeof buf, &cut);
+        ck(rc1 == 5 && cut == 0 && has(buf, "out-123") && has(buf, "err-456"), "pr-run-merged-stderr-and-rc");
+        rc2 = pr_run_merged(av, 10, small, (int)sizeof small, &cut);
+        ck(rc2 == 5 && cut == 1 && strlen(small) == 7, "pr-run-merged-trunc-sets-cut");
+    }
+    {   char *av[] = {"sh", "-c", "sleep 10", 0};
+        char buf[32]; int cut = 0;
+        t = pr_run_merged(av, 1, buf, (int)sizeof buf, &cut);
+        ck(t == 124, "pr-run-merged-timeout-124");
     }
     if (cx_rmtree(work)) die("cleanup");
     printf("CHECK_PROCRUN\tfailed=%d\n", failed);

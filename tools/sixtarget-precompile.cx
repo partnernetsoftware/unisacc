@@ -204,59 +204,61 @@ static int compile_one(const char *compiler, const char *root, const char *workd
 static int collect_plan_units(const char *compiler, const char *root, char *const env[],
                               const char *target, const char *filter,
                               char *units_out, long deadline_ms) {
-    char roots[ST_MAX_UNITS][4400];
-    char *av[ST_MAX_UNITS + 7];
+    char roots[8][4400];
+    char *av[16];
     int nr = cf_root_count();
     if (nr <= 0 || nr > ST_MAX_UNITS) return -1;
-    av[0] = "sh";
-    av[1] = (char *)compiler;
-    av[2] = "-b";
-    av[3] = (char *)target;
-    av[4] = "-cx-plan";
-    for (int i = 0; i < nr; i++) {
-        if (cx_fmt(roots[i], sizeof roots[i], "%s/%s", root, cf_root_source(i))) return -1;
-        av[5 + i] = roots[i];
-    }
-    av[5 + nr] = 0;
-
-    long left = (deadline_ms - sy_now_ms()) / 1000L;
-    if (left < 1) return -1;
-    np_result r = {0};
-    char why[256] = {0};
-    if (np_run(av, root, env, left < 15 ? (int)left : 15, &r, why, sizeof why) || r.rc || r.residue || !r.outn) {
-        np_free(&r);
-        return -1;
-    }
-
     size_t rlen = strlen(root);
     size_t flen = (filter && filter[0]) ? strlen(filter) : 0;
     int count = 0;
-    char *end = r.out + r.outn;
-    for (char *row = r.out; row < end;) {
-        char *nl = (char *)memchr(row, '\n', (size_t)(end - row));
-        if (!nl) break;
-        *nl = 0;
-        char *tab = strchr(row, '\t');
-        if (tab) {
-            char *path = tab + 1;
-            char *tab2 = strchr(path, '\t');
-            if (tab2) *tab2 = 0;
-            if (strlen(path) > rlen + 1 && memcmp(path, root, rlen) == 0 && path[rlen] == '/') {
-                const char *rel = path + rlen + 1;
-                if (!flen || tx_find(rel, (long)strlen(rel), filter, (long)flen) >= 0) {
-                    int dup = 0;
-                    for (int k = 0; k < count; k++) {
-                        if (tx_eqz(units_out + (size_t)k * 4400, path)) { dup = 1; break; }
-                    }
-                    if (!dup && count < ST_MAX_UNITS) {
-                        if (!cx_fmt(units_out + (size_t)count * 4400, 4400, "%s", path)) count++;
+    for (int base = 0; base < nr; base += 8) {
+        int chunk = nr - base;
+        if (chunk > 8) chunk = 8;
+        av[0] = "sh";
+        av[1] = (char *)compiler;
+        av[2] = "-b";
+        av[3] = (char *)target;
+        av[4] = "-cx-plan";
+        for (int i = 0; i < chunk; i++) {
+            if (cx_fmt(roots[i], sizeof roots[i], "%s/%s", root, cf_root_source(base + i))) return -1;
+            av[5 + i] = roots[i];
+        }
+        av[5 + chunk] = 0;
+        long left = (deadline_ms - sy_now_ms()) / 1000L;
+        if (left < 1) return -1;
+        np_result r = {0};
+        char why[256] = {0};
+        if (np_run(av, root, env, left < 15 ? (int)left : 15, &r, why, sizeof why) || r.rc || r.residue || !r.outn) {
+            np_free(&r);
+            return -1;
+        }
+        char *end = r.out + r.outn;
+        for (char *row = r.out; row < end;) {
+            char *nl = (char *)memchr(row, '\n', (size_t)(end - row));
+            if (!nl) break;
+            *nl = 0;
+            char *tab = strchr(row, '\t');
+            if (tab) {
+                char *path = tab + 1;
+                char *tab2 = strchr(path, '\t');
+                if (tab2) *tab2 = 0;
+                if (strlen(path) > rlen + 1 && memcmp(path, root, rlen) == 0 && path[rlen] == '/') {
+                    const char *rel = path + rlen + 1;
+                    if (!flen || tx_find(rel, (long)strlen(rel), filter, (long)flen) >= 0) {
+                        int dup = 0;
+                        for (int k = 0; k < count; k++) {
+                            if (tx_eqz(units_out + (size_t)k * 4400, path)) { dup = 1; break; }
+                        }
+                        if (!dup && count < ST_MAX_UNITS) {
+                            if (!cx_fmt(units_out + (size_t)count * 4400, 4400, "%s", path)) count++;
+                        }
                     }
                 }
             }
+            row = nl + 1;
         }
-        row = nl + 1;
+        np_free(&r);
     }
-    np_free(&r);
     return count;
 }
 

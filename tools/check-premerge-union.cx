@@ -1,0 +1,386 @@
+/* tools/check-premerge-union.cx -- regression check for tools/premerge-union.cx and chain-ready 22-premerge-union.
+ *
+ *   sh ./unisacc.com tools/check-premerge-union.cx
+ *
+ * Verifies on an isolated fixture git repository (main + v0.0.99):
+ *   (1) branch-only file overlay
+ *   (2) 7+ both-modified file rules: tsv-union (tests/batches.tsv, tests/coverage.tsv, build/links.tsv,
+ *       exec/facts/derive-weights.tsv), branch-side (plans/v0.0.99.md), identical, auto-3way
+ *   (3) clean generator --check, derive --check, and check-derive pass (verdict=PASS, rc=0)
+ *   (4) --mutate-drift injects drift into a generated table and fails closed (verdict=FAIL, derive_drift>=1, rc=1)
+ *   (5) conflicting 3-way edit on an auto-3way file fails closed (PREMERGE_FILE CONFLICT, conflict=1, rc=1)
+ *   (6) chain-ready --judge premerge accepts PASS summary and rejects FAIL/drift/conflict
+ * Last line: CHECK_PREMERGE_UNION<TAB>passed=N<TAB>failed=M
+ */
+#pragma unisa use sys.io
+#pragma unisa use sys.fs
+#pragma unisa use sys.proc
+#pragma unisa use sys.posix
+#pragma unisa use sys.env
+#pragma unisa use text.text
+#pragma unisa use text.fmt
+#pragma unisa use mem.bytes
+#pragma unisa use mem.heap
+
+static int passed, failed;
+
+static void ck(int ok, const char *name) {
+    if (ok) {
+        passed++;
+        sy_printf("PASS\t%s\n", name);
+    } else {
+        failed++;
+        sy_printf("FAIL\t%s\n", name);
+    }
+}
+
+static int has(const char *h, const char *needle) {
+    if (!h || !needle) return 0;
+    long hn = (long)tx_len(h, 1 << 20), nn = (long)tx_len(needle, 4096);
+    for (long i = 0; i + nn <= hn; i++) {
+        if (mm_same(h + i, needle, (size_t)nn)) return 1;
+    }
+    return 0;
+}
+
+static int file_equals(const char *path, const char *want) {
+    size_t fn = 0;
+    char *fb = (char *)cx_read(path, &fn);
+    if (!fb || !want) { if (fb) mm_free(fb); return 0; }
+    long wl = (long)tx_len(want, 1 << 20);
+    int ok = ((long)fn == wl && mm_same(fb, want, (size_t)wl));
+    mm_free(fb);
+    return ok;
+}
+
+static int run_sh(const char *cmd, int timeout_s, char *out, size_t cap) {
+    char *v[] = {"sh", "-c", (char *)cmd, 0};
+    char *o = 0; size_t n = 0;
+    int rc = cx_runv_timeout(v, timeout_s, &o, &n);
+    out[0] = 0;
+    if (o && n > 0) {
+        size_t c = n < cap - 1 ? n : cap - 1;
+        mm_copy(out, cap, o, c);
+        out[c] = 0;
+    }
+    if (o) mm_free(o);
+    return rc;
+}
+
+static void put_file(const char *dir, const char *rel, const char *body, int mode) {
+    char p[1024], cmd[1200], out[256];
+    const char *sl = strrchr(rel, '/');
+    if (sl) {
+        char d[1024];
+        long dl = (long)(sl - rel);
+        cx_fmt(d, sizeof d, "%s/%.*s", dir, (int)dl, rel);
+        (void)sy_mkdir_all(d, 0755);
+    }
+    cx_fmt(p, sizeof p, "%s/%s", dir, rel);
+    (void)sy_write_atomic(p, body, (int64_t)tx_len(body, 1 << 20), mode);
+    if (mode == 0755) {
+        cx_fmt(cmd, sizeof cmd, "chmod +x '%s'", p);
+        (void)run_sh(cmd, 5, out, sizeof out);
+    }
+}
+
+static const char *STUB_UC =
+    "#!/bin/sh\n"
+    "# UPI1 pid=0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef\n"
+    "tool=\"$1\"\n"
+    "shift\n"
+    "if [ \"$1\" = \"--\" ]; then shift; fi\n"
+    "case \"$tool\" in\n"
+    "  tools/derive.cx)\n"
+    "    for a in \"$@\"; do\n"
+    "      if [ \"$a\" = \"--prepare-native\" ]; then\n"
+    "        printf 'DERIVE_PREPARE\\tprepared=0\\tno-test-result\\n'\n"
+    "        exit 0\n"
+    "      fi\n"
+    "    done\n"
+    "    if grep -q 'premerge-union-synthetic-drift' build/iface-hash.tsv 2>/dev/null; then\n"
+    "      printf 'DERIVE\\tiface-hash\\tDRIFT\\t5\\trc=1\\tIFACE_HASH FAIL\\n'\n"
+    "      printf 'DERIVE_SUMMARY\\tok=0\\tdrift=1\\trefused=0\\tskipped=0\\telapsed_ms=5\\n'\n"
+    "      exit 1\n"
+    "    fi\n"
+    "    printf 'DERIVE\\tverseq-gen\\tOK\\t2\\n'\n"
+    "    printf 'DERIVE\\ttables-gen\\tOK\\t3\\n'\n"
+    "    printf 'DERIVE\\tiface-hash\\tOK\\t4\\n'\n"
+    "    printf 'DERIVE_SUMMARY\\tok=3\\tdrift=0\\trefused=0\\tskipped=0\\telapsed_ms=9\\n'\n"
+    "    exit 0\n"
+    "    ;;\n"
+    "  tools/check-derive.cx)\n"
+    "    printf 'PASS\\tcheck-derive.fixture\\nDERIVE_CHECK\\tok=59\\tfailed=0\\n'\n"
+    "    exit 0\n"
+    "    ;;\n"
+    "  tools/iface-hash.cx)\n"
+    "    if grep -q 'premerge-union-synthetic-drift' build/iface-hash.tsv 2>/dev/null; then\n"
+    "      printf 'IFACE_HASH\\tFAIL\\tpackages=17\\n'\n"
+    "      exit 1\n"
+    "    fi\n"
+    "    printf 'IFACE_HASH\\tok\\tpackages=17\\n'\n"
+    "    exit 0\n"
+    "    ;;\n"
+    "  *)\n"
+    "    printf 'OK\\t%s\\n' \"$tool\"\n"
+    "    exit 0\n"
+    "    ;;\n"
+    "esac\n";
+
+static const char *STUB_BOUND =
+    "#!/bin/sh\n"
+    "shift\n"
+    "exec \"$@\"\n";
+
+int main(void) {
+    char tmpd[512], repo[600], udir[600], cmd[2048], out[16384];
+    if (sy_mkdtemp(sy_tmpdir(), "check-premerge-union-", tmpd, sizeof tmpd) != 0) {
+        sy_printf("FAIL\tmkdtemp\n");
+        return 1;
+    }
+    cx_fmt(repo, sizeof repo, "%s/repo", tmpd);
+    cx_fmt(udir, sizeof udir, "%s/union", tmpd);
+    (void)sy_mkdir_all(repo, 0755);
+
+    /* Build merge-base commit on main */
+    put_file(repo, "unisacc.com", STUB_UC, 0755);
+    put_file(repo, "tools/bound", STUB_BOUND, 0755);
+    put_file(repo, "build/version-seq.tsv", "# version-seq\n1\t0.0.99\tL0\t开发中\tnote\n", 0644);
+    put_file(repo, "build/iface-hash.tsv", "pkg\tsha\ncx.sys\t1111\n", 0644);
+    put_file(repo, "build/links.tsv", "derive\ta\tb\ttables-gen\tbound=30\n", 0644);
+    put_file(repo, "tests/batches.tsv", "id\tstatus\nb0\tIMPLEMENTED\n", 0644);
+    put_file(repo, "tests/coverage.tsv", "id\tdomain\tstatus\tcontract\tevidence\nc0\tinterfaces\tIMPLEMENTED\told\tev\n", 0644);
+    put_file(repo, "tests/tools-compile-sources.tsv", "tools/a.cx\tregular\ntools/z.cx\tregular\n", 0644);
+    put_file(repo, "plans/v0.0.99.md", "# 0.0.99 计划: base\nline1\n", 0644);
+    put_file(repo, "tools/derive.cx", "/* line 1 */\n/* line 2 */\n/* line 3 */\n/* line 4 */\n/* line 5 */\n", 0644);
+
+    cx_fmt(cmd, sizeof cmd,
+           "cd '%s' && git init -q -b main && git config user.email t@t && git config user.name t && "
+           "git add -A && git commit -qm base && git branch v0.0.99",
+           repo);
+    int rc = run_sh(cmd, 15, out, sizeof out);
+    ck(rc == 0, "fixture-repo-init");
+
+    /* Advance main: edit 7 shared files */
+    put_file(repo, "build/links.tsv", "derive\ta\tb\ttables-gen\tbound=30\nbatch\ttools/check-main.cx\tmain-batch\tsource\ttier=commit\n", 0644);
+    put_file(repo, "exec/facts/derive-weights.tsv", "tables-gen\t10\nlayer-api\t29\n", 0644);
+    put_file(repo, "plans/v0.0.99.md", "# 0.0.99 计划: main-title\nline1\n", 0644);
+    put_file(repo, "tests/batches.tsv", "id\tstatus\nb0\tIMPLEMENTED\nb_main\tIMPLEMENTED\n", 0644);
+    put_file(repo, "tests/coverage.tsv", "id\tdomain\tstatus\tcontract\tevidence\nc0\tinterfaces\tIMPLEMENTED\told\tev\nc_main\tinterfaces\tIMPLEMENTED\tmain\tev\n", 0644);
+    put_file(repo, "tests/tools-compile-sources.tsv", "tools/a.cx\tregular\ntools/b_main.cx\tregular\ntools/z.cx\tregular\n", 0644);
+    put_file(repo, "tools/derive.cx", "/* line 1 main-edit */\n/* line 2 */\n/* line 3 */\n/* line 4 */\n/* line 5 */\n", 0644);
+    cx_fmt(cmd, sizeof cmd, "cd '%s' && git add -A && git commit -qm main-advance", repo);
+    rc = run_sh(cmd, 15, out, sizeof out);
+    ck(rc == 0, "fixture-main-advance");
+
+    /* Advance v0.0.99: add branch-only file + edit 7 shared files */
+    cx_fmt(cmd, sizeof cmd, "cd '%s' && git checkout -q v0.0.99", repo);
+    (void)run_sh(cmd, 10, out, sizeof out);
+    put_file(repo, "cx/sys/branch_only.cx", "int sy_branch_only(void) { return 0; }\n", 0644);
+    put_file(repo, "build/links.tsv", "derive\ta\tb\ttables-gen\tbound=30\nbatch\ttools/check-br.cx\tbr-batch\tsource\ttier=commit\n", 0644);
+    put_file(repo, "exec/facts/derive-weights.tsv", "tables-gen\t10\nsignal-targets\t1\nlayer-api\t29\n", 0644);
+    put_file(repo, "plans/v0.0.99.md", "# 0.0.99 计划: branch-final\nline1\nbranch-notes\n", 0644);
+    put_file(repo, "tests/batches.tsv", "id\tstatus\nb0\tIMPLEMENTED\nb_br\tIMPLEMENTED\n", 0644);
+    put_file(repo, "tests/coverage.tsv", "id\tdomain\tstatus\tcontract\tevidence\nc0\tinterfaces\tIMPLEMENTED\tupdated-on-branch\tev\nc_br\tinterfaces\tIMPLEMENTED\tbr\tev\n", 0644);
+    put_file(repo, "tests/tools-compile-sources.tsv", "tools/a.cx\tregular\ntools/z.cx\tregular\ntools/z_br.cx\tregular\n", 0644);
+    put_file(repo, "tools/derive.cx", "/* line 1 */\n/* line 2 */\n/* line 3 */\n/* line 4 */\n/* line 5 branch-edit */\n", 0644);
+    cx_fmt(cmd, sizeof cmd, "cd '%s' && git add -A && git commit -qm branch-advance && git checkout -q main", repo);
+    rc = run_sh(cmd, 15, out, sizeof out);
+    ck(rc == 0, "fixture-branch-advance");
+
+    /* Run premerge-union --shard all on fixture repo */
+    cx_fmt(cmd, sizeof cmd,
+           "sh ./unisacc.com tools/premerge-union.cx -- --repo '%s' --base main --branch v0.0.99 --dir '%s' --keep --shard all",
+           repo, udir);
+    rc = run_sh(cmd, 45, out, sizeof out);
+    ck(rc == 0 && has(out, "PREMERGE_UNION_SUMMARY\tverdict=PASS\tshard=all\tconflict=0\tgen_fail=0\tderive_drift=0\tderive_refused=0\tcheck_derive_fail=0"),
+       "clean-union-all-pass");
+    ck(has(out, "PREMERGE_FILE\tbuild/links.tsv\tOK\trule=tsv-union") &&
+       has(out, "PREMERGE_FILE\texec/facts/derive-weights.tsv\tOK\trule=tsv-union") &&
+       has(out, "PREMERGE_FILE\tplans/v0.0.99.md\tOK\trule=branch-side") &&
+       has(out, "PREMERGE_FILE\ttests/batches.tsv\tOK\trule=tsv-union") &&
+       has(out, "PREMERGE_FILE\ttests/coverage.tsv\tOK\trule=tsv-union") &&
+       has(out, "PREMERGE_FILE\ttests/tools-compile-sources.tsv\tOK\trule=auto-3way") &&
+       has(out, "PREMERGE_FILE\ttools/derive.cx\tOK\trule=auto-3way"),
+       "seven-shared-files-rules");
+
+    /* Verify union contents on disk */
+    char p[1024];
+    cx_fmt(p, sizeof p, "%s/cx/sys/branch_only.cx", udir);
+    ck(sy_exists(p) == 1, "branch-only-file-overlaid");
+
+    cx_fmt(p, sizeof p, "%s/plans/v0.0.99.md", udir);
+    ck(file_equals(p, "# 0.0.99 计划: branch-final\nline1\nbranch-notes\n"), "plans-takes-branch-side");
+
+    cx_fmt(p, sizeof p, "%s/tests/batches.tsv", udir);
+    ck(file_equals(p, "id\tstatus\nb0\tIMPLEMENTED\nb_main\tIMPLEMENTED\nb_br\tIMPLEMENTED\n"), "batches-tsv-union-keeps-both");
+
+    cx_fmt(p, sizeof p, "%s/tests/coverage.tsv", udir);
+    ck(file_equals(p, "id\tdomain\tstatus\tcontract\tevidence\nc0\tinterfaces\tIMPLEMENTED\tupdated-on-branch\tev\nc_main\tinterfaces\tIMPLEMENTED\tmain\tev\nc_br\tinterfaces\tIMPLEMENTED\tbr\tev\n"),
+       "coverage-tsv-union-updates-key-and-keeps-both");
+
+    cx_fmt(p, sizeof p, "%s/tools/derive.cx", udir);
+    ck(file_equals(p, "/* line 1 main-edit */\n/* line 2 */\n/* line 3 */\n/* line 4 */\n/* line 5 branch-edit */\n"),
+       "auto-3way-keeps-both-hunks");
+
+    /* Mutation test: --mutate-drift build/iface-hash.tsv must turn red (rc=1) */
+    char udir_mut[600];
+    cx_fmt(udir_mut, sizeof udir_mut, "%s/union-mut", tmpd);
+    cx_fmt(cmd, sizeof cmd,
+           "sh ./unisacc.com tools/premerge-union.cx -- --repo '%s' --base main --branch v0.0.99 --dir '%s' --mutate-drift build/iface-hash.tsv --shard derive",
+           repo, udir_mut);
+    rc = run_sh(cmd, 45, out, sizeof out);
+    ck(rc == 1 && has(out, "PREMERGE_MUTATE\tbuild/iface-hash.tsv\tinjected=1") &&
+       has(out, "DERIVE\tiface-hash\tDRIFT\t") &&
+       has(out, "PREMERGE_UNION_SUMMARY\tverdict=FAIL\t"),
+       "mutate-drift-turns-red-rc1");
+
+    /* Conflict test: conflicting 3-way edit on tools/derive.cx must fail closed (rc=1, conflict=1) */
+    cx_fmt(cmd, sizeof cmd, "cd '%s' && git checkout -q v0.0.99", repo);
+    (void)run_sh(cmd, 10, out, sizeof out);
+    put_file(repo, "tools/derive.cx", "/* line 1 branch-conflict */\n/* line 2 */\n/* line 3 */\n/* line 4 */\n/* line 5 branch-edit */\n", 0644);
+    cx_fmt(cmd, sizeof cmd, "cd '%s' && git add -A && git commit -qm branch-conflict && git checkout -q main", repo);
+    (void)run_sh(cmd, 10, out, sizeof out);
+
+    char udir_conf[600];
+    cx_fmt(udir_conf, sizeof udir_conf, "%s/union-conf", tmpd);
+    cx_fmt(cmd, sizeof cmd,
+           "sh ./unisacc.com tools/premerge-union.cx -- --repo '%s' --base main --branch v0.0.99 --dir '%s' --shard derive",
+           repo, udir_conf);
+    rc = run_sh(cmd, 45, out, sizeof out);
+    ck(rc == 1 && has(out, "PREMERGE_FILE\ttools/derive.cx\tCONFLICT\trule=auto-3way") &&
+       has(out, "PREMERGE_UNION_SUMMARY\tverdict=FAIL\tconflict=1\t"),
+       "conflict-3way-fails-closed-rc1");
+
+    /* Judge test in tools/chain-ready.cx (--judge premerge) */
+    char jf[600];
+    cx_fmt(jf, sizeof jf, "%s/j.txt", tmpd);
+    const char *j_ok =
+        "PREMERGE_UNION_TREE\tbase=1111\tbranch=2222\tmerge_base=0000\tbranch_only=5\tboth=7\tconflict=0\tms=100\n"
+        "DERIVE_SUMMARY\tok=17\tdrift=0\trefused=0\tskipped=0\telapsed_ms=18000\n"
+        "PREMERGE_CHECK_DERIVE\tOK\t19000\trc=0\tDERIVE_CHECK ok=59 failed=0\n"
+        "PREMERGE_UNION_SUMMARY\tverdict=PASS\tshard=all\tconflict=0\tgen_fail=0\tderive_drift=0\tderive_refused=0\tcheck_derive_fail=0\tms=29000\n";
+    (void)sy_write_atomic(jf, j_ok, (int64_t)tx_len(j_ok, 4096), 0644);
+    cx_fmt(cmd, sizeof cmd, "sh ./unisacc.com tools/chain-ready.cx -- --judge premerge '%s' 0", jf);
+    rc = run_sh(cmd, 20, out, sizeof out);
+    ck(rc == 0 && has(out, "PASS\t") && has(out, "verdict=PASS"), "chain-ready-judge-premerge-pass");
+
+    const char *j_bad =
+        "DERIVE\tiface-hash\tDRIFT\t117\trc=1\tIFACE_HASH FAIL\n"
+        "PREMERGE_UNION_SUMMARY\tverdict=FAIL\tshard=derive\tconflict=0\tgen_fail=1\tderive_drift=1\tderive_refused=0\tcheck_derive_fail=0\tms=16000\n";
+    (void)sy_write_atomic(jf, j_bad, (int64_t)tx_len(j_bad, 4096), 0644);
+    cx_fmt(cmd, sizeof cmd, "sh ./unisacc.com tools/chain-ready.cx -- --judge premerge '%s' 1", jf);
+    rc = run_sh(cmd, 20, out, sizeof out);
+    ck(rc == 0 && has(out, "FAIL\t") && has(out, "iface-hash") && has(out, "DRIFT"), "chain-ready-judge-premerge-drift-fail");
+
+    /* Merge-traps shard: synthetic git merge reproducing 3970fc6d5a silent delete & silent revert */
+    {
+        char mdir[600], wfile[640], mcmd[4096], rfile[640], ldir[600], lrules[640];
+        cx_fmt(mdir, sizeof mdir, "%s/mt-repo", tmpd);
+        cx_fmt(wfile, sizeof wfile, "%s/mt-waiver.tsv", tmpd);
+        cx_fmt(rfile, sizeof rfile, "%s/mt-rules.tsv", tmpd);
+        {   /* the trap table: the eight `always` rows of the product table, from v0.0.96 on */
+            static const char *rows = "# id\tbranch\tpath\twhen\taction\tevidence\n"
+                "t1\t>=v0.0.96\ttests/manifests/l0-capture.tsv\talways\ttake-theirs\tfixture\n" "t2\t>=v0.0.96\text/sysx/exec.cx\talways\ttake-theirs\tfixture\n"
+                "t3\t>=v0.0.96\text/sysx/processcore.cx\talways\ttake-theirs\tfixture\n" "t4\t>=v0.0.96\text/sysx/reaper.cx\talways\ttake-theirs\tfixture\n"
+                "t5\t>=v0.0.96\ttools/check-reaper.cx\talways\ttake-theirs\tfixture\n" "t6\t>=v0.0.96\tbuild/layer-api/ext.sysx.tsv\talways\ttake-theirs\tfixture\n"
+                "t7\t>=v0.0.96\ttools/cxlib/releaseexec.cx\talways\ttake-theirs\tfixture\n" "t8\t>=v0.0.96\ttools/cxlib/releaseprepare.cx\talways\ttake-theirs\tfixture\n";
+            (void)sy_write_atomic(rfile, rows, (int64_t)tx_len(rows, 4096), 0644);
+        }
+        cx_fmt(mcmd, sizeof mcmd,
+            "mkdir -p '%s'/tests/manifests '%s'/ext/sysx '%s'/tools/cxlib '%s'/build/layer-api && "
+            "cd '%s' && git init -q -b main && "
+            "git config user.name test && git config user.email test@local && "
+            "for f in tests/manifests/l0-capture.tsv ext/sysx/exec.cx ext/sysx/processcore.cx ext/sysx/reaper.cx "
+            "tools/check-reaper.cx build/layer-api/ext.sysx.tsv tools/cxlib/releaseexec.cx tools/cxlib/releaseprepare.cx; "
+            "do printf 'v96-body %%s\\n' \"$f\" > \"$f\"; done && "
+            "git add -A && git commit -qm base-d5ed6f6869 && "
+            "git branch v0.0.96 && "
+            "rm -f tests/manifests/l0-capture.tsv && "
+            "printf 'reverted-by-3970\\n' > ext/sysx/reaper.cx && "
+            "git add -A && git commit -qm shrink-3970fc6d5a && "
+            "git checkout -q -b merged v0.0.96 && "
+            "git merge -q --no-edit main",
+            mdir, mdir, mdir, mdir, mdir);
+        rc = run_sh(mcmd, 30, out, sizeof out);
+        ck(rc == 0, "merge-traps-fixture-setup");
+        /* 1. Silent delete + silent revert accepted by 3-way merge -> MUST FAIL rc=1 */
+        cx_fmt(cmd, sizeof cmd, "sh ./unisacc.com tools/premerge-union.cx -- --shard merge-traps --rules '%s' --repo '%s' --tree '%s' --branch v0.0.96", rfile, mdir, mdir);
+        rc = run_sh(cmd, 30, out, sizeof out);
+        ck(rc == 1 &&
+           has(out, "MERGE_TRAP\tFAIL\ttests/manifests/l0-capture.tsv\treason=missing-in-tree") &&
+           has(out, "MERGE_TRAP\tFAIL\text/sysx/reaper.cx\treason=differs-from-branch") &&
+           has(out, "MERGE_TRAPS_SUMMARY\tverdict=FAIL\tbranch=v0.0.96\tok=6\twaived=0\tfail=2\tna=0\ttotal=8"),
+           "merge-traps-catches-silent-delete-and-revert");
+        /* 2. Named waiver allows the 2 differences -> PASS rc=0 */
+        const char *wv = "# relpath\treason\ntests/manifests/l0-capture.tsv\ttest-waiver-del\next/sysx/reaper.cx\ttest-waiver-rev\n";
+        (void)sy_write_atomic(wfile, wv, (int64_t)tx_len(wv, 512), 0644);
+        cx_fmt(cmd, sizeof cmd, "sh ./unisacc.com tools/premerge-union.cx -- --shard merge-traps --rules '%s' --repo '%s' --tree '%s' --branch v0.0.96 --waiver '%s'", rfile, mdir, mdir, wfile);
+        rc = run_sh(cmd, 30, out, sizeof out);
+        ck(rc == 0 &&
+           has(out, "MERGE_TRAP\tWAIVED\ttests/manifests/l0-capture.tsv\treason=test-waiver-del") &&
+           has(out, "MERGE_TRAP\tWAIVED\text/sysx/reaper.cx\treason=test-waiver-rev") &&
+           has(out, "MERGE_TRAPS_SUMMARY\tverdict=PASS\tbranch=v0.0.96\tok=6\twaived=2\tfail=0\tna=0\ttotal=8"),
+           "merge-traps-named-waiver-passes");
+        /* 3. Explicitly restoring v0.0.96 side for all 8 files -> PASS rc=0 ok=8 */
+        cx_fmt(mcmd, sizeof mcmd, "git -C '%s' checkout v0.0.96 -- tests/manifests/l0-capture.tsv ext/sysx/reaper.cx", mdir);
+        (void)run_sh(mcmd, 15, out, sizeof out);
+        cx_fmt(cmd, sizeof cmd, "sh ./unisacc.com tools/premerge-union.cx -- --shard merge-traps --rules '%s' --repo '%s' --tree '%s' --branch v0.0.96", rfile, mdir, mdir);
+        rc = run_sh(cmd, 30, out, sizeof out);
+        ck(rc == 0 && has(out, "MERGE_TRAPS_SUMMARY\tverdict=PASS\tbranch=v0.0.96\tok=8\twaived=0\tfail=0\tna=0\ttotal=8"),
+           "merge-traps-restored-branch-side-passes");
+        /* 3b. a branch older than the trap line (v0.0.95 and below) is not held to the trap files; v0.0.96 and newer, and unversioned names, are */
+        cx_fmt(mcmd, sizeof mcmd, "git -C '%s' checkout v0.0.96 -- . && git -C '%s' rm -q -f tests/manifests/l0-capture.tsv && git -C '%s' branch -f v0.0.95 v0.0.96", mdir, mdir, mdir);
+        (void)run_sh(mcmd, 15, out, sizeof out);
+        cx_fmt(cmd, sizeof cmd, "sh ./unisacc.com tools/premerge-union.cx -- --shard merge-traps --rules '%s' --repo '%s' --tree '%s' --branch v0.0.95", rfile, mdir, mdir);
+        rc = run_sh(cmd, 30, out, sizeof out);
+        ck(rc == 0 && has(out, "MERGE_TRAP\tNA\ttests/manifests/l0-capture.tsv\treason=branch-older-than-the-trap-line") && has(out, "verdict=PASS\tbranch=v0.0.95\tok=0\twaived=0\tfail=0\tna=8\ttotal=8"), "merge-traps-do-not-apply-to-a-branch-older-than-the-trap-line");
+        cx_fmt(cmd, sizeof cmd, "sh ./unisacc.com tools/premerge-union.cx -- --shard merge-traps --rules '%s' --repo '%s' --tree '%s' --branch v0.0.100", rfile, mdir, mdir);
+        rc = run_sh(cmd, 30, out, sizeof out);
+        ck(has(out, "branch=v0.0.100") && !has(out, "branch-older-than-the-trap-line"), "mutation-newer-version-branch-is-still-held-to-the-traps");
+        /* 5. the table names the files AND the line each belongs to: a trap row for a later line (>=v0.0.98) binds v0.0.98, v0.0.100, not v0.0.97 or v0.0.95;
+         * an empty table holds nothing (so the assertions above are the table's, not the code's) */
+        cx_fmt(ldir, sizeof ldir, "%s/lt-repo", tmpd);
+        cx_fmt(lrules, sizeof lrules, "%s/lt-rules.tsv", tmpd);
+        {   static const char *lr = "# id\tbranch\tpath\twhen\taction\tevidence\n" "early\t>=v0.0.96\ttools/early.cx\talways\ttake-theirs\tfixture\n" "later\t>=v0.0.98\ttools/later.cx\talways\ttake-theirs\tfixture\n";
+            (void)sy_write_atomic(lrules, lr, (int64_t)tx_len(lr, 1024), 0644);
+        }
+        cx_fmt(mcmd, sizeof mcmd, "mkdir -p '%s'/tools && cd '%s' && git init -q -b main && git config user.name test && git config user.email test@local && printf 'BR\\n' > tools/early.cx && printf 'BR\\n' > tools/later.cx && git add -A && git commit -qm base && "
+            "for b in v0.0.95 v0.0.97 v0.0.98 v0.0.100; do git branch $b; done && printf 'MAIN\\n' > tools/early.cx && printf 'MAIN\\n' > tools/later.cx && git add -A && git commit -qm main", ldir, ldir);
+        rc = run_sh(mcmd, 30, out, sizeof out);
+        ck(rc == 0, "merge-traps-later-line-fixture-setup");
+        {   static const char *br[4] = {"v0.0.95", "v0.0.97", "v0.0.98", "v0.0.100"};
+            static const char *want[4] = {"verdict=PASS\tbranch=v0.0.95\tok=0\twaived=0\tfail=0\tna=2\ttotal=2", "verdict=FAIL\tbranch=v0.0.97\tok=0\twaived=0\tfail=1\tna=1\ttotal=2",
+                "verdict=FAIL\tbranch=v0.0.98\tok=0\twaived=0\tfail=2\tna=0\ttotal=2", "verdict=FAIL\tbranch=v0.0.100\tok=0\twaived=0\tfail=2\tna=0\ttotal=2"};
+            static const char *nm[4] = {"table-line-v0.0.95-bound-by-neither-row", "table-line-v0.0.97-bound-by-the-early-row-only", "table-line-v0.0.98-bound-by-both-rows-boundary-inclusive", "table-line-v0.0.100-bound-by-both-rows-numeric-order"};
+            for (int i = 0; i < 4; i++) {
+                cx_fmt(cmd, sizeof cmd, "sh ./unisacc.com tools/premerge-union.cx -- --shard merge-traps --rules '%s' --repo '%s' --tree '%s' --branch %s", lrules, ldir, ldir, br[i]);
+                rc = run_sh(cmd, 30, out, sizeof out);
+                ck(has(out, want[i]), nm[i]);
+            }
+            (void)sy_write_atomic(wfile, "# no trap rows\n", 15, 0644);
+            cx_fmt(cmd, sizeof cmd, "sh ./unisacc.com tools/premerge-union.cx -- --shard merge-traps --rules '%s' --repo '%s' --tree '%s' --branch v0.0.100", wfile, ldir, ldir);
+            rc = run_sh(cmd, 30, out, sizeof out);
+            ck(rc == 0 && has(out, "verdict=PASS\tbranch=v0.0.100\tok=0\twaived=0\tfail=0\tna=0\ttotal=0"), "mutation-empty-table-holds-nothing");
+            cx_fmt(cmd, sizeof cmd, "sh ./unisacc.com tools/premerge-union.cx -- --shard merge-traps --rules '%s/none.tsv' --repo '%s' --tree '%s' --branch v0.0.100 2>&1", tmpd, ldir, ldir);
+            rc = run_sh(cmd, 30, out, sizeof out);
+            ck(rc == 2 && has(out, "unreadable trap table"), "missing-trap-table-is-refused-rc2");
+        }
+        /* 4. A trap path that neither the base nor the branch has (a later version's file) is NA, not a failure; if the base has it, the branch lacking it is still a failure */
+        cx_fmt(mcmd, sizeof mcmd, "cd '%s' && git checkout -q -b nabranch v0.0.96 && git rm -q tests/manifests/l0-capture.tsv && git commit -qm na-branch && git branch nabase", mdir);
+        rc = run_sh(mcmd, 15, out, sizeof out);
+        ck(rc == 0, "merge-traps-na-fixture-setup");
+        cx_fmt(cmd, sizeof cmd, "sh ./unisacc.com tools/premerge-union.cx -- --shard merge-traps --rules '%s' --repo '%s' --tree '%s' --branch nabranch --base nabase", rfile, mdir, mdir);
+        rc = run_sh(cmd, 30, out, sizeof out);
+        ck(rc == 0 && has(out, "MERGE_TRAP\tNA\ttests/manifests/l0-capture.tsv") && has(out, "MERGE_TRAPS_SUMMARY\tverdict=PASS\tbranch=nabranch\tok=7\twaived=0\tfail=0\tna=1\ttotal=8"),
+           "merge-traps-path-absent-in-base-and-branch-is-na");
+        cx_fmt(cmd, sizeof cmd, "sh ./unisacc.com tools/premerge-union.cx -- --shard merge-traps --rules '%s' --repo '%s' --tree '%s' --branch nabranch --base v0.0.96", rfile, mdir, mdir);
+        rc = run_sh(cmd, 30, out, sizeof out);
+        ck(rc == 1 && has(out, "MERGE_TRAP\tFAIL\ttests/manifests/l0-capture.tsv\treason=missing-in-branch") && has(out, "fail=1\tna=0\ttotal=8"),
+           "mutation-base-has-the-path-then-missing-in-branch-fails");
+    }
+
+    (void)sy_remove_all(tmpd);
+    sy_printf("CHECK_PREMERGE_UNION\tpassed=%d\tfailed=%d\n", passed, failed);
+    return failed ? 1 : 0;
+}

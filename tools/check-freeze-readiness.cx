@@ -1,0 +1,201 @@
+/* tools/check-freeze-readiness.cx -- fixtures for freeze-readiness.cx.
+ * Synth: all-green, dirty CONFLICT, missing manual; --fast wall <55s (hot);
+ * parallel vs --mutant-serial (sleep stubs): serial hits bound, parallel passes.
+ * Marker CHECK_FREEZE_READINESS.
+ */
+#pragma unisa use cxlib.ckassert
+#pragma unisa use cxlib.ckrun
+#pragma unisa use testx.check
+#pragma unisa use sys.fs
+#pragma unisa use sys.env
+#pragma unisa use sys.time
+#pragma unisa use sys.posix
+#pragma unisa use text.text
+#pragma unisa use mem.heap
+#pragma unisa use mem.bytes
+
+static char out[1 << 16];
+static char root[900], cwd[800];
+
+static int run_fr(const char *extra) {
+    char cmd[3200];
+    if (cx_fmt(cmd, sizeof cmd,
+        "sh '%s/unisacc.com' '%s/tools/freeze-readiness.cx' -- %s",
+        cwd, cwd, extra && extra[0] ? extra : "")) return -1;
+    return ckk_sh_t("check-freeze-readiness", cmd, out, (int)sizeof out, 55);
+}
+
+static int seed_repo(const char *repo, const char *ver) {
+    char cmd[5000];
+    if (cx_fmt(cmd, sizeof cmd,
+        "mkdir -p '%s/build' '%s/plans' '%s/src' '%s/cx' '%s/bins' '%s/sess' '%s/hl' && "
+        "cd '%s' && git init -q && git config user.name t && git config user.email t@t && "
+        "printf 'ok\\n' > src/a.c && git add src/a.c && git commit -q -m base && "
+        "git branch -M main && git remote add origin . && "
+        "git update-ref refs/remotes/origin/main HEAD && "
+        "printf '28\\t0.0.93\\tx\\t已公开\\tn\\n29\\t%s\\ty\\t建议\\tn\\n' > build/version-seq.tsv && "
+        "printf 'done_units=4\\nfreeze_at=2026-11-23\\n' > 'plans/v%s.md' && "
+        "printf '#!/bin/sh\\necho \"1-rev\\tPASS\\tok\\t1\"\\necho \"READY\\tyes\\tfailed=\\t1\"\\n' > bins/chain.sh && "
+        "printf '#!/bin/sh\\necho \"RATCHETS\\tok=18\\tfail=0\\telapsed_ms=1\"\\n' > bins/rat.sh && "
+        "printf '#!/bin/sh\\necho \"CHECK_RELEASE_PREP\\tpass=1\\tfail=0\"\\n' > bins/prep.sh && "
+        "printf '#!/bin/sh\\nsleep 12\\necho \"1-rev\\tPASS\\tok\\t1\"\\n' > bins/slow-chain.sh && "
+        "printf '#!/bin/sh\\nsleep 12\\necho \"RATCHETS\\tok=18\\tfail=0\"\\n' > bins/slow-rat.sh && "
+        "printf '#!/bin/sh\\nsleep 12\\necho \"CHECK_RELEASE_PREP\\tpass=1\\tfail=0\"\\n' > bins/slow-prep.sh && "
+        "chmod 700 bins/*.sh && "
+        "printf '1000\\tdevsvc-freeze\\tPASS\\t1\\t1\\tfallback\\t1\\trun-batch\\n' > bins/btimes.tsv && "
+        "printf 'MERGE_VERSION\\tverdict=READY\\tconflicts_left=0\\tforced=0\\tregen=0\\ttree=abc12345\\n' > sess/preview.log",
+        repo, repo, repo, repo, repo, repo, repo, repo, ver, ver)) return 2;
+    return ckk_sh_t("check-freeze-readiness", cmd, out, (int)sizeof out, 40) == 0 ? 0 : 2;
+}
+
+static int write_items_green(const char *path) {
+    char cmd[3500];
+    if (cx_fmt(cmd, sizeof cmd,
+        "printf '%%s\\n' "
+        "'id\tdescription\towner\tmanual_status\tevidence\tupdated' "
+        "'ahead-origin\ta\tcc\tdone\t-\t0' "
+        "'chain-1rev\tb\tcc\tdone\t-\t0' "
+        "'ratchets\tc\tcc\tdone\t-\t0' "
+        "'dirty-freeze-domain\td\tcc\tdone\t-\t0' "
+        "'cx-mode-drift\te\tcc\tdone\t-\t0' "
+        "'hardlink-trees\tf\tcc\tdone\t-\t0' "
+        "'devsvc-freeze\tg\tcc\tdone\t-\t0' "
+        "'merge-s0-tree\th\tcc\tdone\t-\t0' "
+        "'release-prep-notes\ti\tcc\tdone\t-\t0' "
+        "'release-prep-rollback\tj\tcc\tdone\t-\t0' "
+        "'verseq\tk\tcc\tdone\t-\t0' "
+        "'plan-freeze-at\tl\tcc\tdone\t-\t0' "
+        "> '%s'", path)) return 2;
+    return ckk_sh_t("check-freeze-readiness", cmd, out, (int)sizeof out, 10) == 0 ? 0 : 2;
+}
+
+static int write_items_miss(const char *path) {
+    char cmd[3500];
+    if (cx_fmt(cmd, sizeof cmd,
+        "printf '%%s\\n' "
+        "'id\tdescription\towner\tmanual_status\tevidence\tupdated' "
+        "'ahead-origin\ta\tcc\tdone\t-\t0' "
+        "'chain-1rev\tb\tcc\tdone\t-\t0' "
+        "'ratchets\tc\tcc\tdone\t-\t0' "
+        "'dirty-freeze-domain\td\tcc\tdone\t-\t0' "
+        "'cx-mode-drift\te\tcc\tdone\t-\t0' "
+        "'hardlink-trees\tf\tcc\tdone\t-\t0' "
+        "'devsvc-freeze\tg\tcc\tdone\t-\t0' "
+        "'merge-s0-tree\th\tcc\tdone\t-\t0' "
+        "'release-prep-notes\ti\tcc\tdone\t-\t0' "
+        "'release-prep-rollback\tj\tcc\tdone\t-\t0' "
+        "'plan-freeze-at\tl\tcc\tdone\t-\t0' "
+        "> '%s'", path)) return 2;
+    return ckk_sh_t("check-freeze-readiness", cmd, out, (int)sizeof out, 10) == 0 ? 0 : 2;
+}
+
+static long parse_elapsed(void) {
+    long i = 0, n = tx_len(out, sizeof out);
+    while (i < n) {
+        long s = i, e, p;
+        while (i < n && out[i] != '\n') i++;
+        e = i; if (i < n) i++;
+        if (e - s < 20 || !tx_same(out + s, 16, "FREEZE_READINESS\t", 16)) continue;
+        p = tx_find(out + s, e - s, "elapsed_ms=", 11);
+        if (p < 0) return -1;
+        {
+            long v = 0, k = s + p + 11;
+            while (k < e && out[k] >= '0' && out[k] <= '9') { v = v * 10 + (out[k] - '0'); k++; }
+            return v;
+        }
+    }
+    return -1;
+}
+
+int main(void) {
+    char repo[900], items[900], extra[2400], cmd[2400]; int rc; long el;
+    if (sy_cwd(cwd, sizeof cwd) < 0) return 2;
+    if (sy_mkdtemp("/tmp", "fr-ck", root, sizeof root)) return 2;
+    if (cx_fmt(repo, sizeof repo, "%s/repo", root)) return 2;
+    if (cx_fmt(items, sizeof items, "%s/items.tsv", root)) return 2;
+    ck(seed_repo(repo, "0.0.94") == 0, "seed-repo");
+    ck(write_items_green(items) == 0, "write-items-green");
+
+    if (cx_fmt(extra, sizeof extra,
+        "--repo '%s' --items '%s' --version 0.0.94 --hardlink-tmp '%s/hl' "
+        "--session-dir '%s/sess' --batch-times '%s/bins/btimes.tsv' "
+        "--chain-bin '%s/bins/chain.sh' --ratchets-bin '%s/bins/rat.sh' "
+        "--release-prep-bin '%s/bins/prep.sh'",
+        repo, items, repo, repo, repo, repo, repo, repo)) return 2;
+    rc = run_fr(extra);
+    ck(tk_has(out, "FREEZE_READINESS\tready=yes\tblockers=0"), "all-green-line");
+    ck(tk_has(out, "FR_ITEM\tahead-origin\tok\t"), "all-green-ahead");
+    ck(tk_has(out, "FR_ITEM\tchain-1rev\tok\t"), "all-green-1rev");
+    ck(tk_has(out, "FR_ITEM\tratchets\tok\t"), "all-green-rat");
+    ck(tk_has(out, "FR_ITEM\tverseq\tok\t"), "all-green-verseq");
+    ck(tk_has(out, "FR_ITEM\tplan-freeze-at\tok\t"), "all-green-plan");
+    ck(tk_has(out, "FR_ITEM\tmerge-s0-tree\tok\t"), "all-green-merge");
+    ck(tk_has(out, "FR_ITEM\tdevsvc-freeze\tok\t"), "all-green-devsvc");
+    ck(tk_has(out, "\tms="), "all-green-has-ms");
+    ck(rc == 0, "all-green-rc");
+
+    if (cx_fmt(cmd, sizeof cmd, "printf 'x\\n' > '%s/src/leak.c'", repo)) return 2;
+    ck(ckk_sh_t("check-freeze-readiness", cmd, out, (int)sizeof out, 10) == 0, "seed-dirty");
+    rc = run_fr(extra);
+    ck(rc != 0 && tk_has(out, "FR_ITEM\tdirty-freeze-domain\tfail\t") &&
+       tk_has(out, "FREEZE_READINESS\tready=no"), "dirty-red");
+    ck(tk_has(out, "CONFLICT"), "conflict-dirty-done");
+    if (cx_fmt(cmd, sizeof cmd, "rm -f '%s/src/leak.c'", repo)) return 2;
+    ck(ckk_sh_t("check-freeze-readiness", cmd, out, (int)sizeof out, 10) == 0, "clear-dirty");
+
+    ck(write_items_miss(items) == 0, "write-items-miss");
+    if (cx_fmt(extra, sizeof extra,
+        "--repo '%s' --items '%s' --version 0.0.94 --hardlink-tmp '%s/hl' "
+        "--session-dir '%s/sess' --batch-times '%s/bins/btimes.tsv' "
+        "--chain-bin '%s/bins/chain.sh' --ratchets-bin '%s/bins/rat.sh' "
+        "--release-prep-bin '%s/bins/prep.sh' --only verseq",
+        repo, items, repo, repo, repo, repo, repo, repo)) return 2;
+    rc = run_fr(extra);
+    ck(rc != 0 && tk_has(out, "MISSING_MANUAL") && tk_has(out, "FR_ITEM\tverseq\t"), "missing-manual-verseq");
+
+    /* --fast wall under 55s (hot, synth stubs) */
+    ck(write_items_green(items) == 0, "rewrite-items-green");
+    if (cx_fmt(extra, sizeof extra,
+        "--fast --repo '%s' --items '%s' --version 0.0.94 --hardlink-tmp '%s/hl'",
+        repo, items, repo)) return 2;
+    rc = run_fr(extra);
+    el = parse_elapsed();
+    if (el < 0) {
+        printf("UNMEASURED\tfast-wall\tno-elapsed_ms\n");
+        ck(1, "fast-wall-unmeasured");
+    } else {
+        ck(rc == 0 && el < 55000 && tk_has(out, "elapsed_ms="), "fast-wall-under-55s");
+    }
+
+    /* parallel vs mutant-serial with 12s sleep stubs (3 heavies) */
+    if (cx_fmt(extra, sizeof extra,
+        "--heavy --only chain-1rev,ratchets,release-prep-notes "
+        "--repo '%s' --items '%s' --version 0.0.94 --hardlink-tmp '%s/hl' "
+        "--session-dir '%s/sess' --batch-times '%s/bins/btimes.tsv' "
+        "--chain-bin '%s/bins/slow-chain.sh' --ratchets-bin '%s/bins/slow-rat.sh' "
+        "--release-prep-bin '%s/bins/slow-prep.sh'",
+        repo, items, repo, repo, repo, repo, repo, repo)) return 2;
+    rc = run_fr(extra);
+    el = parse_elapsed();
+    ck(rc == 0 && el > 0 && el < 55000 && el < 30000, "parallel-heavy-under-30s");
+
+    if (cx_fmt(cmd, sizeof cmd,
+        "sh '%s/tools/bound' 35 sh '%s/unisacc.com' '%s/tools/freeze-readiness.cx' -- "
+        "--mutant-serial --heavy --only chain-1rev,ratchets,release-prep-notes "
+        "--repo '%s' --items '%s' --version 0.0.94 --hardlink-tmp '%s/hl' "
+        "--session-dir '%s/sess' --batch-times '%s/bins/btimes.tsv' "
+        "--chain-bin '%s/bins/slow-chain.sh' --ratchets-bin '%s/bins/slow-rat.sh' "
+        "--release-prep-bin '%s/bins/slow-prep.sh'",
+        cwd, cwd, cwd, repo, items, repo, repo, repo, repo, repo, repo)) return 2;
+    rc = ckk_sh_t("check-freeze-readiness", cmd, out, (int)sizeof out, 55);
+    ck(rc != 0, "mutant-serial-timeout-or-red");
+
+    sy_remove_all(root);
+    {
+        int failed = ck_failures();
+        int total = ck_assertions();
+        printf("FREEZE_READINESS_SUMMARY\tfailed=%d\tpassed=%d\n", failed, total - failed);
+        if (!failed) printf("CHECK_FREEZE_READINESS\n");
+        return failed ? 1 : 0;
+    }
+}

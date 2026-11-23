@@ -1,0 +1,257 @@
+/* Checks tools/pp-equiv.cx: sh ./unisacc.com tools/check-pp-equiv.cx   (from the repo root)
+ *
+ * Judging logic on a stand-in engine: a small sh script plays the APE; its behaviour depends on the model pack
+ * file (good / mutant) and on marker words in the source (REFUSE, MULTI, SLEEP, MUTATE).  A fixture git repo in
+ * TMPDIR supplies include/, tests/ and tests/pp-equiv-corners/.  Cases: manifest shape and sha, SAME / REFUSE_PP /
+ * REFUSE_PRE / timeout verdicts, resume (second run does nothing), the mutant pack caught as DIFF, waivers (valid,
+ * expired, wrong count, prefix wider than the reason), cx-unit refused.
+ * Real engine: the installed ./unisacc.com on the 13 corner cases, same pack on both sides (complete, no DIFF);
+ * and, only when the 0.0.95 packs exist (--models-a / --models-b PATH on the command line, else UNISACC_PPEQ_PKG_ORIGINAL /
+ * UNISACC_PPEQ_PKG_PATCHED; the command line wins and needs no exported variable, which release-chain run refuses), original vs patched
+ * packs in E mode with the pack sha256 printed.  Absent packs print UNMEASURED naming them; never a PASS.
+ * Prints PASS/FAIL lines and CHECK_PP_EQUIV TAB failed=N. */
+#pragma unisa use sys.env
+#pragma unisa use sys.fs
+#pragma unisa use sys.posix
+#pragma unisa use sys.sha
+#pragma unisa use text.text
+#pragma unisa use mem.heap
+#pragma unisa use cxlib.ckassert
+#pragma unisa use cxlib.ckrun
+#pragma unisa use mem.bytes
+
+static char T[512];
+static char out[1 << 16];
+
+#define at(h, w) ckk_has((h), 1 << 20, (w))
+#define FMT(buf, ...) must(!cx_fmt((buf), sizeof(buf), __VA_ARGS__), "format overflow")
+static void must(int ok, const char *why) { if (!ok) { printf("FAIL\t%s\n", why); exit(1); } }
+static void put(const char *rel, const char *body) {
+    char p[1024], d[1024];
+    FMT(p, "%s/%s", T, rel);
+    FMT(d, "%s", p);
+    char *s = strrchr(d, '/');
+    if (s) { *s = 0; sy_mkdir_all(d, 0755); }
+    if (cx_write(p, body, strlen(body))) { printf("FAIL\twrite %s\n", rel); exit(1); }
+}
+static int tool(char **extra, int n) {
+    char *v[48];
+    int k = 0;
+    v[k++] = "sh"; v[k++] = "./unisacc.com"; v[k++] = "tools/pp-equiv.cx"; v[k++] = "--";
+    for (int i = 0; i < n; i++) v[k++] = extra[i];
+    v[k] = 0;
+    return ck_run(v, out, sizeof out);
+}
+static int line_has(const char *tag, const char *w) {
+    char buf[1024];
+    const char *last = 0;
+    size_t tl = strlen(tag), ln = 0;
+    for (const char *p = out; *p;) {
+        const char *e = strchr(p, '\n');
+        size_t n = e ? (size_t)(e - p) : strlen(p);
+        if (tx_prefix(p, (long)n, tag, (long)tl)) { last = p; ln = n; }
+        p += n + (e ? 1 : 0);
+    }
+    if (!last) return 0;
+    if (ln >= sizeof buf) ln = sizeof buf - 1;
+    must(!mm_copy(buf, sizeof buf, last, ln), "line buffer");
+    buf[ln] = 0;
+    return ckk_has(buf, (int)sizeof buf, w);
+}
+static const char *g_root;
+static int run_tool(const char *ape, const char *pa, const char *pb, const char *man, const char *led, const char *extra) {
+    char *a[28];
+    int n = 0;
+    a[n++] = "run"; a[n++] = "--ape"; a[n++] = (char *)ape; a[n++] = "--models-a"; a[n++] = (char *)pa;
+    a[n++] = "--models-b"; a[n++] = (char *)pb; a[n++] = "--manifest"; a[n++] = (char *)man;
+    a[n++] = "--ledger"; a[n++] = (char *)led; a[n++] = "--side-secs"; a[n++] = "1";
+    if (g_root) { a[n++] = "--root"; a[n++] = (char *)g_root; a[n++] = "--exec-root"; a[n++] = "."; }
+    if (extra) { a[n++] = "--jobs"; a[n++] = (char *)extra; }
+    return tool(a, n);
+}
+static int status_tool(const char *pa, const char *pb, const char *man, const char *led, const char *waivers) {
+    char *a[16];
+    int n = 0;
+    a[n++] = "status"; a[n++] = "--manifest"; a[n++] = (char *)man; a[n++] = "--ledger"; a[n++] = (char *)led;
+    a[n++] = "--models-a"; a[n++] = (char *)pa; a[n++] = "--models-b"; a[n++] = (char *)pb;
+    a[n++] = "--waivers"; a[n++] = (char *)waivers; a[n++] = "--today"; a[n++] = "2026-11-23";
+    return tool(a, n);
+}
+static void git(const char *a, const char *b, const char *c) {
+    char *v[10] = {"git", "-C", T, (char *)a, (char *)b, (char *)c, 0};
+    if (!c) v[5] = 0;
+    if (!b) v[4] = 0;
+    ck_run(v, out, sizeof out);
+}
+
+static int g_argc; static char **g_argv;
+int main(int argc, char **argv) {
+    g_argc = argc; g_argv = argv;
+    char man[600], led[600], led2[600], pgood[600], pmut[600], ape[600], w1[600];
+    if (sy_mkdtemp(sy_tmpdir(), "check-pp-equiv-", T, sizeof T)) { printf("FAIL\tmkdtemp\n"); return 1; }
+    FMT(man, "%s/m.tsv", T);
+    FMT(led, "%s/led", T);
+    FMT(led2, "%s/led2", T);
+    FMT(pgood, "%s/good.pack", T);
+    FMT(pmut, "%s/mutant.pack", T);
+    FMT(ape, "%s/ape.sh", T);
+    FMT(w1, "%s/w1.tsv", T);
+    put("good.pack", "mode=good\n");
+    put("mutant.pack", "mode=mutant\n");
+    put("ape.sh",
+        "mp=; mode=e2; f=\n"
+        "while [ $# -gt 0 ]; do case \"$1\" in --models) mp=$2; shift;; -E) mode=E; f=$2; shift;; esac; shift; done\n"
+        "if [ $mode = E ]; then c=$(cat \"$f\"); else c=$(cat); fi\n"
+        "case \"$c\" in *REFUSE*) echo 'refused: marker' >&2; exit 1;; esac\n"
+        "case \"$c\" in *MULTI*) echo 'multiple preprocessing outputs not migrated' >&2; exit 1;; esac\n"
+        "case \"$c\" in *SLEEP*) sleep 6;; esac\n"
+        "if [ -n \"$mp\" ] && grep -q mutant \"$mp\"; then case \"$c\" in *MUTATE*) c=\"$c MUT\";; esac; fi\n"
+        "if [ $mode = e2 ]; then printf 'UNIPP2\\000'; printf '%030d' 0; fi\n"
+        "printf '%s\\n' \"$c\"\n");
+    put("include/a.h", "int a;\n");
+    put("include/b.h", "int b;\n");
+    put("tests/t1.c", "int x;\n");
+    put("tests/t2.c", "int MUTATE;\n");
+    put("tests/t3.c", "int REFUSE;\n");
+    put("tests/t4.c", "int MULTI;\n");
+    put("tests/t5.c", "int SLEEP;\n");
+    put("tests/pp-equiv-corners/k1.c", "int k;\n");
+    put("tests/pp-equiv-corners/sub/h.h", "int h;\n");
+    char *gi[] = {"init", "-q"};
+    {
+        char *v[] = {"git", "-C", T, gi[0], gi[1], 0};
+        ck_run(v, out, sizeof out);
+    }
+    git("add", "-A", 0);
+
+    /* manifest */
+    {
+        char *a[] = {"manifest", "--root", T, "--out", man};
+        int rc = tool(a, 5);
+        ck(rc == 0 && at(out, "rows=18") != 0, "manifest-rows-18: 3 header specs x2 modes + 5 tests x2 + 1 corner x2, sub/ header not an item");
+        char sha[65];
+        size_t n;
+        char *b = cx_read(man, &n);
+        sy_sha256_hex(b ? b : "", b ? n : 0, sha);
+        ck(b && at(out, sha) != 0, "manifest-sha-printed: PP_MANIFEST sha equals the sha256 of the manifest file bytes");
+        ck(b && at(b, "headers\thdr:a.h+b.h\t") && at(b, "corners\ttests/pp-equiv-corners/k1.c\t") && !at(b, "sub/h.h"), "manifest-strata: pair header, corner item present, corner sub header absent");
+        mm_free(b);
+        char *c[] = {"manifest", "--root", T, "--strata", "cx-unit"};
+        rc = tool(c, 5);
+        ck(rc == 2 && at(out, "not implemented") && at(out, "tools/unit-e2-compare.cx"), "cx-unit-refused: the stratum is a named refusal that points at tools/unit-e2-compare.cx, rc 2");
+    }
+
+    /* run: same pack on both sides (parallel, 2 workers) */
+    g_root = T;
+    {
+        int rc = run_tool(ape, pgood, pgood, man, led, "2");
+        ck(rc == 0, "run-same-pack-rc0: two workers finish");
+        status_tool(pgood, pgood, man, led, w1);
+        ck(line_has("PP_EQUIV\t", "total=18") && line_has("PP_EQUIV\t", "same=12\t") && line_has("PP_EQUIV\t", "refuse_pp=2\t") && line_has("PP_EQUIV\t", "diff=0\t")
+           && line_has("PP_EQUIV\t", "unmeasured=4\t") && line_has("PP_EQUIV\t", "pending=0\t") && line_has("PP_EQUIV\t", "COMPLETE=no"),
+           "verdicts: 12 SAME, REFUSE marker 2 REFUSE_PP, MULTI + SLEEP 4 unmeasured, COMPLETE=no without waivers");
+        rc = run_tool(ape, pgood, pgood, man, led, 0);
+        ck(rc == 0 && at(out, "done=0") && at(out, "skipped=18"), "resume: a second run skips all 18 rows and appends none");
+        size_t n;
+        char lp[700];
+        FMT(lp, "%s/c-tests.tsv", led);
+        char *b = cx_read(lp, &n);
+        int rows_t = 0;
+        for (size_t i = 0; b && i < n; i++) if (b[i] == '\n') rows_t++;
+        ck(rows_t == 10 && at(b, "\tREFUSE_PRE\troute-multi-unit-pp\t") && at(b, "\tUNMEASURED\ttimeout\t") && at(b, "\tREFUSE_PP\t-\t"),
+           "ledger-rows: 10 c-tests rows, reasons route-multi-unit-pp and timeout, REFUSE_PP kept apart");
+        mm_free(b);
+    }
+
+    /* waivers */
+    {
+        put("w1.tsv",
+            "# stratum mode prefix reason expires count why\n"
+            "c-tests\tE\ttests/t4.c\troute-multi-unit-pp\t2099-01-01\t1\trouter refuses multi-unit pp\n"
+            "c-tests\te2\ttests/t4.c\troute-multi-unit-pp\t2099-01-01\t1\trouter refuses multi-unit pp\n"
+            "c-tests\tE\ttests/t5.c\ttimeout\t2099-01-01\t1\tslow item\n"
+            "c-tests\te2\ttests/t5.c\ttimeout\t2099-01-01\t1\tslow item\n");
+        int rc = status_tool(pgood, pgood, man, led, w1);
+        ck(rc == 0 && line_has("PP_EQUIV\t", "unmeasured=0\t") && line_has("PP_EQUIV\t", "waived=4\t") && line_has("PP_EQUIV\t", "COMPLETE=yes"),
+           "waivers-valid: four exact-reason rows waive all four, COMPLETE=yes");
+        put("w1.tsv", "c-tests\tE\ttests/t4.c\troute-multi-unit-pp\t2000-01-01\t1\texpired\n");
+        status_tool(pgood, pgood, man, led, w1);
+        ck(at(out, "WAIVER\tvoid\texpired") && line_has("PP_EQUIV\t", "waived=0\t") && line_has("PP_EQUIV\t", "COMPLETE=no"), "waiver-expired: a past expiry date voids the row");
+        put("w1.tsv", "c-tests\tE\ttests/t4.c\troute-multi-unit-pp\t2099-01-01\t3\twrong count\n");
+        status_tool(pgood, pgood, man, led, w1);
+        ck(at(out, "WAIVER\tvoid\tcount-mismatch") && line_has("PP_EQUIV\t", "waived=0\t"), "waiver-count: a declared count that differs from the covered rows voids the row");
+        put("w1.tsv", "c-tests\tE\ttests/t\troute-multi-unit-pp\t2099-01-01\t1\tprefix too wide\n");
+        status_tool(pgood, pgood, man, led, w1);
+        ck(at(out, "WAIVER\tvoid\tprefix-wider-than-reason") && line_has("PP_EQUIV\t", "waived=0\t") && line_has("PP_EQUIV\t", "COMPLETE=no"),
+           "waiver-wide-prefix: a prefix that also matches a REFUSE_PP row and a timeout row does not take effect");
+    }
+
+    /* mutant pack must be caught */
+    {
+        run_tool(ape, pgood, pmut, man, led2, 0);
+        int rc = status_tool(pgood, pmut, man, led2, w1);
+        ck(rc != 0 && line_has("PP_EQUIV\t", "diff=2\t") && line_has("PP_EQUIV\t", "COMPLETE=no"), "mutant-caught: the mutant pack changes t2.c output, 2 DIFF (E and e2), COMPLETE=no");
+        char lp[700];
+        size_t n;
+        FMT(lp, "%s/c-tests.tsv", led2);
+        char *b = cx_read(lp, &n);
+        ck(b && at(b, "\tDIFF\tstdout\t"), "mutant-reason: the DIFF names stdout as the differing stream");
+        mm_free(b);
+    }
+
+    /* real engine */
+    {
+        char rman[700], rled[700], rled2[700];
+        FMT(rman, "%s/real.tsv", T);
+        FMT(rled, "%s/rled", T);
+        FMT(rled2, "%s/rled2", T);
+        g_root = 0;
+        char *a[] = {"manifest", "--strata", "corners", "--modes", "E", "--out", rman};
+        int rc = tool(a, 7);
+        ck(rc == 0 && at(out, "rows=13"), "real-manifest: the 13 corner cases of tests/pp-equiv-corners, E mode");
+        run_tool("./unisacc.com", "-", "-", rman, rled, "4");
+        status_tool("-", "-", rman, rled, w1);
+        ck(line_has("PP_EQUIV\t", "total=13") && line_has("PP_EQUIV\t", "diff=0\t") && line_has("PP_EQUIV\t", "unmeasured=0\t") && line_has("PP_EQUIV\t", "pending=0\t") && line_has("PP_EQUIV\t", "COMPLETE=yes"),
+           "real-engine-same-pack: the installed APE against itself, 13 corners all decided (SAME or REFUSE_PP), COMPLETE=yes");
+        {   /* --steps: e2 rows carry steps=A/B (same pack: A == B, nothing moved); E rows carry none */
+            char sman[700], sled[700], sled2[700];
+            FMT(sman, "%s/steps.tsv", T); FMT(sled, "%s/sled", T); FMT(sled2, "%s/sled2", T);
+            char *m1[] = {"manifest", "--strata", "corners", "--modes", "e2", "--out", sman};
+            tool(m1, 7);
+            char *r1[] = {"run", "--ape", "./unisacc.com", "--models-a", "-", "--models-b", "-", "--manifest", sman, "--ledger", sled, "--side-secs", "8", "--jobs", "4", "--steps", "1"};
+            tool(r1, 17);
+            char *s1[] = {"status", "--manifest", sman, "--ledger", sled, "--models-a", "-", "--models-b", "-", "--waivers", w1, "--today", "2026-11-23", "--steps", "1"};
+            tool(s1, 15);
+            ck(line_has("STEPS_SUM\t", "rows=12\t") && line_has("STEPS_SUM\t", "step_moved=0\t") && line_has("STEPS_SUM\t", "step_grew=0\t"), "steps-mode-e2-same-pack: step counts recorded on the 12 e2 corners that run, none moved");
+            char *r2[] = {"run", "--ape", "./unisacc.com", "--models-a", "-", "--models-b", "-", "--manifest", rman, "--ledger", sled2, "--side-secs", "8", "--jobs", "4", "--steps", "1"};
+            tool(r2, 17);
+            char *s2[] = {"status", "--manifest", rman, "--ledger", sled2, "--models-a", "-", "--models-b", "-", "--waivers", w1, "--today", "2026-11-23", "--steps", "1"};
+            tool(s2, 15);
+            ck(line_has("STEPS_SUM\t", "rows=0\t"), "steps-mode-E-not-applicable: E mode rows carry no step count");
+        }
+        const char *po = sy_env("UNISACC_PPEQ_PKG_ORIGINAL"), *pp = sy_env("UNISACC_PPEQ_PKG_PATCHED");
+        for (int ai = 1; ai + 1 < g_argc; ai++) {
+            if (!strcmp(g_argv[ai], "--models-a")) po = g_argv[ai + 1];
+            else if (!strcmp(g_argv[ai], "--models-b")) pp = g_argv[ai + 1];
+        }
+        if (po && pp && sy_is_reg(po) == 1 && sy_is_reg(pp) == 1) {
+            run_tool("./unisacc.com", po, pp, rman, rled2, "4");
+            status_tool(po, pp, rman, rled2, w1);
+            char sa[65], sb[65];
+            size_t n1, n2;
+            char *b1 = cx_read(po, &n1), *b2 = cx_read(pp, &n2);
+            sy_sha256_hex(b1 ? b1 : "", b1 ? n1 : 0, sa);
+            sy_sha256_hex(b2 ? b2 : "", b2 ? n2 : 0, sb);
+            mm_free(b1); mm_free(b2);
+            printf("REAL_ENGINE_PACKS\toriginal=%s sha256=%s\tpatched=%s sha256=%s\n", po, sa, pp, sb);
+            ck(line_has("PP_EQUIV\t", "total=13") && line_has("PP_EQUIV\t", "diff=0\t") && line_has("PP_EQUIV\t", "unmeasured=0\t") && line_has("PP_EQUIV\t", "pending=0\t") && line_has("PP_EQUIV\t", "COMPLETE=yes"),
+               "real-engine-0.0.95-packs: original vs patched pack, 13 corners E mode, no DIFF (the patch is equivalence-preserving)");
+        } else {
+            printf("UNMEASURED\treal-engine-0.0.95-packs: pack files absent (oracle-original.pkg, oracle-patched.pkg); set UNISACC_PPEQ_PKG_ORIGINAL and UNISACC_PPEQ_PKG_PATCHED to their paths\n");
+        }
+    }
+
+    sy_remove_all(T);
+    printf("CHECK_PP_EQUIV\tfailed=%d\n", ck_failures());
+    return ck_failures() != 0;
+}

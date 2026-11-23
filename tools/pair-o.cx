@@ -1,0 +1,215 @@
+/* tools/pair-o.cx -- pair -o compare under two --models packs (or bare APE).
+ *
+ *   sh ./unisacc.com tools/pair-o.cx -- --ape APE --orig PKG|-- --patched PKG|-- \
+ *       --file PATH --outdir DIR [--bound S]
+ *   sh ./unisacc.com tools/pair-o.cx -- --ape APE --orig PKG --patched PKG \
+ *       --list LIST --start N --count M --outdir DIR [--bound S] [--jobs J]
+ *
+ * Each side runs: sh APE [--models PKG] -o OUT FILE with bound S (default 51).
+ * Writes outdir/a.rc and b.rc always after the child (124 on timeout/spawn miss).
+ * Missing rc file => UNMEASURED. Prints ORACLE lines; list mode ends with ORACLE_SUMMARY.
+ * --jobs J (default 1): documents intended external fan-out; this process runs one
+ * start/count slice serially (callers spawn N processes with disjoint slices). */
+#pragma unisa use cxlib.procrun
+#pragma unisa use sys.fs
+#pragma unisa use sys.env
+#pragma unisa use sys.sha
+#pragma unisa use text.text
+#pragma unisa use text.num
+#pragma unisa use mem.heap
+#pragma unisa use mem.bytes
+
+static char g_ape[900], g_orig[900], g_pat[900], g_file[900], g_list[900], g_outdir[900];
+static int g_bound = 51, g_start, g_count = -1, g_jobs = 1, g_have_file, g_have_list;
+
+static int die(const char *w) { fprintf(stderr, "PAIR_O_ERROR\t%s\n", w); return 2; }
+
+static int write_rc(const char *path, int rc) {
+    char body[32];
+    if (cx_fmt(body, sizeof body, "%d\n", rc)) return -1;
+    return sy_write_file(path, body, (int64_t)tx_len(body, sizeof body), 0600);
+}
+
+static int read_rc(const char *path, int *out) {
+    unsigned char *b; int64_t n; long i = 0; int v = 0, neg = 0;
+    *out = 124;
+    if (sy_read_file(path, &b, &n, 64) < 0 || !b) return -1;
+    if (n > 0 && b[0] == '-') { neg = 1; i = 1; }
+    if (i >= n) { mm_free(b); return -1; }
+    while (i < n && b[i] >= '0' && b[i] <= '9') { v = v * 10 + (b[i] - '0'); i++; }
+    mm_free(b);
+    *out = neg ? -v : v;
+    return 0;
+}
+
+static void sha_empty(char h[65]) {
+    if (sy_sha256_hex("", 0, h)) h[0] = 0;
+}
+
+static int sha_file(const char *path, char h[65], long *len) {
+    unsigned char *b; int64_t n;
+    *len = 0; sha_empty(h);
+    if (sy_read_file(path, &b, &n, 1 << 28) < 0 || !b) return -1;
+    *len = (long)n;
+    if (n == 0) { mm_free(b); return 0; }
+    if (sy_sha256_hex(b, (long)n, h)) { mm_free(b); sha_empty(h); return -1; }
+    mm_free(b);
+    return 0;
+}
+
+/* Run one side; always writes rc_path. Returns child rc (124 on timeout). */
+static int run_side(const char *models, const char *out_bin, const char *file,
+                    const char *stdout_path, const char *stderr_path, const char *rc_path) {
+    char *av[16]; int n = 0; pr_result r; int t, rc = 124;
+    char *env[] = {"UNISACC_RUN_CACHE=0", 0};
+    av[n++] = "/bin/sh"; av[n++] = (char *)g_ape;
+    if (models && models[0] && !tx_eqz(models, "-")) {
+        av[n++] = "--models"; av[n++] = (char *)models;
+    }
+    av[n++] = "-o"; av[n++] = (char *)out_bin;
+    av[n++] = (char *)file; av[n] = 0;
+    sy_unlink(out_bin);
+    t = pr_run("pair-o-side", av, 0, env, g_bound, &r);
+    if (t) {
+        rc = 124;
+        if (r.err && r.errn) sy_write_file(stderr_path, r.err, (int64_t)r.errn, 0600);
+        else sy_write_file(stderr_path, "", 0, 0600);
+        sy_write_file(stdout_path, "", 0, 0600);
+    } else {
+        rc = r.rc;
+        sy_write_file(stdout_path, r.out ? r.out : "", (int64_t)r.outn, 0600);
+        sy_write_file(stderr_path, r.err ? r.err : "", (int64_t)r.errn, 0600);
+    }
+    pr_free(&r);
+    if (write_rc(rc_path, rc)) return 124;
+    return rc;
+}
+
+static const char *classify(int rca, int rcb, long la, long lb, const char *ha, const char *hb) {
+    if (rca == 124 || rcb == 124) return "UNMEASURED";
+    if (rca == 0 && la == 0) return "UNMEASURED";
+    if (rcb == 0 && lb == 0) return "UNMEASURED";
+    if (rca != rcb || !tx_eqz(ha, hb)) return "DIFF";
+    if (rca != 0) return "REFUSE_SAME";
+    return "SAME";
+}
+
+static int pair_one(const char *file, const char *outdir) {
+    char oa[1000], ob[1000], sa[1000], sb[1000], ea[1000], eb[1000], ra[1000], rb[1000];
+    char ha[65], hb[65];
+    int rca = 124, rcb = 124, miss_a = 0, miss_b = 0;
+    long la = 0, lb = 0, erra = 0, errb = 0;
+    unsigned char *ebuf; int64_t en;
+    const char *mark;
+    if (sy_mkdir_all(outdir, 0700)) return die("outdir");
+    if (cx_fmt(oa, sizeof oa, "%s/a.o", outdir) || cx_fmt(ob, sizeof ob, "%s/b.o", outdir) ||
+        cx_fmt(sa, sizeof sa, "%s/a.stdout", outdir) || cx_fmt(sb, sizeof sb, "%s/b.stdout", outdir) ||
+        cx_fmt(ea, sizeof ea, "%s/a.stderr", outdir) || cx_fmt(eb, sizeof eb, "%s/b.stderr", outdir) ||
+        cx_fmt(ra, sizeof ra, "%s/a.rc", outdir) || cx_fmt(rb, sizeof rb, "%s/b.rc", outdir))
+        return die("path");
+    sy_unlink(ra); sy_unlink(rb);
+    rca = run_side(g_orig, oa, file, sa, ea, ra);
+    rcb = run_side(g_pat, ob, file, sb, eb, rb);
+    miss_a = read_rc(ra, &rca);
+    miss_b = read_rc(rb, &rcb);
+    if (miss_a || miss_b) {
+        mark = "UNMEASURED";
+        if (miss_a) rca = 124;
+        if (miss_b) rcb = 124;
+        sha_empty(ha); sha_empty(hb); la = lb = 0;
+    } else {
+        sha_file(oa, ha, &la);
+        sha_file(ob, hb, &lb);
+        mark = classify(rca, rcb, la, lb, ha, hb);
+    }
+    erra = errb = 0;
+    if (sy_read_file(ea, &ebuf, &en, 1 << 20) == 0 && ebuf) { erra = (long)en; mm_free(ebuf); }
+    if (sy_read_file(eb, &ebuf, &en, 1 << 20) == 0 && ebuf) { errb = (long)en; mm_free(ebuf); }
+    printf("ORACLE\t%s\tO\t%s\trc=%d/%d\tsha=%s/%s\terr=%ld/%ld\n",
+           mark, file, rca, rcb, ha, hb, erra, errb);
+    return tx_eqz(mark, "DIFF") ? 1 : tx_eqz(mark, "UNMEASURED") ? 3 : 0;
+}
+
+static int run_list_serial(void) {
+    unsigned char *b; int64_t n; long i = 0, at = 0, seen = 0;
+    int totals[4] = {0}; /* SAME DIFF UNMEASURED REFUSE */
+    char line[900], one_out[1000];
+    if (sy_read_file(g_list, &b, &n, 1 << 22) < 0 || !b) return die("list");
+    while (i < n) {
+        long s = i, e;
+        while (i < n && b[i] != '\n') i++;
+        e = i; if (i < n) i++;
+        if (at < g_start) { at++; continue; }
+        if (g_count >= 0 && seen >= g_count) break;
+        if (e <= s) { at++; continue; }
+        if (e - s >= (long)sizeof line) return die("list-line");
+        if (mm_copy(line, sizeof line, b + s, e - s)) return die("list-copy");
+        line[e - s] = 0;
+        if (cx_fmt(one_out, sizeof one_out, "%s/item-%ld", g_outdir, at)) return die("item-outdir");
+        {
+            int st = pair_one(line, one_out);
+            if (st == 1) totals[1]++;
+            else if (st == 3) totals[2]++;
+            else {
+                int rca = 0; char ra[1000];
+                if (cx_fmt(ra, sizeof ra, "%s/a.rc", one_out) == 0 && read_rc(ra, &rca) == 0 && rca != 0)
+                    totals[3]++;
+                else totals[0]++;
+            }
+        }
+        seen++; at++;
+    }
+    mm_free(b);
+    printf("ORACLE_SUMMARY\tmode=O\tstart=%d\ttotal=%ld\tsame=%d\trefuse_same=%d\tdiff=%d\tunmeasured=%d\n",
+           g_start, seen, totals[0], totals[3], totals[1], totals[2]);
+    return totals[1] ? 1 : totals[2] ? 3 : 0;
+}
+
+static int run_list_jobs(void) {
+    printf("PAIR_O_JOBS\tjobs=%d\tmode=slice-serial\n", g_jobs);
+    return run_list_serial();
+}
+
+int main(int argc, char **argv) {
+    int a = 1;
+    g_ape[0] = g_orig[0] = g_pat[0] = g_file[0] = g_list[0] = g_outdir[0] = 0;
+    cx_fmt(g_orig, sizeof g_orig, "-");
+    cx_fmt(g_pat, sizeof g_pat, "-");
+    while (a < argc) {
+        if (tx_eqz(argv[a], "--ape") && a + 1 < argc) {
+            if (cx_fmt(g_ape, sizeof g_ape, "%s", argv[++a])) return die("ape");
+        } else if (tx_eqz(argv[a], "--orig") && a + 1 < argc) {
+            if (cx_fmt(g_orig, sizeof g_orig, "%s", argv[++a])) return die("orig");
+        } else if (tx_eqz(argv[a], "--patched") && a + 1 < argc) {
+            if (cx_fmt(g_pat, sizeof g_pat, "%s", argv[++a])) return die("patched");
+        } else if (tx_eqz(argv[a], "--file") && a + 1 < argc) {
+            if (cx_fmt(g_file, sizeof g_file, "%s", argv[++a])) return die("file");
+            g_have_file = 1;
+        } else if (tx_eqz(argv[a], "--list") && a + 1 < argc) {
+            if (cx_fmt(g_list, sizeof g_list, "%s", argv[++a])) return die("list");
+            g_have_list = 1;
+        } else if (tx_eqz(argv[a], "--outdir") && a + 1 < argc) {
+            if (cx_fmt(g_outdir, sizeof g_outdir, "%s", argv[++a])) return die("outdir");
+        } else if (tx_eqz(argv[a], "--bound") && a + 1 < argc) {
+            g_bound = (int)tx_strtol(argv[++a], 0, 10);
+            if (g_bound < 1 || g_bound > 600) return die("bound");
+        } else if (tx_eqz(argv[a], "--start") && a + 1 < argc) {
+            g_start = (int)tx_strtol(argv[++a], 0, 10);
+            if (g_start < 0) return die("start");
+        } else if (tx_eqz(argv[a], "--count") && a + 1 < argc) {
+            g_count = (int)tx_strtol(argv[++a], 0, 10);
+            if (g_count < 1) return die("count");
+        } else if (tx_eqz(argv[a], "--jobs") && a + 1 < argc) {
+            g_jobs = (int)tx_strtol(argv[++a], 0, 10);
+            if (g_jobs < 1 || g_jobs > 16) return die("jobs");
+        } else return die("usage");
+        a++;
+    }
+    if (!g_ape[0] || !g_outdir[0]) return die("need --ape --outdir");
+    if (g_have_file && g_have_list) return die("file-xor-list");
+    if (!g_have_file && !g_have_list) return die("need --file or --list");
+    if (g_have_file) return pair_one(g_file, g_outdir);
+    if (g_count < 0) g_count = 1000000;
+    if (g_jobs > 1) return run_list_jobs();
+    return run_list_serial();
+}

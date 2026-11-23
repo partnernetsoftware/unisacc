@@ -105,7 +105,7 @@
 被退回的三个提交:`a5718fab8f`(D1)、`358c2d239c`(变异 b)、`f7e9069324`(D2)。
 前序 (b)(c) 提交保留:`6ab81e577d`、`19514fecdf`、`2ad0f656aa`、`aae7fdc7b6`、`8a98b7dce2`。
 
-夹具:`~/.claude/jobs/7f46e032/tmp/gk96-gkfx.cx`,复制到 `tools/gkfx.cx`(用完不入库),
+夹具:`research/2026-11-23/gk96-gkfx.cx.txt`,复制到 `tools/gkfx.cx`(用完不入库),
 `sh ./unisacc.com tools/gkfx.cx -- f1|f2|f3|f3b|f4`。修前复现原行:
 - f1 `entryC_on_reaped_root_ret=0 orphan_alive=1 FALSE_CLEAN` -> 整改 (a)
 - f2 `ret=0 waitpid_after=-1 errno=10 ROOT_REAPED_BY_SWEEP` -> 整改 (b)
@@ -178,7 +178,7 @@
   - np_run "orphan holding stdout":旧"被清理且 residue==0";新"residue<0、孤儿存活、文案含 cleanup unconfirmed"
     (这一条同时是消费者夹具:根已回收、持管道同组孤儿)。
   - reaped-group-reuse:新增答负值断言。
-- 快照实现(d0bfc5852f)作为方案底稿保留在分支历史,补丁 ~/.claude/jobs/omp1/tmp/snapshot-design-v0.0.96.patch。
+- 快照实现(d0bfc5852f)作为方案底稿保留在分支历史,补丁 research/2026-11-23/snapshot-design-v0.0.96.patch。
 
 ## 七、遗留:已回收根的孤儿清理(不进 0.0.96)
 
