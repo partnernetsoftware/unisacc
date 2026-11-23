@@ -16,7 +16,7 @@
 
 - 版本序与当前状态:build/version-seq.tsv(唯一权威;发布证据索引入口 release/evidence/)。
 - 所有者需求与未告知断点:build/owner-reqs.tsv(只降不升)。
-- 起草快照:0.0.98 已公开(2026-11-23 20:51,v0.0.98 Latest,冻结 F=238c84b071,候选 T=575a613f47,X=df983630da,Y1=8974fd2558,Y2=e3caf24487,APE 07351e2cbf 9010222B,CI 45167911448 六格 QUALIFIED,NOT_QUALIFIED,严格证据 459 批 PASS 457 FAIL 0 UNKNOWN 2,本机 Root 已升至 unisacc 0.0.98;v0.0.97 GitHub 说明已补 run-cache 已知缺陷);标准发布流程(0.0.99 起)目标图见 plans/release-standard.md;公开后版本序重排(build/version-seq.tsv):0.0.99 运行缓存键修复(ccogweco,plans/v0.0.99.md)、0.0.100 大单元冷编译 U7 运行飞跃版(plans/v0.0.100.md)、0.0.101 执行核二期开发飞跃版(plans/v0.0.101.md)、0.0.102 前端 A(plans/v0.0.102.md)、0.0.103 前端 B1、0.0.104 诊断定位类、0.0.105 前端 B2、0.0.106 x16、0.0.107..0.0.117 顺延。
+- 起草快照:0.0.100 已公开(2026-11-24 07:39,v0.0.100 Latest,冻结 F=b348b6f9fd,X=51fc85eeaf,Y1=8f6b8e39c8,Y2=172410320c,APE e173defd0c 9019662B,CI 45285851131 六格 QUALIFIED,首轮 45283344177 osx/x86_64 超时加 ENOTFOUND 经 --redispatch 重派全绿,NOT_QUALIFIED,严格证据 466 批 PASS 463 FAIL 1(precommit-coverage-root 4/1 到期 0.0.101) UNKNOWN 2,本机 Root 已升至 unisacc 0.0.100,含前端 A 两项 C99 修复与 0.0.99 全量已合入内容;详见 release/notes-0.0.100.md 与 plans/v0.0.100.md);0.0.99 记为未公开(不打 tag、不发 GitHub Release;因静默窗解禁后 main 合入 cx/sys/fs.cx 致 SID 前移、现行发布工具硬编码 origin/main 门禁且分支直发补丁不在发布途中首次投产,按方案丁合并随 0.0.100 一次发布,0.0.99 整链 44d1a68dbd 与 191 窗严格预跑 461/1/2 证据保留备查,含 run-cache __FILE__ 相对路径键绑定、UNISACC_RUN_CACHE_KEY_OLD=1、sy_statvfs、mutation-gate 自清;计划 plans/v0.0.99.md);后续版本序(build/version-seq.tsv):0.0.101 逐单元共享状态接线(plans/v0.0.101.md)、0.0.102 cxmod 后缀按内容身份(plans/v0.0.102.md)、0.0.103 执行核动作分派内联、0.0.104 切片转网第一批、0.0.105 精确钉键重做、0.0.106 CXM_MAXU 256、0.0.107..0.0.121 顺延。
 
 
 ## 决定(别人必须遵守)
@@ -32,6 +32,7 @@
 - 版本序唯一入口:build/version-seq.tsv;各版内容、顺延与对调只在该表改,本节不再记逐版重排。跳号:0.0.64、0.0.69、0.0.70(后两号并入 0.0.71 一次发布)。
 - 发布节奏:不设发布频率上限,内容就绪即发;提速靠产线(起链前置门、预跑、提交门只评估提交树),不靠少发版;工具、测试、文档在 main 持续落库,不必触发整链与公开。发布说明如实写已知缺口(未跑 s9 全套就写 NOT_QUALIFIED)。依据:所有者"高速迭代进化"。
 - 起链即内容截止:整链起点之后产品输入一律冻结,链后只收阻塞修复(产品输入变更须重起链);工具、测试、文档可并行但不进候选键。依据:plans/speed-first-rev4.md。
+- 发布期间 main 冻结(2026-11-24 起,直到分支直发补丁拆小重审落库):现行 release-exec gate_main 要求 origin/main 为发布 HEAD 祖先,main 一前移在途候选即发不出(0.0.99 因此记为未公开,内容并入 0.0.100);候选起链后至 release-post 完成,除集成者与发布动作外不得推 origin/main,版本分支不受影响。依据:gatekeeper 两轮 BLOCK 分支直发补丁,fable 回退裁定。回滚:分支直发补丁落库并经一次发布实证后撤销本条。
 - planned_units 只计进候选键的工作项且必须是数字;类标签与手改 A 类文件封顶由起链前置强制。入口:build/version-seq.tsv、tools/chain-ready.cx。
 - 新增拒绝两步走:使原先被接受的程序变为被拒的改动,第 N 版只以告警进入并用候选前端清扫全仓;告警命中连续两版为 0 后,才可在单独一版把默认翻成拒绝,该版不带别的 A 类改动。依据:0.0.86 的 D2 直接默认拒绝导致两次失败链。回滚:删本条。
 - s9 commit 档不挡公开(自 0.0.68):冻结后与整链并行跑,结果补记 release/evidence.tsv,新增 FAIL 走补丁版。入口:prd.md 候选池 Q。
