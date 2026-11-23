@@ -68,13 +68,47 @@ BENCH_SUMMARY	pairs=5	steps=13499647	same_steps=1	same_sha=1	base_med=29.82	prot
 3. **宿主建表开销反噬**: `modelphase layout` 因构建 `CorePackedState` 增加耗时超过推理节省的 `10%` (`> 9 ms` on `hello.c`);
 4. **越界破封顶**: 正式实现所需 A 类文件超过 `a_files_cap=12`。
 
-## 4. A 类文件清单与上限余量(`a_files_cap=12`)
+## 4. 决定与 A 类文件清单(`a_files_cap=12`)
 
-- **`cx/sys/kernel.cx`**: **不改 (0 文件)** — `CoreModel.packed` (`CM_PACKED=152`) 已存在, `UNIKERN1` 映射按 16 KiB 对齐无尺寸硬拒绝。
-- **`exec/c/asm/runcheck.c`**: **不改 (0 文件)** — 宿主建表加 `packed==NULL` 回退保证 `calloc` 序数不变。
-- **正式版 A 类清单**:
-  - 宿主建表与透传 (2): `cx/runtime/model_decode.cx`、`src/executor.cx`
-  - `x86_64` 汇编核 (4): `exec/c/asm/run_x86_64.S`、`exec/c/asm/transition_x86_64.S`、`exec/c/asm/action_x86_64.S`、`exec/c/asm/buffer_x86_64.S`
-  - `arm64` 汇编核 (4): `exec/c/asm/run_arm64.S`、`exec/c/asm/transition_arm64.S`、`exec/c/asm/action_arm64.S`、`exec/c/asm/buffer_arm64.S`
-  - 可选 ABI 偏移生成 (0 或 2): `exec/facts/core-abi.tsv`、`exec/c/asm/layout.h`
-- **合计**: **10 / 12 (余量 2)**; 若含 ABI 偏移入表则为 **12 / 12 (余量 0)**, 严守 `a_files_cap=12`。
+### 4.1 架构与范围决定
+
+1. **`CorePackedState` 偏移入 `exec/facts/core-abi.tsv`**: **采纳入表** (`PS_MODE=0`..`PS_SEQ=56`, `PS_SIZE=64`), 经 `tools/core-abi-gen.cx -- --write` 生成 `exec/c/asm/layout.h`, 实测 `CORE_ABI_GEN OK failed=0`, 严守「事实表 -> 生成器 -> 表」。
+2. **动作循环并入与尾部线程化移出 `0.0.97`**: 「动作循环并入 `core_action`、输出追加快路径、尾部线程化分派」明确列为 **`0.0.97` 之外的后续候选**, 不在本版扩范围, 故 `action_*.S`、`buffer_*.S`、`transition_*.S` 全部不改。
+3. **不改文件**: `cx/sys/kernel.cx` (0)、`exec/c/asm/runcheck.c` (0)。
+
+### 4.2 正式版 A 类清单(7-8 / 封顶 12, 余量 4-5; 严禁扩范围)
+
+- 事实表与 ABI 布局 (3-4): `exec/facts/core-abi.tsv`、`exec/c/asm/layout.h`、`exec/c/core.h` (+ `exec/c/asm/layoutcheck.c` 静态断言)
+- 宿主建表与透传 (2): `cx/runtime/model_decode.cx`、`src/executor.cx`
+- 两架构汇编核 (2): `exec/c/asm/run_x86_64.S`、`exec/c/asm/run_arm64.S`
+- **合计**: **7-8 / 12 (余量 4-5)**, 即使 `core-abi.tsv` 入表也远低于 12 封顶。
+
+## 5. `arm64` 原型编过与 `qemu-aarch64-static` 7 流逐流对拍原行
+
+- 原型文件: `research/2026-11-23/v097-proto-run-arm64.S` (引用 `core-abi.tsv` 生成的 `PS_*` 宏, 零触 `x18`/`x28`)。
+- 构造产物: `base_arm64.kernel` (`UNIKERN1 arch=1 bytes=7024 entry=6644 slot=7016`) vs `proto_arm64.kernel` (`UNIKERN1 arch=1 bytes=7680 entry=7296 slot=7672`, `+656 B` / `+9.3%`, 仍落单个 16 KiB 页)。
+- 实跑方式: 提取 `0.0.93` `unisacc.com` 内置 `Linuxaarch64` 原生切片, 经 `UNISA_KERNEL` 分别注入 `base_arm64.kernel` 与 `proto_arm64.kernel`, 在 `qemu-aarch64-static` 下编 `hello.c` (`UNISACC_RUN_CACHE=0 UNISACC_RR_TIME=1`):
+
+```text
+=== ARM64 BASE ===
+RR_TIME	inference	stage=e2	rc=0	ns=596059078	steps=1575220
+RR_TIME	inference	stage=e1	rc=0	ns=30753010	steps=36163
+RR_TIME	inference	stage=e3	rc=0	ns=1292938000	steps=5390590
+RR_TIME	inference	stage=e4	rc=0	ns=698272996	steps=3028436
+RR_TIME	inference	stage=prune	rc=0	ns=97613502	steps=506394
+RR_TIME	inference	stage=lower	rc=0	ns=586666712	steps=1801995
+RR_TIME	inference	stage=elf	rc=0	ns=433966088	steps=1697355
+=== ARM64 PROTO ===
+RR_TIME	inference	stage=e2	rc=0	ns=516826324	steps=1575220
+RR_TIME	inference	stage=e1	rc=0	ns=26814919	steps=36163
+RR_TIME	inference	stage=e3	rc=0	ns=1026472995	steps=5390590
+RR_TIME	inference	stage=e4	rc=0	ns=535225193	steps=3028436
+RR_TIME	inference	stage=prune	rc=0	ns=79662012	steps=506394
+RR_TIME	inference	stage=lower	rc=0	ns=433868868	steps=1801995
+RR_TIME	inference	stage=elf	rc=0	ns=341597346	steps=1697355
+=== SHA256 ===
+dc2b6459afa0cf3de29e25ff45cfdcbe76beb0ca6ff65fdb0922726961147f3e  h_base_arm64
+dc2b6459afa0cf3de29e25ff45cfdcbe76beb0ca6ff65fdb0922726961147f3e  h_proto_arm64
+```
+
+- 核对结论: 7 流合计 `14,036,153` 步逐流完全一致, `arm64` 产物二进制 `sha256` 逐字节完全一致, `qemu-aarch64-static` 实跑输出 `hi`(qemu 仿真耗时 `3736.27 ms -> 2960.47 ms` 仅作趋势参考, 原生达标计时待低载实机/CI)。
