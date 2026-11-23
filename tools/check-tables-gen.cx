@@ -72,6 +72,52 @@ static int file_is(const char *root, const char *rel, const char *want) {
 #define SZ "tools/z.cx\tregular\n"
 static const char *MAN = "batch\t" BROW "coverage\t" CROW "packages\tbatch\tfx\tall\t-\t-\t-\t-\t-\t-\n" "compile\t" SROW;
 
+/* --index reads every manifest of the index through one "git grep"; its output must not depend on the git configuration, on a colon in
+ * a file name, on a binary attribute, on a NUL byte, or on a missing final newline.  The fixture is a git repository in which each step
+ * stages one more manifest; tools-gen runs in it (the index is read from the current directory). */
+#define BROW2 "fx:y\tIMPLEMENTED\tl\ttools/check-fxy.cx\tSOURCE\tp\t55\t-\ttools/check-fxy.cx\t-\tl.fxy\trc0:FXY\tproduct\tcommit\n"
+#define CROW2 "l.fxy\tl\tIMPLEMENTED_SEPARATE_BATCH\ttext\tfiles\n"
+static void idx_cases(void) {
+    char td[400], cwd[400], cmd[2600]; char *o = 0; size_t n = 0; int rc, i; char *v[] = {"pwd", 0};
+    static const char *RUN = "cd '%s' && %s sh ./unisacc.com tools/tables-gen.cx -- --check --index 2>&1";
+    if (cx_runv_timeout(v, 10, &o, &n) != 0 || n < 2 || n >= sizeof cwd) fatal("pwd");
+    mm_copy(cwd, sizeof cwd, o, n); cwd[n] = 0; for (i = 0; cwd[i]; i++) if (cwd[i] == '\n') cwd[i] = 0;
+    if (cx_fmt(td, sizeof td, "%s/tg-ix-XXXXXX", sy_tmpdir()) || !mkdtemp(td)) fatal("tmpdir");
+    if (cx_fmt(cmd, sizeof cmd, "cd '%s' && git init -q . && git config user.email a@b && git config user.name t && mkdir -p tests/manifests && "
+               "ln -s '%s/unisacc.com' unisacc.com && ln -sn '%s/tools' tools && ln -sn '%s/cx' cx && ln -s '%s/cxroot.tsv' cxroot.tsv", td, cwd, cwd, cwd, cwd) || shq(cmd)) fatal("ix fixture");
+    put(td, "tests/batches.tsv", "id\n" BROW BROW2);
+    put(td, "tests/coverage.tsv", "id\n" CROW CROW2);
+    put(td, "tests/tools-compile-sources.tsv", SA SROW);
+    put(td, "tests/manifests/fx.tsv", MAN);
+    if (cx_fmt(cmd, sizeof cmd, "cd '%s' && git add tests && git commit -q --no-verify -m base", td) || shq(cmd)) fatal("ix base");
+    if (cx_fmt(cmd, sizeof cmd, RUN, td, "")) fatal("c");
+    rc = shq(cmd); ck(rc == 0 && has("manifests=1\tstale=0\twritten=0") && has("hard=0"), "index-plain-passes");
+    if (cx_fmt(cmd, sizeof cmd, RUN, td, "GIT_CONFIG_COUNT=2 GIT_CONFIG_KEY_0=color.grep GIT_CONFIG_VALUE_0=always GIT_CONFIG_KEY_1=color.ui GIT_CONFIG_VALUE_1=always")) fatal("c");
+    rc = shq(cmd); ck(rc == 0 && has("hard=0"), "index-colour-config-does-not-change-the-result");
+    if (cx_fmt(cmd, sizeof cmd, RUN, td, "GIT_CONFIG_COUNT=2 GIT_CONFIG_KEY_0=grep.lineNumber GIT_CONFIG_VALUE_0=true GIT_CONFIG_KEY_1=grep.column GIT_CONFIG_VALUE_1=true")) fatal("c");
+    rc = shq(cmd); ck(rc == 0 && has("hard=0"), "index-line-number-and-column-config-do-not-change-the-result");
+    /* the manifest without a final newline, staged */
+    put(td, "tests/manifests/fx.tsv", "batch\t" BROW "coverage\t" CROW "packages\tbatch\tfx\tall\t-\t-\t-\t-\t-\t-\ncompile\ttools/check-fx.cx\tregular");
+    if (cx_fmt(cmd, sizeof cmd, "cd '%s' && git add tests && git commit -q --no-verify -m nonl", td) || shq(cmd)) fatal("c");
+    if (cx_fmt(cmd, sizeof cmd, RUN, td, "")) fatal("c");
+    rc = shq(cmd); ck(rc == 0 && has("hard=0"), "index-manifest-without-final-newline-passes");
+    /* a manifest marked binary by .gitattributes is still read */
+    put(td, ".gitattributes", "tests/manifests/*.tsv binary\n");
+    if (cx_fmt(cmd, sizeof cmd, "cd '%s' && git add .gitattributes tests && git commit -q --no-verify -m attr", td) || shq(cmd)) fatal("c");
+    if (cx_fmt(cmd, sizeof cmd, RUN, td, "")) fatal("c");
+    rc = shq(cmd); ck(rc == 0 && has("manifests=1") && has("hard=0"), "index-binary-attribute-manifest-is-read");
+    /* a manifest whose name has a colon: its own rows are found, and the manifest before it is not damaged */
+    put(td, "tests/manifests/fx:y.tsv", "batch\t" BROW2 "coverage\t" CROW2 "packages\tbatch\tfx:y\tall\t-\t-\t-\t-\t-\t-\n");
+    if (cx_fmt(cmd, sizeof cmd, "cd '%s' && git add tests && git commit -q --no-verify -m colon", td) || shq(cmd)) fatal("c");
+    if (cx_fmt(cmd, sizeof cmd, RUN, td, "")) fatal("c");
+    rc = shq(cmd); ck(rc == 0 && has("manifests=2") && has("hard=0"), "index-colon-in-manifest-name-is-read-and-damages-no-other");
+    /* a manifest with a NUL byte is MALFORMED by name, the others are still judged */
+    if (cx_fmt(cmd, sizeof cmd, "cd '%s' && printf 'batch\\tfx\\0\\tx\\n' > tests/manifests/nul.tsv && git add tests && git commit -q --no-verify -m nul", td) || shq(cmd)) fatal("c");
+    if (cx_fmt(cmd, sizeof cmd, RUN, td, "")) fatal("c");
+    rc = shq(cmd); ck(rc == 2 && has("MALFORMED\tnul.tsv"), "index-nul-manifest-is-malformed-by-name");
+    if (cx_fmt(cmd, sizeof cmd, "rm -rf '%s'", td) || shq(cmd)) fatal("cleanup");
+}
+
 static void pc_cases(void) {
     char td[400], cwd[400], cmd[2400]; char *o = 0; size_t n = 0; int rc, i; char *v[] = {"pwd", 0};
     if (cx_runv_timeout(v, 10, &o, &n) != 0 || n < 2 || n >= sizeof cwd) fatal("pwd");
@@ -135,6 +181,7 @@ int main(void) {
     if (cx_fmt(cmd, sizeof cmd, "rm -f '%s/tests/manifests/fx.tsv'", root) || shq(cmd)) fatal("rm manifest");
     rc = run("--check", 0, root); ck(rc == 0 && has("manifests=0\tstale=0"), "no-manifest-absent-table-passes");
 
+    idx_cases();
     pc_cases();
     if (cx_fmt(cmd, sizeof cmd, "rm -rf '%s'", root) || shq(cmd)) fatal("cleanup");
     sy_printf("CHECK_TABLES_GEN\tfailed=%d\n", failed);
