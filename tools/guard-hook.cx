@@ -149,11 +149,124 @@ static char *strip_bodies(const char *cmd) {
 }
 
 static int inlist(char **a, long from, long n, const char *x) { long m; for (m = from; m < n; m++) if (eq(a[m], x)) return 1; return 0; }
-static const char *git_violation(char **a, long n) {
-    long i = 0, j; const char *sub;
+/* 分支纪律(只在命令作用于本仓时判定):新建/改名/复制出的分支名必须匹配 ^v0\.0\.[0-9]+$。
+ *   main 只作 branch -m/-M/-c/-C 与 checkout -B/switch -C/worktree add -B 的目标放行;ujs 别仓靠作用域放行(cwd 或 -C 目标不在 GUARD_REPO 下)。
+ *   名为空(引号被 strip_bodies 剥空)或含 $/反引号无法静态判定,放行。删除与列出不拦。
+ * 已知缺口(本轮不修):子壳 (git ...)、花括号 { git ...; }、if/then 体、env/command/eval/xargs 前缀、
+ *   update-ref、fetch/push 的 refspec 建分支。devsvc-core.cx 的合并工作树(merge-NAME 路径与 merge/NAME 分支)是内部 git 调用,不经本钩子,但不合规。 */
+static int ver_branch_ok(const char *nm0, int allow_main) {
+    char *nm = strip_q(nm0); const char *q;
+    if (!*nm || hasc(nm, '$') || hasc(nm, '`')) return 1;
+    if (allow_main && eq(nm, "main")) return 1;
+    if (!sw(nm, "v0.0.")) return 0;
+    q = nm + 5;
+    if (!*q) return 0;
+    for (; *q; q++) if (!isdg(*q)) return 0;
+    return 1;
+}
+static char GB[512];
+static const char *branch_bad(const char *nm, int allow_main) {
+    if (ver_branch_ok(nm, allow_main)) return 0;
+    tx_snprintf(GB, sizeof GB, "git 创建分支 %s:只允许 v0.0.NN 版本分支,补丁放 ~/.local/share/unisacc/research/", nm);
+    return GB;
+}
+static int in_repo_dir(const char *d) { long rl = sl(REPO); return !*d || eq(d, REPO) || (sw(d, REPO) && d[rl] == '/'); }
+/* x 是 --NAME 或 --NAME=V:返回 1;有 =V 时 *val 指向 V,否则 *val 为 0 */
+static int longopt(const char *x, const char *name, const char **val) {
+    long nl = sl(name);
+    *val = 0;
+    if (!sw(x, name)) return 0;
+    if (x[nl] == 0) return 1;
+    if (x[nl] == '=') { *val = x + nl + 1; return 1; }
+    return 0;
+}
+/* 短选项簇 x(-qb、-bNAME):LETTERS 中的第一个字母命中则返回该字母,*val 指向簇内粘连值(无则 0) */
+static int shortcluster(const char *x, const char *letters, const char **val) {
+    long m;
+    *val = 0;
+    if (x[0] != '-' || x[1] == '-' || !x[1]) return 0;
+    for (m = 1; x[m]; m++) if (hasc(letters, x[m])) { if (x[m + 1]) *val = x + m + 1; return x[m]; }
+    return 0;
+}
+/* a[i] 是子命令;只拦创建/改名/复制出的新分支名 */
+static const char *branch_violation(char **a, long i, long n) {
+    const char *sub = i < n ? a[i] : ""; long j;
+    if (eq(sub, "branch")) {
+        int noncreate = 0, mv = 0; const char *first = 0, *last = 0;
+        for (j = i + 1; j < n; j++) {
+            const char *x = a[j], *v;
+            if (eq(x, "--")) continue;
+            if (x[0] == '-' && x[1] == '-') {
+                if (longopt(x, "--points-at", &v) || longopt(x, "--format", &v) || longopt(x, "--sort", &v) || longopt(x, "--color", &v) ||
+                    longopt(x, "--contains", &v) || longopt(x, "--no-contains", &v) || longopt(x, "--merged", &v) || longopt(x, "--no-merged", &v) ||
+                    longopt(x, "--set-upstream-to", &v) || longopt(x, "--abbrev", &v) || longopt(x, "--column", &v)) { noncreate = 1; if (!v && j + 1 < n) j++; }
+                else if (eq(x, "--delete") || eq(x, "--list") || eq(x, "--show-current") || eq(x, "--unset-upstream") || eq(x, "--edit-description") || eq(x, "--all") || eq(x, "--remotes") || eq(x, "--no-column")) noncreate = 1;
+                else if (eq(x, "--move") || eq(x, "--copy")) mv = 1;
+            } else if (x[0] == '-' && x[1]) {
+                long m;
+                for (m = 1; x[m]; m++) {
+                    char c = x[m];
+                    if (c == 'd' || c == 'D' || c == 'l' || c == 'a' || c == 'r') noncreate = 1;
+                    if (c == 'u') { noncreate = 1; if (!x[m + 1] && j + 1 < n) j++; }
+                    if (c == 'm' || c == 'M' || c == 'c' || c == 'C') mv = 1;
+                }
+            } else { if (!first) first = x; last = x; }
+        }
+        if (mv) return last && !noncreate ? branch_bad(last, 1) : 0;
+        if (noncreate) return 0;
+        return first ? branch_bad(first, 0) : 0;
+    }
+    if (eq(sub, "checkout") || eq(sub, "switch") || (eq(sub, "worktree") && i + 1 < n && eq(a[i + 1], "add"))) {
+        int wt = eq(sub, "worktree"), sawb = 0, detach = 0; long npos = 0; const char *pos0 = 0;
+        const char *letters = eq(sub, "checkout") ? "bB" : eq(sub, "switch") ? "cC" : "bB";
+        for (j = i + (wt ? 2 : 1); j < n; j++) {
+            const char *x = a[j], *v = 0; int L = 0, forcelong = 0, hitlong = 0;
+            if (eq(x, "--")) break;
+            if (x[0] == '-' && x[1] == '-') {
+                if (!wt && longopt(x, "--orphan", &v)) hitlong = 1;
+                else if (eq(sub, "switch") && longopt(x, "--create", &v)) hitlong = 1;
+                else if (eq(sub, "switch") && longopt(x, "--force-create", &v)) { hitlong = 1; forcelong = 1; }
+                else if (wt && eq(x, "--detach")) detach = 1;
+                else if (wt && eq(x, "--reason") && j + 1 < n) j++;
+                if (hitlong) {
+                    if (!v) { if (j + 1 >= n) continue; v = a[++j]; }
+                    { const char *bv = branch_bad(v, forcelong); if (bv) return bv; }
+                }
+                continue;
+            }
+            if (x[0] == '-' && x[1]) {
+                L = shortcluster(x, letters, &v);
+                if (wt && hasc(x, 'd')) detach = 1;
+                if (L) {
+                    sawb = 1;
+                    if (!v) { if (j + 1 >= n) continue; v = a[++j]; }
+                    { const char *bv = branch_bad(v, L == 'B' || L == 'C'); if (bv) return bv; }
+                }
+                continue;
+            }
+            if (wt) { if (!npos) pos0 = x; npos++; }
+        }
+        /* worktree add PATH 无 -b/-B/--detach 且无 commit-ish:git 以路径末段为新分支名 */
+        if (wt && !sawb && !detach && npos == 1 && pos0) {
+            const char *base = pos0, *q;
+            for (q = pos0; *q; q++) if (*q == '/' && q[1]) base = q + 1;
+            { const char *bv = branch_bad(base, 0); if (bv) return bv; }
+        }
+    }
+    return 0;
+}
+
+static const char *git_violation(char **a, long n, const char *cur) {
+    long i = 0, j; const char *sub; char *tgt = sdup(cur ? cur : "");
     for (j = 0; j < n; j++) if (eq(a[j], "--autostash")) return "git --autostash 含 stash:共享 main 上不得 stash";
-    while (i < n && a[i][0] == '-')
+    while (i < n && a[i][0] == '-') {
+        if (eq(a[i], "-C") && i + 1 < n) {
+            char *d = strip_q(a[i + 1]);
+            if (*d && !hasc(d, '$') && !hasc(d, '`')) tgt = d[0] == '/' ? resolve("", d) : (*tgt ? resolve(tgt, d) : sdup(""));
+            else tgt = sdup("");
+        }
         i += (eq(a[i], "-C") || eq(a[i], "-c") || eq(a[i], "--git-dir") || eq(a[i], "--work-tree") || eq(a[i], "--namespace")) ? 2 : 1;
+    }
     sub = i < n ? a[i] : "";
 #define REST(x) inlist(a, i + 1, n, x)
     if (eq(sub, "stash")) return "git stash:共享 main 上不得 stash/pop,需干净输入用 git archive 解到 $CLAUDE_JOB_DIR/tmp";
@@ -166,6 +279,7 @@ static const char *git_violation(char **a, long n) {
     if (eq(sub, "restore") && REST(".")) return "git restore .:不得还原他人路径";
     if (eq(sub, "commit") && REST("--no-verify")) return "git commit --no-verify:不得绕过 precommit";
     if (eq(sub, "push") && REST("--no-verify")) return "git push --no-verify:不得绕过 precommit";
+    if (in_repo_dir(tgt)) { const char *bv = branch_violation(a, i, n); if (bv) return bv; }
 #undef REST
     return 0;
 }
@@ -253,7 +367,7 @@ static char *check_seg(char *t, char **curp) {
             if (hitm) return sdup("mkdir 在 out/ 或 ~/work 下建工作目录:不得另建工作目录");
         }
     }
-    if (eq(first, "git")) { const char *g = git_violation(w + k + 1, nw - k - 1); if (g) return sdup(g); }
+    if (eq(first, "git")) { const char *g = git_violation(w + k + 1, nw - k - 1, cur); if (g) return sdup(g); }
     {
         int ip = 0;
         if (sw(first, "python")) { const char *q = first + 6; ip = 1; for (; *q; q++) if (!isdg(*q) && *q != '.') ip = 0; }

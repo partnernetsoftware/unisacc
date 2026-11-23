@@ -63,12 +63,12 @@ static void cgac_prep_minirepo(const char *cwd, const char *rep, char *out) {
     cgac_mk(rep);
     if (cx_fmt(cmd, sizeof cmd,
         "git -C '%s' archive HEAD -- include src cx ext seed exec build weights iterate kernel tools cxroot.tsv | tar -x -C '%s' && "
-        "cp '%s/tools/gen-all-check.cx' '%s/tools/precommit.cx' '%s/tools/' && rm -f '%s/tools/ratchets.cx' && "
+        "cp '%s/tools/gen-all-check.cx' '%s/tools/precommit.cx' '%s/tools/' && rm -f '%s/tools/ratchets.cx' '%s/build/freeze.tsv' && "
         "printf '# derive v1\\n' > '%s/exec/facts/derive.tsv' && "
         "ln -s '%s/unisacc.com' '%s/unisacc.com' && "
         "cd '%s' && git init -q && git config user.email test@local && git config user.name test && "
         "git add -A && git commit -q -m init",
-        cwd, rep, cwd, cwd, rep, rep, rep, cwd, rep, rep)) cgac_abort("minirepo-fmt");
+        cwd, rep, cwd, cwd, rep, rep, rep, rep, cwd, rep, rep)) cgac_abort("minirepo-fmt");
     if (ckk_sh("check-gen-all-check", cmd, out, CGAC_OUT) != 0) cgac_abort("minirepo-run");
 }
 
@@ -380,6 +380,8 @@ int main(int argc, char **argv) {
                 "}\n";
             if (cx_write(gpath, esrc, strlen(esrc))) cgac_abort("h1w");
         }
+        if (cx_fmt(cmd, sizeof cmd, "cd '%s' && git add tools/gen-all-check.cx", rep)) cgac_abort("h1add");
+        if (ckk_sh("check-gen-all-check", cmd, out, sizeof out) != 0) cgac_abort("h1add-run");
         if (cx_fmt(cmd, sizeof cmd,
             "unset UNISA_CONTAINER && cd '%s' && UNISACC_PRECOMMIT_SERIAL=1 sh ./unisacc.com tools/precommit.cx", rep))
             cgac_abort("h1run");
@@ -387,7 +389,7 @@ int main(int argc, char **argv) {
         ck(rc == 0 && ckk_has(out, CGAC_OUT, "GEN_ALL_GATE_UNAVAILABLE") && ckk_has(out, CGAC_OUT, "blocked=0"),
            "precommit-single-error-allows: generator ERROR without DIFF logs GEN_ALL_GATE_UNAVAILABLE and allows commit");
 
-        /* H2: hanging gen-all-check double times out <40s, logs GEN_ALL_GATE_UNAVAILABLE, allows commit, zero orphans */
+        /* H2: hanging gen-all-check double times out <40s, logs GATE_TIMEOUT gate=genall, allows commit, zero orphans */
         if (cx_fmt(tag, sizeof tag, "cgac_hang_probe_%d", (int)getpid())) cgac_abort("htag");
         if (cx_fmt(hsrc, sizeof hsrc,
             "#pragma unisa use sys.proc\n"
@@ -398,6 +400,8 @@ int main(int argc, char **argv) {
             "  return 0;\n"
             "}\n", tag)) cgac_abort("hsrc");
         if (cx_write(gpath, hsrc, strlen(hsrc))) cgac_abort("hw");
+        if (cx_fmt(cmd, sizeof cmd, "cd '%s' && git add tools/gen-all-check.cx", rep)) cgac_abort("h2add");
+        if (ckk_sh("check-gen-all-check", cmd, out, sizeof out) != 0) cgac_abort("h2add-run");
         t10 = sy_now_ms();
         if (cx_fmt(cmd, sizeof cmd,
             "unset UNISA_CONTAINER && cd '%s' && UNISACC_PRECOMMIT_SERIAL=1 sh ./unisacc.com tools/precommit.cx", rep))
@@ -406,8 +410,8 @@ int main(int argc, char **argv) {
         long dt10 = sy_now_ms() - t10;
         if (cx_fmt(cmd, sizeof cmd, "pgrep -f '[c]gac_hang_probe_%d'", (int)getpid())) cgac_abort("hpg");
         rc_pg = ckk_sh("check-gen-all-check", cmd, pout, sizeof pout);
-        ck(rc == 0 && dt10 < 40000 && ckk_has(out, CGAC_OUT, "GEN_ALL_GATE_UNAVAILABLE") && rc_pg != 0,
-           "precommit-hang-bounded-no-orphan: hanging double times out <40s, allows commit, zero orphans");
+        ck(rc == 0 && dt10 < 40000 && ckk_has(out, CGAC_OUT, "GATE_TIMEOUT gate=genall") && rc_pg != 0,
+           "precommit-hang-bounded-no-orphan: hanging double times out <40s, logs GATE_TIMEOUT gate=genall, allows commit, zero orphans");
 
         { char *rmv[] = {"rm", "-rf", work, 0}; (void)ck_run(rmv, out, sizeof out); }
         printf("CHECK_GEN_ALL_HANG\tok=%d\tfailed=%d\tms=%ld\n", ck_assertions() - ck_failures(), ck_failures(), sy_now_ms() - t0);
