@@ -50,7 +50,7 @@ int main(void) {
     /* patches cut from that base: a whole-block append to coverage.tsv and batches.tsv plus a new tool each */
     rc = shf(out, sizeof out, 58,
         "cd '%s' && T=$(printf '\\t') && "
-        "for n in a b; do "
+        "for n in a b c; do "
         "  d=tools; if [ $n = b ]; then d=tools/cxlib; fi; printf 'int main(void){ return 0; }\\n' > $d/zzland$n.cx && "
         "  printf 'zzland%s.row\\tinterfaces\\tIMPLEMENTED_SEPARATE_BATCH\\tx\\tland %s\\n' $n $n >> tests/coverage.tsv && "
         "  git add -A $d/zzland$n.cx tests/coverage.tsv && git diff --cached HEAD > ../patch-$n.diff && git reset -q --hard HEAD; "
@@ -61,7 +61,7 @@ int main(void) {
         /* a real landing lists its new tools in the sources rows too: the files then exist untracked while the rows name them */
         "printf 'tools/zzlanda.cx\\tregular\\n' > ../rows-a/rows-tools-compile-sources.tsv && "
         "printf 'tools/cxlib/zzlandb.cx\\tregular\\n' > ../rows-b/rows-tools-compile-sources.tsv && "
-        "ls ../patch-a.diff ../patch-b.diff >/dev/null && echo CUT_OK", F);
+        "ls ../patch-a.diff ../patch-b.diff ../patch-c.diff >/dev/null && echo CUT_OK", F);
     if (rc != 0 || !has(out, "CUT_OK")) { printf("fixture patches failed: %.300s\n", out); return 2; }
     /* the base table copy to compare with */
     shf(out, sizeof out, 10, "cd '%s' && cp tests/coverage.tsv ../cov.base && cp tests/batches.tsv ../bat.base && cp tests/tools-compile-sources.tsv ../src.base", F);
@@ -125,6 +125,22 @@ int main(void) {
     shf(out, sizeof out, 10, "cd '%s' && mkdir -p ../rows-f && printf 'zzlandf.row\\tinterfaces\\tIMPLEMENTED_SEPARATE_BATCH\\tx\\tland f\\n' > ../rows-f/rows-coverage.tsv", F);
     rc = land(o4, sizeof o4, "--rows-dir ../rows-f --preview-head 0000000000000000000000000000000000000000");
     ok(rc == 0 && has(o4, "LAND_PREVIEW") && has(o4, "rerunning precommit-preview") && has(o4, "PRECOMMIT_PREVIEW\tblocked=3") && !has(o4, "UNMEASURED"), "a changed head reruns the gate once over the touched files and prints its verdict line unchanged");
+
+    /* (8) the index belongs to the caller.  Before the call the caller has staged a tracked file (M), a new file (A) and an intent-to-add (" A").
+     * A call that fails in register (the second row names a tool that does not exist) must leave status and the staged diff byte-identical,
+     * and must not turn the caller's own " A" into "??" (an undo by "git reset" did exactly that). */
+    shf(out, sizeof out, 20, "cd '%s' && mkdir -p ../rows-g ../rows-h && printf 'x\\n' > zzstaged.txt && git add zzstaged.txt && printf 'y\\n' > zzita.txt && git add -N zzita.txt && echo >> README.md && git add README.md && "
+        "git status --porcelain > ../st0 && git diff --cached | sha256sum > ../df0 && "
+        "printf 'tools/zzlandc.cx\\tregular\\ntools/zzlandmissing.cx\\tregular\\n' > ../rows-g/rows-tools-compile-sources.tsv && printf 'tools/zzlandc.cx\\tregular\\n' > ../rows-h/rows-tools-compile-sources.tsv && cat ../st0", F);
+    ok(has(out, "M  README.md") && has(out, " A zzita.txt") && has(out, "A  zzstaged.txt"), "fixture: the caller's staged file, new file and intent-to-add are in the index before the call");
+    rc = land(out, sizeof out, "--patch ../patch-c.diff --rows-dir ../rows-g");
+    shf(o2, sizeof o2, 20, "cd '%s' && git status --porcelain | cmp -s - ../st0 && git diff --cached | sha256sum | cmp -s - ../df0 && test ! -e tools/zzlandc.cx && echo BASELINE_SAME", F);
+    ok(rc == 1 && has(out, "step=register") && has(o2, "BASELINE_SAME"), "a call that fails in register restores the index: status and the staged diff are the caller's, the created file is gone");
+
+    /* (9) the same call with a good row lands: the new file is an intent-to-add (" A"), the caller's staging is unchanged */
+    rc = land(out, sizeof out, "--patch ../patch-c.diff --rows-dir ../rows-h");
+    shf(o2, sizeof o2, 20, "cd '%s' && git status --porcelain | grep 'tools/zzlandc.cx'; echo n=$(git status --porcelain | grep -c '^M  README.md\\|^A  zzstaged.txt\\|^ A zzita.txt')", F);
+    ok(rc == 0 && has(out, "status=LANDED") && has(o2, "A tools/zzlandc.cx") && has(o2, "n=3"), "a landing leaves the new tool in the index and the caller's staged file, new file and intent-to-add as they were");
 
     shf(out, sizeof out, 20, "rm -rf '%s' '%s'", F, WD);
     checks = ckk_okcount(&bad);
