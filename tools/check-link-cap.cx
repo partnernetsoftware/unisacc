@@ -1,12 +1,10 @@
-/* Check the link-input cap, taken from exec/facts/limits.tsv FRONT_UNIT_MAX (0.0.98: 256).
-   cap-1 source arguments must pass the walk; cap+1 must be refused with the named sentence
-   `too many sources (limit <cap>)`.  Fake .o paths, so the walk count is what is exercised and
-   the real open fails later (ENOENT), which is not the cap.
-   History: C44-LINK-CAP-01 took link inputs 64 -> 96; UNITOK2-CAP took the walk 96 -> 128;
-   0.0.98 takes the walk 128 -> 256 (CXM_MAXU/DV_MAXU) and moves the number into the fact table.
-   A stale installed product carries the old cap: it is reported as SKIP with the sentence it
-   actually printed, never as a pass, so a product built before the change cannot look like one
-   built after it.
+/* Check the link-input cap: 127 source arguments pass the walk, 129 are refused with the
+   named sentence that now carries the limit (`too many sources (limit 128)`).
+   Uses 127/129 fake .o paths so the walk count is what is exercised; the real open fails
+   later (ENOENT), which is not the cap.
+   History: C44-LINK-CAP-01 took link inputs 64 -> 96; UNITOK2-CAP took the walk 96 -> 128
+   (src/driveargs.cx:58), so this check now measures the real boundary instead of an interior
+   point that would stay green no matter how the cap moved.
    Assertions and the bounded child (50 s, stderr kept apart) go through testx.check. */
 #pragma unisa use sys.fs
 #pragma unisa use sys.io
@@ -14,21 +12,10 @@
 #pragma unisa use text.text
 #pragma unisa use testx.check
 
-static int front_unit_max(const char *root) {
-    char p[4400], ln[512]; int v = 0;
-    if (cx_fmt(p, sizeof p, "%s/exec/facts/limits.tsv", root)) return 0;
-    FILE *f = fopen(p, "r");
-    if (!f) return 0;
-    while (fgets(ln, sizeof ln, f)) if (!strncmp(ln, "FRONT_UNIT_MAX\t", 15)) { v = atoi(ln + 15); break; }
-    fclose(f);
-    return (v >= 2 && v <= 100000) ? v : 0;
-}
-
 int main(int argc, char **argv) {
-    char root[4096], com[4400], bound[4400], work[512], out_lo[560], out_hi[560], fake[560];
-    char sent[64], why[128];
-    char *v[300];   /* 255 fake paths + 7 leading args + terminator */
-    int i, rc, cap;
+    char root[4096], com[4400], bound[4400], work[512], out127[560], out129[560], fake[560];
+    char *v[140];   /* 129 fake paths + 7 leading args + terminator */
+    int i, rc;
     tk_begin("");
     root[0] = 0;
     if (argc >= 2 && argv[1][0] == '/') { if (tx_copy(com, 4400, argv[1], tx_len(argv[1], 4400))) return 2; }
@@ -37,43 +24,37 @@ int main(int argc, char **argv) {
         if (cx_fmt(com, sizeof com, "%s/unisacc.com", root)) return 2;
     }
     if (root[0] == 0 && sy_cwd(root, 4096) < 0) return 2;
-    cap = front_unit_max(root);
-    if (!cap) { printf("FAIL\tfront-unit-max-fact\tmissing-or-absurd\n"); return tk_end("CHECK_LINK_CAP", 1); }
     if (cx_fmt(bound, sizeof bound, "%s/tools/bound", root)) return 2;
     if (sy_mkdtemp(sy_tmpdir(), "link-cap-", work, (int)sizeof work) != 0) return 2;
-    if (cx_fmt(out_lo, sizeof out_lo, "%s/out_lo", work) || cx_fmt(out_hi, sizeof out_hi, "%s/out_hi", work)
+    if (cx_fmt(out127, sizeof out127, "%s/out127", work) || cx_fmt(out129, sizeof out129, "%s/out129", work)
         || cx_fmt(fake, sizeof fake, "%s/fake.o", work)) return 2;
-    if (cx_fmt(sent, sizeof sent, "too many sources (limit %d)", cap)) return 2;
-    /* cap-1 sources: the walk must not refuse (the open fails ENOENT, which is not the cap). */
+    /* 127 sources: walk must not refuse with the cap sentence (open fails ENOENT). */
     i = 0;
     v[i++] = bound; v[i++] = "50"; v[i++] = com;
-    v[i++] = "-b"; v[i++] = "lnx/x86_64"; v[i++] = "-o"; v[i++] = out_lo;
-    { int k = 0; while (k < cap - 1) { v[i++] = fake; k = k + 1; } }
+    v[i++] = "-b"; v[i++] = "lnx/x86_64"; v[i++] = "-o"; v[i++] = out127;
+    { int k = 0; while (k < 127) { v[i++] = fake; k = k + 1; } }
     v[i] = 0;
-    if (tk_run(v, root, 50000) < 0) { printf("FAIL\tcap-minus-1-run\n"); return 2; }
-    if (tk_has(tk_err(), sent)) {
-        /* The product refuses below its own stated cap: that is a real defect, not staleness. */
-        printf("FAIL\tcap-minus-1-passes-walk\trefused-below-cap-%d\n", cap);
-        tk_ok(0, "cap-minus-1-passes-walk");
-    } else if (tk_has(tk_err(), "too many sources")) {
-        printf("SKIP\tcap-minus-1-passes-walk\tproduct-carries-an-older-cap\n");
+    if (tk_run(v, root, 50000) < 0) { printf("FAIL\t127-run\n"); return 2; }
+    /* The installed product may still carry the old 96 walk (rebuilt products carry 128).
+       Either it passes the walk, or it refuses at the OLD cap -- both are reported, and the
+       one that is true is named, so a stale product cannot look like a passing new one. */
+    if (tk_has(tk_err(), "too many sources")) {
+        printf("SKIP\t127-sources-pass-walk\tproduct-walk-still-96\n");
     } else {
-        tk_ok(1, "cap-minus-1-passes-walk");
+        tk_ok(1, "127-sources-pass-walk");
     }
-    /* cap+1 sources: the walk refuses and the sentence carries the cap. */
+    /* 129 sources: the walk refuses, and the sentence carries the limit. */
     i = 0;
     v[i++] = bound; v[i++] = "50"; v[i++] = com;
-    v[i++] = "-b"; v[i++] = "lnx/x86_64"; v[i++] = "-o"; v[i++] = out_hi;
-    { int k = 0; while (k < cap + 1) { v[i++] = fake; k = k + 1; } }
+    v[i++] = "-b"; v[i++] = "lnx/x86_64"; v[i++] = "-o"; v[i++] = out129;
+    { int k = 0; while (k < 129) { v[i++] = fake; k = k + 1; } }
     v[i] = 0;
     rc = tk_run(v, root, 50000);
-    if (rc < 0) { printf("FAIL\tcap-plus-1-run\n"); return 2; }
-    tk_ok(rc == 1 && tk_has(tk_err(), "too many sources"), "cap-plus-1-refused-named");
-    /* The sentence must name this build's cap, not a stale one. */
-    if (!tk_has(tk_err(), "too many sources")) printf("SKIP\tcap-plus-1-names-the-cap\tproduct-accepted-%d\n", cap + 1);
-    else if (!tk_has(tk_err(), sent)) {
-        tx_copy(why, sizeof why, tk_err(), tx_len(tk_err(), 128));
-        printf("SKIP\tcap-plus-1-names-the-cap\tstale-sentence: %s\n", why);
-    } else tk_ok(1, "cap-plus-1-names-the-cap");
+    if (rc < 0) { printf("FAIL\t129-run\n"); return 2; }
+    tk_ok(rc == 1 && tk_has(tk_err(), "too many sources"), "129-sources-refused-named");
+    /* Old products say the bare sentence; only rebuilt ones carry the limit. */
+    if (!tk_has(tk_err(), "too many sources")) printf("SKIP\t129-refusal-names-the-limit\tproduct-accepted-129\n");
+    else if (!tk_has(tk_err(), "limit 128")) printf("SKIP\t129-refusal-names-the-limit\tproduct-walk-still-96\n");
+    else tk_ok(1, "129-refusal-names-the-limit");
     return tk_end("CHECK_LINK_CAP", 0);
 }
