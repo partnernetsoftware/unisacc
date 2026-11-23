@@ -46,10 +46,10 @@
  * then optional WAITING_CC<TAB>w1,w2,...
  *
  * --idle: TEAM_IDLE window IDLE|BUSY age_min=K for each registered window.
- * IDLE iff prompt-idle (classify IDLE/WAITING_CC) AND pane quiet >= idle-min
- * (default 10). Live: tmux pane_last_activity. Fixture: first body line
- * #tp_age_min=N (stripped). Else BUSY. Footer TEAM_IDLE_SUMMARY idle=A busy=B.
- * check uses fake capture only (no real tmux). */
+ * Only whether the window is working: prompt-idle AND pane quiet >= idle-min
+ * (default 10). Does not read or report context/quota fields. Live age from
+ * tmux pane_last_activity; fixture first body line #tp_age_min=N (stripped).
+ * Else BUSY. Footer TEAM_IDLE_SUMMARY idle=A busy=B. Fake capture in check. */
 #pragma unisa use cxlib.ckrun
 #pragma unisa use cxlib.trailer
 #pragma unisa use cxlib.procrun
@@ -308,9 +308,13 @@ static int asks_cc(const char *t, long tn) {
 
 static const char *classify(const char *text, long n, const char *model, int *ctx_pct, char *ctx_note, long ncap) {
     char t[TP_CAP]; long tn;
-    *ctx_pct = -1; ctx_note[0] = 0;
     tn = tail_text(text, n, g_tail, t, sizeof t);
-    parse_ctx(t, tn, model, ctx_pct, ctx_note, ncap);
+    /* --idle passes ctx_pct=0: do not read context/quota at all */
+    if (ctx_pct) {
+        *ctx_pct = -1;
+        if (ctx_note) ctx_note[0] = 0;
+        parse_ctx(t, tn, model, ctx_pct, ctx_note, ncap);
+    }
     if (is_filtered(t, tn)) return "FILTERED";
     if (has_ci(t, tn, "waiting for input") || has_ci(t, tn, "do you want to")) return "WAITING_INPUT";
     /* running shell/bash frame beats idle auto·model footer */
@@ -508,8 +512,8 @@ static long capture_pane_age_min(const char *window) {
 }
 
 static void idle_one(Win *w) {
-    char capbuf[TP_CAP], note[24], ages[24];
-    long n = 0, age = -1; int ctx = -1;
+    char capbuf[TP_CAP], ages[24];
+    long n = 0, age = -1;
     const char *st, *outst;
     if (g_fix[0]) {
         if (fixture_get(g_fix, w->window, capbuf, sizeof capbuf, &n)) {
@@ -522,8 +526,9 @@ static void idle_one(Win *w) {
         }
         age = capture_pane_age_min(w->window);
     }
-    st = classify(capbuf, n, w->model, &ctx, note, sizeof note);
-    if ((tx_eqz(st, "IDLE") || tx_eqz(st, "WAITING_CC")) && age >= 0 && age >= g_idle_min) {
+    /* null ctx: classify must not parse_ctx / report quota */
+    st = classify(capbuf, n, w->model, 0, 0, 0);
+    if (tx_eqz(st, "IDLE") && age >= 0 && age >= g_idle_min) {
         outst = "IDLE"; g_n_idle_ok++;
     } else {
         outst = "BUSY"; g_n_idle_busy++;
