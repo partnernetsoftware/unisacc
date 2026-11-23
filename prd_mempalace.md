@@ -16,7 +16,7 @@
 
 - 版本序与当前状态:build/version-seq.tsv(唯一权威;发布证据索引入口 release/evidence/)。
 - 所有者需求与未告知断点:build/owner-reqs.tsv(只降不升)。
-- 起草快照:0.0.97 已公开(13:51,v0.0.97 Latest,冻结 a64cb13439,候选 d59040be1a,APE fa14390abbf4,CI 45119589279,Y2 5a2d7c298d);0.0.98 冻结改裁(cc 2026-11-23 15:40):标号函数局部化一期(原 0.0.102 提前至 0.0.98,计划见 plans/v0.0.98.md),争取 16:30 前合入 main 起链并按 0.0.97 流程验证发布,long/heavy jobs=2 与 tools/release-assemble.cx 顺延至 0.0.99;前端 A 顺延至 0.0.99(计划见 plans/v0.0.99.md),原 0.0.99 前端 B1 暂置 0.0.102 待整体重排,版本序见 build/version-seq.tsv。
+- 起草快照:0.0.98 已公开(2026-11-23 20:51,v0.0.98 Latest,冻结 F=238c84b071,候选 T=575a613f47,X=df983630da,Y1=8974fd2558,Y2=e3caf24487,APE 07351e2cbf 9010222B,CI 45167911448 六格 QUALIFIED,NOT_QUALIFIED,严格证据 459 批 PASS 457 FAIL 0 UNKNOWN 2,本机 Root 已升至 unisacc 0.0.98;v0.0.97 GitHub 说明已补 run-cache 已知缺陷);标准发布流程(0.0.99 起)目标图见 plans/release-standard.md;公开后版本序重排(build/version-seq.tsv):0.0.99 运行缓存键修复(ccogweco,plans/v0.0.99.md)、0.0.100 大单元冷编译 U7 运行飞跃版(plans/v0.0.100.md)、0.0.101 执行核二期开发飞跃版(plans/v0.0.101.md)、0.0.102 前端 A(plans/v0.0.102.md)、0.0.103 前端 B1、0.0.104 诊断定位类、0.0.105 前端 B2、0.0.106 x16、0.0.107..0.0.117 顺延。
 
 
 ## 决定(别人必须遵守)
@@ -48,6 +48,7 @@
 ### 证据与门
 
 - 发布证据每候选全套实跑,只复用构造产物,不复用测试结论;"工具契约批次绑定执行编译器身份、跨候选不重跑"未采纳,只做影子核算。依据:1712 行批次里只有 71 行显式接收候选。
+- 证据按字节寻址(2026-11-23 fable 裁定):0.0.99 只做影子核算(全批照常实跑,另记镜像/材料/运行库 sha 命中与结论一致性),不跳过执行,不记 REUSED 替代实跑;连续两版零不等且可省不低于 30% 再议改铁律,改铁律须所有者裁定。前置:agyneon 50 工具镜像相同率实验,低于 60% 或编译占比 80% 以上即结案不做。回滚:删影子表并停用生成步骤。
 - 提交门类与共用发布路径(dvqualify、release-exec、release-prep、register)的变更验收:夹具绿不算,必须在共享检出同款条件下真实提交一次成功;补丁须独立复核并做原版与补丁版真实发车对拍。依据:三次假漂移都靠真实提交抓到。
 - 改产品源的验收必须含引导编译器(bootstrap-0.0.59)多单元编译,不只已装产品 -c。
 - cx-dev(tools/cx-dev、tools/cx-dev-root)的结果只是 LOCAL 证据,不是候选结果;基座(src、cx、include)改动要重装产品。
@@ -179,6 +180,11 @@
 - 删 cx/text 下 build、deflate、json、num 四链接:同批提交加 cxroot.tsv 整名行与删链接,绝不先删后加;前后跑 symindex、check-cx-layers、product-links、core-closure;仓外消费者先在 build/external-users.tsv 逐一确认。现状:四文件仍在。
 - 冷跑缓存:0.0.94 只做 L5(a) 前导预制;L1 闭包复用本期不开(e4 原字节同率 60%,另有三项挡路点);固定前缀预制曾判 NO-GO,重启须重做 P0。入口:plans/v0.0.94.md、build/owner-reqs.tsv R60。
 - 风险登记(均为推断或未核):引导编译器换基与新关键字相撞;SHA256SUMS 无独立签名;缓存目录同用户篡改威胁模型未成文;Mach-O 与 PE 的 TLS 未设计;前端硬上限具名拒绝未普查;主调度单点与磁盘余量低于 20G 预警;用户来源需求为 0。
+
+#### 预跑封口门时序与工具自检迁出(omp-go 备料,cc 2026-11-23 裁定)
+
+- 封口门两端都等 0.0.98 公开后再落:0.0.98 从 main 发,main 上若先有消费侧则 stage-a 必拒。已实测:把 0.0.97 的 strict-final.tsv 按 segment/strict-sha256 写进 inputs 喂新 stage-a,输出 RELEASE_FLOW REFUSE SEAL_MISSING;0.0.97 与 0.0.94-r3 的 strict-final.tsv 里封口行计数都是 0。时序:公开后同一班先落写端,0.0.99 预跑用新 merge 出带封口行的 strict,0.0.99 公开前再落消费侧。回滚:撤两份补丁即回旧行为,旧 strict 重新可发布。入口:research/lane-jobs2/SEAL-GATE-NOTE.md。
+- 工具自检迁出选 c:只迁 tool-selfcheck 中 tier=commit 的 578 批,去处 commit-gate;另 330 批(264 daily 加 66 release)留在预跑;加 5 条候选执行冒烟。a 方案(把 264 daily 批改 commit)单独一件,须附提交门耗时实测再定。依据:0.0.97 预跑 797 批实测耗时归属,tool-selfcheck 占 20.4%,其中有去处的 commit 档为 14.2%,daily 档 6.2% 无去处。入口:research/lane-jobs2/SELFCHECK-MIGRATION.md。
 
 #### 清理留痕
 
