@@ -180,21 +180,14 @@
   - reaped-group-reuse:新增答负值断言。
 - 快照实现(d0bfc5852f)作为方案底稿保留在分支历史,补丁 ~/.claude/jobs/omp1/tmp/snapshot-design-v0.0.96.patch。
 
-## 七、候选:pidfd 方案(真正解决已回收根的孤儿清理)
+## 七、遗留:已回收根的孤儿清理(不进 0.0.96)
 
-- 要点:回收前对组与后代各取 pidfd 快照,事后按 pidfd 发信号(免 pid 复用、免 TOCTOU)。pidfd 指向具体进程,
-  进程退出后信号发不出去,不会落到复用 pid 的旁人身上。
-- 根自行退出的形态:调用方必须在 fork 之前先设 subreaper(sy_child_subreaper),使孤儿成为自己的子进程,从而可证;
-  没有 subreaper 时逃逸孤儿被 init 收养,仍不可证,答负值。
-- L0 平台层新增封装:pidfd_open、pidfd_send_signal、waitid(P_PIDFD)(cx/sys 下,上层不写 __syscallN)。消费侧
-  是 ext/sysx/processcore.cx 与 reaper.cx。
-- 仓内先例:tools/cxlib/chainrunproc.cx 已按"每个后代持 pidfd 加 starttime"做身份(cr_add 里 __syscall6(434,...),
-  那是 tools 内直调,迁移时收进 L0 封装)。
-- 核对结果(ext/sysx/linuxns.cx:102、372):沙箱 seccomp 是 denylist,deny_list 含 pidfd_open 与 pidfd_getfd
-  (被拒);pidfd_send_signal 不在表里,默认放行。所以沙箱内的进程取不到 pidfd:pidfd 方案在沙箱内必须
-  走"未证实"路径,或沙箱表为清理者单独放行 pidfd_open。该项需单独决定,不得默认放开。
-- 风险与边界:(1) 枚举后代到 pidfd_open 之间仍有窗口,打开后必须复核 starttime,不符则关掉不用;(2) fd 数量有上限,
-  溢出返回负值不截断;(3) 快照之后新 fork 的后代只有 subreaper 兜得住;(4) 其余五目标无 pidfd,走表并明确返回
-  "未证实"(不是干净)。
-- 验收设想:根自行退出且被回收后,按 pidfd 杀掉 setsid 逃逸孤儿且答 0;pid 号被复用的旁人不受影响(a1 夹具);
-  沙箱内 pidfd_open 被拒时答负值。
+- 真正的方案是回收前取 pidfd 快照,设计稿在分支 pidfd-design 的 plans/pidfd-proc-cleanup.md(不进 0.0.96)。
+- 0.0.96 的合同到此为止:已回收根只报告,不杀。
+- 复核记录(2026-11-23,只读):已回收路径在库内无信号。消费者仍有"负值后裸 kill"或"回收后裸 kill(-pid)":
+  tools/bg-candidate.cx:444-445(w==pid 已回收后 kill(-pid, 0/SIGKILL),与 a1 同形,未修);
+  tools/cxlib/e2stream.cx:175、tools/affected.cx:676、682(负值后 kill(-pid)/sy_killpg,根未回收所以组号被僵尸根钉住,
+  暂安全,但与"负值只报告"不一致);tools/affected.cx:1602 的 DEFERRED 行对 sv<0 不写 unconfirmed。
+  tools/dvreact.cx:266、tools/prerun-drive.cx:1508 忽略返回值。这些在 0.0.96 之外,落地 pidfd 方案时一并处理。
+- 缺测:库内无针对 gkfx f1-f4 与 gka c1/e1/s1 的入库夹具(tools/gkfx.cx 未跟踪且不属本分支,gka 在 7f46e032 的私有目录);
+  a1 与 snapshot-overflow 已入库(check-reaper 40 项)。
