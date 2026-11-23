@@ -24,6 +24,16 @@ typedef struct {
     int64_t ctime_ns; /* status-change time in nanoseconds, as mtime_ns. */
 } sy_stat_t;
 
+/* Filesystem capacity. bavail is unprivileged available blocks (statvfs f_bavail).
+   Bytes available = bavail * frsize. Disk-gate MiB = that product / 1048576. */
+typedef struct {
+    unsigned long long bavail;
+    unsigned long long bfree;
+    unsigned long long blocks;
+    unsigned long long frsize;
+    unsigned long long bsize;
+} sy_statvfs_t;
+
 /* Nanosecond times: the stat layout differs per target; the prelude exposes the fraction
    as st_*_nsec (Linux) or st_*timespec (macOS). Windows never reaches sy_fill. */
 static int64_t sy_ns_os(const struct stat *s, int which) {
@@ -392,6 +402,86 @@ static int sy_stat_os(const char *path, sy_stat_t *out) {
 int sy_stat(const char *path, sy_stat_t *out) {
     if (!path || !path[0] || !out) return -EINVAL;
     return sy_stat_os(path, out);
+}
+
+/* PATH's filesystem: unprivileged available blocks in bavail, fragment size in frsize.
+   0, or -errno. Linux: statfs syscall. macOS: statfs. Windows: GetDiskFreeSpaceExA
+   with frsize=1 and bavail in bytes. */
+static int sy_statvfs_os(const char *path, sy_statvfs_t *out) {
+#ifdef _WIN32
+    static __u_word fn;
+    unsigned long long avail = 0, total = 0, freeb = 0;
+    __u_word r;
+    if (!fn) fn = _ux_sym("GetDiskFreeSpaceExA");
+    if (!fn) return -ENOSYS;
+    r = _ux_call(fn, (__u_word)path, (__u_word)&avail, (__u_word)&total, (__u_word)&freeb);
+    if (!r) { _ux_fail(); return sy_fail(); }
+    out->frsize = 1;
+    out->bsize = 1;
+    out->bavail = avail;
+    out->bfree = freeb;
+    out->blocks = total;
+    return 0;
+#elif defined(__APPLE__)
+    struct statfs s;
+    errno = 0;
+    if (statfs(path, &s) != 0) return sy_fail();
+    out->bavail = (unsigned long long)s.f_bavail;
+    out->bfree = (unsigned long long)s.f_bfree;
+    out->blocks = (unsigned long long)s.f_blocks;
+    out->frsize = (unsigned long long)(s.f_bsize ? s.f_bsize : 1);
+    out->bsize = (unsigned long long)(s.f_iosize ? s.f_iosize : s.f_bsize);
+    return 0;
+#else
+    struct {
+        long f_type;
+        long f_bsize;
+        unsigned long f_blocks;
+        unsigned long f_bfree;
+        unsigned long f_bavail;
+        unsigned long f_files;
+        unsigned long f_ffree;
+        int f_fsid[2];
+        long f_namelen;
+        long f_frsize;
+        long f_flags;
+        long f_spare[4];
+    } s;
+    long r;
+    errno = 0;
+#ifdef __aarch64__
+    r = __syscall6(43, (long)path, (long)&s, 0, 0, 0);
+#else
+    r = __syscall6(137, (long)path, (long)&s, 0, 0, 0);
+#endif
+    if (r < 0) return (int)r;
+    out->bavail = (unsigned long long)s.f_bavail;
+    out->bfree = (unsigned long long)s.f_bfree;
+    out->blocks = (unsigned long long)s.f_blocks;
+    out->frsize = (unsigned long long)(s.f_frsize ? s.f_frsize : (s.f_bsize ? s.f_bsize : 1));
+    out->bsize = (unsigned long long)(s.f_bsize ? s.f_bsize : out->frsize);
+    return 0;
+#endif
+}
+
+int sy_statvfs(const char *path, sy_statvfs_t *out) {
+    if (!path || !path[0] || !out) return -EINVAL;
+    return sy_statvfs_os(path, out);
+}
+
+/* Unprivileged available bytes / 1048576. The MiB count (>=0), or -errno. */
+long sy_disk_avail_mb(const char *path) {
+    sy_statvfs_t v;
+    unsigned long long bytes, mb;
+    int rc;
+    rc = sy_statvfs(path, &v);
+    if (rc != 0) return rc;
+    if (v.frsize == 0) return -EINVAL;
+    if (v.bavail > (~0ULL) / v.frsize) bytes = ~0ULL;
+    else bytes = v.bavail * v.frsize;
+    mb = bytes / 1048576ULL;
+    if (mb > 9223372036854775807ULL) return 9223372036854775807L;
+    return (long)mb;
 }
 
 /* The prelude's Windows lstat is a call to stat, and stat is not a Windows

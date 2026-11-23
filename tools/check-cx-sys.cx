@@ -87,6 +87,8 @@ int main(int argc, char **argv) {
     if (argc > 0 && argv[0] && argv[0][0]) self = argv[0];
     const char *tmp = sy_env_or("TMPDIR", "/tmp");
     sy_stat_t s;
+    sy_statvfs_t vfs;
+    long avail_mb;
     int rc, cut, pid;
 
     /* env */
@@ -114,6 +116,13 @@ int main(int argc, char **argv) {
     ok(sy_exists(f) == 1 && sy_exists(root) == 1, "exists: file and directory are 1");
     { if (cx_fmt(d, sizeof d, "%s/absent", root)) { fprintf(stderr, "check-cx-sys: text too long for d\n"); exit(2); } }
     ok(sy_exists(d) == 0 && sy_stat(d, &s) == -ENOENT, "exists: absent is 0 (stat -ENOENT)");
+    ok(sy_statvfs(root, &vfs) == 0 && vfs.frsize > 0 && vfs.blocks >= vfs.bfree, "statvfs: scratch fs has frsize and blocks>=bfree");
+    ok(vfs.bfree >= vfs.bavail, "statvfs: bfree >= bavail (unprivileged)");
+    avail_mb = sy_disk_avail_mb(root);
+    ok(avail_mb > 0 && (unsigned long long)avail_mb == vfs.bavail * vfs.frsize / 1048576ULL, "disk_avail_mb: matches bavail*frsize/1048576");
+    ok(sy_statvfs("", &vfs) == -EINVAL && sy_statvfs(0, &vfs) == -EINVAL && sy_statvfs(root, 0) == -EINVAL, "statvfs: empty or null is -EINVAL");
+    { if (cx_fmt(d, sizeof d, "%s/absent-vfs", root)) { fprintf(stderr, "check-cx-sys: text too long for d\n"); exit(2); } }
+    ok(sy_statvfs(d, &vfs) == -ENOENT && sy_disk_avail_mb(d) == -ENOENT, "statvfs: missing path is -ENOENT");
     { if (cx_fmt(under, sizeof under, "%s/under", f)) { fprintf(stderr, "check-cx-sys: text too long for under\n"); exit(2); } }
     ok(sy_exists(under) == -ENOTDIR, "exists: a path under a file is -ENOTDIR, not absent");
     { if (cx_fmt(d, sizeof d, "%s/rmd", root)) { fprintf(stderr, "check-cx-sys: text too long for d\n"); exit(2); } }
