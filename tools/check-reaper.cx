@@ -311,8 +311,12 @@ static void check_capture(void) {
     rc = np_run(av, 0, 0, 1, &r, why, sizeof why);
     pid_path(p, sizeof p, "capture-reaped-orphan");
     d = read_pid(p);
-    ok(rc == -1 && r.timed_out && r.residue == 0 && d > 0 && !alive(d),
-       "np_run: an orphan holding stdout is cleaned after wait reaps the root");
+    /* old: the orphan was cleaned (residue 0, orphan gone).  new (0.0.96 commit 3): a reaped root signals
+       nothing, so the orphan lives on and np_run reports cleanup unconfirmed. */
+    ok(rc == -1 && r.timed_out && r.residue < 0 && d > 0 && alive(d),
+       "np_run: an orphan holding stdout after wait reaps the root is not signalled and residue is negative");
+    ok(strstr(why, "cleanup unconfirmed") != 0 && strstr(why, " survived)") == 0,
+       "np_run: a reaped root reports cleanup unconfirmed, not a survivor list and not clean");
     if (alive(d)) remember(d);
     np_free(&r);
     pid_path(p, sizeof p, "no-such-executable"); av[0] = p;
@@ -329,7 +333,7 @@ static void check_capture(void) {
 
 /* The orphan holds the output pipe after its root exits. The tree is snapshotted while the root is
    still unreaped (the root lives 100 ms after it forked the orphan), then the root is reaped and
-   the sweep runs on the snapshot only.  In a private PID namespace, make the next child reuse the
+   the reaped-root answer only reports (no signal at all).  In a private PID namespace, make the next child reuse the
    exact pid of the reaped root: the sentinel is not in the snapshot, so it is never touched.
    The ordinary batch supplies the sentinel's live pid at the same boundary. */
 static int check_reaped_root(int exact) {
@@ -383,8 +387,10 @@ static int check_reaped_root(int exact) {
         (void)waitpid(sentinel, &st, 0);
     }
     w = waitpid(orphan, &st, WNOHANG);
-    ok(res == 0 && (w == orphan || (w < 0 && errno == ECHILD)),
-       "reaped-root: orphan holding the output pipe is gone");
+    /* old: orphan gone and res == 0.  new: nothing is signalled after the reap, so the answer is
+       negative and the snapshotted orphan is still running. */
+    ok(res < 0 && w == 0, "reaped-root: the snapshotted orphan is not signalled and the answer is negative");
+    ok(res != 0 && res != -ENOSYS, "reaped-root: never reported as clean");
     if (w == 0) {
         sy_kill(orphan);
         (void)waitpid(orphan, &st, 0);
@@ -393,9 +399,10 @@ static int check_reaped_root(int exact) {
     return 0;
 }
 
-/* Snapshot identity, no pid namespace needed.  A member whose starttime no longer matches (the shape
-   of a reused pid; here the recorded value is shifted, the processes are real) is never signalled and
-   the answer is negative; the same snapshot with the true starttime kills the member and answers 0. */
+/* Snapshot identity, no pid namespace needed.  After the reap NOTHING is signalled: a member whose
+   starttime no longer matches (the shape of a reused pid; here the recorded value is shifted, the
+   processes are real) and a member with its true starttime are both left running and both give a
+   negative answer.  Before 0.0.96 commit 3 the second round killed the member and answered 0. */
 static int check_snapshot_identity(void) {
     int round;
     for (round = 0; round < 2; round++) {
@@ -426,8 +433,8 @@ static int check_snapshot_identity(void) {
         w = waitpid(member, &st, WNOHANG | WUNTRACED);
         if (round == 0)
             ok(w == 0 && res < 0, "snapshot-identity: a member whose starttime changed is not signalled and the answer is negative");
-        else
-            ok(res == 0 && (w == member || (w < 0 && errno == ECHILD)), "snapshot-identity: a member with its true starttime is killed and the answer is 0");
+        else   /* old: true starttime -> killed and 0.  new: reaped root, no signal at all */
+            ok(w == 0 && res < 0, "snapshot-identity: even a member with its true starttime is not signalled after the reap (answer negative)");
         if (w == 0) { sy_kill(member); (void)waitpid(member, &st, 0); }
     }
     return 0;
@@ -476,7 +483,7 @@ static int check_reaped_group_reuse(void) {
     w = waitpid(Y, &st, WNOHANG | WUNTRACED);
     ok(w == 0, "reaped-group-reuse: snapshot entry leaves the bystander neither stopped nor killed");
     if (w == 0 || (w == Y && WIFSTOPPED(st))) { sy_kill(Y); (void)waitpid(Y, &st, 0); }
-    (void)res;
+    ok(res < 0, "reaped-group-reuse: a reaped root answers negative (nothing signalled)");
     return 0;
 }
 

@@ -162,8 +162,8 @@ static void kt_pass(int *n, sy_kt_ent *e, int rg, int root, const int *keep, int
    that is not a job root, or -ENOSYS where there is no /proc. REP gets
    "pid(start) ..." for the survivors, at most CAP bytes. KEEP entries (the
    caller's other live children) are never stopped, killed or swept.
-   When ROOT_REAPED is set, ROOT_START must have been captured before wait.
-   Only the orphan sweep runs, and it excludes ROOT even if the pid is live. */
+   When ROOT_REAPED is set nothing is signalled, ever: the survivors are at most listed and the
+   answer is negative (cleanup unconfirmed).  Only a live root is swept and killed. */
 
 /* The one sweep implementation all three entry points share (plans/proc-lifecycle.md rules
    5,6,7).  ROOT/REAPED/START come from a handle (A), a caller's local triple (B) or a bare pid
@@ -263,11 +263,12 @@ static int rp_unproven(const sy_kt_ent *e, int n, int root, long long rst, const
  * reap.  rp_snapshot() records (pid, starttime) of the root's descendants -- by parent chain, and by
  * group membership when the root leads its own group -- while the root is still unreaped (live or a
  * zombie: a zombie root pins its pid and pgid, so the group number is still the root's).  It sends
- * no signal.  After the reap, rp_kill_tree_snap(reaped=1) signals only snapshot members whose
- * starttime still matches, one pid at a time, re-reading the starttime right before each signal.
- * Residual window: between that last read and the kill(2) the pid could be reused (no pidfd here).
- * An answer of 0 means every snapshot member is gone; processes forked after the snapshot are not
- * covered, so take it as late as the caller can (np_run takes it when the root has exited). */
+ * no signal.  The snapshot is used while the root is still live (rp_sweep seeds its kill list with
+ * the members whose starttime still matches).  After the reap NOTHING is signalled, by any entry:
+ * rp_kill_tree_snap(reaped=1) only lists the surviving members and answers -EPERM (cleanup
+ * unconfirmed).  A starttime recheck followed by kill(2) leaves a pid-reuse window that only a
+ * pidfd closes (plans/proc-lifecycle.md candidate pidfd), so no signal is sent on a reaped root.
+ * Members beyond RP_SNAP_MAX are not truncated: rp_snapshot answers -ENOSPC. */
 enum { RP_SNAP_MAX = 256 };
 typedef struct { int root; long long root_start; int n; sy_kt_ent e[RP_SNAP_MAX]; } rp_snap_t;
 
@@ -335,12 +336,14 @@ static int rp_confirm(const sy_kt_ent *e, int n, int root, int deadline_ms, char
     return packed;
 }
 
-/* The root is reaped (or gone): nothing about it or its group number may be signalled.  Signal the
-   snapshot members only, each after its starttime is re-read; a member whose pid now belongs to
-   another process (starttime differs) is never signalled and answers -EPERM when nothing else lives. */
-static int rp_snap_sweep(const rp_snap_t *s, int deadline_ms, const int *keep, int nkeep, char *rep, int cap) {
+/* The root is reaped (or gone): NOTHING is signalled, by any entry.  After the reap no process can be
+   proven to be the root's orphan (pid reuse, setsid escapes, later siblings), and a signal on that
+   guess hits a bystander.  The snapshot members still alive with their recorded starttime are only
+   listed in REP; the answer is -EPERM, "cleanup unconfirmed", never 0 and never a survivor count.
+   The real fix (a pidfd per member, taken before the reap) is plans/proc-lifecycle.md candidate pidfd. */
+static int rp_snap_report(const rp_snap_t *s, const int *keep, int nkeep, char *rep, int cap) {
     sy_kt_ent e[RP_SNAP_MAX];
-    int n = 0, i, pp = 0, pg = 0, packed, residue;
+    int n = 0, i, pp = 0, pg = 0;
     long long st = 0;
     char stt = 0;
     if (rep && cap > 0) rep[0] = 0;
@@ -349,17 +352,9 @@ static int rp_snap_sweep(const rp_snap_t *s, int deadline_ms, const int *keep, i
         if (pid <= 1 || pid == sy_pid() || kt_kept(keep, nkeep, pid)) continue;
         if (kt_stat(pid, &pp, &pg, &st, &stt) != 0) continue;        /* already gone */
         e[n++] = s->e[i];
-        if (st != s->e[i].start || stt == 'Z' || stt == 'X') continue;
-        sy_signal(pid, sn_lnx_SIGSTOP);                               /* a stopped member cannot fork */
     }
-    for (i = 0; i < n; i++) {
-        if (kt_stat(e[i].pid, &pp, &pg, &st, &stt) != 0) continue;
-        if (st == e[i].start && stt != 'Z' && stt != 'X') sy_signal(e[i].pid, SIGKILL);
-    }
-    packed = rp_confirm(e, n, 0, deadline_ms, rep, cap);
-    residue = packed & 0xffff;
-    if ((packed >> 16) != 0 && residue == 0) return -EPERM;
-    return residue;
+    (void)rp_dispose_list(e, n, rep, cap, 0);   /* lists survivors; only reaps zombie children, no signal */
+    return -EPERM;
 }
 
 /* Live root: freeze, kill, confirm.  SEED (optional) is a snapshot taken earlier: members still
@@ -382,12 +377,12 @@ static int rp_sweep(int root, const rp_snap_t *seed, int deadline_ms, const int 
        visible survivors still count and are killed. */
     { int sub = sy_child_subreaper_get(); sub_ok = (sub == 1); }
     if (kt_stat(root, 0, &rg, &rst, 0) != 0) {
-        /* ENOENT: the root is gone, the caller's "live" claim is stale.  Nothing may be signalled at it.
-           With a snapshot of this root the members can still be swept by identity; without one the
-           orphans are unprovable: -EIO, never a clean 0 (gatekeeper fixture f1). */
+        /* ENOENT: the root is gone, the caller's "live" claim is stale.  Nothing may be signalled.
+           With a snapshot of this root the surviving members are only listed (-EPERM); without one
+           the orphans are unprovable: -EIO, never a clean 0 (gatekeeper fixture f1). */
         if (errno != ENOENT) return -EIO;
         if (!seed || seed->root != root) return -EIO;
-        return rp_snap_sweep(seed, deadline_ms, keep, nkeep, rep, cap);
+        return rp_snap_report(seed, keep, nkeep, rep, cap);
     }
     if (rst <= 0) return -EIO;   /* a zero start is a missing baseline, not "everything is newer" */
     freeze_rounds = deadline_ms / 4;
@@ -439,8 +434,8 @@ int rp_kill_tree(sy_child_t *c, int deadline_ms, const int *keep, int nkeep, cha
 }
 
 /* Entry A with a snapshot: REAPED=0 sweeps the live root and also the snapshot members; REAPED=1
-   (root already reaped) signals the snapshot members by identity and nothing else.  No snapshot of
-   this root, or a zero baseline: -EIO, nothing is signalled. */
+   (root already reaped) lists the surviving snapshot members and signals nothing, answer -EPERM.
+   No snapshot of this root, or a zero baseline: -EIO, nothing is signalled. */
 int rp_kill_tree_snap(int root, int reaped, const rp_snap_t *s, int deadline_ms, const int *keep, int nkeep, char *rep, int cap) {
     if (root <= 1) return -EINVAL;
     if (rep && cap > 0) rep[0] = 0;
@@ -453,7 +448,7 @@ int rp_kill_tree_snap(int root, int reaped, const rp_snap_t *s, int deadline_ms,
         if (reaped) return -EIO;
         return rp_sweep(root, 0, deadline_ms, keep, nkeep, rep, cap);
     }
-    if (reaped) return rp_snap_sweep(s, deadline_ms, keep, nkeep, rep, cap);
+    if (reaped) return rp_snap_report(s, keep, nkeep, rep, cap);
     return rp_sweep(root, s, deadline_ms, keep, nkeep, rep, cap);
 }
 

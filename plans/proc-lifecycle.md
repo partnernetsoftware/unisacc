@@ -160,3 +160,41 @@
   上同样 FAIL,与本次改动无关(未查根因)。
 - 其余检查:check-netpack 17/0、check-process-deadline 0 失败、check-l0-killtree 10/0、check-l0-capture 63/0。
 - 下一步:提交 2(三个新夹具与变异必红,含孤儿不核 starttime 的白盒夹具),提交 3(D3)。
+
+## 六、裁定:(d) 切出 0.0.96;已回收根只报告,不杀(2026-11-23)
+
+- 依据:三轮整改每轮换设计、每轮出新阻塞。结构原因是靠 pid 加 starttime 事后推断身份:根自行退出并被回收后,
+  setsid 逃逸的后代在 /proc 里无从归属,pid 与 pgid 号可被无关进程复用,按号发信号只能猜,猜错即误杀旁人。
+- 0.0.96 交付的安全子集:sy_child_subreaper_get(只读查询);rp_dispose_list 不回收根;rst<=0 返回 -EIO;
+  入口 C 根已消失返回 -EIO;未回收路径 rp_unproven(同父后启动且不在名单的子进程不发信号,答 -EPERM);
+  rp_snapshot 上限溢出返回 -ENOSPC 不截断。
+- 已回收路径(入口 A、B、C 一律)只报告负值、绝不发信号:rp_kill_tree_snap(reaped=1) 只列出仍存活的快照成员,
+  答 -EPERM;无快照入口 -EIO。消费者(np_run、e2stream、releaseexec、releaseprepare)见负值一律报
+  "cleanup unconfirmed",不回退到裸 kill(-pid)(main 上 releaseprepare 曾如此,误杀在消费者侧会原样复活)。
+- 断言改写(总数 36 -> 38,只增不减):
+  - reaped-root:旧"孤儿被杀且 res==0";新"res<0 且孤儿未被发信号"(另加"从不报干净"一条)。理由:回收后无法证实归属。
+  - snapshot-identity 第二轮:旧"真实 starttime 的成员被杀且 0";新"同样不发信号,答负值"。理由:starttime 复核与
+    kill(2) 之间仍有 pid 复用窗口,只有 pidfd 能关。
+  - np_run "orphan holding stdout":旧"被清理且 residue==0";新"residue<0、孤儿存活、文案含 cleanup unconfirmed"
+    (这一条同时是消费者夹具:根已回收、持管道同组孤儿)。
+  - reaped-group-reuse:新增答负值断言。
+- 快照实现(d0bfc5852f)作为方案底稿保留在分支历史,补丁 ~/.claude/jobs/omp1/tmp/snapshot-design-v0.0.96.patch。
+
+## 七、候选:pidfd 方案(真正解决已回收根的孤儿清理)
+
+- 要点:回收前对组与后代各取 pidfd 快照,事后按 pidfd 发信号(免 pid 复用、免 TOCTOU)。pidfd 指向具体进程,
+  进程退出后信号发不出去,不会落到复用 pid 的旁人身上。
+- 根自行退出的形态:调用方必须在 fork 之前先设 subreaper(sy_child_subreaper),使孤儿成为自己的子进程,从而可证;
+  没有 subreaper 时逃逸孤儿被 init 收养,仍不可证,答负值。
+- L0 平台层新增封装:pidfd_open、pidfd_send_signal、waitid(P_PIDFD)(cx/sys 下,上层不写 __syscallN)。消费侧
+  是 ext/sysx/processcore.cx 与 reaper.cx。
+- 仓内先例:tools/cxlib/chainrunproc.cx 已按"每个后代持 pidfd 加 starttime"做身份(cr_add 里 __syscall6(434,...),
+  那是 tools 内直调,迁移时收进 L0 封装)。
+- 核对结果(ext/sysx/linuxns.cx:102、372):沙箱 seccomp 是 denylist,deny_list 含 pidfd_open 与 pidfd_getfd
+  (被拒);pidfd_send_signal 不在表里,默认放行。所以沙箱内的进程取不到 pidfd:pidfd 方案在沙箱内必须
+  走"未证实"路径,或沙箱表为清理者单独放行 pidfd_open。该项需单独决定,不得默认放开。
+- 风险与边界:(1) 枚举后代到 pidfd_open 之间仍有窗口,打开后必须复核 starttime,不符则关掉不用;(2) fd 数量有上限,
+  溢出返回负值不截断;(3) 快照之后新 fork 的后代只有 subreaper 兜得住;(4) 其余五目标无 pidfd,走表并明确返回
+  "未证实"(不是干净)。
+- 验收设想:根自行退出且被回收后,按 pidfd 杀掉 setsid 逃逸孤儿且答 0;pid 号被复用的旁人不受影响(a1 夹具);
+  沙箱内 pidfd_open 被拒时答负值。
