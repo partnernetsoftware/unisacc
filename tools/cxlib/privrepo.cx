@@ -1,0 +1,190 @@
+#pragma unisa module privrepo
+/* privrepo -- private scratch repositories for tools, and the one way to run git in them.
+ *
+ *   int pr_make(char *out, long cap)
+ *     creates a fresh directory sy_tmpdir()/unisacc-privrepo-XXXXXXXX, runs `git init` in it, marks it
+ *     (.git/unisacc-privrepo) and writes its canonical path to OUT.  0, or -1 (nothing usable is left in OUT).
+ *
+ *   int pr_git(const char *dir, char *const args[], char *out, long cap, int secs)
+ *     runs `git -C DIR ARGS...` (ARGS is a 0-terminated vector without the leading "git") and
+ *     captures stdout then stderr into OUT (may be 0).  Returns git's exit code (0..255), -1 when
+ *     git could not run or timed out, -2 when the call is refused (nothing was run, OUT holds the reason).
+ *
+ * A call is refused unless ALL of these hold:
+ *   (1) DIR is a canonical absolute path (no symlink, ".." or "." component) directly below the canonical
+ *       sy_tmpdir() and named unisacc-privrepo-*;
+ *   (2) DIR/.git is a real directory holding the marker file pr_make wrote (a repository is private because
+ *       this module made it, not because of where the caller happens to stand);
+ *   (3) git sees DIR as the top level of a repository whose common git directory is DIR/.git;
+ *   (4) that repository is not the repository of the caller's working directory (an extra gate: a probe of
+ *       the working directory that fails for any reason except "not a git repository" refuses);
+ *   (5) ARGS carries no repository-redirecting global option (-C, --git-dir, --work-tree, --namespace,
+ *       --super-prefix, --exec-path) before the sub-command.
+ * Every git process runs under `env -u` for every repository-locating variable (GIT_DIR, GIT_WORK_TREE,
+ * GIT_INDEX_FILE, GIT_OBJECT_DIRECTORY, GIT_COMMON_DIR, ...; the list of `git rev-parse --local-env-vars`
+ * plus GIT_NAMESPACE, GIT_QUARANTINE_PATH and GIT_CONFIG_COUNT) with LC_ALL=C, so a caller that runs inside a
+ * git hook (git exports GIT_INDEX_FILE there) cannot have its scratch work land in the outer repository.
+ * No shell is involved.
+ *
+ * Check: tools/check-privrepo.cx. */
+#pragma unisa use sysx.process
+#pragma unisa use sys.fs
+#pragma unisa use sys.env
+#pragma unisa use text.text
+#pragma unisa use mem.bytes
+
+#define PR_MAXARGS 40
+#define PR_MARK "privrepo-v1\n"
+
+static const char *PR_ENV[] = {
+    "GIT_ALTERNATE_OBJECT_DIRECTORIES", "GIT_CONFIG", "GIT_CONFIG_PARAMETERS", "GIT_CONFIG_COUNT", "GIT_OBJECT_DIRECTORY", "GIT_DIR",
+    "GIT_WORK_TREE", "GIT_IMPLICIT_WORK_TREE", "GIT_GRAFT_FILE", "GIT_INDEX_FILE", "GIT_NO_REPLACE_OBJECTS", "GIT_REPLACE_REF_BASE",
+    "GIT_PREFIX", "GIT_SHALLOW_FILE", "GIT_COMMON_DIR", "GIT_NAMESPACE", "GIT_QUARANTINE_PATH", "GIT_INTERNAL_SUPER_PREFIX", 0
+};
+
+/* the shell prefix "env -u VAR -u VAR ... " (with a trailing blank) that clears every repository-locating variable, for a tool that reads a
+   source repository through a shell command: inside a git hook those variables point at the outer repository.  0, or -1 when DST is too small. */
+int pr_envu(char *dst, int cap) {
+    int k = 0, i;
+    for (i = 0; i == 0 || PR_ENV[i - 1]; i++) {
+        const char *w = i == 0 ? "env" : PR_ENV[i - 1]; int n = (int)strlen(w);
+        if (k + n + 5 >= cap) return -1;
+        if (i) { dst[k++] = '-'; dst[k++] = 'u'; dst[k++] = ' '; }
+        if (mm_copy(dst + k, (long)(cap - k), w, (long)n) != 0) return -1;
+        k += n; dst[k++] = ' ';
+    }
+    dst[k] = 0;
+    return 0;
+}
+
+/* run `git ARGV...` (ARGV[0] is "git") under env -u of every repository-locating variable; combined stdout+stderr into OUT.
+   Returns the exit code, or -1 when it could not run. */
+static int pr_exec(char *const gitv[], char *out, long cap, int secs) {
+    char *av[2 * 20 + 2 * PR_MAXARGS + 16]; char *envadd[2]; int k = 0, i;
+    np_result r; char why[256]; int rc, n;
+    if (out && cap > 0) out[0] = 0;
+    av[k++] = "env";
+    for (i = 0; PR_ENV[i]; i++) { av[k++] = "-u"; av[k++] = (char *)PR_ENV[i]; }
+    for (i = 0; gitv[i]; i++) { if (k >= (int)(sizeof av / sizeof av[0]) - 1) return -1; av[k++] = gitv[i]; }
+    av[k] = 0;
+    envadd[0] = "LC_ALL=C"; envadd[1] = 0;
+    if (np_run(av, 0, envadd, secs, &r, why, sizeof why) != 0) { if (out && cap > 0) cx_fmt(out, (int)cap, "%s", why); return -1; }
+    if (out && cap > 0) {
+        long a = (long)r.outn < cap - 1 ? (long)r.outn : cap - 1, b;
+        if (a > 0 && mm_copy(out, cap, r.out, a) != 0) a = 0;
+        b = (long)r.errn < cap - 1 - a ? (long)r.errn : cap - 1 - a;
+        if (b > 0 && mm_copy(out + a, cap - a, r.err, b) != 0) b = 0;
+        n = (int)(a + b); out[n] = 0;
+    }
+    rc = r.rc; np_free(&r);
+    return rc;
+}
+
+/* the canonical absolute path printed by `git -C DIR rev-parse FLAG` (a path flag); 0, or -1 */
+static int pr_path(const char *dir, const char *flag, char *dst, int cap) {
+    char buf[4400], *av[8]; int rc, n;
+    av[0] = "git"; av[1] = "-C"; av[2] = (char *)dir; av[3] = "rev-parse"; av[4] = "--path-format=absolute"; av[5] = (char *)flag; av[6] = 0;
+    rc = pr_exec(av, buf, sizeof buf, 20);
+    if (rc != 0) return -1;
+    for (n = 0; buf[n] && buf[n] != '\n'; n++) {}
+    buf[n] = 0;
+    if (n == 0 || buf[0] != '/') return -1;
+    return sy_realpath(buf, dst, cap) > 0 ? 0 : -1;
+}
+
+static int pr_refuse(char *out, long cap, const char *why, const char *dir) {
+    if (out && cap > 0) cx_fmt(out, (int)cap, "privrepo: refused %s: %s", why, dir ? dir : "");
+    return -2;
+}
+
+/* the common git directory of the caller's working directory: 0 found (DST), 1 none (not a git repository), -1 the probe itself failed */
+static int pr_cwd_common(char *dst, int cap) {
+    char buf[4400], *av[8]; int rc, n;
+    av[0] = "git"; av[1] = "-C"; av[2] = "."; av[3] = "rev-parse"; av[4] = "--path-format=absolute"; av[5] = "--git-common-dir"; av[6] = 0;
+    rc = pr_exec(av, buf, sizeof buf, 20);
+    if (rc == 0) {
+        for (n = 0; buf[n] && buf[n] != '\n'; n++) {}
+        buf[n] = 0;
+        if (n == 0 || buf[0] != '/') return -1;
+        return sy_realpath(buf, dst, cap) > 0 ? 0 : -1;
+    }
+    if (rc == 128 && strstr(buf, "not a git repository") != 0) return 1;
+    return -1;
+}
+
+static int pr_marked(const char *dir) {
+    char mp[4200], gp[4200], canon[4200]; size_t n = 0; char *b; int ok;
+    if (cx_fmt(gp, sizeof gp, "%s/.git", dir)) return 0;
+    /* kept as defence in depth: the common-dir == DIR/.git test in pr_gate also rejects every input this line rejects (an equivalent mutant);
+       if that test is ever changed, add a case that only this line refuses */
+    if (sy_realpath(gp, canon, (int)sizeof canon) <= 0 || strcmp(canon, gp) != 0) return 0;   /* .git is a real directory, not a link or a file */
+    if (cx_fmt(mp, sizeof mp, "%s/.git/unisacc-privrepo", dir)) return 0;
+    b = cx_read(mp, &n);
+    if (!b) return 0;
+    ok = n == strlen(PR_MARK) && memcmp(b, PR_MARK, n) == 0;
+    free(b);
+    return ok;
+}
+
+/* 0 when DIR passes conditions (1)-(4), else -2 with the reason in WHY */
+static int pr_gate(const char *dir, char *why, long cap) {
+    char canon[4096], tmpc[4096], pre[4200], top[4096], common[4096], want[4200], cwdc[4096]; int cr;
+    if (!dir || dir[0] != '/') return pr_refuse(why, cap, "not an absolute path", dir);
+    if (sy_realpath(dir, canon, (int)sizeof canon) <= 0 || strcmp(canon, dir) != 0) return pr_refuse(why, cap, "not a canonical path (missing, symlink or dot component)", dir);
+    if (sy_realpath(sy_tmpdir(), tmpc, (int)sizeof tmpc) <= 0) return pr_refuse(why, cap, "temp directory unreadable", dir);
+    if (cx_fmt(pre, sizeof pre, "%s/unisacc-privrepo-", tmpc) || strncmp(canon, pre, strlen(pre)) != 0 || strchr(canon + strlen(pre), '/') != 0)
+        return pr_refuse(why, cap, "not a unisacc-privrepo-* directory directly below the temp directory", dir);
+    if (!pr_marked(canon)) return pr_refuse(why, cap, "no privrepo marker (not made by pr_make)", dir);
+    if (pr_path(dir, "--show-toplevel", top, (int)sizeof top) != 0) return pr_refuse(why, cap, "not a git working tree", dir);
+    /* kept as defence in depth: the common-dir == DIR/.git test two lines down also rejects every directory this line rejects (an equivalent
+       mutant); if that test is ever changed, add a case that only this line refuses */
+    if (strcmp(top, canon) != 0) return pr_refuse(why, cap, "not the top level of its own repository", dir);
+    if (pr_path(dir, "--git-common-dir", common, (int)sizeof common) != 0) return pr_refuse(why, cap, "git common directory unreadable", dir);
+    if (cx_fmt(want, sizeof want, "%s/.git", canon) || strcmp(common, want) != 0) return pr_refuse(why, cap, "git common directory is not its own .git", dir);
+    cr = pr_cwd_common(cwdc, (int)sizeof cwdc);
+    if (cr < 0) return pr_refuse(why, cap, "the working directory's repository could not be determined", dir);
+    if (cr == 0 && strcmp(cwdc, common) == 0) return pr_refuse(why, cap, "its git directory is the working directory's repository", dir);
+    return 0;
+}
+
+/* conditions (5): no repository-redirecting global option before the sub-command */
+static int pr_args_ok(char *const args[]) {
+    int i;
+    for (i = 0; args && args[i] && args[i][0] == '-'; i++) {
+        const char *a = args[i];
+        if (!strcmp(a, "-c")) {   /* only the identity of a commit may be set this way; -c core.worktree= and the like redirect git */
+            const char *kv = args[i + 1];
+            if (!kv || !((!strncmp(kv, "user.name=", 10)) || !strncmp(kv, "user.email=", 11))) return 0;
+            i++; continue;
+        }
+        if (!strncmp(a, "-C", 2) || !strncmp(a, "--git-dir", 9) || !strncmp(a, "--work-tree", 11) || !strncmp(a, "--namespace", 11) ||
+            !strncmp(a, "--super-prefix", 14) || !strncmp(a, "--exec-path", 11)) return 0;
+    }
+    return 1;
+}
+
+int pr_make(char *out, long cap) {
+    char path[4096], canon[4096], mp[4200], *av[8]; int rc;
+    if (out && cap > 0) out[0] = 0;
+    if (!out || cap < 2) return -1;
+    if (sy_mkdtemp(sy_tmpdir(), "unisacc-privrepo-", path, (int)sizeof path) != 0) return -1;
+    if (sy_realpath(path, canon, (int)sizeof canon) <= 0) return -1;
+    av[0] = "git"; av[1] = "-C"; av[2] = canon; av[3] = "init"; av[4] = "-q"; av[5] = 0;
+    rc = pr_exec(av, 0, 0, 20);
+    if (rc != 0) return -1;
+    if (cx_fmt(mp, sizeof mp, "%s/.git/unisacc-privrepo", canon) || sy_write_file(mp, PR_MARK, (int64_t)strlen(PR_MARK), 0600) != 0) return -1;
+    if (pr_gate(canon, 0, 0) != 0) return -1;
+    if (mm_copy(out, cap, canon, (long)strlen(canon) + 1) != 0) return -1;
+    return 0;
+}
+
+int pr_git(const char *dir, char *const args[], char *out, long cap, int secs) {
+    char *av[PR_MAXARGS + 4]; int k = 0, i;
+    if (out && cap > 0) out[0] = 0;
+    if (pr_gate(dir, out, cap) != 0) return -2;
+    if (!pr_args_ok(args)) return pr_refuse(out, cap, "a global option that redirects the repository", dir);
+    av[k++] = "git"; av[k++] = "-C"; av[k++] = (char *)dir;
+    for (i = 0; args && args[i]; i++) { if (i >= PR_MAXARGS) return pr_refuse(out, cap, "too many arguments", dir); av[k++] = args[i]; }
+    av[k] = 0;
+    return pr_exec(av, out, cap, secs);
+}

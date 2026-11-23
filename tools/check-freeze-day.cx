@@ -115,11 +115,12 @@ int main(void) {
         head_tree);
     const char *rd_mis_body =
         "#!/bin/sh\n"
+        "printf 'FR_ITEM\\tdevsvc-freeze\\tok\\tall-three=PASS\\tdone\\tcc\\t-\\t-\\tPASS\\n'\n"
         "printf 'FR_ITEM\\tmerge-s0-tree\\tpass\\ttree=deadbeef1234\\tdone\\tcc\\t-\\t-\\tPASS\\n'\n"
         "printf 'FREEZE_READINESS\\tready=yes\\tblockers=0\\n'\n";
     const char *rd_fail_body =
         "#!/bin/sh\n"
-        "printf 'FR_ITEM\\tdevsvc-freeze\\tfail\\tno-lock\\topen\\tcc\\t-\\t-\\tFAIL\\n'\n"
+        "printf 'FR_ITEM\\tdevsvc-freeze\\tfail\\tdevsvc-freeze-scope=FAIL\\topen\\tcc\\t-\\t-\\tFAIL\\n'\n"
         "printf 'FR_ITEM\\tdirty-freeze-domain\\tfail\\tdirty\\topen\\tcc\\t-\\t-\\tFAIL\\n'\n"
         "printf 'FR_ITEM\\tverseq\\tfail\\tdrift\\topen\\tcc\\t-\\t-\\tFAIL\\n'\n"
         "printf 'FR_ITEM\\trelease-prep-notes\\tfail\\ttbd\\topen\\tcc\\t-\\t-\\tFAIL\\n'\n"
@@ -164,12 +165,13 @@ int main(void) {
        p6 < p7 && p7 < p8 && p8 < p9 && p9 < p10 && p10 < p11 && p11 < p12,
        "plan-new-steps-order");
 
-    /* (4) S3-run parameters, load guard, l0-posix2 and expected-unmeasured.tsv */
+    /* (4) S3-run knobs + S9 --timeout-ms 300000 and --from-step 3 resume note (M5/M6) */
     ck(has(&r, "--normal-jobs 8 --window-lanes 3") && has(&r, "--max-jobs 8 --window-lanes 3") &&
        has(&r, "load1<8") && has(&r, "load1>12") && has(&r, "l0-posix2") && has(&r, "expected-unmeasured.tsv") &&
        !has(&r, "--only 1-rev,2-worktree") && has(&r, "bg-candidate.cx -- start --rev ") &&
-       has(&r, "merge --in-dir ") && has(&r, "devsvc.cx -- x --bg --par 1 -- "),
-       "plan-s3-run-knobs-and-judge");
+       has(&r, "merge --in-dir ") && has(&r, "devsvc.cx -- x --bg --par 1 --timeout-ms 300000 -- ") &&
+       has(&r, "--from-step 3"),
+       "plan-s9-timeout-ms-and-from-step");
     np_free(&r);
 
     /* (4b) plan --selfcheck covers all target tools and real chain-ready --only prefixes with 0 failures */
@@ -226,6 +228,33 @@ int main(void) {
        has(&r, "id=S1-light\twho=integrator\tbudget_s=45\tgate=BLOCKED\treason=verseq") &&
        has(&r, "id=S3c\twho=docs\tbudget_s=600\tgate=BLOCKED\treason=release-prep-notes"),
        "plan-readiness-blocks-exact-steps");
+    np_free(&r);
+
+    /* Feed S0-lock a real readiness verdict from the latest shard rows. */
+    char live_rd[1024], live_items[1024], live_times[1024], live_body[4096];
+    if (cx_fmt(live_rd, sizeof live_rd, "%s/rd-live.sh", dir) ||
+        cx_fmt(live_items, sizeof live_items, "%s/rd-items.tsv", dir) ||
+        cx_fmt(live_times, sizeof live_times, "%s/rd-times.tsv", dir) ||
+        cx_fmt(live_body, sizeof live_body,
+            "#!/bin/sh\nexec sh '%s/unisacc.com' '%s/tools/freeze-readiness.cx' -- \"$@\" "
+            "--only devsvc-freeze --items '%s' --batch-times '%s'\n",
+            g_root, g_root, live_items, live_times)) return 2;
+    const char *live_item = "devsvc-freeze\tfreeze\tcc\tdone\t-\t0\n";
+    const char *live_rows = "1\tdevsvc-freeze\tPASS\n1\tdevsvc-freeze-owner\tPASS\n1\tdevsvc-freeze-scope\tFAIL\n";
+    if (sy_write_file(live_rd, live_body, tx_len(live_body, sizeof live_body), 0700) ||
+        sy_write_file(live_items, live_item, tx_len(live_item, 128), 0600) ||
+        sy_write_file(live_times, live_rows, tx_len(live_rows, 128), 0600) ||
+        cx_fmt(args, sizeof args, "plan --version 9.9.9 --branch v9.9.9 --repo '%s' --owner integ --readiness-bin '%s'", repo, live_rd)) return 2;
+    rc = run_fd(args, &r);
+    ck(rc == 0 && has(&r, "readiness_ready=no\treadiness_blockers=1") &&
+       has(&r, "id=S0-lock\twho=integrator\tbudget_s=60\tgate=BLOCKED\treason=devsvc-freeze"),
+       "plan-live-scope-failure-blocks-lock");
+    np_free(&r);
+    if (sy_write_file(live_times, "", 0, 0600)) return 2;
+    rc = run_fd(args, &r);
+    ck(rc == 0 && has(&r, "readiness_ready=no\treadiness_blockers=1") &&
+       has(&r, "id=S0-lock\twho=integrator\tbudget_s=60\tgate=BLOCKED\treason=devsvc-freeze"),
+       "plan-live-empty-evidence-blocks-lock");
     np_free(&r);
 
     /* (7) Missing branch and missing notes template */

@@ -1,0 +1,499 @@
+/* chain-gen1-smoke.cx -- off-chain bypass check once gen1/lnx-x86_64/candidate + compiler.bootstrap.pkg land.
+ *
+ * Usage:
+ *   sh ./unisacc.com tools/chain-gen1-smoke.cx -- --chain-dir DIR --root ROOT --out DIR
+ *       [--par N (1..16, default 8)] [--wait-s S (0..3600, default 900)] [--max-polls N (1..1800, default 180)]
+ *       [--total-s S (10..3600, default 600)] [--shard-from A] [--shard-to B] [--no-diff] [--dry-shards]
+ *
+ * Note: obj_same/obj_diff are informational only (diff_info_only=1) and do not fail the run.
+ * Exit: 0 GREEN, 1 RED (never auto-cancels; prints pgid from owner.tsv and first error line), 2 usage/timeout/infra.
+ */
+#pragma unisa use sys.fs
+#pragma unisa use text.text
+long time(long *);
+
+static int gs_die2(const char *msg) {
+    printf("GEN1_SMOKE\tERROR\tmsg=%s\n", msg);
+    return 2;
+}
+
+static int gs_parse_int(const char *s, int lo, int hi, int *out) {
+    long v;
+    char *end;
+    if (!s || !s[0]) return 0;
+    v = strtol(s, &end, 10);
+    if (*end != 0 || v < lo || v > hi) return 0;
+    *out = (int)v;
+    return 1;
+}
+
+static int gs_nonempty_file(const char *p) {
+    struct stat st;
+    return stat(p, &st) == 0 && S_ISREG(st.st_mode) && st.st_size > 0;
+}
+
+static int gs_dir_exists(const char *p) {
+    struct stat st;
+    return stat(p, &st) == 0 && S_ISDIR(st.st_mode);
+}
+
+static void gs_mkdir_p(const char *p) {
+    char cmd[4400];
+    if (cx_fmt(cmd, sizeof cmd, "mkdir -p \"%s\"", p) != 0) return;
+    system(cmd);
+}
+
+static char *gs_read_all(const char *p, size_t *out_n) {
+    FILE *f;
+    long sz;
+    char *b;
+    size_t nr;
+    *out_n = 0;
+    f = fopen(p, "rb");
+    if (!f) return 0;
+    if (fseek(f, 0, SEEK_END) != 0) { fclose(f); return 0; }
+    sz = ftell(f);
+    if (sz < 0 || fseek(f, 0, SEEK_SET) != 0) { fclose(f); return 0; }
+    b = (char *)malloc((size_t)sz + 1);
+    if (!b) { fclose(f); return 0; }
+    nr = sz > 0 ? fread(b, 1, (size_t)sz, f) : 0;
+    fclose(f);
+    b[nr] = 0;
+    *out_n = nr;
+    return b;
+}
+
+static int gs_read_pgid(const char *chain_dir) {
+    char p[4096];
+    char *buf;
+    size_t n;
+    int pgid;
+    size_t i;
+    pgid = -1;
+    if (cx_fmt(p, sizeof p, "%s/owner.tsv", chain_dir) != 0) return -1;
+    buf = gs_read_all(p, &n);
+    if (!buf) return -1;
+    i = 0;
+    while (i < n) {
+        size_t e;
+        e = i;
+        while (e < n && buf[e] != '\n') e++;
+        if (e - i >= 6 && memcmp(buf + i, "OWNER\t", 6) == 0) {
+            size_t k;
+            k = i;
+            while (k + 5 < e) {
+                if (memcmp(buf + k, "pgid=", 5) == 0) {
+                    int v;
+                    v = atoi(buf + k + 5);
+                    if (v > 0) pgid = v;
+                    break;
+                }
+                k++;
+            }
+        }
+        i = e + 1;
+    }
+    free(buf);
+    return pgid;
+}
+
+static void gs_first_line(const char *path, char *out, size_t cap) {
+    char *buf;
+    size_t n;
+    size_t i;
+    size_t w;
+    out[0] = '-';
+    out[1] = 0;
+    buf = gs_read_all(path, &n);
+    if (!buf) return;
+    i = 0;
+    while (i < n && (buf[i] == '\n' || buf[i] == '\r')) i++;
+    w = 0;
+    while (i < n && buf[i] != '\n' && buf[i] != '\r' && w + 1 < cap) {
+        char c;
+        c = buf[i];
+        out[w++] = (c == '\t') ? ' ' : c;
+        i++;
+    }
+    if (w > 0) out[w] = 0;
+    free(buf);
+}
+
+static void gs_first_fail_line(const char *path, char *out, size_t cap) {
+    char *buf;
+    size_t n;
+    size_t i;
+    buf = gs_read_all(path, &n);
+    if (buf) {
+        i = 0;
+        while (i < n) {
+            size_t e;
+            e = i;
+            while (e < n && buf[e] != '\n' && buf[e] != '\r') e++;
+            if (e - i >= 5 && memcmp(buf + i, "FAIL\t", 5) == 0) {
+                size_t w;
+                size_t k;
+                w = 0;
+                k = i;
+                while (k < e && w + 1 < cap) {
+                    out[w++] = (buf[k] == '\t') ? ' ' : buf[k];
+                    k++;
+                }
+                out[w] = 0;
+                free(buf);
+                return;
+            }
+            i = e;
+            while (i < n && (buf[i] == '\n' || buf[i] == '\r')) i++;
+        }
+        free(buf);
+    }
+    gs_first_line(path, out, cap);
+}
+
+static int gs_run_capture(const char *cmd, const char *log_path) {
+    char full[8192];
+    int rc;
+    if (cx_fmt(full, sizeof full, "%s >\"%s\" 2>&1", cmd, log_path) != 0) return 2;
+    rc = system(full);
+    if (WIFEXITED(rc)) return WEXITSTATUS(rc);
+    return 2;
+}
+
+static int gs_query_shards(const char *root, const char *tmp_log) {
+    char cmd[4400];
+    char *buf;
+    size_t n;
+    int v;
+    if (cx_fmt(cmd, sizeof cmd, "sh ./unisacc.com tests/tools-compile.cx -- --shards \"%s\" >\"%s\" 2>&1", root, tmp_log) != 0) return -1;
+    if (system(cmd) != 0) return -1;
+    buf = gs_read_all(tmp_log, &n);
+    if (!buf) return -1;
+    v = atoi(buf);
+    free(buf);
+    return v > 0 ? v : -1;
+}
+
+static int gs_compare_shard_objs(const char *old_dir, const char *new_dir, int *same_c, int *diff_c) {
+    DIR *d;
+    struct dirent *de;
+    d = opendir(new_dir);
+    if (!d) return 0;
+    while ((de = readdir(d)) != 0) {
+        size_t len;
+        char pa[4096];
+        char pb[4096];
+        char *ba;
+        char *bb;
+        size_t na;
+        size_t nb;
+        len = strlen(de->d_name);
+        if (len < 3 || strcmp(de->d_name + len - 2, ".o") != 0) continue;
+        if (cx_fmt(pa, sizeof pa, "%s/%s", old_dir, de->d_name) != 0) continue;
+        if (cx_fmt(pb, sizeof pb, "%s/%s", new_dir, de->d_name) != 0) continue;
+        ba = gs_read_all(pa, &na);
+        bb = gs_read_all(pb, &nb);
+        if (ba && bb && na == nb && memcmp(ba, bb, na) == 0) (*same_c)++;
+        else (*diff_c)++;
+        if (ba) free(ba);
+        if (bb) free(bb);
+    }
+    closedir(d);
+    return 0;
+}
+
+int main(int argc, char **argv) {
+    const char *chain_dir;
+    const char *root;
+    const char *out_dir;
+    int par;
+    int wait_s;
+    int max_polls;
+    int total_s;
+    int shard_from;
+    int shard_to;
+    int no_diff;
+    int dry_shards;
+    int i;
+    char cand[4096];
+    char pkg[4096];
+    int pgid;
+    long long start_s;
+    long long run_start_s;
+    int polls;
+    int has_cand;
+    int has_pkg;
+    char log_p[4096];
+    char err_line[256];
+    int nshards;
+    int same_c;
+    int diff_c;
+    int failed_shards;
+    int infra_shards;
+    int old_fail;
+    int first_fail_shard;
+    int first_infra_shard;
+    char first_fail_err[256];
+    char first_infra_err[256];
+
+    chain_dir = 0;
+    root = 0;
+    out_dir = 0;
+    par = 8;
+    wait_s = 900;
+    max_polls = 180;
+    total_s = 600;
+    shard_from = -1;
+    shard_to = -1;
+    no_diff = 0;
+    dry_shards = 0;
+
+    i = 1;
+    while (i < argc) {
+        if (strcmp(argv[i], "--chain-dir") == 0 && i + 1 < argc) { chain_dir = argv[++i]; }
+        else if (strcmp(argv[i], "--root") == 0 && i + 1 < argc) { root = argv[++i]; }
+        else if (strcmp(argv[i], "--out") == 0 && i + 1 < argc) { out_dir = argv[++i]; }
+        else if (strcmp(argv[i], "--par") == 0 && i + 1 < argc) {
+            if (!gs_parse_int(argv[++i], 1, 16, &par)) return gs_die2("bad --par");
+        }
+        else if (strcmp(argv[i], "--wait-s") == 0 && i + 1 < argc) {
+            if (!gs_parse_int(argv[++i], 0, 3600, &wait_s)) return gs_die2("bad --wait-s");
+        }
+        else if (strcmp(argv[i], "--max-polls") == 0 && i + 1 < argc) {
+            if (!gs_parse_int(argv[++i], 1, 1800, &max_polls)) return gs_die2("bad --max-polls");
+        }
+        else if (strcmp(argv[i], "--total-s") == 0 && i + 1 < argc) {
+            if (!gs_parse_int(argv[++i], 10, 3600, &total_s)) return gs_die2("bad --total-s");
+        }
+        else if (strcmp(argv[i], "--shard-from") == 0 && i + 1 < argc) {
+            if (!gs_parse_int(argv[++i], 0, 10000, &shard_from)) return gs_die2("bad --shard-from");
+        }
+        else if (strcmp(argv[i], "--shard-to") == 0 && i + 1 < argc) {
+            if (!gs_parse_int(argv[++i], 0, 10000, &shard_to)) return gs_die2("bad --shard-to");
+        }
+        else if (strcmp(argv[i], "--no-diff") == 0) { no_diff = 1; }
+        else if (strcmp(argv[i], "--dry-shards") == 0) { dry_shards = 1; }
+        else return gs_die2("unknown arg");
+        i++;
+    }
+
+    if (!chain_dir || !root || !out_dir) return gs_die2("missing --chain-dir/--root/--out");
+    if (!gs_nonempty_file("./unisacc.com")) return gs_die2("cwd missing ./unisacc.com");
+    if (!gs_dir_exists(chain_dir)) return gs_die2("missing chain-dir");
+    if (!gs_dir_exists(root)) return gs_die2("missing root");
+
+    gs_mkdir_p(out_dir);
+    pgid = gs_read_pgid(chain_dir);
+
+    if (cx_fmt(log_p, sizeof log_p, "%s/shards.txt", out_dir) != 0) return gs_die2("path");
+    nshards = gs_query_shards(root, log_p);
+    if (nshards <= 0) return gs_die2("failed to query shards");
+    if (dry_shards) {
+        printf("GEN1_SMOKE\tSHARDS\ttotal_shards=%d\tpgid=%d\n", nshards, pgid);
+        return 0;
+    }
+
+    if (cx_fmt(cand, sizeof cand, "%s/gen1/lnx-x86_64/candidate", chain_dir) != 0) return gs_die2("path");
+    if (cx_fmt(pkg, sizeof pkg, "%s/compiler.bootstrap.pkg", chain_dir) != 0) return gs_die2("path");
+
+    start_s = ((long long)time(0));
+    polls = 0;
+    has_cand = 0;
+    has_pkg = 0;
+    while (polls < max_polls) {
+        has_cand = gs_nonempty_file(cand);
+        has_pkg = gs_nonempty_file(pkg);
+        if (has_cand && has_pkg) break;
+        polls++;
+        if (polls >= max_polls) break;
+        if (((long long)time(0)) - start_s >= wait_s) break;
+        sleep(5);
+    }
+    if (!has_cand || !has_pkg) {
+        const char *miss;
+        if (!has_cand && !has_pkg) miss = "candidate,pkg";
+        else if (!has_cand) miss = "candidate";
+        else miss = "pkg";
+        printf("GEN1_SMOKE\tTIMEOUT\tmissing=%s\tpgid=%d\tpolls=%d\twait_s=%d\n", miss, pgid, polls, wait_s);
+        return 2;
+    }
+
+    /* Quick single-file FFI + label-local smoke; missing source is an infra error (rc=2). */
+    {
+        const char *cases[2];
+        int c;
+        cases[0] = "tests/cases/win-ffi-strdup.c";
+        cases[1] = "tests/cases/v098-fwdmerge-label-local.c";
+        c = 0;
+        while (c < 2) {
+            char src[4096];
+            char bin[4096];
+            char cmd[8192];
+            int rc;
+            if (cx_fmt(src, sizeof src, "%s/%s", root, cases[c]) != 0) return gs_die2("path");
+            if (!gs_nonempty_file(src)) {
+                printf("GEN1_SMOKE\tINFRA\treason=missing-smoke-source\tcase=%s\tpgid=%d\n", cases[c], pgid);
+                return 2;
+            }
+            if (cx_fmt(bin, sizeof bin, "%s/case_%d.bin", out_dir, c) != 0) return gs_die2("path");
+            if (cx_fmt(log_p, sizeof log_p, "%s/case_%d.log", out_dir, c) != 0) return gs_die2("path");
+            if (cx_fmt(cmd, sizeof cmd, "timeout 60 \"%s\" --models \"%s\" -b lnx/x86_64 -o \"%s\" \"%s\"", cand, pkg, bin, src) != 0) return gs_die2("cmd");
+            rc = gs_run_capture(cmd, log_p);
+            if (rc != 0) {
+                gs_first_line(log_p, err_line, sizeof err_line);
+                printf("GEN1_SMOKE\tRED\tcase=%s\tpgid=%d\terr=%s\n", cases[c], pgid, err_line);
+                return 1;
+            }
+            c++;
+        }
+    }
+
+    if (shard_from < 0) shard_from = 0;
+    if (shard_to < 0) shard_to = nshards - 1;
+    if (shard_from > shard_to || shard_to >= nshards) return gs_die2("bad shard range");
+
+    same_c = 0;
+    diff_c = 0;
+    failed_shards = 0;
+    infra_shards = 0;
+    old_fail = 0;
+    first_fail_shard = -1;
+    first_infra_shard = -1;
+    first_fail_err[0] = 0;
+    first_infra_err[0] = 0;
+    run_start_s = ((long long)time(0));
+
+    {
+        int cur;
+        int active;
+        int pids[16];
+        int pshard[16];
+        int k;
+        k = 0;
+        while (k < 16) { pids[k] = -1; pshard[k] = -1; k++; }
+        cur = shard_from;
+        active = 0;
+        while ((cur <= shard_to && ((long long)time(0)) - run_start_s < total_s) || active > 0) {
+            while (cur <= shard_to && active < par && ((long long)time(0)) - run_start_s < total_s) {
+                int slot;
+                int pid;
+                slot = 0;
+                while (slot < par && pids[slot] > 0) slot++;
+                pid = fork();
+                if (pid == 0) {
+                    char n_out[4096];
+                    char n_log[4096];
+                    char cmd[8192];
+                    int rc;
+                    int r_old;
+                    int exit_code;
+                    cx_fmt(n_out, sizeof n_out, "%s/new_s%d", out_dir, cur);
+                    cx_fmt(n_log, sizeof n_log, "%s/new_s%d.log", out_dir, cur);
+                    cx_fmt(cmd, sizeof cmd, "sh ./unisacc.com tests/tools-compile.cx -- \"%s\" \"%s\" %d --compiler \"%s\" --models \"%s\" >\"%s\" 2>&1",
+                           root, n_out, cur, cand, pkg, n_log);
+                    rc = system(cmd);
+                    exit_code = WIFEXITED(rc) ? WEXITSTATUS(rc) : 2;
+                    if (exit_code == 0 && !no_diff) {
+                        char o_out[4096];
+                        char o_log[4096];
+                        cx_fmt(o_out, sizeof o_out, "%s/old_s%d", out_dir, cur);
+                        cx_fmt(o_log, sizeof o_log, "%s/old_s%d.log", out_dir, cur);
+                        cx_fmt(cmd, sizeof cmd, "sh ./unisacc.com tests/tools-compile.cx -- \"%s\" \"%s\" %d >\"%s\" 2>&1",
+                               root, o_out, cur, o_log);
+                        r_old = system(cmd);
+                        if (!WIFEXITED(r_old) || WEXITSTATUS(r_old) != 0) exit_code = 3;
+                    }
+                    _exit(exit_code);
+                }
+                if (pid > 0) {
+                    pids[slot] = pid;
+                    pshard[slot] = cur;
+                    active++;
+                } else {
+                    infra_shards++;
+                    if (first_infra_shard < 0) {
+                        first_infra_shard = cur;
+                        cx_fmt(first_infra_err, sizeof first_infra_err, "fork-failed");
+                    }
+                }
+                cur++;
+            }
+            if (active > 0) {
+                int st;
+                int wp;
+                wp = waitpid(-1, &st, 0);
+                if (wp <= 0) {
+                    infra_shards++;
+                    if (first_infra_shard < 0) {
+                        first_infra_shard = cur;
+                        cx_fmt(first_infra_err, sizeof first_infra_err, "waitpid-failed");
+                    }
+                    break;
+                }
+                {
+                    int s;
+                    s = 0;
+                    while (s < par) {
+                        if (pids[s] == wp) {
+                            int sh_id;
+                            int ec;
+                            sh_id = pshard[s];
+                            pids[s] = -1;
+                            pshard[s] = -1;
+                            active--;
+                            ec = WIFEXITED(st) ? WEXITSTATUS(st) : 2;
+                            if (ec == 1) {
+                                failed_shards++;
+                                if (first_fail_shard < 0) {
+                                    char n_log[4096];
+                                    first_fail_shard = sh_id;
+                                    cx_fmt(n_log, sizeof n_log, "%s/new_s%d.log", out_dir, sh_id);
+                                    gs_first_fail_line(n_log, first_fail_err, sizeof first_fail_err);
+                                }
+                            } else if (ec == 0 || ec == 3) {
+                                if (ec == 3) old_fail++;
+                                if (!no_diff) {
+                                    char o_out[4096];
+                                    char n_out[4096];
+                                    cx_fmt(o_out, sizeof o_out, "%s/old_s%d", out_dir, sh_id);
+                                    cx_fmt(n_out, sizeof n_out, "%s/new_s%d", out_dir, sh_id);
+                                    gs_compare_shard_objs(o_out, n_out, &same_c, &diff_c);
+                                }
+                            } else {
+                                infra_shards++;
+                                if (first_infra_shard < 0) {
+                                    char n_log[4096];
+                                    first_infra_shard = sh_id;
+                                    cx_fmt(n_log, sizeof n_log, "%s/new_s%d.log", out_dir, sh_id);
+                                    gs_first_line(n_log, first_infra_err, sizeof first_infra_err);
+                                }
+                            }
+                            break;
+                        }
+                        s++;
+                    }
+                }
+            }
+        }
+        if (cur <= shard_to) {
+            printf("GEN1_SMOKE\tTIMEOUT\treason=total-budget\tcur=%d\tshard_to=%d\tpgid=%d\n", cur, shard_to, pgid);
+            return 2;
+        }
+    }
+
+    if (infra_shards > 0) {
+        printf("GEN1_SMOKE\tINFRA\tshard=%d\tinfra_shards=%d\tpgid=%d\terr=%s\n",
+               first_infra_shard, infra_shards, pgid, first_infra_err[0] ? first_infra_err : "-");
+        return 2;
+    }
+
+    if (failed_shards > 0) {
+        printf("GEN1_SMOKE\tRED\tshard=%d\tfailed_shards=%d\ttotal_shards=%d\tpgid=%d\terr=%s\n",
+               first_fail_shard, failed_shards, nshards, pgid, first_fail_err[0] ? first_fail_err : "-");
+        return 1;
+    }
+
+    printf("GEN1_SMOKE\tGREEN\tshards=%d..%d\ttotal_shards=%d\tobj_same=%d\tobj_diff=%d\told_fail=%d\tdiff_info_only=1\tpgid=%d\n",
+           shard_from, shard_to, nshards, same_c, diff_c, old_fail, pgid);
+    return 0;
+}

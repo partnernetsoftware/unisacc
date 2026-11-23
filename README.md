@@ -81,7 +81,7 @@ One hop to each destination. Link targets are Chinese documents; the anchors are
 
 | Topic | Where |
 |---|---|
-| Current status, thinking tree (read first every round) | [prd.md 9.1 thinking tree](prd.md#work-tree) |
+| Current status, thinking tree (read first every round) | [prd_mempalace.md](prd_mempalace.md) (formerly prd.md 9.1) |
 | Memory palace (the single index of all entry points) | [prd.md 9.2 memory palace](prd.md) |
 | Build and chain tools, capability quick reference | [prd.md 2 capability quick reference](prd.md#2-有什么功能已实现能力速查) |
 | Tests, ratchets (13), batches | [prd.md 2.2 tests](prd.md#22-测试棘轮门禁批次)、[prd.md 7 test suite design](prd.md#7-测试套件设计)、[tests/README.md](tests/README.md) |

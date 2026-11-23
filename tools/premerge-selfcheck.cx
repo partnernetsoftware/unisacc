@@ -1,0 +1,868 @@
+/* premerge-selfcheck.cx -- self-checks a patch must pass BEFORE it is sent for review (items 1 to 8, 10 to 12, item 9 corpus pending).
+ *
+ *   sh ./unisacc.com tools/premerge-selfcheck.cx -- --patch P --check 'CMD' [--check 'CMD'...] --out RECEIPT
+ *                                                   [--base REV (default main)] [--repo R (default .)] [--guard]
+ *                                                   [--declare FILE] [--overlay DIR] [--probe 'CMD using $F' ...]
+ *                                                   [--sample FILE] [--flip-max N] [--flip-ids CSV]
+ *
+ * P is a `git diff` patch against REV.  The tool builds a private copy (git archive REV, git apply P, git init), runs
+ * every item for real (nothing is cached), and writes a receipt bound to the sha256 of P:
+ *   SELFCHECK item=N name=... verdict=PASS|FAIL|NA|UNMEASURED detail=...
+ *   SELFCHECK_SUMMARY patch_sha256=H fail=F unmeasured=U verdict=PASS|FAIL|INCOMPLETE
+ * rc 0 PASS, 1 any FAIL, 3 INCOMPLETE (only UNMEASURED, i.e. an input the item needs is not there), 2 refusal.
+ *
+ * (1) real-entry: an added check/fixture line that PRINTS a fixed verdict (a literal ok=N, failed=0 or PASS line with no
+ *     format argument) is a stub; and every added check-*.cx must mention at least one of the non-check sources the
+ *     patch changes (or the product launcher), else the fixture never calls the real entry.
+ * (2) empty-input: each --check is run with a `git` that always fails (exit 128).  If the check called git it must
+ *     not still succeed: a failed read is a refusal, never a pass.  A check that never calls git is NA.
+ * (3) guard-closure (only with --guard): build/sid-inputs.tsv (path classes) is read; every top-level path class
+ *     must be named by at least one added check line (a negative case per class).  The table missing is UNMEASURED.
+ * (4) marker-flip: each added completion marker in a non-check source (PASS, failed=0, READY=yes) is flipped one at a
+ *     time (PASS -> FAIL, failed=0 -> failed=1, READY=yes -> READY=no, at most 10); the --check set must go red for
+ *     every flip, else the marker is not verified by anything (FAIL, survivors listed).
+ * (3) falls back to the 7 product input directories when build/sid-inputs.tsv is absent.
+ * (5) negative-input: every changed non-check source needs at least one added check line feeding a failing/empty input.
+ * (6) deleted-guard: a deleted assertion/refusal/verdict line needs a --declare row (file TAB substring TAB reason) and must
+ *     still exist at the current main (a stale base that reverts others' work is deleted-guard-stale).
+ * (7) malformed-input: each --probe CMD (reads $F) is fed empty, zeros, no-newline, CRLF, negative, plus-sign, extra-column
+ *     and truncated-hash files and must refuse (rc 1..123); NA without --probe, UNMEASURED for a --guard patch.
+ * (8) paths-and-switches: no /tmp or /home literal in an added check, no --mutate/--skip/--force/--unsafe/--bypass switch
+ *     added to a non-check source.
+ * (10) literal-sample: the string literals inside the arguments of an added matching call (has, strstr, tx_find, kv, ...) are decoded by
+ *     the C rules into real bytes and each must occur in the --sample FILE (the real output the author attaches); a refusal
+ *     marker may instead be proved by the identical source text in another source file (the producer).  FAIL names the
+ *     literal and its bytes; no literal NA; literals that need a sample but none given UNMEASURED.
+ * (11) commit-gate-preview: tools/precommit-preview.cx (the real commit gate over a private index and private object store) is run in the
+ *     patched tree over every file the patch touches; PRECOMMIT_PREVIEW blocked=0 is PASS, blocked>0 FAIL (the first BLOCK rows are quoted),
+ *     no answer within 170 s UNMEASURED.  The receipt names the revision the gate ran against.  NA when the tree has no precommit-preview.
+ * (12) flip-compare: tools/affected.cx --files lists the registered batches that reach the changed files; the first --flip-max (default 12,
+ *     source/arg/literal/table kinds before the use closures, tools-compile-NNN excluded) are run in a private tree of the base and in the
+ *     patched tree and every status flip is listed in the receipt.  PASS -> not PASS needs a --declare row `batch:ID<TAB>-<TAB>reason`, else FAIL;
+ *     a --guard patch also needs every selected negative control (id with block, refus, reject or deny) green, none selected is UNMEASURED.
+ *     --flip-ids CSV names the batches instead of selecting them.  More selected than run, or answers missing within 240 s per tree, is UNMEASURED.
+ *     NA when the tree has no tools/affected.cx.  It judges batch states only: a data-format convention nobody tests is not seen here.
+ * --overlay DIR is copied over the private tree after the patch, for inputs the check needs that git does not track.
+ * The baseline (patched tree, unmodified) must be green for every --check, else refusal rc 2. */
+#pragma unisa use cxlib.ckrun
+#pragma unisa use cxlib.privrepo
+#pragma unisa use sys.fs
+#pragma unisa use sys.time
+#pragma unisa use sys.env
+#pragma unisa use sysx.process
+#pragma unisa use mem.heap
+#pragma unisa use mem.bytes
+#pragma unisa use text.text
+
+#define PS_MAXCHK 8
+#define PS_MAXADD 40000
+#define PS_OUT 65536
+
+typedef struct { char *file; int line; char *text; } added_t;
+static added_t A[PS_MAXADD];
+static int nA;
+static added_t D[PS_MAXADD];
+static int nD;
+static const char *g_declare, *g_overlay, *g_probe[4];
+static int g_nprobe;
+static const char *g_patch, *g_base = "main", *g_repo = ".", *g_out, *g_chk[PS_MAXCHK];
+static int g_nchk, g_guard;
+static char T[1024], TREE[1100], BASE[1100], rec[PS_OUT];
+static int rn, nfail, nunm;
+
+static void die2(const char *a, const char *b) {
+    fprintf(stderr, "premerge-selfcheck: REFUSE %s %s\n", a, b ? b : "");
+    if (T[0]) { char c[1200]; if (!cx_fmt(c, sizeof c, "rm -rf '%s'", T)) ckk_sh_t("premerge-selfcheck", c, 0, 0, 20); T[0] = 0; }
+    if (TREE[0] && strstr(TREE, "unisacc-privrepo-")) { char c[1200]; if (!cx_fmt(c, sizeof c, "rm -rf '%s'", TREE)) ckk_sh_t("premerge-selfcheck", c, 0, 0, 20); TREE[0] = 0; }
+    if (BASE[0] && strstr(BASE, "unisacc-privrepo-")) { char c[1200]; if (!cx_fmt(c, sizeof c, "rm -rf '%s'", BASE)) ckk_sh_t("premerge-selfcheck", c, 0, 0, 20); BASE[0] = 0; }
+    exit(2);
+}
+static int sh(const char *script, char *out, int cap, int secs) { return ckk_sh_t("premerge-selfcheck", script, out, cap, secs); }
+/* every read of the source repository goes through `env -u GIT_DIR -u GIT_INDEX_FILE ...`: inside a git hook those variables name the outer repository */
+static const char *envu(void) { static char b[1100]; if (!b[0] && pr_envu(b, (int)sizeof b) != 0) die2("environment prefix", "too long"); return b; }
+static void cp(void *d, long cap, const void *s, long n) { if (mm_copy(d, cap, s, n) != 0) die2("premerge-selfcheck copy", "out of bound"); }
+static void shq(char *d, int cap, const char *s) { if (ckk_shq(d, cap, s) != 0) die2("quote", "too long"); }
+static char *slurp(const char *p, size_t *n) { size_t z = 0; return cx_read(p, n ? n : &z); }
+
+static int is_check_file(const char *f) {
+    const char *b = strrchr(f, '/'); b = b ? b + 1 : f;
+    size_t n = strlen(f);
+    if (!strncmp(f, "tests/", 6)) return 1;
+    return !strncmp(b, "check-", 6) && n > 3 && !strcmp(f + n - 3, ".cx");
+}
+static int is_source(const char *f) {
+    size_t n = strlen(f);
+    return (n > 3 && !strcmp(f + n - 3, ".cx")) || (n > 2 && !strcmp(f + n - 2, ".c"));
+}
+
+static void emit(int item, const char *name, const char *verdict, const char *fmt, ...) {
+    char d[2048]; va_list ap; int k;
+    va_start(ap, fmt); k = vsnprintf(d, sizeof d, fmt, ap); va_end(ap); if (k < 0) die2("detail", "format");
+    k = snprintf(rec + rn, sizeof rec - rn, "SELFCHECK item=%d name=%s verdict=%s detail=%s\n", item, name, verdict, d);
+    if (k < 0 || rn + k >= (int)sizeof rec) die2("receipt", "too long");
+    rn += k;
+    if (!strcmp(verdict, "FAIL")) nfail++;
+    if (!strcmp(verdict, "UNMEASURED")) nunm++;
+}
+
+/* ---------- patch parsing: every added line with its new-file line number ---------- */
+static void parse_patch(char *b, size_t n) {
+    char *s, *e, *file = 0; int cur = 0;
+    for (s = b; s < b + n; s = e + 1) {
+        e = s; while (e < b + n && *e != '\n') e++; *e = 0;
+        if (!strncmp(s, "+++ ", 4)) { file = strncmp(s + 4, "b/", 2) ? 0 : s + 6; continue; }
+        if (!strncmp(s, "--- ", 4)) continue;
+        if (!strncmp(s, "diff --git", 10)) { file = 0; continue; }
+        if (!strncmp(s, "@@", 2)) { char *p = strchr(s, '+'); cur = p ? atoi(p + 1) : 0; continue; }
+        if (!file) continue;
+        if (*s == '+') { if (nA < PS_MAXADD) { A[nA].file = file; A[nA].line = cur; A[nA].text = s + 1; nA++; } cur++; }
+        else if (*s == ' ') cur++;
+        else if (*s == '-' && nD < PS_MAXADD) { D[nD].file = file; D[nD].line = 0; D[nD].text = s + 1; nD++; }
+    }
+}
+
+/* ---------- private tree ---------- */
+static char g_basec[96], g_curc[96];
+static const char *g_cur = "main";   /* the revision a deleted guard line must still exist at (stale-base check); default main */
+static char g_toolsha[160];
+/* every step is its own checked command with absolute paths (git -C), so a failure refuses and nothing ever runs in the caller's cwd */
+static void step(const char *what, const char *script) {
+    char out[2048];
+    if (sh(script, out, sizeof out, 55) != 0) die2(what, out);
+}
+static void build_tree(void) {
+    char q1[1100], q2[1100], q3[1100], q4[1100], tt[1100], sc[4096], out[2048], spec[1200];
+    int k;
+    TREE[0] = 0;
+    shq(q1, sizeof q1, g_repo); shq(q3, sizeof q3, g_patch); shq(q4, sizeof q4, g_overlay ? g_overlay : ""); shq(tt, sizeof tt, T);
+    cx_fmt(spec, sizeof spec, "%s^{commit}", g_base); shq(q2, sizeof q2, spec);
+    cx_fmt(sc, sizeof sc, "%sgit -C %s rev-parse --verify --quiet %s", envu(), q1, q2);
+    if (sh(sc, out, sizeof out, 20) != 0 || strlen(out) < 40) die2("repo or base revision invalid", g_repo);
+    for (k = 0; out[k] && out[k] != '\n' && k < 64; k++) g_basec[k] = out[k];
+    g_basec[k] = 0;
+    cx_fmt(spec, sizeof spec, "%s^{commit}", g_cur); shq(q2, sizeof q2, spec);
+    cx_fmt(sc, sizeof sc, "%sgit -C %s rev-parse --verify --quiet %s", envu(), q1, q2);
+    if (sh(sc, out, sizeof out, 20) != 0 || strlen(out) < 40) die2("current revision invalid", g_cur);
+    for (k = 0; out[k] && out[k] != '\n' && k < 64; k++) g_curc[k] = out[k];
+    g_curc[k] = 0;
+    /* the scratch repository comes from cxlib.privrepo: git runs only through pr_git, which refuses the shared checkout */
+    if (pr_make(TREE, sizeof TREE) != 0) die2("private repository could not be created", 0);
+    shq(tt, sizeof tt, TREE);
+    cx_fmt(sc, sizeof sc, "mkdir -p %s/.git/objects/info && printf '%%s\\n' \"$(%sgit -C %s rev-parse --path-format=absolute --git-path objects)\" > %s/.git/objects/info/alternates", tt, envu(), q1, tt);
+    step("object sharing with the repository failed", sc);
+    {   char *co[] = { "checkout", "-q", "--detach", g_basec, 0 };
+        if (pr_git(TREE, co, out, sizeof out, 55) != 0) die2("checkout of base failed", out);
+    }
+    {   char pabs[4096], *ap[] = { "apply", pabs, 0 };
+        if (sy_realpath(g_patch, pabs, (int)sizeof pabs) <= 0) die2("patch path unreadable", g_patch);
+        if (pr_git(TREE, ap, out, sizeof out, 55) != 0) die2("patch does not apply to the base", out);
+    }
+    cx_fmt(sc, sizeof sc, "[ ! -e %s/unisacc.com ] || ln -sf \"$(realpath %s)/unisacc.com\" %s/unisacc.com", q1, q1, tt);
+    step("unisacc.com link failed", sc);
+    cx_fmt(sc, sizeof sc, "[ -z %s ] || { test -d %s && cp -a \"$(realpath %s)/.\" %s/; }", q4, q4, q4, tt);
+    step("overlay copy failed", sc);
+    {   char *ad[] = { "add", "-A", 0 };
+        char *cm[] = { "-c", "user.name=x", "-c", "user.email=x@x", "commit", "-qm", "patched", 0 };
+        if (pr_git(TREE, ad, out, sizeof out, 55) != 0) die2("tree add failed", out);
+        if (pr_git(TREE, cm, out, sizeof out, 55) != 0) die2("tree commit failed", out);
+    }
+}
+
+/* run every check in the tree; returns 0 when all are green; OUT gets the last output */
+static int is_red(int rc, const char *out, int cap) {
+    const char *p;
+    if (rc != 0) return 1;
+    if (ckk_has(out, cap, "FAIL\t")) return 1;
+    for (p = out; (p = strstr(p, "failed=")); p += 7) if (p[7] >= '1' && p[7] <= '9') return 1;
+    return 0;
+}
+/* every --check and probe goes through np_run with a per-command bound (default and maximum 55 s) and one total budget for the whole run */
+#define PS_TOTAL_MS 280000L
+static long g_t0;
+static void rawl(const char *l) {
+    long n = (long)strlen(l);
+    if (rn + n >= (long)sizeof rec) die2("receipt", "too long");
+    cp(rec + rn, (long)(sizeof rec - rn), l, n + 1); rn += (int)n;
+}
+static int g_cto = 55;
+static int shl(const char *script, char *out, int cap, int secs) {
+    char *av[4], why[600]; np_result r; int rc, k = 0;
+    long left = PS_TOTAL_MS - (sy_now_ms() - g_t0);
+    if (left <= 0) die2("total time budget (280 s) exhausted", 0);
+    if ((long)secs * 1000L > left) secs = (int)((left + 999) / 1000);
+    av[0] = "sh"; av[1] = "-c"; av[2] = (char *)script; av[3] = 0;
+    if (np_run(av, 0, 0, secs, &r, why, sizeof why) != 0) { if (out && cap > 0) cx_fmt(out, cap, "TIMEOUT_OR_LAUNCH %s", why); return 124; }
+    if (out && cap > 0) {
+        size_t a = r.outn < (size_t)cap - 1 ? r.outn : (size_t)cap - 1, b;
+        if (a) cp(out, cap, r.out, (long)a);
+        k = (int)a; b = r.errn < (size_t)(cap - 1 - k) ? r.errn : (size_t)(cap - 1 - k);
+        if (b) cp(out + k, cap - k, r.err, (long)b);
+        out[k + (int)b] = 0;
+    }
+    rc = r.rc; np_free(&r);
+    return rc;
+}
+static int run_checks(const char *pre, char *out, int cap) {
+    int i, rc = 0;
+    char sc[4096];
+    for (i = 0; i < g_nchk; i++) {
+        if (cx_fmt(sc, sizeof sc, "cd %s && %s%s", TREE, pre ? pre : "", g_chk[i])) die2("script", "too long");
+        rc = shl(sc, out, cap, g_cto);
+        if (is_red(rc, out, cap)) return rc ? rc : 1;
+    }
+    return 0;
+}
+
+/* ---------- item 1 ---------- */
+static void item1(void) {
+    int i, bad = 0, j, nsrc = 0;
+    char names[64][128];
+    for (i = 0; i < nA && nsrc < 64; i++) {
+        const char *f = A[i].file;
+        if (is_check_file(f) || !is_source(f)) continue;
+        const char *b = strrchr(f, '/'); b = b ? b + 1 : f;
+        int dup = 0;
+        for (j = 0; j < nsrc; j++) { char t[128]; cx_fmt(t, sizeof t, "%s", b); if (!strcmp(t, names[j])) dup = 1; }
+        if (!dup) cx_fmt(names[nsrc++], sizeof names[0], "%s", b);
+    }
+    for (i = 0; i < nA; i++) {
+        const char *t = A[i].text;
+        if (!is_check_file(A[i].file)) continue;
+        if (!(strstr(t, "printf") || strstr(t, "puts") || strstr(t, "echo"))) continue;
+        if (strchr(t, '%')) continue;
+        {   const char *p = strstr(t, "ok=");
+            int lit = (p && p[3] >= '0' && p[3] <= '9') || strstr(t, "failed=0") || strstr(t, "PASS");
+            if (lit && !strncmp(t, "//", 2) == 0 && !strstr(t, "/*")) {
+                emit(1, "stub-output", "FAIL", "%s:%d prints a fixed verdict with no format argument", A[i].file, A[i].line);
+                bad++;
+            }
+        }
+    }
+    {   int k, last = -1;
+        for (i = 0; i < nA; i++) {
+            char path[1200], *b; size_t n; int seen = 0;
+            if (!is_check_file(A[i].file) || !is_source(A[i].file) || i == last) continue;
+            if (i > 0 && A[i - 1].file == A[i].file) continue;
+            cx_fmt(path, sizeof path, "%s/%s", TREE, A[i].file);
+            b = slurp(path, &n);
+            if (!b) { emit(1, "entry-file", "FAIL", "%s missing after apply", A[i].file); bad++; continue; }
+            if (nsrc == 0) { free(b); continue; }
+            if (strstr(b, "unisacc.com")) seen = 1;
+            for (k = 0; k < nsrc && !seen; k++) if (strstr(b, names[k])) seen = 1;
+            free(b);
+            if (!seen) { emit(1, "real-entry", "FAIL", "%s mentions none of the %d changed sources and not unisacc.com", A[i].file, nsrc); bad++; }
+        }
+    }
+    if (!bad) emit(1, "real-entry", "PASS", "no fixed-verdict output; every added check references a changed source");
+}
+
+/* ---------- item 2 ---------- */
+static void item2(void) {
+    int i; char sc[4096], out[4096], d[1200], calls[1200], fake[1200], pre[2400];
+    cx_fmt(d, sizeof d, "%s/failgit", T);
+    cx_fmt(calls, sizeof calls, "%s/calls", d); cx_fmt(fake, sizeof fake, "%s/git", d);
+    cx_fmt(sc, sizeof sc, "mkdir -p %s && printf '#!/bin/sh\\necho called >> %s\\nexit 128\\n' > %s && chmod +x %s", d, calls, fake, fake);
+    if (sh(sc, out, sizeof out, 10)) die2("fake git", 0);
+    for (i = 0; i < g_nchk; i++) {
+        int rc, called;
+        char one[4096];
+        cx_fmt(sc, sizeof sc, "rm -f %s", calls); sh(sc, out, sizeof out, 5);
+        cx_fmt(pre, sizeof pre, "PATH=%s:$PATH ", d);
+        if (cx_fmt(one, sizeof one, "cd %s && %s%s", TREE, pre, g_chk[i])) die2("script", "too long");
+        rc = shl(one, out, sizeof out, g_cto);
+        cx_fmt(sc, sizeof sc, "test -s %s", calls);
+        called = sh(sc, 0, 0, 5) == 0;
+        if (!called) emit(2, "git-failure", "NA", "check %d never calls git", i);
+        else if (is_red(rc, out, sizeof out)) emit(2, "git-failure", "PASS", "check %d fails when every git call fails (rc=%d)", i, rc);
+        else emit(2, "git-failure", "FAIL", "check %d still succeeds when every git call fails: an empty read counts as a pass", i);
+    }
+}
+
+/* ---------- item 3 ---------- */
+static void item3(void) {
+    char p[1200], *b, *s, *e; size_t n; int classes = 0, miss = 0, i;
+    char seen[64][96]; int ns = 0;
+    if (!g_guard) { emit(3, "guard-closure", "NA", "patch not declared a guard"); return; }
+    cx_fmt(p, sizeof p, "%s/build/sid-inputs.tsv", TREE);
+    b = slurp(p, &n);
+    if (!b) {   /* table absent: the seven product input directories are the fallback closure */
+        const char *d7[7] = { "src", "cx", "ext", "exec", "include", "seed", "kernel" };
+        for (ns = 0; ns < 7; ns++) cx_fmt(seen[ns], sizeof seen[0], "%s", d7[ns]);
+        emit(3, "guard-table", "NA", "build/sid-inputs.tsv absent; closure = the 7 product input directories");
+    }
+    for (s = b; b && s < b + n; s = e + 1) {
+        char cls[96]; char *t; int k, dup = 0;
+        e = s; while (e < b + n && *e != '\n') e++; *e = 0;
+        if (!*s || *s == '#') continue;
+        t = strchr(s, '\t'); if (t) *t = 0;
+        {   char *sl = strchr(s, '/'); size_t l = sl ? (size_t)(sl - s) : strlen(s); if (l >= sizeof cls) l = sizeof cls - 1; cp(cls, (long)sizeof cls, s, (long)l); cls[l] = 0; }
+        if (!strcmp(cls, "path") || !strcmp(cls, "class")) continue;
+        for (k = 0; k < ns; k++) if (!strcmp(seen[k], cls)) dup = 1;
+        if (dup || ns == 64) continue;
+        cx_fmt(seen[ns++], sizeof seen[0], "%s", cls);
+    }
+    free(b);
+    for (classes = 0; classes < ns; classes++) {
+        int hit = 0;
+        for (i = 0; i < nA && !hit; i++) if (is_check_file(A[i].file) && strstr(A[i].text, seen[classes])) hit = 1;
+        if (!hit) { emit(3, "guard-closure", "FAIL", "no added check line names path class %s", seen[classes]); miss++; }
+    }
+    if (!miss) emit(3, "guard-closure", "PASS", "%d path classes each named by an added check", ns);
+}
+
+/* ---------- item 4 ---------- */
+static const char *MK_FROM[3] = { "PASS", "failed=0", "READY=yes" };
+static const char *MK_TO[3]   = { "FAIL", "failed=1", "READY=no" };
+static void item4(void) {
+    int i, tried = 0, killed = 0;
+    for (i = 0; i < nA && tried < 10; i++) {
+        int m; const char *f = A[i].file;
+        if (is_check_file(f) || !is_source(f) || !strncmp(A[i].text, "//", 2)) continue;
+        for (m = 0; m < 3; m++) {
+            const char *p = strstr(A[i].text, MK_FROM[m]);
+            char path[1200], *b, *ls, *le, *nb; size_t n, fl = strlen(MK_FROM[m]), tl = strlen(MK_TO[m]), off; int ln = 1; char out[8192];
+            if (!p || !strchr(A[i].text, '"')) continue;
+            if (!(strstr(A[i].text, "printf") || strstr(A[i].text, "puts") || strstr(A[i].text, "emit(") || strstr(A[i].text, "echo") || strstr(A[i].text, "write"))) continue;   /* only lines that print a verdict are completion markers */
+            cx_fmt(path, sizeof path, "%s/%s", TREE, f);
+            b = slurp(path, &n); if (!b) continue;
+            for (ls = b; ln < A[i].line && ls < b + n; ls++) if (*ls == '\n') ln++;
+            le = ls; while (le < b + n && *le != '\n') le++;
+            { char *q = ls; off = (size_t)-1;
+              while (q + fl <= le) { if (!memcmp(q, MK_FROM[m], fl)) { off = (size_t)(q - b); break; } q++; } }
+            if (off == (size_t)-1) { free(b); continue; }
+            nb = malloc(n + tl + 1);
+            cp(nb, (long)(n + tl + 1), b, (long)off); cp(nb + off, (long)(n + tl + 1 - off), MK_TO[m], (long)tl); cp(nb + off + tl, (long)(n + tl + 1 - off - tl), b + off + fl, (long)(n - off - fl));
+            if (cx_write(path, nb, n - fl + tl) != 0) die2("write mutant", path);
+            tried++;
+            if (run_checks(0, out, sizeof out) != 0) killed++;
+            else emit(4, "marker-flip", "FAIL", "%s:%d flipping %s to %s is not detected by any --check", f, A[i].line, MK_FROM[m], MK_TO[m]);
+            if (cx_write(path, b, n) != 0) die2("restore", path);
+            free(nb); free(b);
+            break;
+        }
+    }
+    if (!tried) emit(4, "marker-flip", "NA", "no completion marker in an added non-check source line");
+    else if (killed == tried) emit(4, "marker-flip", "PASS", "%d/%d marker flips turned the checks red", killed, tried);
+}
+
+/* ---------- item 6: deleted guard lines must be declared and must exist at the current main ---------- */
+static void item6(void) {
+    static const char *tok[] = { "ck(", "ok(", "REFUSE", "refuse", "assert", "die(", "FAIL", "exit(2)", "return -", "rc ==", "!= 0", 0 };
+    char *db = 0, out[1024], sc[3000], lp[1200], mp[1200], q[1200], q2[1200]; size_t dn = 0; int i, k, bad = 0, seen = 0, declared = 0;
+    if (g_declare) db = slurp(g_declare, &dn);
+    cx_fmt(lp, sizeof lp, "%s/del.line", T); cx_fmt(mp, sizeof mp, "%s/main.file", T);
+    for (i = 0; i < nD; i++) {
+        const char *t = D[i].text; int hit = 0, dec = 0, onmain;
+        while (*t == ' ' || *t == '\t') t++;
+        if (!*t || !strncmp(t, "//", 2) || !strncmp(t, "/*", 2) || *t == '*') continue;
+        for (k = 0; tok[k] && !hit; k++) if (strstr(t, tok[k])) hit = 1;
+        if (!hit && strstr(D[i].file, "tests/") && strstr(D[i].file, ".tsv")) hit = 1;   /* a deleted batch or coverage row shrinks coverage */
+        if (!hit) continue;
+        seen++;
+        if (db) {   /* declaration rows: file<TAB>substring<TAB>reason (reason required); each row is parsed from a copy so the table stays intact */
+            char *s, *e;
+            for (s = db; s < db + dn && !dec; s = e + 1) {
+                char ln[1400], *f1, *f2, *f3; size_t ll;
+                e = s; while (e < db + dn && *e != '\n') e++;
+                ll = (size_t)(e - s); if (ll >= sizeof ln) continue;
+                cp(ln, (long)sizeof ln, s, (long)ll); ln[ll] = 0;
+                f1 = ln; f2 = strchr(f1, '\t'); if (!f2) continue; *f2++ = 0;
+                f3 = strchr(f2, '\t'); if (!f3) continue; *f3++ = 0;
+                if (*f3 && !strcmp(f1, D[i].file) && *f2 && strstr(D[i].text, f2)) dec = 1;
+            }
+        }
+        {   char spec[1300], qs[1400]; shq(q, sizeof q, g_repo);
+            cx_fmt(spec, sizeof spec, "%s:%s", g_curc, D[i].file); shq(qs, sizeof qs, spec);
+            cx_fmt(sc, sizeof sc, "%sgit -C %s show %s > %s 2>/dev/null", envu(), q, qs, mp);
+            sh(sc, out, sizeof out, 20);
+            if (cx_write(lp, D[i].text, strlen(D[i].text)) != 0) die2("write line", lp);
+            cx_fmt(sc, sizeof sc, "printf '\\n' >> %s; grep -F -x -q -f %s %s", lp, lp, mp);
+        }
+        onmain = sh(sc, 0, 0, 10) == 0;
+        if (!onmain) { emit(6, "deleted-guard-stale", "FAIL", "%s deletes a guard line that is not at current main (stale base reverts others' work): %.70s", D[i].file, t); bad++; }
+        else if (!dec) { emit(6, "deleted-guard", "FAIL", "%s deletes an assertion/refusal/verdict line with no declared reason: %.70s", D[i].file, t); bad++; }
+        else declared++;
+    }
+    if (!bad) emit(6, "deleted-guard", "PASS", "%d guard-like lines deleted, %d declared (--declare FILE rows file<TAB>substring<TAB>reason)", seen, declared);
+}
+
+/* ---------- item 8: hard-coded absolute paths in checks, and escape-hatch switches in product entries ---------- */
+static void item8(void) {
+    static const char *sw[] = { "\"--mu" "tate", "\"--sk" "ip", "\"--for" "ce", "\"--un" "safe", "\"--by" "pass", 0 };   /* split so this list is not itself a hit */
+    int i, k, bad = 0;
+    for (i = 0; i < nA; i++) {
+        const char *t = A[i].text;
+        if (is_check_file(A[i].file)) {
+            if ((strstr(t, "\"/tmp/") || strstr(t, "\"/home/") || strstr(t, "'/tmp/") || strstr(t, "'/home/") || strstr(t, " /home/") || strstr(t, "=/home/") || strstr(t, " /tmp/") || strstr(t, "=/tmp/")) &&
+                !strstr(t, "TMPDIR") && !strstr(t, "tmpdir") && !strstr(t, "getenv") && strncmp(t, "//", 2) && !strstr(t, "/*")) {
+                emit(8, "hardcoded-path", "FAIL", "%s:%d hard-codes /tmp or /home in a check: %.70s", A[i].file, A[i].line, t); bad++;
+            }
+        } else if (is_source(A[i].file)) {
+            for (k = 0; sw[k]; k++) if (strstr(t, sw[k]) && strncmp(t, "//", 2)) {
+                emit(8, "escape-switch", "FAIL", "%s:%d adds a bypass-style switch %s in a non-check source", A[i].file, A[i].line, sw[k] + 1); bad++; break;
+            }
+        }
+    }
+    if (!bad) emit(8, "paths-and-switches", "PASS", "no hard-coded /tmp or /home in added checks, no bypass-style switch added to sources");
+}
+
+/* ---------- item 10: every literal a new matching call looks for must exist in real output ---------- */
+/* The string literals inside the arguments of an added matching call (has, strstr, tx_find, ...) are decoded by the C rules
+   into the bytes the program really compares, and each must occur in the --sample file, the real output the author attaches.
+   A refusal marker may instead be proved by the producer: the identical source text of the literal in another source file. */
+static const char *g_sample;
+static int c_decode(const char *s, char *d, int cap) {   /* s points after the opening quote; returns decoded length, -1 on overflow */
+    int k = 0;
+    for (; *s && *s != '"'; s++) {
+        int c = (unsigned char)*s;
+        if (c == '\\' && s[1]) {
+            s++;
+            switch (*s) {
+                case 'n': c = '\n'; break; case 't': c = '\t'; break; case 'r': c = '\r'; break; case 'a': c = 7; break;
+                case 'b': c = 8; break; case 'f': c = 12; break; case 'v': c = 11; break;
+                case 'x': { int v = 0; while (s[1] && isxdigit((unsigned char)s[1])) { int x = (unsigned char)s[1]; s++; v = v * 16 + (x <= '9' ? x - '0' : (x | 32) - 'a' + 10); } c = v & 255; break; }
+                case '0': case '1': case '2': case '3': case '4': case '5': case '6': case '7': {
+                    int v = *s - '0', n = 1; while (n < 3 && s[1] >= '0' && s[1] <= '7') { v = v * 8 + (s[1] - '0'); s++; n++; } c = v & 255; break; }
+                default: c = (unsigned char)*s;   /* \\ \" \' \? and unknown: the character itself */
+            }
+        }
+        if (k >= cap) return -1;
+        d[k++] = (char)c;
+    }
+    return k;
+}
+static int in_bytes(const char *h, size_t hn, const char *nd, int nn) {
+    size_t i;
+    if (nn <= 0) return 1;
+    for (i = 0; i + (size_t)nn <= hn; i++) if (h[i] == nd[0] && !memcmp(h + i, nd, (size_t)nn)) return 1;
+    return 0;
+}
+static int is_marker_lit(const char *d, int n) {
+    static const char *w[] = { "REFUS", "refus", "FAIL", "BLOCK", "reason=", "unconfirmed", 0 };
+    int k; char z[520]; if (n > 512) n = 512; if (mm_copy(z, (long)sizeof z, d, (long)n) != 0) return 0; z[n] = 0;
+    for (k = 0; w[k]; k++) if (strstr(z, w[k])) return 1;
+    return 0;
+}
+/* one literal (with adjacent literals concatenated) starting at the quote q; returns the pointer to its last closing quote */
+static const char *take_lit(const char *q, char *d, int *n, char *raw, int rcap, int *rl) {
+    const char *r = q + 1, *last;
+    *n = 0; *rl = 0;
+    for (;;) {
+        const char *st = r; int m = c_decode(r, d + *n, 512 - *n);
+        if (m < 0 || *n < 0) *n = -1; else *n += m;
+        while (*r && *r != '"') { if (*r == '\\' && r[1]) r++; r++; }
+        if (*rl + (int)(r - st) < rcap - 1) { if (mm_copy(raw + *rl, (long)(rcap - *rl), st, (long)(r - st)) != 0) { *n = -1; break; } *rl += (int)(r - st); }
+        last = r;
+        if (!*r) break;
+        { const char *a = r + 1; while (*a == ' ' || *a == '\t') a++; if (*a == '"') { r = a + 1; continue; } }
+        break;
+    }
+    raw[*rl] = 0;
+    return last;
+}
+static void item10(void) {
+    static const char *calls[] = { "has", "ckk_has", "strstr", "tx_find", "tx_has", "kv", "lines", "field_at", "tx_prefix", 0 };
+    char *sm = 0; size_t sn = 0; int i, bad = 0, nlit = 0, proved = 0, nosample = 0;
+    if (g_sample) { sm = slurp(g_sample, &sn); if (!sm) die2("sample unreadable", g_sample); }
+    for (i = 0; i < nA; i++) {
+        const char *t = A[i].text, *tl = t; int c;
+        while (*tl == ' ' || *tl == '\t') tl++;
+        if (!strncmp(tl, "//", 2) || !strncmp(tl, "/*", 2) || *tl == '*') continue;
+        for (c = 0; calls[c]; c++) {
+            size_t cl = strlen(calls[c]); const char *p = t;
+            while ((p = strstr(p, calls[c])) != 0) {
+                const char *q = p + cl; int depth = 0;
+                if ((p > t && (isalnum((unsigned char)p[-1]) || p[-1] == '_')) || *q != '(') { p = q; continue; }
+                for (; *q; q++) {
+                    if (*q == '(') depth++;
+                    else if (*q == ')') { if (--depth == 0) break; }
+                    else if (*q == '\'') { q++; if (*q == '\\') q++; if (*q) q++; }
+                    else if (*q == '"') {
+                        char d[512], raw[600]; int n, rl;
+                        q = take_lit(q, d, &n, raw, (int)sizeof raw, &rl);
+                        if (n < 3) continue;
+                        nlit++;
+                        if (sm && in_bytes(sm, sn, d, n)) continue;
+                        if (is_marker_lit(d, n) && rl > 0) {
+                            char sc[2400], qr[1300], qf[300], out[512];
+                            shq(qr, sizeof qr, raw); shq(qf, sizeof qf, A[i].file);
+                            cx_fmt(sc, sizeof sc, "cd %s; grep -rlF --include='*.cx' --include='*.c' -e %s -- tools cx ext src 2>/dev/null | grep -vxF -e %s | head -1", TREE, qr, qf);
+                            if (sh(sc, out, sizeof out, 20) == 0 && out[0]) { proved++; continue; }
+                        }
+                        if (!sm && !is_marker_lit(d, n)) { nosample++; continue; }
+                        {   char hx[200]; int z, hk = 0;
+                            for (z = 0; z < n && hk < 190; z++) hk += snprintf(hx + hk, sizeof hx - (size_t)hk, "%02x", (unsigned char)d[z]);
+                            emit(10, "literal-not-in-sample", "FAIL", "%s:%d the literal \"%.60s\" decodes to bytes %s, which occur in no real output sample", A[i].file, A[i].line, raw, hx);
+                            bad++;
+                        }
+                    }
+                }
+                p = *q ? q : p + cl;
+            }
+        }
+    }
+    free(sm);
+    if (nlit == 0) { emit(10, "literal-sample", "NA", "no string literal in an added matching call"); return; }
+    if (!bad && nosample) { emit(10, "literal-sample", "UNMEASURED", "%d literal(s) in added matching calls have no producer proof and no --sample FILE with the tool's real output was given", nosample); return; }
+    if (!bad) emit(10, "literal-sample", "PASS", "%d literal(s) in added matching calls: %d found byte-for-byte in the sample, %d proved by the producer's source text", nlit, nlit - proved, proved);
+}
+
+/* ---------- item 11: the real commit gate, rehearsed over the files the patch touches ---------- */
+#define PS_PV_WAIT_S 170
+static void item11(void) {
+    char pv[1400], uc[1200], files[6000], sc[9000], out[8192], po[1300], pr[1300], qf[1300], qt[1300], quc[1300], *res; size_t rn2 = 0;
+    int i, k = 0, nf = 0, waited, blocked = -1;
+    cx_fmt(pv, sizeof pv, "%s/tools/precommit-preview.cx", TREE);
+    if (sy_exists(pv) != 1) { emit(11, "commit-gate-preview", "NA", "no tools/precommit-preview.cx in the patched tree"); return; }
+    if (sy_realpath("./unisacc.com", uc, (int)sizeof uc) <= 0) { emit(11, "commit-gate-preview", "UNMEASURED", "no ./unisacc.com in the working directory to run the gate with"); return; }
+    files[0] = 0;
+    for (i = 0; i < nA; i++) {
+        char fp[1400];
+        if (i > 0 && A[i].file == A[i - 1].file) continue;
+        cx_fmt(fp, sizeof fp, "%s/%s", TREE, A[i].file);
+        if (sy_exists(fp) != 1) continue;
+        shq(qf, sizeof qf, A[i].file);
+        if (k + (int)strlen(qf) + 2 >= (int)sizeof files) { emit(11, "commit-gate-preview", "UNMEASURED", "the patch touches too many files for one preview"); return; }
+        if (nf) files[k++] = ' ';
+        if (mm_copy(files + k, (long)(sizeof files - k), qf, (long)strlen(qf) + 1) != 0) return;
+        k += (int)strlen(qf); nf++;
+    }
+    if (!nf) { emit(11, "commit-gate-preview", "NA", "the patch leaves no file in the patched tree"); return; }
+    cx_fmt(po, sizeof po, "%s/pv.out", T); cx_fmt(pr, sizeof pr, "%s/pv.rc", T);
+    shq(qt, sizeof qt, TREE); shq(quc, sizeof quc, uc);
+    cx_fmt(sc, sizeof sc, "cd %s && ln -sf %s unisacc.com && rm -f '%s' '%s' && { ( %ssh ./unisacc.com tools/precommit-preview.cx -- --root . --files %s > '%s' 2>&1; echo $? > '%s' ) > /dev/null 2>&1 & echo $! > '%s/pv.pid'; }",
+           qt, quc, po, pr, envu(), files, po, pr, T);
+    if (sh(sc, out, sizeof out, 10) != 0) { emit(11, "commit-gate-preview", "UNMEASURED", "the preview could not be started"); return; }
+    for (waited = 0; waited < PS_PV_WAIT_S; waited += 5) {
+        cx_fmt(sc, sizeof sc, "sleep 5; test -f '%s'", pr);
+        if (sh(sc, out, sizeof out, 10) == 0) break;
+    }
+    cx_fmt(sc, sizeof sc, "rm -f %s/unisacc.com", qt);
+    sh(sc, 0, 0, 10);
+    if (waited >= PS_PV_WAIT_S) {
+        cx_fmt(sc, sizeof sc, "kill $(cat '%s/pv.pid' 2>/dev/null) > /dev/null 2>&1; true", T);
+        sh(sc, 0, 0, 10);
+        emit(11, "commit-gate-preview", "UNMEASURED", "no answer from precommit-preview within %d s (head=%s)", PS_PV_WAIT_S, g_curc); return;
+    }
+    res = slurp(po, &rn2);
+    if (res) {
+        const char *m = strstr(res, "PRECOMMIT_PREVIEW\tblocked=");
+        if (m) blocked = atoi(m + 26);
+    }
+    if (blocked == 0) { emit(11, "commit-gate-preview", "PASS", "PRECOMMIT_PREVIEW blocked=0 over %d file(s), head=%s", nf, g_curc); free(res); return; }
+    if (blocked < 0) { emit(11, "commit-gate-preview", "UNMEASURED", "precommit-preview printed no PRECOMMIT_PREVIEW blocked= line (head=%s)", g_curc); free(res); return; }
+    {   char first[1200]; first[0] = 0;
+        cx_fmt(sc, sizeof sc, "grep -a '^GATE' '%s' | grep -a BLOCK | head -3 | cut -c1-200 | tr '\\t\\n' '  '", po);
+        sh(sc, first, sizeof first, 10);
+        emit(11, "commit-gate-preview", "FAIL", "PRECOMMIT_PREVIEW blocked=%d over %d file(s), head=%s: %.700s", blocked, nf, g_curc, first);
+    }
+    free(res);
+}
+
+/* ---------- item 12: before/after comparison of the batches the patch's files select ---------- */
+/* An author check proves the path the author changed; it proves nothing about the other consumers of what the patch
+   changed.  tools/affected.cx --files lists the registered batches that reach the changed files; the first --flip-max of
+   them (kind order: source, arg, literal, table, then the use closures; tools-compile-NNN excluded, they only compile)
+   are run in a private tree of the base and in the patched tree, and every status flip is listed.  PASS -> not PASS that
+   is not declared (--declare row `batch:ID<TAB>-<TAB>reason`) is a FAIL.  A --guard patch also needs every selected
+   negative control (batch id with block, refus, reject or deny) green after the patch. */
+#define PS_FLIP_MAX 48
+#define PS_FLIP_BUDGET_MS 240000
+static int g_flip_max = 12;
+static const char *g_flip_ids;
+typedef struct { char id[96]; char b[24], p[24]; } flip_t;
+static flip_t FL[PS_FLIP_MAX];
+static int nFL;
+
+static void build_base(void) {
+    char q1[1100], tt[1100], sc[4096], out[2048], q4[1100];
+    shq(q1, sizeof q1, g_repo); shq(q4, sizeof q4, g_overlay ? g_overlay : "");
+    if (pr_make(BASE, sizeof BASE) != 0) die2("private repository for the base could not be created", 0);
+    shq(tt, sizeof tt, BASE);
+    cx_fmt(sc, sizeof sc, "mkdir -p %s/.git/objects/info && printf '%%s\\n' \"$(%sgit -C %s rev-parse --path-format=absolute --git-path objects)\" > %s/.git/objects/info/alternates", tt, envu(), q1, tt);
+    step("object sharing (base) failed", sc);
+    {   char *co[] = { "checkout", "-q", "--detach", g_basec, 0 };
+        if (pr_git(BASE, co, out, sizeof out, 55) != 0) die2("checkout of base (item 12) failed", out);
+    }
+    cx_fmt(sc, sizeof sc, "[ ! -e %s/unisacc.com ] || ln -sf \"$(realpath %s)/unisacc.com\" %s/unisacc.com", q1, q1, tt);
+    step("unisacc.com link (base) failed", sc);
+    cx_fmt(sc, sizeof sc, "[ -z %s ] || { test -d %s && cp -a \"$(realpath %s)/.\" %s/; }", q4, q4, q4, tt);
+    step("overlay copy (base) failed", sc);
+}
+
+static int flip_rank(const char *via) {
+    static const char *k[] = { "source", "arg", "literal", "table", "arg-use", "literal-use", "use", 0 };
+    int i;
+    for (i = 0; k[i]; i++) if (!strcmp(via, k[i])) return i;
+    return 7;
+}
+static int flip_add(const char *id) {
+    int i;
+    for (i = 0; i < nFL; i++) if (!strcmp(FL[i].id, id)) return 0;
+    if (nFL >= PS_FLIP_MAX || strlen(id) >= sizeof FL[0].id) return 0;
+    cp(FL[nFL].id, (long)sizeof FL[nFL].id, id, (long)strlen(id) + 1); FL[nFL].b[0] = FL[nFL].p[0] = 0; nFL++;
+    return 1;
+}
+/* run the not-yet-answered ids of one tree (WHICH 0 = base, 1 = patched); returns how many are still unanswered */
+static int flip_run(const char *tree, int which, long deadline) {
+    char qt[1300], uc[1200], sc[6000], out[16384], csv[2400], qu[1300];
+    int round, i, pending;
+    if (sy_realpath("./unisacc.com", uc, (int)sizeof uc) <= 0) return nFL;
+    shq(qt, sizeof qt, tree); shq(qu, sizeof qu, uc);
+    for (round = 0; round < 8; round++) {
+        int k = 0, nn = 0;
+        csv[0] = 0;
+        for (i = 0; i < nFL && nn < 6; i++) {
+            char *st = which ? FL[i].p : FL[i].b;
+            if (st[0]) continue;
+            k += snprintf(csv + k, sizeof csv - (size_t)k, "%s%s", nn ? "," : "", FL[i].id); nn++;
+        }
+        if (!nn || sy_now_ms() > deadline) break;
+        cx_fmt(sc, sizeof sc, "cd %s && ln -sf %s unisacc.com && %ssh ./unisacc.com tools/affected.cx -- --ids %s --run -j 4 2>&1 | grep -a '^BATCH_RUN\\|^RUN_REFUSED\\|^DEFERRED'", qt, qu, envu(), csv);
+        sh(sc, out, sizeof out, 60);
+        {   char *p;
+            for (p = out; *p; ) {
+                char *e = strchr(p, '\n'), *f; int j;
+                if (e) *e = 0;
+                if (!strncmp(p, "BATCH_RUN\tid=", 13)) {
+                    char id[96], stv[24]; const char *s2 = strstr(p, "\tstatus=");
+                    int il = 0, sl = 0;
+                    for (f = p + 13; *f && *f != '\t' && il < 95; f++) id[il++] = *f;
+                    id[il] = 0;
+                    if (s2) for (f = (char *)s2 + 8; *f && *f != '\t' && sl < 23; f++) stv[sl++] = *f;
+                    stv[sl] = 0;
+                    for (j = 0; j < nFL; j++) if (!strcmp(FL[j].id, id) && sl) cp(which ? FL[j].p : FL[j].b, 24, stv, (long)strlen(stv) + 1);
+                } else if (!strncmp(p, "RUN_REFUSED\t", 12)) {
+                    for (j = 0; j < nFL; j++) if (!strcmp(FL[j].id, p + 12)) snprintf(which ? FL[j].p : FL[j].b, 24, "REFUSED");
+                }
+                if (!e) break;
+                p = e + 1;
+            }
+        }
+    }
+    for (i = 0, pending = 0; i < nFL; i++) if (!(which ? FL[i].p : FL[i].b)[0]) pending++;
+    return pending;
+}
+static int flip_declared(const char *db, const char *id) {
+    char key[140]; const char *p;
+    if (!db) return 0;
+    if (cx_fmt(key, sizeof key, "batch:%s\t", id)) return 0;
+    for (p = db; (p = strstr(p, key)); p += 1) if (p == db || p[-1] == '\n') return 1;
+    return 0;
+}
+static int flip_negctl(const char *id) {
+    static const char *w[] = { "block", "refus", "reject", "deny", 0 };
+    int i;
+    for (i = 0; w[i]; i++) if (strstr(id, w[i])) return 1;
+    return 0;
+}
+static void item12(void) {
+    char af[1400], files[6000], sc[9000], out[2048], lp[1300], qf[1300], uc[1200], qt[1300];
+    char *db = 0, *lst; size_t dn = 0, ln = 0;
+    int i, k = 0, nf = 0, seen_total = 0, red = 0, undecl = 0, fixed = 0, both = 0, declared = 0, pend0, pend1, neg = 0, negbad = 0;
+    char flips[900]; int fk = 0;
+    long deadline;
+    cx_fmt(af, sizeof af, "%s/tools/affected.cx", TREE);
+    if (sy_exists(af) != 1) { emit(12, "flip-compare", "NA", "no tools/affected.cx in the patched tree"); return; }
+    if (sy_realpath("./unisacc.com", uc, (int)sizeof uc) <= 0) { emit(12, "flip-compare", "UNMEASURED", "no ./unisacc.com in the working directory to run the batches with"); return; }
+    if (g_declare) db = slurp(g_declare, &dn);
+    if (g_flip_ids) {
+        const char *p = g_flip_ids; char id[96];
+        while (*p) {
+            int il = 0;
+            while (*p && *p != ',' && il < 95) id[il++] = *p++;
+            id[il] = 0; if (*p == ',') p++;
+            if (il) { flip_add(id); seen_total++; }
+        }
+    } else {
+        files[0] = 0;
+        for (i = 0; i < nA + nD; i++) {
+            const added_t *a = i < nA ? &A[i] : &D[i - nA];
+            int j, dup = 0;
+            if (!strcmp(a->file, "tests/batches.tsv") || !strcmp(a->file, "tests/coverage.tsv") || !strcmp(a->file, "tests/tools-compile-sources.tsv")) continue;
+            for (j = 0; j < i; j++) { const added_t *b = j < nA ? &A[j] : &D[j - nA]; if (b->file == a->file || !strcmp(b->file, a->file)) { dup = 1; break; } }
+            if (dup) continue;
+            shq(qf, sizeof qf, a->file);
+            if (k + (int)strlen(qf) + 2 >= (int)sizeof files) { emit(12, "flip-compare", "UNMEASURED", "the patch touches too many files for one selection"); free(db); return; }
+            if (nf) files[k++] = ' ';
+            cp(files + k, (long)(sizeof files - k), qf, (long)strlen(qf) + 1);
+            k += (int)strlen(qf); nf++;
+        }
+        if (!nf) { emit(12, "flip-compare", "NA", "the patch changes no file outside the shared tables"); free(db); return; }
+        cx_fmt(lp, sizeof lp, "%s/flip.list", T); shq(qt, sizeof qt, TREE); shq(qf, sizeof qf, uc);
+        cx_fmt(sc, sizeof sc, "cd %s && ln -sf %s unisacc.com && %ssh ./unisacc.com tools/affected.cx -- --files %s --list-only > '%s' 2>&1", qt, qf, envu(), files, lp);
+        if (sh(sc, out, sizeof out, 60) != 0) { emit(12, "flip-compare", "UNMEASURED", "tools/affected.cx --files could not list the selection"); free(db); return; }
+        lst = slurp(lp, &ln);
+        if (!lst) { emit(12, "flip-compare", "UNMEASURED", "the selection list is unreadable"); free(db); return; }
+        {   int rank;
+            for (rank = 0; rank <= 7; rank++) {
+                char *p;
+                for (p = lst; *p; ) {
+                    char *e = strchr(p, '\n'), *t1, *t2, *t3;
+                    if (e) *e = 0;
+                    if (!strncmp(p, "AFFECTED\t", 9)) {
+                        t1 = p + 9; t2 = strchr(t1, '\t');
+                        if (t2) {
+                            char id[96], via[40]; int il = (int)(t2 - t1), vl = 0;
+                            t3 = strstr(t2, "\tvia=");
+                            if (il > 0 && il < 96 && t3) {
+                                cp(id, (long)sizeof id, t1, (long)il); id[il] = 0;
+                                for (t3 += 5; *t3 && *t3 != '\t' && vl < 39; t3++) via[vl++] = *t3;
+                                via[vl] = 0;
+                                if (strncmp(id, "tools-compile-", 14) && flip_rank(via) == rank) {
+                                    seen_total++;
+                                    if (nFL < g_flip_max) flip_add(id);
+                                }
+                            }
+                        }
+                    }
+                    if (e) *e = '\n';   /* the list is walked once per kind rank */
+                    if (!e) break;
+                    p = e + 1;
+                }
+            }
+        }
+        free(lst);
+    }
+    if (!nFL) { emit(12, "flip-compare", "NA", "no registered batch reaches the changed files"); free(db); return; }
+    build_base();
+    deadline = sy_now_ms() + PS_FLIP_BUDGET_MS;
+    pend0 = flip_run(BASE, 0, deadline);
+    pend1 = flip_run(TREE, 1, deadline + PS_FLIP_BUDGET_MS);
+    flips[0] = 0;
+    for (i = 0; i < nFL; i++) {
+        int bp = !strcmp(FL[i].b, "PASS"), pp = !strcmp(FL[i].p, "PASS");
+        if (!FL[i].b[0] || !FL[i].p[0]) continue;
+        if (bp && !pp) {
+            int dc = flip_declared(db, FL[i].id);
+            red++;
+            if (dc) declared++; else undecl++;
+            if (fk < 700) fk += snprintf(flips + fk, sizeof flips - (size_t)fk, "%s %s->%s%s; ", FL[i].id, FL[i].b, FL[i].p, dc ? " (declared)" : "");
+        } else if (!bp && pp) {
+            fixed++;
+            if (fk < 700) fk += snprintf(flips + fk, sizeof flips - (size_t)fk, "%s %s->%s; ", FL[i].id, FL[i].b, FL[i].p);
+        } else if (!bp && !pp) both++;
+        if (flip_negctl(FL[i].id)) { neg++; if (!pp) negbad++; }
+    }
+    (void)red;
+    if (undecl) { emit(12, "flip-compare", "FAIL", "%d batch(es) went PASS -> not PASS and are not declared: %s", undecl, flips); free(db); return; }
+    if (g_guard && negbad) { emit(12, "flip-compare", "FAIL", "%d selected negative control(s) are not green after the patch: %s", negbad, flips); free(db); return; }
+    if (pend0 || pend1) { emit(12, "flip-compare", "UNMEASURED", "%d of %d selected batches unanswered in the base, %d in the patched tree (budget %d s per tree); compared the rest, flips: %s", pend0, nFL, pend1, PS_FLIP_BUDGET_MS / 1000, flips[0] ? flips : "none"); free(db); return; }
+    if (g_guard && !neg) { emit(12, "flip-compare", "UNMEASURED", "guard patch but no negative control (batch id with block, refus, reject or deny) is among the %d selected batches", nFL); free(db); return; }
+    if (seen_total > nFL && !g_flip_ids) { emit(12, "flip-compare", "UNMEASURED", "ran %d of %d selected batches (--flip-max raises the cap); compared: no PASS flip, fixed=%d red-both=%d declared=%d", nFL, seen_total, fixed, both, declared); free(db); return; }
+    emit(12, "flip-compare", "PASS", "%d batches compared in the base and the patched tree: no undeclared PASS flip, fixed=%d red-both=%d declared=%d negative-controls=%d%s%s", nFL, fixed, both, declared, neg, flips[0] ? ", flips: " : "", flips);
+    free(db);
+}
+
+/* ---------- item 7: malformed and empty inputs to each decision entry ---------- */
+/* --probe CMD names an entry that judges one input file: CMD reads $F and must exit 1..123 (a refusal, never 0, never a
+   crash/timeout) for every malformed input below.  Without --probe the item is NA, or UNMEASURED for a --guard patch. */
+static const struct { const char *name, *bytes; } CORP[] = {
+    { "empty", "" },
+    { "zeros64", "@zero64" },
+    { "no-newline", "x" },
+    { "crlf", "1\\t2\\r\\n" },
+    { "negative", "-1\\n" },
+    { "plus", "+5\\n" },
+    { "extra-column", "a\\tb\\tc\\td\\te\\tf\\n" },
+    { "truncated-hash", "0123456789abcdef" },
+    { 0, 0 }
+};
+static void item7(void) {
+    int p, c, bad = 0, ran = 0; char sc[4096], out[2048], f[1200], q[1200], dir[1200];
+    if (!g_nprobe) { if (g_guard) emit(7, "malformed-input", "UNMEASURED", "guard patch without --probe CMD ($F is the input file)"); else emit(7, "malformed-input", "NA", "no --probe given"); return; }
+    cx_fmt(dir, sizeof dir, "%s/corpus", T);
+    cx_fmt(sc, sizeof sc, "mkdir -p %s", dir); sh(sc, out, sizeof out, 10);
+    for (c = 0; CORP[c].name; c++) {
+        cx_fmt(f, sizeof f, "%s/%s", dir, CORP[c].name);
+        shq(q, sizeof q, f);
+        if (CORP[c].bytes[0] == '@') cx_fmt(sc, sizeof sc, "head -c 64 /dev/zero > %s", q);
+        else cx_fmt(sc, sizeof sc, "printf -- '%s' > %s", CORP[c].bytes, q);
+        if (sh(sc, out, sizeof out, 10) != 0) die2("corpus write", CORP[c].name);
+    }
+    for (p = 0; p < g_nprobe; p++) {
+        for (c = 0; CORP[c].name; c++) {
+            int rc;
+            cx_fmt(f, sizeof f, "%s/%s", dir, CORP[c].name);
+            shq(q, sizeof q, f);
+            if (cx_fmt(sc, sizeof sc, "cd %s && F=%s; export F; %s", TREE, q, g_probe[p])) die2("script", "too long");
+            rc = shl(sc, out, sizeof out, g_cto); ran++;
+            if (rc < 1 || rc > 123) { emit(7, "malformed-input", "FAIL", "probe %d accepted or crashed on '%s' (rc=%d); a malformed input must be refused with rc 1..123", p, CORP[c].name, rc); bad++; }
+        }
+    }
+    if (!bad) emit(7, "malformed-input", "PASS", "%d probe runs, every malformed input refused", ran);
+}
+
+static void item5(void) {
+    /* every changed non-check source needs at least one added check line that feeds a failing or empty input */
+    static const char *neg[] = { "REFUSE", "refuse", "FAIL", "rc == 1", "rc == 2", "rc != 0", "!= 0", "nonexist", "missing", "empty", "ENOENT", "bad", "must not", "never", 0 };
+    int i, k, srcs = 0, negs = 0;
+    for (i = 0; i < nA; i++) if (!is_check_file(A[i].file) && is_source(A[i].file) && (i == 0 || A[i - 1].file != A[i].file)) srcs++;
+    for (i = 0; i < nA; i++) {
+        if (!is_check_file(A[i].file)) continue;
+        for (k = 0; neg[k]; k++) if (strstr(A[i].text, neg[k])) { negs++; break; }
+    }
+    if (!srcs) emit(5, "negative-input", "NA", "no non-check source changed");
+    else if (negs >= srcs) emit(5, "negative-input", "PASS", "%d added negative-case lines for %d changed sources", negs, srcs);
+    else emit(5, "negative-input", "FAIL", "%d changed sources but only %d added check lines feeding a failing/empty input", srcs, negs);
+}
+int main(int argc, char **argv) {
+    int i; size_t pn; char *pb, sc[1200], out[8192], hash[512], q[1200];
+    for (i = 1; i < argc; i++) {
+        if (!strcmp(argv[i], "--patch") && i + 1 < argc) g_patch = argv[++i];
+        else if (!strcmp(argv[i], "--base") && i + 1 < argc) g_base = argv[++i];
+        else if (!strcmp(argv[i], "--current") && i + 1 < argc) g_cur = argv[++i];
+        else if (!strcmp(argv[i], "--repo") && i + 1 < argc) g_repo = argv[++i];
+        else if (!strcmp(argv[i], "--out") && i + 1 < argc) g_out = argv[++i];
+        else if (!strcmp(argv[i], "--check") && i + 1 < argc) { if (g_nchk == PS_MAXCHK) die2("too many --check", 0); g_chk[g_nchk++] = argv[++i]; }
+        else if (!strcmp(argv[i], "--check-timeout") && i + 1 < argc) { g_cto = atoi(argv[++i]); if (g_cto < 1 || g_cto > 55) die2("check-timeout outside", "1..55"); }
+        else if (!strcmp(argv[i], "--guard")) g_guard = 1;
+        else if (!strcmp(argv[i], "--declare") && i + 1 < argc) g_declare = argv[++i];
+        else if (!strcmp(argv[i], "--overlay") && i + 1 < argc) g_overlay = argv[++i];
+        else if (!strcmp(argv[i], "--probe") && i + 1 < argc) { if (g_nprobe == 4) die2("too many --probe", 0); g_probe[g_nprobe++] = argv[++i]; }
+        else if (!strcmp(argv[i], "--sample") && i + 1 < argc) g_sample = argv[++i];
+        else if (!strcmp(argv[i], "--flip-max") && i + 1 < argc) { g_flip_max = atoi(argv[++i]); if (g_flip_max < 1 || g_flip_max > PS_FLIP_MAX) die2("flip-max outside", "1..48"); }
+        else if (!strcmp(argv[i], "--flip-ids") && i + 1 < argc) g_flip_ids = argv[++i];
+        else die2("unknown argument", argv[i]);
+    }
+    if (!g_patch || !g_out || !g_nchk) die2("usage", "--patch P --check CMD [--check CMD] --out RECEIPT [--base REV] [--repo R] [--guard]");
+    /* an old receipt at --out must never survive a refusal or a crash: remove it before anything else can fail */
+    shq(q, sizeof q, g_out);
+    cx_fmt(sc, sizeof sc, "rm -f -- %s", q);
+    if (sh(sc, out, sizeof out, 10) != 0) die2("old receipt could not be removed", g_out);
+    /* the tool's identity is the sha256 of its own source file (argv[0] in run mode), whatever the working directory */
+    shq(q, sizeof q, argv[0]);
+    cx_fmt(sc, sizeof sc, "sha256sum -- %s | cut -c1-64", q);
+    if (sh(sc, g_toolsha, sizeof g_toolsha, 10) != 0 || strlen(g_toolsha) < 64) die2("tool identity unreadable", argv[0]);
+    g_toolsha[64] = 0;
+    pb = slurp(g_patch, &pn);
+    if (!pb || pn == 0) die2("patch missing or empty", g_patch);
+    shq(q, sizeof q, g_patch);
+    cx_fmt(sc, sizeof sc, "sha256sum %s | cut -d' ' -f1", q);
+    if (sh(sc, hash, sizeof hash, 10) != 0 || strlen(hash) < 64) die2("sha256sum", 0);
+    hash[64] = 0;
+    g_t0 = sy_now_ms();
+    { char tt[1024]; cx_fmt(tt, sizeof tt, "%s/premerge-selfcheck-XXXXXX", sy_env_or("TMPDIR", "/tmp")); if (!mkdtemp(tt)) die2("mkdtemp", 0); cx_fmt(T, sizeof T, "%s", tt); }
+    build_tree();
+    {   char th[256], tl[2200]; int j;
+        cx_fmt(th, sizeof th, "%s", g_toolsha);
+        cx_fmt(tl, sizeof tl, "SELFCHECK_INPUT base_commit=%s overlay=%d guard=%d tool_sha256=%s check_timeout=%d\n", g_basec, g_overlay ? 1 : 0, g_guard, th, g_cto); rawl(tl);
+        for (j = 0; j < g_nchk; j++) { cx_fmt(tl, sizeof tl, "SELFCHECK_INPUT check%d=%.300s\n", j, g_chk[j]); rawl(tl); }
+        for (j = 0; j < g_nprobe; j++) { cx_fmt(tl, sizeof tl, "SELFCHECK_INPUT probe%d=%.300s\n", j, g_probe[j]); rawl(tl); }
+    }
+    parse_patch(pb, pn);
+    if (nA == 0 && nD == 0) die2("patch adds and deletes no lines", g_patch);
+    if (run_checks(0, out, sizeof out) != 0) { printf("%s\n", out); die2("baseline --check not green on the patched tree", 0); }
+    item1(); item2(); item3(); item4(); item5(); item6(); item7(); item8(); item10(); item11(); item12();
+    {   char tail[1024]; const char *v = nfail ? "FAIL" : nunm ? "INCOMPLETE" : "PASS";
+        cx_fmt(tail, sizeof tail, "SELFCHECK_SUMMARY patch_sha256=%s fail=%d unmeasured=%d verdict=%s\n", hash, nfail, nunm, v);
+        if (rn + (int)strlen(tail) >= (int)sizeof rec) die2("receipt", "too long");
+        cp(rec + rn, (long)(sizeof rec - rn), tail, (long)strlen(tail) + 1); rn += (int)strlen(tail);
+    }
+    if (cx_write(g_out, rec, (size_t)rn) != 0) die2("write receipt", g_out);
+    fputs(rec, stdout);
+    cx_fmt(sc, sizeof sc, "rm -rf %s", T); sh(sc, 0, 0, 20);
+    if (TREE[0] && strstr(TREE, "unisacc-privrepo-")) { cx_fmt(sc, sizeof sc, "rm -rf '%s'", TREE); sh(sc, 0, 0, 20); }
+    if (BASE[0] && strstr(BASE, "unisacc-privrepo-")) { cx_fmt(sc, sizeof sc, "rm -rf '%s'", BASE); sh(sc, 0, 0, 20); }
+    return nfail ? 1 : nunm ? 3 : 0;
+}

@@ -103,6 +103,16 @@ static int repo_path(const char *a, const char *cur, int out) {
     return eq(p, REPO) || sw(p, cat2(REPO, "/"));
 }
 
+/* 引号体只含 [A-Za-z0-9._/@+-] 的普通名(分支名、路径):原样保留,不剥空,使 'junk' 与 "junk" 仍能按名判定;其余体照旧剥空。
+ * 波及面:strip_bodies 是所有 Bash 规则共用的前置,保留普通引号体后,带引号路径的写文件规则同时生效:
+ * 重定向、sed -i、tee、cp、mkdir 写仓内或 out/ 的带引号写法(如 echo x > '/r/repo/a.c')由放行变为拒绝。 */
+static int plain_body(const char *b, long n) {
+    long k;
+    if (n <= 0) return 0;
+    for (k = 0; k < n; k++) { char c = b[k]; if (!(isal(c) || isdg(c) || c == '.' || c == '_' || c == '/' || c == '@' || c == '+' || c == '-')) return 0; }
+    return 1;
+}
+
 static char *strip_bodies(const char *cmd) {
     long n = sl(cmd), i = 0, o = 0, ls; char *end = 0; char *s = (char *)mm_alloc(n + 2), *r;
     while (i <= n) {
@@ -140,8 +150,8 @@ static char *strip_bodies(const char *cmd) {
     for (i = 0; i < ls; i++) {
         char c = s[i];
         if (c == '\\') { r[o++] = c; if (i + 1 < ls) r[o++] = s[i + 1]; i++; continue; }
-        if (c == '\'') { long j = i + 1; while (j < ls && s[j] != '\'') j++; if (j >= ls) { r[o] = 0; return r; } r[o++] = '\''; r[o++] = '\''; i = j; continue; }
-        if (c == '"') { long j = i + 1; while (j < ls && s[j] != '"') j += s[j] == '\\' ? 2 : 1; r[o++] = '"'; r[o++] = '"'; i = j; continue; }
+        if (c == '\'') { long j = i + 1; while (j < ls && s[j] != '\'') j++; if (j >= ls) { r[o] = 0; return r; } if (plain_body(s + i + 1, j - i - 1)) { mm_copy(r + o, ls * 2 + 4 - o, s + i, j - i + 1); o += j - i + 1; } else { r[o++] = '\''; r[o++] = '\''; } i = j; continue; }
+        if (c == '"') { long j = i + 1; while (j < ls && s[j] != '"') j += s[j] == '\\' ? 2 : 1; if (j < ls && plain_body(s + i + 1, j - i - 1)) { mm_copy(r + o, ls * 2 + 4 - o, s + i, j - i + 1); o += j - i + 1; } else { r[o++] = '"'; r[o++] = '"'; } i = j; continue; }
         r[o++] = c;
     }
     r[o] = 0;
@@ -151,9 +161,13 @@ static char *strip_bodies(const char *cmd) {
 static int inlist(char **a, long from, long n, const char *x) { long m; for (m = from; m < n; m++) if (eq(a[m], x)) return 1; return 0; }
 /* 分支纪律(只在命令作用于本仓时判定):新建/改名/复制出的分支名必须匹配 ^v0\.0\.[0-9]+$。
  *   main 只作 branch -m/-M/-c/-C 与 checkout -B/switch -C/worktree add -B 的目标放行;ujs 别仓靠作用域放行(cwd 或 -C 目标不在 GUARD_REPO 下)。
- *   名为空(引号被 strip_bodies 剥空)或含 $/反引号无法静态判定,放行。删除与列出不拦。
- * 已知缺口(本轮不修):子壳 (git ...)、花括号 { git ...; }、if/then 体、env/command/eval/xargs 前缀、
- *   update-ref、fetch/push 的 refspec 建分支。devsvc-core.cx 的合并工作树(merge-NAME 路径与 merge/NAME 分支)是内部 git 调用,不经本钩子,但不合规。 */
+ *   名含 $/反引号无法静态判定,放行。引号体只含普通名字符时 strip_bodies 原样保留,所以 'junk'、"junk" 按名判定;含空白或元字符的引号体仍剥空放行。删除与列出不拦。
+ * 已知缺口(不修):子壳 (git ...)、花括号 { git ...; }、if/then 体、env/command/eval/xargs 前缀、update-ref、fetch/push 的 refspec 建分支;
+ *   --color/--sort/--abbrev 后跟 junk(实际 --color 无值时 junk 是新分支名,这里按吞值放行);checkout --track origin/junk(建本地分支 junk);
+ *   branch -d x -m a junk 与 branch --list -m(只列出与改名混用时按只列出放行);cd 到仓外后用 --git-dir 指向本仓(作用域只看 cwd 与 -C,不看 --git-dir/--work-tree)。
+ *   带引号的选项或子命令('-b'、'checkout'、'git')仍放行;元字符引号名('junk;x'、'junk!'、'junk=1'、'a&b'、'junk(1)')剥空后放行,
+ *   实际可建出该分支名(下一轮考虑:引号体剥空后的名字一律拒绝,合规名不需要元字符)。
+ *   devsvc-core.cx 的合并工作树(merge-NAME 路径与 merge/NAME 分支)是内部 git 调用,不经本钩子,但不合规。 */
 static int ver_branch_ok(const char *nm0, int allow_main) {
     char *nm = strip_q(nm0); const char *q;
     if (!*nm || hasc(nm, '$') || hasc(nm, '`')) return 1;
@@ -167,7 +181,7 @@ static int ver_branch_ok(const char *nm0, int allow_main) {
 static char GB[512];
 static const char *branch_bad(const char *nm, int allow_main) {
     if (ver_branch_ok(nm, allow_main)) return 0;
-    tx_snprintf(GB, sizeof GB, "git 创建分支 %s:只允许 v0.0.NN 版本分支,补丁放 ~/.local/share/unisacc/research/", nm);
+    tx_snprintf(GB, sizeof GB, "git 创建分支 %s:只允许 v0.0.NN 版本分支,补丁放 ~/.local/share/unisacc/research/", strip_q(nm));
     return GB;
 }
 static int in_repo_dir(const char *d) { long rl = sl(REPO); return !*d || eq(d, REPO) || (sw(d, REPO) && d[rl] == '/'); }
@@ -248,8 +262,9 @@ static const char *branch_violation(char **a, long i, long n) {
         }
         /* worktree add PATH 无 -b/-B/--detach 且无 commit-ish:git 以路径末段为新分支名 */
         if (wt && !sawb && !detach && npos == 1 && pos0) {
-            const char *base = pos0, *q;
-            for (q = pos0; *q; q++) if (*q == '/' && q[1]) base = q + 1;
+            char *pp = sdup(pos0); const char *base = pp, *q; long pl = sl(pp);
+            while (pl > 1 && pp[pl - 1] == '/') pp[--pl] = 0;
+            for (q = pp; *q; q++) if (*q == '/' && q[1]) base = q + 1;
             { const char *bv = branch_bad(base, 0); if (bv) return bv; }
         }
     }

@@ -1,0 +1,185 @@
+#pragma unisa module faultinj
+/* faultinj -- failure injection for tool checks.  A check that says "the tool survives a failing git / an empty file / a bad working
+ * directory / a polluted git environment" needs the failure made on purpose; this module makes the four kinds, only inside a scratch
+ * directory it created itself, and removes that directory at the end.  Every function returns 0 on success and a negative value on failure.
+ *
+ *   int fi_open(char *dir, int cap)
+ *     creates sy_tmpdir()/unisacc-faultinj-XXXXXXXX (canonical path into DIR).  Every other call refuses a DIR that fi_open did not make
+ *     (named unisacc-faultinj-*, directly below the canonical sy_tmpdir(), holding the marker file .faultinj).
+ *   int fi_close(const char *dir)          removes DIR and everything in it (a read-only directory made by fi_cwd included); same gate.
+ *
+ *   (1) a git that fails:
+ *   int fi_fake_git(const char *dir, const char *match, int nth, char *prefix, int cap)
+ *     writes DIR/bin/git.  A call whose arguments contain the word MATCH (any call when MATCH is 0 or "") is a matching call; matching calls are
+ *     counted from 1.  When NTH is 0 every matching call fails, else only the NTH one: the fake prints "fatal: injected failure (faultinj): git
+ *     ARGS" on stderr and exits 128.  Every other call runs the real git unchanged.  PREFIX gets the shell text `env PATH='DIR/bin':"$PATH" `
+ *     to put before the command under test.  Nothing outside DIR is touched.
+ *   int fi_git_calls(const char *dir)      how many git calls the fake saw;  int fi_git_failed(const char *dir)   how many it failed.
+ *
+ *   (2) empty and truncated files:
+ *   int fi_empty_file(const char *path)    creates PATH as an empty file (an existing file is emptied).
+ *   int fi_truncated_copy(const char *src, const char *dst, long n)
+ *     DST holds the first N bytes of SRC (all of SRC when N is larger; N < 0 refused); SRC is not changed.
+ *
+ *   (3) a bad working directory:
+ *   int fi_cwd(int kind, const char *dir, char *prefix, int pcap, char *path, int ccap)
+ *     kind 0 FI_MISSING   PATH names a directory that does not exist (below DIR); PREFIX is empty.
+ *     kind 1 FI_NOTREPO   PATH is an empty directory that is not inside a repository; PREFIX is `cd 'PATH' && `.
+ *     kind 2 FI_READONLY  PATH is a directory with mode 0555 (no write for the owner; root ignores the mode); PREFIX as for kind 1.
+ *     kind 3 FI_DELETED   PATH was removed; PREFIX is `mkdir 'PATH' && cd 'PATH' && rmdir 'PATH' && `: the command starts in a working
+ *                         directory that has been deleted under it.  PATH or PREFIX may be 0 when not wanted.
+ *
+ *   (4) a polluted git environment:
+ *   int fi_gitenv(int kind, const char *outer, char *prefix, int cap)
+ *     PREFIX is a shell text `env NAME='...' ... ` (trailing blank) that sets the repository-locating variables:
+ *     kind 0 FI_ENV_OUTER   GIT_DIR=OUTER/.git, GIT_INDEX_FILE=OUTER/.git/index, GIT_WORK_TREE=OUTER (OUTER is the directory of another repository);
+ *     kind 1 FI_ENV_GONE    GIT_DIR, GIT_INDEX_FILE and GIT_WORK_TREE all /nonexistent;
+ *     kind 2 FI_ENV_SUPER   GIT_INTERNAL_SUPER_PREFIX=OUTER/ (what a submodule command exports);
+ *     kind 3 FI_ENV_ALL     the variables of kinds 0 and 2 together.
+ *
+ * The kinds are plain integers: the module exports no objects or macros (CXIF v0).  Check: tools/check-faultinj.cx. */
+#pragma unisa use cxlib.ckrun
+#pragma unisa use sys.fs
+#pragma unisa use sys.posix
+#pragma unisa use sys.env
+#pragma unisa use mem.bytes
+#pragma unisa use mem.heap
+#pragma unisa use text.text
+
+#define FI_MARK ".faultinj"
+
+/* DIR is a directory fi_open made: canonical, named unisacc-faultinj-*, directly below the canonical temp directory, marked */
+static int fi_gate(const char *dir) {
+    char canon[4096], tmpc[4096], pre[4200], mp[4200]; size_t n = 0; char *b; int ok;
+    if (!dir || dir[0] != '/') return -2;
+    if (sy_realpath(dir, canon, (int)sizeof canon) <= 0 || strcmp(canon, dir) != 0) return -2;
+    if (sy_realpath(sy_tmpdir(), tmpc, (int)sizeof tmpc) <= 0) return -2;
+    if (cx_fmt(pre, sizeof pre, "%s/unisacc-faultinj-", tmpc) || strncmp(canon, pre, strlen(pre)) != 0 || strchr(canon + strlen(pre), '/') != 0) return -2;
+    if (cx_fmt(mp, sizeof mp, "%s/" FI_MARK, dir)) return -2;
+    b = cx_read(mp, &n);
+    if (!b) return -2;
+    ok = n == 6 && memcmp(b, "fi-v1\n", 6) == 0;
+    free(b);
+    return ok ? 0 : -2;
+}
+
+int fi_open(char *dir, int cap) {
+    char path[4096], canon[4096], mp[4200];
+    if (!dir || cap < 2) return -1;
+    dir[0] = 0;
+    if (sy_mkdtemp(sy_tmpdir(), "unisacc-faultinj-", path, (int)sizeof path) != 0) return -1;
+    if (sy_realpath(path, canon, (int)sizeof canon) <= 0) return -1;
+    if (cx_fmt(mp, sizeof mp, "%s/" FI_MARK, canon) || sy_write_file(mp, "fi-v1\n", 6, 0600) != 0) return -1;
+    if (mm_copy(dir, cap, canon, (long)strlen(canon) + 1) != 0) return -1;
+    return 0;
+}
+
+int fi_close(const char *dir) {
+    char cmd[4400], q[4300];
+    if (fi_gate(dir) != 0) return -2;
+    /* a read-only directory made by fi_cwd must be writable again before it can be removed */
+    if (ckk_shq(q, sizeof q, dir) != 0) return -1;
+    if (cx_fmt(cmd, sizeof cmd, "chmod -R u+rwx %s 2>/dev/null; rm -rf %s", q, q)) return -1;
+    return ckk_sh_t("faultinj", cmd, 0, 0, 20) == 0 ? 0 : -1;
+}
+
+int fi_fake_git(const char *dir, const char *match, int nth, char *prefix, int cap) {
+    char bin[4300], path[4400], qd[4300], qm[1100], qb[4300], script[9000]; int k;
+    if (fi_gate(dir) != 0) return -2;
+    if (!match) match = "";
+    if (nth < 0 || strlen(match) > 200) return -1;
+    if (cx_fmt(bin, sizeof bin, "%s/bin", dir) || sy_mkdir_all(bin, 0700) != 0) return -1;
+    if (cx_fmt(path, sizeof path, "%s/git", bin)) return -1;
+    if (ckk_shq(qd, sizeof qd, dir) || ckk_shq(qm, sizeof qm, match) || ckk_shq(qb, sizeof qb, bin)) return -1;
+    /* the fake: log the call; a matching call increments the match counter and fails when it is the NTH (or NTH is 0); the real git is
+       the next `git` on PATH once the fake's own directory is cut off the front */
+    k = cx_fmt(script, sizeof script,
+        "#!/bin/sh\n"
+        "D=%s\nM=%s\nN=%d\n"
+        "echo \"$*\" >> \"$D/git-calls.log\"\n"
+        "hit=0\n"
+        "if [ -z \"$M\" ]; then hit=1; else for a in \"$@\"; do if [ \"$a\" = \"$M\" ]; then hit=1; fi; done; fi\n"
+        "if [ \"$hit\" = 1 ]; then\n"
+        "  c=$(cat \"$D/git-match.count\" 2>/dev/null || echo 0); c=$((c + 1)); echo \"$c\" > \"$D/git-match.count\"\n"
+        "  if [ \"$N\" = 0 ] || [ \"$N\" = \"$c\" ]; then\n"
+        "    echo \"$*\" >> \"$D/git-failed.log\"\n"
+        "    echo \"fatal: injected failure (faultinj): git $*\" >&2\n"
+        "    exit 128\n"
+        "  fi\n"
+        "fi\n"
+        "PATH=${PATH#%s:}\n"
+        "exec git \"$@\"\n", qd, qm, nth, qb);
+    if (k) return -1;
+    if (sy_write_file(path, script, (int64_t)strlen(script), 0755) != 0) return -1;
+    if (prefix && cap > 0 && cx_fmt(prefix, cap, "env PATH=%s:\"$PATH\" ", qb)) return -1;
+    return 0;
+}
+
+/* number of lines of DIR/NAME (0 when the file does not exist) */
+static int fi_lines(const char *dir, const char *name) {
+    char p[4400]; size_t n = 0, i; char *b; int c = 0;
+    if (fi_gate(dir) != 0 || cx_fmt(p, sizeof p, "%s/%s", dir, name)) return -2;
+    b = cx_read(p, &n);
+    if (!b) return 0;
+    for (i = 0; i < n; i++) if (b[i] == '\n') c++;
+    free(b);
+    return c;
+}
+int fi_git_calls(const char *dir) { return fi_lines(dir, "git-calls.log"); }
+int fi_git_failed(const char *dir) { return fi_lines(dir, "git-failed.log"); }
+
+int fi_empty_file(const char *path) {
+    if (!path || !path[0]) return -1;
+    return sy_write_file(path, "", 0, 0600) == 0 ? 0 : -1;
+}
+
+int fi_truncated_copy(const char *src, const char *dst, long n) {
+    size_t sn = 0; char *b; int rc;
+    if (!src || !dst || n < 0) return -1;
+    b = cx_read(src, &sn);
+    if (!b) return -1;
+    if ((size_t)n < sn) sn = (size_t)n;
+    rc = sy_write_file(dst, b, (int64_t)sn, 0600) == 0 ? 0 : -1;
+    free(b);
+    return rc;
+}
+
+int fi_cwd(int kind, const char *dir, char *prefix, int pcap, char *path, int ccap) {
+    char p[4400], q[4500], pre[4600];
+    if (fi_gate(dir) != 0) return -2;
+    if (kind < 0 || kind > 3) return -1;
+    if (cx_fmt(p, sizeof p, "%s/cwd-%d", dir, kind)) return -1;
+    pre[0] = 0;
+    if (kind == 1 || kind == 2) {
+        if (sy_mkdir(p, 0700) != 0) return -1;
+        if (kind == 2 && sy_chmod(p, 0555) != 0) return -1;
+    }
+    if (kind == 1 || kind == 2 || kind == 3) {
+        if (ckk_shq(q, sizeof q, p)) return -1;
+        if (kind == 3) { if (cx_fmt(pre, sizeof pre, "mkdir %s && cd %s && rmdir %s && ", q, q, q)) return -1; }
+        else if (cx_fmt(pre, sizeof pre, "cd %s && ", q)) return -1;
+    }
+    if (path && ccap > 0 && mm_copy(path, ccap, p, (long)strlen(p) + 1) != 0) return -1;
+    if (prefix && pcap > 0 && mm_copy(prefix, pcap, pre, (long)strlen(pre) + 1) != 0) return -1;
+    return 0;
+}
+
+int fi_gitenv(int kind, const char *outer, char *prefix, int cap) {
+    char o[4300], qd[4400], qi[4400], qw[4400], qs[4400], t[4400];
+    if (!prefix || cap < 2 || kind < 0 || kind > 3) return -1;
+    if (kind != 1 && (!outer || outer[0] != '/')) return -1;
+    prefix[0] = 0;
+    if (kind == 1) return cx_fmt(prefix, cap, "env GIT_DIR=/nonexistent GIT_INDEX_FILE=/nonexistent GIT_WORK_TREE=/nonexistent ") ? -1 : 0;
+    if (ckk_shq(o, sizeof o, outer)) return -1;
+    if (kind == 0 || kind == 3) {
+        if (cx_fmt(t, sizeof t, "%s/.git", outer) || ckk_shq(qd, sizeof qd, t)) return -1;
+        if (cx_fmt(t, sizeof t, "%s/.git/index", outer) || ckk_shq(qi, sizeof qi, t)) return -1;
+        if (ckk_shq(qw, sizeof qw, outer)) return -1;
+    }
+    if (kind == 2 || kind == 3) {
+        if (cx_fmt(t, sizeof t, "%s/", outer) || ckk_shq(qs, sizeof qs, t)) return -1;
+    }
+    if (kind == 0) return cx_fmt(prefix, cap, "env GIT_DIR=%s GIT_INDEX_FILE=%s GIT_WORK_TREE=%s ", qd, qi, qw) ? -1 : 0;
+    if (kind == 2) return cx_fmt(prefix, cap, "env GIT_INTERNAL_SUPER_PREFIX=%s ", qs) ? -1 : 0;
+    return cx_fmt(prefix, cap, "env GIT_DIR=%s GIT_INDEX_FILE=%s GIT_WORK_TREE=%s GIT_INTERNAL_SUPER_PREFIX=%s ", qd, qi, qw, qs) ? -1 : 0;
+}

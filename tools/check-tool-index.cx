@@ -115,6 +115,34 @@ int main(void) {
         rc = cx_runv_timeout(v, 50, &o, &m);
         ck(rc == 0 && o && hasl(o, (long)m, "tools=0\ttables=0"), "empty-root");
     }
+    {   /* which tool mentions which table (readers_count): the names are found by hash, not by substring search, so the boundaries are pinned.
+         * Tables: fz.tsv and oa.tsv share a hash slot (fnv64 % 1024 = 268) and have the same length; p.tsv, oa.tsv, foo.tsv are three name
+         * lengths; build/foo.tsv and build/layer-api/foo.tsv are one name in two places; bar.tsv and barfoo.tsv overlap.
+         * Tools: t1 mentions oa only; t2 mentions p, oa and foo; t3 writes none.tsv, oa.tsv, p.tsv (the first .tsv is not a table);
+         * t4 is exactly "p.tsv" (no prefix, no newline); t5 is "barfoo.tsvx" (a name inside a longer word, a letter after .tsv). */
+        long z = 0; char *r; static const char *T[] = {"fz", "oa", "foo", "bar", "barfoo", "p"};
+        int k;
+        { char base[320]; mm_copy(base, sizeof base, dir, tx_len(dir, 320) + 1); cx_fmt(dir, sizeof dir, "%s/readers", base); mkdir(dir, 0700); }
+        cx_fmt(cmd, sizeof cmd, "%s/tools", dir); mkdir(cmd, 0700);
+        cx_fmt(cmd, sizeof cmd, "%s/build", dir); mkdir(cmd, 0700);
+        cx_fmt(cmd, sizeof cmd, "%s/build/layer-api", dir); mkdir(cmd, 0700);
+        cx_fmt(cmd, sizeof cmd, "%s/tests", dir); mkdir(cmd, 0700);
+        put("tests/batches.tsv", "id\n");
+        for (k = 0; k < 6; k++) { char rel[64]; cx_fmt(rel, sizeof rel, "build/%s.tsv", T[k]); put(rel, "x\n"); }
+        put("build/layer-api/foo.tsv", "x\n");
+        put("tools/t1.cx", "oa.tsv");
+        put("tools/t2.cx", "see p.tsv and oa.tsv and foo.tsv\n");
+        put("tools/t3.cx", "none.tsv oa.tsv p.tsv\n");
+        put("tools/t4.cx", "p.tsv");
+        put("tools/t5.cx", "barfoo.tsvx\n");
+        ck(run("--tables", out, sizeof out) == 0, "readers-fixture-written");
+        r = slurp("build/table-index.tsv", &z);
+        ck(r && hasl(r, z, "build/fz.tsv\tUNDESCRIBED\t\t0\n"), "readers-same-slot-other-name-is-not-a-reader");
+        ck(r && hasl(r, z, "build/oa.tsv\tUNDESCRIBED\t\t3\n"), "readers-same-slot-name-counted-in-every-tool");
+        ck(r && hasl(r, z, "build/p.tsv\tUNDESCRIBED\t\t3\n"), "readers-short-name-found-beside-longer-lengths-and-at-body-start");
+        ck(r && hasl(r, z, "build/foo.tsv\tUNDESCRIBED\t\t2\n") && hasl(r, z, "build/layer-api/foo.tsv\tUNDESCRIBED\t\t2\n"), "readers-same-name-in-two-places-counted-for-both");
+        ck(r && hasl(r, z, "build/barfoo.tsv\tUNDESCRIBED\t\t1\n") && hasl(r, z, "build/bar.tsv\tUNDESCRIBED\t\t0\n"), "readers-name-before-a-trailing-letter-and-prefix-overlap");
+    }
     ck(run("--bogus", out, sizeof out) == 2, "bad-arg-rc2");
     sy_printf("CHECK_TOOL_INDEX\tfailed=%d\n", failed);
     return failed ? 1 : 0;
