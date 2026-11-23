@@ -169,7 +169,13 @@ static char *strncat(char *__u_d, const char *__u_s, __u_word __u_n) {
 
 /* strtok keeps its place between calls, as the standard says it must; the
    place is one static pointer, which is why strtok is not reentrant. */
+#if defined(RT_UNIT)
+char *_unisa_tok = 0;
+#elif defined(RT_EXTERN)
+extern char *_unisa_tok;
+#else
 static char *_unisa_tok = 0;
+#endif
 #if !__UNISA_FTRIM_LIBC || __UN_strtok
 static char *strtok(char *__u_s, const char *__u_delim) {
     char *__u_start; __u_word __u_k; int __u_isd;

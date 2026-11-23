@@ -820,7 +820,13 @@ static double atof(const char *__u_s) { return strtod(__u_s, 0); }
  * a program that stores these values or seeds against glibc's will not
  * reproduce here.  Programs that agree between C libraries only because both
  * calls are made in the same order are unaffected. */
+#if defined(RT_UNIT)
+__u_word _unisa_seed = 1;
+#elif defined(RT_EXTERN)
+extern __u_word _unisa_seed;
+#else
 static __u_word _unisa_seed = 1;
+#endif
 #if !__UNISA_FTRIM_LIBC || __UN_rand
 static int rand(void) {
     _unisa_seed = _unisa_seed * 1103515245 + 12345;
@@ -1069,7 +1075,13 @@ static char *getenv(const char *__u_name) {
    valid, as glibc and the BSDs keep them.  Appending past the kernel's copy (or past an
    array the program assigned to environ) moves environ to a malloc'd array twice as big. */
 #if !__UNISA_FTRIM_LIBC || __UN_setenv
+#if defined(RT_UNIT)
+char **_unisa_envheap; __u_word _unisa_envcap;
+#elif defined(RT_EXTERN)
+extern char **_unisa_envheap; extern __u_word _unisa_envcap;
+#else
 static char **_unisa_envheap; static __u_word _unisa_envcap;
+#endif
 #endif
 #if !__UNISA_FTRIM_LIBC || __UN_setenv
 static int setenv(const char *__u_name, const char *__u_val, int __u_over) {
