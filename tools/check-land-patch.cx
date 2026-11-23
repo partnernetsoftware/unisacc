@@ -1,0 +1,149 @@
+/* check-land-patch.cx -- contracts of tools/land-patch.cx.
+ *   sh ./unisacc.com tools/check-land-patch.cx
+ * Fixture: a private repository (cxlib.privrepo) holding the tracked tree of this checkout.  Two patches are cut from the same
+ * base; each edits the same shared tables as a whole block (coverage.tsv gets a row at the end) and adds its own tool.  Landing both
+ * one after the other must keep the rows of both, in landing order (a block-applied second patch would have failed or replaced the
+ * first one's row), register both tools, and compute the tools-compile shard rows.  Refusals leave table and tree byte-identical. */
+#pragma unisa use cxlib.privrepo
+#pragma unisa use cxlib.ckrun
+#pragma unisa use sys.fs
+#pragma unisa use sys.env
+#pragma unisa use text.text
+#pragma unisa use mem.bytes
+
+static int bad, checks;
+static char F[1100], REAL[1100], WD[1200];   /* fixture repo, this checkout, the fixture's work directory (patches, rows) */
+#define ok(c, w) ((void)ckk_ok((c), (w)))
+/* a git hook exports GIT_INDEX_FILE and friends: every script drops them, so the fixture work can never reach the outer repository */
+static int sh(const char *script, char *out, int cap, int secs) {
+    static char b[9800]; if (cx_fmt(b, sizeof b, "unset GIT_DIR GIT_INDEX_FILE GIT_WORK_TREE GIT_OBJECT_DIRECTORY GIT_COMMON_DIR GIT_NAMESPACE GIT_INTERNAL_SUPER_PREFIX; %s", script)) return -1;
+    return ckk_sh_t("check-land-patch", b, out, cap, secs);
+}
+/* every "../" in a script names the work directory WD, a sibling of the fixture repository */
+static int shf(char *out, int cap, int secs, const char *fmt, ...) {
+    char s[6000], x[9000]; va_list ap; int k, i = 0, j = 0;
+    va_start(ap, fmt); k = vsnprintf(s, sizeof s, fmt, ap); va_end(ap);
+    if (k < 0 || k >= (int)sizeof s) { printf("script too long\n"); exit(2); }
+    while (s[i]) {
+        if (s[i] == '.' && s[i + 1] == '.' && s[i + 2] == '/') { int w = (int)strlen(WD); if (j + w + 1 >= (int)sizeof x || mm_copy(x + j, (long)sizeof x - j, WD, w) != 0) exit(2); j += w; x[j++] = '/'; i += 3; }
+        else { if (j + 1 >= (int)sizeof x) exit(2); x[j++] = s[i++]; }
+    }
+    x[j] = 0;
+    return sh(x, out, cap, secs);
+}
+/* run land-patch against the fixture; the arguments after the root are given as one string */
+static int land(char *out, int cap, const char *args) { return shf(out, cap, 58, "cd '%s' && sh ./unisacc.com tools/land-patch.cx -- --root '%s' %s", REAL, F, args); }
+static int has(const char *o, const char *w) { return ckk_has(o, 20000, w); }
+
+int main(void) {
+    static char out[20000], o2[20000], o3[20000], o4[20000];
+    char cwd[1100]; int rc;
+    if (sy_cwd(cwd, (int)sizeof cwd) != 0) { printf("no cwd\n"); return 2; }
+    cx_fmt(REAL, sizeof REAL, "%s", cwd);
+    if (pr_make(F, sizeof F) != 0) { printf("fixture: pr_make failed\n"); return 2; }
+    cx_fmt(WD, sizeof WD, "%s-w", F);
+    if (sy_mkdir(WD, 0700) != 0) { printf("fixture: work directory failed\n"); return 2; }
+    /* the tracked tree of this checkout, committed as the base; a symlink to the product so register.cx can compile */
+    rc = shf(out, sizeof out, 58, "cd '%s' && git ls-files -z | tar --null -T - -cf - | tar -x -C '%s' && ln -sf '%s/unisacc.com' '%s/unisacc.com' && cd '%s' && "
+             "git add -A >/dev/null 2>&1 && git -c user.name=x -c user.email=x@x commit -qm base && echo BASE_OK", REAL, F, REAL, F, F);
+    if (rc != 0 || !has(out, "BASE_OK")) { printf("fixture base failed: %.300s\n", out); return 2; }
+    /* patches cut from that base: a whole-block append to coverage.tsv and batches.tsv plus a new tool each */
+    rc = shf(out, sizeof out, 58,
+        "cd '%s' && T=$(printf '\\t') && "
+        "for n in a b c; do "
+        "  d=tools; if [ $n = b ]; then d=tools/cxlib; fi; printf 'int main(void){ return 0; }\\n' > $d/zzland$n.cx && "
+        "  printf 'zzland%s.row\\tinterfaces\\tIMPLEMENTED_SEPARATE_BATCH\\tx\\tland %s\\n' $n $n >> tests/coverage.tsv && "
+        "  git add -A $d/zzland$n.cx tests/coverage.tsv && git diff --cached HEAD > ../patch-$n.diff && git reset -q --hard HEAD; "
+        "done; "
+        "mkdir -p ../rows-a ../rows-b && "
+        "printf 'zzlanda.row\\tinterfaces\\tIMPLEMENTED_SEPARATE_BATCH\\tx\\tland a\\n' > ../rows-a/rows-coverage.tsv && "
+        "printf 'zzlandb.row\\tinterfaces\\tIMPLEMENTED_SEPARATE_BATCH\\tx\\tland b\\n' > ../rows-b/rows-coverage.tsv && "
+        /* a real landing lists its new tools in the sources rows too: the files then exist untracked while the rows name them */
+        "printf 'tools/zzlanda.cx\\tregular\\n' > ../rows-a/rows-tools-compile-sources.tsv && "
+        "printf 'tools/cxlib/zzlandb.cx\\tregular\\n' > ../rows-b/rows-tools-compile-sources.tsv && "
+        "ls ../patch-a.diff ../patch-b.diff ../patch-c.diff >/dev/null && echo CUT_OK", F);
+    if (rc != 0 || !has(out, "CUT_OK")) { printf("fixture patches failed: %.300s\n", out); return 2; }
+    /* the base table copy to compare with */
+    shf(out, sizeof out, 10, "cd '%s' && cp tests/coverage.tsv ../cov.base && cp tests/batches.tsv ../bat.base && cp tests/tools-compile-sources.tsv ../src.base", F);
+
+    /* (1) a patch that fails the pre-check is refused whole: tables and tree unchanged */
+    shf(out, sizeof out, 20, "cd '%s' && printf 'garbage\\n' > ../bad.diff && true", F);
+    rc = land(out, sizeof out, "--patch ../bad.diff");
+    shf(o2, sizeof o2, 10, "cd '%s' && cmp -s tests/coverage.tsv ../cov.base && git status --porcelain | wc -l", F);
+    ok(rc == 1 && has(out, "LAND_REFUSE") && has(out, "step=apply-check") && has(o2, "0"), "a patch that does not apply is refused in the pre-check, nothing is written");
+
+    /* (2) a row whose key exists with a different text refuses the whole call before any write; the patch is not applied */
+    shf(out, sizeof out, 10, "cd '%s' && mkdir -p ../rows-c && L=$(tail -1 tests/coverage.tsv | cut -f1) && printf '%%s\\tinterfaces\\tIMPLEMENTED_SEPARATE_BATCH\\tx\\tdifferent text\\n' \"$L\" > ../rows-c/rows-coverage.tsv && echo CONF_OK", F);
+    rc = land(out, sizeof out, "--patch ../patch-a.diff --rows-dir ../rows-c");
+    shf(o2, sizeof o2, 10, "cd '%s' && cmp -s tests/coverage.tsv ../cov.base && test ! -e tools/zzlanda.cx && echo UNTOUCHED", F);
+    ok(rc == 1 && has(out, "step=row-conflict") && has(out, "exists with a different row") && has(o2, "UNTOUCHED"), "a key that exists with a different row refuses the call before the patch or any row is written");
+
+    /* (3) dry run reports the plan and writes nothing */
+    rc = land(out, sizeof out, "--patch ../patch-a.diff --rows-dir ../rows-a --dry");
+    shf(o2, sizeof o2, 10, "cd '%s' && cmp -s tests/coverage.tsv ../cov.base && test ! -e tools/zzlanda.cx && echo UNTOUCHED", F);
+    ok(rc == 0 && has(out, "status=DRY") && has(out, "LAND_NEWTOOL\ttools/zzlanda.cx") && has(o2, "UNTOUCHED"), "--dry names the new tool and writes nothing");
+
+    /* (4) land A then B: both rows kept, in landing order; both tools registered; shard rows computed from the shard count */
+    rc = land(out, sizeof out, "--patch ../patch-a.diff --rows-dir ../rows-a");
+    ok(rc == 0 && has(out, "status=LANDED") && has(out, "LAND_REGISTER") && has(out, "LAND_NEXT"), "first patch lands, its new tool is registered, derive is named as the next step");
+    rc = land(o2, sizeof o2, "--patch ../patch-b.diff --rows-dir ../rows-b");
+    ok(rc == 0 && has(o2, "status=LANDED"), "the second patch, cut from the same base and editing the same table, lands after the first");
+    shf(o3, sizeof o3, 10, "cd '%s' && tail -2 tests/coverage.tsv | cut -f1 | tr '\\n' ' ' && echo && head -n -2 tests/coverage.tsv > ../cov.head && cmp -s ../cov.head ../cov.base && echo BASE_PREFIX_KEPT", F);
+    ok(has(o3, "zzlanda.row zzlandb.row") && has(o3, "BASE_PREFIX_KEPT"), "both rows are in coverage.tsv in landing order and the rows before them are byte-identical");
+    shf(o4, sizeof o4, 10, "cd '%s' && grep -c '^tools/\\(cxlib/\\)\\{0,1\\}zzland[ab].cx\tregular' tests/tools-compile-sources.tsv; "
+        "for n in a b; do L=$(grep -n \"^tools/[a-z/]*zzland$n.cx\" tests/tools-compile-sources.tsv | cut -d: -f1); P=$(sed -n \"$((L-1))p\" tests/tools-compile-sources.tsv); R=$(sed -n \"${L}p\" tests/tools-compile-sources.tsv); N=$(sed -n \"$((L+1))p\" tests/tools-compile-sources.tsv); "
+        "{ echo \"$P\"; echo \"$R\"; if [ -n \"$N\" ]; then echo \"$N\"; fi; } | LC_ALL=C sort -c && echo SORTED$n; done; "
+        "n=$(grep -c . tests/tools-compile-sources.tsv); k=$(grep -c '^tools-compile-' tests/batches.tsv); echo rows=$n shards=$k want=$(( (n + 7) / 8 ))", F);
+    ok(has(o4, "2\n") && has(o4, "SORTEDa") && has(o4, "SORTEDb"), "both new tools are in tests/tools-compile-sources.tsv, each between its C byte order neighbours");
+    {   int n = 0, k = 0, w = 0; const char *p = strstr(o4, "rows=");
+        if (p) sscanf(p, "rows=%d shards=%d want=%d", &n, &k, &w);
+        ok(n > 0 && k == w, "the tools-compile-NNN batch rows were computed from the source count (shards = ceil(rows/8))"); }
+
+    /* (5) replay of the rows alone: identical rows are skipped and the table is byte-identical */
+    shf(out, sizeof out, 10, "cd '%s' && cp tests/coverage.tsv ../cov.after", F);
+    rc = land(out, sizeof out, "--rows-dir ../rows-a");
+    shf(o2, sizeof o2, 10, "cd '%s' && cmp -s tests/coverage.tsv ../cov.after && echo SAME", F);
+    ok(rc == 0 && has(out, "table=tests/coverage.tsv new=0 identical-skipped=1") && has(o2, "SAME"), "replaying landed rows is a no-op (identical rows skipped)");
+
+    /* (6) a table without a final newline gets one before the first row is appended */
+    shf(out, sizeof out, 10, "cd '%s' && printf '%%s' \"$(cat tests/coverage.tsv)\" > tests/coverage.tsv && tail -c1 tests/coverage.tsv | od -An -c | tr -d ' ' && mkdir -p ../rows-n && printf 'zzlandn.row\\tinterfaces\\tIMPLEMENTED_SEPARATE_BATCH\\tx\\tland n\\n' > ../rows-n/rows-coverage.tsv", F);
+    rc = land(o2, sizeof o2, "--rows-dir ../rows-n");
+    shf(o3, sizeof o3, 10, "cd '%s' && tail -2 tests/coverage.tsv | cut -f1 | tr '\\n' ' ' && tail -c1 tests/coverage.tsv | od -An -c | tr -d ' '", F);
+    ok(rc == 0 && has(o3, "zzlandb.row zzlandn.row") && has(o3, "\\n"), "a missing final newline is added, the new row starts on its own line and the table ends with a newline");
+
+    /* (7) --preview-head equal to the current head runs nothing; a different one reruns the gate and says so.  The gate in the
+     * fixture is a stand-in answering blocked=3 (the real gate costs about 15 s and has its own check); what is pinned here is that
+     * land-patch decides by the head comparison, runs it over the touched files once and prints the verdict line unchanged. */
+    shf(out, sizeof out, 10, "cd '%s' && printf 'int main(void){ printf(\"%%%%s\\\\n\", \"PRECOMMIT_PREVIEW\\\\tblocked=3\"); return 1; }\\n' > tools/precommit-preview.cx && echo STUB_OK", F);
+    if (!has(out, "STUB_OK")) { printf("fixture stand-in gate failed\n"); return 2; }
+    shf(out, sizeof out, 10, "cd '%s' && git rev-parse HEAD", F);
+    { char h[100]; size_t k = 0; while (out[k] && out[k] != '\n' && k < 99) { h[k] = out[k]; k++; } h[k] = 0;
+      shf(o2, sizeof o2, 10, "cd '%s' && mkdir -p ../rows-e && printf 'zzlande.row\\tinterfaces\\tIMPLEMENTED_SEPARATE_BATCH\\tx\\tland e\\n' > ../rows-e/rows-coverage.tsv", F);
+      { char a[1500]; cx_fmt(a, sizeof a, "--rows-dir ../rows-e --preview-head %s", h); rc = land(o3, sizeof o3, a); }
+      ok(rc == 0 && !has(o3, "LAND_PREVIEW") && has(o3, "LAND_HEAD"), "no gate rerun when the rehearsed head is the current head");
+    }
+    shf(out, sizeof out, 10, "cd '%s' && mkdir -p ../rows-f && printf 'zzlandf.row\\tinterfaces\\tIMPLEMENTED_SEPARATE_BATCH\\tx\\tland f\\n' > ../rows-f/rows-coverage.tsv", F);
+    rc = land(o4, sizeof o4, "--rows-dir ../rows-f --preview-head 0000000000000000000000000000000000000000");
+    ok(rc == 0 && has(o4, "LAND_PREVIEW") && has(o4, "rerunning precommit-preview") && has(o4, "PRECOMMIT_PREVIEW\tblocked=3") && !has(o4, "UNMEASURED"), "a changed head reruns the gate once over the touched files and prints its verdict line unchanged");
+
+    /* (8) the index belongs to the caller.  Before the call the caller has staged a tracked file (M), a new file (A) and an intent-to-add (" A").
+     * A call that fails in register (the second row names a tool that does not exist) must leave status and the staged diff byte-identical,
+     * and must not turn the caller's own " A" into "??" (an undo by "git reset" did exactly that). */
+    shf(out, sizeof out, 20, "cd '%s' && mkdir -p ../rows-g ../rows-h && printf 'x\\n' > zzstaged.txt && git add zzstaged.txt && printf 'y\\n' > zzita.txt && git add -N zzita.txt && echo >> README.md && git add README.md && "
+        "git status --porcelain > ../st0 && git diff --cached | sha256sum > ../df0 && "
+        "printf 'tools/zzlandc.cx\\tregular\\ntools/zzlandmissing.cx\\tregular\\n' > ../rows-g/rows-tools-compile-sources.tsv && printf 'tools/zzlandc.cx\\tregular\\n' > ../rows-h/rows-tools-compile-sources.tsv && cat ../st0", F);
+    ok(has(out, "M  README.md") && has(out, " A zzita.txt") && has(out, "A  zzstaged.txt"), "fixture: the caller's staged file, new file and intent-to-add are in the index before the call");
+    rc = land(out, sizeof out, "--patch ../patch-c.diff --rows-dir ../rows-g");
+    shf(o2, sizeof o2, 20, "cd '%s' && git status --porcelain | cmp -s - ../st0 && git diff --cached | sha256sum | cmp -s - ../df0 && test ! -e tools/zzlandc.cx && echo BASELINE_SAME", F);
+    ok(rc == 1 && has(out, "step=register") && has(o2, "BASELINE_SAME"), "a call that fails in register restores the index: status and the staged diff are the caller's, the created file is gone");
+
+    /* (9) the same call with a good row lands: the new file is an intent-to-add (" A"), the caller's staging is unchanged */
+    rc = land(out, sizeof out, "--patch ../patch-c.diff --rows-dir ../rows-h");
+    shf(o2, sizeof o2, 20, "cd '%s' && git status --porcelain | grep 'tools/zzlandc.cx'; echo n=$(git status --porcelain | grep -c '^M  README.md\\|^A  zzstaged.txt\\|^ A zzita.txt')", F);
+    ok(rc == 0 && has(out, "status=LANDED") && has(o2, "A tools/zzlandc.cx") && has(o2, "n=3"), "a landing leaves the new tool in the index and the caller's staged file, new file and intent-to-add as they were");
+
+    shf(out, sizeof out, 20, "rm -rf '%s' '%s'", F, WD);
+    checks = ckk_okcount(&bad);
+    printf("CX_LAND_PATCH\tchecks=%d\tfailed=%d\n", checks, bad);
+    return bad ? 1 : 0;
+}

@@ -37,17 +37,25 @@ static int run(char **argv, char *out, int cap) {
     out[n] = 0; sy_close(fd);
     return sy_wait_status(pid, 0, &ex, &code, &sig) == pid && ex ? code : -1;
 }
-/* the judge on TEXT with exit code RC */
-static int judge(const char *kind, const char *text, const char *rc, char *out, int cap) {
-    char f[400]; char *v[8];
+/* the judge on TEXT with exit code RC; optional --repo DIR so NRK is read from that tree */
+static int judge_at(const char *repo, const char *kind, const char *text, const char *rc, char *out, int cap) {
+    char f[400]; char *w[16]; int n = 0;
     static int seq; cx_fmt(f, sizeof f, "%s/j%d.txt", tmpd, ++seq);
     cx_write(f, text, tx_len(text, 1 << 20));
-    v[0] = "./tools/bound"; v[1] = "40"; v[2] = "sh"; v[3] = UC; v[4] = "tools/chain-ready.cx"; v[5] = "--"; v[6] = "--judge";
-    {   char *w[12]; int i; for (i = 0; i < 7; i++) w[i] = v[i]; w[7] = (char *)kind; w[8] = f; w[9] = (char *)rc; w[10] = 0;
-        return run(w, out, cap); }
+    w[n++] = "./tools/bound"; w[n++] = "40"; w[n++] = "sh"; w[n++] = UC; w[n++] = "tools/chain-ready.cx"; w[n++] = "--";
+    if (repo && repo[0]) { w[n++] = "--repo"; w[n++] = (char *)repo; }
+    w[n++] = "--judge"; w[n++] = (char *)kind; w[n++] = f; w[n++] = (char *)rc; w[n] = 0;
+    return run(w, out, cap);
+}
+static int judge(const char *kind, const char *text, const char *rc, char *out, int cap) {
+    return judge_at(0, kind, text, rc, out, cap);
 }
 static void jt(const char *name, const char *kind, const char *text, const char *rc, const char *want, const char *frag) {
     char out[2048]; int r = judge(kind, text, rc, out, sizeof out);
+    ck(r == 0 && tx_prefix(out, 4, want, 4) && (!frag || has(out, frag)), name);
+}
+static void jt_repo(const char *name, const char *repo, const char *kind, const char *text, const char *rc, const char *want, const char *frag) {
+    char out[2048]; int r = judge_at(repo, kind, text, rc, out, sizeof out);
     ck(r == 0 && tx_prefix(out, 4, want, 4) && (!frag || has(out, frag)), name);
 }
 static void git(const char *dir, const char *a, const char *b, const char *c) {
@@ -74,10 +82,32 @@ int main(void) {
     jt("derive-timeout-row-names-generator", "derive", "DERIVE\tproduct-map\tTIMEOUT\t45000\trc=142\tx\nDERIVE_SUMMARY\tok=0\tdrift=0\trefused=1\tskipped=13\telapsed_ms=45001\n", "2", "FAIL", "failed_generator=product-map(TIMEOUT)");
     jt("derive-outer-timeout-shard-names-unfinished-generators", "derive:doc-links,tool-index,table-index", "DERIVE\tdoc-links\tOK\t11000\n", "142", "FAIL", "failed_generator=tool-index(TIMEOUT),table-index(TIMEOUT)");
     jt("derive-no-summary-fail", "derive", "garbage\n", "0", "FAIL", "no DERIVE_SUMMARY");
-    jt("ratchets-13-pass", "ratchets", "RATCHET\tcxraw\tok\tx\nRATCHETS\tok=13\tfail=0\telapsed_ms=5\n", "0", "PASS", "ok=13");
-    jt("ratchets-16-pass", "ratchets", "RATCHET\tcxraw\tok\tx\nRATCHETS\tok=16\tfail=0\telapsed_ms=5\n", "0", "PASS", "ok=16");
-    jt("ratchets-slack-warn-pass", "ratchets", "RATCHET\tcxraw\tok\tcxraw: ok: 896 units, 677 calls (baseline 13491); 0 above baseline, 11 below (--write ratchets down)\nRATCHETS\tok=16\tfail=0\telapsed_ms=5\n", "0", "PASS", "WARN ratchet-slack cxraw_below=11");
-    jt("ratchets-12-fail", "ratchets", "RATCHET\tcheck-literal\tFAIL\tLITERAL\nRATCHETS\tok=12\tfail=1\telapsed_ms=5\n", "1", "FAIL", "fail=1");
+    /* 2b: ok must equal <repo>/tools/ratchets.cx line-start #define NRK (comments skipped). */
+    jt("ratchets-19-pass", "ratchets", "RATCHET\tcxraw\tok\tx\nRATCHETS\tok=19\tfail=0\telapsed_ms=5\n", "0", "PASS", "ok=19");
+    jt("ratchets-18-short-fail", "ratchets", "RATCHETS\tok=18\tfail=0\telapsed_ms=5\n", "0", "FAIL", "want_ok=");
+    jt("ratchets-slack-warn-pass", "ratchets", "RATCHET\tcxraw\tok\tcxraw: ok: 896 units, 677 calls (baseline 13491); 0 above baseline, 11 below (--write ratchets down)\nRATCHETS\tok=19\tfail=0\telapsed_ms=5\n", "0", "PASS", "WARN ratchet-slack cxraw_below=11");
+    jt("ratchets-fail1-fail", "ratchets", "RATCHET\tcheck-literal\tFAIL\tLITERAL\nRATCHETS\tok=18\tfail=1\telapsed_ms=5\n", "1", "FAIL", "fail=1");
+    {
+        char nrkdir[420], toolsdir[440], rkpath[460];
+        const char *body_miss = "/* no NRK define in this fixture */\nint x;\n";
+        const char *body_cmt = "/* was: #define NRK 18 */\n#define NRK 19\n";
+        cx_fmt(nrkdir, sizeof nrkdir, "%s/nrk-miss", tmpd);
+        cx_fmt(toolsdir, sizeof toolsdir, "%s/tools", nrkdir);
+        cx_fmt(rkpath, sizeof rkpath, "%s/ratchets.cx", toolsdir);
+        (void)sy_mkdir(nrkdir, 0700); (void)sy_mkdir(toolsdir, 0700);
+        cx_write(rkpath, body_miss, tx_len(body_miss, 256));
+        jt_repo("ratchets-nrk-missing-fail", nrkdir, "ratchets",
+                "RATCHETS\tok=19\tfail=0\telapsed_ms=5\n", "0", "FAIL", "nrk-missing");
+        cx_fmt(nrkdir, sizeof nrkdir, "%s/nrk-cmt", tmpd);
+        cx_fmt(toolsdir, sizeof toolsdir, "%s/tools", nrkdir);
+        cx_fmt(rkpath, sizeof rkpath, "%s/ratchets.cx", toolsdir);
+        (void)sy_mkdir(nrkdir, 0700); (void)sy_mkdir(toolsdir, 0700);
+        cx_write(rkpath, body_cmt, tx_len(body_cmt, 256));
+        jt_repo("ratchets-nrk-comment-trap-pass", nrkdir, "ratchets",
+                "RATCHETS\tok=19\tfail=0\telapsed_ms=5\n", "0", "PASS", "roster=19");
+        jt_repo("ratchets-nrk-comment-trap-short-fail", nrkdir, "ratchets",
+                "RATCHETS\tok=18\tfail=0\telapsed_ms=5\n", "0", "FAIL", "want_ok=19");
+    }
     jt("tri-pass", "tri", "GAP\tCXM_MAXU\tnamed\nCXMOD_TRI\tpassed=15\tfailed=0\tgaps=2\n", "0", "PASS", "failed=0");
     jt("tri-fail", "tri", "CXMOD_TRI\tpassed=14\tfailed=1\tgaps=2\n", "1", "FAIL", "failed=1");
     jt("extract-exact-pass", "extract", "CX0_EXTRACT\tEXACT\tbytes=1\n", "0", "PASS", "EXACT");

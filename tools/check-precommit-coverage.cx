@@ -39,7 +39,7 @@ static int w(const char *rel, const char *body) {
 
 #define BH "id\timplementation\tlayer\tsource\tmode\tplatform\tbudget_seconds\tmaterials\tentry\targs\tcoverage\texpect\theaders\ttier\n"
 #define CH "id\tlayer\timplementation\texpected_or_gap\tsource\n"
-#define SRC "tools/check-precommit-freeze.cx"
+#define SRC "tests/src.cx"
 #define BROW(id, cov) id "\tIMPLEMENTED\tinterfaces\t" SRC "\tSOURCE\tlnx/x86_64\t55\t-\t" SRC "\t-\t" cov "\trc0:X\tproduct\tdaily\n"
 #define TROW(id, src, cov) id "\tIMPLEMENTED\tinterfaces\t" src "\tSOURCE\tlnx/x86_64\t55\t-\t" src "\t-\t" cov "\trc0:X\tproduct\tdaily\n"
 #define CROW(k) k "\tinterfaces\tIMPLEMENTED_SEPARATE_BATCH\texpected\t" SRC "\n"
@@ -62,9 +62,9 @@ static int git(const char *args) {
 }
 
 int main(int argc, char **argv) {
-    int mode_block = argc > 1 && tx_eqz(argv[1], "--block"), mode_pass = argc > 1 && tx_eqz(argv[1], "--pass"), src2 = argc > 1 && tx_eqz(argv[1], "--src2"), mode_src = src2 || (argc > 1 && tx_eqz(argv[1], "--src"));
+    int mode_block = argc > 1 && tx_eqz(argv[1], "--block"), mode_pass = argc > 1 && tx_eqz(argv[1], "--pass"), src2 = argc > 1 && tx_eqz(argv[1], "--src2"), mode_root = argc > 1 && tx_eqz(argv[1], "--root"), mode_src = src2 || (argc > 1 && tx_eqz(argv[1], "--src"));
     char out[8192], cwd[400]; char *o = 0; size_t n = 0; int rc;
-    if (!mode_block && !mode_pass && !mode_src) { sy_printf("usage: --block | --pass | --src | --src2\n"); return 2; }
+    if (!mode_block && !mode_pass && !mode_src && !mode_root) { sy_printf("usage: --block | --pass | --src | --src2 | --root\n"); return 2; }
     {   char *v[] = {"pwd", 0}; if (cx_runv_timeout(v, 10, &o, &n) != 0 || n < 2 || n >= sizeof cwd) { ck(0, "cwd"); return 1; }
         mm_copy(cwd, sizeof cwd, o, n); cwd[n] = 0; for (n = 0; cwd[n]; n++) if (cwd[n] == '\n') cwd[n] = 0;
         mm_copy(root, sizeof root, cwd, tx_len(cwd, 399) + 1); }
@@ -73,6 +73,53 @@ int main(int argc, char **argv) {
         if (cx_fmt(cmd, sizeof cmd, "cd '%s' && git init -q . && git config user.email a@b && git config user.name t && mkdir tests && "
                    "ln -s '%s/unisacc.com' unisacc.com && ln -sn '%s/tools' tools && ln -sn '%s/cx' cx && ln -s '%s/cxroot.tsv' cxroot.tsv && "
                    "ln -sn '%s/tests/cases' tests/cases && ln -sn '%s/tests/cxlib' tests/cxlib && cp '%s/tests/run.cx' tests/run.cx", td, root, root, root, root, root, root, root) || sh(cmd, 0, 0)) { ck(0, "fixture"); return 1; } }
+    if (mode_root) {
+    /* The registry gate's evaluation root (tests/run.cx, tools/precommit.cx coveval):
+     * (a) the tables read are those of the tree the source was invoked from, not the working directory's;
+     * (b) a copy outside ROOT/tests/run.cx is refused, even when its modules resolve;
+     * (c) two different private directories hit the run-cache (the second coveval is not a cold compile);
+     * (d) a staged bad row is still blocked when the hook runs from a subdirectory of the work tree. */
+    char out2[8192], td2[360], cmd[1800];
+    w("tests/src.cx", "int main(void) { return 0; }\n");
+    w("tests/batches.tsv", BH BROW("ra", "cov.ra"));
+    w("tests/coverage.tsv", CH CROW("cov.ra"));
+    git("add tests/run.cx tests/src.cx tests/batches.tsv tests/coverage.tsv"); git("commit -q -m base --no-verify");
+    if (cx_fmt(td2, sizeof td2, "%s-x", td)) { ck(0, "td2"); return 1; }
+    if (cx_fmt(cmd, sizeof cmd, "mkdir -p '%s/tests' && ln -s '%s/unisacc.com' '%s/unisacc.com'", td2, root, td2) || sh(cmd, 0, 0)) { ck(0, "td2-fixture"); return 1; }
+    { char p[500]; if (cx_fmt(p, sizeof p, "%s/tests/batches.tsv", td2) || cx_write(p, BH BROW("rb", "cov.rb"), tx_len(BH BROW("rb", "cov.rb"), 4000))) { ck(0, "td2-tables"); return 1; }
+      if (cx_fmt(p, sizeof p, "%s/tests/coverage.tsv", td2) || cx_write(p, CH CROW("cov.rb"), tx_len(CH CROW("cov.rb"), 4000))) { ck(0, "td2-cov"); return 1; } }
+    /* (a) from another directory, by absolute path: the tables of the invoked tree win */
+    if (cx_fmt(cmd, sizeof cmd, "cd '%s' && sh ./unisacc.com '%s/tests/run.cx' -- --list 2>&1", td2, td)) { ck(0, "a-cmd"); return 1; }
+    rc = sh(cmd, out, sizeof out);
+    ck(rc == 0 && has(out, "BATCH\tra\t") && !has(out, "BATCH\trb\t"), "root-from-invoked-source-not-cwd");
+    /* (b) a copy placed outside the layout, modules resolvable (cx and cxroot.tsv linked beside it) */
+    if (cx_fmt(cmd, sizeof cmd, "mkdir -p '%s/other' && cp '%s/tests/run.cx' '%s/other/run.cx' && ln -sn '%s/tests/cases' '%s/other/cases' && ln -sn '%s/tests/cxlib' '%s/other/cxlib' && cd '%s' && sh ./unisacc.com other/run.cx -- --list 2>&1", td, td, td, root, td, root, td, td)) { ck(0, "b-cmd"); return 1; }
+    rc = sh(cmd, out, sizeof out);
+    ck(has(out, "REFUSE\tinventory-root-layout"), "copy-outside-layout-refused");
+    /* (c)(d) stage a batches-only row and run the hook: from the root, then from a subdirectory, then in a copied private directory */
+    w("tests/batches.tsv", BH BROW("ra", "cov.ra") BROW("rc", "cov.rc"));
+    git("add tests/batches.tsv"); w("tests/batches.tsv", BH BROW("ra", "cov.ra"));
+    rc = pc(out, sizeof out);
+    ck(rc == 1 && has(out, "BLOCKED registry unknown-coverage") && has(out, "id=rc"), "root-run-blocks");
+    if (cx_fmt(cmd, sizeof cmd, "mkdir -p '%s/sub' && cd '%s/sub' && sh ../unisacc.com ../tools/precommit.cx 2>&1", td, td)) { ck(0, "d-cmd"); return 1; }
+    rc = sh(cmd, out, sizeof out);
+    ck(rc == 1 && has(out, "BLOCKED registry unknown-coverage") && has(out, "id=rc"), "subdir-run-blocks");
+    {   char dup[400], fr[460]; long k;
+        /* the flow's coveval node runs in a fresh private root each time; the second run, in a copied directory, must be a run-cache hit */
+        if (cx_fmt(dup, sizeof dup, "%s-c", td) || cx_fmt(cmd, sizeof cmd, "rm -rf '%s'; ln -sn '%s/ext' '%s/ext'; cp -a '%s' '%s'", dup, root, td, td, dup) || sh(cmd, 0, 0)) { ck(0, "c-cmd"); return 1; }
+        for (k = 0; k < 2; k++) {
+            const char *where = k ? dup : td; long q, v = 0;
+            if (cx_fmt(fr, sizeof fr, "%s-f%ld", td, k) || cx_fmt(cmd, sizeof cmd, "rm -rf '%s'; cd '%s' && UNISACC_RATCHETS_PRECOMMIT=1 sh ./unisacc.com tools/precommit-flow.cx -- --run '%s' 2>&1", fr, where, fr)) { ck(0, "c-cmd2"); return 1; }
+            (void)sh(cmd, out2, sizeof out2);
+            q = tx_find(out2, tx_len(out2, 8000), "coveval:", 8);
+            if (q >= 0) { q += 8; while (out2[q] >= '0' && out2[q] <= '9') { v = v * 10 + (out2[q] - '0'); q++; } } else v = -1;
+            if (k) { ck(v >= 0 && v < 2000, "second-private-dir-coveval-not-cold"); if (v < 0 || v >= 2000) sy_printf("coveval_ms=%ld\n", v); }
+        }
+        if (!cx_fmt(cmd, sizeof cmd, "rm -rf '%s' '%s' '%s-f0' '%s-f1'", dup, td2, td, td)) sh(cmd, 0, 0); }
+    {   char c2[500]; if (!cx_fmt(c2, sizeof c2, "rm -rf '%s'", td)) sh(c2, 0, 0); }
+    sy_printf("CHECK_PRECOMMIT_COVERAGE\tfailed=%d\n", failed);
+    return failed ? 1 : 0;
+    }
     if (mode_src) {
     /* (6)-(9) 批次源在 tests/ 下(真实仓多数批次如此):求值根里 tests/ 的普通文件须仍是普通文件,否则 run.cx --list
      * 以 source-not-regular 拒在首行、走不到配对判定。暂存坏行只进索引,工作树还原为 HEAD 版,runlist 门不受影响。 */
@@ -102,11 +149,12 @@ int main(int argc, char **argv) {
     sy_printf("CHECK_PRECOMMIT_COVERAGE\tfailed=%d\n", failed);
     return failed ? 1 : 0;
     }
+    w("tests/src.cx", "int main(void) { return 0; }\n");   /* the batch source must be a tracked file: the isolated staged tree holds only what the index holds */
     if (mode_block) {
     /* 基线提交:HEAD 有 A(已覆盖)与 P(未覆盖,既存);run.cx 在夹具内 */
     w("tests/batches.tsv", BH BROW("a", "cov.a") BROW("p", "cov.p"));
     w("tests/coverage.tsv", CH CROW("cov.a"));
-    git("add tests/run.cx tests/batches.tsv tests/coverage.tsv");
+    git("add tests/run.cx tests/src.cx tests/batches.tsv tests/coverage.tsv");
     git("commit -q -m base --no-verify");
     /* (4) HEAD 已未覆盖的 P:只暂存无关的 coverage 声明行,不归咎于 P */
     w("tests/coverage.tsv", CH CROW("cov.a") CDEC("cov.d"));
@@ -118,7 +166,7 @@ int main(int argc, char **argv) {
     /* 基线改为全覆盖,再做 (1)(2)(3) */
     w("tests/batches.tsv", BH BROW("a", "cov.a"));
     w("tests/coverage.tsv", CH CROW("cov.a"));
-    git("add tests/run.cx tests/batches.tsv tests/coverage.tsv"); git("commit -q -m base2 --no-verify");
+    git("add tests/run.cx tests/src.cx tests/batches.tsv tests/coverage.tsv"); git("commit -q -m base2 --no-verify");
     w("tests/batches.tsv", BH BROW("a", "cov.a") BROW("b", "cov.b"));
     git("add tests/batches.tsv");
     if (mode_block) {

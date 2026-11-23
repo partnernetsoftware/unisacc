@@ -6,8 +6,8 @@
 
 <!-- identity-begin -->
 product_kind	ape1
-product_digest	c561e7e0f24d9b82e71b40c86920bc92c12b7035751c8d6e958930bbfe1dd843
-unisacc.com	c561e7e0f24d9b82e71b40c86920bc92c12b7035751c8d6e958930bbfe1dd843	8997165
+product_digest	07351e2cbfddbc98cb6dfa2945334acf8c1c2d13b0ece5de19af2fe2b5d81a45
+unisacc.com	07351e2cbfddbc98cb6dfa2945334acf8c1c2d13b0ece5de19af2fe2b5d81a45	9010222
 <!-- identity-end -->
 
 ## 身份判定规则

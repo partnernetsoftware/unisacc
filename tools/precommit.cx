@@ -609,12 +609,29 @@ static int freeze_eval_buf(const char *z, const char *names, long fn) {
     return blocked;
 }
 
+static int pc_freeze_outside;
+
+static void pc_freeze_scope(void) {
+    char *bv[] = {"git", "symbolic-ref", "--quiet", "HEAD", 0};
+    long n = 0;
+    /* GIT_DIR identifies the committing worktree even in an isolated checkout. */
+    char *ref = slurp_run(bv, &n);
+    if (!ref) return;
+    if (n > 0 && ref[n - 1] == '\n') ref[--n] = 0;
+    pc_freeze_outside = n > 11 && tx_prefix(ref, n, "refs/heads/", 11) &&
+                        !tx_eqz(ref, "refs/heads/main");
+    if (pc_freeze_outside)
+        sy_eprintf("FREEZE_SCOPE skip=worktree branch=%s\n", ref + 11);
+    mm_free(ref);
+}
+
 static int freeze_gate(void) {
     size_t wtn = 0, cwdn = 0;
     char *z_wt = 0, *z_cwd = 0, *z_idx = 0, *z_head = 0, *names = 0;
     long fn = 0, idxn = 0, hdn = 0;
     char *dv[] = {"git", "diff", "--cached", "--no-renames", "--name-only", "--diff-filter=ACMRD", "-z", 0};
     int blocked = 0, err = 0;
+    if (pc_freeze_outside) return 0;
     if (pc_work_top[0]) {
         char fp[1200];
         if (!cx_fmt(fp, sizeof fp, "%s/build/freeze.tsv", pc_work_top))
@@ -709,6 +726,7 @@ static int freeze_window_status(char *owner_out, size_t ocap) {
     int err = 0, s_wt = 0, s_cwd = 0, s_idx = 0, s_hd = 0;
     char o_wt[64], o_cwd[64], o_idx[64], o_hd[64];
     if (owner_out && ocap > 0) owner_out[0] = 0;
+    if (pc_freeze_outside) return 0;
     o_wt[0] = o_cwd[0] = o_idx[0] = o_hd[0] = 0;
     if (pc_work_top[0]) {
         char fp[1200];
@@ -1840,12 +1858,14 @@ static int cov_eval(const char *tag, const char *reg, long rn, const char *cov, 
     if (cx_fmt(p, sizeof p, "%s/tests/coverage.tsv", dir) || cx_write(p, cov, (size_t)cn)) return -1;
     if (cx_fmt(p, sizeof p, "%s/tests/run.cx", dir)) return -1;
     if (plan_dir && cov_flow(tag)) {
-        char *gv[] = {"sh", "./unisacc.com", p, "--", "--list", 0}; long gn;
+        char *gv[] = {"sh", "-c", "cd \"$1\" && exec sh ./unisacc.com tests/run.cx -- --list", "sh", dir, 0}; long gn;
         cur_gate = "coveval"; mm_free(gate_slurp(gv, &gn)); cur_gate = 0;
         idv[0] = 0; return 0;
     }
     { int ofd, pid, ex = 0, code = 0, sig = 0; long r;
-      char *ev[] = {"sh", "-c", "exec sh ./unisacc.com \"$0\" -- --list 2>&1", p, 0};
+      /* from inside DIR with a relative source: the run-cache then keys the source below the working directory, root-independent, so the second and later runs
+         hit the cache although each run has a fresh private directory (an absolute path outside the working directory is part of the key verbatim) */
+      char *ev[] = {"sh", "-c", "cd \"$0\" && exec sh ./unisacc.com tests/run.cx -- --list 2>&1", dir, 0};
       b = mm_alloc(1 << 20);
       if (!b) return -1;
       pid = sy_spawn_pipe(ev, 0, 0, &ofd, 0);
@@ -3234,7 +3254,11 @@ static int pc_populate_isolated_tree(const char *iso) {
                 return -1;
             }
             if (sy_lstat(sp, &lst) == 0 && lst.kind == 'l') {
-                if (sy_lstat(dp, &lst) != 0 || lst.kind == 'l') {
+                sy_stat_t tgt;
+                /* a tracked link to a regular file stays the link the index recorded: following it would turn a staged
+                   symlink source into a regular file and the registry gate could no longer refuse it as source-not-regular */
+                int keep_link = sy_lstat(dp, &lst) == 0 && lst.kind == 'l' && sy_stat(sp, &tgt) == 0 && tgt.kind == 'f';
+                if (!keep_link && (sy_lstat(dp, &lst) != 0 || lst.kind == 'l')) {
                     if (pc_copy_tree(sp, dp, 0) != 0) {
                         sy_dir_close(&d);
                         return -1;
@@ -3403,6 +3427,7 @@ int main(int argc, char **argv) {
         }
     }
     if (pc_capture_work_top() != 0) { pc_mark_block("isolate", "getcwd-failed"); pc_emit_gate_fail(); return 1; }
+    pc_freeze_scope();
     if (argc == 1 && isolate_staged_tree() != 0) { pc_mark_block("isolate", "staged-tree-setup"); pc_emit_gate_fail(); return 1; }
     {
         long csn = 0, ca = 0;

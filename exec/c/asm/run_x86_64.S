@@ -10,8 +10,8 @@
 #else
 #define CSYM(x) x
 #endif
-#if (MACHINE_SIZE % 8) != 0 || (RESULT_SIZE % 8) != 0
-#error MACHINE_SIZE_and_RESULT_SIZE_must_be_multiples_of_8
+#if (MACHINE_SIZE % 8) != 0 || (RESULT_SIZE % 8) != 0 || PS_SIZE != 64
+#error ABI_alignment_or_PS_SIZE_mismatch
 #endif
 .text
 .p2align 2
@@ -94,12 +94,18 @@ CSYM(core_run):
     call CSYM(core_frame_push)
     xorl %r14d,%r14d
     movl CM_START(%rbx),%r15d
+.p2align 4
 Lxrloop:
     cmpq %r13,%r14
     jge Lxrtimeout
     incq %r14
-    movq CM_MODE(%rbx),%rax
-    movl (%rax,%r15,4),%eax
+    movq CM_PACKED(%rbx),%rsi
+    testq %rsi,%rsi
+    je Lxrunpacked
+    movslq %r15d,%rax
+    shlq $6,%rax
+    addq %rax,%rsi
+    movl PS_MODE(%rsi),%eax
     cmpl $1,%eax
     je Lxrstack
     testl %eax,%eax
@@ -131,6 +137,132 @@ Lxrresult:
     cmpq %rax,%rdx
     cmova %rax,%rdx
 Lxrkey:
+    /* Inlined transition reading from single 64-byte CorePackedState at (%rsi) */
+    movslq %edx,%rdx
+    movq PS_RET_OK(%rsi),%rax
+    testq %rax,%rax
+    je Lxt_noret
+    testl %edx,%edx
+    js Lxt_noret
+    cmpl CM_NS(%rbx),%edx
+    jge Lxt_noret
+    cmpb $0,(%rax,%rdx)
+    je Lxt_noret
+    movl PS_RET_SEQ(%rsi),%ecx
+    movl %edx,%r15d
+    jmp Lxt_dispatch
+Lxt_noret:
+    cmpl $0,CM_ISNET(%rbx)
+    je Lxt_table
+    cmpl PS_LO(%rsi),%edx
+    jl Lxt_domain
+    cmpl PS_HI(%rsi),%edx
+    jg Lxt_domain
+    movslq PS_BASE_NEXT(%rsi),%r9
+    movslq PS_BASE_SEQ(%rsi),%r10
+    movl PS_COUNT(%rsi),%r8d
+    testl %r8d,%r8d
+    je Lxt_bounds
+    movq PS_KEYS(%rsi),%rdi
+    xorl %r11d,%r11d
+Lxt_search:
+    cmpl %r8d,%r11d
+    jae Lxt_sum
+    leal (%r11,%r8),%eax
+    shrl $1,%eax
+    leal 1(%rax),%ecx
+    cmpl (%rdi,%rax,4),%edx
+    cmovgel %ecx,%r11d
+    cmovll %eax,%r8d
+    jmp Lxt_search
+Lxt_sum:
+    testl %r11d,%r11d
+    je Lxt_bounds
+    movq PS_NEXT(%rsi),%rcx
+    movq PS_SEQ(%rsi),%rdi
+Lxt_unit:
+    movslq (%rcx),%rax
+    movslq (%rdi),%r8
+    addq %rax,%r9
+    addq %r8,%r10
+    addq $4,%rcx
+    addq $4,%rdi
+    decl %r11d
+    jne Lxt_unit
+Lxt_bounds:
+    cmpq $-1,%r9
+    jl Lxt_invalid
+    movslq CM_NS(%rbx),%rax
+    cmpq %rax,%r9
+    jge Lxt_invalid
+    testq %r10,%r10
+    js Lxt_invalid
+    movslq CM_NQ(%rbx),%rax
+    cmpq %rax,%r10
+    jge Lxt_invalid
+    movl %r9d,%r15d
+    movl %r10d,%ecx
+    jmp Lxt_dispatch
+Lxt_table:
+    movl PS_MODE(%rsi),%r11d
+    movq PS_NEXT(%rsi),%rcx
+    movq PS_SEQ(%rsi),%rdi
+    cmpl $1,%r11d
+    jne Lxt_direct
+    movl PS_COUNT(%rsi),%r8d
+    movq PS_KEYS(%rsi),%rax
+    testl %r8d,%r8d
+    je Lxrmissing
+Lxt_find:
+    cmpl (%rax),%edx
+    je Lxt_found
+    addq $4,%rax
+    addq $4,%rcx
+    addq $4,%rdi
+    decl %r8d
+    jne Lxt_find
+    jmp Lxrmissing
+Lxt_direct:
+    leaq (%rcx,%rdx,4),%rcx
+    leaq (%rdi,%rdx,4),%rdi
+Lxt_found:
+    movl (%rcx),%r15d
+    movl (%rdi),%ecx
+    jmp Lxt_dispatch
+Lxrunpacked:
+    movq CM_MODE(%rbx),%rax
+    movl (%rax,%r15,4),%eax
+    cmpl $1,%eax
+    je Lxru_stack
+    testl %eax,%eax
+    jne Lxru_result
+    movq M_FRAMES+STACK_ENTRIES(%r12),%rax
+    movl M_FRAMES+STACK_COUNT(%r12),%ecx
+    decl %ecx
+    shlq $5,%rcx
+    addq %rcx,%rax
+    movq FRAME_CURSOR(%rax),%rcx
+    movl $256,%edx
+    cmpq FRAME_END(%rax),%rcx
+    jge Lxru_key
+    movq FRAME_BYTES(%rax),%rax
+    movzbl (%rax,%rcx),%edx
+    jmp Lxru_key
+Lxru_stack:
+    movl $-1,%edx
+    movl M_STACK+STACK_COUNT(%r12),%eax
+    testl %eax,%eax
+    je Lxru_key
+    decl %eax
+    movq M_STACK+STACK_ENTRIES(%r12),%rcx
+    movl (%rcx,%rax,4),%edx
+    jmp Lxru_key
+Lxru_result:
+    movq M_R(%r12),%rdx
+    movl $256,%eax
+    cmpq %rax,%rdx
+    cmova %rax,%rdx
+Lxru_key:
     movl $-1,280(%rsp)
     movl $0,284(%rsp)
     movq %rbx,%rdi
@@ -142,9 +274,10 @@ Lxrkey:
     testq %rax,%rax
     jne Lxrtransitionbad
     movl 280(%rsp),%r15d
+    movl 284(%rsp),%ecx
+Lxt_dispatch:
     testl %r15d,%r15d
     js Lxrmissing
-    movl 284(%rsp),%ecx
     movq CM_QOFF(%rbx),%rax
     movslq (%rax,%rcx,4),%rax
     shlq $3,%rax
@@ -172,6 +305,14 @@ Lxractions:
     movq %rax,336(%rsp)
     incl 344(%rsp)
     jmp Lxractions
+Lxt_domain:
+    leaq Lxt_domain_text(%rip),%rax
+    movq %rax,RESULT_REASON(%rbp)
+    jmp Lxrtransitionbad
+Lxt_invalid:
+    leaq Lxt_invalid_text(%rip),%rax
+    movq %rax,RESULT_REASON(%rbp)
+    jmp Lxrtransitionbad
 Lxrtimeout:
     leaq Lxrtime(%rip),%rax
     movq %rax,RESULT_REASON(%rbp)
@@ -279,6 +420,8 @@ Lxrempty: .asciz ""
 Lxrtime: .asciz "timeout"
 Lxrnone: .asciz "no transition"
 Lxroommsg: .asciz "out of memory"
+Lxt_domain_text: .asciz "observation outside network domain"
+Lxt_invalid_text: .asciz "invalid network output"
 #ifndef __APPLE__
 .section .note.GNU-stack,"",@progbits
 #endif
