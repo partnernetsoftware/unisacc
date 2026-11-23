@@ -16,7 +16,7 @@
 
 - 版本序与当前状态:build/version-seq.tsv(唯一权威;发布证据索引入口 release/evidence/)。
 - 所有者需求与未告知断点:build/owner-reqs.tsv(只降不升)。
-- 起草快照:0.0.98 已公开(2026-11-23 20:51,v0.0.98 Latest,冻结 F=238c84b071,候选 T=575a613f47,X=df983630da,Y1=8974fd2558,Y2=e3caf24487,APE 07351e2cbf 9010222B,CI 45167911448 六格 QUALIFIED,NOT_QUALIFIED,严格证据 459 批 PASS 457 FAIL 0 UNKNOWN 2,本机 Root 已升至 unisacc 0.0.98;v0.0.97 GitHub 说明已补 run-cache 已知缺陷);标准发布流程(0.0.99 起)目标图见 plans/release-standard.md;公开后版本序重排(build/version-seq.tsv):0.0.99 运行缓存键修复(ccogweco,plans/v0.0.99.md)、0.0.100 大单元冷编译 U7 运行飞跃版(plans/v0.0.100.md)、0.0.101 执行核二期开发飞跃版(plans/v0.0.101.md)、0.0.102 前端 A(plans/v0.0.102.md)、0.0.103 前端 B1、0.0.104 诊断定位类、0.0.105 前端 B2、0.0.106 x16、0.0.107..0.0.117 顺延。
+- 起草快照:0.0.98 已公开(2026-11-23 20:51,v0.0.98 Latest,冻结 F=238c84b071,候选 T=575a613f47,X=df983630da,Y1=8974fd2558,Y2=e3caf24487,APE 07351e2cbf 9010222B,CI 45167911448 六格 QUALIFIED,NOT_QUALIFIED,严格证据 459 批 PASS 457 FAIL 0 UNKNOWN 2,本机 Root 已升至 unisacc 0.0.98;v0.0.97 GitHub 说明已补 run-cache 已知缺陷);标准发布流程(0.0.99 起)目标图见 plans/release-standard.md;公开后版本序重排(build/version-seq.tsv):0.0.99 运行缓存键修复(ccogweco,plans/v0.0.99.md)、0.0.100 前端 A(plans/v0.0.100.md)、0.0.101 逐单元共享状态接线(plans/v0.0.101.md)、0.0.102 cxmod 后缀按内容身份(plans/v0.0.102.md)、0.0.103 执行核动作分派内联、0.0.104 切片转网第一批、0.0.105 精确钉键重做、0.0.106 CXM_MAXU 256、0.0.107..0.0.121 顺延。
 
 
 ## 决定(别人必须遵守)
