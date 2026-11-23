@@ -57,4 +57,5 @@ description: 编排者督导多个执行者窗口与后台作业、做定期巡�
 - 版本分支只放产品输入类改动;tools/、devsvc 与 plans/devsvc.md 等开发基础设施一律在 main 上改(0.0.94 合入诊断:唯一的源码双改文件 tools/derive.cx 来自版本分支上的 derive 池提交,合并时语义未证)。
 - 冻结前做一次"并集树只读预合并检查"(归档 main 加分支独有文件,逐个跑生成器 --check 与 derive --check、check-derive),把语义冲突提前暴露。
 - `git revert` 带 `merge=union` 表的陷阱:`tests/batches.tsv`、`tests/coverage.tsv`、`build/links.tsv` 等在 `.gitattributes` 配了 `merge=union`,当待回退提交的增删行与后续追加行发生上下文重叠时,`git revert` 的 union 合并驱动会静默保留本应删除的行(即使 `tests/manifests/*.tsv` 已删),回退后必须显式核对并剔除残留行再跑 `links-gen --write` 与 `derive --check`。
+- 常驻铁律(所有者 2026-11-23 两次批评后固化;压缩与长会话必丢对话里的规则,所以只认写在此处与定时器提示词里的):(1) 冻结或预跑期间只禁共享检出 main 与冻结域,不禁未来版本工作;发冻结广播时同一封信里必须给每个窗口派一个版本工作树任务,闲置窗口是编排者的失误;(2) 不说"你说得对"类认错话,只报动作与结果;(3) 所有者要决定的事自己开 fable 裁定并执行;(4) 工具打印的命令必须用目标子命令的参数表自检后再执行(本次 prerun-inputs 的 run 命令带了 run 不认的 --normal-jobs);(5) 预跑窗口首轮 rc=124 在 0.0.93 同样出现,重试后材料热了转 rc=0,同一窗口连续两次先看 --resume 重轮,不立刻判确定性缺陷。
 - 工具:devsvc f write/edit 在版本工作目录下相对路径会落到主检出,一律用绝对路径;改文件不用 sed -i;主调度自己的提交也走 devsvc 或 commit-own,原生 git commit 会使 devsvc 因 unowned-pending 拒绝推送。

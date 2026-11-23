@@ -66,6 +66,54 @@ static long prose_len(const unsigned char *t, long n) {
     mm_free(c);
     return total;
 }
+/* 认错开头拦截(只判回复开头)。开头先跳过空白与 # - * _ 标记(标题、列表项、强调),再跳过"好的、是的、嗯、对、没错、收到、明白、确实"
+ * 这类前缀(须紧跟标点或空白),然后匹配 APOLOGY 短语;短语后须紧跟标点、空白或结尾,所以"抱歉机制""你说得对不对""我的错误码"不拦。
+ * 首个非空行是引用(>)或表格(|)时不判;句中、第二段出现不判。
+ * 已知缺口:英文 Sorry / You are right;"确实,你的判断正确"这类无套话短语的附和;引用后第二段与句中认错;
+ *   加修饰的道歉、换说法的认错与附和、前缀变体、省略号结尾的认错(都不拦);
+ *   误拦 3 例:"抱歉(apology)表已合入"、"抱歉 表(APOLOGY)新增 3 项"、"对不起:该短语已加入 APOLOGY 表"(开头是短语加标点或空白即判,无法区分谈论该短语本身)。 */
+static const char *APOLOGY[] = { "你说得对", "您说得对", "你说的对", "您说的对", "你说得没错", "您说得没错", "你批评得对", "您批评得对", "你批评的对", "您批评的对",
+    "你是对的", "是我的失误", "我的失误", "确实是我的错", "是我的错", "我的错", "我错了", "很抱歉", "非常抱歉", "抱歉", "对不起", "不好意思", 0 };
+static const char *LEADIN[] = { "好的", "是的", "嗯", "对", "没错", "收到", "明白", "确实", 0 };
+static int punct_at(const unsigned char *t, long i, long n) {
+    unsigned char c;
+    if (i >= n) return 1;
+    if (ws_at(t, i, n) > 0) return 1;
+    c = t[i];
+    if (c < 0x80) return !((c >= '0' && c <= '9') || (c >= 'A' && c <= 'Z') || (c >= 'a' && c <= 'z'));
+    if (i + 2 < n && t[i] == 0xE3 && t[i + 1] == 0x80 && (t[i + 2] == 0x82 || t[i + 2] == 0x81)) return 1;
+    if (i + 2 < n && t[i] == 0xEF && t[i + 1] == 0xBC && (t[i + 2] == 0x8C || t[i + 2] == 0x81 || t[i + 2] == 0x9F || t[i + 2] == 0x9A || t[i + 2] == 0x9B)) return 1;
+    return 0;
+}
+/* 跳过标记与空白 */
+static long skip_marks(const unsigned char *t, long i, long n) {
+    int w;
+    for (;;) {
+        if (i < n && (t[i] == '*' || t[i] == '_' || t[i] == '#' || t[i] == '-')) { i++; continue; }
+        if (i < n && (w = ws_at(t, i, n)) > 0) { i += w; continue; }
+        return i;
+    }
+}
+static int apology_open(const unsigned char *t, long n) {
+    long i = skip_marks(t, 0, n), k; int round;
+    for (round = 0; round < 3; round++) {
+        int moved = 0;
+        for (k = 0; LEADIN[k]; k++) {
+            long m = (long)strlen(LEADIN[k]);
+            if (i + m < n && memcmp(t + i, LEADIN[k], (size_t)m) == 0 && punct_at(t, i + m, n)) {
+                long j = i + m;
+                if (t[j] >= 0xE3 && j + 2 < n && ((t[j] == 0xEF) || t[j] == 0xE3)) j += 3; else j++;
+                i = skip_marks(t, j, n); moved = 1; break;
+            }
+        }
+        if (!moved) break;
+    }
+    for (k = 0; APOLOGY[k]; k++) {
+        long m = (long)strlen(APOLOGY[k]);
+        if (i + m <= n && memcmp(t + i, APOLOGY[k], (size_t)m) == 0 && punct_at(t, i + m, n)) return 1;
+    }
+    return 0;
+}
 static int truthy(js_val *v) {
     int k = js_kind(v);
     if (k == JS_BOOL) return js_bool(v);
@@ -126,6 +174,10 @@ int main(int argc, char **argv) {
                 }
             }
         }
+    }
+    if (txt && apology_open((const unsigned char *)txt, (long)strlen(txt))) {
+        printf("{\"decision\":\"block\",\"reason\":\"回复以认错套话开头:只报动作与结果,不写道歉或附和。\"}\n");
+        return 0;
     }
     if (txt) {
         long len = prose_len((const unsigned char *)txt, (long)strlen(txt));

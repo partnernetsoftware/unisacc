@@ -268,10 +268,389 @@ static int tree_hash_matches(const char *head_tree, const char *merge_tree) {
     return tx_prefix(head_tree, hl, merge_tree, cmp);
 }
 
+/* ---- Parse-level command self-check (--selfcheck) ---- */
+static char g_cr_items[64][64];
+static int g_ncr;
+
+static void cr_add_item(const char *s, long n) {
+    if (n <= 0 || n >= 64 || g_ncr >= 64) return;
+    char tmp[64];
+    mm_copy(tmp, sizeof tmp, s, n);
+    tmp[n] = 0;
+    for (int i = 0; i < g_ncr; i++) if (tx_eqz(g_cr_items[i], tmp)) return;
+    mm_copy(g_cr_items[g_ncr], 64, tmp, n + 1);
+    g_ncr++;
+}
+
+/* Read real item names from <repo>/tools/chain-ready.cx (both nm[] table and WANT("...") guards). */
+static void load_chain_ready_items(const char *repo) {
+    char p[1024];
+    g_ncr = 0;
+    if (cx_fmt(p, sizeof p, "%s/tools/chain-ready.cx", repo)) return;
+    unsigned char *raw = 0;
+    int64_t sz = 0;
+    if (sy_read_file(p, &raw, &sz, 4 << 20) != 0 || !raw || sz <= 0) { mm_free(raw); return; }
+    const char *s = (const char *)raw;
+    /* 1. Extract quoted names from static const char *nm[] = { ... }; */
+    long nm_pos = tx_find(s, (long)sz, "static const char *nm[] = {", 27);
+    if (nm_pos >= 0) {
+        long end_pos = tx_find(s + nm_pos, (long)sz - nm_pos, "};", 2);
+        if (end_pos > 0) {
+            long i = nm_pos + 27, lim = nm_pos + end_pos;
+            while (i < lim) {
+                if (s[i] == '"') {
+                    long st = i + 1;
+                    i++;
+                    while (i < lim && s[i] != '"') i++;
+                    if (i < lim && i > st) cr_add_item(s + st, i - st);
+                }
+                i++;
+            }
+        }
+    }
+    /* 2. Extract quoted names from WANT("...") across the file */
+    long pos = 0;
+    while (pos < (long)sz) {
+        long hit = tx_find(s + pos, (long)sz - pos, "WANT(\"", 6);
+        if (hit < 0) break;
+        long st = pos + hit + 6;
+        long en = st;
+        while (en < (long)sz && s[en] != '"' && s[en] != '\n') en++;
+        if (en < (long)sz && s[en] == '"' && en > st) cr_add_item(s + st, en - st);
+        pos = en + 1;
+    }
+    mm_free(raw);
+}
+
+static int cr_prefix_matches(const char *pfx) {
+    long pl = tx_len(pfx, 64);
+    if (pl <= 0 || g_ncr <= 0) return 0;
+    for (int i = 0; i < g_ncr; i++) {
+        long il = tx_len(g_cr_items[i], 64);
+        if (tx_prefix(g_cr_items[i], il, pfx, pl)) return 1;
+    }
+    return 0;
+}
+
+static int sc_in_list(const char *tok, const char *const *list) {
+    for (int i = 0; list[i]; i++) if (tx_eqz(tok, list[i])) return 1;
+    return 0;
+}
+
+static int sc_check_flags(char toks[][256], int start, int nt,
+                          const char *const *val_flags, const char *const *bool_flags,
+                          int allow_pos, int *npos_out, char *why, long wcap) {
+    int npos = 0;
+    for (int i = start; i < nt; i++) {
+        if (toks[i][0] == '-' && toks[i][1] == '-') {
+            if (val_flags && sc_in_list(toks[i], val_flags)) {
+                if (i + 1 >= nt) { cx_fmt(why, wcap, "missing-value:%s", toks[i]); return 1; }
+                i++;
+            } else if (bool_flags && sc_in_list(toks[i], bool_flags)) {
+                /* ok */
+            } else {
+                cx_fmt(why, wcap, "unknown-flag:%s", toks[i]);
+                return 1;
+            }
+        } else if (toks[i][0] == '-' && toks[i][1]) {
+            if (val_flags && sc_in_list(toks[i], val_flags)) {
+                if (i + 1 >= nt) { cx_fmt(why, wcap, "missing-value:%s", toks[i]); return 1; }
+                i++;
+            } else if (bool_flags && sc_in_list(toks[i], bool_flags)) {
+                /* ok */
+            } else {
+                cx_fmt(why, wcap, "unknown-flag:%s", toks[i]);
+                return 1;
+            }
+        } else {
+            if (!allow_pos) { cx_fmt(why, wcap, "unexpected-pos:%s", toks[i]); return 1; }
+            npos++;
+        }
+    }
+    if (npos_out) *npos_out = npos;
+    return 0;
+}
+
+static int sc_has_flag(char toks[][256], int start, int nt, const char *flag, char *val, long vcap) {
+    for (int i = start; i < nt; i++) {
+        if (tx_eqz(toks[i], flag)) {
+            if (val && vcap > 0) {
+                if (i + 1 < nt) cx_fmt(val, vcap, "%s", toks[i + 1]);
+                else val[0] = 0;
+            }
+            return 1;
+        }
+    }
+    return 0;
+}
+
+static int sc_validate_tool(const char *tool, char toks[][256], int nt, char *why, long wcap) {
+    why[0] = '-'; why[1] = 0;
+    if (tx_eqz(tool, "chain-ready")) {
+        static const char *const vf[] = {"--repo", "--root", "--rev", "--since", "--pgrep-pat", "--only", "--version", "--preflight-table", "--disk-free-gb", 0};
+        static const char *const bf[] = {"--fast", 0};
+        if (sc_check_flags(toks, 0, nt, vf, bf, 0, 0, why, wcap)) return 1;
+        char onlyv[256]; onlyv[0] = 0;
+        if (sc_has_flag(toks, 0, nt, "--only", onlyv, sizeof onlyv)) {
+            if (tx_find(onlyv, tx_len(onlyv, 256), ",", 1) >= 0) {
+                cx_fmt(why, wcap, "chain-ready-only-must-be-single-prefix");
+                return 1;
+            }
+            if (!tx_eqz(onlyv, "$p")) {
+                if (g_ncr <= 0) {
+                    cx_fmt(why, wcap, "chain-ready-items-unreadable");
+                    return 1;
+                }
+                if (!cr_prefix_matches(onlyv)) {
+                    cx_fmt(why, wcap, "chain-ready-only-no-match:%s", onlyv);
+                    return 1;
+                }
+            }
+        }
+        return 0;
+    }
+    if (tx_eqz(tool, "bg-candidate")) {
+        if (nt < 1) { cx_fmt(why, wcap, "missing-subcmd"); return 1; }
+        if (tx_eqz(toks[0], "start")) {
+            static const char *const vf[] = {"--rev", "--deadline-s", "--segment-s", "--max-segments", "--chain", 0};
+            if (sc_check_flags(toks, 1, nt, vf, 0, 0, 0, why, wcap)) return 1;
+            if (!sc_has_flag(toks, 1, nt, "--rev", 0, 0)) { cx_fmt(why, wcap, "bg-candidate-start-needs-rev"); return 1; }
+            return 0;
+        }
+        if (tx_eqz(toks[0], "promote") || tx_eqz(toks[0], "status") || tx_eqz(toks[0], "stop")) return 0;
+        cx_fmt(why, wcap, "unknown-subcmd:%s", toks[0]);
+        return 1;
+    }
+    if (tx_eqz(tool, "prerun-inputs")) {
+        static const char *const vf[] = {"--rev", "--version", "--prev", "--ape", "--dir", "--repo", "--prev-windows", "--priority-src", "--add-ids", "--times-cache", "--evidence-out", "--prev-rev", "--exclude", "--lanes", "--jobs", 0};
+        static const char *const bf[] = {"--no-templates", 0};
+        if (sc_check_flags(toks, 0, nt, vf, bf, 0, 0, why, wcap)) return 1;
+        if (!sc_has_flag(toks, 0, nt, "--rev", 0, 0) || !sc_has_flag(toks, 0, nt, "--version", 0, 0) ||
+            !sc_has_flag(toks, 0, nt, "--prev", 0, 0) || !sc_has_flag(toks, 0, nt, "--dir", 0, 0)) {
+            cx_fmt(why, wcap, "prerun-inputs-missing-required");
+            return 1;
+        }
+        return 0;
+    }
+    if (tx_eqz(tool, "prerun-drive")) {
+        if (nt < 1) { cx_fmt(why, wcap, "missing-subcmd"); return 1; }
+        if (tx_eqz(toks[0], "plan")) {
+            static const char *const vf[] = {"--ids-file", "--out", "--heavy-file", "--times-file", "--priority-file", "--normal-jobs", "--window-lanes", "--win-size", "--warmup", "--max-wins", "--unmeasured-ms", 0};
+            if (sc_check_flags(toks, 1, nt, vf, 0, 0, 0, why, wcap)) return 1;
+            if (!sc_has_flag(toks, 1, nt, "--ids-file", 0, 0) || !sc_has_flag(toks, 1, nt, "--out", 0, 0)) { cx_fmt(why, wcap, "plan-missing-required"); return 1; }
+            return 0;
+        }
+        if (tx_eqz(toks[0], "run")) {
+            static const char *const vf[] = {"--root", "--candidate", "--out", "--dir", "--max-jobs", "--window-lanes", "--load-cap", "--max-retries", "--mock-runner", 0};
+            static const char *const bf[] = {"--resume", "--keep-going", "--no-keep-going", "--fail-fast-unknown", 0};
+            if (sc_check_flags(toks, 1, nt, vf, bf, 0, 0, why, wcap)) return 1;
+            if (!sc_has_flag(toks, 1, nt, "--out", 0, 0) && !sc_has_flag(toks, 1, nt, "--dir", 0, 0)) { cx_fmt(why, wcap, "run-missing-out"); return 1; }
+            return 0;
+        }
+        if (tx_eqz(toks[0], "merge")) {
+            static const char *const vf[] = {"--in-dir", "--out", "--dir", "--version", 0};
+            if (sc_check_flags(toks, 1, nt, vf, 0, 0, 0, why, wcap)) return 1;
+            if (!sc_has_flag(toks, 1, nt, "--in-dir", 0, 0) && !sc_has_flag(toks, 1, nt, "--dir", 0, 0)) { cx_fmt(why, wcap, "merge-missing-in-dir"); return 1; }
+            return 0;
+        }
+        if (tx_eqz(toks[0], "archive")) {
+            static const char *const vf[] = {"--in-dir", "--dir", "--repo", "--version", 0};
+            if (sc_check_flags(toks, 1, nt, vf, 0, 0, 0, why, wcap)) return 1;
+            if (!sc_has_flag(toks, 1, nt, "--in-dir", 0, 0) && !sc_has_flag(toks, 1, nt, "--dir", 0, 0)) { cx_fmt(why, wcap, "archive-missing-in-dir"); return 1; }
+            return 0;
+        }
+        cx_fmt(why, wcap, "unknown-subcmd:%s", toks[0]);
+        return 1;
+    }
+    if (tx_eqz(tool, "ci-early")) {
+        static const char *const vf[] = {"--rev", "--version", "--ape-sha", "--repo", "--workflow", "--ref", "--out", "--poll-s", "--poll-max", "--ci-json", "--ci-log", 0};
+        static const char *const bf[] = {"--parse-only", "--no-dispatch", 0};
+        if (sc_check_flags(toks, 0, nt, vf, bf, 0, 0, why, wcap)) return 1;
+        if (!sc_has_flag(toks, 0, nt, "--rev", 0, 0)) { cx_fmt(why, wcap, "ci-early-needs-rev"); return 1; }
+        return 0;
+    }
+    if (tx_eqz(tool, "release-run")) {
+        if (nt < 1) { cx_fmt(why, wcap, "missing-mode"); return 1; }
+        if (tx_eqz(toks[0], "--pack")) {
+            static const char *const vf[] = {"--chain-out", "--snap", 0};
+            int npos = 0;
+            if (sc_check_flags(toks, 1, nt, vf, 0, 1, &npos, why, wcap)) return 1;
+            if (npos < 4 || !sc_has_flag(toks, 1, nt, "--chain-out", 0, 0)) { cx_fmt(why, wcap, "release-run-pack-needs-4-pos-and-chain-out"); return 1; }
+            return 0;
+        }
+        cx_fmt(why, wcap, "unknown-mode:%s", toks[0]);
+        return 1;
+    }
+    if (tx_eqz(tool, "release-chain")) {
+        if (nt < 1) { cx_fmt(why, wcap, "missing-subcmd"); return 1; }
+        if (tx_eqz(toks[0], "run") || tx_eqz(toks[0], "plan")) {
+            static const char *const vf[] = {"--inputs", "--state", "--layout", "--decisions", "--from", 0};
+            if (sc_check_flags(toks, 1, nt, vf, 0, 0, 0, why, wcap)) return 1;
+            if (!sc_has_flag(toks, 1, nt, "--inputs", 0, 0) || !sc_has_flag(toks, 1, nt, "--state", 0, 0) ||
+                !sc_has_flag(toks, 1, nt, "--layout", 0, 0)) { cx_fmt(why, wcap, "release-chain-missing-required"); return 1; }
+            return 0;
+        }
+        cx_fmt(why, wcap, "unknown-subcmd:%s", toks[0]);
+        return 1;
+    }
+    if (tx_eqz(tool, "release-exec")) {
+        if (nt < 1) { cx_fmt(why, wcap, "missing-mode"); return 1; }
+        if (tx_eqz(toks[0], "--warm") || tx_eqz(toks[0], "--execute")) {
+            static const char *const vf[] = {"--layout", "--out", "--from-step", "--strict", "--baseline", 0};
+            static const char *const bf[] = {"--dry", 0};
+            int npos = 0;
+            if (sc_check_flags(toks, 1, nt, vf, bf, 1, &npos, why, wcap)) return 1;
+            if (npos < 1 || !sc_has_flag(toks, 1, nt, "--layout", 0, 0)) { cx_fmt(why, wcap, "release-exec-needs-candidate-and-layout"); return 1; }
+            return 0;
+        }
+        cx_fmt(why, wcap, "unknown-mode:%s", toks[0]);
+        return 1;
+    }
+    if (tx_eqz(tool, "devsvc")) {
+        if (nt < 1) { cx_fmt(why, wcap, "missing-subcmd"); return 1; }
+        if (tx_eqz(toks[0], "ping") || tx_eqz(toks[0], "start")) return 0;
+        if (tx_eqz(toks[0], "lock")) {
+            if (nt < 3 || !tx_eqz(toks[1], "acquire")) { cx_fmt(why, wcap, "devsvc-lock-usage"); return 1; }
+            static const char *const vf[] = {"--owner", "--ttl", 0};
+            return sc_check_flags(toks, 3, nt, vf, 0, 0, 0, why, wcap);
+        }
+        if (tx_eqz(toks[0], "git")) {
+            if (nt < 2) { cx_fmt(why, wcap, "devsvc-git-missing-op"); return 1; }
+            if (tx_eqz(toks[1], "push") || tx_eqz(toks[1], "merge") || tx_eqz(toks[1], "commit")) return 0;
+            cx_fmt(why, wcap, "devsvc-git-unknown:%s", toks[1]);
+            return 1;
+        }
+        if (tx_eqz(toks[0], "x")) {
+            int dash = -1;
+            for (int i = 1; i < nt; i++) if (tx_eqz(toks[i], "--")) { dash = i; break; }
+            if (dash < 0 || dash + 1 >= nt) { cx_fmt(why, wcap, "devsvc-x-needs-dashdash-and-cmd"); return 1; }
+            static const char *const vf[] = {"--par", "--timeout-ms", "--cwd", "--owner", 0};
+            static const char *const bf[] = {"--bg", 0};
+            if (sc_check_flags(toks, 1, dash, vf, bf, 0, 0, why, wcap)) return 1;
+            if (!sc_has_flag(toks, 1, dash, "--par", 0, 0)) { cx_fmt(why, wcap, "devsvc-x-needs-par"); return 1; }
+            return 0;
+        }
+        cx_fmt(why, wcap, "unknown-subcmd:%s", toks[0]);
+        return 1;
+    }
+    if (tx_eqz(tool, "merge-version")) {
+        if (nt < 1) { cx_fmt(why, wcap, "missing-subcmd"); return 1; }
+        if (tx_eqz(toks[0], "preview")) {
+            static const char *const vf[] = {"--branch", "--base", "--repo", "--rules", "--work", 0};
+            return sc_check_flags(toks, 1, nt, vf, 0, 0, 0, why, wcap);
+        }
+        if (tx_eqz(toks[0], "gate")) {
+            if (nt < 2) { cx_fmt(why, wcap, "merge-version-gate-missing-name"); return 1; }
+            static const char *const vf[] = {"--branch", "--repo", "--work", "--max-load", "--shard", "--shards", 0};
+            return sc_check_flags(toks, 2, nt, vf, 0, 0, 0, why, wcap);
+        }
+        cx_fmt(why, wcap, "unknown-subcmd:%s", toks[0]);
+        return 1;
+    }
+    if (tx_eqz(tool, "freeze-broadcast")) {
+        if (nt < 1) { cx_fmt(why, wcap, "missing-subcmd"); return 1; }
+        static const char *const vf[] = {"--windows-table", "--mux", "--tmux", "--lock", "--until", "--load-ceil", "--why", "--ledger-dir", "--from", "--session", 0};
+        static const char *const bf[] = {"--dry", 0};
+        return sc_check_flags(toks, 1, nt, vf, bf, 0, 0, why, wcap);
+    }
+    if (tx_eqz(tool, "check-release-prep")) {
+        static const char *const vf[] = {"--part", "--notes", "--rollback", 0};
+        return sc_check_flags(toks, 0, nt, vf, 0, 0, 0, why, wcap);
+    }
+    if (tx_eqz(tool, "release-post")) {
+        if (nt < 1 || (!tx_eqz(toks[0], "run") && !tx_eqz(toks[0], "plan"))) { cx_fmt(why, wcap, "release-post-subcmd"); return 1; }
+        static const char *const vf[] = {"--version", "--step", "--repo", "--evidence-dir", "--chain-dir", "--prerun-dir", "--backup-dir", "--state-file", 0};
+        static const char *const bf[] = {"--dry", "--execute", "--root-upgrade", 0};
+        return sc_check_flags(toks, 1, nt, vf, bf, 0, 0, why, wcap);
+    }
+    return 0;
+}
+
+static void sc_scan_cmd(const char *step_id, const char *cmd, int *checked, int *failed) {
+    /* If cmd starts with "for p in A B C ...; do ", collect loop prefixes for chain-ready --only "$p". */
+    char for_items[32][64];
+    int nfor = 0;
+    if (tx_prefix(cmd, tx_len(cmd, 2048), "for p in ", 9)) {
+        const char *fp = cmd + 9;
+        while (*fp && *fp != ';' && nfor < 32) {
+            while (*fp == ' ' || *fp == '\t') fp++;
+            if (!*fp || *fp == ';') break;
+            int k = 0;
+            while (*fp && *fp != ' ' && *fp != '\t' && *fp != ';' && k < 63) for_items[nfor][k++] = *fp++;
+            for_items[nfor][k] = 0;
+            if (k > 0) nfor++;
+        }
+    }
+    const char *p = cmd;
+    while (*p) {
+        const char *m = strstr(p, "tools/");
+        if (!m) break;
+        const char *cx = strstr(m, ".cx --");
+        if (!cx || cx - m <= 6 || cx - m > 60) { p = m + 6; continue; }
+        char tool[64];
+        long tl = (long)(cx - (m + 6));
+        if (tl <= 0 || tl >= (long)sizeof tool) { p = cx + 6; continue; }
+        mm_copy(tool, sizeof tool, m + 6, tl);
+        tool[tl] = 0;
+        const char *q = cx + 6;
+        /* Tokenize arguments until shell separator (&&, ||, ;, #, ), end) */
+        char toks[48][256];
+        int nt = 0;
+        while (*q && nt < 48) {
+            while (*q == ' ' || *q == '\t') q++;
+            if (!*q || *q == ';' || *q == '#' || *q == ')') break;
+            if ((q[0] == '&' && q[1] == '&') || (q[0] == '|' && q[1] == '|')) break;
+            int k = 0;
+            if (*q == '"' || *q == '\'') {
+                char quote = *q++;
+                while (*q && *q != quote && k < 255) toks[nt][k++] = *q++;
+                if (*q == quote) q++;
+            } else {
+                while (*q && *q != ' ' && *q != '\t' && *q != ';' && *q != '#' && *q != ')' && k < 255) {
+                    if ((q[0] == '&' && q[1] == '&') || (q[0] == '|' && q[1] == '|')) break;
+                    toks[nt][k++] = *q++;
+                }
+            }
+            toks[nt][k] = 0;
+            if (k > 0) nt++;
+        }
+        char why[128];
+        int bad = sc_validate_tool(tool, toks, nt, why, sizeof why);
+        /* Expand for-loop --only "$p" prefixes against chain-ready item table */
+        if (!bad && tx_eqz(tool, "chain-ready")) {
+            char onlyv[256]; onlyv[0] = 0;
+            if (sc_has_flag(toks, 0, nt, "--only", onlyv, sizeof onlyv) && tx_eqz(onlyv, "$p")) {
+                if (g_ncr <= 0) {
+                    bad = 1;
+                    cx_fmt(why, sizeof why, "chain-ready-items-unreadable");
+                } else if (nfor <= 0) {
+                    bad = 1;
+                    cx_fmt(why, sizeof why, "chain-ready-for-loop-empty");
+                } else {
+                    for (int fi = 0; fi < nfor; fi++) {
+                        if (!cr_prefix_matches(for_items[fi])) {
+                            bad = 1;
+                            cx_fmt(why, sizeof why, "chain-ready-only-no-match:%s", for_items[fi]);
+                            break;
+                        }
+                    }
+                }
+            }
+        }
+        (*checked)++;
+        if (bad) (*failed)++;
+        printf("FREEZE_SELFCHECK\tstep=%s\ttool=%s\tstatus=%s\treason=%s\n",
+            step_id, tool, bad ? "FAIL" : "OK", why);
+        /* Advance past current tool invocation; for devsvc x, allow scanning nested tools/*.cx after "--" */
+        if (tx_eqz(tool, "devsvc") && nt >= 2 && tx_eqz(toks[0], "x")) p = cx + 6;
+        else p = q;
+    }
+}
+
 static int cmd_plan(int argc, char **argv) {
     char ver[64], branch[96], repo[512], owner[64];
     char prerun_dir[512], chain_dir[512], ape_path[512], rd_bin[512], merge_tree[64];
-    int no_rd = 0;
+    int no_rd = 0, selfcheck = 0;
     ver[0] = branch[0] = repo[0] = owner[0] = 0;
     prerun_dir[0] = chain_dir[0] = ape_path[0] = rd_bin[0] = merge_tree[0] = 0;
 
@@ -286,6 +665,7 @@ static int cmd_plan(int argc, char **argv) {
         else if (tx_eqz(argv[i], "--readiness-bin") && i + 1 < argc) { if (cx_fmt(rd_bin, sizeof rd_bin, "%s", argv[++i])) return 2; }
         else if (tx_eqz(argv[i], "--merge-tree") && i + 1 < argc) { if (cx_fmt(merge_tree, sizeof merge_tree, "%s", argv[++i])) return 2; }
         else if (tx_eqz(argv[i], "--no-readiness")) no_rd = 1;
+        else if (tx_eqz(argv[i], "--selfcheck")) selfcheck = 1;
         else return die_usage("unknown-plan-arg");
     }
     if (!ver[0]) return die_usage("missing --version");
@@ -298,7 +678,7 @@ static int cmd_plan(int argc, char **argv) {
     if (!prerun_dir[0]) cx_fmt(prerun_dir, sizeof prerun_dir, "%s/.cache/unisacc/prerun-%s", home, ver);
     if (!chain_dir[0]) cx_fmt(chain_dir, sizeof chain_dir, "%s/.cache/unisacc/chains/%s", home, ver);
 
-    char prev_ver[64], prev_sha[64], cand_ape[128], main_sha[64], head_tree[64], branch_sha[64];
+    char prev_ver[64], prev_sha[64], cand_ape[128], main_sha[64], head_tree[64], branch_sha[64], rev_full[64];
     int has_cand = (load_candidate_tsv(repo, prev_ver, sizeof prev_ver, prev_sha, sizeof prev_sha, cand_ape, sizeof cand_ape) == 0);
     if (!has_cand) {
         cx_fmt(prev_ver, sizeof prev_ver, "MISSING");
@@ -312,6 +692,8 @@ static int cmd_plan(int argc, char **argv) {
     if (!has_head_tree) cx_fmt(head_tree, sizeof head_tree, "MISSING");
     int has_branch = (git_rev(repo, branch, 1, branch_sha, sizeof branch_sha) == 0);
     if (!has_branch) cx_fmt(branch_sha, sizeof branch_sha, "MISSING");
+    if (git_rev(repo, has_branch ? branch : "HEAD", 0, rev_full, sizeof rev_full) != 0)
+        cx_fmt(rev_full, sizeof rev_full, "0000000000000000000000000000000000000000");
 
     if (!no_rd) {
         run_readiness(repo, ver, rd_bin);
@@ -337,7 +719,8 @@ static int cmd_plan(int argc, char **argv) {
     printf("FREEZE_DAY_CTX\tversion=%s\tbranch=%s\tbranch_sha=%s\tmain_sha=%s\thead_tree=%s\tprev_version=%s\tprev_commit=%s\tmerge_tree=%s\towner=%s\treadiness_ready=%s\treadiness_blockers=%d\n",
         ver, branch, branch_sha, main_sha, head_tree, prev_ver, prev_sha, merge_tree, owner, g_fr_ready, g_fr_blockers);
 
-    int blocked = 0;
+    int blocked = 0, sc_checked = 0, sc_failed = 0;
+    if (selfcheck) load_chain_ready_items(repo);
     for (int i = 0; i < FD_STEPS; i++) {
         char cmd[2048], why[512];
         cmd[0] = 0;
@@ -404,14 +787,16 @@ static int cmd_plan(int argc, char **argv) {
             if (fr_is_bad("plan-freeze-at")) { is_blk = 1; add_reason(why, sizeof why, "plan-freeze-at"); }
         } else if (i == 7) { /* S1-light */
             cx_fmt(cmd, sizeof cmd,
-                "sh ./unisacc.com tools/chain-ready.cx -- --version %s --only 1-rev,2-worktree,6-installed,7-recipe,8-smoke-env,9-ledger,10-envhygiene,11-version-slot,12-freeze-tsv,13-deferred-gates,14-hardlink-trees,21-verseq-gen",
+                "for p in 1-rev 6-affected 7-recipe 8-inflight 9-ledger 10-envhygiene 11-version-slot 12-root-files 12p-preflight-entry 13-snap-cache 14-root-record 16-disk-free 17-root-public 20-ident-helper 21-verseq-gen; do "
+                "sh ./unisacc.com tools/chain-ready.cx -- --version %s --only \"$p\" || exit 1; done",
                 ver);
             if (fr_is_bad("chain-1rev")) { is_blk = 1; add_reason(why, sizeof why, "chain-1rev"); }
             if (fr_is_bad("verseq")) { is_blk = 1; add_reason(why, sizeof why, "verseq"); }
             if (fr_is_bad("plan-freeze-at")) { is_blk = 1; add_reason(why, sizeof why, "plan-freeze-at"); }
         } else if (i == 8) { /* S1-mid */
             cx_fmt(cmd, sizeof cmd,
-                "sh ./unisacc.com tools/chain-ready.cx -- --version %s --only 3-ratchets,4-derive,15-premerge,16-release-prep,17-prerun-inputs,18-batch-domains,19-tables-gen,20-layer-api,22-premerge-union",
+                "for p in 2a-derive 2b-ratchets 3a-cxmod-tri 3b-cx0-extract 4-p1 15-gen-all 18-parse2-gen 19-chain-preflight 22-premerge-union; do "
+                "sh ./unisacc.com tools/chain-ready.cx -- --version %s --only \"$p\" || exit 1; done",
                 ver);
             if (fr_is_bad("ratchets")) { is_blk = 1; add_reason(why, sizeof why, "ratchets"); }
         } else if (i == 9) { /* S1-chain */
@@ -419,7 +804,7 @@ static int cmd_plan(int argc, char **argv) {
                 "sh ./unisacc.com tools/chain-ready.cx -- --version %s --only 5-candidate-chain # solo <=55s (baseline 53.5s)",
                 ver);
         } else if (i == 10) { /* S2 */
-            cx_fmt(cmd, sizeof cmd, "sh ./unisacc.com tools/bg-candidate.cx -- start --version %s --dir %s", ver, chain_dir);
+            cx_fmt(cmd, sizeof cmd, "sh ./unisacc.com tools/bg-candidate.cx -- start --rev %s", rev_full);
             if (!has_branch) { is_blk = 1; add_reason(why, sizeof why, "branch-missing"); }
         } else if (i == 11) { /* S3-inputs */
             cx_fmt(cmd, sizeof cmd,
@@ -435,7 +820,7 @@ static int cmd_plan(int argc, char **argv) {
                 "# judge: PRERUN_SUMMARY 0 FAIL, UNKNOWN only in expected-unmeasured.tsv, verify l0-posix2 first-run result",
                 prerun_dir, prerun_dir, prerun_dir, prerun_dir, ape_path, prerun_dir);
         } else if (i == 13) { /* S3b */
-            cx_fmt(cmd, sizeof cmd, "gh workflow run candidate-native.yml --ref %s", branch);
+            cx_fmt(cmd, sizeof cmd, "sh ./unisacc.com tools/ci-early.cx -- --rev %s --version %s", rev_full, ver);
             if (!has_branch) { is_blk = 1; add_reason(why, sizeof why, "branch-missing"); }
         } else if (i == 14) { /* S3c */
             cx_fmt(cmd, sizeof cmd,
@@ -448,8 +833,8 @@ static int cmd_plan(int argc, char **argv) {
             if (fr_is_bad("release-prep-rollback")) { is_blk = 1; add_reason(why, sizeof why, "release-prep-rollback"); }
         } else if (i == 15) { /* S4 */
             cx_fmt(cmd, sizeof cmd,
-                "sh ./unisacc.com tools/prerun-drive.cx -- merge --in %s --out %s --version %s && "
-                "sh ./unisacc.com tools/prerun-drive.cx -- archive --in %s --version %s",
+                "sh ./unisacc.com tools/prerun-drive.cx -- merge --in-dir %s --out %s --version %s && "
+                "sh ./unisacc.com tools/prerun-drive.cx -- archive --in-dir %s --version %s",
                 prerun_dir, prerun_dir, ver, prerun_dir, ver);
         } else if (i == 16) { /* S4b-renew-lock */
             cx_fmt(cmd, sizeof cmd,
@@ -457,33 +842,33 @@ static int cmd_plan(int argc, char **argv) {
                 owner, owner);
         } else if (i == 17) { /* S5 */
             cx_fmt(cmd, sizeof cmd,
-                "sh ./unisacc.com tools/release-run.cx -- --pack --version %s && "
-                "sh ./unisacc.com tools/release-exec.cx -- --warm --version %s",
-                ver, ver);
+                "sh ./unisacc.com tools/release-run.cx -- --pack . release/candidate.tsv %s/src %s/pack --chain-out %s && "
+                "sh ./unisacc.com tools/release-exec.cx -- --warm %s/pack/candidate.tsv --layout %s/pack/layout --out %s/warm",
+                chain_dir, chain_dir, chain_dir, chain_dir, chain_dir, chain_dir);
         } else if (i == 18) { /* S6 */
             cx_fmt(cmd, sizeof cmd,
-                "sh ./unisacc.com tools/release-chain.cx -- run --version %s --step 1 --step 2 --inputs %s --state %s/state.tsv --layout %s",
-                ver, prerun_dir, chain_dir, chain_dir);
+                "sh ./unisacc.com tools/release-chain.cx -- run --inputs %s/inputs.tsv --state %s/state --layout %s/pack/layout --from 1",
+                prerun_dir, chain_dir, chain_dir);
         } else if (i == 19) { /* S7 */
             cx_fmt(cmd, sizeof cmd,
-                "sh ./unisacc.com tools/release-chain.cx -- run --version %s --step 3 --inputs %s --state %s/state.tsv --layout %s "
+                "sh ./unisacc.com tools/release-chain.cx -- run --inputs %s/inputs.tsv --state %s/state --layout %s/pack/layout --from 3 "
                 "# stage release/notes-%s.md release/rollback.txt release/decision.txt",
-                ver, prerun_dir, chain_dir, chain_dir, ver);
+                prerun_dir, chain_dir, chain_dir, ver);
             if (!has_notes) { is_blk = 1; add_reason(why, sizeof why, "missing-notes-template"); }
             if (!has_rb) { is_blk = 1; add_reason(why, sizeof why, "missing-rollback-template"); }
             if (!has_dec) { is_blk = 1; add_reason(why, sizeof why, "missing-decision-template"); }
         } else if (i == 20) { /* S8 */
             cx_fmt(cmd, sizeof cmd,
-                "sh ./unisacc.com tools/release-chain.cx -- run --version %s --step 4 --inputs %s --state %s/state.tsv --layout %s",
-                ver, prerun_dir, chain_dir, chain_dir);
+                "sh ./unisacc.com tools/release-chain.cx -- run --inputs %s/inputs.tsv --state %s/state --layout %s/pack/layout --from 4",
+                prerun_dir, chain_dir, chain_dir);
         } else if (i == 21) { /* S8b-renew-lock */
             cx_fmt(cmd, sizeof cmd,
                 "DEVSVC_OWNER=%s sh ./unisacc.com tools/devsvc.cx -- lock acquire freeze --owner %s --ttl 7200 # renew before S9 execute",
                 owner, owner);
         } else if (i == 22) { /* S9 */
             cx_fmt(cmd, sizeof cmd,
-                "DEVSVC_OWNER=%s sh ./unisacc.com tools/devsvc.cx -- x --bg sh ./unisacc.com tools/release-exec.cx -- --execute --version %s",
-                owner, ver);
+                "DEVSVC_OWNER=%s sh ./unisacc.com tools/devsvc.cx -- x --bg --par 1 -- sh ./unisacc.com tools/release-exec.cx -- --execute release/candidate.tsv --layout %s/pack/layout --out %s/exec",
+                owner, chain_dir, chain_dir);
         } else if (i == 23) { /* S10 */
             cx_fmt(cmd, sizeof cmd,
                 "sh ./unisacc.com tools/release-post.cx -- run --version %s --dry && "
@@ -499,9 +884,14 @@ static int cmd_plan(int argc, char **argv) {
         printf("FREEZE_STEP\tid=%s\twho=%s\tbudget_s=%d\tgate=%s\treason=%s\texpect=%s\tcmd=%s\n",
             g_specs[i].id, g_specs[i].who, g_specs[i].budget_s,
             is_blk ? "BLOCKED" : "READY", why, exp_disp, cmd);
+        if (selfcheck) sc_scan_cmd(g_specs[i].id, cmd, &sc_checked, &sc_failed);
     }
 
     printf("FREEZE_DAY\tplan\tsteps=%d\tblocked=%d\n", FD_STEPS, blocked);
+    if (selfcheck) {
+        printf("FREEZE_DAY\tselfcheck\tchecked=%d\tfailed=%d\n", sc_checked, sc_failed);
+        if (sc_failed > 0) return 1;
+    }
     return 0;
 }
 

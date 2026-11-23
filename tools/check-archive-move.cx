@@ -1,0 +1,102 @@
+/* check-archive-move.cx -- fixture for archive-move (temp git repo).
+ * Red: --apply with missing src refuses. Green: --dry lists; --apply moves + ARCHIVE.tsv/INDEX.
+ * Ends CHECK_ARCHIVE_MOVE. */
+#pragma unisa use cxlib.ckassert
+#pragma unisa use cxlib.ckrun
+#pragma unisa use sys.fs
+#pragma unisa use sys.env
+#pragma unisa use sys.posix
+#pragma unisa use sys.time
+#pragma unisa use text.text
+
+static char out[1 << 16];
+static char root[900], cwd[800], tool[950], man[950];
+
+static int sh(const char *cmd) {
+    return ckk_sh_t("check-archive-move", cmd, out, (int)sizeof out, 55);
+}
+
+int main(void) {
+    char cmd[5000]; int rc; long now;
+    const char *td = sy_env("TMPDIR");
+    if (!td || !td[0]) td = "/tmp";
+    if (sh("pwd") != 0) return 2;
+    cx_fmt(cwd, sizeof cwd, "%s", out);
+    { long n = tx_len(cwd, sizeof cwd); while (n > 0 && cwd[n - 1] == '\n') cwd[--n] = 0; }
+    now = sy_wall_s();
+    if (cx_fmt(root, sizeof root, "%s/am-check-%ld", td, now % 1000000000)) return 2;
+    sy_remove_all(root);
+    if (sy_mkdir_all(root, 0700)) return 2;
+    /* tool path: this check lives beside archive-move.cx in private draft OR tools/ */
+    {
+        const char *env = sy_env("ARCHIVE_MOVE_TOOL");
+        if (env && env[0]) {
+            if (cx_fmt(tool, sizeof tool, "%s", env)) return 2;
+        } else if (cx_fmt(tool, sizeof tool, "%s/archive-move.cx", cwd)) return 2;
+        if (sy_exists(tool) != 1) {
+            if (cx_fmt(tool, sizeof tool, "%s/tools/archive-move.cx", cwd)) return 2;
+        }
+        if (sy_exists(tool) != 1) {
+            if (cx_fmt(tool, sizeof tool, "%s/.claude/archive-move-draft/archive-move.cx", cwd)) return 2;
+        }
+    }
+    if (cx_fmt(man, sizeof man, "%s/man.tsv", root)) return 2;
+
+    /* seed mini git repo */
+    if (cx_fmt(cmd, sizeof cmd,
+        "cd '%s' && git init -q && git config user.email t@t && git config user.name t && "
+        "mkdir -p research/2026-11-23 archive && "
+        "printf 'old\\n' > research/2026-11-23/a.md && "
+        "printf '#idx\\n' > archive/INDEX.md && "
+        "printf '# original_path\\n' > archive/ARCHIVE.tsv && "
+        "git add -A && git commit -qm seed", root)) return 2;
+    ck(sh(cmd) == 0, "seed-repo");
+
+    /* red: apply missing src */
+    if (cx_fmt(cmd, sizeof cmd,
+        "printf 'F\\tresearch/2026-11-23/missing.md\\tarchive/research-2026-11/research/2026-11-23/missing.md\\n' > '%s'", man)) return 2;
+    ck(sh(cmd) == 0, "seed-bad-man");
+    if (cx_fmt(cmd, sizeof cmd,
+        "cd '%s' && sh '%s/unisacc.com' '%s' -- --apply --manifest '%s' --root '%s' --date 2026-11-23",
+        root, cwd, tool, man, root)) return 2;
+    rc = sh(cmd);
+    ck(rc != 0, "red-missing-src");
+
+    /* green dry */
+    if (cx_fmt(cmd, sizeof cmd,
+        "printf 'F\\tresearch/2026-11-23/a.md\\tarchive/research-2026-11/research/2026-11-23/a.md\\n' > '%s'", man)) return 2;
+    ck(sh(cmd) == 0, "seed-good-man");
+    if (cx_fmt(cmd, sizeof cmd,
+        "cd '%s' && sh '%s/unisacc.com' '%s' -- --dry --manifest '%s' --root '%s'",
+        root, cwd, tool, man, root)) return 2;
+    rc = sh(cmd);
+    ck(rc == 0 && ckk_has(out, (int)sizeof out, "ARCHIVE_MOVE\tDRY") &&
+       ckk_has(out, (int)sizeof out, "src=research/2026-11-23/a.md"), "green-dry");
+    /* file still in place after dry */
+    if (cx_fmt(cmd, sizeof cmd, "test -f '%s/research/2026-11-23/a.md'", root)) return 2;
+    ck(sh(cmd) == 0, "dry-no-move");
+
+    /* green apply */
+    if (cx_fmt(cmd, sizeof cmd,
+        "cd '%s' && sh '%s/unisacc.com' '%s' -- --apply --manifest '%s' --root '%s' --date 2026-11-23 --note draft-check",
+        root, cwd, tool, man, root)) return 2;
+    rc = sh(cmd);
+    ck(rc == 0 && ckk_has(out, (int)sizeof out, "ARCHIVE_MOVE\tDONE"), "green-apply");
+    if (cx_fmt(cmd, sizeof cmd, "test -f '%s/archive/research-2026-11/research/2026-11-23/a.md'", root)) return 2;
+    ck(sh(cmd) == 0, "apply-dst-exists");
+    if (cx_fmt(cmd, sizeof cmd, "test ! -f '%s/research/2026-11-23/a.md'", root)) return 2;
+    ck(sh(cmd) == 0, "apply-src-gone");
+    if (cx_fmt(cmd, sizeof cmd, "grep -q 'research/2026-11-23/a.md' '%s/archive/ARCHIVE.tsv'", root)) return 2;
+    ck(sh(cmd) == 0, "tsv-appended");
+    if (cx_fmt(cmd, sizeof cmd, "grep -q 'research-2026-11' '%s/archive/INDEX.md'", root)) return 2;
+    ck(sh(cmd) == 0, "index-appended");
+
+    sy_remove_all(root);
+    {
+        int failed = ck_failures();
+        int total = ck_assertions();
+        printf("ARCHIVE_MOVE_SUMMARY\tfailed=%d\tpassed=%d\n", failed, total - failed);
+        if (!failed) printf("CHECK_ARCHIVE_MOVE\n");
+        return failed ? 1 : 0;
+    }
+}

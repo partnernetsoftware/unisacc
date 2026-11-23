@@ -4,6 +4,8 @@
 
 本目录只有被点名归档的文件;原目录里的探针、夹具、补丁、日志、`.cx` 脚本和符号链接不在此(未复制,按需从 job 目录取或重做)。
 
+0.0.94 公开后已迁走(见 `archive/research-2026-11/` 与 `archive/ARCHIVE.tsv` note=post-0.0.94):`csr/`、`flow-next/`、`r69-register/`、`r72-product/`、`replay/`、`sy-retval-census/`、`utf8-audit/`、`v091-draft/`、`v093-k3-fixtures/`。下表对已迁路径写归档相对位置。
+
 | 路径 | 内容 | 关联台账 |
 |---|---|---|
 | r76-design/design.md | R76 明文 HTTP/1.1 服务端(ext/net B 类库)设计稿 v2 | R76 |
@@ -18,18 +20,18 @@
 | u4-slices/archive-decisions.md | U4 裁定与 GCC 边界实测 | U4 |
 | u4-slices/release-notes-diffs.md | 汇编标签与 GCC 有意差异(发布说明素材) | U4 |
 | u4-slices/u4-1-receipt.md、u4-3-and-5-receipt.md | U4.1 交付收据;U4.3 与 U4.5 回执 | U4 |
-| csr/tsv-lint-F/ 下三个文件 | tsv-lint F 类逐表分布、高频唯一项与常量 top5 | tsv-lint |
-| csr/cold-ladder-closure.tsv、cold-iso-method.txt | 冷编译阶梯(逐模块加入的冷编译毫秒与闭包规模);冷测隔离方法 | 冷编译 |
-| replay/replay-report.tsv | 遗留补丁重放 apply-check 报告 | 0.0.91 |
-| sy-retval-census/report.md | 全仓 sy_ 返回正数或非负描述符函数被误作 == 0 比较的缺陷普查 | 库面 |
-| r81-census/report.md | R81 永不失败的阈值断言与文本存在性自测盘点 | R81 |
-| utf8-audit/report.md | tools 字节级切分的 UTF-8 边界审计 | UTF-8 |
-| flow-next/v0.0.90-draft.md | 0.0.90 计划草案:U4 asm 标签加 R72 临时头年龄清理 | R72、U4 |
-| v091-draft/plan-draft.md | 0.0.91 计划草案:身份与构建边界(L.1 加 Z5 加 B3) | 0.0.91 |
+| (已归档) ../../archive/research-2026-11/research/2026-11-22/csr/ | tsv-lint F 与冷编译阶梯底稿 | tsv-lint / 冷编译 |
+| (已归档) ../../archive/research-2026-11/research/2026-11-22/replay/replay-report.tsv | 遗留补丁重放 apply-check 报告 | 0.0.91 |
+| (已归档) ../../archive/research-2026-11/research/2026-11-22/sy-retval-census/report.md | 全仓 sy_ 返回正数或非负描述符函数被误作 == 0 比较的缺陷普查 | 库面 |
+| r81-census/report.md | R81 永不失败的布尔断言与文本存在性自测盘点 | R81 |
+| (已归档) ../../archive/research-2026-11/research/2026-11-22/utf8-audit/report.md | tools 字节级切分的 UTF-8 边界审计 | UTF-8 |
+| (已归档) ../../archive/research-2026-11/research/2026-11-22/flow-next/v0.0.90-draft.md | 0.0.90 计划草案:U4 asm 标签加 R72 临时头年龄清理 | R72、U4 |
+| (已归档) ../../archive/research-2026-11/research/2026-11-22/v091-draft/plan-draft.md | 0.0.91 计划草案:身份与构建边界(L.1 加 Z5 加 B3) | 0.0.91 |
 | r70-review/review.md | R70 cx 热启动提案的守门人纸面评审结论 | R70 |
 | litlen/real-bugs-41.tsv | 字面量长度缺陷 41 条真缺陷逐条判定清单 | 字面量长度 |
 | litlen-089/handoff.md | 字面量长度修复交接:发布执行两处提交与 29 条断言漏登 | 字面量长度 |
-| r72-product/receipt.md | R72 临时编译缓存回收收据(补丁已落库,补丁文件不入仓) | R72 |
-| r69-register/rt-shared-fix/receipt.md | rt-shared-gen 大块分配状态补登记回执(补丁已落库,补丁文件不入仓) | R69 |
+| (已归档) ../../archive/research-2026-11/research/2026-11-22/r72-product/receipt.md | R72 临时编译缓存回收收据(补丁已落库,补丁文件不入仓) | R72 |
+| (已归档) ../../archive/research-2026-11/research/2026-11-22/r69-register/rt-shared-fix/receipt.md | rt-shared-gen 大块分配状态补登记回执(补丁已落库,补丁文件不入仓) | R69 |
+| (已归档) ../../archive/research-2026-11/research/2026-11-22/v093-k3-fixtures/ | 0.0.93 K3 夹具设计 | 0.0.93 |
 
 第二批(按价值分级后续入,同一目录):设计稿、评审、判定清单与回执必须入仓;探针原始输出和已落库的补丁文件不入仓(补丁内容已在对应提交里,引用保持原样)。原目录已清理或不在本次范围的引用(`v090-ready/evidence.md`、`v091-ready/review.md`、`v094-ready/review.md` 等)没有归档,引用保持原样;r74 重放目录原目录里不存在。
