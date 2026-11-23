@@ -1,0 +1,214 @@
+/* tools/archive-move.cx -- dry/apply research archive moves from a manifest ().
+ *
+ *   sh ./unisacc.com PATH/TO/archive-move.cx -- --dry|--apply [--manifest FILE] [--root DIR]
+ *       [--archive-tsv PATH] [--index PATH] [--date YYYY-MM-DD] [--note TEXT]
+ *
+ * Manifest TSV: kind(F|D)<TAB>src<TAB>dst  (# comments). --dry only prints ARCHIVE_MOVE lines.
+ * --apply: mkdir -p dst parent, git mv src dst, append archive/ARCHIVE.tsv D-rows, append INDEX.md
+ * stub section. Does NOT rewrite cross-links or run doc-links-gen (caller does after apply).
+ * Exit 0 ok, 1 apply partial fail, 2 usage. */
+#pragma unisa use sys.fs
+#pragma unisa use sys.proc
+#pragma unisa use sys.env
+#pragma unisa use sys.time
+#pragma unisa use text.text
+#pragma unisa use text.num
+#pragma unisa use mem.heap
+#pragma unisa use mem.bytes
+
+#define AM_MAX 128
+
+static char g_man[1100], g_root[1100], g_atsv[1100], g_idx[1100], g_date[40], g_note[400];
+static int g_dry = 1, g_apply;
+static char g_kind[AM_MAX][4], g_src[AM_MAX][500], g_dst[AM_MAX][500];
+static int g_n;
+
+static int die(const char *m) { fprintf(stderr, "archive-move: %s\n", m); return 2; }
+
+static int load_manifest(const char *path) {
+    unsigned char *b; int64_t n; long i = 0;
+    g_n = 0;
+    if (sy_read_file(path, &b, &n, 1 << 20) < 0 || !b) return die("read manifest");
+    while (i < n && g_n < AM_MAX) {
+        long s = i, e, t1 = -1, t2 = -1, j, klen, slen, dlen;
+        while (i < n && b[i] != '\n') i++;
+        e = i; if (i < n) i++;
+        if (e <= s || b[s] == '#') continue;
+        for (j = s; j < e; j++) {
+            if (b[j] != '\t') continue;
+            if (t1 < 0) t1 = j;
+            else if (t2 < 0) { t2 = j; break; }
+        }
+        if (t1 < 0 || t2 < 0) { mm_free(b); return die("manifest need 3 cols"); }
+        klen = t1 - s; slen = t2 - (t1 + 1); dlen = e - (t2 + 1);
+        if (klen <= 0 || klen >= 4 || slen <= 0 || slen >= 500 || dlen <= 0 || dlen >= 500) {
+            mm_free(b); return die("manifest field length");
+        }
+        mm_copy(g_kind[g_n], 4, b + s, klen); g_kind[g_n][klen] = 0;
+        mm_copy(g_src[g_n], 500, b + t1 + 1, slen); g_src[g_n][slen] = 0;
+        mm_copy(g_dst[g_n], 500, b + t2 + 1, dlen); g_dst[g_n][dlen] = 0;
+        if (!tx_eqz(g_kind[g_n], "F") && !tx_eqz(g_kind[g_n], "D")) { mm_free(b); return die("kind F|D"); }
+        g_n++;
+    }
+    mm_free(b);
+    return g_n > 0 ? 0 : die("manifest empty");
+}
+
+static int parent_of(const char *path, char *out, long cap) {
+    long n = tx_len(path, 500), i, last = -1;
+    for (i = 0; i < n; i++) if (path[i] == '/') last = i;
+    if (last <= 0) { out[0] = '.'; out[1] = 0; return 0; }
+    if (last >= cap) return -1;
+    mm_copy(out, cap, path, last); out[last] = 0;
+    return 0;
+}
+
+static int run_git_mv(const char *src, const char *dst) {
+    char *av[] = {"timeout", "20", "git", "mv", (char *)src, (char *)dst, 0};
+    char out[4000]; int cut = 0, rc;
+    out[0] = 0;
+    rc = sy_run(av, out, (long)sizeof out, &cut);
+    if (rc != 0) {
+        fprintf(stderr, "archive-move: git mv failed %s -> %s\n%s\n", src, dst, out);
+        return 1;
+    }
+    return 0;
+}
+
+static int count_files_under(const char *path) {
+    /* best-effort: git ls-files path | wc via sy_run */
+    char cmd[900], out[8000]; int cut = 0, rc, n = 0; long i, len;
+    if (cx_fmt(cmd, sizeof cmd, "git ls-files -- '%s' 2>/dev/null", path)) return 0;
+    {
+        char *av[] = {"timeout", "20", "sh", "-c", cmd, 0};
+        out[0] = 0;
+        rc = sy_run(av, out, (long)sizeof out, &cut);
+        if (rc != 0) return 0;
+    }
+    len = tx_len(out, sizeof out);
+    for (i = 0; i < len; i++) if (out[i] == '\n') n++;
+    if (len > 0 && out[len - 1] != '\n') n++;
+    return n;
+}
+
+static int append_archive_tsv(void) {
+    char path[1200], line[900], *nb; unsigned char *old; int64_t on = 0; long ol, nn, i;
+    int nfiles;
+    if (cx_fmt(path, sizeof path, "%s/%s", g_root, g_atsv)) return -1;
+    if (sy_exists(path) == 1) sy_read_file(path, &old, &on, 1 << 22);
+    else { old = 0; on = 0; }
+    ol = (long)on;
+    nn = ol;
+    for (i = 0; i < g_n; i++) {
+        nfiles = tx_eqz(g_kind[i], "D") ? count_files_under(g_src[i]) : 1;
+        if (nfiles < 1) nfiles = 1;
+        if (cx_fmt(line, sizeof line, "D\t%s\t%d\t%s\t%s\tpending\n",
+                   g_src[i], nfiles, g_date, g_note[0] ? g_note : "archive-move")) {
+            if (old) mm_free(old); return -1;
+        }
+        nn += tx_len(line, sizeof line);
+    }
+    nb = (char *)mm_alloc(nn + 1);
+    if (!nb) { if (old) mm_free(old); return -1; }
+    if (ol > 0) mm_copy(nb, nn + 1, old, ol);
+    nn = ol;
+    for (i = 0; i < g_n; i++) {
+        nfiles = tx_eqz(g_kind[i], "D") ? count_files_under(g_dst[i]) : 1;
+        if (nfiles < 1) nfiles = 1;
+        cx_fmt(line, sizeof line, "D\t%s\t%d\t%s\t%s\tpending\n",
+               g_src[i], nfiles, g_date, g_note[0] ? g_note : "archive-move");
+        { long L = tx_len(line, sizeof line); mm_copy(nb + nn, (nn + L + 1), line, L); nn += L; }
+    }
+    nb[nn] = 0;
+    if (old) mm_free(old);
+    if (sy_write_file(path, nb, (int64_t)nn, 0600)) { mm_free(nb); return -1; }
+    mm_free(nb);
+    printf("ARCHIVE_MOVE_TSV\t%s\n", path);
+    return 0;
+}
+
+static int append_index(void) {
+    char path[1200], block[4000], *nb; unsigned char *old; int64_t on = 0; long ol, nn, i, at;
+    if (cx_fmt(path, sizeof path, "%s/%s", g_root, g_idx)) return -1;
+    if (sy_exists(path) == 1) sy_read_file(path, &old, &on, 1 << 22);
+    else { old = 0; on = 0; }
+    ol = (long)on;
+    at = 0;
+    at += cx_fmt(block + at, (long)sizeof block - at,
+                 "\n## research-2026-11 (%s)\n\narchive-move batch; sources:\n\n", g_date);
+    for (i = 0; i < g_n && at + 520 < (long)sizeof block; i++) {
+        at += cx_fmt(block + at, (long)sizeof block - at, "- `%s` -> `%s`\n", g_src[i], g_dst[i]);
+    }
+    nn = ol + tx_len(block, sizeof block);
+    nb = (char *)mm_alloc(nn + 1);
+    if (!nb) { if (old) mm_free(old); return -1; }
+    if (ol > 0) mm_copy(nb, nn + 1, old, ol);
+    mm_copy(nb + ol, nn + 1 - ol, block, tx_len(block, sizeof block));
+    nb[nn] = 0;
+    if (old) mm_free(old);
+    if (sy_write_file(path, nb, (int64_t)nn, 0600)) { mm_free(nb); return -1; }
+    mm_free(nb);
+    printf("ARCHIVE_MOVE_INDEX\t%s\n", path);
+    return 0;
+}
+
+static int do_moves(void) {
+    int i, fails = 0; char parent[500];
+    for (i = 0; i < g_n; i++) {
+        printf("ARCHIVE_MOVE\tkind=%s\tsrc=%s\tdst=%s\n", g_kind[i], g_src[i], g_dst[i]);
+        if (g_dry) continue;
+        if (parent_of(g_dst[i], parent, sizeof parent)) return die("parent");
+        if (sy_mkdir_all(parent, 0755)) {
+            fprintf(stderr, "archive-move: mkdir %s failed\n", parent);
+            fails++; continue;
+        }
+        if (run_git_mv(g_src[i], g_dst[i])) fails++;
+    }
+    if (g_dry) {
+        printf("ARCHIVE_MOVE\tDRY\tn=%d\n", g_n);
+        return 0;
+    }
+    if (fails) return 1;
+    if (append_archive_tsv()) return die("append ARCHIVE.tsv");
+    if (append_index()) return die("append INDEX.md");
+    printf("ARCHIVE_MOVE\tDONE\tn=%d\n", g_n);
+    printf("ARCHIVE_MOVE_NEXT\trun doc-links-gen --write; check-archive-refs; update research/2026-11-22/README.md cross-links\n");
+    return 0;
+}
+
+int main(int argc, char **argv) {
+    int a = 1;
+    g_man[0] = g_root[0] = g_atsv[0] = g_idx[0] = g_date[0] = g_note[0] = 0;
+    g_dry = 1; g_apply = 0;
+    cx_fmt(g_root, sizeof g_root, ".");
+    cx_fmt(g_atsv, sizeof g_atsv, "archive/ARCHIVE.tsv");
+    cx_fmt(g_idx, sizeof g_idx, "archive/INDEX.md");
+    {
+        long now = sy_wall_s();
+        /* rough UTC date YYYY-MM-DD via date command if needed; default placeholder */
+        cx_fmt(g_date, sizeof g_date, "2026-11-23");
+        (void)now;
+    }
+    while (a < argc) {
+        if (tx_eqz(argv[a], "--dry")) { g_dry = 1; g_apply = 0; }
+        else if (tx_eqz(argv[a], "--apply")) { g_apply = 1; g_dry = 0; }
+        else if (tx_eqz(argv[a], "--manifest") && a + 1 < argc) {
+            if (cx_fmt(g_man, sizeof g_man, "%s", argv[++a])) return die("manifest");
+        } else if (tx_eqz(argv[a], "--root") && a + 1 < argc) {
+            if (cx_fmt(g_root, sizeof g_root, "%s", argv[++a])) return die("root");
+        } else if (tx_eqz(argv[a], "--archive-tsv") && a + 1 < argc) {
+            if (cx_fmt(g_atsv, sizeof g_atsv, "%s", argv[++a])) return die("tsv");
+        } else if (tx_eqz(argv[a], "--index") && a + 1 < argc) {
+            if (cx_fmt(g_idx, sizeof g_idx, "%s", argv[++a])) return die("index");
+        } else if (tx_eqz(argv[a], "--date") && a + 1 < argc) {
+            if (cx_fmt(g_date, sizeof g_date, "%s", argv[++a])) return die("date");
+        } else if (tx_eqz(argv[a], "--note") && a + 1 < argc) {
+            if (cx_fmt(g_note, sizeof g_note, "%s", argv[++a])) return die("note");
+        } else return die("usage: --dry|--apply [--manifest F] [--root D]");
+        a++;
+    }
+    if (!g_man[0]) return die("need --manifest FILE");
+    if (!g_apply && !g_dry) g_dry = 1;
+    if (load_manifest(g_man)) return 2;
+    return do_moves();
+}
