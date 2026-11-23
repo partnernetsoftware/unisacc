@@ -1925,6 +1925,38 @@ static int cov_gate(void) {
     return 1;
 }
 
+/* Split-pair gate: a slow-split parent and its shards must keep equal assertion multisets. Changing a
+ * staged source that belongs to a split group (parent or any shard) runs that ONE group's slow-split
+ * compare; unequal blocks and prints the DIFF lines. Read set comes from tests/split-parents.tsv +
+ * tests/batches.tsv; the tool is tools/check-split-pair.cx (its own fixtures cover red/green). */
+static int split_pair_gate(void) {
+    char p[1300], uc[1300];
+    if (wt_runcx() != 1) { if (!plan_dir) sy_eprintf("precommit: SPLIT_PAIR skipped=1 reason=no-tests/run.cx (fixture repo)\n"); return 0; }
+    if (cx_fmt(p, sizeof p, "%s/tools/check-split-pair.cx", wt_top) || sy_exists(p) != 1) {
+        if (!plan_dir) sy_eprintf("precommit: SPLIT_PAIR skipped=1 reason=no-check-split-pair\n"); return 0;
+    }
+    if (plan_dir) return 0;
+    /* Run the split-pair tool against the warm worktree (pc_orig_cwd), not the cold isolated tree:
+     * the isolated tree has no run-cache and cold-compiling slow-split plus both part checks blows
+     * the gate bound.  ROOT is the worktree, which shares this index (GIT_INDEX_FILE), so the tool's
+     * git diff --cached sees the same staged content and the product there is warm. */
+    const char *root = pc_orig_cwd[0] ? pc_orig_cwd : ".";
+    const char *prod = "./unisacc.com";
+    if (pc_orig_cwd[0] && !cx_fmt(uc, sizeof uc, "%s/unisacc.com", pc_orig_cwd) && sy_exists(uc) == 1)
+        prod = uc; /* lint:allow R1-product precommit runs the split-pair gate via the checkout product */
+    char *av[] = {"sh", (char *)prod, "tools/check-split-pair.cx", "--", "--check", (char *)root, 0};
+    long n = 0;
+    cur_gate = "split-pair"; slurp_okrc = 1;
+    char *o = slurp(av, &n);
+    int rc = slurp_last_rc, to = slurp_last_timeout;
+    slurp_okrc = 0; cur_gate = 0;
+    if (!o) { sy_eprintf("precommit: BLOCKED split-pair gate did not run%s\n", to ? " (timeout)" : " (spawn or no output)"); return 1; }
+    int ok = rc == 0 && !to && tx_find(o, n, "failed=0", 8) >= 0;
+    mm_free(o);
+    if (!ok) { sy_eprintf("precommit: BLOCKED split-pair: a staged split-group edit left parent and shard assertion multisets unequal (mirror the edit on both sides)\n"); return 1; }
+    return 0;
+}
+
 /* Explicit historical artifact format gate. The read set is declared in
  * tests/precommit-gates.tsv; no retired directory is required or read. The
  * immutable HEAD baseline remains the oracle, never the staged baseline. */
@@ -3619,6 +3651,7 @@ int main(int argc, char **argv) {
     { int b0 = blocked; blocked += freeze_gate(); if (blocked > b0) pc_mark_block("freeze", "freeze-window"); }
     { int b0 = blocked; blocked += ledger_gate(); if (blocked > b0) pc_mark_block("ledger", "ledger-format"); }
     { int b0 = blocked; blocked += derive_gate(); if (blocked > b0) pc_mark_block("derive", "derived-table-drift"); }
+    { int b0 = blocked; blocked += split_pair_gate(); if (blocked > b0) pc_mark_block("split-pair", "split-pair-drift"); }
     if (!plan_dir) gt_line();
     if (!staged) { sy_printf("PRECOMMIT\tstaged_cx=0\tblocked=%d\n", blocked); if (blocked) pc_emit_gate_fail(); return blocked ? 1 : 0; }
     { int b0 = blocked; blocked += new_tools(); if (blocked > b0) pc_mark_block("new-tools", "missing-check"); }
