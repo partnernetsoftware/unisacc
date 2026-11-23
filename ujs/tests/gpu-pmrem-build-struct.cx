@@ -18,6 +18,8 @@ static int pmrem_build_compile(const char *dir) {
         "if(op==3){return GpuPmremBuild_hasMip(128,a);}\n"
         "if(op==4){return GpuPmremBuild_init(128);}\n"
         "if(op==5){return GpuPmremBuild_fromCubemap(128,65536,86016,65536,24832,64,16);}\n"
+        "if(op==6){return GpuPmremBuild_fromCubemapFull(128,65536,b,152000,24896,64,a);}\n"
+        "if(op==7){let base=pmrem_build_base(65536,64,152000,1);let taps=pmrem_build_kernel(152000,1);return pmrem_build_blur(65536,152000,0,1,taps,1);}\n"
         "return 0-1;\n";
     if(sy_write_file(layout,abi,sizeof abi-1,0600) || sy_write_file(driver,source,sizeof source-1,0600)) return 1;
     char *args[]={"./ujs/ujs2wasm.com",layout,"ujs/practice/uxe/base/f64-math.ujs",
@@ -33,22 +35,39 @@ static int pmrem_build_compile(const char *dir) {
 
 int main(int argc,char **argv) {
     int mutate=argc==2 && tx_eqz(argv[1],"--mutate");
-    if(argc!=1 && !mutate) return 2;
+    const int full=argc==2 && (tx_eqz(argv[1],"--full") || tx_eqz(argv[1],"--mutate-full"));
+    const int mutateFull=argc==2 && tx_eqz(argv[1],"--mutate-full");
+    if(argc!=1 && !mutate && !full) return 2;
     char dir[256],cwd[460],url[840];
     if(sy_cwd(cwd,sizeof cwd) || sy_mkdtemp("/tmp","ujs-pmrem-build-",dir,sizeof dir)) return 2;
-    int n=tx_snprintf(url,sizeof url,"file://%s/ujs/practice/uxe/test/gpu-pmrem-build-r160.html?dir=%s%s",
-        cwd,dir,mutate?"&mutate=1":"");
+    int n=tx_snprintf(url,sizeof url,"file://%s/ujs/practice/uxe/test/gpu-pmrem-build-r160.html?dir=%s%s%s",
+        cwd,dir,full?"&full=1":"",(mutate || mutateFull)?"&mutate=1":"");
     const double gold[]={1,0,0,255,255,255,0,0,255,0,255,0,255,
         0,0,255,255,255,0,0,255,0,255,0,255,
         1,1,1,1,1,1,1,1, 1,1, 1,1,1,1};
     enum { count=sizeof gold/sizeof gold[0] };
     double values[count]={0};
-    int failed=n<0 || n>=sizeof url || pmrem_build_compile(dir) || r160_wait_read(url,"#r160",values,count,dir);
-    for(int i=0;!failed && i<count;i++) if(values[i]!=gold[i]) {
+    enum { bands=7, fields=5, fullCount=bands*fields+5 };
+    int failed=n<0 || n>=sizeof url || pmrem_build_compile(dir) ||
+        r160_wait_read(url,"#r160",values,full?fullCount:count,dir);
+    if(full && !failed) {
+        for(int i=0;i<bands;i++) {
+            const double *v=values+i*fields;
+            printf("PMREM_FULL band=%d max_delta=%.0f channel_offset=%.0f over_limit=%.0f uxe=%.0f r160=%.0f\n",
+                i,v[0],v[1],v[2],v[3],v[4]);
+            if(v[0]<0 || v[0]>3 || v[2]!=0) failed=1;
+        }
+        printf("PMREM_R160 repeat_max_delta=%.6g shader_precision_delta=%.6g\n",values[fullCount-5],values[fullCount-4]);
+        printf("PMREM_FIRST_PASS max_delta=%.6g channel_offset=%.0f over_limit=%.0f\n",
+            values[fullCount-3],values[fullCount-2],values[fullCount-1]);
+        if(values[fullCount-5]!=0 || values[fullCount-3]>3 || values[fullCount-1]!=0) failed=1;
+    }
+    for(int i=0;!full && !failed && i<count;i++) if(values[i]!=gold[i]) {
         printf("PMREM_BUILD case=%d actual=%.17g gold=%.17g\n",i,values[i],gold[i]);
         failed=1;
     }
     if(sy_remove_all(dir)) failed=1;
-    printf("G_PIXEL PMREM fromCubemap first blur cases=%d failed=%d\n",count,failed);
+    if(full) printf("G_PIXEL PMREM cubeUV bands=%d pixels=%d failed=%d\n",bands,bands*48*32,failed);
+    else printf("G_PIXEL PMREM fromCubemap first blur cases=%d failed=%d\n",count,failed);
     return failed;
 }

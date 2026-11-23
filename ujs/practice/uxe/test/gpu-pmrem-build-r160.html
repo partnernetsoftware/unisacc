@@ -16,7 +16,7 @@ const cases = [
 ];
 const width = 336, height = 64, bytes = width * height * 4;
 
-function r160Atlas(renderer) {
+function r160Atlas(renderer,highPrecision=false,inspectFirst=null) {
   const faces = colors.map(color => {
     const pixels = new Uint8Array(16 * 16 * 4);
     for (let i = 0; i < pixels.length; i += 4) pixels.set([...color, 255], i);
@@ -27,6 +27,23 @@ function r160Atlas(renderer) {
   cube.generateMipmaps = false;
   cube.needsUpdate = true;
   const gen = new PMREMGenerator(renderer);
+  if(highPrecision) {
+    const filter=gen._applyPMREM;
+    gen._applyPMREM=function (target) {
+      this._blurMaterial.fragmentShader=this._blurMaterial.fragmentShader.replace("precision mediump float;","precision highp float;");
+      this._blurMaterial.needsUpdate=true;
+      return filter.call(this,target);
+    };
+  }
+  if(inspectFirst) {
+    const halfBlur=gen._halfBlur;
+    gen._halfBlur=function (...args) {
+      halfBlur.apply(this,args);
+      if(args[2]===0 && args[3]===1 && args[5]==="latitudinal") {
+        renderer.readRenderTargetPixels(args[1],48,0,48,32,inspectFirst);
+      }
+    };
+  }
   const target = gen.fromCubemap(cube);
   return {target, dispose() { target.dispose(); gen.dispose(); cube.dispose(); faces.forEach(face => face.dispose()); }};
 }
@@ -64,6 +81,66 @@ async function productAtlas() {
   return {texture, flags: [refused, metadata, good, again].map(Number)};
 }
 
+async function testFull(renderer, reference) {
+  const binary=await (await fetch("file://"+query.get("dir")+"/probe.wasm")).arrayBuffer();
+  const {instance}=await WebAssembly.instantiate(binary);
+  const wasm=instance.exports;
+  const call=(op,a=0,b=0)=>Number(wasm.uxe_pmrem_build(BigInt(op),BigInt(a),BigInt(b)));
+  const mem=new Uint8Array(wasm.memory.buffer,call(0),196608);
+  colors.forEach((color,i)=>mem.set([...color,255],64+4*i));
+  if(call(4)!==128 || call(6,16,bytes)!==128 || call(3,-2)!==1) throw Error("full cube build");
+  const native=mem.subarray(65536,65536+bytes);
+  const half=new Uint16Array(width*32*4);
+  renderer.readRenderTargetPixels(reference,0,0,width,32,half);
+  function linear(value) {
+    const e=(value>>10)&31, mantissa=value&1023;
+    return e===0 ? mantissa*2**-24 : (1+mantissa/1024)*2**(e-15);
+  }
+  const repeated=r160Atlas(renderer);
+  const second=new Uint16Array(half.length);
+  renderer.readRenderTargetPixels(repeated.target,0,0,width,32,second);
+  repeated.dispose();
+  let repeatDelta=0;
+  for(let i=0;i<half.length;i++) repeatDelta=Math.max(repeatDelta,Math.abs(linear(half[i])-linear(second[i]))*255);
+  const precise=r160Atlas(renderer,true);
+  const precisePixels=new Uint16Array(half.length);
+  renderer.readRenderTargetPixels(precise.target,0,0,width,32,precisePixels);
+  precise.dispose();
+  const stage=new Uint16Array(48*32*4);
+  const debugAtlas=r160Atlas(renderer,false,stage);
+  debugAtlas.dispose();
+  const actualAtlas=native.slice();
+  if(call(7)!==65536) throw Error("first blur probe refused");
+  const first=new Float32Array(mem.buffer,mem.byteOffset+152256,48*32*4);
+  let stageMax=0, stageAt=0, stageOver=0;
+  for(let i=0;i<stage.length;i++) {
+    const delta=Math.abs(first[i]-255*linear(stage[i]));
+    if(delta>3) stageOver++;
+    if(delta>stageMax) { stageMax=delta; stageAt=i; }
+  }
+  const maximum=[];
+  let precisionDelta=0;
+  for(let band=0;band<7;band++) {
+    let difference=0, location=0, over=0;
+    let actualAtMax=0, referenceAtMax=0;
+    const sampled=query.has("mutate") && band===3?2:band;
+    for(let y=0;y<32;y++) for(let x=0;x<48;x++) for(let ch=0;ch<4;ch++) {
+      const at=(y*width+band*48+x)*4+ch;
+      const expected=Math.round(255*linear(half[at]));
+      precisionDelta=Math.max(precisionDelta,Math.abs(expected-Math.round(255*linear(precisePixels[at]))));
+      const value=actualAtlas[(y*width+sampled*48+x)*4+ch];
+      const delta=Math.abs(value-expected);
+      if(delta>3) over++;
+      if(delta>difference) {
+        difference=delta; location=(y*48+x)*4+ch;
+        actualAtMax=value; referenceAtMax=expected;
+      }
+    }
+    maximum.push(difference, location, over, actualAtMax, referenceAtMax);
+  }
+  return [...maximum,repeatDelta,precisionDelta,stageMax,stageAt,stageOver];
+}
+
 async function test() {
   if (REVISION !== "160") throw Error("three.js revision mismatch");
   const canvas = document.createElement("canvas");
@@ -71,6 +148,10 @@ async function test() {
   if (!context) throw Error("WebGL2 unavailable");
   const renderer = new WebGLRenderer({canvas, context});
   const ref = r160Atlas(renderer);
+  if(query.has("full")) {
+    try { return await testFull(renderer,ref.target); }
+    finally { ref.dispose(); renderer.dispose(); }
+  }
   const actual = await productAtlas();
   const target = new WebGLRenderTarget(1, 1);
   const geometry = new BufferGeometry();
