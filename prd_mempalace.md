@@ -141,6 +141,8 @@ flowchart LR
 
 ### 仍未验证或未关闭
 
+- freeze-scope 的三个批次行手工登记，以 `tests/run.cx --list` 的 `metadata_valid=1` 和 `run-batch` 实跑为准。依据为 `tools/register.cx:1458` 固定写入无材料列 `-`，而 `tools/cxlib/testplan.cx:107` 的 `tp_args` 要求占位符在材料列声明。普通 register 试跑因 `batch-args` 拒绝并回滚，登记门未过，33 秒结果记 UNMEASURED。将 register 支持材料列的缺口列入 devsvc 迭代，支持后重新走登记校验。证据入口为本机 `~/.local/share/unisacc/research/freeze-scope/supplement/`。回退通过撤销该提交恢复原批与冻结门。
+
 - 会话与记忆被 moltbaby 清理脚本整目录删除(2026-11-23 编排者查明,待所有者裁定清理策略):~/repos/moltbaby/systemd/scripts/system-cleanup.sh 第 147 到 154 行,每小时(system-cleanup.timer)对 ~/.claude/projects/* 超 100M 即整目录 rm -rf,含全部会话转录与 memory/;近 7 天 16 次(日志 journalctl --user -u system-cleanup.service,00:00:12 一行为证)。unisacc 侧不改他车道:已建镜像兜底(硬链接转录加拷贝 memory,见 tools 下镜像工具)并把记分表权威副本进仓;修正补丁 $CLAUDE_JOB_DIR/tmp/system-cleanup.patch 存在两处已知缺陷(会话子目录 mtime 不随深层追加刷新、管道缺 || true 在 pipefail 下会中止后续清理),不可直接应用。入口:所有者裁定后经 moltbaby 车道维护者落。
 
 - 分车道未核项:APE 字节对 ext 改动不变只是推断;14 个链接目标文件是否进隐式运行库前缀;四个 sysx 别名是否有非 use 形式使用者(去别名前必须先查)。入口:plans/reviews/2026-11-20-layer-lanes.md。

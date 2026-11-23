@@ -146,6 +146,15 @@ static int sh_in(const char *cwd, const char *cmd) {
 int main(int argc, char **argv) {
     char f_new[4400], f_old[4400], f_rep[4400], cmd[4800], gitp[4200];
     int rc = -1;
+    int scope_only = argc == 3 && !strcmp(argv[2], "--scope-only");
+    int owner_only = argc == 3 && !strcmp(argv[2], "--owner-only");
+    int lifecycle_only = argc == 3 && !strcmp(argv[2], "--lifecycle-only");
+    int split = scope_only || owner_only || lifecycle_only;
+    /* Keep real commits and merges. Registered slices skip the optional
+       commit-own pending-derived hint and post-merge launcher rebuild. */
+    const char *archive_paths = split
+        ? " -- . ':(exclude)archive' ':(exclude)tools/on-change.cx' ':(exclude)tools/devsvc.cx'" : "";
+    const char *configure_repo = split ? "git config gc.auto 0 && " : "";
     if (sy_cwd(root, sizeof root) < 0) return 2;
     if (argc >= 3 && !strcmp(argv[1], "--prepare-only")) {
         if (cx_fmt(prod, sizeof prod, "%s/unisacc.com", root) || /* lint:allow R1-product test harness invokes checkout product directly */
@@ -159,7 +168,7 @@ int main(int argc, char **argv) {
     if (sy_exists(gitp) == 0) {
         printf("UNMEASURED\tdevsvc-freeze\tno-.git-in-root\n");
         printf("CHECK_DEVSVC_FREEZE\tpass=0\tfail=0\tunmeasured=1\n");
-        return 0;
+        return split ? 1 : 0;
     }
     if (sy_mkdtemp("/tmp", "dvfreeze", tmp, sizeof tmp)) return 2;
     if (cx_fmt(prod, sizeof prod, "%s/unisacc.com", root) || /* lint:allow R1-product test harness invokes checkout product directly */
@@ -183,12 +192,12 @@ int main(int argc, char **argv) {
 
     /* Clean git-archive checkout (real commit-own.cx, cx/, ext/, tools/) + worktree table copy */
     if (cx_fmt(cmd, sizeof cmd,
-               "git -C '%s' archive HEAD | tar -x -C '%s' && "
+               "git -C '%s' archive HEAD%s | tar -x -C '%s' && "
                "ln -s '%s/unisacc.com' '%s/unisacc.com' && "
                "cp '%s/tools/devsvc-repo.tsv' '%s/tools/devsvc-repo.tsv' && "
                "mkdir -p '%s/docs/src' '%s/tests2' '%s/release-x' && "
                "ln -s src '%s/lnk'",
-               root, repo, root, repo, root, repo, repo, repo, repo, repo) || !sh_in(root, cmd)) {
+               root, archive_paths, repo, root, repo, root, repo, repo, repo, repo, repo) || !sh_in(root, cmd)) {
         fprintf(stderr, "setup archive repo failed: %s\n", out);
         return 2;
     }
@@ -198,7 +207,8 @@ int main(int argc, char **argv) {
         wr(repo, "tests2/x.txt", "initial\n") ||
         wr(repo, "release-x/y.txt", "initial\n") ||
         wr(repo, "build/freeze.tsv", "# empty\n")) return 2;
-    if (!sh_in(repo, "git init -q -b main && git add -A && git -c user.name=fx -c user.email=fx@localhost -c commit.gpgsign=false commit -qm init")) {
+    if (cx_fmt(cmd, sizeof cmd, "git init -q -b main && %sgit add -A && git -c user.name=fx -c user.email=fx@localhost -c commit.gpgsign=false commit -qm init", configure_repo) ||
+        !sh_in(repo, cmd)) {
         fprintf(stderr, "setup init commit failed: %s\n", out);
         return 2;
     }
@@ -237,6 +247,8 @@ int main(int argc, char **argv) {
     { char *a[] = {"lock", "acquire", "freeze", "--ttl", "7200", 0};
       ck("acquire-via-env-ttl-7200", run_dv(repo, "Integ", a, &rc) && rc == 0 && has(out, "OK\tacquired\tfreeze\towner=integ")); }
 
+    if (scope_only) goto scope;
+    if (owner_only) goto owner;
     /* (3) non-owner f write in freeze domain refused */
     { char *a[] = {"f", "write", "src/a.txt", "--from", f_new, 0};
       size_t n = 0; char *cur; char p[4500];
@@ -305,6 +317,8 @@ int main(int argc, char **argv) {
       int ok2 = ok1 && sh_in(repo, "git rev-list --parents -n 1 HEAD | wc -w") && (out[0] == '3' || has(out, " 3\n"));
       ck("integrator-git-merge-no-ff-creates-merge-commit", ok2); }
 
+    if (lifecycle_only) goto lifecycle;
+owner:
     /* (9) CONFIRMED (9) M1 killer: outside-domain & mid-segment paths (docs/src/x.txt, tests2/x.txt, release-x/y.txt) allowed */
     { char *a1[] = {"f", "write", "docs/src/x.txt", "--from", f_new, 0};
       char *a2[] = {"f", "write", "tests2/x.txt", "--from", f_new, 0};
@@ -358,6 +372,8 @@ int main(int argc, char **argv) {
       if (bak) { (void)sy_write_file(lp, bak, bn, 0600); free(bak); }
       ck("locks-tsv-corruptions-and-mismatch-fail-closed", ok); }
 
+    if (owner_only) goto missing_owner;
+scope:
     /* (12) The same freeze lock follows main across worktrees. */
     { char *af[] = {"f", "write", "src/a.txt", "--from", f_new, 0};
       char *ac[] = {"git", "commit", "--cwd", wt, "-m", "linked worktree commit", "--whole", "src/a.txt", 0};
@@ -375,6 +391,9 @@ int main(int argc, char **argv) {
       char *am[] = {"git", "merge", "freeze-scope-side", "--cwd", wt, "--no-ff", 0};
       int linked_main = side_ready &&
           !cx_fmt(cmd, sizeof cmd, "git -C '%s' symbolic-ref HEAD refs/heads/main", wt) && sh_in(repo, cmd);
+      ck("linked-main-write-refuses-non-owner",
+         linked_main && run_dv(wt, "worker1", af, &rc) && rc == 1 &&
+         has(out, "LOCK_HELD freeze owner=integ") && !has(out, "FREEZE_SCOPE skip="));
       /* The clean path isolates the lock decision from commit-own validation. */
       ck("worktree-shared-lock-refuses-non-owner",
          linked_main && run_dv(repo, "worker1", ac, &rc) && rc == 1 &&
@@ -403,6 +422,8 @@ int main(int argc, char **argv) {
       ck("freeze-scope-fixture-returns-to-main", linked_restored && (!side_ready ||
          sh_in(repo, "git restore --worktree src/a.txt && git switch -q main"))); }
 
+    if (scope_only) goto done;
+lifecycle:
     /* (13) non-owner cannot release freeze; holder release recovers worktree & main */
     { char *ab[] = {"lock", "release", "freeze", "--owner", "worker1", 0};
       char *ar[] = {"lock", "release", "freeze", "--owner", "INTEG", 0};
@@ -421,6 +442,8 @@ int main(int argc, char **argv) {
       int ok3 = ok2 && run_dv(repo, "worker1", aw, &rc) && rc == 0;
       ck("ttl-expiry-recovers", ok3); }
 
+    if (lifecycle_only) goto default_ttl;
+missing_owner:
     /* (15) CONFIRMED (11): real commit-own without DEVSVC_OWNER or --owner does not forge X-Unisacc-Window trailer */
     { char *aw[] = {"f", "write", "docs/note.txt", "--from", f_rep, 0};
       char *ac[] = {"git", "commit", "-m", "no owner real commit", "--whole", "docs/note.txt", 0};
@@ -429,6 +452,8 @@ int main(int argc, char **argv) {
       int ok3 = ok2 && sh_in(repo, "git log -1 --format='%(trailers)'") && !has(out, "X-Unisacc-Window:");
       ck("missing-owner-no-forged-trailer", ok3); }
 
+    if (owner_only) goto trailer;
+default_ttl:
     /* (16) PLAUSIBLE: freeze default ttl is 7200 when --ttl omitted */
     { char *aq[] = {"lock", "acquire", "freeze", "--owner", "integ", 0};
       ck("freeze-default-ttl-7200", run_dv(repo, "integ", aq, &rc) && rc == 0 && has(out, "expires_in_s=7200")); }
@@ -450,11 +475,15 @@ int main(int argc, char **argv) {
       (void)sh_in(repo, lcmd);
       ck("freeze-fail-closed-stopped-and-unreadable", ok6); }
 
+    if (lifecycle_only) goto stopped;
+trailer:
     /* (18) PLAUSIBLE: trailer叠加 real commit-own (tr_strip + tr_window_put) produces exactly one X-Unisacc-Window line per commit */
     { int ok = sh_in(repo, "git log -n 6 --format='%(trailers)' | grep -c '^X-Unisacc-Window: integ$'") &&
                (out[0] == '3' && (out[1] == '\n' || out[1] == 0));
       ck("trailer-single-line-with-commit-own", ok); }
 
+    if (owner_only) goto done;
+stopped:
     /* (19) CONFIRMED (C): bounded poll (5000ms / 50ms) verifying stopped daemon leaves no socket and no live process
      *      (handles zombie state when run-batch enables PR_SET_CHILD_SUBREAPER). */
     { char pidf[4400], sockp[4400];
@@ -532,6 +561,11 @@ done:
     { char *rm[] = {"rm", "-rf", tmp, 0}; (void)runv(rm, 0, 0, 30, &rc); }
     if (sy_exists(tmp) != 0) (void)sy_remove_all(tmp);
     ck("cleanup-tmp-and-pin-removed", sy_exists(tmp) == 0);
+    int expected = lifecycle_only ? 20 : owner_only ? 10 : scope_only ? 13 : 0;
+    if (expected && passed + failed != expected) {
+        fprintf(stderr, "DEVSVC_FREEZE_COUNT expected=%d actual=%d\n", expected, passed + failed);
+        failed++;
+    }
     printf("CHECK_DEVSVC_FREEZE\tpass=%d\tfail=%d\n", passed, failed);
     return failed ? 1 : 0;
 }
