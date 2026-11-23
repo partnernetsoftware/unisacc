@@ -59,6 +59,9 @@
 #pragma unisa use mem.heap
 #pragma unisa use mem.bytes
 #pragma unisa use text.text
+#pragma unisa use sys.sha
+#pragma unisa use cxlib.sessionroot
+#pragma unisa use sys.proc
 
 #define MG_MAXCHK 8
 #define MG_MAXC 4096
@@ -82,6 +85,80 @@ static void shq(char *d, int cap, const char *s) {
     int k = 0; d[k++] = '\'';
     for (; *s; s++) { if (k > cap - 6) die2("quote", "too long"); if (*s == '\'') { d[k++] = '\''; d[k++] = '\\'; d[k++] = '\''; d[k++] = '\''; } else d[k++] = *s; }
     d[k++] = '\''; d[k] = 0;
+}
+
+static char *slurp(const char *p, size_t *n);
+static void spit(const char *p, const char *b, size_t n);
+static int sh(const char *script, char *out, int cap, int secs);
+/* ---------- session dir derivation, registration, slot reclaim ---------- */
+/* --out is optional. When absent the dir is derived from the patch content identity, so prep, the
+   workers spawned by run, and a later report all compute the same path. Same patch bytes -> same dir;
+   different bytes -> different dir (a stale slot tree can never be mistaken for this run's). */
+static void derive_out(void) {
+    char id[512], leaf[256], stem[256], hex[65];
+    const char *base, *dot;
+    size_t pn = 0;
+    char *pb;
+    if (g_out) return;
+    if (!g_patch) die2("usage", "--out absent and no --patch to derive it from");
+    pb = slurp(g_patch, &pn);
+    if (!pb) die2("read", g_patch);
+    if (sy_sha256_hex(pb, (long)pn, hex)) { mm_free(pb); die2("sha256", g_patch); }
+    mm_free(pb);
+    base = strrchr(g_patch, '/');
+    base = base ? base + 1 : g_patch;
+    cx_fmt(leaf, sizeof leaf, "%s", base);
+    while ((dot = strrchr(leaf, '.')) != 0) ((char *)dot)[0] = 0;
+    cx_fmt(stem, sizeof stem, "%s", leaf[0] ? leaf : "patch");
+    cx_fmt(id, sizeof id, "mutation-gate-%.80s-%.8s", stem, hex);
+    { static char ob[1024]; if (sr_default(id, ob, sizeof ob)) die2("session root", id); g_out = ob; }
+}
+
+/* state: prepared when prep finishes, done when report wrote a verdict. Anything else means the run
+   died; whoever reclaims orphan session dirs keys off this file instead of re-parsing the dir name. */
+static void write_session(const char *state) {
+    char p[1024], b[2048]; int k = 0;
+    cx_fmt(p, sizeof p, "%s/session.tsv", g_out);
+    k += snprintf(b + k, sizeof b - k, "pid\t%d\nstarted_at\t%ld\npatch\t%s\nbase\t%s\npar\t%d\nstate\t%s\n",
+                  sy_pid(), sy_now_ms(), g_patch ? g_patch : "", g_base ? g_base : "", g_par, state);
+    spit(p, b, (size_t)k);
+}
+
+/* Drop every slot tree, but only when SUMMARY holds a verdict. A killed run leaves no SUMMARY, and a
+   run that failed before reporting must keep its trees so the operator can read the compile logs. */
+static void drop_slots(void) {
+    char p[1024], cmd[16384], qs[2048]; size_t sn = 0; char *sb; int i, k = 0, any = 0;
+    cx_fmt(p, sizeof p, "%s/SUMMARY", g_out);
+    sb = slurp(p, &sn);
+    if (!sb || sn == 0) { if (sb) mm_free(sb); return; }
+    mm_free(sb);
+    k = snprintf(cmd, sizeof cmd, "rm -rf --");
+    /* reclaim 不带 conf 里的 par(它没跑 prep),所以按挂盘实际存在的槽扫,而不是按 g_par。 */
+    for (i = 0; i < 64; i++) {
+        cx_fmt(p, sizeof p, "%s/slot-%d", g_out, i);
+        if (sy_exists(p) != 1) continue;
+        shq(qs, sizeof qs, p);
+        if (k + (int)strlen(qs) + 2 >= (int)sizeof cmd) break;
+        k += snprintf(cmd + k, sizeof cmd - k, " %s", qs);
+        any = 1;
+    }
+    if (!any) return;
+    if (sh(cmd, 0, 0, 55)) { fprintf(stderr, "mutation-gate: WARN slot reclaim failed: %s\n", cmd); return; }
+    printf("MG_SLOTS_RECLAIMED cmd=%s\n", cmd);
+}
+
+/* 独立入口:只做清槽判定,不碰 report。夹具靠它验两条分支(SUMMARY 非空才删)。 */
+static void drop_slots_mode(void) {
+    char p[1024]; size_t sn = 0; char *sb;
+    cx_fmt(p, sizeof p, "%s/SUMMARY", g_out);
+    sb = slurp(p, &sn);
+    if (!sb || sn == 0) {
+        if (sb) mm_free(sb);
+        printf("MG_SLOTS_KEPT reason=no-summary out=%s\n", g_out);
+        return;
+    }
+    mm_free(sb);
+    drop_slots();
 }
 
 static char *slurp(const char *p, size_t *n) { size_t z = 0; char *b = cx_read(p, &z); if (n) *n = z; return b; }
@@ -370,11 +447,21 @@ static void gen_cov(int f, char **L, int nlines, int ln, int *seen, int nseen_ca
 static void prep(void) {
     char cmd[16384], q1[2048], q2[2048], q3[2048], out[8192], p[1024]; int rc, i, f;
     long t0 = sy_now_ms();
-    if (!g_patch || !g_base || !g_out || !g_nchk) die2("usage", "need --patch --base --check --out");
+    if (!g_patch || !g_base || !g_nchk) die2("usage", "need --patch --base --check (--out optional)");
     if (!g_repo) { const char *h = getenv("HOME"); static char rb[512]; cx_fmt(rb, sizeof rb, "%s/repos/unisacc", h ? h : "."); g_repo = rb; }
     if (g_par <= 0) { long nc = sy_ncpu(); g_par = nc > 1 ? (int)(nc / 2) : 1; }
     if (g_par > 16) g_par = 16;
-    if (sy_exists(g_out)) { cx_fmt(p, sizeof p, "%s/conf.tsv", g_out); if (sy_exists(p)) die2("out dir already prepared", g_out); }
+    if (sy_exists(g_out)) {
+        cx_fmt(p, sizeof p, "%s/conf.tsv", g_out);
+        if (sy_exists(p)) {
+            /* 已准备过:拒绝,但把必须删的路径逐条列出。我们不代删——--out 可能是别的窗口给的。 */
+            fprintf(stderr, "mutation-gate: REFUSE out dir already prepared %s\n", g_out);
+            fprintf(stderr, "mutation-gate: reclaim with: rm -rf");
+            for (i = 0; i < g_par; i++) { cx_fmt(p, sizeof p, "%s/slot-%d", g_out, i); if (sy_exists(p) == 1) fprintf(stderr, " '%s'", p); }
+            fprintf(stderr, "\n");
+            exit(2);
+        }
+    }
     sy_mkdir(g_out, 0755);
     shq(q1, sizeof q1, g_repo); shq(q2, sizeof q2, g_base); shq(q3, sizeof q3, g_out);
     {
@@ -464,7 +551,8 @@ static void prep(void) {
     }
     /* slot copies */
     for (i = 1; i < g_par; i++) { cx_fmt(cmd, sizeof cmd, "cp -a %s/slot-0 %s/slot-%d", q3, q3, i); if (sh(cmd, out, sizeof out, 55)) die2("copy slot", ""); }
-    printf("MG_PREP_DONE ms=%ld\n", sy_now_ms() - t0);
+    write_session("prepared");
+    printf("MG_PREP_DONE ms=%ld out=%s\n", sy_now_ms() - t0, g_out);
 }
 
 /* ---------- worker ---------- */
@@ -734,6 +822,7 @@ static int report(void) {
     cx_fmt(p, sizeof p, "%s/SUMMARY", g_out); spit(p, sum, (size_t)k2);
     fputs(sum, stdout);
     printf("MG_SURVIVORS %s/survivors.tsv\n", g_out);
+    write_session(N ? "done" : "done-empty");
     if (N == 0) return 2;
     return verdict;
 }
@@ -759,6 +848,8 @@ static int run_all(const char *self) {
     /* clean leftovers by real PGID (setsid: pgid == pid) */
     for (i = 0; i < g_par; i++) { cx_fmt(cmd, sizeof cmd, "p=$(cat %s/worker-%d.pid 2>/dev/null) && kill -0 \"$p\" 2>/dev/null && kill -TERM -- -\"$p\" 2>/dev/null; true", q3, i); sh(cmd, 0, 0, 5); }
     rc = report();
+    /* 只有 report 写出了结论才清槽:SUMMARY 非空才动手,否则保留现场。 */
+    if (rc == 0 || rc == 1) { write_session("done"); drop_slots(); }
     printf("MG_RUN ms=%ld\n", sy_now_ms() - t0);
     return rc;
 }
@@ -792,12 +883,14 @@ int main(int argc, char **argv) {
         else die2("unknown option", a);
         i++;
     }
+    derive_out();
     if (!g_out) die2("usage", "--out required");
     if (g_expect_n && (!g_quality || (strcmp(mode, "run") && strcmp(mode, "prep"))))
         die2("usage", "check expectations require run or prep with --report");
     if (!strcmp(mode, "prep")) { prep(); return 0; }
     if (!strcmp(mode, "worker")) { if (g_slot < 0) die2("usage", "--slot"); worker(); return 0; }
     if (!strcmp(mode, "report")) return report();
+    if (!strcmp(mode, "reclaim")) { drop_slots_mode(); return 0; }
     if (!strcmp(mode, "run")) return run_all("tools/mutation-gate.cx");
     die2("unknown mode", mode);
     return 2;

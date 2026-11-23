@@ -175,6 +175,53 @@ int main(int argc, char **argv) {
     rc = ckk_sh_t("check-mutation-gate", sc, out, sizeof out, 30);
     ck(rc == 2 && ckk_has(out, sizeof out, "equivalent or out-of-scope"), "adjudicated-bad-verdict-refused");
 
+    /* --- slot reclaim: only after a verdict, and a re-entry names the paths to delete --- */
+    cx_fmt(sc, sizeof sc, "test ! -d %s/strong/slot-0 && test -s %s/strong/SUMMARY && grep -q '^state\tdone$' %s/strong/session.tsv", T, T, T);
+    ck(ckk_sh_t("check-mutation-gate", sc, 0, 0, 10) == 0, "reclaim-after-verdict");
+    cx_fmt(sc, sizeof sc, "sh ./unisacc.com tools/mutation-gate.cx -- prep --repo %s/repo --base base --patch %s/fx.patch "
+           "--check 'echo CHECK ok=1 failed=0' --out %s/orphan --par 2 2>&1", T, T, T);
+    ck(ckk_sh_t("check-mutation-gate", sc, out, sizeof out, 55) == 0 && ckk_has(out, sizeof out, "MG_PREP_DONE"), "prep-orphan");
+    if (!ckk_has(out, sizeof out, "MG_PREP_DONE")) printf("%.800s\n", out);
+    cx_fmt(sc, sizeof sc, "sh ./unisacc.com tools/mutation-gate.cx -- reclaim --out %s/orphan 2>&1", T);
+    rc = ckk_sh_t("check-mutation-gate", sc, out, sizeof out, 20);
+    cx_fmt(sc, sizeof sc, "test -d %s/orphan/slot-0 && test -d %s/orphan/slot-1", T, T);
+    ck(rc == 0 && ckk_has(out, sizeof out, "MG_SLOTS_KEPT reason=no-summary")
+       && ckk_sh_t("check-mutation-gate", sc, 0, 0, 10) == 0, "keep-slots-without-verdict");
+    cx_fmt(sc, sizeof sc, "sh ./unisacc.com tools/mutation-gate.cx -- prep --repo %s/repo --base base --patch %s/fx.patch "
+           "--check 'echo CHECK ok=1 failed=0' --out %s/orphan --par 2 2>&1", T, T, T);
+    rc = ckk_sh_t("check-mutation-gate", sc, out, sizeof out, 30);
+    ck(rc == 2 && ckk_has(out, sizeof out, "out dir already prepared") && ckk_has(out, sizeof out, "reclaim with: rm -rf ")
+       && ckk_has(out, sizeof out, "orphan/slot-0"), "reentry-names-paths");
+    cx_fmt(sc, sizeof sc, "printf 'MUTATION_GATE mutants=1 killed=1 verdict=PASS\\n' > %s/orphan/SUMMARY && "
+           "sh ./unisacc.com tools/mutation-gate.cx -- reclaim --out %s/orphan 2>&1", T, T);
+    rc = ckk_sh_t("check-mutation-gate", sc, out, sizeof out, 20);
+    cx_fmt(sc, sizeof sc, "test ! -d %s/orphan/slot-0 && test ! -d %s/orphan/slot-1 && test -s %s/orphan/SUMMARY", T, T, T);
+    ck(rc == 0 && ckk_has(out, sizeof out, "MG_SLOTS_RECLAIMED")
+       && ckk_sh_t("check-mutation-gate", sc, 0, 0, 10) == 0, "reclaim-keeps-summary");
+
+    /* --out absent: the dir is derived from the patch bytes, so prep/report/worker agree, and the
+       registration file says prepared. Two different patches must not land in one dir. */
+    cx_fmt(sc, sizeof sc, "cp %s/fx.patch %s/one.patch && cp %s/fx.patch %s/two.patch && printf '\\n' >> %s/two.patch", T, T, T, T, T);
+    ckk_sh_t("check-mutation-gate", sc, 0, 0, 10);
+    cx_fmt(sc, sizeof sc, "sh ./unisacc.com tools/mutation-gate.cx -- prep --repo %s/repo --base base --patch %s/one.patch "
+           "--check 'echo CHECK ok=1 failed=0' --par 2 2>&1", T, T);
+    ck(ckk_sh_t("check-mutation-gate", sc, out, sizeof out, 55) == 0 && ckk_has(out, sizeof out, "MG_PREP_DONE"), "derive-out-prep");
+    { const char *o = ckk_has(out, sizeof out, "out=") ? strstr(out, "out=") + 4 : 0;
+      char a[1024] = "";
+      if (o) for (int z = 0; o[z] && o[z] != '\n' && z < (int)sizeof a - 1; z++) a[z] = o[z];
+      cx_fmt(sc, sizeof sc, "test -s '%s/session.tsv' && grep -q '^state\tprepared$' '%s/session.tsv'", a, a);
+      ck(a[0] && strstr(a, "unisacc-session-mutation-gate-one-")
+         && ckk_sh_t("check-mutation-gate", sc, 0, 0, 10) == 0, "derive-out-registered");
+      cx_fmt(sc, sizeof sc, "rm -rf -- '%s'", a); ckk_sh_t("check-mutation-gate", sc, 0, 0, 20);
+    }
+    cx_fmt(sc, sizeof sc, "sh ./unisacc.com tools/mutation-gate.cx -- prep --repo %s/repo --base base --patch %s/two.patch "
+           "--check 'echo CHECK ok=1 failed=0' --par 2 2>&1", T, T);
+    ckk_sh_t("check-mutation-gate", sc, out, sizeof out, 55);
+    { const char *o = strstr(out, "out=");
+      ck(o && !strstr(o, "one") && strstr(o, "two"), "derive-out-distinct-per-patch");
+      if (o) { char a[1024] = ""; for (int z = 4; o[z] && o[z] != '\n' && z - 4 < (int)sizeof a - 1; z++) a[z - 4] = o[z];
+        cx_fmt(sc, sizeof sc, "rm -rf -- '%s'", a); ckk_sh_t("check-mutation-gate", sc, 0, 0, 20); }
+    }
     rc = gate("red", "echo CHECK ok=0 failed=1", "", out, sizeof out);
     ck(rc == 2 && ckk_has(out, sizeof out, "baseline check not green"), "red-baseline");
 
