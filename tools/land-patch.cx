@@ -36,6 +36,8 @@ static const char *g_root = ".", *g_rows, *g_head, *g_patch[LP_MAXP];
 static int g_np, g_dry;
 static char *g_files[LP_MAXF]; static int g_nf;      /* every touched path (patch files, tables, new tools) */
 static char *g_newtool[LP_MAXF]; static int g_nnew;  /* tools to register */
+static char *g_created[LP_MAXF]; static int g_ncr;   /* every file a patch creates (entered in the index as intent-to-add after the apply) */
+static int g_intent;                                 /* 1 once those entries were added (undone by fail) */
 static char *g_orig[3]; static size_t g_orign[3];    /* original table bytes, restored on failure */
 static int g_applied;                                /* patches applied so far (for reversal) */
 
@@ -57,6 +59,26 @@ static void addnew(const char *p) {
     int i; for (i = 0; i < g_nnew; i++) if (!strcmp(g_newtool[i], p)) return;
     if (g_nnew < LP_MAXF) g_newtool[g_nnew++] = strdup(p);
 }
+static void addcreated(const char *p) {
+    int i; for (i = 0; i < g_ncr; i++) if (!strcmp(g_created[i], p)) return;
+    if (g_ncr < LP_MAXF) g_created[g_ncr++] = strdup(p);
+}
+/* "git add -N" (or "git reset" to undo it) over every created file and every new tool that exists in the work tree; 0, or the git rc */
+static char *rootpath(const char *rel);
+static int intent(int undo, const char *qroot, char *out, int cap) {
+    char sc[9000], q[4400]; size_t n; int i, any = 0;
+    n = (size_t)(cx_fmt(sc, sizeof sc, "git -C %s %s --", qroot, undo ? "reset -q" : "add -N") ? 0 : strlen(sc));
+    if (!n) return -1;
+    for (i = 0; i < g_ncr + g_nnew; i++) {
+        const char *p = i < g_ncr ? g_created[i] : g_newtool[i - g_ncr];
+        if (sy_exists(rootpath(p)) != 1) continue;
+        if (ckk_shq(q, sizeof q, p) || n + strlen(q) + 4 >= sizeof sc) return -1;
+        LP_CP(sc + n, sizeof sc - n, " ", 1); n++; LP_CP(sc + n, sizeof sc - n, q, strlen(q) + 1); n += strlen(q); any = 1;
+    }
+    if (!any) return 0;
+    if (!undo) { char *ex = " 2>&1"; LP_CP(sc + n, sizeof sc - n, ex, strlen(ex) + 1); }
+    return sh(sc, out, cap, 30);
+}
 static char *rootpath(const char *rel) {
     static char b[4400]; if (cx_fmt(b, sizeof b, "%s/%s", g_root, rel)) { fprintf(stderr, "land-patch: path too long\n"); exit(2); }
     return b;
@@ -66,6 +88,7 @@ static int is_table(const char *p) { int i; for (i = 0; i < 3; i++) if (!strcmp(
 /* restore every table from its saved bytes, reverse applied patches, then report */
 static int fail(const char *step, const char *why) {
     int i; char sc[9000], q[4400], out[2000];
+    if (g_intent) { char r0[4400]; if (!ckk_shq(r0, sizeof r0, g_root)) intent(1, r0, out, sizeof out); g_intent = 0; }
     for (i = 0; i < 3; i++) if (g_orig[i]) cx_write(rootpath(LP_TABLE[i]), g_orig[i], g_orign[i]);
     for (i = g_applied - 1; i >= 0; i--) {
         if (ckk_shq(q, sizeof q, g_patch[i])) continue;
@@ -91,7 +114,7 @@ static int plan_rows(int t, const char *tb, size_t tn, const char *rows, size_t 
             if (ln == 0) continue;
             kl = keylen(l, (long)ln);
             if (t == 0 && kl > 14 && !memcmp(l, "tools-compile-", 14)) continue;   /* register.cx computes these */
-            if (t == 2) { if (ln > 3 && !memcmp(l + ln - 3, ".cx", 3)) { char p[1024]; if (kl < (int)sizeof p) { LP_CP(p, sizeof p, l, kl); p[kl] = 0; addnew(p); } continue; } }
+            if (t == 2) { if (kl > 3 && !memcmp(l + kl - 3, ".cx", 3)) { char p[1024]; if (kl < (int)sizeof p) { LP_CP(p, sizeof p, l, kl); p[kl] = 0; addnew(p); } continue; } }   /* the row is "PATH<TAB>regular": the key ends in .cx */
             /* search the table, then the rows planned so far (a repeated key inside one rows file is the same question) */
             { int found = 0; const char *src[2] = { tb, *add }; size_t sn[2] = { tn, *an }; int s;
               for (s = 0; s < 2 && !found; s++) {
@@ -127,6 +150,7 @@ static void collect_patch(const char *p) {
             if (k + 3 <= xl && k < sizeof cur) { LP_CP(cur, sizeof cur, x, k); cur[k] = 0; addfile(cur); }
         } else if (e - at >= 13 && !memcmp(b + at, "new file mode", 13) && cur[0]) {
             size_t cl = strlen(cur);
+            addcreated(cur);
             if (!strncmp(cur, "tools/", 6) && cl > 3 && !strcmp(cur + cl - 3, ".cx")) addnew(cur);   /* tools/cxlib/ sources are compiled by the same shards */
         }
         at = e < n ? e + 1 : e;
@@ -186,6 +210,10 @@ int main(int argc, char **argv) {
         g_applied++;
         say("LAND_APPLIED", "%s", g_patch[i]);
     }
+    /* a created file is not in the index until it is added; tests/tools-compile.cx (run by register.cx) counts the index, so every created file
+       and new tool enters it as intent-to-add first (register.cx stages the tools itself, and a failed call undoes this) */
+    if (intent(0, qroot, out, sizeof out) != 0) { cx_fmt(why, sizeof why, "git add -N: %.300s", out); return fail("intent-to-add", why); }
+    g_intent = 1;
     for (t = 0; t < 3; t++) {
         char *nb; size_t nl, ncap; int nlfix;
         if (!addn[t]) continue;
