@@ -338,6 +338,39 @@ static int states(In *in) {
     }
     return 0;
 }
+static int build_packed(In *in) {
+    typedef struct MdPackedState {
+        int mode, count, lo, hi;
+        int base_next, base_seq;
+        int ret_seq, _pad;
+        unsigned char *ret_ok;
+        int *keys, *next, *seq;
+    } MdPackedState;
+    typedef char md_packed_state_size_check[(sizeof(MdPackedState) == 64) ? 1 : -1];
+    CxModel *m = &in->d->model;
+    int ns = m->ns, s;
+    MdPackedState *ps;
+    (void)(sizeof(md_packed_state_size_check));
+    if (ns <= 0) return 0;
+    ps = raw_alloc(in, (size_t)ns * sizeof(MdPackedState), 1);
+    if (in->err) return in->err;
+    for (s = 0; s < ns; s++) {
+        ps[s].mode = m->smode[s];
+        ps[s].count = m->rowc[s];
+        ps[s].lo = m->nlo[s];
+        ps[s].hi = m->nhi[s];
+        ps[s].base_next = m->bn[s];
+        ps[s].base_seq = m->bq[s];
+        ps[s].ret_seq = m->rets[s];
+        ps[s]._pad = 0;
+        ps[s].ret_ok = m->retok[s];
+        ps[s].keys = m->rowk[s];
+        ps[s].next = m->rown[s];
+        ps[s].seq = m->rowq[s];
+    }
+    m->packed = ps;
+    return 0;
+}
 static void raise_top(CxModel *m) {
     int s, i;
     for (s = 0; s < m->ns; s++) if (m->smode[s] == 1)
@@ -389,7 +422,7 @@ int cxmd_decode(CxDecode *d, const unsigned char *data, long length) {
         if (top < ns - 1 || top == 2147483647) return seterr(&in, 2, "bad network domain");
         m->topmax = top;
     }
-    if (strings(&in) || sequences(&in) || states(&in)) return in.err;
+    if (strings(&in) || sequences(&in) || states(&in) || build_packed(&in)) return in.err;
     skip(&in);
     if (in.at != in.length) return seterr(&in, 7, "trailing model data");
     if (!m->isnet) raise_top(m);

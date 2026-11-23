@@ -27,13 +27,20 @@ typedef struct { CoreBlob *entries; int n, cap; } CoreBlobs;
 typedef struct { unsigned char *p; int n, id; } CoreResourceEntry;
 typedef struct { CoreResourceEntry *entries; int n; } CoreResources;
 typedef struct {
+    int mode, count, lo, hi;
+    int base_next, base_seq;
+    int ret_seq, _pad;
+    unsigned char *ret_ok;
+    int *keys, *next, *seq;
+} CorePackedState;
+typedef struct {
     int ns, nq, nrg, start, isnet;
     char **str; int *strl;
     int *qoff, *qlen; I *qa;
     int *mode, *count, **keys, **next, **seq;
     int *lo, *hi, *base_next, *base_seq;
     int *ret_seq; unsigned char **ret_ok;   /* declared returns; ret_ok[q] may be NULL */
-    const void *packed;                     /* reserved packed-table pointer (0.0.93: NULL) */
+    const void *packed;                     /* host-built CorePackedState[ns] or NULL */
 } CoreModel;
 /* Host linkage: absent=0, borrowed=1, malloc-owned=2. No key syntax
    is interpreted by the core; even NUL bytes are ordinary key bytes. */
