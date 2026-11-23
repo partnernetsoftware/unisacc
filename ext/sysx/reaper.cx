@@ -360,7 +360,7 @@ static int rp_snap_report(const rp_snap_t *s, const int *keep, int nkeep, char *
 /* Live root: freeze, kill, confirm.  SEED (optional) is a snapshot taken earlier: members still
    matching their starttime are added to the kill list, which is how an orphan whose parent exited
    after the snapshot is still reached. */
-static int rp_sweep(int root, const rp_snap_t *seed, int deadline_ms, const int *keep, int nkeep, char *rep, int cap) {
+static int rp_sweep(int root, const rp_snap_t *seed, long long expect, int deadline_ms, const int *keep, int nkeep, char *rep, int cap) {
     sy_kt_ent e[SY_KT_MAX];
     int n = 0, rg = 0, i, round, residue = 0, added, freeze_rounds, sub_ok = 1, unprovable, packed;
     long long rst = 0;
@@ -385,6 +385,10 @@ static int rp_sweep(int root, const rp_snap_t *seed, int deadline_ms, const int 
         return rp_snap_report(seed, keep, nkeep, rep, cap);
     }
     if (rst <= 0) return -EIO;   /* a zero start is a missing baseline, not "everything is newer" */
+    /* The caller's baseline (EXPECT > 0) is the starttime of the process it started.  A different value
+       means the pid names another process now (the root was reaped and the number reused): nothing is
+       stopped or killed, the answer is -EIO. */
+    if (expect > 0 && rst != expect) return -EIO;
     freeze_rounds = deadline_ms / 4;
     if (freeze_rounds < 8) freeze_rounds = 8;
     if (freeze_rounds > SY_KT_FREEZE_ROUNDS) freeze_rounds = SY_KT_FREEZE_ROUNDS;
@@ -425,12 +429,12 @@ static int rp_sweep(int root, const rp_snap_t *seed, int deadline_ms, const int 
 }
 
 /* Entry A: a handle.  The pid and pgid come from the handle.  Call it BEFORE sy_proc_end, so the
-   handle is LIVE by contract; the state is not read here (a REAPED handle must not be swept, and
-   that check is the caller's, which is exactly why this runs before the reap).  Anchoring holds:
-   the root is reaped by sy_proc_end, never here. */
+   handle is LIVE by contract.  A REAPED handle is refused here (-EIO, nothing signalled): its pid may
+   name an unrelated process by now.  Anchoring holds: the root is reaped by sy_proc_end, never here. */
 int rp_kill_tree(sy_child_t *c, int deadline_ms, const int *keep, int nkeep, char *rep, int cap) {
     if (!c || c->pid <= 1) return -EINVAL;
-    return rp_sweep(c->pid, 0, deadline_ms, keep, nkeep, rep, cap);
+    if (c->state == SY_CHILD_REAPED) return -EIO;
+    return rp_sweep(c->pid, 0, 0, deadline_ms, keep, nkeep, rep, cap);
 }
 
 /* Entry A with a snapshot: REAPED=0 sweeps the live root and also the snapshot members; REAPED=1
@@ -446,10 +450,10 @@ int rp_kill_tree_snap(int root, int reaped, const rp_snap_t *s, int deadline_ms,
     if (deadline_ms <= 0) deadline_ms = 2000;
     if (!s || s->root != root || s->root_start <= 0) {
         if (reaped) return -EIO;
-        return rp_sweep(root, 0, deadline_ms, keep, nkeep, rep, cap);
+        return rp_sweep(root, 0, 0, deadline_ms, keep, nkeep, rep, cap);
     }
     if (reaped) return rp_snap_report(s, keep, nkeep, rep, cap);
-    return rp_sweep(root, s, deadline_ms, keep, nkeep, rep, cap);
+    return rp_sweep(root, s, s->root_start, deadline_ms, keep, nkeep, rep, cap);
 }
 
 /* Entry B: a caller that reaped the root itself keeps the pair (pid, reaped, starttime).  REAPED=1
@@ -464,14 +468,14 @@ int rp_kill_tree_pid_after_wait(int pid, int reaped, long long root_start,
         if (!tx_eqz(sy_os_name(), "linux")) return -ENOSYS;
         return root_start > 0 ? -EPERM : -EIO;
     }
-    return rp_sweep(pid, 0, deadline_ms, keep, nkeep, rep, cap);
+    return rp_sweep(pid, 0, root_start, deadline_ms, keep, nkeep, rep, cap);
 }
 
 /* Entry C: a bare pid with no identity protection.  The caller promises the pid is one of its
    own children that no wait_any or other path has reaped.  Same three-state answer. */
 int rp_kill_tree_pid(int pid, int deadline_ms, const int *keep, int nkeep, char *rep, int cap) {
     if (pid <= 1) return -EINVAL;
-    return rp_sweep(pid, 0, deadline_ms, keep, nkeep, rep, cap);
+    return rp_sweep(pid, 0, 0, deadline_ms, keep, nkeep, rep, cap);
 }
 
 int rp_subreaper(void) {

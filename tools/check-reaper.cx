@@ -470,8 +470,55 @@ static int check_snapshot_overflow(void) {
     ok(rc == -ENOSPC && snap.n == 0, "snapshot-overflow: more than RP_SNAP_MAX members answers -ENOSPC and holds none");
     sy_killpg(root, SIGKILL);
     (void)waitpid(root, &st, 0);
-    sy_sleep_ms(50);
-    while (waitpid(-1, &st, WNOHANG) > 0) { }
+    /* The children of the group re-parent to this subreaper when the root dies and linger as zombies or
+       dying processes for longer than a fixed sleep under load (276 of them).  Later fixtures read this
+       process's children, so wait for exactly this group until none is left (ECHILD), never waitpid(-1). */
+    for (;;) {
+        pid_t g = waitpid(-root, &st, 0);
+        if (g > 0) continue;
+        if (g < 0 && errno == EINTR) continue;
+        break;
+    }
+    return 0;
+}
+
+/* A stranger S (live, own group) stands for "the pid now names another process".  Three entries must
+   leave it alone and answer -EIO: a REAPED handle (entry A: the handle says the root is gone, so its pid
+   is not ours to touch), entry B with reaped=0 and a baseline that is not S's starttime, and the snapshot
+   entry with reaped=0 and a snapshot whose root_start is not S's.  The positive control (the true
+   baseline) is swept, so the mismatch answer is the baseline compare and not a refusal of everything. */
+static int check_baseline_mismatch(void) {
+    int S, st, w, r1, r2, r3;
+    char report[256];
+    sy_child_t c;
+    rp_snap_t snap;
+    long long real;
+    S = fork();
+    if (S < 0) return 2;
+    if (S == 0) { sy_setpgid(0, 0); sy_sleep_ms(4000); _exit(0); }
+    sy_setpgid(S, S);
+    sy_sleep_ms(30);
+    real = rp_root_start(S);
+    if (real <= 0) { sy_kill(S); (void)waitpid(S, &st, 0); return 2; }
+    memset(&c, 0, sizeof c);
+    c.pid = S; c.state = SY_CHILD_REAPED;
+    r1 = rp_kill_tree(&c, 500, 0, 0, report, sizeof report);
+    r2 = rp_kill_tree_pid_after_wait(S, 0, real + 1000, 500, 0, 0, report, sizeof report);
+    memset(&snap, 0, sizeof snap);
+    snap.root = S; snap.root_start = real + 1000;
+    r3 = rp_kill_tree_snap(S, 0, &snap, 500, 0, 0, report, sizeof report);
+    sy_sleep_ms(100);
+    w = waitpid(S, &st, WNOHANG | WUNTRACED);
+    ok(r1 == -EIO, "baseline: a REAPED handle is refused with -EIO");
+    ok(r2 == -EIO, "baseline: entry B, reaped=0, wrong starttime answers -EIO");
+    ok(r3 == -EIO, "baseline: snapshot entry, reaped=0, wrong root_start answers -EIO");
+    ok(w == 0, "baseline: the stranger was neither stopped nor killed by any of them");
+    r1 = rp_kill_tree_pid_after_wait(S, 0, real, 1000, 0, 0, report, sizeof report);
+    sy_sleep_ms(100);
+    w = waitpid(S, &st, WNOHANG);
+    ok(w == S || (w < 0 && errno == ECHILD), "baseline: with the true starttime the same pid is swept (control)");
+    (void)r1;
+    if (w == 0) { sy_kill(S); (void)waitpid(S, &st, 0); }
     return 0;
 }
 
@@ -659,6 +706,7 @@ int main(int argc, char **argv) {
     ok(check_reaped_root(0) == 0, "reaped-root: fixture completed");
     ok(check_snapshot_identity() == 0, "snapshot-identity: fixture completed");
     ok(check_snapshot_overflow() == 0, "snapshot-overflow: fixture completed");
+    ok(check_baseline_mismatch() == 0, "baseline: fixture completed");
     ok(sy_kill_tree(1, 500, 0, 0, rep, sizeof rep) == -EINVAL, "kill_tree: pid 1 is not a job root");
 
     /* A pid that already exited has no tree and nothing to prove. */

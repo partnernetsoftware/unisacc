@@ -150,6 +150,17 @@ static int fake(int argc, char **argv) {
         for (i = 0; i < 300; i++) (void)sy_sleep_ms(100);
         return 0;
     }
+    if (tx_eqz(mode, "leftover")) {
+        /* A chain that ends cleanly but leaves a process of its own group behind (no setsid). */
+        int c = fork();
+        if (c == 0) {
+            char b[32];
+            if (cx_fmt(b, sizeof b, "pid=%d\n", sy_pid()) || put(out, "leftover.tsv", b)) _exit(2);
+            for (i = 0; i < 80; i++) (void)sy_sleep_ms(100);
+            _exit(0);
+        }
+        for (i = 0; i < 50 && c > 0 && !present(out, "leftover.tsv"); i++) (void)sy_sleep_ms(100);
+    }
     if (tx_eqz(mode, "slow"))
         for (i = 0; i < 25; i++) (void)sy_sleep_ms(100);
     return chain_files(out, rev, 4, 0) ? 2 : 0;
@@ -391,6 +402,22 @@ int main(int argc, char **argv) {
     ck(hung > 1 && sy_getpgid(hung) < 0, "deadline-kill-leaves-no-process");
     rc = tool(bh, "status", 0, 0, 0, 0, 0);
     ck(rc == 0 && lines("BG_CANDIDATE\t" REV_C, "state=FAILED", "rc=124", 0) == 1, "status-killed-chain-failed");
+    /* The chain exited and was reaped, then a member of its old group number is still alive.  After the
+       reap nothing proves that member is the chain's (the number may name an unrelated group), so it is
+       never signalled: the run is marked rc=123 residue-unconfirmed and the process is left running. */
+    {
+        char lb[P], ld[P], lp[P], *lo = 0;
+        size_t ln = 0;
+        int left = -1;
+        if (join(lb, work, "lf") || join(ld, lb, REV_A)) return 2;
+        rc = start(lb, REV_A, "leftover", "30", "5");
+        ck(rc == 0 && await(ld, "exit.tsv", 150) && rows(ld, "exit.tsv", "EXIT\t", "rc=123", "why=residue-unconfirmed") == 1,
+           "reaped-group-leftover-is-reported-not-signalled");
+        if (!join(lp, ld, "leftover.tsv") && (lo = cx_read(lp, &ln)) && !value(lo, (long)ln, "pid=", f_pid, sizeof f_pid)) left = number(f_pid);
+        mm_free(lo);
+        ck(left > 1 && sy_getpgid(left) >= 0, "reaped-group-leftover-keeps-running");
+        if (left > 1) (void)sy_kill(left);
+    }
     char owned_base[P],owned_dir[P];
     if(join(owned_base,work,"react") || join(owned_dir,owned_base,REV_C))return 2;
     rc=start(owned_base,REV_C,"react-hang","30","1");
