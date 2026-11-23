@@ -405,8 +405,12 @@ int sy_stat(const char *path, sy_stat_t *out) {
 }
 
 /* PATH's filesystem: unprivileged available blocks in bavail, fragment size in frsize.
-   0, or -errno. Linux: statfs syscall. macOS: statfs. Windows: GetDiskFreeSpaceExA
-   with frsize=1 and bavail in bytes. */
+   0, or -errno. Linux: statfs syscall. macOS: statfs declared by <sys/mount.h>.
+   Windows: GetDiskFreeSpaceExA with frsize=1 and bavail in bytes. KNOWN GAP: the A
+   entry point takes an ANSI path, so a directory whose name is outside the ANSI code
+   page cannot be measured there and the call fails (-errno) rather than guessing; the
+   W entry point needs a UTF-16 conversion this unit does not carry. Recorded, not
+   silently widened: the '-ENOSYS'/error answer is the contract until a W path exists. */
 static int sy_statvfs_os(const char *path, sy_statvfs_t *out) {
 #ifdef _WIN32
     static __u_word fn;
@@ -423,6 +427,12 @@ static int sy_statvfs_os(const char *path, sy_statvfs_t *out) {
     out->blocks = total;
     return 0;
 #elif defined(__APPLE__)
+    /* struct statfs and statfs() are declared only in include/sys/mount.h, which the
+       implicit prelude does not carry (it is not <sys/stat.h>). Asking for that header
+       by name keeps the platform split inside this _os helper (plans/cx-layers.md): the
+       header carries both macOS layouts (64-bit for arm64, the old one for x86_64's
+       plain symbols), and both define f_bsize/f_iosize/f_blocks/f_bfree/f_bavail. */
+    #include <sys/mount.h>
     struct statfs s;
     errno = 0;
     if (statfs(path, &s) != 0) return sy_fail();
