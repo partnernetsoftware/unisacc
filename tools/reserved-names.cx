@@ -90,15 +90,25 @@ static int do_check(void) {
     char *v[] = {"git", "-C", (char *)root, "ls-files", "-z", 0};
     char *out = 0; size_t n = 0; int rc;
     long at = 0, files = 0, hits = 0; char why[64];
+    long skip = 0;
     rc = cx_runv_timeout(v, 50, &out, &n);
     if (rc || !out) {
-        fprintf(stderr, "reserved-names: FAIL: git ls-files rc=%d\n", rc);
-        mm_free(out);
-        return 1;
+        /* Not a git work tree (release-exec runs ratchets in an archived private tree):
+           fall back to every regular file under ROOT, minus .git, with the ROOT/ prefix stripped. */
+        char *fv[] = {"find", (char *)root, "-name", ".git", "-prune", "-o", "-type", "f", "-print0", 0};
+        mm_free(out); out = 0; n = 0;
+        rc = cx_runv_timeout(fv, 50, &out, &n);
+        if (rc || !out) {
+            fprintf(stderr, "reserved-names: FAIL: git ls-files and find both failed rc=%d\n", rc);
+            mm_free(out);
+            return 1;
+        }
+        skip = (long)strlen(root) + 1;
     }
     while (at < (long)n) {
         long e = at; const char *reason;
         while (e < (long)n && out[e]) e++;
+        if (e - at > skip) at += skip;
         if (e > at) {
             files++;
             reason = bad_path(out + at, e - at, why, sizeof why);

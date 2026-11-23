@@ -9,6 +9,13 @@ CHECK(base_next,CM_BASE_NEXT); CHECK(base_seq,CM_BASE_SEQ);
 CHECK(ret_seq,CM_RET_SEQ); CHECK(ret_ok,CM_RET_OK); CHECK(packed,CM_PACKED);
 typedef char check_size[(sizeof(CoreModel)==CM_SIZE && sizeof(void*)==8 && sizeof(int)==4 && sizeof(I)==8)?1:-1];
 
+#define PCHECK(field,off) typedef char pcheck_##field[(offsetof(CorePackedState,field)==off)?1:-1]
+PCHECK(mode,PS_MODE); PCHECK(count,PS_COUNT); PCHECK(lo,PS_LO); PCHECK(hi,PS_HI);
+PCHECK(base_next,PS_BASE_NEXT); PCHECK(base_seq,PS_BASE_SEQ);
+PCHECK(ret_seq,PS_RET_SEQ); PCHECK(ret_ok,PS_RET_OK);
+PCHECK(keys,PS_KEYS); PCHECK(next,PS_NEXT); PCHECK(seq,PS_SEQ);
+typedef char pcheck_size[(sizeof(CorePackedState)==PS_SIZE)?1:-1];
+
 #define BCHECK(field,off) typedef char bcheck_##field[(offsetof(Buf,field)==off)?1:-1]
 BCHECK(b,BUF_BYTES); BCHECK(at,BUF_ATTR); BCHECK(n,BUF_LENGTH); BCHECK(cap,BUF_CAPACITY);
 typedef char bcheck_size[(sizeof(Buf)==BUF_SIZE)?1:-1];
