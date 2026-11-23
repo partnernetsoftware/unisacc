@@ -3,7 +3,8 @@
 <pre id="r160">pending</pre>
 <script type="module">
 import { BufferAttribute, BufferGeometry, Camera, Color, DataTexture, LinearSRGBColorSpace, Mesh,
-  MeshBasicMaterial, Points, PointsMaterial, REVISION, Scene, ShaderLib, UniformsLib,
+  DirectionalLight, MeshBasicMaterial, MeshPhysicalMaterial, OrthographicCamera, PlaneGeometry,
+  Points, PointsMaterial, REVISION, Scene, ShaderLib, UniformsLib,
   WebGLRenderer } from "../../web/game/three.module.js";
 import { createGpuSubmit } from "../base/gpu-host-abi.js";
 
@@ -76,6 +77,81 @@ function defaults(entry) {
   throw Error("unknown uniform default");
 }
 
+function physicalPixels(gl, program) {
+  const { canvas, gl: oracle } = context();
+  const renderer = new WebGLRenderer({ ...options, canvas, context: oracle });
+  renderer.outputColorSpace = LinearSRGBColorSpace;
+  renderer.setSize(9, 9, false);
+  const camera = new OrthographicCamera(-1, 1, 1, -1, 0.1, 10);
+  camera.position.z = 2;
+  const scene = new Scene();
+  const sun = new DirectionalLight(0xffffff, 2);
+  sun.position.set(0, 0, 1);
+  scene.add(sun);
+  const geometry = new PlaneGeometry(2, 2);
+  const material = new MeshPhysicalMaterial({ color: new Color().setRGB(.10,.04,.02), roughness: .55 });
+  material.specularColor.setRGB(.7,.5,.3);
+  scene.add(new Mesh(geometry, material));
+
+  gl.useProgram(program);
+  gl.viewport(0, 0, 9, 9);
+  gl.disable(gl.DITHER);
+  oracle.disable(oracle.DITHER);
+  const upload = (name, values) => {
+    const location = gl.getUniformLocation(program, name);
+    if (location === null) throw Error("inactive physical uniform " + name);
+    if (values.length === 3) gl.uniform3fv(location, values);
+    else gl.uniform1f(location, values[0]);
+  };
+  const pos = gl.getAttribLocation(program, "a_position");
+  const normal = gl.getAttribLocation(program, "a_color");
+  const buffer = gl.createBuffer();
+  gl.bindBuffer(gl.ARRAY_BUFFER, buffer);
+  gl.bufferData(gl.ARRAY_BUFFER, new Float32Array(vertices), gl.STATIC_DRAW);
+  gl.enableVertexAttribArray(pos);
+  gl.vertexAttribPointer(pos, 3, gl.FLOAT, false, 0, 0);
+  gl.disableVertexAttribArray(normal);
+  gl.vertexAttrib4f(normal, 0, 0, 1, 1);
+  upload("diffuse", [.1,.04,.02]);
+  upload("emissive", [0,0,0]);
+  upload("specularColor", [.7,.5,.3]);
+  upload("roughness", [.55]);
+  upload("metalness", [0]);
+  upload("opacity", [1]);
+  upload("clearcoatRoughness", [.43]);
+  material.clearcoatRoughness = .43;
+  const read = context => {
+    const bytes = new Uint8Array(9 * 9 * 4);
+    context.readPixels(0, 0, 9, 9, context.RGBA, context.UNSIGNED_BYTE, bytes);
+    if (context.getError()) throw Error("physical pixel readback");
+    return bytes;
+  };
+  let differences = 0;
+  const distinct = new Set();
+  try {
+    for (const [ior, intensity, coat] of [[1.3,.45,0],[1.7,.8,0],[1.7,.8,.7]]) {
+      material.ior = ior;
+      material.specularIntensity = intensity;
+      material.clearcoat = coat;
+      renderer.render(scene,camera);
+      upload("ior", [ior]);
+      upload("specularIntensity", [intensity]);
+      upload("clearcoat", [query.has("mutateCoat") ? 0 : coat]);
+      gl.drawArrays(gl.TRIANGLES, 0, 3);
+      const actual = read(gl), expected = read(oracle);
+      differences += actual.reduce((count, value, i) => count + Number(value !== expected[i]), 0);
+      distinct.add(expected[0]);
+    }
+    return [differences, distinct.size];
+  } finally {
+    gl.disableVertexAttribArray(pos);
+    gl.deleteBuffer(buffer);
+    material.dispose();
+    geometry.dispose();
+    renderer.dispose();
+  }
+}
+
 async function product() {
   const { gl } = context();
   let exports;
@@ -145,9 +221,10 @@ async function product() {
     ["lambert", "gpu-lit.vert", "gpu-lambert.frag"],
     ["phong", "gpu-phong.vert", "gpu-phong.frag"],
     ["standard", "gpu-phong.vert", "gpu-standard.frag"],
-    ["physical", "gpu-phong.vert", "gpu-standard.frag"],
+    ["physical", "gpu-phong.vert", "gpu-physical.frag"],
   ];
   const checks = [];
+  let physical = [];
   let stage = "lookup";
   try {
   for (const [name, vertexAsset, fragmentAsset] of programs) {
@@ -194,13 +271,14 @@ async function product() {
     shaders.forEach(shader => gl.attachShader(linked, shader));
     gl.linkProgram(linked);
     checks.push(Number(gl.getProgramParameter(linked, gl.LINK_STATUS)));
+    if (name === "physical") physical = physicalPixels(gl, linked);
     gl.deleteProgram(linked);
     shaders.forEach(shader => gl.deleteShader(shader));
   }
   } catch (error) {
     throw Error(stage + ": " + error.message);
   }
-  return [...pixels, matched, Number(refused), ...checks];
+  return [...pixels, matched, Number(refused), ...checks, ...physical];
 }
 
 try {
