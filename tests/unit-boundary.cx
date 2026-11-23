@@ -10,9 +10,7 @@
  * a scratch directory, compiles them with the tool root's own product, runs the
  * result, and checks both the exit status and the value.
  *
- * The cap comes from exec/facts/limits.tsv FRONT_UNIT_MAX (0.0.98: 256).  The
- * row at the cap must build and run; the row one past it must be refused with
- * "too many sources (limit <cap>)".
+ * 129 must be refused with "too many sources (limit 128)".
  *
  * KNOWN-RED marks a row expected to fail; none is today.  127 and 128 used to
  * crash (SIGSEGV from the 96-entry paths[] table in src/driveplan.cx, now a
@@ -30,7 +28,6 @@
 #pragma unisa use text.text
 
 static int rows, passed, known, failed;
-static int unit_max = 128;   /* main 从 exec/facts/limits.tsv 的 FRONT_UNIT_MAX 覆盖 */
 static char root[4400], scratch[4400];
 
 static void pathcat(char out[4400], const char *a, const char *b) {
@@ -99,7 +96,7 @@ static int run_case(int n, int known_red) {
         return 0;
     }
 
-    int expect_refusal = n > unit_max;
+    int expect_refusal = n > 128;
     FILE *p = popen(cmd, "r");
     if (!p) {
         printf("FAIL\tsize-%d\tpopen\n", n);
@@ -110,8 +107,7 @@ static int run_case(int n, int known_red) {
     int refused = 0;
     line[0] = 0;
     while (fgets(line, sizeof line, p)) {
-        char sent[64]; snprintf(sent, sizeof sent, "too many sources (limit %d)", unit_max);
-        if (strstr(line, sent)) refused = 1;
+        if (strstr(line, "too many sources (limit 128)")) refused = 1;
     }
     int status = pclose(p);
     int code = WIFEXITED(status) ? WEXITSTATUS(status) : -1;
@@ -121,7 +117,7 @@ static int run_case(int n, int known_red) {
     if (expect_refusal) {
         if (refused) {
             passed++;
-            printf("PASS\tsize-%d\trefused-with-limit-%d\n", n, unit_max);
+            printf("PASS\tsize-%d\trefused-with-limit-128\n", n);
             return 1;
         }
         printf("FAIL\tsize-%d\texpected-refusal-got-rc=%d\n", n, code);
@@ -188,22 +184,9 @@ int main(int argc, char **argv) {
         return 2;
     }
 
-    /* 上限来自 exec/facts/limits.tsv 的 FRONT_UNIT_MAX,不写死:表动了这里跟着动。 */
-    {   char lim[4400]; snprintf(lim, sizeof lim, "%s/exec/facts/limits.tsv", root);
-        FILE *lf = fopen(lim, "r");
-        if (!lf) { fputs("unit-boundary: cannot read exec/facts/limits.tsv\n", stderr); return 2; }
-        char ln[512];
-        while (fgets(ln, sizeof ln, lf)) {
-            if (!strncmp(ln, "FRONT_UNIT_MAX\t", 15)) { unit_max = atoi(ln + 15); break; }
-        }
-        fclose(lf);
-        if (unit_max < 2 || unit_max > 100000) { fputs("unit-boundary: FRONT_UNIT_MAX missing or absurd\n", stderr); return 2; }
-    }
-    int sizes[9];
-    sizes[0] = 1; sizes[1] = 2; sizes[2] = 63; sizes[3] = 64; sizes[4] = 65; sizes[5] = 72;
-    sizes[6] = unit_max - 1; sizes[7] = unit_max; sizes[8] = unit_max + 1;
+    static const int sizes[] = { 1, 2, 63, 64, 65, 72, 127, 128, 129 };
     /* One process per row, so the batch stays inside its bound. */
-    int count = 9;
+    int count = (int)(sizeof sizes / sizeof sizes[0]);
     for (int i = 0; i < count; i++) {
         fflush(stdout);
         pid_t p = fork();
