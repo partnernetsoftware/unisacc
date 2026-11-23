@@ -52,7 +52,66 @@ static char *rd(const char *name, const char *ext) {
 static int has(const char *name, const char *needle) { return strstr(rd(name, "txt"), needle) != 0; }
 static int rcof(const char *name) { const char *s = rd(name, "rc"); return s[0] ? atoi(s) : -99; }
 
-int main(void) {
+/* --flip: item 12 (flip-compare) on a repository whose tools/affected.cx is the stand-in tests/cases/premerge-affected-stub.cx.
+ * The stand-in takes each batch's status from tests/state.txt of the tree it runs in, so a patch editing that file flips a batch in the patched
+ * tree only.  Selection: b-good (kind source), b-refuse-neg (kind literal, a negative control by name), tools-compile-000 (never run). */
+static int flip_main(void) {
+    char *tmp = g_tmp, sc[6000], out[8192], src[1300], dst[1300];
+    if (cx_fmt(tmp, sizeof g_tmp, "%s/psc-flip-XXXXXX", sy_env_or("TMPDIR", "/tmp")) || !mkdtemp(tmp)) return 2;
+    if (cx_fmt(src, sizeof src, "tests/cases/premerge-affected-stub.cx") || cx_fmt(dst, sizeof dst, "%s/stub.cx", tmp)) return 2;
+    cx_fmt(sc, sizeof sc, "cp %s %s && echo STUB_OK", src, dst);
+    if (sh(sc, out, sizeof out, 10) != 0 || !ckk_has(out, sizeof out, "STUB_OK")) { printf("stub copy failed\n"); return 2; }
+    cx_fmt(sc, sizeof sc,
+        "set -e; R=$(pwd); T=%s; cd \"$T\" && mkdir td r5 && cd r5 && git init -q . && mkdir tools tests && cp ../stub.cx tools/affected.cx && ln -s \"$R/cx\" cx && ln -s \"$R/ext\" ext && ln -s \"$R/cxroot.tsv\" cxroot.tsv && "
+        "printf 'int main(void){ return 0; }\\n' > tools/seed.cx && printf 'b-good=1\\nb-refuse-neg=1\\n' > tests/state.txt && git add -A && "
+        "git -c user.name=x -c user.email=x@x commit -qm base && git branch -M main && "
+        "printf 'int main(void){ return 1; }\\n' > tools/seed.cx && git diff > ../same.patch && "
+        "sed -i 's/^b-good=1/b-good=0/' tests/state.txt && git diff > ../flip.patch && git checkout -q -- . && "
+        "printf 'int main(void){ return 1; }\\n' > tools/seed.cx && sed -i 's/^b-refuse-neg=1/b-refuse-neg=0/' tests/state.txt && git diff > ../flipneg.patch && git checkout -q -- . && "
+        "printf 'batch:b-good\\t-\\tfixture flips this batch on purpose\\n' > ../decl-ok.tsv && "
+        "printf 'batch:b-refuse-neg\\t-\\tfixture flips this batch on purpose\\n' > ../decl-neg.tsv && echo FLIPFX_OK", tmp);
+    if (sh(sc, out, sizeof out, 30) != 0 || !ckk_has(out, sizeof out, "FLIPFX_OK")) { printf("flip fixture failed: %.400s\n", out); return 2; }
+    q("f-same", "--patch %s/same.patch --repo %s/r5 --base main --check true --out %s/f-same.rec");
+    q("f-flip", "--patch %s/flip.patch --repo %s/r5 --base main --check true --out %s/f-flip.rec");
+    q("f-decl", "--patch %s/flip.patch --repo %s/r5 --base main --check true --declare %s/decl-ok.tsv --out %s/f-decl.rec");
+    q("f-wrong", "--patch %s/flip.patch --repo %s/r5 --base main --check true --declare %s/decl-neg.tsv --out %s/f-wrong.rec");
+    q("f-gneg", "--patch %s/flipneg.patch --repo %s/r5 --base main --check true --declare %s/decl-neg.tsv --guard --out %s/f-gneg.rec");
+    q("f-nog", "--patch %s/flipneg.patch --repo %s/r5 --base main --check true --declare %s/decl-neg.tsv --out %s/f-nog.rec");
+    q("f-ids", "--patch %s/same.patch --repo %s/r5 --base main --check true --flip-ids b-good --guard --out %s/f-ids.rec");
+    q("f-cap", "--patch %s/same.patch --repo %s/r5 --base main --check true --flip-max 1 --out %s/f-cap.rec");
+    q("f-gok", "--patch %s/same.patch --repo %s/r5 --base main --check true --guard --out %s/f-gok.rec");
+    flush();
+    ok(has("f-same", "item=12 name=flip-compare verdict=PASS") && has("f-same", "2 batches compared") && !has("f-same", "tools-compile-000"),
+       "item 12: a patch that flips nothing passes, the tools-compile batch is not run");
+    ok(rcof("f-flip") == 1 && has("f-flip", "item=12 name=flip-compare verdict=FAIL") && has("f-flip", "b-good PASS->FAIL") && has("f-flip", "went PASS -> not PASS") && !has("f-flip", "(declared)"),
+       "item 12: a batch that went PASS -> FAIL in the patched tree fails and is named");
+    ok(has("f-decl", "item=12 name=flip-compare verdict=PASS") && has("f-decl", "b-good PASS->FAIL (declared)") && has("f-decl", "declared=1"),
+       "item 12: the same flip with a batch:ID declare row passes and is listed as declared");
+    ok(rcof("f-wrong") == 1 && has("f-wrong", "item=12 name=flip-compare verdict=FAIL") && has("f-wrong", "b-good PASS->FAIL") && !has("f-wrong", "(declared)"),
+       "item 12: a declare row for another batch does not excuse the flip");
+    ok(has("f-gneg", "item=12 name=flip-compare verdict=FAIL") && has("f-gneg", "negative control"),
+       "item 12: a guard patch fails when a selected negative control is red after the patch, even when the flip is declared");
+    ok(has("f-nog", "item=12 name=flip-compare verdict=PASS") && has("f-nog", "negative-controls=1"),
+       "item 12: without --guard the declared flip of that control passes");
+    ok(has("f-ids", "item=12 name=flip-compare verdict=UNMEASURED") && has("f-ids", "no negative control"),
+       "item 12: a guard patch whose selection holds no negative control is UNMEASURED, not PASS");
+    ok(has("f-cap", "item=12 name=flip-compare verdict=UNMEASURED") && has("f-cap", "ran 1 of 2") && has("f-cap", "no PASS flip"),
+       "item 12: more batches selected than the cap allows to run is UNMEASURED and says so");
+    ok(has("f-gok", "item=12 name=flip-compare verdict=PASS") && has("f-gok", "negative-controls=1"),
+       "item 12: a guard patch with a green negative control passes");
+    cx_fmt(sc, sizeof sc, "T=%s; %s", tmp, "! ls \"$T/td\" | grep -q -E '^(premerge-selfcheck|unisacc-privrepo)-'");
+    ok(sh(sc, 0, 0, 10) == 0, "item 12: no private tree (patched or base) is left in TMPDIR");
+    {   const char *sp = sy_env_or("UNISACC_FLIP_SAMPLE", "");   /* the real tool outputs of this run, for the item-10 sample of a patch that changes this check */
+        if (sp[0]) { char q2[1300]; if (!ckk_shq(q2, sizeof q2, sp)) { cx_fmt(sc, sizeof sc, "cat %s/o/f-*.txt > %s", tmp, q2); sh(sc, 0, 0, 10); } }
+    }
+    cx_fmt(sc, sizeof sc, "rm -rf %s", tmp); sh(sc, 0, 0, 20);
+    checks = ckk_okcount(&bad);
+    printf("CX_PREMERGE_SELFCHECK_FLIP\tchecks=%d\tfailed=%d\n", checks, bad);
+    return bad ? 1 : 0;
+}
+
+int main(int argc, char **argv) {
+    if (argc > 1 && !strcmp(argv[1], "--flip")) return flip_main();
     char *tmp = g_tmp, sc[6000], out[8192]; int rc;
     if (cx_fmt(tmp, sizeof g_tmp, "%s/psc-check-XXXXXX", sy_env_or("TMPDIR", "/tmp")) || !mkdtemp(tmp)) return 2;
     cx_fmt(sc, sizeof sc,
@@ -230,6 +289,7 @@ int main(void) {
     ok(has("hk", "SELFCHECK_SUMMARY patch_sha256=") && !has("hk", "REFUSE"), "with GIT_DIR, GIT_INDEX_FILE and GIT_WORK_TREE set to an outer repository (a git hook) the source repository is still read correctly");
     ok(has("nobase", "SELFCHECK_SUMMARY patch_sha256=") && has("nobase", "base_commit=") && !has("nobase", "REFUSE"), "without --base the default revision main is used");
     ok(has(T_G, "item=11 name=commit-gate-preview verdict=NA"), "item 11: a tree without tools/precommit-preview.cx is NA");
+    ok(has(T_G, "item=12 name=flip-compare verdict=NA") && has(T_G, "no tools/affected.cx"), "item 12: a tree without tools/affected.cx is NA");
     ok(has(T_PA, "item=11 name=commit-gate-preview verdict=PASS") && has(T_PA, "blocked=0 over") && has(T_PA, "head="), "item 11: the gate answering blocked=0 passes and the receipt names the head");
     ok(rcof(T_PB) == 1 && has(T_PB, "commit-gate-preview") && has(T_PB, "blocked=2 over") && has(T_PB, "BLOCK"), "item 11: the gate answering blocked=2 fails and the first BLOCK row is quoted");
     ok(has("b1", "REFUSE repo or base revision invalid"), "an invalid --base is refused before any tree is built");
