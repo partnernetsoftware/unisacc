@@ -1,0 +1,118 @@
+/* tools/check-cxm-syms-headroom.cx -- tools/cxm-syms-headroom.cx 的检查(夹具写入 sy_tmpdir 下)。
+ *
+ * 夹具是一棵私有小树,不读本仓的 build/*.tsv,所以派生表漂移不会让这个批次假红。
+ * 八例:
+ *   triple-five-agree          五处 CXM_MAXU 与三处 CXM_SYMS 一致,末行 PASS;
+ *   count-follows-cxm-project  只数有体的非 static 函数(static 与原型不计);
+ *   head-c-segment-mismatch    只把 cx/cx0/proj/head.c 改回旧值 -> rc 1 且点名该文件;
+ *   syms-segment-mismatch      只改 src/cxmod.c 的 CXM_SYMS -> rc 1 且点名 CXM_SYMS;
+ *   warn-is-not-fail           --warn 1 下过线只 WARN,rc 仍 0;
+ *   fail-threshold-bites       --fail 2 下同样过线 -> rc 1;
+ *   syms-watermark             CXM_SYMS 收到 2、名字 2 -> 100% FAIL rc 1(符号单列参与判定);
+ *   selftest-seven             内建 --selftest 七例全过。
+ * 末行 CHECK_CXM_SYMS_HEADROOM<TAB>passed=N<TAB>failed=N。 */
+#pragma unisa use sys.io
+#pragma unisa use sys.env
+#pragma unisa use sys.fs
+#pragma unisa use sys.proc
+#pragma unisa use sys.posix
+#pragma unisa use text.text
+#pragma unisa use mem.bytes
+
+static int failed;
+static char dir[320];
+static void ck(int ok, const char *name) {
+    if (ok) sy_printf("PASS\tcheck-cxm-syms-headroom.%s\n", name);
+    else { failed++; sy_printf("FAIL\tcheck-cxm-syms-headroom.%s\n", name); }
+}
+static int has(const char *hay, const char *needle) {
+    long nl = tx_len(hay, 100000);
+    size_t n = nl < 0 ? 100000 : (size_t)nl, m = tx_len(needle, 200);
+    for (size_t i = 0; i + m <= n; i++) if (tx_cmp(hay + i, m, needle, m) == 0) return 1;
+    return 0;
+}
+/* 逐级 mkdir;已存在不算错。 */
+static void mkdirp(const char *base, const char *rel) {
+    char p[520];
+    cx_fmt(p, sizeof p, "%s/%s", base, rel);
+    for (char *q = p + strlen(base) + 1; ; q++) {
+        if (*q == '/' || *q == 0) {
+            int c = *q; *q = 0; mkdir(p, 0700); *q = c;
+            if (!c) break;
+        }
+    }
+}
+static void put(const char *base, const char *rel, const char *body) {
+    char path[520];
+    cx_fmt(path, sizeof path, "%s/%s", base, rel);
+    cx_write(path, body, tx_len(body, 100000));
+}
+static int run(const char *root, const char *args, char *out, size_t cap) {
+    char cmd[1500]; char *o = 0; size_t n = 0;
+    cx_fmt(cmd, sizeof cmd, "sh ./unisacc.com tools/cxm-syms-headroom.cx -- '%s' %s 2>&1", root, args);
+    char *v[] = {"sh", "-c", cmd, 0};
+    int rc = cx_runv_timeout(v, 50, &o, &n);
+    out[0] = 0; if (o && n < cap) { mm_copy(out, cap, o, n); out[n] = 0; }
+    return rc;
+}
+/* 一棵可用的夹具树:五处数值一致,两个 root 加一个闭包单元,names 个非 static 函数体,
+   再加一个 static 函数与一个原型(两者都不该被数),u2/u3 只有原型。 */
+static void tree(const char *base, int syms, int maxu, int names) {
+    char b[400];
+    mkdir(base, 0700);
+    mkdirp(base, "cx/compiler"); mkdirp(base, "cx/cx0/proj"); mkdirp(base, "src"); mkdirp(base, "build");
+    cx_fmt(b, sizeof b, "#define CXM_SYMS %d\nenum { CXM_MAXU = %d, DV_MAXU = CXM_MAXU };\n", syms, maxu);
+    put(base, "cx/compiler/cxmod.cx", b);
+    cx_fmt(b, sizeof b, "#define CXM_SYMS %d\n#define CXM_MAXU %d\n", syms, maxu);
+    put(base, "cx/cx0/plan.cx", b);
+    put(base, "src/cxmod.c", b);
+    cx_fmt(b, sizeof b, "#define CXM_MAXU %d\n", maxu);
+    put(base, "cx/cx0/proj/head.c", b);
+    cx_fmt(b, sizeof b, "enum { CXM_MAXU = %d, DV_MAXU = CXM_MAXU };\n", maxu);
+    put(base, "cx/cx0/proj/head.cx", b);
+    put(base, "build/chain-facts.tsv", "# kind\tkey\tvalue\nroot\ta.o\tu1.cx\nroot\tb.o\tu2.cx\n");
+    put(base, "build/core-closure.tsv", "# target\tunit\treal\tvia\tbytes\troots\nlnx-x86_64\tu3.cx\tu3.cx\tuse\t10\t1\n");
+    {
+        char body[400]; size_t w = 0;
+        for (int i = 0; i < names; i++) { if (cx_fmt(body + w, sizeof body - w, "int f%d(void) { return %d; }\n", i, i)) return; w = strlen(body); }
+        if (cx_fmt(body + w, sizeof body - w, "static int sk(void) { return 9; }\nint proto(void);\n")) return;
+        put(base, "u1.cx", body);
+    }
+    put(base, "u2.cx", "int g(void);\n");
+    put(base, "u3.cx", "int h(void);\n");
+}
+int main(void) {
+    char out[8192], base[400];
+    if (cx_fmt(dir, sizeof dir, "%s/cxm-headroom-check-XXXXXX", sy_tmpdir()) || !mkdtemp(dir)) { ck(0, "tmpdir"); return 1; }
+    cx_fmt(base, sizeof base, "%s/ok", dir); tree(base, 4096, 256, 2);
+    int rc = run(base, "", out, sizeof out);
+    ck(rc == 0 && has(out, "HEADROOM_TRIPLE\tCXM_SYMS=4096,4096,4096\tCXM_MAXU=256,256,256,256,256")
+       && has(out, "status=PASS"), "triple-five-agree");
+    ck(has(out, "roots=2\tclosure_added=1\tunits=3\tmodules=0\tread=3\tmissing=0\tnames_upper=2"), "count-follows-cxm-project");
+    /* 只改投影片段 head.c:一致性必须报出来,且点名文件 */
+    cx_fmt(base, sizeof base, "%s/headbad", dir); tree(base, 4096, 256, 2);
+    put(base, "cx/cx0/proj/head.c", "#define CXM_MAXU 128\n");
+    rc = run(base, "", out, sizeof out);
+    ck(rc == 1 && has(out, "CXM_MAXU-mismatch\tat=cx/cx0/proj/head.c") && has(out, "status=FAIL"), "head-c-segment-mismatch");
+    /* 只改投影源的 CXM_SYMS */
+    cx_fmt(base, sizeof base, "%s/symsbad", dir); tree(base, 4096, 256, 2);
+    put(base, "src/cxmod.c", "#define CXM_SYMS 2048\n#define CXM_MAXU 256\n");
+    rc = run(base, "", out, sizeof out);
+    ck(rc == 1 && has(out, "reason=CXM_SYMS-mismatch"), "syms-segment-mismatch");
+    /* 阈值:过 warn 只 WARN 不失败,过 fail 才失败。3/256=1.17%,3/100=3.00%。 */
+    cx_fmt(base, sizeof base, "%s/ok", dir);
+    rc = run(base, "--warn 1 --fail 2", out, sizeof out);
+    ck(rc == 0 && has(out, "CXM_MAXU(units)\tused=3\tlimit=256") && has(out, "status=WARN"), "warn-is-not-fail");
+    cx_fmt(base, sizeof base, "%s/failbite", dir); tree(base, 4096, 100, 2);
+    rc = run(base, "--warn 1 --fail 2", out, sizeof out);
+    ck(rc == 1 && has(out, "CXM_MAXU(units)\tused=3\tlimit=100") && has(out, "status=FAIL"), "fail-threshold-bites");
+    /* 符号单列:limit 2 对 2 个名字 = 100% */
+    cx_fmt(base, sizeof base, "%s/tight", dir); tree(base, 2, 256, 2);
+    rc = run(base, "", out, sizeof out);
+    ck(rc == 1 && has(out, "CXM_SYMS(names_upper)\tused=2\tlimit=2") && has(out, "status=FAIL"), "syms-watermark");
+    /* 内建夹具 */
+    rc = run(base, "--selftest", out, sizeof out);
+    ck(rc == 0 && has(out, "HEADROOM_SELFTEST\tpassed=7\tfailed=0\ttotal=7"), "selftest-seven");
+    sy_printf("CHECK_CXM_SYMS_HEADROOM\tpassed=%d\tfailed=%d\n", 8 - failed, failed);
+    return failed ? 1 : 0;
+}

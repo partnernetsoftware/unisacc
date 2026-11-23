@@ -219,7 +219,95 @@ static int t[];  + t[0]=1 使用 -> rc=1  同上
 ## 6. 未做/未核
 
 - 未起版本分支,未提交任何文件。
-- 17 条 cap 全部 `UNMEASURED`:没有一条有可达复现(只有 `more than 6 arguments` 是 ACCEPT 且有 `r14_seven_args`)。要证明「改读新表后行为不变」,得先造能触发每条上限的夹具;这本身是独立工作量,不在本次范围。
+- 17 条 cap 在 2026-11-23 由 `tools/cap-probe.cx`(提交 3a4ec0ddcd)实测:**8 条 MEASURED、8 条 UNREACHABLE(各带原因)、1 条 SKIPPED(--slow)**,不再是全 UNMEASURED。结果与三条发现见第 7 节。
 - `control-reject.tsv:60` `extern_array_later` 的触发条件未确认。
 - `=INT_CONST_BITS` 是否该进表、`C64` 是否可改 `CMPI` 未评估。
 - t04/t05/t10 的改法只做了网表阅读,未实改验证;`PD.array.inarr` 改走 `PD.array` 后 `SH.NEW` 是否接受「数组的数组」形状未验证。
+
+## 7. cap-probe 实测(2026-11-23,提交 3a4ec0ddcd)
+
+`tools/cap-probe.cx` 表驱动 17 条 cap,对装机产品断言「上限内接受、超限拒绝且文案逐字一致」。
+
+### 7.1 MEASURED 八条的实测边界
+
+| cap | at-cap | past-cap |
+|---|---|---|
+| error-text-283 | 283 字节(报 `#error` 本身,rc 1) | 284 字节,文案命中 |
+| continuation-4096 | 4096 续行(.c 源) | 4097 续行 |
+| constant-beyond-int | 9223372036854775807 | 9223372036854775808 |
+| enum-pool | 59 个 enum | 60 个 |
+| signature-pool | 8024 个函数类型 typedef | 8025 个 |
+| setjmp-expr-depth | 5 层嵌套表达式 | 6 层 |
+| struct-id | 2036 个 struct | 2037 个 |
+| struct-member | 512 成员 | 513 成员 |
+
+### 7.2 三条对 B2 的发现
+
+1. **`forward-calls-8192` 守卫比较写错,不是上限太大。** 8193 个不同宿主转发调用(8193 声明 + 8193 调用)在 0.0.93 上编译干净。`exec/parse2/forward-result.tsv:17` 的 `CMPI fw_count 8192` 只在观察值 2 时进 `FW.full`,而 `fw_count` 单调增长永不等于 2。B2 若只把 8192 换成 `CAPS.*`,缺陷原样保留、cap 仍不可达;要修得把判据改成「`>= 上限`」或换一个能达到的观察值。
+2. **`include-splices-4000` 边界差一。** 3999 次 include 接受、4000 次拒绝。`exec/pp/directive-body-byte.tsv:43,46` 的 `CMPI NINCL 4000` 与 `NINCL` 从 0 起一致,但文案 "more than 4000" 与实测不符。B2 改表时要么改文案要么改判据,不能两处都不动。
+3. **`continuation-4096` 的 at-cap 只能用 `.c` 源。** 用 `.cx` 源时产品会加前导,4008 条续行就已拒绝(实测),`.cx` 路径的真实边界不是 4096。工具把源后缀做成表里的一列(`srcname`),这条用 `probe.c`。B2 若统一改成 `.cx` 会得到假红。
+
+### 7.3 八条 UNREACHABLE 的原因(原文见 `--list` 的 `CAP_WHY` 行)
+
+`forward-calls-8192`(见 7.2.1)、`relocation-capacity`(需 262144 条重定位记录)、`layoutfacts-sid`(需 128 个源单元链接)、`signature-eq-depth`(计数器在签名比较内部)、`setjmp-temp-depth`(拒的是下溢,无源级输入)、`shape-span`(67108864 个形状 id)、`modelgraph-budget`(需 17409 节点或 66 层)、`token-position-span`(需 67108864 字节源)。
+
+### 7.4 B2 的行为不变判据
+
+改表前后各跑一次:
+
+```
+sh ./unisacc.com tools/cap-probe.cx                       # 八条 fast,约 15 秒
+sh ./unisacc.com tools/cap-probe.cx -- --slow --only include-splices-4000   # 单独一条,需 70 秒以上
+```
+
+`measured=` 与 `failed=` 必须前后一致;`UNREACHABLE` 的八条在改表后应仍为 `UNREACHABLE`,若某条变成可达,说明改表顺带修好了守卫,必须在提交说明里写明。
+
+### 7.5 B2 的两条硬性约束(来自 cap-probe 实测)
+
+1. **cap 文案与判据只改一处。** `include-splices-4000` 实测边界是 3999(3999 次 include 接受、4000 次拒绝),而文案写 `more than 4000`。`exec/pp/directive-body-byte.tsv:43,46` 的 `CMPI NINCL 4000` 与 `NINCL` 从 0 起自洽。B2 只能选一个:改文案为 `more than 3999`,或把判据改成 `NINCL > 4000`(即 4000 次接受)。两处都不动就是留一条与实际不符的文案。
+2. **源后缀必须进表列。** `continuation-4096` 的 at-cap 只能用 `.c` 源:`.cx` 源会加前导,4008 条续行就拒绝(实测),`.cx` 路径的真实边界不是 4096。`tools/cap-probe.cx` 已把源文件名做成 `cap_t.srcname` 一列,这条用 `probe.c`。B2 若把 cap-probe 的源统一成 `.cx`,这条会假红;新表 `k2-caps.tsv` 的每一行若需要区分「哪个源路径」,要一并记下来。
+
+### 7.6 B2 的验收判据(定稿)
+
+```
+sh ./unisacc.com tools/cap-probe.cx                                  # 八条 fast,改表前后各一次
+sh ./unisacc.com tools/cap-probe.cx -- --slow --only include-splices-4000   # 单发,70 秒以上
+```
+
+- **通过条件**:改表前后 `measured=` 与 `failed=` 完全一致,且 `CAP` 行逐条状态相同。
+- **例外只有两条明确要修的**:`forward-calls-8192`(比较写错,见第 8 节;修不修由版本决定,若修必须同步改它的 cap 文案或删掉守卫)与 `include-splices-4000`(边界差一,见 7.5.1)。除此之外任何一条状态变化都算回归,不得以「新表更准」为由放行。
+- 八条 `UNREACHABLE` 在改表后必须仍是 `UNREACHABLE`;若某条变可达,必须在提交说明里写明是改表顺带修好了守卫。
+
+## 8. 发现 a 的后果实测(2026-11-23)
+
+问题:`exec/parse2/forward-result.tsv:17` 的 `CMPI fw_count 8192` 之后只把观察值 `2` 导向 `FW.full`(拒绝),而 `fw_count` 是单调递增的,所以这个守卫在正常输入下不会触发。要回答的是:守卫不触发时底层转发表会不会写越界。
+
+### 8.1 结论:无内存破坏、无崩溃、无静默错值;但守卫是死代码
+
+用 N 个不同 `printf` 调用点(真实宿主转发调用)生成 `.cx`,整程序构造后运行,逐行核对输出:
+
+| N | 构造 | 运行 | 输出核对 |
+|---|---|---|---|
+| 8200 | rc 0,bin 261144 B | rc 0,stderr 空 | 8200 行逐行等于 `line 0`..`line 8199` |
+| 20000 | rc 0,bin 601648 B | rc 0,stderr 空 | 20000 行逐行一致 |
+| 40000 | rc 0 | rc 0,stderr 空 | 40000 行逐行一致 |
+| 60000(紧凑 `printf("");`) | rc 0 | rc 0,stdout 与 stderr 均 0 字节 | 无输出可核,无异常 |
+| 70000 / 80000(紧凑) | rc 0 | 未跑(构造即证明编码不崩) | - |
+| 100000 | rc 1 `source too large for the module scan` | - | - |
+
+存储不是定长 8192 数组:`FW.record` 用 `STX fw_count [constant RECORDS] fw_record` 追加,`RECORDS` 是 bank 地址(`846623953387520 = 215<<40`),计数与记录都在 bank 存储里,按需增长。所以超出 8192 只是继续追加,不越界。
+
+### 8.2 真正先触发的三个上限(都不是守卫)
+
+| 上限 | 阈值 | 实测 | 位置 |
+|---|---|---|---|
+| 函数签名池 | `SBB`=8192 | 8185 通过、8190 报 `not covered: function signature pool exhausted`(报在 8013:15) | `exec/parse2/functiontypes-result.tsv:28` |
+| 模块扫描文件域项 | `CXM_ITEMS`=8192 | 8192 个文件域项报 `too many file-scope items for the module scan` | `cx/compiler/cxmod.cx:37` |
+| 模块扫描源大小 | `CXM_SRCMAX`=1048576 | 1028920 B 通过、1158920 B 报 `source too large for the module scan` | `cx/compiler/cxmod.cx:35` |
+
+### 8.3 对版本落点的判断
+
+- **不是内存安全缺陷**,不需要紧急修。
+- **是诚实性缺陷**:`FW.full` 承诺的 `not covered: host-forwarded call count exceeds 8192` 这条拒绝在 0.0.93 上无法产生;而且它与签名池同阈值(8192),签名池总先报,所以即便把 `CMPI` 改成 `>=` 也仍然不可达 —— 除非同时把签名池或模块项上限抬高。
+- 因此按 B2 处理即可,但要写清:**B2 把 8192 换成 `CAPS.FORWARD_CALL_MAX` 后,这条 cap 仍应标 `UNREACHABLE`,并把原因改成「与签名池同阈值,签名池先触发」**;不要为了让 cap-probe 变绿去放宽签名池。
+- 若将来要真正启用这个守卫,得先决定:是让转发计数独立于签名池(不同阈值),还是删掉这条守卫与文案。这属独立议题,不在 B1/B2 范围。
