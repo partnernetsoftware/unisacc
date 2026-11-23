@@ -16,7 +16,7 @@
 
 - 版本序与当前状态:build/version-seq.tsv(唯一权威;发布证据索引入口 release/evidence/)。
 - 所有者需求与未告知断点:build/owner-reqs.tsv(只降不升)。
-- 起草快照:0.0.97 已公开;下一版 0.0.98 冻结条件见 plans/v0.0.98.md 与 build/version-seq.tsv。
+- 起草快照:0.0.97 已公开(13:51,v0.0.97 Latest,冻结 a64cb13439,候选 d59040be1a,APE fa14390abbf4,CI 45119589279,Y2 5a2d7c298d);0.0.98 冻结改裁(cc 2026-11-23 15:40):标号函数局部化一期(原 0.0.102 提前至 0.0.98,计划见 plans/v0.0.98.md),争取 16:30 前合入 main 起链并按 0.0.97 流程验证发布,long/heavy jobs=2 与 tools/release-assemble.cx 顺延至 0.0.99;前端 A 顺延至 0.0.99(计划见 plans/v0.0.99.md),原 0.0.99 前端 B1 暂置 0.0.102 待整体重排,版本序见 build/version-seq.tsv。
 
 
 ## 决定(别人必须遵守)
