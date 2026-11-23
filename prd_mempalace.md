@@ -16,7 +16,7 @@
 
 - 版本序与当前状态:build/version-seq.tsv(唯一权威;发布证据索引入口 release/evidence/)。
 - 所有者需求与未告知断点:build/owner-reqs.tsv(只降不升)。
-- 起草快照:0.0.98 已公开(2026-11-23 20:51,v0.0.98 Latest,冻结 F=238c84b071,候选 T=575a613f47,X=df983630da,Y1=8974fd2558,Y2=e3caf24487,APE 07351e2cbf 9010222B,CI 45167911448 六格 QUALIFIED,NOT_QUALIFIED,严格证据 459 批 PASS 457 FAIL 0 UNKNOWN 2,本机 Root 已升至 unisacc 0.0.98;v0.0.97 GitHub 说明已补 run-cache 已知缺陷);标准发布流程(0.0.99 起)目标图见 plans/release-standard.md;公开后版本序重排(build/version-seq.tsv):0.0.99 运行缓存键修复(ccogweco,plans/v0.0.99.md)、0.0.100 前端 A(plans/v0.0.100.md)、0.0.101 逐单元共享状态接线(plans/v0.0.101.md)、0.0.102 cxmod 后缀按内容身份(plans/v0.0.102.md)、0.0.103 执行核动作分派内联、0.0.104 切片转网第一批、0.0.105 精确钉键重做、0.0.106 CXM_MAXU 256、0.0.107..0.0.121 顺延。
+- 起草快照:0.0.100 已公开(2026-11-24 07:39,v0.0.100 Latest,冻结 F=b348b6f9fd,X=51fc85eeaf,Y1=8f6b8e39c8,Y2=172410320c,APE e173defd0c 9019662B,CI 45285851131 六格 QUALIFIED,首轮 45283344177 osx/x86_64 超时加 ENOTFOUND 经 --redispatch 重派全绿,NOT_QUALIFIED,严格证据 466 批 PASS 463 FAIL 1(precommit-coverage-root 4/1 到期 0.0.101) UNKNOWN 2,本机 Root 已升至 unisacc 0.0.100,含前端 A 两项 C99 修复与 0.0.99 全量已合入内容;详见 release/notes-0.0.100.md 与 plans/v0.0.100.md);0.0.99 记为未公开(不打 tag、不发 GitHub Release;因静默窗解禁后 main 合入 cx/sys/fs.cx 致 SID 前移、现行发布工具硬编码 origin/main 门禁且分支直发补丁不在发布途中首次投产,按方案丁合并随 0.0.100 一次发布,0.0.99 整链 44d1a68dbd 与 191 窗严格预跑 461/1/2 证据保留备查,含 run-cache __FILE__ 相对路径键绑定、UNISACC_RUN_CACHE_KEY_OLD=1、sy_statvfs、mutation-gate 自清;计划 plans/v0.0.99.md);后续版本序(build/version-seq.tsv):0.0.101 逐单元共享状态接线(plans/v0.0.101.md)、0.0.102 cxmod 后缀按内容身份(plans/v0.0.102.md)、0.0.103 执行核动作分派内联、0.0.104 切片转网第一批、0.0.105 精确钉键重做、0.0.106 CXM_MAXU 256、0.0.107..0.0.121 顺延。
 
 
 ## 决定(别人必须遵守)
