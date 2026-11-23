@@ -172,10 +172,13 @@ int main(void) {
        "plan-s3-run-knobs-and-judge");
     np_free(&r);
 
-    /* (4b) plan --selfcheck covers all target tools with 0 failures */
+    /* (4b) plan --selfcheck covers all target tools and real chain-ready --only prefixes with 0 failures */
+    cx_fmt(shcmd, sizeof shcmd, "mkdir -p '%s/tools' && cp '%s/tools/chain-ready.cx' '%s/tools/chain-ready.cx'", repo, g_root, repo);
+    rc = run_sh(g_root, shcmd, 10, &r); np_free(&r);
     cx_fmt(args, sizeof args, "plan --version 9.9.9 --branch v9.9.9 --repo '%s' --owner integ --no-readiness --selfcheck", repo);
     rc = run_fd(args, &r);
     ck(rc == 0 && has(&r, "FREEZE_DAY\tselfcheck\t") && has(&r, "\tfailed=0") &&
+       has(&r, "15-gen-all") && has(&r, "19-chain-preflight") && !has(&r, "15-premerge") && !has(&r, "19-tables-gen") &&
        has(&r, "tool=chain-ready\tstatus=OK") && has(&r, "tool=bg-candidate\tstatus=OK") &&
        has(&r, "tool=prerun-inputs\tstatus=OK") && has(&r, "tool=prerun-drive\tstatus=OK") &&
        has(&r, "tool=ci-early\tstatus=OK") && has(&r, "tool=release-run\tstatus=OK") &&
@@ -183,6 +186,27 @@ int main(void) {
        has(&r, "tool=devsvc\tstatus=OK"),
        "plan-selfcheck-all-tools-ok");
     np_free(&r);
+
+    /* (4c) Red-first negative: if chain-ready lacks an --only prefix (e.g. 15-gen-all), --selfcheck must FAIL rc=1 */
+    {
+        char crp[1024];
+        cx_fmt(crp, sizeof crp, "%s/tools/chain-ready.cx", repo);
+        unsigned char *crb = 0; int64_t crn = 0;
+        if (sy_read_file(crp, &crb, &crn, 4 << 20) == 0 && crb && crn > 0) {
+            for (int64_t p = 0; p + 10 <= crn; p++) {
+                if (mm_same(crb + p, "15-gen-all", 10)) mm_copy((char *)crb + p, 10, "15-xxxxxxx", 10);
+            }
+            (void)sy_write_file(crp, (const char *)crb, (size_t)crn, 0644);
+            mm_free(crb);
+        }
+        cx_fmt(args, sizeof args, "plan --version 9.9.9 --branch v9.9.9 --repo '%s' --owner integ --no-readiness --selfcheck", repo);
+        rc = run_fd(args, &r);
+        ck(rc == 1 && has(&r, "tool=chain-ready\tstatus=FAIL\treason=chain-ready-only-no-match:15-gen-all"),
+           "plan-selfcheck-unknown-only-prefix-fails");
+        np_free(&r);
+        cx_fmt(shcmd, sizeof shcmd, "cp '%s/tools/chain-ready.cx' '%s/tools/chain-ready.cx'", g_root, repo);
+        rc = run_sh(g_root, shcmd, 10, &r); np_free(&r);
+    }
 
     /* (5) Tree hash mismatch blocks S0-verify-tree */
     cx_fmt(args, sizeof args, "plan --version 9.9.9 --branch v9.9.9 --repo '%s' --owner integ --readiness-bin '%s'", repo, rdmis);

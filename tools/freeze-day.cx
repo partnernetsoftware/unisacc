@@ -269,6 +269,69 @@ static int tree_hash_matches(const char *head_tree, const char *merge_tree) {
 }
 
 /* ---- Parse-level command self-check (--selfcheck) ---- */
+static char g_cr_items[64][64];
+static int g_ncr;
+
+static void cr_add_item(const char *s, long n) {
+    if (n <= 0 || n >= 64 || g_ncr >= 64) return;
+    char tmp[64];
+    mm_copy(tmp, sizeof tmp, s, n);
+    tmp[n] = 0;
+    for (int i = 0; i < g_ncr; i++) if (tx_eqz(g_cr_items[i], tmp)) return;
+    mm_copy(g_cr_items[g_ncr], 64, tmp, n + 1);
+    g_ncr++;
+}
+
+/* Read real item names from <repo>/tools/chain-ready.cx (both nm[] table and WANT("...") guards). */
+static void load_chain_ready_items(const char *repo) {
+    char p[1024];
+    g_ncr = 0;
+    if (cx_fmt(p, sizeof p, "%s/tools/chain-ready.cx", repo)) return;
+    unsigned char *raw = 0;
+    int64_t sz = 0;
+    if (sy_read_file(p, &raw, &sz, 4 << 20) != 0 || !raw || sz <= 0) { mm_free(raw); return; }
+    const char *s = (const char *)raw;
+    /* 1. Extract quoted names from static const char *nm[] = { ... }; */
+    long nm_pos = tx_find(s, (long)sz, "static const char *nm[] = {", 27);
+    if (nm_pos >= 0) {
+        long end_pos = tx_find(s + nm_pos, (long)sz - nm_pos, "};", 2);
+        if (end_pos > 0) {
+            long i = nm_pos + 27, lim = nm_pos + end_pos;
+            while (i < lim) {
+                if (s[i] == '"') {
+                    long st = i + 1;
+                    i++;
+                    while (i < lim && s[i] != '"') i++;
+                    if (i < lim && i > st) cr_add_item(s + st, i - st);
+                }
+                i++;
+            }
+        }
+    }
+    /* 2. Extract quoted names from WANT("...") across the file */
+    long pos = 0;
+    while (pos < (long)sz) {
+        long hit = tx_find(s + pos, (long)sz - pos, "WANT(\"", 6);
+        if (hit < 0) break;
+        long st = pos + hit + 6;
+        long en = st;
+        while (en < (long)sz && s[en] != '"' && s[en] != '\n') en++;
+        if (en < (long)sz && s[en] == '"' && en > st) cr_add_item(s + st, en - st);
+        pos = en + 1;
+    }
+    mm_free(raw);
+}
+
+static int cr_prefix_matches(const char *pfx) {
+    long pl = tx_len(pfx, 64);
+    if (pl <= 0 || g_ncr <= 0) return 0;
+    for (int i = 0; i < g_ncr; i++) {
+        long il = tx_len(g_cr_items[i], 64);
+        if (tx_prefix(g_cr_items[i], il, pfx, pl)) return 1;
+    }
+    return 0;
+}
+
 static int sc_in_list(const char *tok, const char *const *list) {
     for (int i = 0; list[i]; i++) if (tx_eqz(tok, list[i])) return 1;
     return 0;
@@ -332,6 +395,16 @@ static int sc_validate_tool(const char *tool, char toks[][256], int nt, char *wh
             if (tx_find(onlyv, tx_len(onlyv, 256), ",", 1) >= 0) {
                 cx_fmt(why, wcap, "chain-ready-only-must-be-single-prefix");
                 return 1;
+            }
+            if (!tx_eqz(onlyv, "$p")) {
+                if (g_ncr <= 0) {
+                    cx_fmt(why, wcap, "chain-ready-items-unreadable");
+                    return 1;
+                }
+                if (!cr_prefix_matches(onlyv)) {
+                    cx_fmt(why, wcap, "chain-ready-only-no-match:%s", onlyv);
+                    return 1;
+                }
             }
         }
         return 0;
@@ -494,6 +567,20 @@ static int sc_validate_tool(const char *tool, char toks[][256], int nt, char *wh
 }
 
 static void sc_scan_cmd(const char *step_id, const char *cmd, int *checked, int *failed) {
+    /* If cmd starts with "for p in A B C ...; do ", collect loop prefixes for chain-ready --only "$p". */
+    char for_items[32][64];
+    int nfor = 0;
+    if (tx_prefix(cmd, tx_len(cmd, 2048), "for p in ", 9)) {
+        const char *fp = cmd + 9;
+        while (*fp && *fp != ';' && nfor < 32) {
+            while (*fp == ' ' || *fp == '\t') fp++;
+            if (!*fp || *fp == ';') break;
+            int k = 0;
+            while (*fp && *fp != ' ' && *fp != '\t' && *fp != ';' && k < 63) for_items[nfor][k++] = *fp++;
+            for_items[nfor][k] = 0;
+            if (k > 0) nfor++;
+        }
+    }
     const char *p = cmd;
     while (*p) {
         const char *m = strstr(p, "tools/");
@@ -529,6 +616,27 @@ static void sc_scan_cmd(const char *step_id, const char *cmd, int *checked, int 
         }
         char why[128];
         int bad = sc_validate_tool(tool, toks, nt, why, sizeof why);
+        /* Expand for-loop --only "$p" prefixes against chain-ready item table */
+        if (!bad && tx_eqz(tool, "chain-ready")) {
+            char onlyv[256]; onlyv[0] = 0;
+            if (sc_has_flag(toks, 0, nt, "--only", onlyv, sizeof onlyv) && tx_eqz(onlyv, "$p")) {
+                if (g_ncr <= 0) {
+                    bad = 1;
+                    cx_fmt(why, sizeof why, "chain-ready-items-unreadable");
+                } else if (nfor <= 0) {
+                    bad = 1;
+                    cx_fmt(why, sizeof why, "chain-ready-for-loop-empty");
+                } else {
+                    for (int fi = 0; fi < nfor; fi++) {
+                        if (!cr_prefix_matches(for_items[fi])) {
+                            bad = 1;
+                            cx_fmt(why, sizeof why, "chain-ready-only-no-match:%s", for_items[fi]);
+                            break;
+                        }
+                    }
+                }
+            }
+        }
         (*checked)++;
         if (bad) (*failed)++;
         printf("FREEZE_SELFCHECK\tstep=%s\ttool=%s\tstatus=%s\treason=%s\n",
@@ -612,6 +720,7 @@ static int cmd_plan(int argc, char **argv) {
         ver, branch, branch_sha, main_sha, head_tree, prev_ver, prev_sha, merge_tree, owner, g_fr_ready, g_fr_blockers);
 
     int blocked = 0, sc_checked = 0, sc_failed = 0;
+    if (selfcheck) load_chain_ready_items(repo);
     for (int i = 0; i < FD_STEPS; i++) {
         char cmd[2048], why[512];
         cmd[0] = 0;
@@ -678,7 +787,7 @@ static int cmd_plan(int argc, char **argv) {
             if (fr_is_bad("plan-freeze-at")) { is_blk = 1; add_reason(why, sizeof why, "plan-freeze-at"); }
         } else if (i == 7) { /* S1-light */
             cx_fmt(cmd, sizeof cmd,
-                "for p in 1-rev 2-worktree 6-installed 7-recipe 8-smoke-env 9-ledger 10-envhygiene 11-version-slot 12-freeze-tsv 13-deferred-gates 14-hardlink-trees 21-verseq-gen; do "
+                "for p in 1-rev 6-affected 7-recipe 8-inflight 9-ledger 10-envhygiene 11-version-slot 12-root-files 12p-preflight-entry 13-snap-cache 14-root-record 16-disk-free 17-root-public 20-ident-helper 21-verseq-gen; do "
                 "sh ./unisacc.com tools/chain-ready.cx -- --version %s --only \"$p\" || exit 1; done",
                 ver);
             if (fr_is_bad("chain-1rev")) { is_blk = 1; add_reason(why, sizeof why, "chain-1rev"); }
@@ -686,7 +795,7 @@ static int cmd_plan(int argc, char **argv) {
             if (fr_is_bad("plan-freeze-at")) { is_blk = 1; add_reason(why, sizeof why, "plan-freeze-at"); }
         } else if (i == 8) { /* S1-mid */
             cx_fmt(cmd, sizeof cmd,
-                "for p in 3-ratchets 4-derive 15-premerge 16-release-prep 17-prerun-inputs 18-batch-domains 19-tables-gen 20-layer-api 22-premerge-union; do "
+                "for p in 2a-derive 2b-ratchets 3a-cxmod-tri 3b-cx0-extract 4-p1 15-gen-all 18-parse2-gen 19-chain-preflight 22-premerge-union; do "
                 "sh ./unisacc.com tools/chain-ready.cx -- --version %s --only \"$p\" || exit 1; done",
                 ver);
             if (fr_is_bad("ratchets")) { is_blk = 1; add_reason(why, sizeof why, "ratchets"); }
