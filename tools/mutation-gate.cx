@@ -60,9 +60,10 @@
  * that runs two gates at once gives each its own TMPDIR.
  * An explicit --out is registered the same way: prep writes conf.tsv and session.tsv (pid, started_at,
  * patch, base, par, state) in BOTH cases, so an orphan is found by state plus liveness, not by the name.
- * Slots are deleted only when the directory holds a non-empty SUMMARY and both conf.tsv and session.tsv; a
- * directory without them is kept and named (MG_SLOTS_KEPT reason=not-mine|no-summary), because --out may
- * point at someone else's tree. */
+ * Slots are deleted only when the directory PROVES it is a gate session: a non-empty SUMMARY (the verdict),
+ * a non-empty conf.tsv, and a session.tsv carrying a `state<TAB>VALUE` line. Anything else is kept and
+ * named (MG_SLOTS_KEPT reason=not-mine|no-summary), because --out may point at someone else's tree and two
+ * touching files are not ownership. */
 #pragma unisa use cxlib.ckrun
 #pragma unisa use sys.fs
 #pragma unisa use sys.time
@@ -135,22 +136,38 @@ static void write_session(const char *state) {
     spit(p, b, (size_t)k);
 }
 
-/* A slot tree is ours to delete only when this directory holds ALL THREE of: a non-empty SUMMARY
-   (the verdict), conf.tsv (prep wrote it) and session.tsv (prep wrote it). A directory that merely
-   looks like a session -- a SUMMARY someone else dropped, slot trees from another tool -- is not
-   touched: the gate never deletes a path it cannot prove it made. */
+/* A slot tree is ours to delete only when this directory holds ALL FOUR of: a non-empty SUMMARY (the
+   verdict), a non-empty conf.tsv (prep wrote the run's settings), and a session.tsv that carries a
+   `state<TAB>VALUE` line with a value (prep/report wrote it). Existence alone is not proof: empty files
+   with the right names are something any caller can create, and the gate never deletes a path it cannot
+   prove it made. */
+static int has_state_line(const char *b, size_t n) {
+    long at = 0, hit;
+    while ((hit = tx_find(b + at, (long)n - at, "state\t", 6)) >= 0) {
+        long p = at + hit;
+        at = p + 6;
+        if (p > 0 && b[p - 1] != '\n') continue;          /* 'state\t' mid-line is another field's text */
+        if (at < (long)n && b[at] != '\n' && b[at] != '\r') return 1;
+    }
+    return 0;
+}
+
 static int mine(const char *reason, long cap) {
     char p[1024];
-    size_t sn = 0;
-    char *sb;
+    size_t sn = 0, cn = 0, nn = 0;
+    char *sb, *cb, *nb;
     cx_fmt(p, sizeof p, "%s/SUMMARY", g_out);
     sb = slurp(p, &sn);
     if (!sb || sn == 0) { if (sb) mm_free(sb); if (reason) cx_fmt(reason, cap, "no-summary"); return 0; }
     mm_free(sb);
     cx_fmt(p, sizeof p, "%s/conf.tsv", g_out);
-    if (sy_exists(p) != 1) { if (reason) cx_fmt(reason, cap, "not-mine"); return 0; }
+    cb = slurp(p, &cn);
+    if (!cb || cn == 0) { if (cb) mm_free(cb); if (reason) cx_fmt(reason, cap, "not-mine"); return 0; }
+    mm_free(cb);
     cx_fmt(p, sizeof p, "%s/session.tsv", g_out);
-    if (sy_exists(p) != 1) { if (reason) cx_fmt(reason, cap, "not-mine"); return 0; }
+    nb = slurp(p, &nn);
+    if (!nb || !has_state_line(nb, nn)) { if (nb) mm_free(nb); if (reason) cx_fmt(reason, cap, "not-mine"); return 0; }
+    mm_free(nb);
     return 1;
 }
 
@@ -278,6 +295,32 @@ static int match_paren(const char *l, const char *m, int o) {
 static int splice(char *d, int cap, const char *l, int a, int b, const char *ins) {
     /* d = l[0..a) + ins + l[b..] */
     return cx_fmt(d, cap, "%.*s%s%s", a, l, ins, l + b) ? -1 : 0;
+}
+/* 1 when the line holds a character outside comments and string literals.  *st carries the block-comment state
+ * across lines: without it a multi-line comment's continuation line (prose with no leading asterisk) looked like
+ * code and the operator walkers mutated that prose, which inflated the denominator with survivors no check could
+ * ever kill.  String and char states do not cross lines, so they reset at end of line. */
+static int line_has_code(const char *l, int *st) {
+    int i = 0, has = 0;
+    while (l[i]) {
+        if (*st == 0) {
+            if (l[i] == '/' && l[i + 1] == '/') break;
+            if (l[i] == '/' && l[i + 1] == '*') { *st = 3; i += 2; continue; }
+            if (l[i] == '"') { *st = 1; i++; continue; }
+            if (l[i] == '\'') { *st = 2; i++; continue; }
+            if (l[i] != ' ' && l[i] != '\t' && l[i] != '\n') has = 1;
+            i++;
+        } else if (*st == 3) {
+            if (l[i] == '*' && l[i + 1] == '/') { *st = 0; i += 2; continue; }
+            i++;
+        } else {
+            if (l[i] == '\\' && l[i + 1]) { i += 2; continue; }
+            if ((*st == 1 && l[i] == '"') || (*st == 2 && l[i] == '\'')) *st = 0;
+            i++;
+        }
+    }
+    if (*st == 1 || *st == 2) *st = 0;
+    return has;
 }
 static int skip_line(const char *l) {
     while (*l == ' ' || *l == '\t') l++;
@@ -476,11 +519,13 @@ static void prep(void) {
     if (sy_exists(g_out)) {
         cx_fmt(p, sizeof p, "%s/conf.tsv", g_out);
         if (sy_exists(p)) {
-            /* 已准备过:拒绝,不代删(这目录也可能是别的窗口给的)。列出的路径是真正挡路的:
-               conf.tsv 与 session.tsv 是 prep 写的登记,slot-* 是已解包的树。 */
+            /* 已准备过:拒绝,不代删(这目录也可能是别的窗口给的)。reclaim 只在已经有结论(SUMMARY)
+               时才会动手——只 prep 过还没 report 的目录跑 reclaim 会得到 reason=no-summary 且登记文件
+               仍在,再 prep 照样被拒,所以先把适用条件写清,再把要删的都列出来。 */
             fprintf(stderr, "mutation-gate: REFUSE out dir already prepared %s\n", g_out);
-            fprintf(stderr, "mutation-gate: reclaim with: sh ./unisacc.com tools/mutation-gate.cx -- reclaim --out '%s'\n", g_out);
-            fprintf(stderr, "mutation-gate: or delete by hand: rm -rf");
+            fprintf(stderr, "mutation-gate: reclaim --out clears slots only after a verdict (SUMMARY); for a prep-only dir delete every path listed below, then prep again\n");
+            fprintf(stderr, "mutation-gate: with a verdict there: sh ./unisacc.com tools/mutation-gate.cx -- reclaim --out '%s'\n", g_out);
+            fprintf(stderr, "mutation-gate: delete by hand: rm -rf");
             cx_fmt(p, sizeof p, "%s/conf.tsv", g_out); if (sy_exists(p) == 1) fprintf(stderr, " '%s'", p);
             cx_fmt(p, sizeof p, "%s/session.tsv", g_out); if (sy_exists(p) == 1) fprintf(stderr, " '%s'", p);
             for (i = 0; i < g_par; i++) { cx_fmt(p, sizeof p, "%s/slot-%d", g_out, i); if (sy_exists(p) == 1) fprintf(stderr, " '%s'", p); }
@@ -505,17 +550,22 @@ static void prep(void) {
         if (rc != 0) { fprintf(stderr, "%s", out); die2("git init of private tree failed", ""); }
     }
     parse_patch(g_patch);
-    /* candidates per file */
+    /* candidates per file: walk every line so the block-comment state carries across lines, and only an added
+       line that still holds code after that walk becomes a candidate.  A patch line inside a multi-line comment
+       whose continuation does not start with an asterisk is prose, and mutating it only ever produced survivors. */
     for (f = 0; f < g_nf; f++) {
-        size_t n; char **L; int nl, a, seen[256];
+        size_t n; char **L; int nl, a, seen[256], st = 0, i;
         cx_fmt(p, sizeof p, "%s/slot-0/%s", g_out, g_files[f]);
         char *b = slurp(p, &n); if (!b) continue;
         nl = split_lines(b, n, &L);
         memset(seen, 0, sizeof seen);
-        for (a = 0; a < g_nadd; a++) {
-            if (g_add[a].file != f || g_add[a].line < 1 || g_add[a].line > nl) continue;
-            if (!skip_line(L[g_add[a].line - 1])) gen_line(f, g_add[a].line, L[g_add[a].line - 1]);
-            if (g_cov) gen_cov(f, L, nl, g_add[a].line, seen, 256);
+        for (i = 1; i <= nl; i++) {
+            int added = 0;
+            for (a = 0; a < g_nadd; a++) if (g_add[a].file == f && g_add[a].line == i) { added = 1; break; }
+            if (!line_has_code(L[i - 1], &st)) continue;      /* must run for every line: it owns the state */
+            if (!added) continue;
+            gen_line(f, i, L[i - 1]);
+            if (g_cov) gen_cov(f, L, nl, i, seen, 256);
         }
         mm_free(L); mm_free(b);
     }
