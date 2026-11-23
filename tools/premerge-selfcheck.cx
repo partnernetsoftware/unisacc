@@ -1,8 +1,9 @@
-/* premerge-selfcheck.cx -- self-checks a patch must pass BEFORE it is sent for review (items 1 to 8, item 9 corpus pending).
+/* premerge-selfcheck.cx -- self-checks a patch must pass BEFORE it is sent for review (items 1 to 8, 10 to 12, item 9 corpus pending).
  *
  *   sh ./unisacc.com tools/premerge-selfcheck.cx -- --patch P --check 'CMD' [--check 'CMD'...] --out RECEIPT
  *                                                   [--base REV (default main)] [--repo R (default .)] [--guard]
  *                                                   [--declare FILE] [--overlay DIR] [--probe 'CMD using $F' ...]
+ *                                                   [--sample FILE] [--flip-max N] [--flip-ids CSV]
  *
  * P is a `git diff` patch against REV.  The tool builds a private copy (git archive REV, git apply P, git init), runs
  * every item for real (nothing is cached), and writes a receipt bound to the sha256 of P:
@@ -35,6 +36,12 @@
  * (11) commit-gate-preview: tools/precommit-preview.cx (the real commit gate over a private index and private object store) is run in the
  *     patched tree over every file the patch touches; PRECOMMIT_PREVIEW blocked=0 is PASS, blocked>0 FAIL (the first BLOCK rows are quoted),
  *     no answer within 170 s UNMEASURED.  The receipt names the revision the gate ran against.  NA when the tree has no precommit-preview.
+ * (12) flip-compare: tools/affected.cx --files lists the registered batches that reach the changed files; the first --flip-max (default 12,
+ *     source/arg/literal/table kinds before the use closures, tools-compile-NNN excluded) are run in a private tree of the base and in the
+ *     patched tree and every status flip is listed in the receipt.  PASS -> not PASS needs a --declare row `batch:ID<TAB>-<TAB>reason`, else FAIL;
+ *     a --guard patch also needs every selected negative control (id with block, refus, reject or deny) green, none selected is UNMEASURED.
+ *     --flip-ids CSV names the batches instead of selecting them.  More selected than run, or answers missing within 240 s per tree, is UNMEASURED.
+ *     NA when the tree has no tools/affected.cx.  It judges batch states only: a data-format convention nobody tests is not seen here.
  * --overlay DIR is copied over the private tree after the patch, for inputs the check needs that git does not track.
  * The baseline (patched tree, unmodified) must be green for every --check, else refusal rc 2. */
 #pragma unisa use cxlib.ckrun
@@ -60,13 +67,14 @@ static const char *g_declare, *g_overlay, *g_probe[4];
 static int g_nprobe;
 static const char *g_patch, *g_base = "main", *g_repo = ".", *g_out, *g_chk[PS_MAXCHK];
 static int g_nchk, g_guard;
-static char T[1024], TREE[1100], rec[PS_OUT];
+static char T[1024], TREE[1100], BASE[1100], rec[PS_OUT];
 static int rn, nfail, nunm;
 
 static void die2(const char *a, const char *b) {
     fprintf(stderr, "premerge-selfcheck: REFUSE %s %s\n", a, b ? b : "");
     if (T[0]) { char c[1200]; if (!cx_fmt(c, sizeof c, "rm -rf '%s'", T)) ckk_sh_t("premerge-selfcheck", c, 0, 0, 20); T[0] = 0; }
     if (TREE[0] && strstr(TREE, "unisacc-privrepo-")) { char c[1200]; if (!cx_fmt(c, sizeof c, "rm -rf '%s'", TREE)) ckk_sh_t("premerge-selfcheck", c, 0, 0, 20); TREE[0] = 0; }
+    if (BASE[0] && strstr(BASE, "unisacc-privrepo-")) { char c[1200]; if (!cx_fmt(c, sizeof c, "rm -rf '%s'", BASE)) ckk_sh_t("premerge-selfcheck", c, 0, 0, 20); BASE[0] = 0; }
     exit(2);
 }
 static int sh(const char *script, char *out, int cap, int secs) { return ckk_sh_t("premerge-selfcheck", script, out, cap, secs); }
@@ -551,6 +559,201 @@ static void item11(void) {
     free(res);
 }
 
+/* ---------- item 12: before/after comparison of the batches the patch's files select ---------- */
+/* An author check proves the path the author changed; it proves nothing about the other consumers of what the patch
+   changed.  tools/affected.cx --files lists the registered batches that reach the changed files; the first --flip-max of
+   them (kind order: source, arg, literal, table, then the use closures; tools-compile-NNN excluded, they only compile)
+   are run in a private tree of the base and in the patched tree, and every status flip is listed.  PASS -> not PASS that
+   is not declared (--declare row `batch:ID<TAB>-<TAB>reason`) is a FAIL.  A --guard patch also needs every selected
+   negative control (batch id with block, refus, reject or deny) green after the patch. */
+#define PS_FLIP_MAX 48
+#define PS_FLIP_BUDGET_MS 240000
+static int g_flip_max = 12;
+static const char *g_flip_ids;
+typedef struct { char id[96]; char b[24], p[24]; } flip_t;
+static flip_t FL[PS_FLIP_MAX];
+static int nFL;
+
+static void build_base(void) {
+    char q1[1100], tt[1100], sc[4096], out[2048], q4[1100];
+    shq(q1, sizeof q1, g_repo); shq(q4, sizeof q4, g_overlay ? g_overlay : "");
+    if (pr_make(BASE, sizeof BASE) != 0) die2("private repository for the base could not be created", 0);
+    shq(tt, sizeof tt, BASE);
+    cx_fmt(sc, sizeof sc, "mkdir -p %s/.git/objects/info && printf '%%s\\n' \"$(%sgit -C %s rev-parse --path-format=absolute --git-path objects)\" > %s/.git/objects/info/alternates", tt, envu(), q1, tt);
+    step("object sharing (base) failed", sc);
+    {   char *co[] = { "checkout", "-q", "--detach", g_basec, 0 };
+        if (pr_git(BASE, co, out, sizeof out, 55) != 0) die2("checkout of base (item 12) failed", out);
+    }
+    cx_fmt(sc, sizeof sc, "[ ! -e %s/unisacc.com ] || ln -sf \"$(realpath %s)/unisacc.com\" %s/unisacc.com", q1, q1, tt);
+    step("unisacc.com link (base) failed", sc);
+    cx_fmt(sc, sizeof sc, "[ -z %s ] || { test -d %s && cp -a \"$(realpath %s)/.\" %s/; }", q4, q4, q4, tt);
+    step("overlay copy (base) failed", sc);
+}
+
+static int flip_rank(const char *via) {
+    static const char *k[] = { "source", "arg", "literal", "table", "arg-use", "literal-use", "use", 0 };
+    int i;
+    for (i = 0; k[i]; i++) if (!strcmp(via, k[i])) return i;
+    return 7;
+}
+static int flip_add(const char *id) {
+    int i;
+    for (i = 0; i < nFL; i++) if (!strcmp(FL[i].id, id)) return 0;
+    if (nFL >= PS_FLIP_MAX || strlen(id) >= sizeof FL[0].id) return 0;
+    cp(FL[nFL].id, (long)sizeof FL[nFL].id, id, (long)strlen(id) + 1); FL[nFL].b[0] = FL[nFL].p[0] = 0; nFL++;
+    return 1;
+}
+/* run the not-yet-answered ids of one tree (WHICH 0 = base, 1 = patched); returns how many are still unanswered */
+static int flip_run(const char *tree, int which, long deadline) {
+    char qt[1300], uc[1200], sc[6000], out[16384], csv[2400], qu[1300];
+    int round, i, pending;
+    if (sy_realpath("./unisacc.com", uc, (int)sizeof uc) <= 0) return nFL;
+    shq(qt, sizeof qt, tree); shq(qu, sizeof qu, uc);
+    for (round = 0; round < 8; round++) {
+        int k = 0, nn = 0;
+        csv[0] = 0;
+        for (i = 0; i < nFL && nn < 6; i++) {
+            char *st = which ? FL[i].p : FL[i].b;
+            if (st[0]) continue;
+            k += snprintf(csv + k, sizeof csv - (size_t)k, "%s%s", nn ? "," : "", FL[i].id); nn++;
+        }
+        if (!nn || sy_now_ms() > deadline) break;
+        cx_fmt(sc, sizeof sc, "cd %s && ln -sf %s unisacc.com && %ssh ./unisacc.com tools/affected.cx -- --ids %s --run -j 4 2>&1 | grep -a '^BATCH_RUN\\|^RUN_REFUSED\\|^DEFERRED'", qt, qu, envu(), csv);
+        sh(sc, out, sizeof out, 60);
+        {   char *p;
+            for (p = out; *p; ) {
+                char *e = strchr(p, '\n'), *f; int j;
+                if (e) *e = 0;
+                if (!strncmp(p, "BATCH_RUN\tid=", 13)) {
+                    char id[96], stv[24]; const char *s2 = strstr(p, "\tstatus=");
+                    int il = 0, sl = 0;
+                    for (f = p + 13; *f && *f != '\t' && il < 95; f++) id[il++] = *f;
+                    id[il] = 0;
+                    if (s2) for (f = (char *)s2 + 8; *f && *f != '\t' && sl < 23; f++) stv[sl++] = *f;
+                    stv[sl] = 0;
+                    for (j = 0; j < nFL; j++) if (!strcmp(FL[j].id, id) && sl) cp(which ? FL[j].p : FL[j].b, 24, stv, (long)strlen(stv) + 1);
+                } else if (!strncmp(p, "RUN_REFUSED\t", 12)) {
+                    for (j = 0; j < nFL; j++) if (!strcmp(FL[j].id, p + 12)) snprintf(which ? FL[j].p : FL[j].b, 24, "REFUSED");
+                }
+                if (!e) break;
+                p = e + 1;
+            }
+        }
+    }
+    for (i = 0, pending = 0; i < nFL; i++) if (!(which ? FL[i].p : FL[i].b)[0]) pending++;
+    return pending;
+}
+static int flip_declared(const char *db, const char *id) {
+    char key[140]; const char *p;
+    if (!db) return 0;
+    if (cx_fmt(key, sizeof key, "batch:%s\t", id)) return 0;
+    for (p = db; (p = strstr(p, key)); p += 1) if (p == db || p[-1] == '\n') return 1;
+    return 0;
+}
+static int flip_negctl(const char *id) {
+    static const char *w[] = { "block", "refus", "reject", "deny", 0 };
+    int i;
+    for (i = 0; w[i]; i++) if (strstr(id, w[i])) return 1;
+    return 0;
+}
+static void item12(void) {
+    char af[1400], files[6000], sc[9000], out[2048], lp[1300], qf[1300], uc[1200], qt[1300];
+    char *db = 0, *lst; size_t dn = 0, ln = 0;
+    int i, k = 0, nf = 0, seen_total = 0, red = 0, undecl = 0, fixed = 0, both = 0, declared = 0, pend0, pend1, neg = 0, negbad = 0;
+    char flips[900]; int fk = 0;
+    long deadline;
+    cx_fmt(af, sizeof af, "%s/tools/affected.cx", TREE);
+    if (sy_exists(af) != 1) { emit(12, "flip-compare", "NA", "no tools/affected.cx in the patched tree"); return; }
+    if (sy_realpath("./unisacc.com", uc, (int)sizeof uc) <= 0) { emit(12, "flip-compare", "UNMEASURED", "no ./unisacc.com in the working directory to run the batches with"); return; }
+    if (g_declare) db = slurp(g_declare, &dn);
+    if (g_flip_ids) {
+        const char *p = g_flip_ids; char id[96];
+        while (*p) {
+            int il = 0;
+            while (*p && *p != ',' && il < 95) id[il++] = *p++;
+            id[il] = 0; if (*p == ',') p++;
+            if (il) { flip_add(id); seen_total++; }
+        }
+    } else {
+        files[0] = 0;
+        for (i = 0; i < nA + nD; i++) {
+            const added_t *a = i < nA ? &A[i] : &D[i - nA];
+            int j, dup = 0;
+            if (!strcmp(a->file, "tests/batches.tsv") || !strcmp(a->file, "tests/coverage.tsv") || !strcmp(a->file, "tests/tools-compile-sources.tsv")) continue;
+            for (j = 0; j < i; j++) { const added_t *b = j < nA ? &A[j] : &D[j - nA]; if (b->file == a->file || !strcmp(b->file, a->file)) { dup = 1; break; } }
+            if (dup) continue;
+            shq(qf, sizeof qf, a->file);
+            if (k + (int)strlen(qf) + 2 >= (int)sizeof files) { emit(12, "flip-compare", "UNMEASURED", "the patch touches too many files for one selection"); free(db); return; }
+            if (nf) files[k++] = ' ';
+            cp(files + k, (long)(sizeof files - k), qf, (long)strlen(qf) + 1);
+            k += (int)strlen(qf); nf++;
+        }
+        if (!nf) { emit(12, "flip-compare", "NA", "the patch changes no file outside the shared tables"); free(db); return; }
+        cx_fmt(lp, sizeof lp, "%s/flip.list", T); shq(qt, sizeof qt, TREE); shq(qf, sizeof qf, uc);
+        cx_fmt(sc, sizeof sc, "cd %s && ln -sf %s unisacc.com && %ssh ./unisacc.com tools/affected.cx -- --files %s --list-only > '%s' 2>&1", qt, qf, envu(), files, lp);
+        if (sh(sc, out, sizeof out, 60) != 0) { emit(12, "flip-compare", "UNMEASURED", "tools/affected.cx --files could not list the selection"); free(db); return; }
+        lst = slurp(lp, &ln);
+        if (!lst) { emit(12, "flip-compare", "UNMEASURED", "the selection list is unreadable"); free(db); return; }
+        {   int rank;
+            for (rank = 0; rank <= 7; rank++) {
+                char *p;
+                for (p = lst; *p; ) {
+                    char *e = strchr(p, '\n'), *t1, *t2, *t3;
+                    if (e) *e = 0;
+                    if (!strncmp(p, "AFFECTED\t", 9)) {
+                        t1 = p + 9; t2 = strchr(t1, '\t');
+                        if (t2) {
+                            char id[96], via[40]; int il = (int)(t2 - t1), vl = 0;
+                            t3 = strstr(t2, "\tvia=");
+                            if (il > 0 && il < 96 && t3) {
+                                cp(id, (long)sizeof id, t1, (long)il); id[il] = 0;
+                                for (t3 += 5; *t3 && *t3 != '\t' && vl < 39; t3++) via[vl++] = *t3;
+                                via[vl] = 0;
+                                if (strncmp(id, "tools-compile-", 14) && flip_rank(via) == rank) {
+                                    seen_total++;
+                                    if (nFL < g_flip_max) flip_add(id);
+                                }
+                            }
+                        }
+                    }
+                    if (e) *e = '\n';   /* the list is walked once per kind rank */
+                    if (!e) break;
+                    p = e + 1;
+                }
+            }
+        }
+        free(lst);
+    }
+    if (!nFL) { emit(12, "flip-compare", "NA", "no registered batch reaches the changed files"); free(db); return; }
+    build_base();
+    deadline = sy_now_ms() + PS_FLIP_BUDGET_MS;
+    pend0 = flip_run(BASE, 0, deadline);
+    pend1 = flip_run(TREE, 1, deadline + PS_FLIP_BUDGET_MS);
+    flips[0] = 0;
+    for (i = 0; i < nFL; i++) {
+        int bp = !strcmp(FL[i].b, "PASS"), pp = !strcmp(FL[i].p, "PASS");
+        if (!FL[i].b[0] || !FL[i].p[0]) continue;
+        if (bp && !pp) {
+            int dc = flip_declared(db, FL[i].id);
+            red++;
+            if (dc) declared++; else undecl++;
+            if (fk < 700) fk += snprintf(flips + fk, sizeof flips - (size_t)fk, "%s %s->%s%s; ", FL[i].id, FL[i].b, FL[i].p, dc ? " (declared)" : "");
+        } else if (!bp && pp) {
+            fixed++;
+            if (fk < 700) fk += snprintf(flips + fk, sizeof flips - (size_t)fk, "%s %s->%s; ", FL[i].id, FL[i].b, FL[i].p);
+        } else if (!bp && !pp) both++;
+        if (flip_negctl(FL[i].id)) { neg++; if (!pp) negbad++; }
+    }
+    (void)red;
+    if (undecl) { emit(12, "flip-compare", "FAIL", "%d batch(es) went PASS -> not PASS and are not declared: %s", undecl, flips); free(db); return; }
+    if (g_guard && negbad) { emit(12, "flip-compare", "FAIL", "%d selected negative control(s) are not green after the patch: %s", negbad, flips); free(db); return; }
+    if (pend0 || pend1) { emit(12, "flip-compare", "UNMEASURED", "%d of %d selected batches unanswered in the base, %d in the patched tree (budget %d s per tree); compared the rest, flips: %s", pend0, nFL, pend1, PS_FLIP_BUDGET_MS / 1000, flips[0] ? flips : "none"); free(db); return; }
+    if (g_guard && !neg) { emit(12, "flip-compare", "UNMEASURED", "guard patch but no negative control (batch id with block, refus, reject or deny) is among the %d selected batches", nFL); free(db); return; }
+    if (seen_total > nFL && !g_flip_ids) { emit(12, "flip-compare", "UNMEASURED", "ran %d of %d selected batches (--flip-max raises the cap); compared: no PASS flip, fixed=%d red-both=%d declared=%d", nFL, seen_total, fixed, both, declared); free(db); return; }
+    emit(12, "flip-compare", "PASS", "%d batches compared in the base and the patched tree: no undeclared PASS flip, fixed=%d red-both=%d declared=%d negative-controls=%d%s%s", nFL, fixed, both, declared, neg, flips[0] ? ", flips: " : "", flips);
+    free(db);
+}
+
 /* ---------- item 7: malformed and empty inputs to each decision entry ---------- */
 /* --probe CMD names an entry that judges one input file: CMD reads $F and must exit 1..123 (a refusal, never 0, never a
    crash/timeout) for every malformed input below.  Without --probe the item is NA, or UNMEASURED for a --guard patch. */
@@ -618,6 +821,8 @@ int main(int argc, char **argv) {
         else if (!strcmp(argv[i], "--overlay") && i + 1 < argc) g_overlay = argv[++i];
         else if (!strcmp(argv[i], "--probe") && i + 1 < argc) { if (g_nprobe == 4) die2("too many --probe", 0); g_probe[g_nprobe++] = argv[++i]; }
         else if (!strcmp(argv[i], "--sample") && i + 1 < argc) g_sample = argv[++i];
+        else if (!strcmp(argv[i], "--flip-max") && i + 1 < argc) { g_flip_max = atoi(argv[++i]); if (g_flip_max < 1 || g_flip_max > PS_FLIP_MAX) die2("flip-max outside", "1..48"); }
+        else if (!strcmp(argv[i], "--flip-ids") && i + 1 < argc) g_flip_ids = argv[++i];
         else die2("unknown argument", argv[i]);
     }
     if (!g_patch || !g_out || !g_nchk) die2("usage", "--patch P --check CMD [--check CMD] --out RECEIPT [--base REV] [--repo R] [--guard]");
@@ -648,7 +853,7 @@ int main(int argc, char **argv) {
     parse_patch(pb, pn);
     if (nA == 0 && nD == 0) die2("patch adds and deletes no lines", g_patch);
     if (run_checks(0, out, sizeof out) != 0) { printf("%s\n", out); die2("baseline --check not green on the patched tree", 0); }
-    item1(); item2(); item3(); item4(); item5(); item6(); item7(); item8(); item10(); item11();
+    item1(); item2(); item3(); item4(); item5(); item6(); item7(); item8(); item10(); item11(); item12();
     {   char tail[1024]; const char *v = nfail ? "FAIL" : nunm ? "INCOMPLETE" : "PASS";
         cx_fmt(tail, sizeof tail, "SELFCHECK_SUMMARY patch_sha256=%s fail=%d unmeasured=%d verdict=%s\n", hash, nfail, nunm, v);
         if (rn + (int)strlen(tail) >= (int)sizeof rec) die2("receipt", "too long");
@@ -658,5 +863,6 @@ int main(int argc, char **argv) {
     fputs(rec, stdout);
     cx_fmt(sc, sizeof sc, "rm -rf %s", T); sh(sc, 0, 0, 20);
     if (TREE[0] && strstr(TREE, "unisacc-privrepo-")) { cx_fmt(sc, sizeof sc, "rm -rf '%s'", TREE); sh(sc, 0, 0, 20); }
+    if (BASE[0] && strstr(BASE, "unisacc-privrepo-")) { cx_fmt(sc, sizeof sc, "rm -rf '%s'", BASE); sh(sc, 0, 0, 20); }
     return nfail ? 1 : nunm ? 3 : 0;
 }
