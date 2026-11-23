@@ -7,6 +7,7 @@ typedef struct UnisaModel {
     int ns,nq,nrg,nstr,start,isnet,topmax,nqa;
     char **str; int *strl; int *qoff,*qlen; int64_t *qa;
     int *smode,*rowc,**rowk,**rown,**rowq; int *nlo,*nhi,*bn,*bq,*rets; unsigned char **retok;
+    void *packed;
 } CxModel;
 int cxmn_number(const unsigned char *, long, long *, int, long long *);
 void cxml_release(CxModel *, void (*)(void *));
