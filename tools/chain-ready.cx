@@ -17,7 +17,7 @@
  *                  if the VERIFIED row's tree_sha differs from current HEAD^{tree} (a commit landed after verify-deferred),
  *                  1-rev stays PASS and emits WARN deferred-verified-tree-not-head (runbook S8 requires verify-deferred on the final tree).
  *   2a-derive      tools/derive.cx -- --check: DERIVE_SUMMARY drift=0 refused=0
- *   2b-ratchets    tools/ratchets.cx last line ok=13 fail=0
+ *   2b-ratchets    tools/ratchets.cx last line fail=0 and ok=NRK (NRK = line-start #define in <repo>/tools/ratchets.cx; comments skipped; missing NRK fails)
  *   3a-cxmod-tri   tools/check-cxmod-tri.cx CXMOD_TRI failed=0 (GAP rows are named by the tool)
  *   3b-cx0-extract tools/cx0-extract.cx -- --check prints CX0_EXTRACT EXACT
  *   4-p1           every .cx with a `#pragma unisa use` goes through cx0_plan (check-cxmod-tri.cx --cx0-batch, 16 files
@@ -477,20 +477,80 @@ static int parse_ratchet_below(const char *o, long n, const char *tag) {
     if (!p) return 0;
     return atoi(p + 16);
 }
+static const char *cr_repo = ".";
+static long ar_kv_long(const char *l, const char *key) {
+    const char *p = strstr(l, key); long i = 0, v = 0; int neg = 0;
+    if (!p) return -1;
+    p += tx_len(key, 16);
+    if (*p == '-') { neg = 1; p++; }
+    if (*p < '0' || *p > '9') return -1;
+    while (p[i] >= '0' && p[i] <= '9' && i < 18) { v = v * 10 + (p[i] - '0'); i++; }
+    return neg ? -v : v;
+}
+/* Roster length = line-start #define NRK in <cr_repo>/tools/ratchets.cx; skip // and block comments. */
+static int ratchet_roster_len(void) {
+    static int cached = -2; /* -2 unset, -1 missing/unreadable, >=1 value */
+    static char cached_repo[512];
+    size_t n = 0; char *b; char path[600]; long i; int in_block = 0;
+    const char *rp = (cr_repo && cr_repo[0]) ? cr_repo : ".";
+    if (cached != -2 && tx_eqz(cached_repo, rp)) return cached;
+    cached = -1;
+    if (cx_fmt(cached_repo, sizeof cached_repo, "%s", rp)) { cached_repo[0] = 0; return -1; }
+    if (cx_fmt(path, sizeof path, "%s/tools/ratchets.cx", rp)) return -1;
+    b = cx_read(path, &n);
+    if (!b) return -1;
+    i = 0;
+    while (i < (long)n) {
+        long le = i, p, v, di;
+        while (le < (long)n && b[le] != '\n') le++;
+        p = i;
+        while (p < le) {
+            if (in_block) {
+                if (p + 1 < le && b[p] == '*' && b[p + 1] == '/') { in_block = 0; p += 2; continue; }
+                p++; continue;
+            }
+            if (p + 1 < le && b[p] == '/' && b[p + 1] == '*') { in_block = 1; p += 2; continue; }
+            if (p + 1 < le && b[p] == '/' && b[p + 1] == '/') break;
+            if (b[p] == ' ' || b[p] == '\t') { p++; continue; }
+            if (p + 12 <= le && b[p] == '#' && b[p + 1] == 'd' && b[p + 2] == 'e' && b[p + 3] == 'f'
+                && b[p + 4] == 'i' && b[p + 5] == 'n' && b[p + 6] == 'e' && b[p + 7] == ' '
+                && b[p + 8] == 'N' && b[p + 9] == 'R' && b[p + 10] == 'K' && b[p + 11] == ' ') {
+                di = p + 12; v = 0;
+                if (di >= le || b[di] < '0' || b[di] > '9') break;
+                while (di < le && b[di] >= '0' && b[di] <= '9' && v < 1000) { v = v * 10 + (b[di] - '0'); di++; }
+                if (v > 0) cached = (int)v;
+                mm_free(b);
+                return cached;
+            }
+            break;
+        }
+        i = (le < (long)n) ? le + 1 : le;
+    }
+    mm_free(b);
+    return cached;
+}
 static int j_ratchets(const char *o, long n, int rc, char *ev, int cap) {
-    char l[160]; line_with(o, n, "RATCHETS\t", l, sizeof l);
-    if (rc == 0 && (has(l, (long)tx_len(l, 200), "ok=18") || has(l, (long)tx_len(l, 200), "ok=17") || has(l, (long)tx_len(l, 200), "ok=16") || has(l, (long)tx_len(l, 200), "ok=13")) && has(l, (long)tx_len(l, 200), "fail=0")) {
+    char l[160]; long okn = -1, fn = -1; int want;
+    line_with(o, n, "RATCHETS\t", l, sizeof l);
+    want = ratchet_roster_len();
+    if (l[0]) { okn = ar_kv_long(l, "ok="); fn = ar_kv_long(l, "fail="); }
+    if (want < 1) {
+        cx_fmt(ev, (size_t)cap, "rc=%d ok=%ld fail=%ld want_ok=-1 nrk-missing path=%s/tools/ratchets.cx %s",
+               rc, okn, fn, (cr_repo && cr_repo[0]) ? cr_repo : ".", l[0] ? l : "no RATCHETS line");
+        return 0;
+    }
+    if (rc == 0 && l[0] && fn == 0 && okn == want) {
         int raw_b = parse_ratchet_below(o, n, "cxraw: ok:");
         int libc_b = parse_ratchet_below(o, n, "cxlibc: ok:");
         if (raw_b > 5 || libc_b > 5)
             cx_fmt(ev, (size_t)cap, "%s WARN ratchet-slack cxraw_below=%d cxlibc_below=%d (run: sh ./unisacc.com tests/cxraw.cx -- --write && sh ./unisacc.com tests/cxlibc.cx -- --write)", l, raw_b, libc_b);
         else
-            cx_fmt(ev, (size_t)cap, "%s", l);
+            cx_fmt(ev, (size_t)cap, "%s (roster=%d)", l, want);
         return 1;
     }
     {   char d[160]; line_with(o, n, "\tFAIL\t", d, sizeof d);
-        if (d[0]) cx_fmt(ev, (size_t)cap, "rc=%d %s; first: %.120s", rc, l[0] ? l : "no RATCHETS line", d);
-        else cx_fmt(ev, (size_t)cap, "rc=%d %s", rc, l[0] ? l : "no RATCHETS line"); }
+        if (d[0]) cx_fmt(ev, (size_t)cap, "rc=%d ok=%ld fail=%ld want_ok=%d %s; first: %.100s", rc, okn, fn, want, l[0] ? l : "no RATCHETS line", d);
+        else cx_fmt(ev, (size_t)cap, "rc=%d ok=%ld fail=%ld want_ok=%d %s", rc, okn, fn, want, l[0] ? l : "no RATCHETS line"); }
     return 0;
 }
 static int j_tri(const char *o, long n, int rc, char *ev, int cap) {
@@ -617,7 +677,6 @@ static int j_slot(const char *o, long n, int rc, char *ev, int cap) {
     line_with(o, n, "CHAIN_READY_VERSION_SLOT", l, sizeof l);
     cx_fmt(ev, (size_t)cap, "rc=%d %s", rc, l[0] ? l : "REFUSE CHAIN_READY_VERSION_SLOT no verdict line"); return 0;
 }
-static const char *cr_repo = ".";
 static long j_genall_field(const char *l, long ln, const char *key) {
     long kl = (long)tx_len(key, 64), at = tx_find(l, ln, key, kl);
     int64_t v = -1;
@@ -1407,26 +1466,38 @@ int main(int argc, char **argv) {
     int fast = 0, a; const char *repo = ".", *since = 0, *pat = "candidate-chain", *only = 0, *tver = 0, *rootarg = 0, *revarg = 0, *pftable = 0;
     long disk_override_gb = -1;
     long T0 = sy_now_ms();
-    if (argc == 5 && tx_eqz(argv[1], "--judge")) {   /* --judge KIND FILE RC */
-        size_t n; char *b = cx_read(argv[3], &n); char ev[512]; int ok;
-        if (!b) { fprintf(stderr, "chain-ready: cannot read %s\n", argv[3]); return 2; }
-        { int64_t rv = 0; tx_to_i64(argv[4], (long)tx_len(argv[4], 16), 10, &rv); ok = judge_kind(argv[2], b, (long)n, (int)rv, ev, sizeof ev); }
-        if (ok < 0) { fprintf(stderr, "chain-ready: %s\n", ev); return 2; }
-        printf("%s\t%s\n", ok == 2 ? "UNMEASURED" : ok ? "PASS" : "FAIL", ev);
-        return 0;
-    }
-    for (a = 1; a < argc; a++) {
-        if (tx_eqz(argv[a], "--fast")) fast = 1;
-        else if (tx_eqz(argv[a], "--repo") && a + 1 < argc) { repo = argv[++a]; cr_repo = repo; }
-        else if (tx_eqz(argv[a], "--since") && a + 1 < argc) since = argv[++a];
-        else if (tx_eqz(argv[a], "--pgrep-pat") && a + 1 < argc) pat = argv[++a];
-        else if (tx_eqz(argv[a], "--only") && a + 1 < argc) only = argv[++a];
-        else if (tx_eqz(argv[a], "--version") && a + 1 < argc) tver = argv[++a];
-        else if (tx_eqz(argv[a], "--root") && a + 1 < argc) rootarg = argv[++a];
-        else if (tx_eqz(argv[a], "--rev") && a + 1 < argc) revarg = argv[++a];
-        else if (tx_eqz(argv[a], "--preflight-table") && a + 1 < argc) pftable = argv[++a];
-        else if (tx_eqz(argv[a], "--disk-free-gb") && a + 1 < argc) { int64_t dv = -1; tx_to_i64(argv[a + 1], (long)tx_len(argv[a + 1], 16), 10, &dv); disk_override_gb = (long)dv; a++; }
-        else { fprintf(stderr, "usage: tools/chain-ready.cx [-- [--fast] [--repo DIR] [--root DIR] [--rev REV] [--since REV] [--pgrep-pat PAT] [--only ITEM-PREFIX] [--version V] [--preflight-table FILE] [--disk-free-gb N] | --judge KIND FILE RC]\n"); return 2; }
+    {
+        int judge_only = 0; const char *jkind = 0, *jfile = 0, *jrcs = 0;
+        for (a = 1; a < argc; a++) {
+            if (tx_eqz(argv[a], "--repo") && a + 1 < argc) { repo = argv[++a]; cr_repo = repo; }
+            else if (tx_eqz(argv[a], "--judge") && a + 3 < argc) {
+                judge_only = 1; jkind = argv[++a]; jfile = argv[++a]; jrcs = argv[++a];
+            } else if (judge_only) {
+                fprintf(stderr, "usage: tools/chain-ready.cx -- [--repo DIR] --judge KIND FILE RC\n");
+                return 2;
+            } else if (tx_eqz(argv[a], "--fast")) fast = 1;
+            else if (tx_eqz(argv[a], "--since") && a + 1 < argc) since = argv[++a];
+            else if (tx_eqz(argv[a], "--pgrep-pat") && a + 1 < argc) pat = argv[++a];
+            else if (tx_eqz(argv[a], "--only") && a + 1 < argc) only = argv[++a];
+            else if (tx_eqz(argv[a], "--version") && a + 1 < argc) tver = argv[++a];
+            else if (tx_eqz(argv[a], "--root") && a + 1 < argc) rootarg = argv[++a];
+            else if (tx_eqz(argv[a], "--rev") && a + 1 < argc) revarg = argv[++a];
+            else if (tx_eqz(argv[a], "--preflight-table") && a + 1 < argc) pftable = argv[++a];
+            else if (tx_eqz(argv[a], "--disk-free-gb") && a + 1 < argc) {
+                int64_t dv = -1; tx_to_i64(argv[a + 1], (long)tx_len(argv[a + 1], 16), 10, &dv); disk_override_gb = (long)dv; a++;
+            } else {
+                fprintf(stderr, "usage: tools/chain-ready.cx [-- [--fast] [--repo DIR] [--root DIR] [--rev REV] [--since REV] [--pgrep-pat PAT] [--only ITEM-PREFIX] [--version V] [--preflight-table FILE] [--disk-free-gb N] | [--repo DIR] --judge KIND FILE RC]\n");
+                return 2;
+            }
+        }
+        if (judge_only) {
+            size_t n; char *b = cx_read(jfile, &n); char ev[512]; int ok;
+            if (!b) { fprintf(stderr, "chain-ready: cannot read %s\n", jfile); return 2; }
+            { int64_t rv = 0; tx_to_i64(jrcs, (long)tx_len(jrcs, 16), 10, &rv); ok = judge_kind(jkind, b, (long)n, (int)rv, ev, sizeof ev); }
+            if (ok < 0) { fprintf(stderr, "chain-ready: %s\n", ev); return 2; }
+            printf("%s\t%s\n", ok == 2 ? "UNMEASURED" : ok ? "PASS" : "FAIL", ev);
+            return 0;
+        }
     }
     static Job J[MAXJ]; static char *items[MAXJ]; static int prios[MAXJ]; int nj = 0, k;
     char tmpd[300], outd[5][340], cached[340], chfiles[8192], changed[8192]; int have_tmp = 0;
