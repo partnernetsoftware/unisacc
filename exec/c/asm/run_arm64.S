@@ -11,8 +11,8 @@
 #else
 #define CSYM(x) x
 #endif
-#if (MACHINE_SIZE % 8) != 0 || (RESULT_SIZE % 8) != 0
-#error MACHINE_SIZE_and_RESULT_SIZE_must_be_multiples_of_8
+#if (MACHINE_SIZE % 8) != 0 || (RESULT_SIZE % 8) != 0 || PS_SIZE != 64
+#error ABI_alignment_or_PS_SIZE_mismatch
 #endif
 .text
 .p2align 2
@@ -95,12 +95,16 @@ CSYM(core_run):
     bl CSYM(core_frame_push)
     mov x23,#0
     ldr w24,[x20,#CM_START]
+.p2align 4
 Lrloop:
     cmp x23,x22
     b.ge Lrtimeout
     add x23,x23,#1
-    ldr x8,[x20,#CM_MODE]
-    ldr w8,[x8,x24,lsl #2]
+    ldr x5,[x20,#CM_PACKED]
+    cbz x5,Lrunpacked
+    uxtw x1,w24
+    add x5,x5,x1,lsl #6
+    ldr w8,[x5,#PS_MODE]
     cmp w8,#1
     b.eq Lrstack
     cbnz w8,Lrresult
@@ -129,6 +133,125 @@ Lrresult:
     cmp x8,x9
     csel x2,x8,x9,ls
 Lrkey:
+    /* Inlined transition reading from single 64-byte CorePackedState at [x5] */
+    sxtw x2,w2
+    ldr x6,[x5,#PS_RET_OK]
+    cbz x6,Ltnoret
+    tbnz w2,#31,Ltnoret
+    ldr w7,[x20,#CM_NS]
+    cmp w2,w7
+    b.ge Ltnoret
+    ldrb w7,[x6,x2]
+    cbz w7,Ltnoret
+    ldr w25,[x5,#PS_RET_SEQ]
+    mov w24,w2
+    b Ltdispatch
+Ltnoret:
+    ldr w6,[x20,#CM_ISNET]
+    cbz w6,Lttable
+    ldr w6,[x5,#PS_LO]
+    cmp w2,w6
+    b.lt Ltdomain
+    ldr w6,[x5,#PS_HI]
+    cmp w2,w6
+    b.gt Ltdomain
+    ldrsw x9,[x5,#PS_BASE_NEXT]
+    ldrsw x10,[x5,#PS_BASE_SEQ]
+    ldr w8,[x5,#PS_COUNT]
+    cbz w8,Ltbounds
+    ldr x11,[x5,#PS_KEYS]
+    mov w6,#0
+Ltsearch:
+    cmp w6,w8
+    b.hs Ltsum
+    add w7,w6,w8
+    lsr w7,w7,#1
+    ldr w14,[x11,w7,uxtw #2]
+    add w15,w7,#1
+    cmp w2,w14
+    csel w6,w15,w6,ge
+    csel w8,w8,w7,ge
+    b Ltsearch
+Ltsum:
+    cbz w6,Ltbounds
+    ldr x12,[x5,#PS_NEXT]
+    ldr x13,[x5,#PS_SEQ]
+Ltunit:
+    ldrsw x15,[x12],#4
+    ldrsw x16,[x13],#4
+    add x9,x9,x15
+    add x10,x10,x16
+    subs w6,w6,#1
+    b.ne Ltunit
+Ltbounds:
+    cmn x9,#1
+    b.lt Ltinvalid
+    ldrsw x6,[x20,#CM_NS]
+    cmp x9,x6
+    b.ge Ltinvalid
+    cmp x10,#0
+    b.lt Ltinvalid
+    ldrsw x6,[x20,#CM_NQ]
+    cmp x10,x6
+    b.ge Ltinvalid
+    mov w24,w9
+    mov w25,w10
+    b Ltdispatch
+Lttable:
+    ldr w6,[x5,#PS_MODE]
+    ldr x12,[x5,#PS_NEXT]
+    ldr x13,[x5,#PS_SEQ]
+    cmp w6,#1
+    b.ne Ltdirect
+    ldr w8,[x5,#PS_COUNT]
+    ldr x11,[x5,#PS_KEYS]
+    mov x7,#0
+    cbz w8,Lrmissing
+Ltfind:
+    ldr w6,[x11,x7,lsl #2]
+    cmp w2,w6
+    b.eq Ltfound
+    add x7,x7,#1
+    subs w8,w8,#1
+    b.ne Ltfind
+    b Lrmissing
+Ltdirect:
+    mov x7,x2
+Ltfound:
+    ldr w24,[x12,x7,lsl #2]
+    ldr w25,[x13,x7,lsl #2]
+    b Ltdispatch
+Lrunpacked:
+    ldr x8,[x20,#CM_MODE]
+    ldr w8,[x8,x24,lsl #2]
+    cmp w8,#1
+    b.eq Lru_stack
+    cbnz w8,Lru_result
+    ldr x8,[x19,#M_FRAMES+STACK_ENTRIES]
+    ldr w9,[x19,#M_FRAMES+STACK_COUNT]
+    sub w9,w9,#1
+    add x8,x8,x9,lsl #5
+    ldp x9,x10,[x8,#FRAME_CURSOR]
+    mov w2,#256
+    cmp x9,x10
+    b.ge Lru_key
+    ldr x8,[x8,#FRAME_BYTES]
+    ldrb w2,[x8,x9]
+    b Lru_key
+Lru_stack:
+    mov w2,#-1
+    ldr w8,[x19,#M_STACK+STACK_COUNT]
+    cbz w8,Lru_key
+    sub w8,w8,#1
+    ldr x9,[x19,#M_STACK+STACK_ENTRIES]
+    ldr w2,[x9,x8,lsl #2]
+    b Lru_key
+Lru_result:
+    ldr x8,[x19,#M_R]
+    mov x9,#256
+    cmp x8,x9
+    csel x2,x8,x9,ls
+Lru_key:
     mov w8,#-1
     str w8,[sp,#376]
     str wzr,[sp,#380]
@@ -140,8 +263,9 @@ Lrkey:
     str x0,[x21,#RESULT_REASON]
     cbnz x0,Lrtransitionbad
     ldr w24,[sp,#376]
-    tbnz w24,#31,Lrmissing
     ldr w25,[sp,#380]
+Ltdispatch:
+    tbnz w24,#31,Lrmissing
     ldr x8,[x20,#CM_QOFF]
     ldrsw x8,[x8,x25,lsl #2]
     ldr x26,[x20,#CM_QA]
@@ -165,6 +289,26 @@ Lractions:
     add x26,x26,x8,lsl #3
     add w27,w27,#1
     b Lractions
+Ltdomain:
+#ifdef __APPLE__
+    adrp x8,Ltdomain_text@PAGE
+    add x8,x8,Ltdomain_text@PAGEOFF
+#else
+    adrp x8,Ltdomain_text
+    add x8,x8,:lo12:Ltdomain_text
+#endif
+    str x8,[x21,#RESULT_REASON]
+    b Lrtransitionbad
+Ltinvalid:
+#ifdef __APPLE__
+    adrp x8,Ltinvalid_text@PAGE
+    add x8,x8,Ltinvalid_text@PAGEOFF
+#else
+    adrp x8,Ltinvalid_text
+    add x8,x8,:lo12:Ltinvalid_text
+#endif
+    str x8,[x21,#RESULT_REASON]
+    b Lrtransitionbad
 Lrtimeout:
 #ifdef __APPLE__
     adrp x8,Lrtime@PAGE
@@ -289,6 +433,8 @@ Lrempty: .asciz ""
 Lrtime: .asciz "timeout"
 Lrnone: .asciz "no transition"
 Lroommsg: .asciz "out of memory"
+Ltdomain_text: .asciz "observation outside network domain"
+Ltinvalid_text: .asciz "invalid network output"
 #ifndef __APPLE__
 .section .note.GNU-stack,"",%progbits
 #endif
