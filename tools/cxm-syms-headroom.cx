@@ -1,0 +1,331 @@
+/* tools/cxm-syms-headroom.cx -- 前端容量水位哨:CXM_SYMS 与 CXM_MAXU(只读,不编译)。
+ *
+ *   sh ./unisacc.com tools/cxm-syms-headroom.cx -- ROOT [--target lnx/x86_64] [--warn PCT] [--fail PCT]
+ *                                                  [--expect-nsym N] [--expect-units N] [--selftest]
+ *
+ * 为什么需要:cx/compiler/cxmod.cx 的 CXM_SYMS 是静态数组容量,超了编译期直接
+ * "too many names for the module check"(cxm_addsym 的守卫);0.0.94 之前 2048 被 44 根
+ * 闭包撑破,靠人肉发现。CXM_MAXU 管一个程序里的单元数,128 时 0.0.94 实测已到 77%。
+ * 本哨把两者变成可复跑的数值断言,并守住三处数值一致。
+ *
+ * 三个口径(cc 2026-11-23 裁定):
+ *   1. CXM_SYMS 是**上界估算**,不是 cxm_nsym 真值:编译器不导出真值,静态扫描把模块里
+ *      所有非 static 有体函数都算,而 cxm_project 还要过 cxm_exportok/cxm_listed。
+ *      故 --expect-nsym 给参考值时两值并排打印并标 MATCH/DIFF,不冒充已验证。
+ *   2. CXM_MAXU 单列(单元数),不与符号数混在一行。
+ *   3. 75% 为 WARN 不为 FAIL:达到 --warn 只打印 WARN 且退出码仍为 0;达到 --fail(90%)
+ *      才退出 1。这样水位哨能进快车道而不会因为已经过 75% 常年红。
+ *
+ * 名字计数规则(对齐 cxmod.cx 的 cxm_project):
+ *   - 非模块单元(无 `#pragma unisa module`):只登记有函数体的非 static 顶层函数;
+ *   - 模块单元:类型名(typedef 名、带体的 struct/union/enum 标签、enum 常量)加导出函数
+ *     与非公开函数。static 函数、函数原型、宏、include 一律不计。
+ *
+ * 单元集:build/chain-facts.tsv 的 44 个 root 加 build/core-closure.tsv 里目标的 use 闭包,
+ * 按 realpath 去重。参考值 2104(符号)与 101(单元)来自 agyneon 对 0.0.94 的实测。
+ *
+ * 输出末行 HEADROOM<TAB>status=PASS|WARN|FAIL<TAB>...;退出码 0 除 FAIL 外,1 为 FAIL,
+ * 2 为参数/读取错误。--selftest 跑四个夹具(低水位 PASS、超水位 FAIL、阈值 99% 后转 PASS、
+ * 三处不一致 FAIL),不需要仓库。 */
+#pragma unisa use sys.fs
+
+#pragma unisa use cxlib.cscan
+#pragma unisa use mem.bytes
+static int die(const char *m) { fprintf(stderr, "HEADROOM\tREFUSE\t%s\n", m); return 2; }
+static char *slurp(const char *p, size_t *n) {
+    char *s = cx_read(p, n);
+    if (!s) return 0;
+    if (memchr(s, 0, *n)) { free(s); return 0; }
+    return s;
+}
+static int digits(const char *s, size_t n, const char *pat, int *out) {
+    size_t pl = strlen(pat);
+    for (size_t i = 0; i + pl < n; i++) {
+        if (memcmp(s + i, pat, pl)) continue;
+        size_t j = i + pl; int v = 0, k = 0;
+        while (j < n && s[j] == ' ') j++;
+        while (j < n && s[j] >= '0' && s[j] <= '9') { v = v * 10 + (s[j] - '0'); j++; k++; }
+        if (k) { *out = v; return 0; }
+    }
+    return 1;
+}
+static size_t skipstr(size_t i, const char *s, size_t n) {
+    int q = s[i]; i++;
+    while (i < n) { if (s[i] == '\\') { i += 2; continue; } if (s[i] == q) return i + 1; i++; }
+    return n;
+}
+/* 单元是否模块:预处理行里出现 `#pragma unisa module`。 */
+static int is_module(const char *s, size_t n) {
+    for (size_t i = 0; i < n;) {
+        size_t e = i; while (e < n && s[e] != '\n') e++;
+        size_t b = i; while (b < e && (s[b] == ' ' || s[b] == '\t')) b++;
+        if (b < e && s[b] == '#') {
+            size_t j = b + 1; while (j < e && (s[j] == ' ' || s[j] == '\t')) j++;
+            if (j + 6 <= e && !memcmp(s + j, "pragma", 6)) {
+                size_t k = j + 6; while (k < e && (s[k] == ' ' || s[k] == '\t')) k++;
+                if (k + 5 <= e && !memcmp(s + k, "unisa", 5)) {
+                    size_t m = k + 5; while (m < e && (s[m] == ' ' || s[m] == '\t')) m++;
+                    if (m + 6 <= e && !memcmp(s + m, "module", 6)) return 1;
+                }
+            }
+        }
+        i = e + 1;
+    }
+    return 0;
+}
+/* 数一份源里的顶层名字。mod=1 时含类型名,mod=0 时只数函数定义(对齐 cxm_project)。 */
+static int count_names(const char *s, size_t n, int *names, int mod) {
+    size_t i = 0;
+    while (i < n) {
+        while (i < n && (s[i] == ' ' || s[i] == '\t' || s[i] == '\n' || s[i] == '\r')) i++;
+        if (i + 1 < n && s[i] == '/' && s[i + 1] == '/') { while (i < n && s[i] != '\n') i++; continue; }
+        if (i + 1 < n && s[i] == '/' && s[i + 1] == '*') { i += 2; while (i + 1 < n && !(s[i] == '*' && s[i + 1] == '/')) i++; i = (i + 1 < n) ? i + 2 : n; continue; }
+        if (i >= n) break;
+        if (s[i] == '#') { while (i < n && s[i] != '\n') i++; continue; }
+        if (s[i] == '"' || s[i] == '\'') { i = skipstr(i, s, n); continue; }
+        if (s[i] == '}' || s[i] == ';') { i++; continue; }
+        int depth = 0, isstatic = 0, istypedef = 0, named = 0, isfn = 0;
+        int lastid_ok = 0; char lastid[128]; int lastidl = 0;
+        size_t k = i;
+        for (; k < n;) {
+            if (s[k] == ' ' || s[k] == '\t' || s[k] == '\n' || s[k] == '\r') { k++; continue; }
+            if (k + 1 < n && s[k] == '/' && s[k + 1] == '/') { while (k < n && s[k] != '\n') k++; continue; }
+            if (k + 1 < n && s[k] == '/' && s[k + 1] == '*') { k += 2; while (k + 1 < n && !(s[k] == '*' && s[k + 1] == '/')) k++; k = (k + 1 < n) ? k + 2 : n; continue; }
+            if (s[k] == '"' || s[k] == '\'') { k = skipstr(k, s, n); lastid_ok = 0; continue; }
+            if (cs_idch(s[k]) && !(s[k] >= '0' && s[k] <= '9')) {
+                size_t b = k; while (k < n && cs_idch(s[k])) k++;
+                int wl = (int)(k - b);
+                if (depth == 0 && !named) {
+                    if (cs_word_eq(s + b, wl, "static")) isstatic = 1;
+                    else if (cs_word_eq(s + b, wl, "typedef")) istypedef = 1;
+                }
+                if (wl < (int)sizeof lastid && !mm_copy(lastid, (long)sizeof lastid, s + b, (long)wl)) { lastidl = wl; lastid_ok = 1; }
+                if (depth == 0 && !named && k < n && s[k] == '(') { named = 1; isfn = 1; }
+                continue;
+            }
+            if (s[k] == '(') { depth++; k++; lastid_ok = 0; continue; }
+            if (s[k] == ')') { if (depth > 0) depth--; k++; continue; }
+            if (s[k] == '[') { int d = 1; k++; while (k < n && d > 0) { if (s[k] == '[') d++; else if (s[k] == ']') d--; k++; } continue; }
+            if (s[k] == '{') {
+                if (depth > 0) { depth++; k++; continue; }
+                if (named && isfn) {                       /* 函数体 */
+                    if (!isstatic) *names = *names + 1;
+                    int d = 1; k++; while (k < n && d > 0) { if (s[k] == '{') d++; else if (s[k] == '}') d--; k++; }
+                    i = k; break;
+                }
+                /* 带体的标签或枚举/结构体定义 */
+                int saw = 0; int tl = 0;
+                for (size_t q = i; q < k;) {
+                    if (cs_idch(s[q]) && !(s[q] >= '0' && s[q] <= '9')) {
+                        size_t b = q; while (q < k && cs_idch(s[q])) q++; int wl = (int)(q - b);
+                        if (cs_word_eq(s + b, wl, "struct")) saw = 1;
+                        else if (cs_word_eq(s + b, wl, "union")) saw = 2;
+                        else if (cs_word_eq(s + b, wl, "enum")) saw = 3;
+                        else if (saw == 1 || saw == 2 || saw == 3) { tl = wl < 127 ? wl : 127; saw = saw + 10; }
+                    } else q++;
+                }
+                int isenum = (saw == 3 || saw == 13);
+                if (mod && saw >= 11 && tl) *names = *names + 1;    /* 带体的标签算一个名字 */
+                /* 跳过体,顺便对 enum 数常量 */
+                int d = 0; size_t q2 = k; int prev = 1;
+                while (q2 < n) {
+                    char c = s[q2];
+                    if (c == ' ' || c == '\t' || c == '\n' || c == '\r') { q2++; continue; }
+                    if (c == '/' && q2 + 1 < n && s[q2 + 1] == '/') { while (q2 < n && s[q2] != '\n') q2++; continue; }
+                    if (c == '/' && q2 + 1 < n && s[q2 + 1] == '*') { q2 += 2; while (q2 + 1 < n && !(s[q2] == '*' && s[q2 + 1] == '/')) q2++; q2 = (q2 + 1 < n) ? q2 + 2 : n; continue; }
+                    if (c == '"' || c == '\'') { q2 = skipstr(q2, s, n); prev = 0; continue; }
+                    if (c == '{') { d++; q2++; prev = 1; continue; }
+                    if (c == '}') { if (d == 0) { q2++; break; } d--; q2++; prev = 0; continue; }
+                    if (c == '(' || c == '[') { d++; q2++; prev = 0; continue; }
+                    if (c == ')' || c == ']') { if (d > 0) d--; q2++; prev = 0; continue; }
+                    if (cs_idch(c) && !(c >= '0' && c <= '9')) {
+                        size_t b = q2; while (q2 < n && cs_idch(s[q2])) q2++;
+                        if (mod && isenum && d == 1 && prev) *names = *names + 1;
+                        prev = 0; continue;
+                    }
+                    if (c == ',' && d == 1) { prev = 1; q2++; continue; }
+                    prev = 0; q2++;
+                }
+                k = q2; i = k; break;
+            }
+            if (s[k] == '}') { if (depth > 0) depth--; k++; continue; }
+            if (s[k] == ';') {
+                if (depth == 0) {
+                    if (mod && istypedef && lastid_ok && lastidl) *names = *names + 1;
+                    i = k + 1; break;
+                }
+                k++; continue;
+            }
+            k++;
+        }
+        if (k >= n) { i = n; break; }
+    }
+    return 0;
+}
+/* 三档判定:>=fail 为 FAIL,>=warn 为 WARN,否则 PASS。返回 2/1/0 供累加。 */
+static int judge(const char *tag, long used, long limit, int warn, int fail) {
+    if (limit <= 0) { printf("HEADROOM\t%s\tused=%ld\tlimit=%ld\tstatus=REFUSE\treason=bad-limit\n", tag, used, limit); return 2; }
+    long p1000 = used * 1000 / limit;
+    const char *st = "PASS"; int sev = 0;
+    if ((used * 100) >= ((long)fail * limit)) { st = "FAIL"; sev = 2; }
+    else if ((used * 100) >= ((long)warn * limit)) { st = "WARN"; sev = 1; }
+    printf("HEADROOM\t%s\tused=%ld\tlimit=%ld\tpct=%ld.%01ld\twarn=%d\tfail=%d\tstatus=%s\n",
+           tag, used, limit, p1000 / 10, p1000 % 10, warn, fail, st);
+    return sev;
+}
+/* 三处/五处数值一致性:打印并返回 bad(0 或 2)。抽出来供夹具复用。 */
+static int triple_cmp(const int *syms, const int *maxu, const char *const *maxu_files) {
+    int bad = 0;
+    printf("HEADROOM_TRIPLE\tCXM_SYMS=%d,%d,%d\tCXM_MAXU=%d,%d,%d,%d,%d\n",
+           syms[0], syms[1], syms[2], maxu[0], maxu[1], maxu[2], maxu[3], maxu[4]);
+    if (syms[0] != syms[1] || syms[1] != syms[2]) { printf("HEADROOM_TRIPLE\tstatus=FAIL\treason=CXM_SYMS-mismatch\n"); bad = 2; }
+    for (int i = 1; i < 5; i++)
+        if (maxu[i] != maxu[0]) { printf("HEADROOM_TRIPLE\tstatus=FAIL\treason=CXM_MAXU-mismatch\tat=%s\n", maxu_files[i]); bad = 2; break; }
+    return bad;
+}
+static int selftest(void) {
+    int bad = 0;
+    printf("HEADROOM_FIXTURE\tlow-water-pass\n");
+    if (judge("fixture-low", 100, 4096, 75, 90) != 0) bad++;
+    printf("HEADROOM_FIXTURE\twarn-is-not-fail\n");
+    if (judge("fixture-warn", 3200, 4096, 75, 90) != 1) bad++;   /* 78.1%: WARN, exit still 0 */
+    printf("HEADROOM_FIXTURE\tover-fail-threshold\n");
+    if (judge("fixture-fail", 3800, 4096, 75, 90) != 2) bad++;   /* 92.7% */
+    printf("HEADROOM_FIXTURE\tthreshold-99-turns-pass\n");
+    if (judge("fixture-threshold", 4000, 4096, 99, 100) != 0) bad++;
+    printf("HEADROOM_FIXTURE\ttriple-mismatch-detected\n");
+    {
+        int s_ok[3] = { 4096, 4096, 4096 }, s_bad[3] = { 4096, 4096, 2048 };
+        int m_ok[5] = { 256, 256, 256, 256, 256 }, m_bad[5] = { 256, 256, 256, 128, 256 };
+        static const char *const f[5] = { "a", "b", "c", "cx/cx0/proj/head.c", "e" };
+        if (triple_cmp(s_ok, m_ok, f) != 0) bad++;
+        if (triple_cmp(s_bad, m_ok, f) != 2) bad++;     /* 符号三处不一致 -> FAIL */
+        if (triple_cmp(s_ok, m_bad, f) != 2) bad++;     /* 投影片段漏改 -> FAIL 并点名 */
+    }
+    printf("HEADROOM_SELFTEST\tpassed=%d\tfailed=%d\ttotal=7\n", 7 - bad, bad);
+    return bad ? 1 : 0;
+}
+int main(int argc, char **argv) {
+    if (argc < 2) {
+        fprintf(stderr, "usage: ROOT [--target T] [--warn PCT] [--fail PCT] [--expect-nsym N] [--expect-units N] [--selftest]\n");
+        return 2;
+    }
+    if (argc >= 3 && !strcmp(argv[2], "--selftest")) return selftest();
+    const char *root = argv[1];
+    const char *target = "lnx/x86_64";
+    int warn = 75, fail = 90;
+    long ref_nsym = -1, ref_units = -1;
+    for (int i = 2; i < argc; i++) {
+        if (!strcmp(argv[i], "--target") && i + 1 < argc) target = argv[++i];
+        else if (!strcmp(argv[i], "--warn") && i + 1 < argc) warn = atoi(argv[++i]);
+        else if (!strcmp(argv[i], "--fail") && i + 1 < argc) fail = atoi(argv[++i]);
+        else if (!strcmp(argv[i], "--expect-nsym") && i + 1 < argc) ref_nsym = atol(argv[++i]);
+        else if (!strcmp(argv[i], "--expect-units") && i + 1 < argc) ref_units = atol(argv[++i]);
+        else return die("unknown-argument");
+    }
+    if (warn < 1 || fail <= warn || fail > 100) return die("bad-thresholds");
+    char p[4400]; size_t n = 0, fn = 0, sn = 0, cn = 0; int bad = 0;
+    /* 1. 数值一致:CXM_SYMS 三处(cc 口径);CXM_MAXU 五处——plan.cx 权威、cxmod.cx 产品、
+       src/cxmod.c 投影、cx/cx0/proj/head.c 与 head.cx 投影片段。投影片段若不同步,
+       cx0-extract --check 仍报 EXACT 却会把旧值写回(0.0.98 实测,见 plans/v0.0.98.md)。 */
+    static const char *syms_files[3] = { "cx/compiler/cxmod.cx", "cx/cx0/plan.cx", "src/cxmod.c" };
+    static const char *maxu_files[5] = { "cx/compiler/cxmod.cx", "cx/cx0/plan.cx", "src/cxmod.c",
+                                         "cx/cx0/proj/head.c", "cx/cx0/proj/head.cx" };
+    int syms[3] = { 0, 0, 0 }, maxu[5] = { 0, 0, 0, 0, 0 };
+    for (int i = 0; i < 3; i++) {
+        if (cx_fmt(p, sizeof p, "%s/%s", root, syms_files[i])) return die("path-bound");
+        char *s = slurp(p, &n);
+        if (!s) return die("read-failed");
+        if (digits(s, n, "#define CXM_SYMS", &syms[i])) { free(s); return die("CXM_SYMS-not-found"); }
+        free(s);
+    }
+    for (int i = 0; i < 5; i++) {
+        if (cx_fmt(p, sizeof p, "%s/%s", root, maxu_files[i])) return die("path-bound");
+        char *s = slurp(p, &n);
+        if (!s) return die("read-failed");
+        if (digits(s, n, "#define CXM_MAXU", &maxu[i]) && digits(s, n, "CXM_MAXU = ", &maxu[i])) { free(s); return die("CXM_MAXU-not-found"); }
+        free(s);
+    }
+    { int t = triple_cmp(syms, maxu, maxu_files); if (t > bad) bad = t; }
+    /* 2. 单元集:44 个产品根 + 目标 use 闭包,按 realpath 去重 */
+    static char unit[512][1024]; int nunits = 0;
+    if (cx_fmt(p, sizeof p, "%s/build/chain-facts.tsv", root)) return die("path-bound");
+    char *facts = slurp(p, &fn);
+    if (!facts) return die("chain-facts-missing");
+    int nroots = 0;
+    for (size_t i = 0; i < fn;) {
+        size_t e = i; while (e < fn && facts[e] != '\n') e++;
+        if (e - i > 5 && !memcmp(facts + i, "root\t", 5)) {
+            size_t t = i + 5; while (t < e && facts[t] != '\t') t++;
+            if (t + 1 < e && e - t - 1 < 1000) {
+                char rel[1024]; if (mm_copy(rel, (long)sizeof rel, facts + t + 1, (long)(e - t - 1))) return die("path-bound"); rel[e - t - 1] = 0;
+                char tmp[1024];
+                if (cx_fmt(tmp, sizeof tmp, "%s/%s", root, rel)) return die("path-bound");
+                char real[1024];
+                if (sy_realpath(tmp, real, sizeof real) > 0) {
+                    int dup = 0; for (int z = 0; z < nunits; z++) if (!strcmp(unit[z], real)) { dup = 1; break; }
+                    if (!dup && nunits < 512) { if (mm_copy(unit[nunits], (long)sizeof unit[0], real, (long)strlen(real) + 1)) return die("path-bound"); nunits++; }
+                }
+                nroots++;
+            }
+        }
+        i = e + 1;
+    }
+    free(facts);
+    int from_closure = 0;
+    {
+        char norm[64]; size_t w = 0;
+        for (const char *q = target; *q && w + 1 < sizeof norm; q++) norm[w++] = (*q == '/') ? '-' : *q;
+        norm[w] = 0;
+        if (cx_fmt(p, sizeof p, "%s/build/core-closure.tsv", root) == 0) {
+            char *c = slurp(p, &cn);
+            if (c) {
+                for (size_t i = 0; i < cn;) {
+                    size_t e = i; while (e < cn && c[e] != '\n') e++;
+                    size_t t1 = i; while (t1 < e && c[t1] != '\t') t1++;
+                    size_t t2 = (t1 < e) ? t1 + 1 : t1; while (t2 < e && c[t2] != '\t') t2++;
+                    size_t t3 = (t2 < e) ? t2 + 1 : t2; while (t3 < e && c[t3] != '\t') t3++;
+                    if (t1 - i == w && !memcmp(c + i, norm, w) && t3 < e && t3 > t2 + 1 && t3 - t2 - 1 < 1000) {
+                        char rel[1024]; if (mm_copy(rel, (long)sizeof rel, c + t2 + 1, (long)(t3 - t2 - 1))) return die("path-bound"); rel[t3 - t2 - 1] = 0;
+                        char tmp[1024];
+                        if (cx_fmt(tmp, sizeof tmp, "%s/%s", root, rel)) return die("path-bound");
+                        char real[1024];
+                        if (sy_realpath(tmp, real, sizeof real) > 0) {
+                            int dup = 0; for (int z = 0; z < nunits; z++) if (!strcmp(unit[z], real)) { dup = 1; break; }
+                            if (!dup && nunits < 512) { if (mm_copy(unit[nunits], (long)sizeof unit[0], real, (long)strlen(real) + 1)) return die("path-bound"); nunits++; from_closure++; }
+                        }
+                    }
+                    i = e + 1;
+                }
+                free(c);
+            }
+        }
+    }
+    /* 3. 按 cxm_project 规则数名字 */
+    int names = 0, mods = 0, read_ok = 0, missing = 0;
+    for (int z = 0; z < nunits; z++) {
+        size_t nn = 0;
+        char *s2 = slurp(unit[z], &nn);
+        if (!s2) { missing++; continue; }
+        int mod = is_module(s2, nn); if (mod) mods++;
+        count_names(s2, nn, &names, mod);
+        free(s2); read_ok++;
+    }
+    printf("HEADROOM_COUNT\troots=%d\tclosure_added=%d\tunits=%d\tmodules=%d\tread=%d\tmissing=%d\tnames_upper=%d\n",
+           nroots, from_closure, nunits, mods, read_ok, missing, names);
+    /* 4. 参考值并排:两个值都打,不冒充已验证 */
+    if (ref_nsym >= 0)
+        printf("HEADROOM_REF\tCXM_SYMS\tupper=%d\treference=%ld\t%s\n", names, ref_nsym, (names == ref_nsym) ? "MATCH" : "DIFF");
+    else printf("HEADROOM_REF\tCXM_SYMS\tupper=%d\treference=none\n", names);
+    if (ref_units >= 0)
+        printf("HEADROOM_REF\tCXM_MAXU\tscanned=%d\treference=%ld\t%s\n", nunits, ref_units, (nunits == ref_units) ? "MATCH" : "DIFF");
+    else printf("HEADROOM_REF\tCXM_MAXU\tscanned=%d\treference=none\n", nunits);
+    /* 5. 水位:CXM_MAXU 单列 */
+    int s1 = judge("CXM_SYMS(names_upper)", names, syms[0], warn, fail);
+    int s2v = judge("CXM_MAXU(units)", nunits, maxu[0], warn, fail);
+    if (s1 > bad) bad = s1;
+    if (s2v > bad) bad = s2v;
+    const char *st = bad == 2 ? "FAIL" : (bad == 1 ? "WARN" : "PASS");
+    printf("HEADROOM\tstatus=%s\twarn=%d\tfail=%d\tunits=%d\tnames_upper=%d\n", st, warn, fail, nunits, names);
+    return bad == 2 ? 1 : 0;   /* WARN 不失败 */
+}

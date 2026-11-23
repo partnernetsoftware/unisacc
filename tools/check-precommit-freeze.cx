@@ -64,7 +64,7 @@ int main(void) {
     if (cx_fmt(td, sizeof td, "%s/precommit-freeze-XXXXXX", sy_tmpdir()) || !mkdtemp(td)) { ck(0, "tmpdir"); return 1; }
     {   char cmd[2400];
         if (cx_fmt(cmd, sizeof cmd,
-            "cd '%s' && git init -q . && git config user.email a@b && git config user.name t && "
+            "cd '%s' && git init -q -b main . && git config user.email a@b && git config user.name t && "
             "mkdir -p exec/facts tools build && "
             "printf '/unisacc.com\\n/cx\\n/tools/cxlib\\n/tools/cx-lint.cx\\n/tools/check-tlib-frozen.cx\\n' > .gitignore && "
             "printf 'CXROOT1\\nR\\tsys\\tcx/sys\\nR\\ttext\\tcx/text\\nR\\tmem\\tcx/mem\\nR\\tcxlib\\ttools/cxlib\\n' > cxroot.tsv && "
@@ -109,7 +109,7 @@ int main(void) {
         rc = run_lane(FAR_LANE, "exec/a.tsv A sid\\n", "exec/a.tsv", "", out, sizeof out);
         ck(rc == 1 && has(out, "malformed"), "lane-a-bad-columns-refused");
     }
-    /* (1) 入库过期加工作区有效(不暂存 freeze.tsv,暂存冻结路径):默认隔离、NO_ISOLATE、子目录、.claude/worktrees/v0.0.99 均须拦 */
+    /* (1) 同一冻结表约束主检出 main，包括隔离调用与子目录调用。 */
     {
         char cmd[3600];
         if (!cx_fmt(cmd, sizeof cmd,
@@ -136,12 +136,34 @@ int main(void) {
         } else ck(0, "committed-expired-worktree-active-subdir-refused");
         if (!cx_fmt(cmd, sizeof cmd,
             "cd '%s' && git worktree add -q .claude/worktrees/v0.0.99 -b v0.0.99 && "
+            "cp build/freeze.tsv .claude/worktrees/v0.0.99/build/freeze.tsv && "
             "cd .claude/worktrees/v0.0.99 && echo z > exec/a.tsv && git add exec/a.tsv && "
             "sh '%s/unisacc.com' '%s/tools/precommit.cx' 2>&1",
             td, root, root)) {
             rc = sh(cmd, out, sizeof out);
-            ck(rc == 1 && has(out, "冻结中"), "committed-expired-shared-worktree-active-linked-wt-refused");
+            ck(rc == 0 && has(out, "blocked=0") && has(out, "FREEZE_SCOPE skip=worktree branch=v0.0.99"),
+               "active-freeze-linked-worktree-passes");
+            sy_printf("SCOPE_PROBE linked rc=%d\n%s", rc, out);
+        } else ck(0, "active-freeze-linked-worktree-passes");
+        if (!cx_fmt(cmd, sizeof cmd,
+            "cd '%s/.claude/worktrees/v0.0.99' && git symbolic-ref HEAD refs/heads/main && "
+            "sh '%s/unisacc.com' '%s/tools/precommit.cx' 2>&1; gate_rc=$?; "
+            "git symbolic-ref HEAD refs/heads/v0.0.99 && exit \"$gate_rc\"",
+            td, root, root)) {
+            rc = sh(cmd, out, sizeof out);
+            ck(rc == 1 && has(out, "冻结中") && !has(out, "FREEZE_SCOPE skip="),
+               "committed-expired-shared-worktree-active-linked-wt-refused");
         } else ck(0, "committed-expired-shared-worktree-active-linked-wt-refused");
+        if (!cx_fmt(cmd, sizeof cmd,
+            "cd '%s' && git switch -qc fixture-side && "
+            "sh '%s/unisacc.com' '%s/tools/precommit.cx' 2>&1; gate_rc=$?; "
+            "git switch -q main && exit \"$gate_rc\"",
+            td, root, root)) {
+            rc = sh(cmd, out, sizeof out);
+            ck(rc == 0 && has(out, "blocked=0") && has(out, "FREEZE_SCOPE skip=worktree branch=fixture-side"),
+               "active-freeze-primary-non-main-passes");
+            sy_printf("SCOPE_PROBE non-main rc=%d\n%s", rc, out);
+        } else ck(0, "active-freeze-primary-non-main-passes");
     }
     /* (2) 同一提交里暂存改 freeze.tsv 把截止改成过期不能自我解冻(暂存版与工作区/HEAD 以更严者为准) */
     {

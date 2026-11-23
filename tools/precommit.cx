@@ -609,12 +609,29 @@ static int freeze_eval_buf(const char *z, const char *names, long fn) {
     return blocked;
 }
 
+static int pc_freeze_outside;
+
+static void pc_freeze_scope(void) {
+    char *bv[] = {"git", "symbolic-ref", "--quiet", "HEAD", 0};
+    long n = 0;
+    /* GIT_DIR identifies the committing worktree even in an isolated checkout. */
+    char *ref = slurp_run(bv, &n);
+    if (!ref) return;
+    if (n > 0 && ref[n - 1] == '\n') ref[--n] = 0;
+    pc_freeze_outside = n > 11 && tx_prefix(ref, n, "refs/heads/", 11) &&
+                        !tx_eqz(ref, "refs/heads/main");
+    if (pc_freeze_outside)
+        sy_eprintf("FREEZE_SCOPE skip=worktree branch=%s\n", ref + 11);
+    mm_free(ref);
+}
+
 static int freeze_gate(void) {
     size_t wtn = 0, cwdn = 0;
     char *z_wt = 0, *z_cwd = 0, *z_idx = 0, *z_head = 0, *names = 0;
     long fn = 0, idxn = 0, hdn = 0;
     char *dv[] = {"git", "diff", "--cached", "--no-renames", "--name-only", "--diff-filter=ACMRD", "-z", 0};
     int blocked = 0, err = 0;
+    if (pc_freeze_outside) return 0;
     if (pc_work_top[0]) {
         char fp[1200];
         if (!cx_fmt(fp, sizeof fp, "%s/build/freeze.tsv", pc_work_top))
@@ -709,6 +726,7 @@ static int freeze_window_status(char *owner_out, size_t ocap) {
     int err = 0, s_wt = 0, s_cwd = 0, s_idx = 0, s_hd = 0;
     char o_wt[64], o_cwd[64], o_idx[64], o_hd[64];
     if (owner_out && ocap > 0) owner_out[0] = 0;
+    if (pc_freeze_outside) return 0;
     o_wt[0] = o_cwd[0] = o_idx[0] = o_hd[0] = 0;
     if (pc_work_top[0]) {
         char fp[1200];
@@ -3403,6 +3421,7 @@ int main(int argc, char **argv) {
         }
     }
     if (pc_capture_work_top() != 0) { pc_mark_block("isolate", "getcwd-failed"); pc_emit_gate_fail(); return 1; }
+    pc_freeze_scope();
     if (argc == 1 && isolate_staged_tree() != 0) { pc_mark_block("isolate", "staged-tree-setup"); pc_emit_gate_fail(); return 1; }
     {
         long csn = 0, ca = 0;

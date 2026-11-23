@@ -1,0 +1,277 @@
+/* tools/check-split-pair.cx -- commit-time gate keeping a slow-split parent and its shards in step.
+ *
+ *   sh ./unisacc.com tools/check-split-pair.cx -- --check [ROOT]
+ *   sh ./unisacc.com tools/check-split-pair.cx -- --selftest [ROOT]
+ *
+ * The split-parents table (tests/split-parents.tsv) names each parent batch, its shards and the check
+ * that ties them; tests/batches.tsv maps a batch to its source file.  A parent assertion multiset must
+ * equal its shards' union and tools/check-slow-split.cx enforces that, but only after the drift already
+ * landed.  This gate runs at commit time: it reads the staged paths and, for every split group whose
+ * parent source file OR any shard source file is staged, runs that ONE group's slow-split multiset
+ * compare (seconds).  Equal -> allow (one-sided edits are fine when the assertion sets stay equal);
+ * unequal -> refuse and print the DIFF lines.  It never deletes an assertion and never widens a bound.
+ *
+ * --selftest runs three fixtures in a temp dir against a fake batcher so it needs no product: a staged
+ * shard-only edit whose sets differ must be refused (red), the same edit mirrored on the parent must be
+ * allowed (green), and a staged path outside every split group must be ignored. Last line:
+ * CHECK_SPLIT_PAIR<TAB>ok=N<TAB>failed=M<TAB>ms=T. */
+#pragma unisa use sys.fs
+#pragma unisa use sys.proc
+#pragma unisa use sys.posix
+#pragma unisa use sys.env
+#pragma unisa use sys.time
+#pragma unisa use sys.io
+#pragma unisa use text.text
+#pragma unisa use text.fmt
+#pragma unisa use cxlib.procrun
+#pragma unisa use mem.heap
+#pragma unisa use mem.bytes
+
+#define CSP_MAXP 32
+#define CSP_MAXS 8
+#define CSP_PW 4400
+
+typedef struct {
+    char parent[96];
+    char parent_src[CSP_PW];
+    char shard_src[CSP_MAXS][CSP_PW];
+    int nshard;
+} CspEntry;
+
+static int csp_ck(int ok, const char *name) {
+    sy_printf("%s\t%s\n", ok ? "PASS" : "FAIL", name);
+    return ok ? 0 : 1;
+}
+
+/* a batch id -> its source file from tests/batches.tsv (column 4); 0 when absent */
+static int csp_batch_src(const char *bt, long bn, const char *id, char *out, size_t cap) {
+    long at = 0, il = tx_len(id, 128);
+    while (at < bn) {
+        long e = tx_chr(bt + at, bn - at, '\n'), l = e < 0 ? bn - at : e;
+        long o0, l0, o3, l3;
+        if (l > 0 && bt[at] != '#' &&
+            !tx_field(bt + at, l, '\t', 0, &o0, &l0) && l0 == il && tx_same(bt + at + o0, l0, id, il) &&
+            !tx_field(bt + at, l, '\t', 3, &o3, &l3) && l3 > 0 && l3 < (long)cap) {
+            mm_copy(out, cap, bt + at + o3, (size_t)l3);
+            out[l3] = 0;
+            return 1;
+        }
+        at += l + 1;
+    }
+    return 0;
+}
+
+/* load split-parents.tsv + batches.tsv into entries; returns count (<=0 on error) */
+static int csp_load(const char *root, CspEntry *ent, int maxe) {
+    char pt[CSP_PW], bt[CSP_PW];
+    if (cx_fmt(pt, sizeof pt, "%s/tests/split-parents.tsv", root) ||
+        cx_fmt(bt, sizeof bt, "%s/tests/batches.tsv", root)) return -1;
+    size_t pn = 0, bn = 0;
+    char *pb = (char *)cx_read(pt, &pn);
+    char *bb = (char *)cx_read(bt, &bn);
+    if (!pb || !bb) { mm_free(pb); mm_free(bb); return -1; }
+    int ne = 0;
+    long at = 0;
+    while (at < (long)pn) {
+        long e = tx_chr(pb + at, (long)pn - at, '\n'), l = e < 0 ? (long)pn - at : e;
+        if (l > 0 && pb[at] != '#') {
+            long o0, l0, o1, l1;
+            if (!tx_field(pb + at, l, '\t', 0, &o0, &l0) && l0 > 0 && l0 < 96 &&
+                !tx_field(pb + at, l, '\t', 1, &o1, &l1) && l1 > 0 &&
+                !tx_same(pb + at + o0, l0, "parent", 6) && ne < maxe) {
+                CspEntry *en = &ent[ne];
+                mm_fill(en, sizeof *en, 0, sizeof *en);
+                mm_copy(en->parent, sizeof en->parent, pb + at + o0, (size_t)l0);
+                en->parent[l0] = 0;
+                if (!csp_batch_src(bb, (long)bn, en->parent, en->parent_src, sizeof en->parent_src)) {
+                    mm_free(pb); mm_free(bb); return -1;
+                }
+                long sp = 0;
+                while (sp < l1 && en->nshard < CSP_MAXS) {
+                    long se = sp;
+                    while (se < l1 && pb[at + o1 + se] != ',') se++;
+                    long ol = se - sp;
+                    if (ol > 0 && ol < 96) {
+                        char one[96];
+                        mm_copy(one, 96, pb + at + o1 + sp, (size_t)ol);
+                        one[ol] = 0;
+                        if (csp_batch_src(bb, (long)bn, one, en->shard_src[en->nshard], CSP_PW))
+                            en->nshard++;
+                    }
+                    sp = se + 1;
+                }
+                ne++;
+            }
+        }
+        at += l + 1;
+    }
+    mm_free(pb);
+    mm_free(bb);
+    return ne;
+}
+
+/* is PATH one of the entry's parent/shard source files?  returns which group index or -1 */
+static int csp_path_hits_group(const CspEntry *ent, int ne, const char *path, int *is_parent) {
+    for (int i = 0; i < ne; i++) {
+        if (tx_eqz(path, ent[i].parent_src)) { *is_parent = 1; return i; }
+        for (int k = 0; k < ent[i].nshard; k++)
+            if (tx_eqz(path, ent[i].shard_src[k])) { *is_parent = 0; return i; }
+    }
+    return -1;
+}
+
+/* staged paths (NUL separated from git diff --cached -z); runs one group's slow-split multiset compare.
+ * Returns 0 when every touched group is equal, 1 on a DIFF (refuse), 2 on a run failure (refuse). */
+static int csp_check_staged(const char *root, const CspEntry *ent, int ne) {
+    char gd[64];
+    if (cx_fmt(gd, sizeof gd, "%s/.git", root)) { /* informational only */ }
+    char *av[] = {"git", "diff", "--cached", "--name-only", "-z", "--", 0};
+    pr_result r;
+    if (pr_run("split-pair-diff", av, root, 0, 20, &r)) { sy_eprintf("check-split-pair: git diff failed: %s\n", r.why); pr_free(&r); return 2; }
+    int touched[CSP_MAXP];
+    for (int i = 0; i < ne; i++) touched[i] = 0;
+    long at = 0;
+    while (at < (long)r.outn) {
+        const char *path = r.out + at;
+        long pl = tx_len(path, (long)r.outn - at);
+        if (pl > 0) {
+            int isp = 0;
+            int g = csp_path_hits_group(ent, ne, path, &isp);
+            if (g >= 0) touched[g] = 1;
+        }
+        at += pl + 1;
+    }
+    pr_free(&r);
+    int bad = 0, any = 0;
+    for (int i = 0; i < ne; i++) {
+        if (!touched[i]) continue;
+        any = 1;
+        char cmd[CSP_PW], grp[128];
+        cx_fmt(grp, sizeof grp, "%s", ent[i].parent);
+        cx_fmt(cmd, sizeof cmd, "sh ./unisacc.com tools/check-slow-split.cx -- --group %s", grp);
+        char *cv[] = {"sh", "-c", cmd, 0};
+        pr_result rr;
+        if (pr_run("split-pair-group", cv, root, 0, 20, &rr)) {
+            sy_eprintf("check-split-pair: slow-split %s timed out/spawn failed: %s\n", grp, rr.why);
+            pr_free(&rr);
+            bad = 1;
+            continue;
+        }
+        /* surface DIFF lines and a non-zero verdict */
+        if (rr.errn) sy_eprintf("%.*s", (int)(rr.errn > 4000 ? 4000 : rr.errn), rr.err ? rr.err : "");
+        int equal = (rr.rc == 0) && rr.out && tx_find(rr.out, (long)rr.outn, "CHECK_SLOW_SPLIT\t", 16) >= 0 && tx_find(rr.out, (long)rr.outn, "failed=0", 8) >= 0;
+        if (!equal) {
+            sy_eprintf("check-split-pair: BLOCKED split-pair-drift group=%s (parent and shard assertion multisets differ; mirror the edit on both sides)\n", grp);
+            bad = 1;
+        } else {
+            sy_printf("check-split-pair: OK split-pair-equal group=%s\n", grp);
+        }
+        pr_free(&rr);
+    }
+    if (!any) sy_printf("check-split-pair: no split-group source staged\n");
+    return bad ? 1 : 0;
+}
+
+/* ---- selftest: fixtures drive a fake batcher so the gate logic is tested without the product ---- */
+static int csp_selftest(const char *root) {
+    (void)root;
+    int failed = 0;
+    /* Build a temp repo layout: tests/split-parents.tsv, tests/batches.tsv, and a fake unisacc.com
+     * whose check-slow-split refuses when a marker file says the group is unequal.  git init + add. */
+    const char *td = sy_tmpdir();
+    const char *base = (td && td[0] == '/') ? td : "/tmp";
+    char work[CSP_PW];
+    char *sh_c[] = { "sh", "-c", 0, 0 };   /* argv for a shell command: build, run, repeat */
+    if (cx_fmt(work, sizeof work, "%s/split-pair-selftest-%d", base, (int)sy_pid())) return 1;
+    char cmd[CSP_PW];
+    cx_fmt(cmd, sizeof cmd,
+        "set -e; W=%s; rm -rf \"$W\"; mkdir -p \"$W/tests\" \"$W/tools\" \"$W/fake\"; cd \"$W\";"
+        " git init -q;"
+        " printf 'parent\\tshards\\tcheck\\tsince\\treason\\n' > tests/split-parents.tsv;"
+        " printf 'fake-parent\\tfake-parent-a,fake-parent-b\\tslow-split\\t0.0.83\\tx\\n' >> tests/split-parents.tsv;"
+        " printf 'id\\timplementation\\tlayer\\tsource\\tmode\\tplatform\\tbudget_seconds\\tmaterials\\tentry\\targs\\tcoverage\\texpect\\theaders\\ttier\\n' > tests/batches.tsv;"
+        " printf 'fake-parent\\tIMPLEMENTED\\tinterfaces\\ttools/check-fake-parent.cx\\tSOURCE\\tlnx/x86_64\\t55\\t-\\ttools/check-fake-parent.cx\\t-\\tx\\trc0:X\\ttree\\tdaily\\n' >> tests/batches.tsv;"
+        " printf 'fake-parent-a\\tIMPLEMENTED\\tinterfaces\\ttools/check-fake-parent-part.cx\\tSOURCE\\tlnx/x86_64\\t55\\t-\\ttools/check-fake-parent-part.cx\\t--part;a\\tx\\trc0:Y\\tproduct\\tcommit\\n' >> tests/batches.tsv;"
+        " printf 'fake-parent-b\\tIMPLEMENTED\\tinterfaces\\ttools/check-fake-parent-part.cx\\tSOURCE\\tlnx/x86_64\\t55\\t-\\ttools/check-fake-parent-part.cx\\t--part;b\\tx\\trc0:Y\\tproduct\\tcommit\\n' >> tests/batches.tsv;"
+        " printf 'parent only\\n' > tools/check-fake-parent.cx;"
+        " printf 'shard only\\n' > tools/check-fake-parent-part.cx;"
+        " git add -A; git -c user.email=a@b -c user.name=a commit -qm init;"
+        " printf '#!/bin/sh\\n"
+        " if [ -f unequal ]; then printf 'FAIL\\tslow-split.fake-parent\\torig=2\\tparts=3\\tunion=3\\n' >&2; printf 'CHECK_SLOW_SPLIT\\tok=1\\tfailed=1\\tms=1\\n'; exit 1; fi;"
+        " printf 'PASS\\tslow-split.fake-parent\\torig=2\\tparts=2\\tunion=2\\n'; printf 'CHECK_SLOW_SPLIT\\tok=2\\tfailed=0\\tms=1\\n'; exit 0\\n' > unisacc.com;"
+        " chmod +x unisacc.com;"
+        " echo READY", work);
+    pr_result r;
+    sh_c[2] = cmd;
+    if (pr_run("split-pair-fixture-init", sh_c, ".", 0, 30, &r) || r.rc != 0) {
+        sy_eprintf("check-split-pair: fixture setup failed: %s\n%.*s", r.why, (int)(r.errn > 2000 ? 2000 : r.errn), r.err ? r.err : "");
+        pr_free(&r);
+        return 1;
+    }
+    pr_free(&r);
+
+    /* (red) stage a shard-only edit and mark the group unequal -> must refuse (rc!=0) */
+    cx_fmt(cmd, sizeof cmd, "cd %s && printf 'shard edited\\n' > tools/check-fake-parent-part.cx && git add tools/check-fake-parent-part.cx && touch unequal", work);
+    sh_c[2] = cmd;
+    if (!pr_run("split-pair-red-setup", sh_c, ".", 0, 20, &r)) pr_free(&r);
+    char *chk[] = {"sh", "./unisacc.com", "tools/check-split-pair.cx", "--", "--check", work, 0};
+    int rc = pr_run("split-pair-red", chk, ".", 0, 25, &r);
+    failed += csp_ck(rc == 0 && r.rc != 0 && tx_find(r.err, (long)r.errn, "BLOCKED split-pair-drift", 24) >= 0,
+                     "red-staged-shard-without-parent-refused");
+    pr_free(&r);
+
+    /* (green) mirror the same edit onto the parent and clear the unequal marker -> allow */
+    cx_fmt(cmd, sizeof cmd, "cd %s && printf 'parent edited\\n' > tools/check-fake-parent.cx && git add tools/check-fake-parent.cx && rm -f unequal", work);
+    sh_c[2] = cmd;
+    if (!pr_run("split-pair-green-setup", sh_c, ".", 0, 20, &r)) pr_free(&r);
+    rc = pr_run("split-pair-green", chk, ".", 0, 25, &r);
+    failed += csp_ck(rc == 0 && r.rc == 0 && tx_find(r.out, (long)r.outn, "OK split-pair-equal", 19) >= 0,
+                     "green-paired-edit-allowed");
+    pr_free(&r);
+
+    /* (ignore) reset the index and stage only an unrelated path -> no group touched, allow */
+    cx_fmt(cmd, sizeof cmd, "cd %s && git reset -q --hard && printf 'x\\n' > tools/unrelated.cx && git add tools/unrelated.cx", work);
+    sh_c[2] = cmd;
+    if (!pr_run("split-pair-ignore-setup", sh_c, ".", 0, 20, &r)) pr_free(&r);
+    rc = pr_run("split-pair-ignore", chk, ".", 0, 25, &r);
+    failed += csp_ck(rc == 0 && r.rc == 0 && tx_find(r.out, (long)r.outn, "no split-group source staged", 28) >= 0,
+                     "ignore-unrelated-path");
+    pr_free(&r);
+
+    /* (red) stage a parent-only edit (shard untouched) with unequal -> refuse, proving one-sided is gated */
+    cx_fmt(cmd, sizeof cmd, "cd %s && printf 'parent twice\\n' > tools/check-fake-parent.cx && git add tools/check-fake-parent.cx && touch unequal", work);
+    sh_c[2] = cmd;
+    if (!pr_run("split-pair-red2-setup", sh_c, ".", 0, 20, &r)) pr_free(&r);
+    rc = pr_run("split-pair-red2", chk, ".", 0, 25, &r);
+    failed += csp_ck(rc == 0 && r.rc != 0, "red-staged-parent-without-shard-refused");
+    pr_free(&r);
+
+    cx_fmt(cmd, sizeof cmd, "rm -rf %s", work);
+    sh_c[2] = cmd;
+    if (!pr_run("split-pair-cleanup", sh_c, ".", 0, 20, &r)) pr_free(&r);
+    return failed ? 1 : 0;
+}
+
+int main(int argc, char **argv) {
+    long t0 = sy_now_ms();
+    int check = 0, st = 0;
+    const char *root = ".";
+    for (int i = 1; i < argc; i++) {
+        if (tx_eqz(argv[i], "--check") && !check) check = 1;
+        else if (tx_eqz(argv[i], "--selftest") && !st) st = 1;
+        else if (argv[i][0] != '-') root = argv[i];
+        else { sy_eprintf("check-split-pair: usage [-- --check|--selftest] [ROOT]\n"); return 2; }
+    }
+    if (st) {
+        int failed = csp_selftest(root);
+        sy_printf("CHECK_SPLIT_PAIR\tok=%d\tfailed=%d\tms=%ld\n", failed ? 0 : 1, failed, sy_now_ms() - t0);
+        return failed ? 1 : 0;
+    }
+    (void)check;
+    CspEntry ent[CSP_MAXP];
+    int ne = csp_load(root, ent, CSP_MAXP);
+    if (ne < 1) { sy_eprintf("check-split-pair: no split-parents rows under %s\n", root); sy_printf("CHECK_SPLIT_PAIR\tok=0\tfailed=1\tms=%ld\n", sy_now_ms() - t0); return 1; }
+    int rc = csp_check_staged(root, ent, ne);
+    sy_printf("CHECK_SPLIT_PAIR\tok=%d\tfailed=%d\tms=%ld\n", rc ? 0 : 1, rc ? 1 : 0, sy_now_ms() - t0);
+    return rc ? 1 : 0;
+}
