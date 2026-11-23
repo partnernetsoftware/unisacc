@@ -1,0 +1,46 @@
+#pragma unisa use sys.posix
+#pragma unisa use sys.proc
+#pragma unisa use sys.sysinfo
+#pragma unisa use sys.sysnums
+#pragma unisa use text.text
+/* Check the raw return and prove that a grandchild can be reaped after its parent exits. */
+static int failures;
+
+static void subreaper_check(int good, const char *name) {
+    printf("%s\t%s\n", good ? "PASS" : "FAIL", name);
+    failures += !good;
+}
+
+static int subreaper_unsupported_numbers(void) {
+    return !(sn_osx_x86_64_syp_prctl_hi | sn_osx_x86_64_syp_prctl_lo |
+             sn_osx_arm64_syp_prctl_hi | sn_osx_arm64_syp_prctl_lo |
+             sn_win_x86_64_syp_prctl_hi | sn_win_x86_64_syp_prctl_lo |
+             sn_win_arm64_syp_prctl_hi | sn_win_arm64_syp_prctl_lo |
+             sn_fallback_syp_prctl_hi | sn_fallback_syp_prctl_lo);
+}
+
+int main(void) {
+    int linux_target = tx_eqz(sy_os_name(), "linux");
+    int rc = sy_child_subreaper();
+    int checks = 2;
+    subreaper_check(subreaper_unsupported_numbers(), "subreaper.unsupported-targets-have-no-syscall");
+    subreaper_check(rc == (linux_target ? 0 : -ENOSYS), "subreaper.platform-result");
+    if (linux_target && rc == 0) {
+        int child = fork();
+        if (child == 0) {
+            int orphan = fork();
+            if (orphan == 0) _exit(47);
+            _exit(orphan < 0 ? 1 : 0);
+        }
+        int exited = 0, code = 0;
+        int first = child > 0 ? sy_wait_status(child, 0, &exited, &code, 0) : -1;
+        int parent_ok = first == child && child > 0 && exited && code == 0;
+        subreaper_check(parent_ok, "subreaper.parent-exited");
+        int orphan = parent_ok ? sy_wait_any(0, &exited, &code, 0) : -1;
+        subreaper_check(orphan > 0 && orphan != child && exited && code == 47,
+                        "subreaper.adopted-orphan");
+        checks += 2;
+    }
+    printf("CHECK_L0_SUBREAPER\tchecks=%d\tfailed=%d\n", checks, failures);
+    return failures != 0;
+}
