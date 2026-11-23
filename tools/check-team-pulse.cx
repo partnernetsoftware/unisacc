@@ -11,6 +11,7 @@
  * (ck fixture-real-repo-status-unchanged = 不移动非自己路径).
  * Ratchet hygiene: never mv/cp/rsync/stash/clean foreign untracked; use
  * git archive HEAD into a private dir or path-limited private tree.
+ * --idle fixture: #tp_age_min=N + prompt idle/busy -> TEAM_IDLE (no real tmux).
  * Ends with CHECK_TEAM_PULSE. */
 #pragma unisa use cxlib.ckassert
 #pragma unisa use cxlib.ckrun
@@ -346,6 +347,55 @@ int main(void) {
         ck(rc != 0 && ckk_has(out, (int)sizeof out, "FREEZE_WATCH\tHARDLINK_TREES\t1\t") &&
            ckk_has(out, (int)sizeof out, "kind=hardlink-trees") &&
            ckk_has(out, (int)sizeof out, "FREEZE_WATCH\tVIOLATION\t"), "fw-hardlink-old-violation");
+    }
+
+
+    /* ---- --idle mode (fake capture; no real tmux) ---- */
+    {
+        char ifx[950], itab[950];
+        if (cx_fmt(ifx, sizeof ifx, "%s/idle-fixture.txt", root) ||
+            cx_fmt(itab, sizeof itab, "%s/idle-wins.tsv", root)) return 2;
+        if (cx_fmt(cmd, sizeof cmd,
+            "printf 'window\\tmodel\\tlane\\twrite_prefix\\tkind\\tgit_ref\\n"
+            "w-idle-quiet\\tgpt-sol\\tmain\\t-\\tanalysis\\t-\\n"
+            "w-idle-fresh\\tgpt-sol\\tmain\\t-\\tanalysis\\t-\\n"
+            "w-busy-work\\tgpt-sol\\tmain\\t-\\tanalysis\\t-\\n' > '%s'", itab)) return 2;
+        ck(ckk_sh_t("check-team-pulse", cmd, out, (int)sizeof out, 10) == 0, "idle-seed-table");
+        {
+            static const char ibody[] =
+                "=== PANE w-idle-quiet ===\n"
+                "#tp_age_min=15\n"
+                "last reply\n"
+                "\xe2\x80\xba Ask Codex to do anything\n"
+                "Context 11% left \xc2\xb7 Context 89% used\n"
+                "=== PANE w-idle-fresh ===\n"
+                "#tp_age_min=3\n"
+                "last reply\n"
+                "\xe2\x80\xba Ask Codex to do anything\n"
+                "Context 11% left \xc2\xb7 Context 89% used\n"
+                "=== PANE w-busy-work ===\n"
+                "#tp_age_min=20\n"
+                "\xe2\x80\xa2 Working (15s \xe2\x80\xa2 esc to interrupt)\n"
+                "Context 40% left \xc2\xb7 Context 60% used\n";
+            if (sy_write_file(ifx, ibody, (int64_t)(sizeof ibody - 1), 0600)) return 2;
+        }
+        if (cx_fmt(cmd, sizeof cmd,
+            "sh '%s/unisacc.com' '%s/tools/team-pulse.cx' -- --idle --idle-min 10 --windows-table '%s' --fixture '%s'",
+            cwd, cwd, itab, ifx)) return 2;
+        out[0] = 0;
+        rc = ckk_sh_t("check-team-pulse", cmd, out, (int)sizeof out, 55);
+        ck(rc == 0, "idle-rc");
+        ck(ckk_has(out, (int)sizeof out, "TEAM_IDLE\tw-idle-quiet\tIDLE\tage_min=15"), "idle-quiet");
+        ck(ckk_has(out, (int)sizeof out, "TEAM_IDLE\tw-idle-fresh\tBUSY\tage_min=3"), "idle-fresh-busy");
+        ck(ckk_has(out, (int)sizeof out, "TEAM_IDLE\tw-busy-work\tBUSY\tage_min=20"), "idle-working-busy");
+        ck(ckk_has(out, (int)sizeof out, "TEAM_IDLE_SUMMARY\tidle=1\tbusy=2"), "idle-summary");
+        if (cx_fmt(cmd, sizeof cmd,
+            "sh '%s/unisacc.com' '%s/tools/team-pulse.cx' -- --idle --idle-min 2 --windows-table '%s' --fixture '%s'",
+            cwd, cwd, itab, ifx)) return 2;
+        out[0] = 0;
+        rc = ckk_sh_t("check-team-pulse", cmd, out, (int)sizeof out, 55);
+        ck(rc == 0 && ckk_has(out, (int)sizeof out, "TEAM_IDLE\tw-idle-fresh\tIDLE\tage_min=3") &&
+           ckk_has(out, (int)sizeof out, "TEAM_IDLE_SUMMARY\tidle=2\tbusy=1"), "idle-min-relax-green");
     }
 
     sy_remove_all(root);
