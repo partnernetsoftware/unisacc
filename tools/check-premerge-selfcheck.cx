@@ -7,6 +7,7 @@
  * missing overlay, patch that does not apply, --check-timeout above 55, nonexistent --repo.
  * The tool runs are independent, so they are queued and started together to keep the whole check inside one 55 s command. */
 #pragma unisa use cxlib.ckrun
+#pragma unisa use cxlib.faultinj
 #pragma unisa use sys.env
 #pragma unisa use sys.fs
 #pragma unisa use mem.bytes
@@ -16,6 +17,7 @@
 static int bad, checks;
 static char g_tmp[1024], qs[30000];
 static int qn;
+#define ok(c, w) ckk_ok((c), (w))
 static int sh(const char *script, char *out, int cap, int secs) { return ckk_sh_t("check-premerge-selfcheck", script, out, cap, secs); }
 
 /* append one background shell piece to the batch */
@@ -111,6 +113,26 @@ int main(void) {
         if (cx_write(sc, "CX_FOO\tok\n", 10)) return 2;
     }
 
+    /* fourth fixture set (item 11): two copies of r whose tree has a stand-in tools/precommit-preview.cx, one answering blocked=0 and one blocked=2 */
+    const char *T_G = "good", *T_PA = "pv-ok", *T_PB = "pv-bad"; /* receipt tags of the item-11 runs */
+    {   static const char *pvsrc[2] = {
+            "int main(void){ printf(\"%s\\n\", \"GATE\\tfake\\tPASS\\tok\\t-\"); printf(\"%s\\n\", \"PRECOMMIT_PREVIEW\\tblocked=0\"); return 0; }\n",
+            "int main(void){ printf(\"%s\\n\", \"GATE\\tratchet:fake\\tBLOCK\\tfake gate refuses reason=x\\t-\"); printf(\"%s\\n\", \"PRECOMMIT_PREVIEW\\tblocked=2\"); return 1; }\n" };
+        static const char *pvdir[2] = { "rp-ok", "rp-bad" };
+        int pi;
+        for (pi = 0; pi < 2; pi++) {
+            char pp[1300], sc4[1800];
+            cx_fmt(sc4, sizeof sc4, "cd %s && rm -rf %s && cp -a r %s", tmp, pvdir[pi], pvdir[pi]);
+            rc = ckk_sh_t("check-premerge-selfcheck", sc4, out, sizeof out, 30);
+            if (rc != 0) { printf("fixture 4 setup failed: %.300s\n", out); return 2; }
+            cx_fmt(pp, sizeof pp, "%s/%s/tools/precommit-preview.cx", tmp, pvdir[pi]);
+            if (cx_write(pp, pvsrc[pi], strlen(pvsrc[pi]))) return 2;
+            cx_fmt(sc4, sizeof sc4, "cd %s/%s && git add -A && git -c user.name=x -c user.email=x@x commit -qm pv", tmp, pvdir[pi]);
+            rc = ckk_sh_t("check-premerge-selfcheck", sc4, out, sizeof out, 30);
+            if (rc != 0) { printf("fixture 4 commit failed: %.300s\n", out); return 2; }
+        }
+    }
+
     /* warm the compile cache once so the parallel runs start from the cached binary */
     cx_fmt(sc, sizeof sc, "TMPDIR=%s/td sh ./unisacc.com tools/premerge-selfcheck.cx -- --no-such-argument >/dev/null 2>&1; true", tmp);
     sh(sc, 0, 0, 30);
@@ -153,6 +175,8 @@ int main(void) {
     qraw("( R=$(pwd); mkdir \"$T/cw\" && cd \"$T/cw\" && git init -q . && echo x > a && git add -A && git -c user.name=x -c user.email=x@x commit -qm c0 && echo u > u && "
          "n1=$(git rev-list --count HEAD) && rc=0 && TMPDIR=\"$T/td\" sh \"$R/unisacc.com\" \"$R/tools/premerge-selfcheck.cx\" -- --patch \"$T/good.patch\" --repo \"$T/no-such-repo\" --check true --out \"$T/cw.rec\" >/dev/null 2>&1 || rc=$?; "
          "n2=$(git rev-list --count HEAD) && test \"$rc\" = 2 && test \"$n1\" = \"$n2\" && test -f u && git status --porcelain | grep -q '^?? u' && test ! -e \"$T/cw.rec\" && echo CWD_UNTOUCHED > \"$T/o/cw.txt\" ) & ");
+    q("pv-ok", "--patch %s/good.patch --repo %s/rp-ok --base main --check true --out %s/pv-ok.rec");
+    q("pv-bad", "--patch %s/good.patch --repo %s/rp-bad --base main --check true --out %s/pv-bad.rec");
     q("nobase", "--patch %s/good.patch --repo %s/r --check true --out %s/nobase.rec");
     q("lit-ok", "--patch %s/lit-ok.patch --repo %s/r --base main --check true --sample %s/sample-ok.txt --out %s/lit-ok.rec");
     q("lit-nosample", "--patch %s/lit-ok.patch --repo %s/r --base main --check true --out %s/lit-ns.rec");
@@ -161,58 +185,66 @@ int main(void) {
     q("lit-prod", "--patch %s/lit-prod.patch --repo %s/r --base main --check true --out %s/lit-prod.rec");
     q("lit-noprod", "--patch %s/lit-noprod.patch --repo %s/r --base main --check true --out %s/lit-noprod.rec");
     q("lit-none", "--patch %s/lit-none.patch --repo %s/r --base main --check true --out %s/lit-none.rec");
-    /* inside a git hook GIT_DIR, GIT_INDEX_FILE and GIT_WORK_TREE name the outer repository: the reads of the source repository must not see them */
-    qraw("( GIT_DIR=\"$T/no-outer-gitdir\" GIT_INDEX_FILE=\"$T/no-outer-index\" GIT_WORK_TREE=\"$T/no-outer-tree\" TMPDIR=\"$T/td\" sh ./unisacc.com tools/premerge-selfcheck.cx -- "
-         "--patch \"$T/good.patch\" --repo \"$T/r\" --base main --check true --out \"$T/hk.rec\" > \"$T/o/hk.txt\" 2>&1; echo $? > \"$T/o/hk.rc\" ) & ");
+    /* inside a git hook GIT_DIR, GIT_INDEX_FILE and GIT_WORK_TREE name the outer repository: the reads of the source repository must not see them
+       (cxlib.faultinj sets all three to a path that does not exist, so a read that honours them fails) */
+    {   char hkp[3000], hkc[3600];
+        if (fi_gitenv(1, 0, hkp, sizeof hkp) != 0 ||
+            cx_fmt(hkc, sizeof hkc, "( %sTMPDIR=\"$T/td\" sh ./unisacc.com tools/premerge-selfcheck.cx -- "
+                   "--patch \"$T/good.patch\" --repo \"$T/r\" --base main --check true --out \"$T/hk.rec\" > \"$T/o/hk.txt\" 2>&1; echo $? > \"$T/o/hk.rc\" ) & ", hkp)) exit(2);
+        qraw(hkc);
+    }
     flush();
 
-    ckk_ok(rcof("good") == 0 && has("good", "SELFCHECK_SUMMARY patch_sha256=") && has("good", "verdict=PASS"), "good patch: verdict PASS, rc 0");
-    ckk_ok(has("good", "item=1 name=real-entry verdict=PASS") && has("good", "item=2 name=git-failure verdict=PASS") && has("good", "item=4 name=marker-flip verdict=PASS"), "good patch: items 1, 2 and 4 each PASS on a real run");
-    ckk_ok(has("good", "item=5 name=negative-input verdict=PASS") && has("good", "item=8 name=paths-and-switches verdict=PASS") && has("p7c", "item=7 name=malformed-input verdict=PASS"), "good patch: items 5 and 8 PASS, and a probe that refuses every malformed input passes item 7");
-    ckk_ok(rcof("del") == 1 && has("del", "item=6 name=deleted-guard verdict=FAIL"), "deleted guard line without a declaration fails");
-    ckk_ok(has("del2", "item=6 name=deleted-guard verdict=PASS") && !has("del2", "item=6 name=deleted-guard verdict=FAIL"), "the same deletion with a declared reason passes item 6");
-    ckk_ok(rcof("path") == 1 && has("path", "item=8 name=hardcoded-path verdict=FAIL"), "a check that hard-codes a path outside the tree fails item 8");
-    ckk_ok(has("p7a", "item=7 name=malformed-input verdict=FAIL") && has("p7a", "accepted or crashed on 'empty'"), "a probe that accepts every input fails item 7, empty input included");
-    ckk_ok(has("p7b", "item=7 name=malformed-input verdict=FAIL") && !has("p7b", "accepted or crashed on 'empty'"), "a probe that refuses empty input but accepts others is still caught");
-    ckk_ok(rcof("stub") == 1 && has("stub", "verdict=FAIL"), "stub patch: verdict FAIL, rc 1");
-    ckk_ok(has("stub", "item=1 name=stub-output verdict=FAIL") && has("stub", "item=1 name=real-entry verdict=FAIL"), "stub patch: fixed ok=19 output and no real entry are both caught");
-    ckk_ok(has("stub", "item=4 name=marker-flip verdict=FAIL"), "stub patch: a completion marker that no check verifies is caught");
-    ckk_ok(rcof("missing") == 2 && has("missing", "REFUSE"), "a missing patch is a refusal, not a pass");
-    ckk_ok(has("two", "item=6 name=deleted-guard verdict=PASS") && !has("two", "item=6 name=deleted-guard verdict=FAIL"), "every deleted guard line is matched against the declaration table, not only the first");
-    ckk_ok(has("tsv", "item=6 name=deleted-guard verdict=FAIL") && has("tsv", "tests/batches.tsv"), "a deleted batches row without a declaration fails item 6");
-    ckk_ok(has("tsv2", "item=6 name=deleted-guard verdict=PASS"), "the same deleted row with a declared reason passes item 6");
-    ckk_ok(has("stale", "item=6 name=deleted-guard-stale verdict=FAIL"), "a patch built on a base that main has moved past fails the stale-base check");
-    ckk_ok(has("nonneg", "item=5 name=negative-input verdict=FAIL"), "a changed source with no added negative-input check line fails item 5");
-    ckk_ok(has("sw-force", "item=8 name=escape-switch verdict=FAIL") && has("sw-force", "--force"), "a source that adds a --force switch fails item 8");
-    ckk_ok(has("sw-mutate", "item=8 name=escape-switch verdict=FAIL") && has("sw-mutate", "--mutate"), "a source that adds a --mutate switch fails item 8");
-    ckk_ok(has("sw-skip", "item=8 name=escape-switch verdict=FAIL") && has("sw-skip", "--skip"), "a source that adds a --skip switch fails item 8");
-    ckk_ok(has("sw-unsafe", "item=8 name=escape-switch verdict=FAIL") && has("sw-unsafe", "--unsafe"), "a source that adds an --unsafe switch fails item 8");
-    ckk_ok(has("sw-bypass", "item=8 name=escape-switch verdict=FAIL") && has("sw-bypass", "--bypass"), "a source that adds a --bypass switch fails item 8");
-    ckk_ok(has("g1", "item=3 name=guard-closure verdict=FAIL") && has("g1", "no added check line names path class"), "a guard patch whose checks name no path class fails item 3");
-    ckk_ok(has("g2", "item=3 name=guard-closure verdict=PASS") && has("g2", "item=7 name=malformed-input verdict=UNMEASURED"), "a guard patch naming every class passes item 3, and item 7 without --probe is UNMEASURED");
-    ckk_ok(has("i2", "item=2 name=git-failure verdict=FAIL"), "a check that swallows a git failure and stays green fails item 2");
+    ok(rcof("good") == 0 && has("good", "SELFCHECK_SUMMARY patch_sha256=") && has("good", "verdict=PASS"), "good patch: verdict PASS, rc 0");
+    ok(has("good", "item=1 name=real-entry verdict=PASS") && has("good", "item=2 name=git-failure verdict=PASS") && has("good", "item=4 name=marker-flip verdict=PASS"), "good patch: items 1, 2 and 4 each PASS on a real run");
+    ok(has("good", "item=5 name=negative-input verdict=PASS") && has("good", "item=8 name=paths-and-switches verdict=PASS") && has("p7c", "item=7 name=malformed-input verdict=PASS"), "good patch: items 5 and 8 PASS, and a probe that refuses every malformed input passes item 7");
+    ok(rcof("del") == 1 && has("del", "item=6 name=deleted-guard verdict=FAIL"), "deleted guard line without a declaration fails");
+    ok(has("del2", "item=6 name=deleted-guard verdict=PASS") && !has("del2", "item=6 name=deleted-guard verdict=FAIL"), "the same deletion with a declared reason passes item 6");
+    ok(rcof("path") == 1 && has("path", "item=8 name=hardcoded-path verdict=FAIL"), "a check that hard-codes a path outside the tree fails item 8");
+    ok(has("p7a", "item=7 name=malformed-input verdict=FAIL") && has("p7a", "accepted or crashed on 'empty'"), "a probe that accepts every input fails item 7, empty input included");
+    ok(has("p7b", "item=7 name=malformed-input verdict=FAIL") && !has("p7b", "accepted or crashed on 'empty'"), "a probe that refuses empty input but accepts others is still caught");
+    ok(rcof("stub") == 1 && has("stub", "verdict=FAIL"), "stub patch: verdict FAIL, rc 1");
+    ok(has("stub", "item=1 name=stub-output verdict=FAIL") && has("stub", "item=1 name=real-entry verdict=FAIL"), "stub patch: fixed ok=19 output and no real entry are both caught");
+    ok(has("stub", "item=4 name=marker-flip verdict=FAIL"), "stub patch: a completion marker that no check verifies is caught");
+    ok(rcof("missing") == 2 && has("missing", "REFUSE"), "a missing patch is a refusal, not a pass");
+    ok(has("two", "item=6 name=deleted-guard verdict=PASS") && !has("two", "item=6 name=deleted-guard verdict=FAIL"), "every deleted guard line is matched against the declaration table, not only the first");
+    ok(has("tsv", "item=6 name=deleted-guard verdict=FAIL") && has("tsv", "tests/batches.tsv"), "a deleted batches row without a declaration fails item 6");
+    ok(has("tsv2", "item=6 name=deleted-guard verdict=PASS"), "the same deleted row with a declared reason passes item 6");
+    ok(has("stale", "item=6 name=deleted-guard-stale verdict=FAIL"), "a patch built on a base that main has moved past fails the stale-base check");
+    ok(has("nonneg", "item=5 name=negative-input verdict=FAIL"), "a changed source with no added negative-input check line fails item 5");
+    ok(has("sw-force", "item=8 name=escape-switch verdict=FAIL") && has("sw-force", "--force"), "a source that adds a --force switch fails item 8");
+    ok(has("sw-mutate", "item=8 name=escape-switch verdict=FAIL") && has("sw-mutate", "--mutate"), "a source that adds a --mutate switch fails item 8");
+    ok(has("sw-skip", "item=8 name=escape-switch verdict=FAIL") && has("sw-skip", "--skip"), "a source that adds a --skip switch fails item 8");
+    ok(has("sw-unsafe", "item=8 name=escape-switch verdict=FAIL") && has("sw-unsafe", "--unsafe"), "a source that adds an --unsafe switch fails item 8");
+    ok(has("sw-bypass", "item=8 name=escape-switch verdict=FAIL") && has("sw-bypass", "--bypass"), "a source that adds a --bypass switch fails item 8");
+    ok(has("g1", "item=3 name=guard-closure verdict=FAIL") && has("g1", "no added check line names path class"), "a guard patch whose checks name no path class fails item 3");
+    ok(has("g2", "item=3 name=guard-closure verdict=PASS") && has("g2", "item=7 name=malformed-input verdict=UNMEASURED"), "a guard patch naming every class passes item 3, and item 7 without --probe is UNMEASURED");
+    ok(has("i2", "item=2 name=git-failure verdict=FAIL"), "a check that swallows a git failure and stays green fails item 2");
     cx_fmt(sc, sizeof sc, "T=%s; %s", tmp, "test \"$(sha256sum \"$T/good.patch\" | cut -d' ' -f1)\" = \"$(sed -n 's/.*patch_sha256=\\([0-9a-f]*\\).*/\\1/p' \"$T/good.rec\" | head -n 1)\"");
-    ckk_ok(sh(sc, 0, 0, 10) == 0, "receipt file carries the sha256 of the patch");
+    ok(sh(sc, 0, 0, 10) == 0, "receipt file carries the sha256 of the patch");
     cx_fmt(sc, sizeof sc, "T=%s; %s", tmp, "test \"$(grep -o 'base_commit=[0-9a-f]*' \"$T/good.rec\" | cut -d= -f2)\" = \"$(git -C \"$T/r\" rev-parse main)\" && grep -q 'SELFCHECK_INPUT check0=git rev-parse' \"$T/good.rec\" && grep -q 'tool_sha256=' \"$T/good.rec\"");
-    ckk_ok(sh(sc, 0, 0, 10) == 0, "the receipt records the base commit, the --check commands and the tool identity");
-    ckk_ok(has("ci", "CI_OK"), "the receipt's tool_sha256 is the sha256 of the tool's own source, also from another working directory");
-    ckk_ok(has("pre", "PRE_GONE"), "an old receipt at --out is removed by a refused run");
-    ckk_ok(has("cw", "CWD_UNTOUCHED"), "a nonexistent --repo is refused (rc 2) and the caller's repository gets no commit and keeps its untracked files");
-    ckk_ok(has("hk", "SELFCHECK_SUMMARY patch_sha256=") && !has("hk", "REFUSE"), "with GIT_DIR, GIT_INDEX_FILE and GIT_WORK_TREE set to an outer repository (a git hook) the source repository is still read correctly");
-    ckk_ok(has("nobase", "SELFCHECK_SUMMARY patch_sha256=") && has("nobase", "base_commit=") && !has("nobase", "REFUSE"), "without --base the default revision main is used");
-    ckk_ok(has("b1", "REFUSE repo or base revision invalid"), "an invalid --base is refused before any tree is built");
-    ckk_ok(has("o1", "REFUSE overlay copy failed") && !has("o1", "SELFCHECK"), "a missing --overlay directory is refused, not ignored");
-    ckk_ok(has("a1", "REFUSE patch does not apply") && !has("a1", "SELFCHECK"), "a patch that does not apply to the base is refused, no receipt");
-    ckk_ok(has("t1", "REFUSE check-timeout outside"), "--check-timeout above the 55 s command bound is refused");
-    ckk_ok(has("lit-ok", "item=10 name=literal-sample verdict=PASS") && !has("lit-ok", "item=10 name=literal-not-in-sample"), "item 10: a literal whose decoded bytes (a real tab) occur in the sample passes");
-    ckk_ok(has("lit-nosample", "item=10 name=literal-sample verdict=UNMEASURED") && rcof("lit-nosample") == 3, "item 10: added matching literals and no sample is UNMEASURED, rc 3");
-    ckk_ok(rcof("lit-bs") == 1 && has("lit-bs", "item=10 name=literal-not-in-sample verdict=FAIL") && has("lit-bs", "bytes 43585f464f4f5c746f6b"), "item 10: a literal backslash-t (read wrongly as a tab) is not in the sample and is printed byte for byte");
-    ckk_ok(rcof("lit-need") == 1 && has("lit-need", "item=10 name=literal-not-in-sample verdict=FAIL") && has("lit-need", "NEED tape"), "item 10: a literal that no real output ever carried fails");
-    ckk_ok(has("lit-prod", "item=10 name=literal-sample verdict=PASS") && has("lit-prod", "1 proved by the producer"), "item 10: a refusal marker identical to the producer's source text is proved without a sample");
-    ckk_ok(rcof("lit-noprod") == 1 && has("lit-noprod", "item=10 name=literal-not-in-sample verdict=FAIL") && has("lit-noprod", "REFUSE-W"), "item 10: a refusal marker no producer source carries fails");
-    ckk_ok(has("lit-none", "item=10 name=literal-sample verdict=NA"), "item 10: a patch with no literal in a matching call is NA");
+    ok(sh(sc, 0, 0, 10) == 0, "the receipt records the base commit, the --check commands and the tool identity");
+    ok(has("ci", "CI_OK"), "the receipt's tool_sha256 is the sha256 of the tool's own source, also from another working directory");
+    ok(has("pre", "PRE_GONE"), "an old receipt at --out is removed by a refused run");
+    ok(has("cw", "CWD_UNTOUCHED"), "a nonexistent --repo is refused (rc 2) and the caller's repository gets no commit and keeps its untracked files");
+    ok(has("hk", "SELFCHECK_SUMMARY patch_sha256=") && !has("hk", "REFUSE"), "with GIT_DIR, GIT_INDEX_FILE and GIT_WORK_TREE set to an outer repository (a git hook) the source repository is still read correctly");
+    ok(has("nobase", "SELFCHECK_SUMMARY patch_sha256=") && has("nobase", "base_commit=") && !has("nobase", "REFUSE"), "without --base the default revision main is used");
+    ok(has(T_G, "item=11 name=commit-gate-preview verdict=NA"), "item 11: a tree without tools/precommit-preview.cx is NA");
+    ok(has(T_PA, "item=11 name=commit-gate-preview verdict=PASS") && has(T_PA, "blocked=0 over") && has(T_PA, "head="), "item 11: the gate answering blocked=0 passes and the receipt names the head");
+    ok(rcof(T_PB) == 1 && has(T_PB, "commit-gate-preview") && has(T_PB, "blocked=2 over") && has(T_PB, "BLOCK"), "item 11: the gate answering blocked=2 fails and the first BLOCK row is quoted");
+    ok(has("b1", "REFUSE repo or base revision invalid"), "an invalid --base is refused before any tree is built");
+    ok(has("o1", "REFUSE overlay copy failed") && !has("o1", "SELFCHECK"), "a missing --overlay directory is refused, not ignored");
+    ok(has("a1", "REFUSE patch does not apply") && !has("a1", "SELFCHECK"), "a patch that does not apply to the base is refused, no receipt");
+    ok(has("t1", "REFUSE check-timeout outside"), "--check-timeout above the 55 s command bound is refused");
+    ok(has("lit-ok", "item=10 name=literal-sample verdict=PASS") && !has("lit-ok", "item=10 name=literal-not-in-sample"), "item 10: a literal whose decoded bytes (a real tab) occur in the sample passes");
+    ok(has("lit-nosample", "item=10 name=literal-sample verdict=UNMEASURED") && rcof("lit-nosample") == 3, "item 10: added matching literals and no sample is UNMEASURED, rc 3");
+    ok(rcof("lit-bs") == 1 && has("lit-bs", "item=10 name=literal-not-in-sample verdict=FAIL") && has("lit-bs", "bytes 43585f464f4f5c746f6b"), "item 10: a literal backslash-t (read wrongly as a tab) is not in the sample and is printed byte for byte");
+    ok(rcof("lit-need") == 1 && has("lit-need", "item=10 name=literal-not-in-sample verdict=FAIL") && has("lit-need", "NEED tape"), "item 10: a literal that no real output ever carried fails");
+    ok(has("lit-prod", "item=10 name=literal-sample verdict=PASS") && has("lit-prod", "1 proved by the producer"), "item 10: a refusal marker identical to the producer's source text is proved without a sample");
+    ok(rcof("lit-noprod") == 1 && has("lit-noprod", "item=10 name=literal-not-in-sample verdict=FAIL") && has("lit-noprod", "REFUSE-W"), "item 10: a refusal marker no producer source carries fails");
+    ok(has("lit-none", "item=10 name=literal-sample verdict=NA"), "item 10: a patch with no literal in a matching call is NA");
     cx_fmt(sc, sizeof sc, "T=%s; %s", tmp, "! ls \"$T/td\" | grep -q -E '^(premerge-selfcheck|unisacc-privrepo)-'");
-    ckk_ok(sh(sc, 0, 0, 10) == 0, "no private tree is left in TMPDIR after passes and refusals");
+    ok(sh(sc, 0, 0, 10) == 0, "no private tree is left in TMPDIR after passes and refusals");
 
     cx_fmt(sc, sizeof sc, "rm -rf %s", tmp); sh(sc, 0, 0, 20);
     checks = ckk_okcount(&bad);

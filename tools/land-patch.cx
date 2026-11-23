@@ -1,0 +1,284 @@
+/* land-patch.cx -- the integrator's landing step: apply reviewed patches, then add shared-table rows one by one.
+ *
+ *   sh ./unisacc.com tools/land-patch.cx -- [--root R] --patch F [--patch F2 ...] [--rows-dir DIR] [--preview-head H] [--dry]
+ *
+ * Why: a patch that touches a shared table (tests/batches.tsv, tests/coverage.tsv, tests/tools-compile-sources.tsv) as
+ * a whole block silently replaces the rows another window added since the patch was cut.  This tool never applies those
+ * three tables as blocks:
+ *   (1) every patch is applied with the three tables excluded (git apply --exclude), after a --check of all patches;
+ *   (2) the table rows come from DIR/rows-batches.tsv, DIR/rows-coverage.tsv and DIR/rows-tools-compile-sources.tsv
+ *       (any subset; a row = one line, key = first tab column).  Each row is appended to its table: key absent ->
+ *       appended (a missing final newline of the table is added first), key present with the identical row -> skipped
+ *       (replay is a no-op), key present with a different row -> REFUSE, nothing written.  Two patches landed one
+ *       after the other keep the rows of both, in landing order;
+ *   (3) new tools (a .cx added under tools/ by a patch, or listed in rows-tools-compile-sources.tsv) are registered
+ *       by tools/register.cx --tool, which keeps the sources table in C byte order and computes the tools-compile-NNN
+ *       batch rows from the shard count; tools-compile-NNN rows of rows-batches.tsv are therefore not taken as given;
+ *   (4) PRECOMMIT_PREVIEW: with --preview-head H, when the checkout HEAD differs from H (the head the patch was
+ *       rehearsed against) tools/precommit-preview.cx is run once over every touched file and its verdict printed.
+ * Output: LAND_* lines; the last is LAND_SUMMARY.  Exit 0 landed (or --dry: would land), 1 refused / failed (every
+ * change of this call is reversed), 2 usage.  Nothing is committed; a path the patch creates and a new tool enter the index as intent-to-add (" A", content unstaged) so that register.cx
+ * can count them; the undo on failure touches only the paths this call added.  Commit with tools/commit-own.cx.
+ * After a landing run: sh ./unisacc.com tools/derive.cx -- --write --only table-index (printed as LAND_NEXT). */
+#pragma unisa use cxlib.ckrun
+#pragma unisa use sys.fs
+#pragma unisa use sys.env
+#pragma unisa use mem.heap
+#pragma unisa use mem.bytes
+#pragma unisa use text.text
+/* every copy is bounded: the destination capacity travels with it */
+#define LP_CP(d, cap, s, n) do { if (mm_copy((d), (long)(cap), (s), (long)(n)) != 0) { fprintf(stderr, "land-patch: copy out of bound\n"); exit(2); } } while (0)
+
+#define LP_MAXP 16
+#define LP_MAXF 256
+static const char *const LP_TABLE[3] = { "tests/batches.tsv", "tests/coverage.tsv", "tests/tools-compile-sources.tsv" };
+static const char *const LP_ROWS[3] = { "rows-batches.tsv", "rows-coverage.tsv", "rows-tools-compile-sources.tsv" };
+static const char *g_root = ".", *g_rows, *g_head, *g_patch[LP_MAXP];
+static int g_np, g_dry;
+static char *g_files[LP_MAXF]; static int g_nf;      /* every touched path (patch files, tables, new tools) */
+static char *g_newtool[LP_MAXF]; static int g_nnew;  /* tools to register */
+static char *g_created[LP_MAXF]; static int g_ncr;   /* every file a patch creates (entered in the index as intent-to-add after the apply) */
+static int g_intent;                                 /* 1 once those entries were added (undone by fail) */
+static char g_ours[2 * LP_MAXF];                     /* per created/new-tool slot: this call put the path into the index (it was untracked before) */
+static char *g_orig[3]; static size_t g_orign[3];    /* original table bytes, restored on failure */
+static int g_applied;                                /* patches applied so far (for reversal) */
+
+/* inside a git hook git exports GIT_INDEX_FILE and friends: every script starts by dropping them, so git -C ROOT means ROOT */
+static int sh(const char *s, char *out, int cap, int secs) {
+    static char b[9600]; if (cx_fmt(b, sizeof b, "unset GIT_DIR GIT_INDEX_FILE GIT_WORK_TREE GIT_OBJECT_DIRECTORY GIT_COMMON_DIR GIT_NAMESPACE GIT_INTERNAL_SUPER_PREFIX; %s", s)) return -1;
+    return ckk_sh_t("land-patch", b, out, cap, secs);
+}
+static void say(const char *tag, const char *fmt, ...) {
+    va_list ap; char d[2000];
+    va_start(ap, fmt); vsnprintf(d, sizeof d, fmt, ap); va_end(ap);
+    printf("%s\t%s\n", tag, d);
+}
+static void addfile(const char *p) {
+    int i; for (i = 0; i < g_nf; i++) if (!strcmp(g_files[i], p)) return;
+    if (g_nf < LP_MAXF) g_files[g_nf++] = strdup(p);
+}
+static void addnew(const char *p) {
+    int i; for (i = 0; i < g_nnew; i++) if (!strcmp(g_newtool[i], p)) return;
+    if (g_nnew < LP_MAXF) g_newtool[g_nnew++] = strdup(p);
+}
+static void addcreated(const char *p) {
+    int i; for (i = 0; i < g_ncr; i++) if (!strcmp(g_created[i], p)) return;
+    if (g_ncr < LP_MAXF) g_created[g_ncr++] = strdup(p);
+}
+/* intent-to-add, path by path.  A path already in the index (tracked, staged, or an intent-to-add of an earlier step) is left exactly
+ * as it is and not recorded; only a path that was untracked before this call is added with "git add -N" and marked ours.  The undo
+ * touches only the marked paths, and only while they still are intent-to-add (" A"): a path the caller staged meanwhile keeps its
+ * staging.  0, or the first git rc. */
+static char *rootpath(const char *rel);
+static int intent(int undo, const char *qroot, char *out, int cap) {
+    char sc[9000], q[4400]; int i, rc = 0;
+    out[0] = 0;
+    for (i = 0; i < g_ncr + g_nnew; i++) {
+        const char *p = i < g_ncr ? g_created[i] : g_newtool[i - g_ncr];
+        if (ckk_shq(q, sizeof q, p)) return -1;
+        if (undo) {
+            if (!g_ours[i]) continue;
+            if (cx_fmt(sc, sizeof sc, "[ \"$(git -C %s status --porcelain -- %s | cut -c1-2)\" = ' A' ] && git -C %s rm --cached -q -- %s", qroot, q, qroot, q)) return -1;
+            (void)sh(sc, out, cap, 30);
+            g_ours[i] = 0;
+            continue;
+        }
+        if (sy_exists(rootpath(p)) != 1) continue;
+        if (cx_fmt(sc, sizeof sc, "git -C %s ls-files --error-unmatch -- %s >/dev/null 2>&1", qroot, q)) return -1;
+        if (sh(sc, out, cap, 30) == 0) continue;
+        if (cx_fmt(sc, sizeof sc, "git -C %s add -N -- %s 2>&1", qroot, q)) return -1;
+        rc = sh(sc, out, cap, 30);
+        if (rc != 0) return rc;
+        g_ours[i] = 1;
+    }
+    return 0;
+}
+static char *rootpath(const char *rel) {
+    static char b[4400]; if (cx_fmt(b, sizeof b, "%s/%s", g_root, rel)) { fprintf(stderr, "land-patch: path too long\n"); exit(2); }
+    return b;
+}
+static int is_table(const char *p) { int i; for (i = 0; i < 3; i++) if (!strcmp(p, LP_TABLE[i])) return 1; return 0; }
+
+/* restore every table from its saved bytes, reverse applied patches, then report */
+static int fail(const char *step, const char *why) {
+    int i; char sc[9000], q[4400], out[2000];
+    if (g_intent) { char r0[4400]; if (!ckk_shq(r0, sizeof r0, g_root)) intent(1, r0, out, sizeof out); g_intent = 0; }
+    for (i = 0; i < 3; i++) if (g_orig[i]) cx_write(rootpath(LP_TABLE[i]), g_orig[i], g_orign[i]);
+    for (i = g_applied - 1; i >= 0; i--) {
+        if (ckk_shq(q, sizeof q, g_patch[i])) continue;
+        {   char r[4400]; if (ckk_shq(r, sizeof r, g_root)) continue;
+            cx_fmt(sc, sizeof sc, "git -C %s apply -R --exclude=%s --exclude=%s --exclude=%s %s", r, LP_TABLE[0], LP_TABLE[1], LP_TABLE[2], q); }
+        sh(sc, out, sizeof out, 30);
+    }
+    say("LAND_REFUSE", "step=%s %s", step, why);
+    say("LAND_SUMMARY", "status=REFUSED step=%s reversed=%d", step, g_applied);
+    return 1;
+}
+
+/* the first tab column of line [l, l+n) */
+static int keylen(const char *l, long n) { long k = 0; while (k < n && l[k] != '\t') k++; return (int)k; }
+
+/* plan the rows of table T from ROWS: appends the new ones to *add (grown buffer); 0 ok, 1 conflict (message in why) */
+static int plan_rows(int t, const char *tb, size_t tn, const char *rows, size_t rn, char **add, size_t *an, int *nnew, int *nskip, char *why, int wcap) {
+    size_t at = 0; *nnew = *nskip = 0;
+    while (at < rn) {
+        const char *l = rows + at; size_t e = at; int kl; const char *tl; size_t ta;
+        while (e < rn && rows[e] != '\n') e++;
+        {   size_t ln = e - at; at = e < rn ? e + 1 : e;
+            if (ln == 0) continue;
+            kl = keylen(l, (long)ln);
+            if (t == 0 && kl > 14 && !memcmp(l, "tools-compile-", 14)) continue;   /* register.cx computes these */
+            if (t == 2) { if (kl > 3 && !memcmp(l + kl - 3, ".cx", 3)) { char p[1024]; if (kl < (int)sizeof p) { LP_CP(p, sizeof p, l, kl); p[kl] = 0; addnew(p); } continue; } }   /* the row is "PATH<TAB>regular": the key ends in .cx */
+            /* search the table, then the rows planned so far (a repeated key inside one rows file is the same question) */
+            { int found = 0; const char *src[2] = { tb, *add }; size_t sn[2] = { tn, *an }; int s;
+              for (s = 0; s < 2 && !found; s++) {
+                  for (ta = 0; ta < sn[s]; ) {
+                      size_t te = ta; while (te < sn[s] && src[s][te] != '\n') te++;
+                      tl = src[s] + ta;
+                      if ((int)(te - ta) >= kl && !memcmp(tl, l, (size_t)kl) && ((te - ta) == (size_t)kl || tl[kl] == '\t')) {
+                          if (te - ta == ln && !memcmp(tl, l, ln)) found = 1;
+                          else { cx_fmt(why, wcap, "%s: key '%.*s' exists with a different row (table has %.80s)", LP_TABLE[t], kl, l, tl); return 1; }
+                          break;
+                      }
+                      ta = te < sn[s] ? te + 1 : te;
+                  }
+              }
+              if (found) { (*nskip)++; continue; }
+            }
+            { char *g = realloc(*add, *an + ln + 2); if (!g) { cx_fmt(why, wcap, "allocation"); return 1; }
+              *add = g; LP_CP(g + *an, ln + 2, l, ln); g[*an + ln] = '\n'; *an += ln + 1; (*nnew)++; }
+        }
+    }
+    return 0;
+}
+
+static void collect_patch(const char *p) {
+    size_t n = 0; char *b = cx_read(p, &n); size_t at = 0; char cur[1024] = "";
+    if (!b) return;
+    while (at < n) {
+        size_t e = at; while (e < n && b[e] != '\n') e++;
+        if (e - at > 13 && !memcmp(b + at, "diff --git a/", 13)) {
+            /* "diff --git a/X b/X": take X (everything up to " b/") */
+            const char *x = b + at + 13; size_t xl = e - at - 13, k;
+            for (k = 0; k + 3 <= xl; k++) if (!memcmp(x + k, " b/", 3)) break;
+            if (k + 3 <= xl && k < sizeof cur) { LP_CP(cur, sizeof cur, x, k); cur[k] = 0; addfile(cur); }
+        } else if (e - at >= 13 && !memcmp(b + at, "new file mode", 13) && cur[0]) {
+            size_t cl = strlen(cur);
+            addcreated(cur);
+            if (!strncmp(cur, "tools/", 6) && cl > 3 && !strcmp(cur + cl - 3, ".cx")) addnew(cur);   /* tools/cxlib/ sources are compiled by the same shards */
+        }
+        at = e < n ? e + 1 : e;
+    }
+    free(b);
+}
+
+int main(int argc, char **argv) {
+    int i, t, rc, nplanned[3] = { 0, 0, 0 }, nskipped[3] = { 0, 0, 0 };
+    char *adds[3] = { 0, 0, 0 }; size_t addn[3] = { 0, 0, 0 };
+    char out[4000], sc[9000], why[1200], qroot[4400], q[4400], excl[600];
+    for (i = 1; i < argc; i++) {
+        if (!strcmp(argv[i], "--root") && i + 1 < argc) g_root = argv[++i];
+        else if (!strcmp(argv[i], "--patch") && i + 1 < argc && g_np < LP_MAXP) g_patch[g_np++] = argv[++i];
+        else if (!strcmp(argv[i], "--rows-dir") && i + 1 < argc) g_rows = argv[++i];
+        else if (!strcmp(argv[i], "--preview-head") && i + 1 < argc) g_head = argv[++i];
+        else if (!strcmp(argv[i], "--dry")) g_dry = 1;
+        else { fprintf(stderr, "usage: land-patch.cx -- [--root R] --patch F [--patch F2 ...] [--rows-dir DIR] [--preview-head H] [--dry]\n"); return 2; }
+    }
+    if (!g_np && !g_rows) { fprintf(stderr, "land-patch: nothing to land (--patch and/or --rows-dir)\n"); return 2; }
+    if (ckk_shq(qroot, sizeof qroot, g_root)) return 2;
+    cx_fmt(excl, sizeof excl, "--exclude=%s --exclude=%s --exclude=%s", LP_TABLE[0], LP_TABLE[1], LP_TABLE[2]);
+
+    /* (0) the root must be a work tree whose three tables exist, each ending in a newline or empty */
+    for (t = 0; t < 3; t++) {
+        g_orig[t] = cx_read(rootpath(LP_TABLE[t]), &g_orign[t]);
+        if (!g_orig[t]) return fail("tables", LP_TABLE[t]);
+    }
+    /* (1) every patch must apply (check only), every touched path is noted */
+    for (i = 0; i < g_np; i++) {
+        if (ckk_shq(q, sizeof q, g_patch[i])) return fail("patch-path", "too long");
+        collect_patch(g_patch[i]);
+        cx_fmt(sc, sizeof sc, "git -C %s apply --check %s %s 2>&1", qroot, excl, q);
+        rc = sh(sc, out, sizeof out, 30);
+        if (rc != 0) { cx_fmt(why, sizeof why, "%s does not apply: %.300s", g_patch[i], out); return fail("apply-check", why); }
+    }
+    /* (2) plan the rows of every table before any write: a conflict stops everything here */
+    if (g_rows) for (t = 0; t < 3; t++) {
+        char rp[4400]; size_t rn = 0; char *r; cx_fmt(rp, sizeof rp, "%s/%s", g_rows, LP_ROWS[t]);
+        if (sy_exists(rp) != 1) continue;
+        r = cx_read(rp, &rn); if (!r) return fail("rows-read", rp);
+        if (plan_rows(t, g_orig[t], g_orign[t], r, rn, &adds[t], &addn[t], &nplanned[t], &nskipped[t], why, sizeof why)) { free(r); return fail("row-conflict", why); }
+        free(r);
+        if (nplanned[t] + nskipped[t] > 0) addfile(LP_TABLE[t]);
+    }
+    for (i = 0; i < g_nnew; i++) addfile(g_newtool[i]);
+    for (t = 0; t < 3; t++) say("LAND_ROWS", "table=%s new=%d identical-skipped=%d", LP_TABLE[t], nplanned[t], nskipped[t]);
+    for (i = 0; i < g_nnew; i++) say("LAND_NEWTOOL", "%s", g_newtool[i]);
+    if (g_dry) { say("LAND_SUMMARY", "status=DRY patches=%d newtools=%d", g_np, g_nnew); return 0; }
+
+    /* (3) apply the patches (tables excluded), then append the rows */
+    for (i = 0; i < g_np; i++) {
+        if (ckk_shq(q, sizeof q, g_patch[i])) return fail("patch-path", "too long");
+        cx_fmt(sc, sizeof sc, "git -C %s apply %s %s 2>&1", qroot, excl, q);
+        rc = sh(sc, out, sizeof out, 30);
+        if (rc != 0) { cx_fmt(why, sizeof why, "%s: %.300s", g_patch[i], out); return fail("apply", why); }
+        g_applied++;
+        say("LAND_APPLIED", "%s", g_patch[i]);
+    }
+    /* a created file is not in the index until it is added; tests/tools-compile.cx (run by register.cx) counts the index, so every created file
+       and new tool enters it as intent-to-add first (register.cx stages the tools itself, and a failed call undoes this) */
+    if (intent(0, qroot, out, sizeof out) != 0) { cx_fmt(why, sizeof why, "git add -N: %.300s", out); return fail("intent-to-add", why); }
+    g_intent = 1;
+    for (t = 0; t < 3; t++) {
+        char *nb; size_t nl, ncap; int nlfix;
+        if (!addn[t]) continue;
+        nlfix = g_orign[t] && g_orig[t][g_orign[t] - 1] != '\n';
+        ncap = g_orign[t] + (size_t)nlfix + addn[t] + 1;
+        nb = malloc(ncap); if (!nb) return fail("allocation", LP_TABLE[t]);
+        LP_CP(nb, ncap, g_orig[t], g_orign[t]); nl = g_orign[t]; if (nlfix) nb[nl++] = '\n';
+        LP_CP(nb + nl, ncap - nl, adds[t], addn[t]); nl += addn[t];
+        if (cx_write(rootpath(LP_TABLE[t]), nb, nl)) { free(nb); return fail("rows-write", LP_TABLE[t]); }
+        free(nb);
+    }
+    /* (4) register new tools: sources table order and tools-compile-NNN rows come from register.cx */
+    if (g_nnew) {
+        size_t sl = 0; if (cx_fmt(sc, sizeof sc, "cd %s && sh ./unisacc.com tools/register.cx --", qroot)) return fail("register", "command too long");
+        for (i = 0; i < g_nnew; i++) {
+            if (ckk_shq(q, sizeof q, g_newtool[i])) return fail("register", "path too long");
+            sl = strlen(sc); if (sl + strlen(q) + 12 >= sizeof sc) return fail("register", "too many tools");
+            LP_CP(sc + sl, sizeof sc - sl, " --tool ", 9); sl += 8; LP_CP(sc + sl, sizeof sc - sl, q, strlen(q) + 1);
+        }
+        rc = sh(sc, out, sizeof out, 60);
+        if (rc != 0) { cx_fmt(why, sizeof why, "register.cx rc=%d: %.400s", rc, out); return fail("register", why); }
+        say("LAND_REGISTER", "%d tool(s) registered (rc=0)", g_nnew);
+    }
+    /* (5) the rehearsal was against another HEAD: run the real gate once more */
+    {   char head[200] = "";
+        cx_fmt(sc, sizeof sc, "git -C %s rev-parse HEAD", qroot);
+        if (sh(sc, head, sizeof head, 10) == 0) { size_t hl = strlen(head); while (hl && (head[hl - 1] == '\n' || head[hl - 1] == '\r')) head[--hl] = 0; }
+        say("LAND_HEAD", "%s", head);
+        if (g_head && strcmp(g_head, head) != 0) {
+            char files[6000] = ""; size_t fl = 0;
+            for (i = 0; i < g_nf; i++) { size_t l = strlen(g_files[i]); if (fl + l + 2 >= sizeof files) break; LP_CP(files + fl, sizeof files - fl, g_files[i], l); fl += l; files[fl++] = ' '; files[fl] = 0; }
+            say("LAND_PREVIEW", "rehearsed-head=%s current-head=%s: rerunning precommit-preview", g_head, head);
+            {   char td[600] = "", q2[700]; int waited = 0, done = 0; size_t tl;
+                if (sh("mktemp -d", td, sizeof td, 10) != 0) { say("LAND_PREVIEW", "UNMEASURED: no scratch directory"); goto previewed; }
+                tl = strlen(td); while (tl && (td[tl - 1] == '\n' || td[tl - 1] == '\r')) td[--tl] = 0;
+                if (ckk_shq(q2, sizeof q2, td)) goto previewed;
+                cx_fmt(sc, sizeof sc, "cd %s && { ( sh ./unisacc.com tools/precommit-preview.cx -- --root . --files %s > %s/o 2>&1; echo $? > %s/rc ) > /dev/null 2>&1 & echo $! > %s/pid; }", qroot, files, q2, q2, q2);
+                sh(sc, out, sizeof out, 10);
+                while (waited < 170 && !done) {   /* bounded: 17 polls of 10 s, then the gate is declared UNMEASURED */
+                    cx_fmt(sc, sizeof sc, "sleep 9; test -f %s/rc", q2);
+                    if (sh(sc, out, sizeof out, 12) == 0) done = 1; else waited += 10;
+                }
+                cx_fmt(sc, sizeof sc, "grep -E '^(PRECOMMIT_PREVIEW|GATE.*BLOCK)' %s/o | cut -c1-300; if test ! -f %s/rc; then kill $(cat %s/pid) > /dev/null 2>&1; fi; rm -rf %s", q2, q2, q2, q2);
+                sh(sc, out, sizeof out, 20);
+                printf("%s", out);
+                if (!done || !ckk_has(out, sizeof out, "PRECOMMIT_PREVIEW")) say("LAND_PREVIEW", "UNMEASURED: no PRECOMMIT_PREVIEW line within %d s", waited);
+            }
+            previewed: ;
+        }
+    }
+    say("LAND_NEXT", "sh ./unisacc.com tools/derive.cx -- --write --only table-index   (then iface-hash if the gate asks); commit with tools/commit-own.cx");
+    say("LAND_SUMMARY", "status=LANDED patches=%d rows=%d newtools=%d files=%d", g_np, nplanned[0] + nplanned[1] + nplanned[2], g_nnew, g_nf);
+    return 0;
+}

@@ -32,6 +32,9 @@
  *     the C rules into real bytes and each must occur in the --sample FILE (the real output the author attaches); a refusal
  *     marker may instead be proved by the identical source text in another source file (the producer).  FAIL names the
  *     literal and its bytes; no literal NA; literals that need a sample but none given UNMEASURED.
+ * (11) commit-gate-preview: tools/precommit-preview.cx (the real commit gate over a private index and private object store) is run in the
+ *     patched tree over every file the patch touches; PRECOMMIT_PREVIEW blocked=0 is PASS, blocked>0 FAIL (the first BLOCK rows are quoted),
+ *     no answer within 170 s UNMEASURED.  The receipt names the revision the gate ran against.  NA when the tree has no precommit-preview.
  * --overlay DIR is copied over the private tree after the patch, for inputs the check needs that git does not track.
  * The baseline (patched tree, unmodified) must be green for every --check, else refusal rc 2. */
 #pragma unisa use cxlib.ckrun
@@ -496,6 +499,58 @@ static void item10(void) {
     if (!bad) emit(10, "literal-sample", "PASS", "%d literal(s) in added matching calls: %d found byte-for-byte in the sample, %d proved by the producer's source text", nlit, nlit - proved, proved);
 }
 
+/* ---------- item 11: the real commit gate, rehearsed over the files the patch touches ---------- */
+#define PS_PV_WAIT_S 170
+static void item11(void) {
+    char pv[1400], uc[1200], files[6000], sc[9000], out[8192], po[1300], pr[1300], qf[1300], qt[1300], quc[1300], *res; size_t rn2 = 0;
+    int i, k = 0, nf = 0, waited, blocked = -1;
+    cx_fmt(pv, sizeof pv, "%s/tools/precommit-preview.cx", TREE);
+    if (sy_exists(pv) != 1) { emit(11, "commit-gate-preview", "NA", "no tools/precommit-preview.cx in the patched tree"); return; }
+    if (sy_realpath("./unisacc.com", uc, (int)sizeof uc) <= 0) { emit(11, "commit-gate-preview", "UNMEASURED", "no ./unisacc.com in the working directory to run the gate with"); return; }
+    files[0] = 0;
+    for (i = 0; i < nA; i++) {
+        char fp[1400];
+        if (i > 0 && A[i].file == A[i - 1].file) continue;
+        cx_fmt(fp, sizeof fp, "%s/%s", TREE, A[i].file);
+        if (sy_exists(fp) != 1) continue;
+        shq(qf, sizeof qf, A[i].file);
+        if (k + (int)strlen(qf) + 2 >= (int)sizeof files) { emit(11, "commit-gate-preview", "UNMEASURED", "the patch touches too many files for one preview"); return; }
+        if (nf) files[k++] = ' ';
+        if (mm_copy(files + k, (long)(sizeof files - k), qf, (long)strlen(qf) + 1) != 0) return;
+        k += (int)strlen(qf); nf++;
+    }
+    if (!nf) { emit(11, "commit-gate-preview", "NA", "the patch leaves no file in the patched tree"); return; }
+    cx_fmt(po, sizeof po, "%s/pv.out", T); cx_fmt(pr, sizeof pr, "%s/pv.rc", T);
+    shq(qt, sizeof qt, TREE); shq(quc, sizeof quc, uc);
+    cx_fmt(sc, sizeof sc, "cd %s && ln -sf %s unisacc.com && rm -f '%s' '%s' && { ( %ssh ./unisacc.com tools/precommit-preview.cx -- --root . --files %s > '%s' 2>&1; echo $? > '%s' ) > /dev/null 2>&1 & echo $! > '%s/pv.pid'; }",
+           qt, quc, po, pr, envu(), files, po, pr, T);
+    if (sh(sc, out, sizeof out, 10) != 0) { emit(11, "commit-gate-preview", "UNMEASURED", "the preview could not be started"); return; }
+    for (waited = 0; waited < PS_PV_WAIT_S; waited += 5) {
+        cx_fmt(sc, sizeof sc, "sleep 5; test -f '%s'", pr);
+        if (sh(sc, out, sizeof out, 10) == 0) break;
+    }
+    cx_fmt(sc, sizeof sc, "rm -f %s/unisacc.com", qt);
+    sh(sc, 0, 0, 10);
+    if (waited >= PS_PV_WAIT_S) {
+        cx_fmt(sc, sizeof sc, "kill $(cat '%s/pv.pid' 2>/dev/null) > /dev/null 2>&1; true", T);
+        sh(sc, 0, 0, 10);
+        emit(11, "commit-gate-preview", "UNMEASURED", "no answer from precommit-preview within %d s (head=%s)", PS_PV_WAIT_S, g_curc); return;
+    }
+    res = slurp(po, &rn2);
+    if (res) {
+        const char *m = strstr(res, "PRECOMMIT_PREVIEW\tblocked=");
+        if (m) blocked = atoi(m + 26);
+    }
+    if (blocked == 0) { emit(11, "commit-gate-preview", "PASS", "PRECOMMIT_PREVIEW blocked=0 over %d file(s), head=%s", nf, g_curc); free(res); return; }
+    if (blocked < 0) { emit(11, "commit-gate-preview", "UNMEASURED", "precommit-preview printed no PRECOMMIT_PREVIEW blocked= line (head=%s)", g_curc); free(res); return; }
+    {   char first[1200]; first[0] = 0;
+        cx_fmt(sc, sizeof sc, "grep -a '^GATE' '%s' | grep -a BLOCK | head -3 | cut -c1-200 | tr '\\t\\n' '  '", po);
+        sh(sc, first, sizeof first, 10);
+        emit(11, "commit-gate-preview", "FAIL", "PRECOMMIT_PREVIEW blocked=%d over %d file(s), head=%s: %.700s", blocked, nf, g_curc, first);
+    }
+    free(res);
+}
+
 /* ---------- item 7: malformed and empty inputs to each decision entry ---------- */
 /* --probe CMD names an entry that judges one input file: CMD reads $F and must exit 1..123 (a refusal, never 0, never a
    crash/timeout) for every malformed input below.  Without --probe the item is NA, or UNMEASURED for a --guard patch. */
@@ -593,7 +648,7 @@ int main(int argc, char **argv) {
     parse_patch(pb, pn);
     if (nA == 0 && nD == 0) die2("patch adds and deletes no lines", g_patch);
     if (run_checks(0, out, sizeof out) != 0) { printf("%s\n", out); die2("baseline --check not green on the patched tree", 0); }
-    item1(); item2(); item3(); item4(); item5(); item6(); item7(); item8(); item10();
+    item1(); item2(); item3(); item4(); item5(); item6(); item7(); item8(); item10(); item11();
     {   char tail[1024]; const char *v = nfail ? "FAIL" : nunm ? "INCOMPLETE" : "PASS";
         cx_fmt(tail, sizeof tail, "SELFCHECK_SUMMARY patch_sha256=%s fail=%d unmeasured=%d verdict=%s\n", hash, nfail, nunm, v);
         if (rn + (int)strlen(tail) >= (int)sizeof rec) die2("receipt", "too long");
