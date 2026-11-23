@@ -1,1 +1,1 @@
-#define CXM_MAXU 128
+#define CXM_MAXU 256
