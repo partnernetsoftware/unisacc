@@ -111,6 +111,7 @@ int main(void) {
             "printf 'batch\\tdomain\\tstatus\\trc\\tcandidate\\tms\\tload1\\tretries\\tnote\\n' >> \"$out\"\n"
             "if [ \"$ids\" = real-commit ]; then\n"
             "  printf 'real-commit\\tproduct-qualification\\tFAIL\\t1\\taaa\\t100\\t1.0\\t0\\tdeterministic-err\\n' >> \"$out\"\n"
+            "  echo 'dvqualify: REFUSE duplicate label' >&2\n"
             "  exit 1\n"
             "fi\n"
             "for id in $(printf '%s' \"$ids\" | tr ',' ' '); do\n"
@@ -130,6 +131,116 @@ int main(void) {
            ckk_has(out, CPD_OUT, "deterministic-err"),
            "run-stops-after-2-retries: stops on repeating non-PASS batch and prints raw line");
     }
+    /* The child's stderr (a candidate refusal reason) is kept next to the window output file as
+       <out>.stderr, so a red window shows WHY without re-running or hand-building. */
+    {
+        char gcmd[CPD_PW], grep_out[CPD_PW];
+        if (cx_fmt(gcmd, sizeof gcmd, "grep -l 'REFUSE duplicate label' '%s'/*.stderr 2>/dev/null | head -1", rdir)) return 2;
+        int gc = ckk_sh("check-prerun-drive", gcmd, grep_out, sizeof grep_out);
+        ck(gc == 0 && ckk_has(grep_out, CPD_OUT, ".stderr"),
+           "window-stderr-kept: child stderr (refusal reason) written to <out>.stderr");
+    }
+    /* A window whose child writes NOTHING to stderr must leave NO <out>.stderr file (an empty
+       sidecar would mean the code wrote on errn==0, a mis-guarded condition). */
+    {
+        char ndir[CPD_PW], nmock[CPD_PW], nc[CPD_PW], nout[CPD_PW], nids[CPD_PW];
+        const char *ms_none =
+            "#!/bin/sh\n"
+            "mode=$1; wid=$2\n"
+            "if [ \"$mode\" = prebuild-self ]; then echo PREBUILD_OK; exit 0; fi\n"
+            "ids=$4; out=$5\n"
+            "echo \"# devsvc qualify\" > \"$out\"\n"
+            "printf 'batch\\tdomain\\tstatus\\trc\\tcandidate\\tms\\tload1\\tretries\\tnote\\n' >> \"$out\"\n"
+            "for id in $(printf '%s' \"$ids\" | tr ',' ' '); do\n"
+            "  printf '%s\\tproduct-qualification\\tPASS\\t0\\taaa\\t50\\t1.0\\t0\\t-\\n' \"$id\" >> \"$out\"\n"
+            "done\n"
+            "exit 0\n";
+        if (cx_fmt(ndir, sizeof ndir, "%s/run-noerr", work) ||
+            cx_fmt(nmock, sizeof nmock, "%s/mock-noerr.sh", work) ||
+            cx_fmt(nids, sizeof nids, "%s/noerr.ids", work) ||
+            cx_write(nids, "eps\nzeta\n", 9) ||
+            cx_write(nmock, ms_none, strlen(ms_none))) return 2;
+        if (cx_fmt(nc, sizeof nc, "sh '%s/unisacc.com' '%s/tools/prerun-drive.cx' -- plan --ids-file '%s' --out '%s' --win-size 8 --warmup 2",
+            cwd, cwd, nids, ndir)) return 2;
+        if (ckk_sh("check-prerun-drive", nc, out, sizeof out) != 0) return 2;
+        if (cx_fmt(nc, sizeof nc, "sh '%s/unisacc.com' '%s/tools/prerun-drive.cx' -- run --root '%s' --out '%s' --mock-runner '%s' --max-retries 2",
+            cwd, cwd, cwd, ndir, nmock)) return 2;
+        int rc = ckk_sh("check-prerun-drive", nc, out, sizeof out);
+        if (cx_fmt(nout, sizeof nout, "ls '%s'/*.stderr 2>/dev/null | wc -l", ndir)) return 2;
+        char cnt[CPD_PW];
+        int cc = ckk_sh("check-prerun-drive", nout, cnt, sizeof cnt);
+        ck(rc == 0 && cc == 0 && ckk_has(cnt, CPD_OUT, "0"),
+           "no-stderr-no-sidecar: a window with empty child stderr creates no <out>.stderr");
+    }
+    /* Exactly one byte on stderr must still be kept (a `> 1` guard would drop it): write a single
+       'Z' byte and assert the sidecar exists and is exactly 1 byte. */
+    {
+        char odir[CPD_PW], omock[CPD_PW], oids[CPD_PW], oc[CPD_PW], oout[CPD_PW];
+        const char *ms_one =
+            "#!/bin/sh\n"
+            "mode=$1; wid=$2\n"
+            "if [ \"$mode\" = prebuild-self ]; then echo PREBUILD_OK; exit 0; fi\n"
+            "ids=$4; out=$5\n"
+            "printf 'Z' >&2\n"
+            "echo \"# devsvc qualify\" > \"$out\"\n"
+            "printf 'batch\\tdomain\\tstatus\\trc\\tcandidate\\tms\\tload1\\tretries\\tnote\\n' >> \"$out\"\n"
+            "for id in $(printf '%s' \"$ids\" | tr ',' ' '); do\n"
+            "  printf '%s\\tproduct-qualification\\tPASS\\t0\\taaa\\t50\\t1.0\\t0\\t-\\n' \"$id\" >> \"$out\"\n"
+            "done\n"
+            "exit 0\n";
+        if (cx_fmt(odir, sizeof odir, "%s/run-onebyte", work) ||
+            cx_fmt(omock, sizeof omock, "%s/mock-onebyte.sh", work) ||
+            cx_fmt(oids, sizeof oids, "%s/one.ids", work) ||
+            cx_write(oids, "eta\ntheta\n", 9) ||
+            cx_write(omock, ms_one, strlen(ms_one))) return 2;
+        if (cx_fmt(oc, sizeof oc, "sh '%s/unisacc.com' '%s/tools/prerun-drive.cx' -- plan --ids-file '%s' --out '%s' --win-size 8 --warmup 2",
+            cwd, cwd, oids, odir)) return 2;
+        if (ckk_sh("check-prerun-drive", oc, out, sizeof out) != 0) return 2;
+        if (cx_fmt(oc, sizeof oc, "sh '%s/unisacc.com' '%s/tools/prerun-drive.cx' -- run --root '%s' --out '%s' --mock-runner '%s' --max-retries 2",
+            cwd, cwd, cwd, odir, omock)) return 2;
+        (void)ckk_sh("check-prerun-drive", oc, out, sizeof out);
+        if (cx_fmt(oout, sizeof oout, "cat '%s'/*.stderr 2>/dev/null | wc -c", odir)) return 2;
+        char ob[CPD_PW];
+        int ocr = ckk_sh("check-prerun-drive", oout, ob, sizeof ob);
+        ck(ocr == 0 && ckk_has(ob, CPD_OUT, "1"),
+           "one-byte-stderr-kept: a single stderr byte is still written to <out>.stderr");
+    }
+    /* Write-failure must be silent and never change the verdict.  Use a plain all-PASS 2-id set
+       with no heavy batch: the mock echoes to stderr on EVERY window and pre-creates <out>.stderr
+       as a DIRECTORY so sy_write_file(<out>.stderr) fails (EISDIR).  The run must still reach
+       PRERUN_RUN status=DONE (rc=0) exactly as a run with a writable stderr sidecar would: a code
+       bug that returned non-rc on a failed write would instead stop early / non-zero. */
+    {
+        char bdir[CPD_PW], bmock[CPD_PW], bids[CPD_PW];
+        const char *ms_dir =
+            "#!/bin/sh\n"
+            "mode=$1; wid=$2\n"
+            "if [ \"$mode\" = prebuild-self ]; then echo PREBUILD_OK; exit 0; fi\n"
+            "jobs=$3; ids=$4; out=$5; att=$6\n"
+            "rm -rf \"$out.stderr\"; mkdir -p \"$out.stderr\"\n"
+            "echo \"dvqualify: note on stderr for $ids\" >&2\n"
+            "echo \"# devsvc qualify\" > \"$out\"\n"
+            "printf 'batch\\tdomain\\tstatus\\trc\\tcandidate\\tms\\tload1\\tretries\\tnote\\n' >> \"$out\"\n"
+            "for id in $(printf '%s' \"$ids\" | tr ',' ' '); do\n"
+            "  printf '%s\\tproduct-qualification\\tPASS\\t0\\taaa\\t50\\t1.0\\t0\\t-\\n' \"$id\" >> \"$out\"\n"
+            "done\n"
+            "exit 0\n";
+        if (cx_fmt(bdir, sizeof bdir, "%s/run-stderr-fail", work) ||
+            cx_fmt(bmock, sizeof bmock, "%s/mock-dir.sh", work) ||
+            cx_fmt(bids, sizeof bids, "%s/two.ids", work) ||
+            cx_write(bids, "gamma\ndelta\n", 12) ||
+            cx_write(bmock, ms_dir, strlen(ms_dir))) return 2;
+        if (cx_fmt(cmd, sizeof cmd, "sh '%s/unisacc.com' '%s/tools/prerun-drive.cx' -- plan --ids-file '%s' --out '%s' --win-size 8 --warmup 2",
+            cwd, cwd, bids, bdir)) return 2;
+        if (ckk_sh("check-prerun-drive", cmd, out, sizeof out) != 0) return 2;
+        if (cx_fmt(cmd, sizeof cmd, "sh '%s/unisacc.com' '%s/tools/prerun-drive.cx' -- run --root '%s' --out '%s' --mock-runner '%s' --max-retries 2",
+            cwd, cwd, cwd, bdir, bmock)) return 2;
+        int rc = ckk_sh("check-prerun-drive", cmd, out, sizeof out);
+        ck(rc == 0 && ckk_has(out, CPD_OUT, "PRERUN_RUN\tstatus=DONE\t") &&
+           ckk_has(out, CPD_OUT, "\trc=0\twall_ms="),
+           "stderr-write-failure-is-silent: unwritable <out>.stderr leaves the window rc=0 and run DONE");
+    }
+
     /* Resume after fixing mock to pass real-commit: skips completed warmup & prebuild-self windows */
     {
         const char *ms_ok =
