@@ -121,6 +121,7 @@ G2预算夹具的成功行遵循 `tests/run-batch.cx` 标记合同：`CHECK_G2_B
 | 查 `.cx` 模块依赖计划 | `./unisacc.com -cx-plan FILE.cx` | 模块循环硬拒绝，报 `module cycle` |
 | 用系统 GCC/Clang 编 `.cx` | `sh ./gcc_cx.com FILE.cx -o OUT` / `sh ./clang_cx.com` | 六格 APE 宿主驱动，不调 unisacc.com |
 | 查调用点 | `sh ./unisacc.com tools/refactor.cx -- sites NAME` | 全仓一次，跳过注释/字面量 |
+| 盘可用量 | `sy_statvfs(path,&v)` / `sy_disk_avail_mb(path)` | L0 `cx/sys/fs.cx`：bavail*frsize 为非特权可用字节，MiB=该值/1048576；缺路径 -ENOENT |
 | st_gap 真值表 | `sh ./unisacc.com tools/st-gap-gen.cx -- --check` | exec/facts/st-gap.tsv 生成 build/st-gap.tsv(18 格)与 if 链;检查 check-st-gap-gen.cx;0.0.64 换消费者的合同 |
 | 根下 C99 示例冒烟 | `sh ./unisacc.com tests/check-examples-smoke.cx` | 9 个示例拷进临时目录默认 -run,断言 rc 与输出(19 条);批次 examples-smoke;cx-lab 产物写 $CXLAB_OUT,见 examples/cx-lab/README.md |
 | 查共享快照残留 | `sh ./unisacc.com tools/snap-residue.cx -- REV OUTDIR [--report]` | 只读;早于 chain-run.tsv 首段 epoch 的 dir/control/lock/file 记 RESIDUE,末行 SNAP_RESIDUE;有残留 rc 1,--report 恒 0 |

@@ -87,6 +87,8 @@ int main(int argc, char **argv) {
     if (argc > 0 && argv[0] && argv[0][0]) self = argv[0];
     const char *tmp = sy_env_or("TMPDIR", "/tmp");
     sy_stat_t s;
+    sy_statvfs_t vfs;
+    long avail_mb;
     int rc, cut, pid;
 
     /* env */
@@ -114,6 +116,27 @@ int main(int argc, char **argv) {
     ok(sy_exists(f) == 1 && sy_exists(root) == 1, "exists: file and directory are 1");
     { if (cx_fmt(d, sizeof d, "%s/absent", root)) { fprintf(stderr, "check-cx-sys: text too long for d\n"); exit(2); } }
     ok(sy_exists(d) == 0 && sy_stat(d, &s) == -ENOENT, "exists: absent is 0 (stat -ENOENT)");
+    ok(sy_statvfs(root, &vfs) == 0 && vfs.frsize > 0 && vfs.blocks >= vfs.bfree, "statvfs: scratch fs has frsize and blocks>=bfree");
+    ok(vfs.bfree >= vfs.bavail, "statvfs: bfree >= bavail (unprivileged)");
+    /* One read is the oracle. sy_disk_avail_mb() takes its own read, so a byte written between
+       the two can cross a MiB boundary and move the second value by exactly one: allow 1, never
+       more, and never compare a number with itself. */
+    avail_mb = sy_disk_avail_mb(root);
+    {   unsigned long long from_one_read = vfs.bavail * vfs.frsize / 1048576ULL;
+        ok(avail_mb >= 0 && (unsigned long long)avail_mb + 1 >= from_one_read
+           && from_one_read + 1 >= (unsigned long long)avail_mb, "disk_avail_mb: within 1 MiB of bavail*frsize/1048576"); }
+    ok(sy_statvfs("", &vfs) == -EINVAL && sy_statvfs(0, &vfs) == -EINVAL && sy_statvfs(root, 0) == -EINVAL, "statvfs: empty or null is -EINVAL");
+    { if (cx_fmt(d, sizeof d, "%s/absent-vfs", root)) { fprintf(stderr, "check-cx-sys: text too long for d\n"); exit(2); } }
+    ok(sy_statvfs(d, &vfs) == -ENOENT && sy_disk_avail_mb(d) == -ENOENT, "statvfs: missing path is -ENOENT");
+    { if (cx_fmt(d, sizeof d, "%s/file/vfs", root)) { fprintf(stderr, "check-cx-sys: text too long for d\n"); exit(2); } }
+    ok(sy_statvfs(d, &vfs) == -ENOTDIR && sy_disk_avail_mb(d) == -ENOTDIR, "statvfs: a path under a regular file is -ENOTDIR, not absent");
+    {   /* EACCES, not ENOENT: the caller may not search the parent. The check runs as the
+           invoking user (not root here), so a 0000 directory refuses the lookup itself. */
+        char no[700], in[800];
+        if (cx_fmt(no, sizeof no, "%s/noexec", root) || sy_mkdir(no, 0700) || cx_fmt(in, sizeof in, "%s/x", no)) { fprintf(stderr, "check-cx-sys: eacces fixture setup failed\n"); exit(2); }
+        ok(sy_chmod(no, 0000) == 0 && sy_statvfs(in, &vfs) == -EACCES && sy_disk_avail_mb(in) == -EACCES, "statvfs: a path the caller may not search is -EACCES, not absent");
+        ok(sy_chmod(no, 0700) == 0 && sy_rmdir(no) == 0, "statvfs: eacces fixture cleaned up");
+    }
     { if (cx_fmt(under, sizeof under, "%s/under", f)) { fprintf(stderr, "check-cx-sys: text too long for under\n"); exit(2); } }
     ok(sy_exists(under) == -ENOTDIR, "exists: a path under a file is -ENOTDIR, not absent");
     { if (cx_fmt(d, sizeof d, "%s/rmd", root)) { fprintf(stderr, "check-cx-sys: text too long for d\n"); exit(2); } }
