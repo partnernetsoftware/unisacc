@@ -58,10 +58,40 @@ static int cgac_flip_first_sha(const char *path) {
     return rc;
 }
 
+static void cgac_check_minirepo(const char *rep) {
+    /* 不含完整批次源树，不运行 affected-canary。这里只核实际运行的
+       precommit、gen-all 和 lane-inputs 的入口、身份输入及派生表。 */
+    static const char *const required[] = {
+        "cxroot.tsv", "exec/facts/derive.tsv",
+        "tools/precommit.cx", "tools/gen-all-check.cx", "tools/lane-inputs-gen.cx",
+        "tools/candidate-trigger-inputs.tsv", "build/core-closure.tsv", "build/lane-inputs.tsv",
+        "seed/ident.c", "seed/sha256.h", "tools/bound", "tools/bound.c", "cx/compiler/boundgate.cx", 0
+    };
+    char path[CGAC_PW];
+    sy_stat_t launcher;
+    if (cx_fmt(path, sizeof path, "%s/unisacc.com", rep) ||
+        sy_stat(path, &launcher) != 0 || launcher.kind != 'f') cgac_abort("minirepo-launcher");
+    for (int i = 0; required[i]; i++) {
+        if (cx_fmt(path, sizeof path, "%s/%s", rep, required[i])) cgac_abort("minirepo-input-path");
+        int ex = sy_exists(path);
+        if (ex != 1) {
+            fprintf(stderr, "check-gen-all-check: REFUSE minirepo-required-input path=%s exists=%d\n", required[i], ex);
+            exit(2);
+        }
+    }
+    if (cx_fmt(path, sizeof path, "%s/tools/affected.cx", rep)) cgac_abort("minirepo-canary-path");
+    int ex = sy_exists(path);
+    if (ex != 0) {
+        fprintf(stderr, "check-gen-all-check: REFUSE minirepo-canary-must-be-absent exists=%d\n", ex);
+        exit(2);
+    }
+}
+
 static void cgac_prep_minirepo(const char *cwd, const char *rep, char *out) {
     char cmd[8192];
     cgac_mk(rep);
     if (cx_fmt(cmd, sizeof cmd,
+        /* 必须在首个提交前省略 affected.cx；暂存删除会触发真实提交门的拒绝分支。 */
         "git -C '%s' archive HEAD -- include src cx ext seed exec build weights iterate kernel tools cxroot.tsv | tar -x -C '%s' && "
         "cp '%s/tools/gen-all-check.cx' '%s/tools/precommit.cx' '%s/tools/' && rm -f '%s/tools/ratchets.cx' '%s/tools/affected.cx' '%s/build/freeze.tsv' && "
         "printf '# derive v1\\n' > '%s/exec/facts/derive.tsv' && "
@@ -70,6 +100,7 @@ static void cgac_prep_minirepo(const char *cwd, const char *rep, char *out) {
         "git add -A && git commit -q -m init",
         cwd, rep, cwd, cwd, rep, rep, rep, rep, rep, cwd, rep, rep)) cgac_abort("minirepo-fmt");
     if (ckk_sh("check-gen-all-check", cmd, out, CGAC_OUT) != 0) cgac_abort("minirepo-run");
+    cgac_check_minirepo(rep);
 }
 
 static int cgac_list_slice(const char *out, int start, int count, char *dst, size_t dcap) {
@@ -229,7 +260,9 @@ int main(int argc, char **argv) {
         rc = ckk_sh("check-gen-all-check", cmd, out, sizeof out);
         {
             int blocked_ok = (rc != 0 && ckk_has(out, CGAC_OUT, "BLOCKED product-table-drift") &&
-                              ckk_has(out, CGAC_OUT, "GEN_CHECK\tlane-inputs-gen\tDIFF"));
+                              ckk_has(out, CGAC_OUT, "GEN_CHECK\tlane-inputs-gen\tDIFF") &&
+                              ckk_has(out, CGAC_OUT, "AFFECTED_CANARY skipped=1 reason=no-tools/affected.cx (fixture repo)"));
+            if (!blocked_ok) fprintf(stderr, "CGAC_PRECOMMIT\tphase=lane-added\trc=%d\n%s", rc, out);
             int pass_ok = 0;
             if (blocked_ok) {
                 if (cx_fmt(cmd, sizeof cmd,
@@ -237,7 +270,10 @@ int main(int argc, char **argv) {
                     "git add build/lane-inputs.tsv && "
                     "UNISACC_PRECOMMIT_SERIAL=1 sh ./unisacc.com tools/precommit.cx", rep)) cgac_abort("d1d");
                 rc = ckk_sh("check-gen-all-check", cmd, out, sizeof out);
-                pass_ok = (rc == 0 && ckk_has(out, CGAC_OUT, "PRECOMMIT\t") && ckk_has(out, CGAC_OUT, "blocked=0"));
+                pass_ok = (rc == 0 && ckk_has(out, CGAC_OUT, "PRECOMMIT\t") && ckk_has(out, CGAC_OUT, "blocked=0") &&
+                           ckk_has(out, CGAC_OUT, "AFFECTED_CANARY skipped=1 reason=no-tools/affected.cx (fixture repo)") &&
+                           !ckk_has(out, CGAC_OUT, "GEN_ALL_GATE_UNAVAILABLE"));
+                if (!pass_ok) fprintf(stderr, "CGAC_PRECOMMIT\tphase=lane-synced\trc=%d\n%s", rc, out);
             }
             ck(blocked_ok && pass_ok,
                "precommit-lane-inputs-add-ext-blocked-and-synced: staging new ext/ file blocks on lane-inputs-gen DIFF until build/lane-inputs.tsv is staged");
