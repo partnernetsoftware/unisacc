@@ -3182,6 +3182,65 @@ static int pc_copy_tree(const char *src, const char *dst, int depth) {
     return -1;
 }
 
+/* Whole string literals "tools/NAME.cx" in the copied sources name the tools those sources run; copy them too, round by round, until
+   nothing new appears (reg-manifest.cx runs tools/batch-packages-gen.cx, precommit.cx runs tools/verseq-gen.cx, ...).  A hand-kept
+   list lost one of them once (check-reg-manifest), so the set is read from the sources. */
+#define PC_CLOSE_NAMES 128
+static int pc_name_char(int c) { return (c >= 'a' && c <= 'z') || (c >= 'A' && c <= 'Z') || (c >= '0' && c <= '9') || c == '_' || c == '-' || c == '.'; }
+
+static int pc_close_scan(const char *iso, const char *sub, const char *base, char names[][160], int *nn) {
+    char dp[1400];
+    sy_dir_t d;
+    if (cx_fmt(dp, sizeof dp, "%s/%s", iso, sub)) return -1;
+    if (sy_dir_open(&d, dp) != 0) return 0;   /* a subdirectory that is not there has nothing to scan */
+    while (sy_dir_next(&d) == 1) {
+        char fp[1500];
+        size_t n = 0;
+        char *b;
+        long i, nl = tx_len(d.name, 200);
+        if (nl < 4 || !tx_eqz(d.name + nl - 3, ".cx")) continue;
+        if (cx_fmt(fp, sizeof fp, "%s/%s", dp, d.name)) continue;
+        b = (char *)cx_read(fp, &n);
+        if (!b) continue;
+        for (i = 0; i + 9 < (long)n; i++) {
+            long j, k;
+            int have = 0, t;
+            sy_stat_t st;
+            char ip[1400], sp[1400];
+            if (b[i] != '"' || !tx_prefix(b + i + 1, (long)n - i - 1, "tools/", 6)) continue;
+            for (j = i + 7; j < (long)n && pc_name_char((unsigned char)b[j]); j++) {}
+            k = j - (i + 7);
+            if (j >= (long)n || b[j] != '"' || k < 4 || k >= 150 || !tx_prefix(b + j - 3, 3, ".cx", 3)) continue;
+            for (t = 0; t < *nn; t++) if (tx_len(names[t], 160) == k && tx_prefix(b + i + 7, k, names[t], k)) have = 1;
+            if (have || *nn >= PC_CLOSE_NAMES) continue;
+            if (mm_copy(names[*nn], 160, b + i + 7, k) != 0) continue;
+            names[*nn][k] = 0;
+            if (cx_fmt(ip, sizeof ip, "%s/tools/%s", iso, names[*nn]) || sy_lstat(ip, &st) == 0) continue;   /* already copied */
+            if (cx_fmt(sp, sizeof sp, "%s/tools/%s", base, names[*nn]) || sy_stat(sp, &st) != 0) continue;   /* not in the source tree either */
+            (*nn)++;
+        }
+        mm_free(b);
+    }
+    sy_dir_close(&d);
+    return 0;
+}
+
+static int pc_close_tools(const char *iso, const char *base) {
+    int round;
+    for (round = 0; round < 8; round++) {
+        char names[PC_CLOSE_NAMES][160];
+        int nn = 0, k;
+        if (pc_close_scan(iso, "tools", base, names, &nn) != 0 || pc_close_scan(iso, "tools/cxlib", base, names, &nn) != 0) return -1;
+        if (nn == 0) return 0;
+        for (k = 0; k < nn; k++) {
+            char cs[1400], cd[1400];
+            if (cx_fmt(cs, sizeof cs, "%s/tools/%s", base, names[k]) || cx_fmt(cd, sizeof cd, "%s/tools/%s", iso, names[k])) return -1;
+            if (pc_copy_tree(cs, cd, 0) != 0) return -1;
+        }
+    }
+    return 0;
+}
+
 static int pc_populate_isolated_tree(const char *iso) {
     const char *w = pc_work_top[0] ? pc_work_top : (pc_local_top[0] ? pc_local_top : pc_orig_cwd);
     const char *wt = pc_local_top[0] ? pc_local_top : (pc_orig_cwd[0] ? pc_orig_cwd : w);
@@ -3191,9 +3250,7 @@ static int pc_populate_isolated_tree(const char *iso) {
         "cxlib", "bound", "bound.c", "precommit.cx", "precommit-flow.cx", "derive.cx",
         "gen-all-check.cx", "ratchets.cx", "cx-lint.cx", "check-tlib-frozen.cx",
         "layer-api.cx", "bump.cx", "reg-manifest.cx", "tables-gen.cx", "facts-gen.cx",
-        "ledger-add.cx", "tool-index.cx", "links-gen.cx",
-        /* reg-manifest.cx computes build/batch-packages.tsv through this (rm_read -> batch-packages-gen --query) */
-        "batch-packages-gen.cx", 0
+        "ledger-add.cx", "tool-index.cx", "links-gen.cx", 0
     };
     static const char * const subdirs[] = { "tools", "tests", 0 };
     int i;
@@ -3235,6 +3292,7 @@ static int pc_populate_isolated_tree(const char *iso) {
                     if (pc_copy_tree(cs, cd, 0) != 0) return -1;
                 }
             }
+            if (base && base[0] && pc_close_tools(iso, base) != 0) return -1;
         }
     }
     for (i = 0; subdirs[i]; i++) {
