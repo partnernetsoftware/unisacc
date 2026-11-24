@@ -506,6 +506,70 @@ int main(void) {
         rc = run(v, out, sizeof out);
         ck(rc == 1 && has(out, "4-p1\tSKIPPED") && has(out, "READY\tno"), "skipped-still-not-ready");
     }
+    /* 22-premerge-union branch selection: must test the target version/checked-out branch, never an earlier broken branch */
+    {   char pmr[360], setup[2400];
+        cx_fmt(pmr, sizeof pmr, "%s/pm-br-repo", tmpd);
+        cx_fmt(setup, sizeof setup,
+            "mkdir -p '%s'/tools '%s'/build && "
+            "cat > '%s'/unisacc.com << 'EOFUC'\n"
+            "#!/bin/sh\n"
+            "tool=\"$1\"; shift; [ \"$1\" = \"--\" ] && shift\n"
+            "case \"$tool\" in\n"
+            "  tools/derive.cx)\n"
+            "    for a in \"$@\"; do [ \"$a\" = \"--prepare-native\" ] && { printf 'DERIVE_PREPARE\\tprepared=0\\tno-test-result\\n'; exit 0; }; done\n"
+            "    if grep -q 'premerge-union-synthetic-drift' build/iface-hash.tsv 2>/dev/null; then\n"
+            "      printf 'DERIVE\\tdoc-links\\tREFUSED\\t5\\trc=4\\tDQ doc-links fail\\n'\n"
+            "      printf 'DERIVE_SUMMARY\\tok=0\\tdrift=0\\trefused=1\\tskipped=0\\telapsed_ms=5\\n'; exit 1\n"
+            "    fi\n"
+            "    printf 'DERIVE\\tiface-hash\\tOK\\t2\\nDERIVE_SUMMARY\\tok=1\\tdrift=0\\trefused=0\\tskipped=0\\telapsed_ms=2\\n'; exit 0;;\n"
+            "  tools/check-derive.cx) printf 'DERIVE_CHECK\\tok=59\\tfailed=0\\n'; exit 0;;\n"
+            "  *) printf 'OK\\t%%s\\n' \"$tool\"; exit 0;;\n"
+            "esac\n"
+            "EOFUC\n"
+            "chmod +x '%s'/unisacc.com && "
+            "printf '#!/bin/sh\\nshift\\nexec \"$@\"\\n' > '%s'/tools/bound && chmod +x '%s'/tools/bound && "
+            "printf '# slot\\tversion\\tclass\\tstate\\tnote\\n1\\t0.0.105\\tL0\\t已公开\\tdone\\n2\\t0.0.108\\tL0\\t建议\\tbad-earlier\\n3\\t0.0.106\\tL0\\t建议\\tgood-car\\n' > '%s'/build/version-seq.tsv && "
+            "printf 'pkg\\tsha\\ncx.sys\\t1111\\n' > '%s'/build/iface-hash.tsv && "
+            "cd '%s' && git init -q -b main && git config user.email t@t && git config user.name t && "
+            "git add -A && git commit -qm base && "
+            "git checkout -q -b v0.0.108 && printf 'premerge-union-synthetic-drift\\n' >> build/iface-hash.tsv && git add -A && git commit -qm bad108 && "
+            "git checkout -q -b v0.0.106 main && printf 'ok\\n' > car106.txt && git add -A && git commit -qm ok106 && "
+            "git checkout -q main",
+            pmr, pmr, pmr, pmr, pmr, pmr, pmr, pmr, pmr);
+        {   char *sv[] = {"./tools/bound", "20", "sh", "-c", setup, 0};
+            rc = run(sv, out, sizeof out);
+            ck(rc == 0, "premerge-22-branch-fixture-setup");
+        }
+        /* Before passing --version 0.0.106 (on main, next unpublished is bad v0.0.108): 22-premerge-union FAILS */
+        {   char *v[] = {"./tools/bound", "55", "sh", UC, "tools/chain-ready.cx", "--", "--repo", pmr, "--only", "22-premerge-union", 0};
+            rc = run(v, out, sizeof out);
+            ck(rc == 1 && has(out, "22-premerge-union\tFAIL") && has(out, "READY\tno"), "premerge-22-red-without-target-version-on-main");
+        }
+        /* With --version 0.0.106 on main: chain-ready forwards --branch v0.0.106 and 22-premerge-union PASSES */
+        {   char *v[] = {"./tools/bound", "55", "sh", UC, "tools/chain-ready.cx", "--", "--repo", pmr, "--version", "0.0.106", "--only", "22-premerge-union", 0};
+            rc = run(v, out, sizeof out);
+            ck(rc == 0 && has(out, "22-premerge-union\tPASS") && has(out, "READY\tyes"), "premerge-22-passes-target-version-despite-earlier-bad-branch");
+        }
+        /* Checked out on v0.0.106 without --version: chain-ready forwards checked-out branch v0.0.106 and PASSES */
+        {   char *cv[] = {"./tools/bound", "10", "git", "-C", pmr, "checkout", "-q", "v0.0.106", 0};
+            (void)run(cv, out, sizeof out);
+            char *v[] = {"./tools/bound", "55", "sh", UC, "tools/chain-ready.cx", "--", "--repo", pmr, "--only", "22-premerge-union", 0};
+            rc = run(v, out, sizeof out);
+            ck(rc == 0 && has(out, "22-premerge-union\tPASS") && has(out, "READY\tyes"), "premerge-22-passes-checked-out-branch-without-version-flag");
+        }
+        /* Mutation proof: dropping --branch (calling premerge-union without --branch on main) fails closed rc=2; source pins --branch on all 5 shards */
+        {   char *cv[] = {"./tools/bound", "10", "git", "-C", pmr, "checkout", "-q", "main", 0};
+            (void)run(cv, out, sizeof out);
+            char *mv[] = {"./tools/bound", "30", "sh", UC, "tools/premerge-union.cx", "--", "--repo", pmr, "--base", "main", "--shard", "prep", 0};
+            rc = run(mv, out, sizeof out);
+            ck(rc == 2 && has(out, "PREMERGE_REFUSE") && has(out, "ambiguous-active-branches"), "premerge-22-mut-drop-branch-refuses-on-main");
+        }
+        {   size_t sn = 0; char *src = cx_read("tools/chain-ready.cx", &sn);
+            ck(src != 0 && has(src, "g_premerge0[10] = \"--branch\"") && has(src, "g_premerge4[10] = \"--branch\""),
+               "premerge-22-source-pins-branch-forwarding");
+            if (src) mm_free(src);
+        }
+    }
     printf("CHAIN_READY_CHECK\tpassed=%d\tfailed=%d\n", passed, failed);
     return failed ? 1 : 0;
 }

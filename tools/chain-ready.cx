@@ -1642,6 +1642,37 @@ static int freeze_armed(const char *repo, char *ev, int cap) {
     return 1;
 }
 
+static int resolve_premerge_branch(const char *repo, const char *explicit_tver, const char *tver, char *out, size_t cap) {
+    char cand[64], spec[96], cur[64];
+    out[0] = 0;
+    if (explicit_tver && explicit_tver[0] &&
+        !cx_fmt(cand, sizeof cand, "v%s", explicit_tver) &&
+        !cx_fmt(spec, sizeof spec, "%s^{commit}", cand)) {
+        char *vv[] = {"git", "rev-parse", "--verify", spec, 0};
+        if (fa_git(repo, vv, 0, 0) == 0) {
+            cx_fmt(out, cap, "%s", cand);
+            return 1;
+        }
+    }
+    {   char *bv[] = {"git", "rev-parse", "--abbrev-ref", "HEAD", 0};
+        if (fa_git(repo, bv, cur, sizeof cur) == 0 && cur[0] &&
+            !tx_eqz(cur, "HEAD") && !tx_eqz(cur, "main")) {
+            cx_fmt(out, cap, "%s", cur);
+            return 1;
+        }
+    }
+    if (tver && tver[0] &&
+        !cx_fmt(cand, sizeof cand, "v%s", tver) &&
+        !cx_fmt(spec, sizeof spec, "%s^{commit}", cand)) {
+        char *vv[] = {"git", "rev-parse", "--verify", spec, 0};
+        if (fa_git(repo, vv, 0, 0) == 0) {
+            cx_fmt(out, cap, "%s", cand);
+            return 1;
+        }
+    }
+    return 0;
+}
+
 int main(int argc, char **argv) {
     int fast = 0, a; const char *repo = ".", *since = 0, *pat = "candidate-chain", *only = 0, *tver = 0, *rootarg = 0, *revarg = 0, *pftable = 0;
     long disk_override_gb = -1;
@@ -1716,11 +1747,11 @@ int main(int argc, char **argv) {
     static char *g_slot[] = {"./tools/bound", "40", "sh", UC, "tools/release-packcheck.cx", "--", "slot", 0, 0, 0, 0};
     static char *g_genall[] = {"./tools/bound", "60", "sh", UC, "tools/gen-all-check.cx", "--", "--root", 0, 0};
     static char *g_versq[] = {"./tools/bound", "45", "sh", UC, "tools/verseq-gen.cx", "--", "--check", 0};
-    static char *g_premerge0[] = {"./tools/bound", "55", "sh", UC, "tools/premerge-union.cx", "--", "--repo", 0, "--shard", "prep", 0};
-    static char *g_premerge1[] = {"./tools/bound", "55", "sh", UC, "tools/premerge-union.cx", "--", "--repo", 0, "--shard", "derive-a", 0};
-    static char *g_premerge2[] = {"./tools/bound", "55", "sh", UC, "tools/premerge-union.cx", "--", "--repo", 0, "--shard", "derive-b", 0};
-    static char *g_premerge3[] = {"./tools/bound", "55", "sh", UC, "tools/premerge-union.cx", "--", "--repo", 0, "--shard", "derive-c", 0};
-    static char *g_premerge4[] = {"./tools/bound", "55", "sh", UC, "tools/premerge-union.cx", "--", "--repo", 0, "--shard", "check-derive", 0};
+    static char *g_premerge0[] = {"./tools/bound", "55", "sh", UC, "tools/premerge-union.cx", "--", "--repo", 0, "--shard", "prep", 0, 0, 0};
+    static char *g_premerge1[] = {"./tools/bound", "55", "sh", UC, "tools/premerge-union.cx", "--", "--repo", 0, "--shard", "derive-a", 0, 0, 0};
+    static char *g_premerge2[] = {"./tools/bound", "55", "sh", UC, "tools/premerge-union.cx", "--", "--repo", 0, "--shard", "derive-b", 0, 0, 0};
+    static char *g_premerge3[] = {"./tools/bound", "55", "sh", UC, "tools/premerge-union.cx", "--", "--repo", 0, "--shard", "derive-c", 0, 0, 0};
+    static char *g_premerge4[] = {"./tools/bound", "55", "sh", UC, "tools/premerge-union.cx", "--", "--repo", 0, "--shard", "check-derive", 0, 0, 0};
     static char **tab[] = {
         g_status, g_branch,
         g_derive1, g_derive2, g_derive3, g_derive4, g_derive5, g_derive6,
@@ -1764,7 +1795,8 @@ int main(int argc, char **argv) {
     g_chain3[6] = outd[2]; g_chain3[7] = cached;
     g_chain4[6] = outd[3]; g_chain4[7] = cached;
     g_chain5[6] = outd[4]; g_chain5[7] = cached;
-    static char auto_ver[32];
+    static char auto_ver[32], pm_branch[64];
+    const char *explicit_tver = tver;
     if (!tver && seq_next_version(repo, auto_ver)) tver = auto_ver;
     g_slot[7] = (char *)repo; if (tver) { g_slot[8] = "--version"; g_slot[9] = (char *)tver; }
     g_genall[7] = (char *)repo;
@@ -1773,6 +1805,13 @@ int main(int argc, char **argv) {
     g_premerge2[7] = (char *)repo;
     g_premerge3[7] = (char *)repo;
     g_premerge4[7] = (char *)repo;
+    if (resolve_premerge_branch(repo, explicit_tver, tver, pm_branch, sizeof pm_branch)) {
+        g_premerge0[10] = "--branch"; g_premerge0[11] = pm_branch; g_premerge0[12] = 0;
+        g_premerge1[10] = "--branch"; g_premerge1[11] = pm_branch; g_premerge1[12] = 0;
+        g_premerge2[10] = "--branch"; g_premerge2[11] = pm_branch; g_premerge2[12] = 0;
+        g_premerge3[10] = "--branch"; g_premerge3[11] = pm_branch; g_premerge3[12] = 0;
+        g_premerge4[10] = "--branch"; g_premerge4[11] = pm_branch; g_premerge4[12] = 0;
+    }
     for (k = 0; k < 25; k++) {
         int c, is_der = (k >= 2 && k <= 7), is_ch = (k >= 11 && k <= 15), is_pm = (k >= 20 && k <= 24);
         if (!WANT(nm[k]) && !(k == 1 && WANT("1-rev")) && !(is_der && WANT("2a-derive")) && !(is_ch && WANT("5-candidate-chain")) && !(is_pm && WANT("22-premerge-union"))) continue;
