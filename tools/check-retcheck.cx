@@ -1,0 +1,114 @@
+/* tools/check-retcheck.cx -- check tools/retcheck.cx (return-value convention ratchet).
+ *
+ *   sh ./unisacc.com tools/check-retcheck.cx
+ *
+ * Writes fixture sources into a private temp dir and runs retcheck --scan on them:
+ *   red   each bad form is reported with its KIND and line (sy_exists as boolean in if/!/&&/||/?:/bare argument,
+ *         tx_snprintf compared to literal 0 or used as boolean, dropped tx_snprintf, `if (!cx_fmt(..)) return -1`
+ *         on the same and the next line);
+ *   green the good forms are not (three-way sy_exists, assigned or returned results, tx_snprintf compared to cap,
+ *         cx_fmt tested != 0, `!cx_fmt(..) && next`, occurrences in strings and comments, a declaration);
+ *   mutation every green line flipped to its bad twin turns red, so a rule that silently accepts all is caught.
+ * Then --check passes on the tracked tree against build/retcheck-baseline.tsv, and an unknown flag is refused (rc 2). */
+#pragma unisa use sys.proc
+#pragma unisa use sys.fs
+#pragma unisa use text.text
+#pragma unisa use sys.env
+#pragma unisa use mem.bytes
+#pragma unisa use mem.heap
+#pragma unisa use cxlib.ckrun
+
+static int failed;
+static void ck(int c, const char *name) { printf("%s\t%s.%s\n", c ? "PASS" : "FAIL", "retcheck", name); failed += !c; }
+#define has(o, s) ckk_has((o), 1 << 16, (s))
+static int run(char **v, char *o, int cap) {
+    char *out = 0; size_t n = 0, k; int rc;
+    o[0] = 0;
+    rc = cx_runv_timeout(v, 50, &out, &n);
+    if (out && n) { k = n < (size_t)cap - 1 ? n : (size_t)cap - 1; mm_copy(o, (size_t)cap, out, (long)k); o[k] = 0; }
+    free(out);
+    return rc;
+}
+static long count(const char *o, const char *s) {
+    long c = 0, n = (long)tx_len(o, 1 << 16), sl = (long)tx_len(s, 256), at = 0, f;
+    while (at < n && (f = tx_find(o + at, n - at, s, sl)) >= 0) { c++; at += f + sl; }
+    return c;
+}
+
+/* line-numbered fixtures: red lines 2..11, green lines 13.. */
+static const char *RED =
+    "int f(void) {\n"
+    "    if (sy_exists(p)) return 1;\n"                                  /* 2 exists-bool */
+    "    if (!sy_exists(p)) return 1;\n"                                 /* 3 exists-bool */
+    "    if (a && sy_exists(p)) return 1;\n"                             /* 4 exists-bool */
+    "    ck(sy_exists(p), \"x\");\n"                                     /* 5 exists-bool */
+    "    r = sy_exists(p) ? 1 : 0;\n"                                    /* 6 exists-bool */
+    "    if (tx_snprintf(b, sizeof b, \"%s\", p) < 0) return 2;\n"       /* 7 snprintf-trunc */
+    "    if (tx_snprintf(b, sizeof b, \"%s\", p) <= 0) return 2;\n"      /* 8 snprintf-trunc */
+    "    tx_snprintf(b, sizeof b, \"%s\", p);\n"                         /* 9 snprintf-dropped */
+    "    if (!cx_fmt(b, sizeof b, \"%s\", p)) return -1;\n"              /* 10 cxfmt-inverted */
+    "    if (!cx_fmt(b, sizeof b, \"%s\",\n        p))\n        return -1;\n"   /* 11 cxfmt-inverted (multi-line) */
+    "}\n";
+static const char *GREEN =
+    "int sy_exists(const char *path);\n"
+    "int g(void) {\n"
+    "    int e = sy_exists(p); if (e < 0) return 2; if (e == 0) return 0;\n"
+    "    if (sy_exists(p) == 1) return 1;\n"
+    "    if (0 > sy_exists(p)) return 2;\n"
+    "    return sy_exists(p);\n"
+    "    if (tx_snprintf(b, sizeof b, \"%s\", p) >= (int)sizeof b) return 2;\n"
+    "    w = tx_snprintf(b, sizeof b, \"%s\", p);\n"
+    "    if (cx_fmt(b, sizeof b, \"%s\", p) != 0) return -1;\n"
+    "    if (!cx_fmt(b, sizeof b, \"%s\", p) && go(b)) return -1;\n"
+    "    puts(\"if (sy_exists(p)) tx_snprintf(b, 1, x);\");\n"
+    "    /* if (!sy_exists(p)) tx_snprintf(b,1,x); */\n"
+    "    // if (!cx_fmt(b, 1, x)) return -1;\n"
+    "}\n";
+/* each green line's bad twin (mutation): must all be flagged */
+static const char *MUT =
+    "int h(void) {\n"
+    "    int e = !sy_exists(p); if (e < 0) return 2;\n"
+    "    if (sy_exists(p) || 1) return 1;\n"
+    "    if (tx_snprintf(b, sizeof b, \"%s\", p) != 0) return 2;\n"
+    "    if (tx_snprintf(b, sizeof b, \"%s\", p)) return 2;\n"
+    "    if (!cx_fmt(b, sizeof b, \"%s\", p)) { return -1; }\n"
+    "}\n";
+
+int main(void) {
+    static char o[1 << 16]; char d[4096], fr[4200], fg[4200], fm[4200]; int rc;
+    if (cx_fmt(d, sizeof d, "%s/check-retcheck-%d", sy_tmpdir(), (int)sy_pid()) != 0 || sy_mkdir(d, 0700) < 0) { ck(0, "fixture-dir"); return 1; }
+    if (cx_fmt(fr, sizeof fr, "%s/red.cx", d) != 0 || cx_fmt(fg, sizeof fg, "%s/green.cx", d) != 0 || cx_fmt(fm, sizeof fm, "%s/mut.cx", d) != 0) { ck(0, "fixture-path"); return 1; }
+    cx_write(fr, RED, tx_len(RED, 4096)); cx_write(fg, GREEN, tx_len(GREEN, 4096)); cx_write(fm, MUT, tx_len(MUT, 4096));
+    {   char *v[] = {"sh", "./unisacc.com", "tools/retcheck.cx", "--", "--scan", fr, 0}; char want[4400]; int ln;
+        static const char *kind[] = {0, 0, "exists-bool", "exists-bool", "exists-bool", "exists-bool", "exists-bool",
+                                     "snprintf-trunc", "snprintf-trunc", "snprintf-dropped", "cxfmt-inverted", "cxfmt-inverted"};
+        rc = run(v, o, sizeof o);
+        ck(rc == 0 && has(o, "retcheck: scanned=1 hits=10"), "red-ten-hits");
+        for (ln = 2; ln <= 11; ln++) {
+            char name[64];
+            cx_fmt(want, sizeof want, "RETCHECK\t%s\t%s:%d\t", kind[ln], fr, ln);
+            cx_fmt(name, sizeof name, "red-line-%d-%s", ln, kind[ln]);
+            ck(has(o, want), name);
+        }
+    }
+    {   char *v[] = {"sh", "./unisacc.com", "tools/retcheck.cx", "--", "--scan", fg, 0};
+        rc = run(v, o, sizeof o);
+        ck(rc == 0 && has(o, "retcheck: scanned=1 hits=0") && count(o, "RETCHECK\t") == 0, "green-zero-hits");
+    }
+    {   char *v[] = {"sh", "./unisacc.com", "tools/retcheck.cx", "--", "--scan", fm, 0};
+        rc = run(v, o, sizeof o);
+        ck(rc == 0 && has(o, "retcheck: scanned=1 hits=5") && count(o, "\texists-bool\t") == 2 && count(o, "\tsnprintf-trunc\t") == 2
+           && count(o, "\tcxfmt-inverted\t") == 1, "mutation-five-hits");
+    }
+    {   char *v[] = {"sh", "./unisacc.com", "tools/retcheck.cx", "--", "--check", 0};
+        rc = run(v, o, sizeof o);
+        ck(rc == 0 && has(o, "retcheck: ok: "), "tree-within-baseline");
+    }
+    {   char *v[] = {"sh", "./unisacc.com", "tools/retcheck.cx", "--", "--bogus", 0};
+        rc = run(v, o, sizeof o);
+        ck(rc == 2, "usage-refused");
+    }
+    sy_unlink(fr); sy_unlink(fg); sy_unlink(fm); sy_rmdir(d);
+    printf("CHECK_RETCHECK\tfailed=%d\n", failed);
+    return failed ? 1 : 0;
+}
