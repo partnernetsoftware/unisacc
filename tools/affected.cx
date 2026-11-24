@@ -49,6 +49,8 @@
    kit=hot|cold|fallback, so a single batch's phases are attributable without parsing its stderr.
    rc: 0 every run batch PASS (or nothing to run), 1 any FAIL/UNKNOWN/RUN_REFUSED, 3 only deferrals,
    2 usage, registry or I/O error.
+   booter-raw-elf reads the sealed candidate chain named by UNISACC_BOOTER_CHAIN_OUT
+   after the chain stops. It never derives an unversioned slice from an installed APE.
   Tier depth: the literal-hop depth follows --tier.  commit keeps the registry read cheap for every commit:
   one extra hop (a changed tool's own literals, so a two-hop defect like check-release-ape -> ape-pack is
   still caught) but no transitive closure.  daily, release, and every invocation without --tier take the
@@ -77,6 +79,7 @@
 #pragma unisa use sys.posix
 #pragma unisa use mem.arena
 #pragma unisa use mem.bytes
+#pragma unisa use mem.heap
 #pragma unisa use text.text
 #pragma unisa use cxlib.testplan
 #pragma unisa use sysx.process
@@ -88,6 +91,7 @@
 #pragma unisa use cxlib.kernelinputs
 #pragma unisa use cxlib.flowadmit
 #pragma unisa use cxlib.batchdomain
+#pragma unisa use cxlib.releaseversion
 
 #define CAP (1L << 24)
 #define MAXNODE 16384
@@ -876,7 +880,7 @@ static int prep_verify(Prep *P) {
 /* The source file a material name resolves to: tools/NAME.cx, or tests/cases/NAME.cx when the first is
    absent (fixtures: fake-gh, fake-s9, fake-release-prepare).  Shared with --materials-dump, so the reported
    resolution and the one the build uses cannot drift.  0 with SRC set, -1 with WHY. */
-enum { PK_CLASSIC_REF = 11, PK_OPTFRAME4 = 12 };
+enum { PK_CLASSIC_REF = 11, PK_OPTFRAME4 = 12, PK_BOOTER_RAW = 13 };
 static int prep_kind_of(const char *name, int kind) {
     long nl = tx_len(name, 256);
     if (kind == 2) {
@@ -891,6 +895,7 @@ static int prep_kind_of(const char *name, int kind) {
     if (tx_eqz(name, "nets") || tx_eqz(name, "pp-gold") || tx_eqz(name, "objects") || tx_eqz(name,"assembler") || tx_eqz(name,"kernels") || tx_eqz(name,"isolated-streams")) return PK_MDIR;
     if (tx_eqz(name, "libneed-native")) return PK_HOSTC;
     if (tx_eqz(name, "ref")) return PK_CLASSIC_REF;
+    if (tx_eqz(name, "booter-raw-elf")) return PK_BOOTER_RAW;
     if (tx_eqz(name, "streams")) return PK_STREAMS;
     if (tx_eqz(name, "identity-helper")) return PK_IDENT;
     if (tx_eqz(name, "old-product") || tx_eqz(name, "new-product") || tx_eqz(name, "new-models")) return PK_OLDP;
@@ -910,6 +915,7 @@ static int prep_source(const char *name, int kind, char *src, long cap, char *wh
     if (tx_eqz(name, "module-units-tool")) return cx_fmt(src, cap, "tests/module/image.cx");
     if (pk == PK_OPTFRAME4) { cx_fmt(src, cap, "tools/opt-frame4-material.cx"); return 0; }
     if (pk == PK_CLASSIC_REF) return cx_fmt(src,cap,"tools/ref-material.cx");
+    if (pk == PK_BOOTER_RAW) return cx_fmt(src,cap,"sealed-chain:fixedpoint/g2/lnx-x86_64/entry.elf");
     if (pk == PK_HOST && tx_eqz(name, "hosttcc")) {
         const char *want = getenv("TCC"), *at = getenv("PATH");
         if (!want || !*want) want = "tcc";
@@ -1065,6 +1071,105 @@ static int optf4_prepare(void) {
     optf4_state = 1;
     return 0;
 }
+/* Read finite canonical chain files. Compare the receipt with the packed APE
+ * and raw g2 slice before handing the latter to the real batch. */
+static unsigned char *booter_read(const char *path, long cap, int64_t *size) {
+    char real[4400]; sy_stat_t st;
+    unsigned char *data=0;
+    if (sy_realpath(path,real,sizeof real)<0 || strcmp(path,real) ||
+        sy_lstat(path,&st) || st.kind!='f' || st.size<=0 || st.size>cap ||
+        sy_read_file(path,&data,size,cap)) return 0;
+    if (*size==st.size) return data;
+    mm_free(data);
+    return 0;
+}
+
+static int booter_log(const unsigned char *data, int64_t n) {
+    return data && n>0 && data[n-1]=='\n' && !memchr(data,0,n) && !memchr(data,'\r',n);
+}
+
+static int booter_receipt_row(const char *receipt, const char *key, const char *path,
+                              const char *sha, long bytes) {
+    char row[4600], prefix[64];
+    if (cx_fmt(row,sizeof row,"%s\t%s\tsha=%s\tbytes=%ld\n",key,path,sha,bytes) ||
+        cx_fmt(prefix,sizeof prefix,"%s\t",key)) return 0;
+    int hits=0;
+    for (const char *p=receipt; *p; p=strchr(p,'\n')+1) {
+        if (strncmp(p,prefix,strlen(prefix))) continue;
+        if (++hits!=1 || strncmp(p,row,strlen(row))) return 0;
+    }
+    return hits==1;
+}
+
+static int booter_seal(const char *seal, const char *sha) {
+    const char *key="\tape-final/ape-receipt.txt\t";
+    char row[120];
+    if (cx_fmt(row,sizeof row,"%s%s\n",key,sha)) return 0;
+    int hits=0;
+    for (const char *p=seal; *p; p=strchr(p,'\n')+1) {
+        if (strncmp(p,"SEAL\t",5)) continue;
+        const char *entry=p+5;
+        size_t pid=strspn(entry,"0123456789");
+        if (!pid || strncmp(entry+pid,key,strlen(key))) continue;
+        if (++hits!=1 || strncmp(entry+pid,row,strlen(row))) return 0;
+    }
+    return hits==1;
+}
+
+static const char *booter_material(Prep *P) {
+    const char *out=sy_env("UNISACC_BOOTER_CHAIN_OUT");
+    if (!out || !*out) return "booter-chain-out-required";
+    char chain[4400], path[4400], ape[4400], product[4400], actual[65];
+    if (*out!='/' || sy_realpath(out,chain,sizeof chain)<0 || strcmp(out,chain) ||
+        cx_fmt(P->path,sizeof P->path,"%s/fixedpoint/g2/lnx-x86_64/entry.elf",chain) ||
+        cx_fmt(P->rcpt,sizeof P->rcpt,"%s/ape-final/ape-receipt.txt",chain) ||
+        cx_fmt(ape,sizeof ape,"%s/ape-final/unisacc-next.com",chain) ||
+        cx_fmt(path,sizeof path,"%s/seal.tsv",chain) ||
+        layout_candidate(product,sizeof product,candidate_dir?candidate_dir:root))
+        return "booter-chain-path";
+
+    int64_t n=0;
+    unsigned char *raw=booter_read(P->path,64L<<20,&n);
+    if (!raw) return "booter-raw-unreadable";
+    tp_sha((char *)raw,(size_t)n,P->sha);
+    int64_t raw_size=n;
+    int valid=n>64 && !memcmp(raw,"\177ELF\002\001",6) && raw[18]==62 && raw[19]==0 &&
+              !rv_inject_slot(raw,(long)n,"0.0.0");
+    mm_free(raw);
+    if (!valid) return "booter-raw-lnx-x86_64-or-version-slot";
+
+    unsigned char *seal=booter_read(path,1L<<20,&n);
+    int64_t receipt_size=0;
+    unsigned char *receipt=booter_read(P->rcpt,1L<<20,&receipt_size);
+    const char *why=0;
+    if (!booter_log(seal,n) || !booter_log(receipt,receipt_size)) why="booter-receipt-or-seal";
+    if (!why) {
+        tp_sha((char *)receipt,(size_t)receipt_size,P->closure);
+        if (!booter_seal((char *)seal,P->closure)) why="booter-receipt-unsealed";
+        else if (!booter_receipt_row((char *)receipt,"lnx/x86_64",P->path,P->sha,(long)raw_size))
+            why="booter-raw-receipt-mismatch";
+    }
+    if (!why) {
+        unsigned char *packed=booter_read(ape,128L<<20,&n);
+        if (!packed) why="booter-ape-unreadable";
+        else {
+            tp_sha((char *)packed,(size_t)n,actual);
+            mm_free(packed);
+            char candidate[65]; sy_stat_t st;
+            if (sy_stat(product,&st) || st.kind!='f' || st.size!=n ||
+                file_sha(product,candidate) || strcmp(candidate,actual) ||
+                !booter_receipt_row((char *)receipt,"unisacc-next.com",ape,actual,(long)n))
+                why="booter-candidate-ape-mismatch";
+        }
+    }
+    mm_free(seal);
+    mm_free(receipt);
+    if (why) return why;
+    memcpy(P->id,P->closure,16); P->id[16]=0;
+    P->state=PS_READY; P->cached=1;
+    return 0;
+}
+
 /* register NAME when it is preparable; returns its slot or -1 (with WHY set) */
 static int prep_plan(const char *name, int kind, char *why, int cap) {
     int k = prep_find(name); Prep *P; char h[65], buf[600];
@@ -1075,6 +1180,11 @@ static int prep_plan(const char *name, int kind, char *why, int cap) {
     cx_fmt(P->name, sizeof P->name, "%s", name);
     P->kind = prep_kind_of(name, kind);
     if (prep_source(name, kind, P->src, (long)sizeof P->src, why, cap)) return -1;
+    if (P->kind==PK_BOOTER_RAW) {
+        const char *reason=booter_material(P);
+        if (reason) { cx_fmt(why,cap,"%s",reason); return -1; }
+        return nprep++;
+    }
     if(P->kind==PK_CLASSIC_REF){
         /* The producer checks its own pinned artifact and receipt on every invocation.
          * A one-commit qualify layout may share an already prepared directory. */
