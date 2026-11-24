@@ -47,10 +47,14 @@ static void check_compile(const char *id, const char *src, int expect_rc0, const
     char *v_bin[] = {prod, "-c", sp, "-o", op, 0};
     int rc = apt_exec(use_sh ? v_sh : v_bin, buf, sizeof buf);
     apt_head(buf, fl, sizeof fl);
-    int ok = expect_rc0 ? (rc == 0) : (rc > 0 && (!want_err || strstr(buf, want_err) != 0));
+    sy_stat_t st;
+    int object = sy_lstat(op, &st);
+    int ok = expect_rc0 ? (rc == 0 && object == 0) :
+        (rc == 1 && object == -ENOENT && !strstr(buf, "run: no transition") &&
+         (!want_err || strstr(buf, want_err) != 0));
     if (ok) passed++; else failed++;
-    sy_printf("ARRPARAM_CASE\t%s\t%s\twant_rc0=%d\tgot_rc=%d\terr=%s\n",
-              id, ok ? "PASS" : "FAIL", expect_rc0, rc, fl);
+    sy_printf("ARRPARAM_CASE\t%s\t%s\twant_rc0=%d\tgot_rc=%d\tobject_stat=%d\terr=%s\n",
+              id, ok ? "PASS" : "FAIL", expect_rc0, rc, object, fl);
 }
 
 static void check_run(const char *id, const char *src) {
@@ -119,13 +123,20 @@ int main(int argc, char **argv) {
                   0, "array parameter bound");
     check_compile("N2-param-unclosed-bracket",
                   "typedef int row[3];\nvoid f(row r[2);\n",
-                  0, "expected ]");
+                  0, "expected ']'");
     check_compile("N3-t04-still-rejected",
                   "int main(void) { int x[3] = {1,2,3}; int (*p[2])[3]; p[0] = &x; return (*p[0])[0]; }\n",
                   0, "array of pointers to arrays");
     check_compile("N4-t05-still-rejected",
                   "void f(int (**p)[4]) { (void)p; }\n",
                   0, "pointer to pointer to array");
+    check_compile("N5-plain-param-unclosed", "void f(int r[2);\n", 0, "expected ']'");
+    check_compile("N6-definition-unclosed", "typedef int row[3];\nvoid f(row r[2) {}\n", 0, "expected ']'");
+    check_compile("N7-pointer-param-unclosed", "typedef int row[3];\nvoid f(row (*r)[2);\n", 0, "expected ']'");
+    check_compile("N8-second-dimension-unclosed", "typedef int row[3];\nvoid f(row r[2][3);\n", 0, "expected ']'");
+    check_compile("N9-global-array-unclosed", "int x[2;\n", 0, "expected ']'");
+    check_compile("N10-global-function-pointer-unclosed", "void (*f)(int x[2);\n", 0, "expected ']'");
+    check_compile("N11-second-param-unclosed", "void f(int x, int y[2);\n", 0, "expected ']'");
 
     if (sy_remove_all(tdir)) failed++;
     sy_printf("ARRPARAM_SUMMARY\tpassed=%d\tfailed=%d\ttotal=%d\n", passed, failed, passed + failed);
