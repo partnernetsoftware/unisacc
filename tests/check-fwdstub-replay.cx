@@ -47,18 +47,14 @@ static int run_image(char *image, const char *expected) {
 static int phase_run(char *candidate, const char *mode, int reject, int single) {
     char e_tmp[4300], e_mode[64], e_path[4300];
     char *env[] = {e_tmp, e_mode, e_path, "UNISA_FWD_REPLAY=1", 0};
-    char *argv[] = {candidate, source[0], extra, "-o", phase_output, 0};
-    if (single) {
-        argv[2] = "-o";
-        argv[3] = phase_output;
-        argv[4] = 0;
-    }
+    char *multi_argv[] = {"sh", candidate, source[0], extra, "-o", phase_output, 0};
+    char *single_argv[] = {"sh", candidate, source[0], "-o", phase_output, 0};
     np_result result = {0};
     char why[512] = "";
     if (cx_fmt(e_tmp, sizeof e_tmp, "TMPDIR=%s", tmp) ||
         cx_fmt(e_mode, sizeof e_mode, "UNISACC_PHASE=%s", mode) ||
         cx_fmt(e_path, sizeof e_path, "UNISACC_PHASE_%s=%s", mode[0] == 'A' ? "OUT" : "IN", phase)) return 0;
-    int rc = np_run(argv, root, env, 8, &result, why, sizeof why);
+    int rc = np_run(single ? single_argv : multi_argv, root, env, 8, &result, why, sizeof why);
     int ok = !rc && !result.residue && (reject
         ? result.rc == 1 && result.err && strstr(result.err, "invalid phase receipt or source") && sy_exists(phase_output) == 0
         : result.rc == 0);
@@ -110,8 +106,8 @@ static int receipt_checks(char *candidate) {
    covers the pair and timeouts clean the process groups. */
 static int parallel(char *candidate) {
     int pid[2], rc[2] = {-EAGAIN, -EAGAIN};
-    char *a[] = {candidate, source[0], extra, "-o", output[0], 0};
-    char *b[] = {candidate, source[1], extra, "-o", output[1], 0};
+    char *a[] = {"sh", candidate, source[0], extra, "-o", output[0], 0};
+    char *b[] = {"sh", candidate, source[1], extra, "-o", output[1], 0};
     long deadline = sy_now_ms() + 10000;
     pid[0] = sy_spawn(a);
     pid[1] = sy_spawn(b);
@@ -134,7 +130,7 @@ static int rejects_malformed_checkpoint_sha(char *candidate) {
         sy_setenv("UNISACC_PHASE", "A", 1) ||
         sy_setenv("UNISACC_PHASE_OUT", phase, 1)) return 0;
     char *discard[] = {"cat", checkpoint_sha, 0};
-    char *compile[] = {candidate, source[0], extra, "-o", phase_output, 0};
+    char *compile[] = {"sh", candidate, source[0], extra, "-o", phase_output, 0};
     int reader = sy_spawn(discard);
     int builder = sy_spawn(compile);
     int read_rc = -EAGAIN, build_rc = -EAGAIN, sent = 0;
@@ -169,7 +165,7 @@ static int rejects_malformed_checkpoint_sha(char *candidate) {
 static int rejects_atomic_write_failure(char *candidate) {
     char deep[4100], e_tmp[4200], why[512] = "";
     char *env[] = {e_tmp, "UNISA_FWD_REPLAY=1", 0};
-    char *compile[] = {candidate, source[0], extra, "-o", phase_output, 0};
+    char *compile[] = {"sh", candidate, source[0], extra, "-o", phase_output, 0};
     if (cx_fmt(deep, sizeof deep, "%s/long", tmp)) return 0;
     size_t n = strlen(deep);
     while (n < 4010) {
@@ -218,7 +214,7 @@ int main(int argc, char **argv) {
             cx_fmt(output[i], sizeof output[i], "%s/program-%d", argv[3], i) ||
             write_text(source[i], i ? var : fixed)) return 2;
     for (int i = 0; i < 2; i++) {
-        char *args[] = {argv[2], source[i], 0};
+        char *args[] = {"sh", argv[2], source[i], 0};
         char *bytes = 0;
         size_t n = 0;
         int rc = cx_runv_timeout(args, 5, &bytes, &n);
