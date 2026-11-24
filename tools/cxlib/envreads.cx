@@ -1,0 +1,103 @@
+/* envreads.cx -- which UNISACC_* / UNISA_* environment variables a line of product source reads, and whether
+ * exec/facts/env-semantics.tsv lists a (variable, file) pair.  Shared by tools/check-env-semantics.cx (whole tree) and
+ * tools/premerge-selfcheck.cx item 14 (added lines of a patch), so both judge one definition of "a read".
+ * Use it with `#pragma unisa use cxlib.envreads` from a tool in tools/.  Every name starts with er_.
+ *   er_scope(FILE)                1 for a .cx/.c/.h under cx/, src/ or exec/c/ (the product), else 0
+ *   er_line_names(TEXT, NM, CAP)  the variables one source line reads, copied into NM[0..n) (64 bytes each, no
+ *                                 duplicates), n <= CAP.  A read is a quoted "UNISACC_X" or "UNISA_X" literal right
+ *                                 after `env(` (sy_env, getenv, setenv, sy_setenv, with blanks allowed before the paren and the
+ *                                 quote) or, on a line holding `_env[]`, any such literal of the name table.  Writes
+ *                                 count: the table lists who touches a variable.  Not a read: a line that begins with
+ *                                 `//`, a block-comment opener or `* `; a literal after `//`; a literal inside a block comment opened and not
+ *                                 closed before it on the same line; a literal with no `env(` (the version slot).
+ *                                 Known gaps: a name built by concatenation or through a macro (#define EV "UNISACC_X"
+ *                                 then sy_env(EV)), a name table continued over several lines, a block comment whose
+ *                                 inner line does not start with `*`.
+ *   er_table_lists(TBL, N, NAME, FILE)
+ *                                 1 when a data row of the table text (7 tab columns: name, domain, unset, empty,
+ *                                 zero, other, readers) names NAME and its comma separated readers include FILE
+ * No exported objects or macros (CXIF v0). */
+#pragma unisa module envreads
+#pragma unisa use mem.bytes
+#pragma unisa use text.text
+
+static int er_ends(const char *s, const char *suf) {
+    size_t a = strlen(s), b = strlen(suf);
+    return a >= b && !strcmp(s + a - b, suf);
+}
+
+int er_scope(const char *f) {
+    if (strncmp(f, "cx/", 3) && strncmp(f, "src/", 4) && strncmp(f, "exec/c/", 7)) return 0;
+    return er_ends(f, ".cx") || er_ends(f, ".c") || er_ends(f, ".h");
+}
+
+/* 1 when the text before the paren at END (blanks skipped) ends with "env" */
+static int er_env_before(const char *t, const char *end) {
+    while (end > t && (end[-1] == ' ' || end[-1] == '\t')) end--;
+    return end - t >= 3 && !strncmp(end - 3, "env", 3);
+}
+/* 1 when the byte at P sits in text that is a comment: after `//`, or inside an unclosed block opened earlier on the line */
+static int er_in_comment(const char *t, const char *p) {
+    const char *q, *open = 0, *c = 0;
+    for (q = t; q < p; q++) {
+        if (q[0] == '/' && q[1] == '/') { c = q; break; }
+        if (q[0] == '/' && q[1] == '*') { open = q; q++; }
+        else if (q[0] == '*' && q[1] == '/' && open) { open = 0; q++; }
+    }
+    return c != 0 || open != 0;
+}
+
+int er_line_names(const char *t, char nm[][64], int cap) {
+    int n = 0, tab;
+    const char *p, *ws = t;
+    while (*ws == ' ' || *ws == '\t') ws++;
+    if (!strncmp(ws, "//", 2) || (*ws == '*' && (ws[1] == ' ' || ws[1] == '/' || !ws[1]))) return 0;
+    tab = strstr(t, "_env[]") != 0;
+    for (p = t; *p; p++) {
+        const char *s, *e, *b;
+        int k, dup = 0, len;
+        if (*p != '"') continue;
+        s = p + 1;
+        if (!strncmp(s, "UNISACC_", 8)) e = s + 8;
+        else if (!strncmp(s, "UNISA_", 6)) e = s + 6;
+        else continue;
+        while ((*e >= 'A' && *e <= 'Z') || (*e >= '0' && *e <= '9') || *e == '_') e++;
+        if (*e != '"') { p = e - 1; continue; }
+        len = (int)(e - s);
+        b = p;
+        while (b > t && (b[-1] == ' ' || b[-1] == '\t')) b--;
+        if ((tab || (b - t >= 4 && b[-1] == '(' && er_env_before(t, b - 1))) && len < 64 && n < cap && !er_in_comment(t, p)) {
+            for (k = 0; k < n; k++) if ((int)strlen(nm[k]) == len && !strncmp(nm[k], s, (size_t)len)) dup = 1;
+            if (!dup) { if (mm_copy(nm[n], 64, s, (size_t)len)) return n; nm[n][len] = 0; n++; }
+        }
+        p = e;
+    }
+    return n;
+}
+
+int er_table_lists(const char *tbl, size_t tn, const char *name, const char *file) {
+    const char *s = tbl, *end = tbl + tn;
+    size_t nl = strlen(name), fl = strlen(file);
+    while (s < end) {
+        const char *e = s;
+        while (e < end && *e != '\n') e++;
+        if (*s != '#' && e > s) {
+            const char *col[8], *q, *rend;
+            int k = 0;
+            col[0] = s;
+            for (q = s; q < e && k < 7; q++) if (*q == '\t') col[++k] = q + 1;
+            rend = k == 7 ? col[7] - 1 : e;   /* an eighth column (expires) ends the readers */
+            if (k >= 6 && (size_t)(col[1] - 1 - col[0]) == nl && !strncmp(col[0], name, nl)) {
+                const char *r = col[6];
+                while (r < rend) {
+                    const char *c = r;
+                    while (c < rend && *c != ',') c++;
+                    if ((size_t)(c - r) == fl && !strncmp(r, file, fl)) return 1;
+                    r = c < rend ? c + 1 : rend;
+                }
+            }
+        }
+        s = e + 1;
+    }
+    return 0;
+}

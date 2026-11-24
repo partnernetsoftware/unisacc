@@ -1,4 +1,4 @@
-/* premerge-selfcheck.cx -- self-checks a patch must pass BEFORE it is sent for review (items 1 to 8, 10 to 12, item 9 corpus pending).
+/* premerge-selfcheck.cx -- self-checks a patch must pass BEFORE it is sent for review (items 1 to 8, 10 to 14, item 9 corpus pending).
  *
  *   sh ./unisacc.com tools/premerge-selfcheck.cx -- --patch P --check 'CMD' [--check 'CMD'...] --out RECEIPT
  *                                                   [--base REV (default main)] [--repo R (default .)] [--guard]
@@ -44,9 +44,13 @@
  *     a --guard patch also needs every selected negative control (id with block, refus, reject or deny) green, none selected is UNMEASURED.
  *     --flip-ids CSV names the batches instead of selecting them.  More selected than run, or answers missing within 240 s per tree, is UNMEASURED.
  *     NA when the tree has no tools/affected.cx.  It judges batch states only: a data-format convention nobody tests is not seen here.
+ * (14) env-semantics: an added UNISACC_ or UNISA_ environment read (sy_env, getenv, setenv, sy_setenv, or a *_env[] table; the cxlib.envreads definition that
+ *     tools/check-env-semantics.cx shares) in a .cx/.c/.h under cx/ or src/ needs a row of the patched exec/facts/env-semantics.tsv whose readers list that
+ *     file, else FAIL naming variable, file and line; NA when no such read is added.  Known gaps: names built by concatenation or reached through a macro.
  * --overlay DIR is copied over the private tree after the patch, for inputs the check needs that git does not track.
  * The baseline (patched tree, unmodified) must be green for every --check, else refusal rc 2. */
 #pragma unisa use cxlib.ckrun
+#pragma unisa use cxlib.envreads
 #pragma unisa use cxlib.privrepo
 #pragma unisa use sys.fs
 #pragma unisa use sys.time
@@ -860,6 +864,37 @@ static int declared_row(const char *file, const char *text) {
     free(db);
     return dec;
 }
+static char g_r1sha[65];
+/* Round two is a diff on a tree that already holds round one.  A --base tree without round one (both rounds cut against main as cumulative
+   patches) leaves no round-one line among the lines round two deletes, so the comparison would touch 0 of N lines and pass: refuse it.
+   Every non-blank line round one added must be a whole line of its file at the base. */
+static void round1_in_base(void) {
+    int i, j, seen, miss = 0; char q1[1100], q2[1100], sc[4600], out[2048], lf[1200], bf[1200], first[400];
+    first[0] = 0;
+    cx_fmt(lf, sizeof lf, "%s/r1.lines", T); cx_fmt(bf, sizeof bf, "%s/r1.base", T);
+    for (i = 0; i < nA1; i++) {
+        const char *f = A1[i].file; size_t n = 0; char *buf; int m = 0;
+        for (j = 0, seen = 0; j < i && !seen; j++) if (!strcmp(A1[j].file, f)) seen = 1;
+        if (seen) continue;
+        for (j = i; j < nA1; j++) if (!strcmp(A1[j].file, f)) { const char *t = A1[j].text; while (*t == ' ' || *t == '\t') t++; if (*t) n += strlen(A1[j].text) + 1; }
+        if (n == 0) continue;
+        buf = malloc(n + 1); if (!buf) die2("memory", 0);
+        for (j = i; j < nA1; j++) if (!strcmp(A1[j].file, f)) {
+            const char *t = A1[j].text; size_t l = strlen(A1[j].text);
+            while (*t == ' ' || *t == '\t') t++;
+            if (*t) { cp(buf + m, (long)(n + 1 - (size_t)m), A1[j].text, (long)l); m += (int)l; buf[m++] = '\n'; }
+        }
+        if (cx_write(lf, buf, (size_t)m) != 0) die2("round-one lines unwritable", lf);
+        free(buf);
+        shq(q1, sizeof q1, g_repo); cx_fmt(sc, sizeof sc, "%s:%s", g_basec, f); shq(q2, sizeof q2, sc);
+        {   char ql[1300], qb[1300]; shq(ql, sizeof ql, lf); shq(qb, sizeof qb, bf);
+            cx_fmt(sc, sizeof sc, "%sgit -C %s show %s > %s 2>/dev/null; grep -Fxvf %s %s | head -n 1000", envu(), q1, q2, qb, qb, ql);
+            (void)sh(sc, out, sizeof out, 20); }
+        {   size_t ol = strlen(out), k; for (k = 0; k < ol; k++) if (out[k] == '\n') miss++; if (ol && out[ol - 1] != '\n') miss++; }
+        if (out[0] && !first[0]) { char *nl = strchr(out, '\n'); if (nl) *nl = 0; cx_fmt(first, sizeof first, "%s: %.200s", f, out); }
+    }
+    if (miss) { char why[500]; cx_fmt(why, sizeof why, "--base %s does not hold the round-one patch (%d round-one line(s) are not in it, first: %.200s): cut round two against a tree that carries round one", g_base, miss, first); die2("round-one lines absent from the base:", why); }
+}
 static void item13(void) {
     int i, j, bad = 0, base = 0, touched = 0, unnamed = 0, dropped = 0, weak = 0;
     int negb = 0, totb = 0, nega = 0, tota = 0;
@@ -895,8 +930,33 @@ static void item13(void) {
         }
     }
     if (base && touched * 100 > base * 30) { emit(13, "round-rewrite-share", "FAIL", "round two rewrites %d of %d round-one lines (over 30%%): send it as a new item for full pre-review", touched, base); bad++; }
-    if (totb && tota && nega * totb < negb * tota) { emit(13, "round-negative-share", "FAIL", "the negative-case share of assertions falls from %d/%d to %d/%d", negb, totb, nega, tota); bad++; }
-    if (!bad) emit(13, "round-compare", "PASS", "round two touches %d of %d round-one lines (all declared), %d assertions dropped and %d weakened (all declared), negative share %d/%d -> %d/%d", touched, base, dropped, weak, negb, totb, nega, tota);
+    /* the absolute count of negative-case assertions must not fall: a share would call a net gain of positive assertions a loss */
+    if (negb && nega < negb) { emit(13, "round-negative-count", "FAIL", "the negative-case assertions fall from %d to %d (of %d round-one and %d round-two assertions)", negb, nega, totb, tota); bad++; }
+    if (!bad) emit(13, "round-compare", "PASS", "round two touches %d of %d round-one lines (all declared), %d assertions dropped and %d weakened (all declared), negative assertions %d -> %d", touched, base, dropped, weak, negb, nega);
+}
+
+/* ---------- item 14: a new UNISACC_ / UNISA_ read in the product needs its exec/facts/env-semantics.tsv row ---------- */
+/* tools/check-env-semantics.cx compares the (variable, file) pairs the product reads with that table, but it ran only at the end of a chain: a
+   read added to src/ or cx/ without its row cost a whole chain.  Here every added line of a .cx/.c/.h under cx/ or src/ is judged by the same
+   cxlib.envreads definition of a read; each (variable, file) must be a row of the patched tree's table whose readers column lists the file.
+   Known gaps (cxlib/envreads.cx lists the scan ones): a patch that deletes a table row while the source still reads the variable is not seen. */
+static void item14(void) {
+    int i, k, nn, reads = 0, bad = 0; char nm[8][64], path[1300]; char *tbl; size_t tn = 0;
+    for (i = 0; i < nA; i++) if (er_scope(A[i].file)) reads += er_line_names(A[i].text, nm, 8);
+    if (!reads) { emit(14, "env-semantics", "NA", "no added line in cx/ or src/ reads an UNISACC_ or UNISA_ variable"); return; }
+    cx_fmt(path, sizeof path, "%s/exec/facts/env-semantics.tsv", TREE);
+    tbl = slurp(path, &tn);
+    if (!tbl) { emit(14, "env-semantics", "FAIL", "the patch reads %d environment variable(s) but the patched tree has no exec/facts/env-semantics.tsv", reads); return; }
+    for (i = 0; i < nA; i++) {
+        if (!er_scope(A[i].file)) continue;
+        nn = er_line_names(A[i].text, nm, 8);
+        for (k = 0; k < nn; k++) if (!er_table_lists(tbl, tn, nm[k], A[i].file)) {
+            if (bad < 5) emit(14, "env-unregistered", "FAIL", "%s:%d reads %s and exec/facts/env-semantics.tsv has no row for it listing this file as a reader (tools/check-env-semantics.cx would fail the chain)", A[i].file, A[i].line, nm[k]);
+            bad++;
+        }
+    }
+    free(tbl);
+    if (!bad) emit(14, "env-semantics", "PASS", "%d added environment read(s) are all rows of exec/facts/env-semantics.tsv naming their file", reads);
 }
 
 /* ---------- --mechanical: the seven mechanical checks a gatekeeper repeats on every patch, one receipt ---------- */
@@ -959,7 +1019,11 @@ static void mech_run(const char *hash) {
         rc = sh(sc, out, sizeof out, 20);
         (void)files;
         if (rc != 0 || !nf) mrow(2, "sha256", rc, sy_now_ms() - t0, "FAIL", "patch sha256 %.16s; the changed-file digests could not be computed: %.200s", hash, out);
-        else { for (k = 0; out[k]; k++) if (out[k] == '\n') out[k] = ';'; mrow(2, "sha256", 0, sy_now_ms() - t0, "PASS", "patch sha256 %s; %d changed file(s): %.900s", hash, nf, out); }
+        else {
+            for (k = 0; out[k]; k++) if (out[k] == '\n') out[k] = ';';
+            if (g_round1) mrow(2, "sha256", 0, sy_now_ms() - t0, "PASS", "patch sha256 %s; round-one sha256 %s; %d changed file(s): %.900s", hash, g_r1sha, nf, out);
+            else mrow(2, "sha256", 0, sy_now_ms() - t0, "PASS", "patch sha256 %s; %d changed file(s): %.900s", hash, nf, out);
+        }
     }
     /* (3) home-directory paths in added lines */
     t0 = sy_now_ms();
@@ -1112,15 +1176,23 @@ int main(int argc, char **argv) {
     }
     if (g_round1) {   /* round one: parse it first, keep its added lines, then parse the patch under review into clean arrays */
         size_t p1n; char *p1 = slurp(g_round1, &p1n);
+        char r1q[1100], r1c[1300], r1l[300];
         if (!p1 || p1n == 0) die2("round-one patch missing or empty", g_round1);
+        /* the receipt binds the round-one file: a trimmed copy would shrink the comparison and must show as another digest */
+        shq(r1q, sizeof r1q, g_round1);
+        cx_fmt(r1c, sizeof r1c, "sha256sum -- %s | cut -c1-64", r1q);
+        if (sh(r1c, g_r1sha, sizeof g_r1sha, 10) != 0 || strlen(g_r1sha) < 64) die2("round-one sha256 unreadable", g_round1);
+        g_r1sha[64] = 0;
+        cx_fmt(r1l, sizeof r1l, "SELFCHECK_INPUT round1_sha256=%s\n", g_r1sha); rawl(r1l);
         parse_patch(p1, p1n);
         cp(A1, (long)sizeof A1, A, (long)(nA * sizeof A[0])); nA1 = nA; nA = 0; nD = 0;
+        round1_in_base();
     }
     parse_patch(pb, pn);
     if (nA == 0 && nD == 0) die2("patch adds and deletes no lines", g_patch);
     if (g_mech) mech_run(hash);
     if (run_checks(0, out, sizeof out) != 0) { printf("%s\n", out); die2("baseline --check not green on the patched tree", 0); }
-    item1(); item2(); item3(); item4(); item5(); item6(); item7(); item8(); item10(); item11(); item12(); item13();
+    item1(); item2(); item3(); item4(); item5(); item6(); item7(); item8(); item10(); item11(); item12(); item13(); item14();
     {   char tail[1024]; const char *v = nfail ? "FAIL" : nunm ? "INCOMPLETE" : "PASS";
         cx_fmt(tail, sizeof tail, "SELFCHECK_SUMMARY patch_sha256=%s fail=%d unmeasured=%d verdict=%s\n", hash, nfail, nunm, v);
         if (rn + (int)strlen(tail) >= (int)sizeof rec) die2("receipt", "too long");

@@ -504,16 +504,18 @@ static int print_plan(int mode) {
     }
     return 0;
 }
-/* --from-run:读 flow 运行目录 DIR/events.tsv 的终态行与 DIR/out/<name>.out。0 有终态,1 无(skip 或未跑) */
+/* --from-run:读 flow 运行目录 DIR/events.tsv 的终态行与 DIR/out/<name>.out。
+ * 0 有 ok/fail/timeout,1 只有 skip 等非终态,2 文件缺失或该行没有任何事件(选中且应跑)。 */
 static int from_run(Row *r, const char *dir) {
-    char p[800]; size_t n = 0; char *b; long at = 0, nl = tx_len(r->name, 64); int got = 0;
-    if (cx_fmt(p, sizeof p, "%s/events.tsv", dir) || !(b = cx_read(p, &n))) return 1;
+    char p[800]; size_t n = 0; char *b; long at = 0, nl = tx_len(r->name, 64); int got = 0, saw = 0;
+    if (cx_fmt(p, sizeof p, "%s/events.tsv", dir) || !(b = cx_read(p, &n))) return 2;
     while (at < (long)n) {   /* EVT seq id state ms rc summary */
         long e = tx_chr(b + at, (long)n - at, '\n'), ln = e < 0 ? (long)n - at : e, f[8], k; int nf = 0;
         const char *l = b + at;
         at += ln + 1; f[0] = 0;
         for (k = 0; k < ln && nf < 6; k++) if (l[k] == '\t') f[++nf] = k + 1;
         if (nf < 6 || f[3] - f[2] - 1 != nl || !mm_same(l + f[2], r->name, nl)) continue;
+        saw = 1;
         if (mm_same(l + f[3], "ok\t", 3) || mm_same(l + f[3], "fail\t", 5) || mm_same(l + f[3], "timeout\t", 8)) {
             long v = 0, q; int neg = 0;
             for (q = f[4]; q < f[5] - 1; q++) v = v * 10 + (l[q] - '0');
@@ -524,7 +526,7 @@ static int from_run(Row *r, const char *dir) {
             got = 1;
         }
     }
-    if (!got) return 1;
+    if (!got) return saw ? 1 : 2;
     if (cx_fmt(p, sizeof p, "%s/out/%s.out", dir, r->name)) return 1;
     n = 0; r->out = cx_read(p, &n);
     if (!r->out) { r->out = mm_alloc(1); if (r->out) r->out[0] = 0; n = 0; }
@@ -694,7 +696,13 @@ int main(int argc, char **argv) {
         for (i = 0; i < nr; i++) {
             Row *r = &rows[ord[i]];
             if (!r->sel) { report(r); continue; }
-            if (from_run(r, fromrun)) { r->status = ST_NOTRUN; report(r); continue; }
+            {   int fr = from_run(r, fromrun);
+                if (fr == 2) {
+                    r->status = ST_REFUSED; r->rc = 2; r->out = 0; r->n = 0;
+                    report(r); continue;
+                }
+                if (fr) { r->status = ST_NOTRUN; report(r); continue; }
+            }
             if (mode == 1) r->status = classify(r->rc);
             else if (seq(r->wr, "-")) { r->status = classify(r->rc); if (r->status == ST_DRIFT) r->status = ST_NEEDS_BUMP; }
             else r->status = r->rc == 0 ? ST_WROTE : r->rc == 142 ? ST_TIMEOUT : ST_REFUSED;

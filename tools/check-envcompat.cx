@@ -1,0 +1,165 @@
+/* tools/check-envcompat.cx -- contract check of cxlib.envcompat (the UNISA_ -> UNISACC_ rename window helper for tools and tests).
+ *
+ *   sh ./unisacc.com tools/check-envcompat.cx -- [--root DIR]
+ *
+ * (1) The helper's name table equals the deprecated rows of exec/facts/env-semantics.tsv: every listed name has a UNISA_ row with an
+ *     expires column, and the one deprecated row without a twin is UNISA_NOSTDINC (the product alone writes it).
+ * (2) ec_setenv / ec_unsetenv write and delete both spellings of a listed name, given in either spelling, and only the given spelling of any other name (a
+ *     longer name that merely starts like a listed one, KERNEL versus KERNEL_SHA, a name already spelled UNISA_).
+ * (3) ec_env takes the new spelling first (an empty new value counts as set), falls back to the old one, else 0; ec_env_or's
+ *     fallback covers unset and empty.
+ * (4) ec_envp appends the pair for a listed name, one entry otherwise, keeps the array 0-terminated and answers -1 when full.
+ * Last line CHECK_ENVCOMPAT<TAB>assertions=N<TAB>failed=M, rc 0 when M is 0. */
+#pragma unisa use cxlib.envcompat
+#pragma unisa use sys.env
+#pragma unisa use mem.bytes
+#pragma unisa use sys.io
+#pragma unisa use text.text
+
+static int nas, failed;
+static void ck(int ok, const char *name) {
+    nas++;
+    if (ok) sy_printf("PASS\tenvcompat.%s\n", name);
+    else { failed++; sy_printf("FAIL\tenvcompat.%s\n", name); }
+}
+
+static int same(const char *a, const char *b) { return a && b && !strcmp(a, b); }
+
+/* the number of tab separated columns of the table row whose first column is NAME, 0 when there is no such row */
+static int table_columns(const char *tbl, const char *name) {
+    size_t nl = strlen(name);
+    const char *s = tbl;
+    while (*s) {
+        const char *e = strchr(s, '\n');
+        if (!e) e = s + strlen(s);
+        if (*s != '#' && (size_t)(e - s) > nl && !strncmp(s, name, nl) && s[nl] == '\t') {
+            int c = 1;
+            const char *q;
+            for (q = s; q < e; q++) if (*q == '\t') c++;
+            return c;
+        }
+        s = *e ? e + 1 : e;
+    }
+    return 0;
+}
+
+static int deprecated_rows(const char *tbl, char out[][64], int cap) {
+    int n = 0;
+    const char *s = tbl;
+    while (*s) {
+        const char *e = strchr(s, '\n');
+        if (!e) e = s + strlen(s);
+        if (!strncmp(s, "UNISA_", 6)) {
+            const char *t = memchr(s, '\t', (size_t)(e - s));
+            int c = 1;
+            const char *q;
+            for (q = s; q < e; q++) if (*q == '\t') c++;
+            if (t && c == 8 && n < cap && t - s < 64) { if (mm_copy(out[n], 64, s, (long)(t - s))) return n; out[n][t - s] = 0; n++; }
+        }
+        s = *e ? e + 1 : e;
+    }
+    return n;
+}
+
+int main(int argc, char **argv) {
+    const char *root = ".";
+    char path[4200], *tbl = 0, dep[16][64];
+    char *arr[8];
+    char legacy[16][80];
+    size_t tn = 0;
+    int i, n, nd, nl = 0;
+    FILE *f;
+    for (i = 1; i < argc; i++) {
+        if (!strcmp(argv[i], "--root") && i + 1 < argc) root = argv[++i];
+        else { fprintf(stderr, "usage: check-envcompat.cx -- [--root DIR]\n"); return 2; }
+    }
+    /* (1) table agreement */
+    { int cx_kept = snprintf(path, sizeof path, "%s/exec/facts/env-semantics.tsv", root); (void)cx_kept; }
+    f = fopen(path, "rb");
+    if (!f) { fprintf(stderr, "check-envcompat: cannot read %s\n", path); return 2; }
+    {
+        char *b = malloc(1 << 20);
+        tn = b ? fread(b, 1, (1 << 20) - 1, f) : 0;
+        fclose(f);
+        if (!b || !tn) { fprintf(stderr, "check-envcompat: empty %s\n", path); return 2; }
+        b[tn] = 0;
+        tbl = b;
+    }
+    for (i = 0; ec_legacy_name(i) && nl < 16; i++) { int cx_kept = snprintf(legacy[nl], sizeof legacy[nl], "UNISA_%s", ec_legacy_name(i)); (void)cx_kept; nl++; }
+    ck(nl == 7 && !ec_legacy_name(7) && !ec_legacy_name(100), "legacy-name-list-ends");
+    for (i = 0; i < nl; i++) {
+        char nm[96];
+        { int cx_kept = snprintf(nm, sizeof nm, "legacy-%s-is-a-deprecated-row", legacy[i]); (void)cx_kept; }
+        ck(table_columns(tbl, legacy[i]) == 8, nm);
+    }
+    nd = deprecated_rows(tbl, dep, 16);
+    {
+        int extra = 0, bad = 0;
+        for (n = 0; n < nd; n++) {
+            int listed = 0;
+            for (i = 0; i < nl; i++) if (!strcmp(dep[n], legacy[i])) listed = 1;
+            if (!listed) { extra++; if (strcmp(dep[n], "UNISA_NOSTDINC")) bad++; }
+        }
+        ck(extra == 1 && bad == 0, "only-UNISA_NOSTDINC-is-deprecated-without-a-twin");
+    }
+    free(tbl);
+    /* (2) writes */
+    sy_unsetenv("UNISACC_JOBS"); sy_unsetenv("UNISA_JOBS");
+    ck(ec_setenv("UNISACC_JOBS", "3", 1) == 0 && same(sy_env("UNISACC_JOBS"), "3") && same(sy_env("UNISA_JOBS"), "3"), "setenv-writes-both-spellings");
+    ck(ec_setenv("UNISACC_JOBS", "5", 0) == 0 && same(sy_env("UNISACC_JOBS"), "3") && same(sy_env("UNISA_JOBS"), "3"), "setenv-without-overwrite-keeps-both");
+    ck(ec_unsetenv("UNISACC_JOBS") == 0 && !sy_env("UNISACC_JOBS") && !sy_env("UNISA_JOBS"), "unsetenv-deletes-both-spellings");
+    sy_unsetenv("UNISACC_OTHER_X"); sy_unsetenv("UNISA_OTHER_X");
+    ck(ec_setenv("UNISACC_OTHER_X", "1", 1) == 0 && same(sy_env("UNISACC_OTHER_X"), "1") && !sy_env("UNISA_OTHER_X"), "unlisted-name-has-no-twin");
+    sy_unsetenv("UNISACC_OTHER_X");
+    sy_unsetenv("UNISACC_KERNEL"); sy_unsetenv("UNISA_KERNEL"); sy_unsetenv("UNISACC_KERNEL_SHA"); sy_unsetenv("UNISA_KERNEL_SHA");
+    ec_setenv("UNISACC_KERNEL_SHA", "aa", 1);
+    ck(same(sy_env("UNISA_KERNEL_SHA"), "aa") && !sy_env("UNISA_KERNEL") && !sy_env("UNISACC_KERNEL"), "kernel-sha-twin-is-not-the-kernel-twin");
+    ec_unsetenv("UNISACC_KERNEL_SHA");
+    sy_unsetenv("UNISACC_JOBS_X"); sy_unsetenv("UNISA_JOBS_X");
+    ck(ec_setenv("UNISACC_JOBS_X", "1", 1) == 0 && !sy_env("UNISA_JOBS_X"), "longer-name-with-a-listed-prefix-has-no-twin");
+    sy_unsetenv("UNISACC_JOBS_X");
+    sy_unsetenv("UNISA_JOBS"); sy_unsetenv("UNISACC_JOBS");
+    ck(ec_setenv("UNISA_JOBS", "2", 1) == 0 && same(sy_env("UNISA_JOBS"), "2") && same(sy_env("UNISACC_JOBS"), "2"), "an-old-spelling-given-writes-both");
+    ck(ec_unsetenv("UNISA_JOBS") == 0 && !sy_env("UNISA_JOBS") && !sy_env("UNISACC_JOBS"), "an-old-spelling-given-deletes-both");
+    sy_setenv("UNISACC_JOBS", "new", 1); sy_setenv("UNISA_JOBS", "old", 1);
+    ck(same(ec_env("UNISA_JOBS"), "new") && same(ec_env("UNISACC_JOBS"), "new"), "env-reads-the-new-spelling-first-whichever-spelling-is-asked");
+    sy_unsetenv("UNISACC_JOBS");
+    ck(same(ec_env("UNISA_JOBS"), "old") && same(ec_env("UNISACC_JOBS"), "old"), "env-falls-back-to-the-old-spelling-whichever-spelling-is-asked");
+    sy_unsetenv("UNISA_JOBS");
+    /* (3) reads */
+    sy_unsetenv("UNISACC_MAXSTEPS"); sy_unsetenv("UNISA_MAXSTEPS");
+    ck(ec_env("UNISACC_MAXSTEPS") == 0, "env-unset-is-null");
+    sy_setenv("UNISA_MAXSTEPS", "7", 1);
+    ck(same(ec_env("UNISACC_MAXSTEPS"), "7"), "env-falls-back-to-the-old-spelling");
+    sy_setenv("UNISACC_MAXSTEPS", "9", 1);
+    ck(same(ec_env("UNISACC_MAXSTEPS"), "9"), "env-takes-the-new-spelling-first");
+    sy_setenv("UNISACC_MAXSTEPS", "", 1);
+    ck(same(ec_env("UNISACC_MAXSTEPS"), ""), "env-empty-new-value-counts-as-set");
+    ck(same(ec_env_or("UNISACC_MAXSTEPS", "dflt"), "dflt"), "env-or-covers-empty");
+    sy_unsetenv("UNISACC_MAXSTEPS"); sy_unsetenv("UNISA_MAXSTEPS");
+    ck(same(ec_env_or("UNISACC_MAXSTEPS", "dflt"), "dflt"), "env-or-covers-unset");
+    sy_setenv("UNISA_MAXSTEPS", "4", 1);
+    ck(same(ec_env_or("UNISACC_MAXSTEPS", "dflt"), "4"), "env-or-takes-the-old-spelling");
+    sy_unsetenv("UNISA_MAXSTEPS");
+    sy_setenv("UNISA_FREE_NAME", "z", 1);
+    ck(ec_env("UNISA_FREE_NAME") && same(ec_env("UNISA_FREE_NAME"), "z") && !ec_env("UNISACC_FREE_NAME"), "env-of-an-old-spelling-reads-it-directly");
+    sy_unsetenv("UNISA_FREE_NAME");
+    /* (4) child environment arrays */
+    n = 0; arr[0] = 0;
+    ck(ec_envp(arr, &n, 8, "UNISACC_CONTAINER=/p") == 0 && n == 2 && same(arr[0], "UNISACC_CONTAINER=/p") && same(arr[1], "UNISA_CONTAINER=/p") && !arr[2], "envp-appends-the-pair-and-terminates");
+    ck(ec_envp(arr, &n, 8, "UNISACC_LOCAL=1") == 0 && n == 3 && same(arr[2], "UNISACC_LOCAL=1") && !arr[3], "envp-appends-one-entry-for-an-unlisted-name");
+    ck(ec_envp(arr, &n, 8, "UNISACC_KERNEL_SHA=ab") == 0 && n == 5 && same(arr[4], "UNISA_KERNEL_SHA=ab") && !arr[5], "envp-pair-for-the-longer-listed-name");
+    n = 0; arr[0] = 0;
+    ck(ec_envp(arr, &n, 2, "UNISACC_JOBS=1") == -1 && !arr[n], "envp-full-array-answers-minus-one-and-stays-terminated");
+    n = 0; arr[0] = 0;
+    ck(ec_envp(arr, &n, 1, "UNISACC_LOCAL=1") == -1 && n == 0, "envp-no-room-for-the-first-entry");
+    n = 0; arr[0] = 0;
+    ck(ec_envp(arr, &n, 8, "UNISA_CONTAINER=/p") == 0 && n == 2 && same(arr[0], "UNISA_CONTAINER=/p") && same(arr[1], "UNISACC_CONTAINER=/p") && !arr[2], "envp-old-spelling-given-gains-the-new-one-after-it");
+    { static char big[1200]; char *pr = big; int bi;
+      if (mm_copy(big, sizeof big, "UNISACC_CONTAINER=", 18)) return 2;
+      for (bi = 18; bi < 1100; bi++) big[bi] = 'x';
+      big[1100] = 0; n = 0; arr[0] = 0; (void)pr;
+      ck(ec_envp(arr, &n, 8, big) == 0 && n == 2 && strlen(arr[1]) == strlen(big) - 2 && !strncmp(arr[1], "UNISA_CONTAINER=", 16), "envp-long-value-still-gets-its-twin-whole"); }
+    sy_printf("CHECK_ENVCOMPAT\tassertions=%d\tfailed=%d\n", nas, failed);
+    return failed ? 1 : 0;
+}

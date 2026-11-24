@@ -1,0 +1,222 @@
+/* tools/check-deferred-census.cx -- fixtures for tools/deferred-census.cx.
+ *
+ *   sh ./unisacc.com tools/check-deferred-census.cx
+ *
+ * The point of the tool is the counting rule: DEFERRED lines inside a copied release/evidence tree are HISTORICAL
+ * evidence committed to the repo, not this run's result. Every fixture therefore plants the same DEFERRED text in
+ * both places and asserts the census sees only one of them.
+ *   run-out-counted             a *.out outside release/evidence: its DEFERRED lines are counted
+ *   evidence-tree-ignored       the same text under release/evidence: counted as evidence_files, contributes 0
+ *   evidence-pruned-not-walked  nothing planted only under release/evidence shows up in the reason list
+ *   reason-descending           the reason with more lines prints first
+ *   pct-from-affected-run       pct = deferred_pos / affected_run, printed with one decimal
+ *   refute-above-ten            deferred_pos > 10% of affected_run -> REFUTE
+ *   ok-at-ten                   exactly 10% is ok (the threshold is "above 10", not "10 or more")
+ *   unmeasured-without-runs     no AFFECTED_RUN line -> UNMEASURED, never ok
+ *   non-out-ignored             a *.txt with DEFERRED text outside evidence is not a run output
+ *   multi-root-separate         two roots in one invocation keep independent counts
+ *   symlink-not-counted         a symlinked *.out is not a run output (it reads another tree; a loop never ends)
+ *   symlink-directory-not-followed  a link to a directory is not entered, so its .out is not counted twice
+ *   depth-cap-reported          a tree deeper than CDS_MAXDEPTH is named on stderr and the deep .out is skipped
+ *   no-root-is-usage-error      no argument -> rc 2
+ *   bare-deferred-no-reason     `DEFERRED<TAB>BATCH` with no reason field contributes no reason bucket
+ *   reason-at-field-cap         a reason that fills the 95-byte key buffer is cut there, not run past the newline
+ *   reason-bucket-join-interleaved  A,B,A: the second A joins A's bucket and B keeps its own
+ *   empty-batch-field-still-splits  a leading tab (empty BATCH) still splits, so the reason is read
+ *   empty-reason-no-bucket      a second tab with nothing after it contributes no bucket
+ *   only-one-reason-bucket      the two rows above leave exactly one reason line
+ * Output CHECK_DEFERRED_CENSUS<TAB>pass=N<TAB>fail=M; rc 1 when any case fails. Writes only under tmp. */
+#pragma unisa use sys.fs
+#pragma unisa use sys.env
+#pragma unisa use sys.proc
+#pragma unisa use cxlib.ckrun
+#pragma unisa use text.text
+
+static int passed, failed;
+static char T[512];
+/* One PASS line per passing case: tests/run-batch.cx counts assertions by counting PASS lines in the child's
+   output, so a silent pass would register as a ZERO-assertion batch. */
+static void ck(int c, const char *n) { if (c) { passed++; printf("PASS\t%s\n", n); } else { failed++; printf("FAIL\t%s\n", n); } }
+static int sh1(const char *script, char *out, int cap, int secs) {
+    return ckk_sh_t("check-deferred-census", script, out, cap, secs);
+}
+
+int main(int argc, char **argv) {
+    static char out[65536], sc[16384];
+    int rc;
+    if (argc > 2) { printf("usage: check-deferred-census.cx\n"); return 2; }
+    rc = sh1("mktemp -d \"${TMPDIR:-/tmp}/dcx-check.XXXXXX\"", T, sizeof T, 10);
+    { int n = (int)tx_len(T, sizeof T); while (n > 0 && (T[n - 1] == '\n' || T[n - 1] == ' ')) T[--n] = 0; }
+    if (rc != 0 || !T[0]) { printf("CHECK_DEFERRED_CENSUS\tpass=0\tfail=1\n"); return 1; }
+
+    /* one root: a live run output with 3 deferred lines over 4 runs, the same text copied into a
+       release/evidence subtree, and a non-.out file that must both be ignored. */
+    cx_fmt(sc, sizeof sc,
+           "set -e; mkdir -p %s/r1/logs %s/r1/frozen-root/release/evidence/0.0.83 && "
+           "{ echo 'SELECTED\ta' > %s/r1/logs/one.out; "
+           "printf 'DEFERRED\ta\tprepare-failed=no-producer=o1-run\n' >> %s/r1/logs/one.out; "
+           "printf 'DEFERRED\tb\tprepare-failed=no-producer=o1-run\n' >> %s/r1/logs/one.out; "
+           "printf 'DEFERRED\tc\tprepare-failed=no-producer=MAJORITY\n' >> %s/r1/logs/one.out; "
+           "printf 'AFFECTED_RUN\tpass=1\tfail=0\tdeferred=1\n' >> %s/r1/logs/one.out; "
+           "printf 'AFFECTED_RUN\tpass=1\tfail=0\tdeferred=1\n' >> %s/r1/logs/one.out; "
+           "printf 'AFFECTED_RUN\tpass=1\tfail=0\tdeferred=0\n' >> %s/r1/logs/one.out; "
+           "printf 'AFFECTED_RUN\tpass=1\tfail=0\tdeferred=1\n' >> %s/r1/logs/one.out; } && "
+           "printf 'DEFERRED\ta\tprepare-failed=no-producer=o1-run\n' > %s/r1/frozen-root/release/evidence/0.0.83/one-deferred.tsv && "
+           "printf 'DEFERRED\ta\tprepare-failed=no-producer=ignored\n' > %s/r1/notrun.txt",
+           T, T, T, T, T, T, T, T, T, T, T, T);
+    rc = sh1(sc, out, sizeof out, 20);
+    if (rc != 0) { printf("%.800s\n", out); printf("CHECK_DEFERRED_CENSUS\tpass=0\tfail=1\n"); return 1; }
+
+    cx_fmt(sc, sizeof sc, "sh ./unisacc.com tools/deferred-census.cx -- %s/r1 2>&1", T);
+    rc = sh1(sc, out, sizeof out, 40);
+    ck(rc == 0 && ckk_has(out, sizeof out, "CENSUS_ROOT\t"), "run-out-counted");
+    ck(ckk_has(out, sizeof out, "out_files=1") && ckk_has(out, sizeof out, "evidence_files=1"), "evidence-tree-ignored");
+    ck(ckk_has(out, sizeof out, "reason=prepare-failed=no-producer=o1-run\tlines=2"), "reason-descending");
+    ck(!ckk_has(out, sizeof out, "no-producer=ignored"), "evidence-pruned-not-walked");
+    ck(ckk_has(out, sizeof out, "affected_run=4") && ckk_has(out, sizeof out, "deferred_rows=3") &&
+       ckk_has(out, sizeof out, "deferred_pos=3") && ckk_has(out, sizeof out, "pct=75.0"), "pct-from-affected-run");
+    ck(ckk_has(out, sizeof out, "CENSUS_VERDICT\tREFUTE"), "refute-above-ten");
+
+    /* exactly 10% is ok; a run with no AFFECTED_RUN line is UNMEASURED rather than ok */
+    cx_fmt(sc, sizeof sc,
+           "set -e; mkdir -p %s/r2 %s/r3 && "
+           "{ printf 'AFFECTED_RUN\tpass=1\tfail=0\tdeferred=1\n' > %s/r2/ten.out; "
+           "for i in 2 3 4 5 6 7 8 9 10; do printf 'AFFECTED_RUN\tpass=1\tfail=0\tdeferred=0\n' >> %s/r2/ten.out; done; "
+           "printf 'DEFERRED\ta\tprepare-failed=no-producer=x\n' >> %s/r2/ten.out; } && "
+           "printf 'DEFERRED\ta\tprepare-failed=no-producer=x\n' > %s/r3/none.out",
+           T, T, T, T, T, T);
+    rc = sh1(sc, out, sizeof out, 20);
+    if (rc != 0) { printf("%.800s\n", out); printf("CHECK_DEFERRED_CENSUS\tpass=0\tfail=1\n"); return 1; }
+    cx_fmt(sc, sizeof sc, "sh ./unisacc.com tools/deferred-census.cx -- %s/r2 %s/r3 2>&1", T, T);
+    rc = sh1(sc, out, sizeof out, 40);
+    ck(ckk_has(out, sizeof out, "pct=10.0") && ckk_has(out, sizeof out, "CENSUS_VERDICT\tok") &&
+       !ckk_has(out, sizeof out, "REFUTE"), "ok-at-ten");
+    ck(ckk_has(out, sizeof out, "CENSUS_VERDICT\tUNMEASURED\treason=no-run-out"), "unmeasured-without-runs");
+
+    /* two roots keep independent counts; a symlink is NOT a run output (S1 2026-11-24).  Following one made the
+       census read another tree's .out -- one `.out` reached through a link was counted twice under two roots --
+       and a link pointing at its own directory would never stop the walk.  Directories below a link are not
+       entered either, so one `.out` is counted once. */
+    cx_fmt(sc, sizeof sc,
+           "set -e; mkdir -p %s/r4 %s/r5 %s/r6 && "
+           "printf 'AFFECTED_RUN\tpass=1\tfail=0\tdeferred=0\n' > %s/r4/real.out && "
+           "printf 'AFFECTED_RUN\tpass=1\tfail=1\tdeferred=0\n' > %s/r4/second.out && "
+           "ln -s %s/r4/real.out %s/r5/link.out && "
+           "ln -s %s/r4 %s/r6/loop && printf 'AFFECTED_RUN\tpass=1\tfail=0\tdeferred=0\n' > %s/r6/direct.out",
+           T, T, T, T, T, T, T, T, T, T);
+    rc = sh1(sc, out, sizeof out, 20);
+    if (rc != 0) { printf("%.800s\n", out); printf("CHECK_DEFERRED_CENSUS\tpass=0\tfail=1\n"); return 1; }
+    cx_fmt(sc, sizeof sc, "sh ./unisacc.com tools/deferred-census.cx -- %s/r4 2>&1", T);
+    rc = sh1(sc, out, sizeof out, 40);
+    ck(rc == 0 && ckk_has(out, sizeof out, "out_files=2") && ckk_has(out, sizeof out, "affected_run=2"), "multi-root-separate");
+    cx_fmt(sc, sizeof sc, "sh ./unisacc.com tools/deferred-census.cx -- %s/r5 2>&1", T);
+    rc = sh1(sc, out, sizeof out, 40);
+    ck(rc == 0 && ckk_has(out, sizeof out, "out_files=0"), "symlink-not-counted");
+    cx_fmt(sc, sizeof sc, "sh ./unisacc.com tools/deferred-census.cx -- %s/r6 2>&1", T);
+    rc = sh1(sc, out, sizeof out, 40);
+    ck(rc == 0 && ckk_has(out, sizeof out, "out_files=1") && ckk_has(out, sizeof out, "affected_run=1"), "symlink-directory-not-followed");
+    cx_fmt(sc, sizeof sc, "sh ./unisacc.com tools/deferred-census.cx -- %s/r1 2>&1", T);
+    rc = sh1(sc, out, sizeof out, 40);
+    ck(!ckk_has(out, sizeof out, "no-producer=ignored"), "non-out-ignored");
+
+    /* no argument is a usage error, not a silent pass */
+    rc = sh1("sh ./unisacc.com tools/deferred-census.cx 2>&1", out, sizeof out, 20);
+    ck(rc == 2 && ckk_has(out, sizeof out, "usage"), "no-root-is-usage-error");
+
+    /* A DEFERRED row with no reason field, and one whose reason fills the key buffer: the parser must stop at
+       the field boundary and at the newline, never run past them. Two mutations of that loop (`at < n` ->
+       `at <= n` and `&&` -> `||`) survived the first mutation round until these two cases landed. */
+    cx_fmt(sc, sizeof sc,
+           "set -e; mkdir -p %s/r7 && "
+           "printf 'AFFECTED_RUN\\tpass=1\\tfail=0\\tdeferred=1\\n' > %s/r7/edge.out && "
+           "printf 'DEFERRED\\tbatch-only\\n' >> %s/r7/edge.out && "
+           "{ printf 'DEFERRED\\tb\\t'; i=0; while [ $i -lt 95 ]; do printf 'R'; i=$((i+1)); done; "
+           "printf '\\n'; } >> %s/r7/edge.out",
+           T, T, T, T);
+    rc = sh1(sc, out, sizeof out, 20);
+    if (rc != 0) { printf("%.800s\n", out); printf("CHECK_DEFERRED_CENSUS\tpass=0\tfail=1\n"); return 1; }
+    cx_fmt(sc, sizeof sc, "sh ./unisacc.com tools/deferred-census.cx -- %s/r7 2>&1", T);
+    rc = sh1(sc, out, sizeof out, 40);
+    ck(rc == 0 && ckk_has(out, sizeof out, "affected_run=1") && ckk_has(out, sizeof out, "deferred_rows=2"),
+       "bare-deferred-no-reason");
+    ck(ckk_has(out, sizeof out, "reason=RRRR"), "reason-at-field-cap");
+    /* `k > RCAP` vs `k >= RCAP` is only observable on a reason of exactly RCAP bytes: the 95-R row above fills
+       the key without touching the terminator, so it must NOT be reported as truncated (r9's 200-R row is). */
+    ck(ckk_has(out, sizeof out, "buckets=1\ttruncated=0\t"), "reason-at-the-cap-not-truncated");
+
+    /* Two reasons interleaved (A, B, A): the second A must join the existing A bucket and B must get its own.
+       The bucket lookup is the one place a reason can be silently misattributed; ordering A,A,B would still
+       print `A lines=2` even when a mutated lookup increments the wrong bucket, so the interleave is the case
+       that pins it. */
+    cx_fmt(sc, sizeof sc,
+           "set -e; mkdir -p %s/r10 && "
+           "{ printf 'AFFECTED_RUN\\tpass=1\\tfail=0\\tdeferred=2\\n' > %s/r10/mix.out; "
+           "printf 'DEFERRED\\ta\\tprepare-failed=no-producer=REASON-A\\n' >> %s/r10/mix.out; "
+           "printf 'DEFERRED\\tb\\tprepare-failed=no-producer=REASON-B\\n' >> %s/r10/mix.out; "
+           "printf 'DEFERRED\\tc\\tprepare-failed=no-producer=REASON-A\\n' >> %s/r10/mix.out; }",
+           T, T, T, T, T);
+    rc = sh1(sc, out, sizeof out, 20);
+    if (rc != 0) { printf("%.800s\n", out); printf("CHECK_DEFERRED_CENSUS\tpass=0\tfail=1\n"); return 1; }
+    cx_fmt(sc, sizeof sc, "sh ./unisacc.com tools/deferred-census.cx -- %s/r10 2>&1", T);
+    rc = sh1(sc, out, sizeof out, 40);
+    ck(rc == 0 && ckk_has(out, sizeof out, "reason=prepare-failed=no-producer=REASON-A\tlines=2") &&
+       ckk_has(out, sizeof out, "reason=prepare-failed=no-producer=REASON-B\tlines=1"), "reason-bucket-join-interleaved");
+    /* The depth cap has to be the tool's own bound, not the runtime's descriptor table (S1 2026-11-24).  A
+       .out two levels below the cap is counted, one below the last allowed level is not, and the skipped
+       directory is named on stderr.  r11 = 16 levels of n0..n15: n14 is entered at depth 15, n15 at 16. */
+    cx_fmt(sc, sizeof sc,
+           "set -e; mkdir -p %s/r11 && printf 'AFFECTED_RUN\\tpass=1\\tfail=0\\tdeferred=0\\n' > %s/r11/top.out && "
+           "d=%s/r11; i=0; while [ $i -lt 15 ]; do d=\"$d/n$i\"; mkdir \"$d\"; i=$((i+1)); done; "
+           "printf 'AFFECTED_RUN\\tpass=1\\tfail=0\\tdeferred=0\\n' > \"$d/at-limit.out\"; "
+           "mkdir \"$d/n15\"; printf 'AFFECTED_RUN\\tpass=1\\tfail=0\\tdeferred=0\\n' > \"$d/n15/past-limit.out\"",
+           T, T, T);
+    rc = sh1(sc, out, sizeof out, 20);
+    if (rc != 0) { printf("%.800s\n", out); printf("CHECK_DEFERRED_CENSUS\tpass=0\tfail=1\n"); return 1; }
+    cx_fmt(sc, sizeof sc, "sh ./unisacc.com tools/deferred-census.cx -- %s/r11 2>&1", T);
+    rc = sh1(sc, out, sizeof out, 40);
+    ck(rc == 0 && ckk_has(out, sizeof out, "WARN nesting deeper than 16") && ckk_has(out, sizeof out, "n14/n15 (subtree not counted)"),
+       "depth-cap-reported");
+    ck(ckk_has(out, sizeof out, "out_files=2\t") && ckk_has(out, sizeof out, "affected_run=2"), "depth-cap-file-at-the-limit-counted");
+    ck(!ckk_has(out, sizeof out, "affected_run=3"), "depth-cap-past-the-limit-not-counted");
+
+    /* Empty BATCH field with a reason (the tab is the first byte, which must still split) and empty REASON
+       field (nothing after the second tab, which must contribute no bucket).  Those are the only two boundary
+       bytes the field split can observe, so they pin `at < 0` and the empty-key return. */
+    cx_fmt(sc, sizeof sc,
+           "set -e; mkdir -p %s/r8 && "
+           "{ printf 'AFFECTED_RUN\\tpass=1\\tfail=0\\tdeferred=1\\n' > %s/r8/edge2.out; "
+           "printf 'DEFERRED\\t\\thas-reason-no-batch\\n' >> %s/r8/edge2.out; "
+           "printf 'DEFERRED\\tb\\t\\n' >> %s/r8/edge2.out; }",
+           T, T, T, T);
+    rc = sh1(sc, out, sizeof out, 20);
+    if (rc != 0) { printf("%.800s\n", out); printf("CHECK_DEFERRED_CENSUS\tpass=0\tfail=1\n"); return 1; }
+    cx_fmt(sc, sizeof sc, "sh ./unisacc.com tools/deferred-census.cx -- %s/r8 2>&1", T);
+    rc = sh1(sc, out, sizeof out, 40);
+    ck(rc == 0 && ckk_has(out, sizeof out, "reason=has-reason-no-batch\tlines=1"), "empty-batch-field-still-splits");
+    ck(!ckk_has(out, sizeof out, "reason=\tline") && !ckk_has(out, sizeof out, "reason= \tlines"), "empty-reason-no-bucket");
+    cx_fmt(sc, sizeof sc, "sh ./unisacc.com tools/deferred-census.cx -- %s/r8 2>&1 | grep -c '^CENSUS_REASON' | tr -d '\\n'", T);
+    rc = sh1(sc, out, sizeof out, 40);
+    ck(rc == 0 && ckk_has(out, sizeof out, "1"), "only-one-reason-bucket");
+
+    /* The bucket capacity and the key cap are reported, not silent: 65 distinct reasons must fill MAXR=64 and
+       report dropped=1, and a reason longer than the key must report truncated=1.  Without those two lines the
+       limits could be raised or removed with no observable difference, which is exactly how the capacity
+       mutants survived the mutation rounds. */
+    cx_fmt(sc, sizeof sc,
+           "set -e; mkdir -p %s/r9 && printf 'AFFECTED_RUN\\tpass=1\\tfail=0\\tdeferred=0\\n' > %s/r9/many.out && "
+           "i=0; while [ $i -lt 65 ]; do printf 'DEFERRED\\tb\\tR%%02d\\n' $i >> %s/r9/many.out; i=$((i+1)); done && "
+           "{ printf 'DEFERRED\\tb\\t'; i=0; while [ $i -lt 200 ]; do printf 'L'; i=$((i+1)); done; printf '\\n'; } >> %s/r9/many.out",
+           T, T, T, T);
+    rc = sh1(sc, out, sizeof out, 20);
+    if (rc != 0) { printf("%.800s\n", out); printf("CHECK_DEFERRED_CENSUS\tpass=0\tfail=1\n"); return 1; }
+    cx_fmt(sc, sizeof sc, "sh ./unisacc.com tools/deferred-census.cx -- %s/r9 2>&1", T);
+    rc = sh1(sc, out, sizeof out, 40);
+    ck(rc == 0 && ckk_has(out, sizeof out, "CENSUS_BUCKETS\tbuckets=64\t"), "bucket-cap-fills-maxr");
+    ck(ckk_has(out, sizeof out, "dropped=2"), "bucket-cap-reports-dropped");
+    ck(ckk_has(out, sizeof out, "truncated=1"), "key-cap-reports-truncated");
+
+
+    { char rm[700]; cx_fmt(rm, sizeof rm, "chmod -R u+w '%s' 2>/dev/null; rm -rf '%s'", T, T); sh1(rm, out, sizeof out, 20); }
+    printf("CHECK_DEFERRED_CENSUS\tpass=%d\tfail=%d\n", passed, failed);
+    return failed ? 1 : 0;
+}

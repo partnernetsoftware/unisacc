@@ -1,0 +1,152 @@
+/* tools/chain-disk-ledger.cx -- append the measured disk peak of one release-chain job to that chain's
+ * own ledger, so a later chain can require room for a run of the same size instead of guessing a constant.
+ *
+ *   sh ./unisacc.com tools/chain-disk-ledger.cx -- KIND ID --measured DIR [--repo ROOT] [--ledger FILE]
+ *                                                 [--avail-mb N] [--dry-run]
+ *
+ * Writes one row to <chain base>/KIND/ID/disk.tsv (chain base = cxlib.chainroot cr_dir, i.e.
+ * <HOME>/.cache/unisacc/chains, or the UNISACC_CHAIN_BASE override a bootstrapping run may set):
+ *
+ *   chain<TAB>ID<TAB>PEAK_MB<TAB>AVAIL_MB<TAB>UNIX_TS
+ *
+ * Same five columns, same units and the same measurement as tools/prerun-disk-ledger.cx, so one reader can
+ * handle both ledgers. PEAK_MB is the sum of every regular file below --measured, in MiB rounded up; symlinks
+ * are neither followed nor counted (a window that links the shared checkout adds no bytes). AVAIL_MB is
+ * sy_disk_avail_mb(--measured) (f_bavail * f_frsize / 2^20 -- the unprivileged figure the disk gate wants),
+ * '-' plus a WARN naming the errno when the measurement fails. Never `df`: its field order is not a contract.
+ *
+ * Why it is separate from the pre-run ledger: the pre-run ledger answers "how big is one window", this one
+ * answers "how big was one whole chain of REV". A chain directory may be swept with the cache, so a missing
+ * row is not an error at read time -- the reader falls back to the first-run constant and says so.
+ *
+ * WHAT IT DOES NOT MEASURE (口径边界, cc 2026-11-24): PEAK_MB is the bytes still present below --measured when
+ * the chain ends. That is not the run's high-water mark: a chain whose scratch lives in /tmp or in a session
+ * directory below a different tree contributes nothing, and a tree cleaned up before the measurement reads
+ * small. So this row is a RECORD, not yet a gate input; a multiplier gate needs a high-water figure
+ * (avail_mb difference across the run, or the minimum of samples taken during it).
+ *
+ * Refusals (rc 2, each naming the reason): no KIND/ID, a KIND outside snap|chain|build|evidence|tmp, an ID
+ * that is not [A-Za-z0-9._-]+ or starts with '.', a missing --measured, a --measured that is not a directory,
+ * no regular file below it, an unusable chain base, a row that does not fit. --dry-run prints the row and
+ * writes nothing. Appending never rewrites earlier rows.
+ *
+ * Check: tools/check-chain-disk-ledger.cx (batch check-chain-disk-ledger). */
+#pragma unisa use sys.posix
+#pragma unisa use sys.fs
+#pragma unisa use sys.io
+#pragma unisa use sys.time
+#pragma unisa use text.text
+#pragma unisa use cxlib.chainroot
+#pragma unisa use cxlib.sessionroot
+
+/* Deeper trees are reported and skipped, not walked: the recursion is bounded in the tool, not by whatever
+   descriptor limit the runtime happens to have.  16 is below that limit on purpose, so a guard that fails to
+   stop shows up as a different total instead of coinciding with the limit. */
+#define CDL_MAXDEPTH 16
+
+static long long g_bytes;
+static long g_files, g_dirs;
+
+/* depth counts the directory levels already entered.  One exit and no early `return`: the guard selects which
+   of two branches runs, so there is no return value that could be left over for a later statement to observe.
+   Past CDL_MAXDEPTH the subtree is named and skipped -- bounded in the tool, not by whatever descriptor table
+   the runtime happens to have. */
+static void walk(const char *dir, int depth) {
+    sy_dir_t d;
+    if (depth >= CDL_MAXDEPTH) {
+        sy_eprintf("chain-disk-ledger: WARN nesting deeper than %d at %s (subtree not counted)\n", CDL_MAXDEPTH, dir);
+    } else if (sy_dir_open(&d, dir) == 0) {
+        while (sy_dir_next(&d) == 1) {
+            char p[4096];
+            sy_stat_t st;
+            /* '.' and '..' are the two names to skip.  Testing only `name_n == 1` dropped every single-character
+               name, which silently lost files called `a` or `1`; the name must also be the dot itself. */
+            if (d.name_n == 1 && d.name[0] == '.') continue;
+            if (d.name_n == 2 && d.name[0] == '.' && d.name[1] == '.') continue;
+            if (cx_fmt(p, sizeof p, "%s/%s", dir, d.name)) continue;
+            if (d.kind == 'd') { g_dirs++; walk(p, depth + 1); continue; }
+            if (d.kind != 'f') continue;   /* symlink: not followed, not counted */
+            if (sy_stat(p, &st) != 0) continue;
+            g_bytes += (long long)st.size;
+            g_files++;
+        }
+        sy_dir_close(&d);
+    }
+}
+
+int main(int argc, char **argv) {
+    const char *kind = 0, *id = 0, *measured = 0, *ledger = 0, *repo = ".";
+    long override_avail = -1;
+    int dry = 0, i;
+    char dir[4400], path[4600], row[1024], avail[32], root[4400];
+    sy_stat_t st;
+    long long peak_mb;
+    int k;
+    for (i = 1; i < argc; i++) {
+        const char *a = argv[i], *v = i + 1 < argc ? argv[i + 1] : 0;
+        if (!strcmp(a, "--dry-run")) { dry = 1; continue; }
+        if (!v && a[0] == '-' && a[1]) { sy_eprintf("chain-disk-ledger: REFUSE missing value for %s\n", a); return 2; }
+        if (!strcmp(a, "--repo")) { repo = v; i++; }
+        else if (!strcmp(a, "--measured")) { measured = v; i++; }
+        else if (!strcmp(a, "--ledger")) { ledger = v; i++; }
+        else if (!strcmp(a, "--avail-mb")) {
+            char *end = 0;
+            long n = strtol(v, &end, 10);
+            if (!end || *end || n < 0) { sy_eprintf("chain-disk-ledger: REFUSE --avail-mb not a non-negative integer: %s\n", v); return 2; }
+            override_avail = n;
+            i++;
+        }
+        else if (!kind) kind = a;
+        else if (!id) id = a;
+        else { sy_eprintf("chain-disk-ledger: REFUSE unknown argument %s\n", a); return 2; }
+    }
+    if (!kind || !id) {
+        sy_eprintf("chain-disk-ledger: REFUSE usage: -- KIND ID --measured DIR [--repo ROOT] [--ledger FILE] [--avail-mb N] [--dry-run]\n");
+        return 2;
+    }
+    if (!measured) { sy_eprintf("chain-disk-ledger: REFUSE --measured DIR is required (nothing measured is not a row)\n"); return 2; }
+    if (sy_stat(measured, &st) != 0 || st.kind != 'd') {
+        sy_eprintf("chain-disk-ledger: REFUSE --measured is missing or not a directory: %s\n", measured);
+        return 2;
+    }
+    if (sy_realpath(repo, root, sizeof root) < 0) { sy_eprintf("chain-disk-ledger: REFUSE cannot canonicalise --repo %s\n", repo); return 2; }
+    walk(measured, 0);
+    if (g_files == 0) {
+        sy_eprintf("chain-disk-ledger: REFUSE no regular files under %s (nothing measured is not a row)\n", measured);
+        return 2;
+    }
+
+    peak_mb = (g_bytes + (1 << 20) - 1) >> 20;
+    if (override_avail >= 0) { if (cx_fmt(avail, sizeof avail, "%ld", override_avail)) return 2; }
+    else {
+        long mb = sy_disk_avail_mb(measured);
+        if (mb < 0) {
+            sy_eprintf("chain-disk-ledger: WARN disk availability unmeasured (%ld) for %s\n", mb, measured);
+            if (cx_fmt(avail, sizeof avail, "-")) return 2;
+        } else if (cx_fmt(avail, sizeof avail, "%ld", mb)) return 2;
+    }
+    k = snprintf(row, sizeof row, "chain\t%s\t%lld\t%s\t%ld\n", id, peak_mb, avail, (long)(sy_now_ms() / 1000));
+    if (k <= 0 || k >= (int)sizeof row) { sy_eprintf("chain-disk-ledger: REFUSE row too long\n"); return 2; }
+    if (!ledger) {
+        /* The ledger lives with the chain it describes (cr_dir names that place and refuses every path
+           inside the checkout), so no caller has to spell the chain base a second time. */
+        if (cr_dir(root, kind, id, 1, dir, sizeof dir)) {
+            sy_eprintf("chain-disk-ledger: REFUSE chain directory for kind=%s id=%s is not usable (bad kind/id, no HOME, or a refused path); pass --ledger\n", kind, id);
+            return 2;
+        }
+        if (cx_fmt(path, sizeof path, "%s/disk.tsv", dir)) { sy_eprintf("chain-disk-ledger: REFUSE path too long\n"); return 2; }
+        ledger = path;
+    }
+    if (dry) { sy_printf("CHAIN_DISK_DRY\tledger=%s\trow=%s", ledger, row); return 0; }
+    {
+        FILE *f = fopen(ledger, "a");
+        if (!f) { sy_eprintf("chain-disk-ledger: REFUSE cannot open %s for append (is the chain directory there?)\n", ledger); return 2; }
+        if (fwrite(row, 1, (size_t)k, f) != (size_t)k || fclose(f)) {
+            sy_eprintf("chain-disk-ledger: REFUSE short write to %s\n", ledger);
+            return 2;
+        }
+    }
+    sy_printf("CHAIN_DISK_LEDGER\tkind=%s\tid=%s\tpeak_mb=%lld\tavail_mb=%s\tfiles=%ld\tdirs=%ld\tledger=%s\n",
+              kind, id, peak_mb, avail, g_files, g_dirs, ledger);
+    return 0;
+}
