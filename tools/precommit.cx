@@ -25,6 +25,7 @@
 #pragma unisa use cxlib.globspan
 #pragma unisa use cxlib.sessionroot
 #pragma unisa use cxlib.dirtywatch
+#pragma unisa use cxlib.pretimes
 #pragma unisa use sys.proc
 #pragma unisa use sys.fs
 #pragma unisa use sys.io
@@ -92,12 +93,15 @@ static char *gate_slurp(char **argv, long *n) {
 /* COMMIT_PHASE lines of each named gate (cur_gate) into UNISACC_COMMIT_PHASE_LOG, set by tools/commit-own.cx to
    its own stdout (/proc/PID/fd/1): a job tail shows the gate in flight, a timeout leaves its begin without an end.
    Unset (a plain git commit): nothing is written, the hook's own output is unchanged. */
+static long pc_times_t0;
 static void gate_phase(const char *name, int begin, long ms) {
     const char *lp = sy_env("UNISACC_COMMIT_PHASE_LOG"); char ln[160]; int bad;
-    if (!lp || !lp[0] || !name) return;
-    bad = begin ? cx_fmt(ln, sizeof ln, "COMMIT_PHASE\tname=%s\tstate=begin\n", name)
-                : cx_fmt(ln, sizeof ln, "COMMIT_PHASE\tname=%s\tstate=end\tms=%ld\n", name, ms);
-    if (!bad) (void)sy_append_file(lp, ln, tx_len(ln, sizeof ln), 0600);
+    if (name && lp && lp[0]) {
+        bad = begin ? cx_fmt(ln, sizeof ln, "COMMIT_PHASE\tname=%s\tstate=begin\n", name)
+                    : cx_fmt(ln, sizeof ln, "COMMIT_PHASE\tname=%s\tstate=end\tms=%ld\n", name, ms);
+        if (!bad) (void)sy_append_file(lp, ln, tx_len(ln, sizeof ln), 0600);
+    }
+    if (!begin && name) pt_row(name, ms, slurp_last_timeout ? "TIMEOUT" : (slurp_last_rc == 0 ? "PASS" : "FAIL"));
 }
 static char *slurp_run(char **argv, long *n);
 static char *slurp(char **argv, long *n) {
@@ -2877,7 +2881,10 @@ static int ratchet_baseline_gate(void) {
     char *names;
     if (plan_dir) return 0;
     names = slurp_run(av, &sn);
-    if (!names) return 0;
+    if (!names) {
+        sy_eprintf("precommit: BLOCKED git diff --cached (ratchet-baseline) failed\n");
+        return 1;
+    }
     while (at < sn) {
         long nl = tx_len(names + at, sn - at);
         if (nl <= 0) break;
@@ -3517,8 +3524,29 @@ int main(int argc, char **argv) {
     char identity_root[4096];
     if (sy_realpath(".", identity_root, sizeof identity_root) >= 0)
         dw_identity_emit("precommit", identity_root, 1);
+    pc_times_t0 = sy_now_ms();
     pc_register_cleanup_hooks();
     pc_sweep_stale_tmp();
+    if (argc == 2 && tx_eqz(argv[1], "--times-selftest")) {
+        char dir[500], path[700];
+        sy_unsetenv("UNISACC_PRECOMMIT_TIMES");
+        slurp_last_rc = 1;
+        slurp_last_timeout = 0;
+        gate_phase("lint", 0, 9);
+        pt_total(pc_times_t0, "precommit", 1);
+        if (sr_default("precommit", dir, sizeof dir) || cx_fmt(path, sizeof path, "%s/precommit-times.tsv", dir)) return 2;
+        sy_printf("TIMES_PATH\t%s\n", path);
+        return 0;
+    }
+    if (argc == 3 && tx_eqz(argv[1], "--times-selftest")) {
+        sy_setenv("UNISACC_PRECOMMIT_TIMES", argv[2], 1);
+        slurp_last_rc = 0;
+        slurp_last_timeout = 0;
+        gate_phase("lint", 0, 7);
+        pt_total(pc_times_t0, "precommit", 0);
+        return 0;
+    }
+    if (argc == 2 && tx_eqz(argv[1], "--ratchet-baseline-selftest")) return ratchet_baseline_gate() ? 1 : 0;
     if (argc >= 2 && tx_eqz(argv[1], "--precheck")) return precheck(argc, argv);
     if (argc >= 2 && tx_eqz(argv[1], "--verify-deferred")) {
         if (pc_capture_work_top() != 0) return 1;
@@ -3790,7 +3818,7 @@ int main(int argc, char **argv) {
     { int b0 = blocked; blocked += ledger_gate(); if (blocked > b0) pc_mark_block("ledger", "ledger-format"); }
     { int b0 = blocked; blocked += derive_gate(); if (blocked > b0) pc_mark_block("derive", "derived-table-drift"); }
     if (!plan_dir) gt_line();
-    if (!staged) { sy_printf("PRECOMMIT\tstaged_cx=0\tblocked=%d\n", blocked); if (blocked) pc_emit_gate_fail(); return blocked ? 1 : 0; }
+    if (!staged) { pt_total(pc_times_t0, "precommit", blocked); sy_printf("PRECOMMIT\tstaged_cx=0\tblocked=%d\n", blocked); if (blocked) pc_emit_gate_fail(); return blocked ? 1 : 0; }
     { int b0 = blocked; blocked += new_tools(); if (blocked > b0) pc_mark_block("new-tools", "missing-check"); }
     { int b0 = blocked; blocked += tlib_frozen_gate(names, sn); if (blocked > b0) pc_mark_block("tlib-frozen", "tlib-bump"); }
     { int b0 = blocked; blocked += lint_gate(names, sn, &lint_absent); if (blocked > b0) pc_mark_block("lint", "cx-lint"); }
@@ -3817,6 +3845,7 @@ int main(int argc, char **argv) {
                                                     "sh ./unisacc.com tools/ratchets.cx");
               if (blocked > b0) pc_mark_block("ratchets", "ratchets-unavailable");
           }
+          pt_total(pc_times_t0, "precommit", blocked);
           sy_printf("PRECOMMIT\tstaged_cx=%d\tblocked=%d\tratchets=absent\n", staged, blocked);
           if (blocked) pc_emit_gate_fail();
           return blocked ? 1 : 0;
@@ -3859,6 +3888,7 @@ int main(int argc, char **argv) {
         }
         mm_free(pout);
     }
+    pt_total(pc_times_t0, "precommit", blocked);
     sy_printf("PRECOMMIT\tstaged_cx=%d\tblocked=%d\n", staged, blocked);
     if (blocked) {
         pc_emit_gate_fail();

@@ -1,0 +1,54 @@
+#pragma unisa module pretimes
+/* pretimes.cx -- the precommit timing ledger, one writer shared by both files that have a timing view:
+ * tools/precommit.cx (serial and judge pass: one row per gate, plus the whole precommit) and
+ * tools/precommit-flow.cx (flow pass: one row per flow node, plus the flow).
+ * Rows are TAB separated: time<TAB>committer<TAB>node<TAB>ms<TAB>verdict, appended to
+ * UNISACC_PRECOMMIT_TIMES when set (value "off" disables the ledger), else to
+ * sr_default("precommit")/precommit-times.tsv.  The header is written once, when the file does not exist.
+ * Writing is best effort: a ledger that cannot be opened is not allowed to change a commit's verdict.
+ * The two callers differ only in the verdict words they pass in, so the rows are written from here once;
+ * before this module each file carried its own copy of the same 30 lines.
+ *   pt_row(NODE, MS, VERDICT)     append one row; VERDICT is PASS/FAIL/RAN/BLOCK/TIMEOUT
+ *   pt_total(T0, NODE, BLOCKED)   append now-T0 ms for NODE, verdict PASS when BLOCKED is 0 else BLOCK
+ *   sh ./unisacc.com tools/check-pretimes.cx --   checks below */
+#pragma unisa use sys.env
+#pragma unisa use sys.fs
+#pragma unisa use sys.io
+#pragma unisa use sys.time
+#pragma unisa use text.text
+#pragma unisa use text.fmt
+#pragma unisa use cxlib.sessionroot
+
+void pt_row(const char *node, long ms, const char *verdict) {
+    const char *ep = sy_env("UNISACC_PRECOMMIT_TIMES");
+    const char *who = sy_env("DEVSVC_OWNER");
+    char dir[500], path[700], row[360], who2[80];
+    long wall, i, wn;
+    const char *hdr = "time\tcommitter\tnode\tms\tverdict\n";
+    if (ep && tx_eqz(ep, "off")) return;
+    if (!node || !verdict) return;
+    if (!who || !who[0]) who = sy_env("USER");
+    if (!who || !who[0]) who = "-";
+    wn = 0;   /* tx_len answers -1 when there is no NUL within cap; here we want the 60-byte prefix instead */
+    while (wn < 60 && who[wn]) wn++;
+    for (i = 0; i < wn; i++) who2[i] = (who[i] == '\t' || who[i] == '\n') ? '_' : who[i];
+    who2[wn] = 0;
+    if (ep && ep[0]) {
+        if (cx_fmt(path, sizeof path, "%s", ep)) return;
+    } else {
+        if (sr_default("precommit", dir, sizeof dir)) return;
+        if (sy_exists(dir) != 1 && sy_mkdir(dir, 0700)) return;
+        if (cx_fmt(path, sizeof path, "%s/precommit-times.tsv", dir)) return;
+    }
+    wall = sy_wall_s();
+    if (wall < 0) wall = 0;
+    if (sy_exists(path) != 1) (void)sy_append_file(path, hdr, tx_len(hdr, 80), 0600);
+    if (cx_fmt(row, sizeof row, "%ld\t%s\t%s\t%ld\t%s\n", wall, who2, node, ms, verdict)) return;
+    (void)sy_append_file(path, row, tx_len(row, sizeof row), 0600);
+}
+
+void pt_total(long t0, const char *node, int blocked) {
+    long ms = sy_now_ms() - t0;
+    if (ms < 0) ms = 0;
+    pt_row(node, ms, blocked ? "BLOCK" : "PASS");
+}

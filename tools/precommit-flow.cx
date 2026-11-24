@@ -24,6 +24,8 @@
 #pragma unisa use mem.bytes
 #pragma unisa use sys.posix
 #pragma unisa use sys.sig
+#pragma unisa use cxlib.pretimes
+#pragma unisa use cxlib.sessionroot
 
 enum { PLAN_MS = 60000 };
 
@@ -129,13 +131,13 @@ static void pcf_register_cleanup_hooks(void) {
  *   FLOWPC_NODES<TAB>top=id:ms,... (at most 6, slowest first)<TAB>sum_ms=N<TAB>packed_ms=N/ncpu<TAB>flow_ms=N
  * sum_ms / ncpu is the floor the flow could reach with perfect packing: flow_ms far above it means one long node (split it), flow_ms close
  * to it means the machine is the limit (queueing; splitting nodes does not help). */
-static void pcf_report_nodes(const char *dir, long flow_ms) {
+static void pcf_report_nodes(const char *dir, long flow_ms, int judge_rc) {
     char fp[1300], top[600]; size_t en = 0; char *ev; long at = 0, sum = 0, cpu = sy_ncpu(), tl = 0;
-    char id[64][40]; long ms[64]; int n = 0, i, j, used[64];
+    char id[256][40]; long ms[256]; int n = 0, i, j, used[256];
     if (cx_fmt(fp, sizeof fp, "%s/events.tsv", dir)) return;
     ev = (char *)cx_read(fp, &en);
     if (!ev || !en) { sy_eprintf("FLOWPC_NODES\tunavailable=events.tsv-missing-or-empty\n"); if (ev) mm_free(ev); return; }
-    while (at < (long)en && n < 64) {
+    while (at < (long)en && n < 256) {
         long e = tx_chr(ev + at, (long)en - at, '\n'), l = e < 0 ? (long)en - at : e, io, il, so, sl, mo, ml;
         const char *ln = ev + at;
         if (tx_prefix(ln, l, "EVT\t", 4) && tx_fields(ln, l, '\t') >= 5) {
@@ -143,14 +145,17 @@ static void pcf_report_nodes(const char *dir, long flow_ms) {
             if (!(sl == 5 && tx_same(ln + so, 5, "start", 5)) && il > 0 && il < 40 && ml > 0 && ml < 12) {
                 long v = 0, k;
                 for (k = 0; k < ml; k++) { char c = ln[mo + k]; if (c < '0' || c > '9') { v = -1; break; } v = v * 10 + (c - '0'); }
-                if (v >= 0 && !mm_copy(id[n], 40, ln + io, il)) { id[n][il] = 0; ms[n] = v; sum += v; n++; }
+                if (v >= 0 && !mm_copy(id[n], 40, ln + io, il)) {
+                    const char *verd = (sl == 2 && tx_same(ln + so, 2, "ok", 2)) ? "PASS" : ((sl == 4 && tx_same(ln + so, 4, "fail", 4)) ? "FAIL" : "RAN");
+                    id[n][il] = 0; ms[n] = v; sum += v; pt_row(id[n], v, verd); n++;
+                }
             }
         }
         at += l + 1;
     }
     mm_free(ev);
     top[0] = 0;
-    for (i = 0; i < 64; i++) used[i] = 0;
+    for (i = 0; i < 256; i++) used[i] = 0;
     for (i = 0; i < 6 && i < n; i++) {   /* selection of the slowest, ties keep file order */
         int best = -1; char item[80];
         for (j = 0; j < n; j++) if (!used[j] && (best < 0 || ms[j] > ms[best])) best = j;
@@ -158,7 +163,8 @@ static void pcf_report_nodes(const char *dir, long flow_ms) {
         if (cx_fmt(item, sizeof item, "%s%s:%ld", i ? "," : "", id[best], ms[best])) return;
         if (tl + tx_len(item, 80) < (long)sizeof top - 1 && !mm_copy(top + tl, (long)sizeof top - tl, item, tx_len(item, 80) + 1)) tl += tx_len(item, 80);
     }
-    sy_eprintf("FLOWPC_NODES\ttop=%s\tsum_ms=%ld\tpacked_ms=%ld\tflow_ms=%ld\n", top, sum, cpu > 0 ? sum / cpu : sum, flow_ms);
+    sy_eprintf("FLOWPC_NODES\ttop=%s\tsum_ms=%ld\tpacked_ms=%ld\tflow_ms=%ld\tevents=%d\n", top, sum, cpu > 0 ? sum / cpu : sum, flow_ms, n);
+    pt_row("flow", flow_ms, judge_rc == 0 ? "PASS" : "FAIL");
 }
 
 static char *slurp(char **argv, long *n) {   /* stdout+stderr merged, bounded by PLAN_MS */
@@ -206,6 +212,20 @@ int main(int argc, char **argv) {
     long nbn = 0; int rkx = 0;
     long pn, at, t0 = sy_now_ms(), t1, t2; int a, jobs = 0, fd, nodes = 0, pid, ex = 0, code = 1, sig = 0, r = 0;
     fl_flow f; fl_sum s;
+    if (argc == 2 && tx_eqz(argv[1], "--times-selftest")) {
+        char tdir[500], tpath[700];
+        sy_unsetenv("UNISACC_PRECOMMIT_TIMES");
+        pt_row("flow", 3, "FAIL");
+        pt_row("gate", 4, "PASS");
+        if (sr_default("precommit", tdir, sizeof tdir) || cx_fmt(tpath, sizeof tpath, "%s/precommit-times.tsv", tdir)) return 2;
+        sy_printf("TIMES_PATH\t%s\n", tpath);
+        return 0;
+    }
+    if (argc == 3 && tx_eqz(argv[1], "--nodes-selftest")) {
+        sy_setenv("UNISACC_PRECOMMIT_TIMES", "off", 1);
+        pcf_report_nodes(argv[2], 0, 0);
+        return 0;
+    }
     for (a = 1; a < argc; a++) {
         if (tx_eqz(argv[a], "--run") && a + 1 < argc) rdir = argv[++a];
         else if (tx_eqz(argv[a], "--jobs") && a + 1 < argc) { const char *q = argv[++a]; jobs = 0; while (*q >= '0' && *q <= '9' && jobs < 100) jobs = jobs * 10 + (*q++ - '0'); if (*q || jobs < 1 || jobs > 32) jobs = 0; }
@@ -309,7 +329,7 @@ int main(int argc, char **argv) {
     if (pid < 0 || sy_wait_status(pid, 0, &ex, &code, &sig) != pid || !ex) { pcf_active_child_pid = 0; sy_eprintf("precommit-flow: precommit --from-run did not run\n"); return 1; }
     pcf_active_child_pid = 0;
     sy_eprintf("FLOWPC\tnodes=%d\tplan_ms=%ld\tflow_ms=%ld\tjudge_ms=%ld\trun=%s\n", nodes, t1 - t0, t2 - t1, sy_now_ms() - t2, dir);
-    pcf_report_nodes(dir, t2 - t1);
+    pcf_report_nodes(dir, t2 - t1, code);
     if (vfile) { char vb[40]; if (cx_fmt(vb, sizeof vb, "RC\t%d\n", code) || cx_write(vfile, vb, tx_len(vb, 40))) { sy_eprintf("precommit-flow: cannot write %s\n", vfile); return 2; } }
     return code;
 }
