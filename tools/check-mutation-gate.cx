@@ -150,27 +150,40 @@ int main(int argc, char **argv) {
     ck(rc == 0, "fixture-repo");
     if (rc != 0) { printf("%s\nCHECK_MUTATION_GATE\tok=%d\tfailed=%d\n", out, ok, failed); return 1; }
 
-    /* A multi-line comment whose continuation lines are plain prose (no leading asterisk) must contribute no
-       mutants.  Before the block-comment state machine, `skip_line` only looked at the first character of each
-       line, so 4096/8192 and the `a < b` in this prose became candidates and every one of them survived: an
-       inflated denominator plus survivors no check could kill (observed as 9 of 16 survivors in a real patch). */
+    /* Five lexical facts a line-oriented or first-character test cannot see.  The fixture file, by line:
+       5  a block comment opens and names a number
+       6  its continuation is plain prose (no leading asterisk) and names 4096, 8192 and `a < b`
+       7  the comment closes and the same line carries code with a second number
+       8  a line comment that itself contains a block opener
+       9  a #define whose value is a number
+       10 code after all of that
+       Red on the older tool: it took line 6 for code (first non-blank is a letter), so the prose numbers became
+       candidates, and it masked line 7 from comment state 0, so it rewrote the comment's 7003 and left 60 alone.
+       Lines 8 and 9 pin no-regression instead: stopping at a line comment and skipping a directive must keep
+       holding, or a note would swallow the next line and a #define value would score as a kill. */
     cx_fmt(sc, sizeof sc,
         "set -e; cd %s; mkdir -p repo2; cd repo2; git init -q; git config user.email t@t; git config user.name t;\n"
         "printf '%%s\\n' 'int main(void) {' '    return 0;' '}' > tools2.cx; git add tools2.cx; git commit -q -m base; git tag base\n"
-        "printf '%%s\\n' 'int main(void) {' '    return 0;' '}' 'static int addone(int v) {' '    /* adds one and returns it: 4096 and 8192 are only examples,' '       and a < b here is prose that must never become a mutant' '     */' '    return v + 1;' '}' > tools2.cx; git diff > ../fx2.patch; git checkout -q tools2.cx", T);
+        "printf '%%s\\n' 'int main(void) {' '    return 0;' '}' 'static int addone(int v) {' '    /* adds one and 7001 is an example,' '       so 4096 and 8192 and a < b are prose, never a mutant' '       ends at 7003 */ int u = 60;' '    // note 5005 /* and 6006 too' '#define K 4096' '    return v + 1 + u;' '}' > tools2.cx; git diff > ../fx2.patch; git checkout -q tools2.cx", T);
     rc = ckk_sh_t("check-mutation-gate", sc, out, sizeof out, 30);
     ck(rc == 0, "block-comment-fixture-repo");
     cx_fmt(sc, sizeof sc, "sh ./unisacc.com tools/mutation-gate.cx -- prep --repo %s/repo2 --base base --patch %s/fx2.patch "
            "--check 'echo CHECK ok=1 failed=0' --out %s/bc --par 1 --max 60 2>&1", T, T, T);
     rc = ckk_sh_t("check-mutation-gate", sc, out, sizeof out, 55);
     ck(rc == 0 && ckk_has(out, sizeof out, "MG_PREP_DONE"), "block-comment-prep");
-    cx_fmt(sc, sizeof sc, "grep -c 'tools2.cx' %s/bc/mutants.tsv", T);
+    /* mutants.tsv is `id <TAB> file <TAB> line <TAB> kind <TAB> description`; the line column pins each case. */
+    cx_fmt(sc, sizeof sc, "cut -f3 %s/bc/mutants.tsv | grep -cx 10", T);
     rc = ckk_sh_t("check-mutation-gate", sc, out, sizeof out, 10);
-    ck(rc == 0, "block-comment-has-candidates-from-code");
-    cx_fmt(sc, sizeof sc, "grep -E '4096|8192|prose that must never' %s/bc/mutants.tsv", T);
+    ck(rc == 0 && atoi(out) > 0, "block-comment-code-after-comment-still-mutated");
+    cx_fmt(sc, sizeof sc, "cut -f3 %s/bc/mutants.tsv | grep -cE '^(6|8|9)$'", T);
     rc = ckk_sh_t("check-mutation-gate", sc, out, sizeof out, 10);
-    ck(rc != 0, "block-comment-prose-not-mutated");
-
+    ck(rc != 0, "block-comment-prose-line-comment-and-define-not-mutated");
+    cx_fmt(sc, sizeof sc, "cut -f5 %s/bc/mutants.tsv | grep -cx 'col 32 60 -> 61'", T);
+    rc = ckk_sh_t("check-mutation-gate", sc, out, sizeof out, 10);
+    ck(rc == 0 && atoi(out) == 1, "block-comment-close-takes-code-not-prose");
+    cx_fmt(sc, sizeof sc, "grep -c 7003 %s/bc/mutants.tsv", T);
+    rc = ckk_sh_t("check-mutation-gate", sc, out, sizeof out, 10);
+    ck(rc != 0, "block-comment-close-prose-number-not-mutated");
     rc = gate("strong", "o=$(sh ./unisacc.com tools/fx.cx) && test \"$o\" = \"$(printf \"start\\nR=5 20 -1 10 -2\")\"", "--report --expect-rc 1", out, sizeof out);
     ck(rc == 0 && ckk_has(out, sizeof out, "verdict=PASS") && !ckk_has(out, sizeof out, " mutants=0 "), "strong-high");
     const char *strong_quality = strstr(out, "MUTATION_QUALITY named=");

@@ -1,5 +1,5 @@
 /* check-premerge-selfcheck.cx -- contracts of tools/premerge-selfcheck.cx on synthetic patches and repositories.
- *   sh ./unisacc.com tools/check-premerge-selfcheck.cx
+ *   sh ./unisacc.com tools/check-premerge-selfcheck.cx [-- --part main|rd]   (the two parts together are the whole check; split for the 55 s bound, see tests/split-parents.tsv)
  * good patch: check calls the real entry, uses git, the completion marker is verified  -> every item PASS, rc 0, receipt bound to the patch sha256.
  * stub patch: check prints a fixed ok=19 line, never mentions the changed source, and the marker is verified by nothing -> items 1 and 4 FAIL, rc 1.
  * bypass switches: a source adding --force, --mutate, --skip, --unsafe or --bypass fails item 8.
@@ -17,7 +17,11 @@
 static int bad, checks;
 static char g_tmp[1024], qs[30000];
 static int qn;
-#define ok(c, w) ckk_ok((c), (w))
+static int g_part;   /* 0 = every assertion; 1 = main part; 2 = rd part (two-round compare, item 10 literal samples, items 6 to 8 probes) */
+static void ok_(int c, const char *w) { if (g_part != 2) ckk_ok(c, w); }   /* an assertion of the main part */
+static void okr_(int c, const char *w) { if (g_part != 1) ckk_ok(c, w); }   /* an assertion of the rd part */
+#define okr(c, w) okr_((c), (w))
+#define ok(c, w) ok_((c), (w))
 static int sh(const char *script, char *out, int cap, int secs) { return ckk_sh_t("check-premerge-selfcheck", script, out, cap, secs); }
 
 /* append one background shell piece to the batch */
@@ -27,10 +31,15 @@ static void qraw(const char *piece) {
     if (mm_copy(qs + qn, (long)sizeof qs - qn, piece, n + 1) != 0) exit(2);
     qn += (int)n;
 }
+/* runs that belong to the main part only */
+static void qraw_main(const char *piece) { if (g_part != 2) qraw(piece); }
 /* one tool run: stdout+stderr to o/NAME.txt, exit code to o/NAME.rc; ARGFMT takes the temp directory for each %s */
 static void q(const char *name, const char *argfmt) {
     char a[2400], l[3200];
-    if (cx_fmt(a, sizeof a, argfmt, g_tmp, g_tmp, g_tmp, g_tmp)) exit(2);
+    int in_rd = !strncmp(name, "rd-", 3) || !strncmp(name, "lit-", 4) || !strcmp(name, "del") || !strcmp(name, "del2") || !strcmp(name, "path") || !strcmp(name, "p7a") || !strcmp(name, "p7b");   /* the rd part runs these tool runs, the main part the others */
+    if (g_part == 2 && !in_rd) return;
+    if (g_part == 1 && in_rd) return;
+    if (cx_fmt(a, sizeof a, argfmt, g_tmp, g_tmp, g_tmp, g_tmp, g_tmp, g_tmp, g_tmp)) exit(2);
     if (cx_fmt(l, sizeof l, "( TMPDIR=\"$T/td\" sh ./unisacc.com tools/premerge-selfcheck.cx -- %s > \"$T/o/%s.txt\" 2>&1; echo $? > \"$T/o/%s.rc\" ) & ", a, name, name)) exit(2);
     qraw(l);
 }
@@ -112,6 +121,7 @@ static int flip_main(void) {
 
 int main(int argc, char **argv) {
     if (argc > 1 && !strcmp(argv[1], "--flip")) return flip_main();
+    if (argc > 2 && !strcmp(argv[1], "--part")) { if (!strcmp(argv[2], "main")) g_part = 1; else if (!strcmp(argv[2], "rd")) g_part = 2; else { printf("check-premerge-selfcheck: --part main|rd\n"); return 2; } }
     char *tmp = g_tmp, sc[6000], out[8192]; int rc;
     if (cx_fmt(tmp, sizeof g_tmp, "%s/psc-check-XXXXXX", sy_env_or("TMPDIR", "/tmp")) || !mkdtemp(tmp)) return 2;
     cx_fmt(sc, sizeof sc,
@@ -123,12 +133,19 @@ int main(int argc, char **argv) {
         "printf 'int main(void){ puts(\"READY=yes\"); return 0; }\\n' > tools/foo.cx && "
         "n=19 && printf 'int main(void){ printf(\"CX_FOO ok=%%s failed=0\\\\n\"); return 0; }\\n' \"$n\" > tools/check-foo.cx && "
         "git add -A && git diff --cached > ../stub.patch && git reset -q --hard && rm -f tools/foo.cx tools/check-foo.cx && "
-        "sed -i '/return -1/d' tools/seed.cx && git diff > ../del.patch && git checkout -q -- tools/seed.cx && "
+        "sed -i '/return -1/d' tools/seed.cx && git diff > ../del.patch && git checkout -q -- tools/seed.cx && git rm -q tools/seed.cx && git diff --cached > ../delfile.patch && git reset -q --hard && "
         "p=/t; printf 'int main(void){ system(\"cat %%smp/x/y\"); return 0; }\\n' \"$p\" > tools/check-bar.cx && git add -A && git diff --cached > ../path.patch && git reset -q --hard && rm -f tools/check-bar.cx && "
-        "printf 'tools/seed.cx\\treturn -1\\tfixture removes the guard on purpose\\n' > ../declare.tsv && echo FIXTURE_OK", tmp);
+        "printf 'tools/seed.cx\\treturn -1\\tfixture removes the guard on purpose\\n' > ../declare.tsv && "
+        "printf 'tools/check-foo.cx\\tCX_FOO\\tfixture renames the marker\\n' > ../rd.decl && git checkout -q -b rd1 && git apply ../good.patch && "
+        "printf '  ck(a == 1 && strstr(s, \"x\") && b != 2, \"rd-keep\");\\n  ck(a == 1 && strstr(s, \"y\"), \"rd-drop\");\\n  ck(a == 1 && strcmp(s, \"z\") == 0 && has(s), \"rd-weak\");\\n  ck(strstr(s, \"a\\\\\"b\") && c, \"rd-esc\");\\n  ck(a == 1 && strstr(s, \"w\"), \"r13\");\\n  ck(strstr(s, \"REFUSE x\"), \"rd-neg\");\\n  ck(a == 1);\\n  ck(a == 1 && b, \"zq\");\\n' >> tools/check-foo.cx && printf 'int rd_bar = 1;\\nint rd_baz = 2;\\n' > tools/rd-bar.cx && printf '  ck(a == 2 && strstr(s, \"g1\"), \"rd-gone\");\\n' > tools/rd-gone.cx && "
+        "git add -A && git -c user.name=x -c user.email=x@x commit -qm round1 && git diff main rd1 > ../rdr1.patch && "
+        "sed -i 's/CX_FOO/CX_BAR/' tools/check-foo.cx && sed -i '/rd-drop/d' tools/check-foo.cx && sed -i '/\"r13\"/d' tools/check-foo.cx && sed -i '/rd-neg/d' tools/check-foo.cx && sed -i '/ck(a == 1);/d' tools/check-foo.cx && sed -i '/\"zq\")/d' tools/check-foo.cx && sed -i '1d' tools/rd-bar.cx && rm tools/rd-gone.cx && sed -i 's/ && has(s)//' tools/check-foo.cx && sed -i 's/ && c, \"rd-esc\"/, \"rd-esc\"/' tools/check-foo.cx && sed -i 's/READY=yes/READY=no/' tools/foo.cx && git diff > ../rd2.patch && git checkout -q -- tools/check-foo.cx tools/foo.cx tools/rd-bar.cx tools/rd-gone.cx && git checkout -q main && echo FIXTURE_OK", tmp);
     rc = ckk_sh_t("check-premerge-selfcheck", sc, out, sizeof out, 30);
     if (rc != 0 || !ckk_has(out, sizeof out, "FIXTURE_OK")) { printf("fixture setup failed: %.400s\n", out); return 2; }
 
+    const char *T_G = "good", *T_PA = "pv-ok", *T_PB = "pv-bad"; /* receipt tags of the item-11 runs */
+    if (g_part == 2) { cx_fmt(sc, sizeof sc, "mkdir -p %s/td", tmp); sh(sc, 0, 0, 10); }
+    if (g_part != 2) {   /* the rd part needs only repository r and its rd1 branch */
     /* second fixture set: two-guard seed in r2 (main advances once), a tsv row, and extra patches built in r */
     cx_fmt(sc, sizeof sc, "T=%s; %s", tmp,
         "set -e; cd \"$T\" && mkdir td r2 && cd r2 && git init -q . && mkdir tools tests && "
@@ -149,6 +166,7 @@ int main(int argc, char **argv) {
     rc = ckk_sh_t("check-premerge-selfcheck", sc, out, sizeof out, 30);
     if (rc != 0 || !ckk_has(out, sizeof out, "FX2_OK")) { printf("fixture 2 setup failed: %.400s\n", out); return 2; }
 
+    }
     /* third fixture set (item 10): each patch adds a producer (tools/foo.cx) and a check whose matching call looks for one literal */
     {   static const char *lit[][3] = {
             /* name, producer source, check source */
@@ -172,8 +190,8 @@ int main(int argc, char **argv) {
         if (cx_write(sc, "CX_FOO\tok\n", 10)) return 2;
     }
 
+    if (g_part != 2) {   /* fixture set 4 is for the main part only */
     /* fourth fixture set (item 11): two copies of r whose tree has a stand-in tools/precommit-preview.cx, one answering blocked=0 and one blocked=2 */
-    const char *T_G = "good", *T_PA = "pv-ok", *T_PB = "pv-bad"; /* receipt tags of the item-11 runs */
     {   static const char *pvsrc[2] = {
             "int main(void){ printf(\"%s\\n\", \"GATE\\tfake\\tPASS\\tok\\t-\"); printf(\"%s\\n\", \"PRECOMMIT_PREVIEW\\tblocked=0\"); return 0; }\n",
             "int main(void){ printf(\"%s\\n\", \"GATE\\tratchet:fake\\tBLOCK\\tfake gate refuses reason=x\\t-\"); printf(\"%s\\n\", \"PRECOMMIT_PREVIEW\\tblocked=2\"); return 1; }\n" };
@@ -192,6 +210,7 @@ int main(int argc, char **argv) {
         }
     }
 
+    }
     /* warm the compile cache once so the parallel runs start from the cached binary */
     cx_fmt(sc, sizeof sc, "TMPDIR=%s/td sh ./unisacc.com tools/premerge-selfcheck.cx -- --no-such-argument >/dev/null 2>&1; true", tmp);
     sh(sc, 0, 0, 30);
@@ -201,12 +220,16 @@ int main(int argc, char **argv) {
     q("del", "--patch %s/del.patch --repo %s/r --base main --check true --out %s/del.rec");
     q("del2", "--patch %s/del.patch --repo %s/r --base main --check true --declare %s/declare.tsv --out %s/del2.rec");
     q("path", "--patch %s/path.patch --repo %s/r --base main --check true --out %s/path.rec");
+    q("delfile", "--patch %s/delfile.patch --repo %s/r --base main --check true --out %s/delfile.rec");
+    q("delfile2", "--patch %s/delfile.patch --repo %s/r --base main --check true --declare %s/declare.tsv --out %s/delfile2.rec");
     q("p7a", "--patch %s/del.patch --repo %s/r --base main --check true --declare %s/declare.tsv --probe 'true' --out %s/p7a.rec");
     q("p7b", "--patch %s/del.patch --repo %s/r --base main --check true --declare %s/declare.tsv --probe 'test -s \"$F\"' --out %s/p7b.rec");
     q("p7c", "--patch %s/good.patch --repo %s/r --base main "
              "--check 'git rev-parse HEAD >/dev/null && grep -q \"READY=yes\" tools/foo.cx && grep -q foo tools/check-foo.cx' --probe false --out %s/p7c.rec");
     q("stub", "--patch %s/stub.patch --repo %s/r --base main --check true --out %s/stub.rec");
     q("missing", "--patch %s/nonexistent.patch --repo %s/r --check true --out %s/x.rec");
+    q("rd-a", "--patch %s/rd2.patch --round1 %s/rdr1.patch --repo %s/r --base rd1 --current rd1 --check true --declare %s/rd.decl --out %s/rd-a.rec");
+    q("mech-bad", "--mechanical --patch %s/tsv.patch --repo %s/r --base main --check true --out %s/mech-bad.rec");
     q("two", "--patch %s/two.patch --repo %s/r2 --base main~1 --current main~1 --check true --declare %s/two.decl --out %s/two.rec");
     q("tsv", "--patch %s/tsv.patch --repo %s/r2 --base main~1 --current main~1 --check true --out %s/tsv.rec");
     q("tsv2", "--patch %s/tsv.patch --repo %s/r2 --base main~1 --current main~1 --check true --declare %s/tsv.decl --out %s/tsv2.rec");
@@ -225,13 +248,13 @@ int main(int argc, char **argv) {
     q("a1", "--patch %s/stale.patch --repo %s/r2 --base main --check true --out %s/a1.rec");
     q("t1", "--patch %s/good.patch --repo %s/r --base main --check true --check-timeout 56 --out %s/t1.rec");
     /* an old receipt at --out does not survive a refusal */
-    qraw("( printf OLD > \"$T/pre.rec\"; TMPDIR=\"$T/td\" sh ./unisacc.com tools/premerge-selfcheck.cx -- --patch \"$T/nonexistent.patch\" --repo \"$T/r\" --check true --out \"$T/pre.rec\" >/dev/null 2>&1; "
+    qraw_main("( printf OLD > \"$T/pre.rec\"; TMPDIR=\"$T/td\" sh ./unisacc.com tools/premerge-selfcheck.cx -- --patch \"$T/nonexistent.patch\" --repo \"$T/r\" --check true --out \"$T/pre.rec\" >/dev/null 2>&1; "
          "test ! -e \"$T/pre.rec\" && echo PRE_GONE > \"$T/o/pre.txt\" ) & ");
     /* the tool identity is its own source file whatever the working directory */
-    qraw("( R=$(pwd); cd \"$T\" && TMPDIR=\"$T/td\" sh \"$R/unisacc.com\" \"$R/tools/premerge-selfcheck.cx\" -- --patch \"$T/good.patch\" --repo \"$T/r\" --base main --check true --out \"$T/ci.rec\" >/dev/null 2>&1; "
+    qraw_main("( R=$(pwd); cd \"$T\" && TMPDIR=\"$T/td\" sh \"$R/unisacc.com\" \"$R/tools/premerge-selfcheck.cx\" -- --patch \"$T/good.patch\" --repo \"$T/r\" --base main --check true --out \"$T/ci.rec\" >/dev/null 2>&1; "
          "test \"$(grep -o 'tool_sha256=[0-9a-f]*' \"$T/ci.rec\" | cut -d= -f2)\" = \"$(sha256sum \"$R/tools/premerge-selfcheck.cx\" | cut -c1-64)\" && echo CI_OK > \"$T/o/ci.txt\" ) & ");
     /* a nonexistent --repo is refused and the caller's repository is left alone */
-    qraw("( R=$(pwd); mkdir \"$T/cw\" && cd \"$T/cw\" && git init -q . && echo x > a && git add -A && git -c user.name=x -c user.email=x@x commit -qm c0 && echo u > u && "
+    qraw_main("( R=$(pwd); mkdir \"$T/cw\" && cd \"$T/cw\" && git init -q . && echo x > a && git add -A && git -c user.name=x -c user.email=x@x commit -qm c0 && echo u > u && "
          "n1=$(git rev-list --count HEAD) && rc=0 && TMPDIR=\"$T/td\" sh \"$R/unisacc.com\" \"$R/tools/premerge-selfcheck.cx\" -- --patch \"$T/good.patch\" --repo \"$T/no-such-repo\" --check true --out \"$T/cw.rec\" >/dev/null 2>&1 || rc=$?; "
          "n2=$(git rev-list --count HEAD) && test \"$rc\" = 2 && test \"$n1\" = \"$n2\" && test -f u && git status --porcelain | grep -q '^?? u' && test ! -e \"$T/cw.rec\" && echo CWD_UNTOUCHED > \"$T/o/cw.txt\" ) & ");
     q("pv-ok", "--patch %s/good.patch --repo %s/rp-ok --base main --check true --out %s/pv-ok.rec");
@@ -250,22 +273,33 @@ int main(int argc, char **argv) {
         if (fi_gitenv(1, 0, hkp, sizeof hkp) != 0 ||
             cx_fmt(hkc, sizeof hkc, "( %sTMPDIR=\"$T/td\" sh ./unisacc.com tools/premerge-selfcheck.cx -- "
                    "--patch \"$T/good.patch\" --repo \"$T/r\" --base main --check true --out \"$T/hk.rec\" > \"$T/o/hk.txt\" 2>&1; echo $? > \"$T/o/hk.rc\" ) & ", hkp)) exit(2);
-        qraw(hkc);
+        qraw_main(hkc);
     }
     flush();
 
     ok(rcof("good") == 0 && has("good", "SELFCHECK_SUMMARY patch_sha256=") && has("good", "verdict=PASS"), "good patch: verdict PASS, rc 0");
     ok(has("good", "item=1 name=real-entry verdict=PASS") && has("good", "item=2 name=git-failure verdict=PASS") && has("good", "item=4 name=marker-flip verdict=PASS"), "good patch: items 1, 2 and 4 each PASS on a real run");
     ok(has("good", "item=5 name=negative-input verdict=PASS") && has("good", "item=8 name=paths-and-switches verdict=PASS") && has("p7c", "item=7 name=malformed-input verdict=PASS"), "good patch: items 5 and 8 PASS, and a probe that refuses every malformed input passes item 7");
-    ok(rcof("del") == 1 && has("del", "item=6 name=deleted-guard verdict=FAIL"), "deleted guard line without a declaration fails");
-    ok(has("del2", "item=6 name=deleted-guard verdict=PASS") && !has("del2", "item=6 name=deleted-guard verdict=FAIL"), "the same deletion with a declared reason passes item 6");
-    ok(rcof("path") == 1 && has("path", "item=8 name=hardcoded-path verdict=FAIL"), "a check that hard-codes a path outside the tree fails item 8");
-    ok(has("p7a", "item=7 name=malformed-input verdict=FAIL") && has("p7a", "accepted or crashed on 'empty'"), "a probe that accepts every input fails item 7, empty input included");
-    ok(has("p7b", "item=7 name=malformed-input verdict=FAIL") && !has("p7b", "accepted or crashed on 'empty'"), "a probe that refuses empty input but accepts others is still caught");
+    okr(rcof("del") == 1 && has("del", "item=6 name=deleted-guard verdict=FAIL"), "deleted guard line without a declaration fails");
+    okr(has("del2", "item=6 name=deleted-guard verdict=PASS") && !has("del2", "item=6 name=deleted-guard verdict=FAIL"), "the same deletion with a declared reason passes item 6");
+    okr(rcof("path") == 1 && has("path", "item=8 name=hardcoded-path verdict=FAIL"), "a check that hard-codes a path outside the tree fails item 8");
+    okr(has("p7a", "item=7 name=malformed-input verdict=FAIL") && has("p7a", "accepted or crashed on 'empty'"), "a probe that accepts every input fails item 7, empty input included");
+    okr(has("p7b", "item=7 name=malformed-input verdict=FAIL") && !has("p7b", "accepted or crashed on 'empty'"), "a probe that refuses empty input but accepts others is still caught");
     ok(rcof("stub") == 1 && has("stub", "verdict=FAIL"), "stub patch: verdict FAIL, rc 1");
     ok(has("stub", "item=1 name=stub-output verdict=FAIL") && has("stub", "item=1 name=real-entry verdict=FAIL"), "stub patch: fixed ok=19 output and no real entry are both caught");
     ok(has("stub", "item=4 name=marker-flip verdict=FAIL"), "stub patch: a completion marker that no check verifies is caught");
     ok(rcof("missing") == 2 && has("missing", "REFUSE"), "a missing patch is a refusal, not a pass");
+    ok(has("good", "item=13 name=round-compare verdict=NA"), "item 13: a patch without --round1 is NA");
+    ok(rcof("delfile") == 1 && has("delfile", "item=6 name=deleted-guard verdict=FAIL") && has("delfile", "tools/seed.cx deletes an assertion/refusal/verdict line with no declared reason"), "item 6: deleting a whole file that holds a guard line is a deleted guard, not invisible");
+    ok(has("delfile2", "item=6 name=deleted-guard verdict=PASS") && !has("delfile2", "item=6 name=deleted-guard verdict=FAIL"), "item 6: a whole-file deletion with a declared reason passes");
+    okr(rcof("rd-a") == 1 && has("rd-a", "round-unnamed-change verdict=FAIL detail=round two changes a round-one line with no --declare row (file<TAB>substring<TAB>reason): tools/check-foo.cx: ck(a == 1 && strstr(s, \"y\")") && has("rd-a", "item=13 name=round-rewrite-share verdict=FAIL"), "item 13: an undeclared round-two change to a round-one line, and a rewrite over 30%, both fail");
+    okr(!has("rd-a", "reason): tools/check-foo.cx: int main(void){ system("), "item 13: a declared round-two change is not reported as unnamed");
+    okr(has("rd-a", "round-assertion-dropped verdict=FAIL detail=round two drops the round-one assertion 'rd-drop'") && !has("rd-a", "assertion 'rd-keep'"), "item 13: a round-one assertion that round two deletes is reported dropped by name, an untouched one is not");
+    okr(has("rd-a", "round-assertion-weakened verdict=FAIL detail=round two weakens the round-one assertion 'rd-weak' (tools/check-foo.cx): fewer conditions (6 -> 4)") && has("rd-a", "assertion 'rd-esc' (tools/check-foo.cx): fewer conditions (2 -> 1)"), "item 13: a round-one assertion that round two reduces to fewer conditions is reported weakened, and a name after an escaped quote is read");
+    okr(has("rd-a", "round-assertion-dropped verdict=FAIL detail=round two drops the round-one assertion 'r13'") && has("rd-a", "round-negative-share verdict=FAIL detail=the negative-case share of assertions falls from 1/9 to 0/3"), "item 13: a three-character assertion name is read, and a round two that removes the only refusal assertion lowers the negative-case share");
+    okr(!has("rd-a", "the round-one assertion ''") && !has("rd-a", "the round-one assertion 'zq'"), "item 13: an assertion call with no name literal is not an assertion with an empty name");
+    okr(has("rd-a", "round-assertion-dropped verdict=FAIL detail=round two drops the round-one assertion 'rd-gone' (tools/rd-gone.cx)"), "item 13: deleting a whole file that holds a round-one assertion reports the assertion dropped");
+    ok(rcof("mech-bad") == 1 && has("mech-bad", "MECH item=1 name=apply-check rc=") && has("mech-bad", "verdict=FAIL detail=git apply --check failed") && has("mech-bad", "MECH_SUMMARY patch_sha256=") && has("mech-bad", "fail=7") && has("mech-bad", "verdict=FAIL\n") && !has("mech-bad", "verdict=PASS"), "--mechanical: a patch that does not apply to the base makes the whole receipt FAIL with all seven items listed, never a refusal");
     ok(has("two", "item=6 name=deleted-guard verdict=PASS") && !has("two", "item=6 name=deleted-guard verdict=FAIL"), "every deleted guard line is matched against the declaration table, not only the first");
     ok(has("tsv", "item=6 name=deleted-guard verdict=FAIL") && has("tsv", "tests/batches.tsv"), "a deleted batches row without a declaration fails item 6");
     ok(has("tsv2", "item=6 name=deleted-guard verdict=PASS"), "the same deleted row with a declared reason passes item 6");
@@ -296,18 +330,19 @@ int main(int argc, char **argv) {
     ok(has("o1", "REFUSE overlay copy failed") && !has("o1", "SELFCHECK"), "a missing --overlay directory is refused, not ignored");
     ok(has("a1", "REFUSE patch does not apply") && !has("a1", "SELFCHECK"), "a patch that does not apply to the base is refused, no receipt");
     ok(has("t1", "REFUSE check-timeout outside"), "--check-timeout above the 55 s command bound is refused");
-    ok(has("lit-ok", "item=10 name=literal-sample verdict=PASS") && !has("lit-ok", "item=10 name=literal-not-in-sample"), "item 10: a literal whose decoded bytes (a real tab) occur in the sample passes");
-    ok(has("lit-nosample", "item=10 name=literal-sample verdict=UNMEASURED") && rcof("lit-nosample") == 3, "item 10: added matching literals and no sample is UNMEASURED, rc 3");
-    ok(rcof("lit-bs") == 1 && has("lit-bs", "item=10 name=literal-not-in-sample verdict=FAIL") && has("lit-bs", "bytes 43585f464f4f5c746f6b"), "item 10: a literal backslash-t (read wrongly as a tab) is not in the sample and is printed byte for byte");
-    ok(rcof("lit-need") == 1 && has("lit-need", "item=10 name=literal-not-in-sample verdict=FAIL") && has("lit-need", "NEED tape"), "item 10: a literal that no real output ever carried fails");
-    ok(has("lit-prod", "item=10 name=literal-sample verdict=PASS") && has("lit-prod", "1 proved by the producer"), "item 10: a refusal marker identical to the producer's source text is proved without a sample");
-    ok(rcof("lit-noprod") == 1 && has("lit-noprod", "item=10 name=literal-not-in-sample verdict=FAIL") && has("lit-noprod", "REFUSE-W"), "item 10: a refusal marker no producer source carries fails");
-    ok(has("lit-none", "item=10 name=literal-sample verdict=NA"), "item 10: a patch with no literal in a matching call is NA");
+    okr(has("lit-ok", "item=10 name=literal-sample verdict=PASS") && !has("lit-ok", "item=10 name=literal-not-in-sample"), "item 10: a literal whose decoded bytes (a real tab) occur in the sample passes");
+    okr(has("lit-nosample", "item=10 name=literal-sample verdict=UNMEASURED") && rcof("lit-nosample") == 3, "item 10: added matching literals and no sample is UNMEASURED, rc 3");
+    okr(rcof("lit-bs") == 1 && has("lit-bs", "item=10 name=literal-not-in-sample verdict=FAIL") && has("lit-bs", "bytes 43585f464f4f5c746f6b"), "item 10: a literal backslash-t (read wrongly as a tab) is not in the sample and is printed byte for byte");
+    okr(rcof("lit-need") == 1 && has("lit-need", "item=10 name=literal-not-in-sample verdict=FAIL") && has("lit-need", "NEED tape"), "item 10: a literal that no real output ever carried fails");
+    okr(has("lit-prod", "item=10 name=literal-sample verdict=PASS") && has("lit-prod", "1 proved by the producer"), "item 10: a refusal marker identical to the producer's source text is proved without a sample");
+    okr(rcof("lit-noprod") == 1 && has("lit-noprod", "item=10 name=literal-not-in-sample verdict=FAIL") && has("lit-noprod", "REFUSE-W"), "item 10: a refusal marker no producer source carries fails");
+    okr(has("lit-none", "item=10 name=literal-sample verdict=NA"), "item 10: a patch with no literal in a matching call is NA");
     cx_fmt(sc, sizeof sc, "T=%s; %s", tmp, "! ls \"$T/td\" | grep -q -E '^(premerge-selfcheck|unisacc-privrepo)-'");
     ok(sh(sc, 0, 0, 10) == 0, "no private tree is left in TMPDIR after passes and refusals");
 
     cx_fmt(sc, sizeof sc, "rm -rf %s", tmp); sh(sc, 0, 0, 20);
     checks = ckk_okcount(&bad);
-    printf("CX_PREMERGE_SELFCHECK\tchecks=%d\tfailed=%d\n", checks, bad);
+    if (g_part) printf("CX_PREMERGE_SELFCHECK_PART\tpart=%s\tchecks=%d\tfailed=%d\n", g_part == 1 ? "main" : "rd", checks, bad);
+    else printf("CX_PREMERGE_SELFCHECK\tchecks=%d\tfailed=%d\n", checks, bad);
     return bad ? 1 : 0;
 }

@@ -264,9 +264,11 @@ static void load_conf(void) {
 }
 
 /* ---------- lexical helpers ---------- */
-/* m[i] = 1 when line[i] is code (not inside a string/char literal or comment) */
-static void code_mask(const char *l, char *m) {
-    int i = 0, st = 0;
+/* m[i] = 1 when line[i] is code (not inside a string/char literal or comment).  `st` is the block-comment state the
+   line starts in: without it a line whose block comment closes and then carries real code was masked as if the
+   comment had never opened, so the walkers mutated the comment's text and left the code alone. */
+static void code_mask(const char *l, char *m, int st) {
+    int i = 0;
     for (; l[i]; i++) {
         if (st == 0) {
             if (l[i] == '/' && l[i + 1] == '/') { for (; l[i]; i++) m[i] = 0; break; }
@@ -284,6 +286,23 @@ static void code_mask(const char *l, char *m) {
     }
     m[i] = 0;
 }
+/* state after the line: 3 inside a block comment, 0 outside.  A string or char literal that is still open at the
+   end of a line is malformed C on its own, so it is reported as outside rather than carried forward. */
+static int end_state(const char *l, int st) {
+    int i = 0;
+    while (l[i]) {
+        if (st == 0) {
+            if (l[i] == '/' && l[i + 1] == '/') break;
+            if (l[i] == '/' && l[i + 1] == '*') { st = 3; i += 2; continue; }
+            if (l[i] == '"' || l[i] == '\'') { int q = l[i]; i++; while (l[i] && l[i] != q) i += l[i] == '\\' ? 2 : 1; if (l[i]) i++; continue; }
+            i++;
+        } else {
+            if (l[i] == '*' && l[i + 1] == '/') { st = 0; i += 2; continue; }
+            i++;
+        }
+    }
+    return st;
+}
 static int isid(int c) { int l = c | 32; return c == '_' || (c >= '0' && c <= '9') || (l >= 'a' && l <= 'z'); }
 static int isdig(int c) { return c >= '0' && c <= '9'; }
 /* index of the ')' matching '(' at o (code only), -1 when not on this line */
@@ -296,38 +315,21 @@ static int splice(char *d, int cap, const char *l, int a, int b, const char *ins
     /* d = l[0..a) + ins + l[b..] */
     return cx_fmt(d, cap, "%.*s%s%s", a, l, ins, l + b) ? -1 : 0;
 }
-/* 1 when the line holds a character outside comments and string literals.  *st carries the block-comment state
- * across lines: without it a multi-line comment's continuation line (prose with no leading asterisk) looked like
- * code and the operator walkers mutated that prose, which inflated the denominator with survivors no check could
- * ever kill.  String and char states do not cross lines, so they reset at end of line. */
-static int line_has_code(const char *l, int *st) {
-    int i = 0, has = 0;
-    while (l[i]) {
-        if (*st == 0) {
-            if (l[i] == '/' && l[i + 1] == '/') break;
-            if (l[i] == '/' && l[i + 1] == '*') { *st = 3; i += 2; continue; }
-            if (l[i] == '"') { *st = 1; i++; continue; }
-            if (l[i] == '\'') { *st = 2; i++; continue; }
-            if (l[i] != ' ' && l[i] != '\t' && l[i] != '\n') has = 1;
-            i++;
-        } else if (*st == 3) {
-            if (l[i] == '*' && l[i + 1] == '/') { *st = 0; i += 2; continue; }
-            i++;
-        } else {
-            if (l[i] == '\\' && l[i + 1]) { i += 2; continue; }
-            if ((*st == 1 && l[i] == '"') || (*st == 2 && l[i] == '\'')) *st = 0;
-            i++;
-        }
-    }
-    if (*st == 1 || *st == 2) *st = 0;
-    return has;
-}
-static int skip_line(const char *l) {
-    while (*l == ' ' || *l == '\t') l++;
-    if (!*l || *l == '\n') return 1;
-    if (l[0] == '/' && (l[1] == '/' || l[1] == '*')) return 1;
-    if (l[0] == '*' || l[0] == '#') return 1;
+/* 1 when the line, entered in comment state `st`, holds a character outside comments and string literals.  The
+   entry state is what makes a comment close followed by real code observable: from state 0 the walkers mutated
+   text and never looked at `60`. */
+static int has_code(const char *l, int st) {
+    char m[MG_LINE]; int i;
+    code_mask(l, m, st);
+    for (i = 0; l[i]; i++) if (m[i]) return 1;
     return 0;
+}
+/* A preprocessor line is a directive, not C code: mutating `#define K 4096` to 4097 or a `#include` path only ever
+   dies at compile time, which scores as killed without any check proving the code works.  They are skipped by the
+   same rule the old `skip_line` used, now stated as what it is about rather than as a list of leading characters. */
+static int is_preproc(const char *l) {
+    while (*l == ' ' || *l == '\t') l++;
+    return *l == '#';
 }
 
 /* ---------- candidates ---------- */
@@ -343,10 +345,10 @@ static void add(int f, int ln, int kind, const char *text, const char *desc) {
     cx_fmt(g_c[g_nc].desc, sizeof g_c[g_nc].desc, "%s", desc); g_nc++;
 }
 
-static void gen_line(int f, int ln, const char *l) {
+static void gen_line(int f, int ln, const char *l, int st) {
     char m[MG_LINE], d[MG_LINE + 64], desc[96]; int i, n = (int)strlen(l), done;
     if (n >= MG_LINE - 8) return;
-    code_mask(l, m);
+    code_mask(l, m, st);
     /* cmp: first comparison operator */
     for (i = 0, done = 0; l[i] && !done; i++) {
         const char *rep = 0; int w = 1;
@@ -486,17 +488,18 @@ static int split_lines(char *b, size_t n, char ***out) {
     *out = v; return k;
 }
 
-static void gen_cov(int f, char **L, int nlines, int ln, int *seen, int nseen_cap) {
+static void gen_cov(int f, char **L, int *sts, int nlines, int ln, int *seen, int nseen_cap) {
     int j;
     for (j = ln - 1; j >= 1; j--) {
         const char *l = L[j - 1];
         if (l[0] == '}' && j != ln) return;           /* left the function: added line is outside a body */
-        if (l[0] && l[0] != ' ' && l[0] != '\t' && l[0] != '#' && l[0] != '/' && l[0] != '*' && l[0] != '}' && strchr(l, '(') && strchr(l, '{') && !strstr(l, "typedef") && !strstr(l, "struct ") ) {
+        if (l[0] && l[0] != ' ' && l[0] != '\t' && l[0] != '/' && l[0] != '*' && l[0] != '}' && strchr(l, '(') && strchr(l, '{') && !strstr(l, "typedef") && !strstr(l, "struct ") ) {
             char m[MG_LINE], d[MG_LINE + 64], desc[96]; int k, o = -1;
             if (strlen(l) >= MG_LINE - 40) return;
             for (k = 0; k < nseen_cap && seen[k]; k++) if (seen[k] == j) return;
             if (k < nseen_cap) seen[k] = j;
-            code_mask(l, m);
+            if (is_preproc(l)) return;                /* a directive is not a function head */
+            code_mask(l, m, sts[j - 1]);
             for (k = 0; l[k]; k++) if (m[k] && l[k] == '{') { o = k; break; }
             if (o < 0) return;
             if (splice(d, sizeof d, l, o + 1, o + 1, " *(volatile int *)0 = 0; ")) return;
@@ -554,19 +557,26 @@ static void prep(void) {
        line that still holds code after that walk becomes a candidate.  A patch line inside a multi-line comment
        whose continuation does not start with an asterisk is prose, and mutating it only ever produced survivors. */
     for (f = 0; f < g_nf; f++) {
-        size_t n; char **L; int nl, a, seen[256], st = 0, i;
+        size_t n; char **L; int nl, a, seen[256], i, *sts;
         cx_fmt(p, sizeof p, "%s/slot-0/%s", g_out, g_files[f]);
         char *b = slurp(p, &n); if (!b) continue;
         nl = split_lines(b, n, &L);
         memset(seen, 0, sizeof seen);
+        /* entry comment state per line, computed once in a forward walk: the walkers need to know whether a line
+           starts inside a block comment: a comment close followed by code is code from there on, and a mask built
+           from state 0 would rewrite the comment text and leave `60` alone. */
+        sts = mm_zalloc((long)(nl + 1) * (long)sizeof(int));
+        for (i = 1; i <= nl; i++) sts[i] = end_state(L[i - 1], sts[i - 1]);
         for (i = 1; i <= nl; i++) {
             int added = 0;
             for (a = 0; a < g_nadd; a++) if (g_add[a].file == f && g_add[a].line == i) { added = 1; break; }
-            if (!line_has_code(L[i - 1], &st)) continue;      /* must run for every line: it owns the state */
             if (!added) continue;
-            gen_line(f, i, L[i - 1]);
-            if (g_cov) gen_cov(f, L, nl, i, seen, 256);
+            if (is_preproc(L[i - 1])) continue;     /* directives die at compile time: not a check's kill */
+            if (!has_code(L[i - 1], sts[i - 1])) continue;
+            gen_line(f, i, L[i - 1], sts[i - 1]);
+            if (g_cov) gen_cov(f, L, sts, nl, i, seen, 256);
         }
+        mm_free(sts);
         mm_free(L); mm_free(b);
     }
     /* selection: round robin over (file, kind) buckets; cov mutants are all kept (not limited by --max) */
