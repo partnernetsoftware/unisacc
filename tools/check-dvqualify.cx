@@ -281,8 +281,16 @@ int main(int argc, char **argv) {
     /* fixture repository with a domain index and one committed file */
     if (sy_mkdir(repo, 0700)) return 2;
     { char t[4400]; cx_fmt(t, sizeof t, "%s/tests", repo); if (sy_mkdir(t, 0700)) return 2; }
+    { char t[4400]; cx_fmt(t, sizeof t, "%s/release", repo); if (sy_mkdir(t, 0700)) return 2;
+      cx_fmt(t, sizeof t, "%s/release/evidence", repo); if (sy_mkdir(t, 0700)) return 2;
+      cx_fmt(t, sizeof t, "%s/release/evidence/0.0.83", repo); if (sy_mkdir(t, 0700)) return 2; }
     if (put(repo, "tests/batch-domain-index.tsv", "# fixture\nid\tdomain\torigin\tbasis\nalpha\tproduct-qualification\tx\tx\nbeta\tproduct-qualification\tx\tx\nbad\tproduct-qualification\tx\tx\nother\tdev-tool\tx\tx\n", 0644) ||
-        put(repo, "tests/batches.tsv", "alpha\tIMPLEMENTED\n", 0644) || sy_write_file(apep, ape_text, strlen(ape_text), 0755)) return 2;
+        put(repo, "tests/batches.tsv", "alpha\tIMPLEMENTED\n", 0644) ||
+        /* one historical deferred proof and one ordinary evidence file: the layout must drop the first and keep
+           the second (tools/dvqualify.cx prunes the deferred proofs under release/evidence and nothing else). */
+        put(repo, "release/evidence/0.0.83/alpha-deferred.tsv", "DEFERRED\talpha\tprepare-failed=no-producer=x\n", 0644) ||
+        put(repo, "release/evidence/0.0.83/alpha-windows.tsv", "WINDOW\t1\n", 0644) ||
+        sy_write_file(apep, ape_text, strlen(ape_text), 0755)) return 2;
     if (!git("init", "-q", 0, 0, 0) || !git("add", "-A", ".", 0, 0)) { fprintf(stderr, "fixture git failed: %s\n", out); return 2; }
     { char *v[] = {"git", "-C", repo, "-c", "user.name=f", "-c", "user.email=f@localhost", "-c", "commit.gpgsign=false", "commit", "-q", "-m", "fixture", 0};
       if (!runv(v, 0, 30, &rc) || rc) { fprintf(stderr, "fixture commit failed: %s\n", out); return 2; } }
@@ -321,6 +329,12 @@ int main(int argc, char **argv) {
       check("layout-real-copy-of-ape", reg && !strcmp(h, sha));
       cx_fmt(lc, sizeof lc, "%s/.git", lay); check("layout-has-git-inventory", sy_exists(lc) == 1);
       cx_fmt(lc, sizeof lc, "%s/tests/batch-domain-index.tsv", lay); check("layout-from-git-archive", sy_exists(lc) == 1);
+      /* the historical proof is pruned from the layout, the ordinary evidence file beside it is not: this is
+         the fix for a deferred count that read 2919 lines of committed history as if it were the run's own. */
+      cx_fmt(lc, sizeof lc, "%s/release/evidence/0.0.83/alpha-deferred.tsv", lay);
+      check("layout-drops-historical-deferred", sy_exists(lc) == 0);
+      cx_fmt(lc, sizeof lc, "%s/release/evidence/0.0.83/alpha-windows.tsv", lay);
+      check("layout-keeps-ordinary-evidence", sy_exists(lc) == 1);
       free(e); }
     /* A live writer holds the evidence inode. Both contenders must leave
        its bytes intact; an alias must contend on the same lock. */
@@ -371,6 +385,16 @@ int main(int argc, char **argv) {
     if(part==2){
         char *seed[]={bin,repo,"--candidate",apep,"--ids","alpha","--out",ev,0};
         if(!runv(seed,0,40,&rc) || rc)return 2;
+        /* The exclude pattern has to be observed from this segment as well.  `--evidence` already asserts both
+           sides, but a mutation of the pattern survived a mutation round that only ran `--layout`, because that
+           segment never looked at the published layout's evidence subtree. */
+        { char *le=cx_read(ev,0),lay2[4400],p2[4500];
+          if(!le || evidence_layout(le,lay2,sizeof lay2))return 2;
+          cx_fmt(p2,sizeof p2,"%s/release/evidence/0.0.83/alpha-deferred.tsv",lay2);
+          check("layout-drops-historical-deferred", sy_exists(p2)==0);
+          cx_fmt(p2,sizeof p2,"%s/release/evidence/0.0.83/alpha-windows.tsv",lay2);
+          check("layout-keeps-ordinary-evidence", sy_exists(p2)==1);
+          free(le); }
     }
     /* Q3 valid-only run exits 0 */
     { char *v[] = {bin, repo, "--candidate", apep, "--ids", "alpha,beta", "--out", ev, "--jobs", "1", 0};

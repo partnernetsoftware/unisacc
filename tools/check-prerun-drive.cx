@@ -34,6 +34,17 @@ int main(int argc, char **argv) {
     if (!getcwd(cwd, sizeof cwd)) return 2;
     if (cx_fmt(work, sizeof work, "%s/cpd-%d", base_td, (int)getpid())) return 2;
     if (mkdir(work, 0700) != 0 && errno != EEXIST) return 2;
+    /* Cold compile is preparation, not a result.  Every fixture below starts the tool through `sh`, and the
+       first one to do so pays its whole compile (~11 s idle, more under load) inside its own bound.  One
+       unasserted invocation moves that cost out of the timed section without touching any fixture's bound
+       (cc 2026-11-24, same rule as check-bg-candidate's prewarm).  The argument is deliberately unknown: the
+       refusal is rc 2 and is not looked at, only the compile is wanted. */
+    {
+        char wcmd[CPD_PW], wout[1024];
+        if (cx_fmt(wcmd, sizeof wcmd, "sh '%s/unisacc.com' '%s/tools/prerun-drive.cx' -- --prewarm-noop", cwd, cwd)) return 2;
+        (void)ckk_sh("check-prerun-drive", wcmd, wout, sizeof wout);
+        printf("PREPARED\tprerun-drive-native\tno-test-result\t(first compile; the timed fixtures below run warm)\n");
+    }
     {
         char ids[CPD_PW], pdir[CPD_PW], mock[CPD_PW], pd_path[CPD_PW], heavy[CPD_PW];
         const char *ms_space =
@@ -994,16 +1005,25 @@ int main(int argc, char **argv) {
                 "exit 0\n";
             if (cx_write(fmock, fmock_s, strlen(fmock_s)) ||
                 cx_write(fdrift, fdrift_s, strlen(fdrift_s))) return 2;
+            /* The frozen root is what every window and every fixture copies, so a committed deferred proof must
+               not be carried in: 1407 copies of 67 such files made one deferred count read 2919 lines of
+               history instead of the run's 4.  The ordinary evidence file beside it must stay, which is what
+               makes the exclusion exact rather than a blanket drop of release/evidence. */
             if (cx_fmt(cmd, sizeof cmd,
-                "mkdir -p '%s' && cd '%s' && git init -q && git config user.name ptest && git config user.email ptest@localhost && "
-                "printf 'init\\n' > a.txt && git add a.txt && git commit -q -m init && "
+                "mkdir -p '%s/release/evidence/0.0.87' && cd '%s' && git init -q && git config user.name ptest && git config user.email ptest@localhost && "
+                "printf 'init\\n' > a.txt && "
+                "printf 'DEFERRED\\tx\\tprepare-failed=no-producer=old-checker\\n' > release/evidence/0.0.87/x-deferred.tsv && "
+                "printf 'WINDOW\\t1\\n' > release/evidence/0.0.87/x-windows.tsv && "
+                "git add -A && git commit -q -m init && "
                 "REV_A=$(git rev-parse HEAD) && "
                 "FGIT_ORIG_ROOT='%s' sh '%s/unisacc.com' '%s/tools/prerun-drive.cx' -- run --root '%s' --out '%s' --mock-runner '%s' --max-jobs 2 && "
                 "REV_B=$(git -C '%s' rev-parse HEAD) && [ \"$REV_A\" != \"$REV_B\" ] && "
                 "grep -q \"^# source=$REV_A$\" '%s/strict-W0000.tsv' && "
                 "grep -q \"^# source=$REV_A$\" '%s/strict-W0001.tsv' && "
+                "[ ! -e '%s/frozen-root/release/evidence/0.0.87/x-deferred.tsv' ] && "
+                "[ -e '%s/frozen-root/release/evidence/0.0.87/x-windows.tsv' ] && "
                 "echo FROZEN_SOURCE_STABLE_OK",
-                fgit, fgit, fgit, cwd, cwd, fgit, u_plan, fmock, fgit, u_plan, u_plan)) return 2;
+                fgit, fgit, fgit, cwd, cwd, fgit, u_plan, fmock, fgit, u_plan, u_plan, u_plan, u_plan)) return 2;
             int rc_fr = ckk_sh("check-prerun-drive", cmd, out, sizeof out);
             ck(rc_fr == 0 &&
                ckk_has(out, CPD_OUT, "PRERUN_FROZEN_SOURCE\trev=") &&
@@ -1253,17 +1273,21 @@ int main(int argc, char **argv) {
             "printf \"b-rel\\\\tproduct-qualification\\\\tPASS\\\\t0\\\\taaa\\\\t120\\\\t1.0\\\\t0\\\\t-\\\\n\" >> \"$out\"\\n"
             "exit 0\\n' > \"$M\" && chmod +x \"$M\"; "
             "cd \"$R\" && git init -q && git config user.name r74 && git config user.email r74@localhost && "
-            "printf 'x\\n' > a.txt && git add a.txt && git commit -qm init && "
+            "mkdir -p release/evidence/0.0.90 && printf 'DEFERRED\\tb\\thist\\n' > release/evidence/0.0.90/hist-deferred.tsv && "
+            "printf 'PASS\\n' > release/evidence/0.0.90/keep.tsv && "
+            "printf 'x\\n' > a.txt && git add -A && git commit -qm init && "
             "sh '%s/unisacc.com' '%s/tools/prerun-drive.cx' -- plan --ids-file \"$IDS\" --out \"$O\" --warmup 1 && "
             "sh '%s/unisacc.com' '%s/tools/prerun-drive.cx' -- run --root . --out \"$O\" --mock-runner \"$M\" && "
             "[ -e \"$O/frozen-root/unisacc.com\" ] && sh \"$O/frozen-root/unisacc.com\" | grep -q '^launcher$' && "
+            "[ ! -e \"$O/frozen-root/release/evidence/0.0.90/hist-deferred.tsv\" ] && "
+            "[ -e \"$O/frozen-root/release/evidence/0.0.90/keep.tsv\" ] && "
             "echo REL_ROOT_SYMLINK_OK",
             f14, f14, f14, f14, cwd, cwd, cwd, cwd)) return 2;
         int rc14a = ckk_sh("check-prerun-drive", cmd, out, sizeof out);
         ck(rc14a == 0 &&
            ckk_has(out, CPD_OUT, "REL_ROOT_SYMLINK_OK") &&
            ckk_has(out, CPD_OUT, "outer_overhead_ms="),
-           "r74f-relative-root-realpath-and-run-outer-overhead: normalizes --root . so frozen-root/unisacc.com is valid and logs outer_overhead_ms");
+           "r74f-relative-root-realpath-prunes-historical-deferred-and-keeps-other-evidence: normalizes --root . so frozen-root/unisacc.com is valid, leaves the historical *-deferred.tsv out of the frozen root (it would otherwise be multiplied into every count of deferred-now), keeps every other evidence file, and logs outer_overhead_ms");
 
         /* 14b: prepare --times-file fallback to latest_strict and unmeasured daily-compile-smoke-* >= 15000ms */
         if (cx_fmt(cmd, sizeof cmd,
