@@ -4,6 +4,8 @@
  *                                                   [--base REV (default main)] [--repo R (default .)] [--guard]
  *                                                   [--declare FILE] [--overlay DIR] [--probe 'CMD using $F' ...]
  *                                                   [--sample FILE] [--flip-max N] [--flip-ids CSV]
+ *                                                   [--round1 PATCH]  (item 13: P is round two; its changes to round-one lines must each be declared)
+ *                                                   [--mechanical [--mutation-out DIR] [--ratchets full|paths]]  (one MECH receipt: apply, sha256, home paths, ratchets, checks, preview, mutation gate)
  *
  * P is a `git diff` patch against REV.  The tool builds a private copy (git archive REV, git apply P, git init), runs
  * every item for real (nothing is cached), and writes a receipt bound to the sha256 of P:
@@ -66,7 +68,7 @@ static int nD;
 static const char *g_declare, *g_overlay, *g_probe[4];
 static int g_nprobe;
 static const char *g_patch, *g_base = "main", *g_repo = ".", *g_out, *g_chk[PS_MAXCHK];
-static int g_nchk, g_guard;
+static int g_nchk, g_guard, g_mech;
 static char T[1024], TREE[1100], BASE[1100], rec[PS_OUT];
 static int rn, nfail, nunm;
 
@@ -107,11 +109,11 @@ static void emit(int item, const char *name, const char *verdict, const char *fm
 
 /* ---------- patch parsing: every added line with its new-file line number ---------- */
 static void parse_patch(char *b, size_t n) {
-    char *s, *e, *file = 0; int cur = 0;
+    char *s, *e, *file = 0, *old = 0; int cur = 0;
     for (s = b; s < b + n; s = e + 1) {
         e = s; while (e < b + n && *e != '\n') e++; *e = 0;
-        if (!strncmp(s, "+++ ", 4)) { file = strncmp(s + 4, "b/", 2) ? 0 : s + 6; continue; }
-        if (!strncmp(s, "--- ", 4)) continue;
+        if (!strncmp(s, "+++ ", 4)) { file = !strncmp(s + 4, "b/", 2) ? s + 6 : !strcmp(s + 4, "/dev/null") ? old : 0; continue; }   /* a whole-file deletion has no b/ side: its removed lines belong to the a/ file */
+        if (!strncmp(s, "--- ", 4)) { old = !strncmp(s + 4, "a/", 2) ? s + 6 : 0; continue; }
         if (!strncmp(s, "diff --git", 10)) { file = 0; continue; }
         if (!strncmp(s, "@@", 2)) { char *p = strchr(s, '+'); cur = p ? atoi(p + 1) : 0; continue; }
         if (!file) continue;
@@ -806,6 +808,259 @@ static void item5(void) {
     else if (negs >= srcs) emit(5, "negative-input", "PASS", "%d added negative-case lines for %d changed sources", negs, srcs);
     else emit(5, "negative-input", "FAIL", "%d changed sources but only %d added check lines feeding a failing/empty input", srcs, negs);
 }
+/* ---------- item 13: round compare -- a second-round patch may only make named changes to what round one added ---------- */
+static const char *g_round1;
+static added_t A1[PS_MAXADD];
+static int nA1;
+/* both sides come from git diff output, so a line that round two removes is byte-identical to the round-one line it came from */
+static int same_line(const char *a, const char *b) { return !strcmp(a, b); }
+/* the assertion name of a ck(...)/ok(...) line: its LAST string literal (the first one is often a source fragment) */
+static int assert_name(const char *t, char *d, int cap) {
+    const char *p, *last = 0, *e = 0;
+    d[0] = 0;
+    if (!strstr(t, "ck(") && !strstr(t, "ok(")) return 0;
+    for (p = t; *p; p++) {
+        if (*p == '"') {
+            const char *s = p + 1, *q2 = s;
+            while (*q2 && *q2 != '"') { if (*q2 == '\\' && q2[1]) q2++; q2++; }
+            if (!*q2) break;
+            last = s; e = q2; p = q2;
+        }
+    }
+    if (!last || e - last < 3 || e - last >= cap) return 0;
+    cp(d, cap, last, (long)(e - last)); d[e - last] = 0;
+    return 1;
+}
+static int strength(const char *t) {
+    static const char *w[] = { "&&", "==", "!=", "strstr(", "strcmp(", "has(", 0 };
+    int n = 0, k; const char *p;
+    for (k = 0; w[k]; k++) for (p = t; (p = strstr(p, w[k])); p += strlen(w[k])) n++;
+    return n;
+}
+static int is_neg_line(const char *t) {
+    static const char *neg[] = { "REFUSE", "refuse", "FAIL", "rc == 1", "rc == 2", "rc != 0", "!= 0", "nonexist", "missing", "empty", "ENOENT", "bad", "must not", "never", 0 };
+    int k, hit = 0;   /* one return: the verdict comes from the loop, never from falling off the end */
+    for (k = 0; neg[k] && !hit; k++) hit = strstr(t, neg[k]) != 0;
+    return hit;
+}
+static int declared_row(const char *file, const char *text) {
+    char *db; size_t dn = 0, ll; char *s, *e; int dec = 0;
+    if (!g_declare) return 0;
+    db = slurp(g_declare, &dn);
+    if (!db) return 0;
+    for (s = db; s < db + dn && !dec; s = e + 1) {
+        char ln[1400], *f1, *f2, *f3;
+        e = s; while (e < db + dn && *e != '\n') e++;
+        ll = (size_t)(e - s); if (ll >= sizeof ln) continue;
+        cp(ln, (long)sizeof ln, s, (long)ll); ln[ll] = 0;
+        f1 = ln; f2 = strchr(f1, '\t'); if (!f2) continue; *f2++ = 0;
+        f3 = strchr(f2, '\t'); if (!f3) continue; *f3++ = 0;
+        if (*f3 && !strcmp(f1, file) && *f2 && strstr(text, f2)) dec = 1;
+    }
+    free(db);
+    return dec;
+}
+static void item13(void) {
+    int i, j, bad = 0, base = 0, touched = 0, unnamed = 0, dropped = 0, weak = 0;
+    int negb = 0, totb = 0, nega = 0, tota = 0;
+    char names[1][1];
+    (void)names;
+    if (!g_round1) { emit(13, "round-compare", "NA", "no --round1 patch: this is a first-round patch"); return; }
+    for (i = 0; i < nA1; i++) {
+        const char *t = A1[i].text; int gone = 0;
+        while (*t == ' ' || *t == '\t') t++;
+        if (!*t) continue;
+        base++;
+        for (j = 0; j < nD && !gone; j++) if (!strcmp(D[j].file, A1[i].file) && same_line(D[j].text, A1[i].text)) gone = 1;
+        if (strstr(A1[i].text, "ck(") || strstr(A1[i].text, "ok(")) { totb++; if (is_neg_line(A1[i].text)) negb++; if (!gone) { tota++; if (is_neg_line(A1[i].text)) nega++; } }
+    }
+    for (i = 0; i < nA; i++) if (strstr(A[i].text, "ck(") || strstr(A[i].text, "ok(")) { tota++; if (is_neg_line(A[i].text)) nega++; }
+    for (j = 0; j < nD; j++) {
+        const char *dt = D[j].text; char dn2[300]; int from1 = 0, k, named = 0, still = 0;
+        while (*dt == ' ' || *dt == '\t') dt++;
+        if (!*dt) continue;
+        for (i = 0; i < nA1 && !from1; i++) if (!strcmp(A1[i].file, D[j].file) && same_line(A1[i].text, D[j].text)) from1 = 1;
+        if (!from1) continue;
+        touched++;
+        named = declared_row(D[j].file, D[j].text);
+        if (!named) { if (unnamed < 3) emit(13, "round-unnamed-change", "FAIL", "round two changes a round-one line with no --declare row (file<TAB>substring<TAB>reason): %s: %.90s", D[j].file, dt); unnamed++; bad++; }
+        if (assert_name(D[j].text, dn2, sizeof dn2)) {
+            int newstr = -1;
+            for (k = 0; k < nA; k++) {
+                char an[300];
+                if (assert_name(A[k].text, an, sizeof an) && !strcmp(an, dn2) && !strcmp(A[k].file, D[j].file)) { still = 1; newstr = strength(A[k].text); break; }
+            }
+            if (!still) { if (!named) { emit(13, "round-assertion-dropped", "FAIL", "round two drops the round-one assertion '%.90s' (%s)", dn2, D[j].file); bad++; } dropped++; }
+            else if (newstr < strength(D[j].text)) { if (!named) { emit(13, "round-assertion-weakened", "FAIL", "round two weakens the round-one assertion '%.90s' (%s): fewer conditions (%d -> %d)", dn2, D[j].file, strength(D[j].text), newstr); bad++; } weak++; }
+        }
+    }
+    if (base && touched * 100 > base * 30) { emit(13, "round-rewrite-share", "FAIL", "round two rewrites %d of %d round-one lines (over 30%%): send it as a new item for full pre-review", touched, base); bad++; }
+    if (totb && tota && nega * totb < negb * tota) { emit(13, "round-negative-share", "FAIL", "the negative-case share of assertions falls from %d/%d to %d/%d", negb, totb, nega, tota); bad++; }
+    if (!bad) emit(13, "round-compare", "PASS", "round two touches %d of %d round-one lines (all declared), %d assertions dropped and %d weakened (all declared), negative share %d/%d -> %d/%d", touched, base, dropped, weak, negb, totb, nega, tota);
+}
+
+/* ---------- --mechanical: the seven mechanical checks a gatekeeper repeats on every patch, one receipt ---------- */
+/* (1) git apply --check on the base, (2) sha256 of the patch and of every changed file, (3) home-directory paths in added lines, (4) ratchets, (5) the changed files' own
+   checks (the original --check lines), (6) precommit-preview --files blocked=, (7) the mutation-gate run (--mutation-out DIR of a finished run).  Each row
+   carries rc and ms; any FAIL makes the whole receipt FAIL; a row that could not be measured is UNMEASURED and the receipt INCOMPLETE (rc 3). */
+static const char *g_mut_out, *g_ratch = "paths";
+static void mrow(int item, const char *name, int rc, long ms, const char *verdict, const char *fmt, ...) {
+    char d[1500]; va_list ap; int k;
+    va_start(ap, fmt); k = vsnprintf(d, sizeof d, fmt, ap); va_end(ap); if (k < 0) die2("detail", "format");
+    k = snprintf(rec + rn, sizeof rec - rn, "MECH item=%d name=%s rc=%d ms=%ld verdict=%s detail=%s\n", item, name, rc, ms, verdict, d);
+    if (k < 0 || rn + k >= (int)sizeof rec) die2("receipt", "too long");
+    rn += k;
+    if (!strcmp(verdict, "FAIL")) nfail++;
+    if (!strcmp(verdict, "UNMEASURED")) nunm++;
+}
+static void mech_finish(const char *hash) {
+    char tail[600], sc[1200]; const char *v = nfail ? "FAIL" : nunm ? "INCOMPLETE" : "PASS";
+    cx_fmt(tail, sizeof tail, "MECH_SUMMARY patch_sha256=%s fail=%d unmeasured=%d verdict=%s\n", hash, nfail, nunm, v);
+    if (rn + (int)strlen(tail) >= (int)sizeof rec) die2("receipt", "too long");
+    cp(rec + rn, (long)(sizeof rec - rn), tail, (long)strlen(tail) + 1); rn += (int)strlen(tail);
+    if (cx_write(g_out, rec, (size_t)rn) != 0) die2("write receipt", g_out);
+    fputs(rec, stdout);
+    cx_fmt(sc, sizeof sc, "rm -rf %s", T); sh(sc, 0, 0, 20);
+    if (TREE[0] && strstr(TREE, "unisacc-privrepo-")) { cx_fmt(sc, sizeof sc, "rm -rf '%s'", TREE); sh(sc, 0, 0, 20); }
+    if (BASE[0] && strstr(BASE, "unisacc-privrepo-")) { cx_fmt(sc, sizeof sc, "rm -rf '%s'", BASE); sh(sc, 0, 0, 20); }
+    exit(nfail ? 1 : nunm ? 3 : 0);
+}
+/* item 1, before the private tree exists: a patch that does not apply is a receipt row, not a refusal */
+static int mech_apply_check(const char *hash) {
+    char ap[1100], q1[1100], q2[1100], qp[1100], pabs[4096], sc[4400], out[1500]; long t0 = sy_now_ms(); int rc, i;
+    static const char *skipped[] = { "sha256", "home-paths", "ratchets", "checks", "precommit-preview", "mutation-gate", 0 };
+    shq(q1, sizeof q1, g_repo); shq(q2, sizeof q2, g_base);
+    if (sy_realpath(g_patch, pabs, (int)sizeof pabs) <= 0) die2("patch path unreadable", g_patch);
+    shq(qp, sizeof qp, pabs);
+    cx_fmt(ap, sizeof ap, "%s/apply", T);
+    cx_fmt(sc, sizeof sc, "mkdir -p '%s' && %sgit -C %s archive %s | tar -x -C '%s' && cd '%s' && %sgit apply --check %s", ap, envu(), q1, q2, ap, ap, envu(), qp);
+    rc = sh(sc, out, sizeof out, 55);
+    if (rc == 0) { mrow(1, "apply-check", 0, sy_now_ms() - t0, "PASS", "git apply --check is clean on %s", g_base); return 1; }
+    mrow(1, "apply-check", rc, sy_now_ms() - t0, "FAIL", "git apply --check failed on %s: %.300s", g_base, out);
+    for (i = 0; skipped[i]; i++) mrow(i + 2, skipped[i], -1, 0, "FAIL", "not run: the patch does not apply to the base");
+    mech_finish(hash);
+    return 0;
+}
+static void mech_run(const char *hash) {
+    char sc[8192], out[8192], files[3000], q[1300], dirs[1500]; long t0; int rc, i, j, nf = 0, nd = 0, hits = 0;
+    char *fl[40]; char *dl[8];
+    /* collect the changed files (added or deleted lines) and their directories */
+    files[0] = 0; dirs[0] = 0;
+    for (i = 0; i < nA + nD; i++) {
+        const char *f = i < nA ? A[i].file : D[i - nA].file; int seen = 0;
+        for (j = 0; j < nf; j++) if (!strcmp(fl[j], f)) { seen = 1; break; }
+        if (!seen && nf < 40) fl[nf++] = (char *)f;
+    }
+    /* (2) sha256 of the patch and of every changed file in the patched tree */
+    t0 = sy_now_ms();
+    {   char list[3000]; int k = 0; list[0] = 0;
+        for (j = 0; j < nf; j++) { shq(q, sizeof q, fl[j]); k += cx_fmt(list + k, (int)sizeof list - k, " %s", q) ? 0 : (int)strlen(q) + 1; }
+        cx_fmt(sc, sizeof sc, "cd %s && for f in%s; do if [ -e \"$f\" ]; then printf '%%s ' \"$f\"; sha256sum -- \"$f\" | cut -c1-16; else printf '%%s deleted\\n' \"$f\"; fi; done", TREE, list);
+        rc = sh(sc, out, sizeof out, 20);
+        (void)files;
+        if (rc != 0 || !nf) mrow(2, "sha256", rc, sy_now_ms() - t0, "FAIL", "patch sha256 %.16s; the changed-file digests could not be computed: %.200s", hash, out);
+        else { for (k = 0; out[k]; k++) if (out[k] == '\n') out[k] = ';'; mrow(2, "sha256", 0, sy_now_ms() - t0, "PASS", "patch sha256 %s; %d changed file(s): %.900s", hash, nf, out); }
+    }
+    /* (3) home-directory paths in added lines */
+    t0 = sy_now_ms();
+    {   char first[600]; int k = 0; first[0] = 0;
+        for (i = 0; i < nA; i++) if (strstr(A[i].text, "/ho" "me/")) { if (hits < 3) k += cx_fmt(first + k, (int)sizeof first - k, "%s%s:%d", hits ? " " : "", A[i].file, A[i].line) ? 0 : (int)strlen(A[i].file) + 8; hits++; }
+        if (hits) mrow(3, "home-paths", 1, sy_now_ms() - t0, "FAIL", "%d added line(s) carry a home-directory path (first: %s): write ~/ instead", hits, first);
+        else mrow(3, "home-paths", 0, sy_now_ms() - t0, "PASS", "no added line carries a home-directory path");
+    }
+    /* (4) ratchets: --ratchets full runs the six shards, the default runs --only-paths for each changed directory (at most 8) */
+    t0 = sy_now_ms();
+    for (j = 0; j < nf && nd < 8; j++) {
+        char *sl = strrchr(fl[j], '/'); char d[400]; int seen = 0, m;
+        if (!sl) cx_fmt(d, sizeof d, "%s", fl[j]); else { m = (int)(sl - fl[j]) + 1; if (m >= (int)sizeof d) m = (int)sizeof d - 1; cp(d, (long)sizeof d, fl[j], m); d[m] = 0; }
+        for (i = 0; i < nd; i++) if (!strcmp(dl[i], d)) { seen = 1; break; }
+        if (!seen) { dl[nd] = (char *)fl[j]; if (sl) dl[nd] = strdup(d); else dl[nd] = strdup(fl[j]); nd++; }
+    }
+    rc = 0; out[0] = 0;
+    if (!strcmp(g_ratch, "full")) {
+        for (i = 1; i <= 6 && !rc; i++) {
+            cx_fmt(sc, sizeof sc, "cd %s && sh ./unisacc.com tools/ratchets.cx -- --shard %d/6 2>&1 | tail -4", TREE, i);
+            rc = shl(sc, out, sizeof out, 58);
+            if (strstr(out, " FAIL") || strstr(out, "fail=") ) { char *p = strstr(out, "fail="); if (rc || (p && p[5] != '0')) rc = rc ? rc : 1; }
+        }
+        if (rc) mrow(4, "ratchets", rc, sy_now_ms() - t0, "FAIL", "ratchets (full, 6 shards) not green: %.500s", out);
+        else mrow(4, "ratchets", 0, sy_now_ms() - t0, "PASS", "ratchets (full, 6 shards) green");
+    } else {
+        for (j = 0; j < nd && !rc; j++) {
+            shq(q, sizeof q, dl[j]);
+            cx_fmt(sc, sizeof sc, "cd %s && sh ./unisacc.com tools/ratchets.cx -- --only-paths %s 2>&1 | tail -6", TREE, q);
+            rc = shl(sc, out, sizeof out, 58);
+            if (is_red(rc, out, sizeof out)) rc = rc ? rc : 1; else rc = 0;
+        }
+        if (rc) mrow(4, "ratchets", rc, sy_now_ms() - t0, "FAIL", "ratchets over %.200s not green: %.500s", dl[j > 0 ? j - 1 : 0], out);
+        else mrow(4, "ratchets", 0, sy_now_ms() - t0, "PASS", "ratchets green over %d changed director(ies) (--ratchets full for all six shards)", nd);
+    }
+    /* (5) the original --check lines, on the real entries, in the patched tree */
+    t0 = sy_now_ms();
+    rc = run_checks(0, out, sizeof out);
+    if (rc) mrow(5, "checks", rc, sy_now_ms() - t0, "FAIL", "a --check line is not green: %.500s", out);
+    else mrow(5, "checks", 0, sy_now_ms() - t0, "PASS", "%d --check line(s) green on the patched tree", g_nchk);
+    /* (6) the commit gate over the files the patch touches: item 11's real preview, its verdict is the row */
+    t0 = sy_now_ms();
+    {   int at = rn, fails = nfail, unm = nunm; const char *v; char *p;
+        item11();
+        p = strstr(rec + at, "verdict="); v = p ? p + 8 : "";
+        if (nfail > fails) { rc = 1; } else rc = 0;
+        /* turn the item-11 row into the mechanical row: keep its text as the detail, drop it from the receipt body */
+        {   char det[1400]; char *d = strstr(rec + at, "detail="); det[0] = 0;
+            if (d) { cx_fmt(det, sizeof det, "%s", d + 7); { size_t l = strlen(det); while (l && (det[l - 1] == '\n')) det[--l] = 0; } }
+            nfail = fails; nunm = unm;
+            if (!strncmp(v, "PASS", 4)) { rn = at; rec[rn] = 0; mrow(6, "precommit-preview", 0, sy_now_ms() - t0, "PASS", "%s", det); }
+            else if (!strncmp(v, "NA", 2)) { rn = at; rec[rn] = 0; mrow(6, "precommit-preview", 0, sy_now_ms() - t0, "UNMEASURED", "no tools/precommit-preview.cx in the patched tree: %s", det); }
+            else if (!strncmp(v, "UNMEASURED", 10)) { rn = at; rec[rn] = 0; mrow(6, "precommit-preview", 3, sy_now_ms() - t0, "UNMEASURED", "%s", det); }
+            else { rn = at; rec[rn] = 0; mrow(6, "precommit-preview", rc ? rc : 1, sy_now_ms() - t0, "FAIL", "%s", det); }
+        }
+    }
+    /* (7) mutation gate: a finished `mutation-gate run --out DIR` of THIS patch (its slot-0 tree holds the same bytes as the patched tree) with missing=0 and verdict=PASS */
+    t0 = sy_now_ms();
+    if (!g_mut_out) mrow(7, "mutation-gate", 3, 0, "UNMEASURED", "no --mutation-out DIR of a finished mutation-gate run was given");
+    else {
+        char sp[1300], *sm; size_t sn = 0;
+        cx_fmt(sp, sizeof sp, "%s/SUMMARY", g_mut_out);
+        sm = slurp(sp, &sn);
+        if (!sm) mrow(7, "mutation-gate", 2, sy_now_ms() - t0, "UNMEASURED", "%s/SUMMARY is not readable: the gate run is not finished", g_mut_out);
+        else {
+            char *g = strstr(sm, "MUTATION_GATE"); int same = 1; char bad[300];
+            bad[0] = 0;
+            {   /* the gate reclaims its slot trees, so the run is bound to this patch by its mutant list: every mutant must sit on a line this patch adds (file, new-file line), and there must be at least one */
+                char mp[1300], *mb; size_t mn = 0, nm = 0;
+                cx_fmt(mp, sizeof mp, "%s/mutants.tsv", g_mut_out);
+                mb = slurp(mp, &mn);
+                if (!mb) { same = 0; cx_fmt(bad, sizeof bad, "%s/mutants.tsv unreadable", g_mut_out); }
+                else {
+                    char *s, *e2;
+                    for (s = mb; s < mb + mn && same; s = e2 + 1) {
+                        char *f1, *f2, *f3; int ln, hit = 0;
+                        e2 = s; while (e2 < mb + mn && *e2 != '\n') e2++;
+                        *e2 = 0;
+                        if (!*s) continue;
+                        f1 = strchr(s, '\t'); if (!f1) { same = 0; continue; } f1++;
+                        f2 = strchr(f1, '\t'); if (!f2) { same = 0; continue; } *f2++ = 0;
+                        f3 = strchr(f2, '\t'); if (!f3) { same = 0; continue; } *f3 = 0;
+                        ln = atoi(f2); nm++;
+                        for (j = 0; j < nA && !hit; j++) if (A[j].line == ln && !strcmp(A[j].file, f1)) hit = 1;
+                        if (!hit) { same = 0; cx_fmt(bad, sizeof bad, "mutant at %s:%d is not a line this patch adds", f1, ln); }
+                    }
+                    if (same && nm == 0) { same = 0; cx_fmt(bad, sizeof bad, "mutants.tsv has no mutant"); }
+                    free(mb);
+                }
+            }
+            if (!g) mrow(7, "mutation-gate", 2, sy_now_ms() - t0, "UNMEASURED", "no MUTATION_GATE line in %s/SUMMARY", g_mut_out);
+            else if (!same) mrow(7, "mutation-gate", 1, sy_now_ms() - t0, "FAIL", "the gate run is not bound to this patch: %s", bad);
+            else if (!strstr(g, "missing=0")) mrow(7, "mutation-gate", 1, sy_now_ms() - t0, "FAIL", "missing is not 0 (every mutant must have a verdict): %.200s", g);
+            else if (!strstr(g, "verdict=PASS")) mrow(7, "mutation-gate", 1, sy_now_ms() - t0, "FAIL", "%.250s", g);
+            else { char *e = strchr(g, '\n'); if (e) *e = 0; mrow(7, "mutation-gate", 0, sy_now_ms() - t0, "PASS", "%.400s", g); }
+            free(sm);
+        }
+    }
+    mech_finish(hash);
+}
+
 int main(int argc, char **argv) {
     int i; size_t pn; char *pb, sc[1200], out[8192], hash[512], q[1200];
     for (i = 1; i < argc; i++) {
@@ -817,6 +1072,10 @@ int main(int argc, char **argv) {
         else if (!strcmp(argv[i], "--check") && i + 1 < argc) { if (g_nchk == PS_MAXCHK) die2("too many --check", 0); g_chk[g_nchk++] = argv[++i]; }
         else if (!strcmp(argv[i], "--check-timeout") && i + 1 < argc) { g_cto = atoi(argv[++i]); if (g_cto < 1 || g_cto > 55) die2("check-timeout outside", "1..55"); }
         else if (!strcmp(argv[i], "--guard")) g_guard = 1;
+        else if (!strcmp(argv[i], "--mechanical")) g_mech = 1;
+        else if (!strcmp(argv[i], "--round1") && i + 1 < argc) g_round1 = argv[++i];
+        else if (!strcmp(argv[i], "--mutation-out") && i + 1 < argc) g_mut_out = argv[++i];
+        else if (!strcmp(argv[i], "--ratchets") && i + 1 < argc) { g_ratch = argv[++i]; if (strcmp(g_ratch, "full") && strcmp(g_ratch, "paths")) die2("--ratchets must be", "full or paths"); }
         else if (!strcmp(argv[i], "--declare") && i + 1 < argc) g_declare = argv[++i];
         else if (!strcmp(argv[i], "--overlay") && i + 1 < argc) g_overlay = argv[++i];
         else if (!strcmp(argv[i], "--probe") && i + 1 < argc) { if (g_nprobe == 4) die2("too many --probe", 0); g_probe[g_nprobe++] = argv[++i]; }
@@ -843,6 +1102,7 @@ int main(int argc, char **argv) {
     hash[64] = 0;
     g_t0 = sy_now_ms();
     { char tt[1024]; cx_fmt(tt, sizeof tt, "%s/premerge-selfcheck-XXXXXX", sy_env_or("TMPDIR", "/tmp")); if (!mkdtemp(tt)) die2("mkdtemp", 0); cx_fmt(T, sizeof T, "%s", tt); }
+    if (g_mech && !mech_apply_check(hash)) return 1;
     build_tree();
     {   char th[256], tl[2200]; int j;
         cx_fmt(th, sizeof th, "%s", g_toolsha);
@@ -850,10 +1110,17 @@ int main(int argc, char **argv) {
         for (j = 0; j < g_nchk; j++) { cx_fmt(tl, sizeof tl, "SELFCHECK_INPUT check%d=%.300s\n", j, g_chk[j]); rawl(tl); }
         for (j = 0; j < g_nprobe; j++) { cx_fmt(tl, sizeof tl, "SELFCHECK_INPUT probe%d=%.300s\n", j, g_probe[j]); rawl(tl); }
     }
+    if (g_round1) {   /* round one: parse it first, keep its added lines, then parse the patch under review into clean arrays */
+        size_t p1n; char *p1 = slurp(g_round1, &p1n);
+        if (!p1 || p1n == 0) die2("round-one patch missing or empty", g_round1);
+        parse_patch(p1, p1n);
+        cp(A1, (long)sizeof A1, A, (long)(nA * sizeof A[0])); nA1 = nA; nA = 0; nD = 0;
+    }
     parse_patch(pb, pn);
     if (nA == 0 && nD == 0) die2("patch adds and deletes no lines", g_patch);
+    if (g_mech) mech_run(hash);
     if (run_checks(0, out, sizeof out) != 0) { printf("%s\n", out); die2("baseline --check not green on the patched tree", 0); }
-    item1(); item2(); item3(); item4(); item5(); item6(); item7(); item8(); item10(); item11(); item12();
+    item1(); item2(); item3(); item4(); item5(); item6(); item7(); item8(); item10(); item11(); item12(); item13();
     {   char tail[1024]; const char *v = nfail ? "FAIL" : nunm ? "INCOMPLETE" : "PASS";
         cx_fmt(tail, sizeof tail, "SELFCHECK_SUMMARY patch_sha256=%s fail=%d unmeasured=%d verdict=%s\n", hash, nfail, nunm, v);
         if (rn + (int)strlen(tail) >= (int)sizeof rec) die2("receipt", "too long");
