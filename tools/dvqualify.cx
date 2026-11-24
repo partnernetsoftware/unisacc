@@ -349,22 +349,28 @@ static int launch(Slot *s, int idx, int attempt) {
 
 /* Material preparation is bounded separately from the first measured batch.
  * Only an explicitly selected native route calls this; every batch still runs. */
-static void prepare_first(const int *pending,int count,int jobs){
-    if(!use_native || !count)return;
-    char src[4400],why[512],ids[1800]="";
+static int prepare_first(const int *pending,int count,int jobs){
+    if(!use_native || !count)return 0;
+    char cwd[4096],selector_root[4096],logs[4096],why[512],ids[1800]="";
     long selector_start=sy_now_ms();
-    if(cx_fmt(src,sizeof src,"%s/tools/affected.cx",lay) ||
-       cx_fmt(prepared_affected,sizeof prepared_affected,"%s/affected",outlog) ||
-       tq_native(lay,src,prepared_affected,why,sizeof why)){
-        prepared_affected[0]=0;use_native=0;
-        fprintf(stderr,"NATIVE_RUNBATCH_FALLBACK\treason=selector-preparation\n");return;
+    int prep=-1;
+    if(sy_cwd(cwd,sizeof cwd)>=0 && sy_realpath(lay,selector_root,sizeof selector_root)>=0 &&
+       sy_realpath(outlog,logs,sizeof logs)>=0 &&
+       !cx_fmt(prepared_affected,sizeof prepared_affected,"%s/affected",logs) && !sy_chdir(selector_root)){
+        /* The plan and build must both resolve relative units in the frozen layout. */
+        prep=tq_native(selector_root,"tools/affected.cx",prepared_affected,why,sizeof why);
+        if(sy_chdir(cwd))return die("restore working directory ",cwd);
     }
-    /* tq_native validates the image bytes under the key for the candidate
-     * compiler and the resolved source closure. This image serves all slots. */
+    if(prep){
+        prepared_affected[0]=0;use_native=0;
+        fprintf(stderr,"NATIVE_RUNBATCH_FALLBACK\treason=selector-preparation\n");return 0;
+    }
+    /* tq_native checks candidate, container and source-closure identity before
+     * reusing verified image bytes. Only the image, not a result, serves all slots. */
     fprintf(stderr,"QUALIFY_SELECTOR_PREP\tms=%ld\treused=%d\n",
             sy_now_ms()-selector_start,tq_last_state()==1);
     for(int i=0;i<count && i<jobs;i++){
-        size_t n=strlen(ids);if(cx_fmt(ids+n,sizeof ids-n,"%s%s",n?",":"",bs[pending[i]].id))return;
+        size_t n=strlen(ids);if(cx_fmt(ids+n,sizeof ids-n,"%s%s",n?",":"",bs[pending[i]].id))return 0;
     }
     char *v[]={prepared_affected,"--ids",ids,"--native-run-batch","--prep-only",0};
     char receipt[16384];long started=sy_now_ms(); int rc=run(v,lay,55,receipt,sizeof receipt);
@@ -373,6 +379,7 @@ static void prepare_first(const int *pending,int count,int jobs){
         use_native=0;
         fprintf(stderr,"NATIVE_RUNBATCH_FALLBACK\treason=runner-preparation\n");
     }
+    return 0;
 }
 /* Run the given indices, at most jobs at once. */
 static int run_set(int *idx, int count, int jobs, int attempt, long deadline) {
@@ -745,7 +752,7 @@ int main(int argc, char **argv) {
         if(outp)fclose(f);
         return kit_state;
     }
-    prepare_first(pending,count,jobs);
+    if(prepare_first(pending,count,jobs)){if(outp)fclose(f);return 2;}
 #ifdef DVQUALIFY_S2_TAP
     s2_open();
 #endif

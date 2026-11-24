@@ -52,6 +52,7 @@
 #pragma unisa use sys.fs
 #pragma unisa use sys.io
 #pragma unisa use cxlib.tlibpkg
+#pragma unisa use packagefooter
 
 #define TQ_PREP_SECS 40
 #define TQ_KIT_SECS 20
@@ -60,13 +61,11 @@
 
 /* The native image is a build artifact, so it is cached by identity and never as a result.
 
-   Identity is exactly what decides the image's bytes: the product binary's own sha256 plus, for every file of
-   the tool's `use` closure as the product's own -cx-plan reports it (the tool, every unit it reaches by `use`
-   and -- because the plan resolves them -- every file those include), that file's path and the sha256 of its
-   working-tree bytes.  Working-tree bytes, not HEAD: what gets compiled is what is on disk.  A file of the
-   closure that cannot be read refuses the key, and a dirty file OUTSIDE the closure changes nothing -- the
-   shared checkout is almost always dirty somewhere, and a key that a neighbour's edit could defeat would
-   never hit.
+   Identity is the embedded product's sha256, the explicit container's sha256 if set, and the
+   paths and working-tree hashes of the files in the product's -cx-plan closure. A launcher
+   without a verifiable embedded footer can choose an external companion regardless of the
+   environment; build it normally but do not cache its image here. Unreadable inputs refuse
+   the key. Dirty files outside these inputs do not invalidate the image.
 
    An entry is <KEY>.sha (one line: the sha256 of the image bytes) plus <image sha>.bin (the bytes, named by
    their own content); both are published through a private name and rename(2), so a reader sees a whole entry
@@ -115,23 +114,44 @@ static int tq_add(char *dst, size_t cap, size_t *at, const char *s) {
     return 1;
 }
 
+static int tq_container_unchanged(const char *path, const sy_stat_t *before) {
+    sy_stat_t after;
+    return !path || !*path || (!sy_stat(path, &after) && after.kind == 'f' &&
+           after.dev == before->dev && after.ino == before->ino && after.size == before->size &&
+           after.mtime_ns == before->mtime_ns && after.ctime_ns == before->ctime_ns);
+}
+
 /* The key text for TOOL under ROOT with PRODUCT; 1 when TQ_KHEX is set and TQ_KDIR is usable. */
-static int tq_key(const char *root, const char *product, const char *tool, char *why, size_t wl) {
+static int tq_key(const char *root, const char *product, const char *tool, const char *container,
+                  int *embedded, sy_stat_t *model, char *why, size_t wl) {
     static char dir[4400];
     static char text[TQ_KEY_CAP];
     const char *v = getenv("UNISACC_TOOLPREP_CACHE");
     char hex[65], *b, *c;
     size_t n = 0, at = 0;
     long i, e, cn;
+    PackageFooter footer;
     tq_khex[0] = 0;
-    if (v && !v[0]) return 0;   /* explicitly disabled */
     b = (char *)cx_read(product, &n);
     if (!b || n == 0) { if (b) free(b); return 0; }
-    cx_sha256_hex(b, (long)n, hex);
+    if (n > 2147483647UL || !packagefooter_locate_bytes((const unsigned char *)b, (long)n, &footer)) {
+        free(b); return 0;
+    }
+    *embedded = 1;
+    if (v && !v[0]) { free(b); return 0; }   /* explicitly disabled */
+    tp_sha(b, n, hex);
     free(b);
-    if (!tq_add(text, sizeof text, &at, "toolkey\t1\nproduct\t") || !tq_add(text, sizeof text, &at, hex) ||
-        !tq_add(text, sizeof text, &at, "\n"))
+    if (!tq_add(text, sizeof text, &at, "toolkey\t2\nproduct\t") || !tq_add(text, sizeof text, &at, hex))
         return 0;
+    if (container && *container) {
+        sy_stat_t launcher;
+        if (sy_stat(container, model) || model->kind != 'f' || model->size <= 0) return 0;
+        /* The inherited name often refers to the launcher inside this layout. */
+        if ((sy_stat(product, &launcher) || !model->ino || launcher.dev != model->dev || launcher.ino != model->ino) &&
+            tp_sha_file(container, hex)) return 0;
+    }
+    if (!tq_add(text, sizeof text, &at, "\ncontainer\t") || !tq_add(text, sizeof text, &at, hex) ||
+        !tq_add(text, sizeof text, &at, "\n")) return 0;
     c = tp_closure(root, product, tool, why, wl);
     if (!c) return 0;
     cn = (long)strlen(c);
@@ -223,9 +243,11 @@ static void tq_put(const char *bin) {
 
 int tq_native(const char *root, const char *tool, const char *bin, char *why, size_t wl) {
     char bound[4400], product[4400], secs[16];
+    const char *container = getenv("UNISA_CONTAINER");
+    sy_stat_t model;
     char *out = 0;
     size_t outn = 0;
-    int rc;
+    int rc, embedded = 0;
     if (!root || !tool || !bin || !why || wl < 64) return -1;
     why[0] = 0;
     if (cx_fmt(bound, sizeof bound, "%s/tools/bound", root) || cx_fmt(product, sizeof product, "%s/unisacc.com", root) ||
@@ -236,14 +258,14 @@ int tq_native(const char *root, const char *tool, const char *bin, char *why, si
     /* a cached image of this exact source closure: copied, its bytes hashed again, and that is all that is
        trusted.  Anything doubtful falls through to the builds below, which are the ones this function always
        had; the caller cannot tell a hit from a build except by the PREPARED line's via= field. */
-    if (tq_key(root, product, tool, why, wl) && tq_take(bin) == 0) {
+    if (tq_key(root, product, tool, container, &embedded, &model, why, wl) &&
+        tq_container_unchanged(container, &model) && tq_take(bin) == 0) {
         tq_last = 1;
         sy_printf("PREPARED\ttool-native\tbound_s=0\tno-test-result\tvia=cache\t%s\n", tool);
         return 0;
     }
     tq_last = 2;   /* built without a key until the tail says otherwise */
-    {   /* the kit's own image decides (listed tool, kit and tlibs fresh, no release-chain environment);
-           a root without a kit exits 7 in the shell and nothing else is started */
+    if (embedded) {   /* A kit is not evidence for an unbound external companion. */
         char image[4400], limit[16];
         char *said = 0;
         size_t saidn = 0;
@@ -268,7 +290,7 @@ int tq_native(const char *root, const char *tool, const char *bin, char *why, si
         if (cx_fmt(why, wl, "tool-prepare rc=%d bound=%d (compiler messages on stderr)", rc, TQ_PREP_SECS)) why[0] = 0;
         return -1;
     }
-    if (tq_khex[0]) { tq_put(bin); tq_last = 0; }
+    if (tq_khex[0] && tq_container_unchanged(container, &model)) { tq_put(bin); tq_last = 0; }
     sy_printf("PREPARED\ttool-native\tbound_s=%d\tno-test-result\t%s\n", TQ_PREP_SECS, tool);
     return 0;
 }
