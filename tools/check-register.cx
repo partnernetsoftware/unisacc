@@ -307,6 +307,74 @@ static void concurrent_tools(const char *dir,const char *one,const char *two,int
     char *left[]={prepared_driver,"--tool",(char*)one,0},*right[]={prepared_driver,"--tool",(char*)two,0};
     concurrent_requests(dir,left,right,right_rc);
 }
+static void private_index_residue(const char *hold, const char *index_path) {
+    char tmp[4400], tmp_env[4500], stale[4500], marker[4500], bound[4500], real[4500];
+    char before[65], after[65], out[32768], pid_env[80];
+    if (sy_mkdtemp(sy_tmpdir(), "unisacc-session-register-residue-", tmp, sizeof tmp) ||
+        cx_fmt(tmp_env, sizeof tmp_env, "TMPDIR=%s", tmp)) die("index residue session", 0);
+    pjoin(stale, sizeof stale, tmp, "unisacc-session-register-index-oldcase0");
+    if (sy_mkdir(stale, 0700)) die("stale index fixture", stale);
+    put_file(stale, "index", "stale\n");
+    if (sy_set_mtime(stale, sy_wall_s() - 10800)) die("age fixture", stale);
+    char *peer[] = {"env", tmp_env, prepared_driver, "--tool", "tools/t-new.cx", "--tool", "tools/tzz.cx", 0};
+    sha_of(index_path, before);
+    int rc = run_in(hold, peer, out, sizeof out);
+    ok(rc == 0 && sy_exists(stale) == 0, "registration reaps an expired private index session");
+
+    pjoin(bound, sizeof bound, hold, "tools/bound");
+    pjoin(real, sizeof real, hold, "tools/bound-real");
+    pjoin(marker, sizeof marker, hold, "stopped-index");
+    if (sy_rename(bound, real)) die("move fixture bound", bound);
+    put_file(hold, "tools/bound",
+        "#!/bin/sh\n"
+        "if test -n \"$REGISTER_FIXTURE_STOP_PID\" && test \"$5\" = ls-files; then\n"
+        "  printf '%s\\n' \"${3#GIT_INDEX_FILE=}\" > stopped-index || exit 2\n"
+        "  kill -STOP \"$REGISTER_FIXTURE_STOP_PID\" || exit 2\n"
+        "fi\n"
+        "exec ./tools/bound-real \"$@\"\n");
+    if (chmod(bound, 0755)) die("mark fixture bound executable", bound);
+    int writer = fork();
+    if (writer < 0) die("fork register writer", hold);
+    if (!writer) {
+        if (chdir(hold) || cx_fmt(pid_env, sizeof pid_env, "REGISTER_FIXTURE_STOP_PID=%d", sy_pid())) _exit(2);
+        char *v[] = {"env", tmp_env, pid_env, prepared_driver, "--tool", "tools/t-new.cx", "--tool", "tools/tzz.cx", 0};
+        execvp(v[0], v);
+        _exit(2);
+    }
+    int status = 0, stopped = 0, reaped = 0;
+    long deadline = sy_now_ms() + 5000;
+    while (sy_now_ms() < deadline) {
+        if (waitpid(writer, &status, WNOHANG | WUNTRACED) == writer) {
+            stopped = WIFSTOPPED(status);
+            reaped = !stopped;
+            break;
+        }
+        sy_sleep_ms(10);
+    }
+    int follower = stopped ? fork() : -1;
+    if (!follower) _exit(run_in(hold, peer, out, sizeof out));
+    int sig = 0;
+    if (!reaped) { sy_signal(writer, 9); sy_wait_status(writer, 0, 0, 0, &sig); }
+    int ex = 0, code = -1;
+    if (stopped && follower < 0) die("fork overlapping register", hold);
+    if (follower > 0) sy_wait_status(follower, 0, &ex, &code, 0);
+    size_t n = 0;
+    char *idx = cx_read(marker, &n);
+    sha_of(index_path, after);
+    if (idx && n && idx[n-1] == '\n') idx[--n] = 0;
+    char *slash = idx && !strncmp(idx, tmp, strlen(tmp)) && idx[strlen(tmp)] == '/' ? strrchr(idx, '/') : 0;
+    if (slash && (strcmp(slash + 1, "index") || strncmp(idx + strlen(tmp) + 1, "unisacc-session-register-index-", 31))) slash = 0;
+    ok(stopped && sig == 9 && ex && code == 0 && slash && sy_exists(idx) == 1 && !strcmp(before, after),
+        "SIGKILL leaves only its private index while an overlapping registration succeeds");
+    if (slash) {
+        *slash = 0;
+        if (sy_set_mtime(idx, sy_wall_s() - 10800)) die("age SIGKILL residue", idx);
+        rc = run_in(hold, peer, out, sizeof out);
+        ok(rc == 0 && sy_exists(idx) == 0, "next registration reaps the aged SIGKILL residue");
+    } else ok(0, "next registration reaps the aged SIGKILL residue");
+    free(idx);
+    if (sy_rename(real, bound)) die("restore fixture bound", bound);
+}
 static int tool_check(int focus) {
     static char out[1 << 15], src[4096]; char hold[4400], a[4400], b[4400], sp[4400], bp[4400], pp[4400], hs[65], hb[65], hp[65], h[65], hex[65], pinrow[400];
     const char *links[] = { "cx", "ext", "cxroot.tsv", "unisacc.com", "tools/cxlib" }, *copies[] = { "tools/bound", "tools/bound.c", "tests/tools-compile.cx" };
@@ -389,6 +457,7 @@ static int tool_check(int focus) {
     char *restore_flag[] = {"git", "update-index", "--no-assume-unchanged", "--", "tools/ta.cx", 0};
     if (run_in(hold, restore_flag, out, sizeof out) || sy_rename(original_verifier, verifier)) die("restore fixture verifier", out);
     if (focus == 2) {
+        private_index_residue(hold, index_path);
         printf("CX_REGISTER_INDEX\tchecks=%d\tfailed=%d\n", checks, failed);
         return failed ? 1 : 0;
     }
