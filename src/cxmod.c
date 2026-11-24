@@ -24,7 +24,7 @@ int cxm_rd(char *path, char *buf, int cap);
 int cxm_wr(char *path, char *buf, int n);
 int cxm_say(int fd, char *s, int n);
 
-#define CXM_MAXU 128
+#define CXM_MAXU 256
 #define CXM_MAXUSE 48
 #define CXM_MAXDECL 48
 #define CXM_MAXEXP 128

@@ -1,10 +1,17 @@
-/* Check the link-input cap: 127 source arguments pass the walk, 129 are refused with the
-   named sentence that now carries the limit (`too many sources (limit 128)`).
-   Uses 127/129 fake .o paths so the walk count is what is exercised; the real open fails
-   later (ENOENT), which is not the cap.
-   History: C44-LINK-CAP-01 took link inputs 64 -> 96; UNITOK2-CAP took the walk 96 -> 128
-   (src/driveargs.cx:58), so this check now measures the real boundary instead of an interior
-   point that would stay green no matter how the cap moved.
+/* Check the link-input cap (exec/facts/limits.tsv FRONT_UNIT_MAX) and the link-layer unit-ordinal
+   capacity (tokenlocations.UNIT_MAX = 128).
+
+   cap-1 sources must pass the argument walk; cap+1 must be refused with this build's sentence
+   `too many sources (limit <cap>)`.  Fake .o paths, so the walk count is what is exercised and
+   the real open fails later (ENOENT), which is not the cap.
+   129 units (128 chained modules plus the root) go through -o: the front accepts them (cap 256)
+   and the linker must refuse by name (`link unit ordinal bound exceeded`), not with a misleading
+   `tape truncated`.
+   A stale installed product carries the old cap.  Every case it cannot answer prints SKIP with
+   what it actually printed, and the check exits nonzero, so a batch rc0 can never record a SKIP
+   as a pass.  A product that admits cap+1 is a FAIL, never a SKIP.
+   History: C44-LINK-CAP-01 64 -> 96; UNITOK2-CAP 96 -> 128; 0.0.98 takes the walk 128 -> 256
+   (CXM_MAXU/DV_MAXU) and moves the number into the fact table.
    Assertions and the bounded child (50 s, stderr kept apart) go through testx.check. */
 #pragma unisa use sys.fs
 #pragma unisa use sys.io
@@ -12,10 +19,37 @@
 #pragma unisa use text.text
 #pragma unisa use testx.check
 
+static int front_unit_max(const char *root) {
+    char p[4400], ln[512]; int v = 0;
+    if (cx_fmt(p, sizeof p, "%s/exec/facts/limits.tsv", root)) return 0;
+    FILE *f = fopen(p, "r");
+    if (!f) return 0;
+    while (fgets(ln, sizeof ln, f)) if (!strncmp(ln, "FRONT_UNIT_MAX\t", 15)) { v = atoi(ln + 15); break; }
+    fclose(f);
+    return (v >= 2 && v <= 100000) ? v : 0;
+}
+
+/* 128 chained modules m0..m127 plus a root that uses m0: 129 units, one past UNIT_MAX */
+static int write_units(const char *dir, int n) {
+    int k; char p[1200];
+    for (k = 0; k < n; k++) {
+        FILE *f;
+        if (cx_fmt(p, sizeof p, "%s/m%d.cx", dir, k)) return 1;
+        f = fopen(p, "wb"); if (!f) return 1;
+        if (k + 1 < n) fprintf(f, "#pragma unisa module m%d\n#pragma unisa use m%d\n", k, k + 1);
+        else fprintf(f, "#pragma unisa module m%d\n", k);
+        fclose(f);
+    }
+    if (cx_fmt(p, sizeof p, "%s/root.cx", dir)) return 1;
+    { FILE *f = fopen(p, "wb"); if (!f) return 1; fprintf(f, "#pragma unisa use m0\nint main(void){return 0;}\n"); fclose(f); }
+    return 0;
+}
+
 int main(int argc, char **argv) {
-    char root[4096], com[4400], bound[4400], work[512], out127[560], out129[560], fake[560];
-    char *v[140];   /* 129 fake paths + 7 leading args + terminator */
-    int i, rc;
+    static char root[4096], com[4400], bound[4400], work[512], out_lo[560], out_hi[560], fake[560], out_u[560], uroot[600];
+    static char *v[300];
+    char sent[64], why[160];
+    int i, rc, cap, skips = 0, old = 0;
     tk_begin("");
     root[0] = 0;
     if (argc >= 2 && argv[1][0] == '/') { if (tx_copy(com, 4400, argv[1], tx_len(argv[1], 4400))) return 2; }
@@ -24,37 +58,68 @@ int main(int argc, char **argv) {
         if (cx_fmt(com, sizeof com, "%s/unisacc.com", root)) return 2;
     }
     if (root[0] == 0 && sy_cwd(root, 4096) < 0) return 2;
+    cap = front_unit_max(root);
+    if (!cap) { printf("FAIL\tfront-unit-max-fact\tmissing-or-absurd\n"); tk_end("CHECK_LINK_CAP", "front-unit-max-fact"); return 1; }
     if (cx_fmt(bound, sizeof bound, "%s/tools/bound", root)) return 2;
     if (sy_mkdtemp(sy_tmpdir(), "link-cap-", work, (int)sizeof work) != 0) return 2;
-    if (cx_fmt(out127, sizeof out127, "%s/out127", work) || cx_fmt(out129, sizeof out129, "%s/out129", work)
-        || cx_fmt(fake, sizeof fake, "%s/fake.o", work)) return 2;
-    /* 127 sources: walk must not refuse with the cap sentence (open fails ENOENT). */
+    if (cx_fmt(out_lo, sizeof out_lo, "%s/out_lo", work) || cx_fmt(out_hi, sizeof out_hi, "%s/out_hi", work)
+        || cx_fmt(fake, sizeof fake, "%s/fake.o", work) || cx_fmt(out_u, sizeof out_u, "%s/out_u", work)
+        || cx_fmt(uroot, sizeof uroot, "%s/root.cx", work)) return 2;
+    if (cx_fmt(sent, sizeof sent, "too many sources (limit %d)", cap)) return 2;
+    /* cap-1 sources: the walk must not refuse (the open fails ENOENT, which is not the cap). */
     i = 0;
     v[i++] = bound; v[i++] = "50"; v[i++] = com;
-    v[i++] = "-b"; v[i++] = "lnx/x86_64"; v[i++] = "-o"; v[i++] = out127;
-    { int k = 0; while (k < 127) { v[i++] = fake; k = k + 1; } }
+    v[i++] = "-b"; v[i++] = "lnx/x86_64"; v[i++] = "-o"; v[i++] = out_lo;
+    { int k = 0; while (k < cap - 1) { v[i++] = fake; k = k + 1; } }
     v[i] = 0;
-    if (tk_run(v, root, 50000) < 0) { printf("FAIL\t127-run\n"); return 2; }
-    /* The installed product may still carry the old 96 walk (rebuilt products carry 128).
-       Either it passes the walk, or it refuses at the OLD cap -- both are reported, and the
-       one that is true is named, so a stale product cannot look like a passing new one. */
-    if (tk_has(tk_err(), "too many sources")) {
-        printf("SKIP\t127-sources-pass-walk\tproduct-walk-still-96\n");
+    if (tk_run(v, root, 50000) < 0) { printf("FAIL\tcap-minus-1-run\n"); return 2; }
+    if (tk_has(tk_err(), sent)) {
+        printf("FAIL\tcap-minus-1-passes-walk\trefused-below-cap-%d\n", cap);
+        tk_ok(0, "cap-minus-1-passes-walk");
+    } else if (tk_has(tk_err(), "too many sources")) {
+        printf("SKIP\tcap-minus-1-passes-walk\tproduct-carries-an-older-cap\n");
+        skips++; old = 1;
     } else {
-        tk_ok(1, "127-sources-pass-walk");
+        tk_ok(1, "cap-minus-1-passes-walk");
     }
-    /* 129 sources: the walk refuses, and the sentence carries the limit. */
+    /* cap+1 sources: the walk refuses and the sentence carries this build's cap. */
     i = 0;
     v[i++] = bound; v[i++] = "50"; v[i++] = com;
-    v[i++] = "-b"; v[i++] = "lnx/x86_64"; v[i++] = "-o"; v[i++] = out129;
-    { int k = 0; while (k < 129) { v[i++] = fake; k = k + 1; } }
+    v[i++] = "-b"; v[i++] = "lnx/x86_64"; v[i++] = "-o"; v[i++] = out_hi;
+    { int k = 0; while (k < cap + 1) { v[i++] = fake; k = k + 1; } }
     v[i] = 0;
     rc = tk_run(v, root, 50000);
-    if (rc < 0) { printf("FAIL\t129-run\n"); return 2; }
-    tk_ok(rc == 1 && tk_has(tk_err(), "too many sources"), "129-sources-refused-named");
-    /* Old products say the bare sentence; only rebuilt ones carry the limit. */
-    if (!tk_has(tk_err(), "too many sources")) printf("SKIP\t129-refusal-names-the-limit\tproduct-accepted-129\n");
-    else if (!tk_has(tk_err(), "limit 128")) printf("SKIP\t129-refusal-names-the-limit\tproduct-walk-still-96\n");
-    else tk_ok(1, "129-refusal-names-the-limit");
-    return tk_end("CHECK_LINK_CAP", 0);
+    if (rc < 0) { printf("FAIL\tcap-plus-1-run\n"); return 2; }
+    if (rc == 1 && tk_has(tk_err(), sent)) tk_ok(1, "cap-plus-1-refused-named");
+    else if (rc == 1 && tk_has(tk_err(), "too many sources")) {
+        tx_copy(why, sizeof why, tk_err(), tx_len(tk_err(), 160));
+        printf("SKIP\tcap-plus-1-refused-named\tproduct-carries-an-older-cap: %s\n", why);
+        skips++; old = 1;
+    } else {
+        /* admitted at cap+1, or refused without the named sentence: a real defect */
+        printf("FAIL\tcap-plus-1-refused-named\tproduct-accepted-cap-plus-1\n");
+        tk_ok(0, "cap-plus-1-refused-named");
+    }
+    /* 129 units (128 chained modules + root) through -o: the linker must name its ordinal bound.
+       A product that already showed an older front cap is not driven here: it refuses before
+       the linker, so the case is UNMEASURED (SKIP) and the check already exits nonzero. */
+    if (old) {
+        printf("SKIP\tunit-129-refused-by-name\tproduct-carries-an-older-front-cap\n");
+        tk_end("CHECK_LINK_CAP", "older-product"); return 1;
+    }
+    if (write_units(work, 128)) { printf("FAIL\tunit-129-fixture\n"); tk_end("CHECK_LINK_CAP", "unit-129-fixture"); return 1; }
+    i = 0;
+    v[i++] = bound; v[i++] = "50"; v[i++] = com;
+    v[i++] = "-b"; v[i++] = "lnx/x86_64"; v[i++] = uroot; v[i++] = "-o"; v[i++] = out_u;
+    v[i] = 0;
+    rc = tk_run(v, root, 50000);
+    if (rc < 0) { printf("FAIL\tunit-129-run\n"); return 2; }
+    if (rc == 1 && tk_has(tk_err(), "link unit ordinal bound exceeded")) tk_ok(1, "unit-129-refused-by-name");
+    else {
+        tx_copy(why, sizeof why, tk_err(), tx_len(tk_err(), 160));
+        printf("FAIL\tunit-129-refused-by-name\tstatus=%d %s\n", rc, why);
+        tk_ok(0, "unit-129-refused-by-name");
+    }
+    tk_end("CHECK_LINK_CAP", 0);
+    return skips ? 1 : 0;
 }
