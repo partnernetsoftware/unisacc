@@ -257,7 +257,7 @@ static int root_preflight(const char *driver) {
    cxroot.tsv and unisacc.com are links to this checkout, tools/bound and tests/tools-compile.cx are copies).
    Seven tracked tools, one shard row plus one stale row past the range.  Asserted: the two new tools land at
    their C byte order places ('-' before letters, zz last), the shard rows follow the count both ways (001
-   added right after 000, the stale 005 taken out), new files are staged, tools-compile --shards accepts the
+   added right after 000, the stale 005 taken out), the real index stays unchanged, tools-compile --shards accepts the
    result, a second call changes no byte, a 64-hex literal is reported and with --pin-owner registered once,
    and a refused or failed call leaves tables and index as they were. */
 static void put_file(const char *dir, const char *rel, const char *text) {
@@ -295,8 +295,7 @@ static void candidate_registration(void) {
     sha_of(bpath,after_b); sha_of(cpath,after_c);
     ok(rc==1 && strstr(log,"REFUSE candidate members pkg=") && strstr(log,":sha-mismatch") && strstr(log,"REGISTER\tid=cr-dev-bad\tstatus=ROLLED_BACK\trows_removed=2\n") && !strcmp(b,after_b) && !strcmp(c,after_c),"changed candidate rolls back only its own rows");
 }
-static void concurrent_tools(const char *dir,const char *one,const char *two,int right_rc){
-    char *left[]={prepared_driver,"--tool",(char*)one,0},*right[]={prepared_driver,"--tool",(char*)two,0};
+static void concurrent_requests(const char *dir,char **left,char **right,int right_rc){
     char msg[4096];int pid=fork();
     if(pid<0)die("fork","register pair");
     if(pid==0)_exit(run_in(dir,left,msg,sizeof msg));
@@ -304,7 +303,79 @@ static void concurrent_tools(const char *dir,const char *one,const char *two,int
     sy_wait_status(pid,0,&ex,&code,&sig);
     ok(ex && code==0 && rc==right_rc,right_rc?"serialized tool requests keep the successful registration":"two simultaneous callers both complete under the registry lock");
 }
-static int tool_check(void) {
+static void concurrent_tools(const char *dir,const char *one,const char *two,int right_rc){
+    char *left[]={prepared_driver,"--tool",(char*)one,0},*right[]={prepared_driver,"--tool",(char*)two,0};
+    concurrent_requests(dir,left,right,right_rc);
+}
+static void private_index_residue(const char *hold, const char *index_path) {
+    char tmp[4400], tmp_env[4500], stale[4500], marker[4500], bound[4500], real[4500];
+    char before[65], after[65], out[32768], pid_env[80];
+    if (sy_mkdtemp(sy_tmpdir(), "unisacc-session-register-residue-", tmp, sizeof tmp) ||
+        cx_fmt(tmp_env, sizeof tmp_env, "TMPDIR=%s", tmp)) die("index residue session", 0);
+    pjoin(stale, sizeof stale, tmp, "unisacc-session-register-index-oldcase0");
+    if (sy_mkdir(stale, 0700)) die("stale index fixture", stale);
+    put_file(stale, "index", "stale\n");
+    if (sy_set_mtime(stale, sy_wall_s() - 10800)) die("age fixture", stale);
+    char *peer[] = {"env", tmp_env, prepared_driver, "--tool", "tools/t-new.cx", "--tool", "tools/tzz.cx", 0};
+    sha_of(index_path, before);
+    int rc = run_in(hold, peer, out, sizeof out);
+    ok(rc == 0 && sy_exists(stale) == 0, "registration reaps an expired private index session");
+
+    pjoin(bound, sizeof bound, hold, "tools/bound");
+    pjoin(real, sizeof real, hold, "tools/bound-real");
+    pjoin(marker, sizeof marker, hold, "stopped-index");
+    if (sy_rename(bound, real)) die("move fixture bound", bound);
+    put_file(hold, "tools/bound",
+        "#!/bin/sh\n"
+        "if test -n \"$REGISTER_FIXTURE_STOP_PID\" && test \"$5\" = ls-files; then\n"
+        "  printf '%s\\n' \"${3#GIT_INDEX_FILE=}\" > stopped-index || exit 2\n"
+        "  kill -STOP \"$REGISTER_FIXTURE_STOP_PID\" || exit 2\n"
+        "fi\n"
+        "exec ./tools/bound-real \"$@\"\n");
+    if (chmod(bound, 0755)) die("mark fixture bound executable", bound);
+    int writer = fork();
+    if (writer < 0) die("fork register writer", hold);
+    if (!writer) {
+        if (chdir(hold) || cx_fmt(pid_env, sizeof pid_env, "REGISTER_FIXTURE_STOP_PID=%d", sy_pid())) _exit(2);
+        char *v[] = {"env", tmp_env, pid_env, prepared_driver, "--tool", "tools/t-new.cx", "--tool", "tools/tzz.cx", 0};
+        execvp(v[0], v);
+        _exit(2);
+    }
+    int status = 0, stopped = 0, reaped = 0;
+    long deadline = sy_now_ms() + 5000;
+    while (sy_now_ms() < deadline) {
+        if (waitpid(writer, &status, WNOHANG | WUNTRACED) == writer) {
+            stopped = WIFSTOPPED(status);
+            reaped = !stopped;
+            break;
+        }
+        sy_sleep_ms(10);
+    }
+    int follower = stopped ? fork() : -1;
+    if (!follower) _exit(run_in(hold, peer, out, sizeof out));
+    int sig = 0;
+    if (!reaped) { sy_signal(writer, 9); sy_wait_status(writer, 0, 0, 0, &sig); }
+    int ex = 0, code = -1;
+    if (stopped && follower < 0) die("fork overlapping register", hold);
+    if (follower > 0) sy_wait_status(follower, 0, &ex, &code, 0);
+    size_t n = 0;
+    char *idx = cx_read(marker, &n);
+    sha_of(index_path, after);
+    if (idx && n && idx[n-1] == '\n') idx[--n] = 0;
+    char *slash = idx && !strncmp(idx, tmp, strlen(tmp)) && idx[strlen(tmp)] == '/' ? strrchr(idx, '/') : 0;
+    if (slash && (strcmp(slash + 1, "index") || strncmp(idx + strlen(tmp) + 1, "unisacc-session-register-index-", 31))) slash = 0;
+    ok(stopped && sig == 9 && ex && code == 0 && slash && sy_exists(idx) == 1 && !strcmp(before, after),
+        "SIGKILL leaves only its private index while an overlapping registration succeeds");
+    if (slash) {
+        *slash = 0;
+        if (sy_set_mtime(idx, sy_wall_s() - 10800)) die("age SIGKILL residue", idx);
+        rc = run_in(hold, peer, out, sizeof out);
+        ok(rc == 0 && sy_exists(idx) == 0, "next registration reaps the aged SIGKILL residue");
+    } else ok(0, "next registration reaps the aged SIGKILL residue");
+    free(idx);
+    if (sy_rename(real, bound)) die("restore fixture bound", bound);
+}
+static int tool_check(int focus) {
     static char out[1 << 15], src[4096]; char hold[4400], a[4400], b[4400], sp[4400], bp[4400], pp[4400], hs[65], hb[65], hp[65], h[65], hex[65], pinrow[400];
     const char *links[] = { "cx", "ext", "cxroot.tsv", "unisacc.com", "tools/cxlib" }, *copies[] = { "tools/bound", "tools/bound.c", "tests/tools-compile.cx" };
     const char *old[] = { "ta", "tb", "tc", "td", "te", "tf", "tg" };
@@ -316,6 +387,8 @@ static int tool_check(void) {
     char *rq[] = {prepared_driver, "--tool", "tools/tq.cx", 0};
     char *gs[] = {"git", "add", "--", "tools/stray.cx", 0}, *gq[] = {"git", "ls-files", "--error-unmatch", "--", "tools/tq.cx", 0};
     char *gn[] = {"git", "ls-files", "--error-unmatch", "--", "tools/t-new.cx", "tools/tzz.cx", 0};
+    char *gn_stage[] = {"git", "add", "--", "tools/t-new.cx", "tools/tzz.cx", 0};
+    char index_path[4400], index_before[65];
     char *sh[] = {"sh", "./unisacc.com", "tests/tools-compile.cx", "--", "--shards", ".", 0};
     if (cx_fmt(hold, sizeof hold, "%s/check-register-tool-XXXXXX", output) || !mkdtemp(hold)) die("mkdtemp", "tool");
     pjoin(a, sizeof a, hold, "tools"); if (sy_mkdir(a, 0700)) die("mkdir", a);
@@ -344,7 +417,10 @@ static int tool_check(void) {
     ok(rc == 2 && strstr(out, "no such file") && strstr(out, "tools/absent.cx"), "--tool with a missing file is refused by name, exit 2");
     sha_of(sp, h); ok(!strcmp(h, hs), "the refused --tool wrote no sources row"); sha_of(bp, h); ok(!strcmp(h, hb), "the refused --tool wrote no batches row");
     /* first registration */
+    pjoin(index_path, sizeof index_path, hold, ".git/index");
+    sha_of(index_path, index_before);
     rc = run_in(hold, r1, out, sizeof out);
+    if (focus) fputs(out, stdout);
     ok(rc == 0 && strstr(out, "REGISTER_TOOL\tstatus=REGISTERED"), "--tool with two new tools ends REGISTERED");
     ok(strstr(out, "sources_added=2\tinventory=9\tshards=2\tshard_rows_added=1\tshard_rows_removed=1"), "two sources added, nine sources are two shards, one shard row added and the stale one removed");
     {   size_t n = 0; char *t = cx_read(sp, &n);
@@ -353,7 +429,39 @@ static int tool_check(void) {
     }
     ok(count_lines(bp, "tools-compile-") == 2 && count_lines(bp, "tools-compile-000\t") == 1 && count_lines(bp, "tools-compile-001\t") == 1, "the shard rows are exactly 000 and 001");
     ok(registry_has(bp, "x-before\tx\n" TC_ROW("000", "0") TC_ROW("001", "1") "x-after\tx\nx-last\tx\n") && count_all(bp) == 5, "001 is inserted right after 000 in the contract format, 005 is gone, other rows untouched");
-    ok(run_in(hold, gn, out, sizeof out) == 0, "both new tools are staged in the index");
+    sha_of(index_path, h);
+    ok(run_in(hold, gn, out, sizeof out) == 1 && !strcmp(h, index_before), "new tools were verified without modifying the real index");
+    if (focus == 1) return failed ? 1 : 0;
+    concurrent_requests(hold, r1, r1, 0);
+    sha_of(index_path, h);
+    ok(!strcmp(h, index_before), "concurrent real inventories preserve the shared index");
+    char saved_index[4400];
+    pjoin(saved_index, sizeof saved_index, hold, ".git/index.saved");
+    if (sy_rename(index_path, saved_index)) die("hide fixture index", index_path);
+    rc = run_in(hold, r1, out, sizeof out);
+    ok(rc == 1 && strstr(out, "failed_step=private-index-unreadable") && sy_exists(index_path) == 0,
+        "a missing shared index is refused and not recreated");
+    if (sy_rename(saved_index, index_path)) die("restore fixture index", index_path);
+
+    /* The separate verifier moves an index flag in the fixture's real index. */
+    char verifier[4400], original_verifier[4400];
+    pjoin(verifier, sizeof verifier, hold, "tests/tools-compile.cx");
+    pjoin(original_verifier, sizeof original_verifier, hold, "tests/tools-compile.original");
+    if (sy_rename(verifier, original_verifier)) die("save fixture verifier", verifier);
+    put_file(hold, "tests/tools-compile.cx",
+        "int main(void){if(system(\"env -u GIT_INDEX_FILE git update-index --assume-unchanged tools/ta.cx\"))return 1;puts(\"2\");return 0;}\n");
+    rc = run_in(hold, r1, out, sizeof out);
+    sha_of(index_path, h);
+    ok(rc == 3 && strstr(out, "REGISTER_TOOL\tstatus=DIRTY\tfailed_step=shared-index-changed") && strcmp(h, index_before),
+        "a successful verifier with shared index drift is refused as DIRTY");
+    char *restore_flag[] = {"git", "update-index", "--no-assume-unchanged", "--", "tools/ta.cx", 0};
+    if (run_in(hold, restore_flag, out, sizeof out) || sy_rename(original_verifier, verifier)) die("restore fixture verifier", out);
+    if (focus == 2) {
+        private_index_residue(hold, index_path);
+        printf("CX_REGISTER_INDEX\tchecks=%d\tfailed=%d\n", checks, failed);
+        return failed ? 1 : 0;
+    }
+    if (run_in(hold, gn_stage, out, sizeof out)) die("git fixture stages verified tools for later index-only checks", out);
     rc = run_in(hold, sh, out, sizeof out);
     ok(rc == 0 && strstr(out, "2\n") && !strstr(out, "REFUSE"), "tests/tools-compile.cx --shards accepts the registered state and prints 2");
     {
@@ -429,10 +537,12 @@ static int tool_check(void) {
     /* a failing verification (a tracked tool that is in no registry row) is rolled back completely */
     put_file(hold, "tools/stray.cx", "int main(void){return 0;}\n"); put_file(hold, "tools/tq.cx", "int main(void){return 0;}\n");
     if (run_in(hold, gs, out, sizeof out)) die("git add stray", out);
+    sha_of(index_path, index_before);
     rc = run_in(hold, rq, out, sizeof out);
     ok(rc == 1 && strstr(out, "REGISTER_TOOL\tstatus=ROLLED_BACK\tfailed_step=tests/tools-compile.cx --shards") && strstr(out, "REFUSE added\ttools/stray.cx"), "a failed verification is ROLLED_BACK with the step and the tools-compile refusal named");
     sha_of(sp, h); ok(!strcmp(h, hs), "the rollback restored tools-compile-sources.tsv"); sha_of(bp, h); ok(!strcmp(h, hb), "the rollback restored batches.tsv");
-    ok(run_in(hold, gq, out, sizeof out) == 1, "the rollback unstaged the tool this call had staged");
+    sha_of(index_path, h);
+    ok(run_in(hold, gq, out, sizeof out) == 1 && !strcmp(h, index_before), "failed verification discarded its private index and preserved the real index");
     put_file(hold,"tests/tools-compile.cx",
         "int main(void){FILE *f=fopen(\"tests/tools-compile-sources.tsv\",\"rb\");if(!f)return 2;char line[512];while(fgets(line,sizeof line,f))if(!strcmp(line,\"tools/reject.cx\\tregular\\n\")){fclose(f);return 1;}fclose(f);puts(\"2\");return 0;}\n");
     put_file(hold,"tools/left.cx","int main(void){return 0;}\n");
@@ -474,8 +584,8 @@ static int tool_check(void) {
     pjoin(a,sizeof a,hold,"tools/bound");pjoin(b,sizeof b,hold,"tools/bound-real");
     if(sy_rename(a,b))die("rename fixture bound",a);
     put_file(hold,"bound-probe.cx",
-        "int main(int argc,char **argv){if(argc>3&&!strcmp(argv[3],\"ls-files\")){"
-        "FILE *f=fopen(access(\"coverage-conflict\",F_OK)?\"tests/batch-product-inputs.tsv\":\"tests/coverage.tsv\",\"ab\");if(!f)return 2;fprintf(f,\"id\\tpeer-%d\\tcx/\\tfixture\\n\",getpid());fclose(f);}"
+        "int main(int argc,char **argv){for(int i=3;i<argc;i++)if(!strcmp(argv[i],\"ls-files\")){"
+        "FILE *f=fopen(access(\"coverage-conflict\",F_OK)?\"tests/batch-product-inputs.tsv\":\"tests/coverage.tsv\",\"ab\");if(!f)return 2;fprintf(f,\"id\\tpeer-%d\\tcx/\\tfixture\\n\",getpid());fclose(f);break;}"
         "argv[0]=\"./tools/bound-real\";execv(argv[0],argv);return 2;}\n");
     char *compile[]={"sh","./unisacc.com","bound-probe.cx","-o","tools/bound",0};
     if(run_in(hold,compile,out,sizeof out))die("build concurrent writer",out);
@@ -679,7 +789,9 @@ int main(int argc,char **argv) {
     int metadata_only=(argc==2||argc==3)&&!strcmp(argv[1],"--metadata-rollback");
     int root_only=(argc==2||argc==3)&&!strcmp(argv[1],"--root-preflight");
     int tool_only=argc==2&&!strcmp(argv[1],"--tool-check");
-    if(argc!=1&&!args_only&&!metadata_only&&!root_only&&!tool_only)return 2;
+    int inventory_timing=argc==2&&!strcmp(argv[1],"--tool-inventory-timing");
+    int inventory_check=argc==2&&!strcmp(argv[1],"--tool-index-check");
+    if(argc!=1&&!args_only&&!metadata_only&&!root_only&&!tool_only&&!inventory_timing&&!inventory_check)return 2;
     static char abuf[1 << 15], bbuf[1 << 15];
     char *av0[16], *av1[16], *v[2] = { av0, av1 };
     const char *ids[4] = { "cr-a", "cr-b", "cr-c", "cr-d" };
@@ -691,7 +803,11 @@ int main(int argc,char **argv) {
     /* default work directory under sy_tmpdir(), never under ROOT/out (project owner 2026-11-13) */
     if (!output[0] && cx_fmt(output,sizeof output,"%s/unisacc-check-register",sy_tmpdir())) die("output path",0);
     if (sy_mkdir(output,0700) && sy_exists(output)!=1) die("output directory",output);
-    if (!root_only) {
+    const char *index_driver = (inventory_check || inventory_timing) ? sy_env("CHECK_REGISTER_DRIVER") : 0;
+    if (index_driver) {
+        if (index_driver[0] != '/' || sy_exists(index_driver) != 1 ||
+            cx_fmt(prepared_driver, sizeof prepared_driver, "%s", index_driver)) die("bad check driver", index_driver);
+    } else if (!root_only) {
         char cache[4400], bin[4400], why[512]; int reused;
         if (rn_prepare(root,DRIVER,output,prepared_driver,sizeof prepared_driver,&reused,why,sizeof why)) die(why,0);
         if (cx_fmt(cache,sizeof cache,"%s/unisacc-register-native",sy_tmpdir())) die("prepare cache",0);
@@ -729,7 +845,7 @@ int main(int argc,char **argv) {
 
     if(metadata_only)return metadata_rollback(argc==3?argv[2]:DRIVER);
     if(root_only)return root_preflight(argc==3?argv[2]:DRIVER);
-    if(tool_only)return tool_check();
+    if(tool_only||inventory_timing||inventory_check)return tool_check(inventory_timing ? 1 : inventory_check ? 2 : 0);
 
     if(args_only){
         candidate_registration();

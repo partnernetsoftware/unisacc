@@ -17,6 +17,7 @@
  *   f write|edit|edits 的这条事件另带 path= 与写后 sha=。成功的 f 写入或 git commit 涉及 exec/、seed/ 下的路径,且本检出已构造过
  *   cx-dev bundle 而没有在跑的 `cx-dev --watch` 时,后台拉起一个事件预建进程(不阻塞本命令;记事件 cxdev.watch;$DEVSVC_CXDEV_WATCH=0 关闭;见 cxdev_kick)。
  *   sh ./unisacc.com tools/devsvc.cx -- git log|diff|show|status ARGS|blame|ls-files ...   只读透传,不取锁,stdout 上限 1 MB 超出打 DEVSVC_TRUNCATED
+ *   sh ./unisacc.com tools/devsvc.cx -- git unstage PATH... [--owner O]   在 git-land 锁内只恢复指定索引项，操作进行中整体拒绝。
  *   sh ./unisacc.com tools/devsvc.cx -- events on-change PATH...       只读接入:跑 on-change --dry-run,把 ON_CHANGE 行入环
  *   sh ./unisacc.com tools/devsvc.cx -- status [--paths]               各工作目录未提交数、在途进程、实例与锁(不拉起实例)
  *   sh ./unisacc.com tools/devsvc.cx -- tool-index [--sha] [--key] [--cache DIR] [--timeout-ms N]   工具索引按内容身份现查(转 tools/derived-query.cx):
@@ -3673,10 +3674,23 @@ static int git_fetch(const char *root, int argc, char **argv) {
     printf("GIT_FETCH\trc=%d\tremote=%s\trefs=%d\n", rc, remote, nrefs > 1 ? nrefs - 1 : 0);
     return rc ? 1 : 0;
 }
+static int us_operation(const char *root, const char **state);
+static int add_land_lock(const char *root) {
+    char req[320], tag[96];
+    pi_self_tag(0, tag, sizeof tag);
+    F(req, sizeof req, "lock-acquire\t%s\t%s\t60\t%s", MG_LOCK, auto_owner(), tag);
+    if (ovf) return 3;
+    int rc = request(root, req, 0);
+    if (rc == 0 && !strncmp(resp, "OK\tacquired\t", 12)) { mg_locked = 1; return 0; }
+    if (rc == 0 && !strncmp(resp, "OK\trenewed\t", 11)) return 0;
+    fprintf(stderr, "devsvc: REFUSE git add reason=%s\n", rc == 3 ? "devsvc-down" :
+        rc == 1 && !strncmp(resp, "ERR\theld", 8) ? "git-land-held" : "git-land-unavailable");
+    return 3;
+}
 /* git add PATH...:把这些路径的 index 同步到工作树内容(清残留暂存用)。拒绝(rc 2,什么都不加):
    绝对路径、含 ..、以 - 开头、out/ 下、被 .gitignore 忽略的路径。成功 GIT_ADD rc=0 n=N。 */
 static int git_add(const char *root, int argc, char **argv) {
-    char *v[FL_MAX_ARGV]; char buf[256]; int i, n = 0, rc, npath = 0, fhit = 0;
+    char *v[FL_MAX_ARGV]; char buf[256]; int i, n = 0, rc, npath = 0, fhit = 0, primary = 0;
     if (argc < 2 || argc + 6 > FL_MAX_ARGV) { fprintf(stderr, "devsvc: git add PATH...: need 1..%d paths\n", FL_MAX_ARGV - 7); git_argerr = 1; return 2; }
     for (i = 1; i < argc; i++) {
         const char *p = argv[i];
@@ -3689,6 +3703,30 @@ static int git_add(const char *root, int argc, char **argv) {
     }
     if (!npath) { fprintf(stderr, "devsvc: git add PATH...: need 1..%d paths\n", FL_MAX_ARGV - 7); git_argerr = 1; return 2; }
     if (fhit && freeze_refuse_if_held(root, argc, argv)) { printf("GIT_ADD\trc=1\treason=lock-held\tlock=freeze\n"); return 1; }
+    char dirs[2 * PW], *common;
+    char *rv[] = {"git", "-C", (char *)root, "rev-parse", "--path-format=absolute", "--git-dir", "--git-common-dir", 0};
+    if (runcap(rv, dirs, sizeof dirs) || !(common = strchr(dirs, '\n'))) {
+        fprintf(stderr, "devsvc: REFUSE git add reason=repository-unreadable\n");
+        return 2;
+    }
+    *common++ = 0; chomp(common);
+    primary = !strcmp(dirs, common);
+    if (primary) {
+        const char *state = 0;
+        rc = us_operation(root, &state);
+        if (rc <= 0) {
+            fprintf(stderr, "devsvc: REFUSE git add reason=%s; use git commit --whole or --keyed; for a package bump use layer-api --worktree-path (plans/devsvc.md)\n",
+                rc < 0 ? "operation-state-unreadable" : "shared-index");
+            return 2;
+        }
+        rc = add_land_lock(root);
+        if (rc) return rc;
+        if (us_operation(root, &state) != 1) {
+            mg_unlock(root);
+            fprintf(stderr, "devsvc: REFUSE git add reason=operation-no-longer-confirmed\n");
+            return 2;
+        }
+    }
     v[n++] = "git"; v[n++] = "-C"; v[n++] = (char *)root; v[n++] = "add"; v[n++] = "--";
     for (i = 1; i < argc; i++) {
         if (!strcmp(argv[i], "--owner") && i + 1 < argc) { i++; continue; }
@@ -3696,8 +3734,127 @@ static int git_add(const char *root, int argc, char **argv) {
     }
     v[n] = 0;
     rc = runcap(v, buf, sizeof buf);
+    if (primary) mg_unlock(root);
     printf("GIT_ADD\trc=%d\tn=%d\n", rc, npath);
     return rc ? 1 : 0;
+}
+/* git unstage PATH... [--owner O]: literal index-only restore under git-land.
+   The working-tree bytes (or symlink target) are read before and after the operation. */
+static int us_index_blob(const char *root, const char *p, char *blob, int cap) {
+    char buf[PW + 100], *t; char *v[] = {"git", "--literal-pathspecs", "-C", (char *)root, "ls-files", "-s", "--", (char *)p, 0};
+    int rc = runcap(v, buf, sizeof buf), lines = 0;
+    F(blob, cap, "-");
+    if (rc) return -1;
+    for (char *s = buf; *s; s++) if (*s == '\n') lines++;
+    if (lines != 1) return lines;
+    t = strchr(buf, '\t');
+    if (!t || !t[1]) return -1;
+    chomp(t + 1);
+    if (strcmp(t + 1, p)) return 2;
+    char *sp = strchr(buf, ' ');
+    if (!sp) return -1;
+    F(blob, cap, "%.40s", sp + 1);
+    return 1;
+}
+static int us_work_sha(const char *root, const char *p, char hx[65]) {
+    char fp[PW], link[PW]; unsigned char *bytes = 0; int64_t n = 0;
+    struct stat st;
+    if (cx_fmt(fp, sizeof fp, "%s/%s", root, p)) return -1;
+    if (lstat(fp, &st)) {
+        if (errno != ENOENT) return -1;
+        return cx_fmt(hx, 65, "absent");
+    }
+    if (S_ISLNK(st.st_mode)) {
+        long got = readlink(fp, link, sizeof link);
+        return got < 0 || got == sizeof link || sy_sha256_hex(link, got, hx);
+    }
+    if (!S_ISREG(st.st_mode) || sy_read_file(fp, &bytes, &n, 1L << 27)) return -1;
+    int rc = sy_sha256_hex(bytes, n, hx);
+    free(bytes);
+    return rc;
+}
+static int us_refuse(const char *path, const char *reason, int rc) {
+    fprintf(stderr, "devsvc: REFUSE git unstage reason=%s path=%s (nothing unstaged)\n", reason, path);
+    return rc;
+}
+static const char *us_path_reason(const char *p) {
+    if (!*p) return "empty";
+    if (*p == '/') return "absolute";
+    if (*p == '-') return "option-like";
+    if (strstr(p, "..")) return "dotdot";
+    if (strpbrk(p, "*?[")) return "wildcard";
+    if (!strcmp(p, ".") || p[strlen(p) - 1] == '/') return "directory";
+    if (strpbrk(p, "\t\r\n")) return "control-character";
+    return 0;
+}
+static int us_operation(const char *root, const char **state) {
+    const char *states[] = {"MERGE_HEAD", "CHERRY_PICK_HEAD", "REVERT_HEAD", "rebase-merge", "rebase-apply", "sequencer", 0};
+    char path[PW];
+    *state = 0;
+    for (int i = 0; states[i]; i++) {
+        char *v[] = {"git", "-C", (char *)root, "rev-parse", "--path-format=absolute", "--git-path", (char *)states[i], 0};
+        if (runcap(v, path, sizeof path)) { *state = states[i]; return -1; }
+        chomp(path);
+        int present = sy_exists(path);
+        if (present != 0) { *state = states[i]; return present < 0 ? -1 : 1; }
+    }
+    return 0;
+}
+static int us_in_progress(const char *root) {
+    const char *state;
+    int rc = us_operation(root, &state);
+    return rc ? us_refuse(state, rc < 0 ? "state-unreadable" : "in-progress", 2) : 0;
+}
+static int git_unstage(const char *root, int argc, char **argv) {
+    char *v[FL_MAX_ARGV]; char blob[64], pre[FL_MAX_ARGV][65], owner[64] = "", request_text[320], tag[96], buf[256];
+    int n = 7, rc = 0, bad = 0;
+    int explicit_owner = 0;
+    if (argc + 8 > FL_MAX_ARGV) return us_refuse("-", "too-many-paths", 2);
+    for (int i = 1; i < argc; i++) {
+        const char *p = argv[i];
+        if (!strcmp(p, "--owner")) {
+            if (explicit_owner || ++i >= argc || !norm_owner(argv[i], owner, sizeof owner) || !owner_tok(owner, 1))
+                return us_refuse("--owner", "invalid-owner", 2);
+            explicit_owner = 1;
+            continue;
+        }
+        const char *reason = us_path_reason(p);
+        if (reason) return us_refuse(p, reason, 2);
+        v[n++] = argv[i];
+    }
+    if (n == 7) return us_refuse("-", "need-paths", 2);
+    if (!explicit_owner && cx_fmt(owner, sizeof owner, "%s", auto_owner())) return us_refuse("-", "invalid-owner", 2);
+    pi_self_tag(0, tag, sizeof tag);
+    if (cx_fmt(request_text, sizeof request_text, "lock-acquire\t%s\t%s\t60\t%s", MG_LOCK, owner, tag))
+        return us_refuse(MG_LOCK, "no-lock", 3);
+    rc = request(root, request_text, 0);
+    if (rc == 1 && !strncmp(resp, "ERR\theld", 8)) return us_refuse(MG_LOCK, "lock-held", 3);
+    if (rc || strncmp(resp, "OK\tacquired\t", 12)) return us_refuse(MG_LOCK, "no-lock", 3);
+    rc = us_in_progress(root);
+    if (rc) goto release;
+    for (int i = 7; i < n; i++) {
+        int k = us_index_blob(root, v[i], blob, sizeof blob);
+        if (k != 1) { rc = us_refuse(v[i], k == 0 ? "not-in-index" : "not-exactly-one-index-entry", 2); goto release; }
+        if (us_work_sha(root, v[i], pre[i])) { rc = us_refuse(v[i], "worktree-unreadable", 2); goto release; }
+        printf("UNSTAGE_PRE\t%s\tindex=%s\twork=%s\n", v[i], blob, pre[i]);
+    }
+    v[0] = "git"; v[1] = "--literal-pathspecs"; v[2] = "-C"; v[3] = (char *)root;
+    v[4] = "restore"; v[5] = "--staged"; v[6] = "--"; v[n] = 0;
+    rc = runcap(v, buf, sizeof buf);
+    for (int i = 7; i < n; i++) {
+        char after[65];
+        if (us_index_blob(root, v[i], blob, sizeof blob) < 0 || us_work_sha(root, v[i], after)) {
+            fprintf(stderr, "UNSTAGE_POST_UNREADABLE\t%s\n", v[i]); bad = 1; continue;
+        }
+        printf("UNSTAGE_POST\t%s\tindex=%s\twork=%s\n", v[i], blob, after);
+        if (strcmp(after, pre[i])) { printf("UNSTAGE_WORKTREE_CHANGED\t%s\tpre=%s\tpost=%s\n", v[i], pre[i], after); bad = 1; }
+    }
+    rc = (rc || bad) ? 1 : 0;
+    printf("GIT_UNSTAGE\trc=%d\tn=%d\n", rc, n - 7);
+release:
+    if (cx_fmt(request_text, sizeof request_text, "lock-release\t%s\t%s", MG_LOCK, owner) || request(root, request_text, 0))
+        fprintf(stderr, "devsvc: git unstage lock-release-unconfirmed lock=%s\n", MG_LOCK);
+    return rc;
 }
 static int git_full_oid(const char *id) {
     return strlen(id) == 40 && strspn(id, "0123456789abcdef") == 40;
@@ -3914,6 +4071,7 @@ static int cmd_git(const char *root, int argc, char **argv) {
     if (!strcmp(argv[0], "merge")) return git_merge(root, argc, argv);
     if (!strcmp(argv[0], "pull")) return git_pull(root, argc, argv);
     if (!strcmp(argv[0], "add")) return git_add(root, argc, argv);
+    if (!strcmp(argv[0], "unstage")) return git_unstage(root, argc, argv);
     if (!strcmp(argv[0], "push")) {
         static char commit_bufs[FL_MAX_ARGV][64], ranges[8][84];
         char *commits[FL_MAX_ARGV], cwd_buf[PW], tmp_cwd[PW], cur[200], bfull[240];
@@ -4022,7 +4180,7 @@ static int cmd_git(const char *root, int argc, char **argv) {
         return git_push_owned_ex(root, cwd, count, commits, nranges, ranges, 0, 1);
     }
     if (!strcmp(argv[0], "commit")) { int cr = git_commit_check(argc, argv); if (cr) { git_argerr = 1; return cr; } if (getenv("DEVSVC_GIT_PARSE_ONLY")) { printf("GIT_ARGS_OK\tstripped=%d\n", git_strip_n); return 0; } }
-    if (strcmp(argv[0], "commit")) { fprintf(stderr, "devsvc: REFUSE git %s: only commit and read-only log|diff|show|status|blame|ls-files are provided (stash, reset, clean, checkout, restore are not offered)\n", argv[0]); return 125; }
+    if (strcmp(argv[0], "commit")) { fprintf(stderr, "devsvc: REFUSE git %s: only commit and read-only log|diff|show|status|blame|ls-files are provided (stash, reset, clean, checkout, restore are not offered; use git unstage PATH to unstage)\n", argv[0]); return 125; }
     /* --cwd D:在版本工作树 D(.claude/worktrees/v0.0.NN 等)里提交。commit-own 以 D 为 cwd 跑:基线是 D 的 HEAD、
      * 私有索引从 D 的 HEAD 建、同步 D 自己的索引,门在 D 的树上求值(读 D 的 tests/precommit-gates.tsv),
      * 比较并交换 update-ref HEAD 更新 D 所在分支,共享检出的 main 不动;--push 只推本请求收据里的提交。
@@ -4184,7 +4342,7 @@ static int usage(void) {
                     "       long commands (over 55 s): devsvc x --bg --par 1 [--timeout-ms N] -- ARGV... -> JOB<TAB>id (returns at once; job runs in its own session, deadline kills its process group);\n"
                     "         devsvc wait JOB [--timeout-ms N<=55000] [--tail N|--grep S|--summary] -> JOB_DONE id rc=N (rc is the job's) or WAIT_TIMEOUT rc 124 (job keeps running; wait again); devsvc jobs lists\n"
                     "       devsvc git commit --status [JOB]: receipts of recent commit jobs (foreground commit runs as a job and prints JOB id first)\n"
-                    "       devsvc git merge BRANCH [-m MSG] [--cwd WORKTREE]: private-index merge, others staged/dirty kept; conflicts -> MERGE_CONFLICT lines, rc 1 | git pull [--cwd WORKTREE]: fetch + fast-forward only | git add PATH...: sync index (out/, .., absolute, ignored refused)\n"
+                    "       devsvc git merge BRANCH [-m MSG] [--cwd WORKTREE]: private-index merge, others staged/dirty kept; conflicts -> MERGE_CONFLICT lines, rc 1 | git pull [--cwd WORKTREE]: fetch + fast-forward only | git add PATH...: sync index (out/, .., absolute, ignored refused) | git unstage PATH... [--owner O]: restore index entry to HEAD, worktree bytes unchanged\n"
                     "         MSG: attribution lines (Co-Authored-By:, Signed-off-by:, Generated with [Claude Code]) are dropped before commit; the first line left must be body text\n"
                     "       devsvc task open|amend|status|done|list ...  -> tools/devtask.cx task ...; devsvc task SUB --help gives the full syntax; devsvc f --help\n"
                     "       devsvc task open: --cwd absolute or repo-relative (under .claude/worktrees/ or a --write-ext dir); --write repo-relative prefixes or absolute under the repo root\n");

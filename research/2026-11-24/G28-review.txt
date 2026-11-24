@@ -1,0 +1,20 @@
+来源:会话临时目录 /home/devali/.claude/jobs/7f46e032/tmp/G28/review.txt 拷贝于 2026-11-24
+G28 复核 2e90c55fd2 (register --promote 重写)  结论: 须改(不可推; 已禁用状态 0f2db9da76 保持即安全, 无须回滚)
+证据: 私有副本 ~/.claude/jobs/7f46e032/tmp/G28 (已删), check-register 原版 CX_REGISTER checks=44 failed=0 RC=0 (复现自报).
+(1) 设计符合度 须改
+  - 锁内重读只改两行: 代码确是锁内重读后按键改两行(通过, 阅读核实); 但"qualify 期间别人插无关行"用例缺失, 未实跑 -> UNMEASURED.
+  - 未走现有 .register-txn 版本化事务: 新造 promote.id/cid/brow/crow 无版本无哈希格式, 违背预审"不新造格式". 现有 --tool --sync --recover 遇此目录走 rg_recover, 格式不认 -> 恢复路径分裂.
+  - 日志写入 cx_write 返回值全 (void) 忽略, 非原子; 日志写一半被杀 -> rg_promote_recover 读失败 return 1 不删目录无提示, 之后所有注册 rg_pending 报 RECOVERY_REQUIRED, 两种 recover 都解不开 -> 死锁.
+  - recover 不校验当前行是否等于本次 promote 写入的行, 盲目覆盖, 若期间他人改该行会被吞.
+  - 产品路径新增 UNISACC_PROMOTE_PAUSE_FILE 持锁睡 10 秒的测试钩子, 未登记为开关.
+(2) SIGKILL 真发信号 通过(kill(kpid,9) 实发); 但暂停点在写表之前, 被杀时共享表仍是 PLANNED, "recover 回 PLANNED" 恒真, 未覆盖 batches 已换 coverage 未换的真中途. qualify 中途 SIGKILL 用例缺失. 须改.
+(3) 列号 通过: 第12列(下标11) NOT_READY->rc0:MARKER, 第14列(下标13) tier commit/platform->release, 与表头一致. run.cx --list 在 promote 成功/失败后不 REFUSE 未断言 -> UNMEASURED, 须补.
+(4) --no-run/--planned 原合同 通过(参数互斥逻辑未改, 原用例全绿).
+(5) 变异:
+  m1 删 txn 块(if(0)) -> 转红 FAIL --promote SIGKILL mid-replace...; FAIL --promote passing check... failed=2.
+  m2 期望列下标 11->10 -> 成功用例仍 PASS (只红了 SIGKILL 一例), 说明成功断言用 strstr 子串不按列, 列号错不被直接检出. 须改为按列断言.
+  删锁内重读: 无对应用例, 推断不会转红, 未实跑 UNMEASURED.
+  mutation-gate 未跑 UNMEASURED.
+(6) 新增行 /home/ 命中 0 通过; 冷环境耗时三次、提交门、截断检查未跑 UNMEASURED.
+须改清单: (a) 改用现有版本化 txn 写快照与哈希, 统一由 --tool --sync --recover 恢复, 或至少日志原子写且失败即中止不替换; (b) recover 先核当前行等于 promote 后行再回滚; (c) 补用例: qualify 中途 SIGKILL 字节不变无残留、batches 换后 coverage 换前 SIGKILL、qualify 期间插无关行替换后保留、recover 保留无关编辑、成功/失败后 run.cx --list metadata_valid=1; (d) 断言按列; (e) 暂停钩子改为仅夹具生效或登记.
+安全子集: 无可单独落地部分; 维持 0f2db9da76 禁用. 第二轮仍不过则拆为 (i) 只读 qualify 子命令 (ii) 事务替换 两件.

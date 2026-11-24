@@ -1,0 +1,1329 @@
+diff --git a/cx/compiler/cxmod.cx b/cx/compiler/cxmod.cx
+index 9329084..42c04e3 100644
+--- a/cx/compiler/cxmod.cx
++++ b/cx/compiler/cxmod.cx
+@@ -26,7 +26,7 @@
+    The driver injects cxm_rd (length, -1 ENOENT only, -2 too large, -3 other read/open/close error), cxm_wr (write a file), cxm_say
+    (bytes to fd 1 or 2), a sha256 hex callback, and the temp directory.  Inspection: -cx-interface M.cx prints the CXIF, -cx-plan prints the units as TSV:
+    index, compile path, forced includes. */
+-enum { CXM_MAXU = 128, DV_MAXU = CXM_MAXU };
++enum { CXM_MAXU = 256, DV_MAXU = CXM_MAXU };
+ #define CXM_MAXUSE 48
+ #define CXM_MAXDECL 48
+ #define CXM_MAXEXP 128
+diff --git a/cx/compiler/tapelink.cx b/cx/compiler/tapelink.cx
+index 907ce80..3f52944 100644
+--- a/cx/compiler/tapelink.cx
++++ b/cx/compiler/tapelink.cx
+@@ -122,7 +122,7 @@ static int tl_semantic(char *t, int p, int e) {
+ static int tl_unlocated(char *t, int p, int e, int first, int *located) {
+     int id;
+     if (*located || !tl_semantic(t, p, e)) return 0;
+-    if (tl_source_next >= 128) { tl_fail("reject: tape truncated\n"); return 1; }
++    if (tl_source_next >= 128) { tl_fail("reject: link unit ordinal bound exceeded (tokenlocations.UNIT_MAX=128)\n"); return 1; }
+     id = tl_source_next; tl_source_next++;
+     if (first >= 0) tl_source_map[first] = id;
+     tl_os(".unit ", 6); tl_num(id); tl_os(" 0:\n", 4);
+@@ -215,7 +215,7 @@ int tl_unit(char *t, int n, int u) {
+                     if (e - i == 7 && tl_same(t + i, 7, ".unit 2", 7)) { i = e + 1; continue; }
+                     if (!tl_frame(t, q + 1, e, &id, &tail)) { tl_fail("reject: tape truncated\n"); return 1; }
+                     if (tl_source_map[id] < 0) {
+-                        if (tl_source_next >= 128) { tl_fail("reject: tape truncated\n"); return 1; }
++                        if (tl_source_next >= 128) { tl_fail("reject: link unit ordinal bound exceeded (tokenlocations.UNIT_MAX=128)\n"); return 1; }
+                         tl_source_map[id] = tl_source_next; tl_source_next++;
+                     }
+                     tl_os(".unit ", 6); tl_num(tl_source_map[id]); tl_o(32); tl_os(t + tail, e - tail); tl_o(10);
+diff --git a/cx/cx0/plan.cx b/cx/cx0/plan.cx
+index 492b7bc..f3d1f74 100644
+--- a/cx/cx0/plan.cx
++++ b/cx/cx0/plan.cx
+@@ -80,7 +80,7 @@ static int cxm_say(int fd,char *s,int n){if(n<0)return 1;return fd==2?cx0_append
+ 
+ /* CX0_COMPAT_BODY_BEGIN */
+ /* CX0_HOST_BEGIN head */
+-#define CXM_MAXU 128
++#define CXM_MAXU 256
+ /* CX0_HOST_END head */
+ #define CXM_MAXUSE 48
+ #define CXM_MAXDECL 48
+diff --git a/cx/cx0/proj/head.c b/cx/cx0/proj/head.c
+index 78f5bb7..dcf63ef 100644
+--- a/cx/cx0/proj/head.c
++++ b/cx/cx0/proj/head.c
+@@ -1 +1 @@
+-#define CXM_MAXU 128
++#define CXM_MAXU 256
+diff --git a/cx/cx0/proj/head.cx b/cx/cx0/proj/head.cx
+index 932ed37..8a8d23a 100644
+--- a/cx/cx0/proj/head.cx
++++ b/cx/cx0/proj/head.cx
+@@ -26,4 +26,4 @@
+    The driver injects cxm_rd (length, -1 ENOENT only, -2 too large, -3 other read/open/close error), cxm_wr (write a file), cxm_say
+    (bytes to fd 1 or 2), a sha256 hex callback, and the temp directory.  Inspection: -cx-interface M.cx prints the CXIF, -cx-plan prints the units as TSV:
+    index, compile path, forced includes. */
+-enum { CXM_MAXU = 128, DV_MAXU = CXM_MAXU };
++enum { CXM_MAXU = 256, DV_MAXU = CXM_MAXU };
+diff --git a/docs/tapebin-v1.md b/docs/tapebin-v1.md
+index f644528..ee46051 100644
+--- a/docs/tapebin-v1.md
++++ b/docs/tapebin-v1.md
+@@ -43,7 +43,7 @@ operand shape 固定为上述 71 项快照，只能在新 opset 末尾追加。
+ 
+ kind 9 无载荷，规范文本为 `.end\n`，必须是 minor 2 的最后一条记录。新文本编码入口要求完整尾帧，缺尾、短读、尾后字节及非法 unit 边界均拒绝。源定位与尾帧不占 opcode，不生成机器码、数据或重定位；解码时保持在原记录位置。对象链接将各对象局部源 unit 映射为互不相同的最终 unit，去掉各对象尾帧后只输出一个最终 `.end\n`。
+ 
+-链接时，非空对象首个待输出语义行若尚无本对象的来源帧，先输出 `.unit N 0:\n`，隔断前一对象的文件名。若随后有真实来源帧，前缀复用该首帧局部 TU 的最终 N，仅清名，不提前套用后来的文件名；完全无来源帧时才分配独立匿名 TU。空白、纯注释和仅含链接属性 `.global`、`.extern`、`.gdef` 的对象不分配匿名 N；标签、指令和实际输出的数据/指令性记录属于语义行，空白与注释控制遵循 `exec/facts/tape-space.tsv`。匿名 TU 与真实帧沿用同一 `tl_source_next` 和 `tokenlocations.UNIT_MAX=128` 容量，0..127 用尽仍按原有 `tape truncated` 拒绝；版本头不额外计数，同 N 换名不额外计数。该边界由链接器补足，不要求 raw 模型伪造来源帧，也不改变唯一最终 `.end\n`。
++链接时，非空对象首个待输出语义行若尚无本对象的来源帧，先输出 `.unit N 0:\n`，隔断前一对象的文件名。若随后有真实来源帧，前缀复用该首帧局部 TU 的最终 N，仅清名，不提前套用后来的文件名；完全无来源帧时才分配独立匿名 TU。空白、纯注释和仅含链接属性 `.global`、`.extern`、`.gdef` 的对象不分配匿名 N；标签、指令和实际输出的数据/指令性记录属于语义行，空白与注释控制遵循 `exec/facts/tape-space.tsv`。匿名 TU 与真实帧沿用同一 `tl_source_next` 和 `tokenlocations.UNIT_MAX=128` 容量，0..127 用尽以具名容量拒绝(`reject: link unit ordinal bound exceeded (tokenlocations.UNIT_MAX=128)`)，不再报 `tape truncated`；版本头不额外计数，同 N 换名不额外计数。该边界由链接器补足，不要求 raw 模型伪造来源帧，也不改变唯一最终 `.end\n`。
+ 
+ 元记录按完整词和分隔符识别；`.unit0:`、`.unitx:`、`.endfoo:` 等合法标签不属于元记录，不得因前缀相同而拒绝或丢弃。
+ 
+diff --git a/exec/facts/limits.tsv b/exec/facts/limits.tsv
+index 99a36dc..ecf1d1d 100644
+--- a/exec/facts/limits.tsv
++++ b/exec/facts/limits.tsv
+@@ -1,7 +1,7 @@
+ # name	value	file	must contain ({} is the value)
+-UNIT_MAX	128	cx/compiler/cxmod.cx	CXM_MAXU = {}
+-UNIT_MAX	128	cx/cx0/plan.cx	#define CXM_MAXU {}
+-UNIT_MAX	128	src/cxmod.c	#define CXM_MAXU {}
++FRONT_UNIT_MAX	256	cx/compiler/cxmod.cx	CXM_MAXU = {}
++FRONT_UNIT_MAX	256	cx/cx0/plan.cx	#define CXM_MAXU {}
++FRONT_UNIT_MAX	256	src/cxmod.c	#define CXM_MAXU {}
+ UNIT_MAX	128	tools/ucn-identity-tables.cx	#define UCN_MAXU {}
+ UNIT_MAX	128	exec/parse2/ucnidentity-result.tsv	["CMPI","ucn_word",{}]
+ UNIT_MAX	128	exec/parse2/units-result.tsv	["CMPI","unit",{}]
+diff --git a/research/2026-11-23/own-flow-caps/README.md b/research/2026-11-23/own-flow-caps/README.md
+new file mode 100644
+index 0000000..2aa33aa
+--- /dev/null
++++ b/research/2026-11-23/own-flow-caps/README.md
+@@ -0,0 +1,45 @@
++# OWN-FLOW 容量上限:实测为具名拒绝,不是静默漏判
++
++日期 2026-11-23。工作树 v0.0.98,产品 0.0.93(c561e7e0)。
++
++## 结论先行
++
++`build/pkg-gaps.tsv:142` 的 `OWN-FLOW-CAPS-SILENT-MISS` 描述**已经过时**。当前源里四条上限全部是
++**具名拒绝**,不是「静默漏判」。实测原行见下。
++
++那行的处理列自己也写了「0.0.78 把上限具名写进 plan.cx 头注释与 KNOWN-LIMIT,超限改报具名拒绝而不是漏判」——
++也就是 0.0.78 已经做了,但状态列还挂 OPEN。
++
++## 实测原行(产品 0.0.93,`sh ./unisacc.com F.cx -o OUT`)
++
++| 夹具 | 原行 |
++| --- | --- |
++| `ok-64-names.cx`(64 个 malloc 名) | 无输出,产出 `m64m.bin` 12288 字节 |
++| `refuse-65-names.cx`(65 个) | `cx: /tmp/owflow/m65m.cx:2: unisa safe: more than 64 released names for the flow check in main` |
++| `ok-32-goto-labels.cx`(32 个标签) | 无输出,产出 `g32.bin` 8192 字节 |
++| `refuse-33-goto-labels.cx`(33 个) | `cx: /tmp/owflow/g33.cx:2: unisa safe: more than 32 goto labels for the flow check in f` |
++| `ok-64-nested-loops.cx`(64 层) | 无输出,产出 `n64.bin` 8192 字节 |
++| `refuse-65-nested-loops.cx`(65 层) | `cx: /tmp/owflow/n65.cx:2: unisa safe: loops or switches nested deeper than 64 for the flow check in main` |
++
++三条都是**带函数名与位置**的拒绝,且边界正好在 64/32/64,与 `cx/cx0/plan.cx:674-681` 的
++`CXF_V 64` / `CXF_L 32` / `CXF_D 64` 一致。
++
++## 与 pkg-gaps 原文的逐项对照
++
++| pkg-gaps 原文 | 实测 |
++| --- | --- |
++| 第 65 个变量起不跟踪 | 否,拒绝: `more than 64 released names` |
++| 第 33 个 goto 标签起忽略汇合 | 否,拒绝: `more than 32 goto labels` |
++| goto 只跑 2 遍非不动点 | 否,源里是 `CXF_GP 64`,文案 `goto labels not stable after 64 walks`(本轮未造不稳定夹具,只核常量与文案) |
++| 循环嵌套超 64 层跳过循环体 | 否,拒绝: `loops or switches nested deeper than 64` |
++
++## 需要 cc 决定的事
++
++1. `build/pkg-gaps.tsv:142` 应改状态。它写的四条里三条已实测为具名拒绝,第四条(2 遍非不动点)源里是 64 遍。
++   建议改 `FIXED-IN-0.0.78`,或至少把描述改成「已具名拒绝;2 遍非不动点说法与源不符」。**我不改这行**,等 cc 定。
++2. 这四条上限本身仍值得进水位表(它们是**正确性**上限而不是容量上限:超了会拒绝用户的合法程序)。
++   与 `CXM_MAXU`/`CXM_SYMS` 的区别是:那两个是产品自身的静态数组容量,这四个是用户代码的形状上限。
++
++## 夹具位置
++
++本目录六个 `.cx`,直接 `sh ./unisacc.com F.cx -o OUT` 可复跑。
+diff --git a/research/2026-11-23/own-flow-caps/ok-32-goto-labels.cxf b/research/2026-11-23/own-flow-caps/ok-32-goto-labels.cxf
+new file mode 100644
+index 0000000..ec73491
+--- /dev/null
++++ b/research/2026-11-23/own-flow-caps/ok-32-goto-labels.cxf
+@@ -0,0 +1,69 @@
++#pragma unisa safe
++int main(void) {
++    int x = 0;
++L0:
++    x = x + 1;
++L1:
++    x = x + 1;
++L2:
++    x = x + 1;
++L3:
++    x = x + 1;
++L4:
++    x = x + 1;
++L5:
++    x = x + 1;
++L6:
++    x = x + 1;
++L7:
++    x = x + 1;
++L8:
++    x = x + 1;
++L9:
++    x = x + 1;
++L10:
++    x = x + 1;
++L11:
++    x = x + 1;
++L12:
++    x = x + 1;
++L13:
++    x = x + 1;
++L14:
++    x = x + 1;
++L15:
++    x = x + 1;
++L16:
++    x = x + 1;
++L17:
++    x = x + 1;
++L18:
++    x = x + 1;
++L19:
++    x = x + 1;
++L20:
++    x = x + 1;
++L21:
++    x = x + 1;
++L22:
++    x = x + 1;
++L23:
++    x = x + 1;
++L24:
++    x = x + 1;
++L25:
++    x = x + 1;
++L26:
++    x = x + 1;
++L27:
++    x = x + 1;
++L28:
++    x = x + 1;
++L29:
++    x = x + 1;
++L30:
++    x = x + 1;
++L31:
++    x = x + 1;
++    return x;
++}
+diff --git a/research/2026-11-23/own-flow-caps/ok-64-names.cxf b/research/2026-11-23/own-flow-caps/ok-64-names.cxf
+new file mode 100644
+index 0000000..c28f0c7
+--- /dev/null
++++ b/research/2026-11-23/own-flow-caps/ok-64-names.cxf
+@@ -0,0 +1,132 @@
++#pragma unisa safe
++int main(void) {
++    char *p0 = malloc(1);
++    char *p1 = malloc(1);
++    char *p2 = malloc(1);
++    char *p3 = malloc(1);
++    char *p4 = malloc(1);
++    char *p5 = malloc(1);
++    char *p6 = malloc(1);
++    char *p7 = malloc(1);
++    char *p8 = malloc(1);
++    char *p9 = malloc(1);
++    char *p10 = malloc(1);
++    char *p11 = malloc(1);
++    char *p12 = malloc(1);
++    char *p13 = malloc(1);
++    char *p14 = malloc(1);
++    char *p15 = malloc(1);
++    char *p16 = malloc(1);
++    char *p17 = malloc(1);
++    char *p18 = malloc(1);
++    char *p19 = malloc(1);
++    char *p20 = malloc(1);
++    char *p21 = malloc(1);
++    char *p22 = malloc(1);
++    char *p23 = malloc(1);
++    char *p24 = malloc(1);
++    char *p25 = malloc(1);
++    char *p26 = malloc(1);
++    char *p27 = malloc(1);
++    char *p28 = malloc(1);
++    char *p29 = malloc(1);
++    char *p30 = malloc(1);
++    char *p31 = malloc(1);
++    char *p32 = malloc(1);
++    char *p33 = malloc(1);
++    char *p34 = malloc(1);
++    char *p35 = malloc(1);
++    char *p36 = malloc(1);
++    char *p37 = malloc(1);
++    char *p38 = malloc(1);
++    char *p39 = malloc(1);
++    char *p40 = malloc(1);
++    char *p41 = malloc(1);
++    char *p42 = malloc(1);
++    char *p43 = malloc(1);
++    char *p44 = malloc(1);
++    char *p45 = malloc(1);
++    char *p46 = malloc(1);
++    char *p47 = malloc(1);
++    char *p48 = malloc(1);
++    char *p49 = malloc(1);
++    char *p50 = malloc(1);
++    char *p51 = malloc(1);
++    char *p52 = malloc(1);
++    char *p53 = malloc(1);
++    char *p54 = malloc(1);
++    char *p55 = malloc(1);
++    char *p56 = malloc(1);
++    char *p57 = malloc(1);
++    char *p58 = malloc(1);
++    char *p59 = malloc(1);
++    char *p60 = malloc(1);
++    char *p61 = malloc(1);
++    char *p62 = malloc(1);
++    char *p63 = malloc(1);
++    free(p0);
++    free(p1);
++    free(p2);
++    free(p3);
++    free(p4);
++    free(p5);
++    free(p6);
++    free(p7);
++    free(p8);
++    free(p9);
++    free(p10);
++    free(p11);
++    free(p12);
++    free(p13);
++    free(p14);
++    free(p15);
++    free(p16);
++    free(p17);
++    free(p18);
++    free(p19);
++    free(p20);
++    free(p21);
++    free(p22);
++    free(p23);
++    free(p24);
++    free(p25);
++    free(p26);
++    free(p27);
++    free(p28);
++    free(p29);
++    free(p30);
++    free(p31);
++    free(p32);
++    free(p33);
++    free(p34);
++    free(p35);
++    free(p36);
++    free(p37);
++    free(p38);
++    free(p39);
++    free(p40);
++    free(p41);
++    free(p42);
++    free(p43);
++    free(p44);
++    free(p45);
++    free(p46);
++    free(p47);
++    free(p48);
++    free(p49);
++    free(p50);
++    free(p51);
++    free(p52);
++    free(p53);
++    free(p54);
++    free(p55);
++    free(p56);
++    free(p57);
++    free(p58);
++    free(p59);
++    free(p60);
++    free(p61);
++    free(p62);
++    free(p63);
++    return 0;
++}
+diff --git a/research/2026-11-23/own-flow-caps/ok-64-nested-loops.cxf b/research/2026-11-23/own-flow-caps/ok-64-nested-loops.cxf
+new file mode 100644
+index 0000000..d018ac5
+--- /dev/null
++++ b/research/2026-11-23/own-flow-caps/ok-64-nested-loops.cxf
+@@ -0,0 +1,134 @@
++#pragma unisa safe
++int main(void) {
++    int x = 0;
++    while (x < 0) {
++    while (x < 1) {
++    while (x < 2) {
++    while (x < 3) {
++    while (x < 4) {
++    while (x < 5) {
++    while (x < 6) {
++    while (x < 7) {
++    while (x < 8) {
++    while (x < 9) {
++    while (x < 10) {
++    while (x < 11) {
++    while (x < 12) {
++    while (x < 13) {
++    while (x < 14) {
++    while (x < 15) {
++    while (x < 16) {
++    while (x < 17) {
++    while (x < 18) {
++    while (x < 19) {
++    while (x < 20) {
++    while (x < 21) {
++    while (x < 22) {
++    while (x < 23) {
++    while (x < 24) {
++    while (x < 25) {
++    while (x < 26) {
++    while (x < 27) {
++    while (x < 28) {
++    while (x < 29) {
++    while (x < 30) {
++    while (x < 31) {
++    while (x < 32) {
++    while (x < 33) {
++    while (x < 34) {
++    while (x < 35) {
++    while (x < 36) {
++    while (x < 37) {
++    while (x < 38) {
++    while (x < 39) {
++    while (x < 40) {
++    while (x < 41) {
++    while (x < 42) {
++    while (x < 43) {
++    while (x < 44) {
++    while (x < 45) {
++    while (x < 46) {
++    while (x < 47) {
++    while (x < 48) {
++    while (x < 49) {
++    while (x < 50) {
++    while (x < 51) {
++    while (x < 52) {
++    while (x < 53) {
++    while (x < 54) {
++    while (x < 55) {
++    while (x < 56) {
++    while (x < 57) {
++    while (x < 58) {
++    while (x < 59) {
++    while (x < 60) {
++    while (x < 61) {
++    while (x < 62) {
++    while (x < 63) {
++    x = x + 1;
++    }
++    }
++    }
++    }
++    }
++    }
++    }
++    }
++    }
++    }
++    }
++    }
++    }
++    }
++    }
++    }
++    }
++    }
++    }
++    }
++    }
++    }
++    }
++    }
++    }
++    }
++    }
++    }
++    }
++    }
++    }
++    }
++    }
++    }
++    }
++    }
++    }
++    }
++    }
++    }
++    }
++    }
++    }
++    }
++    }
++    }
++    }
++    }
++    }
++    }
++    }
++    }
++    }
++    }
++    }
++    }
++    }
++    }
++    }
++    }
++    }
++    }
++    }
++    }
++    return x;
++}
+diff --git a/research/2026-11-23/own-flow-caps/refuse-33-goto-labels.cxf b/research/2026-11-23/own-flow-caps/refuse-33-goto-labels.cxf
+new file mode 100644
+index 0000000..1b1921d
+--- /dev/null
++++ b/research/2026-11-23/own-flow-caps/refuse-33-goto-labels.cxf
+@@ -0,0 +1,71 @@
++#pragma unisa safe
++int f(void) {
++    int x = 0;
++L0:
++    x = x + 1;
++L1:
++    x = x + 1;
++L2:
++    x = x + 1;
++L3:
++    x = x + 1;
++L4:
++    x = x + 1;
++L5:
++    x = x + 1;
++L6:
++    x = x + 1;
++L7:
++    x = x + 1;
++L8:
++    x = x + 1;
++L9:
++    x = x + 1;
++L10:
++    x = x + 1;
++L11:
++    x = x + 1;
++L12:
++    x = x + 1;
++L13:
++    x = x + 1;
++L14:
++    x = x + 1;
++L15:
++    x = x + 1;
++L16:
++    x = x + 1;
++L17:
++    x = x + 1;
++L18:
++    x = x + 1;
++L19:
++    x = x + 1;
++L20:
++    x = x + 1;
++L21:
++    x = x + 1;
++L22:
++    x = x + 1;
++L23:
++    x = x + 1;
++L24:
++    x = x + 1;
++L25:
++    x = x + 1;
++L26:
++    x = x + 1;
++L27:
++    x = x + 1;
++L28:
++    x = x + 1;
++L29:
++    x = x + 1;
++L30:
++    x = x + 1;
++L31:
++    x = x + 1;
++L32:
++    x = x + 1;
++    return x;
++}
+diff --git a/research/2026-11-23/own-flow-caps/refuse-65-names.cxf b/research/2026-11-23/own-flow-caps/refuse-65-names.cxf
+new file mode 100644
+index 0000000..f15dae1
+--- /dev/null
++++ b/research/2026-11-23/own-flow-caps/refuse-65-names.cxf
+@@ -0,0 +1,134 @@
++#pragma unisa safe
++int main(void) {
++    char *p0 = malloc(1);
++    char *p1 = malloc(1);
++    char *p2 = malloc(1);
++    char *p3 = malloc(1);
++    char *p4 = malloc(1);
++    char *p5 = malloc(1);
++    char *p6 = malloc(1);
++    char *p7 = malloc(1);
++    char *p8 = malloc(1);
++    char *p9 = malloc(1);
++    char *p10 = malloc(1);
++    char *p11 = malloc(1);
++    char *p12 = malloc(1);
++    char *p13 = malloc(1);
++    char *p14 = malloc(1);
++    char *p15 = malloc(1);
++    char *p16 = malloc(1);
++    char *p17 = malloc(1);
++    char *p18 = malloc(1);
++    char *p19 = malloc(1);
++    char *p20 = malloc(1);
++    char *p21 = malloc(1);
++    char *p22 = malloc(1);
++    char *p23 = malloc(1);
++    char *p24 = malloc(1);
++    char *p25 = malloc(1);
++    char *p26 = malloc(1);
++    char *p27 = malloc(1);
++    char *p28 = malloc(1);
++    char *p29 = malloc(1);
++    char *p30 = malloc(1);
++    char *p31 = malloc(1);
++    char *p32 = malloc(1);
++    char *p33 = malloc(1);
++    char *p34 = malloc(1);
++    char *p35 = malloc(1);
++    char *p36 = malloc(1);
++    char *p37 = malloc(1);
++    char *p38 = malloc(1);
++    char *p39 = malloc(1);
++    char *p40 = malloc(1);
++    char *p41 = malloc(1);
++    char *p42 = malloc(1);
++    char *p43 = malloc(1);
++    char *p44 = malloc(1);
++    char *p45 = malloc(1);
++    char *p46 = malloc(1);
++    char *p47 = malloc(1);
++    char *p48 = malloc(1);
++    char *p49 = malloc(1);
++    char *p50 = malloc(1);
++    char *p51 = malloc(1);
++    char *p52 = malloc(1);
++    char *p53 = malloc(1);
++    char *p54 = malloc(1);
++    char *p55 = malloc(1);
++    char *p56 = malloc(1);
++    char *p57 = malloc(1);
++    char *p58 = malloc(1);
++    char *p59 = malloc(1);
++    char *p60 = malloc(1);
++    char *p61 = malloc(1);
++    char *p62 = malloc(1);
++    char *p63 = malloc(1);
++    char *p64 = malloc(1);
++    free(p0);
++    free(p1);
++    free(p2);
++    free(p3);
++    free(p4);
++    free(p5);
++    free(p6);
++    free(p7);
++    free(p8);
++    free(p9);
++    free(p10);
++    free(p11);
++    free(p12);
++    free(p13);
++    free(p14);
++    free(p15);
++    free(p16);
++    free(p17);
++    free(p18);
++    free(p19);
++    free(p20);
++    free(p21);
++    free(p22);
++    free(p23);
++    free(p24);
++    free(p25);
++    free(p26);
++    free(p27);
++    free(p28);
++    free(p29);
++    free(p30);
++    free(p31);
++    free(p32);
++    free(p33);
++    free(p34);
++    free(p35);
++    free(p36);
++    free(p37);
++    free(p38);
++    free(p39);
++    free(p40);
++    free(p41);
++    free(p42);
++    free(p43);
++    free(p44);
++    free(p45);
++    free(p46);
++    free(p47);
++    free(p48);
++    free(p49);
++    free(p50);
++    free(p51);
++    free(p52);
++    free(p53);
++    free(p54);
++    free(p55);
++    free(p56);
++    free(p57);
++    free(p58);
++    free(p59);
++    free(p60);
++    free(p61);
++    free(p62);
++    free(p63);
++    free(p64);
++    return 0;
++}
+diff --git a/research/2026-11-23/own-flow-caps/refuse-65-nested-loops.cxf b/research/2026-11-23/own-flow-caps/refuse-65-nested-loops.cxf
+new file mode 100644
+index 0000000..2927333
+--- /dev/null
++++ b/research/2026-11-23/own-flow-caps/refuse-65-nested-loops.cxf
+@@ -0,0 +1,136 @@
++#pragma unisa safe
++int main(void) {
++    int x = 0;
++    while (x < 0) {
++    while (x < 1) {
++    while (x < 2) {
++    while (x < 3) {
++    while (x < 4) {
++    while (x < 5) {
++    while (x < 6) {
++    while (x < 7) {
++    while (x < 8) {
++    while (x < 9) {
++    while (x < 10) {
++    while (x < 11) {
++    while (x < 12) {
++    while (x < 13) {
++    while (x < 14) {
++    while (x < 15) {
++    while (x < 16) {
++    while (x < 17) {
++    while (x < 18) {
++    while (x < 19) {
++    while (x < 20) {
++    while (x < 21) {
++    while (x < 22) {
++    while (x < 23) {
++    while (x < 24) {
++    while (x < 25) {
++    while (x < 26) {
++    while (x < 27) {
++    while (x < 28) {
++    while (x < 29) {
++    while (x < 30) {
++    while (x < 31) {
++    while (x < 32) {
++    while (x < 33) {
++    while (x < 34) {
++    while (x < 35) {
++    while (x < 36) {
++    while (x < 37) {
++    while (x < 38) {
++    while (x < 39) {
++    while (x < 40) {
++    while (x < 41) {
++    while (x < 42) {
++    while (x < 43) {
++    while (x < 44) {
++    while (x < 45) {
++    while (x < 46) {
++    while (x < 47) {
++    while (x < 48) {
++    while (x < 49) {
++    while (x < 50) {
++    while (x < 51) {
++    while (x < 52) {
++    while (x < 53) {
++    while (x < 54) {
++    while (x < 55) {
++    while (x < 56) {
++    while (x < 57) {
++    while (x < 58) {
++    while (x < 59) {
++    while (x < 60) {
++    while (x < 61) {
++    while (x < 62) {
++    while (x < 63) {
++    while (x < 64) {
++    x = x + 1;
++    }
++    }
++    }
++    }
++    }
++    }
++    }
++    }
++    }
++    }
++    }
++    }
++    }
++    }
++    }
++    }
++    }
++    }
++    }
++    }
++    }
++    }
++    }
++    }
++    }
++    }
++    }
++    }
++    }
++    }
++    }
++    }
++    }
++    }
++    }
++    }
++    }
++    }
++    }
++    }
++    }
++    }
++    }
++    }
++    }
++    }
++    }
++    }
++    }
++    }
++    }
++    }
++    }
++    }
++    }
++    }
++    }
++    }
++    }
++    }
++    }
++    }
++    }
++    }
++    }
++    return x;
++}
+diff --git a/src/cxmod.c b/src/cxmod.c
+index c17b72c..3f0dc6e 100644
+--- a/src/cxmod.c
++++ b/src/cxmod.c
+@@ -24,7 +24,7 @@ int cxm_rd(char *path, char *buf, int cap);
+ int cxm_wr(char *path, char *buf, int n);
+ int cxm_say(int fd, char *s, int n);
+ 
+-#define CXM_MAXU 128
++#define CXM_MAXU 256
+ #define CXM_MAXUSE 48
+ #define CXM_MAXDECL 48
+ #define CXM_MAXEXP 128
+diff --git a/src/driveargs.cx b/src/driveargs.cx
+index d4afd46..b9f8fa3 100644
+--- a/src/driveargs.cx
++++ b/src/driveargs.cx
+@@ -54,7 +54,7 @@ int dv_parse_args(void *opts, void *compat, char **srcv, int *nsrc, const char *
+         }
+         if (cxm_flag(argv[i])) { i = i + 1; continue; }
+         if (bx_opt_dash(argv[i]) == 1) return fail(bx_opt_why(*defrun, *src));
+-        if (*nsrc >= DV_MAXU) return fail("too many sources (limit 128)");
++        if (*nsrc >= DV_MAXU) { char lim[80]; lim[0] = 0; (void)cx_fmt(lim, sizeof lim, "too many sources (limit %d)", (int)DV_MAXU); return fail(lim[0] ? lim : "too many sources"); }
+         srcv[*nsrc] = argv[i];
+         if (!*src) *src = argv[i];
+         *nsrc = *nsrc + 1;
+diff --git a/tests/coverage.tsv b/tests/coverage.tsv
+index 1e3a850..dd3fd06 100644
+--- a/tests/coverage.tsv
++++ b/tests/coverage.tsv
+@@ -389,7 +389,7 @@ interfaces.cxraw-dock	interfaces	IMPLEMENTED_SEPARATE_BATCH	DOCK2c 变红面:sub
+ interfaces.sourcepackage-pins	interfaces	IMPLEMENTED_SEPARATE_BATCH	cxlib/sourcepackage.cx 的两个自 pin(basis_pin→tools/source-package.cx, producer_pin→tools/source-package-pack.cx)与实际文件 sha 逐字一致;pin 从源码文本解析,不另存表	tools/check-sourcepackage-pins.cx
+ interfaces.net-dump	interfaces	IMPLEMENTED	net-dump 把 .net 文本解成状态表并可按名字 grep 操作码;复用了 tools/cxlib/netpack.cx 的名字/元数表, 不写第二份解码; 批次 tools/check-net-dump.cx 6 断言	tools/net-dump.cx + tools/check-net-dump.cx
+ interfaces.unit-boundary	interfaces	IMPLEMENTED_SEPARATE_BATCH	单元数 1/2/63/64/65/72/127/128 -o 编译运行返回值正确(72 = osx/win whole-o 的实际单元数); 129 拒绝带 limit 128	tests/unit-boundary.cx
+-interfaces.module-units	interfaces	IMPLEMENTED_SEPARATE_BATCH	模块计数、展开、转发边界与单元上限检查	tests/module,src/driveunits.cx,src/driveplan.cx,cx/compiler/cxmod.cx,tools/check-unit-limit.cx
++interfaces.module-units	interfaces	IMPLEMENTED_SEPARATE_BATCH	模块计数、展开、转发边界与单元上限检查(上限读 exec/facts/limits.tsv 的 FRONT_UNIT_MAX=256, 边界行 127/128/129/255/256/257)	tests/module,src/driveunits.cx,src/driveplan.cx,cx/compiler/cxmod.cx,tools/check-unit-limit.cx
+ interfaces.reject-locate	interfaces	IMPLEMENTED_SEPARATE_BATCH	FAST-1: reject reason names its state, bound timeout and read failure are distinct from network rejection	tests/reject-locate.cx seed/tbl.c tools/bound.c
+ interfaces.check-limits	interfaces	IMPLEMENTED_SEPARATE_BATCH	FAST-3: one limit value across tables and code; whole-o and entry-build object lists are the same set	tests/check-limits.cx exec/facts/limits.tsv
+ interfaces.check-literal	interfaces	IMPLEMENTED_SEPARATE_BATCH	NN-NF: bare integer immediates in net actions only go down	tests/check-literal.cx tests/literal.tsv
+diff --git a/tests/module/boundary.tsv b/tests/module/boundary.tsv
+index 0f78fb0..03bafa1 100644
+--- a/tests/module/boundary.tsv
++++ b/tests/module/boundary.tsv
+@@ -5,5 +5,8 @@ units	expected	forward-original-sources
+ 64	accept	accept
+ 65	accept	accept
+ 127	accept	accept
+-128	accept	refuse
+-129	refuse	refuse
++128	accept	accept
++129	accept	accept
++255	accept	accept
++256	accept	refuse
++257	refuse	refuse
+diff --git a/tests/module/units.cx b/tests/module/units.cx
+index 29e15e9..e84c590 100644
+--- a/tests/module/units.cx
++++ b/tests/module/units.cx
+@@ -10,18 +10,19 @@ int hs_cxm_wr(char *, char *, int);
+ int hs_cxm_say(int, char *, int);
+ void hs_cxm_sha(char *, int, char *);
+ 
+-static char names[129][32];
+-static char *paths[129];
+-static const char *sources[129];
++#define UNIT_ROWS 257   /* FRONT_UNIT_MAX 256 and one past it: the boundary rows below */
++static char names[UNIT_ROWS][32];
++static char *paths[UNIT_ROWS];
++static const char *sources[UNIT_ROWS];
+ int main(void) {
+     FILE *table; char line[128], expected[32], forward[32], why[128]; int n, i, failed = 0;
+     unsigned char *out; long outn;
+     if (cxm_bind(hs_cxm_rd, hs_cxm_wr, hs_cxm_say, hs_cxm_sha, "/tmp")) return 2;
+-    for (i = 0; i < 129; i++) { tx_snprintf(names[i], sizeof names[i], "unit%d.c", i); paths[i] = names[i]; sources[i] = names[i]; }
++    for (i = 0; i < UNIT_ROWS; i++) { tx_snprintf(names[i], sizeof names[i], "unit%d.c", i); paths[i] = names[i]; sources[i] = names[i]; }
+     table = fopen("tests/module/boundary.tsv", "r"); if (!table || !fgets(line, sizeof line, table)) return 2;
+     while (fgets(line, sizeof line, table)) {
+         int plan, expand, count, ok;
+-        if (sscanf(line, "%d %31s %31s", &n, expected, forward) != 3 || n < 1 || n > 129) return 2;
++        if (sscanf(line, "%d %31s %31s", &n, expected, forward) != 3 || n < 1 || n > UNIT_ROWS) return 2;
+         cxm_set_funit(0); plan = cxm_plan(paths, n); count = n; expand = dv_expand(&count, sources, 0);
+         ok = n <= DV_MAXU ? !plan && cxm_count() == n && !expand && count == n : plan && expand;
+         printf("%s\tunits-%d\tcxmod=%d\tdriveplan=%d\tcount=%d\n", ok ? "PASS" : "FAIL", n, plan, expand, count);
+diff --git a/tests/unit-boundary.cx b/tests/unit-boundary.cx
+index 6fdd9b8..0d80b87 100644
+--- a/tests/unit-boundary.cx
++++ b/tests/unit-boundary.cx
+@@ -10,7 +10,9 @@
+  * a scratch directory, compiles them with the tool root's own product, runs the
+  * result, and checks both the exit status and the value.
+  *
+- * 129 must be refused with "too many sources (limit 128)".
++ * The cap comes from exec/facts/limits.tsv FRONT_UNIT_MAX (0.0.98: 256).  The
++ * row at the cap must build and run; the row one past it must be refused with
++ * "too many sources (limit <cap>)".
+  *
+  * KNOWN-RED marks a row expected to fail; none is today.  127 and 128 used to
+  * crash (SIGSEGV from the 96-entry paths[] table in src/driveplan.cx, now a
+@@ -28,6 +30,7 @@
+ #pragma unisa use text.text
+ 
+ static int rows, passed, known, failed;
++static int unit_max = 128;   /* main 从 exec/facts/limits.tsv 的 FRONT_UNIT_MAX 覆盖 */
+ static char root[4400], scratch[4400];
+ 
+ static void pathcat(char out[4400], const char *a, const char *b) {
+@@ -96,7 +99,7 @@ static int run_case(int n, int known_red) {
+         return 0;
+     }
+ 
+-    int expect_refusal = n > 128;
++    int expect_refusal = n > unit_max;
+     FILE *p = popen(cmd, "r");
+     if (!p) {
+         printf("FAIL\tsize-%d\tpopen\n", n);
+@@ -105,9 +108,11 @@ static int run_case(int n, int known_red) {
+         return 0;
+     }
+     int refused = 0;
++    char sent[64];
++    if (cx_fmt(sent, sizeof sent, "too many sources (limit %d)", unit_max)) { pclose(p); printf("FAIL\tsize-%d\trefusal-sentence\n", n); rows++; failed++; return 0; }
+     line[0] = 0;
+     while (fgets(line, sizeof line, p)) {
+-        if (strstr(line, "too many sources (limit 128)")) refused = 1;
++        if (strstr(line, sent)) refused = 1;
+     }
+     int status = pclose(p);
+     int code = WIFEXITED(status) ? WEXITSTATUS(status) : -1;
+@@ -117,7 +122,7 @@ static int run_case(int n, int known_red) {
+     if (expect_refusal) {
+         if (refused) {
+             passed++;
+-            printf("PASS\tsize-%d\trefused-with-limit-128\n", n);
++            printf("PASS\tsize-%d\trefused-with-limit-%d\n", n, unit_max);
+             return 1;
+         }
+         printf("FAIL\tsize-%d\texpected-refusal-got-rc=%d\n", n, code);
+@@ -184,9 +189,22 @@ int main(int argc, char **argv) {
+         return 2;
+     }
+ 
+-    static const int sizes[] = { 1, 2, 63, 64, 65, 72, 127, 128, 129 };
++    /* 上限来自 exec/facts/limits.tsv 的 FRONT_UNIT_MAX,不写死:表动了这里跟着动。 */
++    {   char lim[4400]; if (cx_fmt(lim, sizeof lim, "%s/exec/facts/limits.tsv", root)) return 2;
++        FILE *lf = fopen(lim, "r");
++        if (!lf) { fputs("unit-boundary: cannot read exec/facts/limits.tsv\n", stderr); return 2; }
++        char ln[512];
++        while (fgets(ln, sizeof ln, lf)) {
++            if (!strncmp(ln, "FRONT_UNIT_MAX\t", 15)) { unit_max = atoi(ln + 15); break; }
++        }
++        fclose(lf);
++        if (unit_max < 2 || unit_max > 100000) { fputs("unit-boundary: FRONT_UNIT_MAX missing or absurd\n", stderr); return 2; }
++    }
++    int sizes[9];
++    sizes[0] = 1; sizes[1] = 2; sizes[2] = 63; sizes[3] = 64; sizes[4] = 65; sizes[5] = 72;
++    sizes[6] = unit_max - 1; sizes[7] = unit_max; sizes[8] = unit_max + 1;
+     /* One process per row, so the batch stays inside its bound. */
+-    int count = (int)(sizeof sizes / sizeof sizes[0]);
++    int count = 9;
+     for (int i = 0; i < count; i++) {
+         fflush(stdout);
+         pid_t p = fork();
+diff --git a/tools/check-cxmod-tri.cx b/tools/check-cxmod-tri.cx
+index 042155b..18bcba4 100644
+--- a/tools/check-cxmod-tri.cx
++++ b/tools/check-cxmod-tri.cx
+@@ -107,7 +107,7 @@ static void one_case(const char *name, const char *f, int rc, const char *frag,
+     pass++; printf("PASS\t%s\trc=%d\n", name, rc);
+ }
+ /* CXM_MAXU 夹具:总单元数 n(主文件 + n-1 个链式模块 mu1..mu(n-1),每个只 use 下一个,避开每单元 48 条 use 上限)。
+- * want_prod: 产品期望 rc;cx0 期望 rc 1 且文案含 "more than 96 units"。 */
++ * want_prod: 产品期望 rc;cx0 期望 rc 1 且文案含 "more than 256 units"。 */
+ static void maxu_case(int n, int want_prod, int want_cx0) {
+     char nm[64], body[256]; char o1[4096], o2[4096]; int i, r1, r2, ok2, ok1;
+     char label[64];
+@@ -121,7 +121,7 @@ static void maxu_case(int n, int want_prod, int want_cx0) {
+     r1 = run_src("--cx0", "mumain.cx", o1, sizeof o1);
+     r2 = run_src("--prod", "mumain.cx", o2, sizeof o2);
+     tx_snprintf(label, sizeof label, "CXM_MAXU-%d-units", n);
+-    ok1 = r1 == want_cx0 && (want_cx0 == 0 || seen(o1, "more than 128 units"));
++    ok1 = r1 == want_cx0 && (want_cx0 == 0 || seen(o1, "more than 256 units"));
+     ok2 = r2 == want_prod && (want_prod == 0 || seen(o2, "units"));
+     if (!ok1 || !ok2) { failed++; printf("FAIL\t%s\tcx0 rc=%d(want %d) prod rc=%d(want %d)\n", label, r1, want_cx0, r2, want_prod); return; }
+     /* MAXU 两边同为 128(exec/facts/limits.tsv UNIT_MAX):两条实测断言各记一次 PASS,不再有 GAP */
+@@ -290,7 +290,8 @@ int main(int argc, char **argv) {
+     batch_case("c1.cx", "plain.cx");
+     batch_case("g3.cx", "c5.cx");
+     maxu_case(97, 0, 0);
+-    maxu_case(129, 1, 1);
++    maxu_case(200, 0, 0);      /* 区分 128 与 256 的分辨夹具:旧上限下 200 会被拒 */
++    maxu_case(257, 1, 1);
+     printf("CXMOD_TRI\tpassed=%d failed=%d gaps=%d\n", pass, failed, gaps);
+     return failed != 0;
+ }
+diff --git a/tools/check-link-cap.cx b/tools/check-link-cap.cx
+index 6840cfc..ded6b60 100644
+--- a/tools/check-link-cap.cx
++++ b/tools/check-link-cap.cx
+@@ -1,10 +1,17 @@
+-/* Check the link-input cap: 127 source arguments pass the walk, 129 are refused with the
+-   named sentence that now carries the limit (`too many sources (limit 128)`).
+-   Uses 127/129 fake .o paths so the walk count is what is exercised; the real open fails
+-   later (ENOENT), which is not the cap.
+-   History: C44-LINK-CAP-01 took link inputs 64 -> 96; UNITOK2-CAP took the walk 96 -> 128
+-   (src/driveargs.cx:58), so this check now measures the real boundary instead of an interior
+-   point that would stay green no matter how the cap moved.
++/* Check the link-input cap (exec/facts/limits.tsv FRONT_UNIT_MAX) and the link-layer unit-ordinal
++   capacity (tokenlocations.UNIT_MAX = 128).
++
++   cap-1 sources must pass the argument walk; cap+1 must be refused with this build's sentence
++   `too many sources (limit <cap>)`.  Fake .o paths, so the walk count is what is exercised and
++   the real open fails later (ENOENT), which is not the cap.
++   129 units (128 chained modules plus the root) go through -o: the front accepts them (cap 256)
++   and the linker must refuse by name (`link unit ordinal bound exceeded`), not with a misleading
++   `tape truncated`.
++   A stale installed product carries the old cap.  Every case it cannot answer prints SKIP with
++   what it actually printed, and the check exits nonzero, so a batch rc0 can never record a SKIP
++   as a pass.  A product that admits cap+1 is a FAIL, never a SKIP.
++   History: C44-LINK-CAP-01 64 -> 96; UNITOK2-CAP 96 -> 128; 0.0.98 takes the walk 128 -> 256
++   (CXM_MAXU/DV_MAXU) and moves the number into the fact table.
+    Assertions and the bounded child (50 s, stderr kept apart) go through testx.check. */
+ #pragma unisa use sys.fs
+ #pragma unisa use sys.io
+@@ -12,10 +19,37 @@
+ #pragma unisa use text.text
+ #pragma unisa use testx.check
+ 
++static int front_unit_max(const char *root) {
++    char p[4400], ln[512]; int v = 0;
++    if (cx_fmt(p, sizeof p, "%s/exec/facts/limits.tsv", root)) return 0;
++    FILE *f = fopen(p, "r");
++    if (!f) return 0;
++    while (fgets(ln, sizeof ln, f)) if (!strncmp(ln, "FRONT_UNIT_MAX\t", 15)) { v = atoi(ln + 15); break; }
++    fclose(f);
++    return (v >= 2 && v <= 100000) ? v : 0;
++}
++
++/* 128 chained modules m0..m127 plus a root that uses m0: 129 units, one past UNIT_MAX */
++static int write_units(const char *dir, int n) {
++    int k; char p[1200];
++    for (k = 0; k < n; k++) {
++        FILE *f;
++        if (cx_fmt(p, sizeof p, "%s/m%d.cx", dir, k)) return 1;
++        f = fopen(p, "wb"); if (!f) return 1;
++        if (k + 1 < n) fprintf(f, "#pragma unisa module m%d\n#pragma unisa use m%d\n", k, k + 1);
++        else fprintf(f, "#pragma unisa module m%d\n", k);
++        fclose(f);
++    }
++    if (cx_fmt(p, sizeof p, "%s/root.cx", dir)) return 1;
++    { FILE *f = fopen(p, "wb"); if (!f) return 1; fprintf(f, "#pragma unisa use m0\nint main(void){return 0;}\n"); fclose(f); }
++    return 0;
++}
++
+ int main(int argc, char **argv) {
+-    char root[4096], com[4400], bound[4400], work[512], out127[560], out129[560], fake[560];
+-    char *v[140];   /* 129 fake paths + 7 leading args + terminator */
+-    int i, rc;
++    static char root[4096], com[4400], bound[4400], work[512], out_lo[560], out_hi[560], fake[560], out_u[560], uroot[600];
++    static char *v[300];
++    char sent[64], why[160];
++    int i, rc, cap, skips = 0, old = 0;
+     tk_begin("");
+     root[0] = 0;
+     if (argc >= 2 && argv[1][0] == '/') { if (tx_copy(com, 4400, argv[1], tx_len(argv[1], 4400))) return 2; }
+@@ -24,37 +58,68 @@ int main(int argc, char **argv) {
+         if (cx_fmt(com, sizeof com, "%s/unisacc.com", root)) return 2;
+     }
+     if (root[0] == 0 && sy_cwd(root, 4096) < 0) return 2;
++    cap = front_unit_max(root);
++    if (!cap) { printf("FAIL\tfront-unit-max-fact\tmissing-or-absurd\n"); tk_end("CHECK_LINK_CAP", "front-unit-max-fact"); return 1; }
+     if (cx_fmt(bound, sizeof bound, "%s/tools/bound", root)) return 2;
+     if (sy_mkdtemp(sy_tmpdir(), "link-cap-", work, (int)sizeof work) != 0) return 2;
+-    if (cx_fmt(out127, sizeof out127, "%s/out127", work) || cx_fmt(out129, sizeof out129, "%s/out129", work)
+-        || cx_fmt(fake, sizeof fake, "%s/fake.o", work)) return 2;
+-    /* 127 sources: walk must not refuse with the cap sentence (open fails ENOENT). */
++    if (cx_fmt(out_lo, sizeof out_lo, "%s/out_lo", work) || cx_fmt(out_hi, sizeof out_hi, "%s/out_hi", work)
++        || cx_fmt(fake, sizeof fake, "%s/fake.o", work) || cx_fmt(out_u, sizeof out_u, "%s/out_u", work)
++        || cx_fmt(uroot, sizeof uroot, "%s/root.cx", work)) return 2;
++    if (cx_fmt(sent, sizeof sent, "too many sources (limit %d)", cap)) return 2;
++    /* cap-1 sources: the walk must not refuse (the open fails ENOENT, which is not the cap). */
+     i = 0;
+     v[i++] = bound; v[i++] = "50"; v[i++] = com;
+-    v[i++] = "-b"; v[i++] = "lnx/x86_64"; v[i++] = "-o"; v[i++] = out127;
+-    { int k = 0; while (k < 127) { v[i++] = fake; k = k + 1; } }
++    v[i++] = "-b"; v[i++] = "lnx/x86_64"; v[i++] = "-o"; v[i++] = out_lo;
++    { int k = 0; while (k < cap - 1) { v[i++] = fake; k = k + 1; } }
+     v[i] = 0;
+-    if (tk_run(v, root, 50000) < 0) { printf("FAIL\t127-run\n"); return 2; }
+-    /* The installed product may still carry the old 96 walk (rebuilt products carry 128).
+-       Either it passes the walk, or it refuses at the OLD cap -- both are reported, and the
+-       one that is true is named, so a stale product cannot look like a passing new one. */
+-    if (tk_has(tk_err(), "too many sources")) {
+-        printf("SKIP\t127-sources-pass-walk\tproduct-walk-still-96\n");
++    if (tk_run(v, root, 50000) < 0) { printf("FAIL\tcap-minus-1-run\n"); return 2; }
++    if (tk_has(tk_err(), sent)) {
++        printf("FAIL\tcap-minus-1-passes-walk\trefused-below-cap-%d\n", cap);
++        tk_ok(0, "cap-minus-1-passes-walk");
++    } else if (tk_has(tk_err(), "too many sources")) {
++        printf("SKIP\tcap-minus-1-passes-walk\tproduct-carries-an-older-cap\n");
++        skips++; old = 1;
+     } else {
+-        tk_ok(1, "127-sources-pass-walk");
++        tk_ok(1, "cap-minus-1-passes-walk");
+     }
+-    /* 129 sources: the walk refuses, and the sentence carries the limit. */
++    /* cap+1 sources: the walk refuses and the sentence carries this build's cap. */
+     i = 0;
+     v[i++] = bound; v[i++] = "50"; v[i++] = com;
+-    v[i++] = "-b"; v[i++] = "lnx/x86_64"; v[i++] = "-o"; v[i++] = out129;
+-    { int k = 0; while (k < 129) { v[i++] = fake; k = k + 1; } }
++    v[i++] = "-b"; v[i++] = "lnx/x86_64"; v[i++] = "-o"; v[i++] = out_hi;
++    { int k = 0; while (k < cap + 1) { v[i++] = fake; k = k + 1; } }
+     v[i] = 0;
+     rc = tk_run(v, root, 50000);
+-    if (rc < 0) { printf("FAIL\t129-run\n"); return 2; }
+-    tk_ok(rc == 1 && tk_has(tk_err(), "too many sources"), "129-sources-refused-named");
+-    /* Old products say the bare sentence; only rebuilt ones carry the limit. */
+-    if (!tk_has(tk_err(), "too many sources")) printf("SKIP\t129-refusal-names-the-limit\tproduct-accepted-129\n");
+-    else if (!tk_has(tk_err(), "limit 128")) printf("SKIP\t129-refusal-names-the-limit\tproduct-walk-still-96\n");
+-    else tk_ok(1, "129-refusal-names-the-limit");
+-    return tk_end("CHECK_LINK_CAP", 0);
++    if (rc < 0) { printf("FAIL\tcap-plus-1-run\n"); return 2; }
++    if (rc == 1 && tk_has(tk_err(), sent)) tk_ok(1, "cap-plus-1-refused-named");
++    else if (rc == 1 && tk_has(tk_err(), "too many sources")) {
++        tx_copy(why, sizeof why, tk_err(), tx_len(tk_err(), 160));
++        printf("SKIP\tcap-plus-1-refused-named\tproduct-carries-an-older-cap: %s\n", why);
++        skips++; old = 1;
++    } else {
++        /* admitted at cap+1, or refused without the named sentence: a real defect */
++        printf("FAIL\tcap-plus-1-refused-named\tproduct-accepted-cap-plus-1\n");
++        tk_ok(0, "cap-plus-1-refused-named");
++    }
++    /* 129 units (128 chained modules + root) through -o: the linker must name its ordinal bound.
++       A product that already showed an older front cap is not driven here: it refuses before
++       the linker, so the case is UNMEASURED (SKIP) and the check already exits nonzero. */
++    if (old) {
++        printf("SKIP\tunit-129-refused-by-name\tproduct-carries-an-older-front-cap\n");
++        tk_end("CHECK_LINK_CAP", "older-product"); return 1;
++    }
++    if (write_units(work, 128)) { printf("FAIL\tunit-129-fixture\n"); tk_end("CHECK_LINK_CAP", "unit-129-fixture"); return 1; }
++    i = 0;
++    v[i++] = bound; v[i++] = "50"; v[i++] = com;
++    v[i++] = "-b"; v[i++] = "lnx/x86_64"; v[i++] = uroot; v[i++] = "-o"; v[i++] = out_u;
++    v[i] = 0;
++    rc = tk_run(v, root, 50000);
++    if (rc < 0) { printf("FAIL\tunit-129-run\n"); return 2; }
++    if (rc == 1 && tk_has(tk_err(), "link unit ordinal bound exceeded")) tk_ok(1, "unit-129-refused-by-name");
++    else {
++        tx_copy(why, sizeof why, tk_err(), tx_len(tk_err(), 160));
++        printf("FAIL\tunit-129-refused-by-name\tstatus=%d %s\n", rc, why);
++        tk_ok(0, "unit-129-refused-by-name");
++    }
++    tk_end("CHECK_LINK_CAP", 0);
++    return skips ? 1 : 0;
+ }
+diff --git a/tools/check-maxu.cx b/tools/check-maxu.cx
+index 52e68f2..a16154b 100644
+--- a/tools/check-maxu.cx
++++ b/tools/check-maxu.cx
+@@ -1,5 +1,8 @@
+-/* Check that 127 chained modules plus the root fit and the next module is
+-   refused by the 128-unit limit. An older installed product fails until rebuilt. */
++/* Check the front-unit cap from exec/facts/limits.tsv FRONT_UNIT_MAX:
++   cap-1 chained modules plus the root fill the cap exactly (-cx-plan rc 0); one more
++   module makes cap+1 and is refused with "more than <cap> units in one program".
++   The cap is read from the table, so the check follows the product; an older
++   installed product fails until it is rebuilt. */
+ #pragma unisa use sysx.process
+ #pragma unisa use sys.proc
+ #pragma unisa use sys.fs
+@@ -10,8 +13,24 @@
+ #pragma unisa use mem.heap
+ #pragma unisa use cxlib.ckassert
+ 
+-
+-
++/* the FRONT_UNIT_MAX value of exec/facts/limits.tsv under ROOT; 0 on success */
++static int read_cap(const char *root, int *cap) {
++    char p[4400], line[256];
++    FILE *f;
++    if (cx_fmt(p, sizeof p, "%s/exec/facts/limits.tsv", root)) return 1;
++    f = fopen(p, "r");
++    if (!f) return 1;
++    while (fgets(line, sizeof line, f)) {
++        int v;
++        if (!strncmp(line, "FRONT_UNIT_MAX\t", 15) && sscanf(line + 15, "%d", &v) == 1 && v > 1 && v < 1024) {
++            *cap = v;
++            fclose(f);
++            return 0;
++        }
++    }
++    fclose(f);
++    return 1;
++}
+ 
+ static int write_module(const char *path, int k, int next) {
+     int fd;
+@@ -34,11 +53,11 @@ static int write_module(const char *path, int k, int next) {
+ }
+ 
+ int main(int argc, char **argv) {
+-    char root[4096], com[4400], bound[4400], work[4400], mainc[4400], mc[4400];
++    char root[4096], com[4400], bound[4400], work[4400], mainc[4400], mc[4400], want[64];
+     char *v[8];
+     char why[512];
+     np_result r;
+-    int fd, k;
++    int fd, k, cap = 0, wl;
+     root[0] = 0;
+     if (argc >= 2 && argv[1][0] == '/') { if (tx_copy(com, 4400, argv[1], tx_len(argv[1], 4400))) return 2; }
+     else {
+@@ -46,31 +65,35 @@ int main(int argc, char **argv) {
+         if (cx_fmt(com, sizeof com, "%s/unisacc.com", root)) return 2;
+     }
+     if (root[0] == 0 && sy_cwd(root, 4096) < 0) return 2;
++    if (read_cap(root, &cap)) { printf("FAIL\tread-front-unit-max\n"); return 2; }
+     if (cx_fmt(bound, sizeof bound, "%s/tools/bound", root)) return 2;
+     if (cx_fmt(work, sizeof work, "/tmp/maxu-%d", sy_pid())) return 2;
+     if (sy_mkdir(work, 0700)) return 2;
+-    /* 127 modules and the root occupy all 128 unit slots. */
+-    for (k = 0; k < 127; k++) {
++    /* cap-1 modules and the root occupy all cap unit slots. */
++    for (k = 0; k < cap - 1; k++) {
+         if (cx_fmt(mc, sizeof mc, "%s/m%d.cx", work, k)) return 2;
+-        if (write_module(mc, k, k < 126 ? k + 1 : -1)) return 2;
++        if (write_module(mc, k, k < cap - 2 ? k + 1 : -1)) return 2;
+     }
+     if (cx_fmt(mainc, sizeof mainc, "%s/main.cx", work)) return 2;
+     fd = sy_open_new(mainc, 0644);
+     if (fd < 0) return 2;
+     if (sy_write_all(fd, "#pragma unisa use m0\n", 21) || sy_close(fd)) return 2;
+     v[0] = bound; v[1] = "50"; v[2] = com; v[3] = "-cx-plan"; v[4] = mainc; v[5] = 0;
+-    if (np_run(v, root, 0, 50, &r, why, sizeof why)) { printf("FAIL\t127-run\n"); return 2; }
+-    ck(r.rc == 0, "127-modules-plan-rc0");
++    if (np_run(v, root, 0, 50, &r, why, sizeof why)) { printf("FAIL\tcap-minus-1-run\n"); return 2; }
++    ck(r.rc == 0, "cap-minus-1-modules-plan-rc0");
+     np_free(&r);
+-    /* One additional module makes 129 units. */
+-    if (cx_fmt(mc, sizeof mc, "%s/m127.cx", work)) return 2;
+-    if (write_module(mc, 127, -1)) return 2;
+-    if (cx_fmt(mc, sizeof mc, "%s/m126.cx", work)) return 2;
+-    if (write_module(mc, 126, 127)) return 2;
++    /* One additional module makes cap+1 units. */
++    if (cx_fmt(mc, sizeof mc, "%s/m%d.cx", work, cap - 1)) return 2;
++    if (write_module(mc, cap - 1, -1)) return 2;
++    if (cx_fmt(mc, sizeof mc, "%s/m%d.cx", work, cap - 2)) return 2;
++    if (write_module(mc, cap - 2, cap - 1)) return 2;
++    if (cx_fmt(want, sizeof want, "more than %d units", cap)) return 2;
++    wl = tx_len(want, sizeof want);
++    if (wl <= 0) return 2;
+     v[0] = bound; v[1] = "50"; v[2] = com; v[3] = "-cx-plan"; v[4] = mainc; v[5] = 0;
+-    if (np_run(v, root, 0, 50, &r, why, sizeof why)) { printf("FAIL\t128-run\n"); return 2; }
+-    ck(r.rc == 1 && (r.err && tx_find(r.err, tx_len(r.err, 1 << 20), "more than 128 units", tx_len("more than 128 units", 128)) >= 0), "128-modules-refused-named");
++    if (np_run(v, root, 0, 50, &r, why, sizeof why)) { printf("FAIL\tcap-run\n"); return 2; }
++    ck(r.rc == 1 && r.err && tx_find(r.err, tx_len(r.err, 1 << 20), want, wl) >= 0, "cap-modules-refused-named");
+     np_free(&r);
+-    printf("CHECK_MAXU\tfailed=%d\n", ck_failures());
++    printf("CHECK_MAXU\tfailed=%d\tcap=%d\n", ck_failures(), cap);
+     return ck_failures() ? 1 : 0;
+ }
+diff --git a/tools/check-unit-limit.cx b/tools/check-unit-limit.cx
+index c0b0367..2cc1c2e 100644
+--- a/tools/check-unit-limit.cx
++++ b/tools/check-unit-limit.cx
+@@ -18,7 +18,7 @@ static int check(const char *path) {
+                    strstr(line,"*nu >") || strstr(line,"cxm_n >=") || strstr(line,"u >= CXM_MAXU") ||
+                    strstr(line,"#define CXM_MAXU") || strstr(line,"#define DV_MAXU") ||
+                    (strstr(line,"units in one program") && strstr(line,"more than"));
+-        if (strstr(line, "too many sources (limit 128)") && strstr(line, ">= DV_MAXU")) relevant = 0;
++        if (strstr(line, "too many sources (limit %d)") && strstr(line, ">= DV_MAXU")) relevant = 0;
+         if (relevant && literal(line)) {
+             fprintf(stderr,"unit-limit: %s:%d: bare unit limit\n",path,no); bad++;
+         }

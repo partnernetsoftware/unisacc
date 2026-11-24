@@ -20,6 +20,9 @@
  *   of HEAD; else REFUSE RELEASE_EXEC_GATE_MAIN_ADVANCED origin/main=SHA HEAD=SHA with a NEXT line
  *   (merge yourself, then --from-step N); never merges, never rolls back public state.
  *   No origin/main or history: MAIN_UNKNOWN; fetch failure: MAIN_FETCH.
+ *   F_CHAIN_REV before X is created: HEAD must equal the candidate commit (the chain rev; F is the chain
+ *   start commit); else REFUSE RELEASE_EXEC_GATE_F_NOT_CHAIN_REV, unless --post-chain-merge REASON, which
+ *   passes and appends INDEX row exec-1-post-chain-merge WAIVED HEAD reason.  --dry: DEFERRED.
  * --warm CANDIDATE_TSV --layout DIR [--out DIR] (N4): before the freeze, compile the tools the public
  *   readback compiles with the checkout product (same cwd, same path forms) and prove a second call
  *   hits the run cache; receipt OUT/warm-KEY.tsv (see warm_main). Step 6 prints WARM READY|COLD.
@@ -245,8 +248,8 @@ static int pushed(const char *sha) {
 static void refuse_main(const char *gate, const char *detail) {
     sy_printf("GATE\t%d\t%s\tFAIL\t%s\n", cur_step, gate, detail);
     sy_eprintf("release-exec: REFUSE RELEASE_EXEC_GATE_%s step=%d %s\n", gate, cur_step, detail);
-    sy_printf("NEXT\t%d\tmerge origin/main into this checkout yourself (release-exec never merges), re-run the checks, then resume: release-exec --execute %s --layout %s --from-step %d\n",
-              cur_step, table, layout, cur_step);
+    sy_printf("NEXT\t%d\tmerge origin/main, verify SOURCES_SID unchanged, then resume --from-step %d with --post-chain-merge REASON; or return HEAD to chain_rev and --from-step %d\n",
+              cur_step, cur_step, cur_step);
     sy_printf("ROLLBACK\t%d\tNONE\tmain moved; candidate and public state untouched\n", cur_step);
     emit_phase(2);
     sy_exit(2);
@@ -928,6 +931,41 @@ static int check_x_index(const char *expected) {
 static void record_x(void) {
     if(!check_x_index(xsha))index_row("X-commit","-",xsha,"release/candidate.tsv");
 }
+/* F_CHAIN_REV (R27 S2): the freeze commit F is the chain start commit, and nothing is merged after the chain,
+ * so X is created right on top of the chain rev (candidate column commit).  HEAD != chain rev refuses
+ * F_NOT_CHAIN_REV; only --post-chain-merge REASON lets it pass, and that waiver is written into INDEX
+ * (exec-1-post-chain-merge) so the release record shows it.  --dry reports the mismatch as DEFERRED. */
+static char post_chain_reason[400];
+static int index_has_key(const char *key) {
+    long n = 0, at = 0, ll = 0; const char *ls; char f0[128];
+    char *t = slurp(indexp, &n);
+    if (!t) return 0;
+    int found = 0;
+    while (line_next(t, n, &at, &ls, &ll)) {
+        if (!ll || ls[0] == '#') continue;
+        tab_field(ls, ll, 0, f0, sizeof f0);
+        if (tx_eqz(f0, key)) { found = 1; break; }
+    }
+    free(t);
+    return found;
+}
+static void gate_chain_rev(void) {
+    char head[64], d[600];
+    char *rev[] = {"git", "rev-parse", "HEAD", 0};
+    if (run(rev, 10, head, sizeof head) || !is_hex(head, 40)) refuse("F_NOT_CHAIN_REV", "cannot read HEAD");
+    if (tx_eqz(head, cand.commit)) { gate_pass("F_CHAIN_REV", head); return; }
+    if (post_chain_reason[0]) {
+        cx_fmt(d, sizeof d, "HEAD=%s chain_rev=%s waived: %s", head, cand.commit, post_chain_reason);
+        if (!index_has_key("exec-1-post-chain-merge")) index_named("exec-1-post-chain-merge", "WAIVED", head, d);
+        gate_pass("F_CHAIN_REV", d);
+        return;
+    }
+    cx_fmt(d, sizeof d, "HEAD=%s chain_rev=%s (X must sit on the chain rev; return HEAD to chain_rev and resume --from-step 1, or verify SOURCES_SID unchanged and pass --post-chain-merge REASON)", head, cand.commit);
+    if (dry) { gate_deferred("F_CHAIN_REV", d); return; }
+    sy_printf("NEXT\t%d\treturn HEAD to chain_rev (%s) and --from-step 1; or verify SOURCES_SID unchanged and pass --post-chain-merge REASON\n",
+              cur_step, cand.commit);
+    refuse("F_NOT_CHAIN_REV", d);
+}
 static void step_x(void) {
     char head[64], p[4500], msg[200];
     char *v[] = {"sh", checkout_product, "tools/devsvc.cx", "--", "git", "commit", "-m", msg, "--whole", "release/candidate.tsv", "--push", 0};
@@ -961,6 +999,7 @@ static void step_x(void) {
         record_x();
         say("SKIP","X already committed and pushed",xsha);
     } else {
+        gate_chain_rev();
         if(!dry)check_x_index(0);
         if (act(v, 55, 0, 0)) refuse("X_PUSHED", "devsvc git commit X failed");
         if (dry) { gate_deferred("X_PUSHED", "X not created in --dry"); cx_fmt(xsha, sizeof xsha, "{commit-x}"); return; }
@@ -1711,7 +1750,7 @@ int main(int argc, char **argv) {
     const char *home = sy_env("HOME");
     int warm = argc >= 3 && tx_eqz(argv[1], "--warm");
     if (argc < 3 || (!warm && !tx_eqz(argv[1], "--execute")))
-        die("usage --execute CANDIDATE_TSV --layout DIR [--from-step N] [--dry] [--out DIR] [--strict FILE] [--baseline APE] | --warm CANDIDATE_TSV --layout DIR [--out DIR]");
+        die("usage --execute CANDIDATE_TSV --layout DIR [--from-step N] [--dry] [--out DIR] [--strict FILE] [--baseline APE] [--post-chain-merge REASON] | --warm CANDIDATE_TSV --layout DIR [--out DIR]");
     if (sy_cwd(here, sizeof here)) die("cwd");
     /* When launched inside devsvc x, the outer devsvc.cx sets DEVSVC_REPO_TABLE and DEVSVC_REPO_TABLE_PIN
      * for its pinned core binary. Clearing them before spawning nested devsvc.cx prevents cfg_load from
@@ -1736,6 +1775,10 @@ int main(int argc, char **argv) {
         else if (tx_eqz(argv[i], "--out")) { if (cx_fmt(outdir, sizeof outdir, "%s", argv[++i]) || outdir[0] != '/') die("--out absolute"); }
         else if (tx_eqz(argv[i], "--strict")) { if (sy_realpath(argv[++i], strictp, sizeof strictp) < 0) die("strict file"); }
         else if (tx_eqz(argv[i], "--baseline")) { if (cx_fmt(baseline, sizeof baseline, "%s", argv[++i])) die("baseline"); }
+        else if (tx_eqz(argv[i], "--post-chain-merge")) {
+            const char *r = argv[++i];
+            if (!r[0] || strchr(r, '\t') || strchr(r, '\n') || cx_fmt(post_chain_reason, sizeof post_chain_reason, "%s", r)) die("--post-chain-merge REASON: one line, no tab, at most 399 bytes");
+        }
         else die("unknown option");
     }
     if (!layout[0]) die("--layout DIR required (six persistent release assets)");

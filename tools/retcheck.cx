@@ -1,0 +1,212 @@
+/* tools/retcheck.cx -- return-value convention ratchet for sy_exists, tx_snprintf and cx_fmt.
+ *
+ *   sh ./unisacc.com tools/retcheck.cx -- --check            the ratchet: per FILE+KIND counts only go down
+ *   sh ./unisacc.com tools/retcheck.cx -- --list             every hit as RETCHECK<TAB>KIND<TAB>FILE:LINE<TAB>text
+ *   sh ./unisacc.com tools/retcheck.cx -- --write-baseline > build/retcheck-baseline.tsv
+ *                                                            print the baseline (it prints, the redirect writes it;
+ *                                                            recompute on a clean HEAD tree, never on a dirty worktree)
+ *   sh ./unisacc.com tools/retcheck.cx -- --scan FILE...     list hits in the named files only (for the check)
+ *
+ * Conventions (cx/sys/fs.cx sy_exists, cx/text/fmt.cx tx_snprintf, cx_fmt in the runtime header):
+ *   sy_exists: 1 exists, 0 only for ENOENT, -errno otherwise.  Using it as a boolean
+ *     (if (sy_exists(p)), !sy_exists(p), && / || / ?: / a bare call argument) reads -errno as "exists".
+ *     A use is fine when the result is compared (== != < > <= >=), assigned, or returned.  KIND exists-bool.
+ *   tx_snprintf: snprintf semantics, truncation is ret >= cap.  A result compared only to literal 0, used as a
+ *     boolean, or dropped as a statement misses truncation.  Fine: compared to anything else, assigned, returned.
+ *     KIND snprintf-trunc (compared to 0 or boolean) and snprintf-dropped (result unused).  Prefer cx_fmt (0 ok, -1 on any failure including truncation).
+ *   cx_fmt: 0 ok, -1 failure.  `!cx_fmt(` followed (same line or the next three) by `return -1` treats success as
+ *     failure.  KIND cxfmt-inverted.
+ * Scans tracked *.cx *.c *.h under tools/ tests/ cx/ src/ (git ls-files); occurrences inside string literals or
+ * comments are skipped, as is a definition or declaration (preceded by a type word).
+ * Baseline build/retcheck-baseline.tsv: FILE<TAB>KIND<TAB>N.  --check prints
+ *   retcheck: FILE KIND has N, baseline M
+ * for every key above its row, then "retcheck: ok: ..." or "retcheck: FAIL: ..."; exit 1 on FAIL, 2 on error. */
+#pragma unisa use sys.proc
+#pragma unisa use sys.fs
+#pragma unisa use text.text
+#pragma unisa use mem.heap
+#pragma unisa use mem.bytes
+
+#define BASE "build/retcheck-baseline.tsv"
+#define MAXK 4096
+
+static int idch(char c) { return c == '_' || (c >= '0' && c <= '9') || (c >= 'a' && c <= 'z') || (c >= 'A' && c <= 'Z'); }
+
+/* key table: file, kind, count */
+static char kf[MAXK][256]; static const char *kk[MAXK]; static long kn[MAXK]; static int nk;
+static int listing;
+
+static void hit(const char *file, const char *kind, const char *b, long n, long at) {
+    long ls = at, le = at, line = 1, i; int k;
+    for (i = 0; i < at; i++) if (b[i] == '\n') line++;
+    while (ls > 0 && b[ls - 1] != '\n') ls--;
+    while (le < n && b[le] != '\n') le++;
+    while (ls < le && (b[ls] == ' ' || b[ls] == '\t')) ls++;
+    if (listing) printf("RETCHECK\t%s\t%s:%ld\t%.*s\n", kind, file, line, (int)(le - ls > 160 ? 160 : le - ls), b + ls);
+    for (k = 0; k < nk; k++) if (kk[k] == kind && tx_eqz(kf[k], file)) { kn[k]++; return; }
+    if (nk >= MAXK) { fprintf(stderr, "retcheck: too many keys\n"); exit(2); }
+    cx_fmt(kf[nk], sizeof kf[nk], "%s", file); kk[nk] = kind; kn[nk] = 1; nk++;
+}
+
+/* index of the token before AT (skipping blanks), or -1 */
+static long prev_tok(const char *b, long at) { long i = at - 1; while (i >= 0 && (b[i] == ' ' || b[i] == '\t' || b[i] == '\n' || b[i] == '\r')) i--; return i; }
+static long next_tok(const char *b, long n, long at) { long i = at; while (i < n && (b[i] == ' ' || b[i] == '\t' || b[i] == '\n' || b[i] == '\r')) i++; return i; }
+
+/* position after the ')' that closes the '(' at OPEN, or -1 */
+static long close_paren(const char *b, long n, long open) {
+    long i; int d = 0, q = 0;
+    for (i = open; i < n; i++) {
+        char c = b[i];
+        if (q) { if (c == '\\') i++; else if (c == q) q = 0; continue; }
+        if (c == '"' || c == '\'') q = c;
+        else if (c == '(') d++;
+        else if (c == ')') { if (--d == 0) return i + 1; }
+    }
+    return -1;
+}
+
+static int is_cmp(const char *b, long n, long i) {   /* comparison operator at I */
+    if (i < 0 || i >= n) return 0;
+    if ((b[i] == '=' || b[i] == '!') && i + 1 < n && b[i + 1] == '=') return 1;
+    if (b[i] == '<' || b[i] == '>') { if (i + 1 < n && b[i + 1] == b[i]) return 0; return 1; }
+    return 0;
+}
+static int is_cmp_back(const char *b, long i) {   /* comparison operator ending at I */
+    if (i < 0) return 0;
+    if (b[i] == '=' && i >= 1 && (b[i - 1] == '=' || b[i - 1] == '!' || b[i - 1] == '<' || b[i - 1] == '>')) return 1;
+    if ((b[i] == '<' || b[i] == '>') && !(i >= 1 && b[i - 1] == b[i]) && !(b[i] == '>' && i >= 1 && b[i - 1] == '-')) return 1;
+    return 0;
+}
+static int word_before(const char *b, long i, const char *w) {   /* the identifier ending at I is W */
+    long e = i + 1, s = i, wl = (long)tx_len(w, 64);
+    while (s >= 0 && idch(b[s])) s--;
+    s++;
+    return e - s == wl && tx_same(b + s, wl, w, wl);
+}
+static int type_before(const char *b, long i) {
+    return word_before(b, i, "int") || word_before(b, i, "long") || word_before(b, i, "void") || word_before(b, i, "define");
+}
+static int lit_zero_after(const char *b, long n, long i) {   /* after a comparison op at I, the operand is literal 0 */
+    long j = i + 1;
+    if (j < n && b[j] == '=') j++;
+    j = next_tok(b, n, j);
+    return j < n && b[j] == '0' && !(j + 1 < n && (idch(b[j + 1]) || b[j + 1] == 'x'));
+}
+
+static void scan(const char *file, const char *b, long n) {
+    long i; int q = 0;
+    for (i = 0; i < n; i++) {
+        char c = b[i];
+        if (q) { if (c == '\\') i++; else if (c == q) q = 0; continue; }
+        if (c == '"' || c == '\'') { q = c; continue; }
+        if (c == '/' && i + 1 < n && b[i + 1] == '/') { while (i < n && b[i] != '\n') i++; continue; }
+        if (c == '/' && i + 1 < n && b[i + 1] == '*') { long e = tx_find(b + i + 2, n - i - 2, "*/", 2); if (e < 0) return; i += e + 3; continue; }
+        if (i > 0 && idch(b[i - 1])) continue;
+        if (c == 's' && i + 10 < n && tx_same(b + i, 10, "sy_exists(", 10)) {
+            long open = i + 9, end = close_paren(b, n, open), p = prev_tok(b, i), nx;
+            if (end < 0) return;
+            nx = next_tok(b, n, end);
+            if (type_before(b, p)) { i = open; continue; }
+            if (is_cmp(b, n, nx) || is_cmp_back(b, p) || (((p >= 0 && b[p] == '=' && !(p >= 1 && b[p - 1] == '=')) || word_before(b, p, "return")) && nx < n && (b[nx] == ';' || b[nx] == ',' || b[nx] == ')'))) { i = open; continue; }
+            hit(file, "exists-bool", b, n, i);
+            i = open; continue;
+        }
+        if (c == 't' && i + 12 < n && tx_same(b + i, 12, "tx_snprintf(", 12)) {
+            long open = i + 11, end = close_paren(b, n, open), p = prev_tok(b, i), nx; int bad = 0;
+            if (end < 0) return;
+            nx = next_tok(b, n, end);
+            if (type_before(b, p)) { i = open; continue; }
+            if (is_cmp(b, n, nx)) bad = lit_zero_after(b, n, nx + 1 < n && b[nx + 1] == '=' ? nx + 1 : nx);
+            else if (is_cmp_back(b, p)) { long k = prev_tok(b, b[p] == '=' ? p - 1 : p); bad = k >= 0 && b[k] == '0' && !(k >= 1 && idch(b[k - 1])); }
+            else if ((p >= 0 && b[p] == '=' && !(p >= 1 && b[p - 1] == '=')) || word_before(b, p, "return") || (p >= 0 && b[p] == '+' && b[p - 1] == '+')) bad = 0;
+            else if (p >= 0 && (b[p] == '+' || b[p] == '-' || b[p] == '*') ) bad = 0;   /* arithmetic, e.g. n += ... */
+            else if (nx < n && b[nx] == ';') bad = 2;   /* dropped statement (also after if/else/(void)) */
+            else bad = 1;   /* boolean use or call argument */
+            if (bad) hit(file, bad == 2 ? "snprintf-dropped" : "snprintf-trunc", b, n, i);
+            i = open; continue;
+        }
+        if (c == '!' && i + 8 < n && tx_same(b + i, 8, "!cx_fmt(", 8)) {
+            long end = close_paren(b, n, i + 7), k, m;
+            if (end < 0) return;
+            k = next_tok(b, n, end);
+            if (k < n && b[k] == ')') {   /* the whole condition is !cx_fmt(..) */
+                m = next_tok(b, n, k + 1);
+                if (m < n && b[m] == '{') m = next_tok(b, n, m + 1);
+                if (m + 6 < n && tx_same(b + m, 6, "return", 6)) {
+                    long z = next_tok(b, n, m + 6);
+                    if (z + 1 < n && b[z] == '-' && b[z + 1] == '1' && !idch(b[z + 2])) hit(file, "cxfmt-inverted", b, n, i);
+                }
+            }
+            i = end - 1; continue;
+        }
+    }
+}
+
+static int scan_file(const char *f) {
+    size_t n = 0; char *b = (char *)cx_read(f, &n);
+    if (!b) { fprintf(stderr, "retcheck: cannot read %s\n", f); return -1; }
+    scan(f, b, (long)n); mm_free(b); return 0;
+}
+
+static long base_of(const char *b, long n, const char *f, const char *kind) {
+    long at = 0, fl = (long)tx_len(f, 256), kl = (long)tx_len(kind, 32);
+    while (b && at < n) {
+        long e = tx_chr(b + at, n - at, '\n'), ln = e < 0 ? n - at : e, t = tx_chr(b + at, ln, '\t');
+        if (b[at] != '#' && t == fl && tx_same(b + at, fl, f, fl) && t + 1 + kl < ln && tx_same(b + at + t + 1, kl, kind, kl) && b[at + t + 1 + kl] == '\t') {
+            long v = 0, j; for (j = t + 2 + kl; j < ln && b[at + j] >= '0' && b[at + j] <= '9'; j++) v = v * 10 + (b[at + j] - '0');
+            return v;
+        }
+        at += ln + 1;
+    }
+    return -1;
+}
+
+int main(int argc, char **argv) {
+    static char out[1 << 21];
+    int cut = 0, mode, k; long r, at = 0, total = 0, over = 0; size_t bn = 0; char *base = 0;
+    if (argc >= 3 && tx_eqz(argv[1], "--scan")) {
+        int a; listing = 1;
+        for (a = 2; a < argc; a++) if (scan_file(argv[a])) return 2;
+        for (k = 0; k < nk; k++) total += kn[k];
+        printf("retcheck: scanned=%d hits=%ld\n", argc - 2, total);
+        return 0;
+    }
+    if (argc != 2) goto usage;
+    if (tx_eqz(argv[1], "--check")) mode = 0;
+    else if (tx_eqz(argv[1], "--list")) { mode = 1; listing = 1; }
+    else if (tx_eqz(argv[1], "--write-baseline")) mode = 2;
+    else goto usage;
+    {   char *gv[] = {"./tools/bound", "30", "git", "grep", "-lI", "-e", "sy_exists(", "-e", "tx_snprintf(", "-e", "!cx_fmt(", "--",
+                      "tools/*.cx", "tools/**/*.cx", "tests/*.cx", "tests/**/*.cx", "cx/**/*.cx", "cx/**/*.c", "cx/**/*.h", "src/**/*.c", "src/**/*.h", "src/**/*.cx", 0};
+        r = sy_run(gv, out, sizeof out - 1, &cut);
+        if (r < 0 || r > 1 || cut) { fprintf(stderr, "retcheck: git grep failed rc=%ld\n", r); return 2; }
+        r = r ? 0 : (long)tx_len(out, sizeof out);
+    }
+    while (at < r) {
+        long e = tx_chr(out + at, r - at, '\n'), ln = e < 0 ? r - at : e; char f[1024];
+        if (ln > 0 && ln < (long)sizeof f) {
+            mm_copy(f, sizeof f, out + at, ln); f[ln] = 0;
+            if (scan_file(f)) return 2;
+        }
+        at += ln + 1;
+    }
+    for (k = 0; k < nk; k++) total += kn[k];
+    if (mode == 1) { printf("retcheck: hits=%ld keys=%d\n", total, nk); return 0; }
+    if (mode == 2) {
+        printf("# retcheck baseline: FILE<TAB>KIND<TAB>N, only goes down (tools/retcheck.cx)\n");
+        for (k = 0; k < nk; k++) printf("%s\t%s\t%ld\n", kf[k], kk[k], kn[k]);
+        return 0;
+    }
+    base = (char *)cx_read(BASE, &bn);
+    if (!base) { printf("retcheck: FAIL: cannot read %s\n", BASE); return 1; }
+    for (k = 0; k < nk; k++) {
+        long b = base_of(base, (long)bn, kf[k], kk[k]);
+        if (kn[k] > b) { over++; printf("retcheck: %s %s has %ld, baseline %ld\n", kf[k], kk[k], kn[k], b < 0 ? 0 : b); }
+    }
+    printf("retcheck: %s: keys=%d hits=%ld over=%ld (fix: sy_exists three-way ==1/==0/<0; tx_snprintf -> cx_fmt and test != 0)\n",
+           over ? "FAIL" : "ok", nk, total, over);
+    return over ? 1 : 0;
+usage:
+    fprintf(stderr, "usage: tools/retcheck.cx --check | --list | --write-baseline | --scan FILE...\n");
+    return 2;
+}

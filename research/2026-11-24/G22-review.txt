@@ -1,0 +1,18 @@
+来源:会话临时目录 /home/devali/.claude/jobs/7f46e032/tmp/G22/review.txt 拷贝于 2026-11-24
+G22 事后复核  2026-11-24  只读加私有验证(私有树 git archive HEAD,已删)
+
+件一 fb9b891eff dev-product D1   结论:须改(不回滚;锁与三条拒绝本体成立,两处误拒/死锁与一处下游退化要补)
+(1) 锁:通过。lock_out 用 O_CLOEXEC|O_NOFOLLOW 开 state/lock 加非阻塞 flock,持锁 fd 不关,进程退场(含被杀)内核释放;bg() fork 后子进程立即 execv,CLOEXEC 不把锁带进后台步骤,后台步骤不持锁;--status 不取锁。恢复路径 check_pending(reload,id) 对同 runid 在跑步骤放行,异 runid 活步骤拒 out-busy,不死锁不漏放。残余:check_pending 用 kill(pid,0),rc 缺失且 pid 被复用时会误报 out-busy(只误拒不误放,可接受,建议核 /proc/PID 的 starttime)。
+(2) 须改 误拒正常快车道:delta_read 在 changed>0 且 base_stale=0 且 pkg==pkg.installed 时拒 input-change-not-in-candidate。cx-dev 的 files= 是 ch.n(全部变更文件),而包不变是合法的:只触及非原生配方(全为 NOT_DEPLOYED/NOT_CLAIMED,例如只改 shared-e3 的 exec 输入)或 exec 下不达任何配方的文件。此时应降 LOCAL-PARTIAL 或 LOCAL-BASELINE,现在却 rc2。检查夹具同时给了 errorparse built,所以没覆盖。改法:仅当 built 非空(或 nets>0)而包未变才拒;加只含 NOT_DEPLOYED 的夹具用例。
+(3) 须改 旧 OUT 永久拒:fwpost2 副本 reload 已 SKIP 而 cxdev/state.tsv 为 not-compared-yet,新版 rc2 REFUSE reload-not-compared,且同一命令重跑仍 SKIP 后再拒,无 next= 指引,只能手删 state/reload.rc。应在拒绝时作废 reload 步骤(删 rc)让同命令重跑,或文案给出确切恢复动作。
+(4) 须改 LOCAL-BASELINE 被下游拒:dev-lane --use 要求 receipt scope 严格等于 LOCAL(dev-lane.cx die receipt-scope-not-LOCAL)。LOCAL-PARTIAL 被拒是正确的 fail-closed(通过);但 cx-dev 在 local=0(树等于基线,最常见的新开车道)给 LOCAL-BASELINE,原来收据恒写 LOCAL 可用,现在 --use 拒 -> 行为退化。check-dev-lane 自造 receipt,未覆盖。需裁定 BASELINE 是否可用并让 dev-lane 与检查对齐。另 NOT_RELEASE 文件与启动器头注释仍硬写 scope=LOCAL,与收据不一致,一并改。
+(5) 变异:UNMEASURED(检查冷编与 51 例在本预算内未跑)。静态推演:删 lock_out -> overlapping-out-refused 转红;删 input-change 拒绝 -> changed-input-with-installed-package-refused 转红;删 reload-not-compared -> reload-uncompared-refused 转红;删 seal 前 package-changed-under-us 复核 -> 无用例检出(package-state-mismatch 用例走的是 delta_read 内 pkgsha 比较),存活,须补。mutation-gate.cx 未跑,UNMEASURED。
+
+件二 3de1f09b87 + 9b262e17bf E8 第二轮   结论:须改(不回滚;A、C 已清,健康路径仍缺,且第二轮差异超第一轮三成)
+(A) 通过。acn>0 且工作树无 affected.cx 时改查 git diff --cached --diff-filter=D:暂存删除 -> BLOCKED 并 pc_mark_block(affected-missing);diff 失败也阻断;仅 HEAD 本无才 skip。新用例 canary.delete 断言 CDRC=1、CDBLK 非 0、CDSKIP=0。
+(B) 部分通过 / 须改。canary.red 新增 CNUND(affected-canary 行内含 REFUSE 或 UNDECLARED),连同原 CNFAIL(gate=affected-canary 为首个具名阻断)能杀 G20 所提"只删 blocked++"变异(删后 pc_mark_block 不调,gate= 落到别门,CNFAIL=0 转红,静态推演)。但健康路径 AFFECTED_CANARY ok 用例仍未做(提交说明自认),门恒阻不可检出,G20 第 (3) 项未清。另私有实测:canary.red 夹具行被 coverage 先拒(REFUSE metadata unknown-coverage),未走到 BATCH_PRODUCT_INPUT_UNDECLARED;CNUND 接受 REFUSE 故通过,但用例未锁定原 c1709e5506 形态,建议夹具同时补 coverage 行,断言 UNDECLARED。
+(C) 通过。--registry-check 只 load_registry + pi_load(pi_load 对未声明占位 exit 2,保住原检测力)。私有副本实测 4 次 rc0 batches=1969:1020/621/622/643 ms,对热上限 10 s 占 6-10%,满足 R22 50% 合同;未抬热时限。冷隔离树上限由 30 s 改 50 s,私有树首跑仍命中 run-cache,真冷编耗时 UNMEASURED,50 s 是否合规(冷实测的两倍)无依据,须补冷测三次。读集补 coverage/cxroot/cxlib/ext/cx,9b262e17bf 表与 gt_builtin 对齐;热判定改为全读集 cmp/diff -rq,G20 (C) 同输入同结论清。
+范围:第一轮 01d73ad35b 约 66 行增删,第二轮约 45 行(affected.cx 8、precommit 39、check 8),超三成,按规则记新件;内容均对应 G20 点名项,无越界改动。
+变异与 mutation-gate:UNMEASURED(提交门检查冷编未跑)。
+
+总:两件均 须改,均不须回滚。安全子集:件一锁与 PARTIAL 降级保留;件二 A/C 保留。下一补丁:件一 (2)(3)(4)+seal 复核用例;件二健康路径用例与冷测。按两轮封顶,件二若下一版仍缺健康路径即退回拆小。

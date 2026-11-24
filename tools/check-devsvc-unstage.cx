@@ -1,0 +1,145 @@
+/* tools/check-devsvc-unstage.cx -- 检查 devsvc 子命令 git unstage(只撤索引、工作区逐字节不动)。
+ *
+ *   sh ./unisacc.com tools/check-devsvc-git.cx -- --cases u   复用共享原生核心。
+ *
+ * 夹具:私有会话目录内临时 git 仓,提交 a/b/c 三文件后改写并暂存三者,a 再改工作区(暂存与工作区不同);
+ *   夹具 tools/devsvc-repo.tsv 拷自本仓，运行真实私有实例，结束清理夹具。
+ * 断言:(1) unstage a.txt rc 0、末行 GIT_UNSTAGE rc=0 n=1、有 UNSTAGE_PRE/POST 行;(2) a 的索引 blob 回到 HEAD;
+ *   (3) a/b/c 工作区 sha256 前后相同;(4) b、c 索引 blob 不变(仍为暂存值);(5) 非法参数 rc 2 且具名:空路径、目录、通配符、
+ *   绝对路径、..、不在索引的路径、无参数,且这些调用后索引不变。末行 CHECK_DEVSVC_UNSTAGE<TAB>failed=N;有 FAIL 则 rc 1。 */
+#pragma unisa use sys.time
+#pragma unisa use sys.fs
+#pragma unisa use sys.proc
+#pragma unisa use sys.env
+#pragma unisa use sys.posix
+#pragma unisa use sys.sha
+#pragma unisa use sysx.process
+#pragma unisa use mem.bytes
+#pragma unisa use mem.heap
+
+static int nfail, ovf; static long t0;
+#define F(dst, cap, ...) do { int f_ = snprintf(dst, cap, __VA_ARGS__); if (f_ < 0 || f_ >= (int)(cap)) ovf++; } while (0)
+static char root[1024], core[1200], fx[160], out[1 << 15];
+static void ck(int c, const char *name) {
+    printf("%s\tdevsvc-unstage.%s\tt_ms=%ld\n", c ? "PASS" : "FAIL", name, sy_now_ms() - t0);
+    if (!c) { printf("NOTE\tlast-output\t%.700s\n", out); nfail++; }
+    fflush(stdout);
+}
+static int run(char **v, const char *cwd) {
+    np_result r; char why[200]; int rc; long a, b;
+    memset(out, 0, sizeof out);
+    if (np_run(v, cwd, 0, 55, &r, why, sizeof why)) return -1;
+    a = (long)r.outn; b = (long)r.errn; rc = r.rc;
+    if (a + b > (long)sizeof out - 1 || (a > 0 && mm_copy(out, sizeof out, r.out, a)) || (b > 0 && mm_copy(out + a, sizeof out - a, r.err, b))) rc = -1;
+    np_free(&r);
+    return rc;
+}
+static int has(const char *s) { return strstr(out, s) != 0; }
+static int sh(const char *cmd) { char *v[] = {"sh", "-c", (char *)cmd, 0}; return run(v, fx); }
+static int dv(const char *a, const char *b, const char *c, const char *d, const char *e, const char *f) {
+    char *v[] = {core, (char *)a, (char *)b, (char *)c, (char *)d, (char *)e, (char *)f, 0};
+    return run(v, fx);
+}
+static int dvu(const char *p1, const char *p2) {
+    return dv("git", "unstage", p1, p2, 0, 0);
+}
+/* 索引 blob(无则 "-") */
+static void iblob(const char *p, char *o, int cap) {
+    char c[300]; char *t;
+    F(c, sizeof c, "git ls-files -s -- %s", p); F(o, cap, "-");
+    if (ovf || sh(c) != 0) return;
+    t = strchr(out, ' '); if (t) F(o, cap, "%.40s", t + 1);
+}
+static void hblob(const char *p, char *o, int cap) {
+    char c[300];
+    F(c, sizeof c, "git rev-parse HEAD:%s", p); F(o, cap, "-");
+    if (ovf || sh(c) != 0) return;
+    F(o, cap, "%.40s", out);
+}
+static void wsha(const char *p, char hx[65]) {
+    char fp[400]; unsigned char *b = 0; int64_t n = 0;
+    F(fp, sizeof fp, "%s/%s", fx, p); F(hx, 65, "absent");
+    if (!ovf && !sy_read_file(fp, &b, &n, 1L << 24)) (void)sy_sha256_hex(b ? (const void *)b : (const void *)"", (long)n, hx);
+    free(b);
+}
+static void cleanup(void) { char c[300]; F(c, sizeof c, "rm -rf %s", fx); if (!ovf) { char *v[] = {"sh", "-c", c, 0}; (void)run(v, "/tmp"); } }
+
+int main(int argc, char **argv) {
+    static const char *names[3] = {"a.txt", "b.txt", "c.txt"};
+    char ib[3][64], wb[3][65], ia[3][64], wa[3][65], ha[64], c[1600];
+    int i, rc;
+    t0 = sy_now_ms();
+    if (sy_cwd(root, sizeof root) < 0) return 2;
+    if (argc == 1) {
+        char *v[] = {"sh", "./unisacc.com", "tools/check-devsvc-git.cx", "--", "--cases", "u", 0};
+        rc = run(v, root);
+        fputs(out, stdout);
+        return rc;
+    }
+    if (argc != 2 || argv[1][0] != '/' || cx_fmt(core, sizeof core, "%s", argv[1])) {
+        fprintf(stderr, "check-devsvc-unstage: need shared absolute devsvc execution image\n"); return 2;
+    }
+    F(fx, sizeof fx, "%s/dvus-XXXXXX", sy_tmpdir());
+    if (ovf || !mkdtemp(fx) || cx_fmt(c, sizeof c, "%s/instance", fx) ||
+        setenv("UNISACC_DEVSVC_DIR", c, 1) || setenv("DEVSVC_SELF_BIN", core, 1) || setenv("DEVSVC_OWNER", "guest", 1)) return 2;
+    F(c, sizeof c, "git init -q && git config user.email t@t && git config user.name t && printf 'a\\n' > a.txt && printf 'b\\n' > b.txt && printf 'c\\n' > c.txt"
+                   " && mkdir -p d && printf 'd\\n' > d/x.txt && git add -A && git commit -qm init"
+                   " && printf 'a2\\n' > a.txt && printf 'b2\\n' > b.txt && printf 'c2\\n' > c.txt && git add a.txt b.txt c.txt && printf 'a3\\n' > a.txt"
+                   " && mkdir -p tools && cp %s/tools/devsvc-repo.tsv tools/ && echo tools/ >> .git/info/exclude", root);
+    ck(!ovf && sh(c) == 0, "fixture");
+    for (i = 0; i < 3; i++) { iblob(names[i], ib[i], 64); wsha(names[i], wb[i]); }
+    rc = dvu("b.txt", 0);
+    ck(rc == 3 && has("reason=no-lock"), "missing-service-refuses");
+    ck(dv("start", "--ttl", "45", "--idle", "30", 0) == 0, "private-service");
+    ck(dv("lock", "acquire", "git-land", "--owner", "peer", 0) == 0, "peer-lock-acquired");
+    rc = dvu("b.txt", 0);
+    ck(rc == 3 && has("reason=lock-held"), "peer-lock-refuses");
+    ck(dv("lock", "release", "git-land", "--owner", "peer", 0) == 0, "peer-released");
+    {
+        static const char *states[] = {"MERGE_HEAD", "CHERRY_PICK_HEAD", "REVERT_HEAD", "rebase-merge", "rebase-apply", "sequencer", 0};
+        for (i = 0; states[i]; i++) {
+            char bb[64], want[100];
+            F(c, sizeof c, "mkdir .git/%s", states[i]);
+            if (i < 3) F(c, sizeof c, "git rev-parse HEAD > .git/%s", states[i]);
+            if (sh(c)) { ck(0, "prepare-operation-state"); break; }
+            F(want, sizeof want, "reason=in-progress path=%s", states[i]);
+            rc = dvu("b.txt", 0);
+            int named = has(want);
+            iblob("b.txt", bb, 64);
+            ck(rc == 2 && named && !strcmp(bb, ib[1]), states[i]);
+            F(c, sizeof c, "%s .git/%s", i < 3 ? "rm" : "rmdir", states[i]);
+            if (sh(c)) { ck(0, "remove-operation-state"); break; }
+        }
+    }
+    rc = dvu("a.txt", 0);
+    ck(rc == 0 && has("GIT_UNSTAGE\trc=0\tn=1") && has("UNSTAGE_PRE\ta.txt") && has("UNSTAGE_POST\ta.txt"), "unstage-a-rc0");
+    for (i = 0; i < 3; i++) { iblob(names[i], ia[i], 64); wsha(names[i], wa[i]); }
+    hblob("a.txt", ha, 64);
+    ck(strcmp(ib[0], ia[0]) != 0 && !strcmp(ia[0], ha), "a-index-back-to-head");
+    ck(!strcmp(wb[0], wa[0]) && !strcmp(wb[1], wa[1]) && !strcmp(wb[2], wa[2]), "worktree-bytes-unchanged");
+    ck(!strcmp(ib[1], ia[1]) && !strcmp(ib[2], ia[2]) && strcmp(ia[1], "-") != 0, "other-staged-kept");
+    {
+        static const char *bad[] = {"", "d", "d/", ".", "*.txt", "/tmp/absolute", "../x", "nope.txt", "-q", "a\nb", 0};
+        static const char *reason[] = {"empty", "not-exactly-one-index-entry", "directory", "directory", "wildcard", "absolute", "dotdot", "not-in-index", "option-like", "control-character"};
+        for (i = 0; bad[i]; i++) {
+            char bb[64], want[100];
+            F(want, sizeof want, "reason=%s path=", reason[i]);
+            rc = dvu(bad[i], 0);
+            int named = has(want);
+            iblob("b.txt", bb, 64);
+            ck(rc == 2 && named && !strcmp(bb, ib[1]), reason[i]);
+        }
+        rc = dvu(0, 0); ck(rc == 2 && has("reason=need-paths"), "refuse-noargs-rc2");
+        rc = dvu("--owner", "*"); ck(rc == 2 && has("reason=invalid-owner"), "refuse-invalid-owner");
+        rc = dvu("b.txt", "nope.txt");
+        char bb[64]; int named = has("reason=not-in-index path=nope.txt");
+        iblob("b.txt", bb, 64);
+        ck(rc == 2 && named && !strcmp(bb, ib[1]), "refuse-mixed-atomic");
+    }
+    rc = dv("lock", "list", 0, 0, 0, 0);
+    ck(rc == 0 && !has("git-land"), "lock-released");
+    ck(dv("stop", 0, 0, 0, 0, 0) == 0, "private-service-stopped");
+    cleanup();
+    printf("CHECK_DEVSVC_UNSTAGE\tfailed=%d\tovf=%d\tms=%ld\n", nfail, ovf, sy_now_ms() - t0);
+    return nfail || ovf ? 1 : 0;
+}

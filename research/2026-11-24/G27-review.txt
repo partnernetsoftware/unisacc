@@ -1,0 +1,33 @@
+来源:会话临时目录 /home/devali/.claude/jobs/7f46e032/tmp/G27/review.txt 拷贝于 2026-11-24
+G27 事前审 提交门计时件(ccogweco 重放 omp-grk47) 基底 HEAD de3eaea3f6
+总结论:须改(不阻塞方向,三处补完即可提交)。
+
+(1) diff 范围 -- 通过(代码三文件) / 须改(生成表)
+- precommit.cx 对 HEAD:仅 use cxlib.pretimes、gate_phase 结束写 pt_row、三处 pt_total、ratchet-baseline BLOCKED、两个 selftest 入口。dirtywatch use 与 dw_identity_emit 原样保留,未回退 f21c113315。
+- precommit-flow.cx:64->256 槽、events=N、pt_row、两个 selftest。check-precommit-flow.cx:nodes 例与夹具拷 pretimes.cx。
+- 注意 check-precommit-flow.cx 暂存区与工作区不一致:暂存版多拷 build/table-index.tsv,工作区版已去掉。提交须以工作区版为准(git add 后再提交)。
+- 生成表暂存区混有他人行:tests/batches.tsv 的 check-prerun-drive(-infra) 改行、tests/coverage.tsv 的 bg-candidate/env-semantics/runcache-path-key/prerun-drive 改行、tests/tools-compile-sources.tsv 的 retcheck 两行。只能用 tools/commit-own.cx --keyed 带 pretimes 与 precommit-flow-nodes 自己的行。
+
+(2) ratchet-baseline BLOCKED -- 逻辑通过 / 须改(无用例)
+- slurp_run 仅在 spawn 失败、超时、git 非零退出、内存失败时返回空指针;无暂存时返回空缓冲非空指针,正常路径不误拦。基线文件首次不存在不走这里(这里只读 git diff --cached --diff-filter=M)。
+- 私有实测:git 仓内 --ratchet-baseline-selftest rc=0;GIT_DIR=/nonexistent 下打印 "precommit: BLOCKED git diff --cached (ratchet-baseline) failed" rc=1。
+- 但没有任何 check 调 --ratchet-baseline-selftest(grep 全 tools/tests 零命中),删 BLOCKED 的变异不会转红。行为合同变化必须进 check:建议在 check-pretimes 或 check-ratchets 加两例(非 git 目录 rc1 且含 BLOCKED 行;干净仓 rc0),并贴删 BLOCKED 转红原行。
+
+(3) 账本失败不影响结论 -- 通过;并发 -- 通过附一条已知缺口
+- pt_row 全部 void 返回;实测 UNISACC_PRECOMMIT_TIMES=/nonexist/dir/t.tsv 时 PRECOMMIT blocked=0 rc=0。
+- sy_append_file -> sy_put_file(O_APPEND),单行小于 360 字节一次 write,本地盘行原子。
+- 缺口:表头"不存在才写"是先查后写,两窗口同时首写会出两行表头;读方需容忍。另 check 夹具里跑的 precommit 会把行写进真实默认会话账本(未设变量时),建议夹具设 UNISACC_PRECOMMIT_TIMES=off。提交说明写明。
+
+(4) 耗时 -- 没变坏,不记绿
+- 私有夹具串行空暂存路径,load 9.5-13:旧 2545/2205/2368 ms,新 2585/2150/2232 ms。有暂存 .cx 路径与 flow 路径 UNMEASURED。
+
+(5) tools.cxlib 0.4.10 -- 须改
+- 暂存的 tlib-packages/layer-api/iface-hash/table-index 是按当前树算出的派生值,0.4.10 与 0.0.103 分支临时号冲突。不得照搬,落 main 时按当时 HEAD 现取号并 derive --write 后 --check drift=0。
+
+(6) 变异
+- nodes 槽 n<256 -> n<64:CHECK_PRECOMMIT_FLOW failed=1 转红,通过。
+- 删 BLOCKED:无用例覆盖,见 (2),须改。
+
+(7) cx-lint/cxtrunc/toolsreg -- UNMEASURED(时限内未跑);tools-compile-sources 已含 check-pretimes.cx 与 cxlib/pretimes.cx 两行。check-pretimes 私有实跑 9/0 用 6.7s,precommit-flow --cases nodes 0.4s 通过。新增行 /home/ 命中 0。
+
+提交说明必须写:dirtywatch 未动;ratchet-baseline 读失败由放行改 BLOCKED rc1(fail-closed 合同变化)及其用例名;账本 best-effort 不影响结论、默认路径与 off 开关、表头并发重复缺口;64->256 槽与 events=N;tools.cxlib 版本号为提交时现取;耗时仅空暂存路径测过,其余 UNMEASURED;只带自己的表行(commit-own --keyed)。

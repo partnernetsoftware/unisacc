@@ -1,0 +1,46 @@
+来源:会话临时目录 /home/devali/.claude/jobs/7f46e032/tmp/G26/review.txt 拷贝于 2026-11-24
+G26 复核 R13x devsvc git unstage 补丁(patch.diff)  结论:须改(不 BLOCK 设计,但现在不可落;改 3 处后可落)
+
+基线:origin/main ddf86b5398;本地 HEAD 61bdf33e4c(领先 origin)。私有副本 git archive 解出,用完已删。证据目录 ~/.claude/jobs/7f46e032/tmp/G26/
+
+(1) apply --check  通过
+- 对 origin/main ddf86b5398 与本地 HEAD 61bdf33e4c 均 APPLY_OK,无需重基。
+
+(2) 只动索引不动工作树  通过
+- 补丁自带夹具私有副本实跑:冷跑 58 s 超时(RC=124,冷编译 core,G26-orig.txt);热跑两次 CHECK_DEVSVC_UNSTAGE failed=0 ms=2914 / 2637(G26-orig1/2.txt)。
+- 我的私有仓(run-mstate.txt):b.txt unstage 前后工作区 sha256 ff304d19... 相同;符号链接 l.txt unstage 后链接目标摘要不变,索引 -> -(HEAD 无该项,移出索引),工作区不动。
+
+(3) 路径护栏  须改
+- 无路径、只给 --owner、"." 均 rc 2 拒绝(实跑)。不提供整索引重置。只撤显式列出的路径,不会顺带动他人暂存(作者 M1 证)。
+- 缺陷 A:变异 mA 把整条语法护栏(绝对/../-/通配/尾斜杠/".")删成只剩 if (!*p),夹具仍 failed=0(run-mA.txt)。原因:ls-files 精确一项检查兜住了所有非法参数,夹具只断 rc 2 与"有 REFUSE",不断具名原因。护栏未被任何断言覆盖,要求 "删护栏转红" 未满足。
+  改法:夹具对每种非法参数断言具体文案(含 "empty, absolute, .., option-like, wildcard or directory path"),或护栏改为不同具名 reason=字段并逐项断言。
+- 小项:--owner 值不校验也不使用(--owner '*' 照常放行 c.txt);未暂存路径(索引等于 HEAD)rc 0 无提示,建议输出 UNSTAGE_NOOP 行。非阻塞。
+
+(4) 合并态  须改
+- 冲突项(多 stage)拒绝:"not exactly one index entry" rc 2,通过。
+- 缺陷 B:MERGE_HEAD 存在时,对已自动合并的非冲突路径 b.txt unstage rc 0,索引从合并结果 901b64f0 回退到 HEAD 61780798,随后提交合并即静默丢掉对方对 b 的改动(run-mstate.txt)。要求 "拒绝或不动冲突项" 字面满足,但这是数据丢失路径。
+  改法:存在 .git/MERGE_HEAD、CHERRY_PICK_HEAD、REVERT_HEAD 或 rebase-merge/rebase-apply 时整体 rc 2 拒绝(具名 REFUSE in-progress merge),夹具加一例。
+
+(5) 变异  须改
+- 作者 M1(多撤 b)failed=10、M2(--worktree)failed=2,自报与原行可信。
+- 我的 mA(删路径护栏)存活,见 (3);mL(把 mg_lock 短路为 0)存活 failed=0(run-mL.txt),见 (6)。
+
+(6) 写窗口锁  须改
+- 复用 mg_lock(git-land,租 60 s,等 3 s)。但:mg_lock 无实例时 rc 3 直接返回 0 不加锁;rc 0 而响应非 "OK acquired" 也返回 0 照跑。即 "须持锁" 在无实例与异常响应下都不成立,夹具无实例跑,mL 存活证明锁零覆盖。
+- 校验(us_index_blob)在取锁之前,存在 TOCTOU:校验后、取锁前他人改索引不被重验。
+  改法:取锁后再做逐路径校验与 PRE 记录;mg_locked==0 时 unstage 拒绝(rc 3 具名 no-lock),除非显式 --no-svc 且写进事件;夹具起一个私有实例或桩锁服务断言锁被持且持有期间第二个 unstage 得 lock-held。与 merge 共用的无实例照跑语义是否也要收紧,另提给 devsvc 迭代。
+
+其它
+- 冷环境耗时:冷编译单次超 55 s 门(实测 58 s 超时),作者自报 45.6 s;须并入 check-devsvc-git 共享编译或走启动器缓存,否则在冷环境不可作批次。UNMEASURED:三次冷跑。
+- 未登记 tests/batches.tsv、prd.md 能力速查、核头注子命令表(作者已自认)。
+- 补丁新增行 /home/ 命中:未见(夹具用 /tmp/dvus-<pid>)。
+- 夹具超时被杀时不清 /tmp/dvus-<pid>(本次留下 /tmp/dvus-649752,已按字面删)。建议用 $CLAUDE_JOB_DIR/tmp 或会话根且启动时清同前缀死 pid 残留。
+
+对 S0 的安全子集(现在即可做,不等补丁)
+- 共享检出 31 条暂存中,确认为自己遗留的路径,可逐条 git restore --staged -- 字面路径(guard 不拦带路径形式),前后记 git ls-files -s 与 sha256sum;当前无 MERGE_HEAD 时才做;他人在途路径不碰。这与补丁语义一致,只是无锁无事件。
+
+落地命令(改完 A/B/锁 三处并复核通过后)
+- devsvc git commit -m "devsvc git unstage ..." --whole tools/devsvc-core.cx tools/check-devsvc-unstage.cx,另用 --keyed 带 tests/batches.tsv 与 prd.md 自己的行。
+回滚:git revert <该提交>;unstage 无持久状态,回滚不需数据迁移。
+
+第一轮。第二轮仍不过则退作者拆小(先落 护栏+合并态拒绝,锁收紧单独一补丁)。
