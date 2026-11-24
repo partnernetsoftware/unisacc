@@ -1,6 +1,7 @@
 /* tools/check-cx-dev.cx -- checks of the cx-dev lane (tools/cx-dev.cx, tools/cx-dev).  Results are LOCAL evidence only.
  *
- *   sh ./unisacc.com tools/check-cx-dev.cx [-- --cases a|b|c|d|e]   (no argument: all five groups in order)
+ *   sh ./unisacc.com tools/check-cx-dev.cx [-- --cases a|b|c|d|e|D|E]
+ *   D/E run only the parse2 routing and lint-loader assertions from d/e.
  *   last line: CHECK_CX_DEV<TAB>assertions=N<TAB>failed=0   (TAB after the marker: the batch contract of tests/run-batch.cx)
  *
  * a  construct the loader bundle (--build) under $TMPDIR/cx-dev-UID/check-bundle; thin entry execs it
@@ -244,6 +245,19 @@ static void group_c(void) {
     install_refused("c.install-ape-refuses-local-package");
     np_free(&a); np_free(&p);
 }
+static void d_parse2(np_result *a) {
+    /* R57: parse2 table edit locates warnparse (34) and errorparse (4) directly from pkg.installed D routes. */
+    char p2w[PW], p2b[PW]; char *c[] = {"--reload", 0}, *v[] = {"CXDEV_CACHE=-", 0};
+    pj(p2w, fx, "exec/parse2/gen2-actions-manifest.tsv");
+    pj(p2b, bundle, "base-tree/exec/parse2/gen2-actions-manifest.tsv");
+    edit(p2b, "not covered: struct return", "not covered: struct return (stale-base)");
+    edit(p2w, "not covered: struct return", "not covered: struct return (r57)");
+    cxd(c, v, a);
+    ck(a->rc == 0 && has(a, 1, "CXDEV_RECIPE\tshared-e3\tNOT_DEPLOYED\tnot-in-package\n") &&
+       has(a, 1, "CXDEV_RECIPE\twarnparse\tbuilt\tindex=34\n") &&
+       has(a, 1, "CXDEV_RECIPE\terrorparse\tbuilt\tindex=4\n") &&
+       has(a, 1, "\tLOCAL_OK\n"), "d.parse2-locates-warnparse-errorparse-from-pkg-routes");
+}
 static void group_d(void) {
     np_result a = {0}; char tpl[PW], src[PW], tag[64], neu[96], x[PW], cmd[4 * PW];
     ensure_bundle(0); stage("d", 1); sources();
@@ -258,23 +272,12 @@ static void group_d(void) {
       ck(a.rc == 1 && has(&a, 1, "CXDEV_STALE\trecipe=warnlex\treason=DEFERRED:gen\tmodel=installed") && has(&a, 1, "reject: unexpected character\n") && !has(&a, 1, tag), "d.over-bound-DEFERRED-named-falls-back-to-installed-model");
       ck(has(&a, 1, "CXDEV_RUN\tscope="), "d.stale-run-prints-run-line"); }
     { char *c[] = {"--close", 0}; char st[PW]; pj(st, bundle, "state.tsv"); ck(!access(st, 0), "d.state-present-before-close"); cxd(c, 0, &a); ck(a.rc == 0 && has(&a, 0, "CXDEV_CLOSE") && access(st, 0), "d.close-drops-local-state"); }
-    {   /* R57: parse2 table edit locates warnparse (34) and errorparse (4) directly from pkg.installed D routes
-           without requiring base-tree M byte match or double baseline genp build. */
-        char p2w[PW], p2b[PW]; char *c[] = {"--reload", 0}, *v[] = {"CXDEV_CACHE=-", 0};
-        pj(p2w, fx, "exec/parse2/gen2-actions-manifest.tsv");
-        pj(p2b, bundle, "base-tree/exec/parse2/gen2-actions-manifest.tsv");
-        edit(tpl, neu, "unexpected character");
-        edit(src, "/* cx-dev check */\n", "");
-        edit(p2b, "not covered: struct return", "not covered: struct return (stale-base)");
-        edit(p2w, "not covered: struct return", "not covered: struct return (r57)");
-        cxd(c, v, &a);
-        ck(a.rc == 0 && has(&a, 1, "CXDEV_RECIPE\tshared-e3\tNOT_DEPLOYED\n") &&
-           has(&a, 1, "CXDEV_RECIPE\twarnparse\tbuilt\tindex=34\n") &&
-           has(&a, 1, "CXDEV_RECIPE\terrorparse\tbuilt\tindex=4\n") &&
-           has(&a, 1, "\tLOCAL_OK\n"), "d.parse2-locates-warnparse-errorparse-from-pkg-routes");
-    }
+    edit(tpl, neu, "unexpected character");
+    edit(src, "/* cx-dev check */\n", "");
+    d_parse2(&a);
     np_free(&a);
 }
+static void e_loader(np_result *a);
 static void group_e(void) {
     np_result a = {0}; char tpl[PW], tag[64], neu[96], x[PW];
     ensure_bundle(0); stage("e", 0); sources();
@@ -307,6 +310,10 @@ static void group_e(void) {
         ck(ncmp == 2, "e.watch-compares-only-at-start-and-on-input-event");
         { char lk[PW]; pj(lk, bundle, "watch.lock"); ck(access(lk, 0) != 0, "e.watch-lock-removed-on-exit"); }
     }
+    e_loader(&a);
+    np_free(&a);
+}
+static void e_loader(np_result *a) {
     /* a net whose delta the lint loader refuses on the installed tables too (exec/librarycontract names the
        terminal DONE; tools/cxlib/delta.cx synthesizes HALT only): the same refusal on both sides is reported by
        name and the net is swapped in; a refusal the installed tables do not have still stops the swap */
@@ -322,13 +329,12 @@ static void group_e(void) {
         }
         free(table.p);
         edit(lc, "library contract: malformed declaration stream", "library contract: malformed declaration stream (fixture)");
-        { char *c[] = {"--reload", 0}, *v[] = {"CXDEV_ABSENT=-", "CXDEV_CACHE=-", 0}; cxd(c, v, &a);
-          ck(has(&a, 1, "CXDEV_LINT_NA\trecipe=librarycontract\tmodel=local\tsame-on-installed-tables\treason=delta: edge from EMIT to unknown state DONE\n") && has(&a, 1, "CXDEV_RECIPE\tlibrarycontract\tbuilt"), "e.lint-loader-refusal-same-as-installed-reported-and-built"); }
+        { char *c[] = {"--reload", 0}, *v[] = {"CXDEV_ABSENT=-", "CXDEV_CACHE=-", 0}; cxd(c, v, a);
+          ck(has(a, 1, "CXDEV_LINT_NA\trecipe=librarycontract\tmodel=local\tsame-on-installed-tables\treason=delta: 258 edges to unknown states; first=EMIT -> DONE; from-states=EMIT:1,ERR:257\n") && has(a, 1, "CXDEV_RECIPE\tlibrarycontract\tbuilt"), "e.lint-loader-refusal-same-as-installed-reported-and-built"); }
         edit(lc, "main\tEMIT\t256\tDONE\t", "main\tEMIT\t256\tDONEX\t");
-        { char *c[] = {"--reload", 0}, *v[] = {"CXDEV_ABSENT=-", "CXDEV_CACHE=-", 0}; cxd(c, v, &a);
-          ck(a.rc == 2 && has(&a, 1, "CXDEV_RECIPE\tlibrarycontract\tlint-error:new-ERROR-not-in-installed-tables") && has(&a, 1, "CXDEV_LINT\tERROR\tlint-not-loadable\tdelta: edge from EMIT to unknown state DONEX") && !has(&a, 1, "CXDEV_LINT_NA\trecipe=librarycontract"), "e.lint-loader-refusal-new-against-installed-stops-swap"); }
+        { char *c[] = {"--reload", 0}, *v[] = {"CXDEV_ABSENT=-", "CXDEV_CACHE=-", 0}; cxd(c, v, a);
+          ck(a->rc == 2 && has(a, 1, "CXDEV_RECIPE\tlibrarycontract\tlint-error:new-ERROR-not-in-installed-tables") && has(a, 1, "CXDEV_LINT\tERROR\tlint-not-loadable\tdelta: 258 edges to unknown states; first=EMIT -> DONEX; from-states=EMIT:1,ERR:257\n") && !has(a, 1, "CXDEV_LINT_NA\trecipe=librarycontract"), "e.lint-loader-refusal-new-against-installed-stops-swap"); }
     }
-    np_free(&a);
 }
 int main(int argc, char **argv) {
     const char *which = "abcde"; char tmpl[] = "/tmp/check-cx-dev-XXXXXX", un[PW]; int i;
@@ -337,7 +343,14 @@ int main(int argc, char **argv) {
     pj(un, root, "unisacc.com"); if (access(un, 0)) die("run from the checkout root (./unisacc.com)");
     if (!mkdtemp(tmpl) || !realpath(tmpl, work)) die("scratch");
     for (; *which; which++) {
-        if (*which == 'a') group_a(); else if (*which == 'b') group_b(); else if (*which == 'c') group_c(); else if (*which == 'd') group_d(); else if (*which == 'e') group_e(); else die("--cases takes letters a b c d e");
+        if (*which == 'a') group_a(); else if (*which == 'b') group_b(); else if (*which == 'c') group_c(); else if (*which == 'd') group_d(); else if (*which == 'e') group_e();
+        else if (*which == 'D' || *which == 'E') {
+            np_result r = {0};
+            ensure_bundle(0);
+            if (*which == 'D') { stage("parse2-only", 1); d_parse2(&r); }
+            else { stage("lint-only", 0); e_loader(&r); }
+            np_free(&r);
+        } else die("--cases takes letters a b c d e D E");
     }
     { const char *w = "PA" "SS"; np_put(&seen, "", 1); ck(!strstr(seen.p, w), "no-such-word-in-cx-dev-output"); }
     printf("CHECK_CX_DEV\tassertions=%d\tfailed=%d\n", checks, failed);
