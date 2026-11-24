@@ -64,6 +64,8 @@
 - 整链会话根在链运行与发布期间勿删,清理只由主调度在公开后做。
 - 起整链的环境只设 UNISACC_IDENT_HELPER,不设 UNISACC_RUN_CACHE 与 UNISACC_CACHE_DIR。
 - 起链前置:版本工作树的 unisacc.com 与 unisacc.com.build.json 必须是真实文件副本,不是符号链接;Root 升级后同步各工作树并移走 ~/.cache/unisacc/chains/snap/ 下旧快照。入口:tools/chain-ready.cx 前置 12 到 14。日常跑工具可放指向共享检出的符号链接(CLAUDE.md),起链前必须换成真实副本,以前置 12 到 14 的检查为准。
+- 第二车 0.0.107 起链前:在冻结工作树后台有界预热模块单元材料。G46 的驱动材料冷编约 41 秒,单作业有效上限 50 秒,余量约 9 秒;冷编 `affected` 不得与材料构造塞进同一个 60 秒窗口。先用 `sh ./unisacc.com tools/devsvc.cx -- x --bg --par 1 --timeout-ms 55000 -- sh ./unisacc.com tools/affected.cx -o "$JOB_TMP/affected"` 生成执行体,成功后再用 `sh ./unisacc.com tools/devsvc.cx -- x --bg --par 1 --timeout-ms 55000 -- "$JOB_TMP/affected" --materials-dump --ids module-units,module-units-forward,module-units-limits --prepare-materials -j 1`;`JOB_TMP` 为已建的私有临时目录,两步分别收成功回执。核对 `PREBUILD failed=0` 及两份材料的 SHA-256,只记 PREPARED,三片照常实跑。
+  私有验证显式设置私有 `UNISACC_PREP_CACHE`;冻结工作树的正式预热使用后续起链接着消费的缓存。
 - 废除 load1 负载门(所有者 2026-11-20 明令):不得按 load1 放行、等待、降并发或拒跑,只用固定显式并发上限(--jobs、--max-jobs、--par、S9_WIDTH),load1 只作记录字段;新工具不得再引入。回滚:git revert ecb8cb246f de000a79d6 39cba77ba6。
 - 整链预制:事件触发预制真实命中 0 次,不作依赖;改走推测链加并行确认,采纳内容键待定;推测 APE 与正规 APE sha256 不等则证据自动 INVALID。入口:plans/reviews/2026-11-20-chain-incremental.md 第 9 节。回滚:devsvc react stop,正规链冷起照旧。
 
@@ -235,6 +237,7 @@ old-product-assets 0.0.101 登记与回滚(c4a154dfea 2026-11-24):tools/old-prod
 - 整链续跑:只按原参数续跑,不增删开关;续跑前核前段清单与 `--base/src` 干净树仍在,前置流程不得清空在途链的快照目录。 依据:0.0.89 首链四次 rc=2 入口:`tools/chain-run.cx`
 - 证据留存:链与预跑证据产生后立即备份到仓外 `~/.unisacc-release-evidence-backups/<版本>/`,清单入 `release/evidence/<版本>/backup-evidence.tsv`;作废产物保留并标作废,不作发布证据。 依据:R71 入口:`tools/release-chain.cx`
 - 重复代码:重复是测量,合并是决定;契约不同或合并净亏的重复组登记白名单,不为降数字合并。 依据:ccogw 盘点 入口:`tools/dup-census.cx`
+- 待补用例: `tests/module/boundary.tsv` 的 64 单元记录翻转 `expected` 不会让规划分片失败;旧版也忽略该列,实际仍按 `DV_MAXU` 核计数、展开和拒绝。G46 已实证。另开小项令规划分片断言 `expected`,本次拆片不改判据。
 
 ### (3) 已公开版本(不可逆动作)
 

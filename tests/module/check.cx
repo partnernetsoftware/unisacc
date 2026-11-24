@@ -1,24 +1,63 @@
-#pragma unisa use sys.proc
-#pragma unisa use cxlib.netpack
-static int run(char **args) {
+#pragma unisa use sysx.processcore
+
+static int count_rows(const np_result *r, const char *prefix) {
+    size_t len = strlen(prefix);
+    int count = 0;
+    for (size_t at = 0; at < r->outn;) {
+        const char *start = r->out + at;
+        const char *lf = memchr(start, '\n', r->outn - at);
+        if (!lf) break;
+        if ((size_t)(lf - start + 1) >= len && !memcmp(start, prefix, len)) count++;
+        at = (size_t)(lf - r->out) + 1;
+    }
+    return count;
+}
+
+static int require_count(const char *mode, int actual, int want) {
+    if (actual == want) return 1;
+    fprintf(stderr, "FAIL\tassertion-count\tshard=%s expected=%d actual=%d\n", mode, want, actual);
+    return 0;
+}
+
+static int run(char **args, const char *prefix) {
     np_result r = {0}; char why[512]; int rc;
-    rc = np_run(args, ".", 0, 48, &r, why, sizeof why);
+    rc = pc_run(args, ".", 0, 48, &r, why, sizeof why, 1);
     if (r.outn) fwrite(r.out, 1, r.outn, stdout);
     if (r.errn) fwrite(r.err, 1, r.errn, stderr);
     if (rc) fprintf(stderr, "module-units: %s\n", why);
-    rc = rc || r.rc; np_free(&r); return rc;
+    int count = rc || r.rc ? -1 : count_rows(&r, prefix);
+    pc_free(&r);
+    return count;
 }
-int main(void) {
-    char *units[] = {"sh", "./unisacc.com", "tests/module/units.cx", "src/driveunits.cx", "src/driveplan.cx", "src/host.cx", 0};
-    char *lint[] = {"sh", "./unisacc.com", "tools/check-unit-limit.cx", 0};
-    {
-        char *negative[] = {"sh", "./unisacc.com", "tools/check-unit-limit.cx", "--", "tests/module/limit-negative.txt", 0};
-        np_result r = {0}; char why[512]; int rc = np_run(negative, ".", 0, 10, &r, why, sizeof why);
-        if (rc || r.rc != 1 || !r.out || !strstr(r.out, "violations=5") || !r.err || !strstr(r.err, "limit-negative.txt:5")) {
-            np_free(&r); fputs("FAIL\tunit-limit-negative\n", stderr); return 1;
-        }
-        np_free(&r); puts("PASS\tunit-limit-negative");
+
+static int negative_case(char *image) {
+    char *negative[] = {image, "tests/module/limit-negative.txt", 0};
+    np_result r = {0}; char why[512]; int rc = pc_run(negative, ".", 0, 10, &r, why, sizeof why, 1);
+    int ok = !rc && r.rc == 1 && r.out && strstr(r.out, "violations=5") && r.err && strstr(r.err, "limit-negative.txt:5");
+    pc_free(&r);
+    if (ok) puts("PASS\tunit-limit-negative");
+    else fputs("FAIL\tunit-limit-negative\n", stderr);
+    return ok;
+}
+
+int main(int argc, char **argv) {
+    if (argc != 3 || argv[2][0] != '/') {
+        fputs("module-units: expected mode and absolute prepared image\n", stderr);
+        return 2;
     }
-    if (run(units) || run(lint)) return 1;
-    puts("MODULE_UNITS_CHECK\tstatus=PASS"); return 0;
+    if (strcmp(argv[1], "limits")) {
+        char *v[] = {argv[2], argv[1], 0};
+        int actual = run(v, "PASS\t");
+        int want = !strcmp(argv[1], "plan") ? 24 : 7;
+        return actual < 0 || !require_count(argv[1], actual, want);
+    }
+    char *lint[] = {argv[2], 0};
+    int passed = negative_case(argv[2]);
+    if (passed) {
+        int actual = run(lint, "UNIT_LIMIT\tviolations=0\n");
+        if (actual < 0) return 1;
+        passed += actual == 1;
+    }
+    if (!require_count("limits", passed, 2)) return 1;
+    puts("MODULE_UNITS_LIMITS\tstatus=PASS"); return 0;
 }

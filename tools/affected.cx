@@ -536,6 +536,12 @@ static void load_registry(void) {
     if (tp_visit(root, r, rn, c, cn, &ob, &sum, why, sizeof why)) { fprintf(stderr, "affected: REFUSE metadata %s\n", why); exit(2); }
     if(domain_on)domain_load();
 }
+/* These are additional compiler inputs, not files read by the finished probe. */
+static const char *module_units_inputs[] = {
+    "tests/module/units.cx", "tests/module/forward.cx",
+    "src/driveunits.cx", "src/driveplan.cx", "src/host.cx", 0
+};
+
 /* --plan reason: per model, the first closure node (or -1 = an args token) that named it; -2 unset */
 static int model_src[64]; static unsigned long cur_models;
 static void mark_batch(Batch *B) {
@@ -544,6 +550,13 @@ static void mark_batch(Batch *B) {
     ndirs = 0; epoch++;
     mark_root(B->source);
     if (tx_chr(B->entry, tx_len(B->entry, 4096), '{') < 0 && !tx_eqz(B->entry, B->source)) mark_root(B->entry);
+    if (tx_eqz(B->materials, "module-units-tool:path")) {
+        mark_root("tests/module/image.cx");
+        for (int i = 0; module_units_inputs[i]; i++) mark_root(module_units_inputs[i]);
+        named_file("cxroot.tsv", V_ARG);
+    } else if (tx_eqz(B->materials, "check-unit-limit-tool:path")) {
+        mark_root("tools/check-unit-limit.cx");
+    }
     mark_guards(B->id);
     if (!tx_eqz(B->args, "-")) {   /* ';'-separated tokens; {placeholders} skipped */
         const char *at = B->args;
@@ -892,6 +905,7 @@ static int prep_source(const char *name, int kind, char *src, long cap, char *wh
     if (pk == PK_PROD) { cx_fmt(src, cap, "unisacc.com"); return 0; }
     if (pk == PK_HOSTC) { cx_fmt(src, cap, "tools/libneed-native-material.cx"); return 0; }
     if (pk == PK_OLDP) { cx_fmt(src, cap, "tools/old-product-material.cx"); return 0; }
+    if (tx_eqz(name, "module-units-tool")) return cx_fmt(src, cap, "tests/module/image.cx");
     if (pk == PK_OPTFRAME4) { cx_fmt(src, cap, "tools/opt-frame4-material.cx"); return 0; }
     if (pk == PK_CLASSIC_REF) return cx_fmt(src,cap,"tools/ref-material.cx");
     if (pk == PK_HOST && tx_eqz(name, "hosttcc")) {
@@ -1151,6 +1165,20 @@ static int prep_plan(const char *name, int kind, char *why, int cap) {
         cx_sha256_hex(both, (size_t)tx_len(both, sizeof both), P->closure);
     } else
     if (closure_sha(P->src, P->closure)) { cx_fmt(why, cap, "closure-unreadable=%s", P->src); return -1; }
+    if (tx_eqz(P->name, "module-units-tool")) {
+        Buf inputs = {0}; char sha[65], path[4400];
+        puts_(&inputs, "module-units-v1\n"); puts_(&inputs, P->closure);
+        for (int i = 0; module_units_inputs[i]; i++) {
+            if (closure_sha(module_units_inputs[i], sha)) {
+                cx_fmt(why, cap, "closure-unreadable=%s", module_units_inputs[i]); free(inputs.p); return -1;
+            }
+            puts_(&inputs, sha);
+        }
+        if (cx_fmt(path, sizeof path, "%s/cxroot.tsv", root) || file_sha(path, sha)) {
+            cx_fmt(why, cap, "closure-unreadable=cxroot.tsv"); free(inputs.p); return -1;
+        }
+        puts_(&inputs, sha); cx_sha256_hex(inputs.p, (size_t)inputs.n, P->closure); free(inputs.p);
+    }
     if(P->kind==PK_HOSTC) {
         /* Resolve missing HOSTCC before source-running the producer: CC also
            participates in the product's native tool compilation. */
@@ -1236,6 +1264,10 @@ static int prep_start(PJob *J, int k) {
             if(layout_candidate(J->tmp,sizeof J->tmp,candidate_dir?candidate_dir:root))return -1;
             av[n++]="prepare";av[n++]=(char *)(repo&&*repo?repo:root);av[n++]=J->tmp;av[n++]=P->rcpt;
             P->cached=sy_exists(P->path)==1;
+        } else if (tx_eqz(P->name, "module-units-tool")) {
+            av[n++] = bound; av[n++] = s_all; av[n++] = "sh"; av[n++] = product; av[n++] = srcabs;
+            for (int i = 0; module_units_inputs[i]; i++) av[n++] = (char *)module_units_inputs[i];
+            av[n++] = "-o"; av[n++] = J->tmp;
         } else {
             av[n++] = "sh"; av[n++] = "-c"; av[n++] = (char *)(tx_eqz(P->name,"isolated-streams")?cscript:P->kind == PK_STREAMS || is_net ? sscript : P->kind == PK_MDIR || P->kind == PK_HOSTC ? pscript : P->kind == PK_IDENT ? iscript : script); av[n++] = "sh"; av[n++] = bound; av[n++] = image; av[n++] = srcabs; av[n++] = J->tmp; av[n++] = root; av[n++] = product; av[n++] = s_all; av[n++] = s_kit;
         }
