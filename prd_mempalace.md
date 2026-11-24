@@ -44,8 +44,7 @@
 
 ### 不可逆对外动作
 
-- v0.0.105 已公开(2026-11-24,tag v0.0.105 Latest,F=414a024ea5,X=edff8d214d,Y1=63d91a9744,Y2=7f1d244075,release-post 772daa328e)。回滚:按 release/evidence/0.0.105/rollback.txt,release 改回 draft、Latest 回指 v0.0.101 并读回、前向 git revert Y2 Y1 X、Root 回装用 0.0.101 备份(~/.unisacc-root-backups/0.0.101-public/ 当前不存在,待补)经 tools/install-ape.cx 回装;不删 tag、不 force push。入口:release/evidence/0.0.105/INDEX.tsv。
-- v0.0.88 已公开(2026-11-21,tag v0.0.88,冻结 F=3038dc3e73,发布提交 X=60c5a4dba3,Y1=0d63ceccd9,Y2=4cbf2a5a53,CI 44902485264 QUALIFIED 42/42)。入口:release/evidence/0.0.88/INDEX.tsv。
+- v0.0.105 已公开(2026-11-24,tag v0.0.105 Latest,F=414a024ea5,X=edff8d214d,Y1=63d91a9744,Y2=7f1d244075,release-post 772daa328e)。回滚:按 release/evidence/0.0.105/rollback.txt,release 改回 draft、Latest 回指 v0.0.101 并读回、前向 git revert Y2 Y1 X、Root 回装用 0.0.101 备份(仓根 .unisacc-root-backups/bb715a8bd3.../ 由 install-ape 于 root-upgrade 时写入并登记 index.tsv,镜像 ~/.unisacc-root-backups/0.0.101-public/;回滚命令 sh ./unisacc.com tools/install-ape.cx -- ROOT --rollback 干跑核验后加 --write)。- v0.0.88 已公开(2026-11-21,tag v0.0.88,冻结 F=3038dc3e73,发布提交 X=60c5a4dba3,Y1=0d63ceccd9,Y2=4cbf2a5a53,CI 44902485264 QUALIFIED 42/42)。入口:release/evidence/0.0.88/INDEX.tsv。
 - v0.0.88 回滚:按 release/evidence/0.0.88/rollback.txt,release 改回 draft、前向 git revert Y2 Y1 X、Root 从 ~/.unisacc-root-backups/ 经 tools/install-ape.cx 写回;不删 tag、不 force push。待核:其后 0.0.89、0.0.90 已公开(Latest 现为 v0.0.90),Latest 回指步骤需按现状重写。
 - 已公开不可撤回的路径泄露:v0.0.85 树内 227 个文件含 /home/ 路径,只泄露系统用户名,无凭据,不重写历史。风险低。
 
