@@ -160,6 +160,20 @@ static void negctl_checks(void) {
 }
 
 /* ---- precise-pin checks on the -run route ---- */
+/* delete every cache file except *.plan (force a re-lookup), keeping the plan memo */
+static void purge_keep_plan(const char *cache) {
+    char cmd[4096];
+    char *v[4]; char *o = 0; long n = 0;
+    if (cx_fmt(cmd, sizeof cmd, "find '%s' -maxdepth 1 -type f ! -name '*.plan' -delete", cache)) return;
+    v[0] = "sh"; v[1] = "-c"; v[2] = cmd; v[3] = 0;
+    (void)cx_runv_timeout(v, 20, &o, &n); if (o) mm_free(o);
+}
+/* run cand on an absolute source in DIR, stdout to cap.txt */
+static void runabs_cap(const char *dir, const char *cache, const char *abs) {
+    char tail[4096];
+    if (cx_fmt(tail, sizeof tail, "'%s' >cap.txt", abs)) return;
+    runsh(dir, cache, tail);
+}
 static void pin_checks(void) {
     const char *run = "%s";                 /* relative bare source */
     const char *dw  = "-DW=__FILE__ %s";
@@ -196,6 +210,32 @@ static void pin_checks(void) {
       runsh(id, id, t);                                        /* run3: miss, store pin=1 */
       runsh(id, id, t);                                        /* run4: must be a hit after the fix */
       ck(hit_in(id) != 0, "pin-flip-not-permanent-cold"); }
+    /* F1: the compiler DOES splice backslash + CRLF; __FI<bs><CR><LF>LE__ forms a real __FILE__ token -> pin. */
+    ck(two_run(work, "p14crlf", "int main(void){return 0;}\nconst char *v(void){return __FI\\\r\nLE__;}\n", 0, run) == 0, "pin-crlf-splice-forms-file");
+    /* F2: unterminated literal (apostrophe in don't) inside #if 0 -> scanner fallback over-pins (safe). */
+    ck(two_run(work, "p15unterm", "int main(void){return 0;}\n#if 0\ndon't\n#endif\n", 0, run) == 0, "pin-unterminated-literal-fallback");
+    /* F3: memo-hit re-store must use the restored source ##/fragment bits; a wrong restore stores a
+       pin=0 root-independent entry and the second dir then reuses the first dir's object (prints a's path). */
+    { char base[2400], da[2400], db[2400], cache[2400], pa[2500], pb[2500], cap[2500];
+      const char *src = "#include \"h.h\"\n#define C2(x,y) x##y\nint main(void){puts(C2(__FI,LE__));return 0;}\n";
+      const char *hdr = "#include <stdio.h>\n";
+      cx_fmt(base, sizeof base, "%s/p16f3", work); sy_mkdir_all(base, 0700);
+      cx_fmt(da, sizeof da, "%s/a", base); cx_fmt(db, sizeof db, "%s/b", base); cx_fmt(cache, sizeof cache, "%s/cache", base);
+      sy_mkdir_all(da, 0700); sy_mkdir_all(db, 0700); sy_mkdir_all(cache, 0700);
+      put(da, "s.cx", src); put(db, "s.cx", src); put(da, "h.h", hdr); put(db, "h.h", hdr);
+      cx_fmt(pa, sizeof pa, "%s/s.cx", da); cx_fmt(pb, sizeof pb, "%s/s.cx", db);
+      sy_sleep_ms(3000);              /* let the plan memo become writable (mtime >= 2s old) */
+      runabs_cap(da, cache, pa);      /* a1: cold, store pin=1, write .plan */
+      runabs_cap(da, cache, pa);      /* a2: hit */
+      purge_keep_plan(cache);         /* drop host/tape, keep .plan */
+      runabs_cap(da, cache, pa);      /* a3: memo hit -> recompile -> re-store (restored rs bits decide pin) */
+      runabs_cap(db, cache, pb);      /* b: must compile and print its own path */
+      cx_fmt(cap, sizeof cap, "%s/cap.txt", db);
+      { size_t cn = 0; char *cb = (char *)cx_read(cap, &cn);
+        int ok = cb && bytes_has(cb, (long)cn, "/p16f3/b/s.cx", 13);
+        if (cb) mm_free(cb);
+        ck(ok, "pin-memo-restore-crossdir"); }
+    }
 }
 
 int main(int argc, char **argv) {
