@@ -1,0 +1,58 @@
+/* check-bpidecl.cx -- fixtures for cxlib.bpidecl (the batches.tsv <-> batch-product-inputs.tsv pairing rule).
+ *   sh ./unisacc.com tools/check-bpidecl.cx --
+ * Last line CHECK_BPIDECL<TAB>assertions=N<TAB>failed=M; rc 0 only when failed=0. */
+#pragma unisa use cxlib.bpidecl
+#pragma unisa use text.text
+
+static int pass, fail;
+static void ok(int c, const char *what) { if (c) { pass++; printf("PASS\tbpidecl.%s\n", what); } else { fail++; printf("FAIL\tbpidecl.%s\n", what); } }
+
+static const char *DECL =
+    "# hdr\n"
+    "kind\tkey\tinputs\tbasis\n"
+    "require\t{candidate}\t-\tx\n"
+    "require\t{hostcc}\t-\tx\n"
+    "near\t{root},{out}\t-\tx\n"
+    "id\told-cand\ttools/a.cx\tx\n";
+static const char *DECL_FIXED =
+    "kind\tkey\tinputs\tbasis\n"
+    "require\t{candidate}\t-\tx\n"
+    "id\told-cand\ttools/a.cx\tx\n"
+    "id\tnew-cand\ttests/new-cand.cx\tx\n";
+#define ROW(id, args) id "\tIMPLEMENTED\tproduct\ttests/" id ".cx\tSOURCE\tlnx/x86_64\t55\t-\ttests/" id ".cx\t" args "\tproduct." id "\trc0:X\tproduct\tcommit\n"
+static const char *HEAD_B = ROW("old-cand", "{out};{candidate}") ROW("plain", "{out}");
+
+int main(void) {
+    char ids[256]; long inh, n; const char *b;
+    long dn = tx_len(DECL, 4096), fn = tx_len(DECL_FIXED, 4096), hn = tx_len(HEAD_B, 4096);
+    /* (1) new {candidate} batch without id row: refused, named */
+    b = ROW("old-cand", "{out};{candidate}") ROW("plain", "{out}") ROW("new-cand", "{out};{candidate}");
+    n = bpi_scan(b, tx_len(b, 4096), DECL, dn, HEAD_B, hn, ids, sizeof ids, &inh);
+    ok(n == 1 && tx_eqz(ids, "new-cand") && inh == 0, "new {candidate} row without id row is blamed by name");
+    /* (2) same row with the id row in the same commit: passes */
+    n = bpi_scan(b, tx_len(b, 4096), DECL_FIXED, fn, HEAD_B, hn, ids, sizeof ids, &inh);
+    ok(n == 0 && ids[0] == 0, "id row in the same commit clears it");
+    /* (3) placeholder-free new batch: unaffected */
+    b = ROW("old-cand", "{out};{candidate}") ROW("plain", "{out}") ROW("plain2", "{root};{out}");
+    n = bpi_scan(b, tx_len(b, 4096), DECL, dn, HEAD_B, hn, ids, sizeof ids, &inh);
+    ok(n == 0, "batch without require placeholder is not affected");
+    /* (4) other require key {hostcc} also triggers */
+    b = ROW("hc", "{hostcc}");
+    n = bpi_scan(b, tx_len(b, 4096), DECL, dn, HEAD_B, hn, ids, sizeof ids, &inh);
+    ok(n == 1 && tx_eqz(ids, "hc"), "{hostcc} is a require key too");
+    /* (5) inherited (byte-identical in HEAD) undeclared row: counted as inherited, not blamed */
+    b = ROW("legacy", "{candidate}");
+    n = bpi_scan(b, tx_len(b, 4096), DECL, dn, b, tx_len(b, 4096), ids, sizeof ids, &inh);
+    ok(n == 0 && inh == 1, "inherited row is reported not blamed");
+    /* (6) changing an inherited row's args (adds {candidate}) counts as new */
+    n = bpi_scan(ROW("plain", "{out};{candidate}"), tx_len(ROW("plain", "{out};{candidate}"), 4096), DECL, dn, HEAD_B, hn, ids, sizeof ids, &inh);
+    ok(n == 1 && tx_eqz(ids, "plain"), "a changed row that gains {candidate} is blamed");
+    /* (7) without HEAD every undeclared row counts (register's view) */
+    n = bpi_scan(ROW("x", "{candidate}"), tx_len(ROW("x", "{candidate}"), 4096), DECL, dn, 0, 0, ids, sizeof ids, &inh);
+    ok(n == 1, "no HEAD: undeclared row counts");
+    /* (8) bpi_needs/bpi_has_id direct */
+    ok(bpi_needs(DECL, dn, "{out};{candidate}", 17) == 1 && bpi_needs(DECL, dn, "{out}", 5) == 0, "bpi_needs");
+    ok(bpi_has_id(DECL, dn, "old-cand", 8) == 1 && bpi_has_id(DECL, dn, "old-can", 7) == 0, "bpi_has_id exact");
+    printf("CHECK_BPIDECL\tassertions=%d\tfailed=%d\n", pass + fail, fail);
+    return fail ? 1 : 0;
+}

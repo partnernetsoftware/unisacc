@@ -37,6 +37,7 @@
 #pragma unisa use sys.poll
 #pragma unisa use sys.posix
 #pragma unisa use sys.sig
+#pragma unisa use cxlib.bpidecl
 
 static int slurp_okrc = 0;   /* 允许的最大退出码:0=仅成功;ratchets.cx 用 1 表示「跑完了但有红行」 */
 static int slurp_last_timeout = 0, slurp_last_rc = 0, slurp_from_run_unplanned = 0;
@@ -172,7 +173,7 @@ static const char gt_builtin[] =
     "manifest\tACMRD\ttests/manifests tests/batches.tsv tests/coverage.tsv tools/batch-packages-gen.cx\n"
     "tables\tACMRD\ttests/manifests tests/batches.tsv tests/coverage.tsv tests/tools-compile-sources.tsv\n"
     "toolsreg\tADRT\ttools/*.cx\n"
-    "runlist\tACMR\ttests/coverage.tsv tests/batches.tsv\n"
+    "runlist\tACMR\ttests/coverage.tsv tests/batches.tsv tests/batch-product-inputs.tsv\n"
     "facts\tACMR\tinclude exec/facts\n"
     "ledger\tACMR\tarchive/agentwork-retire-2026-11/ledger.tsv\n"
     "cx\tACMR\t*.cx\n";
@@ -1890,6 +1891,26 @@ static int cov_eval(const char *tag, const char *reg, long rn, const char *cov, 
           mm_free(b); return 2; } }
       if (tx_find(b, total, "PLAN\tmetadata_valid=", 20) < 0) { mm_free(b); return -1; }
       mm_free(b); return 0; }
+}
+/* 产品输入配对闸(BPI-PAIR-GATE):暂存的 tests/batches.tsv 中命令含 batch-product-inputs.tsv 的 require 占位
+ * ({candidate}、{hostcc} 等)的批次,同一提交须在暂存的 tests/batch-product-inputs.tsv 有 id 行,否则 tools/affected.cx
+ * 拒 BATCH_PRODUCT_INPUT_UNDECLARED 且 rc 2(11-23 runcache-path-key 事故)。只拦本次新增或改动的行;
+ * 与 HEAD 逐字节相同的遗留行只报告。规则在 cxlib.bpidecl,与 tools/register.cx 共用。 */
+static int bpi_gate(void) {
+    char *b = 0, *d = 0, *hb = 0; long bn = 0, dn = 0, hn = 0, inh = 0, n; char ids[1024];
+    if (plan_dir) return 0;
+    if (cov_blob("", "tests/batches.tsv", &b, &bn) || cov_blob("", "tests/batch-product-inputs.tsv", &d, &dn)) {
+        if (b) mm_free(b);
+        sy_eprintf("precommit: BLOCKED product-inputs gate: cannot read staged tests/batches.tsv or tests/batch-product-inputs.tsv\n"); return 1; }
+    if (cov_blob("HEAD", "tests/batches.tsv", &hb, &hn)) hb = 0;
+    n = bpi_scan(b, bn, d, dn, hb, hn, ids, sizeof ids, &inh);
+    if (inh) sy_eprintf("precommit: product-inputs gate: %ld inherited undeclared batch row(s) already in HEAD (not blamed)\n", inh);
+    if (n) {
+        sy_eprintf("precommit: BLOCKED product-inputs undeclared: batch id=%s in the staged tests/batches.tsv holds a require placeholder of tests/batch-product-inputs.tsv but has no id row there (tools/affected.cx would refuse BATCH_PRODUCT_INPUT_UNDECLARED rc 2)\n", ids);
+        sy_eprintf("precommit: add id<TAB>ID<TAB>INPUTS<TAB>BASIS rows to tests/batch-product-inputs.tsv in the same commit\n");
+    }
+    mm_free(b); mm_free(d); if (hb) mm_free(hb);
+    return n ? 1 : 0;
 }
 static int cov_gate(void) {
     char *ir, *ic, *hr = 0, *hc = 0; long irn, icn, hrn = 0, hcn = 0; char id[160], hid[160]; int ri, rh = 0;
@@ -3653,7 +3674,7 @@ int main(int argc, char **argv) {
       } else if (msn > 0) {
           char *lout; long ln;
           int cov_blk = cov_gate();
-          blocked += cov_blk;
+          blocked += cov_blk + bpi_gate();
           cur_gate = "runlist"; slurp_okrc = 2; lout = slurp(lv, &ln); slurp_okrc = 0; cur_gate = 0;
           if (!lout) { sy_eprintf("precommit: tests/run.cx --list did not run\n"); return 1; }
           if (!cov_blk && tx_find(lout, ln, "metadata_valid=1", 16) < 0) {
