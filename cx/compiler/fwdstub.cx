@@ -10,8 +10,15 @@
    same bytes on both routes.  Kinds: 0 integer, 1 pointer, 4 float, 8 double.
    Appends to fwdsrc; no libc. */
 static int fwdrun;
-static char fwdsrc[131072];
+/* One fact for the stub-text capacity (exec/facts/limits.tsv FWD_STUB_BYTES; tests/check-limits.cx
+   ties it to fwdincrement.cx). Every append checks the room left; a full buffer sets fwd_full,
+   appends nothing more and returns -1, and the callers refuse by name (fwd_refusal). */
+#define FWD_STUB_BYTES 131072
+static char fwdsrc[FWD_STUB_BYTES];
 static int nfwdsrc;
+static int fwd_full;
+/* Stubs started since fwd_reset: the N of the refusal sentence. */
+static int fwd_nstub;
 /* Exact fact-table target, set by the driver before emitting host stubs. */
 static const char *fwd_target;
 /* 0.0.31 H3: set by the reference front end when the program takes a function's address; every
@@ -22,9 +29,45 @@ static int fwd_ccw;
    pointer, which `void *` does not match -- puts it here, whole and named a<k> ("int (*a2)(char *, int)").
    Read by fwd_emit and fwd_emit_var for parameter k, cleared after each stub; all 0 = the old bytes. */
 static char *fwd_ptype[64];
-int fwd_s(char *s) { while (*s && nfwdsrc < 131000) { fwdsrc[nfwdsrc] = *s; nfwdsrc = nfwdsrc + 1; s = s + 1; } return 0; }
-int fwd_n(char *s, int n) { int k; k = 0; while (k < n && nfwdsrc < 131000) { fwdsrc[nfwdsrc] = s[k]; nfwdsrc = nfwdsrc + 1; k = k + 1; } return 0; }
-int fwd_d(int v) { char d[16]; int n; n = 0; if (v == 0) { d[0] = 48; n = 1; } while (v > 0) { d[n] = 48 + v % 10; v = v / 10; n = n + 1; } while (n > 0) { n = n - 1; fwdsrc[nfwdsrc] = d[n]; nfwdsrc = nfwdsrc + 1; } return 0; }
+/* All or nothing: a piece that does not fit is not cut, so fwd_count() is only ever whole pieces. */
+int fwd_n(char *s, int n) {
+    int k;
+    if (fwd_full || n < 0 || n > FWD_STUB_BYTES - nfwdsrc) { fwd_full = 1; return -1; }
+    k = 0; while (k < n) { fwdsrc[nfwdsrc] = s[k]; nfwdsrc = nfwdsrc + 1; k = k + 1; }
+    return 0;
+}
+int fwd_s(char *s) { int n; n = 0; while (s[n]) n = n + 1; return fwd_n(s, n); }
+int fwd_d(int v) {
+    char d[16], o[16]; int n, k; n = 0;
+    if (v < 0) { fwd_full = 1; return -1; }
+    if (v == 0) { d[0] = 48; n = 1; }
+    while (v > 0) { d[n] = 48 + v % 10; v = v / 10; n = n + 1; }
+    k = 0; while (n > 0) { n = n - 1; o[k] = d[n]; k = k + 1; }
+    return fwd_n(o, k);
+}
+int fwd_overflowed(void) { return fwd_full; }
+int fwd_limit(void) { return FWD_STUB_BYTES; }
+int fwd_stubs(void) { return fwd_nstub; }
+static int fwd_put(char *w, int cap, int at, const char *s) { while (*s && at < cap - 1) { w[at] = *s; at = at + 1; s = s + 1; } return at; }
+static int fwd_putd(char *w, int cap, int at, int v) {
+    char d[16]; int n; n = 0; if (v <= 0) { d[0] = 48; n = 1; }
+    while (v > 0) { d[n] = 48 + v % 10; v = v / 10; n = n + 1; }
+    while (n > 0 && at < cap - 1) { n = n - 1; w[at] = d[n]; at = at + 1; }
+    return at;
+}
+/* The named refusal: forward stub buffer exceeded (forwarded symbols N, limit bytes 131072). */
+void fwd_refusal(char *why, int cap) {
+    int at;
+    if (!why || cap <= 0) return;
+    at = fwd_put(why, cap, 0, "forward stub buffer exceeded (forwarded symbols ");
+    at = fwd_putd(why, cap, at, fwd_nstub);
+    at = fwd_put(why, cap, at, ", limit bytes ");
+    at = fwd_putd(why, cap, at, FWD_STUB_BYTES);
+    at = fwd_put(why, cap, at, ")");
+    why[at] = 0;
+}
+/* 0 while the buffer has room; 1 with the named refusal in why once it is full. */
+int fwd_refused(char *why, int cap) { if (!fwd_full) return 0; fwd_refusal(why, cap); return 1; }
 char *fwd_ctype(int kind, int w, int uns) {
     if (kind == 1) return w == 8 && uns ? "uintptr_t" : "void *";
     if (kind == 8) return "double";
@@ -70,6 +113,7 @@ int fwd_emit(char *nm, int nl, int np, int *kind, int *w, int *uns, int isvoid, 
     rt = fwd_ctype(rkind, rw, runs); rk = fwd_ukind(rkind, rw, runs);
     if (rkind == 1) { rt = "void *"; rk = 5; }
     if (nfwdsrc == 0) fwd_prologue();
+    fwd_nstub = fwd_nstub + 1;
     {   /* R21-4a': integer and pointer signatures of at most six arguments call
            the host directly through __hostcall (no libffi: works on Linux too);
            floating-point ones keep the uffi/libffi bridge (macOS) */
@@ -118,6 +162,7 @@ int fwd_emit_var(char *nm, int nl, int np, int *kind, int *w, int *uns, int isvo
     if (np < 1 || np > 5 || rkind == 4 || rkind == 8) return 0;
     k = 0; while (k < np) { if (kind[k] == 4 || kind[k] == 8) return 0; k = k + 1; }
     if (nfwdsrc == 0) fwd_prologue();
+    fwd_nstub = fwd_nstub + 1;
     fwd_s("#include <stdarg.h>\n");
     fwd_s(isvoid ? "void" : rt); fwd_s(" "); fwd_n(nm, nl); fwd_s("(");
     k = 0; while (k < np) { if (k) fwd_s(", "); fwd_pdecl(k, kind[k], w[k], uns[k]); k = k + 1; }
@@ -163,7 +208,7 @@ int fwd_emit_libs(void) {
     return 1;
 }
 
-void fwd_reset(void) { nfwdsrc = 0; }
+void fwd_reset(void) { nfwdsrc = 0; fwd_full = 0; fwd_nstub = 0; }
 int fwd_count(void) { return nfwdsrc; }
 char *fwd_text(void) { return fwdsrc; }
 void fwd_set_ccw(int v) { fwd_ccw = v; }

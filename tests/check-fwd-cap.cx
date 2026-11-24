@@ -1,0 +1,251 @@
+/* tests/check-fwd-cap.cx -- FWD-STUB-CAP: the forwarding-stub text buffer is bounded and refuses by name.
+ *
+ *   sh ./unisacc.com tests/check-fwd-cap.cx [-- PRODUCT.com]
+ *   sh ./unisacc.com tests/check-fwd-cap.cx -- --unit-only
+ * The unit-only option runs both unit sections and reports FWD_CAP_UNIT.
+ *
+ * Part U (unit, this tree's cx/compiler/fwdstub.cx linked in through `use compiler.fwdstub`):
+ *   - fwd_n/fwd_s/fwd_d append all or nothing and return -1 once the room is gone;
+ *     fwd_count() never passes fwd_limit() and never moves after the first -1;
+ *   - fwd_emit into a full buffer sets fwd_overflowed() and the refusal sentence carries the stub
+ *     count and the byte limit; fwd_reset clears all three.
+ * Part P (product, the installed or given unisacc.com, each child bounded at 50 s):
+ *   N distinct undefined host functions in one -run unit. Small N runs rc 0. Around and past the
+ *   buffer (N = 340, 341, 342, 413, 1000) every outcome is either rc 0 or rc 1 with
+ *   "forward stub buffer exceeded (forwarded symbols" and "limit bytes 131072"; never a signal,
+ *   never "model driver: cli". N = 413 and 1000 must be the named refusal.
+ *   A product built before this fix shows the old cut ("model driver: cli") or a signal: that is
+ *   reported as SKIP with the reason, and the check exits non-zero -- a SKIP is never a PASS.
+ * Last line FWD_CAP<TAB>failed=K<TAB>skipped=S. */
+#pragma unisa use sys.fs
+#pragma unisa use sys.io
+#pragma unisa use sys.env
+#pragma unisa use text.text
+#pragma unisa use testx.check
+#pragma unisa use compiler.fwdstub
+#pragma unisa use compiler.fwdmark
+#pragma unisa use compiler.routepipe
+#pragma unisa use mem.heap
+
+int fwd_overflowed(void);
+int fwd_limit(void);
+int fwd_stubs(void);
+void fwd_refusal(char *, int);
+int fwd_refused(char *, int);
+
+static int skipped;
+
+static void unit_part(void) {
+    char chunk[1000], why[160], want[160];
+    int kind[1] = {0}, w[1] = {4}, uns[1] = {0};
+    int k, rc, before, last, n;
+    for (k = 0; k < 1000; k++) chunk[k] = 'x';
+    fwd_set_target("lnx/x86_64");
+    fwd_reset();
+    tk_ok(fwd_count() == 0 && !fwd_overflowed() && fwd_stubs() == 0, "unit-reset-clean");
+    tk_ok(fwd_limit() == 131072, "unit-limit-is-the-fact");
+    /* fill with 1000-byte pieces: 131 fit, the 132nd does not (131072 - 131000 = 72 < 1000) */
+    rc = 0; n = 0;
+    while (rc == 0 && n < 200) { rc = fwd_n(chunk, 1000); if (rc == 0) n++; }
+    tk_ok(rc == -1 && n == 131, "unit-fwd_n-refuses-the-piece-that-does-not-fit");
+    tk_ok(fwd_count() == 131000 && fwd_overflowed(), "unit-fwd_n-all-or-nothing");
+    before = fwd_count();
+    tk_ok(fwd_n(chunk, 1) == -1 && fwd_s("y") == -1 && fwd_d(7) == -1 && fwd_count() == before,
+          "unit-sticky-after-full");
+    /* fwd_d at the edge: a fresh buffer filled to limit-1, then a two-digit number does not fit */
+    fwd_reset();
+    rc = 0;
+    while (rc == 0 && fwd_count() + 1000 <= fwd_limit()) rc = fwd_n(chunk, 1000);
+    rc = fwd_n(chunk, fwd_limit() - fwd_count() - 1);
+    tk_ok(rc == 0 && fwd_count() == fwd_limit() - 1, "unit-fill-to-limit-minus-one");
+    tk_ok(fwd_d(42) == -1 && fwd_count() == fwd_limit() - 1 && fwd_overflowed(), "unit-fwd_d-bounded");
+    fwd_reset();
+    rc = 0;
+    while (rc == 0 && fwd_count() + 1000 <= fwd_limit()) rc = fwd_n(chunk, 1000);
+    rc = fwd_n(chunk, fwd_limit() - fwd_count() - 1);
+    tk_ok(rc == 0 && fwd_d(5) == 0 && fwd_count() == fwd_limit() && !fwd_overflowed(), "unit-exact-fit-is-not-overflow");
+    tk_ok(fwd_s("") == 0 && fwd_n(chunk, 0) == 0, "unit-empty-append-at-full-is-ok");
+    /* stubs until full: every stub before the cut is whole, the count does not move after it */
+    fwd_reset();
+    n = 0; last = 0;
+    while (!fwd_overflowed() && n < 2000) {
+        char nm[32];
+        int nl;
+        if (cx_fmt(nm, sizeof nm, "fwdcap%d", n)) break;
+        nl = (int)tx_len(nm, 32);
+        last = fwd_count();
+        fwd_emit(nm, nl, 1, kind, w, uns, 0, 0, 4, 0);
+        n++;
+    }
+    tk_ok(fwd_overflowed() && n > 1 && n < 2000, "unit-emit-reaches-full");
+    tk_ok(fwd_count() <= fwd_limit() && fwd_count() >= last, "unit-emit-count-in-bounds");
+    tk_ok(fwd_stubs() == n, "unit-stub-count");
+    fwd_refusal(why, (int)sizeof why);
+    if (cx_fmt(want, sizeof want, "forward stub buffer exceeded (forwarded symbols %d, limit bytes 131072)", n)) want[0] = 0;
+    tk_ok(tx_eqz(why, want), "unit-refusal-sentence");
+    why[0] = 0;
+    tk_ok(fwd_refused(why, (int)sizeof why) == 1 && tx_eqz(why, want), "unit-refused-names-it");
+    printf("INFO\tunit-stubs-at-full\t%d\n", n);
+    fwd_refusal(why, 8);
+    tk_ok(tx_len(why, 16) == 7, "unit-refusal-respects-cap");
+    fwd_reset();
+    tk_ok(fwd_count() == 0 && !fwd_overflowed() && fwd_stubs() == 0, "unit-reset-after-full");
+    why[0] = 'z'; why[1] = 0;
+    tk_ok(fwd_refused(why, (int)sizeof why) == 0 && why[0] == 'z', "unit-refused-silent-with-room");
+}
+
+/* The linker's unresolved-mark enumeration is injected with stable, distinct names. */
+#define CAP_LINK_MARKS 512
+static char cap_marks[CAP_LINK_MARKS][40];
+static int cap_mark_count, cap_route_calls;
+
+int tl_fwd(int i, char **mark) {
+    if (i < 0 || i >= cap_mark_count) return -1;
+    *mark = cap_marks[i];
+    return (int)tx_len(*mark, sizeof cap_marks[i]);
+}
+
+static int cap_span(const char *route, const char *tgt, const char *src, int cx, unsigned flags,
+                    const char *first, const char *last, unsigned char *in, long inn,
+                    unsigned char **out, long *outn, char *why, int cap) {
+    (void)route; (void)tgt; (void)src; (void)cx; (void)flags; (void)first; (void)last;
+    (void)inn; (void)out; (void)outn; (void)why; (void)cap;
+    cap_route_calls++;
+    mm_free(in);
+    return 1;
+}
+static int cap_put(const char *key, int kn, const unsigned char *value, int vn) {
+    (void)key; (void)kn; (void)value; (void)vn;
+    cap_route_calls++;
+    return 1;
+}
+static int cap_pop(void) { cap_route_calls++; return 1; }
+static int cap_more(unsigned char **tape, long *tn, char *unit, long un) {
+    (void)tape; (void)tn; (void)unit; (void)un;
+    cap_route_calls++;
+    return 1;
+}
+
+static void link_unit_part(void) {
+    const char *target = "lnx/x86_64";
+    unsigned char *text = 0, *tape;
+    long n = -1;
+    char why[160] = "", want[160];
+    int rc;
+    for (int i = 0; i < CAP_LINK_MARKS; i++) {
+        if (cx_fmt(cap_marks[i], sizeof cap_marks[i], "__unisa_fw1_f004004_fwdcap_link_%03d", i)) {
+            tk_ok(0, "link-unit-mark-fixture");
+            return;
+        }
+    }
+    cap_mark_count = 1;
+    rc = fk_stub(target, &text, &n);
+    tk_ok(rc == 1 && text && n > 0 && !fwd_overflowed(), "link-unit-one-mark-produces-stub");
+    mm_free(text);
+    text = 0;
+    n = -1;
+
+    cap_mark_count = CAP_LINK_MARKS;
+    rc = fk_stub(target, &text, &n);
+    tk_ok(rc == -5 && fwd_overflowed(), "link-unit-fk-stub-returns-minus-five");
+    tk_ok(text == 0 && n == 0, "link-unit-fk-stub-returns-no-partial-text");
+    mm_free(text);
+    text = 0;
+    n = -1;
+
+    tape = mm_alloc(1);
+    if (!tape || cx_fmt(want, sizeof want,
+        "forward stub buffer exceeded (forwarded symbols %d, limit bytes %d)",
+        CAP_LINK_MARKS, fwd_limit())) {
+        mm_free(tape);
+        tk_ok(0, "link-unit-route-fixture");
+        return;
+    }
+    tape[0] = 0;
+    cap_route_calls = 0;
+    rc = rq_link(cap_span, cap_put, cap_pop, cap_more, target, target, "fixture.c", 0, 0,
+                 tape, 1, &text, &n, why, sizeof why);
+    tk_ok(rc == 1 && tx_eqz(why, want), "link-unit-route-names-capacity-refusal");
+    tk_ok(!cap_route_calls && text == 0 && n == 0, "link-unit-route-stops-before-next-stage");
+    mm_free(text);
+    cap_mark_count = 0;
+    fwd_reset();
+}
+
+static int gen(const char *path, int n) {
+    long cap = (long)n * 64 + 256, at = 0;
+    char *b = malloc((size_t)cap);
+    int i, rc;
+    if (!b) return -1;
+    for (i = 0; i < n; i++) at += snprintf(b + at, (size_t)(cap - at), "int fwdcap%d(int);\n", i);
+    at += snprintf(b + at, (size_t)(cap - at), "int main(int c, char **v) {\n    (void)v;\n    if (c > 99) {\n");
+    for (i = 0; i < n; i++) at += snprintf(b + at, (size_t)(cap - at), "        fwdcap%d(c);\n", i);
+    at += snprintf(b + at, (size_t)(cap - at), "    }\n    return 0;\n}\n");
+    rc = at < cap ? cx_write(path, b, (size_t)at) : -1;
+    free(b);
+    return rc;
+}
+
+/* 0 ran rc 0; 1 named refusal; 2 old product (cut or signal: SKIP); 3 anything else (FAIL) */
+static int product_one(const char *bound, const char *com, const char *work, int n) {
+    char src[700], name[64];
+    char *v[8];
+    int rc;
+    if (cx_fmt(src, sizeof src, "%s/p%d.c", work, n) || gen(src, n)) { printf("FAIL\tgen\t%d\n", n); return 3; }
+    v[0] = (char *)bound; v[1] = "50"; v[2] = (char *)com; v[3] = "-run"; v[4] = src; v[5] = 0;
+    rc = tk_run(v, work, 55000);
+    (void)cx_fmt(name, sizeof name, "N=%d", n);
+    if (rc == 0) return 0;
+    if (rc == 1 && tk_has(tk_err(), "forward stub buffer exceeded (forwarded symbols")
+        && tk_has(tk_err(), "limit bytes 131072")) return 1;
+    if (tk_has(tk_err(), "model driver: cli") || rc >= 128) {
+        printf("SKIP\tproduct-%s\told-product-rc%d\n", name, rc);
+        skipped++;
+        return 2;
+    }
+    printf("FAIL\tproduct-%s\trc%d\n", name, rc);
+    return 3;
+}
+
+static void product_part(const char *root, const char *com) {
+    char bound[4400], work[4400];
+    static const int edge[] = {340, 341, 342};
+    int i, r;
+    if (cx_fmt(bound, sizeof bound, "%s/tools/bound", root)) { tk_ok(0, "product-bound-path"); return; }
+    if (tk_scratch("fwd-cap", work, sizeof work)) { tk_ok(0, "product-scratch"); return; }
+    tk_ok(product_one(bound, com, work, 3) == 0, "product-N3-runs");
+    for (i = 0; i < 3; i++) {
+        char nm[64];
+        r = product_one(bound, com, work, edge[i]);
+        (void)cx_fmt(nm, sizeof nm, "product-N%d-runs-or-named", edge[i]);
+        if (r != 2) tk_ok(r == 0 || r == 1, nm);
+    }
+    r = product_one(bound, com, work, 413);
+    if (r != 2) tk_ok(r == 1, "product-N413-named-refusal");
+    r = product_one(bound, com, work, 1000);
+    if (r != 2) tk_ok(r == 1, "product-N1000-named-refusal");
+}
+
+int main(int argc, char **argv) {
+    char root[4096], com[4400];
+    int a = argc >= 2 && tx_eqz(argv[1], "--") ? 2 : 1;
+    tk_begin("");
+    if (argc == a + 1 && tx_eqz(argv[a], "--unit-only")) {
+        unit_part();
+        link_unit_part();
+        return tk_end("FWD_CAP_UNIT", "");
+    }
+    if (sy_cwd(root, 4096) < 0) return 2;
+    if (argc > a && argv[a][0] == '/') { if (tx_copy(com, 4400, argv[a], tx_len(argv[a], 4400))) return 2; }
+    else if (cx_fmt(com, sizeof com, "%s/unisacc.com", root)) return 2;
+    unit_part();
+    link_unit_part();
+    product_part(root, com);
+    {
+        char extra[64];
+        int rc;
+        (void)cx_fmt(extra, sizeof extra, "skipped=%d", skipped);
+        rc = tk_end("FWD_CAP", extra);
+        return rc ? rc : (skipped ? 3 : 0);
+    }
+}
