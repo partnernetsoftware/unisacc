@@ -1,8 +1,9 @@
-/* tools/check-verseq-gen.cx -- tools/verseq-gen.cx 的检查:夹具目录里逐条验证 R1/R2/R3/R4 的绿与红(负控)。
+/* tools/check-verseq-gen.cx -- tools/verseq-gen.cx 的检查:夹具目录里逐条验证 R1/R2/R3/R4/R5 的绿与红(负控)。
  *
  *   sh ./unisacc.com tools/check-verseq-gen.cx
  *
  * 夹具在系统临时目录,不碰仓库。每条红都必须点名规则且给原行;改动一处只红一处。
+ * R5 只查紧跟「顺延至」「置入」的号,以及回滚行 plans/v0.0.NN.md。同行原号不查。豁免:整行含「本页正文搬自」。
  * 末行 CHECK_VERSEQ_GEN<TAB>checks=N<TAB>failed=F,rc 0 全绿。 */
 #pragma unisa use sys.io
 #pragma unisa use sys.fs
@@ -40,6 +41,38 @@ static int run(char *out, long cap) {
     rc = cx_runv_timeout(v, 50, &o, &n);
     out[0] = 0;
     if (o && (long)n < cap) { mm_copy(out, cap, o, n); out[n] = 0; }
+    return rc;
+}
+static int fail_text_len(const char *h, long hn, const char *mark, int *out) {
+    long i = 0, ml = tx_len(mark, 80);
+    while (i < hn) {
+        long e = i; int tabs = 0; long p;
+        while (e < hn && h[e] != '\n') e++;
+        if (e - i >= ml) {
+            long j; int hit = 0;
+            for (j = i; j + ml <= e; j++) if (h[j] == mark[0] && mm_same(h + j, mark, ml)) { hit = 1; break; }
+            if (hit) {
+                for (p = i; p < e && tabs < 4; p++) if (h[p] == '\t') tabs++;
+                if (tabs == 4) { *out = (int)(e - p); return 1; }
+            }
+        }
+        i = e + 1;
+    }
+    return 0;
+}
+static int run_abs(const char *cwd, const char *root, char *out, long cap) {
+    char here[500], cmd[1400]; char *o = 0; size_t n = 0; int rc;
+    char *pv[] = {"pwd", 0};
+    if (cx_runv_timeout(pv, 10, &o, &n) != 0 || n < 2 || n >= sizeof here) return -1;
+    mm_copy(here, sizeof here, o, n); here[n] = 0;
+    for (n = 0; here[n]; n++) if (here[n] == '\n') here[n] = 0;
+    if (cx_fmt(cmd, sizeof cmd, "cd %s && env -u HOME sh %s/unisacc.com %s/tools/verseq-gen.cx -- --check --root %s", cwd, here, here, root)) return -1;
+    {   char *v[] = {"sh", "-c", cmd, 0};
+        o = 0; n = 0;
+        rc = cx_runv_timeout(v, 50, &o, &n);
+        out[0] = 0;
+        if (o && (long)n < cap) { mm_copy(out, cap, o, n); out[n] = 0; }
+    }
     return rc;
 }
 
@@ -101,6 +134,84 @@ int main(int argc, char **argv) {
         "slot\tversion\tclass\tstate\tnote\n2\t0.0.93\t执行器内核产品化\t已公开\t冻结\n3\t0.0.94\t别的主题\t建议\t未公开\n");
     rc = run(out, sizeof out);
     ck(rc == 0 && !has(out, tx_len(out, 200000), "FAIL\tR4\t"), "unpublished-row-not-checked");
+
+    /* R5 绿:自指号等于文件名;非自指行的别号(前置)不误报 */
+    fixture(0, 0, 0, 0);
+    put("plans/v0.0.93.md",
+        "# 0.0.93 计划:执行器内核产品化(执行器内核)\n"
+        "定稿(重排顺延至 0.0.93,置入 0.0.93):\n"
+        "- 回滚:按提交回退 plans/v0.0.93.md\n"
+        "前置 0.0.91 已满足\n");
+    rc = run(out, sizeof out);
+    ck(rc == 0 && !has(out, tx_len(out, 200000), "FAIL\tR5\t"), "r5-self-ref-pass");
+
+    /* R5 红:错号点名文件、行号、wrong=错号;只红 R5 */
+    put("plans/v0.0.93.md",
+        "# 0.0.93 计划:执行器内核产品化(执行器内核)\n"
+        "定稿(重排顺延至 0.0.99):\n"
+        "- 回滚:按提交回退 plans/v0.0.91.md\n");
+    rc = run(out, sizeof out);
+    ck(rc == 1 && has(out, tx_len(out, 200000), "FAIL\tR5\t") && has(out, tx_len(out, 200000), "plans/v0.0.93.md") && has(out, tx_len(out, 200000), "wrong=99 ") && has(out, tx_len(out, 200000), "wrong=91 "), "r5-wrong-number-names-file-line");
+    ck(!has(out, tx_len(out, 200000), "FAIL\tR1\t") && !has(out, tx_len(out, 200000), "FAIL\tR2\t") && !has(out, tx_len(out, 200000), "FAIL\tR3\t") && !has(out, tx_len(out, 200000), "FAIL\tR4\t"), "r5-wrong-only-r5");
+
+    /* 豁免:「本页正文搬自 v0.0.NN」整行不误报,同文件正确自指仍绿 */
+    put("plans/v0.0.93.md",
+        "# 0.0.93 计划:执行器内核产品化(执行器内核)\n"
+        "本页正文搬自 v0.0.80,顺延至 0.0.70,回滚 plans/v0.0.70.md\n"
+        "定稿(重排顺延至 0.0.93):\n"
+        "- 回滚:按提交回退 plans/v0.0.93.md\n");
+    rc = run(out, sizeof out);
+    ck(rc == 0 && !has(out, tx_len(out, 200000), "FAIL\tR5\t") && !has(out, tx_len(out, 200000), "wrong=70") && !has(out, tx_len(out, 200000), "wrong=80"), "r5-exempt-moved-from-line");
+    /* 原号说明不误报:顺延至后的号对,同行原号与从号不查 */
+    put("plans/v0.0.93.md",
+        "# 0.0.93 计划:执行器内核产品化(执行器内核)\n"
+        "定稿(重排顺延至 0.0.93(原 0.0.91),从 0.0.88 顺延至 0.0.93):\n"
+        "- 回滚:按提交回退 plans/v0.0.93.md\n");
+    rc = run(out, sizeof out);
+    ck(rc == 0 && !has(out, tx_len(out, 200000), "FAIL\tR5\t") && !has(out, tx_len(out, 200000), "wrong=91") && !has(out, tx_len(out, 200000), "wrong=88"), "r5-defer-with-origin-pass");
+    put("plans/v0.0.93.md",
+        "# 0.0.93 计划:执行器内核产品化(执行器内核)\n"
+        "定稿(重排置入 0.0.88):\n");
+    rc = run(out, sizeof out);
+    ck(rc == 1 && has(out, tx_len(out, 200000), "FAIL\tR5\t") && has(out, tx_len(out, 200000), "wrong=88 "), "r5-place-follow-only");
+    /* 短行:拷贝长度必须等于 wrong= 前缀加该行,不得带入下一行 */
+    put("plans/v0.0.93.md",
+        "# 0.0.93 计划:执行器内核产品化(执行器内核)\n"
+        "顺延至 0.0.99\n"
+        "NOTCOPIED\n");
+    rc = run(out, sizeof out);
+    {   int fl = 0;
+        ck(rc == 1 && fail_text_len(out, tx_len(out, 200000), "wrong=99 ", &fl) && fl == 9 + (int)tx_len("顺延至 0.0.99", 40) && !has(out, tx_len(out, 200000), "NOTCOPIED"), "r5-short-copy-len");
+    }
+    /* 长行:自指行超过截断阈值,wrong= 前缀在,文本字段长 399,行尾标记不得出现 */
+    {   char body[900]; long n = 0; int k;
+        const char *head = "# 0.0.93 计划:执行器内核产品化(执行器内核)\n顺延至 0.0.99 ";
+        long hl = tx_len(head, 200);
+        mm_copy(body, sizeof body, head, hl); n = hl;
+        for (k = 0; k < 420 && n < (long)sizeof body - 16; k++) body[n++] = 'A';
+        mm_copy(body + n, sizeof body - (size_t)n, "ZZLATE\n", 7); n += 7;
+        {   char p[700];
+            if (!cx_fmt(p, sizeof p, "%s/plans/v0.0.93.md", dir)) cx_write(p, body, n);
+        }
+        rc = run(out, sizeof out);
+        {   int fl = 0;
+            ck(rc == 1 && has(out, tx_len(out, 200000), "wrong=99 ") && fail_text_len(out, tx_len(out, 200000), "wrong=99 ", &fl) && fl == 399 && !has(out, tx_len(out, 200000), "ZZLATE"), "r5-long-line-trunc");
+        }
+    }
+    /* 环境与 cwd 反例:外目录加去掉 HOME,缺 version-seq 必须拒绝,不得回落到共享仓 */
+    {   char empty[400], foreign[400];
+        if (sy_mkdtemp(sy_tmpdir(), "verseq-empty-", empty, sizeof empty) != 0) return 2;
+        if (sy_mkdtemp(sy_tmpdir(), "verseq-cwd-", foreign, sizeof foreign) != 0) return 2;
+        rc = run_abs(foreign, empty, out, sizeof out);
+        ck(rc == 2 && has(out, tx_len(out, 200000), "VERSEQ\tREFUSE") && !has(out, tx_len(out, 200000), "plans/v0.0."), "env-missing-seq-refuses");
+        fixture(0, 0, 0, 0);
+        put("plans/v0.0.93.md",
+            "# 0.0.93 计划:执行器内核产品化(执行器内核)\n"
+            "定稿(重排顺延至 0.0.93):\n"
+            "- 回滚:按提交回退 plans/v0.0.93.md\n");
+        rc = run_abs(foreign, dir, out, sizeof out);
+        ck(rc == 0 && has(out, tx_len(out, 200000), "VERSEQ_SUMMARY") && !has(out, tx_len(out, 200000), "FAIL"), "cwd-foreign-honors-root");
+    }
 
     sy_printf("CHECK_VERSEQ_GEN\tchecks=%d\tfailed=%d\n", checks, failed);
     return failed ? 1 : 0;

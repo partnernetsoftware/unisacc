@@ -78,4 +78,4 @@ TBD 批:PASS TBD、FAIL TBD、UNKNOWN TBD、INVALID TBD (待 S2 整链、S3 严�
 
 ## 回滚方案
 
-公开前已备好回滚方案, 正式冻结接力后写入 `release/rollback.txt` (当前预备模板见 `release/rollback-0.0.95.txt`, 含草稿撤回 `v0.0.95`、Latest 移回上一公开版、前向撤销 `Y2`/`Y1`/`X` 与本机 Root 回退流程)。
+公开前已备好回滚方案, 正式冻结接力后写入 `release/rollback.txt` (当前预备模板见 `archive/release-pre0100/rollback-0.0.95.txt`, 含草稿撤回 `v0.0.95`、Latest 移回上一公开版、前向撤销 `Y2`/`Y1`/`X` 与本机 Root 回退流程)。

@@ -162,10 +162,14 @@ static int scan_headers(void) {
         size_t sz = 0;
         char *b = cx_read(list[i], &sz);
         long at = 0;
+        int in_rt_branch = 0;
         if (!b) die("cannot read", list[i]);
         while (at < (long)sz) {
             long e = at, p;
             while (e < (long)sz && b[e] != '\n') e++;
+            if (e - at >= 19 && pre(b + at, "#if defined(RT_UNIT)", 19)) { in_rt_branch = 1; at = e + 1; continue; }
+            if (in_rt_branch == 1 && e - at >= 5 && pre(b + at, "#else", 5)) { in_rt_branch = 2; at = e + 1; continue; }
+            if (in_rt_branch > 0 && e - at >= 6 && pre(b + at, "#endif", 6)) { in_rt_branch = 0; at = e + 1; continue; }
             /* 只看**列 0** 的 static：文件作用域声明才是全程序状态，缩进的一定在函数体内 */
             p = at;
             if (b[p] != 's') { at = e + 1; continue; }
@@ -200,8 +204,12 @@ static int scan_headers(void) {
                         while (u < e && ((b[u] >= 'a' && b[u] <= 'z') || (b[u] >= 'A' && b[u] <= 'Z') ||
                                          (b[u] >= '0' && b[u] <= '9') || b[u] == '_') && L < MAXNAM - 1) nm[L++] = b[u++];
                         nm[L] = 0;
-                        if (L > 0 && listed(nm) == 0) {
+                        int st_kind = listed(nm);
+                        if (L > 0 && st_kind == 0) {
                             sy_printf("FAIL\trt-shared-unlisted-static\t%s\t%s\n", list[i], nm);
+                            bad++;
+                        } else if (L > 0 && st_kind == 1 && in_rt_branch != 2) {
+                            sy_printf("FAIL\trt-shared-bare-static\t%s\t%s\n", list[i], nm);
                             bad++;
                         }
                     }

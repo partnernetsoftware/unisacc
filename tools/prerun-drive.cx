@@ -1636,6 +1636,25 @@ static void pd_prepare_opt_frame4(const char *eff_root, const char *cand, const 
     if (rc == 0)
         (void)sy_write_file(donep, "OPT_FRAME4_MATERIAL\tREADY\n", 26, 0644);
 }
+static int pd_text_has_enospc(const char *s, long n) {
+    if (!s || n <= 0) return 0;
+    if (tx_find(s, n, "No space left", 13) >= 0) return 1;
+    if (tx_find(s, n, "设备上没有空间", 21) >= 0) return 1;
+    if (tx_find(s, n, "ENOSPC", 6) >= 0) return 1;
+    return 0;
+}
+static int pd_infra_enospc(const char *outp) {
+    char ep[PD_PW];
+    unsigned char *b = 0; int64_t n = 0;
+    int hit = 0;
+    if (outp && outp[0] && !cx_fmt(ep, sizeof ep, "%s.stderr", outp) &&
+        sy_read_file(ep, &b, &n, 1 << 20) == 0 && b) {
+        hit = pd_text_has_enospc((const char *)b, n);
+        mm_free(b);
+    } else if (b) mm_free(b);
+    return hit;
+}
+
 
 static int pd_cmd_run(const char *root, const char *cand, const char *out_dir, int resume, int max_jobs, int load_cap, int max_retries, int lanes, const char *mock_runner) {
     char wpath[PD_PW], real_root[PD_PW];
@@ -1894,6 +1913,11 @@ static int pd_cmd_run(const char *root, const char *cand, const char *out_dir, i
                 } else {
                     rc = pd_window_attempt(eff_root, cand, mock_runner, wid, phase, run_ids, outp, jobs, attempt);
                 }
+            }
+            if (rc != 0 && pd_infra_enospc(outp)) {
+                printf("PRERUN_INFRA\treason=ENOSPC\twindow=%s\n", wid);
+                mm_free(wb);
+                return 2;
             }
             if (pd_verify_window_source(outp, wid, attempt, eff_root, frozen_rev)) {
                 mm_free(wb);

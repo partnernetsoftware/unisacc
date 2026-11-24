@@ -25,14 +25,102 @@ static int rows_have(const char *rows, long n, const char *want) {
     return rows && tx_find(rows, n, want, strlen(want)) >= 0;
 }
 
-int main(void) {
+int main(int argc, char **argv) {
     long t0 = sy_now_ms();
     char cwd[CPD_PW], work[CPD_PW], cmd[8192], out[CPD_OUT];
     const char *td = sy_tmpdir();
     const char *base_td = (td && td[0] == '/') ? td : "/tmp";
+    int infra_only = (argc > 1 && argv[1] && !strcmp(argv[1], "--infra"));
     if (!getcwd(cwd, sizeof cwd)) return 2;
     if (cx_fmt(work, sizeof work, "%s/cpd-%d", base_td, (int)getpid())) return 2;
     if (mkdir(work, 0700) != 0 && errno != EEXIST) return 2;
+    {
+        char ids[CPD_PW], pdir[CPD_PW], mock[CPD_PW], pd_path[CPD_PW], heavy[CPD_PW];
+        const char *ms_space =
+            "#!/bin/sh\n"
+            "out=$5\n"
+            "echo '# devsvc qualify' > \"$out\"\n"
+            "echo No space left on device >&2\n"
+            "exit 2\n";
+        const char *ms_at0 =
+            "#!/bin/sh\n"
+            "out=$5\n"
+            "echo '# devsvc qualify' > \"$out\"\n"
+            "printf 'ENOSPC\\n' >&2\n"
+            "exit 2\n";
+        const char *ms_zh =
+            "#!/bin/sh\n"
+            "out=$5\n"
+            "echo '# devsvc qualify' > \"$out\"\n"
+            "printf '\\350\\256\\276\\345\\244\\207\\344\\270\\212\\346\\262\\241\\346\\234\\211\\347\\251\\272\\351\\227\\264\\n' >&2\n"
+            "exit 2\n";
+        const char *ms_stdout =
+            "#!/bin/sh\n"
+            "out=$5\n"
+            "echo ENOSPC > \"$out\"\n"
+            "exit 2\n";
+        const char *ms_empty =
+            "#!/bin/sh\n"
+            "out=$5\n"
+            "echo '# devsvc qualify' > \"$out\"\n"
+            "exit 2\n";
+        const char *ms_fake =
+            "#!/bin/sh\n"
+            "out=$5\n"
+            "echo '# devsvc qualify' > \"$out\"\n"
+            "printf 'enospc\\nENOSP\\nENO SPC\\n' >&2\n"
+            "exit 2\n";
+        if (cx_fmt(ids, sizeof ids, "%s/ids.txt", work) || cx_fmt(pdir, sizeof pdir, "%s/plan", work) ||
+            cx_fmt(mock, sizeof mock, "%s/mock.sh", work) ||
+            cx_fmt(pd_path, sizeof pd_path, "%s/tools/prerun-drive.cx", cwd)) return 2;
+        if (cx_write(ids, "a\nb\nc\nd\n", 8)) return 2;
+        if (cx_fmt(heavy, sizeof heavy, "%s/heavy.txt", work) || cx_write(heavy, "a\nb\nc\nd\n", 8)) return 2;
+        if (cx_fmt(cmd, sizeof cmd, "sh '%s/unisacc.com' '%s' -- plan --ids-file '%s' --out '%s' --win-size 8 --warmup 0 --heavy-file '%s'",
+            cwd, pd_path, ids, pdir, heavy)) return 2;
+        if (ckk_sh("check-prerun-drive", cmd, out, sizeof out) != 0) return 2;
+        if (cx_write(mock, ms_space, strlen(ms_space))) return 2;
+        if (cx_fmt(cmd, sizeof cmd, "chmod +x '%s'; sh '%s/unisacc.com' '%s' -- run --root '%s' --out '%s' --mock-runner '%s' --max-retries 1 --no-keep-going",
+            mock, cwd, pd_path, cwd, pdir, mock)) return 2;
+        { int rc = ckk_sh("check-prerun-drive", cmd, out, sizeof out);
+          ck(rc == 2 && ckk_has(out, CPD_OUT, "PRERUN_INFRA\treason=ENOSPC"),
+             "infra-enospc-text: stderr No space left stops with INFRA ENOSPC"); }
+        if (cx_write(mock, ms_at0, strlen(ms_at0))) return 2;
+        if (cx_fmt(cmd, sizeof cmd, "chmod +x '%s'; sh '%s/unisacc.com' '%s' -- run --root '%s' --out '%s' --mock-runner '%s' --max-retries 1 --no-keep-going",
+            mock, cwd, pd_path, cwd, pdir, mock)) return 2;
+        { int rc = ckk_sh("check-prerun-drive", cmd, out, sizeof out);
+          ck(rc == 2 && ckk_has(out, CPD_OUT, "PRERUN_INFRA\treason=ENOSPC"),
+             "infra-enospc-at-byte0: stderr starts with ENOSPC (find=0)"); }
+        if (cx_write(mock, ms_zh, strlen(ms_zh))) return 2;
+        if (cx_fmt(cmd, sizeof cmd, "chmod +x '%s'; sh '%s/unisacc.com' '%s' -- run --root '%s' --out '%s' --mock-runner '%s' --max-retries 1 --no-keep-going",
+            mock, cwd, pd_path, cwd, pdir, mock)) return 2;
+        { int rc = ckk_sh("check-prerun-drive", cmd, out, sizeof out);
+          ck(rc == 2 && ckk_has(out, CPD_OUT, "PRERUN_INFRA\treason=ENOSPC"),
+             "infra-enospc-zh: stderr 设备上没有空间"); }
+        if (cx_write(mock, ms_stdout, strlen(ms_stdout))) return 2;
+        if (cx_fmt(cmd, sizeof cmd, "chmod +x '%s'; sh '%s/unisacc.com' '%s' -- run --root '%s' --out '%s' --mock-runner '%s' --max-retries 1 --no-keep-going",
+            mock, cwd, pd_path, cwd, pdir, mock)) return 2;
+        { int rc = ckk_sh("check-prerun-drive", cmd, out, sizeof out);
+          ck(!ckk_has(out, CPD_OUT, "PRERUN_INFRA\treason=ENOSPC"),
+             "infra-enospc-stdout-only: ENOSPC on stdout not stderr does not INFRA"); (void)rc; }
+        if (cx_write(mock, ms_empty, strlen(ms_empty))) return 2;
+        if (cx_fmt(cmd, sizeof cmd, "chmod +x '%s'; sh '%s/unisacc.com' '%s' -- run --root '%s' --out '%s' --mock-runner '%s' --max-retries 1 --no-keep-going",
+            mock, cwd, pd_path, cwd, pdir, mock)) return 2;
+        { int rc = ckk_sh("check-prerun-drive", cmd, out, sizeof out);
+          ck(!ckk_has(out, CPD_OUT, "PRERUN_INFRA\treason=ENOSPC"),
+             "infra-enospc-empty-stderr: empty sidecar does not INFRA ENOSPC"); (void)rc; }
+        if (cx_write(mock, ms_fake, strlen(ms_fake))) return 2;
+        if (cx_fmt(cmd, sizeof cmd, "chmod +x '%s'; sh '%s/unisacc.com' '%s' -- run --root '%s' --out '%s' --mock-runner '%s' --max-retries 1 --no-keep-going",
+            mock, cwd, pd_path, cwd, pdir, mock)) return 2;
+        { int rc = ckk_sh("check-prerun-drive", cmd, out, sizeof out);
+          ck(!ckk_has(out, CPD_OUT, "PRERUN_INFRA\treason=ENOSPC"),
+             "infra-enospc-approx-neg: lowercase/truncated ENOSP do not INFRA"); (void)rc; }
+        if (infra_only) {
+            { char *rmv[] = {"rm", "-rf", work, 0}; (void)ck_run(rmv, out, sizeof out); }
+            printf("CHECK_PRERUN_DRIVE\tok=%d\tfailed=%d\tms=%ld\n", ck_assertions() - ck_failures(), ck_failures(), sy_now_ms() - t0);
+            return ck_failures() ? 1 : 0;
+        }
+    }
+
 
     /* (1) plan on 421 synthetic ids */
     char ids421[CPD_PW], pdir[CPD_PW];

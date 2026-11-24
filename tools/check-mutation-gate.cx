@@ -19,8 +19,13 @@
  *   empty-summary-keeps-slots an EMPTY SUMMARY is not a verdict: slots stay, reason=no-summary
  *   foreign-dir-not-mine      a dir with a verdict-looking SUMMARY and slot trees but no conf.tsv/session.tsv
  *                             is named reason=not-mine and nothing is deleted
- *   conf-without-session-not-mine  only one of the two registration files is enough to be not-mine
- *   reentry-names-paths       a second prep on the same dir refuses, and names conf.tsv/session.tsv/slot-N
+ *   conf-without-session-not-mine  conf.tsv without session.tsv is not-mine
+ *   session-without-conf-not-mine  session.tsv without conf.tsv is not-mine too (the mirror case: flipping
+ *                             the conf test to always-true must not stay green)
+ *   empty-registration-not-mine    EMPTY conf.tsv + EMPTY session.tsv is not proof of ownership
+ *   session-without-state-not-mine a session.tsv with no `state<TAB>VALUE` line is not ours either
+ *   reentry-names-paths       a second prep on the same dir refuses, names conf.tsv/session.tsv/slot-N, and
+ *                             says reclaim needs a verdict first (reentry-does-not-promise-reclaim)
  *   reclaim-keeps-summary     SUMMARY survives the slot deletion
  *   derive-out-prep / -registered   no --out: <TMPDIR>/unisacc-session-mutation-gate-<stem>-<sha8>, state
  *                             prepared in session.tsv, conf.tsv written -- for an explicit --out as well
@@ -145,6 +150,40 @@ int main(int argc, char **argv) {
     ck(rc == 0, "fixture-repo");
     if (rc != 0) { printf("%s\nCHECK_MUTATION_GATE\tok=%d\tfailed=%d\n", out, ok, failed); return 1; }
 
+    /* Five lexical facts a line-oriented or first-character test cannot see.  The fixture file, by line:
+       5  a block comment opens and names a number
+       6  its continuation is plain prose (no leading asterisk) and names 4096, 8192 and `a < b`
+       7  the comment closes and the same line carries code with a second number
+       8  a line comment that itself contains a block opener
+       9  a #define whose value is a number
+       10 code after all of that
+       Red on the older tool: it took line 6 for code (first non-blank is a letter), so the prose numbers became
+       candidates, and it masked line 7 from comment state 0, so it rewrote the comment's 7003 and left 60 alone.
+       Lines 8 and 9 pin no-regression instead: stopping at a line comment and skipping a directive must keep
+       holding, or a note would swallow the next line and a #define value would score as a kill. */
+    cx_fmt(sc, sizeof sc,
+        "set -e; cd %s; mkdir -p repo2; cd repo2; git init -q; git config user.email t@t; git config user.name t;\n"
+        "printf '%%s\\n' 'int main(void) {' '    return 0;' '}' > tools2.cx; git add tools2.cx; git commit -q -m base; git tag base\n"
+        "printf '%%s\\n' 'int main(void) {' '    return 0;' '}' 'static int addone(int v) {' '    /* adds one and 7001 is an example,' '       so 4096 and 8192 and a < b are prose, never a mutant' '       ends at 7003 */ int u = 60;' '    // note 5005 /* and 6006 too' '#define K 4096' '    return v + 1 + u;' '}' > tools2.cx; git diff > ../fx2.patch; git checkout -q tools2.cx", T);
+    rc = ckk_sh_t("check-mutation-gate", sc, out, sizeof out, 30);
+    ck(rc == 0, "block-comment-fixture-repo");
+    cx_fmt(sc, sizeof sc, "sh ./unisacc.com tools/mutation-gate.cx -- prep --repo %s/repo2 --base base --patch %s/fx2.patch "
+           "--check 'echo CHECK ok=1 failed=0' --out %s/bc --par 1 --max 60 2>&1", T, T, T);
+    rc = ckk_sh_t("check-mutation-gate", sc, out, sizeof out, 55);
+    ck(rc == 0 && ckk_has(out, sizeof out, "MG_PREP_DONE"), "block-comment-prep");
+    /* mutants.tsv is `id <TAB> file <TAB> line <TAB> kind <TAB> description`; the line column pins each case. */
+    cx_fmt(sc, sizeof sc, "cut -f3 %s/bc/mutants.tsv | grep -cx 10", T);
+    rc = ckk_sh_t("check-mutation-gate", sc, out, sizeof out, 10);
+    ck(rc == 0 && atoi(out) > 0, "block-comment-code-after-comment-still-mutated");
+    cx_fmt(sc, sizeof sc, "cut -f3 %s/bc/mutants.tsv | grep -cE '^(6|8|9)$'", T);
+    rc = ckk_sh_t("check-mutation-gate", sc, out, sizeof out, 10);
+    ck(rc != 0, "block-comment-prose-line-comment-and-define-not-mutated");
+    cx_fmt(sc, sizeof sc, "cut -f5 %s/bc/mutants.tsv | grep -cx 'col 32 60 -> 61'", T);
+    rc = ckk_sh_t("check-mutation-gate", sc, out, sizeof out, 10);
+    ck(rc == 0 && atoi(out) == 1, "block-comment-close-takes-code-not-prose");
+    cx_fmt(sc, sizeof sc, "grep -c 7003 %s/bc/mutants.tsv", T);
+    rc = ckk_sh_t("check-mutation-gate", sc, out, sizeof out, 10);
+    ck(rc != 0, "block-comment-close-prose-number-not-mutated");
     rc = gate("strong", "o=$(sh ./unisacc.com tools/fx.cx) && test \"$o\" = \"$(printf \"start\\nR=5 20 -1 10 -2\")\"", "--report --expect-rc 1", out, sizeof out);
     ck(rc == 0 && ckk_has(out, sizeof out, "verdict=PASS") && !ckk_has(out, sizeof out, " mutants=0 "), "strong-high");
     const char *strong_quality = strstr(out, "MUTATION_QUALITY named=");
@@ -204,9 +243,14 @@ int main(int argc, char **argv) {
            "--check 'echo CHECK ok=1 failed=0' --out %s/orphan --par 2 2>&1", T, T, T);
     rc = ckk_sh_t("check-mutation-gate", sc, out, sizeof out, 30);
     ck(rc == 2 && ckk_has(out, sizeof out, "out dir already prepared")
-       && ckk_has(out, sizeof out, "reclaim with: sh ./unisacc.com tools/mutation-gate.cx -- reclaim --out")
+       && ckk_has(out, sizeof out, "reclaim --out clears slots only after a verdict")
+       && ckk_has(out, sizeof out, "with a verdict there: sh ./unisacc.com tools/mutation-gate.cx -- reclaim --out")
        && ckk_has(out, sizeof out, "orphan/conf.tsv") && ckk_has(out, sizeof out, "orphan/session.tsv")
        && ckk_has(out, sizeof out, "orphan/slot-0"), "reentry-names-paths");
+    /* F2: the first line must not promise that reclaim works here -- this dir has no verdict yet, so say
+       what reclaim needs and what to delete by hand. A message that only says 'run reclaim' strands the
+       operator: reclaim reports no-summary and the dir stays refused. */
+    ck(!ckk_has(out, sizeof out, "reclaim with:"), "reentry-does-not-promise-reclaim");
     cx_fmt(sc, sizeof sc, "printf 'MUTATION_GATE mutants=1 killed=1 verdict=PASS\\n' > %s/orphan/SUMMARY && "
            "sh ./unisacc.com tools/mutation-gate.cx -- reclaim --out %s/orphan 2>&1", T, T);
     rc = ckk_sh_t("check-mutation-gate", sc, out, sizeof out, 20);
@@ -240,6 +284,66 @@ int main(int argc, char **argv) {
     cx_fmt(sc, sizeof sc, "test -d %s/half/slot-0", T);
     ck(rc == 0 && ckk_has(out, sizeof out, "MG_SLOTS_KEPT reason=not-mine")
        && ckk_sh_t("check-mutation-gate", sc, 0, 0, 10) == 0, "conf-without-session-not-mine");
+
+    /* F1, the mirror of the case above: a real session.tsv but NO conf.tsv. Deleting on session alone
+       would make the conf check ornamental -- gatekeeper flipped `if (sy_exists(conf))` to `if (0)` and
+       this dir was the one that stayed green. */
+    cx_fmt(sc, sizeof sc, "mkdir -p %s/noconf/slot-0 %s/noconf/slot-1 && cp %s/orphan/session.tsv %s/noconf/ && "
+           "printf 'MUTATION_GATE mutants=1 killed=1 verdict=PASS\\n' > %s/noconf/SUMMARY && "
+           "sh ./unisacc.com tools/mutation-gate.cx -- reclaim --out %s/noconf 2>&1", T, T, T, T, T, T);
+    rc = ckk_sh_t("check-mutation-gate", sc, out, sizeof out, 20);
+    cx_fmt(sc, sizeof sc, "test -d %s/noconf/slot-0 && test -d %s/noconf/slot-1", T, T);
+    ck(rc == 0 && ckk_has(out, sizeof out, "MG_SLOTS_KEPT reason=not-mine")
+       && !ckk_has(out, sizeof out, "MG_SLOTS_RECLAIMED")
+       && ckk_sh_t("check-mutation-gate", sc, 0, 0, 10) == 0, "session-without-conf-not-mine");
+
+    /* F3: the names alone are not proof. An EMPTY conf.tsv plus an EMPTY session.tsv (no `state` line)
+       must not authorise deletion -- that pair is something any caller can create by touching two files. */
+    cx_fmt(sc, sizeof sc, "mkdir -p %s/emptyreg/slot-0 && : > %s/emptyreg/conf.tsv && : > %s/emptyreg/session.tsv && "
+           "printf 'MUTATION_GATE mutants=1 killed=1 verdict=PASS\\n' > %s/emptyreg/SUMMARY && "
+           "sh ./unisacc.com tools/mutation-gate.cx -- reclaim --out %s/emptyreg 2>&1", T, T, T, T, T);
+    rc = ckk_sh_t("check-mutation-gate", sc, out, sizeof out, 20);
+    cx_fmt(sc, sizeof sc, "test -d %s/emptyreg/slot-0", T);
+    ck(rc == 0 && ckk_has(out, sizeof out, "MG_SLOTS_KEPT reason=not-mine")
+       && ckk_sh_t("check-mutation-gate", sc, 0, 0, 10) == 0, "empty-registration-not-mine");
+    /* ...and a session.tsv without a state line is not ours either, even when conf.tsv has bytes */
+    cx_fmt(sc, sizeof sc, "mkdir -p %s/nostate/slot-0 && cp %s/orphan/conf.tsv %s/nostate/ && "
+           "printf 'pid\\t1\\n' > %s/nostate/session.tsv && "
+           "printf 'MUTATION_GATE mutants=1 killed=1 verdict=PASS\\n' > %s/nostate/SUMMARY && "
+           "sh ./unisacc.com tools/mutation-gate.cx -- reclaim --out %s/nostate 2>&1", T, T, T, T, T, T);
+    rc = ckk_sh_t("check-mutation-gate", sc, out, sizeof out, 20);
+    cx_fmt(sc, sizeof sc, "test -d %s/nostate/slot-0", T);
+    ck(rc == 0 && ckk_has(out, sizeof out, "MG_SLOTS_KEPT reason=not-mine")
+       && ckk_sh_t("check-mutation-gate", sc, 0, 0, 10) == 0, "session-without-state-not-mine");
+    /* the state field is a FIELD: 'state\t' text inside another line's value is not the registration.
+       Without this case a scanner that ignores line starts deletes a directory it does not own. */
+    cx_fmt(sc, sizeof sc, "mkdir -p %s/midstate/slot-0 && cp %s/orphan/conf.tsv %s/midstate/ && "
+           "printf 'pid\\t1\\nnote\\tstate\\tprepared\\n' > %s/midstate/session.tsv && "
+           "printf 'MUTATION_GATE mutants=1 killed=1 verdict=PASS\\n' > %s/midstate/SUMMARY && "
+           "sh ./unisacc.com tools/mutation-gate.cx -- reclaim --out %s/midstate 2>&1", T, T, T, T, T, T);
+    rc = ckk_sh_t("check-mutation-gate", sc, out, sizeof out, 20);
+    cx_fmt(sc, sizeof sc, "test -d %s/midstate/slot-0", T);
+    ck(rc == 0 && ckk_has(out, sizeof out, "MG_SLOTS_KEPT reason=not-mine")
+       && ckk_sh_t("check-mutation-gate", sc, 0, 0, 10) == 0, "midline-state-not-mine");
+    /* ...and an empty state VALUE ('state\t' then newline) is not a state either */
+    cx_fmt(sc, sizeof sc, "mkdir -p %s/emptystate/slot-0 && cp %s/orphan/conf.tsv %s/emptystate/ && "
+           "printf 'pid\\t1\\nstate\\t\\n' > %s/emptystate/session.tsv && "
+           "printf 'MUTATION_GATE mutants=1 killed=1 verdict=PASS\\n' > %s/emptystate/SUMMARY && "
+           "sh ./unisacc.com tools/mutation-gate.cx -- reclaim --out %s/emptystate 2>&1", T, T, T, T, T, T);
+    rc = ckk_sh_t("check-mutation-gate", sc, out, sizeof out, 20);
+    cx_fmt(sc, sizeof sc, "test -d %s/emptystate/slot-0", T);
+    ck(rc == 0 && ckk_has(out, sizeof out, "MG_SLOTS_KEPT reason=not-mine")
+       && ckk_sh_t("check-mutation-gate", sc, 0, 0, 10) == 0, "empty-state-value-not-mine");
+    /* a session.tsv whose FIRST line is the state must be recognised: searching from offset 1 would skip it
+       (a scanner that starts past byte 0 is a scanner that misses a file written by another writer). */
+    cx_fmt(sc, sizeof sc, "mkdir -p %s/firststate/slot-0 && cp %s/orphan/conf.tsv %s/firststate/ && "
+           "printf 'state\\tprepared\\n' > %s/firststate/session.tsv && "
+           "printf 'MUTATION_GATE mutants=1 killed=1 verdict=PASS\\n' > %s/firststate/SUMMARY && "
+           "sh ./unisacc.com tools/mutation-gate.cx -- reclaim --out %s/firststate 2>&1", T, T, T, T, T, T);
+    rc = ckk_sh_t("check-mutation-gate", sc, out, sizeof out, 20);
+    cx_fmt(sc, sizeof sc, "test ! -d %s/firststate/slot-0 && test -s %s/firststate/SUMMARY", T, T);
+    ck(rc == 0 && ckk_has(out, sizeof out, "MG_SLOTS_RECLAIMED")
+       && ckk_sh_t("check-mutation-gate", sc, 0, 0, 10) == 0, "state-on-first-line-reclaimed");
 
     /* --out absent: the dir is derived from the patch bytes, so prep/report/worker agree, and the
        registration file says prepared, for a derived and for an explicit --out alike. Two different

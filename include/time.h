@@ -186,12 +186,24 @@ static struct tm *_unisa_fill(__u_word t, __u_word off, int dst, const char *zon
 #if !__UNISA_FTRIM_LIBC || __UN_gmtime_r
 static struct tm *gmtime_r(const time_t *__u_t, struct tm *__u_r) { return _unisa_fill((__u_word)*__u_t, 0, 0, "UTC", __u_r); }
 #endif
+#if defined(RT_UNIT)
+struct tm _unisa_tmbuf;
+#elif defined(RT_EXTERN)
+extern struct tm _unisa_tmbuf;
+#else
 static struct tm _unisa_tmbuf;
+#endif
 #if !__UNISA_FTRIM_LIBC || __UN_gmtime
 static struct tm *gmtime(const time_t *__u_t) { return gmtime_r(__u_t, &_unisa_tmbuf); }
 #endif
 /* the zone, loaded once */
+#if defined(RT_UNIT)
+unsigned char _unisa_tz[65536]; __u_word _unisa_tzn; int _unisa_tzstate;
+#elif defined(RT_EXTERN)
+extern unsigned char _unisa_tz[65536]; extern __u_word _unisa_tzn; extern int _unisa_tzstate;
+#else
 static unsigned char _unisa_tz[65536]; static __u_word _unisa_tzn; static int _unisa_tzstate;   /* 0 not loaded, 1 TZif, 2 UTC */
+#endif
 #if !__UNISA_FTRIM_LIBC || __UN__unisa_be
 static __u_word _unisa_be(const unsigned char *p, int n) { __u_word v; int k; v = 0; k = 0; while (k < n) { v = (v << 8) | p[k]; k = k + 1; } if (n == 4 && (v & 0x80000000L)) v = v - 4294967296L; return v; }
 #endif
@@ -349,7 +361,13 @@ static size_t strftime(char *__u_s, size_t __u_max, const char *__u_f, const str
     return n;
 }
 #endif
+#if defined(RT_UNIT)
+char _unisa_asc[32];
+#elif defined(RT_EXTERN)
+extern char _unisa_asc[32];
+#else
 static char _unisa_asc[32];
+#endif
 #if !__UNISA_FTRIM_LIBC || __UN_asctime
 static char *asctime(const struct tm *__u_tm) { strftime(_unisa_asc, 32, "%a %b %e %H:%M:%S %Y\n", __u_tm); return _unisa_asc; }
 #endif

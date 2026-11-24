@@ -7,7 +7,7 @@
 - 改图只改节点文字或连线,一个节点一句现状加一个入口;过程不入图。
 - 只记三类:别人必须遵守的决定、不可逆的对外动作、阻塞发布的未验证项。
 - 子代理不提交本文件;主调度只在里程碑(整链结束、公开、装机完成)改一次。
-- 版本序在 build/version-seq.tsv,各版内容与验收见对应 plans/v0.0.NN.md(prd.md 9.4 版本表为 0.0.65 至 0.0.80 历史记录),未验证项真源在 build/state-unverified.tsv(tools/state-gen.cx 与下方"仍未验证"逐条对拍)。
+- 版本序在 build/version-seq.tsv,各版内容与验收见对应 plans/v0.0.NN.md(0.0.65 至 0.0.80 的旧版本表已迁入 prd_hist.md「prd.md 9.4 版本表」),未验证项真源在 build/state-unverified.tsv(tools/state-gen.cx 与下方"仍未验证"逐条对拍)。
 - 任务表行 `| 部分落地 | ID、ID |` 与 `| 已落地 | ID、ID |` 供 tools/observe-agents.cx 读取。
 
 ## 地图
@@ -16,7 +16,7 @@
 
 - 版本序与当前状态:build/version-seq.tsv(唯一权威;发布证据索引入口 release/evidence/)。
 - 所有者需求与未告知断点:build/owner-reqs.tsv(只降不升)。
-- 起草快照:0.0.100 已公开(2026-11-24 07:39,v0.0.100 Latest,冻结 F=b348b6f9fd,X=51fc85eeaf,Y1=8f6b8e39c8,Y2=172410320c,APE e173defd0c 9019662B,CI 45285851131 六格 QUALIFIED,首轮 45283344177 osx/x86_64 超时加 ENOTFOUND 经 --redispatch 重派全绿,NOT_QUALIFIED,严格证据 466 批 PASS 463 FAIL 1(precommit-coverage-root 4/1 到期 0.0.101) UNKNOWN 2,本机 Root 已升至 unisacc 0.0.100,含前端 A 两项 C99 修复与 0.0.99 全量已合入内容;详见 release/notes-0.0.100.md 与 plans/v0.0.100.md);0.0.99 记为未公开(不打 tag、不发 GitHub Release;因静默窗解禁后 main 合入 cx/sys/fs.cx 致 SID 前移、现行发布工具硬编码 origin/main 门禁且分支直发补丁不在发布途中首次投产,按方案丁合并随 0.0.100 一次发布,0.0.99 整链 44d1a68dbd 与 191 窗严格预跑 461/1/2 证据保留备查,含 run-cache __FILE__ 相对路径键绑定、UNISACC_RUN_CACHE_KEY_OLD=1、sy_statvfs、mutation-gate 自清;计划 plans/v0.0.99.md);后续版本序(build/version-seq.tsv):0.0.101 逐单元共享状态接线(plans/v0.0.101.md)、0.0.102 cxmod 后缀按内容身份(plans/v0.0.102.md)、0.0.103 执行核动作分派内联、0.0.104 切片转网第一批、0.0.105 精确钉键重做、0.0.106 CXM_MAXU 256、0.0.107..0.0.121 顺延。
+- 起草快照:0.0.101 已公开(2026-11-24 11:26,v0.0.101 Latest,冻结 F=8f0a0af2c4,候选 T=99aa998d87,X=a0aac99a84,Y1=06bd960f8a,Y2=27ca1178a8,APE bb715a8bd3 8827155B,CI 45318518144 六格 QUALIFIED,NOT_QUALIFIED,严格证据 469 批 PASS 454 FAIL 13(1 项 precommit-coverage-root 4/1 加 12 项 netregen-*module* 精确指纹 image=OLD->NEW 豁免,均到期 0.0.102) UNKNOWN 2,本机 Root 已升至 unisacc 0.0.101,含逐单元共享状态接线与 _unisa_envheap/RT_UNIT 修复;详见 release/notes-0.0.101.md 与 0.0.101 计划 plans/v0.0.101.md);0.0.100 已公开(v0.0.100,Y2=172410320c,plans/v0.0.100.md);0.0.99 记为未公开(已随 0.0.100 合入公开,0.0.99 计划 plans/v0.0.99.md);后续版本序(build/version-seq.tsv):0.0.102 cxmod 后缀按内容身份(plans/v0.0.102.md)、0.0.103 执行核动作分派内联、0.0.104 切片转网第一批(plans/v0.0.104.md)、0.0.105 精确钉键重做(plans/v0.0.105.md)、0.0.106 CXM_MAXU 256(plans/v0.0.106.md)、0.0.107..0.0.121 顺延。
 
 
 ## 决定(别人必须遵守)
@@ -97,6 +97,7 @@
 
 - 分车道未核项:APE 字节对 ext 改动不变只是推断;14 个链接目标文件是否进隐式运行库前缀;四个 sysx 别名是否有非 use 形式使用者(去别名前必须先查)。入口:plans/reviews/2026-11-20-layer-lanes.md。
 - 缺口 OBJABI-ARM64-X7-STACK-BELOW-SP-SIGNAL(arm64 -funit 单元 x7 栈在 sp 之下,异步信号可覆盖):build/pkg-gaps.tsv 仍记 OPEN。待核:0.0.82 版本行写有 x7 修复,是否可关。
+- release-flow stage-a 未支持 expected-fail.tsv 的 image=OLD->NEW 指纹豁免(2026-11-24 0.0.101 发布暴露):`tools/release-flow.cx:84` 仅解析 `count=` 未解析 `image=`,第 232 行因 `!b->count` 拒绝全部 `image=` 豁免行;底层正式链(`release-run --pack`、`release-exec --warm`、`release-prep`、`release-exec --execute`)原生支持 `image=` 已全过机检并完成 0.0.101 发布。待发布工具线补齐 `release-flow.cx` 的 `image=` 解析与自测。
 
 ### 仍未验证(缺什么 / 清零动作)
 

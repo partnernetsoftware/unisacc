@@ -15,7 +15,7 @@
 | 审阅记录 | nn-table-review-2026-11-18.md、reviews/(2026-11-20 起 fable 报告正文拷贝:asm-acceleration、core-layer-marking、devsvc-evolution、chain-incremental、table-construction、layer-lanes、core-ext-matrix、fast-iteration;gate-086-edit-rerun 已归档);分车道条文改写稿 archive/plans-pre094/claude-md-layer-lanes-draft.md(暂不生效);团队编排骨架 layer-orchestration.md(第 (12) 节主调度流程改进规则) |
 | 历史但留原位(有工具或登记表字面量) | release-0.0.43.md(tools/release-board.cx 等读取)、v0.0.78.md(tools/tests/cx 引用) |
 | 子目录 | briefs/(简报规范与模板)、pending/、patches/、w5-patches/ |
-| 历史归档指针 | `archive/plans/`(2026-11 首轮 58 个)、`archive/plans-pre082/`(0.0.82 前已公开版本的计划与设计,清单见其 README.tsv)、`archive/plans-pre086/`(0.0.82 到 0.0.85 已公开版本的计划,清单见其 README.tsv)、`archive/plans-pre090/`(0.0.86 到 0.0.89 已公开版本的计划,清单见其 README.tsv)、`archive/plans-pre094/`(0.0.90 到 0.0.93 与 roadmap-rev3、claude-md-layer-lanes-draft,清单见其 README.tsv)、`archive/plans-2026-11/`(2026-11-21 P1 批 7 个旧版计划与方案) |
+| 历史归档指针 | `archive/plans/`(2026-11 首轮 58 个)、`archive/plans-pre082/`(0.0.82 前已公开版本的计划与设计,清单见其 README.tsv)、`archive/plans-pre086/`(0.0.82 到 0.0.85 已公开版本的计划,清单见其 README.tsv)、`archive/plans-pre090/`(0.0.86 到 0.0.89 已公开版本的计划,清单见其 README.tsv)、`archive/plans-pre094/`(0.0.90 到 0.0.93 与 roadmap-rev3、claude-md-layer-lanes-draft,清单见其 README.tsv)、`archive/plans-2026-11/`(2026-11-21 P1 批 7 个旧版计划与方案);发布件归档见 `archive/release-pre0100/`(2026-11-24 第一批,清单见其 README.tsv) |
 
 说明:`release/notes-*.md` 与 `release/evidence/` 下的历史发布说明及证据正文保持原文不改,其中提及的旧 `plans/<file>` 路径对应下表中的 `archive/plans/<file>`。
 
