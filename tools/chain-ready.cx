@@ -45,6 +45,12 @@
  *                  reads it first (0.0.86 start 1 refused there).  Else READY=no preflight-entry-build-json
  *                  kind=missing|symlink|not-regular with the cp --remove-destination -L fix.  Kept apart from 12 so
  *                  the missing record is named on its own; tools/bg-candidate.cx start runs --only 12 (both).
+ *  16-disk-free   available space on the filesystem that holds the chain directory: sy_disk_avail_mb(repo)
+ *                  (f_bavail*frsize/2^20) first, a bounded `tools/bound 10 df -Pk` fallback second, and
+ *                  --disk-free-gb N injects the figure.  Below 8G is FAIL (DISK_BLOCKED), 8..20G is PASS with
+ *                  DISK_LOW, and when BOTH measurements fail the row is FAIL (DISK_UNMEASURED) -- an unmeasured
+ *                  disk is not a passed gate.  The multiplier gate (peak*3/2 from the chain disk ledger) is
+ *                  NOT here yet; the thresholds are still 8G/20G.
  *  13-snap-cache   if the chain snapshot of this rev (cxlib.chainroot cr_snap; --rev REV, else git rev-parse HEAD)
  *                  exists, its unisacc.com and build.json are regular and sha256-equal to ROOT's, else
  *                  READY=no snap-cache-file-not-regular|snap-cache-stale with a mv command (never removed here).
@@ -879,6 +885,51 @@ static void row(const char *item, const char *st, const char *ev, long ms) {
 }
 static void row_judged(const char *item, int ok, const char *ev, long ms) { row(item, ok == 2 ? "UNMEASURED" : ok ? "PASS" : "FAIL", ev, ms); }
 
+/* --chain-base ABS: the base a caller will really put its chain directories under (bg-candidate passes its
+   own --base here).  NULL means "resolve it the way the chain tools do" (cr_base). */
+static const char *chain_base_arg;
+
+/* The filesystem this gate must look at is the one that will hold the chain directory, not the checkout's:
+   the base is <HOME>/.cache/unisacc/chains unless the UNISACC_CHAIN_BASE override is ACCEPTED by
+   cxlib.chainroot's rules (canonical(tmp)/unisacc-session-chain-NAME and nothing else), and $HOME is routinely
+   a different filesystem from the repo.  Measuring REPO answered a question nobody asked -- a checkout on a
+   roomy disk passed while the chain directory sat on a full one.  Measuring any absolute UNISACC_CHAIN_BASE
+   is the same defect with an environment variable as the device: cr_override ignores such a value and the
+   chain still lands on the home disk, so the base is resolved through cr_base (the one place that decides)
+   and never by reading the variable here.  --chain-base ABS is the escape for a caller that keeps its
+   directories somewhere else (bg-candidate -- --base): it names the disk it will really write to.
+   statvfs needs a path that resolves, so the nearest existing ancestor is measured and its name is carried
+   into the evidence row.  When the base cannot be located at all this returns -1 and the caller reports
+   DISK_UNMEASURED: silently measuring the checkout instead would answer about the wrong disk. */
+static int disk_target(const char *root, char *out, long cap) {
+    static char buf[4400], absroot[4400];
+    /* cr_base decides through cr_override, which only speaks about a canonical absolute checkout root: a
+       relative --repo (the default ".") would silently fall back to the home base and the override would look
+       ignored.  Resolving it here keeps that decision with cr_base, not with the caller's spelling. */
+    if (root && root[0] != '/' && sy_realpath(root, absroot, sizeof absroot) >= 0) root = absroot;
+    if (chain_base_arg) {
+        if (chain_base_arg[0] != '/') return -1;
+        if (cx_fmt(buf, sizeof buf, "%s", chain_base_arg)) return -1;
+    } else {
+        if (cr_base(root, buf, sizeof buf)) return -1;
+    }
+    for (;;) {
+        int ex = sy_exists(buf);
+        char *slash;
+        /* 1 exists, 0 absent (ENOENT), negative for ENOTDIR/EACCES/... -- and those are NOT "absent": a base
+           below a directory this process cannot search is a base it cannot measure.  Reading a negative as
+           "keep walking up" would answer about some ancestor's disk instead, which is the defect this gate
+           exists to prevent. */
+        if (ex == 1) break;
+        if (ex != 0) return -1;
+        slash = strrchr(buf, '/');
+        if (!slash) return -1;
+        if (slash == buf) { if (cx_fmt(buf, sizeof buf, "/")) return -1; break; }
+        *slash = 0;
+    }
+    return cx_fmt(out, (int)cap, "%s", buf);
+}
+
 static int parse2_commit(const char *repo, const char *ref, char sha[41]) {
     char object[256], why[160];
     if (cx_fmt(object, sizeof object, "%s^{commit}", ref)) return 0;
@@ -1483,10 +1534,11 @@ int main(int argc, char **argv) {
             else if (tx_eqz(argv[a], "--root") && a + 1 < argc) rootarg = argv[++a];
             else if (tx_eqz(argv[a], "--rev") && a + 1 < argc) revarg = argv[++a];
             else if (tx_eqz(argv[a], "--preflight-table") && a + 1 < argc) pftable = argv[++a];
+            else if (tx_eqz(argv[a], "--chain-base") && a + 1 < argc) chain_base_arg = argv[++a];
             else if (tx_eqz(argv[a], "--disk-free-gb") && a + 1 < argc) {
                 int64_t dv = -1; tx_to_i64(argv[a + 1], (long)tx_len(argv[a + 1], 16), 10, &dv); disk_override_gb = (long)dv; a++;
             } else {
-                fprintf(stderr, "usage: tools/chain-ready.cx [-- [--fast] [--repo DIR] [--root DIR] [--rev REV] [--since REV] [--pgrep-pat PAT] [--only ITEM-PREFIX] [--version V] [--preflight-table FILE] [--disk-free-gb N] | [--repo DIR] --judge KIND FILE RC]\n");
+                fprintf(stderr, "usage: tools/chain-ready.cx [-- [--fast] [--repo DIR] [--root DIR] [--rev REV] [--since REV] [--pgrep-pat PAT] [--only ITEM-PREFIX] [--version V] [--preflight-table FILE] [--disk-free-gb N] [--chain-base ABS] | [--repo DIR] --judge KIND FILE RC]\n");
                 return 2;
             }
         }
@@ -1988,10 +2040,23 @@ int main(int argc, char **argv) {
         else { char ev[640]; long ms; run_p1(&ms, ev, sizeof ev); row_judged("4-p1", ms >= 0, ev, ms < 0 ? -ms : ms); }
     }
     if (WANT("16-disk-free")) {
-        long t0 = sy_now_ms(), avail_gb = disk_override_gb;
-        char ev[320];
-        if (avail_gb < 0) {
-            char *dv[4]; dv[0] = "df"; dv[1] = "-Pk"; dv[2] = (char *)repo; dv[3] = 0;
+        /* Safe subset (cc 2026-11-24 裁定 (b)): the MULTIPLIER is NOT here yet -- the thresholds stay 8G/20G.
+           What changes is where the number comes from: sy_disk_avail_mb (f_bavail*frsize/2^20) on the disk that
+           will hold the chain directory -- not on the checkout, which may be another filesystem -- with a
+           bounded `df -Pk` fallback, and when both fail the row is FAIL, not UNMEASURED: an unmeasured disk is
+           not a passed gate.  --disk-free-gb N still injects the available space (fixtures and hand runs). */
+        long t0 = sy_now_ms(), avail_gb = disk_override_gb, avail_mb;
+        char ev[420], dpath[4400];
+        int located = disk_target(rootarg ? rootarg : repo, dpath, sizeof dpath) == 0;
+        if (!located && cx_fmt(dpath, sizeof dpath, "%s", "?")) return 2;
+        if (avail_gb < 0 && located) {
+            avail_mb = sy_disk_avail_mb(dpath);
+            if (avail_mb >= 0) avail_gb = avail_mb / 1024;
+        }
+        if (avail_gb < 0 && located) {
+            /* bounded: tools/bound gives the child its own 10 s deadline and the read stops at the buffer,
+               so a hung df cannot hold chain-ready open past that. */
+            char *dv[] = {"./tools/bound", "10", "df", "-Pk", dpath, 0};
             int dfd = -1; int dpid = sy_spawn_pipe(dv, 0, 0, &dfd, 0);
             if (dpid >= 0 && dfd >= 0) {
                 char db[2048]; long dn = 0, r;
@@ -2019,16 +2084,27 @@ int main(int argc, char **argv) {
                 }
             }
         }
-        if (avail_gb < 0) {
-            row("16-disk-free", "UNMEASURED", "df -Pk unavailable", sy_now_ms() - t0);
+        /* The measured path is part of the evidence: a reader must be able to see WHICH filesystem the
+           verdict is about, so a gate that answered about the checkout instead of the chain base is visible
+           in the row rather than in a code review. */
+        /* An injected figure (--disk-free-gb N) is the answer even when the base cannot be located -- fixtures
+           and hand runs use it precisely when there is no real chain disk to measure.  With no figure and no
+           base there is nothing to measure, and both reasons are spelled out.  These rows pass an explicit
+           FAIL rather than row_judged's UNMEASURED: row() counts FAIL and SKIPPED but not UNMEASURED, and
+           making it count would change every item's verdict -- that is the 6-affected item (S1 2026-11-24),
+           not this one.  An unreadable disk must still leave READY=no. */
+        if (avail_gb < 0 && !located) {
+            row("16-disk-free", "FAIL", "DISK_UNMEASURED the chain base could not be resolved (UNISACC_CHAIN_BASE is relative, or HOME is unusable): no disk of the right name could be measured, and measuring the checkout would answer about the wrong one; pass an absolute chain base or --disk-free-gb N", sy_now_ms() - t0);
+        } else if (avail_gb < 0) {
+            row("16-disk-free", "FAIL", "DISK_UNMEASURED sy_disk_avail_mb and the bounded df -Pk both failed on the chain disk: an unmeasured disk is not a passed gate; free space or pass --disk-free-gb N", sy_now_ms() - t0);
         } else if (avail_gb < 8) {
-            cx_fmt(ev, sizeof ev, "DISK_BLOCKED avail_gb=%ld (<8G); free disk space before starting chain", avail_gb);
+            cx_fmt(ev, sizeof ev, "DISK_BLOCKED avail_gb=%ld (<8G); free disk space before starting chain; disk=%s", avail_gb, dpath);
             row_judged("16-disk-free", 0, ev, sy_now_ms() - t0);
         } else if (avail_gb < 20) {
-            cx_fmt(ev, sizeof ev, "DISK_LOW avail_gb=%ld (<20G warning, >=8G allowed)", avail_gb);
+            cx_fmt(ev, sizeof ev, "DISK_LOW avail_gb=%ld (<20G warning, >=8G allowed); disk=%s", avail_gb, dpath);
             row_judged("16-disk-free", 1, ev, sy_now_ms() - t0);
         } else {
-            cx_fmt(ev, sizeof ev, "avail_gb=%ld (>=20G)", avail_gb);
+            cx_fmt(ev, sizeof ev, "avail_gb=%ld (>=20G); disk=%s", avail_gb, dpath);
             row_judged("16-disk-free", 1, ev, sy_now_ms() - t0);
         }
     }
