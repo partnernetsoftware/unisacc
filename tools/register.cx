@@ -99,13 +99,9 @@ static int rg_try_lock(long ms) {
     }
 }
 static void rg_pending(void);
-static int rg_lock_raw(void) {
+static int rg_lock(void) {
     long ms = rg_lock_ms(); int fd = rg_try_lock(ms);
     if (fd < 0) { fprintf(stderr, "register: lock timeout: %s held longer than %ld ms\n", rg_lockpath(), ms); exit(2); }
-    return fd;
-}
-static int rg_lock(void) {
-    int fd = rg_lock_raw();
     rg_pending();
     return fd;
 }
@@ -1349,175 +1345,6 @@ static int rg_tool_mode(int argc, char **argv) {
     return 0;
 }
 
-static int rg_promote_rewrite_row(const char *b, size_t n, const char *key, int is_batch, const char *marker, char *out_cid, size_t cid_cap, char **out_buf, size_t *out_len) {
-    size_t kl = strlen(key), i = 0, hit = 0, pos = 0, le = 0;
-    while (i < n) {
-        size_t e = i; while (e < n && b[e] != '\n') e++;
-        if (e > i && b[i] != '#' && e - i > kl && !memcmp(b + i, key, kl) && b[i + kl] == '\t') { pos = i; le = e; hit++; }
-        i = e + 1;
-    }
-    if (hit != 1) return -1;
-    const char *f[16]; size_t fl[16]; int nf = 0; size_t p = pos;
-    while (p <= le && nf < 16) {
-        size_t q = p; while (q < le && b[q] != '\t') q++;
-        f[nf] = b + p; fl[nf] = q - p; nf++; p = q + 1;
-    }
-    if (is_batch) {
-        if (nf != 14 || fl[1] != 7 || memcmp(f[1], "PLANNED", 7) || fl[11] != 9 || memcmp(f[11], "NOT_READY", 9)) return -2;
-        if (out_cid) { if (fl[10] >= cid_cap) return -1; mm_copy(out_cid, cid_cap, f[10], fl[10]); out_cid[fl[10]] = 0; }
-        char new_exp[128]; if (cx_fmt(new_exp, sizeof new_exp, "rc0:%s", marker)) return -1;
-        const char *new_tier = (fl[2] == 8 && !memcmp(f[2], "platform", 8)) ? "release" : "commit";
-        char new_line[8192]; int nl = 0;
-        for (int c = 0; c < 14; c++) {
-            const char *s = c == 1 ? "IMPLEMENTED" : c == 11 ? new_exp : c == 13 ? new_tier : f[c];
-            size_t sl = c == 1 ? 11 : c == 11 ? strlen(new_exp) : c == 13 ? strlen(new_tier) : fl[c];
-            if (nl + (int)sl + 2 >= (int)sizeof new_line) return -1;
-            if (c) new_line[nl++] = '\t';
-            mm_copy(new_line + nl, sizeof new_line - (size_t)nl, s, sl); nl += (int)sl;
-        }
-        new_line[nl++] = '\n';
-        size_t old_ll = le - pos + (le < n ? 1 : 0);
-        size_t nn = n - old_ll + (size_t)nl;
-        char *nb = (char *)mm_alloc((long)nn + 1); if (!nb) return -1;
-        mm_copy(nb, nn, b, pos);
-        mm_copy(nb + pos, nn - pos, new_line, (size_t)nl);
-        mm_copy(nb + pos + (size_t)nl, nn - pos - (size_t)nl, b + pos + old_ll, n - pos - old_ll);
-        nb[nn] = 0; *out_buf = nb; *out_len = nn; return 0;
-    } else {
-        if (nf != 5 || fl[2] != 7 || memcmp(f[2], "PLANNED", 7)) return -2;
-        char new_line[8192]; int nl = 0;
-        for (int c = 0; c < 5; c++) {
-            const char *s = c == 2 ? "IMPLEMENTED_SEPARATE_BATCH" : f[c];
-            size_t sl = c == 2 ? 26 : fl[c];
-            if (nl + (int)sl + 2 >= (int)sizeof new_line) return -1;
-            if (c) new_line[nl++] = '\t';
-            mm_copy(new_line + nl, sizeof new_line - (size_t)nl, s, sl); nl += (int)sl;
-        }
-        new_line[nl++] = '\n';
-        size_t old_ll = le - pos + (le < n ? 1 : 0);
-        size_t nn = n - old_ll + (size_t)nl;
-        char *nb = (char *)mm_alloc((long)nn + 1); if (!nb) return -1;
-        mm_copy(nb, nn, b, pos);
-        mm_copy(nb + pos, nn - pos, new_line, (size_t)nl);
-        mm_copy(nb + pos + (size_t)nl, nn - pos - (size_t)nl, b + pos + old_ll, n - pos - old_ll);
-        nb[nn] = 0; *out_buf = nb; *out_len = nn; return 0;
-    }
-}
-
-static int rg_promote_recover(void) {
-    char tdir[4400], bid_p[4500], cid_p[4500], brow_p[4500], crow_p[4500];
-    if (cx_fmt(tdir, sizeof tdir, "%s/.register-txn", rg_tdir()) || sy_exists(tdir) != 1) return 0;
-    if (cx_fmt(bid_p, sizeof bid_p, "%s/promote.id", tdir) || cx_fmt(cid_p, sizeof cid_p, "%s/promote.cid", tdir)
-        || cx_fmt(brow_p, sizeof brow_p, "%s/promote.brow", tdir) || cx_fmt(crow_p, sizeof crow_p, "%s/promote.crow", tdir)) return 1;
-    size_t in = 0, cn = 0, brn = 0, crn = 0;
-    char *id = (char *)cx_read(bid_p, &in), *cid = (char *)cx_read(cid_p, &cn), *brow = (char *)cx_read(brow_p, &brn), *crow = (char *)cx_read(crow_p, &crn);
-    if (!id || !cid || !brow || !crow) return 1;
-    int lk = rg_lock_raw();
-    size_t bn = 0, cfn = 0; char *bb = (char *)cx_read(rg_bpath(), &bn), *cb = (char *)cx_read(rg_cpath(), &cfn);
-    if (bb && cb) {
-        size_t i = 0;
-        while (i < bn) {
-            size_t e = i; while (e < bn && bb[e] != '\n') e++;
-            if (e > i && e - i > in && !memcmp(bb + i, id, in) && bb[i + in] == '\t') {
-                size_t old_ll = e - i + (e < bn ? 1 : 0), nn = bn - old_ll + brn;
-                char *nb = (char *)mm_alloc((long)nn + 1);
-                if (nb) { mm_copy(nb, nn, bb, i); mm_copy(nb + i, nn - i, brow, brn); mm_copy(nb + i + brn, nn - i - brn, bb + i + old_ll, bn - i - old_ll); sy_write_atomic(rg_bpath(), nb, nn, 0644); mm_free(nb); }
-                break;
-            }
-            i = e + 1;
-        }
-        i = 0;
-        while (i < cfn) {
-            size_t e = i; while (e < cfn && cb[e] != '\n') e++;
-            if (e > i && e - i > cn && !memcmp(cb + i, cid, cn) && cb[i + cn] == '\t') {
-                size_t old_ll = e - i + (e < cfn ? 1 : 0), nn = cfn - old_ll + crn;
-                char *nc = (char *)mm_alloc((long)nn + 1);
-                if (nc) { mm_copy(nc, nn, cb, i); mm_copy(nc + i, nn - i, crow, crn); mm_copy(nc + i + crn, nn - i - crn, cb + i + old_ll, cfn - i - old_ll); sy_write_atomic(rg_cpath(), nc, nn, 0644); mm_free(nc); }
-                break;
-            }
-            i = e + 1;
-        }
-    }
-    if (bb) mm_free(bb); if (cb) mm_free(cb);
-    sy_unlink(bid_p); sy_unlink(cid_p); sy_unlink(brow_p); sy_unlink(crow_p); sy_rmdir(tdir);
-    rg_unlock(lk);
-    printf("REGISTER\tid=%.*s\tstatus=RECOVERED_PLANNED\n", (int)in, id);
-    return 0;
-}
-
-static int rg_promote(const char *id, const char *marker, int use_dev, const char *devdir) {
-    if (tx_eqz(id, "--recover")) return rg_promote_recover();
-    if (!marker || !rg_marker_ok(marker)) rg_die("--promote requires ID and valid MARKER", id);
-    if (rg_root_missing()) { fprintf(stderr, "register: nothing was written (id %s)\n", id); return 2; }
-    char root[4096], cache[4400], listbin[4400], batchbin[4400], pdir[4400], pbat[4500], pcov[4500], parent[4500], why[512], cid[512];
-    static char buf[1 << 16]; int reused = 0, okrun = 0, rc = 0;
-    const char *orig_tables = getenv("UNISACC_TABLES");
-    char saved_tables[4400]; saved_tables[0] = 0;
-    if (orig_tables && *orig_tables) mm_copy(saved_tables, sizeof saved_tables, orig_tables, strlen(orig_tables) + 1);
-    if (sy_realpath(".", root, sizeof root) < 0 || cx_fmt(cache, sizeof cache, "%s/unisacc-register-native", sy_tmpdir())) rg_die("prepare path", 0);
-    if (sy_mkdir(cache, 0700) && sy_exists(cache) != 1) rg_die("prepare directory", cache);
-    if (rn_prepare(root, "tests/run.cx", cache, listbin, sizeof listbin, &reused, why, sizeof why) ||
-        rn_prepare(root, "tests/run-batch.cx", cache, batchbin, sizeof batchbin, &reused, why, sizeof why)) rg_die(why, 0);
-    size_t bn = 0, cn = 0, nbn = 0, ncn = 0;
-    char *bb = (char *)cx_read(rg_bpath(), &bn), *cb = (char *)cx_read(rg_cpath(), &cn), *nb = 0, *nc = 0;
-    if (!bb || !cb) rg_die("cannot read tables", 0);
-    if (rg_promote_rewrite_row(bb, bn, id, 1, marker, cid, sizeof cid, &nb, &nbn) != 0) rg_die("batch is not PLANNED or missing", id);
-    if (rg_promote_rewrite_row(cb, cn, cid, 0, marker, 0, 0, &nc, &ncn) != 0) rg_die("coverage row is not PLANNED or missing", cid);
-    mm_free(bb); mm_free(cb);
-    if (cx_fmt(pdir, sizeof pdir, "%s/unisacc-affected-promote-%d", sy_tmpdir(), sy_pid()) || sy_mkdir(pdir, 0700) != 0
-        || cx_fmt(pbat, sizeof pbat, "%s/batches.tsv", pdir) || cx_fmt(pcov, sizeof pcov, "%s/coverage.tsv", pdir)
-        || sy_write_atomic(pbat, nb, nbn, 0644) || sy_write_atomic(pcov, nc, ncn, 0644)) rg_die("private qualify layout failed", id);
-    mm_free(nb); mm_free(nc);
-    setenv("UNISACC_TABLES", pdir, 1);
-    {   char *v[] = {"./tools/bound", "55", listbin, "--list", 0};
-        rc = run(v, buf, sizeof buf);
-        okrun = tx_find(buf, tx_len(buf, sizeof buf), "metadata_valid=1", 16) >= 0;
-    }
-    if (okrun) {
-        if (cx_fmt(parent, sizeof parent, "%s/run", pdir) || sy_mkdir(parent, 0700) != 0) okrun = 0;
-        else {
-            char *v[9] = {"./tools/bound", "58", batchbin}; int argc_run = 3;
-            if (use_dev) { v[argc_run++] = "--candidate"; v[argc_run++] = (char *)devdir; }
-            v[argc_run++] = root; v[argc_run++] = parent; v[argc_run++] = (char *)id; v[argc_run] = 0;
-            int bofd = -1, bpid = run_start(v, &bofd);
-            rc = run_collect(bpid, bofd, buf, sizeof buf);
-            long at = tx_find(buf, tx_len(buf, sizeof buf), "BATCH_RUN\t", 10);
-            if (at >= 0) { long e = tx_chr(buf + at, tx_len(buf + at, sizeof buf), '\n'); printf("%.*s\n", (int)(e < 0 ? tx_len(buf + at, sizeof buf) : e), buf + at); }
-            okrun = rc == 0 && at >= 0 && tx_find(buf + at, tx_len(buf + at, sizeof buf), "status=PASS", 11) >= 0;
-            if (!okrun) fputs(buf, stderr);
-        }
-    }
-    if (saved_tables[0]) setenv("UNISACC_TABLES", saved_tables, 1);
-    else unsetenv("UNISACC_TABLES");
-    sy_unlink(pbat); sy_unlink(pcov); sy_rmdir(parent); sy_rmdir(pdir);
-    if (!okrun) { printf("REGISTER\tid=%s\tstatus=STILL_PLANNED\n", id); return 1; }
-    int lk = rg_lock();
-    bn = 0; cn = 0; bb = (char *)cx_read(rg_bpath(), &bn); cb = (char *)cx_read(rg_cpath(), &cn);
-    if (!bb || !cb || rg_promote_rewrite_row(bb, bn, id, 1, marker, cid, sizeof cid, &nb, &nbn) != 0
-        || rg_promote_rewrite_row(cb, cn, cid, 0, marker, 0, 0, &nc, &ncn) != 0) { rg_unlock(lk); rg_die("shared table changed during qualify", id); }
-    char tdir[4400], bid_p[4500], cid_p[4500], brow_p[4500], crow_p[4500];
-    if (!cx_fmt(tdir, sizeof tdir, "%s/.register-txn", rg_tdir()) && sy_mkdir(tdir, 0700) == 0) {
-        size_t i = 0; const char *orig_b = 0, *orig_c = 0; size_t obl = 0, ocl = 0;
-        while (i < bn) { size_t e = i; while (e < bn && bb[e] != '\n') e++; if (e > i && e - i > strlen(id) && !memcmp(bb + i, id, strlen(id)) && bb[i + strlen(id)] == '\t') { orig_b = bb + i; obl = e - i + (e < bn ? 1 : 0); break; } i = e + 1; }
-        i = 0;
-        while (i < cn) { size_t e = i; while (e < cn && cb[e] != '\n') e++; if (e > i && e - i > strlen(cid) && !memcmp(cb + i, cid, strlen(cid)) && cb[i + strlen(cid)] == '\t') { orig_c = cb + i; ocl = e - i + (e < cn ? 1 : 0); break; } i = e + 1; }
-        if (orig_b && orig_c && !cx_fmt(bid_p, sizeof bid_p, "%s/promote.id", tdir) && !cx_fmt(cid_p, sizeof cid_p, "%s/promote.cid", tdir)
-            && !cx_fmt(brow_p, sizeof brow_p, "%s/promote.brow", tdir) && !cx_fmt(crow_p, sizeof crow_p, "%s/promote.crow", tdir)) {
-            (void)cx_write(bid_p, id, strlen(id)); (void)cx_write(cid_p, cid, strlen(cid));
-            (void)cx_write(brow_p, orig_b, obl); (void)cx_write(crow_p, orig_c, ocl);
-        }
-    }
-    const char *pause_f = getenv("UNISACC_PROMOTE_PAUSE_FILE");
-    if (pause_f && *pause_f) { (void)cx_write(pause_f, "READY\n", 6); for (int w = 0; w < 100; w++) usleep(100000); }
-    int wbad = sy_write_atomic(rg_bpath(), nb, nbn, 0644) || sy_write_atomic(rg_cpath(), nc, ncn, 0644);
-    mm_free(bb); mm_free(cb); mm_free(nb); mm_free(nc);
-    if (!wbad) { sy_unlink(bid_p); sy_unlink(cid_p); sy_unlink(brow_p); sy_unlink(crow_p); sy_rmdir(tdir); }
-    rg_unlock(lk);
-    if (wbad) rg_die("atomic replace failed", id);
-    printf("REGISTER\tid=%s\tstatus=PROMOTED\n", id);
-    return 0;
-}
-
 int main(int argc, char **argv) {
     char identity_root[4096];
     if (sy_realpath(".", identity_root, sizeof identity_root) >= 0)
@@ -1585,7 +1412,7 @@ int main(int argc, char **argv) {
     const char *arguments="-";
     static char normargs[8192];
     int norun = 0, planned = 0, force_layout = 0;
-    const char *promote_id = 0, *promote_marker = 0;
+    const char *promote_id = 0;
     char devdir[4096];int use_dev=0;
     {   int w = 1, r;   /* --no-run / --planned may stand anywhere: strip them and keep the rest in order */
         for (r = 1; r < argc; r++) {
@@ -1597,10 +1424,7 @@ int main(int argc, char **argv) {
                 use_dev=1;
             } else if (tx_eqz(argv[r], "--no-run")) norun = 1;
             else if (tx_eqz(argv[r], "--planned")) planned = 1;
-            else if (tx_eqz(argv[r], "--promote") && r + 1 < argc) {
-                promote_id = argv[++r];
-                if (!tx_eqz(promote_id, "--recover") && r + 1 < argc && argv[r + 1][0] != '-') promote_marker = argv[++r];
-            }
+            else if (tx_eqz(argv[r], "--promote") && r + 1 < argc) promote_id = argv[++r];
             else if (tx_eqz(argv[r], "--layout-selftest")) force_layout = 1;
             else argv[w++] = argv[r];
         }
@@ -1608,7 +1432,7 @@ int main(int argc, char **argv) {
     }
     if (planned && (norun || use_dev || promote_id)) rg_die("--planned cannot be combined with --no-run, --runner, or --promote", 0);
     if (promote_id && norun) rg_die("--promote cannot be combined with --no-run", 0);
-    if (promote_id) return rg_promote(promote_id, promote_marker, use_dev, devdir);
+    if (promote_id) rg_die("--promote 未实现,重写中", 0);
     if(argc>=3&&tx_eqz(argv[argc-2],"--args")){arguments=argv[argc-1];argc-=2;if(!*arguments||!clean(arguments))rg_die("empty args, TAB or newline in args",0);
         /* table convention: words of one args field are joined by ';' ("--cases;lock"); spaces and the
            "--opt=value" form are folded into it */
@@ -1636,9 +1460,6 @@ int main(int argc, char **argv) {
     if (!sy_exists(check)) rg_die("no such check", check);
     if (tx_snprintf(cid, sizeof cid, "%s.%s", layer, id) >= (int)sizeof cid) rg_die("id too long", id);
     char cache[4400], listbin[4400], batchbin[4400], bpbin[4400], why[512]; int reused, bpok = 0;
-    const char *orig_tables = getenv("UNISACC_TABLES");
-    char saved_tables[4400]; saved_tables[0] = 0;
-    if (orig_tables && *orig_tables) mm_copy(saved_tables, sizeof saved_tables, orig_tables, strlen(orig_tables) + 1);
     if (sy_realpath(".", root, sizeof root) < 0 || cx_fmt(cache, sizeof cache, "%s/unisacc-register-native", sy_tmpdir())) rg_die("prepare path", 0);
     if (sy_mkdir(cache, 0700) && sy_exists(cache) != 1) rg_die("prepare directory", cache);
     if (rn_prepare(root, "tests/run.cx", cache, listbin, sizeof listbin, &reused, why, sizeof why) ||
