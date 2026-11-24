@@ -27,32 +27,47 @@ int main(void) {
     long dn = tx_len(DECL, 4096), fn = tx_len(DECL_FIXED, 4096), hn = tx_len(HEAD_B, 4096);
     /* (1) new {candidate} batch without id row: refused, named */
     b = ROW("old-cand", "{out};{candidate}") ROW("plain", "{out}") ROW("new-cand", "{out};{candidate}");
-    n = bpi_scan(b, tx_len(b, 4096), DECL, dn, HEAD_B, hn, ids, sizeof ids, &inh);
+    n = bpi_scan(b, tx_len(b, 4096), DECL, dn, HEAD_B, hn, 0, 0, ids, sizeof ids, &inh);
     ok(n == 1 && tx_eqz(ids, "new-cand") && inh == 0, "new {candidate} row without id row is blamed by name");
     /* (2) same row with the id row in the same commit: passes */
-    n = bpi_scan(b, tx_len(b, 4096), DECL_FIXED, fn, HEAD_B, hn, ids, sizeof ids, &inh);
+    n = bpi_scan(b, tx_len(b, 4096), DECL_FIXED, fn, HEAD_B, hn, 0, 0, ids, sizeof ids, &inh);
     ok(n == 0 && ids[0] == 0, "id row in the same commit clears it");
     /* (3) placeholder-free new batch: unaffected */
     b = ROW("old-cand", "{out};{candidate}") ROW("plain", "{out}") ROW("plain2", "{root};{out}");
-    n = bpi_scan(b, tx_len(b, 4096), DECL, dn, HEAD_B, hn, ids, sizeof ids, &inh);
+    n = bpi_scan(b, tx_len(b, 4096), DECL, dn, HEAD_B, hn, 0, 0, ids, sizeof ids, &inh);
     ok(n == 0, "batch without require placeholder is not affected");
     /* (4) other require key {hostcc} also triggers */
     b = ROW("hc", "{hostcc}");
-    n = bpi_scan(b, tx_len(b, 4096), DECL, dn, HEAD_B, hn, ids, sizeof ids, &inh);
+    n = bpi_scan(b, tx_len(b, 4096), DECL, dn, HEAD_B, hn, 0, 0, ids, sizeof ids, &inh);
     ok(n == 1 && tx_eqz(ids, "hc"), "{hostcc} is a require key too");
     /* (5) inherited (byte-identical in HEAD) undeclared row: counted as inherited, not blamed */
     b = ROW("legacy", "{candidate}");
-    n = bpi_scan(b, tx_len(b, 4096), DECL, dn, b, tx_len(b, 4096), ids, sizeof ids, &inh);
+    n = bpi_scan(b, tx_len(b, 4096), DECL, dn, b, tx_len(b, 4096), 0, 0, ids, sizeof ids, &inh);
     ok(n == 0 && inh == 1, "inherited row is reported not blamed");
     /* (6) changing an inherited row's args (adds {candidate}) counts as new */
-    n = bpi_scan(ROW("plain", "{out};{candidate}"), tx_len(ROW("plain", "{out};{candidate}"), 4096), DECL, dn, HEAD_B, hn, ids, sizeof ids, &inh);
+    n = bpi_scan(ROW("plain", "{out};{candidate}"), tx_len(ROW("plain", "{out};{candidate}"), 4096), DECL, dn, HEAD_B, hn, 0, 0, ids, sizeof ids, &inh);
     ok(n == 1 && tx_eqz(ids, "plain"), "a changed row that gains {candidate} is blamed");
     /* (7) without HEAD every undeclared row counts (register's view) */
-    n = bpi_scan(ROW("x", "{candidate}"), tx_len(ROW("x", "{candidate}"), 4096), DECL, dn, 0, 0, ids, sizeof ids, &inh);
+    n = bpi_scan(ROW("x", "{candidate}"), tx_len(ROW("x", "{candidate}"), 4096), DECL, dn, 0, 0, 0, 0, ids, sizeof ids, &inh);
     ok(n == 1, "no HEAD: undeclared row counts");
     /* (8) bpi_needs/bpi_has_id direct */
     ok(bpi_needs(DECL, dn, "{out};{candidate}", 17) == 1 && bpi_needs(DECL, dn, "{out}", 5) == 0, "bpi_needs");
     ok(bpi_has_id(DECL, dn, "old-cand", 8) == 1 && bpi_has_id(DECL, dn, "old-can", 7) == 0, "bpi_has_id exact");
+    /* (9) only kind==require keys count: the exact near key {root},{out} is no require placeholder (kills "near also counts") */
+    ok(bpi_needs(DECL, dn, "{root},{out}", 12) == 0, "a near key is not a require placeholder");
+    b = ROW("nr", "{root},{out}");
+    n = bpi_scan(b, tx_len(b, 4096), DECL, dn, 0, 0, 0, 0, ids, sizeof ids, &inh);
+    ok(n == 0, "a batch holding only a near key is not blamed");
+    /* (10) a commented-out batch row is no batch row (kills "scan does not skip #") */
+    b = "#" ROW("cm", "{candidate}");
+    n = bpi_scan(b, tx_len(b, 4096), DECL, dn, 0, 0, 0, 0, ids, sizeof ids, &inh);
+    ok(n == 0, "a commented-out batch row is skipped");
+    /* (11) deleting the id row in this commit while the batch row stays byte-identical to HEAD is this commit's change */
+    b = ROW("old-cand", "{out};{candidate}");
+    n = bpi_scan(b, tx_len(b, 4096), "kind\tkey\tinputs\tbasis\nrequire\t{candidate}\t-\tx\n", 46, b, tx_len(b, 4096), DECL, dn, ids, sizeof ids, &inh);
+    ok(n == 1 && tx_eqz(ids, "old-cand") && inh == 0, "a deleted id row is blamed even though the batch row equals HEAD");
+    n = bpi_scan(b, tx_len(b, 4096), "kind\tkey\tinputs\tbasis\nrequire\t{candidate}\t-\tx\n", 46, b, tx_len(b, 4096), "kind\tkey\tinputs\tbasis\nrequire\t{candidate}\t-\tx\n", 46, ids, sizeof ids, &inh);
+    ok(n == 0 && inh == 1, "an id row HEAD never had keeps the row inherited, not blamed");
     printf("CHECK_BPIDECL\tassertions=%d\tfailed=%d\n", pass + fail, fail);
     return fail ? 1 : 0;
 }
