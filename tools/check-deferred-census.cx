@@ -215,6 +215,22 @@ int main(int argc, char **argv) {
     ck(ckk_has(out, sizeof out, "dropped=2"), "bucket-cap-reports-dropped");
     ck(ckk_has(out, sizeof out, "truncated=1"), "key-cap-reports-truncated");
 
+    /* A lookup after the table is exactly full (r9 above leaves 64 buckets) must not join anything: the
+       bucket scan runs over the entries in use, and the slot one past the last one holds no key at all, so a
+       new distinct key has to be counted as dropped, never merged into an existing bucket. */
+    cx_fmt(sc, sizeof sc,
+           "set -e; mkdir -p %s/r12 && printf 'AFFECTED_RUN\\tpass=1\\tfail=0\\tdeferred=0\\n' > %s/r12/full.out && "
+           "i=0; while [ $i -lt 64 ]; do printf 'DEFERRED\\tb\\tF%%02d\\n' $i >> %s/r12/full.out; i=$((i+1)); done && "
+           "printf 'DEFERRED\\tb\\tF-NOT-THERE\\n' >> %s/r12/full.out",
+           T, T, T, T);
+    rc = sh1(sc, out, sizeof out, 20);
+    if (rc != 0) { printf("%.800s\n", out); printf("CHECK_DEFERRED_CENSUS\tpass=0\tfail=1\n"); return 1; }
+    cx_fmt(sc, sizeof sc, "sh ./unisacc.com tools/deferred-census.cx -- %s/r12 2>&1", T);
+    rc = sh1(sc, out, sizeof out, 40);
+    ck(rc == 0 && ckk_has(out, sizeof out, "CENSUS_BUCKETS\tbuckets=64\ttruncated=0\tdropped=1"),
+       "lookup-when-table-full-drops-not-merges");
+    ck(!ckk_has(out, sizeof out, "F-NOT-THERE"), "lookup-when-table-full-names-no-such-bucket");
+
 
     { char rm[700]; cx_fmt(rm, sizeof rm, "chmod -R u+w '%s' 2>/dev/null; rm -rf '%s'", T, T); sh1(rm, out, sizeof out, 20); }
     printf("CHECK_DEFERRED_CENSUS\tpass=%d\tfail=%d\n", passed, failed);
