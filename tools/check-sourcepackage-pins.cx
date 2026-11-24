@@ -59,55 +59,153 @@ static char *load(const char *p, size_t *n) {
     return b;
 }
 
-/* Next recipe id inside the SpModel table of `src`. Returns 0 at the end. */
-static int a_recipe(const char *src, size_t *at, char out[64]) {
-    const char *p = strstr(src, "static const SpModel recipes[]");
-    if (!p) return 0;
-    const char *end = strstr(p, "\n};");
-    if (!end) return 0;
-    const char *q = p + *at;
-    while (q < end) {
-        if (*q == '"') {
-            const char *e = strchr(q + 1, '"');
-            if (!e || e >= end) return 0;
-            size_t z = (size_t)(e - q - 1);
-            if (z == 0 || z >= 64) return 0;
-            memcpy(out, q + 1, z);
-            out[z] = 0;
-            *at = (size_t)(q - p) + 1;
+/* Lexical token scanner for C/CX source files (identifiers, strings, punct). */
+typedef struct { int kind; const char *s; size_t n; } SpTok;
+
+static int sp_word_char(char c) {
+    return (c >= 'a' && c <= 'z') || (c >= 'A' && c <= 'Z') || (c >= '0' && c <= '9') || c == '_';
+}
+
+static int sp_next_tok(const char *src, size_t len, size_t *at, SpTok *t) {
+    size_t p = *at;
+    while (p < len) {
+        char c = src[p];
+        if (c == ' ' || c == '\t' || c == '\n' || c == '\r') { p++; continue; }
+        if (c == '/' && p + 1 < len && src[p + 1] == '/') {
+            p += 2; while (p < len && src[p] != '\n') p++; continue;
+        }
+        if (c == '/' && p + 1 < len && src[p + 1] == '*') {
+            p += 2; while (p + 1 < len && !(src[p] == '*' && src[p + 1] == '/')) p++;
+            p = (p + 1 < len) ? p + 2 : len; continue;
+        }
+        break;
+    }
+    if (p >= len) { *at = len; return 0; }
+    if (sp_word_char(src[p])) {
+        size_t e = p + 1;
+        while (e < len && sp_word_char(src[e])) e++;
+        t->kind = 1; t->s = src + p; t->n = e - p; *at = e; return 1;
+    }
+    if (src[p] == '"' || src[p] == '\'') {
+        char q = src[p];
+        size_t e = p + 1;
+        while (e < len && src[e] != q) { if (src[e] == '\\' && e + 1 < len) e++; e++; }
+        if (e < len) e++;
+        t->kind = (q == '"') ? 2 : 3;
+        t->s = src + p + 1;
+        t->n = (e >= p + 2) ? (e - p - 2) : 0;
+        *at = e;
+        return 1;
+    }
+    t->kind = 4; t->s = src + p; t->n = 1; *at = p + 1; return 1;
+}
+
+static int sp_tok_is(const SpTok *t, int kind, const char *lit) {
+    size_t ln = strlen(lit);
+    return t->kind == kind && t->n == ln && !memcmp(t->s, lit, ln);
+}
+
+/* Locate token offset right after `static const SpModel recipes[] = {`. */
+static int find_recipes_body(const char *src, size_t len, size_t *body_pos) {
+    size_t at = 0;
+    SpTok t;
+    while (sp_next_tok(src, len, &at, &t)) {
+        if (sp_tok_is(&t, 1, "SpModel")) {
+            SpTok t1, t2, t3, t4, t5;
+            size_t q = at;
+            if (sp_next_tok(src, len, &q, &t1) && sp_tok_is(&t1, 1, "recipes") &&
+                sp_next_tok(src, len, &q, &t2) && sp_tok_is(&t2, 4, "[") &&
+                sp_next_tok(src, len, &q, &t3) && sp_tok_is(&t3, 4, "]") &&
+                sp_next_tok(src, len, &q, &t4) && sp_tok_is(&t4, 4, "=") &&
+                sp_next_tok(src, len, &q, &t5) && sp_tok_is(&t5, 4, "{")) {
+                *body_pos = q;
+                return 1;
+            }
+        }
+    }
+    return 0;
+}
+
+/* Next string token inside the SpModel recipes[] initializer block of `src`. */
+static int a_recipe(const char *src, size_t len, size_t *at, int *depth, char out[64]) {
+    SpTok t;
+    if (*at == 0) {
+        if (!find_recipes_body(src, len, at)) return 0;
+        *depth = 1;
+    }
+    while (*depth > 0 && sp_next_tok(src, len, at, &t)) {
+        if (t.kind == 4 && t.s[0] == '{') { (*depth)++; continue; }
+        if (t.kind == 4 && t.s[0] == '}') { (*depth)--; continue; }
+        if (t.kind == 2) {
+            if (t.n == 0 || t.n >= 64) return 0;
+            memcpy(out, t.s, t.n);
+            out[t.n] = 0;
             return 1;
         }
-        q++;
     }
     return 0;
 }
 
-/* 0 when both tables list the same recipe ids in the same order. */
-static int same_recipes(const char *a, const char *b) {
+/* 0 when both tables list the same recipe strings in the same order. */
+static int same_recipes(const char *a, size_t an, const char *b, size_t bn) {
     char x[64], y[64];
     size_t i = 0, j = 0;
-    while (a_recipe(a, &i, x)) {
-        if (!a_recipe(b, &j, y) || strcmp(x, y)) return 0;
+    int da = 0, db = 0;
+    while (a_recipe(a, an, &i, &da, x)) {
+        if (!a_recipe(b, bn, &j, &db, y) || strcmp(x, y)) return 0;
     }
-    return !a_recipe(b, &j, y);
+    return !a_recipe(b, bn, &j, &db, y);
 }
 
-/* Pull the 64 hex digits that follow `name="` inside the source text. */
+/* Extract the 64 lowercase hex digits from token sequence `name = "<64-hex>"`. */
 static int pin_of(const char *src, size_t n, const char *name, char out[65]) {
-    char needle[64];
-    int z = snprintf(needle, sizeof needle, "%s=\"", name);
-    if (z < 0 || (size_t)z >= sizeof needle) return -1;
-    const char *a = strstr(src, needle);
-    if (!a) return -1;
-    a += z;
-    if ((size_t)(a - src) + 64 >= n) return -1;
-    for (int i = 0; i < 64; i++) {
-        char c = a[i];
-        if (!((c >= '0' && c <= '9') || (c >= 'a' && c <= 'f'))) return -1;
-        out[i] = c;
+    size_t at = 0;
+    SpTok t;
+    while (sp_next_tok(src, n, &at, &t)) {
+        if (!sp_tok_is(&t, 1, name)) continue;
+        size_t q = at;
+        SpTok eq, val;
+        if (!sp_next_tok(src, n, &q, &eq) || !sp_tok_is(&eq, 4, "=")) continue;
+        if (!sp_next_tok(src, n, &q, &val) || val.kind != 2 || val.n != 64) continue;
+        int okhex = 1;
+        for (int i = 0; i < 64; i++) {
+            char c = val.s[i];
+            if (!((c >= '0' && c <= '9') || (c >= 'a' && c <= 'f'))) { okhex = 0; break; }
+            out[i] = c;
+        }
+        if (okhex) {
+            out[64] = 0;
+            return 0;
+        }
     }
-    out[64] = 0;
-    return 0;
+    return -1;
+}
+
+/* Scan tokens for `sp_job_command(` call and absence of `v[n++]="-std=c99"`. */
+static void scan_argv_forwarding(const char *src, size_t n, int *forwards, int *own_copy) {
+    size_t at = 0;
+    SpTok t;
+    *forwards = 0;
+    *own_copy = 0;
+    while (sp_next_tok(src, n, &at, &t)) {
+        if (sp_tok_is(&t, 1, "sp_job_command")) {
+            size_t q = at;
+            SpTok lp;
+            if (sp_next_tok(src, n, &q, &lp) && sp_tok_is(&lp, 4, "(")) *forwards = 1;
+        } else if (sp_tok_is(&t, 1, "v")) {
+            size_t q = at;
+            SpTok a, b, c, d, e, f, g;
+            if (sp_next_tok(src, n, &q, &a) && sp_tok_is(&a, 4, "[") &&
+                sp_next_tok(src, n, &q, &b) && sp_tok_is(&b, 1, "n") &&
+                sp_next_tok(src, n, &q, &c) && sp_tok_is(&c, 4, "+") &&
+                sp_next_tok(src, n, &q, &d) && sp_tok_is(&d, 4, "+") &&
+                sp_next_tok(src, n, &q, &e) && sp_tok_is(&e, 4, "]") &&
+                sp_next_tok(src, n, &q, &f) && sp_tok_is(&f, 4, "=") &&
+                sp_next_tok(src, n, &q, &g) && sp_tok_is(&g, 2, "-std=c99")) {
+                *own_copy = 1;
+            }
+        }
+    }
 }
 
 static void file_sha(const char *p, char out[65], const char *label) {
@@ -123,6 +221,131 @@ static void file_sha(const char *p, char out[65], const char *label) {
     free(b);
     memcpy(out, hex, 65);
     ok(1, label, "read");
+}
+
+/* Verify one active pin variable in a consumer file against an expected sha256. */
+static void check_consumer_pin(const char *root, const char *rel, const char *var,
+                               const char *expected_sha, const char *label) {
+    char p[4400], got[65];
+    size_t n = 0;
+    pathcat(p, root, rel);
+    char *b = load(p, &n);
+    if (!b) {
+        ok(0, label, "unreadable");
+        return;
+    }
+    int found = (pin_of(b, n, var, got) == 0);
+    free(b);
+    ok(found && expected_sha[0] && !strcmp(got, expected_sha), label, found ? got : "missing");
+}
+
+/* Verify that a FILE#anchor in ROOT binds the declared 64-hex value via token scan. */
+static int pins_tsv_anchor_matches(const char *root, const char *decl, const char *value) {
+    const char *h = strrchr(decl, '#');
+    if (!h || !h[1]) return 1;
+    char rel[512], p[4400];
+    if (cx_fmt(rel, sizeof rel, "%.*s", (int)(h - decl), decl)) return 0;
+    pathcat(p, root, rel);
+    size_t n = 0;
+    char *s = load(p, &n);
+    if (!s) return 0;
+    const char *anc = h + 1;
+    size_t al = strlen(anc);
+    int hit = 0;
+    if (al > 1 && anc[al - 1] == '=' && al < 64) {
+        char var[64], got[65];
+        for (size_t k = 0; k < al - 1; k++) var[k] = anc[k];
+        var[al - 1] = 0;
+        if (pin_of(s, n, var, got) == 0 && !strcmp(got, value)) hit = 1;
+    } else {
+        size_t at = 0;
+        SpTok t;
+        while (sp_next_tok(s, n, &at, &t)) {
+            if (sp_tok_is(&t, 2, value)) { hit = 1; break; }
+        }
+    }
+    free(s);
+    return hit;
+}
+
+/* Traverse every active kind=pin row in ROOT/tools/pins.tsv and verify three-way
+ * consistency: sha256(target) == pins.tsv value == anchored source line constant,
+ * and require all active sourcepackage/kernelsha consumers to be declared kind=pin. */
+static void check_active_pins_tsv(const char *root) {
+    static const char *req_anchors[] = {
+        "tools/cxlib/sourcepackage.cx#basis_pin=",
+        "tools/cxlib/sourcepackage.cx#producer_pin=",
+        "tools/cxlib/sourcepackage.cx#digest_module_pin=",
+        "tools/source-package-pack.cx#digest_module_pin=",
+        "tools/source-origin-verify.cx#sov_ks_pin=",
+        "tools/source-package-adopt.cx#ks_pin=",
+        "tools/dev-run.cx#ks_pin=",
+        "tools/identity-material.cx#kernelsha_pin="
+    };
+    int req_seen[8] = {0};
+    char p[4400];
+    pathcat(p, root, "tools/pins.tsv");
+    size_t n = 0;
+    char *s = load(p, &n);
+    if (!s) {
+        ok(0, "pins-tsv-readable", "unreadable");
+        return;
+    }
+    int active_pins = 0, bad_sha = 0, bad_src = 0;
+    char first_bad[256] = {0};
+    for (char *ln = s; *ln;) {
+        char *nl = strchr(ln, '\n');
+        if (nl) *nl = 0;
+        if (*ln && *ln != '#' && strncmp(ln, "path\t", 5)) {
+            char *cols[6] = {0};
+            int nc = 0;
+            char *q = ln;
+            while (nc < 6) {
+                cols[nc++] = q;
+                char *tab = strchr(q, '\t');
+                if (!tab) break;
+                *tab = 0;
+                q = tab + 1;
+            }
+            if (nc >= 4 && !strcmp(cols[1], "pin") && (nc < 6 || strcmp(cols[5], "known-broken"))) {
+                active_pins++;
+                char tp[4400], got[65];
+                size_t tn = 0;
+                pathcat(tp, root, cols[2]);
+                char *tb = load(tp, &tn);
+                if (!tb) {
+                    bad_sha++;
+                    if (!first_bad[0]) cx_fmt(first_bad, sizeof first_bad, "missing:%s", cols[2]);
+                } else {
+                    cx_sha256_hex(tb, tn, got);
+                    free(tb);
+                    if (strcmp(got, cols[3])) {
+                        bad_sha++;
+                        if (!first_bad[0]) cx_fmt(first_bad, sizeof first_bad, "sha:%s->%s", cols[0], cols[2]);
+                    }
+                }
+                if (!pins_tsv_anchor_matches(root, cols[0], cols[3])) {
+                    bad_src++;
+                    if (!first_bad[0]) cx_fmt(first_bad, sizeof first_bad, "src:%s", cols[0]);
+                }
+                for (int r = 0; r < 8; r++) {
+                    if (!strcmp(cols[0], req_anchors[r])) req_seen[r] = 1;
+                }
+            }
+        }
+        if (!nl) break;
+        ln = nl + 1;
+    }
+    free(s);
+    int missing_req = 0;
+    for (int r = 0; r < 8; r++) if (!req_seen[r]) missing_req++;
+    char detail[320];
+    if (cx_fmt(detail, sizeof detail, "active=%d bad_sha=%d bad_src=%d missing_req=%d first=%s",
+               active_pins, bad_sha, bad_src, missing_req, first_bad[0] ? first_bad : "none")) {
+        detail[0] = 0;
+    }
+    ok(active_pins >= 8 && bad_sha == 0 && bad_src == 0 && missing_req == 0,
+       "pins-tsv-active-pins-three-way-match", detail);
 }
 
 int main(int argc, char **argv) {
@@ -155,6 +378,27 @@ int main(int argc, char **argv) {
     ok(producer_actual[0] && !strcmp(producer_pin, producer_actual), "producer_pin-names-source-package-pack",
        producer_actual);
 
+    /* Traverse all active runtime kernelsha.cx consumers so no edit to
+     * tools/cxlib/kernelsha.cx can leave a consumer pin behind. */
+    {
+        char ksha_path[4400], ksha_actual[65] = {0};
+        pathcat(ksha_path, argv[1], "tools/cxlib/kernelsha.cx");
+        file_sha(ksha_path, ksha_actual, "read-cxlib-kernelsha");
+        check_consumer_pin(argv[1], "tools/cxlib/sourcepackage.cx", "digest_module_pin",
+                           ksha_actual, "sourcepackage-digest_module_pin-names-kernelsha");
+        check_consumer_pin(argv[1], "tools/source-package-pack.cx", "digest_module_pin",
+                           ksha_actual, "source-package-pack-digest_module_pin-names-kernelsha");
+        check_consumer_pin(argv[1], "tools/source-origin-verify.cx", "sov_ks_pin",
+                           ksha_actual, "source-origin-verify-sov_ks_pin-names-kernelsha");
+        check_consumer_pin(argv[1], "tools/source-package-adopt.cx", "ks_pin",
+                           ksha_actual, "source-package-adopt-ks_pin-names-kernelsha");
+        check_consumer_pin(argv[1], "tools/dev-run.cx", "ks_pin",
+                           ksha_actual, "dev-run-ks_pin-names-kernelsha");
+        check_consumer_pin(argv[1], "tools/identity-material.cx", "kernelsha_pin",
+                           ksha_actual, "identity-material-kernelsha_pin-names-kernelsha");
+        check_active_pins_tsv(argv[1]);
+    }
+
     /* A drift between the producers is what broke candidate install once: the
      * verifier rebuilt a different argv than the producer wrote. The durable
      * guard is structural -- each producer's job_command must forward to the
@@ -172,10 +416,10 @@ int main(int argc, char **argv) {
             ok(0, labels[i], "unreadable");
             continue;
         }
-        int forwards = strstr(b, "sp_job_command(") != 0;
-        int own_copy = strstr(b, "v[n++]=\"-std=c99\"") != 0;
+        int forwards = 0, own_copy = 0;
+        scan_argv_forwarding(b, n, &forwards, &own_copy);
         char detail[64];
-        snprintf(detail, sizeof detail, "forwards=%d own-copy=%d", forwards, own_copy);
+        if (cx_fmt(detail, sizeof detail, "forwards=%d own-copy=%d", forwards, own_copy)) detail[0] = 0;
         ok(forwards && !own_copy, labels[i], detail);
         free(b);
     }
@@ -191,11 +435,11 @@ int main(int argc, char **argv) {
                                     "tools/source-package-pack.cx" };
         static const char *trl[] = { "read-recipes-cxlib", "read-recipes-source-package", "read-recipes-pack" };
         char *tabs[3] = { 0, 0, 0 };
+        size_t tabs_n[3] = { 0, 0, 0 };
         for (int i = 0; i < 3; i++) {
             char p[4400];
-            size_t n;
             pathcat(p, argv[1], rl[i]);
-            tabs[i] = load(p, &n);
+            tabs[i] = load(p, &tabs_n[i]);
             ok(tabs[i] != 0, trl[i], "table");
         }
         for (int i = 0; i < 2; i++) {
@@ -207,15 +451,15 @@ int main(int argc, char **argv) {
                 ok(0, labels[i], "unreadable");
                 continue;
             }
-            int forwards = strstr(b, "sp_job_command(") != 0;
-            int own_copy = strstr(b, "v[n++]=\"-std=c99\"") != 0;
+            int forwards = 0, own_copy = 0;
+            scan_argv_forwarding(b, n, &forwards, &own_copy);
             char detail[64];
-            snprintf(detail, sizeof detail, "forwards=%d own-copy=%d", forwards, own_copy);
+            if (cx_fmt(detail, sizeof detail, "forwards=%d own-copy=%d", forwards, own_copy)) detail[0] = 0;
             ok(forwards && !own_copy, labels[i], detail);
             free(b);
         }
-        if (tabs[0] && tabs[1]) ok(same_recipes(tabs[0], tabs[1]), "recipes-match-source-package", "row-by-row");
-        if (tabs[0] && tabs[2]) ok(same_recipes(tabs[0], tabs[2]), "recipes-match-pack", "row-by-row");
+        if (tabs[0] && tabs[1]) ok(same_recipes(tabs[0], tabs_n[0], tabs[1], tabs_n[1]), "recipes-match-source-package", "row-by-row");
+        if (tabs[0] && tabs[2]) ok(same_recipes(tabs[0], tabs_n[0], tabs[2], tabs_n[2]), "recipes-match-pack", "row-by-row");
         for (int i = 0; i < 3; i++) free(tabs[i]);
     }
     ok(1, "extra-args-do-not-change-pins", argc > 2 ? "ignored" : "none");

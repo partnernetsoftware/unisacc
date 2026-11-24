@@ -1,0 +1,134 @@
+#pragma unisa module fwdreplay
+#pragma unisa use sys.env
+#pragma unisa use sys.fs
+#pragma unisa use sys.sha
+#pragma unisa use mem.bytes
+#pragma unisa use mem.heap
+#pragma unisa use text.text
+
+static char dv_fwd_path[4200];
+static char dv_fwd_dir[4100];
+static const char *dv_fwd_name = "unisacc-forward-entry.c";
+
+const char *dv_fwd_label(void) { return dv_fwd_name; }
+
+const char *dv_fwd_file(void) {
+    return dv_fwd_path[0] ? dv_fwd_path : 0;
+}
+
+void dv_fwd_cleanup(void) {
+    if (!dv_fwd_dir[0]) return;
+    if (dv_fwd_path[0]) sy_unlink(dv_fwd_path);
+    sy_rmdir(dv_fwd_dir);
+    dv_fwd_dir[0] = 0;
+    dv_fwd_path[0] = 0;
+}
+
+static int dv_fwd_private(const void *text, long n) {
+    dv_fwd_cleanup();
+    if (sy_mkdtemp(sy_tmpdir(), "unisacc-fwd-", dv_fwd_dir, sizeof dv_fwd_dir)) return 1;
+    if (cx_fmt(dv_fwd_path, sizeof dv_fwd_path, "%s/%s", dv_fwd_dir, dv_fwd_name)) {
+        dv_fwd_path[0] = 0;
+        dv_fwd_cleanup();
+        return 1;
+    }
+    if (!sy_write_atomic(dv_fwd_path, text, n, 0600)) return 0;
+    dv_fwd_cleanup();
+    return 1;
+}
+
+static int dv_fwd_receipt(const char *phase, const void *text, long n, char *receipt, int cap) {
+    char checkpoint[4200], digest[65];
+    unsigned char *raw = 0;
+    int64_t size = 0;
+    int rc;
+    if (cx_fmt(checkpoint, sizeof checkpoint, "%s.sha256", phase) ||
+        sy_read_file(checkpoint, &raw, &size, 65)) return 1;
+    rc = size != 65 || raw[64] != '\n' || (text && sy_sha256_any_hex(text, n, digest));
+    if (!rc) {
+        raw[64] = 0;
+        rc = cx_fmt(receipt, cap, "forward-v1\nphase=%s\nstub=%s\n", raw, text ? digest : "none");
+    }
+    mm_free(raw);
+    return rc;
+}
+
+int dv_fwd_publish(const void *text, long n) {
+    const char *mode = sy_env("UNISACC_PHASE");
+    const char *phase;
+    char receipt_path[4200], receipt[160];
+    if (!mode || mode[0] != 'A' || (mode[1] && (mode[1] != '2' || mode[2])))
+        return text ? dv_fwd_private(text, n) : 0;
+    phase = sy_env("UNISACC_PHASE_OUT");
+    if (!phase || !phase[0] ||
+        cx_fmt(dv_fwd_path, sizeof dv_fwd_path, "%s.forward.c", phase) ||
+        cx_fmt(receipt_path, sizeof receipt_path, "%s.forward.receipt", phase) ||
+        dv_fwd_receipt(phase, text, n, receipt, sizeof receipt)) return 1;
+    if (text) {
+        if (sy_write_atomic(dv_fwd_path, text, n, 0600)) return 1;
+    } else {
+        int state = sy_exists(dv_fwd_path);
+        if (state < 0 || (state == 1 && sy_unlink(dv_fwd_path))) return 1;
+        dv_fwd_path[0] = 0;
+    }
+    return sy_write_atomic(receipt_path, receipt, tx_len(receipt, sizeof receipt), 0600);
+}
+
+/* B verifies the bytes before copying them into a process-owned source file. */
+static int dv_fwd_load(void) {
+    const char *phase = sy_env("UNISACC_PHASE_IN");
+    char path[4200], receipt_path[4200], expected[160];
+    unsigned char *text = 0, *receipt = 0;
+    int64_t n = 0, nr = 0;
+    int source, record, rc = -1;
+    if (!phase || !phase[0] || cx_fmt(path, sizeof path, "%s.forward.c", phase) ||
+        cx_fmt(receipt_path, sizeof receipt_path, "%s.forward.receipt", phase)) return -1;
+    source = sy_exists(path);
+    record = sy_exists(receipt_path);
+    if (source < 0 || record != 1) return -1;
+    if (source == 1 && (sy_read_file(path, &text, &n, 2147483647) || n <= 0)) {
+        mm_free(text);
+        return -1;
+    }
+    if (!sy_read_file(receipt_path, &receipt, &nr, sizeof expected) &&
+        !dv_fwd_receipt(phase, text, n, expected, sizeof expected) &&
+        nr == tx_len(expected, sizeof expected) && !mm_cmp(receipt, expected, nr)) {
+        if (!text) rc = 0;
+        else if (!dv_fwd_private(text, n)) rc = 1;
+    }
+    mm_free(receipt);
+    mm_free(text);
+    return rc;
+}
+
+/* An explicit phase always publishes or verifies material. */
+int dv_fwd_cache_ok(void) {
+    const char *phase = sy_env("UNISACC_PHASE");
+    const char *replay = sy_env("UNISA_FWD_REPLAY");
+    return (!phase || !phase[0]) && (!replay || !replay[0]);
+}
+
+int dv_fwd_phase_single(int nsrc, int mode, int tape) {
+    const char *phase = sy_env("UNISACC_PHASE");
+    return nsrc == 1 && (mode == 0 || mode == 3) && !tape && phase &&
+           (phase[0] == 'A' || phase[0] == 'B') && !phase[1];
+}
+
+int dv_fwd_phase_result(int framed, int phase_b, int replay) {
+    if (phase_b) return dv_fwd_load();
+    if (framed && !replay && dv_fwd_publish(0, 0)) return -2;
+    return 1;
+}
+
+int dv_fwd_phase_error(int status, int rc, char *why, int cap) {
+    if (status >= 0) return rc;
+    const char *msg = status == -2 ? "forwarding stub: cannot publish phase receipt"
+                                  : "forwarding stub: invalid phase receipt or source";
+    tx_copy(why, cap, msg, tx_len(msg, cap));
+    return 1;
+}
+
+int dv_fwd_stop(int rc, int restored, void (*arm)(int)) {
+    if (!restored) arm(1);
+    return rc;
+}

@@ -1,4 +1,4 @@
-来源:会话临时目录 /home/devali/.claude/jobs/7f46e032/tmp/R26/ruling.md 拷贝于 2026-11-24
+来源:会话临时目录 ~/.claude/jobs/7f46e032/tmp/R26/ruling.md 拷贝于 2026-11-24
 # R26 裁定:FORWARD_CALL_MAX 8192 与签名池的取舍
 
 ## 0. 最重要判断

@@ -13,22 +13,16 @@
 #pragma unisa use compiler.fwdincrement
 #pragma unisa use runtime.holdframe
 #pragma unisa use sys.env
+#pragma unisa use driver.fwdreplay
 #pragma unisa use stages
 
 static const char *dv_fw_tgt;
 static char dv_fw_why[128];
 static unsigned char dv_funit_one = 1;
-static char dv_fwd_path[4200];   /* <tmpdir>/unisacc-forward-entry.c, filled on first use */
 static int dv_fwd_again;
 
 int dv_fwd_replay(void) {
     return dv_fwd_again || hf_phase_b();
-}
-
-const char *dv_fwd_file(void) {
-    if (!dv_fwd_path[0] && cx_fmt(dv_fwd_path, sizeof dv_fwd_path, "%s/unisacc-forward-entry.c", sy_tmpdir()))
-        dv_fwd_path[0] = 0;
-    return dv_fwd_path[0] ? dv_fwd_path : 0;
 }
 
 static void dv_setwhy(char *why, int cap, const char *s) {
@@ -246,11 +240,6 @@ static int dv_fwd_merge(const char *route, const char *tgt, const char *src, int
     attr_unit = 0;
     attr_slot = -1;
     dv_fw_tgt = tgt;
-    if (!dv_fwd_file()) {
-        free(tape);
-        dv_setwhy(why, cap, "forwarding stub: temp path");
-        return 1;
-    }
     dv_fw_why[0] = 0;
     hold = 0;
     hn = 0;
@@ -261,7 +250,7 @@ static int dv_fwd_merge(const char *route, const char *tgt, const char *src, int
         return 1;
     }
     fast = fwd_incremental(tgt, level, &base, nsrc, &merged, ri, &nri, &attrs, &attr_unit, &attr_slot,
-                           dv_fwd_path, dv_fw_replay, fwm_overflowed, fwd_count, fwd_text,
+                           (char *)dv_fwd_label(), dv_fw_replay, fwm_overflowed, fwd_count, fwd_text,
                            dv_fw_alloc, dv_fw_release, dv_fw_front, dv_fw_range, dv_fw_merge);
     st_attr_exchange(&hold, &hn, &hc);
     free(hold);
@@ -283,8 +272,8 @@ static int dv_fwd_merge(const char *route, const char *tgt, const char *src, int
             dv_setwhy(why, cap, "forwarding stub");
             return 1;
         }
-        if (cx_write(dv_fwd_path, text, (size_t)n)) {
-            dv_setwhy(why, cap, "forwarding stub");
+        if (!hf_phase_b() && dv_fwd_publish(text, n)) {
+            dv_setwhy(why, cap, "forwarding stub: cannot publish source or phase receipt");
             return 1;
         }
         dv_fwd_again = 1;
@@ -464,7 +453,7 @@ int dv_run_lower(const char *route, const char *tgt, const char *src, int cx,
     }
     free(e3);
     pr = dv_fwd_merge(img, tgt, src, cx, level, nsrc, tape, (long)tl, out, outn, why, cap);
-    if (dv_fwd_again) { void hs_phase_arm(int); hs_phase_arm(1); return pr; }
+    if (dv_fwd_again) { void hs_phase_arm(int); return dv_fwd_stop(pr, hf_phase_b(), hs_phase_arm); }
     if (!pr && execf) *execf = 1;
     return pr;
 }

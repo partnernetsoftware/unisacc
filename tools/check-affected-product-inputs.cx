@@ -10,6 +10,7 @@
  *   batches than --no-product-inputs, and --no-product-inputs keeps the unchanged selection.
  * Prints CHECK lines and CHECK_AFFECTED_PRODUCT_INPUTS ok|FAIL; rc 0 only when every case passed. */
 #pragma unisa use cxlib.netpack
+#pragma unisa use testx.check
 #pragma unisa use sys.fs
 #pragma unisa use sys.proc
 #pragma unisa use sys.io
@@ -44,7 +45,6 @@ static int run_in(const char *dir, const char *a, const char *b, const char *c, 
     if (np_run(v, dir, 0, 50, &result, why, sizeof why)) { fprintf(stderr, "TRANSPORT %s\n", why); result.rc = -1; return -1; }
     return result.rc;
 }
-static int has(const char *s) { return result.out && strstr(result.out, s) != 0; }
 static int has_err(const char *s) { return result.err && strstr(result.err, s) != 0; }
 static char *dup_out(void) { size_t n = result.out ? strlen(result.out) : 0; char *p = mm_alloc(n + 1); if (p) { if (n && mm_copy(p, n + 1, result.out, n)) { mm_free(p); return 0; } p[n] = 0; } return p; }
 static int fixture(void) {
@@ -77,7 +77,7 @@ static int fixture(void) {
     if (cx_fmt(full, sizeof full, "%s%s%s%s%s", head, req, ra, rd, rc) || cx_fmt(nod, sizeof nod, "%s%s%s%s", head, req, ra, rc)
         || cx_fmt(unk, sizeof unk, "%s%s%s%s%s%s", head, req, ra, rd, rc, "id\tghost\texec/\tno such batch\n")) return 2;
     /* (1) no table: the unchanged selection */
-    ck(run_in(root, "--files", PP, 0, 0, 0) == 0 && has("AFFECTED\tb\t") && has("AFFECTED\tc\t") && !has("AFFECTED\ta\t") && !has("PRODUCT_INPUTS_SUMMARY"), "no-table-unchanged");
+    ck(run_in(root, "--files", PP, 0, 0, 0) == 0 && tk_has(result.out, "AFFECTED\tb\t") && tk_has(result.out, "AFFECTED\tc\t") && !tk_has(result.out, "AFFECTED\ta\t") && !tk_has(result.out, "PRODUCT_INPUTS_SUMMARY"), "no-table-unchanged");
     base = dup_out(); if (!base) return 2;
     /* (2) header-only table: byte-identical */
     if (put(TABLE, head)) return 2;
@@ -85,16 +85,16 @@ static int fixture(void) {
     /* (3) declarations: declared hits, deep narrowing, wrong prefix kept by the near-closure union */
     if (put(TABLE, full)) return 2;
     /* exec/ is a symlink in the fixture, so why= is the resolved absolute name: match the stable parts */
-    ck(run_in(root, "--files", PP, "--plan", 0, 0) == 0 && has("AFFECTED\ta\t") && has("directive-body-result.tsv\tvia=declared\treason=declared:exec/pp/\n")
-        && has("directive-body-result.tsv\tvia=declared\treason=declared:exec/\n") && !has("AFFECTED\tb\t") && has("NARROWED\tb\t")
-        && has("directive-body-result.tsv\tvia=table\treason=model:tokenpp<-tests/c.cx\n")
-        && has("PRODUCT_INPUTS_SUMMARY\tdeclared=3\tnear=1\tnarrowed=1\tdeclared_hits=2"), "declared-narrowed-union");
+    ck(run_in(root, "--files", PP, "--plan", 0, 0) == 0 && tk_has(result.out, "AFFECTED\ta\t") && tk_has(result.out, "directive-body-result.tsv\tvia=declared\treason=declared:exec/pp/\n")
+        && tk_has(result.out, "directive-body-result.tsv\tvia=declared\treason=declared:exec/\n") && !tk_has(result.out, "AFFECTED\tb\t") && tk_has(result.out, "NARROWED\tb\t")
+        && tk_has(result.out, "directive-body-result.tsv\tvia=table\treason=model:tokenpp<-tests/c.cx\n")
+        && tk_has(result.out, "PRODUCT_INPUTS_SUMMARY\tdeclared=3\tnear=1\tnarrowed=1\tdeclared_hits=2"), "declared-narrowed-union");
     ck(run_in(root, "--files", PP, "--no-product-inputs", 0, 0) == 0 && result.out && !strcmp(result.out, base), "opt-out-byte-identical");
     /* (4) non-table edges keep full depth: a change three hops down b's chain still selects b */
-    ck(run_in(root, "--files", "tests/b3.cx", 0, 0, 0) == 0 && has("AFFECTED\tb\twhy=tests/b3.cx\tvia=literal-use"), "deep-source-edge-kept");
+    ck(run_in(root, "--files", "tests/b3.cx", 0, 0, 0) == 0 && tk_has(result.out, "AFFECTED\tb\twhy=tests/b3.cx\tvia=literal-use"), "deep-source-edge-kept");
     /* (5) negative control: d holds {candidate} but its row is gone */
     if (put(TABLE, nod)) return 2;
-    ck(run_in(root, "--files", PP, 0, 0, 0) == 2 && has_err("BATCH_PRODUCT_INPUT_UNDECLARED\tid=d\tplaceholder={candidate}") && !has("AFFECTED"), "undeclared-refused");
+    ck(run_in(root, "--files", PP, 0, 0, 0) == 2 && has_err("BATCH_PRODUCT_INPUT_UNDECLARED\tid=d\tplaceholder={candidate}") && !tk_has(result.out, "AFFECTED"), "undeclared-refused");
     if (put(TABLE, unk)) return 2;
     ck(run_in(root, "--files", PP, 0, 0, 0) == 2 && has_err("BATCH_PRODUCT_INPUT_UNKNOWN\tid=ghost"), "unknown-id-refused");
     mm_free(base);
@@ -102,10 +102,10 @@ static int fixture(void) {
 }
 static int real(void) {
     char *base; int ok, nb = 0, nn = 0; const char *s;
-    ck(run_in(repo, "--files", PP, "--no-product-inputs", 0, 0) == 0 && has("AFFECTED_SUMMARY") && !has("PRODUCT_INPUTS_SUMMARY"), "real-opt-out");
+    ck(run_in(repo, "--files", PP, "--no-product-inputs", 0, 0) == 0 && tk_has(result.out, "AFFECTED_SUMMARY") && !tk_has(result.out, "PRODUCT_INPUTS_SUMMARY"), "real-opt-out");
     base = dup_out(); if (!base) return 2;
     for (s = base; (s = strstr(s, "\nAFFECTED\t")); s++) nb++;
-    ok = run_in(repo, "--files", PP, "--plan", 0, 0) == 0 && has("PRODUCT_INPUTS_SUMMARY");
+    ok = run_in(repo, "--files", PP, "--plan", 0, 0) == 0 && tk_has(result.out, "PRODUCT_INPUTS_SUMMARY");
     if (result.out) for (s = result.out; (s = strstr(s, "\nAFFECTED\t")); s++) nn++;
     ck(ok && nn > 0 && nn < nb, "real-fewer-than-unchanged");
     { /* every IMPLEMENTED pp-* row that receives a built product must be selected; pp-targets-lines and
@@ -118,7 +118,7 @@ static int real(void) {
           if (!strncmp(line, "pp-", 3) && strstr(line, "\tIMPLEMENTED\t") && (strstr(line, "{candidate}") || strstr(line, "{pp-gold}") || strstr(line, "{hostcc}"))) {
               char want[200]; char *t = strchr(line, '\t'); if (t) *t = 0;
               seen++;
-              if (cx_fmt(want, sizeof want, "AFFECTED\t%s\t", line) || !has(want)) { miss++; fprintf(stderr, "PP_MISSING %s\n", line); }
+              if (cx_fmt(want, sizeof want, "AFFECTED\t%s\t", line) || !tk_has(result.out, want)) { miss++; fprintf(stderr, "PP_MISSING %s\n", line); }
           }
           line = e ? e + 1 : 0;
       }

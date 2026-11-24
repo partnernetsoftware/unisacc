@@ -1,0 +1,171 @@
+/* tools/check-chain-ready-freeze.cx -- fixtures for chain-ready item 23-freeze-armed (R27 S2: the freeze commit F
+ * is the chain start commit).  Every fixture is a private git repository with a private bare origin under the
+ * system temp dir; the shared checkout is only read (tools/chain-ready.cx and its modules).
+ *   sh ./unisacc.com tools/check-chain-ready-freeze.cx [-- --no-mutants]
+ * Red cases, one per FAIL branch: no freeze row, expired row, malformed row, owner mismatch, PUSH-FREEZE without an
+ * owner variable, HEAD behind origin/main, no origin/main, numbering commit after the freeze commit, uncommitted
+ * numbering change.  Green cases: committed row with matching DEVSVC_OWNER, matching UNISACC_INTEGRATOR, numbering
+ * inside the freeze commit, PUSH-FREEZE with an owner variable.
+ * Mutants: a private tree (symlinks to cx, tools/cxlib, cxroot.tsv, the product) holds chain-ready.cx with one FAIL
+ * branch disabled; the fixture aimed at that branch must turn from red to green-wrong, i.e. the check must see it.
+ * Ends with CHAIN_READY_FREEZE passed=N failed=M; exit 0 only when failed=0. */
+#pragma unisa use sys.proc
+#pragma unisa use sys.fs
+#pragma unisa use sys.env
+#pragma unisa use text.text
+#pragma unisa use mem.heap
+#pragma unisa use mem.bytes
+#pragma unisa use sys.posix
+
+#define UC "./unisacc.com" /* lint:allow R1 fixtures run tools/chain-ready.cx under the installed product */
+static int passed, failed;
+static char tmpd[300], cwd[4400], out[16384];
+static const char *bound_s = "40";
+
+static void fz_ck(int ok, const char *name) {
+    if (ok) { passed++; printf("PASS\t%s\n", name); } else { failed++; printf("FAIL\t%s\t%.400s\n", name, out); }
+}
+static int fz_seen(const char *w) { return strstr(out, w) != 0; }
+/* sh -c CMD in DIR (bounded by tools/bound BOUND_S seconds, 40 by default), stdout+stderr into out; the exit code or -1 */
+static int sh_in(const char *dir, const char *cmd) {
+    char b[4400]; int fd = -1, pid, ex = 0, code = 0, sig = 0; long n = 0, r;
+    char *v[] = {"./tools/bound", (char *)bound_s, "sh", "-c", b, 0};
+    out[0] = 0;
+    if (cx_fmt(b, sizeof b, "cd '%s' && { %s; } 2>&1", dir, cmd)) return -1;
+    pid = sy_spawn_pipe(v, 0, 0, &fd, 0);
+    if (pid <= 0) return -1;
+    while (n < (long)sizeof out - 1 && (r = sy_read(fd, out + n, sizeof out - 1 - (size_t)n)) > 0) n += r;
+    out[n] = 0; sy_close(fd);
+    return sy_wait_status(pid, 0, &ex, &code, &sig) == pid && ex ? code : -1;
+}
+#define G "git -c user.name=t -c user.email=t@t -c commit.gpgsign=false "
+/* a fresh repo R with bare origin: numbering files committed and pushed (commit A) */
+static void fresh(const char *r) {
+    char c[2000];
+    cx_fmt(c, sizeof c, "rm -rf '%s' '%s.git' && git init -q --bare '%s.git' && git init -q -b main '%s' && cd '%s' && "
+           "mkdir -p build/layer-api && printf 'p\\t1\\n' > build/tlib-packages.tsv && printf 'h\\t1\\n' > build/iface-hash.tsv && "
+           "printf 'a\\n' > build/layer-api/x.tsv && printf 'x\\n' > f.txt && " G "add -A && " G "commit -qm A && "
+           "git remote add origin '%s.git' && git push -q origin main", r, r, r, r, r, r);
+    if (sh_in(tmpd, c)) printf("SETUP\tfresh\t%.300s\n", out);
+}
+static void in_repo(const char *r, const char *cmd) { if (sh_in(r, cmd)) printf("SETUP\t%s\t%.300s\n", cmd, out); }
+/* chain-ready --only 23-freeze-armed --repo R from TREE, with ENV ("env -u ... K=V" prefix, may be empty) */
+static int ready(const char *tree, const char *r, const char *env) {
+    char c[2000];
+    cx_fmt(c, sizeof c, "env -u DEVSVC_OWNER -u UNISACC_INTEGRATOR %s sh " UC " tools/chain-ready.cx -- --repo '%s' --only 23-freeze-armed", env, r);
+    return sh_in(tree, c);
+}
+#define ROW_OK "printf 'sid1\\tbase\\tcc\\t4102444800\\tsrc\\n' > build/freeze.tsv"
+#define COMMIT_PUSH " && " G "add -A && " G "commit -qm step && git push -q origin main"
+
+typedef struct { const char *name, *setup, *env, *want_rc_kind, *frag; } Case;
+/* want: "FAIL" (rc 1 and the named reason) or "PASS" (rc 0 and the fragment) */
+static const Case cases[] = {
+    {"not-armed-no-row", "true", "DEVSVC_OWNER=cc", "FAIL", "FREEZE_NOT_ARMED"},
+    {"expired-row", "printf 'sid1\\tbase\\tcc\\t1\\tsrc\\n' > build/freeze.tsv" COMMIT_PUSH, "DEVSVC_OWNER=cc", "FAIL", "FREEZE_NOT_ARMED"},
+    {"malformed-row", "printf 'sid1\\tbase\\tcc\\tabc\\tsrc\\n' > build/freeze.tsv" COMMIT_PUSH, "DEVSVC_OWNER=cc", "FAIL", "FREEZE_TABLE_MALFORMED"},
+    {"owner-mismatch", ROW_OK COMMIT_PUSH, "DEVSVC_OWNER=other", "FAIL", "FREEZE_OWNER_MISMATCH active freeze row owner=cc"},
+    {"marker-without-owner-env", "touch .git/PUSH-FREEZE", "", "FAIL", "FREEZE_OWNER_MISMATCH PUSH-FREEZE"},
+    {"behind-origin-main", ROW_OK COMMIT_PUSH " && git update-ref refs/remotes/origin/main $(" G "commit-tree HEAD^{tree} -p HEAD -m other)", "DEVSVC_OWNER=cc UNISACC_FREEZE_NO_FETCH=1", "FAIL", "FREEZE_BEHIND_MAIN behind=1"},
+    {"no-origin-main", ROW_OK COMMIT_PUSH " && git update-ref -d refs/remotes/origin/main", "DEVSVC_OWNER=cc UNISACC_FREEZE_NO_FETCH=1", "FAIL", "FREEZE_ORIGIN_MAIN_UNKNOWN"},
+    {"origin-advanced-fetch-behind", ROW_OK COMMIT_PUSH " && { O=$(git remote get-url origin); C=$(" G "commit-tree HEAD^{tree} -p HEAD -m remote-adv); git push -q \"$O\" \"$C\":refs/heads/main && git update-ref refs/remotes/origin/main HEAD; }", "DEVSVC_OWNER=cc", "FAIL", "FREEZE_BEHIND_MAIN behind=1"},
+    {"fetch-failed-unknown", ROW_OK COMMIT_PUSH " && git remote set-url origin /nonexistent-freeze-origin-url", "DEVSVC_OWNER=cc", "FAIL", "FREEZE_ORIGIN_MAIN_UNKNOWN git fetch origin failed"},
+    {"numbering-after-freeze", ROW_OK COMMIT_PUSH " && printf 'h\\t2\\n' > build/iface-hash.tsv" COMMIT_PUSH, "DEVSVC_OWNER=cc", "FAIL", "FREEZE_TLIB_AFTER_FREEZE numbering commit"},
+    {"numbering-uncommitted", ROW_OK COMMIT_PUSH " && printf 'p\\t2\\n' > build/tlib-packages.tsv", "DEVSVC_OWNER=cc", "FAIL", "FREEZE_TLIB_AFTER_FREEZE uncommitted"},
+    {"armed-owner", ROW_OK COMMIT_PUSH, "DEVSVC_OWNER=cc", "PASS", "armed: freeze.tsv sid=sid1 owner=cc"},
+    {"armed-integrator", ROW_OK COMMIT_PUSH, "UNISACC_INTEGRATOR=CC", "PASS", "armed: freeze.tsv sid=sid1"},
+    {"armed-numbering-in-freeze-commit", ROW_OK " && printf 'h\\t3\\n' > build/iface-hash.tsv" COMMIT_PUSH, "DEVSVC_OWNER=cc", "PASS", "numbering files unchanged after the freeze"},
+    {"armed-uncommitted-row", ROW_OK, "DEVSVC_OWNER=cc", "PASS", "armed: freeze.tsv"},
+    {"armed-marker-with-owner", "touch .git/PUSH-FREEZE", "UNISACC_INTEGRATOR=cc", "PASS", "armed: PUSH-FREEZE marker owner-env=cc"},
+};
+#define NCASES ((int)(sizeof cases / sizeof cases[0]))
+
+/* run case K from TREE; 1 when the observed verdict matches the case's expectation */
+static int run_case(const char *tree, int k) {
+    char r[600]; int rc;
+    cx_fmt(r, sizeof r, "%s/r%d", tmpd, k);
+    fresh(r); in_repo(r, cases[k].setup);
+    rc = ready(tree, r, cases[k].env);
+    if (tx_eqz(cases[k].want_rc_kind, "FAIL")) return rc == 1 && fz_seen("23-freeze-armed\tFAIL") && fz_seen(cases[k].frag) && fz_seen("READY\tno");
+    return rc == 0 && fz_seen("23-freeze-armed\tPASS") && fz_seen(cases[k].frag) && fz_seen("READY\tyes");
+}
+
+/* mutant: OLD (must occur exactly once in chain-ready.cx) replaced by NEW; CASE must then stop matching */
+typedef struct { const char *name, *old, *neu, *kcase; } Mut;
+static const Mut muts[] = {
+    {"drop-not-armed", "if (!marker) { put_ev(ev, cap, \"FREEZE_NOT_ARMED", "if (0) { put_ev(ev, cap, \"FREEZE_NOT_ARMED", "not-armed-no-row"},
+    {"drop-expiry", "if ((long)dl <= now) continue;", "(void)now;", "expired-row"},
+    {"drop-malformed", "mm_free(ft); cx_fmt(ev, (size_t)cap, \"FREEZE_TABLE_MALFORMED", "continue; cx_fmt(ev, (size_t)cap, \"FREEZE_TABLE_MALFORMED", "malformed-row"},
+    {"drop-owner-mismatch", "if (!matched && table_rows_owner_bad) {", "if (0 && table_rows_owner_bad) {", "owner-mismatch"},
+    {"drop-marker-owner", "if (!(own && own[0]) && !(integ && integ[0])) { put_ev", "if (0) { put_ev", "marker-without-owner-env"},
+    {"drop-behind", "if (behind > 0) {", "if (0) {", "behind-origin-main"},
+    {"drop-fetch", "if (!(nofetch && nofetch[0] == '1')) {", "if (0) {", "origin-advanced-fetch-behind"},
+    {"drop-tlib-dirty", "if (buf[0]) { cx_fmt(ev, (size_t)cap, \"FREEZE_TLIB_AFTER_FREEZE uncommitted", "if (0) { cx_fmt(ev, (size_t)cap, \"FREEZE_TLIB_AFTER_FREEZE uncommitted", "numbering-uncommitted"},
+    {"drop-tlib-order", "if (r == 1) { cx_fmt(ev, (size_t)cap, \"FREEZE_TLIB_AFTER_FREEZE", "if (0) { cx_fmt(ev, (size_t)cap, \"FREEZE_TLIB_AFTER_FREEZE", "numbering-after-freeze"},
+};
+#define NMUTS ((int)(sizeof muts / sizeof muts[0]))
+
+static int case_index(const char *n) { for (int k = 0; k < NCASES; k++) if (tx_eqz(cases[k].name, n)) return k; return -1; }
+static long fz_locate(const char *s, long sl, const char *p, long pl) {
+    if (pl <= 0 || pl > sl) return -1;
+    for (long i = 0; i + pl <= sl; i++) {
+        long j = 0;
+        while (j < pl && s[i + j] == p[j]) j++;
+        if (j == pl) return i;
+    }
+    return -1;
+}
+
+static void mutants(void) {
+    char mt[600], c[4800], p[4500], warm[4400]; size_t sn = 0; char *src; int ok[NMUTS]; long wn = 0;
+    cx_fmt(p, sizeof p, "%s/tools/chain-ready.cx", cwd);
+    src = cx_read(p, &sn);
+    if (!src) { failed++; puts("FAIL\tmutant-source-unreadable"); return; }
+    warm[0] = 0;
+    for (int m = 0; m < NMUTS; m++) {
+        const char *o = muts[m].old; long ol = (long)tx_len(o, 4096), nl = (long)tx_len(muts[m].neu, 4096);
+        long at = fz_locate(src, (long)sn, o, ol);
+        ok[m] = 0;
+        if (at < 0 || fz_locate(src + at + ol, (long)sn - at - ol, o, ol) >= 0 || case_index(muts[m].kcase) < 0) { failed++; printf("FAIL\tmutant-%s\tanchor not found exactly once\n", muts[m].name); continue; }
+        cx_fmt(mt, sizeof mt, "%s/mut%d", tmpd, m);
+        cx_fmt(c, sizeof c, "mkdir -p '%s/tools' && ln -sT '%s/cx' '%s/cx' && ln -s '%s/cxroot.tsv' '%s/cxroot.tsv' && ln -s '%s/unisacc.com' '%s/unisacc.com' && "
+               "ln -sT '%s/tools/cxlib' '%s/tools/cxlib' && ln -s '%s/tools/bound' '%s/tools/bound' && { [ ! -e '%s/ext' ] || ln -sT '%s/ext' '%s/ext'; }",
+               mt, cwd, mt, cwd, mt, cwd, mt, cwd, mt, cwd, mt, cwd, cwd, mt);
+        if (sh_in(tmpd, c)) { failed++; printf("FAIL\tmutant-%s-tree\t%.300s\n", muts[m].name, out); continue; }
+        size_t mn = sn - (size_t)ol + (size_t)nl; char *mb = mm_alloc((long)mn + 1);
+        if (!mb) { failed++; puts("FAIL\tmutant-alloc"); continue; }
+        mm_copy(mb, (long)mn + 1, src, at);
+        mm_copy(mb + at, (long)mn + 1 - at, muts[m].neu, nl);
+        mm_copy(mb + at + nl, (long)mn + 1 - at - nl, src + at + ol, (long)sn - at - ol);
+        cx_fmt(p, sizeof p, "%s/tools/chain-ready.cx", mt);
+        int w = cx_write(p, mb, mn); mm_free(mb);
+        if (w) { failed++; printf("FAIL\tmutant-%s\twrite\n", muts[m].name); continue; }
+        ok[m] = 1;
+        /* compile every mutant at once (one cold compile is about 17 s); the cases below then hit the run cache */
+        if (cx_fmt(warm + wn, sizeof warm - (size_t)wn, "(cd '%s' && sh " UC " tools/chain-ready.cx -- --only 9-ledger >/dev/null 2>&1) & ", mt)) { ok[m] = 0; failed++; puts("FAIL\tmutant-warm-capacity"); continue; }
+        wn = (long)tx_len(warm, sizeof warm);
+    }
+    mm_free(src);
+    if (wn && cx_fmt(warm + wn, sizeof warm - (size_t)wn, "wait") == 0) { bound_s = "50"; (void)sh_in(tmpd, warm); bound_s = "40"; }
+    for (int m = 0; m < NMUTS; m++) {
+        char nm[200]; if (!ok[m]) continue;
+        cx_fmt(nm, sizeof nm, "mutant-%s-turns-%s", muts[m].name, muts[m].kcase);
+        cx_fmt(mt, sizeof mt, "%s/mut%d", tmpd, m);
+        /* the targeted fixture must no longer give its expected verdict under the mutant; a mutant that does not
+           even start (no 23-freeze-armed row) proves nothing, so it fails the check too */
+        int still = run_case(mt, case_index(muts[m].kcase));
+        int ran = fz_seen("23-freeze-armed\t");
+        if (!still && ran) { passed++; printf("PASS\t%s\n", nm); } else { failed++; printf("FAIL\t%s\t%s\n", nm, ran ? "mutant survived" : "mutant did not run"); }
+    }
+}
+
+int main(int argc, char **argv) {
+    int no_mut = argc >= 2 && tx_eqz(argv[1], "--no-mutants");
+    if (sy_cwd(cwd, sizeof cwd)) { puts("FAIL\tcwd"); return 1; }
+    if (sy_mkdtemp(sy_tmpdir(), "chain-ready-freeze-", tmpd, sizeof tmpd) != 0) { puts("FAIL\ttmpdir"); return 1; }
+    for (int k = 0; k < NCASES; k++) { char nm[200]; cx_fmt(nm, sizeof nm, "%s-%s", cases[k].name, cases[k].want_rc_kind); fz_ck(run_case(cwd, k), nm); }
+    if (!no_mut) mutants();
+    if (sy_remove_all(tmpd)) fprintf(stderr, "check-chain-ready-freeze: cleanup failed %s\n", tmpd);
+    printf("CHAIN_READY_FREEZE\tpassed=%d\tfailed=%d\n", passed, failed);
+    return failed ? 1 : 0;
+}

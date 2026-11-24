@@ -1676,28 +1676,27 @@ static int pd_check_min_free(const char *out_dir, const char *wid, unsigned long
     }
     return low;
 }
-static int pd_infra_enospc(const char *outp) {
+static void pd_infra_enospc(const char *outp, int *hit_out) {
     char ep[PD_PW];
     const char *ps[2] = {0, outp};
+    *hit_out = 0;
     if (!cx_fmt(ep, sizeof ep, "%s.stderr", outp)) ps[0] = ep;
-    for (int i = 0; i < 2; i++) {
+    for (int i = 0; i < 2 && !*hit_out; i++) {
         unsigned char *b = 0; int64_t n = 0;
         if (ps[i] && sy_read_file(ps[i], &b, &n, 1 << 20) == 0) {
-            int hit = pd_text_has_enospc((const char *)b, n);
+            if (pd_text_has_enospc((const char *)b, n)) *hit_out = 1;
             mm_free(b);
-            if (hit) return 1;
         }
     }
-    return 0;
 }
 /* Extract first line containing REFUSE from result file or sidecar .stderr, truncated to cap-1 bytes (255 bytes for cur[256]). */
-static int pd_extract_refuse(const char *outp, char *dst, size_t cap) {
+static void pd_extract_refuse(const char *outp, char *dst, size_t cap) {
     char ep[PD_PW];
     const char *ps[2] = {0, outp};
-    if (!dst || cap < 2) return 0;
+    if (!dst || cap < 2) return;
     dst[0] = 0;
     if (!cx_fmt(ep, sizeof ep, "%s.stderr", outp)) ps[0] = ep;
-    for (int i = 0; i < 2; i++) {
+    for (int i = 0; i < 2 && !dst[0]; i++) {
         unsigned char *b = 0; int64_t n = 0;
         if (ps[i] && sy_read_file(ps[i], &b, &n, 1 << 20) == 0) {
             const char *s = (const char *)b;
@@ -1708,33 +1707,36 @@ static int pd_extract_refuse(const char *outp, char *dst, size_t cap) {
                 while (le < (long)n && s[le] != '\n' && s[le] != '\r') le++;
                 size_t len = (size_t)(le - ls);
                 if (len >= cap) len = cap - 1;
-                if (mm_copy(dst, cap - 1, s + ls, len) != 0) { mm_free(b); return 0; }
+                mm_copy(dst, cap, s + ls, len);
                 dst[len] = 0;
-                mm_free(b);
-                return 1;
             }
             mm_free(b);
         }
     }
-    return 0;
 }
-static int pd_track_repeat_rc2(int win_rc, const char *outp, const char *wid,
-                               char *prev_ref, size_t prev_cap, int *same_cnt) {
+static void pd_track_repeat_rc2(int win_rc, const char *outp, const char *wid,
+                                char *prev_ref, size_t prev_cap, int *same_cnt, int *stop_out) {
     char cur[256];
-    if (win_rc != 2 || !pd_extract_refuse(outp, cur, sizeof cur)) {
+    cur[0] = 'X';
+    cur[1] = 0;
+    *stop_out = 0;
+    if (win_rc == 2) pd_extract_refuse(outp, cur, sizeof cur);
+    else cur[0] = 0;
+    if (cur[0]) {
+        if (tx_eqz(prev_ref, cur)) {
+            (*same_cnt)++;
+        } else {
+            cx_fmt(prev_ref, prev_cap, "%s", cur);
+            *same_cnt = 1;
+        }
+        if (*same_cnt >= 3) {
+            printf("PRERUN_INFRA\treason=REPEAT_RC2\twindow=%s\n", wid);
+            *stop_out = 1;
+        }
+    } else {
         prev_ref[0] = 0;
         *same_cnt = 0;
-        return 0;
     }
-    if (tx_eqz(prev_ref, cur)) {
-        (*same_cnt)++;
-    } else {
-        cx_fmt(prev_ref, prev_cap, "%s", cur);
-        *same_cnt = 1;
-    }
-    int hit = (*same_cnt >= 3);
-    if (hit) printf("PRERUN_INFRA\treason=REPEAT_RC2\twindow=%s\n", wid);
-    return hit;
 }
 
 
@@ -2003,10 +2005,17 @@ static int pd_cmd_run(const char *root, const char *cand, const char *out_dir, i
                     rc = pd_window_attempt(eff_root, cand, mock_runner, wid, phase, run_ids, outp, jobs, attempt);
                 }
             }
-            if (rc != 0 && pd_infra_enospc(outp)) {
-                printf("PRERUN_INFRA\treason=ENOSPC\twindow=%s\n", wid);
-                mm_free(wb);
-                return 2;
+            {
+                int enospc_hit = 0;
+                if (rc != 0) {
+                    enospc_hit = 1;
+                    pd_infra_enospc(outp, &enospc_hit);
+                }
+                if (enospc_hit) {
+                    printf("PRERUN_INFRA\treason=ENOSPC\twindow=%s\n", wid);
+                    mm_free(wb);
+                    return 2;
+                }
             }
             if (pd_verify_window_source(outp, wid, attempt, eff_root, frozen_rev)) {
                 mm_free(wb);
@@ -2135,9 +2144,13 @@ static int pd_cmd_run(const char *root, const char *cand, const char *out_dir, i
             }
             if (!timed) jobs = 1;
         }
-        if (pd_track_repeat_rc2(win_final_rc, outp, wid, infra_ref, sizeof infra_ref, &infra_same)) {
-            mm_free(wb);
-            return 2;
+        {
+            int repeat_stop = 1;
+            pd_track_repeat_rc2(win_final_rc, outp, wid, infra_ref, sizeof infra_ref, &infra_same, &repeat_stop);
+            if (repeat_stop) {
+                mm_free(wb);
+                return 2;
+            }
         }
     }
     mm_free(wb);

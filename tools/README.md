@@ -1299,7 +1299,9 @@ tools/bound 45 "$WF" front "$F" "$T" "$D/front2" 64 21
 tools/bound 45 "$WF" merge "$F" "$T" "$D/A.phase" "$D/front0" "$D/front1" "$D/front2"
 ```
 
-Mac两片先执行真实stub生成。`STUB` 必须是 `D/stub/stub-path.txt` 记录的 **F/tmp/unisacc-forward-entry.c** 绝对路径，其真实TMPDIR文件字节须与 `D/stub/stub.c` 相同；不能用stub.c副本路径、空桩或另一ISA的桩冒充。两个span都传同一真实路径及重核SHA。
+Mac 两片先执行真实桩生成。`STUB` 取自 `D/stub/stub-path.txt`，当前产品记录 `D/stub/replay.phase.forward.c` 的绝对路径，旧构造器记录其准备目录下的 `tmp/unisacc-forward-entry.c`。实际文件字节必须与 `D/stub/stub.c` 相同。两个 span 均传该路径并重新核对 SHA-256。
+
+显式分相在检查点旁发布 `.forward.receipt`，其中记录检查点 SHA-256 与桩 SHA-256，无桩时记录 `stub=none`。收据用于发现误配和写入中断，未使用 MAC。能够写入该目录的进程也能替换文件和摘要。普通回放及 B 相私有副本使用 `TMPDIR/unisacc-fwd-*`，进程正常退出时回收，崩溃或强制终止可能留下目录。
 
 ```sh
 tools/bound 45 "$WF" stub "$F" "$T" "$D/A.phase" "$D/stub"

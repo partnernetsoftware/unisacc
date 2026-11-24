@@ -1,6 +1,9 @@
 /* tools/check-release-exec.cx -- contract check of tools/release-exec.cx (release-run --execute).
  *
- *   sh ./unisacc.com tools/check-release-exec.cx [-- --part a|b]   (from the repo root)
+ *   sh ./unisacc.com tools/check-release-exec.cx [-- --part a|b|c|r|f]   (from the repo root)
+ * part f (F_CHAIN_REV, R27 S2): HEAD != chain rev refused before X; --post-chain-merge REASON passes and writes
+ *   INDEX exec-1-post-chain-merge once; HEAD == chain rev passes without that row; --dry reports DEFERRED.
+ *   Regular execute fixtures run with no waiver (chain_waive = 0, candidate commit == fixture HEAD).
  *
  * Everything runs in a private fixture repo under /tmp: fake gh and fake ./unisacc.com are
  * this same file in --fake mode (thin sh wrappers put first in PATH / in the fixture root);
@@ -108,7 +111,14 @@ static void advance_main(const char *flag) {
 static int fake_gh(int argc, char **argv) {
     char p[4400], q[4800]; char *t;
     flog("gh", argc, argv, 3);
-    if(argi(argc,argv,"api")>0){sy_printf("1111111111111111111111111111111111111111\n");return 0;}
+    if(argi(argc,argv,"api")>0){
+        char crp[4400], *crt;
+        cx_fmt(crp, sizeof crp, "%s/chain_rev", fdir);
+        crt = slurp(crp);
+        sy_printf("%s\n", (crt && tlen(crt) >= 40) ? crt : "1111111111111111111111111111111111111111");
+        free(crt);
+        return 0;
+    }
     cx_fmt(p, sizeof p, "%s/state", fdir);
     if (argi(argc, argv, "view") > 0 && argi(argc, argv, "release") > 0) {
         t = slurp(p);
@@ -299,12 +309,26 @@ static void ci_json(int bad) {
     np_puts(&b, "]}\n"); np_put(&b, "", 1);
     put(td, "ci.json", b.p); free(b.p);
 }
+static char fx_head[64];
+static void set_fx_chain_rev(const char *sha) {
+    put(td, "chain_rev", sha);
+}
 /* opts: version printed by the fake APE, strict variant, ratchets fail count */
 static void fixture(int fixture_patch, int strict_variant, int ratchet_fail, int with_expected) {
-    char p[4800], t[8192], cand[4096], blob[128], tree[128], tree2[128], commit[128], row[600];
+    char p[4800], t[8192], cand[4096], blob[128], tree[128], tree2[128], commit[128], base_commit[128], row[600];
     char apever[32];cx_fmt(apever,sizeof apever,"0.0.%d",fixture_patch);
     rmrf(fx); rmrf(lay);
     { char *v[] = {"mkdir", "-p", fx, lay, binp, 0}; if (sh(v, "/", 0, 0)) die("mkdir"); }
+    if (git("init", "-q", 0, 0, 0, 0, 0)) die("git init");
+    { char ix[4500]; cx_fmt(ix, sizeof ix, "GIT_INDEX_FILE=%s/fx.index", td);
+      char *e[] = {ix, 0}; np_result r = {0}; char why[200];
+      char *v2[] = {"git", "write-tree", 0};
+      if (np_run(v2, fx, e, 20, &r, why, sizeof why) || r.rc || r.outn < 40) die("base write-tree");
+      for (int i = 0; i < 40; i++) tree2[i] = r.out[i]; tree2[40] = 0; np_free(&r);
+      cx_fmt(p, sizeof p, "%s/fx.index", td); rmrf(p); }
+    if (git("commit-tree", tree2, "-m", "fixture base", 0, base_commit, sizeof base_commit) || tlen(base_commit) != 40) die("base commit-tree");
+    cx_fmt(fx_head, sizeof fx_head, "%s", base_commit);
+    set_fx_chain_rev(fx_head);
     cx_fmt(p, sizeof p, "%s/release/evidence/0.0.99", fx); { char *v[] = {"mkdir", "-p", p, 0}; sh(v, "/", 0, 0); }
     cx_fmt(p, sizeof p, "%s/remote", td); { char *v[] = {"mkdir", "-p", p, 0}; sh(v, "/", 0, 0); }
     cx_fmt(p,sizeof p,"%s/tools",fx);
@@ -322,7 +346,7 @@ static void fixture(int fixture_patch, int strict_variant, int ratchet_fail, int
     cx_fmt(cand, sizeof cand,
         "repo\ttag\tcommit\tversion\tworkflow\tworkflow_ref\tci_run_id\tape\tape_sha256\tpackage\tpackage_sha256\twin_arm64\twin_arm64_sha256\trecord\trecord_sha256\tbuild_alias\tbuild_alias_sha256\tzip\tzip_sha256\tchecksums\tchecksums_sha256\n"
         "example/fixture\tv0.0.%d\t%s\t0.0.%d\tcandidate-native.yml\tv0.0.%d\t0\tunisacc.com\t%s\tpkg.bin\t%s\tslice-win-arm64\t%s\tunisacc.com.build.json\t%s\tbuild.json\t%s\t-\t-\tSHA256SUMS\t%s\n",
-        strict_variant==76?76:99,"1111111111111111111111111111111111111111",strict_variant==76?76:99,strict_variant==76?76:99,
+        strict_variant==76?76:99,fx_head,strict_variant==76?76:99,strict_variant==76?76:99,
         strict_variant==76?"8ffe6b0ba318be4bb77049f1b69165d8b3376ac7c6a917cd1969b5b39ef32e60":sha[0],sha[1],sha[2],sha[3],sha[4],sha[5]);
     put(fx, "release/candidate.tsv", cand);
     /* strict evidence */
@@ -363,8 +387,7 @@ static void fixture(int fixture_patch, int strict_variant, int ratchet_fail, int
     cx_fmt(t, sizeof t, "#!/bin/sh\nexec \"%s\" --fake gh \"$@\"\n",selfbin); put(binp, "gh", t);
     cx_fmt(t, sizeof t, "#!/bin/sh\nexec \"%s\" --fake unisacc \"$@\"\n",selfbin); put(fx, leafs[0], t);
     { char g[4500]; cx_fmt(g, sizeof g, "%s/gh", binp); char *v[] = {"chmod", "+x", g, 0}; sh(v, "/", 0, 0); }
-    /* git: one commit holding release/candidate.tsv, also origin/main (= pushed) */
-    if (git("init", "-q", 0, 0, 0, 0, 0)) die("git init");
+    /* git: commit holding release/candidate.tsv on top of base_commit, also origin/main (= pushed) */
     cx_fmt(p, sizeof p, "%s/release/candidate.tsv", fx);
     if (git("hash-object", "-w", p, 0, 0, blob, sizeof blob)) die("hash-object");
     { char ix[4500], ci[600]; cx_fmt(ix, sizeof ix, "GIT_INDEX_FILE=%s/fx.index", td); cx_fmt(ci, sizeof ci, "100644,%s,release/candidate.tsv", blob);
@@ -375,8 +398,7 @@ static void fixture(int fixture_patch, int strict_variant, int ratchet_fail, int
       if (np_run(v2, fx, e, 20, &r, why, sizeof why) || r.rc || r.outn < 40) die("write-tree");
       for (int i = 0; i < 40; i++) tree[i] = r.out[i]; tree[40] = 0; np_free(&r);
       cx_fmt(p, sizeof p, "%s/fx.index", td); rmrf(p); }
-    (void)tree2;
-    if (git("commit-tree", tree, "-m", "fixture X", 0, commit, sizeof commit)) die("commit-tree");
+    if (git("commit-tree", tree, "-p", base_commit, "-mfixture X", commit, sizeof commit)) die("commit-tree");
     if (git("update-ref", "refs/heads/main", commit, 0, 0, 0, 0) || git("update-ref", "refs/remotes/origin/main", commit, 0, 0, 0, 0) ||
         git("symbolic-ref", "HEAD", "refs/heads/main", 0, 0, 0, 0)) die("update-ref");
     { char bare[4400];cx_fmt(bare,sizeof bare,"%s/bare.git",td);rmrf(bare);
@@ -385,6 +407,7 @@ static void fixture(int fixture_patch, int strict_variant, int ratchet_fail, int
 }
 static char out[262144];
 static char *candidate_input="release/candidate.tsv";
+static int chain_waive = 0;
 static int rx(const char *a1, const char *a2, const char *a3, const char *tool) {
     char ex[4400], up[4400], tp[4400]; char *v[20]; int k = 0, rc; np_result r = {0}; char why[256];
     char *env[] = {pathenv, fakeenv, "HOME=/custom-home/tester", "DEVSVC_REPO_TABLE=/bogus/pinned/devsvc-repo.tsv", "DEVSVC_REPO_TABLE_PIN=HEAD:/bogus/pinned/devsvc-repo.tsv", "RELEASE_EXEC_POLL_MS=10", "RELEASE_EXEC_POLL_MAX=3", 0};
@@ -396,6 +419,9 @@ static int rx(const char *a1, const char *a2, const char *a3, const char *tool) 
     v[k++] = "--execute"; v[k++] = candidate_input; v[k++] = "--layout"; v[k++] = lay;
     v[k++] = "--out"; v[k++] = ex; v[k++] = "--baseline"; v[k++] = "/nonexistent-baseline";
     if (a1) v[k++] = (char *)a1; if (a2) v[k++] = (char *)a2; if (a3) v[k++] = (char *)a3;
+    /* Production default: chain_waive = 0 (no --post-chain-merge), so regular execute fixtures cover HEAD == chain_rev. */
+    { int is_dry = (a1 && tx_eqz(a1, "--dry")) || (a2 && tx_eqz(a2, "--dry")) || (a3 && tx_eqz(a3, "--dry"));
+      if (chain_waive && !is_dry) { v[k++] = "--post-chain-merge"; v[k++] = "fixture-head-is-not-chain-rev"; } }
     v[k] = 0;
     out[0] = 0;
     if (np_run(v, fx, tool ? env2 : env, 55, &r, why, sizeof why)) { np_free(&r); return 125; }
@@ -581,9 +607,11 @@ static void part_a(void) {
         free(bytes);
     }
     ck(has(out, "GATE\t1\tSTRICT\tPASS") && has(out, "expected_fail=1") && has(out, "GATE\t1\tRATCHETS\tPASS") && has(out, "GATE\t1\tAPE_VERSION\tPASS") && has(out, "GATE\t2\tASSETS\tPASS"), "D1.g1-g2-pass");
-    ck(has(out, "CMD\t2\tDRY\tgh -R example/fixture release create v0.0.99 --draft --title 0.0.99 --target 1111111111111111111111111111111111111111") &&
-       has(out, "CMD\t3\tDRY\tgh -R example/fixture workflow run candidate-native.yml --ref v0.0.99 -f release_tag=v0.0.99") &&
-       has(out, "CMD\t5\tDRY\tgh -R example/fixture release edit v0.0.99 --draft=false --latest"), "D1.commands-expanded");
+    { char want_cmd[300];
+      cx_fmt(want_cmd, sizeof want_cmd, "CMD\t2\tDRY\tgh -R example/fixture release create v0.0.99 --draft --title 0.0.99 --target %s", fx_head);
+      ck(has(out, want_cmd) &&
+         has(out, "CMD\t3\tDRY\tgh -R example/fixture workflow run candidate-native.yml --ref v0.0.99 -f release_tag=v0.0.99") &&
+         has(out, "CMD\t5\tDRY\tgh -R example/fixture release edit v0.0.99 --draft=false --latest"), "D1.commands-expanded"); }
     ck(has(out, "GATE\t1\tX_PUSHED\tDEFERRED") && has(out, "GATE\t6\tREADBACK\tDEFERRED") && !has(out, "GATE\t6\tREADBACK\tPASS"), "D1.external-state-deferred-not-pass");
     ck(c && !has(c, "gh ") && !has(c, "unisacc tools/devsvc") && !has(c, "unisacc release/tools/c47-1-readback"), "D1.dry-zero-gh-zero-commit-zero-readback");
     free(c);
@@ -603,7 +631,7 @@ static void part_a(void) {
       fixture(99,0,0,1);
       if(git("read-tree","HEAD",0,0,0,0,0) || git("rev-parse","HEAD",0,0,0,head,sizeof head))die("fixture freeze");
       cx_fmt(p,sizeof p,"%s/release/candidate.tsv",fx);char *table=slurp(p);
-      char *oid=table?strstr(table,"1111111111111111111111111111111111111111"):0;
+      char *oid=table?strstr(table,fx_head):0;
       if(!oid || strlen(head)!=40)die("fixture candidate");
       memcpy(oid,head,40);put(fx,"freeze-candidate.tsv",table);free(table);
       cx_fmt(p,sizeof p,"%s/release/evidence/0.0.99/ratchets.txt",fx);rmrf(p);
@@ -615,6 +643,71 @@ static void part_a(void) {
     fixture(99, 0, 0, 1); put(lay, "pkg.bin", "changed after the table\n");
     expect_gate("G2.asset-byte-change", rx("--dry", 0, 0, 0), "ASSETS");
     c = calls(); ck(c && !has(c, "gh "), "G.dry-negatives-zero-gh"); free(c);
+}
+/* F (R27 S2): X is created right on the chain rev (candidate commit column).  The fixture history gets a
+ * "prior slot" commit so X must be created (as in E1); HEAD is then that commit, not 1111... */
+static void f_fixture(char *head, long cap) {
+    char p[4500]; char *current;
+    fixture(99, 0, 0, 1);
+    cx_fmt(p, sizeof p, "%s/release/candidate.tsv", fx);
+    current = slurp(p);
+    if (!current || put(fx, "release/candidate.tsv", "prior candidate slot\n") ||
+        git("add", "release/candidate.tsv", 0, 0, 0, 0, 0) || git("commit", "-qm", "prior slot", 0, 0, 0, 0) ||
+        git("push", "origin", "main", 0, 0, 0, 0) || put(fx, "release/candidate.tsv", current) ||
+        git("rev-parse", "HEAD", 0, 0, 0, head, cap)) die("F fixture");
+    free(current);
+}
+static void part_f(void) {
+    char head[128], ip[4500], *ix, *cl, want[400]; int rc;
+    chain_waive = 0;
+    cx_fmt(ip, sizeof ip, "%s/release/evidence/0.0.99/INDEX.tsv", fx);
+    /* F1 HEAD != chain rev, no waiver: named refusal before X, NEXT names both paths, INDEX untouched */
+    f_fixture(head, sizeof head);
+    rc = rx(0, 0, 0, 0); cl = calls(); ix = catf(ip);
+    cx_fmt(want, sizeof want, "release-exec: REFUSE RELEASE_EXEC_GATE_F_NOT_CHAIN_REV step=1 HEAD=%s chain_rev=%s", head, fx_head);
+    ck(rc == 2 && strstr(out, want) != 0 &&
+       strstr(out, "NEXT\t1\t") != 0 && strstr(out, "--from-step 1") != 0 &&
+       strstr(out, "SOURCES_SID") != 0 && strstr(out, "--post-chain-merge REASON") != 0,
+       "F1.head-not-chain-rev-refused");
+    ck(cl && !has(cl, "unisacc tools/devsvc -- git commit -m v0.0.99 X: candidate table") && !has(cl, "gh "), "F1.refused-before-x-and-gh");
+    ck(ix && !strstr(ix, "exec-1-post-chain-merge") && !strstr(ix, "exec-1-X-commit"), "F1.refused-index-untouched");
+    if (rc != 2) sy_printf("  rc=%d tail: %.400s\n", rc, out + (tlen(out) > 400 ? tlen(out) - 400 : 0));
+    free(cl); free(ix);
+    /* F2 the same history with --post-chain-merge REASON: passes, and the waiver is in INDEX once (no duplicate on re-run) */
+    f_fixture(head, sizeof head);
+    rc = rx("--post-chain-merge", "late fix merged after the chain", 0, 0); ix = catf(ip); cl = calls();
+    cx_fmt(want, sizeof want, "exec-1-post-chain-merge\t");
+    ck(strstr(out, "GATE\t1\tF_CHAIN_REV\tPASS\tHEAD=") != 0 && cl && has(cl, "unisacc tools/devsvc -- git commit -m v0.0.99 X: candidate table"), "F2.waiver-passes-to-x");
+    { char row[300]; cx_fmt(row, sizeof row, "\tWAIVED\t%s\tHEAD=%s chain_rev=%s waived: late fix merged after the chain", head, head, fx_head);
+      ck(ix && has(ix, want) && strstr(ix, row) != 0, "F2.waiver-written-to-index"); }
+    free(ix); free(cl);
+    /* F2b retry with same waiver does not duplicate exec-1-post-chain-merge in INDEX */
+    { char p[4500]; char *t; cx_fmt(p, sizeof p, "%s/release/candidate.tsv", fx); t = slurp(p);
+      if (!t || put(fx, "release/candidate.tsv", "prior candidate slot\n") ||
+          git("add", "release/candidate.tsv", 0, 0, 0, 0, 0) || git("commit", "-qm", "retry slot", 0, 0, 0, 0) ||
+          git("push", "origin", "main", 0, 0, 0, 0) || put(fx, "release/candidate.tsv", t)) die("F2b fixture");
+      free(t); }
+    put(fx, "release/evidence/0.0.99/INDEX.tsv", "item\ttime\tverdict\tpath_or_ref\tnote\nexec-1-post-chain-merge\t2026\tWAIVED\t0000\tprior\n");
+    rc = rx("--post-chain-merge", "late fix merged after the chain", 0, 0); ix = catf(ip);
+    { char *first = ix ? strstr(ix, "exec-1-post-chain-merge\t") : 0;
+      ck(first && !strstr(first + 1, "exec-1-post-chain-merge\t"), "F2b.waiver-not-duplicated-in-index"); }
+    free(ix);
+    /* F3 HEAD == chain rev: the working candidate names HEAD; F_CHAIN_REV PASS, no waiver row */
+    f_fixture(head, sizeof head);
+    { char p[4500]; char *t; cx_fmt(p, sizeof p, "%s/release/candidate.tsv", fx); t = slurp(p);
+      char *oid = t ? strstr(t, fx_head) : 0;
+      if (!oid || tlen(head) != 40) die("F3 fixture");
+      memcpy(oid, head, 40); put(fx, "release/candidate.tsv", t); free(t); set_fx_chain_rev(head); }
+    rc = rx(0, 0, 0, 0); ix = catf(ip);
+    cx_fmt(want, sizeof want, "GATE\t1\tF_CHAIN_REV\tPASS\t%s", head);
+    ck(has(out, want) && !strstr(out, "F_NOT_CHAIN_REV"), "F3.head-equals-chain-rev-passes");
+    ck(ix && !strstr(ix, "exec-1-post-chain-merge"), "F3.no-waiver-row");
+    free(ix);
+    /* F4 --dry with HEAD != chain rev: DEFERRED, not PASS, not a refusal */
+    f_fixture(head, sizeof head);
+    rc = rx("--dry", 0, 0, 0);
+    ck(rc == 0 && strstr(out, "GATE\t1\tF_CHAIN_REV\tDEFERRED\tHEAD=") != 0 && !strstr(out, "GATE\t1\tF_CHAIN_REV\tPASS"), "F4.dry-mismatch-deferred");
+    chain_waive = 0;
 }
 static void part_b(void) {
     int rc; char *c, p[4500];
@@ -655,12 +748,17 @@ static void part_b(void) {
         "gh -R example/fixture release edit v0.0.99 --draft=false --latest", "gh -R example/fixture release download v0.0.99 -p unisacc.com -p SHA256SUMS",
         "unisacc release/tools/c47-1-readback", "unisacc tools/devsvc -- git commit -m v0.0.99 Y2: public readback"};
     /* E1 full execute */
+    char e1_head[64];
     fixture(99, 0, 0, 1);
     cx_fmt(p,sizeof p,"%s/release/candidate.tsv",fx);
     char *current=slurp(p);
     if(!current || put(fx,"release/candidate.tsv","prior candidate slot\n") ||
        git("add","release/candidate.tsv",0,0,0,0,0) || git("commit","-qm","prior slot",0,0,0,0) ||
-       git("push","origin","main",0,0,0,0) || put(fx,"release/candidate.tsv",current))die("changed X fixture");
+       git("push","origin","main",0,0,0,0) || git("rev-parse","HEAD",0,0,0,e1_head,sizeof e1_head) ||
+       tlen(e1_head)!=40)die("changed X fixture");
+    { char *oid = strstr(current, fx_head); if (!oid) die("E1 commit slot"); memcpy(oid, e1_head, 40); }
+    if(put(fx,"release/candidate.tsv",current))die("changed X fixture");
+    set_fx_chain_rev(e1_head);
     free(current);
     put(td,"readback-timeout-once","1");
     {char d[4500];cx_fmt(d,sizeof d,"%s/release/evidence/0.0.99/nested",fx);sy_mkdir(d,0700);}
@@ -678,7 +776,9 @@ static void part_b(void) {
       ck(has(ix, "exec-1-X-commit\t") && has(ix, "exec-2-draft-readback\t") && has(ix, "exec-3-ci-dispatch\t") && has(ix, "exec-3-ci\t") && has(ix, "exec-4-Y1\t") &&
          has(ix, "exec-5-publish\t") && has(ix, "exec-6-public-readback\t") && has(ix, "exec-7-Y2-done\t"), "E1.index-rows");
       free(ix); }
-    { char cp[4500]; cx_fmt(cp, sizeof cp, "%s/release/candidate.tsv", fx); char *t = catf(cp); ck(has(t, "example/fixture\tv0.0.99\t1111111111111111111111111111111111111111\t0.0.99\tcandidate-native.yml\tv0.0.99\t777001\t"), "E1.ci-run-id-filled"); free(t);
+    { char cp[4500], want_e1[256]; cx_fmt(cp, sizeof cp, "%s/release/candidate.tsv", fx); char *t = catf(cp);
+      cx_fmt(want_e1, sizeof want_e1, "example/fixture\tv0.0.99\t%s\t0.0.99\tcandidate-native.yml\tv0.0.99\t777001\t", e1_head);
+      ck(has(t, want_e1), "E1.ci-run-id-filled"); free(t);
       cx_fmt(cp, sizeof cp, "%s/release/evidence/0.0.99/ci-777001.log", fx); ck(sy_exists(cp) == 1, "E1.ci-evidence-kept");
       t = catf(cp);
       ck(t && !strstr(t, "/ho" "me/") && !strstr(t, "/Us" "ers/") && strstr(t, "lnx=~/work osx=~/work"), "E1.ci-log-home-scrubbed");
@@ -935,12 +1035,15 @@ static void part_c(void) {
             { np_buf b = {0}; int order[5] = {4, 1, 2, 0, 3}; char row[600];
               for (int k = 0; k < 5; k++) { int i = order[k]; cx_fmt(row, sizeof row, "%s  %s\n", sha[i], leafs[i]); np_puts(&b, row); }
               cx_fmt(p, sizeof p, "%s/SHA256SUMS", lay); cx_write(p, b.p, b.n); free(b.p); sha_of(p, sha[5]); }
+            char refc[128];
+            if (git("rev-parse", "HEAD", 0, 0, 0, refc, sizeof refc) || tlen(refc) != 40) die("v85 head");
             cx_fmt(t85, sizeof t85,
                 "repo\ttag\tcommit\tversion\tworkflow\tworkflow_ref\tci_run_id\tape\tape_sha256\tpackage\tpackage_sha256\twin_arm64\twin_arm64_sha256\trecord\trecord_sha256\tbuild_alias\tbuild_alias_sha256\tzip\tzip_sha256\tchecksums\tchecksums_sha256\n"
-                "example/fixture\tv0.0.85\t1111111111111111111111111111111111111111\t0.0.85\tcandidate-native.yml\tv0.0.85\t0\tunisacc.com\t%s\tpkg.bin\t%s\tslice-win-arm64\t%s\tunisacc.com.build.json\t%s\tbuild.json\t%s\t-\t-\tSHA256SUMS\t%s\n",
-                sha[0], sha[1], sha[2], sha[3], sha[4], sha[5]);
+                "example/fixture\tv0.0.85\t%s\t0.0.85\tcandidate-native.yml\tv0.0.85\t0\tunisacc.com\t%s\tpkg.bin\t%s\tslice-win-arm64\t%s\tunisacc.com.build.json\t%s\tbuild.json\t%s\t-\t-\tSHA256SUMS\t%s\n",
+                refc, sha[0], sha[1], sha[2], sha[3], sha[4], sha[5]);
             put(fx, "release/candidate.tsv", t85);
-            { char refc[128]; if (!git("rev-parse", "HEAD", 0, 0, 0, refc, sizeof refc)) git("update-ref", "refs/heads/v0.0.85", refc, 0, 0, 0, 0); }
+            set_fx_chain_rev(refc);
+            git("update-ref", "refs/heads/v0.0.85", refc, 0, 0, 0, 0);
         }
         const char *ev_real85 =
             "# v0.0.85 real evidence paths + UNKNOWN dash whitelist\n"
@@ -983,12 +1086,15 @@ static void part_c(void) {
             { np_buf b = {0}; int order[5] = {4, 1, 2, 0, 3}; char row[600];
               for (int k = 0; k < 5; k++) { int i = order[k]; cx_fmt(row, sizeof row, "%s  %s\n", sha[i], leafs[i]); np_puts(&b, row); }
               cx_fmt(p, sizeof p, "%s/SHA256SUMS", lay); cx_write(p, b.p, b.n); free(b.p); sha_of(p, sha[5]); }
+            char refc[128];
+            if (git("rev-parse", "HEAD", 0, 0, 0, refc, sizeof refc) || tlen(refc) != 40) die("v86 head");
             cx_fmt(t86, sizeof t86,
                 "repo\ttag\tcommit\tversion\tworkflow\tworkflow_ref\tci_run_id\tape\tape_sha256\tpackage\tpackage_sha256\twin_arm64\twin_arm64_sha256\trecord\trecord_sha256\tbuild_alias\tbuild_alias_sha256\tzip\tzip_sha256\tchecksums\tchecksums_sha256\n"
-                "example/fixture\tv0.0.86\t1111111111111111111111111111111111111111\t0.0.86\tcandidate-native.yml\tv0.0.86\t0\tunisacc.com\t%s\tpkg.bin\t%s\tslice-win-arm64\t%s\tunisacc.com.build.json\t%s\tbuild.json\t%s\t-\t-\tSHA256SUMS\t%s\n",
-                sha[0], sha[1], sha[2], sha[3], sha[4], sha[5]);
+                "example/fixture\tv0.0.86\t%s\t0.0.86\tcandidate-native.yml\tv0.0.86\t0\tunisacc.com\t%s\tpkg.bin\t%s\tslice-win-arm64\t%s\tunisacc.com.build.json\t%s\tbuild.json\t%s\t-\t-\tSHA256SUMS\t%s\n",
+                refc, sha[0], sha[1], sha[2], sha[3], sha[4], sha[5]);
             put(fx, "release/candidate.tsv", t86);
-            { char refc[128]; if (!git("rev-parse", "HEAD", 0, 0, 0, refc, sizeof refc)) git("update-ref", "refs/heads/v0.0.86", refc, 0, 0, 0, 0); }
+            set_fx_chain_rev(refc);
+            git("update-ref", "refs/heads/v0.0.86", refc, 0, 0, 0, 0);
         }
         put(fx, "release/evidence/0.0.85/pack-run.out", "real-85\n");
         put(fx, "release/evidence/0.0.85/draft-readback.txt", "real-85\n");
@@ -1134,12 +1240,15 @@ static void part_c(void) {
         { np_buf b = {0}; int order[5] = {4, 1, 2, 0, 3}; char row[600];
           for (int k = 0; k < 5; k++) { int i = order[k]; cx_fmt(row, sizeof row, "%s  %s\n", sha[i], leafs[i]); np_puts(&b, row); }
           cx_fmt(p, sizeof p, "%s/SHA256SUMS", lay); cx_write(p, b.p, b.n); free(b.p); sha_of(p, sha[5]); }
+        char refc[128];
+        if (git("rev-parse", "HEAD", 0, 0, 0, refc, sizeof refc) || tlen(refc) != 40) die("v85 stale head");
         cx_fmt(t85, sizeof t85,
             "repo\ttag\tcommit\tversion\tworkflow\tworkflow_ref\tci_run_id\tape\tape_sha256\tpackage\tpackage_sha256\twin_arm64\twin_arm64_sha256\trecord\trecord_sha256\tbuild_alias\tbuild_alias_sha256\tzip\tzip_sha256\tchecksums\tchecksums_sha256\n"
-            "example/fixture\tv0.0.85\t1111111111111111111111111111111111111111\t0.0.85\tcandidate-native.yml\tv0.0.85\t0\tunisacc.com\t%s\tpkg.bin\t%s\tslice-win-arm64\t%s\tunisacc.com.build.json\t%s\tbuild.json\t%s\t-\t-\tSHA256SUMS\t%s\n",
-            sha[0], sha[1], sha[2], sha[3], sha[4], sha[5]);
+            "example/fixture\tv0.0.85\t%s\t0.0.85\tcandidate-native.yml\tv0.0.85\t0\tunisacc.com\t%s\tpkg.bin\t%s\tslice-win-arm64\t%s\tunisacc.com.build.json\t%s\tbuild.json\t%s\t-\t-\tSHA256SUMS\t%s\n",
+            refc, sha[0], sha[1], sha[2], sha[3], sha[4], sha[5]);
         put(fx, "release/candidate.tsv", t85);
-        { char refc[128]; if (!git("rev-parse", "HEAD", 0, 0, 0, refc, sizeof refc)) git("update-ref", "refs/heads/v0.0.85", refc, 0, 0, 0, 0); }
+        set_fx_chain_rev(refc);
+        git("update-ref", "refs/heads/v0.0.85", refc, 0, 0, 0, 0);
         /* Produce real evidence-rows.tsv matching release-prep output for 0.0.85 */
         const char *rows85 =
             "# v0.0.85 evidence-rows (release-prep format)\n"
@@ -1235,7 +1344,7 @@ static void part_r(void){
     free(whole.p);free(parts.p);free(replay.p);
 }
 int main(int argc, char **argv) {
-    const char *part = "nabcr", *path;
+    const char *part = "nabcrf", *path;
     if(argc==2 && tx_eqz(argv[1],"--fixture-image")){sy_printf("RELEASE_FIXTURE_IMAGE\n");return 0;}
     if (argc >= 3 && tx_eqz(argv[1], "--fake")) {
         const char *d = sy_env("CHECK_RX_FAKE");
@@ -1280,6 +1389,7 @@ int main(int argc, char **argv) {
     if (strchr(part, 'b')) part_b();
     if (strchr(part, 'c')) part_c();
     if (strchr(part, 'r')) part_r();
+    if (strchr(part, 'f')) part_f();
     rmrf(td);
     sy_printf("CHECK_RELEASE_EXEC\t%s\tpart=%s\tfailed=%d\n", failed ? "FAIL" : "PASS", part, failed);
     return failed ? 1 : 0;

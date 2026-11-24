@@ -201,7 +201,7 @@ static void case_freeze_tlib(void) {
         "printf 'fixture\n' > freeze-plain.txt; "
         "probe(){ " CO_RUN "-m freeze-check --dry-run \"$@\" > freeze.out 2>&1; r=$?; "
         "printf 'rc=%s\n' \"$r\"; grep -o 'COMMIT_OWN_FREEZE_TLIB path=[^ ]* reason=[^ ]*' freeze.out || :; }; "
-        "echo ACTIVE; probe --whole build/tlib-packages.tsv; probe --staged build/layer-api/freeze-fixture.tsv; "
+        "echo ACTIVE; probe --whole build/tlib-packages.tsv; probe --whole build/layer-api/freeze-fixture.tsv; "
         "echo NON_TLIB; probe --whole freeze-plain.txt; "
         "echo OWNER; DEVSVC_OWNER=freezer probe --whole build/tlib-packages.tsv; "
         "echo MARKER; printf 'sid\tbase\tfreezer\t1\t-\n' > build/freeze.tsv; touch .git/PUSH-FREEZE; "
@@ -581,17 +581,18 @@ int main(int argc, char **argv) {
         ck(tx_find(out, tx_len(out, sizeof out), "cached-foreign", 14) >= 0 &&
            tx_find(out, tx_len(out, sizeof out), "CACHED\nforeign.txt", 18) >= 0, "foreign-staged-kept");
     }
-    /* prestaged (2026-11-16, three times in one day: tools/check-tape-gap.cx after ca2ed83ca9): an OLD version of a
-       tracked path is staged in the shared index, the work tree is edited again, the path is committed --whole.  The
-       shared index entry must be the committed blob (git status shows nothing for the path), the dropped staged blob
-       is named in a NOTE; a path that is NOT in the commit keeps its staged entry (the foreign case above). */
-    if (co_has(g, "prestaged", "foreign"))   /* also part of the foreign batch */
+    /* A mixed path refuses both ambiguous whole selection and staged selection outside an operation.
+       After the fixture aligns its own index, --whole still syncs the committed blob. */
+    if (co_has(g, "prestaged", "foreign"))
         s2_want("printf 'v1\\n' > zz-pre.txt && git add -- zz-pre.txt && git commit -q --no-verify -m pre0 -- zz-pre.txt && "
                 "printf 'v2-staged-old\\n' > zz-pre.txt && git add -- zz-pre.txt && printf 'v3-work\\n' > zz-pre.txt && "
-                CO_RUN "-m pre --whole zz-pre.txt > pre.out 2>&1; echo RC=$?; grep -c 'index_unsynced=0' pre.out; grep -c 'NOTE.zz-pre.txt.the shared index held a staged version' pre.out; "
+                CO_RUN "-m index --staged zz-pre.txt > staged.out 2>&1; echo STAGED_RC=$?; grep -c COMMIT_OWN_STAGED_OUTSIDE_OPERATION staged.out; "
+                CO_RUN "-m mixed --whole zz-pre.txt > whole.out 2>&1; echo WHOLE_RC=$?; grep -c WHOLE_AMBIGUOUS whole.out; "
+                "git cat-file -p HEAD:zz-pre.txt; git show :zz-pre.txt; cat zz-pre.txt; git add -- zz-pre.txt && "
+                CO_RUN "-m pre --whole zz-pre.txt > pre.out 2>&1; echo RC=$?; grep -c 'index_unsynced=0' pre.out; "
                 "[ \"$(git ls-files -s -- zz-pre.txt | cut -c8-47)\" = \"$(git rev-parse HEAD:zz-pre.txt)\" ] && echo SAMEBLOB; git cat-file -p HEAD:zz-pre.txt; "
                 "echo ST; git status --short -- zz-pre.txt; echo END",
-                "RC=0\n1\n1\nSAMEBLOB\nv3-work\nST\nEND", "prestaged-old-version-index-equals-head-after-commit");
+                "STAGED_RC=2\n1\nWHOLE_RC=1\n1\nv1\nv2-staged-old\nv3-work\nRC=0\n1\nSAMEBLOB\nv3-work\nST\nEND", "prestaged-refusal-and-owned-aligned-index");
     if(co_has(g,"artifacts",0))prepare_materialized_catalog(1);
     if (co_has(g, "artifacts", 0)) 
     {   char out[8192], script[2048];   /* pending-derived 提示:改 tools/ 下 .cx 含 tool-index;无关路径不含;提示不改 rc */

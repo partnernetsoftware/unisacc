@@ -75,6 +75,63 @@ static int is_hex64(const char *s) {
     return s[64] == '"';
 }
 
+static int cp_id_char(char c) {
+    return (c >= 'a' && c <= 'z') || (c >= 'A' && c <= 'Z') || (c >= '0' && c <= '9') || c == '_';
+}
+
+/* Scan next C/CX lexical token (identifier, number, string, or punctuation). */
+static int cp_lex_tok(const char *s, size_t n, size_t *pos, const char **ts, size_t *tn) {
+    size_t i = *pos;
+    while (i < n) {
+        char c = s[i];
+        if (c == ' ' || c == '\t' || c == '\r' || c == '\n') { i++; continue; }
+        if (c == '/' && i + 1 < n && s[i + 1] == '/') {
+            i += 2; while (i < n && s[i] != '\n') i++; continue;
+        }
+        if (c == '/' && i + 1 < n && s[i + 1] == '*') {
+            i += 2; while (i + 1 < n && !(s[i] == '*' && s[i + 1] == '/')) i++;
+            i = (i + 1 < n) ? i + 2 : n; continue;
+        }
+        break;
+    }
+    if (i >= n) { *pos = n; return 0; }
+    *ts = s + i;
+    if (cp_id_char(s[i])) {
+        size_t j = i + 1;
+        while (j < n && cp_id_char(s[j])) j++;
+        *tn = j - i; *pos = j; return 1;
+    }
+    if (s[i] == '"' || s[i] == '\'') {
+        char q = s[i];
+        size_t j = i + 1;
+        while (j < n && s[j] != q) { if (s[j] == '\\' && j + 1 < n) j++; j++; }
+        if (j < n) j++;
+        *tn = j - i; *pos = j; return 2;
+    }
+    if (s[i] == '!' && i + 1 < n && s[i + 1] == '=') {
+        *tn = 2; *pos = i + 2; return 3;
+    }
+    *tn = 1; *pos = i + 1; return 3;
+}
+
+static int cp_tok_eq(const char *ts, size_t tn, const char *lit) {
+    size_t ln = strlen(lit);
+    return tn == ln && !memcmp(ts, lit, ln);
+}
+
+static int cp_ends_with(const char *s, const char *suf) {
+    size_t sn = strlen(s), fn = strlen(suf);
+    return sn >= fn && !memcmp(s + sn - fn, suf, fn);
+}
+
+static int cp_span_present(const char *hay, const char *needle) {
+    size_t hn = strlen(hay), nn = strlen(needle), i;
+    if (!nn) return 1;
+    if (hn < nn) return 0;
+    for (i = 0; i + nn <= hn; i++) if (hay[i] == needle[0] && !memcmp(hay + i, needle, nn)) return 1;
+    return 0;
+}
+
 static int find_decl(const char *path, int line, const char *text, const char *value) {
     char key[LINEBUF]; int i; const char *h;
     if (snprintf(key, sizeof key, "%s:%d", path, line) < 0) return -1;
@@ -82,22 +139,33 @@ static int find_decl(const char *path, int line, const char *text, const char *v
         if (strcmp(r_value[i], value)) continue;
         if (!strcmp(r_path[i], key)) return i;
         h = strrchr(r_path[i], '#');
-        if (h && (size_t)(h - r_path[i]) == strlen(path) && !strncmp(r_path[i], path, (size_t)(h - r_path[i])) && h[1] && text && strstr(text, h + 1)) return i;
+        if (h && (size_t)(h - r_path[i]) == strlen(path) && !strncmp(r_path[i], path, (size_t)(h - r_path[i])) && h[1] && text && cp_span_present(text, h + 1)) return i;
     }
     return -1;
 }
 
 static int parse_authority(void) {
-    char *s, *p;
-    size_t n = 0;
+    char *s;
+    size_t n = 0, pos = 0;
+    const char *ts = 0;
+    size_t tn = 0;
+    int st_j = 0, st_m = 0;
     s = load("tools/source-job-wave.cx", &n);
     if (!s) return -1;
-    p = strstr(s, "nids!=");
-    if (!p) { free(s); return -1; }
-    auth_jobs = (int)strtol(p + 6, 0, 10);
-    p = strstr(s, "counts[1]!=");
-    if (!p) { free(s); return -1; }
-    auth_models = (int)strtol(p + 11, 0, 10);
+    while (cp_lex_tok(s, n, &pos, &ts, &tn)) {
+        if (st_j == 0 && cp_tok_eq(ts, tn, "nids")) st_j = 1;
+        else if (st_j == 1 && cp_tok_eq(ts, tn, "!=")) st_j = 2;
+        else if (st_j == 2) { auth_jobs = (int)strtol(ts, 0, 10); st_j = 3; }
+        else if (st_j < 3) st_j = cp_tok_eq(ts, tn, "nids") ? 1 : 0;
+
+        if (st_m == 0 && cp_tok_eq(ts, tn, "counts")) st_m = 1;
+        else if (st_m == 1 && cp_tok_eq(ts, tn, "[")) st_m = 2;
+        else if (st_m == 2 && cp_tok_eq(ts, tn, "1")) st_m = 3;
+        else if (st_m == 3 && cp_tok_eq(ts, tn, "]")) st_m = 4;
+        else if (st_m == 4 && cp_tok_eq(ts, tn, "!=")) st_m = 5;
+        else if (st_m == 5) { auth_models = (int)strtol(ts, 0, 10); st_m = 6; }
+        else if (st_m < 6) st_m = cp_tok_eq(ts, tn, "counts") ? 1 : 0;
+    }
     free(s);
     return (auth_jobs > 0 && auth_models > 0) ? 0 : -1;
 }
@@ -304,7 +372,7 @@ static void check_anchors(void) {
             if (snprintf(base, sizeof base, "%.*s", (int)(h - r_path[i]), r_path[i]) < 0) continue;
             s = load(base, &n);
             if (!s) { fail_line("ANCHOR_MISSING", r_path[i], 0, r_target[i], "file unreadable"); continue; }
-            if (!strstr(s, h + 1)) fail_line("ANCHOR_MISSING", r_path[i], 0, r_target[i], "content not found");
+            if (!cp_span_present(s, h + 1)) fail_line("ANCHOR_MISSING", r_path[i], 0, r_target[i], "content not found");
             free(s);
         }
     }
@@ -321,10 +389,44 @@ static int row_affected(const char *source,const char *target){
  for(int k=0;k<selected_count;k++)if(!strcmp(target,selected_paths[k])||(strlen(selected_paths[k])==n&&!strncmp(source,selected_paths[k],n)))return 1;
  return 0;
 }
+static int g_pins_only;
+
+static int cp_line_has_hex_lit(const char *ln, const char *val) {
+    const char *q;
+    for (q = ln; *q; q++) {
+        if (*q == '"' && is_hex64(q + 1)) {
+            if (!memcmp(q + 1, val, 64)) return 1;
+            q += 65;
+        }
+    }
+    return 0;
+}
+
+static int source_anchor_has_value(const char *path, const char *value) {
+    const char *h = strrchr(path, '#');
+    char base[LINEBUF], *s, *p;
+    size_t n = 0;
+    int hit = 0;
+    if (!h || !h[1]) return 1;
+    if (cx_fmt(base, sizeof base, "%.*s", (int)(h - path), path)) return 0;
+    s = load(base, &n);
+    if (!s) return 0;
+    p = s;
+    while (*p) {
+        char *e = strchr(p, '\n');
+        if (e) *e = 0;
+        if (cp_span_present(p, h + 1) && cp_line_has_hex_lit(p, value)) { hit = 1; break; }
+        if (!e) break;
+        p = e + 1;
+    }
+    free(s);
+    return hit;
+}
+
 static void verify_rows(void) {
     int i;
     load_exceptions();
-    check_anchors();
+    if (!g_pins_only) check_anchors();
     for (i = 0; i < nrows; i++) {
         const char *path = r_path[i], *kind = r_kind[i], *target = r_target[i];
         const char *value = r_value[i], *status = r_status[i];
@@ -337,6 +439,7 @@ static void verify_rows(void) {
             base[colon - path] = 0;
         }
         if (!strcmp(status, "known-broken")) { known_line(path, line, target, "explicit audit exception"); continue; }
+        if (g_pins_only && strcmp(kind, "pin")) continue;
         if (!strcmp(kind, "literal") || !strcmp(kind, "epoch")) continue;
         if ((!strcmp(kind,"pin") || !strcmp(kind,"path") || !strcmp(kind,"host-dep")) && !row_affected(path,target)) continue;
         if (!strcmp(kind, "pin")) {
@@ -351,13 +454,14 @@ static void verify_rows(void) {
             cx_sha256_hex(b, n, got);
             free(b);
             if (strcmp(got, value)) fail_line("SHA_MISMATCH", path, line, target, got);
+            if (!source_anchor_has_value(path, value)) fail_line("PIN_SOURCE_MISMATCH", path, line, target, value);
         } else if (!strcmp(kind, "path")) {
             int err = 0;
             if (!file_exists(target, &err)) fail_line("PATH_MISSING", path, line, target, err == -EACCES ? "EACCES" : "ENOENT");
         } else if (!strcmp(kind, "count")) {
             int actual = 0, bad = 0;
-            if (strstr(target, "/jobs")) actual = auth_jobs;
-            else if (strstr(target, "/models")) actual = auth_models;
+            if (cp_ends_with(target, "/jobs")) actual = auth_jobs;
+            else if (cp_ends_with(target, "/models")) actual = auth_models;
             else bad = 1;
             if (bad) fail_line("COUNT_TARGET", path, line, target, "not jobs/models");
             else if (strtol(value, 0, 10) != actual) {
@@ -386,25 +490,28 @@ int main(int argc, char **argv) {
     int i, first = 0;
     for (i = 1; i < argc; i++) {
         if (!strcmp(argv[i], "--root") && i + 1 < argc) copy(g_root, sizeof g_root, argv[++i]);
+        else if (!strcmp(argv[i], "--pins-only")) g_pins_only = 1;
         else if (!strcmp(argv[i], "--files") && i + 1 < argc) { first = i + 1; break; }
         else { fprintf(stderr, "check-pins: unknown argument %s\n", argv[i]); return 2; }
     }
     if (first) for (i = first; i < argc; i++)
         if (!strcmp(argv[i],"tools/pins.tsv") || !strcmp(argv[i],"tools/pins-line-exceptions.tsv") || !strcmp(argv[i],"tools/check-pins.cx")) { first = 0; break; }
     if (load_rows()) { fprintf(stderr, "check-pins: cannot read tools/pins.tsv\n"); return 2; }
-    if (parse_authority()) { fprintf(stderr, "check-pins: cannot read authoritative counts\n"); return 2; }
+    if (!g_pins_only && parse_authority()) { fprintf(stderr, "check-pins: cannot read authoritative counts\n"); return 2; }
     if(first){selected_paths=argv+first;selected_count=argc-first;}
     /* 删除及改名按声明源和target两端关联；无参数入口继续完整核验。 */
-    if (first) {
-        for (i = first; i < argc; i++) {
-            const char *p = argv[i]; size_t n = strlen(p); sy_stat_t st; char full[4600];
-            if (strncmp(p,"tools/",6) || n < 3 || strcmp(p+n-3,".cx")) continue;
-            if (join_path(full,sizeof full,p)) return 2;
-            if (sy_lstat(full,&st)) { if (sy_exists(full)==0) continue; return 2; }
-            if (st.kind!='f') { fail_line("READ",p,0,"-","not-regular"); continue; }
-            scan_file(p);
-        }
-    } else { scan_dir("tools"); scan_dir("tools/cxlib"); }
+    if (!g_pins_only) {
+        if (first) {
+            for (i = first; i < argc; i++) {
+                const char *p = argv[i]; size_t n = strlen(p); sy_stat_t st; char full[4600];
+                if (strncmp(p,"tools/",6) || n < 3 || strcmp(p+n-3,".cx")) continue;
+                if (join_path(full,sizeof full,p)) return 2;
+                if (sy_lstat(full,&st)) { if (sy_exists(full)==0) continue; return 2; }
+                if (st.kind!='f') { fail_line("READ",p,0,"-","not-regular"); continue; }
+                scan_file(p);
+            }
+        } else { scan_dir("tools"); scan_dir("tools/cxlib"); }
+    }
     verify_rows();
     printf("CHECK_PINS\tpins=%d\tfailed=%d\tstale=%d\thostdep=%d\n", npins, failed, stale, hostdep);
     return failed ? 1 : 0;
