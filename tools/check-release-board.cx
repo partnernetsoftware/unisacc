@@ -1,0 +1,175 @@
+/* check-release-board: tools/release-board.cx on private fake repos (git init under the temp directory, fake
+ * plans/release-0.0.43.md and tests/*-domain-matrix.tsv), run with the fake repo as cwd.
+ *   sh ./unisacc.com tools/check-release-board.cx --                 (from the repo root)
+ *   sh ./unisacc.com tools/check-release-board.cx -- --tool PATH     (same assertions against another source)
+ * Cases: board (exact BOARD/OWNER/RELEASE text for three domains, one unowned, comment and required=no rows
+ * skipped, unknown state counted only in required, a 4-column row without evidence counted), short row (under 4
+ * columns) refused by file:line, boundary 64 matrices accepted, 65 matrices refused,
+ * git output over 64K refused, plan missing, no matrix tracked, tracked matrix unreadable, not a git repo,
+ * unknown argument.  Every refusal: rc 2, REFUSE text on stderr, empty stdout.
+ * Prints PASS|FAIL<TAB>name per assertion and CHECK_RELEASE_BOARD<TAB>checks=N<TAB>failed=N; rc 0 only when none
+ * failed. */
+#pragma unisa use cxlib.netpack
+#pragma unisa use sys.fs
+#pragma unisa use sys.posix
+#pragma unisa use sys.env
+#pragma unisa use sys.proc
+#pragma unisa use mem.heap
+#pragma unisa use mem.bytes
+
+static int checks, failed;
+static char root[2048], tool[2048], base[2048], out[1 << 16], err[1 << 14];
+static int rc;
+
+static void ck(int ok, const char *name) {
+    checks++; if (!ok) failed++;
+    printf("%s\t%s\n", ok ? "PASS" : "FAIL", name);
+    if (!ok) printf("--- rc=%d stdout ---\n%s--- stderr ---\n%s\n", rc, out, err);
+}
+static int c_has(const char *h, const char *nd) {   /* plain substring test (no strstr, no source anchor) */
+    long m = 0, i;
+    while (nd[m]) m++;
+    if (m == 0) return 1;
+    for (i = 0; h[i]; i++) { long j = 0; while (j < m && h[i + j] == nd[j]) j++; if (j == m) return 1; if (!h[i + 1]) break; }
+    return 0;
+}
+static void grab(char *dst, size_t cap, const char *s, size_t n) {
+    if (n > cap - 1) n = cap - 1;
+    if (s && n) { if (mm_copy(dst, (long)cap, s, (long)n)) dst[0] = 0; }
+    dst[s ? n : 0] = 0;
+}
+static int runv(char **v, const char *cwd, int secs) {
+    np_result r = {0}; char why[256] = "";
+    int e = np_run(v, cwd, 0, secs, &r, why, sizeof why);
+    grab(out, sizeof out, r.out, r.outn); grab(err, sizeof err, r.err, r.errn);
+    if (e) { cx_fmt(err, sizeof err, "runner: %s", why); np_free(&r); return -1; }
+    e = r.rc; np_free(&r); return e;
+}
+static int put(const char *dir, const char *rel, const char *text) {
+    char p[4096], d[4096]; char *s;
+    if (cx_fmt(p, sizeof p, "%s/%s", dir, rel)) return 1;
+    if (mm_copy(d, (long)sizeof d, p, (long)strlen(p) + 1)) return 1; s = strrchr(d, '/'); if (s) { *s = 0; sy_mkdir_all(d, 0755); }
+    return sy_write_atomic(p, text, (long)strlen(text), 0644) != 0;
+}
+static int git(const char *dir, const char *a, const char *b) {
+    char *v[] = {"git", "-c", "user.email=fx@fx", "-c", "user.name=fx", (char *)a, (char *)b, 0};
+    return runv(v, dir, 30);
+}
+/* a fresh fake repo BASE/NAME; git init unless bare is set */
+static int repo(char *dir, size_t cap, const char *name, int with_git) {
+    if (cx_fmt(dir, cap, "%s/%s", base, name)) return 1;
+    if (sy_mkdir_all(dir, 0755)) return 1;
+    if (with_git && git(dir, "init", "-q")) return 1;
+    return 0;
+}
+static const char *PLAN = "# plan\n\n## 任务板\n\nann\talpha\nbob\tbeta, delta\n\n## 其它\n\nzed\tgamma\n";
+static int board(const char *dir, const char *arg) {
+    char *v[] = {"sh", root, tool, "--", (char *)arg, 0};
+    char r2[2100]; if (cx_fmt(r2, sizeof r2, "%s/unisacc.com", root)) return -1; /* lint:allow R1-product launcher: runs the checked tool through the root product */
+    v[1] = r2;
+    return runv(v, dir, 55);
+}
+static void refused(const char *name, const char *needle) {
+    char nm[256];
+    cx_fmt(nm, sizeof nm, "%s-rc2", name); ck(rc == 2, nm);
+    cx_fmt(nm, sizeof nm, "%s-refuse-text", name); ck(c_has(err, "REFUSE release-board") && c_has(err, needle), nm);
+    cx_fmt(nm, sizeof nm, "%s-stdout-empty", name); ck(out[0] == 0, nm);
+}
+static void many(const char *dir, int count, int namelen) {
+    char rel[512], nm[300];
+    for (int i = 0; i < count; i++) {
+        int n; cx_fmt(nm, sizeof nm, "d%03d", i); n = (int)strlen(nm);
+        while (n < namelen && n < (int)sizeof nm - 1) nm[n++] = 'x';
+        nm[n] = 0;
+        cx_fmt(rel, sizeof rel, "tests/%s-domain-matrix.tsv", nm);
+        put(dir, rel, "h\t1\tyes\tCOVERED_LOCAL\tev\n");
+    }
+}
+
+int main(int argc, char **argv) {
+    char d[2400];
+    const char *rel = "tools/release-board.cx";
+    for (int a = 1; a < argc; a++) {
+        if (!strcmp(argv[a], "--tool") && a + 1 < argc) rel = argv[++a];
+        else { fprintf(stderr, "REFUSE check-release-board: unknown argument %s\n", argv[a]); return 2; }
+    }
+    if (sy_cwd(root, sizeof root) || sy_is_reg("tools/release-board.cx") != 1) { printf("FAIL\trun-from-repo-root\nCHECK_RELEASE_BOARD\tchecks=1\tfailed=1\n"); return 2; }
+    if (rel[0] == '/') { if (cx_fmt(tool, sizeof tool, "%s", rel)) return 2; }
+    else if (cx_fmt(tool, sizeof tool, "%s/%s", root, rel)) return 2;
+    if (sy_is_reg(tool) != 1) { fprintf(stderr, "REFUSE check-release-board: no tool %s\n", tool); return 2; }
+    if (cx_fmt(base, sizeof base, "%s/check-release-board-%d", sy_tmpdir(), sy_pid())) return 2;
+
+    /* (1) board */
+    repo(d, sizeof d, "board", 1);
+    put(d, "plans/release-0.0.43.md", PLAN);
+    put(d, "tests/alpha-domain-matrix.tsv",
+        "# host\tid\trequired\tstate\n"
+        "lnx\ta1\tyes\tCOVERED_LOCAL\tnote\n"
+        "lnx\ta2\tyes\tCOVERED_LOCAL\tev\textra\n"
+        "lnx\ta3\tyes\tMISSING\tev\n"
+        "lnx\ta4\tno\tMISSING\tev\n"
+        "osx\ta5\tyes\tNEEDS_FOREIGN_HOST\tev\n"
+        "lnx\ta6\tyes\tWEIRD\tev\n"
+        "lnx\ta7\tyes\tMISSING\n"
+        "\n");
+    put(d, "tests/beta-domain-matrix.tsv", "lnx\tb1\tyes\tNEEDS_PRODUCT_CHANGE\tev\nlnx\tb2\tyes\tCOVERED_LOCAL\tev\n");
+    put(d, "tests/gamma-domain-matrix.tsv", "lnx\tg1\tyes\tMISSING\tev\n");
+    put(d, "tests/untracked-domain-matrix.tsv.bak", "lnx\tu\tyes\tMISSING\n");
+    git(d, "add", "plans/release-0.0.43.md"); git(d, "add", "tests");
+    rc = board(d, 0);
+    ck(rc == 0, "board-rc0");
+    ck(!strcmp(out,
+        "BOARD\talpha\towner=ann\trequired=6\tcovered=2\tmissing=2\tforeign=1\tproduct=0\n"
+        "BOARD\tbeta\towner=bob\trequired=2\tcovered=1\tmissing=0\tforeign=0\tproduct=1\n"
+        "BOARD\tgamma\towner=-\trequired=1\tcovered=0\tmissing=1\tforeign=0\tproduct=0\n"
+        "OWNER\tann\topen=2\n"
+        "OWNER\tbob\topen=1\n"
+        "OWNER\t-\topen=1\n"
+        "RELEASE\trequired=9\tcovered=3\tmissing=3\tforeign=1\tproduct=1\n"), "board-exact-text");
+    ck(err[0] == 0, "board-stderr-empty");
+
+    /* (1b) a row under 4 columns is refused by file and line, never skipped */
+    repo(d, sizeof d, "short", 1); put(d, "plans/release-0.0.43.md", PLAN);
+    put(d, "tests/alpha-domain-matrix.tsv", "# c\nlnx\ta1\tyes\tMISSING\tev\nlnx\ta2\tyes\n"); git(d, "add", ".");
+    rc = board(d, 0); refused("short-row", "short row tests/alpha-domain-matrix.tsv:3 columns=3");
+
+    /* (2) 64 matrices: boundary accepted */
+    repo(d, sizeof d, "d64", 1); put(d, "plans/release-0.0.43.md", PLAN); many(d, 64, 8); git(d, "add", ".");
+    rc = board(d, 0);
+    ck(rc == 0 && c_has(out, "RELEASE\trequired=64\tcovered=64\t") != 0, "domains-64-accepted");
+
+    /* (3) 65 matrices refused */
+    repo(d, sizeof d, "d65", 1); put(d, "plans/release-0.0.43.md", PLAN); many(d, 65, 8); git(d, "add", ".");
+    rc = board(d, 0); refused("domains-65", "domain matrix files over limit");
+
+    /* (4) git ls-files output over 64K (300 names of ~250 bytes) refused */
+    repo(d, sizeof d, "big", 1); put(d, "plans/release-0.0.43.md", PLAN); many(d, 300, 220); git(d, "add", ".");
+    rc = board(d, 0); refused("lsfiles-over-64k", "output over limit");
+
+    /* (5) plan missing */
+    repo(d, sizeof d, "noplan", 1); put(d, "tests/alpha-domain-matrix.tsv", "lnx\ta\tyes\tMISSING\n"); git(d, "add", ".");
+    rc = board(d, 0); refused("plan-missing", "plans/release-0.0.43.md");
+
+    /* (6) no matrix tracked (one present but untracked) */
+    repo(d, sizeof d, "nomatrix", 1); put(d, "plans/release-0.0.43.md", PLAN); git(d, "add", ".");
+    put(d, "tests/alpha-domain-matrix.tsv", "lnx\ta\tyes\tMISSING\n");
+    rc = board(d, 0); refused("no-matrix", "no tests/*-domain-matrix.tsv");
+
+    /* (7) tracked matrix deleted from the work tree */
+    repo(d, sizeof d, "gone", 1); put(d, "plans/release-0.0.43.md", PLAN);
+    put(d, "tests/alpha-domain-matrix.tsv", "lnx\ta\tyes\tMISSING\n"); git(d, "add", ".");
+    { char p[2600]; cx_fmt(p, sizeof p, "%s/tests/alpha-domain-matrix.tsv", d); sy_unlink(p); }
+    rc = board(d, 0); refused("matrix-unreadable", "cannot read tests/alpha-domain-matrix.tsv");
+
+    /* (8) not a git repo */
+    repo(d, sizeof d, "nogit", 0); put(d, "plans/release-0.0.43.md", PLAN); put(d, "tests/alpha-domain-matrix.tsv", "lnx\ta\tyes\tMISSING\n");
+    rc = board(d, 0); refused("not-git", "git ls-files failed");
+
+    /* (9) unknown argument */
+    repo(d, sizeof d, "arg", 1); put(d, "plans/release-0.0.43.md", PLAN); put(d, "tests/alpha-domain-matrix.tsv", "lnx\ta\tyes\tMISSING\n"); git(d, "add", ".");
+    rc = board(d, "--bogus"); refused("unknown-arg", "unknown argument --bogus");
+
+    { char *v[] = {"rm", "-rf", base, 0}; runv(v, 0, 30); }
+    printf("CHECK_RELEASE_BOARD\tchecks=%d\tfailed=%d\n", checks, failed);
+    return failed ? 1 : 0;
+}

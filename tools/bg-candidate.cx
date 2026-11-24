@@ -76,6 +76,10 @@ static long bg_first_check_s = 120;
 static int bg_wait_first_phase = 0;
 static int reactor_owned;
 static const char *preflight_table;
+/* --disk-free-gb N hands the figure to the 16-disk-free preflight instead of measuring.  It exists so a test can
+   make that preflight refuse deterministically on any disk: without it the only way to observe the call is a
+   machine that happens to be nearly full.  Negative means measure for real. */
+static long bg_disk_free_gb = -1;
 
 typedef struct {
     char rev[41], dir[BG_PATH];
@@ -467,10 +471,23 @@ static long number(const char *s, long lo, long hi, const char *name) {
 /* Both Root and candidate-generator checks run before allocating a chain directory.
    READY=no refuses the start and reports the named row with its repair. */
 static int start_preflight(const char *only, const char *rev) {
-    char *v[] = {"./tools/bound", "50", "sh", "./unisacc.com", "tools/chain-ready.cx", "--", "--only", (char *)only, "--root", root, "--repo", root,
-                 rev ? "--rev" : 0, (char *)rev, 0};
-    char out[16384]; long n = 0, r, at = 0; int fd = -1, pid, ex = 0, code = 0, sig = 0, ready = 0;
-    pid = sy_spawn_pipe(v, 0, 0, &fd, 0);
+    char dg[24], out[16384];
+    char *w[20]; int wi = 0;
+    long n = 0, r, at = 0; int fd = -1, pid, ex = 0, code = 0, sig = 0, ready = 0;
+    w[wi++] = "./tools/bound"; w[wi++] = "50"; w[wi++] = "sh"; w[wi++] = "./unisacc.com";
+    w[wi++] = "tools/chain-ready.cx"; w[wi++] = "--"; w[wi++] = "--only"; w[wi++] = (char *)only;
+    w[wi++] = "--root"; w[wi++] = root; w[wi++] = "--repo"; w[wi++] = root;
+    /* The disk gate must look at the disk this start will really write to.  bg-candidate's base is not
+       necessarily cr_base() (--base ABS may name another disk), so it is passed explicitly instead of letting
+       chain-ready guess: a gate that measured the default chain root would pass while this base filled up. */
+    w[wi++] = "--chain-base"; w[wi++] = base;
+    if (rev) { w[wi++] = "--rev"; w[wi++] = (char *)rev; }
+    if (bg_disk_free_gb >= 0) {
+        if (cx_fmt(dg, sizeof dg, "%ld", bg_disk_free_gb)) return 1;
+        w[wi++] = "--disk-free-gb"; w[wi++] = dg;
+    }
+    w[wi] = 0;
+    pid = sy_spawn_pipe(w, 0, 0, &fd, 0);
     if (pid < 0 || fd < 0) { sy_printf("BG_CANDIDATE\tREFUSE\treason=chain-ready-not-started\troot=%s\n", root); return 1; }
     while (n < (long)sizeof out - 1 && (r = sy_read(fd, out + n, sizeof out - 1 - (size_t)n)) > 0) n += r;
     out[n] = 0; sy_close(fd);
@@ -526,7 +543,12 @@ static int cmd_start(const char *rev, const char *chain, long deadline_s, long s
     int k = 0, i, n, pfd[2], pid, got = 0, ids[3];
     if (!rev) die("start needs --rev HEX40", 0);
     if (chain && chain[0] != '/') die("--chain must be an absolute executable", chain);
-    if (start_preflight("12", 0) || start_preflight("11", 0) || start_preflight("18", rev)) return 1;
+    /* 16-disk-free joins the refusal set: it now reads the chain directory's filesystem with one statvfs
+       and FAILs (not UNMEASURED) when neither sy_disk_avail_mb nor the bounded df answers, so a chain is
+       not started on a disk nobody could measure. It runs before any chain directory is allocated, and
+       --only is a prefix match, so the item is named in full. */
+    if (start_preflight("12", 0) || start_preflight("11", 0) || start_preflight("18", rev)
+        || start_preflight("16-disk-free", rev)) return 1;
     if ((!chain || preflight_table) && start_chain_preflight(rev)) return 1;
     if (!chain) {
         char p[BG_PATH];
@@ -806,6 +828,7 @@ int main(int argc, char **argv) {
         else if (!strcmp(a, "--base")) base_arg = b;
         else if (!strcmp(a, "--chain")) chain = b;
         else if (!strcmp(a, "--preflight-table")) preflight_table = b;
+        else if (!strcmp(a, "--disk-free-gb") && !strcmp(cmd, "start")) bg_disk_free_gb = number(b, 0, 1 << 24, a);
         else if (!strcmp(a, "--trash")) trash = b;
         else if (!strcmp(a, "--deadline-s")) deadline_s = number(b, 1, bg_lim("bg.deadline", 1), a);
         else if (!strcmp(a, "--segment-s")) segment_s = number(b, 1, bg_lim("segment", 1), a);

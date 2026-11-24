@@ -431,31 +431,20 @@ bad:
     return 1;
 }
 
-/* 0 when an entry file of a valid size is at PATH: the unpinned key first, the pinned key only when that one is absent */
-static int rc_probe(int elf, char *dir, char *path) {
+/* Try one pin key: 1 with TAPE/TN set on a verified hit, 0 on any miss.
+   Both the unpinned and pinned keys are tried by the caller, so a file whose pin flipped
+   (e.g. a header gained __FILE__) does not leave the unit permanently cold behind a stale
+   entry of the other pin: the stale entry fails its receipt check and the other key is read. */
+static int rc_try(int elf, const char *dir, const char *route, int pin, unsigned char **tapeout, long *tnout) {
     int sy_lstat(const char *, sy_stat_t *);
-    char route[160];
-    char key[65];
-    sy_stat_t st;
-    int pin;
-    pin = 0;
-    while (pin < 2) {
-        if (mc_cache_dir(dir, 400) || rc_route(route, 160, elf) || rc_key(key, route, pin) || rc_join(path, 560, dir, key, elf)) return 1;
-        if (!sy_lstat(path, &st)) return st.kind != 'f' || st.size < 88 || st.size > (1L << 26);
-        pin = pin + 1;
-    }
-    return 1;
-}
-
-static int rc_lookup_kind(int elf, unsigned char **out, long *outn) {
     int tx_same(const char *, long, const char *, long);
-    long long hs_ns(void);
-    char dir[400];
+    char key[65];
     char path[560];
     char hex[65];
     char got[65];
     unsigned char *file;
     unsigned char *tape;
+    sy_stat_t st;
     size_t fn;
     long n;
     long at;
@@ -464,25 +453,12 @@ static int rc_lookup_kind(int elf, unsigned char **out, long *outn) {
     unsigned hn;
     unsigned abn;
     unsigned i;
-    long long t0;
-    long long t1;
     const char *magic;
-    if (out) *out = 0;
-    if (outn) *outn = 0;
-    if (!rc_on || !out || !outn) return 0;
-    t0 = hs_ns();
-    magic = elf ? "USE34\n\0\0" : "USE33\n\0\0";
-    if (rc_probe(elf, dir, path)) {
-        t1 = hs_ns();
-        rc_report(0, t1 - t0);
-        return 0;
-    }
+    if (rc_key(key, route, pin) || rc_join(path, 560, dir, key, elf)) return 0;
+    if (sy_lstat(path, &st) || st.kind != 'f' || st.size < 88 || st.size > (1L << 26)) return 0;
     file = (unsigned char *)cx_read(path, &fn);
-    if (!file) {
-        t1 = hs_ns();
-        rc_report(0, t1 - t0);
-        return 0;
-    }
+    if (!file) return 0;
+    magic = elf ? "USE34\n\0\0" : "USE33\n\0\0";
     n = (long)fn;
     if (n < 88 || !tx_same((const char *)file, 8, magic, 8)) goto miss;
     tn = rc_get32(file + 8);
@@ -542,14 +518,42 @@ static int rc_lookup_kind(int elf, unsigned char **out, long *outn) {
     if (!tape) goto miss;
     mm_copy(tape, (long)tn, file + at, (long)tn);
     rc_release(file);
-    *out = tape;
-    *outn = (long)tn;
+    *tapeout = tape;
+    *tnout = (long)tn;
     mc_cache_touch(dir, path);
-    t1 = hs_ns();
-    rc_report(elf ? 2 : 1, t1 - t0);
     return 1;
 miss:
     rc_release(file);
+    return 0;
+}
+
+static int rc_lookup_kind(int elf, unsigned char **out, long *outn) {
+    long long hs_ns(void);
+    char dir[400];
+    char route[160];
+    unsigned char *tape;
+    long tn;
+    long long t0;
+    long long t1;
+    int pin;
+    if (out) *out = 0;
+    if (outn) *outn = 0;
+    if (!rc_on || !out || !outn) return 0;
+    t0 = hs_ns();
+    if (mc_cache_dir(dir, 400) || rc_route(route, 160, elf)) { t1 = hs_ns(); rc_report(0, t1 - t0); return 0; }
+    pin = 0;
+    while (pin < 2) {
+        tape = 0;
+        tn = 0;
+        if (rc_try(elf, dir, route, pin, &tape, &tn)) {
+            *out = tape;
+            *outn = tn;
+            t1 = hs_ns();
+            rc_report(elf ? 2 : 1, t1 - t0);
+            return 1;
+        }
+        pin = pin + 1;
+    }
     t1 = hs_ns();
     rc_report(0, t1 - t0);
     return 0;
