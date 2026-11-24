@@ -159,25 +159,25 @@ int main(int argc, char **argv) {
         if (cx_fmt(cmd, sizeof cmd, "chmod +x '%s'; sh '%s/unisacc.com' '%s' -- run --root '%s' --out '%s' --mock-runner '%s' --max-retries 1 --no-keep-going",
             mock, cwd, pd_path, work, pdir, mock)) return 2;
         { int rc = ckk_sh("check-prerun-drive", cmd, out, sizeof out);
-          ck(rc == 2 && ckk_has(out, CPD_OUT, "PRERUN_INFRA\treason=ENOSPC"),
+          ck(rc == 2 && ckk_has(out, CPD_OUT, "PRERUN_INFRA\treason=ENOSPC\twindow=W0000"),
              "infra-enospc-text: stderr No space left stops with INFRA ENOSPC"); }
         if (cx_write(mock, ms_at0, strlen(ms_at0))) return 2;
         if (cx_fmt(cmd, sizeof cmd, "chmod +x '%s'; sh '%s/unisacc.com' '%s' -- run --root '%s' --out '%s' --mock-runner '%s' --max-retries 1 --no-keep-going",
             mock, cwd, pd_path, work, pdir, mock)) return 2;
         { int rc = ckk_sh("check-prerun-drive", cmd, out, sizeof out);
-          ck(rc == 2 && ckk_has(out, CPD_OUT, "PRERUN_INFRA\treason=ENOSPC"),
+          ck(rc == 2 && ckk_has(out, CPD_OUT, "PRERUN_INFRA\treason=ENOSPC\twindow=W0000"),
              "infra-enospc-at-byte0: stderr starts with ENOSPC (find=0)"); }
         if (cx_write(mock, ms_zh, strlen(ms_zh))) return 2;
         if (cx_fmt(cmd, sizeof cmd, "chmod +x '%s'; sh '%s/unisacc.com' '%s' -- run --root '%s' --out '%s' --mock-runner '%s' --max-retries 1 --no-keep-going",
             mock, cwd, pd_path, work, pdir, mock)) return 2;
         { int rc = ckk_sh("check-prerun-drive", cmd, out, sizeof out);
-          ck(rc == 2 && ckk_has(out, CPD_OUT, "PRERUN_INFRA\treason=ENOSPC"),
+          ck(rc == 2 && ckk_has(out, CPD_OUT, "PRERUN_INFRA\treason=ENOSPC\twindow=W0000"),
              "infra-enospc-zh: stderr 设备上没有空间"); }
         if (cx_write(mock, ms_stdout, strlen(ms_stdout))) return 2;
         if (cx_fmt(cmd, sizeof cmd, "chmod +x '%s'; sh '%s/unisacc.com' '%s' -- run --root '%s' --out '%s' --mock-runner '%s' --max-retries 1 --no-keep-going",
             mock, cwd, pd_path, work, pdir, mock)) return 2;
         { int rc = ckk_sh("check-prerun-drive", cmd, out, sizeof out);
-          ck(rc == 2 && ckk_has(out, CPD_OUT, "PRERUN_INFRA\treason=ENOSPC"),
+          ck(rc == 2 && ckk_has(out, CPD_OUT, "PRERUN_INFRA\treason=ENOSPC\twindow=W0000"),
              "infra-enospc-result-file: ENOSPC in result file also stops with INFRA ENOSPC"); }
         if (cx_write(mock, ms_empty, strlen(ms_empty))) return 2;
         if (cx_fmt(cmd, sizeof cmd, "chmod +x '%s'; sh '%s/unisacc.com' '%s' -- run --root '%s' --out '%s' --mock-runner '%s' --max-retries 1 --no-keep-going",
@@ -540,11 +540,40 @@ int main(int argc, char **argv) {
                 "exit 2\n";
             if (cx_write(mock, ms_bare, strlen(ms_bare))) return 2;
             if (cx_fmt(cmd, sizeof cmd, "chmod +x '%s'; sh '%s/unisacc.com' '%s' -- run --root '%s' --out '%s' --mock-runner '%s' --max-retries 1 --keep-going",
-                mock, cwd, pd_path, cwd, pdir, mock)) return 2;
+                mock, cwd, pd_path, work, pdir, mock)) return 2;
             int rc = ckk_sh("check-prerun-drive", cmd, out, sizeof out);
             ck(rc == 2 && ckk_has(out, CPD_OUT, "PRERUN_INFRA\treason=REPEAT_RC2\twindow=W0002") &&
                !ckk_has(out, CPD_OUT, "window=W0003"),
                "infra-repeat-rc2-bare-refuse: bare REFUSE line ends at newline without swallowing next line");
+        }
+
+        /* G24 #14: state-machine reset threshold fixture: 2 same REFUSE -> 1 rc=2 without REFUSE (resets to 0) ->
+           1 same REFUSE (count=1, no stop) -> 2 more same REFUSE -> stops exactly at W0005 (3rd consecutive) */
+        {
+            char rs_ids[CPD_PW], rs_dir[CPD_PW], rs_h[CPD_PW];
+            const char *ms_rs =
+                "#!/bin/sh\n"
+                "wid=$2; out=$5\n"
+                "echo '# devsvc qualify' > \"$out\"\n"
+                "if [ \"$wid\" = W0002 ]; then echo 'plain rc2 without marker' >&2; exit 2; fi\n"
+                "printf 'dvqualify: REFUSE reset-boundary-err\\n' >&2\n"
+                "exit 2\n";
+            if (cx_fmt(rs_ids, sizeof rs_ids, "%s/rs.ids", work) ||
+                cx_fmt(rs_dir, sizeof rs_dir, "%s/rs-plan", work) ||
+                cx_fmt(rs_h, sizeof rs_h, "%s/rs.heavy", work) ||
+                cx_write(rs_ids, "a\nb\nc\nd\ne\nf\n", 12) ||
+                cx_write(rs_h, "a\nb\nc\nd\ne\nf\n", 12) ||
+                cx_write(mock, ms_rs, strlen(ms_rs))) return 2;
+            if (cx_fmt(cmd, sizeof cmd, "sh '%s/unisacc.com' '%s' -- plan --ids-file '%s' --out '%s' --win-size 8 --warmup 0 --heavy-file '%s'",
+                cwd, pd_path, rs_ids, rs_dir, rs_h)) return 2;
+            if (ckk_sh("check-prerun-drive", cmd, out, sizeof out) != 0) return 2;
+            if (cx_fmt(cmd, sizeof cmd, "chmod +x '%s'; sh '%s/unisacc.com' '%s' -- run --root '%s' --out '%s' --mock-runner '%s' --max-retries 1 --keep-going",
+                mock, cwd, pd_path, work, rs_dir, mock)) return 2;
+            int rc = ckk_sh("check-prerun-drive", cmd, out, sizeof out);
+            ck(rc == 2 && ckk_has(out, CPD_OUT, "PRERUN_INFRA\treason=REPEAT_RC2\twindow=W0005") &&
+               !ckk_has(out, CPD_OUT, "PRERUN_INFRA\treason=REPEAT_RC2\twindow=W0003") &&
+               !ckk_has(out, CPD_OUT, "PRERUN_INFRA\treason=REPEAT_RC2\twindow=W0004"),
+               "infra-repeat-rc2-reset-threshold: no-REFUSE rc=2 resets streak so 3 consecutive REFUSE required again");
         }
 
         /* G24: retain 1 real -run entry smoke case bypassing cpd_sh_exec native binary substitution */
