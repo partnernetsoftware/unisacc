@@ -180,18 +180,23 @@ int main(int argc, char **argv) {
         return rc;
     }
     const char *sel = "abcdef";
-    int single_f1 = 0, single_f2 = 0;
+    int single_f1 = 0, single_f2 = 0, single_c1 = 0, single_c2 = 0;
+    int single_c1a = 0, single_c1b = 0;
     if (argc >= 3 && !strcmp(argv[1], "--cases")) {
         if (!strcmp(argv[2], "all")) sel = "abcdef";
+        else if (!strcmp(argv[2], "c1")) { sel = "c"; single_c1 = 1; }
+        else if (!strcmp(argv[2], "c1a")) { sel = "c"; single_c1 = single_c1a = 1; }
+        else if (!strcmp(argv[2], "c1b")) { sel = "c"; single_c1 = single_c1b = 1; }
+        else if (!strcmp(argv[2], "c2")) { sel = "c"; single_c2 = 1; }
         else if (!strcmp(argv[2], "f1")) { sel = "f"; single_f1 = 1; }
         else if (!strcmp(argv[2], "f2")) { sel = "f"; single_f2 = 1; }
         else sel = argv[2];
     }
-    else if (argc > 1) { fprintf(stderr, "usage: check-devsvc-git.cx [--cases a|b|c|d|e|f|f1|f2|ab|all]\n"); return 2; }
+    else if (argc > 1) { fprintf(stderr, "usage: check-devsvc-git.cx [--cases a|b|c|c1|c1a|c1b|c2|d|e|f|f1|f2|ab|all]\n"); return 2; }
     {   const char *p;
-        if (!sel[0]) { fprintf(stderr, "usage: check-devsvc-git.cx [--cases a|b|c|d|e|f|f1|f2|ab|all]\n"); return 2; }
+        if (!sel[0]) { fprintf(stderr, "usage: check-devsvc-git.cx [--cases a|b|c|c1|c1a|c1b|c2|d|e|f|f1|f2|ab|all]\n"); return 2; }
         for (p = sel; *p; p++)
-            if (*p < 'a' || *p > 'f') { fprintf(stderr, "usage: check-devsvc-git.cx [--cases a|b|c|d|e|f|f1|f2|ab|all]\n"); return 2; }
+            if (*p < 'a' || *p > 'f') { fprintf(stderr, "usage: check-devsvc-git.cx [--cases a|b|c|c1|c1a|c1b|c2|d|e|f|f1|f2|ab|all]\n"); return 2; }
     }
     A = strchr(sel, 'a') != 0; B = strchr(sel, 'b') != 0; C = strchr(sel, 'c') != 0;
     D = strchr(sel, 'd') != 0; E = strchr(sel, 'e') != 0;
@@ -210,9 +215,9 @@ int main(int argc, char **argv) {
     if (strlen(sel) > 1 || (!single_f1 && !single_f2 && !strcmp(sel, "f"))) return run_flow_shards(sel, t0);
     ensure_dvgit_exe(0);
     {   /* 夹具路径按仓根哈希与组固定(不含 pid)并持 .lock 文件锁防并发互删,且共享真仓 $HOME 固定版本缓存目录 */
-        unsigned long long hh = 1469598103934665603ULL; long q; const char *tag = single_f2 ? "f2" : A && B ? "ab" : A ? "a" : B ? "b" : C ? "c" : D ? "d" : E ? "e" : "f"; char c0[700], lkp[200], gdir[1100], gh[65]; const char *home = getenv("HOME"); int lfd, li;
+        unsigned long long hh = 1469598103934665603ULL; long q; const char *tag = single_c1a ? "c1a" : single_c1b ? "c1b" : single_c1 ? "c1" : single_c2 ? "c2" : single_f2 ? "f2" : A && B ? "ab" : A ? "a" : B ? "b" : C ? "c" : D ? "d" : E ? "e" : "f"; char c0[700], lkp[200], gdir[1100], gh[65]; const char *home = getenv("HOME"); int lfd, li;
         for (q = 0; root[q]; q++) { hh ^= (unsigned char)root[q]; hh *= 1099511628211ULL; }
-        F(fx, sizeof fx, "/tmp/dvgit-%08llx-%s", hh & 0xffffffffULL, tag); F(bare, sizeof bare, "%s-bare", fx);
+        F(fx, sizeof fx, "%s/dvgit-%08llx-%s", C ? sy_tmpdir() : "/tmp", hh & 0xffffffffULL, tag); F(bare, sizeof bare, "%s-bare", fx);
         F(pin, sizeof pin, "%s-pin", fx); F(inst, sizeof inst, "%s-inst", fx);
         F(lkp, sizeof lkp, "%s.lock", fx);
         lfd = sy_open(lkp, 2 | 64, 0600);
@@ -258,6 +263,31 @@ int main(int argc, char **argv) {
     F(c, sizeof c, "git clone -q --bare --local %s %s && git config user.name dvcheck && git config user.email dvcheck@example.invalid && git remote set-url origin %s"
                    " && git add tools/devsvc.cx tools/devsvc-core.cx tools/devsvc-repo.tsv tools/commit-own.cx tools/cxlib/flowexec.cx tools/push-replay.cx && { ! test -e tools/cxlib/flowadmit.cx || git add tools/cxlib/flowadmit.cx; } && { ! test -e tools/gitsync-run.cx || git add tools/gitsync-run.cx; } && { git commit -q -m fixture || git diff --cached --quiet; } && git push -q origin HEAD:main && ln -s %s/unisacc.com unisacc.com", root, bare, bare, root);
     if (ovf || sh(c, fx) != 0) { printf("FAIL\tdevsvc-git.fixture-setup\n"); printf("NOTE\tlast-output\t%.500s\n", out); cleanup(); return 1; }
+
+    if (single_c1a) {
+        /* Build the real worker in the fixture. The receipt checks still go through the
+           real devsvc job and commit path; only the worker's launch format changes. */
+        char product[1300], launch[400], advisory[400];
+        char *worker[] = {"sh", "./unisacc.com", "-O0", "tools/commit-own.cx", "-o", ".git/dvgit-commit-worker", 0};
+        F(product, sizeof product, "%s/unisacc.com", root);
+        F(launch, sizeof launch, "%s/unisacc.com", fx);
+        F(advisory, sizeof advisory, "%s/tools/on-change.cx", fx);
+        /* That read-only advisory has its own checks and is outside the receipt contract. */
+        int no_advisory = !ovf && sy_unlink(advisory) == 0;
+        long prepared_at = sy_now_ms();
+        int prepared_rc = run(worker, fx, 0);
+        printf("PREPARED\tdevsvc-git-receipt-worker\trc=%d\tms=%ld\tno-test-result\n",
+               prepared_rc, sy_now_ms() - prepared_at);
+        if (prepared_rc || !no_advisory || ovf || setenv("DVGIT_REAL_PRODUCT", product, 1) || sy_unlink(launch) ||
+            wfile("unisacc.com",
+                "#!/bin/sh\n"
+                "if [ \"${1:-}\" = tools/commit-own.cx ] && [ \"${2:-}\" = -- ]; then shift 2; exec ./.git/dvgit-commit-worker \"$@\"; fi\n"
+                "exec sh \"$DVGIT_REAL_PRODUCT\" \"$@\"\n") || sy_chmod(launch, 0755)) {
+            puts("FAIL\tdevsvc-git.receipt-product-wrapper");
+            cleanup();
+            return 1;
+        }
+    }
 
     if (A) {
     /* (a) commit --whole --push */
@@ -487,7 +517,7 @@ int main(int argc, char **argv) {
         ck(rc == 0 && p && sscanf(p, "GIT_STATUS\tdirty=%d\torphan=%d", &d, &o) == 2 && d >= 0 && o >= 0 && o <= d, "status-last-line-format"); }
 
     }
-    if (C) {
+    if (C && !single_c2 && !single_c1b) {
     /* (r) 前台 commit 在作业里跑:输出含 JOB id,git commit --status JOB 取回 rc 与 commit 号 */
     {   char id[48] = "", hd[64] = "", old[64] = "", *p;
         ck(dv("start", "--ttl", "90", "--idle", "45", 0, 0, 0) == 0, "commit-event-service");
@@ -507,6 +537,9 @@ int main(int argc, char **argv) {
         rc = dv("git", "commit", "--status", "bad-id", 0, 0, 0, 0);
         ck(rc == 2 && has("bad job id"), "receipt-status-bad-id-rc2");
     }
+    }
+    if (C && !single_c2 && !single_c1a) {
+    if (single_c1b) ck(dv("start", "--ttl", "90", "--idle", "45", 0, 0, 0) == 0, "background-service");
     /* (j) x --bg:立即返回 JOB;作业 --timeout-ms 到点自退 rc 124,整个进程组被清理;wait 返回终态 */
     {   char id[48] = "", c2[300], *p; long t1 = sy_now_ms();
         F(c2, sizeof c2, "sleep 30 & echo $! > %s/bgpid; wait", fx);
@@ -519,6 +552,9 @@ int main(int argc, char **argv) {
         F(c2, sizeof c2, "p=$(cat bgpid); ! kill -0 $p 2>/dev/null || grep -q '^[0-9]* ([^)]*) Z' /proc/$p/stat");
         ck(sh(c2, fx) == 0, "bg-deadline-kills-process-group");
     }
+    }
+    if (C && !single_c1) {
+    if (single_c2) ck(dv("start", "--ttl", "90", "--idle", "45", 0, 0, 0) == 0, "operations-service");
     /* (m) git merge:无冲突合入当前分支;冲突报文件清单 rc 1、不自动解决 */
     F(c, sizeof c, "git checkout -q -b dvm-a && printf 'a\\n' > dvm-a.txt && git add dvm-a.txt && git commit -q -m MA && git checkout -q - "
                    "&& git checkout -q -b dvm-b && printf 'b\\n' > dvm.txt && git add dvm.txt && git commit -q -m MB && git checkout -q - "
