@@ -28,6 +28,16 @@ function facePixels(face) {
   return pixels;
 }
 
+function panorama() {
+  const bytes=new Uint8Array(64*32*4);
+  for(let y=0;y<32;y++) for(let x=0;x<64;x++) {
+    const longitude=((x+.5)/64-.5)*2*Math.PI, latitude=((y+.5)/32-.5)*Math.PI;
+    const xyz=[Math.cos(latitude)*Math.cos(longitude), Math.sin(latitude), Math.cos(latitude)*Math.sin(longitude)];
+    bytes.set([...xyz.map(n=>Math.round(128+100*n)),255],4*(y*64+x));
+  }
+  return bytes;
+}
+
 function r160Atlas(renderer,highPrecision=false,inspectFirst=null) {
   const faces = colors.map((_, face) => new DataTexture(facePixels(face), 16, 16));
   const cube = new CubeTexture(faces);
@@ -52,8 +62,13 @@ function r160Atlas(renderer,highPrecision=false,inspectFirst=null) {
       }
     };
   }
-  const target = gen.fromCubemap(cube);
-  return {target, dispose() { target.dispose(); gen.dispose(); cube.dispose(); faces.forEach(face => face.dispose()); }};
+  const pano=query.has("equirect")?new DataTexture(panorama(),64,32):null;
+  if(pano) {
+    pano.minFilter=pano.magFilter=LinearFilter;
+    pano.needsUpdate=true;
+  }
+  const target=pano?gen.fromEquirectangular(pano):gen.fromCubemap(cube);
+  return {target, dispose() { target.dispose(); gen.dispose(); cube.dispose(); pano?.dispose(); faces.forEach(face => face.dispose()); }};
 }
 
 async function productAtlas() {
@@ -98,7 +113,9 @@ async function testFull(renderer, reference) {
   colors.forEach((color,i)=>mem.set([...color,255],64+4*i));
   const textured=query.has("textured");
   if(textured) colors.forEach((_,face)=>mem.set(facePixels(face),4096+1024*face));
-  if(call(4)!==128 || call(textured?8:6,16,bytes)!==128 || call(3,-2)!==1) throw Error("full cube build");
+  const pano=query.has("equirect");
+  if(pano) mem.set(panorama(),4096);
+  if(call(4)!==128 || call(pano?10:textured?8:6,16,bytes)!==128 || call(3,-2)!==1) throw Error("full cube build");
   const native=mem.subarray(65536,65536+bytes);
   const half=new Uint16Array(width*32*4);
   renderer.readRenderTargetPixels(reference,0,0,width,32,half);
@@ -120,7 +137,7 @@ async function testFull(renderer, reference) {
   const debugAtlas=r160Atlas(renderer,false,stage);
   debugAtlas.dispose();
   const actualAtlas=native.slice();
-  if(call(textured?9:7)!==65536) throw Error("first blur probe refused");
+  if(call(pano?11:textured?9:7)!==65536) throw Error("first blur probe refused");
   const first=new Float32Array(mem.buffer,mem.byteOffset+152256,48*32*4);
   let stageMax=0, stageAt=0, stageOver=0;
   for(let i=0;i<stage.length;i++) {

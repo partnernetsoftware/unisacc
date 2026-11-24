@@ -84,6 +84,35 @@ native function pmrem_build_input_face(face:i64) i64 {
   return 5;
 }
 
+native function pmrem_build_rgb(start:i64,width:i64,height:i64,u:f64,v:f64) i64 {
+  if(u<0.0) { u=0.0; }
+  if(v<0.0) { v=0.0; }
+  if(u>=width-1) { u=0.0+width-1; }
+  if(v>=height-1) { v=0.0+height-1; }
+  let col=f64_floor_i64(u);
+  let row=f64_floor_i64(v);
+  let nextCol=col+(col<width-1);
+  let nextRow=row+(row<height-1);
+  let fx=u-col;
+  let fy=v-row;
+  let rgb=0;
+  let scale=1;
+  let channel=0;
+  while(channel<3) {
+    let a=ux_u8(start+(row*width+col)*4+channel);
+    let b=ux_u8(start+(row*width+nextCol)*4+channel);
+    let c=ux_u8(start+(nextRow*width+col)*4+channel);
+    let d=ux_u8(start+(nextRow*width+nextCol)*4+channel);
+    let top=a+(b-a)*fx;
+    let bottom=c+(d-c)*fx;
+    let value=f64_floor_i64(top+(bottom-top)*fy+0.5);
+    rgb=rgb+scale*value;
+    scale=scale*256;
+    channel=channel+1;
+  }
+  return rgb;
+}
+
 native function pmrem_build_texel(faces:i64,face:i64,direction:i64) i64 {
   let x=0.0-ux_f64(direction);
   let y=ux_f64(direction+8);
@@ -100,35 +129,17 @@ native function pmrem_build_texel(faces:i64,face:i64,direction:i64) i64 {
     axis=ux_math_abs(z); s=x;
     if(face==5) { s=0.0-x; }
   }
-  let u=7.5+8.0*s/axis;
-  let v=7.5+8.0*t/axis;
-  if(u<0.0) { u=0.0; }
-  if(v<0.0) { v=0.0; }
-  if(u>=15.0) { u=15.0; }
-  if(v>=15.0) { v=15.0; }
-  let col=f64_floor_i64(u);
-  let row=f64_floor_i64(v);
-  let nextCol=col+(col<15);
-  let nextRow=row+(row<15);
-  let start=faces+face*1024;
-  let fx=u-col;
-  let fy=v-row;
-  let rgb=0;
-  let scale=1;
-  let channel=0;
-  while(channel<3) {
-    let a=ux_u8(start+(row*16+col)*4+channel);
-    let b=ux_u8(start+(row*16+nextCol)*4+channel);
-    let c=ux_u8(start+(nextRow*16+col)*4+channel);
-    let d=ux_u8(start+(nextRow*16+nextCol)*4+channel);
-    let top=a+(b-a)*fx;
-    let bottom=c+(d-c)*fx;
-    let value=f64_floor_i64(top+(bottom-top)*fy+0.5);
-    rgb=rgb+scale*value;
-    scale=scale*256;
-    channel=channel+1;
-  }
-  return rgb;
+  return pmrem_build_rgb(faces+face*1024,16,16,7.5+8.0*s/axis,7.5+8.0*t/axis);
+}
+
+native function pmrem_build_eq_texel(source:i64,direction:i64) i64 {
+  let x=ux_f64(direction);
+  let y=ux_f64(direction+8);
+  let z=ux_f64(direction+16);
+  let length=f64_sqrt(x*x+y*y+z*z);
+  let longitude=ux_math_atan2(z,x);
+  let latitude=ux_math_asin(y/length);
+  return pmrem_build_rgb(source,64,32,31.5+longitude*10.185916357881302,15.5+latitude*10.185916357881302);
 }
 
 native function pmrem_build_base(atlas:i64,faces:i64,scratch:i64,full:i64) i64 {
@@ -143,7 +154,8 @@ native function pmrem_build_base(atlas:i64,faces:i64,scratch:i64,full:i64) i64 {
     let at=atlas+4*((face/3*16+y)*336+face%3*16+x);
     let source=ux_u32(faces+4*source_face);
     if(full==2) { source=pmrem_build_texel(faces,source_face,direction); }
-    if(full!=0 && (x==0 || x==15) && (y==0 || y==15)) {
+    if(full==3) { source=pmrem_build_eq_texel(faces,direction); }
+    if((full==1 || full==2) && (x==0 || x==15) && (y==0 || y==15)) {
       let chosen=ux_u32(plan+GpuPmremSample.face)%3;
       let axis=0;
       if(chosen==1) { axis=8; }
@@ -328,6 +340,7 @@ native function pmrem_build_cube(state:i64,atlas:i64,capacity:i64,scratch:i64,wo
   let inputBytes=24;
   if(mode==1) { bands=1; }
   if(mode==7) { inputBytes=6144; }
+  if(mode==8) { inputBytes=8192; }
   let bytes=GpuPmremBuild_bytes();
   let needed=GpuPmremBuild_scratchBytes();
   if(bands==1) { needed=24832; }
@@ -341,6 +354,7 @@ native function pmrem_build_cube(state:i64,atlas:i64,capacity:i64,scratch:i64,wo
   while(i<bytes) { let reset=ux_u32_put(atlas+i,0); i=i+4; }
   let sourceMode=bands>1;
   if(mode==7) { sourceMode=2; }
+  if(mode==8) { sourceMode=3; }
   let base=pmrem_build_base(atlas,faces,scratch,sourceMode);
   let band=1;
   while(band<=bands) {
@@ -368,6 +382,11 @@ native function GpuPmremBuild_fromCubemapFull(state:i64,atlas:i64,capacity:i64,s
 
 native function GpuPmremBuild_fromCubePixels(state:i64,atlas:i64,capacity:i64,scratch:i64,work:i64,faces:i64,size:i64) i64 {
   return pmrem_build_cube(state,atlas,capacity,scratch,work,faces,size,7);
+}
+
+// Linear 64x32 RGBA8 panorama producing a 16x16 face atlas.
+native function GpuPmremBuild_fromEquirect(state:i64,atlas:i64,capacity:i64,scratch:i64,work:i64,pixels:i64,size:i64) i64 {
+  return pmrem_build_cube(state,atlas,capacity,scratch,work,pixels,size,8);
 }
 
 native function GpuPmremBuild_hasMip(state:i64,mip:i64) i64 {
