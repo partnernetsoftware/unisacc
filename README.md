@@ -82,7 +82,7 @@ One hop to each destination. Link targets are Chinese documents; the anchors are
 | Topic | Where |
 |---|---|
 | Current status, thinking tree (read first every round) | [prd_mempalace.md](prd_mempalace.md) (formerly prd.md 9.1) |
-| Memory palace (the single index of all entry points) | [prd.md 9.2 memory palace](prd.md) |
+| Memory palace (the single index of all entry points) | [prd.md 9.2 entry index](prd.md) |
 | Build and chain tools, capability quick reference | [prd.md 2 capability quick reference](prd.md#2-有什么功能已实现能力速查) |
 | Tests, ratchets (13), batches | [prd.md 2.2 tests](prd.md#22-测试棘轮门禁批次)、[prd.md 7 test suite design](prd.md#7-测试套件设计)、[tests/README.md](tests/README.md) |
 | Structure: five layers, six slices, seven streams, eighteen nets, executor | [prd.md 3 structure](prd.md#3-结构组成unisacccom-的内部) |
@@ -91,7 +91,7 @@ One hop to each destination. Link targets are Chinese documents; the anchors are
 | The cx language and cx-side structure | [prd_cx.md 0 cx core PRD](prd_cx.md#0-cx-核心-prd定稿-2026-11-12)、[cx/spec.md](cx/spec.md)、[docs/cx/prd.md](docs/cx/prd.md) |
 | cx design documents | [design-core](docs/cx/design-core.md)、[stability](docs/cx/stability.md)、[ref-cpython](docs/cx/ref-cpython.md)、[ref-node](docs/cx/ref-node.md)、[ref-quickjs](docs/cx/ref-quickjs.md)、[ref-rust](docs/cx/ref-rust.md) |
 | Release process and CI handbook | [prd_release.md 1 release chain](prd_release.md#1-发布链顺序即依赖)、[release/README.md](release/README.md) |
-| Past releases and history | [prd.md 9.3 past releases](prd.md)、[prd_hist.md](prd_hist.md) |
+| Past releases and history | [prd.md 9.2 entry index](prd.md)、[prd_hist.md](prd_hist.md) |
 | Toolchain internals (object files, assembler, linker) | [docs/toolchain.md](docs/toolchain.md)、[tools/kernels.md](tools/kernels.md)、[tools/packages.md](tools/packages.md) |
 | Formats and interoperability | [docs/tapebin-v1.md](docs/tapebin-v1.md)、[docs/host-interop.md](docs/host-interop.md)、[docs/glossary.md](docs/glossary.md) |
 | Task board, ledger, workflow | [prd_mempalace.md](prd_mempalace.md) (the only coordination entry; `archive/agentwork-retire-2026-11/` is retired, history only) |
