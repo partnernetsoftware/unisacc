@@ -84,6 +84,53 @@ native function pmrem_build_input_face(face:i64) i64 {
   return 5;
 }
 
+native function pmrem_build_texel(faces:i64,face:i64,direction:i64) i64 {
+  let x=0.0-ux_f64(direction);
+  let y=ux_f64(direction+8);
+  let z=ux_f64(direction+16);
+  let axis=ux_math_abs(x);
+  let s=z;
+  let t=0.0-y;
+  if(face==0) { s=0.0-z; }
+  if(face==2 || face==3) {
+    axis=ux_math_abs(y); s=x; t=z;
+    if(face==3) { t=0.0-z; }
+  }
+  if(face>=4) {
+    axis=ux_math_abs(z); s=x;
+    if(face==5) { s=0.0-x; }
+  }
+  let u=7.5+8.0*s/axis;
+  let v=7.5+8.0*t/axis;
+  if(u<0.0) { u=0.0; }
+  if(v<0.0) { v=0.0; }
+  if(u>=15.0) { u=15.0; }
+  if(v>=15.0) { v=15.0; }
+  let col=f64_floor_i64(u);
+  let row=f64_floor_i64(v);
+  let nextCol=col+(col<15);
+  let nextRow=row+(row<15);
+  let start=faces+face*1024;
+  let fx=u-col;
+  let fy=v-row;
+  let rgb=0;
+  let scale=1;
+  let channel=0;
+  while(channel<3) {
+    let a=ux_u8(start+(row*16+col)*4+channel);
+    let b=ux_u8(start+(row*16+nextCol)*4+channel);
+    let c=ux_u8(start+(nextRow*16+col)*4+channel);
+    let d=ux_u8(start+(nextRow*16+nextCol)*4+channel);
+    let top=a+(b-a)*fx;
+    let bottom=c+(d-c)*fx;
+    let value=f64_floor_i64(top+(bottom-top)*fy+0.5);
+    rgb=rgb+scale*value;
+    scale=scale*256;
+    channel=channel+1;
+  }
+  return rgb;
+}
+
 native function pmrem_build_base(atlas:i64,faces:i64,scratch:i64,full:i64) i64 {
   let i=0;
   while(i<1536) {
@@ -95,6 +142,7 @@ native function pmrem_build_base(atlas:i64,faces:i64,scratch:i64,full:i64) i64 {
     let source_face=pmrem_build_input_face(ux_u32(plan+GpuPmremSample.face));
     let at=atlas+4*((face/3*16+y)*336+face%3*16+x);
     let source=ux_u32(faces+4*source_face);
+    if(full==2) { source=pmrem_build_texel(faces,source_face,direction); }
     if(full!=0 && (x==0 || x==15) && (y==0 || y==15)) {
       let chosen=ux_u32(plan+GpuPmremSample.face)%3;
       let axis=0;
@@ -104,6 +152,7 @@ native function pmrem_build_base(atlas:i64,faces:i64,scratch:i64,full:i64) i64 {
       let next=GpuPmrem_plan(scratch+32,4,direction,0.0);
       let adjacent=pmrem_build_input_face(ux_u32(next+GpuPmremSample.face));
       let neighbor=ux_u32(faces+4*adjacent);
+      if(full==2) { neighbor=pmrem_build_texel(faces,adjacent,direction); }
       let r=(source%256+neighbor%256+1)/2;
       let g=(source/256%256+neighbor/256%256+1)/2;
       let b=(source/65536%256+neighbor/65536%256+1)/2;
@@ -274,19 +323,25 @@ native function pmrem_build_blur(atlas:i64,scratch:i64,pass:i64,band:i64,taps:i6
 
 // First prefilter band for six solid 16x16 RGBA8 faces, input order
 // +X,-X,+Y,-Y,+Z,-Z. RGB is linear. The caller retains both buffers.
-native function pmrem_build_cube(state:i64,atlas:i64,capacity:i64,scratch:i64,work:i64,faces:i64,size:i64,bands:i64) i64 {
+native function pmrem_build_cube(state:i64,atlas:i64,capacity:i64,scratch:i64,work:i64,faces:i64,size:i64,mode:i64) i64 {
+  let bands=6;
+  let inputBytes=24;
+  if(mode==1) { bands=1; }
+  if(mode==7) { inputBytes=6144; }
   let bytes=GpuPmremBuild_bytes();
   let needed=GpuPmremBuild_scratchBytes();
   if(bands==1) { needed=24832; }
   if(size!=16 || capacity<bytes || work<needed || state%4!=0 || atlas%4!=0 || scratch%8!=0 || faces%4!=0 ||
      pmrem_build_range(state,GpuPmremBuild.size)==0 || pmrem_build_range(atlas,capacity)==0 ||
-     pmrem_build_range(scratch,work)==0 || pmrem_build_range(faces,24)==0 || ux_u32(state+GpuPmremBuild.live)!=0 ||
+     pmrem_build_range(scratch,work)==0 || pmrem_build_range(faces,inputBytes)==0 || ux_u32(state+GpuPmremBuild.live)!=0 ||
      pmrem_build_overlap(state,GpuPmremBuild.size,atlas,bytes)!=0 || pmrem_build_overlap(state,GpuPmremBuild.size,scratch,needed)!=0 ||
-     pmrem_build_overlap(state,GpuPmremBuild.size,faces,24)!=0 || pmrem_build_overlap(atlas,bytes,scratch,needed)!=0 ||
-     pmrem_build_overlap(atlas,bytes,faces,24)!=0 || pmrem_build_overlap(scratch,needed,faces,24)!=0) { return 0-1; }
+     pmrem_build_overlap(state,GpuPmremBuild.size,faces,inputBytes)!=0 || pmrem_build_overlap(atlas,bytes,scratch,needed)!=0 ||
+     pmrem_build_overlap(atlas,bytes,faces,inputBytes)!=0 || pmrem_build_overlap(scratch,needed,faces,inputBytes)!=0) { return 0-1; }
   let i=0;
   while(i<bytes) { let reset=ux_u32_put(atlas+i,0); i=i+4; }
-  let base=pmrem_build_base(atlas,faces,scratch,bands>1);
+  let sourceMode=bands>1;
+  if(mode==7) { sourceMode=2; }
+  let base=pmrem_build_base(atlas,faces,scratch,sourceMode);
   let band=1;
   while(band<=bands) {
     let taps=pmrem_build_kernel(scratch,band);
@@ -309,6 +364,10 @@ native function GpuPmremBuild_fromCubemap(state:i64,atlas:i64,capacity:i64,scrat
 
 native function GpuPmremBuild_fromCubemapFull(state:i64,atlas:i64,capacity:i64,scratch:i64,work:i64,faces:i64,size:i64) i64 {
   return pmrem_build_cube(state,atlas,capacity,scratch,work,faces,size,6);
+}
+
+native function GpuPmremBuild_fromCubePixels(state:i64,atlas:i64,capacity:i64,scratch:i64,work:i64,faces:i64,size:i64) i64 {
+  return pmrem_build_cube(state,atlas,capacity,scratch,work,faces,size,7);
 }
 
 native function GpuPmremBuild_hasMip(state:i64,mip:i64) i64 {

@@ -16,12 +16,20 @@ const cases = [
 ];
 const width = 336, height = 64, bytes = width * height * 4;
 
+function facePixels(face) {
+  const pixels = new Uint8Array(16 * 16 * 4);
+  for (let y=0; y<16; y++) for (let x=0; x<16; x++) {
+    const u=(x+.5)/8-1, v=(y+.5)/8-1;
+    const directions=[[1,-v,-u],[-1,-v,u],[u,1,v],[u,-1,-v],[u,-v,1],[-u,-v,-1]];
+    const direction=directions[face], length=Math.hypot(...direction);
+    const rgb=query.has("textured")?direction.map(component=>Math.round(128+95*component/length)):colors[face];
+    pixels.set([...rgb,255],(y*16+x)*4);
+  }
+  return pixels;
+}
+
 function r160Atlas(renderer,highPrecision=false,inspectFirst=null) {
-  const faces = colors.map(color => {
-    const pixels = new Uint8Array(16 * 16 * 4);
-    for (let i = 0; i < pixels.length; i += 4) pixels.set([...color, 255], i);
-    return new DataTexture(pixels, 16, 16);
-  });
+  const faces = colors.map((_, face) => new DataTexture(facePixels(face), 16, 16));
   const cube = new CubeTexture(faces);
   cube.minFilter = cube.magFilter = LinearFilter;
   cube.generateMipmaps = false;
@@ -88,7 +96,9 @@ async function testFull(renderer, reference) {
   const call=(op,a=0,b=0)=>Number(wasm.uxe_pmrem_build(BigInt(op),BigInt(a),BigInt(b)));
   const mem=new Uint8Array(wasm.memory.buffer,call(0),196608);
   colors.forEach((color,i)=>mem.set([...color,255],64+4*i));
-  if(call(4)!==128 || call(6,16,bytes)!==128 || call(3,-2)!==1) throw Error("full cube build");
+  const textured=query.has("textured");
+  if(textured) colors.forEach((_,face)=>mem.set(facePixels(face),4096+1024*face));
+  if(call(4)!==128 || call(textured?8:6,16,bytes)!==128 || call(3,-2)!==1) throw Error("full cube build");
   const native=mem.subarray(65536,65536+bytes);
   const half=new Uint16Array(width*32*4);
   renderer.readRenderTargetPixels(reference,0,0,width,32,half);
@@ -110,7 +120,7 @@ async function testFull(renderer, reference) {
   const debugAtlas=r160Atlas(renderer,false,stage);
   debugAtlas.dispose();
   const actualAtlas=native.slice();
-  if(call(7)!==65536) throw Error("first blur probe refused");
+  if(call(textured?9:7)!==65536) throw Error("first blur probe refused");
   const first=new Float32Array(mem.buffer,mem.byteOffset+152256,48*32*4);
   let stageMax=0, stageAt=0, stageOver=0;
   for(let i=0;i<stage.length;i++) {
