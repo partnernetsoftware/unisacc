@@ -1,0 +1,98 @@
+#pragma unisa module envcompat
+/* envcompat.cx -- the UNISA_* -> UNISACC_* rename window for tools/ and tests/.
+ * During the window a tool may drive both the installed product (reads only UNISA_X) and a candidate
+ * (reads UNISACC_X first, then UNISA_X with a deprecation line).  So every write a tool makes goes to
+ * both spellings, and every read takes the new spelling first.  Writing the extra spelling is harmless
+ * to a product that does not read it, so the tool side does not wait for the product side.
+ * The name may be given in either spelling: a call site keeps the spelling it has today and gains the
+ * other one through this module; when the window closes the sites only change their literal.
+ * Only the names in ec_legacy[] below (one table, here, independent of the product's own list) get a
+ * twin; any other name passes through as-is.  UNISA_NOSTDINC is not listed: only the product writes it.
+ * Use it with `#pragma unisa use cxlib.envcompat`.  Every name starts with ec_ / EC_.
+ *   ec_setenv(NAME, VAL, OW)   sy_setenv NAME and, for a listed name, its other spelling too; first error wins
+ *   ec_unsetenv(NAME)          sy_unsetenv both spellings
+ *   ec_env(NAME)               for a listed name the value of UNISACC_X when set, else of UNISA_X (no
+ *                              deprecation line), else 0; any other name is sy_env(NAME)
+ *   ec_env_or(NAME, FALLBACK)  ec_env's value when set and non-empty, else FALLBACK (the sy_env_or shape)
+ *   ec_envp(DST, N, CAP, ASSIGN)
+ *                              append ASSIGN ("UNISA_X=V" or "UNISACC_X=V") to the child environment array
+ *                              DST[0..*N) and, for a listed name, a heap copy with the other spelling;
+ *                              keeps DST 0-terminated; 0 or -1 (full)
+ *   ec_legacy_name(I)          the I-th listed bare name (CONTAINER, ...), 0 past the end; for the checks
+ * A literal child environment array spells both initializers itself ("UNISA_X=V", "UNISACC_X=V"):
+ * module macros do not cross `#pragma unisa use`, so there is no pair macro (tools/envtwin.cx adds them).
+ * Retire the module when exec/facts/env-semantics.tsv's expires date for the UNISA_ rows passes. */
+#pragma unisa use sys.env
+#pragma unisa use mem.heap
+#pragma unisa use mem.bytes
+
+static const char *const ec_legacy[] = { "CONTAINER", "FFI_BRIDGE", "FWD_REPLAY", "JOBS", "KERNEL", "KERNEL_SHA", "MAXSTEPS", 0 };
+
+const char *ec_legacy_name(int i) {
+    int k;
+    for (k = 0; k < i && ec_legacy[k]; k++) {}
+    return k == i ? ec_legacy[i] : 0;
+}
+
+/* The other spelling of NAME (UNISACC_X for a listed UNISA_X and the reverse; a trailing "=V" is carried) written into
+   OUT, or 0 when NAME is not listed.  *NEWFIRST is 1 when NAME itself is the new spelling. */
+static const char *ec_other(const char *name, char *out, int cap, int *newfirst) {
+    int i, k, n, pre;
+    if (!name) return 0;
+    if (!strncmp(name, "UNISACC_", 8)) { pre = 8; *newfirst = 1; }
+    else if (!strncmp(name, "UNISA_", 6)) { pre = 6; *newfirst = 0; }
+    else return 0;
+    for (n = pre; name[n] && name[n] != '='; n++) {}
+    for (i = 0; ec_legacy[i]; i++) {
+        k = (int)strlen(ec_legacy[i]);
+        if (k != n - pre || strncmp(name + pre, ec_legacy[i], k)) continue;
+        k = (int)strlen(name + pre);
+        { int pl = *newfirst ? 6 : 8;
+          if (pl + k + 1 > cap) return 0;
+          if (mm_copy(out, cap, *newfirst ? "UNISA_" : "UNISACC_", pl) || mm_copy(out + pl, cap - pl, name + pre, k + 1)) return 0; }
+        return out;
+    }
+    return 0;
+}
+
+int ec_setenv(const char *name, const char *val, int ow) {
+    char other[128];
+    int nf, r = sy_setenv(name, val, ow), s = 0;
+    if (ec_other(name, other, sizeof other, &nf)) s = sy_setenv(other, val, ow);
+    return r ? r : s;
+}
+
+int ec_unsetenv(const char *name) {
+    char other[128];
+    int nf, r = sy_unsetenv(name), s = 0;
+    if (ec_other(name, other, sizeof other, &nf)) s = sy_unsetenv(other);
+    return r ? r : s;
+}
+
+const char *ec_env(const char *name) {
+    char other[128];
+    int nf;
+    const char *v;
+    if (!ec_other(name, other, sizeof other, &nf)) return sy_env(name);
+    v = sy_env(nf ? name : other);
+    return v ? v : sy_env(nf ? other : name);
+}
+
+const char *ec_env_or(const char *name, const char *fallback) {
+    const char *v = ec_env(name);
+    return v && v[0] ? v : fallback;
+}
+
+int ec_envp(char **dst, int *n, int cap, const char *assign) {
+    char *c;
+    int nf, size = (int)strlen(assign) + 16;
+    if (*n + 1 >= cap) return -1;
+    c = (char *)mm_alloc(size);   /* the other spelling is at most 2 bytes longer; sized by length so no value is cut */
+    if (!c) return -1;
+    if (!ec_other(assign, c, size, &nf)) { mm_free(c); dst[(*n)++] = (char *)assign; dst[*n] = 0; return 0; }
+    if (*n + 2 >= cap) { mm_free(c); return -1; }
+    dst[(*n)++] = (char *)assign;
+    dst[(*n)++] = c;
+    dst[*n] = 0;
+    return 0;
+}

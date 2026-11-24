@@ -1,0 +1,169 @@
+/* tools/envtwin.cx -- give the UNISA_X / UNISACC_X string literals of the rename window their other spelling.
+ *
+ *   sh ./unisacc.com tools/envtwin.cx -- --check FILE...     lists the files that still lack a twin (rc 1), writes nothing
+ *   sh ./unisacc.com tools/envtwin.cx -- --write FILE...     adds the twins in place
+ * Prints FILE<TAB>a=N<TAB>b=N per file that needs (--check) or got (--write) a change; the last line is
+ * ENVTWIN<TAB>files=N<TAB>a=N<TAB>b=N<TAB>mode=check|write.
+ * Only the names of cxlib.envcompat's table (ec_legacy_name) are twinned, so there is one list.  A literal in either
+ * spelling gains the other one; two literal shapes, which tools/refactor.cx does not touch because it skips string literals:
+ *   (a) a whole literal "UNISA_X=V" (or "UNISACC_X=V") standing as an array initializer element (a { or , before it, a , or }
+ *       after it) gains , "UNISACC_X=V" (or , "UNISA_X=V") right after it;
+ *   (b) inside any literal: "env -u UNISA_X" gains " -u UNISACC_X" and "unset UNISA_X" gains " UNISACC_X" (and the reverse).
+ * Idempotent: a literal already followed by its twin is left alone, so a second run changes nothing.  Not covered (hand edit): a
+ * literal that is not an array element, an assignment spliced into a longer command string, a name built at run time.
+ * Retire together with cxlib.envcompat. */
+#pragma unisa use cxlib.envcompat
+#pragma unisa use sys.fs
+#pragma unisa use mem.heap
+#pragma unisa use mem.bytes
+#pragma unisa use text.text
+
+static int is_name_char(int c) { return (c >= 'A' && c <= 'Z') || (c >= '0' && c <= '9') || c == '_'; }
+
+/* length of a listed bare name at S that is not followed by another name character, else 0 */
+static int name_at(const char *s) {
+    int i;
+    for (i = 0; ec_legacy_name(i); i++) {
+        const char *nm = ec_legacy_name(i);
+        int k = (int)strlen(nm);
+        if (!strncmp(s, nm, (size_t)k) && !is_name_char((unsigned char)s[k])) return k;
+    }
+    return 0;
+}
+
+/* 1 when the text at S begins with the literal TEXT (an exact byte compare) */
+static int at(const char *s, long n, long i, const char *text) {
+    long k = (long)strlen(text);
+    return i + k <= n && !strncmp(s + i, text, (size_t)k);
+}
+
+/* the two spellings: index 0 old, 1 new */
+static const char *const PFX[2] = { "UNISA_", "UNISACC_" };
+
+static void put_at(char *d, long cap, long *o, const char *s, long n) {
+    if (mm_copy(d + *o, cap - *o, s, n)) { fprintf(stderr, "envtwin: buffer overflow\n"); exit(2); }
+    *o += n;
+}
+
+/* rewrite one buffer; returns the new length in *on (the result is malloc'ed), counts in *na and *nb */
+static char *twin(const char *in, long n, long *on, int *na, int *nb) {
+    char *out = malloc((size_t)n * 2 + 64);
+    long i = 0, o = 0, ocap = n * 2 + 64;
+    char stk[128];
+    int sp = 0, incom = 0;
+    char instr = 0;
+    *na = *nb = 0;
+    if (!out) return 0;
+    while (i < n) {
+        int d, hit = 0;
+        for (d = 0; d < 2 && !hit; d++) {
+            const char *mine = PFX[d], *other = PFX[1 - d];
+            long pl = (long)strlen(mine);
+            if (in[i] == '"' && at(in, n, i + 1, mine)) {
+                int k = name_at(in + i + 1 + pl);
+                if (k && in[i + 1 + pl + k] == '=') {
+                    long j = i + 2 + pl + k, b = i - 1, a;
+                    while (j < n && in[j] != '"' && in[j] != '\n' && in[j] != '\\') j++;
+                    while (b >= 0 && (in[b] == ' ' || in[b] == '\t' || in[b] == '\n')) b--;
+                    a = j + 1;
+                    while (a < n && (in[a] == ' ' || in[a] == '\t' || in[a] == '\n')) a++;
+                    if (j < n && in[j] == '"' && b >= 0 && (in[b] == '{' || in[b] == ',') && a < n && (in[a] == ',' || in[a] == '}') && sp > 0 && sp <= (int)sizeof stk && stk[sp - 1] == '{') {
+                        /* the twin literal would follow after a comma; skip when it is already there */
+                        int have = 0;
+                        long wl = j + 1 - (i + 1 + pl);   /* NAME=V" with its closing quote */
+                        char want[256];
+                        if (wl + 12 < (long)sizeof want) {
+                            long ol = (long)strlen(other);
+                            { long wo = 0;
+                              put_at(want, (long)sizeof want, &wo, "\"", 1);
+                              put_at(want, (long)sizeof want, &wo, other, ol);
+                              put_at(want, (long)sizeof want, &wo, in + i + 1 + pl, wl);
+                              want[wo] = 0; }
+                            if (in[a] == ',') {
+                                long c = a + 1;
+                                while (c < n && (in[c] == ' ' || in[c] == '\t' || in[c] == '\n')) c++;
+                                have = at(in, n, c, want);
+                            }
+                            if (!have && in[b] == ',') {   /* the twin as the element right before this one */
+                                long e = b - 1, wlen = 1 + ol + wl;
+                                while (e >= 0 && (in[e] == ' ' || in[e] == '\t' || in[e] == '\n')) e--;
+                                if (e + 1 >= wlen && at(in, n, e + 1 - wlen, want)) have = 1;
+                            }
+                        }
+                        put_at(out, ocap, &o, in + i, j + 1 - i);
+                        if (!have) {
+                            put_at(out, ocap, &o, ", \"", 3);
+                            put_at(out, ocap, &o, other, (long)strlen(other));
+                            put_at(out, ocap, &o, in + i + 1 + pl, wl);
+                            (*na)++;
+                        }
+                        i = j + 1;
+                        hit = 1;
+                    }
+                }
+            }
+        }
+        if (hit) continue;
+        for (d = 0; d < 2 && !hit; d++) {
+            const char *mine = PFX[d], *other = PFX[1 - d];
+            char key_u[32], key_s[32];
+            int pl = 0, ku = snprintf(key_u, sizeof key_u, "env -u %s", mine), ks = snprintf(key_s, sizeof key_s, "unset %s", mine);
+            if (at(in, n, i, key_u)) pl = ku;
+            else if (at(in, n, i, key_s)) pl = ks;
+            if (pl) {
+                int k = name_at(in + i + pl);
+                if (k) {
+                    char want[96];
+                    int wl = snprintf(want, sizeof want, pl == ku ? " -u %s%.*s" : " %s%.*s", other, k, in + i + pl);
+                    put_at(out, ocap, &o, in + i, pl + k);
+                    if (!at(in, n, i + pl + k, want)) {
+                        put_at(out, ocap, &o, want, wl);
+                        (*nb)++;
+                    }
+                    i += pl + k;
+                    hit = 1;
+                }
+            }
+        }
+        if (hit) continue;
+        /* bracket tracking outside strings, char literals and comments, so (a) fires only directly inside { } */
+        if (instr) { if (in[i] == '\\' && i + 1 < n) { out[o++] = in[i++]; } else if (in[i] == instr) instr = 0; }
+        else if (incom == 1) { if (in[i] == '\n') incom = 0; }
+        else if (incom == 2) { if (in[i] == '*' && i + 1 < n && in[i + 1] == '/') { out[o++] = in[i++]; incom = 0; } }
+        else if (in[i] == '"' || in[i] == '\'') instr = in[i];
+        else if (in[i] == '/' && i + 1 < n && in[i + 1] == '/') incom = 1;
+        else if (in[i] == '/' && i + 1 < n && in[i + 1] == '*') { out[o++] = in[i++]; incom = 2; }
+        else if (in[i] == '{' || in[i] == '(' || in[i] == '[') { if (sp < (int)sizeof stk) stk[sp] = in[i]; sp++; }
+        else if ((in[i] == '}' || in[i] == ')' || in[i] == ']') && sp > 0) sp--;
+        out[o++] = in[i++];
+    }
+    *on = o;
+    return out;
+}
+
+int main(int argc, char **argv) {
+    int write = -1, f, files = 0, ta = 0, tb = 0;
+    if (argc < 3 || (strcmp(argv[1], "--check") && strcmp(argv[1], "--write"))) {
+        fprintf(stderr, "usage: envtwin.cx -- --check|--write FILE...\n");
+        return 2;
+    }
+    write = !strcmp(argv[1], "--write");
+    for (f = 2; f < argc; f++) {
+        size_t n = 0;
+        char *in = cx_read(argv[f], &n), *out;
+        long on = 0;
+        int na, nb;
+        if (!in) { fprintf(stderr, "envtwin: cannot read %s\n", argv[f]); return 2; }
+        out = twin(in, (long)n, &on, &na, &nb);
+        if (!out) { fprintf(stderr, "envtwin: out of memory\n"); return 2; }
+        if (na || nb) {
+            files++; ta += na; tb += nb;
+            printf("%s\ta=%d\tb=%d\n", argv[f], na, nb);
+            if (write && cx_write(argv[f], out, (size_t)on)) { fprintf(stderr, "envtwin: cannot write %s\n", argv[f]); return 2; }
+        }
+        free(out);
+        free(in);
+    }
+    printf("ENVTWIN\tfiles=%d\ta=%d\tb=%d\tmode=%s\n", files, ta, tb, write ? "write" : "check");
+    return !write && files ? 1 : 0;
+}
