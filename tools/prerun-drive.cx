@@ -1142,8 +1142,23 @@ static int pd_call_window(const char *root, const char *cand, const char *mock_r
                     (char *)ids, (char *)outp, seq, 0};
     np_result r = {0};
     char *env[] = {temp_env, 0};
+    char ep[PD_PW];
+    int have_ep = (outp && outp[0] && !cx_fmt(ep, sizeof ep, "%s.stderr", outp));
+    /* A retry reuses the same <outp>.stderr path; drop any sidecar from the previous attempt first,
+       so a later silent pass never leaves the earlier attempt's refusal reason next to the window. */
+    if (have_ep) (void)sy_unlink(ep);
     int tr = np_run(mock_runner ? mock : real, root, temp_env ? env : 0, PD_CHILD_SECONDS, &r, why, sizeof why);
     int rc = tr ? 124 : r.rc;
+    /* Keep the child's stderr next to the window output: the candidate refusal reason (e.g. a
+     * duplicate label), PRECHECK/LAYOUT/KIT evidence.  Only adds a file; never changes the verdict,
+     * the budget or rc. A failed write is ignored (the window result is already in outp).  r.err is
+     * a byte buffer of r.errn bytes; sy_write_file writes exactly that many, no NUL needed.  A
+     * sidecar is diagnostic, so cap it at the last 1 MiB: the tail carries the refusal/exit reason
+     * and this keeps a runaway child's stderr from filling the window directory. */
+    if (r.errn > 0 && r.err && have_ep) {
+        long keep = (long)r.errn > (1L << 20) ? (1L << 20) : (long)r.errn;
+        (void)sy_write_file(ep, r.err + ((long)r.errn - keep), (int64_t)keep, 0644);
+    }
     np_free(&r);
     return rc;
 }
@@ -1349,10 +1364,17 @@ static int pd_freeze_source_root(const char *root, const char *out_dir,
     sy_stat_t st;
     if (sy_lstat(ghead, &st) != 0) {
         char scmd[8192];
+        /* release/evidence/*-deferred.tsv is historical failure evidence (67 tracked files, 139 DEFERRED rows).
+         * A frozen-root is built once per prerun dir and then cloned by every fixture that copies a work dir,
+         * so carrying it multiplies history into every count of "deferred now" (measured: 2919 of 2923
+         * DEFERRED rows in one prerun dir came from this family, 1407 copies of 67 files).  The release-flow
+         * decisions that read these proofs read REPO/release/evidence/..., not the frozen root, and
+         * prerun-inputs already names a missing one as unreadable-in-PV, so pruning them here removes the
+         * multiplication without hiding anything.  Counting rule: tools/deferred-census.cx. */
         if (cx_fmt(scmd, sizeof scmd,
             "g=$(git -C '%s' rev-parse --path-format=absolute --git-common-dir) && "
             "rm -rf '%s' && mkdir -p '%s/.git/refs/heads' '%s/.git/refs/tags' && "
-            "git -C '%s' archive --format=tar '%s' | tar -x -C '%s' && "
+            "git -C '%s' archive --format=tar '%s' -- . ':(exclude,glob)**/release/evidence/**/*-deferred.tsv' | tar -x -C '%s' && "
             "ln -s \"$g/objects\" '%s/.git/objects' && "
             "printf '[core]\\n\\trepositoryformatversion = 0\\n\\tfilemode = true\\n\\tbare = false\\n' > '%s/.git/config' && "
             "printf '%%s\\n' '%s' > '%s/.git/HEAD' && "
@@ -1621,8 +1643,102 @@ static void pd_prepare_opt_frame4(const char *eff_root, const char *cand, const 
     if (rc == 0)
         (void)sy_write_file(donep, "OPT_FRAME4_MATERIAL\tREADY\n", 26, 0644);
 }
+static int pd_text_has_enospc(const char *s, long n) {
+    if (!s || n <= 0) return 0;
+    if (tx_find(s, n, "No space left", 13) >= 0) return 1;
+    if (tx_find(s, n, "设备上没有空间", 21) >= 0) return 1;
+    if (tx_find(s, n, "ENOSPC", 6) >= 0) return 1;
+    return 0;
+}
+static int pd_parse_min_free(const char *s, unsigned long long *out) {
+    unsigned long long v = 0;
+    if (!s[0]) return -1;
+    for (const char *p = s; *p; p++) {
+        if (*p < '0' || *p > '9') return -1;
+        unsigned long long d = (unsigned long long)(*p - '0');
+        if (v > ((~0ULL) - d) / 10ULL) return -1;
+        v = v * 10ULL + d;
+    }
+    if (v == 0) return -1;
+    *out = v;
+    return 0;
+}
+static long pd_mock_avail_mb = -2;
+static int pd_check_min_free(const char *out_dir, const char *wid, unsigned long long min_free_bytes) {
+    if (!min_free_bytes) return 0;
+    long avail_mb = (pd_mock_avail_mb >= -1) ? pd_mock_avail_mb : sy_disk_avail_mb(out_dir);
+    int low = 0;
+    if (avail_mb < 0)
+        printf("PRERUN_DISK_FREE\tstatus=UNMEASURED\trc=%ld\twindow=%s\n", avail_mb, wid);
+    else if ((unsigned long long)avail_mb * 1048576ULL < min_free_bytes) {
+        printf("PRERUN_INFRA\treason=ENOSPC\twindow=%s\n", wid);
+        low = 1;
+    }
+    return low;
+}
+static int pd_infra_enospc(const char *outp) {
+    char ep[PD_PW];
+    const char *ps[2] = {0, outp};
+    if (!cx_fmt(ep, sizeof ep, "%s.stderr", outp)) ps[0] = ep;
+    for (int i = 0; i < 2; i++) {
+        unsigned char *b = 0; int64_t n = 0;
+        if (ps[i] && sy_read_file(ps[i], &b, &n, 1 << 20) == 0) {
+            int hit = pd_text_has_enospc((const char *)b, n);
+            mm_free(b);
+            if (hit) return 1;
+        }
+    }
+    return 0;
+}
+/* Extract first line containing REFUSE from result file or sidecar .stderr, truncated to cap-1 bytes (255 bytes for cur[256]). */
+static int pd_extract_refuse(const char *outp, char *dst, size_t cap) {
+    char ep[PD_PW];
+    const char *ps[2] = {0, outp};
+    if (!dst || cap < 2) return 0;
+    dst[0] = 0;
+    if (!cx_fmt(ep, sizeof ep, "%s.stderr", outp)) ps[0] = ep;
+    for (int i = 0; i < 2; i++) {
+        unsigned char *b = 0; int64_t n = 0;
+        if (ps[i] && sy_read_file(ps[i], &b, &n, 1 << 20) == 0) {
+            const char *s = (const char *)b;
+            long at = tx_find(s, (long)n, "REFUSE", 6);
+            if (at >= 0) {
+                long ls = at, le = at + 6;
+                while (ls > 0 && s[ls - 1] != '\n') ls--;
+                while (le < (long)n && s[le] != '\n' && s[le] != '\r') le++;
+                size_t len = (size_t)(le - ls);
+                if (len >= cap) len = cap - 1;
+                if (mm_copy(dst, cap - 1, s + ls, len) != 0) { mm_free(b); return 0; }
+                dst[len] = 0;
+                mm_free(b);
+                return 1;
+            }
+            mm_free(b);
+        }
+    }
+    return 0;
+}
+static int pd_track_repeat_rc2(int win_rc, const char *outp, const char *wid,
+                               char *prev_ref, size_t prev_cap, int *same_cnt) {
+    char cur[256];
+    if (win_rc != 2 || !pd_extract_refuse(outp, cur, sizeof cur)) {
+        prev_ref[0] = 0;
+        *same_cnt = 0;
+        return 0;
+    }
+    if (tx_eqz(prev_ref, cur)) {
+        (*same_cnt)++;
+    } else {
+        cx_fmt(prev_ref, prev_cap, "%s", cur);
+        *same_cnt = 1;
+    }
+    int hit = (*same_cnt >= 3);
+    if (hit) printf("PRERUN_INFRA\treason=REPEAT_RC2\twindow=%s\n", wid);
+    return hit;
+}
 
-static int pd_cmd_run(const char *root, const char *cand, const char *out_dir, int resume, int max_jobs, int load_cap, int max_retries, int lanes, const char *mock_runner) {
+
+static int pd_cmd_run(const char *root, const char *cand, const char *out_dir, int resume, int max_jobs, int load_cap, int max_retries, int lanes, const char *mock_runner, unsigned long long min_free_bytes) {
     char wpath[PD_PW], real_root[PD_PW];
     unsigned char *wb = 0; int64_t wn = 0;
     pd_run_wall_ms = 0;
@@ -1700,6 +1816,8 @@ static int pd_cmd_run(const char *root, const char *cand, const char *out_dir, i
     pd_prepare_opt_frame4(eff_root, cand, out_dir, mock_runner, resume, wb, wn);
     int64_t pos = 0;
     int ran = 0, skipped = 0, incomplete = 0;
+    char infra_ref[256] = {0};
+    int infra_same = 0;
     int retry_counts[PD_MAX_IDS];
     char retry_ids[PD_MAX_IDS][128];
     int nretry = 0;
@@ -1727,6 +1845,10 @@ static int pd_cmd_run(const char *root, const char *cand, const char *out_dir, i
         if (resume && sy_lstat(donep, &st) == 0) {
             skipped++;
             continue;
+        }
+        if (pd_check_min_free(out_dir, wid, min_free_bytes)) {
+            mm_free(wb);
+            return 2;
         }
         if (!prefetched && lanes > 1 && pd_can_share_window(phase, ids, current.jobs) &&
             (!resume || (sy_exists(outp) == 0 && sy_exists(donep) == 0))) {
@@ -1846,6 +1968,7 @@ static int pd_cmd_run(const char *root, const char *cand, const char *out_dir, i
         }
         int serial = timed && resume && sy_exists(serialp) == 1;
         int attempt = 0;
+        int win_final_rc = -1;
         for (;;) {
             if (serial) {
                 int result = pd_recover_serial(eff_root, cand, out_dir, mock_runner, wid,
@@ -1879,6 +2002,11 @@ static int pd_cmd_run(const char *root, const char *cand, const char *out_dir, i
                 } else {
                     rc = pd_window_attempt(eff_root, cand, mock_runner, wid, phase, run_ids, outp, jobs, attempt);
                 }
+            }
+            if (rc != 0 && pd_infra_enospc(outp)) {
+                printf("PRERUN_INFRA\treason=ENOSPC\twindow=%s\n", wid);
+                mm_free(wb);
+                return 2;
             }
             if (pd_verify_window_source(outp, wid, attempt, eff_root, frozen_rev)) {
                 mm_free(wb);
@@ -1939,6 +2067,7 @@ static int pd_cmd_run(const char *root, const char *cand, const char *out_dir, i
                 cx_fmt(dline, sizeof dline, "QUALIFY_DONE\twindow=%s\tjobs=%d\tattempts=%d\n", wid, jobs, attempt);
                 sy_write_file(donep, dline, (int64_t)strlen(dline), 0644);
                 ran++;
+                win_final_rc = 0;
                 break;
             }
             if (!has_nonpass && rem_ids[0]) {
@@ -1976,6 +2105,7 @@ static int pd_cmd_run(const char *root, const char *cand, const char *out_dir, i
                     return 1;
                 }
                 if (pd_keep_going == 2 || (pd_keep_going >= 1 && only_unknown)) {
+                    win_final_rc = rc;
                     if (timed) {
                         int missing = 0;
                         for (int i = 0; i < nwin; i++) {
@@ -2004,6 +2134,10 @@ static int pd_cmd_run(const char *root, const char *cand, const char *out_dir, i
                 return 1;
             }
             if (!timed) jobs = 1;
+        }
+        if (pd_track_repeat_rc2(win_final_rc, outp, wid, infra_ref, sizeof infra_ref, &infra_same)) {
+            mm_free(wb);
+            return 2;
         }
     }
     mm_free(wb);
@@ -2885,6 +3019,7 @@ int main(int argc, char **argv) {
         const char *root = 0, *cand = 0, *out_d = 0, *mock_r = 0;
         char env_root[PD_PW] = {0}, env_cand[PD_PW] = {0}, env_jobs[32] = {0}, env_kg[32] = {0}, real_root[PD_PW] = {0};
         int resume = 0, max_j = PD_DEFAULT_NORMAL_JOBS, has_max_j = 0, load_cap = 6, max_ret = 2, has_kg = 0, lanes = 0;
+        unsigned long long min_free_bytes = 0;
         pd_keep_going = 1;
         for (int i = 2; i < argc; i++) {
             if (tx_eqz(argv[i], "--root") && i + 1 < argc) root = argv[++i];
@@ -2898,11 +3033,27 @@ int main(int argc, char **argv) {
             }
             else if (tx_eqz(argv[i], "--load-cap") && i + 1 < argc) { load_cap = atoi(argv[++i]); fprintf(stderr, "PRERUN_DEPRECATED\t--load-cap\tignored: load gates retired 2026-11-20, use --max-jobs\n"); }
             else if (tx_eqz(argv[i], "--max-retries") && i + 1 < argc) max_ret = atoi(argv[++i]);
+            else if (tx_eqz(argv[i], "--min-free")) {
+                if (i + 1 >= argc || pd_parse_min_free(argv[++i], &min_free_bytes) != 0)
+                    return pd_refuse("invalid-min-free");
+            }
+            else if (tx_eqz(argv[i], "--mock-avail-mb")) {
+                if (i + 1 >= argc) return pd_refuse("invalid-mock-avail-mb");
+                const char *ms = argv[++i];
+                if (tx_eqz(ms, "-1")) pd_mock_avail_mb = -1;
+                else {
+                    unsigned long long mv = 0;
+                    if (tx_eqz(ms, "0")) pd_mock_avail_mb = 0;
+                    else if (pd_parse_min_free(ms, &mv) != 0 || mv > 1000000000ULL) return pd_refuse("invalid-mock-avail-mb");
+                    else pd_mock_avail_mb = (long)mv;
+                }
+            }
             else if (tx_eqz(argv[i], "--keep-going")) { pd_keep_going = 2; has_kg = 1; }
             else if (tx_eqz(argv[i], "--no-keep-going") || tx_eqz(argv[i], "--fail-fast-unknown")) { pd_keep_going = 0; has_kg = 1; }
             else if (tx_eqz(argv[i], "--mock-runner") && i + 1 < argc) mock_r = argv[++i];
             else return pd_refuse("unknown-run-arg");
         }
+        if (pd_mock_avail_mb >= -1 && !mock_r) return pd_refuse("mock-avail-mb-requires-mock-runner");
         if (out_d) {
             if (!root && pd_env_lookup(out_d, "root", env_root, sizeof env_root)) root = env_root;
             if (!cand && pd_env_lookup(out_d, "candidate", env_cand, sizeof env_cand)) cand = env_cand;
@@ -2915,7 +3066,7 @@ int main(int argc, char **argv) {
         if (sy_realpath(root, real_root, sizeof real_root) > 0 && real_root[0]) root = real_root;
         if (!out_d || (!cand && !mock_r)) return pd_refuse("run-requires-out-and-candidate");
         if (max_ret < 1 || max_ret > 3) return pd_refuse("invalid-max-retries");
-        return pd_cmd_run(root, cand ? cand : "-", out_d, resume, max_j, load_cap, max_ret, lanes, mock_r);
+        return pd_cmd_run(root, cand ? cand : "-", out_d, resume, max_j, load_cap, max_ret, lanes, mock_r, min_free_bytes);
     }
     if (tx_eqz(sub, "merge")) {
         const char *in_d = 0, *out_d = 0, *ver = 0;

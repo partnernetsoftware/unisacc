@@ -7,9 +7,16 @@
  * 未知相(表内无)基线 0、thr 60。无在跑相时输出 GAP 行:上一行事件后经过时间超过 60 秒则 GAP 触发(状态 GAP),否则 BETWEEN。
  * 输出只读;不写任何链目录文件。 */
 typedef struct { char name[96]; long dur, thr; } ph_t;
-static ph_t P[2048]; static int NP;
+/* tool-side caps (see exec/facts/limits.tsv proposal): over-cap input is refused by name, never cut short */
+#define CP_MAX_PHASES 2048
+#define CP_MAX_HB 8192
+static ph_t P[CP_MAX_PHASES]; static int NP;
 typedef struct { long t; char name[96]; char kind[8]; } hb_t;
-static hb_t H[8192]; static int NH;
+static hb_t H[CP_MAX_HB]; static int NH;
+static int cp_over(const char *what, int cap, const char *path) {
+    fprintf(stderr, "REFUSE chain-pace: %s over limit limit=%d actual>%d file=%s\n", what, cap, cap, path);
+    return 2;
+}
 
 static void cpyn(char *d, int cap, const char *s) { int i = 0; while (i < cap - 1 && s[i]) { d[i] = s[i]; i++; } d[i] = 0; }
 static int rdlines(const char *path, char **buf, long *n) {
@@ -33,7 +40,8 @@ static int load_hb(const char *path) {
     NH = 0;
     while (i < n) {
         s = i; while (i < n && b[i] != '\n') i++;
-        if (i > s && fld(b + s, (int)(i - s), 0, t, 32) == 0 && fld(b + s, (int)(i - s), 1, nm, 96) == 0 && fld(b + s, (int)(i - s), 4, kd, 16) == 0 && NH < 8192) {
+        if (i > s && fld(b + s, (int)(i - s), 0, t, 32) == 0 && fld(b + s, (int)(i - s), 1, nm, 96) == 0 && fld(b + s, (int)(i - s), 4, kd, 16) == 0) {
+            if (NH >= CP_MAX_HB) { free(b); return cp_over("heartbeat rows", CP_MAX_HB, path); }
             H[NH].t = atol(t); cpyn(H[NH].name, 96, nm); cpyn(H[NH].kind, 8, kd); NH++;
         }
         i++;
@@ -47,7 +55,8 @@ static int do_thresholds(const char *ck) {
     while (i < n) {
         s = i; while (i < n && b[i] != '\n') i++;
         if (i > s && fld(b + s, (int)(i - s), 1, nm, 96) == 0 && fld(b + s, (int)(i - s), 2, w, 48) == 0
-            && !strncmp(w, "wall_ms=", 8) && NP < 2048) {
+            && !strncmp(w, "wall_ms=", 8)) {
+            if (NP >= CP_MAX_PHASES) { free(b); return cp_over("checkpoint phases", CP_MAX_PHASES, ck); }
             cpyn(P[NP].name, 96, nm); P[NP].dur = atol(w + 8) / 1000; NP++;
         }
         i++;
@@ -73,7 +82,8 @@ static int do_watch(const char *hb, const char *tb, long now, int nl, char **log
     i = 0;
     while (i < n) {
         s = i; while (i < n && b[i] != '\n') i++;
-        if (i > s && b[s] != 'p' && fld(b + s, (int)(i - s), 0, nm, 96) == 0 && NP < 2048) {
+        if (i > s && b[s] != 'p' && fld(b + s, (int)(i - s), 0, nm, 96) == 0) {
+            if (NP >= CP_MAX_PHASES) { free(b); return cp_over("threshold phases", CP_MAX_PHASES, tb); }
             cpyn(P[NP].name, 96, nm); fld(b + s, (int)(i - s), 1, w, 48); P[NP].dur = atol(w);
             fld(b + s, (int)(i - s), 2, w, 48); P[NP].thr = atol(w); NP++;
         }

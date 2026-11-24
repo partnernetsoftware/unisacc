@@ -1,5 +1,5 @@
-/* tools/check-slow-split.cx -- 校验慢批拆分(signal-targets/win-argv/snapshots-cx)原批与分片断言多重集严格相等。
- *   sh ./unisacc.com tools/check-slow-split.cx [-- --group all|signal-targets|win-argv|snapshots-cx]
+/* tools/check-slow-split.cx -- 校验慢批拆分(signal-targets/win-argv/snapshots-cx/premerge-selfcheck)原批与分片断言多重集严格相等。
+ *   sh ./unisacc.com tools/check-slow-split.cx [-- --group all|signal-targets|win-argv|snapshots-cx|premerge-selfcheck]
  * Runs each original batch alongside its split parts concurrently, extracts every PASS assertion ID
  * (column 2 of PASS<TAB>ID lines), sorts both multisets, and requires exact multiset equality
  * (missing, extra, or duplicate assertions all fail). Last line: CHECK_SLOW_SPLIT<TAB>ok=N<TAB>failed=M<TAB>ms=T. */
@@ -51,6 +51,8 @@ static int css_start(CssJob *j, const char *label, char **argv) {
         j->rc = 127;
         return 1;
     }
+    /* the read end is polled across every job: a blocking read on the first job would hold the others' end-of-output (and so their ms) until it finished */
+    sy_fd_nonblock(j->fd, 1);
     return 0;
 }
 
@@ -81,6 +83,15 @@ static void css_wait_all(CssJob *jobs, int nj, long bound_ms) {
                 j->done = 1;
                 left--;
                 progressed = 1;
+            } else if (g != -EAGAIN && g != -EINTR) {   /* a read error ends the job named, never spins */
+                sy_close(j->fd);
+                j->ms = sy_now_ms() - j->t0;
+                sy_kill(j->pid);
+                sy_wait_status(j->pid, 0, 0, 0, 0);
+                j->rc = 126;
+                j->done = 1;
+                left--;
+                progressed = 1;
             }
         }
         if (left > 0 && sy_now_ms() >= deadline) {
@@ -90,6 +101,7 @@ static void css_wait_all(CssJob *jobs, int nj, long bound_ms) {
                     sy_close(jobs[i].fd);
                     sy_wait_status(jobs[i].pid, 0, 0, 0, 0);
                     jobs[i].rc = 124;
+                    jobs[i].ms = sy_now_ms() - jobs[i].t0;
                     jobs[i].done = 1;
                     left--;
                 }
@@ -206,6 +218,12 @@ static int css_parent_tool(const char *parent, const char **orig_cx, const char 
         *needs_workdir = 0;
         return 1;
     }
+    if (tx_eqz(parent, "premerge-selfcheck")) {
+        *orig_cx = "tools/check-premerge-selfcheck.cx";
+        *part_cx = "tools/check-premerge-selfcheck.cx";
+        *needs_workdir = 0;
+        return 1;
+    }
     if (tx_eqz(parent, "snapshots-cx")) {
         *orig_cx = "tests/snapshots-cx.cx";
         *part_cx = "tools/check-snapshots-cx-part.cx";
@@ -219,6 +237,7 @@ static int css_part_supported(const char *parent, const char *part) {
     if (tx_eqz(parent, "signal-targets")) return tx_eqz(part, "gen") || tx_eqz(part, "posix") || tx_eqz(part, "win");
     if (tx_eqz(parent, "win-argv")) return tx_eqz(part, "facts") || tx_eqz(part, "x86_64") || tx_eqz(part, "arm64");
     if (tx_eqz(parent, "snapshots-cx")) return tx_eqz(part, "core") || tx_eqz(part, "alloc");
+    if (tx_eqz(parent, "premerge-selfcheck")) return tx_eqz(part, "main") || tx_eqz(part, "rd");
     return 0;
 }
 

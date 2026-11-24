@@ -1,0 +1,60 @@
+/* tools/check-envreads.cx -- contract check of cxlib.envreads (er_scope, er_line_names, er_table_lists): the one definition of
+ * "a product line reads an environment variable" that tools/check-env-semantics.cx and tools/premerge-selfcheck.cx item 14 share.
+ * Each case is a source line or table text with the expected variables; the negative cases (comments, version slot, a name
+ * with no env call) must stay empty.  Last line CHECK_ENVREADS<TAB>assertions=N<TAB>failed=M, rc 0 when M is 0. */
+#pragma unisa use cxlib.envreads
+#pragma unisa use sys.io
+#pragma unisa use text.text
+
+static int nas, failed;
+static void ck(int ok, const char *name) {
+    nas++;
+    if (ok) sy_printf("PASS\tenvreads.%s\n", name);
+    else { failed++; sy_printf("FAIL\tenvreads.%s\n", name); }
+}
+
+/* the line reads exactly the n names listed (in order) */
+static int names_are(const char *line, int n, const char *a, const char *b) {
+    char nm[8][64];
+    int got = er_line_names(line, nm, 8);
+    if (got != n) return 0;
+    if (n >= 1 && strcmp(nm[0], a)) return 0;
+    if (n >= 2 && strcmp(nm[1], b)) return 0;
+    return 1;
+}
+
+int main(void) {
+    const char *tbl =
+        "# header\n"
+        "UNISACC_A\tdom\tu\te\tz\to\tcx/a.cx,src/b.cx\n"
+        "UNISA_B\tdom\tu\te\tz\to\tcx/c.cx,exec/c/d.h\t0.0.110\n";
+    char nm[8][64];
+    ck(er_scope("cx/runtime/x.cx") && er_scope("src/host.cx") && er_scope("exec/c/runreuse.h") && er_scope("exec/c/asm/binding.c"), "scope-product-dirs");
+    ck(!er_scope("tools/x.cx") && !er_scope("tests/x.cx") && !er_scope("cx/x.txt") && !er_scope("cxx/x.cx") && !er_scope("exec/facts/x.c"), "scope-rejects-tools-tests-other-ext-prefix-lookalikes");
+    ck(names_are("  e = sy_env(\"UNISACC_X\");", 1, "UNISACC_X", 0), "sy_env-unisacc");
+    ck(names_are("p = getenv(\"UNISA_Y\");", 1, "UNISA_Y", 0), "getenv-unisa");
+    ck(names_are("p = getenv (\"UNISA_Y\");", 1, "UNISA_Y", 0), "blank-before-paren");
+    ck(names_are("p = getenv( \"UNISA_Y\" );", 1, "UNISA_Y", 0), "blank-after-paren");
+    ck(names_are("sy_setenv(\"UNISA_CONTAINER\", pkg, 1);", 1, "UNISA_CONTAINER", 0), "setenv-write-counts");
+    ck(names_are("a = sy_env(\"UNISACC_P\"); b = sy_env(\"UNISA_Q\");", 2, "UNISACC_P", "UNISA_Q"), "two-names-in-order");
+    ck(names_are("a = sy_env(\"UNISACC_P\"); b = sy_env(\"UNISACC_P\");", 1, "UNISACC_P", 0), "duplicate-name-once");
+    ck(names_are("static const char *x_env[] = {\"UNISACC_A\", \"UNISACC_B\"};", 2, "UNISACC_A", "UNISACC_B"), "name-table-both-entries");
+    ck(names_are("    // sy_env(\"UNISACC_X\")", 0, 0, 0), "line-comment-line");
+    ck(names_are("    /* getenv(\"UNISACC_X\") */", 0, 0, 0), "block-comment-line");
+    ck(names_are(" * getenv(\"UNISACC_X\") inside a doc block", 0, 0, 0), "doc-star-line");
+    ck(names_are("x = 1; // sy_env(\"UNISACC_X\")", 0, 0, 0), "trailing-line-comment");
+    ck(names_are("x = 1; /* sy_env(\"UNISACC_X\") */ y = 2;", 0, 0, 0), "inline-block-comment");
+    ck(names_are("/* c */ e = sy_env(\"UNISACC_X\");", 1, "UNISACC_X", 0), "read-after-closed-comment");
+    ck(names_are("#define SLOT \"UNISACC_VERSION_SLOT_0000000000\"", 0, 0, 0), "version-slot-has-no-env-call");
+    ck(names_are("puts(\"UNISACC_X\");", 0, 0, 0), "plain-string-is-not-a-read");
+    ck(names_are("e = sy_env(\"UNISACC_x\");", 0, 0, 0), "lowercase-name-is-not-a-variable-literal");
+    ck(names_are("e = sy_env(NAME);", 0, 0, 0), "macro-name-is-a-known-gap");
+    ck(er_line_names("e = sy_env(\"UNISACC_P\");", nm, 0) == 0, "cap-zero-copies-nothing");
+    ck(er_table_lists(tbl, strlen(tbl), "UNISACC_A", "cx/a.cx") && er_table_lists(tbl, strlen(tbl), "UNISACC_A", "src/b.cx"), "table-lists-each-reader");
+    ck(!er_table_lists(tbl, strlen(tbl), "UNISACC_A", "cx/c.cx") && !er_table_lists(tbl, strlen(tbl), "UNISACC_Z", "cx/a.cx"), "table-rejects-wrong-file-and-unknown-name");
+    ck(er_table_lists(tbl, strlen(tbl), "UNISA_B", "exec/c/d.h") && !er_table_lists(tbl, strlen(tbl), "UNISA_B", "0.0.110"), "expires-column-is-not-a-reader");
+    ck(!er_table_lists(tbl, strlen(tbl), "UNISACC", "cx/a.cx") && !er_table_lists(tbl, strlen(tbl), "UNISACC_AA", "cx/a.cx"), "name-match-is-whole-field");
+    ck(!er_table_lists(tbl, strlen(tbl), "# header", "cx/a.cx"), "comment-rows-are-skipped");
+    sy_printf("CHECK_ENVREADS\tassertions=%d\tfailed=%d\n", nas, failed);
+    return failed ? 1 : 0;
+}

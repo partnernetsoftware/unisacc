@@ -268,6 +268,19 @@ int main(int argc, char **argv) {
     int part=0;
     const char *parts[]={"--evidence","--layout","--resume","--route"};
     if(argc==2)for(int i=0;i<4;i++)if(!strcmp(argv[1],parts[i]))part=i+1;
+    if(argc==2 && !strcmp(argv[1],"--limits")){
+        /* --ids over the old fixed 8192 copy: 150 ids x 60 chars (~9150 bytes) must all list; an id over 95 chars is refused by name */
+        static char idsarg[12000], longid[200]; long w=0;
+        const char *launcher=sy_env_or("UNISACC","./unisacc.com"); /* lint:allow R1-product repository launcher */
+        for(int i=0;i<150;i++){ int k=snprintf(idsarg+w,sizeof idsarg-(size_t)w,"%sid-%03d-",i?",":"",i); w+=k; for(int j=k-(i?1:0);j<60;j++)idsarg[w++]='p'; idsarg[w]=0; }
+        char *v[]={"sh",(char*)launcher,"tools/dvqualify.cx","--",root,"--ids",idsarg,"--list",0};
+        check("ids-overlimit-8192-all-listed", runv(v,root,50,&rc) && rc==0 && has(out,"set=ids\tbatches=150\t") && has(out,"QUALIFY_LIST\tid-149-"));
+        for(int j=0;j<120;j++)longid[j]='q'; longid[120]=0;
+        char *v2[]={"sh",(char*)launcher,"tools/dvqualify.cx","--",root,"--ids",longid,"--list",0};
+        check("ids-long-id-refused-by-name", runv(v2,root,50,&rc) && rc==2 && has(out,"id over limit limit=95 actual=120"));
+        printf("CHECK_DVQUALIFY\tpassed=%d\tfailed=%d\n",passed,failed);
+        char *del[]={"rm","-rf",tmp,0}; runv(del,0,10,&rc); return failed?1:0;
+    }
     if (!part && !gate && !kit && argc == 2) { if (sy_realpath(argv[1], bin, sizeof bin) < 0) return 2; }
     else if(kit) {
         const char *launcher=sy_env_or("UNISACC","./unisacc.com"); /* lint:allow R1-product repository launcher for the gate fixture compiler */
@@ -281,8 +294,16 @@ int main(int argc, char **argv) {
     /* fixture repository with a domain index and one committed file */
     if (sy_mkdir(repo, 0700)) return 2;
     { char t[4400]; cx_fmt(t, sizeof t, "%s/tests", repo); if (sy_mkdir(t, 0700)) return 2; }
+    { char t[4400]; cx_fmt(t, sizeof t, "%s/release", repo); if (sy_mkdir(t, 0700)) return 2;
+      cx_fmt(t, sizeof t, "%s/release/evidence", repo); if (sy_mkdir(t, 0700)) return 2;
+      cx_fmt(t, sizeof t, "%s/release/evidence/0.0.83", repo); if (sy_mkdir(t, 0700)) return 2; }
     if (put(repo, "tests/batch-domain-index.tsv", "# fixture\nid\tdomain\torigin\tbasis\nalpha\tproduct-qualification\tx\tx\nbeta\tproduct-qualification\tx\tx\nbad\tproduct-qualification\tx\tx\nother\tdev-tool\tx\tx\n", 0644) ||
-        put(repo, "tests/batches.tsv", "alpha\tIMPLEMENTED\n", 0644) || sy_write_file(apep, ape_text, strlen(ape_text), 0755)) return 2;
+        put(repo, "tests/batches.tsv", "alpha\tIMPLEMENTED\n", 0644) ||
+        /* one historical deferred proof and one ordinary evidence file: the layout must drop the first and keep
+           the second (tools/dvqualify.cx prunes the deferred proofs under release/evidence and nothing else). */
+        put(repo, "release/evidence/0.0.83/alpha-deferred.tsv", "DEFERRED\talpha\tprepare-failed=no-producer=x\n", 0644) ||
+        put(repo, "release/evidence/0.0.83/alpha-windows.tsv", "WINDOW\t1\n", 0644) ||
+        sy_write_file(apep, ape_text, strlen(ape_text), 0755)) return 2;
     if (!git("init", "-q", 0, 0, 0) || !git("add", "-A", ".", 0, 0)) { fprintf(stderr, "fixture git failed: %s\n", out); return 2; }
     { char *v[] = {"git", "-C", repo, "-c", "user.name=f", "-c", "user.email=f@localhost", "-c", "commit.gpgsign=false", "commit", "-q", "-m", "fixture", 0};
       if (!runv(v, 0, 30, &rc) || rc) { fprintf(stderr, "fixture commit failed: %s\n", out); return 2; } }
@@ -321,6 +342,12 @@ int main(int argc, char **argv) {
       check("layout-real-copy-of-ape", reg && !strcmp(h, sha));
       cx_fmt(lc, sizeof lc, "%s/.git", lay); check("layout-has-git-inventory", sy_exists(lc) == 1);
       cx_fmt(lc, sizeof lc, "%s/tests/batch-domain-index.tsv", lay); check("layout-from-git-archive", sy_exists(lc) == 1);
+      /* the historical proof is pruned from the layout, the ordinary evidence file beside it is not: this is
+         the fix for a deferred count that read 2919 lines of committed history as if it were the run's own. */
+      cx_fmt(lc, sizeof lc, "%s/release/evidence/0.0.83/alpha-deferred.tsv", lay);
+      check("layout-drops-historical-deferred", sy_exists(lc) == 0);
+      cx_fmt(lc, sizeof lc, "%s/release/evidence/0.0.83/alpha-windows.tsv", lay);
+      check("layout-keeps-ordinary-evidence", sy_exists(lc) == 1);
       free(e); }
     /* A live writer holds the evidence inode. Both contenders must leave
        its bytes intact; an alias must contend on the same lock. */
@@ -371,6 +398,16 @@ int main(int argc, char **argv) {
     if(part==2){
         char *seed[]={bin,repo,"--candidate",apep,"--ids","alpha","--out",ev,0};
         if(!runv(seed,0,40,&rc) || rc)return 2;
+        /* The exclude pattern has to be observed from this segment as well.  `--evidence` already asserts both
+           sides, but a mutation of the pattern survived a mutation round that only ran `--layout`, because that
+           segment never looked at the published layout's evidence subtree. */
+        { char *le=cx_read(ev,0),lay2[4400],p2[4500];
+          if(!le || evidence_layout(le,lay2,sizeof lay2))return 2;
+          cx_fmt(p2,sizeof p2,"%s/release/evidence/0.0.83/alpha-deferred.tsv",lay2);
+          check("layout-drops-historical-deferred", sy_exists(p2)==0);
+          cx_fmt(p2,sizeof p2,"%s/release/evidence/0.0.83/alpha-windows.tsv",lay2);
+          check("layout-keeps-ordinary-evidence", sy_exists(p2)==1);
+          free(le); }
     }
     /* Q3 valid-only run exits 0 */
     { char *v[] = {bin, repo, "--candidate", apep, "--ids", "alpha,beta", "--out", ev, "--jobs", "1", 0};

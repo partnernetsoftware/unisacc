@@ -25,6 +25,7 @@ static int rc_armed;
 static int rc_broken;
 static char rc_prod[65];
 static char rc_src[65];
+static char rc_srcraw[65];   /* digest of the source argv spellings (verbatim, NUL separated); -c object route */
 static char rc_raw[65];
 static int rc_pin;
 static char rc_target[96];
@@ -242,16 +243,29 @@ static int rc_route(char *dst, int cap, int elf) {
 
 /* X1 (cx/runtime/rcident.cx rk_*): pin 0 is the root-independent key, pin 1 the key of an entry naming __FILE__ */
 static int rc_key(char key[65], const char *route, int pin) {
-    char blob[640];
+    char blob[768];
     int at;
     at = 0;
-    if (rc_cat(blob, 640, &at, "USE33\nver=13\nmode=") || rc_cat(blob, 640, &at, rc_prod) ||
-        rc_cat_u(blob, 640, &at, (unsigned long long)rc_mode) || rc_cat(blob, 640, &at, "\npkg=") || rc_cat(blob, 640, &at, rc_prod) ||
-        rc_cat(blob, 640, &at, "\nroute=") || rc_cat(blob, 640, &at, route) ||
-        rc_cat(blob, 640, &at, "\ntarget=") || rc_cat(blob, 640, &at, rc_target) ||
-        rc_cat(blob, 640, &at, "\nlevel=") || rc_cat_u(blob, 640, &at, (unsigned long long)rc_level) ||
-        rc_cat(blob, 640, &at, pin ? "\npin=1\nsrc=" : "\npin=0\nsrc=") || rc_cat(blob, 640, &at, pin ? rc_raw : rc_src) ||
-        rc_cat(blob, 640, &at, "\n")) return 1;
+    /* 0.0.99: the -c object route (rc_mode==5) also binds the source argv spelling (srcraw), because the
+     * object embeds that spelling (relative source -> 'x.cx', absolute -> '/dir/x.cx') and a key without
+     * it makes a second directory reuse the first directory's object with the wrong embedded path. -run
+     * and -o executable stay root-independent (X1). ver=14 for the new key.
+     * Escape hatch: UNISACC_RUN_CACHE_KEY_OLD=1 reverts ONLY the key layout (ver 14 -> 13, drops the
+     * srcraw line) for one release, to localize a red. Precise pinning is not in 0.0.99; the pin
+     * decision stays the original ri_names_file substring scan and is identical under both keys. */
+    {
+        const char *old = sy_env("UNISACC_RUN_CACHE_KEY_OLD");
+        int legacy = (old && old[0] && old[0] != '0');
+        int bindraw = (!legacy && rc_mode == 5 && pin == 0 && rc_srcraw[0]);
+        if (rc_cat(blob, 768, &at, legacy ? "USE33\nver=13\nmode=" : "USE33\nver=14\nmode=") || rc_cat(blob, 768, &at, rc_prod) ||
+            rc_cat_u(blob, 768, &at, (unsigned long long)rc_mode) || rc_cat(blob, 768, &at, "\npkg=") || rc_cat(blob, 768, &at, rc_prod) ||
+            rc_cat(blob, 768, &at, "\nroute=") || rc_cat(blob, 768, &at, route) ||
+            rc_cat(blob, 768, &at, "\ntarget=") || rc_cat(blob, 768, &at, rc_target) ||
+            rc_cat(blob, 768, &at, "\nlevel=") || rc_cat_u(blob, 768, &at, (unsigned long long)rc_level) ||
+            rc_cat(blob, 768, &at, pin ? "\npin=1\nsrc=" : "\npin=0\nsrc=") || rc_cat(blob, 768, &at, pin ? rc_raw : rc_src)) return 1;
+        if (bindraw && (rc_cat(blob, 768, &at, "\nsrcraw=") || rc_cat(blob, 768, &at, rc_srcraw))) return 1;
+        if (rc_cat(blob, 768, &at, "\n")) return 1;
+    }
     cx_sha256_hex(blob, (size_t)at, key);
     return 0;
 }
@@ -417,31 +431,20 @@ bad:
     return 1;
 }
 
-/* 0 when an entry file of a valid size is at PATH: the unpinned key first, the pinned key only when that one is absent */
-static int rc_probe(int elf, char *dir, char *path) {
+/* Try one pin key: 1 with TAPE/TN set on a verified hit, 0 on any miss.
+   Both the unpinned and pinned keys are tried by the caller, so a file whose pin flipped
+   (e.g. a header gained __FILE__) does not leave the unit permanently cold behind a stale
+   entry of the other pin: the stale entry fails its receipt check and the other key is read. */
+static int rc_try(int elf, const char *dir, const char *route, int pin, unsigned char **tapeout, long *tnout) {
     int sy_lstat(const char *, sy_stat_t *);
-    char route[160];
-    char key[65];
-    sy_stat_t st;
-    int pin;
-    pin = 0;
-    while (pin < 2) {
-        if (mc_cache_dir(dir, 400) || rc_route(route, 160, elf) || rc_key(key, route, pin) || rc_join(path, 560, dir, key, elf)) return 1;
-        if (!sy_lstat(path, &st)) return st.kind != 'f' || st.size < 88 || st.size > (1L << 26);
-        pin = pin + 1;
-    }
-    return 1;
-}
-
-static int rc_lookup_kind(int elf, unsigned char **out, long *outn) {
     int tx_same(const char *, long, const char *, long);
-    long long hs_ns(void);
-    char dir[400];
+    char key[65];
     char path[560];
     char hex[65];
     char got[65];
     unsigned char *file;
     unsigned char *tape;
+    sy_stat_t st;
     size_t fn;
     long n;
     long at;
@@ -450,25 +453,12 @@ static int rc_lookup_kind(int elf, unsigned char **out, long *outn) {
     unsigned hn;
     unsigned abn;
     unsigned i;
-    long long t0;
-    long long t1;
     const char *magic;
-    if (out) *out = 0;
-    if (outn) *outn = 0;
-    if (!rc_on || !out || !outn) return 0;
-    t0 = hs_ns();
-    magic = elf ? "USE34\n\0\0" : "USE33\n\0\0";
-    if (rc_probe(elf, dir, path)) {
-        t1 = hs_ns();
-        rc_report(0, t1 - t0);
-        return 0;
-    }
+    if (rc_key(key, route, pin) || rc_join(path, 560, dir, key, elf)) return 0;
+    if (sy_lstat(path, &st) || st.kind != 'f' || st.size < 88 || st.size > (1L << 26)) return 0;
     file = (unsigned char *)cx_read(path, &fn);
-    if (!file) {
-        t1 = hs_ns();
-        rc_report(0, t1 - t0);
-        return 0;
-    }
+    if (!file) return 0;
+    magic = elf ? "USE34\n\0\0" : "USE33\n\0\0";
     n = (long)fn;
     if (n < 88 || !tx_same((const char *)file, 8, magic, 8)) goto miss;
     tn = rc_get32(file + 8);
@@ -528,14 +518,42 @@ static int rc_lookup_kind(int elf, unsigned char **out, long *outn) {
     if (!tape) goto miss;
     mm_copy(tape, (long)tn, file + at, (long)tn);
     rc_release(file);
-    *out = tape;
-    *outn = (long)tn;
+    *tapeout = tape;
+    *tnout = (long)tn;
     mc_cache_touch(dir, path);
-    t1 = hs_ns();
-    rc_report(elf ? 2 : 1, t1 - t0);
     return 1;
 miss:
     rc_release(file);
+    return 0;
+}
+
+static int rc_lookup_kind(int elf, unsigned char **out, long *outn) {
+    long long hs_ns(void);
+    char dir[400];
+    char route[160];
+    unsigned char *tape;
+    long tn;
+    long long t0;
+    long long t1;
+    int pin;
+    if (out) *out = 0;
+    if (outn) *outn = 0;
+    if (!rc_on || !out || !outn) return 0;
+    t0 = hs_ns();
+    if (mc_cache_dir(dir, 400) || rc_route(route, 160, elf)) { t1 = hs_ns(); rc_report(0, t1 - t0); return 0; }
+    pin = 0;
+    while (pin < 2) {
+        tape = 0;
+        tn = 0;
+        if (rc_try(elf, dir, route, pin, &tape, &tn)) {
+            *out = tape;
+            *outn = tn;
+            t1 = hs_ns();
+            rc_report(elf ? 2 : 1, t1 - t0);
+            return 1;
+        }
+        pin = pin + 1;
+    }
     t1 = hs_ns();
     rc_report(0, t1 - t0);
     return 0;
@@ -558,6 +576,7 @@ int rc_open(const char *product, int argc, char **argv, const char **sources, in
     rc_broken = 0;
     rc_prod[0] = 0;
     rc_src[0] = 0;
+    rc_srcraw[0] = 0;
     rc_raw[0] = 0;
     rc_pin = 0;
     /* Resource-flow capture rewrites a ledger on every build, and --strict-resource-flow
@@ -573,6 +592,21 @@ int rc_open(const char *product, int argc, char **argv, const char **sources, in
     rc_nsrc = nsrc;
     if (rk_prod(product, rc_prod)) return 0;
     if (rk_open() || rk_sources2(argc, argv, sources, nsrc, rc_prod, rc_src, rc_raw, &rc_pin)) return 0;
+    /* rc_srcraw: digest of the source argv spellings verbatim (NUL separated), for the -c object key.
+       Only the strings dv_srcv holds are used, so no file is read; a relative 'x.cx' and an absolute
+       '/d/x.cx' differ, which is what the embedded .unisa.tape records. */
+    {
+        unsigned char *rb = 0; long rn = 0, rcap = 0, sj;
+        int anyn = 0;
+        for (sj = 0; sj < nsrc; sj++) {
+            long sl;
+            if (!sources[sj]) { anyn = -1; break; }
+            sl = tx_len(sources[sj], 4096);
+            if (sl < 0 || rc_app(&rb, &rn, &rcap, sources[sj], sl + 1)) { anyn = -1; break; }
+        }
+        if (anyn == 0 && rn > 0) (void)rk_hex(rb, rn, rc_srcraw);
+        rc_release(rb);
+    }
     rc_on = 1;
     if (rc_debug()) {
         char line[180];

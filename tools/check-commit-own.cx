@@ -8,6 +8,7 @@
  *   lock    a new file is committed while .git/index.lock is held for 4 s: COMMIT_OWN says index_unsynced=0, the
  *           file's index entry is the committed blob and git status shows nothing for it;
  *   nolock  the same without a lock, as a control.
+ *   freeze-tlib: all three numbering paths are refused while frozen; check owner and thaw.
  * Prints PASS/FAIL per case and CHECK_COMMIT_OWN<TAB>failed=N; exit 1 when N > 0. */
 #pragma unisa use sys.fs
 #pragma unisa use mem.bytes
@@ -190,6 +191,29 @@ static void s2_want(const char *script_tail, const char *want, const char *name)
     sh(script, out, sizeof out);
     ck(tx_find(out, tx_len(out, sizeof out), want, tx_len(want, 512)) >= 0, name);
     if (tx_find(out, tx_len(out, sizeof out), want, tx_len(want, 512)) < 0) sy_printf("GOT\t%s\n", out);   /* the evidence of a FAIL */
+}
+static void case_freeze_tlib(void) {
+    s2_want(
+        "rm -f tools/on-change.cx; export DEVSVC_OWNER=guest UNISACC_INTEGRATOR=; "
+        "printf 'sid\tbase\tfreezer\t4102444800\t-\n' > build/freeze.tsv; "
+        "printf '# fixture\n' >> build/tlib-packages.tsv; printf '# fixture\n' >> build/iface-hash.tsv; "
+        "printf '# fixture\n' > build/layer-api/freeze-fixture.tsv; git add -- build/layer-api/freeze-fixture.tsv; "
+        "printf 'fixture\n' > freeze-plain.txt; "
+        "probe(){ " CO_RUN "-m freeze-check --dry-run \"$@\" > freeze.out 2>&1; r=$?; "
+        "printf 'rc=%s\n' \"$r\"; grep -o 'COMMIT_OWN_FREEZE_TLIB path=[^ ]* reason=[^ ]*' freeze.out || :; }; "
+        "echo ACTIVE; probe --whole build/tlib-packages.tsv; probe --staged build/layer-api/freeze-fixture.tsv; "
+        "echo NON_TLIB; probe --whole freeze-plain.txt; "
+        "echo OWNER; DEVSVC_OWNER=freezer probe --whole build/tlib-packages.tsv; "
+        "echo MARKER; printf 'sid\tbase\tfreezer\t1\t-\n' > build/freeze.tsv; touch .git/PUSH-FREEZE; "
+        "probe --whole build/iface-hash.tsv; "
+        "echo THAW; rm .git/PUSH-FREEZE; " CO_RUN "-m thaw --whole build/tlib-packages.tsv > thaw.out 2>&1; "
+        "echo rc=$?; git show HEAD:build/tlib-packages.tsv | tail -1; echo END",
+        "ACTIVE\nrc=2\nCOMMIT_OWN_FREEZE_TLIB path=build/tlib-packages.tsv reason=build/freeze.tsv\n"
+        "rc=2\nCOMMIT_OWN_FREEZE_TLIB path=build/layer-api/freeze-fixture.tsv reason=build/freeze.tsv\n"
+        "NON_TLIB\nrc=0\nOWNER\nrc=0\nMARKER\nrc=2\n"
+        "COMMIT_OWN_FREEZE_TLIB path=build/iface-hash.tsv reason=PUSH-FREEZE\n"
+        "THAW\nrc=0\n# fixture\nEND",
+        "freeze-tlib-three-paths-owner-marker-and-thaw");
 }
 static void case_s2(int part) {
     /* the pending-derived hint is not under test here (the three older batches assert it); without tools/on-change.cx
@@ -593,6 +617,7 @@ int main(int argc, char **argv) {
         sh(script, out, sizeof out);
         ck(tx_find(out, tx_len(out, sizeof out), "git commit refused (rc 1): ZZHOOKREASON", 39) >= 0, "commit-refused-names-git-reason");
     }
+    if (co_has(g, "freeze-tlib", 0)) case_freeze_tlib();
 done:
     if (failed) sy_eprintf("CHECK_COMMIT_OWN_DIAGNOSTICS retained=%s/clone\n", base);
     else { char rm[4500]; if (!cx_fmt(rm, sizeof rm, "rm -rf %s", base)) sh(rm, out, sizeof out); }

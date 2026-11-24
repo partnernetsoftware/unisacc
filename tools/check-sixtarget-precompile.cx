@@ -21,7 +21,7 @@ static void patch_unistd_fixture(const char *dir, int add_fwd) {
     char up[512];
     unsigned char *b = 0;
     int64_t n = 0;
-    if (tx_snprintf(up, sizeof up, "%s/include/unistd.h", dir) <= 0) return;
+    if (cx_fmt(up, sizeof up, "%s/include/unistd.h", dir) != 0) return;
     if (sy_read_file(up, &b, &n, 1 << 20) != 0 || !b || n <= 0) {
         if (b) mm_free(b);
         return;
@@ -106,6 +106,10 @@ int main(void) {
     st_ck(ckk_sh("CHECK_SIXTARGET", cmd, out, sizeof out) == 2 && ckk_has(out, sizeof out, "bad --part"), "bad-part-syntax-refused");
     tx_snprintf(cmd, sizeof cmd, "%s --mode files --file %s --deadline-s 56", stbin, good_cx);
     st_ck(ckk_sh("CHECK_SIXTARGET", cmd, out, sizeof out) == 2 && ckk_has(out, sizeof out, "1..55"), "bad-deadline-refused");
+    tx_snprintf(cmd, sizeof cmd, "%s --mode files --file %s --par 0", stbin, good_cx);
+    st_ck(ckk_sh("CHECK_SIXTARGET", cmd, out, sizeof out) == 2 && ckk_has(out, sizeof out, "--par must be 1..16"), "bad-par-zero-refused");
+    tx_snprintf(cmd, sizeof cmd, "%s --mode files --file %s --par 17", stbin, good_cx);
+    st_ck(ckk_sh("CHECK_SIXTARGET", cmd, out, sizeof out) == 2 && ckk_has(out, sizeof out, "--par must be 1..16"), "bad-par-over-16-refused");
     tx_snprintf(cmd, sizeof cmd, "%s --mode templates --root /nonexistent-st-root", stbin);
     st_ck(ckk_sh("CHECK_SIXTARGET", cmd, out, sizeof out) == 2 && ckk_has(out, sizeof out, "cannot resolve --root"), "bad-root-refused");
     tx_snprintf(cmd, sizeof cmd, "%s --mode templates --compiler /nonexistent-st-comp", stbin);
@@ -193,6 +197,22 @@ int main(void) {
     st_ck(rc_p1 == 0 && ckk_has(out, sizeof out, "\ttargets=3\tchecked=3\tfailed=0\t") &&
        ckk_has(out, sizeof out, "target=win/arm64") && !ckk_has(out, sizeof out, "target=win/x86_64"),
        "shard-part-1-of-2");
+
+    /* 3b. --par only reorders the work: a width of 1 must still compile every target, and the target set
+       must equal the unthrottled one (a width loop that drops or duplicates slots shows here). */
+    tx_snprintf(cmd, sizeof cmd, "%s --mode files --file %s --par 1", stbin, good_cx);
+    int rc_par1 = ckk_sh("CHECK_SIXTARGET", cmd, out, sizeof out);
+    st_ck(rc_par1 == 0 &&
+       ckk_has(out, sizeof out, "SIXTARGET_SUMMARY\tmode=files\ttargets=6\tchecked=6\tfailed=0\t") &&
+       ckk_has(out, sizeof out, "target=lnx/x86_64") && ckk_has(out, sizeof out, "target=lnx/arm64") &&
+       ckk_has(out, sizeof out, "target=osx/x86_64") && ckk_has(out, sizeof out, "target=osx/arm64") &&
+       ckk_has(out, sizeof out, "target=win/x86_64") && ckk_has(out, sizeof out, "target=win/arm64"),
+       "par-one-still-compiles-every-target");
+
+    tx_snprintf(cmd, sizeof cmd, "%s --mode files --file %s --par 3", stbin, good_cx);
+    st_ck(ckk_sh("CHECK_SIXTARGET", cmd, out, sizeof out) == 0 &&
+       ckk_has(out, sizeof out, "SIXTARGET_SUMMARY\tmode=files\ttargets=6\tchecked=6\tfailed=0\t"),
+       "par-three-same-verdict");
 
     /* 4. Negative: real win-only compile error fails win targets with target + diag line */
     tx_snprintf(cmd, sizeof cmd, "%s --mode files --file %s", stbin, bad_err_cx);

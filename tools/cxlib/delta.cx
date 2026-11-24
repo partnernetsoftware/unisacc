@@ -24,7 +24,7 @@ typedef struct dl_act { int op; int alu; const char *s1, *s2, *s3; long long v; 
 typedef struct dl_seq { dl_act *a; int n; } dl_seq;
 typedef struct dl_edge { int next; dl_seq *seq; } dl_edge;   /* next < 0: no edge for this key */
 typedef struct dl_state { const char *name; int mode; dl_edge *byte; char **tkeys; dl_edge *tedges; int tn; } dl_state;
-typedef struct dl_delta { dl_state *s; int ns; dl_seq *seqs; int nseq; int start; int nreg; char **regnames; void *index; void *regs; } dl_delta;   /* index: state name map; regs: register name map */
+typedef struct dl_delta { dl_state *s; int ns; dl_seq *seqs; int nseq; int start; int nreg; char **regnames; void *index; void *regs; int dangling_dead; long dangling_count; } dl_delta;   /* index: state name map; regs: register name map */
 
 static const char *dl_opnames[DL_OP_N] = { "ADV", "MARK", "JUMP", "COPYT", "COPY", "OUT", "LDI", "COPYW", "ALU", "ALUI", "CMP", "CMPI", "A64", "A64I", "C64", "C64U", "RLD", "LDX", "STX", "OUTW",
        "SPAN", "SPANT", "SPAN2", "OLAST", "ODROP", "OLEN", "OCUT", "ORES", "OFILL", "OCLR", "OSEL", "SETOT", "XATTR", "PUSH", "POP", "INTERN", "SBINTERN",
@@ -177,11 +177,12 @@ static void dl_load_seq(dl_delta *d, dl_seq *q, dl_jv *arr) {
 }
 int dl_state(dl_delta *d, const char *name) { dl_map *m = d->index; return (int)dl_mapget(m, name, -1); }
 const char *dl_regname(dl_delta *d, int id) { return id > 0 && id <= d->nreg ? d->regnames[id] : ""; }
-void dl_load(const char *path, dl_delta *d) {
+void dl_load_mode(const char *path, dl_delta *d, int allow_dead) {
     FILE *f = fopen(path, "rb"); if (!f) { fprintf(stderr, "delta: cannot open %s\n", path); exit(2); }
     fseek(f, 0, SEEK_END); long n = ftell(f); fseek(f, 0, SEEK_SET);
     char *text = dl_alloc((size_t)n + 1); if (fread(text, 1, (size_t)n, f) != (size_t)n) dl_die("read"); text[n] = 0; fclose(f);
     memset(d, 0, sizeof *d);
+    d->dangling_dead = -1;
     dl_map *states_ix = dl_alloc(sizeof *states_ix); memset(states_ix, 0, sizeof *states_ix);
     dl_map *reg_ix = dl_alloc(sizeof *reg_ix); memset(reg_ix, 0, sizeof *reg_ix); d->regs = reg_ix; d->index = states_ix;
     dl_jp = text; dl_jline = 1; dl_jv *root = dl_jparse();
@@ -202,12 +203,18 @@ void dl_load(const char *path, dl_delta *d) {
     d->nseq = seqs->n + halt_needed; d->seqs = dl_alloc((size_t)(d->nseq ? d->nseq : 1) * sizeof(dl_seq));
     for (int i = 0; i < seqs->n; i++) dl_load_seq(d, &d->seqs[i], seqs->items[i]);
     if (halt_needed) { dl_seq *hq = &d->seqs[seqs->n]; hq->n = 1; hq->a = dl_alloc(sizeof(dl_act)); memset(hq->a, 0, sizeof(dl_act)); hq->a[0].op = DL_REJECT; hq->a[0].s1 = "halt"; }
-    d->ns = states->n + halt_needed; d->s = dl_alloc((size_t)(d->ns ? d->ns : 1) * sizeof(dl_state)); memset(d->s, 0, (size_t)(d->ns ? d->ns : 1) * sizeof(dl_state));
+    d->ns = states->n + halt_needed;
+    d->s = dl_alloc((size_t)(d->ns + 1) * sizeof(dl_state)); memset(d->s, 0, (size_t)(d->ns + 1) * sizeof(dl_state));
     for (int i = 0; i < states->n; i++) { d->s[i].name = states->keys[i]; dl_mapset(states_ix, d->s[i].name, i); }
     if (halt_needed) {
         int h = states->n; d->s[h].name = "HALT"; d->s[h].mode = 'b'; dl_mapset(states_ix, "HALT", h);
         d->s[h].byte = dl_alloc(257 * sizeof(dl_edge)); for (int k = 0; k < 257; k++) { d->s[h].byte[k].next = h; d->s[h].byte[k].seq = &d->seqs[seqs->n]; }
     }
+    int *unknown_from = calloc((size_t)states->n + 1, sizeof(int));
+    if (!unknown_from) dl_die("alloc");
+    long unknown = 0;
+    int has_binding = 0, first_from = 0;
+    const char *first_to = 0;
     for (int i = 0; i < states->n; i++) {
         dl_jv *st = states->items[i]; if (st->kind != DLJ_ARR || st->n != 2 || st->items[0]->kind != DLJ_STR || st->items[1]->kind != DLJ_OBJ) dl_die("state shape");
         const char *m = st->items[0]->str; dl_jv *row = st->items[1]; d->s[i].mode = m[0];
@@ -216,7 +223,14 @@ void dl_load(const char *path, dl_delta *d) {
         else { d->s[i].byte = dl_alloc(257 * sizeof(dl_edge)); for (int k = 0; k < 257; k++) { d->s[i].byte[k].next = -1; d->s[i].byte[k].seq = 0; } }
         for (int k = 0; k < row->n; k++) {
             dl_jv *e = row->items[k]; if (e->kind != DLJ_ARR || e->n != 2 || e->items[0]->kind != DLJ_STR || e->items[1]->kind != DLJ_NUM) dl_die("edge shape");
-            long long ni = dl_mapget(states_ix, e->items[0]->str, -1); if (ni < 0) { fprintf(stderr, "delta: edge from %s to unknown state %s\n", d->s[i].name, e->items[0]->str); exit(2); }
+            const char *target = e->items[0]->str;
+            long long ni = dl_mapget(states_ix, target, -1);
+            if (ni < 0) {
+                if (!unknown) { first_from = i; first_to = target; }
+                unknown++; unknown_from[i]++;
+                if (strchr(target, '$')) has_binding = 1;
+                ni = d->ns;
+            }
             long long si = e->items[1]->num; if (si < 0 || si >= d->nseq) dl_die("sequence index");
             dl_edge ed; ed.next = (int)ni; ed.seq = &d->seqs[si];
             if (m[0] == 't') d->s[i].tedges[k] = ed;
@@ -224,5 +238,27 @@ void dl_load(const char *path, dl_delta *d) {
         }
     }
     long long si = dl_mapget(states_ix, start->str, -1); if (si < 0) dl_die("start state"); d->start = (int)si;
+    if (unknown) {
+        d->dangling_count = unknown;
+        if (allow_dead) fprintf(stderr, "SIM_WARN\tdangling=%ld\t", unknown);
+        else fprintf(stderr, "delta: %ld edges to unknown states; ", unknown);
+        fprintf(stderr, "first=%s -> %s; from-states=", d->s[first_from].name, first_to);
+        int comma = 0;
+        for (int i = 0; i < states->n; i++) if (unknown_from[i]) {
+            fprintf(stderr, "%s%s:%d", comma ? "," : "", d->s[i].name, unknown_from[i]);
+            comma = 1;
+        }
+        if (has_binding) fputs("; targets containing $ may be unresolved bindings", stderr);
+        fputc('\n', stderr);
+        if (!allow_dead) exit(2);
+        /* tbl emits an empty byte row for an unknown name. Keep incoming actions intact. */
+        d->dangling_dead = d->ns++;
+        dl_state *dead = &d->s[d->dangling_dead];
+        dead->name = "<dangling-dead>"; dead->mode = 'b';
+        dead->byte = dl_alloc(257 * sizeof(dl_edge));
+        for (int k = 0; k < 257; k++) { dead->byte[k].next = -1; dead->byte[k].seq = 0; }
+    }
+    free(unknown_from);
     free(text);
 }
+void dl_load(const char *path, dl_delta *d) { dl_load_mode(path, d, 0); }

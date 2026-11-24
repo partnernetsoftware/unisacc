@@ -169,6 +169,30 @@ static void root_baseline_sample(void){
   np_free(&r);
  }
 }
+/* k1 and k92 share FNV-1a slot 1 of the 64-slot key index (filler f00..f15 avoid slot 1): a lookup that skips the key compare returns the wrong binding. */
+static void root_keyslot_sample(void){
+ char dir[4400],base[4400],pp[4400],d[4400],p[4400],opts[2048];path(dir,scratch,"root-keyslot");if(mkdir(dir,0700))die("keyslot fixture mkdir");path(base,dir,"exec");if(mkdir(base,0700))die("keyslot exec mkdir");
+ const char *parts[]={"pp","parse2"};for(int i=0;i<2;i++){path(d,base,parts[i]);if(mkdir(d,0700))die("keyslot stage mkdir");}
+ char fill[1024];fill[0]=0;for(int i=0;i<16;i++){char one[64],acc[1024];if(cx_fmt(one,sizeof one,"\"f%02d\":\"@str:FILL.%02d\",",i,i))die("keyslot fill bound");if(cx_fmt(acc,sizeof acc,"%s%s",fill,one))die("keyslot fill bound");if(cx_fmt(fill,sizeof fill,"%s",acc))die("keyslot fill bound");}
+ if(cx_fmt(opts,sizeof opts,"{\"let\":{%s\"k1\":\"@str:SLOT.A\",\"k92\":\"@str:SLOT.B\"}}",fill))die("keyslot opts bound");
+ char man[4096];if(cx_fmt(man,sizeof man,"table\tuses-byte.tsv\t-\t-\t-\t-\t-\t-\t{\"mode\":\"b\"}\nrows\tslot\t-\t-\t-\t-\t-\t-\t%s\n",opts))die("keyslot manifest bound");
+ path(pp,base,"pp");path(p,pp,"gen-manifest.tsv");put(p,man);path(p,pp,"slot-byte.tsv");put(p,"$k1\t*\tHALT\t[]\n$k92\t*\tHALT\t[]\n");path(p,pp,"uses-byte.tsv");put(p,"USE\t0\tSLOT.A\t[]\nUSE\t*\tSLOT.B\t[]\n");
+ path(d,base,"parse2");path(p,d,"gen-manifest.tsv");put(p,"table\tother-byte.tsv\t-\t-\t-\t-\t-\t-\t{\"mode\":\"b\"}\n");path(p,d,"other-byte.tsv");put(p,"Q\t*\tHALT\t[]\n");
+ char *v[]={exe,"--root",dir,"--limit","100",0};np_result r={0};char why[512]={0};int tr=np_run(v,root,0,15,&r,why,sizeof why);
+ int yes=!tr&&!r.rc&&!r.residue&&r.out&&strstr(r.out,"errors=0");ck(yes,"colliding-key-slots-keep-distinct-bindings");
+ if(!yes){if(r.outn)fwrite(r.out,1,r.outn,stderr);if(r.errn)fwrite(r.err,1,r.errn,stderr);if(tr)fprintf(stderr,"%s\n",why);}np_free(&r);
+}
+/* One literal source row reached from two stages (pp directly, parse2 via ../pp call) must give evidence in both scopes. */
+static void root_twoscope_sample(void){
+ char dir[4400],base[4400],pp[4400],d[4400],p[4400];path(dir,scratch,"root-twoscope");if(mkdir(dir,0700))die("twoscope fixture mkdir");path(base,dir,"exec");if(mkdir(base,0700))die("twoscope exec mkdir");
+ const char *parts[]={"pp","parse2"};for(int i=0;i<2;i++){path(d,base,parts[i]);if(mkdir(d,0700))die("twoscope stage mkdir");}
+ path(pp,base,"pp");path(p,pp,"gen-manifest.tsv");put(p,"table\tuses-byte.tsv\t-\t-\t-\t-\t-\t-\t{\"mode\":\"b\"}\ncall\tsh\t-\t-\t-\t-\t-\t-\t-\n");
+ path(p,pp,"sh-manifest.tsv");put(p,"rows\tlits\tsec\t-\t-\t-\t-\t-\t-\n");path(p,pp,"lits-byte.tsv");put(p,"sec\t@str:LIT.X\t*\tHALT\t[]\n");path(p,pp,"uses-byte.tsv");put(p,"USE\t*\tLIT.X\t[]\n");
+ path(d,base,"parse2");path(p,d,"gen-manifest.tsv");put(p,"table\tother-byte.tsv\t-\t-\t-\t-\t-\t-\t{\"mode\":\"b\"}\ncall\t../pp/sh\t-\t-\t-\t-\t-\t-\t-\n");path(p,d,"other-byte.tsv");put(p,"Q\t*\tLIT.X\t[]\n");
+ char *v[]={exe,"--root",dir,"--limit","100",0};np_result r={0};char why[512]={0};int tr=np_run(v,root,0,15,&r,why,sizeof why);
+ int yes=!tr&&!r.rc&&!r.residue&&r.out&&strstr(r.out,"errors=0")&&strstr(r.out,"UNRESOLVED\texec/pp\tuses-byte.tsv:1\tLIT.X\tpossible definition from lits-byte.tsv:1")&&strstr(r.out,"UNRESOLVED\texec/parse2\tother-byte.tsv:1\tLIT.X\tpossible definition from lits-byte.tsv:1");ck(yes,"literal-row-evidence-registered-per-scope");
+ if(!yes){if(r.outn)fwrite(r.out,1,r.outn,stderr);if(r.errn)fwrite(r.err,1,r.errn,stderr);if(tr)fprintf(stderr,"%s\n",why);}np_free(&r);
+}
 int main(void){
  char tmp[]="/tmp/tsv-lint-check-XXXXXX",p[4400],com[4400],tool[4400];
  if(!realpath(".",root)||!mkdtemp(tmp))die("temporary root");
@@ -194,6 +218,8 @@ int main(void){
  root_domain_sample();
  root_selection_sample();
  root_baseline_sample();
+ root_keyslot_sample();
+ root_twoscope_sample();
  {char *v[]={exe,"--root",root,"--limit","10",0};np_result r={0};char why[512]={0};int tr=np_run(v,root,0,20,&r,why,sizeof why);ck(!tr&&!r.rc&&!r.residue&&r.out&&strstr(r.out,"errors=0"),"current-pp-parse2-negative");if(tr||r.rc||r.residue)fprintf(stderr,"tsv-lint-root: transport=%d rc=%d residue=%d %s\n",tr,r.rc,r.residue,why);if(r.outn)fwrite(r.out,1,r.outn,stdout);if(r.errn)fwrite(r.err,1,r.errn,stderr);np_free(&r);}
  {char *v[]={exe,"--root",root,"--check",0};np_result r={0};char why[512]={0};int tr=np_run(v,root,0,20,&r,why,sizeof why);ck(!tr&&!r.rc&&!r.residue&&r.out&&strstr(r.out,"tsv-lint: ok:"),"current-pp-parse2-check-mode");if(tr||r.rc||r.residue)fprintf(stderr,"tsv-lint-check: transport=%d rc=%d residue=%d %s\n",tr,r.rc,r.residue,why);if(r.outn)fwrite(r.out,1,r.outn,stdout);if(r.errn)fwrite(r.err,1,r.errn,stderr);np_free(&r);}
  if(cx_rmtree(scratch))die("cleanup");printf("CHECK_TSV_LINT\tchecks=%d\tfailed=%d\n",checks,bad);return bad?1:0;

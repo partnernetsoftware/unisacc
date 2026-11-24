@@ -451,7 +451,16 @@ static int run_set(int *idx, int count, int jobs, int attempt, long deadline) {
 static int populate_layout(void) {
     char tar[4400], out[256];
     if (cx_fmt(tar, sizeof tar, "%s/frozen.tar", outlog)) return die("archive path ", outlog);
-    char *ar[] = {"git", "-C", root, "archive", "--format=tar", "-o", tar, head, 0}; if (run(ar, 0, 60, 0, 0)) return die("git archive ", root);
+    /* release/evidence/*-deferred.tsv is historical failure evidence committed to the repo: 67 tracked files
+     * carrying 139 DEFERRED lines, and they land in every copy of the qualify tree.  Carrying them into the
+     * layout multiplies that history by the number of trees (measured: 2919 of 2923 DEFERRED rows in a prerun
+     * dir came from this file family), so any count of "how many batches are deferred now" would read history
+     * instead of the run.  They are evidence for release-flow decisions, which read REPO/release/evidence/...
+     * and never the layout, so the layout does not need them.  Excluding exactly these leaves every other
+     * evidence file in place.  Counting rule this protects: tools/deferred-census.cx. */
+    char *ar[] = {"git", "-C", root, "archive", "--format=tar", "-o", tar, head, "--", ".",
+                  ":(exclude,glob)**/release/evidence/**/*-deferred.tsv", 0};
+    if (run(ar, 0, 60, 0, 0)) return die("git archive ", root);
     char *x[] = {"tar", "-xf", tar, "-C", lay, 0}; if (run(x, 0, 60, 0, 0)) return die("tar ", tar);
     char *rt[] = {"rm", "-f", tar, 0}; run(rt, 0, 10, 0, 0);
     char dst[4200];sy_stat_t prior;
@@ -637,7 +646,17 @@ int main(int argc, char **argv) {
     if (seed < 0) seed = sy_wall_s() % 1000000;
     if (!ids && !include_split_parents) { if (load_split_parents()) return 2; }
     /* (3) batch set */
-    if (ids) { char t[8192]; cx_fmt(t, sizeof t, "%s", ids); for (char *p = strtok(t, ","); p; p = strtok(0, ",")) add(p); }
+    if (ids) {   /* --ids grows with the argument (was a fixed 8192 copy whose cx_fmt result went unchecked) */
+        size_t il = strlen(ids) + 1; char *t = (char *)malloc(il);
+        if (!t) return die("--ids: out of memory", 0);
+        mm_copy(t, (long)il, ids, (long)il);
+        for (char *p = strtok(t, ","); p; p = strtok(0, ",")) {
+            if (strlen(p) >= sizeof bs[0].id) { char m[160]; cx_fmt(m, sizeof m, "--ids: id over limit limit=%d actual=%d: ", (int)sizeof bs[0].id - 1, (int)strlen(p)); free(t); return die(m, p); }
+            if (nb >= MAXB) { char m[120]; cx_fmt(m, sizeof m, "--ids: batch count over limit limit=%d (MAXB)", MAXB); free(t); return die(m, 0); }
+            add(p);
+        }
+        free(t);
+    }
     else if (!strcmp(set, "sample")) {
         for (int i = 0; sample_ids[i]; i++) { if (is_split_parent(sample_ids[i])) { split_excluded++; continue; } add(sample_ids[i]); }
         if (each_row("tests/batches.tsv", take_shard, 0) || nshard < 10) return die("tools-compile shards not found in tests/batches.tsv", 0);

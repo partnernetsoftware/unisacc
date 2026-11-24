@@ -11,10 +11,11 @@
  * arrives, so it can be compared byte for byte with `curl -s`; the progress notes and the certificate facts
  * go to standard error under --verbose.
  *
- * The chain is checked as far as a client can without a trust store: every certificate the server sent is
- * parsed, each child's signature is checked against its issuer, the leaf must match the host name and be
- * valid now.  The top certificate is NOT compared against a root, so a successful run says "this is a real
- * TLS 1.3 server speaking to us", not "this chain is trusted". */
+ * Trust model: this tool has no root store, so a chain that only links internally proves nothing about who
+ * signed it (anyone can self-sign for the host). It therefore requires --pin SHA256 (the sha256 of the leaf
+ * certificate DER): the leaf must match the pin, and the leaf must match the host name and be valid now,
+ * and every child's signature is checked against its issuer. Without --pin it refuses (no trust anchor).
+ * An unparseable certificate anywhere in the chain is refused. A root-store chain check is future work. */
 #pragma unisa use sys.io
 #pragma unisa use sys.fs
 #pragma unisa use sysx.net
@@ -25,6 +26,8 @@
 #pragma unisa use crypto.tls13
 #pragma unisa use crypto.record
 #pragma unisa use crypto.x509
+#pragma unisa use sys.sha
+#pragma unisa use mem.heap
 
 #define TG_MAX_REC 16640
 #define TG_MAX_MSG 4096
@@ -76,47 +79,59 @@ static long read_record(int fd, unsigned char *rec, long cap) {
     return 5 + len;
 }
 
-/* Parse every certificate of a Certificate message and check the links the server can prove.
-   Returns the number of certificates, or -errno. */
-static int check_chain(const unsigned char *msg, long n, const char *host, long now) {
+/* Trust outcomes beyond errno: no anchor configured, or the leaf does not match the pin. */
+#define TG_NOTRUST (-200)
+#define TG_PINMISMATCH (-201)
+
+/* Parse every certificate of a Certificate message and check the links the server can prove, the leaf's
+   host name and validity, and (with PIN) that the leaf matches the pin. Returns the certificate count,
+   or a negative value: -errno, TG_NOTRUST (no --pin), TG_PINMISMATCH.
+   Any certificate that does not parse (leaf or issuer) is refused: an unparseable chain is not trusted. */
+static int check_chain(const unsigned char *msg, long n, const char *host, long now, const char *pin) {
     cs_tls13_cert_iter it;
     cs_x509 certs[TG_MAX_CERTS];
-    const unsigned char *der;
-    long derlen, k;
+    const unsigned char *der, *leaf_der = 0;
+    long derlen, leaf_len = 0;
     int count = 0, r, i;
     r = cs_tls13_cert_begin(&it, msg + 4, n - 4);
     if (r) return r;
     while (count < TG_MAX_CERTS) {
         der = 0; derlen = 0;
         r = cs_tls13_cert_next(&it, &der, &derlen);
-        if (r) return r;
+        if (r < 0) return r;
+        if (r == 1) break;          /* 1 = end of the server's certificate list, not an error */
         if (!der) break;
         r = cs_x509_parse(der, derlen, &certs[count]);
         if (verbose) sy_eprintf("cert %d: %ld bytes, parse=%d\n", count, derlen, r);
-        if (r) {
-            /* The leaf must parse: it is what the CertificateVerify is checked against.  An issuer we cannot
-               parse (a P-384 or SHA-384 certificate, which ext/crypto/x509.cx deliberately does not handle)
-               only ends the chain here; the handshake goes on and the server's Finished still has to verify. */
-            if (count == 0) return r;
-            note("chain verification stops at index ", count);
-            return count;
-        }
+        if (r) return -EPROTO;      /* any unparseable certificate (leaf or issuer) is refused */
+        if (count == 0) { leaf_der = der; leaf_len = derlen; }
         count++;
     }
-    if (count == 0) return -EPROTO;
-    if (cs_x509_match_dns(&certs[0], host) != 0) return -EHOSTUNREACH;
-    if (cs_x509_valid_at(&certs[0], now) != 0) return -ETIMEDOUT;
+    if (count == 0 || !leaf_der) return -EPROTO;
+    if (cs_x509_match_dns(&certs[0], host) != 1) return -EHOSTUNREACH;
+    if (cs_x509_valid_at(&certs[0], now) != 1) return -ETIMEDOUT;
     for (i = 0; i + 1 < count; i++) {
         r = cs_x509_verify_sig(&certs[i], &certs[i + 1]);
         if (r) return r;
         note("chain link verified, index ", i);
     }
+    /* Trust: this tool has no root store; a caller-supplied pin is the only anchor. Without one, refuse:
+       a self-signed leaf for the host would otherwise pass the name/validity/link checks above. */
+    if (!pin || !pin[0]) return TG_NOTRUST;
+    {
+        char hex[65];
+        int z;
+        if (sy_sha256_hex(leaf_der, (size_t)leaf_len, hex)) return -EIO;
+        for (z = 0; z < 64; z++) if (hex[z] != pin[z]) return TG_PINMISMATCH;
+    }
     return count;
 }
 
 int main(int argc, char **argv) {
-    const char *host = 0, *path = "/";
-    long port = 443, i, n, off, len, outlen;
+    const char *host = 0, *path = "/", *pinarg = 0, *selftest = 0;
+    char pinbuf[65];
+    int have_pin = 0;
+    long port = 443, i, n, off, len, outlen, nowv = -1;
     int fd, r, rnd, inner;
     unsigned char priv[32], rand[32], payload[TG_MAX_REC], rec[TG_MAX_REC + 5];
     unsigned char done[CS_TLS13_HASH], msg[TG_MAX_MSG + 4];
@@ -127,13 +142,51 @@ int main(int argc, char **argv) {
         if (tx_eqz(argv[i], "--host") && i + 1 < argc) host = argv[++i];
         else if (tx_eqz(argv[i], "--path") && i + 1 < argc) path = argv[++i];
         else if (tx_eqz(argv[i], "--port") && i + 1 < argc) port = tx_atol(argv[++i]);
+        else if (tx_eqz(argv[i], "--pin") && i + 1 < argc) pinarg = argv[++i];
+        else if (tx_eqz(argv[i], "--selftest-chain") && i + 1 < argc) selftest = argv[++i];
+        else if (tx_eqz(argv[i], "--now") && i + 1 < argc) nowv = tx_atol(argv[++i]);
         else if (tx_eqz(argv[i], "--verbose")) verbose = 1;
         else {
-            sy_eprintf("usage: tls13-get --host HOST [--path /] [--port 443] [--verbose]\n");
+            sy_eprintf("usage: tls13-get --host HOST --pin SHA256 [--path /] [--port 443] [--verbose]\n");
             return 2;
         }
     }
     if (!host || port <= 0 || port > 65535) { sy_eprintf("tls13-get: --host is required\n"); return 2; }
+    if (pinarg) {
+        long pl = 0;
+        while (pinarg[pl]) pl++;
+        if (pl != 64) { sy_eprintf("tls13-get: --pin must be 64 hex chars (sha256 of the leaf certificate)\n"); return 2; }
+        for (i = 0; i < 64; i++) {
+            char c = pinarg[i];
+            if (c >= 'A' && c <= 'F') c = (char)(c - 'A' + 'a');
+            if (!((c >= '0' && c <= '9') || (c >= 'a' && c <= 'f'))) { sy_eprintf("tls13-get: --pin must be hex\n"); return 2; }
+            pinbuf[i] = c;
+        }
+        pinbuf[64] = 0;
+        have_pin = 1;
+    }
+    /* Offline self-test: read a prebuilt framed TLS Certificate handshake message and run check_chain on it.
+       Never part of the online path; used by tools/check-tls13-get.cx with static DER fixtures. */
+    if (selftest) {
+        size_t sn = 0;
+        char *sb = (char *)cx_read(selftest, &sn);
+        int cr;
+        if (!sb || sn < 8) { if (sb) mm_free(sb); sy_eprintf("tls13-get: cannot read --selftest-chain %s\n", selftest); return 2; }
+        cr = check_chain((const unsigned char *)sb, (long)sn, host, nowv >= 0 ? nowv : sy_wall_s(), have_pin ? pinbuf : 0);
+        mm_free(sb);
+        {
+            const char *tag;
+            if (cr >= 0) tag = "ok";
+            else if (cr == TG_NOTRUST) tag = "notrust";
+            else if (cr == TG_PINMISMATCH) tag = "pinmismatch";
+            else if (cr == -EHOSTUNREACH) tag = "hostname";
+            else if (cr == -ETIMEDOUT) tag = "expired";
+            else if (cr == -EPROTO) tag = "parse";
+            else tag = "error";
+            printf("SELFTEST_CHAIN\t%s\n", tag);
+        }
+        return cr >= 0 ? 0 : 1;
+    }
 
     rnd = random_bytes(priv, 32);
     if (!rnd) rnd = random_bytes(rand, 32);
@@ -212,7 +265,9 @@ int main(int argc, char **argv) {
             long framed = cs_tls13_message(msg + off, outlen - off);
             if (framed <= 0) { sy_eprintf("tls13-get: truncated inner handshake\n"); return 1; }
             if (msg[off] == CS_TLS13_HS_CERTIFICATE) {
-                int count = check_chain(msg + off, framed, host, sy_wall_s());
+                int count = check_chain(msg + off, framed, host, sy_wall_s(), have_pin ? pinbuf : 0);
+                if (count == TG_NOTRUST) { sy_eprintf("tls13-get: no trust anchor configured (pass --pin SHA256 of the leaf certificate)\n"); return 1; }
+                if (count == TG_PINMISMATCH) { sy_eprintf("tls13-get: leaf certificate does not match --pin\n"); return 1; }
                 if (count < 0) { sy_eprintf("tls13-get: certificate refused (%d)\n", count); return 1; }
                 note("certificates parsed and linked: ", count);
             }

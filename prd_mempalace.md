@@ -7,68 +7,16 @@
 - 改图只改节点文字或连线,一个节点一句现状加一个入口;过程不入图。
 - 只记三类:别人必须遵守的决定、不可逆的对外动作、阻塞发布的未验证项。
 - 子代理不提交本文件;主调度只在里程碑(整链结束、公开、装机完成)改一次。
-- 版本序在 build/version-seq.tsv,各版内容与验收见对应 plans/v0.0.NN.md(prd.md 9.4 版本表为 0.0.65 至 0.0.80 历史记录),未验证项真源在 build/state-unverified.tsv(tools/state-gen.cx 与下方"仍未验证"逐条对拍)。
+- 版本序在 build/version-seq.tsv,各版内容与验收见对应 plans/v0.0.NN.md(0.0.65 至 0.0.80 的旧版本表已迁入 prd_hist.md「prd.md 9.4 版本表」),未验证项真源在 build/state-unverified.tsv(tools/state-gen.cx 与下方"仍未验证"逐条对拍)。
 - 任务表行 `| 部分落地 | ID、ID |` 与 `| 已落地 | ID、ID |` 供 tools/observe-agents.cx 读取。
 
 ## 地图
 
-当前(2026-11-23 11:50):0.0.94 已公开(11:07,v0.0.94 Latest,APE e1408291,CI 45103237968,Y2 98f9f15532,本机 Root 已升 0.0.94);所有者裁定从 0.0.97 重新出发:0.0.95、0.0.96 两号跳过,下一发布 0.0.97 = main 上已有的 e2 重扫修复(原 0.0.95,ca2f342aab)加执行核每步成本(分支 v0.0.97,须先合入 main 再重跑 check-core-run-diff);进程生命周期(分支 v0.0.96)不进 0.0.97,做完按下一空号发;0.0.98 到 0.0.102 分支保留、暂停加活。发布方式改为'先证明再冻结':合入后后台出候选整链与预跑,冻结只登记已证明 APE(冻结行与 freeze_at 不进 APE,只有 release/candidate.tsv 版本串进,已核),冻结日只核对 SID 与 APE sha 并提升。入口:build/version-seq.tsv、research/2026-11-23/promote-not-rebuild.md、research/release-gotchas.md。
+本图只留指针,过期流程图已归档 archive/prd_mempalace-2026-11-23.md(2026-11-23 移出)。
 
-```mermaid
-flowchart LR
-  subgraph 版本流水线
-    V66["0.0.66 已公开,备份 ~/.cache/unisacc/ape-0.0.66"]
-    V67["0.0.67 已公开 Latest 已装(APE a99ea71d)<br/>release/、archive/plans/release-notes-0.0.67.md"]
-    V68["0.0.68 分支 v0.0.68 开发中<br/>驱动与运行缓存二期、500 ms 门<br/>prd.md 版本表"]
-    V69["0.0.69 prune 原样判定前置(性能 R1)"]
-    V70["0.0.70 cxmod 内存安全乙期"]
-    V71["0.0.71 正规构造499/499,APE ca84同字节复现<br/>/tmp/unisacc-session-v71-rc2"]
-    V72["0.0.72 已公开 Latest(冻结 F 5cdbd305b1)<br/>archive/pre080/release/notes-0.0.72.md"]
-    V73["0.0.73 已公开 Latest(冻结 F 3865c7c9e0)<br/>release/evidence/0.0.73/"]
-    V74["0.0.74 已公开 Latest(冻结 F 0dae4d3024)<br/>release/evidence/0.0.74/"]
-    V75["0.0.75 已公开 Latest(冻结 F fe6dfb32cf)<br/>release/evidence/0.0.75/"]
-    V76["0.0.76 已公开 Latest(冻结 F debb8f43f9)<br/>release/evidence/0.0.76/"]
-    V77["0.0.77 cxmod 内存安全乙期一段,分支 v0.0.77<br/>archive/plans/v0.0.77.md"]
-    ECO["0.0.78 至 0.0.81 已公开(0.0.81 冻结 F 8b46bf21ee,对象产出二期,NOT_QUALIFIED)<br/>release/notes-0.0.81.md、release/evidence/0.0.81/"]
-    PERF["0.0.82 前端诊断二期与 ref 判据替换、0.0.83 Q-P 首次尝试、0.0.84 执行器与模型包,0.0.100 起汇编级精修(入口准则在 0.0.99 封板前满足)<br/>archive/plans-pre094/roadmap-rev3.md、plans/roadmap-0.0.83-0.0.99.md、archive/plans-pre086/v0.0.82.md、archive/plans-pre086/v0.0.83.md、plans/nn-migration-rev3.md"]
-    V66 --> V67 --> V68 --> V69 --> V70 --> V71 --> V72 --> V73 --> V74 --> V75 --> V76 --> V77 --> ECO --> PERF
-  end
-  subgraph 发布
-    REL["发布 12 步与回滚<br/>release/rollback.txt、archive 起链配方节"]
-    Q["裁决恒 NOT_QUALIFIED unknown=1<br/>s9 daily/release 未跑通<br/>release/decision.txt"]
-  end
-  subgraph 质量门
-    GATE["棘轮 13、derive 11、chain-ready 9 项<br/>tools/ratchets.cx、tools/derive.cx、tools/chain-ready.cx"]
-    TEST["测试入口 tests/run.cx<br/>tests/batches.tsv、tests/coverage.tsv"]
-    UV["仍未验证 19 条<br/>build/state-unverified.tsv"]
-  end
-  subgraph 设计与规划
-    PRD["结构与路线、候选池(加速 A 至 P)<br/>prd.md"]
-    CX["cx 设计与库包审视<br/>prd_cx.md 0.2 节"]
-    SPEC["cx 使用规范与库包一览<br/>prd_cx_spec.md 3.4a"]
-    SPEED["速度只认四工具<br/>build/speed-baseline.tsv"]
-  end
-  subgraph 编排
-    ORCH["主调度 cc;窗口 omp-go、omp-cdx 经 bin/mux envelope;子代理至多 2"]
-    WT["版本工作目录 .claude/worktrees/v0.0.NN"]
-  end
-  V67 --> REL --> Q
-  V68 --> GATE
-  GATE --> V67
-  TEST --> GATE
-  UV --> Q
-  PRD --> V68
-  CX --> V70
-  SPEC --> CX
-  SPEED --> V68
-  ORCH --> WT --> V68
-  T71["P2指定175项实跑全过,全套仍NOT_QUALIFIED<br/>/tmp/unisacc-session-v71-rc2/p2-evidence.md"]
-  S71["封存复核已在 v0.0.71 修复,待整轮复验<br/>tools/bg-candidate.cx"]
-  V71 --> T71 --> Q
-  V71 --> S71 --> Q
-    ITER["迭代速度方法学:五条元原则与收口标准<br/>prd_paradigm.md 第 9 节、prd_iteration.md"]
-    OREQ["所有者需求台账:状态、证据、告知记录,未告知断点只降不升<br/>build/owner-reqs.tsv、tools/check-owner-reqs.cx"]
-```
+- 版本序与当前状态:build/version-seq.tsv(唯一权威;发布证据索引入口 release/evidence/)。
+- 所有者需求与未告知断点:build/owner-reqs.tsv(只降不升)。
+- 起草快照(2026-11-24 解冻口):0.0.105 已公开(v0.0.105 Latest,冻结 F=414a024ea5,X=edff8d214d,Y1=63d91a9744,Y2=7f1d244075,release-post 772daa328e,解冻合入 323b70985c;详见 release/notes-0.0.105.md、release/evidence/0.0.105/、plans/v0.0.105.md);0.0.101 已公开(F=8f0a0af2c4,Y2=27ca1178a8,严格证据豁免到期 0.0.102,见 release/notes-0.0.101.md);后续版本序已按路线图重排(e524638bfa):下一版 0.0.103,随后 0.0.102、0.0.122、0.0.124、0.0.107、0.0.106、0.0.109、0.0.108、0.0.112、0.0.123、0.0.125,延后 0.0.104、0.0.110、0.0.111、0.0.113、0.0.114;各版主题只看 build/version-seq.tsv 与 plans/v0.0.NN.md。
 
 
 ## 决定(别人必须遵守)
@@ -79,11 +27,18 @@ flowchart LR
 - 登记:向 Rust 学习内存安全(所有者 2026-10-23 提出,曾在 roadmap 与 v0.0.85 计划里被列为不做):已重新编排,路线权威 plans/memory-safety.md(五期、六项采用门指标);甲、乙期为快车道工具期不占版本槽;丙一期条件并入 0.0.95,入口门不过则不并入;丙二期起在 0.0.102 之后新增版号。回滚:恢复 roadmap-0.0.83-0.0.99.md:122 修订注之前口径并在此记一行。
 - 登记:四道并行、每版足量(所有者 2026-11-19)不撤销,按"一个候选只含一类大改"执行:只有功能道一类 A 类改动进候选,速度、资格、用户三道在 main 持续落库且不计 planned_units;足量以封顶内完成率衡量。入口:plans/roadmap-0.0.83-0.0.99.md(含 0.0.100 起汇编级精修入口准则)。回滚:所有者一句话即恢复原口径。
 
+### 材料身份(闭包摘要)
+
+- 一次性失效(2026-11-24,3c04bf835b):tools/affected.cx 的 closure_sha 不再计 .git/ 前缀节点(per-checkout 路径,不是源码依赖;版本工作树里 .git 是文件)。main 检出实测四个闭包摘要全变:release-run、precommit、chain-ready 同为 da37137e022a... -> 606d63e227c2...,affected.cx 的 019185220d2d... -> 74d283b679c7...。结果:此提交之后所有按闭包摘要键的材料身份(tools/affected.cx --prepare-materials 的 release-oneshot、release-run 等)第一次需要冷建一次,旧缓存条目失效不再命中。预跑(agy-flow)首轮冷建属预期,不是回归。入口:tools/check-affected-gitnode.cx。回滚:恢复 3e54e46d70 版 closure_sha(计 .git/ 节点,版本工作树里需 git_path_abs 解析)。
+
 ### 版本与发布
 
 - 版本序唯一入口:build/version-seq.tsv;各版内容、顺延与对调只在该表改,本节不再记逐版重排。跳号:0.0.64、0.0.69、0.0.70(后两号并入 0.0.71 一次发布)。
 - 发布节奏:不设发布频率上限,内容就绪即发;提速靠产线(起链前置门、预跑、提交门只评估提交树),不靠少发版;工具、测试、文档在 main 持续落库,不必触发整链与公开。发布说明如实写已知缺口(未跑 s9 全套就写 NOT_QUALIFIED)。依据:所有者"高速迭代进化"。
 - 起链即内容截止:整链起点之后产品输入一律冻结,链后只收阻塞修复(产品输入变更须重起链);工具、测试、文档可并行但不进候选键。依据:plans/speed-first-rev4.md。
+- 发布期间 main 冻结(2026-11-24 起,直到分支直发补丁拆小重审落库):现行 release-exec gate_main 要求 origin/main 为发布 HEAD 祖先,main 一前移在途候选即发不出(0.0.99 因此记为未公开,内容并入 0.0.100);候选起链后至 release-post 完成,除集成者与发布动作外不得推 origin/main,版本分支不受影响。依据:gatekeeper 两轮 BLOCK 分支直发补丁,fable 回退裁定。回滚:分支直发补丁落库并经一次发布实证后撤销本条。0.0.105 冻结期出现两次不明推 main(14:31:18、15:02:08),推送者未查出;已在共享仓 .git/hooks/pre-push 加推送审计(日志 ~/.cache/unisacc/push-audit.log,原钩子备份 ~/.local/share/unisacc/research/cc/parked/pre-push.orig),过期冻结行已删(79de13e3c3,原因:devsvc 判过期为解冻而 pre-push 只看 PUSH-FREEZE,冻结门全失效);新 pre-push 冻结门原型 D7(过期不当解冻)在审,落库前冻结仍靠本条人工遵守。回滚审计:用备份覆盖 .git/hooks/pre-push。
+- 0.0.105 零重编保 SID(2026-11-24):exec/facts/env-semantics.tsv 恢复为 0bca 版 blob 3a2305921a 以保持 SID 不变,新版表迁到 tests/env-semantics.tsv 作单一读点;exec 下旧副本是待删遗留,须由下一产品版(进候选键的版)删除并同步读点,任何工具不得再读 exec 下旧副本。依据:避免为表迁移触发全量重编。入口:release/notes-0.0.105.md、tests/env-semantics.tsv。回滚:前向提交把 tests/env-semantics.tsv 内容写回 exec/facts 并重起链。
+- 开版本分支前置(2026-11-24):没有临时分支;开 v0.0.NN 分支前该号须已在 build/version-seq.tsv 有行且 plans/v0.0.NN.md 已写;0.0.122 至 0.0.125 已立项(cbc9469b03)。版本分支上游设为同名 origin/v0.0.NN,不得设为 main(今日已纠正一例)。入口:tools/verseq-gen.cx(--reorder 只在公开后用,写后须立即提交)。回滚:删本条。
 - planned_units 只计进候选键的工作项且必须是数字;类标签与手改 A 类文件封顶由起链前置强制。入口:build/version-seq.tsv、tools/chain-ready.cx。
 - 新增拒绝两步走:使原先被接受的程序变为被拒的改动,第 N 版只以告警进入并用候选前端清扫全仓;告警命中连续两版为 0 后,才可在单独一版把默认翻成拒绝,该版不带别的 A 类改动。依据:0.0.86 的 D2 直接默认拒绝导致两次失败链。回滚:删本条。
 - s9 commit 档不挡公开(自 0.0.68):冻结后与整链并行跑,结果补记 release/evidence.tsv,新增 FAIL 走补丁版。入口:prd.md 候选池 Q。
@@ -93,13 +48,14 @@ flowchart LR
 
 ### 不可逆对外动作
 
-- v0.0.88 已公开(2026-11-21,tag v0.0.88,冻结 F=3038dc3e73,发布提交 X=60c5a4dba3,Y1=0d63ceccd9,Y2=4cbf2a5a53,CI 44902485264 QUALIFIED 42/42)。入口:release/evidence/0.0.88/INDEX.tsv。
+- v0.0.105 已公开(2026-11-24,tag v0.0.105 Latest,F=414a024ea5,X=edff8d214d,Y1=63d91a9744,Y2=7f1d244075,release-post 772daa328e)。回滚:按 release/evidence/0.0.105/rollback.txt,release 改回 draft、Latest 回指 v0.0.101 并读回、前向 git revert Y2 Y1 X、Root 回装用 0.0.101 备份(仓根 .unisacc-root-backups/bb715a8bd3.../ 由 install-ape 于 root-upgrade 时写入并登记 index.tsv,镜像 ~/.unisacc-root-backups/0.0.101-public/;回滚命令 sh ./unisacc.com tools/install-ape.cx -- ROOT --rollback 干跑核验后加 --write)。- v0.0.88 已公开(2026-11-21,tag v0.0.88,冻结 F=3038dc3e73,发布提交 X=60c5a4dba3,Y1=0d63ceccd9,Y2=4cbf2a5a53,CI 44902485264 QUALIFIED 42/42)。入口:release/evidence/0.0.88/INDEX.tsv。
 - v0.0.88 回滚:按 release/evidence/0.0.88/rollback.txt,release 改回 draft、前向 git revert Y2 Y1 X、Root 从 ~/.unisacc-root-backups/ 经 tools/install-ape.cx 写回;不删 tag、不 force push。待核:其后 0.0.89、0.0.90 已公开(Latest 现为 v0.0.90),Latest 回指步骤需按现状重写。
 - 已公开不可撤回的路径泄露:v0.0.85 树内 227 个文件含 /home/ 路径,只泄露系统用户名,无凭据,不重写历史。风险低。
 
 ### 证据与门
 
 - 发布证据每候选全套实跑,只复用构造产物,不复用测试结论;"工具契约批次绑定执行编译器身份、跨候选不重跑"未采纳,只做影子核算。依据:1712 行批次里只有 71 行显式接收候选。
+- 证据按字节寻址(2026-11-23 fable 裁定):0.0.99 只做影子核算(全批照常实跑,另记镜像/材料/运行库 sha 命中与结论一致性),不跳过执行,不记 REUSED 替代实跑;连续两版零不等且可省不低于 30% 再议改铁律,改铁律须所有者裁定。前置:agyneon 50 工具镜像相同率实验,低于 60% 或编译占比 80% 以上即结案不做。回滚:删影子表并停用生成步骤。
 - 提交门类与共用发布路径(dvqualify、release-exec、release-prep、register)的变更验收:夹具绿不算,必须在共享检出同款条件下真实提交一次成功;补丁须独立复核并做原版与补丁版真实发车对拍。依据:三次假漂移都靠真实提交抓到。
 - 改产品源的验收必须含引导编译器(bootstrap-0.0.59)多单元编译,不只已装产品 -c。
 - cx-dev(tools/cx-dev、tools/cx-dev-root)的结果只是 LOCAL 证据,不是候选结果;基座(src、cx、include)改动要重装产品。
@@ -117,6 +73,10 @@ flowchart LR
 - 绝对家目录路径(隐私):证据入口与文档一律写 ~/ 或仓内相对路径,不写 /home/<用户名>/、/Users/<用户名>/。入口:棘轮 no-home-path(基线 build/no-home-path-baseline.tsv 只降不升)、tools/no-home-path.cx --staged、改写用 tools/scrub-home-paths.cx --write。回滚:删 ratchets.cx 的 no-home-path 项并还原 check-ratchets 计数。
 - 家目录路径豁免(历史证据不改):release/evidence/、research/、archive/、apps/csih、ujs、tests/stream-e1/e2-domain-matrix.tsv、tests/real-inputs.tsv、ape-receipt.txt、tools/check-preflight.cx、build/preflight-rules.tsv、tools/libneed-material.cx、tests/check-guard-edit.cx;后几项为工具生成或断言字面,后续在生成处规范化。
 - 写仓内文件只用 Edit/Write 或 .cx 工具。入口:CLAUDE.md。
+- tools.cxlib 版本号只在落 main 时按当时 HEAD 现取号,版本分支上的号一律视为临时,合入时重取;layer-api 与 iface-hash 同提交。当前 main 为 0.4.8(件一 0e839333a0 取 0.4.7,0.0.103 分支合入后重取 0.4.8,分支那两次号作废)。依据:分支并行取号撞号。回滚:删本条。
+- premerge-union 的 release/candidate.tsv 归版本分支(2026-11-24):版本槽行主分支带上一已发布版、版本分支带自己那一行,两侧必改同一行,三方合并无法自解;tools/premerge-union.cx 的 merge_one_both 把 release/candidate.tsv 与 plans/v0.0.* 同列固定取分支侧(rule=branch-side-version-slot),tests/merge-rules.tsv 的 conflict 行不被该函数消费,故另记 candidate-version-slot 与代码一致。此前 0.0.103 起链 22-premerge-union 因此项红。变异证明:删该 arm 后 check-premerge-union 26/5(含 FAIL version-slot-takes-branch-side),原状 31/0。落地 9b57647531。回滚:撤该 commit。
+- 整链 derive 高负载缺口(2026-11-24):chain-ready 的 2a-derive 与 22-premerge-union 在高并发下会把 batch-packages-gen 压过 derive 的 30 秒界(TIMEOUT rc=142),单跑 18.6 秒 ok=1;19-chain-preflight 的 sixtarget 节点同理(整链 49.8 秒 rc=1,单跑 44 秒 PASS)。验收用例归 agy-flow 的冲突域限流件:整链中 derive 节点需按冲突域限并发或让 batch-packages-gen 串行。这不是放宽时效,是限并发。入口:tools/derive.cx 第 138 行附近的原生生成器须知。回滚:删本条。
+- git push --no-verify 可绕过全部本地钩子(含推送审计与冻结门);GitHub 分支保护未开,因发布流程直推 main。冻结与审计在服务端不可强制,属已知缺口,改发布流程为分支直发后再开保护。
 
 ### devsvc 与协同方式
 
@@ -127,6 +87,7 @@ flowchart LR
 - prd*.md 与 plans/*.md 在 devsvc doc 子命令与 flow 的 doc.* 算子落地后只经接口改,不直接编辑。待核:接口是否已落地。
 - 派生查询:工具索引与产品全景经 devsvc tool-index、devsvc product-map 现查;两个 build/ 导出不再跟踪,快照仅显式导出,--check 仍现算并逐字节对拍。入口:plans/devsvc.md R1 节。回滚:恢复 derive.tsv 物化行并重新跟踪。
 - 分而治之(所有者 2026-11-20 方向):按模块、环节与泳道分割,每个环节写清输入身份、输出身份、等待时做什么;并发只是结果。入口:plans/devsvc.md"分布式演进(2026-11-20)"。回滚:git revert 该决定所在提交。
+- devsvc 设计原则(2026-11-24 fable R5 路线与 R4 结构评审):(1) 门核真跑结果与字节身份,不核登记表;(2) 工具失败大声报,过期不当解冻、失败不当零、缺行不当 0;(3) 单一提交入口,私有索引,不卷共享暂存;(4) devsvc 默认按 HEAD 构建,核心改动须加 --dev 自测工作区版本。入口:证据在会话临时目录,待归档(R5 路线、R4 结构评审)。回滚:删本条。
 - agentwork 已退役到 archive/agentwork-retire-2026-11/:协同决定只进本文件,不追加过程账本;ledger-add 默认拒绝,仅显式 --ledger 可用。回滚:前向提交恢复原路径。
 
 ### 编排与工作方式
@@ -141,10 +102,18 @@ flowchart LR
 
 ### 仍未验证或未关闭
 
+- freeze-scope 的三个批次行手工登记，以 `tests/run.cx --list` 的 `metadata_valid=1` 和 `run-batch` 实跑为准。依据为 `tools/register.cx:1458` 固定写入无材料列 `-`，而 `tools/cxlib/testplan.cx:107` 的 `tp_args` 要求占位符在材料列声明。普通 register 试跑因 `batch-args` 拒绝并回滚，登记门未过，33 秒结果记 UNMEASURED。将 register 支持材料列的缺口列入 devsvc 迭代，支持后重新走登记校验。证据入口为本机 `~/.local/share/unisacc/research/freeze-scope/supplement/`。回退通过撤销该提交恢复原批与冻结门。
+
 - 会话与记忆被 moltbaby 清理脚本整目录删除(2026-11-23 编排者查明,待所有者裁定清理策略):~/repos/moltbaby/systemd/scripts/system-cleanup.sh 第 147 到 154 行,每小时(system-cleanup.timer)对 ~/.claude/projects/* 超 100M 即整目录 rm -rf,含全部会话转录与 memory/;近 7 天 16 次(日志 journalctl --user -u system-cleanup.service,00:00:12 一行为证)。unisacc 侧不改他车道:已建镜像兜底(硬链接转录加拷贝 memory,见 tools 下镜像工具)并把记分表权威副本进仓;修正补丁 $CLAUDE_JOB_DIR/tmp/system-cleanup.patch 存在两处已知缺陷(会话子目录 mtime 不随深层追加刷新、管道缺 || true 在 pipefail 下会中止后续清理),不可直接应用。入口:所有者裁定后经 moltbaby 车道维护者落。
 
 - 分车道未核项:APE 字节对 ext 改动不变只是推断;14 个链接目标文件是否进隐式运行库前缀;四个 sysx 别名是否有非 use 形式使用者(去别名前必须先查)。入口:plans/reviews/2026-11-20-layer-lanes.md。
 - 缺口 OBJABI-ARM64-X7-STACK-BELOW-SP-SIGNAL(arm64 -funit 单元 x7 栈在 sp 之下,异步信号可覆盖):build/pkg-gaps.tsv 仍记 OPEN。待核:0.0.82 版本行写有 x7 修复,是否可关。
+- release-flow stage-a 未支持 expected-fail.tsv 的 image=OLD->NEW 指纹豁免(2026-11-24 0.0.101 发布暴露):`tools/release-flow.cx:84` 仅解析 `count=` 未解析 `image=`,第 232 行因 `!b->count` 拒绝全部 `image=` 豁免行;底层正式链(`release-run --pack`、`release-exec --warm`、`release-prep`、`release-exec --execute`)原生支持 `image=` 已全过机检并完成 0.0.101 发布。待发布工具线补齐 `release-flow.cx` 的 `image=` 解析与自测。
+- 提交门不跑受影响批次(E4):precommit 只派生与评估提交树,不实跑 affected 选出的批次,改被多处 use 的模块可绿进 main。入口:证据在会话临时目录,待归档(E4 评审)。清零:提交门接 affected --run 有界子集并带负控。
+- affected 曾因 tests/batch-product-inputs 漏行全线 rc2,已修 c1709e5506;需补"表缺行即具名拒绝"负控,防再次静默。
+- run-batch 断言计数盲区(E9):零断言或计数不进结论的批次可记 PASS,候选清单在会话临时目录,待归档(E9 zero-candidates);不据此删批,逐批补断言或标 UNKNOWN。
+- tls13-get 证书检查曾失效(已修 7f277e7344);修复前经该工具取得的外部内容不视为已验真。
+- old-product-assets:0.0.101 将登记为旧产物基线,由 agy-flow 执行;登记前旧产物对比无基线,结论记 UNKNOWN。
 
 ### 仍未验证(缺什么 / 清零动作)
 
@@ -162,6 +131,7 @@ flowchart LR
 - 模块接口摘要与缓存键:单元缓存与预构建对象的键是否覆盖所用模块接口摘要未查(结构体扩字段后旧布局对象被复用属同类风险)。未入 state-unverified.tsv,待补行。
 - ext/sysx/linuxns.cx:lnx_arm64 实跑 UNMEASURED;私有 lns_sys 带 dock 直调,L0 有 sy_syscall6 后须改一行去 dock。入口:build/pkg-gaps.tsv L0-LACKS-SY-SYSCALL6。待核(0.0.88 已含 sy_syscall6,是否已改未查)。
 - 其余不阻塞发布,只见真源:U02 U05 U06 U07 U08 U09 U11 U12 U13 U14 U18 U19。
+- forward 调用上限 8192 在产品内不可达:签名池约 8064(functiontypes-manifest.tsv:3)与 .cx 文件项上限 CXM_ITEMS 8192(cxmod.cx:1383)先耗尽,故 FORWARD_CALL_MAX 相等即拒(S0)仅有表级证据(tests/check-forward-limit-table.cx)。待 fable 裁:降 FW 限到签名池之下,或把签名池升到 8192 以上。未入 state-unverified.tsv,待补行。
 
 ### 里程碑与跨窗口约定
 
@@ -171,10 +141,12 @@ flowchart LR
 
 - 发布撤回(对已公开的每一版通用):转回草稿、Latest 移回上一公开版、前向 revert,不删标签。依据:公开不可逆。入口:release/rollback.txt。
 - Root 回退:用 tools/install-ape.cx 重装上一版公开 APE;公开安装不留候选备份,--rollback 会拒绝(REFUSED no-candidate-backup)。旧件备份在 .unisacc-root-backups/<版本>-public/。
+old-product-assets 0.0.101 登记与回滚(c4a154dfea 2026-11-24):tools/old-product-assets.tsv 已登记 0.0.101(8827155B; sha256 bb715a8bd3ed...eac82) 并预置本地缓存 ~/.cache/unisacc/prep-cache/old-product-cache/<sha256>/unisacc.com。回滚:删除 tools/old-product-assets.tsv 中 0.0.101 登记行即回退至 0.0.83; ~/.cache/unisacc/prep-cache/old-product-cache/<sha256>/ 按内容哈希寻址无副作用。
 - 资格口径:0.0.71 至 0.0.87 各公开版整体裁决均为 NOT_QUALIFIED(全套 s9 未过或未跑,原生 CI 只覆盖冒烟子集);发布说明须如实写已知缺口,不得称全批资格。入口:release/notes-X.md。
 - CI 单格超时处置:先读发码源码行,再用上一公开件与候选在本机各跑三次对照,gh run rerun --failed 只一次,然后 release-exec --from-step 3;第二次失败按确定性缺陷停手;发布说明写明非一次通过。依据:0.0.83 定因。
 - stream-pipe 55 秒单部件界限不放宽,余量靠拆部件取得。入口:build/pkg-gaps.tsv STREAM-PIPE-OSX-X86_64-55S-BOUND-THIN-MARGIN。
 - netregen 字节栅栏:判据文本不改;有意改变 .cx 镜像的版本只能在 G1 expected-fail 登记 image=旧SHA256->新SHA256 精确指纹并带到期,逐字相等才放行,过期拒绝,下版不同须定因不得续期。回滚:撤 G1 指纹分支与登记行。
+- 冻结行带截止,发布若越过截止须在截止前续期或改行;过期冻结行在新 pre-push 门(D7)落库前会被 devsvc 当解冻、被 pre-push 忽略,两端口径不一。依据:0.0.94-FREEZE 过期致冻结门全失效(79de13e3c3)。入口:build/freeze.tsv;D7 报告在会话临时目录,待归档。
 - 发布节奏:日常装机投放加每周一到两次正式公开,公开最多每天一次;仓根 Root 升级与公开脱钩。入口:plans/roadmap-0.0.83-0.0.99.md 末节修订注、archive/plans-pre090/v0.0.87.md S1 S4。
 - 内容截止:planned 封顶,超出另开新版;起链即内容截止;计划外满 3 项停收。范围变更由主调度先写回计划文件(四道表与 planned 键值)再派工,内容截止、冻结、公开后三点对账。依据:0.0.83 计划 0/10 而计划外 12 项。
 - 无生产者挂账:cx-booter-ape 与 tools-default-regression 已连续 11 版 UNKNOWN,须补材料生产者。入口:build/owner-reqs.tsv R56。
@@ -217,7 +189,7 @@ flowchart LR
 
 #### 路线与版本序
 
-- 版本序与各版主题只以 build/version-seq.tsv 为准;改序须同步 plans/vX.md 与路线图修订注。回滚:按提交还原这些文件。入口:plans/roadmap-0.0.83-0.0.99.md。
+- 版本序与各版主题只以 build/version-seq.tsv 为准;改序须同步 plans/vX.md 与路线图修订注,只在公开后用 tools/verseq-gen.cx --reorder,写后立即提交(最近一次 e524638bfa)。回滚:按提交还原这些文件。入口:plans/roadmap-0.0.83-0.0.99.md。
 - 所有者需求(2026-11-20,不得静默砍):汇编支持是 C99 加 POSIX 基本需求,内联 asm、.s/.S 与 gcc .o 混编、汇编标签、原子内建不延到 0.0.100 之后;核心层对 asm 的支持应更完善。入口:build/owner-reqs.tsv R20。
 - 汇编范围:接受 A1 到 A4,达标线为 lnx 两 ISA 对 gcc 对拍通过;SIMD 内建与 -S 输出 GAS 文本不进基本需求;A4 在 A1 到 A3 对拍通过后重过采用门。入口:plans/reviews/2026-11-20-asm-acceleration.md。
 - U4 asm 标签只做 lnx ELF 函数改名,变量改名砍,osx 与 win 具名拒绝;A1 与 K2 不同版(一个候选只含一类大改,产品大改超过 3 单位拆两版)。入口:archive/plans-pre094/v0.0.90.md。
@@ -230,21 +202,19 @@ flowchart LR
 - 冷跑缓存:0.0.94 只做 L5(a) 前导预制;L1 闭包复用本期不开(e4 原字节同率 60%,另有三项挡路点);固定前缀预制曾判 NO-GO,重启须重做 P0。入口:plans/v0.0.94.md、build/owner-reqs.tsv R60。
 - 风险登记(均为推断或未核):引导编译器换基与新关键字相撞;SHA256SUMS 无独立签名;缓存目录同用户篡改威胁模型未成文;Mach-O 与 PE 的 TLS 未设计;前端硬上限具名拒绝未普查;主调度单点与磁盘余量低于 20G 预警;用户来源需求为 0。
 
+#### 预跑封口门时序与工具自检迁出(omp-go 备料,cc 2026-11-23 裁定)
+
+- 封口门两端都等 0.0.98 公开后再落:0.0.98 从 main 发,main 上若先有消费侧则 stage-a 必拒。已实测:把 0.0.97 的 strict-final.tsv 按 segment/strict-sha256 写进 inputs 喂新 stage-a,输出 RELEASE_FLOW REFUSE SEAL_MISSING;0.0.97 与 0.0.94-r3 的 strict-final.tsv 里封口行计数都是 0。时序:公开后同一班先落写端,0.0.99 预跑用新 merge 出带封口行的 strict,0.0.99 公开前再落消费侧。回滚:撤两份补丁即回旧行为,旧 strict 重新可发布。入口:research/lane-jobs2/SEAL-GATE-NOTE.md。
+- 工具自检迁出选 c:只迁 tool-selfcheck 中 tier=commit 的 578 批,去处 commit-gate;另 330 批(264 daily 加 66 release)留在预跑;加 5 条候选执行冒烟。a 方案(把 264 daily 批改 commit)单独一件,须附提交门耗时实测再定。依据:0.0.97 预跑 797 批实测耗时归属,tool-selfcheck 占 20.4%,其中有去处的 commit 档为 14.2%,daily 档 6.2% 无去处。入口:research/lane-jobs2/SELFCHECK-MIGRATION.md。
+
 #### 清理留痕
 
 - 归档找回:archive/plans-2026-11g/README.tsv 记原路径与原因,git mv 回去或 git log --follow。清理候选(仓根 .o、tools 疑似无用清单、未逐份审的 plans)只列不动。待核(旧版本工作树 v0.0.67 至 v0.0.70 是否仍在)。
 
+
 #### pp-equiv 对拍证据包(2026-11-23)
 
-- 身份:`oracle-original.pkg` sha256 `50bf450063e8bd1acc186957c11de23b6a0174dd776e5afce558fc1d553667f8`(2904461 字节),`oracle-patched.pkg` sha256 `4ac1180a9fb9cd204222382947e24e510b4ef4cf5b24c289b08699b5295a4b82`(2904810 字节);0.0.95 重扫修复补丁 sha256 `25ab7a4f9e9ff82841952ae291752a2246c97e38351a12b03265b7ef2a4f19b0` 前后各一包,由 cdx 在私有副本里用 `CXDEV_RELOAD`(nets=3 built=3)实造。
-- 位置:原件在 `/tmp/unisacc-v095-oracle.cNgFT6T6/`(易失),已复制到 `~/.local/share/unisacc/research/v095-rescan-review/` 同名(仓外,不入库)。构造日志 `reload.log`、`rebuild.log`、`inc-sub-reload.log` 在同目录。
-- 用法:`tools/check-pp-equiv.cx` 靠环境变量 `UNISACC_PPEQ_PKG_ORIGINAL` 与 `UNISACC_PPEQ_PKG_PATCHED` 指向两包才跑 0.0.95 对拍;未设置或文件不在时该例打印 UNMEASURED 并具名,不算 PASS。重建办法:包不由 pp-equiv 重建,须 cdx 在 0.0.93 基线的私有副本上重做 `CXDEV_RELOAD`(改前包为未打补丁树,改后包为打补丁树),重建后 sha256 须在本条更新;包身份对不上不得当同一次证据。
-- 全量对拍(5128 项:headers 2415 与 c-tests 136 各 e2/E,加 corners 13 各 e2/E)尚未用这两包跑完,当前只对 corners 13 例 E 模式对拍得 diff=0。
-- 全量对拍结果(2026-11-23,0.0.95 e2 重扫修复,四片串行 --jobs 6 --budget-ms 45000 --side-secs 4):清单 sha256 `1ea9694a22111a7f63c36c44792d9de7aea4eea8706ace9a50d7c4d51224f922`,末行 `PP_EQUIV total=5128 same=5078 refuse_pp=50 diff=0 unmeasured=0 waived=0 pending=0 COMPLETE=yes`;分层 headers e2 与 E 各 SAME 2415,c-tests 各 SAME 116 REFUSE_PP 20,corners 各 SAME 8 REFUSE_PP 5,与 cdx 对得上。证据 ledger 在 `~/.local/share/unisacc/research/v095-rescan-review/pp-equiv-full/`(不入仓);复跑 `sh ./unisacc.com tools/pp-equiv.cx -- run --ape ./unisacc.com --models-a oracle-original.pkg --models-b oracle-patched.pkg --manifest pp-equiv-full/full.manifest --ledger 新目录 --jobs 6 --budget-ms 45000` 重复到 COMPLETE=yes;清单重建 `manifest --out FILE` 须同 sha,依赖 include/、tests/*.c、tests/pp-equiv-corners 未变。`-o` 模式不在此清单,由 csr 复核(1154 项,账本 o-replay.tsv)。
-- 0.0.95 e2 重扫修复证据汇总(2026-11-23,omp-go、csr、omp-sonnet):(a) `-o` 双包复核 1154 项由 csr 出,`same=1146 refuse_same=8 diff=0 unmeasured=0`,未取步数;(b) pp-equiv 全量 5128 项见上条,未取步数;(c) 单元层 113 项 `UEC_STATUS total=113 same=106 refuse_same=7 diff=0 unmeasured=0 pending=0 COMPLETE=yes`,分层 tools 40、cx 25、ext 20、examples 8、tests 7、corners 13;(d) 阳性对照(0.0.95 修的是 e2 重扫步数,字节相同是合同,所以分辨力要看步数):`run-all --steps 1` 末行 `STEPS_SUM rows=113 step_moved=112 step_grew=4`,步数合计 455988310 -> 265763887(降 41.7%);永久夹具 `tests/unit-e2-rescan/{plain,inc1,inc2}.c` 用关系断言守住(plain 至多贵 2 步、inc1 与 inc2 严格省且 inc2 省得更多,实测 34 与 112)。限制:5128 与 1154 两条未取步数(工具只比字节);4 个极短 include 单元步数升 2 到 3 步,属 INC_SUB 固定开销;墙钟 39 单元各 7 轮中位实测只降 19.0%(中位比值 0.974,p75 1.007,13/39 更慢),原因是 e2 墙钟含模型装载、verify、layout,所以发布说明不得把步数降幅 41.7% 当墙钟收益。证据位置:`~/.local/share/unisacc/research/v095-rescan-review/`(uec-113、pp-equiv-full 与两个 oracle 包),记录 `research/2026-11-23/e2-rescan-positive-control.md` 与 `v095-o-replay-result.md`。
-- 0.0.95 步数证据补充(2026-11-23,omp-sonnet):pp-equiv 的 e2 对拍加 `--steps` 后,原包 oracle-original 对修复包 oracle-patched 均 diff=0 且步数全部变化,三个口径各自标注、不可混比:(a) headers 层(corners 13 加 headers 2415 对,偏深 include 的合成源)步数 3817530546 降到 1505176669,降 60.6%,2427/2427 项变化,3 项变多;(b) c-tests 层(tests/*.c 的 e2 模式 139 项)272973547 降到 93710463,降 65.7%,139/139 变化,59 项变多(小文件固定开销),20 个 refuse_pp 两包同样拒绝;(c) 113 个真实编译单元(unit-e2-compare)降 41.7%,真实单元最能代表产品。E 模式无步数概念,不适用。清单口径:全量 5128 项 = 每模式 2564(headers 2415、c-tests 136、corners 13)乘 e2 与 E 两模式;本次步数只跑 e2 模式,所以 c-tests 行数以各自 manifest 为准。
-- 事件与残余风险(2026-11-23):(1) 整点 `system-cleanup`(moltbaby 车道)对 /tmp 下空闲超 120 分钟的目录先 `chmod -R u+rwx` 再 `rm -rf`,经硬链接树改了仓内文件的权限位(05:00:07 的 276 个 cx/ 文件、06:00:03 的 55 个 ext/ 文件,600/644/664 变 700/744/764),肇事者是 precommit.cx 与 check-old-product-material.cx 的硬链接隔离树(泄漏 234 个目录);已止血并改拷贝,脚本侧建议(chmod 只对目录)须经 moltbaby 维护者处理;同一清理 00:00:12 与 06:00:04 两次清空 `~/.claude/projects`,靠 tools/session-mirror.cx 恢复(恢复副本在 ~/.local/share/unisacc/session-restore-gen1-2026-11-23/)。(2) fsx_scratch 回收残余风险(gatekeeper d3764544ef):属主被 SIGKILL 后后代只在目录树第 4 层以下写入超过 30 分钟会被同前缀进程回收;跨 PID 命名空间共用 TMPDIR 时对方活进程表现为 ESRCH 可能被误删(头注释已写明,代码不防);回收失败被吞不报告。(3) tests/tools-compile-sources.tsv、tests/batches.tsv 与 tools-compile-185 分片曾在 05:59 到 06:29 间被不明来源删行(19 行加分片),已按 HEAD 写回;register.cx 回滚经复现无缺陷;来源待查,护栏 REGISTRY_SHRANK 在做。
-- 库模式 v3 签名通路缺口(2026-11-23,omp-go 实测):`LF.ENTRY_LIMIT` 128 是 v3 wire 格式规格上限(`exec/c/librarysignature-v3.md`: entry_count <=128),不是可调阈值,三条入口(-c、-l -c、stream --res library/signatureversion)都走不到该判定;原因:(1) v3 资源只能由宿主库 `exec/c/libunisacc.c` 注入,该文件不在树内(`build/owner-reqs.tsv:5` R04 libunisacc 记 LOST/UNVERIFIED);(2) `src/drivestream.cx:127` 对每个 `--res` 键无条件加 `cli/` 前缀,与模型键 `library/*`(`exec/facts/k2-libraryresources.tsv:4`)对不上,stream 注不进库资源。cap-probe 对该 cap 应记 UNREACHABLE。后续:`--res` 前缀缺陷须单独评估(会改所有 `--res` 键名),R04 补回树内是 v3 通路唯一前置。
+全部证据(两 oracle 包身份、全量 5128 项与步数补充)已移到 research/2026-11-23/pp-equiv-evidence.md。入口保留:tools/check-pp-equiv.cx 靠环境变量 UNISACC_PPEQ_PKG_ORIGINAL 与 UNISACC_PPEQ_PKG_PATCHED 指向两包才跑对拍,未设置或文件不在时打印 UNMEASURED 不算 PASS。
 
 ## 编排稳定约定与近两版发布事实(原"编排交接 2026-11-21 21:10")
 
@@ -267,34 +237,18 @@ flowchart LR
 - 重复代码:重复是测量,合并是决定;契约不同或合并净亏的重复组登记白名单,不为降数字合并。 依据:ccogw 盘点 入口:`tools/dup-census.cx`
 
 ### (3) 已公开版本(不可逆动作)
-- 0.0.89 已公开:候选 `f77e64a25b`,冻结 `74f541c6cc`,Y2 `57de2b4ddd`,六格 CI `44935566045` QUALIFIED;严格预跑 440 PASS/0 FAIL/2 UNKNOWN(无生产者)。 入口:`release/notes-0.0.89.md`、`release/evidence/0.0.89/`
-- 0.0.90 已公开并置 Latest:候选 `9109473641`,冻结 `5d1e492d7e`,阶段 A `6d7f11d22c`,Y1 `c438b6d628`,Y2 `13a48bb870`,六格 CI `44973535033`;APE sha256 前缀 `46fd3db95f97`(8991222 字节)。 入口:`release/evidence/0.0.90/`
-- 0.0.90 证据:严格预跑 459 批 457 PASS/0 FAIL/2 UNKNOWN(`cx-booter-ape`、`tools-default-regression` 无生产者)。 入口:`release/evidence/v0.0.90-strict-2026-11-22.tsv`、`release/evidence/0.0.90/backup-evidence.tsv`
+
+0.0.89、0.0.90 的公开事实(候选/冻结/Y2/CI/预跑数)与后续版本要点已归档 archive/prd_mempalace-versions-2026-11-23.md。回滚办法与 Root 备份留原位(下两条,不可清扫)。
 - 0.0.90 回滚:(1) `gh release edit v0.0.90 --draft=true` 并把 `v0.0.89` 置 Latest 后读回;(2) `main` 从新到旧 `git revert` 后推送;(3) `tools/install-ape.cx` 用 `~/.unisacc-root-backups/0.0.89-public/unisacc.com` 回装并核版本。 入口:`release/evidence/0.0.90/rollback.txt`
 - 分支与 Root 备份:分支 `v0.0.90` 保留到 0.0.91 公开;旧 Root 备份在 `~/.unisacc-root-backups/{0.0.87,0.0.88,0.0.89}-public/`,回滚依赖它们,不得清扫。 依据:版本分支规则 入口:`git branch`
-- U4 汇编标签裁定:仅支持 `__asm__`/`__asm`;裸 `asm` 具名拒绝但保留作普通标识符;`osx`/`win` 具名拒绝;4 处比 GCC 11.4 更严属有意差异,须留在发布说明。 依据:0.0.90 开版评审 入口:`plans/a1a-design/u4-decisions.md`
 
 ### (4) 0.0.90 已知缺口与未验证项
-- 资格:0.0.90 整体裁决 NOT_QUALIFIED,全套 `s9` 的 `daily`/`release` 未跑通;`daily` 仅有 15 片编译冒烟,完整运行态未验。 入口:`release/notes-0.0.90.md`
-- R75:`tools/tsv-lint.cx` 未解析引用实测 11351(0.0.89 的 11277 到 0.0.90 涨 74,来自 U4 新增的动态绑定表行,每个新行必计一条),上限由所有者 2026-11-22 从 11050 放宽到 13260(11050 加 20%,为不阻塞版本);0.0.92 只做门执行(上限必须有门拦)加 asm volatile 行列号,削表(F 绑定)延后;增长必须拦:基线固化为实测值只降不升。 入口:`build/owner-reqs.tsv` R75
-- R78:变异门真实杀伤率已由 0.0.90 四补丁补 `--expect-fail` 与 `release-chain.cx` `sy_realpath>0` 补强至 `[57/82,59/82]=[69.51%,71.95%]` 高于 0.60 线(`release-chain` 20/26=0.77 PASS)。 入口:`tools/mutation-gate.cx`、`research/2026-11-22/r78-v090-named/summary.md`
-- 诊断行列号:U4 差异项与 `asm volatile` 拒绝缺 `file:line:col`,排 0.0.92。 入口:`build/owner-reqs.tsv` R55
-- 字面量长度:41 条真缺陷的全套补丁未落(顺序:检查器与棘轮 -> 越界读 -> 工具 -> 检查 -> 注解;`gate` 须在 `annotations` 之后)。 入口:`archive/plans-pre094/v0.0.91.md`、`research/2026-11-22/litlen-089/handoff.md`、`research/2026-11-22/litlen/real-bugs-41.tsv`
-- R69 普查余项:24 个不可达 `*-gen` 待核,约 22 个二级死传递进候选清理;28 批未接线检查已登记。 入口:`build/owner-reqs.tsv` R69、`research/2026-11-22/r69-report/report.md`
-- 共享写治理:`tools/check-shared-writes.cx`、预提交门与 `build/shared-writes-baseline.tsv`(27 行只减不增)均未落库(ls 核不存在);R71 的 M3/M4/M6 未收口。 入口:`build/owner-reqs.tsv` R71、R73
-- `textx.isotime`:缺 JS 引擎对拍夹具(`tests/fixtures/textx-isotime/` 不存在),解析取舍(无时区返 `-EINVAL`、越界严格拒绝)仅按规范编写;未经 `affected --run` 整批。 入口:`tools/check-textx-isotime.cx`
-- 死 C 源码:`tools/cx-pipeline-stage.c:5`、`tools/cx0-e2.c:9,44` 引用已迁走的 `../exec/c/`;须先查调用与批次再决定退役,不自动删。 入口:`tools/refactor.cx sites`
+
+R75/R78/R69/R69.6/R79/R81 等仍跟踪项已归档全文于 archive/prd_mempalace-versions-2026-11-23.md;跟踪真源为 build/owner-reqs.tsv(只降不升),本文件不再逐条维护。
 
 ### (5) 后续版本与评审要点
-- 0.0.91 范围:只收"身份与构建边界"(L.1 + Z5 + B3),A 类封顶 20;L.1 + Z5 + B3 不超过 17 文件时才并入 litlen 注解补丁(3 个 A 类文件)。 依据:开版拍板 入口:`archive/plans-pre094/v0.0.91.md`
-- 0.0.92 至 0.0.94 主题:两处口径不一致,见 report-C;以 `build/version-seq.tsv` 为准,待核。 入口:`build/version-seq.tsv`
-- R69.6 零断言守卫:第一阶段 `run-batch`/`allsession` 影子计数 `assertions=N` 已落 `22b2c76688`;第二阶段路线定为 0.0.92 十批试点(`cdx` 主刀)、0.0.93 迁移与首轮影子、0.0.94 继续影子、最早 0.0.96 满足总量门 268 加分层数据门槛后对新批强制;豁免须写可核查条件,未报存量只降不升。 依据:守门人评审 入口:`tests/run-batch.cx`、`research/2026-11-22/zero-assert/phase2-design-v2.md`
-- R69.6 计数自保:`assertions=N` 须在共享断言库自增,不许手写常量;变异须覆盖"删总结字段必红""删自增必红";流式计数须对任意切分点不变;区分"只报失败"与"真零断言",存量分阶段迁。 入口:`build/owner-reqs.tsv` R69、`research/2026-11-22/r69-6-shadow/report.md`
-- R78 存活变异分类:分支不可达(`UNREACHABLE_BRANCH`)、夹具无法区分(`EQUIV_OR_DEGENERATE_FIXTURE`)、弱检查(`WEAK_CHECK`)三类分报。 依据:ccogw 经验 入口:`tools/mutation-gate.cx`
-- R79 释放后使用粗检:工具已落(`tools/uaf-census.cx`/`check-uaf-census.cx`,报告模式不进 `chain-ready`);历史回测在范围 5/5、全样本 5/9;漏报面(字段/跨函数/非.cx/OOB/litlen)已写明;基线只降不升。 入口:`research/2026-11-22/uaf-census-retro/report.md`、`build/owner-reqs.tsv` R79、`plans/memory-safety.md`
-- R81 断言质量:阈值断言须能说出哪种可达状态会让它变红;关键门(`release-chain`、`chain-ready`、`precommit`)自测须是行为探针,不是文本存在性。 依据:R81 盘点(27 处疑似永不失败) 入口:`build/owner-reqs.tsv` R81、`research/2026-11-22/r81-census/report.md`
-- 待定项治理:台账与本文件中每个待定条目须有结论,或下一动作加到期版本;缺者列清单,存量只降不升。待核扫描工具是否已落。 入口:`build/owner-reqs.tsv`
-- 体验候选(不排期):块注释被 `*/` 提前关闭且同行紧跟不匹配引号时附一行提示。 入口:无
+
+0.0.91 及以后范围与评审要点同上归档;当前版本范围以 build/version-seq.tsv 与对应 plans/v0.0.NN.md 为准。
 
 ### (6) 待所有者裁定或告知
 - R20 汇编拆版:U4 拆为 0.0.90、其后版本顺延一号,尚未告知所有者;`build/owner-reqs.tsv` 的 `told_owner` 列 72 行全空,统一告知后才可填。待核。 入口:`build/owner-reqs.tsv`

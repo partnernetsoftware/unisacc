@@ -14,7 +14,9 @@
  *     process is gone; a bad revision and a relative --chain are usage errors;
  *     start first runs tools/chain-ready.cx --only 12 on ROOT: a Root without unisacc.com.build.json
  *     (0.0.86 start 1) and a Root whose unisacc.com is a symbolic link (0.0.86 start 2) are refused
- *     before any candidate directory exists, each naming its failed item and the cp -L fix;
+ *     before any candidate directory exists, each naming its failed item and the cp -L fix; the same
+ *     preflight set also carries 16-disk-free, so an unreadable disk refuses the start before a chain
+ *     directory is allocated (that item now FAILs instead of reporting UNMEASURED);
  * (2) status: DONE with the APE sha, UNOWNED, ORPHANED, FAILED for a missing phase and for a
  *     blocker after the terminal row, the phase counts, and the single-revision form;
  * (3) promote --check: a complete candidate is accepted and its APE path and sha, source SID and
@@ -55,6 +57,7 @@
 #define REV_E "eeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeee"
 
 static int failed;
+
 static char root[4096], work[P], bin[P], self[P], fxroot[P];
 static char *last;
 static size_t lastn;
@@ -227,6 +230,40 @@ static int start(const char *b, const char *rev, const char *mode, const char *d
     v[k++] = "--"; v[k++] = "--fixture-case"; v[k++] = (char *)mode; v[k] = 0;
     return cx_runv_timeout(v, 20, &last, &lastn);
 }
+/* bin start with the disk figure injected: only the 16-disk-free preflight's answer changes, so a test can
+   observe that start actually calls it without depending on this machine's free space. */
+static int start_disk(const char *b, const char *rev, const char *gb) {
+    char *v[26];
+    int k = 0;
+    mm_free(last); last = 0; lastn = 0;
+    v[k++] = bin; v[k++] = "start"; v[k++] = "--rev"; v[k++] = (char *)rev;
+    v[k++] = "--deadline-s"; v[k++] = "30"; v[k++] = "--slack-s"; v[k++] = "5";
+    v[k++] = "--chain"; v[k++] = self;
+    v[k++] = "--root"; v[k++] = fxroot; v[k++] = "--base"; v[k++] = (char *)b;
+    v[k++] = "--disk-free-gb"; v[k++] = (char *)gb;
+    v[k++] = "--"; v[k++] = "--fixture-case"; v[k++] = "ok"; v[k] = 0;
+    return cx_runv_timeout(v, 20, &last, &lastn);
+}
+/* The base this start will really write to is what the disk gate must measure, end to end.  A 4 MiB tmpfs
+   mounted in a user namespace is a real chain disk that is really too small while the checkout stays roomy,
+   and no figure is injected, so only chain-ready's own measurement can refuse.  The start's base and out live
+   under the session root (TMPDIR/unisacc-session-*) because bg-candidate insists on that layout.  Deleting
+   `w[wi++] = "--chain-base"; w[wi++] = base;` in start_preflight makes chain-ready measure cr_base (the home
+   disk) instead, the start is accepted, and this case turns red. */
+static int start_small_base(const char *rev) {
+    char *v[16], sc[3 * P];
+    int k = 0;
+    mm_free(last); last = 0; lastn = 0;
+    if (cx_fmt(sc, sizeof sc,
+        "set -e; D=$(mktemp -d); B=\"$D/unisacc-session-chain-bgc1\"; mkdir -p \"$B\"; "
+        "mount -t tmpfs -o size=4m tmpfs \"$B\" || exit 9; "
+        "'%s' start --rev '%s' --deadline-s 30 --slack-s 5 --chain '%s' --root '%s' --base \"$B\" -- --fixture-case ok; rc=$?; "
+        "umount \"$B\"; rm -rf \"$D\"; exit $rc",
+        bin, rev, self, fxroot)) return 1;
+    v[k++] = "./tools/bound"; v[k++] = "45"; v[k++] = "unshare"; v[k++] = "-Ur"; v[k++] = "-m"; v[k++] = "sh"; v[k++] = "-c";
+    v[k++] = sc; v[k] = 0;
+    return cx_runv_timeout(v, 50, &last, &lastn);
+}
 /* Where in the N bytes of tool output or fixture rows a TAB field (or a line) begins with PIECE;
    PIECE may run over several fields. -1 when no field begins with it. */
 static long field_at(const char *hay, long n, const char *piece) {
@@ -312,13 +349,31 @@ static int preflight_git_fixture(void) {
         !previous || cx_fmt(envpath,sizeof envpath,"%s:%s",dir,previous) ||
         sy_setenv("PATH",envpath,1);
 }
+/* Cold compile is preparation, not a result.  The first invocation of tools/chain-ready.cx has to compile it
+   (about 13 s idle, more under parallel load), and inside a timed fixture that cost lands in the fixture's own
+   bound: measured under mutation-gate --par 2 it pushed start-refuses-unverifiable-parse2-inputs past its 20 s
+   window even though the assertion was right.  The bound is not raised -- instead one unasserted warm-up runs
+   the same command shape the preflight uses.  The run-cache key truncates at `--`, so this one compile serves
+   every --only the preflight asks for. */
+static void prewarm(void) {
+    char *w[16]; int n = 0;
+    mm_free(last); last = 0; lastn = 0;
+    w[n++] = "sh"; w[n++] = "./unisacc.com"; w[n++] = "tools/chain-ready.cx"; w[n++] = "--";
+    w[n++] = "--only"; w[n++] = "18-parse2-gen";
+    w[n++] = "--root"; w[n++] = fxroot; w[n++] = "--repo"; w[n++] = fxroot;
+    w[n] = 0;
+    (void)cx_runv_timeout(w, 40, &last, &lastn);
+    sy_printf("PREPARED\tchain-ready-native\tbound_s=40\tno-test-result\t(first compile; the timed fixtures below run warm)\n");
+    mm_free(last); last = 0; lastn = 0;
+}
 
 int main(int argc, char **argv) {
-    char src[P], why[256], b1[P], bh[P], b2[P], b3[P], b4[P], trash[P], none[P], dir[P], dh[P], t[2 * P], ape[65];
+    char src[P], why[256], b1[P], bh[P], b2[P], b3[P], b4[P], bd[P], bd2[P], bd3[P], bd4[P], trash[P], none[P], dir[P], dh[P], t[2 * P], ape[65];
     char s_pid[32], s_pgid[32], f_pid[32], before[6][65], after[65], aside[P];
     int rc, rc2, pid = -1, i, hung = -1;
 
     if (argc > 1 && tx_eqz(argv[1], "--rev")) return fake(argc, argv);
+
     if (sy_realpath(argc >= 2 && argv[1][0] ? argv[1] : ".", root, sizeof root) < 0) return 2;
     if (argc >= 3 && argv[2][0]) {
         (void)sy_mkdir(argv[2], 0755);
@@ -329,11 +384,13 @@ int main(int argc, char **argv) {
     if (sy_realpath(work, work, sizeof work) < 0) return 2;
     if (join(bin, work, "bg-candidate.native") || join(self, work, "fake-chain.native") || join(fxroot, work, "root") || join(b1, work, "b1") ||
         join(bh, work, "bh") || join(b2, work, "b2") || join(b3, work, "b3") || join(b4, work, "b4") || join(trash, work, "trash") ||
-        join(none, work, "no-such-trash")) return 2;
+        join(none, work, "no-such-trash") || join(bd, work, "bd") || join(bd2, work, "bd2") || join(bd3, work, "bd3") ||
+        join(bd4, work, "bd4")) return 2;
     if (join(src, root, "tools/bg-candidate.cx") || tq_native(root, src, bin, why, sizeof why)) {
         sy_printf("FAIL\tbgc.build-native\t%s\n", why);
         return 1;
     }
+    /* The fake chain plays chain-run for the fixtures that start one. */
     if (join(src, root, "tools/check-bg-candidate.cx") || tq_native(root, src, self, why, sizeof why)) {
         sy_printf("FAIL\tbgc.build-fake-chain\t%s\n", why);
         return 1;
@@ -346,10 +403,65 @@ int main(int argc, char **argv) {
         sy_printf("FAIL\tbgc.fixture-prepare\n");
         return 1;
     }
+    prewarm();
     rc = start(b1, REV_D, "ok", "30", "5");
     ck(rc == 1 && lines("BG_CANDIDATE\tREFUSE-ITEM\t18-parse2-gen\tFAIL", 0, 0, 0) == 1 &&
        !present(b1, REV_D), "start-refuses-unverifiable-parse2-inputs");
 
+    /* The disk-preflight fixtures are end-to-end starts: below the threshold start must be refused with the
+       item named and no chain directory created, above it the chain must actually finish.  Nothing in
+       check-chain-ready can see this -- deleting the start_preflight("16-disk-free", ...) call leaves
+       chain-ready's own fixtures green.  They run in the one batch, like every other fixture here: a separate
+       shard would leave assertions under a path nothing calls, which is how dead assertions appear. */
+    rc = start_disk(bd2, REV_A, "1");
+    ck(rc == 1 && lines("BG_CANDIDATE\tREFUSE-ITEM\t16-disk-free", "DISK_BLOCKED", 0, 0) == 1 &&
+       lines("BG_CANDIDATE\tREFUSE", "reason=chain-ready", 0, 0) == 1 && !present(bd2, REV_A),
+       "start-refused-when-disk-preflight-fails");
+    /* 0 is a real figure, not "measure for me": the sentinel is negative.  A default that stops being negative
+       (the -1 literal turning into -0) injects 0 and refuses every start on a healthy disk. */
+    rc = start_disk(bd2, REV_A, "0");
+    ck(rc == 1 && lines("BG_CANDIDATE\tREFUSE-ITEM\t16-disk-free", "FAIL", "DISK_BLOCKED avail_gb=0", 0) == 1 &&
+       !present(bd2, REV_A), "start-refused-when-injected-zero");
+    /* short-circuit order: 12 passes here, and 11 must still be asked.  Replace the first `||` with `&&` and a
+       failing 11 is skipped, so the start goes on instead of refusing with the item named. */
+    if (put(fxroot, "release/candidate.tsv", "tag\tversion\nv0.0.0\t0.0.0\n")) return 2;
+    rc = start(bd4, REV_A, "ok", "30", "5");
+    ck(rc == 1 && lines("BG_CANDIDATE\tREFUSE-ITEM\t11-version-slot", 0, 0, 0) == 1 && !present(bd4, REV_A),
+       "disk-shard-keeps-twelve-then-eleven-order");
+    if (put(fxroot, "release/candidate.tsv", "tag\tversion\nv0.0.1\t0.0.1\n")) return 2;
+    rc = start_disk(bd, REV_A, "40");
+    ck(rc == 0 && lines("BG_CANDIDATE\tSTARTED", "rev=" REV_A, 0, 0) == 1, "start-accepted-when-disk-preflight-passes");
+    if (join(dir, bd, REV_A)) return 2;
+    ck(await(dir, "exit.tsv", 100) && rows(dir, "exit.tsv", "EXIT\t", 0, 0) == 1, "disk-preflight-chain-finishes");
+    /* End-to-end from bg-candidate's own --base: no injected figure, so the only thing that can refuse is
+       chain-ready measuring the small disk this start names.  Deleting the `--chain-base` pass-through makes
+       chain-ready measure cr_base() (the home disk) and this starts instead of refusing. */
+    rc = start_small_base(REV_A);
+    ck(rc == 1 && lines("BG_CANDIDATE\tREFUSE-ITEM\t16-disk-free", "DISK_BLOCKED", 0, 0) == 1 &&
+       lines("BG_CANDIDATE\tREFUSE", "reason=chain-ready", 0, 0) == 1,
+       "start-refused-when-its-own-base-is-small");
+    /* No injection: chain-ready measures the chain base for real, and this machine's figure decides the verdict.
+       Demanding STARTED would make the fixture red on a full disk for the right reason, and accepting any refusal
+       would let a default that injects 0 through -- so the assertion is "a real figure was read and the start then
+       obeyed it": either it started, or it refused with REFUSE-ITEM 16-disk-free and a non-zero avail_gb.
+       DISK_UNMEASURED (nothing measured) and avail_gb=0 (the -1 sentinel collapsed into an injection) are
+       excluded by name. */
+    rc = start(bd3, REV_A, "ok", "30", "5");
+    {
+        int started = rc == 0 && lines("BG_CANDIDATE\tSTARTED", "rev=" REV_A, 0, 0) == 1;
+        ck(started || (rc == 1 && lines("BG_CANDIDATE\tREFUSE-ITEM\t16-disk-free", "DISK_BLOCKED avail_gb=", 0, 0) == 1 &&
+                       lines("BG_CANDIDATE\tREFUSE\treason=chain-ready", 0, 0, 0) == 1),
+           "start-measures-when-not-injected");
+        /* A field test would miss this: the figure sits INSIDE `DISK_BLOCKED avail_gb=0 (<8G)`, so no field begins
+           with it and `lines("avail_gb=0")` was 0 even when the sentinel had collapsed -- which is how the
+           -1-to--0 mutant survived the gate.  Both guards are raw substrings of the run's output. */
+        ck(tx_find(last, (long)lastn, "DISK_UNMEASURED", 15) < 0 && tx_find(last, (long)lastn, "avail_gb=0", 10) < 0,
+           "measured-start-uses-a-real-figure");
+        if (started) {
+            if (join(dir, bd3, REV_A)) return 2;
+            ck(await(dir, "exit.tsv", 100) && rows(dir, "exit.tsv", "EXIT\t", 0, 0) == 1, "measured-start-chain-finishes");
+        }
+    }
     /* (1) start. The chain that must be killed runs in a base of its own, beside the others. */
     rc = start(bh, REV_C, "hang", "1", "1");
     ck(rc == 0 && lines("BG_CANDIDATE\tSTARTED", "rev=" REV_C, 0, 0) == 1, "start-hang-accepted");

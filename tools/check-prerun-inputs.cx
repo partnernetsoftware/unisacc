@@ -64,7 +64,21 @@ int main(int argc, char **argv) {
     np_result r = run(ok, 0);
     ck(r.rc == 0 && tk_has(r.out, "status=READY"), "ready-status");
     ck(tk_has(r.out, "PRERUN_CMD") && tk_has(r.out, "--window-lanes 3") && tk_has(r.out, "--normal-jobs 8"), "recommended-cmd-knobs");
-    ck(tk_has(r.out, "--window-lanes 3 --normal-jobs 8 --resume --max-jobs 8") && !tk_has(r.out, "--max-jobs 4"), "run-cmd-max-jobs-matches-plan");
+    ck(tk_has(r.out, "--window-lanes 3 --normal-jobs 8 --resume --max-jobs 8 --keep-going --min-free 2147483648; rc=$?; [ \"$rc\" -eq 0 ] && exit 0; [ \"$rc\" -eq 2 ] && exit 2; done; exit 1") &&
+       tk_has(r.out, "supervise.log") &&
+       !tk_has(r.out, "--max-jobs 4"), "run-cmd-max-jobs-matches-plan");
+    /* Verify the emitted attempt loop stops immediately on rc=2 without retrying, retries twice on rc=1, and exits 0 on rc=0 */
+    {
+        char rcmd[2048];
+        cx_fmt(rcmd, sizeof rcmd,
+            "run_loop(){ c=0; for attempt in 1 2; do c=$((c+1)); (exit \"$1\"); rc=$?; [ \"$rc\" -eq 0 ] && { echo \"C=$c RC=0\"; return 0; }; [ \"$rc\" -eq 2 ] && { echo \"C=$c RC=2\"; return 2; }; done; echo \"C=$c RC=1\"; return 1; }; "
+            "run_loop 2; echo E2=$?; run_loop 1; echo E1=$?; run_loop 0; echo E0=$?");
+        char *lv[] = {"sh", "-c", rcmd, 0};
+        np_result lr = run(lv, 0);
+        ck(tk_has(lr.out, "C=1 RC=2\nE2=2\n") && tk_has(lr.out, "C=2 RC=1\nE1=1\n") && tk_has(lr.out, "C=1 RC=0\nE0=0\n"),
+           "run-cmd-rc2-stops-without-retry");
+        np_free(&lr);
+    }
     ck(tk_has(r.out, "WARN\tdropped\tgone"), "dropped-id-listed");
     ck(tk_has(r.out, "WARN\tstatus-mismatch\tl0-new"), "notes-mismatch-warn-only");
     ck(tk_has(r.out, "outside_set=1"), "outside-set-count-excludes-planned");

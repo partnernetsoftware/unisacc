@@ -37,17 +37,25 @@ static int run(char **argv, char *out, int cap) {
     out[n] = 0; sy_close(fd);
     return sy_wait_status(pid, 0, &ex, &code, &sig) == pid && ex ? code : -1;
 }
-/* the judge on TEXT with exit code RC */
-static int judge(const char *kind, const char *text, const char *rc, char *out, int cap) {
-    char f[400]; char *v[8];
+/* the judge on TEXT with exit code RC; optional --repo DIR so NRK is read from that tree */
+static int judge_at(const char *repo, const char *kind, const char *text, const char *rc, char *out, int cap) {
+    char f[400]; char *w[16]; int n = 0;
     static int seq; cx_fmt(f, sizeof f, "%s/j%d.txt", tmpd, ++seq);
     cx_write(f, text, tx_len(text, 1 << 20));
-    v[0] = "./tools/bound"; v[1] = "40"; v[2] = "sh"; v[3] = UC; v[4] = "tools/chain-ready.cx"; v[5] = "--"; v[6] = "--judge";
-    {   char *w[12]; int i; for (i = 0; i < 7; i++) w[i] = v[i]; w[7] = (char *)kind; w[8] = f; w[9] = (char *)rc; w[10] = 0;
-        return run(w, out, cap); }
+    w[n++] = "./tools/bound"; w[n++] = "40"; w[n++] = "sh"; w[n++] = UC; w[n++] = "tools/chain-ready.cx"; w[n++] = "--";
+    if (repo && repo[0]) { w[n++] = "--repo"; w[n++] = (char *)repo; }
+    w[n++] = "--judge"; w[n++] = (char *)kind; w[n++] = f; w[n++] = (char *)rc; w[n] = 0;
+    return run(w, out, cap);
+}
+static int judge(const char *kind, const char *text, const char *rc, char *out, int cap) {
+    return judge_at(0, kind, text, rc, out, cap);
 }
 static void jt(const char *name, const char *kind, const char *text, const char *rc, const char *want, const char *frag) {
     char out[2048]; int r = judge(kind, text, rc, out, sizeof out);
+    ck(r == 0 && tx_prefix(out, 4, want, 4) && (!frag || has(out, frag)), name);
+}
+static void jt_repo(const char *name, const char *repo, const char *kind, const char *text, const char *rc, const char *want, const char *frag) {
+    char out[2048]; int r = judge_at(repo, kind, text, rc, out, sizeof out);
     ck(r == 0 && tx_prefix(out, 4, want, 4) && (!frag || has(out, frag)), name);
 }
 static void git(const char *dir, const char *a, const char *b, const char *c) {
@@ -74,10 +82,32 @@ int main(void) {
     jt("derive-timeout-row-names-generator", "derive", "DERIVE\tproduct-map\tTIMEOUT\t45000\trc=142\tx\nDERIVE_SUMMARY\tok=0\tdrift=0\trefused=1\tskipped=13\telapsed_ms=45001\n", "2", "FAIL", "failed_generator=product-map(TIMEOUT)");
     jt("derive-outer-timeout-shard-names-unfinished-generators", "derive:doc-links,tool-index,table-index", "DERIVE\tdoc-links\tOK\t11000\n", "142", "FAIL", "failed_generator=tool-index(TIMEOUT),table-index(TIMEOUT)");
     jt("derive-no-summary-fail", "derive", "garbage\n", "0", "FAIL", "no DERIVE_SUMMARY");
-    jt("ratchets-13-pass", "ratchets", "RATCHET\tcxraw\tok\tx\nRATCHETS\tok=13\tfail=0\telapsed_ms=5\n", "0", "PASS", "ok=13");
-    jt("ratchets-16-pass", "ratchets", "RATCHET\tcxraw\tok\tx\nRATCHETS\tok=16\tfail=0\telapsed_ms=5\n", "0", "PASS", "ok=16");
-    jt("ratchets-slack-warn-pass", "ratchets", "RATCHET\tcxraw\tok\tcxraw: ok: 896 units, 677 calls (baseline 13491); 0 above baseline, 11 below (--write ratchets down)\nRATCHETS\tok=16\tfail=0\telapsed_ms=5\n", "0", "PASS", "WARN ratchet-slack cxraw_below=11");
-    jt("ratchets-12-fail", "ratchets", "RATCHET\tcheck-literal\tFAIL\tLITERAL\nRATCHETS\tok=12\tfail=1\telapsed_ms=5\n", "1", "FAIL", "fail=1");
+    /* 2b: ok must equal <repo>/tools/ratchets.cx line-start #define NRK (comments skipped). */
+    jt("ratchets-19-pass", "ratchets", "RATCHET\tcxraw\tok\tx\nRATCHETS\tok=19\tfail=0\telapsed_ms=5\n", "0", "PASS", "ok=19");
+    jt("ratchets-18-short-fail", "ratchets", "RATCHETS\tok=18\tfail=0\telapsed_ms=5\n", "0", "FAIL", "want_ok=");
+    jt("ratchets-slack-warn-pass", "ratchets", "RATCHET\tcxraw\tok\tcxraw: ok: 896 units, 677 calls (baseline 13491); 0 above baseline, 11 below (--write ratchets down)\nRATCHETS\tok=19\tfail=0\telapsed_ms=5\n", "0", "PASS", "WARN ratchet-slack cxraw_below=11");
+    jt("ratchets-fail1-fail", "ratchets", "RATCHET\tcheck-literal\tFAIL\tLITERAL\nRATCHETS\tok=18\tfail=1\telapsed_ms=5\n", "1", "FAIL", "fail=1");
+    {
+        char nrkdir[420], toolsdir[440], rkpath[460];
+        const char *body_miss = "/* no NRK define in this fixture */\nint x;\n";
+        const char *body_cmt = "/* was: #define NRK 18 */\n#define NRK 19\n";
+        cx_fmt(nrkdir, sizeof nrkdir, "%s/nrk-miss", tmpd);
+        cx_fmt(toolsdir, sizeof toolsdir, "%s/tools", nrkdir);
+        cx_fmt(rkpath, sizeof rkpath, "%s/ratchets.cx", toolsdir);
+        (void)sy_mkdir(nrkdir, 0700); (void)sy_mkdir(toolsdir, 0700);
+        cx_write(rkpath, body_miss, tx_len(body_miss, 256));
+        jt_repo("ratchets-nrk-missing-fail", nrkdir, "ratchets",
+                "RATCHETS\tok=19\tfail=0\telapsed_ms=5\n", "0", "FAIL", "nrk-missing");
+        cx_fmt(nrkdir, sizeof nrkdir, "%s/nrk-cmt", tmpd);
+        cx_fmt(toolsdir, sizeof toolsdir, "%s/tools", nrkdir);
+        cx_fmt(rkpath, sizeof rkpath, "%s/ratchets.cx", toolsdir);
+        (void)sy_mkdir(nrkdir, 0700); (void)sy_mkdir(toolsdir, 0700);
+        cx_write(rkpath, body_cmt, tx_len(body_cmt, 256));
+        jt_repo("ratchets-nrk-comment-trap-pass", nrkdir, "ratchets",
+                "RATCHETS\tok=19\tfail=0\telapsed_ms=5\n", "0", "PASS", "roster=19");
+        jt_repo("ratchets-nrk-comment-trap-short-fail", nrkdir, "ratchets",
+                "RATCHETS\tok=18\tfail=0\telapsed_ms=5\n", "0", "FAIL", "want_ok=19");
+    }
     jt("tri-pass", "tri", "GAP\tCXM_MAXU\tnamed\nCXMOD_TRI\tpassed=15\tfailed=0\tgaps=2\n", "0", "PASS", "failed=0");
     jt("tri-fail", "tri", "CXMOD_TRI\tpassed=14\tfailed=1\tgaps=2\n", "1", "FAIL", "failed=1");
     jt("extract-exact-pass", "extract", "CX0_EXTRACT\tEXACT\tbytes=1\n", "0", "PASS", "EXACT");
@@ -164,7 +194,8 @@ int main(void) {
         rc = run(v, out, sizeof out);
         ck(rc == 0 && has(out, "10-envhygiene\tPASS") && has(out, "READY\tyes"), "envhygiene-clean-environment-pass");
     }
-    {   char *v[] = {"./tools/bound", "60", "env", "UNISACC_RUN_CACHE=0",
+    /* any non-empty UNISACC_RUN_CACHE is the leak; =1 keeps the run cache warm (=0 forced a ~20 s cold compile) */
+    {   char *v[] = {"./tools/bound", "60", "env", "UNISACC_RUN_CACHE=1",
                      "sh", UC, "tools/chain-ready.cx", "--", "--only", "10-envhygiene", 0};
         rc = run(v, out, sizeof out);
         ck(rc == 1 && has(out, "10-envhygiene\tFAIL") && has(out, "UNISACC_RUN_CACHE") && has(out, "READY\tno"), "envhygiene-cache-variable-named-not-ready");
@@ -352,6 +383,128 @@ int main(void) {
             rc = run(v, out, sizeof out);
             ck(rc == 1 && has(out, "20-ident-helper\tFAIL") && has(out, "not-executable") && has(out, "READY\tno"), "ident-helper-20-mut3-not-executable-fail");
         }
+    }
+    /* 16-disk-free (safe subset, cc 2026-11-24 裁定 (b)): the thresholds are still 8G/20G, the number now
+       comes from sy_disk_avail_mb with a bounded df fallback, and an unmeasured disk is a FAIL.
+       --disk-free-gb N injects the available space, so every case is deterministic on any machine. */
+    {   char *v[] = {"./tools/bound", "40", "sh", UC, "tools/chain-ready.cx", "--", "--only", "16-disk-free", "--disk-free-gb", "30", 0};
+        rc = run(v, out, sizeof out);
+        ck(rc == 0 && has(out, "16-disk-free\tPASS") && has(out, "avail_gb=30 (>=20G)") && has(out, "READY\tyes"),
+           "disk-inject-above-20-pass");
+    }
+    {   char *v[] = {"./tools/bound", "40", "sh", UC, "tools/chain-ready.cx", "--", "--only", "16-disk-free", "--disk-free-gb", "10", 0};
+        rc = run(v, out, sizeof out);
+        ck(rc == 0 && has(out, "16-disk-free\tPASS") && has(out, "DISK_LOW avail_gb=10") && has(out, "READY\tyes"),
+           "disk-inject-between-8-and-20-warns-but-passes");
+    }
+    {   char *v[] = {"./tools/bound", "40", "sh", UC, "tools/chain-ready.cx", "--", "--only", "16-disk-free", "--disk-free-gb", "7", 0};
+        rc = run(v, out, sizeof out);
+        ck(rc == 1 && has(out, "16-disk-free\tFAIL") && has(out, "DISK_BLOCKED avail_gb=7") && has(out, "READY\tno"),
+           "disk-inject-below-8-blocks");
+    }
+    /* boundary: exactly 8G is allowed (the rule is "below 8G blocks") and exactly 20G already counts as >=20G.
+       These two pin the `<` comparisons, so a mutation to `<=` or `>` is caught. */
+    {   char *v[] = {"./tools/bound", "40", "sh", UC, "tools/chain-ready.cx", "--", "--only", "16-disk-free", "--disk-free-gb", "8", 0};
+        rc = run(v, out, sizeof out);
+        ck(rc == 0 && has(out, "16-disk-free\tPASS") && has(out, "DISK_LOW avail_gb=8") && has(out, "READY\tyes"),
+           "disk-boundary-8g-allowed");
+    }
+    {   char *v[] = {"./tools/bound", "40", "sh", UC, "tools/chain-ready.cx", "--", "--only", "16-disk-free", "--disk-free-gb", "20", 0};
+        rc = run(v, out, sizeof out);
+        ck(rc == 0 && has(out, "16-disk-free\tPASS") && has(out, "avail_gb=20 (>=20G)") && has(out, "READY\tyes"),
+           "disk-boundary-20g-is-full-pass");
+    }
+    /* a zero injection is a real figure, not "measure for me": the sentinel for the latter is negative, so the
+       guard must stay `avail_gb < 0` (with `<=` a start asks the real disk and 0G silently passes). */
+    {   char *v[] = {"./tools/bound", "40", "sh", UC, "tools/chain-ready.cx", "--", "--only", "16-disk-free", "--disk-free-gb", "0", 0};
+        rc = run(v, out, sizeof out);
+        ck(rc == 1 && has(out, "16-disk-free\tFAIL") && has(out, "DISK_BLOCKED avail_gb=0") && has(out, "READY\tno"),
+           "disk-injected-zero-blocks-instead-of-measuring");
+    }
+    /* both measurements failing on the SAME path is a FAIL, not a pass and not an exemption.  A dangling
+       symlink is the device: it exists (so the path is located and named in the evidence), while statvfs and
+       `df -Pk` both fail on it.  It has to come in through --chain-base: an UNISACC_CHAIN_BASE that is not
+       canonical(tmp)/unisacc-session-chain-NAME is ignored by cr_override, so the gate would fall back to the
+       home base and never reach this branch -- the fixture would have passed for the wrong reason. */
+    {   char *v[] = {"./tools/bound", "40", "sh", "-c", "L=$(mktemp -u); ln -s /nonexistent/chain-ready-disk-fixture \"$L\"; "
+                 "sh " UC " tools/chain-ready.cx -- --only 16-disk-free --repo . --chain-base \"$L\"; rc=$?; rm -f \"$L\"; exit $rc", 0};
+        rc = run(v, out, sizeof out);
+        ck(rc == 1 && has(out, "16-disk-free\tFAIL") && has(out, "DISK_UNMEASURED sy_disk_avail_mb and the bounded df -Pk both failed") && has(out, "READY\tno"),
+           "disk-both-measurements-fail-is-fail");
+    }
+    /* The filesystem that matters is the chain base's, not the checkout's (S1 2026-11-24).  A 4 MiB tmpfs
+       mounted in a user namespace is a real chain disk that is really too small, while the checkout stays on
+       the roomy root: measuring the repo passes, measuring the chain base blocks.  Nothing here is a stub --
+       sy_disk_avail_mb reads that mount. */
+    {   char *v[64]; int n = 0;
+        v[n++] = "./tools/bound"; v[n++] = "40"; v[n++] = "unshare"; v[n++] = "-Ur"; v[n++] = "-m"; v[n++] = "sh"; v[n++] = "-c";
+        v[n++] = "D=$(mktemp -d); B=\"$D/unisacc-session-chain-tf1\"; mkdir -p \"$B\"; mount -t tmpfs -o size=4m tmpfs \"$B\" || exit 9; "
+                 "sh " UC " tools/chain-ready.cx -- --only 16-disk-free --root . --repo . --chain-base \"$B\"; rc=$?; "
+                 "umount \"$B\"; rm -rf \"$D\"; exit $rc";
+        v[n] = 0;
+        rc = run(v, out, sizeof out);
+        ck(rc == 1 && has(out, "16-disk-free\tFAIL") && has(out, "DISK_BLOCKED avail_gb=0") && has(out, "READY\tno"),
+           "disk-chain-base-small-blocks-while-checkout-is-roomy");
+    }
+    /* a chain base that resolves is what gets measured, and the row names it: `--repo` still points at the
+       roomy checkout, so a row carrying ANY other path means the gate measured the wrong filesystem.  The
+       override is resolved through cxlib.chainroot cr_base -- the one place that decides where a chain
+       directory lands -- not by reading the variable, so / here is REJECTED as an override (cr_override takes
+       only canonical(tmp)/unisacc-session-chain-NAME) and the home chain base is what gets measured.  A gate
+       that honoured the raw value would pass on a roomy / while the chain filled the home disk: that is the
+       fail-open this fixture catches. */
+    {   char *v[] = {"./tools/bound", "40", "env", "UNISACC_CHAIN_BASE=/", "sh", UC, "tools/chain-ready.cx", "--", "--only", "16-disk-free", "--repo", repo, 0};
+        rc = run(v, out, sizeof out);
+        ck((rc == 0 || rc == 1) && has(out, ".cache/unisacc/chains") && !has(out, "disk=/\t") &&
+           !has(out, "16-disk-free\tUNMEASURED"),
+           "disk-stale-absolute-override-is-not-honoured-and-home-base-is-measured");
+    }
+    /* the override cr_override DOES accept is measured: the same directory the chain will use.  cr_override
+       takes only canonical(tmpdir)/unisacc-session-chain-NAME, so the base must be a direct child of the temp
+       directory -- putting it one level deeper (inside a mktemp -d) would be ignored and the home base would
+       answer, which is exactly the fallback the fixture above pins from the other side. */
+    {   char *v[] = {"./tools/bound", "40", "sh", "-c", "B=\"$(dirname \"$(mktemp -u)\")/unisacc-session-chain-cr1\"; mkdir -p \"$B\"; "
+                 "UNISACC_CHAIN_BASE=\"$B\" sh " UC " tools/chain-ready.cx -- --only 16-disk-free --repo . ; rc=$?; rmdir \"$B\"; exit $rc", 0};
+        rc = run(v, out, sizeof out);
+        ck((rc == 0 || rc == 1) && has(out, "unisacc-session-chain-cr1") &&
+           !has(out, "16-disk-free\tUNMEASURED"), "disk-accepted-override-is-what-gets-measured");
+    }
+    /* A one-character relative --repo ("./") must be resolved before cr_base judges it: cr_override only
+       speaks about a canonical absolute checkout root, so a spelling left relative silently answers with the
+       home base and the accepted override looks ignored.  The row names the base that was measured, so a gate
+       that skipped the resolution points at .cache/unisacc/chains instead of the temp base here. */
+    {   char *v[] = {"./tools/bound", "40", "sh", "-c", "B=\"$(dirname \"$(mktemp -u)\")/unisacc-session-chain-cr26\"; mkdir -p \"$B\"; "
+                 "UNISACC_CHAIN_BASE=\"$B\" sh " UC " tools/chain-ready.cx -- --only 16-disk-free --repo ./ ; rc=$?; rmdir \"$B\"; exit $rc", 0};
+        rc = run(v, out, sizeof out);
+        ck((rc == 0 || rc == 1) && has(out, "disk=") && has(out, "unisacc-session-chain-cr26") &&
+           !has(out, ".cache/unisacc/chains") && !has(out, "16-disk-free\tUNMEASURED"),
+           "disk-dot-slash-repo-still-resolves-the-accepted-override");
+    }
+    /* --chain-base ABS is the escape for a caller whose directories are not cr_base() (bg-candidate -- --base):
+       the gate must measure THAT disk, and a relative one names no disk at all. */
+    {   char *v[] = {"./tools/bound", "40", "sh", UC, "tools/chain-ready.cx", "--", "--only", "16-disk-free", "--chain-base", "/", 0};
+        rc = run(v, out, sizeof out);
+        ck((rc == 0 || rc == 1) && has(out, "disk=/\t"), "disk-chain-base-flag-is-what-gets-measured");
+    }
+    {   char *v[] = {"./tools/bound", "40", "sh", UC, "tools/chain-ready.cx", "--", "--only", "16-disk-free", "--chain-base", "relative-base", 0};
+        rc = run(v, out, sizeof out);
+        ck(rc == 1 && has(out, "DISK_UNMEASURED the chain base could not be resolved") && has(out, "READY\tno"),
+           "disk-relative-chain-base-flag-is-unmeasured");
+    }
+    /* an injected figure still works, because that is the escape when nothing can be located. */
+    {   char *v[] = {"./tools/bound", "40", "env", "UNISACC_CHAIN_BASE=relative-base", "sh", UC, "tools/chain-ready.cx", "--", "--only", "16-disk-free", "--disk-free-gb", "9", 0};
+        rc = run(v, out, sizeof out);
+        ck(rc == 0 && has(out, "DISK_LOW avail_gb=9") && has(out, "READY\tyes"), "disk-injection-works-without-a-base");
+    }
+    /* an UNMEASURED that is NOT one of the two manual items must make READY=no: the old row() only counted
+       FAIL and SKIPPED, so a gate that could not measure left the chain 'ready'. */
+    {   char *v[] = {"./tools/bound", "40", "sh", UC, "tools/chain-ready.cx", "--", "--only", "7-recipe", 0};
+        rc = run(v, out, sizeof out);
+        ck(rc == 0 && has(out, "7-recipe\tUNMEASURED") && has(out, "READY\tyes"), "manual-unmeasured-by-design-still-ready");
+    }
+    {   char *v[] = {"./tools/bound", "40", "sh", UC, "tools/chain-ready.cx", "--", "--fast", "--only", "4-p1", 0};
+        rc = run(v, out, sizeof out);
+        ck(rc == 1 && has(out, "4-p1\tSKIPPED") && has(out, "READY\tno"), "skipped-still-not-ready");
     }
     printf("CHAIN_READY_CHECK\tpassed=%d\tfailed=%d\n", passed, failed);
     return failed ? 1 : 0;

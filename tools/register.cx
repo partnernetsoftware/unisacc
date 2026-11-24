@@ -64,7 +64,9 @@
 #pragma unisa use mem.bytes
 #pragma unisa use text.fmt
 #pragma unisa use mem.heap
+#pragma unisa use cxlib.bpidecl
 #pragma unisa use cxlib.runnerprep
+#pragma unisa use cxlib.dirtywatch
 
 static void rg_die(const char *a, const char *b) { fprintf(stderr, "register: %s%s%s\n", a, b ? ": " : "", b ? b : ""); exit(2); }
 
@@ -1344,6 +1346,9 @@ static int rg_tool_mode(int argc, char **argv) {
 }
 
 int main(int argc, char **argv) {
+    char identity_root[4096];
+    if (sy_realpath(".", identity_root, sizeof identity_root) >= 0)
+        dw_identity_emit("register", identity_root, 0);
     /* --layout-rows LAYDIR REL PROPOSED: print the rows of PROPOSED a layout keeps (fixture entry for
        tools/check-register-cold-runner.cx; reads only, writes nothing). */
     if(argc==5 && tx_eqz(argv[1],"--layout-rows")){
@@ -1406,9 +1411,10 @@ int main(int argc, char **argv) {
     const char *id, *check, *marker, *text, *files, *layer, *headers;
     const char *arguments="-";
     static char normargs[8192];
-    int norun = 0, force_layout = 0;
+    int norun = 0, planned = 0, force_layout = 0;
+    const char *promote_id = 0;
     char devdir[4096];int use_dev=0;
-    {   int w = 1, r;   /* --no-run may stand anywhere: strip it and keep the rest in order */
+    {   int w = 1, r;   /* --no-run / --planned may stand anywhere: strip them and keep the rest in order */
         for (r = 1; r < argc; r++) {
             if(tx_eqz(argv[r],"--args") && r+1<argc){argv[w++]=argv[r];argv[w++]=argv[++r];}
             else if(tx_eqz(argv[r],"--runner")){
@@ -1417,11 +1423,16 @@ int main(int argc, char **argv) {
                 if(sy_realpath(argv[++r],devdir,sizeof devdir)<0 || sy_stat(devdir,&st) || st.kind!='d')rg_die("--runner invalid dev-product directory",argv[r]);
                 use_dev=1;
             } else if (tx_eqz(argv[r], "--no-run")) norun = 1;
+            else if (tx_eqz(argv[r], "--planned")) planned = 1;
+            else if (tx_eqz(argv[r], "--promote") && r + 1 < argc) promote_id = argv[++r];
             else if (tx_eqz(argv[r], "--layout-selftest")) force_layout = 1;
             else argv[w++] = argv[r];
         }
         argc = w; argv[argc] = 0;
     }
+    if (planned && (norun || use_dev || promote_id)) rg_die("--planned cannot be combined with --no-run, --runner, or --promote", 0);
+    if (promote_id && norun) rg_die("--promote cannot be combined with --no-run", 0);
+    if (promote_id) rg_die("--promote 未实现,重写中", 0);
     if(argc>=3&&tx_eqz(argv[argc-2],"--args")){arguments=argv[argc-1];argc-=2;if(!*arguments||!clean(arguments))rg_die("empty args, TAB or newline in args",0);
         /* table convention: words of one args field are joined by ';' ("--cases;lock"); spaces and the
            "--opt=value" form are folded into it */
@@ -1456,9 +1467,26 @@ int main(int argc, char **argv) {
     lk = rg_lock();   /* the duplicate checks, both appends and --list are one span (see the header) */
     if (has_key(rg_bpath(), id)) rg_die("batch already registered", id);
     if (has_key(rg_cpath(), cid)) rg_die("coverage row already present", cid);
-    if (tx_snprintf(brow, sizeof brow, "%s\tIMPLEMENTED\t%s\t%s\tSOURCE\tlnx/x86_64\t55\t-\t%s\t%s\t%s\trc0:%s\t%s\t%s\n", id, layer, check, check, arguments, cid, marker, headers, tx_eqz(layer,"platform")?"release":"commit") >= (int)sizeof brow
-        || tx_snprintf(crow, sizeof crow, "%s\t%s\tIMPLEMENTED_SEPARATE_BATCH\t%s\t%s\n", cid, layer, text, files) >= (int)sizeof crow) rg_die("row too long", id);
-    if (!rg_row_ok(brow, marker)) rg_die("row would fail the tp_expect check", id);
+    char expcol[128];
+    if (planned) cx_fmt(expcol, sizeof expcol, "NOT_READY");
+    else if (cx_fmt(expcol, sizeof expcol, "rc0:%s", marker)) rg_die("marker too long", id);
+    if (tx_snprintf(brow, sizeof brow, "%s\t%s\t%s\t%s\tSOURCE\tlnx/x86_64\t55\t-\t%s\t%s\t%s\t%s\t%s\t%s\n", id, planned ? "PLANNED" : "IMPLEMENTED", layer, check, check, arguments, cid, expcol, headers, planned ? "release" : (tx_eqz(layer,"platform")?"release":"commit")) >= (int)sizeof brow
+        || tx_snprintf(crow, sizeof crow, "%s\t%s\t%s\t%s\t%s\n", cid, layer, planned ? "PLANNED" : "IMPLEMENTED_SEPARATE_BATCH", text, files) >= (int)sizeof crow) rg_die("row too long", id);
+    if (!planned && !rg_row_ok(brow, marker)) rg_die("row would fail the tp_expect check", id);
+    {   /* a require placeholder ({candidate}, {hostcc}, ...) needs an id row in batch-product-inputs.tsv first,
+           else tools/affected.cx refuses BATCH_PRODUCT_INPUT_UNDECLARED rc 2 for every selection (cxlib.bpidecl) */
+        char dp[4400]; size_t dsz = 0; char *db = 0; int ex;
+        if (cx_fmt(dp, sizeof dp, "%s/batch-product-inputs.tsv", rg_tdir())) rg_die("path bound", "batch-product-inputs");
+        ex = sy_exists(dp);   /* 0 only for ENOENT; ENOTDIR/EACCES come back negative and are never taken as absent */
+        if (ex < 0) rg_die("cannot stat the product-inputs declaration table", dp);
+        if (ex == 1) { db = (char *)cx_read(dp, &dsz); if (!db) rg_die("cannot read the product-inputs declaration table", dp); }
+        if (db && bpi_needs(db, (long)dsz, arguments, tx_len(arguments, 8192)) && !bpi_has_id(db, (long)dsz, id, tx_len(id, 4096))) {
+            fprintf(stderr, "register: --args %s holds a require placeholder of %s but it has no id row for %s\n", arguments, dp, id);
+            fprintf(stderr, "register: add 'id<TAB>%s<TAB>INPUTS<TAB>BASIS' to %s first (commit it with the batch row)\n", id, dp);
+            mm_free(db); rg_die("product inputs undeclared", id);
+        }
+        if (db) mm_free(db);
+    }
     if (append(rg_bpath(), brow)) rg_die("cannot append", rg_bpath());
     if (append(rg_cpath(), crow)) { take_out(rg_bpath(), brow); rg_die("cannot append", rg_cpath()); }
     {   char *v[] = {"./tools/bound", "55", listbin, "--list", 0};
@@ -1470,10 +1498,10 @@ int main(int argc, char **argv) {
             { size_t bn = tx_len(buf, sizeof buf); if (bn) { fwrite(buf, 1, bn, stderr); if (buf[bn - 1] != '\n') fputc('\n', stderr); } }
         }
     }
-    if (okrun && norun) {
-        /* --no-run: the rows stay as IMPLEMENTED, nothing is run or recorded as PASS here */
+    if (okrun && (norun || planned)) {
+        /* --no-run / --planned: nothing is run or recorded as PASS here */
         rg_unlock(lk); lk = -1; parent[0] = 0;
-        fprintf(stderr, "register: --no-run: the trial batch run was NOT done; the caller must produce batch evidence for %s itself (tests/run-batch.cx) and remove the rows if it fails\n", id);
+        if (norun) fprintf(stderr, "register: --no-run: the trial batch run was NOT done; the caller must produce batch evidence for %s itself (tests/run-batch.cx) and remove the rows if it fails\n", id);
     } else if (okrun) {
         /* The batch run is outside the lock: run.cx/run-batch only read the row, while a check that itself
            registers (tools/check-register.cx) would otherwise wait on a lock its own parent holds. */
@@ -1519,11 +1547,11 @@ int main(int argc, char **argv) {
         return 1;
     }
     if (lk >= 0) rg_unlock(lk);
-    printf("REGISTER\tid=%s\tstatus=%s\n", id, norun ? "REGISTERED_NORUN" : "REGISTERED");
+    printf("REGISTER\tid=%s\tstatus=%s\n", id, planned ? "REGISTERED_PLANNED" : norun ? "REGISTERED_NORUN" : "REGISTERED");
     rg_timing_warn(id);
     rg_dup_hint(check);
     /* For a real registration obtain its canonical manifest row from the current registry. */
-    if (!getenv("UNISACC_TABLES") || !*getenv("UNISACC_TABLES")) {
+    if (!planned && (!getenv("UNISACC_TABLES") || !*getenv("UNISACC_TABLES"))) {
         char *v[] = {"./tools/bound", "58", "sh", "./unisacc.com", "tools/batch-packages-gen.cx", "--", "--query","--row",(char*)id,0};
         char *vn[] = {"./tools/bound", "58", bpbin, "--query","--row",(char*)id,0};
         rc = run(bpok ? vn : v, buf, sizeof buf);

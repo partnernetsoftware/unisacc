@@ -1544,8 +1544,14 @@ static int fileno(FILE *__u_f) {
 #else
 #define _U_PO_SC(n) (n)
 #endif
-#if !__UNISA_FTRIM_LIBC || __UN_popen || __UN_pclose
+#if defined(RT_UNIT) || !__UNISA_FTRIM_LIBC || __UN_popen || __UN_pclose
+#if defined(RT_UNIT)
+int _u_po_fd[16]; long _u_po_pid[16]; int _u_po_n;
+#elif defined(RT_EXTERN)
+extern int _u_po_fd[16]; extern long _u_po_pid[16]; extern int _u_po_n;
+#else
 static int _u_po_fd[16]; static long _u_po_pid[16]; static int _u_po_n;
+#endif
 #endif
 /* the child gets environ (<stdlib.h>'s _unisa_env, one object for the program, which a constructor
    there fills before main); a program with no unit including <stdlib.h> has none, and the child gets

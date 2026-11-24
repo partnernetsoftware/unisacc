@@ -1,0 +1,153 @@
+/* tools/check-chain-disk-ledger.cx -- fixtures for tools/chain-disk-ledger.cx.
+ *
+ *   sh ./unisacc.com tools/check-chain-disk-ledger.cx
+ *
+ * The chain base is redirected with TMPDIR + UNISACC_CHAIN_BASE (the override cxlib.chainroot honours: it must
+ * be canonical(sy_tmpdir())/unisacc-session-chain-NAME, so TMPDIR is redirected too), and HOME points inside the
+ * fixture root, so no case can touch the operator's cache. Each case builds its own measured tree.
+ *   peak-rounds-up          1 MiB + 512 KiB + 2 B -> peak_mb=2 (ceil, not truncation)
+ *   row-shape               exactly five tab fields, first word 'chain', id and peak as written
+ *   ledger-at-chain-root    the default ledger is <chain base>/KIND/ID/disk.tsv, never inside --measured
+ *   symlink-not-counted     a link to the shared checkout adds no bytes (files= counts only regular files)
+ *   append-not-truncate     two runs give two rows and the first row's bytes are unchanged
+ *   avail-measured          without --avail-mb the column is f_bavail*frsize/2^20 within 1 MiB of `df -Pk`
+ *   avail-override-wins     --avail-mb N writes N verbatim (the disk gate injects a threshold-side value)
+ *   dry-run-writes-nothing  --dry-run prints the row and creates no ledger
+ *   kind-invalid            KIND outside snap|chain|build|evidence|tmp -> rc 2, names the reason
+ *   id-invalid              ID starting with '.' -> rc 2
+ *   measured-missing        no --measured -> rc 2
+ *   measured-not-dir        --measured is a regular file -> rc 2
+ *   measured-empty          no regular files below --measured -> rc 2
+ * Output CHECK_CHAIN_DISK_LEDGER<TAB>ok=N<TAB>failed=M; rc 1 when any case fails. Writes only under tmp. */
+#pragma unisa use sys.fs
+#pragma unisa use sys.io
+#pragma unisa use sys.env
+#pragma unisa use sys.proc
+#pragma unisa use cxlib.ckrun
+#pragma unisa use text.text
+#pragma unisa use cxlib.ckassert
+
+static char T[512];
+static char ENV[2048];   /* "TMPDIR=... UNISACC_CHAIN_BASE=.../cbase HOME=.../home ", spelled once */
+static char CB[1024];    /* <T>/cbase, the chain base every case expects */
+
+static int sh1(const char *script, char *out, int cap, int secs) {
+    return ckk_sh_t("check-chain-disk-ledger", script, out, cap, secs);
+}
+
+int main(int argc, char **argv) {
+    static char out[65536], sc[8192];
+    const char *tool = "tools/chain-disk-ledger.cx";
+    int rc;
+    if (argc > 2) { printf("usage: check-chain-disk-ledger.cx\n"); return 2; }
+    rc = sh1("mktemp -d \"${TMPDIR:-/tmp}/cdl-check.XXXXXX\"", T, sizeof T, 10);
+    { int n = (int)tx_len(T, sizeof T); while (n > 0 && (T[n - 1] == '\n' || T[n - 1] == ' ')) T[--n] = 0; }
+    if (rc != 0 || !T[0]) { printf("CHECK_CHAIN_DISK_LEDGER\tok=0\tfailed=1\n"); return 1; }
+    if (cx_fmt(CB, sizeof CB, "%s/unisacc-session-chain-cbase", T) ||
+        cx_fmt(ENV, sizeof ENV, "TMPDIR=%s UNISACC_CHAIN_BASE=%s HOME=%s/home", T, CB, T)) {
+        printf("CHECK_CHAIN_DISK_LEDGER\tok=0\tfailed=1\n"); return 1;
+    }
+
+    /* one measured tree with a known byte total, plus the redirected bases */
+    cx_fmt(sc, sizeof sc,
+           "set -e; mkdir -p %s/m/sub %s/unisacc-session-chain-cbase %s/home %s/links && head -c 1048576 /dev/zero > %s/m/big.bin && "
+           "head -c 524288 /dev/zero > %s/m/sub/half.bin && printf 'xx' > %s/m/sub/two.txt && "
+           "ln -s %s/no-such-target %s/links/link && printf 'x' > %s/links/one.txt",
+           T, T, T, T, T, T, T, T, T, T);
+    rc = sh1(sc, out, sizeof out, 20);
+    if (rc != 0) { printf("%s\n", out); printf("CHECK_CHAIN_DISK_LEDGER\tok=0\tfailed=1\n"); return 1; }
+
+    /* 1/4: peak rounds up and the row has exactly five tab fields */
+    cx_fmt(sc, sizeof sc, "%s sh ./unisacc.com %s -- chain revAAA --measured %s/m 2>&1", ENV, tool, T);
+    rc = sh1(sc, out, sizeof out, 55);
+    ck(rc == 0 && ckk_has(out, sizeof out, "peak_mb=2") && ckk_has(out, sizeof out, "files=3"), "peak-rounds-up");
+    if (rc) printf("%.1200s\n", out);
+    cx_fmt(sc, sizeof sc, "awk -F'\t' 'NF!=5{bad=1} $1!=\"chain\"{bad=1} $2!=\"revAAA\"{bad=1} $3!=\"2\"{bad=1} END{exit bad}' %s/chain/revAAA/disk.tsv", CB);
+    ck(sh1(sc, out, sizeof out, 10) == 0, "row-shape");
+
+    /* 3: the default path is the chainroot directory for KIND/ID, not something we spell ourselves */
+    cx_fmt(sc, sizeof sc, "test -s %s/chain/revAAA/disk.tsv && test ! -e %s/m/disk.tsv && test ! -e %s/disk.tsv", CB, T, T);
+    ck(sh1(sc, out, sizeof out, 10) == 0, "ledger-at-chain-root");
+
+    /* 2: a symlink to a 900 KB binary adds no bytes: 1 byte of real file -> peak_mb=1, files=1 */
+    cx_fmt(sc, sizeof sc, "%s sh ./unisacc.com %s -- chain revLNK --measured %s/links 2>&1", ENV, tool, T);
+    rc = sh1(sc, out, sizeof out, 55);
+    ck(rc == 0 && ckk_has(out, sizeof out, "peak_mb=1") && ckk_has(out, sizeof out, "files=1"), "symlink-not-counted");
+
+    /* 5: appending never rewrites earlier rows */
+    cx_fmt(sc, sizeof sc, "set -e; head -n 1 %s/chain/revAAA/disk.tsv > %s/first.before; wc -l < %s/chain/revAAA/disk.tsv > %s/n.before; "
+           "%s sh ./unisacc.com %s -- chain revAAA --measured %s/m >/dev/null 2>&1; "
+           "head -n 1 %s/chain/revAAA/disk.tsv > %s/first.after; wc -l < %s/chain/revAAA/disk.tsv > %s/n.after; "
+           "cmp -s %s/first.before %s/first.after && test \"$(cat %s/n.after)\" = \"$(( $(cat %s/n.before) + 1 ))\"",
+           CB, T, CB, T, ENV, tool, T, CB, T, CB, T, T, T, T, T);
+    ck(sh1(sc, out, sizeof out, 55) == 0, "append-not-truncate");
+
+    /* 6: no --avail-mb -> the measured figure.  The oracle is df, but free space on a live filesystem moves
+       between the tool's read and the oracle's: two single reads compared against each other went red when a
+       parallel job wrote during the gap (measured under mutation-gate load).  So df is read BOTH sides of the
+       tool and the figure must lie in [before-1, after+1] MiB -- still an exact cross-check of statvfs vs df,
+       without demanding that a busy disk hold still. */
+    cx_fmt(sc, sizeof sc, "set -e; "
+           "lo=$(( $(df -Pk %s/m | awk 'NR==2{print $4}') / 1024 )); "
+           "%s sh ./unisacc.com %s -- chain revAV --measured %s/m >/dev/null 2>&1; "
+           "hi=$(( $(df -Pk %s/m | awk 'NR==2{print $4}') / 1024 )); "
+           "got=$(cut -f4 %s/chain/revAV/disk.tsv); "
+           "test -n \"$got\" && test \"$got\" != '-' && test \"$got\" -ge $(( lo - 1 )) && test \"$got\" -le $(( hi + 1 ))",
+           T, ENV, tool, T, T, CB);
+    rc = sh1(sc, out, sizeof out, 55);
+    ck(rc == 0, "avail-measured-matches-df");
+    if (rc) printf("%.800s\n", out);
+
+    /* 7: --avail-mb wins verbatim */
+    cx_fmt(sc, sizeof sc, "%s sh ./unisacc.com %s -- chain revOVR --measured %s/m --avail-mb 6604 >/dev/null 2>&1; "
+           "cut -f4 %s/chain/revOVR/disk.tsv", ENV, tool, T, CB);
+    rc = sh1(sc, out, sizeof out, 55);
+    ck(rc == 0 && ckk_has(out, sizeof out, "6604\n"), "avail-override-wins");
+
+    /* 8: --dry-run prints but creates no ledger */
+    cx_fmt(sc, sizeof sc, "%s sh ./unisacc.com %s -- chain revDRY --measured %s/m --dry-run 2>&1", ENV, tool, T);
+    rc = sh1(sc, out, sizeof out, 55);
+    cx_fmt(sc, sizeof sc, "test ! -e %s/chain/revDRY/disk.tsv", CB);
+    ck(rc == 0 && ckk_has(out, sizeof out, "CHAIN_DISK_DRY") && !ckk_has(out, sizeof out, "CHAIN_DISK_LEDGER")
+       && sh1(sc, 0, 0, 10) == 0, "dry-run-writes-nothing");
+
+    /* 9..13: refusals name their reason and exit 2 */
+    cx_fmt(sc, sizeof sc, "%s sh ./unisacc.com %s -- bogus revX --measured %s/m 2>&1", ENV, tool, T);
+    rc = sh1(sc, out, sizeof out, 30);
+    ck(rc == 2 && ckk_has(out, sizeof out, "is not usable"), "kind-invalid");
+    cx_fmt(sc, sizeof sc, "%s sh ./unisacc.com %s -- chain .hidden --measured %s/m 2>&1", ENV, tool, T);
+    rc = sh1(sc, out, sizeof out, 30);
+    ck(rc == 2 && ckk_has(out, sizeof out, "is not usable"), "id-invalid");
+    cx_fmt(sc, sizeof sc, "%s sh ./unisacc.com %s -- chain revNoM 2>&1", ENV, tool);
+    rc = sh1(sc, out, sizeof out, 30);
+    ck(rc == 2 && ckk_has(out, sizeof out, "--measured"), "measured-missing");
+    cx_fmt(sc, sizeof sc, "%s sh ./unisacc.com %s -- chain revFile --measured %s/m/big.bin 2>&1", ENV, tool, T);
+    rc = sh1(sc, out, sizeof out, 30);
+    ck(rc == 2 && ckk_has(out, sizeof out, "not a directory"), "measured-not-dir");
+    cx_fmt(sc, sizeof sc, "mkdir -p %s/empty && %s sh ./unisacc.com %s -- chain revEmpty --measured %s/empty 2>&1", T, ENV, tool, T);
+    rc = sh1(sc, out, sizeof out, 30);
+    ck(rc == 2 && ckk_has(out, sizeof out, "no regular files"), "measured-empty");
+
+    /* Two properties with numbers, not code: a one-character name is a file (the dot test used to be
+       `name_n == 1`, which dropped `a` and `1`), and the depth guard stops at CDL_MAXDEPTH -- `deep` is depth 0,
+       so n14 is entered at depth 15 (its files count) and n15 would be entered at depth 16 (its files do not).
+       The guard has to be the thing that stops the walk: n15 is well inside whatever descriptor table the
+       runtime keeps, so a guard that prints and then falls through counts that subtree and the total changes. */
+    cx_fmt(sc, sizeof sc, "set -e; mkdir -p %s/deep && cd %s/deep && printf 'xy' > a && printf 'z' > 1 && "
+           "d=%s/deep; i=0; while [ $i -lt 15 ]; do d=\"$d/n$i\"; mkdir \"$d\"; i=$((i+1)); done; "
+           "printf 'abcd' > \"$d/at-limit\"; mkdir \"$d/n15\"; printf '1234567890' > \"$d/n15/past-limit\"",
+           T, T, T);
+    rc = sh1(sc, out, sizeof out, 40);
+    ck(rc == 0, "deep-fixture-built");
+    cx_fmt(sc, sizeof sc, "%s sh ./unisacc.com %s -- chain revDeep --measured %s/deep --ledger %s/deep.tsv --avail-mb 1000 2>&1",
+           ENV, tool, T, T);
+    rc = sh1(sc, out, sizeof out, 55);
+    ck(rc == 0 && ckk_has(out, sizeof out, "n14/n15 (subtree not counted)"), "depth-guard-names-the-skipped-directory");
+    ck(ckk_has(out, sizeof out, "files=3\tdirs=16\t"), "one-letter-names-and-file-at-the-limit-counted");
+    ck(!ckk_has(out, sizeof out, "files=4\t"), "file-past-the-limit-not-counted");
+
+    cx_fmt(sc, sizeof sc, "rm -rf -- '%s'", T);
+    sh1(sc, 0, 0, 20);
+    printf("CHECK_CHAIN_DISK_LEDGER\tok=%d\tfailed=%d\n", ck_assertions(), ck_failures());
+    return ck_failures() ? 1 : 0;
+}

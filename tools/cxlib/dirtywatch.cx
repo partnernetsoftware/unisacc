@@ -1,0 +1,137 @@
+#pragma unisa module dirtywatch
+#pragma unisa use sys.fs
+#pragma unisa use text.text
+#pragma unisa use mem.heap
+#pragma unisa use mem.bytes
+#pragma unisa use sys.env
+#pragma unisa use sys.io
+
+typedef struct dw_res {
+    int rc;
+    char *out;
+    size_t outn;
+} dw_res;
+
+static int dw_path_order(const void *a, const void *b) {
+    const char *left = *(char *const *)a;
+    const char *right = *(char *const *)b;
+    return strcmp(left + 3, right + 3);
+}
+
+/* The root is explicit. Only the hook may carry its alternate index into Git. */
+static void dw_identity_git(const char *root, const char *command, int hook, dw_res *r) {
+    char *args[40];
+    int k = 0;
+    args[k++] = "env";
+    const char *const clear[] = {"GIT_DIR", "GIT_WORK_TREE", "GIT_COMMON_DIR",
+        "GIT_OBJECT_DIRECTORY", "GIT_ALTERNATE_OBJECT_DIRECTORIES", "GIT_NAMESPACE",
+        "GIT_CONFIG_PARAMETERS", "GIT_CONFIG_COUNT", "GIT_INDEX_FILE", 0};
+    for (int i = 0; clear[i]; i++) {
+        if (hook && tx_eqz(clear[i], "GIT_INDEX_FILE")) continue;
+        args[k++] = "-u";
+        args[k++] = (char *)clear[i];
+    }
+    args[k++] = "GIT_OPTIONAL_LOCKS=0";
+    args[k++] = "git";
+    args[k++] = "-c";
+    args[k++] = "core.fsmonitor=false";
+    args[k++] = "-C";
+    args[k++] = (char *)root;
+    args[k++] = (char *)command;
+    if (tx_eqz(command, "status")) {
+        args[k++] = "--porcelain=v1";
+        args[k++] = "-z";
+        args[k++] = "--no-renames";
+        args[k++] = "--untracked-files=all";
+    } else {
+        args[k++] = "--quiet";
+        args[k++] = "--verify";
+        args[k++] = "HEAD";
+    }
+    args[k] = 0;
+    r->rc = cx_runv_timeout(args, 2, &r->out, &r->outn);
+}
+
+static int dw_identity_paths(const char *root, dw_res *r, char hash[65], int *types) {
+    size_t count = 0, bytes = 0;
+    for (size_t i = 0; i < r->outn; i++) if (!r->out[i]) count++;
+    if (!r->outn) {
+        cx_sha256_hex("", 0, hash);
+        return 0;
+    }
+    if (r->out[r->outn - 1] || count > r->outn / 5) return -1;
+    char **rows = malloc(count * sizeof *rows);
+    char *sorted = malloc(r->outn);
+    if (!rows || !sorted) { free(rows); free(sorted); return -1; }
+    count = 0;
+    for (size_t i = 0; i < r->outn;) {
+        char *row = r->out + i;
+        size_t len = strlen(row);
+        i += len + 1;
+        if (len < 4 || row[2] != ' ') { free(sorted); free(rows); return -1; }
+        if (row[0] == '?' && tx_eqz(row + 3, "unisacc.com")) {
+            char path[4400];
+            sy_stat_t st;
+            if (!cx_fmt(path, sizeof path, "%s/unisacc.com", root) &&
+                sy_lstat(path, &st) == 0 && st.kind == 'l') continue;
+        }
+        rows[count++] = row;
+        if (row[0] == '?') *types |= 4;
+        else {
+            if (row[0] != ' ') *types |= 1;
+            if (row[1] != ' ') *types |= 2;
+        }
+    }
+    qsort(rows, count, sizeof *rows, dw_path_order);
+    for (size_t i = 0; i < count; i++) {
+        const char *path = rows[i] + 3;
+        size_t len = strlen(path) + 1;
+        if (mm_copy(sorted + bytes, r->outn - bytes, path, len)) {
+            free(sorted);
+            free(rows);
+            return -1;
+        }
+        bytes += len;
+    }
+    cx_sha256_hex(sorted, bytes, hash);
+    free(sorted);
+    free(rows);
+    return 0;
+}
+
+int dw_identity_line(const char *entry, const char *root, int hook, char *out, size_t cap) {
+    char dotgit[4400], hash[65] = "-", head[65] = "-";
+    static const char *const differences[] = {"clean", "staged", "unstaged",
+        "staged,unstaged", "untracked", "staged,untracked", "unstaged,untracked",
+        "staged,unstaged,untracked"};
+    const char *tables = sy_env("UNISACC_TABLES");
+    const char *kind = "archive", *diff = "unavailable";
+    sy_stat_t st;
+    int git = cx_fmt(dotgit, sizeof dotgit, "%s/.git", root)
+        ? -1 : sy_lstat(dotgit, &st);
+    if (git != -ENOENT) {
+        kind = "git";
+        if (!git) {
+            dw_res rev = {0}, status = {0};
+            int types = 0;
+            dw_identity_git(root, "rev-parse", hook, &rev);
+            if (!rev.rc && (rev.outn == 41 || rev.outn == 65) &&
+                rev.out[rev.outn - 1] == '\n') {
+                if (tx_copy(head, sizeof head, rev.out, rev.outn - 1)) head[0] = 0;
+            }
+            dw_identity_git(root, "status", hook, &status);
+            if (!status.rc && !dw_identity_paths(root, &status, hash, &types))
+                diff = differences[types];
+            free(rev.out);
+            free(status.out);
+        }
+    }
+    if (tables && tables[0] && !tx_eqz(tables, "tests")) kind = "private-table";
+    return cx_fmt(out, cap, "RUNNER_IDENTITY\tentry=%s\tkind=%s\thead=%s\tdirty_sha256=%s\tdiff=%s\n",
+                  entry, kind, head, hash, diff);
+}
+
+void dw_identity_emit(const char *entry, const char *root, int hook) {
+    char line[256];
+    if (!dw_identity_line(entry, root, hook, line, sizeof line)) sy_eprintf("%s", line);
+}

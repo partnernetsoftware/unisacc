@@ -2955,7 +2955,13 @@ static double atof(const char *__u_s) { return strtod(__u_s, 0); }
  * a program that stores these values or seeds against glibc's will not
  * reproduce here.  Programs that agree between C libraries only because both
  * calls are made in the same order are unaffected. */
+#if defined(RT_UNIT)
+__u_word _unisa_seed = 1;
+#elif defined(RT_EXTERN)
+extern __u_word _unisa_seed;
+#else
 static __u_word _unisa_seed = 1;
+#endif
 #if !__UNISA_FTRIM_LIBC || __UN_rand
 static int rand(void) {
     _unisa_seed = _unisa_seed * 1103515245 + 12345;
@@ -3203,8 +3209,14 @@ static char *getenv(const char *__u_name) {
    NAME's entry or appended.  An entry is never freed: a pointer getenv returned stays
    valid, as glibc and the BSDs keep them.  Appending past the kernel's copy (or past an
    array the program assigned to environ) moves environ to a malloc'd array twice as big. */
-#if !__UNISA_FTRIM_LIBC || __UN_setenv
+#if defined(RT_UNIT) || !__UNISA_FTRIM_LIBC || __UN_setenv
+#if defined(RT_UNIT)
+char **_unisa_envheap; __u_word _unisa_envcap;
+#elif defined(RT_EXTERN)
+extern char **_unisa_envheap; extern __u_word _unisa_envcap;
+#else
 static char **_unisa_envheap; static __u_word _unisa_envcap;
+#endif
 #endif
 #if !__UNISA_FTRIM_LIBC || __UN_setenv
 static int setenv(const char *__u_name, const char *__u_val, int __u_over) {
@@ -3413,8 +3425,14 @@ static int fileno(FILE *__u_f) {
 #else
 #define _U_PO_SC(n) (n)
 #endif
-#if !__UNISA_FTRIM_LIBC || __UN_popen || __UN_pclose
+#if defined(RT_UNIT) || !__UNISA_FTRIM_LIBC || __UN_popen || __UN_pclose
+#if defined(RT_UNIT)
+int _u_po_fd[16]; long _u_po_pid[16]; int _u_po_n;
+#elif defined(RT_EXTERN)
+extern int _u_po_fd[16]; extern long _u_po_pid[16]; extern int _u_po_n;
+#else
 static int _u_po_fd[16]; static long _u_po_pid[16]; static int _u_po_n;
+#endif
 #endif
 /* the child gets environ (<stdlib.h>'s _unisa_env, one object for the program, which a constructor
    there fills before main); a program with no unit including <stdlib.h> has none, and the child gets
@@ -4595,7 +4613,13 @@ static double atof(const char *__u_s) { return strtod(__u_s, 0); }
  * a program that stores these values or seeds against glibc's will not
  * reproduce here.  Programs that agree between C libraries only because both
  * calls are made in the same order are unaffected. */
+#if defined(RT_UNIT)
+__u_word _unisa_seed = 1;
+#elif defined(RT_EXTERN)
+extern __u_word _unisa_seed;
+#else
 static __u_word _unisa_seed = 1;
+#endif
 #if !__UNISA_FTRIM_LIBC || __UN_rand
 static int rand(void) {
     _unisa_seed = _unisa_seed * 1103515245 + 12345;
@@ -4843,8 +4867,14 @@ static char *getenv(const char *__u_name) {
    NAME's entry or appended.  An entry is never freed: a pointer getenv returned stays
    valid, as glibc and the BSDs keep them.  Appending past the kernel's copy (or past an
    array the program assigned to environ) moves environ to a malloc'd array twice as big. */
-#if !__UNISA_FTRIM_LIBC || __UN_setenv
+#if defined(RT_UNIT) || !__UNISA_FTRIM_LIBC || __UN_setenv
+#if defined(RT_UNIT)
+char **_unisa_envheap; __u_word _unisa_envcap;
+#elif defined(RT_EXTERN)
+extern char **_unisa_envheap; extern __u_word _unisa_envcap;
+#else
 static char **_unisa_envheap; static __u_word _unisa_envcap;
+#endif
 #endif
 #if !__UNISA_FTRIM_LIBC || __UN_setenv
 static int setenv(const char *__u_name, const char *__u_val, int __u_over) {
@@ -5173,7 +5203,13 @@ static char *strncat(char *__u_d, const char *__u_s, __u_word __u_n) {
 
 /* strtok keeps its place between calls, as the standard says it must; the
    place is one static pointer, which is why strtok is not reentrant. */
+#if defined(RT_UNIT)
+char *_unisa_tok = 0;
+#elif defined(RT_EXTERN)
+extern char *_unisa_tok;
+#else
 static char *_unisa_tok = 0;
+#endif
 #if !__UNISA_FTRIM_LIBC || __UN_strtok
 static char *strtok(char *__u_s, const char *__u_delim) {
     char *__u_start; __u_word __u_k; int __u_isd;

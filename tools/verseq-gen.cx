@@ -1,12 +1,16 @@
-/* tools/verseq-gen.cx -- 版本口径漂移检查(只读):计划文件名号与标题号、标题主题与版本序表、宫殿版本与计划引用、版本工作树版本序已公开行。
+/* tools/verseq-gen.cx -- 版本口径漂移检查(只读):计划文件名号与标题号、标题主题与版本序表、宫殿版本与计划引用、版本工作树版本序已公开行、计划正文自指号。
  *
  *   sh ./unisacc.com tools/verseq-gen.cx -- --check [--root DIR]
+ *   sh ./unisacc.com tools/verseq-gen.cx -- --reorder ORDER_FILE [--write] [--root DIR]   (见 do_reorder 前注释)
  *
- * 四条规则,每条红行打印 FAIL<TAB>规则<TAB>文件<TAB>行号<TAB>原行(截断 400 字节):
+ * 五条规则,每条红行打印 FAIL<TAB>规则<TAB>文件<TAB>行号<TAB>原行(截断 400 字节):
  *   R1 filename-title  plans/v0.0.NN*.md 文件名号 == 首行出现的第一个 0.0.MM
  *   R2 title-topic     首行 "计划:" 后主题的首个片段(到 + ( 、 , ; 或行尾)== build/version-seq.tsv 同号行 class 列的子串
  *   R3 palace-pair     prd_mempalace.md 每个 "plans/v0.0.MM.md" 之前最近的独立 0.0.NN 必须等于 MM
  *   R4 worktree-seq    .claude/worktrees/<name>/build/version-seq.tsv 与 main 同版本行的 class 一致
+ *   R5 body-self       正文里紧跟「顺延至」「置入」之后的那个版本号,以及回滚行的 plans/v0.0.NN.md,必须等于文件名号。红行文本以 wrong=错号 开头。同行其它号(原号、从号)不查。
+ *     紧跟:短语后跳过空白与反引号,可读可选的 v,再读 0.0.NN。短语后不是版本号则本处不查。
+ *     豁免:整行含「本页正文搬自」则跳过。
  * 末行 VERSEQ_SUMMARY<TAB>checks=N<TAB>fail=F。rc 0 全清,1 有红,2 用法或读文件错。
  * Check: tools/check-verseq-gen.cx. */
 #pragma unisa use sys.fs
@@ -124,6 +128,73 @@ static int load_seq(const char *p) {
     return 0;
 }
 
+/* 正文自指。豁免短语与触发词用 UTF-8 字节,不写多字符常量。 */
+static int r5_exempt(const char *l, long ln) { return has(l, ln, "\xe6\x9c\xac\xe9\xa1\xb5\xe6\xad\xa3\xe6\x96\x87\xe6\x90\xac\xe8\x87\xaa", 18); }
+static int r5_defer(const char *l, long ln) { return has(l, ln, "\xe9\xa1\xba\xe5\xbb\xb6\xe8\x87\xb3", 9); }
+static int r5_place(const char *l, long ln) { return has(l, ln, "\xe7\xbd\xae\xe5\x85\xa5", 6); }
+static int r5_roll(const char *l, long ln) { return has(l, ln, "\xe5\x9b\x9e\xe6\xbb\x9a", 6); }
+static void r5fail(const char *path, int ln, int wrong, const char *text, long tn) {
+    char buf[LINEBUF];
+    long n = 0;
+    const char *pre = "wrong=";
+    for (int i = 0; pre[i] && n < LINEBUF - 2; i++) buf[n++] = pre[i];
+    char rev[8]; int ri = 0; int w = wrong;
+    if (w < 0) w = 0;
+    if (w == 0) rev[ri++] = '0';
+    while (w > 0 && ri < 8) { rev[ri++] = (char)('0' + (w % 10)); w /= 10; }
+    while (ri > 0 && n < LINEBUF - 2) buf[n++] = rev[--ri];
+    if (n < LINEBUF - 1) buf[n++] = ' ';
+    long c = tn;
+    if (c > LINEBUF - 1 - n) c = LINEBUF - 1 - n;
+    for (long i = 0; i < c; i++) buf[n++] = text[i];
+    red("R5", path, ln, buf, n);
+}
+static int r5_follow(const char *l, long ln, long after, int *out) { long i = after; int v = 0; while (i < ln && (l[i] == ' ' || l[i] == '\t' || l[i] == '`')) i++; if (i < ln && l[i] == 'v') i++; if (i + 4 <= ln && l[i] == '0' && l[i + 1] == '.' && l[i + 2] == '0' && l[i + 3] == '.') v = digits(l, ln, i + 4, out); return v; }
+static void check_r5(const char *path, const char *b, long n, int fno) {
+    if (n <= 0) return;
+    long at = line_end(b, n, 0) + 1;
+    int lineno = 2;
+    while (at < n) {
+        long e = line_end(b, n, at);
+        const char *l = b + at;
+        long ln = e - at;
+        if (ln > 0 && !r5_exempt(l, ln)) {
+            if (r5_defer(l, ln) || r5_place(l, ln)) {
+                long pos = 0;
+                while (pos < ln) {
+                    long q1 = find_at(l, ln, "\xe9\xa1\xba\xe5\xbb\xb6\xe8\x87\xb3", 9, pos);
+                    long q2 = find_at(l, ln, "\xe7\xbd\xae\xe5\x85\xa5", 6, pos);
+                    long q = -1; long step = 0;
+                    if (q1 >= 0 && (q2 < 0 || q1 <= q2)) { q = q1; step = 9; }
+                    else if (q2 >= 0) { q = q2; step = 6; }
+                    if (q < 0) break;
+                    int v;
+                    if (r5_follow(l, ln, q + step, &v)) {
+                        checks++;
+                        if (v != fno) r5fail(path, lineno, v, l, ln);
+                    }
+                    pos = q + step;
+                }
+            }
+            if (r5_roll(l, ln)) {
+                long pos = 0;
+                while (pos < ln) {
+                    long q = find_at(l, ln, "plans/v0.0.", 11, pos);
+                    if (q < 0) break;
+                    int v;
+                    if (digits(l, ln, q + 11, &v)) {
+                        checks++;
+                        if (v != fno) r5fail(path, lineno, v, l, ln);
+                    }
+                    pos = q + 11;
+                }
+            }
+        }
+        at = e + 1;
+        lineno++;
+    }
+}
+
 static void check_plan(const char *dir, const char *name) {
     char path[900];
     if (cx_fmt(path, sizeof path, "%s/%s", dir, name)) return;
@@ -136,8 +207,9 @@ static void check_plan(const char *dir, const char *name) {
     if (!digits(name, nl, find_at(name, nl, "v0.0.", 5, 0) + 5, &fno)) return;
     checks++;
     long te = minor_after(b, e, 0, &tno);
-    if (te < 0) { red("R1", path, 1, b, e); return; }
+    if (te < 0) { red("R1", path, 1, b, e); check_r5(path, b, n, fno); return; }
     if (fno != tno) red("R1", path, 1, b, e);
+    check_r5(path, b, n, fno);
     /* R2: "计划:" 后主题首个片段须是表 class 的子串 */
     long pa = find_at(b, e, "\xe8\xae\xa1\xe5\x88\x92:", 7, 0);
     if (pa < 0) return;
@@ -243,19 +315,246 @@ static void scan_worktrees(void) {
     }
 }
 
+
+/* --reorder ORDER_FILE [--write]:只改 slot 列。
+ *   重排域:状态列恰为「建议」且 note 不含「号跳过」的全部行,不论 slot 大小(公开后仍可用)。
+ *   已定行:其余一切版本行(已公开、未公开、发布中等任何中间状态、号跳过行),slot 与文件行序都不动。
+ *   ORDER_FILE 每行一个版本号 0.0.NN(可带 v 前缀),# 起注释与空行跳过;一行 ...rest 表示其余域内行按原序接在后面。
+ *   域内每个版本须恰好出现一次:缺版本(且无 ...rest)、重复、未知或域外版本、坏行一律 rc 2 拒绝。
+ *   新 slot = 已定行最大 slot + 1 起按新序连续分配;域内行整体搬到文件中最后一个已定行之后,每行 slot 以外字节逐字节不变(自校验)。
+ *   于是「最后已公开行之后第一个非已公开行」= ORDER_FILE 第一项(除非其间夹着中间状态已定行),输出 REORDER_NEXT 自证。
+ *   plans/ 正文不读写。重排后对新表在内存里重跑 R1-R5,有红 rc 1 拒绝写。
+ *   默认 dry-run 打印 MOVE 行与 -/+ 行;--write 写前重读表与开头读到的字节比对,不同 rc 2 REFUSE changed-under-us,
+ *   相同才经 sy_write_atomic 原子替换。末行 REORDER_SUMMARY。
+ *   --write 成功后必须立即提交:git commit -m ... -- build/version-seq.tsv。parse2/preflight 读 HEAD,seq_next 读工作区,不提交两边不一致。
+ *   --test-race 仅供夹具:读表后、写前重读前往表尾追加一行,模拟并发写者。 */
+#define MAXR 256
+static long rs[MAXR], rl[MAXR];
+static int rslot[MAXR], rver[MAXR], rdom[MAXR];
+static int nr;
+static int parse_rows(const char *b, long n) {
+    long at = 0; nr = 0;
+    while (at < n) {
+        long e = line_end(b, n, at);
+        if (nr >= MAXR) return -1;
+        rs[nr] = at; rl[nr] = e - at; rslot[nr] = -1; rver[nr] = -1; rdom[nr] = 0;
+        const char *l = b + at; long ln = e - at;
+        long t1 = find_at(l, ln, "\t", 1, 0);
+        int sv, mi;
+        if (ln > 0 && l[0] != '#' && t1 > 0 && digits(l, t1, 0, &sv)) {
+            long k = 0; while (k < t1 && l[k] >= '0' && l[k] <= '9') k++;
+            long t2 = find_at(l, ln, "\t", 1, t1 + 1);
+            if (k == t1 && t2 > t1 && minor_after(l, t2, t1 + 1, &mi) >= 0) { rslot[nr] = sv; rver[nr] = mi; }
+        }
+        nr++;
+        at = e + 1;
+    }
+    return 0;
+}
+/* 第 i 行状态列;返回长度,*st 指向起点;无状态列返回 -1 */
+static long row_state(const char *b, int i, const char **st) {
+    const char *l = b + rs[i]; long ln = rl[i];
+    long t1 = find_at(l, ln, "\t", 1, 0), t2 = t1 >= 0 ? find_at(l, ln, "\t", 1, t1 + 1) : -1, t3 = t2 >= 0 ? find_at(l, ln, "\t", 1, t2 + 1) : -1;
+    if (t3 < 0) return -1;
+    long t4 = find_at(l, ln, "\t", 1, t3 + 1);
+    if (t4 < 0) t4 = ln;
+    *st = l + t3 + 1;
+    return t4 - t3 - 1;
+}
+/* 可移动:状态恰为「建议」且整行不含「号跳过」;其余版本行都是已定行(含发布中等中间状态) */
+static int row_movable(const char *b, int i) {
+    const char *st; long sl = row_state(b, i, &st);
+    if (sl != 6 || !mm_same(st, "\xe5\xbb\xba\xe8\xae\xae", 6)) return 0;
+    return !has(b + rs[i], rl[i], "\xe5\x8f\xb7\xe8\xb7\xb3\xe8\xbf\x87", 9);
+}
+static int row_published(const char *b, int i) {
+    const char *st; long sl = row_state(b, i, &st);
+    return sl == 9 && mm_same(st, "\xe5\xb7\xb2\xe5\x85\xac\xe5\xbc\x80", 9);
+}
+static int refuse(const char *why, const char *what) { sy_printf("REORDER\tREFUSE\t%s\t%s\n", why, what); return 2; }
+static int do_reorder(const char *ofile, int wr, int race) {
+    char sp[900];
+    if (cx_fmt(sp, sizeof sp, "%s/build/version-seq.tsv", root)) return 2;
+    long n; char *b = slurp(sp, &n);
+    if (!b) return refuse("missing", sp);
+    if (parse_rows(b, n) < 0) return refuse("too-many-rows", sp);
+    int nd = 0;
+    for (int i = 0; i < nr; i++) if (rver[i] >= 0 && row_movable(b, i)) { rdom[i] = 1; nd++; }
+    int maxset = -1, lastset = -1;
+    for (int i = 0; i < nr; i++) if (rver[i] >= 0 && !rdom[i]) { if (rslot[i] > maxset) maxset = rslot[i]; lastset = i; }
+    for (int i = 0; i < nr; i++) for (int j = i + 1; j < nr; j++) if (rver[i] >= 0 && rver[i] == rver[j]) return refuse("table-dup-version", sp);
+    long on; char *o = slurp(ofile, &on);
+    if (!o) return refuse("missing-order", ofile);
+    int ord[MAXR], no = 0, rest = 0;
+    long at = 0;
+    while (at < on) {
+        long e = line_end(o, on, at);
+        long s = at, t = e;
+        while (s < t && (o[s] == ' ' || o[s] == '\t' || o[s] == '\r')) s++;
+        while (t > s && (o[t - 1] == ' ' || o[t - 1] == '\t' || o[t - 1] == '\r')) t--;
+        at = e + 1;
+        if (s == t || o[s] == '#') continue;
+        if (t - s == 7 && mm_same(o + s, "...rest", 7)) { rest = 1; continue; }
+        long p = s; int v;
+        if (o[p] == 'v') p++;
+        long q = p + 4;
+        while (q < t && o[q] >= '0' && o[q] <= '9') q++;
+        char tok[80]; long tl = t - s < 79 ? t - s : 79; mm_copy(tok, 80, o + s, tl); tok[tl] = 0;
+        if (!(p + 4 < t && mm_same(o + p, "0.0.", 4) && q == t && digits(o, t, p + 4, &v))) return refuse("bad-line", tok);
+        int ri = -1;
+        for (int i = 0; i < nr; i++) if (rver[i] == v) ri = i;
+        if (ri < 0) return refuse("unknown-version", tok);
+        if (!rdom[ri]) return refuse("outside-domain", tok);
+        for (int k = 0; k < no; k++) if (ord[k] == ri) return refuse("duplicate", tok);
+        if (no >= MAXR) return refuse("too-many", tok);
+        ord[no++] = ri;
+    }
+    for (int i = 0; i < nr; i++) if (rdom[i]) {
+        int seen = 0;
+        for (int k = 0; k < no; k++) if (ord[k] == i) seen = 1;
+        if (!seen) {
+            if (!rest) { char tok[40]; cx_fmt(tok, sizeof tok, "0.0.%d", rver[i]); return refuse("missing-version", tok); }
+            ord[no++] = i;
+        }
+    }
+    /* 新 slot:已定行最大 slot 之后按新序连续分配 */
+    int nslot[MAXR];
+    for (int i = 0; i < nr; i++) nslot[i] = rslot[i];
+    for (int k = 0; k < no; k++) nslot[ord[k]] = maxset + 1 + k;
+    /* 拼新表:非域内行按原序不动,域内行按新序整体放在最后一个已定行之后 */
+    long cap = n + (long)nr * 8 + 16;
+    char *nb = mm_alloc(cap); long nn = 0; int moved = 0, nl = 0;
+    int seqi[MAXR * 2], ns = 0;
+    for (int i = 0; i < nr; i++) {
+        if (rdom[i]) continue;
+        seqi[ns++] = i;
+        if (i == lastset) for (int k = 0; k < no; k++) seqi[ns++] = ord[k];
+    }
+    if (lastset < 0) { int base = ns; for (int k = ns - 1; k >= 0; k--) seqi[k + no] = seqi[k]; for (int k = 0; k < no; k++) seqi[k] = ord[k]; ns = base + no; }
+    for (int x = 0; x < ns; x++) {
+        int src = seqi[x];
+        if (nl) nb[nn++] = '\n';
+        nl = 1;
+        if (rdom[src]) {
+            const char *l = b + rs[src]; long t1 = find_at(l, rl[src], "\t", 1, 0);
+            char num[16]; cx_fmt(num, sizeof num, "%d", nslot[src]);
+            long k = tx_len(num, 16);
+            mm_copy(nb + nn, cap - nn, num, k); nn += k;
+            mm_copy(nb + nn, cap - nn, l + t1, rl[src] - t1); nn += rl[src] - t1;
+        } else { mm_copy(nb + nn, cap - nn, b + rs[src], rl[src]); nn += rl[src]; }
+    }
+    if (n > 0 && b[n - 1] == '\n') nb[nn++] = '\n';
+    /* 自校验:新表每行 slot 以外字节等于原表同版本行;非版本行按原序逐字节相等;版本集合不变;slot 唯一 */
+    {   long sv_rs[MAXR], sv_rl[MAXR]; int sv_ver[MAXR], sv_slot[MAXR], snr = nr;
+        for (int i = 0; i < nr; i++) { sv_rs[i] = rs[i]; sv_rl[i] = rl[i]; sv_ver[i] = rver[i]; sv_slot[i] = nslot[i]; }
+        if (parse_rows(nb, nn) < 0 || nr != snr) return refuse("selfcheck-rows", sp);
+        int fk = 0;
+        for (int i = 0; i < nr; i++) {
+            if (rver[i] < 0) {
+                while (fk < snr && sv_ver[fk] >= 0) fk++;
+                if (fk >= snr || rl[i] != sv_rl[fk] || !mm_same(nb + rs[i], b + sv_rs[fk], rl[i])) return refuse("selfcheck-fixed-row", sp);
+                fk++;
+                continue;
+            }
+            int j = -1;
+            for (int k = 0; k < snr; k++) if (sv_ver[k] == rver[i]) j = k;
+            if (j < 0 || rslot[i] != sv_slot[j]) return refuse("selfcheck-version", sp);
+            long a = find_at(nb + rs[i], rl[i], "\t", 1, 0), c = find_at(b + sv_rs[j], sv_rl[j], "\t", 1, 0);
+            if (rl[i] - a != sv_rl[j] - c || !mm_same(nb + rs[i] + a, b + sv_rs[j] + c, rl[i] - a)) return refuse("selfcheck-bytes", sp);
+            for (int k = 0; k < i; k++) if (rver[k] >= 0 && rslot[k] == rslot[i]) return refuse("selfcheck-slot-dup", sp);
+            if (rslot[i] != sv_slot[j]) return refuse("selfcheck-slot", sp);
+        }
+        /* 差异 */
+        for (int k = 0; k < no; k++) {
+            int i = ord[k];
+            /* 原 slot 在 b 中 */
+            const char *l = b + sv_rs[i]; long t1 = find_at(l, sv_rl[i], "\t", 1, 0);
+            int old; digits(l, t1, 0, &old);
+            if (old != sv_slot[i]) {
+                moved++;
+                long cl = sv_rl[i] < 160 ? sv_rl[i] : 160;
+                while (cl > 0 && cl < sv_rl[i] && ((unsigned char)l[cl] & 0xC0) == 0x80) cl--;
+                for (long x = 0; x < cl; x++) linebuf[x] = l[x] == '\t' ? ' ' : l[x];
+                linebuf[cl] = 0;
+                sy_printf("MOVE\t0.0.%d\tslot %d -> %d\n-\t%s\n", sv_ver[i], old, sv_slot[i], linebuf);
+                char num[16]; cx_fmt(num, sizeof num, "%d", sv_slot[i]);
+                sy_printf("+\t%s%s\n", num, linebuf + t1);
+            }
+        }
+        /* 消费者口径自证:最后已公开行之后第一个非已公开版本行 */
+        int lp = -1, nx = -1;
+        for (int i = 0; i < nr; i++) if (rver[i] >= 0 && row_published(nb, i)) lp = i;
+        for (int i = lp + 1; i < nr && nx < 0; i++) if (rver[i] >= 0 && !row_published(nb, i)) nx = i;
+        if (nx >= 0) {
+            int indom = 0;
+            for (int k = 0; k < no; k++) if (sv_ver[ord[k]] == rver[nx]) indom = 1;
+            sy_printf("REORDER_NEXT\t0.0.%d\t%s\n", rver[nx], indom ? "domain-first" : "settled-in-between");
+            if (indom && no > 0 && rver[nx] != sv_ver[ord[0]]) return refuse("selfcheck-next", sp);
+        }
+    }
+    /* 新表重跑 R1-R5(只读) */
+    nt = 0; failed = 0; checks = 0;
+    {   long at2 = 0;
+        while (at2 < nn) {
+            long e = line_end(nb, nn, at2);
+            char *l = nb + at2; long ln = e - at2;
+            long t1 = find_at(l, ln, "\t", 1, 0);
+            long t2 = t1 > 0 ? find_at(l, ln, "\t", 1, t1 + 1) : -1;
+            long t3 = t2 > 0 ? find_at(l, ln, "\t", 1, t2 + 1) : -1;
+            long t4 = t3 > 0 ? find_at(l, ln, "\t", 1, t3 + 1) : -1;
+            int mi;
+            if (ln > 0 && l[0] != '#' && t4 > t3 && t3 > t2 && minor_after(l, t2, t1 + 1, &mi) >= 0 && nt < MAXV) {
+                long cl = t3 - (t2 + 1), sl = t4 - (t3 + 1);
+                tminor[nt] = mi;
+                tcls[nt] = mm_alloc(cl + 1); mm_copy(tcls[nt], cl + 1, l + t2 + 1, cl); tcls[nt][cl] = 0;
+                tstate[nt] = mm_alloc(sl + 1); mm_copy(tstate[nt], sl + 1, l + t3 + 1, sl); tstate[nt][sl] = 0;
+                nt++;
+            }
+            at2 = e + 1;
+        }
+    }
+    scan_plans();
+    scan_palace();
+    scan_worktrees();
+    sy_printf("VERSEQ_SUMMARY\tchecks=%d\tfail=%d\n", checks, failed);
+    if (failed) { sy_printf("REORDER_SUMMARY\tdomain=%d\tmoved=%d\twrite=0\trules=red\n", nd, moved); return 1; }
+    int w = 0;
+    int changed = nn != n || !mm_same(nb, b, n);
+    if (wr && changed) {
+        if (race) {
+            char *rb = mm_alloc(n + 8); mm_copy(rb, n + 8, b, n); mm_copy(rb + n, 8, "#race\n", 6);
+            if (sy_write_atomic(sp, rb, n + 6, 0644)) return refuse("race-hook", sp);
+        }
+        long cn; char *cb = slurp(sp, &cn);
+        if (!cb || cn != n || !mm_same(cb, b, n)) return refuse("changed-under-us", sp);
+        int rc = sy_write_atomic(sp, nb, nn, 0644);
+        if (rc) return refuse("write", sp);
+        w = 1;
+    }
+    sy_printf("REORDER_SUMMARY\tdomain=%d\tmoved=%d\twrite=%d\trules=green\n", nd, moved, w);
+    if (w) sy_printf("REORDER_NOTE\t须立即提交:git commit -m ... -- build/version-seq.tsv(parse2/preflight 读 HEAD,seq_next 读工作区,不提交两边不一致)\n");
+    return 0;
+}
+
 static int usage(void) {
-    sy_printf("usage: verseq-gen.cx -- --check [--root DIR]\n");
+    sy_printf("usage: verseq-gen.cx -- --check [--root DIR]\n       verseq-gen.cx -- --reorder ORDER_FILE [--write] [--root DIR]\n"
+              "       --write 成功后须立即提交:git commit -m ... -- build/version-seq.tsv\n");
     return 2;
 }
 
 int main(int argc, char **argv) {
-    int mode = 0;
+    int mode = 0, wr = 0, race = 0;
+    const char *ofile = 0;
     for (int a = 1; a < argc; a++) {
-        if (tx_eqz(argv[a], "--check")) mode = 1;
+        if (tx_eqz(argv[a], "--check")) mode = mode ? -1 : 1;
+        else if (tx_eqz(argv[a], "--reorder") && a + 1 < argc) { mode = mode ? -1 : 2; ofile = argv[++a]; }
+        else if (tx_eqz(argv[a], "--write")) wr = 1;
+        else if (tx_eqz(argv[a], "--test-race")) race = 1;
         else if (tx_eqz(argv[a], "--root") && a + 1 < argc) root = argv[++a];
         else return usage();
     }
-    if (!mode) return usage();
+    if (mode <= 0 || (wr && mode != 2)) return usage();
+    if (mode == 2) return do_reorder(ofile, wr, race);
     char sp[900];
     if (cx_fmt(sp, sizeof sp, "%s/build/version-seq.tsv", root)) return 2;
     if (load_seq(sp) < 0) { sy_printf("VERSEQ\tREFUSE\tmissing %s\n", sp); return 2; }

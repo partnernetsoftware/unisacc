@@ -750,6 +750,27 @@ int main(int argc,char **argv) {
         args[15]="--no-run";args[6]="cr-args-sp";args[8]="REGISTER_FIXTURE_OK";args[14]="--cases lock";rc=run(args,abuf,sizeof abuf);ok(rc==0&&registry_has(bpath,"\t--cases;lock\tinterfaces.cr-args-sp\trc0:"),"--args '--cases lock' is stored as --cases;lock");
         args[6]="cr-args-eq";args[14]="--cases=lock";rc=run(args,abuf,sizeof abuf);ok(rc==0&&registry_has(bpath,"\t--cases;lock\tinterfaces.cr-args-eq\trc0:"),"--args '--cases=lock' is stored as --cases;lock");
         args[6]="cr-args-mix";args[14]="--cases=lock  --x=1 k=v";rc=run(args,abuf,sizeof abuf);ok(rc==0&&registry_has(bpath,"\t--cases;lock;--x;1;k=v\tinterfaces.cr-args-mix\trc0:"),"mixed spaces and = fold per token, plain k=v is kept");
+        /* batch-product-inputs.tsv (cxlib.bpidecl): a require placeholder needs an id row; only ENOENT counts as an absent table */
+        {   char dpath[4400], hbp[65], ap[65];
+            if (cx_fmt(dpath, sizeof dpath, "%s/batch-product-inputs.tsv", tables)) die("path bound", "decl");
+            sha_of(bpath, hbp);
+            { const char *t1 = "kind\tkey\tinputs\tbasis\nrequire\t{candidate}\t-\tx\n"; if (cx_write(dpath, t1, strlen(t1))) die("write", dpath); }
+            args[6]="cr-bpi";args[14]="{out};{candidate}";rc=run(args,abuf,sizeof abuf);
+            ok(rc==2&&strstr(abuf,"product inputs undeclared"),"register refuses a require placeholder without an id row in the declaration table");
+            sha_of(bpath,ap);ok(!strcmp(hbp,ap),"the undeclared refusal left batches.tsv byte for byte");
+            { const char *t2 = "kind\tkey\tinputs\tbasis\nrequire\t{candidate}\t-\tx\nid\tcr-bpi-ok\ttools/a.cx\tx\n"; if (cx_write(dpath, t2, strlen(t2))) die("write", dpath); }
+            args[6]="cr-bpi-ok";rc=run(args,abuf,sizeof abuf);
+            ok(rc==0&&registry_has(bpath,"\t{out};{candidate}\tinterfaces.cr-bpi-ok\trc0:"),"register accepts the same placeholder once the id row is declared");
+            sy_unlink(dpath);
+            if (sy_mkdir(dpath, 0700)) die("mkdir", dpath);
+            sha_of(bpath, hbp);
+            args[6]="cr-bpi-dir";rc=run(args,abuf,sizeof abuf);
+            ok(rc==2&&strstr(abuf,"cannot read the product-inputs declaration table"),"a declaration table that exists but cannot be read is refused, never treated as absent");
+            sha_of(bpath,ap);ok(!strcmp(hbp,ap),"the unreadable-table refusal left batches.tsv byte for byte");
+            sy_rmdir(dpath);
+            args[6]="cr-bpi-none";rc=run(args,abuf,sizeof abuf);
+            ok(rc==0,"an absent declaration table (ENOENT) is no declaration: the call goes through");
+        }
         args[6]="cr-args-semi";args[14]="--cases;lock";rc=run(args,abuf,sizeof abuf);ok(rc==0&&registry_has(bpath,"\t--cases;lock\tinterfaces.cr-args-semi\trc0:"),"an already normalised args field is unchanged");args[15]=0;
         /* --no-run: rows written, batch not run (marker never printed, so a real run would roll back) */
         {   char *nr[]={"env",envtables,"sh","./unisacc.com",DRIVER,"--","cr-nr-ok",fx,"NEVER_PRINTED","no-run row",fx,"interfaces","--no-run",0};
@@ -975,6 +996,53 @@ int main(int argc,char **argv) {
             if (!cx_fmt(p, sizeof p, "%s/.register.lock", tables)) sy_unlink(p);
             if (!cx_fmt(p, sizeof p, "%s/.register.holder-done", tables)) sy_unlink(p);
             if (sy_rmdir(tables) != 0) { checks++; failed++; printf("FAIL\tprivate copy not removed\n"); }
+        }
+    }
+    /* --planned and --promote ID */
+    {   char ptables[4096], pbpath[4400], pcpath[4400];
+        if (cx_fmt(ptables, sizeof ptables, "%s/reg-plan-%d", sy_tmpdir(), sy_pid()) || sy_mkdir(ptables, 0700) != 0) {
+            checks++; failed++; printf("FAIL\tplanned mkdir\n");
+        } else {
+            setenv("UNISACC_TABLES", ptables, 1);
+            size_t bn = 0, cn = 0; char *bb = cx_read(rbpath, &bn), *cb = cx_read(rcpath, &cn);
+            if (cx_fmt(pbpath, sizeof pbpath, "%s/batches.tsv", ptables) || cx_fmt(pcpath, sizeof pcpath, "%s/coverage.tsv", ptables)
+                || !bb || !cb || cx_write(pbpath, bb, bn) || cx_write(pcpath, cb, cn)) {
+                checks++; failed++; printf("FAIL\tplanned copy\n");
+            } else {
+                char out[65536]; int rc;
+                const char *pid_bad = "check-reg-plan-bad";
+                const char *pid_ok = "check-reg-plan-ok";
+                char *v1[] = {"sh", "./unisacc.com", "tools/register.cx", "--", "--planned", pid_bad, "tools/precommit-preview.cx", "WRONG_MARKER", "planned bad", "tools/precommit-preview.cx", 0};
+                rc = run(v1, out, sizeof out);
+                ok(rc == 0 && strstr(out, "status=REGISTERED_PLANNED") != 0 && !strstr(out, "BATCH_RUN\t"), "planned registers without trial run");
+                { size_t zn = 0; char *zb = cx_read(pbpath, &zn); size_t zn2 = 0; char *zc = cx_read(pcpath, &zn2);
+                  char *lb = zb ? strstr(zb, pid_bad) : 0, *lc = zc ? strstr(zc, pid_bad) : 0;
+                  char *eb = lb ? strchr(lb, '\n') : 0, *ec = lc ? strchr(lc, '\n') : 0;
+                  if (eb) *eb = 0; if (ec) *ec = 0;
+                  ok(lb && lc && strstr(lb, "\tPLANNED\t") && strstr(lc, "\tPLANNED\t"), "planned writes PLANNED to both tables"); }
+
+                char *vlist[] = {"sh", "./unisacc.com", "tests/run.cx", "--", "--list", 0};
+                rc = run(vlist, out, sizeof out);
+                ok(rc == 0 && strstr(out, "metadata_valid=1") != 0, "run.cx --list validates PLANNED metadata");
+
+                char *vall[] = {"sh", "./unisacc.com", "tests/run.cx", "--", "--all", 0};
+                rc = run(vall, out, sizeof out);
+                ok(rc != 0 && strstr(out, "NOT_RUN") != 0 && strstr(out, "PLANNED") != 0, "run.cx --all exits non-zero and shows NOT_RUN PLANNED");
+
+                char *vmux[] = {"sh", "./unisacc.com", "tools/register.cx", "--", "--planned", "--no-run", pid_ok, "tools/check-register.cx", "CX_REGISTER", "mux", "tools/register.cx", 0};
+                rc = run(vmux, out, sizeof out);
+                ok(rc != 0, "--planned with --no-run refused");
+
+                char *vprom_bad[] = {"sh", "./unisacc.com", "tools/register.cx", "--", "--promote", pid_bad, 0};
+                rc = run(vprom_bad, out, sizeof out);
+                ok(rc != 0 && strstr(out, "--promote 未实现,重写中") != 0, "--promote refused by name while rewriting");
+            }
+            unsetenv("UNISACC_TABLES");
+            if (!cx_fmt(pbpath, sizeof pbpath, "%s/batches.tsv", ptables)) sy_unlink(pbpath);
+            if (!cx_fmt(pcpath, sizeof pcpath, "%s/coverage.tsv", ptables)) sy_unlink(pcpath);
+            if (!cx_fmt(pbpath, sizeof pbpath, "%s/.register.lock", ptables)) sy_unlink(pbpath);
+            if (!cx_fmt(pbpath, sizeof pbpath, "%s/.register.holder-done", ptables)) sy_unlink(pbpath);
+            sy_rmdir(ptables);
         }
     }
     printf("CX_REGISTER\tchecks=%d\tfailed=%d\n", checks, failed);

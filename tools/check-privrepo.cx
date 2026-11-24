@@ -1,0 +1,197 @@
+/* check-privrepo.cx -- contracts of tools/cxlib/privrepo.cx.
+ *   sh ./unisacc.com tools/check-privrepo.cx
+ * The check builds its own fixture "shared" repository (with a staged file, an untracked file and a hook), moves into it, and tries
+ * to reach it every way: the repository itself, a sub-directory, a symlink, a relative path, other repositories (unmarked, wrongly
+ * named, marker-less), redirecting global options, and every repository-locating environment variable.  Shared state (index hash,
+ * HEAD, status, object count) must be identical afterwards.  A pre-commit hook that itself uses pr_make/pr_git must not disturb the
+ * outer commit.  It never uses the checkout it is started from as a target.  The hidden argument --hook-body is the hook's side. */
+#pragma unisa use cxlib.privrepo
+#pragma unisa use cxlib.ckrun
+#pragma unisa use sys.fs
+#pragma unisa use sys.env
+#pragma unisa use sys.proc
+#pragma unisa use text.text
+
+static int bad, checks;
+static int sh(const char *script, char *out, int cap) { return ckk_sh_t("check-privrepo", script, out, cap, 30); }
+
+static char *COMMIT[] = { "-c", "user.name=x", "-c", "user.email=x@x", "commit", "-q", "-m", "private", 0 };
+static char *ADDALL[] = { "add", "-A", 0 };
+static char *STATUS[] = { "status", "--porcelain", 0 };
+static char *HEAD[] = { "rev-parse", "HEAD", 0 };
+
+/* the side of the pre-commit hook: a private repository, a file, add, commit */
+static int hook_body(void) {
+    char priv[4096], out[1024], fp[4200]; int rc;
+    if (pr_make(priv, sizeof priv) != 0) return 10;
+    cx_fmt(fp, sizeof fp, "%s/hookfile", priv);
+    if (sy_write_file(fp, "from-hook\n", 10, 0600) != 0) return 11;
+    rc = pr_git(priv, ADDALL, out, sizeof out, 20); if (rc != 0) return 12;
+    rc = pr_git(priv, COMMIT, out, sizeof out, 20); if (rc != 0) return 13;
+    cx_fmt(fp, sizeof fp, "rm -rf '%s'", priv);
+    sh(fp, 0, 0);
+    return 0;
+}
+
+/* index hash, HEAD, status and object count of the repository at DIR, as one string */
+static void snap(const char *dir, char *out, int cap) {
+    char sc[2400];
+    cx_fmt(sc, sizeof sc, "cd '%s' && { sha256sum .git/index; git rev-parse HEAD; git status --porcelain; find .git/objects -type f | wc -l; } 2>&1", dir);
+    sh(sc, out, cap);
+}
+
+int main(int argc, char **argv) {
+    char orig[4096], tmpd[1100], S[1200], O[1200], P[1200], F[1200], D[1200], priv[4096], out[2048], sc[4800], s0[2048], s1[2048], pc[4096];
+    int rc, i;
+    if (argc > 1 && !strcmp(argv[1], "--hook-body")) return hook_body();
+    if (sy_cwd(orig, (int)sizeof orig) < 0) return 2;
+    cx_fmt(tmpd, sizeof tmpd, "%s", sy_tmpdir());
+    cx_fmt(S, sizeof S, "%s/psc-shared-%d", tmpd, sy_pid());
+    cx_fmt(O, sizeof O, "%s/psc-other-%d", tmpd, sy_pid());
+    cx_fmt(P, sizeof P, "%s/psc-plain-%d", tmpd, sy_pid());
+    cx_fmt(F, sizeof F, "%s/unisacc-privrepo-fake-%d", tmpd, sy_pid());
+    cx_fmt(D, sizeof D, "%s/psc-gone-%d", tmpd, sy_pid());
+    cx_fmt(sc, sizeof sc,
+           "set -e; rm -rf '%s' '%s' '%s' '%s' '%s'; mkdir -p '%s/sub' '%s' '%s' '%s' '%s' && "
+           "for d in '%s' '%s' '%s'; do git -C \"$d\" init -q . ; done && "
+           "printf a > '%s/a' && git -C '%s' add a && git -C '%s' -c user.name=x -c user.email=x@x commit -qm base && "
+           "printf b > '%s/b' && git -C '%s' add b && printf u > '%s/u' && printf o > '%s/o1' && echo FX_OK",
+           S, O, P, F, D, S, O, P, F, D, S, O, F, S, S, S, S, S, S, O);
+    rc = sh(sc, out, sizeof out);
+    if (rc != 0 || !ckk_has(out, sizeof out, "FX_OK")) { printf("fixture setup failed: %.300s\n", out); return 2; }
+    snap(S, s0, sizeof s0);
+    ckk_ok(strlen(s0) > 60, "the fixture shared repository has an index, a HEAD, a staged and an untracked file");
+    if (sy_chdir(S) != 0) return 2;
+
+    rc = pr_make(priv, sizeof priv);
+    cx_fmt(pc, sizeof pc, "%s/.git/unisacc-privrepo", priv);
+    ckk_ok(rc == 0 && priv[0] == '/' && sy_exists(pc) == 1 && strstr(priv, "unisacc-privrepo-") != 0, "pr_make creates a marked private repository below the temp directory");
+    cx_fmt(sc, sizeof sc, "printf x > '%s/f1'", priv);
+    sh(sc, out, sizeof out);
+    ckk_ok(pr_git(priv, STATUS, out, sizeof out, 20) == 0 && strstr(out, "f1") != 0, "pr_git runs git in the private repository");
+    ckk_ok(pr_git(priv, ADDALL, out, sizeof out, 20) == 0 && pr_git(priv, COMMIT, out, sizeof out, 20) == 0 && pr_git(priv, HEAD, out, sizeof out, 20) == 0 && strlen(out) >= 40, "add, commit and rev-parse work in the private repository");
+
+    /* shared repository and look-alikes are refused before git runs */
+    rc = pr_git(S, COMMIT, out, sizeof out, 20);
+    ckk_ok(rc == -2 && strstr(out, "unisacc-privrepo-") != 0, "the shared repository itself is refused");
+    cx_fmt(sc, sizeof sc, "%s/sub", S);
+    ckk_ok(pr_git(sc, COMMIT, out, sizeof out, 20) == -2, "a sub-directory of the shared repository is refused");
+    cx_fmt(sc, sizeof sc, "%s/unisacc-privrepo-link-%d", tmpd, sy_pid());
+    { char c2[4800]; cx_fmt(c2, sizeof c2, "rm -f '%s'; ln -s '%s' '%s'", sc, S, sc); sh(c2, out, sizeof out); }
+    rc = pr_git(sc, COMMIT, out, sizeof out, 20);
+    ckk_ok(rc == -2 && strstr(out, "canonical") != 0, "a symlink named like a private repository but pointing at the shared one is refused");
+    { char c2[4800]; cx_fmt(c2, sizeof c2, "rm -f '%s'", sc); sh(c2, 0, 0); }
+    rc = pr_git(".", COMMIT, out, sizeof out, 20);
+    ckk_ok(rc == -2 && strstr(out, "absolute") != 0, "a relative path is refused");
+    ckk_ok(pr_git(P, COMMIT, out, sizeof out, 20) == -2, "a plain directory is refused");
+    cx_fmt(sc, sizeof sc, "%s/no-such-%d", tmpd, sy_pid());
+    ckk_ok(pr_git(sc, COMMIT, out, sizeof out, 20) == -2, "a missing directory is refused");
+    rc = pr_git(O, COMMIT, out, sizeof out, 20);
+    ckk_ok(rc == -2 && strstr(out, "unisacc-privrepo-") != 0, "another ordinary repository is refused although the working directory is elsewhere");
+    rc = pr_git(F, COMMIT, out, sizeof out, 20);
+    ckk_ok(rc == -2 && strstr(out, "marker") != 0, "a repository with the right name but no marker is refused");
+    {   char c2[4800]; cx_fmt(c2, sizeof c2, "printf 'privrepo-v1\\n' > '%s/.git/unisacc-privrepo'", O); sh(c2, 0, 0); }
+    ckk_ok(pr_git(O, COMMIT, out, sizeof out, 20) == -2, "a forged marker in a repository outside the unisacc-privrepo-* naming is still refused");
+
+    /* the working directory is not what makes the shared repository shared */
+    if (sy_chdir(P) != 0) return 2;
+    ckk_ok(pr_git(priv, STATUS, out, sizeof out, 20) == 0, "from a working directory that is no repository a private repository is usable");
+    rc = pr_git(O, COMMIT, out, sizeof out, 20);
+    ckk_ok(rc == -2, "from a working directory that is no repository another ordinary repository is still refused");
+    if (sy_chdir(priv) != 0) return 2;
+    ckk_ok(pr_git(O, COMMIT, out, sizeof out, 20) == -2, "from inside a private repository another ordinary repository is still refused");
+    rc = pr_git(priv, STATUS, out, sizeof out, 20);
+    ckk_ok(rc == -2 && strstr(out, "working directory's repository") != 0, "a private repository whose directory is the caller's working directory's repository is refused");
+    {   char lk[4800], c2[9700];   /* a directory named like a private one whose .git is a link to a real private repository's .git */
+        cx_fmt(lk, sizeof lk, "%s/unisacc-privrepo-gitlink-%d", tmpd, sy_pid());
+        cx_fmt(c2, sizeof c2, "rm -rf '%s'; mkdir '%s' && ln -s '%s/.git' '%s/.git'", lk, lk, priv, lk);
+        sh(c2, 0, 0);
+        rc = pr_git(lk, STATUS, out, sizeof out, 20);
+        ckk_ok(rc == -2, "a directory whose .git is a link to a marked private repository's .git is refused");
+        cx_fmt(c2, sizeof c2, "rm -rf '%s'", lk); sh(c2, 0, 0);
+        cx_fmt(lk, sizeof lk, "%s/unisacc-privrepo-nested", priv);
+        ckk_ok(pr_git(lk, STATUS, out, sizeof out, 20) == -2, "a directory nested inside a marked private repository is refused");
+    }
+    if (sy_chdir(D) != 0) return 2;
+    { char c2[4800]; cx_fmt(c2, sizeof c2, "rmdir '%s'", D); sh(c2, 0, 0); }
+    rc = pr_git(priv, STATUS, out, sizeof out, 20);
+    ckk_ok(rc == -2 || rc == -1, "a working directory that cannot be probed fails closed, never open");
+    if (sy_chdir(S) != 0) return 2;
+
+    /* redirecting global options */
+    { char *a1[] = { "-C", S, "status", 0 }; ckk_ok(pr_git(priv, a1, out, sizeof out, 20) == -2, "the -C global option is refused"); }
+    { char gd[1400], *a2[3]; cx_fmt(gd, sizeof gd, "--git-dir=%s/.git", S); a2[0] = gd; a2[1] = "status"; a2[2] = 0; ckk_ok(pr_git(priv, a2, out, sizeof out, 20) == -2, "the --git-dir global option is refused"); }
+    { char wt[1400], *a3[3]; cx_fmt(wt, sizeof wt, "--work-tree=%s", S); a3[0] = wt; a3[1] = "status"; a3[2] = 0; ckk_ok(pr_git(priv, a3, out, sizeof out, 20) == -2, "the --work-tree global option is refused"); }
+    { char *a4[] = { "-c", "user.name=y", "status", "-s", 0 }; ckk_ok(pr_git(priv, a4, out, sizeof out, 20) == 0, "-c VAR=VALUE before the sub-command is allowed"); }
+    { char wt[1400], *a5[5]; cx_fmt(wt, sizeof wt, "core.worktree=%s", S); a5[0] = "-c"; a5[1] = wt; a5[2] = "status"; a5[3] = "-s"; a5[4] = 0; ckk_ok(pr_git(priv, a5, out, sizeof out, 20) == -2, "-c core.worktree=SHARED is refused: only user.name and user.email may be set with -c"); }
+    { char *a6[] = { "-c", "core.hooksPath=/nonexistent-hooks", "status", "-s", 0 }; ckk_ok(pr_git(priv, a6, out, sizeof out, 20) == -2, "-c with any other key is refused"); }
+    { char *a7[] = { "-c", 0 }; ckk_ok(pr_git(priv, a7, out, sizeof out, 20) == -2, "-c without a value is refused"); }
+
+    snap(S, s1, sizeof s1);
+    ckk_ok(strcmp(s0, s1) == 0, "the shared repository's index hash, HEAD, status and object count are unchanged by every refused call");
+
+    /* the clearing prefix names every variable git itself calls repository-local (git rev-parse --local-env-vars), plus the ones git does not list */
+    {   char eu[1400], small[10], lv[3000], *ln, *nx; int missing = 0, seen = 0;
+        ckk_ok(pr_envu(eu, sizeof eu) == 0 && strncmp(eu, "env -u ", 7) == 0 && eu[strlen(eu) - 1] == ' ', "pr_envu writes an env -u prefix");
+        ckk_ok(pr_envu(small, sizeof small) == -1, "pr_envu refuses a destination that is too small");
+        if (sh("git rev-parse --local-env-vars", lv, sizeof lv) == 0) {
+            for (ln = lv; *ln; ln = nx) {
+                char nmv[120], pat[140]; int k = 0;
+                nx = ln; while (*nx && *nx != '\n') nx++;
+                while (ln + k < nx && k < 100) { nmv[k] = ln[k]; k++; }
+                nmv[k] = 0; if (*nx) nx++;
+                if (strncmp(nmv, "GIT_", 4) != 0) continue;
+                seen++; cx_fmt(pat, sizeof pat, " -u %s ", nmv);
+                if (!strstr(eu, pat)) { missing++; printf("missing from the prefix: %s\n", nmv); }
+            }
+        }
+        ckk_ok(seen > 8 && missing == 0, "every variable of git rev-parse --local-env-vars is cleared by the prefix");
+        ckk_ok(strstr(eu, " -u GIT_INTERNAL_SUPER_PREFIX ") != 0 && strstr(eu, " -u GIT_QUARANTINE_PATH ") != 0, "the variables git does not list as local are cleared too");
+    }
+
+    /* repository-locating environment variables must not carry a private call into the shared repository */
+    {   char ix[1400], od[1400], gd[1400], wt[1400]; const char *nm[10], *val[10]; int n = 0;
+        cx_fmt(ix, sizeof ix, "%s/.git/index", S); cx_fmt(od, sizeof od, "%s/.git/objects", S); cx_fmt(gd, sizeof gd, "%s/.git", S); cx_fmt(wt, sizeof wt, "%s", S);
+        nm[n] = "GIT_INDEX_FILE"; val[n++] = ix;
+        nm[n] = "GIT_OBJECT_DIRECTORY"; val[n++] = od;
+        nm[n] = "GIT_DIR"; val[n++] = gd;
+        nm[n] = "GIT_WORK_TREE"; val[n++] = wt;
+        nm[n] = "GIT_COMMON_DIR"; val[n++] = gd;
+        nm[n] = "GIT_ALTERNATE_OBJECT_DIRECTORIES"; val[n++] = od;
+        nm[n] = "GIT_NAMESPACE"; val[n++] = "shared-ns";
+        nm[n] = "GIT_PREFIX"; val[n++] = "sub/";
+        nm[n] = "GIT_INTERNAL_SUPER_PREFIX"; val[n++] = "shared-sub/";
+        for (i = 0; i < n; i++) {
+            char p2[4096], fp[4300], why[200]; int r1, r2, r3;
+            sy_setenv(nm[i], val[i], 1);
+            r1 = pr_make(p2, sizeof p2);
+            if (r1 == 0) {
+                cx_fmt(fp, sizeof fp, "%s/env-%d", p2, i);
+                sy_write_file(fp, "env\n", 4, 0600);
+                r2 = pr_git(p2, ADDALL, out, sizeof out, 20);
+                r3 = pr_git(p2, COMMIT, out, sizeof out, 20);
+            } else { r2 = r3 = -9; }
+            sy_unsetenv(nm[i]);
+            snap(S, s1, sizeof s1);
+            cx_fmt(why, sizeof why, "%s set to the shared repository does not leak: the private commit works and the shared state is unchanged", nm[i]);
+            ckk_ok(r1 == 0 && r2 == 0 && r3 == 0 && strcmp(s0, s1) == 0, why);
+            if (r1 == 0) { cx_fmt(fp, sizeof fp, "rm -rf '%s'", p2); sh(fp, 0, 0); }
+        }
+    }
+
+    /* a pre-commit hook that uses a private repository (git exports GIT_INDEX_FILE there) leaves the outer commit intact */
+    {   char hp[1400], hs[2600];
+        cx_fmt(hp, sizeof hp, "%s/.git/hooks/pre-commit", S);
+        cx_fmt(hs, sizeof hs, "#!/bin/sh\nsh '%s/unisacc.com' '%s/tools/check-privrepo.cx' -- --hook-body || exit 1\n", orig, orig);
+        sy_write_file(hp, hs, (int64_t)strlen(hs), 0755);
+        cx_fmt(sc, sizeof sc, "cd '%s' && git -c user.name=x -c user.email=x@x commit -q -m outer >/dev/null 2>&1; echo rc=$?; git rev-list --count HEAD; git show --name-only --format= HEAD; git status --porcelain", S);
+        sh(sc, out, sizeof out);
+        ckk_ok(strstr(out, "rc=0") != 0 && strstr(out, "\n2\n") != 0 && strstr(out, "\nb\n") != 0 && strstr(out, "hookfile") == 0 && strstr(out, "?? u") != 0, "a pre-commit hook that uses pr_make/pr_git does not disturb the outer commit (one new commit with only the staged file)");
+    }
+
+    cx_fmt(sc, sizeof sc, "cd / && rm -rf '%s' '%s' '%s' '%s' '%s'", S, O, P, F, priv);
+    sh(sc, 0, 0);
+    checks = ckk_okcount(&bad);
+    printf("CX_PRIVREPO\tchecks=%d\tfailed=%d\n", checks, bad);
+    return bad ? 1 : 0;
+}

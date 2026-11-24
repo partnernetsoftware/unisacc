@@ -1,9 +1,10 @@
-/* tools/check-env-semantics.cx -- exec/facts/env-semantics.tsv against the product's UNISACC_* reads.
+/* tools/check-env-semantics.cx -- tests/env-semantics.tsv against the product's UNISACC_* reads.
  *
- *   sh ./unisacc.com tools/check-env-semantics.cx -- [--product PRODUCT] [--root DIR]
+ *   sh ./unisacc.com tools/check-env-semantics.cx -- [--product PRODUCT] [--root DIR] [--now VERSION]
  *
- * (1) Static (always): the (name, file) pairs read by cx/ and src/ (.cx .c .h; env("UNISACC_X" calls,
- *     i.e. sy_env, getenv, setenv, and names held in a *_env[] table) equal the table's name x readers
+ * (1) Static (always): the (name, file) pairs read by cx/ and src/ (.cx .c .h; UNISACC_ and UNISA_ variables read or written through
+ *     env("X" calls, i.e. sy_env, getenv, setenv, sy_setenv, and names held in a *_env[] table; the definition of a read is
+ *     cxlib/envreads.cx, comment lines excluded) equal the table's name x readers
  *     pairs; a read point missing from the table, or a table pair with no read point, fails by name.
  *     The cache root rows (unset token default-root) must equal mc_root_env[] in cx/runtime/modelcache.cx
  *     in order, so the root decision is driven by the same names the table lists.
@@ -19,6 +20,8 @@
  * exports UNISA_CONTAINER and execs entry/candidate).
  * Exit 0 all hold, 1 a pair or case fails (named), 2 usage or I/O.
  */
+#pragma unisa use cxlib.envreads
+#pragma unisa use cxlib.releaseversion
 #pragma unisa use sys.proc
 #pragma unisa use mem.bytes
 
@@ -27,6 +30,8 @@ static char pn[MAXP][64], pf[MAXP][128];
 static int npair;
 static char tn[MAXP][64], tf[MAXP][128];
 static int ntab;
+static char xn[MAXP][64], xv[MAXP][24];
+static int nexp;
 static char rootv[8][64], cell[8][4][512];
 static int nroot;
 static int fails, nas;
@@ -53,23 +58,20 @@ static int scan(const char *root) {
     char cmd[8192];
     char *out = 0, *p, *q; size_t on = 0;
     int rc;
-    cx_fmt(cmd, sizeof cmd, "cd '%s' && grep -rnoE 'env\\(\"UNISACC_[A-Z0-9_]+\"|_env\\[\\] = \\{.*' cx src --include=*.cx --include=*.c --include=*.h", root);
+    cx_fmt(cmd, sizeof cmd, "cd '%s' && grep -rnE 'UNISA(CC)?_[A-Z0-9_]+\"' cx src exec/c --include=*.cx --include=*.c --include=*.h", root);
     {
         char *v[] = {"sh", "-c", cmd, 0};
         rc = cx_runv_timeout(v, 30, &out, &on);
     }
     if (rc != 0 || !out) { fprintf(stderr, "check-env-semantics: scan rc=%d\n", rc); free(out); return 1; }
     for (p = out; *p; p = q) {
-        char *c1, *m;
+        char *c1, *m, nm[8][64];
+        int k, nn;
         q = strchr(p, '\n'); if (!q) q = p + strlen(p); else *q++ = 0;
         c1 = strchr(p, ':'); if (!c1) continue;
         m = strchr(c1 + 1, ':'); if (!m) continue;
-        while ((m = strstr(m, "\"UNISACC_"))) {
-            char *s = m + 1, *e = s;
-            while ((*e >= 'A' && *e <= 'Z') || (*e >= '0' && *e <= '9') || *e == '_') e++;
-            if (*e == '"') addp(pn, pf, &npair, s, (int)(e - s), p, (int)(c1 - p));
-            m = e;
-        }
+        nn = er_line_names(m + 1, nm, 8);
+        for (k = 0; k < nn; k++) addp(pn, pf, &npair, nm[k], (int)strlen(nm[k]), p, (int)(c1 - p));
     }
     free(out);
     return 0;
@@ -78,17 +80,18 @@ static int scan(const char *root) {
 static int table(const char *root) {
     char path[4200], line[8192];
     FILE *f;
-    cx_fmt(path, sizeof path, "%s/exec/facts/env-semantics.tsv", root);
+    cx_fmt(path, sizeof path, "%s/tests/env-semantics.tsv", root);
     f = fopen(path, "r");
-    if (!f) { nas++; printf("FAIL\ttable\tmissing exec/facts/env-semantics.tsv\n"); fails++; return 1; }
+    if (!f) { nas++; printf("FAIL\ttable\tmissing tests/env-semantics.tsv\n"); fails++; return 1; }
     while (fgets(line, sizeof line, f)) {
-        char *col[8], *p = line, *r;
+        char *col[9], *p = line, *r;
         int n = 0, i;
         size_t L = strlen(line);
         if (line[0] == '#' || line[0] == '\n') continue;
         if (L && line[L - 1] == '\n') line[L - 1] = 0;
-        while (n < 8) { col[n++] = p; p = strchr(p, '\t'); if (!p) break; *p++ = 0; }
-        if (n != 7) { printf("FAIL\ttable\tcolumns=%d want 7: %.60s\n", n, col[0]); fails++; continue; }
+        while (n < 9) { col[n++] = p; p = strchr(p, '\t'); if (!p) break; *p++ = 0; }
+        if (n != 7 && n != 8) { printf("FAIL\ttable\tcolumns=%d want 7 or 8 (8th: expires): %.60s\n", n, col[0]); fails++; continue; }
+        if (n == 8 && strcmp(col[7], "-") && nexp < MAXP && !mm_copy(xn[nexp], 64, col[0], strlen(col[0]) + 1) && !mm_copy(xv[nexp], 24, col[7], strlen(col[7]) + 1)) nexp++;
         for (r = col[6]; *r; ) {
             char *e = strchr(r, ',');
             int k = e ? (int)(e - r) : (int)strlen(r);
@@ -103,6 +106,28 @@ static int table(const char *root) {
     }
     fclose(f);
     return 0;
+}
+
+static int ver_part(const char **s) { int v = 0; while (**s >= '0' && **s <= '9') { v = v * 10 + (**s - '0'); (*s)++; } if (**s == '.') (*s)++; return v; }
+/* 1 when version A is lower than or equal to B, compared as numbers part by part (0.0.9 is lower than 0.0.10) */
+static int ver_le(const char *a, const char *b) {
+    int i;
+    for (i = 0; i < 3; i++) { int x = ver_part(&a), y = ver_part(&b); if (x != y) return x < y; }
+    return 1;
+}
+
+/* a deprecated row (8th column, a version) is an expiry date: it turns red once that version is the candidate or earlier */
+static void expiry(const char *root, const char *now_arg) {
+    char path[4200], now[24]; int i;
+    if (now_arg) cx_fmt(now, sizeof now, "%s", now_arg);
+    else { cx_fmt(path, sizeof path, "%s/release/candidate.tsv", root); if (rv_load(path, now)) { printf("FAIL\texpiry\tcannot read the candidate version from release/candidate.tsv\n"); fails++; return; } }
+    for (i = 0; i < nexp; i++) {
+        nas++;
+        if (!rv_valid(xv[i])) { printf("FAIL\texpiry\t%s expires=%s is not a version\n", xn[i], xv[i]); fails++; }
+        else if (ver_le(xv[i], now)) { printf("FAIL\texpired\t%s deprecated until %s, now %s: rename it or push the date\n", xn[i], xv[i], now); fails++; }
+    }
+    nas++;
+    if (!ver_le("0.0.9", "0.0.10") || ver_le("0.0.10", "0.0.9") || !ver_le("0.0.10", "0.0.10") || ver_le("0.0.11", "0.0.10")) { printf("FAIL\texpiry\tversion order is not numeric\n"); fails++; }
 }
 
 static void statics(const char *root) {
@@ -247,18 +272,20 @@ static void run_split(const char *prod, const char *name, const char *setting, i
 static int tok(const char *c, const char *t) { size_t k = strlen(t); return !strncmp(c, t, k) && (c[k] == ':' || c[k] == ','); }
 
 int main(int argc, char **argv) {
-    const char *product = 0, *root = ".", *tmp = getenv("TMPDIR");
+    const char *product = 0, *root = ".", *tmp = getenv("TMPDIR"), *now_arg = 0;
     char prod[4096], rootabs[4096], s[4600], abs[4300], z[4200];
     int i, rz;
     for (i = 1; i < argc; i++) {
         if (!strcmp(argv[i], "--product") && i + 1 < argc) product = argv[++i];
         else if (!strcmp(argv[i], "--root") && i + 1 < argc) root = argv[++i];
-        else { fprintf(stderr, "usage: check-env-semantics.cx -- [--product PRODUCT] [--root DIR]\n"); return 2; }
+        else if (!strcmp(argv[i], "--now") && i + 1 < argc) now_arg = argv[++i];
+        else { fprintf(stderr, "usage: check-env-semantics.cx -- [--product PRODUCT] [--root DIR] [--now VERSION]\n"); return 2; }
     }
     if (!realpath(root, rootabs)) { fprintf(stderr, "check-env-semantics: no root %s\n", root); return 2; }
     if (scan(rootabs)) return 2;
     table(rootabs);
     statics(rootabs);
+    expiry(rootabs, now_arg);
     if (product) {
         if (!realpath(product, prod)) { fprintf(stderr, "check-env-semantics: no product %s\n", product); return 2; }
         cx_fmt(z, sizeof z, "%s/0", rootabs);

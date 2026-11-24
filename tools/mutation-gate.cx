@@ -43,7 +43,27 @@
  * one MG_UNCOVERED file func allowed|blocking line per uncovered function).  rc 0 when the adjudicated score
  * >= min-score (default 0.6) and every uncovered function is listed in --allow-uncovered, rc 1 otherwise,
  * rc 2 on refusal
- * (bad arguments, patch does not apply, baseline check not green, no mutant).  N = 0 is a refusal. */
+ * (bad arguments, patch does not apply, baseline check not green, no mutant).  N = 0 is a refusal.
+ *
+
+ * Two usage traps, both learned the hard way:
+ * (1) --check is all-or-nothing against the baseline: passing only the driver patch without its check
+ *     patch leaves the tree's own check red, and the gate REFUSEs "baseline check not green" instead of
+ *     reporting mutants. Always pass one combined patch that carries both.
+ * (2) --adjudicated is a data file, not a TSV with a header: a header row is read as a verdict and the
+ *     gate REFUSEs "--adjudicated verdict must be equivalent or out-of-scope". Leave the header out.
+ *
+ * Session dir and slot reclaim:
+ * --out is optional. Without it the dir is <TMPDIR>/unisacc-session-mutation-gate-<patch-stem>-<sha8>: the
+ * same patch bytes always give the same dir, so prep, the workers run spawns and a later report agree, and
+ * a different patch never lands in another patch's tree. TMPDIR decides where sessions live, so a caller
+ * that runs two gates at once gives each its own TMPDIR.
+ * An explicit --out is registered the same way: prep writes conf.tsv and session.tsv (pid, started_at,
+ * patch, base, par, state) in BOTH cases, so an orphan is found by state plus liveness, not by the name.
+ * Slots are deleted only when the directory PROVES it is a gate session: a non-empty SUMMARY (the verdict),
+ * a non-empty conf.tsv, and a session.tsv carrying a `state<TAB>VALUE` line. Anything else is kept and
+ * named (MG_SLOTS_KEPT reason=not-mine|no-summary), because --out may point at someone else's tree and two
+ * touching files are not ownership. */
 #pragma unisa use cxlib.ckrun
 #pragma unisa use sys.fs
 #pragma unisa use sys.time
@@ -51,6 +71,9 @@
 #pragma unisa use mem.heap
 #pragma unisa use mem.bytes
 #pragma unisa use text.text
+#pragma unisa use sys.sha
+#pragma unisa use cxlib.sessionroot
+#pragma unisa use sys.proc
 
 #define MG_MAXCHK 8
 #define MG_MAXC 4096
@@ -74,6 +97,107 @@ static void shq(char *d, int cap, const char *s) {
     int k = 0; d[k++] = '\'';
     for (; *s; s++) { if (k > cap - 6) die2("quote", "too long"); if (*s == '\'') { d[k++] = '\''; d[k++] = '\\'; d[k++] = '\''; d[k++] = '\''; } else d[k++] = *s; }
     d[k++] = '\''; d[k] = 0;
+}
+
+static char *slurp(const char *p, size_t *n);
+static void spit(const char *p, const char *b, size_t n);
+static int sh(const char *script, char *out, int cap, int secs);
+/* ---------- session dir derivation, registration, slot reclaim ---------- */
+/* --out is optional. When absent the dir is derived from the patch content identity, so prep, the
+   workers spawned by run, and a later report all compute the same path. Same patch bytes -> same dir;
+   different bytes -> different dir (a stale slot tree can never be mistaken for this run's). */
+static void derive_out(void) {
+    char id[512], leaf[256], stem[256], hex[65];
+    const char *base, *dot;
+    size_t pn = 0;
+    char *pb;
+    if (g_out) return;
+    if (!g_patch) die2("usage", "--out absent and no --patch to derive it from");
+    pb = slurp(g_patch, &pn);
+    if (!pb) die2("read", g_patch);
+    if (sy_sha256_hex(pb, (long)pn, hex)) { mm_free(pb); die2("sha256", g_patch); }
+    mm_free(pb);
+    base = strrchr(g_patch, '/');
+    base = base ? base + 1 : g_patch;
+    cx_fmt(leaf, sizeof leaf, "%s", base);
+    while ((dot = strrchr(leaf, '.')) != 0) ((char *)dot)[0] = 0;
+    cx_fmt(stem, sizeof stem, "%s", leaf[0] ? leaf : "patch");
+    cx_fmt(id, sizeof id, "mutation-gate-%.80s-%.8s", stem, hex);
+    { static char ob[1024]; if (sr_default(id, ob, sizeof ob)) die2("session root", id); g_out = ob; }
+}
+
+/* state: prepared when prep finishes, done when report wrote a verdict. Anything else means the run
+   died; whoever reclaims orphan session dirs keys off this file instead of re-parsing the dir name. */
+static void write_session(const char *state) {
+    char p[1024], b[2048]; int k = 0;
+    cx_fmt(p, sizeof p, "%s/session.tsv", g_out);
+    k += snprintf(b + k, sizeof b - k, "pid\t%d\nstarted_at\t%ld\npatch\t%s\nbase\t%s\npar\t%d\nstate\t%s\n",
+                  sy_pid(), sy_now_ms(), g_patch ? g_patch : "", g_base ? g_base : "", g_par, state);
+    spit(p, b, (size_t)k);
+}
+
+/* A slot tree is ours to delete only when this directory holds ALL FOUR of: a non-empty SUMMARY (the
+   verdict), a non-empty conf.tsv (prep wrote the run's settings), and a session.tsv that carries a
+   `state<TAB>VALUE` line with a value (prep/report wrote it). Existence alone is not proof: empty files
+   with the right names are something any caller can create, and the gate never deletes a path it cannot
+   prove it made. */
+static int has_state_line(const char *b, size_t n) {
+    long at = 0, hit;
+    while ((hit = tx_find(b + at, (long)n - at, "state\t", 6)) >= 0) {
+        long p = at + hit;
+        at = p + 6;
+        if (p > 0 && b[p - 1] != '\n') continue;          /* 'state\t' mid-line is another field's text */
+        if (at < (long)n && b[at] != '\n' && b[at] != '\r') return 1;
+    }
+    return 0;
+}
+
+static int mine(const char *reason, long cap) {
+    char p[1024];
+    size_t sn = 0, cn = 0, nn = 0;
+    char *sb, *cb, *nb;
+    cx_fmt(p, sizeof p, "%s/SUMMARY", g_out);
+    sb = slurp(p, &sn);
+    if (!sb || sn == 0) { if (sb) mm_free(sb); if (reason) cx_fmt(reason, cap, "no-summary"); return 0; }
+    mm_free(sb);
+    cx_fmt(p, sizeof p, "%s/conf.tsv", g_out);
+    cb = slurp(p, &cn);
+    if (!cb || cn == 0) { if (cb) mm_free(cb); if (reason) cx_fmt(reason, cap, "not-mine"); return 0; }
+    mm_free(cb);
+    cx_fmt(p, sizeof p, "%s/session.tsv", g_out);
+    nb = slurp(p, &nn);
+    if (!nb || !has_state_line(nb, nn)) { if (nb) mm_free(nb); if (reason) cx_fmt(reason, cap, "not-mine"); return 0; }
+    mm_free(nb);
+    return 1;
+}
+
+/* Drop every slot tree, but only after mine() says the verdict and both registration files are here.
+   A killed run leaves no SUMMARY, and a run that failed before reporting must keep its trees so the
+   operator can read the compile logs. */
+static void drop_slots(void) {
+    char p[1024], cmd[16384], qs[2048]; int i, k = 0, any = 0;
+    if (!mine(0, 0)) return;
+    k = snprintf(cmd, sizeof cmd, "rm -rf --");
+    /* reclaim 不带 conf 里的 par(它没跑 prep),所以按挂盘实际存在的槽扫,而不是按 g_par。 */
+    for (i = 0; i < 64; i++) {
+        cx_fmt(p, sizeof p, "%s/slot-%d", g_out, i);
+        if (sy_exists(p) != 1) continue;
+        shq(qs, sizeof qs, p);
+        if (k + (int)strlen(qs) + 2 >= (int)sizeof cmd) break;
+        k += snprintf(cmd + k, sizeof cmd - k, " %s", qs);
+        any = 1;
+    }
+    if (!any) return;
+    if (sh(cmd, 0, 0, 55)) { fprintf(stderr, "mutation-gate: WARN slot reclaim failed: %s\n", cmd); return; }
+    printf("MG_SLOTS_RECLAIMED cmd=%s\n", cmd);
+}
+
+/* 独立入口:只做清槽判定,不碰 report。夹具靠它验三条分支(有结论+两份登记才删;缺 SUMMARY 记
+   no-summary;缺 conf.tsv/session.tsv 记 not-mine)。 */
+static void drop_slots_mode(void) {
+    char why[64];
+    if (!mine(why, sizeof why)) { printf("MG_SLOTS_KEPT reason=%s out=%s\n", why, g_out); return; }
+    drop_slots();
 }
 
 static char *slurp(const char *p, size_t *n) { size_t z = 0; char *b = cx_read(p, &z); if (n) *n = z; return b; }
@@ -140,9 +264,11 @@ static void load_conf(void) {
 }
 
 /* ---------- lexical helpers ---------- */
-/* m[i] = 1 when line[i] is code (not inside a string/char literal or comment) */
-static void code_mask(const char *l, char *m) {
-    int i = 0, st = 0;
+/* m[i] = 1 when line[i] is code (not inside a string/char literal or comment).  `st` is the block-comment state the
+   line starts in: without it a line whose block comment closes and then carries real code was masked as if the
+   comment had never opened, so the walkers mutated the comment's text and left the code alone. */
+static void code_mask(const char *l, char *m, int st) {
+    int i = 0;
     for (; l[i]; i++) {
         if (st == 0) {
             if (l[i] == '/' && l[i + 1] == '/') { for (; l[i]; i++) m[i] = 0; break; }
@@ -160,6 +286,23 @@ static void code_mask(const char *l, char *m) {
     }
     m[i] = 0;
 }
+/* state after the line: 3 inside a block comment, 0 outside.  A string or char literal that is still open at the
+   end of a line is malformed C on its own, so it is reported as outside rather than carried forward. */
+static int end_state(const char *l, int st) {
+    int i = 0;
+    while (l[i]) {
+        if (st == 0) {
+            if (l[i] == '/' && l[i + 1] == '/') break;
+            if (l[i] == '/' && l[i + 1] == '*') { st = 3; i += 2; continue; }
+            if (l[i] == '"' || l[i] == '\'') { int q = l[i]; i++; while (l[i] && l[i] != q) i += l[i] == '\\' ? 2 : 1; if (l[i]) i++; continue; }
+            i++;
+        } else {
+            if (l[i] == '*' && l[i + 1] == '/') { st = 0; i += 2; continue; }
+            i++;
+        }
+    }
+    return st;
+}
 static int isid(int c) { int l = c | 32; return c == '_' || (c >= '0' && c <= '9') || (l >= 'a' && l <= 'z'); }
 static int isdig(int c) { return c >= '0' && c <= '9'; }
 /* index of the ')' matching '(' at o (code only), -1 when not on this line */
@@ -172,12 +315,21 @@ static int splice(char *d, int cap, const char *l, int a, int b, const char *ins
     /* d = l[0..a) + ins + l[b..] */
     return cx_fmt(d, cap, "%.*s%s%s", a, l, ins, l + b) ? -1 : 0;
 }
-static int skip_line(const char *l) {
-    while (*l == ' ' || *l == '\t') l++;
-    if (!*l || *l == '\n') return 1;
-    if (l[0] == '/' && (l[1] == '/' || l[1] == '*')) return 1;
-    if (l[0] == '*' || l[0] == '#') return 1;
+/* 1 when the line, entered in comment state `st`, holds a character outside comments and string literals.  The
+   entry state is what makes a comment close followed by real code observable: from state 0 the walkers mutated
+   text and never looked at `60`. */
+static int has_code(const char *l, int st) {
+    char m[MG_LINE]; int i;
+    code_mask(l, m, st);
+    for (i = 0; l[i]; i++) if (m[i]) return 1;
     return 0;
+}
+/* A preprocessor line is a directive, not C code: mutating `#define K 4096` to 4097 or a `#include` path only ever
+   dies at compile time, which scores as killed without any check proving the code works.  They are skipped by the
+   same rule the old `skip_line` used, now stated as what it is about rather than as a list of leading characters. */
+static int is_preproc(const char *l) {
+    while (*l == ' ' || *l == '\t') l++;
+    return *l == '#';
 }
 
 /* ---------- candidates ---------- */
@@ -193,10 +345,10 @@ static void add(int f, int ln, int kind, const char *text, const char *desc) {
     cx_fmt(g_c[g_nc].desc, sizeof g_c[g_nc].desc, "%s", desc); g_nc++;
 }
 
-static void gen_line(int f, int ln, const char *l) {
+static void gen_line(int f, int ln, const char *l, int st) {
     char m[MG_LINE], d[MG_LINE + 64], desc[96]; int i, n = (int)strlen(l), done;
     if (n >= MG_LINE - 8) return;
-    code_mask(l, m);
+    code_mask(l, m, st);
     /* cmp: first comparison operator */
     for (i = 0, done = 0; l[i] && !done; i++) {
         const char *rep = 0; int w = 1;
@@ -336,17 +488,18 @@ static int split_lines(char *b, size_t n, char ***out) {
     *out = v; return k;
 }
 
-static void gen_cov(int f, char **L, int nlines, int ln, int *seen, int nseen_cap) {
+static void gen_cov(int f, char **L, int *sts, int nlines, int ln, int *seen, int nseen_cap) {
     int j;
     for (j = ln - 1; j >= 1; j--) {
         const char *l = L[j - 1];
         if (l[0] == '}' && j != ln) return;           /* left the function: added line is outside a body */
-        if (l[0] && l[0] != ' ' && l[0] != '\t' && l[0] != '#' && l[0] != '/' && l[0] != '*' && l[0] != '}' && strchr(l, '(') && strchr(l, '{') && !strstr(l, "typedef") && !strstr(l, "struct ") ) {
+        if (l[0] && l[0] != ' ' && l[0] != '\t' && l[0] != '/' && l[0] != '*' && l[0] != '}' && strchr(l, '(') && strchr(l, '{') && !strstr(l, "typedef") && !strstr(l, "struct ") ) {
             char m[MG_LINE], d[MG_LINE + 64], desc[96]; int k, o = -1;
             if (strlen(l) >= MG_LINE - 40) return;
             for (k = 0; k < nseen_cap && seen[k]; k++) if (seen[k] == j) return;
             if (k < nseen_cap) seen[k] = j;
-            code_mask(l, m);
+            if (is_preproc(l)) return;                /* a directive is not a function head */
+            code_mask(l, m, sts[j - 1]);
             for (k = 0; l[k]; k++) if (m[k] && l[k] == '{') { o = k; break; }
             if (o < 0) return;
             if (splice(d, sizeof d, l, o + 1, o + 1, " *(volatile int *)0 = 0; ")) return;
@@ -362,11 +515,27 @@ static void gen_cov(int f, char **L, int nlines, int ln, int *seen, int nseen_ca
 static void prep(void) {
     char cmd[16384], q1[2048], q2[2048], q3[2048], out[8192], p[1024]; int rc, i, f;
     long t0 = sy_now_ms();
-    if (!g_patch || !g_base || !g_out || !g_nchk) die2("usage", "need --patch --base --check --out");
+    if (!g_patch || !g_base || !g_nchk) die2("usage", "need --patch --base --check (--out optional)");
     if (!g_repo) { const char *h = getenv("HOME"); static char rb[512]; cx_fmt(rb, sizeof rb, "%s/repos/unisacc", h ? h : "."); g_repo = rb; }
     if (g_par <= 0) { long nc = sy_ncpu(); g_par = nc > 1 ? (int)(nc / 2) : 1; }
     if (g_par > 16) g_par = 16;
-    if (sy_exists(g_out)) { cx_fmt(p, sizeof p, "%s/conf.tsv", g_out); if (sy_exists(p)) die2("out dir already prepared", g_out); }
+    if (sy_exists(g_out)) {
+        cx_fmt(p, sizeof p, "%s/conf.tsv", g_out);
+        if (sy_exists(p)) {
+            /* 已准备过:拒绝,不代删(这目录也可能是别的窗口给的)。reclaim 只在已经有结论(SUMMARY)
+               时才会动手——只 prep 过还没 report 的目录跑 reclaim 会得到 reason=no-summary 且登记文件
+               仍在,再 prep 照样被拒,所以先把适用条件写清,再把要删的都列出来。 */
+            fprintf(stderr, "mutation-gate: REFUSE out dir already prepared %s\n", g_out);
+            fprintf(stderr, "mutation-gate: reclaim --out clears slots only after a verdict (SUMMARY); for a prep-only dir delete every path listed below, then prep again\n");
+            fprintf(stderr, "mutation-gate: with a verdict there: sh ./unisacc.com tools/mutation-gate.cx -- reclaim --out '%s'\n", g_out);
+            fprintf(stderr, "mutation-gate: delete by hand: rm -rf");
+            cx_fmt(p, sizeof p, "%s/conf.tsv", g_out); if (sy_exists(p) == 1) fprintf(stderr, " '%s'", p);
+            cx_fmt(p, sizeof p, "%s/session.tsv", g_out); if (sy_exists(p) == 1) fprintf(stderr, " '%s'", p);
+            for (i = 0; i < g_par; i++) { cx_fmt(p, sizeof p, "%s/slot-%d", g_out, i); if (sy_exists(p) == 1) fprintf(stderr, " '%s'", p); }
+            fprintf(stderr, "\n");
+            exit(2);
+        }
+    }
     sy_mkdir(g_out, 0755);
     shq(q1, sizeof q1, g_repo); shq(q2, sizeof q2, g_base); shq(q3, sizeof q3, g_out);
     {
@@ -384,18 +553,30 @@ static void prep(void) {
         if (rc != 0) { fprintf(stderr, "%s", out); die2("git init of private tree failed", ""); }
     }
     parse_patch(g_patch);
-    /* candidates per file */
+    /* candidates per file: walk every line so the block-comment state carries across lines, and only an added
+       line that still holds code after that walk becomes a candidate.  A patch line inside a multi-line comment
+       whose continuation does not start with an asterisk is prose, and mutating it only ever produced survivors. */
     for (f = 0; f < g_nf; f++) {
-        size_t n; char **L; int nl, a, seen[256];
+        size_t n; char **L; int nl, a, seen[256], i, *sts;
         cx_fmt(p, sizeof p, "%s/slot-0/%s", g_out, g_files[f]);
         char *b = slurp(p, &n); if (!b) continue;
         nl = split_lines(b, n, &L);
         memset(seen, 0, sizeof seen);
-        for (a = 0; a < g_nadd; a++) {
-            if (g_add[a].file != f || g_add[a].line < 1 || g_add[a].line > nl) continue;
-            if (!skip_line(L[g_add[a].line - 1])) gen_line(f, g_add[a].line, L[g_add[a].line - 1]);
-            if (g_cov) gen_cov(f, L, nl, g_add[a].line, seen, 256);
+        /* entry comment state per line, computed once in a forward walk: the walkers need to know whether a line
+           starts inside a block comment: a comment close followed by code is code from there on, and a mask built
+           from state 0 would rewrite the comment text and leave `60` alone. */
+        sts = mm_zalloc((long)(nl + 1) * (long)sizeof(int));
+        for (i = 1; i <= nl; i++) sts[i] = end_state(L[i - 1], sts[i - 1]);
+        for (i = 1; i <= nl; i++) {
+            int added = 0;
+            for (a = 0; a < g_nadd; a++) if (g_add[a].file == f && g_add[a].line == i) { added = 1; break; }
+            if (!added) continue;
+            if (is_preproc(L[i - 1])) continue;     /* directives die at compile time: not a check's kill */
+            if (!has_code(L[i - 1], sts[i - 1])) continue;
+            gen_line(f, i, L[i - 1], sts[i - 1]);
+            if (g_cov) gen_cov(f, L, sts, nl, i, seen, 256);
         }
+        mm_free(sts);
         mm_free(L); mm_free(b);
     }
     /* selection: round robin over (file, kind) buckets; cov mutants are all kept (not limited by --max) */
@@ -456,7 +637,8 @@ static void prep(void) {
     }
     /* slot copies */
     for (i = 1; i < g_par; i++) { cx_fmt(cmd, sizeof cmd, "cp -a %s/slot-0 %s/slot-%d", q3, q3, i); if (sh(cmd, out, sizeof out, 55)) die2("copy slot", ""); }
-    printf("MG_PREP_DONE ms=%ld\n", sy_now_ms() - t0);
+    write_session("prepared");
+    printf("MG_PREP_DONE ms=%ld out=%s\n", sy_now_ms() - t0, g_out);
 }
 
 /* ---------- worker ---------- */
@@ -726,6 +908,7 @@ static int report(void) {
     cx_fmt(p, sizeof p, "%s/SUMMARY", g_out); spit(p, sum, (size_t)k2);
     fputs(sum, stdout);
     printf("MG_SURVIVORS %s/survivors.tsv\n", g_out);
+    write_session(N ? "done" : "done-empty");
     if (N == 0) return 2;
     return verdict;
 }
@@ -751,6 +934,8 @@ static int run_all(const char *self) {
     /* clean leftovers by real PGID (setsid: pgid == pid) */
     for (i = 0; i < g_par; i++) { cx_fmt(cmd, sizeof cmd, "p=$(cat %s/worker-%d.pid 2>/dev/null) && kill -0 \"$p\" 2>/dev/null && kill -TERM -- -\"$p\" 2>/dev/null; true", q3, i); sh(cmd, 0, 0, 5); }
     rc = report();
+    /* 只有 report 写出了结论才清槽:SUMMARY 非空才动手,否则保留现场。 */
+    if (rc == 0 || rc == 1) { write_session("done"); drop_slots(); }
     printf("MG_RUN ms=%ld\n", sy_now_ms() - t0);
     return rc;
 }
@@ -784,12 +969,14 @@ int main(int argc, char **argv) {
         else die2("unknown option", a);
         i++;
     }
+    derive_out();
     if (!g_out) die2("usage", "--out required");
     if (g_expect_n && (!g_quality || (strcmp(mode, "run") && strcmp(mode, "prep"))))
         die2("usage", "check expectations require run or prep with --report");
     if (!strcmp(mode, "prep")) { prep(); return 0; }
     if (!strcmp(mode, "worker")) { if (g_slot < 0) die2("usage", "--slot"); worker(); return 0; }
     if (!strcmp(mode, "report")) return report();
+    if (!strcmp(mode, "reclaim")) { drop_slots_mode(); return 0; }
     if (!strcmp(mode, "run")) return run_all("tools/mutation-gate.cx");
     die2("unknown mode", mode);
     return 2;

@@ -310,6 +310,41 @@ static int tkey_lt(int a, int b) {
     return tpaths[a][i] == 0 && tpaths[b][i] != 0;
 }
 
+/* "tool f mentions table name t" (find(body, name) >= 0) for every pair, in one pass over each tool body: a table name always ends in ".tsv", so
+ * a mention is a name-length window ending at some ".tsv" in the body.  Names are hashed (chained per slot); only the lengths that occur are tried.
+ * hitm[t * nf + f] = 1 on a mention.  Replaces a substring search of every body for every table. */
+#define HSLOTS 1024
+static char *hitm;
+static unsigned long long fnv(const char *p, long n) {
+    unsigned long long h = 1469598103934665603ULL; long i;
+    for (i = 0; i < n; i++) { h ^= (unsigned char)p[i]; h *= 1099511628211ULL; }
+    return h;
+}
+static void fill_hits(void) {
+    int slot[HSLOTS], next[MAXT], nlen[MAXT], lens[MAXT], nl_ = 0, t, f, k; long i;
+    for (i = 0; i < HSLOTS; i++) slot[i] = -1;
+    for (t = 0; t < nt; t++) {
+        long L = tx_len(tnames[t], 300); unsigned long long h = fnv(tnames[t], L) % HSLOTS;
+        nlen[t] = (int)L; next[t] = slot[h]; slot[h] = t;
+        for (k = 0; k < nl_ && lens[k] != (int)L; k++) {}
+        if (k == nl_) lens[nl_++] = (int)L;
+    }
+    for (f = 0; f < nf; f++) {
+        const char *b = body[f]; long n = blen[f];
+        for (i = 0; i + 4 <= n; i++) {
+            long end;
+            if (b[i] != '.' || b[i + 1] != 't' || b[i + 2] != 's' || b[i + 3] != 'v') continue;
+            end = i + 4;
+            for (k = 0; k < nl_; k++) {
+                long L = lens[k]; int c;
+                if (end < L) continue;
+                for (c = slot[fnv(b + end - L, L) % HSLOTS]; c >= 0; c = next[c])
+                    if (nlen[c] == (int)L && mm_same(b + end - L, tnames[c], L)) hitm[(long)c * nf + f] = 1;
+            }
+        }
+    }
+}
+
 static char *build_tables(long *outn) {
     char *out = mm_alloc(OUTCAP);
     long len = 0;
@@ -326,6 +361,10 @@ static char *build_tables(long *outn) {
         for (j = i - 1; j >= 0 && tkey_lt(k, torder[j]); j--) torder[j + 1] = torder[j];
         torder[j + 1] = k;
     }
+    hitm = (char *)mm_alloc((size_t)nt * (size_t)nf + 1);
+    if (!hitm) { fprintf(stderr, "tool-index: out of memory\n"); exit(2); }
+    memset(hitm, 0, (size_t)nt * (size_t)nf + 1);
+    fill_hits();
     { const char *h = "table\tpurpose\tgenerator\treaders_count\n"; mm_copy(out, OUTCAP, h, tx_len(h, 100)); len = tx_len(h, 100); }
     for (i = 0; i < nt; i++) {
         int t = torder[i], f, readers = 0, gen = -1;
@@ -354,7 +393,7 @@ static char *build_tables(long *outn) {
             f = order[j];
             if (names[f][0] == 'c' && mm_same(names[f], "check-", 6)) continue;
             if (f == gen) continue;
-            if (find(body[f], blen[f], tnames[t]) < 0) continue;
+            if (!hitm[(long)t * nf + f]) continue;
             if (gen < 0 && find(body[f], blen[f], "--write") >= 0) gen = f;
             else readers++;
         }
@@ -377,7 +416,8 @@ static int emit(const char *rel, char *buf, long n, int write_mode) {
         char dm[700]; const char *base = rel; long q;
         for (q = 0; rel[q]; q++) if (rel[q] == '/') base = rel + q + 1;
         if (awp_devmeta(root, base, write_mode, dm, sizeof dm)) { sy_printf("DEVMETA_PATH_FAIL\t%s\n", base); return 2; }
-        if (write_mode) return (cx_write(path, buf, n) || cx_write(dm, buf, n)) ? 2 : 0;
+        /* sibling temporary + rename: a concurrent reader never sees a truncated table */
+        if (write_mode) return (sy_write_atomic(path, buf, n, 0644) || sy_write_atomic(dm, buf, n, 0644)) ? 2 : 0;
         old = slurp(dm, &on);
         if (old && (on != n || !mm_same(old, buf, n))) sy_printf("MIRROR_STALE\t%s\thint=derive --write --only table-index\n", dm);
     }

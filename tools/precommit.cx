@@ -24,6 +24,8 @@
  *   Verify  : sh ./unisacc.com tools/precommit.cx -- --verify-deferred [--gate derive|genall|tlibfrozen|lint|ratchets] */
 #pragma unisa use cxlib.globspan
 #pragma unisa use cxlib.sessionroot
+#pragma unisa use cxlib.dirtywatch
+#pragma unisa use cxlib.pretimes
 #pragma unisa use sys.proc
 #pragma unisa use sys.fs
 #pragma unisa use sys.io
@@ -36,11 +38,13 @@
 #pragma unisa use sys.poll
 #pragma unisa use sys.posix
 #pragma unisa use sys.sig
+#pragma unisa use cxlib.bpidecl
 
 static int slurp_okrc = 0;   /* 允许的最大退出码:0=仅成功;ratchets.cx 用 1 表示「跑完了但有红行」 */
 static int slurp_last_timeout = 0, slurp_last_rc = 0, slurp_from_run_unplanned = 0;
 static volatile int pc_active_child_pid = 0;
 #define SLURP_DEADLINE_MS 55000   /* 每个子进程(含 ratchets/cx-lint/verify-deferred)最多 55 s:超时杀进程组,统一按 GATE_TIMEOUT 处理 */
+static long slurp_bound_ms = 0;   /* >0: this one slurp uses a tighter bound (affected-canary 10 s), reset by the caller */
 /* --plan DIR / --from-run DIR (tools/precommit-flow.cx): the gate subprocesses become flow nodes.
  * cur_gate names the gate about to call slurp (manifest, tables, runlist, facts, tlibfrozen, lint, lintr1,
  * ratchets).  --plan: print PLAN<TAB>id<TAB>argv... and act as if the gate ran with empty output.
@@ -89,12 +93,15 @@ static char *gate_slurp(char **argv, long *n) {
 /* COMMIT_PHASE lines of each named gate (cur_gate) into UNISACC_COMMIT_PHASE_LOG, set by tools/commit-own.cx to
    its own stdout (/proc/PID/fd/1): a job tail shows the gate in flight, a timeout leaves its begin without an end.
    Unset (a plain git commit): nothing is written, the hook's own output is unchanged. */
+static long pc_times_t0;
 static void gate_phase(const char *name, int begin, long ms) {
     const char *lp = sy_env("UNISACC_COMMIT_PHASE_LOG"); char ln[160]; int bad;
-    if (!lp || !lp[0] || !name) return;
-    bad = begin ? cx_fmt(ln, sizeof ln, "COMMIT_PHASE\tname=%s\tstate=begin\n", name)
-                : cx_fmt(ln, sizeof ln, "COMMIT_PHASE\tname=%s\tstate=end\tms=%ld\n", name, ms);
-    if (!bad) (void)sy_append_file(lp, ln, tx_len(ln, sizeof ln), 0600);
+    if (name && lp && lp[0]) {
+        bad = begin ? cx_fmt(ln, sizeof ln, "COMMIT_PHASE\tname=%s\tstate=begin\n", name)
+                    : cx_fmt(ln, sizeof ln, "COMMIT_PHASE\tname=%s\tstate=end\tms=%ld\n", name, ms);
+        if (!bad) (void)sy_append_file(lp, ln, tx_len(ln, sizeof ln), 0600);
+    }
+    if (!begin && name) pt_row(name, ms, slurp_last_timeout ? "TIMEOUT" : (slurp_last_rc == 0 ? "PASS" : "FAIL"));
 }
 static char *slurp_run(char **argv, long *n);
 static char *slurp(char **argv, long *n) {
@@ -115,13 +122,13 @@ static char *slurp_run(char **argv, long *n) {
     pid = sy_spawn_pipe(argv, 0, 0, &ofd, 0);
     if (pid < 0) return 0;
     pc_active_child_pid = pid;
-    deadline = sy_now_ms() + SLURP_DEADLINE_MS;
+    deadline = sy_now_ms() + (slurp_bound_ms > 0 ? slurp_bound_ms : SLURP_DEADLINE_MS);
     for (;;) {
         sy_pollfd_t pf; long left = deadline - sy_now_ms();
         pf.fd = ofd; pf.events = SY_POLLIN; pf.revents = 0;
         if (left <= 0 || sy_poll(&pf, 1, left) <= 0) {
             sy_eprintf("precommit: GATE_TIMEOUT gate=%s cmd=%s bound_s=%d\n",
-                       cur_gate ? cur_gate : "subproc", argv[0], SLURP_DEADLINE_MS / 1000);
+                       cur_gate ? cur_gate : "subproc", argv[0], (int)((slurp_bound_ms > 0 ? slurp_bound_ms : SLURP_DEADLINE_MS) / 1000));
             slurp_last_timeout = 1;
             slurp_last_rc = 124;
             pc_active_child_pid = 0;
@@ -171,9 +178,10 @@ static const char gt_builtin[] =
     "manifest\tACMRD\ttests/manifests tests/batches.tsv tests/coverage.tsv tools/batch-packages-gen.cx\n"
     "tables\tACMRD\ttests/manifests tests/batches.tsv tests/coverage.tsv tests/tools-compile-sources.tsv\n"
     "toolsreg\tADRT\ttools/*.cx\n"
-    "runlist\tACMR\ttests/coverage.tsv tests/batches.tsv\n"
+    "runlist\tACMR\ttests/coverage.tsv tests/batches.tsv tests/batch-product-inputs.tsv\n"
     "facts\tACMR\tinclude exec/facts\n"
     "ledger\tACMR\tarchive/agentwork-retire-2026-11/ledger.tsv\n"
+    "affected-canary\tACMRD\ttests/batches.tsv tests/batch-product-inputs.tsv tests/coverage.tsv cxroot.tsv tools/affected.cx tools/cxlib ext cx\n"
     "cx\tACMR\t*.cx\n";
 static const char *gt_tab = 0; static long gt_n = 0; static int gt_src = 0, gt_na = 0; static char gt_nal[160];
 static int gt_load(void) {
@@ -1858,12 +1866,14 @@ static int cov_eval(const char *tag, const char *reg, long rn, const char *cov, 
     if (cx_fmt(p, sizeof p, "%s/tests/coverage.tsv", dir) || cx_write(p, cov, (size_t)cn)) return -1;
     if (cx_fmt(p, sizeof p, "%s/tests/run.cx", dir)) return -1;
     if (plan_dir && cov_flow(tag)) {
-        char *gv[] = {"sh", "./unisacc.com", p, "--", "--list", 0}; long gn;
+        char *gv[] = {"sh", "-c", "cd \"$1\" && exec sh ./unisacc.com tests/run.cx -- --list", "sh", dir, 0}; long gn;
         cur_gate = "coveval"; mm_free(gate_slurp(gv, &gn)); cur_gate = 0;
         idv[0] = 0; return 0;
     }
     { int ofd, pid, ex = 0, code = 0, sig = 0; long r;
-      char *ev[] = {"sh", "-c", "exec sh ./unisacc.com \"$0\" -- --list 2>&1", p, 0};
+      /* from inside DIR with a relative source: the run-cache then keys the source below the working directory, root-independent, so the second and later runs
+         hit the cache although each run has a fresh private directory (an absolute path outside the working directory is part of the key verbatim) */
+      char *ev[] = {"sh", "-c", "cd \"$0\" && exec sh ./unisacc.com tests/run.cx -- --list 2>&1", dir, 0};
       b = mm_alloc(1 << 20);
       if (!b) return -1;
       pid = sy_spawn_pipe(ev, 0, 0, &ofd, 0);
@@ -1887,6 +1897,42 @@ static int cov_eval(const char *tag, const char *reg, long rn, const char *cov, 
           mm_free(b); return 2; } }
       if (tx_find(b, total, "PLAN\tmetadata_valid=", 20) < 0) { mm_free(b); return -1; }
       mm_free(b); return 0; }
+}
+/* 产品输入配对闸(BPI-PAIR-GATE):暂存的 tests/batches.tsv 中命令含 batch-product-inputs.tsv 的 require 占位
+ * ({candidate}、{hostcc} 等)的批次,同一提交须在暂存的 tests/batch-product-inputs.tsv 有 id 行,否则 tools/affected.cx
+ * 拒 BATCH_PRODUCT_INPUT_UNDECLARED 且 rc 2(11-23 runcache-path-key 事故)。只拦本次新增或改动的行;
+ * 与 HEAD 逐字节相同的遗留行只报告。规则在 cxlib.bpidecl,与 tools/register.cx 共用。 */
+/* 1 when PATH is in the index, 0 when it is not (output empty), -1 when git itself failed: only a definite "not in the index"
+ * lets a caller treat the table as absent; every other read failure stays a block. */
+static int bpi_in_index(const char *path) {
+    char *v[] = {"git", "ls-files", "--stage", "--", (char *)path, 0}; long n = 0; char *o = slurp(v, &n);
+    if (!o) return -1;
+    mm_free(o);
+    return n > 0 ? 1 : 0;
+}
+static int bpi_gate(void) {
+    char *b = 0, *d = 0, *hb = 0, *hd = 0; long bn = 0, dn = 0, hn = 0, hdn = 0, inh = 0, n; char ids[1024]; int ib, id_in;
+    if (plan_dir) return 0;
+    ib = bpi_in_index("tests/batches.tsv"); id_in = bpi_in_index("tests/batch-product-inputs.tsv");
+    if (ib < 0 || id_in < 0) { sy_eprintf("precommit: BLOCKED product-inputs gate: cannot list the index (git ls-files failed)\n"); return 1; }
+    if (!ib) return 0;   /* no batch table staged (fixture repo): nothing to pair */
+    if (cov_blob("", "tests/batches.tsv", &b, &bn)) {
+        sy_eprintf("precommit: BLOCKED product-inputs gate: cannot read staged tests/batches.tsv\n"); return 1; }
+    if (id_in) {
+        if (cov_blob("", "tests/batch-product-inputs.tsv", &d, &dn)) {
+            mm_free(b);
+            sy_eprintf("precommit: BLOCKED product-inputs gate: cannot read staged tests/batch-product-inputs.tsv\n"); return 1; }
+    } else { d = mm_alloc(1); if (!d) { mm_free(b); return 1; } d[0] = 0; dn = 0; }   /* declaration table not in the index: empty declarations */
+    if (cov_blob("HEAD", "tests/batches.tsv", &hb, &hn)) hb = 0;
+    if (cov_blob("HEAD", "tests/batch-product-inputs.tsv", &hd, &hdn)) hd = 0;
+    n = bpi_scan(b, bn, d, dn, hb, hn, hd, hdn, ids, sizeof ids, &inh);
+    if (inh) sy_eprintf("precommit: product-inputs gate: %ld inherited undeclared batch row(s) already in HEAD (not blamed)\n", inh);
+    if (n) {
+        sy_eprintf("precommit: BLOCKED product-inputs undeclared: batch id=%s in the staged tests/batches.tsv holds a require placeholder of tests/batch-product-inputs.tsv but has no id row there (tools/affected.cx would refuse BATCH_PRODUCT_INPUT_UNDECLARED rc 2)\n", ids);
+        sy_eprintf("precommit: add id<TAB>ID<TAB>INPUTS<TAB>BASIS rows to tests/batch-product-inputs.tsv in the same commit\n");
+    }
+    mm_free(b); mm_free(d); if (hb) mm_free(hb); if (hd) mm_free(hd);
+    return n ? 1 : 0;
 }
 static int cov_gate(void) {
     char *ir, *ic, *hr = 0, *hc = 0; long irn, icn, hrn = 0, hcn = 0; char id[160], hid[160]; int ri, rh = 0;
@@ -2835,7 +2881,10 @@ static int ratchet_baseline_gate(void) {
     char *names;
     if (plan_dir) return 0;
     names = slurp_run(av, &sn);
-    if (!names) return 0;
+    if (!names) {
+        sy_eprintf("precommit: BLOCKED git diff --cached (ratchet-baseline) failed\n");
+        return 1;
+    }
     while (at < sn) {
         long nl = tx_len(names + at, sn - at);
         if (nl <= 0) break;
@@ -3179,6 +3228,77 @@ static int pc_copy_tree(const char *src, const char *dst, int depth) {
     return -1;
 }
 
+/* Whole string literals "tools/NAME.cx" in the copied sources name the tools those sources run; copy them too, round by round, until
+   nothing new appears (reg-manifest.cx runs tools/batch-packages-gen.cx, precommit.cx runs tools/verseq-gen.cx, ...).  A hand-kept
+   list lost one of them once (check-reg-manifest), so the set is read from the sources. */
+#define PC_CLOSE_NAMES 128
+static int pc_name_char(int c) { return (c >= 'a' && c <= 'z') || (c >= 'A' && c <= 'Z') || (c >= '0' && c <= '9') || c == '_' || c == '-' || c == '.'; }
+
+static int pc_close_scan(const char *iso, const char *sub, const char *base, char names[][160], int *nn) {
+    char dp[1400];
+    sy_dir_t d;
+    if (cx_fmt(dp, sizeof dp, "%s/%s", iso, sub)) return -1;
+    if (sy_dir_open(&d, dp) != 0) return 0;   /* a subdirectory that is not there has nothing to scan */
+    while (sy_dir_next(&d) == 1) {
+        char fp[1500];
+        size_t n = 0;
+        char *b;
+        long i, nl = tx_len(d.name, 200);
+        if (nl < 4 || !tx_eqz(d.name + nl - 3, ".cx")) continue;
+        if (cx_fmt(fp, sizeof fp, "%s/%s", dp, d.name)) continue;
+        b = (char *)cx_read(fp, &n);
+        if (!b) continue;
+        for (i = 0; i + 9 < (long)n; i++) {
+            long j, k;
+            int have = 0, t;
+            sy_stat_t st;
+            char ip[1400], sp[1400];
+            if (b[i] != '"' || !tx_prefix(b + i + 1, (long)n - i - 1, "tools/", 6)) continue;
+            for (j = i + 7; j < (long)n && pc_name_char((unsigned char)b[j]); j++) {}
+            k = j - (i + 7);
+            if (j >= (long)n || b[j] != '"' || k < 4 || k >= 150 || !tx_prefix(b + j - 3, 3, ".cx", 3)) continue;
+            for (t = 0; t < *nn; t++) if (tx_len(names[t], 160) == k && tx_prefix(b + i + 7, k, names[t], k)) have = 1;
+            if (have) continue;
+            if (*nn >= PC_CLOSE_NAMES) { mm_free(b); sy_dir_close(&d); return -1; }   /* a full name table must not silently drop a tool */
+            if (mm_copy(names[*nn], 160, b + i + 7, k) != 0) continue;
+            names[*nn][k] = 0;
+            if (cx_fmt(ip, sizeof ip, "%s/tools/%s", iso, names[*nn]) || sy_lstat(ip, &st) == 0) continue;   /* already copied */
+            if (cx_fmt(sp, sizeof sp, "%s/tools/%s", base, names[*nn])) continue;
+            if (sy_stat(sp, &st) != 0) {
+                /* a literal that names no file in the source tree: HEAD-tracked -> the isolated tree lost a tool, refuse; never tracked
+                   (docs, examples, generated output) -> skipped */
+                char tp[400]; char *tv[] = {"git", "ls-tree", "--name-only", "HEAD", "--", tp, 0}; long tn = 0; char *to;
+                if (cx_fmt(tp, sizeof tp, "tools/%s", names[*nn])) continue;
+                to = slurp(tv, &tn);
+                if (!to) { mm_free(b); sy_dir_close(&d); return -1; }
+                mm_free(to);
+                if (tn > 0) { sy_eprintf("precommit: BLOCKED isolated tree closure: tools/%s is tracked in HEAD but missing from the source tree\n", names[*nn]); mm_free(b); sy_dir_close(&d); return -1; }
+                continue;
+            }
+            (*nn)++;
+        }
+        mm_free(b);
+    }
+    sy_dir_close(&d);
+    return 0;
+}
+
+static int pc_close_tools(const char *iso, const char *base) {
+    int round;
+    for (round = 0; round < 8; round++) {
+        char names[PC_CLOSE_NAMES][160];
+        int nn = 0, k;
+        if (pc_close_scan(iso, "tools", base, names, &nn) != 0 || pc_close_scan(iso, "tools/cxlib", base, names, &nn) != 0) return -1;
+        if (nn == 0) return 0;
+        for (k = 0; k < nn; k++) {
+            char cs[1400], cd[1400];
+            if (cx_fmt(cs, sizeof cs, "%s/tools/%s", base, names[k]) || cx_fmt(cd, sizeof cd, "%s/tools/%s", iso, names[k])) return -1;
+            if (pc_copy_tree(cs, cd, 0) != 0) return -1;
+        }
+    }
+    return -1;   /* still growing after 8 rounds: the closure is not proven complete */
+}
+
 static int pc_populate_isolated_tree(const char *iso) {
     const char *w = pc_work_top[0] ? pc_work_top : (pc_local_top[0] ? pc_local_top : pc_orig_cwd);
     const char *wt = pc_local_top[0] ? pc_local_top : (pc_orig_cwd[0] ? pc_orig_cwd : w);
@@ -3230,6 +3350,7 @@ static int pc_populate_isolated_tree(const char *iso) {
                     if (pc_copy_tree(cs, cd, 0) != 0) return -1;
                 }
             }
+            if (base && base[0] && pc_close_tools(iso, base) != 0) return -1;
         }
     }
     for (i = 0; subdirs[i]; i++) {
@@ -3252,7 +3373,11 @@ static int pc_populate_isolated_tree(const char *iso) {
                 return -1;
             }
             if (sy_lstat(sp, &lst) == 0 && lst.kind == 'l') {
-                if (sy_lstat(dp, &lst) != 0 || lst.kind == 'l') {
+                sy_stat_t tgt;
+                /* a tracked link to a regular file stays the link the index recorded: following it would turn a staged
+                   symlink source into a regular file and the registry gate could no longer refuse it as source-not-regular */
+                int keep_link = sy_lstat(dp, &lst) == 0 && lst.kind == 'l' && sy_stat(sp, &tgt) == 0 && tgt.kind == 'f';
+                if (!keep_link && (sy_lstat(dp, &lst) != 0 || lst.kind == 'l')) {
                     if (pc_copy_tree(sp, dp, 0) != 0) {
                         sy_dir_close(&d);
                         return -1;
@@ -3396,8 +3521,32 @@ static int isolate_staged_tree(void) {
 
 int main(int argc, char **argv) {
     long sn, rn, at; int staged = 0, blocked = 0, lint_absent = 0;
+    char identity_root[4096];
+    if (sy_realpath(".", identity_root, sizeof identity_root) >= 0)
+        dw_identity_emit("precommit", identity_root, 1);
+    pc_times_t0 = sy_now_ms();
     pc_register_cleanup_hooks();
     pc_sweep_stale_tmp();
+    if (argc == 2 && tx_eqz(argv[1], "--times-selftest")) {
+        char dir[500], path[700];
+        sy_unsetenv("UNISACC_PRECOMMIT_TIMES");
+        slurp_last_rc = 1;
+        slurp_last_timeout = 0;
+        gate_phase("lint", 0, 9);
+        pt_total(pc_times_t0, "precommit", 1);
+        if (sr_default("precommit", dir, sizeof dir) || cx_fmt(path, sizeof path, "%s/precommit-times.tsv", dir)) return 2;
+        sy_printf("TIMES_PATH\t%s\n", path);
+        return 0;
+    }
+    if (argc == 3 && tx_eqz(argv[1], "--times-selftest")) {
+        sy_setenv("UNISACC_PRECOMMIT_TIMES", argv[2], 1);
+        slurp_last_rc = 0;
+        slurp_last_timeout = 0;
+        gate_phase("lint", 0, 7);
+        pt_total(pc_times_t0, "precommit", 0);
+        return 0;
+    }
+    if (argc == 2 && tx_eqz(argv[1], "--ratchet-baseline-selftest")) return ratchet_baseline_gate() ? 1 : 0;
     if (argc >= 2 && tx_eqz(argv[1], "--precheck")) return precheck(argc, argv);
     if (argc >= 2 && tx_eqz(argv[1], "--verify-deferred")) {
         if (pc_capture_work_top() != 0) return 1;
@@ -3583,7 +3732,7 @@ int main(int argc, char **argv) {
       } else if (msn > 0) {
           char *lout; long ln;
           int cov_blk = cov_gate();
-          blocked += cov_blk;
+          blocked += cov_blk + bpi_gate();
           cur_gate = "runlist"; slurp_okrc = 2; lout = slurp(lv, &ln); slurp_okrc = 0; cur_gate = 0;
           if (!lout) { sy_eprintf("precommit: tests/run.cx --list did not run\n"); return 1; }
           if (!cov_blk && tx_find(lout, ln, "metadata_valid=1", 16) < 0) {
@@ -3598,6 +3747,55 @@ int main(int argc, char **argv) {
               blocked++;
           }
       }
+    }
+    /* affected-canary gate: tools/affected.cx went rc2 on every call for days (a batch with a {candidate}
+       placeholder lacked its tests/batch-product-inputs.tsv row) and nothing noticed.  A commit touching the
+       canary read set (registry, declaration, coverage and cxroot tables, affected.cx and the cxlib/ext/cx trees
+       it is built from) runs `affected --registry-check`: registry load plus the product-input declaration check,
+       no closure scan (about 1 s hot).  When every one of those inputs staged equals the work tree's bytes the
+       check runs in the work tree (warm run-cache, bound 10 s: same inputs, same verdict); otherwise it runs
+       inside the isolated staged tree (cold compile, bound 30 s), never on a diverging work tree.  rc != 0 or no
+       answer blocks, naming affected's own reason lines.  A commit that deletes tools/affected.cx blocks; only a
+       repository that never had it (fixture) skips. */
+    { long acn; char *acnames = gate_diff("affected-canary", &acn);
+      if (!acnames) { sy_eprintf("precommit: BLOCKED git diff --cached (affected-canary read set) failed\n"); blocked++; }
+      else if (acn > 0 && sy_exists("tools/affected.cx") != 1) {
+          char *dv[] = {"git", "diff", "--cached", "--diff-filter=D", "--name-only", "--", "tools/affected.cx", 0}; long dn = 0; char *dd = slurp(dv, &dn);
+          if (plan_dir) {}
+          else if (!dd) { sy_eprintf("precommit: BLOCKED affected-canary cannot tell whether tools/affected.cx is deleted (git diff failed)\n"); blocked++; pc_mark_block("affected-canary", "affected-missing"); }
+          else if (dn > 0) { sy_eprintf("precommit: BLOCKED affected-canary tools/affected.cx is deleted in this commit (the liveness canary cannot run)\n"); blocked++; pc_mark_block("affected-canary", "affected-missing"); }
+          else sy_eprintf("precommit: AFFECTED_CANARY skipped=1 reason=no-tools/affected.cx (fixture repo)\n");
+          if (dd) mm_free(dd);
+      } else if (acn > 0) {
+          const char *wtop = pc_work_top[0] ? pc_work_top : (pc_local_top[0] ? pc_local_top : pc_orig_cwd);
+          char *cv[] = {"sh", "-c", "for f in tools/affected.cx cxroot.tsv tests/batches.tsv tests/batch-product-inputs.tsv tests/coverage.tsv; do cmp -s \"$f\" \"$0/$f\" || { echo DIFF; exit 0; }; done;"
+                        " for d in tools/cxlib ext cx; do diff -rq \"$d\" \"$0/$d\" >/dev/null 2>&1 || { echo DIFF; exit 0; }; done; echo SAME", (char *)wtop, 0};
+          char *hv[] = {"sh", "-c", "cd \"$0\" && unset GIT_DIR GIT_WORK_TREE GIT_INDEX_FILE &&"
+                        " exec sh ./unisacc.com tools/affected.cx -- --registry-check 2>&1", (char *)wtop, 0};
+          char *iv[] = {"sh", "-c", "exec sh ./unisacc.com tools/affected.cx -- --registry-check 2>&1", 0};
+          long an, cn2; char *ao, *co; int b0_ac = blocked, arc, ato, hot; long t_ac = sy_now_ms();
+          co = (plan_dir || !wtop[0]) ? 0 : slurp(cv, &cn2);
+          hot = co && tx_find(co, cn2, "SAME", 4) >= 0; mm_free(co);
+          cur_gate = "affected-canary"; slurp_okrc = 255; slurp_bound_ms = hot ? 10000 : 30000;
+          ao = slurp(hot ? hv : iv, &an); arc = slurp_last_rc; ato = slurp_last_timeout;
+          slurp_bound_ms = 0; slurp_okrc = 0; cur_gate = 0;
+          if (plan_dir) {}
+          else if (!ao) { sy_eprintf("precommit: BLOCKED affected-canary %s (basis=%s bound %d s)\n", ato ? "timeout" : "did not run", hot ? "worktree-binary" : "staged-tree", hot ? 10 : 30); blocked++; }
+          else if (arc != 0 || tx_find(ao, an, "AFFECTED_REGISTRY_CHECK", 22) < 0) {
+              long at6 = 0; int shown = 0;
+              sy_eprintf("precommit: BLOCKED affected-canary tools/affected.cx rc=%d\n", arc);
+              while (at6 < an && shown < 8) { long e = tx_chr(ao + at6, an - at6, '\n'), l = e < 0 ? an - at6 : e;
+                  if (tx_find(ao + at6, l, "REFUSE", 6) >= 0 || tx_find(ao + at6, l, "UNDECLARED", 10) >= 0 ||
+                      tx_find(ao + at6, l, "UNKNOWN", 7) >= 0 || tx_find(ao + at6, l, "affected:", 9) >= 0) {
+                      sy_eprintf("precommit: affected-canary %.*s\n", (int)l, ao + at6); shown++; }
+                  at6 += l + 1; }
+              if (!shown) sy_eprintf("precommit: affected-canary tail: %.*s\n", (int)(an > 300 ? 300 : an), an > 300 ? ao + an - 300 : ao);
+              blocked++;
+          } else sy_eprintf("precommit: AFFECTED_CANARY ok basis=%s ms=%ld\n", hot ? "worktree-binary" : "staged-tree", sy_now_ms() - t_ac);
+          mm_free(ao);
+          if (blocked > b0_ac) pc_mark_block("affected-canary", "affected-rc");
+      }
+      mm_free(acnames);
     }
     /* facts gate: a commit touching include/ or exec/facts/ must leave the generated pp-autoinc-gen table
        in sync. The FTRIM/libc anchors are baked into that table from every .h's raw #if lines, so an out-of-
@@ -3620,7 +3818,7 @@ int main(int argc, char **argv) {
     { int b0 = blocked; blocked += ledger_gate(); if (blocked > b0) pc_mark_block("ledger", "ledger-format"); }
     { int b0 = blocked; blocked += derive_gate(); if (blocked > b0) pc_mark_block("derive", "derived-table-drift"); }
     if (!plan_dir) gt_line();
-    if (!staged) { sy_printf("PRECOMMIT\tstaged_cx=0\tblocked=%d\n", blocked); if (blocked) pc_emit_gate_fail(); return blocked ? 1 : 0; }
+    if (!staged) { pt_total(pc_times_t0, "precommit", blocked); sy_printf("PRECOMMIT\tstaged_cx=0\tblocked=%d\n", blocked); if (blocked) pc_emit_gate_fail(); return blocked ? 1 : 0; }
     { int b0 = blocked; blocked += new_tools(); if (blocked > b0) pc_mark_block("new-tools", "missing-check"); }
     { int b0 = blocked; blocked += tlib_frozen_gate(names, sn); if (blocked > b0) pc_mark_block("tlib-frozen", "tlib-bump"); }
     { int b0 = blocked; blocked += lint_gate(names, sn, &lint_absent); if (blocked > b0) pc_mark_block("lint", "cx-lint"); }
@@ -3647,6 +3845,7 @@ int main(int argc, char **argv) {
                                                     "sh ./unisacc.com tools/ratchets.cx");
               if (blocked > b0) pc_mark_block("ratchets", "ratchets-unavailable");
           }
+          pt_total(pc_times_t0, "precommit", blocked);
           sy_printf("PRECOMMIT\tstaged_cx=%d\tblocked=%d\tratchets=absent\n", staged, blocked);
           if (blocked) pc_emit_gate_fail();
           return blocked ? 1 : 0;
@@ -3689,6 +3888,7 @@ int main(int argc, char **argv) {
         }
         mm_free(pout);
     }
+    pt_total(pc_times_t0, "precommit", blocked);
     sy_printf("PRECOMMIT\tstaged_cx=%d\tblocked=%d\n", staged, blocked);
     if (blocked) {
         pc_emit_gate_fail();

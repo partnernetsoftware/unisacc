@@ -201,6 +201,41 @@ int main(int argc, char **argv) {
         ck(cr_dir(root, "snap", id, 0, o1, sizeof o1) == 0 && !strcmp(o1, dflt), "override-empty-is-default");
     }
 
+    /* (5) cr_base 的 cap==1:可观察差异在 OUT 字节上,不在返回值上。
+       原式 cap<1 对 cap==1 放行到 cx_fmt,格式化截断 -> 返回 -1 且 OUT 被写成空串;
+       判据写成 cap<=1 会提前返回 -1、OUT 一个字节都不动。两条都返回 -1,只有 OUT 字节区分得开;
+       夹具必须先预填哨兵再断言 OUT 被写成空串,否则这条差异永远测不到。 */
+    {   char small[8]; long z; int rc;
+        for (z = 0; z < 8; z++) small[z] = 'Z';
+        rc = cr_base(root, small, 1);
+        ck(rc == -1 && small[0] == 0 && small[1] == 'Z', "base-cap-one-truncates-and-writes-empty");
+        for (z = 0; z < 8; z++) small[z] = 'Z';
+        rc = cr_base(root, small, 0);
+        ck(rc == -1 && small[0] == 'Z', "base-cap-zero-refuses-without-writing");
+        for (z = 0; z < 8; z++) small[z] = 'Z';
+        rc = cr_base(root, small, 4400);
+        ck(rc == 0 && small[0] == '/', "base-real-cap-writes-the-answer");
+        /* null OUT with a sane cap still has to answer -1 instead of handing 0 to the formatter:
+           the `||` guard is what keeps the two refusals in one test, so the `||` -> `&&` mutation must show here. */
+        rc = cr_base(root, 0, 4400);
+        ck(rc == -1, "base-null-out-refused");
+        /* negative cap must refuse BEFORE the formatter even when a legal override is active: in that
+           branch the original hands cap=-1 straight to cx_fmt (no write, -1), while the `||` -> `&&` mutation
+           falls through and cx_fmt answers 0 having written bytes -- observed with a probe.  The earlier
+           negative-cap case had no override, so it never reached the formatter and could not tell. */
+        {   char ovp[4600];
+            cx_fmt(ovp, sizeof ovp, "%s/unisacc-session-chain-crneg-%d", tc, pid);
+            sy_setenv("UNISACC_CHAIN_BASE", ovp, 1);
+            for (z = 0; z < 8; z++) small[z] = 'Z';
+            rc = cr_base(root, small, -1);
+            ck(rc == -1 && small[0] == 'Z', "base-negative-cap-refused-without-writing");
+            for (z = 0; z < 8; z++) small[z] = 'Z';
+            rc = cr_base(root, small, 1);
+            ck(rc == -1 && small[0] == 0, "base-cap-one-writes-empty-with-override");
+            sy_setenv("UNISACC_CHAIN_BASE", "", 1);
+        }
+    }
+
     /* cleanup of this check's own fixtures (kind directories stay: they are shared) */
     sy_rmdir(d2);
     cx_fmt(p, sizeof p, "%s/out", froot);

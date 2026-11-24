@@ -1,0 +1,251 @@
+/* runcache-path-key.cx -- run-cache 键:srcraw 对象路径 + 精确钉住(0.0.105 红夹具,测试侧)。
+ *   sh ./unisacc.com tests/runcache-path-key.cx -- NEW_OUT CANDIDATE
+ *
+ * 三段:对象路径(srcraw,6 项,0.0.99 已审)、三负控、精确钉住(11 项)。
+ * 精确钉住断言一律走 -run 路由(rc_mode!=5),因为 -c 对象键的 srcraw 会掩盖钉住效果。
+ * -run 两目录同相对源名:不钉 -> 根无关命中(lookup_hit=2);钉 -> 原始键含 cwd 不同 -> miss(0)。
+ * 未修产品上:注释/字符串 __FILE__ 被 ri_names_file 子串误钉(期望 hit 却 miss)、CAT/DW/跨文件本应钉却未钉,
+ * 这些为红;本版精确判定后全绿。末行 CHECK_RUNCACHE_PATH_KEY<TAB>ok=N<TAB>failed=M。 */
+#pragma unisa use sys.fs
+#pragma unisa use sys.env
+#pragma unisa use sys.posix
+#pragma unisa use sys.io
+#pragma unisa use sys.sha
+#pragma unisa use sys.time
+#pragma unisa use text.text
+#pragma unisa use text.fmt
+#pragma unisa use mem.heap
+#pragma unisa use mem.bytes
+#pragma unisa use cxlib.procrun
+
+static int checks, failed;
+static char work[2048], cand[2200];
+static void die(const char *s) { fprintf(stderr, "runcache-path-key: %s\n", s); exit(2); }
+static void ck(int yes, const char *name) { checks++; if (!yes) failed++; printf("%s\truncache-path-key.%s\n", yes ? "PASS" : "FAIL", name); }
+static void put(const char *dir, const char *leaf, const char *text) {
+    char p[2400];
+    if (cx_fmt(p, sizeof p, "%s/%s", dir, leaf)) die("path");
+    if (cx_write(p, text, (size_t)tx_len(text, 4096))) die("write");
+}
+/* plain byte-substring test (not tx_find/tx_contains, which the lint rules treat as source anchors) */
+static int bytes_has(const char *h, size_t hn, const char *needle, size_t m) {
+    if (!h || m == 0 || hn < m) return 0;
+    for (size_t i = 0; i + m <= hn; i++) if (!memcmp(h + i, needle, m)) return 1;
+    return 0;
+}
+static long idxof(const char *h, long hn, const char *nd, long m, long from) {
+    for (long i = from; i + m <= hn; i++) if (!memcmp(h + i, nd, m)) return i;
+    return -1;
+}
+static long dg(const char *p, char hex[65]) {
+    size_t n = 0; char *b = (char *)cx_read(p, &n);
+    if (!b) { hex[0] = 0; return -1; }
+    if (sy_sha256_hex(b, n, hex)) cx_sha256_hex(b, n, hex);
+    mm_free(b); return (long)n;
+}
+/* run the compiler (cand) in DIR with an isolated E3CACHE; RR_TIME on; stderr to <dir>/rr.err. */
+static int runsh(const char *dir, const char *cache, const char *tail) {
+    char cmd[4096], errp[2400];
+    if (cx_fmt(errp, sizeof errp, "%s/rr.err", dir)) die("path");
+    if (cx_fmt(cmd, sizeof cmd, "cd '%s' && UNISACC_E3CACHE='%s' UNISACC_RR_TIME=1 sh '%s' %s 2>'%s'", dir, cache, cand, tail, errp)) die("cmd");
+    char *v[] = {"sh", "-c", cmd, 0};
+    char *o = 0; long n = 0;
+    int rc = cx_runv_timeout(v, 50, &o, &n);
+    if (o) mm_free(o);
+    return rc;
+}
+/* last RR_TIME lookup_hit=N for the run in DIR (2 = hit, 0 = miss), -1 when absent */
+static int hit_in(const char *dir) {
+    char p[2400]; long val = -1;
+    if (cx_fmt(p, sizeof p, "%s/rr.err", dir)) return -1;
+    size_t n = 0; char *b = (char *)cx_read(p, &n);
+    if (!b) return -1;
+    long at = 0;
+    while (at < (long)n) {
+        long q = idxof(b, (long)n, "lookup_hit=", 11, at);
+        if (q < 0) break;
+        long d = q + 11; val = 0;
+        while (d < (long)n && b[d] >= '0' && b[d] <= '9') { val = val * 10 + (b[d] - '0'); d++; }
+        at = d;
+    }
+    mm_free(b); return (int)val;
+}
+/* -run two-dir pin probe: write SRC (and optional HDR) into <root>/<tag>-a and -b, run the tail
+   (one %s -> the bare 's.cx') in a shared cache, cold in -a then -b. Relative spelling is the same
+   in both dirs, so the only reason -b misses is that the unit is pinned. Returns -b's lookup_hit. */
+static int two_run(const char *root, const char *tag, const char *srctext, const char *hdrtxt, const char *tail_tmpl) {
+    char pa[2048], pb[2048], cache[2048], ta[4096], tb[4096];
+    if (cx_fmt(pa, sizeof pa, "%s/%s-a", root, tag) || cx_fmt(pb, sizeof pb, "%s/%s-b", root, tag) ||
+        cx_fmt(cache, sizeof cache, "%s/%s-cache", root, tag)) die("path");
+    sy_mkdir_all(pa, 0700); sy_mkdir_all(pb, 0700); sy_mkdir_all(cache, 0700);
+    put(pa, "s.cx", srctext); put(pb, "s.cx", srctext);
+    if (hdrtxt) { put(pa, "h.h", hdrtxt); put(pb, "h.h", hdrtxt); }
+    cx_fmt(ta, sizeof ta, tail_tmpl, "s.cx"); cx_fmt(tb, sizeof tb, tail_tmpl, "s.cx");
+    runsh(pa, cache, ta);
+    runsh(pb, cache, tb);
+    return hit_in(pb);
+}
+
+/* ---- object-path (srcraw) checks, 0.0.99 ---- */
+static void obj_checks(void) {
+    const char *src = "int proof(void){return 37;}\n";
+    char a[2400], b[2400], cb[2400], cache[2400], ccache[2400], o[2400];
+    if (cx_fmt(a, sizeof a, "%s/a", work) || cx_fmt(b, sizeof b, "%s/b", work) ||
+        cx_fmt(cb, sizeof cb, "%s/coldb", work) || cx_fmt(cache, sizeof cache, "%s/cache", work) ||
+        cx_fmt(ccache, sizeof ccache, "%s/coldcache", work) ||
+        sy_mkdir_all(a, 0700) || sy_mkdir_all(b, 0700) || sy_mkdir_all(cb, 0700) ||
+        sy_mkdir_all(cache, 0700) || sy_mkdir_all(ccache, 0700)) die("mk sub");
+    put(a, "probe.cx", src); put(b, "probe.cx", src); put(cb, "probe.cx", src);
+    char ap[2500], bp[2500], t[3000];
+    cx_fmt(ap, sizeof ap, "%s/a/probe.cx", work); cx_fmt(bp, sizeof bp, "%s/b/probe.cx", work);
+    cx_fmt(t, sizeof t, "-O2 -c -b lnx/x86_64 -funit -o out.o '%s'", ap); runsh(a, cache, t);
+    cx_fmt(t, sizeof t, "-O2 -c -b lnx/x86_64 -funit -o out.o '%s'", bp); runsh(b, cache, t);
+    cx_fmt(t, sizeof t, "-O2 -c -b lnx/x86_64 -funit -o out.o '%s'", bp); runsh(cb, ccache, t);
+    { char bsha[65], csha[65]; cx_fmt(o, sizeof o, "%s/out.o", b); dg(o, bsha); cx_fmt(o, sizeof o, "%s/out.o", cb); dg(o, csha);
+      ck(bsha[0] && !strcmp(bsha, csha), "obj-abs-two-dirs-b-matches-cold"); }
+    { char i1[2400], needle[64]; cx_fmt(i1, sizeof i1, "%s/inc", work); sy_mkdir_all(i1, 0700); put(i1, "h.h", "#define V 1\n");
+      put(work, "m.cx", "int proof(void){return 1;}\n");
+      cx_fmt(t, sizeof t, "-O2 -c -b lnx/x86_64 -funit -I'%s' -o m.o m.cx", i1); runsh(work, cache, t);
+      size_t n = 0; char *ob = (char *)cx_read((cx_fmt(o, sizeof o, "%s/m.o", work), o), &n);
+      cx_fmt(needle, sizeof needle, "%s", "inc/h.h");
+      int found = ob && bytes_has(ob, n, needle, tx_len(needle, 64)); if (ob) mm_free(ob);
+      ck(!found, "ctl-include-not-embedded"); }
+    { char r1[2400], r2[2400], rc1[2400], s1[65], s2[65];
+      cx_fmt(r1, sizeof r1, "%s/rA", work); cx_fmt(r2, sizeof r2, "%s/rB", work); cx_fmt(rc1, sizeof rc1, "%s/rcache", work);
+      sy_mkdir_all(r1, 0700); sy_mkdir_all(r2, 0700); sy_mkdir_all(rc1, 0700);
+      put(r1, "probe.cx", src); put(r2, "probe.cx", src);
+      cx_fmt(t, sizeof t, "-O2 -c -b lnx/x86_64 -funit -o out.o probe.cx"); runsh(r1, rc1, t); runsh(r2, rc1, t);
+      cx_fmt(o, sizeof o, "%s/out.o", r1); dg(o, s1); cx_fmt(o, sizeof o, "%s/out.o", r2); dg(o, s2);
+      ck(s1[0] && !strcmp(s1, s2), "obj-rel-two-dirs-identical"); }
+    { char f1[2400], f2[2400], s1[65], s2[65]; cx_fmt(f1, sizeof f1, "%s/fA", work); cx_fmt(f2, sizeof f2, "%s/fB", work);
+      sy_mkdir_all(f1, 0700); sy_mkdir_all(f2, 0700);
+      const char *fsrc = "int main(void){return 0;}\nconst char *f(void){return __FILE__;}\n";
+      put(f1, "fp.cx", fsrc); put(f2, "fp.cx", fsrc);
+      cx_fmt(t, sizeof t, "-O2 -c -b lnx/x86_64 -funit -o out.o '%s/fp.cx'", f1); runsh(f1, cache, t);
+      cx_fmt(t, sizeof t, "-O2 -c -b lnx/x86_64 -funit -o out.o '%s/fp.cx'", f2); runsh(f2, cache, t);
+      cx_fmt(o, sizeof o, "%s/out.o", f1); dg(o, s1); cx_fmt(o, sizeof o, "%s/out.o", f2); dg(o, s2);
+      ck(s1[0] && s2[0] && strcmp(s1, s2) != 0, "file-pinned-two-dirs-differ"); }
+    { char h1[2400], h2[2400], s1[65], s2[65]; cx_fmt(h1, sizeof h1, "%s/hA", work); cx_fmt(h2, sizeof h2, "%s/hB", work);
+      sy_mkdir_all(h1, 0700); sy_mkdir_all(h2, 0700);
+      put(h1, "main.cx", "#include \"h.h\"\nint proof(void){return VAL;}\n"); put(h1, "h.h", "#define VAL 37\n");
+      put(h2, "main.cx", "#include \"h.h\"\nint proof(void){return VAL;}\n"); put(h2, "h.h", "#define VAL 99\n");
+      cx_fmt(t, sizeof t, "-O2 -c -b lnx/x86_64 -funit -o out.o main.cx"); runsh(h1, cache, t); runsh(h2, cache, t);
+      cx_fmt(o, sizeof o, "%s/out.o", h1); dg(o, s1); cx_fmt(o, sizeof o, "%s/out.o", h2); dg(o, s2);
+      ck(s1[0] && s2[0] && strcmp(s1, s2) != 0, "header-diff-no-miscode"); }
+    { char x[2400], needle[16]; cx_fmt(x, sizeof x, "%s/xA", work); sy_mkdir_all(x, 0700); put(x, "e.cx", "int main(void){return 0;}\n");
+      cx_fmt(t, sizeof t, "-O2 -b lnx/x86_64 -o exec.bin '%s/e.cx'", x); runsh(x, cache, t);
+      size_t n = 0; char *eb = (char *)cx_read((cx_fmt(o, sizeof o, "%s/exec.bin", x), o), &n);
+      cx_fmt(needle, sizeof needle, "%s", "e.cx");
+      int found = eb && bytes_has(eb, n, needle, tx_len(needle, 16)); if (eb) mm_free(eb);
+      ck(!found, "ctl-executable-not-embedded"); }
+}
+
+/* three negative controls on the -run route: change one byte -> miss */
+static void negctl_checks(void) {
+    const char *base = "int main(void){return 0;}\n";
+    char id[2400], t[4000];
+    cx_fmt(id, sizeof id, "%s/neg-src", work); sy_mkdir_all(id, 0700);
+    put(id, "s.cx", base); cx_fmt(t, sizeof t, "%s", "s.cx"); runsh(id, id, t);
+    put(id, "s.cx", "int main(void){return 1;}\n"); runsh(id, id, t);
+    ck(hit_in(id) == 0, "negctl-source-one-byte-miss");
+    cx_fmt(id, sizeof id, "%s/neg-argv", work); sy_mkdir_all(id, 0700);
+    put(id, "s.cx", base); cx_fmt(t, sizeof t, "%s", "-O2 s.cx"); runsh(id, id, t);
+    cx_fmt(t, sizeof t, "%s", "-O1 s.cx"); runsh(id, id, t);
+    ck(hit_in(id) == 0, "negctl-argv-one-option-miss");
+    cx_fmt(id, sizeof id, "%s/neg-hdr", work); sy_mkdir_all(id, 0700);
+    put(id, "s.cx", "#include \"h.h\"\nint main(void){return V;}\n"); put(id, "h.h", "#define V 0\n");
+    cx_fmt(t, sizeof t, "%s", "s.cx"); runsh(id, id, t);
+    put(id, "h.h", "#define V 1\n"); runsh(id, id, t);
+    ck(hit_in(id) == 0, "negctl-header-one-byte-miss");
+}
+
+/* ---- precise-pin checks on the -run route ---- */
+/* delete every cache file except *.plan (force a re-lookup), keeping the plan memo */
+static void purge_keep_plan(const char *cache) {
+    char cmd[4096];
+    char *v[4]; char *o = 0; long n = 0;
+    if (cx_fmt(cmd, sizeof cmd, "find '%s' -maxdepth 1 -type f ! -name '*.plan' -delete", cache)) return;
+    v[0] = "sh"; v[1] = "-c"; v[2] = cmd; v[3] = 0;
+    (void)cx_runv_timeout(v, 20, &o, &n); if (o) mm_free(o);
+}
+/* run cand on an absolute source in DIR, stdout to cap.txt */
+static void runabs_cap(const char *dir, const char *cache, const char *abs) {
+    char tail[4096];
+    if (cx_fmt(tail, sizeof tail, "'%s' >cap.txt", abs)) return;
+    runsh(dir, cache, tail);
+}
+static void pin_checks(void) {
+    const char *run = "%s";                 /* relative bare source */
+    const char *dw  = "-DW=__FILE__ %s";
+    ck(two_run(work, "p1cmt", "int main(void){return 0;}/* mentions __FILE__ */\n", 0, run) == 2, "pin-comment-not");
+    ck(two_run(work, "p2str", "int main(void){return 0;}\nconst char *v(void){return \"__FILE__\";}\n", 0, run) == 2, "pin-string-not");
+    ck(two_run(work, "p3real", "int main(void){return 0;}\nconst char *v(void){return __FILE__;}\n", 0, run) == 0, "pin-real");
+    ck(two_run(work, "p4apo", "int main(void){return 0;}/* don't split */\nconst char *v(void){return __FILE__;}\n", 0, run) == 0, "pin-apostrophe-comment");
+    ck(two_run(work, "p5cat", "int main(void){return 0;}\n#define C2(a,b) a##b\nconst char *v(void){return C2(__FI,LE__);}\n", 0, run) == 0, "pin-cat-fragment");
+    ck(two_run(work, "p6unr", "int main(void){return 0;}\n#define C2(a,b) a##b\nstatic int xy=3;\nint z(void){return C2(x,y);}\n", 0, run) == 2, "pin-unrelated-paste-not");
+    ck(two_run(work, "p7syp", "int main(void){return 0;}\n#define S(n) (sn_##n##_hi)\nstatic const long sn_x_hi=1;\nint z(void){return (int)sn_x_hi;}\n", 0, run) == 2, "pin-syp-num-not");
+    ck(two_run(work, "p8dw", "int main(void){return 0;}\nconst char *v(void){return W;}\n", 0, dw) == 0, "pin-dw-file");
+    /* header carries __FILE__; the source itself does not (no hollow self-test). */
+    ck(two_run(work, "p9hf", "#include \"h.h\"\nint main(void){return 0;}\n", "#define V 0\nstatic const char *hh(void){return __FILE__;}\n", run) == 0, "pin-header-file");
+    /* CAT entirely inside the header: ## and the fragment tokens both live in h.h -> (hh && hf). */
+    ck(two_run(work, "p9hc", "#include \"h.h\"\nint main(void){return V;}\n", "#define C2(x,y) x##y\n#define V 0\n#define FF C2(__FI,LE__)\n", run) == 0, "pin-header-only-cat");
+    /* ## in the source, fragment in the header -> (rs_hh && hf). */
+    ck(two_run(work, "p9sh", "#include \"h.h\"\nint main(void){return 0;}\n#define C2(x,y) x##y\n#define ZZ C2(a,b)\n", "#define F __FI\n", run) == 0, "pin-source-cat-header-frag");
+    ck(two_run(work, "p10xf", "int main(void){return 0;}\n#include \"h.h\"\nconst char *v(void){return C2(__FI,LE__);}\n", "#define C2(a,b) a##b\n", run) == 0, "pin-crossfile-cat");
+    ck(two_run(work, "p11esc", "int main(void){return 0;}\nconst char c = '\\\\';\nconst char *v(void){return __FILE__;}\n", 0, run) == 0, "pin-escaped-literal-still-real");
+    /* LF line splice (the compiler's own splice is LF-only): __FI<bs><LF>LE__ forms a real __FILE__ token -> pin. */
+    ck(two_run(work, "p12lf", "int main(void){return 0;}\nconst char *v(void){return __FI\\\nLE__;}\n", 0, run) == 0, "pin-lf-splice-forms-file");
+    /* LF splice inside a line comment: the __FILE__ on the continued line stays in the comment -> not pinned. */
+    ck(two_run(work, "p13lc", "int main(void){return 0;}\n// note \\\n__FILE__\n", 0, run) == 2, "pin-lf-splice-comment-swallows");
+    /* 1b: a header gaining __FILE__ flips pin without changing rc_src; the stale pin=0 entry
+       must not keep the unit permanently cold. The 4th run must be a hit. */
+    { char id[2400], t[4000];
+      cx_fmt(id, sizeof id, "%s/p1bf", work); sy_mkdir_all(id, 0700);
+      put(id, "s.cx", "#include \"h.h\"\nint main(void){return V;}\n");
+      put(id, "h.h", "#define V 0\n");
+      cx_fmt(t, sizeof t, "%s", "s.cx");
+      runsh(id, id, t);                                        /* run1: cold, store pin=0 */
+      runsh(id, id, t);                                        /* run2: hit pin=0 */
+      put(id, "h.h", "#define V 0\nstatic const char *hh(void){return __FILE__;}\n"); /* pin flips */
+      runsh(id, id, t);                                        /* run3: miss, store pin=1 */
+      runsh(id, id, t);                                        /* run4: must be a hit after the fix */
+      ck(hit_in(id) != 0, "pin-flip-not-permanent-cold"); }
+    /* F1: the compiler DOES splice backslash + CRLF; __FI<bs><CR><LF>LE__ forms a real __FILE__ token -> pin. */
+    ck(two_run(work, "p14crlf", "int main(void){return 0;}\nconst char *v(void){return __FI\\\r\nLE__;}\n", 0, run) == 0, "pin-crlf-splice-forms-file");
+    /* F2: unterminated literal (apostrophe in don't) inside #if 0 -> scanner fallback over-pins (safe). */
+    ck(two_run(work, "p15unterm", "int main(void){return 0;}\n#if 0\ndon't\n#endif\n", 0, run) == 0, "pin-unterminated-literal-fallback");
+    /* F3: memo-hit re-store must use the restored source ##/fragment bits; a wrong restore stores a
+       pin=0 root-independent entry and the second dir then reuses the first dir's object (prints a's path). */
+    { char base[2400], da[2400], db[2400], cache[2400], pa[2500], pb[2500], cap[2500];
+      const char *src = "#include \"h.h\"\n#define C2(x,y) x##y\nint main(void){puts(C2(__FI,LE__));return 0;}\n";
+      const char *hdr = "#include <stdio.h>\n";
+      cx_fmt(base, sizeof base, "%s/p16f3", work); sy_mkdir_all(base, 0700);
+      cx_fmt(da, sizeof da, "%s/a", base); cx_fmt(db, sizeof db, "%s/b", base); cx_fmt(cache, sizeof cache, "%s/cache", base);
+      sy_mkdir_all(da, 0700); sy_mkdir_all(db, 0700); sy_mkdir_all(cache, 0700);
+      put(da, "s.cx", src); put(db, "s.cx", src); put(da, "h.h", hdr); put(db, "h.h", hdr);
+      cx_fmt(pa, sizeof pa, "%s/s.cx", da); cx_fmt(pb, sizeof pb, "%s/s.cx", db);
+      sy_sleep_ms(3000);              /* let the plan memo become writable (mtime >= 2s old) */
+      runabs_cap(da, cache, pa);      /* a1: cold, store pin=1, write .plan */
+      runabs_cap(da, cache, pa);      /* a2: hit */
+      purge_keep_plan(cache);         /* drop host/tape, keep .plan */
+      runabs_cap(da, cache, pa);      /* a3: memo hit -> recompile -> re-store (restored rs bits decide pin) */
+      runabs_cap(db, cache, pb);      /* b: must compile and print its own path */
+      cx_fmt(cap, sizeof cap, "%s/cap.txt", db);
+      { size_t cn = 0; char *cb = (char *)cx_read(cap, &cn);
+        int ok = cb && bytes_has(cb, (long)cn, "/p16f3/b/s.cx", 13);
+        if (cb) mm_free(cb);
+        ck(ok, "pin-memo-restore-crossdir"); }
+    }
+}
+
+int main(int argc, char **argv) {
+    if (argc != 3) die("usage: NEW_OUT CANDIDATE");
+    if (cx_fmt(work, sizeof work, "%s", argv[1])) die("path");
+    if (sy_realpath(argv[2], cand, sizeof cand) < 0) die("cand realpath");
+    { char p[2400]; if (cx_fmt(p, sizeof p, "%s", work) || sy_mkdir_all(work, 0700)) die("work mkdir"); }
+    obj_checks();
+    negctl_checks();
+    pin_checks();
+    printf("CHECK_RUNCACHE_PATH_KEY\tok=%d\tfailed=%d\n", checks - failed, failed);
+    return failed ? 1 : 0;
+}

@@ -1,0 +1,155 @@
+/* tools/deferred-census.cx -- how many batches are deferred NOW: counts run outputs only, never the historical
+ * evidence committed to the repo.
+ *
+ *   sh ./unisacc.com tools/deferred-census.cx -- ROOT...
+ *
+ * WHY (the lesson this tool exists for): a plain `grep -rh '^DEFERRED' .cache/unisacc/prerun/` reported 2923
+ * lines, which was read as "this many batches are deferred" and planned work to add four material producers.
+ * 2919 of those 2923 lines came from `release/evidence/*-deferred.tsv` -- failure evidence COMMITTED to the
+ * repo (67 tracked files, 139 DEFERRED lines) -- because every qualify layout and every frozen root is a full
+ * tree copy: 1407 copies of those 67 files is 21x.  The run itself had 4 deferred lines.  Counting rows is
+ * therefore only meaningful after pruning the copies, which dvqualify and prerun-drive now do at archive time.
+ *
+ * RULE (fixed, and the reason this is a tool and not a grep):
+ *   RUN_OUT   a *.out file whose path does not contain /release/evidence/ -- the run's own output
+ *   EVIDENCE  any file whose path contains /release/evidence/ -- historical, counted as a file, never scanned
+ * Only RUN_OUT files contribute DEFERRED rows and AFFECTED_RUN rows.
+ *
+ * Output:
+ *   CENSUS_ROOT    ROOT  out_files=N  evidence_files=M
+ *   CENSUS_REASON  reason=<the text after DEFERRED<TAB>BATCH<TAB>>  lines=N   (descending, at most 16)
+ *   CENSUS_SUM     affected_run=A  deferred_rows=D  deferred_pos=P  pct=X.X
+ *   CENSUS_VERDICT ok|REFUTE|UNMEASURED  reason=...
+ * REFUSE (above the 10% line cc set) is REFUTE; exactly 10% is ok; no AFFECTED_RUN line is UNMEASURED, never ok.
+ * Exit 0 except 2 on usage.
+ *
+ * Check: tools/check-deferred-census.cx (batch deferred-census). */
+#pragma unisa use mem.bytes
+#pragma unisa use sys.fs
+#pragma unisa use sys.posix
+#pragma unisa use text.text
+
+/* 递归数文件,按路径是否含 /release/evidence/ 分类;对命中类别的文件扫 DEFERRED/AFFECTED_RUN 行。 */
+static long g_out_files, g_ev_files, g_affected, g_defer_rows, g_defer_pos;
+#define MAXR 64                              /* distinct reason buckets kept */
+#define RKEY 96                              /* key length; one macro so the cap cannot drift from the array */
+#define RCAP ((long)RKEY - 1)                /* usable key bytes: the last byte is the terminator */
+static char g_reason[MAXR][RKEY];
+static long g_rlines[MAXR];
+static int g_nr;
+static long g_truncated;                     /* reasons cut at RCAP: reported, so the cut is visible */
+static long g_dropped;                       /* distinct reasons past MAXR: reported, so the cap is visible */
+
+/* The row is `DEFERRED<TAB>BATCH<TAB>REASON`, and the batch id differs per row while the REASON is what
+   decides whether a producer is missing.  Grouping by the whole tail would split one reason into as many
+   buckets as there are batches; the key is the second tab field onward.
+   `n` is the field length measured up to the newline, so a newline test inside a loop here could never fire and a
+   `<` there could not be told from `<=`: those guards mutate into survivors no fixture can kill, which is a hole
+   in the mutation gate rather than in this parser.  The field is therefore copied as a bounded slice, and the two
+   boundary conditions left are ones a test can observe: the second-tab lookup and the key size.
+   The cap is derived from the array size (`sizeof key - 1`), not written as a literal beside it: with a literal,
+   growing the array changed nothing observable and the mutant survived. */
+static void bump_reason(const char *s, long n) {
+    int i;
+    char key[RKEY]; long k, at;
+    at = tx_find(s, n, "\t", 1);                   /* n <= 0 or no tab: tx_find itself answers -1 */
+    if (at < 0) return;                             /* a bare `DEFERRED<TAB>BATCH` names no reason */
+    k = n - (at + 1);
+    if (k > RCAP) { k = RCAP; g_truncated++; }
+    if (k <= 0) return;
+    if (mm_copy(key, (long)sizeof key, s + at + 1, k)) return; key[k] = 0;
+    for (i = 0; i < g_nr; i++) if (!strcmp(g_reason[i], key)) { g_rlines[i]++; return; }
+    if (g_nr >= MAXR) { g_dropped++; return; }
+    if (mm_copy(g_reason[g_nr], (long)sizeof g_reason[g_nr], key, k + 1)) return;
+    g_rlines[g_nr] = 1; g_nr++;
+}
+
+static int ends_out(const char *p) {
+    long n = (long)strlen(p);
+    return n > 4 && !strcmp(p + n - 4, ".out");
+}
+
+static void scan_file(const char *p) {
+    size_t n = 0; char *s = cx_read(p, &n);
+    long at = 0;
+    if (!s) return;
+    while (at < (long)n) {
+        long e = at, ln;
+        while (e < (long)n && s[e] != '\n') e++;
+        ln = e - at;
+        if (ln > 9 && !memcmp(s + at, "DEFERRED\t", 9)) { g_defer_rows++; bump_reason(s + at + 9, ln - 9); }
+        else if (ln > 12 && !memcmp(s + at, "AFFECTED_RUN\t", 13)) {
+            long r = tx_find(s + at, ln, "deferred=", 9);
+            g_affected++;
+            if (r >= 0) {
+                long v = 0, q = r + 9;
+                while (q < ln && s[at + q] >= '0' && s[at + q] <= '9') { v = v * 10 + (s[at + q] - '0'); q++; }
+                if (v > 0) g_defer_pos++;
+            }
+        }
+        at = e + 1;
+    }
+    free(s);
+}
+
+/* 目录遍历:sy_dir_open/next/close 在 cx/sys/posix.cx
+   符号链接文件不当普通文件读:一个指向别处的链接会让普查把另一棵树的 .out 也算进来,而链接环会让
+   遍历不终止;深度与 chain-disk-ledger 同规矩,超过 CDS_MAXDEPTH 就具名报告并跳过该子树,递归上界在工具
+   里,不靠运行时的描述符上限。 */
+#define CDS_MAXDEPTH 16
+static void walk(const char *dir, int depth) {
+    sy_dir_t d; int rc;
+    if (!dir || !dir[0]) return;
+    if (depth >= CDS_MAXDEPTH) {
+        fprintf(stderr, "deferred-census: WARN nesting deeper than %d at %s (subtree not counted)\n", CDS_MAXDEPTH, dir);
+        return;
+    }
+    if (sy_dir_open(&d, dir) != 0) return;
+    while ((rc = sy_dir_next(&d)) > 0) {
+        char p[4400];
+        if (d.name_n == 1 && d.name[0] == '.') continue;
+        if (d.name_n == 2 && d.name[0] == '.' && d.name[1] == '.') continue;
+        if (cx_fmt(p, sizeof p, "%s/%s", dir, d.name)) continue;
+        if (d.kind == 'd') { walk(p, depth + 1); continue; }
+        if (d.kind != 'f') continue;              /* 符号链接:不计、不入 */
+        if (tx_find(p, (long)strlen(p), "/release/evidence/", 18) >= 0) { g_ev_files++; continue; }
+        if (!ends_out(p)) continue;
+        g_out_files++;
+        scan_file(p);
+    }
+    sy_dir_close(&d);
+}
+
+int main(int argc, char **argv) {
+    int i, j;
+    long pct10 = 0;
+    if (argc < 2) { fprintf(stderr, "usage: deferred-census.cx -- ROOT...\n"); return 2; }
+    for (i = 1; i < argc; i++) {
+        g_out_files = g_ev_files = g_affected = g_defer_rows = g_defer_pos = 0;
+        g_nr = 0; g_truncated = 0; g_dropped = 0;
+        walk(argv[i], 0);
+        printf("CENSUS_ROOT\t%s\tout_files=%ld\tevidence_files=%ld\n", argv[i], g_out_files, g_ev_files);
+        /* every kept bucket, descending by line count; a bucket already printed is zeroed so the next pass
+           picks the next largest.  The bound is g_nr (not a literal such as 16): with a literal the capacity
+           MAXR could be raised without any output changing, which left that limit untestable. */
+        for (j = 0; j < g_nr; j++) {
+            int best = -1, k;
+            long bv = 0;
+            for (k = 0; k < g_nr; k++) if (g_rlines[k] > bv) { bv = g_rlines[k]; best = k; }
+            if (best < 0) break;
+            printf("CENSUS_REASON\treason=%s\tlines=%ld\n", g_reason[best], g_rlines[best]);
+            g_rlines[best] = 0;
+        }
+        printf("CENSUS_BUCKETS\tbuckets=%d\ttruncated=%ld\tdropped=%ld\n", g_nr, g_truncated, g_dropped);
+        pct10 = g_affected ? (g_defer_pos * 1000 / g_affected) : 0;
+        printf("CENSUS_SUM\taffected_run=%ld\tdeferred_rows=%ld\tdeferred_pos=%ld\tpct=%ld.%01ld\n",
+               g_affected, g_defer_rows, g_defer_pos, pct10 / 10, pct10 % 10);
+        if (g_affected == 0)
+            printf("CENSUS_VERDICT\tUNMEASURED\treason=no-run-out\n");
+        else if (g_defer_pos * 100 > g_affected * 10)
+            printf("CENSUS_VERDICT\tREFUTE\treason=pct-above-10\tpct=%ld.%01ld\n", pct10 / 10, pct10 % 10);
+        else
+            printf("CENSUS_VERDICT\tok\treason=pct-at-or-below-10\tpct=%ld.%01ld\n", pct10 / 10, pct10 % 10);
+    }
+    return 0;
+}

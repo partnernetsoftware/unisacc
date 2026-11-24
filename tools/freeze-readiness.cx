@@ -269,8 +269,8 @@ static void probe_hardlink(void) {
 
 static void probe_devsvc_freeze(void) {
     unsigned char *b; int64_t n; long i; char path[1100];
-    char last_st[32]; long t0 = sy_now_ms();
-    last_st[0] = 0;
+    const char *ids[] = {"devsvc-freeze", "devsvc-freeze-owner", "devsvc-freeze-scope", 0};
+    char last_st[3][32] = {{0}}; long t0 = sy_now_ms();
     if (!want("devsvc-freeze")) return;
     if (g_btimes[0]) cx_fmt(path, sizeof path, "%s", g_btimes);
     else {
@@ -291,12 +291,19 @@ static void probe_devsvc_freeze(void) {
         mm_copy(line, sizeof line, b + s, e - s); line[e - s] = 0;
         f[nf++] = line;
         for (j = 0; line[j] && nf < 4; j++) if (line[j] == '\t') { line[j] = 0; f[nf++] = line + j + 1; }
-        if (nf >= 3 && tx_eqz(f[1], "devsvc-freeze")) cx_fmt(last_st, sizeof last_st, "%s", f[2]);
+        if (nf >= 3) for (int k = 0; ids[k]; k++)
+            if (tx_eqz(f[1], ids[k])) cx_fmt(last_st[k], sizeof last_st[k], "%s", f[2]);
     }
     mm_free(b);
-    if (!last_st[0]) emit("devsvc-freeze", "unmeasured", "no-devsvc-freeze-row", sy_now_ms() - t0);
-    else if (tx_eqz(last_st, "PASS")) emit("devsvc-freeze", "ok", "last=PASS", sy_now_ms() - t0);
-    else emit("devsvc-freeze", "fail", last_st, sy_now_ms() - t0);
+    for (int k = 0; ids[k]; k++) {
+        if (!tx_eqz(last_st[k], "PASS")) {
+            char detail[96];
+            cx_fmt(detail, sizeof detail, "%s=%s", ids[k], last_st[k][0] ? last_st[k] : "MISSING");
+            emit("devsvc-freeze", "fail", detail, sy_now_ms() - t0);
+            return;
+        }
+    }
+    emit("devsvc-freeze", "ok", "all-three=PASS", sy_now_ms() - t0);
 }
 
 static int scan_ready_tree(const char *dir, int depth, char *tree, long tcap) {

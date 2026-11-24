@@ -1,0 +1,107 @@
+/* check-faultinj.cx -- contracts of tools/cxlib/faultinj.cx.
+ *   sh ./unisacc.com tools/check-faultinj.cx
+ * Every failure is made inside scratch directories the module and cxlib.privrepo created and is observed with real git and real shells:
+ * the fake git fails exactly the call it was told to and runs the real git for everything else; empty and truncated files have the exact bytes;
+ * the four bad working directories behave as named (a deleted cwd really breaks git, a read-only one really refuses a write); the polluted
+ * environments really redirect git to the outer repository or to nothing; fi_close removes everything and the gate refuses directories the
+ * module did not make. */
+#pragma unisa use cxlib.faultinj
+#pragma unisa use cxlib.privrepo
+#pragma unisa use cxlib.ckrun
+#pragma unisa use sys.fs
+#pragma unisa use sys.env
+#pragma unisa use text.text
+
+#define ok(c, w) ((void)ckk_ok((c), (w)))
+static int bad, checks;
+/* a git hook exports GIT_INDEX_FILE and friends: every script starts without them, so the scratch work cannot reach an outer repository */
+static int sh(const char *script, char *out, int cap) {
+    char b[9000]; if (cx_fmt(b, sizeof b, "unset GIT_DIR GIT_INDEX_FILE GIT_WORK_TREE GIT_OBJECT_DIRECTORY GIT_COMMON_DIR GIT_NAMESPACE GIT_INTERNAL_SUPER_PREFIX; %s 2>&1", script)) return -1;
+    return ckk_sh_t("check-faultinj", b, out, cap, 30);
+}
+static int shf(char *out, int cap, const char *fmt, ...) {
+    char s[8000]; va_list ap; int k;
+    va_start(ap, fmt); k = vsnprintf(s, sizeof s, fmt, ap); va_end(ap);
+    if (k < 0 || k >= (int)sizeof s) { printf("script too long\n"); exit(2); }
+    return sh(s, out, cap);
+}
+static int has(const char *o, const char *w) { return ckk_has(o, 8000, w); }
+static int size_of(const char *p) { size_t n = 0; char *b = cx_read(p, &n); if (!b) return -1; free(b); return (int)n; }
+
+int main(void) {
+    char D[1100], R1[1100], R2[1100], pre[3000], pre2[3000], path[3000], out[8000], o2[8000], o3[8000], f[3300], g[3300];
+    int rc, i;
+    if (fi_open(D, sizeof D) != 0) { printf("fi_open failed\n"); return 2; }
+    if (pr_make(R1, sizeof R1) != 0 || pr_make(R2, sizeof R2) != 0) { printf("pr_make failed\n"); return 2; }
+
+    /* (1) a git that fails the second matching call and nothing else */
+    if (fi_fake_git(D, "rev-parse", 2, pre, sizeof pre) != 0) { printf("fi_fake_git failed\n"); return 2; }
+    shf(out, sizeof out, "cd '%s' && %sgit rev-parse --show-toplevel", R1, pre);
+    rc = shf(o2, sizeof o2, "cd '%s' && %sgit rev-parse --show-toplevel", R1, pre);
+    ok(rc == 128 && has(o2, "fatal: injected failure (faultinj): git rev-parse --show-toplevel"), "the second matching call fails with rc 128 and the injected message on stderr");
+    rc = shf(o3, sizeof o3, "cd '%s' && %sgit rev-parse --show-toplevel", R1, pre);
+    ok(rc == 0 && has(o3, R1) && has(out, R1), "the first and the third matching calls run the real git and answer the real top level");
+    rc = shf(o3, sizeof o3, "cd '%s' && %sgit --version", R1, pre);
+    ok(rc == 0 && has(o3, "git version") && fi_git_failed(D) == 1 && fi_git_calls(D) == 4, "a call that does not contain the word is passed through; the fake counted 4 calls and failed exactly 1");
+    {   char d2[1100];
+        if (fi_open(d2, sizeof d2) != 0) return 2;
+        fi_fake_git(d2, 0, 0, pre2, sizeof pre2);
+        rc = shf(o3, sizeof o3, "{ cd '%s' && %sgit status; %sgit --version; }", R1, pre2, pre2);
+        ok(has(o3, "injected failure (faultinj): git status") && has(o3, "injected failure (faultinj): git --version") && fi_git_failed(d2) == 2, "with no MATCH word and NTH 0 every call fails");
+        fi_close(d2);
+    }
+
+    /* (2) empty and truncated files */
+    cx_fmt(f, sizeof f, "%s/orig.txt", D); cx_fmt(g, sizeof g, "%s/cut.txt", D);
+    cx_write(f, "0123456789abcdefghij\nsecond line\n", 33);
+    ok(fi_empty_file(g) == 0 && size_of(g) == 0, "fi_empty_file makes a 0-byte file");
+    cx_write(g, "stale content", 13);
+    ok(fi_empty_file(g) == 0 && size_of(g) == 0, "fi_empty_file empties an existing file");
+    {   size_t n = 0; char *b;
+        ok(fi_truncated_copy(f, g, 7) == 0 && size_of(g) == 7 && (b = cx_read(g, &n)) && n == 7 && memcmp(b, "0123456", 7) == 0, "fi_truncated_copy keeps exactly the first N bytes");
+        ok(size_of(f) == 33, "the source of a truncated copy is unchanged");
+        ok(fi_truncated_copy(f, g, 1000) == 0 && size_of(g) == 33, "N larger than the file copies it whole");
+        ok(fi_truncated_copy(f, g, -1) != 0 && fi_truncated_copy("/nonexistent/x", g, 3) != 0, "a negative N and a missing source are refused");
+    }
+
+    /* (3) bad working directories */
+    ok(fi_cwd(0, D, pre, sizeof pre, path, sizeof path) == 0 && pre[0] == 0 && sy_exists(path) == 0, "FI_MISSING names a path that does not exist and needs no prefix");
+    ok(fi_cwd(1, D, pre, sizeof pre, path, sizeof path) == 0, "FI_NOTREPO is made");
+    rc = shf(out, sizeof out, "%sgit rev-parse --show-toplevel", pre);
+    ok(rc == 128 && has(out, "not a git repository"), "in an FI_NOTREPO directory git answers 128 not a git repository");
+    ok(fi_cwd(3, D, pre, sizeof pre, path, sizeof path) == 0 && sy_exists(path) == 0, "FI_DELETED leaves no directory behind");
+    rc = shf(out, sizeof out, "%sgit status", pre);
+    ok(rc != 0 && rc != 124, "a command started in a deleted working directory fails (git cannot read its cwd)");
+    ok(fi_cwd(2, D, pre, sizeof pre, path, sizeof path) == 0, "FI_READONLY is made");
+    if (sy_euid() == 0) printf("SKIP\tFI_READONLY write refusal: running as root, the mode is ignored\n");
+    else { rc = shf(out, sizeof out, "%stouch x", pre); ok(rc != 0, "a write into an FI_READONLY directory is refused"); }
+
+    /* (4) polluted git environments: R1 is the repository the command stands in, R2 the outer one */
+    rc = shf(out, sizeof out, "cd '%s' && git rev-parse --show-toplevel", R1);
+    ok(rc == 0 && has(out, R1) && !has(out, R2), "baseline: without pollution git answers the repository it stands in");
+    ok(fi_gitenv(0, R2, pre, sizeof pre) == 0, "FI_ENV_OUTER is made");
+    rc = shf(out, sizeof out, "cd '%s' && %sgit rev-parse --show-toplevel", R1, pre);
+    ok(rc == 0 && has(out, R2) && !has(out, R1), "FI_ENV_OUTER redirects git to the outer repository although it stands in another");
+    ok(fi_gitenv(1, 0, pre, sizeof pre) == 0, "FI_ENV_GONE is made");
+    rc = shf(out, sizeof out, "cd '%s' && %sgit rev-parse --show-toplevel", R1, pre);
+    ok(rc == 128, "FI_ENV_GONE makes git fail with 128");
+    ok(fi_gitenv(2, R2, pre, sizeof pre) == 0, "FI_ENV_SUPER is made");
+    rc = shf(out, sizeof out, "%ssh -c 'echo SUPER=$GIT_INTERNAL_SUPER_PREFIX'", pre);
+    cx_fmt(g, sizeof g, "SUPER=%s/", R2);
+    ok(rc == 0 && has(out, g), "FI_ENV_SUPER exports GIT_INTERNAL_SUPER_PREFIX naming the outer repository");
+    ok(fi_gitenv(3, R2, pre, sizeof pre) == 0, "FI_ENV_ALL is made");
+    rc = shf(out, sizeof out, "%ssh -c 'echo A=$GIT_DIR B=$GIT_INDEX_FILE C=$GIT_WORK_TREE D=$GIT_INTERNAL_SUPER_PREFIX'", pre);
+    cx_fmt(g, sizeof g, "A=%s/.git B=%s/.git/index C=%s D=%s/", R2, R2, R2, R2);
+    ok(rc == 0 && has(out, g), "FI_ENV_ALL sets all four variables");
+    ok(fi_gitenv(0, "relative", pre, sizeof pre) != 0 && fi_gitenv(7, R2, pre, sizeof pre) != 0, "a relative outer path and an unknown kind are refused");
+
+    /* (5) the gate and the cleanup */
+    ok(fi_fake_git("/tmp", "x", 1, pre, sizeof pre) != 0 && fi_fake_git(R1, "x", 1, pre, sizeof pre) != 0, "directories the module did not make are refused (a plain directory, a private repository)");
+    ok(fi_close(R1) != 0 && sy_exists(R1) == 1, "fi_close refuses a directory it did not make and leaves it alone");
+    fi_cwd(2, D, 0, 0, 0, 0);
+    ok(fi_close(D) == 0 && sy_exists(D) == 0, "fi_close removes the scratch directory with a read-only directory inside");
+    for (i = 0; i < 2; i++) { const char *r = i ? R2 : R1; char c[1500]; cx_fmt(c, sizeof c, "rm -rf '%s'", r); ckk_sh_t("check-faultinj", c, 0, 0, 20); }
+    checks = ckk_okcount(&bad);
+    printf("CX_FAULTINJ\tchecks=%d\tfailed=%d\n", checks, bad);
+    return bad ? 1 : 0;
+}

@@ -1,0 +1,36 @@
+#!/bin/sh
+# pre-push thin entry. Install: cp tools/hooks/pre-push .git/hooks/pre-push (shared by all work trees).
+# (1) push audit: process chain, env and ref lines -> ${PUSH_AUDIT_LOG:-~/.cache/unisacc/push-audit.log} (record only).
+# (2) freeze gate body is tools/prepush.cx of the MAIN work tree (from git common dir, never --show-toplevel:
+#     version work trees older than the gate have no tools/prepush.cx). Check: tools/check-prepush.cx.
+# (3) main work tree lacks prepush.cx or unisacc.com: degraded gate, audited; refuse if .git/PUSH-FREEZE
+#     exists or any target is refs/heads/main (never fail open on main), otherwise pass.
+L="${PUSH_AUDIT_LOG:-$HOME/.cache/unisacc/push-audit.log}"
+mkdir -p "$(dirname "$L")" 2>/dev/null
+IN=$(mktemp "${TMPDIR:-/tmp}/pre-push.XXXXXX") || { echo "pre-push: mktemp failed, refusing" >&2; exit 1; }
+trap 'rm -f "$IN"' EXIT
+cat > "$IN" || { echo "pre-push: stdin unreadable, refusing" >&2; exit 1; }
+{ printf '=== %s pid=%s remote=%s url=%s cwd=%s\n' "$(date -Is)" "$$" "$1" "$2" "$(pwd)"
+  p=$$; i=0; while [ "$p" -gt 1 ] && [ $i -lt 12 ]; do printf '  %s %s\n' "$p" "$(tr '\0' ' ' < /proc/$p/cmdline 2>/dev/null | cut -c1-300)"; p=$(awk '/^PPid:/{print $2}' /proc/$p/status 2>/dev/null); [ -z "$p" ] && break; i=$((i+1)); done
+  printf '  env DEVSVC_OWNER=%s UNISACC_INTEGRATOR=%s\n' "$DEVSVC_OWNER" "$UNISACC_INTEGRATOR"
+  sed 's/^/  ref /' "$IN"; } >> "$L" 2>/dev/null
+C=$(git rev-parse --path-format=absolute --git-common-dir 2>/dev/null) || { echo "pre-push: no git common dir, refusing" >&2; exit 1; }
+R=$(cd "$C/.." && pwd)
+if [ -f "$R/tools/prepush.cx" ] && [ -e "$R/unisacc.com" ]; then
+  sh "$R/unisacc.com" "$R/tools/prepush.cx" -- "$@" < "$IN"; rc=$?
+  printf '  gate=prepush rc=%s\n' "$rc" >> "$L" 2>/dev/null
+  exit $rc
+fi
+printf '  gate=degraded root=%s\n' "$R" >> "$L" 2>/dev/null
+if [ -e "$C/PUSH-FREEZE" ]; then
+  echo "pre-push: degraded gate ($R/tools/prepush.cx or unisacc.com missing): .git/PUSH-FREEZE present, refusing" >&2
+  printf '  degraded=refuse reason=push-freeze\n' >> "$L" 2>/dev/null; exit 1
+fi
+while read -r lr ls rr rs; do
+  if [ "$rr" = "refs/heads/main" ]; then
+    echo "pre-push: degraded gate ($R/tools/prepush.cx or unisacc.com missing): refusing push to refs/heads/main" >&2
+    printf '  degraded=refuse reason=main\n' >> "$L" 2>/dev/null; exit 1
+  fi
+done < "$IN"
+printf '  degraded=pass\n' >> "$L" 2>/dev/null
+exit 0

@@ -1,0 +1,146 @@
+/* research/2026-11-23/v0102-label-local-prep/probe-label-local.cx
+ * Minimal red-first probe for 0.0.102 label-local phase 1:
+ *   L1 (red before 0.0.102): adding a branch in f1 must NOT change f2's emitted -S assembly labels.
+ *   L2 (positive): two functions f1 and f2 with same-named goto label L both compile and run (rc=0).
+ *   L3 (negative control for gotolabels fn_seq): f1 defines L_only_f1, f2 does `goto L_only_f1;` without
+ *      defining it in f2 -> must be rejected with "use of undeclared label 'L_only_f1'" (catches rl=1 collision
+ *      when lab is reset per function without an independent fn_seq register).
+ */
+#pragma unisa use sys.fs
+#pragma unisa use sys.io
+#pragma unisa use sys.env
+#pragma unisa use sys.proc
+#pragma unisa use text.text
+#pragma unisa use text.fmt
+#pragma unisa use mem.heap
+#pragma unisa use mem.bytes
+#pragma unisa use cxlib.netpack
+
+static int run_cmd(char **av, char *out, long cap, long *out_n) {
+    np_result r;
+    char why[256];
+    mm_fill(&r, sizeof r, 0, sizeof r);
+    *out_n = 0;
+    if (out && cap > 0) out[0] = 0;
+    if (np_run(av, 0, 0, 20, &r, why, sizeof why) != 0) {
+        np_free(&r);
+        return -1;
+    }
+    long pos = 0;
+    if (r.out && r.outn > 0 && out && cap > 1) {
+        long n = (long)r.outn < cap - 1 ? (long)r.outn : cap - 1;
+        mm_copy(out, cap, r.out, n);
+        pos += n;
+    }
+    if (r.err && r.errn > 0 && out && pos < cap - 1) {
+        long n = (long)r.errn < (cap - 1 - pos) ? (long)r.errn : (cap - 1 - pos);
+        mm_copy(out + pos, cap - pos, r.err, n);
+        pos += n;
+    }
+    if (out && cap > 0) out[pos] = 0;
+    *out_n = pos;
+    int rc = r.rc;
+    np_free(&r);
+    return rc;
+}
+
+static const char *SRC_A =
+    "int f1(int x) {\n"
+    "    if (x > 0) return x + 1;\n"
+    "    return 0;\n"
+    "}\n"
+    "int f2(int y) {\n"
+    "    if (y > 0) goto L;\n"
+    "    return 20;\n"
+    "L:\n"
+    "    return y + 2;\n"
+    "}\n"
+    "int main(void) { return f1(1) + f2(2) - 6; }\n";
+
+static const char *SRC_B =
+    "int f1(int x) {\n"
+    "    if (x > 0) {\n"
+    "        if (x > 10) return x + 10;\n"
+    "        return x + 1;\n"
+    "    }\n"
+    "    return 0;\n"
+    "}\n"
+    "int f2(int y) {\n"
+    "    if (y > 0) goto L;\n"
+    "    return 20;\n"
+    "L:\n"
+    "    return y + 2;\n"
+    "}\n"
+    "int main(void) { return f1(1) + f2(2) - 6; }\n";
+
+static const char *SRC_NEG =
+    "int f1(void) { L_only_f1: return 1; }\n"
+    "int f2(void) { goto L_only_f1; return 2; }\n"
+    "int main(void) { return f1() + f2(); }\n";
+
+static const char *extract_f2(const char *s, long n, long *out_len) {
+    long pos = tx_find(s, n, "\nf2:\n", 5);
+    if (pos < 0) { *out_len = 0; return 0; }
+    pos++; /* point to "f2:\n" */
+    long end = tx_find(s + pos, n - pos, "\nmain:\n", 7);
+    if (end < 0) end = n - pos;
+    else end++; /* include trailing newline */
+    *out_len = end;
+    return s + pos;
+}
+
+int main(void) {
+    char ca[640], cb[640], cn[640], sa[640], sb[640], obin[640];
+    const char *tmp = sy_tmpdir();
+    if (!tmp || !tmp[0]) return 2;
+    cx_fmt(ca, sizeof ca, "%s/l1_a.c", tmp);
+    cx_fmt(cb, sizeof cb, "%s/l1_b.c", tmp);
+    cx_fmt(cn, sizeof cn, "%s/l3_neg.c", tmp);
+    cx_fmt(sa, sizeof sa, "%s/l1_a.s", tmp);
+    cx_fmt(sb, sizeof sb, "%s/l1_b.s", tmp);
+    cx_fmt(obin, sizeof obin, "%s/l3_neg.out", tmp);
+
+    cx_write(ca, SRC_A, (size_t)tx_len(SRC_A, 4096));
+    cx_write(cb, SRC_B, (size_t)tx_len(SRC_B, 4096));
+    cx_write(cn, SRC_NEG, (size_t)tx_len(SRC_NEG, 4096));
+
+    char out[4096];
+    long out_n = 0;
+    char *av_a[] = {"sh", "./unisacc.com", "-S", "-o", sa, ca, 0};
+    char *av_b[] = {"sh", "./unisacc.com", "-S", "-o", sb, cb, 0};
+    int rca = run_cmd(av_a, out, sizeof out, &out_n);
+    int rcb = run_cmd(av_b, out, sizeof out, &out_n);
+    if (rca != 0 || rcb != 0) {
+        sy_printf("FAIL\tL1.compile-S\trca=%d\trcb=%d\n", rca, rcb);
+        return 1;
+    }
+
+    unsigned char *ba = 0, *bb = 0;
+    int64_t na = 0, nb = 0;
+    sy_read_file(sa, &ba, &na, 1 << 20);
+    sy_read_file(sb, &bb, &nb, 1 << 20);
+    long f2a_n = 0, f2b_n = 0;
+    const char *f2a = extract_f2((const char *)ba, (long)na, &f2a_n);
+    const char *f2b = extract_f2((const char *)bb, (long)nb, &f2b_n);
+
+    int l1_same = (f2a && f2b && f2a_n == f2b_n && mm_cmp(f2a, f2b, f2a_n) == 0);
+    int l1_fn_qualified = (f2a && tx_find(f2a, f2a_n, "__unisacc_Lf2.", 14) >= 0 &&
+                           tx_find(f2a, f2a_n, "__unisacc_Rf2.", 14) >= 0);
+
+    char *av_neg[] = {"sh", "./unisacc.com", "-o", obin, cn, 0};
+    int rcn = run_cmd(av_neg, out, sizeof out, &out_n);
+    int l3_rejected = (rcn != 0 && tx_find(out, out_n, "use of undeclared label 'L_only_f1'", 35) >= 0);
+
+    sy_printf("L3_NEG_CROSS_FN_GOTO\t%s\trc=%d\n", l3_rejected ? "PASS" : "FAIL", rcn);
+    sy_printf("L1_F2_INVARIANCE\t%s\tf2a_bytes=%ld\tf2b_bytes=%ld\tfn_qualified=%d\n",
+           (l1_same && l1_fn_qualified) ? "PASS" : "FAIL", f2a_n, f2b_n, l1_fn_qualified);
+    if (!l1_same && f2a && f2b) {
+        sy_printf("--- f2 in A (1 branch in f1) ---\n%.*s", (int)f2a_n, f2a);
+        sy_printf("--- f2 in B (2 branches in f1) ---\n%.*s", (int)f2b_n, f2b);
+    }
+
+    mm_free(ba);
+    mm_free(bb);
+    sy_unlink(ca); sy_unlink(cb); sy_unlink(cn); sy_unlink(sa); sy_unlink(sb); sy_unlink(obin);
+    return (l1_same && l1_fn_qualified && l3_rejected) ? 0 : 1;
+}

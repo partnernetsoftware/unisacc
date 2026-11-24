@@ -44,6 +44,14 @@ static void rel_path(char *out, long cap, const char *root, const char *rel) {
 }
 
 /* independent count of TAB-separated fields in LINE[0..N); -1 when the line ends with no TAB and no content */
+/* byte substring test over a counted buffer (no NUL assumption) */
+static int contains(const unsigned char *h, long hn, const char *nd) {
+    long m = 0, i;
+    while (nd[m]) m++;
+    if (!h || hn < m) return 0;
+    for (i = 0; i + m <= hn; i++) if (!memcmp(h + i, nd, (size_t)m)) return 1;
+    return 0;
+}
 static int fields(const char *line, long n) {
     long i;
     int c = 1;
@@ -197,6 +205,27 @@ int main(int argc, char **argv) {
     ck(rl_count("tool-check") == want_tool_check && rl_count("tool-batch") == want_tool_batch, "tool-index-check-and-batches");
     ck(rl_count("model-table") == want_model_table, "table-deps-model-to-table");
     ck(rl_count("phase-input") == want_phase_input, "phase-inputs-item-to-phase");
+
+    /* phase-inputs: attr must be the token's own prefix (mm_same-equal), and a token that starts with no known
+       prefix must carry no attr (a 'matching' test inverted with !mm_same mis-attributes every row). */
+    {   np_buf c = {0};
+        char tmp[] = "/tmp/chk-relload-XXXXXX";
+        const char *body = "P1\tphase:aa,src:bb,table:cc,git-tree:dd,other:ee\n";
+        if (!mkdtemp(tmp)) die("temp");
+        if (cx_fmt(path, (long)sizeof path, "%s/chain-phase-inputs.tsv", tmp)) die("path");
+        if (cx_write(path, body, strlen(body))) die("write");
+        why[0] = 0;
+        if (rl_load(&c, path, rl_fmt_phase_inputs(), why, (int)sizeof why)) ck(0, "phase-input-attr-phase");
+        else {
+            ck(contains(c.p, c.n, "phase-input\tphase:aa\tP1\tchain-phase-inputs\tphase\n"), "phase-input-attr-phase");
+            ck(contains(c.p, c.n, "phase-input\tsrc:bb\tP1\tchain-phase-inputs\tsrc\n"), "phase-input-attr-src");
+            ck(contains(c.p, c.n, "phase-input\ttable:cc\tP1\tchain-phase-inputs\ttable\n"), "phase-input-attr-table");
+            ck(contains(c.p, c.n, "phase-input\tgit-tree:dd\tP1\tchain-phase-inputs\tgit-tree\n"), "phase-input-attr-git-tree");
+            ck(contains(c.p, c.n, "phase-input\tother:ee\tP1\tchain-phase-inputs\t-\n"), "phase-input-attr-other-none");
+        }
+        free(c.p);
+    }
+
     check_wire();
 
     /* links' own comment and blank lines contribute nothing: a file of only those has no edges */

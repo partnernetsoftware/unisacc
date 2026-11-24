@@ -6,6 +6,8 @@
  * and exec/c/run.c do: stdout = accepted output, stderr = diagnostics or "reject: NAME", rc 0/1/3(timeout).
  * --cov writes one "STATE\tKEY" line per distinct (state, observation) taken, sorted, so two runs can be
  * diffed (comm -13 A B) to find which states handled a byte in one run and not the other.
+ * --deadline-ms N bounds the execution loop (after loading). On that deadline or TERM, coverage is
+ * partial, SIM_STOP reports the current state on stderr, and the exit code is 3.
  * Semantics follow exec/pp/sim.py (docs/exec/e2-pp-delta.md): obs = byte at the top frame cursor (256 at
  * end) / result r / control-stack top; W is int64 with 32-bit wrap on ALU and 64-bit wrap on A64;
  * numeric W addresses (LDX/STX) live in a separate map from named registers, as Python's dict keeps
@@ -15,12 +17,19 @@
 #pragma unisa use text.text
 #pragma unisa use sys.sha
 #pragma unisa use sys.posix
+#pragma unisa use sys.sig
+#pragma unisa use sys.time
 #pragma unisa use mem.bytes
 
 enum { MAXSTACK = 4096, MAXFRAMES = 256 };
 static void die(const char *s) { fprintf(stderr, "sim: %s\n", s); exit(2); }
 static void *xmalloc(size_t n) { void *p = malloc(n ? n : 1); if (!p) die("out of memory"); return p; }
 static void *xrealloc(void *p, size_t n) { p = realloc(p, n ? n : 1); if (!p) die("out of memory"); return p; }
+static volatile sig_atomic_t sim_term;
+static void sim_on_term(int sig) { sim_term = sig; }
+static int sim_cov_order(const void *a, const void *b) {
+    return strcmp(*(const char *const *)a, *(const char *const *)b);
+}
 
 /* ---- growable byte buffer ---- */
 typedef struct { unsigned char *s; long n, cap; } Bytes;
@@ -279,6 +288,23 @@ static long long alu64(int op, long long a, long long b, int *dz) {
 typedef struct { unsigned char *s; long n; } Blob;
 
 int main(int argc, char **argv) {
+    int dangling_dead = 0;
+    long deadline_ms = 0;
+    for (int i = 1; i < argc; i++) if (!strcmp(argv[i], "--deadline-ms")) {
+        if (deadline_ms || i + 1 >= argc) die("--deadline-ms requires one positive duration");
+        char *end;
+        errno = 0;
+        deadline_ms = strtol(argv[i + 1], &end, 10);
+        if (errno || *end || deadline_ms < 1 || deadline_ms > 2147483647L) die("--deadline-ms outside 1..2147483647");
+        for (int j = i; j + 2 < argc; j++) argv[j] = argv[j + 2];
+        argc -= 2; i--;
+    }
+    for (int i = 1; i < argc; i++) if (!strcmp(argv[i], "--dangling=dead")) {
+        if (dangling_dead) die("duplicate --dangling=dead");
+        dangling_dead = 1;
+        for (int j = i; j + 1 < argc; j++) argv[j] = argv[j + 1];
+        argc--; i--;
+    }
     for(int i=1;i<argc;i++)if(!strcmp(argv[i],"--watch-frame-out")){if(ws_export_dir||i+1==argc)die("frame export argument");ws_export_dir=argv[i+1];for(int j=i;j+2<argc;j++)argv[j]=argv[j+2];argc-=2;i--;}
     for(int i=1;i<argc;i++)if(!strcmp(argv[i],"--watch-compact")){if(ws_compact)die("duplicate --watch-compact");ws_compact=1;for(int j=i;j+1<argc;j++)argv[j]=argv[j+1];argc--;i--;}
     for(int i=1;i<argc;i++)if(!strcmp(argv[i],"--watch-states")){if(ws_path||i+1==argc)die("watch config argument");ws_path=argv[i+1];for(int j=i;j+2<argc;j++)argv[j]=argv[j+2];argc-=2;i--;}
@@ -286,11 +312,11 @@ int main(int argc, char **argv) {
     const char *delta = 0, *input = 0, *srcpath = 0, *covpath = 0; int pos = 0;
     const char *resname[16], *respath[16]; int nres = 0;
     for (int i = 1; i < argc; i++) { if (tx_eqz(argv[i], "--resource") && i + 1 < argc) { const char *s = argv[++i], *eq = strchr(s, '='); if (!eq || eq == s || !eq[1] || nres == 16) die("--resource NAME=FILE (at most 16)"); char *nm = xmalloc((size_t)(eq - s) + 2); nm[0] = 0; { void *cx_kept = mm_copy(nm + 1, (size_t)(eq - s), s, (size_t)(eq - s)); (void)cx_kept; } nm[eq - s + 1] = 0; for (int r2 = 0; r2 < nres; r2++) if (tx_eqz(resname[r2] + 1, nm + 1)) die("--resource name given twice"); resname[nres] = nm; respath[nres] = eq + 1; nres++; } else if(tx_eqz(argv[i],"--write-events")&&i+1<argc)we_path=argv[++i]; else if(tx_eqz(argv[i],"--event-limit")&&i+1<argc)we_limit=we_number(argv[++i],1000000); else if(tx_eqz(argv[i],"--event-bytes")&&i+1<argc)we_byte_limit=we_number(argv[++i],67108864); else if (tx_eqz(argv[i], "--cov") && i + 1 < argc) covpath = argv[++i]; else if (pos == 0) delta = argv[i], pos++; else if (pos == 1) input = argv[i], pos++; else if (pos == 2) srcpath = argv[i], pos++; else if (pos == 3) bundled = argv[i], pos++; else die("usage: DELTA.json INPUT [SRC_LABEL] [INCLUDE_DIR] [--cov COV.tsv]"); }
-    if (!delta || !input) { fputs("usage: sim DELTA.json INPUT [SRC_LABEL] [INCLUDE_DIR] [--cov COV.tsv]\n", stderr); return 2; }
+    if (!delta || !input) { fputs("usage: sim DELTA.json INPUT [SRC_LABEL] [INCLUDE_DIR] [--cov COV.tsv] [--dangling=dead]\n", stderr); return 2; }
     if (!srcpath) srcpath = input;
     if(we_path){struct stat ws;if(!lstat(we_path,&ws)||errno!=ENOENT)die("write-events target exists or stat error");size_t dn;unsigned char *db=(unsigned char *)cx_read(delta,&dn);if(!db)die("write-events delta read");we_hash(db,dn,we_delta_sha);free(db);}
     if(ws_export_dir){if(!ws_path||!ws_compact||!we_path)die("frame export requires compact sparse watch and sidecar");struct stat st;if(!lstat(ws_export_dir,&st)||errno!=ENOENT)die("frame export directory exists or stat error");}
-    dl_delta D; dl_load(delta, &D);ws_load(&D);
+    dl_delta D; dl_load_mode(delta, &D, dangling_dead);ws_load(&D);
     /* input */
     Bytes xin = {0}; { FILE *f = strcmp(input, "-") ? fopen(input, "rb") : stdin; if (!f) { fprintf(stderr, "sim: cannot open input %s\n", input); return 2; } unsigned char chunk[65536]; size_t k; while ((k = fread(chunk, 1, sizeof chunk, f)) > 0) bput(&xin, chunk, (long)k); if (f != stdin) fclose(f); }
     unsigned char *x = xin.s ? xin.s : (unsigned char *)""; long xn = xin.n;
@@ -315,9 +341,18 @@ int main(int argc, char **argv) {
     /* coverage: a flag per (state, key) for b/r, a set for t */
     unsigned char *cov = 0; SMap covt = {0}; if (covpath) { cov = xmalloc((size_t)D.ns * 257); memset(cov, 0, (size_t)D.ns * 257); }
     int result = -1; const char *rejname = 0; const char *laststate = 0; int lastkey = -1;
+    int term_rc = sy_sig_handle(SIGTERM, sim_on_term);
+    if (term_rc && term_rc != -ENOSYS) die("install TERM handler");
+    long started_ms = deadline_ms ? sy_now_ms() : 0;
     int trace = 0;
     { int ti; for (ti = 1; ti < argc; ti++) if (tx_eqz(argv[ti], "--trace")) trace = 1; }
     for (;;) {
+        if (sim_term || (deadline_ms && !(steps & 1023) && sy_now_ms() - started_ms >= deadline_ms)) {
+            fprintf(stderr, "SIM_STOP\treason=%s\tstate=%s\tsteps=%lld\tcur=%ld\n",
+                    sim_term ? "TERM" : "deadline", D.s[q].name, steps, fr->cur);
+            result = 3;
+            goto done;
+        }
         steps++;if(ws_path)ws_record(&D,q,W,fr->diagnostic_id,fr->b,fr->cur,fr->end,o.n,sb.n,o.s);
         dl_state *st = &D.s[q]; dl_edge *ed; int key;
         laststate = st->name;
@@ -402,7 +437,7 @@ done:
         char **lines = xmalloc((size_t)(cnt ? cnt : 1) * sizeof(char *)); long li = 0;
         for (int s = 0; s < D.ns; s++) for (int k = 0; k < 257; k++) if (cov[(long)s * 257 + k]) { size_t cap = strlen(D.s[s].name) + 16; char *l = xmalloc(cap); if (snprintf(l, cap, "%s\t%d", D.s[s].name, k) >= (int)cap) die("coverage line"); lines[li++] = l; }
         for (long i = 0; i < covt.cap; i++) if (covt.keys[i]) lines[li++] = covt.keys[i];
-        for (long i = 1; i < li; i++) { char *t = lines[i]; long j = i - 1; while (j >= 0 && strcmp(lines[j], t) > 0) { lines[j + 1] = lines[j]; j--; } lines[j + 1] = t; }
+        qsort(lines, (size_t)li, sizeof *lines, sim_cov_order);
         FILE *cf = fopen(covpath, "wb"); if (!cf) die("cannot write coverage"); for (long i = 0; i < li; i++) { fputs(lines[i], cf); fputc('\n', cf); } if (fclose(cf)) die("coverage write");
     }
     if (result == 0) { if(ws_active)die("snapshot unclosed mark at ACCEPT");if(we_path)we_publish(&o); if (o.n) fwrite(o.s, 1, (size_t)o.n, stdout); if (e.n) fwrite(e.s, 1, (size_t)e.n, stderr); return 0; }
@@ -411,5 +446,5 @@ done:
         fprintf(stderr, "reject: %s\n", rejname);
     }
     if (e.n) fwrite(e.s, 1, (size_t)e.n, stderr);
-    return 1;
+    return result == 3 ? 3 : 1;
 }

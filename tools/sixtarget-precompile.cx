@@ -11,6 +11,8 @@
  *   --filter PREFIX     relative path prefix filter for chain-units mode (e.g. cx/sys/)
  *   --part K/N          shard targets across N shards (0 <= K < N, N in 1..16)
  *   --file PATH         explicit source file for files mode (repeatable, up to 32)
+ *   --par N             max compiler processes in flight (1..16); default keeps each mode's own width
+ *                       (chain-units 4 per target, one per target in templates/headers/files)
  *   --deadline-s S      hard deadline in seconds (1..55, default 50)
  *   --require-d2        verify compiler rejects undeclared function calls before precompiling
  * Output:
@@ -529,7 +531,7 @@ static int compile_header_tu(const char *compiler, const char *root, const char 
 int main(int argc, char **argv) {
     const char *mode = 0, *root_arg = ".", *comp_arg = 0, *target_arg = "all", *filter_arg = 0, *rev_arg = 0;
     const char *files[ST_MAX_FILES];
-    int nfiles = 0, part = 0, total_parts = 1, deadline_s = 50, require_d2 = 0, explicit_root = 0;
+    int nfiles = 0, part = 0, total_parts = 1, deadline_s = 50, require_d2 = 0, explicit_root = 0, par = 0;
 
     for (int i = 1; i < argc; i++) {
         if (tx_eqz(argv[i], "--mode") && i + 1 < argc) mode = argv[++i];
@@ -541,6 +543,12 @@ int main(int argc, char **argv) {
         else if (tx_eqz(argv[i], "--part") && i + 1 < argc) {
             if (parse_part(argv[++i], &part, &total_parts) != 0) {
                 fprintf(stderr, "sixtarget-precompile: bad --part (expected K/N)\n");
+                return 2;
+            }
+        } else if (tx_eqz(argv[i], "--par") && i + 1 < argc) {
+            par = atoi(argv[++i]);
+            if (par < 1 || par > 16) {
+                fprintf(stderr, "sixtarget-precompile: --par must be 1..16\n");
                 return 2;
             }
         } else if (tx_eqz(argv[i], "--file") && i + 1 < argc) {
@@ -652,7 +660,20 @@ int main(int argc, char **argv) {
             return 2;
         }
         int pids[ST_MAX_TARGETS];
+        int width = (par > 0 && par < ntargets) ? par : ntargets;
+        int live = 0;
+        for (int i = 0; i < ST_MAX_TARGETS; i++) pids[i] = 0;
         for (int ti = 0; ti < ntargets; ti++) {
+            while (live >= width) {   /* --par: keep at most that many compilers in flight */
+                for (int j = 0; j < ti; j++) {
+                    if (pids[j] <= 0) continue;
+                    int st = 0;
+                    waitpid(pids[j], &st, 0);
+                    pids[j] = 0;
+                    live--;
+                    break;
+                }
+            }
             fflush(stdout);
             fflush(stderr);
             int pid = (int)fork();
@@ -668,6 +689,7 @@ int main(int argc, char **argv) {
                 _exit(ok ? 0 : 1);
             }
             pids[ti] = pid;
+            live++;
         }
         for (int ti = 0; ti < ntargets; ti++) {
             if (pids[ti] > 0) {
@@ -719,24 +741,39 @@ int main(int argc, char **argv) {
             }
         }
         int pids[ST_MAX_TARGETS * 2];
-        for (int ti = 0; ti < ntargets; ti++) {
-            for (int k = 0; k < 2; k++) {
-                int slot = ti * 2 + k;
-                fflush(stdout);
-                fflush(stderr);
-                int pid = (int)fork();
-                if (pid == 0) {
-                    char obuf[2048], opath[4400];
-                    size_t opos = 0;
-                    obuf[0] = 0;
-                    int ok = compile_one_slot(compiler, root, workdir, child_env, targets[ti], slot, wpaths[k], tpls[k], deadline_ms, obuf, sizeof obuf, &opos);
-                    if (!cx_fmt(opath, sizeof opath, "%s/hout-%d.txt", workdir, slot)) {
-                        sy_write_file(opath, obuf, (int64_t)opos, 0600);
+        int nslots = ntargets * 2;
+        int width = (par > 0 && par < nslots) ? par : nslots;
+        int live = 0;
+        for (int i = 0; i < ST_MAX_TARGETS * 2; i++) pids[i] = 0;
+        for (int slot = 0; slot < nslots; slot++) {
+            {   /* --par: keep at most that many compilers in flight */
+                while (live >= width) {
+                    for (int j = 0; j < slot; j++) {
+                        if (pids[j] <= 0) continue;
+                        int st = 0;
+                        waitpid(pids[j], &st, 0);
+                        pids[j] = 0;
+                        live--;
+                        break;
                     }
-                    _exit(ok ? 0 : 1);
                 }
-                pids[slot] = pid;
             }
+            int ti = slot / 2, k = slot % 2;
+            fflush(stdout);
+            fflush(stderr);
+            int pid = (int)fork();
+            if (pid == 0) {
+                char obuf[2048], opath[4400];
+                size_t opos = 0;
+                obuf[0] = 0;
+                int ok = compile_one_slot(compiler, root, workdir, child_env, targets[ti], slot, wpaths[k], tpls[k], deadline_ms, obuf, sizeof obuf, &opos);
+                if (!cx_fmt(opath, sizeof opath, "%s/hout-%d.txt", workdir, slot)) {
+                    sy_write_file(opath, obuf, (int64_t)opos, 0600);
+                }
+                _exit(ok ? 0 : 1);
+            }
+            pids[slot] = pid;
+            live++;
         }
         for (int slot = 0; slot < ntargets * 2; slot++) {
             if (pids[slot] > 0) { int st = 0; waitpid(pids[slot], &st, 0); }
@@ -772,9 +809,10 @@ int main(int argc, char **argv) {
                 if (shard_units && (u % total_parts != part)) continue;
                 sel_u[nsel++] = u;
             }
-            for (int base = 0; base < nsel; base += 4) {
-                int w = (nsel - base) < 4 ? (nsel - base) : 4;
-                int pids[4];
+            int unit_w = (par > 0) ? par : 4;   /* --par: in-flight compilers for this target */
+            for (int base = 0; base < nsel; base += unit_w) {
+                int w = (nsel - base) < unit_w ? (nsel - base) : unit_w;
+                int pids[16];
                 for (int j = 0; j < w; j++) {
                     int u = sel_u[base + j];
                     const char *up = ubuf + (size_t)u * 4400;
@@ -815,7 +853,20 @@ int main(int argc, char **argv) {
         mm_free(ubuf);
     } else {
         int pids[ST_MAX_TARGETS];
+        int width = (par > 0 && par < ntargets) ? par : ntargets;
+        int live = 0;
+        for (int i = 0; i < ST_MAX_TARGETS; i++) pids[i] = 0;
         for (int ti = 0; ti < ntargets; ti++) {
+            while (live >= width) {   /* --par: keep at most that many compilers in flight */
+                for (int j = 0; j < ti; j++) {
+                    if (pids[j] <= 0) continue;
+                    int st = 0;
+                    waitpid(pids[j], &st, 0);
+                    pids[j] = 0;
+                    live--;
+                    break;
+                }
+            }
             fflush(stdout);
             fflush(stderr);
             int pid = (int)fork();
@@ -834,6 +885,7 @@ int main(int argc, char **argv) {
                 _exit(ok ? 0 : 1);
             }
             pids[ti] = pid;
+            live++;
         }
         for (int ti = 0; ti < ntargets; ti++) {
             if (pids[ti] > 0) { int st = 0; waitpid(pids[ti], &st, 0); }
