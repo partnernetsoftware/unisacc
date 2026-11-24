@@ -1,4 +1,4 @@
-来源:会话临时目录 /home/devali/.claude/jobs/7f46e032/tmp/R28/design.md 拷贝于 2026-11-24
+来源:会话临时目录 ~/.claude/jobs/7f46e032/tmp/R28/design.md 拷贝于 2026-11-24
 # R28 设计裁定:affected 闭包按边分级收窄
 
 日期 2026-11-24。只读取证,未改仓内文件。证据目录 ~/.claude/jobs/7f46e032/tmp/R28/(dump.txt 为默认档逐批闭包,dumpc.txt 为 --tier commit 逐批闭包,均由 `tools/affected.cx -- --closure-dump` 现产,各约 13 秒)。

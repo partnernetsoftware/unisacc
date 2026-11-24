@@ -1,4 +1,4 @@
-来源:会话临时目录 /home/devali/.claude/jobs/7f46e032/tmp/R23/design.md 拷贝于 2026-11-24
+来源:会话临时目录 ~/.claude/jobs/7f46e032/tmp/R23/design.md 拷贝于 2026-11-24
 # R23 结构诊断与裁定:dev-product 未含输入改动、表改快车道、register PLANNED
 
 日期 2026-11-24。只读取证加一次私有构建(产物在 ~/.claude/jobs/7f46e032/tmp/R23/fw3,未动仓内文件与在途进程)。
