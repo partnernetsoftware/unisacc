@@ -17,6 +17,22 @@ static void fixture(int mode){
  char text[4096];(cx_fmt(text, sizeof text, "{\"start\":\"%s\",\"states\":{\"S\":[\"r\",{\"0\":[\"M\",3]}],\"M\":[\"r\",{\"0\":[\"%s\",0]}],\"E\":[\"r\",{\"0\":[\"Z\",1]}],\"Z\":[\"r\",{\"0\":[\"Z\",1]}]},\"seqs\":[%s,%s,[[\"LDI\",\"x\",0]],[[\"OUT\",113],[\"OUT\",10]]]}", start, next, emit, finish) ? exit(2) : (void)0);put(delta,text);put(input,"A");put(config,good);
 }
 static void failure(int mode,const char *label){fixture(mode);char *s=run(1,2,0);ck(s&&!exists(),label);free(s);}
+static void partial_coverage(void) {
+    char cov[4400], why[256] = "";
+    np_result r = {0};
+    size_t n;
+    if (cx_fmt(cov, sizeof cov, "%s/partial-cov", work)) die("coverage path");
+    put(delta, "{\"start\":\"ENTER\",\"states\":{\"ENTER\":[\"b\",{\"120\":[\"WAIT\",0]}],\"WAIT\":[\"r\",{\"0\":[\"WAIT\",0]}]},\"seqs\":[[]]}");
+    put(input, "x");
+    char *v[] = {"sh", com, sim, "--", delta, input, "--cov", cov, "--deadline-ms", "50", 0};
+    int rc = np_run(v, 0, 0, 8, &r, why, sizeof why);
+    char *observed = cx_read(cov, &n);
+    ck(!rc && r.rc == 3 && !r.outn && r.err &&
+       strstr(r.err, "SIM_STOP\treason=deadline\tstate=WAIT\t") &&
+       observed && n == sizeof "ENTER\t120\nWAIT\t0\n" - 1 &&
+       !memcmp(observed, "ENTER\t120\nWAIT\t0\n", n), "deadline preserves partial coverage and waiting state");
+    free(observed); np_free(&r); unlink(cov);
+}
 static int export_exists(void){struct stat st;if(!lstat(export_dir,&st))return 1;if(errno==ENOENT)return 0;die("export stat");return 1;}
 static void export_fixture(int budget){
  const char *small="{\"start\":\"S\",\"states\":{\"S\":[\"r\",{\"0\":[\"L\",0]}],\"L\":[\"r\",{\"0\":[\"L\",1]}]},\"seqs\":[[[\"LDI\",\"x\",3],[\"LDI\",\"lo\",0],[\"LDI\",\"hi\",1],[\"BLOBSAVE\",\"b\",\"lo\",\"hi\"],[\"INPUSH\",\"b\"]],[[\"COPY\"],[\"ADV\"],[\"ACCEPT\"]]]}";
@@ -45,4 +61,4 @@ int main(int argc,char **argv){char root[4400],temp[]="/tmp/check-output-snapsho
  fixture(0);put(config,"M\tx\toutput-mark\n");on=run(1,2,0);ck(on&&!exists(),"unpaired policy config refuses");free(on);
  fixture(0);put(config,"M\tx\toutput-mark,frame-edges\nE\tx\toutput-span\n");on=run(1,2,0);ck(on&&!exists(),"combined policy literal refuses");free(on);
  fixture(0);on=run(1,2,"4");ck(on&&!exists(),"extra snapshot records obey original event budget");free(on);
- unlink(delta);unlink(input);unlink(config);rmdir(work);printf("SIM_OUTPUT_SNAPSHOT_CHECK\tchecks=%d\tfailed=%d\n",checks,bad);return bad?1:0;}
+ partial_coverage();unlink(delta);unlink(input);unlink(config);rmdir(work);printf("SIM_OUTPUT_SNAPSHOT_CHECK\tchecks=%d\tfailed=%d\n",checks,bad);return bad?1:0;}
