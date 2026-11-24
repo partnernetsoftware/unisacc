@@ -37,6 +37,7 @@
 #pragma unisa use sys.poll
 #pragma unisa use sys.posix
 #pragma unisa use sys.sig
+#pragma unisa use cxlib.bpidecl
 
 static int slurp_okrc = 0;   /* 允许的最大退出码:0=仅成功;ratchets.cx 用 1 表示「跑完了但有红行」 */
 static int slurp_last_timeout = 0, slurp_last_rc = 0, slurp_from_run_unplanned = 0;
@@ -172,7 +173,7 @@ static const char gt_builtin[] =
     "manifest\tACMRD\ttests/manifests tests/batches.tsv tests/coverage.tsv tools/batch-packages-gen.cx\n"
     "tables\tACMRD\ttests/manifests tests/batches.tsv tests/coverage.tsv tests/tools-compile-sources.tsv\n"
     "toolsreg\tADRT\ttools/*.cx\n"
-    "runlist\tACMR\ttests/coverage.tsv tests/batches.tsv\n"
+    "runlist\tACMR\ttests/coverage.tsv tests/batches.tsv tests/batch-product-inputs.tsv\n"
     "facts\tACMR\tinclude exec/facts\n"
     "ledger\tACMR\tarchive/agentwork-retire-2026-11/ledger.tsv\n"
     "cx\tACMR\t*.cx\n";
@@ -1891,6 +1892,42 @@ static int cov_eval(const char *tag, const char *reg, long rn, const char *cov, 
       if (tx_find(b, total, "PLAN\tmetadata_valid=", 20) < 0) { mm_free(b); return -1; }
       mm_free(b); return 0; }
 }
+/* 产品输入配对闸(BPI-PAIR-GATE):暂存的 tests/batches.tsv 中命令含 batch-product-inputs.tsv 的 require 占位
+ * ({candidate}、{hostcc} 等)的批次,同一提交须在暂存的 tests/batch-product-inputs.tsv 有 id 行,否则 tools/affected.cx
+ * 拒 BATCH_PRODUCT_INPUT_UNDECLARED 且 rc 2(11-23 runcache-path-key 事故)。只拦本次新增或改动的行;
+ * 与 HEAD 逐字节相同的遗留行只报告。规则在 cxlib.bpidecl,与 tools/register.cx 共用。 */
+/* 1 when PATH is in the index, 0 when it is not (output empty), -1 when git itself failed: only a definite "not in the index"
+ * lets a caller treat the table as absent; every other read failure stays a block. */
+static int bpi_in_index(const char *path) {
+    char *v[] = {"git", "ls-files", "--stage", "--", (char *)path, 0}; long n = 0; char *o = slurp(v, &n);
+    if (!o) return -1;
+    mm_free(o);
+    return n > 0 ? 1 : 0;
+}
+static int bpi_gate(void) {
+    char *b = 0, *d = 0, *hb = 0, *hd = 0; long bn = 0, dn = 0, hn = 0, hdn = 0, inh = 0, n; char ids[1024]; int ib, id_in;
+    if (plan_dir) return 0;
+    ib = bpi_in_index("tests/batches.tsv"); id_in = bpi_in_index("tests/batch-product-inputs.tsv");
+    if (ib < 0 || id_in < 0) { sy_eprintf("precommit: BLOCKED product-inputs gate: cannot list the index (git ls-files failed)\n"); return 1; }
+    if (!ib) return 0;   /* no batch table staged (fixture repo): nothing to pair */
+    if (cov_blob("", "tests/batches.tsv", &b, &bn)) {
+        sy_eprintf("precommit: BLOCKED product-inputs gate: cannot read staged tests/batches.tsv\n"); return 1; }
+    if (id_in) {
+        if (cov_blob("", "tests/batch-product-inputs.tsv", &d, &dn)) {
+            mm_free(b);
+            sy_eprintf("precommit: BLOCKED product-inputs gate: cannot read staged tests/batch-product-inputs.tsv\n"); return 1; }
+    } else { d = mm_alloc(1); if (!d) { mm_free(b); return 1; } d[0] = 0; dn = 0; }   /* declaration table not in the index: empty declarations */
+    if (cov_blob("HEAD", "tests/batches.tsv", &hb, &hn)) hb = 0;
+    if (cov_blob("HEAD", "tests/batch-product-inputs.tsv", &hd, &hdn)) hd = 0;
+    n = bpi_scan(b, bn, d, dn, hb, hn, hd, hdn, ids, sizeof ids, &inh);
+    if (inh) sy_eprintf("precommit: product-inputs gate: %ld inherited undeclared batch row(s) already in HEAD (not blamed)\n", inh);
+    if (n) {
+        sy_eprintf("precommit: BLOCKED product-inputs undeclared: batch id=%s in the staged tests/batches.tsv holds a require placeholder of tests/batch-product-inputs.tsv but has no id row there (tools/affected.cx would refuse BATCH_PRODUCT_INPUT_UNDECLARED rc 2)\n", ids);
+        sy_eprintf("precommit: add id<TAB>ID<TAB>INPUTS<TAB>BASIS rows to tests/batch-product-inputs.tsv in the same commit\n");
+    }
+    mm_free(b); mm_free(d); if (hb) mm_free(hb); if (hd) mm_free(hd);
+    return n ? 1 : 0;
+}
 static int cov_gate(void) {
     char *ir, *ic, *hr = 0, *hc = 0; long irn, icn, hrn = 0, hcn = 0; char id[160], hid[160]; int ri, rh = 0;
     if (wt_runcx() != 1) { if (!plan_dir) sy_eprintf("precommit: COVGATE skipped=1 reason=no-tests/run.cx (fixture repo)\n"); return 0; }
@@ -3182,6 +3219,77 @@ static int pc_copy_tree(const char *src, const char *dst, int depth) {
     return -1;
 }
 
+/* Whole string literals "tools/NAME.cx" in the copied sources name the tools those sources run; copy them too, round by round, until
+   nothing new appears (reg-manifest.cx runs tools/batch-packages-gen.cx, precommit.cx runs tools/verseq-gen.cx, ...).  A hand-kept
+   list lost one of them once (check-reg-manifest), so the set is read from the sources. */
+#define PC_CLOSE_NAMES 128
+static int pc_name_char(int c) { return (c >= 'a' && c <= 'z') || (c >= 'A' && c <= 'Z') || (c >= '0' && c <= '9') || c == '_' || c == '-' || c == '.'; }
+
+static int pc_close_scan(const char *iso, const char *sub, const char *base, char names[][160], int *nn) {
+    char dp[1400];
+    sy_dir_t d;
+    if (cx_fmt(dp, sizeof dp, "%s/%s", iso, sub)) return -1;
+    if (sy_dir_open(&d, dp) != 0) return 0;   /* a subdirectory that is not there has nothing to scan */
+    while (sy_dir_next(&d) == 1) {
+        char fp[1500];
+        size_t n = 0;
+        char *b;
+        long i, nl = tx_len(d.name, 200);
+        if (nl < 4 || !tx_eqz(d.name + nl - 3, ".cx")) continue;
+        if (cx_fmt(fp, sizeof fp, "%s/%s", dp, d.name)) continue;
+        b = (char *)cx_read(fp, &n);
+        if (!b) continue;
+        for (i = 0; i + 9 < (long)n; i++) {
+            long j, k;
+            int have = 0, t;
+            sy_stat_t st;
+            char ip[1400], sp[1400];
+            if (b[i] != '"' || !tx_prefix(b + i + 1, (long)n - i - 1, "tools/", 6)) continue;
+            for (j = i + 7; j < (long)n && pc_name_char((unsigned char)b[j]); j++) {}
+            k = j - (i + 7);
+            if (j >= (long)n || b[j] != '"' || k < 4 || k >= 150 || !tx_prefix(b + j - 3, 3, ".cx", 3)) continue;
+            for (t = 0; t < *nn; t++) if (tx_len(names[t], 160) == k && tx_prefix(b + i + 7, k, names[t], k)) have = 1;
+            if (have) continue;
+            if (*nn >= PC_CLOSE_NAMES) { mm_free(b); sy_dir_close(&d); return -1; }   /* a full name table must not silently drop a tool */
+            if (mm_copy(names[*nn], 160, b + i + 7, k) != 0) continue;
+            names[*nn][k] = 0;
+            if (cx_fmt(ip, sizeof ip, "%s/tools/%s", iso, names[*nn]) || sy_lstat(ip, &st) == 0) continue;   /* already copied */
+            if (cx_fmt(sp, sizeof sp, "%s/tools/%s", base, names[*nn])) continue;
+            if (sy_stat(sp, &st) != 0) {
+                /* a literal that names no file in the source tree: HEAD-tracked -> the isolated tree lost a tool, refuse; never tracked
+                   (docs, examples, generated output) -> skipped */
+                char tp[400]; char *tv[] = {"git", "ls-tree", "--name-only", "HEAD", "--", tp, 0}; long tn = 0; char *to;
+                if (cx_fmt(tp, sizeof tp, "tools/%s", names[*nn])) continue;
+                to = slurp(tv, &tn);
+                if (!to) { mm_free(b); sy_dir_close(&d); return -1; }
+                mm_free(to);
+                if (tn > 0) { sy_eprintf("precommit: BLOCKED isolated tree closure: tools/%s is tracked in HEAD but missing from the source tree\n", names[*nn]); mm_free(b); sy_dir_close(&d); return -1; }
+                continue;
+            }
+            (*nn)++;
+        }
+        mm_free(b);
+    }
+    sy_dir_close(&d);
+    return 0;
+}
+
+static int pc_close_tools(const char *iso, const char *base) {
+    int round;
+    for (round = 0; round < 8; round++) {
+        char names[PC_CLOSE_NAMES][160];
+        int nn = 0, k;
+        if (pc_close_scan(iso, "tools", base, names, &nn) != 0 || pc_close_scan(iso, "tools/cxlib", base, names, &nn) != 0) return -1;
+        if (nn == 0) return 0;
+        for (k = 0; k < nn; k++) {
+            char cs[1400], cd[1400];
+            if (cx_fmt(cs, sizeof cs, "%s/tools/%s", base, names[k]) || cx_fmt(cd, sizeof cd, "%s/tools/%s", iso, names[k])) return -1;
+            if (pc_copy_tree(cs, cd, 0) != 0) return -1;
+        }
+    }
+    return -1;   /* still growing after 8 rounds: the closure is not proven complete */
+}
+
 static int pc_populate_isolated_tree(const char *iso) {
     const char *w = pc_work_top[0] ? pc_work_top : (pc_local_top[0] ? pc_local_top : pc_orig_cwd);
     const char *wt = pc_local_top[0] ? pc_local_top : (pc_orig_cwd[0] ? pc_orig_cwd : w);
@@ -3191,9 +3299,7 @@ static int pc_populate_isolated_tree(const char *iso) {
         "cxlib", "bound", "bound.c", "precommit.cx", "precommit-flow.cx", "derive.cx",
         "gen-all-check.cx", "ratchets.cx", "cx-lint.cx", "check-tlib-frozen.cx",
         "layer-api.cx", "bump.cx", "reg-manifest.cx", "tables-gen.cx", "facts-gen.cx",
-        "ledger-add.cx", "tool-index.cx", "links-gen.cx",
-        /* reg-manifest.cx computes build/batch-packages.tsv through this (rm_read -> batch-packages-gen --query) */
-        "batch-packages-gen.cx", 0
+        "ledger-add.cx", "tool-index.cx", "links-gen.cx", 0
     };
     static const char * const subdirs[] = { "tools", "tests", 0 };
     int i;
@@ -3235,6 +3341,7 @@ static int pc_populate_isolated_tree(const char *iso) {
                     if (pc_copy_tree(cs, cd, 0) != 0) return -1;
                 }
             }
+            if (base && base[0] && pc_close_tools(iso, base) != 0) return -1;
         }
     }
     for (i = 0; subdirs[i]; i++) {
@@ -3595,7 +3702,7 @@ int main(int argc, char **argv) {
       } else if (msn > 0) {
           char *lout; long ln;
           int cov_blk = cov_gate();
-          blocked += cov_blk;
+          blocked += cov_blk + bpi_gate();
           cur_gate = "runlist"; slurp_okrc = 2; lout = slurp(lv, &ln); slurp_okrc = 0; cur_gate = 0;
           if (!lout) { sy_eprintf("precommit: tests/run.cx --list did not run\n"); return 1; }
           if (!cov_blk && tx_find(lout, ln, "metadata_valid=1", 16) < 0) {

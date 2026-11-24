@@ -64,6 +64,7 @@
 #pragma unisa use mem.bytes
 #pragma unisa use text.fmt
 #pragma unisa use mem.heap
+#pragma unisa use cxlib.bpidecl
 #pragma unisa use cxlib.runnerprep
 #pragma unisa use cxlib.dirtywatch
 
@@ -1463,6 +1464,20 @@ int main(int argc, char **argv) {
     if (tx_snprintf(brow, sizeof brow, "%s\tIMPLEMENTED\t%s\t%s\tSOURCE\tlnx/x86_64\t55\t-\t%s\t%s\t%s\trc0:%s\t%s\t%s\n", id, layer, check, check, arguments, cid, marker, headers, tx_eqz(layer,"platform")?"release":"commit") >= (int)sizeof brow
         || tx_snprintf(crow, sizeof crow, "%s\t%s\tIMPLEMENTED_SEPARATE_BATCH\t%s\t%s\n", cid, layer, text, files) >= (int)sizeof crow) rg_die("row too long", id);
     if (!rg_row_ok(brow, marker)) rg_die("row would fail the tp_expect check", id);
+    {   /* a require placeholder ({candidate}, {hostcc}, ...) needs an id row in batch-product-inputs.tsv first,
+           else tools/affected.cx refuses BATCH_PRODUCT_INPUT_UNDECLARED rc 2 for every selection (cxlib.bpidecl) */
+        char dp[4400]; size_t dsz = 0; char *db = 0; int ex;
+        if (cx_fmt(dp, sizeof dp, "%s/batch-product-inputs.tsv", rg_tdir())) rg_die("path bound", "batch-product-inputs");
+        ex = sy_exists(dp);   /* 0 only for ENOENT; ENOTDIR/EACCES come back negative and are never taken as absent */
+        if (ex < 0) rg_die("cannot stat the product-inputs declaration table", dp);
+        if (ex == 1) { db = (char *)cx_read(dp, &dsz); if (!db) rg_die("cannot read the product-inputs declaration table", dp); }
+        if (db && bpi_needs(db, (long)dsz, arguments, tx_len(arguments, 8192)) && !bpi_has_id(db, (long)dsz, id, tx_len(id, 4096))) {
+            fprintf(stderr, "register: --args %s holds a require placeholder of %s but it has no id row for %s\n", arguments, dp, id);
+            fprintf(stderr, "register: add 'id<TAB>%s<TAB>INPUTS<TAB>BASIS' to %s first (commit it with the batch row)\n", id, dp);
+            mm_free(db); rg_die("product inputs undeclared", id);
+        }
+        if (db) mm_free(db);
+    }
     if (append(rg_bpath(), brow)) rg_die("cannot append", rg_bpath());
     if (append(rg_cpath(), crow)) { take_out(rg_bpath(), brow); rg_die("cannot append", rg_cpath()); }
     {   char *v[] = {"./tools/bound", "55", listbin, "--list", 0};

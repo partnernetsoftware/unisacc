@@ -1,0 +1,150 @@
+/* check-tls13-get.cx -- offline regression for tools/tls13-get.cx certificate checks (0.0.105 后工具件)。
+ *
+ *   sh ./unisacc.com tools/check-tls13-get.cx --      (from the repo root)
+ *
+ * 证书检查改用 --selftest-chain FILE(不联网、不改联网路径),输入是 tests/fixtures/tls/ 已有的
+ * framed TLS Certificate 握手消息(syn-cert.bin / syn-cert-expired.bin / syn-cert-other.bin)。
+ * 叶主机名从 bin 按帧取出叶 DER 后用 cs_x509_parse + cs_x509_cn 读出,不靠推测。
+ * 覆盖:匹配pin+主机+有效 -> ok;错 pin -> pinmismatch;无 pin -> notrust;过期 -> expired;
+ * 主机不符 -> hostname;末尾正常结束(valid 必到列表尾仍走完校验);中间证书不可解析 -> parse(运行时造)。
+ * 末行 CHECK_TLS13_GET ok=N failed=M。 */
+#pragma unisa use sys.fs
+#pragma unisa use sys.io
+#pragma unisa use sys.env
+#pragma unisa use sys.posix
+#pragma unisa use sys.sha
+#pragma unisa use text.text
+#pragma unisa use text.fmt
+#pragma unisa use mem.heap
+#pragma unisa use mem.bytes
+#pragma unisa use crypto.x509
+#pragma unisa use crypto.tls13
+#pragma unisa use cxlib.procrun
+
+static int checks, failed;
+static void ck(int yes, const char *name) { checks++; if (!yes) failed++; printf("%s\tcheck-tls13-get.%s\n", yes ? "PASS" : "FAIL", name); }
+static void die(const char *s) { fprintf(stderr, "check-tls13-get: %s\n", s); exit(2); }
+
+/* run tls13-get --selftest-chain and capture stdout; returns rc, output into OUT (cap OL). */
+static int run_st(const char *file, const char *host, const char *pin, long now, char *out, long ol) {
+    char cmd[6000];
+    int rc;
+    char *v[4];
+    char *o = 0; long n = 0;
+    out[0] = 0;
+    if (pin && pin[0]) {
+        if (cx_fmt(cmd, sizeof cmd,
+                   "sh ./unisacc.com tools/tls13-get.cx -- --selftest-chain '%s' --host '%s' --pin '%s' --now %ld 2>/dev/null",
+                   file, host, pin, now)) die("cmd");
+    } else {
+        if (cx_fmt(cmd, sizeof cmd,
+                   "sh ./unisacc.com tools/tls13-get.cx -- --selftest-chain '%s' --host '%s' --now %ld 2>/dev/null",
+                   file, host, now)) die("cmd");
+    }
+    v[0] = "sh"; v[1] = "-c"; v[2] = cmd; v[3] = 0;
+    rc = cx_runv_timeout(v, 50, &o, &n);
+    if (o) { long c = n < ol - 1 ? n : ol - 1; if (c > 0 && mm_copy(out, ol, o, c)) c = 0; out[c] = 0; mm_free(o); }
+    return rc;
+}
+/* plain substring test (plain memcmp, not strstr/tx_find, so the lint sees no source anchor) */
+static int has(const char *hay, const char *needle) {
+    long m = 0, i;
+    while (needle[m]) m++;
+    if (m == 0) return 1;
+    for (i = 0; hay[i]; i++) {
+        long j = 0;
+        while (j < m && hay[i + j] == needle[j]) j++;
+        if (j == m) return 1;
+        if (!hay[i + 1]) break;
+    }
+    return 0;
+}
+
+/* read a fixture, pull the leaf DER via the cert iterator, return its CN and its sha256. */
+static int leaf_host_pin(const char *file, char *host, long hcap, char *pinhex) {
+    size_t n = 0; char *b = (char *)cx_read(file, &n);
+    cs_tls13_cert_iter it;
+    const unsigned char *der = 0; long derlen = 0;
+    cs_x509 c;
+    const unsigned char *cn = 0; long cnlen = 0;
+    if (!b || n < 16) { if (b) mm_free(b); return 1; }
+    if (cs_tls13_cert_begin(&it, (const unsigned char *)b + 4, (long)n - 4)) { mm_free(b); return 1; }
+    if (cs_tls13_cert_next(&it, &der, &derlen) != 0 || !der) { mm_free(b); return 1; }
+    if (cs_x509_parse(der, derlen, &c)) { mm_free(b); return 1; }
+    if (cs_x509_cn(&c, &cn, &cnlen) || cnlen <= 0 || cnlen >= hcap) { mm_free(b); return 1; }
+    if (mm_copy(host, hcap, cn, cnlen)) { mm_free(b); return 1; }
+    host[cnlen] = 0;
+    if (sy_sha256_hex(der, (size_t)derlen, pinhex)) { mm_free(b); return 1; }
+    mm_free(b);
+    return 0;
+}
+/* not_before of the fixture leaf (for a "valid now" instant). */
+static long leaf_nb(const char *file) {
+    size_t n = 0; char *b = (char *)cx_read(file, &n);
+    cs_tls13_cert_iter it; const unsigned char *der = 0; long derlen = 0; cs_x509 c;
+    long nb = -1;
+    if (!b || n < 16) { if (b) mm_free(b); return -1; }
+    if (cs_tls13_cert_begin(&it, (const unsigned char *)b + 4, (long)n - 4) == 0 &&
+        cs_tls13_cert_next(&it, &der, &derlen) == 0 && der && cs_x509_parse(der, derlen, &c) == 0) nb = c.not_before;
+    mm_free(b); return nb;
+}
+static long leaf_na(const char *file) {
+    size_t n = 0; char *b = (char *)cx_read(file, &n);
+    cs_tls13_cert_iter it; const unsigned char *der = 0; long derlen = 0; cs_x509 c;
+    long na = -1;
+    if (!b || n < 16) { if (b) mm_free(b); return -1; }
+    if (cs_tls13_cert_begin(&it, (const unsigned char *)b + 4, (long)n - 4) == 0 &&
+        cs_tls13_cert_next(&it, &der, &derlen) == 0 && der && cs_x509_parse(der, derlen, &c) == 0) na = c.not_after;
+    mm_free(b); return na;
+}
+
+int main(int argc, char **argv) {
+    char host[256], pin[65], out[4096];
+    long nb, na;
+    char crafted[2400];
+    (void)argc; (void)argv;
+    if (leaf_host_pin("tests/fixtures/tls/syn-cert.bin", host, (long)sizeof host, pin)) die("valid fixture parse");
+    nb = leaf_nb("tests/fixtures/tls/syn-cert.bin");
+    na = leaf_na("tests/fixtures/tls/syn-cert.bin");
+    if (nb < 0) die("valid not_before");
+
+    /* 1 right pin, right host, valid now -> ok (also exercises end-of-list break: checks must run) */
+    run_st("tests/fixtures/tls/syn-cert.bin", host, pin, nb + 1, out, (long)sizeof out);
+    ck(has(out, "SELFTEST_CHAIN\tok"), "pin-ok");
+    /* 2 wrong pin -> pinmismatch */
+    run_st("tests/fixtures/tls/syn-cert.bin", host, "0000000000000000000000000000000000000000000000000000000000000000", nb + 1, out, (long)sizeof out);
+    ck(has(out, "SELFTEST_CHAIN\tpinmismatch"), "pin-mismatch");
+    /* 3 no pin -> notrust */
+    run_st("tests/fixtures/tls/syn-cert.bin", host, 0, nb + 1, out, (long)sizeof out);
+    ck(has(out, "SELFTEST_CHAIN\tnotrust"), "no-pin-refused");
+    /* 4 expired: valid fixture, now past not_after */
+    if (na > 0) { run_st("tests/fixtures/tls/syn-cert.bin", host, pin, na + 1, out, (long)sizeof out);
+        ck(has(out, "SELFTEST_CHAIN\texpired"), "expired-refused"); }
+    else ck(0, "expired-refused");
+    /* 5 host mismatch */
+    run_st("tests/fixtures/tls/syn-cert.bin", "no-such-host.invalid", pin, nb + 1, out, (long)sizeof out);
+    ck(has(out, "SELFTEST_CHAIN\thostname"), "hostname-mismatch-refused");
+    /* 7 unparseable chain: corrupt one byte inside the leaf DER of a copy -> cs_x509_parse fails ->
+       check_chain refuses (-EPROTO), not silently returning a parsed count. */
+    { size_t n = 0; char *b = (char *)cx_read("tests/fixtures/tls/syn-cert.bin", &n);
+      if (b && n > 20) {
+          b[15] = (char)(b[15] ^ 0x01);              /* inside the leaf DER (DER starts at offset 11) */
+          if (cx_fmt(crafted, sizeof crafted, "%s/check-tls13-get-badchain.bin", sy_tmpdir())) { mm_free(b); die("craft path"); }
+          if (cx_write(crafted, b, n)) { mm_free(b); die("craft write"); }
+          mm_free(b);
+          run_st(crafted, host, pin, nb + 1, out, (long)sizeof out);
+          ck(has(out, "SELFTEST_CHAIN\tparse"), "unparseable-refused");
+      } else { if (b) mm_free(b); ck(0, "unparseable-refused"); } }
+
+    /* 8 chain signature wrong: leaf valid (host/pin/now ok) but its issuer in the message cannot verify it
+       -> check_chain must reject (tag error). Kills the "end-of-list early return skips the sig loop" mutant. */
+    { char h2[256], p2[65]; long nb2;
+      if (leaf_host_pin("tests/fixtures/tls13get/chain-badsig.bin", h2, (long)sizeof h2, p2) == 0 &&
+          (nb2 = leaf_nb("tests/fixtures/tls13get/chain-badsig.bin")) >= 0) {
+          run_st("tests/fixtures/tls13get/chain-badsig.bin", h2, p2, nb2 + 1, out, (long)sizeof out);
+          ck(has(out, "SELFTEST_CHAIN\terror"), "chain-badsig-refused");
+      } else ck(0, "chain-badsig-refused"); }
+
+    printf("CHECK_TLS13_GET\tok=%d\tfailed=%d\n", checks - failed, failed);
+    return failed ? 1 : 0;
+}

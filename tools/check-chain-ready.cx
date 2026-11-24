@@ -194,7 +194,8 @@ int main(void) {
         rc = run(v, out, sizeof out);
         ck(rc == 0 && has(out, "10-envhygiene\tPASS") && has(out, "READY\tyes"), "envhygiene-clean-environment-pass");
     }
-    {   char *v[] = {"./tools/bound", "60", "env", "UNISACC_RUN_CACHE=0",
+    /* any non-empty UNISACC_RUN_CACHE is the leak; =1 keeps the run cache warm (=0 forced a ~20 s cold compile) */
+    {   char *v[] = {"./tools/bound", "60", "env", "UNISACC_RUN_CACHE=1",
                      "sh", UC, "tools/chain-ready.cx", "--", "--only", "10-envhygiene", 0};
         rc = run(v, out, sizeof out);
         ck(rc == 1 && has(out, "10-envhygiene\tFAIL") && has(out, "UNISACC_RUN_CACHE") && has(out, "READY\tno"), "envhygiene-cache-variable-named-not-ready");
@@ -382,6 +383,117 @@ int main(void) {
             rc = run(v, out, sizeof out);
             ck(rc == 1 && has(out, "20-ident-helper\tFAIL") && has(out, "not-executable") && has(out, "READY\tno"), "ident-helper-20-mut3-not-executable-fail");
         }
+    }
+    /* 16-disk-free (safe subset, cc 2026-11-24 裁定 (b)): the thresholds are still 8G/20G, the number now
+       comes from sy_disk_avail_mb with a bounded df fallback, and an unmeasured disk is a FAIL.
+       --disk-free-gb N injects the available space, so every case is deterministic on any machine. */
+    {   char *v[] = {"./tools/bound", "40", "sh", UC, "tools/chain-ready.cx", "--", "--only", "16-disk-free", "--disk-free-gb", "30", 0};
+        rc = run(v, out, sizeof out);
+        ck(rc == 0 && has(out, "16-disk-free\tPASS") && has(out, "avail_gb=30 (>=20G)") && has(out, "READY\tyes"),
+           "disk-inject-above-20-pass");
+    }
+    {   char *v[] = {"./tools/bound", "40", "sh", UC, "tools/chain-ready.cx", "--", "--only", "16-disk-free", "--disk-free-gb", "10", 0};
+        rc = run(v, out, sizeof out);
+        ck(rc == 0 && has(out, "16-disk-free\tPASS") && has(out, "DISK_LOW avail_gb=10") && has(out, "READY\tyes"),
+           "disk-inject-between-8-and-20-warns-but-passes");
+    }
+    {   char *v[] = {"./tools/bound", "40", "sh", UC, "tools/chain-ready.cx", "--", "--only", "16-disk-free", "--disk-free-gb", "7", 0};
+        rc = run(v, out, sizeof out);
+        ck(rc == 1 && has(out, "16-disk-free\tFAIL") && has(out, "DISK_BLOCKED avail_gb=7") && has(out, "READY\tno"),
+           "disk-inject-below-8-blocks");
+    }
+    /* boundary: exactly 8G is allowed (the rule is "below 8G blocks") and exactly 20G already counts as >=20G.
+       These two pin the `<` comparisons, so a mutation to `<=` or `>` is caught. */
+    {   char *v[] = {"./tools/bound", "40", "sh", UC, "tools/chain-ready.cx", "--", "--only", "16-disk-free", "--disk-free-gb", "8", 0};
+        rc = run(v, out, sizeof out);
+        ck(rc == 0 && has(out, "16-disk-free\tPASS") && has(out, "DISK_LOW avail_gb=8") && has(out, "READY\tyes"),
+           "disk-boundary-8g-allowed");
+    }
+    {   char *v[] = {"./tools/bound", "40", "sh", UC, "tools/chain-ready.cx", "--", "--only", "16-disk-free", "--disk-free-gb", "20", 0};
+        rc = run(v, out, sizeof out);
+        ck(rc == 0 && has(out, "16-disk-free\tPASS") && has(out, "avail_gb=20 (>=20G)") && has(out, "READY\tyes"),
+           "disk-boundary-20g-is-full-pass");
+    }
+    /* a zero injection is a real figure, not "measure for me": the sentinel for the latter is negative, so the
+       guard must stay `avail_gb < 0` (with `<=` a start asks the real disk and 0G silently passes). */
+    {   char *v[] = {"./tools/bound", "40", "sh", UC, "tools/chain-ready.cx", "--", "--only", "16-disk-free", "--disk-free-gb", "0", 0};
+        rc = run(v, out, sizeof out);
+        ck(rc == 1 && has(out, "16-disk-free\tFAIL") && has(out, "DISK_BLOCKED avail_gb=0") && has(out, "READY\tno"),
+           "disk-injected-zero-blocks-instead-of-measuring");
+    }
+    /* both measurements failing on the SAME path is a FAIL, not a pass and not an exemption.  A dangling
+       symlink is the device: it exists (so the path is located and named in the evidence), while statvfs and
+       `df -Pk` both fail on it.  It has to come in through --chain-base: an UNISACC_CHAIN_BASE that is not
+       canonical(tmp)/unisacc-session-chain-NAME is ignored by cr_override, so the gate would fall back to the
+       home base and never reach this branch -- the fixture would have passed for the wrong reason. */
+    {   char *v[] = {"./tools/bound", "40", "sh", "-c", "L=$(mktemp -u); ln -s /nonexistent/chain-ready-disk-fixture \"$L\"; "
+                 "sh " UC " tools/chain-ready.cx -- --only 16-disk-free --repo . --chain-base \"$L\"; rc=$?; rm -f \"$L\"; exit $rc", 0};
+        rc = run(v, out, sizeof out);
+        ck(rc == 1 && has(out, "16-disk-free\tFAIL") && has(out, "DISK_UNMEASURED sy_disk_avail_mb and the bounded df -Pk both failed") && has(out, "READY\tno"),
+           "disk-both-measurements-fail-is-fail");
+    }
+    /* The filesystem that matters is the chain base's, not the checkout's (S1 2026-11-24).  A 4 MiB tmpfs
+       mounted in a user namespace is a real chain disk that is really too small, while the checkout stays on
+       the roomy root: measuring the repo passes, measuring the chain base blocks.  Nothing here is a stub --
+       sy_disk_avail_mb reads that mount. */
+    {   char *v[64]; int n = 0;
+        v[n++] = "./tools/bound"; v[n++] = "40"; v[n++] = "unshare"; v[n++] = "-Ur"; v[n++] = "-m"; v[n++] = "sh"; v[n++] = "-c";
+        v[n++] = "D=$(mktemp -d); B=\"$D/unisacc-session-chain-tf1\"; mkdir -p \"$B\"; mount -t tmpfs -o size=4m tmpfs \"$B\" || exit 9; "
+                 "sh " UC " tools/chain-ready.cx -- --only 16-disk-free --root . --repo . --chain-base \"$B\"; rc=$?; "
+                 "umount \"$B\"; rm -rf \"$D\"; exit $rc";
+        v[n] = 0;
+        rc = run(v, out, sizeof out);
+        ck(rc == 1 && has(out, "16-disk-free\tFAIL") && has(out, "DISK_BLOCKED avail_gb=0") && has(out, "READY\tno"),
+           "disk-chain-base-small-blocks-while-checkout-is-roomy");
+    }
+    /* a chain base that resolves is what gets measured, and the row names it: `--repo` still points at the
+       roomy checkout, so a row carrying ANY other path means the gate measured the wrong filesystem.  The
+       override is resolved through cxlib.chainroot cr_base -- the one place that decides where a chain
+       directory lands -- not by reading the variable, so / here is REJECTED as an override (cr_override takes
+       only canonical(tmp)/unisacc-session-chain-NAME) and the home chain base is what gets measured.  A gate
+       that honoured the raw value would pass on a roomy / while the chain filled the home disk: that is the
+       fail-open this fixture catches. */
+    {   char *v[] = {"./tools/bound", "40", "env", "UNISACC_CHAIN_BASE=/", "sh", UC, "tools/chain-ready.cx", "--", "--only", "16-disk-free", "--repo", repo, 0};
+        rc = run(v, out, sizeof out);
+        ck((rc == 0 || rc == 1) && has(out, ".cache/unisacc/chains") && !has(out, "disk=/\t") &&
+           !has(out, "16-disk-free\tUNMEASURED"),
+           "disk-stale-absolute-override-is-not-honoured-and-home-base-is-measured");
+    }
+    /* the override cr_override DOES accept is measured: the same directory the chain will use.  cr_override
+       takes only canonical(tmpdir)/unisacc-session-chain-NAME, so the base must be a direct child of the temp
+       directory -- putting it one level deeper (inside a mktemp -d) would be ignored and the home base would
+       answer, which is exactly the fallback the fixture above pins from the other side. */
+    {   char *v[] = {"./tools/bound", "40", "sh", "-c", "B=\"$(dirname \"$(mktemp -u)\")/unisacc-session-chain-cr1\"; mkdir -p \"$B\"; "
+                 "UNISACC_CHAIN_BASE=\"$B\" sh " UC " tools/chain-ready.cx -- --only 16-disk-free --repo . ; rc=$?; rmdir \"$B\"; exit $rc", 0};
+        rc = run(v, out, sizeof out);
+        ck((rc == 0 || rc == 1) && has(out, "unisacc-session-chain-cr1") &&
+           !has(out, "16-disk-free\tUNMEASURED"), "disk-accepted-override-is-what-gets-measured");
+    }
+    /* --chain-base ABS is the escape for a caller whose directories are not cr_base() (bg-candidate -- --base):
+       the gate must measure THAT disk, and a relative one names no disk at all. */
+    {   char *v[] = {"./tools/bound", "40", "sh", UC, "tools/chain-ready.cx", "--", "--only", "16-disk-free", "--chain-base", "/", 0};
+        rc = run(v, out, sizeof out);
+        ck((rc == 0 || rc == 1) && has(out, "disk=/\t"), "disk-chain-base-flag-is-what-gets-measured");
+    }
+    {   char *v[] = {"./tools/bound", "40", "sh", UC, "tools/chain-ready.cx", "--", "--only", "16-disk-free", "--chain-base", "relative-base", 0};
+        rc = run(v, out, sizeof out);
+        ck(rc == 1 && has(out, "DISK_UNMEASURED the chain base could not be resolved") && has(out, "READY\tno"),
+           "disk-relative-chain-base-flag-is-unmeasured");
+    }
+    /* an injected figure still works, because that is the escape when nothing can be located. */
+    {   char *v[] = {"./tools/bound", "40", "env", "UNISACC_CHAIN_BASE=relative-base", "sh", UC, "tools/chain-ready.cx", "--", "--only", "16-disk-free", "--disk-free-gb", "9", 0};
+        rc = run(v, out, sizeof out);
+        ck(rc == 0 && has(out, "DISK_LOW avail_gb=9") && has(out, "READY\tyes"), "disk-injection-works-without-a-base");
+    }
+    /* an UNMEASURED that is NOT one of the two manual items must make READY=no: the old row() only counted
+       FAIL and SKIPPED, so a gate that could not measure left the chain 'ready'. */
+    {   char *v[] = {"./tools/bound", "40", "sh", UC, "tools/chain-ready.cx", "--", "--only", "7-recipe", 0};
+        rc = run(v, out, sizeof out);
+        ck(rc == 0 && has(out, "7-recipe\tUNMEASURED") && has(out, "READY\tyes"), "manual-unmeasured-by-design-still-ready");
+    }
+    {   char *v[] = {"./tools/bound", "40", "sh", UC, "tools/chain-ready.cx", "--", "--fast", "--only", "4-p1", 0};
+        rc = run(v, out, sizeof out);
+        ck(rc == 1 && has(out, "4-p1\tSKIPPED") && has(out, "READY\tno"), "skipped-still-not-ready");
     }
     printf("CHAIN_READY_CHECK\tpassed=%d\tfailed=%d\n", passed, failed);
     return failed ? 1 : 0;
