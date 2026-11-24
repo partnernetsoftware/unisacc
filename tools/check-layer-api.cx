@@ -186,14 +186,69 @@ static int bumpt(const char *r, const char *pkg, const char *flag) {
     return cx_runv_timeout(v, 40, &last, &lastn);
 }
 
+/* Run the documented explicit selection under the devsvc add guard. */
+static int private_bump_check(const char *guard) {
+    char gx[4400], ix[4400], repo_env[4500], api[4400], iface[4400], cwd[4400];
+    char *before = 0, *after = 0, *lastout = 0;
+    size_t bn = 0, an = 0, on = 0;
+    if (cx_fmt(gx, sizeof gx, "%s/guarded", work) || sy_mkdir(gx, 0700) ||
+        cx_fmt(ix, sizeof ix, "%s/.git/index", gx) ||
+
+        cx_fmt(repo_env, sizeof repo_env, "DEVSVC_REPO_TABLE=%s/tools/devsvc-repo.tsv", root) ||
+        cx_fmt(api, sizeof api, "%s/build/layer-api", gx) ||
+        cx_fmt(iface, sizeof iface, "%s/build/iface-hash.tsv", gx) ||
+        sy_cwd(cwd, sizeof cwd) < 0) return 2;
+    char sub[4400];
+    if (cx_fmt(sub, sizeof sub, "%s/build", gx) || sy_mkdir(sub, 0700) ||
+        cx_fmt(sub, sizeof sub, "%s/ga", gx) || sy_mkdir(sub, 0700) || gput(gx, "unisacc.com", 0) ||
+        gwrite(gx, "build/tlib-packages.tsv", "gx.a\t0.1.0\tPENDING\tga\t-\t-\tfixture\n") ||
+        gwrite(gx, "ga/one.cx", "#pragma unisa module one\nint gx_one(void) { return 1; }\n") ||
+        gitrun(gx, "init", "-q", 0, 0) || gitrun(gx, "add", "-A", 0, 0) ||
+        gitrun(gx, "commit", "-q", "-m", "base") || bumpt(gx, "gx.a", 0) ||
+        gitrun(gx, "add", "build", 0, 0) || gitrun(gx, "commit", "-q", "-m", "frozen") ||
+        gwrite(gx, "peer.txt", "foreign stage\n") || gitrun(gx, "add", "peer.txt", 0, 0) ||
+        gwrite(gx, "ga/one.cx", "#pragma unisa module one\nint gx_one(void) { return 2; }\n")) return 2;
+    before = cx_read(ix, &bn);
+    if (!before || sy_chdir(gx)) { mm_free(before); return 2; }
+    char *add[] = {"sh", "-c", "exec \"$@\" 2>&1", "sh", "env", repo_env, (char *)guard, "git", "add", "ga/one.cx", 0};
+    int rc = cx_runv_timeout(add, 20, &lastout, &on);
+    int guarded = rc == 2 && lastout && tx_find(lastout, (long)on, "reason=shared-index", 19) >= 0;
+    ck(guarded, "shared-devsvc-add-guard-is-active");
+    mm_free(lastout); lastout = 0;
+    char *bump[] = {bin, "--bump", "gx.a", "--worktree-path", "peer.txt", 0};
+    mm_free(last); last = 0; lastn = 0;
+    ck(cx_runv_timeout(bump, 25, &last, &lastn) == 2, "private-bump-refuses-explicit-foreign-path");
+    bump[4] = "ga/one.cx";
+    char *refresh[] = {"sh", bin_product, (char *)0, "--", "--write", "--api", api, "--table", iface, 0};
+    char iface_tool[4400];
+    int ready = !cx_fmt(iface_tool, sizeof iface_tool, "%s/tools/iface-hash.cx", root);
+    refresh[2] = iface_tool;
+    mm_free(last); last = 0; lastn = 0;
+    int bumped = ready && !cx_runv_timeout(bump, 25, &last, &lastn);
+    ck(bumped && line3("BUMP", "gx.a", "patch") && has_field("gx.a", "0.1.0 -> 0.1.1"), "private-index-frozen-patch-bump");
+    ck(bumped && !tool(gx, "--check", "gx.a"), "private-bump-layer-api-check");
+    int refreshed = bumped && !cx_runv_timeout(refresh, 25, 0, 0);
+    refresh[4] = "--check";
+    ck(refreshed && !cx_runv_timeout(refresh, 20, 0, 0), "private-bump-iface-hash-write-and-check");
+    after = cx_read(ix, &an);
+    ck(after && bn == an && tx_same(before, (long)bn, after, (long)an), "private-bump-preserves-shared-index-with-foreign-entry");
+    mm_free(before); mm_free(after);
+    if (sy_chdir(cwd)) return 2;
+    sy_printf("CHECK_LAYER_API_PRIVATE_BUMP\tfailed=%d\n", failed);
+    return failed ? 1 : 0;
+}
+
 int main(int argc, char **argv) {
     char src[4400], why[256], product[4400], sa[65], sb[65], sa2[65];
     int rc, prep = 0;
 
-    if (sy_realpath(argc >= 2 && argv[1][0] ? argv[1] : ".", root, sizeof root) < 0) return 2;
-    if (argc >= 3 && argv[2][0]) {
-        (void)sy_mkdir(argv[2], 0755);
-        if (cx_fmt(work, sizeof work, "%s/layer-api-%d-%ld", argv[2], sy_pid(), sy_now_ms())) return 2;
+    const char *guard = argc == 4 && tx_eqz(argv[1], "--private-index-check") ? argv[2] : 0;
+    const char *rarg = guard ? "." : argc >= 2 ? argv[1] : ".";
+    const char *outarg = guard ? argv[3] : argc >= 3 ? argv[2] : 0;
+    if ((guard && guard[0] != '/') || sy_realpath(rarg, root, sizeof root) < 0) return 2;
+    if (outarg && outarg[0]) {
+        (void)sy_mkdir(outarg, 0755);
+        if (cx_fmt(work, sizeof work, "%s/layer-api-%d-%ld", outarg, sy_pid(), sy_now_ms())) return 2;
     } else {
         char dot[4400];
         if (cx_fmt(dot, sizeof dot, "%s/.trash", root) || cx_fmt(work, sizeof work, "%s/layer-api-%d-%ld", dot, sy_pid(), sy_now_ms())) return 2;
@@ -208,6 +263,8 @@ int main(int argc, char **argv) {
         sy_printf("FAIL\tlayer-api.build-native\t%s\n", why);
         return 1;
     }
+
+    if (guard) return private_bump_check(guard);
 
     /* (1) this checkout */
     rc = tool(root, "--check", 0);

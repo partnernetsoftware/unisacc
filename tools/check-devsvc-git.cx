@@ -539,7 +539,19 @@ int main(int argc, char **argv) {
     rc = dv("git", "add", "dvg-add.txt", "dvg-ign.log", 0, 0, 0, 0); ck(rc == 2 && has("ignored path"), "add-refuse-ignored-nothing-added");
     ck(sh("[ -z \"$(git ls-files -s -- dvg-add.txt)\" ]", fx) == 0, "add-refused-adds-nothing");
     rc = dv("git", "add", "dvg-add.txt", 0, 0, 0, 0, 0);
-    ck(rc == 0 && has("GIT_ADD\trc=0\tn=1") && sh("[ -n \"$(git ls-files -s -- dvg-add.txt)\" ]", fx) == 0, "add-syncs-index");
+    ck(rc == 2 && has("reason=shared-index") && sh("[ -z \"$(git ls-files -s -- dvg-add.txt)\" ]", fx) == 0, "add-refuses-shared-index");
+    ck(dv("stop", 0, 0, 0, 0, 0, 0, 0) == 0, "add-stop-receipt-service");
+    ck(setenv("DEVSVC_OWNER", "dvg-addon", 1) == 0 && sh("mkdir .git/sequencer", fx) == 0, "add-sequencer-fixture");
+    rc = dv("git", "add", "dvg-add.txt", 0, 0, 0, 0, 0);
+    ck(rc == 3 && has("reason=devsvc-down"), "add-operation-needs-live-service");
+    ck(dv("start", "--ttl", "90", "--idle", "45", 0, 0, 0) == 0, "add-start-service");
+    rc = dv("git", "add", "dvg-add.txt", 0, 0, 0, 0, 0);
+    ck(rc == 0 && has("GIT_ADD\trc=0\tn=1") && sh("[ -n \"$(git ls-files -s -- dvg-add.txt)\" ]", fx) == 0, "add-syncs-index-with-new-lock");
+    ck(dv("lock", "acquire", "git-land", 0, 0, 0, 0, 0) == 0, "add-own-lock-preheld");
+    rc = dv("git", "add", "dvg-add.txt", 0, 0, 0, 0, 0);
+    ck(rc == 0 && dv("lock", "list", 0, 0, 0, 0, 0, 0) == 0 && has("git-land"), "add-reuses-and-preserves-owned-lock");
+    ck(dv("lock", "release", "git-land", 0, 0, 0, 0, 0) == 0, "add-release-fixture-lock");
+    ck(dv("stop", 0, 0, 0, 0, 0, 0, 0) == 0 && sh("rmdir .git/sequencer", fx) == 0 && unsetenv("DEVSVC_OWNER") == 0, "add-cleanup");
     }
     if (D) {
     /* (d) git merge 派生表冲突自动解决:夹具 exec/facts/derive.tsv 只留一行小生成器 dvd(两个输入表拼成 build/dvd.tsv),

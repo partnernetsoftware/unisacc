@@ -89,7 +89,16 @@ t1	exec	c1	a0=sh;a1=-c;a2=sh ./unisacc.com tools/check-devsvc-flow.cx;timeout_ms
 - 并行强制参数(2026-11-15):`flow`、`x` 与 `tools/flowrun.cx run` 一律要求显式 `--par N`(1..32,单节点也写 `--par 1`),缺省 rc 2 并打 `REFUSE missing --par`;flow 节点表可写一行 `par N` 声明,命令行优先;`--jobs N` 仅作旧写法别名。上表 x、flow 两行的写法均应补 `--par N`。`git commit --whole PATH` 可提交已 `git rm` 的删除(HEAD 有、工作区无,打 `DELETE PATH`)。
 ### 提交门:新增 tlib 模块与分相派生
 
-新增库按一个完整登记集提交:(1) 实跑库检查,再用 `devsvc register --tool tools/cxlib/NAME.cx --tool tools/check-NAME.cx` 同步工具清单与 `tools-compile-NNN` 分片,不要只手加清单两行;用 `devsvc register ID CHECK MARKER COVERAGE FILES --args ARGS` 登记批次。(2) 用 `devsvc git add` 只暂存本次包源;同一包的并行改动交集成者统一跑 `tools/layer-api.cx -- --bump tools.cxlib`,接口清单、api_sha、frozen 与版本一并更新,已覆盖全部本次源且检查通过的 bump 不重复执行。(3) 跑新批次、对应工具分片与 `layer-api --check`,再用 `devsvc git commit --derive --whole 本次源... 各自manifest... --keyed tests/tools-compile-sources.tsv 本次路径键 --keyed tests/batches.tsv 批次ID与分片ID --keyed tests/coverage.tsv 覆盖ID --push`。若同次新增工具分片,不要混用 `--registered` 与该表的额外 `--keyed`:当前 `--registered` 会独占注册表选行并丢弃额外键;只含完整注册集时可用 `--registered`。包版本与接口表由 `--derive` 在 HEAD 加本次包源的私有树生成,不把别的在途源混入 bump;共享表只带本次行,ujs 暂存保留。
+新增库按一个完整登记集提交:(1) 实跑库检查,再用 `devsvc register --tool tools/cxlib/NAME.cx --tool tools/check-NAME.cx` 同步工具清单与 `tools-compile-NNN` 分片,不要只手加清单两行;用 `devsvc register ID CHECK MARKER COVERAGE FILES --args ARGS` 登记批次。(2) 同一包的并行改动由集成者统一按下方私有索引命令取号。已覆盖全部本次源且检查通过的 bump 不重复执行。(3) 跑新批次、对应工具分片与 `layer-api --check`,再用 `devsvc git commit --derive --whole 本次源... 各自manifest... --keyed tests/tools-compile-sources.tsv 本次路径键 --keyed tests/batches.tsv 批次ID与分片ID --keyed tests/coverage.tsv 覆盖ID --push`。若同次新增工具分片,不要混用 `--registered` 与该表的额外 `--keyed`:当前 `--registered` 会独占注册表选行并丢弃额外键;只含完整注册集时可用 `--registered`。包版本与接口表由 `--derive` 在 HEAD 加本次包源的私有树生成,不把别的在途源混入 bump;共享表只带本次行,ujs 暂存保留。
+
+手工取号在仓根运行。冻结及取号授权完成后，按包名逐一传入本次包源文件。
+
+```sh
+sh ./unisacc.com tools/layer-api.cx -- --bump PKG --worktree-path PATH1 --worktree-path PATH2 &&
+sh ./unisacc.com tools/iface-hash.cx -- --write
+```
+
+`--worktree-path` 从 HEAD 建私有索引，只录入明列的包源文件，并保留漏选包源的拒绝检查。已有取号的 `--version V --owner O` 或已确认破坏性变更的 `--allow-major` 仍传给同一条命令。成功后运行 `layer-api --check --pkg PKG` 与 `iface-hash --check`，按本次路径提交包源和派生表。
 
 `git commit --derive` 先在提交专属树执行独立有界派生阶段,落内容回执,再由提交阶段核对基准提交、输入树、产物树与回执摘要;身份变化就拒绝复用。回执的 `phase=derive|commit` 与 `derived=completed|incomplete` 区分失败位置;先用 `devsvc git commit --status JOB` 确认真实终态,不要重复已落地的提交。修正输入后重试原命令会重新派生。直跑工具可用 `commit-own --derive-prepare FILE` 与同参数的 `--derive-receipt FILE --derive-id SHA` 分相,后者只核身份并过原提交门。
 
