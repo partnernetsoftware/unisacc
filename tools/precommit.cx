@@ -3254,7 +3254,18 @@ static int pc_close_scan(const char *iso, const char *sub, const char *base, cha
             if (mm_copy(names[*nn], 160, b + i + 7, k) != 0) continue;
             names[*nn][k] = 0;
             if (cx_fmt(ip, sizeof ip, "%s/tools/%s", iso, names[*nn]) || sy_lstat(ip, &st) == 0) continue;   /* already copied */
-            if (cx_fmt(sp, sizeof sp, "%s/tools/%s", base, names[*nn]) || sy_stat(sp, &st) != 0) continue;   /* not in the source tree either */
+            if (cx_fmt(sp, sizeof sp, "%s/tools/%s", base, names[*nn])) continue;
+            if (sy_stat(sp, &st) != 0) {
+                /* a literal that names no file in the source tree: HEAD-tracked -> the isolated tree lost a tool, refuse; never tracked
+                   (docs, examples, generated output) -> skipped */
+                char tp[400]; char *tv[] = {"git", "ls-tree", "--name-only", "HEAD", "--", tp, 0}; long tn = 0; char *to;
+                if (cx_fmt(tp, sizeof tp, "tools/%s", names[*nn])) continue;
+                to = slurp(tv, &tn);
+                if (!to) { mm_free(b); sy_dir_close(&d); return -1; }
+                mm_free(to);
+                if (tn > 0) { sy_eprintf("precommit: BLOCKED isolated tree closure: tools/%s is tracked in HEAD but missing from the source tree\n", names[*nn]); mm_free(b); sy_dir_close(&d); return -1; }
+                continue;
+            }
             (*nn)++;
         }
         mm_free(b);
