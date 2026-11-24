@@ -326,7 +326,7 @@ static void bench(const char *which) {
  * never shares inodes/hardlinks (st_nlink==1) in precommit-tree.* or cov_link_dir, cleans up all
  * precommit-* dirs on normal/fail/timeout(SIGTERM)/flow exits, and sweeps >30min dead-PID stale dirs on startup. */
 static void group_tree_isolate(void) {
-    char out[16384], cmd[8192], root[2048], tmp[256];
+    char out[16384], cmd[12288], root[2048], tmp[256];
     if (sy_realpath(".", root, sizeof root) < 0) { ck(0, "tree-isolate.realpath"); return; }
     if (cx_fmt(tmp, sizeof tmp, "%s/pc-iso-%d-%ld", sy_tmpdir(), sy_pid(), sy_now_ms() % 100000L)) { ck(0, "tree-isolate.tmp"); return; }
     if (cx_fmt(cmd, sizeof cmd,
@@ -462,6 +462,15 @@ static void group_tree_isolate(void) {
         "(cd \"$T/repo\" && TMPDIR=\"$T/isotmp\" UNISACC_PRECOMMIT_IN_TREE=0 UNISACC_PRECOMMIT_SERIAL=1 \"$T/pc.bin\" > \"$T/s1.out\" 2>&1; echo S1RC=$?; grep -E 'PRECOMMIT|PRECOMMIT_GATE_FAIL' \"$T/s1.out\" || true); "
         "LEAK_CNT=$(find \"$T/isotmp\" -mindepth 1 -maxdepth 1 \\( -name 'precommit-*' -o -name 'unisacc-session-precommit-*' \\) 2>/dev/null | wc -l); "
         "echo LEAK_CNT=$LEAK_CNT; "
+        "BPI_B=\"$(printf 'bz\\tIMPLEMENTED\\tc\\tt\\tSOURCE\\tl\\t55\\t-\\tt\\t{out};{candidate}\\tx\\trc0:M\\tproduct\\tcommit\\n')\"; "
+        "printf '%%s\\n' \"$BPI_B\" >> \"$T/repo/tests/batches.tsv\"; printf 'require\\t{candidate}\\t-\\tx\\n' > \"$T/repo/tests/batch-product-inputs.tsv\"; "
+        "git -C \"$T/repo\" add tests/batches.tsv tests/batch-product-inputs.tsv; "
+        "(cd \"$T/repo\" && TMPDIR=\"$T/isotmp\" UNISACC_PRECOMMIT_IN_TREE=0 UNISACC_PRECOMMIT_SERIAL=1 \"$T/pc.bin\" > \"$T/bpi1.out\" 2>&1); echo BPI_UNDECLARED=$(grep -c 'BLOCKED product-inputs undeclared: batch id=bz' \"$T/bpi1.out\"); "
+        "printf 'id\\tbz\\tt\\tx\\n' >> \"$T/repo/tests/batch-product-inputs.tsv\"; git -C \"$T/repo\" add tests/batch-product-inputs.tsv; "
+        "(cd \"$T/repo\" && TMPDIR=\"$T/isotmp\" UNISACC_PRECOMMIT_IN_TREE=0 UNISACC_PRECOMMIT_SERIAL=1 \"$T/pc.bin\" > \"$T/bpi2.out\" 2>&1); echo BPI_DECLARED=$(grep -c 'product-inputs undeclared' \"$T/bpi2.out\"); "
+        "git -C \"$T/repo\" -c user.name=pcg -c user.email=pcg@example.invalid commit -q -m decl -- tests/batches.tsv tests/batch-product-inputs.tsv; "
+        "printf 'require\\t{candidate}\\t-\\tx\\n' > \"$T/repo/tests/batch-product-inputs.tsv\"; git -C \"$T/repo\" add tests/batch-product-inputs.tsv; "
+        "(cd \"$T/repo\" && TMPDIR=\"$T/isotmp\" UNISACC_PRECOMMIT_IN_TREE=0 UNISACC_PRECOMMIT_SERIAL=1 \"$T/pc.bin\" > \"$T/bpi3.out\" 2>&1); echo BPI_ROW_DELETED=$(grep -c 'BLOCKED product-inputs undeclared: batch id=bz' \"$T/bpi3.out\"); "
         "rm -rf \"$T\"",
         root, tmp)) {
         ck(0, "tree-isolate.fmt2"); return;
@@ -474,6 +483,8 @@ static void group_tree_isolate(void) {
     ck(has(out, "NGRC=1\n") && has(out, "PRECOMMIT_GATE_FAIL\tgate=isolate\treason=staged-tree-setup\n"), "tree-isolate.non-git-fails-closed-with-gate");
     ck(has(out, "S1RC=1\n") && has(out, "PRECOMMIT\tstaged_cx=2\tblocked=1\n") &&
        has(out, "PRECOMMIT_GATE_FAIL\tgate=ratchets\treason=ratchet-over\n"), "tree-isolate.staged-dirty-blocked-with-gate-reason");
+    ck(has(out, "BPI_UNDECLARED=1\n") && has(out, "BPI_DECLARED=0\n") && has(out, "BPI_ROW_DELETED=1\n"),
+       "tree-isolate.bpi-gate-real-entry-blocks-undeclared-clears-declared-blocks-deleted-id-row");
     if (failed) sy_printf("%s\n", out);
 }
 

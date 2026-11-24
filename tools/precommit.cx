@@ -1896,20 +1896,36 @@ static int cov_eval(const char *tag, const char *reg, long rn, const char *cov, 
  * ({candidate}、{hostcc} 等)的批次,同一提交须在暂存的 tests/batch-product-inputs.tsv 有 id 行,否则 tools/affected.cx
  * 拒 BATCH_PRODUCT_INPUT_UNDECLARED 且 rc 2(11-23 runcache-path-key 事故)。只拦本次新增或改动的行;
  * 与 HEAD 逐字节相同的遗留行只报告。规则在 cxlib.bpidecl,与 tools/register.cx 共用。 */
+/* 1 when PATH is in the index, 0 when it is not (output empty), -1 when git itself failed: only a definite "not in the index"
+ * lets a caller treat the table as absent; every other read failure stays a block. */
+static int bpi_in_index(const char *path) {
+    char *v[] = {"git", "ls-files", "--stage", "--", (char *)path, 0}; long n = 0; char *o = slurp(v, &n);
+    if (!o) return -1;
+    mm_free(o);
+    return n > 0 ? 1 : 0;
+}
 static int bpi_gate(void) {
-    char *b = 0, *d = 0, *hb = 0; long bn = 0, dn = 0, hn = 0, inh = 0, n; char ids[1024];
+    char *b = 0, *d = 0, *hb = 0, *hd = 0; long bn = 0, dn = 0, hn = 0, hdn = 0, inh = 0, n; char ids[1024]; int ib, id_in;
     if (plan_dir) return 0;
-    if (cov_blob("", "tests/batches.tsv", &b, &bn) || cov_blob("", "tests/batch-product-inputs.tsv", &d, &dn)) {
-        if (b) mm_free(b);
-        sy_eprintf("precommit: BLOCKED product-inputs gate: cannot read staged tests/batches.tsv or tests/batch-product-inputs.tsv\n"); return 1; }
+    ib = bpi_in_index("tests/batches.tsv"); id_in = bpi_in_index("tests/batch-product-inputs.tsv");
+    if (ib < 0 || id_in < 0) { sy_eprintf("precommit: BLOCKED product-inputs gate: cannot list the index (git ls-files failed)\n"); return 1; }
+    if (!ib) return 0;   /* no batch table staged (fixture repo): nothing to pair */
+    if (cov_blob("", "tests/batches.tsv", &b, &bn)) {
+        sy_eprintf("precommit: BLOCKED product-inputs gate: cannot read staged tests/batches.tsv\n"); return 1; }
+    if (id_in) {
+        if (cov_blob("", "tests/batch-product-inputs.tsv", &d, &dn)) {
+            mm_free(b);
+            sy_eprintf("precommit: BLOCKED product-inputs gate: cannot read staged tests/batch-product-inputs.tsv\n"); return 1; }
+    } else { d = mm_alloc(1); if (!d) { mm_free(b); return 1; } d[0] = 0; dn = 0; }   /* declaration table not in the index: empty declarations */
     if (cov_blob("HEAD", "tests/batches.tsv", &hb, &hn)) hb = 0;
-    n = bpi_scan(b, bn, d, dn, hb, hn, ids, sizeof ids, &inh);
+    if (cov_blob("HEAD", "tests/batch-product-inputs.tsv", &hd, &hdn)) hd = 0;
+    n = bpi_scan(b, bn, d, dn, hb, hn, hd, hdn, ids, sizeof ids, &inh);
     if (inh) sy_eprintf("precommit: product-inputs gate: %ld inherited undeclared batch row(s) already in HEAD (not blamed)\n", inh);
     if (n) {
         sy_eprintf("precommit: BLOCKED product-inputs undeclared: batch id=%s in the staged tests/batches.tsv holds a require placeholder of tests/batch-product-inputs.tsv but has no id row there (tools/affected.cx would refuse BATCH_PRODUCT_INPUT_UNDECLARED rc 2)\n", ids);
         sy_eprintf("precommit: add id<TAB>ID<TAB>INPUTS<TAB>BASIS rows to tests/batch-product-inputs.tsv in the same commit\n");
     }
-    mm_free(b); mm_free(d); if (hb) mm_free(hb);
+    mm_free(b); mm_free(d); if (hb) mm_free(hb); if (hd) mm_free(hd);
     return n ? 1 : 0;
 }
 static int cov_gate(void) {
@@ -3233,7 +3249,8 @@ static int pc_close_scan(const char *iso, const char *sub, const char *base, cha
             k = j - (i + 7);
             if (j >= (long)n || b[j] != '"' || k < 4 || k >= 150 || !tx_prefix(b + j - 3, 3, ".cx", 3)) continue;
             for (t = 0; t < *nn; t++) if (tx_len(names[t], 160) == k && tx_prefix(b + i + 7, k, names[t], k)) have = 1;
-            if (have || *nn >= PC_CLOSE_NAMES) continue;
+            if (have) continue;
+            if (*nn >= PC_CLOSE_NAMES) { mm_free(b); sy_dir_close(&d); return -1; }   /* a full name table must not silently drop a tool */
             if (mm_copy(names[*nn], 160, b + i + 7, k) != 0) continue;
             names[*nn][k] = 0;
             if (cx_fmt(ip, sizeof ip, "%s/tools/%s", iso, names[*nn]) || sy_lstat(ip, &st) == 0) continue;   /* already copied */
@@ -3259,7 +3276,7 @@ static int pc_close_tools(const char *iso, const char *base) {
             if (pc_copy_tree(cs, cd, 0) != 0) return -1;
         }
     }
-    return 0;
+    return -1;   /* still growing after 8 rounds: the closure is not proven complete */
 }
 
 static int pc_populate_isolated_tree(const char *iso) {
