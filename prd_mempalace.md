@@ -141,6 +141,7 @@
 
 - 发布撤回(对已公开的每一版通用):转回草稿、Latest 移回上一公开版、前向 revert,不删标签。依据:公开不可逆。入口:release/rollback.txt。
 - Root 回退:用 tools/install-ape.cx 重装上一版公开 APE;公开安装不留候选备份,--rollback 会拒绝(REFUSED no-candidate-backup)。旧件备份在 .unisacc-root-backups/<版本>-public/。
+old-product-assets 0.0.101 登记与回滚(c4a154dfea 2026-11-24):tools/old-product-assets.tsv 已登记 0.0.101(8827155B; sha256 bb715a8bd3ed...eac82) 并预置本地缓存 ~/.cache/unisacc/prep-cache/old-product-cache/<sha256>/unisacc.com。回滚:删除 tools/old-product-assets.tsv 中 0.0.101 登记行即回退至 0.0.83; ~/.cache/unisacc/prep-cache/old-product-cache/<sha256>/ 按内容哈希寻址无副作用。
 - 资格口径:0.0.71 至 0.0.87 各公开版整体裁决均为 NOT_QUALIFIED(全套 s9 未过或未跑,原生 CI 只覆盖冒烟子集);发布说明须如实写已知缺口,不得称全批资格。入口:release/notes-X.md。
 - CI 单格超时处置:先读发码源码行,再用上一公开件与候选在本机各跑三次对照,gh run rerun --failed 只一次,然后 release-exec --from-step 3;第二次失败按确定性缺陷停手;发布说明写明非一次通过。依据:0.0.83 定因。
 - stream-pipe 55 秒单部件界限不放宽,余量靠拆部件取得。入口:build/pkg-gaps.tsv STREAM-PIPE-OSX-X86_64-55S-BOUND-THIN-MARGIN。
