@@ -407,6 +407,7 @@ static void fixture(int fixture_patch, int strict_variant, int ratchet_fail, int
 }
 static char out[262144];
 static char *candidate_input="release/candidate.tsv";
+static const char *rx_out_leaf = "xout";
 static int chain_waive = 0;
 static int rx(const char *a1, const char *a2, const char *a3, const char *tool) {
     char ex[4400], up[4400], tp[4400]; char *v[20]; int k = 0, rc; np_result r = {0}; char why[256];
@@ -414,7 +415,7 @@ static int rx(const char *a1, const char *a2, const char *a3, const char *tool) 
     char realenv[4200]; cx_fmt(realenv, sizeof realenv, "CHECK_RX_REAL=%s", root);
     char *env2[] = {pathenv, fakeenv, "HOME=/custom-home/tester", "DEVSVC_REPO_TABLE=/bogus/pinned/devsvc-repo.tsv", "DEVSVC_REPO_TABLE_PIN=HEAD:/bogus/pinned/devsvc-repo.tsv", "RELEASE_EXEC_POLL_MS=10", "RELEASE_EXEC_POLL_MAX=3", realenv, 0};
     cx_fmt(up, sizeof up, "%s/%s", root, leafs[0]); cx_fmt(tp, sizeof tp, "%s/%s", root, tool ? tool : "tools/release-exec.cx");
-    cx_fmt(ex, sizeof ex, "%s/xout", td);
+    if (cx_fmt(ex, sizeof ex, "%s/%s", td, rx_out_leaf)) die("fixture output path");
     v[k++]=tool?hookbin:execbin;
     v[k++] = "--execute"; v[k++] = candidate_input; v[k++] = "--layout"; v[k++] = lay;
     v[k++] = "--out"; v[k++] = ex; v[k++] = "--baseline"; v[k++] = "/nonexistent-baseline";
@@ -959,11 +960,23 @@ static void part_c(void) {
     /* G3 draft readback */
     fixture(99, 0, 0, 1); put(td, "corrupt-download", "1");
     rc = rx(0, 0, 0, 0); expect_gate("G3.draft-readback-mismatch", rc, "DRAFT_READBACK");
+    ck(rc == 2 && has(out, "SHA256SUMS mismatch pkg.bin"), "G3.draft-readback-corrupt-bytes-refused");
     c = calls(); ck(has(out, "ROLLBACK\t2\tPLAN\tnot public") && c && !has(c, "gh -R example/fixture workflow run") && !has(c, "gh -R example/fixture release edit v0.0.99 --draft=false"), "G3.stops-before-ci-and-publish"); free(c);
+    /* The same assets must pass draft readback at either output path. */
+    fixture(99, 0, 0, 1);
+    ci_json(3);
+    rx_out_leaf = "xout-draft-readback-long-path-012345678901234567890123456789012345678901234567890123456789"
+                  "012345678901234567890123456789012345678901234567890123456789";
+    rc = rx(0, 0, 0, 0);
+    ck(rc == 2 && has(out, "GATE\t2\tDRAFT_READBACK\tPASS\tfive assets match downloaded SHA256SUMS"),
+       "G3.draft-readback-long-output-path");
+    rx_out_leaf = "xout";
     /* G4 CI */
     fixture(99, 0, 0, 1);
     ci_json(3);
     rc = rx(0, 0, 0, 0); expect_gate("G4.ci-job-not-success", rc, "CI_SUCCESS");
+    ck(rc == 2 && has(out, "GATE\t2\tDRAFT_READBACK\tPASS\tfive assets match downloaded SHA256SUMS"),
+       "G3.draft-readback-default-output-path");
     ck(has(out, "NEXT\t3\ttransient CI failure (same candidate): release-exec --execute ") &&
        has(out, " --from-step 3 --redispatch") &&
        has(out, "NEXT\t3\treplacement candidate (archive failed CI + delete draft): sh ./unisacc.com tools/release-chain.cx -- retry-ci --version 0.0.99 --run-id 777001 --evidence-dir release/evidence/0.0.99 --candidate ") &&
