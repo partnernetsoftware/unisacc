@@ -338,11 +338,11 @@ static void rg_dup_hint(const char *path) {
  *     after the last existing shard row, rows past the range are taken out;
  * (c) every 64-hex literal of the tool that has no tools/pins.tsv row is printed as PIN_NEEDED with the row
  *     to add; with --pin-owner OWNER the row "FILE#HEX literal - HEX OWNER ok" is appended instead;
- * (d) git add of each tool that is not tracked yet (a tracked file is left alone: its staging is the caller's).
+ * (d) verify new tools in a private copy of the index. The caller commits with --new-tool or --whole.
  * Then tests/tools-compile.cx --shards . must print the computed count.  Everything is validated before the
  * first write. A failed verification reverses this call's additions and removals by key against the
- * latest table and unstages the files this call staged (git rm --cached), exit 1 with the
- * step named.  A second identical call changes nothing and ends status=UNCHANGED.  Nothing is compiled and
+ * latest table and discards the private index, exit 1 with the step named.
+ * A second identical call changes nothing and ends status=UNCHANGED. Nothing is compiled and
  * no PASS is recorded here: the shard batches themselves still have to be run. */
 #define RG_TOOLS_MAX 64
 #define RG_SOURCES "tests/tools-compile-sources.tsv"
@@ -1100,12 +1100,63 @@ static void rg_plan_shards(RgShardPlan *plan,const char *stage,const char *bb,si
         printf("REGISTER_SYNC_MANIFEST\ttools-compile-%03d\t%s\n",i,m->after?"add":"remove");
     }
 }
+#define RG_INDEX_SESSION "unisacc-session-register-index-"
+static void rg_reap_indexes(void) {
+    sy_dir_t scan;
+    sy_stat_t st;
+    char path[4400], entry[4500];
+    const char *tmp = sy_tmpdir();
+    long now = sy_wall_s(), until = sy_now_ms() + 100;
+    if (now < 7200 || sy_dir_open(&scan, tmp)) return;
+    while (sy_now_ms() < until && sy_dir_next(&scan) == 1) {
+        if (strncmp(scan.name, RG_INDEX_SESSION, sizeof RG_INDEX_SESSION - 1) ||
+            strlen(scan.name) != sizeof RG_INDEX_SESSION - 1 + 8 ||
+            cx_fmt(path, sizeof path, "%s/%s", tmp, scan.name) ||
+            sy_lstat(path, &st) || st.kind != 'd' || st.uid != (long)sy_uid() || st.mtime > now - 7200) continue;
+        if (!cx_fmt(entry, sizeof entry, "%s/index", path)) sy_unlink(entry);
+        if (!cx_fmt(entry, sizeof entry, "%s/index.lock", path)) sy_unlink(entry);
+        sy_rmdir(path);
+    }
+    sy_dir_close(&scan);
+}
+static int rg_tool_index(const char *dir, char source[4400], char before[65], char *env, size_t cap) {
+    char target[4400], *nl, *bytes;
+    size_t size;
+    char *v[] = {"./tools/bound", "5", "git", "rev-parse", "--path-format=absolute", "--git-path", "index", 0};
+    if (run(v, source, 4400) || !(nl = strchr(source, '\n')) || nl[1]) return 1;
+    *nl = 0;
+    if (rg_snapshot(source, before) || !before[0]) return 1;
+    if (cx_fmt(target, sizeof target, "%s/index", dir) || cx_fmt(env, cap, "GIT_INDEX_FILE=%s", target)) return 1;
+    bytes = cx_read(source, &size);
+    if (!bytes) return 1;
+    char copied[65];
+    int rc = sy_sha256_hex(bytes, size, copied) || !tx_eqz(copied, before) ||
+        sy_write_atomic(target, bytes, size, 0600);
+    free(bytes);
+    return rc != 0;
+}
+static int rg_tool_index_changed(const char *path, const char *before) {
+    char after[65];
+    return before[0] && (rg_snapshot(path, after) || !tx_eqz(after, before));
+}
+static int rg_prepare_inventory(char bin[4400]) {
+    char root[4400], cache[4400], why[512];
+    long start = sy_now_ms();
+    int reused = 0, rc;
+    if (sy_realpath(".", root, sizeof root) < 0 ||
+        cx_fmt(cache, sizeof cache, "%s/unisacc-register-native", sy_tmpdir()) ||
+        (sy_mkdir(cache, 0700) && sy_exists(cache) != 1)) return 1;
+    rc = rn_prepare(root, "tests/tools-compile.cx", cache, bin, 4400, &reused, why, sizeof why);
+    printf("REGISTER_TOOL_PHASE\tphase=prepare-inventory\trc=%d\treused=%d\tms=%ld\n", rc, reused, sy_now_ms() - start);
+    if (rc) fprintf(stderr, "register: --tool: %s\n", why);
+    return rc != 0;
+}
 static int rg_tool_mode(int argc, char **argv) {
     static char buf[1 << 15];
     const char *tools[RG_TOOLS_MAX], *kinds[RG_TOOLS_MAX], *owner = 0; int staged[RG_TOOLS_MAX], have[RG_TOOLS_MAX], nt = 0, i, j, rc, lk;
     char *sb, *bb, *pb = 0, *ns, *nb, *np = 0; size_t sn = 0, bn = 0, pn = 0, nsn = 0, nbn = 0, npn = 0;
     long at, rows = 0, shards, added_src = 0, added_sh = 0, removed_sh = 0, added_pin = 0, need_pin = 0, ins, *seen;
-    int ch_s, ch_b, ch_p = 0, dirty = 0, did = 0;
+    int ch_s, ch_b, ch_p = 0, dirty = 0;
     int sync_dry=argc==4 && tx_eqz(argv[1],"--tool") && tx_eqz(argv[2],"--sync") && tx_eqz(argv[3],"--dry");
     int publishing=argc==3 && tx_eqz(argv[1],"--tool") && tx_eqz(argv[2],"--sync");
     int sync=publishing || sync_dry;
@@ -1133,6 +1184,11 @@ static int rg_tool_mode(int argc, char **argv) {
     if (rg_root_missing()) { fprintf(stderr, "register: nothing was written (--tool)\n"); return 2; }
     if (sy_exists("tools/bound") != 1) rg_die("--tool: no ./tools/bound in this root", 0);
     if (sy_exists("tests/tools-compile.cx") != 1) rg_die("--tool: no tests/tools-compile.cx in this root", 0);
+    char inventory_bin[4400];
+    if (!sync) {
+        rg_reap_indexes();
+        if (rg_prepare_inventory(inventory_bin)) rg_die("REFUSE inventory-prepare", 0);
+    }
     lk = rg_lock();
     char decl[4400],versions[5][65],index_path[4400],index_hash[65],product_path[4096],product_hash[65];
     if(publishing){
@@ -1281,17 +1337,23 @@ static int rg_tool_mode(int argc, char **argv) {
         free(tb);
     }
     ch_s = nsn != sn || memcmp(ns, sb, sn); ch_b = nbn != bn || memcmp(nb, bb, bn); ch_p = added_pin > 0;
-    /* (d) stage what is not tracked yet, then write, then verify; any failure from here on is undone */
+    /* (d) Stage only in the verifier's private index. */
     {   const char *step = 0;
+        char private_dir[4400], index_env[4500], real_index[4400], before[65] = "";
+        if (sy_mkdtemp(sy_tmpdir(), RG_INDEX_SESSION, private_dir, sizeof private_dir)) {
+            rg_unlock(lk);
+            rg_die("private-index-directory", 0);
+        }
+        if (rg_tool_index(private_dir, real_index, before, index_env, sizeof index_env)) step = "private-index-unreadable";
         for (i = 0; i < nt && !step; i++) {
-            char *q[] = {"./tools/bound", "20", "git", "ls-files", "--error-unmatch", "--", (char *)tools[i], 0};
-            char *a[] = {"./tools/bound", "20", "git", "add", "--", (char *)tools[i], 0};
+            char *q[] = {"./tools/bound", "20", "env", index_env, "git", "ls-files", "--error-unmatch", "--", (char *)tools[i], 0};
+            char *a[] = {"./tools/bound", "20", "env", index_env, "git", "add", "--", (char *)tools[i], 0};
             rc = run(q, buf, sizeof buf);
             if (rc == 0) continue;
             if (rc != 1) { step = "git ls-files"; fprintf(stderr, "register: --tool: git ls-files %s failed rc=%d (is this root a git work tree?): %s\n", tools[i], rc, buf); break; }
             rc = run(a, buf, sizeof buf);
             if (rc != 0) { step = "git add"; fprintf(stderr, "register: --tool: git add %s failed rc=%d: %s\n", tools[i], rc, buf); }
-            else { staged[i] = 1; did = 1; }
+            else staged[i] = 1;
         }
         int stale=0;
         int targets[]={2,0,4},changes[]={ch_s,ch_b,ch_p};
@@ -1309,36 +1371,39 @@ static int rg_tool_mode(int argc, char **argv) {
             }
         }
         if (!step) {
-            char *v[] = {"./tools/bound", "55", "sh", "./unisacc.com", "tests/tools-compile.cx", "--", "--shards", ".", 0};
+            char *v[] = {"./tools/bound", "20", "env", index_env, inventory_bin, "--shards", ".", 0};
+            long started = sy_now_ms();
             char want[32]; long bl;
             /* tools-compile reads ROOT/tests/batches.tsv: with UNISACC_TABLES the private batches table is
                not the one it sees, so only the inventory half can be verified there */
             rc = run(v, buf, sizeof buf); bl = (long)strlen(buf);
+            printf("REGISTER_TOOL_PHASE\tphase=verify-inventory\trc=%d\tms=%ld\n", rc, sy_now_ms() - started);
             tx_snprintf(want, sizeof want, "%ld\n", shards);
             if (rc != 0 || bl < (long)strlen(want) || strcmp(buf + bl - strlen(want), want) || (bl > (long)strlen(want) && buf[bl - strlen(want) - 1] != '\n')) {
                 step = "tests/tools-compile.cx --shards";
                 fprintf(stderr, "register: --tool: verification failed rc=%d want=%ld got:\n%s%s", rc, shards, buf, bl && buf[bl - 1] == '\n' ? "" : "\n");
             }
         }
+        char *rm[] = {"./tools/bound", "5", "rm", "-rf", "--", private_dir, 0};
+        if (run(rm, buf, sizeof buf) && !step) step = "private-index-cleanup";
+        int index_dirty = rg_tool_index_changed(real_index, before);
+        if (index_dirty) step = "shared-index-changed";
         if (step) {
-            int bad = 0;
+            int bad = index_dirty;
             bad |= rg_tool_restore(RG_PINS,pb,pn,np,npn,dirty & 4);
             bad |= rg_tool_restore(rg_bpath(),bb,bn,nb,nbn,dirty & 2);
             bad |= rg_tool_restore(RG_SOURCES,sb,sn,ns,nsn,dirty & 1);
-            for (i = 0; i < nt; i++) if (staged[i]) {
-                char *u[] = {"./tools/bound", "20", "git", "rm", "--cached", "-q", "--", (char *)tools[i], 0};
-                if (run(u, buf, sizeof buf) != 0) { bad = 1; fprintf(stderr, "register: --tool rollback could NOT unstage %s\n", tools[i]); }
-            }
             rg_unlock(lk);
+            if (rg_tool_index_changed(real_index, before)) { bad = 1; step = "shared-index-changed"; }
             printf("REGISTER_TOOL\tstatus=%s\tfailed_step=%s\n", bad ? "DIRTY" : "ROLLED_BACK", step);
             return bad ? 3 : stale ? 4 : 1;
         }
     }
     rg_unlock(lk);
-    for (i = 0; i < nt; i++) printf("REGISTER_TOOL\ttool=%s\tkind=%s\tgit=%s\n", tools[i], kinds[i], staged[i] ? "ADDED" : "TRACKED");
+    for (i = 0; i < nt; i++) printf("REGISTER_TOOL\ttool=%s\tkind=%s\tgit=%s\n", tools[i], kinds[i], staged[i] ? "CHECKED_PRIVATE_INDEX" : "TRACKED");
     printf("REGISTER_TOOL\tsources_added=%ld\tinventory=%ld\tshards=%ld\tshard_rows_added=%ld\tshard_rows_removed=%ld\tpins_added=%ld\tpins_needed=%ld\n", added_src, rows, shards, added_sh, removed_sh, added_pin, need_pin);
-    printf("REGISTER_TOOL\tstatus=%s\n", ch_s || ch_b || ch_p || did ? "REGISTERED" : "UNCHANGED");
-    if (ch_s || ch_b || ch_p || did) {
+    printf("REGISTER_TOOL\tstatus=%s\n", ch_s || ch_b || ch_p ? "REGISTERED" : "UNCHANGED");
+    if (ch_s || ch_b || ch_p) {
         for (i = 0; i < nt; i++) rg_dup_hint(tools[i]);
         printf("REGISTER_NEXT\tderive --write --only links,batch-domains\n");
     }
