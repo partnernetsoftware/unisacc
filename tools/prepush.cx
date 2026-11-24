@@ -1,0 +1,205 @@
+/* prepush: cx body of the git pre-push hook (freeze gate for refs/heads/main).
+ *   .git/hooks/pre-push = copy of tools/hooks/pre-push (audit + thin entry), which runs
+ *       sh "$MAIN/unisacc.com" "$MAIN/tools/prepush.cx" -- "$@"   with MAIN = parent of git common dir
+ *   (main work tree, so version work trees older than this gate still work); degraded mode in the hook
+ *   when MAIN lacks either file. Owners compare after devsvc norm_owner (trim, lowercase).
+ *   Blank or whitespace-only rows of build/freeze.tsv are skipped; a malformed row freezes and nobody passes.
+ *   stdin: git's lines '<local ref> <local sha> <remote ref> <remote sha>'.
+ * A push whose remote ref is refs/heads/main (update, create or delete) is refused while frozen.
+ * Freeze sources, all read from the main work tree (git common dir), never from a branch copy:
+ *   (1) build/freeze.tsv: any non-comment row freezes. Unexpired row -> FROZEN; expired row is NOT a
+ *       thaw: refuse with FREEZE_EXPIRED and tell to renew deadline_epoch_s or delete the row explicitly.
+ *       Unreadable or malformed table -> refuse (fail closed).
+ *   (2) devsvc freeze lock: <instdir>/locks.tsv row 'freeze<TAB>OWNER<TAB>EXP...' with EXP > now.
+ *       instdir = $UNISACC_DEVSVC_DIR, else ${DEVSVC_HOME:-$DV_PIN_DIR}/H, else ~/.cache/unisacc/devsvc/H,
+ *       H = first 16 hex of sha256(main work tree top) (same key as tools/devsvc-core.cx).
+ *   (3) <git common dir>/PUSH-FREEZE exists (no owner: nobody passes, delete the file to thaw).
+ * Owner pass: when every active source names an owner and $DEVSVC_OWNER or $UNISACC_INTEGRATOR equals it,
+ *   the push passes (release step_x/y). An expired freeze.tsv row never passes, owner or not.
+ * Exit: 0 pass, 1 refused (PREPUSH_REFUSE lines on stderr), 2 usage/environment error (also blocks the push).
+ * Check: tools/check-prepush.cx. */
+#pragma unisa use sys.fs
+#pragma unisa use sys.env
+#pragma unisa use sys.time
+#pragma unisa use sys.proc
+#pragma unisa use sys.sha
+#pragma unisa use sysx.process
+#pragma unisa use text.text
+#pragma unisa use mem.bytes
+#pragma unisa use mem.heap
+
+#define PW 4096
+/* Bounded format that never truncates silently: an overflow refuses the push (rc 2, fail closed). */
+static void fmt_ok(int r) { if (r) { fprintf(stderr, "prepush: format bound exceeded, refusing\n"); exit(2); } }
+#define FMT(...) fmt_ok(cx_fmt(__VA_ARGS__))
+static char common[PW], top[PW];
+static char owners[8][64]; static int nown;   /* owners named by active sources */
+static int anon;                              /* an active source without owner (PUSH-FREEZE) */
+static int expired;                           /* an expired freeze.tsv row */
+static int frozen;
+static char why[2048];
+
+static void addwhy(const char *s) { size_t l = strlen(why); FMT(why + l, sizeof why - l, "%s%s", l ? "; " : "", s); }
+static void chomp(char *s) { size_t l = strlen(s); while (l && (s[l - 1] == '\n' || s[l - 1] == '\r')) s[--l] = 0; }
+
+static int cap_git(char **v, char *o, int cap) {
+    char *out = 0; size_t n = 0; int rc = cx_runv_timeout(v, 20, &out, &n);
+    if (n >= (size_t)cap) n = (size_t)cap - 1;
+    if (out) mm_copy(o, (size_t)cap, out, n);
+    o[out ? n : 0] = 0; mm_free(out);
+    return rc;
+}
+static int locate(void) {
+    char out[2 * PW];
+    char *v[] = {"git", "rev-parse", "--path-format=absolute", "--git-common-dir", 0};
+    if (cap_git(v, out, sizeof out)) return -1;
+    chomp(out); FMT(common, sizeof common, "%s", out);
+    size_t l = strlen(common);
+    if (l > 5 && !strcmp(common + l - 5, "/.git")) { mm_copy(top, sizeof top, common, l - 5); top[l - 5] = 0; }
+    else FMT(top, sizeof top, "%s", common);   /* bare repo: no work tree, no freeze.tsv */
+    return 0;
+}
+static int field(const char *p, size_t ll, int col, char *o, size_t cap) {
+    const char *q = p, *e = p + ll; int c = 0;
+    for (;;) {
+        const char *t = memchr(q, '\t', (size_t)(e - q)); const char *ce = t ? t : e;
+        if (c == col) { size_t n = (size_t)(ce - q); if (n >= cap) n = cap - 1; mm_copy(o, cap, q, n); o[n] = 0; return (int)n; }
+        if (!t) return -1;
+        c++; q = t + 1;
+    }
+}
+static int posnum(const char *s, long *v) {
+    long x = 0; if (!*s || strlen(s) > 18) return 0;
+    for (; *s; s++) { if (*s < '0' || *s > '9') return 0; x = x * 10 + (*s - '0'); }
+    *v = x; return x > 0;
+}
+/* same rule as norm_owner in tools/devsvc-core.cx: trim blanks, 1..63 printable bytes, ASCII lowercased */
+static int norm_owner(const char *raw, char *out, size_t cap) {
+    const char *s, *e; size_t n = 0;
+    if (!raw || !out || cap < 2) return 0;
+    s = raw;
+    while (*s == ' ' || *s == '\t' || *s == '\r' || *s == '\n') s++;
+    e = s + strlen(s);
+    while (e > s && (e[-1] == ' ' || e[-1] == '\t' || e[-1] == '\r' || e[-1] == '\n')) e--;
+    if (e <= s || (size_t)(e - s) >= 64 || (size_t)(e - s) >= cap) return 0;
+    for (const char *p = s; p < e; p++) {
+        unsigned char c = (unsigned char)*p;
+        if (c < 0x21 || c == 0x7f) return 0;
+        if (c >= 'A' && c <= 'Z') c = (unsigned char)(c + 32);
+        out[n++] = (char)c;
+    }
+    out[n] = 0;
+    return n > 0;
+}
+static void own(const char *o) {
+    char n[64];
+    if (!norm_owner(o, n, sizeof n)) { anon = 1; addwhy("freeze owner unusable (nobody passes)"); return; }
+    if (nown < 8) FMT(owners[nown++], 64, "%s", n); else anon = 1;
+}
+static int blank(const char *q, size_t ll) { for (size_t i = 0; i < ll; i++) if (q[i] != ' ' && q[i] != '\t') return 0; return 1; }
+
+static int src_tsv(long now) {
+    char p[PW + 32]; FMT(p, sizeof p, "%s/build/freeze.tsv", top);
+    int ex = sy_exists(p);
+    if (ex == 0) return 0;
+    if (ex < 0) { frozen = 1; addwhy("build/freeze.tsv unreadable (fail closed)"); return 1; }
+    unsigned char *b = 0; int64_t bn = 0;
+    if (sy_read_file(p, &b, &bn, 1 << 16) || !b) { frozen = 1; addwhy("build/freeze.tsv unreadable (fail closed)"); return 1; }
+    for (const char *q = (const char *)b, *end = q + bn; q < end; ) {
+        const char *nl = memchr(q, '\n', (size_t)(end - q)); size_t ll = nl ? (size_t)(nl - q) : (size_t)(end - q);
+        while (ll && q[ll - 1] == '\r') ll--;
+        if (ll && q[0] != '#' && !blank(q, ll)) {
+            char sid[128], ow[64], dl[32], m[400]; long d = 0;
+            if (field(q, ll, 0, sid, sizeof sid) <= 0 || field(q, ll, 2, ow, sizeof ow) <= 0 || field(q, ll, 3, dl, sizeof dl) <= 0 || !posnum(dl, &d)) {
+                frozen = 1; anon = 1; addwhy("build/freeze.tsv malformed row (fail closed)");
+            } else if (d > now) {
+                frozen = 1; own(ow);
+                FMT(m, sizeof m, "build/freeze.tsv %s owner=%s deadline=%ld", sid, ow, d); addwhy(m);
+            } else {
+                frozen = 1; expired = 1;
+                FMT(m, sizeof m, "FREEZE_EXPIRED build/freeze.tsv %s owner=%s deadline=%ld<now=%ld", sid, ow, d, now); addwhy(m);
+            }
+        }
+        q = nl ? nl + 1 : end;
+    }
+    mm_free(b);
+    return 0;
+}
+static void instdir(char *d, size_t cap) {
+    const char *e = getenv("UNISACC_DEVSVC_DIR");
+    if (e && *e) { FMT(d, cap, "%s", e); return; }
+    char hex[80]; const char *home = getenv("HOME"); d[0] = 0;
+    if (sy_sha256_hex(top, strlen(top), hex)) return;
+    hex[16] = 0;
+    const char *pb = getenv("DEVSVC_HOME"); if (!pb || !*pb) pb = getenv("DV_PIN_DIR");
+    if (pb && *pb) FMT(d, cap, "%s/%s", pb, hex);
+    else if (home && *home) FMT(d, cap, "%s/.cache/unisacc/devsvc/%s", home, hex);
+}
+static void src_lock(long now) {
+    char d[PW], p[PW + 32]; instdir(d, sizeof d);
+    if (!d[0]) return;
+    FMT(p, sizeof p, "%s/locks.tsv", d);
+    int ex = sy_exists(p);
+    if (ex == 0) return;
+    if (ex < 0) { frozen = 1; addwhy("devsvc locks.tsv unreadable (fail closed)"); return; }
+    unsigned char *b = 0; int64_t bn = 0;
+    if (sy_read_file(p, &b, &bn, 1 << 16) || !b) { frozen = 1; addwhy("devsvc locks.tsv unreadable (fail closed)"); return; }
+    for (const char *q = (const char *)b, *end = q + bn; q < end; ) {
+        const char *nl = memchr(q, '\n', (size_t)(end - q)); size_t ll = nl ? (size_t)(nl - q) : (size_t)(end - q);
+        char nm[32], ow[64], ex2[32], m[300]; long x = 0;
+        if (field(q, ll, 0, nm, sizeof nm) > 0 && !strcmp(nm, "freeze")) {
+            if (field(q, ll, 1, ow, sizeof ow) <= 0 || field(q, ll, 2, ex2, sizeof ex2) <= 0 || !posnum(ex2, &x)) {
+                frozen = 1; addwhy("devsvc freeze lock row corrupt (fail closed)");
+            } else if (x > now) {
+                frozen = 1; own(ow); FMT(m, sizeof m, "devsvc freeze lock owner=%s exp=%ld", ow, x); addwhy(m);
+            }
+        }
+        q = nl ? nl + 1 : end;
+    }
+    mm_free(b);
+}
+static void src_flag(void) {
+    char p[PW + 32]; FMT(p, sizeof p, "%s/PUSH-FREEZE", common);
+    int ex = sy_exists(p);
+    if (ex != 0) { frozen = 1; anon = 1; addwhy(ex < 0 ? "PUSH-FREEZE unreadable (fail closed)" : ".git/PUSH-FREEZE present"); }
+}
+static int owner_pass(void) {
+    if (anon || expired || !nown) return 0;
+    char a[64], b[64];
+    if (!norm_owner(getenv("DEVSVC_OWNER"), a, sizeof a)) a[0] = 0;
+    if (!norm_owner(getenv("UNISACC_INTEGRATOR"), b, sizeof b)) b[0] = 0;
+    for (int i = 0; i < nown; i++) {
+        int ok = (a[0] && !strcmp(a, owners[i])) || (b[0] && !strcmp(b, owners[i]));
+        if (!ok) return 0;
+    }
+    return 1;
+}
+
+int main(int argc, char **argv) {
+    (void)argc; (void)argv;
+    static char in[1 << 16]; long n = 0, g;
+    while ((g = sy_read(0, in + n, (long)sizeof in - 1 - n)) > 0) { n += g; if (n >= (long)sizeof in - 1) break; }
+    if (g < 0) { fprintf(stderr, "PREPUSH_REFUSE\treason=stdin-unreadable\n"); return 2; }
+    if (n >= (long)sizeof in - 1) { char sink[4096]; while (sy_read(0, sink, sizeof sink) > 0) {} fprintf(stderr, "PREPUSH_REFUSE\treason=stdin-too-long\n"); return 2; }
+    in[n] = 0;
+    int main_hit = 0;
+    for (char *l = in, *nl; l && *l; l = nl ? nl + 1 : 0) {
+        nl = strchr(l, '\n'); if (nl) *nl = 0;
+        char lr[512], ls[80], rr[512], rs[80];
+        if (sscanf(l, "%511s %79s %511s %79s", lr, ls, rr, rs) != 4) continue;
+        if (!strcmp(rr, "refs/heads/main")) main_hit = 1;
+    }
+    if (!main_hit) return 0;
+    if (locate()) { fprintf(stderr, "PREPUSH_REFUSE\treason=no-git-dir\n"); return 2; }
+    long now = sy_wall_s();
+    { const char *t = getenv("PREPUSH_NOW"); long v; if (t && posnum(t, &v)) now = v; }
+    src_tsv(now); src_lock(now); src_flag();
+    if (!frozen) return 0;
+    if (owner_pass()) { fprintf(stderr, "PREPUSH_PASS\treason=freeze-owner\tsources=%s\n", why); return 0; }
+    fprintf(stderr, "PREPUSH_REFUSE\tref=refs/heads/main\treason=%s\tsources=%s\n", expired ? "freeze-expired" : "frozen", why);
+    if (expired) fprintf(stderr, "prepush: freeze row expired; an expired row is not a thaw. Renew deadline_epoch_s in build/freeze.tsv, or delete the row explicitly to thaw.\n");
+    fprintf(stderr, "prepush: main is frozen; push your version branch (git push origin HEAD:refs/heads/v0.0.NN) instead. "
+                    "Thaw: release the devsvc freeze lock / delete the build/freeze.tsv row / remove .git/PUSH-FREEZE; "
+                    "the freeze owner may push with DEVSVC_OWNER or UNISACC_INTEGRATOR set to the owner.\n");
+    return 1;
+}

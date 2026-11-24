@@ -2368,7 +2368,9 @@ static int parse_pos_long(const char *s, size_t len, long *out) {
     if (out) *out = v;
     return 1;
 }
-/* 0: absent or only expired/comment rows; 1: at least one unexpired freeze row; -1: unreadable or malformed. */
+/* 0: absent, or only comment/blank/whitespace-only rows; 1: at least one unexpired freeze row;
+   2: freeze rows exist and all are expired (an expired row is not a thaw: renew deadline_epoch_s or
+   delete the row; same rule as the pre-push gate tools/prepush.cx); -1: unreadable or malformed. */
 static int freeze_tsv_state(const char *root) {
     char fzp[PW];
     if (!root || !root[0] || cx_fmt(fzp, sizeof fzp, "%s/build/freeze.tsv", root)) return 0;
@@ -2383,7 +2385,9 @@ static int freeze_tsv_state(const char *root) {
         const char *nl = memchr(p, '\n', (size_t)(end - p));
         size_t ll = nl ? (size_t)(nl - p) : (size_t)(end - p);
         while (ll > 0 && p[ll - 1] == '\r') ll--;
-        if (ll > 0 && p[0] != '#') {
+        size_t nb = 0;
+        while (nb < ll && (p[nb] == ' ' || p[nb] == '\t')) nb++;
+        if (ll > 0 && p[0] != '#' && nb < ll) {
             /* columns: 0=sid, 1=base, 2=owner, 3=deadline_epoch_s, 4=paths */
             const char *q = p, *le = p + ll;
             int col = 0;
@@ -2399,6 +2403,7 @@ static int freeze_tsv_state(const char *root) {
             long dl_s = 0;
             if (!ds || !parse_pos_long(ds, dl, &dl_s)) { free(b); return -1; }
             if (dl_s > now) active = 1;
+            else if (!active) active = 2;
         }
         p = nl ? nl + 1 : end;
     }
@@ -2422,6 +2427,11 @@ static int freeze_check(const char *root, const char *owner, char *holder, size_
     int rc; const char *s, *e; char nown[64], nhold[64], lp[PW];
     int has_own = norm_owner(owner, nown, sizeof nown);
     int fz_state = freeze_tsv_state(root);
+    if (fz_state == 2) {   /* expired-only rows freeze and nobody passes, owner included */
+        if (holder && hcap > 0) snprintf(holder, hcap, "freeze-expired");
+        fprintf(stderr, "FREEZE_EXPIRED build/freeze.tsv: an expired row is not a thaw. Renew deadline_epoch_s, or delete the row explicitly to thaw.\n");
+        return 1;
+    }
     char fhold[64]; int have_fhold = 0;
     fhold[0] = 0;
     /* Direct read of persisted locks.tsv: malformed/truncated/unreadable fails closed;

@@ -514,7 +514,9 @@ stopped:
       }
       ck("wait-daemon-gone-slow-exit", ok); }
 
-    /* (21) Expired-only build/freeze.tsv + stopped daemon + no locks.tsv: must NOT fail-closed */
+    /* (21) Expired-only build/freeze.tsv + stopped daemon + no locks.tsv: an expired row is NOT a thaw
+       (contract changed with the pre-push gate tools/prepush.cx): fail closed for everyone, the row's
+       owner included, with the renew/delete hint. Header-only and whitespace-only rows stay a thaw. */
     { char lkp[4400];
       char *aa[] = {"git", "add", "src/a.txt", 0};
       int ok = !cx_fmt(lkp, sizeof lkp, "%s/locks.tsv", inst);
@@ -523,9 +525,15 @@ stopped:
                      "# candidate_sid\tbase_commit\towner\tdeadline_epoch_s\tpaths\n"
                      "L0-CORE-FREEZE-049\t7bf9cd5aad\tcc\t1000000000\tcx/sys cx/core\n");
       g_no_autostart = 1; g_use_self_bin = 0;
-      ok = ok && run_dv(repo, "worker1", aa, &rc) && rc == 0 && !has(out, "LOCK_HELD freeze");
+      ok = ok && run_dv(repo, "worker1", aa, &rc) && rc == 1 &&
+           has(out, "LOCK_HELD freeze owner=freeze-expired") && has(out, "FREEZE_EXPIRED") && has(out, "Renew deadline_epoch_s");
+      ck("expired-freeze-tsv-refused", ok);
+      ok = run_dv(repo, "CC", aa, &rc) && rc == 1 && has(out, "LOCK_HELD freeze owner=freeze-expired");
+      ck("expired-freeze-tsv-refuses-owner-too", ok);
+      ok = !wr(repo, "build/freeze.tsv", "# candidate_sid\tbase_commit\towner\tdeadline_epoch_s\tpaths\n\n   \n\t \n") &&
+           run_dv(repo, "worker1", aa, &rc) && rc == 0 && !has(out, "LOCK_HELD freeze");
       g_no_autostart = 0;
-      ck("expired-freeze-tsv-stopped-daemon-allowed", ok); }
+      ck("header-and-whitespace-rows-freeze-tsv-allowed", ok); }
 
     /* (22) Active build/freeze.tsv + stopped daemon + autostart disabled: fail-closed with recovery command */
     { char *aa[] = {"git", "add", "src/a.txt", 0};
@@ -561,7 +569,7 @@ done:
     { char *rm[] = {"rm", "-rf", tmp, 0}; (void)runv(rm, 0, 0, 30, &rc); }
     if (sy_exists(tmp) != 0) (void)sy_remove_all(tmp);
     ck("cleanup-tmp-and-pin-removed", sy_exists(tmp) == 0);
-    int expected = lifecycle_only ? 20 : owner_only ? 10 : scope_only ? 13 : 0;
+    int expected = lifecycle_only ? 22 : owner_only ? 10 : scope_only ? 13 : 0;
     if (expected && passed + failed != expected) {
         fprintf(stderr, "DEVSVC_FREEZE_COUNT expected=%d actual=%d\n", expected, passed + failed);
         failed++;

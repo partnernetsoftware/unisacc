@@ -279,6 +279,13 @@ static long long alu64(int op, long long a, long long b, int *dz) {
 typedef struct { unsigned char *s; long n; } Blob;
 
 int main(int argc, char **argv) {
+    int dangling_dead = 0;
+    for (int i = 1; i < argc; i++) if (!strcmp(argv[i], "--dangling=dead")) {
+        if (dangling_dead) die("duplicate --dangling=dead");
+        dangling_dead = 1;
+        for (int j = i; j + 1 < argc; j++) argv[j] = argv[j + 1];
+        argc--; i--;
+    }
     for(int i=1;i<argc;i++)if(!strcmp(argv[i],"--watch-frame-out")){if(ws_export_dir||i+1==argc)die("frame export argument");ws_export_dir=argv[i+1];for(int j=i;j+2<argc;j++)argv[j]=argv[j+2];argc-=2;i--;}
     for(int i=1;i<argc;i++)if(!strcmp(argv[i],"--watch-compact")){if(ws_compact)die("duplicate --watch-compact");ws_compact=1;for(int j=i;j+1<argc;j++)argv[j]=argv[j+1];argc--;i--;}
     for(int i=1;i<argc;i++)if(!strcmp(argv[i],"--watch-states")){if(ws_path||i+1==argc)die("watch config argument");ws_path=argv[i+1];for(int j=i;j+2<argc;j++)argv[j]=argv[j+2];argc-=2;i--;}
@@ -286,11 +293,11 @@ int main(int argc, char **argv) {
     const char *delta = 0, *input = 0, *srcpath = 0, *covpath = 0; int pos = 0;
     const char *resname[16], *respath[16]; int nres = 0;
     for (int i = 1; i < argc; i++) { if (tx_eqz(argv[i], "--resource") && i + 1 < argc) { const char *s = argv[++i], *eq = strchr(s, '='); if (!eq || eq == s || !eq[1] || nres == 16) die("--resource NAME=FILE (at most 16)"); char *nm = xmalloc((size_t)(eq - s) + 2); nm[0] = 0; { void *cx_kept = mm_copy(nm + 1, (size_t)(eq - s), s, (size_t)(eq - s)); (void)cx_kept; } nm[eq - s + 1] = 0; for (int r2 = 0; r2 < nres; r2++) if (tx_eqz(resname[r2] + 1, nm + 1)) die("--resource name given twice"); resname[nres] = nm; respath[nres] = eq + 1; nres++; } else if(tx_eqz(argv[i],"--write-events")&&i+1<argc)we_path=argv[++i]; else if(tx_eqz(argv[i],"--event-limit")&&i+1<argc)we_limit=we_number(argv[++i],1000000); else if(tx_eqz(argv[i],"--event-bytes")&&i+1<argc)we_byte_limit=we_number(argv[++i],67108864); else if (tx_eqz(argv[i], "--cov") && i + 1 < argc) covpath = argv[++i]; else if (pos == 0) delta = argv[i], pos++; else if (pos == 1) input = argv[i], pos++; else if (pos == 2) srcpath = argv[i], pos++; else if (pos == 3) bundled = argv[i], pos++; else die("usage: DELTA.json INPUT [SRC_LABEL] [INCLUDE_DIR] [--cov COV.tsv]"); }
-    if (!delta || !input) { fputs("usage: sim DELTA.json INPUT [SRC_LABEL] [INCLUDE_DIR] [--cov COV.tsv]\n", stderr); return 2; }
+    if (!delta || !input) { fputs("usage: sim DELTA.json INPUT [SRC_LABEL] [INCLUDE_DIR] [--cov COV.tsv] [--dangling=dead]\n", stderr); return 2; }
     if (!srcpath) srcpath = input;
     if(we_path){struct stat ws;if(!lstat(we_path,&ws)||errno!=ENOENT)die("write-events target exists or stat error");size_t dn;unsigned char *db=(unsigned char *)cx_read(delta,&dn);if(!db)die("write-events delta read");we_hash(db,dn,we_delta_sha);free(db);}
     if(ws_export_dir){if(!ws_path||!ws_compact||!we_path)die("frame export requires compact sparse watch and sidecar");struct stat st;if(!lstat(ws_export_dir,&st)||errno!=ENOENT)die("frame export directory exists or stat error");}
-    dl_delta D; dl_load(delta, &D);ws_load(&D);
+    dl_delta D; dl_load_mode(delta, &D, dangling_dead);ws_load(&D);
     /* input */
     Bytes xin = {0}; { FILE *f = strcmp(input, "-") ? fopen(input, "rb") : stdin; if (!f) { fprintf(stderr, "sim: cannot open input %s\n", input); return 2; } unsigned char chunk[65536]; size_t k; while ((k = fread(chunk, 1, sizeof chunk, f)) > 0) bput(&xin, chunk, (long)k); if (f != stdin) fclose(f); }
     unsigned char *x = xin.s ? xin.s : (unsigned char *)""; long xn = xin.n;

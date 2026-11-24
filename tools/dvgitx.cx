@@ -157,7 +157,19 @@ static int untrack(int argc, char **argv) {
             char *uv[] = {"git", "update-index", "--add", "--cacheinfo", ci, 0}; (void)run(uv, root, 0, 0, 0); }
     }
     for (i = 0; i < nu; i++) if (tracked[i]) printf("UNTRACK\tpath=%s\tstate=untracked\n", up[i]);
-    if (push) { char *pv[] = {"git", "push", "origin", "HEAD:main", 0}; pushed = run(pv, root, 0, 0, 0) == 0; }
+    if (push) {   /* explicit current branch, never a bare HEAD:main; main goes through the prepush freeze gate first */
+        char br[300], spec[400], line[800], com[4200], body[4200];
+        char *bv[] = {"git", "symbolic-ref", "--quiet", "HEAD", 0};
+        if (run(bv, root, 0, br, sizeof br) || strncmp(br, "refs/heads/", 11)) { printf("PUSH_REFUSE\treason=detached-head\n"); br[0] = 0; }
+        else { size_t l = strlen(br); while (l && (br[l - 1] == '\n' || br[l - 1] == '\r')) br[--l] = 0; }
+        int ok = br[0] && !cx_fmt(spec, sizeof spec, "%s:%s", nw, br) && !cx_fmt(line, sizeof line, "%s %s %s 0\n", br, nw, br);
+        if (ok && !strcmp(br, "refs/heads/main")) {
+            if (cx_fmt(com, sizeof com, "%s/unisacc.com", root) || cx_fmt(body, sizeof body, "%s/tools/prepush.cx", root)) ok = 0;
+            else { char *fv[] = {"sh", "-c", "printf '%s' \"$1\" | sh \"$2\" \"$3\" --", "prepush", line, com, body, 0};
+                   if (run(fv, root, 0, 0, 0)) { printf("PUSH_REFUSE\treason=frozen\tref=%s\n", br); ok = 0; } }
+        }
+        if (ok) { char *pv[] = {"git", "push", "origin", spec, 0}; pushed = run(pv, root, 0, 0, 0) == 0; }
+    }
     rc = push && !pushed ? 1 : 0;
     printf("GIT_COMMIT\trc=%d\tcommit=%s\tpushed=%d\tms=%ld%s\n", rc, nw, pushed, sy_now_ms() - t0, rc ? "\treason=push-failed" : "");
     return rc;
