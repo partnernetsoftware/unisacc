@@ -161,6 +161,30 @@ int main(int argc, char **argv) {
     cx_fmt(outp, sizeof outp, "%s/c5.out", dir);
     rv_ck(rc == 0 && rv_contains(outp, "EQ=0"), "C5-static-fn-addr-pin");
 
+    /* C6: entry-build path (-ftrim-libc + -DRT_UNIT on u1 that does not call setenv/strtok/rand/gmtime) */
+    {
+        char p1[4096]; char p2[4096]; char o1[4096]; char o2[4096]; char bin[4096]; char out[4096]; char c6[8192];
+        int rc6;
+        cx_fmt(p1, sizeof p1, "%s/c6_u1.c", dir); cx_fmt(p2, sizeof p2, "%s/c6_u2.c", dir);
+        cx_fmt(o1, sizeof o1, "%s/c6_u1.o", dir); cx_fmt(o2, sizeof o2, "%s/c6_u2.o", dir);
+        cx_fmt(bin, sizeof bin, "%s/c6.bin", dir); cx_fmt(out, sizeof out, "%s/c6.out", dir);
+        rv_write_file(p1, "#include <stdio.h>\n#include <stdlib.h>\n#include <string.h>\n#include <time.h>\nint u2_run(void);\nint main(void) { return u2_run(); }\n");
+        rv_write_file(p2, "#include <stdio.h>\n#include <stdlib.h>\n#include <string.h>\n#include <time.h>\nint u2_run(void) { setenv(\"U_V101\", \"ok\", 1); srand(7); (void)rand(); time_t t = 0; (void)gmtime(&t); char b[16] = \"a,b\"; strtok(b, \",\"); printf(\"C6_OK=%s\\n\", getenv(\"U_V101\")); return 0; }\n");
+        rc6 = 0;
+        cx_fmt(c6, sizeof c6, "sh \"%s\" -I include -c -funit -ftrim-libc -b lnx/x86_64 -DRT_UNIT -o \"%s\" \"%s\" >/dev/null 2>&1", ape, o1, p1);
+        if (system(c6) != 0) rc6 = -1;
+        cx_fmt(c6, sizeof c6, "sh \"%s\" -I include -c -funit -b lnx/x86_64 -DRT_EXTERN -o \"%s\" \"%s\" >/dev/null 2>&1", ape, o2, p2);
+        if (rc6 == 0 && system(c6) != 0) rc6 = -1;
+        cx_fmt(c6, sizeof c6, "sh \"%s\" -b lnx/x86_64 -o \"%s\" \"%s\" \"%s\" >/dev/null 2>&1", ape, bin, o1, o2);
+        if (rc6 == 0 && system(c6) != 0) rc6 = -1;
+        if (rc6 == 0) {
+            cx_fmt(c6, sizeof c6, "\"%s\" >\"%s\" 2>&1", bin, out);
+            rc6 = system(c6);
+            rc6 = WIFEXITED(rc6) ? WEXITSTATUS(rc6) : -1;
+        }
+        rv_ck(rc6 == 0 && rv_contains(out, "C6_OK=ok"), "C6-ftrim-rt-unit-all-shared");
+    }
+
     cx_fmt(cmd, sizeof cmd, "rm -rf \"%s\"", dir);
     system(cmd);
     printf("RT_SHARED_V101_CHECK\tassertions=%d\tfailed=%d\n", rv_n, rv_failed);

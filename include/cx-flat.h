@@ -3209,7 +3209,7 @@ static char *getenv(const char *__u_name) {
    NAME's entry or appended.  An entry is never freed: a pointer getenv returned stays
    valid, as glibc and the BSDs keep them.  Appending past the kernel's copy (or past an
    array the program assigned to environ) moves environ to a malloc'd array twice as big. */
-#if !__UNISA_FTRIM_LIBC || __UN_setenv
+#if defined(RT_UNIT) || !__UNISA_FTRIM_LIBC || __UN_setenv
 #if defined(RT_UNIT)
 char **_unisa_envheap; __u_word _unisa_envcap;
 #elif defined(RT_EXTERN)
@@ -3425,7 +3425,7 @@ static int fileno(FILE *__u_f) {
 #else
 #define _U_PO_SC(n) (n)
 #endif
-#if !__UNISA_FTRIM_LIBC || __UN_popen || __UN_pclose
+#if defined(RT_UNIT) || !__UNISA_FTRIM_LIBC || __UN_popen || __UN_pclose
 #if defined(RT_UNIT)
 int _u_po_fd[16]; long _u_po_pid[16]; int _u_po_n;
 #elif defined(RT_EXTERN)
@@ -4867,7 +4867,7 @@ static char *getenv(const char *__u_name) {
    NAME's entry or appended.  An entry is never freed: a pointer getenv returned stays
    valid, as glibc and the BSDs keep them.  Appending past the kernel's copy (or past an
    array the program assigned to environ) moves environ to a malloc'd array twice as big. */
-#if !__UNISA_FTRIM_LIBC || __UN_setenv
+#if defined(RT_UNIT) || !__UNISA_FTRIM_LIBC || __UN_setenv
 #if defined(RT_UNIT)
 char **_unisa_envheap; __u_word _unisa_envcap;
 #elif defined(RT_EXTERN)

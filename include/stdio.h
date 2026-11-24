@@ -1544,7 +1544,7 @@ static int fileno(FILE *__u_f) {
 #else
 #define _U_PO_SC(n) (n)
 #endif
-#if !__UNISA_FTRIM_LIBC || __UN_popen || __UN_pclose
+#if defined(RT_UNIT) || !__UNISA_FTRIM_LIBC || __UN_popen || __UN_pclose
 #if defined(RT_UNIT)
 int _u_po_fd[16]; long _u_po_pid[16]; int _u_po_n;
 #elif defined(RT_EXTERN)
