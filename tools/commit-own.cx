@@ -602,10 +602,88 @@ static const char *co_window_msg(const char *msg) {
    whole pass (gates included) on the new HEAD or reports the conflict.  1 with the reason in OUT on failure. */
 static long co_ref_ms;
 static int co_ref_rc;
+
+static int co_same_freezer(const char *a, const char *b) {
+    if (!a || !b) return 0;
+    a += strspn(a, " \t\r\n"); b += strspn(b, " \t\r\n");
+    size_t an = strlen(a), bn = strlen(b);
+    while (an && strchr(" \t\r\n", a[an - 1])) an--;
+    while (bn && strchr(" \t\r\n", b[bn - 1])) bn--;
+    if (!an || an != bn || an >= 64) return 0;
+    for (size_t i = 0; i < an; i++) {
+        unsigned char x = a[i], y = b[i];
+        if (x >= 'A' && x <= 'Z') x += 'a' - 'A';
+        if (y >= 'A' && y <= 'Z') y += 'a' - 'A';
+        if (x < 0x21 || x == 0x7f || x != y) return 0;
+    }
+    return 1;
+}
+
+/* The freeze row in the primary worktree governs linked version worktrees too.
+   A bare PUSH-FREEZE marker has no owner; active table rows identify the freezer. */
+static const char *co_tlib_freeze(void) {
+    char common[4400], p[4400], roots[16384], *end;
+    char *gitdir[] = {"git", "rev-parse", "--path-format=absolute", "--git-common-dir", 0};
+    char *worktrees[] = {"git", "worktree", "list", "--porcelain", 0};
+    if (run(gitdir, common, sizeof common) || !common[0] ||
+        cx_fmt(p, sizeof p, "%s/PUSH-FREEZE", common)) return "freeze-source-unreadable";
+    int flag = sy_exists(p);
+    if (flag < 0 || run(worktrees, roots, sizeof roots) || strncmp(roots, "worktree ", 9)) return "freeze-source-unreadable";
+    end = strchr(roots, '\n');
+    if (end) *end = 0;
+    if (cx_fmt(p, sizeof p, "%s/build/freeze.tsv", roots + 9)) return "freeze-source-unreadable";
+    int ex = sy_exists(p);
+    if (ex < 0) return "freeze-source-unreadable";
+    if (!ex) return flag ? "PUSH-FREEZE" : 0;
+    unsigned char *data = 0;
+    int64_t size;
+    if (sy_read_file(p, &data, &size, 1 << 16) || !data) return "freeze-source-unreadable";
+    const char *owner = getenv("DEVSVC_OWNER"), *integrator = getenv("UNISACC_INTEGRATOR");
+    const char *reason = 0;
+    long now = sy_wall_s();
+    int active = 0;
+    for (char *row = strtok((char *)data, "\n"); row; row = strtok(0, "\n")) {
+        if (row[strspn(row, " \t\r")] == 0 || row[0] == '#') continue;
+        char *base = strchr(row, '\t');
+        char *who = base ? strchr(base + 1, '\t') : 0;
+        char *deadline = who ? strchr(++who, '\t') : 0;
+        if (!deadline || deadline == who) { reason = "freeze-table-malformed"; break; }
+        *deadline++ = 0;
+        errno = 0;
+        long expires = strtol(deadline, &end, 10);
+        if (errno || expires <= 0 || (*end != '\t' && *end != '\r' && *end != 0)) { reason = "freeze-table-malformed"; break; }
+        if (expires <= now) continue;
+        active = 1;
+        if (!co_same_freezer(owner, who) && !co_same_freezer(integrator, who)) {
+            reason = "build/freeze.tsv"; break;
+        }
+    }
+    mm_free(data);
+    return reason ? reason : flag && !active ? "PUSH-FREEZE" : 0;
+}
+
+static int co_freeze_tlib(const char *base, char *out, long cap) {
+    char paths[8192];
+    char *v[] = {"git", "diff", "--cached", "--no-renames", "--name-only", (char *)base, "--",
+                 "build/tlib-packages.tsv", "build/iface-hash.tsv", ":(glob)build/layer-api/*.tsv", 0};
+    if (run(v, paths, sizeof paths)) {
+        if (cx_fmt(out, (size_t)cap, "COMMIT_OWN_FREEZE_TLIB reason=index-unreadable")) out[0] = 0;
+        return 1;
+    }
+    if (!paths[0]) return 0;
+    const char *reason = co_tlib_freeze();
+    if (!reason) return 0;
+    char *nl = strchr(paths, '\n');
+    if (nl) *nl = 0;
+    if (cx_fmt(out, (size_t)cap, "COMMIT_OWN_FREEZE_TLIB path=%s reason=%s next=retry-after-thaw", paths, reason)) out[0] = 0;
+    return 1;
+}
+
 static int co_land(const char *msg, const char *basec, char *newfull, char *out, long cap) {
     char tree[64], btree[64], spec[64];
     char *wv[] = {"git", "write-tree", 0}, *bv[] = {"git", "rev-parse", spec, 0};
     newfull[0] = 0;
+    if (co_freeze_tlib(basec, out, cap)) return 1;
     if (tx_snprintf(spec, sizeof spec, "%s^{tree}", basec) >= (int)sizeof spec) return 1;
     if (run(wv, tree, sizeof tree) != 0 || run(bv, btree, sizeof btree) != 0 || tx_len(tree, sizeof tree) != 40) { tx_snprintf(out, (size_t)cap, "git write-tree failed on the private index"); return 1; }
     if (tx_eqz(tree, btree)) { tx_snprintf(out, (size_t)cap, "nothing to commit: the selected paths equal HEAD"); return 1; }
@@ -1197,6 +1275,10 @@ static int co_mergecont(int mcont, const char *msg, int np, const char **paths, 
         if (out[0]) { fprintf(stderr, "COMMIT_OWN_FAIL\tclass=args\ncommit-own: COMMIT_MERGE_UNRESOLVED: unmerged entries remain (git ls-files -u not empty; nothing committed)\n"); return 2; } }
     if (run(hv, mh, sizeof mh) != 0 || tx_len(mh, sizeof mh) < 40) co_die("setup", "git rev-parse MERGE_HEAD failed");
     mh[40] = 0;
+    if (co_freeze_tlib("HEAD", out, sizeof out)) {
+        fprintf(stderr, "COMMIT_OWN_FAIL\tclass=freeze-tlib\ncommit-own: REFUSE %s\n", out);
+        return 2;
+    }
     if (dry) { sy_printf("COMMIT_OWN_DRY\trc=0\tmerge_head=%s\n", mh); return 0; }
     g_bound_s = 55;
     {   char *cv[] = {"sh", "-c", "exec \"$@\" 2>&1", "sh", "git", "commit", "-q", "-m", (char *)co_window_msg(msg), 0};
@@ -1770,6 +1852,11 @@ again:  /* Retry against the same HEAD whose paths were compared. */
             }
         }
         if (derive) co_phase("derive", 0);
+        if (co_freeze_tlib(basec, out, sizeof out)) {
+            sy_unsetenv("GIT_INDEX_FILE"); sy_unlink(idx); co_pending_collect();
+            fprintf(stderr, "COMMIT_OWN_FAIL\tclass=freeze-tlib\ncommit-own: REFUSE %s\n", out);
+            return 2;
+        }
         if (co_nnew && co_newtool_gate()) { sy_unsetenv("GIT_INDEX_FILE"); sy_unlink(idx); co_pending_collect(); return 1; }
         if (nreg) co_phase("regm", 1);
         if (nreg) {   /* the precommit registration-manifest gate's own verdict, on the private index */
@@ -1885,6 +1972,7 @@ again:  /* Retry against the same HEAD whose paths were compared. */
             if (dry) fcls = tx_find(out, on, "precommit", 9) >= 0 ? "precommit" : "git-or-hook";
             else if (tx_find(out, on, "cannot lock ref 'HEAD'", 22) >= 0) fcls = "head-moved";
             else if (tx_find(out, on, "index.lock", 10) >= 0) fcls = "index-lock";
+            else if (tx_find(out, on, "COMMIT_OWN_FREEZE_TLIB", 22) >= 0) fcls = "freeze-tlib";
             else if (tx_find(out, on, "nothing to commit", 17) >= 0 || tx_find(out, on, "nothing added to commit", 23) >= 0) fcls = "nothing-to-commit";
             else if (tx_find(out, on, "precommit", 9) >= 0 || tx_find(out, on, "PRECOMMIT", 9) >= 0) fcls = "precommit";
             else fcls = "git-or-hook"; }
