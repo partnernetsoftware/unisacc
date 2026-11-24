@@ -1,0 +1,65 @@
+#pragma unisa module bpidecl
+/* bpidecl.cx -- the batch-product-inputs pairing rule shared by tools/precommit.cx and tools/register.cx.
+ * tests/batch-product-inputs.tsv lists `require` placeholders ({candidate}, {hostcc}, ...); a batch of
+ * tests/batches.tsv whose args (column 10) hold one of them must have a `id<TAB>ID` row, else tools/affected.cx
+ * refuses BATCH_PRODUCT_INPUT_UNDECLARED with rc 2 and selects nothing (11-23 runcache-path-key incident).
+ * Use it with `#pragma unisa use cxlib.bpidecl`.  Every name starts with bpi_.
+ *   bpi_needs(DECL, DN, ARGS, AN)   1 when ARGS holds a require key of DECL, else 0
+ *   bpi_has_id(DECL, DN, ID, IN)    1 when DECL has an id row for ID
+ *   bpi_scan(B, BN, DECL, DN, HB, HN, IDS, CAP, *INHERITED)
+ *       count of batch rows of B that need a declaration and lack one and are new or changed against HB
+ *       (HB 0 = all count as new); the ids go comma-joined into IDS; rows byte-identical in HB are counted
+ *       in *INHERITED instead (reported, not blamed on this commit). */
+#pragma unisa use text.text
+#pragma unisa use mem.bytes
+
+static int bpi_line_in(const char *hb, long hn, const char *l, long ln) {
+    long at = 0;
+    while (hb && at < hn) {
+        long e = tx_chr(hb + at, hn - at, '\n'), k = e < 0 ? hn - at : e;
+        if (tx_same(hb + at, k, l, ln)) return 1;
+        at += k + 1;
+    }
+    return 0;
+}
+
+int bpi_needs(const char *d, long dn, const char *args, long an) {
+    long at = 0;
+    while (at < dn) {
+        long e = tx_chr(d + at, dn - at, '\n'), l = e < 0 ? dn - at : e, o0, l0, o1, l1;
+        if (l > 0 && d[at] != '#' && !tx_field(d + at, l, '\t', 0, &o0, &l0) && tx_same(d + at + o0, l0, "require", 7) &&
+            !tx_field(d + at, l, '\t', 1, &o1, &l1) && l1 > 0 && tx_find(args, an, d + at + o1, l1) >= 0) return 1;
+        at += l + 1;
+    }
+    return 0;
+}
+
+int bpi_has_id(const char *d, long dn, const char *id, long in) {
+    long at = 0;
+    while (at < dn) {
+        long e = tx_chr(d + at, dn - at, '\n'), l = e < 0 ? dn - at : e, o0, l0, o1, l1;
+        if (l > 0 && d[at] != '#' && !tx_field(d + at, l, '\t', 0, &o0, &l0) && tx_same(d + at + o0, l0, "id", 2) &&
+            !tx_field(d + at, l, '\t', 1, &o1, &l1) && tx_same(d + at + o1, l1, id, in)) return 1;
+        at += l + 1;
+    }
+    return 0;
+}
+
+long bpi_scan(const char *b, long bn, const char *d, long dn, const char *hb, long hn, char *ids, size_t cap, long *inherited) {
+    long at = 0, n = 0; size_t o = 0;
+    if (cap) ids[0] = 0;
+    if (inherited) *inherited = 0;
+    while (at < bn) {
+        long e = tx_chr(b + at, bn - at, '\n'), l = e < 0 ? bn - at : e, io, il, ao, al;
+        if (l > 0 && b[at] != '#' && !tx_field(b + at, l, '\t', 0, &io, &il) && !tx_field(b + at, l, '\t', 9, &ao, &al) &&
+            bpi_needs(d, dn, b + at + ao, al) && !bpi_has_id(d, dn, b + at + io, il)) {
+            if (hb && bpi_line_in(hb, hn, b + at, l)) { if (inherited) (*inherited)++; }
+            else {
+                n++;
+                if (o + (size_t)il + 2 < cap) { if (o) ids[o++] = ','; mm_copy(ids + o, cap - o, b + at + io, (size_t)il); o += (size_t)il; ids[o] = 0; }
+            }
+        }
+        at += l + 1;
+    }
+    return n;
+}
