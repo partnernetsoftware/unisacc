@@ -1,0 +1,159 @@
+#pragma unisa use cxlib.dirtywatch
+#pragma unisa use sys.env
+#pragma unisa use sys.fs
+#pragma unisa use sys.posix
+#pragma unisa use sys.proc
+#pragma unisa use sys.io
+#pragma unisa use mem.heap
+#pragma unisa use text.text
+
+static int failures, checks;
+
+static void check(int ok, const char *name) {
+    checks++;
+    if (ok) sy_printf("PASS\trunner-identity.%s\n", name);
+    else {
+        failures++;
+        sy_eprintf("FAIL\trunner-identity.%s\n", name);
+    }
+}
+
+static int git(char **argv, char *out, size_t cap) {
+    char *bytes = 0;
+    size_t n = 0;
+    int rc = cx_runv_timeout(argv, 4, &bytes, &n);
+    if (out && !rc) {
+        if (!bytes || !n || bytes[n - 1] != '\n' || n > cap) rc = 1;
+        else if (tx_copy(out, cap, bytes, n - 1)) rc = 1;
+    }
+    free(bytes);
+    return rc;
+}
+
+static int matches(const char *root, int hook, const char *kind, const char *head,
+                   const char *paths, size_t len, const char *diff) {
+    char hash[65] = "-", expected[256], actual[256];
+    if (paths) cx_sha256_hex(paths, len, hash);
+    return !cx_fmt(expected, sizeof expected,
+                   "RUNNER_IDENTITY\tentry=fixture\tkind=%s\thead=%s\tdirty_sha256=%s\tdiff=%s\n",
+                   kind, head, hash, diff) &&
+           !dw_identity_line("fixture", root, hook, actual, sizeof actual) &&
+           tx_eqz(actual, expected);
+}
+
+static int entry_has_line(char **argv, int expected_rc, const char *entry, const char *diff) {
+    char *out = 0;
+    size_t n = 0;
+    int rc = cx_runv_timeout(argv, 14, &out, &n);
+    char prefix[96], suffix[96];
+    int ok = 0;
+    if (rc == expected_rc && out &&
+        !cx_fmt(prefix, sizeof prefix, "RUNNER_IDENTITY\tentry=%s\tkind=git\t", entry) &&
+        !cx_fmt(suffix, sizeof suffix, "\tdiff=%s\n", diff)) {
+        char *line = strstr(out, "RUNNER_IDENTITY\t");
+        if (line && !strncmp(line, prefix, strlen(prefix))) {
+            char *end = strchr(line, '\n');
+            size_t len = strlen(suffix);
+            if (end && (size_t)(end + 1 - line) >= len)
+                ok = !memcmp(end + 1 - len, suffix, len) && !strstr(end + 1, "RUNNER_IDENTITY\t");
+        }
+    }
+    if (!ok) sy_eprintf("RUNNER_IDENTITY_ENTRY\tentry=%s\trc=%d\toutput=%.*s\n",
+                         entry, rc, (int)(n < 360 ? n : 360), out ? out : "");
+    free(out);
+    return ok;
+}
+
+static int prepare_entries(const char *checkout, const char *fixture, char bins[3][4400]) {
+    static char *sources[] = {"tests/run-batch.cx", "tools/precommit.cx", "tools/register.cx"};
+    int children[3], ok = 1;
+    for (int i = 0; i < 3; i++)
+        if (cx_fmt(bins[i], sizeof bins[i], "%s/entry-%d", fixture, i)) return 0;
+    if (sy_chdir(checkout)) return 0;
+    for (int i = 0; i < 3; i++) {
+        /* lint:allow R1-product compile the real entry from the checkout under test */
+        char *build[] = {"./tools/bound", "34", "sh", "./unisacc.com", sources[i], "-o", bins[i], 0};
+        children[i] = sy_spawn_inherit(build, -1);
+    }
+    for (int i = 0; i < 3; i++) {
+        int exited = 0, rc = -1;
+        if (children[i] < 0 || sy_wait_status(children[i], 0, &exited, &rc, 0) != children[i] ||
+            !exited || rc) {
+            sy_eprintf("RUNNER_IDENTITY_BUILD\tentry=%s\trc=%d\n", sources[i], rc);
+            ok = 0;
+        }
+    }
+    return sy_chdir(fixture) == 0 && ok;
+}
+
+int main(int argc, char **argv) {
+    char cwd[4096], root[4096], index[4400], head[65];
+    int named_entries = argc == 5 && tx_eqz(argv[1], "--native-entries");
+    if (argc != 1 && !named_entries) return 2;
+    if (sy_cwd(cwd, sizeof cwd) < 0 ||
+        (named_entries && (argv[2][0] != '/' || argv[3][0] != '/' || argv[4][0] != '/')) ||
+        sy_mkdtemp(sy_tmpdir(), "unisacc-affected-check-runner-identity.", root, sizeof root) ||
+        cx_fmt(index, sizeof index, "%s/alternate-index", root) ||
+        sy_chdir(root)) return 2;
+    sy_unsetenv("GIT_DIR");
+    sy_unsetenv("GIT_WORK_TREE");
+    sy_unsetenv("GIT_INDEX_FILE");
+    sy_unsetenv("GIT_COMMON_DIR");
+    sy_unsetenv("GIT_OBJECT_DIRECTORY");
+    sy_unsetenv("GIT_ALTERNATE_OBJECT_DIRECTORIES");
+    sy_unsetenv("GIT_NAMESPACE");
+    sy_unsetenv("GIT_CONFIG_PARAMETERS");
+    sy_unsetenv("GIT_CONFIG_COUNT");
+    sy_unsetenv("UNISACC_TABLES");
+    sy_setenv("GIT_OPTIONAL_LOCKS", "0", 1);
+    check(matches(root, 0, "archive", "-", 0, 0, "unavailable"), "archive");
+    sy_setenv("UNISACC_TABLES", "/fixture/tables", 1);
+    check(matches(root, 0, "private-table", "-", 0, 0, "unavailable"), "private-table");
+    sy_unsetenv("UNISACC_TABLES");
+    char *init[] = {"git", "init", "-q", 0};
+    char *add[] = {"git", "add", "--", "z", 0};
+    char *commit[] = {"git", "-c", "user.name=Fixture", "-c", "user.email=fixture@example.invalid",
+        "-c", "commit.gpgsign=false", "-c", "core.hooksPath=/dev/null",
+        "commit", "-qm", "fixture", 0};
+    char *rev[] = {"git", "rev-parse", "HEAD", 0};
+    char *read_tree[] = {"git", "read-tree", "HEAD", 0};
+    char *add_a[] = {"git", "add", "--", "a", 0};
+    int ready = !git(init, 0, 0) && !cx_write("z", "a\n", 2) && !git(add, 0, 0) &&
+        !git(commit, 0, 0) && !git(rev, head, sizeof head);
+    check(ready, "fixture-commit");
+    if (ready) {
+        check(matches(root, 0, "git", head, "", 0, "clean"), "clean");
+        sy_setenv("GIT_DIR", "/fixture/nonexistent-git", 1);
+        check(matches(root, 0, "git", head, "", 0, "clean"), "foreign-git-dir");
+        sy_unsetenv("GIT_DIR");
+        check(!cx_write("a", "a\n", 2) &&
+              matches(root, 0, "git", head, "a\0", 2, "untracked") &&
+              !sy_unlink("a"), "shortest-status-record");
+        check(!sy_symlink("z", "unisacc.com") &&
+              matches(root, 0, "git", head, "", 0, "clean"), "bootstrap-link-excluded");
+        check(!cx_write("a", "a\n", 2) && !cx_write("z", "b\n", 2) &&
+              matches(root, 0, "git", head, "a\0z\0", 4, "unstaged,untracked"),
+              "sorted-byte-paths");
+        sy_setenv("GIT_INDEX_FILE", index, 1);
+        check(!git(read_tree, 0, 0) && !git(add_a, 0, 0), "alternate-index-setup");
+        check(matches(root, 1, "git", head, "a\0alternate-index\0z\0", 20,
+                      "staged,unstaged,untracked"), "hook-index");
+        check(matches(root, 0, "git", head, "a\0alternate-index\0z\0", 20,
+                      "unstaged,untracked"), "explicit-root-keeps-own-index");
+        char bins[3][4400];
+        int have_entries = named_entries || prepare_entries(cwd, root, bins);
+        if (have_entries) {
+            char *rb[] = {"sh", "-c", "exec \"$@\" 2>&1", "capture", named_entries ? argv[2] : bins[0],
+                root, root, "missing", 0};
+            char *pc[] = {"sh", "-c", "exec \"$@\" 2>&1", "capture", named_entries ? argv[3] : bins[1], "--gates", 0};
+            char *rg[] = {"sh", "-c", "exec \"$@\" 2>&1", "capture", named_entries ? argv[4] : bins[2],
+                "--qualify-tree", "invalid", 0};
+            check(entry_has_line(rb, 2, "run-batch", "unstaged,untracked"), "run-batch-entry");
+            check(entry_has_line(pc, 0, "precommit", "staged,unstaged,untracked"), "precommit-entry");
+            check(entry_has_line(rg, 2, "register", "unstaged,untracked"), "register-entry");
+        } else check(0, "compile-real-entries");
+    }
+    if (sy_chdir(cwd) || sy_remove_all(root)) failures++;
+    sy_printf("CHECK_RUNNER_IDENTITY\tchecks=%d\tfailed=%d\n", checks, failures);
+    return failures ? 1 : 0;
+}
