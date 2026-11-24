@@ -371,7 +371,7 @@ static void find_strict(void) {
 }
 /* Fold qualify's append-only evidence in its recorded order, like --resume.
    RAW identifies the execution associated with the latest structured row. */
-typedef struct { char id[128], status[8], rc[16]; int reason, allowed, witnessed, segment, unresolved_raw_unknown; } strict_batch;
+typedef struct { char id[128], status[8], rc[16], window_leaf[240]; int reason, allowed, witnessed, segment, unresolved_raw_unknown, window_raw; } strict_batch;
 static strict_batch strict_batches[1024];
 static int strict_count;
 static strict_batch *strict_slot(const char *id) {
@@ -383,6 +383,7 @@ static int strict_reason(const char *s) {
     if(tx_eqz(s,"no-producer"))return 1;
     if(tx_eqz(s,"load-wait-timeout"))return 2;
     if(tx_eqz(s,"outer-timeout"))return 3;
+    if(tx_eqz(s,"window-timeout"))return 4;
     return 0;
 }
 /* Split exact fields, rejecting extra columns and embedded NUL or CR. */
@@ -393,6 +394,32 @@ static int strict_split(char *s,long n,char **fields,int cap) {
         if(s[i]=='\t'){if(count==cap)return 0;s[i]=0;fields[count++]=s+i+1;}
     }
     s[n]=0;return count;
+}
+static int strict_window_elapsed(const char *s) {
+    int ms=0;
+    for(;*s;s++){
+        if(*s<'0'||*s>'9')return 0;
+        if(ms<53000)ms=ms*10+(*s-'0');
+    }
+    return ms>=53000;
+}
+static int strict_window_evidence(const char *leaf,const char *raw,long size) {
+    char path[4500],buf[16385];long used=0,at=0,len;const char *line;
+    if(cx_fmt(path,sizeof path,"%s/%s",evdir,leaf))return 0;
+    int fd=sy_open(path,O_RDONLY|O_NONBLOCK|O_NOFOLLOW,0);
+    if(fd<0)return 0;
+    sy_stat_t st;int valid=!sy_fstat(fd,&st)&&st.kind=='f';
+    while(valid&&used<(long)sizeof buf){
+        long got=sy_read(fd,buf+used,sizeof buf-used);
+        if(!got)break;
+        if(got<0){valid=0;break;}
+        used+=got;
+    }
+    sy_close(fd);
+    if(!valid||used==(long)sizeof buf)return 0;
+    while(line_next(buf,used,&at,&line,&len))
+        if(len==size&&!memcmp(line,raw,size))return 1;
+    return 0;
 }
 static int producer_evidence(const char *id,const char *leaf) {
     char path[4500],prefix[240],buf[16385];long at=0,len,used=0;const char *line;
@@ -435,6 +462,8 @@ static void strict_exceptions(void) {
         strict_batch *b=strict_slot(f[0]);
         if(b->allowed || !(b->allowed=strict_reason(f[1])))refuse("STRICT_UNKNOWN","duplicate batch or unknown reason in expected-unmeasured.tsv");
         if(b->allowed==1 && (nf!=3||!producer_evidence(b->id,f[2])))refuse("STRICT_UNKNOWN","no-producer needs matching affected evidence");
+        if(b->allowed==4 && (nf!=3||!f[2][0]||f[2][0]=='.'||strchr(f[2],'/')||
+           cx_fmt(b->window_leaf,sizeof b->window_leaf,"%s",f[2])))refuse("STRICT_UNKNOWN","window-timeout needs matching evidence file");
     }
     free(t);
 }
@@ -492,17 +521,21 @@ static void strict_terminals(char *t,long n) {
         if(tx_eqz(f[0],"NETREGEN_DIFF"))continue;
         if(tx_eqz(f[0],"RAW")){
             if(!tx_eqz(f[1],"BATCH_RUN"))refuse("STRICT_UNKNOWN","invalid RAW row");
-            const char *id=0,*st=0,*sha=0,*rc=0;
+            const char *id=0,*st=0,*sha=0,*rc=0,*transport=0,*assertions=0;
             for(int i=2;i<nf;i++){
                 if(!strncmp(f[i],"id=",3)){if(id)refuse("STRICT_UNKNOWN","duplicate RAW id");id=f[i]+3;}
                 if(!strncmp(f[i],"status=",7)){if(st)refuse("STRICT_UNKNOWN","duplicate RAW status");st=f[i]+7;}
                 if(!strncmp(f[i],"candidate=",10)){if(sha)refuse("STRICT_UNKNOWN","duplicate RAW candidate");sha=f[i]+10;}
                 if(!strncmp(f[i],"rc=",3)){if(rc)refuse("STRICT_UNKNOWN","duplicate RAW rc");rc=f[i]+3;}
+                if(!strncmp(f[i],"transport=",10)){if(transport)refuse("STRICT_UNKNOWN","duplicate RAW transport");transport=f[i]+10;}
+                if(!strncmp(f[i],"assertions=",11)){if(assertions)refuse("STRICT_UNKNOWN","duplicate RAW assertions");assertions=f[i]+11;}
             }
             if(!id||!st||!sha||!rc)refuse("STRICT_UNKNOWN","incomplete RAW");
             strict_batch *b=strict_slot(id);
             if(!b->status[0])refuse("STRICT_UNKNOWN","RAW without a corresponding batch row");
             b->witnessed=tx_eqz(sha,cand.sha[0])&&tx_eqz(b->status,st)&&tx_eqz(b->rc,rc);
+            b->window_raw=b->reason==4&&b->allowed==4&&b->segment==table&&b->witnessed&&transport&&assertions&&
+                tx_eqz(transport,"-1")&&tx_eqz(assertions,"UNMEASURED")&&strict_window_evidence(b->window_leaf,s,len);
             if(tx_eqz(st,"FAIL") && !b->witnessed)refuse("STRICT_UNKNOWN","FAIL receipt differs from its batch row");
             if(tx_eqz(st,"UNKNOWN") && !b->witnessed)refuse("STRICT_UNKNOWN","UNKNOWN receipt differs from its batch row");
             continue;
@@ -522,6 +555,10 @@ static void strict_terminals(char *t,long n) {
            affected producer diagnostic is required by strict_exceptions. */
         if(tx_eqz(f[3],"3") && (tx_eqz(f[8],"no-BATCH_RUN rc=3") ||
            tx_eqz(f[8],"no-BATCH_RUN rc=3;load_wait>6") || tx_eqz(f[8],"no-BATCH_RUN rc=3;load_wait>3")))b->reason=1;
+        if(b->reason==4)b->reason=0; /* A literal strict note is not a timing witness. */
+        b->window_raw=0;
+        if(tx_eqz(f[2],"UNKNOWN") && tx_eqz(f[3],"0") && tx_eqz(f[4],cand.sha[0]) &&
+           strict_window_elapsed(f[5]) && tx_eqz(f[8],"transport-failed-raw-neg1"))b->reason=4;
         unknowns=-1;
     }
     for(int i=0;i<strict_count;i++){
@@ -530,7 +567,7 @@ static void strict_terminals(char *t,long n) {
         if(b->allowed && !tx_eqz(b->status,"UNKNOWN"))refuse("STRICT_UNKNOWN",b->id);
         if(!b->status[0])continue;
         if(tx_eqz(b->status,"UNKNOWN")){
-            if(!b->reason||b->allowed!=b->reason)refuse("STRICT_UNKNOWN",b->id);
+            if(!b->reason||b->allowed!=b->reason||(b->reason==4&&!b->window_raw))refuse("STRICT_UNKNOWN",b->id);
         }else if(!b->witnessed)refuse("STRICT_UNKNOWN",b->id);
     }
     if(table && unknowns<0)refuse("STRICT_UNKNOWN","missing final SUMMARY");
