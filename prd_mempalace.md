@@ -27,6 +27,10 @@
 - 登记:向 Rust 学习内存安全(所有者 2026-10-23 提出,曾在 roadmap 与 v0.0.85 计划里被列为不做):已重新编排,路线权威 plans/memory-safety.md(五期、六项采用门指标);甲、乙期为快车道工具期不占版本槽;丙一期条件并入 0.0.95,入口门不过则不并入;丙二期起在 0.0.102 之后新增版号。回滚:恢复 roadmap-0.0.83-0.0.99.md:122 修订注之前口径并在此记一行。
 - 登记:四道并行、每版足量(所有者 2026-11-19)不撤销,按"一个候选只含一类大改"执行:只有功能道一类 A 类改动进候选,速度、资格、用户三道在 main 持续落库且不计 planned_units;足量以封顶内完成率衡量。入口:plans/roadmap-0.0.83-0.0.99.md(含 0.0.100 起汇编级精修入口准则)。回滚:所有者一句话即恢复原口径。
 
+### 材料身份(闭包摘要)
+
+- 一次性失效(2026-11-24,3c04bf835b):tools/affected.cx 的 closure_sha 不再计 .git/ 前缀节点(per-checkout 路径,不是源码依赖;版本工作树里 .git 是文件)。main 检出实测四个闭包摘要全变:release-run、precommit、chain-ready 同为 da37137e022a... -> 606d63e227c2...,affected.cx 的 019185220d2d... -> 74d283b679c7...。结果:此提交之后所有按闭包摘要键的材料身份(tools/affected.cx --prepare-materials 的 release-oneshot、release-run 等)第一次需要冷建一次,旧缓存条目失效不再命中。预跑(agy-flow)首轮冷建属预期,不是回归。入口:tools/check-affected-gitnode.cx。回滚:恢复 3e54e46d70 版 closure_sha(计 .git/ 节点,版本工作树里需 git_path_abs 解析)。
+
 ### 版本与发布
 
 - 版本序唯一入口:build/version-seq.tsv;各版内容、顺延与对调只在该表改,本节不再记逐版重排。跳号:0.0.64、0.0.69、0.0.70(后两号并入 0.0.71 一次发布)。
