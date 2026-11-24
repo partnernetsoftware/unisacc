@@ -1345,102 +1345,6 @@ static int rg_tool_mode(int argc, char **argv) {
     return 0;
 }
 
-static int rg_promote_swap(const char *path, const char *key, const char *from_col, const char *to_col, char *out_cid, size_t cid_cap) {
-    size_t n = 0; char *b = (char *)cx_read(path, &n);
-    if (!b) return -1;
-    size_t kl = strlen(key), fl = strlen(from_col), tl = strlen(to_col);
-    size_t i = 0, hit = 0, pos = 0;
-    while (i < n) {
-        size_t e = i; while (e < n && b[e] != '\n') e++;
-        if (e > i && b[i] != '#' && e - i > kl && !memcmp(b + i, key, kl) && b[i + kl] == '\t') {
-            pos = i; hit++;
-        }
-        i = e + 1;
-    }
-    if (hit != 1) { mm_free(b); return -1; }
-    size_t le = pos; while (le < n && b[le] != '\n') le++;
-    size_t c1 = pos + kl + 1;
-    size_t c1e = c1; while (c1e < le && b[c1e] != '\t') c1e++;
-    size_t cs = c1, ce = c1e;
-    if (out_cid) {
-        /* batches.tsv: col 10 (0-based) is coverage id */
-        int col = 0; size_t p = pos;
-        while (p < le && col < 10) { if (b[p] == '\t') col++; p++; }
-        size_t q = p; while (q < le && b[q] != '\t') q++;
-        if (col != 10 || q == p || q - p >= cid_cap) { mm_free(b); return -1; }
-        mm_copy(out_cid, cid_cap, b + p, q - p); out_cid[q - p] = 0;
-    } else {
-        /* coverage.tsv: col 2 (0-based) is status */
-        if (c1e >= le) { mm_free(b); return -1; }
-        cs = c1e + 1; ce = cs; while (ce < le && b[ce] != '\t') ce++;
-    }
-    if (ce - cs != fl || memcmp(b + cs, from_col, fl)) { mm_free(b); return -2; }
-    size_t nn = n - fl + tl;
-    char *nb = (char *)mm_alloc((long)nn + 1);
-    if (!nb) { mm_free(b); return -1; }
-    mm_copy(nb, nn, b, cs);
-    mm_copy(nb + cs, nn - cs, to_col, tl);
-    mm_copy(nb + cs + tl, nn - cs - tl, b + ce, n - ce);
-    int wrc = cx_write(path, nb, nn);
-    mm_free(nb); mm_free(b);
-    return wrc ? -1 : 0;
-}
-
-static int rg_promote(const char *id, int use_dev, const char *devdir, int force_layout) {
-    char cid[512], root[4096], cache[4400], listbin[4400], batchbin[4400], parent[4400], why[512];
-    static char buf[1 << 16];
-    int reused = 0, lk = -1, okrun = 0, rc = 0;
-    if (!clean(id) || !*id) rg_die("empty field, TAB or newline in id", 0);
-    if (rg_root_missing()) { fprintf(stderr, "register: nothing was written (id %s)\n", id); return 2; }
-    if (sy_realpath(".", root, sizeof root) < 0 || cx_fmt(cache, sizeof cache, "%s/unisacc-register-native", sy_tmpdir())) rg_die("prepare path", 0);
-    if (sy_mkdir(cache, 0700) && sy_exists(cache) != 1) rg_die("prepare directory", cache);
-    if (rn_prepare(root, "tests/run.cx", cache, listbin, sizeof listbin, &reused, why, sizeof why) ||
-        rn_prepare(root, "tests/run-batch.cx", cache, batchbin, sizeof batchbin, &reused, why, sizeof why)) rg_die(why, 0);
-    lk = rg_lock();
-    if (rg_promote_swap(rg_bpath(), id, "PLANNED", "IMPLEMENTED", cid, sizeof cid) != 0) {
-        rg_unlock(lk); rg_die("batch is not PLANNED or missing", id);
-    }
-    if (rg_promote_swap(rg_cpath(), cid, "PLANNED", "IMPLEMENTED_SEPARATE_BATCH", 0, 0) != 0) {
-        (void)rg_promote_swap(rg_bpath(), id, "IMPLEMENTED", "PLANNED", 0, 0);
-        rg_unlock(lk); rg_die("coverage row is not PLANNED or missing", cid);
-    }
-    {   char *v[] = {"./tools/bound", "55", listbin, "--list", 0};
-        rc = run(v, buf, sizeof buf);
-        okrun = tx_find(buf, tx_len(buf, sizeof buf), "metadata_valid=1", 16) >= 0;
-    }
-    rg_unlock(lk); lk = -1; parent[0] = 0;
-    if (okrun) {
-        char tmpc[4096];
-        if (sy_realpath(sy_tmpdir(), tmpc, sizeof tmpc) < 0 || tx_snprintf(parent, sizeof parent, "%s/unisacc-affected-register-%s-%d", tmpc, id, sy_pid()) >= (int)sizeof parent
-            || sy_mkdir(parent, 0700) != 0) { okrun = 0; parent[0] = 0; }
-        else {
-            char *v[9] = {"./tools/bound", "58", batchbin}; int argc_run = 3;
-            if (use_dev) { v[argc_run++] = "--candidate"; v[argc_run++] = (char *)devdir; }
-            v[argc_run++] = root; v[argc_run++] = parent; v[argc_run++] = (char *)id; v[argc_run] = 0;
-            int bofd = -1, bpid = run_start(v, &bofd);
-            rc = run_collect(bpid, bofd, buf, sizeof buf);
-            long at = tx_find(buf, tx_len(buf, sizeof buf), "BATCH_RUN\t", 10);
-            if (at >= 0) { long e = tx_chr(buf + at, tx_len(buf + at, sizeof buf), '\n'); printf("%.*s\n", (int)(e < 0 ? tx_len(buf + at, sizeof buf) : e), buf + at); }
-            okrun = rc == 0 && at >= 0 && tx_find(buf + at, tx_len(buf + at, sizeof buf), "status=PASS", 11) >= 0;
-            if (!okrun) fputs(buf, stderr);
-            if (okrun && force_layout && rg_qualify_layout_selftest(root, id, "", "", batchbin, use_dev, devdir, 0) != 0) okrun = 0;
-        }
-    }
-    if (parent[0]) sy_rmdir(parent);
-    if (!okrun) {
-        lk = rg_lock_rollback();
-        if (lk >= 0) {
-            (void)rg_promote_swap(rg_bpath(), id, "IMPLEMENTED", "PLANNED", 0, 0);
-            (void)rg_promote_swap(rg_cpath(), cid, "IMPLEMENTED_SEPARATE_BATCH", "PLANNED", 0, 0);
-            rg_unlock(lk);
-        }
-        printf("REGISTER\tid=%s\tstatus=STILL_PLANNED\n", id);
-        return 1;
-    }
-    printf("REGISTER\tid=%s\tstatus=PROMOTED\n", id);
-    return 0;
-}
-
 int main(int argc, char **argv) {
     char identity_root[4096];
     if (sy_realpath(".", identity_root, sizeof identity_root) >= 0)
@@ -1528,7 +1432,7 @@ int main(int argc, char **argv) {
     }
     if (planned && (norun || use_dev || promote_id)) rg_die("--planned cannot be combined with --no-run, --runner, or --promote", 0);
     if (promote_id && norun) rg_die("--promote cannot be combined with --no-run", 0);
-    if (promote_id) return rg_promote(promote_id, use_dev, devdir, force_layout);
+    if (promote_id) rg_die("--promote 未实现,重写中", 0);
     if(argc>=3&&tx_eqz(argv[argc-2],"--args")){arguments=argv[argc-1];argc-=2;if(!*arguments||!clean(arguments))rg_die("empty args, TAB or newline in args",0);
         /* table convention: words of one args field are joined by ';' ("--cases;lock"); spaces and the
            "--opt=value" form are folded into it */
