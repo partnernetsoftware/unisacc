@@ -7,7 +7,10 @@
  * board (a line "OWNER<TAB>domain,domain,..." under "## 任务板"; unlisted domains show "-").  Prints one
  * BOARD row per domain, one OWNER row per owner (open = MISSING + NEEDS_PRODUCT_CHANGE), and
  * RELEASE<TAB>required=R<TAB>covered=C<TAB>missing=M<TAB>foreign=F<TAB>product=P.  The patrol compares these
- * numbers round to round: an owner whose open count did not move is chased, not messaged again. */
+ * numbers round to round: an owner whose open count did not move is chased, not messaged again.
+ * Fail-closed (REFUSE on stderr, rc 2): any argument, unreadable plan or matrix, git ls-files failing or listing
+ * no matrix, git output over 64K, more than 64 matrices, a non-comment non-blank matrix row under 4 columns (named
+ * by file:line; a 4-column row without the evidence column is legal and counted).  Checked by tools/check-release-board.cx. */
 #pragma unisa use sys.fs
 #pragma unisa use sys.proc
 #pragma unisa use sys.io
@@ -41,27 +44,36 @@ static void owner_of(Dom *d, const char *plan, long pn) {   /* "OWNER\tdomain,do
     }
 }
 
-int main(void) {
+int main(int argc, char **argv) {
     char *gv[] = {"git", "ls-files", "-z", "--", "tests/*-domain-matrix.tsv", 0}, chunk[8192], list[65536];
-    int ofd, pid, k, j; long r, n = 0, at; size_t pn; char *plan = cx_read("plans/release-0.0.43.md", &pn);
+    int ofd, pid, k, j, gexit = 0, gcode = 0; long r, n = 0, at; size_t pn; char *plan;
     long R = 0, C = 0, M = 0, F = 0, P = 0;
+    if (argc != 1) { fprintf(stderr, "REFUSE release-board: unknown argument %s (takes none)\n", argv[1]); return 2; }
+    plan = cx_read("plans/release-0.0.43.md", &pn);
+    if (!plan) { fprintf(stderr, "REFUSE release-board: cannot read plans/release-0.0.43.md\n"); return 2; }
     pid = px_spawn_spool(gv, 0, 0, &ofd, 0);
-    if (pid < 0) return 2;
-    while ((r = sy_read(ofd, chunk, sizeof chunk)) > 0) { for (k = 0; k < r && n + 1 < (long)sizeof list; k++) list[n++] = chunk[k]; }
-    sy_close(ofd); sy_wait_status(pid, 0, 0, 0, 0);
-    for (at = 0; at < n && nd < 64; ) {
+    if (pid < 0) { fprintf(stderr, "REFUSE release-board: cannot spawn git ls-files\n"); return 2; }
+    while ((r = sy_read(ofd, chunk, sizeof chunk)) > 0) { for (k = 0; k < r; k++) { if (n + 1 >= (long)sizeof list) { fprintf(stderr, "REFUSE release-board: git ls-files output over limit limit=%ld\n", (long)sizeof list); sy_close(ofd); sy_wait_status(pid, 0, 0, 0, 0); return 2; } list[n++] = chunk[k]; } }
+    sy_close(ofd); sy_wait_status(pid, 0, &gexit, &gcode, 0);
+    if (!gexit || gcode) { fprintf(stderr, "REFUSE release-board: git ls-files failed rc=%d\n", gcode); return 2; }
+    if (n == 0) { fprintf(stderr, "REFUSE release-board: no tests/*-domain-matrix.tsv tracked\n"); return 2; }
+    for (at = 0; at < n; ) {
+        if (nd >= 64) { fprintf(stderr, "REFUSE release-board: domain matrix files over limit limit=64 (RB_MAX_DOMAINS)\n"); return 2; }
         const char *p = list + at; long pl = tx_len(p, n - at), b = pl; size_t sz; char *t; long i = 0;
         if (pl <= 0) break;
         at += pl + 1;
         while (b > 0 && p[b - 1] != '/') b--;
         tx_copy(dom[nd].name, sizeof dom[nd].name, p + b, pl - b - (long)tx_len("-domain-matrix.tsv", 64));
-        t = cx_read(p, &sz); if (!t) continue;
-        while (i < (long)sz) {   /* host  id  required  state  ... */
+        t = cx_read(p, &sz); if (!t) { fprintf(stderr, "REFUSE release-board: cannot read %.*s\n", (int)pl, p); return 2; }
+        long ln = 0;
+        while (i < (long)sz) {   /* host  id  required  state  [evidence ...]: 4 columns is the minimum, as in tests/full-domain.cx */
             long e = tx_chr(t + i, (long)sz - i, '\n'), l = e < 0 ? (long)sz - i : e, f[5], nf = 0, q;
+            ln++;
             if (l > 0 && t[i] != '#') {
                 f[0] = 0;
                 for (q = 0; q < l && nf < 4; q++) if (t[i + q] == '\t') f[++nf] = q + 1;
-                if (nf >= 4) {
+                if (nf < 3) { fprintf(stderr, "REFUSE release-board: short row %.*s:%ld columns=%ld (need host id required state)\n", (int)pl, p, ln, nf + 1); return 2; }
+                {
                     const char *req = t + i + f[2], *st = t + i + f[3]; long sl = tx_chr(st, l - f[3], '\t'); if (sl < 0) sl = l - f[3];
                     if (tx_prefix(req, 3, "yes", 3)) {
                         if (tx_same(st, sl, "COVERED_LOCAL", 13)) dom[nd].cov++;
@@ -75,7 +87,7 @@ int main(void) {
             i += l + 1;
         }
         mm_free(t);
-        if (plan) owner_of(&dom[nd], plan, (long)pn); else tx_copy(dom[nd].owner, sizeof dom[nd].owner, "-", 1);
+        owner_of(&dom[nd], plan, (long)pn);
         nd++;
     }
     for (k = 0; k < nd; k++) {
