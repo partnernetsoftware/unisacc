@@ -110,12 +110,16 @@ static void delta_add(np_buf *list, const char *recipe, const char *reason) {
     if (reason) { np_puts(list, ":"); np_puts(list, reason); }
 }
 
+static void reload_uncompared(void) {
+    die("reload-not-compared", "next=rerun with a new --out directory");
+}
+
 static void delta_read(dp_delta *d, const char *cxdev, const char *pkg, char sha[65]) {
     char p[PW], installed[65], fp[64] = "";
     size_t n;
     pj(p, cxdev, "state.tsv");
     char *state = cx_read(p, &n);
-    if (!state) die("reload-not-compared", p);
+    if (!state) reload_uncompared();
     for (char *line = strtok(state, "\n"); line; line = strtok(0, "\n")) {
         if (!strncmp(line, "base_stale\t", 11)) {
             d->base_stale = atoi(line + 11);
@@ -127,7 +131,7 @@ static void delta_read(dp_delta *d, const char *cxdev, const char *pkg, char sha
         else if (sscanf(line, "local\t%d", &d->local) == 1) continue;
     }
     free(state);
-    if (!fp[0] || !strcmp(fp, "not-compared-yet")) die("reload-not-compared", 0);
+    if (!fp[0] || !strcmp(fp, "not-compared-yet")) reload_uncompared();
     lp(p, "reload");
     char *log = cx_read(p, &n);
     if (!log) die("reload-log-unreadable", p);
@@ -149,13 +153,21 @@ static void delta_read(dp_delta *d, const char *cxdev, const char *pkg, char sha
     free(log);
     if (!keys || !summary || !d->scope[0]) die("reload-log-incomplete", p);
     if (file_sha(pkg, sha)) die("package-changed-under-us", pkg);
-    if (d->changed > 0 && !d->base_stale) {
+    if (d->changed > 0 && d->built.n && !d->base_stale) {
         pj(p, cxdev, "pkg.installed");
         if (file_sha(p, installed)) die("package-unreadable", p);
         if (!strcmp(sha, installed)) die("input-change-not-in-candidate", "first=unreported");
     }
     if (strcmp(sha, d->expected)) die("package-changed-under-us", pkg);
-    if (d->missing.n && cx_fmt(d->scope, sizeof d->scope, "LOCAL-PARTIAL")) die("fmt", 0);
+    if ((d->missing.n || (d->changed && !d->built.n)) &&
+        cx_fmt(d->scope, sizeof d->scope, "LOCAL-PARTIAL")) die("fmt", 0);
+}
+
+static void mark_scope(const char *scope) {
+    char p[PW], line[200];
+    pj(p, out, "NOT_RELEASE");
+    if (cx_fmt(line, sizeof line, "NOT_RELEASE\tdev-product-v1\tscope=%s\tlnx/x86_64 only; not installed; not candidate evidence\n", scope)) die("fmt", 0);
+    put(p, line);
 }
 
 /* a step is done when rc is 0, its input identity matches and its product still hashes to the recorded sha */
@@ -320,7 +332,7 @@ int main(int argc, char **argv) {
         pj(p, out, "state"); if (mkdir(p, 0755) && errno != EEXIST) die("mkdir", p);
         lock_out();
         pj(p, out, "log"); if (mkdir(p, 0755) && errno != EEXIST) die("mkdir", p);
-        pj(p, out, "NOT_RELEASE"); put(p, "NOT_RELEASE\tdev-product-v1\tscope=LOCAL\tlnx/x86_64 only; not installed; not candidate evidence\n");
+        pj(p, out, "NOT_RELEASE"); if (!isfile(p)) mark_scope("PENDING");
     } else if (!isdir(out)) die("out-missing", out);
     printf("NOT_RELEASE\tdev-product-v1\n");
     pj(cxdev, out, "cxdev"); pj(loader, cxdev, "cx-dev"); pj(pkg, cxdev, "pkg.bin"); pj(base, cxdev, "base.bin");
@@ -339,6 +351,7 @@ int main(int argc, char **argv) {
         if (done("hdr", hid, pkgh)) printf("DEV_STEP\thdr\tSKIP\n");
         else { t0 = now_ms(); if (swap_headers(hdr_pkg, pkgh)) fail("hdr"); seal_step("hdr", hid, pkgh, now_ms() - t0); }
         if (file_sha(pkgh, h3)) die("product-missing", pkgh);
+        mark_scope("LOCAL");
         printf("DEV_HDR\tpath=%s\tsha=%s\tscope=LOCAL\n", pkgh, h3);
         return 0;
     }
@@ -418,13 +431,14 @@ int main(int argc, char **argv) {
                delta.stale, delta.base_stale, delta.scope)) die("delta-too-long", 0);
     np_puts(&report, buf);
     if (!status_only) {
-        if (cx_fmt(buf, sizeof buf, "#!/bin/sh\n# NOT_RELEASE dev-product-v1 scope=LOCAL (tools/dev-product.cx); lnx/x86_64 only\nexport UNISA_CONTAINER='%s' UNISACC_LOCAL=1\nif [ x${UNISACC_E3CACHE+x} = x ]; then export UNISACC_CACHE_DIR=\"${DEV_PRODUCT_CACHE:-%s/runcache}\"; else unset UNISACC_CACHE_DIR; fi\nexec '%s' \"$@\"\n", pkgh, out, cand)) die("path-too-long", 0);
+        if (cx_fmt(buf, sizeof buf, "#!/bin/sh\n# NOT_RELEASE dev-product-v1 scope=%s (tools/dev-product.cx); lnx/x86_64 only\nexport UNISA_CONTAINER='%s' UNISACC_LOCAL=1\nif [ x${UNISACC_E3CACHE+x} = x ]; then export UNISACC_CACHE_DIR=\"${DEV_PRODUCT_CACHE:-%s/runcache}\"; else unset UNISACC_CACHE_DIR; fi\nexec '%s' \"$@\"\n", delta.scope, pkgh, out, cand)) die("path-too-long", 0);
         put(launch, buf); if (chmod(launch, 0755)) die("chmod", launch);
         pj(p, out, "runcache"); if (mkdir(p, 0700) && errno != EEXIST) die("mkdir", p);
         if (cx_fmt(buf, sizeof buf, "NOT_RELEASE\tdev-product-v1\ntree\t%s\ntree_fp\t%s\nentry\t%s\t%s\npkg\t%s\t%s\nnets_pkg\t%s\t%s\nproduct\t%s\t%s\nscope\t%s\n", tree, treeid, cand, h2, pkgh, h3, pkg, h1, launch, fin, delta.scope)) die("path-too-long", 0);
         np_buf receipt = {0};
         np_puts(&receipt, buf); np_puts(&receipt, report.p);
         pj(p, out, "receipt.tsv"); put(p, receipt.p);
+        mark_scope(delta.scope);
         free(receipt.p);
     } else if (!isfile(launch)) { printf("DEV_STEP\tseal\tTODO\n"); return 3; }
     printf("DEV_PRODUCT_PARTS\tentry=%.16s\tpkg=%.16s\tnets_pkg=%.16s\twall_ms=%lld\n", h2, h3, h1, now_ms() - t_start);

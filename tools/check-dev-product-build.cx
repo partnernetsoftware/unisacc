@@ -111,6 +111,31 @@ static void cache_routes(const char *dir, const np_result *sealed) {
     ok(!rc && !r.rc && has_unit_entries(fallback),"launcher-default-runcache-entries");
     np_free(&r);
 }
+/* Change the nets package inside the entry subprocess, after reload validation.
+   Reusing the already sealed header step isolates the check at final publication. */
+static void seal_race(const char *cwd, const char *w, const char *o) {
+    char tree[PW], p[PW], include[PW], shim[240], id[80], why[256] = "", hash[65];
+    np_result r = {0};
+    char *fingerprint[] = {"find", "include", "src", "cx", "exec", "seed", "-type", "f", "-printf", "%p %s %T@\n", 0};
+    int bad = cx_fmt(tree, sizeof tree, "%s/race-tree", w) || mkdir(tree, 0700) ||
+        cx_fmt(p, sizeof p, "%s/include", tree) || cx_fmt(include, sizeof include, "%s/include", cwd) || symlink(include, p);
+    const char *dirs[] = {"src", "cx", "exec", "seed", "tools", 0};
+    for (int i = 0; !bad && dirs[i]; i++) bad = cx_fmt(p, sizeof p, "%s/%s", tree, dirs[i]) || mkdir(p, 0700);
+    bad |= wr(tree, "src/fingerprint", "one regular source") || wr(tree, "tools/entry-build.cx", "") ||
+        cx_fmt(shim, sizeof shim, "#!/bin/sh\n[ \"$1\" = tools/entry-build.cx ] || exit 99\nprintf 'changed after reload' > \"$4\"\n") ||
+        wr(tree, "unisacc.com", shim);
+    if (bad || np_run(fingerprint, tree, 0, 5, &r, why, sizeof why) || r.rc || !r.outn) {
+        ok(0, "seal-race-fixture"); np_free(&r); return;
+    }
+    cx_sha256_hex(r.out, r.outn, hash); np_free(&r);
+    bad = cx_fmt(id, sizeof id, "reload:%s", hash) || wr(o, "state/reload.id", id);
+    char *av[] = {"sh", (char *)COM, (char *)TOOL, "--", "--tree", tree, "--git", (char *)cwd, "--out", (char *)o, "--until-done", 0};
+    int e = run(av, &r);
+    ok(!bad && !e && r.rc == 2 && has(r.out, r.outn, "DEV_STEP\tentry\tDONE") && has(r.out, r.outn, "DEV_STEP\thdr\tSKIP") &&
+       has(r.err, r.errn, "REFUSE package-changed-under-us") && !has(r.out, r.outn, "DEV_PRODUCT\t"), "seal-rechecks-package-after-entry");
+    np_free(&r);
+}
+
 /* --until-done on the real background path of the reload step, with a small fake job as OUT/cxdev/cx-dev */
 static void until(const char *cwd, const char *w, const char *pkg) {
     char o[PW], p[PW], script[2 * PW], id[PW + 16], v[600], pid_s[64], h[65], h1[65], h2[65], sha1[65], sha2[65]; np_result r; int bad = 0, i, rc_seen = 0, gone = 0; long pid; size_t n; char *b;
@@ -165,7 +190,8 @@ static void until(const char *cwd, const char *w, const char *pkg) {
       char *av[] = {"sh", (char *)COM, (char *)TOOL, "--", "--tree", (char *)cwd, "--out", o, "--until-done", 0};
       bad = wr(o, "log/reload.log", log) || wr(o, "cxdev/state.tsv", "fp\tnot-compared-yet\n");
       int e = run(av, &r);
-      ok(!bad && !e && r.rc == 2 && has(r.err, r.errn, "REFUSE reload-not-compared"), "reload-uncompared-refused");
+      ok(!bad && !e && r.rc == 2 && has(r.err, r.errn, "REFUSE reload-not-compared") &&
+          has(r.err, r.errn, "next=rerun with a new --out directory"), "reload-uncompared-refused");
       np_free(&r);
       if (cx_fmt(script, sizeof script, "fp\tcompared\nscope\tLOCAL\nlocal\t1\npkgsha\t%s\nbase_stale\t0\t-\n", h1)) { ok(0, "reload-state-format"); return; }
       bad = wr(o, "cxdev/state.tsv", script) || cx_fmt(p, sizeof p, "%s/cxdev/pkg.installed", o);
@@ -199,6 +225,31 @@ static void until(const char *cwd, const char *w, const char *pkg) {
       ok(!has(r.out, r.outn, "\tDONE\t") && !has(r.out, r.outn, "\tSTARTED\t") && !has(r.out, r.outn, "DEV_UNTIL\t") && !has(r.out, r.outn, "PENDING"), "until-finished-directory-redoes-nothing");
       ok(sha1[0] && !strcmp(sha1, sha2), "until-finished-directory-same-sha");
       cache_routes(o,&r); np_free(&r); }
+    {
+      const char *log = "CXDEV_KEYS\tper_recipe=1\tfiles=1\nCXDEV_RECIPE\tshared-e3\tNOT_DEPLOYED\nCXDEV_RELOAD\tnets=0\tbuilt=0\tlocal_members=0\tstale=0\n";
+      char *av[] = {"sh", (char *)COM, (char *)TOOL, "--", "--tree", (char *)cwd, "--out", o, "--until-done", 0};
+      bad = wr(o, "log/reload.log", log) || cx_fmt(p, sizeof p, "%s/cxdev/pkg.installed", o);
+      b = cx_read(pkg, &n);
+      if (!bad) bad = !b || cx_write(p, b, n);
+      free(b);
+      bad |= cx_fmt(script, sizeof script, "fp\tcompared\nscope\tLOCAL-BASELINE\nlocal\t0\npkgsha\t%s\nbase_stale\t0\t-\n", h1) ||
+          wr(o, "cxdev/state.tsv", script);
+      int e = run(av, &r);
+      ok(!bad && !e && r.rc == 0 && has(r.out, r.outn, "built=-\tnot_rebuilt=shared-e3:NOT_DEPLOYED") &&
+         last_has(&r, "scope=LOCAL-PARTIAL"), "shared-e3-only-with-installed-package-is-partial");
+      np_free(&r);
+      line1(o, "NOT_RELEASE", v, sizeof v);
+      bad = !strstr(v, "scope=LOCAL-PARTIAL") || cx_fmt(p, sizeof p, "%s/unisacc.com", o);
+      b = bad ? 0 : cx_read(p, &n);
+      ok(b && has(b, n, "# NOT_RELEASE dev-product-v1 scope=LOCAL-PARTIAL"), "partial-scope-markers-agree");
+      free(b);
+      bad = wr(o, "log/reload.log", "CXDEV_KEYS\tper_recipe=1\tfiles=1\nCXDEV_RELOAD\tnets=0\tbuilt=0\tlocal_members=0\tstale=0\n");
+      e = run(av, &r);
+      ok(!bad && !e && r.rc == 0 && has(r.out, r.outn, "built=-\tnot_rebuilt=-") &&
+         last_has(&r, "scope=LOCAL-PARTIAL"), "unmapped-change-with-installed-package-is-partial");
+      np_free(&r);
+      seal_race(cwd, w, o);
+    }
 }
 
 static const char *H[3] = {"cx-flat.h", "stdio.h", "stdlib.h"};
