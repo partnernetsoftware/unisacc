@@ -127,6 +127,7 @@
 - 模块接口摘要与缓存键:单元缓存与预构建对象的键是否覆盖所用模块接口摘要未查(结构体扩字段后旧布局对象被复用属同类风险)。未入 state-unverified.tsv,待补行。
 - ext/sysx/linuxns.cx:lnx_arm64 实跑 UNMEASURED;私有 lns_sys 带 dock 直调,L0 有 sy_syscall6 后须改一行去 dock。入口:build/pkg-gaps.tsv L0-LACKS-SY-SYSCALL6。待核(0.0.88 已含 sy_syscall6,是否已改未查)。
 - 其余不阻塞发布,只见真源:U02 U05 U06 U07 U08 U09 U11 U12 U13 U14 U18 U19。
+- forward 调用上限 8192 在产品内不可达:签名池约 8064(functiontypes-manifest.tsv:3)与 .cx 文件项上限 CXM_ITEMS 8192(cxmod.cx:1383)先耗尽,故 FORWARD_CALL_MAX 相等即拒(S0)仅有表级证据(tests/check-forward-limit-table.cx)。待 fable 裁:降 FW 限到签名池之下,或把签名池升到 8192 以上。未入 state-unverified.tsv,待补行。
 
 ### 里程碑与跨窗口约定
 
