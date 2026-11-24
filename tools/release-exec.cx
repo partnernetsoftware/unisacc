@@ -300,7 +300,12 @@ static void rollback(void) {
     }
     sy_printf("ROLLBACK\t%d\t%s\trelease/rollback.txt (1): back to draft, Latest -> %s; tag never deleted\n", cur_step, dry ? "PLAN" : "RUN", prevtag);
     { int r1 = act(a, 30, 0, 0), r2 = act(b, 30, 0, 0);
-      if (!dry) sy_printf("ROLLBACK\t%d\tRESULT\tdraft_rc=%d\tlatest_rc=%d\n", cur_step, r1, r2); }
+      if (!dry) {
+          char note[100];
+          cx_fmt(note, sizeof note, "draft_rc=%d latest_rc=%d", r1, r2);
+          sy_printf("ROLLBACK\t%d\tRESULT\tdraft_rc=%d\tlatest_rc=%d\n", cur_step, r1, r2);
+          index_row("rollback", r1 || r2 ? "FAIL" : "PASS", "release/rollback.txt", note);
+      } }
 }
 
 /* ---- G1: strict evidence --------------------------------------------------------- */
@@ -1420,6 +1425,53 @@ static void step_y1(void) {
 }
 
 /* ---- step 5: publish ------------------------------------------------------------------------ */
+static int readback_prewarmed;
+
+/* Same outer argv and inherited environment as the public readback smoke.
+ * release-ape keeps candidate probe diagnostics private on success, so only
+ * the two checkout tool lookups are visible here. */
+static void readback_prewarm(void) {
+    char launcher[4600], tool[4600], ape[4600], sha[65], why[256];
+    char *v[] = {"sh", launcher, tool, "--", "smoke", ape, 0};
+    char *env[] = {"UNISACC_RR_TIME=1", 0};
+    np_result r = {0};
+    int hits = 0, misses = 0, ok;
+    if (cx_fmt(launcher, sizeof launcher, "%s/%s", here, checkout_product + 2) ||
+        cx_fmt(tool, sizeof tool, "%s/tools/chain-step.cx", here) ||
+        cx_fmt(ape, sizeof ape, "%s/%s", layout, cand.name[0])) die("readback prewarm path");
+    sha_file(ape, sha);
+    if (!tx_eqz(sha, cand.sha[0])) die("readback prewarm candidate SHA mismatch");
+    /* A successful first smoke can fill one cold layer. Only a second observation
+     * can then prove readiness. Do not retry a transport or smoke failure. */
+    for (int attempt = 0; attempt < 2; attempt++) {
+        hits = misses = 0;
+        show(v, "PREWARM");
+        ok = !np_run(v, here, env, 45, &r, why, sizeof why) && !r.rc && !r.residue;
+        if (ok && r.err) {
+            static const char prefix[] = "RR_TIME\tlookup_hit=";
+            long at = 0, n; const char *line;
+            while (line_next(r.err, (long)r.errn, &at, &line, &n)) {
+                long k = sizeof prefix - 1, start = k;
+                int positive = 0;
+                if (n <= k || memcmp(line, prefix, k)) continue;
+                while (k < n && line[k] >= '0' && line[k] <= '9') positive |= line[k++] != '0';
+                if (k > start && k < n && line[k] == '\t' && positive) hits++;
+                else misses++;
+            }
+        }
+        np_free(&r);
+        if (!ok || (hits == 2 && !misses)) break;
+    }
+    if (!ok || hits != 2 || misses) {
+        sy_printf("GATE\t%d\tREADBACK_PREWARM\tFAIL\tsmoke_ok=%d hits=%d misses=%d\n", cur_step, ok, hits, misses);
+        emit_phase(2);
+        /* This is a local readiness failure, not a reason to undo a public release on resume. */
+        die("RELEASE_EXEC_GATE_READBACK_PREWARM: run release-exec --warm with the same checkout, --layout, --out and cache environment before resuming");
+    }
+    gate_pass("READBACK_PREWARM", "smoke passed; chain-step and release-ape hit");
+    readback_prewarmed = 1;
+}
+
 static void step_publish(void) {
     char json[4500], log[4500], ref[600]; int st;
     char *v[] = {"gh", "-R", REPO, "release", "edit", cand.tag, "--draft=false", "--latest", 0};
@@ -1433,6 +1485,7 @@ static void step_publish(void) {
     if (st == 2 || (dry && index_ref("publish", "exec-5-publish", ref, sizeof ref))) { published = 1; show(v, "DONE"); say("SKIP", "release already public", cand.tag); }
     else if (cur_step < from_step && !dry) refuse("RESUME", "release not public for a verify-only step");
     else {
+        if (!dry) readback_prewarm();
         if (act(v, 30, 0, 0)) refuse("PUBLIC_SHA", "gh release edit --draft=false failed");
         if (!dry) { published = 1; if (release_state() != 2) refuse("PUBLIC_SHA", "release still draft after edit"); index_row("publish", "-", cand.tag, "isDraft=false, Latest"); }
     }
@@ -1455,6 +1508,15 @@ static void step_readback(void) {
         else { gate_pass("PUBLIC_SHA", "evidence public-readback.txt READBACK_SHA equals candidate"); gate_pass("READBACK", "evidence public-readback.txt rc=0 (recorded)"); }
         return;
     }
+    if (cur_step < from_step) {
+        if (evidence_readback_ok("public-readback.txt", 1) != 1) {
+            /* A verify-only resume must not mutate an already public release. */
+            die("RELEASE_EXEC_GATE_READBACK: recorded public readback missing or invalid; resume from step 6");
+        }
+        gate_pass("READBACK", "public readback evidence verified");
+        return;
+    }
+    if (!readback_prewarmed) readback_prewarm();
     sy_mkdir(fresh, 0755);
     if (act(dl, 55, 0, 0)) refuse("PUBLIC_SHA", "public download failed");
     cx_fmt(p, sizeof p, "%s/%s", fresh, cand.name[0]); sha_file(p, hex);
@@ -1658,14 +1720,28 @@ static int warm_identity(char *why, long cap) {
     if (cx_fmt(warm_receipt, sizeof warm_receipt, "%s/warm-%s.tsv", outdir, warm_key)) { cx_fmt(why, cap, "receipt path"); return 1; }
     return 0;
 }
-/* 1 receipt present and equal, 0 absent, -1 present but different (tampered) */
-static int warm_receipt_state(void) {
+/* Read the out receipt first; a published copy can have a scrubbed root. */
+static int warm_receipt_at(const char *path) {
     long n; char *t; int same;
-    if (sy_exists(warm_receipt) != 1) return 0;
-    t = slurp(warm_receipt, &n);
-    same = t && n == (long)warm_row.n && !memcmp(t, warm_row.p, warm_row.n);
+    int present = sy_exists(path);
+    if (!present) return 0;
+    if (present < 0 || !(t = slurp(path, &n))) return -1;
+    same = n == (long)warm_row.n && !memcmp(t, warm_row.p, warm_row.n);
+    if (!same) {
+        np_buf scrubbed = {0};
+        scrub_home_put(&scrubbed, warm_row.p, (long)warm_row.n);
+        same = n == (long)scrubbed.n && !memcmp(t, scrubbed.p, scrubbed.n);
+        free(scrubbed.p);
+    }
     free(t);
     return same ? 1 : -1;
+}
+static int warm_receipt_state(void) {
+    char path[4600];
+    int st = warm_receipt_at(warm_receipt);
+    if (st) return st;
+    if (cx_fmt(path, sizeof path, "%s/warm-%s.tsv", evdir, warm_key)) return -1;
+    return warm_receipt_at(path);
 }
 static void warm_argv(int i, char **v, char *tp, long cap) {
     if (warm_abs[i]) cx_fmt(tp, cap, "%s/%s", here, warm_tool[i]); else cx_fmt(tp, cap, "%s", warm_tool[i]);
@@ -1736,7 +1812,7 @@ static int warm_main(void) {
         miss = warm_probes("after-rewarm");
     }
     if (miss) { sy_eprintf("release-exec: REFUSE RELEASE_EXEC_GATE_WARM %d target(s) not served from the run cache after warm-up\n", miss); return 2; }
-    if (!st && sy_write_atomic(warm_receipt, warm_row.p, warm_row.n, 0644)) { sy_eprintf("release-exec: REFUSE RELEASE_EXEC_GATE_WARM receipt write\n"); return 2; }
+    if (sy_exists(warm_receipt) != 1 && sy_write_atomic(warm_receipt, warm_row.p, warm_row.n, 0644)) { sy_eprintf("release-exec: REFUSE RELEASE_EXEC_GATE_WARM receipt write\n"); return 2; }
     sy_printf("WARM\tRESULT\tREADY\tkey=%s\ttargets=5\n", warm_key);
     return 0;
 }
