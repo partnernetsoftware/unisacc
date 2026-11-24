@@ -152,6 +152,8 @@ int main(void) {
     put_file(repo, "tests/coverage.tsv", "id\tdomain\tstatus\tcontract\tevidence\nc0\tinterfaces\tIMPLEMENTED\told\tev\n", 0644);
     put_file(repo, "tests/tools-compile-sources.tsv", "tools/a.cx\tregular\ntools/z.cx\tregular\n", 0644);
     put_file(repo, "plans/v0.0.99.md", "# 0.0.99 计划: base\nline1\n", 0644);
+    put_file(repo, "release/candidate.tsv",
+             "repo\ttag\tcommit\tversion\npartnernetsoftware/unisacc\tv0.0.98\t-\t0.0.98\n", 0644);
     put_file(repo, "tools/derive.cx", "/* line 1 */\n/* line 2 */\n/* line 3 */\n/* line 4 */\n/* line 5 */\n", 0644);
 
     cx_fmt(cmd, sizeof cmd,
@@ -169,6 +171,10 @@ int main(void) {
     put_file(repo, "tests/coverage.tsv", "id\tdomain\tstatus\tcontract\tevidence\nc0\tinterfaces\tIMPLEMENTED\told\tev\nc_main\tinterfaces\tIMPLEMENTED\tmain\tev\n", 0644);
     put_file(repo, "tests/tools-compile-sources.tsv", "tools/a.cx\tregular\ntools/b_main.cx\tregular\ntools/z.cx\tregular\n", 0644);
     put_file(repo, "tools/derive.cx", "/* line 1 main-edit */\n/* line 2 */\n/* line 3 */\n/* line 4 */\n/* line 5 */\n", 0644);
+    /* The candidate slot: main carries another version while the branch carries its own, which is the
+       shape every version branch merge has. */
+    put_file(repo, "release/candidate.tsv",
+             "repo\ttag\tcommit\tversion\npartnernetsoftware/unisacc\tv0.0.100\t-\t0.0.100\n", 0644);
     cx_fmt(cmd, sizeof cmd, "cd '%s' && git add -A && git commit -qm main-advance", repo);
     rc = run_sh(cmd, 15, out, sizeof out);
     ck(rc == 0, "fixture-main-advance");
@@ -184,6 +190,8 @@ int main(void) {
     put_file(repo, "tests/coverage.tsv", "id\tdomain\tstatus\tcontract\tevidence\nc0\tinterfaces\tIMPLEMENTED\tupdated-on-branch\tev\nc_br\tinterfaces\tIMPLEMENTED\tbr\tev\n", 0644);
     put_file(repo, "tests/tools-compile-sources.tsv", "tools/a.cx\tregular\ntools/z.cx\tregular\ntools/z_br.cx\tregular\n", 0644);
     put_file(repo, "tools/derive.cx", "/* line 1 */\n/* line 2 */\n/* line 3 */\n/* line 4 */\n/* line 5 branch-edit */\n", 0644);
+    put_file(repo, "release/candidate.tsv",
+             "repo\ttag\tcommit\tversion\npartnernetsoftware/unisacc\tv0.0.99\t-\t0.0.99\n", 0644);
     cx_fmt(cmd, sizeof cmd, "cd '%s' && git add -A && git commit -qm branch-advance && git checkout -q main", repo);
     rc = run_sh(cmd, 15, out, sizeof out);
     ck(rc == 0, "fixture-branch-advance");
@@ -201,8 +209,9 @@ int main(void) {
        has(out, "PREMERGE_FILE\ttests/batches.tsv\tOK\trule=tsv-union") &&
        has(out, "PREMERGE_FILE\ttests/coverage.tsv\tOK\trule=tsv-union") &&
        has(out, "PREMERGE_FILE\ttests/tools-compile-sources.tsv\tOK\trule=auto-3way") &&
-       has(out, "PREMERGE_FILE\ttools/derive.cx\tOK\trule=auto-3way"),
-       "seven-shared-files-rules");
+       has(out, "PREMERGE_FILE\ttools/derive.cx\tOK\trule=auto-3way") &&
+       has(out, "PREMERGE_FILE\trelease/candidate.tsv\tOK\trule=branch-side-version-slot"),
+       "shared-files-rules-including-the-version-slot");
 
     /* Verify union contents on disk */
     char p[1024];
@@ -222,6 +231,13 @@ int main(void) {
     cx_fmt(p, sizeof p, "%s/tools/derive.cx", udir);
     ck(file_equals(p, "/* line 1 main-edit */\n/* line 2 */\n/* line 3 */\n/* line 4 */\n/* line 5 branch-edit */\n"),
        "auto-3way-keeps-both-hunks");
+
+    /* The version slot: main carries 0.0.100, the branch carries 0.0.99, and only the branch's row may
+       survive.  Deleting the release/candidate.tsv arm of merge_one_both's branch-side rule makes this file
+       fall to auto-3way and the summary report conflict=1, so this case is what holds that arm in place. */
+    cx_fmt(p, sizeof p, "%s/release/candidate.tsv", udir);
+    ck(file_equals(p, "repo\ttag\tcommit\tversion\npartnernetsoftware/unisacc\tv0.0.99\t-\t0.0.99\n"),
+       "version-slot-takes-branch-side");
 
     /* Mutation test: --mutate-drift build/iface-hash.tsv must turn red (rc=1) */
     char udir_mut[600];

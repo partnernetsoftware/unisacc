@@ -998,6 +998,55 @@ int main(int argc,char **argv) {
             if (sy_rmdir(tables) != 0) { checks++; failed++; printf("FAIL\tprivate copy not removed\n"); }
         }
     }
+    /* --planned and --promote ID */
+    {   char ptables[4096], pbpath[4400], pcpath[4400];
+        if (cx_fmt(ptables, sizeof ptables, "%s/reg-plan-%d", sy_tmpdir(), sy_pid()) || sy_mkdir(ptables, 0700) != 0) {
+            checks++; failed++; printf("FAIL\tplanned mkdir\n");
+        } else {
+            setenv("UNISACC_TABLES", ptables, 1);
+            size_t bn = 0, cn = 0; char *bb = cx_read(rbpath, &bn), *cb = cx_read(rcpath, &cn);
+            if (cx_fmt(pbpath, sizeof pbpath, "%s/batches.tsv", ptables) || cx_fmt(pcpath, sizeof pcpath, "%s/coverage.tsv", ptables)
+                || !bb || !cb || cx_write(pbpath, bb, bn) || cx_write(pcpath, cb, cn)) {
+                checks++; failed++; printf("FAIL\tplanned copy\n");
+            } else {
+                char out[65536]; int rc;
+                const char *pid_bad = "check-reg-plan-bad";
+                const char *pid_ok = "check-reg-plan-ok";
+                char *v1[] = {"sh", "./unisacc.com", "tools/register.cx", "--", "--planned", pid_bad, "tools/precommit-preview.cx", "WRONG_MARKER", "planned bad", "tools/precommit-preview.cx", 0};
+                rc = run(v1, out, sizeof out);
+                ok(rc == 0 && strstr(out, "status=REGISTERED_PLANNED") != 0 && !strstr(out, "BATCH_RUN\t"), "planned registers without trial run");
+                { size_t zn = 0; char *zb = cx_read(pbpath, &zn); size_t zn2 = 0; char *zc = cx_read(pcpath, &zn2);
+                  ok(zb && zc && strstr(zb, "\tPLANNED\t") && strstr(zc, "\tPLANNED\t"), "planned writes PLANNED to both tables"); }
+
+                char *vlist[] = {"sh", "./unisacc.com", "tests/run.cx", "--", "--list", 0};
+                rc = run(vlist, out, sizeof out);
+                ok(rc == 0 && strstr(out, "metadata_valid=1") != 0, "run.cx --list validates PLANNED metadata");
+
+                char *vall[] = {"sh", "./unisacc.com", "tests/run.cx", "--", "--all", 0};
+                rc = run(vall, out, sizeof out);
+                ok(rc != 0 && strstr(out, "NOT_RUN") != 0 && strstr(out, "PLANNED") != 0, "run.cx --all exits non-zero and shows NOT_RUN PLANNED");
+
+                char *vmux[] = {"sh", "./unisacc.com", "tools/register.cx", "--", "--planned", "--no-run", pid_ok, "tools/check-register.cx", "CX_REGISTER", "mux", "tools/register.cx", 0};
+                rc = run(vmux, out, sizeof out);
+                ok(rc != 0, "--planned with --no-run refused");
+
+                char *vprom_bad[] = {"sh", "./unisacc.com", "tools/register.cx", "--", "--promote", pid_bad, 0};
+                rc = run(vprom_bad, out, sizeof out);
+                { size_t zn = 0; char *zb = cx_read(pbpath, &zn);
+                  ok(rc != 0 && strstr(out, "status=STILL_PLANNED") != 0 && zb && strstr(zb, "\tPLANNED\t"), "--promote failing check reverts to STILL_PLANNED"); }
+
+                char *vprom_non[] = {"sh", "./unisacc.com", "tools/register.cx", "--", "--promote", "check-register", 0};
+                rc = run(vprom_non, out, sizeof out);
+                ok(rc != 0, "--promote on non-PLANNED batch refused");
+            }
+            unsetenv("UNISACC_TABLES");
+            if (!cx_fmt(pbpath, sizeof pbpath, "%s/batches.tsv", ptables)) sy_unlink(pbpath);
+            if (!cx_fmt(pcpath, sizeof pcpath, "%s/coverage.tsv", ptables)) sy_unlink(pcpath);
+            if (!cx_fmt(pbpath, sizeof pbpath, "%s/.register.lock", ptables)) sy_unlink(pbpath);
+            if (!cx_fmt(pbpath, sizeof pbpath, "%s/.register.holder-done", ptables)) sy_unlink(pbpath);
+            sy_rmdir(ptables);
+        }
+    }
     printf("CX_REGISTER\tchecks=%d\tfailed=%d\n", checks, failed);
     return failed ? 1 : 0;
 }

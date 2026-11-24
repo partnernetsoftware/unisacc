@@ -43,6 +43,7 @@ static int slurp_okrc = 0;   /* 允许的最大退出码:0=仅成功;ratchets.cx
 static int slurp_last_timeout = 0, slurp_last_rc = 0, slurp_from_run_unplanned = 0;
 static volatile int pc_active_child_pid = 0;
 #define SLURP_DEADLINE_MS 55000   /* 每个子进程(含 ratchets/cx-lint/verify-deferred)最多 55 s:超时杀进程组,统一按 GATE_TIMEOUT 处理 */
+static long slurp_bound_ms = 0;   /* >0: this one slurp uses a tighter bound (affected-canary 10 s), reset by the caller */
 /* --plan DIR / --from-run DIR (tools/precommit-flow.cx): the gate subprocesses become flow nodes.
  * cur_gate names the gate about to call slurp (manifest, tables, runlist, facts, tlibfrozen, lint, lintr1,
  * ratchets).  --plan: print PLAN<TAB>id<TAB>argv... and act as if the gate ran with empty output.
@@ -117,13 +118,13 @@ static char *slurp_run(char **argv, long *n) {
     pid = sy_spawn_pipe(argv, 0, 0, &ofd, 0);
     if (pid < 0) return 0;
     pc_active_child_pid = pid;
-    deadline = sy_now_ms() + SLURP_DEADLINE_MS;
+    deadline = sy_now_ms() + (slurp_bound_ms > 0 ? slurp_bound_ms : SLURP_DEADLINE_MS);
     for (;;) {
         sy_pollfd_t pf; long left = deadline - sy_now_ms();
         pf.fd = ofd; pf.events = SY_POLLIN; pf.revents = 0;
         if (left <= 0 || sy_poll(&pf, 1, left) <= 0) {
             sy_eprintf("precommit: GATE_TIMEOUT gate=%s cmd=%s bound_s=%d\n",
-                       cur_gate ? cur_gate : "subproc", argv[0], SLURP_DEADLINE_MS / 1000);
+                       cur_gate ? cur_gate : "subproc", argv[0], (int)((slurp_bound_ms > 0 ? slurp_bound_ms : SLURP_DEADLINE_MS) / 1000));
             slurp_last_timeout = 1;
             slurp_last_rc = 124;
             pc_active_child_pid = 0;
@@ -176,6 +177,7 @@ static const char gt_builtin[] =
     "runlist\tACMR\ttests/coverage.tsv tests/batches.tsv tests/batch-product-inputs.tsv\n"
     "facts\tACMR\tinclude exec/facts\n"
     "ledger\tACMR\tarchive/agentwork-retire-2026-11/ledger.tsv\n"
+    "affected-canary\tACMRD\ttests/batches.tsv tests/batch-product-inputs.tsv tests/coverage.tsv cxroot.tsv tools/affected.cx tools/cxlib ext cx\n"
     "cx\tACMR\t*.cx\n";
 static const char *gt_tab = 0; static long gt_n = 0; static int gt_src = 0, gt_na = 0; static char gt_nal[160];
 static int gt_load(void) {
@@ -3717,6 +3719,55 @@ int main(int argc, char **argv) {
               blocked++;
           }
       }
+    }
+    /* affected-canary gate: tools/affected.cx went rc2 on every call for days (a batch with a {candidate}
+       placeholder lacked its tests/batch-product-inputs.tsv row) and nothing noticed.  A commit touching the
+       canary read set (registry, declaration, coverage and cxroot tables, affected.cx and the cxlib/ext/cx trees
+       it is built from) runs `affected --registry-check`: registry load plus the product-input declaration check,
+       no closure scan (about 1 s hot).  When every one of those inputs staged equals the work tree's bytes the
+       check runs in the work tree (warm run-cache, bound 10 s: same inputs, same verdict); otherwise it runs
+       inside the isolated staged tree (cold compile, bound 30 s), never on a diverging work tree.  rc != 0 or no
+       answer blocks, naming affected's own reason lines.  A commit that deletes tools/affected.cx blocks; only a
+       repository that never had it (fixture) skips. */
+    { long acn; char *acnames = gate_diff("affected-canary", &acn);
+      if (!acnames) { sy_eprintf("precommit: BLOCKED git diff --cached (affected-canary read set) failed\n"); blocked++; }
+      else if (acn > 0 && sy_exists("tools/affected.cx") != 1) {
+          char *dv[] = {"git", "diff", "--cached", "--diff-filter=D", "--name-only", "--", "tools/affected.cx", 0}; long dn = 0; char *dd = slurp(dv, &dn);
+          if (plan_dir) {}
+          else if (!dd) { sy_eprintf("precommit: BLOCKED affected-canary cannot tell whether tools/affected.cx is deleted (git diff failed)\n"); blocked++; pc_mark_block("affected-canary", "affected-missing"); }
+          else if (dn > 0) { sy_eprintf("precommit: BLOCKED affected-canary tools/affected.cx is deleted in this commit (the liveness canary cannot run)\n"); blocked++; pc_mark_block("affected-canary", "affected-missing"); }
+          else sy_eprintf("precommit: AFFECTED_CANARY skipped=1 reason=no-tools/affected.cx (fixture repo)\n");
+          if (dd) mm_free(dd);
+      } else if (acn > 0) {
+          const char *wtop = pc_work_top[0] ? pc_work_top : (pc_local_top[0] ? pc_local_top : pc_orig_cwd);
+          char *cv[] = {"sh", "-c", "for f in tools/affected.cx cxroot.tsv tests/batches.tsv tests/batch-product-inputs.tsv tests/coverage.tsv; do cmp -s \"$f\" \"$0/$f\" || { echo DIFF; exit 0; }; done;"
+                        " for d in tools/cxlib ext cx; do diff -rq \"$d\" \"$0/$d\" >/dev/null 2>&1 || { echo DIFF; exit 0; }; done; echo SAME", (char *)wtop, 0};
+          char *hv[] = {"sh", "-c", "cd \"$0\" && unset GIT_DIR GIT_WORK_TREE GIT_INDEX_FILE &&"
+                        " exec sh ./unisacc.com tools/affected.cx -- --registry-check 2>&1", (char *)wtop, 0};
+          char *iv[] = {"sh", "-c", "exec sh ./unisacc.com tools/affected.cx -- --registry-check 2>&1", 0};
+          long an, cn2; char *ao, *co; int b0_ac = blocked, arc, ato, hot; long t_ac = sy_now_ms();
+          co = (plan_dir || !wtop[0]) ? 0 : slurp(cv, &cn2);
+          hot = co && tx_find(co, cn2, "SAME", 4) >= 0; mm_free(co);
+          cur_gate = "affected-canary"; slurp_okrc = 255; slurp_bound_ms = hot ? 10000 : 30000;
+          ao = slurp(hot ? hv : iv, &an); arc = slurp_last_rc; ato = slurp_last_timeout;
+          slurp_bound_ms = 0; slurp_okrc = 0; cur_gate = 0;
+          if (plan_dir) {}
+          else if (!ao) { sy_eprintf("precommit: BLOCKED affected-canary %s (basis=%s bound %d s)\n", ato ? "timeout" : "did not run", hot ? "worktree-binary" : "staged-tree", hot ? 10 : 30); blocked++; }
+          else if (arc != 0 || tx_find(ao, an, "AFFECTED_REGISTRY_CHECK", 22) < 0) {
+              long at6 = 0; int shown = 0;
+              sy_eprintf("precommit: BLOCKED affected-canary tools/affected.cx rc=%d\n", arc);
+              while (at6 < an && shown < 8) { long e = tx_chr(ao + at6, an - at6, '\n'), l = e < 0 ? an - at6 : e;
+                  if (tx_find(ao + at6, l, "REFUSE", 6) >= 0 || tx_find(ao + at6, l, "UNDECLARED", 10) >= 0 ||
+                      tx_find(ao + at6, l, "UNKNOWN", 7) >= 0 || tx_find(ao + at6, l, "affected:", 9) >= 0) {
+                      sy_eprintf("precommit: affected-canary %.*s\n", (int)l, ao + at6); shown++; }
+                  at6 += l + 1; }
+              if (!shown) sy_eprintf("precommit: affected-canary tail: %.*s\n", (int)(an > 300 ? 300 : an), an > 300 ? ao + an - 300 : ao);
+              blocked++;
+          } else sy_eprintf("precommit: AFFECTED_CANARY ok basis=%s ms=%ld\n", hot ? "worktree-binary" : "staged-tree", sy_now_ms() - t_ac);
+          mm_free(ao);
+          if (blocked > b0_ac) pc_mark_block("affected-canary", "affected-rc");
+      }
+      mm_free(acnames);
     }
     /* facts gate: a commit touching include/ or exec/facts/ must leave the generated pp-autoinc-gen table
        in sync. The FTRIM/libc anchors are baked into that table from every .h's raw #if lines, so an out-of-

@@ -69,7 +69,9 @@
 - 绝对家目录路径(隐私):证据入口与文档一律写 ~/ 或仓内相对路径,不写 /home/<用户名>/、/Users/<用户名>/。入口:棘轮 no-home-path(基线 build/no-home-path-baseline.tsv 只降不升)、tools/no-home-path.cx --staged、改写用 tools/scrub-home-paths.cx --write。回滚:删 ratchets.cx 的 no-home-path 项并还原 check-ratchets 计数。
 - 家目录路径豁免(历史证据不改):release/evidence/、research/、archive/、apps/csih、ujs、tests/stream-e1/e2-domain-matrix.tsv、tests/real-inputs.tsv、ape-receipt.txt、tools/check-preflight.cx、build/preflight-rules.tsv、tools/libneed-material.cx、tests/check-guard-edit.cx;后几项为工具生成或断言字面,后续在生成处规范化。
 - 写仓内文件只用 Edit/Write 或 .cx 工具。入口:CLAUDE.md。
-- tools.cxlib 版本号只在落 main 时按当时 HEAD 现取号,版本分支上的号一律视为临时,合入时重取;layer-api 与 iface-hash 同提交。当前 main 为 0.4.7(0e839333a0)。依据:分支并行取号撞号。回滚:删本条。
+- tools.cxlib 版本号只在落 main 时按当时 HEAD 现取号,版本分支上的号一律视为临时,合入时重取;layer-api 与 iface-hash 同提交。当前 main 为 0.4.8(件一 0e839333a0 取 0.4.7,0.0.103 分支合入后重取 0.4.8,分支那两次号作废)。依据:分支并行取号撞号。回滚:删本条。
+- premerge-union 的 release/candidate.tsv 归版本分支(2026-11-24):版本槽行主分支带上一已发布版、版本分支带自己那一行,两侧必改同一行,三方合并无法自解;tools/premerge-union.cx 的 merge_one_both 把 release/candidate.tsv 与 plans/v0.0.* 同列固定取分支侧(rule=branch-side-version-slot),tests/merge-rules.tsv 的 conflict 行不被该函数消费,故另记 candidate-version-slot 与代码一致。此前 0.0.103 起链 22-premerge-union 因此项红。变异证明:删该 arm 后 check-premerge-union 26/5(含 FAIL version-slot-takes-branch-side),原状 31/0。落地 9b57647531。回滚:撤该 commit。
+- 整链 derive 高负载缺口(2026-11-24):chain-ready 的 2a-derive 与 22-premerge-union 在高并发下会把 batch-packages-gen 压过 derive 的 30 秒界(TIMEOUT rc=142),单跑 18.6 秒 ok=1;19-chain-preflight 的 sixtarget 节点同理(整链 49.8 秒 rc=1,单跑 44 秒 PASS)。验收用例归 agy-flow 的冲突域限流件:整链中 derive 节点需按冲突域限并发或让 batch-packages-gen 串行。这不是放宽时效,是限并发。入口:tools/derive.cx 第 138 行附近的原生生成器须知。回滚:删本条。
 - git push --no-verify 可绕过全部本地钩子(含推送审计与冻结门);GitHub 分支保护未开,因发布流程直推 main。冻结与审计在服务端不可强制,属已知缺口,改发布流程为分支直发后再开保护。
 
 ### devsvc 与协同方式

@@ -163,11 +163,11 @@ static void group_na(void) {
        " sh ./unisacc.com tools/precommit.cx > m.out 2>&1; echo MRC=$?; grep -c 'gate facts has no read-set row' m.out | tr '\\n' ' '; echo norow;"
        " cp gates.keep tests/precommit-gates.tsv; git reset -q tests/precommit-gates.tsv;"
        " grep '^GATE" T "' g1.out > g1.rows; grep '^GATE" T "' g2.out > g2.rows; cmp -s g1.rows g2.rows && echo GATES_SAME; echo NROWS=$(grep -c . g1.rows); tail -1 g1.out; tail -1 g2.out", out, sizeof out, 1);
-    ck(has(out, "G1RC=0\n") && has(out, "G2RC=0\n") && has(out, "GATES_SAME\n") && has(out, "NROWS=7\n") && has(out, "GATES\tsource=table\n") && has(out, "GATES\tsource=builtin\n"), "na.table-equals-builtin");
+    ck(has(out, "G1RC=0\n") && has(out, "G2RC=0\n") && has(out, "GATES_SAME\n") && has(out, "NROWS=8\n") && has(out, "GATES\tsource=table\n") && has(out, "GATES\tsource=builtin\n"), "na.table-equals-builtin");
     ck(has(out, "MRC=1\n") && has(out, "1 norow\n"), "na.missing-row-fails-closed");
     sh("sh ./unisacc.com tools/precommit.cx > n.out 2> n.err; echo NRC=$?; sh ./unisacc.com tools/precommit-base.cx > b.out 2> b.err; echo BRC=$?;"
        " echo \"NL=$(grep '^PRECOMMIT" T "' n.out)\"; echo \"BL=$(grep '^PRECOMMIT" T "' b.out)\"; grep '^PRECOMMIT_GATES' n.out; echo PASSCNT=$(cat n.out n.err | grep -c PASS)", out, sizeof out, 1);
-    ck(has(out, "PRECOMMIT_GATES\tnot_affected=7\tna=cx,manifest,tables,toolsreg,runlist,facts,ledger\tsource=table\n") && has(out, "PASSCNT=0\n"), "na.disjoint-not-affected-not-pass");
+    ck(has(out, "PRECOMMIT_GATES\tnot_affected=8\tna=cx,manifest,tables,toolsreg,runlist,affected-canary,facts,ledger\tsource=table\n") && has(out, "PASSCNT=0\n"), "na.disjoint-not-affected-not-pass");
     ck(has(out, "NRC=0\n") && has(out, "BRC=0\n") && has(out, "NL=PRECOMMIT\tstaged_cx=0\tblocked=0\n") && has(out, "BL=PRECOMMIT\tstaged_cx=0\tblocked=0\n"), "na.disjoint-verdict-as-base");
     sh("printf '%s\\n' 'static void zz2(char **v) { sy_spawn(v); }' >> tools/flowrun.cx && git add tools/flowrun.cx;"
        " ( sh ./unisacc.com tools/precommit.cx > n.out 2> n.err; echo $? > n.rc ) & ( sh ./unisacc.com tools/precommit-base.cx > b.out 2> b.err; echo $? > b.rc ) & wait;"
@@ -175,7 +175,25 @@ static void group_na(void) {
        " grep '^precommit: ' n.err | sort > n.msg; grep '^precommit: ' b.err | sort > b.msg; cmp -s n.msg b.msg && echo MSG_SAME; echo NMSG=$(grep -c 'blocked:lint:' b.msg)", out, sizeof out, 1);
     ck(has(out, "NRC=1\n") && has(out, "BRC=1\n") && has(out, "NL=PRECOMMIT\tstaged_cx=1\tblocked=1\n") && has(out, "BL=PRECOMMIT\tstaged_cx=1\tblocked=1\n"), "na.intersecting-verdict-as-base");
     ck(has(out, "MSG_SAME\n") && !has(out, "NMSG=0\n") && has(out, "NMSG="), "na.intersecting-messages-as-base");
-    ck(has(out, "PRECOMMIT_GATES\tnot_affected=6\tna=manifest,tables,toolsreg,runlist,facts,ledger\tsource=table\n"), "na.intersecting-gate-not-counted");
+    ck(has(out, "PRECOMMIT_GATES\tnot_affected=7\tna=manifest,tables,toolsreg,runlist,affected-canary,facts,ledger\tsource=table\n"), "na.intersecting-gate-not-counted");
+    /* affected-canary red: a staged batches.tsv row whose args hold {candidate} and that has no batch-product-inputs.tsv id row makes
+       tools/affected.cx refuse (BATCH_PRODUCT_INPUT_UNDECLARED, rc 2) or not answer in the bound; either way the gate blocks by name */
+    sh("git reset -q; git checkout -q -- tools/flowrun.cx;"
+       " printf 'zzcan\\tIMPLEMENTED\\tinterfaces\\ttools/check-precommit-gates.cx\\tSOURCE\\tlnx/x86_64\\t55\\t-\\ttools/check-precommit-gates.cx\\t{out};{candidate}\\tinterfaces.zzcan\\trc0:X\\tproduct\\tcommit\\n' >> tests/batches.tsv;"
+       " printf 'interfaces.zzcan\\tinterfaces\\tIMPLEMENTED_SEPARATE_BATCH\\tcanary fixture row\\ttools/check-precommit-gates.cx\\n' >> tests/coverage.tsv; git add tests/coverage.tsv;"
+       " git add tests/batches.tsv; sh ./unisacc.com tools/precommit.cx > cn.out 2> cn.err; echo CNRC=$?; cat cn.out cn.err | grep -c 'BLOCKED affected-canary' | sed 's/^/CNBLK=/';"
+       " cat cn.out cn.err | grep -c 'gate=affected-canary' | sed 's/^/CNFAIL=/'; cat cn.out cn.err | grep 'affected-canary' | grep -c 'BATCH_PRODUCT_INPUT_UNDECLARED' | sed 's/^/CNUND=/'; git reset -q tests/batches.tsv tests/coverage.tsv; git checkout -q -- tests/batches.tsv tests/coverage.tsv", out, sizeof out, 1);
+    ck(has(out, "CNRC=1\n") && !has(out, "CNBLK=0\n") && has(out, "CNBLK=") && !has(out, "CNFAIL=0\n") && !has(out, "CNUND=0\n") && has(out, "CNUND="), "canary.red-staged-undeclared-placeholder-blocks-by-gate-name");
+    /* affected-canary healthy: warm the same --registry-check first, then a staged comment-only change to the declaration table runs the
+       canary hot and reports ok (basis=worktree-binary) within the 10 s bound */
+    sh("git reset -q; git checkout -q -- tools/flowrun.cx tests/batch-product-inputs.tsv; sh ./unisacc.com tools/affected.cx -- --registry-check > /dev/null 2>&1;"
+       " printf '# canary healthy fixture\\n' >> tests/batch-product-inputs.tsv; git add tests/batch-product-inputs.tsv; sh ./unisacc.com tools/precommit.cx > ch.out 2> ch.err; cat ch.out ch.err | grep -c 'AFFECTED_CANARY ok' | sed 's/^/CHOK=/';"
+       " cat ch.out ch.err | grep -c 'BLOCKED affected-canary' | sed 's/^/CHBLK=/'; git reset -q tests/batch-product-inputs.tsv; git checkout -q -- tests/batch-product-inputs.tsv", out, sizeof out, 1);
+    ck(has(out, "CHOK=1\n") && has(out, "CHBLK=0\n"), "canary.healthy-reports-ok-hot");
+    /* affected-canary delete: removing tools/affected.cx in the commit must block by name, not skip */
+    sh("git reset -q; git checkout -q -- tools/flowrun.cx; git rm -q --cached tools/affected.cx; sh ./unisacc.com tools/precommit.cx > cd.out 2> cd.err; echo CDRC=$?;"
+       " cat cd.out cd.err | grep -c 'BLOCKED affected-canary' | sed 's/^/CDBLK=/'; cat cd.out cd.err | grep -c 'skipped=1' | sed 's/^/CDSKIP=/'; git reset -q tools/affected.cx; git checkout -q -- tools/affected.cx", out, sizeof out, 1);
+    ck(has(out, "CDRC=1\n") && !has(out, "CDBLK=0\n") && has(out, "CDSKIP=0\n"), "canary.delete-affected-blocks-not-skips");
     if (failed) sy_printf("%s\n", out);
 }
 
@@ -190,7 +208,7 @@ static void group_reuse(int part) {
        " echo DRC=$(cat dn.rc)/$(cat db.rc); cmp -s dn.blk db.blk && echo D_SAME;"
        " echo DREAL=$(grep -c 'registration manifest.*zzg1' dn.blk);"
        " echo \"DL=$(grep '^PRECOMMIT" T "' dn.out)\"; echo \"BL=$(grep '^PRECOMMIT" T "' db.out)\"; grep '^PRECOMMIT_GATES' dn.out", out, sizeof out, 1);
-    ck(has(out, "DRC=1/1\n") && has(out, "D_SAME\n") && !has(out, "DREAL=0\n") && has(out, "DREAL=") && has(out, "PRECOMMIT_GATES\tnot_affected=4\tna=cx,runlist,facts,ledger\tsource=table\n"), "reuse.manifest-verdict-as-base");
+    ck(has(out, "DRC=1/1\n") && has(out, "D_SAME\n") && !has(out, "DREAL=0\n") && has(out, "DREAL=") && has(out, "PRECOMMIT_GATES\tnot_affected=5\tna=cx,runlist,affected-canary,facts,ledger\tsource=table\n"), "reuse.manifest-verdict-as-base");
     {   const char *a = tx_find(out, tx_len(out, sizeof out), "DL=", 3) >= 0 ? out + tx_find(out, tx_len(out, sizeof out), "DL=", 3) + 3 : "", *b = tx_find(out, tx_len(out, sizeof out), "BL=", 3) >= 0 ? out + tx_find(out, tx_len(out, sizeof out), "BL=", 3) + 3 : "x";
         long al = tx_chr(a, tx_len(a, 400), '\n'), bl = tx_chr(b, tx_len(b, 400), '\n');
         ck(al > 10 && al == bl && tx_same(a, al, b, bl), "reuse.manifest-line-as-base"); }
