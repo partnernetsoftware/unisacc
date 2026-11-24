@@ -68,6 +68,7 @@
   私有验证显式设置私有 `UNISACC_PREP_CACHE`;冻结工作树的正式预热使用后续起链接着消费的缓存。
 - 废除 load1 负载门(所有者 2026-11-20 明令):不得按 load1 放行、等待、降并发或拒跑,只用固定显式并发上限(--jobs、--max-jobs、--par、S9_WIDTH),load1 只作记录字段;新工具不得再引入。回滚:git revert ecb8cb246f de000a79d6 39cba77ba6。
 - 整链预制:事件触发预制真实命中 0 次,不作依赖;改走推测链加并行确认,采纳内容键待定;推测 APE 与正规 APE sha256 不等则证据自动 INVALID。入口:plans/reviews/2026-11-20-chain-incremental.md 第 9 节。回滚:devsvc react stop,正规链冷起照旧。
+- 第二车三源门: `chain-ready --only 3a-cxmod-tri` 先独立编两份会话材料,再实跑核心及导出两片。登记批次可用 `affected --materials-dump --ids cxmod-tri,cxmod-tri-exports --prepare-materials -j 1` 预备内容键材料,核对 `PREBUILD failed=0`;只复用执行体,不复用断言结论。
 
 ### 分支与提交
 

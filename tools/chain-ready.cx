@@ -18,7 +18,7 @@
  *                  1-rev stays PASS and emits WARN deferred-verified-tree-not-head (runbook S8 requires verify-deferred on the final tree).
  *   2a-derive      tools/derive.cx -- --check: DERIVE_SUMMARY drift=0 refused=0
  *   2b-ratchets    tools/ratchets.cx last line fail=0 and ok=NRK (NRK = line-start #define in <repo>/tools/ratchets.cx; comments skipped; missing NRK fails)
- *   3a-cxmod-tri   tools/check-cxmod-tri.cx CXMOD_TRI failed=0 (GAP rows are named by the tool)
+ *   3a-cxmod-tri   two CXMOD_TRI shards run from prepared native images (GAP rows are named by the tool)
  *   3b-cx0-extract tools/cx0-extract.cx -- --check prints CX0_EXTRACT EXACT
  *   4-p1           every .cx with a `#pragma unisa use` goes through cx0_plan (check-cxmod-tri.cx --cx0-batch, 16 files
  *                  per child, bound 40 per child, 16 lanes, each file judged on its own segment; no file-count cap); a new rejection is one whose diagnostic has "bad symbol name", "does not export" or
@@ -1553,6 +1553,7 @@ int main(int argc, char **argv) {
     }
     static Job J[MAXJ]; static char *items[MAXJ]; static int prios[MAXJ]; int nj = 0, k;
     char tmpd[300], outd[5][340], cached[340], chfiles[8192], changed[8192]; int have_tmp = 0;
+    char tri_image[340], tri_extract[340];
     tmpd[0] = 0; chfiles[0] = 0; changed[0] = 0;
     if (sr_scratch("chain-ready-", tmpd, sizeof tmpd) == 0) have_tmp = 1;
     for (k = 0; k < 5; k++) cx_fmt(outd[k], sizeof outd[k], "%s/out%d", tmpd, k + 1);
@@ -1576,7 +1577,8 @@ int main(int argc, char **argv) {
     static char *g_derive5[] = {"./tools/bound", "45", "sh", UC, "tools/derive.cx", "--", "--check", "--only", "product-map", 0};
     static char *g_derive6[] = {"./tools/bound", "45", "sh", UC, "tools/derive.cx", "--", "--check", "--only", "doc-links,tool-index,table-index", 0};
     static char *g_rat[] = {"./tools/bound", "60", "sh", UC, "tools/ratchets.cx", 0};
-    static char *g_tri[] = {"./tools/bound", "60", "sh", UC, "tools/check-cxmod-tri.cx", 0};
+    static char *g_tri[] = {"./tools/bound", "55", 0, "--core", 0, 0};
+    static char *g_tri_exports[] = {"./tools/bound", "55", 0, "--exports", 0};
     static char *g_ext[] = {"./tools/bound", "55", "sh", UC, "tools/cx0-extract.cx", "--", "--check", 0};
     static char *g_chain1[] = {"./tools/bound", "60", "sh", UC, "tools/check-candidate-chain.cx", "--", 0, 0, "--cases", "core-a", 0};
     static char *g_chain2[] = {"./tools/bound", "60", "sh", UC, "tools/check-candidate-chain.cx", "--", 0, 0, "--cases", "core-b", 0};
@@ -1598,7 +1600,8 @@ int main(int argc, char **argv) {
         g_rat, g_tri, g_ext,
         g_chain1, g_chain2, g_chain3, g_chain4, g_chain5,
         g_pg, g_slot, g_genall, g_versq,
-        g_premerge0, g_premerge1, g_premerge2, g_premerge3, g_premerge4
+        g_premerge0, g_premerge1, g_premerge2, g_premerge3, g_premerge4,
+        g_tri_exports
     };
     static const char *nm[] = {
         "1-rev", "1-branch",
@@ -1606,7 +1609,8 @@ int main(int argc, char **argv) {
         "2b-ratchets", "3a-cxmod-tri", "3b-cx0-extract",
         "5-candidate-chain", "5-candidate-chain2", "5-candidate-chain3", "5-candidate-chain4", "5-candidate-chain5",
         "8-inflight", "11-version-slot", "15-gen-all", "21-verseq-gen",
-        "22-premerge-union", "22-premerge-union2", "22-premerge-union3", "22-premerge-union4", "22-premerge-union5"
+        "22-premerge-union", "22-premerge-union2", "22-premerge-union3", "22-premerge-union4", "22-premerge-union5",
+        "3a-cxmod-tri-exports"
     };
     static const char *kd[] = {
         "rev", "branch",
@@ -1619,7 +1623,8 @@ int main(int argc, char **argv) {
         "ratchets", "tri", "extract",
         "chain:core-a", "chain:core-b", "chain:core-c", "chain:objects", "chain:watch",
         "inflight", "slot", "genall", "versq",
-        "premerge:prep", "premerge:derive-a", "premerge:derive-b", "premerge:derive-c", "premerge:check-derive"
+        "premerge:prep", "premerge:derive-a", "premerge:derive-b", "premerge:derive-c", "premerge:check-derive",
+        "tri"
     };
     static const int pr[] = {
         9, 9,
@@ -1627,7 +1632,8 @@ int main(int argc, char **argv) {
         5, 4, 6,
         3, 3, 3, 3, 2,
         8, 7, 4, 6,
-        0, 1, 1, 0, 2
+        0, 1, 1, 0, 2,
+        4
     };
     g_status[5] = (char *)repo; g_branch[5] = (char *)repo; g_pg[4] = (char *)pat;
     g_chain1[6] = outd[0]; g_chain1[7] = cached;
@@ -1644,10 +1650,18 @@ int main(int argc, char **argv) {
     g_premerge2[7] = (char *)repo;
     g_premerge3[7] = (char *)repo;
     g_premerge4[7] = (char *)repo;
-    for (k = 0; k < 25; k++) {
+    int tri_core = WANT("3a-cxmod-tri"), tri_exports = WANT("3a-cxmod-tri-exports");
+    int tri_scratch = have_tmp &&
+        !cx_fmt(tri_image, sizeof tri_image, "%s/check-cxmod-tri", tmpd) &&
+        !cx_fmt(tri_extract, sizeof tri_extract, "%s/cx0-extract", tmpd);
+    if ((tri_core || tri_exports) && !tri_scratch)
+        row("3a-cxmod-tri", "FAIL", "no private material directory", 0);
+    g_tri[2] = g_tri_exports[2] = tri_image; g_tri[4] = tri_extract;
+    for (k = 0; k < (int)(sizeof tab / sizeof tab[0]); k++) {
         int c, is_der = (k >= 2 && k <= 7), is_ch = (k >= 11 && k <= 15), is_pm = (k >= 20 && k <= 24);
         if (!WANT(nm[k]) && !(k == 1 && WANT("1-rev")) && !(is_der && WANT("2a-derive")) && !(is_ch && WANT("5-candidate-chain")) && !(is_pm && WANT("22-premerge-union"))) continue;
         if (is_ch && !have_tmp) continue;
+        if (tx_eqz(kd[k], "tri") && !tri_scratch) continue;
         for (c = 0; tab[k][c]; c++) J[nj].argv[c] = tab[k][c];
         J[nj].argv[c] = 0; J[nj].name = nm[k]; items[nj] = (char *)kd[k]; prios[nj] = pr[k];
         nj++;
@@ -1743,6 +1757,28 @@ int main(int argc, char **argv) {
                 start(&J[i]);
                 finish(&J[i]);
                 done++;
+            }
+        }
+        if (tri_scratch && (tri_core || tri_exports)) {
+            char *compile[][8] = {
+                {"./tools/bound", "50", "sh", UC, "tools/check-cxmod-tri.cx", "-o", tri_image, 0},
+                {"./tools/bound", "50", "sh", UC, "tools/cx0-extract.cx", "-o", tri_extract, 0}
+            };
+            int ok[2] = {0, !tri_core};
+            for (int m = 0; m < 1 + tri_core; m++) {
+                Job p = {0};
+                for (int a = 0; compile[m][a]; a++) p.argv[a] = compile[m][a];
+                if (!start(&p)) { finish(&p); ok[m] = p.state != 3 && !p.rc; }
+                if (ok[m]) printf("PREPARED\t%s\tms=%ld\n", compile[m][4], p.ms);
+                else {
+                    row("3a-material", "FAIL", compile[m][4], p.ms);
+                    if (p.out && p.out[0]) fputs(p.out, stderr);
+                }
+                mm_free(p.out);
+            }
+            for (i = 0; i < nj; i++) if (tx_eqz(items[i], "tri") &&
+                (!ok[0] || (tx_eqz(J[i].name, "3a-cxmod-tri") && !ok[1]))) {
+                J[i].state = 2; J[i].rc = 2; J[i].out = 0; J[i].n = J[i].ms = 0; done++;
             }
         }
         /* Pre-start up to 4 non-chain shards (e.g. 2a-derive) while preparing candidate-chain & chain-phases-gen materials

@@ -1,5 +1,5 @@
 /* tools/check-cxmod-tri.cx -- cxmod 三源一致性门(行为级)。
- *   sh ./unisacc.com tools/check-cxmod-tri.cx
+ *   Native checker: IMAGE --core EXTRACT_IMAGE | IMAGE --exports
  * 同一批夹具(取自 tests/module/units.cx 与 tests/cx-namespace.cx 的用例)由三源真正跑 plan:
  *   cx0   cx/cx0/plan.cx 的 CX0_COMPAT_BODY(cx0_plan)
  *   prod  cx/compiler/cxmod.cx(cxm_plan,产品源)
@@ -10,11 +10,13 @@
 #pragma unisa use compiler.cxmod
 #pragma unisa use sys.proc
 #pragma unisa use sys.fs
-#pragma unisa use cxlib.netpack
+#pragma unisa use sys.posix
+#pragma unisa use sysx.process
 #pragma unisa use text.fmt
 #pragma unisa use text.text
 /* 与 src/host.cx 的 hs_cxm_* 同合同的本地回调(-run 下宿主函数不可用) */
 static int run_src(const char *mode, const char *file, char *out, int cap);
+static const char *worker;
 static int cb_rd(char *path, char *buf, int cap) {
     FILE *f; int n;
     if (!path || !buf || cap <= 0) return -3;
@@ -55,10 +57,10 @@ static int child_cx0_batch(int n, char **files) {
 }
 /* batch output segment for full path p must equal the single --cx0 output byte for byte */
 static void batch_case(const char *f1, const char *f2) {
-    char p1[400], p2[400], o1[4096], o2[4096], hd[512]; char *av[9]; np_result r = {0}; char why[256]; int ok = 0;
+    char p1[400], p2[400], o1[4096], o2[4096], hd[512]; np_result r = {0}; char why[256]; int ok = 0;
     tx_snprintf(p1, sizeof p1, "%s/%s", dir, f1); tx_snprintf(p2, sizeof p2, "%s/%s", dir, f2);
     run_src("--cx0", f1, o1, sizeof o1); run_src("--cx0", f2, o2, sizeof o2);
-    av[0] = "sh"; av[1] = "./unisacc.com"; av[2] = "tools/check-cxmod-tri.cx"; av[3] = "--"; av[4] = "--cx0-batch"; av[5] = p1; av[6] = p2; av[7] = 0; /* lint:allow R1 tool re-runs itself as child under the installed product, same as tools/ratchets.cx */
+    char *av[] = {(char *)worker, "--cx0-batch", p1, p2, 0};
     if (!np_run(av, ".", 0, 20, &r, why, sizeof why) && r.out) {
         char want[9000]; long wn;
         tx_snprintf(want, sizeof want, "@@FILE\t%s\n%s@@FILE\t%s\n%s@@END\t2\n", p1, o1, p2, o2);
@@ -77,9 +79,9 @@ static int child_prod(const char *file) {
 }
 /* 跑一个源:rc 与合并输出;ex 1 表示期望拒绝 */
 static int run_src(const char *mode, const char *file, char *out, int cap) {
-    char full[400]; char *av[8]; np_result r = {0}; char why[256]; int rc, n = 0, i;
+    char full[400]; np_result r = {0}; char why[256]; int rc, n = 0, i;
     tx_snprintf(full, sizeof full, "%s/%s", dir, file);
-    av[0] = "sh"; av[1] = "./unisacc.com"; av[2] = "tools/check-cxmod-tri.cx"; av[3] = "--"; av[4] = (char *)mode; av[5] = full; av[6] = 0; /* lint:allow R1 tool re-runs itself as child under the installed product, same as tools/ratchets.cx */
+    char *av[] = {(char *)worker, (char *)mode, full, 0};
     rc = np_run(av, ".", 0, 20, &r, why, sizeof why);
     out[0] = 0;
     if (rc) return -1;
@@ -231,19 +233,13 @@ static void export_cases(void) {
     one_case("export-p2-no-cxpack-symbol", "y2.cx", 0, "", 0);
     one_case("export-p3-multi-line-union", "y3.cx", 0, "", 0);
 }
-int main(int argc, char **argv) {
-    char *ex[] ={"sh", "./unisacc.com", "tools/cx0-extract.cx", "--", "--check", 0}; /* lint:allow R1 runs tools/cx0-extract.cx under the installed product, same as tools/ratchets.cx */
-    np_result r = {0}; char why[512]; int rc, extract_ok;
-    if (argc == 3 && !strcmp(argv[1], "--cx0")) { tx_snprintf(dir, sizeof dir, "/tmp"); return child_cx0(argv[2]); }
-    if (argc >= 3 && !strcmp(argv[1], "--cx0-batch")) { tx_snprintf(dir, sizeof dir, "/tmp"); return child_cx0_batch(argc - 2, argv + 2); }
-    if (argc == 3 && !strcmp(argv[1], "--cx0-if")) { tx_snprintf(dir, sizeof dir, "/tmp"); return child_cx0_if(argv[2]); }
-    if (argc == 3 && !strcmp(argv[1], "--prod")) { tx_snprintf(dir, sizeof dir, "/tmp"); return child_prod(argv[2]); }
-    rc = np_run(ex, ".", 0, 50, &r, why, sizeof why);
-    extract_ok = !rc && r.rc == 0 && r.out && bytes_at(r.out, r.outn, "CX0_EXTRACT\tEXACT", 17) >= 0;
+static void core_cases(char *extract) {
+    char *ex[] = {extract, "--check", 0};
+    np_result r = {0}; char why[512];
+    int rc = np_run(ex, ".", 0, 50, &r, why, sizeof why);
+    int extract_ok = !rc && r.rc == 0 && r.out && bytes_at(r.out, r.outn, "CX0_EXTRACT\tEXACT", 17) >= 0;
     np_free(&r);
     if (extract_ok) { pass++; puts("PASS\tplan-vs-src-cxmod-c-extract-exact"); } else { failed++; puts("FAIL\tplan-vs-src-cxmod-c-extract-exact"); }
-    tx_snprintf(dir, sizeof dir, "/tmp/cxmod-tri-XXXXXX");
-    if (!mkdtemp(dir)) { puts("FAIL\ttmpdir"); return 1; }
     put("a.cx", "#pragma unisa module a\nint clash(void){return 1;}\n");
     put("b.cx", "#pragma unisa module b\nint clash(void){return 2;}\n");
     put("aa.cx", "#pragma unisa module aa\nint clash(void){return 1;}\nint other(void){return 7;}\n");
@@ -265,8 +261,6 @@ int main(int argc, char **argv) {
     one_case("import-cycle-refused", "c5.cx", 1, "module cycle", 0);
     /* 0.0.65 D1a:export 已实现,原 planned-export-refused-by-name(unknown unisa pragma export)换成语义断言 X6,不删 */
     one_case("export-x06-undefined-refused", "p1.cx", 1, "module fac exports ok but does not define it", 0);
-    export_cases();
-    pilot_rw();
     one_case("planned-wildcard-refused-by-name", "p3.cx", 1, "bad module name \"sys.*\"", 0);
     one_case("planned-bare-star-refused-by-name", "p4.cx", 1, "bad module name \"*\"", 0);
     one_case("symbol-star-refused", "g0.cx", 1, "bad symbol name \"*\"", 0);
@@ -292,6 +286,31 @@ int main(int argc, char **argv) {
     maxu_case(97, 0, 0);
     maxu_case(200, 0, 0);      /* 区分 128 与 256 的分辨夹具:旧上限下 200 会被拒 */
     maxu_case(257, 1, 1);
-    printf("CXMOD_TRI\tpassed=%d failed=%d gaps=%d\n", pass, failed, gaps);
+}
+
+int main(int argc, char **argv) {
+    if (argc == 3 && !strcmp(argv[1], "--cx0")) { tx_snprintf(dir, sizeof dir, "/tmp"); return child_cx0(argv[2]); }
+    if (argc >= 3 && !strcmp(argv[1], "--cx0-batch")) { tx_snprintf(dir, sizeof dir, "/tmp"); return child_cx0_batch(argc - 2, argv + 2); }
+    if (argc == 3 && !strcmp(argv[1], "--cx0-if")) { tx_snprintf(dir, sizeof dir, "/tmp"); return child_cx0_if(argv[2]); }
+    if (argc == 3 && !strcmp(argv[1], "--prod")) { tx_snprintf(dir, sizeof dir, "/tmp"); return child_prod(argv[2]); }
+    int core = argc == 3 && !strcmp(argv[1], "--core") && argv[2][0] == '/';
+    int exports = argc == 2 && !strcmp(argv[1], "--exports");
+    if ((!core && !exports) || argv[0][0] != '/') {
+        fputs("cxmod-tri: expected prepared image, --core EXTRACT_IMAGE or --exports\n", stderr);
+        return 2;
+    }
+    worker = argv[0];
+    tx_snprintf(dir, sizeof dir, "/tmp/cxmod-tri-XXXXXX");
+    if (!mkdtemp(dir)) { puts("FAIL\ttmpdir"); return 1; }
+    if (core) core_cases(argv[2]);
+    else { export_cases(); pilot_rw(); }
+    sy_remove_all(dir);
+    const char *shard = core ? "core" : "exports";
+    int want = core ? 25 : 21, actual = pass + failed + gaps;
+    if (actual != want) {
+        printf("FAIL\tassertion-count\tshard=%s expected=%d actual=%d\n", shard, want, actual);
+        failed++;
+    }
+    printf("CXMOD_TRI\tpassed=%d failed=%d gaps=%d shard=%s\n", pass, failed, gaps, shard);
     return failed != 0;
 }
