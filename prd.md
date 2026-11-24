@@ -420,6 +420,8 @@ T1合同登记（登记不等于通过）：`generator-location`批次自建真�
 
 纯 cx 密码学（无宿主库，均过向量）：`crypto.sha256`、`crypto.b64`、`crypto.hkdf`、`crypto.chacha20poly1305`、`crypto.gcm`（AES-128/256）、`crypto.ct`、`crypto.x25519`、`crypto.bn`、`crypto.der`、`crypto.p256`、`crypto.rsa`、`crypto.x509`、`crypto.tls13`、`crypto.record`——用 `#pragma unisa use crypto.<模块>`。
 
+封版准入核对用 `tools/seal-precheck.cx -- EVIDENCE_DIR`，按七条判据报告拒绝原因与汇总。输入表与证据归档要求见 [封版准入机械核对](plans/seal-precheck.md)。
+
 完整入口清单（含每条的说明、既有依据与覆盖边界）见 [archive/plans/2026-11-01/prd-c43-full-2026-11-01.md](archive/plans/2026-11-01/prd-c43-full-2026-11-01.md) 的「已实现能力速查」；这里只列常用入口，具体输入结果与覆盖边界以实际核对为准。
 
 <a id="model-function-bytes"></a>

@@ -1,0 +1,162 @@
+/* Exercise the executable against synthetic seal evidence, with optional mutant source. */
+#pragma unisa use sys.fs
+#pragma unisa use sys.posix
+#pragma unisa use sys.env
+#pragma unisa use text.fmt
+#pragma unisa use cxlib.netpack
+
+static char root[4096];
+static const char *digest="aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa";
+static const char *target[]={"lnx/x86_64","lnx/arm64","osx/x86_64","osx/arm64","win/x86_64","win/arm64"};
+static const char *version[]={"fixture-a","fixture-b","fixture-c"};
+static const char *ledger="id\t描述\t等级\t关闭车\t证据\tstate\tclosure_evidence\n";
+static const char *source;
+static int ok, failed;
+
+static void need(int condition) {
+    if (!condition) { fprintf(stderr,"CHECK_SEAL_PRECHECK fixture-setup\n"); exit(2); }
+}
+static void put(const char *leaf,const char *data) {
+    char path[4096];
+    need(!cx_fmt(path,sizeof path,"%s/%s",root,leaf));
+    need(!cx_write(path,data,strlen(data)));
+}
+static void invoke(const char *name,int rc,const char *line,const char *extra) {
+    const char *product="./unisacc.com";
+    char *v[]={"sh",(char *)product,(char *)source,"--",root,0};
+    np_result result={0};
+    char why[512]={0};
+    int ran=np_run(v,0,0,20,&result,why,sizeof why);
+    int pass=!ran && !result.timed_out && !result.residue && result.rc==rc && result.out &&
+        strstr(result.out,line) && (!extra || strstr(result.out,extra));
+    printf("%s\tcheck-seal-precheck.%s\trc=%d\n",pass?"PASS":"FAIL",name,result.rc);
+    if (pass) ok++;
+    else {
+        failed++;
+        if (result.out) printf("%s",result.out);
+        if (result.err) printf("%s",result.err);
+        if (ran) printf("%s\n",why);
+    }
+    np_free(&result);
+}
+static void strict(int failures,int unknown) {
+    np_buf body={0};
+    char row[512];
+    np_puts(&body,"batch\tdomain\tstatus\trc\tcandidate\tms\tload1\tretries\tnote\n");
+    for (int i=1;i<=30;i++) {
+        int rc=i<=30-failures-unknown?0:i>30-unknown?3:1;
+        const char *status=!rc?"PASS":rc==3?"UNKNOWN":"FAIL";
+        need(!cx_fmt(row,sizeof row,"fixture-%d\tproduct\t%s\t%d\t%s\t1\t0\t0\t-\n",i,status,rc,digest));
+        np_puts(&body,row);
+        if (!rc) {
+            need(!cx_fmt(row,sizeof row,"RAW\tBATCH_RUN\tid=fixture-%d\tstatus=PASS\trc=0\tcandidate=%s%s\n",
+                i,digest,i%2?"\trunner=native\tscope=fixture":""));
+            np_puts(&body,row);
+        }
+    }
+    need(!cx_fmt(row,sizeof row,"SUMMARY\tbatches=30\tPASS=%d\tFAIL=%d\tUNKNOWN=%d\tINVALID=0\tape_sha256=%s\n",
+        30-failures-unknown,failures,unknown,digest));
+    np_puts(&body,row);
+    put("strict.tsv",body.p);
+}
+static void checklist(void) {
+    np_buf body={0};
+    char row[128];
+    np_puts(&body,"item\tcategory\tbatch\n");
+    for (int i=1;i<=30;i++) {
+        int category=i<=8?1:i<=16?2:i<=22?3:i<=26?4:5;
+        need(!cx_fmt(row,sizeof row,"%d\t2.%d\tfixture-%d\n",i,category,i));
+        np_puts(&body,row);
+    }
+    put("checklist.tsv",body.p);
+}
+static void attest(int late,int bad_ci,int bad_frontend) {
+    np_buf body={0};
+    char row[512];
+    const char *phase[]={"A","B1","B2"};
+    np_puts(&body,"kind\tkey\tvalue\tape_sha256\tref\n");
+    for (int i=0;i<3;i++) {
+        need(!cx_fmt(row,sizeof row,"release\t%s\tPUBLISHED\t%s\tfixed-%d.tsv\n",version[i],digest,i));
+        np_puts(&body,row);
+        need(!cx_fmt(row,sizeof row,"timing\t%s\t1/%d\t-\tproof.txt\n",version[i],late && i==2?7202:7201));
+        np_puts(&body,row);
+        need(!cx_fmt(row,sizeof row,"frontend\t%s\t%s\t-\tproof.txt\n",
+            phase[i],bad_frontend && i==2?"UNMEASURED":"PASS"));
+        np_puts(&body,row);
+    }
+    for (int i=0;i<6;i++) {
+        need(!cx_fmt(row,sizeof row,"ci\t%s\t%s\t%s\tproof.txt\n",
+            target[i],bad_ci && i==2?"FAIL":"QUALIFIED",digest));
+        np_puts(&body,row);
+    }
+    put("seal-evidence.tsv",body.p);
+}
+static void fixed(int missing_target) {
+    np_buf body={0};
+    char row[512];
+    np_puts(&body,"target\tg2_path\tg2_sha256\tg3_path\tg3_sha256\tbytes\tverdict\n");
+    for (int i=0;i<6-missing_target;i++) {
+        need(!cx_fmt(row,sizeof row,"%s\tg2/%d\t%s\tg3/%d\t%s\t1\tSAME\n",target[i],i,digest,i,digest));
+        np_puts(&body,row);
+    }
+    for (int i=0;i<3;i++) {
+        need(!cx_fmt(row,sizeof row,"fixed-%d.tsv",i));
+        put(row,body.p);
+    }
+}
+static void claims(int extra) {
+    np_buf body={0};
+    char row[128];
+    np_puts(&body,"id\tversion\tkind\tstate\tsubject\tmissing\taction\twrite_domain\towner\tevidence\tupdated\n"
+        "U21\tfixture-c\tharness-gap\tUNVERIFIED\titem\t-\t-\t-\t-\t-\t-\n");
+    for (int i=0;i<extra;i++) {
+        need(!cx_fmt(row,sizeof row,"extra-%d\tfixture-c\tno-run\tUNVERIFIED\titem\t-\t-\t-\t-\t-\t-\n",i));
+        np_puts(&body,row);
+    }
+    put("state-unverified.tsv",body.p);
+}
+int main(int argc,char **argv) {
+    need(argc==1 || (argc==3 && !strcmp(argv[1],"--source")));
+    source=argc==3?argv[2]:"tools/seal-precheck.cx";
+    const char *tmp=sy_env("TMPDIR");
+    need(!sy_mkdtemp(tmp && *tmp?tmp:"/tmp","unisacc-seal-",root,sizeof root));
+    strict(0,0);
+    checklist();
+    fixed(0);
+    attest(0,0,0);
+    put("proof.txt","fixture proof\n");
+    put("expected-fail.tsv","batch\texpected\treason\nfixture-25\timage-drift\tfixture\n");
+    put("expected-unmeasured.tsv","batch\treason\tevidence\nfixture-30\tno-producer\tfixture\n");
+    claims(0);
+    char row[512];
+    need(!cx_fmt(row,sizeof row,"%sP0-fixture\tfixture\tP0\t0.1.0\t-\tOPEN\t-\n",ledger));
+    put("p0-ledger.tsv",row);
+    invoke("open-p0",2,"SEAL_GATE\t3\tREFUSE\treason=open-p0","passed=6\tfailed=1");
+    need(!cx_fmt(row,sizeof row,"%sP0-fixture\tfixture\tP0\t0.1.0\t-\tCLOSED\tproof.txt\n",ledger));
+    put("p0-ledger.tsv",row);
+    invoke("seven-pass",0,"SEAL_PRECHECK\tPASS\tpassed=7\tfailed=0","claim_count=1\tlimit=3");
+    strict(5,1);
+    invoke("raw-strict-and-checklist",2,"FAIL=5\tUNKNOWN=1\tINVALID=0\texpected_fail=1\tregistered_no_producer=1",
+        "SEAL_GATE\t7\tREFUSE\treason=checklist-below-threshold");
+    strict(1,0);
+    invoke("strict-only",2,"SEAL_GATE\t2\tREFUSE\treason=strict-nonpass","passed=6\tfailed=1");
+    strict(0,0);
+    fixed(1);
+    invoke("fixedpoint-only",2,"SEAL_GATE\t1\tREFUSE\treason=missing-fixedpoint-target","passed=6\tfailed=1");
+    fixed(0);
+    attest(0,1,0);
+    invoke("ci-only",2,"SEAL_GATE\t2\tREFUSE\treason=ci-target-not-qualified","passed=6\tfailed=1");
+    attest(0,0,1);
+    invoke("frontend-only",2,"SEAL_GATE\t5\tREFUSE\treason=frontend-phase-incomplete","passed=6\tfailed=1");
+    attest(0,0,0);
+    claims(3);
+    invoke("claims-only",2,"SEAL_GATE\t4\tREFUSE\treason=claim-limit","passed=6\tfailed=1");
+    claims(0);
+    attest(1,0,0);
+    invoke("late-public",2,"SEAL_GATE\t6\tREFUSE\treason=public-wall-clock-over-limit-or-missing",0);
+    attest(0,0,0);
+    put("checklist.tsv","item\tcategory\tbatch\n");
+    invoke("missing-checklist-rows",2,"SEAL_GATE\t7\tREFUSE\treason=missing-checklist-rows",0);
+    printf("CHECK_SEAL_PRECHECK\tok=%d\tfailed=%d\n",ok,failed);
+    return failed?1:0;
+}
