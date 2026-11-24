@@ -214,6 +214,17 @@ static int merge_one_both(const char *repo, const char *dir, const char *base_sh
        records the same rule as `candidate-version-slot`; merge_one_both keeps it here because the conflict
        rows of that table are not consumed by this function. */
     if (starts_with(rel, "plans/v0.0.") || streq(rel, "release/candidate.tsv")) {
+        /* The version slot is only the data row; a header column added on main must not be thrown away by
+           taking the branch side, so the two first lines have to agree before the branch file wins. */
+        if (streq(rel, "release/candidate.tsv")) {
+            if (cx_fmt(cmd, sizeof cmd,
+                       "git -C '%s' show '%s:%s' 2>/dev/null | head -n 1 > '%s/.hdr-base'; "
+                       "git -C '%s' show '%s:%s' | head -n 1 > '%s/.hdr-br'; cmp -s '%s/.hdr-base' '%s/.hdr-br'",
+                       repo, base_sha, rel, dir, repo, br_sha, rel, dir, dir, dir)) return 1;
+            int hrc = run_sh(cmd, 15, &o, &on);
+            if (o) { mm_free(o); o = 0; }
+            if (hrc != 0) { cx_fmt(rule_out, rcap, "version-slot-header-mismatch"); return 1; }
+        }
         if (cx_fmt(cmd, sizeof cmd, "git -C '%s' show '%s:%s' > '%s'", repo, br_sha, rel, dst)) return 1;
         if (run_sh(cmd, 15, &o, &on) != 0) { if (o) mm_free(o); return 1; }
         if (o) mm_free(o);

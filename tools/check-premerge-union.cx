@@ -154,6 +154,7 @@ int main(void) {
     put_file(repo, "plans/v0.0.99.md", "# 0.0.99 计划: base\nline1\n", 0644);
     put_file(repo, "release/candidate.tsv",
              "repo\ttag\tcommit\tversion\npartnernetsoftware/unisacc\tv0.0.98\t-\t0.0.98\n", 0644);
+    put_file(repo, "release/notes-0.0.98.md", "fixture base note\nfixture base note 2\n", 0644);
     put_file(repo, "tools/derive.cx", "/* line 1 */\n/* line 2 */\n/* line 3 */\n/* line 4 */\n/* line 5 */\n", 0644);
 
     cx_fmt(cmd, sizeof cmd,
@@ -267,6 +268,39 @@ int main(void) {
     ck(rc == 1 && has(out, "PREMERGE_FILE\ttools/derive.cx\tCONFLICT\trule=auto-3way") &&
        has(out, "PREMERGE_UNION_SUMMARY\tverdict=FAIL\tconflict=1\t"),
        "conflict-3way-fails-closed-rc1");
+
+    /* G19: the version slot's second row is the branch's, but the header row is not.  A column added on the
+       main side must not disappear because the whole file came from the branch; a mismatch fails closed, and
+       a different file under release/ is not covered by the slot rule at all. */
+    {
+        char hdir[600];
+        cx_fmt(hdir, sizeof hdir, "%s/union-hdr", tmpd);
+        cx_fmt(cmd, sizeof cmd, "cd '%s' && B0=$(git rev-list --max-parents=0 main) && git checkout -q \"$B0\" && git checkout -q -b v0.0.98h", repo);
+        (void)run_sh(cmd, 15, out, sizeof out);
+        put_file(repo, "release/candidate.tsv",
+                 "repo\ttag\tcommit\tversion\npartnernetsoftware/unisacc\tv0.0.97\t-\t0.0.97\n", 0644);
+        cx_fmt(cmd, sizeof cmd, "cd '%s' && git add -A && git commit -qm hdr-branch && git checkout -q main", repo);
+        (void)run_sh(cmd, 15, out, sizeof out);
+        put_file(repo, "release/candidate.tsv",
+                 "repo\ttag\tcommit\tversion\tnote\npartnernetsoftware/unisacc\tv0.0.98\t-\t0.0.98\theader-added-on-main\n", 0644);
+        put_file(repo, "release/notes-0.0.98.md", "fixture base note\nfixture base note 2\nmain-side note\n", 0644);
+        cx_fmt(cmd, sizeof cmd, "cd '%s' && git add -A && git commit -qm hdr-main", repo);
+        (void)run_sh(cmd, 15, out, sizeof out);
+        cx_fmt(cmd, sizeof cmd, "cd '%s' && git checkout -q v0.0.98h", repo);
+        (void)run_sh(cmd, 15, out, sizeof out);
+        put_file(repo, "release/notes-0.0.98.md", "branch-side note\nfixture base note\nfixture base note 2\n", 0644);
+        cx_fmt(cmd, sizeof cmd, "cd '%s' && git add -A && git commit -qm hdr-branch-note && git checkout -q main", repo);
+        (void)run_sh(cmd, 15, out, sizeof out);
+        cx_fmt(cmd, sizeof cmd,
+               "sh ./unisacc.com tools/premerge-union.cx -- --repo '%s' --base main --branch v0.0.98h --dir '%s' --shard all",
+               repo, hdir);
+        rc = run_sh(cmd, 45, out, sizeof out);
+        ck(rc == 1 && has(out, "PREMERGE_FILE\trelease/candidate.tsv\tCONFLICT\trule=version-slot-header-mismatch") &&
+           has(out, "PREMERGE_UNION_SUMMARY\tverdict=FAIL\t"),
+           "version-slot-header-mismatch-fails-closed");
+        ck(has(out, "PREMERGE_FILE\trelease/notes-0.0.98.md\tOK\trule=auto-3way"),
+           "other-release-file-uses-ordinary-3way");
+    }
 
     /* Judge test in tools/chain-ready.cx (--judge premerge) */
     char jf[600];
