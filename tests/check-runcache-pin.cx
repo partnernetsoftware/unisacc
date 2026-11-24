@@ -1,0 +1,228 @@
+/* Cross-directory runtime cache checks. Usage: NEW_OUT CANDIDATE. */
+#pragma unisa use sys.fs
+#pragma unisa use sys.posix
+#pragma unisa use sysx.process
+#pragma unisa use sys.time
+#pragma unisa use mem.bytes
+#pragma unisa use runtime.rcident
+
+typedef struct {
+    const char *label, *main, *header, *arg1, *arg2;
+    int pinned, module;
+} PinCase;
+
+static int failures, checks;
+
+static void check(int ok, const char *name) {
+    printf("%s\t%s\n", ok ? "PASS" : "FAIL", name);
+    checks++;
+    failures += !ok;
+}
+
+static int put(const char *dir, const char *leaf, const char *text) {
+    char p[4400];
+    return cx_fmt(p, sizeof p, "%s/%s", dir, leaf) ||
+           sy_write_atomic(p, text, strlen(text), 0600);
+}
+
+static void exercise(const PinCase *t, char *candidate, const char *out) {
+    char area[4400], dirs[2][4400], cache[4500], cache_env[4600], dep[4500];
+    char *env[] = {cache_env, "UNISACC_RUN_CACHE=1", "UNISACC_RR_DEBUG=1", "UNISACC_RR_TIME=1", 0};
+    if (cx_fmt(area, sizeof area, "%s/%s", out, t->label) || sy_mkdir(area, 0700) ||
+        cx_fmt(cache, sizeof cache, "%s/cache", area) || sy_mkdir(cache, 0700) ||
+        cx_fmt(cache_env, sizeof cache_env, "UNISACC_CACHE_DIR=%s", cache)) {
+        check(0, t->label);
+        return;
+    }
+    for (int i = 0; i < 2; i++) {
+        char main[4500], expected[9100], label[200];
+        const char *leaf = "p.cx";
+        if (cx_fmt(dirs[i], sizeof dirs[i], "%s/d%d", area, i + 1) || sy_mkdir(dirs[i], 0700) ||
+            cx_fmt(main, sizeof main, "%s/%s", dirs[i], leaf) || put(dirs[i], leaf, t->main) ||
+            (t->header && put(dirs[i], "dep.h", t->header)) ||
+            (t->module && (put(dirs[i], "cxroot.tsv", "CXROOT1\nR\tpinlib\tlib\n") ||
+             cx_fmt(dep, sizeof dep, "%s/lib", dirs[i]) || sy_mkdir(dep, 0700) ||
+             put(dep, "dep.cx", "#pragma unisa module dep\n#include <dep.h>\nconst char *where(void){return header_path();}\n"))) ||
+            cx_fmt(dep, sizeof dep, "%s/dep.h", dirs[i]) ||
+            cx_fmt(expected, sizeof expected, "%s\n", t->module ? "dep.h" : t->pinned > 0 ? (t->header ? dep : main) : "portable")) {
+            check(0, t->label);
+            return;
+        }
+        char *argv[9] = {"sh", candidate};
+        int n = 2;
+        argv[n++] = main;
+        if (t->arg1) argv[n++] = (char *)t->arg1;
+        if (t->arg2) argv[n++] = (char *)(!strcmp(t->arg2, "dep.h") ? dep : t->arg2);
+        if (t->module) { argv[n++] = "-I"; argv[n++] = dirs[i]; }
+        argv[n++] = "--";
+        argv[n] = 0;
+        for (int warm = 0; warm < 2; warm++) {
+            np_result r = {0};
+            char why[512] = "";
+            int rc = np_run(argv, dirs[i], env, 8, &r, why, sizeof why);
+            int hit = r.err && strstr(r.err, "lookup_hit=2");
+            int expect_hit = warm || (i && !t->pinned);
+            int ok = !rc && !r.residue && (t->pinned < 0
+                ? r.rc == 1 && !hit && r.err && strstr(r.err, "unexpected character")
+                : !r.rc && r.outn == strlen(expected) && !memcmp(r.out, expected, r.outn) && hit == expect_hit);
+            cx_fmt(label, sizeof label, "%s.d%d.%s", t->label, i + 1, warm ? "warm" : "cold");
+            check(ok, label);
+            if (!warm && t->header) {
+                char present[4600];
+                if (cx_fmt(present, sizeof present, "RR_PRESENT\t%s", dep)) present[0] = 0;
+                cx_fmt(label, sizeof label, "%s.d%d.dependency", t->label, i + 1);
+                check(present[0] && r.err && strstr(r.err, present), label);
+            }
+            if (!ok) fprintf(stderr, "%s rc=%d transport=%d hit=%d expected_hit=%d stdout=%s stderr=%s %s\n",
+                label, r.rc, rc, hit, expect_hit, r.out ? r.out : "", r.err ? r.err : "", why);
+            np_free(&r);
+        }
+    }
+}
+
+static void mask_contract(const char *out) {
+    char missing[4400], paste[4400];
+    if (cx_fmt(missing, sizeof missing, "%s/absent.h", out) ||
+        cx_fmt(paste, sizeof paste, "%s/paste-only.h", out) ||
+        put(out, "paste-only.h", "#define C(a,b) a##b\n")) {
+        check(0, "mask-contract.setup");
+        return;
+    }
+    char *paths[] = {missing};
+    check(rk_pinned(paths, 1, 1) == 1, "mask-contract.decided-seed-skips-dependencies");
+    paths[0] = paste;
+    check(rk_pinned(paths, 1, 2) == 1, "mask-contract.combine-bits-return-boolean");
+    check(rk_pinned(paths, 0, 2) == 0, "mask-contract.fragment-alone-remains-portable");
+}
+
+static int memo_run(char *candidate, const char *cwd, char *source, char *cache_env) {
+    char *env[] = {cache_env, "UNISACC_RUN_CACHE=1", 0};
+    char *argv[] = {"sh", candidate, source, "--", 0};
+    char expected[4500], why[512] = "";
+    np_result result = {0};
+    if (cx_fmt(expected, sizeof expected, "%s\n", source)) return 0;
+    int rc = np_run(argv, cwd, env, 8, &result, why, sizeof why);
+    int ok = !rc && !result.rc && !result.residue && result.outn == strlen(expected) &&
+             !memcmp(result.out, expected, result.outn);
+    if (!ok && result.errn) fwrite(result.err, 1, result.errn, stderr);
+    np_free(&result);
+    return ok;
+}
+
+/* Read complete records from the on-disk memo wire format. */
+static char *memo_field(char *body, char tag, size_t width, const char *expected) {
+    if (!body) return 0;
+    for (char *line = body, *end; (end = strchr(line, '\n')); line = end + 1) {
+        if ((size_t)(end - line) != width + 2 || line[0] != tag || line[1] != ' ') continue;
+        if (!expected || !memcmp(line + 2, expected, width)) return line + 2;
+    }
+    return 0;
+}
+
+static int memo_find(const char *cache, const char *source, char path[4500]) {
+    sy_dir_t dir;
+    if (sy_dir_open(&dir, cache)) return 1;
+    int rc = 1;
+    while (sy_dir_next(&dir) == 1) {
+        if (dir.name_n != 69 || memcmp(dir.name + 64, ".plan", 5) ||
+            cx_fmt(path, 4500, "%s/%s", cache, dir.name)) continue;
+        size_t n;
+        char *body = cx_read(path, &n);
+        if (memo_field(body, 'U', strlen(source), source)) rc = 0;
+        free(body);
+        if (!rc) break;
+    }
+    sy_dir_close(&dir);
+    return rc;
+}
+
+static int memo_hashes(const char *record, const char *source, const char *text) {
+    static const char prefix[] = "pinscan-2\0Rp.cx\0Rp.cx\0";
+    static const char version[] = "pinscan-2";
+    char material[9000], argv_hash[65], source_hash[65];
+    size_t src_n = strlen(source) + 1, text_n = strlen(text);
+    if (mm_copy(material, sizeof material, version, sizeof version) ||
+        mm_copy(material + sizeof version, sizeof material - sizeof version, source, src_n)) return 0;
+    cx_sha256_hex(material, sizeof version + src_n, argv_hash);
+    size_t prefix_n = sizeof prefix - 1;
+    if (mm_copy(material, sizeof material, prefix, prefix_n) ||
+        mm_copy(material + prefix_n, sizeof material - prefix_n, text, text_n)) return 0;
+    cx_sha256_hex(material, prefix_n + text_n, source_hash);
+    return !memcmp(record, argv_hash, 64) && !memcmp(record + 130, source_hash, 64);
+}
+
+static int memo_record(const char *path, const char *src, const char *text) {
+    size_t n;
+    char *body = cx_read(path, &n);
+    char *s = memo_field(body, 'S', 261, 0);
+    int ok = s && !memcmp(body, "UPM2\n", 5) && s[260] == '6' && memo_hashes(s, src, text);
+    free(body);
+    return ok;
+}
+
+static int memo_drop_images(const char *cache) {
+    sy_dir_t dir;
+    if (sy_dir_open(&dir, cache)) return 1;
+    int rc = 0, next;
+    char path[4500];
+    while ((next = sy_dir_next(&dir)) == 1) {
+        if (dir.name_n != 64 && !(dir.name_n == 69 && !memcmp(dir.name + 64, ".host", 5))) continue;
+        if (cx_fmt(path, sizeof path, "%s/%s", cache, dir.name) || sy_unlink(path)) { rc = 1; break; }
+    }
+    sy_dir_close(&dir);
+    return rc || next < 0;
+}
+
+static void memo_checks(const char *out, char *candidate, const char *text) {
+    char cache[4400], env[4500], cwd[2][4400], src[2][4500], plan[2][4500];
+    if (cx_fmt(cache, sizeof cache, "%s/paste/cache", out) ||
+        cx_fmt(env, sizeof env, "UNISACC_CACHE_DIR=%s", cache)) { check(0, "memo.setup"); return; }
+    sy_sleep_ms(1100);
+    for (int i = 0; i < 2; i++) {
+        if (cx_fmt(cwd[i], sizeof cwd[i], "%s/paste/d%d", out, i + 1) ||
+            cx_fmt(src[i], sizeof src[i], "%s/p.cx", cwd[i]) ||
+            !memo_run(candidate, cwd[i], src[i], env) || memo_find(cache, src[i], plan[i])) {
+            check(0, "memo.plan-present");
+            return;
+        }
+        check(memo_record(plan[i], src[i], text), "memo.versioned-argv-and-source-keys-with-mask-six");
+    }
+    for (int i = 0; i < 2; i++) {
+        size_t n;
+        char *body = cx_read(plan[0], &n);
+        char *s = memo_field(body, 'S', 261, 0);
+        if (!s || n < 5) {
+            free(body); check(0, "memo.mutation-setup"); return;
+        }
+        if (i) s[260] = '8';
+        else body[3] = '1';
+        int rewritten = !sy_write_atomic(plan[0], body, n, 0600) &&
+                        memo_run(candidate, cwd[0], src[0], env) &&
+                        memo_record(plan[0], src[0], text);
+        free(body);
+        check(rewritten, i ? "memo.out-of-range-mask-is-rebuilt" : "memo.legacy-record-is-rebuilt");
+    }
+    check(!memo_drop_images(cache) && memo_run(candidate, cwd[0], src[0], env) &&
+          memo_run(candidate, cwd[1], src[1], env), "memo.mask-survives-image-rebuild-across-directories");
+}
+
+int main(int argc, char **argv) {
+    if (argc != 3 || argv[1][0] != '/' || argv[2][0] != '/' || sy_mkdir(argv[1], 0700)) return 2;
+    const char *path = "int main(void){return puts(PV)<0;}\n";
+    PinCase cases[] = {
+        {"splice", "int main(void){return puts(__FI\\\nLE__)<0;}\n", 0, 0, 0, 1, 0},
+        {"paste", "#define C(a,b) a##b\nint main(void){return puts(C(__FI,LE__))<0;}\n", 0, 0, 0, 1, 0},
+        {"define-joined", path, 0, "-DPV=__FILE__", 0, 1, 0},
+        {"define-separate", path, 0, "-D", "PV=__FILE__", 1, 0},
+        {"argv-fragments", "#define C(a,b) a##b\n#define X(a,b) C(a,b)\nint main(void){return puts(X(P,Q))<0;}\n", 0, "-DP=__FI", "-DQ=LE__", 1, 0},
+        {"argv-paste-rejected", path, 0, "-DPV=__FI##LE__", 0, -1, 0},
+        {"forced-header", "int main(void){return puts(where())<0;}\n", "static const char *where(void){return __FILE__;}\n", "-include", "dep.h", 1, 0},
+        {"module-header", "#pragma unisa use pinlib.dep\nint main(void){return puts(where())<0;}\n", "static const char *header_path(void){return __FILE__;}\n", 0, 0, 1, 1},
+        {"portable", "/* __FILE__ */\nint main(void){return puts(\"portable\")<0;}\n", 0, 0, 0, 0, 0}
+    };
+    for (int i = 0; i < sizeof cases / sizeof cases[0]; i++) exercise(&cases[i], argv[2], argv[1]);
+    mask_contract(argv[1]);
+    memo_checks(argv[1], argv[2], cases[1].main);
+    printf("CHECK_RUNCACHE_PIN\tassertions=%d\tfailed=%d\n", checks, failures);
+    return failures != 0;
+}

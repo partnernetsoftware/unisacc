@@ -5,6 +5,7 @@
 #pragma unisa use mem.heap
 #pragma unisa use mem.bytes
 #pragma unisa use text.text
+#pragma unisa use text.pinscan
 #pragma unisa use sys.time
 #pragma unisa use sys.sig
 #pragma unisa use sys.sysinfo
@@ -125,19 +126,6 @@ const char *rk_norm(const char *p) {
     return p + ri_cwdn + 1;
 }
 
-static int ri_names_file(const char *b, long n) {
-    long i;
-    if (!b || n < 8) return 0;
-    /* pivot on the 'F' at offset 2: rarer in C text than '_' */
-    i = 2;
-    while (i + 6 <= n) {
-        if (b[i] == 'F' && b[i - 2] == '_' && b[i - 1] == '_' && b[i + 1] == 'I' && b[i + 2] == 'L' &&
-            b[i + 3] == 'E' && b[i + 4] == '_' && b[i + 5] == '_')
-            return 1;
-        i = i + 1;
-    }
-    return 0;
-}
 
 static int ri_app(unsigned char **b, long *n, long *cap, const void *p, long k) {
     unsigned char *nb;
@@ -182,31 +170,34 @@ int rk_file(const char *path, char hex[65], int *names) {
         mm_free(b);
         return 1;
     }
-    if (names) *names = ri_names_file(b, (long)n);
+    if (names) *names = pin_scan_text(b, (long)n);
     rc = rk_hex(b, (long)n, hex);
     mm_free(b);
     return rc;
 }
 
-/* 1 when one of the N recorded present files names __FILE__, 0 when none, -1 on a read failure. */
-int rk_pinned(char **have, int n) {
+/* 1 when the unit is pinned: SEED (the OR of the source pin masks from rk_sources)
+   ORed with the pin masks of the N recorded present files; 0 when not, -1 on a read failure. */
+int rk_pinned(char **have, int n, int seed) {
     char hex[65];
     int names;
+    int m;
     int i;
+    m = seed;
     i = 0;
-    while (i < n) {
+    while (i < n && !pin_decide(m)) {
         names = 0;
         if (rk_file(have[i], hex, &names)) return -1;
-        if (names) return 1;
+        m = m | names;
         i = i + 1;
     }
-    return 0;
+    return pin_decide(m);
 }
 
 /* HEX: normalized arguments (up to "--"), normalized source paths and source bytes;
    each path is tagged R (made relative) or A (verbatim). RAW: the pinned digest
    (current directory, raw arguments, raw paths, then HEX, which already binds the
-   bytes). *PIN is 1 when a source names __FILE__. rk_open must have succeeded. */
+   bytes). *PIN is the combined path-dependence mask. rk_open must have succeeded. */
 int rk_sources(int argc, char **argv, const char **sources, int nsrc, char hex[65], char raw[65], int *pin) {
     unsigned char *acc;
     unsigned char *leg;
@@ -214,6 +205,7 @@ int rk_sources(int argc, char **argv, const char **sources, int nsrc, char hex[6
     long cap;
     long ln2;
     long cap2;
+    const char *rule;
     int j;
     acc = 0;
     n = 0;
@@ -222,6 +214,8 @@ int rk_sources(int argc, char **argv, const char **sources, int nsrc, char hex[6
     ln2 = 0;
     cap2 = 0;
     *pin = 0;
+    rule = pin_rule_version();
+    if (ri_app(&acc, &n, &cap, rule, tx_len(rule, 64) + 1)) goto bad;
     if (ri_cwdn <= 0 || ri_app(&leg, &ln2, &cap2, ri_cwd, (long)ri_cwdn + 1)) goto bad;
     j = 1;
     while (j < argc) {
@@ -238,6 +232,8 @@ int rk_sources(int argc, char **argv, const char **sources, int nsrc, char hex[6
         if (ri_app(&acc, &n, &cap, a == argv[j] ? "A" : "R", 1) || ri_app(&acc, &n, &cap, a, ln + 1)) goto bad;
         j = j + 1;
     }
+    /* -D definitions are a virtual file of the unit: their path macro, fragments or pastes count too */
+    *pin = *pin | pin_scan_argv(j - 1, argv + 1);
     j = 0;
     while (j < nsrc) {
         sy_stat_t st;
@@ -259,7 +255,7 @@ int rk_sources(int argc, char **argv, const char **sources, int nsrc, char hex[6
             mm_free(body);
             goto bad;
         }
-        if (ri_names_file(body, (long)bn)) *pin = 1;
+        *pin = *pin | pin_scan_text(body, (long)bn);
         if (ri_app(&acc, &n, &cap, body, (long)bn)) {
             mm_free(body);
             goto bad;
@@ -391,7 +387,7 @@ static int rm_check(char *b, long n) {
     char hex[65];
     char *p;
     sy_stat_t st;
-    if (n < 8 || !tx_same(b, 5, "UPM1\n", 5) || b[n - 1] != '\n' || b[n - 2] != 'E' || b[n - 3] != '\n') return 1;
+    if (n < 8 || !tx_same(b, 5, "UPM2\n", 5) || b[n - 1] != '\n' || b[n - 2] != 'E' || b[n - 3] != '\n') return 1;
     at = 5;
     nu = 0;
     while (at < n) {
@@ -419,7 +415,7 @@ static int rm_check(char *b, long n) {
         } else if (tag == 'A') {
             if (sy_stat(p, &st) != -ENOENT) return 1;
         } else if (tag == 'S') {
-            if (e - at != 2 + 261) return 1;
+            if (e - at != 2 + 261 || p[260] < '0' || p[260] > '7') return 1;
             rm_sline = p;
         } else if (tag == 'P' || tag == 'R') {
             if (e - at < 2 + 66 || p[64] != ' ') return 1;
@@ -449,7 +445,7 @@ static int rm_keypath(char **paths, int n, int funit) {
     if (rk_open() || rm_ident("/proc/self/exe", exe, 0) || mc_cache_dir(dir, 400)) return 1;
     td = sy_tmpdir();
     if (!td || tx_len(td, 4096) <= 0) return 1;
-    if (ri_app(&k, &kn, &kc, "UPM1", 5) || ri_app(&k, &kn, &kc, exe, 65) || ri_app(&k, &kn, &kc, ri_cwd, (long)ri_cwdn + 1) ||
+    if (ri_app(&k, &kn, &kc, "UPM2", 5) || ri_app(&k, &kn, &kc, exe, 65) || ri_app(&k, &kn, &kc, ri_cwd, (long)ri_cwdn + 1) ||
         ri_app(&k, &kn, &kc, td, tx_len(td, 4096) + 1) || ri_app(&k, &kn, &kc, funit ? "F" : "W", 2)) goto bad;
     i = 0;
     while (i < n) {
@@ -554,7 +550,7 @@ static void rm_store(const char *ah, const char *prod, const char *hex, const ch
     o = 0;
     on = 0;
     oc = 0;
-    if (rm_t0 <= 0 || ri_app(&o, &on, &oc, "UPM1\n", 5)) goto out;
+    if (rm_t0 <= 0 || ri_app(&o, &on, &oc, "UPM2\n", 5)) goto out;
     n = rm_countf();
     i = 0;
     while (i < n) {
@@ -578,7 +574,7 @@ static void rm_store(const char *ah, const char *prod, const char *hex, const ch
     }
     if (ri_app(&o, &on, &oc, "S ", 2) || ri_app(&o, &on, &oc, ah, 64) || ri_app(&o, &on, &oc, " ", 1) ||
         ri_app(&o, &on, &oc, prod, 64) || ri_app(&o, &on, &oc, " ", 1) || ri_app(&o, &on, &oc, hex, 64) ||
-        ri_app(&o, &on, &oc, " ", 1) || ri_app(&o, &on, &oc, raw, 64) || ri_app(&o, &on, &oc, pin ? " 1\nE\n" : " 0\nE\n", 5)) goto out;
+        ri_app(&o, &on, &oc, " ", 1) || ri_app(&o, &on, &oc, raw, 64) || ri_app(&o, &on, &oc, " ", 1) || ri_app(&o, &on, &oc, &"01234567"[pin & 7], 1) || ri_app(&o, &on, &oc, "\nE\n", 3)) goto out;
     cx_sha256_hex(o, (size_t)on, id);
     ln = tx_len(rm_path, 720);
     if (ln <= 0 || tx_copy(tmp, 800, rm_path, ln) || tx_copy(tmp + ln, 800 - ln, ".", 1) || tx_copy(tmp + ln + 1, 800 - ln - 1, id, 64)) goto out;
@@ -594,10 +590,13 @@ int rk_sources2(int argc, char **argv, const char **sources, int nsrc, const cha
     long ac;
     long ln;
     char ah[65];
+    const char *rule = pin_rule_version();
     int j;
     a = 0;
     an = 0;
     ac = 0;
+    /* the memo key carries the pin rule version: a mask from another rule is never reused */
+    if (rm_state && ri_app(&a, &an, &ac, rule, tx_len(rule, 64) + 1)) { if (rm_state == 1) rm_state = 0; mm_free(a); return rk_sources(argc, argv, sources, nsrc, hex, raw, pin); }
     j = 1;
     while (rm_state && j < argc && argv[j] && !tx_eq(argv[j], "--", 8)) {
         ln = tx_len(argv[j], 4096);
@@ -608,7 +607,7 @@ int rk_sources2(int argc, char **argv, const char **sources, int nsrc, const cha
     mm_free(a);
     if (rm_state == 2 && rm_sline && tx_same(rm_sline, 64, ah, 64) && tx_same(rm_sline + 65, 64, prod, 64)) {
         if (tx_copy(hex, 65, rm_sline + 130, 64) || tx_copy(raw, 65, rm_sline + 195, 64)) return 1;
-        *pin = rm_sline[260] == '1';
+        *pin = rm_sline[260] - '0';
         return 0;
     }
     if (rk_sources(argc, argv, sources, nsrc, hex, raw, pin)) return 1;

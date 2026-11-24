@@ -1,0 +1,152 @@
+/* tests/check-pinscan.cx -- unit contract of text.pinscan, the path-dependence rule
+ * used by cx/runtime/rcident.cx. Calls the module functions directly; every case states its expected
+ * verdict, and the summary line counts missed pins separately (a missed pin is a wrong output,
+ * an extra pin only a recompile).  usage: check-pinscan.cx -- [REPO_ROOT]   (default ".")
+ * REPO_ROOT supplies four real files: include/stdint.h, include/cx-flat.h and
+ * tools/cxlib/toolprep.cx must stay unpinned and paste-free; tests/run.cx uses __FILE__. */
+#pragma unisa use text.pinscan
+#pragma unisa use sys.fs
+#pragma unisa use sys.io
+#pragma unisa use mem.heap
+
+static int ck_n, ck_fail, ck_miss;
+
+/* WANT: 'p' pinned, 'n' unpinned and no paste bit, 'u' unpinned, '4' the paste bit is set */
+static void ck_one(const char *name, int m, int want) {
+    int got, ok;
+    if (want == '4') ok = (m & 4) != 0;
+    else if (want == 'u') ok = m >= 0 && !pin_decide(m);
+    else if (want == 'n') ok = m >= 0 && !pin_decide(m) && !(m & 4);
+    else ok = m >= 0 && pin_decide(m);
+    got = m >= 0 ? pin_decide(m) : -1;
+    ck_n++;
+    if (!ok) { ck_fail++; if (want == 'p' || want == '4') ck_miss++; }
+    sy_printf("%s\t%s\tmask=%d\tpin=%d\twant=%c\n", ok ? "PASS" : "FAIL", name, m, got, want);
+}
+
+static long ck_len(const char *s) { long n = 0; while (s[n]) n++; return n; }
+
+static int ck_text(const char *s) { return pin_scan_text(s, ck_len(s)); }
+
+typedef struct { const char *name; const char *text; int want; } ck_case_t;
+
+static const ck_case_t ck_files[] = {
+    /* Q14 synthetic cases (same bytes as Q14/cases) */
+    {"q14.no_comment_block", "/* uses __FILE__ in a comment */\nint main(void){return 0;}\n", 'n'},
+    {"q14.no_comment_line", "// __FILE__ here\nint main(void){return 0;}\n", 'n'},
+    {"q14.no_comment_spliced", "// line comment continued \\\n__FILE__ still comment\nint x;\n", 'n'},
+    {"q14.no_string", "const char *s = \"path __FILE__ \\\" still __FILE__\";\n", 'n'},
+    {"q14.no_string_escq", "char c = '\\''; const char *s=\"__FILE__\";\n", 'n'},
+    {"q14.no_toolprep_like", "/* tq_mentions_file __FILE__ */ static int f(const char*b){return b[0]=='_';}\nconst char *m = \"__FILE__\";\n", 'n'},
+    {"q14.pin_digitsep", "int n = 1'000; const char *p = __FILE__;\n", 'p'},
+    {"q14.pin_hdrname", "#include <a/*b.h>\nconst char *p = __FILE__;\n", 'p'},
+    {"q14.pin_inrun", "int __FILE__x;\n", 'p'},
+    {"q14.pin_macro", "#define F __FILE__\nconst char *p = F;\n", 'p'},
+    {"q14.pin_paste", "#define C(a,b) a##b\nconst char *p = C(__FI,LE__);\n", 'p'},
+    {"q14.pin_paste_digraph", "%:define C(a,b) a%:%:b\nconst char *p = C(__FI,LE__);\n", 'p'},
+    {"q14.pin_real", "const char *p = __FILE__;\n", 'p'},
+    {"q14.pin_splice", "const char *p = __FI\\\nLE__;\n", 'p'},
+    {"q14.pin_splice_crlf", "const char *p = __FI\\\r\nLE__;\n", 'p'},
+    {"q14.pin_unterminated", "const char *s = \"unterminated\nconst char *p = __FILE__;\n", 'p'},
+    {"q14.no_stdint_paste", "#define INT64_C(v)  v##LL\n#define UINT32_C(v) v##U\nint _x; int E__;\n", 'n'},
+    {"q14.pin_paste3", "#define C(a,b,c) a##b##c\nconst char *p = C(__,FI,LE__);\n", 'p'},
+    {"q14.pin_paste_litleft", "#define P(x) __FI##x\n", 'p'},
+    {"q14.pin_paste_litright", "#define Q(x) x##LE__\n", 'p'},
+    {"q14.pin_paste_va", "#define V(...) __VA_ARGS__##_\n", 'p'},
+    {"q14.p4_paste_nodefine", "int a = b ## c;\n", '4'},
+    {"q14.p4_paste_end", "#define W(x) x##\n", '4'},
+    {"q14.no_syscall_chain", "#define S(name) (sn_a_##name##_hi * 6 + sn_a_##name##_lo)\nint _q, E__;\n", 'n'},
+    {"q14.pin_paste_chain_lit", "#define R(x) __##x##__\n", 'p'},
+    /* G5: %: is '#' at line start, so %:include <..> holds a header name, not a comment opener */
+    {"g5.pct_include", "%:include <a/*b.h>\nconst char *p = __FILE__; /* x */\n", 'p'},
+    {"g5.pct_include_indent", "  %: include <x/*y.h>\nint q = __FILE__;\n", 'p'},
+    {"g5.pct_define_macro", "%:define F __FILE__\nconst char *p = F;\n", 'p'},
+    /* G5: a block comment open to end of file pins, whatever it swallowed */
+    {"g5.unclosed_comment", "int a;\n/* never closed __F", 'p'},
+    {"g5.unclosed_comment_plain", "int a;\n/* open\nint b;\n", 'p'},
+    {"g5.closed_comment_ok", "int a; /* closed */ int b;\n", 'n'},
+    /* splices inside directives and pastes */
+    {"g5.splice_in_define", "#define F __F\\\nILE__\nconst char *p = F;\n", 'p'},
+    {"g5.splice_in_paste", "#define C(a,b) a#\\\n#b\nconst char *p = C(__FI,LE__);\n", 'p'},
+    {"g5.splice_crlf_define", "#define F __FIL\\\r\nE__\n", 'p'},
+    /* macro indirection */
+    {"g5.macro_two_level", "#define A B\n#define B __FILE__\nconst char *p = A;\n", 'p'},
+    {"g5.macro_fn_indirect", "#define G(x) x\nconst char *p = G(__FILE__);\n", 'p'},
+    /* stringising: S(__FILE__) is the literal "__FILE__", S2(__FILE__) is the path; both pin (extra pin allowed) */
+    {"g5.stringize_s2", "#define S(x) #x\n#define S2(x) S(x)\nconst char *p = S2(__FILE__);\n", 'p'},
+    {"g5.stringize_s2_indirect", "#define S(x) #x\n#define S2(x) S(x)\n#define F __FILE__\nconst char *p = S2(F);\n", 'p'},
+    {"g5.stringize_plain", "#define S(x) #x\nconst char *p = S(LINE);\n", 'n'},
+    /* other paths through the preprocessor */
+    {"g5.if0_still_pins", "#if 0\nconst char *p = __FILE__;\n#endif\n", 'p'},
+    {"g5.line_directive", "#line 10 \"x.c\"\nint a;\n", 'n'},
+    {"g5.empty", "", 'n'},
+    {0, 0, 0}
+};
+
+typedef struct { const char *name; const char *argv[6]; int argc; const char *src; int want; } ck_argv_t;
+
+static const ck_argv_t ck_args[] = {
+    /* G5 A: the path macro itself on the command line, joined and separate */
+    {"argv.A_joined", {"-DPV=__FILE__"}, 1, "int main(void){puts(PV);return 0;}\n", 'p'},
+    {"argv.A_separate", {"-D", "PV=__FILE__"}, 2, "int main(void){puts(PV);return 0;}\n", 'p'},
+    /* G5 B: both fragments on the command line, the paste in two levels of source macros */
+    {"argv.B_joined", {"-DP=__FI", "-DQ=LE__"}, 2, "#define C(a,b) a##b\n#define X(a,b) C(a,b)\nint main(void){puts(X(P,Q));return 0;}\n", 'p'},
+    {"argv.B_separate", {"-D", "P=__FI", "-D", "Q=LE__"}, 4, "#define C(a,b) a##b\n#define X(a,b) C(a,b)\nint main(void){puts(X(P,Q));return 0;}\n", 'p'},
+    /* G5 C: the paste macro on the command line (shell: -D'C(a,b)=a##b'), fragments in source */
+    {"argv.C_joined", {"-DC(a,b)=a##b"}, 1, "int main(void){puts(C(__FI,LE__));return 0;}\n", 'p'},
+    {"argv.C_separate", {"-D", "C(a,b)=a##b"}, 2, "int main(void){puts(C(__FI,LE__));return 0;}\n", 'p'},
+    {"argv.any_file_run", {"-o", "out__FILE__x"}, 2, "int a;\n", 'p'},
+    /* harmless definitions keep the cache key relative */
+    {"argv.harmless", {"-DNDEBUG", "-DV=3", "-O2", "-o"}, 4, "int main(void){return V;}\n", 'n'},
+    {"argv.harmless_paste", {"-DINT64_C(v)=v##LL"}, 1, "long x = INT64_C(3);\n", 'n'},
+    {"argv.harmless_sep_last", {"-D"}, 1, "int a;\n", 'n'},
+    {0, {0}, 0, 0, 0}
+};
+
+static int ck_real(const char *root, const char *rel) {
+    char p[4096];
+    unsigned char *b = 0;
+    int64_t n = 0;
+    int m;
+    long i = 0, j = 0;
+    while (root[i] && i < 3000) { p[i] = root[i]; i++; }
+    p[i++] = '/';
+    while (rel[j] && i < 4090) p[i++] = rel[j++];
+    p[i] = 0;
+    if (sy_read_file(p, &b, &n, 64 << 20) != 0 || !b) return -1;
+    m = pin_scan_text((const char *)b, (long)n);
+    mm_free(b);
+    return m;
+}
+
+int main(int argc, char **argv) {
+    const char *root = argc > 1 ? argv[1] : ".";
+    int i, a, b;
+    for (i = 0; ck_files[i].name; i++) ck_one(ck_files[i].name, ck_text(ck_files[i].text), ck_files[i].want);
+    /* Q14 cross-file: fragments in one header, the paste in another; neither pins alone */
+    a = ck_text("const char *p = C(__FI,LE__);\n");
+    b = ck_text("#define C(a,b) a##b\n");
+    ck_one("q14.xfile_frag_alone", a, 'n');
+    ck_one("q14.xfile_paste_alone", b, 'u');
+    ck_one("q14.xfile_paste_bit", b, '4');
+    ck_one("q14.xfile_unit", a | b, 'p');
+    for (i = 0; ck_args[i].name; i++) {
+        int m = pin_scan_argv(ck_args[i].argc, (char **)ck_args[i].argv);
+        ck_one(ck_args[i].name, m | ck_text(ck_args[i].src), ck_args[i].want);
+    }
+    ck_one("define.joined_noeq", pin_scan_define("-DFOO"), 'n');
+    ck_one("define.bare_value", pin_scan_define("PV=__FILE__"), 'p');
+    ck_one("real.include/stdint.h", ck_real(root, "include/stdint.h"), 'n');
+    ck_one("real.include/cx-flat.h", ck_real(root, "include/cx-flat.h"), 'n');
+    ck_one("real.tools/cxlib/toolprep.cx", ck_real(root, "tools/cxlib/toolprep.cx"), 'n');
+    ck_one("real.tests/run.cx", ck_real(root, "tests/run.cx"), 'p');
+    {
+        const char *v = pin_rule_version();
+        int ok = v && v[0];
+        ck_n++;
+        if (!ok) ck_fail++;
+        sy_printf("%s\tversion\t%s\n", ok ? "PASS" : "FAIL", ok ? v : "-");
+    }
+    sy_printf("PINSCAN_SUMMARY\tcases=%d\tfail=%d\tmissed_pin=%d\n", ck_n, ck_fail, ck_miss);
+    return ck_fail ? 1 : 0;
+}
