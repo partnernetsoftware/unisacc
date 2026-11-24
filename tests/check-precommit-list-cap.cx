@@ -1,0 +1,129 @@
+/* tests/check-precommit-list-cap.cx -- 真实调用 precommit 门入口(UNISACC_PRECOMMIT_SERIAL=1 强制串行):
+ * (1) >1MiB 输出中 1MiB 后 unknown-coverage row= 被拒;
+ * (2) UNISACC_PRECOMMIT_LIST_MAX=1048576 收紧上限时具名拒绝 runlist-output-exceeded-cap-1048576 且 rc!=0;
+ * (3) 正常大小输出带 PLAN metadata_valid=1 时 rc0 且 blocked=0;
+ * (4) 小输出带 PLAN metadata_valid=0 时 rc!=0 且含 metadata_valid!=1 (证明门真消费 PLAN). */
+#pragma unisa use sys.fs
+#pragma unisa use sys.env
+#pragma unisa use sys.io
+#pragma unisa use sys.proc
+#pragma unisa use sys.posix
+#pragma unisa use sysx.run
+#pragma unisa use text.text
+#pragma unisa use text.fmt
+#pragma unisa use mem.heap
+
+static int failed;
+static void ck(int ok, const char *name) {
+    if (!ok) failed++;
+    sy_printf("%s\tprecommit-list-cap.%s\n", ok ? "PASS" : "FAIL", name);
+}
+static int has(const char *b, long n, const char *s) {
+    long m = tx_len(s, 256), i, j;
+    if (!b || !s || m <= 0 || m > n) return 0;
+    for (i = 0; i + m <= n; i++) {
+        for (j = 0; j < m && b[i + j] == s[j]; j++) {}
+        if (j == m) return 1;
+    }
+    return 0;
+}
+static int run_cmd(char **argv, const char *dir, char *out, long cap) {
+    int ofd, pid, ex = 0, code = 0, sig = 0; long n = 0, r; char junk[4096];
+    pid = px_spawn_spool(argv, dir, SY_SPAWN_ERR_TO_OUT, &ofd, 0);
+    if (pid < 0) return -1;
+    while (n < cap - 1 && (r = sy_read(ofd, out + n, cap - 1 - n)) > 0) n += r;
+    out[n] = 0;
+    while (sy_read(ofd, junk, sizeof junk) > 0) {}
+    sy_close(ofd);
+    if (sy_wait_status(pid, 0, &ex, &code, &sig) != pid || !ex) return -1;
+    return code;
+}
+
+int main(void) {
+    char root[4096], tmp[4400], p[4400], q[4400];
+    static char out[1 << 15];
+    int prep_ok = 1;
+    if (sy_realpath(".", root, sizeof root) < 0) return 2;
+    if (sy_mkdtemp(sy_tmpdir(), "pc-list-cap-", tmp, sizeof tmp)) return 2;
+    if (sy_setenv("UNISACC_PRECOMMIT_SERIAL", "1", 1)) prep_ok = 0;
+    {
+        const char *links[] = {"unisacc.com", "cx", "ext", "src", "cxroot.tsv", "build", 0};
+        for (int i = 0; links[i]; i++) {
+            if (cx_fmt(p, sizeof p, "%s/%s", root, links[i]) || cx_fmt(q, sizeof q, "%s/%s", tmp, links[i]) || sy_symlink(p, q)) prep_ok = 0;
+        }
+        if (cx_fmt(p, sizeof p, "%s/tools", tmp) || sy_mkdir(p, 0755)) prep_ok = 0;
+        {
+            const char *tlinks[] = {"precommit.cx", "cxlib", "cx-lint.cx", 0};
+            for (int i = 0; tlinks[i]; i++) {
+                if (cx_fmt(p, sizeof p, "%s/tools/%s", root, tlinks[i]) || cx_fmt(q, sizeof q, "%s/tools/%s", tmp, tlinks[i]) || sy_symlink(p, q)) prep_ok = 0;
+            }
+        }
+        if (cx_fmt(p, sizeof p, "%s/tests", tmp) || sy_mkdir(p, 0755)) prep_ok = 0;
+        if (cx_fmt(p, sizeof p, "%s/tests/run.cx", tmp)) prep_ok = 0;
+        else {
+            const char *src =
+                "#pragma unisa use sys.io\n"
+                "int main(void) {\n"
+                "    char pad[1025]; for (int i = 0; i < 1024; i++) pad[i] = 'x'; pad[1024] = 0;\n"
+                "    for (int j = 0; j < 1050; j++) sy_printf(\"BATCH\\t%d\\t%s\\n\", j, pad);\n"
+                "    sy_printf(\"unknown-coverage row=999 id=after-1mib\\nPLAN\\tmetadata_valid=0\\n\");\n"
+                "    return 2;\n"
+                "}\n";
+            if (cx_write(p, src, (size_t)tx_len(src, 4096))) prep_ok = 0;
+        }
+        if (cx_fmt(p, sizeof p, "%s/tests/batches.tsv", tmp) || cx_write(p, "id\n", 3)) prep_ok = 0;
+        if (cx_fmt(p, sizeof p, "%s/tests/coverage.tsv", tmp) || cx_write(p, "id\n", 3)) prep_ok = 0;
+        ck(prep_ok, "fixture-setup");
+        if (prep_ok) {
+            char *gi[] = {"git", "init", "-q", tmp, 0};
+            char *gc1[] = {"git", "-C", tmp, "config", "user.name", "t", 0};
+            char *gc2[] = {"git", "-C", tmp, "config", "user.email", "t@t", 0};
+            char *gcm[] = {"git", "-C", tmp, "commit", "--allow-empty", "-q", "-m", "init", 0};
+            char *ga[] = {"git", "-C", tmp, "add", "tests/batches.tsv", "tests/coverage.tsv", "tests/run.cx", 0};
+            char *gar[] = {"git", "-C", tmp, "add", "tests/run.cx", 0};
+            char *pc[] = {"sh", "./unisacc.com", "tools/precommit.cx", "--", 0};
+            int git_ok = run_cmd(gi, 0, out, sizeof out) == 0 && run_cmd(gc1, 0, out, sizeof out) == 0 &&
+                         run_cmd(gc2, 0, out, sizeof out) == 0 && run_cmd(gcm, 0, out, sizeof out) == 0 &&
+                         run_cmd(ga, 0, out, sizeof out) == 0;
+            ck(git_ok, "fixture-git-init");
+            if (git_ok) {
+            /* 1) >1MiB 扩容检出 1MiB 后 unknown-coverage */
+            int rc = run_cmd(pc, tmp, out, sizeof out);
+            ck(rc != 0 && has(out, tx_len(out, sizeof out), "after-1mib"), "serial-after-1mib-refused");
+            /* 2) 收紧上限 UNISACC_PRECOMMIT_LIST_MAX=1048576 具名拒绝 */
+            ck(!sy_setenv("UNISACC_PRECOMMIT_LIST_MAX", "1048576", 1), "setenv-tighten");
+            rc = run_cmd(pc, tmp, out, sizeof out);
+            ck(rc != 0 && has(out, tx_len(out, sizeof out), "runlist-output-exceeded-cap-1048576"), "serial-tightened-cap-refused");
+            /* 3) 正常大小输出带 PLAN metadata_valid=1 成功通过 */
+            ck(!sy_setenv("UNISACC_PRECOMMIT_LIST_MAX", "16777216", 1), "setenv-default");
+            {
+                const char *ok_src = "#pragma unisa use sys.io\nint main(void) { sy_printf(\"PLAN\\tmetadata_valid=1\\n\"); return 0; }\n";
+                if (cx_fmt(p, sizeof p, "%s/tests/run.cx", tmp) ||
+                    cx_write(p, ok_src, (size_t)tx_len(ok_src, 1024)) ||
+                    run_cmd(gar, 0, out, sizeof out) != 0) {
+                    ck(0, "normal-plan-metadata-valid-passes");
+                } else {
+                    rc = run_cmd(pc, tmp, out, sizeof out);
+                    ck(rc == 0 && has(out, tx_len(out, sizeof out), "PRECOMMIT\t") &&
+                       has(out, tx_len(out, sizeof out), "blocked=0"), "normal-plan-metadata-valid-passes");
+                }
+            }
+            /* 4) 反例: 小输出带 PLAN metadata_valid=0 必须具名拒绝 */
+            {
+                const char *bad_src = "#pragma unisa use sys.io\nint main(void) { sy_printf(\"PLAN\\tmetadata_valid=0\\n\"); return 2; }\n";
+                if (cx_fmt(p, sizeof p, "%s/tests/run.cx", tmp) ||
+                    cx_write(p, bad_src, (size_t)tx_len(bad_src, 1024)) ||
+                    run_cmd(gar, 0, out, sizeof out) != 0) {
+                    ck(0, "small-plan-metadata-invalid-refused");
+                } else {
+                    rc = run_cmd(pc, tmp, out, sizeof out);
+                    ck(rc != 0 && has(out, tx_len(out, sizeof out), "metadata_valid!=1"), "small-plan-metadata-invalid-refused");
+                }
+            }
+            }
+        }
+    }
+    (void)sy_remove_all(tmp);
+    sy_printf("CHECK_PRECOMMIT_LIST_CAP\tfailed=%d\n", failed);
+    return failed ? 1 : 0;
+}
