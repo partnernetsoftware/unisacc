@@ -22,7 +22,7 @@
  *                then records rc 0 and no process is left in its session (bounded wait: 60 polls of 200 ms).
  *                With a forged entry step (identity built from the recorded tree fingerprint), `--until-done`
  *                finishes in one call: reload DONE, entry SKIP, hdr DONE (real swap), exit 0, last line
- *                DEV_PRODUCT scope=LOCAL; once more on that finished directory: exit 0, nothing DONE or STARTED,
+ *                DEV_PRODUCT scope=LOCAL-PARTIAL; once more on that finished directory: exit 0, nothing DONE or STARTED,
  *                no DEV_UNTIL line, same sha.
  *                Not exercised here: the real reload and entry under --until-done, the entry PENDING line, the
  *                poll count cap as the binding bound, the DIED path (job killed from outside).
@@ -121,6 +121,16 @@ static void until(const char *cwd, const char *w, const char *pkg) {
     cx_sha256_hex(script, strlen(script), h);
     bad |= cx_fmt(id, sizeof id, "build:%s", cwd) || wr(o, "state/build.id", id) || wr(o, "state/build.sha", h) || wr(o, "state/build.rc", "0");
     ok(!bad, "until-fixture-forged-build-step");
+    {
+      char *av[] = {"sh", (char *)COM, (char *)TOOL, "--", "--tree", (char *)cwd, "--out", o, 0};
+      if (cx_fmt(p, sizeof p, "%s/state/lock", o)) { ok(0, "out-lock-path"); return; }
+      int fd = sy_open(p, O_RDWR | O_CREAT | O_CLOEXEC, 0600);
+      int held = fd >= 0 && !sy_flock(fd, 2 | 4);
+      int e = run(av, &r);
+      ok(held && !e && r.rc == 2 && has(r.err, r.errn, "REFUSE out-busy"), "overlapping-out-refused");
+      if (fd >= 0) sy_close(fd);
+      np_free(&r);
+    }
     { char *av[] = {"sh", (char *)COM, (char *)TOOL, "--", "--tree", (char *)cwd, "--out", o, "--until-done", "--total-s", "1", 0};
       int e = run(av, &r);
       ok(!e && r.rc == 3, "until-short-total-exit-3");
@@ -150,12 +160,39 @@ static void until(const char *cwd, const char *w, const char *pkg) {
     bad |= cx_fmt(id, sizeof id, "entry:%.16s:%.16s:%.16s", v + 7, h1, h2) || wr(o, "entry/candidate", script) ||
            cx_fmt(p,sizeof p,"%s/entry/candidate",o) || sy_chmod(p,0755) || wr(o, "state/entry.id", id) || wr(o, "state/entry.sha", h) || wr(o, "state/entry.rc", "0");
     ok(!bad, "until-fixture-forged-entry-step");
+    {
+      const char *log = "CXDEV_KEYS\tper_recipe=1\tfiles=1\nCXDEV_RECIPE\tshared-e3\tNOT_DEPLOYED\nCXDEV_RECIPE\terrorparse\tbuilt\tindex=4\nCXDEV_RELOAD\tnets=1\tbuilt=1\tlocal_members=1\tstale=0\n";
+      char *av[] = {"sh", (char *)COM, (char *)TOOL, "--", "--tree", (char *)cwd, "--out", o, "--until-done", 0};
+      bad = wr(o, "log/reload.log", log) || wr(o, "cxdev/state.tsv", "fp\tnot-compared-yet\n");
+      int e = run(av, &r);
+      ok(!bad && !e && r.rc == 2 && has(r.err, r.errn, "REFUSE reload-not-compared"), "reload-uncompared-refused");
+      np_free(&r);
+      if (cx_fmt(script, sizeof script, "fp\tcompared\nscope\tLOCAL\nlocal\t1\npkgsha\t%s\nbase_stale\t0\t-\n", h1)) { ok(0, "reload-state-format"); return; }
+      bad = wr(o, "cxdev/state.tsv", script) || cx_fmt(p, sizeof p, "%s/cxdev/pkg.installed", o);
+      b = cx_read(pkg, &n);
+      if (!bad) bad = !b || cx_write(p, b, n);
+      free(b);
+      e = run(av, &r);
+      ok(!bad && !e && r.rc == 2 && has(r.err, r.errn, "REFUSE input-change-not-in-candidate"), "changed-input-with-installed-package-refused");
+      np_free(&r);
+      bad = wr(o, "cxdev/pkg.installed", "prior package") || wr(o, "cxdev/state.tsv", "fp\tcompared\nscope\tLOCAL\npkgsha\twrong\n");
+      e = run(av, &r);
+      ok(!bad && !e && r.rc == 2 && has(r.err, r.errn, "REFUSE package-changed-under-us"), "package-state-mismatch-refused");
+      np_free(&r);
+      if (wr(o, "cxdev/state.tsv", script)) { ok(0, "reload-state-write"); return; }
+    }
     { char *av[] = {"sh", (char *)COM, (char *)TOOL, "--", "--tree", (char *)cwd, "--out", o, "--until-done", 0};
       int e = run(av, &r); hdr_sha(&r, sha1);
       ok(!e && r.rc == 0, "until-one-call-finishes-exit-0");
       if (r.rc) { if (r.out) fwrite(r.out, 1, r.outn, stderr); if (r.err) fwrite(r.err, 1, r.errn, stderr); }
       ok(has(r.out, r.outn, "DEV_STEP\treload\tDONE") && has(r.out, r.outn, "DEV_STEP\tentry\tSKIP") && has(r.out, r.outn, "DEV_STEP\thdr\tDONE") && !has(r.out, r.outn, "\tSTARTED\t"), "until-one-call-reload-DONE-entry-SKIP-hdr-DONE");
-      ok(last_has(&r, "DEV_PRODUCT\tpath=") && last_has(&r, "\tscope=LOCAL"), "until-one-call-last-line-DEV_PRODUCT-scope-LOCAL"); np_free(&r); }
+      ok(last_has(&r, "DEV_PRODUCT\tpath=") && last_has(&r, "\tscope=LOCAL-PARTIAL"), "until-one-call-last-line-DEV_PRODUCT-scope-LOCAL-PARTIAL");
+      const char *delta = "DEV_DELTA\tchanged=1\tlocal_members=1\tbuilt=errorparse\tnot_rebuilt=shared-e3:NOT_DEPLOYED\tstale=0\tbase_stale=0\tscope=LOCAL-PARTIAL";
+      if (cx_fmt(p, sizeof p, "%s/receipt.tsv", o)) { ok(0, "delta-receipt-path"); np_free(&r); return; }
+      b = cx_read(p, &n);
+      ok(has(r.out, r.outn, delta) && has(r.out, r.outn, "DEV_WARN\taffected-recipe-not-rebuilt\trecipe=shared-e3") &&
+         b && has(b, n, delta), "changed-input-partial-delta-and-receipt");
+      free(b); np_free(&r); }
     { char *av[] = {"sh", (char *)COM, (char *)TOOL, "--", "--tree", (char *)cwd, "--out", o, "--until-done", "--total-s", "5", 0};
       int e = run(av, &r); hdr_sha(&r, sha2);
       ok(!e && r.rc == 0 && last_has(&r, "DEV_PRODUCT\tpath=") && last_has(&r, "\tscope=LOCAL"), "until-finished-directory-exit-0-DEV_PRODUCT");

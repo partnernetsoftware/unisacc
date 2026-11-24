@@ -37,7 +37,8 @@
  * A background step still running when --wait runs out ends the call with
  *   DEV_PRODUCT_PENDING<TAB>step=..<TAB>pid=..<TAB>next=rerun the same command          exit 3
  * and the same command resumes (--until-done does that waiting inside one call).  Success ends with
- *   DEV_PRODUCT<TAB>path=OUT/unisacc.com<TAB>sha=..<TAB>scope=LOCAL                       exit 0
+ *   DEV_DELTA lists changed inputs, rebuilt recipes and affected recipes still missing.
+ *   DEV_PRODUCT<TAB>path=OUT/unisacc.com<TAB>sha=..<TAB>scope=LOCAL|LOCAL-BASELINE|LOCAL-PARTIAL  exit 0
  * sha = sha256 of "entry-sha\npkg-sha\n".  A failed step: DEV_PRODUCT_FAIL<TAB>step=..<TAB>log=.., exit 1.
  * The tree identity is a stat fingerprint (path, size, mtime of include src cx exec seed), not a content hash.
  * Only lnx/x86_64.  Check: tools/check-dev-product-build.cx
@@ -46,6 +47,7 @@
 #pragma unisa use sys.fs
 #pragma unisa use sys.sha
 #pragma unisa use sys.time
+#pragma unisa use sys.posix
 #pragma unisa use cxlib.netpack
 #pragma unisa use mem.bytes
 
@@ -71,6 +73,90 @@ static void get(const char *p, char *o, size_t cap) {
 }
 static void sp(char *o, const char *step, const char *ext) { char r[200]; if (cx_fmt(r, sizeof r, "state/%s.%s", step, ext)) die("path-too-long", step); pj(o, out, r); }
 static void lp(char *o, const char *step) { char r[200]; if (cx_fmt(r, sizeof r, "log/%s.log", step)) die("path-too-long", step); pj(o, out, r); }
+
+/* Keep the inode in place. The kernel releases the lock even on a killed caller. */
+static void lock_out(void) {
+    char p[PW], owner[64]; int rc;
+    pj(p, out, "state/lock");
+    int fd = sy_open(p, O_RDWR | O_CREAT | O_CLOEXEC | O_NOFOLLOW, 0600);
+    if (fd < 0) die("out-lock", p);
+    rc = sy_flock(fd, 2 | 4);
+    if (rc == -EAGAIN) { get(p, owner, sizeof owner); die("out-busy", owner[0] ? owner : 0); }
+    if (rc || cx_fmt(owner, sizeof owner, "pid=%ld\n", (long)getpid()) ||
+        ftruncate(fd, 0) || write(fd, owner, strlen(owner)) != (long)strlen(owner)) die("out-lock", p);
+}
+
+static void check_pending(const char *step, const char *id) {
+    char p[PW], owner[64], running[400], detail[96];
+    sp(p, step, "rc"); if (isfile(p)) return;
+    sp(p, step, "pid"); get(p, owner, sizeof owner);
+    long pid = atol(owner);
+    if (pid <= 1 || (kill((pid_t)pid, 0) && errno == ESRCH)) return;
+    sp(p, step, "runid"); get(p, running, sizeof running);
+    if (id && !strcmp(id, running)) return;
+    if (cx_fmt(detail, sizeof detail, "pid=%ld", pid)) die("fmt", 0);
+    die("out-busy", detail);
+}
+
+typedef struct {
+    int changed, local, stale, base_stale;
+    char scope[32], expected[65], first[PW];
+    np_buf built, missing;
+} dp_delta;
+
+static void delta_add(np_buf *list, const char *recipe, const char *reason) {
+    if (list->n) np_puts(list, ",");
+    np_puts(list, recipe);
+    if (reason) { np_puts(list, ":"); np_puts(list, reason); }
+}
+
+static void delta_read(dp_delta *d, const char *cxdev, const char *pkg, char sha[65]) {
+    char p[PW], installed[65], fp[64] = "";
+    size_t n;
+    pj(p, cxdev, "state.tsv");
+    char *state = cx_read(p, &n);
+    if (!state) die("reload-not-compared", p);
+    for (char *line = strtok(state, "\n"); line; line = strtok(0, "\n")) {
+        if (!strncmp(line, "base_stale\t", 11)) {
+            d->base_stale = atoi(line + 11);
+            char *first = strchr(line + 11, '\t');
+            if (first && cx_fmt(d->first, sizeof d->first, "%s", first + 1)) die("fmt", 0);
+        } else if (sscanf(line, "fp\t%63s", fp) == 1) continue;
+        else if (sscanf(line, "scope\t%31s", d->scope) == 1) continue;
+        else if (sscanf(line, "pkgsha\t%64s", d->expected) == 1) continue;
+        else if (sscanf(line, "local\t%d", &d->local) == 1) continue;
+    }
+    free(state);
+    if (!fp[0] || !strcmp(fp, "not-compared-yet")) die("reload-not-compared", 0);
+    lp(p, "reload");
+    char *log = cx_read(p, &n);
+    if (!log) die("reload-log-unreadable", p);
+    int keys = 0, summary = 0;
+    for (char *line = strtok(log, "\n"); line; line = strtok(0, "\n")) {
+        int per, nets, built, local;
+        char recipe[64], result[96];
+        if (sscanf(line, "CXDEV_KEYS\tper_recipe=%d\tfiles=%d", &per, &d->changed) == 2) {
+            keys = 1;
+        } else if (sscanf(line, "CXDEV_RECIPE\t%63[^\t]\t%95[^\t]", recipe, result) == 2) {
+            if (!strcmp(result, "built")) delta_add(&d->built, recipe, 0);
+            else {
+                delta_add(&d->missing, recipe, result);
+                printf("DEV_WARN\taffected-recipe-not-rebuilt\trecipe=%s\treason=%s\n", recipe, result);
+            }
+        } else if (sscanf(line, "CXDEV_RELOAD\tnets=%d\tbuilt=%d\tlocal_members=%d\tstale=%d",
+                          &nets, &built, &local, &d->stale) == 4) summary = 1;
+    }
+    free(log);
+    if (!keys || !summary || !d->scope[0]) die("reload-log-incomplete", p);
+    if (file_sha(pkg, sha)) die("package-changed-under-us", pkg);
+    if (d->changed > 0 && !d->base_stale) {
+        pj(p, cxdev, "pkg.installed");
+        if (file_sha(p, installed)) die("package-unreadable", p);
+        if (!strcmp(sha, installed)) die("input-change-not-in-candidate", "first=unreported");
+    }
+    if (strcmp(sha, d->expected)) die("package-changed-under-us", pkg);
+    if (d->missing.n && cx_fmt(d->scope, sizeof d->scope, "LOCAL-PARTIAL")) die("fmt", 0);
+}
 
 /* a step is done when rc is 0, its input identity matches and its product still hashes to the recorded sha */
 static int done(const char *step, const char *id, const char *product) {
@@ -202,6 +288,7 @@ static int pending(const char *step, const char *remaining) {
 int main(int argc, char **argv) {
     char p[PW], cxdev[PW], loader[PW], pkg[PW], base[PW], entry[PW], cand[PW], pkgh[PW], launch[PW], com[PW], id[400], cmd[3 * PW], h1[65], h2[65], h3[65], fin[65], buf[2 * PW];
     int i, rc = 0, pend = 0; long long t0;
+    dp_delta delta = {0};
     for (i = 1; i < argc; i++) {
         if (!strcmp(argv[i], "--tree") && i + 1 < argc) { if (cx_fmt(tree, PW, "%s", argv[++i])) die("path-too-long", 0); }
         else if (!strcmp(argv[i], "--out") && i + 1 < argc) { if (cx_fmt(out, PW, "%s", argv[++i])) die("path-too-long", 0); }
@@ -231,6 +318,7 @@ int main(int argc, char **argv) {
     if (!status_only) {
         if (mkdir(out, 0755) && errno != EEXIST) die("mkdir", out);
         pj(p, out, "state"); if (mkdir(p, 0755) && errno != EEXIST) die("mkdir", p);
+        lock_out();
         pj(p, out, "log"); if (mkdir(p, 0755) && errno != EEXIST) die("mkdir", p);
         pj(p, out, "NOT_RELEASE"); put(p, "NOT_RELEASE\tdev-product-v1\tscope=LOCAL\tlnx/x86_64 only; not installed; not candidate evidence\n");
     } else if (!isdir(out)) die("out-missing", out);
@@ -242,6 +330,7 @@ int main(int argc, char **argv) {
     if (hdr_pkg[0]) {
         char hid[400], a[65], b[65], c[65];
         if (hdr_pkg[0] != '/' || status_only) die("--hdr-only ABS_PKG (not with --status)", 0);
+        check_pending("reload", 0); check_pending("entry", 0);
         if (file_sha(hdr_pkg, h1)) die("package-unreadable", hdr_pkg);
         pj(p, tree, "include/cx-flat.h"); if (file_sha(p, a)) die("header-unreadable", p);
         pj(p, tree, "include/stdio.h"); if (file_sha(p, b)) die("header-unreadable", p);
@@ -266,6 +355,7 @@ int main(int argc, char **argv) {
     if (done("build", id, loader) && isfile(base)) printf("DEV_STEP\tbuild\tSKIP\n");
     else if (status_only) { printf("DEV_STEP\tbuild\tTODO\n"); return 3; }
     else {
+        check_pending("reload", 0); check_pending("entry", 0);
         char e1[PW + 32], e2[PW + 32], e3[PW + 32], e4[64], cx[PW];
         char *av[] = {"env", e1, e2, e3, e4, "sh", com, cx, "--", "--build", 0};
         pj(cx, tree, "tools/cx-dev.cx");
@@ -279,18 +369,24 @@ int main(int argc, char **argv) {
     if (cx_fmt(id, sizeof id, "reload:%s", treeid)) die("fmt", 0);
     if (done("reload", id, pkg)) printf("DEV_STEP\treload\tSKIP\n");
     else {
+        if (status_only) return pending("reload", "reload,entry,hdr,seal");
+        check_pending("reload", id); check_pending("entry", 0);
         if (cx_fmt(cmd, sizeof cmd, "env CXDEV_HOME='%s' CXDEV_WT='%s' CXDEV_PAR=%d '%s' --reload", cxdev, tree, par, loader)) die("command-too-long", 0);
         if (bg("reload", cmd, 240, id, &rc)) return pending("reload", "reload,entry,hdr,seal");
         if (rc) fail("reload");
+        delta_read(&delta, cxdev, pkg, h1);
         seal_step("reload", id, pkg, -1);
     }
 
     /* entry (background) and hdr (foreground) both depend on reload only */
-    if (file_sha(pkg, h1) || file_sha(base, h2)) die("bundle-incomplete", cxdev);
+    if (!delta.scope[0]) delta_read(&delta, cxdev, pkg, h1);
+    if (file_sha(base, h2)) die("bundle-incomplete", cxdev);
     if (cx_fmt(id, sizeof id, "entry:%.16s:%.16s:%.16s", treeid, h1, h2)) die("fmt", 0);
     if (done("entry", id, cand)) printf("DEV_STEP\tentry\tSKIP\n");
     else {
         int w = wait_s; wait_s = 0;   /* start it, do hdr meanwhile, then wait */
+        if (status_only) return pending("entry", "entry,seal");
+        check_pending("entry", id);
         if (cx_fmt(cmd, sizeof cmd, "sh -c 'cd \"$0\" && exec sh ./unisacc.com tools/entry-build.cx -- \"$0\" \"$1\" \"$2\" \"$3\"' '%s' '%s' '%s' '%s'", tree, pkg, entry, base)) die("command-too-long", 0);
         pend = bg("entry", cmd, 280, id, &rc); wait_s = w;
         if (!pend && rc) fail("entry");
@@ -312,17 +408,28 @@ int main(int argc, char **argv) {
     }
 
     /* seal */
+    if (file_sha(pkg, fin) || strcmp(fin, h1)) die("package-changed-under-us", pkg);
     if (file_sha(cand, h2) || file_sha(pkgh, h3)) die("product-missing", out);
     if (cx_fmt(buf, sizeof buf, "%s\n%s\n", h2, h3)) die("fmt", 0);
     cx_sha256_hex(buf, strlen(buf), fin);
+    np_buf report = {0};
+    if (cx_fmt(buf, sizeof buf, "DEV_DELTA\tchanged=%d\tlocal_members=%d\tbuilt=%s\tnot_rebuilt=%s\tstale=%d\tbase_stale=%d\tscope=%s\n",
+               delta.changed, delta.local, delta.built.p ? delta.built.p : "-", delta.missing.p ? delta.missing.p : "-",
+               delta.stale, delta.base_stale, delta.scope)) die("delta-too-long", 0);
+    np_puts(&report, buf);
     if (!status_only) {
         if (cx_fmt(buf, sizeof buf, "#!/bin/sh\n# NOT_RELEASE dev-product-v1 scope=LOCAL (tools/dev-product.cx); lnx/x86_64 only\nexport UNISA_CONTAINER='%s' UNISACC_LOCAL=1\nif [ x${UNISACC_E3CACHE+x} = x ]; then export UNISACC_CACHE_DIR=\"${DEV_PRODUCT_CACHE:-%s/runcache}\"; else unset UNISACC_CACHE_DIR; fi\nexec '%s' \"$@\"\n", pkgh, out, cand)) die("path-too-long", 0);
         put(launch, buf); if (chmod(launch, 0755)) die("chmod", launch);
         pj(p, out, "runcache"); if (mkdir(p, 0700) && errno != EEXIST) die("mkdir", p);
-        if (cx_fmt(buf, sizeof buf, "NOT_RELEASE\tdev-product-v1\ntree\t%s\ntree_fp\t%s\nentry\t%s\t%s\npkg\t%s\t%s\nnets_pkg\t%s\t%s\nproduct\t%s\t%s\nscope\tLOCAL\n", tree, treeid, cand, h2, pkgh, h3, pkg, h1, launch, fin)) die("path-too-long", 0);
-        pj(p, out, "receipt.tsv"); put(p, buf);
+        if (cx_fmt(buf, sizeof buf, "NOT_RELEASE\tdev-product-v1\ntree\t%s\ntree_fp\t%s\nentry\t%s\t%s\npkg\t%s\t%s\nnets_pkg\t%s\t%s\nproduct\t%s\t%s\nscope\t%s\n", tree, treeid, cand, h2, pkgh, h3, pkg, h1, launch, fin, delta.scope)) die("path-too-long", 0);
+        np_buf receipt = {0};
+        np_puts(&receipt, buf); np_puts(&receipt, report.p);
+        pj(p, out, "receipt.tsv"); put(p, receipt.p);
+        free(receipt.p);
     } else if (!isfile(launch)) { printf("DEV_STEP\tseal\tTODO\n"); return 3; }
     printf("DEV_PRODUCT_PARTS\tentry=%.16s\tpkg=%.16s\tnets_pkg=%.16s\twall_ms=%lld\n", h2, h3, h1, now_ms() - t_start);
-    printf("DEV_PRODUCT\tpath=%s\tsha=%s\tscope=LOCAL\n", launch, fin);
+    fputs(report.p, stdout);
+    printf("DEV_PRODUCT\tpath=%s\tsha=%s\tscope=%s\n", launch, fin, delta.scope);
+    free(report.p); free(delta.built.p); free(delta.missing.p);
     return 0;
 }
