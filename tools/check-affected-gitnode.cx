@@ -1,12 +1,18 @@
-/* Checks that tools/affected.cx can digest the source closure of a file naming a .git/ path when the checkout is
- * a version worktree (git worktree add: .git is a pointer FILE, so <root>/.git/gitdir does not exist as named).
+/* Checks the source-closure digest tools/affected.cx computes (--closure-sha) for a file naming a .git/ path, in a
+ * plain repository and in version worktrees (git worktree add: .git is a pointer FILE, and the content of
+ * <root>/.git/gitdir is a per-checkout absolute path).
  *   sh ./unisacc.com tools/check-affected-gitnode.cx -- [--affected DRAFT.cx]
- * Fixture (private temp dir, never the real repository): a git repo R with one commit, a worktree W of it, and in
- * both R and W a one-file closure tools/gn.cx whose only content is the literal ".git/gitdir".  Cases:
- *   plain-repo-closure-sha   in R (.git is a directory) --closure-sha tools/gn.cx answers CLOSURE_SHA rc 0
- *   worktree-closure-sha     in W (.git is a file) the same answers CLOSURE_SHA rc 0, never CLOSURE_UNREADABLE
- * Mutation: --affected DRAFT.cx runs the same cases on a draft; a draft without the .git/ node read must turn
- * worktree-closure-sha red.  Prints CHECK lines and CHECK_AFFECTED_GITNODE ok|FAIL; rc 0 only when all passed. */
+ * Fixture (private temp dir, never the real repository): a git repo R with one commit, worktrees W and W2 of it,
+ * and in each a one-file closure tools/gn.cx whose only content is the literal ".git/gitdir".  Cases:
+ *   plain-repo-closure-sha    in R (.git is a directory) --closure-sha tools/gn.cx answers CLOSURE_SHA rc 0
+ *   worktree-closure-sha      in W (.git is a file) the same answers CLOSURE_SHA rc 0, never CLOSURE_UNREADABLE
+ *   worktrees-same-digest     W and W2, same source, answer the same digest (a .git/ node is not a source
+ *                             dependency: counting it made every checkout a different material identity)
+ *   unreadable-node-refused   a node that is not under .git/ and cannot be read (tests/noperm.dat, mode 000, named by
+ *                             a literal in tools/np.cx, R only) still answers CLOSURE_UNREADABLE rc 2
+ * Mutation: --affected DRAFT.cx runs the same cases on a draft; a draft that counts .git/ nodes turns
+ * worktree-closure-sha or worktrees-same-digest red, one that skips every unreadable node turns
+ * unreadable-node-refused red.  Prints CHECK lines and CHECK_AFFECTED_GITNODE ok|FAIL; rc 0 only when all passed. */
 #pragma unisa use cxlib.netpack
 #pragma unisa use sys.fs
 #pragma unisa use sys.proc
@@ -15,7 +21,7 @@
 #pragma unisa use text.fmt
 #pragma unisa use mem.heap
 #pragma unisa use mem.bytes
-static char repo[4096], base[5000], rdir[5200], wdir[5200], product[5000], affected[5000];
+static char repo[4096], base[5000], rdir[5200], wdir[5200], w2dir[5200], product[5000], affected[5000], dig1[200], dig2[200];
 static np_result result; static int failed, passed;
 static void ck(int yes, const char *name) {
     printf("CHECK\t%s\t%s\n", name, yes ? "PASS" : "FAIL");
@@ -53,7 +59,9 @@ static int git(const char *dir, char *a, char *b, char *c, char *d, char *e, cha
 static int fixture(void) {
     if (sy_mkdir_all(rdir, 0700) || stubs(rdir)) return 2;
     if (git(rdir, "init", "-q", 0, 0, 0, 0) || git(rdir, "add", "-A", 0, 0, 0, 0) || git(rdir, "commit", "-q", "-m", "fixture", 0, 0)) return 2;
-    if (git(rdir, "worktree", "add", "-q", wdir, "-b", "wt")) return 2;
+    if (git(rdir, "worktree", "add", "-q", wdir, "-b", "wt") || git(rdir, "worktree", "add", "-q", w2dir, "-b", "wt2")) return 2;
+    if (put(rdir, "tools/np.cx", "static const char *g = \"tests/noperm.dat\";\nint main(void){return g[0] == 0;}\n") || put(rdir, "tests/noperm.dat", "x\n")) return 2;
+    { char *v[] = {"chmod", "000", "tests/noperm.dat", 0}; if (run(v, rdir)) return 2; }
     return 0;
 }
 int main(int argc, char **argv) {
@@ -65,12 +73,18 @@ int main(int argc, char **argv) {
     const char *launcher = sy_env_or("UNISACC", "./unisacc.com"); /* lint:allow R1-product This fixture runs the same root candidate; the harness can override UNISACC. */
     if (sy_realpath(".", repo, sizeof repo) < 0 || sy_realpath(launcher, product, sizeof product) < 0
         || cx_fmt(base, sizeof base, "/tmp/unisacc-affected-gn-%d", sy_pid())
-        || cx_fmt(rdir, sizeof rdir, "%s/r", base) || cx_fmt(wdir, sizeof wdir, "%s/w", base)
+        || cx_fmt(rdir, sizeof rdir, "%s/r", base) || cx_fmt(wdir, sizeof wdir, "%s/w", base) || cx_fmt(w2dir, sizeof w2dir, "%s/w2", base)
         || (draft ? cx_fmt(affected, sizeof affected, "%s", draft) : cx_fmt(affected, sizeof affected, "%s/tools/affected.cx", repo))) return 2;
     rc = fixture();
     if (!rc) {
         ck(closure(rdir) == 0 && has("CLOSURE_SHA\ttools/gn.cx\t") && !has("CLOSURE_UNREADABLE"), "plain-repo-closure-sha");
         ck(closure(wdir) == 0 && has("CLOSURE_SHA\ttools/gn.cx\t") && !has("CLOSURE_UNREADABLE"), "worktree-closure-sha");
+        { const char *s = result.out ? strstr(result.out, "CLOSURE_SHA") : 0; dig1[0] = 0; if (s) cx_fmt(dig1, sizeof dig1, "%.100s", s); }
+        ck(closure(w2dir) == 0 && has("CLOSURE_SHA\ttools/gn.cx\t"), "worktree-two-closure-sha");
+        { const char *s = result.out ? strstr(result.out, "CLOSURE_SHA") : 0; dig2[0] = 0; if (s) cx_fmt(dig2, sizeof dig2, "%.100s", s); }
+        ck(dig1[0] && !strcmp(dig1, dig2), "worktrees-same-digest");
+        { char *v[] = {"sh", product, affected, "--", "--closure-sha", "tools/np.cx", 0};
+          ck(run(v, rdir) == 2 && has("CLOSURE_UNREADABLE\ttools/np.cx"), "unreadable-node-refused"); }
     }
     { char *v[] = {"rm", "-rf", base, 0}; np_result r = {0}; char why[200]; (void)np_run(v, repo, 0, 10, &r, why, sizeof why); np_free(&r); }
     np_free(&result);

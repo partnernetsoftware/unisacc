@@ -709,16 +709,9 @@ static char cachedir[4400];
 
 static int prep_find(const char *name) { int k; for (k = 0; k < nprep; k++) if (tx_eqz(prep[k].name, name)) return k; return -1; }
 static int cmp_s(const void *a, const void *b) { return strcmp(*(char *const *)a, *(char *const *)b); }
-/* A node under .git/ names a git-internal file.  In a version worktree .git is a pointer file, so the raw
-   <root>/.git/NAME does not exist; the same git-path resolution tok_stat used to see it gives the real path. */
-static char *read_node(int k, size_t *sz) {
-    char *s = cx_read(node[k].key, sz), abs[4400];
-    if (!s) {
-        const char *d = display(k);
-        if (tx_prefix(d, tx_len(d, 8192), ".git/", 5) && git_path_abs(d, abs, sizeof abs)) s = cx_read(abs, sz);
-    }
-    return s;
-}
+/* Nodes under .git/ are not part of the source closure: they are git-internal paths named by a literal (the
+   backlink check in the cache-root code), their content is a per-checkout absolute path, and in a version
+   worktree .git is a pointer file.  Counting them gave one source tree a different digest in every worktree. */
 /* sha256 over the sorted "path<TAB>filesha" lines of the source closure of REL */
 static int closure_sha(const char *rel, char *out65) {
     char **ln = ar_alloc(arena, 4096 * (long)sizeof(char *)); int k, n = 0; Buf all = {0, 0, 0};
@@ -727,7 +720,8 @@ static int closure_sha(const char *rel, char *out65) {
     mark_root(rel);
     for (k = 0; k < nnode && n < 4096; k++) {
         char *s; size_t sz; char h[65], line[8400]; if (node[k].mark != epoch) continue;
-        s = read_node(k, &sz);
+        { const char *d = display(k); if (tx_prefix(d, tx_len(d, 8192), ".git/", 5)) continue; }
+        s = cx_read(node[k].key, &sz);
         if (!s) return -1;
         cx_sha256_hex(s, sz, h);
         free(s);
