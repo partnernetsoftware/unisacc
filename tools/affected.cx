@@ -545,6 +545,11 @@ static const char *module_units_inputs[] = {
     "tests/module/units.cx", "tests/module/forward.cx",
     "src/driveunits.cx", "src/driveplan.cx", "src/host.cx", 0
 };
+/* Pinned before the default PASS-row transport changed in a33063747f.
+ * A qualify layout only has one Git commit, so carry the exact old source as a fixture. */
+static const char checker_old[] = "tests/fixtures/tools-compile/default-regression-old.cx";
+static const char checker_new[] = "tests/tools-compile.cx";
+static const char checker_old_sha[] = "bcb069cc8f9fad535c7a79083c988219fb88040a4804518fb12e6c6f365bd18a";
 
 /* --plan reason: per model, the first closure node (or -1 = an args token) that named it; -2 unset */
 static int model_src[64]; static unsigned long cur_models;
@@ -561,6 +566,7 @@ static void mark_batch(Batch *B) {
     } else if (tx_eqz(B->materials, "check-unit-limit-tool:path")) {
         mark_root("tools/check-unit-limit.cx");
     }
+    if (tx_eqz(B->id, "tools-default-regression")) mark_root(checker_old);
     mark_guards(B->id);
     if (!tx_eqz(B->args, "-")) {   /* ';'-separated tokens; {placeholders} skipped */
         const char *at = B->args;
@@ -880,7 +886,7 @@ static int prep_verify(Prep *P) {
 /* The source file a material name resolves to: tools/NAME.cx, or tests/cases/NAME.cx when the first is
    absent (fixtures: fake-gh, fake-s9, fake-release-prepare).  Shared with --materials-dump, so the reported
    resolution and the one the build uses cannot drift.  0 with SRC set, -1 with WHY. */
-enum { PK_CLASSIC_REF = 11, PK_OPTFRAME4 = 12, PK_BOOTER_RAW = 13 };
+enum { PK_CLASSIC_REF = 11, PK_OPTFRAME4 = 12, PK_BOOTER_RAW = 13, PK_CHECKER_SOURCE = 14 };
 static int prep_kind_of(const char *name, int kind) {
     long nl = tx_len(name, 256);
     if (kind == 2) {
@@ -899,6 +905,7 @@ static int prep_kind_of(const char *name, int kind) {
     if (tx_eqz(name, "streams")) return PK_STREAMS;
     if (tx_eqz(name, "identity-helper")) return PK_IDENT;
     if (tx_eqz(name, "old-product") || tx_eqz(name, "new-product") || tx_eqz(name, "new-models")) return PK_OLDP;
+    if (tx_eqz(name, "old-checker-source") || tx_eqz(name, "new-checker-source")) return PK_CHECKER_SOURCE;
     if (tx_eqz(name, "o1-run") || tx_eqz(name, "o1-net") || tx_eqz(name, "o1-table") ||
         tx_eqz(name, "o2-run") || tx_eqz(name, "o2-net") || tx_eqz(name, "o2-table")) return PK_OPTFRAME4;
     return PK_TOOL;
@@ -911,6 +918,10 @@ static int prep_source(const char *name, int kind, char *src, long cap, char *wh
     if (pk == PK_SID) { cx_fmt(src, cap, "identity-helper:ROOT"); return 0; }
     if (pk == PK_PROD) { cx_fmt(src, cap, "unisacc.com"); return 0; }
     if (pk == PK_HOSTC) { cx_fmt(src, cap, "tools/libneed-native-material.cx"); return 0; }
+    const char *checker = 0;
+    if (tx_eqz(name, "old-checker") || tx_eqz(name, "old-checker-source")) checker = checker_old;
+    if (tx_eqz(name, "new-checker") || tx_eqz(name, "new-checker-source")) checker = checker_new;
+    if (checker && (pk == PK_TOOL || pk == PK_CHECKER_SOURCE)) return cx_fmt(src, cap, "%s", checker);
     if (pk == PK_OLDP) { cx_fmt(src, cap, "tools/old-product-material.cx"); return 0; }
     if (tx_eqz(name, "module-units-tool")) return cx_fmt(src, cap, "tests/module/image.cx");
     if (pk == PK_OPTFRAME4) { cx_fmt(src, cap, "tools/opt-frame4-material.cx"); return 0; }
@@ -1184,6 +1195,19 @@ static int prep_plan(const char *name, int kind, char *why, int cap) {
         const char *reason=booter_material(P);
         if (reason) { cx_fmt(why,cap,"%s",reason); return -1; }
         return nprep++;
+    }
+    if (P->kind == PK_CHECKER_SOURCE || tx_eqz(name, "old-checker") || tx_eqz(name, "new-checker")) {
+        char path[4400]; sy_stat_t st;
+        if (cx_fmt(path, sizeof path, "%s/%s", root, P->src) || sy_lstat(path, &st) || st.kind != 'f' ||
+            !st.size || file_sha(path, h)) { cx_fmt(why, cap, "checker-source-unreadable=%s", P->src); return -1; }
+        if (tx_eqz(P->src, checker_old) && !tx_eqz(h, checker_old_sha)) {
+            cx_fmt(why, cap, "checker-source-pin-mismatch=%s", P->src); return -1;
+        }
+        if (P->kind == PK_CHECKER_SOURCE) {
+            if (cx_fmt(P->path, sizeof P->path, "%s", path)) return -1;
+            memcpy(P->sha, h, 65); memcpy(P->closure, h, 65); memcpy(P->id, h, 16); P->id[16] = 0;
+            P->state = PS_READY; P->cached = 1; return nprep++;
+        }
     }
     if(P->kind==PK_CLASSIC_REF){
         /* The producer checks its own pinned artifact and receipt on every invocation.
