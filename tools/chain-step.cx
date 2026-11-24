@@ -1516,7 +1516,7 @@ static int cs_build(const char *rev, const char *s, const char *b, int objects, 
    linker, and the one-step build from the entry source no longer fits one 90 second phase. The
    bootstrap has its own checkpoint between its two passes: UNISACC_PHASE=A stops after the first
    pass, having written the framed units to UNISACC_PHASE_OUT (with a .sha256 receipt of the file)
-   and the host-forwarding stub to TMPDIR/unisacc-forward-entry.c; UNISACC_PHASE=B restores both
+   and the host-forwarding stub beside the checkpoint; UNISACC_PHASE=B restores both
    and finishes the image. The argv is the one-step argv in both phases, and the image is byte for
    byte the one-step image (measured on 9a34cb97b4: e386c0c8... three ways).
    build-front owns PHASE A: receipt binds rev/root/source/bootstrap/producer, the verified object
@@ -1555,6 +1555,13 @@ static void cs_ctl_absent(const char *p) {
     if (e < 0) cs_die("REFUSE controller stale state", p);
     if (e == 1 && sy_unlink(p)) cs_die("controller stale cleanup", p);
 }
+static int cs_ctl_forward(const char *mat, char *path, char *receipt) {
+    if (cx_fmt(path, 4500, "%s.forward.c", mat) ||
+        cx_fmt(receipt, 4500, "%s.forward.receipt", mat)) cs_die("forward path", mat);
+    int source = sy_exists(path), record = sy_exists(receipt);
+    if (source < 0 || record < 0 || (source == 1 && record != 1)) cs_die("REFUSE incomplete controller forwarding receipt", mat);
+    return source;
+}
 /* Run the one-step argv under one phase of the checkpoint; argv and phase environment are
    written beside DEST as evidence, and the environment is put back afterwards. */
 static int cs_ctl_run(const char *s, const char *boot, const char *src, const char *out, const char *dest, const char *tmp, const char *phase, const char *in, const char *po) {
@@ -1579,6 +1586,8 @@ static int cs_ctl_run(const char *s, const char *boot, const char *src, const ch
    the whole image; OUTPUT is that image and there is no stub). The saved receipt text decides:
    a stub added or removed afterwards yields the other mode's text and is refused. */
 static int cs_ctl_front_text(char *dst, long cap, const char *rev, const char *s, const char *source, const char *bootstrap, const char *self, const char *input, const char *mat, const char *stub, const char *out, char mat_sha[65], char stub_sha[65]) {
+    char phase_stub[4500], receipt[4500], receipt_sha[65], current[65];
+    int phased = cs_ctl_forward(mat, phase_stub, receipt);
     int e = sy_exists(stub);
     if (e < 0) cs_die("REFUSE controller stub state", stub);
     if (e == 1) cs_ctl_material(mat, stub, mat_sha, stub_sha);
@@ -1588,10 +1597,18 @@ static int cs_ctl_front_text(char *dst, long cap, const char *rev, const char *s
         if (cx_fmt(stub_sha, 65, "-")) cs_die("front receipt", out);
     }
     if (cx_fmt(dst, cap, "chain-controller-v1\nrev=%s\nroot=%s\nsource_sha=%s\nbootstrap_sha=%s\nproducer_sha=%s\nphase=front-from-source\ninput_sha=%s\nmode=%s\noutput_sha=%s\nstub_sha=%s\n", rev, s, source, bootstrap, self, input, e == 1 ? "checkpoint" : "image", mat_sha, stub_sha)) cs_die("front receipt", mat);
+    if (phased) {
+        cs_sha(phase_stub, current);
+        if (e != 1 || strcmp(current, stub_sha)) cs_die("REFUSE controller forwarding source differs", phase_stub);
+        cs_sha(receipt, receipt_sha);
+        long used = strlen(dst);
+        if (cx_fmt(dst + used, cap - used, "forward_receipt_sha=%s\n", receipt_sha)) cs_die("front receipt", receipt);
+    }
     return e == 1;
 }
 static int cs_build_split(const char *rev, const char *s, const char *b, int front) {
     char boot[4400], src[4400], obj[4400], out[4400], mat[4400], matrec[4400], stub[4400], frec[4400], rec[4400], lock[4400], tmp[4400], tmpstub[4500];
+    char phase_stub[4500], phase_receipt[4500];
     char source[65], bootstrap[65], input[65], self[65], mat_sha[65], stub_sha[65], after[65], output[65], front_sha[65], expected[2600], identity[2400];
     long n = 0;
     if (cx_fmt(boot, sizeof boot, "%s/Root41-bootstrap.com", b) || cx_fmt(src, sizeof src, "%s/tools/source-package.cx", s) || cx_fmt(obj, sizeof obj, "%s/source-package-O2.o", b) ||
@@ -1614,15 +1631,20 @@ static int cs_build_split(const char *rev, const char *s, const char *b, int fro
         /* No front receipt: a link receipt here was made from another front and is refused; an
            image without either receipt is what a killed attempt left and is made again. */
         if (sy_exists(rec) != 0) cs_die("REFUSE controller receipt without front receipt", rec);
+        if (cx_fmt(phase_stub, sizeof phase_stub, "%s.forward.c", mat) ||
+            cx_fmt(phase_receipt, sizeof phase_receipt, "%s.forward.receipt", mat)) cs_die("forward path", mat);
+        cs_ctl_absent(phase_stub); cs_ctl_absent(phase_receipt);
         cs_ctl_absent(out); cs_ctl_absent(mat); cs_ctl_absent(matrec); cs_ctl_absent(stub); cs_ctl_fresh(tmp);
         if (cs_ctl_run(s, boot, src, out, mat, tmp, "A", "", mat)) cs_die("controller front", mat);
-        int stopped = sy_exists(tmpstub), imaged = sy_exists(out);
+        int phased = cs_ctl_forward(mat, phase_stub, phase_receipt);
+        const char *forward = phased ? phase_stub : tmpstub;
+        int stopped = sy_exists(forward), imaged = sy_exists(out);
         if (stopped < 0 || imaged < 0 || stopped == imaged) cs_die("REFUSE controller front left neither or both of stub and image", out);
         if (stopped) {
-            long sn = 0; char *sb = cs_load(tmpstub, &sn);
-            if (!sb || sn <= 0) cs_die("REFUSE controller forwarding stub missing", tmpstub);
+            long sn = 0; char *sb = cs_load(forward, &sn);
+            if (!sb || sn <= 0) cs_die("REFUSE controller forwarding stub missing", forward);
             cs_save(stub, sb, sn); free(sb);
-        } else { cs_ctl_absent(mat); cs_ctl_absent(matrec); }
+        } else { cs_ctl_absent(mat); cs_ctl_absent(matrec); cs_ctl_absent(phase_receipt); }
         cs_source(s, after); if (strcmp(source, after)) cs_die("REFUSE controller source changed", s);
         cs_sha(boot, after); if (strcmp(bootstrap, after)) cs_die("REFUSE controller bootstrap changed", boot);
         if (cs_ctl_front_text(expected, sizeof expected, rev, s, source, bootstrap, self, input, mat, stub, out, mat_sha, stub_sha) != stopped) cs_die("REFUSE controller front changed", mat);
@@ -1645,17 +1667,23 @@ static int cs_build_split(const char *rev, const char *s, const char *b, int fro
     }
     if (checkpoint) {
         cs_ctl_absent(out); cs_ctl_fresh(tmp);
-        long sn = 0; char *sb = cs_load(stub, &sn);
-        if (!sb) cs_die("REFUSE controller forwarding stub missing", stub);
-        cs_save(tmpstub, sb, sn); free(sb);
-        cs_sha(tmpstub, after); if (strcmp(stub_sha, after)) cs_die("REFUSE controller forwarding stub copy differs", tmpstub);
+        int phased = cs_ctl_forward(mat, phase_stub, phase_receipt);
+        if (!phased) {
+            long sn = 0; char *sb = cs_load(stub, &sn);
+            if (!sb) cs_die("REFUSE controller forwarding stub missing", stub);
+            cs_save(tmpstub, sb, sn); free(sb);
+            cs_sha(tmpstub, after); if (strcmp(stub_sha, after)) cs_die("REFUSE controller forwarding stub copy differs", tmpstub);
+        }
         if (cs_ctl_run(s, boot, src, out, out, tmp, "B", mat, "")) cs_die("controller build", out);
         cs_source(s, after); if (strcmp(source, after)) cs_die("REFUSE controller source changed", s);
         cs_sha(boot, after); if (strcmp(bootstrap, after)) cs_die("REFUSE controller bootstrap changed", boot);
         char mat_after[65], stub_after[65];
         cs_ctl_material(mat, stub, mat_after, stub_after);
-        cs_sha(tmpstub, after);
+        cs_sha(phased ? phase_stub : tmpstub, after);
         if (strcmp(mat_sha, mat_after) || strcmp(stub_sha, stub_after) || strcmp(stub_sha, after)) cs_die("REFUSE controller front changed during build", mat);
+        cs_ctl_front_text(expected, sizeof expected, rev, s, source, bootstrap, self, input, mat, stub, out, mat_after, stub_after);
+        if (sy_sha256_hex(expected, (long)strlen(expected), after) || strcmp(front_sha, after))
+            cs_die("REFUSE controller front receipt changed during build", mat);
         cs_sha(out, output);
     } else {
         /* Image mode: the front receipt already binds this image; nothing is left to run. */
