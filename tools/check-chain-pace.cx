@@ -92,6 +92,21 @@ int main(void) {
                v[7] = (char *)"--now"; v[8] = s; v[9] = 0;
                rc = cx_runv_timeout(v, 50, &o, &n); ck(rc != 0 && rc != -1, "reject-5col-table"); free(o); o = 0; }
       } }
+    /* (7) 超限具名拒绝:2049 个 checkpoint 相、8193 行心跳,修前静默停收 */
+    { static char big[600000]; long w = 0; int k; char p2[300];
+      for (k = 0; k < 2049; k++) w += snprintf(big + w, sizeof big - (size_t)w, "DONE\tP%d\twall_ms=1000\tsha=-\n", k);
+      if (cx_fmt(p2, sizeof p2, "%s/ckp-big.tsv", dir) || cx_write(p2, big, (size_t)w)) ck(0, "write-ckp-big");
+      else { char sc[1200], *sv[4] = {(char *)"sh", (char *)"-c", sc, 0};
+             cx_fmt(sc, sizeof sc, "sh %s %s -- thresholds %s 2>&1", com, tool, p2);
+             rc = cx_runv_timeout(sv, 50, &o, &n);
+             ck(rc == 2 && has(o, n, "REFUSE chain-pace: checkpoint phases over limit limit=2048"), "overlimit-phases-refuse"); free(o); o = 0; }
+      w = 0;
+      for (k = 0; k < 8193; k++) w += snprintf(big + w, sizeof big - (size_t)w, "%d\tA\t1\t1\tstart\n", 1000 + k);
+      if (cx_write(hb, big, (size_t)w)) ck(0, "write-hb-big");
+      else { char sc[1200], *sv[4] = {(char *)"sh", (char *)"-c", sc, 0};
+             cx_fmt(sc, sizeof sc, "sh %s %s -- watch %s %s --now 9300 2>&1", com, tool, hb, thr);
+             rc = cx_runv_timeout(sv, 50, &o, &n);
+             ck(rc == 2 && has(o, n, "REFUSE chain-pace: heartbeat rows over limit limit=8192"), "overlimit-heartbeat-refuse"); free(o); o = 0; } }
     cx_rmtree(dir);
     sy_printf("check-chain-pace failed=%d\n", failed);
     if (!failed) sy_printf("CHECK_CHAIN_PACE\n");
