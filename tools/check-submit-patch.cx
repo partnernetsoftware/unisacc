@@ -17,6 +17,14 @@ static void ck(int ok, const char *n) {
     if (!ok) failed++;
 }
 
+/* 1 when some line of B (N bytes) begins with "index " -- a patch carries blob ids only on its index lines */
+static int has_index_line(const char *b, long n) {
+    long i;
+    for (i = 1; i + 6 <= n; i++)
+        if (b[i - 1] == '\n' && tx_prefix(b + i, n - i, "index ", 6)) return 1;
+    return 0;
+}
+
 static int sh(const char *cmd, char *out, int cap) {
     char *v[5];
     np_result r = {0};
@@ -43,7 +51,8 @@ int main(void) {
         "printf 'int main(void){return 0;}\\n' > a.c && git add a.c && git commit -qm s && "
         "printf 'int main(void){return 1;}\\n' > a.c", dir)) die("fmt");
     ck(sh(cmd, out, sizeof out) == 0, "seed-repo");
-    if (cx_fmt(sp, sizeof sp, "%s/submit-patch-bin", sy_tmpdir()) ||
+    /* sibling of the private mkdtemp dir (unique name, outside the fixture repo): concurrent runs never share the binary */
+    if (cx_fmt(sp, sizeof sp, "%s.bin", dir) ||
         cx_fmt(cmd, sizeof cmd, "sh '%s/unisacc.com' '%s/tools/submit-patch.cx' -o '%s'", root, root, sp)) die("fmt");
     ck(sh(cmd, out, sizeof out) == 0, "compile-sp");
     if (cx_fmt(cmd, sizeof cmd, "cd '%s' && GIT_DIR=.git '%s' '%s/p.patch' 2>&1", dir, sp, dir)) die("fmt");
@@ -54,7 +63,7 @@ int main(void) {
         char p[4400]; size_t n; char *b;
         if (cx_fmt(p, sizeof p, "%s/p.patch", dir)) die("fmt");
         b = cx_read(p, &n);
-        ck(b && n && strstr(b, "\nindex "), "has-index");
+        ck(b && n && has_index_line(b, (long)n), "has-index");
         free(b);
         if (cx_fmt(cmd, sizeof cmd,
             "cd '%s' && printf 'x\\n' > a.c && GIT_DIR=.git '%s' '%s/p.patch' 2>&1", dir, sp, dir))
@@ -115,7 +124,7 @@ int main(void) {
         if (cx_fmt(cmd, sizeof cmd, "rm -rf '%s'", d2)) die("fmt");
         sh(cmd, out, sizeof out);
     }
-    if (cx_fmt(cmd, sizeof cmd, "rm -rf '%s'", dir)) die("fmt");
+    if (cx_fmt(cmd, sizeof cmd, "rm -rf '%s' '%s'", dir, sp)) die("fmt");
     sh(cmd, out, sizeof out);
     printf("CHECK_SUBMIT_PATCH\tfailed=%d\n", failed);
     return failed ? 1 : 0;
