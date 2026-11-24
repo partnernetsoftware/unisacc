@@ -1455,6 +1455,20 @@ static int co_newtool_gate(void) {
     sy_printf("NEW_TOOL\ttools=%d\tnew_batches=%d\tgate=ok\n", co_nnew, nid);
     return 0;
 }
+static int co_operation_active(void) {
+    const char *states[] = {"MERGE_HEAD", "CHERRY_PICK_HEAD", "REVERT_HEAD", "rebase-merge", "rebase-apply", "sequencer", 0};
+    int active = 0;
+    char path[4400];
+    for (int i = 0; states[i]; i++) {
+        char *v[] = {"git", "rev-parse", "--git-path", (char *)states[i], 0};
+        if (run(v, path, sizeof path) || !path[0]) return 0;
+        int present = sy_exists(path);
+        if (present < 0) return 0;
+        active |= present == 1;
+    }
+    return active;
+}
+
 int main(int argc, char **argv) {
     if (argc > 1 && tx_eqz(argv[1], "--replay-index")) return co_replay_index(argc, argv);
     {   /* --new-tool PATH: rewritten to --whole PATH --keyed tests/tools-compile-sources.tsv PATH (see co_newtool_gate) */
@@ -1508,7 +1522,12 @@ int main(int argc, char **argv) {
             a++;
             while (a < argc && argv[a][0] != '-') { if (np == CO_MAX) co_die("too many paths", 0); path[np] = argv[a]; keys[np] = 0; np++; a++; }
         } else if (tx_eqz(argv[a], "--staged")) {
+            if (!co_operation_active()) {
+                fprintf(stderr, "COMMIT_OWN_FAIL\tclass=index-staged-disabled\ncommit-own: REFUSE COMMIT_OWN_STAGED_OUTSIDE_OPERATION; use --whole or --keyed\n");
+                return 2;
+            }
             a++;
+            if (a >= argc || argv[a][0] == '-') co_die("usage", "--staged needs a path");
             while (a < argc && argv[a][0] != '-') { if (np == CO_MAX) co_die("too many paths", 0); path[np] = argv[a]; keys[np] = 0; staged[np] = 1; np++; a++; }
         } else if (tx_eqz(argv[a], "--keyed") && a + 2 < argc) {
             int j;   /* at parse time only a --keyed entry has keys: merge a repeated PATH into its first entry */
@@ -1613,7 +1632,7 @@ int main(int argc, char **argv) {
         wb[40] = 0;
         if (tx_eqz(wb, ib)) continue;                                 /* 工作区就是索引内容:没有未暂存段 */
         fprintf(stderr, "COMMIT_OWN_FAIL\tclass=whole-ambiguous\n");
-        fprintf(stderr, "commit-own: REFUSE WHOLE_AMBIGUOUS: %s has staged changes and further unstaged changes; --whole would mix both into one commit. Use --staged to commit only the index, or --keyed with the row keys (nothing committed)\n", path[k]);
+        fprintf(stderr, "commit-own: REFUSE WHOLE_AMBIGUOUS: %s has staged changes and further unstaged changes; --whole would mix both into one commit. Use --keyed for table rows, or resolve the staged version with its owner first (nothing committed)\n", path[k]);
         {   char *dv[] = {"git", "diff", "--no-color", "--unified=0", (char *)hb, (char *)ib, 0};
             char dh[8192]; if (run(dv, dh, sizeof dh) == 0) {
                 char *p = dh; int shown = 0;
