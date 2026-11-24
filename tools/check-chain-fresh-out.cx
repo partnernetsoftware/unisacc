@@ -22,6 +22,7 @@
  *       run directly, and does not reach a resumed chain, which keeps its pinned producer; a
  *       changed pinned executable is refused;
  *   (7) a context directory left without context.tsv is set aside before prepare-context.
+ *   (8) a failing Git after wait must not signal a surviving member of its process group.
  * Marker: CHECK_CHAIN_FRESH_OUT failed=0.  Fixture only; it does not grant construction qualification. */
 #pragma unisa use sys.fs
 #pragma unisa use sys.proc
@@ -91,10 +92,52 @@ static int has(const char *file, const char *needle) {
     free(b); return ok;
 }
 
+static int check_reaped_git(const char *out, const char *steptool) {
+    char dir[4400], git[4400], ready[4400], go[4400], ack[4400], *log = 0;
+    if (sy_mkdir(out, 0755) && sy_exists(out) != 1) return 2;
+    if (cx_fmt(dir, sizeof dir, "%s/reaped-git-%d", out, sy_pid()) || sy_mkdir(dir, 0700) ||
+        cx_fmt(git, sizeof git, "%s/git", dir) || cx_fmt(ready, sizeof ready, "%s/ready", dir) ||
+        cx_fmt(go, sizeof go, "%s/go", dir) || cx_fmt(ack, sizeof ack, "%s/ack", dir)) return 2;
+    /* The witness shares Git's process group, but not its output pipe. It acknowledges
+       only after chain-step has returned; if signalled, it cannot acknowledge. */
+    static const char script[] =
+        "#!/bin/sh\n"
+        "[ \"$1\" = rev-parse ] && [ \"$2\" = --verify ] || exit 97\n"
+        "(\n"
+        "  : > ready || exit 97\n"
+        "  for i in 1 2 3 4 5 6 7 8 9 10; do\n"
+        "    if [ -f go ]; then : > ack; exit; fi\n"
+        "    sleep 0.5\n"
+        "  done\n"
+        ") </dev/null >/dev/null 2>&1 &\n"
+        "for i in 1 2 3 4 5 6 7 8 9 10; do\n"
+        "  if [ -f ready ]; then printf 'fixture-git\\n'; exit 7; fi\n"
+        "  sleep 0.05\n"
+        "done\n"
+        "exit 98\n";
+    if (cx_write(git, script, sizeof script - 1) || sy_chmod(git, 0700)) return 2;
+    char *v[] = {"sh", "-c", "cd \"$1\" && PATH=\"$PWD:$PATH\" exec \"$2\" snap fixture-invalid-rev",
+                 "chain-step-reaped-git", dir, (char *)steptool, 0};
+    int rc = run(v, 3, &log);
+    int rejected = rc == 2 && log && strstr(log, "rev-parse ex=1 code=7 sig=0 got=fixture-git");
+    ck(rejected && sy_exists(ready) == 1, "snap-git-failed-and-witness-was-ready");
+    free(log);
+    if (cx_write(go, "go\n", 3)) return 2;
+    long deadline = sy_now_ms() + 1500;
+    while (sy_exists(ack) == 0 && sy_now_ms() < deadline) sy_sleep_ms(20);
+    ck(rejected && sy_exists(ack) == 1, "snap-failed-git-was-not-signalled-after-wait");
+    return 0;
+}
+
 int main(int argc, char **argv) {
+    if (argc == 4 && !strcmp(argv[1], "--reaped-git") && argv[2][0] == '/' && argv[3][0] == '/') {
+        int rc = check_reaped_git(argv[2], argv[3]);
+        return rc ? rc : failed ? 1 : 0;
+    }
     char root[4400], com[4400], f[4400], p[4400], q[4400], script[9000];
     if (argc != 4 || argv[1][0] != '/' || argv[2][0] != '/' || argv[3][0] != '/') { fprintf(stderr, "usage: check-chain-fresh-out /ABS/OUT /ABS/chain-step-tool /ABS/candidate-chain-tool\n"); return 2; }
     const char *steptool = argv[2], *cand = argv[3];
+    if (check_reaped_git(argv[1], steptool)) return 2;
     /* 假根没有 kernel-route/asm-source 源文件:显式夹具开关(DSG-DRV1 第 3 片),真实链缺源副本会拒绝 */
     setenv("UNISACC_PIN_FIXTURE", "1", 1);
     if (sy_realpath(".", root, sizeof root) < 0) return 2;
