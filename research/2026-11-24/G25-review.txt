@@ -1,0 +1,23 @@
+来源:会话临时目录 /home/devali/.claude/jobs/7f46e032/tmp/G25/review.txt 拷贝于 2026-11-24
+G25 事后复核 3e54e46d70 (tools/affected.cx .git/ 节点经 git-path 解析)  结论: 通过(保留,不回滚),附两条非阻塞须改建议
+输入身份: 3e54e46d70;HEAD 上 tools/affected.cx 与 check 与该提交一致(git diff 空)。私有树 ~/.claude/jobs/7f46e032/tmp/G25w.FUZKsB/a (git archive 3e54e46d70)。
+
+(1) 修法 通过: read_node 先按原 key cx_read,失败且 display 以 .git/ 开头才经 git_path_abs 解析再读;closure_sha 改用之。git_path_abs 返回约定与 tok_stat(416 行)一致(非零=已解析)。.git 为目录: 原路径直接可读,不走回退;.git 为文件: 回退到 <common>/worktrees/<w>/gitdir。
+(2) 夹具与变异 通过: 夹具在 /tmp 私有仓真做 git worktree add(.git 为指针文件)。私有树三次实跑:
+  原修复  CHECK_AFFECTED_GITNODE ok passed=2 failed=0 rc=0 (26 秒)
+  m1 closure_sha 退回 cx_read(node.key)  CHECK worktree-closure-sha FAIL rc=1
+  m3 解析后读改为 s=0                      CHECK worktree-closure-sha FAIL rc=1
+  m2 去掉 .git/ 前缀守卫                   仍 ok rc=0 (存活;守卫未被断言,近似等价变异)
+  注: plain-repo 用例在普通仓里 .git/gitdir 不存在、tok_stat 不建节点,该用例对修复不敏感,只是回归护栏。
+(3) 真实工作树 通过(部分 UNMEASURED): v0.0.125 (.git 为 58 字节文件,未含本修复) 只读跑:
+  旧(m1)  CLOSURE_UNREADABLE tools/release-run.cx rc=2   <- 先红
+  新      CLOSURE_SHA tools/release-run.cx ab81f1c8... rc=0 <- 后绿
+  --materials-dump --ids release-prepare --prepare-materials: PREBUILD materials=3 hit=3 built=0 failed=0 rc=0;全为 cache=hit(作者先前已构),冷构造本轮 UNMEASURED。未跑 --run 批次。工作树 git status 前后均空。
+(4) main 闭包哈希不变 通过: 共享检出 main 上新版与 m1(=旧读法加同一入口)对 release-run/affected/precommit/chain-ready 四个闭包 --closure-sha 逐字节相同。逻辑上回退只在原读失败时触发,旧行为该处为 return -1,故成功路径不可能改变。
+(5) 登记 通过: batches/coverage 各 1 行,与 manifests/affected-gitnode.tsv 的 batch/coverage 行逐字一致,links.tsv 有 batch 行,tools-compile-sources 有源行;预算 55 秒,冷跑实测 22-26 秒。补丁新增行 /home/ 命中 0。
+
+须改(非阻塞,可下轮):
+ a. 根因是 affected 把自身源码里的字面量 .git/gitdir 当闭包节点;工作树里该节点内容为 worktree 绝对路径,使 prep 身份随工作树位置变化(同源不同位置不同 closure_sha,缓存不共享)。建议 .git/ 节点不入闭包,或以固定标记替代内容。
+ b. 补一条断言杀 m2(非 .git/ 前缀的不可读节点仍须 CLOSURE_UNREADABLE rc 2),守住回退不外溢。
+ 旁注: main 上 release-run/precommit/chain-ready 三闭包哈希相同(9c773ad5...),闭包可能过宽,属既有行为,未在本提交引入,另查。
+未做: mutation-gate.cx 未跑(UNMEASURED);冷环境三次只跑一次。

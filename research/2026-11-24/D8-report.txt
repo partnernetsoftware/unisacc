@@ -1,0 +1,48 @@
+来源:会话临时目录 /home/devali/.claude/jobs/7f46e032/tmp/D8/report.txt 拷贝于 2026-11-24
+D8 pre-push 冻结门修订(在 D7 上按 G17 须改项修订)
+基线:origin/main 9b57647531。私有修订:没改共享检出,没装钩子,没提交,没推送。
+
+产出
+- D8/patch.diff:相对 origin/main 的主补丁,含 tools/dvgitx.cx(与 D7 相同)、tools/prepush.cx、tools/check-prepush.cx、tools/hooks/pre-push。
+- D8/devsvc-freeze.diff:devsvc 同步补丁,含 tools/devsvc-core.cx、tools/check-devsvc-freeze.cx。
+- D8/release-exec-freeze-gate.draft.txt:release-exec 提交前冻结门草案(只出草案)。
+- 两份补丁在 origin/main 的 git archive 私有副本上 git apply --check 通过,应用后与 D8 文件逐字节一致。
+
+修订项
+(1) 薄入口 tools/hooks/pre-push:主工作树根取 $(git rev-parse --path-format=absolute --git-common-dir)/..,不再用 --show-toplevel。
+    主工作树缺 tools/prepush.cx 或 unisacc.com 时走降级:有 .git/PUSH-FREEZE 拒全部推送;目标含 refs/heads/main 拒;其余放行;每种结论都写进审计日志(gate=degraded、degraded=pass/refuse reason=...)。
+(2) 保留推送审计块:stdin 先存 mktemp 临时文件(退出时用 trap 删除),同一份内容先喂审计(进程链、env、ref 行)再喂 prepush.cx;另补一行 gate=prepush rc=N。日志路径默认 ~/.cache/unisacc/push-audit.log,可用 PUSH_AUDIT_LOG 覆盖(夹具用)。原钩子单独的 PUSH-FREEZE 判定改由 prepush.cx src_flag 覆盖。
+(3) owner 比较:prepush.cx 内放一份 norm_owner,与 devsvc-core.cx:376 同规则(去首尾空白,1..63 个可打印字节,ASCII 转小写)。表里的 owner 和 DEVSVC_OWNER/UNISACC_INTEGRATOR 两侧都先规范化;表 owner 规范化失败时按无主处理,谁都不放行。
+(4) 只含空格或制表符的行当空行跳过。坏行除冻结外再置 anon,持有者也不放行(按失败即关闭处理)。
+(5) check-prepush.cx:删掉写死的 /home 路径。仓根 RT 取 PREPUSH_CX 所在目录的上一级,UNISACC_COM 默认 RT/unisacc.com,被测钩子是 RT/tools/hooks/pre-push(装的就是真实薄入口)。
+    夹具:c 当主工作树(放 prepush.cx 副本、unisacc.com 和包根符号链接),w 是 git worktree 建的版本工作树(里面没有 prepush.cx)。
+    分段 PART=push|feed|mut1|mut2,每段单条命令都在 60 秒内;all 会超过 60 秒,登记批次时应拆成四行。
+(6) devsvc 同步补丁:freeze_tsv_state 返回值改为 0 无行(含只剩表头、只有空白行)/ 1 未过期 / 2 只剩过期行 / -1 坏表。
+    freeze_check 遇到 2 时在联系服务前直接拒,holder 记 freeze-expired,stderr 输出 FREEZE_EXPIRED 和续期或删行提示,持有者也拒。版本工作树分支仍按 freeze_outside_main 先行放行,与钩子只拦 main 的口径一致。
+    合同变更:check-devsvc-freeze 的 (21) 原来断言"只剩过期行时放行",现在反转为拒绝。这是有意改语义,不是删断言;同时新增"持有者也拒"和"只剩表头/空白行放行"两条,lifecycle 段计数 20 -> 22。
+
+实跑证据(都是单命令 60 秒内串行跑的,TMPDIR=D8/tmp)
+- check-prepush push 段:19/0,24.4 秒。断言包括:先红(旧钩子放过冻结中的 main);HEAD:main 和 branch:main 拒;版本分支放行;持有者经 DEVSVC_OWNER、UNISACC_INTEGRATOR、嵌套子进程放行;非持有者拒;过期行拒并带提示,持有者也拒;审计日志记下 ref 行和 gate rc;版本工作树推本分支放行,推 main 拒;降级时分支放行、main 拒、PUSH-FREEZE 连分支也拒,三种结论都进了审计。
+- check-prepush feed 段:16/0,19.5 秒。断言包括:PUSH-FREEZE 叠加未过期有主行时持有者被拒(另有对照:只有有主行时持有者放行);过期 devsvc 锁放行(对照:有效锁拒、持有者放行);坏行拒,持有者也拒;只剩表头放行;只有空白行放行;删除 main 的 ref 拒;多 ref 且 main 在第二行时拒;多 ref 不含 main 放行;空 stdin 放行;DEVSVC_OWNER=CC 放行;表 owner 为 Cc 且 env 为 ' cc ' 时放行;ccx 拒。
+- check-prepush mut1 / mut2:12/0,共 6 个变异全部转红:去掉 refs/heads/main 判定、过期当解冻、owner_pass 去掉 anon ||(G17 m1)、过期锁仍算冻结 x>now->1(G17 m3)、坏行不置 frozen(G17 m4)、owner 大小写敏感。对"应拒"的变异,断言要求 rc==1 且输出含 PREPUSH_REFUSE,防止编译失败被误当成转红。上一轮 mut 合跑一次用了 59.8 秒,这次已拆成两段。
+- devsvc 同步补丁:新核心经 git archive 私有树编译(43 秒),由 check-devsvc-freeze 用 argv 传入新二进制来跑,没走 devsvc 的 HEAD 构建:--lifecycle-only 22/0,--owner-only 10/0,--scope-only 13/0。
+  先红:同一新 check 对 origin/main 旧核心跑 lifecycle,结果 19/3,失败的就是 expired-freeze-tsv-refused、refuses-owner-too、header-and-whitespace-rows-allowed 三条(旧核心把空白行判成坏表)。
+- 未实跑(UNMEASURED):devsvc-core 全量 check-devsvc 其余段;dvgitx --push 路径(与 D7 相同,仍无私有 bare 远端用例);devsvc --bg 提交路径的环境;mutation-gate;release-exec 草案(未编译)。未登记批次(tests/batches.tsv 需 register,四段各一行)。
+
+安装步骤(集成者在 main 上执行,补丁合入并复核之后)
+(a) 前置:build/freeze.tsv 只剩表头,或只有未过期且 owner 正确的行(新语义下过期行会拒 main 推送和 devsvc 写);没有 .git/PUSH-FREEZE;devsvc locks.tsv 里没有意外的 freeze 行。
+(b) 把 devsvc-freeze.diff 与 patch.diff 合入后提交推送,devsvc 重启以加载新核心。顺序:先装钩子再推送,或者先推后装都行;推送本身要按当时的冻结状态过门。
+(c) 备份:cp .git/hooks/pre-push ~/.local/share/unisacc/research/cc/parked/pre-push.audit-$(date +%s)
+(d) 安装:cp tools/hooks/pre-push .git/hooks/pre-push && chmod +x .git/hooks/pre-push(各工作树共享 common dir 的 hooks)。不用 core.hooksPath,否则现有 pre-commit 等钩子会失效。
+(e) 验证:推一次非 main 分支应放行;在私有夹具里跑 check-prepush 四段;核对 ~/.cache/unisacc/push-audit.log 新增一条,带 gate=prepush rc=0。
+(f) 发布者执行 release-exec 前先 export DEVSVC_OWNER=<freeze.tsv owner>(提交前门草案落地前,这一步靠人工)。
+
+回滚
+- 钩子:cp 备份文件回 .git/hooks/pre-push(不涉及 git config)。
+- 补丁:git revert 对应提交。devsvc 补丁回滚后,过期行恢复按解冻处理;此时钩子与 devsvc 语义又不一致,两份补丁应同进同退。
+
+风险与已知缺口
+- git push --no-verify 可以绕过客户端钩子;真正强制要靠 GitHub 分支保护,应记进 prd_mempalace 未验证项。
+- 门拦的是推到任意远端的 refs/heads/main(不看 URL),属于过拦,可以接受。
+- 降级模式比完整门粗:没有持有者放行,冻结期内只要主工作树缺 prepush.cx,main 谁都推不了。这是有意的选择,不 fail-open。
+- release-exec 提交前门只有草案:接入前,冻结期发布者如果忘了 export owner,仍会出现提交已落地但 pushed=0 的半态(可以重推)。

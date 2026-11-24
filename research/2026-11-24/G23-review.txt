@@ -1,0 +1,30 @@
+来源:会话临时目录 /home/devali/.claude/jobs/7f46e032/tmp/G23/review.txt 拷贝于 2026-11-24
+G23 事后审四笔(只读加私有 git archive 副本 origin/main,夹具已删)
+结论:3700373f98 须回滚(或立即热修);e38f6d9d6f 须改;f7734e7443 须改;58c7026b2e 通过(运行 UNMEASURED)。
+
+(1) 3700373f98 register --planned/--promote  须回滚
+- 实测 [私有夹具 UNISACC_TABLES]:--planned g23-ok tools/check-edit-span.cx CHECK_EDIT_SPAN -> REGISTERED_PLANNED,行 expect 列为 NOT_READY,stage=release。
+- --promote g23-ok -> rc=1 status=STILL_PLANNED,但 batches.tsv 行留为 IMPLEMENTED(coverage 仍 PLANNED),随后 tests/run.cx --list 输出 REFUSE metadata-schema batch-expect id=g23-ok:一次失败的 promote 让全仓注册表不可加载。
+- 根因1:rg_promote 回滚调用 rg_promote_swap(bpath,...,0,0),out_cid=0 走 coverage 分支改第 2 列(layer),与 IMPLEMENTED 不符返回 -2,回滚静默失败;coverage 失败分支的批表回退同病。
+- 根因2:promote 只换状态列,不把 NOT_READY 换成 rc0:MARKER(marker 在 --planned 时已丢弃),也不改 stage;tp_expect 对非 PLANNED 要求 rc0:,故 promote 永远不可能成功。check 无成功用例。
+- 补点(a)未做:IMPLEMENTED 在锁内落盘后释放锁再跑 58 秒试跑,中途被杀即留未验证 IMPLEMENTED;未走现有 .register-txn 事务日志与恢复,cx_write 直写非原子;无被杀用例。
+- 补点(b):run.cx --all 对 PLANNED 非零有用例(run.cx 原有行为,line 25 NOT_RUN reason=PLANNED),通过。
+- check 断言过弱:strstr(zb,"\tPLANNED\t") 对整表任一行即真,故掩盖了上面的残留 IMPLEMENTED。
+- --no-run 原合同:代码路径仅加 planned 分支与互斥,静态看未变;--list 对 PLANNED:metadata_valid=1 有用例。
+- 安全子集:可保留 --planned(写 PLANNED/NOT_READY),--promote 退回作者:须重写 expect 列与 stage、走事务日志、回滚按批表列定位、补成功/失败/SIGKILL 中途三用例并断言具体行。
+
+(2) e38f6d9d6f delta 悬空边汇总  须改
+- 默认仍 exit 2(用例 dangling-default-collects-and-refuses),--dangling=dead 无生产调用者(全仓 grep 仅 sim/table-lint/check),通过。
+- dead 模式 SIM_WARN dangling=N 写 stderr,计数可见;但 table-lint --strict 摘要 errors=0 不含 dangling,建议摘要行带 dangling=N。
+- 消费者未遍历:拒绝文案由 "delta: edge from X to unknown state Y" 改为 "delta: N edges to unknown states; first=X -> Y",tools/check-cx-dev.cx:326/329 仍断言旧文案(CXDEV_LINT_NA reason=... / CXDEV_LINT ERROR lint-not-loadable ...),静态判定转红。须同步改断言(迁移不删)。
+
+(3) f7734e7443 cx-dev NOT_DEPLOYED 文案  须改
+- 判定未改(仅 absent 分支打印串),通过。
+- 但 tools/check-cx-dev.cx:271 断言 "CXDEV_RECIPE\tshared-e3\tNOT_DEPLOYED\n",新输出为 NOT_DEPLOYED\tnot-in-package\n,静态转红;check-dev-product-build 用自造日志,实跑 55/0 不受影响。
+- 私有副本实跑 check-cx-dev 在 a 组 bundle not published 处 rc=2 早退,e 组未达,UNMEASURED;作者应在可发布 bundle 环境实跑并改 271 行断言。
+
+(4) 58c7026b2e E8 第三轮  通过
+- 冷限:precommit.cx 50000 -> 30000,文案 bound 30 s,门表 冷 30 s,三处一致,未放宽。
+- 健康用例 canary.healthy-reports-ok-hot:CHOK=1 且 CHBLK=0,对应 precommit.cx:3825 真实输出 AFFECTED_CANARY ok,调真入口。
+- 红用例 CNUND 收紧为只认 BATCH_PRODUCT_INPUT_UNDECLARED(去掉 REFUSE 宽匹配),并补 coverage 行使夹具只剩 UNDECLARED 一种失败形态,锁住原缺陷。
+- 差异 12 行,远低于三成,不按新件。check-precommit-gates 本轮未实跑,UNMEASURED。

@@ -1,0 +1,26 @@
+来源:会话临时目录 /home/devali/.claude/jobs/7f46e032/tmp/G20/review.txt 拷贝于 2026-11-24
+G20 复核 01d73ad35b(E8 affected-canary)  结论:须改(不 BLOCK 已推部分,但现形态不应视为合格门;下列 (A)(B)(C) 改完再记绿)
+
+(1) 发现 affected 失效能力:部分通过 / 须改
+ - 通过:对 c1709e5506 形态(batches.tsv 加 {candidate} 行而 batch-product-inputs.tsv 缺 id 行)有 canary.red 真实入口用例,失败时 BLOCKED 带门名 affected-canary 并回显 REFUSE/UNDECLARED 行,pc_mark_block 具名。
+ - 须改(A) fail-open:读集声明 ACMRD 含 D,但门内 sy_exists("tools/affected.cx")!=1 时只打 skipped=1。门在 chdir(pc_iso_dir) 之后跑,暂存删除 tools/affected.cx 恰好走 skip 分支 -> 放行。应区分夹具仓(HEAD 也无该文件)与本次删除(HEAD 有、暂存无 -> BLOCKED)。
+ - 须改(B) 读集不完备:affected.cx 实际读 tests/coverage.tsv(读不到即 die,源 534-535 行)、cxroot.tsv 以及 use 闭包 cxlib.testplan/cxroot/toolprep/platformscope/tlibpkg/kernelinputs/flowadmit/batchdomain。这些改坏同样让 affected 全线 rc2,但不触发本门。读集应补 tests/coverage.tsv 与 affected.cx 的 use 闭包(可由 affected 自身闭包扫描或 tools-compile-sources 派生,不手抄)。
+ - 须改(C) hot 基准"同输入同结论"不成立:cmp 只比 3 个文件,hot 路径却在工作树跑,coverage.tsv 与 cxlib 闭包可能工作树与暂存不同 -> 以工作树结论冒充暂存结论。比较集应与 (B) 的完整读集一致。
+
+(2) 余量:须改
+ - 自报 hot 6.8-8.3 s 对 10 s 上限,占 68-83%,违反 R22 余量合同(单跑不超时限 50%);高负载下必误拦。冷隔离树 20.6-25.4 s 对 30 s 同样超 50%。
+ - 改法(任选,推荐 a+c):(a) 缓存编译产物按输入身份键(affected.cx 及闭包内容哈希),让隔离树也命中,不缓存结论;(b) 给 affected 加只做注册表与 product-input 声明核对的轻模式(不做闭包扫描),门只调轻模式,目标小于 2 s;(c) 时限按 R22 取实测 p95 两倍:hot 至少 17 s、冷至少 51 s(冷已近 55 s 子进程总线,所以冷路径必须先做 (a))。超时文案已区分 timeout,保持。
+
+(3) 健康路径用例:须改(必须补)
+ - 无 AFFECTED_CANARY ok 用例,门若恒阻(例如 hv/iv 参数写错、basis 判错)现有检查发现不了,全员提交被拦。夹具冷编超时不是豁免理由:可在夹具内预热一次(同参数先跑一次 affected 建 run-cache,不计入断言),或在 (a)/(b) 落地后直接断言 ok 行与 basis=worktree/staged 各一例。
+
+(4) E7 tree-isolate 回归是否再触及:通过(静态)
+ - 新门只读 pc_work_top/pc_local_top/pc_orig_cwd,hot 子进程在 sh -c 内 cd 并 unset GIT_DIR/GIT_WORK_TREE/GIT_INDEX_FILE,未改父进程 cwd 与环境;未触 bpi_gate 与 isolate_staged_tree。reuse-key/reuse-commit 作者报 failed=0;本复核未重跑,UNMEASURED。
+
+(5) 变异:部分通过 / UNMEASURED
+ - 删除门块:canary.red 的 CNBLK=0 -> 转红(静态推演),na.* 期望含 affected-canary 来自表与 gt_builtin,单删调用不会让 na 红,只靠 canary.red。
+ - 文案 BLOCKED 改 REPORT:CNBLK=0 -> 转红。
+ - 保留文案只删 blocked++(本复核另加变异):canary.red 断言 CNRC=1,但同一夹具暂存了 batches.tsv,runlist 门也可能因 zzcan 行阻断,CNRC 仍为 1、文案仍在 -> 该变异大概率存活。须让用例断言 pc_mark_block 的具名阻断行或唯一阻断源。
+ - 三项均未实跑(提交门冷编在 20 分钟预算与负载下不可稳定完成),记 UNMEASURED;mutation-gate.cx 未跑,UNMEASURED。
+
+可立即落地的安全子集:无需回滚已推提交;作者下一补丁先做 (A)(3) 与时限放宽到合同值,(B)(C)(a)(b) 随后。第二轮仍有 (A)(2)(3) 未清则退回拆小。

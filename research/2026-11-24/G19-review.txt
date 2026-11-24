@@ -1,0 +1,22 @@
+来源:会话临时目录 /home/devali/.claude/jobs/7f46e032/tmp/G19/review.txt 拷贝于 2026-11-24
+G19 事后审 9b57647531 premerge-union 版本槽规则   总结论:通过(附两条非阻塞建议)
+
+(1) 取分支侧对 release/candidate.tsv 是否总正确 -> 通过
+- 全史 125 个版本:表头 md5 恒为同一值(d0ba66d2),行数恒为 2。文件 = 固定表头 + 唯一槽行,无"槽行之外"可被 main 合法更新的行。
+- main 上的合法更新(X: candidate table 填 commit/hash,Y1 填 ci_run_id,如 edff8d214d、63d91a9744)全部改的就是槽行本身,属上一版;合入新版时被新版槽行替换是预期语义,新版的 X/Y1 会在 main 上重填。
+- 只对"两侧都改"的文件进 merge_one_both;分支未改槽(未设自己版本)时走 main 侧,不会把 main 已填好的上一版行回退。故不需要"槽行取分支、其余三方合并"。
+- 残余风险(非阻塞):若将来表头加列只在 main 上做,会被分支侧覆盖丢失。建议:取分支侧前比对 base 与 branch 首行,不同则报 conflict(约 5 行)。
+
+(2) 冻结合并方向 v0.0.NN -> main -> 通过
+- 工具 base=main、branch=v0.0.NN,合并结果即将落 main 的树;取分支侧 = 写入本版槽行,与冻结后 X/Y1 在 main 上填该行的数据流一致,不会让后续发布步骤读到上一版行而自拒。反向同步(main -> 分支)不经本工具,不受影响。
+
+(3) 断言能否杀主要变异 -> 通过(静态推演;私有实跑 UNMEASURED)
+- 共享检出原样(与 9b57647531 同内容)实跑:CHECK_PREMERGE_UNION passed=31 failed=0。
+- 变异推演:(a) 删 candidate 分支 -> 落 auto-3way 冲突 -> clean-union-all-pass 转红(作者报 26/5 与此一致);(b) br_sha 改 base_sha(取 main 侧)-> 文件为 v0.0.100 行 -> version-slot-takes-branch-side 转红;(c) rule 文案三元改成恒 "branch-side" -> shared-files-rules-including-the-version-slot 转红;(d) streq 改 starts_with "release/" 等放宽 -> 夹具无其他 release 文件,杀不掉(覆盖缺口,轻)。
+- 自做变异 (b) 在 git archive 私有副本实跑失败:模块解析 tools/sys/io.cx 找不到(副本布局问题,非补丁缺陷),故标 UNMEASURED。
+
+(4) 规则表与代码一致性 -> 通过(建议)
+- tests/merge-rules.tsv 新行 candidate-version-slot / release/candidate.tsv / conflict / take-theirs 与代码语义一致。
+- 但该表 conflict 行不被 merge_one_both 消费(代码注释自认),一致性只靠人工;建议在 check-premerge-union 加一条断言:表内 take-theirs 的路径集合 = 代码硬编码集合,防漂移。
+
+能否落库:已落,保持;两条建议可作下一小补丁。

@@ -1,0 +1,53 @@
+来源:会话临时目录 /home/devali/.claude/jobs/7f46e032/tmp/G21/review.txt 拷贝于 2026-11-24
+G21 第二轮复审 D8(pre-push 冻结门 + devsvc 冻结同步 + release-exec 草案)
+结论:可装(钩子主补丁 + devsvc 补丁同批);release-exec 草案 须改,不同落。安装顺序:先落 devsvc 补丁,再落主补丁,最后装钩子。
+私有副本:origin/main 9b57647531 git archive -> $CLAUDE_JOB_DIR/tmp/G21/w.ZK68BT;两补丁 apply --check 通过,无冲突。新增行 /home/ 命中 0。
+
+(0) 增量比例 -- 须注明(不阻塞)
+- 新增行 D7 331 -> D8 517(+56%);diff 改动行 370 对 D7 363 行。按规则超三成,按新件审,本轮即按新件全量复核。
+- 逐块对应 G17:hooks/pre-push 3->36 行 = G17(5) 主工作树入口+审计块+降级;prepush.cx +28 = G17(2) 空白行、(3) norm_owner、(7)m4 坏行置 anon;check-prepush +125 = G17(7) 点名六类夹具 + 去 /home + 分段;dvgitx 与 D7 逐字同。未见点名外改动。
+- D7 断言未删:D8 push 段含 D7 全部旧断言并扩充。
+- 小差:D8 自报 push 段 19/0,我实跑 18 PASS/0 FAIL;须在报告更正计数。
+
+(1) 主工作树入口 -- 通过
+- 实跑 check-prepush push 段(夹具内 git worktree 建版本工作树 w,无 tools/prepush.cx 无 unisacc.com,钩子为真实 tools/hooks/pre-push):worktree-has-no-gate-body、worktree-own-branch-passes、worktree-main-refused 均 PASS。
+- 我自行在 bash 直接建工作树被仓守卫 GUARD-EDIT-V1 拦(worktree add),故以夹具实跑为证,未另做手工复现:UNMEASURED(手工)。
+- 降级不 fail-open:degraded-main-refused、degraded-push-freeze-refuses-branch PASS。git 2.34 支持 --path-format;取 common dir 失败即拒(fail closed)。
+- 旧钩子用 --git-dir 判 PUSH-FREEZE,工作树里看不到主仓 PUSH-FREEZE;新钩子用 common dir,更严,属修正。
+
+(2) 审计块与 stdin -- 通过
+- 进程链/env 段与现 .git/hooks/pre-push 逐字一致;stdin 存一个 mktemp 文件,同一份喂审计、prepush.cx 与降级循环;trap 删除。audit-log-records-ref-and-gate、degraded-audited PASS。
+- 注:钩子内用 awk/sed 属沿用原审计块的宿主薄脚本,不新增算法,可接受。
+
+(3) devsvc (21) 反转 -- 通过
+- 读 diff:freeze_tsv_state 新增返回 2(只剩过期行),freeze_check 遇 2 拒且持有者也拒;(21) 由 rc==0 改为 rc==1 并要求 FREEZE_EXPIRED 文案,另加持有者也拒、只剩表头/空白行放行两条,lifecycle 20->22。是收紧合同而非弱化,原放行语义转由"只剩表头"用例守。
+- 无死锁:续期或删行改的是工作树 freeze.tsv,freeze_check 与 prepush 读的都是工作树文件,改后状态即变 1(持有者过)或 0,可以提交推送。
+- 回滚说明已写"两份补丁同进同退";建议在两条提交说明里互相点名对方提交号。
+- devsvc 三段 22/0、10/0、13/0 与先红 19/3 为 D8 自报;本轮未重编新核心复跑:UNMEASURED(复核者)。落库前集成者须用 affected 或 check-devsvc-freeze 三行实跑一次。
+
+(4) check-prepush 四段时限与变异 -- 通过
+- 四段并行实跑,各 timeout 58 内完成,全 fail=0:push 18、feed 16、mut1 6、mut2 6(含 generated 与 is-red 成对断言)。
+- 自做与自报不同的两个钩子变异:ma 降级循环 refs/heads/main 改 mainZ -> degraded-main-refused、degraded-audited 转红;mb 主工作树改回 --show-toplevel -> worktree-main-refused 转红。均被杀。
+- mutation-gate.cx 未跑:UNMEASURED。
+
+(5) 批次登记 -- 须改(登记动作,草案如下,expect 按 PREPUSH_CHECK 末行)
+prepush-push	IMPLEMENTED	interfaces	tools/check-prepush.cx	SOURCE	lnx/x86_64	55	-	tools/check-prepush.cx	tools/prepush.cx;push	interfaces.prepush-push	rc0:PREPUSH_CHECK	product	commit
+prepush-feed	IMPLEMENTED	interfaces	tools/check-prepush.cx	SOURCE	lnx/x86_64	55	-	tools/check-prepush.cx	tools/prepush.cx;feed	interfaces.prepush-feed	rc0:PREPUSH_CHECK	product	commit
+prepush-mut1	IMPLEMENTED	interfaces	tools/check-prepush.cx	SOURCE	lnx/x86_64	55	-	tools/check-prepush.cx	tools/prepush.cx;mut1	interfaces.prepush-mut1	rc0:PREPUSH_CHECK	product	daily
+prepush-mut2	IMPLEMENTED	interfaces	tools/check-prepush.cx	SOURCE	lnx/x86_64	55	-	tools/check-prepush.cx	tools/prepush.cx;mut2	interfaces.prepush-mut2	rc0:PREPUSH_CHECK	product	daily
+- 经 tools/register.cx 登记,coverage.tsv 同步四行;四段并行负载下单段耗时未单独计时,登记前按冷环境各测三次:UNMEASURED。
+
+(6) release-exec 草案 -- 须改,不同落
+- 不能编译:含 "..." 省略的逐行解析;调用的 main_top() 在 origin/main tools/release-exec.cx 中不存在;fz_norm 只有声明。
+- 方向正确(提交前具名拒,ROLLBACK NONE);与 freeze-day 写表列序一致(第 3 列 owner)。另起补丁,带 6 例与 3 变异,紧随本件。落地前以安装步骤(f) 人工 export DEVSVC_OWNER 兜底。
+
+安装顺序
+(a) 前置核:build/freeze.tsv 只剩表头(新语义下过期行会冻住全部 devsvc 写与 main 推送),无 .git/PUSH-FREEZE,locks.tsv 无 freeze 行。
+(b) 先落 devsvc-freeze.diff(提交推送,重启 devsvc 加载新核心),理由:钩子先装则一段时间内钩子拒过期行而 devsvc 放行,出现提交已落推不出的半态。
+(c) 再落 patch.diff + 四行批次登记。
+(d) 备份旧钩子到 ~/.local/share/unisacc/research/cc/parked/,cp tools/hooks/pre-push .git/hooks/pre-push,chmod +x;不用 core.hooksPath。
+(e) 推一次非 main 分支验放行,核 push-audit.log 有 gate=prepush rc=0。
+回滚:钩子 cp 备份回;两补丁一起 revert。
+
+未防:--no-verify;须 GitHub 分支保护,记 prd_mempalace 未验证项。
+证据:$CLAUDE_JOB_DIR/tmp/G21/{push,feed,mut1,mut2,ma,mb}.log
