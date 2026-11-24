@@ -15,7 +15,7 @@
 - 出事源头是 cdx 的 pinscan 覆盖门(check-pinscan.cx 变异进程 7400 秒不退),其源码我未找到;须定位后同样加夹具。mutation-gate.cx 自身:每项检查走 ckk_sh_t 55 秒并在 setsid 内,收尾按 `kill -TERM -- -pid`,只发 TERM 不核实退出,须改为 TERM 后等待、仍在则 KILL、再核实 /proc 无同组成员(用 ext/sysx/reaper.cx 的 rp_kill_tree_pid)。
 - 归属:0.0.125(进程生命周期),下一任接手。
 
-## 3. R28 闭包收窄(设计 /home/devali/.claude/jobs/7f46e032/tmp/R28/design.md)
+## 3. R28 闭包收窄(设计 ~/.claude/jobs/7f46e032/tmp/R28/design.md)
 S0 已得证据(只读,零仓内改动):
 - E2:dump.txt 对 dumpc.txt 的每批差集:默认档独有 C 行 720380,涉及 221 个工具;频次最高 source-package-pack(560 批)、kernel-link(559)、asm-material(559)、asm-source(558)。这些工具只被 chain-step、kernel-build、kernelinputs 等点名。
 - 抽 5 个批次(run-reserve、random-expr-preservation 等)与差集前 5 个批次(a12-cycle、affected-drain、affected-gitnode、affected-domain-*):其检查源码都不点名这四个工具。结论倾向"差集主要是传递膨胀,非真执行",但样本小,S2 实测 spawn 集才是判据。

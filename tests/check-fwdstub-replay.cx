@@ -1,0 +1,266 @@
+/* Usage: ROOT CANDIDATE NEW_OUTDIR. The two replay jobs share TMPDIR. */
+#pragma unisa use sys.fs
+#pragma unisa use sys.env
+#pragma unisa use sys.posix
+#pragma unisa use sys.proc
+#pragma unisa use sys.time
+#pragma unisa use sysx.process
+#pragma unisa use mem.bytes
+
+static char root[4096], tmp[4200], phase[4200];
+static char source[2][4200], extra[4200], output[2][4200], phase_output[4200];
+static char legacy[4200], sidecar[4200], receipt[4200], checkpoint_sha[4200];
+static const char *want[] = {"forward-fixed\n", "forward-varargs\n"};
+static int failed, checks;
+
+static void check(int ok, const char *label) {
+    checks++;
+    if (!ok) failed++;
+    printf("%s\t%s\n", ok ? "PASS" : "FAIL", label);
+}
+
+static int write_text(const char *path, const char *text) {
+    return sy_write_atomic(path, text, strlen(text), 0600);
+}
+
+static int no_private_sources(void) {
+    sy_dir_t dir;
+    int rc;
+    if (sy_dir_open(&dir, tmp)) return 0;
+    while ((rc = sy_dir_next(&dir)) == 1) {
+        if (dir.name_n >= 12 && !memcmp(dir.name, "unisacc-fwd-", 12)) break;
+    }
+    sy_dir_close(&dir);
+    return rc == 0;
+}
+
+static int run_image(char *image, const char *expected) {
+    char *args[] = {image, 0};
+    char *text = 0;
+    size_t n = 0;
+    int rc = cx_runv_timeout(args, 3, &text, &n);
+    int ok = !rc && n == strlen(expected) && !memcmp(text, expected, n);
+    free(text);
+    return ok;
+}
+
+static int phase_run(char *candidate, const char *mode, int reject, int single) {
+    char e_tmp[4300], e_mode[64], e_path[4300];
+    char *env[] = {e_tmp, e_mode, e_path, "UNISA_FWD_REPLAY=1", 0};
+    char *multi_argv[] = {"sh", candidate, source[0], extra, "-o", phase_output, 0};
+    char *single_argv[] = {"sh", candidate, source[0], "-o", phase_output, 0};
+    np_result result = {0};
+    char why[512] = "";
+    if (cx_fmt(e_tmp, sizeof e_tmp, "TMPDIR=%s", tmp) ||
+        cx_fmt(e_mode, sizeof e_mode, "UNISACC_PHASE=%s", mode) ||
+        cx_fmt(e_path, sizeof e_path, "UNISACC_PHASE_%s=%s", mode[0] == 'A' ? "OUT" : "IN", phase)) return 0;
+    int rc = np_run(single ? single_argv : multi_argv, root, env, 8, &result, why, sizeof why);
+    int ok = !rc && !result.residue && (reject
+        ? result.rc == 1 && result.err && strstr(result.err, "invalid phase receipt or source") && sy_exists(phase_output) == 0
+        : result.rc == 0);
+    if (!ok) {
+        fprintf(stderr, "phase %s transport=%d rc=%d residue=%d %s\n", mode, rc, result.rc, result.residue, why);
+        if (result.errn) fwrite(result.err, 1, result.errn, stderr);
+        if (result.outn) fwrite(result.out, 1, result.outn, stderr);
+    }
+    np_free(&result);
+    return ok;
+}
+
+static int phases(char *candidate, const char *mode, int reject) {
+    return phase_run(candidate, mode, reject, 0);
+}
+
+static int receipt_checks(char *candidate) {
+    unsigned char *wire = 0, *digest = 0;
+    int64_t n = 0, nd = 0;
+    if (sy_read_file(receipt, &wire, &n, 159) ||
+        sy_read_file(checkpoint_sha, &digest, &nd, 65)) {
+        free(wire); free(digest);
+        return 1;
+    }
+    int bound = nd == 65 && n == 152 && !memcmp(wire, "forward-v1\nphase=", 17) &&
+                !memcmp(wire + 17, digest, 65);
+    check(bound, "receipt binds the checkpoint checksum");
+    char tail[161];
+    if (mm_copy(tail, sizeof tail, wire, n)) {
+        free(wire); free(digest);
+        return 1;
+    }
+    tail[n] = 'x';
+    int rc = sy_write_atomic(receipt, tail, n + 1, 0600);
+    if (!rc) check(phases(candidate, "B", 1), "B refuses a valid receipt prefix with trailing bytes");
+    if (!rc && sy_exists(phase_output) == 1) rc = sy_unlink(phase_output);
+    if (bound && !rc) {
+        tail[17] = wire[17] == '0' ? '1' : '0';
+        rc = sy_write_atomic(receipt, tail, n, 0600);
+        if (!rc) check(phases(candidate, "B", 1), "B refuses a receipt for another checkpoint");
+        if (!rc && sy_exists(phase_output) == 1) rc = sy_unlink(phase_output);
+    }
+    if (!rc) rc = sy_write_atomic(receipt, wire, n, 0600);
+    free(wire); free(digest);
+    return rc;
+}
+
+/* Both children have started before either is waited. A single deadline
+   covers the pair and timeouts clean the process groups. */
+static int parallel(char *candidate) {
+    int pid[2], rc[2] = {-EAGAIN, -EAGAIN};
+    char *a[] = {"sh", candidate, source[0], extra, "-o", output[0], 0};
+    char *b[] = {"sh", candidate, source[1], extra, "-o", output[1], 0};
+    long deadline = sy_now_ms() + 10000;
+    pid[0] = sy_spawn(a);
+    pid[1] = sy_spawn(b);
+    for (int step = 0; step < 1000 && sy_now_ms() < deadline; step++) {
+        for (int i = 0; i < 2; i++) if (pid[i] > 0 && rc[i] == -EAGAIN) rc[i] = sy_wait(pid[i], 1);
+        if (rc[0] != -EAGAIN && rc[1] != -EAGAIN) break;
+        sy_sleep_ms(10);
+    }
+    for (int i = 0; i < 2; i++) if (pid[i] > 0 && rc[i] == -EAGAIN) {
+        sy_killpg(pid[i], 9);
+        sy_wait(pid[i], 0);
+    }
+    return rc[0] == 0 && rc[1] == 0;
+}
+
+/* A writes the checksum once. Deliver malformed bytes when it reopens the
+   same checksum path to bind the forwarding receipt. */
+static int rejects_malformed_checkpoint_sha(char *candidate) {
+    if (sy_mkfifo(checkpoint_sha, 0600) ||
+        sy_setenv("UNISACC_PHASE", "A", 1) ||
+        sy_setenv("UNISACC_PHASE_OUT", phase, 1)) return 0;
+    char *discard[] = {"cat", checkpoint_sha, 0};
+    char *compile[] = {"sh", candidate, source[0], extra, "-o", phase_output, 0};
+    int reader = sy_spawn(discard);
+    int builder = sy_spawn(compile);
+    int read_rc = -EAGAIN, build_rc = -EAGAIN, sent = 0;
+    long deadline = sy_now_ms() + 8000;
+    for (int i = 0; i < 800 && sy_now_ms() < deadline && reader > 0 && builder > 0; i++) {
+        if (read_rc == -EAGAIN) read_rc = sy_wait(reader, 1);
+        if (read_rc == 0 && !sent) {
+            int fd = sy_open(checkpoint_sha, O_WRONLY | O_NONBLOCK, 0);
+            if (fd >= 0) {
+                char malformed[65];
+                memset(malformed, '0', sizeof malformed);
+                int rc = sy_write_all(fd, malformed, sizeof malformed);
+                sent = !sy_close(fd) && !rc;
+            }
+        }
+        build_rc = sy_wait(builder, 1);
+        if (build_rc != -EAGAIN) break;
+        sy_sleep_ms(10);
+    }
+    if (reader > 0 && read_rc == -EAGAIN) { sy_killpg(reader, 9); sy_wait(reader, 0); }
+    if (builder > 0 && build_rc == -EAGAIN) { sy_killpg(builder, 9); sy_wait(builder, 0); }
+    int ok = sent && build_rc == 1 && sy_exists(receipt) == 0;
+    if (sy_exists(receipt) == 1) (void)sy_unlink(receipt);
+    if (sy_exists(sidecar) == 1) (void)sy_unlink(sidecar);
+    if (sy_exists(phase_output) == 1) (void)sy_unlink(phase_output);
+    if (sy_unlink(checkpoint_sha) || sy_unsetenv("UNISACC_PHASE") || sy_unsetenv("UNISACC_PHASE_OUT")) return 0;
+    return ok;
+}
+
+/* The directory fits the host path limit, but the forwarding source
+   exceeds the atomic writer's limit. The driver must report publication. */
+static int rejects_atomic_write_failure(char *candidate) {
+    char deep[4100], e_tmp[4200], why[512] = "";
+    char *env[] = {e_tmp, "UNISA_FWD_REPLAY=1", 0};
+    char *compile[] = {"sh", candidate, source[0], extra, "-o", phase_output, 0};
+    if (cx_fmt(deep, sizeof deep, "%s/long", tmp)) return 0;
+    size_t n = strlen(deep);
+    while (n < 4010) {
+        deep[n++] = '/';
+        size_t width = 4010 - n;
+        if (width > 100) width = 100;
+        if (4010 - n == 101) width = 99;
+        memset(deep + n, 'x', width);
+        n += width;
+    }
+    deep[n] = 0;
+    if (sy_mkdir_all(deep, 0700) || cx_fmt(e_tmp, sizeof e_tmp, "TMPDIR=%s", deep)) return 0;
+    np_result result = {0};
+    int rc = np_run(compile, root, env, 8, &result, why, sizeof why);
+    int ok = !rc && !result.residue && result.rc == 1 && result.err &&
+             strstr(result.err, "cannot publish source or phase receipt") &&
+             sy_exists(phase_output) == 0;
+    if (!ok && result.errn) fwrite(result.err, 1, result.errn, stderr);
+    np_free(&result);
+    return ok;
+}
+
+int main(int argc, char **argv) {
+    static const char *fixed =
+        "#include <unisacc_ffi.h>\n"
+        "static void host(int x) { if (x) { int vq(const char *, int); vq(\"a\", 1); } }\n"
+        "int main(void) { host(0); return fprintf(stdout, \"forward-fixed\\n\") < 0; }\n";
+    static const char *var =
+        "#include <unisacc_ffi.h>\n"
+        "static void host(int x) { if (x) { int vr(const char *, ...); vr(\"a\", 1); } }\n"
+        "int main(void) { host(0); return fprintf(stdout, \"forward-varargs\\n\") < 0; }\n";
+    if (argc != 4 || sy_realpath(argv[1], root, sizeof root) < 0 ||
+        argv[2][0] != '/' || argv[3][0] != '/' || sy_mkdir(argv[3], 0700) ||
+        cx_fmt(tmp, sizeof tmp, "%s/tmp", argv[3]) || sy_mkdir(tmp, 0700) ||
+        cx_fmt(phase, sizeof phase, "%s/port.phase", argv[3]) ||
+        cx_fmt(extra, sizeof extra, "%s/extra.c", argv[3]) ||
+        cx_fmt(phase_output, sizeof phase_output, "%s/replay.image", argv[3]) ||
+        cx_fmt(legacy, sizeof legacy, "%s/unisacc-forward-entry.c", tmp) ||
+        cx_fmt(sidecar, sizeof sidecar, "%s.forward.c", phase) ||
+        cx_fmt(receipt, sizeof receipt, "%s.forward.receipt", phase) ||
+        cx_fmt(checkpoint_sha, sizeof checkpoint_sha, "%s.sha256", phase) ||
+        write_text(extra, "int extra(void) { return 19; }\n") ||
+        sy_setenv("TMPDIR", tmp, 1) || sy_setenv("UNISACC_RUN_CACHE", "0", 1)) return 2;
+    for (int i = 0; i < 2; i++)
+        if (cx_fmt(source[i], sizeof source[i], "%s/main-%d.c", argv[3], i) ||
+            cx_fmt(output[i], sizeof output[i], "%s/program-%d", argv[3], i) ||
+            write_text(source[i], i ? var : fixed)) return 2;
+    for (int i = 0; i < 2; i++) {
+        char *args[] = {"sh", argv[2], source[i], 0};
+        char *bytes = 0;
+        size_t n = 0;
+        int rc = cx_runv_timeout(args, 5, &bytes, &n);
+        check(!rc && n == strlen(want[i]) && !memcmp(bytes, want[i], n),
+              i ? "single-unit variadic FFI closure" : "single-unit fixed FFI closure");
+        if (rc && n) fwrite(bytes, 1, n, stderr);
+        free(bytes);
+    }
+    check(parallel(argv[2]), "incremental compilation of fixed and variadic calls");
+    check(run_image(output[0], want[0]), "fixed image output");
+    check(run_image(output[1], want[1]), "variadic image output");
+    (void)sy_unlink(output[0]);
+    (void)sy_unlink(output[1]);
+    if (sy_setenv("UNISA_FWD_REPLAY", "1", 1)) return 2;
+    check(parallel(argv[2]), "concurrent replay with shared TMPDIR");
+    check(run_image(output[0], want[0]), "fixed replay output");
+    check(run_image(output[1], want[1]), "variadic replay output");
+    check(sy_exists(legacy) == 0, "no shared forwarding source");
+    check(no_private_sources(), "ordinary replay removes all private forwarding directories");
+    check(phases(argv[2], "A", 0) && sy_exists(phase_output) == 0, "A stops after forwarding publication");
+    check(sy_exists(sidecar) == 1 && sy_exists(receipt) == 1, "A publishes source and receipt beside checkpoint");
+    if (write_text(legacy, "#error stale shared forwarding source\n")) return 2;
+    check(phases(argv[2], "B", 0) && run_image(phase_output, want[0]), "B replays A with stale shared source present");
+    check(no_private_sources(), "phase B removes its private forwarding directory");
+    if (sy_exists(phase_output) == 1 && sy_unlink(phase_output)) return 2;
+    if (sy_exists(receipt) == 1 && receipt_checks(argv[2])) return 2;
+    if (write_text(sidecar, "int changed(void) { return 0; }\n")) return 2;
+    check(phases(argv[2], "B", 1), "B refuses a changed forwarding source");
+    if (sy_exists(phase_output) == 1 && sy_unlink(phase_output)) return 2;
+    if (sy_unlink(sidecar) || (sy_exists(receipt) == 1 && sy_unlink(receipt))) return 2;
+    check(phases(argv[2], "B", 1), "B refuses a missing forwarding source and receipt");
+    if (sy_unlink(checkpoint_sha)) return 2;
+    check(rejects_malformed_checkpoint_sha(argv[2]), "A refuses a checkpoint checksum with an invalid terminator");
+    check(rejects_atomic_write_failure(argv[2]), "ordinary replay reports atomic publication failure");
+    if (write_text(source[0], "int main(void) { return puts(\"plain\") < 0; }\n")) return 2;
+    check(phases(argv[2], "A", 0) && run_image(phase_output, "plain\n") &&
+          sy_exists(receipt) == 1 && sy_exists(sidecar) == 0, "A records an explicit no-stub checkpoint");
+    if (sy_exists(phase_output) == 1 && sy_unlink(phase_output)) return 2;
+    check(phases(argv[2], "B", 0) && run_image(phase_output, "plain\n"), "B accepts a verified no-stub checkpoint");
+    if (sy_exists(phase_output) == 1 && sy_unlink(phase_output)) return 2;
+    if (sy_unlink(phase) || sy_unlink(checkpoint_sha) || (sy_exists(receipt) == 1 && sy_unlink(receipt))) return 2;
+    check(phase_run(argv[2], "A", 0, 1) && run_image(phase_output, "plain\n") &&
+          sy_exists(receipt) == 1 && sy_exists(sidecar) == 0, "single-source A publishes a no-stub receipt");
+    if (sy_exists(phase_output) == 1 && sy_unlink(phase_output)) return 2;
+    if (write_text(source[0], "int main(void) { return puts(\"changed\") < 0; }\n")) return 2;
+    check(phase_run(argv[2], "B", 0, 1) && run_image(phase_output, "plain\n"), "single-source B restores the checkpoint");
+    printf("CHECK_FWDSTUB_REPLAY\tassertions=%d\tfailed=%d\n", checks, failed);
+    return failed != 0;
+}

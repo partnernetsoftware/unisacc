@@ -14,6 +14,8 @@
  * worktree-closure-sha or worktrees-same-digest red, one that skips every unreadable node turns
  * unreadable-node-refused red.  Prints CHECK lines and CHECK_AFFECTED_GITNODE ok|FAIL; rc 0 only when all passed. */
 #pragma unisa use cxlib.netpack
+#pragma unisa use cxlib.ckassert
+#pragma unisa use testx.check
 #pragma unisa use sys.fs
 #pragma unisa use sys.proc
 #pragma unisa use sys.io
@@ -22,18 +24,17 @@
 #pragma unisa use mem.heap
 #pragma unisa use mem.bytes
 static char repo[4096], base[5000], rdir[5200], wdir[5200], w2dir[5200], product[5000], affected[5000], dig1[200], dig2[200];
-static np_result result; static int failed, passed;
-static void ck(int yes, const char *name) {
+static np_result result;
+static void report_case(int yes, const char *name) {
     printf("CHECK\t%s\t%s\n", name, yes ? "PASS" : "FAIL");
-    if (yes) passed++;
-    else { failed++; fprintf(stderr, "CASE_DIAG %s rc=%d stdout=%.1500s stderr=%.1500s\n", name, result.rc, result.out ? result.out : "", result.err ? result.err : ""); }
+    ck_observe(yes);
+    if (!yes) fprintf(stderr, "CASE_DIAG %s rc=%d stdout=%.1500s stderr=%.1500s\n", name, result.rc, result.out ? result.out : "", result.err ? result.err : "");
 }
 static int run(char **v, const char *dir) {
     char why[400]; np_free(&result);
     if (np_run(v, dir, 0, 50, &result, why, sizeof why)) { fprintf(stderr, "TRANSPORT %s\n", why); result.rc = -1; return -1; }
     return result.rc;
 }
-static int has(const char *s) { return result.out && strstr(result.out, s) != 0; }
 static int put(const char *dir, const char *rel, const char *text) {
     char path[6000]; if (cx_fmt(path, sizeof path, "%s/%s", dir, rel)) return 2;
     return sy_write_atomic(path, text, strlen(text), 0600) ? 2 : 0;
@@ -77,18 +78,19 @@ int main(int argc, char **argv) {
         || (draft ? cx_fmt(affected, sizeof affected, "%s", draft) : cx_fmt(affected, sizeof affected, "%s/tools/affected.cx", repo))) return 2;
     rc = fixture();
     if (!rc) {
-        ck(closure(rdir) == 0 && has("CLOSURE_SHA\ttools/gn.cx\t") && !has("CLOSURE_UNREADABLE"), "plain-repo-closure-sha");
-        ck(closure(wdir) == 0 && has("CLOSURE_SHA\ttools/gn.cx\t") && !has("CLOSURE_UNREADABLE"), "worktree-closure-sha");
+        report_case(closure(rdir) == 0 && tk_has(result.out, "CLOSURE_SHA\ttools/gn.cx\t") && !tk_has(result.out, "CLOSURE_UNREADABLE"), "plain-repo-closure-sha");
+        report_case(closure(wdir) == 0 && tk_has(result.out, "CLOSURE_SHA\ttools/gn.cx\t") && !tk_has(result.out, "CLOSURE_UNREADABLE"), "worktree-closure-sha");
         { const char *s = result.out ? strstr(result.out, "CLOSURE_SHA") : 0; dig1[0] = 0; if (s) cx_fmt(dig1, sizeof dig1, "%.100s", s); }
-        ck(closure(w2dir) == 0 && has("CLOSURE_SHA\ttools/gn.cx\t"), "worktree-two-closure-sha");
+        report_case(closure(w2dir) == 0 && tk_has(result.out, "CLOSURE_SHA\ttools/gn.cx\t"), "worktree-two-closure-sha");
         { const char *s = result.out ? strstr(result.out, "CLOSURE_SHA") : 0; dig2[0] = 0; if (s) cx_fmt(dig2, sizeof dig2, "%.100s", s); }
-        ck(dig1[0] && !strcmp(dig1, dig2), "worktrees-same-digest");
+        report_case(dig1[0] && !strcmp(dig1, dig2), "worktrees-same-digest");
         { char *v[] = {"sh", product, affected, "--", "--closure-sha", "tools/np.cx", 0};
-          ck(run(v, rdir) == 2 && has("CLOSURE_UNREADABLE\ttools/np.cx"), "unreadable-node-refused"); }
+          report_case(run(v, rdir) == 2 && tk_has(result.out, "CLOSURE_UNREADABLE\ttools/np.cx"), "unreadable-node-refused"); }
     }
     { char *v[] = {"rm", "-rf", base, 0}; np_result r = {0}; char why[200]; (void)np_run(v, repo, 0, 10, &r, why, sizeof why); np_free(&r); }
     np_free(&result);
     if (rc) { printf("CHECK_AFFECTED_GITNODE\tFAIL\tsetup=%d\n", rc); return 2; }
+    int failed = ck_failures(), passed = ck_assertions() - failed;
     printf("CHECK_AFFECTED_GITNODE\t%s\tpassed=%d\tfailed=%d\n", failed ? "FAIL" : "ok", passed, failed);
     return failed ? 1 : 0;
 }

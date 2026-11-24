@@ -24,12 +24,13 @@
 #pragma unisa use text.text
 #pragma unisa use mem.bytes
 #pragma unisa use mem.heap
+#pragma unisa use testx.check
 
 static int failed;
 /* Bounded format that never truncates silently: an overflow stops the check (rc 2). */
 static void fmt_ok(int r) { if (r) { fprintf(stderr, "check-prepush: format bound exceeded\n"); exit(2); } }
 #define FMT(...) fmt_ok(cx_fmt(__VA_ARGS__))
-static char T[1024], RT[4200], COM[4200], SRC[4200], HOOK[4200], out[1 << 16];
+static char T[1024], RT[4200], COM[4200], SRC[4200], OWNER_SRC[4200], HOOK[4200], out[1 << 16];
 static long now;
 static void ck(int c, const char *name) {
     printf("%s\tprepush.%s\n", c ? "PASS" : "FAIL", name);
@@ -43,7 +44,6 @@ static int sh(const char *cmd) {
     out[o ? n : 0] = 0; mm_free(o);
     return rc;
 }
-static int has(const char *s) { return strstr(out, s) != 0; }
 static void head(char *h, size_t cap) {
     char c[2048]; FMT(c, sizeof c, "git --git-dir=%s/r.git rev-parse refs/heads/main", T);
     sh(c); FMT(h, cap, "%.40s", out);
@@ -97,9 +97,9 @@ static int feed(const char *env, const char *lines) {
 #define Z "0000000000000000000000000000000000000000"
 #define A "1111111111111111111111111111111111111111"
 #define MAINLINE "refs/heads/x " A " refs/heads/main " Z "\\n"
-static int mutate(const char *from, const char *to, const char *dst) {
+static int mutate(const char *src, const char *from, const char *to, const char *dst) {
     unsigned char *b = 0; int64_t n = 0;
-    if (sy_read_file(SRC, &b, &n, 1 << 20) || !b) return -1;
+    if (sy_read_file(src, &b, &n, 1 << 20) || !b) return -1;
     long at = tx_find((const char *)b, n, from, (long)strlen(from));
     if (at < 0) { mm_free(b); return -1; }
     long fl = (long)strlen(from), tl = (long)strlen(to);
@@ -110,7 +110,7 @@ static int mutate(const char *from, const char *to, const char *dst) {
     int rc = sy_write_file(dst, o, n - fl + tl, 0600);
     mm_free(o); mm_free(b); return rc;
 }
-static void body_restore(void) { char c[9000]; FMT(c, sizeof c, "cp %s %s/c/tools/prepush.cx", SRC, T); sh(c); }
+static int body_restore(void) { char c[9000]; FMT(c, sizeof c, "cp %s %s/c/tools/prepush.cx", SRC, T); return sh(c); }
 static void reset(void) { freeze_row(0); lockrow(0); pflag(0); }
 
 static void part_push(void) {
@@ -120,14 +120,14 @@ static void part_push(void) {
     ck(rc == 0 && mv, "old-hook-lets-frozen-main-through(red-first)");
     hook_new();
     rc = push("", "HEAD:main", &mv);
-    ck(rc != 0 && !mv && has("PREPUSH_REFUSE") && has("build/freeze.tsv FX owner=cc"), "frozen-HEAD:main-refused");
+    ck(rc != 0 && !mv && tk_has(out, "PREPUSH_REFUSE") && tk_has(out, "build/freeze.tsv FX owner=cc"), "frozen-HEAD:main-refused");
     FMT(c, sizeof c, "cd %s/c && git branch -f v0.0.98 HEAD", T); sh(c);
     rc = push("", "v0.0.98:main", &mv);
     ck(rc != 0 && !mv, "frozen-branch:main-refused");
     rc = push("", "HEAD:refs/heads/v0.0.98", &mv);
     ck(rc == 0 && !mv, "version-branch-push-passes");
     rc = push("DEVSVC_OWNER=cc", "HEAD:main", &mv);
-    ck(rc == 0 && mv && has("PREPUSH_PASS"), "holder-DEVSVC_OWNER-passes");
+    ck(rc == 0 && mv && tk_has(out, "PREPUSH_PASS"), "holder-DEVSVC_OWNER-passes");
     rc = push("UNISACC_INTEGRATOR=cc", "HEAD:main", &mv);
     ck(rc == 0 && mv, "holder-UNISACC_INTEGRATOR-passes");
     rc = push("DEVSVC_OWNER=other", "HEAD:main", &mv);
@@ -136,7 +136,7 @@ static void part_push(void) {
     ck(rc == 0 && mv, "holder-through-nested-processes-passes");
     freeze_row(now - 10);
     rc = push("", "HEAD:main", &mv);
-    ck(rc != 0 && !mv && has("FREEZE_EXPIRED") && has("Renew") && has("delete the row"), "expired-row-refused-with-hint");
+    ck(rc != 0 && !mv && tk_has(out, "FREEZE_EXPIRED") && tk_has(out, "Renew") && tk_has(out, "delete the row"), "expired-row-refused-with-hint");
     rc = push("DEVSVC_OWNER=cc", "HEAD:main", &mv);
     ck(rc != 0 && !mv, "expired-row-refuses-holder-too");
     FMT(c, sizeof c, "grep -q '^  ref [^ ]* [0-9a-f]* refs/heads/main ' %s/audit.log && grep -q 'gate=prepush rc=1' %s/audit.log", T, T);
@@ -150,7 +150,7 @@ static void part_push(void) {
     ck(rc == 0 && !mv, "worktree-own-branch-passes");
     /* forced spec: w is behind main, a plain push would stop at the local non-fast-forward check before the hook */
     rc = push_in("w", "", "+HEAD:main", &mv);
-    ck(rc != 0 && !mv && has("PREPUSH_REFUSE"), "worktree-main-refused");
+    ck(rc != 0 && !mv && tk_has(out, "PREPUSH_REFUSE"), "worktree-main-refused");
 
     /* degraded: main work tree lacks tools/prepush.cx */
     FMT(c, sizeof c, "mv %s/c/tools/prepush.cx %s/c/tools/prepush.off", T, T); sh(c);
@@ -158,10 +158,10 @@ static void part_push(void) {
     rc = push_in("w", "", "HEAD:refs/heads/v0.0.99", &mv);
     ck(rc == 0 && !mv, "degraded-branch-passes");
     rc = push_in("w", "", "+HEAD:main", &mv);
-    ck(rc != 0 && !mv && has("degraded gate"), "degraded-main-refused");
+    ck(rc != 0 && !mv && tk_has(out, "degraded gate"), "degraded-main-refused");
     pflag(1);
     rc = push_in("w", "", "HEAD:refs/heads/v0.0.99", &mv);
-    ck(rc != 0 && has("PUSH-FREEZE"), "degraded-push-freeze-refuses-branch");
+    ck(rc != 0 && tk_has(out, "PUSH-FREEZE"), "degraded-push-freeze-refuses-branch");
     pflag(0);
     FMT(c, sizeof c, "grep -q 'degraded=pass' %s/audit.log && grep -q 'degraded=refuse reason=main' %s/audit.log && grep -q 'degraded=refuse reason=push-freeze' %s/audit.log", T, T, T);
     ck(sh(c) == 0, "degraded-audited");
@@ -174,27 +174,27 @@ static void part_feed(void) {
     /* PUSH-FREEZE layered on an unexpired owner row: holder refused */
     freeze_row(now + 3600); pflag(1);
     rc = feed("DEVSVC_OWNER=cc", MAINLINE);
-    ck(rc == 1 && has("PUSH-FREEZE"), "push-freeze-plus-owner-row-refuses-holder");
+    ck(rc == 1 && tk_has(out, "PUSH-FREEZE"), "push-freeze-plus-owner-row-refuses-holder");
     pflag(0);
     rc = feed("DEVSVC_OWNER=cc", MAINLINE);
-    ck(rc == 0 && has("PREPUSH_PASS"), "owner-row-alone-holder-passes(control)");
+    ck(rc == 0 && tk_has(out, "PREPUSH_PASS"), "owner-row-alone-holder-passes(control)");
     /* devsvc lock */
     freeze_row(0); lockrow(now - 5);
     rc = feed("", MAINLINE);
     ck(rc == 0, "expired-devsvc-lock-passes");
     lockrow(now + 600);
     rc = feed("", MAINLINE);
-    ck(rc == 1 && has("devsvc freeze lock owner=cc"), "live-devsvc-lock-refuses(control)");
+    ck(rc == 1 && tk_has(out, "devsvc freeze lock owner=cc"), "live-devsvc-lock-refuses(control)");
     rc = feed("DEVSVC_OWNER=cc", MAINLINE);
     ck(rc == 0, "live-devsvc-lock-holder-passes");
     lockrow(0);
     /* table shape */
     tsv("FX\\tabc\\tcc\\tsoon\\tsrc\\n");
     rc = feed("", MAINLINE);
-    ck(rc == 1 && has("malformed"), "malformed-row-refuses");
+    ck(rc == 1 && tk_has(out, "malformed"), "malformed-row-refuses");
     FMT(b, sizeof b, "FX\\tabc\\tcc\\t%ld\\tsrc\\nBAD\\n", now + 3600); tsv(b);
     rc = feed("DEVSVC_OWNER=cc", MAINLINE);
-    ck(rc == 1 && has("malformed"), "malformed-row-refuses-holder");
+    ck(rc == 1 && tk_has(out, "malformed"), "malformed-row-refuses-holder");
     tsv("");
     rc = feed("", MAINLINE);
     ck(rc == 0, "header-only-passes");
@@ -213,7 +213,7 @@ static void part_feed(void) {
     ck(rc == 0, "empty-stdin-passes");
     /* owner case, devsvc norm_owner */
     rc = feed("DEVSVC_OWNER=CC", MAINLINE);
-    ck(rc == 0 && has("PREPUSH_PASS"), "owner-env-uppercase-passes");
+    ck(rc == 0 && tk_has(out, "PREPUSH_PASS"), "owner-env-uppercase-passes");
     FMT(b, sizeof b, "FX\\tabc\\tCc\\t%ld\\tsrc\\n", now + 3600); tsv(b);
     rc = feed("UNISACC_INTEGRATOR=' cc '", MAINLINE);
     ck(rc == 0, "owner-row-mixed-case-and-trimmed-env-passes");
@@ -223,8 +223,9 @@ static void part_feed(void) {
 }
 
 static void part_mut(int lo, int hi) {
-    char m[9000]; int rc, g;
+    char m[9000], owner[9000]; int rc, g;
     FMT(m, sizeof m, "%s/c/tools/prepush.cx", T);
+    FMT(owner, sizeof owner, "%s/c/tools/dv/ownernorm.cx", T);
     struct { const char *from, *to, *name; int which; } mu[] = {
         {"if (!strcmp(rr, \"refs/heads/main\")) main_hit = 1;", "main_hit = 0;", "no-mainref", 0},
         {"frozen = 1; expired = 1;", "expired = 0;", "expired-as-thaw", 1},
@@ -235,15 +236,18 @@ static void part_mut(int lo, int hi) {
     };
     for (int i = lo; i < hi; i++) {
         char nm[200]; reset();
-        g = mutate(mu[i].from, mu[i].to, m);
+        if (mu[i].which == 5) {
+            g = body_restore();
+            if (!g) g = mutate(OWNER_SRC, mu[i].from, mu[i].to, owner);
+        } else g = mutate(SRC, mu[i].from, mu[i].to, m);
         FMT(nm, sizeof nm, "mutant-%s-generated", mu[i].name); ck(g == 0, nm);
         switch (mu[i].which) {
         case 0: freeze_row(now + 3600); rc = feed("", MAINLINE); rc = rc == 0; break;
         case 1: freeze_row(now - 10); rc = feed("", MAINLINE); rc = rc == 0; break;
         case 2: freeze_row(now + 3600); pflag(1); rc = feed("DEVSVC_OWNER=cc", MAINLINE); rc = rc == 0; break;
-        case 3: lockrow(now - 5); rc = feed("", MAINLINE); rc = rc == 1 && has("PREPUSH_REFUSE"); break;
+        case 3: lockrow(now - 5); rc = feed("", MAINLINE); rc = rc == 1 && tk_has(out, "PREPUSH_REFUSE"); break;
         case 4: tsv("FX\\tabc\\tcc\\tsoon\\tsrc\\n"); rc = feed("", MAINLINE); rc = rc == 0; break;
-        default: freeze_row(now + 3600); rc = feed("DEVSVC_OWNER=CC", MAINLINE); rc = rc == 1 && has("PREPUSH_REFUSE"); break;
+        default: freeze_row(now + 3600); rc = feed("DEVSVC_OWNER=CC", MAINLINE); rc = rc == 1 && tk_has(out, "PREPUSH_REFUSE"); break;
         }
         FMT(nm, sizeof nm, "mutant-%s-is-red", mu[i].name); ck(g == 0 && rc, nm);
     }
@@ -260,15 +264,16 @@ int main(int argc, char **argv) {
     { char *sl = strrchr(RT, '/'); if (sl) *sl = 0; sl = strrchr(RT, '/'); if (sl) *sl = 0; else FMT(RT, sizeof RT, "."); }
     { const char *u = getenv("UNISACC_COM"); if (u && *u) FMT(COM, sizeof COM, "%s", u); else FMT(COM, sizeof COM, "%s/unisacc.com", RT); }
     FMT(HOOK, sizeof HOOK, "%s/tools/hooks/pre-push", RT);
+    FMT(OWNER_SRC, sizeof OWNER_SRC, "%s/tools/dv/ownernorm.cx", RT);
     if (sy_exists(COM) != 1 || sy_exists(HOOK) != 1 || sy_exists(SRC) != 1) { fprintf(stderr, "missing %s or %s or %s\n", COM, HOOK, SRC); return 2; }
     { const char *td = getenv("TMPDIR"); if (sy_mkdtemp(td && *td ? td : "/tmp", "prepush-", T, sizeof T)) { fprintf(stderr, "mkdtemp failed\n"); return 2; } }
     now = sy_wall_s();
     /* c = main work tree: tracked f only; gate body, launcher and package roots untracked */
     FMT(c, sizeof c, "cd %s && mkdir dv && git init -q --bare r.git && git init -q -b main c && cd c && git config user.email t@t && git config user.name t && "
              "git remote add origin ../r.git && echo 0 > f && git add f && git commit -qm init && git push -q origin main && git branch v0.0.99 && "
-             "git worktree add -q ../w v0.0.99 && mkdir -p tools && cp %s tools/prepush.cx && ln -s %s unisacc.com && ln -s %s/tools/cxlib tools/cxlib && "
+             "git worktree add -q ../w v0.0.99 && mkdir -p tools/dv && cp %s tools/prepush.cx && cp %s tools/dv/ownernorm.cx && ln -s %s unisacc.com && { ln -sT %s/tools/cxlib tools/cxlib || exit $?; } && "
              "for x in cx cxroot.tsv ext include src; do [ -e %s/$x ] && ln -s %s/$x $x; done; cd ../w && git config user.email t@t && git config user.name t; true",
-             T, SRC, COM, RT, RT, RT);
+             T, SRC, OWNER_SRC, COM, RT, RT, RT);
     if (sh(c)) { fprintf(stderr, "fixture setup failed: %s\n", out); return 2; }
     int all = !strcmp(part, "all");
     if (all || !strcmp(part, "push")) part_push();

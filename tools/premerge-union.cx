@@ -69,13 +69,34 @@ static int run_sh(const char *cmd, int timeout_s, char **out_p, size_t *n_p) {
     return cx_runv_timeout(v, timeout_s, out_p, n_p);
 }
 
-static int detect_active_branch(const char *repo, char *br, size_t cap) {
+static int detect_active_branch(const char *repo, const char *base_ref, char *br, size_t cap,
+                                char *amb_a, size_t amb_cap, char *amb_b, int *amb_cnt) {
+    char cmd[1024], *o = 0; size_t on = 0;
+    *amb_cnt = 0;
+    amb_a[0] = 0;
+    amb_b[0] = 0;
+    if (!cx_fmt(cmd, sizeof cmd, "git -C '%s' rev-parse --abbrev-ref HEAD 2>/dev/null", repo) &&
+        run_sh(cmd, 10, &o, &on) == 0 && o) {
+        char cur[64];
+        size_t cp = on < sizeof cur - 1 ? on : sizeof cur - 1;
+        mm_copy(cur, sizeof cur, o, cp); cur[cp] = 0;
+        trim_nl(cur);
+        mm_free(o); o = 0;
+        if (cur[0] && !streq(cur, "HEAD") && !streq(cur, "main") && (!base_ref || !streq(cur, base_ref))) {
+            cx_fmt(br, cap, "%s", cur);
+            return 0;
+        }
+    } else if (o) {
+        mm_free(o); o = 0;
+    }
+
     char p[1024]; size_t n = 0;
     if (cx_fmt(p, sizeof p, "%s/build/version-seq.tsv", repo)) return 1;
     char *b = (char *)cx_read(p, &n);
     if (!b) return 1;
     long at = 0;
-    int found = 0;
+    int ncand = 0;
+    char first[64] = {0}, second[64] = {0};
     while (at < (long)n) {
         long e = tx_chr(b + at, (long)n - at, '\n');
         long ln = e < 0 ? (long)n - at : e;
@@ -85,21 +106,39 @@ static int detect_active_branch(const char *repo, char *br, size_t cap) {
             long t1 = tx_chr(l, ln, '\t');
             if (t1 > 0 && t1 + 1 < ln) {
                 const char *v = l + t1 + 1;
-                long rem = ln - t1 - 1;
-                long t2 = tx_chr(v, rem, '\t');
-                if (t2 > 0 && starts_with(v, "0.0.")) {
-                    /* check if state is NOT 已公开 (\xe5\xb7\xb2\xe5\x85\xac\xe5\xbc\x80) */
-                    if (tx_find(l, ln, "\xe5\xb7\xb2\xe5\x85\xac\xe5\xbc\x80", 9) < 0) {
-                        char cand[64], cmd[1024], *o = 0; size_t on = 0;
-                        if (!cx_fmt(cand, sizeof cand, "v%.*s", (int)t2, v) &&
-                            !cx_fmt(cmd, sizeof cmd, "git -C '%s' rev-parse --verify '%s^{commit}' >/dev/null 2>&1", repo, cand) &&
-                            run_sh(cmd, 10, &o, &on) == 0) {
-                            cx_fmt(br, cap, "%s", cand);
-                            found = 1;
-                            if (o) mm_free(o);
-                            break;
+                long rem1 = ln - t1 - 1;
+                long t2 = tx_chr(v, rem1, '\t');
+                if (t2 > 0 && starts_with(v, "0.0.") && t2 + 1 < rem1) {
+                    const char *c2 = v + t2 + 1;
+                    long rem2 = rem1 - t2 - 1;
+                    long t3 = tx_chr(c2, rem2, '\t');
+                    if (t3 >= 0 && t3 + 1 < rem2) {
+                        const char *st = c2 + t3 + 1;
+                        long rem3 = rem2 - t3 - 1;
+                        long t4 = tx_chr(st, rem3, '\t');
+                        long st_len = t4 < 0 ? rem3 : t4;
+                        /* check ONLY col 4 (state) does not contain 已公开 (\xe5\xb7\xb2\xe5\x85\xac\xe5\xbc\x80) */
+                        if (tx_find(st, st_len, "\xe5\xb7\xb2\xe5\x85\xac\xe5\xbc\x80", 9) < 0) {
+                            char cand[64];
+                            if (!cx_fmt(cand, sizeof cand, "v%.*s", (int)t2, v) &&
+                                !streq(cand, first) && !streq(cand, second)) {
+                                int has_br = (!cx_fmt(cmd, sizeof cmd,
+                                    "git -C '%s' rev-parse --verify 'refs/heads/%s^{commit}' >/dev/null 2>&1",
+                                    repo, cand) && run_sh(cmd, 10, &o, &on) == 0);
+                                if (o) { mm_free(o); o = 0; }
+                                if (has_br) {
+                                    int is_anc = (!cx_fmt(cmd, sizeof cmd,
+                                        "git -C '%s' merge-base --is-ancestor 'refs/heads/%s^{commit}' '%s^{commit}' >/dev/null 2>&1",
+                                        repo, cand, base_ref ? base_ref : "main") && run_sh(cmd, 10, &o, &on) == 0);
+                                    if (o) { mm_free(o); o = 0; }
+                                    if (!is_anc) {
+                                        if (ncand == 0) cx_fmt(first, sizeof first, "%s", cand);
+                                        else if (ncand == 1) cx_fmt(second, sizeof second, "%s", cand);
+                                        ncand++;
+                                    }
+                                }
+                            }
                         }
-                        if (o) mm_free(o);
                     }
                 }
             }
@@ -107,7 +146,17 @@ static int detect_active_branch(const char *repo, char *br, size_t cap) {
         at += (e < 0 ? (long)n - at : e + 1);
     }
     mm_free(b);
-    return found ? 0 : 1;
+    if (ncand >= 2) {
+        cx_fmt(amb_a, amb_cap, "%s", first);
+        cx_fmt(amb_b, amb_cap, "%s", second);
+        *amb_cnt = ncand;
+        return 2;
+    }
+    if (ncand == 1) {
+        cx_fmt(br, cap, "%s", first);
+        return 0;
+    }
+    return 1;
 }
 
 static int load_diff_list(const char *repo, const char *a, const char *b, char arr[MAX_CHG][320], int *cnt) {
@@ -431,7 +480,14 @@ int main(int argc, char **argv) {
         return 2;
     }
     if (!br_ref || !br_ref[0]) {
-        if (detect_active_branch(repo, auto_br, sizeof auto_br) == 0) br_ref = auto_br;
+        char amb_a[64], amb_b[64]; int amb_cnt = 0;
+        int drc = detect_active_branch(repo, base_ref, auto_br, sizeof auto_br, amb_a, sizeof amb_a, amb_b, &amb_cnt);
+        if (drc == 2) {
+            sy_printf("PREMERGE_REFUSE\treason=ambiguous-active-branches\tfirst=%s\tsecond=%s\tcount=%d\thint=pass --branch REF\n",
+                      amb_a, amb_b, amb_cnt);
+            return 2;
+        }
+        if (drc == 0) br_ref = auto_br;
         else br_ref = "HEAD";
     }
 
@@ -471,7 +527,7 @@ int main(int argc, char **argv) {
         }
     } else {
         char def_dir[1024];
-        if (cx_fmt(def_dir, sizeof def_dir, "%s/unisacc-premerge-union", sy_tmpdir()) ||
+        if (cx_fmt(def_dir, sizeof def_dir, "%s/unisacc-premerge-union-%.10s-%.10s", sy_tmpdir(), base_sha, br_sha) ||
             sy_mkdir_all(def_dir, 0700) < 0 ||
             sy_realpath(def_dir, dir, sizeof dir) < 0) {
             sy_eprintf("premerge-union: cannot create default union dir\n");

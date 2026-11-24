@@ -1,0 +1,70 @@
+/* check-forward-limit-table.cx -- FORWARD_CALL_MAX off-by-one at the TABLE level (seconds, no build).
+ * Reads exec/parse2/forward-result.tsv and asserts the $b3 dispatch (result of CMPI fw_count,8192):
+ * observation 1 (equal) and 2 (greater) both target FW.full (reject); observation 0 (below) -> FW.capture.
+ * Mutating the '1-2' observation back to '2' drops 1 to the '*' fallback (FW.capture): red.
+ * Product-level 8193 is unreachable (signature pool ~8064) -- see coverage interfaces.forward-count.
+ *   sh ./unisacc.com tests/check-forward-limit-table.cx --
+ * 末行 CHECK_FORWARD_LIMIT_TABLE ok=N failed=M。 */
+#pragma unisa use sys.fs
+#pragma unisa use text.text
+#pragma unisa use mem.heap
+
+static int checks, failed;
+static void ck(int yes, const char *name) { checks++; if (!yes) failed++; printf("%s\tcheck-forward-limit-table.%s\n", yes ? "PASS" : "FAIL", name); }
+
+static int fld_eq(const char *p, long n, const char *lit, long ln) { return n == ln && tx_same(p, n, lit, ln); }
+/* classify a target field: 1 = FW.full, 2 = FW.capture, 0 = other */
+static int tclass(const char *p, long n) { if (fld_eq(p, n, "FW.full", 7)) return 1; if (fld_eq(p, n, "FW.capture", 10)) return 2; return 0; }
+/* does comma list OBS (length N) cover value V explicitly (not '*')? */
+static int covers(const char *s, long n, int v) {
+    long at = 0;
+    while (at < n) {
+        long e = at;
+        int lo = 0, hi = 0, neg = 0; long q;
+        while (e < n && s[e] != ',') e++;
+        if (e > at && s[at] != '*') {
+            q = at;
+            if (s[q] == '-') { neg = 1; q++; }
+            while (q < e && s[q] >= '0' && s[q] <= '9') { lo = lo * 10 + (s[q] - '0'); q++; }
+            if (neg) lo = -lo;
+            hi = lo;
+            if (q < e && s[q] == '-') { q++; neg = 0; hi = 0; if (q < e && s[q] == '-') { neg = 1; q++; } while (q < e && s[q] >= '0' && s[q] <= '9') { hi = hi * 10 + (s[q] - '0'); q++; } if (neg) hi = -hi; }
+            if (lo <= v && v <= hi) return 1;
+        }
+        at = e + 1;
+    }
+    return 0;
+}
+
+int main(int argc, char **argv) {
+    size_t n = 0;
+    char *b = (char *)cx_read("exec/parse2/forward-result.tsv", &n);
+    long at = 0;
+    int e1 = -1, e2 = -1, e0 = -1, starcode = -1;
+    (void)argc; (void)argv;
+    if (!b) { printf("FAIL\tcheck-forward-limit-table.read\nCHECK_FORWARD_LIMIT_TABLE\tok=0\tfailed=1\n"); return 1; }
+    while (at < (long)n) {
+        long e = at, q, s;
+        const char *f[5]; long fl[5]; int nf = 0, c;
+        while (e < (long)n && b[e] != '\n') e++;
+        if (e > at && b[at] != '#') {
+            q = at;
+            while (q <= e && nf < 5) { s = q; while (q < e && b[q] != '\t') q++; f[nf] = b + s; fl[nf] = q - s; nf++; q++; }
+            if (nf >= 4 && fl[1] == 3 && tx_same(f[1], 3, "$b3", 3)) {
+                c = tclass(f[3], fl[3]);
+                if (fl[2] == 1 && f[2][0] == '*') starcode = c;
+                else {
+                    if (covers(f[2], fl[2], 1)) e1 = c;
+                    if (covers(f[2], fl[2], 2)) e2 = c;
+                    if (covers(f[2], fl[2], 0)) e0 = c;
+                }
+            }
+        }
+        at = e + 1;
+    }
+    { int v1 = e1 >= 0 ? e1 : starcode, v2 = e2 >= 0 ? e2 : starcode, v0 = e0 >= 0 ? e0 : starcode;
+      ck(v1 == 1, "obs-1-to-FW.full"); ck(v2 == 1, "obs-2-to-FW.full"); ck(v0 == 2, "obs-0-to-FW.capture"); }
+    mm_free(b);
+    printf("CHECK_FORWARD_LIMIT_TABLE\tok=%d\tfailed=%d\n", checks - failed, failed);
+    return failed ? 1 : 0;
+}

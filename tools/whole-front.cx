@@ -201,7 +201,13 @@ static void verify_merge(const char *target,const char *phase,np_buf *identity){
 }
 static void stub_result(const char *dest,np_buf *r){
  char p[4400],h[65];const char *files[]={"stub.c","replay.phase","stub-path.txt"};for(int i=0;i<3;i++){path(p,dest,files[i]);long n=digest(p,h);if(n<=0)die("empty stub product");add(r,files[i],h);}
- path(p,dest,"stub-path.txt");size_t n;char *text=load(p,&n);if(!n||n>=4400||memchr(text,0,n)||memchr(text,'\n',n)||memchr(text,'\r',n))die("stub path text");char source[4400];if(mm_copy(source,sizeof source,text,(long)n))die("stub path bound");source[n]=0;free(text);if(source[0]!='/')die("absolute stub path required");char actual[65],copy[65];digest(source,actual);path(p,dest,"stub.c");digest(p,copy);if(strcmp(actual,copy))die("real stub differs from copied stub");add(r,"real_stub_sha",actual);dir_identity(dest,r,"output_dev_ino");
+ path(p,dest,"stub-path.txt");size_t n;char *text=load(p,&n);if(!n||n>=4400||memchr(text,0,n)||memchr(text,'\n',n)||memchr(text,'\r',n))die("stub path text");char source[4400];if(mm_copy(source,sizeof source,text,(long)n))die("stub path bound");source[n]=0;free(text);
+ char legacy[4400];path(legacy,tmpdir,"unisacc-forward-entry.c");path(p,dest,"replay.phase.forward.c");
+ if(!strcmp(source,p)){
+  path(p,dest,"replay.phase.forward.receipt");if(digest(p,h)<=0)die("empty forwarding receipt");add(r,"forward_receipt_sha",h);
+  path(p,dest,"replay.phase.sha256");if(digest(p,h)!=65)die("invalid replay checkpoint checksum");add(r,"replay_checkpoint_receipt_sha",h);
+ }else if(strcmp(source,legacy))die("unexpected forwarding stub path");
+ char actual[65],copy[65];digest(source,actual);path(p,dest,"stub.c");digest(p,copy);if(strcmp(actual,copy))die("real stub differs from copied stub");add(r,"real_stub_sha",actual);dir_identity(dest,r,"output_dev_ino");
 }
 static int stub_phase(int argc,char **argv){
  if((argc!=6&&argc!=7)||(argc==7&&strcmp(argv[6],"--resume"))||!*argv[3]||strlen(argv[3])>64||strpbrk(argv[3],"\t\r\n"))die("usage: stub PREPARED_DIR TARGET PHASE NEW_OUT [--resume]");int resume=argc==7;long long start=phase_now();physical(argv[2],prepared);char phase[4400],dest[4400];physical(argv[4],phase);new_name(argv[5],dest);phase_control(dest,resume);np_buf before={0},merge_before={0},merge_after={0},r={0};inputs(&before);verify_merge(argv[3],phase,&merge_before);char h[65];digest(phase,h);add(&merge_before,"phase_sha",h);
@@ -213,7 +219,8 @@ static void image_stub(const char *target,const char *phase,const char *stub,np_
  char p[4400],h[65],after[65];
  if(cx_fmt(p,sizeof p,"%s.control/ready.tsv",stub))die("stub ready path");digest(p,h);add(id,"prev_ready_sha",h);
  char *v[]={"whole-front","stub",prepared,(char *)target,(char *)phase,(char *)stub,"--resume",0};resume_call(stub_phase,7,v);digest(p,after);if(strcmp(h,after))die("stub receipt changed");
- path(p,stub,"stub-path.txt");size_t n;char *s=load(p,&n);char actual[4400];path(actual,tmpdir,"unisacc-forward-entry.c");if(n!=strlen(actual)||memcmp(s,actual,n))die("dv_fwd_file path differs from prepared TMPDIR");free(s);
+ path(p,stub,"stub-path.txt");size_t n;char *s=load(p,&n);char actual[4400];
+ if(!n||n>=sizeof actual||tx_copy(actual,sizeof actual,s,n))die("forwarding stub path bound");free(s);
  char a[65],b[65];digest(actual,a);path(p,stub,"stub.c");digest(p,b);if(strcmp(a,b))die("dv_fwd_file bytes differ from stub.c");add(id,"real_stub_sha",a);add(id,"real_stub_path",actual);digest(phase,h);add(id,"phase_sha",h);dir_identity(stub,id,"stub_dev_ino");
 }
 static void image_file(const char *dir,const char *name,np_buf *r){char p[4400],h[65],key[128];path(p,dir,name);long n=digest(p,h);if(cx_fmt(key,sizeof key,"%s_sha",name))die("image key bound");add(r,key,h);if(cx_fmt(key,sizeof key,"%s_bytes",name))die("image key bound");addnum(r,key,n);}
@@ -241,7 +248,17 @@ static int image_phase(int argc,char **argv){
  char p[4400],image[4400],slice[128];if(cx_fmt(slice,sizeof slice,"slice-%s",argv[3]))die("slice name bound");for(char *s=slice;*s;s++)if(*s=='/')*s='-';path(image,dest,"image");
  if(verify||resume){path(p,dest,"INPUT");size_t n;char *s=load(p,&n);if(n!=manifest.n||memcmp(s,manifest.p,n))die("image INPUT changed");free(s);}else{
   if(mkdir(dest,0700))die("exclusive image NEW_OUT");char evidence[4400];if(tx_copy(evidence,sizeof evidence,out,(long)strlen(out)))die("text copy bound");if(tx_copy(out,sizeof out,dest,(long)strlen(dest)))die("text copy bound");save("INPUT",manifest.p,manifest.n);
-  if(setenv("TMPDIR",tmpdir,1)||ec_setenv("UNISA_CONTAINER", pkg, 1)||setenv("UNISACC_PHASE","B",1)||setenv("UNISACC_PHASE_IN",phase,1)||unsetenv("UNISACC_PHASE_OUT"))die("image environment");
+  char replay[4400], forward_receipt[4400], image_tmp[4400];
+  path(forward_receipt,stub,"replay.phase.forward.receipt");
+  int phased=sy_exists(forward_receipt);if(phased<0)die("forwarding receipt access");
+  if(phased){
+   path(replay,stub,"replay.phase");
+   path(image_tmp,dest,"forward-tmp");if(sy_mkdir(image_tmp,0700))die("private image TMPDIR");
+   path(p,stub,"stub.c");size_t n;char *bytes=load(p,&n);
+   path(p,image_tmp,"unisacc-forward-entry.c");if(sy_write_atomic(p,bytes,n,0600))die("legacy forwarding bridge");
+   free(bytes);
+  }
+  if(setenv("TMPDIR",phased?image_tmp:tmpdir,1)||ec_setenv("UNISA_CONTAINER", pkg, 1)||setenv("UNISACC_PHASE","B",1)||setenv("UNISACC_PHASE_IN",phased?replay:phase,1)||unsetenv("UNISACC_PHASE_OUT"))die("image environment");
   char *v[128+6],log[4400];int k=0;v[k++]=ctor;v[k++]="-o";v[k++]=image;v[k++]="-b";v[k++]=argv[3];for(int i=0;i<cf_root_count();i++)v[k++]=root_args[i];v[k]=0;epoch_clear();long long t=phase_now();run(v,root,log);long long ns=phase_now()-t;epoch_clear();
   size_t n;char *s=load(log,&n);save("stdout",s,n);free(s);char err[64];if(cx_fmt(err,sizeof err,"child-%d.stderr",serial-1))die("image stderr name");path(p,dest,err);s=load(p,&n);save("stderr",s,n);free(s);np_buf timing={0};np_putll(&timing,ns);np_puts(&timing,"\n");save("construct_ns",timing.p,timing.n);free(timing.p);
   /* PKG already contains its footer: append unchanged, exactly once. */

@@ -1,0 +1,359 @@
+#pragma unisa module pinscan
+/* text/pinscan: does a translation unit's output depend on its source path spelling?
+   The product run cache uses this rule through cx/runtime/rcident.cx.
+   A unit whose expansion can produce __FILE__ must be pinned (keyed by its raw path).
+   Pure cx, no libc, no other module: both layers may use it without an upward import.
+   Ownership: the caller owns every buffer; nothing is retained; no state between calls.
+
+   Interface
+     pin_scan_text(buf, len)     mask of one file's bytes (source, header, forced include)
+     pin_scan_define(arg)        mask of one -D definition: "-DNAME=VAL", "-DNAME", or the
+                                 bare "NAME=VAL" that follows a separate "-D"
+     pin_scan_argv(argc, argv)   OR of pin_scan_define over every -D form, plus REAL for any
+                                 argument holding the byte run __FILE__
+     pin_decide(mask_or)         1 pin, 0 no pin, for the OR of every mask of the unit
+     pin_rule_version()          PIN_RULE_VERSION; put it in every memo that stores a mask
+
+   Mask bits
+     PIN_REAL  1  code holds the byte run __FILE__ (inside a longer identifier too)
+     PIN_FRAG  2  code holds an identifier run that may be one operand of a paste yielding
+                  __FILE__: a substring of it, or a run ending with a proper prefix or
+                  starting with a proper suffix of it
+     PIN_PASTE 4  code holds a paste (## or %:%:) that could yield __FILE__: one outside a
+                  recognised #define body, at either end of a body or next to another paste,
+                  or a chain t0 ## .. ## tk whose t0 is a parameter or proper prefix and whose
+                  tk is a parameter or proper suffix (v##LL, v##U, a_##n##_hi stay harmless)
+   pin = REAL, or FRAG and PASTE, over the OR of all files and definitions of the unit
+   (the paste and its operands may sit in different files, or on the command line).
+
+   Every ambiguity resolves towards code: splices are removed first (LF and CRLF); a quote
+   after a digit run continues the number; an unclosed literal pins at newline or EOF; no raw
+   strings; identifiers never absorb '$' or bytes >= 0x80; %: at line start is '#';
+   <...> after #include / %:include is a header name; a block comment still open at end
+   of file pins (it may have swallowed real code after a mis-synchronisation).
+   A missed pin lets a cached image carry another directory's path; an extra pin only
+   costs a recompile. */
+
+#define PIN_REAL 1
+#define PIN_FRAG 2
+#define PIN_PASTE 4
+#define PIN_RULE_VERSION "pinscan-3"
+
+const char *pin_rule_version(void) {
+    return PIN_RULE_VERSION;
+}
+
+static int pin_same(const char *a, long an, const char *b, long bn) {
+    long i;
+    if (an != bn) return 0;
+    for (i = 0; i < an; i++)
+        if (a[i] != b[i]) return 0;
+    return 1;
+}
+
+static void pin_copy(char *d, const char *s, long k) {
+    long i;
+    for (i = 0; i < k; i++) d[i] = s[i];
+}
+
+static long pin_sk(const char *b, long n, long i) {
+    while (i < n && b[i] == '\\') {
+        if (i + 1 < n && b[i + 1] == '\n') i = i + 2;
+        else if (i + 2 < n && b[i + 1] == '\r' && b[i + 2] == '\n') i = i + 3;
+        else break;
+    }
+    return i;
+}
+
+static int pin_idc(char c) {
+    return (c >= 'a' && c <= 'z') || (c >= 'A' && c <= 'Z') || (c >= '0' && c <= '9') || c == '_';
+}
+
+static int pin_run_mask(const char *r, long k) {
+    static const char w[9] = "__FILE__";
+    long s;
+    long j;
+    if (k <= 0) return 0;
+    for (s = 0; s + 8 <= k; s++)
+        if (pin_same(r + s, 8, w, 8)) return PIN_REAL;
+    if (k < 8)
+        for (s = 0; s + k <= 8; s++)
+            if (pin_same(r, k, w + s, k)) return PIN_FRAG;
+    for (j = 1; j < 8; j++) {
+        if (j <= k && pin_same(r + k - j, j, w, j)) return PIN_FRAG;
+        if (j <= k && pin_same(r, j, w + 8 - j, j)) return PIN_FRAG;
+    }
+    return 0;
+}
+
+/* define-body state for the paste rule */
+typedef struct {
+    int ds;          /* 0 none, 1 after # define, 2 name seen, 3 in the parameter list, 4 in the body */
+    int np;          /* parameters recorded; -1: overflow, every identifier counts as one */
+    char pv[32][64];
+    int pl[32];
+    int npaste;      /* pastes in the open chain */
+    int cfirst;      /* 1: the first operand of the open chain may start __FILE__ */
+    int pend;        /* 1: a paste waits for its right operand */
+    int lk;          /* previous body token: 0 none, 1 identifier, 2 other */
+    char lt[64];
+    long ll;
+} pin_def_t;
+
+static int pin_is_param(const pin_def_t *s, const char *r, long k) {
+    int j;
+    if (s->np < 0) return 1;
+    for (j = 0; j < s->np; j++)
+        if (pin_same(s->pv[j], (long)s->pl[j], r, k)) return 1;
+    return 0;
+}
+
+static int pin_operand(const pin_def_t *s, const char *r, long k, int side) {
+    static const char w[9] = "__FILE__";
+    if (k <= 0 || k > 63) return k > 63;
+    if (pin_is_param(s, r, k)) return 1;
+    if (k >= 8) return 0;
+    return side == 0 ? pin_same(r, k, w, k) : pin_same(r, k, w + 8 - k, k);
+}
+
+static void pin_chain_end(pin_def_t *s, int *m) {
+    if (s->npaste && s->cfirst && s->lk == 1 && pin_operand(s, s->lt, s->ll, 1)) *m = *m | PIN_PASTE;
+    s->npaste = 0;
+}
+
+/* one token: KIND 1 identifier (R/K), 2 other, 3 paste */
+static void pin_body_tok(pin_def_t *s, int *m, int kind, const char *r, long k) {
+    if (s->ds != 4) {
+        if (kind == 3) *m = *m | PIN_PASTE;
+        return;
+    }
+    if (kind == 3) {
+        if (s->pend || s->lk == 0) *m = *m | PIN_PASTE;
+        else if (!s->npaste) s->cfirst = s->lk == 1 && pin_operand(s, s->lt, s->ll, 0);
+        s->npaste = s->npaste + 1;
+        s->pend = 1;
+        return;
+    }
+    if (s->pend) s->pend = 0;
+    else if (s->npaste) pin_chain_end(s, m);
+    s->lk = kind;
+    s->ll = kind == 1 && k <= 63 ? k : 64;
+    if (kind == 1 && k <= 63) pin_copy(s->lt, r, k);
+}
+
+static void pin_def_eol(pin_def_t *s, int *m) {
+    if (s->ds == 4 && s->pend) *m = *m | PIN_PASTE;
+    else if (s->ds == 4 && s->npaste) pin_chain_end(s, m);
+    s->ds = 0;
+    s->np = 0;
+    s->npaste = 0;
+    s->cfirst = 0;
+    s->pend = 0;
+    s->lk = 0;
+}
+
+static void pin_add_param(pin_def_t *s, const char *r, long k) {
+    if (s->np < 0) return;
+    if (s->np >= 32 || k > 63) { s->np = -1; return; }
+    pin_copy(s->pv[s->np], r, k);
+    s->pl[s->np] = (int)k;
+    s->np = s->np + 1;
+}
+
+int pin_scan_text(const char *b, long n) {
+    char run[512];
+    pin_def_t s;
+    long k;
+    long i;
+    long t;
+    int m;
+    int bol;
+    int hdr;
+    char c;
+    char d;
+    char q;
+    if (!b || n <= 0) return 0;
+    m = 0;
+    bol = 1;
+    hdr = 0;
+    s.ds = 0;
+    pin_def_eol(&s, &m);
+    i = pin_sk(b, n, 0);
+    while (i < n) {
+        c = b[i];
+        t = pin_sk(b, n, i + 1);
+        d = t < n ? b[t] : 0;
+        if (c == '\n') {
+            pin_def_eol(&s, &m);
+            bol = 1;
+            hdr = 0;
+            i = t;
+            continue;
+        }
+        if (c == '/' && d == '/') {
+            i = t;
+            while (i < n && b[i] != '\n') i = pin_sk(b, n, i + 1);
+            continue;
+        }
+        if (c == '/' && d == '*') {
+            int closed = 0;
+            i = pin_sk(b, n, t + 1);
+            while (i < n) {
+                t = pin_sk(b, n, i + 1);
+                if (b[i] == '*' && t < n && b[t] == '/') { i = pin_sk(b, n, t + 1); closed = 1; break; }
+                i = t;
+            }
+            if (!closed) { m = m | PIN_REAL; break; }   /* open to end of file: pin */
+            continue;
+        }
+        if (hdr == 2 && c == '<') {
+            i = t;
+            while (i < n && b[i] != '>' && b[i] != '\n') i = pin_sk(b, n, i + 1);
+            if (i < n && b[i] == '>') i = pin_sk(b, n, i + 1);
+            hdr = 0;
+            continue;
+        }
+        if (c == '"' || c == '\'') {
+            int closed = 0;
+            q = c;
+            i = t;
+            while (i < n && b[i] != '\n') {
+                if (b[i] == q) { i = pin_sk(b, n, i + 1); closed = 1; break; }
+                if (b[i] == '\\') {
+                    i = pin_sk(b, n, i + 1);
+                    if (i < n && b[i] != '\n') i = pin_sk(b, n, i + 1);
+                    continue;
+                }
+                i = pin_sk(b, n, i + 1);
+            }
+            if (!closed) m = m | PIN_REAL;
+            bol = 0;
+            hdr = 0;
+            if (s.ds == 2) s.ds = 4;
+            pin_body_tok(&s, &m, 2, 0, 0);
+            continue;
+        }
+        if (pin_idc(c)) {
+            k = 0;
+            while (i < n && (pin_idc(b[i]) || (b[i] == '\'' && k > 0 && run[0] >= '0' && run[0] <= '9'))) {
+                if (k < 512) run[k] = b[i];
+                k = k + 1;
+                i = pin_sk(b, n, i + 1);
+            }
+            if (k > 512) {
+                m = m | PIN_REAL | PIN_FRAG;
+                k = 512;
+            } else m = m | pin_run_mask(run, k);
+            if (hdr == 1 && k == 6 && pin_same(run, 6, "define", 6)) s.ds = 1;
+            else if (s.ds == 1) s.ds = 2;
+            else if (s.ds == 2) { s.ds = 4; pin_body_tok(&s, &m, 1, run, k); }
+            else if (s.ds == 3) pin_add_param(&s, run, k);
+            else pin_body_tok(&s, &m, 1, run, k);
+            if (hdr == 1 && ((k == 7 && pin_same(run, 7, "include", 7)) || (k == 12 && pin_same(run, 12, "include_next", 12)) || (k == 6 && pin_same(run, 6, "import", 6)))) hdr = 2;
+            else hdr = 0;
+            bol = 0;
+            continue;
+        }
+        if (c == ' ' || c == '\t' || c == '\r' || c == '\f' || c == '\v') {
+            i = t;
+            continue;
+        }
+        if (c == '#' && d == '#') {
+            pin_body_tok(&s, &m, 3, 0, 0);
+            bol = 0;
+            hdr = 0;
+            i = pin_sk(b, n, t + 1);
+            continue;
+        }
+        if (c == '%' && d == ':') {
+            long u = pin_sk(b, n, t + 1);
+            if (u < n && b[u] == '%' && pin_sk(b, n, u + 1) < n && b[pin_sk(b, n, u + 1)] == ':') {
+                pin_body_tok(&s, &m, 3, 0, 0);
+                bol = 0;
+                hdr = 0;
+                i = pin_sk(b, n, pin_sk(b, n, u + 1) + 1);
+                continue;
+            }
+            if (bol) {               /* %: at line start is the digraph of '#' */
+                hdr = 1;
+                bol = 0;
+                i = u;
+                continue;
+            }
+        }
+        if (c == '#' && bol) {
+            hdr = 1;
+            bol = 0;
+            i = t;
+            continue;
+        }
+        if (s.ds == 2) s.ds = c == '(' ? 3 : 4;
+        else if (s.ds == 3) {
+            if (c == ')') s.ds = 4;
+            else if (c == '.') pin_add_param(&s, "__VA_ARGS__", 11);
+        } else if (s.ds == 1) s.ds = 0;
+        else if (s.ds == 4 || s.ds == 0) pin_body_tok(&s, &m, 2, 0, 0);
+        bol = 0;
+        hdr = 0;
+        i = t;
+    }
+    pin_def_eol(&s, &m);
+    return m;
+}
+
+static long pin_zlen(const char *s) {
+    long n = 0;
+    while (s[n]) n++;
+    return n;
+}
+
+/* One -D definition as a virtual file "#define NAME VAL\n" ("1" when there is no '=').
+   ARG is "-DNAME[=VAL]" or the bare "NAME[=VAL]" that follows a separate "-D". */
+int pin_scan_define(const char *arg) {
+    char buf[4200];
+    long n, at, eq, i;
+    int m;
+    if (!arg) return 0;
+    n = pin_zlen(arg);
+    m = 0;
+    for (i = 0; i + 8 <= n; i++)
+        if (pin_same(arg + i, 8, "__FILE__", 8)) m = m | PIN_REAL;
+    if (n >= 2 && arg[0] == '-' && arg[1] == 'D') { arg = arg + 2; n = n - 2; }
+    if (n <= 0) return m;
+    if (n > 4096) return m | PIN_REAL | PIN_FRAG | PIN_PASTE;
+    pin_copy(buf, "#define ", 8);
+    at = 8;
+    eq = -1;
+    for (i = 0; i < n; i++)
+        if (arg[i] == '=') { eq = i; break; }
+    if (eq < 0) {
+        pin_copy(buf + at, arg, n); at = at + n;
+        pin_copy(buf + at, " 1", 2); at = at + 2;
+    } else {
+        pin_copy(buf + at, arg, eq); at = at + eq;
+        buf[at++] = ' ';
+        pin_copy(buf + at, arg + eq + 1, n - eq - 1); at = at + n - eq - 1;
+    }
+    buf[at++] = '\n';
+    return m | pin_scan_text(buf, at);
+}
+
+int pin_scan_argv(int argc, char **argv) {
+    int i, m = 0;
+    long k, j;
+    for (i = 0; i < argc; i++) {
+        const char *a = argv[i];
+        if (!a) continue;
+        k = pin_zlen(a);
+        for (j = 0; j + 8 <= k; j++)
+            if (pin_same(a + j, 8, "__FILE__", 8)) m = m | PIN_REAL;
+        if (k == 2 && a[0] == '-' && a[1] == 'D') {
+            if (i + 1 < argc) { m = m | pin_scan_define(argv[i + 1]); i++; }
+        } else if (k > 2 && a[0] == '-' && a[1] == 'D') m = m | pin_scan_define(a);
+    }
+    return m;
+}
+
+int pin_decide(int m) {
+    return (m & PIN_REAL) || ((m & PIN_FRAG) && (m & PIN_PASTE)) ? 1 : 0;
+}

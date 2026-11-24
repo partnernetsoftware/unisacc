@@ -430,6 +430,49 @@ int main(void) {
            "mutation-base-has-the-path-then-missing-in-branch-fails");
     }
 
+    /* Active branch detection: prefer checked-out non-main branch; on main check col 4 (state) only and refuse multiple active branches */
+    {
+        char abrepo[600], abdir[600];
+        cx_fmt(abrepo, sizeof abrepo, "%s/ab-repo", tmpd);
+        cx_fmt(abdir, sizeof abdir, "%s/ab-union", tmpd);
+        (void)sy_mkdir_all(abrepo, 0755);
+        put_file(abrepo, "unisacc.com", STUB_UC, 0755);
+        put_file(abrepo, "tools/bound", STUB_BOUND, 0755);
+        put_file(abrepo, "build/version-seq.tsv",
+                 "# slot\tversion\tclass\tstate\tnote\n"
+                 "1\t0.0.105\tL0\t已公开\tdone\n"
+                 "2\t0.0.108\tL0\t建议\tinterference-branch\n"
+                 "3\t0.0.106\tL0\t建议\t前置 0.0.105 已公开\n", 0644);
+        put_file(abrepo, "build/iface-hash.tsv", "pkg\tsha\ncx.sys\t1111\n", 0644);
+        cx_fmt(cmd, sizeof cmd,
+               "cd '%s' && git init -q -b main && git config user.email t@t && git config user.name t && "
+               "git add -A && git commit -qm base && "
+               "git checkout -q -b v0.0.108 && printf 'premerge-union-synthetic-drift\\n' >> build/iface-hash.tsv && "
+               "git add -A && git commit -qm bad108 && "
+               "git checkout -q -b v0.0.106 main && printf 'ok106\\n' > branch106.txt && "
+               "git add -A && git commit -qm ok106",
+               abrepo);
+        rc = run_sh(cmd, 15, out, sizeof out);
+        ck(rc == 0, "active-branch-fixture-init");
+        /* 1. Checked out on v0.0.106 without --branch: uses checked-out branch, not earlier v0.0.108 */
+        cx_fmt(cmd, sizeof cmd, "sh ./unisacc.com tools/premerge-union.cx -- --repo '%s' --base main --dir '%s-1' --shard all", abrepo, abdir);
+        rc = run_sh(cmd, 25, out, sizeof out);
+        ck(rc == 0 && has(out, "PREMERGE_UNION_SUMMARY\tverdict=PASS"), "no-branch-flag-prefers-checked-out-branch");
+        /* 2. Checked out on main without --branch with two active branches: refuses with both names rc=2 */
+        cx_fmt(cmd, sizeof cmd, "git -C '%s' checkout -q main", abrepo);
+        (void)run_sh(cmd, 10, out, sizeof out);
+        cx_fmt(cmd, sizeof cmd, "sh ./unisacc.com tools/premerge-union.cx -- --repo '%s' --base main --dir '%s-2' --shard prep 2>&1", abrepo, abdir);
+        rc = run_sh(cmd, 25, out, sizeof out);
+        ck(rc == 2 && has(out, "PREMERGE_REFUSE") && has(out, "ambiguous-active-branches") &&
+           has(out, "v0.0.108") && has(out, "v0.0.106"), "no-branch-flag-on-main-refuses-multiple-active-branches-rc2");
+        /* 3. After removing v0.0.108, only v0.0.106 remains (note mentions 已公开, state is 建议): selects v0.0.106 and passes */
+        cx_fmt(cmd, sizeof cmd, "git -C '%s' branch -D v0.0.108 >/dev/null 2>&1", abrepo);
+        (void)run_sh(cmd, 10, out, sizeof out);
+        cx_fmt(cmd, sizeof cmd, "sh ./unisacc.com tools/premerge-union.cx -- --repo '%s' --base main --dir '%s-3' --shard all", abrepo, abdir);
+        rc = run_sh(cmd, 25, out, sizeof out);
+        ck(rc == 0 && has(out, "PREMERGE_UNION_SUMMARY\tverdict=PASS"), "version-seq-checks-state-col-not-note-col");
+    }
+
     (void)sy_remove_all(tmpd);
     sy_printf("CHECK_PREMERGE_UNION\tpassed=%d\tfailed=%d\n", passed, failed);
     return failed ? 1 : 0;
