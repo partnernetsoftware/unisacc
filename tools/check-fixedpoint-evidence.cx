@@ -1,0 +1,156 @@
+/* Exercise the evidence writer with independent chain and release directories. */
+#pragma unisa use sys.fs
+#pragma unisa use sys.posix
+#pragma unisa use sys.env
+#pragma unisa use sys.sha
+#pragma unisa use text.fmt
+#pragma unisa use mem.heap
+#pragma unisa use cxlib.netpack
+
+static const char *target[] = {"lnx/x86_64","lnx/arm64","osx/x86_64","osx/arm64","win/x86_64","win/arm64"};
+static const char *leaf[] = {"lnx-x86_64/entry.elf","lnx-arm64/entry.elf","osx-x86_64/slice-osx-x86_64",
+    "osx-arm64/slice-osx-arm64","win-x86_64/slice-win-x86_64","win-arm64/slice-win-arm64"};
+static const char *verdict = "CHAIN\tfixedpoint\tobjects=same\tcount=44\nCHAIN\tfixedpoint\tkernels=same\tcount=2\n"
+    "CHAIN\tfixedpoint\tslices=same\tcount=6\nCHAIN\tfixedpoint\tproduct=same\n";
+static const char *attempts = "ATTEMPT\t1\tphase=compare-recheck\trc=0\tresidue=0\tbound=55\tmemo=off\n"
+    "ATTEMPT\t2\tphase=compare\trc=0\tresidue=0\tbound=55\tmemo=on\n";
+static const char *original = "existing\t2026-11-24 12:00:00 +0000\tPASS\texisting.tsv\tkeep\n";
+static char base[4096], chain[4096], com[4096], source[4096];
+static int passed, failed;
+
+static void must(int ok) {
+    if (!ok) { fprintf(stderr,"CHECK_FIXEDPOINT_EVIDENCE fixture-setup\n"); exit(2); }
+}
+static void expect(int ok, const char *name) {
+    printf("%s\tcheck-fixedpoint-evidence.%s\n",ok?"PASS":"FAIL",name);
+    if (ok) passed++; else failed++;
+}
+static void fixture_path(char *out, const char *rel) {
+    must(!cx_fmt(out,4096,"%s/%s",base,rel));
+}
+static void put(const char *path, const char *data) {
+    char full[4096], parent[4096];
+    fixture_path(full,path);
+    must(!cx_fmt(parent,sizeof parent,"%s",full));
+    *strrchr(parent,'/') = 0;
+    must(!sy_mkdir_all(parent,0700) && !cx_write(full,data,strlen(data)));
+}
+static char *read_fixture(const char *leafname) {
+    char path[4096]; size_t n;
+    fixture_path(path,leafname);
+    return cx_read(path,&n);
+}
+static int execute(const char *version,const char *expected) {
+    char *v[]={"sh",com,source,"--",chain,(char *)version,base,"--write-notes",0};
+    np_result run={0}; char why[512]={0};
+    int rc=np_run(v,0,0,30,&run,why,sizeof why);
+    int good=!rc && run.rc==(expected?2:0) && !run.timed_out && !run.residue &&
+        (expected ? run.err && strstr(run.err,expected) :
+            run.out && strstr(run.out,"FIXEDPOINT_NOTE\t") && strstr(run.out,"FIXEDPOINT_EVIDENCE\tPASS\t"));
+    printf("CASE\tversion=%s\trc=%d\n",version,run.rc);
+    if (run.out) printf("%s",run.out);
+    if (run.err) printf("%s",run.err);
+    if (rc) printf("%s\n",why);
+    np_free(&run);
+    return good;
+}
+int main(int argc,char **argv) {
+    must(argc==1 || (argc==3 && !strcmp(argv[1],"--source")));
+    must(sy_realpath(".",source,sizeof source)>=0);
+    must(!cx_fmt(com,sizeof com,"%s/unisacc.com",source));
+    must(sy_realpath(argc==3?argv[2]:"tools/fixedpoint-evidence.cx",source,sizeof source)>=0);
+    const char *tmp=sy_env("TMPDIR");
+    must(!sy_mkdtemp(tmp&&*tmp?tmp:"/tmp","unisacc-fpev-",base,sizeof base));
+    fixture_path(chain,"chain");
+    put("chain/checkpoint.tsv","DONE\tcompare\t123\n");
+    put("chain/chain-run.tsv",attempts);
+    put("chain/chain-run-1.stdout","RECHECK\tbefore=compare\tfull=1\tmemo=off\tbuilt=0\n");
+    char compare[1024];
+    must(!cx_fmt(compare,sizeof compare,"SHAMEMO\tchain\toff\treason=reached-compare\n%s",verdict));
+    put("chain/chain-run-2.stdout",compare);
+    np_buf receipt={0}; char body[28], row[4600], digest[65], hashes[6][65];
+    for (int i=0;i<6;i++) {
+        must(!cx_fmt(body,sizeof body,"artifact-%d",i));
+        must(!sy_sha256_hex(body,strlen(body),hashes[i]));
+        for (int g=2;g<=3;g++) {
+            must(!cx_fmt(row,sizeof row,"chain/fixedpoint/g%d/%s",g,leaf[i]));
+            put(row,body);
+        }
+        must(!cx_fmt(row,sizeof row,"%s\t%s/fixedpoint/g2/%s\tsha=%s\tbytes=%ld\n",
+            target[i],chain,leaf[i],hashes[i],(long)strlen(body)));
+        np_puts(&receipt,row);
+    }
+    put("chain/ape-final/unisacc-next.com","packed");
+    must(!sy_sha256_hex("packed",6,digest));
+    must(!cx_fmt(row,sizeof row,"unisacc-next.com\t%s/ape-final/unisacc-next.com\tsha=%s\tbytes=6\n"
+        "cache-manager-mode\tEXPLICIT_INPUTS\ncache-manager/osx/x86_64\t/opt/private-owner/cm\tsha=%s\tbytes=6\n",
+        chain,digest,digest));
+    np_puts(&receipt,row);
+    put("chain/ape-final/ape-receipt.txt",receipt.p);
+    put("release/evidence/0.0.107/INDEX.tsv",original);
+    put("release/notes-0.0.107.md","# Existing release notes\n");
+    put("release/notes-0.1.0.md","# Existing release notes\n");
+
+    put("chain/fixedpoint/g3/win-arm64/slice-win-arm64","artifact-X");
+    expect(execute("0.0.107","REFUSE\tslice-mismatch"),"same-size-g3-mutation-refused");
+    char *before=read_fixture("release/evidence/0.0.107/INDEX.tsv");
+    expect(before && !strcmp(before,original),"refusal-preserves-index");
+    mm_free(before);
+    put("chain/fixedpoint/g3/win-arm64/slice-win-arm64","artifact-5");
+    expect(execute("0.0.107",0),"six-targets-pass");
+
+    char *table=read_fixture("release/evidence/0.0.107/fixedpoint-6targets.tsv");
+    expect(table && strstr(table,"# CHAIN\tfixedpoint\tslices=same\tcount=6\n"),"compare-proof-preserved");
+    int rows=0;
+    for (int i=0;i<6;i++) {
+        must(!cx_fmt(row,sizeof row,"%s\tfixedpoint/g2/%s\t%s\tfixedpoint/g3/%s\t%s\t10\tSAME\n",
+            target[i],leaf[i],hashes[i],leaf[i],hashes[i]));
+        if (table && strstr(table,row)) rows++;
+    }
+    expect(rows==6 && !strstr(table,base) && !strstr(table,"/" "home/"),"six-relative-bound-rows");
+    char *ape=read_fixture("release/evidence/0.0.107/ape-receipt.txt");
+    expect(ape && strstr(ape,"external/cache-manager/osx/x86_64") && !strstr(ape,"/opt/private-owner/cm") && !strstr(ape,base) &&
+        !strstr(ape,"/" "home/"),"sanitized-receipt");
+    char *input=read_fixture("chain/ape-final/ape-receipt.txt");
+    expect(input && !strcmp(input,receipt.p),"source-receipt-unchanged");
+    expect(execute("0.0.107",0),"identical-repeat-pass");
+    char *index=read_fixture("release/evidence/0.0.107/INDEX.tsv");
+    const char *prefix="fixedpoint-6targets\t";
+    char *entry=index?strstr(index,prefix):0;
+    expect(entry && !strncmp(index,original,strlen(original)) && !strstr(entry+strlen(prefix),prefix) &&
+        strstr(entry,"\tPASS\tfixedpoint-6targets.tsv\t"),"index-appended-once");
+    char *notes=read_fixture("release/notes-0.0.107.md");
+    char *sentence=notes?strstr(notes,"6/6 SAME"):0;
+    expect(sentence && !strncmp(notes,"# Existing release notes\n",25) &&
+        !strstr(sentence+8,"6/6 SAME"),"notes-appended-once");
+    put("chain/chain-run-2.stdout",verdict);
+    expect(execute("0.1.0","REFUSE\tcompare-memo-proof"),"memo-off-proof-required");
+    put("chain/chain-run-2.stdout",compare);
+    char *target_sha=strstr(receipt.p,"\tsha=");
+    must(target_sha!=0);
+    target_sha+=5;
+    char saved=*target_sha;
+    *target_sha=saved=='0'?'1':'0';
+    put("chain/ape-final/ape-receipt.txt",receipt.p);
+    expect(execute("0.1.0","REFUSE\treceipt-g2-binding"),"receipt-target-sha-mutation-refused");
+    *target_sha=saved;
+    const char *guard_path[]={"cache/Users/private-owner/cm","cache/" "root/private-owner/cm","cache/~/private-owner/cm"};
+    const char *guard_case[]={"private-path-guard-after-relative-normalization","private-path-guard-root","private-path-guard-tilde"};
+    for (int i=0;i<3;i++) {
+        np_buf guard_receipt={0};
+        np_puts(&guard_receipt,receipt.p);
+        must(!cx_fmt(row,sizeof row,"cache-manager-source\t%s\tsha=%s\tbytes=6\n",guard_path[i],digest));
+        np_puts(&guard_receipt,row);
+        put("chain/ape-final/ape-receipt.txt",guard_receipt.p);
+        expect(execute("0.1.0","REFUSE\toutput-identity"),guard_case[i]);
+        mm_free(guard_receipt.p);
+    }
+    put("chain/ape-final/ape-receipt.txt",receipt.p);
+    put("chain/ape-final/unisacc-next.com","pocked");
+    expect(execute("0.1.0","REFUSE\treceipt-ape-binding"),"same-size-ape-mutation-refused");
+
+    mm_free(table); mm_free(ape); mm_free(input); mm_free(index); mm_free(notes); mm_free(receipt.p);
+    must(!sy_remove_all(base));
+    printf("CHECK_FIXEDPOINT_EVIDENCE\tok=%d\tfailed=%d\n",passed,failed);
+    return failed != 0;
+}
