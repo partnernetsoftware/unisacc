@@ -1,0 +1,273 @@
+diff --git a/cx/sys/time.cx b/cx/sys/time.cx
+index df17233..1c02b1e 100644
+--- a/cx/sys/time.cx
++++ b/cx/sys/time.cx
+@@ -1,5 +1,6 @@
+ #pragma unisa module time
+ #pragma unisa dock
++#pragma unisa use sys.env
+ /* L0 sys/time: clocks, local-time text, sleeping and file times (plans/cx-layers.md).
+    L0 exception (agreed for cx/sys/ only): <time.h>, <poll.h> and <sys/time.h>
+    are not in the implicit prelude, and the carried headers already hold the
+@@ -75,6 +76,46 @@ int sy_local_fmt(char *out, int cap, const char *fmt, long sec) {
+     return (int)n;
+ }
+ 
++/* Test seam, same shape as UNISACC_PROC_INJECT_* but default off and exact:
++   it fires only when UNISACC_TIME_INJECT_EINTR=1 AND UNISACC_TIME_INJECT_PID
++   is the decimal text of this process, compared as bytes (no arithmetic, so an
++   over-long digit string cannot wrap into a valid pid; omitted/foreign pid or
++   a pid with extra characters = off).  Armed: every poll below naps 5 ms (or
++   the requested time when shorter) and returns EINTR. */
++static int syt_inject_eintr(void) {
++#ifdef _WIN32
++    return 0;
++#else
++    const char *v = sy_env("UNISACC_TIME_INJECT_EINTR");
++    const char *p;
++    char me[32];
++    if (!v || v[0] != '1' || v[1]) return 0;
++    p = sy_env("UNISACC_TIME_INJECT_PID");
++    if (!p || !p[0]) return 0;
++    if (cx_fmt(me, sizeof me, "%ld", (long)getpid())) return 0;
++    return !strcmp(p, me);
++#endif
++}
++
++/* poll with the injection seam above. Never returns EINTR when the seam is off;
++   firing is observable from outside (a ready fd reports 0 under the seam). */
++static int syt_poll(struct pollfd *fds, unsigned long n, int ms) {
++#ifdef _WIN32
++    (void)fds; (void)n; (void)ms;
++    return -ENOSYS;
++#else
++    if (syt_inject_eintr()) {
++        struct timespec q;
++        q.tv_sec = 0;
++        q.tv_nsec = (long)(ms > 0 && ms < 5 ? ms : 5) * 1000000L;
++        nanosleep(&q, NULL);
++        errno = EINTR;
++        return -1;
++    }
++    return poll(fds, n, ms);
++#endif
++}
++
+ /* Windows has no poll: a nap is the carried nanosleep (Sleep), and there is no
+    readiness wait for an fd. Elsewhere both are poll. The exported functions have
+    no #if. */
+@@ -84,7 +125,17 @@ static int syt_nap(int ms) {
+     q.tv_sec = ms / 1000; q.tv_nsec = (long)(ms % 1000) * 1000000L;
+     return nanosleep(&q, NULL);
+ #else
+-    return poll(NULL, 0, ms);
++    long end = sy_now_ms() + ms;
++    for (;;) {
++        long left = end - sy_now_ms();
++        if (left <= 0) return 0;
++        if (left > 2000000000L) left = 2000000000L;
++        if (syt_poll(NULL, 0, (int)left) < 0) {
++            if (errno == EINTR) continue;   /* re-enter with the time that is left */
++            return -errno;
++        }
++        return 0;
++    }
+ #endif
+ }
+ static int syt_readable(int fd, long ms) {
+@@ -93,24 +144,36 @@ static int syt_readable(int fd, long ms) {
+     return -ENOSYS;
+ #else
+     struct pollfd p;
+-    int r;
++    long end = ms >= 0 ? sy_now_ms() + ms : 0;
++    int first = 1;
+     p.fd = fd; p.events = POLLIN; p.revents = 0;
+-    do r = poll(&p, 1, ms < 0 ? -1 : (int)(ms > 2000000000L ? 2000000000L : ms));
+-    while (r < 0 && errno == EINTR);
+-    if (r < 0) return -errno;
+-    return r > 0 ? 1 : 0;
++    for (;;) {
++        long left = ms < 0 ? -1 : end - sy_now_ms();
++        int wait, r;
++        if (ms >= 0 && left < 0) left = 0;                    /* a late clock is still one poll(0) */
++        if (ms >= 0 && !first && left <= 0) return 0;          /* budget spent after the first poll */
++        wait = left < 0 ? -1 : (int)(left > 2000000000L ? 2000000000L : left);
++        r = syt_poll(&p, 1, wait);                             /* ms==0 still asks once */
++        if (r < 0) {
++            if (errno == EINTR) { first = 0; continue; }       /* re-enter with what is left */
++            return -errno;
++        }
++        return r > 0 ? 1 : 0;
++    }
+ #endif
+ }
+ 
+ /* Sleep MS milliseconds (poll with no fds; Windows: Sleep); an interruption resumes
+-   for what is left. 0, or -errno. */
++   for what is left and the whole call never runs past MS. 0, or -errno. */
+ int sy_sleep_ms(long ms) {
+-    long end = sy_now_ms() + ms, left = ms;
+-    while (left > 0) {
+-        if (syt_nap((int)(left > 2000000000L ? 2000000000L : left)) < 0 && errno != EINTR) return -errno;
+-        left = end - sy_now_ms();
++    long end = sy_now_ms() + ms;
++    for (;;) {
++        long left = end - sy_now_ms();
++        int rc;
++        if (left <= 0) return 0;
++        rc = syt_nap((int)(left > 2000000000L ? 2000000000L : left));
++        if (rc < 0) return rc;
+     }
+-    return 0;
+ }
+ 
+ /* Wait up to MS (negative: forever) for FD to be readable (or hung up).
+diff --git a/tests/batches.tsv b/tests/batches.tsv
+index de09a5a..65f993b 100644
+--- a/tests/batches.tsv
++++ b/tests/batches.tsv
+@@ -2055,3 +2055,4 @@ fwd-cap-contract	IMPLEMENTED	contract	tests/check-fwd-cap.cx	SOURCE	lnx/x86_64	5
+ check-batch-cap	IMPLEMENTED	interfaces	tools/check-batch-cap.cx	SOURCE	lnx/x86_64	55	-	tools/check-batch-cap.cx	-	interfaces.check-batch-cap	rc0:CHECK_BATCH_CAP	product	commit
+ tapepack	IMPLEMENTED	interfaces	tools/check-tapepack.cx	SOURCE	lnx/x86_64	55	-	tools/check-tapepack.cx	-	interfaces.tapepack	rc0:CHECK_TAPEPACK	product	commit
+ tape-tldce-speed-contract	IMPLEMENTED	interfaces	tools/check-tape-tldce-speed.cx	SOURCE	lnx/x86_64	55	-	tools/check-tape-tldce-speed.cx	--self-test	interfaces.tape-tldce-speed-contract	rc0:CHECK_TAPE_TLDCE_SPEED	product	commit
++check-time-eintr	IMPLEMENTED	interfaces	tools/check-time-eintr.cx	SOURCE	lnx/x86_64	55	-	tools/check-time-eintr.cx	-	interfaces.check-time-eintr	rc0:CHECK_TIME_EINTR	product	commit
+diff --git a/tests/coverage.tsv b/tests/coverage.tsv
+index f6e5bdc..b985a7e 100644
+--- a/tests/coverage.tsv
++++ b/tests/coverage.tsv
+@@ -1670,3 +1670,4 @@ contract.fwd-cap-contract	contract	IMPLEMENTED_SEPARATE_BATCH	同一转发桩生
+ interfaces.check-batch-cap	interfaces	IMPLEMENTED_SEPARATE_BATCH	统一批次与工具源容量并核调度边界、预跑准备拒绝和截断防护	tools/check-batch-cap.cx tools/cxlib/testplan.cx tools/cxlib/s9sched.cx tools/prerun-drive.cx tools/s9-nightly.cx
+ interfaces.tapepack	interfaces	IMPLEMENTED_SEPARATE_BATCH	确定性 UTAPEBIN 容器打包与往返:72 操作码、局部分支、函数地址、RELO 与变异拒绝	tools/tapepack.cx tools/check-tapepack.cx
+ interfaces.tape-tldce-speed-contract	interfaces	IMPLEMENTED_SEPARATE_BATCH	速度门轻量合同:固定顺序、输入 SHA 拒绝与精确 15 倍边界,不执行测速	tools/check-tape-tldce-speed.cx
++interfaces.check-time-eintr	interfaces	IMPLEMENTED_SEPARATE_BATCH	sy_readable zero-wait first poll and EINTR deadline; exact-PID default-off seam	cx/sys/time.cx tools/check-time-eintr.cx
+diff --git a/tests/manifests/check-time-eintr.tsv b/tests/manifests/check-time-eintr.tsv
+new file mode 100644
+index 0000000..30cd4af
+--- /dev/null
++++ b/tests/manifests/check-time-eintr.tsv
+@@ -0,0 +1,3 @@
++batch	check-time-eintr	IMPLEMENTED	interfaces	tools/check-time-eintr.cx	SOURCE	lnx/x86_64	55	-	tools/check-time-eintr.cx	-	interfaces.check-time-eintr	rc0:CHECK_TIME_EINTR	product	commit
++coverage	interfaces.check-time-eintr	interfaces	IMPLEMENTED_SEPARATE_BATCH	sy_readable zero-wait first poll and EINTR deadline; exact-PID default-off seam	cx/sys/time.cx tools/check-time-eintr.cx
++packages	batch	check-time-eintr	all	-	-	-	-	-	-
+diff --git a/tests/tools-compile-sources.tsv b/tests/tools-compile-sources.tsv
+index 25a6df4..64acbce 100644
+--- a/tests/tools-compile-sources.tsv
++++ b/tests/tools-compile-sources.tsv
+@@ -814,6 +814,7 @@ tools/check-textx-json-emit.cx	regular
+ tools/check-textx-regex.cx	regular
+ tools/check-textx-zlfeed.cx	regular
+ tools/check-tier-census.cx	regular
++tools/check-time-eintr.cx	regular
+ tools/check-timing.cx	regular
+ tools/check-tlib-admit.cx	regular
+ tools/check-tlib-assert-bag.cx	regular
+diff --git a/tools/check-time-eintr.cx b/tools/check-time-eintr.cx
+new file mode 100644
+index 0000000..1c0a774
+--- /dev/null
++++ b/tools/check-time-eintr.cx
+@@ -0,0 +1,103 @@
++/* tools/check-time-eintr.cx -- sy_sleep_ms / sy_readable honor one deadline across EINTR,
++ * and ms==0 still polls once.
++ *
++ *   With UNISACC_TIME_INJECT_EINTR=1 and UNISACC_TIME_INJECT_PID = this pid,
++ *   every poll naps 5 ms (or the requested time when shorter) and returns
++ *   EINTR; an omitted or foreign PID leaves the seam off (default off, like S1e).
++ *
++ *   (1) zero-wait readiness, seam OFF: a ready pipe returns 1 from
++ *       sy_readable(fd, 0), an unready one returns 0 (a first poll(0) must happen);
++ *   (2) sy_sleep_ms(200): 0, wall 190..1000 ms, seam fired more than once;
++ *   (3) sy_readable(pipe, 200): 0 (timeout), wall 190..1000 ms.
++ *   Run under a wrapper timeout: without the deadline recompute (2)/(3) never
++ *   return.  Exit 0 all pass; 1 otherwise. */
++#pragma unisa use sys.time
++#pragma unisa use sys.posix
++#pragma unisa use sys.proc
++
++static long ck_fail;
++
++static void ck(int ok, const char *what) {
++    if (ok) printf("PASS\t%s\n", what);
++    else { printf("FAIL\t%s\n", what); ck_fail++; }
++}
++
++int main(void) {
++    long t0, t1, rc;
++    int fds[2];
++    char me[32];
++    /* (1) seam off: ms==0 must still poll once */
++    if (pipe(fds) != 0) { printf("FAIL\tpipe\n"); return 1; }
++    if (write(fds[1], "x", 1) != 1) { printf("FAIL\tpipe write\n"); return 1; }
++    rc = sy_readable(fds[0], 0);
++    ck(rc == 1, "readable(fd,0) returns 1 on a ready fd");
++    if (read(fds[0], me, 1) != 1) { printf("FAIL\tpipe drain\n"); return 1; }
++    rc = sy_readable(fds[0], 0);
++    ck(rc == 0, "readable(fd,0) returns 0 on an unready fd");
++    close(fds[0]); close(fds[1]);
++
++    if (setenv("UNISACC_TIME_INJECT_EINTR", "1", 1) != 0) { printf("FAIL\tsetenv\n"); return 1; }
++    cx_fmt(me, sizeof me, "%ld", (long)getpid());
++    if (setenv("UNISACC_TIME_INJECT_PID", me, 1) != 0) { printf("FAIL\tsetenv pid\n"); return 1; }
++
++    /* seam fired: an armed ready fd reports 0 at ms==0 (poll(0) was interrupted) */
++    if (pipe(fds) != 0) { printf("FAIL\tpipe-arm\n"); return 1; }
++    if (write(fds[1], "s", 1) != 1) { printf("FAIL\tpipe-arm write\n"); return 1; }
++    rc = sy_readable(fds[0], 0);
++    close(fds[0]); close(fds[1]);
++    ck(rc == 0, "armed seam interrupts the first poll (ready fd reports 0 at ms=0)");
++
++    t0 = sy_now_ms();
++    rc = sy_sleep_ms(200);
++    t1 = sy_now_ms();
++    ck(rc == 0, "sleep rc=0 under continuous EINTR");
++    ck(t1 - t0 >= 190 && t1 - t0 <= 1000, "sleep wall inside 190..1000 ms");
++
++    if (pipe(fds) != 0) { printf("FAIL\tpipe2\n"); return 1; }
++    t0 = sy_now_ms();
++    rc = sy_readable(fds[0], 200);   /* write end open: no data, no hang-up */
++    t1 = sy_now_ms();
++    close(fds[0]); close(fds[1]);
++    ck(rc == 0, "readable returns 0 (timeout) under continuous EINTR");
++    ck(t1 - t0 >= 190 && t1 - t0 <= 1000, "readable wall inside 190..1000 ms");
++
++    /* seam off again when PID is omitted: a ready fd must report 1 at ms==0 */
++    if (unsetenv("UNISACC_TIME_INJECT_PID") != 0) { printf("FAIL\tunset pid\n"); return 1; }
++    if (pipe(fds) != 0) { printf("FAIL\tpipe3\n"); return 1; }
++    if (write(fds[1], "y", 1) != 1) { printf("FAIL\tpipe3 write\n"); return 1; }
++    rc = sy_readable(fds[0], 0);
++    ck(rc == 1, "omitted PID disarms the seam (ready fd still 1)");
++    close(fds[0]); close(fds[1]);
++
++    /* foreign PID: the seam must not fire for another pid */
++    if (setenv("UNISACC_TIME_INJECT_PID", "1", 1) != 0) { printf("FAIL\tsetenv foreign\n"); return 1; }
++    if (pipe(fds) != 0) { printf("FAIL\tpipe4\n"); return 1; }
++    if (write(fds[1], "z", 1) != 1) { printf("FAIL\tpipe4 write\n"); return 1; }
++    rc = sy_readable(fds[0], 0);
++    ck(rc == 1, "foreign PID does not arm the seam (ready fd 1)");
++    close(fds[0]); close(fds[1]);
++
++    /* over-long decimal text (2^64 + pid) must not wrap into this pid */
++    {
++        char big[32];
++        long base = (long)strlen("18446744073709551616");
++        long i, carry = (long)getpid();
++        for (i = 0; i < base; i++) big[i] = "18446744073709551616"[i];
++        big[base] = 0;
++        for (i = base - 1; i >= 0 && carry > 0; i--) {
++            long v = (big[i] - '0') + (carry % 10);
++            carry /= 10;
++            if (v > 9) { v -= 10; carry++; }
++            big[i] = (char)('0' + v);
++        }
++        if (setenv("UNISACC_TIME_INJECT_PID", big, 1) != 0) { printf("FAIL\tsetenv big\n"); return 1; }
++    }
++    if (pipe(fds) != 0) { printf("FAIL\tpipe5\n"); return 1; }
++    if (write(fds[1], "w", 1) != 1) { printf("FAIL\tpipe5 write\n"); return 1; }
++    rc = sy_readable(fds[0], 0);
++    ck(rc == 1, "over-long PID text is rejected (ready fd 1)");
++    close(fds[0]); close(fds[1]);
++
++    printf("CHECK_TIME_EINTR\t%s\tfail=%ld\n", ck_fail ? "FAIL" : "PASS", ck_fail);
++    return ck_fail ? 1 : 0;
++}
