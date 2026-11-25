@@ -391,7 +391,7 @@ tape_run_x86_64:
     cmpl $10,%eax
     jbe .Lrun_shift
     cmpl $15,%eax
-    jb .Lrun_opcode
+    jb .Lrun_divide
     cmpl $20,%eax
     jbe .Lrun_compare
 .Lrun_noncmp:
@@ -681,6 +681,32 @@ tape_run_x86_64:
 .Lrun_shift_done:
     movl %r10d,%ecx
     jmp .Lrun_arith_result
+.Lrun_divide:
+    movl %eax,%r10d
+    movq 48(%rsp,%rdx,8),%rax
+    movzbl 5(%rsp),%edx
+    andl $15,%edx
+    movq 48(%rsp,%rdx,8),%r9
+    testq %r9,%r9
+    jz .Lrun_opcode
+    cmpl $13,%r10d
+    jae .Lrun_divide_unsigned
+    cmpq $-1,%r9
+    jne .Lrun_divide_signed
+    movabsq $0x8000000000000000,%r8
+    cmpq %r8,%rax
+    je .Lrun_opcode
+.Lrun_divide_signed:
+    cqto
+    idivq %r9
+    jmp .Lrun_divide_result
+.Lrun_divide_unsigned:
+    xorl %edx,%edx
+    divq %r9
+.Lrun_divide_result:
+    testl $1,%r10d
+    cmovzq %rdx,%rax
+    jmp .Lrun_store
 .Lrun_compare:
     movq 48(%rsp,%rdx,8),%r8
     movzbl 5(%rsp),%edx
