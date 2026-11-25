@@ -1,0 +1,844 @@
+diff --git a/build/pkg-gaps.tsv b/build/pkg-gaps.tsv
+index 5e7eba3..27e640e 100644
+--- a/build/pkg-gaps.tsv
++++ b/build/pkg-gaps.tsv
+@@ -243,3 +243,4 @@ REGISTER-NO-DEV-RUNNER	tools/register.cx 登记批次时只用已装产品跑一
+ 2026-11-23	PRELUDE-SIGNAL-NO-KERNEL-HANDLER	prelude 的 signal()/sigaction() 仅填进程内表而不调内核 rt_sigaction, 导致工具用 signal(SIGTERM/SIGINT, ...) 做被杀清理时静默失效(如 prerun-drive.cx:1510); 需求: signal() 应当真注册内核 handler 或在文档/诊断里明确仅进程内语义	工具改用 sys.sig 的 sy_sig_handle 或经 ext.fsx fsx_scratch 自动注册内核 SIGTERM/SIGINT 清理	cx/sys 或 prelude	OPEN
+ 2026-11-23	SIZEOF-TYPE-NAME-ARRAY-PTR	sizeof(int (*)[3]) 等类型名作 sizeof 操作数时产品报 "expected ')'" (gcc 给 8); 需求: sizeof(类型名) 接受完整类型名并给出尺寸	暂不修; 已记入 ~/.local/share/unisacc/research/frontend-b1-ready/DESIGN.md 3.1 节备查	exec/parse2 或 exec/parse2/declarator	OPEN
+ 2026-11-24	MODULE-DEFINE-NOT-EXPORTED-BY-USE	模块(cxlib.envcompat)里的 #define 不跨 #pragma unisa use 导出:使用方调用 EC_PAIR 这类模块宏报 undeclared function,所以字面量环境数组只能直接写 "UNISACC_X=V" 与 "UNISA_X=V" 两个字面量,无法用成对宏	字面量数组手写两项,由 tools/envtwin.cx 机械补旁名	cx 模块系统(use 导出宏,CXIF v0 现为 No exported macros)	open
++2026-11-25	PRERUN-WATCH-V2	cx/text 尚缺日志键值切片辅助(按制表符分栏并取 key=VAL 值切片,tools/prerun-watch.cx 自带 pw_kv_span)	在 tools/prerun-watch.cx 内手写 pw_kv_span	cx/text(tx_kv_span)	OPEN
+diff --git a/tools/check-prerun-watch.cx b/tools/check-prerun-watch.cx
+new file mode 100644
+index 0000000..1301858
+--- /dev/null
++++ b/tools/check-prerun-watch.cx
+@@ -0,0 +1,324 @@
++/* tools/check-prerun-watch.cx -- eight offline synthetic fixture checks for tools/prerun-watch.cx (<5s).
++ *
++ *   sh ./unisacc.com tools/check-prerun-watch.cx [-- --tool PATH]
++ *
++ * Default tool path: tools/prerun-watch.cx if present, else research/agy-h/prerun-watch.cx.
++ * Marker: CHECK_PRERUN_WATCH<TAB>passed=N<TAB>failed=0
++ */
++#pragma unisa use sys.fs
++#pragma unisa use sys.env
++#pragma unisa use sys.proc
++#pragma unisa use sys.time
++#pragma unisa use sys.posix
++#pragma unisa use sysx.process
++#pragma unisa use cxlib.ckrun
++#pragma unisa use text.text
++#pragma unisa use text.iter
++#pragma unisa use mem.bytes
++#pragma unisa use mem.heap
++
++static int cpw_passed, cpw_failed;
++static char cpw_tool[1024];
++static char cpw_bin[1024];
++
++static void ck(int ok, const char *name) {
++    if (ok) {
++        cpw_passed++;
++        printf("PASS\tcheck-prerun-watch.%s\n", name);
++    } else {
++        cpw_failed++;
++        printf("FAIL\tcheck-prerun-watch.%s\n", name);
++    }
++}
++
++static int has_txt(const char *buf, long n, const char *needle) {
++    if (!buf || n <= 0) return 0;
++    int cap = n >= 65535 ? 65535 : (int)n + 1;
++    return ckk_has(buf, cap, needle);
++}
++
++static int write_txt(const char *path, const char *body) {
++    return sy_write_atomic(path, body, tx_len(body, 65536), 0644);
++}
++
++static int run_watch(const char *win_p, const char *log_p, const char *rate_p,
++                     const char *now_s, const char *extra_flag, np_result *r) {
++    char *av[16];
++    char why[256];
++    int k = 0;
++    av[k++] = cpw_bin;
++    if (win_p) { av[k++] = (char *)"--windows"; av[k++] = (char *)win_p; }
++    if (log_p) { av[k++] = (char *)"--log"; av[k++] = (char *)log_p; }
++    if (rate_p) { av[k++] = (char *)"--rate-tsv"; av[k++] = (char *)rate_p; }
++    if (now_s) { av[k++] = (char *)"--now"; av[k++] = (char *)now_s; }
++    if (extra_flag) av[k++] = (char *)extra_flag;
++    av[k] = 0;
++    memset(r, 0, sizeof *r);
++    return np_run(av, ".", 0, 15, r, why, sizeof why);
++}
++
++static void mk_windows(char *out, int cap, const char *hdr_lanes) {
++    int n = snprintf(out, (size_t)cap,
++        "# prerun-drive windows\n"
++        "# timing=wave-v1 jobs=8 budget_ms=22000\n"
++        "%s"
++        "window\tjobs\tphase\tcount\tids\n"
++        "W0000\t1\twarmup\t1\tprepush-mut1\n"
++        "W0001\t1\theavy\t1\tnetregen-a\n"
++        "W0002\t1\theavy\t1\tnetregen-b\n"
++        "W0003\t1\tlong\t1\tcheck-split-parents\n"
++        "W0004\t8\tnormal\t1\tbatch-04\n"
++        "W0005\t8\tnormal\t1\tbatch-05\n"
++        "W0006\t8\tnormal\t1\tbatch-06\n"
++        "W0007\t8\tnormal\t1\tbatch-07\n"
++        "W0008\t8\tnormal\t1\tbatch-08\n"
++        "W0009\t8\tnormal\t1\tbatch-09\n",
++        hdr_lanes);
++    if (n < 0 || n >= cap) out[0] = 0;
++}
++
++int main(int argc, char **argv) {
++    const char *td = sy_tmpdir();
++    const char *base_td = (td && td[0] == '/') ? td : "/tmp";
++    char dir[512], w1[560], w3[560], l1[560], l2[560], l3[560], l4[560], l_inc[560];
++    char r1[560], r_done[560], r_bad[560], r_hdr[560];
++    char qtool[1200], qbin[1200], bcmd[2600], bout[2048];
++    char wbuf[2048];
++    const char *explicit_tool = 0;
++
++    for (int i = 1; i < argc; i++) {
++        if (tx_eqz(argv[i], "--tool") && i + 1 < argc) explicit_tool = argv[++i];
++    }
++    if (explicit_tool) {
++        if (tx_copy(cpw_tool, (long)sizeof cpw_tool, explicit_tool, tx_len(explicit_tool, 1024))) return 2;
++    } else if (sy_exists("tools/prerun-watch.cx") == 1) {
++        (void)tx_copy(cpw_tool, (long)sizeof cpw_tool, "tools/prerun-watch.cx", 21);
++    } else {
++        (void)tx_copy(cpw_tool, (long)sizeof cpw_tool, "research/agy-h/prerun-watch.cx", 30);
++    }
++
++    if (cx_fmt(dir, sizeof dir, "%s/unisacc-cpw-%d", base_td, sy_pid()) ||
++        cx_fmt(cpw_bin, sizeof cpw_bin, "%s/prerun-watch-bin", dir) ||
++        cx_fmt(w1, sizeof w1, "%s/win2.tsv", dir) ||
++        cx_fmt(w3, sizeof w3, "%s/win3.tsv", dir) ||
++        cx_fmt(l1, sizeof l1, "%s/log1.log", dir) ||
++        cx_fmt(l2, sizeof l2, "%s/log2.log", dir) ||
++        cx_fmt(l3, sizeof l3, "%s/log3.log", dir) ||
++        cx_fmt(l4, sizeof l4, "%s/log4.log", dir) ||
++        cx_fmt(l_inc, sizeof l_inc, "%s/log-inc.log", dir) ||
++        cx_fmt(r1, sizeof r1, "%s/rate1.tsv", dir) ||
++        cx_fmt(r_done, sizeof r_done, "%s/rate-done.tsv", dir) ||
++        cx_fmt(r_bad, sizeof r_bad, "%s/rate-bad.tsv", dir) ||
++        cx_fmt(r_hdr, sizeof r_hdr, "%s/rate-bad-hdr.tsv", dir)) {
++        ck(0, "path-bound");
++        return 1;
++    }
++    cx_rmtree(dir);
++    if (sy_mkdir_all(dir, 0755)) { ck(0, "mkdir"); return 1; }
++    if (ckk_shq(qtool, (int)sizeof qtool, cpw_tool) ||
++        ckk_shq(qbin, (int)sizeof qbin, cpw_bin) ||
++        cx_fmt(bcmd, sizeof bcmd, "sh ./unisacc.com %s -o %s", qtool, qbin)) {
++        ck(0, "build-cmd");
++        cx_rmtree(dir);
++        return 1;
++    }
++    if (ckk_sh("CHECK_PRERUN_WATCH", bcmd, bout, (int)sizeof bout) != 0) {
++        ck(0, "compile-tool");
++        cx_rmtree(dir);
++        return 1;
++    }
++
++    mk_windows(wbuf, (int)sizeof wbuf, "# window-lanes=2\n");
++    if (write_txt(w1, wbuf)) { ck(0, "write-w1"); return 1; }
++    mk_windows(wbuf, (int)sizeof wbuf, "# window-lanes=3\n");
++    if (write_txt(w3, wbuf)) { ck(0, "write-w3"); return 1; }
++
++    /* Case 1: cpw.normal-2lane */
++    {
++        const char *log_s =
++            "PRERUN_WINDOW\twindow=W0000\tphase=warmup\tattempt=1\tjobs=1\trc=0\twall_ms=5000\n"
++            "PRERUN_WINDOW\twindow=W0001\tphase=heavy\tattempt=1\tjobs=1\trc=0\twall_ms=6000\n"
++            "PRERUN_WINDOW\twindow=W0002\tphase=heavy\tattempt=1\tjobs=1\trc=0\twall_ms=6000\n"
++            "PRERUN_WINDOW\twindow=W0003\tphase=long\tattempt=1\tjobs=1\trc=0\twall_ms=7000\n"
++            "PRERUN_LANES\tfirst=W0004\twindows=2\n"
++            "PRERUN_WINDOW\twindow=W0004\tphase=normal\tattempt=1\tjobs=8\trc=0\twall_ms=8000\n"
++            "PRERUN_WINDOW\twindow=W0005\tphase=normal\tattempt=1\tjobs=8\trc=0\twall_ms=8000\n";
++        const char *rate_s =
++            "sample_ts\tepoch_s\telapsed_since_chain_start_min\telapsed_since_prerun_ids_min\t"
++            "done_windows\ttotal_windows\tlast_window\tcurrent_phase\tdone_by_phase\trem_by_phase\t"
++            "rate_win_per_min\teta_prerun_rem_min\test_prerun_end_ts\test_start_to_pub_min\tnote\n"
++            "2026-11-25 00:00:00 +0800\t1700000000\t10.0\t5.0\t2\t10\tW0001\theavy\twarmup=1,heavy=1\theavy=1,long=1,normal=6\t0.40\t20.0\t00:20\tUNMEASURED\tseed\n";
++        np_result res;
++        int rr;
++        if (write_txt(l1, log_s) || write_txt(r1, rate_s)) { ck(0, "setup-c1"); return 1; }
++        rr = run_watch(w1, l1, r1, "1700000300", 0, &res);
++        ck(rr == 0 && res.rc == 0 &&
++           has_txt(res.out, (long)res.outn, "PRERUN_WATCH\tstate=RUNNING\tdone=6/10\trate_inc=0.80\trate_cum=0.60\teta_min=5.0\trc124=none\tlanes=2\tlast=W0005\tphase=normal\n"),
++           "normal-2lane");
++        np_free(&res);
++    }
++
++    /* Case 2: cpw.rc124-dedup-stopped (stop on rc=124, then resume dedup) */
++    {
++        const char *stop_log =
++            "PRERUN_WINDOW\twindow=W0000\tphase=warmup\tattempt=1\tjobs=1\trc=0\twall_ms=5000\n"
++            "PRERUN_WINDOW\twindow=W0001\tphase=heavy\tattempt=1\tjobs=1\trc=0\twall_ms=6000\n"
++            "PRERUN_WINDOW\twindow=W0002\tphase=heavy\tattempt=1\tjobs=1\trc=0\twall_ms=6000\n"
++            "PRERUN_WINDOW\twindow=W0003\tphase=long\tattempt=1\tjobs=1\trc=124\twall_ms=58000\n"
++            "PRERUN_WINDOW\twindow=W0003\tphase=long\tattempt=2\tjobs=1\trc=124\twall_ms=58000\n"
++            "PRERUN_STOP\tbatch=check-split-parents\tretries=2\twindow=W0003\traw=timeout\n";
++        const char *resume_log =
++            "PRERUN_WINDOW\twindow=W0000\tphase=warmup\tattempt=1\tjobs=1\trc=0\twall_ms=5000\n"
++            "PRERUN_WINDOW\twindow=W0001\tphase=heavy\tattempt=1\tjobs=1\trc=0\twall_ms=6000\n"
++            "PRERUN_WINDOW\twindow=W0002\tphase=heavy\tattempt=1\tjobs=1\trc=0\twall_ms=6000\n"
++            "PRERUN_WINDOW\twindow=W0003\tphase=long\tattempt=1\tjobs=1\trc=124\twall_ms=58000\n"
++            "PRERUN_WINDOW\twindow=W0003\tphase=long\tattempt=2\tjobs=1\trc=124\twall_ms=58000\n"
++            "PRERUN_STOP\tbatch=check-split-parents\tretries=2\twindow=W0003\traw=timeout\n"
++            "PRERUN_WINDOW\twindow=W0002\tphase=heavy\tattempt=1\tjobs=1\trc=0\twall_ms=5900\n"
++            "PRERUN_WINDOW\twindow=W0003\tphase=long\tattempt=1\tjobs=1\trc=0\twall_ms=52000\n";
++        np_result res1, res2;
++        int rr1, rr2;
++        if (write_txt(l2, stop_log)) { ck(0, "setup-c2a"); return 1; }
++        rr1 = run_watch(w1, l2, 0, "1700000300", 0, &res1);
++        if (write_txt(l2, resume_log)) { np_free(&res1); ck(0, "setup-c2b"); return 1; }
++        rr2 = run_watch(w1, l2, 0, "1700000360", 0, &res2);
++        ck(rr1 == 0 && res1.rc == 1 &&
++           has_txt(res1.out, (long)res1.outn, "state=STOPPED\tdone=3/10") &&
++           has_txt(res1.out, (long)res1.outn, "rc124=W0003\t") &&
++           rr2 == 0 && res2.rc == 0 &&
++           has_txt(res2.out, (long)res2.outn, "state=RUNNING\tdone=4/10") &&
++           has_txt(res2.out, (long)res2.outn, "rc124=W0003\t"),
++           "rc124-dedup-stopped");
++        np_free(&res1);
++        np_free(&res2);
++    }
++
++    /* Case 3: cpw.lanes-obs-overrides-plan */
++    {
++        np_result res;
++        int rr = run_watch(w3, l1, r1, "1700000300", 0, &res);
++        ck(rr == 0 && res.rc == 0 &&
++           has_txt(res.out, (long)res.outn, "\tlanes=2\t"),
++           "lanes-obs-overrides-plan");
++        np_free(&res);
++    }
++
++    /* Case 4: cpw.cold-or-same-ts-unmeasured */
++    {
++        np_result r_cold, r_same;
++        int rc1 = run_watch(w1, l1, 0, "1700000300", 0, &r_cold);
++        int rc2 = run_watch(w1, l1, r1, "1700000000", 0, &r_same);
++        ck(rc1 == 0 && r_cold.rc == 0 &&
++           has_txt(r_cold.out, (long)r_cold.outn, "\trate_inc=UNMEASURED\trate_cum=UNMEASURED\teta_min=UNMEASURED\t") &&
++           rc2 == 0 && r_same.rc == 0 &&
++           has_txt(r_same.out, (long)r_same.outn, "\trate_inc=UNMEASURED\t"),
++           "cold-or-same-ts-unmeasured");
++        np_free(&r_cold);
++        np_free(&r_same);
++    }
++
++    /* Case 5: cpw.done-freeze-last-sample (DONE with closing sample freezes rate at last sample epoch) */
++    {
++        const char *done_log =
++            "PRERUN_WINDOW\twindow=W0000\tphase=warmup\tattempt=1\tjobs=1\trc=0\twall_ms=100\n"
++            "PRERUN_WINDOW\twindow=W0001\tphase=heavy\tattempt=1\tjobs=1\trc=0\twall_ms=100\n"
++            "PRERUN_WINDOW\twindow=W0002\tphase=heavy\tattempt=1\tjobs=1\trc=0\twall_ms=100\n"
++            "PRERUN_WINDOW\twindow=W0003\tphase=long\tattempt=1\tjobs=1\trc=0\twall_ms=100\n"
++            "PRERUN_LANES\tfirst=W0004\twindows=2\n"
++            "PRERUN_WINDOW\twindow=W0004\tphase=normal\tattempt=1\tjobs=8\trc=0\twall_ms=100\n"
++            "PRERUN_WINDOW\twindow=W0005\tphase=normal\tattempt=1\tjobs=8\trc=0\twall_ms=100\n"
++            "PRERUN_WINDOW\twindow=W0006\tphase=normal\tattempt=1\tjobs=8\trc=0\twall_ms=100\n"
++            "PRERUN_WINDOW\twindow=W0007\tphase=normal\tattempt=1\tjobs=8\trc=0\twall_ms=100\n"
++            "PRERUN_WINDOW\twindow=W0008\tphase=normal\tattempt=1\tjobs=8\trc=0\twall_ms=100\n"
++            "PRERUN_WINDOW\twindow=W0009\tphase=normal\tattempt=1\tjobs=8\trc=0\twall_ms=100\n"
++            "PRERUN_RUN\tstatus=DONE\tran=10\tskipped=0\tout=/tmp/x\n";
++        const char *done_rate =
++            "sample_ts\tepoch_s\telapsed_since_chain_start_min\telapsed_since_prerun_ids_min\t"
++            "done_windows\ttotal_windows\tlast_window\tcurrent_phase\tdone_by_phase\trem_by_phase\t"
++            "rate_win_per_min\teta_prerun_rem_min\test_prerun_end_ts\test_start_to_pub_min\tnote\n"
++            "2026-11-25 00:00:00 +0800\t1700000000\t10.0\t5.0\t4\t10\tW0003\tlong\twarmup=1\tnormal=6\t0.80\t7.5\t00:08\tUNMEASURED\ts1\n"
++            "2026-11-25 00:03:00 +0800\t1700000180\t13.0\t8.0\t10\t10\tW0009\tnormal\tnormal=6\tnone\t2.00\t0\tDONE\tUNMEASURED\tdone\n";
++        np_result res1, res2;
++        int rr1, rr2;
++        if (write_txt(l3, done_log) || write_txt(r_done, done_rate)) { ck(0, "setup-c5"); return 1; }
++        rr1 = run_watch(w1, l3, r1, "1700000300", 0, &res1);
++        rr2 = run_watch(w1, l3, r_done, "1700000999", 0, &res2);
++        ck(rr1 == 0 && res1.rc == 0 &&
++           has_txt(res1.out, (long)res1.outn, "PRERUN_WATCH\tstate=DONE\tdone=10/10\trate_inc=1.60\trate_cum=1.00\teta_min=0\t") &&
++           rr2 == 0 && res2.rc == 0 &&
++           has_txt(res2.out, (long)res2.outn, "PRERUN_WATCH\tstate=DONE\tdone=10/10\trate_inc=2.00\trate_cum=1.25\teta_min=0\t"),
++           "done-freeze-last-sample");
++        np_free(&res1);
++        np_free(&res2);
++    }
++
++    /* Case 6: cpw.done-incomplete-negative (status=DONE with done_wins < total must refuse DONE) */
++    {
++        const char *inc_log =
++            "PRERUN_WINDOW\twindow=W0000\tphase=warmup\tattempt=1\tjobs=1\trc=0\twall_ms=100\n"
++            "PRERUN_WINDOW\twindow=W0001\tphase=heavy\tattempt=1\tjobs=1\trc=0\twall_ms=100\n"
++            "PRERUN_WINDOW\twindow=W0002\tphase=heavy\tattempt=1\tjobs=1\trc=0\twall_ms=100\n"
++            "PRERUN_WINDOW\twindow=W0003\tphase=long\tattempt=1\tjobs=1\trc=0\twall_ms=100\n"
++            "PRERUN_LANES\tfirst=W0004\twindows=2\n"
++            "PRERUN_WINDOW\twindow=W0004\tphase=normal\tattempt=1\tjobs=8\trc=0\twall_ms=100\n"
++            "PRERUN_WINDOW\twindow=W0005\tphase=normal\tattempt=1\tjobs=8\trc=0\twall_ms=100\n"
++            "PRERUN_WINDOW\twindow=W0006\tphase=normal\tattempt=1\tjobs=8\trc=0\twall_ms=100\n"
++            "PRERUN_WINDOW\twindow=W0007\tphase=normal\tattempt=1\tjobs=8\trc=0\twall_ms=100\n"
++            "PRERUN_RUN\tstatus=DONE\tran=8\tskipped=0\tout=/tmp/x\n";
++        np_result res;
++        int rr;
++        if (write_txt(l_inc, inc_log)) { ck(0, "setup-c6"); return 1; }
++        rr = run_watch(w1, l_inc, r1, "1700000300", 0, &res);
++        ck(rr == 0 && res.rc == 1 &&
++           has_txt(res.out, (long)res.outn, "PRERUN_WATCH\tstate=INCOMPLETE\tdone=8/10\trate_inc=1.20\trate_cum=0.80\teta_min=1.7\t") &&
++           !has_txt(res.out, (long)res.outn, "state=DONE") &&
++           !has_txt(res.out, (long)res.outn, "\teta_min=0\t"),
++           "done-incomplete-negative");
++        np_free(&res);
++    }
++
++    /* Case 7: cpw.refuse-bad-rate-header-and-append (15 cols with col 0 ok but cols 1..14 wrong, plus --append-rate rejected) */
++    {
++        np_result r_hd, r_app;
++        int rc1, rc2;
++        if (write_txt(r_hdr,
++            "sample_ts\tc1\tc2\tc3\tc4\tc5\tc6\tc7\tc8\tc9\tc10\tc11\tc12\tc13\tc14\n"
++            "2026-11-25 00:00:00 +0800\t1700000000\t10.0\t5.0\t2\t10\tW0001\theavy\ta\tb\t0.40\t20.0\t00:20\tUNMEASURED\tnote\n")) {
++            ck(0, "setup-c7"); return 1;
++        }
++        rc1 = run_watch(w1, l1, r_hdr, "1700000300", 0, &r_hd);
++        rc2 = run_watch(w1, l1, r1, "1700000300", "--append-rate", &r_app);
++        ck(rc1 == 0 && r_hd.rc == 2 &&
++           has_txt(r_hd.err, (long)r_hd.errn, "PRERUN_WATCH\tREFUSE\treason=rate-header-mismatch") &&
++           !has_txt(r_hd.out, (long)r_hd.outn, "PRERUN_WATCH\tstate=") &&
++           rc2 == 0 && r_app.rc == 2 &&
++           has_txt(r_app.err, (long)r_app.errn, "PRERUN_WATCH\tREFUSE\treason=unknown-arg"),
++           "refuse-bad-rate-header-and-append");
++        np_free(&r_hd);
++        np_free(&r_app);
++    }
++
++    /* Case 8: cpw.refuse-missing-or-bad-schema */
++    {
++        np_result r_miss, r_sch;
++        int rc1, rc2;
++        if (write_txt(r_bad, "a\tb\tc\td\te\tf\tg\th\ti\tj\tk\tl\tm\tn\n1\t2\t3\t4\t5\t6\t7\t8\t9\t10\t11\t12\t13\t14\n")) {
++            ck(0, "setup-c7"); return 1;
++        }
++        rc1 = run_watch(w1, l4, 0, "1700000300", 0, &r_miss);
++        rc2 = run_watch(w1, l1, r_bad, "1700000300", 0, &r_sch);
++        ck(rc1 == 0 && r_miss.rc == 2 &&
++           has_txt(r_miss.err, (long)r_miss.errn, "PRERUN_WATCH\tREFUSE\treason=enoent") &&
++           !has_txt(r_miss.out, (long)r_miss.outn, "PRERUN_WATCH\tstate=") &&
++           rc2 == 0 && r_sch.rc == 2 &&
++           has_txt(r_sch.err, (long)r_sch.errn, "PRERUN_WATCH\tREFUSE\treason=rate-schema-mismatch") &&
++           !has_txt(r_sch.out, (long)r_sch.outn, "PRERUN_WATCH\tstate="),
++           "refuse-missing-or-bad-schema");
++        np_free(&r_miss);
++        np_free(&r_sch);
++    }
++
++    cx_rmtree(dir);
++    printf("CHECK_PRERUN_WATCH\tpassed=%d\tfailed=%d\n", cpw_passed, cpw_failed);
++    return cpw_failed ? 1 : 0;
++}
+diff --git a/tools/prerun-watch.cx b/tools/prerun-watch.cx
+new file mode 100644
+index 0000000..92b0f51
+--- /dev/null
++++ b/tools/prerun-watch.cx
+@@ -0,0 +1,499 @@
++/* tools/prerun-watch.cx -- bounded read-only status/rate watch for 2-lane prerun.
++ *
++ *   sh ./unisacc.com tools/prerun-watch.cx -- --windows W.tsv --log S.log
++ *       [--rate-tsv R.tsv] [--prerun-dir DIR]
++ *       [--now EPOCH_S] [--prerun-start EPOCH_S]
++ *
++ * Reads windows.tsv, supervise.log and optional 15-column prerun-rate.tsv, and prints
++ * one machine-readable line:
++ *   PRERUN_WATCH\tstate=RUNNING|STOPPED|DONE|INCOMPLETE\tdone=D/T\trate_inc=...\trate_cum=...\teta_min=...\trc124=...\tlanes=...\tlast=...\tphase=...
++ * When state=DONE and rate_tsv already holds a final row with done_windows == total,
++ * rate_inc and rate_cum freeze at the last sample epoch (prev2 -> prev).
++ * Exit codes: 0 = RUNNING/DONE, 1 = STOPPED/INCOMPLETE,
++ *             2 = REFUSE (bad args, missing/unreadable input, 15-col header/schema error, cap hit).
++ */
++#pragma unisa use sys.fs
++#pragma unisa use sys.io
++#pragma unisa use sys.time
++#pragma unisa use text.text
++#pragma unisa use text.iter
++#pragma unisa use text.num
++#pragma unisa use tsvx.read
++#pragma unisa use mem.bytes
++#pragma unisa use mem.heap
++
++#define PW_MAX_WINS 2048
++#define PW_MAX_PHASES 32
++#define PW_PATH 4096
++#define PW_LOG_CAP (32L << 20)
++#define PW_WIN_CAP (8L << 20)
++#define PW_RATE_CAP (4L << 20)
++#define PW_RATE_COLS 15
++
++typedef struct {
++    char wid[32];
++    char phase[32];
++    int done;
++    int saw124;
++} PwWin;
++
++typedef struct {
++    char name[32];
++    int total;
++    int done;
++} PwPhase;
++
++static PwWin pw_wins[PW_MAX_WINS];
++static int pw_nwins;
++static PwPhase pw_phases[PW_MAX_PHASES];
++static int pw_nphases;
++static int pw_rc124_order[PW_MAX_WINS];
++static int pw_nrc124;
++
++static int pw_refuse(const char *reason, const char *path) {
++    sy_eprintf("PRERUN_WATCH\tREFUSE\treason=%s\tpath=%s\n", reason, path && path[0] ? path : "-");
++    return 2;
++}
++
++static const char *pw_errno_tag(int rc) {
++    if (rc == -ENOENT) return "enoent";
++    if (rc == -ENOTDIR) return "enotdir";
++    if (rc == -EACCES) return "eacces";
++    if (rc == -EFBIG) return "efbig";
++    return "io-error";
++}
++
++static int pw_find_win(const char *s, long n) {
++    for (int i = 0; i < pw_nwins; i++) {
++        long wl = tx_len(pw_wins[i].wid, 32);
++        if (wl == n && tx_same(pw_wins[i].wid, wl, s, n)) return i;
++    }
++    return -1;
++}
++
++static int pw_phase_slot(const char *s, long n) {
++    for (int i = 0; i < pw_nphases; i++) {
++        long pl = tx_len(pw_phases[i].name, 32);
++        if (pl == n && tx_same(pw_phases[i].name, pl, s, n)) return i;
++    }
++    if (pw_nphases >= PW_MAX_PHASES) return -1;
++    if (tx_copy(pw_phases[pw_nphases].name, 32, s, n)) return -1;
++    pw_phases[pw_nphases].total = 0;
++    pw_phases[pw_nphases].done = 0;
++    return pw_nphases++;
++}
++
++static int pw_kv_span(const char *line, long ln, const char *key, long klen, long *voff, long *vlen) {
++    long fcnt = tx_fields(line, ln, '\t');
++    for (long i = 0; i < fcnt; i++) {
++        long fo = 0, fl = 0;
++        if (tx_field(line, ln, '\t', i, &fo, &fl)) break;
++        if (fl >= klen && tx_prefix(line + fo, fl, key, klen)) {
++            *voff = fo + klen;
++            *vlen = fl - klen;
++            return 0;
++        }
++    }
++    return -1;
++}
++
++static int pw_parse_long_span(const char *s, long n, long *out) {
++    char buf[48];
++    char *end = 0;
++    if (n <= 0 || tx_copy(buf, (long)sizeof buf, s, n)) return -1;
++    if (tx_strtol_r(buf, &end, 10, out) || !end || *end != 0) return -1;
++    return 0;
++}
++
++static int pw_load_windows(const char *path, int *plan_lanes) {
++    unsigned char *buf = 0;
++    int64_t n = 0;
++    int rc = sy_read_file(path, &buf, &n, PW_WIN_CAP);
++    if (rc) return pw_refuse(pw_errno_tag(rc), path);
++
++    *plan_lanes = -1;
++    pw_nwins = 0;
++    pw_nphases = 0;
++
++    tx_iter_t it;
++    tx_iter_init(&it, (const char *)buf, (long)n);
++    while (tx_line_next(&it) == 1) {
++        const char *ln = it.s + it.off;
++        long l = it.len;
++        if (l == 0) continue;
++        if (ln[0] == '#') {
++            const char *lk = "# window-lanes=";
++            long lkl = 15;
++            if (l > lkl && tx_prefix(ln, l, lk, lkl)) {
++                long kv = 0;
++                if (pw_parse_long_span(ln + lkl, l - lkl, &kv) || kv < 1 || kv > 8) {
++                    mm_free(buf);
++                    return pw_refuse("invalid-window-lanes", path);
++                }
++                *plan_lanes = (int)kv;
++            }
++            continue;
++        }
++        if (tx_prefix(ln, l, "window\t", 7)) continue;
++        long fcnt = tx_fields(ln, l, '\t');
++        if (fcnt < 5) {
++            mm_free(buf);
++            return pw_refuse("windows-schema-mismatch", path);
++        }
++        long wo = 0, wl = 0, po = 0, pl = 0;
++        if (tx_field(ln, l, '\t', 0, &wo, &wl) || tx_field(ln, l, '\t', 2, &po, &pl) || wl <= 0 || pl <= 0) {
++            mm_free(buf);
++            return pw_refuse("windows-bad-row", path);
++        }
++        if (pw_nwins >= PW_MAX_WINS) {
++            mm_free(buf);
++            return pw_refuse("windows-over-cap", path);
++        }
++        if (tx_copy(pw_wins[pw_nwins].wid, 32, ln + wo, wl) ||
++            tx_copy(pw_wins[pw_nwins].phase, 32, ln + po, pl)) {
++            mm_free(buf);
++            return pw_refuse("windows-field-over-cap", path);
++        }
++        pw_wins[pw_nwins].done = 0;
++        pw_wins[pw_nwins].saw124 = 0;
++        int ps = pw_phase_slot(ln + po, pl);
++        if (ps < 0) {
++            mm_free(buf);
++            return pw_refuse("phases-over-cap", path);
++        }
++        pw_phases[ps].total++;
++        pw_nwins++;
++    }
++    mm_free(buf);
++    if (pw_nwins == 0) return pw_refuse("empty-windows", path);
++    return 0;
++}
++
++typedef struct {
++    int done_wins;
++    int obs_lanes;
++    int seen_done;
++    long last_ok_idx;
++    long last_win_idx;
++    long last_stop_idx;
++    char last_win[32];
++    char last_phase[32];
++} PwLogStat;
++
++static int pw_load_log(const char *path, PwLogStat *st) {
++    unsigned char *buf = 0;
++    int64_t n = 0;
++    int rc = sy_read_file(path, &buf, &n, PW_LOG_CAP);
++    if (rc) return pw_refuse(pw_errno_tag(rc), path);
++
++    st->done_wins = 0;
++    st->obs_lanes = -1;
++    st->seen_done = 0;
++    st->last_ok_idx = -1;
++    st->last_win_idx = -1;
++    st->last_stop_idx = -1;
++    tx_copy(st->last_win, 32, "none", 4);
++    tx_copy(st->last_phase, 32, "none", 4);
++    pw_nrc124 = 0;
++
++    tx_iter_t it;
++    tx_iter_init(&it, (const char *)buf, (long)n);
++    long line_idx = 0;
++    while (tx_line_next(&it) == 1) {
++        const char *ln = it.s + it.off;
++        long l = it.len;
++        if (tx_prefix(ln, l, "PRERUN_WINDOW\t", 14)) {
++            long wo = 0, wl = 0, po = 0, pl = 0, ro = 0, rl = 0, rval = -1;
++            st->last_win_idx = line_idx;
++            if (!pw_kv_span(ln, l, "window=", 7, &wo, &wl) &&
++                !pw_kv_span(ln, l, "rc=", 3, &ro, &rl) &&
++                !pw_parse_long_span(ln + ro, rl, &rval)) {
++                int wi = pw_find_win(ln + wo, wl);
++                if (rval == 0 && wi >= 0) {
++                    if (!pw_wins[wi].done) {
++                        pw_wins[wi].done = 1;
++                        st->done_wins++;
++                        int ps = pw_phase_slot(pw_wins[wi].phase, tx_len(pw_wins[wi].phase, 32));
++                        if (ps >= 0) pw_phases[ps].done++;
++                    }
++                    st->last_ok_idx = line_idx;
++                    (void)tx_copy(st->last_win, 32, pw_wins[wi].wid, tx_len(pw_wins[wi].wid, 32));
++                    (void)tx_copy(st->last_phase, 32, pw_wins[wi].phase, tx_len(pw_wins[wi].phase, 32));
++                } else if (rval == 124 && wi >= 0) {
++                    if (!pw_wins[wi].saw124) {
++                        pw_wins[wi].saw124 = 1;
++                        pw_rc124_order[pw_nrc124++] = wi;
++                    }
++                }
++                if (st->last_ok_idx < 0) {
++                    (void)tx_copy(st->last_win, 32, ln + wo, wl);
++                    if (!pw_kv_span(ln, l, "phase=", 6, &po, &pl)) {
++                        (void)tx_copy(st->last_phase, 32, ln + po, pl);
++                    }
++                }
++            }
++        } else if (tx_prefix(ln, l, "PRERUN_KEEP_GOING\t", 18)) {
++            long wo = 0, wl = 0;
++            if (!pw_kv_span(ln, l, "window=", 7, &wo, &wl)) {
++                int wi = pw_find_win(ln + wo, wl);
++                if (wi >= 0 && !pw_wins[wi].done) {
++                    pw_wins[wi].done = 1;
++                    st->done_wins++;
++                    int ps = pw_phase_slot(pw_wins[wi].phase, tx_len(pw_wins[wi].phase, 32));
++                    if (ps >= 0) pw_phases[ps].done++;
++                    st->last_ok_idx = line_idx;
++                    (void)tx_copy(st->last_win, 32, pw_wins[wi].wid, tx_len(pw_wins[wi].wid, 32));
++                    (void)tx_copy(st->last_phase, 32, pw_wins[wi].phase, tx_len(pw_wins[wi].phase, 32));
++                }
++            }
++        } else if (tx_prefix(ln, l, "PRERUN_LANES\t", 13)) {
++            long wo = 0, wl = 0, kval = 0;
++            if (!pw_kv_span(ln, l, "windows=", 8, &wo, &wl) &&
++                !pw_parse_long_span(ln + wo, wl, &kval) &&
++                kval >= 1 && kval <= 8) {
++                st->obs_lanes = (int)kval;
++            }
++        } else if (tx_prefix(ln, l, "PRERUN_STOP\t", 12) ||
++                   tx_prefix(ln, l, "PRERUN_PRODUCT_RED_STOP\t", 24)) {
++            st->last_stop_idx = line_idx;
++        } else if (tx_prefix(ln, l, "PRERUN_RUN\tstatus=DONE", 22)) {
++            st->seen_done = 1;
++        }
++        line_idx++;
++    }
++    mm_free(buf);
++    return 0;
++}
++
++typedef struct {
++    int has_first;
++    long first_epoch_s;
++    long first_done;
++    double first_prerun_min;
++    int has_prev2;
++    long prev2_epoch_s;
++    long prev2_done;
++    int has_prev;
++    long prev_epoch_s;
++    long prev_done;
++} PwRateHist;
++
++static const char *const pw_rate_cols[PW_RATE_COLS] = {
++    "sample_ts",
++    "epoch_s",
++    "elapsed_since_chain_start_min",
++    "elapsed_since_prerun_ids_min",
++    "done_windows",
++    "total_windows",
++    "last_window",
++    "current_phase",
++    "done_by_phase",
++    "rem_by_phase",
++    "rate_win_per_min",
++    "eta_prerun_rem_min",
++    "est_prerun_end_ts",
++    "est_start_to_pub_min",
++    "note"
++};
++
++static int pw_load_rate(const char *path, PwRateHist *rh) {
++    unsigned char *buf = 0;
++    int64_t n = 0;
++    int rc = sy_read_file(path, &buf, &n, PW_RATE_CAP);
++    if (rc) return pw_refuse(pw_errno_tag(rc), path);
++
++    tx_iter_t it;
++    tx_iter_init(&it, (const char *)buf, (long)n);
++    int cols = 0, r, rows = 0;
++    while ((r = tv_row_next(&it, &cols)) == 1) {
++        if (cols != PW_RATE_COLS) {
++            mm_free(buf);
++            return pw_refuse("rate-schema-mismatch", path);
++        }
++        if (rows == 0) {
++            for (int c = 0; c < PW_RATE_COLS; c++) {
++                long fo = 0, fl = 0;
++                long expect_l = tx_len(pw_rate_cols[c], 64);
++                if (tv_field(&it, c, &fo, &fl) || fl != expect_l ||
++                    !tx_same(it.s + fo, fl, pw_rate_cols[c], expect_l)) {
++                    mm_free(buf);
++                    return pw_refuse("rate-header-mismatch", path);
++                }
++            }
++            rows++;
++            continue;
++        }
++        long eo = 0, el = 0, mo = 0, ml = 0, doff = 0, dlen = 0;
++        long ep = 0, dv = 0;
++        if (tv_field(&it, 1, &eo, &el) ||
++            tv_field(&it, 3, &mo, &ml) ||
++            tv_field(&it, 4, &doff, &dlen) ||
++            pw_parse_long_span(it.s + eo, el, &ep) ||
++            pw_parse_long_span(it.s + doff, dlen, &dv)) {
++            mm_free(buf);
++            return pw_refuse("rate-bad-numeric-row", path);
++        }
++        if (!rh->has_first) {
++            char mbuf[32];
++            char *mend = 0;
++            double mval = -1.0;
++            rh->has_first = 1;
++            rh->first_epoch_s = ep;
++            rh->first_done = dv;
++            rh->first_prerun_min = -1.0;
++            if (!tx_copy(mbuf, (long)sizeof mbuf, it.s + mo, ml) &&
++                !tx_strtod_r(mbuf, &mend, &mval) &&
++                mend && *mend == 0 && mval >= 0.0) {
++                rh->first_prerun_min = mval;
++            }
++        }
++        if (rh->has_prev) {
++            rh->has_prev2 = 1;
++            rh->prev2_epoch_s = rh->prev_epoch_s;
++            rh->prev2_done = rh->prev_done;
++        }
++        rh->has_prev = 1;
++        rh->prev_epoch_s = ep;
++        rh->prev_done = dv;
++        rows++;
++    }
++    mm_free(buf);
++    if (r < 0) return pw_refuse("rate-iter-error", path);
++    if (rows == 0) return pw_refuse("rate-empty-file", path);
++    return 0;
++}
++
++static void pw_format_rc124(char *out, int cap) {
++    if (pw_nrc124 == 0) {
++        (void)tx_copy(out, cap, "none", 4);
++        return;
++    }
++    int pos = 0;
++    for (int i = 0; i < pw_nrc124; i++) {
++        const char *w = pw_wins[pw_rc124_order[i]].wid;
++        int n = snprintf(out + pos, (size_t)(cap - pos), "%s%s", i ? "," : "", w);
++        if (n < 0 || n >= cap - pos) break;
++        pos += n;
++    }
++}
++
++int main(int argc, char **argv) {
++    const char *win_p = 0, *log_p = 0, *rate_p = 0, *dir_p = 0;
++    char def_win[PW_PATH], def_log[PW_PATH];
++    int has_now = 0;
++    long now_s = 0, prerun_start_s = 0;
++
++    for (int i = 1; i < argc; i++) {
++        if (tx_eqz(argv[i], "--windows") && i + 1 < argc) win_p = argv[++i];
++        else if (tx_eqz(argv[i], "--log") && i + 1 < argc) log_p = argv[++i];
++        else if (tx_eqz(argv[i], "--rate-tsv") && i + 1 < argc) rate_p = argv[++i];
++        else if (tx_eqz(argv[i], "--prerun-dir") && i + 1 < argc) dir_p = argv[++i];
++        else if (tx_eqz(argv[i], "--now") && i + 1 < argc) {
++            if (pw_parse_long_span(argv[i + 1], tx_len(argv[i + 1], 64), &now_s) || now_s <= 0)
++                return pw_refuse("invalid-now", argv[i + 1]);
++            has_now = 1;
++            i++;
++        } else if (tx_eqz(argv[i], "--prerun-start") && i + 1 < argc) {
++            if (pw_parse_long_span(argv[i + 1], tx_len(argv[i + 1], 64), &prerun_start_s) || prerun_start_s <= 0)
++                return pw_refuse("invalid-prerun-start", argv[i + 1]);
++            i++;
++        } else {
++            return pw_refuse("unknown-arg", argv[i]);
++        }
++    }
++
++    if (dir_p && dir_p[0]) {
++        if (!win_p) {
++            if (cx_fmt(def_win, sizeof def_win, "%s/windows.tsv", dir_p)) return pw_refuse("path-bound", dir_p);
++            win_p = def_win;
++        }
++        if (!log_p) {
++            if (cx_fmt(def_log, sizeof def_log, "%s/supervise.log", dir_p)) return pw_refuse("path-bound", dir_p);
++            log_p = def_log;
++        }
++    }
++    if (!win_p || !win_p[0] || !log_p || !log_p[0]) return pw_refuse("missing-windows-or-log", "-");
++
++    int plan_lanes = -1;
++    if (pw_load_windows(win_p, &plan_lanes)) return 2;
++
++    PwLogStat st;
++    if (pw_load_log(log_p, &st)) return 2;
++
++    PwRateHist rh;
++    memset(&rh, 0, sizeof rh);
++    if (rate_p && rate_p[0]) {
++        if (pw_load_rate(rate_p, &rh)) return 2;
++    }
++
++    const char *state = "RUNNING";
++    int exit_rc = 0;
++    if (st.seen_done && st.done_wins == pw_nwins) {
++        state = "DONE";
++        exit_rc = 0;
++    } else if (st.seen_done && st.done_wins < pw_nwins) {
++        state = "INCOMPLETE";
++        exit_rc = 1;
++    } else if (st.last_stop_idx >= 0 && st.last_stop_idx > st.last_win_idx) {
++        state = "STOPPED";
++        exit_rc = 1;
++    }
++
++    int freeze_at_last_sample = (tx_eqz(state, "DONE") && rh.has_prev && rh.prev_done == st.done_wins);
++    if (!has_now && !freeze_at_last_sample) {
++        now_s = sy_wall_s();
++        if (now_s <= 0) return pw_refuse("wall-clock-unavailable", "-");
++    }
++
++    char rate_inc_str[32], rate_cum_str[32], eta_str[32], lanes_str[32], rc124_str[2048];
++    double r_inc = -1.0, r_cum = -1.0, eta_val = 0.0;
++    int has_r_inc = 0, has_r_cum = 0, has_eta = 0;
++    long eval_now_s = freeze_at_last_sample ? rh.prev_epoch_s : now_s;
++
++    if (freeze_at_last_sample) {
++        if (rh.has_prev2 && rh.prev_epoch_s > rh.prev2_epoch_s && rh.prev_done >= rh.prev2_done) {
++            r_inc = (double)(rh.prev_done - rh.prev2_done) * 60.0 / (double)(rh.prev_epoch_s - rh.prev2_epoch_s);
++            if (!cx_fmt(rate_inc_str, sizeof rate_inc_str, "%.2f", r_inc)) has_r_inc = 1;
++        }
++    } else if (rh.has_prev && eval_now_s > rh.prev_epoch_s && st.done_wins >= rh.prev_done) {
++        r_inc = (double)(st.done_wins - rh.prev_done) * 60.0 / (double)(eval_now_s - rh.prev_epoch_s);
++        if (!cx_fmt(rate_inc_str, sizeof rate_inc_str, "%.2f", r_inc)) has_r_inc = 1;
++    }
++    if (!has_r_inc) (void)tx_copy(rate_inc_str, (long)sizeof rate_inc_str, "UNMEASURED", 10);
++
++    long eff_start = prerun_start_s;
++    if (eff_start <= 0 && rh.has_first && rh.first_prerun_min >= 0.0) {
++        eff_start = rh.first_epoch_s - (long)(rh.first_prerun_min * 60.0 + 0.5);
++    }
++    if (eff_start > 0 && eval_now_s > eff_start) {
++        r_cum = (double)st.done_wins * 60.0 / (double)(eval_now_s - eff_start);
++        if (!cx_fmt(rate_cum_str, sizeof rate_cum_str, "%.2f", r_cum)) has_r_cum = 1;
++    }
++    if (!has_r_cum) (void)tx_copy(rate_cum_str, (long)sizeof rate_cum_str, "UNMEASURED", 10);
++
++    if (st.done_wins == pw_nwins) {
++        (void)tx_copy(eta_str, (long)sizeof eta_str, "0", 1);
++    } else {
++        double use_r = (has_r_inc && r_inc > 0.0) ? r_inc : (has_r_cum && r_cum > 0.0) ? r_cum : -1.0;
++        if (use_r > 0.0) {
++            eta_val = (double)(pw_nwins - st.done_wins) / use_r;
++            if (!cx_fmt(eta_str, sizeof eta_str, "%.1f", eta_val)) has_eta = 1;
++        }
++        if (!has_eta) (void)tx_copy(eta_str, (long)sizeof eta_str, "UNMEASURED", 10);
++    }
++
++    int eff_lanes = st.obs_lanes > 0 ? st.obs_lanes : plan_lanes;
++    if (eff_lanes > 0) {
++        if (cx_fmt(lanes_str, sizeof lanes_str, "%d", eff_lanes))
++            (void)tx_copy(lanes_str, (long)sizeof lanes_str, "UNMEASURED", 10);
++    } else {
++        (void)tx_copy(lanes_str, (long)sizeof lanes_str, "UNMEASURED", 10);
++    }
++
++    pw_format_rc124(rc124_str, (int)sizeof rc124_str);
++
++    printf("PRERUN_WATCH\tstate=%s\tdone=%d/%d\trate_inc=%s\trate_cum=%s\teta_min=%s\trc124=%s\tlanes=%s\tlast=%s\tphase=%s\n",
++           state, st.done_wins, pw_nwins, rate_inc_str, rate_cum_str, eta_str,
++           rc124_str, lanes_str, st.last_win, st.last_phase);
++    return exit_rc;
++}
