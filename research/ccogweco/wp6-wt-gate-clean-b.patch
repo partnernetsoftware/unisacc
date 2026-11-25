@@ -1,0 +1,75 @@
+diff --git a/tests/batches.tsv b/tests/batches.tsv
+index 0d44dfa..dcecb42 100644
+--- a/tests/batches.tsv
++++ b/tests/batches.tsv
+@@ -491,7 +491,7 @@ cross-targets-osx	IMPLEMENTED	product	tests/check-cross-targets.cx	SOURCE	lnx/x8
+ cross-targets-win	IMPLEMENTED	product	tests/check-cross-targets.cx	SOURCE	lnx/x86_64	55	-	tests/check-cross-targets.cx	{root};--target;win/x86_64;--target;win/arm64	product.cross-targets	rc0:CROSS_TARGETS	product	daily
+ core-opkinds	IMPLEMENTED	contract	tests/check-core-opkinds.cx	SOURCE	lnx/x86_64	55	-	tests/check-core-opkinds.cx	-	contract.core-opkinds	rc0:CORE_OPKINDS	product	commit
+ wave-domains	IMPLEMENTED	contract	tests/check-wave-domains.cx	SOURCE	lnx/x86_64	55	-	tests/check-wave-domains.cx	-	tests.wave-domains	rc0:WAVE_DOMAINS	product	commit
+-wt-gate-clean	IMPLEMENTED	contract	tests/check-wt-gate.cx	SOURCE	lnx/x86_64	55	-	tests/check-wt-gate.cx	{root};{out};clean	contract.wt-gate-clean	rc0:WT_GATE	product	daily
++wt-gate-clean	IMPLEMENTED	contract	tests/check-wt-gate.cx	SOURCE	lnx/x86_64	55	all-waves-tool:path	tests/check-wt-gate.cx	{root};{out};clean;--all-waves;{all-waves-tool}	contract.wt-gate-clean	rc0:WT_GATE	product	daily
+ wt-gate-probe	PLANNED	contract	tests/check-wt-gate.cx	SOURCE	lnx/x86_64	55	-	tests/check-wt-gate.cx	{root};{out};probe	contract.wt-gate-probe	NOT_READY	product	release
+ wt-gate-clean-win	PLANNED	platform	tests/check-wt-gate.cx	SOURCE	win/x86_64	55	-	tests/check-wt-gate.cx	{root};{out};clean	platform.wt-gate-clean-win	NOT_READY	product	release
+ decode-sbout	IMPLEMENTED	library	tools/check-decode-sbout.cx	SOURCE	lnx/x86_64	55	-	tools/check-decode-sbout.cx	-	tools.decode-sbout	rc0:DECODE_SBOUT	product	daily
+diff --git a/tests/check-wt-gate.cx b/tests/check-wt-gate.cx
+index e7e4758..127ded8 100644
+--- a/tests/check-wt-gate.cx
++++ b/tests/check-wt-gate.cx
+@@ -25,7 +25,7 @@
+ #pragma unisa use mem.bytes
+ #pragma unisa use text.text
+ 
+-static char g_root[4096], g_tab[4400], g_keep[4400], g_aw[4400];
++static char g_root[4096], g_tab[4400], g_keep[4400], g_aw[4400], g_rbmat[4400], g_awmat[4400];
+ static int asserts, failed, g_need_restore;
+ static char g_w[4400];
+ static void cleanup_scratch(void) {
+@@ -40,6 +40,10 @@ static void restore_batches(void) {
+     if (kb) { (void)cx_write(g_tab, kb, kn); free(kb); }
+     g_need_restore = 0;
+ }
++static void setmat(char *d, size_t n, const char *v) {
++    if (strlen(v) >= n) die("material path length");
++    if (mm_copy(d, n, v, strlen(v) + 1)) die("material copy");
++}
+ static void ck(int ok, const char *what, const char *detail) {
+     asserts++;
+     if (!ok) failed++;
+@@ -70,11 +74,16 @@ static int has(const char *s, const char *want) {
+ }
+ int main(int argc, char **argv) {
+     char w[4400], sess_parent[4400], *o, *probe;
+-    int rc, a = argc >= 2 && tx_eqz(argv[1], "--") ? 2 : 1, m_clean, m_probe;
+-    if (argc != a + 3) die("usage: ROOT SESSION_PARENT clean|probe");
++    int rc, a = argc >= 2 && tx_eqz(argv[1], "--") ? 2 : 1, m_clean, m_probe, i;
++    if (argc < a + 3) die("usage: ROOT SESSION_PARENT clean|probe [--all-waves ABS] [--run-batch ABS]");
+     m_clean = tx_eqz(argv[a + 2], "clean");
+     m_probe = tx_eqz(argv[a + 2], "probe");
+     if (!m_clean && !m_probe) die("usage: mode must be clean or probe");
++    for (i = a + 3; i < argc; i++) {
++        if (!strcmp(argv[i], "--all-waves") && i + 1 < argc && argv[i + 1][0] == '/') setmat(g_awmat, sizeof g_awmat, argv[++i]);
++        else if (!strcmp(argv[i], "--run-batch") && i + 1 < argc && argv[i + 1][0] == '/') setmat(g_rbmat, sizeof g_rbmat, argv[++i]);
++        else die("usage: --all-waves ABS | --run-batch ABS");
++    }
+     if (!realpath(argv[a], g_root)) die("root");
+     if (!realpath(argv[a + 1], sess_parent)) {
+         /* run-batch hands {out}, a directory it owns; create it when this is the first batch there. */
+@@ -94,10 +103,15 @@ int main(int argc, char **argv) {
+     /* all-waves in -run mode demands a native run-batch beside itself: build both natives once, scratch-local.
+        The probe clone of step 2 is made in the same parallel step (it only reads .git); the product launcher
+        is not tracked, so the clone gets its own copy of ROOT's.  rc: 3 = a native build failed, 4 = clone failed. */
+-    {   char a[9000];
+-        char cl[4600] = "true", cpl[4600] = "true";
++    {   char a[11000];
++        char cl[4600] = "true", cpl[4600] = "true", rb[5200], aw[5200];
++        /* 材料相:批次可给出预编执行体;给出的一方不再现场编,未给出的照旧现场编. */
+         if (m_probe && (cx_fmt(cl, sizeof cl, "git clone --local %s %s/pr", g_root, w) || cx_fmt(cpl, sizeof cpl, "cp ./unisacc.com %s/pr/unisacc.com", w))) die("cmd");
+-        if (cx_fmt(a, sizeof a, "mkdir -p %s/nat && { sh ./unisacc.com tests/run-batch.cx -o %s/nat/run-batch & p1=$!; { %s; } >/dev/null 2>&1 & p2=$!; sh ./unisacc.com tools/all-waves.cx -o %s/nat/all-waves; r=$?; wait $p1 || r=3; [ $r = 0 ] || r=3; wait $p2 || r=4; [ $r != 0 ] || %s || r=4; exit $r; }", w, w, cl, w, cpl)) die("cmd");
++        if (g_rbmat[0]) { if (sy_exists(g_rbmat) != 1) die("run-batch material"); if (cx_fmt(rb, sizeof rb, "cp '%s' %s/nat/run-batch;", g_rbmat, w)) die("cmd"); }
++        else if (cx_fmt(rb, sizeof rb, "( sh ./unisacc.com tests/run-batch.cx -o %s/nat/run-batch ) & p1=$!;", w)) die("cmd");
++        if (g_awmat[0]) { if (sy_exists(g_awmat) != 1) die("all-waves material"); if (cx_fmt(aw, sizeof aw, "cp '%s' %s/nat/all-waves; r=$?;", g_awmat, w)) die("cmd"); }
++        else if (cx_fmt(aw, sizeof aw, "sh ./unisacc.com tools/all-waves.cx -o %s/nat/all-waves; r=$?;", w)) die("cmd");
++        if (cx_fmt(a, sizeof a, "mkdir -p %s/nat && { %s { %s; } >/dev/null 2>&1 & p2=$!; %s [ $r = 0 ] || r=3; [ -z \"${p1:-}\" ] || wait $p1 || r=3; wait $p2 || r=4; [ $r != 0 ] || %s || r=4; exit $r; }", w, rb, cl, aw, cpl)) die("cmd");
+         o = run(a, &rc);
+         free(o);
+         if (rc == 4) die("local clone");

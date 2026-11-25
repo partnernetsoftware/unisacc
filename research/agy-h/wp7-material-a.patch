@@ -1,0 +1,344 @@
+diff --git a/tests/batches.tsv b/tests/batches.tsv
+index 0d44dfa..23260de 100644
+--- a/tests/batches.tsv
++++ b/tests/batches.tsv
+@@ -405,7 +405,7 @@ maxu	IMPLEMENTED	contract	tools/check-maxu.cx	SOURCE	lnx/x86_64	55	-	tools/check
+ tbin-wiring	IMPLEMENTED	interfaces	tools/check-tapebin-wiring.cx	SOURCE	lnx/x86_64	55	-	tools/check-tapebin-wiring.cx	-	interfaces.tbin-wiring	rc0:TAPEBIN_WIRING	product	daily
+ stdio	IMPLEMENTED	contract	tools/check-stdio.cx	SOURCE	lnx/x86_64	55	-	tools/check-stdio.cx	-	contract.stdio	rc0:CHECK_STDIO	product	daily
+ asmtext-tables	IMPLEMENTED	contract	tools/check-asmtext-tables.cx	SOURCE	lnx/x86_64	55	-	tools/check-asmtext-tables.cx	-	contract.asmtext-tables	rc0:ASMTEXT_TABLES	product	daily
+-cx-procguard	IMPLEMENTED	interfaces	tools/check-procguard.cx	SOURCE	lnx/x86_64	55	-	tools/check-procguard.cx	-	interfaces.cx-procguard	rc0:CX_PROCGUARD	product	daily
++cx-procguard	IMPLEMENTED	interfaces	tools/check-procguard.cx	SOURCE	lnx/x86_64	55	procguard-tool:path	tools/check-procguard.cx	{procguard-tool}	interfaces.cx-procguard	rc0:CX_PROCGUARD	product	daily
+ cx-reaper	IMPLEMENTED	interfaces	tools/check-reaper.cx	SOURCE	lnx/x86_64	55	-	tools/check-reaper.cx	-	interfaces.cx-reaper	rc0:CX_REAPER	product	commit
+ cx-childdepth	IMPLEMENTED	interfaces	tools/check-childdepth.cx	SOURCE	lnx/x86_64	55	-	tools/check-childdepth.cx	-	interfaces.cx-childdepth	rc0:CHILD_DEPTH	product	daily
+ cx-register	IMPLEMENTED	interfaces	tools/check-register.cx	SOURCE	lnx/x86_64	55	regprep-dir	tools/check-register.cx	--out;{regprep-dir}	interfaces.cx-register	rc0:CX_REGISTER	product	daily
+diff --git a/tools/check-procguard.cx b/tools/check-procguard.cx
+index 3d942b5..b8ddb0c 100644
+--- a/tools/check-procguard.cx
++++ b/tools/check-procguard.cx
+@@ -4,8 +4,11 @@
+ #pragma unisa use sys.posix
+ #pragma unisa use sys.time
+ #pragma unisa use text.text
++#pragma unisa use mem.bytes
++#pragma unisa use cxlib.toolprep
++#pragma unisa use cxlib.netpack
+ /* tools/check-procguard.cx -- checks tools/procguard.cx for real.
+-     sh ./unisacc.com tools/check-procguard.cx
++     sh ./unisacc.com tools/check-procguard.cx [-- [--probe|--no-probe] [PROCGUARD_BIN]]
+    Two throwaway symlinks pgA.cx/pgB.cx -> sleep; 6 A, 2 B, 4 plain (max 5).
+    dry-run must name A (pgA.cx:6) and signal nothing; under load /proc top can
+    be another .cx group so the same needle is retried ≤5, never relaxed.
+@@ -13,10 +16,12 @@
+    Pure observation fixtures cover strict age/CPU and signal eligibility edges.
+    Real deleted-cwd probes use default dry then explicit enforce; young sleep,
+    busy and existing directory suffix lookalikes survive. --probe runs only
+-   those real probes. Every enforce is restricted to this check's children.
++   those real probes; --no-probe runs the remainder without repeating probe.
++   Every enforce is restricted to this check's children.
+    Prints PASS/FAIL then CX_PROCGUARD<TAB>failed=N. L3: no #include, no libc. */
+ 
+ static int n_ok, n_bad;
++static char g_pg_bin[4400];
+ static void ok(int c, const char *name) { printf("%s %s\n", c ? "PASS" : "FAIL", name); if (c) n_ok++; else n_bad++; }
+ 
+ static int read_file(const char *path, char *buf, int cap) {
+@@ -50,21 +55,51 @@ static const char *sleep_bin(void) {
+     return 0;
+ }
+ 
+-/* run procguard through the product, capture stdout */
++static int spawn_bound(char **av) {
++    sy_spawn_t o; sy_child_t c;
++    sy_spawn_init(&o);
++    o.argv = av; o.pgroup = -1; o.deadline_ms = 60000;
++    o.in_fd = SY_STDIO_NULL; o.out_fd = SY_STDIO_NULL; o.err_fd = SY_STDIO_NULL;
++    if (sy_proc_spawn(&o, &c) < 0) return -1;
++    (void)sy_proc_close(&c);
++    return c.pid;
++}
++
++static int run_pg_argv(char **av, const char *log_env, char *out, int cap) {
++    np_result r; char why[512], ev[1200]; char *env[2] = {0, 0}; int rc;
++    if (out && cap > 0) out[0] = 0;
++    if (log_env && log_env[0]) {
++        if (cx_fmt(ev, sizeof ev, "PG_LOG=%s", log_env)) return -EINVAL;
++        env[0] = ev;
++    }
++    if (np_run(av, 0, log_env ? env : 0, 30, &r, why, sizeof why)) return -1;
++    if (out && cap > 0 && r.out && r.outn) {
++        long n = (long)r.outn;
++        if (n >= cap) n = cap - 1;
++        if (mm_copy(out, (size_t)cap, r.out, n)) { np_free(&r); return -EINVAL; }
++        out[n] = 0;
++    }
++    rc = r.rc;
++    np_free(&r);
++    return rc;
++}
++
++/* run compiled procguard tool, capture stdout */
+ static int run_pg(const char *verb, int max, const char *log, char *out, int cap) {
+-    char cmd[2048];
+-    char *av[4];
+-    int cut = 0;
+-    av[0] = "sh"; av[1] = "-c"; av[2] = cmd; av[3] = 0;
+-    if (cx_fmt(cmd, sizeof cmd, "PG_LOG='%s' sh %s tools/procguard.cx --once --%s --max %d --only-parent %d",
+-               log, sy_env_or("UNISACC", "./unisacc.com"), verb, max, sy_pid())) return -EINVAL;
+-    return sy_run(av, out, cap, &cut);
++    char vflag[64], maxs[32], pids[32];
++    char *av[8];
++    if (cx_fmt(vflag, sizeof vflag, "--%s", verb) ||
++        cx_fmt(maxs, sizeof maxs, "%d", max) ||
++        cx_fmt(pids, sizeof pids, "%d", sy_pid())) return -EINVAL;
++    av[0] = g_pg_bin; av[1] = "--once"; av[2] = vflag;
++    av[3] = "--max"; av[4] = maxs; av[5] = "--only-parent"; av[6] = pids; av[7] = 0;
++    return run_pg_argv(av, log, out, cap);
+ }
+ 
+ /* Exercise observable decisions; every signalled pid is our direct child. */
+ static void runaway_probe(const char *dir, const char *log) {
+-    char cmd[4096], out[8192], cwd[1200], link[1200], busy[1200], sleeper[1200], named[1200], namedlink[1200], spaced[1200], spacedlink[1200];
+-    int p[5], i, rc, cut = 0, clean = 1;
++    char cmd[4096], out[8192], cwd[1200], link[1200], busy[1200], sleeper[1200], named[1200], namedlink[1200], spaced[1200], spacedlink[1200], pids[32];
++    int p[5], i, rc, clean = 1;
+     const char *sb = sleep_bin();
+     char *av[] = {"sh", "-c", cmd, 0};
+     cx_fmt(cwd, sizeof cwd, "%s/deleted", dir);
+@@ -73,19 +108,21 @@ static void runaway_probe(const char *dir, const char *log) {
+     cx_fmt(sleeper, sizeof sleeper, "%s/sleeper.cx", dir); sy_symlink(sb, sleeper);
+     sy_mkdir(cwd, 0700); sy_symlink(sb, link); sy_symlink("/bin/sh", busy);
+     cx_fmt(cmd, sizeof cmd, "cd '%s' && exec '%s' 55", cwd, link);
+-    p[0] = sy_spawn(av);
+-    { char *a[] = {sleeper, "55", 0}; p[1] = sy_spawn(a); }
++    p[0] = spawn_bound(av);
++    { char *a[] = {sleeper, "55", 0}; p[1] = spawn_bound(a); }
+     cx_fmt(cmd, sizeof cmd, "exec '%s' -c 'while :; do :; done'", busy);
+-    p[2] = sy_spawn(av);
++    p[2] = spawn_bound(av);
+     cx_fmt(named, sizeof named, "%s/foo(deleted)", dir); sy_mkdir(named, 0700);
+     cx_fmt(namedlink, sizeof namedlink, "%s/named.cx", dir); sy_symlink(sb, namedlink);
+-    cx_fmt(cmd, sizeof cmd, "cd '%s' && exec '%s' 55", named, namedlink); p[3] = sy_spawn(av);
++    cx_fmt(cmd, sizeof cmd, "cd '%s' && exec '%s' 55", named, namedlink); p[3] = spawn_bound(av);
+     cx_fmt(spaced, sizeof spaced, "%s/foo (deleted)", dir); sy_mkdir(spaced, 0700);
+     cx_fmt(spacedlink, sizeof spacedlink, "%s/spaced.cx", dir); sy_symlink(sb, spacedlink);
+-    cx_fmt(cmd, sizeof cmd, "cd '%s' && exec '%s' 55", spaced, spacedlink); p[4] = sy_spawn(av);
++    cx_fmt(cmd, sizeof cmd, "cd '%s' && exec '%s' 55", spaced, spacedlink); p[4] = spawn_bound(av);
+     sy_sleep_ms(300); sy_rmdir(cwd);
+-    cx_fmt(cmd, sizeof cmd, "sh %s tools/procguard.cx --once --max 100000 --only-parent %d --log '%s'", sy_env_or("UNISACC", "./unisacc.com"), sy_pid(), log);
+-    rc = sy_run(av, out, sizeof out, &cut);
++    if (cx_fmt(pids, sizeof pids, "%d", sy_pid())) return;
++    {   char *pv[] = {g_pg_bin, "--once", "--max", "100000", "--only-parent", pids, "--log", (char *)log, 0};
++        rc = run_pg_argv(pv, 0, out, sizeof out);
++    }
+     printf("PROBE_DEFAULT %s", out);
+     ok(rc == 0 && tx_contains(out, tx_len(out, sizeof out), "deleted-cwd=1", 13), "deleted cwd is an actual default-dry candidate");
+     ok(alive(p[0]) && alive(p[1]) && alive(p[2]), "default dry preserves deleted target and sleep/busy controls");
+@@ -106,16 +143,25 @@ static void runaway_probe(const char *dir, const char *log) {
+ }
+ 
+ static void fixtures(const char *args, const char *prefix, const char *expected, const char **names, int count) {
+-    char cmd[4096], out[4096]; int cut = 0, rc, i, pos = 0, n;
+-    char *av[] = {"sh", "-c", cmd, 0};
+-    cx_fmt(cmd, sizeof cmd, "sh %s tools/procguard.cx %s", sy_env_or("UNISACC", "./unisacc.com"), args);
+-    rc = sy_run(av, out, sizeof out, &cut); n = tx_len(out, sizeof out);
++    char copy[2048], out[4096]; char *av[160]; char *p = copy;
++    int rc, i, pos = 0, n, na = 0;
++    if (cx_fmt(copy, sizeof copy, "%s", args)) { ok(0, "fixture args overflow"); return; }
++    av[na++] = g_pg_bin;
++    while (*p && na + 1 < 160) {
++        while (*p == ' ') p++;
++        if (!*p) break;
++        av[na++] = p;
++        while (*p && *p != ' ') p++;
++        if (*p) *p++ = 0;
++    }
++    av[na] = 0;
++    rc = run_pg_argv(av, 0, out, sizeof out); n = tx_len(out, sizeof out);
+     for (i = 0; i < count; i++) {
+         int end = pos; char want[64];
+         while (end < n && out[end] != '\n') end++;
+         if (tx_eqz(prefix, "stopped")) cx_fmt(want, sizeof want, "kill=%c cont=%c", expected[i * 2], expected[i * 2 + 1]);
+         else cx_fmt(want, sizeof want, "%s%c", prefix, expected[i]);
+-        ok(rc == 0 && !cut && tx_contains(out + pos, end - pos, want, tx_len(want, sizeof want)), names[i]);
++        ok(rc == 0 && tx_contains(out + pos, end - pos, want, tx_len(want, sizeof want)), names[i]);
+         pos = end < n ? end + 1 : end;
+     }
+     ok(pos == n, "observation fixture emits exactly the requested rows");
+@@ -140,25 +186,44 @@ static void boundaries(void) {
+ }
+ 
+ int main(int argc, char **argv) {
+-    char dir[1024], pa[1100], pb[1100], log[1100];
+-    int pids[24], np = 0, i, rc;
++    char dir[1024], pa[1100], pb[1100], log[1100], root[4096], src[4400], why[256];
++    int pids[24], np = 0, i, rc, probe_only = 0, no_probe = 0;
+     char out[8192];
+     const char *sb = sleep_bin();
+-    (void)argv;
++    const char *tool_arg = 0;
++    for (i = 1; i < argc; i++) {
++        if (tx_eqz(argv[i], "--probe")) probe_only = 1;
++        else if (tx_eqz(argv[i], "--no-probe")) no_probe = 1;
++        else if (!tool_arg && argv[i][0] && argv[i][0] != '-') tool_arg = argv[i];
++        else { printf("FAIL usage\nCX_PROCGUARD\tfailed=1\n"); return 2; }
++    }
++    if (probe_only && no_probe) { printf("FAIL usage --probe with --no-probe\nCX_PROCGUARD\tfailed=1\n"); return 2; }
+     if (!sb) { printf("FAIL sleep binary\nCX_PROCGUARD\tfailed=1\n"); return 1; }
+     if (cx_fmt(dir, sizeof dir, "/tmp/cdx-procguard-check-XXXXXX") || !mkdtemp(dir)) return 2;
+     if (cx_fmt(pa, sizeof pa, "%s/pgA.cx", dir) || cx_fmt(pb, sizeof pb, "%s/pgB.cx", dir) || cx_fmt(log, sizeof log, "%s/log", dir))
+         return 2;
+-    if (argc > 1 && tx_eqz(argv[1], "--probe")) { runaway_probe(dir, log); cx_rmtree(dir); printf("CX_PROCGUARD\tfailed=%d\n", n_bad); return n_bad ? 1 : 0; }
++    if (tool_arg) {
++        if (cx_fmt(g_pg_bin, sizeof g_pg_bin, "%s", tool_arg) || sy_is_reg(g_pg_bin) != 1) {
++            printf("FAIL missing procguard-tool\nCX_PROCGUARD\tfailed=1\n"); cx_rmtree(dir); return 2;
++        }
++    } else {
++        if (sy_realpath(".", root, sizeof root) < 0 ||
++            cx_fmt(src, sizeof src, "%s/tools/procguard.cx", root) ||
++            cx_fmt(g_pg_bin, sizeof g_pg_bin, "%s/procguard.native", dir) ||
++            tq_native(root, src, g_pg_bin, why, sizeof why)) {
++            printf("FAIL build procguard-tool\nCX_PROCGUARD\tfailed=1\n"); cx_rmtree(dir); return 2;
++        }
++    }
++    if (probe_only) { runaway_probe(dir, log); cx_rmtree(dir); printf("CX_PROCGUARD\tfailed=%d\n", n_bad); return n_bad ? 1 : 0; }
+     boundaries();
+-    runaway_probe(dir, log);
++    if (!no_probe) runaway_probe(dir, log);
+     sy_unlink(pa); sy_unlink(pb);
+     if (sy_symlink(sb, pa) < 0 || sy_symlink(sb, pb) < 0) { printf("FAIL cannot link the fixtures\nCX_PROCGUARD\tfailed=1\n"); return 1; }
+ 
+     /* 6 A, 2 B (same fixture family), 4 plain sleeps that carry no .cx */
+-    for (i = 0; i < 6; i++) { char *av[] = {pa, "60", 0}; int p = sy_spawn(av); if (p > 0) pids[np++] = p; }
+-    for (i = 0; i < 2; i++) { char *av[] = {pb, "60", 0}; int p = sy_spawn(av); if (p > 0) pids[np++] = p; }
+-    for (i = 0; i < 4; i++) { char *av[] = {"sleep", "60", 0}; int p = sy_spawn(av); if (p > 0) pids[np++] = p; }
++    for (i = 0; i < 6; i++) { char *av[] = {pa, "60", 0}; int p = spawn_bound(av); if (p > 0) pids[np++] = p; }
++    for (i = 0; i < 2; i++) { char *av[] = {pb, "60", 0}; int p = spawn_bound(av); if (p > 0) pids[np++] = p; }
++    for (i = 0; i < 4; i++) { char *av[] = {"sleep", "60", 0}; int p = spawn_bound(av); if (p > 0) pids[np++] = p; }
+     ok(np == 12, "spawn: 6 A + 2 B + 4 plain run");
+     sy_sleep_ms(300);
+ 
+@@ -198,7 +263,7 @@ int main(int argc, char **argv) {
+     }
+ 
+     /* residue: the next scan counts what the ENFORCE left behind, not what it signalled */
+-    for (i = 0; i < 2; i++) { char *av[] = {pa, "60", 0}; int p = sy_spawn(av); if (p > 0) pids[np++] = p; }
++    for (i = 0; i < 2; i++) { char *av[] = {pa, "60", 0}; int p = spawn_bound(av); if (p > 0) pids[np++] = p; }
+     sy_sleep_ms(200);
+     rc = run_pg("dry-run", 5, log, out, sizeof out);
+     ok(rc == 0, "residue scan exits 0");
+@@ -210,7 +275,7 @@ int main(int argc, char **argv) {
+     for (i = 12; i < np; i++) { sy_signal(pids[i], 9); sy_wait_status(pids[i], 0, 0, 0, 0); }
+     np = 12;
+     /* a clean kill reads back as 0, not as the number of signals sent */
+-    for (i = 0; i < 6; i++) { char *av[] = {pa, "60", 0}; int p = sy_spawn(av); if (p > 0) pids[np++] = p; }
++    for (i = 0; i < 6; i++) { char *av[] = {pa, "60", 0}; int p = spawn_bound(av); if (p > 0) pids[np++] = p; }
+     sy_sleep_ms(300);
+     rc = run_pg("enforce", 5, log, out, sizeof out);
+     ok(rc == 0 && tx_contains(out, tx_len(out, sizeof out), "killed=6", 8), "second enforce kills the fresh six");
+@@ -218,7 +283,7 @@ int main(int argc, char **argv) {
+     ok(rc == 0 && tx_contains(out, tx_len(out, sizeof out), "pgA.cx:0", 8), "residue reads back 0 when nothing survived");
+ 
+     {   /* an oversized log is rotated to .1 and started fresh */
+-        char big[1100], bak[1100], cmd[1200], o[2048];
++        char big[1100], bak[1100], o[2048];
+         int fd;
+         sy_stat_t st;
+         if (cx_fmt(big, sizeof big, "%s/big.log", dir) || cx_fmt(bak, sizeof bak, "%s/big.log.1", dir)) return 2;
+@@ -226,8 +291,9 @@ int main(int argc, char **argv) {
+         fd = sy_open(big, 1 | 0100 | 02000, 0644);
+         ok(fd >= 0 && sy_truncate(fd, 9L * 1024 * 1024) == 0, "oversized log prepared");
+         if (fd >= 0) sy_close(fd);
+-        if (cx_fmt(cmd, sizeof cmd, "sh %s tools/procguard.cx --once --dry-run --log '%s'", sy_env_or("UNISACC", "./unisacc.com"), big)) return 2;
+-        {   char *av[] = {"sh", "-c", cmd, 0}; int cut = 0; rc = sy_run(av, o, sizeof o, &cut); }
++        {   char *bv[] = {g_pg_bin, "--once", "--dry-run", "--log", big, 0};
++            rc = run_pg_argv(bv, 0, o, sizeof o);
++        }
+         ok(rc == 0, "run with an oversized log exits 0");
+         ok(sy_stat(bak, &st) == 0 && st.size == 9L * 1024 * 1024, "oversized log moved to .1");
+         ok(sy_stat(big, &st) == 0 && st.size > 0 && st.size < 4096, "a fresh log was started");
+diff --git a/tools/lab-loader/check-p3-swap.cx b/tools/lab-loader/check-p3-swap.cx
+index 1af475c..c4ac2fe 100644
+--- a/tools/lab-loader/check-p3-swap.cx
++++ b/tools/lab-loader/check-p3-swap.cx
+@@ -17,6 +17,7 @@
+  * 末行 CHECK_P3_SWAP assertions=N failed=M；任何 FAIL 退出码 1。
+  */
+ #pragma unisa use cxlib.netpack
++#pragma unisa use cxlib.toolprep
+ #pragma unisa use runtime.codec
+ #pragma unisa use cxlib.productpkg
+ #pragma unisa use mem.bytes
+@@ -41,7 +42,7 @@ static void ps_elf(char *o, int cap) {
+         char cache_env[4500];
+         int fd, off = 0;
+         np_result r;
+-        if (snprintf(ape, sizeof ape, "%s/unisacc.com", ps_root) >= (int)sizeof ape) ps_die("path");
++        if (snprintf(ape, sizeof ape, "%s/unisacc.com", ps_root) >= (int)sizeof ape) ps_die("path"); /* lint:allow R1-product installed APE candidate sidecar extraction requires candidate path */
+         if (!mkdtemp(ps_cache) || cx_fmt(cache_env,sizeof cache_env,"XDG_CACHE_HOME=%s",ps_cache)) ps_die("private slice cache");
+         { char *av[] = {"sh", ape, "--version", 0}, *env[]={cache_env,0};
+           if (np_run(av, ps_root, env, 20, &r, why, sizeof why)) ps_die(why);
+@@ -238,6 +239,10 @@ int main(int argc, char **argv) {
+         if (!realpath(argv[2], work)) ps_die("work directory must exist");
+     } else ps_die("usage [ROOT WORKDIR]");
+     if(cx_fmt(ps_cache,sizeof ps_cache,"%s/candidate-cache-XXXXXX",work))ps_die("path");
++    char p3_src[4400], p3_bin[4400], p3_why[256];
++    if (cx_fmt(p3_src, sizeof p3_src, "%s/tools/lab-loader/p3-swap.cx", ps_root) ||
++        cx_fmt(p3_bin, sizeof p3_bin, "%s/p3-swap.native", work)) ps_die("path");
++    if (tq_native(ps_root, p3_src, p3_bin, p3_why, sizeof p3_why)) ps_die(p3_why);
+ 
+     /* 包取已装产品的 dev 分体（P3/P4 都接受；ps_body 会剥 UNIPKG1 footer），不再读 out/。 */
+     ps_pkg(pkg, (int)sizeof pkg);
+@@ -250,7 +255,7 @@ int main(int argc, char **argv) {
+         if (snprintf(model0rec, sizeof model0rec, "%s/model0.rec", work) >= (int)sizeof model0rec) ps_die("path");
+         ps_write(model0rec, rec, recn, 0600);
+         if (snprintf(out1, sizeof out1, "%s/same.bin", work) >= (int)sizeof out1) ps_die("path");
+-        {   char *av[] = {"sh", "./unisacc.com", "tools/lab-loader/p3-swap.cx", pkg, "0", out1, model0rec, 0};
++        {   char *av[] = {p3_bin, pkg, "0", out1, model0rec, 0};
+             np_result r; char why[1024];
+             if (np_run(av, ps_root, 0, 40, &r, why, sizeof why)) ps_die(why);
+             ps_ck(r.rc == 0, "S1a.self-swap-runs");
+@@ -274,7 +279,7 @@ int main(int argc, char **argv) {
+         free(raw);
+         /* gate②: 替换 e1(序号) */
+         if (snprintf(out2, sizeof out2, "%s/e1-by-index.bin", work) >= (int)sizeof out2) ps_die("path");
+-        {   char *av[] = {"sh", "./unisacc.com", "tools/lab-loader/p3-swap.cx", pkg, "1", out2, e1raw, 0};
++        {   char *av[] = {p3_bin, pkg, "1", out2, e1raw, 0};
+             np_result r; char why[1024];
+             if (np_run(av, ps_root, 0, 40, &r, why, sizeof why)) ps_die(why);
+             ps_ck(r.rc == 0, "S2a.swap-by-index-runs");
+@@ -282,7 +287,7 @@ int main(int argc, char **argv) {
+         }
+         /* S3: 按名字 */
+         if (snprintf(out3, sizeof out3, "%s/e1-by-name.bin", work) >= (int)sizeof out3) ps_die("path");
+-        {   char *av[] = {"sh", "./unisacc.com", "tools/lab-loader/p3-swap.cx", pkg, "e1", out3, e1raw, "--model", 0};
++        {   char *av[] = {p3_bin, pkg, "e1", out3, e1raw, "--model", 0};
+             np_result r; char why[1024];
+             if (np_run(av, ps_root, 0, 40, &r, why, sizeof why)) ps_die(why);
+             ps_ck(r.rc == 0, "S3a.swap-by-name-runs");
+@@ -305,7 +310,7 @@ int main(int argc, char **argv) {
+     /* S5: 越界序号 / 不存在的模型名 */
+     {   char out4[4400];
+         if (snprintf(out4, sizeof out4, "%s/bad-index.bin", work) >= (int)sizeof out4) ps_die("path");
+-        {   char *av[] = {"sh", "./unisacc.com", "tools/lab-loader/p3-swap.cx", pkg, "999", out4, e1raw, 0};
++        {   char *av[] = {p3_bin, pkg, "999", out4, e1raw, 0};
+             np_result r; char why[1024];
+             if (np_run(av, ps_root, 0, 40, &r, why, sizeof why)) ps_die(why);
+             ps_ck(r.rc == 2, "S5a.index-out-of-range-refused");
+@@ -313,7 +318,7 @@ int main(int argc, char **argv) {
+             np_free(&r);
+         }
+         if (snprintf(out4, sizeof out4, "%s/bad-name.bin", work) >= (int)sizeof out4) ps_die("path");
+-        {   char *av[] = {"sh", "./unisacc.com", "tools/lab-loader/p3-swap.cx", pkg, "nosuch", out4, e1raw, "--model", 0};
++        {   char *av[] = {p3_bin, pkg, "nosuch", out4, e1raw, "--model", 0};
+             np_result r; char why[1024];
+             if (np_run(av, ps_root, 0, 40, &r, why, sizeof why)) ps_die(why);
+             ps_ck(r.rc == 2, "S5c.unknown-model-refused");
+@@ -483,7 +488,7 @@ int main(int argc, char **argv) {
+             free(img);
+         }
+         if (snprintf(outn, sizeof outn, "%s/neg-out.pkg", work) >= (int)sizeof outn) ps_die("path");
+-        {   char *av[] = {"sh", "./unisacc.com", "tools/lab-loader/p3-swap.cx", tmp_body, "0", outn, netpath, 0};
++        {   char *av[] = {p3_bin, tmp_body, "0", outn, netpath, 0};
+             np_result r; char why[1024];
+             if (np_run(av, ps_root, 0, 40, &r, why, sizeof why)) ps_die(why);
+             ps_ck(r.rc == 0, "S6b.swap-negative-net-runs");

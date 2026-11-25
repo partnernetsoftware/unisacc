@@ -16,16 +16,24 @@ strict 汇总、CI run、起链到公开墙钟)在 0.1.0 封版车上最后填�
 | SHA256SUMS | 待填 |
 | CI run ID、attempt 与 Y1 | 待填 |
 
+## 前序版本:0.0.106 公开事实(2026-11-25)
+
+- 公开:01:42:35 重新公开;首次 01:36:31 因发布后读回 smoke 冷编超 45 秒自动回滚 Draft,6 分钟后重公开;两次都记录。
+- CI 两次:45442318936 败于 windows-11-arm fetch 对新建草稿的瞬态 404(软失败吞掉、slice 缺 payload);重派 45446325698 全绿 42/0,两次 run 都留。
+- 身份:冻结 2e8a19a342、链后 8ca2f5e4b8(六文件 R40 B-t,冻结路径内两个 tests)、APE 5f83ac93…、SOURCES_SID c6eeca9f…;Y1 32f26cd024、Y2 9d08f985fa。
+- 时钟:T1 21:31:05、T3_R6 00:50:55(199.8 分钟)、T4 01:42:35(251.5 分钟);预跑完成 00:08:15(157.2 分钟)。
+- 证据入口:release/evidence/0.0.106/INDEX.tsv、ci-45442318936.*、ci-45446325698.*、path-b-proof.md;research/ccogweco/post-106-ledger.md。
+
 ## 准入七条逐条(R37 读法,R38 计数口径)
 
 | # | 条件 | 当前判定 | 依据与原行 | 证据路径 | 封版前还缺什么 |
 |---|---|---|---|---|---|
 | 1 | 六目标自举不动点连续 3 版 | 部分满足(106 已归档;107/0.1.0 待) | 106 已实测并归档:release/evidence/0.0.106/ape-receipt.txt 六切片、fixedpoint-6targets.tsv 六行 SAME、INDEX 两行、notes 原句;链 compare `slices=same count=6`、`objects=same count=102`、`kernels=same count=2`、`product=same`(chain-run-249.stdout:161-164) | release/evidence/0.0.106/;research/ccogweco/fp-106-extraction.md | 107 与 0.1.0 两趟各自归档同四项 |
-| 2 | CI 六格 QUALIFIED 且严格证据 FAIL/UNKNOWN 为 0 | 部分满足(106 strict FAIL=0;CI 六格沿用 0.0.105 记录) | 106 预跑原 merge(503 批)为 PASS=495 FAIL=6 UNKNOWN=2;同候选后补七条原 FAIL 行后合并 SUMMARY 为 batches=505 PASS=503 FAIL=0 UNKNOWN=2 INVALID=0;UNKNOWN=2 为已登记无生产者(cx-booter-ape、tools-default-regression,0.0.105 同形);CI 六格 QUALIFIED 引 0.0.105 ci-45347740771.log(pass=42 fail=0) | release/evidence/0.0.106/strict.tsv、expected-unmeasured.tsv;release/evidence/0.0.105/ci-45347740771.log | 107/0.1.0 各自 strict FAIL=0 与当版 CI QUALIFIED |
+| 2 | CI 六格 QUALIFIED 且严格证据 FAIL/UNKNOWN 为 0 | 部分满足(106 strict FAIL=0;106 CI 五格绿后重派全绿 42/0) | 106 预跑原 merge(503 批)为 PASS=495 FAIL=6 UNKNOWN=2;同候选后补七条原 FAIL 行后合并 SUMMARY 为 batches=505 PASS=503 FAIL=0 UNKNOWN=2 INVALID=0;UNKNOWN=2 为已登记无生产者(cx-booter-ape、tools-default-regression,0.0.105 同形);CI:45442318936 因 windows-11-arm 瞬态 404 失败,重派 45446325698 全绿 42/0 | release/evidence/0.0.106/strict.tsv、expected-unmeasured.tsv、ci-45446325698.log | 107/0.1.0 各自 strict FAIL=0 与当版 CI QUALIFIED |
 | 3 | 零已知 P0 | 未测(待 107 候选实跑) | 账本 5 行:2 个 P0 由 107 F1 关闭(P0-126、P0-F1);P0-chain-step-reaped-kill 已随 107 追加集(chain-step 修复与夹具),待候选实跑关闭;U33 判 P1 随 0.0.125;POT-f0r 潜在非 P0 | research/ccogweco/p0-ledger.tsv;research/2026-11-24/R38-ruling.md 第 1 节 | 107 候选上 F1 与 chain-step 的实跑原行;账本关行 |
 | 4 | state-unverified 不超过 3 行(只计声称类) | 不满足(预期 3 到 4) | 表内 23 个数据行(22 UNVERIFIED + U33 OPEN);声称类基数 10 = U05/U06/U08/U09/U11/U30/U33/U21/E01/E02;缺口与债 15 行不计数 | build/state-unverified.tsv;research/ccogweco/unverified-classification.md;seal-0.1.0-evidence-map.md 条 4 三值 | 三值见下节;E02 保留则多为 4 行,如实记未满足 |
 | 5 | 前端覆盖三期完成 | 不满足,豁免(仅本条) | A 在 0.0.100;B1 在 0.0.107 只有部分 2/3 与 3/3 引擎行与 module-units/cxmod-tri 分片,完整重放待候选;B2=0.0.109 未开工 | R37 第 5 条(b)(c)(research/2026-11-24/R37-seal.md:64-66);plans/v0.0.107.md、plans/v0.0.109.md | B1 四批实跑(c99-tentative-array-incomplete、c99-array-param-typedef、c99-extern-array-incomplete、c99-global-redecl-conflict);B2 顺延写进说明 |
-| 6 | 整链起到公开连续 3 版不超过 120 分钟 | 不满足(原文) / 按 R6 重述待第三样本 | 原文口径 98=96.5 分钟 PASS,100=175.5、101=163.7、105=209.9 均超;R6 重述只取封版车"起链到 READY_TO_EXECUTE"为第三样本,106/107 也须在 120 内才够三样本 | research/agy-h/chain-to-public.tsv;R37 第 6 条(:69-73,须 fable 裁) | 106/107/0.1.0 的起链到 READY_TO_EXECUTE 墙钟 |
+| 6 | 整链起到公开连续 3 版不超过 120 分钟 | 原文与 R6 重述均未满足(106 两口径都超) | 两口径并列:(T4-T1) 原文口径与 (T3_R6-T1) R6 重述口径。106 实测 T1=2026-11-24 21:31:05、T3_R6=2026-11-25 00:50:55(199.8 分钟)、T4=01:42:35(251.5 分钟),两口径都超 120;历史 98=96.5 PASS、100=175.5、101=163.7、105=209.9 均超。0.1.0 两口径各自记录,不选一个粉饰 | research/agy-h/chain-to-public.tsv;research/agy-h/car2-timeline-v2.md;R37 第 6 条(:69-73);agy-h seal-0.1.0-checklist.md:84-101(T1/T3_R6/T4 定义) | 107 与 0.1.0 的 T1/T3_R6/T4 原行;107 预计公开 04:24-04:35(基准)或 05:40(保守),封版车预计 114-140 分钟,基准仅余 6 分钟安全垫 |
 | 7 | 能用清单 30 过 25 | 未冻结(草案 29/30 就绪) | 30 项已按类配额(8/8/6/4/4)绑定现有批次;29 项就绪,唯一保留缺口是 release-chain 批本身(不换项);清单未冻结,strict.tsv 批次行机械映射未出 | research/ccogweco/usable-list-draft.md;R37 第 7 条 | 107 公开前冻结清单并勾 strict 批次行;release-chain 缺口登记 0.1.x |
 
 结论:七条里当前无一条可写"满足"。第 1、3 条不可豁免(R37 :7):1 要靠三趟归档,3 要靠 107 候选实跑;
@@ -63,10 +71,9 @@ U09 affected-iface2 重跑、U21 分片端到端)。未实跑的行不得记关�
 | 0.0.100 | 175.5 | OVER_120M | CI 首轮超时重派 |
 | 0.0.101 | 163.7 | OVER_120M | 链后合 main 形成 F 耗时 107.2 分钟 |
 | 0.0.105 | 209.9 | OVER_120M | 链止到 X 161.0 分钟(prd_mempalace:43 笔误为到 F) |
-| 0.0.106 | 起链到预跑完 157.2(到公开待填) | 公开后按原文口径填 | 21:31:05 起链,21:58:56 链止(27.9 分);预跑 00:08:17 完成,链起到预跑完 157.2 分钟;公开时刻待填 |
+| 0.0.106 | T3_R6=199.8 / T4=251.5 | 两口径都超 | 21:31:05 起链,21:58:56 链止(27.9 分),00:50:55 X 提交(T3_R6,199.8 分),01:36:31 首次公开、回滚后 01:42:35 重公开(T4,251.5 分);预跑完成 00:08:15(链起 157.2 分) |
 
-原文条款要求连续三版 ≤120,历史只有 98 一版达标;按 R6 重述(第三样本取封版车到 READY_TO_EXECUTE)仍需
-106、107、0.1.0 三样本,当前不足,故本条如实记未满足并注明样本不足。
+原文条款要求连续三版 ≤120,历史只有 98 一版达标;R6 重述(第三样本取封版车到 READY_TO_EXECUTE)与原文口径并列记录:106 两口径都超(199.8 / 251.5)。与 car2-timeline-v2 对齐:107 基准 04:24-04:35 公开、保守 05:40;0.1.0 封版车预计 114-140 分钟,基准 T1->T4 114 分钟仅余 6 分钟安全垫,任一次读回回滚(106 实测 +6.1 分钟)即超 120,故本条如实记未满足,不选单一粉饰口径。
 
 ## 六目标不动点三版归档进度(106/107/0.1.0)
 
