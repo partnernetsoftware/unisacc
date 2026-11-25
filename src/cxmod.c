@@ -51,6 +51,7 @@ int cxm_iscx[CXM_MAXU]; int cxm_lib[CXM_MAXU];
 int cxm_use[CXM_MAXU][CXM_MAXDECL]; int cxm_nuse[CXM_MAXU];
 /* per use, the imported symbol and its alias (both empty = import the whole module) */
 char cxm_usym[CXM_MAXU][CXM_MAXDECL][CXM_SYMW]; char cxm_ualias[CXM_MAXU][CXM_MAXDECL][CXM_SYMW];
+int cxm_uline[CXM_MAXU][CXM_MAXDECL];
 char cxm_reach[CXM_MAXU][CXM_MAXU];
 int cxm_topo[CXM_MAXU]; int cxm_ntopo; int cxm_color[CXM_MAXU]; int cxm_stk[CXM_MAXU]; int cxm_nstk;
 char cxm_ift[CXM_IFMAX + 1]; int cxm_nift;
@@ -546,6 +547,7 @@ int cxm_adduse(int u, char *w, int n, int line, char *sym, int sn, char *alias, 
     }
     if (cxm_nuse[u] >= CXM_MAXDECL) { cxm_start(u, line); cxm_m("too many use declarations in one unit"); return cxm_fail(); }
     cxm_use[u][cxm_nuse[u]] = v;
+    cxm_uline[u][cxm_nuse[u]] = line;
     cxm_cpyn(cxm_usym[u][cxm_nuse[u]], sym, sn, CXM_SYMW);
     cxm_cpyn(cxm_ualias[u][cxm_nuse[u]], alias, an, CXM_SYMW);
     cxm_nuse[u] = cxm_nuse[u] + 1;
@@ -1854,7 +1856,7 @@ int cxm_usechk(void) {
                 v = cxm_use[u][k]; i = 0;
                 while (i < cxm_nsym && !(cxm_symu[i] == v && cxm_symk[i] == 0 && cxm_eq(cxm_sym[i], cxm_usym[u][k]))) i = i + 1;
                 if (i == cxm_nsym) {
-                    cxm_start(0 - 1, 0); cxm_m("module "); cxm_m(cxm_name[v]); cxm_m(" does not export "); cxm_m(cxm_usym[u][k]);
+                    cxm_start(u, cxm_uline[u][k]); cxm_m("module "); cxm_m(cxm_name[v]); cxm_m(" does not export "); cxm_m(cxm_usym[u][k]);
                     cxm_m(" (used by "); cxm_m(cxm_arg[u]); cxm_m(")"); return cxm_fail();
                 }
             }
