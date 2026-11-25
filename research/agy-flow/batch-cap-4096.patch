@@ -1,0 +1,732 @@
+diff --git a/exec/facts/limits.tsv b/exec/facts/limits.tsv
+index fea292c..38b7e19 100644
+--- a/exec/facts/limits.tsv
++++ b/exec/facts/limits.tsv
+@@ -59,3 +59,5 @@ GEN_NTARGET	6	tools/cell-gen.cx	#define NTARGET {}
+ GEN_NTARGET	6	tools/target-gen.cx	#define NTARGET {}
+ FWD_STUB_BYTES	131072	cx/compiler/fwdstub.cx	#define FWD_STUB_BYTES {}
+ FWD_STUB_BYTES	131072	cx/compiler/fwdincrement.cx	#define FWI_STUB_BYTES {}
++TP_BATCH_CAP	4096	tools/cxlib/testplan.cx	TP_BATCH_CAP = {}
++TP_TOOL_SRC_CAP	4096	tools/cxlib/testplan.cx	TP_TOOL_SRC_CAP = {}
+diff --git a/tests/tools-compile.cx b/tests/tools-compile.cx
+index 43d0ae2..d663fd9 100644
+--- a/tests/tools-compile.cx
++++ b/tests/tools-compile.cx
+@@ -31,6 +31,7 @@
+ #pragma unisa use text.text
+ #pragma unisa use text.fmt
+ #pragma unisa use mem.bytes
++#pragma unisa use cxlib.testplan
+ 
+ static void die(const char *s) { fprintf(stderr,"tools-compile: %s\n",s); exit(2); }
+ static char root[4096], work[4096], product[4400];
+@@ -460,6 +461,7 @@ int main(int argc,char **argv) {
+         for(int i=1;i<count;i++)if(!strcmp(sources[i-1],sources[i]))die("duplicate source");
+     }
+     if(!count)die("empty source inventory");
++    if(count>TP_TOOL_SRC_CAP)die("REFUSE source inventory exceeds TP_TOOL_SRC_CAP");
+     if(update){registry(1,argv[3]);return 0;}
+     registry(0,0);
+     int shards=count/8+(count%8!=0);
+diff --git a/tools/affected.cx b/tools/affected.cx
+index 226e266..66569ea 100644
+--- a/tools/affected.cx
++++ b/tools/affected.cx
+@@ -96,7 +96,8 @@
+ #define CAP (1L << 24)
+ #define MAXNODE 16384
+ #define HASHN 32768
+-#define MAXBATCH 2048
++#define MAXBATCH TP_BATCH_CAP
++#define BKEY_CAP (TP_BATCH_CAP * 2)
+ #define MAXJOBS 8
+ 
+ static int arena;
+@@ -604,7 +605,7 @@ static int match(const int *changed, int nch, int *why) {
+ /* 批级记忆:(source,entry,args) 与 changed[] 不变时 mark_batch+match 的结论也不变,而批 id 只影响
+    mark_guards(只对 3 个 cross-targets 批生效)。1034 个 IMPLEMENTED SOURCE 批只有 560 个 distinct
+    源。命中时直接复用 (v, why),不重算闭包;guard 批仍走完整路径以免漏掉目录守卫。 */
+-static char *bkey[4096]; static int bv[4096], bwhy[4096], bsrc[4096], bmod[4096];
++static char *bkey[BKEY_CAP]; static int bv[BKEY_CAP], bwhy[BKEY_CAP], bsrc[BKEY_CAP], bmod[BKEY_CAP];
+ /* --plan: for a via=table match on node WHY, the model that pulled the table in (*MOD) and the closure
+    node that named that model (return; -1 = an args token, -2 = none found). Changes no decision. */
+ static int table_reason(int why, int *mod) {
+@@ -614,9 +615,9 @@ static int table_reason(int why, int *mod) {
+     return -2;
+ }
+ static int bslot(const char *k, int create) {
+-    unsigned long h = hash(k) & 4095; int i;
+-    for (i = 0; i < 4096; i++) {
+-        unsigned long s = (h + (unsigned long)i) & 4095;
++    unsigned long h = hash(k) & (BKEY_CAP - 1); int i;
++    for (i = 0; i < BKEY_CAP; i++) {
++        unsigned long s = (h + (unsigned long)i) & (BKEY_CAP - 1);
+         if (!bkey[s]) { if (!create) return -1; bkey[s] = keep(k, tx_len(k, 8200)); return (int)s; }
+         if (tx_eqz(bkey[s], k)) return (int)s;
+     }
+diff --git a/tools/all-waves.cx b/tools/all-waves.cx
+index a03f400..1ef6842 100644
+--- a/tools/all-waves.cx
++++ b/tools/all-waves.cx
+@@ -147,8 +147,8 @@ static int cmd_materials(int argc,char **argv){if(argc<5)die("usage","materials
+ static int decided(const as_manifest *m,const char *id){for(int i=0;i<m->nref;i++)if(tx_eqz(m->ref[i].id, id)&&!tx_eqz(m->ref[i].verdict, "UNKNOWN"))return 1;return 0;}
+ /* Tier is a caller selection only: the session registry and qualification stay complete. */
+ static const char *tier_filter;
+-static char tier_ids[2048][128];static int tier_count;
+-static void tier_batch(const tp_batch_view *v,void *ctx){(void)ctx;if(!strcmp(v->implementation,"IMPLEMENTED")&&tp_tier_includes(tier_filter,v->tier)){if(tier_count==2048)die("tier-limit",v->id);if(cx_fmt(tier_ids[tier_count],sizeof tier_ids[0],"%s",v->id))die("tier-id-bound",v->id);tier_count++;}}
++static char tier_ids[TP_BATCH_CAP][128];static int tier_count;
++static void tier_batch(const tp_batch_view *v,void *ctx){(void)ctx;if(!strcmp(v->implementation,"IMPLEMENTED")&&tp_tier_includes(tier_filter,v->tier)){if(tier_count==TP_BATCH_CAP)die("tier-limit",v->id);if(cx_fmt(tier_ids[tier_count],sizeof tier_ids[0],"%s",v->id))die("tier-id-bound",v->id);tier_count++;}}
+ static void tier_cov(const tp_coverage_view *v,void *ctx){(void)v;(void)ctx;}
+ static void select_tier(const char *value){
+  if(strcmp(value,"commit")&&strcmp(value,"daily")&&strcmp(value,"release"))die("unknown-tier",value);tier_filter=value;tier_count=0;
+diff --git a/tools/batch-packages-gen.cx b/tools/batch-packages-gen.cx
+index 5183513..81636fe 100644
+--- a/tools/batch-packages-gen.cx
++++ b/tools/batch-packages-gen.cx
+@@ -37,8 +37,9 @@
+ #pragma unisa use text.text
+ #pragma unisa use mem.bytes
+ #pragma unisa use mem.heap
++#pragma unisa use cxlib.testplan
+ 
+-enum { MAXP = 16, MAXB = 4096 };
++enum { MAXP = 16, MAXB = TP_BATCH_CAP };
+ static TpPkg pk[MAXP];
+ static int npk;
+ static unsigned depc[MAXP], rdepc[MAXP];   /* bit sets: the package with its dependency closure; its dependents */
+diff --git a/tools/check-batch-cap.cx b/tools/check-batch-cap.cx
+new file mode 100644
+index 0000000..52ce134
+--- /dev/null
++++ b/tools/check-batch-cap.cx
+@@ -0,0 +1,474 @@
++/* tools/check-batch-cap.cx -- single-source 4096 batch/tool capacity consistency, behavior (2100/4000), and mutation proof.
++ *
++ *   sh ./unisacc.com tools/check-batch-cap.cx
++ *   last line: CHECK_BATCH_CAP<TAB>passed=P<TAB>failed=F
++ *
++ * Verifies:
++ *   (1) Single source of truth: exec/facts/limits.tsv and tools/cxlib/testplan.cx agree on
++ *       TP_BATCH_CAP = 4096 and TP_TOOL_SRC_CAP = 4096.
++ *   (2) Token-level traversal of all 11 batch/tool-source capacity consumers: every consumer
++ *       references TP_BATCH_CAP or TP_TOOL_SRC_CAP with zero independent 2048 literals.
++ *   (3) Mutation proof: mutating any one of the 11 consumers back to 2048 is caught (11/11 killed).
++ *   (4) Behavior proof at 2100 and 4000 synthetic batch rows (plus 4097 over-limit refusal):
++ *       tests/run.cx --list, tools/affected.cx, cxlib.s9sched (ss_steps_par), and tools/all-waves.cx. */
++#pragma unisa use sys.io
++#pragma unisa use sys.fs
++#pragma unisa use sys.posix
++#pragma unisa use sys.proc
++#pragma unisa use sys.env
++#pragma unisa use text.text
++#pragma unisa use mem.bytes
++#pragma unisa use mem.heap
++#pragma unisa use cxlib.netpack
++#pragma unisa use cxlib.chainargv
++#pragma unisa use cxlib.testplan
++#pragma unisa use cxlib.s9sched
++
++static int g_pass = 0;
++static int g_fail = 0;
++static char g_root[4096];
++
++static void bck(int ok, const char *name) {
++    if (ok) {
++        g_pass++;
++        sy_printf("PASS\tcheck-batch-cap.%s\n", name);
++    } else {
++        g_fail++;
++        sy_printf("FAIL\tcheck-batch-cap.%s\n", name);
++    }
++}
++
++static int tok_eq(void *a, int i, const char *s) { return ca_token_is(a, i, s); }
++
++/* Check `#define NAME VAL` via token stream. */
++static int has_macro_tok(void *a, const char *name, const char *val) {
++    int n = ca_token_count(a), hits = 0, ok = 0;
++    for (int i = 0; i + 3 < n; i++) {
++        if (tok_eq(a, i, "#") && tok_eq(a, i + 1, "define") && tok_eq(a, i + 2, name)) {
++            hits++;
++            if (tok_eq(a, i + 3, val)) ok++;
++        }
++    }
++    return hits == 1 && ok == 1;
++}
++
++/* Check `enum { ... NAME = VAL ... }` via token stream. */
++static int has_enum_tok(void *a, const char *name, const char *val) {
++    int n = ca_token_count(a), hits = 0, ok = 0;
++    for (int i = 0; i + 3 < n; i++) {
++        if (tok_eq(a, i, "enum") && tok_eq(a, i + 1, "{")) {
++            int end = ca_token_end(a, i + 1);
++            if (end < 0) continue;
++            for (int j = i + 2; j + 2 < end; j++) {
++                if (tok_eq(a, j, name) && tok_eq(a, j + 1, "=")) {
++                    hits++;
++                    if (tok_eq(a, j + 2, val)) ok++;
++                }
++            }
++        }
++    }
++    return hits == 1 && ok == 1;
++}
++
++/* Count exact token matches for IDENT[SYM] or IDENT == SYM or call arg SYM. */
++static int count_tok_pair(void *a, const char *t0, const char *t1, const char *t2) {
++    int n = ca_token_count(a), c = 0;
++    for (int i = 0; i + 2 < n; i++) {
++        if (tok_eq(a, i, t0) && tok_eq(a, i + 1, t1) && tok_eq(a, i + 2, t2)) c++;
++    }
++    return c;
++}
++
++static int count_tok(void *a, const char *t) {
++    int n = ca_token_count(a), c = 0;
++    for (int i = 0; i < n; i++) if (tok_eq(a, i, t)) c++;
++    return c;
++}
++
++/* Verify one consumer source text (id 0..10) against single-source TP_BATCH_CAP / TP_TOOL_SRC_CAP. */
++static int check_consumer_src(int id, const char *src) {
++    void *a = ca_tokens(src);
++    if (!a) return 0;
++    int ok = 0;
++    if (id == 0) {
++        /* tools/cxlib/testplan.cx: defines TP_BATCH_CAP=4096, TP_TOOL_SRC_CAP=4096, uses TP_BATCH_CAP in bf/source_present/3x tp_table, zero 2048 in tp_process */
++        int def_ok = has_enum_tok(a, "TP_BATCH_CAP", "4096") && has_enum_tok(a, "TP_TOOL_SRC_CAP", "4096");
++        int uses = count_tok(a, "TP_BATCH_CAP");
++        int old_alloc = count_tok_pair(a, "calloc", "(", "2048") + count_tok_pair(a, ",", "2048", ",");
++        ok = def_ok && uses >= 7 && old_alloc == 0;
++    } else if (id == 1) {
++        /* tools/affected.cx */
++        ok = has_macro_tok(a, "MAXBATCH", "TP_BATCH_CAP");
++    } else if (id == 2) {
++        /* tools/cxlib/s9sched.cx */
++        ok = has_macro_tok(a, "SS_MAX", "TP_BATCH_CAP");
++    } else if (id == 3) {
++        /* tools/all-waves.cx */
++        ok = count_tok_pair(a, "tier_ids", "[", "TP_BATCH_CAP") == 1 &&
++             count_tok_pair(a, "tier_count", "==", "TP_BATCH_CAP") == 1 &&
++             count_tok_pair(a, "tier_ids", "[", "2048") == 0 &&
++             count_tok_pair(a, "tier_count", "==", "2048") == 0;
++    } else if (id == 4) {
++        /* tools/osx-lane.cx */
++        ok = has_macro_tok(a, "OL_MAX", "TP_BATCH_CAP");
++    } else if (id == 5) {
++        /* tools/osx-sentinel.cx */
++        ok = count_tok_pair(a, "ids", "[", "TP_BATCH_CAP") == 1 &&
++             count_tok_pair(a, "count", "==", "TP_BATCH_CAP") == 1 &&
++             count_tok_pair(a, "count", ">", "TP_BATCH_CAP") == 1 &&
++             count_tok(a, "2048") == 0;
++    } else if (id == 6) {
++        /* tools/batch-packages-gen.cx */
++        ok = has_enum_tok(a, "MAXB", "TP_BATCH_CAP");
++    } else if (id == 7) {
++        /* tools/prerun-drive.cx */
++        ok = has_macro_tok(a, "PD_MAX_IDS", "TP_BATCH_CAP");
++    } else if (id == 8) {
++        /* tools/tool-index.cx */
++        ok = has_macro_tok(a, "MAXF", "TP_TOOL_SRC_CAP");
++    } else if (id == 9) {
++        /* tools/tlib-admit.cx */
++        ok = has_macro_tok(a, "MAXF", "TP_TOOL_SRC_CAP");
++    } else if (id == 10) {
++        /* tests/tools-compile.cx */
++        ok = count_tok_pair(a, "count", ">", "TP_TOOL_SRC_CAP") == 1;
++    }
++    ca_tokens_free(a);
++    return ok;
++}
++
++/* Replace all occurrences of NEEDLE in SRC with REPL in a freshly allocated buffer. */
++static char *mutate_replace(const char *src, const char *needle, const char *repl) {
++    size_t sl = strlen(src), nl = strlen(needle), rl = strlen(repl);
++    size_t cap = sl * 2 + 256, outn = 0;
++    char *out = (char *)mm_alloc((long)cap);
++    if (!out) return 0;
++    size_t i = 0;
++    while (i < sl) {
++        if (i + nl <= sl && memcmp(src + i, needle, nl) == 0) {
++            if (outn + rl + 1 >= cap) {
++                cap = (cap + rl) * 2;
++                out = (char *)mm_grow(out, (long)cap);
++                if (!out) return 0;
++            }
++            mm_copy(out + outn, (long)(cap - outn), repl, (long)rl);
++            outn += rl;
++            i += nl;
++        } else {
++            if (outn + 2 >= cap) {
++                cap *= 2;
++                out = (char *)mm_grow(out, (long)cap);
++                if (!out) return 0;
++            }
++            out[outn++] = src[i++];
++        }
++    }
++    out[outn] = 0;
++    return out;
++}
++
++/* Build synthetic N-row batches.tsv and 1-row coverage.tsv in memory or on disk. */
++static char *synth_batches(int nrows, size_t *out_len) {
++    size_t cap = (size_t)nrows * 256 + 512;
++    char *b = (char *)mm_alloc((long)cap);
++    if (!b) return 0;
++    size_t n = 0;
++    const char *hdr = "id\timplementation\tlayer\tsource\tmode\tplatform\tbudget_seconds\tmaterials\tentry\targs\tcoverage\texpect\theaders\ttier\n";
++    size_t hl = strlen(hdr);
++    mm_copy(b, (long)cap, hdr, (long)hl);
++    n = hl;
++    for (int i = 0; i < nrows; i++) {
++        char row[256];
++        int w = snprintf(row, sizeof row,
++                         "bcap-%04d\tIMPLEMENTED\tinterfaces\ttools/check-batch-cap.cx\tSOURCE\tlnx/x86_64\t55\t-\ttools/check-batch-cap.cx\t-\tinterfaces.bcap\trc0:CHECK_BATCH_CAP\tproduct\tcommit\n",
++                         i);
++        if (w <= 0 || n + (size_t)w + 1 >= cap) { mm_free(b); return 0; }
++        mm_copy(b + n, (long)(cap - n), row, (long)w);
++        n += (size_t)w;
++    }
++    b[n] = 0;
++    if (out_len) *out_len = n;
++    return b;
++}
++
++static const char *SYNTH_COV =
++    "id\tlayer\timplementation\texpected_or_gap\tsource\n"
++    "interfaces.bcap\tinterfaces\tIMPLEMENTED_SEPARATE_BATCH\tsynthetic batch capacity test\ttools/check-batch-cap.cx\n";
++
++static int g_s9_want_n = 0;
++static int mock_s9_list(const char *run, char *buf, int cap) {
++    (void)run;
++    int off = 0;
++    for (int i = 0; i < g_s9_want_n; i++) {
++        int w = snprintf(buf + off, (size_t)(cap - off),
++                         "S9_PENDING\tslice=s-%04d\talone=0\theavy=0\tneed=10\n", i);
++        if (w <= 0 || off + w >= cap - 64) return -1;
++        off += w;
++    }
++    int w = snprintf(buf + off, (size_t)(cap - off), "S9_PENDING_SUMMARY\tpending=%d\n", g_s9_want_n);
++    if (w <= 0 || off + w >= cap) return -1;
++    return 0;
++}
++static int mock_s9_spawn(ParJob *j, const char *run, const char *leaf, int deadline_s) {
++    (void)j; (void)run; (void)leaf; (void)deadline_s;
++    return -1;
++}
++
++static int run_proc(char **av, const char *cwd, int secs, int *rc_out, char *obuf, size_t ocap) {
++    np_result r = {0};
++    char why[256];
++    int tr = np_run(av, cwd, 0, secs, &r, why, sizeof why);
++    *rc_out = tr ? 124 : r.rc;
++    if (obuf && ocap > 0) {
++        obuf[0] = 0;
++        size_t n = 0;
++        if (r.out && r.outn > 0) {
++            size_t c = r.outn < ocap - 1 ? r.outn : ocap - 1;
++            mm_copy(obuf, (long)ocap, r.out, (long)c);
++            n += c;
++        }
++        if (r.err && r.errn > 0 && n + 1 < ocap) {
++            size_t c = r.errn < ocap - 1 - n ? r.errn : ocap - 1 - n;
++            mm_copy(obuf + n, (long)(ocap - n), r.err, (long)c);
++            n += c;
++        }
++        obuf[n] = 0;
++    }
++    np_free(&r);
++    return tr;
++}
++
++static int copy_reg(const char *src, const char *dst, int mode) {
++    size_t n = 0;
++    char *b = cx_read(src, &n);
++    if (!b) return -1;
++    int rc = sy_write_atomic(dst, b, (long)n, mode);
++    free(b);
++    return rc;
++}
++
++static int write_synth_tree(const char *dir, const char *sess, int nrows) {
++    char p[4400], dst[4400];
++    if (sy_mkdir_all(dir, 0700)) return -1;
++    cx_fmt(p, sizeof p, "%s/tests", dir); if (sy_mkdir_all(p, 0700)) return -1;
++    cx_fmt(p, sizeof p, "%s/tools", dir); if (sy_mkdir_all(p, 0700)) return -1;
++    cx_fmt(p, sizeof p, "%s/build", dir); if (sy_mkdir_all(p, 0700)) return -1;
++
++    /* Symlink repo directories needed by run.cx / affected.cx / all-waves.cx */
++    const char *links[] = {"cx", "ext", "include", "src", "exec", "seed", "cxroot.tsv", "unisacc.com", 0};
++    for (int i = 0; links[i]; i++) {
++        cx_fmt(p, sizeof p, "%s/%s", g_root, links[i]);
++        cx_fmt(dst, sizeof dst, "%s/%s", dir, links[i]);
++        (void)symlink(p, dst);
++    }
++    cx_fmt(p, sizeof p, "%s/tools/cxlib", g_root);
++    cx_fmt(dst, sizeof dst, "%s/tools/cxlib", dir);
++    (void)symlink(p, dst);
++    cx_fmt(p, sizeof p, "%s/tools/bound", g_root);
++    cx_fmt(dst, sizeof dst, "%s/tools/bound", dir);
++    (void)symlink(p, dst);
++
++    /* Copy entry tools as regular files so realpath(__FILE__) resolves inside dir (not g_root) */
++    const char *tcopies[] = {"tools/affected.cx", "tools/all-waves.cx", "tests/run.cx", "tests/run-batch.cx", 0};
++    for (int i = 0; tcopies[i]; i++) {
++        cx_fmt(p, sizeof p, "%s/%s", g_root, tcopies[i]);
++        cx_fmt(dst, sizeof dst, "%s/%s", dir, tcopies[i]);
++        if (copy_reg(p, dst, 0644)) return -1;
++    }
++    /* tools/check-batch-cap.cx must be a regular file (testplan lstat checks S_ISREG) */
++    cx_fmt(dst, sizeof dst, "%s/tools/check-batch-cap.cx", dir);
++    if (sy_write_atomic(dst, "int main(void){return 0;}\n", 26, 0644)) return -1;
++    cx_fmt(p, sizeof p, "%s/tests/cases", g_root);
++    cx_fmt(dst, sizeof dst, "%s/tests/cases", dir);
++    (void)symlink(p, dst);
++    cx_fmt(dst, sizeof dst, "%s/tests/batch-product-inputs.tsv", dir);
++    if (sy_write_atomic(dst, "kind\tkey\tinputs\tbasis\n", 22, 0644)) return -1;
++    const char *bfiles[] = {"iface-hash.tsv", "chain-facts.tsv", "batch-packages.tsv", "batch-domains.tsv", 0};
++    for (int i = 0; bfiles[i]; i++) {
++        cx_fmt(p, sizeof p, "%s/build/%s", g_root, bfiles[i]);
++        cx_fmt(dst, sizeof dst, "%s/build/%s", dir, bfiles[i]);
++        (void)symlink(p, dst);
++    }
++
++    size_t bn = 0;
++    char *bt = synth_batches(nrows, &bn);
++    if (!bt) return -1;
++    cx_fmt(p, sizeof p, "%s/tests/batches.tsv", dir);
++    int wr1 = sy_write_atomic(p, bt, (long)bn, 0644);
++    mm_free(bt);
++    cx_fmt(p, sizeof p, "%s/tests/coverage.tsv", dir);
++    int wr2 = sy_write_atomic(p, SYNTH_COV, (long)strlen(SYNTH_COV), 0644);
++    if (wr1 || wr2) return -1;
++
++    /* Write minimal valid all-waves v2 session manifest for `all-waves.cx pending --tier commit` */
++    if (sy_mkdir_all(sess, 0700)) return -1;
++    cx_fmt(p, sizeof p, "%s/materials.tsv", sess);
++    if (sy_write_atomic(p, "", 0, 0600)) return -1;
++    cx_fmt(p, sizeof p, "%s/lock", sess);
++    if (sy_write_atomic(p, "", 0, 0600)) return -1;
++    char sbuf[1024];
++    const char *z64 = "0000000000000000000000000000000000000000000000000000000000000000";
++    int sn = snprintf(sbuf, sizeof sbuf,
++        "ALLSESSION\tv2\nroot\t%s\ncandidate_sha\t%s\nbatches_sha\t%s\ncoverage_sha\t%s\n"
++        "registry_sha\t%s\nsource_sid\t%s\nharness_sha\t%s\nmaterials_map_sha\t%s\n"
++        "created_ns\t1\ncandidate_kind\tape1\nEND\t0\n",
++        dir, z64, z64, z64, z64, z64, z64, z64);
++    if (sn <= 0 || sn >= (int)sizeof sbuf) return -1;
++    cx_fmt(p, sizeof p, "%s/session.tsv", sess);
++    return sy_write_atomic(p, sbuf, (long)sn, 0600);
++}
++
++static void count_batch_cb(const tp_batch_view *v, void *ctx) { (void)v; (*(int *)ctx)++; }
++static void count_cov_cb(const tp_coverage_view *v, void *ctx) { (void)v; (void)ctx; }
++
++int main(void) {
++    if (sy_cwd(g_root, sizeof g_root) < 0) return 2;
++
++    /* (1) Runtime & limits.tsv single-source verification */
++    bck(tp_batch_cap() == 4096 && tp_tool_src_cap() == 4096, "single-source-runtime-4096");
++    {
++        size_t ln = 0;
++        char *lim = cx_read("exec/facts/limits.tsv", &ln);
++        int ok = lim && strstr(lim, "TP_BATCH_CAP\t4096\ttools/cxlib/testplan.cx\tTP_BATCH_CAP = {}") != 0 &&
++                 strstr(lim, "TP_TOOL_SRC_CAP\t4096\ttools/cxlib/testplan.cx\tTP_TOOL_SRC_CAP = {}") != 0;
++        if (lim) free(lim);
++        bck(ok, "limits-tsv-anchors-single-source");
++    }
++
++    /* (2) & (3) Traverse all 11 consumers: consistency PASS + mutation to 2048 MUST FAIL */
++    const char *cfiles[11] = {
++        "tools/cxlib/testplan.cx",
++        "tools/affected.cx",
++        "tools/cxlib/s9sched.cx",
++        "tools/all-waves.cx",
++        "tools/osx-lane.cx",
++        "tools/osx-sentinel.cx",
++        "tools/batch-packages-gen.cx",
++        "tools/prerun-drive.cx",
++        "tools/tool-index.cx",
++        "tools/tlib-admit.cx",
++        "tests/tools-compile.cx"
++    };
++    const char *cnames[11] = {
++        "testplan", "affected", "s9sched", "all-waves", "osx-lane", "osx-sentinel",
++        "batch-packages-gen", "prerun-drive", "tool-index", "tlib-admit", "tools-compile"
++    };
++    const char *csyms[11] = {
++        "TP_BATCH_CAP", "TP_BATCH_CAP", "TP_BATCH_CAP", "TP_BATCH_CAP", "TP_BATCH_CAP",
++        "TP_BATCH_CAP", "TP_BATCH_CAP", "TP_BATCH_CAP", "TP_TOOL_SRC_CAP", "TP_TOOL_SRC_CAP",
++        "TP_TOOL_SRC_CAP"
++    };
++    int mut_killed = 0;
++    for (int i = 0; i < 11; i++) {
++        size_t sn = 0;
++        char *src = cx_read(cfiles[i], &sn);
++        char tag[96];
++        int ok = src && check_consumer_src(i, src);
++        cx_fmt(tag, sizeof tag, "consumer.%s", cnames[i]);
++        bck(ok, tag);
++        if (src) {
++            char *mut = (i == 0) ? mutate_replace(src, "4096", "2048") : mutate_replace(src, csyms[i], "2048");
++            int mok = mut && !check_consumer_src(i, mut);
++            if (mok) mut_killed++;
++            cx_fmt(tag, sizeof tag, "mutant-2048-killed.%s", cnames[i]);
++            bck(mok, tag);
++            if (mut) mm_free(mut);
++            free(src);
++        }
++    }
++    bck(mut_killed == 11, "all-11-consumer-mutants-killed");
++
++    /* (4a) In-process tp_visit behavior at 2100, 4000, and 4097 (over-limit) */
++    {
++        int counts[3] = {2100, 4000, 4097};
++        for (int k = 0; k < 3; k++) {
++            size_t bn = 0;
++            char *bt = synth_batches(counts[k], &bn);
++            tp_summary sum;
++            char why[256];
++            int seen = 0;
++            tp_observer ob = {count_batch_cb, count_cov_cb, &seen};
++            int rc = bt ? tp_visit(g_root, bt, bn, SYNTH_COV, strlen(SYNTH_COV), &ob, &sum, why, sizeof why) : -1;
++            if (bt) mm_free(bt);
++            if (counts[k] <= 4096) {
++                char tag[64];
++                cx_fmt(tag, sizeof tag, "tp-visit-accepts-%d", counts[k]);
++                bck(rc == 0 && sum.batches == counts[k] && seen == counts[k], tag);
++            } else {
++                bck(rc != 0 && strstr(why, "table-limit row=4097") != 0, "tp-visit-refuses-4097");
++            }
++        }
++    }
++
++    /* (4b) cxlib.s9sched behavior at 2100, 4000, and 4097 (over-limit) */
++    {
++        ss_ops ops;
++        memset(&ops, 0, sizeof ops);
++        ops.hcap = 1; ops.extra = 1; ops.closes = 1; ops.outer = 55;
++        ops.list = mock_s9_list; ops.spawn = mock_s9_spawn; ops.sched_sha = "synthetic";
++        long ms = 0;
++        g_s9_want_n = 2100;
++        int rc21 = ss_steps_par(&ops, "/tmp", 1, 0, &ms);
++        bck(rc21 == 3, "s9sched-accepts-2100");
++        g_s9_want_n = 4000;
++        int rc40 = ss_steps_par(&ops, "/tmp", 1, 0, &ms);
++        bck(rc40 == 3, "s9sched-accepts-4000");
++        g_s9_want_n = 4097;
++        int rc41 = ss_steps_par(&ops, "/tmp", 1, 0, &ms);
++        bck(rc41 == 1, "s9sched-refuses-4097");
++    }
++
++    /* (4c) Real CLI subprocess behavior: run.cx --list, affected.cx, all-waves.cx at 2100 and 4000 */
++    char tmp[4096];
++    if (sy_mkdtemp("/tmp", "unisacc-session-bcap", tmp, sizeof tmp) == 0) {
++        int sizes[2] = {2100, 4000};
++        static char obuf[2 << 20];
++        for (int s = 0; s < 2; s++) {
++            int N = sizes[s];
++            char sdir[4200], sess[4300], want_b[64], want_a[64], tag[96];
++            cx_fmt(sdir, sizeof sdir, "%s/tree-%d", tmp, N);
++            cx_fmt(sess, sizeof sess, "%s/sess-%d", tmp, N);
++            int prep_ok = (write_synth_tree(sdir, sess, N) == 0);
++            cx_fmt(tag, sizeof tag, "synth-tree-%d", N);
++            bck(prep_ok, tag);
++            if (!prep_ok) continue;
++
++            /* tests/run.cx --list */
++            int rc = -1;
++            char *av_run[] = {"sh", "./unisacc.com", "tests/run.cx", "--", "--list", 0};
++            (void)run_proc(av_run, sdir, 30, &rc, obuf, sizeof obuf);
++            cx_fmt(want_b, sizeof want_b, "batches=%d\t", N);
++            cx_fmt(tag, sizeof tag, "run-list-%d", N);
++            int ok_r = (rc == 0 && strstr(obuf, want_b) != 0);
++            bck(ok_r, tag);
++            if (!ok_r) sy_printf("NOTE\t%s\trc=%d\tlen=%ld\thead=%.200s\n", tag, rc, (long)strlen(obuf), obuf);
++
++            /* tools/affected.cx --files tools/check-batch-cap.cx */
++            char *av_aff[] = {"sh", "./unisacc.com", "tools/affected.cx", "--", "--files", "tools/check-batch-cap.cx", 0};
++            (void)run_proc(av_aff, sdir, 30, &rc, obuf, sizeof obuf);
++            cx_fmt(want_a, sizeof want_a, "scanned=%d\t", N);
++            cx_fmt(tag, sizeof tag, "affected-scan-%d", N);
++            int ok_a = (rc == 0 && strstr(obuf, want_a) != 0);
++            bck(ok_a, tag);
++            if (!ok_a) sy_printf("NOTE\t%s\trc=%d\tlen=%ld\thead=%.200s\n", tag, rc, (long)strlen(obuf), obuf);
++
++            /* tools/all-waves.cx pending --tier commit */
++            char *av_wp[] = {"sh", "./unisacc.com", "tools/all-waves.cx", "--", "pending", sdir, sess, "--tier", "commit", 0};
++            int rc2 = -1;
++            (void)run_proc(av_wp, sdir, 30, &rc2, obuf, sizeof obuf);
++            cx_fmt(want_b, sizeof want_b, "PENDING_SUMMARY\tundecided=%d\t", N);
++            cx_fmt(tag, sizeof tag, "all-waves-pending-%d", N);
++            int ok_w = (rc2 == 0 && strstr(obuf, want_b) != 0 && strstr(obuf, "tier-limit") == 0);
++            bck(ok_w, tag);
++            if (!ok_w) sy_printf("NOTE\t%s\trc=%d\tlen=%ld\thead=%.200s\n", tag, rc2, (long)strlen(obuf), obuf);
++        }
++        char *rmv[] = {"rm", "-rf", tmp, 0};
++        int rrc = 0;
++        (void)run_proc(rmv, g_root, 10, &rrc, 0, 0);
++    } else {
++        bck(0, "mkdtemp-synth");
++    }
++
++    sy_printf("CHECK_BATCH_CAP\tpassed=%d\tfailed=%d\n", g_pass, g_fail);
++    return g_fail ? 1 : 0;
++}
+diff --git a/tools/cxlib/s9sched.cx b/tools/cxlib/s9sched.cx
+index 395df1b..d1cc36c 100644
+--- a/tools/cxlib/s9sched.cx
++++ b/tools/cxlib/s9sched.cx
+@@ -12,6 +12,7 @@
+ #pragma unisa use mem.bytes
+ #pragma unisa use cxlib.netpack
+ #pragma unisa use cxlib.die
++#pragma unisa use cxlib.testplan
+ 
+ typedef struct { const char *name; int pid, fd, deadline_s; long t0; np_buf out; } ParJob;
+ /* 判定层交给调度层的全部入口:四个限值(判定层从限值表读出)与两个回调。 */
+@@ -22,11 +23,11 @@ typedef struct {
+     const char *sched_sha;                                                          /* 本文件内容摘要,只留痕 */
+ } ss_ops;
+ 
+-#define SS_MAX 2048
++#define SS_MAX TP_BATCH_CAP
+ typedef struct { char leaf[80]; int alone, heavy, need, state, tries; ParJob j; } ss_row; /* state: 0 待发 1 在跑 2 DONE 已记 3 未记 4 放弃 */
+ static ss_row ss_rows[SS_MAX];
+ static int ss_n;
+-static char ss_buf[262144];
++static char ss_buf[524288];
+ static void ss_free(ParJob *j) { free(j->out.p); j->out.p = 0; j->out.n = j->out.cap = 0; }
+ static int ss_field(const char *line, const char *key) { const char *q = strstr(line, key); return q ? atoi(q + strlen(key)) : -1; }
+ static int ss_has(const char *s, size_t n, const char *needle) {
+diff --git a/tools/cxlib/testplan.cx b/tools/cxlib/testplan.cx
+index b9cff0e..64754d0 100644
+--- a/tools/cxlib/testplan.cx
++++ b/tools/cxlib/testplan.cx
+@@ -4,6 +4,13 @@
+  * until an actual executor explicitly verifies supplied material identities. */
+ #pragma unisa module testplan
+ #pragma unisa use text.text
++/* Single source of truth for batch registry and tool-source inventory capacities. */
++enum {
++ TP_BATCH_CAP = 4096,
++ TP_TOOL_SRC_CAP = 4096
++};
++int tp_batch_cap(void){return TP_BATCH_CAP;}
++int tp_tool_src_cap(void){return TP_TOOL_SRC_CAP;}
+ typedef struct {
+  int batches;int implemented_batches;int planned_batches;int unprepared_batches;
+  int planned_missing_sources;int coverage_rows;int implemented_coverage;
+@@ -74,15 +81,15 @@ static int tp_process(const char *root,const char *registry,size_t rn,const char
+  int nb=0,nc=0,i,j,rc=-1;tp_summary summary;memset(&summary,0,sizeof summary);if(out)memset(out,0,sizeof *out);if(why&&cap)why[0]=0;
+  if(!root||!registry||!coverage||!out||!why||!cap||root[0]!='/'||strlen(root)>4095){if(why&&cap)tp_bad(why,cap,"arguments",0,0);return -1;}
+  if(rn>4194304||cn>4194304)return tp_bad(why,cap,"table-limit",0,0);
+- r=malloc(rn+1);c=malloc(cn+1);bf=calloc(2048*14,sizeof *bf);cf=calloc(8192*5,sizeof *cf);mapped=calloc(8192,sizeof *mapped);implemented=calloc(8192,sizeof *implemented);last=calloc(8192,sizeof *last);source_present=calloc(2048,sizeof *source_present);
++ r=malloc(rn+1);c=malloc(cn+1);bf=calloc((size_t)TP_BATCH_CAP*14,sizeof *bf);cf=calloc(8192*5,sizeof *cf);mapped=calloc(8192,sizeof *mapped);implemented=calloc(8192,sizeof *implemented);last=calloc(8192,sizeof *last);source_present=calloc(TP_BATCH_CAP,sizeof *source_present);
+  if(!r||!c||!bf||!cf||!mapped||!implemented||!last||!source_present){tp_bad(why,cap,"allocation",0,0);goto done;}
+  memcpy(r,registry,rn);r[rn]=0;memcpy(c,coverage,cn);c[cn]=0;
+  int cols=14;
+- if(tp_table(r,rn,"id\timplementation\tlayer\tsource\tmode\tplatform\tbudget_seconds\tmaterials\tentry\targs\tcoverage\texpect\theaders\ttier\n",14,bf,2048,&nb,why,cap)){
++ if(tp_table(r,rn,"id\timplementation\tlayer\tsource\tmode\tplatform\tbudget_seconds\tmaterials\tentry\targs\tcoverage\texpect\theaders\ttier\n",14,bf,TP_BATCH_CAP,&nb,why,cap)){
+   if(strncmp(why,"table-header",12))goto done;
+-  cols=13;if(tp_table(r,rn,"id\timplementation\tlayer\tsource\tmode\tplatform\tbudget_seconds\tmaterials\tentry\targs\tcoverage\texpect\theaders\n",13,bf,2048,&nb,why,cap)){
++  cols=13;if(tp_table(r,rn,"id\timplementation\tlayer\tsource\tmode\tplatform\tbudget_seconds\tmaterials\tentry\targs\tcoverage\texpect\theaders\n",13,bf,TP_BATCH_CAP,&nb,why,cap)){
+    if(strncmp(why,"table-header",12))goto done;
+-   cols=12;if(tp_table(r,rn,"id\timplementation\tlayer\tsource\tmode\tplatform\tbudget_seconds\tmaterials\tentry\targs\tcoverage\texpect\n",12,bf,2048,&nb,why,cap))goto done;
++   cols=12;if(tp_table(r,rn,"id\timplementation\tlayer\tsource\tmode\tplatform\tbudget_seconds\tmaterials\tentry\targs\tcoverage\texpect\n",12,bf,TP_BATCH_CAP,&nb,why,cap))goto done;
+   }
+   for(i=nb;i-->0;){memmove(bf+i*14,bf+i*cols,cols*sizeof *bf);char **v=bf+i*14;if(cols==12)v[12]="product";v[13]=strcmp(v[1],"IMPLEMENTED")||!strcmp(v[2],"platform")?"release":!strcmp(v[7],"-")?"commit":"daily";}
+  }
+diff --git a/tools/osx-lane.cx b/tools/osx-lane.cx
+index 11b865d..88d1367 100644
+--- a/tools/osx-lane.cx
++++ b/tools/osx-lane.cx
+@@ -7,7 +7,7 @@
+ #pragma unisa use mem.bytes
+ #pragma unisa use sys.fs
+ #pragma unisa use sys.posix
+-#define OL_MAX 2048
++#define OL_MAX TP_BATCH_CAP
+ typedef struct {char *id,*impl,*platform,*materials,*expect,*tier;int present,completed;} OlJob;
+ typedef struct {char name[128],value[4096],before[65];int kind,supplied;} OlMaterial;
+ static OlJob *jobs;static int nj,nosx;static OlMaterial mats[128];static int nm;
+diff --git a/tools/osx-sentinel.cx b/tools/osx-sentinel.cx
+index 682c79f..deb4eb7 100644
+--- a/tools/osx-sentinel.cx
++++ b/tools/osx-sentinel.cx
+@@ -6,6 +6,7 @@
+ #pragma unisa use sys.fs
+ #pragma unisa use mem.bytes
+ #pragma unisa use cxlib.awpath
++#pragma unisa use cxlib.testplan
+ static char root[4096],state[4096],lockpath[4400],logs[4400],why[1000];static long endtime;static int held,seq,lockfd=-1,fetching;
+ static void done(int rc){if(held&&close(lockfd)){fprintf(stderr,"osx-sentinel: unlock failed errno=%d\n",errno);exit(2);}exit(rc);}
+ static void die(const char*s){fprintf(stderr,"osx-sentinel: REFUSE %s errno=%d\n",s,errno);done(2);} /* lint:allow R3-die done() releases the lock then exits on every path */
+@@ -24,7 +25,7 @@ static void check_inputs(void){char p[4400],a[4400],b[4400],wantroot[4096],boot[
+ static void window(int seconds){if(endtime-sy_now_ms()<(long)(seconds+1)*1000){puts("OSX_SENTINEL\tstatus=PENDING\treason=insufficient-complete-child-window");done(3);}commandcap=seconds;}
+ static void typed_map(const char*tree,const char*image,const char*models,char*map,size_t cap){char p[4400];path(p,sizeof p,tree,"tests/batches.tsv");size_t n;char*s=readreg(p,&n,8388608);unsigned needed=0;const char*names[]={"default-tape-dut","default-tape-models","prune-dut","prune-models"};char*row=strchr(s,'\n');if(!row)die("batch metadata header");row++;while(*row){char*end=strchr(row,'\n');if(!end)die("batch metadata tail");*end=0;char*fields[14];int count=0;char*a=row;for(;;){if(count==14)die("batch metadata columns");fields[count++]=a;char*t=strchr(a,'\t');if(!t)break;*t=0;a=t+1;}if(count!=14)die("batch metadata columns");if(!strncmp(fields[5],"osx/",4)||!strcmp(fields[0],"smoke")){char*mat=fields[7];while(*mat&&strcmp(mat,"-")){char*comma=strchr(mat,',');if(comma)*comma=0;for(int k=0;k<4;k++)if(!strcmp(mat,names[k]))needed|=1U<<k;if(!comma)break;mat=comma+1;}}row=end+1;}free(s);np_buf b={0};for(int k=0;k<4;k++)if(needed&(1U<<k)){np_puts(&b,names[k]);np_puts(&b,"\t");np_puts(&b,(k&1)?models:image);np_puts(&b,"\n");}if(b.n>=cap)die("typed MAP bound");if(mm_copy(map,(long)cap,b.p?b.p:"",(long)b.n))die("typed MAP copy");map[b.n]=0;free(b.p);}
+ static void after_build(const char*rev,const char*tree,const char*work){char p[4400],image[4400],rec[4400],sha[65],want[65],target[100],recordrev[41],bytes[40];path(image,sizeof image,tree,"out/slice/slice-osx-arm64");path(rec,sizeof rec,tree,"out/slice/receipt.txt");size_t n;char*r=readreg(rec,&n,16384);if(!value(r,"sha",want,sizeof want)||!hex(want,64)||!value(r,"target",target,sizeof target)||strcmp(target,"osx/arm64")||!value(r,"rev",recordrev,sizeof recordrev)||strcmp(recordrev,rev)||!value(r,"bytes",bytes,sizeof bytes))die("ARM build receipt identity");struct stat st;if(lstat(image,&st)||!S_ISREG(st.st_mode)||st.st_size<=0)die("ARM build image kind");char actualbytes[40];if(cx_fmt(actualbytes,sizeof actualbytes,"%lld",(long long)st.st_size)||strcmp(bytes,actualbytes))die("ARM receipt bytes");digest(image,sha);if(strcmp(sha,want))die("ARM build image SHA");free(r);char map[9000],models[4400];path(models,sizeof models,state,"models.bin");typed_map(tree,image,models,map,sizeof map);path(p,sizeof p,work,"materials.tsv");if(missing(p))put(p,map,strlen(map),0);else{size_t z;char*s=readreg(p,&z,16384);if(z!=strlen(map)||memcmp(s,map,z))die("MAP changed");free(s);}path(p,sizeof p,work,"build-receipt.sha256");digest(rec,sha);if(missing(p))put(p,sha,64,0);progress(rev,"LANE");}
+-static void verify_jobs(const char*s,const char*lane,long expected,const char*candidate,int failed){const char*headers[]={"OSX_LANE_QUEUE","status","selected","executed","identity_stable","candidate","source_sid","harness","registry","fail_id"};char ids[2048][128];int count=0,failures=0;for(const char*p=s;*p;){const char*e=strchr(p,'\n'),*tab=strchr(p,'\t');if(!e||!tab||tab>=e)die("receipt row");size_t kn=tab-p;int header=0;for(int k=0;k<10;k++)if(strlen(headers[k])==kn&&!memcmp(p,headers[k],kn))header=1;if(!header){if(count==2048||!kn||kn>=128||e-tab!=65)die("job receipt fields");for(size_t k=0;k<kn;k++){char c=p[k];if(!((c>='a'&&c<='z')||(c>='0'&&c<='9')||c=='-'))die("job ID");ids[count][k]=c;}ids[count][kn]=0;for(int k=0;k<count;k++)if(!strcmp(ids[k],ids[count]))die("duplicate job receipt");char expectedsha[65];for(int k=0;k<64;k++)expectedsha[k]=tab[1+k];expectedsha[64]=0;if(!hex(expectedsha,64))die("job SHA");np_buf b={0};const char*suffix[]={"stdout","stderr","status.tsv","verdict.tsv"};int jobrc=-1;for(int k=0;k<4;k++){char name[200],pathbuf[4400],len[60];if(cx_fmt(name,sizeof name,"job-%s.%s",ids[count],suffix[k]))die("job file name");path(pathbuf,sizeof pathbuf,lane,name);size_t n;char*raw=readreg(pathbuf,&n,67108864);if(k==0){char*mark=strstr(raw,"BATCH_RUN\tid="),id[128],status[20],marker[128],sha[65];int rc,tr;if(!mark||strstr(mark+1,"BATCH_RUN\tid=")||sscanf(mark,"BATCH_RUN\tid=%127s\tstatus=%19s\trc=%d\ttransport=%d\tmarker=%127s\tcandidate=%64s",id,status,&rc,&tr,marker,sha)!=6||strcmp(id,ids[count])||strcmp(sha,candidate)||tr)die("job BATCH identity");if(!strcmp(status,"PASS")&&!rc)jobrc=0;else if(!strcmp(status,"FAIL")&&rc){jobrc=1;failures++;}else die("job BATCH unknown status");}if(k==2){int pid,reaped,tr,rc,residue;long ms;char expectedstatus[600];if(sscanf(raw,"pid\t%d\nreaped\t%d\nelapsed_ms\t%ld\ntransport\t%d\nrc\t%d\nresidue\t%d\n",&pid,&reaped,&ms,&tr,&rc,&residue)!=6||pid<=0||reaped!=1||ms<0||tr||residue||rc!=jobrc||cx_fmt(expectedstatus,sizeof expectedstatus,"pid\t%d\nreaped\t%d\nelapsed_ms\t%ld\ntransport\t%d\nrc\t%d\nresidue\t%d\n",pid,reaped,ms,tr,rc,residue)||strlen(expectedstatus)!=n||memcmp(raw,expectedstatus,n))die("job actual waitpid status UNKNOWN");}if(k==3){char expectedverdict[300];if(cx_fmt(expectedverdict,sizeof expectedverdict,"%s\t%s\t%d\t0\t0\t",ids[count],jobrc?"FAIL":"LOCAL_PASS",jobrc)||strncmp(raw,expectedverdict,strlen(expectedverdict)))die("job verdict does not match actual status");}if(cx_fmt(len,sizeof len,"%zu:",n))die("job frame");np_puts(&b,name);np_puts(&b,"\n");np_puts(&b,len);np_put(&b,raw,n);free(raw);}char h[65];cx_sha256_hex(b.p,b.n,h);free(b.p);if(strcmp(h,expectedsha))die("job evidence content SHA mismatch");count++;}p=e+1;}if(count!=expected||(!failed&&failures)||(failed&&!failures))die("job receipts incomplete or FAIL mismatch");}
++static void verify_jobs(const char*s,const char*lane,long expected,const char*candidate,int failed){const char*headers[]={"OSX_LANE_QUEUE","status","selected","executed","identity_stable","candidate","source_sid","harness","registry","fail_id"};char ids[TP_BATCH_CAP][128];int count=0,failures=0;for(const char*p=s;*p;){const char*e=strchr(p,'\n'),*tab=strchr(p,'\t');if(!e||!tab||tab>=e)die("receipt row");size_t kn=tab-p;int header=0;for(int k=0;k<10;k++)if(strlen(headers[k])==kn&&!memcmp(p,headers[k],kn))header=1;if(!header){if(count==TP_BATCH_CAP||!kn||kn>=128||e-tab!=65)die("job receipt fields");for(size_t k=0;k<kn;k++){char c=p[k];if(!((c>='a'&&c<='z')||(c>='0'&&c<='9')||c=='-'))die("job ID");ids[count][k]=c;}ids[count][kn]=0;for(int k=0;k<count;k++)if(!strcmp(ids[k],ids[count]))die("duplicate job receipt");char expectedsha[65];for(int k=0;k<64;k++)expectedsha[k]=tab[1+k];expectedsha[64]=0;if(!hex(expectedsha,64))die("job SHA");np_buf b={0};const char*suffix[]={"stdout","stderr","status.tsv","verdict.tsv"};int jobrc=-1;for(int k=0;k<4;k++){char name[200],pathbuf[4400],len[60];if(cx_fmt(name,sizeof name,"job-%s.%s",ids[count],suffix[k]))die("job file name");path(pathbuf,sizeof pathbuf,lane,name);size_t n;char*raw=readreg(pathbuf,&n,67108864);if(k==0){char*mark=strstr(raw,"BATCH_RUN\tid="),id[128],status[20],marker[128],sha[65];int rc,tr;if(!mark||strstr(mark+1,"BATCH_RUN\tid=")||sscanf(mark,"BATCH_RUN\tid=%127s\tstatus=%19s\trc=%d\ttransport=%d\tmarker=%127s\tcandidate=%64s",id,status,&rc,&tr,marker,sha)!=6||strcmp(id,ids[count])||strcmp(sha,candidate)||tr)die("job BATCH identity");if(!strcmp(status,"PASS")&&!rc)jobrc=0;else if(!strcmp(status,"FAIL")&&rc){jobrc=1;failures++;}else die("job BATCH unknown status");}if(k==2){int pid,reaped,tr,rc,residue;long ms;char expectedstatus[600];if(sscanf(raw,"pid\t%d\nreaped\t%d\nelapsed_ms\t%ld\ntransport\t%d\nrc\t%d\nresidue\t%d\n",&pid,&reaped,&ms,&tr,&rc,&residue)!=6||pid<=0||reaped!=1||ms<0||tr||residue||rc!=jobrc||cx_fmt(expectedstatus,sizeof expectedstatus,"pid\t%d\nreaped\t%d\nelapsed_ms\t%ld\ntransport\t%d\nrc\t%d\nresidue\t%d\n",pid,reaped,ms,tr,rc,residue)||strlen(expectedstatus)!=n||memcmp(raw,expectedstatus,n))die("job actual waitpid status UNKNOWN");}if(k==3){char expectedverdict[300];if(cx_fmt(expectedverdict,sizeof expectedverdict,"%s\t%s\t%d\t0\t0\t",ids[count],jobrc?"FAIL":"LOCAL_PASS",jobrc)||strncmp(raw,expectedverdict,strlen(expectedverdict)))die("job verdict does not match actual status");}if(cx_fmt(len,sizeof len,"%zu:",n))die("job frame");np_puts(&b,name);np_puts(&b,"\n");np_puts(&b,len);np_put(&b,raw,n);free(raw);}char h[65];cx_sha256_hex(b.p,b.n,h);free(b.p);if(strcmp(h,expectedsha))die("job evidence content SHA mismatch");count++;}p=e+1;}if(count!=expected||(!failed&&failures)||(failed&&!failures))die("job receipts incomplete or FAIL mismatch");}
+ static void dispatch_lane(const char*rev,const char*tree,const char*work){char driver[4400],lane[4400],map[4400],p[4400],stdoutpath[4400],stderrpath[4400],wire[15000];path(driver,sizeof driver,state,"lane-native");path(lane,sizeof lane,tree,"out/lane-run");path(map,sizeof map,work,"materials.tsv");path(p,sizeof p,work,"lane-sequence");long serial=0;if(!missing(p)){size_t n;char*b=readreg(p,&n,30);char*end;serial=strtol(b,&end,10);if(*end!='\n'||end[1]||serial<1||serial>100000)die("lane sequence");free(b);}serial++;char number[40];if(cx_fmt(number,sizeof number,"%ld\n",serial))die("lane sequence format");put(p,number,strlen(number),1);if(cx_fmt(stdoutpath,sizeof stdoutpath,"%s/lane-%ld.stdout",work,serial)||cx_fmt(stderrpath,sizeof stderrpath,"%s/lane-%ld.stderr",work,serial))die("lane transcript paths");int fo=open(stdoutpath,O_WRONLY|O_CREAT|O_EXCL|O_NOFOLLOW|O_CLOEXEC,0600),fe=open(stderrpath,O_WRONLY|O_CREAT|O_EXCL|O_NOFOLLOW|O_CLOEXEC,0600);if(fo<0||fe<0)die("lane exclusive transcript");if(cx_fmt(wire,sizeof wire,"OSX_SENTINEL_HANDOFF1\nrevision\t%s\nlane_sha\t%s\nstdout\t%s\nstderr\t%s\npid\t%d\nexit_status\tUNOBSERVED_EXEC_HANDOFF\n",rev,lanehash,stdoutpath,stderrpath,(int)getpid()))die("lane handoff receipt");path(p,sizeof p,work,"lane-handoff.tsv");put(p,wire,strlen(wire),1);progress(rev,"LANE_COLLECT");fflush(stdout);size_t n=0;while(environ[n])n++;char**env=calloc(n+8,sizeof *env);if(!env)die("lane environment");size_t z=0;for(size_t k=0;k<n;k++){int keep=1;for(int j=0;commandenv[j];j++){size_t len=strcspn(commandenv[j],"=");if(!strncmp(environ[k],commandenv[j],len)&&environ[k][len]=='=')keep=0;}if(keep)env[z++]=environ[k];}for(int j=0;commandenv[j];j++)env[z++]=commandenv[j];env[z]=0;environ=env;int flags=fcntl(lockfd,F_GETFD);if(flags<0||fcntl(lockfd,F_SETFD,flags&~FD_CLOEXEC)||dup2(fo,1)<0||dup2(fe,2)<0||close(fo)||close(fe))die("lane exec handoff fds");char *v[]={driver,"--step",(char*)tree,lane,map,0};execv(driver,v);die("lane exec failed; no final status inferred");}
+ static void setturn(const char*);static void assessed(const char*,int);
+ static long number(const char*s,long max){if(!s||!*s)return -1;long v=0;for(size_t i=0;s[i];i++){if(s[i]<'0'||s[i]>'9'||v>(max-(s[i]-'0'))/10)return -1;v=v*10+s[i]-'0';}return v;}
+@@ -50,7 +51,7 @@ static void failed_materials(const char*tree,const char*id,char*csv,size_t cap){
+ static void first_bad(const char*bad,const char*head){char w[4400],tree[4400],p[4400],fail[128];runpaths(bad,w,tree);path(p,sizeof p,tree,"out/lane-run/queue-result.tsv");size_t n;char*s=readreg(p,&n,1048576);if(!value(s,"fail_id",fail,sizeof fail)||!fail[0]||strpbrk(fail,"\t\r\n /"))die("first bad lacks exact failure batch");free(s);char needed[2000];failed_materials(tree,fail,needed,sizeof needed);np_buf args={0};const char*fixed[]={"tools/bound","55","sh","unisacc.com","tests/run-batch.cx","--"};for(int i=0;i<6;i++){if(i==0||i==3||i==4){char a[4400];path(a,sizeof a,tree,fixed[i]);np_puts(&args,a);}else np_puts(&args,fixed[i]);np_puts(&args,"\n");}np_puts(&args,tree);np_puts(&args,"\n");path(p,sizeof p,tree,"out/reproduce");np_puts(&args,p);np_puts(&args,"\n");np_puts(&args,fail);np_puts(&args,"\n");path(p,sizeof p,w,"materials.tsv");char*m=readreg(p,&n,32768);for(char*a=m;*a;){char*e=strchr(a,'\n'),*t=strchr(a,'\t');if(!e||!t||t>=e)die("repro MAP");*t=0;if(declared(needed,a)){*t='=';np_put(&args,a,e-a);np_puts(&args,"\n");}a=e+1;}free(m);path(p,sizeof p,w,"firstbad-argv.tsv");if(missing(p))put(p,args.p,args.n,0);free(args.p);char id[80],line[13000],needle[300],date[40];const char*owner=strstr(fail,"lnx")?"lnx-material":"osx";if(cx_fmt(id,sizeof id,"OSX-REGRESS-%s",bad)||cx_fmt(needle,sizeof needle,"generation=%s",inputsha)||sy_local_fmt(date,sizeof date,"%Y-%m-%d",sy_wall_s())<0||cx_fmt(line,sizeof line,"%s\tosx-first-bad\t%s\t%s\t同材料首坏批次%s domain=osx-source;%s argv:%s %s head=%s logs=%s/out/lane-run/job-%s.stdout mkdir-repro-parent-required state=READY SOURCE-DRIVER-ONLY;实际稳定FAIL及祖先区间证明\n",id,owner,date,fail,owner,p,needle,head,tree,fail))die("firstbad item row");append_table(id,line,needle,1);char bf[4400];path(bf,sizeof bf,state,"bisect.tsv");char archived[4400];if(cx_fmt(archived,sizeof archived,"%s/bisect-complete-%s.tsv",state,bad)||rename(bf,archived))die("archive bisect");complete_revision(head,"FIRST_BAD_REPORTED");}
+ static void bisect_pick(void){char good[41],bad[41],head[41],phase[40],mid[41];char*s=bisect_load(good,bad,head,phase,mid);free(s);if(strcmp(phase,"PICK"))die("bisect pick phase");comparable(good,bad);char range[90];if(cx_fmt(range,sizeof range,"%s..%s",good,bad))die("range");char *list[]={"git","-C",root,"rev-list",range,0};np_result r=call(list);int count=0;for(size_t i=0;i<r.outn;i++)if(r.out[i]=='\n')count++;if(count<1||r.outn!=(size_t)count*41)die("ancestry interval shape");np_free(&r);if(count==1){first_bad(bad,head);return;}char*pick[]={"git","-C",root,"rev-list","--bisect",range,0};r=call(pick);if(r.rc||r.outn!=41||r.out[40]!='\n')die("bisect midpoint");r.out[40]=0;if(!hex(r.out,40)||!strcmp(r.out,good)||!strcmp(r.out,bad)||cx_fmt(mid,sizeof mid,"%s",r.out))die("nonprogressing midpoint");np_free(&r);char w[4400],t[4400],p[4400];runpaths(mid,w,t);path(p,sizeof p,w,"result.tsv");if(!missing(p))die("midpoint already assessed; explicit reuse requires revalidation");bisect_save(good,bad,head,"EVALUATE",mid);progress(mid,"DETECTED");}
+ static int choose_queued(char chosen[41]){char p[4400];path(p,sizeof p,state,"queue.tsv");size_t n;char*s=readreg(p,&n,8192);if(n%41)die("queued revisions wire");for(size_t i=0;i<n;i+=41){char rev[41];for(int k=0;k<40;k++)rev[k]=s[i+k];rev[40]=0;if(s[i+40]!='\n'||!hex(rev,40))die("queue commit");char w[4400],t[4400];runpaths(rev,w,t);path(p,sizeof p,w,"complete.tsv");if(missing(p)){if(cx_fmt(chosen,41,"%s",rev))die("queue choice");free(s);return 1;}size_t z;char*c=readreg(p,&z,2000),gen[65],want[65],actual[65],status[40];if(!value(c,"generation",gen,sizeof gen)||strcmp(gen,inputsha)||!value(c,"result_sha",want,sizeof want)||!value(c,"status",status,sizeof status))die("completed generation receipt");free(c);path(p,sizeof p,w,"result.tsv");if(!missing(p)){digest(p,actual);if(strcmp(actual,want))die("completed assessment changed");}else{cx_sha256_hex(status,strlen(status),actual);if(strcmp(actual,want))die("completed fallback receipt");}}free(s);return 0;}
+-static void lane_step(const char*rev,const char*tree,const char*work){char driver[4400],lane[4400],map[4400],receipt[4400],installed[4400],h[65];path(driver,sizeof driver,state,"lane-native");path(lane,sizeof lane,tree,"out/lane-run");path(map,sizeof map,work,"materials.tsv");path(receipt,sizeof receipt,work,"lane-handoff.tsv");size_t hn;char*handoff=readreg(receipt,&hn,16384);char observedrev[41],observeddriver[65],op[4400],ep[4400];if(!value(handoff,"revision",observedrev,sizeof observedrev)||strcmp(observedrev,rev)||!value(handoff,"lane_sha",observeddriver,sizeof observeddriver)||strcmp(observeddriver,lanehash)||!value(handoff,"stdout",op,sizeof op)||!value(handoff,"stderr",ep,sizeof ep))die("handoff identity");free(handoff);np_result r={0};r.out=readreg(op,&r.outn,67108864);r.err=readreg(ep,&r.errn,67108864);if(strstr(r.out,"OSX_LANE_STEP\tstatus=PENDING\t"))r.rc=3;else if(strstr(r.out,"OSX_LANE_STEP\tstatus=LOCAL_PASS\t"))r.rc=0;else if(strstr(r.out,"OSX_LANE_STEP\tstatus=FAIL\t"))r.rc=1;else r.rc=2;char*marker=r.out?strstr(r.out,"OSX_LANE_STEP\tstatus="):0;if(!marker||strstr(marker+1,"OSX_LANE_STEP\tstatus="))die("unique lane step marker");int rc=r.rc;if(rc==3){if(strncmp(marker,"OSX_LANE_STEP\tstatus=PENDING\t",29))die("lane pending marker");np_free(&r);progress(rev,"LANE");done(3);}if(rc!=0&&rc!=1){np_free(&r);puts("OSX_SENTINEL\tstatus=UNKNOWN\treason=lane-refused");done(2);}const char*expected=rc?"OSX_LANE_STEP\tstatus=FAIL\t":"OSX_LANE_STEP\tstatus=LOCAL_PASS\t";if(strncmp(marker,expected,strlen(expected)))die("lane status/exit mismatch");np_free(&r);char *verify[]={driver,"--verify-queue",(char*)tree,lane,map,0};window(45);np_result vr=call(verify);char *vm=vr.out?strstr(vr.out,"OSX_LANE_QUEUE_VERIFY\tstatus="):0;const char *vs=rc?"OSX_LANE_QUEUE_VERIFY\tstatus=FAIL\t":"OSX_LANE_QUEUE_VERIFY\tstatus=LOCAL_PASS\t";if(vr.rc!=rc||!vm||strstr(vm+1,"OSX_LANE_QUEUE_VERIFY\tstatus=")||strncmp(vm,vs,strlen(vs)))die("independent queue verifier UNKNOWN or mismatch");char verified_receipt[65],verified_candidate[65],verified_sid[65],verified_registry[65],verified_harness[65];int verified_selected,verified_executed;if(sscanf(vm,"OSX_LANE_QUEUE_VERIFY\tstatus=%*s\treceipt_sha=%64s\tcandidate=%64s\tsource_sid=%64s\tregistry=%64s\tharness=%64s\tselected=%d\texecuted=%d",verified_receipt,verified_candidate,verified_sid,verified_registry,verified_harness,&verified_selected,&verified_executed)!=7)die("verifier identity schema");np_free(&vr);path(receipt,sizeof receipt,lane,"queue.state");size_t qn;char*qraw=readreg(receipt,&qn,33554432);char queuesha[65],bodysha[65];if(qn<66||qraw[64]!='\n')die("queue state wire");cx_sha256_hex(qraw+65,qn-65,bodysha);if(memcmp(qraw,bodysha,64))die("queue state hash mismatch");cx_sha256_hex(qraw,qn,queuesha);free(qraw);path(receipt,sizeof receipt,lane,"queue-result.tsv");size_t n;char*s=readreg(receipt,&n,1048576);char status[40],selected[30],executed[30],stable[5],candidate[65],sid[65],harness[65],registry[65];if(strncmp(s,"OSX_LANE_QUEUE\t1\n",17)||!value(s,"status",status,sizeof status)||strcmp(status,rc?"FAIL":"LOCAL_PASS")||!value(s,"selected",selected,sizeof selected)||!value(s,"executed",executed,sizeof executed)||!value(s,"identity_stable",stable,sizeof stable)||strcmp(stable,"1")||!value(s,"candidate",candidate,sizeof candidate)||!hex(candidate,64)||!value(s,"source_sid",sid,sizeof sid)||!hex(sid,64)||!value(s,"harness",harness,sizeof harness)||!hex(harness,64)||!value(s,"registry",registry,sizeof registry)||!hex(registry,64))die("lane final receipt schema");long count=number(selected,2048),donecount=number(executed,2048);if(count<1||count>2048||donecount<1||donecount>count||(!rc&&strcmp(selected,executed)))die("lane incomplete final receipt");path(installed,sizeof installed,tree,"unisacc.com");digest(installed,h);if(strcmp(h,candidate))die("lane candidate binding");digest(receipt,h);if(strcmp(h,verified_receipt)||strcmp(candidate,verified_candidate)||strcmp(sid,verified_sid)||strcmp(registry,verified_registry)||strcmp(harness,verified_harness)||count!=verified_selected||donecount!=verified_executed)die("verifier differs from original receipt");char failid[128];if(rc&&!value(s,"fail_id",failid,sizeof failid))die("lane FAIL lacks batch identity");verify_jobs(s,lane,donecount,candidate,rc);free(s);digest(receipt,h);path(receipt,sizeof receipt,work,"lane-receipt.sha256");if(missing(receipt))put(receipt,h,64,0);else{size_t z;char*b=readreg(receipt,&z,64);if(z!=64||memcmp(b,h,64))die("terminal receipt changed");free(b);}save_result(rev,rc,candidate,sid,harness,registry,h,queuesha);assessed(rev,rc);done(2);}
++static void lane_step(const char*rev,const char*tree,const char*work){char driver[4400],lane[4400],map[4400],receipt[4400],installed[4400],h[65];path(driver,sizeof driver,state,"lane-native");path(lane,sizeof lane,tree,"out/lane-run");path(map,sizeof map,work,"materials.tsv");path(receipt,sizeof receipt,work,"lane-handoff.tsv");size_t hn;char*handoff=readreg(receipt,&hn,16384);char observedrev[41],observeddriver[65],op[4400],ep[4400];if(!value(handoff,"revision",observedrev,sizeof observedrev)||strcmp(observedrev,rev)||!value(handoff,"lane_sha",observeddriver,sizeof observeddriver)||strcmp(observeddriver,lanehash)||!value(handoff,"stdout",op,sizeof op)||!value(handoff,"stderr",ep,sizeof ep))die("handoff identity");free(handoff);np_result r={0};r.out=readreg(op,&r.outn,67108864);r.err=readreg(ep,&r.errn,67108864);if(strstr(r.out,"OSX_LANE_STEP\tstatus=PENDING\t"))r.rc=3;else if(strstr(r.out,"OSX_LANE_STEP\tstatus=LOCAL_PASS\t"))r.rc=0;else if(strstr(r.out,"OSX_LANE_STEP\tstatus=FAIL\t"))r.rc=1;else r.rc=2;char*marker=r.out?strstr(r.out,"OSX_LANE_STEP\tstatus="):0;if(!marker||strstr(marker+1,"OSX_LANE_STEP\tstatus="))die("unique lane step marker");int rc=r.rc;if(rc==3){if(strncmp(marker,"OSX_LANE_STEP\tstatus=PENDING\t",29))die("lane pending marker");np_free(&r);progress(rev,"LANE");done(3);}if(rc!=0&&rc!=1){np_free(&r);puts("OSX_SENTINEL\tstatus=UNKNOWN\treason=lane-refused");done(2);}const char*expected=rc?"OSX_LANE_STEP\tstatus=FAIL\t":"OSX_LANE_STEP\tstatus=LOCAL_PASS\t";if(strncmp(marker,expected,strlen(expected)))die("lane status/exit mismatch");np_free(&r);char *verify[]={driver,"--verify-queue",(char*)tree,lane,map,0};window(45);np_result vr=call(verify);char *vm=vr.out?strstr(vr.out,"OSX_LANE_QUEUE_VERIFY\tstatus="):0;const char *vs=rc?"OSX_LANE_QUEUE_VERIFY\tstatus=FAIL\t":"OSX_LANE_QUEUE_VERIFY\tstatus=LOCAL_PASS\t";if(vr.rc!=rc||!vm||strstr(vm+1,"OSX_LANE_QUEUE_VERIFY\tstatus=")||strncmp(vm,vs,strlen(vs)))die("independent queue verifier UNKNOWN or mismatch");char verified_receipt[65],verified_candidate[65],verified_sid[65],verified_registry[65],verified_harness[65];int verified_selected,verified_executed;if(sscanf(vm,"OSX_LANE_QUEUE_VERIFY\tstatus=%*s\treceipt_sha=%64s\tcandidate=%64s\tsource_sid=%64s\tregistry=%64s\tharness=%64s\tselected=%d\texecuted=%d",verified_receipt,verified_candidate,verified_sid,verified_registry,verified_harness,&verified_selected,&verified_executed)!=7)die("verifier identity schema");np_free(&vr);path(receipt,sizeof receipt,lane,"queue.state");size_t qn;char*qraw=readreg(receipt,&qn,33554432);char queuesha[65],bodysha[65];if(qn<66||qraw[64]!='\n')die("queue state wire");cx_sha256_hex(qraw+65,qn-65,bodysha);if(memcmp(qraw,bodysha,64))die("queue state hash mismatch");cx_sha256_hex(qraw,qn,queuesha);free(qraw);path(receipt,sizeof receipt,lane,"queue-result.tsv");size_t n;char*s=readreg(receipt,&n,1048576);char status[40],selected[30],executed[30],stable[5],candidate[65],sid[65],harness[65],registry[65];if(strncmp(s,"OSX_LANE_QUEUE\t1\n",17)||!value(s,"status",status,sizeof status)||strcmp(status,rc?"FAIL":"LOCAL_PASS")||!value(s,"selected",selected,sizeof selected)||!value(s,"executed",executed,sizeof executed)||!value(s,"identity_stable",stable,sizeof stable)||strcmp(stable,"1")||!value(s,"candidate",candidate,sizeof candidate)||!hex(candidate,64)||!value(s,"source_sid",sid,sizeof sid)||!hex(sid,64)||!value(s,"harness",harness,sizeof harness)||!hex(harness,64)||!value(s,"registry",registry,sizeof registry)||!hex(registry,64))die("lane final receipt schema");long count=number(selected,TP_BATCH_CAP),donecount=number(executed,TP_BATCH_CAP);if(count<1||count>TP_BATCH_CAP||donecount<1||donecount>count||(!rc&&strcmp(selected,executed)))die("lane incomplete final receipt");path(installed,sizeof installed,tree,"unisacc.com");digest(installed,h);if(strcmp(h,candidate))die("lane candidate binding");digest(receipt,h);if(strcmp(h,verified_receipt)||strcmp(candidate,verified_candidate)||strcmp(sid,verified_sid)||strcmp(registry,verified_registry)||strcmp(harness,verified_harness)||count!=verified_selected||donecount!=verified_executed)die("verifier differs from original receipt");char failid[128];if(rc&&!value(s,"fail_id",failid,sizeof failid))die("lane FAIL lacks batch identity");verify_jobs(s,lane,donecount,candidate,rc);free(s);digest(receipt,h);path(receipt,sizeof receipt,work,"lane-receipt.sha256");if(missing(receipt))put(receipt,h,64,0);else{size_t z;char*b=readreg(receipt,&z,64);if(z!=64||memcmp(b,h,64))die("terminal receipt changed");free(b);}save_result(rev,rc,candidate,sid,harness,registry,h,queuesha);assessed(rev,rc);done(2);}
+ static np_result call(char**av){long left=endtime-sy_now_ms();int seconds=(int)(left/1000);if(seconds>commandcap)seconds=commandcap;if(seconds<1)die("tick deadline before complete command");np_result r={0};long began=sy_now_ms();int tr=np_run(av,root,commandenv,seconds,&r,why,sizeof why);char p[4500],leaf[120],h[65],oh[65],eh[65],row[1800];cx_sha256_hex(r.out?r.out:"",r.outn,oh);cx_sha256_hex(r.err?r.err:"",r.errn,eh);if(cx_fmt(leaf,sizeof leaf,"%d-%d.stdout",(int)getpid(),seq))die("log name");path(p,sizeof p,logs,leaf);put(p,r.out?r.out:"",r.outn,0);if(cx_fmt(leaf,sizeof leaf,"%d-%d.stderr",(int)getpid(),seq))die("log name");path(p,sizeof p,logs,leaf);put(p,r.err?r.err:"",r.errn,0);np_buf args={0};for(int i=0;av[i];i++){np_puts(&args,av[i]);np_puts(&args,"\n");}cx_sha256_hex(args.p,args.n,h);if(cx_fmt(leaf,sizeof leaf,"%d-%d.argv",(int)getpid(),seq))die("log name");path(p,sizeof p,logs,leaf);put(p,args.p,args.n,0);free(args.p);if(cx_fmt(row,sizeof row,"transport\t%d\nrc\t%d\nresidue\t%d\nelapsed_ms\t%ld\nargv_sha256\t%s\nstdout_sha256\t%s\nstderr_sha256\t%s\ngeneration\t%s\nreason\t%s\n",tr,r.rc,r.residue,sy_now_ms()-began,h,oh,eh,inputsha,tr?why:"-"))die("status bound");if(cx_fmt(leaf,sizeof leaf,"%d-%d.status.tsv",(int)getpid(),seq++))die("log name");path(p,sizeof p,logs,leaf);put(p,row,strlen(row),0);if(tr||r.residue){np_free(&r);die("command failed; unchanged phase; logs retained");}return r;}
+ static void run(char**v){np_result r=call(v);int rc=r.rc;np_free(&r);if(rc)die("command nonzero; unchanged phase");}
+ static int missing(const char*p){struct stat st;errno=0;if(!lstat(p,&st))return 0;if(errno!=ENOENT)die("existence IO");return 1;}
+diff --git a/tools/prerun-drive.cx b/tools/prerun-drive.cx
+index e9d4fc2..557c292 100644
+--- a/tools/prerun-drive.cx
++++ b/tools/prerun-drive.cx
+@@ -22,9 +22,10 @@
+ #pragma unisa use mem.bytes
+ #pragma unisa use mem.heap
+ #pragma unisa use text.text
++#pragma unisa use cxlib.testplan
+ 
+ #define PD_PW 4400
+-#define PD_MAX_IDS 2048
++#define PD_MAX_IDS TP_BATCH_CAP
+ #define PD_PREP_MAXB 1024
+ #define PD_MAX_WINS 2048
+ #define PD_MAX_FILES (PD_MAX_WINS + PD_MAX_IDS)
+diff --git a/tools/tlib-admit.cx b/tools/tlib-admit.cx
+index 1652087..858357c 100644
+--- a/tools/tlib-admit.cx
++++ b/tools/tlib-admit.cx
+@@ -34,11 +34,12 @@
+ #pragma unisa use text.text
+ #pragma unisa use mem.bytes
+ #pragma unisa use mem.heap
++#pragma unisa use cxlib.testplan
+ 
+ static char root[4096], kitdir[4400];
+ static const char *extra[8];   /* --with SRC: further root units of the program, given to every link */
+ static int nextra;
+-#define MAXF 2048
++#define MAXF TP_TOOL_SRC_CAP
+ static char files[MAXF][256];
+ static int nfiles;
+ 
+diff --git a/tools/tool-index.cx b/tools/tool-index.cx
+index dddb254..71278a5 100644
+--- a/tools/tool-index.cx
++++ b/tools/tool-index.cx
+@@ -17,8 +17,9 @@
+ #pragma unisa use mem.bytes
+ #pragma unisa use cxlib.awpath
+ #pragma unisa use cxlib.genkit
++#pragma unisa use cxlib.testplan
+ 
+-#define MAXF 2048
++#define MAXF TP_TOOL_SRC_CAP
+ #define OUTCAP (8 * 1024 * 1024)
+ 
+ static const char *root = ".";

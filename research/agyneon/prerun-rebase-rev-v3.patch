@@ -1,0 +1,416 @@
+diff --git a/tools/check-prerun-rebase.cx b/tools/check-prerun-rebase.cx
+new file mode 100644
+index 0000000..f9d924e
+--- /dev/null
++++ b/tools/check-prerun-rebase.cx
+@@ -0,0 +1,184 @@
++/* tools/check-prerun-rebase.cx -- table-driven check for prerun-drive rebase-rev. */
++#pragma unisa use sys.fs
++#pragma unisa use sys.posix
++#pragma unisa use sys.env
++#pragma unisa use sysx.run
++
++static int failed;
++static int rows;
++static int asserted;
++
++static void sh_run(const char *cwd, const char *cmd) {
++    px_opts o;
++    px_result r;
++    char *av[4];
++    av[0] = "sh"; av[1] = "-c"; av[2] = (char *)cmd; av[3] = 0;
++    px_opts_init(&o); o.argv = av; o.cwd = cwd; o.deadline_ms = 5000;
++    px_run(&o, &r);
++    px_result_free(&r);
++}
++
++static int parse_kv_int(const char *s, const char *key) {
++    char pat[64];
++    int i, j, plen;
++    cx_fmt(pat, sizeof pat, "\t%s=", key);
++    plen = (int)strlen(pat);
++    for (i = 0; s[i]; i++) {
++        for (j = 0; j < plen && s[i + j] == pat[j]; j++) {}
++        if (j == plen) return atoi(s + i + plen);
++    }
++    return -1;
++}
++
++static void verify_case(char **cols, const char *repo) {
++    const char *id = cols[0];
++    int exp_rc = atoi(cols[1]);
++    const char *exp_tag = cols[2];
++    int exp_ret = atoi(cols[3]);
++    int exp_rer = atoi(cols[4]);
++    char outd[512], revf[512], cmd[1024];
++    px_opts o;
++    px_result r;
++    char *av[4];
++    int rc, obs_ret = -1, obs_rer = -1, ok;
++
++    cx_fmt(outd, sizeof outd, "%s/out_%s", repo, id);
++    sh_run(repo, "git checkout -q base");
++    if (strcmp(id, "non_ancestor_refused") == 0) {
++        cx_fmt(cmd, sizeof cmd, "mkdir -p '%s' && git rev-parse side > '%s/frozen-source.rev'", outd, outd);
++        sh_run(repo, cmd);
++        sh_run(repo, "git checkout -q goodpath");
++    } else if (strcmp(id, "disallowed_path_refused") == 0) {
++        cx_fmt(cmd, sizeof cmd, "mkdir -p '%s' && git rev-parse base > '%s/frozen-source.rev'", outd, outd);
++        sh_run(repo, cmd);
++        sh_run(repo, "git checkout -q badpath");
++    } else if (strcmp(id, "sid_mismatch_refused") == 0) {
++        cx_fmt(cmd, sizeof cmd, "mkdir -p '%s' && git rev-parse base > '%s/frozen-source.rev'", outd, outd);
++        sh_run(repo, cmd);
++        sh_run(repo, "git checkout -q goodpath");
++        setenv("PRERUN_REBASE_SID_BIN", "/bin/echo", 1);
++    } else if (strcmp(id, "single_batch_changed_reruns") == 0) {
++        int i;
++        cx_fmt(cmd, sizeof cmd, "mkdir -p '%s' && git rev-parse base > '%s/frozen-source.rev'", outd, outd);
++        sh_run(repo, cmd);
++        for (i = 0; i < 5; i++) {
++            cx_fmt(cmd, sizeof cmd, "touch '%s/done.W%04d' && printf 'b%d\\tPASS\\t%s\\n' > '%s/strict-W%04d.tsv'",
++                   outd, i, i, i == 2 ? "tests/ok.txt" : "tests/other.txt", outd, i);
++            sh_run(repo, cmd);
++        }
++        sh_run(repo, "git checkout -q goodpath");
++    } else if (strcmp(id, "sampling_10pct_floor") == 0) {
++        int i;
++        cx_fmt(cmd, sizeof cmd, "mkdir -p '%s' && git rev-parse base > '%s/frozen-source.rev'", outd, outd);
++        sh_run(repo, cmd);
++        for (i = 0; i < 10; i++) {
++            cx_fmt(cmd, sizeof cmd, "touch '%s/done.W%04d' && printf 'b%d\\tPASS\\ttests/other.txt\\n' > '%s/strict-W%04d.tsv'",
++                   outd, i, i, outd, i);
++            sh_run(repo, cmd);
++        }
++        sh_run(repo, "git checkout -q goodpath");
++    } else if (strcmp(id, "replay_c7_to_c10_disallowed_posix") == 0) {
++        cx_fmt(cmd, sizeof cmd, "mkdir -p '%s' && git rev-parse base > '%s/frozen-source.rev'", outd, outd);
++        sh_run(repo, cmd);
++        sh_run(repo, "git checkout -q posixbad");
++    } else if (strcmp(id, "replay_c9b_to_c10_scale_20") == 0) {
++        int i;
++        cx_fmt(cmd, sizeof cmd, "mkdir -p '%s' && git rev-parse base > '%s/frozen-source.rev'", outd, outd);
++        sh_run(repo, cmd);
++        for (i = 0; i < 20; i++) {
++            const char *st = (i == 3) ? "FAIL" : "PASS";
++            const char *f = (i == 2) ? "tests/daily-compile-smoke.tsv" : "tests/other.txt";
++            cx_fmt(cmd, sizeof cmd, "touch '%s/done.W%04d' && printf 'b%d\\t%s\\t%s\\n' > '%s/strict-W%04d.tsv'",
++                   outd, i, i, st, f, outd, i);
++            sh_run(repo, cmd);
++        }
++        sh_run(repo, "git checkout -q c10good");
++    }
++    (void)revf;
++    cx_fmt(cmd, sizeof cmd, "sh ./unisacc.com tools/prerun-drive.cx -- rebase-rev --root '%s' --out '%s' --new-rev HEAD", repo, outd);
++    av[0] = "sh"; av[1] = "-c"; av[2] = cmd; av[3] = 0;
++    px_opts_init(&o); o.argv = av; o.deadline_ms = 40000; o.merge_err = 1;
++    rc = px_run(&o, &r);
++    unsetenv("PRERUN_REBASE_SID_BIN");
++    if (rc == 0) rc = r.code != 0 ? 1 : 0; else rc = 1;
++    if (r.out && exp_rc == 0) {
++        obs_ret = parse_kv_int(r.out, "retained");
++        obs_rer = parse_kv_int(r.out, "rerun");
++    }
++    ok = (rc == exp_rc) && (r.out && strstr(r.out, exp_tag) != 0) && (obs_ret == exp_ret) && (obs_rer == exp_rer);
++    if (ok && exp_rc == 0) {
++        sy_dir_t d;
++        int actual_done = 0;
++        size_t rsz = 0;
++        char *rtxt;
++        cx_fmt(revf, sizeof revf, "%s/frozen-source.rev", outd);
++        rtxt = cx_read(revf, &rsz);
++        if (!rtxt || rsz < 40 || strncmp(rtxt, "HEAD", 4) == 0) ok = 0;
++        if (rtxt) free(rtxt);
++        if (sy_dir_open(&d, outd) == 0) {
++            while (sy_dir_next(&d) == 1) {
++                if (strncmp(d.name, "done.W", 6) == 0) actual_done++;
++            }
++            sy_dir_close(&d);
++        }
++        if (actual_done != obs_ret) ok = 0;
++    }
++    asserted++;
++    if (ok) printf("PASS\t%s\n", id);
++    else {
++        printf("FAIL\t%s\twant=(%d,%s,%d,%d)\tobs=(%d,%d,%d)\n", id, exp_rc, exp_tag, exp_ret, exp_rer, rc, obs_ret, obs_rer);
++        failed++;
++    }
++    px_result_free(&r);
++}
++
++int main(void) {
++    char repo[512], cmd[4096];
++    size_t sz = 0;
++    char *txt, *p, *nl;
++    int line_no = 0;
++
++    cx_fmt(repo, sizeof repo, "%s/prerun-rebase-test-%d", sy_tmpdir(), (int)getpid());
++    cx_fmt(cmd, sizeof cmd,
++           "rm -rf '%s' && mkdir -p '%s/tests' '%s/cx/sys' '%s/ext' '%s/src' '%s/include' && "
++           "cd '%s' && git init -q && git config user.email t@t && git config user.name t && "
++           "touch tests/ok.txt tests/other.txt tests/daily-compile-smoke.tsv cx/sys/proc.cx cx/sys/posix.cx ext/a src/a include/a && "
++           "git add -A && git commit -q -m init && git branch -M base && "
++           "git checkout -q -b side && echo x > tests/side.txt && git add -A && git commit -q -m side && "
++           "git checkout -q base && git checkout -q -b badpath && echo x > cx/sys/proc.cx && git add -A && git commit -q -m bad && "
++           "git checkout -q base && git checkout -q -b posixbad && echo x > cx/sys/posix.cx && git add -A && git commit -q -m pbad && "
++           "git checkout -q base && git checkout -q -b goodpath && echo x > tests/ok.txt && git add -A && git commit -q -m good && "
++           "git checkout -q base && git checkout -q -b c10good && echo x > tests/daily-compile-smoke.tsv && git add -A && git commit -q -m c10",
++           repo, repo, repo, repo, repo, repo, repo);
++    sh_run(0, cmd);
++
++    txt = cx_read("tools/prerun-rebase-cases.tsv", &sz);
++    if (!txt) { printf("FAIL\tmissing tools/prerun-rebase-cases.tsv\n"); return 1; }
++    p = txt;
++    while (*p) {
++        nl = strchr(p, '\n');
++        if (nl) *nl = 0;
++        if (line_no > 0 && p[0]) {
++            char *cols[8];
++            int nc = 0;
++            char *q = p;
++            cols[nc++] = q;
++            while (*q && nc < 8) {
++                if (*q == '\t') { *q = 0; cols[nc++] = q + 1; }
++                q++;
++            }
++            rows++;
++            if (nc >= 5) verify_case(cols, repo);
++            else { printf("FAIL\tbad_row_%s\n", cols[0]); failed++; }
++        }
++        line_no++;
++        if (!nl) break;
++        p = nl + 1;
++    }
++    free(txt);
++    cx_fmt(cmd, sizeof cmd, "rm -rf '%s'", repo);
++    sh_run(0, cmd);
++    if (rows != asserted) { printf("FAIL\tmismatch rows=%d asserted=%d\n", rows, asserted); failed++; }
++    printf("CHECK_PRERUN_REBASE\trows=%d\tasserted=%d\tfailed=%d\n", rows, asserted, failed);
++    return failed ? 1 : 0;
++}
+diff --git a/tools/prerun-drive.cx b/tools/prerun-drive.cx
+index a9c8de3..b2f5d95 100644
+--- a/tools/prerun-drive.cx
++++ b/tools/prerun-drive.cx
+@@ -11,6 +11,7 @@
+  *   replay --ids-file FILE --evidence-dir DIR --out DIR [--expected-strict FILE] [--expected-g1dry FILE]
+  * Batch result lines are kept verbatim. Timed windows can recover missing
+  * evidence in single-batch runs, each with its own deadline. */
++#pragma unisa use sysx.run
+ #pragma unisa use sys.fs
+ #pragma unisa use sys.posix
+ #pragma unisa use sys.proc
+@@ -2955,9 +2956,198 @@ static int pd_cmd_prepare(const char *from_chain_dir, const char *root_arg, cons
+     return 0;
+ }
+ 
++static int pd_rebase_allowed_path(const char *p) {
++    if (!p || !p[0]) return 0;
++    if (strncmp(p, "tests/", 6) == 0) return 1;
++    if (strncmp(p, "tools/", 6) == 0) return 1;
++    if (strncmp(p, "build/", 6) == 0) return 1;
++    return 0;
++}
++
++static int pd_rebase_run_git(const char *root, char **av, char *out, int cap) {
++    px_opts o;
++    px_result r;
++    int rc;
++    px_opts_init(&o);
++    o.argv = av;
++    o.cwd = root;
++    o.deadline_ms = 10000;
++    o.out_cap = cap > 0 ? cap - 1 : 4096;
++    o.err_cap = 1024;
++    rc = px_run(&o, &r);
++    if (out && cap > 0) {
++        int n = r.out && r.outn > 0 ? (int)(r.outn < cap - 1 ? r.outn : cap - 1) : 0;
++        int k;
++        for (k = 0; k < n; k++) out[k] = r.out[k];
++        out[n] = 0;
++    }
++    if (r.truncated) rc = -EOVERFLOW;
++    if (rc == 0 && r.code != 0) rc = r.code;
++    px_result_free(&r);
++    return rc;
++}
++
++static int pd_rebase_sid(const char *root, const char *rev, char *out, int cap) {
++    const char *sid_bin = sy_env("PRERUN_REBASE_SID_BIN");
++    if (sid_bin && sid_bin[0]) {
++        char *av[3];
++        av[0] = (char *)sid_bin; av[1] = (char *)rev; av[2] = 0;
++        if (pd_rebase_run_git(root, av, out, cap) != 0) return -1;
++        return 0;
++    }
++    {
++        char arg0[128], arg1[128], arg2[128], arg3[128];
++        char *av[7];
++        if (cx_fmt(arg0, sizeof arg0, "%s:src", rev) ||
++            cx_fmt(arg1, sizeof arg1, "%s:cx", rev) ||
++            cx_fmt(arg2, sizeof arg2, "%s:ext", rev) ||
++            cx_fmt(arg3, sizeof arg3, "%s:include", rev)) return -1;
++        av[0] = "git"; av[1] = "rev-parse"; av[2] = arg0; av[3] = arg1; av[4] = arg2; av[5] = arg3; av[6] = 0;
++        if (pd_rebase_run_git(root, av, out, cap) != 0) return -1;
++        return 0;
++    }
++}
++
++static int pd_cmd_rebase_rev(const char *root, const char *out_dir, const char *new_rev, int dry_run) {
++    char revf[PD_PW], old_rev[128], new_sha[128], diff_out[16384], sid_old[512], sid_new[512];
++    char *changed[512];
++    int nchanged = 0, retained = 0, rerun = 0, sampled = 0;
++    sy_dir_t d;
++    if (!root || !root[0] || !out_dir || !out_dir[0] || !new_rev || !new_rev[0])
++        return pd_refuse("rebase-rev-requires-root-out-newrev");
++    {
++        char arg[160];
++        char *av[5];
++        int k = 0;
++        if (cx_fmt(arg, sizeof arg, "%s^{commit}", new_rev) != 0) return pd_refuse("path");
++        av[0] = "git"; av[1] = "rev-parse"; av[2] = "--verify"; av[3] = arg; av[4] = 0;
++        if (pd_rebase_run_git(root, av, new_sha, (int)sizeof new_sha) != 0) return pd_refuse("invalid-new-rev");
++        while (new_sha[k] && new_sha[k] != '\n' && new_sha[k] != '\r') k++;
++        new_sha[k] = 0;
++        if (k != 40) return pd_refuse("invalid-new-rev-sha");
++    }
++    if (cx_fmt(revf, sizeof revf, "%s/frozen-source.rev", out_dir)) return pd_refuse("path");
++    {
++        size_t sz = 0;
++        char *txt = cx_read(revf, &sz);
++        int k = 0;
++        if (!txt) return pd_refuse("missing-frozen-source-rev");
++        while (txt[k] && txt[k] != '\n' && txt[k] != '\r' && k < (int)sizeof old_rev - 1) { old_rev[k] = txt[k]; k++; }
++        old_rev[k] = 0;
++        free(txt);
++    }
++    {
++        char *av[5];
++        av[0] = "git"; av[1] = "merge-base"; av[2] = "--is-ancestor"; av[3] = old_rev; av[4] = (char *)new_rev;
++        {
++            char *av6[6];
++            av6[0] = av[0]; av6[1] = av[1]; av6[2] = av[2]; av6[3] = av[3]; av6[4] = av[4]; av6[5] = 0;
++            if (pd_rebase_run_git(root, av6, 0, 0) != 0) {
++                printf("PRERUN_REBASE\tREFUSE\tnon-ancestor\n");
++                return pd_refuse("non-ancestor");
++            }
++        }
++    }
++    {
++        char rng[256];
++        char *av[5];
++        char *p, *nl;
++        if (cx_fmt(rng, sizeof rng, "%s..%s", old_rev, new_rev)) return pd_refuse("path");
++        av[0] = "git"; av[1] = "diff"; av[2] = "--name-only"; av[3] = rng; av[4] = 0;
++        if (pd_rebase_run_git(root, av, diff_out, (int)sizeof diff_out) != 0) return pd_refuse("git-diff-failed");
++        p = diff_out;
++        while (*p) {
++            nl = strchr(p, '\n');
++            if (nl) *nl = 0;
++            if (p[0]) {
++                if (!pd_rebase_allowed_path(p)) {
++                    printf("PRERUN_REBASE\tREFUSE\tdisallowed-path=%s\n", p);
++                    return pd_refuse("disallowed-changed-path");
++                }
++                if (nchanged < 512) changed[nchanged++] = p;
++            }
++            if (!nl) break;
++            p = nl + 1;
++        }
++    }
++    if (pd_rebase_sid(root, old_rev, sid_old, (int)sizeof sid_old) != 0 ||
++        pd_rebase_sid(root, new_rev, sid_new, (int)sizeof sid_new) != 0 ||
++        strcmp(sid_old, sid_new) != 0) {
++        printf("PRERUN_REBASE\tREFUSE\tsid-mismatch\n");
++        return pd_refuse("sid-mismatch");
++    }
++    if (sy_dir_open(&d, out_dir) == 0) {
++        char done_names[1024][64];
++        int ndone = 0, i;
++        while (sy_dir_next(&d) == 1) {
++            if (strncmp(d.name, "done.W", 6) == 0 && ndone < 1024) {
++                if (cx_fmt(done_names[ndone], 64, "%s", d.name) == 0) ndone++;
++            }
++        }
++        sy_dir_close(&d);
++        for (i = 0; i < ndone; i++) {
++            char spath[PD_PW], dpath[PD_PW];
++            int aff = 0, j;
++            size_t ssz = 0;
++            char *stxt;
++            if (cx_fmt(spath, sizeof spath, "%s/strict-%s.tsv", out_dir, done_names[i] + 5) != 0) return pd_refuse("path");
++            stxt = cx_read(spath, &ssz);
++            if (!stxt) aff = 1;
++            else {
++                for (j = 0; j < nchanged && !aff; j++) {
++                    if (strstr(stxt, changed[j])) aff = 1;
++                }
++                if (strstr(stxt, "\tFAIL") || strstr(stxt, "\tUNKNOWN") || strstr(stxt, "\tINVALID")) aff = 1;
++                free(stxt);
++            }
++            if (!aff && ((i + 1) % 10 == 0)) { aff = 1; sampled++; }
++            if (aff) {
++                rerun++;
++                if (!dry_run) {
++                    if (cx_fmt(dpath, sizeof dpath, "%s/%s", out_dir, done_names[i]) != 0) return pd_refuse("path");
++                    sy_unlink(dpath);
++                }
++            } else {
++                retained++;
++            }
++        }
++        if (retained >= 5 && sampled == 0 && ndone > 0) {
++            char dpath[PD_PW];
++            int pick = ndone - 1;
++            if (!dry_run) {
++                if (cx_fmt(dpath, sizeof dpath, "%s/%s", out_dir, done_names[pick]) != 0) return pd_refuse("path");
++                if (sy_unlink(dpath) != 0) return pd_refuse("unlink-done-failed");
++            }
++            retained--;
++            rerun++;
++            sampled = 1;
++        }
++    }
++    if (!dry_run) {
++        char nb[160];
++        if (cx_fmt(nb, sizeof nb, "%s\n", new_sha) != 0) return pd_refuse("path");
++        if (sy_write_file(revf, nb, (int64_t)strlen(nb), 0644)) return pd_refuse("write-frozen-source-rev");
++    }
++    printf("PRERUN_REBASE\t%s\told=%s\tnew=%s\tretained=%d\trerun=%d\tsampled=%d\tchanged=%d\tdry_run=%d\n",
++           dry_run ? "PLAN" : "OK", old_rev, new_sha, retained, rerun, sampled, nchanged, dry_run);
++    return 0;
++}
++
+ int main(int argc, char **argv) {
+-    if (argc < 2) return pd_refuse("usage: prepare|plan|run|merge|archive|replay");
++    if (argc < 2) return pd_refuse("usage: prepare|plan|run|merge|archive|replay|rebase-rev");
+     const char *sub = argv[1];
++    if (tx_eqz(sub, "rebase-rev")) {
++        const char *root = 0, *out_d = 0, *new_rev = 0;
++        int dry_run = 0;
++        for (int i = 2; i < argc; i++) {
++            if (tx_eqz(argv[i], "--root") && i + 1 < argc) root = argv[++i];
++            else if ((tx_eqz(argv[i], "--out") || tx_eqz(argv[i], "--dir")) && i + 1 < argc) out_d = argv[++i];
++            else if (tx_eqz(argv[i], "--new-rev") && i + 1 < argc) new_rev = argv[++i];
++            else if (tx_eqz(argv[i], "--dry-run") || tx_eqz(argv[i], "--plan")) dry_run = 1;
++            else return pd_refuse("unknown-rebase-rev-arg");
++        }
++        return pd_cmd_rebase_rev(root, out_d, new_rev, dry_run);
++    }
+     if (tx_eqz(sub, "prepare")) {
+         const char *chain_d = 0, *root_d = 0, *ver = 0, *out_d = 0, *ids_f = 0, *times_f = 0, *prio_f = 0, *heavy_f = 0;
+         int win_sz = 10, warmup = -1;
+diff --git a/tools/prerun-rebase-cases.tsv b/tools/prerun-rebase-cases.tsv
+new file mode 100644
+index 0000000..5060027
+--- /dev/null
++++ b/tools/prerun-rebase-cases.tsv
+@@ -0,0 +1,8 @@
++id	expect_rc	expect_tag	expect_retained	expect_rerun
++non_ancestor_refused	1	non-ancestor	-1	-1
++disallowed_path_refused	1	disallowed-path=cx/sys/proc.cx	-1	-1
++sid_mismatch_refused	1	sid-mismatch	-1	-1
++single_batch_changed_reruns	0	PRERUN_REBASE	4	1
++sampling_10pct_floor	0	PRERUN_REBASE	9	1
++replay_c7_to_c10_disallowed_posix	1	disallowed-path=cx/sys/posix.cx	-1	-1
++replay_c9b_to_c10_scale_20	0	PRERUN_REBASE	16	4
