@@ -1,0 +1,374 @@
+diff --git a/build/bare-proc-baseline.tsv b/build/bare-proc-baseline.tsv
+new file mode 100644
+index 0000000..677d864
+--- /dev/null
++++ b/build/bare-proc-baseline.tsv
+@@ -0,0 +1,13 @@
++# bare-proc baseline: FILE<TAB>CALLS of direct fork/waitpid/wait4/waitid, kept history only goes down (tools/check-bare-proc.cx)
++cx/cx0/plan.cx	2
++cx/sys/runlaunch.cx	2
++ext/sysx/processcore.cx	3
++ext/sysx/trace.cx	1
++tools/cxlib/adoptedsnapshot.cx	2
++tools/cxlib/chainrunproc.cx	4
++tools/cxlib/e2stream.cx	4
++tools/cxlib/hostcheck.cx	2
++tools/cxlib/nninputs.cx	2
++tools/cxlib/releaseexec.cx	3
++tools/cxlib/releaseprepare.cx	3
++tools/cxlib/sourcepackage.cx	12
+diff --git a/tools/check-bare-proc.cx b/tools/check-bare-proc.cx
+new file mode 100644
+index 0000000..a6cf1b3
+--- /dev/null
++++ b/tools/check-bare-proc.cx
+@@ -0,0 +1,222 @@
++/* tools/check-bare-proc.cx -- bare fork/waitpid/wait4/waitid call sites only go down.
++ *
++ *   sh ./unisacc.com tools/check-bare-proc.cx [ROOT] -- --check
++ *   sh ./unisacc.com tools/check-bare-proc.cx [ROOT] -- --write-baseline
++ *
++ * Scans ROOT/tools/cxlib, ROOT/ext and ROOT/cx for direct fork, waitpid, wait4
++ * and waitid calls (the identifier immediately before "(", not part of a longer
++ * identifier, line not a comment line), skipping cx/sys/proc.cx, which owns the
++ * process lifecycle helpers.  A call must go through the L0 helper or the
++ * cxlib process layer; a new bare call needs a baseline row and review.
++ * The baseline build/bare-proc-baseline.tsv holds FILE<TAB>CALLS (header "# ...").
++ * --check: a file above its row prints "check-bare-proc: FILE has N calls,
++ * baseline M"; a file with calls and no row prints "... and no baseline row";
++ * the summary is "check-bare-proc: ok: files=F calls=C" or "... FAIL: ... over=K",
++ * exit 1 on FAIL.  Rows below the baseline are allowed and not printed. */
++#pragma unisa use sys.fs
++#pragma unisa use sys.posix
++#pragma unisa use text.text
++
++#define MAXP 4400
++#define MAXF 2048
++#define MAXDEPTH 16
++
++static int tok_ch(unsigned char c) {
++    return (c >= 'a' && c <= 'z') || (c >= 'A' && c <= 'Z') || (c >= '0' && c <= '9') || c == '_';
++}
++
++static int has_suffix(const char *s, const char *p) {
++    long n = (long)strlen(s), m = (long)strlen(p);
++    return n >= m && memcmp(s + n - m, p, (size_t)m) == 0;
++}
++
++static int read_text(const char *abs, char **out, long *n) {
++    size_t z = 0;
++    char *b = cx_read(abs, &z);
++    if (!b) return -1;
++    if (z && memchr(b, 0, z)) { free(b); return -1; }
++    *out = b; *n = (long)z;
++    return 0;
++}
++
++typedef struct { char file[300]; long calls; } frec;
++static frec F[MAXF];
++static int Fn;
++static long total_calls;
++
++static void f_add(const char *file, long calls) {
++    int i;
++    for (i = 0; i < Fn; i++) if (!strcmp(F[i].file, file)) { F[i].calls += calls; return; }
++    if (Fn >= MAXF) { fprintf(stderr, "check-bare-proc: too many files\n"); return; }
++    cx_fmt(F[Fn].file, sizeof F[Fn].file, "%s", file);
++    F[Fn].calls = calls;
++    Fn++;
++}
++
++/* bare call sites in one text buffer */
++static long count_calls(const char *b, long n) {
++    static const char *CN[] = { "fork", "waitpid", "wait4", "waitid", 0 };
++    long i = 0, hits = 0;
++    while (i < n) {
++        long j = i, k;
++        int comment = 0;
++        while (j < n && b[j] != '\n') j++;
++        k = i;
++        while (k < j && (b[k] == ' ' || b[k] == '\t')) k++;
++        if (k < j && (b[k] == '*' || b[k] == '#' || (b[k] == '/' && (b[k + 1] == '*' || b[k + 1] == '/'))))
++            comment = 1;
++        if (!comment) {
++            for (k = i; k < j; k++) {
++                int c;
++                for (c = 0; CN[c]; c++) {
++                    long cl = (long)strlen(CN[c]);
++                    if (k + cl <= j && memcmp(b + k, CN[c], (size_t)cl) == 0) {
++                        int left = (k == i) || !tok_ch((unsigned char)b[k - 1]);
++                        long q = k + cl;
++                        while (q < j && (b[q] == ' ' || b[q] == '\t')) q++;
++                        if (left && q < j && b[q] == '(') {
++                            long cpos; int inc = 0;
++                            for (cpos = i; cpos < k; cpos++)
++                                if (b[cpos] == '/' && cpos + 1 < k && b[cpos + 1] == '/') { inc = 1; break; }
++                            if (!inc) { hits++; k += cl - 1; break; }
++                        }
++                    }
++                }
++            }
++        }
++        i = j + 1;
++    }
++    return hits;
++}
++
++static void scan_file(const char *abs, const char *rel) {
++    char *b; long n, c;
++    if (!(has_suffix(rel, ".cx") || has_suffix(rel, ".c") || has_suffix(rel, ".h") ||
++          has_suffix(rel, ".in") || has_suffix(rel, ".inc"))) return;
++    if (!strcmp(rel, "cx/sys/proc.cx")) return;
++    if (read_text(abs, &b, &n)) return;
++    c = count_calls(b, n);
++    free(b);
++    if (c > 0) { f_add(rel, c); total_calls += c; }
++}
++
++static void walk(const char *abs, const char *rel, int depth) {
++    sy_dir_t d;
++    if (depth > MAXDEPTH) return;
++    if (sy_dir_open(&d, abs) != 0) return;
++    while (sy_dir_next(&d) == 1) {
++        char pa[MAXP], pr[MAXP];
++        if (d.name_n == 1 && d.name[0] == '.') continue;
++        if (d.name_n == 2 && d.name[0] == '.' && d.name[1] == '.') continue;
++        if (cx_fmt(pa, sizeof pa, "%s/%s", abs, d.name)) continue;
++        if (rel[0] == 0) { if (cx_fmt(pr, sizeof pr, "%s", d.name)) continue; }
++        else { if (cx_fmt(pr, sizeof pr, "%s/%s", rel, d.name)) continue; }
++        if (d.kind == 'd') { walk(pa, pr, depth + 1); continue; }
++        if (d.kind == 'f') scan_file(pa, pr);
++    }
++    sy_dir_close(&d);
++}
++
++static void scan_root(const char *root) {
++    static const char *DIRS[] = { "tools/cxlib", "ext", "cx", 0 };
++    int i;
++    for (i = 0; DIRS[i]; i++) {
++        char abs[MAXP];
++        if (cx_fmt(abs, sizeof abs, "%s/%s", root, DIRS[i])) continue;
++        walk(abs, DIRS[i], 0);
++    }
++}
++
++static int cmp_f(const void *a, const void *b) {
++    return strcmp(((const frec *)a)->file, ((const frec *)b)->file);
++}
++
++static int base_find(const char *root, const char *file, long *out) {
++    static frec B[MAXF];
++    static int Bn = -1, i;
++    char path[MAXP], *b; long n;
++    if (Bn < 0) {
++        Bn = 0;
++        *out = -1;
++        if (cx_fmt(path, sizeof path, "%s/build/bare-proc-baseline.tsv", root)) return 0;
++        if (read_text(path, &b, &n)) return 0;
++        {
++            long at = 0;
++            while (at < n) {
++                long e = at; while (e < n && b[e] != '\n') e++;
++                if (e > at && b[at] != '#' && Bn < MAXF) {
++                    long fld = 0, st = at, q, cnt = 0;
++                    char f2[300];
++                    f2[0] = 0;
++                    for (q = at; q <= e; q++) {
++                        if (q == e || b[q] == '\t') {
++                            long L = q - st;
++                            if (fld == 0) { long z; if (L > 299) L = 299; for (z = 0; z < L; z++) f2[z] = b[st + z]; f2[L] = 0; }
++                            else if (fld == 1) { long z; for (z = 0; z < L; z++) if (b[st + z] >= '0' && b[st + z] <= '9') cnt = cnt * 10 + (b[st + z] - '0'); }
++                            fld++; st = q + 1;
++                            if (fld > 1) break;
++                        }
++                    }
++                    if (f2[0]) { cx_fmt(B[Bn].file, sizeof B[Bn].file, "%s", f2); B[Bn].calls = cnt; Bn++; }
++                }
++                at = e + 1;
++            }
++        }
++        free(b);
++    }
++    for (i = 0; i < Bn; i++) if (!strcmp(B[i].file, file)) { *out = B[i].calls; return 1; }
++    *out = -1;
++    return 1;
++}
++
++static int write_baseline(const char *root) {
++    char path[MAXP];
++    char *out;
++    long o = 0, cap = 1 << 20;
++    int i, rc;
++    if (cx_fmt(path, sizeof path, "%s/build/bare-proc-baseline.tsv", root)) return -1;
++    out = malloc((size_t)cap);
++    if (!out) return -1;
++    {
++        const char *hdr = "# bare-proc baseline: FILE<TAB>CALLS of direct fork/waitpid/wait4/waitid, kept history only goes down (tools/check-bare-proc.cx)\n";
++        if (cx_fmt(out, (int)cap, "%s", hdr)) { free(out); return -1; }
++        o = (long)strlen(out);
++    }
++    for (i = 0; i < Fn; i++) {
++        if (cx_fmt(out + o, (int)(cap - o), "%s\t%ld\n", F[i].file, F[i].calls)) { free(out); return -1; }
++        o += (long)strlen(out + o);
++    }
++    rc = cx_write(path, out, (size_t)o);
++    free(out);
++    return rc;
++}
++
++int main(int argc, char **argv) {
++    const char *root = ".";
++    int wr = 0, ck = 0, i, over = 0;
++    for (i = 1; i < argc; i++) {
++        if (!strcmp(argv[i], "--check")) ck = 1;
++        else if (!strcmp(argv[i], "--write-baseline")) wr = 1;
++        else if (argv[i][0] != '-') root = argv[i];
++    }
++    if (!ck && !wr) { fprintf(stderr, "usage: check-bare-proc [ROOT] --check|--write-baseline\n"); return 2; }
++    scan_root(root);
++    qsort(F, (size_t)Fn, sizeof F[0], cmp_f);
++    if (wr) {
++        if (write_baseline(root)) { fprintf(stderr, "check-bare-proc: cannot write baseline\n"); return 2; }
++        printf("check-bare-proc: ok: files=%d calls=%ld baseline written\n", Fn, total_calls);
++        return 0;
++    }
++    for (i = 0; i < Fn; i++) {
++        long row = -1;
++        if (!base_find(root, F[i].file, &row)) { printf("check-bare-proc: FAIL: cannot read build/bare-proc-baseline.tsv\n"); return 2; }
++        if (row < 0) { printf("check-bare-proc: %s has %ld calls and no baseline row\n", F[i].file, F[i].calls); over++; }
++        else if (F[i].calls > row) { printf("check-bare-proc: %s has %ld calls, baseline %ld\n", F[i].file, F[i].calls, row); over++; }
++    }
++    if (over) {
++        printf("check-bare-proc: FAIL: files=%d calls=%ld over=%d (build/bare-proc-baseline.tsv)\n", Fn, total_calls, over);
++        return 1;
++    }
++    printf("check-bare-proc: ok: files=%d calls=%ld\n", Fn, total_calls);
++    return 0;
++}
+diff --git a/tools/check-check-bare-proc.cx b/tools/check-check-bare-proc.cx
+new file mode 100644
+index 0000000..16e4262
+--- /dev/null
++++ b/tools/check-check-bare-proc.cx
+@@ -0,0 +1,72 @@
++/* tools/check-check-bare-proc.cx -- fixture for tools/check-bare-proc.cx.
++ *
++ *   Builds a throwaway ROOT under /tmp with one file and a matching baseline:
++ *   (1) a comment line naming waitpid is not counted, one real fork is;
++ *   (2) --check passes at the baseline (rc 0);
++ *   (3) adding a bare waitpid line makes the check fail with
++ *       "a.cx has 2 calls, baseline 1" (rc 1);
++ *   (4) a new file with a bare wait4 and no baseline row fails with
++ *       "no baseline row" (rc 1).
++ *   Exit 0 all pass; 1 otherwise. */
++#pragma unisa use sys.fs
++#pragma unisa use sys.proc
++#pragma unisa use text.text
++
++static long ck_fail;
++
++static void ck(int ok, const char *what) {
++    if (ok) printf("PASS\t%s\n", what);
++    else { printf("FAIL\t%s\n", what); ck_fail++; }
++}
++
++static int has(const char *s, const char *sub) { return strstr(s, sub) != 0; }
++
++static int run_check(const char *root, char *out, long cap, long *used) {
++    char *av[9];
++    int n = 0, cut = 0, rc;
++    av[n++] = "sh"; av[n++] = "./unisacc.com"; av[n++] = "tools/check-bare-proc.cx";
++    av[n++] = "--"; av[n++] = (char *)root; av[n++] = "--check"; av[n++] = 0;
++    rc = sy_run(av, out, (int)cap, &cut);
++    *used = (long)strlen(out);
++    return cut ? -2 : rc;
++}
++
++int main(void) {
++    char root[256], p[400], out[1 << 16];
++    long used = 0;
++    int rc;
++    cx_fmt(root, sizeof root, "/tmp/check-bare-proc-%ld", (long)getpid());
++    cx_fmt(p, sizeof p, "%s/tools/cxlib", root); if (sy_mkdir_all(p, 0755)) { printf("FAIL\tmkdir\n"); return 1; }
++    cx_fmt(p, sizeof p, "%s/build", root); if (sy_mkdir_all(p, 0755)) { printf("FAIL\tmkdir\n"); return 1; }
++
++    {
++        const char *fa = "/* waitpid(0,0,0) in a comment is not a call */\nstatic int f(void){\n int q=fork();\n return q;\n}\n";
++        const char *fb = "# t\ntools/cxlib/a.cx\t1\n";
++        cx_fmt(p, sizeof p, "%s/tools/cxlib/a.cx", root);
++        if (cx_write(p, fa, (size_t)strlen(fa))) { printf("FAIL\twrite a.cx\n"); return 1; }
++        cx_fmt(p, sizeof p, "%s/build/bare-proc-baseline.tsv", root);
++        if (cx_write(p, fb, (size_t)strlen(fb))) { printf("FAIL\twrite baseline\n"); return 1; }
++    }
++
++    rc = run_check(root, out, sizeof out, &used);
++    ck(rc == 0 && has(out, "files=1 calls=1"), "comment not counted, baseline passes (rc 0)");
++
++    cx_fmt(p, sizeof p, "%s/tools/cxlib/a.cx", root);
++    {
++        const char *fa2 = "/* waitpid(0,0,0) in a comment is not a call */\nstatic int f(void){\n int q=fork();\n int r=waitpid(0,0,0);\n return q+r;\n}\n";
++        if (cx_write(p, fa2, (size_t)strlen(fa2))) { printf("FAIL\trewrite a.cx\n"); return 1; }
++    }
++    rc = run_check(root, out, sizeof out, &used);
++    ck(rc == 1 && has(out, "a.cx has 2 calls, baseline 1"), "one more bare waitpid fails (rc 1)");
++
++    cx_fmt(p, sizeof p, "%s/tools/cxlib/b.cx", root);
++    {
++        const char *fc = "static int g(void){\n return wait4(0,0,0,0);\n}\n";
++        if (cx_write(p, fc, (size_t)strlen(fc))) { printf("FAIL\twrite b.cx\n"); return 1; }
++    }
++    rc = run_check(root, out, sizeof out, &used);
++    ck(rc == 1 && has(out, "b.cx has 1 calls and no baseline row"), "new file without row fails (rc 1)");
++
++    printf("CHECK_CHECK_BARE_PROC\t%s\tfail=%ld\n", ck_fail ? "FAIL" : "PASS", ck_fail);
++    return ck_fail ? 1 : 0;
++}
+diff --git a/tools/ratchets.cx b/tools/ratchets.cx
+index 3c78aee..2a2983b 100644
+--- a/tools/ratchets.cx
++++ b/tools/ratchets.cx
+@@ -25,7 +25,9 @@
+  * ref-job-paths (the 17th: tools/ref-job-paths.cx --check, references to private job scratch files in plans/ and
+  * prd_mempalace.md only go down, exempt rows expire, base build/ref-job-paths-baseline.tsv) and
+  * reserved-names (the 19th: tools/reserved-names.cx --check, Windows reserved path stems nul/con/prn/aux/com1-9/lpt1-9,
+- * trailing dot/space segments, and illegal path chars; baseline 0 hits).
++ * trailing dot/space segments, and illegal path chars; baseline 0 hits) and
++ * bare-proc (the 20th: tools/check-bare-proc.cx --check, direct fork/waitpid/wait4/waitid calls outside
++ * cx/sys/proc.cx under tools/cxlib, ext and cx only go down, base build/bare-proc-baseline.tsv).
+  * Tool line counts are reports, not ratchets.
+  * with --check in parallel
+  * (each under tools/bound 55) and prints, per ratchet, one line
+@@ -43,7 +45,7 @@
+ #pragma unisa use mem.heap
+ #pragma unisa use sys.env
+ 
+-#define NRK 19
++#define NRK 20
+ typedef struct { const char *name; int pid, ofd, efd; char *out; long n; int rc; } Rk;
+ 
+ static void slurp(int fd, char **buf, long *n) {
+@@ -196,6 +198,7 @@ static const char *rk_script(const char *name, char *buf, long cap) {
+     if (tx_eqz(name, "no-home-path")) return "tools/no-home-path.cx";
+     if (tx_eqz(name, "ref-job-paths")) return "tools/ref-job-paths.cx";
+     if (tx_eqz(name, "reserved-names")) return "tools/reserved-names.cx";
++    if (tx_eqz(name, "bare-proc")) return "tools/check-bare-proc.cx";
+     if (tx_eqz(name, "tsv-lint")) return "tools/tsv-lint.cx";
+     if (cx_fmt(buf, cap, "tests/%s.cx", name)) return 0;
+     return buf;
+@@ -224,6 +227,7 @@ static int rk_path_hits(const char *name, const char *p, long pl, int precommit_
+     if (tx_eqz(name, "notcovered")) return tx_prefix(p, pl, "exec/", 5) || tx_prefix(p, pl, "tools/notcovered-census", 23);
+     if (tx_eqz(name, "tsv-lint")) return tx_prefix(p, pl, "exec/", 5) || tx_prefix(p, pl, "tools/tsv-lint", 14) || (pl == 27 && tx_same(p, 27, "build/tsv-lint-baseline.tsv", 27));
+     if (tx_eqz(name, "dup-census")) return tx_prefix(p, pl, "tools/", 6);
++    if (tx_eqz(name, "bare-proc")) return tx_prefix(p, pl, "tools/cxlib/", 12) || tx_prefix(p, pl, "ext/", 4) || tx_prefix(p, pl, "cx/", 3);
+     if (tx_eqz(name, "ref-job-paths")) return (pl == 16 && tx_same(p, 16, "prd_mempalace.md", 16));
+     if (tx_eqz(name, "aluiwidth") || tx_eqz(name, "net-deps"))
+         return tx_prefix(p, pl, "src/", 4) || tx_prefix(p, pl, "cx/", 3) ||
+@@ -458,7 +462,7 @@ static int judge(Rk *rk, const char *only, int *okp, int *skipp);
+ static void from_run(Rk *rk, const char *dir);
+ 
+ int main(int argc, char **argv) {
+-    static Rk rk[NRK] = {{"cxraw"}, {"cxinclude"}, {"cxapis"}, {"cxtrunc"}, {"cxlibc"}, {"cxplatform"}, {"srcshape"}, {"coreapi"}, {"verwriter"}, {"aluiwidth"}, {"outdep"}, {"check-literal"}, {"net-deps"}, {"notcovered"}, {"dup-census"}, {"no-home-path"}, {"ref-job-paths"}, {"tsv-lint"}, {"reserved-names"}};
++    static Rk rk[NRK] = {{"cxraw"}, {"cxinclude"}, {"cxapis"}, {"cxtrunc"}, {"cxlibc"}, {"cxplatform"}, {"srcshape"}, {"coreapi"}, {"verwriter"}, {"aluiwidth"}, {"outdep"}, {"check-literal"}, {"net-deps"}, {"notcovered"}, {"dup-census"}, {"no-home-path"}, {"ref-job-paths"}, {"tsv-lint"}, {"reserved-names"}, {"bare-proc"}};
+     const char *only = 0; long t0 = sy_now_ms(); int k, ok = 0, fail = 0, skipped = 0;
+     if (argc == 4 && tx_eqz(argv[1], "--precommit")) return rk_precommit_match(argv[2], argv[3]);
+     if ((argc == 3 || argc == 5) && tx_eqz(argv[1], "--rows")) {   /* --rows SAVED [--only P]: the filter alone, on a saved ratchet output */
