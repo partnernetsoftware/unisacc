@@ -410,6 +410,8 @@ tape_run_x86_64:
     je .Lrun_call
     cmpl $30,%eax
     je .Lrun_callr
+    cmpl $31,%eax
+    je .Lrun_callm
     cmpl $37,%eax
     je .Lrun_ret
     cmpl $38,%eax
@@ -438,6 +440,10 @@ tape_run_x86_64:
     movq 40(%r12),%rax
     movq (%rax,%r8,8),%rax
     jmp .Lrun_store
+.Lrun_callm:
+    movl %eax,%r10d
+    movl $8,%r9d
+    jmp .Lrun_mem_base
 .Lrun_mem:
     movl %eax,%r10d
     movq $8,%r9
@@ -491,12 +497,16 @@ tape_run_x86_64:
     je .Lrun_mem_check_map
     cmpl $23,%r10d
     je .Lrun_mem_check_map
+    cmpl $31,%r10d
+    je .Lrun_mem_check_map
     movl $2,%r8d
 .Lrun_mem_check_map:
     call hoststub_lnx_x86_64_map_access
     testq %rax,%rax
     jnz .Lrun_memory
 .Lrun_mem_access:
+    cmpl $31,%r10d
+    je .Lrun_callm_target
     cmpl $26,%r10d
     je .Lrun_mem_zero
     cmpl $21,%r10d
@@ -560,6 +570,10 @@ tape_run_x86_64:
 .Lrun_callr:
     movl $3,%r11d
     movq 48(%rsp,%rcx,8),%rax
+    jmp .Lrun_checked_target
+.Lrun_callm_target:
+    movl $3,%r11d
+    movq (%rdi),%rax
 .Lrun_checked_target:
     movq %r15,%rdx
     subq %r14,%rdx
