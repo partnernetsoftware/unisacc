@@ -1,5 +1,5 @@
 /* Contract: checks tools/prerun-inputs.cx offline on a throw-away git fixture.
- * READY run prints the full PRERUN_INPUTS line and the recommended run command (window-lanes 3, normal-jobs 8);
+ * READY run prints the full PRERUN_INPUTS line and the recommended run command (window-lanes 3, plan normal-jobs 8, run max-jobs 8);
  * the ids are the previous windows filtered by the batches table of REV; a missing priority source, missing
  * ape, missing times cache or missing previous windows each give status=MISSING:<item> and rc 1; a
  * PRERUN_DIR under /tmp, a relative PRERUN_DIR, --times-file / --ids-file / --priority-file (direct inputs,
@@ -25,6 +25,12 @@ static void sh(const char *cmd, const char *cwd) {
     char *v[] = {"sh", "-c", (char *)cmd, 0}; np_result r = run(v, cwd);
     if (r.rc) { fprintf(stderr, "check-prerun-inputs: fixture step failed: %s\n%s", cmd, r.err ? r.err : ""); exit(2); }
     np_free(&r);
+}
+static int copy_slice(char *dst, size_t cap, const char *src, size_t len) {
+    if (!dst || !src || len + 1 > cap) { if (dst && cap) dst[0] = 0; return -1; }
+    for (size_t i = 0; i < len; i++) dst[i] = src[i];
+    dst[len] = 0;
+    return 0;
 }
 int main(int argc, char **argv) {
     char base[4096]; sy_stat_t st;
@@ -64,9 +70,17 @@ int main(int argc, char **argv) {
     np_result r = run(ok, 0);
     ck(r.rc == 0 && tk_has(r.out, "status=READY"), "ready-status");
     ck(tk_has(r.out, "PRERUN_CMD") && tk_has(r.out, "--window-lanes 3") && tk_has(r.out, "--normal-jobs 8"), "recommended-cmd-knobs");
-    ck(tk_has(r.out, "--window-lanes 3 --normal-jobs 8 --resume --max-jobs 8 --keep-going --min-free 2147483648; rc=$?; [ \"$rc\" -eq 0 ] && exit 0; [ \"$rc\" -eq 2 ] && exit 2; done; exit 1") &&
+    ck(tk_has(r.out, "--window-lanes 3 --resume --max-jobs 8 --keep-going --min-free 2147483648; rc=$?; [ \"$rc\" -eq 0 ] && exit 0; [ \"$rc\" -eq 2 ] && exit 2; done; exit 1") &&
        tk_has(r.out, "supervise.log") &&
        !tk_has(r.out, "--max-jobs 4"), "run-cmd-max-jobs-matches-plan");
+    {
+        const char *rl = strstr(r.out, "PRERUN_CMD\trun\t");
+        const char *rn = rl ? strchr(rl, '\n') : 0;
+        size_t rlen = (rl && rn) ? (size_t)(rn - rl) : (rl ? strlen(rl) : 0);
+        char rline[4096];
+        int okline = rl && rlen > 0 && copy_slice(rline, sizeof rline, rl, rlen) == 0;
+        ck(okline && strstr(rline, "--normal-jobs") == 0, "run-cmd-has-no-normal-jobs");
+    }
     /* Verify the emitted attempt loop stops immediately on rc=2 without retrying, retries twice on rc=1, and exits 0 on rc=0 */
     {
         char rcmd[2048];
@@ -86,6 +100,46 @@ int main(int argc, char **argv) {
     { char p[4700]; cx_fmt(p, sizeof p, "%s/ids.txt", dir); unsigned char *b = 0; int64_t n = 0;
       ck(!sy_read_file(p, &b, &n, 1000) && n == 11 && !memcmp(b, "alpha\nbeta\n", 11), "ids-are-prev-windows-filtered-by-rev");
       cx_fmt(p, sizeof p, "%s/times.tsv", dir); sy_stat_t s2; ck(!sy_stat(p, &s2) && (s2.mode & 0222) == 0, "times-frozen-readonly"); }
+    /* 1b. Feed generated plan and run commands directly to tools/prerun-drive.cx */
+    {
+        const char *pl = strstr(r.out, "PRERUN_CMD\tplan\t");
+        const char *ps = pl ? pl + 16 : 0;
+        const char *pe = ps ? strchr(ps, '\n') : 0;
+        char pcmd[8192];
+        if (!ps || !pe || copy_slice(pcmd, sizeof pcmd, ps, (size_t)(pe - ps)) != 0) pcmd[0] = 0;
+        char *pv[] = {"sh", "-c", pcmd, 0};
+        np_result pr = pcmd[0] ? run(pv, 0) : (np_result){0};
+        ck(pcmd[0] && pr.rc == 0 && tk_has(pr.out, "PRERUN_PLAN\t"), "generated-plan-cmd-accepted-by-prerun-drive");
+        np_free(&pr);
+
+        char mock[4600]; cx_fmt(mock, sizeof mock, "%s/mock-runner.sh", tmp);
+        const char *ms =
+            "#!/bin/sh\n"
+            "kind=$1\n"
+            "if [ \"$kind\" = \"prebuild-self\" ] || [ \"$kind\" = \"prepare-opt-frame4\" ]; then exit 0; fi\n"
+            "ids=$4; out=$5\n"
+            "mkdir -p \"${out%/*}\"\n"
+            "printf '# devsvc qualify\\nbatch\\tdomain\\tstatus\\trc\\tcandidate\\tms\\tload1\\tretries\\tnote\\n' > \"$out\"\n"
+            "printf '%s\\tproduct-qualification\\tPASS\\t0\\taaa\\t10\\t1.0\\t0\\t-\\n' \"$ids\" >> \"$out\"\n"
+            "exit 0\n";
+        (void)sy_write_file(mock, ms, (int64_t)strlen(ms), 0755);
+
+        const char *rl = strstr(r.out, "PRERUN_CMD\trun\t");
+        const char *rs = rl ? strstr(rl, "sh ./unisacc.com tools/prerun-drive.cx -- run ") : 0;
+        const char *re = rs ? strstr(rs, "; rc=$?") : 0;
+        char raw_run[4096], run_cmd[8192];
+        raw_run[0] = 0; run_cmd[0] = 0;
+        if (rs && re && copy_slice(raw_run, sizeof raw_run, rs, (size_t)(re - rs)) == 0) {
+            cx_fmt(run_cmd, sizeof run_cmd,
+                   "set -- '%s' '%s'; %s --mock-runner '%s' --mock-avail-mb 4096",
+                   ape, dir, raw_run, mock);
+        }
+        char *rv[] = {"sh", "-c", run_cmd, 0};
+        np_result dr = run_cmd[0] ? run(rv, 0) : (np_result){0};
+        ck(run_cmd[0] && dr.rc == 0 && !tk_has(dr.out, "unknown-run-arg") && tk_has(dr.out, "PRERUN_RUN\tstatus=DONE"),
+           "generated-run-cmd-accepted-by-prerun-drive");
+        np_free(&dr);
+    }
     np_free(&r);
     /* 2. add-ids joins the new batch */
     char *addv[] = {bin, "--rev", rev, "--version", "0.0.9", "--prev", "0.0.8", "--repo", fx, "--ape", ape, "--dir", dir2,
