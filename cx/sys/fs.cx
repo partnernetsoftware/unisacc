@@ -141,7 +141,8 @@ int sy_realpath(const char *path, char *dst, int cap) {
 }
 
 /* This process's executable path into DST. Its length, or -errno.
-   Linux reads /proc/self/exe. Windows calls GetModuleFileNameA (kernel32). */
+   Linux reads /proc/self/exe (detecting truncation at >= cap).
+   Windows calls GetModuleFileNameA (kernel32). Darwin returns -ENOSYS (UNCOVERED). */
 static int sy_self_path_os(char *dst, int cap) {
 #ifdef _WIN32
     static __u_word fn;
@@ -152,12 +153,16 @@ static int sy_self_path_os(char *dst, int cap) {
     if (n == 0) { _ux_fail(); return sy_fail(); }
     if (n >= (__u_word)cap) return -ENAMETOOLONG;
     return (int)n;
+#elif defined(__APPLE__)
+    (void)dst; (void)cap;
+    return -ENOSYS;
 #else
     long n;
     errno = 0;
-    n = readlink("/proc/self/exe", dst, (size_t)cap - 1);
+    n = readlink("/proc/self/exe", dst, (size_t)cap);
     if (n < 0) return sy_fail();
-    if (n >= cap) return -ENAMETOOLONG;
+    if (n == 0) return -EIO;
+    if (n >= cap) { dst[0] = 0; return -ENAMETOOLONG; }
     dst[n] = 0;
     return (int)n;
 #endif

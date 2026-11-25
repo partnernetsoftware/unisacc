@@ -1,52 +1,191 @@
 #pragma unisa module nnext
 #pragma unisa use sys.fs
+#pragma unisa use sys.posix
 #pragma unisa use sys.env
-#pragma unisa use sys.sha
 #pragma unisa use mem.bytes
 #pragma unisa use mem.heap
 #pragma unisa use text.text
 
+/* External nn loader (C44/v0.1.3 A3-4 minimal honest contract, v4):
+ *
+ * 1. Five-state model: DISABLED / ABSENT / PRESENT / ERROR / UNPROBED.
+ *    Only whole-directory ENOENT and per-stage ENOENT fix ABSENT; any other
+ *    error (ENOTDIR, ELOOP symlink, non-regular file, truncated, bad magic,
+ *    overflow) fixes ERROR and refuses compilation.
+ * 2. Immutable-file + atomic-rename contract: each PRESENT stage is opened once
+ *    relative to the pinned directory fd (O_RDONLY|O_NONBLOCK|O_NOFOLLOW|O_CLOEXEC),
+ *    fstat-verified regular, read completely into a private heap buffer (with
+ *    short-read/-EINTR loop and 1-byte trailing EOF check), verified for
+ *    UNINETB1N magic, and immediately closed. Probe, decode, CRC, and load use
+ *    this same private buffer with zero re-open.
+ *    - Same-size in-place overwrites (without atomic rename) are NOT supported
+ *      and NOT guaranteed to be detected (documented unsupported limit).
+ *    - Per-stage consistency is guaranteed; cross-stage atomic directory
+ *      snapshots are not guaranteed without immutable generation/manifest ids.
+ * 3. O_NOFOLLOW protects only the final directory and stage filename segments;
+ *    intermediate path component symlinks are not guarded by this contract.
+ * 4. Platform UNCOVERED policy:
+ *    - Default beside path when target lacks sy_self_path (Darwin -ENOSYS) or
+ *      openat/O_NOFOLLOW (Windows -ENOSYS): falls back to builtin
+ *      (CXN_DISABLED, rc 0) so ordinary compiles and stream runs pass.
+ *    - Explicit --nn-dir or UNISACC_NN_DIR: refuses loudly (UNCOVERED -ENOSYS)
+ *      when target lacks openat/O_NOFOLLOW (Windows); works on Darwin via POSIX.
+ * 5. Cache safety: cxn_cache_allowed() returns 1 ONLY when booted, closure-sealed,
+ *    and free of external hits/errors. cxn_close() releases model payload buffers
+ *    (called from pm_close) while preserving sticky external/error/booted/sealed
+ *    state until next cxn_boot/cxn_init/cxn_destroy. UNPROBED stages never fall
+ *    back to ABSENT or re-open disk; they set sticky_err and fail with 3. */
+
 #define CXN_DIR_CAP 4096
-#define CXN_PATH_CAP 4200
+#define CXN_SNAP_CAP 32
+#define CXN_TOTAL_CAP (64L * 1024L * 1024L)
+
+enum {
+    CXN_DISABLED = 0,
+    CXN_ABSENT = 1,
+    CXN_PRESENT = 2,
+    CXN_ERROR = 3,
+    CXN_UNPROBED = 4
+};
+
+typedef struct {
+    char stage[32];
+    int state;
+    unsigned char *buf;
+    long bn;
+    unsigned crc;
+    int have_crc;
+} CxnSnap;
 
 static char cxn_dir[CXN_DIR_CAP];
 static char cxn_why_buf[256];
-static int cxn_active;
+static char cxn_uncovered_buf[256];
+static int cxn_booted;
+static int cxn_mode;
+static int cxn_dfd = -1;
+static int cxn_sealed;
+static int cxn_sticky_ext;
+static int cxn_sticky_err;
 static int cxn_explicit;
-static int cxn_dir_exists;
-static int cxn_hit_any;
-static int cxn_err;
-static unsigned char *cxn_buf;
+static CxnSnap cxn_snaps[CXN_SNAP_CAP];
+static int cxn_nsnaps;
+static long cxn_total_bytes;
+static int (*cxn_open_dir_fn)(const char *);
+static int (*cxn_self_path_fn)(char *, int);
+
+void cxn_set_sys_hooks(int (*od)(const char *), int (*sp)(char *, int)) {
+    cxn_open_dir_fn = od;
+    cxn_self_path_fn = sp;
+}
+
+static void cxn_release_payloads(void) {
+    int i;
+    if (cxn_dfd >= 0) {
+        sy_close(cxn_dfd);
+        cxn_dfd = -1;
+    }
+    for (i = 0; i < cxn_nsnaps; i++) {
+        if (cxn_snaps[i].buf) {
+            mm_free(cxn_snaps[i].buf);
+            cxn_snaps[i].buf = 0;
+        }
+    }
+    cxn_total_bytes = 0;
+}
+
+void cxn_destroy(void) {
+    cxn_release_payloads();
+    mm_fill(cxn_snaps, sizeof cxn_snaps, 0, sizeof cxn_snaps);
+    cxn_nsnaps = 0;
+    cxn_dir[0] = 0;
+    cxn_why_buf[0] = 0;
+    cxn_uncovered_buf[0] = 0;
+    cxn_booted = 0;
+    cxn_mode = CXN_DISABLED;
+    cxn_sealed = 0;
+    cxn_sticky_ext = 0;
+    cxn_sticky_err = 0;
+    cxn_explicit = 0;
+}
 
 static int cxn_fail_msg(char *why, int wcap, const char *msg) {
-    int i = 0;
-    const char *p = (msg && msg[0]) ? msg : "external nn refused";
-    cxn_err = 1;
-    while (p[i] && i + 1 < (int)sizeof cxn_why_buf) { cxn_why_buf[i] = p[i]; i = i + 1; }
-    cxn_why_buf[i] = 0;
+    long ml = msg ? tx_len(msg, 255) : 0;
+    if (ml < 0) ml = 0;
+    if (ml > 255) ml = 255;
+    if (ml > 0) mm_copy(cxn_why_buf, sizeof cxn_why_buf, msg, ml);
+    cxn_why_buf[ml] = 0;
     if (why && wcap > 0) {
-        int j = 0;
-        while (cxn_why_buf[j] && j + 1 < wcap) { why[j] = cxn_why_buf[j]; j = j + 1; }
-        why[j] = 0;
+        long cp = ml < (long)wcap - 1 ? ml : (long)wcap - 1;
+        if (cp > 0) mm_copy(why, wcap, msg, cp);
+        why[cp] = 0;
     }
+    cxn_sticky_err = 1;
     return -1;
+}
+
+static void cxn_note_uncovered(const char *msg) {
+    long ml = msg ? tx_len(msg, 255) : 0;
+    if (ml < 0) ml = 0;
+    if (ml > 255) ml = 255;
+    if (ml > 0) mm_copy(cxn_uncovered_buf, sizeof cxn_uncovered_buf, msg, ml);
+    cxn_uncovered_buf[ml] = 0;
+}
+
+static int cxn_valid_stage(const char *s) {
+    long i = 0;
+    if (!s || !s[0]) return 0;
+    while (s[i]) {
+        char c = s[i];
+        int ok = (c >= 'a' && c <= 'z') || (c >= '0' && c <= '9') || c == '_' || c == '-';
+        if (!ok || i >= 31) return 0;
+        i++;
+    }
+    return 1;
+}
+
+static CxnSnap *cxn_find_snap(const char *stage) {
+    int i;
+    for (i = 0; i < cxn_nsnaps; i++) {
+        if (tx_eqz(cxn_snaps[i].stage, stage)) return &cxn_snaps[i];
+    }
+    return 0;
+}
+
+static CxnSnap *cxn_alloc_snap(const char *stage, char *why, int wcap) {
+    CxnSnap *s = cxn_find_snap(stage);
+    if (s) return s;
+    if (cxn_nsnaps >= CXN_SNAP_CAP) {
+        cxn_fail_msg(why, wcap, "external nn stage limit exceeded");
+        return 0;
+    }
+    long sl = tx_len(stage, 32);
+    if (sl <= 0 || sl >= 32) {
+        cxn_fail_msg(why, wcap, "invalid nn stage name");
+        return 0;
+    }
+    s = &cxn_snaps[cxn_nsnaps++];
+    mm_fill(s, sizeof *s, 0, sizeof *s);
+    s->state = CXN_ERROR;
+    mm_copy(s->stage, sizeof s->stage, stage, sl + 1);
+    return s;
 }
 
 static int cxn_set_dir(const char *src, char *why, int wcap) {
     long n = 0;
     if (!src || !src[0]) return -1;
     while (src[n]) {
-        if (n + 1 >= CXN_DIR_CAP) return cxn_fail_msg(why, wcap, "external nn dir exceeds 4095 bytes");
+        if (n + 1 >= CXN_DIR_CAP) {
+            cxn_dir[0] = 0;
+            return cxn_fail_msg(why, wcap, "external nn dir exceeds 4095 bytes");
+        }
         cxn_dir[n] = src[n];
-        n = n + 1;
+        n++;
     }
     cxn_dir[n] = 0;
     return 0;
 }
 
-static int cxn_is_sep(char c) {
-    return c == '/' || c == '\\';
-}
+static int cxn_is_sep(char c) { return c == '/' || c == '\\'; }
 
 static int cxn_set_beside_from_exe(const char *exe, char *why, int wcap) {
     long i = 0, last = -1;
@@ -54,7 +193,7 @@ static int cxn_set_beside_from_exe(const char *exe, char *why, int wcap) {
     if (!exe || !exe[0]) return 0;
     while (exe[i]) {
         if (cxn_is_sep(exe[i])) { last = i; sep = exe[i]; }
-        i = i + 1;
+        i++;
     }
     /* Bare executable name with no separator never falls back to CWD ./nn */
     if (last < 0) return 0;
@@ -64,7 +203,7 @@ static int cxn_set_beside_from_exe(const char *exe, char *why, int wcap) {
         long total = prefix_len + need_sep + 2;
         if (last == 2 && exe[1] == ':' && exe[2] == '\\') prefix_len = 3;
         if (total + 1 > CXN_DIR_CAP) return cxn_fail_msg(why, wcap, "beside nn dir exceeds 4095 bytes");
-        for (long k = 0; k < prefix_len; k = k + 1) cxn_dir[k] = exe[k];
+        for (long k = 0; k < prefix_len; k++) cxn_dir[k] = exe[k];
         long at = prefix_len;
         if (need_sep) cxn_dir[at++] = sep;
         cxn_dir[at++] = 'n';
@@ -74,13 +213,20 @@ static int cxn_set_beside_from_exe(const char *exe, char *why, int wcap) {
     return 1;
 }
 
+/* Returns 1 if resolved, 0 if UNCOVERED builtin fallback (Darwin -ENOSYS), -1 on error. */
 static int cxn_resolve_self_beside(char *why, int wcap) {
     char self[CXN_DIR_CAP];
-    int n = sy_self_path(self, (int)sizeof self);
+    int n = (cxn_self_path_fn ? cxn_self_path_fn : sy_self_path)(self, (int)sizeof self);
     if (n == -ENAMETOOLONG || n >= (int)sizeof self) {
         return cxn_fail_msg(why, wcap, "executable path exceeds 4095 bytes");
     }
-    if (n <= 0) return 0;
+    if (n == -ENOSYS) {
+        cxn_note_uncovered("UNCOVERED: external nn default beside unsupported on target (-ENOSYS); falling back to builtin");
+        return 0;
+    }
+    if (n <= 0) {
+        return cxn_fail_msg(why, wcap, "executable path unavailable for beside nn probe");
+    }
     self[n] = 0;
     return cxn_set_beside_from_exe(self, why, wcap);
 }
@@ -89,7 +235,7 @@ static int cxn_ends_unisacc_com(const char *val) {
     long n = 0;
     if (!val || !val[0]) return 0;
     if (tx_eqz(val, "unisacc.com") || tx_eqz(val, "./unisacc.com")) return 1;
-    while (val[n]) n = n + 1;
+    while (val[n]) n++;
     if (n > 12 && tx_eqz(val + n - 12, "/unisacc.com")) return 1;
     if (n > 12 && tx_eqz(val + n - 12, "\\unisacc.com")) return 1;
     return 0;
@@ -119,175 +265,239 @@ static int cxn_chain_forced(const char *pkg) {
 
 static int cxn_init_core(const char *cli_dir, int no_ext, const char *pkg, const char *exe_path, char *why, int wcap) {
     const char *env_dir;
-    sy_stat_t st;
-    int sr;
-    cxn_dir[0] = 0;
-    cxn_why_buf[0] = 0;
-    cxn_active = 0;
-    cxn_explicit = 0;
-    cxn_dir_exists = 0;
-    cxn_hit_any = 0;
-    cxn_err = 0;
+    int dfd;
+    cxn_destroy();
+    cxn_booted = 1;
     if (why && wcap > 0) why[0] = 0;
-    if (no_ext || cxn_chain_forced(pkg)) return 0;
+    if (no_ext || cxn_chain_forced(pkg)) {
+        cxn_mode = CXN_DISABLED;
+        cxn_sealed = 1;
+        return 0;
+    }
     if (cli_dir && cli_dir[0]) {
-        if (cxn_set_dir(cli_dir, why, wcap) < 0) return -1;
-        cxn_active = 1;
+        if (cxn_set_dir(cli_dir, why, wcap) < 0) { cxn_mode = CXN_ERROR; return -1; }
         cxn_explicit = 1;
     } else if ((env_dir = sy_env("UNISACC_NN_DIR")) != 0 && env_dir[0]) {
-        if (cxn_set_dir(env_dir, why, wcap) < 0) return -1;
-        cxn_active = 1;
+        if (cxn_set_dir(env_dir, why, wcap) < 0) { cxn_mode = CXN_ERROR; return -1; }
         cxn_explicit = 1;
     } else {
         int r = (exe_path && exe_path[0]) ? cxn_set_beside_from_exe(exe_path, why, wcap) : cxn_resolve_self_beside(why, wcap);
-        if (r < 0) return -1;
-        if (r == 0) return 0;
-        cxn_active = 1;
+        if (r < 0) { cxn_mode = CXN_ERROR; return -1; }
+        if (r == 0) { cxn_mode = CXN_DISABLED; cxn_sealed = 1; return 0; }
         cxn_explicit = 0;
     }
-    sr = sy_stat(cxn_dir, &st);
-    if (sr == 0) {
-        if (st.kind != 'd') return cxn_fail_msg(why, wcap, "external nn path is not a directory");
-        cxn_dir_exists = 1;
-    } else if (sr != -ENOENT) {
-        return cxn_fail_msg(why, wcap, "external nn directory unreadable");
+    dfd = (cxn_open_dir_fn ? cxn_open_dir_fn : sy_open_dir_nofollow)(cxn_dir);
+    if (dfd >= 0) {
+        cxn_dfd = dfd;
+        cxn_mode = CXN_PRESENT;
+        cxn_sealed = 0;
+        return 1;
     }
-    return 1;
+    if (dfd == -ENOENT) {
+        cxn_mode = CXN_ABSENT;
+        cxn_sealed = 1;
+        return 1;
+    }
+    if (dfd == -ENOSYS) {
+        if (!cxn_explicit) {
+            /* B3 policy: default beside path on Windows (-ENOSYS) falls back to builtin with named UNCOVERED */
+            cxn_dir[0] = 0;
+            cxn_mode = CXN_DISABLED;
+            cxn_sealed = 1;
+            cxn_note_uncovered("UNCOVERED: external nn default beside openat/O_NOFOLLOW unsupported on target (-ENOSYS); falling back to builtin");
+            return 0;
+        }
+        cxn_mode = CXN_ERROR;
+        return cxn_fail_msg(why, wcap, "UNCOVERED: explicit external nn openat/O_NOFOLLOW unsupported on target (-ENOSYS)");
+    }
+    cxn_mode = CXN_ERROR;
+    if (dfd == -ELOOP) {
+        return cxn_fail_msg(why, wcap, "external nn directory symlink refused (-ELOOP)");
+    }
+    if (dfd == -ENOTDIR) {
+        return cxn_fail_msg(why, wcap, "external nn path is not a directory (-ENOTDIR)");
+    }
+    return cxn_fail_msg(why, wcap, "external nn directory unreadable");
 }
 
-/* Unit-test & legacy entry: 1 active, 0 builtin, -1 rejected (overlong or unreadable path). */
+/* Unit-test & legacy entry: 1 active/dir-resolved, 0 disabled builtin, -1 refused. */
 int cxn_init(const char *cli_dir, int no_ext, const char *exe_path) {
     return cxn_init_core(cli_dir, no_ext, 0, exe_path, 0, 0);
 }
 
-/* Driver entry: always resolves beside via L0 sy_self_path (never raw argv[0]); returns 0 on ok, -1 on refusal. */
+/* Driver entry: always resolves beside via L0 sy_self_path (never raw argv[0]); 0 ok, -1 refused. */
 int cxn_boot(const char *cli_dir, int no_ext, const char *pkg, char *why, int wcap) {
     int rc = cxn_init_core(cli_dir, no_ext, pkg, 0, why, wcap);
     return rc < 0 ? -1 : 0;
 }
 
-int cxn_dir_present(void) { return cxn_active && cxn_dir_exists; }
-int cxn_bypass_cache(void) { return (cxn_active && (cxn_hit_any || cxn_err)) ? 1 : 0; }
-const char *cxn_dir_get(void) { return cxn_active ? cxn_dir : 0; }
+int cxn_dir_present(void) { return (cxn_mode == CXN_PRESENT && cxn_dfd >= 0) ? 1 : 0; }
+int cxn_cache_allowed(void) {
+    return (cxn_booted && cxn_sealed && !cxn_sticky_ext && !cxn_sticky_err && cxn_mode != CXN_ERROR) ? 1 : 0;
+}
+const char *cxn_dir_get(void) { return (cxn_mode != CXN_DISABLED && cxn_mode != CXN_ERROR && cxn_dir[0]) ? cxn_dir : 0; }
 const char *cxn_why(void) { return cxn_why_buf[0] ? cxn_why_buf : "external nn refused"; }
+const char *cxn_uncovered_why(void) { return cxn_uncovered_buf[0] ? cxn_uncovered_buf : 0; }
 
+/* Releases payload buffers and open dir fd while PRESERVING sticky external/error/booted/sealed state until next boot or destroy. */
 void cxn_close(void) {
-    if (cxn_buf) { mm_free(cxn_buf); cxn_buf = 0; }
+    cxn_release_payloads();
 }
 
-static int cxn_make_stage_path(const char *stage, char *path, int pcap, char *why, int wcap) {
-    long di = 0, si = 0;
-    if (!stage || !stage[0]) return cxn_fail_msg(why, wcap, "invalid nn stage");
-    while (cxn_dir[di]) {
-        if (di + 6 >= pcap) return cxn_fail_msg(why, wcap, "external nn file path too long");
-        path[di] = cxn_dir[di];
-        di = di + 1;
+int cxn_seal(void) {
+    if (cxn_dfd >= 0) { sy_close(cxn_dfd); cxn_dfd = -1; }
+    if (!cxn_booted || cxn_mode == CXN_ERROR || cxn_sticky_err) {
+        cxn_sealed = 0;
+        return -1;
     }
-    if (di == 0 || !cxn_is_sep(path[di - 1])) path[di++] = '/';
-    while (stage[si]) {
-        if (cxn_is_sep(stage[si]) || di + 5 >= pcap) return cxn_fail_msg(why, wcap, "external nn stage path too long");
-        path[di++] = stage[si++];
-    }
-    path[di++] = '.'; path[di++] = 'n'; path[di++] = 'b'; path[di] = 0;
+    cxn_sealed = 1;
     return 0;
 }
 
+/* Probes STAGE via pinned cxn_dfd (O_RDONLY|O_NONBLOCK|O_NOFOLLOW|O_CLOEXEC), reads whole immutable file once into private buffer. */
 int cxn_probe_stage(const char *stage, char *why, int wcap) {
-    char path[CXN_PATH_CAP];
+    char rel[40];
     int fd;
     sy_stat_t st;
-    unsigned char hdr[9];
-    const char *m = "UNINETB1N";
-    long got = 0;
-    if (!cxn_active || !cxn_dir_exists) return 0;
-    if (cxn_make_stage_path(stage, path, (int)sizeof path, why, wcap) != 0) return -1;
-    fd = sy_open_read(path);
+    long sz, got = 0, si = 0;
+    unsigned char *buf;
+    unsigned char extra;
+    long tr;
+    CxnSnap *s;
+    if (!cxn_booted || cxn_mode == CXN_ERROR || cxn_sticky_err) {
+        return cxn_fail_msg(why, wcap, cxn_why());
+    }
+    if (cxn_mode == CXN_DISABLED || cxn_mode == CXN_ABSENT) return 0;
+    if (!cxn_valid_stage(stage)) return cxn_fail_msg(why, wcap, "invalid nn stage");
+    s = cxn_find_snap(stage);
+    if (s) {
+        if (s->state == CXN_ERROR) return -1;
+        return 0;
+    }
+    if (cxn_sealed || cxn_dfd < 0) {
+        return cxn_fail_msg(why, wcap, "external nn probe attempted after snapshot seal");
+    }
+    s = cxn_alloc_snap(stage, why, wcap);
+    if (!s) return -1;
+    while (stage[si]) { rel[si] = stage[si]; si++; }
+    rel[si++] = '.'; rel[si++] = 'n'; rel[si++] = 'b'; rel[si] = 0;
+    fd = sy_openat_read_nofollow(cxn_dfd, rel);
     if (fd < 0) {
-        if (fd == -ENOENT) return 0;
+        if (fd == -ENOENT) { s->state = CXN_ABSENT; return 0; }
+        s->state = CXN_ERROR;
+        if (fd == -ENOSYS) return cxn_fail_msg(why, wcap, "UNCOVERED: external nn openat/O_NOFOLLOW unsupported");
+        if (fd == -ELOOP) return cxn_fail_msg(why, wcap, "external nn stage symlink refused (-ELOOP)");
         return cxn_fail_msg(why, wcap, "external nn file unreadable");
     }
     if (sy_fstat(fd, &st) != 0 || st.kind != 'f') {
         sy_close(fd);
+        s->state = CXN_ERROR;
         return cxn_fail_msg(why, wcap, "external nn is not a regular file");
     }
-    if (st.size < 9 || st.size > 2147483647L) {
+    if (st.size < 9 || st.size > 2147483647L || st.size > CXN_TOTAL_CAP - cxn_total_bytes) {
         sy_close(fd);
-        return cxn_fail_msg(why, wcap, "external nn truncated");
+        s->state = CXN_ERROR;
+        return cxn_fail_msg(why, wcap, st.size < 9 ? "external nn truncated" : "external nn size limit exceeded");
     }
-    while (got < 9) {
-        long r = sy_read(fd, hdr + got, 9 - got);
-        if (r <= 0) { sy_close(fd); return cxn_fail_msg(why, wcap, "external nn header unreadable"); }
+    sz = (long)st.size;
+    buf = (unsigned char *)mm_alloc(sz);
+    if (!buf) {
+        sy_close(fd);
+        s->state = CXN_ERROR;
+        return cxn_fail_msg(why, wcap, "external nn out of memory");
+    }
+    while (got < sz) {
+        long r = sy_read(fd, buf + got, sz - got);
+        if (r < 0) {
+            mm_free(buf); sy_close(fd);
+            s->state = CXN_ERROR;
+            return cxn_fail_msg(why, wcap, "external nn read failed");
+        }
+        if (r == 0) {
+            mm_free(buf); sy_close(fd);
+            s->state = CXN_ERROR;
+            return cxn_fail_msg(why, wcap, "external nn truncated during read");
+        }
         got = got + r;
     }
+    tr = sy_read(fd, &extra, 1);
     sy_close(fd);
-    for (int k = 0; k < 9; k = k + 1) {
-        if (hdr[k] != (unsigned char)m[k]) return cxn_fail_msg(why, wcap, "external nn bad UNINETB1N magic");
+    if (tr != 0) {
+        mm_free(buf);
+        s->state = CXN_ERROR;
+        return cxn_fail_msg(why, wcap, tr > 0 ? "external nn grew during read" : "external nn EOF check failed");
     }
-    cxn_hit_any = 1;
+    if (!mm_same(buf, "UNINETB1N", 9)) {
+        mm_free(buf);
+        s->state = CXN_ERROR;
+        return cxn_fail_msg(why, wcap, "external nn bad UNINETB1N magic");
+    }
+    s->state = CXN_PRESENT;
+    s->buf = buf;
+    s->bn = sz;
+    cxn_total_bytes = cxn_total_bytes + sz;
+    cxn_sticky_ext = 1;
     return 0;
 }
 
 int cxn_probe_route(int (*along)(const char *, int, const char **), const char *route, char *why, int wcap) {
     int idx = 0;
     const char *stage = 0;
-    if (!cxn_active || !cxn_dir_exists) return 0;
+    if (!cxn_booted || cxn_mode == CXN_ERROR || cxn_sticky_err) {
+        return cxn_fail_msg(why, wcap, cxn_why());
+    }
+    if (cxn_mode == CXN_DISABLED || cxn_mode == CXN_ABSENT) return 0;
     if (cxn_probe_stage("e2", why, wcap) != 0) return -1;
     if (along && route) {
         while (along(route, idx, &stage) == 0) {
             if (stage && cxn_probe_stage(stage, why, wcap) != 0) return -1;
-            idx = idx + 1;
+            idx++;
         }
     }
     return 0;
 }
 
+/* Single-seal boot+probe+seal entry for `unisacc stream STAGE` (never re-probes inside xs_run). */
+int cxn_stream_seal(const char *cli_dir, int no_ext, const char *pkg, const char *stage, char *why, int wcap) {
+    if (cxn_boot(cli_dir, no_ext, pkg, why, wcap) != 0) return -1;
+    if (cxn_dir_present() && cxn_probe_stage(stage, why, wcap) != 0) return -1;
+    return cxn_seal();
+}
+
+/* Consumes ONLY the probed snapshot (never re-opens disk). UNPROBED stage refuses with rc=3 (never falls back to ABSENT). */
 int cxn_try_load(const char *stage, const unsigned char **bytes, long *n,
                  int *raw, unsigned *crc, int *compressed,
                  unsigned (*crcfn)(char *, int)) {
-    char path[CXN_PATH_CAP];
-    int fd;
-    sy_stat_t st;
-    long sz, got = 0;
-    unsigned char *buf;
-    const char *m = "UNINETB1N";
+    CxnSnap *s;
     if (!stage || !bytes || !n || !raw || !crc || !compressed || !crcfn) return 4;
-    if (!cxn_active || !cxn_dir[0]) return 2;
-    if (cxn_make_stage_path(stage, path, (int)sizeof path, 0, 0) != 0) return 3;
-    fd = sy_open_read(path);
-    if (fd < 0) {
-        if (fd == -ENOENT) return 2;
-        cxn_fail_msg(0, 0, "external nn file unreadable");
+    if (!cxn_booted || !cxn_sealed || cxn_sticky_err || cxn_mode == CXN_ERROR) {
+        cxn_fail_msg(0, 0, !cxn_sealed ? "external nn snapshot not sealed" : cxn_why());
         return 3;
     }
-    if (sy_fstat(fd, &st) != 0 || st.kind != 'f') {
-        sy_close(fd);
-        cxn_fail_msg(0, 0, "external nn is not a regular file");
+    if (cxn_mode == CXN_DISABLED || cxn_mode == CXN_ABSENT) return 2;
+    s = cxn_find_snap(stage);
+    if (!s) {
+        cxn_fail_msg(0, 0, "external nn stage unprobed");
         return 3;
     }
-    if (st.size < 9 || st.size > 2147483647L) {
-        sy_close(fd);
-        cxn_fail_msg(0, 0, "external nn truncated");
+    if (s->state == CXN_ERROR || s->state == CXN_UNPROBED) {
+        cxn_sticky_err = 1;
         return 3;
     }
-    sz = (long)st.size;
-    buf = (unsigned char *)mm_alloc((long)sz);
-    if (!buf) { sy_close(fd); cxn_fail_msg(0, 0, "external nn out of memory"); return 3; }
-    while (got < sz) {
-        long r = sy_read(fd, buf + got, sz - got);
-        if (r <= 0) { mm_free(buf); sy_close(fd); cxn_fail_msg(0, 0, "external nn read failed"); return 3; }
-        got = got + r;
+    if (s->state == CXN_ABSENT) return 2;
+    if (s->state != CXN_PRESENT || !s->buf) {
+        cxn_fail_msg(0, 0, "external nn snapshot payload missing");
+        return 3;
     }
-    sy_close(fd);
-    for (int k = 0; k < 9; k = k + 1) {
-        if (buf[k] != (unsigned char)m[k]) { mm_free(buf); cxn_fail_msg(0, 0, "external nn bad UNINETB1N magic"); return 3; }
+    if (!s->have_crc) {
+        s->crc = crcfn((char *)s->buf, (int)s->bn);
+        s->have_crc = 1;
     }
-    if (cxn_buf) mm_free(cxn_buf);
-    cxn_buf = buf;
-    *bytes = cxn_buf;
-    *n = sz;
-    *raw = (int)sz;
-    *crc = crcfn((char *)cxn_buf, (int)sz);
+    *bytes = s->buf;
+    *n = s->bn;
+    *raw = (int)s->bn;
+    *crc = s->crc;
     *compressed = 2;
-    cxn_hit_any = 1;
+    cxn_sticky_ext = 1;
     return 0;
 }

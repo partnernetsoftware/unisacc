@@ -410,6 +410,20 @@ static int dv_pkg_open(const char *cont, unsigned char **pkg, long *pkgn, char *
     return 0;
 }
 
+static int dv_probe_ext(const char *cont, const char *tgt, int lvl, int warn, int nsrc, int fwd, int mode2,
+                        const char *route, unsigned char **pkg, long *pkgn, char *preason) {
+    int cxt_text(const char *, int, int, int, int, char *, long, char *, long);
+    int cxn_dir_present(void); int cxn_probe_route(int (*)(const char *, int, const char **), const char *, char *, int);
+    int cxn_seal(void); int pm_along(const char *, int, const char **);
+    long tx_len(const char *, long); int tx_copy(char *, long, const char *, long);
+    char r2[96], why2[128], ur[96]; long tl; int bad;
+    bad = cxn_dir_present() ? (dv_pkg_open(cont, pkg, pkgn, preason) || cxn_probe_route(pm_along, route, preason, 128) ||
+        ((fwd || nsrc > 1) && ((cxt_text(tgt, 0, nsrc > 1 ? nsrc : 2, warn, lvl, r2, 96, why2, 128) == 0 && cxn_probe_route(pm_along, r2, preason, 128)) ||
+        (mode2 == 3 && nsrc > 1 && cxt_text(tgt, 5, 1, warn, lvl, r2, 96, why2, 128) == 0 && cxn_probe_route(pm_along, r2, preason, 128)))) ||
+        ((fwd || nsrc > 1) && tgt && (tl = tx_len(tgt, 80)) > 0 && tl + 6 <= 96 && !tx_copy(ur, 96, tgt, tl) && !tx_copy(ur + tl, 96 - tl, "/unit", 5) && cxn_probe_route(pm_along, ur, preason, 128))) : 0;
+    return (bad || cxn_seal()) ? 1 : 0;
+}
+
 int dv_main(int argc, char **argv) {
     static CxcState opts;
     char why[128];
@@ -438,7 +452,7 @@ int dv_main(int argc, char **argv) {
    prototypes (C44-PACKAGE-01 step 1). */
 extern int ex_touch(void); int ex_cap_gate(int *, char **); int ex_ri_arm(const char *, int, const unsigned char *, long); void ex_alu_note(int); int sy_setenv(const char *, const char *, int);
 int ex_ri_say(const char *, const char *); int ex_ri_emit(const char *, const unsigned char *, long, char *, int, const char *, int); int ex_ri_die(const char *, int); int ex_ri_argv(int); int ex_flow_pinned(void); void ex_ri_stamp5(int);
-extern int pm_open(const unsigned char *, long, char *, int); extern int pm_close(void); extern int pm_along(const char *, int, const char **); extern int pm_model(const char *, const char *, const unsigned char **, long *, int *, unsigned *, int *); extern const char *cxc_nn_dir_get(void); extern int cxc_no_ext_nn_get(void); extern int cxn_boot(const char *, int, const char *, char *, int); extern int cxn_dir_present(void); extern int cxn_probe_route(int (*)(const char *, int, const char **), const char *, char *, int); extern const char *cxn_why(void); extern int cxn_bypass_cache(void);
+extern int pm_open(const unsigned char *, long, char *, int); extern int pm_close(void); extern int pm_along(const char *, int, const char **); extern int pm_model(const char *, const char *, const unsigned char **, long *, int *, unsigned *, int *); extern const char *cxc_nn_dir_get(void); extern int cxc_no_ext_nn_get(void); extern int cxn_boot(const char *, int, const char *, char *, int); extern int cxn_dir_present(void); extern int cxn_probe_route(int (*)(const char *, int, const char **), const char *, char *, int); extern int cxn_seal(void); extern void cxn_destroy(void); extern int cxn_cache_allowed(void); extern const char *cxn_why(void); extern const char *cxn_uncovered_why(void);
 extern int ex_pp(const unsigned char *, long, int, unsigned, int, unsigned char *, int, const char *, unsigned char **, long *, char *, int); extern int dv_ar(int, char **);
 extern int dv_as(int, char **); extern int dv_view(int, char **); extern int dv_stream(int, char **);
 extern int dv_run_lower(const char *, const char *, const char *, int, int, int, unsigned char *, long, unsigned char **, long *, char *, int, int *, int); extern int dv_run_lower_n(const char *, const char *, const char *, int, int, int, const char *const *, unsigned char *, long, unsigned char **, long *, char *, int, int *, int); extern int dv_fwd_replay(void);
@@ -478,6 +492,7 @@ extern int cxa_line(unsigned char **, long *, long *, const char *, char *, long
     i = dv_parse(&opts, argv, argc, why, &src, &nsrc, &argstart);
     if (i >= 0) return i;
     if (cxn_boot(cxc_nn_dir_get(), cxc_no_ext_nn_get(), opts.pkg, preason, 128)) return dv_fail(preason);
+    { const char *uw = cxn_uncovered_why(); const char *nd = getenv("UNISACC_NN_DIAG"); (void)(uw && nd && nd[0] && (fprintf(stderr, "%s\n", uw), 1)); }
     shown = opts.out;
     gotb = 0; gotn = 0; dv_fwd_pass = 0; dv_fwd_exec = 0; pkg = 0; pkgn = 0;
     {
@@ -549,7 +564,7 @@ extern int cxa_line(unsigned char **, long *, long *, const char *, char *, long
         (void)shown;
         (void)obj;
         if (dv_read_input(src, tgt, &as_tape, &gotb, &gotn, argv[0], opts.pkg, cont, 512, preason)) return 1;
-        if (cxn_dir_present() && (dv_pkg_open(cont, &pkg, &pkgn, preason) || cxn_probe_route(pm_along, route, preason, 128))) { pm_close(); hs_free(pkg); hs_free(gotb); return dv_fail(preason); }
+        if (dv_probe_ext(cont, tgt, opts.level, opts.warnings, nsrc, image_fwd || mode2 == 3, mode2, route, &pkg, &pkgn, preason)) { pm_close(); hs_free(pkg); hs_free(gotb); cxn_destroy(); return dv_fail(preason); }
         /* A cache hit execs the image and skips models. Pass 2 does not look.
            A miss arms the include receipts for the store. */
         if ((mode2 == 3 || mode2 == 0 || (mode2 == 5 && !asmw && !ex_flow_pinned())) && nsrc >= 1 && !dv_fwd_pass && !as_tape && !cxp_tape_path(src)) {
@@ -563,12 +578,12 @@ extern int cxa_line(unsigned char **, long *, long *, const char *, char *, long
                 return ex_ri_argv(code);
             }
             argc = cxc_warm_strip(argc, argv); /* --warm keys its entry as the same command without it */
-            ready = !cxn_bypass_cache() && dv_fwd_cache_ok() && rc_open(cont, argc, argv, dv_srcv, nsrc, tgt, opts.level, opts.warnings,
+            ready = cxn_cache_allowed() && dv_fwd_cache_ok() && rc_open(cont, argc, argv, dv_srcv, nsrc, tgt, opts.level, opts.warnings,
                             (as_tape || cxp_tape_path(src)) ? 1 : 0, opts.deponly, mode2);
             if (ready && rc_lookup_elf(&cached, &cachedn) == 1) {
                 (void)(mode2 == 5 && (ex_ri_stamp5(1), 1));
                 code = mode2 == 3 ? (cxc_warm_on() ? 0 : ex_ri_hit(cached, cachedn, dv_runargs)) : ex_ri_emit(mode2 == 5 ? shown : (opts.out && opts.out[0] ? opts.out : "a.out"), cached, cachedn, preason, 128, 0, hb_target_id(tgt));
-                pm_close(); hs_free(pkg); hs_free(cached); hs_free(gotb);
+                pm_close(); hs_free(pkg); hs_free(cached); hs_free(gotb); cxn_destroy();
                 return code;
             }
             (void)(mode2 == 5 && (ex_ri_stamp5(0), 1));
@@ -633,7 +648,7 @@ extern int cxa_line(unsigned char **, long *, long *, const char *, char *, long
             fputs("unisacc: model driver: cli\n", stderr);
             return 1;
         }
-        { int hs_forward_exec(const unsigned char *, long, char **); unsigned char *si = 0; long sin = 0; int sc = (mode2 == 3 && nsrc > 1 && !dv_fwd_pass && !as_tape && !cxp_tape_path(src) && !dv_defs_n && !dv_incdir_n && !dv_quotedir_n && !dv_forced_n && !opts.nostd && !opts.werror && !opts.warnings && !cxc_warm_on() && !ex_flow_pinned() && !cxn_bypass_cache() && rspl_mode()) ? rspl_drive(cont, tgt, opts.level, nsrc, dv_srcv, st_attr_reset, st_span, st_extra_put, st_extra_pop, st_includes, rq_object, &si, &sin) : 1; while (sc != 1) { int ec = sc == 0 ? hs_forward_exec(si, sin, dv_runargs) : 1; mm_free(si); pm_close(); hs_free(pkg); hs_free(gotb); return ec; } }
+        { int hs_forward_exec(const unsigned char *, long, char **); unsigned char *si = 0; long sin = 0; int sc = (mode2 == 3 && nsrc > 1 && !dv_fwd_pass && !as_tape && !cxp_tape_path(src) && !dv_defs_n && !dv_incdir_n && !dv_quotedir_n && !dv_forced_n && !opts.nostd && !opts.werror && !opts.warnings && !cxc_warm_on() && !ex_flow_pinned() && cxn_cache_allowed() && rspl_mode()) ? rspl_drive(cont, tgt, opts.level, nsrc, dv_srcv, st_attr_reset, st_span, st_extra_put, st_extra_pop, st_includes, rq_object, &si, &sin) : 1; while (sc != 1) { int ec = sc == 0 ? hs_forward_exec(si, sin, dv_runargs) : 1; mm_free(si); pm_close(); hs_free(pkg); hs_free(gotb); cxn_destroy(); return ec; } }
 dv_replay:
         /* Args were bound before the package was opened, on pass 1.
            The slots are published again here so e3 still sees them.
@@ -758,6 +773,7 @@ dv_replay:
             if (pr) {
                 pm_close();
                 free(pkg);
+                cxn_destroy();
                 if (!preason[0]) {
                     if (pr == 1 || pr == 2 || pr == 3) return pr;
                     return 1;
@@ -771,18 +787,26 @@ dv_replay:
                 pm_close();
                 hs_free(pkg);
                 hs_free(body);
+                cxn_destroy();
                 return code;
             }
-            if (mode2 == 3 && nsrc >= 1)
-                return dv_run_route(execf, body, bodyn, dv_runargs, pkg, tgt, src, preason, gap);
+            if (mode2 == 3 && nsrc >= 1) {
+                int code = dv_run_route(execf, body, bodyn, dv_runargs, pkg, tgt, src, preason, gap);
+                cxn_destroy();
+                return code;
+            }
             pm_close();
             free(pkg);
             /* mode 4 is the tokens route: tokenpp then tokenlex, on stdout.
                mode 5 without an assembly path is the object route: the span
                already ran lower and the object ELF stage. Assembly -S stays
                on the old stop until that route is the tape text. */
-            return dv_finish(mode2, shown, runit2, asmw, body, bodyn, preason,
-                             opts.host_symbols_path, tgt, opts.emitbin, route, gap);
+            {
+                int code = dv_finish(mode2, shown, runit2, asmw, body, bodyn, preason,
+                                     opts.host_symbols_path, tgt, opts.emitbin, route, gap);
+                cxn_destroy();
+                return code;
+            }
         }
     }
 }

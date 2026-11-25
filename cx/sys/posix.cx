@@ -119,6 +119,55 @@ int sy_openat(int dfd, const char *path, int flags, int mode) {
     return (int)syp(syp_openat, dfd, (long)path, flags, mode, 0);
 }
 
+static int syp_openat_nofol_os(int dfd, const char *path, int is_dir);
+
+/* Open REL relative to directory descriptor DFD without blocking or following a final symlink
+   (O_RDONLY|O_NONBLOCK|O_NOFOLLOW|O_CLOEXEC). The fd, or -errno (-ENOSYS on Windows). */
+int sy_openat_read_nofollow(int dfd, const char *rel) {
+    if (dfd < 0 || !rel || !rel[0])
+        return -EINVAL;
+    return syp_openat_nofol_os(dfd, rel, 0);
+}
+
+/* Open directory PATH without following a final symlink (O_RDONLY|O_DIRECTORY|O_NOFOLLOW|O_CLOEXEC),
+   normalizing trailing '/' so POSIX does not dereference a symlink before O_NOFOLLOW.
+   The fd, or -errno (-ENOENT missing, -ELOOP/-ENOTDIR symlink or non-dir, -ENOSYS on Windows).
+   Intermediate path component symlinks are outside this guarantee. */
+int sy_open_dir_nofollow(const char *path) {
+    char clean[4096];
+    long n = 0, trimmed, i;
+    if (!path || !path[0])
+        return -EINVAL;
+    while (path[n]) {
+        if (n >= 4095) return syp_openat_nofol_os(sy_at_fdcwd(), path, 1);
+        n++;
+    }
+    if (n <= 1 || path[n - 1] != '/')
+        return syp_openat_nofol_os(sy_at_fdcwd(), path, 1);
+    trimmed = n;
+    while (trimmed > 1 && path[trimmed - 1] == '/') trimmed--;
+    for (i = 0; i < trimmed; i++) clean[i] = path[i];
+    clean[trimmed] = 0;
+    return syp_openat_nofol_os(sy_at_fdcwd(), clean, 1);
+}
+
+/* Helper with OS-conditional flags for openat/O_NOFOLLOW; Windows returns -ENOSYS (UNCOVERED).
+   64-iteration EINTR cap avoids unbounded spin (and mutation-gate 55s hang if condition flips). */
+static int syp_openat_nofol_os(int dfd, const char *path, int is_dir) {
+#if !defined(_WIN32)
+    int fl = O_RDONLY | O_NOFOLLOW | O_CLOEXEC | (is_dir ? O_DIRECTORY : O_NONBLOCK);
+    int fd = -EINTR;
+    for (int r = 0; r < 64; r++) {
+        fd = sy_openat(dfd, path, fl, 0);
+        if (fd != -EINTR) break;
+    }
+    return fd;
+#else
+    (void)dfd; (void)path; (void)is_dir;
+    return -ENOSYS;
+#endif
+}
+
 /* linkat(2): a new hard link NEWP (in NEWD) to OLDP (in OLDD). 0, or -errno (-EEXIST: NEWP exists). */
 int sy_linkat(int oldd, const char *oldp, int newd, const char *newp, int flags) {
     if (!oldp || !oldp[0] || !newp || !newp[0]) return -EINVAL;

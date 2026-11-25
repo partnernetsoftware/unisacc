@@ -17,6 +17,7 @@
    A known cell prefix in --route selects the target; an explicit --target
    must agree. Routes without that prefix retain the host/default target. */
 #pragma unisa module drivestream
+#pragma unisa use driver.nnext
 #pragma unisa use driver.input
 #pragma unisa use stages
 #pragma unisa use runtime.attribute_frame
@@ -39,33 +40,23 @@
 #pragma unisa use stream.item
 #pragma unisa use stream.pipe
 
-static const char *ds_stage;
-static const char *ds_tgt;
-static const char *ds_route;
+static const char *ds_stage, *ds_tgt, *ds_route;
 static const char *ds_src = "stdin.c";
-static const char *ds_models;
-static const char *ds_argv0;
+static const char *ds_models, *ds_argv0, *ds_nn_dir;
 static const char *ds_in[DV_MAXU];
-static int ds_inn;
+static int ds_inn, ds_level, ds_multi, ds_raw, ds_no_ext_nn;
 static unsigned ds_unit;
-static int ds_level;
-static int ds_multi;
-static int ds_raw;
 static char ds_routeb[96];
 static unsigned char ds_one = 1;
 static char ds_reskey[8][40];
 static unsigned char *ds_resb[8];
 static long ds_resn[8];
 static int ds_resc;
-static unsigned char *ds_incdir;
-static long ds_incdir_n;
-static unsigned char *ds_quotedir;
-static long ds_quotedir_n;
-static unsigned char *ds_errlim;
-static long ds_errlim_n;
+static unsigned char *ds_incdir, *ds_quotedir, *ds_errlim;
+static long ds_incdir_n, ds_quotedir_n, ds_errlim_n;
 
 static int ds_usage(void) {
-    sy_eprintf("usage: unisacc stream STAGE [--target T] [--route R] [--source LABEL] [--unit N] [--level N] [--multi] [--models PKG] [--res NAME[=FILE]]... [--raw] < in > out\n"
+    sy_eprintf("usage: unisacc stream STAGE [--target T] [--route R] [--source LABEL] [--unit N] [--level N] [--multi] [--models PKG] [--nn-dir DIR] [--no-external-nn] [--res NAME[=FILE]]... [--raw] < in > out\n"
                "       unisacc stream frame --in LABEL=FILE...\n"
                "       unisacc stream sidecar < e3-out > tape\n");
     return 2;
@@ -167,13 +158,17 @@ static int ds_args(int argc, char **argv) {
         const char *val;
         a = argv[i];
         val = i + 1 < argc ? argv[i + 1] : 0;
-        if (tx_eqz(a, "--raw")) { ds_raw = 1; i = i + 1; continue; }
-        if (tx_eqz(a, "--multi")) { ds_multi = 1; i = i + 1; continue; }
+        if (tx_eqz(a, "--raw") || tx_eqz(a, "--multi") || tx_eqz(a, "--no-external-nn")) {
+            *(tx_eqz(a, "--raw") ? &ds_raw : tx_eqz(a, "--multi") ? &ds_multi : &ds_no_ext_nn) = 1;
+            i = i + 1;
+            continue;
+        }
         if (!val) return 1;
         if (tx_eqz(a, "--target")) { ds_tgt = val; explicit_target = 1; }
         else if (tx_eqz(a, "--route")) ds_route = val;
         else if (tx_eqz(a, "--source")) ds_src = val;
         else if (tx_eqz(a, "--models")) ds_models = val;
+        else if (tx_eqz(a, "--nn-dir")) ds_nn_dir = val;
         else if (tx_eqz(a, "--unit")) { if (ds_num(val, &v) || v >= DV_MAXU) return 1; ds_unit = (unsigned)v; }
         else if (tx_eqz(a, "--level")) { if (ds_num(val, &v) || v > 3) return 1; ds_level = (int)v; }
         else if (tx_eqz(a, "--res")) { if (ds_res(val)) return 1; }
@@ -366,17 +361,13 @@ static int ds_cli(void) {
 
 /* Pipeline stage two: the package stage, through st_span (which takes the input block). */
 static int ds_model(void *ctx, void *vin, void *vout, char *why, int cap) {
-    char cont[512];
-    char preason[128];
+    char cont[512], preason[128];
     xs_item *it = vin;
     unsigned char *pkg = 0, *in = it->buf.data, *out;
     long pkgn = 0, inn = it->buf.len, outn;
     int rc;
-    int pm_open(const unsigned char *, long, char *, int);
-    int pm_close(void);
-    int ex_ri_arm(const char *, int, const unsigned char *, long);
-    int ex_touch(void);
-    int bd_touch(void);
+    int pm_open(const unsigned char *, long, char *, int), pm_close(void);
+    int ex_ri_arm(const char *, int, const unsigned char *, long), ex_touch(void), bd_touch(void);
     (void)ctx;
     preason[0] = 0;
     xs_item_init(it);
@@ -432,6 +423,12 @@ int dv_stream(int argc, char **argv) {
         return 1;
     }
     why[0] = 0;
+    if (!tx_eqz(ds_stage, "sidecar") && cxn_stream_seal(ds_nn_dir, ds_no_ext_nn, ds_models, ds_stage, why, 128)) {
+        sy_eprintf("unisacc: model driver: %s\n", why[0] ? why : cxn_why());
+        cxn_destroy();
+        return 1;
+    }
+    { const char *uw = cxn_uncovered_why(); const char *nd = sy_env("UNISACC_NN_DIAG"); (void)(uw && nd && nd[0] && (sy_eprintf("%s\n", uw), 1)); }
     xs_item_init(&it);
     xs_item_init(&ot);
     pr = xs_open(&h, (long)(~0UL >> 1)) || xs_add(h, 1, 1, 2, ds_strip, 0) ||   /* largest long of the target: 32 bits on win */
@@ -439,14 +436,17 @@ int dv_stream(int argc, char **argv) {
     pr = pr ? (tx_copy(why, 128, "stream: pipeline setup", 22), 1) : xs_run(h, &it, &ot, why, 128);
     if (pr == 3 && why[0]) {   /* a named boundary gap; 3 with an empty why is the executor's spent step budget */
         sy_eprintf("route=%s\nNOT_IMPLEMENTED %s\n", ds_route, ds_stage);
+        cxn_destroy();
         return 2;
     }
     if (pr) {
         if (why[0]) sy_eprintf("unisacc: model driver: %s\n", why);
+        cxn_destroy();
         return pr == 2 || pr == 3 ? pr : 1;
     }
     pr = ds_out(ot.buf.data, ot.buf.len);
     xs_item_drop(&ot);
     xs_close(h);
+    cxn_destroy();
     return pr;
 }
