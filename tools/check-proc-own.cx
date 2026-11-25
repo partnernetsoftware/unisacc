@@ -1,0 +1,148 @@
+#pragma unisa use sys.proc
+#pragma unisa use sys.time
+#pragma unisa use sys.io
+#pragma unisa use cxlib.ckassert
+
+static int g_fail;
+
+static void ck_po(int ok, const char *name) {
+    ck(ok, name);
+    if (!ok) g_fail = g_fail + 1;
+}
+
+int main(void) {
+    sy_spawn_t sp;
+    sy_child_t hold[64];
+    sy_child_t c;
+    sy_exit_t st;
+    const char *av_sleep[4];
+    const char *av_true[2];
+    int i, rc, live = 0, ab = 0, lost = 0;
+    char pidbuf[32];
+
+    sy_proc_test_reset();
+    av_sleep[0] = "/bin/sh"; av_sleep[1] = "-c"; av_sleep[2] = "sleep 30"; av_sleep[3] = 0;
+    av_true[0] = "/bin/true"; av_true[1] = 0;
+
+    /* I7 entry: atexit failure refuses spawn without fork or slot leak */
+    setenv("UNISACC_PROC_INJECT_ATEXIT_FAIL", "1", 1);
+    memset(&sp, 0, sizeof sp);
+    sp.argv = av_true; sp.in_fd = SY_STDIO_NULL; sp.out_fd = SY_STDIO_NULL; sp.err_fd = SY_STDIO_NULL;
+    rc = sy_proc_spawn(&sp, &c);
+    sy_proc_own_stats(&live, &ab, &lost);
+    ck_po(rc == -ENOMEM && live == 0, "I7-atexit-fail-refuses-spawn");
+    unsetenv("UNISACC_PROC_INJECT_ATEXIT_FAIL");
+
+    /* I2 + I5: wait error keeps slot & zeros st; ECHILD -> LOST */
+    sp.argv = av_sleep;
+    rc = sy_proc_spawn(&sp, &c);
+    ck_po(rc == 0, "I2-spawn-ok");
+    memset(&st, 0x5a, sizeof st);
+    cx_fmt(pidbuf, sizeof pidbuf, "%d", c.pid);
+    setenv("UNISACC_PROC_INJECT_PID", pidbuf, 1);
+    setenv("UNISACC_PROC_INJECT_WAIT_ERR", "1", 1);
+    rc = sy_proc_try_wait(&c, &st);
+    unsetenv("UNISACC_PROC_INJECT_WAIT_ERR");
+    unsetenv("UNISACC_PROC_INJECT_PID");
+    sy_proc_own_stats(&live, &ab, &lost);
+    ck_po(rc == -EINTR && live == 1 && st.exited == 0 && st.code == 0, "I2-I5-wait-err-keeps-slot-zeros-st");
+
+    memset(&st, 0x5a, sizeof st);
+    setenv("UNISACC_PROC_INJECT_PID", pidbuf, 1);
+    setenv("UNISACC_PROC_INJECT_KILL_EPERM", "1", 1);
+    rc = sy_proc_kill(&c, SIGTERM);
+    unsetenv("UNISACC_PROC_INJECT_KILL_EPERM");
+    unsetenv("UNISACC_PROC_INJECT_PID");
+    sy_proc_own_stats(&live, &ab, &lost);
+    ck_po(rc == -EPERM && live == 1, "I2-kill-eperm-keeps-slot");
+
+    /* I6: close transfers LIVE -> ABANDONED, idempotent, DETACHED refuses wait/try/kill/end */
+    sy_proc_close(&c);
+    sy_proc_own_stats(&live, &ab, &lost);
+    ck_po(live == 0 && ab == 1 && c.pid == -2, "I6-close-transfers-abandoned");
+    ck_po(sy_proc_wait(&c, &st) == -EINVAL && sy_proc_try_wait(&c, &st) == -EINVAL && sy_proc_kill(&c, SIGTERM) == -EINVAL && sy_proc_end(&c, 10, &st) == -EINVAL, "I6-detached-refuses-all-ops");
+    sy_proc_close(&c);
+    sy_proc_own_stats(&live, &ab, &lost);
+    ck_po(ab == 1, "I6-double-close-idempotent");
+    rc = sy_proc_own_drain(1000);
+    sy_proc_own_stats(&live, &ab, &lost);
+    ck_po(rc == 0 && ab == 0, "I6-drain-reaps-abandoned");
+
+    /* I2 ECHILD -> LOST (never signal LOST), real reap recovers capacity (lost==0) */
+    {
+        const char *av_short[4];
+        av_short[0] = "/bin/sh"; av_short[1] = "-c"; av_short[2] = "sleep 0.05"; av_short[3] = 0;
+        sp.argv = av_short;
+        rc = sy_proc_spawn(&sp, &c);
+    }
+    sp.argv = av_sleep;
+    ck_po(rc == 0, "I2-echild-spawn");
+    cx_fmt(pidbuf, sizeof pidbuf, "%d", c.pid);
+    setenv("UNISACC_PROC_INJECT_PID", pidbuf, 1);
+    setenv("UNISACC_PROC_INJECT_ECHILD", "1", 1);
+    memset(&st, 0x5a, sizeof st);
+    rc = sy_proc_try_wait(&c, &st);
+    unsetenv("UNISACC_PROC_INJECT_ECHILD");
+    unsetenv("UNISACC_PROC_INJECT_PID");
+    sy_proc_own_stats(&live, &ab, &lost);
+    ck_po(rc == -ECHILD && lost >= 1 && st.exited == 0, "I2-I5-echild-marks-lost-zeros-st");
+    ck_po(sy_proc_kill(&c, SIGTERM) == -ESRCH && sy_kill(c.pid) == -ESRCH, "I2-lost-never-signalled");
+    rc = sy_proc_wait(&c, &st);
+    sy_proc_own_stats(&live, &ab, &lost);
+    ck_po(rc == 0 && lost == 0, "I2-lost-real-reap-recovers-capacity");
+    sy_proc_close(&c);
+
+    /* I8: owner pid isolation across fork + real PID check */
+    rc = sy_proc_spawn(&sp, &c);
+    ck_po(rc == 0 && c.pid > 0, "I8-spawn-before-fork");
+    {
+        int saved_pid = c.pid;
+        pid_t fpid;
+        sy_proc_close(&c);
+        fpid = fork();
+        if (fpid == 0) exit(0);
+        sy_wait((int)fpid, 0);
+        sy_proc_own_stats(&live, &ab, &lost);
+        ck_po(ab == 1 && kill((pid_t)saved_pid, 0) == 0, "I8-real-pid-alive-after-fork-exit");
+        rc = sy_proc_own_drain(1000);
+        ck_po(rc == 0 && kill((pid_t)saved_pid, 0) != 0, "I8-parent-drains-after-fork");
+    }
+
+    /* I1 fork fail returns RESERVED */
+    setenv("UNISACC_PROC_INJECT_FORK_FAIL", "1", 1);
+    rc = sy_proc_spawn(&sp, &c);
+    unsetenv("UNISACC_PROC_INJECT_FORK_FAIL");
+    sy_proc_own_stats(&live, &ab, &lost);
+    ck_po(rc == -EAGAIN && live == 0, "I1-fork-fail-returns-reserved");
+
+    /* I3 reaped handle caches non-zero exit code & wait_status updates table (stale handle -> -ESRCH) */
+    {
+        const char *av_exit7[4];
+        av_exit7[0] = "/bin/sh"; av_exit7[1] = "-c"; av_exit7[2] = "exit 7"; av_exit7[3] = 0;
+        sp.argv = av_exit7;
+        rc = sy_proc_spawn(&sp, &c);
+        ck_po(rc == 0 && sy_proc_wait(&c, &st) == 0 && st.exited == 1 && st.code == 7, "I3-wait-nonzero-exit7");
+        memset(&st, 0, sizeof st);
+        rc = sy_proc_try_wait(&c, &st);
+        ck_po(rc == 1 && st.exited == 1 && st.code == 7 && sy_proc_kill(&c, SIGTERM) == -ESRCH, "I3-reaped-handle-returns-cached-exit7");
+        memset(&st, 0x5a, sizeof st);
+        rc = sy_proc_end(&c, 10, &st);
+        ck_po(rc == -ESRCH && st.exited == 0 && sy_proc_try_wait(&c, &st) == 1 && st.code == 7, "I3-reaped-end-zeros-out-keeps-cache");
+    }
+
+    printf("PROC_OWN_TABLE\tstatus=UNMEASURED\treason=table-driven-fixture-pending\n");
+
+    sp.argv = av_true;
+    rc = sy_proc_spawn(&sp, &c);
+    if (rc == 0) {
+        int ex = 0, code = 0, sig = 0;
+        int wpid = sy_wait_status(c.pid, 0, &ex, &code, &sig);
+        sy_proc_own_stats(&live, &ab, &lost);
+        ck_po(wpid > 0 && live == 0, "I3-wait-status-updates-table");
+        ck_po(sy_proc_kill(&c, SIGTERM) == -ESRCH && sy_proc_try_wait(&c, &st) == -ESRCH, "I3-stale-handle-after-raw-reap-esrch");
+        sy_proc_close(&c);
+    }
+
+    printf("CHECK_PROC_OWN\tfailed=%d\n", g_fail);
+    return g_fail ? 1 : 0;
+}
