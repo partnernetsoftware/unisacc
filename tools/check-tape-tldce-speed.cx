@@ -1,0 +1,755 @@
+/* tools/check-tape-tldce-speed.cx -- T1.4c official 15x speed gate & rate-probe harness.
+ *
+ * Usage:
+ *   (1) Generate fixed-order SHA-256 object manifest from DIR:
+ *       sh ./unisacc.com tools/check-tape-tldce-speed.cx -- --write-manifest MANIFEST.txt --obj-dir DIR
+ *   (2) Official T1.4c qualification gate (default: --require-complete, fails non-zero unless tape completes,
+ *       matches native byte-for-byte + SHA-256 + dce_cut, meets exact tmed_ms <= postwarm_med * 15, and load_gate=CLEAN):
+ *       sh ./unisacc.com tools/check-tape-tldce-speed.cx -- --manifest MANIFEST.txt --obj-dir DIR [--runs 5] [--tape-runs 3] [--tape-budget B] [--max-load 6.0] [--reuse-dir DIR] [--profile-tag pure102]
+ *   (3) Rate-probe baseline mode (explicit --probe-rate only; never claims T14C_VERDICT status=PASS):
+ *       sh ./unisacc.com tools/check-tape-tldce-speed.cx -- --probe-rate --manifest MANIFEST.txt --obj-dir DIR [--runs 5] [--tape-runs 3] [--tape-budget 100000000] [--max-load 6.0] [--reuse-dir DIR]
+ *   (4) Light registration check (input integrity and cutoff, no benchmark):
+ *       sh ./unisacc.com tools/check-tape-tldce-speed.cx -- --self-test
+ *
+ * Strict protocol (aligned with T1.4c / M1 frozen contract):
+ *   (1) Explicit fixed manifest only: refuses implicit directory scanning; preserves manifest line order and
+ *       verifies every object file's exact SHA-256 before any timing begins.
+ *   (2) Pre-warm / post-warm naming: without root drop_caches, OS page cache is not dropped; samples are named
+ *       PREWARM_SUMMARY (prewarm_median_ms) and POSTWARM_SUMMARY (postwarm_median_ms), never claiming cold page cache.
+ *   (3) Exact multiplication inequality for 15x gate: tmed_ms <= postwarm_median_ms * 15 (no integer division truncation).
+ *   (4) Official gate checks outer rc==0, tape status==0, exit_code==0, complete TLDCE_DRIVER fields (dce_cut match & >0),
+ *       exact byte-for-byte memcmp and SHA-256 parity with native output, and exact 15x inequality.
+ *       Budget exhaustion (status==3) fails non-zero in official mode; only --probe-rate allows rc=0 for throughput measurement.
+ *   (5) Same-source driver stays strictly within M1 frozen 8 host slots {0,1,2,3,4,5,6,8} (mask <= 383).
+ *   (6) --reuse-dir is probe-only: prebuilt executables do not bind the current source tree.
+ *
+ * Output ends with: CHECK_TAPE_TLDCE_SPEED<TAB>passed=P<TAB>failed=F
+ */
+#pragma unisa use cxlib.netpack
+#pragma unisa use sys.fs
+#pragma unisa use sys.posix
+#pragma unisa use sys.io
+#pragma unisa use sys.env
+#pragma unisa use sys.time
+#pragma unisa use sys.sha
+#pragma unisa use text.text
+#pragma unisa use mem.bytes
+#pragma unisa use mem.heap
+
+#define TS_MAX_OBJS 256
+#define TS_MAX_RUNS 15
+
+static int g_pass = 0;
+static int g_fail = 0;
+
+static void tck(int cond, const char *name) {
+    if (cond) { g_pass++; sy_printf("PASS\tcheck-tape-tldce-speed.%s\n", name); }
+    else { g_fail++; sy_printf("FAIL\tcheck-tape-tldce-speed.%s\n", name); }
+}
+
+/* Minimal same-source 102-object tl_dce driver: strictly M1 frozen 8 host slots (mask <= 383).
+ * Uses zero stdio.h functions and zero sys.posix functions; defines sy_rlimit_as() -> -1 locally;
+ * avoids mm_grow (realloc -> mremap syscall slot 12) and uses O_RDONLY (0) / O_WRONLY (1) only. */
+static const char TLDCE_DRIVER_SRC[] =
+    "#pragma unisa use compiler.tapelink\n"
+    "#pragma unisa use sys.fs\n"
+    "#pragma unisa use mem.heap\n"
+    "#pragma unisa use mem.bytes\n"
+    "long sy_rlimit_as(void) { return -1; }\n"
+    "static unsigned char *g_ob = 0;\n"
+    "static long g_on = 0;\n"
+    "static long g_ocap = 0;\n"
+    "static int d_emit(int c) {\n"
+    "    if (g_on >= g_ocap) {\n"
+    "        long nc = g_ocap > 0 ? g_ocap * 2 : 1048576;\n"
+    "        unsigned char *nb = (unsigned char *)mm_alloc(nc);\n"
+    "        if (!nb) return 1;\n"
+    "        if (g_ob && g_on > 0) (void)mm_copy(nb, nc, g_ob, g_on);\n"
+    "        if (g_ob) mm_free(g_ob);\n"
+    "        g_ob = nb; g_ocap = nc;\n"
+    "    }\n"
+    "    g_ob[g_on++] = (unsigned char)(c & 255);\n"
+    "    return 0;\n"
+    "}\n"
+    "static int d_die(char *m) {\n"
+    "    if (m) { long l = 0; while (m[l]) l++; if (l > 0) (void)sy_write_all(2, m, l); }\n"
+    "    return 1;\n"
+    "}\n"
+    "static void put_u64(char *dst, int *pos, unsigned long long v) {\n"
+    "    char d[24]; int n = 0;\n"
+    "    if (v == 0) { dst[(*pos)++] = '0'; return; }\n"
+    "    while (v > 0) { d[n++] = (char)('0' + (v % 10ull)); v /= 10ull; }\n"
+    "    while (n > 0) dst[(*pos)++] = d[--n];\n"
+    "}\n"
+    "static void put_s(char *dst, int *pos, const char *s) {\n"
+    "    while (*s) dst[(*pos)++] = *s++;\n"
+    "}\n"
+    "static int read_obj(const char *path, unsigned char **out_b, long *out_n) {\n"
+    "    int fd = sy_open(path, O_RDONLY, 0);\n"
+    "    if (fd < 0) return -1;\n"
+    "    sy_stat_t st;\n"
+    "    if (sy_fstat(fd, &st) != 0 || st.size <= 0 || st.size > 67108864L) { sy_close(fd); return -1; }\n"
+    "    unsigned char *b = (unsigned char *)mm_alloc((long)st.size + 1);\n"
+    "    if (!b) { sy_close(fd); return -1; }\n"
+    "    if (sy_read_full(fd, b, (long)st.size) != 0) { mm_free(b); sy_close(fd); return -1; }\n"
+    "    sy_close(fd);\n"
+    "    b[st.size] = 0;\n"
+    "    *out_b = b; *out_n = (long)st.size;\n"
+    "    return 0;\n"
+    "}\n"
+    "int main(int argc, char **argv) {\n"
+    "    if (argc < 3) return 2;\n"
+    "    const char *out_path = argv[1];\n"
+    "    if (tl_bind(d_emit, d_die) || tl_begin()) return 3;\n"
+    "    int u = 0;\n"
+    "    for (int i = 2; i < argc; i++) {\n"
+    "        unsigned char *b = 0; long bn = 0, tl = 0;\n"
+    "        if (read_obj(argv[i], &b, &bn) != 0) return 4;\n"
+    "        char *t = tl_tape((char *)b, bn, &tl);\n"
+    "        if (!t || tl <= 0) { mm_free(b); return 5; }\n"
+    "        if (u == 0) tl_adopt_first(); else if (tl_target_differs()) { mm_free(b); return 12; }\n"
+    "        if (tl_unitver(t, (int)tl) != 0 || tl_unit(t, (int)tl, u) != 0 || tl_note_links(t, tl) != 0) { mm_free(b); return 6; }\n"
+    "        u++;\n"
+    "        mm_free(b);\n"
+    "    }\n"
+    "    g_on = tl_dce((char *)g_ob, g_on);\n"
+    "    if (tl_check_undef() != 0) return 7;\n"
+    "    if (tl_entry_missing() != 0) return 8;\n"
+    "    if (tl_dce_cut() <= 0) return 11;\n"
+    "    tl_finish(u);\n"
+    "    int fd = sy_open(out_path, O_WRONLY, 0);\n"
+    "    if (fd < 0) return 9;\n"
+    "    if (g_on > 0 && sy_write_all(fd, g_ob, g_on) != 0) { sy_close(fd); return 10; }\n"
+    "    sy_close(fd);\n"
+    "    char msg[160]; int mp = 0;\n"
+    "    put_s(msg, &mp, \"TLDCE_DRIVER\\tunits=\"); put_u64(msg, &mp, (unsigned long long)u);\n"
+    "    put_s(msg, &mp, \"\\tbytes=\"); put_u64(msg, &mp, (unsigned long long)g_on);\n"
+    "    put_s(msg, &mp, \"\\tdce_cut=\"); put_u64(msg, &mp, (unsigned long long)tl_dce_cut());\n"
+    "    msg[mp++] = '\\n';\n"
+    "    (void)sy_write_all(1, msg, mp);\n"
+    "    mm_free(g_ob);\n"
+    "    return 0;\n"
+    "}\n";
+
+static int run_cmd(char **av, const char *cwd, int secs, int *rc_out, long *ms_out, char *obuf, size_t ocap) {
+    np_result r = {0};
+    char why[256];
+    long t0 = sy_now_ms();
+    int tr = np_run(av, cwd, 0, secs, &r, why, sizeof why);
+    long dt = sy_now_ms() - t0;
+    if (ms_out) *ms_out = dt > 0 ? dt : 1;
+    *rc_out = tr ? 124 : r.rc;
+    if (obuf && ocap > 0) {
+        obuf[0] = 0;
+        size_t n = 0;
+        if (r.out && r.outn > 0) {
+            size_t c = r.outn < ocap - 1 ? r.outn : ocap - 1;
+            mm_copy(obuf, (long)ocap, r.out, (long)c);
+            n += c;
+        }
+        if (r.err && r.errn > 0 && n + 1 < ocap) {
+            size_t c = r.errn < ocap - 1 - n ? r.errn : ocap - 1 - n;
+            mm_copy(obuf + n, (long)(ocap - n), r.err, (long)c);
+            n += c;
+        }
+        obuf[n] = 0;
+    }
+    np_free(&r);
+    return tr;
+}
+
+static void sort_longs(long *a, int n) {
+    for (int i = 1; i < n; i++) {
+        long v = a[i];
+        int j = i;
+        while (j > 0 && a[j - 1] > v) { a[j] = a[j - 1]; j--; }
+        a[j] = v;
+    }
+}
+
+static int read_load1_x100(void) {
+    unsigned char *b = 0; int64_t n = 0;
+    if (sy_read_file("/proc/loadavg", &b, &n, 256) != 0 || !b || n <= 0) return -1;
+    int whole = 0, frac = 0, i = 0;
+    while (i < n && b[i] >= '0' && b[i] <= '9') { whole = whole * 10 + (b[i] - '0'); i++; }
+    if (i < n && b[i] == '.') {
+        i++;
+        int mult = 10;
+        while (i < n && b[i] >= '0' && b[i] <= '9' && mult > 0) { frac += (b[i] - '0') * mult; mult /= 10; i++; }
+    }
+    mm_free(b);
+    return whole * 100 + frac;
+}
+
+static int file_sha_and_len(const char *path, char hex[65], long *len_out) {
+    unsigned char *b = 0; int64_t n = 0;
+    if (sy_read_file(path, &b, &n, 64 << 20) != 0 || !b) return -1;
+    if (len_out) *len_out = (long)n;
+    int rc = sy_sha256_hex(b, (long)n, hex);
+    mm_free(b);
+    return rc;
+}
+
+static int files_byte_equal(const char *p1, const char *p2) {
+    unsigned char *b1 = 0, *b2 = 0; int64_t n1 = 0, n2 = 0;
+    if (sy_read_file(p1, &b1, &n1, 64 << 20) != 0 || !b1) return 0;
+    if (sy_read_file(p2, &b2, &n2, 64 << 20) != 0 || !b2) { mm_free(b1); return 0; }
+    int eq = (n1 == n2 && (n1 == 0 || memcmp(b1, b2, (size_t)n1) == 0));
+    mm_free(b1); mm_free(b2);
+    return eq;
+}
+
+static unsigned long long parse_kv_ull(const char *s, const char *key, int *found) {
+    long sl = (long)strlen(s), kl = (long)strlen(key);
+    long pos = -1;
+    for (long i = 0; i + kl <= sl; i++) {
+        if (memcmp(s + i, key, (size_t)kl) == 0) { pos = i + kl; break; }
+    }
+    if (pos < 0) { if (found) *found = 0; return 0; }
+    const char *p = s + pos;
+    unsigned long long v = 0;
+    int any = 0;
+    while (*p >= '0' && *p <= '9') { v = v * 10ull + (unsigned long long)(*p - '0'); p++; any = 1; }
+    if (found) *found = any;
+    return v;
+}
+
+static int load_product_path(const char *root, char *out, size_t cap) {
+    unsigned char *b = 0; int64_t n = 0;
+    char cfgp[4200];
+    if (cx_fmt(cfgp, sizeof cfgp, "%s/tools/devsvc-repo.tsv", root)) return -1;
+    if (sy_read_file(cfgp, &b, &n, 65536) != 0 || !b) return -1;
+    int ok = 0;
+    long at = 0;
+    while (at < n) {
+        long e = at;
+        while (e < n && b[e] != '\n') e++;
+        long l = e - at;
+        if (l > 8 && memcmp(b + at, "product\t", 8) == 0) {
+            long s = at + 8, p = s;
+            while (p < e && b[p] != '\t' && b[p] != '\r') p++;
+            if (p > s && p - s < 256) {
+                char rel[260];
+                mm_copy(rel, sizeof rel, b + s, p - s);
+                rel[p - s] = 0;
+                if (cx_fmt(out, (int)cap, "%s/%s", root, rel) == 0) ok = 1;
+                break;
+            }
+        }
+        at = e + 1;
+    }
+    mm_free(b);
+    return ok ? 0 : -1;
+}
+
+static unsigned long long rd_u(const unsigned char *p, int w) {
+    unsigned long long v = 0;
+    for (int i = 0; i < w; i++) v |= ((unsigned long long)p[i]) << (i * 8);
+    return v;
+}
+
+static int is_hex64(const char *s, long n) {
+    if (n != 64) return 0;
+    for (long i = 0; i < 64; i++) {
+        char c = s[i];
+        if (!((c >= '0' && c <= '9') || (c >= 'a' && c <= 'f'))) return 0;
+    }
+    return 1;
+}
+
+/* Parse HOST section of .tapeslice and compute exact 64-bit slot bitmask. */
+static int inspect_slice_mask(const char *path, unsigned long long *mask_out, int *hcnt_out, long *bytes_out) {
+    unsigned char *b = 0; int64_t n = 0;
+    if (sy_read_file(path, &b, &n, 16 << 20) != 0 || !b || n < 208) { if (b) mm_free(b); return -1; }
+    unsigned long long hoff = rd_u(b + 188, 8);
+    unsigned long long hlen = rd_u(b + 196, 8);
+    unsigned int hcnt = (unsigned int)rd_u(b + 204, 4);
+    unsigned long long mask = 0;
+    if (hoff + hlen > (unsigned long long)n) { mm_free(b); return -1; }
+    unsigned long long pos = 0;
+    for (unsigned int i = 0; i < hcnt && pos + 4 <= hlen; i++) {
+        unsigned int slot = (unsigned int)rd_u(b + hoff + pos, 2);
+        unsigned int nlen = (unsigned int)rd_u(b + hoff + pos + 2, 2);
+        if (slot < 64) mask |= (1ull << slot);
+        pos += 4ull + (unsigned long long)nlen;
+    }
+    *mask_out = mask;
+    *hcnt_out = (int)hcnt;
+    *bytes_out = (long)n;
+    mm_free(b);
+    return 0;
+}
+
+/* Write sorted sha256sum-format manifest from DIR/*.o */
+static int write_manifest_from_dir(const char *dir, const char *mpath) {
+    static char names[TS_MAX_OBJS][256];
+    sy_dir_t dd;
+    int n = 0;
+    if (sy_dir_open(&dd, dir)) return -1;
+    for (;;) {
+        int got = sy_dir_next(&dd);
+        if (got <= 0) break;
+        size_t l = strlen(dd.name);
+        if (l <= 2 || strcmp(dd.name + l - 2, ".o") != 0) continue;
+        if (n >= TS_MAX_OBJS) break;
+        if (cx_fmt(names[n], 256, "%s", dd.name) == 0) n++;
+    }
+    sy_dir_close(&dd);
+    if (n <= 0) return -1;
+    for (int i = 1; i < n; i++) {
+        char tmp[256];
+        mm_copy(tmp, sizeof tmp, names[i], 256);
+        int j = i;
+        while (j > 0 && strcmp(names[j - 1], tmp) > 0) {
+            mm_copy(names[j], 256, names[j - 1], 256);
+            j--;
+        }
+        mm_copy(names[j], 256, tmp, 256);
+    }
+    static char mbuf[TS_MAX_OBJS * 340];
+    long mp = 0;
+    for (int i = 0; i < n; i++) {
+        char fp[4400], sha[65];
+        if (cx_fmt(fp, sizeof fp, "%s/%s", dir, names[i])) return -1;
+        if (file_sha_and_len(fp, sha, 0) != 0) return -1;
+        int w = snprintf(mbuf + mp, sizeof mbuf - (size_t)mp, "%s  %s\n", sha, names[i]);
+        if (w <= 0 || mp + w >= (long)sizeof mbuf) return -1;
+        mp += w;
+    }
+    if (sy_write_atomic(mpath, mbuf, mp, 0644) != 0) return -1;
+    char msha[65];
+    if (sy_sha256_hex((const unsigned char *)mbuf, mp, msha) != 0) return -1;
+    sy_printf("MANIFEST_WRITTEN\tpath=%s\tcount=%d\tmanifest_sha=%s\n", mpath, n, msha);
+    return 0;
+}
+
+/* Load explicit manifest in exact line order and verify every object file's SHA-256.
+ * Accepts "<64hex>  <name>" (sha256sum format) or "<name><TAB><64hex>" (TSV format). */
+static int load_and_verify_manifest(const char *mpath, const char *obj_dir,
+                                    char objs[TS_MAX_OBJS][512], char msha_out[65], int *bad_out) {
+    unsigned char *b = 0; int64_t n = 0;
+    *bad_out = 0;
+    if (sy_read_file(mpath, &b, &n, 4 << 20) != 0 || !b || n <= 0) { if (b) mm_free(b); return -1; }
+    if (sy_sha256_hex(b, (long)n, msha_out) != 0) { mm_free(b); return -1; }
+    int cnt = 0;
+    long at = 0;
+    while (at < n) {
+        long e = at;
+        while (e < n && b[e] != '\n') e++;
+        long s = at, l = e - at;
+        while (l > 0 && (b[s + l - 1] == '\r' || b[s + l - 1] == ' ' || b[s + l - 1] == '\t')) l--;
+        if (l > 0 && b[s] != '#') {
+            char exp_sha[65] = "", name[320] = "";
+            int parsed = 0;
+            if (l > 66 && is_hex64((const char *)b + s, 64) && (b[s + 64] == ' ' || b[s + 64] == '\t')) {
+                long p = s + 64;
+                while (p < s + l && (b[p] == ' ' || b[p] == '\t' || b[p] == '*')) p++;
+                long nl = (s + l) - p;
+                if (nl > 0 && nl < (long)sizeof name) {
+                    mm_copy(exp_sha, 65, b + s, 64); exp_sha[64] = 0;
+                    mm_copy(name, sizeof name, b + p, nl); name[nl] = 0;
+                    parsed = 1;
+                }
+            } else {
+                const char *tab = (const char *)memchr(b + s, '\t', (size_t)l);
+                if (tab) {
+                    long nl = (long)(tab - ((const char *)b + s));
+                    long sl = l - nl - 1;
+                    if (nl > 0 && nl < (long)sizeof name && is_hex64(tab + 1, sl)) {
+                        mm_copy(name, sizeof name, b + s, nl); name[nl] = 0;
+                        mm_copy(exp_sha, 65, tab + 1, 64); exp_sha[64] = 0;
+                        parsed = 1;
+                    }
+                }
+            }
+            if (!parsed || strstr(name, "..") != 0 || cnt >= TS_MAX_OBJS) {
+                (*bad_out)++;
+            } else {
+                char full[512], got_sha[65] = "";
+                if (name[0] == '/') {
+                    if (cx_fmt(full, sizeof full, "%s", name)) { (*bad_out)++; at = e + 1; continue; }
+                } else {
+                    if (!obj_dir[0] || cx_fmt(full, sizeof full, "%s/%s", obj_dir, name)) { (*bad_out)++; at = e + 1; continue; }
+                }
+                if (file_sha_and_len(full, got_sha, 0) != 0 || strcmp(got_sha, exp_sha) != 0) {
+                    sy_eprintf("check-tape-tldce-speed: manifest-mismatch entry=%s expected=%s got=%s\n",
+                               name, exp_sha, got_sha[0] ? got_sha : "MISSING");
+                    (*bad_out)++;
+                } else {
+                    mm_copy(objs[cnt], 512, full, 512);
+                    cnt++;
+                }
+            }
+        }
+        at = e + 1;
+    }
+    mm_free(b);
+    return cnt;
+}
+
+static unsigned long long speed_gate_15x(long native_ms) {
+    return native_ms > 0 ? (unsigned long long)native_ms * 15ull : 0;
+}
+
+static int speed_within_15x(long tape_ms, unsigned long long gate_ms) {
+    return tape_ms > 0 && (unsigned long long)tape_ms <= gate_ms;
+}
+
+static const char *speed_complete_status(int probe_rate, int valid, int within_15x, int loaded) {
+    if (!valid) return probe_rate ? "PROBE_FAULT_OR_NONZERO" : "FAIL";
+    if (probe_rate) return "PROBE_COMPLETE";
+    if (loaded) return "ADVISORY_COMPLETE";
+    return within_15x ? "PASS" : "FAIL";
+}
+
+static int speed_selftest(char objs[TS_MAX_OBJS][512]) {
+    char dir[256], a[512], b[512], mf[512], sha[65], ah[65], bh[65], manifest[160];
+    int bad = 0;
+    if (sy_sha256_hex("a", 1, ah) || sy_sha256_hex("b", 1, bh) ||
+        cx_fmt(manifest, sizeof manifest, "%s  b.o\na.o\t%s\n", bh, ah) ||
+        sy_mkdtemp(sy_tmpdir(), "t14c-selftest", dir, sizeof dir)) return 2;
+    if (cx_fmt(a, sizeof a, "%s/a.o", dir) ||
+        cx_fmt(b, sizeof b, "%s/b.o", dir) ||
+        cx_fmt(mf, sizeof mf, "%s/ordered.sha256", dir)) return 2;
+    if (sy_write_file(a, "a", 1, 0600) || sy_write_file(b, "b", 1, 0600) ||
+        sy_write_file(mf, manifest, strlen(manifest), 0600)) return 2;
+    int count = load_and_verify_manifest(mf, dir, objs, sha, &bad);
+    tck(count == 2 && bad == 0 && !strcmp(objs[0], b) && !strcmp(objs[1], a),
+        "manifest-preserves-explicit-order");
+    if (sy_write_file(b, "x", 1, 0600)) return 2;
+    count = load_and_verify_manifest(mf, dir, objs, sha, &bad);
+    tck(count == 1 && bad == 1 && !strcmp(objs[0], a), "manifest-rejects-changed-bytes");
+    tck(speed_within_15x(1500, speed_gate_15x(100)) &&
+        !speed_within_15x(1501, speed_gate_15x(100)) &&
+        !speed_within_15x(0, speed_gate_15x(100)), "exact-15x-cutoff");
+    tck(!strcmp(speed_complete_status(1, 1, 1, 0), "PROBE_COMPLETE") &&
+        !strcmp(speed_complete_status(0, 1, 1, 0), "PASS") &&
+        !strcmp(speed_complete_status(0, 1, 1, 1), "ADVISORY_COMPLETE"),
+        "probe-and-loaded-runs-do-not-qualify");
+    (void)sy_unlink(mf);
+    (void)sy_unlink(b);
+    (void)sy_unlink(a);
+    (void)sy_rmdir(dir);
+    sy_printf("CHECK_TAPE_TLDCE_SPEED\tpassed=%d\tfailed=%d\tmode=contract-only\n", g_pass, g_fail);
+    return g_fail ? 1 : 0;
+}
+
+int main(int argc, char **argv) {
+    char obj_dir[4096] = "", manifest_path[4096] = "", write_mpath[4096] = "", prod_path[4200] = "";
+    char root[4096] = "", tmp[4096] = "", reuse_dir[4096] = "", profile_tag[64] = "pure102";
+    int nruns = 5, truns = 3, max_load_x100 = 600, allow_loaded = 0, probe_rate = 0, keep_tmp = 0;
+    unsigned long long tape_budget = 100000000ull;
+    static char objs[TS_MAX_OBJS][512];
+    if (argc == 2 && !strcmp(argv[1], "--self-test")) return speed_selftest(objs);
+
+    for (int i = 1; i < argc; i++) {
+        if (!strcmp(argv[i], "--obj-dir") && i + 1 < argc) { cx_fmt(obj_dir, sizeof obj_dir, "%s", argv[++i]); }
+        else if (!strcmp(argv[i], "--manifest") && i + 1 < argc) { cx_fmt(manifest_path, sizeof manifest_path, "%s", argv[++i]); }
+        else if (!strcmp(argv[i], "--write-manifest") && i + 1 < argc) { cx_fmt(write_mpath, sizeof write_mpath, "%s", argv[++i]); }
+        else if (!strcmp(argv[i], "--product") && i + 1 < argc) { cx_fmt(prod_path, sizeof prod_path, "%s", argv[++i]); }
+        else if (!strcmp(argv[i], "--reuse-dir") && i + 1 < argc) { cx_fmt(reuse_dir, sizeof reuse_dir, "%s", argv[++i]); }
+        else if (!strcmp(argv[i], "--profile-tag") && i + 1 < argc) { cx_fmt(profile_tag, sizeof profile_tag, "%s", argv[++i]); }
+        else if (!strcmp(argv[i], "--runs") && i + 1 < argc) { nruns = atoi(argv[++i]); }
+        else if (!strcmp(argv[i], "--tape-runs") && i + 1 < argc) { truns = atoi(argv[++i]); }
+        else if (!strcmp(argv[i], "--tape-budget") && i + 1 < argc) { tape_budget = (unsigned long long)strtoull(argv[++i], 0, 10); }
+        else if (!strcmp(argv[i], "--max-load") && i + 1 < argc) { max_load_x100 = (int)(atof(argv[++i]) * 100.0 + 0.5); }
+        else if (!strcmp(argv[i], "--allow-loaded")) { allow_loaded = 1; }
+        else if (!strcmp(argv[i], "--probe-rate")) { probe_rate = 1; }
+        else if (!strcmp(argv[i], "--require-complete")) { probe_rate = 0; }
+        else {
+            sy_eprintf("usage: check-tape-tldce-speed.cx --manifest FILE --obj-dir DIR [--product PATH] [--runs N] [--tape-runs K] [--tape-budget B] [--max-load L] [--reuse-dir DIR] [--profile-tag TAG] [--require-complete|--probe-rate] [--allow-loaded]\n");
+            sy_eprintf("   or: check-tape-tldce-speed.cx --write-manifest FILE --obj-dir DIR\n");
+            return 2;
+        }
+    }
+    if (reuse_dir[0] && !probe_rate) {
+        sy_eprintf("check-tape-tldce-speed: REFUSE material-reuse-requires-probe-rate\n");
+        return 2;
+    }
+    if (write_mpath[0]) {
+        if (!obj_dir[0]) { sy_eprintf("check-tape-tldce-speed: REFUSE --write-manifest requires --obj-dir DIR\n"); return 2; }
+        return write_manifest_from_dir(obj_dir, write_mpath) == 0 ? 0 : 1;
+    }
+    if (!manifest_path[0]) {
+        sy_eprintf("check-tape-tldce-speed: REFUSE explicit --manifest FILE required (implicit directory scan disabled)\n");
+        return 2;
+    }
+    if (nruns < 1 || nruns > TS_MAX_RUNS) nruns = 5;
+    if (truns < 1 || truns > TS_MAX_RUNS) truns = 3;
+    if (sy_cwd(root, sizeof root) < 0) return 2;
+    if (!prod_path[0] && load_product_path(root, prod_path, sizeof prod_path) != 0) {
+        sy_eprintf("check-tape-tldce-speed: REFUSE cannot resolve product path from tools/devsvc-repo.tsv (pass --product PATH)\n");
+        return 2;
+    }
+
+    char msha[65] = "";
+    int bad_entries = 0;
+    int nobjs = load_and_verify_manifest(manifest_path, obj_dir, objs, msha, &bad_entries);
+    sy_printf("INPUT_MANIFEST\tprofile=%s\tcount=%d\tbad=%d\tmanifest_sha=%s\tmode=%s\n",
+              profile_tag, nobjs > 0 ? nobjs : 0, bad_entries, msha[0] ? msha : "-",
+              probe_rate ? "probe-rate" : "official-gate");
+    tck(nobjs > 0 && bad_entries == 0, "input-manifest-sha256-verified");
+    if (nobjs <= 0 || bad_entries > 0) {
+        sy_printf("CHECK_TAPE_TLDCE_SPEED\tpassed=%d\tfailed=%d\n", g_pass, g_fail);
+        return 1;
+    }
+
+    int load_x100 = read_load1_x100();
+    if (load_x100 < 0) {
+        sy_eprintf("check-tape-tldce-speed: REFUSE load-unavailable\n");
+        return 2;
+    }
+    int loaded = (load_x100 > max_load_x100);
+    const char *load_tag = loaded ? "ADVISORY_LOADED" : "CLEAN";
+    sy_printf("LOAD_GATE\tload1=%d.%02d\tmax_load=%d.%02d\tscope=%s\n",
+              load_x100 / 100, load_x100 % 100,
+              max_load_x100 / 100, max_load_x100 % 100, load_tag);
+    if (loaded && !allow_loaded) {
+        sy_eprintf("check-tape-tldce-speed: REFUSE load-over-gate load1=%d.%02d > %d.%02d (pass --allow-loaded for advisory baseline)\n",
+                   load_x100 / 100, load_x100 % 100, max_load_x100 / 100, max_load_x100 % 100);
+        return 2;
+    }
+
+    if (reuse_dir[0]) {
+        if (sy_mkdir_all(reuse_dir, 0700) != 0) return 2;
+        cx_fmt(tmp, sizeof tmp, "%s", reuse_dir);
+        keep_tmp = 1;
+    } else {
+        if (sy_mkdtemp("/tmp", "tape-tldce-spd", tmp, sizeof tmp) != 0) return 2;
+    }
+    char drv_cx[4200], drv_nat[4200], drv_tape[4200], drv_slice[4200], run_bin[4200], so_path[4200], ref_out[4200];
+    cx_fmt(drv_cx, sizeof drv_cx, "%s/tldce_driver.cx", tmp);
+    cx_fmt(drv_nat, sizeof drv_nat, "%s/tldce_native", tmp);
+    cx_fmt(drv_tape, sizeof drv_tape, "%s/tldce.tape", tmp);
+    cx_fmt(drv_slice, sizeof drv_slice, "%s/tldce.tapeslice", tmp);
+    cx_fmt(run_bin, sizeof run_bin, "%s/tapemode_run", tmp);
+    cx_fmt(so_path, sizeof so_path, "%s/libtape_m1.so", tmp);
+    cx_fmt(ref_out, sizeof ref_out, "%s/native_ref.tape", tmp);
+
+    static char obuf[65536];
+    int rc = 0;
+    long ms_nat_build = 0, ms_tape_emit = 0, ms_pack = 0, ms_chk = 0, ms_run_build = 0, ms_so_build = 0;
+
+    if (keep_tmp && sy_exists(drv_nat) == 1 && sy_exists(drv_slice) == 1 &&
+        sy_exists(run_bin) == 1 && sy_exists(so_path) == 1) {
+        unsigned long long mask = 0; int hcnt = 0; long sbytes = 0;
+        int mok = (inspect_slice_mask(drv_slice, &mask, &hcnt, &sbytes) == 0);
+        sy_printf("DRIVER_SLICE\tbytes=%ld\thost_slots=%d\tmask=%llu\tsubset_m1_383=%d\n",
+                  sbytes, hcnt, mask, (mask & ~383ull) == 0 ? 1 : 0);
+        tck(mok && (mask & ~383ull) == 0, "driver-host-mask-within-frozen-383");
+        sy_printf("BUILD_TIMING\treused=1\tnative_build_ms=0\ttape_emit_ms=0\tpack_ms=0\tcheck_ms=0\trun_build_ms=0\tso_build_ms=0\n");
+    } else {
+        char link_tsv[4200], tgt_tsv[4200], link_cx[4200], tgt_cx[4200];
+        cx_fmt(link_tsv, sizeof link_tsv, "%s/cxroot.tsv", tmp);
+        cx_fmt(tgt_tsv, sizeof tgt_tsv, "%s/cxroot.tsv", root);
+        cx_fmt(link_cx, sizeof link_cx, "%s/cx", tmp);
+        cx_fmt(tgt_cx, sizeof tgt_cx, "%s/cx", root);
+        (void)sy_unlink(link_tsv); (void)sy_symlink(tgt_tsv, link_tsv);
+        (void)sy_unlink(link_cx);  (void)sy_symlink(tgt_cx, link_cx);
+        tck(sy_write_atomic(drv_cx, TLDCE_DRIVER_SRC, (long)strlen(TLDCE_DRIVER_SRC), 0644) == 0, "driver-source-written");
+
+        char *av1[] = {"sh", prod_path, drv_cx, "-o", drv_nat, 0};
+        (void)run_cmd(av1, root, 45, &rc, &ms_nat_build, obuf, sizeof obuf);
+        tck(rc == 0 && sy_exists(drv_nat) == 1, "build-native-driver");
+
+        char *av2[] = {"sh", prod_path, "--target", "lnx/x86_64", "-S", drv_cx, "-o", drv_tape, 0};
+        (void)run_cmd(av2, root, 45, &rc, &ms_tape_emit, obuf, sizeof obuf);
+        tck(rc == 0 && sy_exists(drv_tape) == 1, "emit-driver-tape");
+
+        char *av3[] = {"sh", prod_path, "tools/tapepack.cx", "--", drv_tape, "-o", drv_slice, 0};
+        (void)run_cmd(av3, root, 45, &rc, &ms_pack, obuf, sizeof obuf);
+        tck(rc == 0 && sy_exists(drv_slice) == 1 && strstr(obuf, "TAPEPACK_OK\tdce=1\t") != 0, "pack-driver-tapeslice");
+
+        char *av4[] = {"sh", prod_path, "tools/tapepack.cx", "--", "--check", drv_tape, drv_slice, 0};
+        (void)run_cmd(av4, root, 45, &rc, &ms_chk, obuf, sizeof obuf);
+        tck(rc == 0 && strstr(obuf, "TAPEPACK_CHECK\tPASS\tdce=1\t") != 0, "check-driver-tapeslice-roundtrip");
+
+        unsigned long long mask = 0; int hcnt = 0; long sbytes = 0;
+        int mok = (inspect_slice_mask(drv_slice, &mask, &hcnt, &sbytes) == 0);
+        sy_printf("DRIVER_SLICE\tbytes=%ld\thost_slots=%d\tmask=%llu\tsubset_m1_383=%d\n",
+                  sbytes, hcnt, mask, (mask & ~383ull) == 0 ? 1 : 0);
+        tck(mok && (mask & ~383ull) == 0, "driver-host-mask-within-frozen-383");
+
+        char *av5[] = {"sh", prod_path, "tools/tapemode-run.cx", "-o", run_bin, 0};
+        (void)run_cmd(av5, root, 45, &rc, &ms_run_build, obuf, sizeof obuf);
+        tck(rc == 0 && sy_exists(run_bin) == 1, "build-native-tapemode-run");
+
+        const char *cc_bin = (sy_exists("/usr/bin/cc") == 1) ? "/usr/bin/cc" : "cc";
+        char *av6[] = {(char *)cc_bin, "-shared", "-fPIC", "-O2", "-o", so_path,
+                       "tools/tape/asm/tape_x86_64.S", "tools/tape/asm/hoststub_lnx_x86_64.S", 0};
+        (void)run_cmd(av6, root, 30, &rc, &ms_so_build, obuf, sizeof obuf);
+        tck(rc == 0 && sy_exists(so_path) == 1, "build-libtape-m1-so");
+
+        sy_printf("BUILD_TIMING\treused=0\tnative_build_ms=%ld\ttape_emit_ms=%ld\tpack_ms=%ld\tcheck_ms=%ld\trun_build_ms=%ld\tso_build_ms=%ld\n",
+                  ms_nat_build, ms_tape_emit, ms_pack, ms_chk, ms_run_build, ms_so_build);
+    }
+
+    if (g_fail > 0) {
+        if (!keep_tmp) { char *rmv[] = {"rm", "-rf", tmp, 0}; (void)run_cmd(rmv, root, 10, &rc, 0, 0, 0); }
+        sy_printf("CHECK_TAPE_TLDCE_SPEED\tpassed=%d\tfailed=%d\n", g_pass, g_fail);
+        return 1;
+    }
+
+    /* (2) Native pre-warm (N runs) + 1 warmup + post-warm (N runs); OS page cache is NOT dropped. */
+    char *nav[TS_MAX_OBJS + 4];
+    long pre_ms[TS_MAX_RUNS], post_ms[TS_MAX_RUNS];
+    char ref_sha[65] = "";
+    long ref_bytes = 0;
+    unsigned long long ref_dce_cut = 0;
+    int all_nat_ok = 1, all_cut_ok = 1, have_ref_file = 0;
+
+    for (int phase = 0; phase < 3; phase++) {
+        int count = (phase == 1) ? 1 : nruns;
+        for (int r = 0; r < count; r++) {
+            char outp[4200];
+            cx_fmt(outp, sizeof outp, "%s/nat-p%d-r%d.tape", tmp, phase, r);
+            (void)sy_write_file(outp, "", 0, 0644);
+            int k = 0;
+            nav[k++] = drv_nat;
+            nav[k++] = outp;
+            for (int j = 0; j < nobjs; j++) nav[k++] = objs[j];
+            nav[k] = 0;
+            long dt = 0;
+            (void)run_cmd(nav, root, 45, &rc, &dt, obuf, sizeof obuf);
+            char sha[65] = "";
+            long blen = 0;
+            int sh_ok = (rc == 0 && file_sha_and_len(outp, sha, &blen) == 0);
+            int f_u = 0, f_b = 0, f_cut = 0;
+            unsigned long long d_u = parse_kv_ull(obuf, "TLDCE_DRIVER\tunits=", &f_u);
+            unsigned long long d_b = parse_kv_ull(obuf, "\tbytes=", &f_b);
+            unsigned long long dce_cut = parse_kv_ull(obuf, "\tdce_cut=", &f_cut);
+            if (!sh_ok || !f_u || !f_b || !f_cut || (int)d_u != nobjs || (long)d_b != blen) all_nat_ok = 0;
+            if (!f_cut || dce_cut == 0) all_cut_ok = 0;
+            if (sh_ok && !ref_sha[0]) {
+                mm_copy(ref_sha, sizeof ref_sha, sha, 65);
+                ref_bytes = blen;
+                ref_dce_cut = dce_cut;
+                if (sy_rename(outp, ref_out) == 0) have_ref_file = 1;
+            } else {
+                if (sh_ok && (blen != ref_bytes || strcmp(sha, ref_sha) != 0 || dce_cut != ref_dce_cut)) all_nat_ok = 0;
+                (void)sy_unlink(outp);
+            }
+            if (phase == 0) {
+                pre_ms[r] = dt;
+                sy_printf("NATIVE_PREWARM_RUN\ti=%d\trc=%d\twall_ms=%ld\tbytes=%ld\tdce_cut=%llu\tsha256=%s\n",
+                          r + 1, rc, dt, blen, dce_cut, sha[0] ? sha : "-");
+            } else if (phase == 2) {
+                post_ms[r] = dt;
+                sy_printf("NATIVE_POSTWARM_RUN\ti=%d\trc=%d\twall_ms=%ld\tbytes=%ld\tdce_cut=%llu\tsha256=%s\n",
+                          r + 1, rc, dt, blen, dce_cut, sha[0] ? sha : "-");
+            }
+        }
+    }
+    tck(all_nat_ok && all_cut_ok && have_ref_file && ref_bytes > 0 && ref_sha[0] != 0, "native-prewarm-and-postwarm-parity");
+
+    sort_longs(pre_ms, nruns);
+    sort_longs(post_ms, nruns);
+    long pre_med = pre_ms[nruns / 2], pre_p25 = pre_ms[nruns / 4], pre_p75 = pre_ms[(3 * nruns) / 4];
+    long post_med = post_ms[nruns / 2], post_p25 = post_ms[nruns / 4], post_p75 = post_ms[(3 * nruns) / 4];
+    unsigned long long gate_15x_post = speed_gate_15x(post_med);
+    unsigned long long gate_15x_pre = speed_gate_15x(pre_med);
+
+    sy_printf("PREWARM_SUMMARY\tn=%d\tmin_ms=%ld\tp25_ms=%ld\tprewarm_median_ms=%ld\tp75_ms=%ld\tmax_ms=%ld\tiqr_ms=%ld\tbytes=%ld\tdce_cut=%llu\tsha256=%s\tpage_cache=NOT_DROPPED\n",
+              nruns, pre_ms[0], pre_p25, pre_med, pre_p75, pre_ms[nruns - 1], pre_p75 - pre_p25, ref_bytes, ref_dce_cut, ref_sha);
+    sy_printf("POSTWARM_SUMMARY\tn=%d\tmin_ms=%ld\tp25_ms=%ld\tpostwarm_median_ms=%ld\tp75_ms=%ld\tmax_ms=%ld\tiqr_ms=%ld\tbytes=%ld\tdce_cut=%llu\tsha256=%s\tpage_cache=NOT_DROPPED\n",
+              nruns, post_ms[0], post_p25, post_med, post_p75, post_ms[nruns - 1], post_p75 - post_p25, ref_bytes, ref_dce_cut, ref_sha);
+    sy_printf("T14C_GATE_15X\tpostwarm_median_ms=%ld\tgate_15x_postwarm_ms=%llu\tprewarm_median_ms=%ld\tgate_15x_prewarm_ms=%llu\trule=tape_median_ms<=postwarm_median_ms*15\n",
+              post_med, gate_15x_post, pre_med, gate_15x_pre);
+
+    /* (3) Tape execution: official completion + byte-cmp + exact 15x gate, or --probe-rate baseline */
+    char *tav[TS_MAX_OBJS + 12];
+    char bud_s[32];
+    cx_fmt(bud_s, sizeof bud_s, "%llu", tape_budget);
+    long tape_ms[TS_MAX_RUNS];
+    long tape_rate[TS_MAX_RUNS];
+    int all_completed = 1, parity_ok = 1, fields_ok = 1, any_fault = 0;
+    unsigned long long last_steps = 0, last_status = 99, last_fpc = 0, last_freason = 0;
+
+    for (int r = 0; r < truns; r++) {
+        char outp[4200];
+        cx_fmt(outp, sizeof outp, "%s/tape-r%d.tape", tmp, r);
+        (void)sy_write_file(outp, "", 0, 0644);
+        int k = 0;
+        tav[k++] = run_bin;
+        tav[k++] = "--so"; tav[k++] = so_path;
+        tav[k++] = "--budget"; tav[k++] = bud_s;
+        tav[k++] = drv_slice;
+        tav[k++] = outp;
+        for (int j = 0; j < nobjs; j++) tav[k++] = objs[j];
+        tav[k] = 0;
+        long dt = 0;
+        (void)run_cmd(tav, root, 55, &rc, &dt, obuf, sizeof obuf);
+        int fs = 0, fe = 0, fst = 0, fpc = 0, ffr = 0;
+        unsigned long long st = parse_kv_ull(obuf, "status=", &fs);
+        unsigned long long ec = parse_kv_ull(obuf, "exit_code=", &fe);
+        unsigned long long steps = parse_kv_ull(obuf, "steps=", &fst);
+        unsigned long long pc = parse_kv_ull(obuf, "fault_pc=", &fpc);
+        unsigned long long fr = parse_kv_ull(obuf, "fault_reason=", &ffr);
+        long sps = dt > 0 ? (long)((steps * 1000ull) / (unsigned long long)dt) : 0;
+        tape_ms[r] = dt;
+        tape_rate[r] = sps;
+        last_steps = steps; last_status = st; last_fpc = pc; last_freason = fr;
+        int completed_i = (rc == 0 && fs && fe && st == 0 && ec == 0);
+        if (!completed_i) all_completed = 0;
+        if (!fs || (st == 0 && (ec != 0 || rc != 0)) || (st != 0 && !(st == 3 && fr == 0))) any_fault = 1;
+        char tsha[65] = "-";
+        long tlen = 0;
+        int cmp_eq = 0;
+        unsigned long long tdce = 0;
+        if (completed_i) {
+            int fu = 0, fb = 0, fc = 0;
+            unsigned long long tu = parse_kv_ull(obuf, "TLDCE_DRIVER\tunits=", &fu);
+            unsigned long long tb = parse_kv_ull(obuf, "\tbytes=", &fb);
+            tdce = parse_kv_ull(obuf, "\tdce_cut=", &fc);
+            if (!fu || !fb || !fc || (int)tu != nobjs || tdce != ref_dce_cut) fields_ok = 0;
+            if (file_sha_and_len(outp, tsha, &tlen) != 0 || (long)tb != tlen ||
+                tlen != ref_bytes || strcmp(tsha, ref_sha) != 0 || !files_byte_equal(ref_out, outp)) {
+                parity_ok = 0;
+            } else {
+                cmp_eq = 1;
+            }
+        }
+        (void)sy_unlink(outp);
+        sy_printf("TAPE_RUN\ti=%d\trc=%d\tstatus=%llu\texit_code=%llu\tsteps=%llu\twall_ms=%ld\tsteps_per_sec=%ld\tfault_pc=%llu\tfault_reason=%llu\tbytes=%ld\tdce_cut=%llu\tcmp=%s\tsha256=%s\n",
+                  r + 1, rc, st, ec, steps, dt, sps, pc, fr, tlen, tdce, completed_i ? (cmp_eq ? "MATCH" : "MISMATCH") : "UNRUN", tsha);
+    }
+    (void)sy_unlink(ref_out);
+
+    sort_longs(tape_ms, truns);
+    sort_longs(tape_rate, truns);
+    long tmed_ms = tape_ms[truns / 2];
+    long tmed_sps = tape_rate[truns / 2];
+    unsigned long long est_steps_15x = ((unsigned long long)tmed_sps * gate_15x_post) / 1000ull;
+
+    if (all_completed) {
+        /* Exact multiplication inequality: NO integer division truncation (prevents 15.9x passing as 15). */
+        int within_15x = speed_within_15x(tmed_ms, gate_15x_post);
+        long ratio_x100 = post_med > 0 ? (long)(((unsigned long long)tmed_ms * 100ull) / (unsigned long long)post_med) : 99999;
+        int valid = !any_fault && parity_ok && fields_ok;
+        const char *status = speed_complete_status(probe_rate, valid, within_15x, loaded);
+        sy_printf("T14C_VERDICT\tstatus=%s\tparity=%s\tfields=%s\ttape_median_ms=%ld\tpostwarm_median_ms=%ld\tgate_15x_ms=%llu\twithin_15x=%d\tratio=%ld.%02ld\tsteps=%llu\tsteps_per_sec_median=%ld\tload_gate=%s\n",
+                  status,
+                  parity_ok ? "MATCH" : "MISMATCH", fields_ok ? "OK" : "MISSING",
+                  tmed_ms, post_med, gate_15x_post, within_15x,
+                  ratio_x100 / 100, ratio_x100 % 100, last_steps, tmed_sps, load_tag);
+        if (probe_rate) tck(valid, "tape-probe-complete-and-parity");
+        else tck(valid && within_15x && !loaded, "t14c-official-complete-and-15x-gate");
+    } else if (probe_rate) {
+        const char *vstat = any_fault ? "PROBE_FAULT_OR_NONZERO" : "PROBE_INCOMPLETE_BUDGET";
+        sy_printf("T14C_VERDICT\tstatus=%s\tlast_status=%llu\tbudget=%llu\ttape_median_ms=%ld\tsteps_per_sec_median=%ld\tgate_15x_postwarm_ms=%llu\test_max_steps_at_15x=%llu\tfault_pc=%llu\tfault_reason=%llu\tload_gate=%s\n",
+                  vstat, last_status, tape_budget, tmed_ms, tmed_sps, gate_15x_post, est_steps_15x, last_fpc, last_freason, load_tag);
+        tck(!any_fault && last_steps > 0, "tape-probe-rate-no-fault");
+    } else {
+        const char *vstat = any_fault ? "FAIL_FAULT_OR_NONZERO" : "FAIL_INCOMPLETE_BUDGET";
+        sy_printf("T14C_VERDICT\tstatus=%s\tlast_status=%llu\tbudget=%llu\ttape_median_ms=%ld\tsteps_per_sec_median=%ld\tgate_15x_postwarm_ms=%llu\test_max_steps_at_15x=%llu\tfault_pc=%llu\tfault_reason=%llu\tload_gate=%s\n",
+                  vstat, last_status, tape_budget, tmed_ms, tmed_sps, gate_15x_post, est_steps_15x, last_fpc, last_freason, load_tag);
+        tck(0, "t14c-official-complete-and-15x-gate");
+    }
+
+    if (!keep_tmp) {
+        char *rmv[] = {"rm", "-rf", tmp, 0};
+        (void)run_cmd(rmv, root, 10, &rc, 0, 0, 0);
+    }
+    sy_printf("CHECK_TAPE_TLDCE_SPEED\tpassed=%d\tfailed=%d\n", g_pass, g_fail);
+    return g_fail ? 1 : 0;
+}
