@@ -2,7 +2,7 @@
 
 目标版本: `0.0.106` (tag `v0.0.106`, 仓 `partnernetsoftware/unisacc`)
 冻结链提交 (`targetCommitish`): `2e8a19a342251910d53010f51002b14a4ca7f916` (短写 `2e8a19a342`)
-候选真源: `../../release/candidate.tsv` 与 `.claude/worktrees/v0.0.106/release/evidence/0.0.106/`
+候选真源: `2e8a19a342:release/candidate.tsv` 与 `.claude/worktrees/v0.0.106/release/evidence/0.0.106/`
 说明: 公开 (`exec-5-publish`) 后立即可逐条运行的本地只读命令, 单条均可在 60 秒内完成; 不改仓库工作区, 不写 `out/`。
 
 ---
@@ -89,7 +89,7 @@ git fetch origin tag v0.0.106 --no-tags && git rev-parse 'refs/tags/v0.0.106^{co
 
 ## 2. 六件资产下载与 SHA-256 核验 (`/tmp/v106-verify`)
 
-说明: `../../release/candidate.tsv` 第 17-18 列 `zip` / `zip_sha256` 为 `-` (`tools/cxlib/releasecandidate.cx:48` `rcand_skip(&c, 5)` 跳过 `zip`), 实际随 Release 上传与校验的资产共 6 件 (`SHA256SUMS` 文件本身列举前 5 件并自成第 6 件资产)。
+说明: `2e8a19a342:release/candidate.tsv` 第 17-18 列 `zip` / `zip_sha256` 为 `-` (`tools/cxlib/releasecandidate.cx:48` `rcand_skip(&c, 5)` 跳过 `zip`), 实际随 Release 上传与校验的资产共 6 件 (`SHA256SUMS` 文件本身列举前 5 件并自成第 6 件资产)。
 
 ### (1) 命令原行 (≤60 秒局部只读核验)
 
@@ -110,7 +110,7 @@ unisacc.com.build.json: OK
 build.json: OK
 ```
 
-### (3) 六件资产全量 SHA-256 期望原行 (对照 `../../release/candidate.tsv:2`)
+### (3) 六件资产全量 SHA-256 期望原行 (对照 `.claude/worktrees/v0.0.106/release/candidate.tsv:2`)
 
 ```text
 5f83ac93d201b252ea0b56098475be9e30045875cdf1ce692451cda095ceeb3c  unisacc.com
@@ -137,27 +137,27 @@ b49d838cf576379cfa5527f5ae7fdaba3a4294a4da21cd20b5a7cc2f5b9a870b  pkg.bin
 # c47-1-readback (public) YYYY-MM-DD HH:MM:SS +0800 via release-exec; rc=0
 ```
 
-2. 第 1 步 `metadata` (`c47-1-readback.cx:148-149`, `../../release/evidence/0.0.105/public-readback.txt:2-3`):
+2. 第 1 步 `metadata` (`c47-1-readback.cx:148-149`, `0.0.105/public-readback.txt:2-3`):
 
 ```text
 {"isDraft":false,"isPrerelease":false,"tagName":"v0.0.106","targetCommitish":"2e8a19a342251910d53010f51002b14a4ca7f916"}
 READBACK_STEP metadata PASS
 ```
 
-3. 第 2 步 `tag` (`c47-1-readback.cx:152`, `../../release/evidence/0.0.105/public-readback.txt:4-5`):
+3. 第 2 步 `tag` (`c47-1-readback.cx:152`, `0.0.105/public-readback.txt:4-5`):
 
 ```text
 2e8a19a342251910d53010f51002b14a4ca7f916
 READBACK_STEP tag PASS
 ```
 
-4. 第 3 步 `download` (`c47-1-readback.cx:155-156`, `../../release/evidence/0.0.105/public-readback.txt:6`):
+4. 第 3 步 `download` (`c47-1-readback.cx:155-156`, `0.0.105/public-readback.txt:6`):
 
 ```text
 READBACK_STEP download PASS
 ```
 
-5. 第 4 步 `asset-sha` (`c47-1-readback.cx:159`, `../../release/evidence/0.0.105/public-readback.txt:7-15`):
+5. 第 4 步 `asset-sha` (`c47-1-readback.cx:159`, `0.0.105/public-readback.txt:7-15`):
 
 ```text
 5f83ac93d201b252ea0b56098475be9e30045875cdf1ce692451cda095ceeb3c  unisacc.com
@@ -171,21 +171,21 @@ READBACK_SHA slice-win-arm64 1ca2eaa10bafc2c4f76b736796fa4b7cf20b2d5709ae5484141
 READBACK_SHA unisacc.com.build.json 1dc2fed3b15cc02349f30ec18dad1982533f7a358c1bf6f1578b036d829601c3
 ```
 
-6. 第 5 步 `version` (`c47-1-readback.cx:163`, `../../release/evidence/0.0.105/public-readback.txt:16-17`):
+6. 第 5 步 `version` (`c47-1-readback.cx:163`, `0.0.105/public-readback.txt:16-17`):
 
 ```text
 unisacc 0.0.106
 READBACK_STEP version PASS
 ```
 
-7. 第 6-10 步 (`smoke`, `comm`, `layout-generate`, `layout-check`, `checksums`, `../../release/evidence/0.0.105/public-readback.txt:18-49`):
+7. 第 6-10 步 (`smoke`, `comm`, `layout-generate`, `layout-check`, `checksums`, `0.0.105/public-readback.txt:18-49`):
 
 - `smoke`: 5 条 `PASS	release-ape.smoke.{candidate-version,run-c-exit-7,S-prints-tape,cx-host-c-library,cx-tool-srcshape}` + `RELEASE_APE	SMOKE	ok=5	failed=0` + `READBACK_STEP smoke PASS`
 - `comm`: `CHECK_RUN_COMM	PASS old-negative-control=63 new-comm=rcprobe.c memfd,args,fd9,stdout,rc=CHECKED` + `READBACK_STEP comm PASS`
 - `layout-generate` & `layout-check`: 各有 `RELEASE_LAYOUT	status=PASS` + `READBACK_STEP layout-generate PASS` / `READBACK_STEP layout-check PASS`
 - `checksums`: 5 行 `<name>: OK` + `READBACK_STEP checksums PASS`
 
-8. 第 11 步 `zip-members` 与总判行 (`c47-1-readback.cx:182,184`, `../../release/evidence/0.0.105/public-readback.txt:50-51`):
+8. 第 11 步 `zip-members` 与总判行 (`c47-1-readback.cx:182,184`, `0.0.105/public-readback.txt:50-51`):
 
 ```text
 READBACK_STEP zip-members NOT_APPLICABLE version=0.0.106 no-zip-contract
@@ -194,7 +194,7 @@ C47_1_READBACK PASS expected_draft=false tag=v0.0.106 version=0.0.106 commit=2e8
 
 (注: `output=` 前缀经 `tools/release-exec.cx:1508` `scrub_home_put` 脱敏为 `~/`。)
 
-9. 尾行 (`tools/release-exec.cx:1509`, `../../release/evidence/0.0.105/public-readback.txt:52`):
+9. 尾行 (`tools/release-exec.cx:1509`, `0.0.105/public-readback.txt:52`):
 
 ```text
 READBACK_SHA unisacc.com 5f83ac93d201b252ea0b56098475be9e30045875cdf1ce692451cda095ceeb3c
@@ -232,7 +232,7 @@ exec-7-Y2	<YYYY-MM-DD HH:MM:SS +0800>	-	pending	evidence INDEX and decision reco
 exec-7-Y2-done	<YYYY-MM-DD HH:MM:SS +0800>	-	<Y2_COMMIT_40HEX>	Y2 committed; this row rides with the next commit
 ```
 
-4. `post-publish` (由 `release-post` 步骤 2 -> `release-chain.cx mark-version-seq` 在密封 `INDEX.tsv` 时写入, 对照 `../../release/evidence/0.0.105/INDEX.tsv:13`):
+4. `post-publish` (由 `release-post` 步骤 2 -> `release-chain.cx mark-version-seq` 在密封 `INDEX.tsv` 时写入, 对照 `0.0.105/INDEX.tsv:13`):
 
 ```tsv
 post-publish	<YYYY-MM-DD HH:MM:SS +0800>	PASS	build/version-seq.tsv	version=0.0.106 marked 已公开 (Y2=<Y2_COMMIT_40HEX>)
