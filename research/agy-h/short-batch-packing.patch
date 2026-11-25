@@ -1,0 +1,297 @@
+diff --git a/tools/prerun-drive.cx b/tools/prerun-drive.cx
+index e9d4fc240..dcc96112e 100644
+--- a/tools/prerun-drive.cx
++++ b/tools/prerun-drive.cx
+@@ -41,6 +41,7 @@
+ #define PD_BATCH_WINDOW_MS (PD_CHILD_SECONDS * 1000 - PD_SINGLE_RESERVE_MS)
+ #define PD_TIMED_BUDGET_MS 22000
+ #define PD_DEFAULT_UNMEASURED_MS 15000
++#define PD_TIMES_WINDOW 5
+ #define PD_TIMED_HEADER "# prerun-drive windows\n# timing=wave-v1 jobs="
+ 
+ typedef struct {
+@@ -50,6 +51,8 @@ typedef struct {
+     int nonpass;
+     int measured;
+     long time_ms;
++    long recent_ms[PD_TIMES_WINDOW];
++    int recent_cnt;
+ } PdBatch;
+ 
+ typedef struct {
+@@ -141,6 +144,44 @@ static int pd_is_isolated_long_id(const char *id) {
+     return 0;
+ }
+ 
++/* Batches with shared-state conflicts across the 7 isolation domains (d1..d7) or timing-sensitive
++ * cache/concurrency fixtures must stay in 1-batch exclusive long windows even if time_ms <= 22000ms. */
++static int pd_is_exclusive_heavy_id(const char *id) {
++    static const char *exact[] = {
++        "unit-frontcache-race", "unit-frontcache-neg", "runcache-pin", "runcache-roots",
++        "chain-ready-freeze", "cx-booter-ape", "notcovered", "module-units",
++        "ratchets-tool-full", "release-flow", "check-release-state", "check-run-split",
++        "check-unitlink", "check-unitlink-more", "affected-gitnode", "install-ape-split2",
++        "processcore-compile", "productpkg-dir-identity", "speed-ledger", "runner-identity",
++        "evidence-identity", "lane-key-probes", "check-netregen-expected-fail",
++        "check-tls13-get", 0
++    };
++    static const char *prefixes[] = {
++        "devsvc-git-c-", "devsvc-core-", "precommit-flow-", "precommit-list-cap",
++        "check-gen-all-", "prepush-", "release-exec-", "premerge-selfcheck-",
++        "check-register-layout-", "layer-api-", 0
++    };
++    if (!id || !id[0]) return 1;
++    if (pd_is_isolated_long_id(id)) return 1;
++    for (int i = 0; prefixes[i]; i++) if (pd_starts(id, prefixes[i])) return 1;
++    for (int i = 0; exact[i]; i++) if (tx_eqz(id, exact[i])) return 1;
++    for (int i = 0; i < pd_nheavy_extra; i++) if (tx_eqz(id, pd_heavy_extra[i])) return 1;
++    return 0;
++}
++
++/* Unified exclusive-window predicate: keeps exclusive/shared-state batches, >22s batches, and
++ * unmeasured batches (unless --unmeasured-ms or compile-smoke allows packing) in 1-batch long windows;
++ * all other <=22s non-conflicting short batches pack into normal parallel windows (jobs=8). */
++static int pd_needs_exclusive_long_window(int idx) {
++    const PdBatch *b = &pd_ids[idx];
++    int can_pack_unmeasured = (pd_unmeasured_ms > 0 || pd_is_compile_smoke_id(b->id));
++    if (pd_is_exclusive_heavy_id(b->id)) return 1;
++    if (!pd_has_times) return 0;
++    if (b->time_ms > PD_TIMED_BUDGET_MS) return 1;
++    if (!b->measured && !can_pack_unmeasured) return 1;
++    return 0;
++}
++
+ static int pd_is_heavy_id(const char *id) {
+     static const char *builtin[] = {
+         "real-commit", "unit-frontcache-equiv3", "check-split-parents",
+@@ -222,6 +263,7 @@ static int pd_load_ids(const char *path) {
+         pd_ids[pd_nids].priority = 0;
+         pd_ids[pd_nids].nonpass = 0;
+         pd_ids[pd_nids].measured = 0;
++        pd_ids[pd_nids].recent_cnt = 0;
+         pd_ids[pd_nids].time_ms = pd_is_compile_smoke_id(id) ? PD_DEFAULT_UNMEASURED_MS : 5000;
+         pd_nids++;
+     }
+@@ -421,8 +463,20 @@ static int pd_load_times_file(const char *path) {
+                 if (v < 500) v = 500;
+                 if (pd_ids[idx].heavy && !pd_mut_times_use_nonpass && v > PD_BATCH_WINDOW_MS && v <= 55000)
+                     v = PD_BATCH_WINDOW_MS;
+-                if (!pd_ids[idx].measured || v > pd_ids[idx].time_ms)
+-                    pd_ids[idx].time_ms = v;
++                if (pd_ids[idx].recent_cnt < PD_TIMES_WINDOW) {
++                    pd_ids[idx].recent_ms[pd_ids[idx].recent_cnt++] = v;
++                } else {
++                    for (int ri = 1; ri < PD_TIMES_WINDOW; ri++)
++                        pd_ids[idx].recent_ms[ri - 1] = pd_ids[idx].recent_ms[ri];
++                    pd_ids[idx].recent_ms[PD_TIMES_WINDOW - 1] = v;
++                    pd_ids[idx].recent_cnt++;
++                }
++                int nwin_samples = pd_ids[idx].recent_cnt < PD_TIMES_WINDOW ? pd_ids[idx].recent_cnt : PD_TIMES_WINDOW;
++                long max_recent = 0;
++                for (int ri = 0; ri < nwin_samples; ri++) {
++                    if (pd_ids[idx].recent_ms[ri] > max_recent) max_recent = pd_ids[idx].recent_ms[ri];
++                }
++                pd_ids[idx].time_ms = max_recent;
+                 pd_ids[idx].measured = 1;
+                 measured++;
+             }
+@@ -525,7 +579,7 @@ static void pd_pack_normal_group(int *rem, int nrem, int win_size, int *w_normal
+         int norm_rem[PD_MAX_IDS];
+         int nnorm = 0;
+         for (int i = 0; i < nrem; i++) {
+-            if (pd_is_isolated_long_id(pd_ids[rem[i]].id) && pd_nwins < pd_max_wins) {
++            if (pd_needs_exclusive_long_window(rem[i]) && pd_nwins < pd_max_wins) {
+                 PdWin *w = &pd_wins[pd_nwins++];
+                 cx_fmt(w->wid, sizeof w->wid, "W%04d", pd_nwins - 1);
+                 w->jobs = 1;
+@@ -555,20 +609,18 @@ static void pd_pack_normal_group(int *rem, int nrem, int win_size, int *w_normal
+         }
+         return;
+     }
+-    /* Sort descending by historical time_ms, breaking ties by original position.
+-     * Isolated-long batches sort ahead of normal batches so all long windows group
+-     * together into contiguous window_lanes=4 waves without fragmenting normal packing. */
++    /* Sort descending by recent time_ms, breaking ties by original position.
++     * Exclusive/long-bound batches sort ahead of normal-packable batches so all long windows group
++     * together into contiguous window_lanes waves without fragmenting normal packing. */
+     for (int i = 1; i < nrem; i++) {
+         int v = rem[i];
+         long t = pd_ids[v].time_ms;
+-        int iso_v = pd_is_isolated_long_id(pd_ids[v].id) || t > PD_TIMED_BUDGET_MS ||
+-                    (!pd_ids[v].measured && !(pd_unmeasured_ms > 0 || pd_is_compile_smoke_id(pd_ids[v].id)));
++        int iso_v = pd_needs_exclusive_long_window(v);
+         int j = i - 1;
+         while (j >= 0) {
+             int u = rem[j];
+             long tu = pd_ids[u].time_ms;
+-            int iso_u = pd_is_isolated_long_id(pd_ids[u].id) || tu > PD_TIMED_BUDGET_MS ||
+-                        (!pd_ids[u].measured && !(pd_unmeasured_ms > 0 || pd_is_compile_smoke_id(pd_ids[u].id)));
++            int iso_u = pd_needs_exclusive_long_window(u);
+             if (iso_u < iso_v || (iso_u == iso_v && tu < t)) {
+                 rem[j + 1] = rem[j];
+                 j--;
+@@ -583,10 +635,8 @@ static void pd_pack_normal_group(int *rem, int nrem, int win_size, int *w_normal
+         w->jobs = pd_normal_jobs;
+         cx_fmt(w->phase, sizeof w->phase, "normal");
+         w->count = 0;
+-        int can_pack_unmeasured = (pd_unmeasured_ms > 0 || pd_is_compile_smoke_id(pd_ids[rem[pos]].id));
+-        if (pd_is_isolated_long_id(pd_ids[rem[pos]].id) || pd_ids[rem[pos]].time_ms > PD_TIMED_BUDGET_MS ||
+-            (!pd_ids[rem[pos]].measured && !can_pack_unmeasured)) {
+-            /* An isolated or missing sample cannot establish parallel wall time unless conservative --unmeasured-ms is set. */
++        if (pd_needs_exclusive_long_window(rem[pos])) {
++            /* Exclusive heavy/shared-state batches, >22s batches, or missing samples without --unmeasured-ms stay in 1-batch long windows. */
+             cx_fmt(w->phase, sizeof w->phase, "long");
+             w->idxs[w->count++] = rem[pos++];
+             w->jobs = 1;
+@@ -596,12 +646,11 @@ static void pd_pack_normal_group(int *rem, int nrem, int win_size, int *w_normal
+         long cost = 0;
+         /* dvqualify preserves --ids order and barriers every --segment-batches jobs. */
+         while (pos < nrem && w->count < win_size &&
+-               !pd_is_isolated_long_id(pd_ids[rem[pos]].id) &&
++               !pd_needs_exclusive_long_window(rem[pos]) &&
+                cost + pd_ids[rem[pos]].time_ms <= PD_TIMED_BUDGET_MS) {
+             cost += pd_ids[rem[pos]].time_ms;
+             for (int lane = 0; lane < w->jobs && pos < nrem && w->count < win_size &&
+-                 !pd_is_isolated_long_id(pd_ids[rem[pos]].id) &&
+-                 (pd_ids[rem[pos]].measured || pd_unmeasured_ms > 0 || pd_is_compile_smoke_id(pd_ids[rem[pos]].id)); lane++)
++                 !pd_needs_exclusive_long_window(rem[pos]); lane++)
+                 w->idxs[w->count++] = rem[pos++];
+         }
+         if (!w->count) return;
+diff --git a/tools/check-prerun-drive.cx b/tools/check-prerun-drive.cx
+index bfe6ad199..a5932153c 100644
+--- a/tools/check-prerun-drive.cx
++++ b/tools/check-prerun-drive.cx
+@@ -2020,6 +2020,132 @@ int main(int argc, char **argv) {
+            "slow-split-and-unit-frontcache-equiv-isolated-parallel-lanes: isolates slow-split and unit-frontcache-equiv0..4 into 1-batch long windows running on 4 parallel window lanes");
+     }
+ 
++    /* (18) short-batch-out-of-long: non-conflicting short batches with <=22s recent timing pack into normal jobs=8,
++     *      exclusive/shared-state batches stay in 1-batch long windows even when <=22s, and planned id set equals input ids. */
++    {
++        char f18[CPD_PW], ids18[CPD_PW], tf18[CPD_PW], o18[CPD_PW];
++        const char *pd_src = getenv("CHECK_PRERUN_DRIVE_SRC");
++        char pd_path[CPD_PW];
++        if (pd_src && pd_src[0]) cx_fmt(pd_path, sizeof pd_path, "%s", pd_src);
++        else cx_fmt(pd_path, sizeof pd_path, "%s/tools/prerun-drive.cx", cwd);
++        if (cx_fmt(f18, sizeof f18, "%s/f18", work) || sy_mkdir_all(f18, 0700) ||
++            cx_fmt(ids18, sizeof ids18, "%s/ids.txt", f18) ||
++            cx_fmt(tf18, sizeof tf18, "%s/times.tsv", f18) ||
++            cx_fmt(o18, sizeof o18, "%s/out", f18)) return 2;
++        const char *s_ids18 =
++            "w-light\n"
++            "daily-compile-smoke-01\n"
++            "daily-compile-smoke-02\n"
++            "tools-compile-002\n"
++            "tools-compile-004\n"
++            "optimization-corpus-9-o0-o1\n"
++            "properties-cases-tu\n"
++            "ucn-identities\n"
++            "releaseseq\n"
++            "devsvc-git-c-operations\n"
++            "check-register-layout-gate\n"
++            "check-gen-all-ready\n"
++            "layer-api-real-b\n"
++            "slow-split\n"
++            "unit-frontcache-equiv0\n"
++            "notcovered\n"
++            "check-unitlink\n";
++        /* Historical spike >22s followed by 5 recent PASS <=22s for the 8 safe short batches;
++         * exclusive shared-state batches <=22s must still remain isolated in 1-batch long windows. */
++        const char *s_tf18 =
++            "1795300001\tw-light\tPASS\t500\t450\tfallback\t1.0\trun-batch\n"
++            "1795300002\tdaily-compile-smoke-01\tPASS\t29900\t29000\tfallback\t1.0\trun-batch\n"
++            "1795300003\tdaily-compile-smoke-01\tPASS\t4100\t4000\tfallback\t1.0\trun-batch\n"
++            "1795300004\tdaily-compile-smoke-01\tPASS\t4200\t4100\tfallback\t1.0\trun-batch\n"
++            "1795300005\tdaily-compile-smoke-01\tPASS\t4300\t4200\tfallback\t1.0\trun-batch\n"
++            "1795300006\tdaily-compile-smoke-01\tPASS\t4000\t3900\tfallback\t1.0\trun-batch\n"
++            "1795300007\tdaily-compile-smoke-01\tPASS\t4150\t4050\tfallback\t1.0\trun-batch\n"
++            "1795300008\tdaily-compile-smoke-02\tPASS\t33300\t33000\tfallback\t1.0\trun-batch\n"
++            "1795300009\tdaily-compile-smoke-02\tPASS\t14000\t13900\tfallback\t1.0\trun-batch\n"
++            "1795300010\tdaily-compile-smoke-02\tPASS\t14100\t14000\tfallback\t1.0\trun-batch\n"
++            "1795300011\tdaily-compile-smoke-02\tPASS\t13900\t13800\tfallback\t1.0\trun-batch\n"
++            "1795300012\tdaily-compile-smoke-02\tPASS\t14200\t14100\tfallback\t1.0\trun-batch\n"
++            "1795300013\tdaily-compile-smoke-02\tPASS\t13800\t13700\tfallback\t1.0\trun-batch\n"
++            "1795300014\ttools-compile-002\tPASS\t47700\t47000\tfallback\t1.0\trun-batch\n"
++            "1795300015\ttools-compile-002\tPASS\t3900\t3800\tfallback\t1.0\trun-batch\n"
++            "1795300016\ttools-compile-002\tPASS\t3800\t3700\tfallback\t1.0\trun-batch\n"
++            "1795300017\ttools-compile-002\tPASS\t3700\t3600\tfallback\t1.0\trun-batch\n"
++            "1795300018\ttools-compile-002\tPASS\t3950\t3850\tfallback\t1.0\trun-batch\n"
++            "1795300019\ttools-compile-002\tPASS\t3850\t3750\tfallback\t1.0\trun-batch\n"
++            "1795300020\ttools-compile-004\tPASS\t46900\t46000\tfallback\t1.0\trun-batch\n"
++            "1795300021\ttools-compile-004\tPASS\t3400\t3300\tfallback\t1.0\trun-batch\n"
++            "1795300022\ttools-compile-004\tPASS\t3300\t3200\tfallback\t1.0\trun-batch\n"
++            "1795300023\ttools-compile-004\tPASS\t3500\t3400\tfallback\t1.0\trun-batch\n"
++            "1795300024\ttools-compile-004\tPASS\t3200\t3100\tfallback\t1.0\trun-batch\n"
++            "1795300025\ttools-compile-004\tPASS\t3350\t3250\tfallback\t1.0\trun-batch\n"
++            "1795300026\toptimization-corpus-9-o0-o1\tPASS\t23800\t23000\tfallback\t1.0\trun-batch\n"
++            "1795300027\toptimization-corpus-9-o0-o1\tPASS\t12800\t12700\tfallback\t1.0\trun-batch\n"
++            "1795300028\toptimization-corpus-9-o0-o1\tPASS\t12900\t12800\tfallback\t1.0\trun-batch\n"
++            "1795300029\toptimization-corpus-9-o0-o1\tPASS\t12700\t12600\tfallback\t1.0\trun-batch\n"
++            "1795300030\toptimization-corpus-9-o0-o1\tPASS\t13000\t12900\tfallback\t1.0\trun-batch\n"
++            "1795300031\toptimization-corpus-9-o0-o1\tPASS\t12600\t12500\tfallback\t1.0\trun-batch\n"
++            "1795300032\tproperties-cases-tu\tPASS\t24200\t24000\tfallback\t1.0\trun-batch\n"
++            "1795300033\tproperties-cases-tu\tPASS\t5100\t5000\tfallback\t1.0\trun-batch\n"
++            "1795300034\tproperties-cases-tu\tPASS\t5200\t5100\tfallback\t1.0\trun-batch\n"
++            "1795300035\tproperties-cases-tu\tPASS\t5000\t4900\tfallback\t1.0\trun-batch\n"
++            "1795300036\tproperties-cases-tu\tPASS\t5300\t5200\tfallback\t1.0\trun-batch\n"
++            "1795300037\tproperties-cases-tu\tPASS\t4950\t4850\tfallback\t1.0\trun-batch\n"
++            "1795300038\tucn-identities\tPASS\t33700\t33000\tfallback\t1.0\trun-batch\n"
++            "1795300039\tucn-identities\tPASS\t9600\t9500\tfallback\t1.0\trun-batch\n"
++            "1795300040\tucn-identities\tPASS\t9500\t9400\tfallback\t1.0\trun-batch\n"
++            "1795300041\tucn-identities\tPASS\t9700\t9600\tfallback\t1.0\trun-batch\n"
++            "1795300042\tucn-identities\tPASS\t9400\t9300\tfallback\t1.0\trun-batch\n"
++            "1795300043\tucn-identities\tPASS\t9650\t9550\tfallback\t1.0\trun-batch\n"
++            "1795300044\treleaseseq\tPASS\t33700\t33000\tfallback\t1.0\trun-batch\n"
++            "1795300045\treleaseseq\tPASS\t5000\t4900\tfallback\t1.0\trun-batch\n"
++            "1795300046\treleaseseq\tPASS\t5100\t5000\tfallback\t1.0\trun-batch\n"
++            "1795300047\treleaseseq\tPASS\t4900\t4800\tfallback\t1.0\trun-batch\n"
++            "1795300048\treleaseseq\tPASS\t5050\t4950\tfallback\t1.0\trun-batch\n"
++            "1795300049\treleaseseq\tPASS\t4950\t4850\tfallback\t1.0\trun-batch\n"
++            "1795300050\tdevsvc-git-c-operations\tPASS\t6600\t6500\tfallback\t1.0\trun-batch\n"
++            "1795300051\tcheck-register-layout-gate\tPASS\t5600\t5500\tfallback\t1.0\trun-batch\n"
++            "1795300052\tcheck-gen-all-ready\tPASS\t7100\t7000\tfallback\t1.0\trun-batch\n"
++            "1795300053\tlayer-api-real-b\tPASS\t9000\t8900\tfallback\t1.0\trun-batch\n"
++            "1795300054\tslow-split\tPASS\t14000\t13800\tfallback\t1.0\trun-batch\n"
++            "1795300055\tunit-frontcache-equiv0\tPASS\t9000\t8800\tfallback\t1.0\trun-batch\n"
++            "1795300056\tnotcovered\tPASS\t54000\t53000\tfallback\t1.0\trun-batch\n"
++            "1795300057\tcheck-unitlink\tPASS\t37800\t37000\tfallback\t1.0\trun-batch\n";
++        if (cx_write(ids18, s_ids18, strlen(s_ids18)) ||
++            cx_write(tf18, s_tf18, strlen(s_tf18))) return 2;
++        if (cx_fmt(cmd, sizeof cmd,
++            "set -e; "
++            "sh '%s/unisacc.com' '%s' -- plan --ids-file '%s' --times-file '%s' --out '%s' --normal-jobs 8 --warmup 1 && "
++            "grep -q '\t8\tnormal\t2\tdaily-compile-smoke-02,daily-compile-smoke-01$' '%s/windows.tsv' && "
++            "! grep -q '\tlong\t1\ttools-compile-002$' '%s/windows.tsv' && "
++            "! grep -q '\tlong\t1\ttools-compile-004$' '%s/windows.tsv' && "
++            "! grep -q '\tlong\t1\toptimization-corpus-9-o0-o1$' '%s/windows.tsv' && "
++            "! grep -q '\tlong\t1\tproperties-cases-tu$' '%s/windows.tsv' && "
++            "! grep -q '\tlong\t1\tucn-identities$' '%s/windows.tsv' && "
++            "! grep -q '\tlong\t1\treleaseseq$' '%s/windows.tsv' && "
++            "grep -q '\t8\tnormal\t6\t' '%s/windows.tsv' && "
++            "grep -q '\t1\tlong\t1\tdevsvc-git-c-operations$' '%s/windows.tsv' && "
++            "grep -q '\t1\tlong\t1\tcheck-register-layout-gate$' '%s/windows.tsv' && "
++            "grep -q '\t1\tlong\t1\tcheck-gen-all-ready$' '%s/windows.tsv' && "
++            "grep -q '\t1\tlong\t1\tlayer-api-real-b$' '%s/windows.tsv' && "
++            "grep -q '\t1\tlong\t1\tslow-split$' '%s/windows.tsv' && "
++            "grep -q '\t1\tlong\t1\tunit-frontcache-equiv0$' '%s/windows.tsv' && "
++            "grep -q '\t1\tlong\t1\tnotcovered$' '%s/windows.tsv' && "
++            "grep -q '\t1\tlong\t1\tcheck-unitlink$' '%s/windows.tsv' && "
++            "sort '%s' > '%s/ids.sorted' && "
++            "grep -v '^#' '%s/windows.tsv' | grep -v '^window\t' | cut -f5 | tr ',' '\\n' | sort > '%s/plan.sorted' && "
++            "diff -u '%s/ids.sorted' '%s/plan.sorted' && "
++            "echo SHORT_BATCH_PACKING_OK",
++            cwd, pd_path, ids18, tf18, o18,
++            o18, o18, o18, o18, o18, o18, o18, o18,
++            o18, o18, o18, o18, o18, o18, o18, o18,
++            ids18, f18, o18, f18, f18, f18)) return 2;
++        int rc18 = ckk_sh("check-prerun-drive", cmd, out, sizeof out);
++        ck(rc18 == 0 &&
++           ckk_has(out, CPD_OUT, "PRERUN_PLAN\ttotal=17\twindows=11\twarmup=1\theavy=0\tnormal=2\t") &&
++           ckk_has(out, CPD_OUT, "SHORT_BATCH_PACKING_OK"),
++           "short-batch-out-of-long: non-conflicting short batches pack into normal jobs=8 while exclusive/shared-state batches stay in 1-batch long windows with exact id set parity");
++    }
++
+     { char *rmv[] = {"rm", "-rf", work, 0}; (void)ck_run(rmv, out, sizeof out); }
+     printf("CHECK_PRERUN_DRIVE\tok=%d\tfailed=%d\tms=%ld\n", ck_assertions() - ck_failures(), ck_failures(), sy_now_ms() - t0);
+     return ck_failures() ? 1 : 0;
