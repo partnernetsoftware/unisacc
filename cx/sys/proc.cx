@@ -545,15 +545,15 @@ static void syp_own_commit(int slot, int pid, int pgid) {
 }
 
 static int syp_inject_match(int pid, const char *env_name) {
-    const char *p = sy_env("UNISACC_PROC_INJECT_PID");
-    const char *v = sy_env(env_name);
+    const char *p, *v;
+    int want = 0, i = 0;
+    if (!syp_test_armed) return 0;
+    v = sy_env(env_name);
     if (!v || !v[0] || (v[0] == '0' && !v[1])) return 0;
-    if (p && p[0]) {
-        int want = 0, i = 0;
-        while (p[i] >= '0' && p[i] <= '9') { want = want * 10 + (p[i] - '0'); i++; }
-        if (want > 0 && want != pid) return 0;
-    }
-    return 1;
+    p = sy_env("UNISACC_PROC_INJECT_PID");
+    if (!p || !p[0]) return 0;
+    while (p[i] >= '0' && p[i] <= '9') { want = want * 10 + (p[i] - '0'); i++; }
+    return (want > 0 && want == pid) ? 1 : 0;
 }
 
 int sy_proc_own_stats(int *live, int *abandoned, int *lost) {
@@ -620,7 +620,7 @@ static void syp_own_atexit_fn(void) {
 }
 
 static int syp_atexit_arm(void) {
-    const char *inj = sy_env("UNISACC_PROC_INJECT_ATEXIT_FAIL");
+    const char *inj = syp_test_armed ? sy_env("UNISACC_PROC_INJECT_ATEXIT_FAIL") : 0;
     if (inj && inj[0] == '1' && !inj[1]) { syp_test_ev_push(SYP_EV_ATEXIT_ARM, -1, 0, -ENOMEM, 0); return -ENOMEM; }
     if (!syp_own_atexit_armed) {
         if (atexit(syp_own_atexit_fn) != 0) { syp_test_ev_push(SYP_EV_ATEXIT_ARM, -1, 0, -ENOMEM, 0); return -ENOMEM; }
@@ -661,7 +661,7 @@ static int syp_proc_spawn_os(const sy_spawn_t *o, sy_child_t *c) {
     if (!e && o->err_fd == SY_STDIO_PIPE && !(o->flags & SY_SPAWN_ERR_TO_OUT) && pipe(pe) != 0) e = errno;
     syp_test_ev_push(SYP_EV_SETUP, slot, 0, e ? -e : 0, 0);
     if (!e) {
-        const char *ff = sy_env("UNISACC_PROC_INJECT_FORK_FAIL");
+        const char *ff = syp_test_armed ? sy_env("UNISACC_PROC_INJECT_FORK_FAIL") : 0;
         if (ff && ff[0] == '1' && !ff[1]) e = EAGAIN;
         else { sy_prespawn(); pid = fork(); if (pid < 0) e = errno; }
         syp_test_ev_push(SYP_EV_FORK, slot, (int)pid, e ? -e : 0, 0);
