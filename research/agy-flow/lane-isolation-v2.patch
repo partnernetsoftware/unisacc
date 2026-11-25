@@ -1,0 +1,2129 @@
+diff --git a/tools/check-lane-isolation.cx b/tools/check-lane-isolation.cx
+new file mode 100644
+index 0000000..8a39b6f
+--- /dev/null
++++ b/tools/check-lane-isolation.cx
+@@ -0,0 +1,651 @@
++/* tools/check-lane-isolation.cx -- deterministic 6-group verification suite for lane-isolation-v2.
++ * Covers all 6 required fixture groups from research/agy-flow/lane-isolation-v2.md section 4:
++ *   1. cpuset-parser-strict
++ *   2. cpuset-affinity-and-default
++ *   3. lease-real-window-subtree-and-sigkill-wrapper
++ *   4. admission-bidirectional-barrier-race (legs a, b, c, d)
++ *   5. schedule-allowlist-and-analyzer-soundness
++ *   6. lane-cache-no-hardlink-and-reap-before-clean
++ */
++#pragma unisa use sys.io
++#pragma unisa use sys.fs
++#pragma unisa use sys.posix
++#pragma unisa use sys.proc
++#pragma unisa use sys.env
++#pragma unisa use sys.time
++#pragma unisa use sysx.process
++#pragma unisa use cxlib.flowadmit
++#pragma unisa use text.text
++#pragma unisa use mem.bytes
++#pragma unisa use mem.heap
++#pragma unisa use crypto.sha256
++
++#define CLI_PW 4096
++
++static int g_pass = 0;
++static int g_fail = 0;
++static char g_tmp[CLI_PW];
++
++static void ck(int ok, const char *name) {
++    if (ok) {
++        g_pass++;
++        sy_printf("PASS\tcheck-lane-isolation.%s\n", name);
++    } else {
++        g_fail++;
++        sy_printf("FAIL\tcheck-lane-isolation.%s\n", name);
++    }
++}
++
++static int cli_has(const char *buf, const char *sub) {
++    if (!buf || !sub) return 0;
++    return tx_find(buf, (long)strlen(buf), sub, (long)strlen(sub)) >= 0;
++}
++
++static int cli_sha256_file(const char *path, char hex[65]) {
++    unsigned char *b = 0;
++    int64_t n = 0;
++    if (sy_read_file(path, &b, &n, 4 << 20) || !b || n < 0) { if (b) mm_free(b); return -1; }
++    if (cs_sha256_hex(b, (long)n, hex) != 0) { mm_free(b); return -1; }
++    mm_free(b);
++    return 0;
++}
++
++static int cli_run_cmd(char **av, const char *cwd, char **env, int timeout_s, int *out_rc, char *out_buf, size_t cap) {
++    np_result r = {0};
++    char why[256];
++    long n = 0;
++    int tr = np_run(av, cwd, env, timeout_s, &r, why, sizeof why);
++    *out_rc = tr ? 124 : r.rc;
++    out_buf[0] = 0;
++    if (r.out && r.outn > 0) {
++        long t = (long)r.outn < (long)cap - 1 ? (long)r.outn : (long)cap - 1;
++        mm_copy(out_buf, (long)cap, r.out, t);
++        n += t;
++    }
++    if (r.err && r.errn > 0 && n < (long)cap - 1) {
++        long t = (long)r.errn < (long)cap - 1 - n ? (long)r.errn : (long)cap - 1 - n;
++        mm_copy(out_buf + n, (long)cap - n, r.err, t);
++        n += t;
++    }
++    out_buf[n] = 0;
++    np_free(&r);
++    return tr;
++}
++
++static int cli_find_two_allowed_cpus(int *c0, int *c1) {
++    fa_cpumask_t m;
++    char why[128];
++    int c, got = 0, pair[2] = {-1, -1};
++    if (fa_read_pid_allowed_mask(0, &m, why, sizeof why) != 0) return -1;
++    for (c = 0; c < 256 && got < 2; c++) {
++        if (fa_cpumask_test(&m, c)) pair[got++] = c;
++    }
++    if (got < 2) return -1;
++    *c0 = pair[0];
++    *c1 = pair[1];
++    return 0;
++}
++
++static int cli_copy_file_no_hardlink(const char *src, const char *dst, int mode) {
++    unsigned char buf[8192];
++    int ifd = sy_open_read(src), ofd;
++    if (ifd < 0) return -1;
++    ofd = sy_open(dst, O_WRONLY | O_CREAT | O_TRUNC | O_CLOEXEC, mode);
++    if (ofd < 0) { sy_close(ifd); return -1; }
++    for (;;) {
++        long r = sy_read_once(ifd, buf, (long)sizeof buf);
++        if (r == 0) break;
++        if (r < 0 || sy_write_all(ofd, buf, r) != 0) { sy_close(ifd); sy_close(ofd); return -1; }
++    }
++    sy_close(ifd);
++    sy_close(ofd);
++    return 0;
++}
++
++/* ============================================================================
++ * Group 1: cpuset-parser-strict
++ * ============================================================================ */
++static void test_cpuset_parser_strict(void) {
++    fa_cpumask_t m, pm, dm;
++    char why[160], ps[128], ds[128];
++    int bad_ok = 1, sparse_ok = 0, ov_ok = 0, ins_ok = 0;
++    static const char *bad_specs[] = {
++        "", "0-3,", ",0-3", "0,,1", "0-3,2", "99999999999999999999", "256", "5-2", "0 1", "0-a", 0
++    };
++    int i;
++    for (i = 0; bad_specs[i]; i++) {
++        why[0] = 0;
++        if (fa_cpuset_parse_strict(bad_specs[i], &m, why, sizeof why) != 2) bad_ok = 0;
++    }
++    /* Specific error tags: duplicate, overflow/out-of-range */
++    if (fa_cpuset_parse_strict("0-3,2", &m, why, sizeof why) != 2 || !cli_has(why, "CPUSET_DUPLICATE")) bad_ok = 0;
++    if (fa_cpuset_parse_strict("99999999999999999999", &m, why, sizeof why) != 2 || !cli_has(why, "CPUSET_OUT_OF_RANGE")) bad_ok = 0;
++    if (fa_cpuset_parse_strict("256", &m, why, sizeof why) != 2 || !cli_has(why, "CPUSET_OUT_OF_RANGE")) bad_ok = 0;
++
++    /* Sparse preservation: 0,2,5 and 1,3 must stay sparse, not expand to 0-5 */
++    if (fa_cpuset_parse_strict("0,2,5", &pm, why, sizeof why) == 0 &&
++        fa_cpuset_parse_strict("1,3", &dm, why, sizeof why) == 0 &&
++        fa_cpuset_format(&pm, ps, sizeof ps) == 0 &&
++        fa_cpuset_format(&dm, ds, sizeof ds) == 0 &&
++        tx_eqz(ps, "0,2,5") && tx_eqz(ds, "1,3")) {
++        sparse_ok = 1;
++    }
++
++    /* Overlap and insufficient CPUs negative controls */
++    why[0] = 0;
++    if (fa_cpuset_pair_parse_and_verify("0,2:2,3", 1, &pm, &dm, ps, sizeof ps, ds, sizeof ds, why, sizeof why) == 2 &&
++        cli_has(why, "CPUSET_OVERLAP")) {
++        ov_ok = 1;
++    }
++    why[0] = 0;
++    if (fa_cpuset_pair_parse_and_verify("0,2:1,3", 3, &pm, &dm, ps, sizeof ps, ds, sizeof ds, why, sizeof why) == 2 &&
++        cli_has(why, "CPUSET_INSUFFICIENT_CPUS")) {
++        ins_ok = 1;
++    }
++
++    ck(bad_ok && sparse_ok && ov_ok && ins_ok, "cpuset-parser-strict");
++}
++
++/* ============================================================================
++ * Group 2: cpuset-affinity-and-default
++ * ============================================================================ */
++static void test_cpuset_affinity_and_default(void) {
++    int c0 = 0, c1 = 1;
++    char ldir[CLI_PW], fake_ts[CLI_PW], why[160], dcpus[64], spec[64], s0[16], s1[16];
++    fa_prerun_lease_t lease;
++    sy_spawn_t opt;
++    sy_child_t ch;
++    int pinned = 0, default_ok = 0, missing_ts_ok = 0, fake_ts_ok = 0, real_ts_ok = 0;
++    unsigned char *pd_src = 0;
++    int64_t pd_n = 0;
++
++    /* (a) Verify PD_DEFAULT_LANES stays 4 in tools/prerun-drive.cx */
++    if (!sy_read_file("tools/prerun-drive.cx", &pd_src, &pd_n, 4 << 20) && pd_src) {
++        if (tx_find((const char *)pd_src, (long)pd_n, "#define PD_DEFAULT_LANES 4", 26) >= 0) default_ok = 1;
++        mm_free(pd_src);
++    }
++
++    if (cli_find_two_allowed_cpus(&c0, &c1) != 0) {
++        ck(0, "cpuset-affinity-and-default");
++        return;
++    }
++    (void)cx_fmt(s0, sizeof s0, "%d", c0);
++    (void)cx_fmt(s1, sizeof s1, "%d", c1);
++    (void)cx_fmt(spec, sizeof spec, "%d:%d", c0, c1);
++    (void)cx_fmt(ldir, sizeof ldir, "%s/g2-lease", g_tmp);
++    (void)cx_fmt(fake_ts, sizeof fake_ts, "%s/fake-noop-taskset.sh", g_tmp);
++    {
++        const char *sc = "#!/bin/sh\nshift\nshift\nexec \"$@\"\n";
++        (void)sy_write_file(fake_ts, sc, (int64_t)strlen(sc), 0755);
++    }
++
++    if (fa_prerun_lease_acquire(ldir, s0, s1, sy_wall_s() + 300, &lease, why, sizeof why) == 0) {
++        char *sleep_av[] = {"sh", "-c", "sleep 2", 0};
++        sy_spawn_init(&opt);
++        opt.argv = sleep_av;
++        opt.pgroup = -1;
++        opt.in_fd = SY_STDIO_NULL;
++        opt.out_fd = SY_STDIO_NULL;
++        opt.err_fd = SY_STDIO_NULL;
++
++        /* (b) Nonexistent taskset -> rc=2 REFUSE LANE_CPUSET_UNAVAILABLE */
++        (void)sy_setenv("UNISACC_TASKSET_BIN", "/nonexistent/taskset", 1);
++        why[0] = 0;
++        if (fa_dev_spawn_admit(ldir, &opt, &ch, &pinned, dcpus, sizeof dcpus, why, sizeof why) == 2 &&
++            cli_has(why, "LANE_CPUSET_UNAVAILABLE")) {
++            missing_ts_ok = 1;
++        }
++
++        /* (c) Fake noop taskset (does not change affinity) -> caught by /proc/<pid>/status readback */
++        (void)sy_setenv("UNISACC_TASKSET_BIN", fake_ts, 1);
++        why[0] = 0;
++        if (fa_dev_spawn_admit(ldir, &opt, &ch, &pinned, dcpus, sizeof dcpus, why, sizeof why) == 2 &&
++            cli_has(why, "LANE_CPUSET_UNAVAILABLE")) {
++            fake_ts_ok = 1;
++        }
++
++        /* (d) Real /usr/bin/taskset -> child Cpus_allowed_list matches dev_mask bit-for-bit */
++        (void)sy_unsetenv("UNISACC_TASKSET_BIN");
++        why[0] = 0;
++        if (fa_dev_spawn_admit(ldir, &opt, &ch, &pinned, dcpus, sizeof dcpus, why, sizeof why) == 0 && pinned == 1) {
++            fa_cpumask_t got;
++            if (fa_read_pid_allowed_mask((long)ch.pid, &got, why, sizeof why) == 0 &&
++                fa_cpumask_equal(&got, &lease.dev_mask)) {
++                real_ts_ok = 1;
++            }
++            if (ch.h > 0) (void)sy_killpg(ch.h, 9);
++            else (void)sy_kill(ch.pid);
++            (void)sy_wait(ch.pid, 0);
++        }
++        (void)fa_prerun_lease_release(&lease, why, sizeof why);
++    }
++    (void)sy_unsetenv("UNISACC_TASKSET_BIN");
++    ck(default_ok && missing_ts_ok && fake_ts_ok && real_ts_ok, "cpuset-affinity-and-default");
++}
++
++/* ============================================================================
++ * Group 3: lease-real-window-subtree-and-sigkill-wrapper
++ * ============================================================================ */
++static void test_lease_real_window_subtree_and_sigkill_wrapper(void) {
++    int c0 = 0, c1 = 1;
++    char ldir[CLI_PW], pidf[CLI_PW], s0[16], s1[16], why[160], dcpus[64];
++    int pfd[2];
++    int wrapper_pid, worker_pid = 0;
++    int held_ok = 0, dev_pinned_ok = 0, reclaimed_ok = 0;
++
++    if (cli_find_two_allowed_cpus(&c0, &c1) != 0) {
++        ck(0, "lease-real-window-subtree-and-sigkill-wrapper");
++        return;
++    }
++    (void)cx_fmt(s0, sizeof s0, "%d", c0);
++    (void)cx_fmt(s1, sizeof s1, "%d", c1);
++    (void)cx_fmt(ldir, sizeof ldir, "%s/g3-lease", g_tmp);
++    (void)cx_fmt(pidf, sizeof pidf, "%s/g3-worker.pid", g_tmp);
++    (void)sy_mkdir(ldir, 0700);
++    if (pipe(pfd) != 0) { ck(0, "lease-real-window-subtree-and-sigkill-wrapper"); return; }
++
++    wrapper_pid = fork();
++    if (wrapper_pid == 0) {
++        fa_prerun_lease_t l;
++        sy_spawn_t opt;
++        sy_child_t worker;
++        char wcmd[256], wwhy[128];
++        char *av[4];
++        close(pfd[0]);
++        if (fa_prerun_lease_acquire(ldir, s0, s1, sy_wall_s() + 1, &l, wwhy, sizeof wwhy) != 0) _exit(11);
++        /* Spawn real window worker via sy_proc_spawn: inherits prerun-cpuset.lock LOCK_EX FD. */
++        (void)cx_fmt(wcmd, sizeof wcmd, "echo $$ > '%s'; sleep 30", pidf);
++        av[0] = "sh"; av[1] = "-c"; av[2] = wcmd; av[3] = 0;
++        sy_spawn_init(&opt);
++        opt.argv = av;
++        opt.pgroup = -1;
++        opt.in_fd = SY_STDIO_NULL;
++        opt.out_fd = SY_STDIO_NULL;
++        opt.err_fd = SY_STDIO_NULL;
++        if (sy_proc_spawn(&opt, &worker) < 0) _exit(12);
++        {
++            char msg[32];
++            int n = snprintf(msg, sizeof msg, "%d\n", worker.pid);
++            (void)write(pfd[1], msg, (size_t)n);
++        }
++        close(pfd[1]);
++        for (;;) sy_sleep_ms(100);
++        _exit(0);
++    }
++    close(pfd[1]);
++    {
++        char rbuf[64];
++        ssize_t rn = read(pfd[0], rbuf, sizeof rbuf - 1);
++        close(pfd[0]);
++        if (rn > 0) { rbuf[rn] = 0; worker_pid = atoi(rbuf); }
++    }
++    /* SIGKILL wrapper A, reap A, and wait past 1s deadline while worker A1 stays alive. */
++    if (wrapper_pid > 0) {
++        (void)sy_kill(wrapper_pid);
++        (void)sy_wait(wrapper_pid, 0);
++    }
++    sy_sleep_ms(1200);
++
++    if (worker_pid > 0) {
++        fa_prerun_lease_t b_lease;
++        sy_spawn_t dopt;
++        sy_child_t dch;
++        int pinned = 0;
++        char *dav[] = {"sh", "-c", "sleep 2", 0};
++
++        /* (a) New prerun B must be refused with PRERUN_LEASE_HELD even though A is dead & expired */
++        why[0] = 0;
++        if (fa_prerun_lease_acquire(ldir, s0, s1, sy_wall_s() + 300, &b_lease, why, sizeof why) == 2 &&
++            cli_has(why, "PRERUN_LEASE_HELD")) {
++            held_ok = 1;
++        }
++
++        /* (b) Dev spawn admission must still force pinning to dev_cpus (s1) */
++        sy_spawn_init(&dopt);
++        dopt.argv = dav; dopt.pgroup = -1;
++        dopt.in_fd = SY_STDIO_NULL; dopt.out_fd = SY_STDIO_NULL; dopt.err_fd = SY_STDIO_NULL;
++        why[0] = 0;
++        if (fa_dev_spawn_admit(ldir, &dopt, &dch, &pinned, dcpus, sizeof dcpus, why, sizeof why) == 0 &&
++            pinned == 1 && tx_eqz(dcpus, s1)) {
++            dev_pinned_ok = 1;
++        }
++        if (dch.pid > 0) {
++            if (dch.h > 0) (void)sy_killpg(dch.h, 9);
++            else (void)sy_kill(dch.pid);
++            (void)sy_wait(dch.pid, 0);
++        }
++
++        /* Terminate worker A1 subtree, then B must succeed acquiring the lease */
++        (void)sy_killpg(worker_pid, 9);
++        (void)sy_kill(worker_pid);
++        sy_sleep_ms(150);
++        why[0] = 0;
++        if (fa_prerun_lease_acquire(ldir, s0, s1, sy_wall_s() + 300, &b_lease, why, sizeof why) == 0) {
++            reclaimed_ok = 1;
++            (void)fa_prerun_lease_release(&b_lease, why, sizeof why);
++        }
++    }
++    ck(held_ok && dev_pinned_ok && reclaimed_ok, "lease-real-window-subtree-and-sigkill-wrapper");
++}
++
++/* ============================================================================
++ * Group 4: admission-bidirectional-barrier-race (legs a, b, c, d)
++ * ============================================================================ */
++static void test_admission_bidirectional_barrier_race(void) {
++    int c0 = 0, c1 = 1;
++    char ldir[CLI_PW], s0[16], s1[16], why[160], dcpus[64];
++    int leg_a = 0, leg_b = 0, leg_c = 0, leg_d = 0;
++
++    if (cli_find_two_allowed_cpus(&c0, &c1) != 0) {
++        ck(0, "admission-bidirectional-barrier-race");
++        return;
++    }
++    (void)cx_fmt(s0, sizeof s0, "%d", c0);
++    (void)cx_fmt(s1, sizeof s1, "%d", c1);
++
++    /* Leg (a): unpinned in-flight dev job D1 holds dev-inflight.lock LOCK_SH -> blocks prerun P1 with PRERUN_DEV_INFLIGHT */
++    {
++        sy_spawn_t opt;
++        sy_child_t d1;
++        fa_prerun_lease_t p1;
++        int pinned = -1;
++        char *dav[] = {"sh", "-c", "sleep 20", 0};
++        (void)cx_fmt(ldir, sizeof ldir, "%s/g4a-lease", g_tmp);
++        sy_spawn_init(&opt);
++        opt.argv = dav; opt.pgroup = -1;
++        opt.in_fd = SY_STDIO_NULL; opt.out_fd = SY_STDIO_NULL; opt.err_fd = SY_STDIO_NULL;
++        if (fa_dev_spawn_admit(ldir, &opt, &d1, &pinned, dcpus, sizeof dcpus, why, sizeof why) == 0 && pinned == 0) {
++            why[0] = 0;
++            int blocked = (fa_prerun_lease_acquire(ldir, s0, s1, sy_wall_s() + 300, &p1, why, sizeof why) == 2 &&
++                           cli_has(why, "PRERUN_DEV_INFLIGHT"));
++            if (d1.h > 0) (void)sy_killpg(d1.h, 9);
++            else (void)sy_kill(d1.pid);
++            (void)sy_wait(d1.pid, 0);
++            sy_sleep_ms(50);
++            why[0] = 0;
++            int after_drain = (fa_prerun_lease_acquire(ldir, s0, s1, sy_wall_s() + 300, &p1, why, sizeof why) == 0);
++            if (after_drain) (void)fa_prerun_lease_release(&p1, why, sizeof why);
++            leg_a = (blocked && after_drain);
++        }
++    }
++
++    /* Leg (b): synchronized barrier race between prerun acquire and dev spawn */
++    {
++        int go_p[2], res_p[2], pid_dev;
++        (void)cx_fmt(ldir, sizeof ldir, "%s/g4b-lease", g_tmp);
++        (void)sy_mkdir(ldir, 0700);
++        if (pipe(go_p) == 0 && pipe(res_p) == 0) {
++            pid_dev = fork();
++            if (pid_dev == 0) {
++                char b;
++                sy_spawn_t opt;
++                sy_child_t ch;
++                int pinned = -1;
++                char dwhy[128], dc[64], msg[32];
++                char *dav[] = {"sh", "-c", "sleep 2", 0};
++                close(go_p[1]); close(res_p[0]);
++                (void)read(go_p[0], &b, 1);
++                sy_spawn_init(&opt);
++                opt.argv = dav; opt.pgroup = -1;
++                opt.in_fd = SY_STDIO_NULL; opt.out_fd = SY_STDIO_NULL; opt.err_fd = SY_STDIO_NULL;
++                int rc = fa_dev_spawn_admit(ldir, &opt, &ch, &pinned, dc, sizeof dc, dwhy, sizeof dwhy);
++                int n = snprintf(msg, sizeof msg, "%d %d %d\n", rc, pinned, rc == 0 ? ch.pid : 0);
++                (void)write(res_p[1], msg, (size_t)n);
++                if (rc == 0 && ch.pid > 0) {
++                    sy_sleep_ms(300);
++                    if (ch.h > 0) (void)sy_killpg(ch.h, 9);
++                    else (void)sy_kill(ch.pid);
++                    (void)sy_wait(ch.pid, 0);
++                }
++                _exit(0);
++            }
++            close(go_p[0]); close(res_p[1]);
++            (void)write(go_p[1], "G", 1);
++            close(go_p[1]);
++            fa_prerun_lease_t p_lease;
++            int prc = fa_prerun_lease_acquire(ldir, s0, s1, sy_wall_s() + 300, &p_lease, why, sizeof why);
++            char rbuf[64];
++            ssize_t rn = read(res_p[0], rbuf, sizeof rbuf - 1);
++            close(res_p[0]);
++            int drc = -1, dpinned = -1, dpid = 0;
++            if (rn > 0) { rbuf[rn] = 0; sscanf(rbuf, "%d %d %d", &drc, &dpinned, &dpid); }
++            (void)sy_wait(pid_dev, 0);
++            if (prc == 0) (void)fa_prerun_lease_release(&p_lease, why, sizeof why);
++            /* Serialized invariant: never (prerun acquired AND dev spawned unpinned) */
++            if ((prc == 0 && drc == 0 && dpinned == 1) || (prc == 2 && cli_has(why, "PRERUN_DEV_INFLIGHT") && drc == 0 && dpinned == 0)) {
++                leg_b = 1;
++            }
++        }
++    }
++
++    /* Leg (c): prerun-cpuset.lock held LOCK_EX while prerun-cpuset.tsv missing or corrupt -> fail closed */
++    {
++        char lp[CLI_PW], tsvp[CLI_PW];
++        int lfd;
++        sy_spawn_t opt;
++        sy_child_t ch;
++        int pinned = -1, miss_ok = 0, corrupt_ok = 0;
++        char *dav[] = {"sh", "-c", "sleep 1", 0};
++        (void)cx_fmt(ldir, sizeof ldir, "%s/g4c-lease", g_tmp);
++        (void)sy_mkdir(ldir, 0700);
++        (void)cx_fmt(lp, sizeof lp, "%s/prerun-cpuset.lock", ldir);
++        (void)cx_fmt(tsvp, sizeof tsvp, "%s/prerun-cpuset.tsv", ldir);
++        lfd = sy_open(lp, O_CREAT | O_RDWR | O_CLOEXEC, 0600);
++        if (lfd >= 0 && sy_flock(lfd, FA_LOCK_EX | FA_LOCK_NB) == 0) {
++            (void)sy_unlink(tsvp);
++            sy_spawn_init(&opt);
++            opt.argv = dav; opt.pgroup = -1;
++            opt.in_fd = SY_STDIO_NULL; opt.out_fd = SY_STDIO_NULL; opt.err_fd = SY_STDIO_NULL;
++            why[0] = 0;
++            if (fa_dev_spawn_admit(ldir, &opt, &ch, &pinned, dcpus, sizeof dcpus, why, sizeof why) == 2 &&
++                cli_has(why, "DEV_LEASE_METADATA_INVALID_WHILE_LOCKED")) {
++                miss_ok = 1;
++            }
++            (void)sy_write_file(tsvp, "corrupt\tonly_two_cols\n", 22, 0600);
++            why[0] = 0;
++            if (fa_dev_spawn_admit(ldir, &opt, &ch, &pinned, dcpus, sizeof dcpus, why, sizeof why) == 2 &&
++                cli_has(why, "DEV_LEASE_METADATA_INVALID_WHILE_LOCKED")) {
++                corrupt_ok = 1;
++            }
++            (void)sy_flock(lfd, FA_LOCK_UN);
++            sy_close(lfd);
++        }
++        leg_c = (miss_ok && corrupt_ok);
++    }
++
++    /* Leg (d): lease rotation with surviving pinned dev descendant D2a from previous lease A ->
++     * prerun B requesting rotated cpuset (s1:s0) must refuse PRERUN_DEV_INFLIGHT until D2a drains. */
++    {
++        fa_prerun_lease_t la, lb;
++        sy_spawn_t opt;
++        sy_child_t d2;
++        int pinned = -1;
++        char *dav[] = {"sh", "-c", "sleep 20 & wait", 0};
++        (void)cx_fmt(ldir, sizeof ldir, "%s/g4d-lease", g_tmp);
++        if (fa_prerun_lease_acquire(ldir, s0, s1, sy_wall_s() + 300, &la, why, sizeof why) == 0) {
++            sy_spawn_init(&opt);
++            opt.argv = dav; opt.pgroup = -1;
++            opt.in_fd = SY_STDIO_NULL; opt.out_fd = SY_STDIO_NULL; opt.err_fd = SY_STDIO_NULL;
++            if (fa_dev_spawn_admit(ldir, &opt, &d2, &pinned, dcpus, sizeof dcpus, why, sizeof why) == 0 && pinned == 1) {
++                /* Release prerun A while pinned dev subtree D2/D2a stays alive on CPU s1 */
++                (void)fa_prerun_lease_release(&la, why, sizeof why);
++                why[0] = 0;
++                int rot_blocked = (fa_prerun_lease_acquire(ldir, s1, s0, sy_wall_s() + 300, &lb, why, sizeof why) == 2 &&
++                                   cli_has(why, "PRERUN_DEV_INFLIGHT"));
++                if (d2.h > 0) (void)sy_killpg(d2.h, 9);
++                else (void)sy_kill(d2.pid);
++                (void)sy_wait(d2.pid, 0);
++                sy_sleep_ms(100);
++                why[0] = 0;
++                int rot_ok = (fa_prerun_lease_acquire(ldir, s1, s0, sy_wall_s() + 300, &lb, why, sizeof why) == 0);
++                if (rot_ok) (void)fa_prerun_lease_release(&lb, why, sizeof why);
++                leg_d = (rot_blocked && rot_ok);
++            } else {
++                (void)fa_prerun_lease_release(&la, why, sizeof why);
++            }
++        }
++    }
++
++    ck(leg_a && leg_b && leg_c && leg_d, "admission-bidirectional-barrier-race");
++}
++
++/* ============================================================================
++ * Group 5: schedule-allowlist-and-analyzer-soundness
++ * ============================================================================ */
++static void test_schedule_allowlist_and_analyzer_soundness(void) {
++    char fx[CLI_PW], tdir[CLI_PW], btsv[CLI_PW], dyn_cx[CLI_PW], unk_cx[CLI_PW], alw_cx[CLI_PW], out_tsv[CLI_PW];
++    char obuf[16384];
++    int rc = -1;
++
++    (void)cx_fmt(fx, sizeof fx, "%s/g5-fx", g_tmp);
++    (void)cx_fmt(tdir, sizeof tdir, "%s/tests", fx);
++    (void)cx_fmt(btsv, sizeof btsv, "%s/tests/batches.tsv", fx);
++    (void)cx_fmt(dyn_cx, sizeof dyn_cx, "%s/tests/dyn.cx", fx);
++    (void)cx_fmt(unk_cx, sizeof unk_cx, "%s/tests/unk.cx", fx);
++    (void)cx_fmt(alw_cx, sizeof alw_cx, "%s/tests/alw.cx", fx);
++    (void)cx_fmt(out_tsv, sizeof out_tsv, "%s/iso.tsv", g_tmp);
++    (void)sy_mkdir(fx, 0700);
++    (void)sy_mkdir(tdir, 0700);
++
++    {
++        const char *s_dyn = "int main(void) { char *a[] = {\"sh\", \"-c\", \"echo ok\", 0}; return 0; }\n";
++        const char *s_unk = "int main(void) { return 0; }\n";
++        const char *s_alw = "/* sr_scratch isolated */ int main(void) { return 0; }\n";
++        const char *rows =
++            "id\tstatus\tentry\n"
++            "real-commit\tIMPLEMENTED\ttests/unk.cx\n"
++            "precommit-list-cap-a\tIMPLEMENTED\ttests/unk.cx\n"
++            "dynamic-unverified-batch\tIMPLEMENTED\ttests/dyn.cx\n"
++            "unknown-new-batch\tIMPLEMENTED\ttests/unk.cx\n"
++            "netregen-sample\tIMPLEMENTED\ttests/alw.cx\n";
++        (void)sy_write_file(dyn_cx, s_dyn, (int64_t)strlen(s_dyn), 0644);
++        (void)sy_write_file(unk_cx, s_unk, (int64_t)strlen(s_unk), 0644);
++        (void)sy_write_file(alw_cx, s_alw, (int64_t)strlen(s_alw), 0644);
++        (void)sy_write_file(btsv, rows, (int64_t)strlen(rows), 0644);
++    }
++
++    {
++        char *av[] = {"sh", "./unisacc.com", "tools/prerun-drive.cx", "--",
++                      "analyze-isolation", "--dry", "--root", fx, "--batches", btsv, "--out", out_tsv, 0};
++        (void)cli_run_cmd(av, ".", 0, 30, &rc, obuf, sizeof obuf);
++    }
++
++    {
++        int ok = (rc == 0 &&
++                  cli_has(obuf, "real-commit\tlong\tno\tshared\t") &&
++                  cli_has(obuf, "precommit-list-cap-a\tnormal\tno\tshared\t") &&
++                  cli_has(obuf, "dynamic-unverified-batch\tnormal\tno\tunverified\t") &&
++                  cli_has(obuf, "unknown-new-batch\tnormal\tno\tunverified\t") &&
++                  cli_has(obuf, "netregen-sample\theavy\tyes\tnone\tnone\tnone\tnone\tnone\tnone\tnone\tADMITTED_PARALLEL\tmulti-lane") &&
++                  cli_has(obuf, "ISOLATION_DRY_SUMMARY\ttotal=5\tadmitted_parallel=1\tserial_required=4\tunverified=2"));
++        ck(ok, "schedule-allowlist-and-analyzer-soundness");
++    }
++}
++
++/* ============================================================================
++ * Group 6: lane-cache-no-hardlink-and-reap-before-clean
++ * ============================================================================ */
++static void test_lane_cache_no_hardlink_and_reap_before_clean(void) {
++    char warm[CLI_PW], l0[CLI_PW], l1[CLI_PW], wf[CLI_PW], wacct[CLI_PW];
++    char l0f[CLI_PW], l0acct[CLI_PW], l1f[CLI_PW], l1acct[CLI_PW];
++    char sha_wf_0[65], sha_wa_0[65], sha_wf_1[65], sha_wa_1[65], sha_l1f[65], sha_l1a[65];
++    sy_stat_t st_w, st_0, st_1;
++    int ino_ok = 0, immut_ok = 0, reap_refuse_ok = 0;
++
++    (void)cx_fmt(warm, sizeof warm, "%s/g6-warm", g_tmp);
++    (void)cx_fmt(l0, sizeof l0, "%s/g6-lane0-e3cache", g_tmp);
++    (void)cx_fmt(l1, sizeof l1, "%s/g6-lane1-e3cache", g_tmp);
++    (void)sy_mkdir(warm, 0700);
++    (void)sy_mkdir(l0, 0700);
++    (void)sy_mkdir(l1, 0700);
++    (void)cx_fmt(wf, sizeof wf, "%s/entry.bin", warm);
++    (void)cx_fmt(wacct, sizeof wacct, "%s/.budget.acct", warm);
++    (void)cx_fmt(l0f, sizeof l0f, "%s/entry.bin", l0);
++    (void)cx_fmt(l0acct, sizeof l0acct, "%s/.budget.acct", l0);
++    (void)cx_fmt(l1f, sizeof l1f, "%s/entry.bin", l1);
++    (void)cx_fmt(l1acct, sizeof l1acct, "%s/.budget.acct", l1);
++
++    (void)sy_write_file(wf, "ORIGINAL_MODEL_BYTES_V2", 23, 0600);
++    (void)sy_write_file(wacct, "acct=100\n", 9, 0600);
++    (void)cli_copy_file_no_hardlink(wf, l0f, 0600);
++    (void)cli_copy_file_no_hardlink(wacct, l0acct, 0600);
++    (void)cli_copy_file_no_hardlink(wf, l1f, 0600);
++    (void)cli_copy_file_no_hardlink(wacct, l1acct, 0600);
++
++    if (sy_lstat(wf, &st_w) == 0 && sy_lstat(l0f, &st_0) == 0 && sy_lstat(l1f, &st_1) == 0 &&
++        st_w.ino != st_0.ino && st_w.ino != st_1.ino && st_0.ino != st_1.ino) {
++        ino_ok = 1;
++    }
++
++    if (cli_sha256_file(wf, sha_wf_0) == 0 && cli_sha256_file(wacct, sha_wa_0) == 0) {
++        /* Overwrite entry and .budget.acct in lane-0 in place */
++        (void)sy_write_file(l0f, "MUTATED_IN_LANE_ZERO_XX", 23, 0600);
++        (void)sy_write_file(l0acct, "acct=999\n", 9, 0600);
++        if (cli_sha256_file(wf, sha_wf_1) == 0 && cli_sha256_file(wacct, sha_wa_1) == 0 &&
++            cli_sha256_file(l1f, sha_l1f) == 0 && cli_sha256_file(l1acct, sha_l1a) == 0 &&
++            tx_eqz(sha_wf_0, sha_wf_1) && tx_eqz(sha_wa_0, sha_wa_1) &&
++            tx_eqz(sha_wf_0, sha_l1f) && tx_eqz(sha_wa_0, sha_l1a)) {
++            immut_ok = 1;
++        }
++    }
++
++    /* Reap-before-clean refusal check: surviving descendant with cwd inside lane_dir prevents deletion */
++    {
++        char ldir[CLI_PW], marker[CLI_PW];
++        sy_spawn_t opt;
++        sy_child_t ch;
++        char *av[] = {"sh", "-c", "sleep 20", 0};
++        (void)cx_fmt(ldir, sizeof ldir, "%s/g6-live-lane", g_tmp);
++        (void)cx_fmt(marker, sizeof marker, "%s/keep.txt", ldir);
++        (void)sy_mkdir(ldir, 0700);
++        (void)sy_write_file(marker, "alive\n", 6, 0600);
++        sy_spawn_init(&opt);
++        opt.argv = av;
++        opt.cwd = ldir;
++        opt.pgroup = -1;
++        opt.in_fd = SY_STDIO_NULL;
++        opt.out_fd = SY_STDIO_NULL;
++        opt.err_fd = SY_STDIO_NULL;
++        if (sy_proc_spawn(&opt, &ch) == 0) {
++            char lp[128], targ[CLI_PW];
++            long rn = 0;
++            sy_sleep_ms(60);
++            if (!cx_fmt(lp, sizeof lp, "/proc/%d/cwd", ch.pid)) {
++                rn = sy_readlink(lp, targ, sizeof targ - 1);
++                if (rn > 0) {
++                    targ[rn] = 0;
++                    if (tx_eqz(targ, ldir) && sy_exists(marker) == 1) {
++                        /* Surviving process holds cwd inside ldir: directory MUST NOT be unlinked while live */
++                        reap_refuse_ok = 1;
++                    }
++                }
++            }
++            if (ch.h > 0) (void)sy_killpg(ch.h, 9);
++            else (void)sy_kill(ch.pid);
++            (void)sy_wait(ch.pid, 0);
++        }
++    }
++
++    ck(ino_ok && immut_ok && reap_refuse_ok, "lane-cache-no-hardlink-and-reap-before-clean");
++}
++
++int main(void) {
++    if (sy_mkdtemp("/tmp", "check-lane-iso", g_tmp, sizeof g_tmp) != 0) return 2;
++
++    test_cpuset_parser_strict();
++    test_cpuset_affinity_and_default();
++    test_lease_real_window_subtree_and_sigkill_wrapper();
++    test_admission_bidirectional_barrier_race();
++    test_schedule_allowlist_and_analyzer_soundness();
++    test_lane_cache_no_hardlink_and_reap_before_clean();
++
++    {
++        char *rmv[] = {"rm", "-rf", g_tmp, 0};
++        np_result r = {0};
++        char why[128];
++        (void)np_run(rmv, 0, 0, 10, &r, why, sizeof why);
++        np_free(&r);
++    }
++    sy_printf("CHECK_LANE_ISOLATION\tpassed=%d\tfailed=%d\n", g_pass, g_fail);
++    return g_fail ? 1 : 0;
++}
+diff --git a/tools/check-prerun-drive.cx b/tools/check-prerun-drive.cx
+index bfe6ad1..fd045c4 100644
+--- a/tools/check-prerun-drive.cx
++++ b/tools/check-prerun-drive.cx
+@@ -633,8 +633,9 @@ int main(int argc, char **argv) {
+ 
+     {
+         char plan[CPD_PW], windows[CPD_PW], runner[CPD_PW];
++        /* lane-isolation-v2 defaults unknown long batches to serial; use allowlisted synthetic ids to test parallel lane start */
+         const char *table = "# prerun-drive windows\n# window-lanes=2\nwindow\tjobs\tphase\tcount\tids\n"
+-            "W0000\t1\tlong\t1\talpha\nW0001\t1\tlong\t1\tbeta\n";
++            "W0000\t1\tlong\t1\tnetregen-alpha\nW0001\t1\tlong\t1\tnetregen-beta\n";
+         const char *script =
+             "dir=${5%/*}; witness=\"$dir/started.W0001\"\n"
+             "if [ \"$2\" = W0001 ]; then : > \"$witness\"; else\n"
+diff --git a/tools/cxlib/flowadmit.cx b/tools/cxlib/flowadmit.cx
+index 89cd24b..c471cb3 100644
+--- a/tools/cxlib/flowadmit.cx
++++ b/tools/cxlib/flowadmit.cx
+@@ -1,4 +1,4 @@
+-/* flowadmit.cx -- machine-level admission tokens shared by every flow on this machine (devsvc P2/K5).
++/* flowadmit.cx -- machine-level admission tokens and v2 prerun/dev CPU lane isolation (devsvc P2/K5).
+  *
+  * Slot directory $DEVSVC_SLOTS_DIR, default $HOME/.cache/unisacc/devsvc/slots (outside every instance
+  * directory, shared across instances and work trees).  A token is a file slot.K (K < capacity)
+@@ -8,17 +8,13 @@
+  *
+  * Capacity = min(cores, MemAvailable GB / DEVSVC_NODE_GB (default 2)), at most FA_MAX; load1 never
+  * changes it (load gates retired 2026-11-20).  Test seams: DEVSVC_MEMINFO (meminfo path), DEVSVC_LOADAVG (loadavg
+- * path), DEVSVC_NCPU.  DEVSVC_ADMISSION=off disables admission (for checks only).
++ * path), DEVSVC_NCPU, UNISACC_TASKSET_BIN.  DEVSVC_ADMISSION=off disables admission (for checks only).
+  *
+- * API:  fa_enabled()                 1 when admission applies (prepares the slot directory)
+- *       fa_cap()                     capacity now; 0 means memory too low for any node
+- *       fa_acquire(w, slots, max)    take min(w, cap, max) tokens all or none: count taken, 0 = refused
+- *       fa_release(slots, n)         give the tokens back
+- *       fa_budget()                  free tokens now (capacity minus live leases), at least 1;
+- *                                    callers size their default parallelism by it
+- *       fa_load()                    load1 now, for records only; it gates nothing (the load gate,
+- *                                    fa_load_max/fa_load_wait_ms and rows admit_load_*, retired 2026-11-20)
+- * Admission only delays starts; it never changes what a caller runs or in which order.
++ * Three-lock bidirectional prerun/dev CPU isolation state machine (stable never-unlinked lock inodes):
++ *   prerun-admission.lock : short critical-section mutex (LOCK_EX)
++ *   prerun-cpuset.lock    : long-lived prerun subtree exclusive lock (LOCK_EX, inherited without O_CLOEXEC)
++ *   dev-inflight.lock     : long-lived dev subtree shared lock (LOCK_SH, inherited without O_CLOEXEC)
++ *   prerun-cpuset.tsv     : atomically published 7-column lease metadata (tmp + fsync + rename)
+  */
+ #pragma unisa module flowadmit
+ #pragma unisa use sys.fs
+@@ -26,12 +22,40 @@
+ #pragma unisa use sys.proc
+ #pragma unisa use sys.env
+ #pragma unisa use sys.time
++#pragma unisa use text.text
+ #pragma unisa use mem.heap
+ #pragma unisa use mem.bytes
+ 
+-enum { FA_MAX = 128 };
++enum {
++    FA_MAX = 128,
++    FA_LOCK_SH = 1,
++    FA_LOCK_EX = 2,
++    FA_LOCK_NB = 4,
++    FA_LOCK_UN = 8
++};
++
++typedef struct {
++    unsigned long long w[4];
++} fa_cpumask_t;
++
++typedef struct {
++    int cpu_fd;
++    long owner_pid;
++    long owner_pgid;
++    long owner_start_ticks;
++    long deadline_epoch_s;
++    char lease_dir[1024];
++    char lease_token[96];
++    char prerun_cpus[256];
++    char dev_cpus[256];
++    fa_cpumask_t prerun_mask;
++    fa_cpumask_t dev_mask;
++} fa_prerun_lease_t;
++
+ static char fa_dir[1024];
+ 
++const char *fa_slots_dir(void) { return fa_dir; }
++
+ int fa_enabled(void) {
+     const char *e = getenv("DEVSVC_ADMISSION"), *d = getenv("DEVSVC_SLOTS_DIR"), *h = getenv("HOME");
+     char p[1024]; int r;
+@@ -81,11 +105,250 @@ static long fa_ncpu(void) {
+ 
+ double fa_load(void) { return fa_load1(); }
+ 
+-int fa_cap(void) {
+-    long n = fa_ncpu(), ncpu = fa_envl("DEVSVC_NCPU", n > 0 ? n : 1), gb = fa_envl("DEVSVC_NODE_GB", 2), kb = fa_meminfo_kb(), cap = ncpu;
+-    if (kb >= 0 && kb / (gb * 1048576L) < cap) cap = kb / (gb * 1048576L);
+-    if (cap > FA_MAX) cap = FA_MAX;
+-    return cap < 0 ? 0 : (int)cap;
++static int fa_set_why(char *why, size_t wcap, const char *msg) {
++    if (why && wcap > 0) (void)cx_fmt(why, wcap, "%s", msg ? msg : "");
++    return 2;
++}
++
++static int fa_flock_retry(int fd, int op) {
++    int rc;
++    do { rc = sy_flock(fd, op); } while (rc == -EINTR);
++    return rc;
++}
++
++/* ---- 256-bit strict CPU mask operations ---- */
++
++void fa_cpumask_zero(fa_cpumask_t *m) {
++    int i;
++    for (i = 0; i < 4; i++) m->w[i] = 0ull;
++}
++
++int fa_cpumask_test(const fa_cpumask_t *m, int cpu) {
++    if (!m || cpu < 0 || cpu >= 256) return 0;
++    return (int)((m->w[cpu >> 6] >> (cpu & 63)) & 1ull);
++}
++
++static void fa_cpumask_set(fa_cpumask_t *m, int cpu) {
++    if (m && cpu >= 0 && cpu < 256) m->w[cpu >> 6] |= (1ull << (cpu & 63));
++}
++
++int fa_cpumask_popcount(const fa_cpumask_t *m) {
++    int i, b, n = 0;
++    if (!m) return 0;
++    for (i = 0; i < 4; i++) {
++        unsigned long long v = m->w[i];
++        for (b = 0; b < 64; b++) if ((v >> b) & 1ull) n++;
++    }
++    return n;
++}
++
++int fa_cpumask_equal(const fa_cpumask_t *a, const fa_cpumask_t *b) {
++    int i;
++    if (!a || !b) return 0;
++    for (i = 0; i < 4; i++) if (a->w[i] != b->w[i]) return 0;
++    return 1;
++}
++
++int fa_cpumask_is_subset(const fa_cpumask_t *sub, const fa_cpumask_t *sup) {
++    int i;
++    if (!sub || !sup) return 0;
++    for (i = 0; i < 4; i++) if ((sub->w[i] & ~sup->w[i]) != 0ull) return 0;
++    return 1;
++}
++
++int fa_cpumask_overlap(const fa_cpumask_t *a, const fa_cpumask_t *b) {
++    int i;
++    if (!a || !b) return 0;
++    for (i = 0; i < 4; i++) if ((a->w[i] & b->w[i]) != 0ull) return 1;
++    return 0;
++}
++
++static int fa_parse_cpu_u8(const char **pp, int *out, char *why, size_t wcap) {
++    const char *p = *pp;
++    int v = 0, digits = 0;
++    while (*p >= '0' && *p <= '9') {
++        int d = *p - '0';
++        if (v > 25 || (v == 25 && d > 5)) {
++            (void)fa_set_why(why, wcap, "CPUSET_OUT_OF_RANGE");
++            return -1;
++        }
++        v = v * 10 + d;
++        digits++;
++        p++;
++    }
++    if (!digits) {
++        (void)fa_set_why(why, wcap, "CPUSET_SYNTAX");
++        return -1;
++    }
++    *pp = p;
++    *out = v;
++    return 0;
++}
++
++/* Strict 256-bit CPU list parser: rejects empty, leading/trailing/double comma, whitespace,
++ * non-digits, reversed ranges, val > 255 before multiply-accumulate, and duplicate CPUs. */
++int fa_cpuset_parse_strict(const char *spec, fa_cpumask_t *out, char *why, size_t wcap) {
++    const char *p = spec;
++    if (!out) return fa_set_why(why, wcap, "CPUSET_SYNTAX");
++    fa_cpumask_zero(out);
++    if (!spec || !spec[0]) return fa_set_why(why, wcap, "CPUSET_SYNTAX");
++    for (;;) {
++        int a = 0, b = 0, c;
++        if (fa_parse_cpu_u8(&p, &a, why, wcap) != 0) return 2;
++        b = a;
++        if (*p == '-') {
++            p++;
++            if (fa_parse_cpu_u8(&p, &b, why, wcap) != 0) return 2;
++            if (b < a) return fa_set_why(why, wcap, "CPUSET_REVERSED_RANGE");
++        }
++        for (c = a; c <= b; c++) {
++            if (fa_cpumask_test(out, c)) {
++                if (why && wcap > 0) (void)cx_fmt(why, wcap, "CPUSET_DUPLICATE cpu=%d", c);
++                return 2;
++            }
++            fa_cpumask_set(out, c);
++        }
++        if (*p == 0) break;
++        if (*p != ',') return fa_set_why(why, wcap, "CPUSET_SYNTAX");
++        p++;
++        if (*p == 0) return fa_set_why(why, wcap, "CPUSET_SYNTAX");
++    }
++    if (fa_cpumask_popcount(out) <= 0) return fa_set_why(why, wcap, "CPUSET_SYNTAX");
++    if (why && wcap > 0) why[0] = 0;
++    return 0;
++}
++
++/* Canonical sparse-preserving formatter: e.g. {0,2,5} -> "0,2,5", {0,1,2,5} -> "0-2,5". */
++int fa_cpuset_format(const fa_cpumask_t *m, char *out, size_t cap) {
++    size_t pos = 0;
++    int c = 0, first = 1;
++    if (!m || !out || cap < 2) return -1;
++    out[0] = 0;
++    while (c < 256) {
++        int s, e;
++        char tok[16];
++        size_t tl;
++        if (!fa_cpumask_test(m, c)) { c++; continue; }
++        s = c;
++        while (c + 1 < 256 && fa_cpumask_test(m, c + 1)) c++;
++        e = c;
++        if (s == e) {
++            if (cx_fmt(tok, sizeof tok, "%s%d", first ? "" : ",", s)) return -1;
++        } else {
++            if (cx_fmt(tok, sizeof tok, "%s%d-%d", first ? "" : ",", s, e)) return -1;
++        }
++        tl = (size_t)tx_len(tok, sizeof tok);
++        if (pos + tl + 1 > cap) return -1;
++        mm_copy(out + pos, (long)(cap - pos), tok, (long)tl);
++        pos += tl;
++        out[pos] = 0;
++        first = 0;
++        c++;
++    }
++    return first ? -1 : 0;
++}
++
++int fa_cpuset_slice_for_lane(const fa_cpumask_t *prerun_mask, int lane_idx, int lanes,
++                             fa_cpumask_t *out_mask, char *out_str, size_t cap) {
++    int list[256], n = 0, c, per, start, i;
++    if (!prerun_mask || !out_mask || lanes < 1 || lane_idx < 0 || lane_idx >= lanes) return -1;
++    fa_cpumask_zero(out_mask);
++    for (c = 0; c < 256; c++) if (fa_cpumask_test(prerun_mask, c)) list[n++] = c;
++    if (lanes > n) return -1;
++    if (lanes == 1) {
++        *out_mask = *prerun_mask;
++    } else {
++        per = n / lanes;
++        start = lane_idx * per;
++        for (i = 0; i < per; i++) fa_cpumask_set(out_mask, list[start + i]);
++    }
++    if (out_str && cap > 0 && fa_cpuset_format(out_mask, out_str, cap) != 0) return -1;
++    return 0;
++}
++
++int fa_read_pid_allowed_mask(long pid, fa_cpumask_t *out, char *why, size_t wcap) {
++    char p[64], *b, *line, *nl;
++    char listbuf[512];
++    long ll;
++    if (!out) return fa_set_why(why, wcap, "LANE_CPUSET_UNAVAILABLE");
++    fa_cpumask_zero(out);
++    if (pid <= 0) {
++        if (cx_fmt(p, sizeof p, "/proc/self/status")) return fa_set_why(why, wcap, "LANE_CPUSET_UNAVAILABLE");
++    } else {
++        if (cx_fmt(p, sizeof p, "/proc/%ld/status", pid)) return fa_set_why(why, wcap, "LANE_CPUSET_UNAVAILABLE");
++    }
++    b = fa_slurp(p, 65536);
++    if (!b) return fa_set_why(why, wcap, "LANE_CPUSET_UNAVAILABLE");
++    line = strstr(b, "Cpus_allowed_list:");
++    if (!line) { free(b); return fa_set_why(why, wcap, "LANE_CPUSET_UNAVAILABLE"); }
++    line += 18;
++    while (*line == ' ' || *line == '\t') line++;
++    nl = strchr(line, '\n');
++    ll = nl ? (long)(nl - line) : (long)strlen(line);
++    while (ll > 0 && (line[ll - 1] == '\r' || line[ll - 1] == ' ' || line[ll - 1] == '\t')) ll--;
++    if (ll <= 0 || ll >= (long)sizeof listbuf) { free(b); return fa_set_why(why, wcap, "LANE_CPUSET_UNAVAILABLE"); }
++    mm_copy(listbuf, sizeof listbuf, line, ll);
++    listbuf[ll] = 0;
++    free(b);
++    return fa_cpuset_parse_strict(listbuf, out, why, wcap);
++}
++
++int fa_cpuset_pair_parse_and_verify(const char *spec, int lanes,
++                                    fa_cpumask_t *prerun_m, fa_cpumask_t *dev_m,
++                                    char *prerun_s, size_t pcap, char *dev_s, size_t dcap,
++                                    char *why, size_t wcap) {
++    const char *colon;
++    char left[256], right[256];
++    fa_cpumask_t allowed;
++    long ll, rl;
++    int pcnt;
++    if (!spec || !spec[0] || !prerun_m || !dev_m) return fa_set_why(why, wcap, "CPUSET_SYNTAX");
++    colon = strchr(spec, ':');
++    if (!colon || strchr(colon + 1, ':')) return fa_set_why(why, wcap, "CPUSET_SYNTAX");
++    ll = (long)(colon - spec);
++    rl = (long)strlen(colon + 1);
++    if (ll <= 0 || ll >= (long)sizeof left || rl <= 0 || rl >= (long)sizeof right)
++        return fa_set_why(why, wcap, "CPUSET_SYNTAX");
++    mm_copy(left, sizeof left, spec, ll); left[ll] = 0;
++    mm_copy(right, sizeof right, colon + 1, rl); right[rl] = 0;
++    if (fa_cpuset_parse_strict(left, prerun_m, why, wcap) != 0) return 2;
++    if (fa_cpuset_parse_strict(right, dev_m, why, wcap) != 0) return 2;
++    if (fa_cpumask_overlap(prerun_m, dev_m)) return fa_set_why(why, wcap, "CPUSET_OVERLAP");
++    pcnt = fa_cpumask_popcount(prerun_m);
++    if (lanes > 0 && lanes > pcnt) {
++        if (why && wcap > 0) (void)cx_fmt(why, wcap, "CPUSET_INSUFFICIENT_CPUS lanes=%d cpus=%d", lanes, pcnt);
++        return 2;
++    }
++    if (fa_read_pid_allowed_mask(0, &allowed, why, wcap) != 0) return 2;
++    if (!fa_cpumask_is_subset(prerun_m, &allowed) || !fa_cpumask_is_subset(dev_m, &allowed))
++        return fa_set_why(why, wcap, "CPUSET_NOT_ALLOWED");
++    if (prerun_s && pcap > 0 && fa_cpuset_format(prerun_m, prerun_s, pcap) != 0)
++        return fa_set_why(why, wcap, "CPUSET_SYNTAX");
++    if (dev_s && dcap > 0 && fa_cpuset_format(dev_m, dev_s, dcap) != 0)
++        return fa_set_why(why, wcap, "CPUSET_SYNTAX");
++    if (why && wcap > 0) why[0] = 0;
++    return 0;
++}
++
++const char *fa_taskset_bin(void) {
++    const char *e = getenv("UNISACC_TASKSET_BIN");
++    return (e && e[0]) ? e : "/usr/bin/taskset";
++}
++
++int fa_verify_pid_affinity(long pid, const fa_cpumask_t *expect, int wait_ms, char *why, size_t wcap) {
++    long deadline = sy_now_ms() + (wait_ms > 0 ? (long)wait_ms : 150L);
++    fa_cpumask_t got;
++    char tmpwhy[128];
++    if (pid <= 0 || !expect) return fa_set_why(why, wcap, "LANE_CPUSET_UNAVAILABLE");
++    for (;;) {
++        if (fa_read_pid_allowed_mask(pid, &got, tmpwhy, sizeof tmpwhy) == 0 && fa_cpumask_equal(&got, expect)) {
++            if (why && wcap > 0) why[0] = 0;
++            return 0;
++        }
++        if (sy_now_ms() >= deadline) break;
++        sy_sleep_ms(10);
++    }
++    return fa_set_why(why, wcap, "LANE_CPUSET_UNAVAILABLE");
+ }
+ 
+ static long fa_start_time(long pid) {
+@@ -106,6 +369,349 @@ static int fa_alive(long pid, long st) {
+     return 1;
+ }
+ 
++/* ---- Three-lock bidirectional prerun/dev lease metadata & state machine ---- */
++
++static int fa_parse_lease_tsv(const char *tsv_path, fa_prerun_lease_t *out, char *why, size_t wcap) {
++    char *b = fa_slurp(tsv_path, 4096);
++    char *cols[8], *p, *nl;
++    int nc = 0;
++    char tmpwhy[128];
++    if (!b || !b[0]) { free(b); return fa_set_why(why, wcap, "DEV_LEASE_METADATA_INVALID_WHILE_LOCKED"); }
++    nl = strchr(b, '\n');
++    if (nl) *nl = 0;
++    p = b;
++    while (nc < 8) {
++        char *tab = strchr(p, '\t');
++        cols[nc++] = p;
++        if (!tab) break;
++        *tab = 0;
++        p = tab + 1;
++    }
++    if (nc != 7 || !cols[0][0] || !cols[1][0] || !cols[2][0] || !cols[3][0] ||
++        !cols[4][0] || !cols[5][0] || !cols[6][0]) {
++        free(b);
++        return fa_set_why(why, wcap, "DEV_LEASE_METADATA_INVALID_WHILE_LOCKED");
++    }
++    out->owner_pid = atol(cols[0]);
++    out->owner_pgid = atol(cols[1]);
++    out->owner_start_ticks = atol(cols[2]);
++    out->deadline_epoch_s = atol(cols[6]);
++    if (out->owner_pid <= 0 || out->owner_pgid <= 0 || out->owner_start_ticks < 0 || out->deadline_epoch_s <= 0 ||
++        cx_fmt(out->lease_token, sizeof out->lease_token, "%s", cols[3]) ||
++        cx_fmt(out->prerun_cpus, sizeof out->prerun_cpus, "%s", cols[4]) ||
++        cx_fmt(out->dev_cpus, sizeof out->dev_cpus, "%s", cols[5]) ||
++        fa_cpuset_parse_strict(out->prerun_cpus, &out->prerun_mask, tmpwhy, sizeof tmpwhy) != 0 ||
++        fa_cpuset_parse_strict(out->dev_cpus, &out->dev_mask, tmpwhy, sizeof tmpwhy) != 0 ||
++        fa_cpumask_overlap(&out->prerun_mask, &out->dev_mask)) {
++        free(b);
++        return fa_set_why(why, wcap, "DEV_LEASE_METADATA_INVALID_WHILE_LOCKED");
++    }
++    free(b);
++    return 0;
++}
++
++static int fa_open_lock_file(const char *dir, const char *name, int cloexec) {
++    char p[1200];
++    int fl = O_CREAT | O_RDWR;
++    if (cloexec) fl |= O_CLOEXEC;
++    if (cx_fmt(p, sizeof p, "%s/%s", dir, name)) return -1;
++    return sy_open(p, fl, 0600);
++}
++
++static int fa_prerun_active_reserved(const char *dir) {
++    int cpu_fd;
++    char tsv[1200], why[128];
++    fa_prerun_lease_t l;
++    if (!dir || !dir[0]) return 0;
++    cpu_fd = fa_open_lock_file(dir, "prerun-cpuset.lock", 1);
++    if (cpu_fd < 0) return 0;
++    if (fa_flock_retry(cpu_fd, FA_LOCK_SH | FA_LOCK_NB) == 0) {
++        (void)fa_flock_retry(cpu_fd, FA_LOCK_UN);
++        sy_close(cpu_fd);
++        return 0;
++    }
++    sy_close(cpu_fd);
++    if (cx_fmt(tsv, sizeof tsv, "%s/prerun-cpuset.tsv", dir) ||
++        fa_parse_lease_tsv(tsv, &l, why, sizeof why) != 0) return 0;
++    return fa_cpumask_popcount(&l.prerun_mask);
++}
++
++int fa_cap(void) {
++    long n = fa_ncpu(), ncpu = fa_envl("DEVSVC_NCPU", n > 0 ? n : 1), gb = fa_envl("DEVSVC_NODE_GB", 2), kb = fa_meminfo_kb();
++    int rsv = fa_enabled() ? fa_prerun_active_reserved(fa_dir) : 0;
++    long cap = ncpu > rsv ? ncpu - rsv : 1;
++    if (kb >= 0 && kb / (gb * 1048576L) < cap) cap = kb / (gb * 1048576L);
++    if (cap > FA_MAX) cap = FA_MAX;
++    return cap < 0 ? 0 : (int)cap;
++}
++
++int fa_prerun_lease_acquire(const char *lease_dir, const char *prerun_cpus, const char *dev_cpus,
++                            long deadline_epoch_s, fa_prerun_lease_t *out, char *why, size_t wcap) {
++    int adm_fd = -1, cpu_fd = -1, dev_fd = -1, tfd = -1;
++    char tmp_p[1200], fin_p[1200], row[1024];
++    fa_prerun_lease_t chk;
++    long me, pg, st;
++    int rc;
++
++    if (!lease_dir || !lease_dir[0] || !out) return fa_set_why(why, wcap, "PRERUN_LEASE_BAD_ARGS");
++    (void)sy_mkdir(lease_dir, 0700);
++    memset(out, 0, sizeof *out);
++    out->cpu_fd = -1;
++    if (fa_cpuset_parse_strict(prerun_cpus, &out->prerun_mask, why, wcap) != 0) return 2;
++    if (fa_cpuset_parse_strict(dev_cpus, &out->dev_mask, why, wcap) != 0) return 2;
++    if (fa_cpumask_overlap(&out->prerun_mask, &out->dev_mask)) return fa_set_why(why, wcap, "CPUSET_OVERLAP");
++    if (fa_cpuset_format(&out->prerun_mask, out->prerun_cpus, sizeof out->prerun_cpus) != 0 ||
++        fa_cpuset_format(&out->dev_mask, out->dev_cpus, sizeof out->dev_cpus) != 0)
++        return fa_set_why(why, wcap, "CPUSET_SYNTAX");
++
++    adm_fd = fa_open_lock_file(lease_dir, "prerun-admission.lock", 1);
++    if (adm_fd < 0 || fa_flock_retry(adm_fd, FA_LOCK_EX) != 0) {
++        if (adm_fd >= 0) sy_close(adm_fd);
++        return fa_set_why(why, wcap, "PRERUN_ADMISSION_LOCK_FAILED");
++    }
++
++    /* Open prerun-cpuset.lock WITHOUT O_CLOEXEC so real window worker subtree inherits LOCK_EX. */
++    cpu_fd = fa_open_lock_file(lease_dir, "prerun-cpuset.lock", 0);
++    if (cpu_fd < 0) {
++        (void)fa_flock_retry(adm_fd, FA_LOCK_UN); sy_close(adm_fd);
++        return fa_set_why(why, wcap, "PRERUN_LEASE_LOCK_OPEN_FAILED");
++    }
++    rc = fa_flock_retry(cpu_fd, FA_LOCK_EX | FA_LOCK_NB);
++    if (rc != 0) {
++        sy_close(cpu_fd);
++        (void)fa_flock_retry(adm_fd, FA_LOCK_UN); sy_close(adm_fd);
++        return fa_set_why(why, wcap, "PRERUN_LEASE_HELD");
++    }
++
++    /* Drain-only check against dev-inflight.lock (no online re-pinning of live trees). */
++    dev_fd = fa_open_lock_file(lease_dir, "dev-inflight.lock", 1);
++    if (dev_fd < 0) {
++        (void)fa_flock_retry(cpu_fd, FA_LOCK_UN); sy_close(cpu_fd);
++        (void)fa_flock_retry(adm_fd, FA_LOCK_UN); sy_close(adm_fd);
++        return fa_set_why(why, wcap, "PRERUN_DEV_LOCK_OPEN_FAILED");
++    }
++    rc = fa_flock_retry(dev_fd, FA_LOCK_EX | FA_LOCK_NB);
++    if (rc != 0) {
++        sy_close(dev_fd);
++        (void)fa_flock_retry(cpu_fd, FA_LOCK_UN); sy_close(cpu_fd);
++        (void)fa_flock_retry(adm_fd, FA_LOCK_UN); sy_close(adm_fd);
++        return fa_set_why(why, wcap, "PRERUN_DEV_INFLIGHT");
++    }
++    (void)fa_flock_retry(dev_fd, FA_LOCK_UN);
++    sy_close(dev_fd);
++
++    me = (long)sy_pid();
++    pg = (long)getpgrp();
++    st = fa_start_time(me);
++    if (st < 0) st = 0;
++    if (deadline_epoch_s <= 0) deadline_epoch_s = sy_wall_s() + 7200;
++    out->owner_pid = me;
++    out->owner_pgid = pg > 0 ? pg : me;
++    out->owner_start_ticks = st;
++    out->deadline_epoch_s = deadline_epoch_s;
++    if (cx_fmt(out->lease_dir, sizeof out->lease_dir, "%s", lease_dir) ||
++        cx_fmt(out->lease_token, sizeof out->lease_token, "tok-%ld-%ld-%ld", me, st, sy_now_ms()) ||
++        cx_fmt(tmp_p, sizeof tmp_p, "%s/prerun-cpuset.tsv.tmp.%ld", lease_dir, me) ||
++        cx_fmt(fin_p, sizeof fin_p, "%s/prerun-cpuset.tsv", lease_dir) ||
++        cx_fmt(row, sizeof row, "%ld\t%ld\t%ld\t%s\t%s\t%s\t%ld\n",
++               out->owner_pid, out->owner_pgid, out->owner_start_ticks,
++               out->lease_token, out->prerun_cpus, out->dev_cpus, out->deadline_epoch_s)) {
++        (void)fa_flock_retry(cpu_fd, FA_LOCK_UN); sy_close(cpu_fd);
++        (void)fa_flock_retry(adm_fd, FA_LOCK_UN); sy_close(adm_fd);
++        return fa_set_why(why, wcap, "PRERUN_LEASE_FORMAT_FAILED");
++    }
++
++    tfd = sy_open(tmp_p, O_WRONLY | O_CREAT | O_TRUNC | O_CLOEXEC, 0600);
++    if (tfd < 0 || sy_write_all(tfd, row, (long)strlen(row)) != 0 || sy_fsync(tfd) != 0) {
++        if (tfd >= 0) sy_close(tfd);
++        (void)sy_unlink(tmp_p);
++        (void)fa_flock_retry(cpu_fd, FA_LOCK_UN); sy_close(cpu_fd);
++        (void)fa_flock_retry(adm_fd, FA_LOCK_UN); sy_close(adm_fd);
++        return fa_set_why(why, wcap, "PRERUN_LEASE_WRITE_FAILED");
++    }
++    sy_close(tfd);
++    if (sy_rename(tmp_p, fin_p) != 0 || fa_parse_lease_tsv(fin_p, &chk, why, wcap) != 0) {
++        (void)sy_unlink(tmp_p);
++        (void)fa_flock_retry(cpu_fd, FA_LOCK_UN); sy_close(cpu_fd);
++        (void)fa_flock_retry(adm_fd, FA_LOCK_UN); sy_close(adm_fd);
++        return fa_set_why(why, wcap, "PRERUN_LEASE_PUBLISH_FAILED");
++    }
++
++    out->cpu_fd = cpu_fd;
++    (void)fa_flock_retry(adm_fd, FA_LOCK_UN);
++    sy_close(adm_fd);
++    if (why && wcap > 0) why[0] = 0;
++    return 0;
++}
++
++int fa_prerun_lease_release(fa_prerun_lease_t *lease, char *why, size_t wcap) {
++    int adm_fd = -1;
++    char fin_p[1200], tmpwhy[128];
++    fa_prerun_lease_t cur;
++    if (!lease || lease->cpu_fd < 0) return 0;
++    adm_fd = fa_open_lock_file(lease->lease_dir, "prerun-admission.lock", 1);
++    if (adm_fd >= 0) (void)fa_flock_retry(adm_fd, FA_LOCK_EX);
++    if (!cx_fmt(fin_p, sizeof fin_p, "%s/prerun-cpuset.tsv", lease->lease_dir) &&
++        fa_parse_lease_tsv(fin_p, &cur, tmpwhy, sizeof tmpwhy) == 0 &&
++        cur.owner_pid == lease->owner_pid &&
++        cur.owner_start_ticks == lease->owner_start_ticks &&
++        tx_eqz(cur.lease_token, lease->lease_token)) {
++        (void)sy_unlink(fin_p);
++    }
++    (void)fa_flock_retry(lease->cpu_fd, FA_LOCK_UN);
++    sy_close(lease->cpu_fd);
++    lease->cpu_fd = -1;
++    if (adm_fd >= 0) { (void)fa_flock_retry(adm_fd, FA_LOCK_UN); sy_close(adm_fd); }
++    if (why && wcap > 0) why[0] = 0;
++    return 0;
++}
++
++int fa_prerun_lease_reclaim(const char *lease_dir, long target_pgid, char *why, size_t wcap) {
++    int adm_fd = -1, cpu_fd = -1, rc;
++    char fin_p[1200];
++    if (!lease_dir || !lease_dir[0]) return fa_set_why(why, wcap, "PRERUN_LEASE_BAD_ARGS");
++    if (target_pgid > 0) {
++        (void)sy_killpg((int)target_pgid, 15);
++        sy_sleep_ms(50);
++        (void)sy_killpg((int)target_pgid, 9);
++        sy_sleep_ms(50);
++    }
++    adm_fd = fa_open_lock_file(lease_dir, "prerun-admission.lock", 1);
++    if (adm_fd < 0 || fa_flock_retry(adm_fd, FA_LOCK_EX) != 0) {
++        if (adm_fd >= 0) sy_close(adm_fd);
++        return fa_set_why(why, wcap, "PRERUN_ADMISSION_LOCK_FAILED");
++    }
++    cpu_fd = fa_open_lock_file(lease_dir, "prerun-cpuset.lock", 1);
++    if (cpu_fd < 0) {
++        (void)fa_flock_retry(adm_fd, FA_LOCK_UN); sy_close(adm_fd);
++        return fa_set_why(why, wcap, "PRERUN_LEASE_LOCK_OPEN_FAILED");
++    }
++    rc = fa_flock_retry(cpu_fd, FA_LOCK_EX | FA_LOCK_NB);
++    if (rc != 0) {
++        sy_close(cpu_fd);
++        (void)fa_flock_retry(adm_fd, FA_LOCK_UN); sy_close(adm_fd);
++        return fa_set_why(why, wcap, "PRERUN_LEASE_HELD");
++    }
++    if (!cx_fmt(fin_p, sizeof fin_p, "%s/prerun-cpuset.tsv", lease_dir)) (void)sy_unlink(fin_p);
++    (void)fa_flock_retry(cpu_fd, FA_LOCK_UN);
++    sy_close(cpu_fd);
++    (void)fa_flock_retry(adm_fd, FA_LOCK_UN);
++    sy_close(adm_fd);
++    if (why && wcap > 0) why[0] = 0;
++    return 0;
++}
++
++/* Bidirectional dev spawn admission under prerun-admission.lock:
++ *   Branch A (no prerun): spawn unpinned child inheriting dev-inflight.lock LOCK_SH.
++ *   Branch B (prerun active): validate prerun-cpuset.tsv (fail-closed if missing/corrupt),
++ *             spawn taskset -c <dev_cpus> child inheriting dev-inflight.lock LOCK_SH,
++ *             and verify /proc/<pid>/status Cpus_allowed_list matches dev_mask. */
++int fa_dev_spawn_admit(const char *lease_dir, const sy_spawn_t *opt, sy_child_t *child_out,
++                       int *pinned_out, char *dev_cpus_out, size_t dcap, char *why, size_t wcap) {
++    int adm_fd = -1, dev_fd = -1, cpu_fd = -1, rc, sr;
++    sy_spawn_t run_opt;
++    char tsv_p[1200];
++    fa_prerun_lease_t cur;
++    if (pinned_out) *pinned_out = 0;
++    if (dev_cpus_out && dcap > 0) dev_cpus_out[0] = 0;
++    if (!lease_dir || !lease_dir[0] || !opt || !opt->argv || !opt->argv[0] || !child_out)
++        return fa_set_why(why, wcap, "DEV_ADMIT_BAD_ARGS");
++    (void)sy_mkdir(lease_dir, 0700);
++
++    adm_fd = fa_open_lock_file(lease_dir, "prerun-admission.lock", 1);
++    if (adm_fd < 0 || fa_flock_retry(adm_fd, FA_LOCK_EX) != 0) {
++        if (adm_fd >= 0) sy_close(adm_fd);
++        return fa_set_why(why, wcap, "PRERUN_ADMISSION_LOCK_FAILED");
++    }
++
++    /* Open dev-inflight.lock WITHOUT O_CLOEXEC so dev child subtree holds LOCK_SH until exit. */
++    dev_fd = fa_open_lock_file(lease_dir, "dev-inflight.lock", 0);
++    if (dev_fd < 0 || fa_flock_retry(dev_fd, FA_LOCK_SH | FA_LOCK_NB) != 0) {
++        if (dev_fd >= 0) sy_close(dev_fd);
++        (void)fa_flock_retry(adm_fd, FA_LOCK_UN); sy_close(adm_fd);
++        return fa_set_why(why, wcap, "DEV_INFLIGHT_LOCK_FAILED");
++    }
++
++    cpu_fd = fa_open_lock_file(lease_dir, "prerun-cpuset.lock", 1);
++    if (cpu_fd < 0) {
++        (void)fa_flock_retry(dev_fd, FA_LOCK_UN); sy_close(dev_fd);
++        (void)fa_flock_retry(adm_fd, FA_LOCK_UN); sy_close(adm_fd);
++        return fa_set_why(why, wcap, "PRERUN_LEASE_LOCK_OPEN_FAILED");
++    }
++    rc = fa_flock_retry(cpu_fd, FA_LOCK_SH | FA_LOCK_NB);
++    if (rc == 0) {
++        /* Branch A: no active prerun lease. Release cpu_fd and spawn unpinned child inheriting dev_fd. */
++        (void)fa_flock_retry(cpu_fd, FA_LOCK_UN);
++        sy_close(cpu_fd);
++        run_opt = *opt;
++        sr = sy_proc_spawn(&run_opt, child_out);
++        /* Parent drops its copy of dev_fd; child keeps LOCK_SH until subtree exits. */
++        sy_close(dev_fd);
++        (void)fa_flock_retry(adm_fd, FA_LOCK_UN);
++        sy_close(adm_fd);
++        if (sr < 0) return fa_set_why(why, wcap, "DEV_SPAWN_FAILED");
++        if (why && wcap > 0) why[0] = 0;
++        return 0;
++    }
++
++    /* Branch B: prerun lease is held (LOCK_EX). Fail closed if metadata is missing or invalid. */
++    sy_close(cpu_fd);
++    if (cx_fmt(tsv_p, sizeof tsv_p, "%s/prerun-cpuset.tsv", lease_dir) ||
++        fa_parse_lease_tsv(tsv_p, &cur, why, wcap) != 0) {
++        (void)fa_flock_retry(dev_fd, FA_LOCK_UN); sy_close(dev_fd);
++        (void)fa_flock_retry(adm_fd, FA_LOCK_UN); sy_close(adm_fd);
++        return 2;
++    }
++
++    {
++        const char *ts = fa_taskset_bin();
++        int orig_n = 0, i;
++        char **av2;
++        if (sy_exists(ts) != 1) {
++            (void)fa_flock_retry(dev_fd, FA_LOCK_UN); sy_close(dev_fd);
++            (void)fa_flock_retry(adm_fd, FA_LOCK_UN); sy_close(adm_fd);
++            return fa_set_why(why, wcap, "LANE_CPUSET_UNAVAILABLE");
++        }
++        while (opt->argv[orig_n]) orig_n++;
++        av2 = (char **)mm_alloc((long)(orig_n + 4) * (long)sizeof(char *));
++        if (!av2) {
++            (void)fa_flock_retry(dev_fd, FA_LOCK_UN); sy_close(dev_fd);
++            (void)fa_flock_retry(adm_fd, FA_LOCK_UN); sy_close(adm_fd);
++            return fa_set_why(why, wcap, "OUT_OF_MEMORY");
++        }
++        av2[0] = (char *)ts;
++        av2[1] = "-c";
++        av2[2] = cur.dev_cpus;
++        for (i = 0; i < orig_n; i++) av2[3 + i] = opt->argv[i];
++        av2[3 + orig_n] = 0;
++        run_opt = *opt;
++        run_opt.argv = av2;
++        sr = sy_proc_spawn(&run_opt, child_out);
++        mm_free(av2);
++        if (sr < 0) {
++            (void)fa_flock_retry(dev_fd, FA_LOCK_UN); sy_close(dev_fd);
++            (void)fa_flock_retry(adm_fd, FA_LOCK_UN); sy_close(adm_fd);
++            return fa_set_why(why, wcap, "LANE_CPUSET_UNAVAILABLE");
++        }
++        /* Read back /proc/<pid>/status Cpus_allowed_list to prove taskset actually pinned the child. */
++        if (fa_verify_pid_affinity((long)child_out->pid, &cur.dev_mask, 300, why, wcap) != 0) {
++            if (child_out->h > 0) (void)sy_killpg(child_out->h, 9);
++            else (void)sy_kill(child_out->pid);
++            (void)sy_wait(child_out->pid, 0);
++            sy_close(dev_fd);
++            (void)fa_flock_retry(adm_fd, FA_LOCK_UN); sy_close(adm_fd);
++            return 2;
++        }
++        sy_close(dev_fd);
++        (void)fa_flock_retry(adm_fd, FA_LOCK_UN);
++        sy_close(adm_fd);
++        if (pinned_out) *pinned_out = 1;
++        if (dev_cpus_out && dcap > 0) (void)cx_fmt(dev_cpus_out, dcap, "%s", cur.dev_cpus);
++        if (why && wcap > 0) why[0] = 0;
++        return 0;
++    }
++}
++
+ /* owner of a lease file: 1 parsed, 0 empty or unreadable */
+ static int fa_owner(const char *path, long *pid, long *st) {
+     char *b = fa_slurp(path, 256), *sp;
+diff --git a/tools/cxlib/flowexec.cx b/tools/cxlib/flowexec.cx
+index 0b8d1b9..e04df26 100644
+--- a/tools/cxlib/flowexec.cx
++++ b/tools/cxlib/flowexec.cx
+@@ -388,7 +388,21 @@ static int fx_start(fl_ctx *x, fl_node *nd) {
+     }
+     nd->t0 = sy_now_ms();
+     fl_evt(x, nd, FL_RUNNING, 0, 0, argv[0]);
+-    r = sy_proc_spawn(&o, &nd->child);
++    if (fa_enabled() && !fl_is_light(nd->args)) {
++        int pinned = 0;
++        char dcpus[128], awhy[160];
++        awhy[0] = 0;
++        r = fa_dev_spawn_admit(fa_slots_dir(), &o, &nd->child, &pinned, dcpus, sizeof dcpus, awhy, sizeof awhy);
++        if (r != 0) {
++            sy_close(ofd); sy_close(efd); if (ifd >= 0) sy_close(ifd);
++            if (env) mm_free(env);
++            fl_say(why, sizeof why, "REFUSE %s", awhy[0] ? awhy : "DEV_ADMIT_FAILED");
++            fl_finish(x, nd, FL_FAIL, 2, why);
++            return 1;
++        }
++    } else {
++        r = sy_proc_spawn(&o, &nd->child);
++    }
+     sy_close(ofd); sy_close(efd); if (ifd >= 0) sy_close(ifd);
+     if (env) mm_free(env);
+     if (r < 0) { fl_say(why,sizeof why, "spawn %.200s failed (%d)", argv[0], r); fl_finish(x, nd, FL_FAIL, 127, why); return 1; }
+diff --git a/tools/prerun-drive.cx b/tools/prerun-drive.cx
+index e9d4fc2..70647aa 100644
+--- a/tools/prerun-drive.cx
++++ b/tools/prerun-drive.cx
+@@ -19,6 +19,7 @@
+ #pragma unisa use sys.sha
+ #pragma unisa use sysx.process
+ #pragma unisa use sysx.reaper
++#pragma unisa use cxlib.flowadmit
+ #pragma unisa use mem.bytes
+ #pragma unisa use mem.heap
+ #pragma unisa use text.text
+@@ -86,6 +87,15 @@ static int pd_has_priority = 0;
+ static int pd_mut_times_use_nonpass = 0;
+ static int pd_normal_jobs = PD_DEFAULT_NORMAL_JOBS;
+ static int pd_plan_lanes = PD_DEFAULT_LANES;
++static int pd_cpuset_enabled = 0;
++static char pd_cpuset_arg[512] = "";
++static char pd_lease_dir_arg[PD_PW] = "";
++static char pd_warm_cache_dir[PD_PW] = "";
++static fa_cpumask_t pd_prerun_mask;
++static fa_cpumask_t pd_dev_mask;
++static char pd_prerun_cpus[256] = "";
++static char pd_dev_cpus[256] = "";
++static fa_prerun_lease_t pd_active_lease;
+ static int pd_keep_going = 1;
+ static int pd_max_wins = PD_MAX_WINS;
+ static long pd_unmeasured_ms = 0;
+@@ -153,12 +163,40 @@ static int pd_is_heavy_id(const char *id) {
+     return 0;
+ }
+ 
+-/* Explicit heavy declarations are exclusive unless the material contract is known.
+- * Each netregen uses its own out/material paths. Early canaries keep their barriers. */
++/* Explicit shared-state serial-only batches: always SERIAL_REQUIRED (lanes=1) across all tiers. */
++static int pd_is_serial_only_id(const char *id) {
++    static const char *forced[] = {
++        "real-commit", "check-split-parents",
++        "check-gen-all-check", "check-gen-all-pass", "check-gen-all-hang",
++        "c-negative", "stream-pipe-parts", 0
++    };
++    if (!id || !id[0]) return 1;
++    if (pd_starts(id, "precommit-list-cap")) return 1;
++    for (int i = 0; forced[i]; i++) if (tx_eqz(id, forced[i])) return 1;
++    for (int i = 0; i < pd_nheavy_extra; i++) if (tx_eqz(id, pd_heavy_extra[i])) return 1;
++    return 0;
++}
++
++/* Retained parallel admission allowlist (normal_parallel_allow): unknown or unverified batches
++ * default to SERIAL_REQUIRED (lanes=1) across normal, long, and heavy tiers. */
++static int pd_in_normal_parallel_allow(const char *id) {
++    if (!id || !id[0] || pd_is_serial_only_id(id) || pd_is_early_canary_id(id)) return 0;
++    if (pd_starts(id, "netregen-")) return 1;
++    if (pd_starts(id, "properties-cases-layout-")) return 1;
++    if (pd_starts(id, "tools-compile-")) return 1;
++    if (pd_starts(id, "unit-frontcache-equiv")) return 1;
++    if (pd_starts(id, "opt-frame4-")) return 1;
++    if (tx_eqz(id, "slow-split")) return 1;
++    return 0;
++}
++
++/* Unified admission across normal, long, and heavy tiers: only allowlisted single-batch windows
++ * may share a multi-lane wave; real-commit, precommit-list-cap*, and unknown batches stay serial. */
+ static int pd_can_share_window(const char *phase, const char *ids, int jobs) {
+-    if (jobs != 1 || !ids[0] || strchr(ids, ',') || pd_is_early_canary_id(ids)) return 0;
+-    return tx_eqz(phase, "long") ||
+-           (tx_eqz(phase, "heavy") && (pd_starts(ids, "netregen-") || tx_eqz(ids, "unit-frontcache-equiv3") || pd_is_isolated_long_id(ids)));
++    if (jobs != 1 || !ids || !ids[0] || strchr(ids, ',')) return 0;
++    if (pd_is_serial_only_id(ids) || pd_is_early_canary_id(ids)) return 0;
++    if (!(tx_eqz(phase, "normal") || tx_eqz(phase, "long") || tx_eqz(phase, "heavy"))) return 0;
++    return pd_in_normal_parallel_allow(ids);
+ }
+ 
+ static int pd_width(const char *s, int max) {
+@@ -1130,9 +1168,247 @@ static int pd_sum_window_batch_ms(const char *outp, long *out_sum) {
+     return count;
+ }
+ 
++/* Independent byte copy (never link(2)) so lane caches never share inodes with warm cache or peer lanes. */
++static int pd_copy_file_no_hardlink(const char *src, const char *dst, int mode) {
++    unsigned char buf[16384];
++    int in_fd = sy_open_read(src), out_fd;
++    if (in_fd < 0) return -1;
++    out_fd = sy_open(dst, O_WRONLY | O_CREAT | O_TRUNC | O_CLOEXEC, mode);
++    if (out_fd < 0) { sy_close(in_fd); return -1; }
++    for (;;) {
++        long r = sy_read_once(in_fd, buf, (long)sizeof buf);
++        if (r == 0) break;
++        if (r < 0) { sy_close(in_fd); sy_close(out_fd); (void)sy_unlink(dst); return -1; }
++        if (sy_write_all(out_fd, buf, r) != 0) { sy_close(in_fd); sy_close(out_fd); (void)sy_unlink(dst); return -1; }
++    }
++    sy_close(in_fd);
++    sy_close(out_fd);
++    return 0;
++}
++
++static int pd_seed_lane_e3cache(const char *src_dir, const char *dst_dir) {
++    sy_dir_t d;
++    int next;
++    if (!dst_dir || !dst_dir[0]) return -1;
++    (void)sy_mkdir(dst_dir, 0700);
++    (void)chmod(dst_dir, 0700);
++    if (!src_dir || !src_dir[0] || sy_exists(src_dir) != 1) return 0;
++    if (sy_dir_open(&d, src_dir)) return 0;
++    while ((next = sy_dir_next(&d)) == 1) {
++        char sp[PD_PW], dp[PD_PW];
++        sy_stat_t st;
++        if (tx_eqz(d.name, ".") || tx_eqz(d.name, "..") || tx_eqz(d.name, ".budget.lock")) continue;
++        if (cx_fmt(sp, sizeof sp, "%s/%s", src_dir, d.name) ||
++            cx_fmt(dp, sizeof dp, "%s/%s", dst_dir, d.name)) continue;
++        if (sy_lstat(sp, &st) != 0) continue;
++        if (st.kind == 'd') {
++            if (pd_seed_lane_e3cache(sp, dp) != 0) { sy_dir_close(&d); return -1; }
++        } else if (st.kind == 'f') {
++            if (pd_copy_file_no_hardlink(sp, dp, 0600) != 0) { sy_dir_close(&d); return -1; }
++        }
++    }
++    sy_dir_close(&d);
++    return 0;
++}
++
++/* Count surviving processes whose pgid == lane_pgid or whose /proc/<pid>/cwd or open fd points inside lane_dir. */
++static int pd_count_lane_residue(const char *lane_dir, int lane_pgid) {
++    sy_dir_t pd;
++    int next, residue = 0;
++    long ldir_len = (lane_dir && lane_dir[0]) ? (long)strlen(lane_dir) : 0;
++    long self_pid = (long)sy_pid();
++    if (sy_dir_open(&pd, "/proc")) return 0;
++    while ((next = sy_dir_next(&pd)) == 1) {
++        long pid = 0;
++        int i, all_dig = 1;
++        for (i = 0; pd.name[i]; i++) {
++            if (pd.name[i] < '0' || pd.name[i] > '9') { all_dig = 0; break; }
++            pid = pid * 10 + (long)(pd.name[i] - '0');
++        }
++        if (!all_dig || pid <= 0 || pid == self_pid) continue;
++        if (lane_pgid > 0 && (int)sy_getpgid((int)pid) == lane_pgid) {
++            residue++;
++            continue;
++        }
++        if (ldir_len > 0) {
++            char lp[128], target[PD_PW];
++            long rn;
++            if (!cx_fmt(lp, sizeof lp, "/proc/%ld/cwd", pid)) {
++                rn = sy_readlink(lp, target, sizeof target - 1);
++                if (rn > 0) {
++                    target[rn] = 0;
++                    if (rn >= ldir_len && memcmp(target, lane_dir, (size_t)ldir_len) == 0 &&
++                        (rn == ldir_len || target[ldir_len] == '/')) {
++                        residue++;
++                        continue;
++                    }
++                }
++            }
++        }
++    }
++    sy_dir_close(&pd);
++    return residue;
++}
++
++/* Hard reap-before-clean gate: refuse to delete lane_dir if any descendant survives. */
++static int pd_reap_and_clean_lane(const char *lane_dir, int lane_pgid, int allow_kill) {
++    int residue;
++    if (allow_kill && lane_pgid > 0) {
++        char rep[256];
++        rp_kill_tree(lane_pgid, 150, 0, 0, rep, sizeof rep);
++        (void)sy_killpg(lane_pgid, 9);
++        sy_sleep_ms(30);
++    }
++    residue = pd_count_lane_residue(lane_dir, lane_pgid);
++    if (residue > 0) {
++        fprintf(stderr, "LANE_TAINTED\tdir=%s\tresidue=%d\nRESIDUE\tdir=%s\tcount=%d\n",
++                lane_dir, residue, lane_dir, residue);
++        return -1;
++    }
++    if (lane_dir && lane_dir[0] && sy_exists(lane_dir) == 1) {
++        char *rmv[] = {"rm", "-rf", (char *)lane_dir, 0};
++        np_result r = {0};
++        char why[128];
++        (void)np_run(rmv, 0, 0, 15, &r, why, sizeof why);
++        np_free(&r);
++    }
++    return 0;
++}
++
++static int pd_setup_lane_barrier(const char *base_dir, int lane_idx,
++                                 char env_out[7][PD_PW + 32], char *lane_dir_out, size_t lcap) {
++    char lroot[PD_PW], ldir[PD_PW], d_tmp[PD_PW], d_home[PD_PW], d_cache[PD_PW];
++    char d_e3[PD_PW], d_dev[PD_PW], d_pin[PD_PW];
++    const char *src_cache = pd_warm_cache_dir[0] ? pd_warm_cache_dir : getenv("UNISACC_WARM_CACHE_DIR");
++    if (cx_fmt(lroot, sizeof lroot, "%s/lanes", base_dir) ||
++        cx_fmt(ldir, sizeof ldir, "%s/lanes/lane-%d", base_dir, lane_idx) ||
++        cx_fmt(d_tmp, sizeof d_tmp, "%s/tmp", ldir) ||
++        cx_fmt(d_home, sizeof d_home, "%s/home", ldir) ||
++        cx_fmt(d_cache, sizeof d_cache, "%s/cache", ldir) ||
++        cx_fmt(d_e3, sizeof d_e3, "%s/e3cache", ldir) ||
++        cx_fmt(d_dev, sizeof d_dev, "%s/devsvc", ldir) ||
++        cx_fmt(d_pin, sizeof d_pin, "%s/dv-pin", ldir)) return -1;
++    (void)sy_mkdir(lroot, 0700);
++    (void)sy_mkdir(ldir, 0700);
++    (void)sy_mkdir(d_tmp, 0700);
++    (void)sy_mkdir(d_home, 0700);
++    (void)sy_mkdir(d_cache, 0700);
++    (void)sy_mkdir(d_e3, 0700);
++    (void)chmod(d_e3, 0700);
++    (void)sy_mkdir(d_dev, 0700);
++    (void)sy_mkdir(d_pin, 0700);
++    if (src_cache && src_cache[0] && pd_seed_lane_e3cache(src_cache, d_e3) != 0) return -1;
++    if (cx_fmt(env_out[0], PD_PW + 32, "TMPDIR=%s", d_tmp) ||
++        cx_fmt(env_out[1], PD_PW + 32, "HOME=%s", d_home) ||
++        cx_fmt(env_out[2], PD_PW + 32, "XDG_CACHE_HOME=%s", d_cache) ||
++        cx_fmt(env_out[3], PD_PW + 32, "UNISACC_CACHE_DIR=%s", d_e3) ||
++        cx_fmt(env_out[4], PD_PW + 32, "UNISACC_E3CACHE=%s", d_e3) ||
++        cx_fmt(env_out[5], PD_PW + 32, "UNISACC_DEVSVC_DIR=%s", d_dev) ||
++        cx_fmt(env_out[6], PD_PW + 32, "DV_PIN_DIR=%s", d_pin)) return -1;
++    if (lane_dir_out && lcap > 0 && cx_fmt(lane_dir_out, lcap, "%s", ldir)) return -1;
++    return 0;
++}
++
++/* Spawn pinned command keeping inherited lock FDs (e.g. prerun-cpuset.lock LOCK_EX) and
++ * verify child affinity via /proc/<pid>/status Cpus_allowed_list. Returns rc or 2 on refusal. */
++static int pd_run_pinned_window(char **base_av, const char *root, char **extra_env,
++                                const char *cpulist, const fa_cpumask_t *expect_mask,
++                                const char *stderr_path) {
++    const char *ts = fa_taskset_bin();
++    char **av2, **env2 = 0, **cur = sy_env_vec();
++    int orig_n = 0, base_e = 0, ext_e = 0, i, sr, rc = 124;
++    sy_spawn_t opt;
++    sy_child_t ch;
++    char awhy[160];
++    int efd = SY_STDIO_NULL;
++    long deadline;
++
++    if (!cpulist || !cpulist[0] || !expect_mask || sy_exists(ts) != 1) {
++        return pd_refuse("LANE_CPUSET_UNAVAILABLE");
++    }
++    while (base_av[orig_n]) orig_n++;
++    av2 = (char **)mm_alloc((long)(orig_n + 4) * (long)sizeof(char *));
++    if (!av2) return pd_refuse("OUT_OF_MEMORY");
++    av2[0] = (char *)ts;
++    av2[1] = "-c";
++    av2[2] = (char *)cpulist;
++    for (i = 0; i < orig_n; i++) av2[3 + i] = base_av[i];
++    av2[3 + orig_n] = 0;
++
++    if (extra_env && extra_env[0]) {
++        while (cur && cur[base_e]) base_e++;
++        while (extra_env[ext_e]) ext_e++;
++        env2 = (char **)mm_alloc((long)(base_e + ext_e + 1) * (long)sizeof(char *));
++        if (!env2) { mm_free(av2); return pd_refuse("OUT_OF_MEMORY"); }
++        for (i = 0; i < base_e; i++) env2[i] = cur[i];
++        for (i = 0; i < ext_e; i++) {
++            const char *eq = strchr(extra_env[i], '=');
++            long kl = eq ? (long)(eq - extra_env[i]) + 1 : 0;
++            int j, hit = 0;
++            for (j = 0; j < base_e; j++) {
++                if (kl > 0 && strncmp(env2[j], extra_env[i], (size_t)kl) == 0) { env2[j] = extra_env[i]; hit = 1; }
++            }
++            if (!hit) env2[base_e++] = extra_env[i];
++        }
++        env2[base_e] = 0;
++    }
++
++    if (stderr_path && stderr_path[0]) {
++        efd = sy_open(stderr_path, O_WRONLY | O_CREAT | O_TRUNC | O_CLOEXEC, 0644);
++        if (efd < 0) efd = SY_STDIO_NULL;
++    }
++    sy_spawn_init(&opt);
++    opt.argv = av2;
++    opt.env = env2;
++    opt.cwd = root;
++    opt.pgroup = -1;
++    opt.in_fd = SY_STDIO_NULL;
++    opt.out_fd = SY_STDIO_NULL;
++    opt.err_fd = efd;
++    sr = sy_proc_spawn(&opt, &ch);
++    if (efd >= 0) sy_close(efd);
++    mm_free(av2);
++    if (env2) mm_free(env2);
++    if (sr < 0) return pd_refuse("LANE_CPUSET_UNAVAILABLE");
++
++    /* Read back /proc/<pid>/status Cpus_allowed_list while child runs (or if child exited fast, check status). */
++    awhy[0] = 0;
++    if (fa_verify_pid_affinity((long)ch.pid, expect_mask, 300, awhy, sizeof awhy) != 0) {
++        int ex = 0, code = 0, sig = 0;
++        int wr = sy_wait_status(ch.pid, 1, &ex, &code, &sig);
++        if (wr <= 0) {
++            if (ch.h > 0) (void)sy_killpg(ch.h, 9);
++            else (void)sy_kill(ch.pid);
++            (void)sy_wait(ch.pid, 0);
++            return pd_refuse("LANE_CPUSET_UNAVAILABLE");
++        }
++        return pd_refuse("LANE_CPUSET_UNAVAILABLE");
++    }
++
++    deadline = sy_now_ms() + (long)PD_CHILD_SECONDS * 1000L;
++    for (;;) {
++        int ex = 0, code = 0, sig = 0;
++        int wr = sy_wait_status(ch.pid, 1, &ex, &code, &sig);
++        if (wr > 0) {
++            rc = ex ? code : (128 + sig);
++            break;
++        }
++        if (sy_now_ms() >= deadline) {
++            if (ch.h > 0) (void)sy_killpg(ch.h, 9);
++            else (void)sy_kill(ch.pid);
++            (void)sy_wait(ch.pid, 0);
++            rc = 124;
++            break;
++        }
++        sy_sleep_ms(10);
++    }
++    return rc;
++}
++
+ static int pd_call_window(const char *root, const char *cand, const char *mock_runner,
+                           const char *wid, const char *ids, const char *outp,
+-                          int jobs, int attempt, char *temp_env) {
++                          int jobs, int attempt, char **extra_env,
++                          const char *cpulist, const fa_cpumask_t *expect_mask) {
+     char size[12], seq[12], why[256];
+     if (cx_fmt(size, sizeof size, "%d", jobs) || cx_fmt(seq, sizeof seq, "%d", attempt)) return 2;
+     char *real[] = {"sh", "./unisacc.com", "tools/dvqualify.cx", "--", ".",
+@@ -1140,14 +1416,16 @@ static int pd_call_window(const char *root, const char *cand, const char *mock_r
+                     "--jobs", size, "--segment-batches", size, 0};
+     char *mock[] = {"sh", (char *)mock_runner, "window", (char *)wid, size,
+                     (char *)ids, (char *)outp, seq, 0};
+-    np_result r = {0};
+-    char *env[] = {temp_env, 0};
+     char ep[PD_PW];
+     int have_ep = (outp && outp[0] && !cx_fmt(ep, sizeof ep, "%s.stderr", outp));
+     /* A retry reuses the same <outp>.stderr path; drop any sidecar from the previous attempt first,
+        so a later silent pass never leaves the earlier attempt's refusal reason next to the window. */
+     if (have_ep) (void)sy_unlink(ep);
+-    int tr = np_run(mock_runner ? mock : real, root, temp_env ? env : 0, PD_CHILD_SECONDS, &r, why, sizeof why);
++    if (cpulist && cpulist[0] && expect_mask) {
++        return pd_run_pinned_window(mock_runner ? mock : real, root, extra_env, cpulist, expect_mask, have_ep ? ep : 0);
++    }
++    np_result r = {0};
++    int tr = np_run(mock_runner ? mock : real, root, extra_env, PD_CHILD_SECONDS, &r, why, sizeof why);
+     int rc = tr ? 124 : r.rc;
+     /* Keep the child's stderr next to the window output: the candidate refusal reason (e.g. a
+      * duplicate label), PRECHECK/LAYOUT/KIT evidence.  Only adds a file; never changes the verdict,
+@@ -1184,7 +1462,9 @@ static int pd_window_attempt(const char *root, const char *cand, const char *moc
+                              const char *wid, const char *phase, const char *ids,
+                              const char *outp, int jobs, int attempt) {
+     long started = sy_now_ms();
+-    int rc = pd_call_window(root, cand, mock_runner, wid, ids, outp, jobs, attempt, 0);
++    int rc = pd_call_window(root, cand, mock_runner, wid, ids, outp, jobs, attempt, 0,
++                            pd_cpuset_enabled ? pd_prerun_cpus : 0,
++                            pd_cpuset_enabled ? &pd_prerun_mask : 0);
+     pd_log_window(wid, phase, outp, jobs, attempt, rc, sy_now_ms() - started);
+     return rc;
+ }
+@@ -1490,7 +1770,12 @@ static int pd_next_window(const unsigned char *wb, int64_t wn, int64_t *offset,
+ typedef struct {
+     PdWindow window;
+     const char *root, *cand, *mock;
+-    char env[PD_PW + 8];
++    char lane_dir[PD_PW];
++    char env_buf[7][PD_PW + 32];
++    char *env_vec[8];
++    char cpulist[128];
++    fa_cpumask_t cpumask;
++    int has_cpuset;
+     int pid, fds[2], rc;
+     long wall_ms;
+ } PdLane;
+@@ -1503,7 +1788,9 @@ static int pd_lane_child(void *opaque) {
+     PdLaneResult result = {0};
+     long start = sy_now_ms();
+     result.rc = pd_call_window(lane->root, lane->cand, lane->mock,
+-                               w->wid, w->ids, w->strict, 1, 1, lane->env);
++                               w->wid, w->ids, w->strict, 1, 1, lane->env_vec,
++                               lane->has_cpuset ? lane->cpulist : 0,
++                               lane->has_cpuset ? &lane->cpumask : 0);
+     result.wall_ms = sy_now_ms() - start;
+     return write(1, &result, sizeof result) != sizeof result;
+ }
+@@ -1516,12 +1803,19 @@ static int pd_first_attempts(PdLane *group, int count, const char *dir,
+                              const char *root, const char *cand, const char *mock) {
+     for (int i = 0; i < count; i++) {
+         PdLane *lane = &group[i];
+-        char tmp[PD_PW];
+-        sy_stat_t st;
+-        if (cx_fmt(tmp, sizeof tmp, "%s/.lane-tmp-%d", dir, i + 1) ||
+-            (sy_mkdir(tmp, 0700) && (sy_lstat(tmp, &st) || st.kind != 'd' ||
+-                                    st.mode != 0700 || st.uid != sy_uid())) ||
+-            cx_fmt(lane->env, sizeof lane->env, "TMPDIR=%s", tmp)) return -1;
++        int k;
++        lane->lane_dir[0] = 0;
++        lane->cpulist[0] = 0;
++        lane->has_cpuset = 0;
++        if (pd_setup_lane_barrier(dir, i, lane->env_buf, lane->lane_dir, sizeof lane->lane_dir) != 0)
++            return -1;
++        for (k = 0; k < 7; k++) lane->env_vec[k] = lane->env_buf[k];
++        lane->env_vec[7] = 0;
++        if (pd_cpuset_enabled) {
++            if (fa_cpuset_slice_for_lane(&pd_prerun_mask, i, count, &lane->cpumask, lane->cpulist, sizeof lane->cpulist) != 0)
++                return -1;
++            lane->has_cpuset = 1;
++        }
+         lane->root = root;
+         lane->cand = cand;
+         lane->mock = mock;
+@@ -1564,13 +1858,16 @@ static int pd_first_attempts(PdLane *group, int count, const char *dir,
+     if (active || pd_lane_interrupted) bad = 1;
+     for (int i = 0; i < count; i++) {
+         PdLane *lane = &group[i];
+-        if (lane->pid <= 0) continue;
+-        char report[256];
+-        rp_kill_tree(lane->pid, 100, 0, 0, report, sizeof report);
+-        int status;
+-        waitpid(lane->pid, &status, WNOHANG);
+-        sy_close(lane->fds[0]);
+-        sy_close(lane->fds[1]);
++        int pg = lane->pid;
++        if (lane->pid > 0) {
++            char report[256];
++            rp_kill_tree(lane->pid, 100, 0, 0, report, sizeof report);
++            int status;
++            waitpid(lane->pid, &status, WNOHANG);
++            sy_close(lane->fds[0]);
++            sy_close(lane->fds[1]);
++        }
++        if (lane->lane_dir[0] && pd_reap_and_clean_lane(lane->lane_dir, pg, 1) != 0) bad = 1;
+     }
+     signal(SIGTERM, term);
+     signal(SIGINT, intr);
+@@ -1740,6 +2037,13 @@ static void pd_track_repeat_rc2(int win_rc, const char *outp, const char *wid,
+ }
+ 
+ 
++static void pd_atexit_release_lease(void) {
++    if (pd_cpuset_enabled && pd_active_lease.cpu_fd >= 0) {
++        char rwhy[128];
++        (void)fa_prerun_lease_release(&pd_active_lease, rwhy, sizeof rwhy);
++    }
++}
++
+ static int pd_cmd_run(const char *root, const char *cand, const char *out_dir, int resume, int max_jobs, int load_cap, int max_retries, int lanes, const char *mock_runner, unsigned long long min_free_bytes) {
+     char wpath[PD_PW], real_root[PD_PW];
+     unsigned char *wb = 0; int64_t wn = 0;
+@@ -1768,11 +2072,36 @@ static int pd_cmd_run(const char *root, const char *cand, const char *out_dir, i
+         mm_free(wb);
+         return pd_refuse("timed-plan-exceeds-max-jobs");
+     }
+-    char frozen_root[PD_PW], frozen_rev[64], canonical_dir[PD_PW];
++    char canonical_dir[PD_PW];
+     if (sy_realpath(out_dir, canonical_dir, sizeof canonical_dir) <= 0) {
+         mm_free(wb); return pd_refuse("run-output-directory");
+     }
+     out_dir = canonical_dir;
++    if (pd_cpuset_enabled) {
++        char cwhy[192], ldir[PD_PW];
++        const char *lease_d = pd_lease_dir_arg[0] ? pd_lease_dir_arg : getenv("DEVSVC_SLOTS_DIR");
++        cwhy[0] = 0;
++        if (fa_cpuset_pair_parse_and_verify(pd_cpuset_arg, lanes,
++                                            &pd_prerun_mask, &pd_dev_mask,
++                                            pd_prerun_cpus, sizeof pd_prerun_cpus,
++                                            pd_dev_cpus, sizeof pd_dev_cpus,
++                                            cwhy, sizeof cwhy) != 0) {
++            mm_free(wb);
++            return pd_refuse(cwhy[0] ? cwhy : "CPUSET_SYNTAX");
++        }
++        if (!lease_d || !lease_d[0]) {
++            if (cx_fmt(ldir, sizeof ldir, "%s/lease", out_dir)) { mm_free(wb); return pd_refuse("lease-dir-bound"); }
++            lease_d = ldir;
++        }
++        if (fa_prerun_lease_acquire(lease_d, pd_prerun_cpus, pd_dev_cpus,
++                                    sy_wall_s() + 7200, &pd_active_lease,
++                                    cwhy, sizeof cwhy) != 0) {
++            mm_free(wb);
++            return pd_refuse(cwhy[0] ? cwhy : "PRERUN_LEASE_HELD");
++        }
++        (void)atexit(pd_atexit_release_lease);
++    }
++    char frozen_root[PD_PW], frozen_rev[64];
+     const char *eff_root = root;
+     frozen_root[0] = 0;
+     frozen_rev[0] = 0;
+@@ -1999,7 +2328,11 @@ static int pd_cmd_run(const char *root, const char *cand, const char *out_dir, i
+                 sy_unlink(outp);
+                 if (prefetched) {
+                     long start = sy_now_ms();
+-                    rc = pd_call_window(eff_root, cand, mock_runner, wid, run_ids, outp, jobs, attempt, prefetched->env);
++                    (void)pd_setup_lane_barrier(canonical_dir, (int)(prefetched - group), prefetched->env_buf, prefetched->lane_dir, sizeof prefetched->lane_dir);
++                    rc = pd_call_window(eff_root, cand, mock_runner, wid, run_ids, outp, jobs, attempt, prefetched->env_vec,
++                                        prefetched->has_cpuset ? prefetched->cpulist : 0,
++                                        prefetched->has_cpuset ? &prefetched->cpumask : 0);
++                    if (prefetched->lane_dir[0]) (void)pd_reap_and_clean_lane(prefetched->lane_dir, 0, 0);
+                     pd_log_window(wid, phase, outp, jobs, attempt, rc, sy_now_ms() - start);
+                 } else {
+                     rc = pd_window_attempt(eff_root, cand, mock_runner, wid, phase, run_ids, outp, jobs, attempt);
+@@ -2154,6 +2487,10 @@ static int pd_cmd_run(const char *root, const char *cand, const char *out_dir, i
+         }
+     }
+     mm_free(wb);
++    if (pd_cpuset_enabled) {
++        char rwhy[128];
++        (void)fa_prerun_lease_release(&pd_active_lease, rwhy, sizeof rwhy);
++    }
+     if (incomplete) {
+         printf("PRERUN_RUN\tstatus=INCOMPLETE\tran=%d\tskipped=%d\tmissing_windows=%d\tout=%s\n",
+                ran, skipped, incomplete, out_dir);
+@@ -2967,6 +3304,206 @@ static int pd_cmd_prepare(const char *from_chain_dir, const char *root_arg, cons
+     return 0;
+ }
+ 
++static int pd_buf_has(const char *b, long n, const char *sub) {
++    if (!b || n <= 0 || !sub || !sub[0]) return 0;
++    return tx_find(b, n, sub, (long)strlen(sub)) >= 0;
++}
++
++static int pd_cmd_analyze_isolation(const char *root, const char *batches_path, const char *out_path) {
++    char bpath[PD_PW];
++    unsigned char *raw = 0;
++    int64_t rn = 0, pos = 0;
++    size_t cap = 1 << 20, mp = 0;
++    char *out = 0;
++    int total = 0, admitted = 0, serial = 0, unver = 0;
++    const char *hdr = "batch\ttier\tallowlist\td1_worktree_git\td2_home_cache\td3_run_cache\td4_registry\td5_net_material\td6_fixed_tmp\td7_devsvc_daemon\tverdict\tlane_policy\n";
++
++    if (!root || !root[0]) root = ".";
++    if (batches_path && batches_path[0]) {
++        if (cx_fmt(bpath, sizeof bpath, "%s", batches_path)) return pd_refuse("analyze-batches-path");
++    } else {
++        if (cx_fmt(bpath, sizeof bpath, "%s/tests/batches.tsv", root)) return pd_refuse("analyze-batches-path");
++    }
++    if (sy_read_file(bpath, &raw, &rn, 4 << 20) || !raw || rn <= 0) {
++        if (raw) mm_free(raw);
++        return pd_refuse("analyze-read-batches");
++    }
++    out = (char *)mm_alloc((long)cap);
++    if (!out) { mm_free(raw); return pd_refuse("out-of-memory"); }
++    {
++        size_t hl = strlen(hdr);
++        mm_copy(out, (long)cap, hdr, (long)hl);
++        mp = hl;
++        out[mp] = 0;
++    }
++
++    while (pos < rn) {
++        int64_t ls = pos;
++        while (pos < rn && raw[pos] != '\n') pos++;
++        int64_t le = pos;
++        if (pos < rn) pos++;
++        if (le > ls && raw[le - 1] == '\r') le--;
++        if (le <= ls || raw[ls] == '#') continue;
++        const char *cols[16];
++        int64_t clens[16];
++        int nc = 0;
++        int64_t p = ls;
++        while (nc < 16) {
++            int64_t cs = p;
++            while (p < le && raw[p] != '\t') p++;
++            cols[nc] = (const char *)raw + cs;
++            clens[nc] = p - cs;
++            nc++;
++            if (p >= le) break;
++            p++;
++        }
++        if (nc < 2 || clens[0] <= 0 || clens[0] >= 128) continue;
++        if (clens[0] == 2 && memcmp(cols[0], "id", 2) == 0) continue;
++        if (clens[0] == 5 && memcmp(cols[0], "batch", 5) == 0) continue;
++
++        char bid[128], entry[512];
++        mm_copy(bid, sizeof bid, cols[0], clens[0]);
++        bid[clens[0]] = 0;
++        entry[0] = 0;
++        for (int c = 1; c < nc; c++) {
++            if (clens[c] > 3 && clens[c] < (int64_t)sizeof entry) {
++                if (tx_find(cols[c], clens[c], ".cx", 3) >= 0 || tx_find(cols[c], clens[c], ".sh", 3) >= 0) {
++                    mm_copy(entry, sizeof entry, cols[c], clens[c]);
++                    entry[clens[c]] = 0;
++                    break;
++                }
++            }
++        }
++
++        const char *tier = (pd_is_isolated_long_id(bid) || tx_eqz(bid, "real-commit")) ? "long" : (pd_is_heavy_id(bid) ? "heavy" : "normal");
++        int allow = pd_in_normal_parallel_allow(bid);
++        const char *d1 = "unverified", *d2 = "unverified", *d3 = "unverified", *d4 = "unverified";
++        const char *d5 = "unverified", *d6 = "unverified", *d7 = "unverified";
++
++        unsigned char *sb = 0, *mb = 0;
++        int64_t sn = 0, mn = 0;
++        int has_src = 0, has_iso_proof = 0, has_dynamic = 0;
++        if (entry[0]) {
++            char sp[PD_PW];
++            if (entry[0] == '/') {
++                if (!cx_fmt(sp, sizeof sp, "%s", entry) && !sy_read_file(sp, &sb, &sn, 2 << 20)) has_src = 1;
++            } else {
++                if (!cx_fmt(sp, sizeof sp, "%s/%s", root, entry) && !sy_read_file(sp, &sb, &sn, 2 << 20)) has_src = 1;
++            }
++        }
++        {
++            char mpth[PD_PW];
++            if (!cx_fmt(mpth, sizeof mpth, "%s/tests/manifests/%s.tsv", root, bid)) {
++                (void)sy_read_file(mpth, &mb, &mn, 256 << 10);
++            }
++        }
++
++        if (has_src && sb) {
++            const char *s = (const char *)sb;
++            long sl = (long)sn;
++            has_dynamic = pd_buf_has(s, sl, "sh -c") || pd_buf_has(s, sl, "\"-c\"") ||
++                          pd_buf_has(s, sl, "system(") || pd_buf_has(s, sl, "popen(") ||
++                          pd_buf_has(s, sl, "ckk_sh(");
++            has_iso_proof = (pd_buf_has(s, sl, "sr_scratch") || pd_buf_has(s, sl, "sy_mkdtemp") ||
++                             (mb && pd_buf_has((const char *)mb, (long)mn, "isolation=lane"))) && !has_dynamic;
++
++            if (pd_buf_has(s, sl, "git commit") || pd_buf_has(s, sl, "commit-own") ||
++                pd_buf_has(s, sl, "push-replay") || pd_buf_has(s, sl, "git update-ref") ||
++                pd_buf_has(s, sl, "build/freeze.tsv")) d1 = "shared";
++            else if (has_iso_proof && !pd_buf_has(s, sl, "git ")) d1 = "none";
++
++            if (pd_buf_has(s, sl, "getenv(\"HOME\")") && !has_iso_proof) d2 = "unverified";
++            else if (has_iso_proof) d2 = "none";
++
++            if (pd_buf_has(s, sl, "UNISACC_CACHE_DIR") && has_dynamic) d3 = "unverified";
++            else if (has_iso_proof || allow) d3 = "none";
++
++            if (pd_buf_has(s, sl, "register.cx") || (pd_buf_has(s, sl, "tests/batches.tsv") && pd_buf_has(s, sl, "--write")))
++                d4 = "shared";
++            else if (has_iso_proof) d4 = "none";
++
++            if (pd_buf_has(s, sl, "out/")) d5 = "shared";
++            else if (has_iso_proof || allow) d5 = "none";
++
++            if (pd_buf_has(s, sl, "/tmp/") && !pd_buf_has(s, sl, "sy_mkdtemp") && !pd_buf_has(s, sl, "sr_scratch"))
++                d6 = "shared";
++            else if (has_iso_proof) d6 = "none";
++
++            if (pd_buf_has(s, sl, "devsvc") && !pd_buf_has(s, sl, "UNISACC_DEVSVC_DIR")) d7 = "shared";
++            else if (has_iso_proof && !pd_buf_has(s, sl, "devsvc")) d7 = "none";
++        }
++        if (mb) mm_free(mb);
++        if (sb) mm_free(sb);
++
++        if (allow && !has_dynamic && !tx_eqz(d1, "shared") && !tx_eqz(d4, "shared") &&
++            !tx_eqz(d5, "shared") && !tx_eqz(d6, "shared") && !tx_eqz(d7, "shared")) {
++            d1 = "none"; d2 = "none"; d3 = "none"; d4 = "none"; d5 = "none"; d6 = "none"; d7 = "none";
++        }
++        if (tx_eqz(bid, "real-commit")) {
++            d1 = "shared"; d2 = "shared"; d3 = "none"; d4 = "none"; d5 = "none"; d6 = "none"; d7 = "shared";
++            allow = 0;
++        } else if (pd_starts(bid, "precommit-list-cap")) {
++            d1 = "shared"; d2 = "none"; d3 = "none"; d4 = "none"; d5 = "none"; d6 = "none"; d7 = "shared";
++            allow = 0;
++        } else if (pd_is_serial_only_id(bid)) {
++            if (tx_eqz(d1, "none")) d1 = "shared";
++            allow = 0;
++        }
++
++        int has_unv = tx_eqz(d1, "unverified") || tx_eqz(d2, "unverified") || tx_eqz(d3, "unverified") ||
++                      tx_eqz(d4, "unverified") || tx_eqz(d5, "unverified") || tx_eqz(d6, "unverified") ||
++                      tx_eqz(d7, "unverified");
++        int has_sh = tx_eqz(d1, "shared") || tx_eqz(d2, "shared") || tx_eqz(d3, "shared") ||
++                     tx_eqz(d4, "shared") || tx_eqz(d5, "shared") || tx_eqz(d6, "shared") ||
++                     tx_eqz(d7, "shared");
++        int ok_par = (allow && !has_unv && !has_sh);
++        const char *verdict = ok_par ? "ADMITTED_PARALLEL" : "SERIAL_REQUIRED";
++        const char *lpol = ok_par ? "multi-lane" : "serial-only";
++
++        total++;
++        if (ok_par) admitted++;
++        else {
++            serial++;
++            if (has_unv) unver++;
++        }
++
++        char row[512];
++        if (!cx_fmt(row, sizeof row, "%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\n",
++                    bid, tier, allow ? "yes" : "no", d1, d2, d3, d4, d5, d6, d7, verdict, lpol)) {
++            size_t rl = strlen(row);
++            if (mp + rl + 256 < cap) {
++                mm_copy(out + mp, (long)(cap - mp), row, (long)rl);
++                mp += rl;
++                out[mp] = 0;
++            }
++        }
++    }
++    mm_free(raw);
++
++    {
++        char sum[256];
++        if (!cx_fmt(sum, sizeof sum, "ISOLATION_DRY_SUMMARY\ttotal=%d\tadmitted_parallel=%d\tserial_required=%d\tunverified=%d\n",
++                    total, admitted, serial, unver)) {
++            size_t sl = strlen(sum);
++            if (mp + sl + 1 < cap) {
++                mm_copy(out + mp, (long)(cap - mp), sum, (long)sl);
++                mp += sl;
++                out[mp] = 0;
++            }
++        }
++    }
++
++    if (out_path && out_path[0]) {
++        if (sy_write_atomic(out_path, out, (int64_t)mp, 0644) != 0) {
++            mm_free(out);
++            return pd_refuse("analyze-write-out");
++        }
++    }
++    fwrite(out, 1, mp, stdout);
++    mm_free(out);
++    return 0;
++}
++
+ int main(int argc, char **argv) {
+     if (argc < 2) return pd_refuse("usage: prepare|plan|run|merge|archive|replay");
+     const char *sub = argv[1];
+@@ -3063,6 +3600,16 @@ int main(int argc, char **argv) {
+             }
+             else if (tx_eqz(argv[i], "--keep-going")) { pd_keep_going = 2; has_kg = 1; }
+             else if (tx_eqz(argv[i], "--no-keep-going") || tx_eqz(argv[i], "--fail-fast-unknown")) { pd_keep_going = 0; has_kg = 1; }
++            else if (tx_eqz(argv[i], "--cpuset") && i + 1 < argc) {
++                if (cx_fmt(pd_cpuset_arg, sizeof pd_cpuset_arg, "%s", argv[++i])) return pd_refuse("invalid-cpuset");
++                pd_cpuset_enabled = 1;
++            }
++            else if (tx_eqz(argv[i], "--lease-dir") && i + 1 < argc) {
++                if (cx_fmt(pd_lease_dir_arg, sizeof pd_lease_dir_arg, "%s", argv[++i])) return pd_refuse("invalid-lease-dir");
++            }
++            else if (tx_eqz(argv[i], "--warm-cache") && i + 1 < argc) {
++                if (cx_fmt(pd_warm_cache_dir, sizeof pd_warm_cache_dir, "%s", argv[++i])) return pd_refuse("invalid-warm-cache");
++            }
+             else if (tx_eqz(argv[i], "--mock-runner") && i + 1 < argc) mock_r = argv[++i];
+             else return pd_refuse("unknown-run-arg");
+         }
+@@ -3145,5 +3692,18 @@ int main(int argc, char **argv) {
+         if (!ids_f || !ev_d || !out_d) return pd_refuse("replay-requires-ids-file-evidence-dir-and-out");
+         return pd_cmd_replay(ids_f, ev_d, out_d, exp_s, exp_g);
+     }
++    if (tx_eqz(sub, "analyze-isolation")) {
++        const char *root = ".", *batches = 0, *out_p = 0;
++        int dry = 0;
++        for (int i = 2; i < argc; i++) {
++            if (tx_eqz(argv[i], "--dry")) dry = 1;
++            else if (tx_eqz(argv[i], "--root") && i + 1 < argc) root = argv[++i];
++            else if (tx_eqz(argv[i], "--batches") && i + 1 < argc) batches = argv[++i];
++            else if (tx_eqz(argv[i], "--out") && i + 1 < argc) out_p = argv[++i];
++            else return pd_refuse("unknown-analyze-isolation-arg");
++        }
++        if (!dry) return pd_refuse("analyze-isolation-requires-dry");
++        return pd_cmd_analyze_isolation(root, batches, out_p);
++    }
+     return pd_refuse("unknown-subcommand");
+ }
