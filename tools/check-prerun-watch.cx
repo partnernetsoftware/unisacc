@@ -1,0 +1,427 @@
+/* tools/check-prerun-watch.cx -- twelve offline synthetic fixture checks for tools/prerun-watch.cx (<5s).
+ *
+ *   sh ./unisacc.com tools/check-prerun-watch.cx [-- --tool PATH]
+ *
+ * Default tool path: tools/prerun-watch.cx if present, else research/agy-h/prerun-watch.cx.
+ * Marker: CHECK_PRERUN_WATCH<TAB>passed=N<TAB>failed=0
+ */
+#pragma unisa use sys.fs
+#pragma unisa use sys.env
+#pragma unisa use sys.proc
+#pragma unisa use sys.time
+#pragma unisa use sys.posix
+#pragma unisa use sysx.process
+#pragma unisa use cxlib.ckrun
+#pragma unisa use text.text
+#pragma unisa use text.iter
+#pragma unisa use mem.bytes
+#pragma unisa use mem.heap
+
+static int cpw_passed, cpw_failed;
+static char cpw_tool[1024];
+static char cpw_bin[1024];
+
+static void ck(int ok, const char *name) {
+    if (ok) {
+        cpw_passed++;
+        printf("PASS\tcheck-prerun-watch.%s\n", name);
+    } else {
+        cpw_failed++;
+        printf("FAIL\tcheck-prerun-watch.%s\n", name);
+    }
+}
+
+static int has_txt(const char *buf, long n, const char *needle) {
+    if (!buf || n <= 0) return 0;
+    int cap = n >= 65535 ? 65535 : (int)n + 1;
+    return ckk_has(buf, cap, needle);
+}
+
+static int write_txt(const char *path, const char *body) {
+    return sy_write_atomic(path, body, tx_len(body, 65536), 0644);
+}
+
+static int run_watch_args(char **extra_av, int extra_n, np_result *r) {
+    char *av[24];
+    char why[256];
+    int k = 0;
+    av[k++] = cpw_bin;
+    for (int i = 0; i < extra_n && k < 23; i++) av[k++] = extra_av[i];
+    av[k] = 0;
+    memset(r, 0, sizeof *r);
+    return np_run(av, ".", 0, 15, r, why, sizeof why);
+}
+
+static int run_watch(const char *win_p, const char *log_p, const char *rate_p,
+                     const char *now_s, const char *extra_flag, np_result *r) {
+    char *av[16];
+    int k = 0;
+    if (win_p) { av[k++] = (char *)"--windows"; av[k++] = (char *)win_p; }
+    if (log_p) { av[k++] = (char *)"--log"; av[k++] = (char *)log_p; }
+    if (rate_p) { av[k++] = (char *)"--rate-tsv"; av[k++] = (char *)rate_p; }
+    if (now_s) { av[k++] = (char *)"--now"; av[k++] = (char *)now_s; }
+    if (extra_flag) av[k++] = (char *)extra_flag;
+    return run_watch_args(av, k, r);
+}
+
+static void mk_windows(char *out, int cap, const char *hdr_lanes) {
+    int n = snprintf(out, (size_t)cap,
+        "# prerun-drive windows\n"
+        "# timing=wave-v1 jobs=8 budget_ms=22000\n"
+        "%s"
+        "window\tjobs\tphase\tcount\tids\n"
+        "W0000\t1\twarmup\t1\tprepush-mut1\n"
+        "W0001\t1\theavy\t1\tnetregen-a\n"
+        "W0002\t1\theavy\t1\tnetregen-b\n"
+        "W0003\t1\tlong\t1\tcheck-split-parents\n"
+        "W0004\t8\tnormal\t1\tbatch-04\n"
+        "W0005\t8\tnormal\t1\tbatch-05\n"
+        "W0006\t8\tnormal\t1\tbatch-06\n"
+        "W0007\t8\tnormal\t1\tbatch-07\n"
+        "W0008\t8\tnormal\t1\tbatch-08\n"
+        "W0009\t8\tnormal\t1\tbatch-09\n",
+        hdr_lanes);
+    if (n < 0 || n >= cap) out[0] = 0;
+}
+
+int main(int argc, char **argv) {
+    const char *td = sy_tmpdir();
+    const char *base_td = (td && td[0] == '/') ? td : "/tmp";
+    char dir[512], w1[560], w3[560], l1[560], l2[560], l3[560], l4[560], l_inc[560];
+    char r1[560], r_done[560], r_bad[560], r_hdr[560];
+    char pr_dir[560], d_win[560], d_log[560], d_dlog[560], d_pidf[560], d_donep[600];
+    char qtool[1200], qbin[1200], bcmd[2600], bout[2048];
+    char wbuf[2048], pid_s[32];
+    const char *explicit_tool = 0;
+
+    for (int i = 1; i < argc; i++) {
+        if (tx_eqz(argv[i], "--tool") && i + 1 < argc) explicit_tool = argv[++i];
+    }
+    if (explicit_tool) {
+        if (tx_copy(cpw_tool, (long)sizeof cpw_tool, explicit_tool, tx_len(explicit_tool, 1024))) return 2;
+    } else if (sy_exists("tools/prerun-watch.cx") == 1) {
+        (void)tx_copy(cpw_tool, (long)sizeof cpw_tool, "tools/prerun-watch.cx", 21);
+    } else {
+        (void)tx_copy(cpw_tool, (long)sizeof cpw_tool, "research/agy-h/prerun-watch.cx", 30);
+    }
+
+    if (cx_fmt(dir, sizeof dir, "%s/unisacc-cpw-%d", base_td, sy_pid()) ||
+        cx_fmt(cpw_bin, sizeof cpw_bin, "%s/prerun-watch-bin", dir) ||
+        cx_fmt(w1, sizeof w1, "%s/win2.tsv", dir) ||
+        cx_fmt(w3, sizeof w3, "%s/win3.tsv", dir) ||
+        cx_fmt(l1, sizeof l1, "%s/log1.log", dir) ||
+        cx_fmt(l2, sizeof l2, "%s/log2.log", dir) ||
+        cx_fmt(l3, sizeof l3, "%s/log3.log", dir) ||
+        cx_fmt(l4, sizeof l4, "%s/log4.log", dir) ||
+        cx_fmt(l_inc, sizeof l_inc, "%s/log-inc.log", dir) ||
+        cx_fmt(r1, sizeof r1, "%s/rate1.tsv", dir) ||
+        cx_fmt(r_done, sizeof r_done, "%s/rate-done.tsv", dir) ||
+        cx_fmt(r_bad, sizeof r_bad, "%s/rate-bad.tsv", dir) ||
+        cx_fmt(r_hdr, sizeof r_hdr, "%s/rate-bad-hdr.tsv", dir) ||
+        cx_fmt(pr_dir, sizeof pr_dir, "%s/prerun-v3", dir) ||
+        cx_fmt(d_win, sizeof d_win, "%s/windows.tsv", pr_dir) ||
+        cx_fmt(d_log, sizeof d_log, "%s/supervise.log", pr_dir) ||
+        cx_fmt(d_dlog, sizeof d_dlog, "%s/prerun-daemon.out", pr_dir) ||
+        cx_fmt(d_pidf, sizeof d_pidf, "%s/prerun-drive.pid", pr_dir)) {
+        ck(0, "path-bound");
+        return 1;
+    }
+    cx_rmtree(dir);
+    if (sy_mkdir_all(pr_dir, 0755)) { ck(0, "mkdir"); return 1; }
+    if (ckk_shq(qtool, (int)sizeof qtool, cpw_tool) ||
+        ckk_shq(qbin, (int)sizeof qbin, cpw_bin) ||
+        cx_fmt(bcmd, sizeof bcmd, "sh ./unisacc.com %s -o %s", qtool, qbin)) {
+        ck(0, "build-cmd");
+        cx_rmtree(dir);
+        return 1;
+    }
+    if (ckk_sh("CHECK_PRERUN_WATCH", bcmd, bout, (int)sizeof bout) != 0) {
+        ck(0, "compile-tool");
+        cx_rmtree(dir);
+        return 1;
+    }
+
+    mk_windows(wbuf, (int)sizeof wbuf, "# window-lanes=2\n");
+    if (write_txt(w1, wbuf)) { ck(0, "write-w1"); return 1; }
+    if (write_txt(d_win, wbuf)) { ck(0, "write-dwin"); return 1; }
+    mk_windows(wbuf, (int)sizeof wbuf, "# window-lanes=3\n");
+    if (write_txt(w3, wbuf)) { ck(0, "write-w3"); return 1; }
+
+    /* Case 1: cpw.normal-2lane */
+    {
+        const char *log_s =
+            "PRERUN_WINDOW\twindow=W0000\tphase=warmup\tattempt=1\tjobs=1\trc=0\twall_ms=5000\n"
+            "PRERUN_WINDOW\twindow=W0001\tphase=heavy\tattempt=1\tjobs=1\trc=0\twall_ms=6000\n"
+            "PRERUN_WINDOW\twindow=W0002\tphase=heavy\tattempt=1\tjobs=1\trc=0\twall_ms=6000\n"
+            "PRERUN_WINDOW\twindow=W0003\tphase=long\tattempt=1\tjobs=1\trc=0\twall_ms=7000\n"
+            "PRERUN_LANES\tfirst=W0004\twindows=2\n"
+            "PRERUN_WINDOW\twindow=W0004\tphase=normal\tattempt=1\tjobs=8\trc=0\twall_ms=8000\n"
+            "PRERUN_WINDOW\twindow=W0005\tphase=normal\tattempt=1\tjobs=8\trc=0\twall_ms=8000\n";
+        const char *rate_s =
+            "sample_ts\tepoch_s\telapsed_since_chain_start_min\telapsed_since_prerun_ids_min\t"
+            "done_windows\ttotal_windows\tlast_window\tcurrent_phase\tdone_by_phase\trem_by_phase\t"
+            "rate_win_per_min\teta_prerun_rem_min\test_prerun_end_ts\test_start_to_pub_min\tnote\n"
+            "2026-11-25 00:00:00 +0800\t1700000000\t10.0\t5.0\t2\t10\tW0001\theavy\twarmup=1,heavy=1\theavy=1,long=1,normal=6\t0.40\t20.0\t00:20\tUNMEASURED\tseed\n";
+        np_result res;
+        int rr;
+        if (write_txt(l1, log_s) || write_txt(r1, rate_s)) { ck(0, "setup-c1"); return 1; }
+        rr = run_watch(w1, l1, r1, "1700000300", 0, &res);
+        ck(rr == 0 && res.rc == 0 &&
+           has_txt(res.out, (long)res.outn, "PRERUN_WATCH\tstate=RUNNING\tdone=6/10\trate_inc=0.80\trate_cum=0.60\teta_min=5.0\trc124=none\tlanes=2\tlast=W0005\tphase=normal\n"),
+           "normal-2lane");
+        np_free(&res);
+    }
+
+    /* Case 2: cpw.rc124-dedup-stopped (stop on rc=124, then resume dedup) */
+    {
+        const char *stop_log =
+            "PRERUN_WINDOW\twindow=W0000\tphase=warmup\tattempt=1\tjobs=1\trc=0\twall_ms=5000\n"
+            "PRERUN_WINDOW\twindow=W0001\tphase=heavy\tattempt=1\tjobs=1\trc=0\twall_ms=6000\n"
+            "PRERUN_WINDOW\twindow=W0002\tphase=heavy\tattempt=1\tjobs=1\trc=0\twall_ms=6000\n"
+            "PRERUN_WINDOW\twindow=W0003\tphase=long\tattempt=1\tjobs=1\trc=124\twall_ms=58000\n"
+            "PRERUN_WINDOW\twindow=W0003\tphase=long\tattempt=2\tjobs=1\trc=124\twall_ms=58000\n"
+            "PRERUN_STOP\tbatch=check-split-parents\tretries=2\twindow=W0003\traw=timeout\n";
+        const char *resume_log =
+            "PRERUN_WINDOW\twindow=W0000\tphase=warmup\tattempt=1\tjobs=1\trc=0\twall_ms=5000\n"
+            "PRERUN_WINDOW\twindow=W0001\tphase=heavy\tattempt=1\tjobs=1\trc=0\twall_ms=6000\n"
+            "PRERUN_WINDOW\twindow=W0002\tphase=heavy\tattempt=1\tjobs=1\trc=0\twall_ms=6000\n"
+            "PRERUN_WINDOW\twindow=W0003\tphase=long\tattempt=1\tjobs=1\trc=124\twall_ms=58000\n"
+            "PRERUN_WINDOW\twindow=W0003\tphase=long\tattempt=2\tjobs=1\trc=124\twall_ms=58000\n"
+            "PRERUN_STOP\tbatch=check-split-parents\tretries=2\twindow=W0003\traw=timeout\n"
+            "PRERUN_WINDOW\twindow=W0002\tphase=heavy\tattempt=1\tjobs=1\trc=0\twall_ms=5900\n"
+            "PRERUN_WINDOW\twindow=W0003\tphase=long\tattempt=1\tjobs=1\trc=0\twall_ms=52000\n";
+        np_result res1, res2;
+        int rr1, rr2;
+        if (write_txt(l2, stop_log)) { ck(0, "setup-c2a"); return 1; }
+        rr1 = run_watch(w1, l2, 0, "1700000300", 0, &res1);
+        if (write_txt(l2, resume_log)) { np_free(&res1); ck(0, "setup-c2b"); return 1; }
+        rr2 = run_watch(w1, l2, 0, "1700000360", 0, &res2);
+        ck(rr1 == 0 && res1.rc == 1 &&
+           has_txt(res1.out, (long)res1.outn, "state=STOPPED\tdone=3/10") &&
+           has_txt(res1.out, (long)res1.outn, "rc124=W0003\t") &&
+           rr2 == 0 && res2.rc == 0 &&
+           has_txt(res2.out, (long)res2.outn, "state=RUNNING\tdone=4/10") &&
+           has_txt(res2.out, (long)res2.outn, "rc124=W0003\t"),
+           "rc124-dedup-stopped");
+        np_free(&res1);
+        np_free(&res2);
+    }
+
+    /* Case 3: cpw.lanes-obs-overrides-plan */
+    {
+        np_result res;
+        int rr = run_watch(w3, l1, r1, "1700000300", 0, &res);
+        ck(rr == 0 && res.rc == 0 &&
+           has_txt(res.out, (long)res.outn, "\tlanes=2\t"),
+           "lanes-obs-overrides-plan");
+        np_free(&res);
+    }
+
+    /* Case 4: cpw.cold-or-same-ts-unmeasured */
+    {
+        np_result r_cold, r_same;
+        int rc1 = run_watch(w1, l1, 0, "1700000300", 0, &r_cold);
+        int rc2 = run_watch(w1, l1, r1, "1700000000", 0, &r_same);
+        ck(rc1 == 0 && r_cold.rc == 0 &&
+           has_txt(r_cold.out, (long)r_cold.outn, "\trate_inc=UNMEASURED\trate_cum=UNMEASURED\teta_min=UNMEASURED\t") &&
+           rc2 == 0 && r_same.rc == 0 &&
+           has_txt(r_same.out, (long)r_same.outn, "\trate_inc=UNMEASURED\t"),
+           "cold-or-same-ts-unmeasured");
+        np_free(&r_cold);
+        np_free(&r_same);
+    }
+
+    /* Case 5: cpw.done-freeze-last-sample (DONE with closing sample freezes rate at last sample epoch) */
+    {
+        const char *done_log =
+            "PRERUN_WINDOW\twindow=W0000\tphase=warmup\tattempt=1\tjobs=1\trc=0\twall_ms=100\n"
+            "PRERUN_WINDOW\twindow=W0001\tphase=heavy\tattempt=1\tjobs=1\trc=0\twall_ms=100\n"
+            "PRERUN_WINDOW\twindow=W0002\tphase=heavy\tattempt=1\tjobs=1\trc=0\twall_ms=100\n"
+            "PRERUN_WINDOW\twindow=W0003\tphase=long\tattempt=1\tjobs=1\trc=0\twall_ms=100\n"
+            "PRERUN_LANES\tfirst=W0004\twindows=2\n"
+            "PRERUN_WINDOW\twindow=W0004\tphase=normal\tattempt=1\tjobs=8\trc=0\twall_ms=100\n"
+            "PRERUN_WINDOW\twindow=W0005\tphase=normal\tattempt=1\tjobs=8\trc=0\twall_ms=100\n"
+            "PRERUN_WINDOW\twindow=W0006\tphase=normal\tattempt=1\tjobs=8\trc=0\twall_ms=100\n"
+            "PRERUN_WINDOW\twindow=W0007\tphase=normal\tattempt=1\tjobs=8\trc=0\twall_ms=100\n"
+            "PRERUN_WINDOW\twindow=W0008\tphase=normal\tattempt=1\tjobs=8\trc=0\twall_ms=100\n"
+            "PRERUN_WINDOW\twindow=W0009\tphase=normal\tattempt=1\tjobs=8\trc=0\twall_ms=100\n"
+            "PRERUN_RUN\tstatus=DONE\tran=10\tskipped=0\tout=/tmp/x\n";
+        const char *done_rate =
+            "sample_ts\tepoch_s\telapsed_since_chain_start_min\telapsed_since_prerun_ids_min\t"
+            "done_windows\ttotal_windows\tlast_window\tcurrent_phase\tdone_by_phase\trem_by_phase\t"
+            "rate_win_per_min\teta_prerun_rem_min\test_prerun_end_ts\test_start_to_pub_min\tnote\n"
+            "2026-11-25 00:00:00 +0800\t1700000000\t10.0\t5.0\t4\t10\tW0003\tlong\twarmup=1\tnormal=6\t0.80\t7.5\t00:08\tUNMEASURED\ts1\n"
+            "2026-11-25 00:03:00 +0800\t1700000180\t13.0\t8.0\t10\t10\tW0009\tnormal\tnormal=6\tnone\t2.00\t0\tDONE\tUNMEASURED\tdone\n";
+        np_result res1, res2;
+        int rr1, rr2;
+        if (write_txt(l3, done_log) || write_txt(r_done, done_rate)) { ck(0, "setup-c5"); return 1; }
+        rr1 = run_watch(w1, l3, r1, "1700000300", 0, &res1);
+        rr2 = run_watch(w1, l3, r_done, "1700000999", 0, &res2);
+        ck(rr1 == 0 && res1.rc == 0 &&
+           has_txt(res1.out, (long)res1.outn, "PRERUN_WATCH\tstate=DONE\tdone=10/10\trate_inc=1.60\trate_cum=1.00\teta_min=0\t") &&
+           rr2 == 0 && res2.rc == 0 &&
+           has_txt(res2.out, (long)res2.outn, "PRERUN_WATCH\tstate=DONE\tdone=10/10\trate_inc=2.00\trate_cum=1.25\teta_min=0\t"),
+           "done-freeze-last-sample");
+        np_free(&res1);
+        np_free(&res2);
+    }
+
+    /* Case 6: cpw.done-incomplete-negative (status=DONE with done_wins < total must refuse DONE) */
+    {
+        const char *inc_log =
+            "PRERUN_WINDOW\twindow=W0000\tphase=warmup\tattempt=1\tjobs=1\trc=0\twall_ms=100\n"
+            "PRERUN_WINDOW\twindow=W0001\tphase=heavy\tattempt=1\tjobs=1\trc=0\twall_ms=100\n"
+            "PRERUN_WINDOW\twindow=W0002\tphase=heavy\tattempt=1\tjobs=1\trc=0\twall_ms=100\n"
+            "PRERUN_WINDOW\twindow=W0003\tphase=long\tattempt=1\tjobs=1\trc=0\twall_ms=100\n"
+            "PRERUN_LANES\tfirst=W0004\twindows=2\n"
+            "PRERUN_WINDOW\twindow=W0004\tphase=normal\tattempt=1\tjobs=8\trc=0\twall_ms=100\n"
+            "PRERUN_WINDOW\twindow=W0005\tphase=normal\tattempt=1\tjobs=8\trc=0\twall_ms=100\n"
+            "PRERUN_WINDOW\twindow=W0006\tphase=normal\tattempt=1\tjobs=8\trc=0\twall_ms=100\n"
+            "PRERUN_WINDOW\twindow=W0007\tphase=normal\tattempt=1\tjobs=8\trc=0\twall_ms=100\n"
+            "PRERUN_RUN\tstatus=DONE\tran=8\tskipped=0\tout=/tmp/x\n";
+        np_result res;
+        int rr;
+        if (write_txt(l_inc, inc_log)) { ck(0, "setup-c6"); return 1; }
+        rr = run_watch(w1, l_inc, r1, "1700000300", 0, &res);
+        ck(rr == 0 && res.rc == 1 &&
+           has_txt(res.out, (long)res.outn, "PRERUN_WATCH\tstate=INCOMPLETE\tdone=8/10\trate_inc=1.20\trate_cum=0.80\teta_min=1.7\t") &&
+           !has_txt(res.out, (long)res.outn, "state=DONE") &&
+           !has_txt(res.out, (long)res.outn, "\teta_min=0\t"),
+           "done-incomplete-negative");
+        np_free(&res);
+    }
+
+    /* Case 7: cpw.refuse-bad-rate-header-and-append */
+    {
+        np_result r_hd, r_app;
+        int rc1, rc2;
+        if (write_txt(r_hdr,
+            "sample_ts\tc1\tc2\tc3\tc4\tc5\tc6\tc7\tc8\tc9\tc10\tc11\tc12\tc13\tc14\n"
+            "2026-11-25 00:00:00 +0800\t1700000000\t10.0\t5.0\t2\t10\tW0001\theavy\ta\tb\t0.40\t20.0\t00:20\tUNMEASURED\tnote\n")) {
+            ck(0, "setup-c7"); return 1;
+        }
+        rc1 = run_watch(w1, l1, r_hdr, "1700000300", 0, &r_hd);
+        rc2 = run_watch(w1, l1, r1, "1700000300", "--append-rate", &r_app);
+        ck(rc1 == 0 && r_hd.rc == 2 &&
+           has_txt(r_hd.err, (long)r_hd.errn, "PRERUN_WATCH\tREFUSE\treason=rate-header-mismatch") &&
+           !has_txt(r_hd.out, (long)r_hd.outn, "PRERUN_WATCH\tstate=") &&
+           rc2 == 0 && r_app.rc == 2 &&
+           has_txt(r_app.err, (long)r_app.errn, "PRERUN_WATCH\tREFUSE\treason=unknown-arg"),
+           "refuse-bad-rate-header-and-append");
+        np_free(&r_hd);
+        np_free(&r_app);
+    }
+
+    /* Case 8: cpw.refuse-missing-or-bad-schema */
+    {
+        np_result r_miss, r_sch;
+        int rc1, rc2;
+        if (write_txt(r_bad, "a\tb\tc\td\te\tf\tg\th\ti\tj\tk\tl\tm\tn\n1\t2\t3\t4\t5\t6\t7\t8\t9\t10\t11\t12\t13\t14\n")) {
+            ck(0, "setup-c8"); return 1;
+        }
+        rc1 = run_watch(w1, l4, 0, "1700000300", 0, &r_miss);
+        rc2 = run_watch(w1, l1, r_bad, "1700000300", 0, &r_sch);
+        ck(rc1 == 0 && r_miss.rc == 2 &&
+           has_txt(r_miss.err, (long)r_miss.errn, "PRERUN_WATCH\tREFUSE\treason=enoent") &&
+           !has_txt(r_miss.out, (long)r_miss.outn, "PRERUN_WATCH\tstate=") &&
+           rc2 == 0 && r_sch.rc == 2 &&
+           has_txt(r_sch.err, (long)r_sch.errn, "PRERUN_WATCH\tREFUSE\treason=rate-schema-mismatch") &&
+           !has_txt(r_sch.out, (long)r_sch.outn, "PRERUN_WATCH\tstate="),
+           "refuse-missing-or-bad-schema");
+        np_free(&r_miss);
+        np_free(&r_sch);
+    }
+
+    /* Case 9: cpw.v3-stale-stop-suppressed-by-done-files-and-live-pid (supervise stopped at W0003, resume wrote done.W0004..5 + live pid) */
+    {
+        const char *old_stop =
+            "PRERUN_WINDOW\twindow=W0000\tphase=warmup\tattempt=1\tjobs=1\trc=0\twall_ms=100\n"
+            "PRERUN_WINDOW\twindow=W0001\tphase=heavy\tattempt=1\tjobs=1\trc=0\twall_ms=100\n"
+            "PRERUN_WINDOW\twindow=W0002\tphase=heavy\tattempt=1\tjobs=1\trc=0\twall_ms=100\n"
+            "PRERUN_WINDOW\twindow=W0003\tphase=long\tattempt=1\tjobs=1\trc=124\twall_ms=58000\n"
+            "PRERUN_STOP\tbatch=check-split-parents\tretries=2\twindow=W0003\traw=timeout\n";
+        if (cx_fmt(pid_s, sizeof pid_s, "%d", sy_pid())) { ck(0, "setup-c9p"); return 1; }
+        if (write_txt(d_log, old_stop) || write_txt(d_pidf, pid_s)) { ck(0, "setup-c9a"); return 1; }
+        for (int wi = 0; wi <= 5; wi++) {
+            if (cx_fmt(d_donep, sizeof d_donep, "%s/done.W%04d", pr_dir, wi) || write_txt(d_donep, "ok\n")) {
+                ck(0, "setup-c9b"); return 1;
+            }
+        }
+        /* Also test extra sub-window done.W0003.z01 does not inflate main done=6/10 */
+        if (cx_fmt(d_donep, sizeof d_donep, "%s/done.W0003.z01", pr_dir) || write_txt(d_donep, "ok\n")) {
+            ck(0, "setup-c9c"); return 1;
+        }
+        char *av[10] = {(char *)"--prerun-dir", pr_dir, (char *)"--now", (char *)"1700000300"};
+        np_result res;
+        int rr = run_watch_args(av, 4, &res);
+        ck(rr == 0 && res.rc == 0 &&
+           has_txt(res.out, (long)res.outn, "PRERUN_WATCH\tstate=RUNNING\tdone=6/10\t") &&
+           has_txt(res.out, (long)res.outn, "\tlast=W0005\tphase=normal\n") &&
+           has_txt(res.out, (long)res.outn, "PRERUN_WATCH_V3\tlog_done=3\tdone_files=7\tdir_wins=6\textra_dir=3\tpid_alive=yes\tlogs=supervise\n"),
+           "v3-stale-stop-suppressed-by-done-files-and-live-pid");
+        np_free(&res);
+    }
+
+    /* Case 10: cpw.v3-daemon-log-and-subrecover-done (prerun-daemon.out continues W0006..W0009, DONE reached via done.W0003 recovery) */
+    {
+        const char *daemon_s =
+            "PRERUN_WINDOW\twindow=W0003.z01\tphase=serial-recovery\tattempt=1\tjobs=1\trc=0\twall_ms=100\n"
+            "PRERUN_WINDOW\twindow=W0004\tphase=normal\tattempt=1\tjobs=8\trc=0\twall_ms=100\n"
+            "PRERUN_WINDOW\twindow=W0005\tphase=normal\tattempt=1\tjobs=8\trc=0\twall_ms=100\n"
+            "PRERUN_WINDOW\twindow=W0006\tphase=normal\tattempt=1\tjobs=8\trc=0\twall_ms=100\n"
+            "PRERUN_WINDOW\twindow=W0007\tphase=normal\tattempt=1\tjobs=8\trc=0\twall_ms=100\n"
+            "PRERUN_WINDOW\twindow=W0008\tphase=normal\tattempt=1\tjobs=8\trc=0\twall_ms=100\n"
+            "PRERUN_WINDOW\twindow=W0009\tphase=normal\tattempt=1\tjobs=8\trc=0\twall_ms=100\n"
+            "PRERUN_RUN\tstatus=DONE\tran=7\tskipped=3\tout=/tmp/x\n";
+        if (write_txt(d_dlog, daemon_s)) { ck(0, "setup-c10a"); return 1; }
+        for (int wi = 6; wi <= 9; wi++) {
+            if (cx_fmt(d_donep, sizeof d_donep, "%s/done.W%04d", pr_dir, wi) || write_txt(d_donep, "ok\n")) {
+                ck(0, "setup-c10b"); return 1;
+            }
+        }
+        char *av[10] = {(char *)"--prerun-dir", pr_dir, (char *)"--now", (char *)"1700000400"};
+        np_result res;
+        int rr = run_watch_args(av, 4, &res);
+        ck(rr == 0 && res.rc == 0 &&
+           has_txt(res.out, (long)res.outn, "PRERUN_WATCH\tstate=DONE\tdone=10/10\t") &&
+           has_txt(res.out, (long)res.outn, "\teta_min=0\t") &&
+           has_txt(res.out, (long)res.outn, "\tlast=W0009\tphase=normal\n") &&
+           has_txt(res.out, (long)res.outn, "PRERUN_WATCH_V3\tlog_done=9\tdone_files=11\tdir_wins=10\textra_dir=1\tpid_alive=yes\tlogs=supervise+daemon\n"),
+           "v3-daemon-log-and-subrecover-done");
+        np_free(&res);
+    }
+
+    /* Case 11: cpw.v3-dead-pid-marks-stopped (no PRERUN_STOP in log, but --pid is dead => STOPPED rc=1) */
+    {
+        char *av[12] = {(char *)"--windows", w1, (char *)"--log", l1, (char *)"--pid", (char *)"4194300", (char *)"--now", (char *)"1700000300"};
+        np_result res;
+        int rr = run_watch_args(av, 8, &res);
+        ck(rr == 0 && res.rc == 1 &&
+           has_txt(res.out, (long)res.outn, "PRERUN_WATCH\tstate=STOPPED\tdone=6/10\t") &&
+           has_txt(res.out, (long)res.outn, "PRERUN_WATCH_V3\tlog_done=6\tdone_files=0\tdir_wins=0\textra_dir=0\tpid_alive=no\tlogs=supervise\n"),
+           "v3-dead-pid-marks-stopped");
+        np_free(&res);
+    }
+
+    /* Case 12: cpw.v3-refuse-bad-pid-and-missing-done-dir */
+    {
+        char bad_dir[560];
+        (void)cx_fmt(bad_dir, sizeof bad_dir, "%s/missing-done-dir", dir);
+        char *av1[10] = {(char *)"--windows", w1, (char *)"--log", l1, (char *)"--pid", (char *)"0", (char *)"--now", (char *)"1700000300"};
+        char *av2[10] = {(char *)"--windows", w1, (char *)"--log", l1, (char *)"--done-dir", bad_dir, (char *)"--now", (char *)"1700000300"};
+        np_result r_pid, r_dir;
+        int rc1 = run_watch_args(av1, 8, &r_pid);
+        int rc2 = run_watch_args(av2, 8, &r_dir);
+        ck(rc1 == 0 && r_pid.rc == 2 &&
+           has_txt(r_pid.err, (long)r_pid.errn, "PRERUN_WATCH\tREFUSE\treason=invalid-pid") &&
+           rc2 == 0 && r_dir.rc == 2 &&
+           has_txt(r_dir.err, (long)r_dir.errn, "PRERUN_WATCH\tREFUSE\treason=enoent"),
+           "v3-refuse-bad-pid-and-missing-done-dir");
+        np_free(&r_pid);
+        np_free(&r_dir);
+    }
+
+    cx_rmtree(dir);
+    printf("CHECK_PRERUN_WATCH\tpassed=%d\tfailed=%d\n", cpw_passed, cpw_failed);
+    return cpw_failed ? 1 : 0;
+}

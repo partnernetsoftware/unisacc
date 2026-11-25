@@ -1,0 +1,633 @@
+/* tools/prerun-watch.cx -- bounded read-only status/rate watch for 2-lane prerun (v3).
+ *
+ *   sh ./unisacc.com tools/prerun-watch.cx -- --windows W.tsv --log S.log
+ *       [--daemon-log D.log] [--done-dir DIR] [--pid PID | --pid-file FILE]
+ *       [--rate-tsv R.tsv] [--prerun-dir DIR]
+ *       [--now EPOCH_S] [--prerun-start EPOCH_S]
+ *
+ * Reads windows.tsv, supervise.log (+ optional daemon log / done.* dir / pid), and optional
+ * 15-column prerun-rate.tsv, and prints one machine-readable summary line:
+ *   PRERUN_WATCH\tstate=RUNNING|STOPPED|DONE|INCOMPLETE\tdone=D/T\trate_inc=...\trate_cum=...\teta_min=...\trc124=...\tlanes=...\tlast=...\tphase=...
+ * When v3 resume-aware inputs (--daemon-log, --done-dir, --pid, --pid-file, or --prerun-dir
+ * with prerun-daemon.out / done.* / prerun-drive.pid) are used, prints a second detail line:
+ *   PRERUN_WATCH_V3\tlog_done=...\tdone_files=...\tdir_wins=...\textra_dir=...\tpid_alive=yes|no|UNMEASURED\tlogs=...
+ * Exit codes: 0 = RUNNING/DONE, 1 = STOPPED/INCOMPLETE,
+ *             2 = REFUSE (bad args, missing/unreadable input, 15-col header/schema error, cap hit).
+ */
+#pragma unisa use sys.fs
+#pragma unisa use sys.io
+#pragma unisa use sys.time
+#pragma unisa use sys.posix
+#pragma unisa use text.text
+#pragma unisa use text.iter
+#pragma unisa use text.num
+#pragma unisa use tsvx.read
+#pragma unisa use mem.bytes
+#pragma unisa use mem.heap
+
+#define PW_MAX_WINS 2048
+#define PW_MAX_PHASES 32
+#define PW_MAX_DIR_SCAN 16384
+#define PW_PATH 4096
+#define PW_LOG_CAP (32L << 20)
+#define PW_WIN_CAP (8L << 20)
+#define PW_RATE_CAP (4L << 20)
+#define PW_RATE_COLS 15
+
+typedef struct {
+    char wid[32];
+    char phase[32];
+    int done;
+    int saw124;
+} PwWin;
+
+typedef struct {
+    char name[32];
+    int total;
+    int done;
+} PwPhase;
+
+static PwWin pw_wins[PW_MAX_WINS];
+static int pw_nwins;
+static PwPhase pw_phases[PW_MAX_PHASES];
+static int pw_nphases;
+static int pw_rc124_order[PW_MAX_WINS];
+static int pw_nrc124;
+
+static int pw_refuse(const char *reason, const char *path) {
+    sy_eprintf("PRERUN_WATCH\tREFUSE\treason=%s\tpath=%s\n", reason, path && path[0] ? path : "-");
+    return 2;
+}
+
+static const char *pw_errno_tag(int rc) {
+    if (rc == -ENOENT) return "enoent";
+    if (rc == -ENOTDIR) return "enotdir";
+    if (rc == -EACCES) return "eacces";
+    if (rc == -EFBIG) return "efbig";
+    return "io-error";
+}
+
+static int pw_find_win(const char *s, long n) {
+    for (int i = 0; i < pw_nwins; i++) {
+        long wl = tx_len(pw_wins[i].wid, 32);
+        if (wl == n && tx_same(pw_wins[i].wid, wl, s, n)) return i;
+    }
+    return -1;
+}
+
+static int pw_phase_slot(const char *s, long n) {
+    for (int i = 0; i < pw_nphases; i++) {
+        long pl = tx_len(pw_phases[i].name, 32);
+        if (pl == n && tx_same(pw_phases[i].name, pl, s, n)) return i;
+    }
+    if (pw_nphases >= PW_MAX_PHASES) return -1;
+    if (tx_copy(pw_phases[pw_nphases].name, 32, s, n)) return -1;
+    pw_phases[pw_nphases].total = 0;
+    pw_phases[pw_nphases].done = 0;
+    return pw_nphases++;
+}
+
+static int pw_kv_span(const char *line, long ln, const char *key, long klen, long *voff, long *vlen) {
+    long fcnt = tx_fields(line, ln, '\t');
+    for (long i = 0; i < fcnt; i++) {
+        long fo = 0, fl = 0;
+        if (tx_field(line, ln, '\t', i, &fo, &fl)) break;
+        if (fl >= klen && tx_prefix(line + fo, fl, key, klen)) {
+            *voff = fo + klen;
+            *vlen = fl - klen;
+            return 0;
+        }
+    }
+    return -1;
+}
+
+static int pw_parse_long_span(const char *s, long n, long *out) {
+    char buf[48];
+    char *end = 0;
+    if (n <= 0 || tx_copy(buf, (long)sizeof buf, s, n)) return -1;
+    if (tx_strtol_r(buf, &end, 10, out) || !end || *end != 0) return -1;
+    return 0;
+}
+
+static int pw_load_windows(const char *path, int *plan_lanes) {
+    unsigned char *buf = 0;
+    int64_t n = 0;
+    int rc = sy_read_file(path, &buf, &n, PW_WIN_CAP);
+    if (rc) return pw_refuse(pw_errno_tag(rc), path);
+
+    *plan_lanes = -1;
+    pw_nwins = 0;
+    pw_nphases = 0;
+
+    tx_iter_t it;
+    tx_iter_init(&it, (const char *)buf, (long)n);
+    while (tx_line_next(&it) == 1) {
+        const char *ln = it.s + it.off;
+        long l = it.len;
+        if (l == 0) continue;
+        if (ln[0] == '#') {
+            const char *lk = "# window-lanes=";
+            long lkl = 15;
+            if (l > lkl && tx_prefix(ln, l, lk, lkl)) {
+                long kv = 0;
+                if (pw_parse_long_span(ln + lkl, l - lkl, &kv) || kv < 1 || kv > 8) {
+                    mm_free(buf);
+                    return pw_refuse("invalid-window-lanes", path);
+                }
+                *plan_lanes = (int)kv;
+            }
+            continue;
+        }
+        if (tx_prefix(ln, l, "window\t", 7)) continue;
+        long fcnt = tx_fields(ln, l, '\t');
+        if (fcnt < 5) {
+            mm_free(buf);
+            return pw_refuse("windows-schema-mismatch", path);
+        }
+        long wo = 0, wl = 0, po = 0, pl = 0;
+        if (tx_field(ln, l, '\t', 0, &wo, &wl) || tx_field(ln, l, '\t', 2, &po, &pl) || wl <= 0 || pl <= 0) {
+            mm_free(buf);
+            return pw_refuse("windows-bad-row", path);
+        }
+        if (pw_nwins >= PW_MAX_WINS) {
+            mm_free(buf);
+            return pw_refuse("windows-over-cap", path);
+        }
+        if (tx_copy(pw_wins[pw_nwins].wid, 32, ln + wo, wl) ||
+            tx_copy(pw_wins[pw_nwins].phase, 32, ln + po, pl)) {
+            mm_free(buf);
+            return pw_refuse("windows-field-over-cap", path);
+        }
+        pw_wins[pw_nwins].done = 0;
+        pw_wins[pw_nwins].saw124 = 0;
+        int ps = pw_phase_slot(ln + po, pl);
+        if (ps < 0) {
+            mm_free(buf);
+            return pw_refuse("phases-over-cap", path);
+        }
+        pw_phases[ps].total++;
+        pw_nwins++;
+    }
+    mm_free(buf);
+    if (pw_nwins == 0) return pw_refuse("empty-windows", path);
+    return 0;
+}
+
+typedef struct {
+    int done_wins;
+    int obs_lanes;
+    int seen_done;
+    int last_win_wi;
+    long last_ok_idx;
+    long last_win_idx;
+    long last_stop_idx;
+    char last_win[32];
+    char last_phase[32];
+} PwLogStat;
+
+static void pw_init_log_stat(PwLogStat *st) {
+    st->done_wins = 0;
+    st->obs_lanes = -1;
+    st->seen_done = 0;
+    st->last_win_wi = -1;
+    st->last_ok_idx = -1;
+    st->last_win_idx = -1;
+    st->last_stop_idx = -1;
+    (void)tx_copy(st->last_win, 32, "none", 4);
+    (void)tx_copy(st->last_phase, 32, "none", 4);
+    pw_nrc124 = 0;
+}
+
+static int pw_scan_log(const char *path, PwLogStat *st, long *line_idx_io) {
+    unsigned char *buf = 0;
+    int64_t n = 0;
+    int rc = sy_read_file(path, &buf, &n, PW_LOG_CAP);
+    if (rc) return pw_refuse(pw_errno_tag(rc), path);
+
+    tx_iter_t it;
+    tx_iter_init(&it, (const char *)buf, (long)n);
+    long line_idx = *line_idx_io;
+    while (tx_line_next(&it) == 1) {
+        const char *ln = it.s + it.off;
+        long l = it.len;
+        if (tx_prefix(ln, l, "PRERUN_WINDOW\t", 14)) {
+            long wo = 0, wl = 0, po = 0, pl = 0, ro = 0, rl = 0, rval = -1;
+            st->last_win_idx = line_idx;
+            if (!pw_kv_span(ln, l, "window=", 7, &wo, &wl) &&
+                !pw_kv_span(ln, l, "rc=", 3, &ro, &rl) &&
+                !pw_parse_long_span(ln + ro, rl, &rval)) {
+                int wi = pw_find_win(ln + wo, wl);
+                if (rval == 0 && wi >= 0) {
+                    if (!pw_wins[wi].done) {
+                        pw_wins[wi].done = 1;
+                        st->done_wins++;
+                        int ps = pw_phase_slot(pw_wins[wi].phase, tx_len(pw_wins[wi].phase, 32));
+                        if (ps >= 0) pw_phases[ps].done++;
+                    }
+                    st->last_ok_idx = line_idx;
+                    st->last_win_wi = wi;
+                    (void)tx_copy(st->last_win, 32, pw_wins[wi].wid, tx_len(pw_wins[wi].wid, 32));
+                    (void)tx_copy(st->last_phase, 32, pw_wins[wi].phase, tx_len(pw_wins[wi].phase, 32));
+                } else if (rval == 124 && wi >= 0) {
+                    if (!pw_wins[wi].saw124) {
+                        pw_wins[wi].saw124 = 1;
+                        pw_rc124_order[pw_nrc124++] = wi;
+                    }
+                }
+                if (st->last_ok_idx < 0) {
+                    (void)tx_copy(st->last_win, 32, ln + wo, wl);
+                    if (!pw_kv_span(ln, l, "phase=", 6, &po, &pl)) {
+                        (void)tx_copy(st->last_phase, 32, ln + po, pl);
+                    }
+                }
+            }
+        } else if (tx_prefix(ln, l, "PRERUN_KEEP_GOING\t", 18)) {
+            long wo = 0, wl = 0;
+            if (!pw_kv_span(ln, l, "window=", 7, &wo, &wl)) {
+                int wi = pw_find_win(ln + wo, wl);
+                if (wi >= 0 && !pw_wins[wi].done) {
+                    pw_wins[wi].done = 1;
+                    st->done_wins++;
+                    int ps = pw_phase_slot(pw_wins[wi].phase, tx_len(pw_wins[wi].phase, 32));
+                    if (ps >= 0) pw_phases[ps].done++;
+                    st->last_ok_idx = line_idx;
+                    st->last_win_wi = wi;
+                    (void)tx_copy(st->last_win, 32, pw_wins[wi].wid, tx_len(pw_wins[wi].wid, 32));
+                    (void)tx_copy(st->last_phase, 32, pw_wins[wi].phase, tx_len(pw_wins[wi].phase, 32));
+                }
+            }
+        } else if (tx_prefix(ln, l, "PRERUN_LANES\t", 13)) {
+            long wo = 0, wl = 0, kval = 0;
+            if (!pw_kv_span(ln, l, "windows=", 8, &wo, &wl) &&
+                !pw_parse_long_span(ln + wo, wl, &kval) &&
+                kval >= 1 && kval <= 8) {
+                st->obs_lanes = (int)kval;
+            }
+        } else if (tx_prefix(ln, l, "PRERUN_STOP\t", 12) ||
+                   tx_prefix(ln, l, "PRERUN_PRODUCT_RED_STOP\t", 24)) {
+            st->last_stop_idx = line_idx;
+        } else if (tx_prefix(ln, l, "PRERUN_RUN\tstatus=DONE", 22)) {
+            st->seen_done = 1;
+        }
+        line_idx++;
+    }
+    *line_idx_io = line_idx;
+    mm_free(buf);
+    return 0;
+}
+
+static int pw_scan_done_dir(const char *dir, PwLogStat *st,
+                              int *done_files_out, int *dir_wins_out, int *extra_dir_out) {
+    sy_dir_t d;
+    int rc = sy_dir_open(&d, dir);
+    if (rc) return pw_refuse(pw_errno_tag(rc), dir);
+
+    int seen = 0, max_dir_wi = -1, nret;
+    *done_files_out = 0;
+    *dir_wins_out = 0;
+    *extra_dir_out = 0;
+
+    while ((nret = sy_dir_next(&d)) == 1) {
+        if (++seen > PW_MAX_DIR_SCAN) {
+            (void)sy_dir_close(&d);
+            return pw_refuse("done-dir-over-cap", dir);
+        }
+        if (d.name_n > 5 && tx_prefix(d.name, d.name_n, "done.", 5)) {
+            (*done_files_out)++;
+            int wi = pw_find_win(d.name + 5, d.name_n - 5);
+            if (wi >= 0) {
+                (*dir_wins_out)++;
+                if (wi > max_dir_wi) max_dir_wi = wi;
+                if (!pw_wins[wi].done) {
+                    pw_wins[wi].done = 1;
+                    st->done_wins++;
+                    int ps = pw_phase_slot(pw_wins[wi].phase, tx_len(pw_wins[wi].phase, 32));
+                    if (ps >= 0) pw_phases[ps].done++;
+                    (*extra_dir_out)++;
+                }
+            }
+        }
+    }
+    (void)sy_dir_close(&d);
+    if (nret < 0 && nret != -ENAMETOOLONG) return pw_refuse(pw_errno_tag(nret), dir);
+
+    if (*extra_dir_out > 0 && max_dir_wi >= 0 && max_dir_wi > st->last_win_wi) {
+        st->last_win_wi = max_dir_wi;
+        (void)tx_copy(st->last_win, 32, pw_wins[max_dir_wi].wid, tx_len(pw_wins[max_dir_wi].wid, 32));
+        (void)tx_copy(st->last_phase, 32, pw_wins[max_dir_wi].phase, tx_len(pw_wins[max_dir_wi].phase, 32));
+    }
+    return 0;
+}
+
+static int pw_read_pid_file(const char *path, long *pid_out) {
+    unsigned char *buf = 0;
+    int64_t n = 0;
+    int rc = sy_read_file(path, &buf, &n, 4096);
+    if (rc) return pw_refuse(pw_errno_tag(rc), path);
+
+    long s = 0, e = (long)n;
+    while (s < e && (buf[s] == ' ' || buf[s] == '\t' || buf[s] == '\r' || buf[s] == '\n')) s++;
+    while (e > s && (buf[e - 1] == ' ' || buf[e - 1] == '\t' || buf[e - 1] == '\r' || buf[e - 1] == '\n')) e--;
+    long pv = 0;
+    int bad = (e <= s || pw_parse_long_span((const char *)buf + s, e - s, &pv) || pv <= 0 || pv > 4194304);
+    mm_free(buf);
+    if (bad) return pw_refuse("invalid-pid-file", path);
+    *pid_out = pv;
+    return 0;
+}
+
+static int pw_check_pid_alive(long pid) {
+    long pg = sy_getpgid((int)pid);
+    if (pg >= 0 || pg == -EPERM) return 1;
+    return 0;
+}
+
+typedef struct {
+    int has_first;
+    long first_epoch_s;
+    long first_done;
+    double first_prerun_min;
+    int has_prev2;
+    long prev2_epoch_s;
+    long prev2_done;
+    int has_prev;
+    long prev_epoch_s;
+    long prev_done;
+} PwRateHist;
+
+static const char *const pw_rate_cols[PW_RATE_COLS] = {
+    "sample_ts",
+    "epoch_s",
+    "elapsed_since_chain_start_min",
+    "elapsed_since_prerun_ids_min",
+    "done_windows",
+    "total_windows",
+    "last_window",
+    "current_phase",
+    "done_by_phase",
+    "rem_by_phase",
+    "rate_win_per_min",
+    "eta_prerun_rem_min",
+    "est_prerun_end_ts",
+    "est_start_to_pub_min",
+    "note"
+};
+
+static int pw_load_rate(const char *path, PwRateHist *rh) {
+    unsigned char *buf = 0;
+    int64_t n = 0;
+    int rc = sy_read_file(path, &buf, &n, PW_RATE_CAP);
+    if (rc) return pw_refuse(pw_errno_tag(rc), path);
+
+    tx_iter_t it;
+    tx_iter_init(&it, (const char *)buf, (long)n);
+    int cols = 0, r, rows = 0;
+    while ((r = tv_row_next(&it, &cols)) == 1) {
+        if (cols != PW_RATE_COLS) {
+            mm_free(buf);
+            return pw_refuse("rate-schema-mismatch", path);
+        }
+        if (rows == 0) {
+            for (int c = 0; c < PW_RATE_COLS; c++) {
+                long fo = 0, fl = 0;
+                long expect_l = tx_len(pw_rate_cols[c], 64);
+                if (tv_field(&it, c, &fo, &fl) || fl != expect_l ||
+                    !tx_same(it.s + fo, fl, pw_rate_cols[c], expect_l)) {
+                    mm_free(buf);
+                    return pw_refuse("rate-header-mismatch", path);
+                }
+            }
+            rows++;
+            continue;
+        }
+        long eo = 0, el = 0, mo = 0, ml = 0, doff = 0, dlen = 0;
+        long ep = 0, dv = 0;
+        if (tv_field(&it, 1, &eo, &el) ||
+            tv_field(&it, 3, &mo, &ml) ||
+            tv_field(&it, 4, &doff, &dlen) ||
+            pw_parse_long_span(it.s + eo, el, &ep) ||
+            pw_parse_long_span(it.s + doff, dlen, &dv)) {
+            mm_free(buf);
+            return pw_refuse("rate-bad-numeric-row", path);
+        }
+        if (!rh->has_first) {
+            char mbuf[32];
+            char *mend = 0;
+            double mval = -1.0;
+            rh->has_first = 1;
+            rh->first_epoch_s = ep;
+            rh->first_done = dv;
+            rh->first_prerun_min = -1.0;
+            if (!tx_copy(mbuf, (long)sizeof mbuf, it.s + mo, ml) &&
+                !tx_strtod_r(mbuf, &mend, &mval) &&
+                mend && *mend == 0 && mval >= 0.0) {
+                rh->first_prerun_min = mval;
+            }
+        }
+        if (rh->has_prev) {
+            rh->has_prev2 = 1;
+            rh->prev2_epoch_s = rh->prev_epoch_s;
+            rh->prev2_done = rh->prev_done;
+        }
+        rh->has_prev = 1;
+        rh->prev_epoch_s = ep;
+        rh->prev_done = dv;
+        rows++;
+    }
+    mm_free(buf);
+    if (r < 0) return pw_refuse("rate-iter-error", path);
+    if (rows == 0) return pw_refuse("rate-empty-file", path);
+    return 0;
+}
+
+static void pw_format_rc124(char *out, int cap) {
+    if (pw_nrc124 == 0) {
+        (void)tx_copy(out, cap, "none", 4);
+        return;
+    }
+    int pos = 0;
+    for (int i = 0; i < pw_nrc124; i++) {
+        const char *w = pw_wins[pw_rc124_order[i]].wid;
+        int n = snprintf(out + pos, (size_t)(cap - pos), "%s%s", i ? "," : "", w);
+        if (n < 0 || n >= cap - pos) break;
+        pos += n;
+    }
+}
+
+int main(int argc, char **argv) {
+    const char *win_p = 0, *log_p = 0, *dlog_p = 0, *done_dir_p = 0, *rate_p = 0, *dir_p = 0, *pidf_p = 0;
+    char def_win[PW_PATH], def_log[PW_PATH], def_dlog[PW_PATH], def_pf[PW_PATH];
+    int has_now = 0, has_pid = 0, v3_mode = 0;
+    long now_s = 0, prerun_start_s = 0, watch_pid = 0;
+
+    for (int i = 1; i < argc; i++) {
+        if (tx_eqz(argv[i], "--windows") && i + 1 < argc) win_p = argv[++i];
+        else if (tx_eqz(argv[i], "--log") && i + 1 < argc) log_p = argv[++i];
+        else if (tx_eqz(argv[i], "--daemon-log") && i + 1 < argc) { dlog_p = argv[++i]; v3_mode = 1; }
+        else if (tx_eqz(argv[i], "--done-dir") && i + 1 < argc) { done_dir_p = argv[++i]; v3_mode = 1; }
+        else if (tx_eqz(argv[i], "--pid-file") && i + 1 < argc) { pidf_p = argv[++i]; v3_mode = 1; }
+        else if (tx_eqz(argv[i], "--rate-tsv") && i + 1 < argc) rate_p = argv[++i];
+        else if (tx_eqz(argv[i], "--prerun-dir") && i + 1 < argc) dir_p = argv[++i];
+        else if (tx_eqz(argv[i], "--pid") && i + 1 < argc) {
+            if (pw_parse_long_span(argv[i + 1], tx_len(argv[i + 1], 64), &watch_pid) ||
+                watch_pid <= 0 || watch_pid > 4194304)
+                return pw_refuse("invalid-pid", argv[i + 1]);
+            has_pid = 1;
+            v3_mode = 1;
+            i++;
+        } else if (tx_eqz(argv[i], "--now") && i + 1 < argc) {
+            if (pw_parse_long_span(argv[i + 1], tx_len(argv[i + 1], 64), &now_s) || now_s <= 0)
+                return pw_refuse("invalid-now", argv[i + 1]);
+            has_now = 1;
+            i++;
+        } else if (tx_eqz(argv[i], "--prerun-start") && i + 1 < argc) {
+            if (pw_parse_long_span(argv[i + 1], tx_len(argv[i + 1], 64), &prerun_start_s) || prerun_start_s <= 0)
+                return pw_refuse("invalid-prerun-start", argv[i + 1]);
+            i++;
+        } else {
+            return pw_refuse("unknown-arg", argv[i]);
+        }
+    }
+
+    if (dir_p && dir_p[0]) {
+        if (!win_p) {
+            if (cx_fmt(def_win, sizeof def_win, "%s/windows.tsv", dir_p)) return pw_refuse("path-bound", dir_p);
+            win_p = def_win;
+        }
+        if (!log_p) {
+            if (cx_fmt(def_log, sizeof def_log, "%s/supervise.log", dir_p)) return pw_refuse("path-bound", dir_p);
+            log_p = def_log;
+        }
+        if (!dlog_p) {
+            if (cx_fmt(def_dlog, sizeof def_dlog, "%s/prerun-daemon.out", dir_p)) return pw_refuse("path-bound", dir_p);
+            if (sy_exists(def_dlog) == 1) dlog_p = def_dlog;
+        }
+        if (!done_dir_p) done_dir_p = dir_p;
+        if (!has_pid && !pidf_p) {
+            if (cx_fmt(def_pf, sizeof def_pf, "%s/prerun-drive.pid", dir_p)) return pw_refuse("path-bound", dir_p);
+            if (sy_exists(def_pf) == 1) pidf_p = def_pf;
+        }
+    }
+    if (!win_p || !win_p[0] || !log_p || !log_p[0]) return pw_refuse("missing-windows-or-log", "-");
+
+    int plan_lanes = -1;
+    if (pw_load_windows(win_p, &plan_lanes)) return 2;
+
+    PwLogStat st;
+    pw_init_log_stat(&st);
+    long line_idx = 0;
+    if (pw_scan_log(log_p, &st, &line_idx)) return 2;
+    if (dlog_p && dlog_p[0]) {
+        if (pw_scan_log(dlog_p, &st, &line_idx)) return 2;
+    }
+
+    int log_done = st.done_wins;
+    int done_files = 0, dir_wins = 0, extra_dir = 0;
+    if (done_dir_p && done_dir_p[0]) {
+        if (pw_scan_done_dir(done_dir_p, &st, &done_files, &dir_wins, &extra_dir)) return 2;
+        if (done_files > 0) v3_mode = 1;
+    }
+    if (dlog_p && dlog_p[0]) v3_mode = 1;
+    if (pidf_p && pidf_p[0]) {
+        if (!has_pid) {
+            if (pw_read_pid_file(pidf_p, &watch_pid)) return 2;
+            has_pid = 1;
+        }
+        v3_mode = 1;
+    }
+
+    int pid_alive = -1;
+    if (has_pid) pid_alive = pw_check_pid_alive(watch_pid);
+
+    PwRateHist rh;
+    memset(&rh, 0, sizeof rh);
+    if (rate_p && rate_p[0]) {
+        if (pw_load_rate(rate_p, &rh)) return 2;
+    }
+
+    int has_recent_stop = (st.last_stop_idx >= 0 && st.last_stop_idx > st.last_win_idx);
+    const char *state = "RUNNING";
+    int exit_rc = 0;
+    if (st.seen_done && st.done_wins == pw_nwins) {
+        state = "DONE";
+        exit_rc = 0;
+    } else if (st.seen_done && st.done_wins < pw_nwins) {
+        state = "INCOMPLETE";
+        exit_rc = 1;
+    } else if (has_recent_stop) {
+        if (pid_alive == 1 || extra_dir > 0) {
+            state = "RUNNING";
+            exit_rc = 0;
+        } else {
+            state = "STOPPED";
+            exit_rc = 1;
+        }
+    } else if (pid_alive == 0 && st.done_wins < pw_nwins) {
+        state = "STOPPED";
+        exit_rc = 1;
+    }
+
+    int freeze_at_last_sample = (tx_eqz(state, "DONE") && rh.has_prev && rh.prev_done == st.done_wins);
+    if (!has_now && !freeze_at_last_sample) {
+        now_s = sy_wall_s();
+        if (now_s <= 0) return pw_refuse("wall-clock-unavailable", "-");
+    }
+
+    char rate_inc_str[32], rate_cum_str[32], eta_str[32], lanes_str[32], rc124_str[2048];
+    double r_inc = -1.0, r_cum = -1.0, eta_val = 0.0;
+    int has_r_inc = 0, has_r_cum = 0, has_eta = 0;
+    long eval_now_s = freeze_at_last_sample ? rh.prev_epoch_s : now_s;
+
+    if (freeze_at_last_sample) {
+        if (rh.has_prev2 && rh.prev_epoch_s > rh.prev2_epoch_s && rh.prev_done >= rh.prev2_done) {
+            r_inc = (double)(rh.prev_done - rh.prev2_done) * 60.0 / (double)(rh.prev_epoch_s - rh.prev2_epoch_s);
+            if (!cx_fmt(rate_inc_str, sizeof rate_inc_str, "%.2f", r_inc)) has_r_inc = 1;
+        }
+    } else if (rh.has_prev && eval_now_s > rh.prev_epoch_s && st.done_wins >= rh.prev_done) {
+        r_inc = (double)(st.done_wins - rh.prev_done) * 60.0 / (double)(eval_now_s - rh.prev_epoch_s);
+        if (!cx_fmt(rate_inc_str, sizeof rate_inc_str, "%.2f", r_inc)) has_r_inc = 1;
+    }
+    if (!has_r_inc) (void)tx_copy(rate_inc_str, (long)sizeof rate_inc_str, "UNMEASURED", 10);
+
+    long eff_start = prerun_start_s;
+    if (eff_start <= 0 && rh.has_first && rh.first_prerun_min >= 0.0) {
+        eff_start = rh.first_epoch_s - (long)(rh.first_prerun_min * 60.0 + 0.5);
+    }
+    if (eff_start > 0 && eval_now_s > eff_start) {
+        r_cum = (double)st.done_wins * 60.0 / (double)(eval_now_s - eff_start);
+        if (!cx_fmt(rate_cum_str, sizeof rate_cum_str, "%.2f", r_cum)) has_r_cum = 1;
+    }
+    if (!has_r_cum) (void)tx_copy(rate_cum_str, (long)sizeof rate_cum_str, "UNMEASURED", 10);
+
+    if (st.done_wins == pw_nwins) {
+        (void)tx_copy(eta_str, (long)sizeof eta_str, "0", 1);
+    } else {
+        double use_r = (has_r_inc && r_inc > 0.0) ? r_inc : (has_r_cum && r_cum > 0.0) ? r_cum : -1.0;
+        if (use_r > 0.0) {
+            eta_val = (double)(pw_nwins - st.done_wins) / use_r;
+            if (!cx_fmt(eta_str, sizeof eta_str, "%.1f", eta_val)) has_eta = 1;
+        }
+        if (!has_eta) (void)tx_copy(eta_str, (long)sizeof eta_str, "UNMEASURED", 10);
+    }
+
+    int eff_lanes = st.obs_lanes > 0 ? st.obs_lanes : plan_lanes;
+    if (eff_lanes > 0) {
+        if (cx_fmt(lanes_str, sizeof lanes_str, "%d", eff_lanes))
+            (void)tx_copy(lanes_str, (long)sizeof lanes_str, "UNMEASURED", 10);
+    } else {
+        (void)tx_copy(lanes_str, (long)sizeof lanes_str, "UNMEASURED", 10);
+    }
+
+    pw_format_rc124(rc124_str, (int)sizeof rc124_str);
+
+    printf("PRERUN_WATCH\tstate=%s\tdone=%d/%d\trate_inc=%s\trate_cum=%s\teta_min=%s\trc124=%s\tlanes=%s\tlast=%s\tphase=%s\n",
+           state, st.done_wins, pw_nwins, rate_inc_str, rate_cum_str, eta_str,
+           rc124_str, lanes_str, st.last_win, st.last_phase);
+    if (v3_mode) {
+        const char *palive = pid_alive == 1 ? "yes" : pid_alive == 0 ? "no" : "UNMEASURED";
+        const char *lsrc = (dlog_p && dlog_p[0]) ? "supervise+daemon" : "supervise";
+        printf("PRERUN_WATCH_V3\tlog_done=%d\tdone_files=%d\tdir_wins=%d\textra_dir=%d\tpid_alive=%s\tlogs=%s\n",
+               log_done, done_files, dir_wins, extra_dir, palive, lsrc);
+    }
+    return exit_rc;
+}
