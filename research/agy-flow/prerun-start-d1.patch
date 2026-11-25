@@ -1,0 +1,1900 @@
+diff --git a/tools/prerun-start.cx b/tools/prerun-start.cx
+new file mode 100644
+index 0000000000..79b0610964
+--- /dev/null
++++ b/tools/prerun-start.cx
+@@ -0,0 +1,1376 @@
++/* tools/prerun-start.cx -- unified strict prerun launcher and D1 freeze admission gate.
++ *
++ * Subcommands:
++ *   admission        --root DIR --base REV --candidate APE --out DIR
++ *                    [--dvqualify-prog FILE] [--affected-prog FILE]
++ *   verify-admission --root DIR --base REV --candidate APE --out DIR
++ *                    [--affected-prog FILE]
++ *   cold-identity    --root DIR --candidate APE [--rev REV]
++ *   start            --rev REV --version V --prev PV --prev-rev PREVREV --ape ABS_APE
++ *                    --dir ABS_DIR --priority-src FILE --cold-times-file FILE
++ *                    [--repo DIR] [--lanes N] [--jobs N] [--prev-windows FILE]
++ *                    [--times-cache FILE] [--evidence-out DIR | --no-templates]
++ *                    [--exclude FILE] [--add-ids FILE] [--inputs-prog FILE]
++ *                    [--drive-prog FILE] [--plan-only]
++ *   resume           --dir ABS_DIR --candidate ABS_APE [--repo DIR]
++ *                    [--allow-migrate REASON] [--drive-prog FILE]
++ *
++ * Check: tools/check-prerun-start.cx. */
++#pragma unisa use cxlib.netpack
++#pragma unisa use sys.fs
++#pragma unisa use sys.env
++#pragma unisa use sys.posix
++#pragma unisa use sys.proc
++#pragma unisa use sys.sha
++#pragma unisa use text.text
++#pragma unisa use mem.bytes
++#pragma unisa use mem.heap
++
++#define PS_MAXIDS 4096
++#define PS_IDLEN 128
++#define PS_PW 4400
++#define PS_COLD_MAX_MS 27500
++#define PS_RUN_BOUND_SECS 5400
++
++static char g_ids[PS_MAXIDS][PS_IDLEN];
++static int g_src[PS_MAXIDS]; /* bit 1 = affected, bit 2 = added */
++static int g_prio[PS_MAXIDS];
++static int g_nids;
++
++static int ps_refuse(const char *sub, const char *why) {
++    printf("PRERUN_START\tREFUSE\tsub=%s\treason=%s\n", sub ? sub : "-", why ? why : "unknown");
++    return 2;
++}
++
++static int ps_unlock_refuse(const char *lockp, const char *sub, const char *why) {
++    if (lockp && lockp[0]) sy_unlink(lockp);
++    return ps_refuse(sub, why);
++}
++
++static char *ps_read_all(const char *path, size_t *n) {
++    unsigned char *b = 0; int64_t k = 0;
++    if (sy_read_file(path, &b, &k, 64 << 20)) return 0;
++    *n = (size_t)k;
++    return (char *)b;
++}
++
++static int ps_sha_buf(const char *data, size_t n, char hex[65]) {
++    return sy_sha256_hex(data, (long)n, hex);
++}
++
++static int ps_sha_file(const char *path, char hex[65]) {
++    size_t n = 0;
++    char *b = ps_read_all(path, &n);
++    if (!b) return -1;
++    int rc = ps_sha_buf(b, n, hex);
++    mm_free(b);
++    return rc;
++}
++
++static int ps_is_hex(const char *s, size_t len) {
++    for (size_t i = 0; i < len; i++) {
++        char c = s[i];
++        if (!((c >= '0' && c <= '9') || (c >= 'a' && c <= 'f'))) return 0;
++    }
++    return 1;
++}
++
++static int ps_is_digits(const char *s, size_t len) {
++    if (len == 0 || len > 12) return 0;
++    for (size_t i = 0; i < len; i++) if (s[i] < '0' || s[i] > '9') return 0;
++    return 1;
++}
++
++static int ps_starts(const char *s, const char *pre) {
++    size_t pl = strlen(pre);
++    return strlen(s) >= pl && memcmp(s, pre, pl) == 0;
++}
++
++static int ps_ends_cx(const char *s) {
++    size_t n = strlen(s);
++    return n >= 3 && memcmp(s + n - 3, ".cx", 3) == 0;
++}
++
++static int ps_prog_prefix(char **v, const char *prog) {
++    int c = 0;
++    if (ps_ends_cx(prog)) {
++        v[c++] = "sh";
++        v[c++] = "./unisacc.com";
++        v[c++] = (char *)prog;
++        v[c++] = "--";
++    } else {
++        v[c++] = (char *)prog;
++    }
++    return c;
++}
++
++static int ps_prog_has_token(const char *repo, const char *prog, const char *tok) {
++    char path[PS_PW];
++    const char *p = prog;
++    if (prog[0] != '/') {
++        if (cx_fmt(path, sizeof path, "%s/%s", repo, prog)) return 0;
++        p = path;
++    }
++    size_t n = 0, tl = strlen(tok);
++    char *b = ps_read_all(p, &n);
++    if (!b) return 1;
++    int hit = 0;
++    for (size_t i = 0; tl > 0 && i + tl <= n; i++) {
++        if (!memcmp(b + i, tok, tl)) { hit = 1; break; }
++    }
++    mm_free(b);
++    return hit;
++}
++
++static int ps_is_compile_smoke_id(const char *id) {
++    return ps_starts(id, "daily-compile-smoke-") || ps_starts(id, "compile-smoke-");
++}
++
++static int ps_is_early_canary_id(const char *id) {
++    return ps_starts(id, "ri-image-") || !strcmp(id, "ri-route-refuse") || !strcmp(id, "lane-key-probes") ||
++           ps_is_compile_smoke_id(id);
++}
++
++static int ps_is_warmup_excluded_id(const char *id) {
++    return !strcmp(id, "tools-default-regression") || !strcmp(id, "cx-booter-ape") ||
++           ps_starts(id, "unit-frontcache-") || ps_starts(id, "opt-frame4-");
++}
++
++static int ps_is_heavy_id(const char *id) {
++    static const char *builtin[] = {
++        "real-commit", "unit-frontcache-equiv3", "check-split-parents",
++        "check-gen-all-check", "check-gen-all-pass", "check-gen-all-hang",
++        "c-negative", "stream-pipe-parts", 0
++    };
++    for (int i = 0; builtin[i]; i++) if (!strcmp(id, builtin[i])) return 1;
++    if (ps_starts(id, "netregen-")) return 1;
++    return 0;
++}
++
++static int ps_find_id(const char *id) {
++    for (int i = 0; i < g_nids; i++) if (!strcmp(g_ids[i], id)) return i;
++    return -1;
++}
++
++static void ps_trim_line(char *s) {
++    size_t n = strlen(s);
++    while (n > 0 && (s[n - 1] == '\n' || s[n - 1] == '\r' || s[n - 1] == ' ' || s[n - 1] == '\t')) s[--n] = 0;
++}
++
++static int ps_git_out(const char *repo, char **argv, char *out, size_t cap) {
++    np_result r = {0}; char why[512];
++    if (np_run(argv, repo, 0, 30, &r, why, sizeof why) || r.rc || !r.out) {
++        np_free(&r);
++        return -1;
++    }
++    size_t n = r.outn < cap - 1 ? r.outn : cap - 1;
++    mm_copy(out, cap, r.out, n);
++    out[n] = 0;
++    ps_trim_line(out);
++    np_free(&r);
++    return 0;
++}
++
++/* Resolve two or three rev-parse specs in one git invocation to minimize subprocess overhead. */
++static int ps_git_rev_pair(const char *repo, const char *s1, const char *s2, char h1[41], char h2[41]) {
++    char *v[] = {"git", "rev-parse", (char *)s1, (char *)s2, 0};
++    char buf[256];
++    if (ps_git_out(repo, v, buf, sizeof buf)) return -1;
++    if (strlen(buf) < 81 || buf[40] != '\n') return -1;
++    mm_copy(h1, 41, buf, 40); h1[40] = 0;
++    mm_copy(h2, 41, buf + 41, 40); h2[40] = 0;
++    if (!ps_is_hex(h1, 40) || !ps_is_hex(h2, 40)) return -1;
++    return 0;
++}
++
++static int ps_git_rev_triple(const char *repo, const char *s1, const char *s2, const char *s3,
++                             char h1[41], char h2[41], char h3[41]) {
++    char *v[] = {"git", "rev-parse", (char *)s1, (char *)s2, (char *)s3, 0};
++    char buf[384];
++    if (ps_git_out(repo, v, buf, sizeof buf)) return -1;
++    if (strlen(buf) < 122 || buf[40] != '\n' || buf[81] != '\n') return -1;
++    mm_copy(h1, 41, buf, 40); h1[40] = 0;
++    mm_copy(h2, 41, buf + 41, 40); h2[40] = 0;
++    mm_copy(h3, 41, buf + 82, 40); h3[40] = 0;
++    if (!ps_is_hex(h1, 40) || !ps_is_hex(h2, 40) || !ps_is_hex(h3, 40)) return -1;
++    return 0;
++}
++
++static int ps_git_clean_tracked(const char *repo) {
++    char *v[] = {"git", "status", "--porcelain", "--untracked-files=no", 0};
++    char buf[256];
++    if (ps_git_out(repo, v, buf, sizeof buf)) return -1;
++    return buf[0] == 0 ? 0 : 1;
++}
++
++static char *ps_git_show_alloc(const char *repo, const char *spec, size_t *out_n) {
++    char *v[] = {"git", "show", (char *)spec, 0};
++    np_result r = {0}; char why[512];
++    if (np_run(v, repo, 0, 30, &r, why, sizeof why) || r.rc || !r.out) {
++        np_free(&r);
++        return 0;
++    }
++    char *b = (char *)mm_alloc(r.outn + 1);
++    if (!b) { np_free(&r); return 0; }
++    if (r.outn) mm_copy(b, r.outn + 1, r.out, r.outn);
++    b[r.outn] = 0;
++    *out_n = r.outn;
++    np_free(&r);
++    return b;
++}
++
++static void ps_load_implemented_batches(const char *t, size_t n) {
++    g_nids = 0;
++    const char *p = t, *end = t + n;
++    int first = 1;
++    while (p < end) {
++        const char *nl = (const char *)memchr(p, '\n', (size_t)(end - p));
++        size_t ll = nl ? (size_t)(nl - p) : (size_t)(end - p);
++        char line[2048];
++        size_t cp = ll < sizeof line - 1 ? ll : sizeof line - 1;
++        mm_copy(line, sizeof line, p, cp);
++        line[cp] = 0;
++        p += ll + (nl ? 1 : 0);
++        if (first) { first = 0; continue; }
++        if (!line[0] || line[0] == '#') continue;
++        char *t1 = strchr(line, '\t');
++        if (!t1) continue;
++        *t1++ = 0;
++        char *t2 = strchr(t1, '\t');
++        if (t2) *t2 = 0;
++        if (strcmp(t1, "IMPLEMENTED") || strlen(line) >= PS_IDLEN || g_nids >= PS_MAXIDS) continue;
++        if (ps_find_id(line) >= 0) continue;
++        cx_fmt(g_ids[g_nids], PS_IDLEN, "%s", line);
++        g_src[g_nids] = 0;
++        g_prio[g_nids] = 0;
++        g_nids++;
++    }
++}
++
++static int ps_batch_implemented_in(const char *t, size_t n, const char *id) {
++    const char *p = t, *end = t + n;
++    size_t il = strlen(id);
++    int first = 1;
++    while (p < end) {
++        const char *nl = (const char *)memchr(p, '\n', (size_t)(end - p));
++        size_t ll = nl ? (size_t)(nl - p) : (size_t)(end - p);
++        const char *row = p;
++        p += ll + (nl ? 1 : 0);
++        if (first) { first = 0; continue; }
++        if (ll > il + 12 && !memcmp(row, id, il) && row[il] == '\t' &&
++            !memcmp(row + il + 1, "IMPLEMENTED", 11) &&
++            (row[il + 12] == '\t' || row[il + 12] == '\r' || il + 12 == ll)) {
++            return 1;
++        }
++    }
++    return 0;
++}
++
++static const char *ps_src_label(int mask) {
++    if (mask == 3) return "both";
++    if (mask == 2) return "added";
++    return "affected";
++}
++
++static int ps_compute_cold_identity(const char *repo, const char *rev, const char *ape,
++                                    char cold_id[65], char rev_sha[41], char tree_sha[41],
++                                    char ape_sha[65], char batches_sha[65]) {
++    char cspec[128], tspec[128], bspec[160], head_c[41];
++    const char *r = (rev && rev[0]) ? rev : "HEAD";
++    if (cx_fmt(cspec, sizeof cspec, "%s^{commit}", r) ||
++        cx_fmt(tspec, sizeof tspec, "%s^{tree}", r) ||
++        cx_fmt(bspec, sizeof bspec, "%s:tests/batches.tsv", r)) return -1;
++    if (ps_git_rev_triple(repo, cspec, tspec, "HEAD^{commit}", rev_sha, tree_sha, head_c)) return -1;
++    sy_stat_t st;
++    if (!ape || sy_stat(ape, &st) || st.kind != 'f' || ps_sha_file(ape, ape_sha)) return -1;
++    size_t bn = 0;
++    char *bt = 0;
++    char disk_bp[PS_PW];
++    if (!strcmp(rev_sha, head_c) && !cx_fmt(disk_bp, sizeof disk_bp, "%s/tests/batches.tsv", repo)) {
++        bt = ps_read_all(disk_bp, &bn);
++    }
++    if (!bt) bt = ps_git_show_alloc(repo, bspec, &bn);
++    if (!bt) return -1;
++    int brc = ps_sha_buf(bt, bn, batches_sha);
++    mm_free(bt);
++    if (brc) return -1;
++    char payload[512];
++    if (cx_fmt(payload, sizeof payload, "warmup-cold-v1\n%s\n%s\n%s\n", tree_sha, ape_sha, batches_sha)) return -1;
++    return ps_sha_buf(payload, strlen(payload), cold_id);
++}
++
++static int ps_collect_admission_union(const char *root, const char *base_rev, const char *affected_prog,
++                                      char head_sha[41], char tree_sha[41], char base_sha[41],
++                                      char batches_sha[65], char *why, size_t wcap) {
++    char bspec[128], disk_bp[PS_PW];
++    if (ps_git_clean_tracked(root) != 0) { cx_fmt(why, wcap, "dirty-tree"); return -1; }
++    if (cx_fmt(bspec, sizeof bspec, "%s^{commit}", base_rev) ||
++        ps_git_rev_triple(root, "HEAD^{commit}", "HEAD^{tree}", bspec, head_sha, tree_sha, base_sha)) {
++        cx_fmt(why, wcap, "rev-resolve-failed"); return -1;
++    }
++    size_t hbn = 0, pbn = 0;
++    cx_fmt(disk_bp, sizeof disk_bp, "%s/tests/batches.tsv", root);
++    char *hbt = ps_read_all(disk_bp, &hbn);
++    if (!hbt) { cx_fmt(why, wcap, "head-batches-unreadable"); return -1; }
++    if (ps_sha_buf(hbt, hbn, batches_sha)) { mm_free(hbt); cx_fmt(why, wcap, "batches-sha-failed"); return -1; }
++    ps_load_implemented_batches(hbt, hbn);
++    mm_free(hbt);
++    if (g_nids <= 0) { cx_fmt(why, wcap, "no-implemented-batches"); return -1; }
++
++    char pbspec[160];
++    cx_fmt(pbspec, sizeof pbspec, "%s:tests/batches.tsv", base_sha);
++    char *pbt = ps_git_show_alloc(root, pbspec, &pbn);
++    if (!pbt) { cx_fmt(why, wcap, "base-batches-unreadable"); return -1; }
++    for (int i = 0; i < g_nids; i++) {
++        if (!ps_batch_implemented_in(pbt, pbn, g_ids[i])) g_src[i] |= 2;
++    }
++    mm_free(pbt);
++
++    const char *aprog = (affected_prog && affected_prog[0]) ? affected_prog : "tools/affected.cx";
++    char *av[12]; int ac = ps_prog_prefix(av, aprog);
++    av[ac++] = "--since"; av[ac++] = base_sha; av[ac++] = "--list-only"; av[ac] = 0;
++    np_result ar = {0}; char awhy[512];
++    if (np_run(av, root, 0, 55, &ar, awhy, sizeof awhy) || ar.rc || !ar.out) {
++        np_free(&ar);
++        cx_fmt(why, wcap, "affected-run-failed");
++        return -1;
++    }
++    const char *p = ar.out, *end = ar.out + ar.outn;
++    while (p < end) {
++        const char *nl = (const char *)memchr(p, '\n', (size_t)(end - p));
++        size_t ll = nl ? (size_t)(nl - p) : (size_t)(end - p);
++        if (ll > 9 && !memcmp(p, "AFFECTED\t", 9)) {
++            const char *id_s = p + 9;
++            const char *tb = (const char *)memchr(id_s, '\t', (size_t)(p + ll - id_s));
++            size_t il = tb ? (size_t)(tb - id_s) : (size_t)(p + ll - id_s);
++            if (il > 0 && il < PS_IDLEN) {
++                char id[PS_IDLEN];
++                mm_copy(id, sizeof id, id_s, il);
++                id[il] = 0;
++                ps_trim_line(id);
++                int ix = ps_find_id(id);
++                if (ix >= 0) g_src[ix] |= 1;
++            }
++        }
++        p += ll + (nl ? 1 : 0);
++    }
++    np_free(&ar);
++    return 0;
++}
++
++static int ps_parse_batch_evidence(const char *path, const char *want_id, const char *want_cand,
++                                   char *status_out, size_t st_cap, long *ms_out,
++                                   char *raw_line_out, size_t raw_cap, char raw_sha_out[65]) {
++    size_t n = 0;
++    char *b = ps_read_all(path, &n);
++    if (!b) return -1;
++    status_out[0] = 0;
++    *ms_out = 0;
++    raw_line_out[0] = 0;
++    raw_sha_out[0] = 0;
++    int got_row = 0, got_raw = 0;
++    const char *p = b, *end = b + n;
++    size_t il = strlen(want_id);
++    while (p < end) {
++        const char *nl = (const char *)memchr(p, '\n', (size_t)(end - p));
++        size_t ll = nl ? (size_t)(nl - p) : (size_t)(end - p);
++        size_t rll = ll;
++        if (rll > 0 && p[rll - 1] == '\r') rll--;
++        if (rll > 4 && !memcmp(p, "RAW\t", 4) && tx_find(p, (long)rll, "BATCH_RUN", 9) >= 0) {
++            char id_pat[PS_IDLEN + 8], cand_pat[80];
++            cx_fmt(id_pat, sizeof id_pat, "\tid=%s\t", want_id);
++            cx_fmt(cand_pat, sizeof cand_pat, "\tcandidate=%s", want_cand);
++            if (tx_find(p, (long)rll, id_pat, (long)strlen(id_pat)) >= 0) {
++                size_t cp = rll < raw_cap - 1 ? rll : raw_cap - 1;
++                mm_copy(raw_line_out, raw_cap, p, cp);
++                raw_line_out[cp] = 0;
++                ps_sha_buf(raw_line_out, strlen(raw_line_out), raw_sha_out);
++                if (tx_find(p, (long)rll, "\tstatus=PASS\t", 13) >= 0 &&
++                    tx_find(p, (long)rll, "\trc=0\t", 6) >= 0 &&
++                    tx_find(p, (long)rll, cand_pat, (long)strlen(cand_pat)) >= 0) {
++                    got_raw = 1;
++                }
++            }
++        } else if (rll > il + 1 && !memcmp(p, want_id, il) && p[il] == '\t') {
++            char line[2048];
++            size_t cp = rll < sizeof line - 1 ? rll : sizeof line - 1;
++            mm_copy(line, sizeof line, p, cp);
++            line[cp] = 0;
++            char *cols[10]; int nc = 0; char *q = line;
++            while (nc < 10) {
++                cols[nc++] = q;
++                char *tb = strchr(q, '\t');
++                if (!tb) break;
++                *tb = 0;
++                q = tb + 1;
++            }
++            if (nc == 9) {
++                cx_fmt(status_out, st_cap, "%s", cols[2]);
++                *ms_out = atol(cols[5]);
++                if (!strcmp(cols[2], "PASS") && !strcmp(cols[3], "0") && !strcmp(cols[4], want_cand)) {
++                    got_row = 1;
++                }
++            }
++        }
++        p += ll + (nl ? 1 : 0);
++    }
++    mm_free(b);
++    return (got_row && got_raw) ? 0 : 1;
++}
++
++static int ps_cmd_admission(int argc, char **argv) {
++    const char *root = 0, *base = 0, *cand = 0, *out = 0;
++    const char *dvprog = "tools/dvqualify.cx", *afprog = "tools/affected.cx";
++    for (int i = 2; i < argc; i++) {
++        const char *k = argv[i], *v = i + 1 < argc ? argv[i + 1] : 0;
++        if (!v) return ps_refuse("admission", "missing-value");
++        if (!strcmp(k, "--root")) root = v;
++        else if (!strcmp(k, "--base")) base = v;
++        else if (!strcmp(k, "--candidate")) cand = v;
++        else if (!strcmp(k, "--out")) out = v;
++        else if (!strcmp(k, "--dvqualify-prog")) dvprog = v;
++        else if (!strcmp(k, "--affected-prog")) afprog = v;
++        else return ps_refuse("admission", "unknown-option");
++        i++;
++    }
++    if (!root || !base || !cand || !out) return ps_refuse("admission", "need-root-base-candidate-out");
++    if (out[0] != '/') return ps_refuse("admission", "out-not-absolute");
++    char rroot[PS_PW], rcand[PS_PW], cand_sha[65];
++    sy_stat_t st;
++    if (sy_realpath(root, rroot, sizeof rroot) < 0) return ps_refuse("admission", "root-unresolvable");
++    if (sy_realpath(cand, rcand, sizeof rcand) < 0 || sy_stat(rcand, &st) || st.kind != 'f' || ps_sha_file(rcand, cand_sha))
++        return ps_refuse("admission", "candidate-unreadable");
++    if (sy_mkdir_all(out, 0700)) return ps_refuse("admission", "out-create-failed");
++
++    char head_sha[41], tree_sha[41], base_sha[41], batches_sha[65], why[256];
++    if (ps_collect_admission_union(rroot, base, afprog, head_sha, tree_sha, base_sha, batches_sha, why, sizeof why))
++        return ps_refuse("admission", why);
++
++    int nsel = 0;
++    for (int i = 0; i < g_nids; i++) if (g_src[i]) nsel++;
++
++    np_buf rec = {0}, pri = {0};
++    char line[4096], rpath[PS_PW], ppath[PS_PW];
++    cx_fmt(rpath, sizeof rpath, "%s/admission-receipt.tsv", out);
++    cx_fmt(ppath, sizeof ppath, "%s/priority.tsv", out);
++
++    np_puts(&rec, "# prerun-start admission receipt (D1 freeze admission gate)\n");
++    cx_fmt(line, sizeof line,
++           "ADMISSION_META\tschema=v1\ttree_sha=%s\thead_sha=%s\tbase_sha=%s\tcandidate_sha256=%s\tbatches_sha256=%s\tcount=%d\tstatus=PASS\n",
++           tree_sha, head_sha, base_sha, cand_sha, batches_sha, nsel);
++    np_puts(&rec, line);
++
++    np_puts(&pri, "# prerun-start admission priority table (D1)\n");
++    cx_fmt(line, sizeof line, "# tree_sha=%s base_sha=%s candidate_sha256=%s\nbatch\tsource\tstatus\n__admission_pass_anchor__\tadmission\tPASS\n", tree_sha, base_sha, cand_sha);
++    np_puts(&pri, line);
++
++    /* tools/dvqualify.cx:635 requires positional ROOT as argv[1] (no --root flag). */
++    for (int i = 0; i < g_nids; i++) {
++        if (!g_src[i]) continue;
++        char bfile[PS_PW], st_str[32] = "UNKNOWN", raw_line[1024] = "", raw_sha[65] = "-";
++        long bms = 0;
++        cx_fmt(bfile, sizeof bfile, "%s/batch-%s.tsv", out, g_ids[i]);
++        sy_unlink(bfile);
++        char *dv[20]; int dc = ps_prog_prefix(dv, dvprog);
++        dv[dc++] = rroot;
++        dv[dc++] = "--candidate"; dv[dc++] = rcand;
++        dv[dc++] = "--ids"; dv[dc++] = g_ids[i];
++        dv[dc++] = "--jobs"; dv[dc++] = "1";
++        dv[dc++] = "--segment-batches"; dv[dc++] = "1";
++        dv[dc++] = "--out"; dv[dc++] = bfile;
++        dv[dc] = 0;
++        np_result dr = {0}; char dwhy[512];
++        int tr = np_run(dv, rroot, 0, 58, &dr, dwhy, sizeof dwhy);
++        int drc = tr ? -1 : dr.rc;
++        np_free(&dr);
++        int perr = ps_parse_batch_evidence(bfile, g_ids[i], cand_sha, st_str, sizeof st_str, &bms,
++                                           raw_line, sizeof raw_line, raw_sha);
++        if (drc != 0 || perr != 0) {
++            if (!st_str[0]) cx_fmt(st_str, sizeof st_str, "UNKNOWN");
++            np_buf frec = {0};
++            np_puts(&frec, "# prerun-start admission receipt (D1 freeze admission gate)\n");
++            cx_fmt(line, sizeof line,
++                   "ADMISSION_META\tschema=v1\ttree_sha=%s\thead_sha=%s\tbase_sha=%s\tcandidate_sha256=%s\tbatches_sha256=%s\tcount=%d\tstatus=FAIL\tfailed_batch=%s\tfailed_status=%s\n",
++                   tree_sha, head_sha, base_sha, cand_sha, batches_sha, nsel, g_ids[i], st_str);
++            np_puts(&frec, line);
++            cx_write(rpath, frec.p ? frec.p : "", frec.n);
++            free(frec.p); free(rec.p); free(pri.p);
++            printf("PRERUN_START\tADMISSION\tFAIL\tbatch=%s\tstatus=%s\trc=%d\n", g_ids[i], st_str, drc);
++            return 1;
++        }
++        cx_fmt(line, sizeof line, "ADMISSION_BATCH\t%s\t%s\tPASS\t%ld\t%s\t%s\n%s\n",
++               g_ids[i], ps_src_label(g_src[i]), bms, cand_sha, raw_sha, raw_line);
++        np_puts(&rec, line);
++        cx_fmt(line, sizeof line, "%s\t%s\tPRIORITY\n", g_ids[i], ps_src_label(g_src[i]));
++        np_puts(&pri, line);
++    }
++
++    if (cx_write(rpath, rec.p ? rec.p : "", rec.n) || cx_write(ppath, pri.p ? pri.p : "", pri.n)) {
++        free(rec.p); free(pri.p);
++        return ps_refuse("admission", "receipt-write-failed");
++    }
++    free(rec.p); free(pri.p);
++    printf("PRERUN_START\tADMISSION\tPASS\ttree=%s\tbase=%s\tcandidate=%s\tbatches=%d\treceipt=%s\tpriority=%s\n",
++           tree_sha, base_sha, cand_sha, nsel, rpath, ppath);
++    return 0;
++}
++
++static int ps_kv_get(const char *line, const char *key, char *out, size_t cap) {
++    long k = tx_find(line, (long)strlen(line), key, (long)strlen(key));
++    out[0] = 0;
++    if (k < 0) return -1;
++    const char *p = line + k + strlen(key);
++    size_t j = 0;
++    while (p[j] && p[j] != '\t' && p[j] != '\n' && p[j] != '\r' && j + 1 < cap) {
++        out[j] = p[j];
++        j++;
++    }
++    out[j] = 0;
++    return 0;
++}
++
++static int ps_cmd_verify_admission(int argc, char **argv) {
++    const char *root = 0, *base = 0, *cand = 0, *out = 0;
++    const char *afprog = "tools/affected.cx";
++    for (int i = 2; i < argc; i++) {
++        const char *k = argv[i], *v = i + 1 < argc ? argv[i + 1] : 0;
++        if (!v) return ps_refuse("verify-admission", "missing-value");
++        if (!strcmp(k, "--root")) root = v;
++        else if (!strcmp(k, "--base")) base = v;
++        else if (!strcmp(k, "--candidate")) cand = v;
++        else if (!strcmp(k, "--out")) out = v;
++        else if (!strcmp(k, "--affected-prog")) afprog = v;
++        else return ps_refuse("verify-admission", "unknown-option");
++        i++;
++    }
++    if (!root || !base || !cand || !out) return ps_refuse("verify-admission", "need-root-base-candidate-out");
++    char rroot[PS_PW], rcand[PS_PW], cand_sha[65];
++    sy_stat_t st;
++    if (sy_realpath(root, rroot, sizeof rroot) < 0) return ps_refuse("verify-admission", "root-unresolvable");
++    if (sy_realpath(cand, rcand, sizeof rcand) < 0 || sy_stat(rcand, &st) || st.kind != 'f' || ps_sha_file(rcand, cand_sha))
++        return ps_refuse("verify-admission", "candidate-unreadable");
++
++    char head_sha[41], tree_sha[41], base_sha[41], batches_sha[65], why[256];
++    if (ps_collect_admission_union(rroot, base, afprog, head_sha, tree_sha, base_sha, batches_sha, why, sizeof why))
++        return ps_refuse("verify-admission", why);
++
++    char rpath[PS_PW], ppath[PS_PW];
++    cx_fmt(rpath, sizeof rpath, "%s/admission-receipt.tsv", out);
++    cx_fmt(ppath, sizeof ppath, "%s/priority.tsv", out);
++    size_t rn = 0, pn = 0;
++    char *rt = ps_read_all(rpath, &rn);
++    if (!rt) return ps_refuse("verify-admission", "receipt-missing");
++    char *pt = 0;
++
++    static int seen_rec[PS_MAXIDS];
++    static int seen_pri[PS_MAXIDS];
++    for (int i = 0; i < g_nids; i++) { seen_rec[i] = 0; seen_pri[i] = 0; }
++
++    int got_meta = 0, rec_rows = 0;
++    const char *p = rt, *end = rt + rn;
++    while (p < end) {
++        const char *nl = (const char *)memchr(p, '\n', (size_t)(end - p));
++        size_t ll = nl ? (size_t)(nl - p) : (size_t)(end - p);
++        char line[2048];
++        size_t cp = ll < sizeof line - 1 ? ll : sizeof line - 1;
++        mm_copy(line, sizeof line, p, cp);
++        line[cp] = 0;
++        ps_trim_line(line);
++        p += ll + (nl ? 1 : 0);
++        if (!line[0] || line[0] == '#') continue;
++        if (ps_starts(line, "ADMISSION_META\t")) {
++            char v_st[32], v_tree[64], v_base[64], v_cand[80], v_bsha[80];
++            ps_kv_get(line, "\tstatus=", v_st, sizeof v_st);
++            ps_kv_get(line, "\ttree_sha=", v_tree, sizeof v_tree);
++            ps_kv_get(line, "\tbase_sha=", v_base, sizeof v_base);
++            ps_kv_get(line, "\tcandidate_sha256=", v_cand, sizeof v_cand);
++            ps_kv_get(line, "\tbatches_sha256=", v_bsha, sizeof v_bsha);
++            if (strcmp(v_st, "PASS")) { mm_free(rt); return ps_refuse("verify-admission", "receipt-status-not-pass"); }
++            if (strcmp(v_tree, tree_sha)) { mm_free(rt); return ps_refuse("verify-admission", "tree-mismatch"); }
++            if (strcmp(v_base, base_sha)) { mm_free(rt); return ps_refuse("verify-admission", "base-mismatch"); }
++            if (strcmp(v_cand, cand_sha)) { mm_free(rt); return ps_refuse("verify-admission", "candidate-mismatch"); }
++            if (strcmp(v_bsha, batches_sha)) { mm_free(rt); return ps_refuse("verify-admission", "batches-sha-mismatch"); }
++            got_meta = 1;
++        } else if (ps_starts(line, "ADMISSION_BATCH\t")) {
++            char *cols[8]; int nc = 0; char *q = line;
++            while (nc < 8) {
++                cols[nc++] = q;
++                char *tb = strchr(q, '\t');
++                if (!tb) break;
++                *tb = 0;
++                q = tb + 1;
++            }
++            if (nc != 7) { mm_free(rt); return ps_refuse("verify-admission", "malformed-batch-row"); }
++            int ix = ps_find_id(cols[1]);
++            if (ix < 0 || !g_src[ix] || seen_rec[ix]) {
++                mm_free(rt);
++                return ps_refuse("verify-admission", "unexpected-or-duplicate-batch");
++            }
++            if (strcmp(cols[3], "PASS")) { mm_free(rt); return ps_refuse("verify-admission", "batch-status-not-pass"); }
++            if (strcmp(cols[5], cand_sha)) { mm_free(rt); return ps_refuse("verify-admission", "batch-candidate-mismatch"); }
++            char bfile[PS_PW], bst[32], braw[1024], bsha[65];
++            long bms = 0;
++            cx_fmt(bfile, sizeof bfile, "%s/batch-%s.tsv", out, cols[1]);
++            if (ps_parse_batch_evidence(bfile, cols[1], cand_sha, bst, sizeof bst, &bms, braw, sizeof braw, bsha) ||
++                strcmp(bsha, cols[6])) {
++                mm_free(rt);
++                return ps_refuse("verify-admission", "batch-raw-evidence-mismatch");
++            }
++            seen_rec[ix] = 1;
++            rec_rows++;
++        }
++    }
++    mm_free(rt);
++    if (!got_meta) return ps_refuse("verify-admission", "receipt-meta-missing");
++    pt = ps_read_all(ppath, &pn);
++    if (!pt) return ps_refuse("verify-admission", "priority-missing");
++
++    p = pt; end = pt + pn;
++    while (p < end) {
++        const char *nl = (const char *)memchr(p, '\n', (size_t)(end - p));
++        size_t ll = nl ? (size_t)(nl - p) : (size_t)(end - p);
++        char line[512];
++        size_t cp = ll < sizeof line - 1 ? ll : sizeof line - 1;
++        mm_copy(line, sizeof line, p, cp);
++        line[cp] = 0;
++        ps_trim_line(line);
++        p += ll + (nl ? 1 : 0);
++        if (!line[0] || line[0] == '#') continue;
++        char *tb = strchr(line, '\t');
++        if (tb) *tb = 0;
++        if (!strcmp(line, "id") || !strcmp(line, "batch") || !strcmp(line, "__admission_pass_anchor__")) continue;
++        int ix = ps_find_id(line);
++        if (ix < 0 || !g_src[ix] || seen_pri[ix]) {
++            mm_free(pt);
++            return ps_refuse("verify-admission", "priority-table-mismatch");
++        }
++        seen_pri[ix] = 1;
++    }
++    mm_free(pt);
++
++    int want_n = 0;
++    for (int i = 0; i < g_nids; i++) {
++        if (!g_src[i]) continue;
++        want_n++;
++        if (!seen_rec[i]) {
++            char msg[200];
++            cx_fmt(msg, sizeof msg, "missing-batch:%s", g_ids[i]);
++            return ps_refuse("verify-admission", msg);
++        }
++        if (!seen_pri[i]) {
++            char msg[200];
++            cx_fmt(msg, sizeof msg, "priority-missing-batch:%s", g_ids[i]);
++            return ps_refuse("verify-admission", msg);
++        }
++    }
++    if (rec_rows != want_n) return ps_refuse("verify-admission", "batch-count-mismatch");
++    printf("PRERUN_START\tADMISSION_VERIFY\tPASS\ttree=%s\tbase=%s\tcandidate=%s\tbatches=%d\n",
++           tree_sha, base_sha, cand_sha, want_n);
++    return 0;
++}
++
++static int ps_cmd_cold_identity(int argc, char **argv) {
++    const char *root = 0, *cand = 0, *rev = "HEAD";
++    for (int i = 2; i < argc; i++) {
++        const char *k = argv[i], *v = i + 1 < argc ? argv[i + 1] : 0;
++        if (!v) return ps_refuse("cold-identity", "missing-value");
++        if (!strcmp(k, "--root") || !strcmp(k, "--repo")) root = v;
++        else if (!strcmp(k, "--candidate") || !strcmp(k, "--ape")) cand = v;
++        else if (!strcmp(k, "--rev")) rev = v;
++        else return ps_refuse("cold-identity", "unknown-option");
++        i++;
++    }
++    if (!root || !cand) return ps_refuse("cold-identity", "need-root-and-candidate");
++    char rroot[PS_PW], rcand[PS_PW], cold_id[65], rev_sha[41], tree_sha[41], ape_sha[65], b_sha[65];
++    if (sy_realpath(root, rroot, sizeof rroot) < 0 || sy_realpath(cand, rcand, sizeof rcand) < 0)
++        return ps_refuse("cold-identity", "path-unresolvable");
++    if (ps_compute_cold_identity(rroot, rev, rcand, cold_id, rev_sha, tree_sha, ape_sha, b_sha))
++        return ps_refuse("cold-identity", "identity-compute-failed");
++    printf("PRERUN_START\tCOLD_IDENTITY\t%s\trev=%s\ttree=%s\tcandidate=%s\tbatches=%s\n",
++           cold_id, rev_sha, tree_sha, ape_sha, b_sha);
++    return 0;
++}
++
++static int ps_load_ids_list(const char *path) {
++    size_t n = 0;
++    char *b = ps_read_all(path, &n);
++    if (!b) return -1;
++    g_nids = 0;
++    const char *p = b, *end = b + n;
++    while (p < end && g_nids < PS_MAXIDS) {
++        const char *nl = (const char *)memchr(p, '\n', (size_t)(end - p));
++        size_t ll = nl ? (size_t)(nl - p) : (size_t)(end - p);
++        char line[PS_IDLEN];
++        size_t cp = ll < sizeof line - 1 ? ll : sizeof line - 1;
++        mm_copy(line, sizeof line, p, cp);
++        line[cp] = 0;
++        ps_trim_line(line);
++        p += ll + (nl ? 1 : 0);
++        if (!line[0] || line[0] == '#') continue;
++        char *tb = strchr(line, '\t');
++        if (tb) *tb = 0;
++        if (!strcmp(line, "id") || !strcmp(line, "batch") || !strcmp(line, "RAW") || !strcmp(line, "SUMMARY")) continue;
++        if (ps_find_id(line) >= 0) continue;
++        cx_fmt(g_ids[g_nids], PS_IDLEN, "%s", line);
++        g_src[g_nids] = 0;
++        g_prio[g_nids] = 0;
++        g_nids++;
++    }
++    mm_free(b);
++    return g_nids > 0 ? 0 : -1;
++}
++
++static int ps_load_priority_marks(const char *path) {
++    size_t n = 0;
++    char *b = ps_read_all(path, &n);
++    if (!b) return -1;
++    int has_pass = 0;
++    const char *p = b, *end = b + n;
++    while (p < end) {
++        const char *nl = (const char *)memchr(p, '\n', (size_t)(end - p));
++        size_t ll = nl ? (size_t)(nl - p) : (size_t)(end - p);
++        char line[1024];
++        size_t cp = ll < sizeof line - 1 ? ll : sizeof line - 1;
++        mm_copy(line, sizeof line, p, cp);
++        line[cp] = 0;
++        ps_trim_line(line);
++        p += ll + (nl ? 1 : 0);
++        if (!line[0] || line[0] == '#') continue;
++        char *cols[6]; int nc = 0; char *q = line;
++        while (nc < 6) {
++            cols[nc++] = q;
++            char *tb = strchr(q, '\t');
++            if (!tb) break;
++            *tb = 0;
++            q = tb + 1;
++        }
++        if (nc >= 3 && !strcmp(cols[2], "PASS")) { has_pass = 1; break; }
++    }
++    p = b;
++    while (p < end) {
++        const char *nl = (const char *)memchr(p, '\n', (size_t)(end - p));
++        size_t ll = nl ? (size_t)(nl - p) : (size_t)(end - p);
++        char line[1024];
++        size_t cp = ll < sizeof line - 1 ? ll : sizeof line - 1;
++        mm_copy(line, sizeof line, p, cp);
++        line[cp] = 0;
++        ps_trim_line(line);
++        p += ll + (nl ? 1 : 0);
++        if (!line[0] || line[0] == '#') continue;
++        char *cols[6]; int nc = 0; char *q = line;
++        while (nc < 6) {
++            cols[nc++] = q;
++            char *tb = strchr(q, '\t');
++            if (!tb) break;
++            *tb = 0;
++            q = tb + 1;
++        }
++        if (!strcmp(cols[0], "RAW") || !strcmp(cols[0], "SUMMARY") || !strcmp(cols[0], "CHECKPOINT") ||
++            !strcmp(cols[0], "batch") || !strcmp(cols[0], "id")) continue;
++        if (has_pass && nc >= 3) {
++            const char *id_col = ps_is_digits(cols[0], strlen(cols[0])) ? cols[1] : cols[0];
++            int is_pass = !strcmp(cols[2], "PASS");
++            int ix = ps_find_id(id_col);
++            if (ix >= 0) g_prio[ix] = is_pass ? 0 : 2;
++        } else {
++            int ix = ps_find_id(cols[0]);
++            if (ix >= 0) g_prio[ix] = 2;
++        }
++    }
++    mm_free(b);
++    return 0;
++}
++
++static int ps_select_cold_warmup_batch(const char *cold_file, const char *want_cold_id,
++                                       char best_id[PS_IDLEN], long *best_max_ms, char *why, size_t wcap) {
++    size_t n = 0;
++    char *b = ps_read_all(cold_file, &n);
++    if (!b) { cx_fmt(why, wcap, "cold-times-unreadable"); return -1; }
++    const char *p = b, *end = b + n;
++    int got_hdr = 0;
++    int best_ix = -1;
++    long best_ms = 0;
++    while (p < end) {
++        const char *nl = (const char *)memchr(p, '\n', (size_t)(end - p));
++        size_t ll = nl ? (size_t)(nl - p) : (size_t)(end - p);
++        char line[512];
++        size_t cp = ll < sizeof line - 1 ? ll : sizeof line - 1;
++        mm_copy(line, sizeof line, p, cp);
++        line[cp] = 0;
++        ps_trim_line(line);
++        p += ll + (nl ? 1 : 0);
++        if (!line[0] || line[0] == '#') continue;
++        char *cols[6]; int nc = 0; char *q = line;
++        while (nc < 6) {
++            cols[nc++] = q;
++            char *tb = strchr(q, '\t');
++            if (!tb) break;
++            *tb = 0;
++            q = tb + 1;
++        }
++        if (!got_hdr) {
++            if (nc != 2 || strcmp(cols[0], "warmup-cold-v1") || strlen(cols[1]) != 64 || !ps_is_hex(cols[1], 64)) {
++                mm_free(b);
++                cx_fmt(why, wcap, "cold-header-invalid");
++                return -1;
++            }
++            if (strcmp(cols[1], want_cold_id)) {
++                mm_free(b);
++                cx_fmt(why, wcap, "cold-identity-mismatch");
++                return -1;
++            }
++            got_hdr = 1;
++            continue;
++        }
++        if (nc != 4 || !ps_is_digits(cols[1], strlen(cols[1])) ||
++            !ps_is_digits(cols[2], strlen(cols[2])) || !ps_is_digits(cols[3], strlen(cols[3]))) {
++            mm_free(b);
++            cx_fmt(why, wcap, "cold-row-malformed");
++            return -1;
++        }
++        long m1 = atol(cols[1]), m2 = atol(cols[2]), m3 = atol(cols[3]);
++        if (m1 <= 0 || m2 <= 0 || m3 <= 0) {
++            mm_free(b);
++            cx_fmt(why, wcap, "cold-row-nonpositive");
++            return -1;
++        }
++        long mx = m1 > m2 ? m1 : m2;
++        if (m3 > mx) mx = m3;
++        int ix = ps_find_id(cols[0]);
++        if (ix < 0) continue;
++        if (g_prio[ix] > 0 || ps_is_heavy_id(cols[0]) || ps_is_early_canary_id(cols[0]) ||
++            ps_is_warmup_excluded_id(cols[0])) continue;
++        if (mx > PS_COLD_MAX_MS) continue;
++        if (best_ix < 0 || mx < best_ms || (mx == best_ms && ix < best_ix)) {
++            best_ix = ix;
++            best_ms = mx;
++        }
++    }
++    mm_free(b);
++    if (!got_hdr) { cx_fmt(why, wcap, "cold-header-missing"); return -1; }
++    if (best_ix < 0) { cx_fmt(why, wcap, "no-eligible-cold-warmup-batch"); return -1; }
++    cx_fmt(best_id, PS_IDLEN, "%s", g_ids[best_ix]);
++    *best_max_ms = best_ms;
++    return 0;
++}
++
++static int ps_enforce_w0000_and_verify_windows(const char *wpath, const char *best_id, char *why, size_t wcap) {
++    size_t n = 0;
++    char *b = ps_read_all(wpath, &n);
++    if (!b) { cx_fmt(why, wcap, "windows-unreadable"); return -1; }
++
++    char w0_id[PS_IDLEN] = "";
++    const char *p = b, *end = b + n;
++    while (p < end) {
++        const char *nl = (const char *)memchr(p, '\n', (size_t)(end - p));
++        size_t ll = nl ? (size_t)(nl - p) : (size_t)(end - p);
++        if (ll > 6 && !memcmp(p, "W0000\t", 6)) {
++            char line[1024];
++            size_t cp = ll < sizeof line - 1 ? ll : sizeof line - 1;
++            mm_copy(line, sizeof line, p, cp);
++            line[cp] = 0;
++            ps_trim_line(line);
++            char *cols[6]; int nc = 0; char *q = line;
++            while (nc < 6) {
++                cols[nc++] = q;
++                char *tb = strchr(q, '\t');
++                if (!tb) break;
++                *tb = 0;
++                q = tb + 1;
++            }
++            if (nc == 5 && !strcmp(cols[1], "1") && !strcmp(cols[2], "warmup") && !strcmp(cols[3], "1")) {
++                cx_fmt(w0_id, sizeof w0_id, "%s", cols[4]);
++            }
++            break;
++        }
++        p += ll + (nl ? 1 : 0);
++    }
++    if (!w0_id[0]) { mm_free(b); cx_fmt(why, wcap, "w0000-warmup-missing"); return -1; }
++
++    if (strcmp(w0_id, best_id) != 0) {
++        np_buf out = {0};
++        p = b;
++        while (p < end) {
++            const char *nl = (const char *)memchr(p, '\n', (size_t)(end - p));
++            size_t ll = nl ? (size_t)(nl - p) : (size_t)(end - p);
++            char line[8192];
++            size_t cp = ll < sizeof line - 1 ? ll : sizeof line - 1;
++            mm_copy(line, sizeof line, p, cp);
++            line[cp] = 0;
++            ps_trim_line(line);
++            p += ll + (nl ? 1 : 0);
++            if (line[0] != 'W') {
++                np_puts(&out, line);
++                np_puts(&out, "\n");
++                continue;
++            }
++            char *cols[6]; int nc = 0; char *q = line;
++            while (nc < 6) {
++                cols[nc++] = q;
++                char *tb = strchr(q, '\t');
++                if (!tb) break;
++                *tb = 0;
++                q = tb + 1;
++            }
++            if (nc != 5) { free(out.p); mm_free(b); cx_fmt(why, wcap, "windows-row-malformed"); return -1; }
++            char prefix[256];
++            cx_fmt(prefix, sizeof prefix, "%s\t%s\t%s\t%s\t", cols[0], cols[1], cols[2], cols[3]);
++            np_puts(&out, prefix);
++            if (!strcmp(cols[0], "W0000")) {
++                np_puts(&out, best_id);
++            } else {
++                char *s = cols[4];
++                int first_tok = 1;
++                while (*s) {
++                    char *c = strchr(s, ',');
++                    if (c) *c = 0;
++                    if (!first_tok) np_puts(&out, ",");
++                    first_tok = 0;
++                    if (!strcmp(s, best_id)) np_puts(&out, w0_id);
++                    else np_puts(&out, s);
++                    if (!c) break;
++                    s = c + 1;
++                }
++            }
++            np_puts(&out, "\n");
++        }
++        mm_free(b);
++        if (cx_write(wpath, out.p ? out.p : "", out.n)) {
++            free(out.p);
++            cx_fmt(why, wcap, "windows-rewrite-failed");
++            return -1;
++        }
++        free(out.p);
++        b = ps_read_all(wpath, &n);
++        if (!b) { cx_fmt(why, wcap, "windows-reread-failed"); return -1; }
++    }
++
++    static int seen[PS_MAXIDS];
++    for (int i = 0; i < g_nids; i++) seen[i] = 0;
++    int w0_ok = 0;
++    p = b; end = b + n;
++    while (p < end) {
++        const char *nl = (const char *)memchr(p, '\n', (size_t)(end - p));
++        size_t ll = nl ? (size_t)(nl - p) : (size_t)(end - p);
++        char line[8192];
++        size_t cp = ll < sizeof line - 1 ? ll : sizeof line - 1;
++        mm_copy(line, sizeof line, p, cp);
++        line[cp] = 0;
++        ps_trim_line(line);
++        p += ll + (nl ? 1 : 0);
++        if (line[0] != 'W') continue;
++        char *cols[6]; int nc = 0; char *q = line;
++        while (nc < 6) {
++            cols[nc++] = q;
++            char *tb = strchr(q, '\t');
++            if (!tb) break;
++            *tb = 0;
++            q = tb + 1;
++        }
++        if (nc != 5) { mm_free(b); cx_fmt(why, wcap, "windows-row-malformed"); return -1; }
++        if (!strcmp(cols[2], "prebuild-self")) continue;
++        if (!strcmp(cols[0], "W0000")) {
++            if (!strcmp(cols[1], "1") && !strcmp(cols[2], "warmup") && !strcmp(cols[3], "1") && !strcmp(cols[4], best_id))
++                w0_ok = 1;
++        }
++        char *s = cols[4];
++        while (*s) {
++            char *c = strchr(s, ',');
++            if (c) *c = 0;
++            int ix = ps_find_id(s);
++            if (ix < 0 || seen[ix]) {
++                mm_free(b);
++                cx_fmt(why, wcap, "window-duplicate-or-unknown-batch");
++                return -1;
++            }
++            seen[ix] = 1;
++            if (!c) break;
++            s = c + 1;
++        }
++    }
++    mm_free(b);
++    if (!w0_ok) { cx_fmt(why, wcap, "w0000-not-selected-light-batch"); return -1; }
++    for (int i = 0; i < g_nids; i++) {
++        if (!seen[i]) {
++            cx_fmt(why, wcap, "window-plan-missing-batch");
++            return -1;
++        }
++    }
++    return 0;
++}
++
++/* Atomic lock acquisition via O_CREAT | O_EXCL before writing any plan/input file.
++ * Negative-control hook PRERUN_START_MUT_SKIP_LOCK=1 disables atomic locking to prove test sensitivity. */
++static int ps_lock_acquire(const char *dir, char lock_path[PS_PW]) {
++    if (cx_fmt(lock_path, PS_PW, "%s/run.lock", dir)) return -1;
++    const char *mut = sy_env("PRERUN_START_MUT_SKIP_LOCK");
++    if (mut && !strcmp(mut, "1")) {
++        lock_path[0] = 0;
++        return 0;
++    }
++    char pbuf[64];
++    cx_fmt(pbuf, sizeof pbuf, "%ld\n", (long)sy_pid());
++    for (int attempt = 0; attempt < 2; attempt++) {
++        int fd = sy_open(lock_path, O_WRONLY | O_CREAT | O_EXCL, 0600);
++        if (fd >= 0) {
++            int werr = sy_write_all(fd, pbuf, (long)strlen(pbuf));
++            int cerr = sy_close(fd);
++            if (werr || cerr) { sy_unlink(lock_path); lock_path[0] = 0; return -1; }
++            return 0;
++        }
++        size_t n = 0;
++        char *b = ps_read_all(lock_path, &n);
++        if (!b) { lock_path[0] = 0; return 1; }
++        ps_trim_line(b);
++        long pid = atol(b);
++        mm_free(b);
++        if (pid <= 1) { lock_path[0] = 0; return 1; }
++        char proc_p[128];
++        sy_stat_t st;
++        if (!cx_fmt(proc_p, sizeof proc_p, "/proc/%ld", pid) && sy_stat(proc_p, &st) == 0) {
++            lock_path[0] = 0;
++            return 1; /* live process holds lock */
++        }
++        if (attempt == 0) sy_unlink(lock_path);
++    }
++    lock_path[0] = 0;
++    return 1;
++}
++
++static int ps_cmd_start(int argc, char **argv) {
++    const char *rev = 0, *ver = 0, *prev = 0, *prevrev = 0, *ape = 0, *dir = 0, *prio = 0, *coldf = 0;
++    const char *repo = ".", *pwin = 0, *tcache = 0, *evout = 0, *exclf = 0, *addf = 0;
++    const char *in_prog = "tools/prerun-inputs.cx", *dr_prog = "tools/prerun-drive.cx";
++    int lanes = 2, jobs = 8, notpl = 0, plan_only = 0;
++    for (int i = 2; i < argc; i++) {
++        const char *k = argv[i];
++        if (!strcmp(k, "--no-templates")) { notpl = 1; continue; }
++        if (!strcmp(k, "--plan-only")) { plan_only = 1; continue; }
++        if (!strcmp(k, "--normal-jobs")) return ps_refuse("start", "normal-jobs-refused-use-jobs");
++        const char *v = i + 1 < argc ? argv[i + 1] : 0;
++        if (!v) return ps_refuse("start", "missing-value");
++        if (!strcmp(k, "--rev")) rev = v;
++        else if (!strcmp(k, "--version")) ver = v;
++        else if (!strcmp(k, "--prev")) prev = v;
++        else if (!strcmp(k, "--prev-rev")) prevrev = v;
++        else if (!strcmp(k, "--ape") || !strcmp(k, "--candidate")) ape = v;
++        else if (!strcmp(k, "--dir") || !strcmp(k, "--out")) dir = v;
++        else if (!strcmp(k, "--priority-src")) prio = v;
++        else if (!strcmp(k, "--cold-times-file")) coldf = v;
++        else if (!strcmp(k, "--repo") || !strcmp(k, "--root")) repo = v;
++        else if (!strcmp(k, "--prev-windows")) pwin = v;
++        else if (!strcmp(k, "--times-cache")) tcache = v;
++        else if (!strcmp(k, "--evidence-out")) evout = v;
++        else if (!strcmp(k, "--exclude")) exclf = v;
++        else if (!strcmp(k, "--add-ids")) addf = v;
++        else if (!strcmp(k, "--inputs-prog")) in_prog = v;
++        else if (!strcmp(k, "--drive-prog")) dr_prog = v;
++        else if (!strcmp(k, "--lanes") || !strcmp(k, "--window-lanes")) lanes = atoi(v);
++        else if (!strcmp(k, "--jobs") || !strcmp(k, "--max-jobs")) jobs = atoi(v);
++        else return ps_refuse("start", "unknown-option");
++        i++;
++    }
++    if (!rev || !ver || !prev || !ape || !dir || !prio || !coldf)
++        return ps_refuse("start", "need-rev-version-prev-ape-dir-priority-coldtimes");
++    if (lanes < 1 || lanes > 8 || jobs < 1 || jobs > 16)
++        return ps_refuse("start", "lanes-1..8-and-jobs-1..16");
++    if (dir[0] != '/' || ape[0] != '/')
++        return ps_refuse("start", "dir-and-ape-must-be-absolute");
++
++    char rrepo[PS_PW], rape[PS_PW], rcold[PS_PW];
++    sy_stat_t st;
++    if (sy_realpath(repo, rrepo, sizeof rrepo) < 0) return ps_refuse("start", "repo-unresolvable");
++    if (sy_realpath(ape, rape, sizeof rape) < 0 || sy_stat(rape, &st) || st.kind != 'f')
++        return ps_refuse("start", "kit-missing-ape");
++    if (sy_realpath(coldf, rcold, sizeof rcold) < 0 || sy_stat(rcold, &st) || st.kind != 'f')
++        return ps_refuse("start", "cold-times-file-missing");
++
++    if (sy_mkdir_all(dir, 0700)) return ps_refuse("start", "dir-create-failed");
++
++    /* Acquire atomic O_CREAT|O_EXCL run.lock BEFORE writing any input, plan, or binding file. */
++    char lockp[PS_PW] = "";
++    int lrc = ps_lock_acquire(dir, lockp);
++    if (lrc == 1) return ps_refuse("start", "already-running");
++    if (lrc < 0) return ps_refuse("start", "lock-create-failed");
++
++    char bindp[PS_PW], w0p[PS_PW], d0p[PS_PW];
++    cx_fmt(bindp, sizeof bindp, "%s/start-binding.tsv", dir);
++    cx_fmt(w0p, sizeof w0p, "%s/strict-W0000.tsv", dir);
++    cx_fmt(d0p, sizeof d0p, "%s/done.W0000", dir);
++    if (sy_exists(bindp) == 1 || sy_exists(w0p) == 1 || sy_exists(d0p) == 1)
++        return ps_unlock_refuse(lockp, "start", "already-started-use-resume");
++
++    char cold_id[65], rev_sha[41], tree_sha[41], ape_sha[65], batches_sha[65];
++    if (ps_compute_cold_identity(rrepo, rev, rape, cold_id, rev_sha, tree_sha, ape_sha, batches_sha))
++        return ps_unlock_refuse(lockp, "start", "cold-identity-compute-failed");
++
++    /* Step 1: invoke prerun-inputs.cx */
++    char lanes_s[16], jobs_s[16];
++    cx_fmt(lanes_s, sizeof lanes_s, "%d", lanes);
++    cx_fmt(jobs_s, sizeof jobs_s, "%d", jobs);
++    char *iv[36]; int ic = ps_prog_prefix(iv, in_prog);
++    iv[ic++] = "--rev"; iv[ic++] = (char *)rev;
++    iv[ic++] = "--version"; iv[ic++] = (char *)ver;
++    iv[ic++] = "--prev"; iv[ic++] = (char *)prev;
++    if (prevrev) { iv[ic++] = "--prev-rev"; iv[ic++] = (char *)prevrev; }
++    iv[ic++] = "--repo"; iv[ic++] = rrepo;
++    iv[ic++] = "--ape"; iv[ic++] = rape;
++    iv[ic++] = "--dir"; iv[ic++] = (char *)dir;
++    iv[ic++] = "--priority-src"; iv[ic++] = (char *)prio;
++    iv[ic++] = "--lanes"; iv[ic++] = lanes_s;
++    iv[ic++] = "--jobs"; iv[ic++] = jobs_s;
++    if (pwin) { iv[ic++] = "--prev-windows"; iv[ic++] = (char *)pwin; }
++    if (tcache) { iv[ic++] = "--times-cache"; iv[ic++] = (char *)tcache; }
++    if (evout) { iv[ic++] = "--evidence-out"; iv[ic++] = (char *)evout; }
++    if (notpl) { iv[ic++] = "--no-templates"; }
++    if (exclf) { iv[ic++] = "--exclude"; iv[ic++] = (char *)exclf; }
++    if (addf) { iv[ic++] = "--add-ids"; iv[ic++] = (char *)addf; }
++    iv[ic] = 0;
++
++    np_result ir = {0}; char iwhy[512];
++    if (np_run(iv, rrepo, 0, 50, &ir, iwhy, sizeof iwhy) || ir.rc != 0 || !ir.out ||
++        tx_find(ir.out, (long)ir.outn, "status=READY", 12) < 0) {
++        if (ir.out && ir.outn) fwrite(ir.out, 1, ir.outn, stdout);
++        if (ir.err && ir.errn) fwrite(ir.err, 1, ir.errn, stderr);
++        np_free(&ir);
++        return ps_unlock_refuse(lockp, "start", "prerun-inputs-not-ready");
++    }
++    fwrite(ir.out, 1, ir.outn, stdout);
++    np_free(&ir);
++
++    char idsp[PS_PW], timesp[PS_PW], priop[PS_PW], winp[PS_PW];
++    cx_fmt(idsp, sizeof idsp, "%s/ids.txt", dir);
++    cx_fmt(timesp, sizeof timesp, "%s/times.tsv", dir);
++    cx_fmt(priop, sizeof priop, "%s/priority.tsv", dir);
++    cx_fmt(winp, sizeof winp, "%s/windows.tsv", dir);
++    if (ps_load_ids_list(idsp) || ps_load_priority_marks(priop))
++        return ps_unlock_refuse(lockp, "start", "inputs-artifacts-missing");
++
++    char best_id[PS_IDLEN] = "";
++    long best_ms = 0;
++    char cwhy[256];
++    if (ps_select_cold_warmup_batch(rcold, cold_id, best_id, &best_ms, cwhy, sizeof cwhy))
++        return ps_unlock_refuse(lockp, "start", cwhy);
++
++    /* Step 2: invoke prerun-drive.cx plan with --warmup 1 [--cold-times-file --cold-identity] */
++    int has_cold_cli = ps_prog_has_token(rrepo, dr_prog, "--cold-times-file");
++    char *pv[28]; int pc = ps_prog_prefix(pv, dr_prog);
++    pv[pc++] = "plan";
++    pv[pc++] = "--ids-file"; pv[pc++] = idsp;
++    pv[pc++] = "--times-file"; pv[pc++] = timesp;
++    pv[pc++] = "--priority-file"; pv[pc++] = priop;
++    pv[pc++] = "--out"; pv[pc++] = (char *)dir;
++    pv[pc++] = "--normal-jobs"; pv[pc++] = jobs_s;
++    pv[pc++] = "--window-lanes"; pv[pc++] = lanes_s;
++    pv[pc++] = "--warmup"; pv[pc++] = "1";
++    if (has_cold_cli) {
++        pv[pc++] = "--cold-times-file"; pv[pc++] = rcold;
++        pv[pc++] = "--cold-identity"; pv[pc++] = cold_id;
++    }
++    pv[pc] = 0;
++    np_result pr = {0}; char pwhy[512];
++    if (np_run(pv, rrepo, 0, 50, &pr, pwhy, sizeof pwhy)) {
++        np_free(&pr);
++        return ps_unlock_refuse(lockp, "start", "plan-transport-failed");
++    }
++    if (has_cold_cli && pr.rc == 2 && pr.err && tx_find(pr.err, (long)pr.errn, "unknown-plan-arg", 16) >= 0) {
++        np_free(&pr);
++        pc -= 4;
++        pv[pc] = 0;
++        if (np_run(pv, rrepo, 0, 50, &pr, pwhy, sizeof pwhy) || pr.rc != 0) {
++            if (pr.err && pr.errn) fwrite(pr.err, 1, pr.errn, stderr);
++            np_free(&pr);
++            return ps_unlock_refuse(lockp, "start", "plan-failed");
++        }
++    } else if (pr.rc != 0) {
++        if (pr.err && pr.errn) fwrite(pr.err, 1, pr.errn, stderr);
++        np_free(&pr);
++        return ps_unlock_refuse(lockp, "start", "plan-failed");
++    }
++    if (pr.out && pr.outn) fwrite(pr.out, 1, pr.outn, stdout);
++    np_free(&pr);
++
++    if (ps_enforce_w0000_and_verify_windows(winp, best_id, cwhy, sizeof cwhy))
++        return ps_unlock_refuse(lockp, "start", cwhy);
++
++    char win_sha[65], ids_sha[65];
++    if (ps_sha_file(winp, win_sha) || ps_sha_file(idsp, ids_sha))
++        return ps_unlock_refuse(lockp, "start", "plan-hash-failed");
++
++    char bind_text[4096];
++    cx_fmt(bind_text, sizeof bind_text,
++           "# prerun-start binding (schema=v1)\n"
++           "BINDING\tschema=v1\trepo=%s\trev=%s\trev_sha=%s\tversion=%s\ttree_sha=%s\tape_path=%s\tape_sha256=%s\tcold_identity=%s\twarmup_batch=%s\twarmup_cold_max_ms=%ld\twindows_sha256=%s\tids_sha256=%s\tlanes=%d\tmax_jobs=%d\n",
++           rrepo, rev, rev_sha, ver, tree_sha, rape, ape_sha, cold_id, best_id, best_ms, win_sha, ids_sha, lanes, jobs);
++    if (cx_write(bindp, bind_text, strlen(bind_text)))
++        return ps_unlock_refuse(lockp, "start", "binding-write-failed");
++
++    printf("PRERUN_START\tPLAN_READY\tdir=%s\twarmup=%s\twarmup_cold_max_ms=%ld\tcold_identity=%s\twindows_sha=%s\tlanes=%d\tmax_jobs=%d\n",
++           dir, best_id, best_ms, cold_id, win_sha, lanes, jobs);
++    if (plan_only) {
++        if (lockp[0]) sy_unlink(lockp);
++        return 0;
++    }
++
++    /* Step 3: invoke prerun-drive.cx run (only --max-jobs and --keep-going, never --normal-jobs; bound = 5400s) */
++    char *rv[20]; int rc_i = ps_prog_prefix(rv, dr_prog);
++    rv[rc_i++] = "run";
++    rv[rc_i++] = "--root"; rv[rc_i++] = rrepo;
++    rv[rc_i++] = "--candidate"; rv[rc_i++] = rape;
++    rv[rc_i++] = "--out"; rv[rc_i++] = (char *)dir;
++    rv[rc_i++] = "--window-lanes"; rv[rc_i++] = lanes_s;
++    rv[rc_i++] = "--max-jobs"; rv[rc_i++] = jobs_s;
++    rv[rc_i++] = "--keep-going";
++    rv[rc_i] = 0;
++    np_result rr = {0}; char rwhy[512];
++    int tr = np_run(rv, rrepo, 0, PS_RUN_BOUND_SECS, &rr, rwhy, sizeof rwhy);
++    int rrc = tr ? 2 : rr.rc;
++    if (rr.out && rr.outn) fwrite(rr.out, 1, rr.outn, stdout);
++    if (rr.err && rr.errn) fwrite(rr.err, 1, rr.errn, stderr);
++    np_free(&rr);
++    if (lockp[0]) sy_unlink(lockp);
++    printf("PRERUN_START\tRUN_DONE\trc=%d\tdir=%s\twarmup=%s\tbound_s=%d\n", rrc, dir, best_id, PS_RUN_BOUND_SECS);
++    return rrc;
++}
++
++static int ps_cmd_resume(int argc, char **argv) {
++    const char *dir = 0, *ape = 0, *repo = 0, *mig_why = 0;
++    const char *dr_prog = "tools/prerun-drive.cx";
++    for (int i = 2; i < argc; i++) {
++        const char *k = argv[i];
++        if (!strcmp(k, "--normal-jobs")) return ps_refuse("resume", "normal-jobs-refused-use-binding");
++        const char *v = i + 1 < argc ? argv[i + 1] : 0;
++        if (!v) return ps_refuse("resume", "missing-value");
++        if (!strcmp(k, "--dir") || !strcmp(k, "--out")) dir = v;
++        else if (!strcmp(k, "--candidate") || !strcmp(k, "--ape")) ape = v;
++        else if (!strcmp(k, "--repo") || !strcmp(k, "--root")) repo = v;
++        else if (!strcmp(k, "--allow-migrate")) mig_why = v;
++        else if (!strcmp(k, "--drive-prog")) dr_prog = v;
++        else return ps_refuse("resume", "unknown-option");
++        i++;
++    }
++    if (!dir || !ape) return ps_refuse("resume", "need-dir-and-candidate");
++    if (dir[0] != '/' || ape[0] != '/') return ps_refuse("resume", "dir-and-candidate-must-be-absolute");
++    if (mig_why && (!mig_why[0] || strchr(mig_why, '\t') || strchr(mig_why, '\n')))
++        return ps_refuse("resume", "invalid-allow-migrate-reason");
++
++    char rape[PS_PW], ape_sha[65];
++    sy_stat_t st;
++    if (sy_realpath(ape, rape, sizeof rape) < 0 || sy_stat(rape, &st) || st.kind != 'f' || ps_sha_file(rape, ape_sha))
++        return ps_refuse("resume", "kit-missing-candidate");
++
++    char lockp[PS_PW] = "";
++    int lrc = ps_lock_acquire(dir, lockp);
++    if (lrc == 1) return ps_refuse("resume", "already-running");
++    if (lrc < 0) return ps_refuse("resume", "lock-create-failed");
++
++    char bindp[PS_PW], winp[PS_PW], idsp[PS_PW];
++    cx_fmt(bindp, sizeof bindp, "%s/start-binding.tsv", dir);
++    cx_fmt(winp, sizeof winp, "%s/windows.tsv", dir);
++    cx_fmt(idsp, sizeof idsp, "%s/ids.txt", dir);
++    size_t bn = 0;
++    char *bt = ps_read_all(bindp, &bn);
++    if (!bt) return ps_unlock_refuse(lockp, "resume", "binding-missing");
++
++    char b_repo[PS_PW] = "", b_rev_sha[65] = "", b_tree_sha[65] = "", b_ape_sha[65] = "";
++    char b_win_sha[65] = "", b_ids_sha[65] = "", b_lanes[16] = "", b_jobs[16] = "";
++    const char *p = bt, *end = bt + bn;
++    while (p < end) {
++        const char *nl = (const char *)memchr(p, '\n', (size_t)(end - p));
++        size_t ll = nl ? (size_t)(nl - p) : (size_t)(end - p);
++        char line[4096];
++        size_t cp = ll < sizeof line - 1 ? ll : sizeof line - 1;
++        mm_copy(line, sizeof line, p, cp);
++        line[cp] = 0;
++        ps_trim_line(line);
++        p += ll + (nl ? 1 : 0);
++        if (ps_starts(line, "BINDING\t")) {
++            ps_kv_get(line, "\trepo=", b_repo, sizeof b_repo);
++            ps_kv_get(line, "\trev_sha=", b_rev_sha, sizeof b_rev_sha);
++            ps_kv_get(line, "\ttree_sha=", b_tree_sha, sizeof b_tree_sha);
++            ps_kv_get(line, "\tape_sha256=", b_ape_sha, sizeof b_ape_sha);
++            ps_kv_get(line, "\twindows_sha256=", b_win_sha, sizeof b_win_sha);
++            ps_kv_get(line, "\tids_sha256=", b_ids_sha, sizeof b_ids_sha);
++            ps_kv_get(line, "\tlanes=", b_lanes, sizeof b_lanes);
++            ps_kv_get(line, "\tmax_jobs=", b_jobs, sizeof b_jobs);
++        }
++    }
++    mm_free(bt);
++    if (!b_repo[0] || !b_rev_sha[0] || !b_tree_sha[0] || !b_ape_sha[0] || !b_win_sha[0] || !b_lanes[0] || !b_jobs[0])
++        return ps_unlock_refuse(lockp, "resume", "binding-malformed");
++    if (strcmp(b_ape_sha, ape_sha) != 0)
++        return ps_unlock_refuse(lockp, "resume", "candidate-mismatch");
++
++    char cur_win_sha[65], cur_ids_sha[65];
++    if (ps_sha_file(winp, cur_win_sha) || strcmp(cur_win_sha, b_win_sha) != 0)
++        return ps_unlock_refuse(lockp, "resume", "plan-windows-changed-or-missing");
++    if (ps_sha_file(idsp, cur_ids_sha) || strcmp(cur_ids_sha, b_ids_sha) != 0)
++        return ps_unlock_refuse(lockp, "resume", "plan-ids-changed-or-missing");
++
++    char rrepo[PS_PW];
++    const char *use_repo = (repo && repo[0]) ? repo : b_repo;
++    if (sy_realpath(use_repo, rrepo, sizeof rrepo) < 0)
++        return ps_unlock_refuse(lockp, "resume", "repo-unresolvable");
++
++    if (ps_git_clean_tracked(rrepo) != 0)
++        return ps_unlock_refuse(lockp, "resume", "dirty-tree");
++
++    char cur_rev[41], cur_tree[41];
++    if (ps_git_rev_pair(rrepo, "HEAD^{commit}", "HEAD^{tree}", cur_rev, cur_tree))
++        return ps_unlock_refuse(lockp, "resume", "repo-rev-resolve-failed");
++
++    int repo_diff = strcmp(rrepo, b_repo) != 0;
++    int rev_diff = strcmp(cur_rev, b_rev_sha) != 0;
++    int tree_diff = strcmp(cur_tree, b_tree_sha) != 0;
++    if (repo_diff || rev_diff || tree_diff) {
++        if (!mig_why || !mig_why[0]) {
++            if (repo_diff) return ps_unlock_refuse(lockp, "resume", "repo-mismatch-pass-allow-migrate");
++            if (tree_diff) return ps_unlock_refuse(lockp, "resume", "tree-mismatch-pass-allow-migrate");
++            return ps_unlock_refuse(lockp, "resume", "rev-mismatch-pass-allow-migrate");
++        }
++        char migp[PS_PW], mline[2048];
++        cx_fmt(migp, sizeof migp, "%s/migration-ledger.tsv", dir);
++        cx_fmt(mline, sizeof mline,
++               "MIGRATION\tfrom_repo=%s\tto_repo=%s\tfrom_rev=%s\tto_rev=%s\tfrom_tree=%s\tto_tree=%s\tcandidate_sha256=%s\treason=%s\n",
++               b_repo, rrepo, b_rev_sha, cur_rev, b_tree_sha, cur_tree, ape_sha, mig_why);
++        int mfd = sy_open(migp, O_WRONLY | O_CREAT | O_APPEND, 0600);
++        if (mfd < 0 || sy_write_all(mfd, mline, (long)strlen(mline)) || sy_close(mfd)) {
++            if (mfd >= 0) sy_close(mfd);
++            return ps_unlock_refuse(lockp, "resume", "migration-ledger-write-failed");
++        }
++        printf("PRERUN_START\tRESUME_MIGRATED\tfrom_repo=%s\tto_repo=%s\tfrom_rev=%s\tto_rev=%s\tfrom_tree=%s\tto_tree=%s\treason=%s\n",
++               b_repo, rrepo, b_rev_sha, cur_rev, b_tree_sha, cur_tree, mig_why);
++    }
++
++    char *rv[22]; int rc_i = ps_prog_prefix(rv, dr_prog);
++    rv[rc_i++] = "run";
++    rv[rc_i++] = "--root"; rv[rc_i++] = rrepo;
++    rv[rc_i++] = "--candidate"; rv[rc_i++] = rape;
++    rv[rc_i++] = "--out"; rv[rc_i++] = (char *)dir;
++    rv[rc_i++] = "--window-lanes"; rv[rc_i++] = b_lanes;
++    rv[rc_i++] = "--max-jobs"; rv[rc_i++] = b_jobs;
++    rv[rc_i++] = "--keep-going";
++    rv[rc_i++] = "--resume";
++    rv[rc_i] = 0;
++    np_result rr = {0}; char rwhy[512];
++    int tr = np_run(rv, rrepo, 0, PS_RUN_BOUND_SECS, &rr, rwhy, sizeof rwhy);
++    int rrc = tr ? 2 : rr.rc;
++    if (rr.out && rr.outn) fwrite(rr.out, 1, rr.outn, stdout);
++    if (rr.err && rr.errn) fwrite(rr.err, 1, rr.errn, stderr);
++    np_free(&rr);
++    if (lockp[0]) sy_unlink(lockp);
++    printf("PRERUN_START\tRESUME_DONE\trc=%d\tdir=%s\tbound_s=%d\n", rrc, dir, PS_RUN_BOUND_SECS);
++    return rrc;
++}
++
++int main(int argc, char **argv) {
++    if (argc >= 2 && !strcmp(argv[1], "--")) { argc--; argv++; }
++    if (argc < 2) return ps_refuse("main", "usage: admission|verify-admission|cold-identity|start|resume");
++    const char *sub = argv[1];
++    if (!strcmp(sub, "admission")) return ps_cmd_admission(argc, argv);
++    if (!strcmp(sub, "verify-admission")) return ps_cmd_verify_admission(argc, argv);
++    if (!strcmp(sub, "cold-identity")) return ps_cmd_cold_identity(argc, argv);
++    if (!strcmp(sub, "start")) return ps_cmd_start(argc, argv);
++    if (!strcmp(sub, "resume")) return ps_cmd_resume(argc, argv);
++    return ps_refuse(sub, "unknown-subcommand");
++}
+diff --git a/tools/check-prerun-start.cx b/tools/check-prerun-start.cx
+new file mode 100644
+index 0000000000..572e2b522e
+--- /dev/null
++++ b/tools/check-prerun-start.cx
+@@ -0,0 +1,512 @@
++/* Contract: checks tools/prerun-start.cx offline on a throw-away git fixture.
++ * Verifies:
++ *   (1) D1 admission & verify-admission: passes positional ROOT (argv[1]) per tools/dvqualify.cx:635 (verified
++ *       against real tools/dvqualify.cx entry point and a strict mock that refuses unknown flags like --root),
++ *       catches failing batch (107 W0201 red before freeze), passes after fix, generates admission-receipt.tsv
++ *       and priority.tsv from {affected U added}, and refuses missing batch, wrong candidate, wrong tree,
++ *       stale PASS (base mismatch / raw mismatch), and UNKNOWN status.
++ *   (2) T11 cold-identity & start/resume wrapper: acquires atomic O_CREAT|O_EXCL run.lock BEFORE writing any
++ *       plan/input files (with negative control PRERUN_START_MUT_SKIP_LOCK=1 proving lock removal turns red),
++ *       rejects --normal-jobs on start/resume, rejects stale cold-identity and ineligible cold-times, selects
++ *       lightest eligible cold batch for W0000 while keeping priority batches at the front, runs with
++ *       --max-jobs, --keep-going, and bound_s=5400, and verifies resume checks repo/rev/tree_sha/candidate
++ *       frozen identity (requiring --allow-migrate REASON with migration-ledger.tsv accounting on repo/tree change).
++ * Layer: interfaces. Output: CHECK_PRERUN_START. */
++#pragma unisa use cxlib.netpack
++#pragma unisa use sys.fs
++#pragma unisa use sys.env
++#pragma unisa use sys.posix
++#pragma unisa use sys.proc
++#pragma unisa use mem.bytes
++#pragma unisa use mem.heap
++
++static char tmp[4096], fx[4400], fx2[4400], persist[4400], bin[4400], driver[4096];
++static int g_pass, g_fail;
++
++static void ck(int ok, const char *name) {
++    if (ok) { g_pass++; printf("PASS\t%s\n", name); }
++    else { g_fail++; printf("FAIL\t%s\n", name); }
++}
++
++static int tk_has(const char *s, const char *sub) {
++    return s && sub && strstr(s, sub) != 0;
++}
++
++static np_result run(char **v, const char *cwd) {
++    np_result r = {0}; char why[512];
++    if (np_run(v, cwd, 0, 55, &r, why, sizeof why)) {
++        fprintf(stderr, "check-prerun-start: %s\n", why);
++        exit(2);
++    }
++    return r;
++}
++
++static void sh(const char *cmd, const char *cwd) {
++    char *v[] = {"sh", "-c", (char *)cmd, 0};
++    np_result r = run(v, cwd);
++    if (r.rc) {
++        fprintf(stderr, "check-prerun-start: fixture step failed: %s\n%s%s",
++                cmd, r.out ? r.out : "", r.err ? r.err : "");
++        exit(2);
++    }
++    np_free(&r);
++}
++
++int main(int argc, char **argv) {
++    if (sy_mkdtemp(sy_tmpdir(), "prerun-start-check-", tmp, sizeof tmp) ||
++        cx_fmt(fx, sizeof fx, "%s/repo", tmp) ||
++        cx_fmt(fx2, sizeof fx2, "%s/repo2", tmp) ||
++        cx_fmt(bin, sizeof bin, "%s/prerun-start", tmp)) return 2;
++    if (sy_realpath("./unisacc.com", driver, sizeof driver) < 0) return 2;
++    const char *home = sy_env("HOME");
++    if (!home || cx_fmt(persist, sizeof persist, "%s/.cache/unisacc/prerun-start-check-%ld", home, (long)sy_pid())) return 2;
++
++    if (sy_mkdir(fx, 0700) || sy_mkdir_all(persist, 0700)) return 2;
++
++    char repo_root[4096];
++    if (sy_realpath(".", repo_root, sizeof repo_root) < 0) return 2;
++    char setup[12000];
++    cx_fmt(setup, sizeof setup,
++        "set -e; ln -s '%s' ./unisacc.com; "
++        "ln -s '%s/cxroot.tsv' ./cxroot.tsv; "
++        "ln -s '%s/cx' ./cx; "
++        "ln -s '%s/ext' ./ext; "
++        "ln -s '%s/unisa' ./unisa; "
++        "mkdir -p tools tests release/evidence/0.1.0; "
++        "ln -s '%s/tools/cxlib' tools/cxlib; "
++        "printf 'unisacc.com\\ncxroot.tsv\\ncx\\next\\nunisa\\ntools/cxlib\\n' > .gitignore; "
++        "printf 'id\\timplementation\\tmode\\tsource\\tentry\\targs\\texpected_rc\\tmarker\\tmaterials\\tscope\\towner\\theaders\\ttier\\n"
++        "light-a\\tIMPLEMENTED\\tSOURCE\\ta.cx\\t-\\t-\\t0\\tOK\\t-\\thost\\tc\\tproduct\\tsmoke\\n"
++        "light-b\\tIMPLEMENTED\\tSOURCE\\tb.cx\\t-\\t-\\t0\\tOK\\t-\\thost\\tc\\tproduct\\tsmoke\\n"
++        "w0201-aff\\tIMPLEMENTED\\tSOURCE\\tw.cx\\t-\\t-\\t0\\tOK\\t-\\thost\\tc\\tproduct\\tfull\\n' > tests/batches.tsv; "
++        "printf 'batch\\tdomain\\trule\\tsample\\tbasis\\n"
++        "light-a\\tproduct-qualification\\tr\\ts\\tb\\n"
++        "light-b\\tproduct-qualification\\tr\\ts\\tb\\n"
++        "w0201-aff\\tproduct-qualification\\tr\\ts\\tb\\n"
++        "new-heavy-prio\\tproduct-qualification\\tr\\ts\\tb\\n' > tests/batch-domain-index.tsv; "
++        "printf '# prerun-drive windows\\nwindow\\tjobs\\tphase\\tcount\\tids\\nW0000\\t1\\twarmup\\t1\\tlight-a\\nW0001\\t2\\tnormal\\t2\\tlight-b,w0201-aff\\n' > release/evidence/0.1.0/prerun-windows.tsv; "
++        "printf 'batch\\tdomain\\tstatus\\nlight-a\\tp\\tPASS\\nlight-b\\tp\\tPASS\\nw0201-aff\\tp\\tPASS\\n' > strict-prev.tsv; "
++        "printf '1\\tlight-a\\tPASS\\t4000\\n2\\tlight-b\\tPASS\\t2500\\n3\\tw0201-aff\\tPASS\\t1200\\n' > times.tsv; "
++        "printf 'candidate-v1\\n' > ape-v1.bin; printf 'candidate-v2\\n' > ape-v2.bin; "
++        "git init -q . && git add .gitignore tests release strict-prev.tsv times.tsv ape-v1.bin ape-v2.bin && git -c user.name=t -c user.email=t@t commit -q -m base && git rev-parse HEAD > base.txt; "
++        "printf 'new-heavy-prio\\tIMPLEMENTED\\tSOURCE\\tn.cx\\t-\\t-\\t0\\tOK\\t-\\thost\\tc\\tproduct\\tfull\\n' >> tests/batches.tsv; "
++        "printf '4\\tnew-heavy-prio\\tPASS\\t800\\n' >> times.tsv; "
++        "git add tests/batches.tsv times.tsv && git -c user.name=t -c user.email=t@t commit -q -m head && git rev-parse HEAD > head.txt; "
++        "cp -a '%s' '%s'",
++        driver, repo_root, repo_root, repo_root, repo_root, repo_root, fx, fx2);
++
++    if (argc == 2) {
++        if (sy_realpath(argv[1], bin, sizeof bin) < 0) return 2;
++        sh(setup, fx);
++    } else {
++        char par_setup[14000];
++        cx_fmt(par_setup, sizeof par_setup,
++            "set -e; (cd '%s' && sh '%s' tools/prerun-start.cx -o '%s') & b_pid=$!; "
++            "%s; wait $b_pid",
++            repo_root, driver, bin, setup);
++        sh(par_setup, fx);
++    }
++
++    /* Create strict executable mock helpers in tmp/: mock-dvqualify strictly requires positional ROOT argv[1]
++     * and refuses any unknown option (such as --root). */
++    char mock_af_bin[4500], mock_dv_bin[4500], mock_in_bin[4500], mock_dr_bin[4500], real_dv_wrap[4500];
++    cx_fmt(mock_af_bin, sizeof mock_af_bin, "%s/mock-affected", tmp);
++    cx_fmt(mock_dv_bin, sizeof mock_dv_bin, "%s/mock-dvqualify", tmp);
++    cx_fmt(mock_in_bin, sizeof mock_in_bin, "%s/mock-inputs", tmp);
++    cx_fmt(mock_dr_bin, sizeof mock_dr_bin, "%s/mock-drive", tmp);
++    cx_fmt(real_dv_wrap, sizeof real_dv_wrap, "%s/real-dvqualify-list-wrap", tmp);
++
++    const char *af_sh =
++        "#!/bin/sh\n"
++        "while [ $# -gt 0 ]; do\n"
++        "  case \"$1\" in\n"
++        "    --since) shift 2;;\n"
++        "    --list-only) shift;;\n"
++        "    *) echo \"mock-affected: unknown arg $1\" >&2; exit 2;;\n"
++        "  esac\n"
++        "done\n"
++        "printf 'AFFECTED\\tw0201-aff\\twhy=w.cx\\tvia=source\\n'\n"
++        "printf 'AFFECTED_SUMMARY\\tchanged=1\\tbatches=1\\tscanned=4\\n'\n";
++    const char *dv_sh =
++        "#!/bin/sh\n"
++        "if [ $# -lt 1 ] || [ \"${1#-}\" != \"$1\" ] || [ ! -d \"$1\" ]; then\n"
++        "  echo \"dvqualify: argv[1] must be positional repo root directory (got: ${1:-none})\" >&2\n"
++        "  exit 2\n"
++        "fi\n"
++        "root=\"$1\"; shift\n"
++        "cand=''; id=''; out=''; jobs=''; seg=''\n"
++        "while [ $# -gt 0 ]; do\n"
++        "  case \"$1\" in\n"
++        "    --candidate) cand=\"$2\"; shift 2;;\n"
++        "    --ids) id=\"$2\"; shift 2;;\n"
++        "    --jobs) jobs=\"$2\"; shift 2;;\n"
++        "    --segment-batches) seg=\"$2\"; shift 2;;\n"
++        "    --out) out=\"$2\"; shift 2;;\n"
++        "    *) echo \"dvqualify: unknown argument $1\" >&2; exit 2;;\n"
++        "  esac\n"
++        "done\n"
++        "if [ -z \"$root\" ] || [ -z \"$cand\" ] || [ -z \"$id\" ] || [ -z \"$out\" ] || [ \"$jobs\" != '1' ] || [ \"$seg\" != '1' ]; then\n"
++        "  echo 'dvqualify: missing required options' >&2; exit 2\n"
++        "fi\n"
++        "csha=$(sha256sum \"$cand\" | awk '{print $1}')\n"
++        "st='PASS'; rc=0; cnt='4/0'\n"
++        "if [ \"$MOCK_DV_MODE\" = 'fail-w0201' ] && [ \"$id\" = 'w0201-aff' ]; then st='FAIL'; rc=1; cnt='3/1'; fi\n"
++        "if [ \"$MOCK_DV_MODE\" = 'unknown-w0201' ] && [ \"$id\" = 'w0201-aff' ]; then st='UNKNOWN'; rc=124; cnt='0/0'; fi\n"
++        "printf 'batch\\tdomain\\tstatus\\trc\\tcandidate\\tms\\tlayout_ms\\tassertions\\tnote\\n' > \"$out\"\n"
++        "printf '%s\\tproduct-qualification\\t%s\\t%d\\t%s\\t120\\t10\\t4\\tcount=%s\\n' \"$id\" \"$st\" \"$rc\" \"$csha\" \"$cnt\" >> \"$out\"\n"
++        "printf 'RAW\\tBATCH_RUN\\tid=%s\\tstatus=%s\\trc=%d\\tcandidate=%s\\tms=120\\tassertions=4\\n' \"$id\" \"$st\" \"$rc\" \"$csha\" >> \"$out\"\n"
++        "exit $rc\n";
++    /* Wrapper that forwards the exact argv produced by prerun-start admission into real tools/dvqualify.cx --list */
++    char real_dv_sh[2048];
++    cx_fmt(real_dv_sh, sizeof real_dv_sh,
++        "#!/bin/sh\n"
++        "set -e\n"
++        "if [ ! -s '%s/real-dv-list.out' ]; then\n"
++        "  UNISACC_RUN_CACHE=1 sh '%s' '%s/tools/dvqualify.cx' -- \"$@\" --list > '%s/real-dv-list.out'\n"
++        "fi\n"
++        "exec '%s' \"$@\"\n",
++        tmp, driver, repo_root, tmp, mock_dv_bin);
++    const char *in_sh =
++        "#!/bin/sh\n"
++        "dir=''; prio=''; times=''\n"
++        "while [ $# -gt 0 ]; do\n"
++        "  case \"$1\" in\n"
++        "    --dir) dir=\"$2\"; shift 2;;\n"
++        "    --priority-src) prio=\"$2\"; shift 2;;\n"
++        "    --times-cache) times=\"$2\"; shift 2;;\n"
++        "    --no-templates) shift;;\n"
++        "    --rev|--version|--prev|--prev-rev|--repo|--ape|--lanes|--jobs|--prev-windows|--evidence-out|--exclude|--add-ids) shift 2;;\n"
++        "    *) echo \"mock-inputs: unknown arg $1\" >&2; exit 2;;\n"
++        "  esac\n"
++        "done\n"
++        "mkdir -p \"$dir\"\n"
++        "printf 'light-a\\nlight-b\\nw0201-aff\\nnew-heavy-prio\\n' > \"$dir/ids.txt\"\n"
++        "cp -f \"$times\" \"$dir/times.tsv\"\n"
++        "cp -f \"$prio\" \"$dir/priority.tsv\"\n"
++        "printf 'PRERUN_INPUTS ape=ok ids_sha=ok times_sha=ok priority=ok dir=%s added=1 excluded=0 status=READY\\n' \"$dir\"\n";
++    const char *dr_sh =
++        "#!/bin/sh\n"
++        "sub=\"$1\"; shift\n"
++        "out=''; maxj='8'; lanes='2'; has_keep=0; has_res=0; coldf=''; coldid=''\n"
++        "while [ $# -gt 0 ]; do\n"
++        "  case \"$1\" in\n"
++        "    --normal-jobs)\n"
++        "      if [ \"$sub\" = 'run' ]; then printf 'PRERUN_DRIVE\\tREFUSE\\treason=unknown-run-arg\\n' >&2; exit 2; fi\n"
++        "      shift 2;;\n"
++        "    --out) out=\"$2\"; shift 2;;\n"
++        "    --max-jobs) maxj=\"$2\"; shift 2;;\n"
++        "    --window-lanes) lanes=\"$2\"; shift 2;;\n"
++        "    --cold-times-file) coldf=\"$2\"; shift 2;;\n"
++        "    --cold-identity) coldid=\"$2\"; shift 2;;\n"
++        "    --ids-file|--times-file|--priority-file|--warmup|--root|--candidate) shift 2;;\n"
++        "    --keep-going) has_keep=1; shift;;\n"
++        "    --resume) has_res=1; shift;;\n"
++        "    *) echo \"mock-drive: unknown arg $1\" >&2; exit 2;;\n"
++        "  esac\n"
++        "done\n"
++        "if [ \"$sub\" = 'plan' ]; then\n"
++        "  mkdir -p \"$out\"\n"
++        "  printf '# prerun-drive windows\\n# timing=wave-v1 jobs=4 budget_ms=22000\\n# window-lanes=%s\\nwindow\\tjobs\\tphase\\tcount\\tids\\n' \"$lanes\" > \"$out/windows.tsv\"\n"
++        "  printf 'W0000\\t1\\twarmup\\t1\\tnew-heavy-prio\\nW0001\\t4\\tnormal\\t1\\tw0201-aff\\nW0002\\t4\\tnormal\\t2\\tlight-a,light-b\\n' >> \"$out/windows.tsv\"\n"
++        "  printf 'PRERUN_PLAN\\ttotal=4\\twindows=3\\twarmup=1\\theavy=0\\tnormal=2\\tout=%s/windows.tsv\\tcold_id=%s\\n' \"$out\" \"$coldid\"\n"
++        "  exit 0\n"
++        "fi\n"
++        "if [ \"$sub\" = 'run' ]; then\n"
++        "  if [ -z \"$out\" ] || [ \"$has_keep\" -ne 1 ]; then exit 2; fi\n"
++        "  [ -f \"$out/strict-W0000.tsv\" ] || printf 'W0000-PASS\\n' > \"$out/strict-W0000.tsv\"\n"
++        "  [ -f \"$out/done.W0000\" ] || printf 'ok\\n' > \"$out/done.W0000\"\n"
++        "  printf 'MOCK_RUN\\tlane=%s\\tmax_jobs=%s\\tkeep_going=%d\\tresume=%d\\n' \"$lanes\" \"$maxj\" \"$has_keep\" \"$has_res\"\n"
++        "  exit 0\n"
++        "fi\n"
++        "exit 2\n";
++
++    if (cx_write(mock_af_bin, af_sh, strlen(af_sh)) || sy_chmod(mock_af_bin, 0755) ||
++        cx_write(mock_dv_bin, dv_sh, strlen(dv_sh)) || sy_chmod(mock_dv_bin, 0755) ||
++        cx_write(real_dv_wrap, real_dv_sh, strlen(real_dv_sh)) || sy_chmod(real_dv_wrap, 0755) ||
++        cx_write(mock_in_bin, in_sh, strlen(in_sh)) || sy_chmod(mock_in_bin, 0755) ||
++        cx_write(mock_dr_bin, dr_sh, strlen(dr_sh)) || sy_chmod(mock_dr_bin, 0755)) return 2;
++
++    /* Verify strict mock-dvqualify rejects old --root flag */
++    {
++        char *bad_dv[] = {mock_dv_bin, "--root", fx, "--candidate", driver, "--ids", "light-a", 0};
++        np_result br = run(bad_dv, 0);
++        ck(br.rc == 2 && tk_has(br.err, "argv[1] must be positional repo root"), "strict-mock-dvqualify-rejects-dash-root");
++        np_free(&br);
++    }
++
++    char base_rev[64] = "", head_rev[64] = "";
++    {
++        char p[4500]; unsigned char *b = 0; int64_t n = 0;
++        cx_fmt(p, sizeof p, "%s/base.txt", fx);
++        if (sy_read_file(p, &b, &n, 100) || n < 40 || mm_copy(base_rev, sizeof base_rev, b, 40)) return 2;
++        mm_free(b); b = 0;
++        cx_fmt(p, sizeof p, "%s/head.txt", fx);
++        if (sy_read_file(p, &b, &n, 100) || n < 40 || mm_copy(head_rev, sizeof head_rev, b, 40)) return 2;
++        mm_free(b);
++    }
++
++    char ape1[4500], ape2[4500], adm_dir[4600];
++    cx_fmt(ape1, sizeof ape1, "%s/ape-v1.bin", fx);
++    cx_fmt(ape2, sizeof ape2, "%s/ape-v2.bin", fx);
++    cx_fmt(adm_dir, sizeof adm_dir, "%s/adm", persist);
++
++    /* (1) D1 Red-then-Green: 107 Round 1 W0201 failure caught before freeze */
++    setenv("MOCK_DV_MODE", "fail-w0201", 1);
++    char *adm_fail[] = {bin, "admission", "--root", fx, "--base", base_rev, "--candidate", ape1, "--out", adm_dir,
++                        "--affected-prog", mock_af_bin, "--dvqualify-prog", mock_dv_bin, 0};
++    np_result r = run(adm_fail, 0);
++    ck(r.rc == 1 && tk_has(r.out, "PRERUN_START\tADMISSION\tFAIL\tbatch=w0201-aff\tstatus=FAIL"),
++       "d1-w0201-red-caught-before-freeze");
++    np_free(&r);
++
++    char *ver_fail[] = {bin, "verify-admission", "--root", fx, "--base", base_rev, "--candidate", ape1, "--out", adm_dir,
++                        "--affected-prog", mock_af_bin, 0};
++    r = run(ver_fail, 0);
++    ck(r.rc == 2 && tk_has(r.out, "receipt-status-not-pass"), "d1-verify-rejects-failed-receipt");
++    np_free(&r);
++
++    /* D1 UNKNOWN batch status refused */
++    setenv("MOCK_DV_MODE", "unknown-w0201", 1);
++    r = run(adm_fail, 0);
++    ck(r.rc == 1 && tk_has(r.out, "PRERUN_START\tADMISSION\tFAIL\tbatch=w0201-aff\tstatus=UNKNOWN"),
++       "d1-unknown-batch-refused");
++    np_free(&r);
++
++    /* D1 Green after fix (both affected w0201-aff and newly added new-heavy-prio pass, forwarded through real tools/dvqualify.cx --list) */
++    unsetenv("MOCK_DV_MODE");
++    char *adm_real[] = {bin, "admission", "--root", fx, "--base", base_rev, "--candidate", ape1, "--out", adm_dir,
++                        "--affected-prog", mock_af_bin, "--dvqualify-prog", real_dv_wrap, 0};
++    r = run(adm_real, 0);
++    ck(r.rc == 0 && tk_has(r.out, "PRERUN_START\tADMISSION\tPASS") && tk_has(r.out, "batches=2"),
++       "d1-green-after-fix-and-accepted-by-real-dvqualify-cli");
++    np_free(&r);
++    {
++        char rlp[4500]; unsigned char *rb = 0; int64_t rn = 0;
++        cx_fmt(rlp, sizeof rlp, "%s/real-dv-list.out", tmp);
++        ck(!sy_read_file(rlp, &rb, &rn, 4096) && rb && tk_has((const char *)rb, "QUALIFY_LIST\t"),
++           "real-dvqualify-accepted-positional-root-and-listed-batch");
++        if (rb) mm_free(rb);
++    }
++
++    r = run(ver_fail, 0);
++    ck(r.rc == 0 && tk_has(r.out, "PRERUN_START\tADMISSION_VERIFY\tPASS") && tk_has(r.out, "batches=2"),
++       "d1-verify-admission-passes");
++    np_free(&r);
++
++    /* D1 Negative controls: wrong candidate, wrong base (stale PASS), missing batch, dirty/wrong tree */
++    char *ver_wrong_cand[] = {bin, "verify-admission", "--root", fx, "--base", base_rev, "--candidate", ape2, "--out", adm_dir,
++                              "--affected-prog", mock_af_bin, 0};
++    r = run(ver_wrong_cand, 0);
++    ck(r.rc == 2 && tk_has(r.out, "candidate-mismatch"), "d1-verify-rejects-wrong-candidate");
++    np_free(&r);
++
++    char *ver_wrong_base[] = {bin, "verify-admission", "--root", fx, "--base", head_rev, "--candidate", ape1, "--out", adm_dir,
++                              "--affected-prog", mock_af_bin, 0};
++    r = run(ver_wrong_base, 0);
++    ck(r.rc == 2 && tk_has(r.out, "base-mismatch"), "d1-verify-rejects-stale-base");
++    np_free(&r);
++
++    /* Tamper priority.tsv to drop new-heavy-prio -> missing batch refused */
++    char prio_adm[4700], prio_bak[4700];
++    cx_fmt(prio_adm, sizeof prio_adm, "%s/priority.tsv", adm_dir);
++    cx_fmt(prio_bak, sizeof prio_bak, "%s/priority.tsv.bak", adm_dir);
++    sh("cp priority.tsv priority.tsv.bak && grep -v 'new-heavy-prio' priority.tsv.bak > priority.tsv", adm_dir);
++    r = run(ver_fail, 0);
++    ck(r.rc == 2 && tk_has(r.out, "priority-missing-batch:new-heavy-prio"), "d1-verify-rejects-missing-batch");
++    np_free(&r);
++    sh("mv priority.tsv.bak priority.tsv", adm_dir);
++
++    /* Dirty tree refused */
++    sh("printf '# dirty\\n' >> times.tsv", fx);
++    r = run(ver_fail, 0);
++    ck(r.rc == 2 && tk_has(r.out, "dirty-tree"), "d1-verify-rejects-dirty-tree");
++    np_free(&r);
++    sh("git checkout -- times.tsv", fx);
++
++    /* (2) T11 Cold-identity & prerun-start wrapper */
++    char *cid_cmd[] = {bin, "cold-identity", "--root", fx, "--candidate", ape1, "--rev", head_rev, 0};
++    r = run(cid_cmd, 0);
++    ck(r.rc == 0 && tk_has(r.out, "PRERUN_START\tCOLD_IDENTITY\t"), "cold-identity-computed");
++    char cold_id[65] = "";
++    if (r.out) {
++        const char *p = strstr(r.out, "COLD_IDENTITY\t");
++        if (p) mm_copy(cold_id, sizeof cold_id, p + 14, 64);
++        cold_id[64] = 0;
++    }
++    np_free(&r);
++    ck(strlen(cold_id) == 64, "cold-identity-is-64-hex");
++
++    char cold_stale[4500], cold_over[4500], cold_ok[4500], times_f[4500], run_dir[4600];
++    cx_fmt(cold_stale, sizeof cold_stale, "%s/cold-stale.tsv", fx);
++    cx_fmt(cold_over, sizeof cold_over, "%s/cold-over.tsv", fx);
++    cx_fmt(cold_ok, sizeof cold_ok, "%s/cold-ok.tsv", fx);
++    cx_fmt(times_f, sizeof times_f, "%s/times.tsv", fx);
++    cx_fmt(run_dir, sizeof run_dir, "%s/prerun-run", persist);
++
++    char cbuf[1024];
++    cx_fmt(cbuf, sizeof cbuf,
++           "warmup-cold-v1\t0000000000000000000000000000000000000000000000000000000000000000\n"
++           "light-b\t3100\t3200\t3150\n");
++    cx_write(cold_stale, cbuf, strlen(cbuf));
++
++    /* All non-priority batches > 27500ms, only priority batch new-heavy-prio is fast (800ms) -> must refuse! */
++    cx_fmt(cbuf, sizeof cbuf,
++           "warmup-cold-v1\t%s\n"
++           "new-heavy-prio\t700\t800\t750\n"
++           "w0201-aff\t900\t950\t920\n"
++           "light-a\t28100\t27000\t26000\n"
++           "light-b\t27501\t25000\t24000\n",
++           cold_id);
++    cx_write(cold_over, cbuf, strlen(cbuf));
++
++    /* Eligible cold file: new-heavy-prio (800ms) and w0201-aff (950ms) are in priority.tsv so excluded from W0000;
++     * light-a max is 4200ms, light-b max is 2600ms -> light-b must be selected for W0000! */
++    cx_fmt(cbuf, sizeof cbuf,
++           "warmup-cold-v1\t%s\n"
++           "new-heavy-prio\t700\t800\t750\n"
++           "w0201-aff\t900\t950\t920\n"
++           "light-a\t4100\t4200\t4000\n"
++           "light-b\t2500\t2600\t2400\n",
++           cold_id);
++    cx_write(cold_ok, cbuf, strlen(cbuf));
++
++    /* Reject --normal-jobs passed to start */
++    char *bad_nj[] = {bin, "start", "--normal-jobs", "8", 0};
++    r = run(bad_nj, 0);
++    ck(r.rc == 2 && tk_has(r.out, "normal-jobs-refused-use-jobs"), "start-rejects-normal-jobs-flag");
++    np_free(&r);
++
++    /* Reject stale cold-identity */
++    char dir_stale[4600]; cx_fmt(dir_stale, sizeof dir_stale, "%s/stale", persist);
++    char *st_stale[] = {bin, "start", "--rev", head_rev, "--prev-rev", base_rev, "--version", "0.1.1", "--prev", "0.1.0",
++                        "--repo", fx, "--ape", ape1, "--dir", dir_stale, "--priority-src", prio_adm,
++                        "--cold-times-file", cold_stale, "--times-cache", times_f, "--no-templates",
++                        "--inputs-prog", mock_in_bin, "--drive-prog", mock_dr_bin, "--plan-only", 0};
++    r = run(st_stale, 0);
++    ck(r.rc == 2 && tk_has(r.out, "cold-identity-mismatch"), "start-rejects-stale-cold-identity");
++    np_free(&r);
++
++    /* Reject when only priority batches are <= 27.5s and non-priority exceed 27.5s (no fallback!) */
++    char dir_over[4600]; cx_fmt(dir_over, sizeof dir_over, "%s/over", persist);
++    char *st_over[] = {bin, "start", "--rev", head_rev, "--prev-rev", base_rev, "--version", "0.1.1", "--prev", "0.1.0",
++                       "--repo", fx, "--ape", ape1, "--dir", dir_over, "--priority-src", prio_adm,
++                       "--cold-times-file", cold_over, "--times-cache", times_f, "--no-templates",
++                       "--inputs-prog", mock_in_bin, "--drive-prog", mock_dr_bin, "--plan-only", 0};
++    r = run(st_over, 0);
++    ck(r.rc == 2 && tk_has(r.out, "no-eligible-cold-warmup-batch"), "start-rejects-when-no-eligible-nonpriority-cold-batch");
++    np_free(&r);
++
++    /* Atomic pre-plan lock test + negative control (removing atomic lock turns red) */
++    char dir_locktest[4600], pre_lock[4700], pre_win[4700], pbuf[64];
++    cx_fmt(dir_locktest, sizeof dir_locktest, "%s/locktest", persist);
++    cx_fmt(pre_lock, sizeof pre_lock, "%s/run.lock", dir_locktest);
++    cx_fmt(pre_win, sizeof pre_win, "%s/windows.tsv", dir_locktest);
++    sy_mkdir_all(dir_locktest, 0700);
++    cx_fmt(pbuf, sizeof pbuf, "%ld\n", (long)sy_pid());
++    cx_write(pre_lock, pbuf, strlen(pbuf));
++    char *st_locked[] = {bin, "start", "--rev", head_rev, "--prev-rev", base_rev, "--version", "0.1.1", "--prev", "0.1.0",
++                         "--repo", fx, "--ape", ape1, "--dir", dir_locktest, "--priority-src", prio_adm,
++                         "--cold-times-file", cold_ok, "--times-cache", times_f, "--no-templates",
++                         "--inputs-prog", mock_in_bin, "--drive-prog", mock_dr_bin, "--plan-only", 0};
++    r = run(st_locked, 0);
++    ck(r.rc == 2 && tk_has(r.out, "already-running") && sy_exists(pre_win) != 1,
++       "start-acquires-atomic-lock-before-writing-any-plan-file");
++    np_free(&r);
++
++    /* Negative control: with PRERUN_START_MUT_SKIP_LOCK=1 (atomic lock removed), start fails to block and writes windows.tsv */
++    setenv("PRERUN_START_MUT_SKIP_LOCK", "1", 1);
++    r = run(st_locked, 0);
++    unsetenv("PRERUN_START_MUT_SKIP_LOCK");
++    ck(r.rc == 0 && sy_exists(pre_win) == 1, "negative-control-removing-atomic-lock-writes-plan-when-locked");
++    np_free(&r);
++
++    /* Valid start (--plan-only first to verify W0000 selection and priority preservation) */
++    char *st_plan[] = {bin, "start", "--rev", head_rev, "--prev-rev", base_rev, "--version", "0.1.1", "--prev", "0.1.0",
++                       "--repo", fx, "--ape", ape1, "--dir", run_dir, "--priority-src", prio_adm,
++                       "--cold-times-file", cold_ok, "--times-cache", times_f, "--no-templates",
++                       "--inputs-prog", mock_in_bin, "--drive-prog", mock_dr_bin,
++                       "--lanes", "2", "--jobs", "4", "--plan-only", 0};
++    r = run(st_plan, 0);
++    ck(r.rc == 0 && tk_has(r.out, "PRERUN_START\tPLAN_READY") && tk_has(r.out, "warmup=light-b\twarmup_cold_max_ms=2600"),
++       "start-selects-light-b-for-w0000-excluding-priority");
++    np_free(&r);
++
++    char win_file[4700]; cx_fmt(win_file, sizeof win_file, "%s/windows.tsv", run_dir);
++    unsigned char *wb = 0; int64_t wn = 0;
++    ck(!sy_read_file(win_file, &wb, &wn, 65536) && wb &&
++       tk_has((const char *)wb, "W0000\t1\twarmup\t1\tlight-b\n") &&
++       tk_has((const char *)wb, "w0201-aff") && tk_has((const char *)wb, "new-heavy-prio") && tk_has((const char *)wb, "light-a"),
++       "windows-tsv-has-light-b-in-w0000-and-keeps-all-batches");
++    if (wb) mm_free(wb);
++
++    /* Re-running start on an already initialized dir is refused (must use resume) */
++    r = run(st_plan, 0);
++    ck(r.rc == 2 && tk_has(r.out, "already-started-use-resume"), "second-start-on-same-dir-refused");
++    np_free(&r);
++
++    /* Full start on fresh dir with mock-drive (verifies run receives --max-jobs 4 --keep-going, bound_s=5400, NOT --normal-jobs) */
++    char run_dir2[4600]; cx_fmt(run_dir2, sizeof run_dir2, "%s/prerun-run2", persist);
++    char *st_exec[] = {bin, "start", "--rev", head_rev, "--prev-rev", base_rev, "--version", "0.1.1", "--prev", "0.1.0",
++                       "--repo", fx, "--ape", ape1, "--dir", run_dir2, "--priority-src", prio_adm,
++                       "--cold-times-file", cold_ok, "--times-cache", times_f, "--no-templates",
++                       "--inputs-prog", mock_in_bin, "--drive-prog", mock_dr_bin,
++                       "--lanes", "2", "--jobs", "4", 0};
++    r = run(st_exec, 0);
++    ck(r.rc == 0 && tk_has(r.out, "MOCK_RUN\tlane=2\tmax_jobs=4\tkeep_going=1\tresume=0") &&
++       tk_has(r.out, "PRERUN_START\tRUN_DONE\trc=0") && tk_has(r.out, "bound_s=5400"),
++       "start-executes-run-with-max-jobs-keep-going-and-bound-5400");
++    np_free(&r);
++
++    /* Resume refuses wrong candidate, active lock, another repo without --allow-migrate, and changed tree without --allow-migrate */
++    char *res_bad_cand[] = {bin, "resume", "--dir", run_dir2, "--candidate", ape2, "--drive-prog", mock_dr_bin, 0};
++    r = run(res_bad_cand, 0);
++    ck(r.rc == 2 && tk_has(r.out, "candidate-mismatch"), "resume-rejects-wrong-candidate");
++    np_free(&r);
++
++    char *res_other_repo[] = {bin, "resume", "--dir", run_dir2, "--candidate", ape1, "--repo", fx2, "--drive-prog", mock_dr_bin, 0};
++    r = run(res_other_repo, 0);
++    ck(r.rc == 2 && tk_has(r.out, "repo-mismatch-pass-allow-migrate"), "resume-rejects-different-repo-without-allow-migrate");
++    np_free(&r);
++
++    /* Advance HEAD tree in fx2 and verify tree mismatch is rejected without --allow-migrate, then accepted with --allow-migrate */
++    sh("printf '5\\tlight-a\\tPASS\\t3900\\n' >> times.tsv && git add times.tsv && git -c user.name=t -c user.email=t@t commit -q -m drift", fx2);
++    char *res_mig_ok[] = {bin, "resume", "--dir", run_dir2, "--candidate", ape1, "--repo", fx2,
++                          "--allow-migrate", "authorized worktree handoff", "--drive-prog", mock_dr_bin, 0};
++    r = run(res_mig_ok, 0);
++    ck(r.rc == 0 && tk_has(r.out, "PRERUN_START\tRESUME_MIGRATED\t") &&
++       tk_has(r.out, "reason=authorized worktree handoff") &&
++       tk_has(r.out, "PRERUN_START\tRESUME_DONE\trc=0") && tk_has(r.out, "bound_s=5400"),
++       "resume-allows-explicit-migration-and-records-ledger");
++    np_free(&r);
++    {
++        char mig_p[4700]; unsigned char *mb = 0; int64_t mn = 0;
++        cx_fmt(mig_p, sizeof mig_p, "%s/migration-ledger.tsv", run_dir2);
++        ck(!sy_read_file(mig_p, &mb, &mn, 4096) && mb && tk_has((const char *)mb, "MIGRATION\tfrom_repo="),
++           "migration-ledger-written");
++        if (mb) mm_free(mb);
++    }
++
++    char lock_f[4700];
++    cx_fmt(lock_f, sizeof lock_f, "%s/run.lock", run_dir2);
++    cx_write(lock_f, pbuf, strlen(pbuf));
++    char *res_ok[] = {bin, "resume", "--dir", run_dir2, "--candidate", ape1, "--drive-prog", mock_dr_bin, 0};
++    r = run(res_ok, 0);
++    ck(r.rc == 2 && tk_has(r.out, "already-running"), "resume-rejects-concurrent-live-run");
++    np_free(&r);
++    sy_unlink(lock_f);
++
++    r = run(res_ok, 0);
++    ck(r.rc == 0 && tk_has(r.out, "MOCK_RUN\tlane=2\tmax_jobs=4\tkeep_going=1\tresume=1") &&
++       tk_has(r.out, "PRERUN_START\tRESUME_DONE\trc=0"),
++       "resume-passes-max-jobs-keep-going-and-preserves-evidence");
++    np_free(&r);
++
++    char rm[4700];
++    cx_fmt(rm, sizeof rm, "chmod -R u+w '%s' '%s' 2>/dev/null; rm -rf '%s' '%s'", persist, tmp, persist, tmp);
++    char *rmv[] = {"sh", "-c", rm, 0};
++    np_result rr = run(rmv, 0);
++    np_free(&rr);
++
++    printf("CHECK_PRERUN_START\tpass=%d fail=%d\n", g_pass, g_fail);
++    return g_fail ? 1 : 0;
++}
