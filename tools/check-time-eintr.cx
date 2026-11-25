@@ -1,0 +1,103 @@
+/* tools/check-time-eintr.cx -- sy_sleep_ms / sy_readable honor one deadline across EINTR,
+ * and ms==0 still polls once.
+ *
+ *   With UNISACC_TIME_INJECT_EINTR=1 and UNISACC_TIME_INJECT_PID = this pid,
+ *   every poll naps 5 ms (or the requested time when shorter) and returns
+ *   EINTR; an omitted or foreign PID leaves the seam off (default off, like S1e).
+ *
+ *   (1) zero-wait readiness, seam OFF: a ready pipe returns 1 from
+ *       sy_readable(fd, 0), an unready one returns 0 (a first poll(0) must happen);
+ *   (2) sy_sleep_ms(200): 0, wall 190..1000 ms, seam fired more than once;
+ *   (3) sy_readable(pipe, 200): 0 (timeout), wall 190..1000 ms.
+ *   Run under a wrapper timeout: without the deadline recompute (2)/(3) never
+ *   return.  Exit 0 all pass; 1 otherwise. */
+#pragma unisa use sys.time
+#pragma unisa use sys.posix
+#pragma unisa use sys.proc
+
+static long ck_fail;
+
+static void ck(int ok, const char *what) {
+    if (ok) printf("PASS\t%s\n", what);
+    else { printf("FAIL\t%s\n", what); ck_fail++; }
+}
+
+int main(void) {
+    long t0, t1, rc;
+    int fds[2];
+    char me[32];
+    /* (1) seam off: ms==0 must still poll once */
+    if (pipe(fds) != 0) { printf("FAIL\tpipe\n"); return 1; }
+    if (write(fds[1], "x", 1) != 1) { printf("FAIL\tpipe write\n"); return 1; }
+    rc = sy_readable(fds[0], 0);
+    ck(rc == 1, "readable(fd,0) returns 1 on a ready fd");
+    if (read(fds[0], me, 1) != 1) { printf("FAIL\tpipe drain\n"); return 1; }
+    rc = sy_readable(fds[0], 0);
+    ck(rc == 0, "readable(fd,0) returns 0 on an unready fd");
+    close(fds[0]); close(fds[1]);
+
+    if (setenv("UNISACC_TIME_INJECT_EINTR", "1", 1) != 0) { printf("FAIL\tsetenv\n"); return 1; }
+    cx_fmt(me, sizeof me, "%ld", (long)getpid());
+    if (setenv("UNISACC_TIME_INJECT_PID", me, 1) != 0) { printf("FAIL\tsetenv pid\n"); return 1; }
+
+    /* seam fired: an armed ready fd reports 0 at ms==0 (poll(0) was interrupted) */
+    if (pipe(fds) != 0) { printf("FAIL\tpipe-arm\n"); return 1; }
+    if (write(fds[1], "s", 1) != 1) { printf("FAIL\tpipe-arm write\n"); return 1; }
+    rc = sy_readable(fds[0], 0);
+    close(fds[0]); close(fds[1]);
+    ck(rc == 0, "armed seam interrupts the first poll (ready fd reports 0 at ms=0)");
+
+    t0 = sy_now_ms();
+    rc = sy_sleep_ms(200);
+    t1 = sy_now_ms();
+    ck(rc == 0, "sleep rc=0 under continuous EINTR");
+    ck(t1 - t0 >= 190 && t1 - t0 <= 1000, "sleep wall inside 190..1000 ms");
+
+    if (pipe(fds) != 0) { printf("FAIL\tpipe2\n"); return 1; }
+    t0 = sy_now_ms();
+    rc = sy_readable(fds[0], 200);   /* write end open: no data, no hang-up */
+    t1 = sy_now_ms();
+    close(fds[0]); close(fds[1]);
+    ck(rc == 0, "readable returns 0 (timeout) under continuous EINTR");
+    ck(t1 - t0 >= 190 && t1 - t0 <= 1000, "readable wall inside 190..1000 ms");
+
+    /* seam off again when PID is omitted: a ready fd must report 1 at ms==0 */
+    if (unsetenv("UNISACC_TIME_INJECT_PID") != 0) { printf("FAIL\tunset pid\n"); return 1; }
+    if (pipe(fds) != 0) { printf("FAIL\tpipe3\n"); return 1; }
+    if (write(fds[1], "y", 1) != 1) { printf("FAIL\tpipe3 write\n"); return 1; }
+    rc = sy_readable(fds[0], 0);
+    ck(rc == 1, "omitted PID disarms the seam (ready fd still 1)");
+    close(fds[0]); close(fds[1]);
+
+    /* foreign PID: the seam must not fire for another pid */
+    if (setenv("UNISACC_TIME_INJECT_PID", "1", 1) != 0) { printf("FAIL\tsetenv foreign\n"); return 1; }
+    if (pipe(fds) != 0) { printf("FAIL\tpipe4\n"); return 1; }
+    if (write(fds[1], "z", 1) != 1) { printf("FAIL\tpipe4 write\n"); return 1; }
+    rc = sy_readable(fds[0], 0);
+    ck(rc == 1, "foreign PID does not arm the seam (ready fd 1)");
+    close(fds[0]); close(fds[1]);
+
+    /* over-long decimal text (2^64 + pid) must not wrap into this pid */
+    {
+        char big[32];
+        long base = (long)strlen("18446744073709551616");
+        long i, carry = (long)getpid();
+        for (i = 0; i < base; i++) big[i] = "18446744073709551616"[i];
+        big[base] = 0;
+        for (i = base - 1; i >= 0 && carry > 0; i--) {
+            long v = (big[i] - '0') + (carry % 10);
+            carry /= 10;
+            if (v > 9) { v -= 10; carry++; }
+            big[i] = (char)('0' + v);
+        }
+        if (setenv("UNISACC_TIME_INJECT_PID", big, 1) != 0) { printf("FAIL\tsetenv big\n"); return 1; }
+    }
+    if (pipe(fds) != 0) { printf("FAIL\tpipe5\n"); return 1; }
+    if (write(fds[1], "w", 1) != 1) { printf("FAIL\tpipe5 write\n"); return 1; }
+    rc = sy_readable(fds[0], 0);
+    ck(rc == 1, "over-long PID text is rejected (ready fd 1)");
+    close(fds[0]); close(fds[1]);
+
+    printf("CHECK_TIME_EINTR\t%s\tfail=%ld\n", ck_fail ? "FAIL" : "PASS", ck_fail);
+    return ck_fail ? 1 : 0;
+}
