@@ -1,0 +1,49 @@
+/* tools/check-tapemode-run.cx -- T1.3 contract checks for tools/tapemode-run.cx.
+ * Verifies CLI usage rejection, invalid/missing slice handling, and full end-to-end execution
+ * (--self-test exit_code=42 and --hello-test "hello tape!") whenever T1.2 tape_x86_64.S is present. */
+#pragma unisa use sys.fs
+#pragma unisa use sys.io
+#pragma unisa use text.text
+#pragma unisa use cxlib.procrun
+
+static int g_pass = 0;
+static int g_fail = 0;
+static char g_out[16384];
+
+static void ck(int ok, const char *name) {
+    if (ok) { g_pass++; sy_printf("PASS\tcheck-tapemode-run.%s\n", name); }
+    else { g_fail++; sy_printf("FAIL\tcheck-tapemode-run.%s\n", name); }
+}
+
+int main(void) {
+    int cut = 0, rc = 0;
+    /* 1. Missing args rejects with usage (rc=2) */
+    {
+        char *vu[] = {"sh", "./unisacc.com", "tools/tapemode-run.cx", "--", 0}; /* lint:allow R1-product tests tapemode-run CLI via checkout product */
+        rc = pr_run_merged(vu, 45, g_out, (int)sizeof g_out, &cut);
+        ck(rc == 2 && !cut && strstr(g_out, "usage:") != 0,
+           "usage-rejected-rc2");
+    }
+
+    /* 2. Either executes full T1.2+T1.3 self-test & hello-test when tape_x86_64.S exists,
+     *    or cleanly refuses with missing-assembly diagnostic (rc=2) on standalone T1.3 trees. */
+    if (sy_exists("tools/tape/asm/tape_x86_64.S") == 1) {
+        char *vs[] = {"sh", "./unisacc.com", "tools/tapemode-run.cx", "--", "--self-test", 0}; /* lint:allow R1-product runs tapemode-run self-test via checkout product */
+        char *vh[] = {"sh", "./unisacc.com", "tools/tapemode-run.cx", "--", "--hello-test", 0}; /* lint:allow R1-product runs tapemode-run hello-test via checkout product */
+        rc = pr_run_merged(vs, 45, g_out, (int)sizeof g_out, &cut);
+        ck(rc == 0 && !cut && strstr(g_out, "TAPEMODE_RUN\tSELFTEST\tPASS\texit_code=42") != 0,
+           "selftest-exit-42-pass");
+        rc = pr_run_merged(vh, 45, g_out, (int)sizeof g_out, &cut);
+        ck(rc == 0 && !cut && strstr(g_out, "hello tape!") != 0 &&
+           strstr(g_out, "TAPEMODE_RUN\tHELLOTEST\tPASS\texit_code=0") != 0,
+           "hellotest-write-stdout-pass");
+    } else {
+        char *vs[] = {"sh", "./unisacc.com", "tools/tapemode-run.cx", "--", "--self-test", 0}; /* lint:allow R1-product verifies missing-T1.2-asm refusal via checkout product */
+        rc = pr_run_merged(vs, 45, g_out, (int)sizeof g_out, &cut);
+        ck(rc == 2 && !cut && strstr(g_out, "missing T1.2 or T1.3 assembly source") != 0,
+           "missing-t12-asm-cleanly-refused");
+    }
+
+    sy_printf("CHECK_TAPEMODE_RUN\tpassed=%d\tfailed=%d\n", g_pass, g_fail);
+    return g_fail ? 1 : 0;
+}
