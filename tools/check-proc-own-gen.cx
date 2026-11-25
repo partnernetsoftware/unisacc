@@ -1,0 +1,56 @@
+#pragma unisa use sys.proc
+#pragma unisa use sys.io
+#pragma unisa use cxlib.ckassert
+
+static int g_fail;
+static void ck_pg(int ok, const char *n) { ck(ok, n); if (!ok) g_fail++; }
+
+int main(void) {
+    sy_spawn_t sp;
+    sy_child_t c7, c9, c1, stale, c2;
+    sy_exit_t st;
+    const char *av_exit7[4];
+    const char *av_exit9[4];
+    const char *av_true[2];
+    const char *av_sleep[4];
+    int wi, live = 0, ab = 0, lost = 0;
+
+    av_exit7[0] = "/bin/sh"; av_exit7[1] = "-c"; av_exit7[2] = "exit 7"; av_exit7[3] = 0;
+    av_exit9[0] = "/bin/sh"; av_exit9[1] = "-c"; av_exit9[2] = "exit 9"; av_exit9[3] = 0;
+    av_true[0] = "/bin/true"; av_true[1] = 0;
+    av_sleep[0] = "/bin/sh"; av_sleep[1] = "-c"; av_sleep[2] = "sleep 30"; av_sleep[3] = 0;
+    memset(&sp, 0, sizeof sp);
+    sp.in_fd = SY_STDIO_NULL; sp.out_fd = SY_STDIO_NULL; sp.err_fd = SY_STDIO_NULL;
+
+    /* 1. Wrap-around probe: 65 subsequent exit-9 spawns must not overwrite old handle's exit 7 */
+    sp.argv = av_exit7;
+    ck_pg(sy_proc_spawn(&sp, &c7) == 0 && sy_proc_wait(&c7, &st) == 0 && st.exited == 1 && st.code == 7, "I3-spawn-exit7");
+    sp.argv = av_exit9;
+    for (wi = 0; wi < 65; wi++) {
+        if (sy_proc_spawn(&sp, &c9) == 0) sy_proc_wait(&c9, &st);
+    }
+    memset(&st, 0, sizeof st);
+    ck_pg(sy_proc_try_wait(&c7, &st) == 1 && st.exited == 1 && st.code == 7, "I3-reaped-cache-survives-65-reaps");
+
+    /* 2. Same-slot new-gen stale handle rejection */
+    sp.argv = av_true;
+    ck_pg(sy_proc_spawn(&sp, &c1) == 0, "I3-gen-spawn-c1");
+    stale = c1;
+    ck_pg(sy_proc_wait(&c1, &st) == 0, "I3-gen-reap-c1");
+    sp.argv = av_sleep;
+    ck_pg(sy_proc_spawn(&sp, &c2) == 0, "I3-gen-spawn-c2");
+    ck_pg(c2.own_slot == stale.own_slot && c2.own_gen != stale.own_gen, "I3-same-slot-new-gen");
+    stale.pid = c2.pid;
+    ck_pg(sy_proc_try_wait(&stale, &st) == -ESRCH, "I3-stale-gen-try-wait-esrch");
+    ck_pg(sy_proc_kill(&stale, SIGTERM) == -ESRCH, "I3-stale-gen-kill-esrch");
+    ck_pg(sy_proc_end(&stale, 10, &st) == -ESRCH, "I3-stale-gen-end-esrch");
+    stale.pid = c2.pid;
+    sy_proc_close(&stale);
+    sy_proc_own_stats(&live, &ab, &lost);
+    ck_pg(live == 1 && ab == 0, "I3-stale-close-untouched-c2");
+    sy_proc_end(&c2, 20, &st);
+    sy_proc_close(&c2);
+
+    printf("CHECK_PROC_OWN_GEN\tfailed=%d\n", g_fail);
+    return g_fail ? 1 : 0;
+}
