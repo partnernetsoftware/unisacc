@@ -341,8 +341,10 @@ tape_run_x86_64:
     je .Lrun_mov
     cmpl $7,%eax
     jbe .Lrun_bit_arith
+    cmpl $10,%eax
+    jbe .Lrun_shift
     cmpl $15,%eax
-    jb .Lrun_noncmp
+    jb .Lrun_opcode
     cmpl $20,%eax
     jbe .Lrun_compare
 .Lrun_noncmp:
@@ -520,6 +522,26 @@ tape_run_x86_64:
 .Lrun_arith_result:
     movq %r8,%rax
     jmp .Lrun_store
+.Lrun_shift:
+    movq 48(%rsp,%rdx,8),%r8
+    movzbl 5(%rsp),%edx
+    andl $15,%edx
+    movl %ecx,%r10d
+    movq 48(%rsp,%rdx,8),%rcx
+    cmpl $8,%eax
+    je .Lrun_shl
+    cmpl $9,%eax
+    je .Lrun_sar
+    shrq %cl,%r8
+    jmp .Lrun_shift_done
+.Lrun_shl:
+    shlq %cl,%r8
+    jmp .Lrun_shift_done
+.Lrun_sar:
+    sarq %cl,%r8
+.Lrun_shift_done:
+    movl %r10d,%ecx
+    jmp .Lrun_arith_result
 .Lrun_compare:
     movq 48(%rsp,%rdx,8),%r8
     movzbl 5(%rsp),%edx
