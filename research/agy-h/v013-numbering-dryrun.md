@@ -1,8 +1,8 @@
 # v0.1.3 编号预演与起链缺口清单
 
-- 维护者: `agy-h` | 日期: `2026-11-25` | 依据规程: [SKILL.md](file:///home/devali/repos/unisacc/skills/unisacc-orch-release-train/SKILL.md) 第 (2)、(8) 节
+- 维护者: `agy-h` | 日期: `2026-11-25` | 依据规程: [SKILL.md](file://~/repos/unisacc/skills/unisacc-orch-release-train/SKILL.md) 第 (2)、(8) 节
 - 预演对象: `git archive` 导出的 `v0.1.2` 树 (`.claude/worktrees/v0.1.2 HEAD 4e8aa13c6`) 解压至私有临时目录 `/tmp/agy_h_work/v013_dryrun`
-- 交付入口: [v013-numbering-dryrun.md](file:///home/devali/repos/unisacc/research/agy-h/v013-numbering-dryrun.md)
+- 交付入口: [v013-numbering-dryrun.md](file://~/repos/unisacc/research/agy-h/v013-numbering-dryrun.md)
 - 隔离声明: 所有编号模拟、`git` 历史构造、`derive` 写入与 `chain-ready` 干跑全部发生在 `/tmp/agy_h_work/v013_dryrun`, 未改共享 `main` 与 `.claude/worktrees/v0.1.2`, 不提交。
 
 ---
@@ -19,16 +19,16 @@
 
 ### 1.2 「编号提交一次做全」修改清单 (分两笔紧接提交)
 
-依据 `SKILL.md` 第 (2) 节与 [chain-ready.cx](file:///home/devali/repos/unisacc/tools/chain-ready.cx#L1521-L1642) 门 `23-freeze-armed` 要求 (`build/tlib-packages.tsv`、`build/layer-api`、`build/iface-hash.tsv` 不得晚于冻结行):
+依据 `SKILL.md` 第 (2) 节与 [chain-ready.cx](file://~/repos/unisacc/tools/chain-ready.cx#L1521-L1642) 门 `23-freeze-armed` 要求 (`build/tlib-packages.tsv`、`build/layer-api`、`build/iface-hash.tsv` 不得晚于冻结行):
 
 1. **第一笔 (`C0a` 编号 + 派生物同步提交, 在所有编号文件落齐后一次提交)**:
-   - [build/version-seq.tsv](file:///home/devali/repos/unisacc/.claude/worktrees/v0.1.2/build/version-seq.tsv): 确认前版第 67 槽 `0.1.2` 已标 `已公开` (由 `v0.1.2 release-post` 完成), 新增第 68 槽:
+   - [build/version-seq.tsv](file://~/repos/unisacc/.claude/worktrees/v0.1.2/build/version-seq.tsv): 确认前版第 67 槽 `0.1.2` 已标 `已公开` (由 `v0.1.2 release-post` 完成), 新增第 68 槽:
      `68	0.1.3	进程生命周期修复与 tape 切片车 M1(C3 进程生命周期修复重放 + tape M1 最小执行链路)	进行中	编排者 2026-11-25 立项 0.1.3;前置 0.1.2;计划 plans/v0.1.3.md`
-   - [release/candidate.tsv](file:///home/devali/repos/unisacc/.claude/worktrees/v0.1.2/release/candidate.tsv): 版本列从 `0.1.2` 改为 `0.1.3` (满足门 `11-version-slot` 等于 `--version 0.1.3` / 分支名 `v0.1.3`)。
-   - `plans/v0.1.3.md` (参考 [v013-numbering.md](file:///home/devali/.local/share/unisacc/research/agyneon/v013-numbering.md)): 首行 `# 0.1.3 计划:进程生命周期修复与 tape 切片车 M1` 与 `version-seq.tsv` class 子串一致 (`verseq-gen` R1/R2), 且必须含 `19-chain-preflight` 机械检查三字段 (`planned_units=8`, `a_class=进程生命周期修复与 tape 切片车 M1`, `a_files_cap=24`, `freeze_at=TBD`) 与正确回滚自指行 (`R5`)。
+   - [release/candidate.tsv](file://~/repos/unisacc/.claude/worktrees/v0.1.2/release/candidate.tsv): 版本列从 `0.1.2` 改为 `0.1.3` (满足门 `11-version-slot` 等于 `--version 0.1.3` / 分支名 `v0.1.3`)。
+   - `plans/v0.1.3.md` (参考 [v013-numbering.md](file://~/.local/share/unisacc/research/agyneon/v013-numbering.md)): 首行 `# 0.1.3 计划:进程生命周期修复与 tape 切片车 M1` 与 `version-seq.tsv` class 子串一致 (`verseq-gen` R1/R2), 且必须含 `19-chain-preflight` 机械检查三字段 (`planned_units=8`, `a_class=进程生命周期修复与 tape 切片车 M1`, `a_files_cap=24`, `freeze_at=TBD`) 与正确回滚自指行 (`R5`)。
    - **`build/table-index.tsv` (本次干跑新发现必同步项)**: 因改 `build/version-seq.tsv` 等 `build/*` 文件触发 `derive` 的 `table-index` (`tool-index.cx -- --check-tables`), 必须同步运行 `tools/derive.cx -- --write --only table-index` 消除 `v0.1.2` 遗留漂移并随 `C0a` 提交 (见第 (3) 节缺口 #1)。
 2. **第二笔 (`C0b` 冻结封口提交, 单独最后一笔, 以 `C0a` 40 位 SHA 为 `base_commit`)**:
-   - [build/freeze.tsv](file:///home/devali/repos/unisacc/.claude/worktrees/v0.1.2/build/freeze.tsv): 确认 `0.1.2-FREEZE` 行已注释解冻, 新增 `0.1.3-FREEZE <C0a_BASE_HEX40> cc <DEADLINE_EPOCH_S> src cx ext exec include seed kernel tests release`。
+   - [build/freeze.tsv](file://~/repos/unisacc/.claude/worktrees/v0.1.2/build/freeze.tsv): 确认 `0.1.2-FREEZE` 行已注释解冻, 新增 `0.1.3-FREEZE <C0a_BASE_HEX40> cc <DEADLINE_EPOCH_S> src cx ext exec include seed kernel tests release`。
 
 ### 1.3 需要同步的文件与派生物总表 (`C0` 编号期 vs `v0.1.3` `C3+M1` 合车起链前)
 
@@ -60,7 +60,7 @@
 | `11-version-slot` | `FAIL` | `11-version-slot	FAIL	rc=2 REFUSE CHAIN_READY_VERSION_SLOT slot-version-differs-from-target 0.1.2 0.1.3	8456` |
 | `18-parse2-gen` | `FAIL` | `18-parse2-gen	FAIL	READY=no parse2-gen-identity base=refs/tags/v0.1.1 fix: 修复指名事实并提交后重跑 sh ./unisacc.com tools/chain-ready.cx -- --only 18 --rev HEAD	22` |
 | `23-freeze-armed` | `FAIL` | `23-freeze-armed	FAIL	FREEZE_ORIGIN_MAIN_UNKNOWN git fetch origin failed	27` |
-| `8-inflight` | `FAIL` | `8-inflight	FAIL	1 chain process(es) running, first: 1890812 /home/devali/.cache/unisacc/unisacc-96fa989705997477 tools/candidate-chain.cx -o /home/devali/.cache/unisacc/pf-	51` |
+| `8-inflight` | `FAIL` | `8-inflight	FAIL	1 chain process(es) running, first: 1890812 ~/.cache/unisacc/unisacc-96fa989705997477 tools/candidate-chain.cx -o ~/.cache/unisacc/pf-	51` |
 | `19-chain-preflight` (默认全表) | `TIMEOUT` | 在 2 核下超过 60s 规则限退出; 单独拆测子项 `chain-to-snap` `cts_rc=124` (超过 45s 限) |
 | `15-gen-all` | `TIMEOUT` | `rc=124` (2 核 + 在途链负载下 50s 超时) |
 | `2b-ratchets` | `PASS` | `2b-ratchets	PASS	RATCHETS ok=19 fail=0 elapsed_ms=22789 (roster=19)	23257` |
@@ -74,12 +74,12 @@
 11-version-slot	PASS	VERSION_SLOT OK version=0.1.3 target=0.1.3 source=arg expect_self_report=unisacc 0.1.3	47
 12-root-files	PASS	unisacc.com and unisacc.com.build.json under . are regular files	59
 12p-preflight-entry	PASS	preflight entry record ./unisacc.com.build.json is a regular file	58
-13-snap-cache	PASS	no snapshot cache for rev f0d72ca927 at /home/devali/.cache/unisacc/chains/snap/f0d72ca927-a28e8815: the chain builds a fresh one	33
+13-snap-cache	PASS	no snapshot cache for rev f0d72ca927 at ~/.cache/unisacc/chains/snap/f0d72ca927-a28e8815: the chain builds a fresh one	33
 14-root-record	PASS	product_digest and bytes match the APE; WARN root-record-stale-fields version=0.0.105 has no release/candidate.tsv row: commit and sources_sha256 not verified	35
-16-disk-free	PASS	avail_gb=69 (>=20G); disk=/home/devali/.cache/unisacc/chains	0
+16-disk-free	PASS	avail_gb=69 (>=20G); disk=~/.cache/unisacc/chains	0
 17-root-public	PASS	Root is not a candidate install (no unisacc.com.candidate.tsv): release steps may use it as the baseline	0
 18-parse2-gen	PASS	base=389efc634ca33c89ab5604a4b256e7aefc3cc2a6 rev=f0d72ca9270e160266f06f781ebdd0eafbca7e91 parse2-inputs-unchanged	12
-20-ident-helper	PASS	UNISACC_IDENT_HELPER=/home/devali/.cache/unisacc/prep-cache/identity-helper-b9ed85e8f3890fa8.bin executable	0
+20-ident-helper	PASS	UNISACC_IDENT_HELPER=~/.cache/unisacc/prep-cache/identity-helper-b9ed85e8f3890fa8.bin executable	0
 21-verseq-gen	PASS	VERSEQ_SUMMARY checks=100 fail=0	58
 23-freeze-armed	PASS	armed: freeze.tsv sid=0.1.3-FREEZE owner=cc deadline=1795640000; HEAD behind origin/main=0; numbering files unchanged after the freeze	60
 3b-cx0-extract	PASS	CX0_EXTRACT EXACT bytes=118485 sha256=0a92fb19f87540cb6ae2af2776601eca89101f0da0a8fa8299a576d8fe0b7e73 output=src/cxmod.c authority=cx/cx0/p	73
@@ -138,7 +138,7 @@ GEN_LIST_SUMMARY	total=45	uncovered=2
 3. **重型前置门 (`15-gen-all`, `5-candidate-chain`, `22-premerge-union`, `19-chain-preflight` 全表) 在受限 2 核与冷缓存下全部超时 (`rc=124`)**:
    - 包括 `5-candidate-chain` (文档要求静默单跑两轮)、`19-chain-preflight` 里的 `chain-to-snap` (`cts_rc=124`) 与 `sixtarget` 四节点 (`44..55s`)、`22-premerge-union` (冷态两分片合计超 50s)。`v0.1.3` 正式起链前须在非限核静默窗口分步运行并完成全套 `--prepare-native` 预热, 且 `4-p1` (`--fast` 时 `SKIPPED`) 在起链前不得跳过, 须跑完不带 `--fast` 的完整 `chain-ready`。
 4. **默认 `UNISACC_IDENT_HELPER` 路径不存在 (`20-ident-helper`)**:
-   - 实查 `~/.cache/unisacc/ident-helper/identity-helper-real5` 缺失, 必须在 `env -i` 显式指向 `~/.cache/unisacc/prep-cache/identity-helper-b9ed85e8f3890fa8.bin` (或先用 `seed/ident.c` 重建后 `cmp` 验证), 与 [toolline-roadmap.md](file:///home/devali/repos/unisacc/research/agy-h/toolline-roadmap.md) `S3` 待修一致。
+   - 实查 `~/.cache/unisacc/ident-helper/identity-helper-real5` 缺失, 必须在 `env -i` 显式指向 `~/.cache/unisacc/prep-cache/identity-helper-b9ed85e8f3890fa8.bin` (或先用 `seed/ident.c` 重建后 `cmp` 验证), 与 [toolline-roadmap.md](file://~/repos/unisacc/research/agy-h/toolline-roadmap.md) `S3` 待修一致。
 5. **前版依赖与远程门前置尚未落地 (`11`, `18`, `23`, `8` 现时阻断)**:
    - `v0.1.2` 尚未 Y2 公开与解冻: 共享 `build/freeze.tsv` 仍含活跃 `0.1.2-FREEZE`, `version-seq.tsv` 缺第 68 槽 `0.1.3`, `release/candidate.tsv` 仍为 `0.1.2`, 仓库缺 `refs/tags/v0.1.2` (`18-parse2-gen` 需对应 `已公开` 标签) 与 `plans/v0.1.3.md` (`check_version_scope` 必填 `planned_units` / `a_class` / `a_files_cap`); 干跑基线时刻宿主机还存在真实在途链 (`8-inflight FAIL pid=1890812`)。
 6. **已装 Root 与候选记录表滞后告警 (`14-root-record`)**:

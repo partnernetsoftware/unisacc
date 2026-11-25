@@ -14,9 +14,9 @@
 
 | 顺序 | 补丁文件 | 涉及文件 | 串行原因 / 说明 |
 | --- | --- | --- | --- |
-| `1` | [0001-chain-ready-launch-env.patch](file:///home/devali/repos/unisacc/research/agy-h/toolline-series/0001-chain-ready-launch-env.patch) | `tools/chain-ready.cx`, `tools/check-chain-ready.cx` | 先落 `identity-helper` 回执自检、`--prepare`、`--launch-env`、拆分 `2a-derive7` (`table-index`) 与 `batch-packages-gen` 独占互斥 |
-| `2` | [0002-gate23-pik1.patch](file:///home/devali/repos/unisacc/research/agy-h/toolline-series/0002-gate23-pik1.patch) | `tools/chain-ready.cx`, `tools/check-chain-ready-freeze.cx` | 基于 `0001` 行号定位对齐后, 将门 `23-freeze-armed` 落后 `origin/main` 判据改为 `PIK1` (`cr_is_pik1_path` + `git diff HEAD...refs/remotes/origin/main`) |
-| `3` | [0003-freeze-cut.patch](file:///home/devali/repos/unisacc/research/agy-h/toolline-series/0003-freeze-cut.patch) | `tools/freeze-cut.cx`, `tools/check-freeze-cut.cx`, `tests/tools-compile-sources.tsv`, `tests/batches.tsv`, `tests/coverage.tsv` | 新增 `freeze-cut` 单命令事务化编号 (`C0a`) + 冻结 (`C0b`) + `--check` 与夹具及批次登记 (落地共享表 `batches.tsv` / `coverage.tsv` 时使用 `tools/commit-own.cx --keyed`) |
+| `1` | [0001-chain-ready-launch-env.patch](file://~/repos/unisacc/research/agy-h/toolline-series/0001-chain-ready-launch-env.patch) | `tools/chain-ready.cx`, `tools/check-chain-ready.cx` | 先落 `identity-helper` 回执自检、`--prepare`、`--launch-env`、拆分 `2a-derive7` (`table-index`) 与 `batch-packages-gen` 独占互斥 |
+| `2` | [0002-gate23-pik1.patch](file://~/repos/unisacc/research/agy-h/toolline-series/0002-gate23-pik1.patch) | `tools/chain-ready.cx`, `tools/check-chain-ready-freeze.cx` | 基于 `0001` 行号定位对齐后, 将门 `23-freeze-armed` 落后 `origin/main` 判据改为 `PIK1` (`cr_is_pik1_path` + `git diff HEAD...refs/remotes/origin/main`) |
+| `3` | [0003-freeze-cut.patch](file://~/repos/unisacc/research/agy-h/toolline-series/0003-freeze-cut.patch) | `tools/freeze-cut.cx`, `tools/check-freeze-cut.cx`, `tests/tools-compile-sources.tsv`, `tests/batches.tsv`, `tests/coverage.tsv` | 新增 `freeze-cut` 单命令事务化编号 (`C0a`) + 冻结 (`C0b`) + `--check` 与夹具及批次登记 (落地共享表 `batches.tsv` / `coverage.tsv` 时使用 `tools/commit-own.cx --keyed`) |
 
 ---
 
@@ -153,7 +153,7 @@ CHAIN_READY_FREEZE	passed=2	failed=0
 | 顺序 | 泳道号 | 任务 / 补丁 | 写域交集 | 落地前提与过门命令 |
 | --- | --- | --- | --- | --- |
 | `1` | `S1` | `agyneon`: `--rebase-rev NEWREV` | `tools/prerun-drive.cx`, `tools/check-prerun-rebase.cx`, `tests/{batches,coverage}.tsv` (`--keyed`) | 先落 `main`, 确立增量重跑入口、依赖闭包判定与 `10%` 抽样兜底; 过门: `check-prerun-rebase.cx` 与 `check-prerun-drive.cx` 全绿 |
-| `2` | `S5` | `agy-h`: 短批出 `long` 窗装箱 ([short-batch-packing.patch](file:///home/devali/repos/unisacc/research/agy-h/short-batch-packing.patch)) | `tools/prerun-drive.cx` (`plan` 排窗与 `pd_is_exclusive_heavy_id` 7 域白名单), `tools/check-prerun-drive.cx` (第 18 项 `short-batch-out-of-long`) | 严格排在 `S1` 合入 `main` 之后基于新 `main` rebase (预计 `0.5 - 1.0h`), 验证集守恒与独占批不并窗; 过门: `check-prerun-drive.cx` (`ok=95 failed=0`) + `check-prerun-rebase.cx` 全绿 |
+| `2` | `S5` | `agy-h`: 短批出 `long` 窗装箱 ([short-batch-packing.patch](file://~/repos/unisacc/research/agy-h/short-batch-packing.patch)) | `tools/prerun-drive.cx` (`plan` 排窗与 `pd_is_exclusive_heavy_id` 7 域白名单), `tools/check-prerun-drive.cx` (第 18 项 `short-batch-out-of-long`) | 严格排在 `S1` 合入 `main` 之后基于新 `main` rebase (预计 `0.5 - 1.0h`), 验证集守恒与独占批不并窗; 过门: `check-prerun-drive.cx` (`ok=95 failed=0`) + `check-prerun-rebase.cx` 全绿 |
 | `3` | `S6` | `agy-flow`: `lane-isolation` 127 行 (`--cpuset`) | `tools/prerun-drive.cx`, `tools/check-prerun-drive.cx` | 紧接 `S5` rebase 后合入 `tools/prerun-drive.cx` |
 | `4` | `S7` | `ompgpt`: `dvqualify --out` 唯一性护栏 + `prerun-drive` retry 不 `unlink` `W99xx` | `tools/dvqualify.cx`, `tools/check-dvqualify.cx`, `tools/prerun-drive.cx`, `tools/check-prerun-drive.cx` | 紧接 `S6` 合入 `tools/prerun-drive.cx` (`dvqualify.cx` 侧可与 `S1/S5` 并行先入) |
 

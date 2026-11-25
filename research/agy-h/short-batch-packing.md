@@ -1,10 +1,10 @@
 # fast-iteration 第二步: 短批出 long 窗装箱设计与补丁说明
 
 - 基准树: `v0.1.2` (`HEAD 4e8aa13c6`, 与共享 `main` 上的 `tools/prerun-drive.cx`、`tools/check-prerun-drive.cx` 字节一致)
-- 实测数据来源: `/home/devali/.cache/unisacc/prerun/v0.1.2-115e5720de/` (`rev 115e5720ded24809c6daadbc9aaa7c72afe08d90`, 只读统计, 未修改缓存)
+- 实测数据来源: `~/.cache/unisacc/prerun/v0.1.2-115e5720de/` (`rev 115e5720ded24809c6daadbc9aaa7c72afe08d90`, 只读统计, 未修改缓存)
 - 交付文件:
-  - 报告: [short-batch-packing.md](file:///home/devali/repos/unisacc/research/agy-h/short-batch-packing.md)
-  - 补丁: [short-batch-packing.patch](file:///home/devali/repos/unisacc/research/agy-h/short-batch-packing.patch)
+  - 报告: [short-batch-packing.md](file://~/repos/unisacc/research/agy-h/short-batch-packing.md)
+  - 补丁: [short-batch-packing.patch](file://~/repos/unisacc/research/agy-h/short-batch-packing.patch)
 - 状态范围: 所有测试、模拟与 `git apply --check` 均在私有临时目录 (`/tmp/agy_h_work/`) 以只读/副本方式验证, 未修改共享检出、未提交、未执行真实 `prerun`。
 
 ---
@@ -13,7 +13,7 @@
 
 ### 1.1 实跑窗口与日志构成
 
-从 `/home/devali/.cache/unisacc/prerun/v0.1.2-115e5720de/windows.tsv` 与 `supervise.log` 统计:
+从 `~/.cache/unisacc/prerun/v0.1.2-115e5720de/windows.tsv` 与 `supervise.log` 统计:
 
 | 统计口径 | 指标 | 数值 | 说明 |
 | --- | --- | --- | --- |
@@ -40,7 +40,7 @@
 
 ## (2) 7 域共享状态冲突审计与独占白名单 (`pd_is_exclusive_heavy_id`)
 
-依据 [lane-isolation-v2.md](file:///home/devali/repos/unisacc/research/agy-flow/lane-isolation-v2.md) 第 68-95 行的 7 类共享状态冲突域 (`d1` 共享仓 git/worktree, `d2` `$HOME/.cache` 等用户态固定状态, `d3` 运行缓存目录, `d4` 共享构建物, `d5` 公共进程/锁/端口, `d6` 固定 `/tmp` 路径, `d7` 本机工作区/外围真值), 核查主要家族源码后得出隔离边界:
+依据 [lane-isolation-v2.md](file://~/repos/unisacc/research/agy-flow/lane-isolation-v2.md) 第 68-95 行的 7 类共享状态冲突域 (`d1` 共享仓 git/worktree, `d2` `$HOME/.cache` 等用户态固定状态, `d3` 运行缓存目录, `d4` 共享构建物, `d5` 公共进程/锁/端口, `d6` 固定 `/tmp` 路径, `d7` 本机工作区/外围真值), 核查主要家族源码后得出隔离边界:
 
 | 冲突域 / 分类 | 典型批前缀或精确 ID | 实读源码依据 | 处置方式 |
 | --- | --- | --- | --- |
@@ -56,7 +56,7 @@
 
 ## (3) 补丁设计与关键改动 (`tools/prerun-drive.cx`)
 
-补丁 [short-batch-packing.patch](file:///home/devali/repos/unisacc/research/agy-h/short-batch-packing.patch) 共 297 行 (`tools/prerun-drive.cx` +100/-14, `tools/check-prerun-drive.cx` +126):
+补丁 [short-batch-packing.patch](file://~/repos/unisacc/research/agy-h/short-batch-packing.patch) 共 297 行 (`tools/prerun-drive.cx` +100/-14, `tools/check-prerun-drive.cx` +126):
 
 1. **有界尾窗定时 (`PD_TIMES_WINDOW 5`)**:
    - `PdBatch` 增加 `recent_ms[PD_TIMES_WINDOW]` 与 `recent_cnt`。
@@ -69,7 +69,7 @@
 
 ## (4) 前后计划对比与墙钟节省估算
 
-使用完全相同的输入 (`/home/devali/.cache/unisacc/prerun/v0.1.2-115e5720de/ids.txt` 共 527 批与 `times.tsv`) 及参数 (`--normal-jobs 8 --window-lanes 2 --warmup 1`), 对原版与打补丁版做同基准计划生成对比:
+使用完全相同的输入 (`~/.cache/unisacc/prerun/v0.1.2-115e5720de/ids.txt` 共 527 批与 `times.tsv`) 及参数 (`--normal-jobs 8 --window-lanes 2 --warmup 1`), 对原版与打补丁版做同基准计划生成对比:
 
 | 指标 | 原实跑缓存 (`v0.1.2` `windows.tsv`) | 同基准原版 (`cmp_old`) | 同基准补丁版 (`cmp_new`) | 变化 (`cmp_old -> cmp_new`) |
 | --- | --- | --- | --- | --- |
@@ -105,7 +105,7 @@
 
 ## (5) 先红后绿验收夹具设计与实测结果
 
-在 `tools/check-prerun-drive.cx` 新增第 `(18)` 项断言 `short-batch-out-of-long` (已包含于 [short-batch-packing.patch](file:///home/devali/repos/unisacc/research/agy-h/short-batch-packing.patch) 中):
+在 `tools/check-prerun-drive.cx` 新增第 `(18)` 项断言 `short-batch-out-of-long` (已包含于 [short-batch-packing.patch](file://~/repos/unisacc/research/agy-h/short-batch-packing.patch) 中):
 
 1. **夹具构造**:
    - 构造 17 个批输入 `ids.txt`: 1 个极短批 (`w-light` 进 `W0000` warmup), 8 个安全短批 (`daily-compile-smoke-01,02`, `tools-compile-002,004`, `optimization-corpus-9-o0-o1`, `properties-cases-tu`, `ucn-identities`, `releaseseq`, 每项先放 1 条 `23.8s - 47.7s` 历史高值再放 5 条 `<=22s` 近期 `PASS`), 6 个 `<=22s` 的 7 域/定时独占批 (`devsvc-git-c-operations`, `check-register-layout-gate`, `check-gen-all-ready`, `layer-api-real-b`, `slow-split`, `unit-frontcache-equiv0`), 以及 2 个 `>22s` 慢批 (`notcovered`, `check-unitlink`)。
@@ -125,8 +125,8 @@
      `CHECK_PRERUN_DRIVE_SRC=/tmp/agy_h_work/v012_test/prerun-drive.cx sh ./unisacc.com /tmp/agy_h_work/v012_test/check-prerun-drive.cx --`
      -> `PASS short-batch-out-of-long` 及全部既有测试全部通过 (`CHECK_PRERUN_DRIVE ok=95 failed=0 ms=28319`)。
    - **只读补丁校验**:
-     `git -C .claude/worktrees/v0.1.2 apply --check /home/devali/repos/unisacc/research/agy-h/short-batch-packing.patch` -> exit `0` (`V012_APPLY_OK`)。
-     `git apply --check /home/devali/repos/unisacc/research/agy-h/short-batch-packing.patch` -> exit `0` (`MAIN_APPLY_OK`)。
+     `git -C .claude/worktrees/v0.1.2 apply --check ~/repos/unisacc/research/agy-h/short-batch-packing.patch` -> exit `0` (`V012_APPLY_OK`)。
+     `git apply --check ~/repos/unisacc/research/agy-h/short-batch-packing.patch` -> exit `0` (`MAIN_APPLY_OK`)。
 
 ---
 
@@ -134,7 +134,7 @@
 
 ### 6.1 回放输入与 v0.1.2 实跑基准 (`251 窗 / 约 76 分钟` 口径还原)
 
-- 数据来源: [v012-batch-ms-dist.tsv](file:///home/devali/repos/unisacc/research/ccogweco/v012-batch-ms-dist.tsv) (`529` 数据行 = `527` 个唯一批 + `2` 条 `W99xx` 补跑行 `W9919 check-daily-compile-smoke 3661ms`、`W9987 slow-split 52588ms`, 批内实测总和 `7,451,622 ms`) 与 [v012-long-short-batches.tsv](file:///home/devali/repos/unisacc/research/ccogweco/v012-long-short-batches.tsv) (`91` 个在 v0.1.2 驻留 `long` 却实测 `< 22s` 的短批)。
+- 数据来源: [v012-batch-ms-dist.tsv](file://~/repos/unisacc/research/ccogweco/v012-batch-ms-dist.tsv) (`529` 数据行 = `527` 个唯一批 + `2` 条 `W99xx` 补跑行 `W9919 check-daily-compile-smoke 3661ms`、`W9987 slow-split 52588ms`, 批内实测总和 `7,451,622 ms`) 与 [v012-long-short-batches.tsv](file://~/repos/unisacc/research/ccogweco/v012-long-short-batches.tsv) (`91` 个在 v0.1.2 驻留 `long` 却实测 `< 22s` 的短批)。
 - 原 `v0.1.2` `251` 窗口构成: `windows.tsv` 主计划 `247` 窗 + `W0242` 超时触发 `serial-recovery` 裂出的 `2` 个子窗 (`W0242.z09`, `W0242.z10`) + `2` 次人工补跑窗 (`W9919`, `W9987`) = `251` 窗; 主驱动终次尝试 `supervise.log` 实测 `60.94 min` (`3,656,178 ms`), 叠加热身备料 `55s`、`8` 次重试 `222.7s`、`W0242` 恢复及 `W0219`/`W99xx` 红停处置合计约 `76 分钟` (参见 `PIPELINE.md:18`)。
 - 对 `91` 个 `< 22s` `long` 短批回放统计:
   - 真实并入 `normal` (`jobs=8`): **`67` 个** (另加近 5 轮 <=22s 而当轮 >22s 的 `objects-unsupported-win-arm64` `33,938ms` 与 `properties-cases-layout-len12-part6` `32,530ms`, 共 `69` 批出 `long`)。
