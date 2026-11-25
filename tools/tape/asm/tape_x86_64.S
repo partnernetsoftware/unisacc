@@ -752,6 +752,16 @@ tape_run_x86_64:
     movq 48(%rsp,%rax,8),%r9
     shrl $4,%r10d
     movq 48(%rsp,%r10,8),%rax
+    cmpq $3,%rdi
+    jne .Lrun_sys_call
+    /* Linux tape uses MAP_SHARED/PRIVATE and MAP_ANONYMOUS. Do not
+       accept fixed mappings or flags outside this tape dialect subset. */
+    testq $-36,%r8
+    jnz .Lrun_sys_einval
+    movl %r8d,%r10d
+    andl $3,%r8d
+    shrl $3,%r10d
+    orl %r10d,%r8d
     jmp .Lrun_sys_call
 .Lrun_sys_short:
     xorl %eax,%eax
@@ -760,8 +770,12 @@ tape_run_x86_64:
     movq %rax,(%rsp)
     call *%r11
     addq $16,%rsp
+.Lrun_sys_result:
     movq %rax,48(%rsp)
     jmp .Lrun_next
+.Lrun_sys_einval:
+    movq $-22,%rax
+    jmp .Lrun_sys_result
 .Lrun_memory:
     movl $2,%edx
     jmp .Lrun_fault
