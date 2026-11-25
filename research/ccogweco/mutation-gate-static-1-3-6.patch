@@ -1,0 +1,378 @@
+diff --git a/tools/check-mutation-gate-timeout.cx b/tools/check-mutation-gate-timeout.cx
+new file mode 100644
+index 0000000000..37b91d85b0
+--- /dev/null
++++ b/tools/check-mutation-gate-timeout.cx
+@@ -0,0 +1,115 @@
++/* tools/check-mutation-gate-timeout.cx -- a timed-out mutant must not leave processes behind.
++ *
++ *   sh ./unisacc.com tools/check-mutation-gate-timeout.cx --
++ *
++ * Builds a private git repo whose check hangs on every mutated tree (the unmutated tree is green,
++ * so prep accepts it), runs tools/mutation-gate.cx -- run with --deadline-s 30 and one mutant, and
++ * asserts, after the gate returned:
++ *   (1) no process still carries the check's marker (MG126MARK);
++ *   (2) no member of the worker's process group survives (kill -0 -PGID fails);
++ *   (3) the gate finished inside deadline + 10 s.
++ * Before the fix the deadline path only sent TERM and did not verify: the hung check and its sleeps
++ * survived, so (1) and (2) were red.  The killing path is mg_stop_group in tools/mutation-gate.cx.
++ * Last line CHECK_MG_TIMEOUT<TAB>failed=N; rc 1 when N > 0. */
++#pragma unisa use sys.fs
++#pragma unisa use sys.io
++#pragma unisa use sys.env
++#pragma unisa use sys.time
++#pragma unisa use sys.proc
++#pragma unisa use text.fmt
++#pragma unisa use text.text
++#pragma unisa use mem.heap
++
++static int checks, failed;
++static char root[4096], work[4400];
++static char gout[8192];
++static void die(const char *s) { fprintf(stderr, "check-mg-timeout: %s\n", s); exit(2); }
++static void ck(int yes, const char *name) { checks++; if (!yes) failed++; printf("%s\tmg-timeout.%s\n", yes ? "PASS" : "FAIL", name); }
++static int sh(const char *cmd, char *out, int cap, int secs) {
++    char *o = 0; size_t n = 0; int rc;
++    { char *av[] = {"sh", "-c", (char *)cmd, 0}; rc = cx_runv_timeout(av, secs, &o, &n); }
++    if (out && cap > 0) { size_t m = o ? n : 0; if (m > (size_t)cap - 1) m = (size_t)cap - 1; if (m) memcpy(out, o, m); out[m ? m : 0] = 0; }
++    if (o) mm_free(o);
++    return rc;
++}
++
++int main(int argc, char **argv) {
++    char wp[4400], repo[4400], src[4400], prid[4400], patch[4400], outd[4400], cmd[12000], o[8192], pg[64], chk[1600];
++    long t0, ms;
++    (void)argc; (void)argv;
++    if (sy_cwd(root, sizeof root) < 0) die("cwd");
++    if (cx_fmt(work, sizeof work, "%s/mg-timeout-%d", sy_tmpdir(), (int)sy_pid())) die("work");
++    if (sy_mkdir(work, 0700)) die("work mkdir");
++    if (cx_fmt(repo, sizeof repo, "%s/repo", work)) die("repo");
++    if (sy_mkdir(repo, 0700)) die("repo mkdir");
++    if (cx_fmt(src, sizeof src, "%s/src.cx", repo)) die("src");
++    { FILE *f = fopen(src, "wb"); if (!f) die("src write");
++      fputs("int f(int x) {\n    if (x > 1) return 2;\n    return 0;\n}\n", f); fclose(f); }
++    { char ic[5200]; if (cx_fmt(ic, sizeof ic, "git -C %s init -q && git -C %s add -A && git -C %s -c user.name=mg -c user.email=mg@example.invalid commit -qm base", repo, repo, repo)) die("init cmd"); if (sh(ic, 0, 0, 20)) die("git init"); }
++    /* the patch adds a function; its added lines give the gate its mutants */
++    { FILE *f = fopen(src, "ab"); if (!f) die("src append");
++      fputs("\nint g(int y) {\n    if (y > 3) return 4;\n    return 0;\n}\n", f); fclose(f); }
++    if (cx_fmt(patch, sizeof patch, "%s/add.patch", work)) die("patch");
++    if (cx_fmt(cmd, sizeof cmd, "git -C %s diff -- src.cx > %s && git -C %s checkout -q -- src.cx", repo, patch, repo)) die("cmd");
++    if (sh(cmd, o, sizeof o, 20)) die("patch make");
++    /* pristine = the patched file the slot holds; a mutant makes src.cx differ from it */
++    if (cx_fmt(prid, sizeof prid, "%s/pristine.cx", work)) die("prid");
++    if (cx_fmt(cmd, sizeof cmd, "git -C %s apply %s && cp %s %s && git -C %s checkout -q -- src.cx && git -C %s apply %s", repo, patch, src, prid, repo, repo, patch)) die("cmd3");
++    if (sh(cmd, o, sizeof o, 20)) die("pristine");
++    if (cx_fmt(outd, sizeof outd, "%s/out", work)) die("outd");
++    /* the check: green on the unmutated slot, hangs forever on any mutation, and carries a marker */
++    { char hp[4400]; FILE *hf;
++      if (cx_fmt(hp, sizeof hp, "%s/hang.sh", work)) die("hang path");
++      hf = fopen(hp, "wb"); if (!hf) die("hang write");
++      fputs("#!/bin/sh\ntrap '' TERM\nexec sleep 3600\n", hf); fclose(hf);
++      if (cx_fmt(chk, sizeof chk, "if cmp -s src.cx %s; then exit 0; fi; echo MG126MARK; sh %s & sh %s; wait", prid, hp, hp)) die("chk"); }
++    if (cx_fmt(cmd, sizeof cmd, "cd %s && exec sh ./unisacc.com tools/mutation-gate.cx -- run --patch %s --base HEAD --repo %s --check '%s' --out %s --max 1 --par 1 --deadline-s 30 2>&1",
++               root, patch, repo, chk, outd)) die("gate cmd");
++    /* warm the gate's own compile cache: the timed section must measure the gate, not a cold build
++       (a separate buffer: the gate command above must survive) */
++    { char wc[1200]; if (cx_fmt(wc, sizeof wc, "sh ./unisacc.com tools/mutation-gate.cx -- 2>/dev/null")) die("warm cmd");
++      sh(wc, 0, 0, 55); }   /* -run compile cache, same lane as the gate call */
++    t0 = sy_now_ms();
++    sh(cmd, o, sizeof o, 55);
++    ms = sy_now_ms() - t0;
++    memcpy(gout, o, sizeof gout);   /* later sh() calls reuse o; the gate's lines stay in gout */
++    printf("MG_TIMEOUT gate_ms=%ld\n", ms); printf("MG_CHK\t%s\n", chk);
++    printf("MG_OUT\t%.400s\n", o);
++    { char *q = o; while (q && *q) { char *e = strchr(q, '\n'); long l = e ? (long)(e - q) : (long)strlen(q);
++        if ((l >= 3 && !memcmp(q, "MG_", 3)) || (l >= 9 && !memcmp(q, "MUTATION_", 9))) { printf("MG_LINE\t%.*s\n", (int)l, q); }
++        q = e ? e + 1 : q + l; } }
++    if (cx_fmt(cmd, sizeof cmd, "printf 'MG_CUR '; cat %s/cur-0.pid 2>/dev/null; printf 'MG_PS\\n'; ps -eo pid,pgid,args 2>/dev/null | grep -F hang.sh | grep -v grep", outd)) die("ps cmd0");
++    sh(cmd, o, sizeof o, 10);
++    { char *q = o; while (q && *q) { char *e = strchr(q, '\n'); long l = e ? (long)(e - q) : (long)strlen(q); if (l > 0) printf("%.*s\n", (int)l, q); q = e ? e + 1 : 0; } }
++    if (cx_fmt(cmd, sizeof cmd, "ps -eo args= 2>/dev/null | grep -F MG126MARK | grep -v grep | wc -l")) die("ps cmd");
++    sh(cmd, o, sizeof o, 10);
++    ck(atoi(o) == 0, "no-marker-process-left");
++    /* the worker pid file records the group; a still-living member refuses the clean answer */
++    ck(ms < 40000, "gate-finished-within-deadline-plus-10");
++    { /* the gate must really have run: its own completion line, with a run time past half the deadline
++         (an empty run that never reached the worker would pass the timing check above by accident) */
++      char *q = strstr(gout, "MG_RUN ms=");
++      long run_ms = q ? atol(q + 10) : -1;
++      ck(run_ms >= 15000, "gate-really-ran");
++      printf("MG_GATE_RUN_MS\t%ld\n", run_ms);
++    }
++    if (cx_fmt(cmd, sizeof cmd, "cat %s/worker-0.pid 2>/dev/null", outd)) die("pid cmd");
++    pg[0] = 0; sh(cmd, pg, sizeof pg, 5);
++    { int pid = atoi(pg); char sc[200];
++      if (cx_fmt(sc, sizeof sc, "kill -0 -- -%d 2>/dev/null", pid)) die("sc");
++      if (pid > 0 && sh(sc, 0, 0, 5) != 0) { char rm[300]; cx_fmt(rm, sizeof rm, "kill -KILL -- -%d 2>/dev/null; kill -KILL %d 2>/dev/null; true", pid, pid); sh(rm, 0, 0, 5); }
++      ck(pid > 0 && sh(sc, 0, 0, 5) != 0, "worker-group-gone"); }
++    /* the check child is its own group (sy_spawn); with a TERM-immune hang, only the TERM+wait+KILL+
++       verify path removes it.  Its pid file is left by mg_run_check and the group is checked here
++       without any fixture-side kill. */
++    if (cx_fmt(cmd, sizeof cmd, "cat %s/cur-0.pid 2>/dev/null", outd)) die("cur cmd");
++    pg[0] = 0; sh(cmd, pg, sizeof pg, 5);
++    { int cpid = atoi(pg); char sc[200];
++      if (cx_fmt(sc, sizeof sc, "kill -0 -- -%d 2>/dev/null", cpid)) die("sc2");
++      ck(cpid > 0 && sh(sc, 0, 0, 5) != 0, "check-group-gone"); }
++    /* cleanup of the fixture's own tree; the gate's slots are kept only on a refused run */
++    if (cx_fmt(cmd, sizeof cmd, "rm -rf %s", work)) die("rm");
++    sh(cmd, 0, 0, 10);
++    printf("CHECK_MG_TIMEOUT\tfailed=%d\n", failed);
++    return failed ? 1 : 0;
++}
+diff --git a/tools/mutation-gate.cx b/tools/mutation-gate.cx
+index 65101c1d46..41050e03c2 100644
+--- a/tools/mutation-gate.cx
++++ b/tools/mutation-gate.cx
+@@ -32,10 +32,12 @@
+  * `cov` mutant per touched function: `*(volatile int *)0 = 0;` right after its opening brace; a surviving cov
+  * mutant means the checks never execute that function (typical cause: the check tests its own copy).
+  * worker: per mutant the line is replaced in the slot tree, the file must still compile
+- * (`sh ./unisacc.com -c -funit FILE -o TMP`; compile failures are discarded and counted), then every check
+- * runs in the slot (cwd = slot, ckk_sh_t, at most 55 s each, inside `setsid` so the process group is killed
+- * on return); a mutant is killed when some check has rc != 0 or prints failed=N with N > 0.  The original
+- * file is restored before the next mutant.
++ * runs in the slot through mg_run_check (cwd = slot, at most 55 s each): sy_spawn puts that child in its own
++ * process group and its pid is recorded in OUT/cur-slot.pid, so the run stops it by that group (TERM, wait,
++ * KILL, wait, verify: mg_stop_group) even when the worker itself was killed by the deadline; a member that
++ * answers kill -0 after the KILL makes MG_RESIDUE and refuses the run (never reported as a killed mutant).
++ * a mutant is killed when some check has rc != 0 or prints failed=N with N > 0.  The original file is
++ * restored before the next mutant.
+  * report: DIR/survivors.tsv (id file line kind mutated-line), DIR/SUMMARY and the line
+  *   MUTATION_GATE mutants=N killed=K survived=S compile_fail=C missing=X score=K/N(=F) adjudicated=A
+  *                 score_adj=K/(N-A)(=G) min=M verdict=PASS|FAIL
+@@ -68,6 +70,8 @@
+ #pragma unisa use sys.fs
+ #pragma unisa use sys.time
+ #pragma unisa use sysx.process
++#pragma unisa use sysx.poll
++#pragma unisa use sys.io
+ #pragma unisa use mem.heap
+ #pragma unisa use mem.bytes
+ #pragma unisa use text.text
+@@ -91,6 +95,55 @@ static const char *g_allow_unc, *g_adjud;
+ static void die2(const char *a, const char *b) { fprintf(stderr, "mutation-gate: REFUSE %s %s\n", a, b ? b : ""); exit(2); }
+ 
+ static int sh(const char *script, char *out, int cap, int secs) { return ckk_sh_t("mutation-gate", script, out, cap, secs); }
++static long mg_proc_start(int pid);
++static int mg_pid_write(const char *path, int pid);
++static int mg_pid_read(const char *path, int *pid, long *start);
++static int mg_same_proc(int pid, long start);
++/* Run SCRIPT with a bound like sh(), but leave the child where the run's cleanup can reach it: its pid
++   (a sy_spawn child is its own process group leader) is written to PIDFILE before the first read and
++   removed after the child is gone, so run_all kills that group too when the worker's own deadline
++   killed the worker first.  On the bound the whole child tree is killed (sy_kill_tree records what
++   survives) and 124 is returned, the same code a timeout carries elsewhere. */
++static int mg_run_check(const char *script, char *out, int cap, int secs, const char *pidfile) {
++    char *av[] = {"sh", "-c", (char *)script, 0};
++    int ofd = -1, pid, ex = 0, code = 0, sig = 0, pr, timedout = 0, rc;
++    long total = 0, deadline;
++    char *b;
++    if (out && cap > 0) out[0] = 0;
++    if (secs < 1 || secs > 60) return -EINVAL;
++    pid = sy_spawn_pipe(av, 0, 0, &ofd, 0);
++    if (pid < 0) return -1;
++    if (pidfile && pidfile[0]) (void)mg_pid_write(pidfile, pid);
++    b = (char *)mm_alloc(cap > 0 ? (long)cap : 1);
++    if (!b) { sy_close(ofd); sy_kill_tree(pid, 5000, 0, 0, 0, 0); sy_wait_status(pid, 0, &ex, &code, &sig); if (pidfile) sy_unlink(pidfile); return -1; }
++    deadline = sy_now_ms() + (long)secs * 1000;
++    for (;;) {
++        sy_pollfd_t pf; long left = deadline - sy_now_ms(); long r;
++        if (left <= 0) { timedout = 1; break; }
++        pf.fd = ofd; pf.events = SY_POLLIN; pf.revents = 0;
++        pr = sy_poll(&pf, 1, left > 1000 ? 1000 : (int)left);
++        if (pr == 0) continue;
++        if (pr < 0) break;
++        r = sy_read(ofd, b + total, (long)cap - 1 - total);
++        if (r <= 0) break;
++        total += r;
++        if (total >= (long)cap - 1) break;
++    }
++    if (timedout) {
++        int keep[1] = {0}; char rep[160];
++        sy_kill_tree(pid, 5000, keep, 0, rep, sizeof rep);
++        total += 0;
++    }
++    sy_close(ofd);
++    sy_wait_status(pid, 0, &ex, &code, &sig);
++    b[total] = 0;
++    if (out && cap > 0) { long m = total < (long)cap ? total : (long)cap - 1; if (m > 0) memcpy(out, b, (size_t)m); out[m > 0 ? m : 0] = 0; }
++    mm_free(b);
++    if (pidfile && pidfile[0]) sy_unlink(pidfile);
++    if (timedout) return 124;
++    rc = ex ? code : (sig ? 128 + sig : -1);
++    return rc;
++}
+ 
+ /* single-quote S for sh into D */
+ static void shq(char *d, int cap, const char *s) {
+@@ -614,7 +667,7 @@ static void prep(void) {
+     /* baseline: every check must be green on the unmutated patched tree */
+     for (i = 0; i < g_nchk; i++) {
+         char sc[8192]; int failed;
+-        { char qc[4096]; shq(qc, sizeof qc, g_chk[i]); cx_fmt(sc, sizeof sc, "cd %s/slot-0 && exec setsid -w sh -c %s 2>&1", q3, qc); }
++        { char qc[4096]; shq(qc, sizeof qc, g_chk[i]); cx_fmt(sc, sizeof sc, "cd %s/slot-0 && exec sh -c %s 2>&1", q3, qc); }
+         rc = sh(sc, out, sizeof out, 55);
+         { const char *fp = strstr(out, "failed="); failed = fp ? atoi(fp + 7) : 0; }
+         printf("MG_BASELINE check=%d rc=%d failed=%d\n", i, rc, failed);
+@@ -628,7 +681,7 @@ static void prep(void) {
+         orig = slurp(fp, &on); if (!orig) die2("read", fp);
+         { char *nb = mm_alloc((long)on + 64); cp(nb, (long)on + 64, orig, (long)on); cp(nb + on, 64, "\n@@ mutation-gate broken @@\n", 28); spit(fp, nb, on + 28); mm_free(nb); }
+         shq(qf, sizeof qf, g_files[g_c[0].file]);
+-        cx_fmt(sc, sizeof sc, "cd %s/slot-0 && exec setsid -w sh ./unisacc.com -c -funit %s -o .mg-selftest.o >/dev/null 2>&1", q3, qf);
++        cx_fmt(sc, sizeof sc, "cd %s/slot-0 && exec sh ./unisacc.com -c -funit %s -o .mg-selftest.o >/dev/null 2>&1", q3, qf);
+         rc = sh(sc, out, sizeof out, 55);
+         spit(fp, orig, on); mm_free(orig);
+         { char tp[1024]; cx_fmt(tp, sizeof tp, "%s/slot-0/.mg-selftest.o", g_out); sy_unlink(tp); }
+@@ -717,15 +770,17 @@ static void worker(void) {
+         /* compile gate */
+         { char qf[2048]; shq(qf, sizeof qf, file);
+           char ql[2048], lp[1024]; cx_fmt(lp, sizeof lp, "%s/m/%d.compile.log", g_out, id); shq(ql, sizeof ql, lp);
+-          cx_fmt(cmd, sizeof cmd, "cd %s && exec setsid -w sh ./unisacc.com -c -funit %s -o .mg-compile-%d.o >%s 2>&1", q3, qf, id, ql); }
+-        rc = sh(cmd, out, sizeof out, 55);
++          cx_fmt(cmd, sizeof cmd, "cd %s && exec sh ./unisacc.com -c -funit %s -o .mg-compile-%d.o >%s 2>&1", q3, qf, id, ql); }
++        { char pfile[1024]; cx_fmt(pfile, sizeof pfile, "%s/cur-%d.pid", g_out, g_slot);
++          rc = mg_run_check(cmd, out, sizeof out, 55, pfile); }
+         { char tmpo[1024]; cx_fmt(tmpo, sizeof tmpo, "%s/.mg-compile-%d.o", sd, id); sy_unlink(tmpo); }
+         if (rc != 0) { verdict = 2; quality = Q_UNKNOWN; quality_rc = rc; }
+         else {
+             for (i = 0; i < g_nchk; i++) {
+                 char qc[4096]; shq(qc, sizeof qc, g_chk[i]);
+-                cx_fmt(cmd, sizeof cmd, "cd %s && exec setsid -w sh -c %s 2>&1", q3, qc);
+-                out[0] = 0; rc = sh(cmd, out, sizeof out, 55);
++                cx_fmt(cmd, sizeof cmd, "cd %s && exec sh -c %s 2>&1", q3, qc);
++                { char pfile[1024]; cx_fmt(pfile, sizeof pfile, "%s/cur-%d.pid", g_out, g_slot);
++                  out[0] = 0; rc = mg_run_check(cmd, out, sizeof out, 55, pfile); }
+                 if (g_quality) {
+                     int observation = quality_check(out, rc, i);
+                     if (observation != Q_SURVIVED) {
+@@ -913,7 +968,81 @@ static int report(void) {
+     return verdict;
+ }
+ 
+-/* ---------- run ---------- */
++/* The 20th number after the command name of /proc/PID/stat is starttime: two reads that differ mean
++   the pid was reused.  0 when the process is gone or the file cannot be parsed. */
++static long mg_proc_start(int pid) {
++    char p[64], *b; size_t n = 0; long seen = 0, v = 0; int f; char *q;
++    if (pid <= 0) return 0;
++    if (cx_fmt(p, sizeof p, "/proc/%d/stat", pid)) return 0;
++    b = (char *)cx_read(p, &n);
++    if (!b) return 0;
++    q = strrchr(b, ')');
++    if (!q) { mm_free(b); return 0; }
++    q++;
++    for (;;) {
++        while (*q == ' ') q++;
++        if (!*q) break;
++        v = 0; while (*q >= '0' && *q <= '9') { v = v * 10 + (*q - '0'); q++; }
++        seen++;
++        if (seen == 20) { mm_free(b); return v > 0 ? v : 0; }
++        while (*q && *q != ' ') q++;
++    }
++    mm_free(b);
++    return 0;
++}
++/* PID[ start] (the form mg_run_check writes); 0 on success.  START may be 0 for an old file. */
++static int mg_pid_write(const char *path, int pid) {
++    FILE *f = fopen(path, "wb"); long st; int k;
++    if (!f) return -1;
++    st = mg_proc_start(pid);
++    k = fprintf(f, "%d %ld\n", pid, st);
++    fclose(f);
++    return k > 0 ? 0 : -1;
++}
++/* PID and START from PATH; 0 on success, -1 when absent or unparsable. */
++static int mg_pid_read(const char *path, int *pid, long *start) {
++    char *b; size_t n = 0; char *sp;
++    *pid = 0; *start = 0;
++    b = (char *)cx_read(path, &n);
++    if (!b) return -1;
++    *pid = atoi(b);
++    sp = strchr(b, ' ');
++    if (sp) *start = atol(sp + 1);
++    mm_free(b);
++    return *pid > 0 ? 0 : -1;
++}
++/* 1 when PID still is the process whose starttime is START (0 = PID already gone). */
++static int mg_same_proc(int pid, long start) {
++    long now;
++    if (pid <= 0) return 0;
++    now = mg_proc_start(pid);
++    return now > 0 && start > 0 && now == start;
++}
++/* A worker's process group is its session (run_all starts it under setsid): 0 when the group has no
++   member left (kill -0 -PGID answers EPERM/ESRCH), 1 while one remains. */
++static int mg_group_alive(int pgid) {
++    char sc[256];
++    if (pgid <= 0) return 0;
++    cx_fmt(sc, sizeof sc, "kill -0 -%d 2>/dev/null", pgid);
++    return sh(sc, 0, 0, 5) == 0;
++}
++/* Stop PGID the way the gate's contract says: TERM the group, wait for it, KILL it if anything is
++   still there, wait again, and answer the residue (0 = nothing remains).  A timed-out mutant's
++   checks run in this group, so the deadline kill reaches them; the run only calls report() after
++   this has verified the group empty, and a residue is a loud refusal, not a killed mutant. */
++static int mg_stop_group(int pgid, long start) {
++    int k; char sc[256];
++    if (pgid <= 0) return 0;
++    /* identity first: a pgid whose leader was reused is not ours to signal */
++    if (start > 0 && !mg_same_proc(pgid, start)) return mg_group_alive(pgid) ? 1 : 0;
++    cx_fmt(sc, sizeof sc, "kill -TERM -%d 2>/dev/null; kill -TERM %d 2>/dev/null; true", pgid, pgid);
++    sh(sc, 0, 0, 5);
++    for (k = 0; k < 50; k++) { if (!mg_group_alive(pgid)) return 0; sy_sleep_ms(100); }
++    cx_fmt(sc, sizeof sc, "kill -KILL -%d 2>/dev/null; kill -KILL %d 2>/dev/null; true", pgid, pgid);
++    sh(sc, 0, 0, 5);
++    for (k = 0; k < 50; k++) { if (!mg_group_alive(pgid)) return 0; sy_sleep_ms(100); }
++    return mg_group_alive(pgid) ? 1 : 0;
++}
+ static int run_all(const char *self) {
+     char cmd[16384], out[8192], q3[2048], qs[2048]; int i, rc; long t0 = sy_now_ms();
+     prep();
+@@ -922,6 +1051,19 @@ static int run_all(const char *self) {
+         cx_fmt(cmd, sizeof cmd, "setsid timeout -k 5 %d sh ./unisacc.com %s -- worker --out %s --slot %d > %s/worker-%d.log 2>&1 < /dev/null & echo $! > %s/worker-%d.pid", g_deadline, qs, q3, i, q3, i, q3, i);
+         rc = sh(cmd, out, sizeof out, 30); if (rc) die2("spawn worker", "");
+     }
++    { /* starttime sidecar for each worker: identity is verified before any signal (pid reuse) */
++      for (i = 0; i < g_par; i++) {
++          char pf[1024]; long n = 0; char *b; int wpid = 0;
++          cx_fmt(pf, sizeof pf, "%s/worker-%d.pid", g_out, i);
++          b = (char *)cx_read(pf, (size_t *)&n);
++          if (b) { wpid = atoi(b); mm_free(b); }
++          if (wpid > 0) {
++              long st = mg_proc_start(wpid); FILE *f;
++              cx_fmt(pf, sizeof pf, "%s/worker-%d.start", g_out, i);
++              f = fopen(pf, "wb"); if (f) { fprintf(f, "%ld\n", st); fclose(f); }
++          }
++      }
++    }
+     /* bounded wait: total deadline g_deadline s, poll every 2 s */
+     for (int it = 0; it < g_deadline / 2 + 10; it++) {
+         int done = 0; char p[1024];
+@@ -931,8 +1073,25 @@ static int run_all(const char *self) {
+         { int alive = 0; for (i = 0; i < g_par; i++) { char sc[2048]; cx_fmt(sc, sizeof sc, "kill -0 \"$(cat %s/worker-%d.pid)\" 2>/dev/null", q3, i); if (sh(sc, 0, 0, 5) == 0) alive++; } if (alive == 0) break; }
+         sy_sleep_ms(2000);
+     }
+-    /* clean leftovers by real PGID (setsid: pgid == pid) */
+-    for (i = 0; i < g_par; i++) { cx_fmt(cmd, sizeof cmd, "p=$(cat %s/worker-%d.pid 2>/dev/null) && kill -0 \"$p\" 2>/dev/null && kill -TERM -- -\"$p\" 2>/dev/null; true", q3, i); sh(cmd, 0, 0, 5); }
++    /* stop every worker's process group and verify it: identity first (pid reuse), then TERM,
++       wait, KILL, wait; a surviving member is a refused run (nothing is reported as a verdict
++       over a group that is still running) */
++    { int residue = 0;
++      for (i = 0; i < g_par; i++) {
++          int pgid = 0, cpg = 0; long pst = 0, cst = 0; char pf[1024];
++          cx_fmt(pf, sizeof pf, "%s/worker-%d.pid", g_out, i);
++          if (mg_pid_read(pf, &pgid, &pst)) pgid = 0;
++          cx_fmt(pf, sizeof pf, "%s/worker-%d.start", g_out, i);
++          { long n = 0; char *b = (char *)cx_read(pf, (size_t *)&n); if (b) { pst = atol(b); mm_free(b); } }
++          cx_fmt(pf, sizeof pf, "%s/cur-%d.pid", g_out, i);
++          if (mg_pid_read(pf, &cpg, &cst)) cpg = 0;
++          if (cpg > 0 && !mg_same_proc(cpg, cst)) { printf("MG_STALE slot=%d check_pgid=%d pid-reused-or-gone\n", i, cpg); cpg = 0; }
++          if (pgid > 0 && !mg_same_proc(pgid, pst)) { printf("MG_STALE slot=%d worker_pgid=%d pid-reused-or-gone\n", i, pgid); pgid = 0; }
++          if (mg_stop_group(cpg, cst)) { printf("MG_RESIDUE pgid=%d slot=%d what=check\n", cpg, i); residue++; }
++          if (mg_stop_group(pgid, pst)) { printf("MG_RESIDUE pgid=%d slot=%d what=worker\n", pgid, i); residue++; }
++      }
++      if (residue) die2("worker process group still has members after TERM/KILL", "(residue above; slots kept)");
++    }
+     rc = report();
+     /* 只有 report 写出了结论才清槽:SUMMARY 非空才动手,否则保留现场。 */
+     if (rc == 0 || rc == 1) { write_session("done"); drop_slots(); }
