@@ -42,6 +42,7 @@
 #pragma unisa use text.text
 #pragma unisa use text.fmt
 #pragma unisa use cxlib.netpack
+#pragma unisa use cxlib.releaseseq
 #pragma unisa use mem.bytes
 
 #define MAXB 1024
@@ -73,13 +74,6 @@ static int next_line(const char *t, long n, long *at, const char **ls, long *ll)
 static int run(char **v, const char *cwd, int secs, np_result *r) {
     char why[512] = {0}; if (np_run(v, cwd, 0, secs, r, why, sizeof why)) { sy_eprintf("release-prep: child %s: %s\n", v[0], why); return -1; } return r->rc;
 }
-static int bump_prev(void) {   /* 0.0.74 -> 0.0.73 */
-    long n = tx_len(ver, sizeof ver), i = n - 1; int last = 0, mul = 1;
-    while (i >= 0 && ver[i] >= '0' && ver[i] <= '9') { last += (ver[i] - '0') * mul; mul *= 10; i--; }
-    if (i < 0 || ver[i] != '.' || last <= 0) return -1;
-    { char head[32]; mm_copy(head, sizeof head, ver, i); head[i] = 0; return cx_fmt(prev, sizeof prev, "%s.%d", head, last - 1); }
-}
-static int ver_ok(const char *v) { int dots = 0, dig = 0; for (; *v; v++) { if (*v == '.') { if (!dig) return 0; dots++; dig = 0; } else if (*v >= '0' && *v <= '9') dig++; else return 0; } return dots == 2 && dig; }
 
 /* ---- layout: candidate sha and frozen commit ---- */
 static void read_layout(void) {
@@ -376,13 +370,13 @@ int main(int argc, char **argv) {
             {"qualify", "sh ./unisacc.com tools/devsvc.cx -- qualify --candidate APE --out|--resume release/evidence/vV-strict-DATE.tsv", "SUMMARY ape_sha256=APE, UNKNOWN=0 INVALID=0 (CHECKPOINT -> --resume, never PASS)"},
             {"pack", "sh ./unisacc.com tools/release-run.cx -- --pack ROOT CANDIDATE_TSV SRC_DIR OUT --chain-out CHAIN --commit %s", "APE sha equals chain product, SID VERIFIED"},
             {"execute-dry", "sh ./unisacc.com tools/release-run.cx -- --execute release/candidate.tsv --layout OUT/layout --dry", "every gate PASS or DEFERRED, no FAIL"}};
-        if (tx_len(c, 64) != 40 || !is_hex(c, 40) || tx_len(a, 80) != 64 || !is_hex(a, 64) || !ver_ok(v)) die("USAGE", "--tail-plan COMMIT40 APE_SHA64 VERSION");
+        if (tx_len(c, 64) != 40 || !is_hex(c, 40) || tx_len(a, 80) != 64 || !is_hex(a, 64) || !rs_version(v)) die("USAGE", "--tail-plan COMMIT40 APE_SHA64 VERSION");
         for (k = 0; k < 5; k++) { char cmd[600]; cx_fmt(cmd, sizeof cmd, st[k][1], c);
             sy_printf("TAIL\t%d\t%s\tkey=%s:%s\tversion=%s\tcmd=%s\tgate=%s\ton_fail=stop\n", k, st[k][0], a, c, v, cmd, st[k][2]); }
         sy_printf("TAIL\tPLAN_ONLY\tnothing started; idempotent key (ape sha, commit); a step whose evidence for this key exists is DONE, not rerun\n");
         return 0;
     }
-    if (argc < 2 || !ver_ok(argv[1]) || cx_fmt(ver, sizeof ver, "%s", argv[1]))
+    if (argc < 2 || !rs_version(argv[1]) || cx_fmt(ver, sizeof ver, "%s", argv[1]))
         die("USAGE", "release-prep VERSION --layout DIR [--out DIR] [--strict FILE] [--commit HEX40] [--prev VERSION] [--ratchets FILE]");
     for (i = 2; i < argc; i += 2) {
         const char *a = argv[i], *v = i + 1 < argc ? argv[i + 1] : 0;
@@ -391,14 +385,14 @@ int main(int argc, char **argv) {
         else if (tx_eqz(a, "--out")) { if (cx_fmt(outd, sizeof outd, "%s", v) || outd[0] != '/') die("USAGE", "--out must be absolute"); }
         else if (tx_eqz(a, "--strict")) { if (sy_realpath(v, strictp, sizeof strictp) < 0) die("STRICT", "--strict file"); }
         else if (tx_eqz(a, "--commit")) { if (cx_fmt(commit, sizeof commit, "%s", v)) die("COMMIT", "too long"); }
-        else if (tx_eqz(a, "--prev")) { if (!ver_ok(v) || cx_fmt(prev, sizeof prev, "%s", v)) die("USAGE", "--prev version"); }
+        else if (tx_eqz(a, "--prev")) { if (!rs_precedes(v, ver) || cx_fmt(prev, sizeof prev, "%s", v)) die("USAGE", "--prev must be an earlier version"); }
         else if (tx_eqz(a, "--ratchets")) { if (sy_realpath(v, ratin, sizeof ratin) < 0) die("RATCHETS_SOURCE", "--ratchets file"); }
         else if (tx_eqz(a,"--archive-only")) { if(v[0]!='/' || cx_fmt(archive_dir,sizeof archive_dir,"%s",v))die("ARCHIVE_ID","new absolute directory required"); }
         else if (tx_eqz(a,"--ratchets-in")) { if(v[0]!='/' || sy_realpath(v,rat_tree,sizeof rat_tree)<0 || strcmp(v,rat_tree))die("ARCHIVE_ID","canonical material directory required"); }
         else die("USAGE", a);
     }
     if (!layout[0]) die("USAGE", "--layout DIR required");
-    if (!prev[0] && bump_prev()) die("USAGE", "cannot derive previous version; pass --prev");
+    if (!prev[0] && rs_previous(ver,prev,sizeof prev)) die("USAGE", "no previous published version in build/version-seq.tsv; pass --prev");
     if ((rat_tree[0] && ratin[0]) || (archive_dir[0] && (rat_tree[0] || ratin[0] || outd[0]))) die("USAGE","conflicting ratchets sources");
     if (archive_dir[0]) {
         char tree[4400],p[4400],row[180];read_layout();

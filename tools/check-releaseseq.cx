@@ -1,0 +1,36 @@
+#pragma unisa use cxlib.releaseseq
+#pragma unisa use sys.fs
+#pragma unisa use sys.env
+#pragma unisa use sys.posix
+#pragma unisa use sys.io
+#pragma unisa use text.text
+
+static int passed, failed;
+static void ck(int ok,const char *label) {
+    sy_printf("%s\tcheck-releaseseq.%s\n",ok?"PASS":"FAIL",label);
+    if(ok)passed++;else failed++;
+}
+static int previous_is(const char *version,const char *expected) {
+    char out[24];
+    return !rs_previous(version,out,sizeof out)&&tx_eqz(out,expected);
+}
+int main(void) {
+    char tmp[4096],cwd[4096],out[24];
+    static const char table[]="slot\tversion\tclass\tstate\tnote\n"
+        "1\t0.0.107\tfixture\t已公开\t-\n2\t0.0.105\tfixture\t已公开\t-\n"
+        "3\t0.0.106\tfixture\t建议\t-\n4\t0.0.99\tfixture\t已公开\t-\n";
+    if(sy_cwd(cwd,sizeof cwd)||sy_mkdtemp("/tmp","releaseseq-",tmp,sizeof tmp))return 2;
+    int setup=sy_chdir(tmp)||sy_mkdir("build",0700)||sy_write_file("build/version-seq.tsv",table,sizeof table-1,0600);
+    if(!setup){
+        ck(previous_is("0.1.0","0.0.107"),"minor-carry");
+        ck(previous_is("0.0.107","0.0.105"),"skip-unpublished-and-ignore-row-order");
+        ck(rs_precedes("0.0.99","0.0.105")&&!rs_precedes("0.0.105","0.0.99"),"numeric-order");
+        ck(rs_previous("0.0.99",out,sizeof out)!=0,"no-published-predecessor");
+        ck(!rs_version("0.0.0")&&!rs_version("01.0.0")&&!rs_version("0.0")&&!rs_version("0.1.0.1"),"malformed");
+        ck(rs_version("65535.65535.65535")&&!rs_version("65536.0.0")&&!rs_version("65535.65535.65535.65535"),"overflow-boundary");
+        ck(!sy_unlink("build/version-seq.tsv")&&rs_previous("0.1.0",out,sizeof out)!=0,"missing-version-table");
+    }
+    if(sy_chdir(cwd)||sy_remove_all(tmp)||setup)return 2;
+    sy_printf("CHECK_RELEASESEQ\tpassed=%d\tfailed=%d\n",passed,failed);
+    return failed?1:0;
+}

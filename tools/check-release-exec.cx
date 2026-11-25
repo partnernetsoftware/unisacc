@@ -345,6 +345,12 @@ static void fixture(int fixture_patch, int strict_variant, int ratchet_fail, int
     if(sy_mkdir(p,0755))die("fixture tools directory");
     cx_fmt(t,sizeof t,"product\t%s\tfixture checkout driver\n",leafs[0]);
     if(put(p,"devsvc-repo.tsv",t))die("fixture checkout configuration");
+    cx_fmt(p,sizeof p,"%s/build",fx);
+    if(sy_mkdir(p,0755))die("fixture build directory");
+    put(fx,"build/version-seq.tsv","slot\tversion\tclass\tstate\tnote\n"
+        "1\t0.0.75\tfixture\t已公开\t-\n2\t0.0.98\tfixture\t已公开\t-\n"
+        "3\t0.0.106\tfixture\t已公开\t-\n4\t0.0.107\tfixture\t已公开\t-\n"
+        "5\t0.0.108\tfixture\t建议\t-\n6\t0.0.97\tfixture\t已公开\t-\n");
     /* fake APE and assets */
     cx_fmt(t, sizeof t, "#!/bin/sh\necho unisacc %s\n", apever); put(lay, leafs[0], t);
     put(lay, "pkg.bin", "pkg bytes\n"); put(lay, "slice-win-arm64", "slice bytes\n");
@@ -642,8 +648,36 @@ static void unknown_cases(void) {
     ck(rx("--dry","--strict",path,0)==2 && has(out,"GATE\t1\tSTRICT\tPASS") &&
        has(out,"rows=66 expected_fail=1") && has(out,"GATE\t1\tCANDIDATE_SHA\tPASS"),"published-v076-g1-replay");
 }
+static void version_shape_cases(void) {
+    fixture(99,0,0,1);
+    const char *versions[]={"0.1.0","0.0.107","0.0.99","0.0.0","01.0.0","0.0","0.1.0.1","0.1.0"};
+    const char *previous[]={"v0.0.107","v0.0.106","v0.0.98"};
+    const char *labels[]={"version-minor-carry","version-public-predecessor","version-legacy",
+        "version-all-zero-refused","version-leading-zero-refused","version-short-refused",
+        "version-four-parts-refused","version-missing-public-predecessor-refused"};
+    for(int i=0;i<8;i++){
+        const char *v=versions[i];
+        char candidate[4096],want[80];
+        if(cx_fmt(candidate,sizeof candidate,
+           "repo\ttag\tcommit\tversion\tworkflow\tworkflow_ref\tci_run_id\tape\tape_sha256\tpackage\tpackage_sha256\twin_arm64\twin_arm64_sha256\trecord\trecord_sha256\tbuild_alias\tbuild_alias_sha256\tzip\tzip_sha256\tchecksums\tchecksums_sha256\n"
+           "example/fixture\tv%s\t%s\t%s\tcandidate-native.yml\tv%s\t0\tunisacc.com\t%s\tpkg.bin\t%s\tslice-win-arm64\t%s\tunisacc.com.build.json\t%s\tbuild.json\t%s\t%s\t%s\tSHA256SUMS\t%s\n",
+           v,fx_head,v,v,sha[0],sha[1],sha[2],sha[3],sha[4],i==3?"win-arm64.zip":"-",i==3?sha[2]:"-",sha[5]))die("version fixture table");
+        put(fx,"release/candidate.tsv",candidate);
+        if(i==7)put(fx,"build/version-seq.tsv","slot\tversion\tclass\tstate\tnote\n1\t0.0.107\tfixture\t建议\t-\n");
+        int rc=rx("--dry",0,0,0);
+        int ok;
+        if(i<3){
+            cx_fmt(want,sizeof want,"RELEASE_EXEC\tPREVIOUS\t%s\n",previous[i]);
+            ok=strstr(out,want)&&has(out,"RELEASE_EXEC\tMODE\tDRY");
+        }else ok=rc==2&&!has(out,"RELEASE_EXEC\tMODE")&&has(out,i==7?
+            "release-exec: REFUSE no previous published version":"release-exec: REFUSE version");
+        if(!ok)sy_printf("VERSION_SHAPE\t%s\trc=%d\n%s\n",v,rc,out);
+        ck(ok,labels[i]);
+    }
+}
 static void part_a(void) {
     unknown_cases();
+    version_shape_cases();
     int rc; char *c;
     /* D1 dry */
     fixture(99, 0, 0, 1);

@@ -55,6 +55,7 @@
 #pragma unisa use text.fmt
 #pragma unisa use cxlib.netpack
 #pragma unisa use cxlib.releasecandidate
+#pragma unisa use cxlib.releaseseq
 #pragma unisa use sys.posix
 #pragma unisa use sys.sig
 #pragma unisa use mem.bytes
@@ -1862,7 +1863,7 @@ static void warm_note(void) {
 }
 
 int main(int argc, char **argv) {
-    char why[512], ver[64]; int i;
+    char why[512]; int i;
     const char *home = sy_env("HOME");
     int warm = argc >= 3 && tx_eqz(argv[1], "--warm");
     if (argc < 3 || (!warm && !tx_eqz(argv[1], "--execute")))
@@ -1899,6 +1900,12 @@ int main(int argc, char **argv) {
     }
     if (!layout[0]) die("--layout DIR required (six persistent release assets)");
     if (rcand_load(table, &cand, why, sizeof why)) die(why);
+    if(!rs_version(cand.version))die("version shape");
+    if(!warm){
+        prevtag[0]='v';
+        if(rs_previous(cand.version,prevtag+1,sizeof prevtag-1))die("no previous published version in build/version-seq.tsv");
+        sy_printf("RELEASE_EXEC\tPREVIOUS\t%s\n",prevtag);
+    }
     long cn, at=0, ll;
     const char *line;
     char *cfg=slurp("tools/devsvc-repo.tsv",&cn);
@@ -1921,12 +1928,6 @@ int main(int argc, char **argv) {
     if (cx_fmt(indexp, sizeof indexp, "%s/INDEX.tsv", dry ? outdir : evdir)) die("index path");
     static const char index_header[] = "item\ttime\tverdict\tpath_or_ref\tnote\n";
     if (dry && cx_write(indexp, index_header, sizeof index_header - 1)) die("index write");
-    /* previous tag for rollback: last version component minus one */
-    { long n = tlen(cand.version), k = n; while (k > 0 && cand.version[k - 1] != '.') k--;
-      if (k <= 0 || k >= 60 || atol(cand.version + k) < 1) die("version shape");
-      if (mm_copy(ver, (long)sizeof ver, cand.version, k)) die("version copy");
-      ver[k] = 0;
-      cx_fmt(prevtag, sizeof prevtag, "v%s%ld", ver, atol(cand.version + k) - 1); }
     sy_printf("RELEASE_EXEC\tMODE\t%s\t%s\tfrom_step=%d\tlayout=%s\n", dry ? "DRY" : "EXECUTE", cand.tag, from_step, layout);
     for (cur_step = 1; cur_step <= 7; cur_step++) {
         step_t0 = sy_now_ms();
