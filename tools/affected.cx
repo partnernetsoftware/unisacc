@@ -96,7 +96,8 @@
 #define CAP (1L << 24)
 #define MAXNODE 16384
 #define HASHN 32768
-#define MAXBATCH 2048
+#define MAXBATCH TP_BATCH_CAP
+#define BKEY_CAP (TP_BATCH_CAP * 2)
 #define MAXJOBS 8
 
 static int arena;
@@ -604,7 +605,7 @@ static int match(const int *changed, int nch, int *why) {
 /* 批级记忆:(source,entry,args) 与 changed[] 不变时 mark_batch+match 的结论也不变,而批 id 只影响
    mark_guards(只对 3 个 cross-targets 批生效)。1034 个 IMPLEMENTED SOURCE 批只有 560 个 distinct
    源。命中时直接复用 (v, why),不重算闭包;guard 批仍走完整路径以免漏掉目录守卫。 */
-static char *bkey[4096]; static int bv[4096], bwhy[4096], bsrc[4096], bmod[4096];
+static char *bkey[BKEY_CAP]; static int bv[BKEY_CAP], bwhy[BKEY_CAP], bsrc[BKEY_CAP], bmod[BKEY_CAP];
 /* --plan: for a via=table match on node WHY, the model that pulled the table in (*MOD) and the closure
    node that named that model (return; -1 = an args token, -2 = none found). Changes no decision. */
 static int table_reason(int why, int *mod) {
@@ -614,9 +615,9 @@ static int table_reason(int why, int *mod) {
     return -2;
 }
 static int bslot(const char *k, int create) {
-    unsigned long h = hash(k) & 4095; int i;
-    for (i = 0; i < 4096; i++) {
-        unsigned long s = (h + (unsigned long)i) & 4095;
+    unsigned long h = hash(k) & (BKEY_CAP - 1); int i;
+    for (i = 0; i < BKEY_CAP; i++) {
+        unsigned long s = (h + (unsigned long)i) & (BKEY_CAP - 1);
         if (!bkey[s]) { if (!create) return -1; bkey[s] = keep(k, tx_len(k, 8200)); return (int)s; }
         if (tx_eqz(bkey[s], k)) return (int)s;
     }

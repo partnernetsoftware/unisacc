@@ -30,7 +30,9 @@
 #pragma unisa use cxlib.loadavg
 
 #define MAXR 40000
-#define MAXB 4096
+#pragma unisa use cxlib.testplan
+
+#define MAXB TP_BATCH_CAP
 
 typedef struct { char cand[65], batch[96], def[65], status[12], load[16], raw[65], state[12], note[200]; long ms, msmax, budget, t; int native; } Row;
 typedef struct { char id[96], domain[48], def[65], sh[65], native[65]; long budget; int indomain; } Def;
@@ -54,9 +56,10 @@ static int load_defs(void) {
     file_sha("tests/run-batch.cx", run_sha); file_sha("tools/affected.cx", aff_sha);
     if (cx_fmt(p, sizeof p, "%s/tests/batches.tsv", root) || sy_read_file(p, &b, &n, 64L << 20) || !b) return die("cannot read ", p);
     char *s = (char *)b, *end = s + n;
-    while (s < end && nd < MAXB) {
+    while (s < end) {
         char *e = memchr(s, '\n', end - s); if (!e) e = end; *e = 0;
         if (*s && *s != '#' && strncmp(s, "id\t", 3)) {
+            if (nd == MAXB) { free(b); return die("batch-capacity", 0); }
             char line[8192], *f[20]; cpy(line, sizeof line, s); int k = split(line, f, 20);
             Def *d = &defs[nd]; memset(d, 0, sizeof *d); cpy(d->id, sizeof d->id, f[0]); cpy(d->domain, sizeof d->domain, "-");
             d->budget = k > 6 ? atol(f[6]) : 0;
@@ -160,7 +163,8 @@ static int ingest(const char *ev, int *unknown) {
             if (c >= 9) {
                 Row *r = 0; for (int i = 0; i < k; i++) if (!strcmp(nw[i].batch, f[0])) r = &nw[i];
                 long ms = atol(f[5]);
-                if (!r && k < MAXB) { r = &nw[k++]; memset(r, 0, sizeof *r); cpy(r->batch, 96, f[0]); }
+                if (!r && k == MAXB) { free(b); return die("evidence-batch-capacity", 0); }
+                if (!r) { r = &nw[k++]; memset(r, 0, sizeof *r); cpy(r->batch, 96, f[0]); }
                 if (r) { cpy(r->status, 12, f[2]); if (strcmp(r->status, "PASS") && strcmp(r->status, "FAIL") && strcmp(r->status, "INVALID")) cpy(r->status, 12, "UNKNOWN");
                          r->ms = ms; if (ms > r->msmax) r->msmax = ms; cpy(r->load, 16, f[6]);
                          char nt[200]; cx_fmt(nt, sizeof nt, "%s%sattempt:%s:%ld", r->note, r->note[0] ? ";" : "", f[2], ms); cpy(r->note, 200, nt);

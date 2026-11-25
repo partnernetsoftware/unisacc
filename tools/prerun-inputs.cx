@@ -55,7 +55,9 @@
 #pragma unisa use mem.bytes
 #pragma unisa use mem.heap
 
-#define MAXIDS 4096
+#pragma unisa use cxlib.testplan
+
+#define MAXIDS TP_BATCH_CAP
 #define IDLEN 128
 
 static char g_ids[MAXIDS][IDLEN];   /* batches.tsv rows (IMPLEMENTED) in file order */
@@ -91,7 +93,7 @@ static int under(const char *p, const char *dir) {
 }
 
 /* parse "id<TAB>implementation..." rows of a batches table (first line is the header) */
-static void load_batches(char *t, size_t n) {
+static int load_batches(char *t, size_t n) {
     char *p = t, *end = t + n; int first = 1;
     while (p < end) {
         char *nl = memchr(p, '\n', (size_t)(end - p));
@@ -104,13 +106,15 @@ static void load_batches(char *t, size_t n) {
         *t1++ = 0;
         char *fl[16]; int nf = 0; char *q = t1;
         while (nf < 14) { fl[nf++] = q; char *tb = strchr(q, '\t'); if (!tb) break; *tb = 0; q = tb + 1; }
-        if (strcmp(fl[0], "IMPLEMENTED") || strlen(line) >= IDLEN || g_nids >= MAXIDS) continue;
+        if (strcmp(fl[0], "IMPLEMENTED") || strlen(line) >= IDLEN) continue;
         if (find_id(line) >= 0) continue;
+        if (g_nids == MAXIDS) return -1;
         cx_fmt(g_ids[g_nids], IDLEN, "%s", line);
         cx_fmt(g_hdr[g_nids], sizeof g_hdr[0], "%s", nf > 11 ? fl[11] : "?");
         cx_fmt(g_tier[g_nids], sizeof g_tier[0], "%s", nf > 12 ? fl[12] : "?");
         g_nids++;
     }
+    return 0;
 }
 
 /* ids of a prerun-windows.tsv: data rows "window jobs phase count id,id,.." (comment and header lines skipped) */
@@ -227,8 +231,9 @@ int main(int argc, char **argv) {
     char spec[256]; if (cx_fmt(spec, sizeof spec, "%s:tests/batches.tsv", rev)) return refuse("rev");
     char *gv[] = {"git", "show", spec, 0}; np_result r = {0}; char why[512];
     if (np_run(gv, repo, 0, 30, &r, why, sizeof why) || r.rc || !r.out) return refuse("git-show-batches-failed");
-    load_batches(r.out, strlen(r.out));
+    int batches_rc = load_batches(r.out, strlen(r.out));
     np_free(&r);
+    if (batches_rc) return refuse("batch-capacity");
     if (g_nids == 0) return refuse("no-batches");
     /* previous windows */
     size_t pn = 0; char *pt = read_all(pwin, &pn);

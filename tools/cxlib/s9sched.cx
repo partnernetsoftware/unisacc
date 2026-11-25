@@ -12,6 +12,7 @@
 #pragma unisa use mem.bytes
 #pragma unisa use cxlib.netpack
 #pragma unisa use cxlib.die
+#pragma unisa use cxlib.testplan
 
 typedef struct { const char *name; int pid, fd, deadline_s; long t0; np_buf out; } ParJob;
 /* 判定层交给调度层的全部入口:四个限值(判定层从限值表读出)与两个回调。 */
@@ -22,11 +23,17 @@ typedef struct {
     const char *sched_sha;                                                          /* 本文件内容摘要,只留痕 */
 } ss_ops;
 
-#define SS_MAX 2048
+#define SS_MAX TP_BATCH_CAP
 typedef struct { char leaf[80]; int alone, heavy, need, state, tries; ParJob j; } ss_row; /* state: 0 待发 1 在跑 2 DONE 已记 3 未记 4 放弃 */
 static ss_row ss_rows[SS_MAX];
 static int ss_n;
-static char ss_buf[262144];
+/* Longest leaf, six int fields, labels and a separate summary line. */
+enum { SS_PENDING_ROW_CAP = 224, SS_PENDING_SUMMARY_CAP = 96 };
+int ss_pending_truncated(const char *verb, size_t bytes, size_t cap) {
+    return tx_eqz(verb, "pending") && bytes >= cap;
+}
+
+static char ss_buf[TP_BATCH_CAP * SS_PENDING_ROW_CAP + SS_PENDING_SUMMARY_CAP];
 static void ss_free(ParJob *j) { free(j->out.p); j->out.p = 0; j->out.n = j->out.cap = 0; }
 static int ss_field(const char *line, const char *key) { const char *q = strstr(line, key); return q ? atoi(q + strlen(key)) : -1; }
 static int ss_has(const char *s, size_t n, const char *needle) {
