@@ -476,12 +476,24 @@ tape_run_x86_64:
     jz .Lrun_memory
     movq %rdi,%rsi
     subq %r8,%rsi
-    jb .Lrun_memory
+    jb .Lrun_mem_mapped
     movq 16(%r12),%r8
     subq %r9,%r8
-    jb .Lrun_memory
+    jb .Lrun_mem_mapped
     cmpq %r8,%rsi
-    ja .Lrun_memory
+    jbe .Lrun_mem_access
+.Lrun_mem_mapped:
+    movl $1,%r8d
+    cmpl $21,%r10d
+    je .Lrun_mem_check_map
+    cmpl $23,%r10d
+    je .Lrun_mem_check_map
+    movl $2,%r8d
+.Lrun_mem_check_map:
+    call hoststub_lnx_x86_64_map_access
+    testq %rax,%rax
+    jnz .Lrun_memory
+.Lrun_mem_access:
     cmpl $26,%r10d
     je .Lrun_mem_zero
     cmpl $21,%r10d

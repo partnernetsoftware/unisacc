@@ -22,7 +22,7 @@ hoststub_lnx_x86_64_bind:
     movq $0, hs_mmap_cnt(%rip)
     leaq hs_mmap_tab(%rip), %rdi
     xorl %eax, %eax
-    movl $64, %ecx
+    movl $96, %ecx
     rep stosq
     ret
 .size hoststub_lnx_x86_64_bind,.-hoststub_lnx_x86_64_bind
@@ -34,6 +34,31 @@ hoststub_lnx_x86_64_mmap_count:
     movq hs_mmap_cnt(%rip), %rax
     ret
 .size hoststub_lnx_x86_64_mmap_count,.-hoststub_lnx_x86_64_mmap_count
+
+/* Private interpreter ABI: addr=rdi, width=r9, required prot=r8d.
+ * Preserve guest operand registers; clobber rax, rsi and r11. */
+.globl hoststub_lnx_x86_64_map_access
+.hidden hoststub_lnx_x86_64_map_access
+hoststub_lnx_x86_64_map_access:
+    leaq hs_mmap_tab(%rip), %r11
+.Lmap_access_next:
+    testl %r8d, 16(%r11)
+    jz .Lmap_access_skip
+    movq 8(%r11), %rsi
+    subq %r9, %rsi
+    jb .Lmap_access_skip
+    movq %rdi, %rax
+    subq 0(%r11), %rax
+    jb .Lmap_access_skip
+    cmpq %rsi, %rax
+    jbe .Lchk_ok
+.Lmap_access_skip:
+    addq $24, %r11
+    leaq hs_mmap_tab+768(%rip), %rax
+    cmpq %rax, %r11
+    jb .Lmap_access_next
+    movq $-14, %rax
+    ret
 
 /* Internal helper: validate [rdi, rdi+rsi) inside hs_membase..+hs_memlimit or hs_mmap_tab[0..31].
  * Returns rax = 0 if valid, -14 (-EFAULT) if out of bounds. Clobbers r10, r11, rax. */
@@ -64,8 +89,8 @@ hoststub_lnx_x86_64_mmap_count:
     cmpq %r11, %rax
     jbe .Lchk_ok
 .Lchk_mmap_next:
-    addq $16, %r10
-    leaq hs_mmap_tab+512(%rip), %rax
+    addq $24, %r10
+    leaq hs_mmap_tab+768(%rip), %rax
     cmpq %rax, %r10
     jb .Lchk_mmap_loop
     movq $-14, %rax
@@ -92,6 +117,8 @@ hoststub_lnx_x86_64_mmap_count:
 .Lcstr_mmap_prep:
     leaq hs_mmap_tab(%rip), %r10
 .Lcstr_mmap_loop:
+    testl $1, 16(%r10)
+    jz .Lcstr_mmap_next
     movq 8(%r10), %r11
     testq %r11, %r11
     jz .Lcstr_mmap_next
@@ -103,8 +130,8 @@ hoststub_lnx_x86_64_mmap_count:
     subq %rax, %r11
     jmp .Lcstr_scan
 .Lcstr_mmap_next:
-    addq $16, %r10
-    leaq hs_mmap_tab+512(%rip), %rax
+    addq $24, %r10
+    leaq hs_mmap_tab+768(%rip), %rax
     cmpq %rax, %r10
     jb .Lcstr_mmap_loop
 .Lcstr_bad:
@@ -228,6 +255,7 @@ hoststub_lnx_x86_64:
     orl $0x10, %r10d
 .Lmmap_do:
     movq 8(%rsp), %r11          /* save r5=off before stack adjustments */
+    pushq %rcx                  /* save protection before syscall */
     pushq %rdx                  /* save len for mmap_tab tracking */
     movq %rsi, %rdi             /* addr */
     movq %rdx, %rsi             /* len */
@@ -238,6 +266,7 @@ hoststub_lnx_x86_64:
     movl $9, %eax
     syscall
     popq %rdx                   /* restore len */
+    popq %rcx                   /* restore protection */
     cmpq $-4096, %rax
     ja .Lret_done
     testq %rdx, %rdx
@@ -247,8 +276,8 @@ hoststub_lnx_x86_64:
 .Lmmap_ins:
     cmpq $0, 8(%r10)
     je .Lmmap_store
-    addq $16, %r10
-    leaq hs_mmap_tab+512(%rip), %r11
+    addq $24, %r10
+    leaq hs_mmap_tab+768(%rip), %r11
     cmpq %r11, %r10
     jb .Lmmap_ins
     /* Table full: undo mapping and return -ENOMEM (-12) so no untracked escape persists */
@@ -261,6 +290,7 @@ hoststub_lnx_x86_64:
 .Lmmap_store:
     movq %rax, 0(%r10)
     movq %rdx, 8(%r10)
+    movq %rcx, 16(%r10)
     incq hs_mmap_cnt(%rip)
     ret
 
@@ -284,11 +314,12 @@ hoststub_lnx_x86_64:
     jnz .Lret_done
     movq $0, 0(%r10)
     movq $0, 8(%r10)
+    movq $0, 16(%r10)
     decq hs_mmap_cnt(%rip)
     ret
 .Lmunmap_next:
-    addq $16, %r10
-    leaq hs_mmap_tab+512(%rip), %r11
+    addq $24, %r10
+    leaq hs_mmap_tab+768(%rip), %r11
     cmpq %r11, %r10
     jb .Lmunmap_find
     jmp .Leinval
@@ -560,6 +591,6 @@ hs_memlimit:
 hs_mmap_cnt:
     .quad 0
 hs_mmap_tab:
-    .zero 512
+    .zero 768
 
 .section .note.GNU-stack,"",@progbits
