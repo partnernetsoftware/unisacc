@@ -22,9 +22,10 @@
 #pragma unisa use mem.bytes
 #pragma unisa use mem.heap
 #pragma unisa use text.text
+#pragma unisa use cxlib.testplan
 
 #define PD_PW 4400
-#define PD_MAX_IDS 2048
+#define PD_MAX_IDS TP_BATCH_CAP
 #define PD_PREP_MAXB 1024
 #define PD_MAX_WINS 2048
 #define PD_MAX_FILES (PD_MAX_WINS + PD_MAX_IDS)
@@ -2573,9 +2574,9 @@ typedef struct {
     unsigned char foreign;
 } PdBMeta;
 
-static PdBMeta pd_bmeta[4096];
+static PdBMeta pd_bmeta[TP_BATCH_CAP];
 static int pd_nbmeta = 0;
-static char pd_pq_ids[2048][96];
+static char pd_pq_ids[TP_BATCH_CAP][96];
 static int pd_npq = 0;
 static char pd_split_p[64][96];
 static int pd_nsplit_p = 0;
@@ -2599,7 +2600,15 @@ static int pd_in_pq(const char *id) {
     return 0;
 }
 
-static void pd_load_repo_batch_meta(const char *root) {
+static void pd_add_batch_meta(const char *id, long idn, int planned, int foreign) {
+    PdBMeta *m = &pd_bmeta[pd_nbmeta++];
+    mm_copy(m->id, sizeof m->id, id, (size_t)idn);
+    m->id[idn] = 0;
+    m->planned = planned;
+    m->foreign = foreign;
+}
+
+static int pd_load_repo_batch_meta(const char *root) {
     char p[PD_PW];
     unsigned char *b = 0; int64_t n = 0;
     pd_nbmeta = 0; pd_npq = 0; pd_nsplit_p = 0;
@@ -2623,32 +2632,9 @@ static void pd_load_repo_batch_meta(const char *root) {
         mm_free(b); b = 0; n = 0;
     }
     if (!cx_fmt(p, sizeof p, "%s/tests/batches.tsv", root) && !sy_read_file(p, &b, &n, 8 << 20)) {
-        int64_t pos = 0;
-        while (pos < n && pd_nbmeta < 4096) {
-            int64_t ls = pos;
-            while (pos < n && b[pos] != '\n') pos++;
-            int64_t le = pos;
-            if (pos < n) pos++;
-            if (le > ls && b[le - 1] == '\r') le--;
-            if (le <= ls || b[ls] == '#') continue;
-            const char *c[16]; int64_t cl[16]; int nc = 0; int64_t q = ls;
-            while (nc < 16) {
-                int64_t cs = q;
-                while (q < le && b[q] != '\t') q++;
-                c[nc] = (const char *)b + cs; cl[nc] = q - cs; nc++;
-                if (q >= le) break;
-                q++;
-            }
-            if (nc >= 6 && cl[0] > 0 && cl[0] < 95 && !(cl[0] == 2 && !memcmp(c[0], "id", 2))) {
-                PdBMeta *m = &pd_bmeta[pd_nbmeta++];
-                mm_copy(m->id, 96, c[0], (size_t)cl[0]);
-                m->id[cl[0]] = 0;
-                m->planned = !(cl[1] == 11 && !memcmp(c[1], "IMPLEMENTED", 11));
-                m->foreign = !((cl[5] == 10 && !memcmp(c[5], "lnx/x86_64", 10)) ||
-                               (cl[5] == 3 && !memcmp(c[5], "any", 3)));
-            }
-        }
+        int rc = tp_visit_prepare_meta((const char *)b, n, pd_add_batch_meta);
         mm_free(b); b = 0; n = 0;
+        if (rc) return pd_refuse("prepare-batch-meta-limit");
     }
     if (cx_fmt(p, sizeof p, "%s/tests/batch-domain-index.tsv", root) || sy_read_file(p, &b, &n, 8 << 20)) {
         char qp[PD_PW], qc[PD_PW], why[256];
@@ -2671,7 +2657,7 @@ static void pd_load_repo_batch_meta(const char *root) {
     }
     if (b && n > 0) {
         int64_t pos = 0;
-        while (pos < n && pd_npq < 2048) {
+        while (pos < n) {
             int64_t ls = pos;
             while (pos < n && b[pos] != '\n') pos++;
             int64_t le = pos;
@@ -2694,12 +2680,14 @@ static void pd_load_repo_batch_meta(const char *root) {
                 mm_copy(id, 96, c[0], (size_t)cl[0]);
                 id[cl[0]] = 0;
                 if (!pd_in_pq(id)) {
+                    if (pd_npq == TP_BATCH_CAP) { mm_free(b); return pd_refuse("prepare-product-qualification-limit"); }
                     cx_fmt(pd_pq_ids[pd_npq++], 96, "%s", id);
                 }
             }
         }
         mm_free(b);
     }
+    return 0;
 }
 
 static void pd_find_latest_strict(const char *root, const char *cur_ver, char *out_path, size_t cap) {
@@ -2734,6 +2722,7 @@ static int pd_cmd_prepare(const char *from_chain_dir, const char *root_arg, cons
     } else {
         if (sy_realpath(".", root, sizeof root) < 0) cx_fmt(root, sizeof root, ".");
     }
+    if (pd_load_repo_batch_meta(root)) return 2;
     {
         char *gv[] = {"git", "-C", root, "rev-parse", "HEAD", 0};
         np_result gr = {0};
@@ -2824,7 +2813,6 @@ static int pd_cmd_prepare(const char *from_chain_dir, const char *root_arg, cons
     }
     pd_mkdirs(out_dir);
 
-    pd_load_repo_batch_meta(root);
     char latest_strict[PD_PW] = {0}, ids_path[PD_PW] = {0}, times_path[PD_PW] = {0}, prio_path[PD_PW] = {0};
     pd_find_latest_strict(root, ver, latest_strict, sizeof latest_strict);
     if (!latest_strict[0]) pd_find_latest_strict(root, "", latest_strict, sizeof latest_strict);

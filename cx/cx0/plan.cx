@@ -110,6 +110,7 @@ static int cxm_iscx[CXM_MAXU]; static int cxm_lib[CXM_MAXU];
 static int cxm_use[CXM_MAXU][CXM_MAXDECL]; static int cxm_nuse[CXM_MAXU];
 /* per use, the imported symbol and its alias (both empty = import the whole module) */
 static char cxm_usym[CXM_MAXU][CXM_MAXDECL][CXM_SYMW]; static char cxm_ualias[CXM_MAXU][CXM_MAXDECL][CXM_SYMW];
+static int cxm_uline[CXM_MAXU][CXM_MAXDECL];
 static char cxm_reach[CXM_MAXU][CXM_MAXU];
 static int cxm_topo[CXM_MAXU]; static int cxm_ntopo; static int cxm_color[CXM_MAXU]; static int cxm_stk[CXM_MAXU]; static int cxm_nstk;
 static char cxm_ift[CXM_IFMAX + 1]; static int cxm_nift;
@@ -542,6 +543,7 @@ static int cxm_rootfind(int u, int line, char *w, int n, char *out) {
 /* `#pragma unisa use NAME` (optionally `NAME::sym as alias`) in unit u at line */
 static int cxm_adduse(int u, char *w, int n, int line, char *sym, int sn, char *alias, int an) {
     char cand[CXM_PATHW]; char norm[CXM_PATHW]; int dl; int k; int v; int p;
+    int rr = -1; char rroot[CXM_PATHW]; rroot[0] = 0;
     if (!cxm_goodname(w, n)) { cxm_start(u, line); cxm_m("bad module name \""); cxm_mn(w, n); cxm_m("\""); return cxm_fail(); }
     if (cxm_eqn(w, n, "std") || cxm_eqn(w, n, "std.cx")) return 0;        /* the prelude: always there */
     if (n > 4 && w[0] == 's' && w[1] == 't' && w[2] == 'd' && w[3] == '.') {
@@ -559,10 +561,10 @@ static int cxm_adduse(int u, char *w, int n, int line, char *sym, int sn, char *
     if (cxm_norm(cand, norm)) { cxm_start(u, line); cxm_m("module path too long"); return cxm_fail(); }
     v = 0; while (v < cxm_n && !cxm_samefile(cxm_path[v], norm)) v = v + 1;
     if (v == cxm_n && cxm_rd(norm, cxm_cmp, 1) == 0 - 1) {     /* nothing beside the unit: the package root */
-        char rnorm[CXM_PATHW]; int rr;
+        char rnorm[CXM_PATHW];
         rr = cxm_rootfind(u, line, w, n, rnorm);
         if (rr < 0) return 1;
-        if (rr == 0) { cxm_cpy(norm, rnorm, CXM_PATHW); v = 0; while (v < cxm_n && !cxm_samefile(cxm_path[v], norm)) v = v + 1; }
+        if (rr == 0) { cxm_cpy(rroot, rnorm, CXM_PATHW); cxm_cpy(norm, rnorm, CXM_PATHW); v = 0; while (v < cxm_n && !cxm_samefile(cxm_path[v], norm)) v = v + 1; }
     }
     if (v < cxm_n && !cxm_eq(cxm_path[v], norm) && !cxm_deps_same(cxm_path[v], norm)) {
         cxm_start(u, line); cxm_m("module "); cxm_mn(w, n); cxm_m(" has two lexical entries: ");
@@ -571,6 +573,9 @@ static int cxm_adduse(int u, char *w, int n, int line, char *sym, int sn, char *
     if (v == cxm_n) {
         if (cxm_rd(norm, cxm_cmp, 1) == 0 - 1) {
             cxm_start(u, line); cxm_m("module "); cxm_mn(w, n); cxm_m(": no file "); cxm_m(norm);
+            cxm_m("; searched "); cxm_m(norm);
+            if (rr == 0) { cxm_m(" and package root "); cxm_m(rroot); }
+            else cxm_m("; no cxroot.tsv in any ancestor directory");
             k = 0; while (k < n && w[k] != '.') k = k + 1;
             if (k == n) cxm_m("; the package table matches leading segments only: for a single-segment name add a whole-name row R<TAB>NAME<TAB>DIR to cxroot.tsv or use a two-segment prefix");
             return cxm_fail();
@@ -598,6 +603,7 @@ static int cxm_adduse(int u, char *w, int n, int line, char *sym, int sn, char *
     }
     if (cxm_nuse[u] >= CXM_MAXDECL) { cxm_start(u, line); cxm_m("too many use declarations in one unit"); return cxm_fail(); }
     cxm_use[u][cxm_nuse[u]] = v;
+    cxm_uline[u][cxm_nuse[u]] = line;
     cxm_cpyn(cxm_usym[u][cxm_nuse[u]], sym, sn, CXM_SYMW);
     cxm_cpyn(cxm_ualias[u][cxm_nuse[u]], alias, an, CXM_SYMW);
     cxm_nuse[u] = cxm_nuse[u] + 1;
@@ -1913,7 +1919,7 @@ static int cxm_usechk(void) {
                 v = cxm_use[u][k]; i = 0;
                 while (i < cxm_nsym && !(cxm_symu[i] == v && cxm_symk[i] == 0 && cxm_eq(cxm_sym[i], cxm_usym[u][k]))) i = i + 1;
                 if (i == cxm_nsym) {
-                    cxm_start(0 - 1, 0); cxm_m("module "); cxm_m(cxm_name[v]); cxm_m(" does not export "); cxm_m(cxm_usym[u][k]);
+                    cxm_start(u, cxm_uline[u][k]); cxm_m("module "); cxm_m(cxm_name[v]); cxm_m(" does not export "); cxm_m(cxm_usym[u][k]);
                     cxm_m(" (used by "); cxm_m(cxm_arg[u]); cxm_m(")"); return cxm_fail();
                 }
             }

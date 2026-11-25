@@ -5,7 +5,7 @@ description: 写脚本、自动化、批处理、文本与文件处理、TSV 表
 
 # unisacc + .cx：把脚本从 python/node/bun 换过来
 
-每条断言来自仓库文件或 2026-11-06 在已装产品 `unisacc 0.0.44`（dev-lnx，`sh ./unisacc.com --version`）上的实跑。
+每条断言来自仓库文件或在已装产品上的实跑;版本相关的行为以 `sh ./unisacc.com --version` 与 CHANGELOG 为准,冲突时信实测。
 标 ```cx-run 的块由 `tests/check-skill-cx.cx` 实跑，输出必须与紧随的 ```expect 块逐字节一致；文档过期就红。
 示例源码在 `skills/unisacc-cx/examples/`，每个 ≤40 行。
 
@@ -99,7 +99,7 @@ sh ./unisacc.com -cx-plan skills/unisacc-cx/examples/use_kv.cx | cut -f1,2
 | 哈希表 / 通用容器 | 没有。小表用定长数组加线性查找（kv.cx）；大表登记缺口 |
 | `mkdtemp` 的 `sy_*` 封装 | 只有前导 libc `mkdtemp`（上层新文件调它会计入 cxlibc 棘轮）；用 `sy_mkdir` 重试（tmpdir.cx） |
 | HTTP 客户端/服务端 | 只有 TCP（`sys.net`）与 TLS 1.3 记录层（`crypto.tls13/record`），没有 HTTP 解析 |
-| 同一单元同时 `use mem.grow` 与 `use text.build` | 已装 0.0.44 报 `mm_alloc exported by both heap (cx/mem/heap.cx:15) and mem.heap (cx/text/mem/heap.cx:15)`（实跑，`tools/practice-vec.cx` 同样 rc=1）；根因是软链农场的两种路径拼法，包根解析 CX-U-7 要产品重装后才生效。规避：拆成两个单元（vec.cx / strbuild.cx） |
+| 同一单元同时 `use mem.grow` 与 `use text.build` | 已装产品曾报 `mm_alloc exported by both heap (cx/mem/heap.cx:15) and mem.heap (cx/text/mem/heap.cx:15)`（实跑，`tools/practice-vec.cx` 同样 rc=1）；根因是软链农场的两种路径拼法，包根解析 CX-U-7 要产品重装后才生效。规避：拆成两个单元（vec.cx / strbuild.cx） |
 | 仓外脚本 | 没有 `cxroot.tsv` 就不能 `use`；仓外目录要自带一份 `cxroot.tsv` 指回模块目录 |
 | 编译期所有权/借用检查 | 未实现（CX-W-4），见 §4 |
 
@@ -174,7 +174,7 @@ cleaned dir=0
 - **每条命令及其子进程 ≤60 秒**：子进程用 `cx_runv_timeout`/`np_run` 给 deadline；超时清理整棵树（`sys.process` → `sy_kill_tree`）。不用 `sleep` 轮询等；等待要有总 deadline 和次数上限。
 - **管道**：`cmd | head` 吞掉 `cmd` 的退出码；判断上游失败用 `set -o pipefail`，或让程序自己读完再截断。
 - **编译行为差异进表**：事实表 → 生成器（`--check`）→ 网；不在 `drive.cx`/`host.cx` 写特判。`kernel/` 是生成物，禁止手改。
-- **十三个棘轮一次跑完**：`sh ./unisacc.com tools/ratchets.cx`（2026-11-06 克隆实跑 `RATCHETS ok=13 fail=0 elapsed_ms=24306`）。新 `tools/*.cx` 增加行数会触 `toolsloc`（基线 `tests/toolsloc.tsv` TOTAL 71961，只降不升，新增工具须先改基线并经 cc 批准）；`tests/`、`skills/` 下的文件不计入 toolsloc。
+- **十三个棘轮一次跑完**：`sh ./unisacc.com tools/ratchets.cx`，末行 `RATCHETS ok=N fail=0`。工具行数不设上限,新增工具须带 `check-*.cx` 并登记批次。
 
 ## 4. 模块化与内存安全：已有的，和方向
 
@@ -187,9 +187,9 @@ cleaned dir=0
 
 **方向（项目所有者定；未实现，不要说成已有）**
 
-- 编译期所有权/借用检查（CX-W-4，0.0.45 路线 C）。今天的句柄检查是**过期句柄隔离**：句柄是可复制整数，猜中就能访问；不是线性类型，不是机密性。
+- 编译期所有权/借用检查（路线图项 CX-W-4,未实现）。今天的句柄检查是**过期句柄隔离**：句柄是可复制整数，猜中就能访问；不是线性类型，不是机密性。
 - `export`（`pub use`，CX-W-3）、层感知前导（CX-W-5）、`-c -funit` 每模块一只对象（CX-W-1）。
-- 产品所有权多在结构体字段与包装分配器里，函数内文本分析覆盖不到（2026-11-03 全仓 9043 函数，产品目录仅 60 个局部 owner）。
+- 产品所有权多在结构体字段与包装分配器里，函数内文本分析覆盖不到（全仓分析显示产品目录仅极少数函数含局部 owner）。
 
 **写新模块的推荐形态**（`examples/kv.cx` + `use_kv.cx`，实跑）：状态 `static` 在模块内；对外只给整数句柄或 `(ptr,len)`，不给内部结构体指针；句柄带世代，过期句柄拒绝而非解引用；满了返回 `-1` 而不是静默覆盖；每个公开函数先验参再碰数组。
 
@@ -209,7 +209,7 @@ other_still=1
 
 ## 5. 工具箱（tools/，各一句话 + 一条实跑命令）
 
-| 工具 | 何时用 | 命令（2026-11-06 克隆实跑） |
+| 工具 | 何时用 | 命令 |
 |---|---|---|
 | `refactor.cx sites` | 查调用点（跳过注释/字面量） | `sh ./unisacc.com tools/refactor.cx -- sites sy_mkdir skills/unisacc-cx/examples/tmpdir.cx tests/check-skill-cx.cx` → 两行 `FILE:LINE<TAB>call` |
 | `refactor.cx find/apply/sweep` | 批量机械改写，每文件改前改后验证，不过即还原；多轮用 `sweep` 重复同一命令直到 rc 0 | `sh ./unisacc.com tools/refactor.cx -- sweep RULES.tsv 4 --tracked -- 'sh ./unisacc.com {file} -- --check'` |
@@ -229,13 +229,13 @@ other_still=1
 
 **造工具规则**：同一类查找或改写要做第二遍、或涉及十处以上，没有合适的工具就当场用 `.cx` 造一个放进 `tools/`，带 `check-*.cx` 检查并用 `register.cx` 登记批次，在 `prd.md` 能力速查补一行；不开成百次 grep、不手工逐个编辑。
 
-## 6. 常见坑（2026-11-05/06 实际踩过）
+## 6. 常见坑（实际踩过）
 
 1. **材料名在不同批次被当文件/目录**：all-waves 会话把 `chain-gen1` 绑成目录、`kernels/contracts.cx` 绑成父目录，造出假 FAIL；单跑 HEAD 才是事实（ledger RC1-MATERIAL-BIND）。写 check 时参数形态（文件还是目录）要在用法注释里写明并在入口判 `st.kind`。
 2. **测试原地改输入**：check 不得改自己的输入；产物进 mkdtemp 临时目录或 `out/`，`outdep` 棘轮禁止批次读未声明的 `out/` 残留。`check-skill-cx.cx` 的 `--self-test` 把夹具写到临时目录再删。
 3. **写死计数的断言**：`sourcepackage.cx` 六处写死 34/107 与 recipes 表不同源，报告 `models=42` 被 `34` 卡住、`job_seen[107]` 越界静默写坏（ledger INSTALL44）。计数来自表或 `#define` 单一来源；本文的 expect 块只断言示例自身输出，不断言 `scanned=400` 这类全局计数。
 4. **pid 命名临时目录**：pid 复用、跨会话冲突；用 mkdtemp 语义（`sy_mkdir` 原子重试，tmpdir.cx）。
-5. **`-c` 多对象链接的 stdio 告警是已知误报**：两个及以上 `.cx` 对象链接恒打印一次 `warning: 2 objects each carry a private stdio table`（判据只数 `.bss g_<probe>` 行），rc 与产物不变；依赖「链接时 stderr 为空」的脚本要调整（CHANGELOG 0.0.44-rc1，WARN-PROBE-USED）。
+5. **`-c` 多对象链接的 stdio 告警是已知误报**：两个及以上 `.cx` 对象链接恒打印一次 `warning: 2 objects each carry a private stdio table`（判据只数 `.bss g_<probe>` 行），rc 与产物不变；依赖「链接时 stderr 为空」的脚本要调整（WARN-PROBE-USED，见 CHANGELOG）。
 6. **改了 `tools/`、`tests/` 的检查后要跑 affected**：`sh ./unisacc.com tools/affected.cx -- --files F --run`，或用已装产品实编一遍；候选版本放宽的限制在安装前不算数。
 7. **`use` 旁边优先**：源文件旁边若有同名 `.cx`，它会盖过 `cxroot.tsv` 的映射；`mem.grow`+`text.build` 同单元冲突见 §2.1。
 8. **`| head` 吞退出码**；手工拼 `stream` 管道要 `set -o pipefail`。

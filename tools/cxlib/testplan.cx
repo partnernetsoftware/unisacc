@@ -4,6 +4,50 @@
  * until an actual executor explicitly verifies supplied material identities. */
 #pragma unisa module testplan
 #pragma unisa use text.text
+/* Single source of truth for batch registry and tool-source inventory capacities. */
+enum {
+ TP_BATCH_CAP = 4096,
+ TP_TOOL_SRC_CAP = 4096
+};
+int tp_batch_cap(void){return TP_BATCH_CAP;}
+int tp_tool_src_cap(void){return TP_TOOL_SRC_CAP;}
+/* The prepare metadata projection accepts legacy registries with six or more fields. */
+typedef void (*tp_prepare_meta_fn)(const char *id, long idn, int planned, int foreign);
+int tp_visit_prepare_meta(const char *text, long size, tp_prepare_meta_fn emit) {
+    long pos = 0;
+    int rows = 0;
+    while (pos < size) {
+        long start = pos;
+        while (pos < size && text[pos] != '\n') pos++;
+        long end = pos;
+        if (pos < size) pos++;
+        if (end > start && text[end - 1] == '\r') end--;
+        if (end <= start || text[start] == '#') continue;
+        const char *f[6];
+        long len[6];
+        long at = start;
+        int n = 0;
+        while (n < 6) {
+            long first = at;
+            while (at < end && text[at] != '\t') at++;
+            f[n] = text + first;
+            len[n++] = at - first;
+            if (at >= end) break;
+            at++;
+        }
+        if (n < 6 || len[0] <= 0 || len[0] >= 95 ||
+            (len[0] == 2 && !memcmp(f[0], "id", 2))) continue;
+        if (rows++ == TP_BATCH_CAP) return -1;
+        if (emit) {
+            int planned = !(len[1] == 11 && !memcmp(f[1], "IMPLEMENTED", 11));
+            int foreign = !((len[5] == 10 && !memcmp(f[5], "lnx/x86_64", 10)) ||
+                            (len[5] == 3 && !memcmp(f[5], "any", 3)));
+            emit(f[0], len[0], planned, foreign);
+        }
+    }
+    return 0;
+}
+
 typedef struct {
  int batches;int implemented_batches;int planned_batches;int unprepared_batches;
  int planned_missing_sources;int coverage_rows;int implemented_coverage;
@@ -74,15 +118,15 @@ static int tp_process(const char *root,const char *registry,size_t rn,const char
  int nb=0,nc=0,i,j,rc=-1;tp_summary summary;memset(&summary,0,sizeof summary);if(out)memset(out,0,sizeof *out);if(why&&cap)why[0]=0;
  if(!root||!registry||!coverage||!out||!why||!cap||root[0]!='/'||strlen(root)>4095){if(why&&cap)tp_bad(why,cap,"arguments",0,0);return -1;}
  if(rn>4194304||cn>4194304)return tp_bad(why,cap,"table-limit",0,0);
- r=malloc(rn+1);c=malloc(cn+1);bf=calloc(2048*14,sizeof *bf);cf=calloc(8192*5,sizeof *cf);mapped=calloc(8192,sizeof *mapped);implemented=calloc(8192,sizeof *implemented);last=calloc(8192,sizeof *last);source_present=calloc(2048,sizeof *source_present);
+ r=malloc(rn+1);c=malloc(cn+1);bf=calloc((size_t)TP_BATCH_CAP*14,sizeof *bf);cf=calloc(8192*5,sizeof *cf);mapped=calloc(8192,sizeof *mapped);implemented=calloc(8192,sizeof *implemented);last=calloc(8192,sizeof *last);source_present=calloc(TP_BATCH_CAP,sizeof *source_present);
  if(!r||!c||!bf||!cf||!mapped||!implemented||!last||!source_present){tp_bad(why,cap,"allocation",0,0);goto done;}
  memcpy(r,registry,rn);r[rn]=0;memcpy(c,coverage,cn);c[cn]=0;
  int cols=14;
- if(tp_table(r,rn,"id\timplementation\tlayer\tsource\tmode\tplatform\tbudget_seconds\tmaterials\tentry\targs\tcoverage\texpect\theaders\ttier\n",14,bf,2048,&nb,why,cap)){
+ if(tp_table(r,rn,"id\timplementation\tlayer\tsource\tmode\tplatform\tbudget_seconds\tmaterials\tentry\targs\tcoverage\texpect\theaders\ttier\n",14,bf,TP_BATCH_CAP,&nb,why,cap)){
   if(strncmp(why,"table-header",12))goto done;
-  cols=13;if(tp_table(r,rn,"id\timplementation\tlayer\tsource\tmode\tplatform\tbudget_seconds\tmaterials\tentry\targs\tcoverage\texpect\theaders\n",13,bf,2048,&nb,why,cap)){
+  cols=13;if(tp_table(r,rn,"id\timplementation\tlayer\tsource\tmode\tplatform\tbudget_seconds\tmaterials\tentry\targs\tcoverage\texpect\theaders\n",13,bf,TP_BATCH_CAP,&nb,why,cap)){
    if(strncmp(why,"table-header",12))goto done;
-   cols=12;if(tp_table(r,rn,"id\timplementation\tlayer\tsource\tmode\tplatform\tbudget_seconds\tmaterials\tentry\targs\tcoverage\texpect\n",12,bf,2048,&nb,why,cap))goto done;
+   cols=12;if(tp_table(r,rn,"id\timplementation\tlayer\tsource\tmode\tplatform\tbudget_seconds\tmaterials\tentry\targs\tcoverage\texpect\n",12,bf,TP_BATCH_CAP,&nb,why,cap))goto done;
   }
   for(i=nb;i-->0;){memmove(bf+i*14,bf+i*cols,cols*sizeof *bf);char **v=bf+i*14;if(cols==12)v[12]="product";v[13]=strcmp(v[1],"IMPLEMENTED")||!strcmp(v[2],"platform")?"release":!strcmp(v[7],"-")?"commit":"daily";}
  }

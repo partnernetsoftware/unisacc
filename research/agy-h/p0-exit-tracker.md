@@ -1,6 +1,6 @@
-# P0 出口判据对照页 (目标: 14:20 出口 / 离线 `0.1.1` 彩排全绿)
+# P0 与三版整合对照页 (0.1.1 -> 0.1.2 -> 0.1.3)
 
-维护窗口: `agy-h` | 最近更新: 2026-11-25 13:24 | 上游规划依据: `research/ompgpt/p0-prep-window-plan.md`
+维护窗口: `agy-h` | 最近更新: 2026-11-25 14:22 | 上游依据: `three-versions.md` (三版整合令) | V1 最终头: `b3e9731b6a` (`004d50e3cf` 起跳)
 
 ---
 
@@ -30,6 +30,9 @@
 | (4) 域声明提交门 (`tools/precommit.cx`) | 在飞 | `eb57262f30` (先落 `check-releaseseq` 域) | `ompgpt` 串行落库 `precommit.cx` |
 | (5) `#15` release-exec notes 正文写入回读 | 待 `P1-b` 后 | 依赖 `ompgpt` 串行链 | 待落库 |
 | (6) `r39e` `tests/runcache-units.cx` | 待/在飞 | `cdx` 负责、`ompgpt` 复核 | 待提交 |
-| 候选 17 `affected.cx` 下游闭包修复 (`%s/` + `NAME-tool:path`) | 待修订 (`agy-h`, 切片分析优先顺延约 20 分) | `619844dd` 已过 `ompgpt` 静态核; `cdx`/`cc` 要求改 `getenv`->`sy_env`、补成对 `materials` 键夹具(加变异)及缺失生产者负控 | 交付切片详尽分析前三节后立即修订重跑 `ratchets` 与真 `precommit` 并交 `cdx`/`ompgpt` |
+| 候选 17 `affected.cx` 下游闭包修复 (`%s/` + `NAME-tool:path`) | 已撤出暂存区降 `P1` (13:58 `cdx` 终审裁定) | 完整补丁已存档 `~/.unisacc-worktree-backups/cand17-affected-66748b46.patch` 与 `~/.local/share/unisacc/research/agy-h/cand17-affected-66748b46.patch`; 暂存区/工作树已清理并释放 `cand17-affected` 锁 | `0.1.1` 起链后按 `P1` 另行登记 `cand17`+`list3` 并把 `list` 控入 `<=23s` 重提; `agy-h` 现转 `V2` `B2` 重放 |
 | 候选 19 `guard-hook` prerun 证据保护 | 降 P1 (`0.1.1` 后) | `7e94f02524` 已 revert 为 `a84b2075fd`; 私有收窄补丁 `2de1ef3c...` 记入 `research/agy-h/cand19-p1-notes.md` | 暂不落库, `P0` 出口不等它 |
 | 候选 20 / 21 / 22 (`check-release-post` / `constexpr-sizeof` / 封存工具) | `P0-W` 已落 / 余单列 (`P1`) | `864de15886` (`P0-W` 已入 main); `research/agy-h/car2-108-candidates.md` (第 20-22 条) | 不阻塞 `0.1.1` 开车 (`P1`) |
+| `V1 (0.1.1)` 冻结头与静默窗 | 最终头 `b3e9731b6a` 待起链 | `14:21 cc` 静默窗至 `14:45`, `cdx` 单跑 `2a shard2` 与门 6 后 `agy-flow` 起链 | V1 公开前 `main` 冻结; `agy-h` 只做只读/文档/补丁文本 |
+| `V2 (0.1.2)` `B2` 前端事实表化 | 首件补丁 `2.1-2.3` 就绪 | `~/.local/share/unisacc/research/agy-h/b2-k2-caps-rebased.patch` (`sha256: 46993021...`, 独立验证全绿) | 等 V1 起链后分出 `v0.1.2` 树与机器窗口许可时重放 |
+| `tape` `M0` `T0.2` (`hoststub`) | 初版完成送审 `T0.4` | `.claude/worktrees/tape-m0` (`CHECK_HOSTSTUB passed=9 failed=0`, `CX_LINT findings=0`), 补丁 `tape-t02-hoststub-draft.patch` (`sha256: bf80f1ee...`) | 等 `1:cdx` 审阅(`T0.4`)及静默窗后登记 `register.cx` 并提交 `tape/m0` |

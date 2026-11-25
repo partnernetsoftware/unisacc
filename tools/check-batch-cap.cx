@@ -1,0 +1,668 @@
+/* Check shared capacities, production refusal, and the S9 pending boundary.
+ * --report-literals prints a non-gating inventory of candidate literals. */
+#pragma unisa use cxlib.testplan
+#pragma unisa use cxlib.s9sched
+#pragma unisa use cxlib.netpack
+#pragma unisa use cxlib.chainargv
+#pragma unisa use sys.fs
+#pragma unisa use sys.posix
+#pragma unisa use sys.io
+#pragma unisa use sys.env
+#pragma unisa use sys.time
+#pragma unisa use text.text
+#pragma unisa use mem.bytes
+#pragma unisa use mem.heap
+
+static int g_pass = 0;
+static int g_fail = 0;
+static char g_root[4096];
+
+static void bck(int cond, const char *name) {
+    if (cond) {
+        g_pass++;
+        sy_printf("PASS\tcheck-batch-cap.%s\n", name);
+    } else {
+        g_fail++;
+        sy_printf("FAIL\tcheck-batch-cap.%s\n", name);
+    }
+    fflush(stdout);
+}
+
+static int is_id_ch(char c) {
+    return (c >= 'a' && c <= 'z') || (c >= 'A' && c <= 'Z') ||
+           (c >= '0' && c <= '9') || c == '_';
+}
+
+/* Strip C comments and string/char literals while preserving line count and spacing. */
+static char *strip_code(const char *src) {
+    size_t n = strlen(src);
+    char *out = (char *)mm_alloc((long)(n + 1));
+    if (!out) return 0;
+    size_t i = 0, o = 0;
+    while (i < n) {
+        if (src[i] == '/' && i + 1 < n && src[i + 1] == '/') {
+            while (i < n && src[i] != '\n') i++;
+            continue;
+        }
+        if (src[i] == '/' && i + 1 < n && src[i + 1] == '*') {
+            i += 2;
+            while (i + 1 < n && !(src[i] == '*' && src[i + 1] == '/')) {
+                if (src[i] == '\n') out[o++] = '\n';
+                i++;
+            }
+            if (i + 1 < n) i += 2;
+            out[o++] = ' ';
+            continue;
+        }
+        if (src[i] == '"' || src[i] == '\'') {
+            char q = src[i++];
+            out[o++] = ' ';
+            while (i < n && src[i] != q) {
+                if (src[i] == '\\' && i + 1 < n) i += 2;
+                else { if (src[i] == '\n') out[o++] = '\n'; i++; }
+            }
+            if (i < n) i++;
+            out[o++] = ' ';
+            continue;
+        }
+        out[o++] = src[i++];
+    }
+    out[o] = 0;
+    return out;
+}
+
+/* Match complete lexer tokens. The negative controls overlay token values without
+ * modifying source bytes or letting comments and string literals impersonate code. */
+typedef struct {
+    void *tokens;
+    const char *from;
+    const char *to;
+    int only_at;
+} cap_tokens;
+
+static int cap_token_is(cap_tokens view, int i, const char *expected, int kind) {
+    if (ca_token_kind(view.tokens, i) != kind) return 0;
+    const char *actual = ca_token_text(view.tokens, i);
+    if (view.from && (view.only_at < 0 || view.only_at == i) && !strcmp(actual, view.from))
+        actual = view.to;
+    return !strcmp(actual, expected);
+}
+
+static int cap_token_find(cap_tokens view, int lo, int hi, const char *const *pattern, int count) {
+    for (int i = lo; i + count <= hi; i++) {
+        int j;
+        for (j = 0; j < count; j++) {
+            const char *want = pattern[j];
+            int kind = want[0] == '@' ? 2 : is_id_ch(want[0]) ? 1 : 0;
+            if (!cap_token_is(view, i + j, want + (kind == 2), kind)) break;
+        }
+        if (j == count) return i;
+    }
+    return -1;
+}
+
+static int has_token_seq(cap_tokens view, const char *a, const char *b, const char *c) {
+    const char *pattern[] = {a, b, c};
+    return cap_token_find(view, 0, ca_token_count(view.tokens), pattern, 3) >= 0;
+}
+
+static int has_use_testplan(cap_tokens view) {
+    const char *qualified[] = {"#", "pragma", "unisa", "use", "cxlib", ".", "testplan"};
+    const char *local[] = {"#", "pragma", "unisa", "use", "testplan"};
+    int n = ca_token_count(view.tokens);
+    return cap_token_find(view, 0, n, qualified, 7) >= 0 ||
+           cap_token_find(view, 0, n, local, 5) >= 0;
+}
+
+/* Verify consumer idx binds to TP_BATCH_CAP / TP_TOOL_SRC_CAP without 2048/4096 regressions. */
+static int check_consumer(int idx, cap_tokens c) {
+    if (!c.tokens) return 0;
+    int ok = 0;
+    switch (idx) {
+    case 0: /* tools/cxlib/testplan.cx */
+        ok = has_token_seq(c, "TP_BATCH_CAP", "=", "4096") &&
+             has_token_seq(c, "TP_TOOL_SRC_CAP", "=", "4096") &&
+             has_token_seq(c, "TP_BATCH_CAP", "*", "14") &&
+             has_token_seq(c, "bf", ",", "TP_BATCH_CAP") &&
+             !has_token_seq(c, "bf", ",", "2048");
+        break;
+    case 1: /* tools/affected.cx */
+        ok = has_use_testplan(c) &&
+             has_token_seq(c, "define", "MAXBATCH", "TP_BATCH_CAP") &&
+             has_token_seq(c, "TP_BATCH_CAP", "*", "2") &&
+             !has_token_seq(c, "define", "MAXBATCH", "2048");
+        break;
+    case 2: /* tools/cxlib/s9sched.cx */
+        ok = has_use_testplan(c) &&
+             has_token_seq(c, "define", "SS_MAX", "TP_BATCH_CAP") &&
+             has_token_seq(c, "ss_buf", "[", "TP_BATCH_CAP") &&
+             !has_token_seq(c, "define", "SS_MAX", "2048");
+        break;
+    case 3: /* tools/all-waves.cx */
+        ok = has_use_testplan(c) &&
+             has_token_seq(c, "tier_ids", "[", "TP_BATCH_CAP") &&
+             has_token_seq(c, "tier_count", "==", "TP_BATCH_CAP") &&
+             !has_token_seq(c, "tier_ids", "[", "2048");
+        break;
+    case 4: /* tools/osx-lane.cx */
+        ok = has_use_testplan(c) &&
+             has_token_seq(c, "define", "OL_MAX", "TP_BATCH_CAP") &&
+             !has_token_seq(c, "define", "OL_MAX", "2048");
+        break;
+    case 5: /* tools/osx-sentinel.cx */
+        ok = has_use_testplan(c) &&
+             has_token_seq(c, "ids", "[", "TP_BATCH_CAP") &&
+             has_token_seq(c, "count", "==", "TP_BATCH_CAP") &&
+             has_token_seq(c, "selected", ",", "TP_BATCH_CAP") &&
+             !has_token_seq(c, "ids", "[", "2048");
+        break;
+    case 6: /* tools/batch-packages-gen.cx */
+        ok = has_use_testplan(c) &&
+             has_token_seq(c, "MAXB", "=", "TP_BATCH_CAP") &&
+             !has_token_seq(c, "MAXB", "=", "2048");
+        break;
+    case 7: /* tools/prerun-drive.cx (all 3 batch sites: PD_MAX_IDS, pd_bmeta, pd_pq_ids) */
+        ok = has_use_testplan(c) &&
+             has_token_seq(c, "define", "PD_MAX_IDS", "TP_BATCH_CAP") &&
+             has_token_seq(c, "pd_bmeta", "[", "TP_BATCH_CAP") &&
+             has_token_seq(c, "tp_visit_prepare_meta", "(", "(") &&
+             has_token_seq(c, "pd_pq_ids", "[", "TP_BATCH_CAP") &&
+             has_token_seq(c, "pd_npq", "==", "TP_BATCH_CAP") &&
+             !has_token_seq(c, "define", "PD_MAX_IDS", "2048") &&
+             !has_token_seq(c, "pd_pq_ids", "[", "2048") &&
+             !has_token_seq(c, "pd_npq", "<", "2048");
+        break;
+    case 8: /* tools/s9-shards.cx */
+        ok = has_use_testplan(c) &&
+             has_token_seq(c, "define", "S9_MAX", "TP_BATCH_CAP") &&
+             !has_token_seq(c, "define", "S9_MAX", "2048");
+        break;
+    case 9: /* tools/s9-shards-flow.cx */
+        ok = has_use_testplan(c) &&
+             has_token_seq(c, "define", "SF_MAX", "TP_BATCH_CAP") &&
+             !has_token_seq(c, "define", "SF_MAX", "2048");
+        break;
+    case 10: /* tools/speed-ledger.cx */
+        ok = has_use_testplan(c) &&
+             has_token_seq(c, "define", "SL_MAXB", "TP_BATCH_CAP") &&
+             !has_token_seq(c, "define", "SL_MAXB", "2048");
+        break;
+    case 11: /* tools/tlib-cover.cx */
+        ok = has_use_testplan(c) &&
+             has_token_seq(c, "define", "MAXF", "TP_BATCH_CAP") &&
+             !has_token_seq(c, "define", "MAXF", "2048");
+        break;
+    case 12: /* tools/tool-index.cx */
+        ok = has_use_testplan(c) &&
+             has_token_seq(c, "define", "MAXF", "TP_TOOL_SRC_CAP") &&
+             !has_token_seq(c, "define", "MAXF", "2048");
+        break;
+    case 13: /* tools/tlib-admit.cx */
+        ok = has_use_testplan(c) &&
+             has_token_seq(c, "define", "MAXF", "TP_TOOL_SRC_CAP") &&
+             !has_token_seq(c, "define", "MAXF", "2048");
+        break;
+    case 14: /* tests/tools-compile.cx */
+        ok = has_use_testplan(c) &&
+             has_token_seq(c, "count", ">", "TP_TOOL_SRC_CAP") &&
+             !has_token_seq(c, "count", ">", "2048");
+        break;
+    case 15: /* tools/tier-census.cx */
+        ok = has_use_testplan(c) &&
+             has_token_seq(c, "define", "TC_MAXC", "TP_TOOL_SRC_CAP") &&
+             !has_token_seq(c, "define", "TC_MAXC", "2048");
+        break;
+    case 16: /* tools/posix-census.cx */
+        ok = has_use_testplan(c) &&
+             has_token_seq(c, "define", "PC_MAXF", "TP_TOOL_SRC_CAP") &&
+             !has_token_seq(c, "define", "PC_MAXF", "2048");
+        break;
+    case 17: /* tools/check-out-writers.cx */
+        ok = has_use_testplan(c) &&
+             has_token_seq(c, "names", "[", "TP_TOOL_SRC_CAP") &&
+             has_token_seq(c, "n", "==", "TP_TOOL_SRC_CAP") &&
+             !has_token_seq(c, "names", "[", "2048");
+        break;
+    default: {
+        const char *aliases[] = {"MAXIDS", "MAXB", "MAXB", "MAXB", "MAXB", "MAXID"};
+        ok = idx >= 18 && idx < 24 && has_use_testplan(c) &&
+             has_token_seq(c, "define", aliases[idx - 18], "TP_BATCH_CAP");
+        break;
+    }
+    }
+    return ok;
+}
+
+/* Report candidate literals by source location and syntax. */
+static int scan_literal_lines(const char *path, const char *src, np_buf *rows) {
+    char *code = strip_code(src);
+    if (!code) return -1;
+    int max_continues = 0, line_no = 0;
+    for (char *line = code; *line;) {
+        char *end = strchr(line, '\n');
+        char *lead = line;
+        int old_cap = 0, new_cap = 0, max_decl = 0, directive = 0;
+        line_no++;
+        if (end) *end = 0;
+        while (*lead == ' ' || *lead == '\t') lead++;
+        if (max_continues) {
+            const char *value = lead;
+            while (*value == '(' || *value == '+' || *value == '-' ||
+                   *value == ' ' || *value == '\t') value++;
+            max_decl = *value >= '0' && *value <= '9';
+            max_continues = !*value || (*value == '\\' && !value[1]);
+        }
+        if (*lead == '#') {
+            const char *q = lead + 1;
+            while (*q == ' ' || *q == '\t') q++;
+            if (!strncmp(q, "define", 6) && !is_id_ch(q[6])) {
+                directive = 1;
+                lead = (char *)q + 6;
+            }
+        }
+        for (char *p = lead; *p;) {
+            if (!is_id_ch(*p)) { p++; continue; }
+            char *first = p++;
+            while (is_id_ch(*p)) p++;
+            if (*first >= '0' && *first <= '9') {
+                char *tail;
+                unsigned long v = strtoul(first, &tail, 0);
+                while (tail < p && strchr("uUlL", *tail)) tail++;
+                if (tail == p && v == 2048) old_cap++;
+                if (tail == p && v == 4096) new_cap++;
+            } else {
+                char *q = p;
+                int is_max = 0;
+                for (char *s = first; s + 3 <= p; s++) {
+                    if (!memcmp(s, "MAX", 3)) { is_max = 1; break; }
+                }
+                while (*q == ' ' || *q == '\t') q++;
+                if (*q == '=' && q[1] != '=') {
+                    q++;
+                    while (*q == ' ' || *q == '\t') q++;
+                } else if (!directive) {
+                    continue;
+                }
+                while (*q == '(' || *q == '+' || *q == '-' || *q == ' ' || *q == '\t') q++;
+                if (is_max && *q >= '0' && *q <= '9') max_decl++;
+                if (is_max && ((!directive && !*q) || (*q == '\\' && !q[1])))
+                    max_continues = 1;
+            }
+            directive = 0;
+        }
+        if (old_cap || new_cap || max_decl) {
+            char row[1024], excerpt[121];
+            const char *s = line;
+            size_t n = 0;
+            while (*s == ' ' || *s == '\t') s++;
+            while (*s && n + 1 < sizeof excerpt) {
+                char c = *s++;
+                excerpt[n++] = c == '\t' || c == '\r' ? ' ' : c;
+            }
+            excerpt[n] = 0;
+            const char *categories[] = {"literal-2048", "literal-4096", "numeric-max"};
+            int counts[] = {old_cap, new_cap, max_decl};
+            for (int i = 0; i < 3; i++) if (counts[i]) {
+                if (cx_fmt(row, sizeof row, "%s\t%d\t%s\t%d\t%s\n",
+                           path, line_no, categories[i], counts[i], excerpt)) {
+                    mm_free(code);
+                    return -1;
+                }
+                np_puts(rows, row);
+            }
+        }
+        if (!end) break;
+        line = end + 1;
+    }
+    mm_free(code);
+    return 0;
+}
+
+static int scan_literal_tree(const char *path, np_buf *rows) {
+    sy_dir_t dir;
+    int got;
+    if (sy_dir_open(&dir, path)) return -1;
+    while ((got = sy_dir_next(&dir)) == 1) {
+        char rel[512];
+        size_t n = strlen(dir.name);
+        if (!strcmp(dir.name, ".") || !strcmp(dir.name, "..")) continue;
+        if (cx_fmt(rel, sizeof rel, "%s/%s", path, dir.name)) { got = -1; break; }
+        if (dir.kind == 'd') {
+            if (scan_literal_tree(rel, rows)) { got = -1; break; }
+        } else if (dir.kind == 'f' &&
+                   ((n >= 3 && !strcmp(dir.name + n - 3, ".cx")) ||
+                    (n >= 2 && (!strcmp(dir.name + n - 2, ".c") || !strcmp(dir.name + n - 2, ".h")))) &&
+                   strcmp(rel, "tools/check-batch-cap.cx")) {
+            size_t sn = 0;
+            char *src = cx_read(rel, &sn);
+            if (!src) { got = -1; break; }
+            int rc = scan_literal_lines(rel, src, rows);
+            free(src);
+            if (rc) { got = -1; break; }
+        }
+    }
+    sy_dir_close(&dir);
+    return got < 0 ? -1 : 0;
+}
+
+static int literal_report(void) {
+    np_buf rows = {0};
+    int rc = scan_literal_tree("tools", &rows);
+    if (scan_literal_tree("tests", &rows)) rc = -1;
+    sy_printf("path\tline\tcategory\tcount\texcerpt\n");
+    if (rows.p) sy_printf("%s", rows.p);
+    free(rows.p);
+    if (rc) sy_printf("BATCH_CAP_LITERAL_REPORT\tstatus=INCOMPLETE\n");
+    return 0;
+}
+
+/* Build synthetic N-row batches.tsv and 1-row coverage.tsv in memory or on disk. */
+static char *synth_batches(int nrows, size_t *out_len) {
+    size_t cap = (size_t)nrows * 256 + 512;
+    char *b = (char *)mm_alloc((long)cap);
+    if (!b) return 0;
+    size_t n = 0;
+    const char *hdr = "id\timplementation\tlayer\tsource\tmode\tplatform\tbudget_seconds\tmaterials\tentry\targs\tcoverage\texpect\theaders\ttier\n";
+    size_t hl = strlen(hdr);
+    mm_copy(b, (long)cap, hdr, (long)hl);
+    n = hl;
+    for (int i = 0; i < nrows; i++) {
+        char row[256];
+        int w = snprintf(row, sizeof row,
+                         "bcap-%04d\tIMPLEMENTED\tinterfaces\ttools/check-batch-cap.cx\tSOURCE\tlnx/x86_64\t55\t-\ttools/check-batch-cap.cx\t-\tinterfaces.bcap\trc0:CHECK_BATCH_CAP\tproduct\tcommit\n",
+                         i);
+        if (w <= 0 || n + (size_t)w + 1 >= cap) { mm_free(b); return 0; }
+        mm_copy(b + n, (long)(cap - n), row, (long)w);
+        n += (size_t)w;
+    }
+    b[n] = 0;
+    if (out_len) *out_len = n;
+    return b;
+}
+
+static const char *SYNTH_COV =
+    "id\tlayer\timplementation\texpected_or_gap\tsource\n"
+    "interfaces.bcap\tinterfaces\tIMPLEMENTED_SEPARATE_BATCH\tsynthetic batch capacity test\ttools/check-batch-cap.cx\n";
+
+/* Production max-width S9_PENDING mock (~144 bytes/row -> 4096 rows = ~590 KiB > old 512 KiB ss_buf). */
+static int g_s9_want_n = 0;
+static int mock_s9_list(const char *run, char *buf, int cap) {
+    (void)run;
+    int off = 0;
+    for (int i = 0; i < g_s9_want_n; i++) {
+        int w = snprintf(buf + off, (size_t)(cap - off),
+                         "S9_PENDING\tslice=slice-%068d-%04d\ttier=0\talone=0\theavy=0\tbudget=55\tmaterials=10\tneed=120\n",
+                         0, i);
+        if (w <= 0 || off + w >= cap - 64) return -1;
+        off += w;
+    }
+    int w = snprintf(buf + off, (size_t)(cap - off), "S9_PENDING_SUMMARY\tpending=%d\tslices=%d\n", g_s9_want_n, g_s9_want_n);
+    if (w <= 0 || off + w >= cap) return -1;
+    return 0;
+}
+static int mock_s9_spawn(ParJob *j, const char *run, const char *leaf, int deadline_s) {
+    (void)j; (void)run; (void)leaf; (void)deadline_s;
+    return -1;
+}
+
+static int run_proc(char **av, const char *cwd, int secs, int *rc_out, char *obuf, size_t ocap) {
+    np_result r = {0};
+    char why[256];
+    int tr = np_run(av, cwd, 0, secs, &r, why, sizeof why);
+    *rc_out = tr ? 124 : r.rc;
+    if (obuf && ocap > 0) {
+        obuf[0] = 0;
+        size_t n = 0;
+        if (r.out && r.outn > 0) {
+            size_t c = r.outn < ocap - 1 ? r.outn : ocap - 1;
+            mm_copy(obuf, (long)ocap, r.out, (long)c);
+            n += c;
+        }
+        if (r.err && r.errn > 0 && n + 1 < ocap) {
+            size_t c = r.errn < ocap - 1 - n ? r.errn : ocap - 1 - n;
+            mm_copy(obuf + n, (long)(ocap - n), r.err, (long)c);
+            n += c;
+        }
+        obuf[n] = 0;
+    }
+    np_free(&r);
+    return tr;
+}
+
+static void count_batch_cb(const tp_batch_view *v, void *ctx) { (void)v; (*(int *)ctx)++; }
+static void count_cov_cb(const tp_coverage_view *v, void *ctx) { (void)v; (void)ctx; }
+
+static int prepare_meta_seen;
+static void count_prepare_meta(const char *id, long idn, int planned, int foreign) {
+    (void)id;
+    (void)idn;
+    (void)planned;
+    (void)foreign;
+    prepare_meta_seen++;
+}
+
+static void check_prepare_guard(void) {
+    size_t n = 0, sn = 0;
+    char *src = cx_read("tools/prerun-drive.cx", &sn);
+    cap_tokens view = {ca_tokens(src), 0, 0, -1};
+    char *batches = synth_batches(tp_batch_cap() + 1, &n);
+    const char *propagate[] = {"if","(","pd_load_repo_batch_meta","(","root",")",")","return","2",";"};
+    const char *load[] = {"int","rc","=","tp_visit_prepare_meta","(","(","const","char","*",")","b",",","n",",","pd_add_batch_meta",")",";"};
+    const char *refuse[] = {"if","(","rc",")","return","pd_refuse","(","@prepare-batch-meta-limit",")",";"};
+    int start, end, meta_start, meta_end;
+    int wired = ca_function(view.tokens, "pd_cmd_prepare", &start, &end) &&
+                cap_token_find(view, start, end, propagate, 10) >= 0 &&
+                ca_function(view.tokens, "pd_load_repo_batch_meta", &meta_start, &meta_end) &&
+                cap_token_find(view, meta_start, meta_end, load, 17) >= 0 &&
+                cap_token_find(view, meta_start, meta_end, refuse, 10) >= 0;
+    prepare_meta_seen = 0;
+    int rc = batches ? tp_visit_prepare_meta(batches, n, count_prepare_meta) : 0;
+    bck(wired && batches && rc == -1 && prepare_meta_seen == tp_batch_cap(),
+        "prerun-prepare-refuses-4097");
+    if (batches) mm_free(batches);
+    ca_tokens_free(view.tokens);
+    if (src) free(src);
+}
+
+/* The production command can be replayed separately with the cold compiler. */
+static void check_prepare_cli(void) {
+    char tmp[4096], tests[4200], registry[4300], domain[4300], out[4200];
+    char log[512] = {0};
+    if (sy_mkdtemp(sy_tmpdir(), "unisacc-session-bcap-prepare", tmp, sizeof tmp)) {
+        bck(0, "prerun-prepare-fixture");
+        return;
+    }
+    if (cx_fmt(tests, sizeof tests, "%s/tests", tmp) ||
+        cx_fmt(registry, sizeof registry, "%s/batches.tsv", tests) ||
+        cx_fmt(domain, sizeof domain, "%s/batch-domain-index.tsv", tests) ||
+        cx_fmt(out, sizeof out, "%s/output", tmp)) {
+        sy_rmdir(tmp);
+        bck(0, "prerun-prepare-fixture-path");
+        return;
+    }
+    size_t n = 0;
+    char *rows = synth_batches(tp_batch_cap() + 1, &n);
+    int fixture = rows && !sy_mkdir(tests, 0700) && !cx_write(registry, rows, n) &&
+                  !cx_write(domain, "id\tdomain\n", 10);
+    if (rows) mm_free(rows);
+    int rc = 0, tr = -1;
+    long start = sy_now_ms();
+    if (fixture) {
+        char *argv[] = {"sh", "./unisacc.com", "tools/prerun-drive.cx", "--", "prepare",
+                        "--from-chain-dir", tmp, "--root", tmp, "--out", out, 0};
+        tr = run_proc(argv, g_root, 35, &rc, log, sizeof log);
+    }
+    long elapsed = sy_now_ms() - start;
+    int clean = 1;
+    if (sy_exists(registry) == 1 && sy_unlink(registry)) clean = 0;
+    if (sy_exists(domain) == 1 && sy_unlink(domain)) clean = 0;
+    if (sy_exists(tests) == 1 && sy_rmdir(tests)) clean = 0;
+    if (sy_rmdir(tmp)) clean = 0;
+    sy_printf("BATCH_CAP_PREPARE\trc=%d\telapsed_ms=%ld\tclean=%d\n", rc, elapsed, clean);
+    if (log[0]) sy_printf("%s", log);
+    bck(fixture && !tr && rc == 2 && elapsed >= 0 && clean &&
+        strstr(log, "PRERUN_DRIVE\tREFUSE\treason=prepare-batch-meta-limit"),
+        "prerun-prepare-cli-refuses-4097");
+}
+
+static void check_nightly_capture(void) {
+    size_t n = 0;
+    char *src = cx_read("tools/s9-nightly.cx", &n);
+    cap_tokens view = {ca_tokens(src), 0, 0, -1};
+    const char *guard[] = {"if","(","ss_pending_truncated","(","verb",",","r",".","outn",",","(","size_t",")","ocap",")",")","{"};
+    const char *refuse[] = {"np_free","(","&","r",")",";","return","2",";"};
+    int start, end, at = -1, close = -1;
+    if (ca_function(view.tokens, "invoke", &start, &end))
+        at = cap_token_find(view, start, end, guard, 17);
+    if (at >= 0) close = ca_token_end(view.tokens, at + 16);
+    int wired = close >= 0 && cap_token_find(view, at + 17, close, refuse, 9) >= 0;
+    bck(wired && !ss_pending_truncated("pending", 63, 64) &&
+        ss_pending_truncated("pending", 64, 64) && ss_pending_truncated("pending", 65, 64) &&
+        !ss_pending_truncated("step", 65, 64), "s9-nightly-pending-truncation-refused");
+    ca_tokens_free(view.tokens);
+    if (src) free(src);
+}
+
+int main(int argc, char **argv) {
+    if (argc == 2 && !strcmp(argv[1], "--report-literals")) return literal_report();
+    if (sy_cwd(g_root, sizeof g_root) < 0) return 2;
+    if (argc == 2 && !strcmp(argv[1], "--prepare-cli")) {
+        check_prepare_cli();
+        sy_printf("CHECK_BATCH_CAP\tpassed=%d\tfailed=%d\n", g_pass, g_fail);
+        return g_fail ? 1 : 0;
+    }
+    if (argc != 1) return 2;
+
+    /* (1) Runtime & limits.tsv single-source verification */
+    bck(tp_batch_cap() == 4096 && tp_tool_src_cap() == 4096, "single-source-runtime-4096");
+    {
+        size_t ln = 0;
+        char *lim = cx_read("exec/facts/limits.tsv", &ln);
+        int ok = lim && strstr(lim, "TP_BATCH_CAP\t4096\ttools/cxlib/testplan.cx\tTP_BATCH_CAP = {}") != 0 &&
+                 strstr(lim, "TP_TOOL_SRC_CAP\t4096\ttools/cxlib/testplan.cx\tTP_TOOL_SRC_CAP = {}") != 0;
+        if (lim) free(lim);
+        bck(ok, "limits-tsv-anchors-single-source");
+    }
+
+    /* (2) Traverse all 24 consumers: consistency PASS + mutation to 2048 MUST FAIL */
+    const char *cfiles[24] = {
+        "tools/cxlib/testplan.cx",
+        "tools/affected.cx",
+        "tools/cxlib/s9sched.cx",
+        "tools/all-waves.cx",
+        "tools/osx-lane.cx",
+        "tools/osx-sentinel.cx",
+        "tools/batch-packages-gen.cx",
+        "tools/prerun-drive.cx",
+        "tools/s9-shards.cx",
+        "tools/s9-shards-flow.cx",
+        "tools/speed-ledger.cx",
+        "tools/tlib-cover.cx",
+        "tools/tool-index.cx",
+        "tools/tlib-admit.cx",
+        "tests/tools-compile.cx",
+        "tools/tier-census.cx",
+        "tools/posix-census.cx",
+        "tools/check-out-writers.cx",
+        "tools/prerun-inputs.cx",
+        "tools/daily-ready.cx",
+        "tools/evidence-cover.cx",
+        "tools/dvledger.cx",
+        "tools/s9-profile.cx",
+        "tools/batch-timing.cx"
+    };
+    const char *cnames[24] = {
+        "testplan", "affected", "s9sched", "all-waves", "osx-lane", "osx-sentinel",
+        "batch-packages-gen", "prerun-drive", "s9-shards", "s9-shards-flow",
+        "speed-ledger", "tlib-cover", "tool-index", "tlib-admit", "tools-compile",
+        "tier-census", "posix-census", "check-out-writers",
+        "prerun-inputs", "daily-ready", "evidence-cover", "dvledger", "s9-profile", "batch-timing"
+    };
+    const char *csyms[24] = {
+        "TP_BATCH_CAP", "TP_BATCH_CAP", "TP_BATCH_CAP", "TP_BATCH_CAP", "TP_BATCH_CAP",
+        "TP_BATCH_CAP", "TP_BATCH_CAP", "TP_BATCH_CAP", "TP_BATCH_CAP", "TP_BATCH_CAP",
+        "TP_BATCH_CAP", "TP_BATCH_CAP", "TP_TOOL_SRC_CAP", "TP_TOOL_SRC_CAP",
+        "TP_TOOL_SRC_CAP", "TP_TOOL_SRC_CAP", "TP_TOOL_SRC_CAP", "TP_TOOL_SRC_CAP",
+        "TP_BATCH_CAP", "TP_BATCH_CAP", "TP_BATCH_CAP", "TP_BATCH_CAP", "TP_BATCH_CAP", "TP_BATCH_CAP"
+    };
+    int mut_killed = 0;
+    for (int i = 0; i < 24; i++) {
+        size_t sn = 0;
+        char *src = cx_read(cfiles[i], &sn);
+        char tag[96];
+        cap_tokens original = {ca_tokens(src), 0, 0, -1};
+        if (src) free(src);
+        cx_fmt(tag, sizeof tag, "consumer.%s", cnames[i]);
+        bck(check_consumer(i, original), tag);
+        cap_tokens changed = {original.tokens, i == 0 ? "4096" : csyms[i], "2048", -1};
+        int mok = original.tokens && !check_consumer(i, changed);
+        if (mok) mut_killed++;
+        cx_fmt(tag, sizeof tag, "mutant-2048-killed.%s", cnames[i]);
+        bck(mok, tag);
+        if (i == 7) {
+            const char *pq[] = {"pd_pq_ids", "[", "TP_BATCH_CAP"};
+            const char *bm[] = {"pd_bmeta", "[", "TP_BATCH_CAP"};
+            int end = ca_token_count(original.tokens);
+            int pq_at = cap_token_find(original, 0, end, pq, 3);
+            int bm_at = cap_token_find(original, 0, end, bm, 3);
+            cap_tokens pq_changed = {original.tokens, "TP_BATCH_CAP", "2048", pq_at + 2};
+            cap_tokens bm_changed = {original.tokens, "TP_BATCH_CAP", "4096", bm_at + 2};
+            bck(pq_at >= 0 && !check_consumer(7, pq_changed), "mutant-2048-killed.prerun-drive-pd-pq-ids");
+            bck(bm_at >= 0 && !check_consumer(7, bm_changed), "mutant-4096-hardcoded-killed.prerun-drive-pd-bmeta");
+        }
+        ca_tokens_free(original.tokens);
+    }
+    bck(mut_killed == 24, "all-24-consumer-mutants-killed");
+
+    {
+        np_buf mutation = {0};
+        int rc = scan_literal_lines("tools/batch-probe.cx",
+            "int batch_ids[2048];\nenum { MAX_NEW_BATCHES =\n    3072 };\n", &mutation);
+        bck(!rc && mutation.p && strstr(mutation.p, "\tliteral-2048\t") &&
+            strstr(mutation.p, "\tnumeric-max\t"), "literal-inventory-detects-array-and-numeric-max");
+        free(mutation.p);
+    }
+
+    /* (4a) In-process tp_visit behavior at 2100, 4000, and 4097 (over-limit) */
+    {
+        int counts[3] = {2100, 4000, 4097};
+        for (int k = 0; k < 3; k++) {
+            size_t bn = 0;
+            char *bt = synth_batches(counts[k], &bn);
+            tp_summary sum;
+            char why[256];
+            int seen = 0;
+            tp_observer ob = {count_batch_cb, count_cov_cb, &seen};
+            int rc = bt ? tp_visit(g_root, bt, bn, SYNTH_COV, strlen(SYNTH_COV), &ob, &sum, why, sizeof why) : -1;
+            if (bt) mm_free(bt);
+            if (counts[k] <= 4096) {
+                char tag[64];
+                cx_fmt(tag, sizeof tag, "tp-visit-accepts-%d", counts[k]);
+                bck(rc == 0 && sum.batches == counts[k] && seen == counts[k], tag);
+            } else {
+                bck(rc != 0 && strstr(why, "table-limit row=4097") != 0, "tp-visit-refuses-4097");
+            }
+        }
+    }
+
+    /* (4b) cxlib.s9sched ss_buf production max-width boundary at 2100, 4096, and 4097 */
+    {
+        ss_ops ops;
+        memset(&ops, 0, sizeof ops);
+        ops.hcap = 1; ops.extra = 1; ops.closes = 1; ops.outer = 300;
+        ops.list = mock_s9_list; ops.spawn = mock_s9_spawn; ops.sched_sha = "synthetic";
+        long ms = 0;
+        g_s9_want_n = 2100;
+        bck(ss_steps_par(&ops, "/tmp", 1, 0, &ms) == 3, "s9sched-maxwidth-accepts-2100");
+        g_s9_want_n = 4096;
+        bck(ss_steps_par(&ops, "/tmp", 1, 0, &ms) == 3, "s9sched-maxwidth-ssbuf-accepts-4096");
+        g_s9_want_n = 4097;
+        bck(ss_steps_par(&ops, "/tmp", 1, 0, &ms) == 1, "s9sched-maxwidth-refuses-4097");
+    }
+
+
+    check_nightly_capture();
+    check_prepare_guard();
+    sy_printf("CHECK_BATCH_CAP\tpassed=%d\tfailed=%d\n", g_pass, g_fail);
+    return g_fail ? 1 : 0;
+}

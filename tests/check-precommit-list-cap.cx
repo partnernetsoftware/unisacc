@@ -1,8 +1,8 @@
-/* tests/check-precommit-list-cap.cx -- 真实调用 precommit 门入口(UNISACC_PRECOMMIT_SERIAL=1 强制串行):
- * (1) >1MiB 输出中 1MiB 后 unknown-coverage row= 被拒;
- * (2) UNISACC_PRECOMMIT_LIST_MAX=1048576 收紧上限时具名拒绝 runlist-output-exceeded-cap-1048576 且 rc!=0;
- * (3) 正常大小输出带 PLAN metadata_valid=1 时 rc0 且 blocked=0;
- * (4) 小输出带 PLAN metadata_valid=0 时 rc!=0 且含 metadata_valid!=1 (证明门真消费 PLAN). */
+/* tests/check-precommit-list-cap.cx -- 真实调用 precommit 门入口(UNISACC_PRECOMMIT_SERIAL=1 强制串行, 支持 --part after-1mib|tighten-cap|plan-pass|plan-deny|all):
+ * (1) >1MiB 输出中 1MiB 后 unknown-coverage row= 被拒(after-1mib);
+ * (2) UNISACC_PRECOMMIT_LIST_MAX=1048576 收紧上限时具名拒绝 runlist-output-exceeded-cap-1048576 且 rc!=0(tighten-cap);
+ * (3) 正常大小输出带 PLAN metadata_valid=1 时 rc0 且 blocked=0(plan-pass);
+ * (4) 小输出带 PLAN metadata_valid=0 时 rc!=0 且含 metadata_valid!=1(plan-deny). */
 #pragma unisa use sys.fs
 #pragma unisa use sys.env
 #pragma unisa use sys.io
@@ -12,6 +12,12 @@
 #pragma unisa use text.text
 #pragma unisa use text.fmt
 #pragma unisa use mem.heap
+
+#define PART_AFTER_1MIB  1
+#define PART_TIGHTEN_CAP 2
+#define PART_PLAN_PASS   4
+#define PART_PLAN_DENY   8
+#define PART_ALL         15
 
 static int failed;
 static void ck(int ok, const char *name) {
@@ -38,12 +44,60 @@ static int run_cmd(char **argv, const char *dir, char *out, long cap) {
     if (sy_wait_status(pid, 0, &ex, &code, &sig) != pid || !ex) return -1;
     return code;
 }
+static int write_large_run_cx(const char *tmp) {
+    char p[4400];
+    const char *src =
+        "#pragma unisa use sys.io\n"
+        "int main(void) {\n"
+        "    char pad[1025]; for (int i = 0; i < 1024; i++) pad[i] = 'x'; pad[1024] = 0;\n"
+        "    for (int j = 0; j < 1050; j++) sy_printf(\"BATCH\\t%d\\t%s\\n\", j, pad);\n"
+        "    sy_printf(\"unknown-coverage row=999 id=after-1mib\\nPLAN\\tmetadata_valid=0\\n\");\n"
+        "    return 2;\n"
+        "}\n";
+    if (cx_fmt(p, sizeof p, "%s/tests/run.cx", tmp)) return -1;
+    return cx_write(p, src, (size_t)tx_len(src, 4096)) ? -1 : 0;
+}
+static int write_small_run_cx(const char *tmp, int valid) {
+    char p[4400];
+    const char *src = valid
+        ? "#pragma unisa use sys.io\nint main(void) { sy_printf(\"PLAN\\tmetadata_valid=1\\n\"); return 0; }\n"
+        : "#pragma unisa use sys.io\nint main(void) { sy_printf(\"PLAN\\tmetadata_valid=0\\n\"); return 2; }\n";
+    if (cx_fmt(p, sizeof p, "%s/tests/run.cx", tmp)) return -1;
+    return cx_write(p, src, (size_t)tx_len(src, 1024)) ? -1 : 0;
+}
+static int stage_file(const char *tmp, const char *rel, char *out, long cap) {
+    char *ga[] = {"git", "-C", (char *)tmp, "add", (char *)rel, 0};
+    return run_cmd(ga, 0, out, cap);
+}
 
-int main(void) {
-    char root[4096], tmp[4400], p[4400], q[4400];
+int main(int argc, char **argv) {
+    char root[4096], tmp[4400], p_prod[4400], p_pc[4400], p[4400], q[4400];
+    const char *precommit_bin = 0;
     static char out[1 << 15];
-    int prep_ok = 1;
+    int prep_ok = 1, mask = PART_ALL, want_large;
+    for (int i = 1; i < argc; i++) {
+        if (tx_eqz(argv[i], "--part") && i + 1 < argc) {
+            const char *pt = argv[++i];
+            if (tx_eqz(pt, "after-1mib")) mask = PART_AFTER_1MIB;
+            else if (tx_eqz(pt, "tighten-cap")) mask = PART_TIGHTEN_CAP;
+            else if (tx_eqz(pt, "plan-pass")) mask = PART_PLAN_PASS;
+            else if (tx_eqz(pt, "plan-deny")) mask = PART_PLAN_DENY;
+            else if (tx_eqz(pt, "all")) mask = PART_ALL;
+            else {
+                sy_eprintf("check-precommit-list-cap: REFUSE unknown --part %s\n", pt);
+                return 2;
+            }
+        } else if (tx_eqz(argv[i], "--precommit") && i + 1 < argc) {
+            precommit_bin = argv[++i];
+        } else {
+            sy_eprintf("check-precommit-list-cap: REFUSE usage [--part after-1mib|tighten-cap|plan-pass|plan-deny|all] [--precommit BIN]\n");
+            return 2;
+        }
+    }
+    want_large = (mask & (PART_AFTER_1MIB | PART_TIGHTEN_CAP)) != 0;
     if (sy_realpath(".", root, sizeof root) < 0) return 2;
+    if (cx_fmt(p_prod, sizeof p_prod, "%s/unisacc.com", root) ||
+        cx_fmt(p_pc, sizeof p_pc, "%s/tools/precommit.cx", root)) return 2;
     if (sy_mkdtemp(sy_tmpdir(), "pc-list-cap-", tmp, sizeof tmp)) return 2;
     if (sy_setenv("UNISACC_PRECOMMIT_SERIAL", "1", 1)) prep_ok = 0;
     {
@@ -59,17 +113,10 @@ int main(void) {
             }
         }
         if (cx_fmt(p, sizeof p, "%s/tests", tmp) || sy_mkdir(p, 0755)) prep_ok = 0;
-        if (cx_fmt(p, sizeof p, "%s/tests/run.cx", tmp)) prep_ok = 0;
-        else {
-            const char *src =
-                "#pragma unisa use sys.io\n"
-                "int main(void) {\n"
-                "    char pad[1025]; for (int i = 0; i < 1024; i++) pad[i] = 'x'; pad[1024] = 0;\n"
-                "    for (int j = 0; j < 1050; j++) sy_printf(\"BATCH\\t%d\\t%s\\n\", j, pad);\n"
-                "    sy_printf(\"unknown-coverage row=999 id=after-1mib\\nPLAN\\tmetadata_valid=0\\n\");\n"
-                "    return 2;\n"
-                "}\n";
-            if (cx_write(p, src, (size_t)tx_len(src, 4096))) prep_ok = 0;
+        if (want_large) {
+            if (write_large_run_cx(tmp) != 0) prep_ok = 0;
+        } else {
+            if (write_small_run_cx(tmp, (mask & PART_PLAN_PASS) != 0) != 0) prep_ok = 0;
         }
         if (cx_fmt(p, sizeof p, "%s/tests/batches.tsv", tmp) || cx_write(p, "id\n", 3)) prep_ok = 0;
         if (cx_fmt(p, sizeof p, "%s/tests/coverage.tsv", tmp) || cx_write(p, "id\n", 3)) prep_ok = 0;
@@ -78,48 +125,57 @@ int main(void) {
             char *gi[] = {"git", "init", "-q", tmp, 0};
             char *gc1[] = {"git", "-C", tmp, "config", "user.name", "t", 0};
             char *gc2[] = {"git", "-C", tmp, "config", "user.email", "t@t", 0};
-            char *gcm[] = {"git", "-C", tmp, "commit", "--allow-empty", "-q", "-m", "init", 0};
-            char *ga[] = {"git", "-C", tmp, "add", "tests/batches.tsv", "tests/coverage.tsv", "tests/run.cx", 0};
-            char *gar[] = {"git", "-C", tmp, "add", "tests/run.cx", 0};
-            char *pc[] = {"sh", "./unisacc.com", "tools/precommit.cx", "--", 0};
+            char *ga0[] = {"git", "-C", tmp, "add", "tests/batches.tsv", "tests/coverage.tsv", "tests/run.cx", 0};
+            char *gcm[] = {"git", "-C", tmp, "commit", "-q", "-m", "init", 0};
+            char *pc[6];
+            if (precommit_bin && precommit_bin[0]) {
+                pc[0] = (char *)precommit_bin; pc[1] = 0;
+            } else {
+                pc[0] = "sh"; pc[1] = p_prod; pc[2] = p_pc; pc[3] = "--"; pc[4] = 0;
+            }
             int git_ok = run_cmd(gi, 0, out, sizeof out) == 0 && run_cmd(gc1, 0, out, sizeof out) == 0 &&
-                         run_cmd(gc2, 0, out, sizeof out) == 0 && run_cmd(gcm, 0, out, sizeof out) == 0 &&
-                         run_cmd(ga, 0, out, sizeof out) == 0;
+                         run_cmd(gc2, 0, out, sizeof out) == 0 && run_cmd(ga0, 0, out, sizeof out) == 0 &&
+                         run_cmd(gcm, 0, out, sizeof out) == 0;
+            if (git_ok && (cx_fmt(p, sizeof p, "%s/tests/batches.tsv", tmp) ||
+                           cx_write(p, "id\n# probe\n", 11) ||
+                           stage_file(tmp, "tests/batches.tsv", out, sizeof out) != 0)) {
+                git_ok = 0;
+            }
             ck(git_ok, "fixture-git-init");
             if (git_ok) {
-            /* 1) >1MiB 扩容检出 1MiB 后 unknown-coverage */
-            int rc = run_cmd(pc, tmp, out, sizeof out);
-            ck(rc != 0 && has(out, tx_len(out, sizeof out), "after-1mib"), "serial-after-1mib-refused");
-            /* 2) 收紧上限 UNISACC_PRECOMMIT_LIST_MAX=1048576 具名拒绝 */
-            ck(!sy_setenv("UNISACC_PRECOMMIT_LIST_MAX", "1048576", 1), "setenv-tighten");
-            rc = run_cmd(pc, tmp, out, sizeof out);
-            ck(rc != 0 && has(out, tx_len(out, sizeof out), "runlist-output-exceeded-cap-1048576"), "serial-tightened-cap-refused");
-            /* 3) 正常大小输出带 PLAN metadata_valid=1 成功通过 */
-            ck(!sy_setenv("UNISACC_PRECOMMIT_LIST_MAX", "16777216", 1), "setenv-default");
-            {
-                const char *ok_src = "#pragma unisa use sys.io\nint main(void) { sy_printf(\"PLAN\\tmetadata_valid=1\\n\"); return 0; }\n";
-                if (cx_fmt(p, sizeof p, "%s/tests/run.cx", tmp) ||
-                    cx_write(p, ok_src, (size_t)tx_len(ok_src, 1024)) ||
-                    run_cmd(gar, 0, out, sizeof out) != 0) {
-                    ck(0, "normal-plan-metadata-valid-passes");
-                } else {
+                int rc;
+                if (mask & PART_AFTER_1MIB) {
+                    /* 1) >1MiB 扩容检出 1MiB 后 unknown-coverage */
                     rc = run_cmd(pc, tmp, out, sizeof out);
-                    ck(rc == 0 && has(out, tx_len(out, sizeof out), "PRECOMMIT\t") &&
-                       has(out, tx_len(out, sizeof out), "blocked=0"), "normal-plan-metadata-valid-passes");
+                    ck(rc != 0 && has(out, tx_len(out, sizeof out), "after-1mib"), "serial-after-1mib-refused");
                 }
-            }
-            /* 4) 反例: 小输出带 PLAN metadata_valid=0 必须具名拒绝 */
-            {
-                const char *bad_src = "#pragma unisa use sys.io\nint main(void) { sy_printf(\"PLAN\\tmetadata_valid=0\\n\"); return 2; }\n";
-                if (cx_fmt(p, sizeof p, "%s/tests/run.cx", tmp) ||
-                    cx_write(p, bad_src, (size_t)tx_len(bad_src, 1024)) ||
-                    run_cmd(gar, 0, out, sizeof out) != 0) {
-                    ck(0, "small-plan-metadata-invalid-refused");
-                } else {
+                if (mask & PART_TIGHTEN_CAP) {
+                    /* 2) 收紧上限 UNISACC_PRECOMMIT_LIST_MAX=1048576 具名拒绝 */
+                    ck(!sy_setenv("UNISACC_PRECOMMIT_LIST_MAX", "1048576", 1), "setenv-tighten");
                     rc = run_cmd(pc, tmp, out, sizeof out);
-                    ck(rc != 0 && has(out, tx_len(out, sizeof out), "metadata_valid!=1"), "small-plan-metadata-invalid-refused");
+                    ck(rc != 0 && has(out, tx_len(out, sizeof out), "runlist-output-exceeded-cap-1048576"), "serial-tightened-cap-refused");
                 }
-            }
+                if (mask & PART_PLAN_PASS) {
+                    /* 3) 正常大小输出带 PLAN metadata_valid=1 成功通过 */
+                    ck(!sy_setenv("UNISACC_PRECOMMIT_LIST_MAX", "16777216", 1), "setenv-default");
+                    if (want_large && (write_small_run_cx(tmp, 1) != 0 || stage_file(tmp, "tests/run.cx", out, sizeof out) != 0)) {
+                        ck(0, "normal-plan-metadata-valid-passes");
+                    } else {
+                        rc = run_cmd(pc, tmp, out, sizeof out);
+                        ck(rc == 0 && has(out, tx_len(out, sizeof out), "PRECOMMIT\t") &&
+                           has(out, tx_len(out, sizeof out), "blocked=0"), "normal-plan-metadata-valid-passes");
+                    }
+                }
+                if (mask & PART_PLAN_DENY) {
+                    /* 4) 反例: 小输出带 PLAN metadata_valid=0 必须具名拒绝 */
+                    if ((want_large || (mask & PART_PLAN_PASS)) &&
+                        (write_small_run_cx(tmp, 0) != 0 || stage_file(tmp, "tests/run.cx", out, sizeof out) != 0)) {
+                        ck(0, "small-plan-metadata-invalid-refused");
+                    } else {
+                        rc = run_cmd(pc, tmp, out, sizeof out);
+                        ck(rc != 0 && has(out, tx_len(out, sizeof out), "metadata_valid!=1"), "small-plan-metadata-invalid-refused");
+                    }
+                }
             }
         }
     }

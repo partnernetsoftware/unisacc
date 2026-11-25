@@ -1,0 +1,991 @@
+diff --git a/tests/batches.tsv b/tests/batches.tsv
+index e1de5dd..969eb13 100644
+--- a/tests/batches.tsv
++++ b/tests/batches.tsv
+@@ -2042,3 +2042,4 @@ releaseseq	IMPLEMENTED	contract	tools/check-releaseseq.cx	SOURCE	lnx/x86_64	55	-
+ prerun-watch	IMPLEMENTED	interfaces	tools/check-prerun-watch.cx	SOURCE	lnx/x86_64	55	-	tools/check-prerun-watch.cx	-	interfaces.prerun-watch	rc0:CHECK_PRERUN_WATCH	product	commit
+ k2-caps-gen	IMPLEMENTED	interfaces	tools/check-k2-caps-gen.cx	SOURCE	lnx/x86_64	45	-	tools/check-k2-caps-gen.cx	-	interfaces.k2-caps-gen	rc0:CHECK_K2_CAPS_GEN	product	commit
+ fwd-cap-contract	IMPLEMENTED	contract	tests/check-fwd-cap.cx	SOURCE	lnx/x86_64	55	-	tests/check-fwd-cap.cx	--product-contract	contract.fwd-cap-contract	rc0:FWD_CAP_CONTRACT	product	commit
++freeze-cut	IMPLEMENTED	interfaces	tools/check-freeze-cut.cx	SOURCE	lnx/x86_64	55	-	tools/check-freeze-cut.cx	-	interfaces.freeze-cut	rc0:CHECK_FREEZE_CUT	product	commit
+diff --git a/tests/coverage.tsv b/tests/coverage.tsv
+index c24cbd0..e98eb5c 100644
+--- a/tests/coverage.tsv
++++ b/tests/coverage.tsv
+@@ -1659,3 +1659,4 @@ contract.releaseseq	contract	IMPLEMENTED_SEPARATE_BATCH	按三段数值选最近
+ interfaces.prerun-watch	interfaces	IMPLEMENTED_SEPARATE_BATCH	prerun-watch v3 resume done-file and pid liveness checks	tools/prerun-watch.cx tools/check-prerun-watch.cx
+ interfaces.k2-caps-gen	interfaces	IMPLEMENTED_SEPARATE_BATCH	0.0.100 B2: exec/facts/k2-caps.tsv 17 个上限事实表生成器 k2-caps-gen.cx(--check/--write 产出 k2-caps-consts.tsv、保留 5 个旧常量别名、核对 19 处消费源表行与改表变异必红)	exec/facts/k2-caps.tsv exec/facts/k2-caps-consts.tsv tools/k2-caps-gen.cx tools/check-k2-caps-gen.cx
+ contract.fwd-cap-contract	contract	IMPLEMENTED_SEPARATE_BATCH	同一转发桩生成器 N=3/340 运行成功；N=354/355/413/1000 以对应符号数及 131072 字节上限具名拒绝	tests/check-fwd-cap.cx cx/compiler/fwdstub.cx
++interfaces.freeze-cut	interfaces	IMPLEMENTED_SEPARATE_BATCH	freeze-cut 一条命令完成编号提交与独立冻结提交(--check/--cut/先红后绿/PIK1/环境与根文件拒绝)	tools/freeze-cut.cx tools/check-freeze-cut.cx
+diff --git a/tests/tools-compile-sources.tsv b/tests/tools-compile-sources.tsv
+index 924eed7..5992a27 100644
+--- a/tests/tools-compile-sources.tsv
++++ b/tests/tools-compile-sources.tsv
+@@ -377,6 +377,7 @@ tools/check-flowrun.cx	regular
+ tools/check-flowsh.cx	regular
+ tools/check-forecast-tier-runtime.cx	regular
+ tools/check-freeze-broadcast.cx	regular
++tools/check-freeze-cut.cx	regular
+ tools/check-freeze-day.cx	regular
+ tools/check-freeze-gate.cx	regular
+ tools/check-freeze-plan.cx	regular
+@@ -1107,6 +1108,7 @@ tools/format-gen.cx	regular
+ tools/formats-elf-text.cx	regular
+ tools/formats-macho-pe.cx	regular
+ tools/freeze-broadcast.cx	regular
++tools/freeze-cut.cx	regular
+ tools/freeze-day.cx	regular
+ tools/freeze-gate.cx	regular
+ tools/freeze-plan.cx	regular
+diff --git a/tools/check-freeze-cut.cx b/tools/check-freeze-cut.cx
+new file mode 100644
+index 0000000..547f857
+--- /dev/null
++++ b/tools/check-freeze-cut.cx
+@@ -0,0 +1,220 @@
++/* tools/check-freeze-cut.cx -- red-then-green contract check for tools/freeze-cut.cx (batch freeze-cut).
++ * Tests precondition refusals (bad version, polluted env, symlink root, missing owner, non-public prev slot,
++ * active prev freeze, dirty product source before cut), single-command --cut (C0a numbering commit + C0b
++ * isolated freeze row commit), --check PASS, and post-cut tamper mutations.
++ * Final line: CHECK_FREEZE_CUT<TAB>passed=N<TAB>failed=M
++ */
++#pragma unisa use fsx.fs
++#pragma unisa use sys.fs
++#pragma unisa use sys.io
++#pragma unisa use sys.proc
++#pragma unisa use sys.posix
++#pragma unisa use text.text
++#pragma unisa use text.fmt
++#pragma unisa use mem.heap
++#pragma unisa use mem.bytes
++#pragma unisa use cxlib.netpack
++
++static int g_pass, g_fail;
++static char g_root[4096];
++
++static void ck(int ok, const char *name, const np_result *r) {
++    if (ok) {
++        g_pass++;
++        printf("PASS\t%s\n", name);
++    } else {
++        g_fail++;
++        printf("FAIL\t%s\trc=%d\tout=%.200s\terr=%.200s\n",
++               name, r ? r->rc : -1,
++               (r && r->out) ? r->out : "",
++               (r && r->err) ? r->err : "");
++    }
++}
++
++static int run_sh(const char *cwd, const char *cmd, int timeout_s, np_result *r) {
++    char *av[4];
++    char why[256];
++    av[0] = "sh"; av[1] = "-c"; av[2] = (char *)cmd; av[3] = 0;
++    mm_fill(r, sizeof *r, 0, sizeof *r);
++    if (np_run(av, cwd, 0, timeout_s, r, why, sizeof why) != 0) return -1;
++    return r->rc;
++}
++
++static int has(const np_result *r, const char *lit) {
++    long ll = tx_len(lit, 512);
++    if (r->out && r->outn > 0 && tx_find(r->out, (long)r->outn, lit, ll) >= 0) return 1;
++    if (r->err && r->errn > 0 && tx_find(r->err, (long)r->errn, lit, ll) >= 0) return 1;
++    return 0;
++}
++
++static int run_fc(const char *env_pre, const char *args, np_result *r) {
++    char cmd[8192];
++    if (cx_fmt(cmd, sizeof cmd,
++               "env -u UNISACC_RUN_CACHE -u UNISACC_CACHE_DIR -u UNISACC_FREEZE_NO_FETCH "
++               "-u UNISACC_BOUND_DEADLINE_MONO %s sh '%s/unisacc.com' '%s/tools/freeze-cut.cx' -- %s",
++               env_pre ? env_pre : "", g_root, g_root, args)) return -1;
++    return run_sh(g_root, cmd, 45, r);
++}
++
++static void init_repo(const char *repo, const char *state67) {
++    char shcmd[8192]; np_result r;
++    cx_fmt(shcmd, sizeof shcmd,
++        "set -e; rm -rf '%s'; mkdir -p '%s/build/layer-api' '%s/release' '%s/plans' '%s/src' '%s/research'; cd '%s'; "
++        "git init -q -b main; git config user.name test; git config user.email t@local; git config commit.gpgsign false; "
++        "printf 'ape\\n' > unisacc.com; printf '{\"version\":\"0.1.2\"}\\n' > unisacc.com.build.json; "
++        "printf '# slot\\tversion\\tclass\\tstate\\tnote\\n"
++        "67\\t0.1.2\\t基线主题(C1+C2)\\t%s\\t编排者 2026-11-25 立项 0.1.2;计划 plans/v0.1.2.md\\n' > build/version-seq.tsv; "
++        "printf 'repo\\ttag\\tcommit\\tversion\\tworkflow\\tworkflow_ref\\tci_run_id\\tape\\n"
++        "org/repo\\tv0.1.2\\t11223344556677889900aabbccddeeff00112233\\t0.1.2\\tcandidate-native.yml\\tv0.1.2\\t0\\tunisacc.com\\n' > release/candidate.tsv; "
++        "printf '# candidate_sid\\tbase_commit\\towner\\tdeadline_epoch_s\\tpaths\\n"
++        "# 0.1.2-FREEZE\\t11223344556677889900aabbccddeeff00112233\\tcc\\t4102444800\\tsrc\\n' > build/freeze.tsv; "
++        "printf '# 0.1.2 计划:基线主题\\nplanned_units=8\\ndone_units=UNMEASURED\\nunplanned_units=0\\na_class=基线主题\\na_files_cap=24\\nfreeze_at=TBD\\n' > plans/v0.1.2.md; "
++        "printf 'p\\t1\\n' > build/tlib-packages.tsv; printf 'h\\t1\\n' > build/iface-hash.tsv; printf 'x\\n' > build/layer-api/x.tsv; "
++        "printf 'int a = 1;\\n' > src/a.c; printf 'doc\\n' > research/r.md; "
++        "git add -A; git commit -qm init",
++        repo, repo, repo, repo, repo, repo, repo, state67);
++    (void)run_sh(g_root, shcmd, 30, &r);
++    np_free(&r);
++}
++
++int main(void) {
++    if (sy_realpath(".", g_root, sizeof g_root) < 0) return 2;
++    int sc = 0;
++    if (fsx_scratch(&sc, "check-fcut-") != 0) return 2;
++    const char *dir = fsx_scratch_dir(sc);
++    if (!dir) return 2;
++
++    char repo[1024], args[2048], shcmd[4096];
++    np_result r;
++
++    cx_fmt(repo, sizeof repo, "%s/repo_cut", dir);
++    init_repo(repo, "\xe5\xb7\xb2\xe5\x85\xac\xe5\xbc\x80"); /* 已公开 */
++
++    /* 1. Bad version format refused */
++    cx_fmt(args, sizeof args, "--cut --repo '%s' --version 0.1 --topic foo --owner cc --no-derive", repo);
++    run_fc("", args, &r);
++    ck(r.rc == 2 && has(&r, "REFUSE\tFREEZE_CUT\tbad-version"), "mut-bad-version-refused", &r);
++    np_free(&r);
++
++    /* 2. Polluted env refused */
++    cx_fmt(args, sizeof args, "--check --repo '%s' --version 0.1.3 --owner cc --no-derive", repo);
++    run_fc("UNISACC_FREEZE_NO_FETCH=1", args, &r);
++    ck(r.rc == 2 && has(&r, "REFUSE\tFREEZE_CUT\tpolluted-env"), "mut-polluted-env-refused", &r);
++    np_free(&r);
++
++    /* 3. Missing owner refused */
++    cx_fmt(args, sizeof args, "--cut --repo '%s' --version 0.1.3 --topic foo --no-derive", repo);
++    run_fc("-u DEVSVC_OWNER -u UNISACC_INTEGRATOR", args, &r);
++    ck(r.rc == 2 && has(&r, "REFUSE\tFREEZE_CUT\towner-unset"), "mut-owner-unset-refused", &r);
++    np_free(&r);
++
++    /* 4. Symlink Root file refused */
++    cx_fmt(shcmd, sizeof shcmd, "cd '%s' && mv unisacc.com unisacc.com.real && ln -s unisacc.com.real unisacc.com", repo);
++    run_sh(g_root, shcmd, 15, &r); np_free(&r);
++    cx_fmt(args, sizeof args, "--cut --repo '%s' --version 0.1.3 --topic foo --owner cc --no-derive", repo);
++    run_fc("", args, &r);
++    ck(r.rc == 2 && has(&r, "REFUSE\tFREEZE_CUT\troot-file-symlink"), "mut-root-symlink-refused", &r);
++    np_free(&r);
++    cx_fmt(shcmd, sizeof shcmd, "cd '%s' && rm -f unisacc.com && mv unisacc.com.real unisacc.com", repo);
++    run_sh(g_root, shcmd, 15, &r); np_free(&r);
++
++    /* 5. Previous version not public refused */
++    char rbad_prev[1024];
++    cx_fmt(rbad_prev, sizeof rbad_prev, "%s/repo_prev", dir);
++    init_repo(rbad_prev, "\xe8\xbf\x9b\xe8\xa1\x8c\xe4\xb8\xad"); /* 进行中 */
++    cx_fmt(args, sizeof args, "--cut --repo '%s' --version 0.1.3 --topic foo --owner cc --no-derive", rbad_prev);
++    run_fc("", args, &r);
++    ck(r.rc == 2 && has(&r, "REFUSE\tFREEZE_CUT\tprev-version-not-public"), "mut-prev-not-public-refused", &r);
++    np_free(&r);
++
++    /* 6. Active unthawed freeze row refused */
++    cx_fmt(shcmd, sizeof shcmd,
++           "cd '%s' && printf '0.1.2-FREEZE\\t11223344556677889900aabbccddeeff00112233\\tcc\\t4102444800\\tsrc\\n' >> build/freeze.tsv && "
++           "git add build/freeze.tsv && git commit -qm active-frz", repo);
++    run_sh(g_root, shcmd, 15, &r); np_free(&r);
++    cx_fmt(args, sizeof args, "--cut --repo '%s' --version 0.1.3 --topic foo --owner cc --no-derive", repo);
++    run_fc("", args, &r);
++    ck(r.rc == 2 && has(&r, "REFUSE\tFREEZE_CUT\tprev-freeze-still-active"), "mut-prev-freeze-active-refused", &r);
++    np_free(&r);
++    cx_fmt(shcmd, sizeof shcmd, "cd '%s' && git reset -q --hard HEAD~1", repo);
++    run_sh(g_root, shcmd, 15, &r); np_free(&r);
++
++    /* 7. Dirty product source before numbering refused */
++    cx_fmt(shcmd, sizeof shcmd, "cd '%s' && printf 'int dirty = 1;\\n' >> src/a.c", repo);
++    run_sh(g_root, shcmd, 15, &r); np_free(&r);
++    cx_fmt(args, sizeof args, "--cut --repo '%s' --version 0.1.3 --topic foo --owner cc --no-derive", repo);
++    run_fc("", args, &r);
++    ck(r.rc == 2 && has(&r, "REFUSE\tFREEZE_CUT\tnumbering-step-touched-product-source"), "mut-dirty-product-refused", &r);
++    np_free(&r);
++    cx_fmt(shcmd, sizeof shcmd, "cd '%s' && git checkout -q -- src/a.c", repo);
++    run_sh(g_root, shcmd, 15, &r); np_free(&r);
++
++    /* 8. --check before cut must fail */
++    cx_fmt(args, sizeof args, "--check --repo '%s' --version 0.1.3 --owner cc --no-derive", repo);
++    run_fc("", args, &r);
++    ck(r.rc != 0, "mut-check-before-cut-fails", &r);
++    np_free(&r);
++
++    /* 9. Happy path --cut + --check + git commit structure check */
++    cx_fmt(args, sizeof args,
++           "--cut --repo '%s' --version 0.1.3 --topic '生命周期与切片车' --a-class '生命周期与切片车' --planned-units 8 --a-files-cap 24 --owner cc --deadline-s 7200 --no-derive",
++           repo);
++    run_fc("", args, &r);
++    ck(r.rc == 0 && has(&r, "FREEZE_CUT\tPASS\tversion=0.1.3\tslot=68"), "cut-single-command-pass", &r);
++    np_free(&r);
++
++    cx_fmt(args, sizeof args, "--check --repo '%s' --version 0.1.3 --owner cc --no-derive", repo);
++    run_fc("", args, &r);
++    ck(r.rc == 0 && has(&r, "FREEZE_CUT\tCHECK_PASS\tversion=0.1.3\tslot=68"), "check-after-cut-pass", &r);
++    np_free(&r);
++
++    /* Verify C0a and C0b git history + candidate.tsv + freeze base_commit + plans/v0.1.3.md */
++    cx_fmt(shcmd, sizeof shcmd,
++        "cd '%s' && "
++        "C0A=$(git rev-parse HEAD~1) && "
++        "BASE=$(awk -F'\\t' '$1==\"0.1.3-FREEZE\"{print $2}' build/freeze.tsv) && "
++        "[ \"$C0A\" = \"$BASE\" ] && "
++        "FDIFF=$(git diff-tree --no-commit-id --name-only -r HEAD) && "
++        "[ \"$FDIFF\" = \"build/freeze.tsv\" ] && "
++        "grep -q '^# 0.1.3 计划:生命周期与切片车' plans/v0.1.3.md && "
++        "grep -q '^planned_units=8$' plans/v0.1.3.md && "
++        "grep -q '^a_files_cap=24$' plans/v0.1.3.md && "
++        "grep -q 'plans/v0.1.3.md' plans/v0.1.3.md && "
++        "awk -F'\\t' 'NR==2{exit($4==\"0.1.3\"?0:1)}' release/candidate.tsv && "
++        "echo STRUCT_OK", repo);
++    run_sh(g_root, shcmd, 15, &r);
++    ck(r.rc == 0 && has(&r, "STRUCT_OK"), "cut-git-structure-exact", &r);
++    np_free(&r);
++
++    /* 10. Tamper mutations caught by --check */
++    /* 10a: freeze commit mixed with product file */
++    cx_fmt(shcmd, sizeof shcmd,
++        "cd '%s' && printf 'int m = 1;\\n' >> src/a.c && git add src/a.c build/freeze.tsv && git commit -q --amend --no-edit", repo);
++    run_sh(g_root, shcmd, 15, &r); np_free(&r);
++    cx_fmt(args, sizeof args, "--check --repo '%s' --version 0.1.3 --owner cc --no-derive", repo);
++    run_fc("", args, &r);
++    ck(r.rc == 2 && has(&r, "REFUSE\tFREEZE_CUT\tfreeze-commit-mixed"), "mut-check-freeze-mixed-refused", &r);
++    np_free(&r);
++
++    /* 10b: tlib after freeze refused (reset back clean first, then commit iface-hash after freeze) */
++    cx_fmt(shcmd, sizeof shcmd,
++        "cd '%s' && git reset -q --hard HEAD@{1} && printf 'h\\t2\\n' > build/iface-hash.tsv && git add build/iface-hash.tsv && git commit -qm late-tlib", repo);
++    run_sh(g_root, shcmd, 15, &r); np_free(&r);
++    cx_fmt(args, sizeof args, "--check --repo '%s' --version 0.1.3 --owner cc --no-derive", repo);
++    run_fc("", args, &r);
++    ck(r.rc == 2 && has(&r, "REFUSE\tFREEZE_CUT\ttlib-after-freeze"), "mut-check-tlib-after-freeze-refused", &r);
++    np_free(&r);
++
++    /* 10c: plan R1 mismatch caught by --check */
++    cx_fmt(shcmd, sizeof shcmd,
++        "cd '%s' && git reset -q --hard HEAD~1 && sed -i '1s/0.1.3/0.1.4/' plans/v0.1.3.md && git add plans/v0.1.3.md && git commit -qm bad-plan", repo);
++    run_sh(g_root, shcmd, 15, &r); np_free(&r);
++    cx_fmt(args, sizeof args, "--check --repo '%s' --version 0.1.3 --owner cc --no-derive", repo);
++    run_fc("", args, &r);
++    ck(r.rc == 2 && has(&r, "REFUSE\tFREEZE_CUT\tplan-version-mismatch"), "mut-check-plan-r1-refused", &r);
++    np_free(&r);
++
++    fsx_scratch_drop(sc);
++    printf("CHECK_FREEZE_CUT\tpassed=%d\tfailed=%d\n", g_pass, g_fail);
++    return g_fail ? 1 : 0;
++}
+diff --git a/tools/freeze-cut.cx b/tools/freeze-cut.cx
+new file mode 100644
+index 0000000..debaaf5
+--- /dev/null
++++ b/tools/freeze-cut.cx
+@@ -0,0 +1,721 @@
++/* tools/freeze-cut.cx -- transactional numbering & freeze cut (C0a numbering + C0b isolated freeze commit).
++ * Implements skills/unisacc-orch-release-train (2) pre-chain checklist:
++ *   sh ./unisacc.com tools/freeze-cut.cx -- --check --version V [--repo DIR] [--owner NAME] [--no-derive] [--skip-root-check]
++ *   sh ./unisacc.com tools/freeze-cut.cx -- --cut --version V --topic TEXT [--a-class TEXT]
++ *       [--planned-units N] [--a-files-cap N] [--repo DIR] [--owner NAME]
++ *       [--deadline-s SECS | --deadline-epoch EPOCH] [--paths STR]
++ *       [--use-existing-plan] [--no-commit] [--no-derive] [--skip-root-check]
++ *
++ * Guarantees:
++ *   1. Clean env (no UNISACC_FREEZE_NO_FETCH/UNISACC_RUN_CACHE/UNISACC_CACHE_DIR/unregistered UNISACC_*).
++ *   2. Regular root files (unisacc.com, unisacc.com.build.json not symlinks unless --skip-root-check).
++ *   3. Previous version in build/version-seq.tsv is public and no old freeze row remains active.
++ *   4. Single numbering commit C0a updates build/version-seq.tsv, release/candidate.tsv (version col),
++ *      plans/v<V>.md (R1/R2/R5 + 19-chain-preflight fields), and build/table-index.tsv (via derive unless --no-derive),
++ *      with zero PIK1 product-input files modified.
++ *   5. Separate final commit C0b appends <V>-FREEZE to build/freeze.tsv with base_commit=C0a (only build/freeze.tsv touched),
++ *      preserving tlib-packages / layer-api / iface-hash ordering before freeze.
++ *
++ * Check: tools/check-freeze-cut.cx (batch freeze-cut).
++ */
++#pragma unisa use fsx.fs
++#pragma unisa use sys.fs
++#pragma unisa use sys.io
++#pragma unisa use sys.env
++#pragma unisa use sys.proc
++#pragma unisa use sys.time
++#pragma unisa use sys.posix
++#pragma unisa use text.text
++#pragma unisa use text.fmt
++#pragma unisa use text.conv
++#pragma unisa use mem.heap
++#pragma unisa use mem.bytes
++#pragma unisa use cxlib.netpack
++#pragma unisa use cxlib.releaseversion
++#pragma unisa use cxlib.releaseseq
++
++static int refuse(const char *reason, const char *detail) {
++    printf("REFUSE\tFREEZE_CUT\t%s\t%s\n", reason, detail && detail[0] ? detail : "-");
++    return 2;
++}
++
++static int fc_under(const char *p, const char *dir) {
++    long dl = (long)tx_len(dir, 64);
++    return p && !strncmp(p, dir, (size_t)dl) && p[dl] == '/';
++}
++
++static int fc_ends(const char *p, const char *sfx) {
++    long pl = (long)tx_len(p, 4096), sl = (long)tx_len(sfx, 64);
++    return pl >= sl && !memcmp(p + pl - sl, sfx, (size_t)sl);
++}
++
++static const char *fc_base(const char *p) {
++    const char *s = strrchr(p, '/');
++    return s ? s + 1 : p;
++}
++
++static int fc_is_pik1_path(const char *p) {
++    static const char *const exact[] = {
++        "iterate/kernel/typekw.tsv", "cxroot.tsv", "build/core-closure.tsv",
++        "tools/bound", "tools/bound.c", "tools/cxbin", "tools/safedel.cx", "tools/lib.sh",
++        "tools/build_ref.sh", "tools/export_ref.sh", "tools/refshim.h", "tools/reffoot.h",
++        "tools/sourceflat.cx", "tools/ape-pack.cx", "tools/release-ape.cx", "tools/cxlib/releaseversion.cx",
++        "tools/candidate-chain.cx", "tools/chain-step.cx", "tools/release-build.cx", "tools/build.cx",
++        "tools/kernel-build.cx", "tools/product-build.cx", "tools/source-job-wave.cx", "tools/pc-wave.cx",
++        "tools/selfhost.cx", "tools/cxlib/nninputs.cx", "tools/cxlib/netpack.cx",
++        "tools/cxlib/kernelsha.cx", "tools/cxlib/productpkg.cx", "tools/cxlib/netsel.cx", 0
++    };
++    static const char *const seed_ok[] = {
++        "tbl.c", "net.c", "json.h", "gen.c", "facts.h", "ident.c",
++        "blob.c", "sha256.h", "pack.c", "compilerpack.c", "ape.c", 0
++    };
++    const char *b; int i;
++    if (!p || !p[0]) return 0;
++    for (i = 0; exact[i]; i++) if (tx_eqz(p, exact[i])) return 1;
++    b = fc_base(p);
++    if (fc_under(p, "seed")) {
++        for (i = 0; seed_ok[i]; i++) if (tx_eqz(b, seed_ok[i])) return 1;
++        return 0;
++    }
++    if (tx_eqz(b, "README.md") || tx_eqz(b, ".DS_Store") || fc_ends(p, ".md")) return 0;
++    if ((fc_ends(p, ".c") || fc_ends(p, ".h")) && (fc_under(p, "probes") || strstr(p, "/probes/") != 0)) return 0;
++    if (fc_under(p, "cx")) {
++        if (tx_eqz(p, "cx/check_memory.cx") || tx_eqz(p, "cx/check_owned.cx")) return 0;
++        return 1;
++    }
++    if (fc_under(p, "exec")) {
++        if (tx_eqz(p, "exec/facts/derive.tsv")) return 0;
++        if (fc_ends(p, "check.sh") || fc_ends(p, "check.py") || fc_ends(p, "check.cx")) return 0;
++        if (fc_under(p, "exec/build") && (strchr(p + 11, '/') != 0 || !fc_ends(p, ".py"))) return 0;
++        return 1;
++    }
++    if (fc_under(p, "src") || fc_under(p, "include") || fc_under(p, "kernel") ||
++        fc_under(p, "weights") || fc_under(p, "ext") || fc_under(p, "flownet")) return 1;
++    return 0;
++}
++
++static int fc_is_hex40(const char *s) {
++    int i;
++    if (!s) return 0;
++    for (i = 0; i < 40; i++) {
++        char c = s[i];
++        if (!((c >= '0' && c <= '9') || (c >= 'a' && c <= 'f'))) return 0;
++    }
++    return s[40] == 0;
++}
++
++static int fc_same_ci(const char *a, long an, const char *b) {
++    long bn = b ? (long)tx_len(b, 64) : 0, i;
++    while (an > 0 && (a[an - 1] == ' ' || a[an - 1] == '\r')) an--;
++    if (!an || an != bn) return 0;
++    for (i = 0; i < an; i++) {
++        char x = a[i], y = b[i];
++        if (x >= 'A' && x <= 'Z') x = (char)(x + 32);
++        if (y >= 'A' && y <= 'Z') y = (char)(y + 32);
++        if (x != y) return 0;
++    }
++    return 1;
++}
++
++static int fc_git(const char *repo, char **argv, char *out, long cap) {
++    np_result r = {0}; char why[200]; int rc; size_t n;
++    if (out && cap > 0) out[0] = 0;
++    if (np_run(argv, repo, 0, 20, &r, why, sizeof why)) { np_free(&r); return -1; }
++    rc = r.rc;
++    if (out && cap > 0) {
++        n = r.outn < (size_t)(cap - 1) ? r.outn : (size_t)(cap - 1);
++        if (n) mm_copy(out, cap, r.out, (long)n);
++        out[n] = 0;
++        while (n && (out[n - 1] == '\n' || out[n - 1] == '\r')) out[--n] = 0;
++    }
++    np_free(&r);
++    return rc;
++}
++
++static int fc_check_env(char *why, size_t cap) {
++    extern char **environ;
++    static const char *leak[] = {"UNISACC_RUN_CACHE", "UNISACC_CACHE_DIR", "UNISACC_FREEZE_NO_FETCH", 0};
++    static const char *ok[] = {
++        "UNISACC_IDENT_HELPER", "UNISACC_PREP_CACHE", "UNISACC_DEVSVC_DIR", "UNISACC_TMPDIR",
++        "UNISACC_BATCH_TIMES", "UNISACC_COMMIT_OWN_RUN", "UNISACC_BOUND_DEADLINE_MONO",
++        "UNISACC_INTEGRATOR", 0
++    };
++    why[0] = 0;
++    for (int i = 0; leak[i]; i++) {
++        const char *v = getenv(leak[i]);
++        if (v != 0) { cx_fmt(why, cap, "var=%s", leak[i]); return 0; }
++    }
++    for (char **ep = environ; ep && *ep; ep++) {
++        const char *eq; long kl; int known = 0;
++        if (strncmp(*ep, "UNISACC_", 8)) continue;
++        eq = strchr(*ep, '='); kl = eq ? (long)(eq - *ep) : (long)strlen(*ep);
++        for (int oi = 0; ok[oi]; oi++) if ((long)strlen(ok[oi]) == kl && !memcmp(*ep, ok[oi], (size_t)kl)) known = 1;
++        if (!known) { cx_fmt(why, cap, "var=%.*s", (int)kl, *ep); return 0; }
++    }
++    return 1;
++}
++
++static int fc_check_root_files(const char *repo, char *detail, size_t cap) {
++    static const char *names[2] = {"unisacc.com", "unisacc.com.build.json"};
++    for (int i = 0; i < 2; i++) {
++        char p[4400]; sy_stat_t st;
++        if (cx_fmt(p, sizeof p, "%s/%s", repo, names[i])) return -1;
++        if (sy_lstat(p, &st) != 0) { cx_fmt(detail, cap, "path=%s status=missing", p); return -1; }
++        if (st.kind != 'f') { cx_fmt(detail, cap, "path=%s kind=%c", p, st.kind); return -2; }
++    }
++    return 0;
++}
++
++static int fc_check_worktree_clean(const char *repo, int *touched_pik1, char *first_path, size_t cap) {
++    char *sv[] = {"git", "-c", "core.quotePath=false", "status", "--porcelain", "--untracked-files=all", 0};
++    np_result r = {0}; char why[200]; size_t at = 0; int dirty = 0;
++    *touched_pik1 = 0;
++    first_path[0] = 0;
++    if (np_run(sv, repo, 0, 20, &r, why, sizeof why) || r.rc != 0) { np_free(&r); return -1; }
++    while (r.out && at < r.outn) {
++        size_t e = at;
++        while (e < r.outn && r.out[e] != '\n') e++;
++        if (e - at > 3) {
++            size_t plen = e - (at + 3);
++            char path[1024];
++            if (plen >= sizeof path) plen = sizeof path - 1;
++            mm_copy(path, sizeof path, r.out + at + 3, (long)plen);
++            path[plen] = 0;
++            dirty++;
++            if (fc_is_pik1_path(path)) {
++                if (!*touched_pik1) cx_fmt(first_path, cap, "path=%s", path);
++                *touched_pik1 = 1;
++            } else if (!first_path[0]) {
++                cx_fmt(first_path, cap, "path=%s", path);
++            }
++        }
++        at = e + 1;
++    }
++    np_free(&r);
++    return dirty;
++}
++
++static int fc_commit_touches_pik1(const char *repo, const char *commit, char *first_path, size_t cap) {
++    char *dv[] = {"git", "-c", "core.quotePath=false", "diff-tree", "--no-commit-id", "--name-only", "-r", "-z", (char *)commit, 0};
++    np_result r = {0}; char why[200]; size_t at = 0;
++    first_path[0] = 0;
++    if (np_run(dv, repo, 0, 20, &r, why, sizeof why) || r.rc != 0) { np_free(&r); return -1; }
++    while (r.out && at < r.outn) {
++        const char *p = r.out + at;
++        long pl = (long)strlen(p);
++        if (pl > 0 && fc_is_pik1_path(p)) {
++            cx_fmt(first_path, cap, "commit=%.12s path=%s", commit, p);
++            np_free(&r);
++            return 1;
++        }
++        at += (size_t)pl + 1;
++    }
++    np_free(&r);
++    return 0;
++}
++
++typedef struct {
++    long max_slot;
++    long target_slot;
++    int found_target;
++    char target_state[64];
++    char target_class[512];
++    char prev_ver[32];
++    int has_non_public_prev;
++    char non_public_detail[160];
++} SeqInfo;
++
++static int fc_inspect_seq(const char *repo, const char *ver, SeqInfo *out) {
++    char p[4400]; size_t n = 0; char *b; long at = 0;
++    static const char pub[] = "\xe5\xb7\xb2\xe5\x85\xac\xe5\xbc\x80"; /* 已公开 */
++    static const char act[] = "\xe8\xbf\x9b\xe8\xa1\x8c\xe4\xb8\xad"; /* 进行中 */
++    mm_fill(out, sizeof *out, 0, sizeof *out);
++    if (cx_fmt(p, sizeof p, "%s/build/version-seq.tsv", repo)) return -1;
++    b = cx_read(p, &n);
++    if (!b) return -1;
++    while (at < (long)n) {
++        long e = at;
++        while (e < (long)n && b[e] != '\n') e++;
++        const char *l = b + at; long ln = e - at;
++        at = e + 1;
++        if (ln <= 0 || l[0] == '#') continue;
++        const char *f[5]; long fl[5]; int c = 0; long s = 0;
++        for (long x = 0; x <= ln && c < 5; x++) {
++            if (x == ln || l[x] == '\t') { f[c] = l + s; fl[c] = x - s; c++; s = x + 1; }
++        }
++        if (c < 4) continue;
++        int64_t slot = 0;
++        if (tx_to_i64(f[0], fl[0], 10, &slot) == 0 && slot > out->max_slot) out->max_slot = (long)slot;
++        char vbuf[32];
++        if (fl[1] > 0 && fl[1] < (long)sizeof vbuf) {
++            mm_copy(vbuf, sizeof vbuf, f[1], fl[1]); vbuf[fl[1]] = 0;
++            if (tx_eqz(vbuf, ver)) {
++                out->found_target = 1;
++                out->target_slot = (long)slot;
++                long cl = fl[2] < (long)sizeof out->target_class - 1 ? fl[2] : (long)sizeof out->target_class - 1;
++                mm_copy(out->target_class, sizeof out->target_class, f[2], cl); out->target_class[cl] = 0;
++                long sl = fl[3] < (long)sizeof out->target_state - 1 ? fl[3] : (long)sizeof out->target_state - 1;
++                mm_copy(out->target_state, sizeof out->target_state, f[3], sl); out->target_state[sl] = 0;
++            } else {
++                int is_pub = (fl[3] == (long)(sizeof pub - 1) && !memcmp(f[3], pub, sizeof pub - 1));
++                int is_act = (fl[3] == (long)(sizeof act - 1) && !memcmp(f[3], act, sizeof act - 1));
++                if (is_pub && rv_valid(vbuf)) cx_fmt(out->prev_ver, sizeof out->prev_ver, "%s", vbuf);
++                if (is_act) {
++                    out->has_non_public_prev = 1;
++                    cx_fmt(out->non_public_detail, sizeof out->non_public_detail, "slot=%lld version=%s state=%.*s",
++                           (long long)slot, vbuf, (int)(fl[3] < 40 ? fl[3] : 40), f[3]);
++                }
++            }
++        }
++    }
++    mm_free(b);
++    return 0;
++}
++
++typedef struct {
++    int has_other_active;
++    char other_detail[160];
++    int found_target;
++    char target_base[64];
++    char target_owner[64];
++    long target_deadline;
++} FreezeInfo;
++
++static int fc_inspect_freeze(const char *repo, const char *ver, FreezeInfo *out) {
++    char p[4400], want_sid[48]; size_t n = 0; char *b; long at = 0, now = sy_wall_s();
++    mm_fill(out, sizeof *out, 0, sizeof *out);
++    cx_fmt(want_sid, sizeof want_sid, "%s-FREEZE", ver);
++    if (cx_fmt(p, sizeof p, "%s/build/freeze.tsv", repo)) return -1;
++    b = cx_read(p, &n);
++    if (!b) return -1;
++    while (at < (long)n) {
++        long e = at;
++        while (e < (long)n && b[e] != '\n') e++;
++        const char *l = b + at; long ln = e - at;
++        at = e + 1;
++        if (ln <= 0 || l[0] == '#') continue;
++        const char *f[5]; long fl[5]; int c = 0; long s = 0;
++        for (long x = 0; x <= ln && c < 5; x++) {
++            if (x == ln || l[x] == '\t') { f[c] = l + s; fl[c] = x - s; c++; s = x + 1; }
++        }
++        if (c < 4) { mm_free(b); return -2; }
++        int64_t dl = 0;
++        if (tx_to_i64(f[3], fl[3], 10, &dl) || dl <= 0) { mm_free(b); return -2; }
++        char sid[64];
++        long sidl = fl[0] < (long)sizeof sid - 1 ? fl[0] : (long)sizeof sid - 1;
++        mm_copy(sid, sizeof sid, f[0], sidl); sid[sidl] = 0;
++        if (tx_eqz(sid, want_sid)) {
++            out->found_target = 1;
++            out->target_deadline = (long)dl;
++            if (fl[1] < (long)sizeof out->target_base) {
++                mm_copy(out->target_base, sizeof out->target_base, f[1], fl[1]);
++                out->target_base[fl[1]] = 0;
++            }
++            if (fl[2] < (long)sizeof out->target_owner) {
++                mm_copy(out->target_owner, sizeof out->target_owner, f[2], fl[2]);
++                out->target_owner[fl[2]] = 0;
++            }
++        } else if ((long)dl > now) {
++            out->has_other_active = 1;
++            cx_fmt(out->other_detail, sizeof out->other_detail, "sid=%s", sid);
++        }
++    }
++    mm_free(b);
++    return 0;
++}
++
++static int fc_check_plan_doc(const char *repo, const char *ver, const char *seq_class, char *why_tag, char *detail, size_t cap) {
++    char p[4400], self_ref[64]; size_t n = 0; char *b;
++    if (cx_fmt(p, sizeof p, "%s/plans/v%s.md", repo, ver)) { cx_fmt(why_tag, 64, "plan-path"); return -1; }
++    if (sy_exists(p) != 1) { cx_fmt(why_tag, 64, "plan-missing"); cx_fmt(detail, cap, "path=%s", p); return -1; }
++    b = cx_read(p, &n);
++    if (!b || n == 0) { if (b) mm_free(b); cx_fmt(why_tag, 64, "plan-unreadable"); cx_fmt(detail, cap, "path=%s", p); return -1; }
++    /* Line 1 check (R1 + R2) */
++    long e1 = 0;
++    while (e1 < (long)n && b[e1] != '\n') e1++;
++    char hdr[32]; cx_fmt(hdr, sizeof hdr, "# %s ", ver);
++    if (e1 < (long)strlen(hdr) || memcmp(b, hdr, strlen(hdr)) != 0) {
++        cx_fmt(why_tag, 64, "plan-version-mismatch");
++        cx_fmt(detail, cap, "path=%s line1=%.80s", p, b);
++        mm_free(b);
++        return -1;
++    }
++    static const char plan_kw[] = "\xe8\xae\xa1\xe5\x88\x92:"; /* 计划: */
++    long pa = tx_find(b, e1, plan_kw, (long)(sizeof plan_kw - 1));
++    if (pa >= 0 && seq_class && seq_class[0]) {
++        long s = pa + (long)(sizeof plan_kw - 1);
++        while (s < e1 && (b[s] == ' ' || b[s] == '\t')) s++;
++        long t = s;
++        while (t < e1 && b[t] != '+' && b[t] != '(' && b[t] != ',' && b[t] != ';') t++;
++        while (t > s && (b[t - 1] == ' ' || b[t - 1] == '\t')) t--;
++        if (t > s && tx_find(seq_class, (long)tx_len(seq_class, 512), b + s, t - s) < 0) {
++            cx_fmt(why_tag, 64, "plan-topic-mismatch");
++            cx_fmt(detail, cap, "plan=%.*s seq_class=%.100s", (int)(t - s), b + s, seq_class);
++            mm_free(b);
++            return -1;
++        }
++    }
++    /* Check 19-chain-preflight fields + R5 self reference */
++    int has_pu = 0, has_ac = 0, has_cap = 0;
++    long at = 0;
++    while (at < (long)n) {
++        long e = at;
++        while (e < (long)n && b[e] != '\n') e++;
++        long ln = e - at;
++        const char *l = b + at;
++        if (ln > 14 && tx_prefix(l, ln, "planned_units=", 14)) {
++            int64_t pu = 0;
++            if (!tx_to_i64(l + 14, ln - 14, 10, &pu) && pu > 0) has_pu = 1;
++        } else if (ln > 8 && tx_prefix(l, ln, "a_class=", 8)) {
++            if (ln > 8) has_ac = 1;
++        } else if (ln > 12 && tx_prefix(l, ln, "a_files_cap=", 12)) {
++            int64_t fc = 0;
++            if (!tx_to_i64(l + 12, ln - 12, 10, &fc) && fc > 0) has_cap = 1;
++        }
++        at = e + 1;
++    }
++    cx_fmt(self_ref, sizeof self_ref, "plans/v%s.md", ver);
++    if (!has_pu || !has_ac || !has_cap || tx_find(b, (long)n, self_ref, (long)strlen(self_ref)) < 0) {
++        cx_fmt(why_tag, 64, "plan-fields-incomplete");
++        cx_fmt(detail, cap, "pu=%d ac=%d cap=%d self_ref=%s", has_pu, has_ac, has_cap, self_ref);
++        mm_free(b);
++        return -1;
++    }
++    mm_free(b);
++    return 0;
++}
++
++static int fc_run_repo_tool(const char *repo, const char *tool, const char *a1, const char *a2, const char *a3) {
++    char cmd[4400], toolp[4400], uc[4400];
++    if (cx_fmt(uc, sizeof uc, "%s/unisacc.com", repo) || sy_exists(uc) != 1) return 0;
++    if (cx_fmt(toolp, sizeof toolp, "%s/%s", repo, tool) || sy_exists(toolp) != 1) return 0;
++    char *av[10]; int ac = 0;
++    av[ac++] = "sh"; av[ac++] = "./unisacc.com"; av[ac++] = (char *)tool; av[ac++] = "--";
++    if (a1) av[ac++] = (char *)a1;
++    if (a2) av[ac++] = (char *)a2;
++    if (a3) av[ac++] = (char *)a3;
++    av[ac] = 0;
++    np_result r = {0}; char why[200];
++    if (np_run(av, repo, 0, 45, &r, why, sizeof why)) { np_free(&r); return -1; }
++    int rc = r.rc;
++    (void)cmd;
++    np_free(&r);
++    return rc;
++}
++
++static int fc_do_check(const char *repo, const char *ver, const char *owner, int no_derive, int skip_root_check) {
++    char detail[512], why_tag[64];
++    if (!rv_valid(ver)) return refuse("bad-version", ver);
++    if (!owner || !owner[0]) return refuse("owner-unset", "pass --owner or set DEVSVC_OWNER");
++    if (!fc_check_env(detail, sizeof detail)) return refuse("polluted-env", detail);
++    if (!skip_root_check) {
++        int rr = fc_check_root_files(repo, detail, sizeof detail);
++        if (rr == -2) return refuse("root-file-symlink", detail);
++        if (rr != 0) return refuse("root-file-missing", detail);
++    }
++    int pik1_dirty = 0;
++    int dirty = fc_check_worktree_clean(repo, &pik1_dirty, detail, sizeof detail);
++    if (dirty < 0) return refuse("git-status-failed", repo);
++    if (pik1_dirty) return refuse("numbering-step-touched-product-source", detail);
++    if (dirty > 0) return refuse("dirty-worktree", detail);
++
++    SeqInfo seq;
++    if (fc_inspect_seq(repo, ver, &seq)) return refuse("version-seq-unreadable", repo);
++    if (seq.has_non_public_prev) return refuse("prev-version-not-public", seq.non_public_detail);
++    if (!seq.found_target) return refuse("target-slot-missing", ver);
++    {   static const char active[] = "\xe8\xbf\x9b\xe8\xa1\x8c\xe4\xb8\xad"; /* 进行中 */
++        if (!tx_eqz(seq.target_state, active)) return refuse("target-slot-not-active", seq.target_state);
++    }
++
++    char cand_p[4400], cand_ver[24];
++    if (cx_fmt(cand_p, sizeof cand_p, "%s/release/candidate.tsv", repo)) return refuse("path-bound", repo);
++    if (rv_load(cand_p, cand_ver)) return refuse("candidate-tsv-malformed", cand_p);
++    if (!tx_eqz(cand_ver, ver)) {
++        cx_fmt(detail, sizeof detail, "candidate=%s want=%s", cand_ver, ver);
++        return refuse("candidate-version-mismatch", detail);
++    }
++
++    if (fc_check_plan_doc(repo, ver, seq.target_class, why_tag, detail, sizeof detail)) {
++        return refuse(why_tag, detail);
++    }
++
++    FreezeInfo frz;
++    int fr = fc_inspect_freeze(repo, ver, &frz);
++    if (fr == -2) return refuse("freeze-table-malformed", repo);
++    if (fr != 0) return refuse("freeze-table-unreadable", repo);
++    if (frz.has_other_active) return refuse("prev-freeze-still-active", frz.other_detail);
++    if (!frz.found_target) return refuse("freeze-row-missing", ver);
++    if (frz.target_deadline <= sy_wall_s()) return refuse("freeze-row-expired", ver);
++    if (!fc_same_ci(frz.target_owner, (long)strlen(frz.target_owner), owner)) {
++        cx_fmt(detail, sizeof detail, "row=%s want=%s", frz.target_owner, owner);
++        return refuse("freeze-owner-mismatch", detail);
++    }
++    if (!fc_is_hex40(frz.target_base)) return refuse("freeze-base-invalid", frz.target_base);
++
++    char frz_c[64], tlib_c[64], diff_out[1024];
++    char *fv[] = {"git", "log", "-1", "--format=%H", "HEAD", "--", "build/freeze.tsv", 0};
++    if (fc_git(repo, fv, frz_c, sizeof frz_c) || !fc_is_hex40(frz_c)) return refuse("freeze-commit-missing", repo);
++    char *dfv[] = {"git", "diff-tree", "--no-commit-id", "--name-only", "-r", frz_c, 0};
++    if (fc_git(repo, dfv, diff_out, sizeof diff_out) || !tx_eqz(diff_out, "build/freeze.tsv")) {
++        return refuse("freeze-commit-mixed", diff_out);
++    }
++    char *av[] = {"git", "merge-base", "--is-ancestor", frz.target_base, frz_c, 0};
++    if (fc_git(repo, av, 0, 0) != 0) return refuse("freeze-base-not-ancestor", frz.target_base);
++    if (fc_commit_touches_pik1(repo, frz.target_base, detail, sizeof detail) != 0) {
++        return refuse("numbering-step-touched-product-source", detail);
++    }
++    char *tv[] = {"git", "log", "-1", "--format=%H", "HEAD", "--", "build/tlib-packages.tsv", "build/layer-api", "build/iface-hash.tsv", 0};
++    if (fc_git(repo, tv, tlib_c, sizeof tlib_c) == 0 && fc_is_hex40(tlib_c) && !tx_eqz(tlib_c, frz_c)) {
++        char *tav[] = {"git", "merge-base", "--is-ancestor", tlib_c, frz_c, 0};
++        if (fc_git(repo, tav, 0, 0) != 0) return refuse("tlib-after-freeze", tlib_c);
++    }
++
++    if (!no_derive) {
++        if (fc_run_repo_tool(repo, "tools/derive.cx", "--check", "--only", "table-index") != 0) {
++            return refuse("table-index-drift", "run derive --write --only table-index");
++        }
++        if (fc_run_repo_tool(repo, "tools/verseq-gen.cx", "--check", 0, 0) != 0) {
++            return refuse("verseq-gen-failed", repo);
++        }
++    }
++
++    printf("FREEZE_CUT\tCHECK_PASS\tversion=%s\tslot=%ld\tbase=%s\tfreeze_commit=%s\n",
++           ver, seq.target_slot, frz.target_base, frz_c);
++    return 0;
++}
++
++static int fc_update_candidate_version(const char *repo, const char *ver) {
++    char p[4400]; size_t n = 0; char *b;
++    if (cx_fmt(p, sizeof p, "%s/release/candidate.tsv", repo)) return -1;
++    b = cx_read(p, &n);
++    if (!b) return -1;
++    long h_end = 0;
++    while (h_end < (long)n && b[h_end] != '\n') h_end++;
++    if (h_end >= (long)n) { mm_free(b); return -1; }
++    int col = 0, vcol = -1; long s = 0;
++    for (long x = 0; x <= h_end; x++) {
++        if (x == h_end || b[x] == '\t') {
++            if (x - s == 7 && !memcmp(b + s, "version", 7)) { vcol = col; break; }
++            col++; s = x + 1;
++        }
++    }
++    if (vcol < 0) { mm_free(b); return -1; }
++    long r1_start = h_end + 1;
++    long r1_end = r1_start;
++    while (r1_end < (long)n && b[r1_end] != '\n') r1_end++;
++    col = 0; s = r1_start;
++    long v_start = -1, v_end = -1;
++    for (long x = r1_start; x <= r1_end; x++) {
++        if (x == r1_end || b[x] == '\t') {
++            if (col == vcol) { v_start = s; v_end = x; break; }
++            col++; s = x + 1;
++        }
++    }
++    if (v_start < 0) { mm_free(b); return -1; }
++    size_t vl = strlen(ver);
++    size_t nn = n - (size_t)(v_end - v_start) + vl;
++    char *nb = mm_alloc((long)nn + 1);
++    if (!nb) { mm_free(b); return -1; }
++    mm_copy(nb, (long)nn + 1, b, v_start);
++    mm_copy(nb + v_start, (long)nn + 1 - v_start, ver, (long)vl);
++    mm_copy(nb + v_start + (long)vl, (long)nn + 1 - v_start - (long)vl, b + v_end, (long)n - v_end);
++    nb[nn] = 0;
++    int rc = sy_write_atomic(p, nb, nn, 0644);
++    mm_free(nb);
++    mm_free(b);
++    return rc;
++}
++
++static int fc_append_line_atomic(const char *path, const char *line) {
++    size_t n = 0; char *b = cx_read(path, &n);
++    if (!b) return -1;
++    int need_nl = (n > 0 && b[n - 1] != '\n') ? 1 : 0;
++    size_t ll = strlen(line);
++    size_t nn = n + (size_t)need_nl + ll + 1;
++    char *nb = mm_alloc((long)nn + 1);
++    if (!nb) { mm_free(b); return -1; }
++    mm_copy(nb, (long)nn + 1, b, (long)n);
++    if (need_nl) nb[n++] = '\n';
++    mm_copy(nb + n, (long)nn + 1 - (long)n, line, (long)ll);
++    nb[n + ll] = '\n';
++    nb[n + ll + 1] = 0;
++    int rc = sy_write_atomic(path, nb, n + ll + 1, 0644);
++    mm_free(nb);
++    mm_free(b);
++    return rc;
++}
++
++static int fc_do_cut(const char *repo, const char *ver, const char *topic, const char *a_class,
++                     long planned_units, long a_files_cap, const char *owner,
++                     long deadline_s, long deadline_epoch, const char *paths,
++                     int use_existing_plan, int no_commit, int no_derive, int skip_root_check) {
++    char detail[512], why_tag[64];
++    if (!rv_valid(ver)) return refuse("bad-version", ver);
++    if (!topic || !topic[0]) return refuse("topic-unset", "pass --topic TEXT");
++    if (!owner || !owner[0]) return refuse("owner-unset", "pass --owner or set DEVSVC_OWNER");
++    if (planned_units <= 0 || a_files_cap <= 0) return refuse("bad-plan-bounds", "planned-units and a-files-cap must be > 0");
++    if (!fc_check_env(detail, sizeof detail)) return refuse("polluted-env", detail);
++    if (!skip_root_check) {
++        int rr = fc_check_root_files(repo, detail, sizeof detail);
++        if (rr == -2) return refuse("root-file-symlink", detail);
++        if (rr != 0) return refuse("root-file-missing", detail);
++    }
++    int pik1_dirty = 0;
++    int dirty = fc_check_worktree_clean(repo, &pik1_dirty, detail, sizeof detail);
++    if (dirty < 0) return refuse("git-status-failed", repo);
++    if (pik1_dirty) return refuse("numbering-step-touched-product-source", detail);
++    if (dirty > 0) return refuse("dirty-worktree", detail);
++
++    SeqInfo seq;
++    if (fc_inspect_seq(repo, ver, &seq)) return refuse("version-seq-unreadable", repo);
++    if (seq.has_non_public_prev) return refuse("prev-version-not-public", seq.non_public_detail);
++    if (seq.found_target) return refuse("version-already-in-seq", ver);
++
++    FreezeInfo frz;
++    int fr = fc_inspect_freeze(repo, ver, &frz);
++    if (fr == -2) return refuse("freeze-table-malformed", repo);
++    if (fr != 0) return refuse("freeze-table-unreadable", repo);
++    if (frz.has_other_active) return refuse("prev-freeze-still-active", frz.other_detail);
++    if (frz.found_target) return refuse("freeze-already-exists", ver);
++
++    char plan_p[4400], seq_p[4400], frz_p[4400], cand_p[4400];
++    if (cx_fmt(plan_p, sizeof plan_p, "%s/plans/v%s.md", repo, ver) ||
++        cx_fmt(seq_p, sizeof seq_p, "%s/build/version-seq.tsv", repo) ||
++        cx_fmt(frz_p, sizeof frz_p, "%s/build/freeze.tsv", repo) ||
++        cx_fmt(cand_p, sizeof cand_p, "%s/release/candidate.tsv", repo)) {
++        return refuse("path-bound", repo);
++    }
++    if (!use_existing_plan && sy_exists(plan_p) == 1) return refuse("plan-already-exists", plan_p);
++
++    char pre_ver[24];
++    if (rv_load(cand_p, pre_ver)) return refuse("candidate-tsv-malformed", cand_p);
++    long next_slot = seq.max_slot + 1;
++    const char *prev_show = seq.prev_ver[0] ? seq.prev_ver : pre_ver;
++    const char *eff_ac = (a_class && a_class[0]) ? a_class : topic;
++
++    /* C0a write: build/version-seq.tsv, release/candidate.tsv, plans/v<V>.md */
++    char seq_line[1024];
++    cx_fmt(seq_line, sizeof seq_line, "%ld\t%s\t%s\t\xe8\xbf\x9b\xe8\xa1\x8c\xe4\xb8\xad\t%s \xe7\xab\x8b\xe9\xa1\xb9 %s;\xe5\x89\x8d\xe7\xbd\xae %s;\xe8\xae\xa1\xe5\x88\x92 plans/v%s.md",
++           next_slot, ver, topic, owner, ver, prev_show, ver);
++    if (fc_append_line_atomic(seq_p, seq_line)) return refuse("write-version-seq-failed", seq_p);
++    if (fc_update_candidate_version(repo, ver)) return refuse("write-candidate-failed", cand_p);
++
++    if (!use_existing_plan) {
++        char plan_buf[4096];
++        cx_fmt(plan_buf, sizeof plan_buf,
++            "# %s \xe8\xae\xa1\xe5\x88\x92:%s\n\n"
++            "planned_units=%ld\n"
++            "done_units=UNMEASURED\n"
++            "unplanned_units=0\n"
++            "a_class=%s\n"
++            "a_files_cap=%ld\n"
++            "freeze_at=TBD\n\n"
++            "## \xe7\x9b\xae\xe6\xa0\x87\xe4\xb8\x8e\xe8\x8c\x83\xe5\x9b\xb4\n\n"
++            "- \xe5\x89\x8d\xe7\xbd\xae\xe7\x89\x88\xe6\x9c\xac %s \xe5\xb7\xb2\xe5\x85\xac\xe5\xbc\x80, \xe5\x9c\xa8\xe7\x8b\xac\xe7\xab\x8b\xe7\x89\x88\xe6\x9c\xac\xe5\xb7\xa5\xe4\xbd\x9c\xe6\xa0\x91\xe5\xbc\x80\xe5\xb1\x95 %s\xe3\x80\x82\n\n"
++            "## \xe9\xaa\x8c\xe6\x94\xb6\xe4\xb8\x8e\xe5\x9b\x9e\xe6\xbb\x9a\n\n"
++            "- \xe9\x97\xa8\xe7\xa6\x81: verseq-gen.cx -- --check, chain-ready.cx \xe5\x85\xa8\xe9\x87\x8f\xe9\x80\x9a\xe8\xbf\x87\xe3\x80\x82\n"
++            "- \xe5\x9b\x9e\xe6\xbb\x9a (`plans/v%s.md`): \xe8\x8b\xa5\xe9\xaa\x8c\xe6\x94\xb6\xe6\x9c\xaa\xe8\xbf\x87, \xe6\x8c\x89 C0b -> C0a \xe9\x80\x86\xe5\xba\x8f\xe5\x9b\x9e\xe9\x80\x80\xe5\xb9\xb6\xe9\x87\x8d\xe8\xb7\x91 verseq-gen.cx -- --check\xe3\x80\x82\n",
++            ver, topic, planned_units, eff_ac, a_files_cap, prev_show, ver, ver);
++        if (sy_write_atomic(plan_p, plan_buf, strlen(plan_buf), 0644)) return refuse("write-plan-failed", plan_p);
++    }
++
++    if (fc_check_plan_doc(repo, ver, topic, why_tag, detail, sizeof detail)) return refuse(why_tag, detail);
++
++    if (!no_derive) {
++        (void)fc_run_repo_tool(repo, "tools/derive.cx", "--write", "--only", "table-index");
++        if (fc_run_repo_tool(repo, "tools/verseq-gen.cx", "--check", 0, 0) != 0) return refuse("verseq-gen-failed", repo);
++    }
++
++    char base_sha[64], frz_sha[64];
++    cx_fmt(base_sha, sizeof base_sha, "UNCOMMITTED");
++    cx_fmt(frz_sha, sizeof frz_sha, "UNCOMMITTED");
++    if (!no_commit) {
++        char plan_rel[96];
++        cx_fmt(plan_rel, sizeof plan_rel, "plans/v%s.md", ver);
++        char *addv[] = {"git", "add", "--", "build/version-seq.tsv", "release/candidate.tsv", plan_rel, 0};
++        if (fc_git(repo, addv, 0, 0) != 0) return refuse("git-add-c0a-failed", repo);
++        char tbl_p[4400];
++        if (!cx_fmt(tbl_p, sizeof tbl_p, "%s/build/table-index.tsv", repo) && sy_exists(tbl_p) == 1) {
++            char *tadd[] = {"git", "add", "--", "build/table-index.tsv", 0};
++            (void)fc_git(repo, tadd, 0, 0);
++        }
++        char msg[256];
++        cx_fmt(msg, sizeof msg, "chore(release): v%s numbering slot, candidate version, and plan", ver);
++        char *cmv[] = {"git", "-c", "commit.gpgsign=false", "commit", "-qm", msg, 0};
++        if (fc_git(repo, cmv, 0, 0) != 0) return refuse("git-commit-c0a-failed", repo);
++        char *hv[] = {"git", "rev-parse", "HEAD", 0};
++        if (fc_git(repo, hv, base_sha, sizeof base_sha) != 0 || !fc_is_hex40(base_sha)) return refuse("git-rev-c0a-failed", repo);
++        if (fc_commit_touches_pik1(repo, base_sha, detail, sizeof detail) != 0) {
++            return refuse("numbering-step-touched-product-source", detail);
++        }
++    }
++
++    /* C0b write: build/freeze.tsv isolated final commit */
++    long dl = deadline_epoch > 0 ? deadline_epoch : (sy_wall_s() + (deadline_s > 0 ? deadline_s : 86400));
++    char frz_line[512];
++    cx_fmt(frz_line, sizeof frz_line, "%s-FREEZE\t%s\t%s\t%ld\t%s", ver, base_sha, owner, dl, paths);
++    if (fc_append_line_atomic(frz_p, frz_line)) return refuse("write-freeze-failed", frz_p);
++
++    if (!no_commit) {
++        char *fadd[] = {"git", "add", "--", "build/freeze.tsv", 0};
++        if (fc_git(repo, fadd, 0, 0) != 0) return refuse("git-add-c0b-failed", repo);
++        char fmsg[256];
++        cx_fmt(fmsg, sizeof fmsg, "chore(release): arm %s-FREEZE at %.12s", ver, base_sha);
++        char *fcmv[] = {"git", "-c", "commit.gpgsign=false", "commit", "-qm", fmsg, 0};
++        if (fc_git(repo, fcmv, 0, 0) != 0) return refuse("git-commit-c0b-failed", repo);
++        char *hv[] = {"git", "rev-parse", "HEAD", 0};
++        if (fc_git(repo, hv, frz_sha, sizeof frz_sha) != 0 || !fc_is_hex40(frz_sha)) return refuse("git-rev-c0b-failed", repo);
++        if (fc_do_check(repo, ver, owner, no_derive, skip_root_check) != 0) return 2;
++    }
++
++    printf("FREEZE_CUT\tPASS\tversion=%s\tslot=%ld\tbase=%s\tfreeze_commit=%s\n",
++           ver, next_slot, base_sha, frz_sha);
++    return 0;
++}
++
++int main(int argc, char **argv) {
++    const char *repo = ".", *ver = 0, *topic = 0, *a_class = 0, *owner = getenv("DEVSVC_OWNER");
++    const char *paths = "src cx ext exec include seed kernel tests release";
++    long planned_units = 8, a_files_cap = 24, deadline_s = 86400, deadline_epoch = 0;
++    int do_check = 0, do_cut = 0, use_existing_plan = 0, no_commit = 0, no_derive = 0, skip_root_check = 0;
++    if (!owner || !owner[0]) owner = getenv("UNISACC_INTEGRATOR");
++    for (int i = 1; i < argc; i++) {
++        if (tx_eqz(argv[i], "--")) continue;
++        else if (tx_eqz(argv[i], "--check")) do_check = 1;
++        else if (tx_eqz(argv[i], "--cut")) do_cut = 1;
++        else if (tx_eqz(argv[i], "--use-existing-plan")) use_existing_plan = 1;
++        else if (tx_eqz(argv[i], "--no-commit")) no_commit = 1;
++        else if (tx_eqz(argv[i], "--no-derive")) no_derive = 1;
++        else if (tx_eqz(argv[i], "--skip-root-check")) skip_root_check = 1;
++        else if (tx_eqz(argv[i], "--repo") && i + 1 < argc) repo = argv[++i];
++        else if (tx_eqz(argv[i], "--version") && i + 1 < argc) ver = argv[++i];
++        else if (tx_eqz(argv[i], "--topic") && i + 1 < argc) topic = argv[++i];
++        else if (tx_eqz(argv[i], "--a-class") && i + 1 < argc) a_class = argv[++i];
++        else if (tx_eqz(argv[i], "--owner") && i + 1 < argc) owner = argv[++i];
++        else if (tx_eqz(argv[i], "--paths") && i + 1 < argc) paths = argv[++i];
++        else if (tx_eqz(argv[i], "--planned-units") && i + 1 < argc) {
++            const char *val = argv[++i]; int64_t v = 0;
++            if (tx_to_i64(val, (long)strlen(val), 10, &v)) return refuse("bad-planned-units", val);
++            planned_units = (long)v;
++        } else if (tx_eqz(argv[i], "--a-files-cap") && i + 1 < argc) {
++            const char *val = argv[++i]; int64_t v = 0;
++            if (tx_to_i64(val, (long)strlen(val), 10, &v)) return refuse("bad-a-files-cap", val);
++            a_files_cap = (long)v;
++        } else if (tx_eqz(argv[i], "--deadline-s") && i + 1 < argc) {
++            const char *val = argv[++i]; int64_t v = 0;
++            if (tx_to_i64(val, (long)strlen(val), 10, &v)) return refuse("bad-deadline-s", val);
++            deadline_s = (long)v;
++        } else if (tx_eqz(argv[i], "--deadline-epoch") && i + 1 < argc) {
++            const char *val = argv[++i]; int64_t v = 0;
++            if (tx_to_i64(val, (long)strlen(val), 10, &v)) return refuse("bad-deadline-epoch", val);
++            deadline_epoch = (long)v;
++        } else {
++            return refuse("bad-arg", argv[i]);
++        }
++    }
++    if (do_check + do_cut != 1) return refuse("usage", "pass exactly one of --check or --cut with --version V");
++    if (!ver) return refuse("bad-version", "missing --version");
++    if (do_check) return fc_do_check(repo, ver, owner, no_derive, skip_root_check);
++    return fc_do_cut(repo, ver, topic, a_class, planned_units, a_files_cap, owner,
++                     deadline_s, deadline_epoch, paths, use_existing_plan, no_commit, no_derive, skip_root_check);
++}
