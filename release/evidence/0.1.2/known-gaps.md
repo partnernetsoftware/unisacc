@@ -12,12 +12,14 @@
 (2) `cx/compiler/fwdmerge.cx:24` 保留 `lint:allow R3-die` 纯注释:
 - 无语义变化, 属 `cx-lint R3-die` 规则不可约残留。
 
-(3) 预跑期五次红停与修补经过 (`C6..C10`):
-- `W0001` (`lane-key-probes`): `C6` (`218c0a746f`) 同步 `build/lane-inputs.tsv`;
-- `W0081` (`check-gen-all-check`): `C7` (`719012b5e8`) 同步 `CGAC_GENERATORS` `44 -> 45`;
-- `W0016` (`real-commit`): `C8` (`c18cd1a77a`) 接入 `devsvc-tool` 与 `precommit-tool` 材料, 热态墙钟降至 `9.4s`;
-- `W0118` (`processcore-compile`) 与 `devsvc-git-c-operations`: `C9` (`ec596c55bf`) / `C9b` (`115e5720de`) 拆出 `C3` 并重跑整链;
-- `W0219` (`check-daily-compile-smoke`): `C10` (`4e8aa13c61`) 仅同步 `tests/daily-compile-smoke.tsv` (`SOURCES_SID` 不变), 并按先例补跑 `W9919`/`W9987`/`W9943`。
+(3) 预跑期四次红停加一次未停机批红与修补经过 (`4 prerun stops + 1 keep-going batch failure`, `C6..C10`):
+- 四次 `PRODUCT_RED_STOP` 红停:
+  - `W0001` (`lane-key-probes`): `C6` (`218c0a746f`) 同步 `build/lane-inputs.tsv`;
+  - `W0081` (`check-gen-all-check`): `C7` (`719012b5e8`) 同步 `CGAC_GENERATORS` `44 -> 45`;
+  - `W0118` (`processcore-compile`) 与 `devsvc-git-c-operations`: `C9` (`ec596c55bf`) / `C9b` (`115e5720de`) 拆出 `C3` 并重跑整链;
+  - `W0219` (`check-daily-compile-smoke`): `C10` (`4e8aa13c61`) 仅同步 `tests/daily-compile-smoke.tsv` (`SOURCES_SID` 不变), 并按先例补跑 `W9919`/`W9987`/`W9943`;
+- 一次未停机 `keep-going` 批红:
+  - `W0016` (`real-commit`): 在 `W0081` 红停备份的第二次预跑 (`~/.unisacc-worktree-backups/prerun-v012-stop-W0081-20261125/supervise.log`) 中为 `keep-going` 批红未停机, 由 `C8` (`c18cd1a77a`) 接入 `devsvc-tool` 与 `precommit-tool` 材料修复, 热态墙钟降至 `9.4s`。
 
 (4) `W9942` 原始证据件丢失事故如实披露 (`incident-W9942`):
 - 经过与原因: 针对 `tsv-lint-root` 的首次补跑尝试 `W9942` (`strict-W9942-tsv-lint-root.tsv`, 结果为 `UNKNOWN`, `55631ms`, `load1=2.65`, `transport=-1`, `candidate=e31c413a`) 于 `2026-11-25 21:35:48 +0800` 在 `task-9722` 中切回 `W9941` 且尚未收到 `W9943` 改号令时被人工执行 `rm -f` 误删。核对源码 `tools/dvqualify.cx:705-732` 确认 `dvqualify` 仅 truncate 写文件不 `unlink`, 丢失纯系该次人工 `rm -f` 所致。
@@ -26,7 +28,11 @@
   - `unisacc-session-devsvc-flow-1613789-mv1hm0dg.x.out`: `raw=b5ea6710957ce7cafe6e7b1e876a31c53fd45eef9430c2bf41a6cd7096ae00db` -> `sanitized=3d853e3995ee7ca7acf1cf4843f2c99b46f17306a5101eb031635bd0b70455ae`
 - 对最终结论影响: 最终合并裁决完全不依赖已丢失的 `W9942`, 由未动过的原始失败窗 `strict-W0242.z10.tsv` (`UNKNOWN`) 与同布局预热后的正式补跑窗 `strict-W9943-tsv-lint-root.tsv` (`PASS`, `10878ms`, `assertions=2`, `sha256=16ab74a2b8fb8be7c87c01ebbabf2c6f47630f2486cf9bb4afa1ff9df7b712a2`) 独立闭环。
 
-(5) 未跑范围:
+(5) 链后并入与 `no-home-path` 脱敏留痕 (`post-chain-merge`):
+- `F=C9b=115e5720de` 起链后, 仅追加 `C10=4e8aa13c61` (`tests/daily-compile-smoke.tsv`)、并入 `origin/main=e3f12440f5` (`d806a5b4e7`, 仅 `research/*` 与 `software_test_ai.md` 18 文件)、脱敏提交 `3dfa49e57` 与发布证据归档; 经整链 `identity-helper` 实算并入前后与最终 `HEAD` 的 `SOURCES_SID` 均为 `88e190bdb8bc45df16e06ff9b22d959df08adf6105fb23598edc3c25b50bc8b6`。
+- 并入的 `origin/main` (`e3f12440f`) 研究页 `research/ccogweco/broken-links.tsv:2` 含未脱敏家目录路径, 触发 `no-home-path` 棘轮 `18/1`, 已用 `tools/scrub-home-paths.cx` 脱敏该一行 (提交号 `3dfa49e57`, 仅改该行路径前缀, `SOURCES_SID` 不变), `GATE 1 RATCHETS` 恢复 `19/0 PASS`。
+
+(6) 未跑范围:
 - 全套 `s9` 未跑; 严格证据 `release/evidence/0.1.2/strict.tsv` 所列 `527` 批之外的范围均为 `UNMEASURED`。
 
 ## 2. `SUPERSEDED` 双口径对照说明
