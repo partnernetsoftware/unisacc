@@ -3,7 +3,8 @@
  * Synthetic evidence dir + fake chain/metrics/day/install bins.
  * Covers: plan lines, dry zero-write, step OK/FAIL, resume skip DONE,
  * root-upgrade gate, mutant-dry-write red;
- * real-repo 0.0.93 dry must DONE (UNMEASURED if env missing); 0.0.94 dry BLOCKED:index-seal.
+ * real-repo 0.0.93 dry must DONE (UNMEASURED if env missing);
+ * 0.0.94 dry must block on index-seal when the Y2 key is absent.
  * Ends CHECK_RELEASE_POST. */
 #pragma unisa use cxlib.ckassert
 #pragma unisa use cxlib.ckrun
@@ -33,6 +34,20 @@ static int run_rp(const char *extra) {
 }
 
 static int has(const char *s) { return ckk_has(out, (int)sizeof out, s); }
+
+static int has_y2_done(const char *body, size_t n) {
+    const char key[] = "exec-7-Y2-done";
+    const size_t key_n = sizeof key - 1;
+    size_t at = 0;
+    while (at < n) {
+        size_t end = at;
+        while (end < n && body[end] != '\n') end++;
+        if (end - at > key_n && body[at + key_n] == '\t' &&
+            tx_same(body + at, key_n, key, key_n)) return 1;
+        at = end < n ? end + 1 : end;
+    }
+    return 0;
+}
 
 static int seed_ok_bins(void) {
     char cmd[5000];
@@ -86,6 +101,11 @@ int main(void) {
         cx_fmt(inst, sizeof inst, "%s/fake-inst.sh", root)) return 2;
     sy_mkdir_all(ev, 0700); sy_mkdir_all(cdir, 0700); sy_mkdir_all(pdir, 0700); sy_mkdir_all(bdir, 0700);
 
+    const char y2_row[] = "# index\nexec-7-Y2-done\tnow\t-\tabc\tdone\n";
+    const char other_rows[] = "exec-7-Y2-done-extra\tnow\nother\texec-7-Y2-done\n";
+    ck(has_y2_done(y2_row, sizeof y2_row - 1), "index-y2-key-with-tab");
+    ck(!has_y2_done(other_rows, sizeof other_rows - 1), "index-y2-prefix-and-other-column-refused");
+
     /* INDEX with Y2-done */
     if (cx_fmt(cmd, sizeof cmd,
         "printf 'exec-7-Y2-done\\tnow\\t-\\tabc\\tdone\\n' > '%s/INDEX.tsv' && "
@@ -112,7 +132,8 @@ int main(void) {
     if (cx_fmt(cmd, sizeof cmd, "printf 'no-seal\\n' > '%s/INDEX.tsv'", ev)) return 2;
     ck(ckk_sh_t("check-release-post", cmd, out, (int)sizeof out, 10) == 0, "seed-bad-index");
     rc = run_rp("run --version 9.9.9 --dry");
-    ck(rc != 0 && has("BLOCKED:index-seal") && has("RELEASE_POST_RETRY"), "fail-index-seal");
+    ck(rc != 0 && has("POST_STEP\t1\tindex-seal\tFAIL\tmissing-exec-7-Y2-done") &&
+       has("BLOCKED:index-seal") && has("RELEASE_POST_RETRY"), "fail-index-seal");
     if (cx_fmt(cmd, sizeof cmd, "printf 'exec-7-Y2-done\\tnow\\t-\\tabc\\tdone\\n' > '%s/INDEX.tsv'", ev)) return 2;
     ck(ckk_sh_t("check-release-post", cmd, out, (int)sizeof out, 10) == 0, "restore-index");
 
@@ -180,12 +201,7 @@ int main(void) {
             {
                 unsigned char *bb; int64_t bn = 0;
                 if (sy_read_file(idx94, &bb, &bn, 1 << 20) == 0 && bb) {
-                    long at = 0, nn = (long)bn; const char *pref = "exec-7-Y2-done"; long pl = 15;
-                    while (at < nn) {
-                        long e = at; while (e < nn && bb[e] != '\n') e++;
-                        if (e - at >= pl && tx_same((char *)bb + at, pl, pref, pl)) has_y2 = 1;
-                        at = e + (e < nn ? 1 : 0);
-                    }
+                    has_y2 = has_y2_done((const char *)bb, (size_t)bn);
                     mm_free(bb);
                 }
             }
