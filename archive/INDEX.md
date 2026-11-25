@@ -81,3 +81,4 @@
 | [archive/pre080/tests/corpus-ctestsuite/c46-3-minimal-rejections.tsv](pre080/tests/corpus-ctestsuite/c46-3-minimal-rejections.tsv) | 已归档 | 0.0.80 | tests/corpus-ctestsuite 0.0.46 到 0.0.48 首轮一次性结果 |
 - `research/2026-11-22/v093-k3-fixtures` -> `archive/research-2026-11/research/2026-11-22/v093-k3-fixtures`
 - `release/notes-0.0.97.md` -> `archive/release-pre0100/notes-0.0.97.md`
+- `research/ccogweco/mempalace-decisions.patch` -> `archive/research-2026-11-25/ccogweco/mempalace-decisions.patch`
