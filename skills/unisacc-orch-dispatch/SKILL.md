@@ -28,8 +28,8 @@ description: 编排者向执行者窗口或子代理派工、并把交付落库�
 
 ## (3) 分支与工作目录
 
-- 分支只有两类:`main`(集成与发布)和每个开发中版本一条 `v0.0.NN`。不按单元、任务或执行者另建分支或工作树。原因:CLAUDE.md 只规定这两类,按单元分叉会制造合并债与孤儿分支。
-- 版本分支的工作目录是仓内 `.claude/worktrees/v0.0.NN`,根放 `unisacc.com` 与 `unisacc.com.build.json` 指向共享检出同名文件的符号链接(已忽略,不提交)。直接 `git worktree add` 被守卫钩子 `tools/guard-hook.cx` 拒绝,经 `sh ./unisacc.com tools/devsvc.cx -- x --par 1 -- git worktree add ...` 建。
+- 分支只有两类:`main`(集成与发布)和每个开发中版本一条 `vX.Y.Z`。不按单元、任务或执行者另建分支或工作树。原因:CLAUDE.md 只规定这两类,按单元分叉会制造合并债与孤儿分支。
+- 版本分支的工作目录是仓内 `.claude/worktrees/vX.Y.Z`,根放 `unisacc.com` 与 `unisacc.com.build.json` 指向共享检出同名文件的符号链接(已忽略,不提交)。直接 `git worktree add` 被守卫钩子 `tools/guard-hook.cx` 拒绝,经 `sh ./unisacc.com tools/devsvc.cx -- x --par 1 -- git worktree add ...` 建。
 - 多个窗口共用同一检出(main 共享检出或版本工作目录),各自只提交自己的路径(`devsvc git commit --whole 路径`,即 commit-own 的设计目的)。devsvc 与产线工具线(tools/ tests/ build/ plans/ skills/ 的 C 类改动)直接在 main 共享检出上提交。
 
 ## (4) 提交与推送组合
@@ -65,4 +65,4 @@ git push origin HEAD:main
 
 ## (7) 公开前冻结期
 
-某版公开前不向 main 落非阻塞项,下一版的改动提交到下一版的版本分支 `v0.0.NN`,公开后由编排者合入。原因:冻结合并时 main 的额外提交会改变候选身份,迫使整链重跑。
+某版公开前不向 main 落非阻塞项,下一版的改动提交到下一版的版本分支 `vX.Y.Z`,公开后由编排者合入。原因:冻结合并时 main 的额外提交会改变候选身份,迫使整链重跑。
