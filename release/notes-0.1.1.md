@@ -25,14 +25,14 @@
 
 ## 3. 整链、pack、warm 与严格预跑实测
 
-- 整链实测:`T1 = 2026-11-25 14:36:35 +0800` (`1795588595`),`T2 = 2026-11-25 15:01:23 +0800` (`1795590083`, `exit.tsv rc=0`),state `DONE` 时刻 `15:01:27 +0800`,用时 `24.8` 分钟(`499/499 DONE`)。
-- 不动点 (`compare_attempt=243`):`objects=same count=102`、`kernels=same count=2`、`slices=same count=6`、`product=same`;六目标 `g2/g3` 逐对 SHA256 相同(`fixedpoint-6targets.tsv sha256=9b76071245d814bc20d419630f23e0bd69a50c9bd5ad35d9442b4a55688a66c2`, `ape-receipt.txt sha256=cabaac622b5c749cf8d982f5d8515d6630207063c42dfa3262ee2edd15dfa67d`):
-  - `lnx-x86_64/entry.elf`: `ae4d4827229591d4282b86d60829c3a7dd640f0c6930f14e55ef30532774f4c8`
-  - `lnx-arm64/entry.elf`: `40b42c5705158c3ec0be7e0ed4022dcba0083a2444d63ca7de2ff41d675c3bc3`
-  - `osx-x86_64/slice-osx-x86_64`: `fd085ef03d71dc949b7d72676f3bb67daef102c9495be0bf86ab261a99a986e5`
-  - `osx-arm64/slice-osx-arm64`: `53e2524c510a29268b8b72a238a85c9ba2426e957701d9e0731e75c98988565d`
-  - `win-x86_64/slice-win-x86_64`: `bb2b7ef851f7cb4f34946134a62ab703fa3b5f8801686e7535bd8c0db9fb10f8`
-  - `win-arm64/slice-win-arm64`: `37c6e0e740b44b1fcbf550339ef30de66be33256d572bc47169ab87bfdcba1c8`
+- 整链实测:`T1 = 2026-11-25 14:36:35 +0800` (`1795588595`, `owner.tsv`),`T2 = 2026-11-25 15:01:27 +0800` (`1795590087`, `exit.tsv rc=0 why=exited`),用时 `24.9` 分钟(`1492s = 24 分 52 秒`, `499/499 DONE`)。
+- 不动点 (`compare_attempt=243`):`objects=same count=102`、`kernels=same count=2`、`slices=same count=6`、`product=same`、`package=present sha=4d13b970d75732d61126e67f1f4574a70f48eb9675b95900453dfd370d3b4f1b`;六目标 `g2/g3` 逐对 SHA256 相同(从 `release/evidence/0.1.1/fixedpoint-6targets.tsv` `sha256=9b76071245d814bc20d419630f23e0bd69a50c9bd5ad35d9442b4a55688a66c2` 机器提取, `ape-receipt.txt sha256=cabaac622b5c749cf8d982f5d8515d6630207063c42dfa3262ee2edd15dfa67d`):
+  - `lnx/x86_64` (`fixedpoint/g2/lnx-x86_64/entry.elf`): `4542533b550c284189f91de4000f434be74baec4790128aee218c7a9b85402ed` (`1954382` bytes, `SAME`)
+  - `lnx/arm64` (`fixedpoint/g2/lnx-arm64/entry.elf`): `f7ab55f6b8cb1466c517e0f3b25c819630317d572202e5fab224593721df055c` (`2105878` bytes, `SAME`)
+  - `osx/x86_64` (`fixedpoint/g2/osx-x86_64/slice-osx-x86_64`): `cc9a98e17f2c15f582daebcaa1bd88b3d7099c83ad50aac4291ea10678f81114` (`3203554` bytes, `SAME`)
+  - `osx/arm64` (`fixedpoint/g2/osx-arm64/slice-osx-arm64`): `b10fc08cc1436fd57653f245e99547eb87453bff46093b8a1fbaf43d4e0cf3a5` (`4326370` bytes, `SAME`)
+  - `win/x86_64` (`fixedpoint/g2/win-x86_64/slice-win-x86_64`): `ff49983e97b4f3f8a58a5235f717704a2792d0ce4310f530395a541e37dcbc46` (`3514368` bytes, `SAME`)
+  - `win/arm64` (`fixedpoint/g2/win-arm64/slice-win-arm64`): `7f29174a5232c63a0906496d03bc844b4b2e41bc3944b77ad06bbb6f96f72ee1` (`4708352` bytes, `SAME`)
 - pack 与 warm:`RELEASE_RUN RESULT PACK_OK`, `PACK_APE SAME sha256=d83537aef92eb55ed94d81081b0cff27d146a0ef0d83b2a544b989c15701c3eb`;`WARM RESULT READY key=724591f94ed13900544d968b66275d10ac18ad63316d201d098b2d88f2a595bb targets=5`;`draft-readback.txt sha256=de6070fc18eeb8893e359f0c69183acc38e55d2cce565d9c813acc11341d13c6`。
 - 严格预跑 (`release/evidence/0.1.1/strict.tsv`, `sha256=749ff13b6594726176d231fb5397b6285a82480fb6fb2dc5b3a7f534959c0b59`):
   - 预跑 `246` 窗 (`15:08` -> `16:18`, `522` 批, `split_parents_excluded=9`):原合并为 `519 PASS / 1 FAIL (slow-split W0087 55456ms) / 2 UNKNOWN (precommit-list-cap W0014 55531ms, tsv-lint-root W0241.z06 55583ms) / 0 INVALID`。
@@ -48,7 +48,7 @@
 | 3 | 零已知 P0 | P0 账本已清零或按 3 版整合令降级 P1(`D1 admission`、`T11` 甲件、候选 `17`、`R1-H1`、候选 `19` 均入 `0.1.2`/`0.1.3`) |
 | 4 | `state-unverified` 声称类 `<=3` | 未满足,按 R38 口径如实披露 |
 | 5 | 前端覆盖三期 | 未满足,按 R37 豁免;`B2` 前端事实表化顺延 `0.1.2` |
-| 6 | 起链到公开 `<=120` 分钟 (`0.1.1` fable 线 `130` 分钟) | `T1 = 14:36:35 +0800` 起算,按实际公开时刻 `exec-5-publish` 记账 |
+| 6 | 起链到公开 `<=120` 分钟 (`0.1.1` fable 线 `130` 分钟) | 未满足;`T1 = 14:36:35 +0800` (`1795588595`) 到 `T4 = 16:54:30 +0800` (`1795596870`, `exec-5-publish`) = `137.9` 分钟 (`8275s`);`T2 = 15:01:27 +0800` (`1795590087`, `exit.tsv`) 到 `T4 = 113.1` 分钟 (`6783s`);`T2` 到 `X` (`16:44:23 +0800`) = `102.9` 分钟 (`6176s`),按 fable 口径如实记 |
 | 7 | 能用清单 30 过 25 | 清单 `29` 项就绪;唯一保留缺口 `release-chain` 批登记 `0.1.x` |
 
 ## 5. 已知缺口与未跑范围
@@ -65,5 +65,11 @@
 
 ## 6. 证据入口与撤回方案
 
-- 证据目录:`release/evidence/0.1.1/INDEX.tsv`、`release/evidence/0.1.1/strict.tsv`、`release/evidence/0.1.1/expected-unmeasured.tsv`、`release/evidence/0.1.1/list-cap-margin.md`、`release/evidence/0.1.1/fixedpoint-6targets.tsv`、`release/evidence/0.1.1/draft-readback.txt`、`release/evidence/0.1.1/ci-45578960112.json`、`release/evidence/0.1.1/ci-45578960112.log`、`release/evidence/0.1.1/public-readback.txt`。
+- 证据目录:`release/evidence/0.1.1/INDEX.tsv`、`release/evidence/0.1.1/strict.tsv`、`release/evidence/0.1.1/expected-unmeasured.tsv`、`release/evidence/0.1.1/list-cap-margin.md`、`release/evidence/0.1.1/fixedpoint-6targets.tsv`、`release/evidence/0.1.1/draft-readback.txt`、`release/evidence/0.1.1/ci-45578960112.json`、`release/evidence/0.1.1/ci-45578960112.log`、`release/evidence/0.1.1/public-readback.txt`、`release/evidence/0.1.1/backup-evidence.tsv`。
 - 撤回方案:`release/rollback.txt` (回退 Latest 到 `v0.1.0`,将 `v0.1.1` 转回 draft,永不删已公开 tag 与 release)。
+
+## 7. 公开后更正 (2026-11-25)
+
+- 六目标 `g2/g3` 切片 SHA256 改为从提交内 `release/evidence/0.1.1/fixedpoint-6targets.tsv` 机器提取,消除原手抄偏差。
+- `T2` 终态时刻按链产物 `exit.tsv` (`EXIT 1795590087 pid=2994845 rc=0 why=exited`) 对齐为 `2026-11-25 15:01:27 +0800` (`T1 -> T2 = 1492s = 24.9` 分钟;`T2 -> T4 = 6783s = 113.1` 分钟)。
+- 更正不触资产、`SOURCES_SID`、候选字节与 strict 计数。
