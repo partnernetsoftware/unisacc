@@ -52,6 +52,8 @@ static int line(char **args,const char *cwd,char *buf,size_t cap) {
     buf[n]=0;
     return 0;
 }
+static char precommit_bin[4096];
+static char devsvc_bin[4096];
 static int setup(int selftest) {
     char hook[4096],objects[4096],archive[4096],alternates[4096],instance[4096];
     char *rev[]={"git","rev-parse","--verify","refs/remotes/origin/main^{commit}",0};
@@ -96,8 +98,13 @@ static int setup(int selftest) {
     char *sethooks[]={"git","config","core.hooksPath",".git/hooks",0};
     char *copyhook[]={"install","-D","-m","0700",hook,".git/hooks/pre-commit",0};
     if(missing){
-        if(cx_fmt(hook,sizeof hook,"%s/layout-hook",scratch))return 2;
+        char entry_buf[4300];
         const char *entry="#!/bin/sh\nexec sh ./unisacc.com tools/precommit.cx\n";
+        if(cx_fmt(hook,sizeof hook,"%s/layout-hook",scratch))return 2;
+        if(precommit_bin[0]){
+            if(cx_fmt(entry_buf,sizeof entry_buf,"#!/bin/sh\nexec '%s'\n",precommit_bin))return 2;
+            entry=entry_buf;
+        }
         if(cx_write(hook,entry,strlen(entry)))return 2;
         puts("REAL_COMMIT fixture-hook=standard-precommit-entry");
     }
@@ -145,8 +152,15 @@ static int rehearsal(int selftest,int probe) {
     if(!paths)return 2;
     size_t bytes=last.outn;
     if(mm_copy(paths,bytes,last.out,bytes)){free(paths);return 2;}
-    char *args[64]={"sh",launcher,"tools/devsvc.cx","--","git","commit","-m","R3 private rehearsal","--whole"};
-    int argc=9;
+    char *args[64];
+    int argc=0,base_argc=0;
+    if(devsvc_bin[0]){
+        args[0]=devsvc_bin;args[1]="git";args[2]="commit";args[3]="-m";args[4]="R3 private rehearsal";args[5]="--whole";
+        argc=6;base_argc=6;
+    }else{
+        args[0]="sh";args[1]=launcher;args[2]="tools/devsvc.cx";args[3]="--";args[4]="git";args[5]="commit";args[6]="-m";args[7]="R3 private rehearsal";args[8]="--whole";
+        argc=9;base_argc=9;
+    }
     for(size_t i=0;i<bytes;) {
         char *p=paths+i;
         if(argc>=54||!*p||*p=='-'||strchr(p,'\n')||strchr(p,'\t')) {
@@ -155,7 +169,7 @@ static int rehearsal(int selftest,int probe) {
         args[argc++]=p; i+=strlen(p)+1;
     }
     args[argc]=0;
-    printf("REAL_COMMIT base=%s proposed_tree=%s paths=%d\n",base,wanted,argc-9);
+    printf("REAL_COMMIT base=%s proposed_tree=%s paths=%d\n",base,wanted,argc-base_argc);
     fflush(stdout);
     int rc=cmd(args,repo,55);
     free(paths);
@@ -209,10 +223,17 @@ static int dispose(void) {
     return rc;
 }
 int main(int argc,char **argv) {
-    int selftest=argc==2&&!strcmp(argv[1],"--selftest");
-    int probe=argc==3&&!strcmp(argv[1],"--probe");
-    if(!selftest&&(argc!=3||(!probe&&strcmp(argv[1],"--patch"))||!realpath(argv[2],patchfile))){
-        fprintf(stderr,"usage: check-real-commit --patch FILE | --probe FILE | --selftest\n");return 2;
+    int selftest=0,probe=0;
+    for(int i=1;i<argc;i++){
+        if(!strcmp(argv[i],"--selftest"))selftest=1;
+        else if(!strcmp(argv[i],"--precommit")&&i+1<argc){if(!realpath(argv[++i],precommit_bin))return 2;}
+        else if(!strcmp(argv[i],"--devsvc")&&i+1<argc){if(!realpath(argv[++i],devsvc_bin))return 2;}
+        else if(!strcmp(argv[i],"--probe")&&i+1<argc){probe=1;if(!realpath(argv[++i],patchfile))return 2;}
+        else if(!strcmp(argv[i],"--patch")&&i+1<argc){if(!realpath(argv[++i],patchfile))return 2;}
+        else{fprintf(stderr,"usage: check-real-commit --patch FILE | --probe FILE | --selftest [--precommit BIN]\n");return 2;}
+    }
+    if(!selftest&&!patchfile[0]){
+        fprintf(stderr,"usage: check-real-commit --patch FILE | --probe FILE | --selftest [--precommit BIN]\n");return 2;
     }
     deadline=sy_now_ms()+(selftest?46000:55000);
     if(sy_child_subreaper()<0){fprintf(stderr,"REAL_COMMIT REFUSE subreaper-unavailable\n");return 2;}
