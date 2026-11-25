@@ -23,6 +23,7 @@
 #pragma unisa use mem.heap
 #pragma unisa use cxlib.sessionroot
 #pragma unisa use cxlib.mergebranch
+#pragma unisa use cxlib.releaseseq
 
 #define MAX_CHG 1024
 #define MAX_LINES 16384
@@ -39,6 +40,15 @@ static int streq(const char *a, const char *b) {
 static int starts_with(const char *s, const char *pre) {
     long sl = (long)tx_len(s, 4096), pl = (long)tx_len(pre, 512);
     return sl >= pl && mm_same(s, pre, (size_t)pl);
+}
+
+static int version_plan(const char *path) {
+    if (!starts_with(path, "plans/v")) return 0;
+    char ver[32]; long n = (long)tx_len(path, 4096), i = 7;
+    if (n <= 10 || n == 4096 || !tx_eqz(path + n - 3, ".md") || tx_chr(path + 7, n - 7, '/') >= 0) return 0;
+    while (i < n - 3 && path[i] != '-') i++;
+    if (i == 7 || i - 7 >= (long)sizeof ver || tx_copy(ver, sizeof ver, path + 7, i - 7)) return 0;
+    return rs_version(ver);
 }
 
 static void trim_nl(char *s) {
@@ -108,7 +118,9 @@ static int detect_active_branch(const char *repo, const char *base_ref, char *br
                 const char *v = l + t1 + 1;
                 long rem1 = ln - t1 - 1;
                 long t2 = tx_chr(v, rem1, '\t');
-                if (t2 > 0 && starts_with(v, "0.0.") && t2 + 1 < rem1) {
+                char ver[24];
+                if (t2 > 0 && t2 < (long)sizeof ver && t2 + 1 < rem1 &&
+                    !tx_copy(ver, sizeof ver, v, t2) && rs_version(ver)) {
                     const char *c2 = v + t2 + 1;
                     long rem2 = rem1 - t2 - 1;
                     long t3 = tx_chr(c2, rem2, '\t');
@@ -120,7 +132,7 @@ static int detect_active_branch(const char *repo, const char *base_ref, char *br
                         /* check ONLY col 4 (state) does not contain 已公开 (\xe5\xb7\xb2\xe5\x85\xac\xe5\xbc\x80) */
                         if (tx_find(st, st_len, "\xe5\xb7\xb2\xe5\x85\xac\xe5\xbc\x80", 9) < 0) {
                             char cand[64];
-                            if (!cx_fmt(cand, sizeof cand, "v%.*s", (int)t2, v) &&
+                            if (!cx_fmt(cand, sizeof cand, "v%s", ver) &&
                                 !streq(cand, first) && !streq(cand, second)) {
                                 int has_br = (!cx_fmt(cmd, sizeof cmd,
                                     "git -C '%s' rev-parse --verify 'refs/heads/%s^{commit}' >/dev/null 2>&1",
@@ -257,12 +269,13 @@ static int merge_one_both(const char *repo, const char *dir, const char *base_sh
     }
     if (o) { mm_free(o); o = 0; }
 
-    /* 2. plans/v0.0.*.md and release/candidate.tsv -> take branch side.  The candidate table's second row is
+    /* 2. Version plans (including suffixed plans) and release/candidate.tsv -> take branch side. The candidate table's second row is
        this version's slot: main carries the last published version and a version branch must carry its own,
        so both sides always edit that one line and a 3-way merge can never settle it.  tests/merge-rules.tsv
        records the same rule as `candidate-version-slot`; merge_one_both keeps it here because the conflict
        rows of that table are not consumed by this function. */
-    if (starts_with(rel, "plans/v0.0.") || streq(rel, "release/candidate.tsv")) {
+    int is_plan = version_plan(rel);
+    if (is_plan || streq(rel, "release/candidate.tsv")) {
         /* The version slot is only the data row; a header column added on main must not be thrown away by
            taking the branch side, so the two first lines have to agree before the branch file wins. */
         if (streq(rel, "release/candidate.tsv")) {
@@ -277,7 +290,7 @@ static int merge_one_both(const char *repo, const char *dir, const char *base_sh
         if (cx_fmt(cmd, sizeof cmd, "git -C '%s' show '%s:%s' > '%s'", repo, br_sha, rel, dst)) return 1;
         if (run_sh(cmd, 15, &o, &on) != 0) { if (o) mm_free(o); return 1; }
         if (o) mm_free(o);
-        cx_fmt(rule_out, rcap, starts_with(rel, "plans/v0.0.") ? "branch-side" : "branch-side-version-slot");
+        cx_fmt(rule_out, rcap, is_plan ? "branch-side" : "branch-side-version-slot");
         return 0;
     }
 

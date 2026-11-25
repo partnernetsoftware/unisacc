@@ -94,6 +94,7 @@
 #pragma unisa use cxlib.sessionroot
 #pragma unisa use cxlib.netpack
 #pragma unisa use cxlib.releaseversion
+#pragma unisa use cxlib.releaseseq
 #pragma unisa use sys.posix
 
 #define UC "./unisacc.com" /* lint:allow R1 tool runs sibling tools under the installed product, like tools/ratchets.cx */
@@ -402,16 +403,20 @@ static int cr_deferred_verify(const char *repo, char *why_out, size_t wcap) {
     }
     return 0;
 }
+static int branch_version(const char *o, long n, char ver[32]) {
+    while (n > 0 && (o[n - 1] == '\n' || o[n - 1] == '\r')) n--;
+    if (n < 2 || n > 32 || o[0] != 'v') return 0;
+    tx_copy(ver, 32, o + 1, n - 1);
+    return rs_version(ver);
+}
+
 static int j_branch(const char *o, long n, char *ev, int cap) {
+    char ver[32];
     long l = n;
     while (l > 0 && (o[l - 1] == '\n' || o[l - 1] == '\r')) l--;
     if (l == 4 && tx_prefix(o, l, "main", 4)) { put_ev(ev, cap, "branch main"); return 1; }
-    if (l > 5 && tx_prefix(o, l, "v0.0.", 5)) {
-        long i = 5;
-        while (i < l && o[i] >= '0' && o[i] <= '9') i++;
-        if (i == l) { cx_fmt(ev, (size_t)cap, "branch %.*s", (int)l, o); return 1; }
-    }
-    cx_fmt(ev, (size_t)cap, "branch is not main or v0.0.NN: %.40s", n > 0 ? o : "(none)"); return 0;
+    if (branch_version(o, l, ver)) { cx_fmt(ev, (size_t)cap, "branch v%s", ver); return 1; }
+    cx_fmt(ev, (size_t)cap, "branch is not main or vX.Y.Z: %.40s", n > 0 ? o : "(none)"); return 0;
 }
 static int j_derive_shard(const char *o, long n, int rc, const char *shard_gens, char *ev, int cap) {
     char l[160], failed_gens[256]; long fgn = 0, at = 0;
@@ -998,11 +1003,12 @@ static int seq_next_version(const char *repo, char ver[32]) {
     char p[4400], tag[64] = "", why[160], *b, *s;
     char *bv[] = {"git", "rev-parse", "--abbrev-ref", "HEAD", 0};
     np_result r = {0};
+    char branch_ver[32];
     size_t n = 0;
     int got = 0;
     ver[0] = 0;
-    if (!np_run(bv, repo, 0, 5, &r, why, sizeof why) && !r.rc && r.out && r.outn > 5 &&
-        tx_prefix(r.out, (long)r.outn, "v0.0.", 5)) {
+    if (!np_run(bv, repo, 0, 5, &r, why, sizeof why) && !r.rc && r.out &&
+        branch_version(r.out, (long)r.outn, branch_ver)) {
         np_free(&r);
         return 0;
     }
@@ -1358,15 +1364,8 @@ static int check_version_scope(const char *repo, const char *revarg, const char 
     } else {
         char *bv[] = {"git", "rev-parse", "--abbrev-ref", "HEAD", 0};
         np_result r = {0};
-        if (!np_run(bv, repo, 0, 5, &r, why, sizeof why) && !r.rc && r.out && r.outn > 5) {
-            long l = (long)r.outn;
-            while (l > 0 && (r.out[l - 1] == '\n' || r.out[l - 1] == '\r')) l--;
-            if (l > 5 && tx_prefix(r.out, l, "v0.0.", 5)) {
-                long k = 0, i;
-                for (i = 1; i < l && (r.out[i] == '.' || (r.out[i] >= '0' && r.out[i] <= '9')) && k < 63; i++) ver[k++] = r.out[i];
-                ver[k] = 0;
-            }
-        }
+        if (!np_run(bv, repo, 0, 5, &r, why, sizeof why) && !r.rc && r.out &&
+            !branch_version(r.out, (long)r.outn, ver)) ver[0] = 0;
         np_free(&r);
     }
     if (!ver[0]) return 1;

@@ -27,6 +27,7 @@
 #pragma unisa use mem.bytes
 #pragma unisa use mem.heap
 #pragma unisa use text.json
+#pragma unisa use cxlib.releaseseq
 
 static const char *HOMEV;   /* process.env.HOME ?? "" */
 static char *HOMED;         /* process.env.HOME ?? "/home/devali" */
@@ -159,8 +160,8 @@ static char *strip_bodies(const char *cmd) {
 }
 
 static int inlist(char **a, long from, long n, const char *x) { long m; for (m = from; m < n; m++) if (eq(a[m], x)) return 1; return 0; }
-/* 分支纪律(只在命令作用于本仓时判定):新建/改名/复制出的分支名必须匹配 ^v0\.0\.[0-9]+$。
- *   main 只作 branch -m/-M/-c/-C 与 checkout -B/switch -C/worktree add -B 的目标放行;ujs 别仓靠作用域放行(cwd 或 -C 目标不在 GUARD_REPO 下)。
+/* 分支纪律(只在命令作用于本仓时判定):新建/改名/复制出的分支名必须是规范三段版本。
+ *   main 只作 branch -m/-M/-c/-C 与 checkout -B/switch -C 的目标放行;ujs 别仓靠作用域放行(cwd 或 -C 目标不在 GUARD_REPO 下)。
  *   名含 $/反引号无法静态判定,放行。引号体只含普通名字符时 strip_bodies 原样保留,所以 'junk'、"junk" 按名判定;含空白或元字符的引号体仍剥空放行。删除与列出不拦。
  * 已知缺口(不修):子壳 (git ...)、花括号 { git ...; }、if/then 体、env/command/eval/xargs 前缀、update-ref、fetch/push 的 refspec 建分支;
  *   --color/--sort/--abbrev 后跟 junk(实际 --color 无值时 junk 是新分支名,这里按吞值放行);checkout --track origin/junk(建本地分支 junk);
@@ -169,19 +170,15 @@ static int inlist(char **a, long from, long n, const char *x) { long m; for (m =
  *   实际可建出该分支名(下一轮考虑:引号体剥空后的名字一律拒绝,合规名不需要元字符)。
  *   devsvc-core.cx 的合并工作树(merge-NAME 路径与 merge/NAME 分支)是内部 git 调用,不经本钩子,但不合规。 */
 static int ver_branch_ok(const char *nm0, int allow_main) {
-    char *nm = strip_q(nm0); const char *q;
+    char *nm = strip_q(nm0);
     if (!*nm || hasc(nm, '$') || hasc(nm, '`')) return 1;
     if (allow_main && eq(nm, "main")) return 1;
-    if (!sw(nm, "v0.0.")) return 0;
-    q = nm + 5;
-    if (!*q) return 0;
-    for (; *q; q++) if (!isdg(*q)) return 0;
-    return 1;
+    return nm[0] == 'v' && rs_version(nm + 1);
 }
 static char GB[512];
 static const char *branch_bad(const char *nm, int allow_main) {
     if (ver_branch_ok(nm, allow_main)) return 0;
-    tx_snprintf(GB, sizeof GB, "git 创建分支 %s:只允许 v0.0.NN 版本分支,补丁放 ~/.local/share/unisacc/research/", strip_q(nm));
+    tx_snprintf(GB, sizeof GB, "git 创建分支 %s:只允许 vX.Y.Z 版本分支,补丁放 ~/.local/share/unisacc/research/", strip_q(nm));
     return GB;
 }
 static int in_repo_dir(const char *d) { long rl = sl(REPO); return !*d || eq(d, REPO) || (sw(d, REPO) && d[rl] == '/'); }
@@ -202,8 +199,25 @@ static int shortcluster(const char *x, const char *letters, const char **val) {
     for (m = 1; x[m]; m++) if (hasc(letters, x[m])) { if (x[m + 1]) *val = x + m + 1; return x[m]; }
     return 0;
 }
+static const char *const WT_REFUSE = "git clone/worktree add:不得另建克隆或工作树,直接在 ~/repos/unisacc 里工作";
+
+static const char *worktree_leaf(const char *cur, const char *path) {
+    char *target = strip_q(path);
+    if (!*target || hasc(target, '$') || hasc(target, '`')) return 0;
+    char *abs = target[0] == '/' ? resolve("", target) : (*cur ? resolve(cur, target) : sdup(""));
+    char *prefix = cat2(REPO, "/.claude/worktrees/");
+    if (!sw(abs, prefix)) return 0;
+    const char *leaf = abs + sl(prefix);
+    if (sw(leaf, "merge-")) {
+        const char *q = leaf + 6;
+        if (!*q) return 0;
+        for (; *q; q++) if (!(isdg(*q) || isal(*q) || *q == '.' || *q == '_' || *q == '-')) return 0;
+        return leaf;
+    }
+    return leaf[0] == 'v' && rs_version(leaf + 1) ? leaf : 0;
+}
 /* a[i] 是子命令;只拦创建/改名/复制出的新分支名 */
-static const char *branch_violation(char **a, long i, long n) {
+static const char *branch_violation(char **a, long i, long n, const char *cur, int local) {
     const char *sub = i < n ? a[i] : ""; long j;
     if (eq(sub, "branch")) {
         int noncreate = 0, mv = 0; const char *first = 0, *last = 0;
@@ -231,12 +245,13 @@ static const char *branch_violation(char **a, long i, long n) {
         return first ? branch_bad(first, 0) : 0;
     }
     if (eq(sub, "checkout") || eq(sub, "switch") || (eq(sub, "worktree") && i + 1 < n && eq(a[i + 1], "add"))) {
-        int wt = eq(sub, "worktree"), sawb = 0, detach = 0; long npos = 0; const char *pos0 = 0;
+        int wt = eq(sub, "worktree"), detach = 0, positional = 0, force_branch = 0;
+        const char *pos0 = 0, *pos1 = 0, *created = 0;
         const char *letters = eq(sub, "checkout") ? "bB" : eq(sub, "switch") ? "cC" : "bB";
         for (j = i + (wt ? 2 : 1); j < n; j++) {
             const char *x = a[j], *v = 0; int L = 0, forcelong = 0, hitlong = 0;
-            if (eq(x, "--")) break;
-            if (x[0] == '-' && x[1] == '-') {
+            if (!positional && eq(x, "--")) { if (!wt) break; positional = 1; continue; }
+            if (!positional && x[0] == '-' && x[1] == '-') {
                 if (!wt && longopt(x, "--orphan", &v)) hitlong = 1;
                 else if (eq(sub, "switch") && longopt(x, "--create", &v)) hitlong = 1;
                 else if (eq(sub, "switch") && longopt(x, "--force-create", &v)) { hitlong = 1; forcelong = 1; }
@@ -248,24 +263,27 @@ static const char *branch_violation(char **a, long i, long n) {
                 }
                 continue;
             }
-            if (x[0] == '-' && x[1]) {
+            if (!positional && x[0] == '-' && x[1]) {
                 L = shortcluster(x, letters, &v);
-                if (wt && hasc(x, 'd')) detach = 1;
+                if (wt && eq(x, "-d")) detach = 1;
                 if (L) {
-                    sawb = 1;
                     if (!v) { if (j + 1 >= n) continue; v = a[++j]; }
-                    { const char *bv = branch_bad(v, L == 'B' || L == 'C'); if (bv) return bv; }
+                    if (wt) {
+                        if (created) return WT_REFUSE;
+                        created = v; force_branch = L == 'B';
+                    } else { const char *bv = branch_bad(v, L == 'B' || L == 'C'); if (bv) return bv; }
                 }
                 continue;
             }
-            if (wt) { if (!npos) pos0 = x; npos++; }
+            if (wt) { if (!pos0) pos0 = x; else if (!pos1) pos1 = x; else return WT_REFUSE; }
         }
-        /* worktree add PATH 无 -b/-B/--detach 且无 commit-ish:git 以路径末段为新分支名 */
-        if (wt && !sawb && !detach && npos == 1 && pos0) {
-            char *pp = sdup(pos0); const char *base = pp, *q; long pl = sl(pp);
-            while (pl > 1 && pp[pl - 1] == '/') pp[--pl] = 0;
-            for (q = pp; *q; q++) if (*q == '/' && q[1]) base = q + 1;
-            { const char *bv = branch_bad(base, 0); if (bv) return bv; }
+        if (wt) {
+            const char *leaf = pos0 ? worktree_leaf(cur, pos0) : 0;
+            if (!leaf) return WT_REFUSE;
+            if (local && created) { const char *bv = branch_bad(created, force_branch); if (bv) return bv; }
+            const char *branch = created ? created : (!detach ? pos1 : 0);
+            if (branch && leaf[0] == 'v' && !eq(strip_q(branch), leaf)) return WT_REFUSE;
+            if (local && !branch && !detach) return branch_bad(leaf, 0);
         }
     }
     return 0;
@@ -294,7 +312,10 @@ static const char *git_violation(char **a, long n, const char *cur) {
     if (eq(sub, "restore") && REST(".")) return "git restore .:不得还原他人路径";
     if (eq(sub, "commit") && REST("--no-verify")) return "git commit --no-verify:不得绕过 precommit";
     if (eq(sub, "push") && REST("--no-verify")) return "git push --no-verify:不得绕过 precommit";
-    if (in_repo_dir(tgt)) { const char *bv = branch_violation(a, i, n); if (bv) return bv; }
+    int local = in_repo_dir(tgt);
+    if (local || (eq(sub, "worktree") && i + 1 < n && eq(a[i + 1], "add"))) {
+        const char *bv = branch_violation(a, i, n, tgt, local); if (bv) return bv;
+    }
 #undef REST
     return 0;
 }
@@ -345,33 +366,7 @@ static char *check_seg(char *t, char **curp) {
         else if ((eq(first, "cp") || eq(first, "mv") || eq(first, "install") || eq(first, "ln") || eq(first, "rsync")) && noa > 1 && repo_path(oa[noa - 1], cur, 1)) hit = oa[noa - 1];
         if (hit && *hit) return fmt("%s 写仓库根 out/ (%s):不得往仓库 out/ 放任何东西,改用 $CLAUDE_JOB_DIR/tmp 或 /tmp", first, hit);
     }
-    if (eq(first, "git") && k + 1 < nw) {
-        int bad = eq(w[k + 1], "clone");
-        if (!bad && eq(w[k + 1], "worktree") && k + 2 < nw && eq(w[k + 2], "add")) {
-            char *tg = sdup(""), *abs; int ok = 0;
-            for (i = k + 3; i < nw; i++) {
-                if (w[i][0] == '-' && (w[i][1] == 'b' || w[i][1] == 'B') && !w[i][2]) { i++; continue; }
-                if (w[i][0] == '-') continue;
-                tg = w[i]; break;
-            }
-            tg = strip_q(tg);
-            if (*tg && !hasc(tg, '$') && !hasc(tg, '`')) {
-                char *pre = cat2(REPO, "/.claude/worktrees/v0.0.");
-                char *mpre = cat2(REPO, "/.claude/worktrees/merge-");
-                abs = tg[0] == '/' ? resolve("", tg) : (*cur ? resolve(cur, tg) : sdup(""));
-                if (sw(abs, pre)) { const char *q = abs + sl(pre); if (*q) { ok = 1; for (; *q; q++) if (!isdg(*q)) ok = 0; } }
-                else if (sw(abs, mpre)) {
-                    const char *q = abs + sl(mpre);
-                    if (*q) {
-                        ok = 1;
-                        for (; *q; q++) if (!(isdg(*q) || isal(*q) || *q == '.' || *q == '_' || *q == '-')) ok = 0;
-                    }
-                }
-            }
-            bad = !ok;
-        }
-        if (bad) return sdup("git clone/worktree add:不得另建克隆或工作树,直接在 ~/repos/unisacc 里工作");
-    }
+    if (eq(first, "git") && k + 1 < nw && eq(w[k + 1], "clone")) return sdup(WT_REFUSE);
     if (eq(first, "mkdir")) {
         for (i = k + 1; i < nw; i++) {
             const char *a = w[i]; long j, m = sl(a); int hitm = sw(a, "~/work") || has(a, "cc-work");

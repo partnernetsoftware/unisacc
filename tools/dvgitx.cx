@@ -8,11 +8,11 @@
  *       --ignore PATH appends the line PATH to .gitignore when it is not already a line
  *       (idempotent); the commit carries .gitignore as HEAD's copy plus exactly those lines.
  *       Receipt: GIT_COMMIT<TAB>rc=..<TAB>commit=..<TAB>pushed=..<TAB>ms=.. like git commit.
- *   dvgitx ROOT worktree add .claude/worktrees/v0.0.NN v0.0.NN [--base REF]
+ *   dvgitx ROOT worktree add .claude/worktrees/vX.Y.Z vX.Y.Z [--base REF]
  *       Same rule as tools/guard-hook.cx: only that path form and branch name; anything else is
  *       REFUSE worktree-path-form (rc 2). Creates the branch when missing, then places the
  *       ignored symlink unisacc.com -> ROOT/unisacc.com at the work tree top.
- *   dvgitx ROOT worktree remove .claude/worktrees/v0.0.NN
+ *   dvgitx ROOT worktree remove .claude/worktrees/vX.Y.Z
  *       Never forces: uncommitted changes -> REFUSE worktree-dirty plus DIRTY<TAB>line rows (rc 2).
  *   dvgitx ROOT worktree list
  * Check: tools/check-dvgitx.cx. */
@@ -24,6 +24,7 @@
 #pragma unisa use sysx.process
 #pragma unisa use cxlib.trailer
 #pragma unisa use mem.bytes
+#pragma unisa use cxlib.releaseseq
 
 static char root[4096];
 static char cap_out[1 << 16];
@@ -175,11 +176,9 @@ static int untrack(int argc, char **argv) {
     return rc;
 }
 
-/* .claude/worktrees/v0.0.NN (relative or ROOT-absolute) whose leaf equals BRANCH = v0.0.NN */
+/* .claude/worktrees/vX.Y.Z (relative or ROOT-absolute) whose leaf equals BRANCH. */
 static int wt_form(const char *path, const char *br, char *abs, int cap) {
-    const char *q = br; if (strncmp(q, "v0.0.", 5)) return 0;
-    q += 5; if (!*q) return 0;
-    for (; *q; q++) if (*q < '0' || *q > '9') return 0;
+    if (br[0] != 'v' || !rs_version(br + 1)) return 0;
     char want[4200]; if (cx_fmt(want, sizeof want, "%s/.claude/worktrees/%s", root, br)) return 0;
     if (path[0] == '/') { if (strcmp(path, want)) return 0; }
     else { char rel[300]; if (cx_fmt(rel, sizeof rel, ".claude/worktrees/%s", br) || strcmp(path, rel)) return 0; }
@@ -192,7 +191,7 @@ static int worktree(int argc, char **argv) {
     if (argc == 1 && !strcmp(argv[0], "list")) { char *v[] = {"git", "worktree", "list", 0}; int rc = run(v, root, 0, cap_out, sizeof cap_out); fputs(cap_out, stdout); return rc; }
     if (argc >= 3 && !strcmp(argv[0], "add") && (argc == 3 || (argc == 5 && !strcmp(argv[3], "--base")))) {
         if (!wt_form(argv[1], argv[2], abs, sizeof abs)) {
-            fprintf(stderr, "devsvc: REFUSE worktree-path-form: worktree add takes .claude/worktrees/v0.0.NN and branch v0.0.NN with the same NN (got %s %s; same rule as tools/guard-hook.cx)\n", argv[1], argv[2]);
+            fprintf(stderr, "devsvc: REFUSE worktree-path-form: worktree add takes .claude/worktrees/vX.Y.Z and matching branch vX.Y.Z (got %s %s; same rule as tools/guard-hook.cx)\n", argv[1], argv[2]);
             return 2; }
         char ref[300], o[200]; cx_fmt(ref, sizeof ref, "refs/heads/%s", argv[2]);
         char *ev[] = {"git", "rev-parse", "-q", "--verify", ref, 0}; int exists = run(ev, root, 0, o, sizeof o) == 0;
@@ -208,7 +207,7 @@ static int worktree(int argc, char **argv) {
     }
     if (argc == 2 && !strcmp(argv[0], "remove")) {
         if (!wt_form(argv[1], leaf(argv[1]), abs, sizeof abs)) {
-            fprintf(stderr, "devsvc: REFUSE worktree-path-form: worktree remove takes .claude/worktrees/v0.0.NN (got %s)\n", argv[1]); return 2; }
+            fprintf(stderr, "devsvc: REFUSE worktree-path-form: worktree remove takes .claude/worktrees/vX.Y.Z (got %s)\n", argv[1]); return 2; }
         char *sv[] = {"git", "-C", abs, "status", "--porcelain", 0};
         if (run(sv, root, 0, cap_out, sizeof cap_out)) { fprintf(stderr, "devsvc: REFUSE worktree-missing: %s is not a work tree\n", abs); return 2; }
         if (cap_out[0]) {
@@ -224,7 +223,7 @@ static int worktree(int argc, char **argv) {
         printf("WORKTREE\tremove\trc=%d\tpath=%s\n", rc, abs);
         return rc ? 1 : 0;
     }
-    fprintf(stderr, "devsvc: REFUSE worktree-args: use git worktree add .claude/worktrees/v0.0.NN v0.0.NN [--base REF] | remove .claude/worktrees/v0.0.NN | list\n");
+    fprintf(stderr, "devsvc: REFUSE worktree-args: use git worktree add .claude/worktrees/vX.Y.Z vX.Y.Z [--base REF] | remove .claude/worktrees/vX.Y.Z | list\n");
     return 2;
 }
 
