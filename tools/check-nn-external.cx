@@ -1,0 +1,108 @@
+#pragma unisa use driver.cli
+#pragma unisa use driver.nnext
+#pragma unisa use text.text
+#pragma unisa use sys.io
+#pragma unisa use cxlib.ckassert
+
+static int g_fail;
+
+static void ck_nn(int ok, const char *name) {
+    ck(ok, name);
+    if (!ok) g_fail = g_fail + 1;
+}
+
+static unsigned ex_crc32_test(char *p, int n) {
+    unsigned crc = 0xffffffffU;
+    int i, j;
+    for (i = 0; i < n; i = i + 1) {
+        crc = crc ^ (unsigned char)p[i];
+        for (j = 0; j < 8; j = j + 1)
+            crc = (crc >> 1) ^ (0xedb88320U & (unsigned)(-(int)(crc & 1U)));
+    }
+    return ~crc;
+}
+
+static int write_file_bytes(const char *path, const char *data, long n) {
+    FILE *f = fopen(path, "wb");
+    if (!f) return 1;
+    if (n > 0 && fwrite(data, 1, (size_t)n, f) != (size_t)n) { fclose(f); return 1; }
+    fclose(f);
+    return 0;
+}
+
+int main(void) {
+    CxcState st;
+    char why[128];
+    char *av1[4];
+    char *av2[3];
+    char *av3[2];
+    int idx;
+    const unsigned char *mb = 0;
+    long mn = 0;
+    int raw = 0, compressed = 0;
+    unsigned crc = 0;
+    int rc;
+    const char *dir = "/tmp/nn-ext-test-dir";
+    const char *nb = "/tmp/nn-ext-test-dir/e2.nb";
+
+    ck_nn(sizeof(CxcState) == 144, "cli-abi-size");
+    memset(&st, 0, sizeof st);
+    av1[0] = "unisacc"; av1[1] = "--nn-dir"; av1[2] = (char *)dir; av1[3] = "a.cx";
+    ck_nn(cxc_default_run(&st, av1, 4, why, 128) == 0, "cli-default-run");
+    idx = 1;
+    ck_nn(cxc_step(&st, av1, 4, &idx, why, 128) == 0 && idx == 3, "cli-nn-dir-step");
+    ck_nn(tx_eqz(cxc_nn_dir_get(), dir) && cxc_no_ext_nn_get() == 0, "cli-nn-dir-val");
+
+    memset(&st, 0, sizeof st);
+    av2[0] = "unisacc"; av2[1] = "--no-external-nn"; av2[2] = "a.cx";
+    ck_nn(cxc_default_run(&st, av2, 3, why, 128) == 0, "cli-noext-default-run");
+    idx = 1;
+    ck_nn(cxc_step(&st, av2, 3, &idx, why, 128) == 0 && idx == 2, "cli-noext-step");
+    ck_nn(cxc_no_ext_nn_get() == 1, "cli-noext-val");
+
+    memset(&st, 0, sizeof st);
+    av3[0] = "unisacc"; av3[1] = "--nn-dir";
+    idx = 1;
+    ck_nn(cxc_step(&st, av3, 2, &idx, why, 128) == 5, "cli-nn-dir-missing-arg");
+
+    setenv("UNISACC_NN_DIR", "/tmp/env-nn", 1);
+    unsetenv("UNISACC_NN_MODE");
+    cxn_init(0, 0, "/tmp/fakebin/tool");
+    ck_nn(tx_eqz(cxn_dir_get(), "/tmp/env-nn"), "prio-env-over-beside");
+    cxn_init(dir, 0, "/tmp/fakebin/tool");
+    ck_nn(tx_eqz(cxn_dir_get(), dir), "prio-cli-over-env");
+    cxn_init(dir, 1, "/tmp/fakebin/tool");
+    ck_nn(cxn_dir_get() == 0, "prio-noext-over-cli");
+    unsetenv("UNISACC_NN_DIR");
+    cxn_init(0, 0, "/tmp/fakebin/tool");
+    ck_nn(tx_eqz(cxn_dir_get(), "/tmp/fakebin/nn"), "prio-beside-fallback");
+
+    system("rm -rf /tmp/nn-ext-test-dir && mkdir -p /tmp/nn-ext-test-dir");
+
+    cxn_init(dir, 0, "/tmp/fakebin/tool");
+    rc = cxn_try_load("e2", &mb, &mn, &raw, &crc, &compressed, ex_crc32_test);
+    ck_nn(rc == 2, "empty-dir-fallback");
+
+    ck_nn(write_file_bytes(nb, "BADMAGIC!", 9) == 0, "write-bad-nb");
+    rc = cxn_try_load("e2", &mb, &mn, &raw, &crc, &compressed, ex_crc32_test);
+    ck_nn(rc == 3, "corrupt-nb-refused");
+
+    ck_nn(write_file_bytes(nb, "UNINETB1N\x01\x02\x03", 12) == 0, "write-good-nb-v1");
+    rc = cxn_try_load("e2", &mb, &mn, &raw, &crc, &compressed, ex_crc32_test);
+    ck_nn(rc == 0 && compressed == 2 && mn == 12 && mb[9] == 1, "external-nb-v1");
+
+    ck_nn(write_file_bytes(nb, "UNINETB1N\x09\x08\x07\x06", 13) == 0, "write-good-nb-v2");
+    rc = cxn_try_load("e2", &mb, &mn, &raw, &crc, &compressed, ex_crc32_test);
+    ck_nn(rc == 0 && compressed == 2 && mn == 13 && mb[9] == 9, "external-nb-v2-hot");
+
+    ck_nn(write_file_bytes(nb, "BADMAGIC!", 9) == 0, "write-bad-nb-again");
+    cxn_init(dir, 1, "/tmp/fakebin/tool");
+    rc = cxn_try_load("e2", &mb, &mn, &raw, &crc, &compressed, ex_crc32_test);
+    ck_nn(rc == 2, "no-external-nn-ignores-corrupt");
+
+    cxn_close();
+    system("rm -rf /tmp/nn-ext-test-dir");
+    printf("CHECK_NN_EXTERNAL\tfailed=%d\n", g_fail);
+    printf("E2E_LAYER\tstatus=UNMEASURED\trequires=v0.1.3 product-build (rebuild unisacc.com driver + P4 container assembly)\n");
+    return g_fail ? 1 : 0;
+}

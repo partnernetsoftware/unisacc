@@ -1,0 +1,115 @@
+#pragma unisa module nnext
+#pragma unisa use sys.fs
+#pragma unisa use sys.env
+#pragma unisa use mem.bytes
+#pragma unisa use text.text
+
+static char cxn_dir[512];
+static int cxn_active;
+static int cxn_explicit;
+static unsigned char *cxn_buf;
+
+static void cxn_copyz(char *dst, int cap, const char *src) {
+    int i = 0;
+    if (!dst || cap <= 0) return;
+    if (src) while (src[i] && i + 1 < cap) { dst[i] = src[i]; i = i + 1; }
+    dst[i] = 0;
+}
+
+int cxn_init(const char *cli_dir, int no_ext, const char *exe_path) {
+    const char *mode;
+    const char *env_dir;
+    const char *slash = 0;
+    int len = 0;
+    cxn_dir[0] = 0;
+    cxn_active = 0;
+    cxn_explicit = 0;
+    mode = sy_env("UNISACC_NN_MODE");
+    if (no_ext || (mode && tx_eqz(mode, "builtin"))) return 0;
+    if (cli_dir && cli_dir[0]) {
+        cxn_copyz(cxn_dir, (int)sizeof cxn_dir, cli_dir);
+        cxn_active = 1;
+        cxn_explicit = 1;
+        return 1;
+    }
+    env_dir = sy_env("UNISACC_NN_DIR");
+    if (env_dir && env_dir[0]) {
+        cxn_copyz(cxn_dir, (int)sizeof cxn_dir, env_dir);
+        cxn_active = 1;
+        cxn_explicit = 1;
+        return 1;
+    }
+    if (exe_path && exe_path[0]) {
+        while (exe_path[len]) {
+            if (exe_path[len] == '/') slash = exe_path + len;
+            len = len + 1;
+        }
+        if (slash && (int)(slash - exe_path) + 4 < (int)sizeof cxn_dir) {
+            int dlen = (int)(slash - exe_path);
+            int i = 0;
+            while (i < dlen) { cxn_dir[i] = exe_path[i]; i = i + 1; }
+            cxn_dir[i] = '/'; cxn_dir[i + 1] = 'n'; cxn_dir[i + 2] = 'n'; cxn_dir[i + 3] = 0;
+        } else {
+            cxn_copyz(cxn_dir, (int)sizeof cxn_dir, "./nn");
+        }
+        cxn_active = 1;
+        cxn_explicit = 0;
+        return 1;
+    }
+    return 0;
+}
+
+int cxn_bypass_cache(void) { return cxn_active && cxn_explicit; }
+const char *cxn_dir_get(void) { return cxn_active ? cxn_dir : 0; }
+
+void cxn_close(void) {
+    void mm_free(void *);
+    if (cxn_buf) { mm_free(cxn_buf); cxn_buf = 0; }
+}
+
+int cxn_try_load(const char *stage, const unsigned char **bytes, long *n,
+                 int *raw, unsigned *crc, int *compressed,
+                 unsigned (*crcfn)(char *, int)) {
+    void *mm_alloc(size_t);
+    void mm_free(void *);
+    char path[640];
+    int di = 0, si = 0, fd;
+    sy_stat_t st;
+    long sz, got = 0;
+    unsigned char *buf;
+    if (!stage || !bytes || !n || !raw || !crc || !compressed || !crcfn) return 4;
+    if (!cxn_active || !cxn_dir[0]) return 2;
+    while (cxn_dir[di] && di + 1 < 512) { path[di] = cxn_dir[di]; di = di + 1; }
+    path[di++] = '/';
+    while (stage[si] && di + 4 < (int)sizeof path) { path[di++] = stage[si++]; }
+    path[di++] = '.'; path[di++] = 'n'; path[di++] = 'b'; path[di] = 0;
+    fd = sy_open_read(path);
+    if (fd < 0) return fd == -ENOENT ? 2 : 3;
+    if (sy_fstat(fd, &st) != 0 || st.size < 9 || st.size > 2147483647L) {
+        sy_close(fd);
+        return 3;
+    }
+    sz = (long)st.size;
+    buf = (unsigned char *)mm_alloc((size_t)sz);
+    if (!buf) { sy_close(fd); return 3; }
+    while (got < sz) {
+        long r = sy_read(fd, buf + got, sz - got);
+        if (r <= 0) { mm_free(buf); sy_close(fd); return 3; }
+        got = got + r;
+    }
+    sy_close(fd);
+    {
+        const char *m = "UNINETB1N";
+        int k = 0;
+        while (k < 9 && buf[k] == (unsigned char)m[k]) k = k + 1;
+        if (k != 9) { mm_free(buf); return 3; }
+    }
+    if (cxn_buf) mm_free(cxn_buf);
+    cxn_buf = buf;
+    *bytes = cxn_buf;
+    *n = sz;
+    *raw = (int)sz;
+    *crc = crcfn((char *)cxn_buf, (int)sz);
+    *compressed = 2;
+    return 0;
+}
