@@ -1,6 +1,6 @@
 # T1.4c 静默窗口测速
 
-状态：r1 静默窗已执行，16/64 对象等价且分别为 94.037/114.316 倍，102 对象外限未完成，15 倍门未通过；原行与分相见 [M1 实测](tape-m1-result.md)。历史链目录缺失，重建的 102 件均不等于历史 SHA；`quiet-speed/objects-v010-r1/` 是首份重建的固定字节存档，不是历史恢复。见 [恢复核对](quiet-speed/v010-g2-recovery.md) 与 [跨根不一致](object-nondeterminism.md)。
+状态：r1 静默窗已执行，16/64 对象等价且分别为 94.037/114.316 倍，102 对象外限未完成，15 倍门未通过；原行与分相见 [M1 实测](tape-m1-result.md)。历史链目录缺失，重建的 102 件均不等于历史 SHA；`quiet-speed/objects-v010-r1/` 是首份重建的固定字节存档，不是历史恢复。见 恢复核对(私有证据,仓外 ~/.local/share/unisacc/research/ompgpt/quiet-speed/v010-g2-recovery.md) 与 [跨根不一致](object-nondeterminism.md)。
 
 ## 一键测速
 
