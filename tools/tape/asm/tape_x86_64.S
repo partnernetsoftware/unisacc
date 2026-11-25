@@ -249,7 +249,7 @@ tape_run_x86_64:
     pushq %r14
     pushq %r15
     /* Locals followed by 4096 pairs of return PC and guest stack pointer. */
-    subq $65728,%rsp
+    subq $65744,%rsp
     movq %rdi,%r12
     movq %rdx,%r13
     xorq %rax,%rax
@@ -315,6 +315,7 @@ tape_run_x86_64:
     movl $16,%ecx
     rep stosq
     movq $0,176(%rsp)
+    movq $-1,65728(%rsp)
     movq 8(%r12),%rdx
     movq 100(%rdx),%rax
     addq $7,%rax
@@ -407,6 +408,8 @@ tape_run_x86_64:
     je .Lrun_jumpz
     cmpl $29,%eax
     je .Lrun_call
+    cmpl $30,%eax
+    je .Lrun_callr
     cmpl $37,%eax
     je .Lrun_ret
     cmpl $38,%eax
@@ -553,6 +556,11 @@ tape_run_x86_64:
     testb $1,3(%rsp)
     jz .Lrun_code
     movq 8(%rsp),%rax
+    jmp .Lrun_checked_target
+.Lrun_callr:
+    movl $3,%r11d
+    movq 48(%rsp,%rcx,8),%rax
+.Lrun_checked_target:
     movq %r15,%rdx
     subq %r14,%rdx
     cmpq %rdx,%rax
@@ -565,6 +573,39 @@ tape_run_x86_64:
     andl $7,%ecx
     btl %ecx,%r8d
     jnc .Lrun_code
+    cmpl $2,%r11d
+    je .Lrun_lea_code_done
+    cmpl $3,%r11d
+    jne .Lrun_target_ready
+    cmpq 65728(%rsp),%rax
+    je .Lrun_target_ready
+    /* An indirect target also needs a declared CODE relocation. */
+    movq 8(%r12),%r8
+    movq 164(%r8),%rdx
+    movq 172(%r8),%rcx
+    testb $15,%cl
+    jnz .Lrun_code
+    movq 56(%r12),%rsi
+    subq %rdx,%rsi
+    jb .Lrun_code
+    cmpq %rsi,%rcx
+    ja .Lrun_code
+    addq %r8,%rdx
+.Lrun_callr_relo:
+    testq %rcx,%rcx
+    jz .Lrun_code
+    cmpb $0,8(%rdx)
+    jne .Lrun_callr_next
+    movslq 12(%rdx),%rsi
+    cmpq %rax,%rsi
+    jne .Lrun_callr_next
+    movq %rax,65728(%rsp)
+    jmp .Lrun_target_ready
+.Lrun_callr_next:
+    addq $16,%rdx
+    subq $16,%rcx
+    jmp .Lrun_callr_relo
+.Lrun_target_ready:
     testl %r11d,%r11d
     jz .Lrun_branch_take
     movq 176(%rsp),%rcx
@@ -743,9 +784,9 @@ tape_run_x86_64:
     xorl $1,%eax
     jmp .Lrun_store
 .Lrun_lea:
-    testb $1,3(%rsp)
-    jz .Lrun_opcode
     movq 8(%rsp),%rax
+    testb $1,3(%rsp)
+    jz .Lrun_lea_code
     cmpq 16(%r12),%rax
     ja .Lrun_memory
     movq 72(%r12),%rdx
@@ -753,6 +794,13 @@ tape_run_x86_64:
     jz .Lrun_memory
     addq %rdx,%rax
     jc .Lrun_memory
+    jmp .Lrun_store
+.Lrun_lea_code:
+    movl $2,%r11d
+    jmp .Lrun_checked_target
+.Lrun_lea_code_done:
+    movzbl 4(%rsp),%ecx
+    andl $15,%ecx
     jmp .Lrun_store
 .Lrun_sys:
     testb $1,3(%rsp)
@@ -939,7 +987,7 @@ tape_run_x86_64:
 .Lrun_status:
     movq %rax,0(%r13)
 .Lrun_return:
-    addq $65728,%rsp
+    addq $65744,%rsp
     popq %r15
     popq %r14
     popq %r13
