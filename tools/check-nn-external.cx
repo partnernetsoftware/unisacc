@@ -2,6 +2,19 @@
 #pragma unisa use driver.nnext
 #pragma unisa use text.text
 #pragma unisa use sys.io
+#pragma unisa use sys.fs
+#pragma unisa use sys.env
+#pragma unisa use sys.proc
+#pragma unisa use sys.posix
+#pragma unisa use mem.bytes
+#pragma unisa use runtime.packagefooter
+#pragma unisa use runtime.package_decode
+#pragma unisa use runtime.package_lifetime
+#pragma unisa use runtime.model_number
+#pragma unisa use compiler.bindstage
+#pragma unisa use runtime.routestep
+#pragma unisa use cxlib.codec
+#pragma unisa use cxlib.netpack
 #pragma unisa use cxlib.ckassert
 
 static int g_fail;
@@ -11,18 +24,29 @@ static void ck_nn(int ok, const char *name) {
     if (!ok) g_fail = g_fail + 1;
 }
 
-static unsigned ex_crc32_test(char *p, int n) {
-    unsigned crc = 0xffffffffU;
-    int i, j;
-    for (i = 0; i < n; i = i + 1) {
-        crc = crc ^ (unsigned char)p[i];
-        for (j = 0; j < 8; j = j + 1)
-            crc = (crc >> 1) ^ (0xedb88320U & (unsigned)(-(int)(crc & 1U)));
+static void *pk_alloc_fn(void *p, size_t n) { return realloc(p, n ? n : 1); }
+static void pk_free_fn(void *p) { free(p); }
+
+static int has_bytes(const char *hay, size_t hn, const char *ndl) {
+    long nl = tx_len(ndl, 512);
+    if (!hay || nl <= 0 || hn < (size_t)nl) return 0;
+    for (size_t i = 0; i + (size_t)nl <= hn; i++) {
+        long j = 0;
+        while (j < nl && hay[i + (size_t)j] == ndl[j]) j++;
+        if (j == nl) return 1;
     }
-    return ~crc;
+    return 0;
 }
 
-static int write_file_bytes(const char *path, const char *data, long n) {
+static int run_sh(const char *cwd, const char *cmd, int secs, np_result *r) {
+    char *av[4]; char why[200];
+    av[0] = "sh"; av[1] = "-c"; av[2] = (char *)cmd; av[3] = 0;
+    mm_fill(r, sizeof *r, 0, sizeof *r);
+    if (np_run(av, cwd, 0, secs, r, why, sizeof why) != 0) return -1;
+    return r->rc;
+}
+
+static int write_file_bytes(const char *path, const unsigned char *data, long n) {
     FILE *f = fopen(path, "wb");
     if (!f) return 1;
     if (n > 0 && fwrite(data, 1, (size_t)n, f) != (size_t)n) { fclose(f); return 1; }
@@ -30,24 +54,294 @@ static int write_file_bytes(const char *path, const char *data, long n) {
     return 0;
 }
 
-int main(void) {
+/* Extracts real UNINETB1N stage bytes from ./unisacc.com P4 container (fail-closed if missing/corrupt). */
+static int extract_real_stage(const char *pkg_path, const char *want_stage, unsigned char **out_b, long *out_n) {
+    size_t fn = 0;
+    char *fb = cx_read(pkg_path, &fn);
+    PackageFooter foot;
+    CxPackageDecode dec;
+    CxCodecCrc crc;
+    int rc = 1;
+    *out_b = 0; *out_n = 0;
+    if (!fb || !packagefooter_locate_bytes((const unsigned char *)fb, (long)fn, &foot)) {
+        if (fb) free(fb);
+        return 1;
+    }
+    mm_fill(&dec, sizeof dec, 0, sizeof dec);
+    dec.allocate = pk_alloc_fn;
+    dec.release = pk_free_fn;
+    if (cxcodec_crc_init(&crc) ||
+        cxpk_decode(&dec, (const unsigned char *)fb + foot.package_offset, foot.package_length)) {
+        free(fb);
+        return 1;
+    }
+    CxPackage *p = &dec.package;
+    for (int i = 0; i < p->s; i++) {
+        if (tx_eqz(p->stages[i].name, want_stage)) {
+            int mi = p->stages[i].model;
+            if (mi >= 0 && mi < p->m) {
+                const unsigned char *comp = p->b + p->off[mi];
+                long clen = p->len[mi];
+                int rawlen = p->raw[mi];
+                unsigned exp_crc = p->crc[mi];
+                int codec = p->ver < 3 ? 0 : (p->model_codec[mi] ? 1 : 2);
+                unsigned char *raw = (unsigned char *)malloc((size_t)(rawlen > 0 ? rawlen : 1));
+                if (raw) {
+                    int ok = 0;
+                    if (codec == 2 && clen == rawlen) {
+                        mm_copy(raw, rawlen, comp, rawlen);
+                        ok = 1;
+                    } else if (codec == 1 && !cxcodec_inflate(raw, (unsigned long)rawlen, comp, (unsigned long)clen)) {
+                        ok = 1;
+                    }
+                    unsigned act_crc = 0;
+                    if (ok && !cxcodec_crc(&crc, (const char *)raw, rawlen, &act_crc) &&
+                        act_crc == exp_crc && rawlen >= 9 && !memcmp(raw, "UNINETB1N", 9)) {
+                        *out_b = raw; *out_n = (long)rawlen; rc = 0;
+                    } else {
+                        free(raw);
+                    }
+                }
+            }
+            break;
+        }
+    }
+    cxpl_release(&dec.package, pk_free_fn);
+    free(fb);
+    return rc;
+}
+
+static unsigned ex_crc32_test(char *p, int n) {
+    unsigned crc = 0xffffffffU;
+    for (int i = 0; i < n; i++) {
+        crc = crc ^ (unsigned char)p[i];
+        for (int j = 0; j < 8; j++)
+            crc = (crc >> 1) ^ (0xedb88320U & (unsigned)(-(int)(crc & 1U)));
+    }
+    return ~crc;
+}
+
+static void run_e2e(const char *cand_path, const char *base_dir, const unsigned char *real_e2, long real_e2_n) {
+    char cmd[8192], cand_bin[4200], nn_dir[4200], e2_nb[4400], cache_dir[4200];
+    char work_dir[4200], link_dir[4200], link_cand[4400], h_cx[4400];
+    char long560[4400], long560_nb[4600], long4200[4600];
+    np_result r;
+
+    cx_fmt(cand_bin, sizeof cand_bin, "%s/e2e_bin/cand", base_dir);
+    cx_fmt(nn_dir, sizeof nn_dir, "%s/e2e_bin/nn", base_dir);
+    cx_fmt(e2_nb, sizeof e2_nb, "%s/e2.nb", nn_dir);
+    cx_fmt(cache_dir, sizeof cache_dir, "%s/e2e_cache", base_dir);
+    cx_fmt(work_dir, sizeof work_dir, "%s/e2e_work", base_dir);
+    cx_fmt(link_dir, sizeof link_dir, "%s/e2e_links", base_dir);
+    cx_fmt(link_cand, sizeof link_cand, "%s/cand_link", link_dir);
+    cx_fmt(h_cx, sizeof h_cx, "%s/h.cx", work_dir);
+
+    cx_fmt(cmd, sizeof cmd,
+        "set -e; mkdir -p '%s/e2e_bin' '%s' '%s' '%s'; "
+        "cp '%s' '%s'; chmod +x '%s'; "
+        "ln -sf '%s' '%s'; "
+        "printf 'int main(void) { return 42; }\\n' > '%s'",
+        base_dir, cache_dir, work_dir, link_dir,
+        cand_path, cand_bin, cand_bin, cand_bin, link_cand, h_cx);
+    run_sh(".", cmd, 20, &r);
+    ck_nn(r.rc == 0, "e2e-setup");
+    np_free(&r);
+
+    /* (E1) Same candidate: warm up builtin run-cache (cold -> warm hit) */
+    cx_fmt(cmd, sizeof cmd,
+        "env -u UNISACC_NN_DIR -u UNISACC_NN_MODE -u UNISACC_PHASE -u UNISACC_CTOR "
+        "-u UNISACC_CHAIN_PHASE_BOUND_S -u UNISACC_CHAIN_TOOLS_EPOCH -u UNISACC_CHAIN_SHAMEMO -u UNISACC_IDENTITY_HELPER -u UNISA_CONTAINER "
+        "UNISACC_CACHE_DIR='%s' UNISACC_RUN_CACHE=1 UNISACC_RR_TIME=1 "
+        "'%s' -run '%s'", cache_dir, cand_bin, h_cx);
+    run_sh(work_dir, cmd, 30, &r);
+    ck_nn(r.rc == 42, "e2e-builtin-cold-rc42");
+    np_free(&r);
+
+    run_sh(work_dir, cmd, 30, &r);
+    ck_nn(r.rc == 42 && has_bytes(r.err, r.errn, "RR_TIME\tlookup_hit=2") &&
+          !has_bytes(r.err, r.errn, "RR_TIME\tinference"), "e2e-builtin-warm-cache-hit");
+    np_free(&r);
+
+    /* (E2) Beside nn/ with REAL extracted UNINETB1N model bypasses warm builtin cache and compiles with external model */
+    cx_fmt(cmd, sizeof cmd, "mkdir -p '%s'", nn_dir);
+    run_sh(".", cmd, 10, &r); np_free(&r);
+    ck_nn(write_file_bytes(e2_nb, real_e2, real_e2_n) == 0, "e2e-write-real-e2");
+
+    cx_fmt(cmd, sizeof cmd,
+        "env -u UNISACC_NN_DIR -u UNISACC_NN_MODE -u UNISACC_PHASE -u UNISACC_CTOR "
+        "-u UNISACC_CHAIN_PHASE_BOUND_S -u UNISACC_CHAIN_TOOLS_EPOCH -u UNISACC_CHAIN_SHAMEMO -u UNISACC_IDENTITY_HELPER -u UNISA_CONTAINER "
+        "UNISACC_CACHE_DIR='%s' UNISACC_RUN_CACHE=1 UNISACC_RR_TIME=1 "
+        "'%s' -run '%s'", cache_dir, cand_bin, h_cx);
+    run_sh(work_dir, cmd, 30, &r);
+    ck_nn(r.rc == 42 && !has_bytes(r.err, r.errn, "RR_TIME\tlookup_hit=") &&
+          has_bytes(r.err, r.errn, "RR_TIME\tinference\tstage=e2"), "e2e-beside-real-nn-bypasses-warm-cache");
+    np_free(&r);
+
+    /* (E3) Symlink and PATH lookup resolve beside REAL executable nn/, ignoring corrupt CWD ./nn trap */
+    cx_fmt(cmd, sizeof cmd,
+        "mkdir -p '%s/nn' && printf 'BADMAGIC!' > '%s/nn/e2.nb' && "
+        "env -u UNISACC_NN_DIR -u UNISACC_NN_MODE -u UNISACC_PHASE -u UNISACC_CTOR "
+        "-u UNISACC_CHAIN_PHASE_BOUND_S -u UNISACC_CHAIN_TOOLS_EPOCH -u UNISACC_CHAIN_SHAMEMO -u UNISACC_IDENTITY_HELPER -u UNISA_CONTAINER "
+        "UNISACC_CACHE_DIR='%s' UNISACC_RUN_CACHE=1 '%s' -run '%s'",
+        work_dir, work_dir, cache_dir, link_cand, h_cx);
+    run_sh(work_dir, cmd, 30, &r);
+    ck_nn(r.rc == 42, "e2e-symlink-resolves-exe-beside-ignores-cwd-nn");
+    np_free(&r);
+
+    cx_fmt(cmd, sizeof cmd,
+        "env -u UNISACC_NN_DIR -u UNISACC_NN_MODE -u UNISACC_PHASE -u UNISACC_CTOR "
+        "-u UNISACC_CHAIN_PHASE_BOUND_S -u UNISACC_CHAIN_TOOLS_EPOCH -u UNISACC_CHAIN_SHAMEMO -u UNISACC_IDENTITY_HELPER -u UNISA_CONTAINER "
+        "PATH='%s/e2e_bin:/usr/bin:/bin' UNISACC_CACHE_DIR='%s' UNISACC_RUN_CACHE=1 "
+        "cand -run '%s'", base_dir, cache_dir, h_cx);
+    run_sh(work_dir, cmd, 30, &r);
+    ck_nn(r.rc == 42, "e2e-path-invocation-resolves-exe-beside");
+    np_free(&r);
+
+    /* (E4) Internally corrupted UNINETB1N (magic intact, interior payload corrupted) refuses despite warm cache! */
+    {
+        unsigned char *bad_int = (unsigned char *)malloc((size_t)real_e2_n);
+        int ok_w = 0;
+        if (bad_int) {
+            mm_copy(bad_int, real_e2_n, real_e2, real_e2_n);
+            for (long k = 9; k < real_e2_n && k < 64; k++) bad_int[k] = (unsigned char)(bad_int[k] ^ 0xffu);
+            ok_w = (write_file_bytes(e2_nb, bad_int, real_e2_n > 24 ? 24 : real_e2_n) == 0);
+            free(bad_int);
+        }
+        ck_nn(ok_w, "e2e-write-internal-corrupt-e2");
+    }
+    cx_fmt(cmd, sizeof cmd,
+        "env -u UNISACC_NN_DIR -u UNISACC_NN_MODE -u UNISACC_PHASE -u UNISACC_CTOR "
+        "-u UNISACC_CHAIN_PHASE_BOUND_S -u UNISACC_CHAIN_TOOLS_EPOCH -u UNISACC_CHAIN_SHAMEMO -u UNISACC_IDENTITY_HELPER -u UNISA_CONTAINER "
+        "UNISACC_CACHE_DIR='%s' UNISACC_RUN_CACHE=1 '%s' -run '%s'", cache_dir, cand_bin, h_cx);
+    run_sh(work_dir, cmd, 30, &r);
+    ck_nn(r.rc != 0 && r.rc != 42, "e2e-beside-internal-corrupt-refused-not-cached");
+    np_free(&r);
+
+    /* (E5) Special file (FIFO) beside nn refuses immediately without blocking read */
+    cx_fmt(cmd, sizeof cmd, "rm -f '%s' && mkfifo '%s'", e2_nb, e2_nb);
+    run_sh(".", cmd, 10, &r); np_free(&r);
+    cx_fmt(cmd, sizeof cmd,
+        "env -u UNISACC_NN_DIR -u UNISACC_NN_MODE -u UNISACC_PHASE -u UNISACC_CTOR "
+        "-u UNISACC_CHAIN_PHASE_BOUND_S -u UNISACC_CHAIN_TOOLS_EPOCH -u UNISACC_CHAIN_SHAMEMO -u UNISACC_IDENTITY_HELPER -u UNISA_CONTAINER "
+        "UNISACC_CACHE_DIR='%s' '%s' -run '%s'", cache_dir, cand_bin, h_cx);
+    run_sh(work_dir, cmd, 10, &r);
+    ck_nn(r.rc != 0 && r.rc != 42, "e2e-fifo-nonregular-refused-no-hang");
+    np_free(&r);
+
+    /* (E6) >550 char explicit --nn-dir works without truncation; >=4096 char explicit dir explicitly refused */
+    {
+        char seg[64];
+        cx_fmt(seg, sizeof seg, "d012345678901234567890123456789012345678901234567890");
+        cx_fmt(long560, sizeof long560, "%s", work_dir);
+        for (int s = 0; s < 12; s++) {
+            size_t cur = strlen(long560);
+            cx_fmt(long560 + cur, sizeof long560 - cur, "/%s", seg);
+        }
+        ck_nn(strlen(long560) > 550, "e2e-long560-len");
+        cx_fmt(cmd, sizeof cmd, "mkdir -p '%s'", long560);
+        run_sh(".", cmd, 10, &r); np_free(&r);
+        cx_fmt(long560_nb, sizeof long560_nb, "%s/e2.nb", long560);
+        ck_nn(write_file_bytes(long560_nb, real_e2, real_e2_n) == 0, "e2e-long560-write");
+        /* Replace corrupt FIFO with empty dir so --nn-dir works cleanly */
+        cx_fmt(cmd, sizeof cmd, "rm -f '%s'", e2_nb);
+        run_sh(".", cmd, 10, &r); np_free(&r);
+        cx_fmt(cmd, sizeof cmd,
+            "env -u UNISACC_NN_DIR -u UNISACC_NN_MODE -u UNISACC_PHASE -u UNISACC_CTOR "
+            "-u UNISACC_CHAIN_PHASE_BOUND_S -u UNISACC_CHAIN_TOOLS_EPOCH -u UNISACC_CHAIN_SHAMEMO -u UNISACC_IDENTITY_HELPER -u UNISA_CONTAINER "
+            "'%s' --nn-dir '%s' -run '%s'", cand_bin, long560, h_cx);
+        run_sh(work_dir, cmd, 30, &r);
+        ck_nn(r.rc == 42, "e2e-explicit-560plus-dir-not-truncated");
+        np_free(&r);
+
+        memset(long4200, 'x', 4200);
+        long4200[0] = '/'; long4200[4200] = 0;
+        {
+            char *ovv[] = {cand_bin, "--nn-dir", long4200, "-run", h_cx, 0};
+            char owhy[200];
+            mm_fill(&r, sizeof r, 0, sizeof r);
+            int orc = (np_run(ovv, work_dir, 0, 15, &r, owhy, sizeof owhy) == 0) ? r.rc : -1;
+            ck_nn(orc != 0 && orc != 42, "e2e-overlong-4200-dir-refused");
+            np_free(&r);
+        }
+    }
+
+    /* (E7) Fallback on empty beside nn/, byte-identical to --no-external-nn, and formal-chain isolation */
+    cx_fmt(cmd, sizeof cmd,
+        "env -u UNISACC_NN_DIR -u UNISACC_NN_MODE -u UNISACC_PHASE -u UNISACC_CTOR "
+        "-u UNISACC_CHAIN_PHASE_BOUND_S -u UNISACC_CHAIN_TOOLS_EPOCH -u UNISACC_CHAIN_SHAMEMO -u UNISACC_IDENTITY_HELPER -u UNISA_CONTAINER "
+        "'%s' -b lnx/x86_64 '%s' -o '%s/a.elf' && "
+        "'%s' --no-external-nn -b lnx/x86_64 '%s' -o '%s/b.elf' && cmp '%s/a.elf' '%s/b.elf'",
+        cand_bin, h_cx, work_dir, cand_bin, h_cx, work_dir, work_dir, work_dir);
+    run_sh(work_dir, cmd, 30, &r);
+    ck_nn(r.rc == 0, "e2e-empty-beside-fallback-byte-identical");
+    np_free(&r);
+
+    /* Plant bad file in beside nn/ and verify formal-chain env & --no-external-nn & UNISACC_NN_MODE=builtin ignore it */
+    ck_nn(write_file_bytes(e2_nb, (const unsigned char *)"BADMAGIC!", 9) == 0, "e2e-replant-bad-beside");
+    cx_fmt(cmd, sizeof cmd, "UNISACC_NN_MODE=builtin '%s' -run '%s'", cand_bin, h_cx);
+    run_sh(work_dir, cmd, 30, &r);
+    ck_nn(r.rc == 42, "e2e-nn-mode-builtin-ignores-corrupt");
+    np_free(&r);
+
+    cx_fmt(cmd, sizeof cmd, "UNISACC_CHAIN_PHASE_BOUND_S=60 '%s' -run '%s'", cand_bin, h_cx);
+    run_sh(work_dir, cmd, 30, &r);
+    ck_nn(r.rc == 42, "e2e-formal-chain-env-forces-builtin");
+    np_free(&r);
+
+    cx_fmt(cmd, sizeof cmd, "'%s' --no-external-nn -run '%s'", cand_bin, h_cx);
+    run_sh(work_dir, cmd, 30, &r);
+    ck_nn(r.rc == 42, "e2e-no-external-nn-ignores-corrupt");
+    np_free(&r);
+
+    /* E2E also checks SOURCES_SID unchanged when <repo>/nn/e2.nb is added */
+    cx_fmt(cmd, sizeof cmd,
+        "rm -rf '%s/sid_snap' && mkdir -p '%s/sid_snap' && "
+        "git archive HEAD | tar -xf - -C '%s/sid_snap' && "
+        "cc -std=c99 -O2 -w -I '%s/sid_snap/seed' '%s/sid_snap/seed/ident.c' -o '%s/sid_ident' && "
+        "S1=$('%s/sid_ident' '%s/sid_snap') && "
+        "mkdir -p '%s/sid_snap/nn' && cp '%s' '%s/sid_snap/nn/e2.nb' && "
+        "S2=$('%s/sid_ident' '%s/sid_snap') && "
+        "[ -n \"$S1\" ] && [ \"$S1\" = \"$S2\" ] && rm -rf '%s/sid_snap'",
+        base_dir, base_dir, base_dir, base_dir, base_dir, base_dir,
+        base_dir, base_dir, base_dir, e2_nb, base_dir, base_dir, base_dir, base_dir);
+    run_sh(".", cmd, 30, &r);
+    ck_nn(r.rc == 0, "e2e-external-nn-outside-sources-sid");
+    np_free(&r);
+}
+
+int main(int argc, char **argv) {
     CxcState st;
-    char why[128];
-    char *av1[4];
-    char *av2[3];
-    char *av3[2];
-    int idx;
+    char why[128], base_dir[4096], dir[4200], nb[4400], env_nn[4200], long560[4400], long4200[4600], cmd[4096];
+    char *av1[4], *av2[3], *av3[2];
+    int idx, raw = 0, compressed = 0, rc;
     const unsigned char *mb = 0;
     long mn = 0;
-    int raw = 0, compressed = 0;
     unsigned crc = 0;
-    int rc;
-    const char *dir = "/tmp/nn-ext-test-dir";
-    const char *nb = "/tmp/nn-ext-test-dir/e2.nb";
+    const char *e2e_cand = 0;
+    np_result r;
+
+    for (int a = 1; a < argc; a++) {
+        if (tx_eqz(argv[a], "--e2e") && a + 1 < argc) e2e_cand = argv[++a];
+        else { printf("FAIL\tbad-arg\t%s\n", argv[a]); return 2; }
+    }
+
+    if (sy_mkdtemp(sy_tmpdir(), "nn-ext-check-", base_dir, sizeof base_dir) != 0) {
+        printf("FAIL\tmkdtemp\n");
+        return 1;
+    }
+    cx_fmt(dir, sizeof dir, "%s/nn-dir", base_dir);
+    cx_fmt(nb, sizeof nb, "%s/e2.nb", dir);
+    cx_fmt(env_nn, sizeof env_nn, "%s/env-nn", base_dir);
+
+    /* Clean env for isolated unit tests */
+    unsetenv("UNISACC_NN_DIR"); unsetenv("UNISACC_NN_MODE"); unsetenv("UNISACC_PHASE");
+    unsetenv("UNISACC_CTOR"); unsetenv("UNISACC_CHAIN_PHASE_BOUND_S");
+    unsetenv("UNISACC_CHAIN_TOOLS_EPOCH"); unsetenv("UNISACC_CHAIN_SHAMEMO");
+    unsetenv("UNISACC_IDENTITY_HELPER"); unsetenv("UNISA_CONTAINER");
 
     ck_nn(sizeof(CxcState) == 144, "cli-abi-size");
     memset(&st, 0, sizeof st);
-    av1[0] = "unisacc"; av1[1] = "--nn-dir"; av1[2] = (char *)dir; av1[3] = "a.cx";
+    av1[0] = "unisacc"; av1[1] = "--nn-dir"; av1[2] = dir; av1[3] = "a.cx";
     ck_nn(cxc_default_run(&st, av1, 4, why, 128) == 0, "cli-default-run");
     idx = 1;
     ck_nn(cxc_step(&st, av1, 4, &idx, why, 128) == 0 && idx == 3, "cli-nn-dir-step");
@@ -65,44 +359,124 @@ int main(void) {
     idx = 1;
     ck_nn(cxc_step(&st, av3, 2, &idx, why, 128) == 5, "cli-nn-dir-missing-arg");
 
-    setenv("UNISACC_NN_DIR", "/tmp/env-nn", 1);
-    unsetenv("UNISACC_NN_MODE");
-    cxn_init(0, 0, "/tmp/fakebin/tool");
-    ck_nn(tx_eqz(cxn_dir_get(), "/tmp/env-nn"), "prio-env-over-beside");
-    cxn_init(dir, 0, "/tmp/fakebin/tool");
-    ck_nn(tx_eqz(cxn_dir_get(), dir), "prio-cli-over-env");
-    cxn_init(dir, 1, "/tmp/fakebin/tool");
-    ck_nn(cxn_dir_get() == 0, "prio-noext-over-cli");
-    unsetenv("UNISACC_NN_DIR");
-    cxn_init(0, 0, "/tmp/fakebin/tool");
-    ck_nn(tx_eqz(cxn_dir_get(), "/tmp/fakebin/nn"), "prio-beside-fallback");
+    /* Blocker (2): No bare argv[0] -> ./nn; Windows backslash supported; L0 sy_self_path supported; overlong refused */
+    {
+        char fake_exe[4400], want_nn[4400], cmdm[4600];
+        cx_fmt(fake_exe, sizeof fake_exe, "%s/fakebin/tool", base_dir);
+        cx_fmt(want_nn, sizeof want_nn, "%s/fakebin/nn", base_dir);
+        cx_fmt(cmdm, sizeof cmdm, "mkdir -p '%s/fakebin' '%s/fakebin/nn' '%s' '%s'", base_dir, base_dir, env_nn, dir);
+        run_sh(".", cmdm, 10, &r); np_free(&r);
 
-    system("rm -rf /tmp/nn-ext-test-dir && mkdir -p /tmp/nn-ext-test-dir");
+        setenv("UNISACC_NN_DIR", env_nn, 1);
+        ck_nn(cxn_init(0, 0, fake_exe) == 1 && tx_eqz(cxn_dir_get(), env_nn), "prio-env-over-beside");
+        ck_nn(cxn_init(dir, 0, fake_exe) == 1 && tx_eqz(cxn_dir_get(), dir), "prio-cli-over-env");
+        ck_nn(cxn_init(dir, 1, fake_exe) == 0 && cxn_dir_get() == 0, "prio-noext-over-cli");
+        unsetenv("UNISACC_NN_DIR");
 
-    cxn_init(dir, 0, "/tmp/fakebin/tool");
+        ck_nn(cxn_init(0, 0, fake_exe) == 1 && tx_eqz(cxn_dir_get(), want_nn), "prio-beside-fallback");
+        ck_nn(cxn_init(0, 0, "unisacc") == 0 && cxn_dir_get() == 0, "bare-name-never-falls-back-cwd-nn");
+        ck_nn(cxn_init(0, 0, "C:\\tools\\unisacc.exe") == 1 && tx_eqz(cxn_dir_get(), "C:\\tools\\nn"), "win-backslash-beside");
+        ck_nn(cxn_init(0, 0, 0) >= 0, "l0-self-path-ok");
+
+        /* >550 char multi-segment dir preserved untruncated; >=4096 explicitly refused */
+        cx_fmt(long560, sizeof long560, "%s", base_dir);
+        for (int s = 0; s < 12; s++) {
+            size_t bl = strlen(long560);
+            cx_fmt(long560 + bl, sizeof long560 - bl, "/d012345678901234567890123456789012345678901234567890");
+        }
+        ck_nn(strlen(long560) > 550 && cxn_init(long560, 0, 0) == 1 && tx_eqz(cxn_dir_get(), long560), "explicit-560-char-not-truncated");
+
+        memset(long4200, 'c', 4200);
+        long4200[0] = '/'; long4200[4200] = 0;
+        ck_nn(cxn_init(long4200, 0, 0) < 0 && cxn_dir_get() == 0, "explicit-overlong-4200-refused");
+    }
+
+    /* Extract REAL UNINETB1N model from installed ./unisacc.com (NOT synthetic magic-only blob!) */
+    unsigned char *real_e2 = 0;
+    long real_e2_n = 0;
+    ck_nn(extract_real_stage("./unisacc.com", "e2", &real_e2, &real_e2_n) == 0 && real_e2_n > 32, "extract-real-e2-uninetb1n");
+
+    /* Blocker (1) & (2): empty dir fallback keeps bypass=0; beside/explicit valid nb sets bypass=1; corrupt & FIFO refuse before cache */
+    cxn_init(dir, 0, 0);
+    ck_nn(cxn_probe_stage("e2", why, sizeof why) == 0 && cxn_bypass_cache() == 0, "empty-dir-no-bypass");
     rc = cxn_try_load("e2", &mb, &mn, &raw, &crc, &compressed, ex_crc32_test);
     ck_nn(rc == 2, "empty-dir-fallback");
 
-    ck_nn(write_file_bytes(nb, "BADMAGIC!", 9) == 0, "write-bad-nb");
+    /* Regular file check with mkfifo: must fail immediately with non-zero rc=3 without hanging */
+    cx_fmt(cmd, sizeof cmd, "rm -f '%s' && mkfifo '%s'", nb, nb);
+    run_sh(".", cmd, 10, &r); np_free(&r);
     rc = cxn_try_load("e2", &mb, &mn, &raw, &crc, &compressed, ex_crc32_test);
-    ck_nn(rc == 3, "corrupt-nb-refused");
+    ck_nn(rc == 3 && cxn_probe_stage("e2", why, sizeof why) != 0, "fifo-nonregular-refused");
+    cx_fmt(cmd, sizeof cmd, "rm -f '%s'", nb);
+    run_sh(".", cmd, 10, &r); np_free(&r);
 
-    ck_nn(write_file_bytes(nb, "UNINETB1N\x01\x02\x03", 12) == 0, "write-good-nb-v1");
-    rc = cxn_try_load("e2", &mb, &mn, &raw, &crc, &compressed, ex_crc32_test);
-    ck_nn(rc == 0 && compressed == 2 && mn == 12 && mb[9] == 1, "external-nb-v1");
+    /* Non-dir blocking --nn-dir must refuse */
+    {
+        char notdir[4200];
+        cx_fmt(notdir, sizeof notdir, "%s/not_a_dir", base_dir);
+        ck_nn(write_file_bytes(notdir, (const unsigned char *)"file", 4) == 0, "write-nondir");
+        ck_nn(cxn_boot(notdir, 0, 0, why, sizeof why) != 0, "nondir-nn-dir-refused");
+    }
 
-    ck_nn(write_file_bytes(nb, "UNINETB1N\x09\x08\x07\x06", 13) == 0, "write-good-nb-v2");
-    rc = cxn_try_load("e2", &mb, &mn, &raw, &crc, &compressed, ex_crc32_test);
-    ck_nn(rc == 0 && compressed == 2 && mn == 13 && mb[9] == 9, "external-nb-v2-hot");
+    /* Beside valid real model MUST set cxn_bypass_cache() == 1! */
+    {
+        char beside_nn[4400], beside_e2[4500], fake_exe[4200];
+        cx_fmt(fake_exe, sizeof fake_exe, "%s/fakebin/tool", base_dir);
+        cx_fmt(beside_nn, sizeof beside_nn, "%s/fakebin/nn", base_dir);
+        cx_fmt(beside_e2, sizeof beside_e2, "%s/e2.nb", beside_nn);
+        ck_nn(real_e2 != 0 && write_file_bytes(beside_e2, real_e2, real_e2_n) == 0, "write-beside-real-e2");
+        ck_nn(cxn_init(0, 0, fake_exe) == 1 && cxn_probe_stage("e2", why, sizeof why) == 0 && cxn_bypass_cache() == 1,
+              "beside-active-real-nb-sets-bypass-1");
 
-    ck_nn(write_file_bytes(nb, "BADMAGIC!", 9) == 0, "write-bad-nb-again");
-    cxn_init(dir, 1, "/tmp/fakebin/tool");
-    rc = cxn_try_load("e2", &mb, &mn, &raw, &crc, &compressed, ex_crc32_test);
-    ck_nn(rc == 2, "no-external-nn-ignores-corrupt");
+        /* Formal-chain env (UNISACC_PHASE / UNISACC_CTOR / UNISACC_CHAIN_PHASE_BOUND_S) forces builtin even when beside exists! */
+        setenv("UNISACC_CHAIN_PHASE_BOUND_S", "60", 1);
+        ck_nn(cxn_boot(0, 0, 0, why, sizeof why) == 0 && cxn_dir_get() == 0 && cxn_bypass_cache() == 0,
+              "formal-chain-env-forces-builtin");
+        unsetenv("UNISACC_CHAIN_PHASE_BOUND_S");
 
+        setenv("UNISACC_CTOR", "/tmp/ctor", 1);
+        ck_nn(cxn_boot(0, 0, 0, why, sizeof why) == 0 && cxn_dir_get() == 0, "formal-chain-ctor-forces-builtin");
+        unsetenv("UNISACC_CTOR");
+
+        /* --models PKG without explicit --nn-dir forces builtin */
+        ck_nn(cxn_boot(0, 0, "/some/pkg.bin", why, sizeof why) == 0 && cxn_dir_get() == 0, "models-pkg-forces-builtin");
+
+        /* Non-com UNISA_CONTAINER forces builtin */
+        setenv("UNISA_CONTAINER", "/some/pkg.bin", 1);
+        ck_nn(cxn_boot(0, 0, 0, why, sizeof why) == 0 && cxn_dir_get() == 0, "container-pkg-forces-builtin");
+        unsetenv("UNISA_CONTAINER");
+    }
+
+    /* Corrupt real model bytes -> probe detects bad magic before cache; valid real loads exact bytes & CRC */
+    cxn_init(dir, 0, 0);
+    ck_nn(write_file_bytes(nb, (const unsigned char *)"BADMAGIC!", 9) == 0, "write-bad-nb");
+    ck_nn(cxn_probe_stage("e2", why, sizeof why) != 0, "probe-corrupt-magic-refused-before-cache");
+    ck_nn(cxn_try_load("e2", &mb, &mn, &raw, &crc, &compressed, ex_crc32_test) == 3, "corrupt-nb-refused");
+
+    if (real_e2) {
+        unsigned want_crc = ex_crc32_test((char *)real_e2, (int)real_e2_n);
+        ck_nn(write_file_bytes(nb, real_e2, real_e2_n) == 0, "write-real-e2");
+        ck_nn(cxn_probe_stage("e2", why, sizeof why) == 0 && cxn_bypass_cache() == 1, "explicit-real-e2-sets-bypass-1");
+        rc = cxn_try_load("e2", &mb, &mn, &raw, &crc, &compressed, ex_crc32_test);
+        ck_nn(rc == 0 && compressed == 2 && mn == real_e2_n && crc == want_crc && !memcmp(mb, real_e2, (size_t)real_e2_n),
+              "external-real-e2-load-exact");
+
+        ck_nn(cxn_init(dir, 1, 0) == 0 && cxn_try_load("e2", &mb, &mn, &raw, &crc, &compressed, ex_crc32_test) == 2,
+              "no-external-nn-ignores-external");
+    }
+
+    if (e2e_cand && real_e2) {
+        run_e2e(e2e_cand, base_dir, real_e2, real_e2_n);
+    }
+
+    if (real_e2) free(real_e2);
     cxn_close();
-    system("rm -rf /tmp/nn-ext-test-dir");
+    (void)sy_remove_all(base_dir);
     printf("CHECK_NN_EXTERNAL\tfailed=%d\n", g_fail);
-    printf("E2E_LAYER\tstatus=UNMEASURED\trequires=v0.1.3 product-build (rebuild unisacc.com driver + P4 container assembly)\n");
+    if (!e2e_cand) {
+        printf("E2E_LAYER\tstatus=UNMEASURED\trun_with=--e2e CANDIDATE_PATH\n");
+    } else {
+        printf("E2E_LAYER\tstatus=%s\tcand=%s\n", g_fail ? "FAIL" : "PASS", e2e_cand);
+    }
     return g_fail ? 1 : 0;
 }
