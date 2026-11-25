@@ -43,7 +43,7 @@ iterate/kernel/typekw.tsv` 与 21 条 tools 支撑文件清单无输出(链止�
 - X 提交:X_SHA=336618e100c2ad5d32a8e7e12dded1f8fa6cc3d0(短号 336618e100,已推 origin/v0.1.0);candidate.tsv 七哈希同 pack 表。
 - X 时间 2026-11-25 11:39:21 +0800;T2 到 X = 132.9 分钟,T_done(10:57:16)到 X = 42.1 分钟(45 分钟硬线按 T2 起算仍超,如实记)。
 - Step 2 draft:2026-11-25 11:40:53 +0800 建草稿(target=a11d28fc0a),回读通过 `GATE 2 DRAFT_READBACK PASS five assets match downloaded SHA256SUMS`;Step 3 CI 于 11:41:01 +0800 起跑(`candidate-native.yml`,run 45541660048,headSha=336618e100,headBranch=v0.1.0),**已于本轮结单:run completed/conclusion success,6/6 全绿,QUALIFIED 42/0**;ci-45541660048.json sha256=220e3f3b1c5c5f34023462cd5560dd6e99635b3f66368b98fc77316ee210cd09,log sha256=e1248d7fbeb11bd48d5871b8c9960d6bd8ee6708affaf3b333b7d9e764947fc5。
-- CI 耗时:2026-11-25T03:41:01Z -> 03:50:30Z,约 **8.95 分钟**(0.0.107 为 9.06 分钟);六条 CANDIDATE_QUALIFY 原行:`CANDIDATE_QUALIFY	verdict=QUALIFIED	pass=42	fail=0	not_run=0	invalid=0`。
+- CI 耗时:2026-11-25T03:41:01Z -> 03:50:30Z = **9 分 29 秒(9.48 分钟)**,0.0.107 为 9.06 分钟(本车多约 0.42 分钟);六条 CANDIDATE_QUALIFY 原行:`CANDIDATE_QUALIFY\tverdict=QUALIFIED\tpass=42\tfail=0\tnot_run=0\tinvalid=0`。
 - Step 3 四行回执:`GATE 3 CI_SUCCESS PASS run success, six candidate targets success`;`GATE 3 CI_VERDICT PASS verdict=QUALIFIED fail=0 invalid=0`;`INDEX exec-3-ci PASS 45541660048 six targets success, CANDIDATE_QUALIFY no fail/invalid`;`STEP 3 ci DONE`。
 
 ## 严格预跑 S5(0.1.0)
@@ -63,11 +63,11 @@ iterate/kernel/typekw.tsv` 与 21 条 tools 支撑文件清单无输出(链止�
 | # | 条件 | 本版状态 |
 |---|---|---|
 | 1 | 六目标不动点连续 3 版 | 106/107 已归档;0.1.0 链止后归档第三套(链上四同与六目标 g2/g3 逐对 sha 相同) |
-| 2 | CI 六格 QUALIFIED 且 strict FAIL/UNKNOWN=0 | CI 按实际 run 回填;strict 以当轮 SUMMARY 为准,UNKNOWN 只允许已登记无生产者项 |
+| 2 | CI 六格 QUALIFIED 且 strict FAIL/UNKNOWN=0 | CI 按实际 run 回填;strict 以当轮 SUMMARY 为准,**UNKNOWN 仅限已登记且证据可核项:107 与 0.1.0 均为 `precommit-list-cap` 的 window-timeout**(本车 S5:520 PASS、0 FAIL、1 UNKNOWN、527 RAW、superseded=6、ratchets 19/0) |
 | 3 | 零已知 P0 | P0 账本 5 行,F1 与 chain-step 已在 0.0.107 关闭;U33 为 P1,随 0.1.x |
 | 4 | state-unverified 声称类 <=3 | **未满足**,预期 3 到 4 行,按 R38 口径如实记 |
 | 5 | 前端覆盖三期 | **未满足**,按 R37 豁免;B2 顺延 0.1.2(原 0.0.109) |
-| 6 | 起链到公开 <=120 分钟 | **未满足**;参照 0.0.107 实测(链 26.4 分钟 + 预跑 80.9 分钟 + CI 9.1 分钟)与起车前预估,T1 到 T4 预计 125.4 到 139.4 分钟,链止到 X 亦超 45 分钟;两口径并列,如实写 |
+| 6 | 起链到公开 <=120 分钟 | **未满足**;本轮 T1 08:59:43 到 T4 11:55:05 = **175.4 分钟**(T2 到 T4 = 148.6 分钟),链止到 X 亦超 45 分钟;原文与 R6 重述两口径并列,如实记 |
 | 7 | 能用清单 30 过 25 | 清单已冻结、29 项就绪;唯一保留缺口是 release-chain 批本身,登记 0.1.x |
 
 ## 已知缺口
@@ -101,9 +101,15 @@ iterate/kernel/typekw.tsv` 与 21 条 tools 支撑文件清单无输出(链止�
 |---|---|
 | <CI_RUN_ID> | `gh run list` 按 headSha;失败/重派各留一行 |
 | APE5 / SID5(已回填) | b7cae17b… / 37ff46cd02171c8a…;取自 pack 与 sha256sum |
-| 公开时刻 | release/evidence/0.1.0/INDEX.tsv 的 `exec-5-publish` |
+| 公开时刻 | 2026-11-25 11:55:05 +0800(exec-5-publish,isDraft=false, Latest) |
 
-其余值(T1/T2/T3_R6/T4、Y1/Y2、strict 计数)在链止与各步回执后写入正文对应句,不预写。
+其余值:Y1=7375d05e33ce6b3b296b375dfeb7de2b8ce56b9b、Y2=7dc318425d259087d25e0386a8239789144ce7f7(均见 INDEX);T3_R6 见 `CHAIN RESULT READY_TO_EXECUTE`;**T4=11:55:05 +0800,T1 到 T4 = 175.4 分钟,T2 到 T4 = 148.6 分钟**;strict 计数见 S5 节。
+
+## 公开后更正(2026-11-25)
+
+- CI 耗时原写 8.95 分钟,实为 9 分 29 秒(9.48 分钟);0.0.107 为 9.06 分钟,本车多约 0.42 分钟。
+- 准入条件 2 的 UNKNOWN 描述原为模板句,实为 `precommit-list-cap` 的 window-timeout(107 与 0.1.0 同);不改变 1 UNKNOWN 计数与披露口径。
+- 更正不触资产、SID、候选字节与 strict 计数。
 
 ## 落盘规则
 
