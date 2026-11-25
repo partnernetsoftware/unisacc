@@ -1,0 +1,251 @@
+diff --git a/tools/check-proc-s3.cx b/tools/check-proc-s3.cx
+new file mode 100644
+index 0000000..b0419fa
+--- /dev/null
++++ b/tools/check-proc-s3.cx
+@@ -0,0 +1,245 @@
++/* tools/check-proc-s3.cx -- v0.1.4 C3 S3 table-driven check skeleton (58 rows). */
++#pragma unisa use sys.proc
++#pragma unisa use sys.time
++#pragma unisa use sys.io
++#pragma unisa use sysx.run
++#pragma unisa use sysx.reaper
++
++#define MAX_ROWS 64
++#define MAX_COLS 16
++#define MAX_LINE 512
++
++typedef struct {
++    int id;
++    char slot_before[24];
++    char handle_before[24];
++    char event[32];
++    char outcome[48];
++    char slot_after[24];
++    char handle_after[24];
++    int rc;
++    char out_profile[24];
++    int release_by_api;
++    long max_ms;
++    char source[24];
++} s3_row_t;
++
++static int parse_rc_str(const char *s, int *out) {
++    if (strcmp(s, "0") == 0) { *out = 0; return 0; }
++    if (strcmp(s, "1") == 0) { *out = 1; return 0; }
++    if (strcmp(s, "-EIO") == 0) { *out = -EIO; return 0; }
++    if (strcmp(s, "-EBADF") == 0) { *out = -EBADF; return 0; }
++    if (strcmp(s, "-ECHILD") == 0) { *out = -ECHILD; return 0; }
++    if (strcmp(s, "-ETIMEDOUT") == 0) { *out = -ETIMEDOUT; return 0; }
++    if (strcmp(s, "-ESRCH") == 0) { *out = -ESRCH; return 0; }
++    if (strcmp(s, "-EPERM") == 0) { *out = -EPERM; return 0; }
++    if (strcmp(s, "-ENOMEM") == 0) { *out = -ENOMEM; return 0; }
++    if (strcmp(s, "-ENOENT") == 0) { *out = -ENOENT; return 0; }
++    if (strcmp(s, "-EACCES") == 0) { *out = -EACCES; return 0; }
++    return -1;
++}
++
++static int split_tabs(char *line, char **cols, int maxc) {
++    int n = 0;
++    char *p = line;
++    cols[n++] = p;
++    while (*p && n < maxc) {
++        if (*p == '\t') {
++            *p = 0;
++            cols[n++] = p + 1;
++        }
++        p++;
++    }
++    return n;
++}
++
++static int load_spec(const char *path, s3_row_t *rows, int *nrows) {
++    FILE *fp = fopen(path, "r");
++    char line[MAX_LINE];
++    int lno = 0;
++    *nrows = 0;
++    if (!fp) {
++        printf("CHECK_PROC_S3_ERR reason=SPEC_OPEN_FAIL path=%s\n", path);
++        return -1;
++    }
++    while (fgets(line, sizeof line, fp)) {
++        size_t len = strlen(line);
++        char *cols[MAX_COLS];
++        int nc;
++        s3_row_t *r;
++        long v;
++        while (len > 0 && (line[len - 1] == '\n' || line[len - 1] == '\r')) line[--len] = 0;
++        if (len == 0) continue;
++        lno++;
++        nc = split_tabs(line, cols, MAX_COLS);
++        if (nc != 12) {
++            printf("CHECK_PROC_S3_ERR reason=BAD_COL_COUNT line=%d cols=%d\n", lno, nc);
++            fclose(fp);
++            return -1;
++        }
++        if (lno == 1) {
++            if (strcmp(cols[0], "id") != 0 || strcmp(cols[11], "source") != 0) {
++                printf("CHECK_PROC_S3_ERR reason=BAD_HEADER\n");
++                fclose(fp);
++                return -1;
++            }
++            continue;
++        }
++        if (*nrows >= MAX_ROWS) {
++            printf("CHECK_PROC_S3_ERR reason=TOO_MANY_ROWS\n");
++            fclose(fp);
++            return -1;
++        }
++        r = &rows[*nrows];
++        memset(r, 0, sizeof *r);
++        r->id = atoi(cols[0]);
++        if (r->id != *nrows + 1) {
++            printf("CHECK_PROC_S3_ERR reason=BAD_ID line=%d id=%d\n", lno, r->id);
++            fclose(fp);
++            return -1;
++        }
++        snprintf(r->slot_before, sizeof r->slot_before, "%s", cols[1]);
++        snprintf(r->handle_before, sizeof r->handle_before, "%s", cols[2]);
++        snprintf(r->event, sizeof r->event, "%s", cols[3]);
++        snprintf(r->outcome, sizeof r->outcome, "%s", cols[4]);
++        snprintf(r->slot_after, sizeof r->slot_after, "%s", cols[5]);
++        snprintf(r->handle_after, sizeof r->handle_after, "%s", cols[6]);
++        if (parse_rc_str(cols[7], &r->rc) != 0) {
++            printf("CHECK_PROC_S3_ERR reason=BAD_RC line=%d rc=%s\n", lno, cols[7]);
++            fclose(fp);
++            return -1;
++        }
++        snprintf(r->out_profile, sizeof r->out_profile, "%s", cols[8]);
++        if (strcmp(cols[9], "yes") == 0) r->release_by_api = 1;
++        else if (strcmp(cols[9], "no") == 0) r->release_by_api = 0;
++        else {
++            printf("CHECK_PROC_S3_ERR reason=BAD_RELEASE line=%d val=%s\n", lno, cols[9]);
++            fclose(fp);
++            return -1;
++        }
++        v = atol(cols[10]);
++        if (v <= 0) {
++            printf("CHECK_PROC_S3_ERR reason=BAD_MAX_MS line=%d val=%s\n", lno, cols[10]);
++            fclose(fp);
++            return -1;
++        }
++        r->max_ms = v;
++        snprintf(r->source, sizeof r->source, "%s", cols[11]);
++        (*nrows)++;
++    }
++    fclose(fp);
++    if (*nrows != 58) {
++        printf("CHECK_PROC_S3_ERR reason=ROW_COUNT_MISMATCH rows=%d expected=58\n", *nrows);
++        return -1;
++    }
++    return 0;
++}
++
++static int run_b1_wait(const s3_row_t *r, long *out_ms, int *out_rc) {
++    sy_spawn_t sp;
++    sy_child_t c;
++    sy_exit_t st;
++    const char *av[4];
++    long t0;
++    int rc;
++    av[0] = "/bin/sh"; av[1] = "-c"; av[2] = "sleep 0.35; exit 7"; av[3] = 0;
++    memset(&sp, 0, sizeof sp);
++    sp.argv = av;
++    sp.in_fd = SY_STDIO_NULL;
++    sp.out_fd = SY_STDIO_NULL;
++    sp.err_fd = SY_STDIO_NULL;
++    sp.deadline_ms = 0;
++    rc = sy_proc_spawn(&sp, &c);
++    if (rc != 0) { *out_rc = rc; *out_ms = 0; return 0; }
++    t0 = sy_now_ms();
++    rc = sy_proc_wait(&c, &st);
++    *out_ms = sy_now_ms() - t0;
++    *out_rc = rc;
++    return rc == r->rc && st.exited == 1 && st.code == 7 && st.timed_out == 0 && *out_ms >= 300 && *out_ms <= r->max_ms;
++}
++
++static int run_b1_run(const s3_row_t *r, long *out_ms, int *out_rc) {
++    sy_spawn_t sp;
++    sy_exit_t st;
++    const char *av[4];
++    long t0;
++    int rc;
++    av[0] = "/bin/sh"; av[1] = "-c"; av[2] = "sleep 0.35; exit 7"; av[3] = 0;
++    memset(&sp, 0, sizeof sp);
++    sp.argv = av;
++    sp.in_fd = SY_STDIO_NULL;
++    sp.out_fd = SY_STDIO_NULL;
++    sp.err_fd = SY_STDIO_NULL;
++    sp.deadline_ms = 0;
++    t0 = sy_now_ms();
++    rc = sy_proc_run(&sp, &st);
++    *out_ms = sy_now_ms() - t0;
++    *out_rc = rc;
++    return rc == r->rc && st.exited == 1 && st.code == 7 && st.timed_out == 0 && *out_ms >= 300 && *out_ms <= r->max_ms;
++}
++
++static int run_b2_px_timeout(const s3_row_t *r, int kill_tree, long *out_ms, int *out_rc) {
++    px_opts o;
++    px_result res;
++    const char *av[4];
++    long t0;
++    int rc, ok;
++    av[0] = "/bin/sh"; av[1] = "-c"; av[2] = "sleep 5"; av[3] = 0;
++    memset(&o, 0, sizeof o);
++    memset(&res, 0, sizeof res);
++    o.argv = av;
++    o.deadline_ms = 30;
++    o.kill_tree = kill_tree;
++    t0 = sy_now_ms();
++    rc = px_run(&o, &res);
++    *out_ms = sy_now_ms() - t0;
++    *out_rc = rc;
++    ok = (rc == r->rc && res.code == 124 && res.timed_out == 1 && *out_ms <= r->max_ms);
++    if (kill_tree) ok = ok && (res.residue == 0);
++    else ok = ok && (res.residue == -1);
++    px_result_free(&res);
++    return ok;
++}
++
++int main(void) {
++    s3_row_t rows[MAX_ROWS];
++    int nrows = 0, i, asserted = 0, failed = 0, unmeasured = 0;
++    sy_proc_test_reset();
++    if (load_spec("research/cdx/c3-s3-v014-spec.tsv", rows, &nrows) != 0) {
++        return 2;
++    }
++    for (i = 0; i < nrows; i++) {
++        const s3_row_t *r = &rows[i];
++        long ms = 0;
++        int rc = 0, ok = 0;
++        const char *reason = "UNIMPLEMENTED";
++        asserted++;
++        if (r->id == 38) {
++            ok = run_b1_wait(r, &ms, &rc);
++            reason = ok ? "OK" : "B1_WAIT_FAILED";
++        } else if (r->id == 39) {
++            ok = run_b1_run(r, &ms, &rc);
++            reason = ok ? "OK" : "B1_RUN_FAILED";
++        } else if (r->id == 40) {
++            ok = run_b2_px_timeout(r, 0, &ms, &rc);
++            reason = ok ? "OK" : "B2_NOTREE_TIMEOUT_SLOW_OR_MISMATCH";
++        } else if (r->id == 41) {
++            ok = run_b2_px_timeout(r, 1, &ms, &rc);
++            reason = ok ? "OK" : "B2_TREE_TIMEOUT_SLOW_OR_MISMATCH";
++        } else if (r->id == 43 || r->id == 45 || r->id == 46 || r->id == 53) {
++            ok = 0;
++            rc = -ENOSYS;
++            reason = "MISSING_API=rp_kill_tree_keep_root";
++        } else {
++            ok = 0;
++            reason = "UNIMPLEMENTED";
++        }
++        if (!ok) failed++;
++        printf("PROC_S3_ROW id=%02d event=%s rc=%d slot=%s handle=%s release=%d ms=%ld status=%s reason=%s\n",
++               r->id, r->event, rc, r->slot_after, r->handle_after, r->release_by_api, ms,
++               ok ? "PASS" : "FAIL", reason);
++    }
++    printf("CHECK_PROC_S3 rows=%d asserted=%d failed=%d unmeasured=%d\n",
++           nrows, asserted, failed, unmeasured);
++    return failed == 0 ? 0 : 1;
++}
