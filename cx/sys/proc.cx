@@ -379,6 +379,71 @@ static int syp_own_lost;
 static int syp_own_atexit_armed;
 static unsigned syp_own_gen_seq;
 
+typedef struct { int state; int pid; int pgid; unsigned gen; } sy_proc_test_slot_t;
+typedef struct { int kind; int slot; int pid; int rc; int extra; } sy_proc_test_ev_t;
+enum {
+    SYP_EV_ATEXIT_ARM = 1,
+    SYP_EV_RESERVE = 2,
+    SYP_EV_SETUP = 3,
+    SYP_EV_FORK = 4,
+    SYP_EV_COMMIT = 5,
+    SYP_EV_HANDSHAKE = 6,
+    SYP_EV_DRAIN_KILL = 7,
+    SYP_EV_DRAIN_WAIT = 8
+};
+enum { SYP_TEST_EV_CAP = 256, SYP_TEST_INJ_CAP = 32 };
+static sy_proc_test_ev_t syp_test_evs[SYP_TEST_EV_CAP];
+static int syp_test_ev_n;
+static int syp_test_setup_step;
+static int syp_test_setup_err;
+static int syp_test_hs_wait_err;
+static long syp_test_clock_delta;
+typedef struct { int active; int callsite; int pid; int count; int err; } syp_test_inj_t;
+static syp_test_inj_t syp_test_injs[SYP_TEST_INJ_CAP];
+
+static void syp_test_ev_push(int kind, int slot, int pid, int rc, int extra) {
+    if (syp_test_ev_n < SYP_TEST_EV_CAP) {
+        sy_proc_test_ev_t *e = &syp_test_evs[syp_test_ev_n++];
+        e->kind = kind; e->slot = slot; e->pid = pid; e->rc = rc; e->extra = extra;
+    }
+}
+static int syp_test_take_setup_err(int step) {
+    if (syp_test_setup_step == step && syp_test_setup_err != 0) {
+        int e = syp_test_setup_err;
+        syp_test_setup_step = 0;
+        syp_test_setup_err = 0;
+        return e;
+    }
+    return 0;
+}
+static int syp_test_take_hs_wait_err(void) {
+    if (syp_test_hs_wait_err != 0) {
+        int e = syp_test_hs_wait_err;
+        syp_test_hs_wait_err = 0;
+        return e;
+    }
+    return 0;
+}
+static int syp_test_take_syscall(int callsite, int pid, int *out_err) {
+    int i;
+    for (i = 0; i < SYP_TEST_INJ_CAP; i++) {
+        if (syp_test_injs[i].active && syp_test_injs[i].callsite == callsite &&
+            (syp_test_injs[i].pid == 0 || syp_test_injs[i].pid == pid)) {
+            *out_err = syp_test_injs[i].err;
+            if (syp_test_injs[i].count > 0) {
+                syp_test_injs[i].count--;
+                if (syp_test_injs[i].count == 0) syp_test_injs[i].active = 0;
+            }
+            return 1;
+        }
+    }
+    return 0;
+}
+static long syp_now_ms(void) {
+    long t = sy_now_ms();
+    return t < 0 ? t : t + syp_test_clock_delta;
+}
+
 static void syp_own_check_owner(void) {
     int me = (int)getpid();
     if (syp_own_owner_pid != me) {
@@ -507,6 +572,7 @@ int sy_proc_own_drain(int budget_ms) {
         if (syp_own[i].state == SYP_SLOT_ABANDONED && syp_own[i].pid > 0) {
             if (syp_own[i].pgid > 0) (void)kill(-(pid_t)syp_own[i].pgid, SIGKILL);
             (void)kill((pid_t)syp_own[i].pid, SIGKILL);
+            syp_test_ev_push(SYP_EV_DRAIN_KILL, i, syp_own[i].pid, 0, syp_own[i].state);
         }
     }
     for (;;) {
@@ -514,7 +580,14 @@ int sy_proc_own_drain(int budget_ms) {
         for (i = 0; i < SYP_OWN_CAP; i++) {
             if ((syp_own[i].state == SYP_SLOT_ABANDONED || syp_own[i].state == SYP_SLOT_LOST) && syp_own[i].pid > 0) {
                 int raw;
-                pid_t w = waitpid((pid_t)syp_own[i].pid, &raw, WNOHANG);
+                pid_t w;
+                int inj_e = 0;
+                if (syp_test_take_syscall(3, syp_own[i].pid, &inj_e)) {
+                    if (inj_e == 0) { w = 0; }
+                    else { errno = inj_e; w = -1; }
+                } else
+                w = waitpid((pid_t)syp_own[i].pid, &raw, WNOHANG);
+                syp_test_ev_push(SYP_EV_DRAIN_WAIT, i, syp_own[i].pid, (int)w, w < 0 ? errno : 0);
                 if (w == (pid_t)syp_own[i].pid) {
                     syp_own_on_reap((int)w);
                 } else if (w < 0 && errno == ECHILD) {
@@ -544,11 +617,12 @@ static void syp_own_atexit_fn(void) {
 
 static int syp_atexit_arm(void) {
     const char *inj = sy_env("UNISACC_PROC_INJECT_ATEXIT_FAIL");
-    if (inj && inj[0] == '1' && !inj[1]) return -ENOMEM;
+    if (inj && inj[0] == '1' && !inj[1]) { syp_test_ev_push(SYP_EV_ATEXIT_ARM, -1, 0, -ENOMEM, 0); return -ENOMEM; }
     if (!syp_own_atexit_armed) {
-        if (atexit(syp_own_atexit_fn) != 0) return -ENOMEM;
+        if (atexit(syp_own_atexit_fn) != 0) { syp_test_ev_push(SYP_EV_ATEXIT_ARM, -1, 0, -ENOMEM, 0); return -ENOMEM; }
         syp_own_atexit_armed = 1;
     }
+    syp_test_ev_push(SYP_EV_ATEXIT_ARM, -1, 0, 0, syp_own_atexit_armed);
     return 0;
 }
 
@@ -570,16 +644,23 @@ static int syp_proc_spawn_os(const sy_spawn_t *o, sy_child_t *c) {
     pid_t pid = -1;
     if ((ar = syp_atexit_arm()) != 0) return ar;
     slot = syp_own_reserve();
+    syp_test_ev_push(SYP_EV_RESERVE, slot, 0, slot < 0 ? slot : 0, 0);
     if (slot < 0) return slot;
-    if (pipe(ps) != 0) { syp_own_unreserve(slot); return -errno; }
+    if ((e = syp_test_take_setup_err(1)) != 0) { syp_test_ev_push(SYP_EV_SETUP, slot, 0, -e, 1); syp_own_unreserve(slot); return -e; }
+    if (pipe(ps) != 0) { syp_test_ev_push(SYP_EV_SETUP, slot, 0, -errno, 1); syp_own_unreserve(slot); return -errno; }
+    if ((e = syp_test_take_setup_err(2)) != 0) { /* injected fcntl error */ }
+    else
     if (fcntl(ps[0], F_SETFD, FD_CLOEXEC) != 0 || fcntl(ps[1], F_SETFD, FD_CLOEXEC) != 0) e = errno;
+    if (!e && (e = syp_test_take_setup_err(3)) != 0) { /* injected stdio pipe error */ }
     if (!e && o->in_fd == SY_STDIO_PIPE && pipe(pi) != 0) e = errno;
     if (!e && o->out_fd == SY_STDIO_PIPE && pipe(po) != 0) e = errno;
     if (!e && o->err_fd == SY_STDIO_PIPE && !(o->flags & SY_SPAWN_ERR_TO_OUT) && pipe(pe) != 0) e = errno;
+    syp_test_ev_push(SYP_EV_SETUP, slot, 0, e ? -e : 0, 0);
     if (!e) {
         const char *ff = sy_env("UNISACC_PROC_INJECT_FORK_FAIL");
         if (ff && ff[0] == '1' && !ff[1]) e = EAGAIN;
         else { sy_prespawn(); pid = fork(); if (pid < 0) e = errno; }
+        syp_test_ev_push(SYP_EV_FORK, slot, (int)pid, e ? -e : 0, 0);
     }
     if (e) {
         int *all[4];
@@ -597,17 +678,23 @@ static int syp_proc_spawn_os(const sy_spawn_t *o, sy_child_t *c) {
     }
     close(ps[1]);
     syp_own_commit(slot, (int)pid, group < 0 ? (int)pid : group);
+    syp_test_ev_push(SYP_EV_COMMIT, slot, (int)pid, 0, (int)syp_own[slot].gen);
     if (pi[0] >= 0) close(pi[0]);
     if (po[1] >= 0) close(po[1]);
     if (pe[1] >= 0) close(pe[1]);
     do k = read(ps[0], &e, sizeof e); while (k < 0 && errno == EINTR);
     close(ps[0]);
+    syp_test_ev_push(SYP_EV_HANDSHAKE, slot, (int)pid, (int)k, e);
     if (k == (long)sizeof e) {
         pid_t w;
         if (pi[1] >= 0) close(pi[1]);
         if (po[0] >= 0) close(po[0]);
         if (pe[0] >= 0) close(pe[0]);
-        do w = waitpid(pid, &st, 0); while (w < 0 && errno == EINTR);
+        {
+            int hs_e = syp_test_take_hs_wait_err();
+            if (hs_e != 0) { w = -1; errno = hs_e; }
+            else { do w = waitpid(pid, &st, 0); while (w < 0 && errno == EINTR); }
+        }
         if (w == pid) syp_own_on_reap((int)pid);
         else {
             int idx = syp_own_find_pid((int)pid);
@@ -623,7 +710,7 @@ static int syp_proc_spawn_os(const sy_spawn_t *o, sy_child_t *c) {
     if (pe[0] >= 0) fcntl(pe[0], F_SETFD, FD_CLOEXEC);
     c->pid = (int)pid; c->in_fd = pi[1]; c->out_fd = po[0]; c->err_fd = pe[0];
     if (o->deadline_ms > 0) {
-        long now = sy_now_ms();
+        long now = syp_now_ms();
         c->deadline_at_ms = (now < 0 ? 0 : now) + o->deadline_ms;
         if (c->deadline_at_ms == 0) c->deadline_at_ms = 1;
     }
@@ -647,6 +734,10 @@ int sy_proc_kill(sy_child_t *c, int sig) {
     if (idx < 0) { c->pid = -1; return -ESRCH; }
     if (syp_own[idx].state == SYP_SLOT_LOST) return -ESRCH;
     if (syp_inject_match(c->pid, "UNISACC_PROC_INJECT_KILL_EPERM")) return -EPERM;
+    {
+        int inj_e = 0;
+        if (syp_test_take_syscall(2, c->pid, &inj_e) && inj_e > 0) return -inj_e;
+    }
     errno = 0;
     if (c->h > 0) { if (kill(-(pid_t)c->h, sig) == 0) return 0; if (errno != ESRCH) return -errno; }
     errno = 0;
@@ -664,7 +755,16 @@ static int syp_reap(sy_child_t *c, int nohang, sy_exit_t *st) {
         return -ECHILD;
     }
     for (;;) {
-        w = waitpid((pid_t)c->pid, &raw, nohang ? WNOHANG : 0);
+        {
+            int inj_e = 0;
+            if (syp_test_take_syscall(1, c->pid, &inj_e)) {
+                if (inj_e == 0) return 0;
+                errno = inj_e;
+                w = -1;
+            } else {
+                w = waitpid((pid_t)c->pid, &raw, nohang ? WNOHANG : 0);
+            }
+        }
         if (w == (pid_t)c->pid) break;
         if (w == 0) return 0;
         if (errno != EINTR) {
@@ -719,7 +819,7 @@ int sy_proc_wait(sy_child_t *c, sy_exit_t *st) {
     if (syp_own_find_handle(c) < 0) { c->pid = -1; return -ESRCH; }
     if (c->deadline_at_ms > 0) {
         for (;;) {
-            long now = sy_now_ms();
+            long now = syp_now_ms();
             r = syp_reap(c, 1, st);
             if (r != 0) break;
             if (now >= c->deadline_at_ms) {
@@ -751,10 +851,10 @@ int sy_proc_end(sy_child_t *c, int grace_ms, sy_exit_t *st) {
     idx = syp_own_find_handle(c);
     if (idx < 0) { c->pid = -1; return -ESRCH; }
     if (syp_own[idx].state == SYP_SLOT_LOST) return -ESRCH;
-    end = sy_now_ms() + grace_ms;
+    end = syp_now_ms() + grace_ms;
     sy_proc_kill(c, SIGTERM);
     for (g = 0; g < grace_ms; g += 5) {
-        if (sy_now_ms() >= end) break;
+        if (syp_now_ms() >= end) break;
         sy_sleep_ms(5);
     }
     kr = sy_proc_kill(c, SIGKILL);
@@ -778,6 +878,8 @@ int sy_proc_close(sy_child_t *c) {
     idx = syp_own_find_handle(c);
     if (idx >= 0 && syp_own[idx].state == SYP_SLOT_LIVE) {
         syp_own[idx].state = SYP_SLOT_ABANDONED;
+        c->pid = -2;
+    } else if (idx >= 0 && syp_own[idx].state == SYP_SLOT_LOST) {
         c->pid = -2;
     } else if (c->pid > 0) {
         c->pid = -1;
@@ -945,3 +1047,58 @@ int sy_kill(int pid) {
 
 /* This process's pid. */
 int sy_pid(void) { return (int)getpid(); }
+
+void sy_proc_test_reset(void) {
+    int i;
+    syp_test_ev_n = 0;
+    syp_test_setup_step = 0;
+    syp_test_setup_err = 0;
+    syp_test_hs_wait_err = 0;
+    syp_test_clock_delta = 0;
+    for (i = 0; i < SYP_TEST_INJ_CAP; i++) syp_test_injs[i].active = 0;
+}
+int sy_proc_test_slot(int idx, sy_proc_test_slot_t *out) {
+    if (!out || idx < 0 || idx >= SYP_OWN_CAP) return -EINVAL;
+    syp_own_check_owner();
+    out->state = syp_own[idx].state;
+    out->pid = syp_own[idx].pid;
+    out->pgid = syp_own[idx].pgid;
+    out->gen = syp_own[idx].gen;
+    return 0;
+}
+void sy_proc_test_meta(int *owner_pid, int *lost, int *atexit_armed, unsigned *gen_seq) {
+    syp_own_check_owner();
+    if (owner_pid) *owner_pid = syp_own_owner_pid;
+    if (lost) *lost = syp_own_lost;
+    if (atexit_armed) *atexit_armed = syp_own_atexit_armed;
+    if (gen_seq) *gen_seq = syp_own_gen_seq;
+}
+int sy_proc_test_events_count(void) { return syp_test_ev_n; }
+int sy_proc_test_event(int idx, sy_proc_test_ev_t *out) {
+    if (!out || idx < 0 || idx >= syp_test_ev_n) return -EINVAL;
+    *out = syp_test_evs[idx];
+    return 0;
+}
+void sy_proc_test_inject_setup_err(int step, int err) {
+    syp_test_setup_step = step;
+    syp_test_setup_err = err;
+}
+void sy_proc_test_inject_handshake_wait_err(int err) {
+    syp_test_hs_wait_err = err;
+}
+void sy_proc_test_inject_syscall(int callsite, int pid, int count, int err) {
+    int i;
+    for (i = 0; i < SYP_TEST_INJ_CAP; i++) {
+        if (!syp_test_injs[i].active) {
+            syp_test_injs[i].active = 1;
+            syp_test_injs[i].callsite = callsite;
+            syp_test_injs[i].pid = pid;
+            syp_test_injs[i].count = count;
+            syp_test_injs[i].err = err;
+            return;
+        }
+    }
+}
+void sy_proc_test_clock_advance(long delta_ms) {
+    syp_test_clock_delta += delta_ms;
+}
