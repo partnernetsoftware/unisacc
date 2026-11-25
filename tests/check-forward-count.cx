@@ -1,0 +1,72 @@
+/* check-forward-count.cx -- FORWARD_CALL_MAX 边界:运行时用生成器产 N 个不同 extern 调用,
+ * 用候选产品 -run 该夹具,断言 8191/8192 通过、8193 具名拒(host-forwarded call count exceeds 8192)。
+ *
+ *   sh ./unisacc.com tests/check-forward-count.cx -- CANDIDATE_APE
+ *
+ * 夹具不入库:每档生成到会话目录,用完删。修前候选(无相等即拒)时 8193 不被拒 -> 本检查红。
+ * 末行 CHECK_FORWARD_COUNT ok=N failed=M。 */
+#pragma unisa use sys.fs
+#pragma unisa use sys.io
+#pragma unisa use sys.env
+#pragma unisa use sys.proc
+#pragma unisa use sys.posix
+#pragma unisa use text.text
+#pragma unisa use text.fmt
+#pragma unisa use mem.heap
+#pragma unisa use mem.bytes
+#pragma unisa use cxlib.procrun
+
+static int checks, failed;
+static char cand[2200], sess[2200];
+static void die(const char *s) { fprintf(stderr, "check-forward-count: %s\n", s); exit(2); }
+static void ck(int yes, const char *name) { checks++; if (!yes) failed++; printf("%s\tcheck-forward-count.%s\n", yes ? "PASS" : "FAIL", name); }
+static int has(const char *h, long hn, const char *nd) {
+    long m = 0, i; while (nd[m]) m++; if (!h || hn < m) return 0;
+    for (i = 0; i + m <= hn; i++) if (!memcmp(h + i, nd, (size_t)m)) return 1; return 0;
+}
+/* run `sh -c CMD`, capture stdout+stderr into OUT; return rc. */
+static int runcap(const char *cmd, char *out, long ol) {
+    char *v[4]; char *o = 0; long n = 0; int rc;
+    out[0] = 0;
+    v[0] = "sh"; v[1] = "-c"; v[2] = (char *)cmd; v[3] = 0;
+    rc = cx_runv_timeout(v, 55, &o, &n);
+    if (o) { long c = n < ol - 1 ? n : ol - 1; if (c > 0 && mm_copy(out, ol, o, c)) c = 0; out[c < 0 ? 0 : c] = 0; mm_free(o); }
+    return rc;
+}
+int main(int argc, char **argv) {
+    long tiers[4]; int i;
+    char cmd[6000], out[8192];
+    tiers[0] = 8191; tiers[1] = 8192; tiers[2] = 8193; tiers[3] = 8;
+    if (argc < 2) die("usage: check-forward-count.cx CANDIDATE_APE");
+    if (sy_realpath(argv[1], cand, sizeof cand) < 0) die("cand realpath");
+    { const char *td = sy_tmpdir(); if (!td || !td[0]) die("no tmpdir");
+      if (cx_fmt(sess, sizeof sess, "%s/check-forward-count-%d", td, (int)sy_pid())) die("sess");
+      if (sy_mkdir_all(sess, 0700)) die("sess mkdir"); }
+    for (i = 0; i < 4; i++) {
+        char fx[2400], fqn[64];
+        long N = tiers[i];
+        if (cx_fmt(fx, sizeof fx, "%s/fwd-%ld.cx", sess, N)) die("fx");
+        if (cx_fmt(fqn, sizeof fqn, "n%ld", N)) die("fqn");
+        /* generate the fixture with the candidate (it runs .cx scripts) */
+        if (cx_fmt(cmd, sizeof cmd, "sh '%s' tests/fixtures/forward-count/gen_forward_count.cx -- '%s' %ld 2>&1", cand, fx, N)) die("gen cmd");
+        runcap(cmd, out, (long)sizeof out);
+        /* run it. Below the limit the build must get past forwarding and then fail at the host
+           symbol (rc 127, "no host function"); the limit tier names "exceeds 8192". Any other
+           outcome (too many file-scope items / signature pool exhausted) is a real FAIL printed. */
+        if (cx_fmt(cmd, sizeof cmd, "sh '%s' '%s' 2>&1", cand, fx)) die("run cmd");
+        {   int rc = runcap(cmd, out, (long)sizeof out);
+            if (N <= 8192) {
+                char nm[96]; if (cx_fmt(nm, sizeof nm, "%s-ok", fqn)) die("nm");
+                int good = rc == 127 && has(out, (long)strlen(out), "no host function");
+                if (!good) { long z = 0; while (out[z] && out[z] != '\n') z++; if (z > 160) z = 160;
+                    fprintf(stderr, "check-forward-count: %s rc=%d first=%.*s\n", fqn, rc, (int)z, out); }
+                ck(good, nm);
+            } else {
+                char nm[96]; if (cx_fmt(nm, sizeof nm, "%s-rejected", fqn)) die("nm");
+                ck(has(out, (long)strlen(out), "host-forwarded call count exceeds 8192"), nm);
+            }
+        }
+    }
+    printf("CHECK_FORWARD_COUNT\tok=%d\tfailed=%d\n", checks - failed, failed);
+    return failed ? 1 : 0;
+}
