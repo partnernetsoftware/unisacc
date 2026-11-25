@@ -32,7 +32,7 @@
 - research/agy-h/car2-timeline-v2.md(106 实测分相与 107 估计);
 - research/ccogweco/roadmap-0.1.x.md(0.1.x 批次与顺延十项);
 - research/ccogweco/prerun-speedup-0.1.x.md(S1-S4 与结构点);
-- research/2026-11-24/R37-seal.md(第 5/6 条读法);
+- archive/research-2026-11-25/2026-11-24/R37-seal.md(第 5/6 条读法);
 - plans/v0.0.109.md、plans/v0.0.125.md(原始范围)。
 报告原页落库时补路径;在补上前,证据入口以本页列出的摘要为准。
 

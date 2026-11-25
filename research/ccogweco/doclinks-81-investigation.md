@@ -22,7 +22,7 @@
 
 ## 附:no-home-path
 
-- 私有树 RATCHETS 的 no-home-path 仅剩 `research/omp-sonnet/handoff.md has 1 lines`(既有),决定补丁与本次修法都没有新增;RATCHETS fail=2 的另一项与本改动无关(dup-census 等既有)。
+- 私有树 RATCHETS 的 no-home-path 仅剩 `archive/research-2026-11-25/omp-sonnet/handoff.md has 1 lines`(既有),决定补丁与本次修法都没有新增;RATCHETS fail=2 的另一项与本改动无关(dup-census 等既有)。
 
 ## 工具线缺口登记(cc 2026-11-24 决定)
 

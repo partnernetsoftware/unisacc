@@ -7,7 +7,7 @@
 - 该提交全量改动只有 2 个文件:
   - `exec/parse2/shape-result.tsv` 1 行:`parameter-dimensions FN.shiftdone` 的 RET 行末尾加 `["COPYW","parrank","drk"]`(基线 ac48dad0f5 -> fb0a2384e0)。
   - `tests/notcovered.tsv`:删 `incomplete array declaration before another definition` 一行,把 `...without an initializer` 计数 3->2、来源去掉 `exec/parse2/tentative`。
-- 与三份原补丁(`772d5614fa` 内 `research/2026-11-23/v099-b1-series/`)逐块比对:
+- 与三份原补丁(`772d5614fa` 内 `archive/research-2026-11-25/2026-11-23/v099-b1-series/`)逐块比对:
   - 0001 gredecl:文件齐全(`tests/check-global-redecl-conflict.cx`、manifest 均在 107 树,batch 行 `c99-global-redecl-conflict` 在 tests/batches.tsv:2006)。1/3 在。
   - 0002 7.2:补丁要求 `exec/parse2/tentative-result.tsv`、`tests/check-tentative-array-incomplete.cx`、`tests/manifests/c99-tentative-array-incomplete.tsv`、batches/coverage 行。107 树里夹具与 manifest 均不存在,只有 notcovered 的删行与 0002 完全相同。2/3 = 引擎/表数行在,夹具与登记缺。
   - 0003 t10:补丁要求 `exec/parse2/control-result.tsv`、`shape-result.tsv` 一行、`tests/check-array-param-typedef.cx`、`tests/manifests/c99-array-param-typedef.tsv`、batches/coverage 行。107 树里只有 shape-result 那 1 行(hunk index 与 0003 相同 ac48dad->fb0a238);control-result 改动、夹具、manifest、登记全缺。3/3 = 只有引擎一行,不是整块。

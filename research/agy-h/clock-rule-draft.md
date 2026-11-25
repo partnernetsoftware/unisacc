@@ -2,7 +2,7 @@
 
 日期: 2026-11-24
 执行窗口: agy-h (只读写作, 未运行重命令)
-依据数据: [chain-to-public.tsv](chain-to-public.tsv)、`prd_mempalace.md:43-47`、`research/2026-11-24/R27-design.md:40`、`research/2026-11-24/R30-boundary.md:68`、`research/2026-11-24/R31-plan24h.md:14-31`、`build/north-star.tsv:2,5`、`~/.cache/unisacc/prerun/v0.0.106-2e8a19a342/`
+依据数据: [chain-to-public.tsv](chain-to-public.tsv)、`prd_mempalace.md:43-47`、`archive/research-2026-11-25/2026-11-24/R27-design.md:40`、`archive/research-2026-11-25/2026-11-24/R30-boundary.md:68`、`archive/research-2026-11-25/2026-11-24/R31-plan24h.md:14-31`、`build/north-star.tsv:2,5`、`~/.cache/unisacc/prerun/v0.0.106-2e8a19a342/`
 
 ## 1. prd_mempalace.md:43 笔误与修正行草案
 
@@ -14,7 +14,7 @@
 (1) 冻结提交 F 定为起链提交本身,链后不再合任何 main,阻塞修复例外则重起链;度量改为"链止到 F",0.0.105 为 161 分钟,验收线 30 分钟、硬线 45 分钟,起链到公开目标 90 分钟(硬线 120)
 ```
 
-对照 `research/2026-11-24/R27-design.md:40` 与实测证据 ([chain-to-public.tsv](chain-to-public.tsv)):
+对照 `archive/research-2026-11-25/2026-11-24/R27-design.md:40` 与实测证据 ([chain-to-public.tsv](chain-to-public.tsv)):
 - `0.0.105` 实测 `chain_stop -> F (414a024ea5)` 为 `146.2` 分钟 (`12:43:15 -> 15:09:27`), `chain_stop -> X (edff8d214d)` 才是 `161.0` 分钟 (`12:43:15 -> 15:24:16`)。
 - `R27-design.md:40` 原文明确指出: F 定为起链提交后, 链止到 F 不再适用 (按 `chain_start` 后起链则链止到 F 为负的链长, 按链止后看则为 0), 真正要度量的指标是"链止到 X 提交"。现行 `prd_mempalace.md:43` 将"链止到 X"笔误写作"链止到 F"。
 

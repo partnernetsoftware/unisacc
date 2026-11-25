@@ -10,7 +10,7 @@
 - 最近 10 分钟有改动:research/agy-h/notes-0.0.107-skeleton.md(1 分钟,他人正在写,排除);
   本窗口自己的 land106-dryrun.md(3 分钟)、post-106-ledger.md(6 分钟)不属于他人,可入。
 - 含 /home/ 或被 Unicode 符号污染而排除的:
-  - research/2026-11-24/G53-review.txt(/home/=1,他人件,不入,待其作者改);
+  - archive/research-2026-11-25/2026-11-24/G53-review.txt(/home/=1,他人件,不入,待其作者改);
   - research/agy-h/evidence-path-style.md(/home/=1,新页,不入);
   - research/agy-h/wp7-material-a.patch(Unicode 箭头,属补丁,不入本批);
   - research/ccogweco/archive-106-steps.md、land106-dryrun.md、after-seal-roadmap.md、path-c-rechain-plan.md
@@ -77,8 +77,8 @@ research/2026-11-24(4):R37-seal.md、R38-ruling.md、R39-ruling.md、R40-ruling.
       research/ccogweco/unverified-classification.md research/ccogweco/unlanded-inventory.md \
       research/ccogweco/usable-list-draft.md research/ccogweco/w0150-history.md \
       research/ccogweco/w0191-history.md research/ccogweco/y2-root-backup.md \
-      research/2026-11-24/R37-seal.md research/2026-11-24/R38-ruling.md \
-      research/2026-11-24/R39-ruling.md research/2026-11-24/R40-ruling.md \
+      archive/research-2026-11-25/2026-11-24/R37-seal.md archive/research-2026-11-25/2026-11-24/R38-ruling.md \
+      archive/research-2026-11-25/2026-11-24/R39-ruling.md archive/research-2026-11-25/2026-11-24/R40-ruling.md \
       skills/unisacc-orch-supervise/team-scoreboard.md
 
 提交后补:若本批 md 改变了 build/doc-links.tsv,须同提交带上或紧接一次

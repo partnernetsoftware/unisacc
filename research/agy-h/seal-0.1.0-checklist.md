@@ -1,6 +1,6 @@
 # unisacc 0.1.0 零改动封存车逐步核对表
 
-依据: `research/ccogweco/seal-0.1.0-evidence-map.md`、`research/ccogweco/notes-0.1.0-draft.md`、`research/2026-11-24/R37-seal.md`、`research/agy-h/clock-rule-draft.md`、`seed/ident.c:95-155`、`tools/bg-candidate.cx:677-758`、`tools/release-run.cx:432-630`、`tools/release-chain.cx:1-42,1540`、`tools/release-exec.cx:1420-1600`、`tools/release-post.cx:1-200`。
+依据: `research/ccogweco/seal-0.1.0-evidence-map.md`、`research/ccogweco/notes-0.1.0-draft.md`、`archive/research-2026-11-25/2026-11-24/R37-seal.md`、`research/agy-h/clock-rule-draft.md`、`seed/ident.c:95-155`、`tools/bg-candidate.cx:677-758`、`tools/release-run.cx:432-630`、`tools/release-chain.cx:1-42,1540`、`tools/release-exec.cx:1420-1600`、`tools/release-post.cx:1-200`。
 定位: `0.1.0` 为零代码生成变化的封版车(只收封版证明与版本号收口, 不进 `107` 追加集、不进新功能或材料补丁栈), 从 `0.0.107` 公开后推进至 `0.1.0` 公开。若准入第 1 条(连续 3 版六目标不动点)或第 3 条(零已知 P0)任一为假, 依据 `prd_mempalace.md:47` 与 `notes-0.1.0-draft.md:32` 当趟改称 `0.0.127`, 不称 `0.1.0`。
 
 ---

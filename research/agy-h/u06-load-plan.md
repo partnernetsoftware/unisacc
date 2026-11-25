@@ -2,7 +2,7 @@
 
 日期: 2026-11-24
 执行窗口: agy-h (执行实跑、旧写法对照与留证), agyneon (定因归属裁定)
-依据: `research/2026-11-24/R38-ruling.md:75,97,99,111`、`build/state-unverified.tsv:4`、`git:813e1629ec`、`git:80155036e6`、`tools/tsv-lint.cx:38,302-309`、`tools/check-tsv-lint.cx:196-226`
+依据: `archive/research-2026-11-25/2026-11-24/R38-ruling.md:75,97,99,111`、`build/state-unverified.tsv:4`、`git:813e1629ec`、`git:80155036e6`、`tools/tsv-lint.cx:38,302-309`、`tools/check-tsv-lint.cx:196-226`
 
 ## 1. 历史输入与真实读写关系核查 (回应 cdx 复核第 1 点)
 

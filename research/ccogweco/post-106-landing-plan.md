@@ -33,7 +33,7 @@
 - 打包对象:P1-c 全组(u30/e01 两页 v2、dryread、缺口页、按层跑批设计、路线页、0.1.0 草案、w0150/w0191、
   验收页、判定树、y2 备份页、path-c 备页、notes-106-final 留存、seal map、p0 账本、usable-list、unclassified 等);
   skills/unisacc-orch-supervise/team-scoreboard.md 的 0.0.106 行。
-- 粒度:一次"0.0.106 里程碑收尾"提交,路径 `research/ccogweco/`、`research/2026-11-24/`、记分表;
+- 粒度:一次"0.0.106 里程碑收尾"提交,路径 `research/ccogweco/`、`archive/research-2026-11-25/2026-11-24/`、记分表;
   不逐页提交。
 - 期望:`git show --stat` 只含上述路径;不碰 tools/tests。
 
@@ -78,7 +78,7 @@
 | 步 | 提交 | 路径 | 说明 |
 |---|---|---|---|
 | 1 | 记忆宫殿三笔后一次提交 | prd_mempalace.md | 共享文件,cc 署名 |
-| 2 | 里程碑收尾一次 | research/ccogweco/、research/2026-11-24/、skills/…/team-scoreboard.md | 纯文档合批 |
+| 2 | 里程碑收尾一次 | research/ccogweco/、archive/research-2026-11-25/2026-11-24/、skills/…/team-scoreboard.md | 纯文档合批 |
 | 3 | doc-links 棘轮一件 | tools/ratchets.cx、check、tests/batches.tsv(键) | 实质提交,带自己的研究页 |
 | 4 | 解冻/107 冻结行 | build/freeze.tsv | cc 执行 |
 | 5 | 107 合并后派生表 | 派生与登记表 | 在 107 车树,不推共享 main |

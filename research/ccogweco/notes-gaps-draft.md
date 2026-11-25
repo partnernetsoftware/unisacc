@@ -20,7 +20,7 @@
 - (3) 零已知 P0:发布链 chain-step P0 在 107 修复并实跑后满足;E02 不判 P0(需显式接口变更才触发,非默认路径),以已知缺口入说明;U33 为 P1 随 0.0.125。证据:research/ccogweco/p0-ledger.tsv。
 - (4) state-unverified 不超过 3 行:可能不满足。按 R38 口径声称类基数 10;E02 确定为已知缺口保留,U05(mac 主机)与 U33(P1)保留,预期 3 到 4 行(U06 多半留),若为 4 则如实记未满足,不改 kind、不搬账。证据:research/ccogweco/unverified-classification.md、research/ccogweco/seal-0.1.0-evidence-map.md 条 4 三值。
 - (5) 前端覆盖三期:不满足(豁免按 R37 仅本条):A 在 0.0.100,B1 在 0.0.107,B2(0.0.109)未开工并顺延,封版说明写明未满足。证据:plans/v0.0.109.md、plans/v0.0.107.md。
-- (6) 整链起到公开连续 3 版不超过 120 分钟:仅第三样本按 R37 重述取封版车到 READY_TO_EXECUTE;0.0.105 链止到 F 为 161 分钟(prd_mempalace:43;R30 另记 222 分钟,口径不同),106 起链 20:47:41、链 28 分钟、公开预计 120-160 分钟,107 预计同量级;若 106/107 超 120,本条如实记未满足并注明样本不足。证据:prd_mempalace.md:43、research/2026-11-24/R37-seal.md 条 6、链目录 checkpoint.tsv。
+- (6) 整链起到公开连续 3 版不超过 120 分钟:仅第三样本按 R37 重述取封版车到 READY_TO_EXECUTE;0.0.105 链止到 F 为 161 分钟(prd_mempalace:43;R30 另记 222 分钟,口径不同),106 起链 20:47:41、链 28 分钟、公开预计 120-160 分钟,107 预计同量级;若 106/107 超 120,本条如实记未满足并注明样本不足。证据:prd_mempalace.md:43、archive/research-2026-11-25/2026-11-24/R37-seal.md 条 6、链目录 checkpoint.tsv。
 - (7) 能用清单 30 过 25:可满足。30 项里 29 项就绪(module-units 由 107 车 a7b2dd86c5 覆盖;其余由 WP4 在 107 追加集关闭),唯一保留缺口是 release-chain 本身(不换项);清单须 107 公开前冻结并绑定 strict.tsv 批次行机械计数。证据:research/ccogweco/usable-list-draft.md。
 - (8) 其它已知缺口:E02(见上)、U33 的 P1 竞态、余量包里 release-chain 与未拆批次在 0.1.x 收口;不把上述缺口改写成 PASS。证据:research/ccogweco/p0-ledger.tsv、research/agy-h/margin-packages.md。
 

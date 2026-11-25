@@ -45,7 +45,7 @@ base = 992cfbdbb6(git merge-base ac483247c7 6faff97eed)。
 | build/tlib-packages.tsv | 两侧都取了新号 | 派生/事实表:合后 `tools/layer-api.cx -- --bump-pending` 现取,写回本表 |
 | tests/batch-product-inputs.tsv | 两侧各自追加行,无删除(我方 +3、车侧 +6) | 手写并集(保留两段全部行),再 `tools/prerun-inputs.cx -- --check` 等消费检查 |
 
-另有 1 处是文档内容里的 `<<<<<<<` 字样误报:research/2026-11-24/car1-merge-preview.md 两侧都有该文件,内容冲突需人工取最新版(它本身就记录上一轮冲突表)。
+另有 1 处是文档内容里的 `<<<<<<<` 字样误报:archive/research-2026-11-25/2026-11-24/car1-merge-preview.md 两侧都有该文件,内容冲突需人工取最新版(它本身就记录上一轮冲突表)。
 
 自动合入但合后必须复核(旧 merge-tree 判为可合并,不代表语义正确):
 - tests/batches.tsv(我方 +4、车侧 +21)、tests/coverage.tsv(我方 +6/-2、车侧 +20/-2):合后查重键 `grep -o '^tools-compile-[0-9]*' tests/batches.tsv | sort | uniq -d` 与 `tools/tables-gen.cx -- --check`。

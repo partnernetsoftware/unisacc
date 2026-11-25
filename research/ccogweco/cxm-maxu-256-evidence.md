@@ -64,6 +64,6 @@ tools/check-link-cap.cx: 上限读表; cap-1/cap+1 走实际 walk; 放行 cap+1 
 ## 提交门清理(2026-11-24 第二轮,按 blocked=10 意见)
 
 - 补丁只含源与自己的表行: 删除临时工具 tools/genunits-tmp.cx; 移除 4 张派生表(build/iface-hash.tsv、build/tlib-packages.tsv、build/layer-api/cx.compile.tsv、build/doc-links.tsv),包号改为落车时现取(本次在私有 v0.0.107 树现算到 cx.plan 0.1.14、cx.compile 0.2.25)。
-- 棘轮: research/2026-11-23/own-flow-caps 下 7 个夹具源由 .cx 改为 .cxf(不再被 cxraw/cxlibc 扫描); src/driveargs.cx 的拒文案改用 cx_fmt 并保持 if 数与行数不变; tests/unit-boundary.cx 两处丢弃式 snprintf 改 cx_fmt。私有树棘轮结果 18 项 ok,唯一红项 dup-census 的加数在 base 文件(devsvc-core/prepush),不在本补丁路径。
+- 棘轮: archive/research-2026-11-25/2026-11-23/own-flow-caps 下 7 个夹具源由 .cx 改为 .cxf(不再被 cxraw/cxlibc 扫描); src/driveargs.cx 的拒文案改用 cx_fmt 并保持 if 数与行数不变; tests/unit-boundary.cx 两处丢弃式 snprintf 改 cx_fmt。私有树棘轮结果 18 项 ok,唯一红项 dup-census 的加数在 base 文件(devsvc-core/prepush),不在本补丁路径。
 - 私有 v0.0.107 archive(非工作树)自测: precommit-preview 对补丁路径 + 落车时现取的派生表 = blocked=2,两条都来自 v0.0.107 车头自带的重复 coverage 行(c99.extern-array-incomplete 在车头出现 2 次;git show v0.0.107:tests/coverage.tsv 计数为 2),与补丁无关;补丁路径本身 0 条阻塞。
 - 补丁规模: 24 文件(17 重放 + 5 漏改 + 2 新增行),在 v0.0.107 车头 ad5c3e72 的干净 archive 上整份 git apply --check 通过。
