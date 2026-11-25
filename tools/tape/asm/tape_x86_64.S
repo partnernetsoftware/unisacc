@@ -346,8 +346,12 @@ tape_run_x86_64:
     cmpl $20,%eax
     jbe .Lrun_compare
 .Lrun_noncmp:
+    cmpl $24,%eax
+    jbe .Lrun_mem
     cmpl $25,%eax
     je .Lrun_lea
+    cmpl $26,%eax
+    je .Lrun_mem
     cmpl $27,%eax
     je .Lrun_jump
     cmpl $28,%eax
@@ -359,6 +363,100 @@ tape_run_x86_64:
     cmpl $47,%eax
     je .Lrun_next
     jmp .Lrun_opcode
+.Lrun_mem:
+    movl %eax,%r10d
+    movq $8,%r9
+    cmpl $23,%eax
+    jb .Lrun_mem_width
+    movq 16(%rsp),%r9
+.Lrun_mem_width:
+    cmpl $26,%eax
+    je .Lrun_mem_base
+    cmpq $1,%r9
+    je .Lrun_mem_base
+    cmpq $2,%r9
+    je .Lrun_mem_base
+    cmpq $4,%r9
+    je .Lrun_mem_base
+    cmpq $8,%r9
+    jne .Lrun_opcode
+.Lrun_mem_base:
+    movq 48(%rsp,%rcx,8),%rdi
+    cmpl $21,%eax
+    je .Lrun_mem_load_base
+    cmpl $23,%eax
+    jne .Lrun_mem_offset
+.Lrun_mem_load_base:
+    movq 48(%rsp,%rdx,8),%rdi
+.Lrun_mem_offset:
+    movq 8(%rsp),%r8
+    testq %r8,%r8
+    js .Lrun_mem_negative
+    addq %r8,%rdi
+    jc .Lrun_memory
+    jmp .Lrun_mem_bounds
+.Lrun_mem_negative:
+    addq %r8,%rdi
+    jnc .Lrun_memory
+.Lrun_mem_bounds:
+    movq 72(%r12),%r8
+    testq %r8,%r8
+    jz .Lrun_memory
+    movq %rdi,%rsi
+    subq %r8,%rsi
+    jb .Lrun_memory
+    movq 16(%r12),%r8
+    subq %r9,%r8
+    jb .Lrun_memory
+    cmpq %r8,%rsi
+    ja .Lrun_memory
+    cmpl $26,%r10d
+    je .Lrun_mem_zero
+    cmpl $21,%r10d
+    je .Lrun_mem_load
+    cmpl $23,%r10d
+    je .Lrun_mem_load
+    movq 48(%rsp,%rdx,8),%rax
+    cmpq $8,%r9
+    je .Lrun_mem_st8
+    cmpq $4,%r9
+    je .Lrun_mem_st4
+    cmpq $2,%r9
+    je .Lrun_mem_st2
+    movb %al,(%rdi)
+    jmp .Lrun_next
+.Lrun_mem_st2:
+    movw %ax,(%rdi)
+    jmp .Lrun_next
+.Lrun_mem_st4:
+    movl %eax,(%rdi)
+    jmp .Lrun_next
+.Lrun_mem_st8:
+    movq %rax,(%rdi)
+    jmp .Lrun_next
+.Lrun_mem_load:
+    cmpq $8,%r9
+    je .Lrun_mem_ld8
+    cmpq $4,%r9
+    je .Lrun_mem_ld4
+    cmpq $2,%r9
+    je .Lrun_mem_ld2
+    movsbq (%rdi),%rax
+    jmp .Lrun_store
+.Lrun_mem_ld2:
+    movswq (%rdi),%rax
+    jmp .Lrun_store
+.Lrun_mem_ld4:
+    movslq (%rdi),%rax
+    jmp .Lrun_store
+.Lrun_mem_ld8:
+    movq (%rdi),%rax
+    jmp .Lrun_store
+.Lrun_mem_zero:
+    movq %r9,%rcx
+    xorl %eax,%eax
+    rep stosb
+    jmp .Lrun_next
 .Lrun_jumpz:
     cmpq $0,48(%rsp,%rcx,8)
     jne .Lrun_next
