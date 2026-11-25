@@ -32,10 +32,10 @@
 
 **层就是目录**（2026-10-31 收口）。`cx/sys/`、`cx/mem/`、`cx/text/` 三个目录整体是 L0，其余目录是上层；`tests/cxraw-layers.tsv` 里 L0 条目退化为这三个目录前缀。这一版把事实上已在 L0 的适配器迁进 `cx/sys/`，让目录名与层名一致：
 
-- `../cx/sys/kernel.cx` → `cx/sys/kernel.cx`
-- `../ext/sysx/process.cx`、`process_group.cx`、`process_group_osx.cx` → `cx/sys/`
-- `../cx/sys/lnx-x86_64.c` → `cx/sys/lnx-x86_64.c`
-- `../cx/compiler/winprocess.cx` → `cx/compiler/winprocess.cx`（纯整数/PE 页计算，零 libc 零 include，属编译器 PE 侧，不是宿主对接）
+- `3aae1b76974cd68:cx/core/kernel.cx` → `cx/sys/kernel.cx`
+- `3aae1b76974cd68:cx/runtime/process.cx`、`process_group.cx`、`process_group_osx.cx` → `cx/sys/`
+- `3aae1b76974cd68:cx/runtime/lnx-x86_64.c` → `cx/sys/lnx-x86_64.c`
+- `3aae1b76974cd68:cx/runtime/winprocess.cx` → `cx/compiler/winprocess.cx`（纯整数/PE 页计算，零 libc 零 include，属编译器 PE 侧，不是宿主对接）
 
 | 层 | 路径 | 可直接调用 libc/POSIX | 职责 |
 |---|---|---|---|
@@ -52,12 +52,12 @@
 | `tests/cxinclude-boundary.tsv` | 谁可以 `#include` | 目录前缀 + 逐个 `FILE<TAB>理由` 精确例外 |
 | `tests/cxraw.tsv`、`tests/cxinclude.tsv` | 存量基线 | 每文件一行计数，只降不升 |
 
-两个棘轮的扫描面现在都是 `git ls-files -- '*.cx' ':(glob)cx/**/*.c' ':(glob)cx/**/*.h' ':(glob)cx/**/*.c.in' ':(exclude)archive/'`。之前只扫 `*.cx`，`../cx/sys/lnx-x86_64.c` 完全在盲区；现在 `cx/` 下的宿主 C 与 `.c.in` 投影同样受约束。`src/`、`exec/`、`tools/` 的宿主 C 不在分层叙事内，故意不扫。`cx/cx0/compat-prefix.c.in` 是唯一因此新增的精确例外（cx0-extract 投影到 `src/cxmod.c` 的固定前导，对接携带的 `unisa_sha256.h`）。
+两个棘轮的扫描面现在都是 `git ls-files -- '*.cx' ':(glob)cx/**/*.c' ':(glob)cx/**/*.h' ':(glob)cx/**/*.c.in' ':(exclude)archive/'`。之前只扫 `*.cx`，`3aae1b76974cd68:cx/runtime/lnx-x86_64.c` 完全在盲区；现在 `cx/` 下的宿主 C 与 `.c.in` 投影同样受约束。`src/`、`exec/`、`tools/` 的宿主 C 不在分层叙事内，故意不扫。`cx/cx0/compat-prefix.c.in` 是唯一因此新增的精确例外（cx0-extract 投影到 `src/cxmod.c` 的固定前导，对接携带的 `unisa_sha256.h`）。
 
 ## 只有底层能用 include 对接 libc/POSIX（项目所有者口径，2026-10-30）
 
 - 能写 `#include` 的只有底层：`include/`（前导与携带头）、`tools/cxcc-hostinc/`、`cx/sys/`。名单在 `tests/cxinclude-boundary.tsv`，由 `tests/cxinclude.cx` 检查。其余单位一律用隐式前导，加上 `#pragma unisa use sys.*/text.*/mem.*`。精确例外条目现在接受 `.cx/.c/.h/.c.in`。
-- 两张表的不一致已收口（2026-10-31）：过去 `tests/cxraw-layers.tsv` 按文件逐个准许 `../cx/sys/kernel.cx`、`cx/runtime/process*.cx` 直接调 libc，与 include 白名单不同名。现在这些文件已迁进 `cx/sys/`，两张表都用同一个目录前缀表达 L0，剩下的精确例外只有引导期的 `src/host.cx`、`src/hostnative.cx` 和 csih 的头部表面探针。
+- 两张表的不一致已收口（2026-10-31）：过去 `tests/cxraw-layers.tsv` 按文件逐个准许 `3aae1b76974cd68:cx/core/kernel.cx`、`cx/runtime/process*.cx` 直接调 libc，与 include 白名单不同名。现在这些文件已迁进 `cx/sys/`，两张表都用同一个目录前缀表达 L0，剩下的精确例外只有引导期的 `src/host.cx`、`src/hostnative.cx` 和 csih 的头部表面探针。
 - 白名单外仍在 include 的（2026-10-30）：
   - `src/host.cx` 原来 3 个（`<sys/mman.h>`、`<dlfcn.h>`、`<fcntl.h>`）。mmap、mprotect、munmap 已进 `cx/sys/mem.cx`，dlopen、dlsym、dlclose、dlerror 的地址已进 `cx/sys/dl.cx`。open 用的 `O_*` 本来就在前导里，没有再为 `<fcntl.h>` 写 include。`src/host.cx` 现在 0 个 `#include`。`tests/cxinclude.cx --check` 不再报这个文件；整次仍失败，报的是 `apps/csih`（24 个超基线、2 个低于基线），那是 csih 车道。
   - `apps/csih`：项目所有者定 csih 只做自己的事，`cx/sys` 的接口由 cc 补。已补的有 `sysx.net`、`sys.poll`、`sys.tty`、`sys.time`（796531e47f，检查 `cx-l0-sys-net` 43/0）和 `sys.guard`（setjmp/longjmp 收进 `sy_guard`/`sy_guard_fail`，检查 `cx-l0-sys-guard` 6/0）。5 个只用到前导头的 probe 已去掉 include（03cd501057）。剩下的按下表机械迁移：
@@ -75,7 +75,7 @@
 
 ## 棘轮
 
-`tests/cxraw.cx`（基线 `tests/cxraw.tsv`）统计 L1–L3 每个单位里直接调用的 libc/POSIX 函数（内存、字符串、文件、目录、进程、环境、时钟，名单在源码 `raw_names`），注释与字面量不计。只降不升；新文件必须为 0。初始基线：635 个文件，22,847 次。2026-10-30 起不再重复计已跟踪的符号链接（f638c861e5）。2026-10-31 起扫描面扩到 `cx/**/*.c`、`*.h`、`*.c.in`（`tests/cxinclude.cx` 同步），`../cx/sys/lnx-x86_64.c` 不再在盲区。同日把事实 L0 适配器迁进 `cx/sys/` 后实跑：1510 个单位、14,614 次（其中 6 个文件移入 `cx/sys/` 前缀不再计数），基线 14,614，0 项超基线，0 项低于基线。同一天把 `cxapis`、`cxtrunc`、`cxlibc`、`cxplatform` 四条基线一起收紧到当前值（319/780/23042/190）。
+`tests/cxraw.cx`（基线 `tests/cxraw.tsv`）统计 L1–L3 每个单位里直接调用的 libc/POSIX 函数（内存、字符串、文件、目录、进程、环境、时钟，名单在源码 `raw_names`），注释与字面量不计。只降不升；新文件必须为 0。初始基线：635 个文件，22,847 次。2026-10-30 起不再重复计已跟踪的符号链接（f638c861e5）。2026-10-31 起扫描面扩到 `cx/**/*.c`、`*.h`、`*.c.in`（`tests/cxinclude.cx` 同步），`3aae1b76974cd68:cx/runtime/lnx-x86_64.c` 不再在盲区。同日把事实 L0 适配器迁进 `cx/sys/` 后实跑：1510 个单位、14,614 次（其中 6 个文件移入 `cx/sys/` 前缀不再计数），基线 14,614，0 项超基线，0 项低于基线。同一天把 `cxapis`、`cxtrunc`、`cxlibc`、`cxplatform` 四条基线一起收紧到当前值（319/780/23042/190）。
 
 产品路径的现状（L1–L2，2026-10-30 时点、迁移前的目录归属）：
 
@@ -98,7 +98,7 @@
 ## 已有与新建的 L0
 
 - 已有：`include/cx.h` 前导里的 `cx_read`、`cx_write`、`cx_run*`、`cx_walk`、`cx_fmt`、`cx_path_join`、`cx_remove/rmtree/trash`（棘轮不计 `cx_*`）；`cx/core/memory.cx` 的句柄式所有者/借用内存（`cx/core/memory.md`）。
-- 新建：`cx/text/text.cx`（`tx_len`、`tx_same`、`tx_eq`、`tx_prefix`、`tx_chr`、`tx_find`、`tx_copy`，无 libc 调用，检查 `tools/check-cx-text.cx`）；`../ext/textx/deflate.cx`（`dz_bound`、`dz_deflate`、`dz_gzip_bound`、`dz_gzip`、`dz_crc32`，deflate/gzip 压缩，无 libc 调用，调用方提供输出缓冲，模块私有静态表因而不可重入，检查 `tools/check-cx-deflate.cx` 用系统 `gzip -dc` 对拍）；`cx/mem/arena.cx`（`ar_new`、`ar_alloc`、`ar_dup`、`ar_drop`，句柄式，按限额分配、整体释放，检查 `tools/check-cx-arena.cx`）。
+- 新建：`cx/text/text.cx`（`tx_len`、`tx_same`、`tx_eq`、`tx_prefix`、`tx_chr`、`tx_find`、`tx_copy`，无 libc 调用，检查 `tools/check-cx-text.cx`）；`fab2451e91822a9:cx/text/deflate.cx`（`dz_bound`、`dz_deflate`、`dz_gzip_bound`、`dz_gzip`、`dz_crc32`，deflate/gzip 压缩，无 libc 调用，调用方提供输出缓冲，模块私有静态表因而不可重入，检查 `tools/check-cx-deflate.cx` 用系统 `gzip -dc` 对拍）；`cx/mem/arena.cx`（`ar_new`、`ar_alloc`、`ar_dup`、`ar_drop`，句柄式，按限额分配、整体释放，检查 `tools/check-cx-arena.cx`）。
 - 使用方按目录放符号链接 `text -> ../cx/text`、`mem -> ../cx/mem`（tools/、tests/ 已加），`#pragma unisa use text.text` / `mem.arena`。
 - 示范迁移：`tools/gold-table.cx` 33→0、`tests/cxraw.cx` 29→0。
 - 新建 `cx/sys`（2026-10-30，cc 同意由 unisacc-00 做；`del.cx` 归 cc）。检查 `tools/check-cx-sys.cx`，42 条实跑。使用方按目录放软链 `sys -> ../cx/sys`（tools/、apps/csih/probes/ 已加），`#pragma unisa use sys.fs` 等。
@@ -127,7 +127,7 @@
 
 1. 已做：`tests/cxraw.cx` 棘轮与层前缀表。
 2. 已做（2026-10-30）：`cx/mem`、`cx/text`、`cx/sys`（env/fs/proc/time/net/posix）各有接口、实现和独立检查。
-   - `../cx/sys/kernel.cx`（f03c5a940d）也登记为 L0 适配器：它装载包内的汇编执行核心，libc 调用就是核心的服务表。
+   - `3aae1b76974cd68:cx/core/kernel.cx`（f03c5a940d）也登记为 L0 适配器：它装载包内的汇编执行核心，libc 调用就是核心的服务表。
    - **取舍：前导里的 `cx_*` 帮手原地认定为 L0 接口，不搬进 `cx/sys`。** 它们实现在 `include/cx-nested.h` 里，本身就属于 L0 适配层；目前 320 个 `.cx` 共用 1369 次，搬家只会造成大面积改动，不改变分层。新代码优先用 `cx/sys`、`cx/text`、`cx/mem`；`cx_*` 继续可用，棘轮不计。
    - 棘轮现状：上层直接调用 19634 次（初始 22847；去掉符号链接重复计数，再把检查工具的字符串比较改走 `tx_eq`），这次实跑 629 个已跟踪文件，0 项超基线，0 项低于基线。
 3. 迁移按调用密度：`cx/runtime`（memcpy/strlen 为主）→ `cx/driver`（strcmp 为主）→ `cx/core`（分配器已是注入式，改为注入 `cx/mem`）→ `src/`（与 grk 协调，等第二代自举后）→ tools/tests/apps。
