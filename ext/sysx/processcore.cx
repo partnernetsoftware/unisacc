@@ -53,17 +53,6 @@ static int np_fault(void) {
     if (!v || !*v) return 0;
     return !strcmp(v,"residue") ? 1 : -1;
 }
-/* Has PID exited?  Asked WITHOUT reaping it (waitid with WNOWAIT), so the zombie root still pins its
-   pid and pgid while the tree is snapshotted (plans/proc-lifecycle.md rule 2). */
-static int np_exited_nowait(pid_t pid) {
-    int waitid(int, int, void *, int);
-    unsigned char si[128];
-    int i, r;
-    for (i = 0; i < (int)sizeof si; i++) si[i] = 0;
-    errno = 0;
-    r = waitid(1 /* P_PID */, pid, (void *)si, 4 /* WEXITED */ | 1 /* WNOHANG */ | 0x01000000 /* WNOWAIT */);
-    return r == 0 && ((int *)si)[4] != 0;
-}
 /* Reap only this child, including after asynchronous SIGKILL. */
 static int np_reap_killed(pid_t pid, int *st) {
     for (int i=0;i<2000;i++) {
@@ -118,9 +107,6 @@ int pc_run(char *const argv[], const char *cwd, char *const envadd[], int secs, 
         _exit(255);
     }
     sy_setpgid(pid, pid);   /* also from the parent, so the group exists before any kill */
-    long long root_start = rp_root_start(pid);
-    rp_snap_t snap;
-    int have_snap = 0;
     close(po[1]); close(pe[1]); close(pf[1]);
     fcntl(pf[0], F_SETFL, O_NONBLOCK);
     fcntl(po[0], F_SETFL, O_NONBLOCK); fcntl(pe[0], F_SETFL, O_NONBLOCK);
@@ -137,7 +123,6 @@ int pc_run(char *const argv[], const char *cwd, char *const envadd[], int secs, 
         if (open_o) { k = read(po[0], t, sizeof t); if (k > 0) { np_put(&o, t, (size_t)k); got = 1; } else if (k == 0 || (errno != EAGAIN && errno != EINTR)) { open_o = 0; close(po[0]); } }
         if (open_e) { k = read(pe[0], t, sizeof t); if (k > 0) { np_put(&e, t, (size_t)k); got = 1; } else if (k == 0 || (errno != EAGAIN && errno != EINTR)) { open_e = 0; close(pe[0]); } }
         if (!reaped) {
-            if (!have_snap && np_exited_nowait(pid)) have_snap = rp_snapshot(pid, 0, 0, &snap) == 0;
             int w = waitpid(pid, &st, WNOHANG);
             if (w == pid) reaped = 1;
         }
@@ -147,7 +132,8 @@ int pc_run(char *const argv[], const char *cwd, char *const envadd[], int secs, 
         now = sy_now_ms();
         if (now < 0 || now >= deadline) {
             size_t i; char rep[256];
-            int sv = rp_kill_tree_snap(pid, reaped, have_snap ? &snap : 0, 2000, 0, 0, rep, sizeof rep);
+            int sv = rp_kill_tree(pid, 2000, 0, 0, rep, sizeof rep);   /* freeze, kill, re-check; -ENOSYS off /proc */
+            if (sv < 0) { kill(-pid, SIGKILL); kill(pid, SIGKILL); }   /* no /proc: the pre-reaper group kill */
             res->residue = sv;
             res->timed_out = now >= deadline;
             if (fault==1) { res->residue=1; fputs("FAULT_INJECTED\tresidue\n",stderr); }
@@ -166,7 +152,6 @@ int pc_run(char *const argv[], const char *cwd, char *const envadd[], int secs, 
                 np_puts(&l, "]' timed out after ");
                 { int cx_kept = snprintf(t, sizeof t, "%d seconds", secs); (void)cx_kept; } np_puts(&l, t);
                 if (res->residue > 0) { np_puts(&l, " ("); np_puts(&l, sv>0?rep:"injected"); np_puts(&l, " survived)"); }
-                else if (res->residue < 0) np_puts(&l, " (cleanup unconfirmed)");
                 snprintf(why, wl, "%s", l.p); free(l.p);
             }
             return -1;

@@ -106,17 +106,12 @@ static int px_put(char **p, long *n, long *capb, long cap, const char *s, long k
     return 0;
 }
 
-/* Kill the job on timeout: first rp_kill_tree sweeps descendants that left the group (it must
-   run BEFORE the root is reaped, since it identifies orphans by the root's start time), then
-   sy_proc_end terminates the group and reaps the leader through the handle, so ST is always
-   filled -- the old form let rp_kill_tree reap the root and left ST uninitialised for the
-   caller's status read (cc review 2026-11-22, third read-code finding). */
-static void px_kill(sy_child_t *c, int tree, px_result *r, sy_exit_t *st) {
+static void px_kill(sy_child_t *c, int tree, px_result *r) {
     char rep[256];
     int sv = -1;
-    if (tree) sv = rp_kill_tree(c, 2000, 0, 0, rep, (int)sizeof rep);
+    if (tree) sv = rp_kill_tree(c->pid, 2000, 0, 0, rep, (int)sizeof rep);
+    if (sv < 0) sy_proc_kill(c, 9);
     r->residue = sv;
-    (void)sy_proc_end(c, 200, st);
 }
 
 /* 0 when the child ran and was reaped (*R filled, code 124 on timeout), or -errno with nothing
@@ -187,8 +182,8 @@ int px_run(const px_opts *o, px_result *r) {
         }
     }
     if (timed) {
-        px_kill(&c, o->kill_tree, r, &st);
-        /* sy_proc_end already reaped the leader through the handle; st is filled. */
+        px_kill(&c, o->kill_tree, r);
+        while (sy_proc_try_wait(&c, &st) == 0) sy_sleep_ms(2);
         if (timed > 0) st.timed_out = 1;
     }
     sy_proc_close(&c);
