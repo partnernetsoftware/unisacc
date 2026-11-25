@@ -1,0 +1,451 @@
+/* tools/check-tapeslice.cx -- T0.1 contract, hoststub-slots linkage, and mutation checks for tapeslice container.
+ * Verifies:
+ *   1. tools/tapeslice-gen.cx -- --check exits 0 (fact tables == generated contract module)
+ *   2. Valid UTAPEBIN minor=3 6-section container passes ts_validate_container
+ *   3. Mutation 1: tampered ident (header bytes 28..59) rejected with bad-ident
+ *   4. Mutation 2: truncated last section (or trailing bytes) rejected
+ *   5. Mutation 3: unknown section tag (e.g. XUNK instead of HOST) rejected with unknown-or-misordered-tag
+ *   6. Additional negative controls: minor=2 rejected, future minor=4 rejected, nonzero padding rejected,
+ *      malformed HOST (unknown slot=99, mismatched name, length mismatch) rejected after ident reseal,
+ *      and mid-instruction entry_off rejected by ts_validate_entry_ibitmap
+ *   7. T0.2 hoststub-slots.tsv linkage: real table accepted, rename and slot-swap mutations rejected,
+ *      and M1 frozen 8-slot support check accepts 8 frozen slots while rejecting legal unimplemented slot 12 (spawn)
+ */
+#pragma unisa use sys.io
+#pragma unisa use sys.proc
+#pragma unisa use text.text
+#pragma unisa use mem.bytes
+#pragma unisa use tape.tapeslice_contract
+
+#define TS_MAGIC "UTAPEBIN"
+#define TS_MAJOR 1
+#define TS_MINOR 3
+#define TS_ENDIAN 1
+#define TS_NSECT 6
+#define TS_DIR_OFF 64
+#define TS_IDENT_OFF 28
+#define TS_ORIGIN_OFF 60
+
+static int g_pass = 0;
+static int g_fail = 0;
+static char g_ht_mut[16384];
+
+static void ck(int ok, const char *name) {
+    if (ok) {
+        g_pass++;
+        sy_printf("PASS\tcheck-tapeslice.%s\n", name);
+    } else {
+        g_fail++;
+        sy_printf("FAIL\tcheck-tapeslice.%s\n", name);
+    }
+}
+
+/* Build a minimal valid 224-byte tapeslice container:
+ * - 64-byte header + 144-byte directory = 208 bytes
+ * - CODE: off=208, len=2, cnt=1 (e.g. ret=37, nop=47), padded with 6 zero bytes to 216
+ * - DATA: off=216, len=0, cnt=0
+ * - BSSZ: off=216, len=8, cnt=1 (u64 bss_size = 64), ends at 224
+ * - SYMS: off=224, len=0, cnt=0
+ * - RELO: off=224, len=0, cnt=0
+ * - HOST: off=224, len=0, cnt=0
+ */
+static long build_sample_container(unsigned char *b) {
+    int i, j;
+    const char *tags[6] = {"CODE", "DATA", "BSSZ", "SYMS", "RELO", "HOST"};
+    unsigned long long offs[6] = {208, 216, 216, 224, 224, 224};
+    unsigned long long lens[6] = {2, 0, 8, 0, 0, 0};
+    unsigned long long cnts[6] = {1, 0, 1, 0, 0, 0};
+    for (i = 0; i < 224; i++) b[i] = 0;
+    for (i = 0; i < 8; i++) b[i] = (unsigned char)TS_MAGIC[i];
+    ts_wr_u(b + 8, 2, TS_MAJOR);
+    ts_wr_u(b + 10, 2, TS_MINOR);
+    ts_wr_u(b + 12, 2, TS_ENDIAN);
+    ts_wr_u(b + 14, 2, 0);
+    ts_wr_u(b + 16, 4, 0);
+    ts_wr_u(b + 20, 4, TS_NSECT);
+    ts_wr_u(b + 24, 4, TS_DIR_OFF);
+    ts_wr_u(b + TS_ORIGIN_OFF, 4, 1);
+    for (i = 0; i < 6; i++) {
+        int d = TS_DIR_OFF + 24 * i;
+        for (j = 0; j < 4; j++) b[d + j] = (unsigned char)tags[i][j];
+        ts_wr_u(b + d + 4, 8, offs[i]);
+        ts_wr_u(b + d + 12, 8, lens[i]);
+        ts_wr_u(b + d + 20, 4, cnts[i]);
+    }
+    /* CODE bytes at 208..209: ret (37), nop (47) */
+    b[208] = 37;
+    b[209] = 47;
+    /* BSSZ u64 at 216..223: 64 bytes */
+    ts_wr_u(b + 216, 8, 64);
+    ts_seal_ident(b, 224);
+    return 224;
+}
+
+/* Build a complete non-empty 312-byte container exercising CODE, DATA, BSSZ, SYMS, RELO, HOST:
+ * - CODE: off=208, len=6, cnt=2 (insn0 @0 len=3, insn1 @3 len=3 -> ibitmap=0x09), padded to 216
+ * - DATA: off=216, len=9, cnt=2 ("main\0foo\0"), padded to 232
+ * - BSSZ: off=232, len=8, cnt=1 (bss_size=64)
+ * - SYMS: off=240, len=32, cnt=2 (name_off=0 sect=0 kind=0 val=0; name_off=5 sect=1 kind=1 val=0)
+ * - RELO: off=272, len=32, cnt=2 (pos=1 kind=1 width=2 addend=0; pos=4 kind=2 width=2 addend=16)
+ * - HOST: off=304, len=8, cnt=1 (slot=0 "exit")
+ */
+static long build_nonempty_container(unsigned char *b) {
+    int i, j;
+    const char *tags[6] = {"CODE", "DATA", "BSSZ", "SYMS", "RELO", "HOST"};
+    unsigned long long offs[6] = {208, 216, 232, 240, 272, 304};
+    unsigned long long lens[6] = {6, 9, 8, 32, 32, 8};
+    unsigned long long cnts[6] = {2, 2, 1, 2, 2, 1};
+    for (i = 0; i < 312; i++) b[i] = 0;
+    for (i = 0; i < 8; i++) b[i] = (unsigned char)TS_MAGIC[i];
+    ts_wr_u(b + 8, 2, TS_MAJOR);
+    ts_wr_u(b + 10, 2, TS_MINOR);
+    ts_wr_u(b + 12, 2, TS_ENDIAN);
+    ts_wr_u(b + 14, 2, 0);
+    ts_wr_u(b + 16, 4, 3);
+    ts_wr_u(b + 20, 4, TS_NSECT);
+    ts_wr_u(b + 24, 4, TS_DIR_OFF);
+    ts_wr_u(b + TS_ORIGIN_OFF, 4, 1);
+    for (i = 0; i < 6; i++) {
+        int d = TS_DIR_OFF + 24 * i;
+        for (j = 0; j < 4; j++) b[d + j] = (unsigned char)tags[i][j];
+        ts_wr_u(b + d + 4, 8, offs[i]);
+        ts_wr_u(b + d + 12, 8, lens[i]);
+        ts_wr_u(b + d + 20, 4, cnts[i]);
+    }
+    /* CODE[0..5] */
+    b[208] = 1; b[209] = 0; b[210] = 0;
+    b[211] = 1; b[212] = 0; b[213] = 0;
+    /* DATA[0..8] = "main\0foo\0" */
+    mm_copy(b + 216, 9, "main\0foo\0", 9);
+    /* BSSZ = 64 */
+    ts_wr_u(b + 232, 8, 64);
+    /* SYMS row 0 @240: name_off=0, sect=0, kind=0, rsv=0, val=0 */
+    ts_wr_u(b + 240, 4, 0); b[244] = 0; b[245] = 0; ts_wr_u(b + 246, 2, 0); ts_wr_u(b + 248, 8, 0);
+    /* SYMS row 1 @256: name_off=5, sect=1, kind=1, rsv=0, val=0 */
+    ts_wr_u(b + 256, 4, 5); b[260] = 1; b[261] = 1; ts_wr_u(b + 262, 2, 0); ts_wr_u(b + 264, 8, 0);
+    /* RELO row 0 @272: pos=1, kind=1, width=2, rsv=0, addend=0 */
+    ts_wr_u(b + 272, 8, 1); b[280] = 1; b[281] = 2; ts_wr_u(b + 282, 2, 0); ts_wr_u(b + 284, 4, 0);
+    /* RELO row 1 @288: pos=4, kind=2, width=2, rsv=0, addend=16 */
+    ts_wr_u(b + 288, 8, 4); b[296] = 2; b[297] = 2; ts_wr_u(b + 298, 2, 0); ts_wr_u(b + 300, 4, 16);
+    /* HOST @304: slot=0 "exit" */
+    ts_wr_u(b + 304, 2, 0); ts_wr_u(b + 306, 2, 4);
+    mm_copy(b + 308, 4, "exit", 4);
+    ts_seal_ident(b, 312);
+    return 312;
+}
+
+static long append_host_rec(unsigned char *dst, long pos, unsigned long long slot, const char *name) {
+    long nlen = 0, k;
+    while (name[nlen]) nlen++;
+    ts_wr_u(dst + pos, 2, slot);
+    ts_wr_u(dst + pos + 2, 2, (unsigned long long)nlen);
+    for (k = 0; k < nlen; k++) dst[pos + 4 + k] = (unsigned char)name[k];
+    return pos + 4 + nlen;
+}
+
+static long replace_once(char *dst, long cap, const char *src, long slen, const char *pat, long plen, const char *rep, long rlen) {
+    long p = tx_find(src, slen, pat, plen);
+    long out_len;
+    if (p < 0) return -1;
+    out_len = slen - plen + rlen;
+    if (out_len <= 0 || out_len >= cap) return -1;
+    mm_copy(dst, cap, src, p);
+    mm_copy(dst + p, cap - p, rep, rlen);
+    mm_copy(dst + p + rlen, cap - p - rlen, src + p + plen, slen - p - plen);
+    dst[out_len] = 0;
+    return out_len;
+}
+
+int main(void) {
+    unsigned char buf[512], mut[512], ibitmap[1];
+    char why[64];
+    long len;
+
+    ck(ts_contract_row_count() == 34, "contract-row-count-34");
+    ck(ts_contract_row(8) != 0 && tx_eqz(ts_contract_row(8)->field, "ident") &&
+       ts_contract_row(8)->off == 28 && ts_contract_row(8)->size == 32, "ident-offset-28-size-32");
+    ck(ts_contract_row(9) != 0 && tx_eqz(ts_contract_row(9)->field, "origin") &&
+       ts_contract_row(9)->off == 60 && ts_contract_row(9)->size == 4, "origin-offset-60-size-4");
+
+    len = build_sample_container(buf);
+    why[0] = 0;
+    ck(ts_validate_container(buf, len, why, 64) == 0, "valid-container-accepted");
+
+    /* Required Mutation 1: tampered ident rejected */
+    mm_copy(mut, 512, buf, len);
+    mut[TS_IDENT_OFF + 5] ^= 0xff;
+    why[0] = 0;
+    ck(ts_validate_container(mut, len, why, 64) != 0 && tx_eqz(why, "bad-ident"),
+       "mutant-bad-ident-rejected");
+
+    /* Required Mutation 2: truncated last section rejected (even if ident resealed) */
+    mm_copy(mut, 512, buf, len);
+    /* Set HOST len=8 at 196..203 so off(224)+len(8)=232 > actual file len(224) */
+    ts_wr_u(mut + 196, 8, 8);
+    ts_seal_ident(mut, len);
+    why[0] = 0;
+    ck(ts_validate_container(mut, len, why, 64) != 0 && tx_eqz(why, "section-out-of-bounds"),
+       "mutant-truncated-last-section-rejected");
+
+    /* Required Mutation 2b: trailing byte after last section rejected */
+    mm_copy(mut, 512, buf, len);
+    mut[224] = 0;
+    ts_seal_ident(mut, len + 1);
+    why[0] = 0;
+    ck(ts_validate_container(mut, len + 1, why, 64) != 0 && tx_eqz(why, "truncated-or-trailing-bytes"),
+       "mutant-trailing-bytes-after-last-section-rejected");
+
+    /* Required Mutation 3: unknown section tag rejected */
+    mm_copy(mut, 512, buf, len);
+    mut[184] = 'X'; mut[185] = 'U'; mut[186] = 'N'; mut[187] = 'K';
+    ts_seal_ident(mut, len);
+    why[0] = 0;
+    ck(ts_validate_container(mut, len, why, 64) != 0 && tx_eqz(why, "unknown-or-misordered-tag"),
+       "mutant-unknown-tag-rejected");
+
+    /* Mutation 4: minor=2 (old tapebin) rejected by slice validator */
+    mm_copy(mut, 512, buf, len);
+    ts_wr_u(mut + 10, 2, 2);
+    ts_seal_ident(mut, len);
+    why[0] = 0;
+    ck(ts_validate_container(mut, len, why, 64) != 0 && tx_eqz(why, "bad-minor"),
+       "mutant-minor-2-rejected");
+
+    /* Mutation 4b: future unknown minor=4 rejected by exact minor==3 check */
+    mm_copy(mut, 512, buf, len);
+    ts_wr_u(mut + 10, 2, 4);
+    ts_seal_ident(mut, len);
+    why[0] = 0;
+    ck(ts_validate_container(mut, len, why, 64) != 0 && tx_eqz(why, "bad-minor"),
+       "mutant-future-minor-4-rejected");
+
+    /* Mutation 5: non-zero padding byte between CODE (208..210) and DATA/BSSZ (216) rejected */
+    mm_copy(mut, 512, buf, len);
+    mut[211] = 1;
+    ts_seal_ident(mut, len);
+    why[0] = 0;
+    ck(ts_validate_container(mut, len, why, 64) != 0 && tx_eqz(why, "nonzero-padding"),
+       "mutant-nonzero-padding-rejected");
+
+    /* Mutation 6: malformed HOST records (bad slot=99, name mismatch, slen mismatch) rejected after ident reseal */
+    {
+        int bad_slot_ok = 0, bad_name_ok = 0, bad_len_ok = 0, good_host_ok = 0;
+        /* Positive control: valid HOST record slot=0 "exit" (4B header + 4B name = 8B at 224..231) */
+        mm_copy(mut, 512, buf, len);
+        ts_wr_u(mut + 196, 8, 8);
+        ts_wr_u(mut + 204, 4, 1);
+        append_host_rec(mut, 224, 0, "exit");
+        ts_seal_ident(mut, 232);
+        why[0] = 0;
+        good_host_ok = (ts_validate_container(mut, 232, why, 64) == 0);
+
+        /* Bad slot=99 */
+        ts_wr_u(mut + 224, 2, 99);
+        ts_seal_ident(mut, 232);
+        why[0] = 0;
+        bad_slot_ok = (ts_validate_container(mut, 232, why, 64) != 0 && tx_eqz(why, "unknown-host-slot"));
+
+        /* Valid slot=0 but wrong name "exix" */
+        ts_wr_u(mut + 224, 2, 0);
+        mut[231] = 'x';
+        ts_seal_ident(mut, 232);
+        why[0] = 0;
+        bad_name_ok = (ts_validate_container(mut, 232, why, 64) != 0 && tx_eqz(why, "bad-host-record"));
+
+        /* Valid slot=0 "exit" but slen=9 (1 extra trailing byte inside HOST) */
+        mut[231] = 't';
+        mut[232] = 0;
+        ts_wr_u(mut + 196, 8, 9);
+        ts_seal_ident(mut, 233);
+        why[0] = 0;
+        bad_len_ok = (ts_validate_container(mut, 233, why, 64) != 0 && tx_eqz(why, "bad-host-record"));
+
+        ck(good_host_ok && bad_slot_ok && bad_name_ok && bad_len_ok,
+           "mutant-malformed-host-rejected");
+    }
+
+    /* Mutation 7: entry_off landing mid-instruction rejected by ts_validate_entry_ibitmap */
+    {
+        int on_boundary_ok = 0, mid_insn_rejected = 0;
+        /* Single 2-byte instruction at CODE[0..1]: bit 0 = 1 (valid insn start), bit 1 = 0 (mid-insn) */
+        ibitmap[0] = 0x01;
+        why[0] = 0;
+        on_boundary_ok = (ts_validate_entry_ibitmap(buf, len, ibitmap, 1, why, 64) == 0);
+
+        mm_copy(mut, 512, buf, len);
+        ts_wr_u(mut + 16, 4, 1);
+        ts_seal_ident(mut, len);
+        why[0] = 0;
+        mid_insn_rejected = (ts_validate_container(mut, len, why, 64) == 0 &&
+                             ts_validate_entry_ibitmap(mut, len, ibitmap, 1, why, 64) != 0 &&
+                             tx_eqz(why, "entry-not-on-insn-boundary"));
+        ck(on_boundary_ok && mid_insn_rejected, "mutant-entry-mid-insn-rejected");
+    }
+
+    /* T0.2 hoststub-slots.tsv linkage + rename/swap negative controls */
+    {
+        size_t ht_n = 0;
+        char *ht = cx_read("tools/tape/facts/hoststub-slots.tsv", &ht_n);
+        long ml;
+        why[0] = 0;
+        ck(ht != 0 && ht_n > 0 && ts_validate_host_table(ht, (long)ht_n, why, 64) == 0,
+           "hoststub-slots-table-linked");
+
+        /* Rename 0\texit -> 0\texit2 */
+        ml = ht ? replace_once(g_ht_mut, (long)sizeof g_ht_mut, ht, (long)ht_n, "\n0\texit\t", 8, "\n0\texit2\t", 9) : -1;
+        why[0] = 0;
+        ck(ml > 0 && ts_validate_host_table(g_ht_mut, ml, why, 64) != 0 && tx_eqz(why, "host-table-op-mismatch"),
+           "mutant-hoststub-table-rename-rejected");
+
+        /* Swap slot 1 (read) and slot 2 (write) ops: 1\twrite and 2\tread */
+        {
+            static char ht_tmp[16384];
+            long ml1 = ht ? replace_once(ht_tmp, (long)sizeof ht_tmp, ht, (long)ht_n, "\n1\tread\t", 8, "\n1\twrite\t", 9) : -1;
+            long ml2 = (ml1 > 0) ? replace_once(g_ht_mut, (long)sizeof g_ht_mut, ht_tmp, ml1, "\n2\twrite\t", 9, "\n2\tread\t", 8) : -1;
+            why[0] = 0;
+            ck(ml2 > 0 && ts_validate_host_table(g_ht_mut, ml2, why, 64) != 0 &&
+               (tx_eqz(why, "host-table-op-mismatch") || tx_eqz(why, "host-table-slot-mismatch")),
+               "mutant-hoststub-table-swap-slot-rejected");
+        }
+    }
+
+    /* M1 frozen 8-slot support check: positive (all 8 frozen slots) and negative (legal slot 12 spawn) */
+    {
+        static const unsigned long long m1_slots[8] = {0, 1, 2, 3, 4, 5, 6, 8};
+        static const char *m1_names[8] = {"exit", "read", "write", "mmap", "munmap", "open", "close", "fstat"};
+        long pos = 224;
+        int k;
+        mm_copy(mut, 512, buf, len);
+        for (k = 0; k < 8; k++) pos = append_host_rec(mut, pos, m1_slots[k], m1_names[k]);
+        ts_wr_u(mut + 196, 8, (unsigned long long)(pos - 224));
+        ts_wr_u(mut + 204, 4, 8);
+        ts_seal_ident(mut, pos);
+        why[0] = 0;
+        ck(ts_validate_container(mut, pos, why, 64) == 0 && ts_validate_m1_host_support(mut, pos, why, 64) == 0,
+           "m1-frozen-8slots-accepted");
+
+        /* Legal but M1-unimplemented slot 12 (spawn) passes format check but rejected by M1 support check */
+        mm_copy(mut, 512, buf, len);
+        pos = append_host_rec(mut, 224, 12, "spawn");
+        ts_wr_u(mut + 196, 8, (unsigned long long)(pos - 224));
+        ts_wr_u(mut + 204, 4, 1);
+        ts_seal_ident(mut, pos);
+        why[0] = 0;
+        ck(ts_validate_container(mut, pos, why, 64) == 0 &&
+           ts_validate_m1_host_support(mut, pos, why, 64) != 0 &&
+           tx_eqz(why, "m1-unsupported-host-slot"),
+           "mutant-m1-unimplemented-host-slot-rejected");
+    }
+
+    /* CODE hostcall vs HOST section declaration check */
+    {
+        int decl_ok = 0, undecl_rej = 0, m1_rej = 0, unk_rej = 0;
+        long pos = 224;
+        mm_copy(mut, 512, buf, len);
+        /* Container HOST declares ONLY slot=0 (exit) */
+        pos = append_host_rec(mut, pos, 0, "exit");
+        ts_wr_u(mut + 196, 8, (unsigned long long)(pos - 224));
+        ts_wr_u(mut + 204, 4, 1);
+        ts_seal_ident(mut, pos);
+
+        why[0] = 0;
+        decl_ok = (ts_validate_hostcall_slot(mut, pos, 0, 1, why, 64) == 0);
+        why[0] = 0;
+        undecl_rej = (ts_validate_hostcall_slot(mut, pos, 2, 1, why, 64) != 0 &&
+                      tx_eqz(why, "undeclared-host-slot-in-code"));
+        why[0] = 0;
+        m1_rej = (ts_validate_hostcall_slot(mut, pos, 12, 1, why, 64) != 0 &&
+                  tx_eqz(why, "m1-unsupported-host-slot"));
+        why[0] = 0;
+        unk_rej = (ts_validate_hostcall_slot(mut, pos, 99, 0, why, 64) != 0 &&
+                   tx_eqz(why, "unknown-host-slot"));
+        ck(decl_ok && undecl_rej && m1_rej && unk_rej,
+           "mutant-undeclared-hostcall-in-code-rejected");
+    }
+
+    /* T0.4 B1/B4/B6: non-empty CODE/DATA/BSSZ/SYMS/RELO/HOST positive + negative SYMS/RELO/overflow fixtures */
+    {
+        unsigned char nbuf[512], nmut[512], nbm[1];
+        long nlen = build_nonempty_container(nbuf);
+        unsigned long long d_aligned = 0;
+        nbm[0] = 0x09; /* bit 0 (insn0) + bit 3 (insn1) */
+        why[0] = 0;
+        ck(ts_validate_entry_ibitmap(nbuf, nlen, nbm, 1, why, 64) == 0 &&
+           ts_validate_m1_host_support(nbuf, nlen, why, 64) == 0,
+           "nonempty-syms-relo-container-accepted");
+
+        /* SYMS name_off >= data_len */
+        mm_copy(nmut, 512, nbuf, nlen);
+        ts_wr_u(nmut + 256, 4, 9);
+        ts_seal_ident(nmut, nlen);
+        why[0] = 0;
+        ck(ts_validate_container(nmut, nlen, why, 64) != 0 && tx_eqz(why, "bad-syms-record"),
+           "mutant-syms-name-oob-rejected");
+
+        /* SYMS unterminated string in DATA (overwrite trailing NUL at DATA[8] with 'x') */
+        mm_copy(nmut, 512, nbuf, nlen);
+        nmut[216 + 8] = 'x';
+        ts_seal_ident(nmut, nlen);
+        why[0] = 0;
+        ck(ts_validate_container(nmut, nlen, why, 64) != 0 && tx_eqz(why, "bad-syms-record"),
+           "mutant-syms-unterminated-rejected");
+
+        /* RELO bad width (0 and 11) */
+        {
+            int w0_rej = 0, w11_rej = 0;
+            mm_copy(nmut, 512, nbuf, nlen);
+            nmut[281] = 0;
+            ts_seal_ident(nmut, nlen);
+            why[0] = 0;
+            w0_rej = (ts_validate_container(nmut, nlen, why, 64) != 0 && tx_eqz(why, "bad-relo-record"));
+            nmut[281] = 11;
+            ts_seal_ident(nmut, nlen);
+            why[0] = 0;
+            w11_rej = (ts_validate_container(nmut, nlen, why, 64) != 0 && tx_eqz(why, "bad-relo-record"));
+            ck(w0_rej && w11_rej, "mutant-relo-bad-width-rejected");
+        }
+
+        /* RELO pos+width past code_len, pos==0, and u64 wraparound */
+        {
+            int oob_rej = 0, pos0_rej = 0, wrap_rej = 0;
+            mm_copy(nmut, 512, nbuf, nlen);
+            ts_wr_u(nmut + 288, 8, 5); /* pos=5, width=2 > code_len=6 */
+            ts_seal_ident(nmut, nlen);
+            why[0] = 0;
+            oob_rej = (ts_validate_container(nmut, nlen, why, 64) != 0 && tx_eqz(why, "bad-relo-record"));
+
+            ts_wr_u(nmut + 272, 8, 0); /* pos=0 hits opcode byte */
+            ts_seal_ident(nmut, nlen);
+            why[0] = 0;
+            pos0_rej = (ts_validate_container(nmut, nlen, why, 64) != 0 && tx_eqz(why, "bad-relo-record"));
+
+            ts_wr_u(nmut + 272, 8, 0xffffffffffffffffull); /* u64 wraparound */
+            ts_seal_ident(nmut, nlen);
+            why[0] = 0;
+            wrap_rej = (ts_validate_container(nmut, nlen, why, 64) != 0 && tx_eqz(why, "bad-relo-record"));
+            ck(oob_rej && pos0_rej && wrap_rej, "mutant-relo-oob-pos0-wrap-rejected");
+        }
+
+        /* RELO spanning into insn1 opcode boundary at offset 3 (pos=2, width=2 -> [2,3]) */
+        mm_copy(nmut, 512, nbuf, nlen);
+        ts_wr_u(nmut + 272, 8, 2);
+        ts_wr_u(nmut + 280, 1, 1); /* keep width=2 at +281, change pos=2 */
+        nmut[281] = 2;
+        ts_seal_ident(nmut, nlen);
+        why[0] = 0;
+        ck(ts_validate_container(nmut, nlen, why, 64) == 0 &&
+           ts_validate_entry_ibitmap(nmut, nlen, nbm, 1, why, 64) != 0 &&
+           tx_eqz(why, "relo-crosses-insn-boundary"),
+           "mutant-relo-crosses-insn-boundary-rejected");
+
+        /* Overflow-safe DATA alignment + BSS subtraction check */
+        why[0] = 0;
+        ck(ts_check_linear_bounds(9, 64, 80, &d_aligned, why, 64) == 0 && d_aligned == 16 &&
+           ts_check_linear_bounds(9, 64, 79, &d_aligned, why, 64) != 0 &&
+           ts_check_linear_bounds(0xfffffffffffffffdull, 8, 0xffffffffffffffffull, &d_aligned, why, 64) != 0,
+           "linear-bounds-subtraction-overflow-safe");
+    }
+
+    sy_printf("CHECK_TAPESLICE\tpassed=%d\tfailed=%d\n", g_pass, g_fail);
+    return g_fail ? 1 : 0;
+}

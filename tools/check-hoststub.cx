@@ -1,0 +1,607 @@
+/* tools/check-hoststub.cx -- contract and mutation checks for tools/tape/facts/hoststub{,-slots}.tsv (T0.2).
+ * Verifies:
+ *   (1) hoststub-slots.tsv (11 cols, slots 0..36) defines guest arg order, flags normalization, portable hs_stat64
+ *       layout on slot 8/9, and cross-OS adapt semantics; ONLY M1 8-slot subset {0,1,2,3,4,5,6,8} may be frozen;
+ *   (2) hoststub.tsv (14 cols, 6 targets x 37 slots) locks (op, nargs, ret, tier, source) to hoststub-slots.tsv,
+ *       forbids marking non-M1/non-Linux rows (including all 120 sys_ext extension rows) as frozen, and enforces
+ *       OS bytes_max budgets (lnx <= 512, osx <= 2048, win <= 3584);
+ *   (3) cross-checks @abiops + @abi in exec/facts/lower-abi.tsv AND syp_* numbers in exec/facts/sys-syscalls.tsv;
+ *   (4) 9 structured red-green mutations without source anchors (0 tx_find calls). */
+#pragma unisa use sys.fs
+#pragma unisa use sys.io
+#pragma unisa use text.text
+#pragma unisa use text.iter
+#pragma unisa use tsvx.read
+#pragma unisa use mem.heap
+
+#define HS_NTGT 6
+#define HS_NSLOT 37
+
+static int hs_pass = 0;
+static int hs_fail = 0;
+
+static void hs_ck(int ok, const char *name) {
+    if (ok) { hs_pass = hs_pass + 1; sy_printf("PASS\tcheck-hoststub.%s\n", name); }
+    else { hs_fail = hs_fail + 1; sy_printf("FAIL\tcheck-hoststub.%s\n", name); }
+}
+
+static const char *g_tgts[HS_NTGT][2] = {
+    {"lnx", "x86_64"}, {"lnx", "arm64"},
+    {"osx", "x86_64"}, {"osx", "arm64"},
+    {"win", "x86_64"}, {"win", "arm64"}
+};
+
+static const int g_budgets[HS_NTGT] = {512, 512, 2048, 2048, 3584, 3584};
+
+static const char *g_ops[HS_NSLOT] = {
+    "exit", "read", "write", "mmap", "munmap", "open", "close", "mprotect",
+    "fstat", "stat", "lseek", "pread", "spawn", "wait", "pipe", "dup2",
+    "kill", "getpid", "clock", "sleep", "getenvblock", "selfpath", "getcwd", "rename",
+    "unlink", "mkdir", "readdir", "ftruncate", "fsync", "chmod", "readlink", "dlopen",
+    "dlsym", "dlcall", "sigset", "sigret", "isatty"
+};
+
+static int is_m1_core_slot(int s) {
+    return (s >= 0 && s <= 6) || s == 8;
+}
+
+typedef struct {
+    char target[24];
+    char op[32];
+    char sysno[24];
+} abi_entry_t;
+
+typedef struct {
+    char name[32];
+    char x64[24];
+    char arm64[24];
+} syp_entry_t;
+
+typedef struct {
+    int present;
+    int nargs;
+    char op[32];
+    char tier[16];
+    char status[16];
+    char source[128];
+} slot_spec_t;
+
+static abi_entry_t g_abi[512];
+static int g_nabi = 0;
+static char g_abiops[64][32];
+static int g_nabiops = 0;
+static syp_entry_t g_syp[128];
+static int g_nsyp = 0;
+
+static int in_list(const char *s, long n, const char **opts, int nopts) {
+    int i;
+    for (i = 0; i < nopts; i = i + 1) {
+        if (tx_same(s, n, opts[i], tx_len(opts[i], 32))) return 1;
+    }
+    return 0;
+}
+
+static int parse_u64(const char *s, long n, long long *out) {
+    long long v = 0;
+    long i = 0;
+    if (n <= 0) return -1;
+    for (i = 0; i < n; i = i + 1) {
+        if (s[i] < '0' || s[i] > '9') return -1;
+        v = v * 10 + (s[i] - '0');
+        if (v > 100000000LL) return -1;
+    }
+    *out = v;
+    return 0;
+}
+
+static int load_lower_abi(const char *path) {
+    unsigned char *data = 0;
+    int64_t len = 0;
+    tx_iter_t it;
+    int cols = 0, rc = 0, sec = 0;
+    if (sy_read_file(path, &data, &len, 1048576) != 0 || !data) return -1;
+    tx_iter_init(&it, (char *)data, (long)len);
+    while ((rc = tv_row_next(&it, &cols)) == 1) {
+        long rlen = it.len;
+        const char *row = it.s + it.off;
+        if (rlen == 0 || row[0] == '#') continue;
+        if (row[0] == '@') {
+            if (rlen >= 7 && tx_same(row, 7, "@abiops", 7)) sec = 1;
+            else if (rlen >= 4 && tx_same(row, 4, "@abi", 4) && (rlen == 4 || row[4] == '\t')) sec = 2;
+            else sec = 0;
+            continue;
+        }
+        if (sec == 1 && cols >= 3) {
+            long a1, n1, a2, n2;
+            if (!tv_field(&it, 1, &a1, &n1) && !tv_field(&it, 2, &a2, &n2) &&
+                tx_same(it.s + a1, n1, "lnx/x86_64", 10) && g_nabiops < 64 && n2 < 32) {
+                (void)tx_copy(g_abiops[g_nabiops], 32, it.s + a2, n2);
+                g_nabiops = g_nabiops + 1;
+            }
+        } else if (sec == 2 && cols >= 4) {
+            long a1, n1, a2, n2, a3, n3;
+            if (!tv_field(&it, 1, &a1, &n1) && !tv_field(&it, 2, &a2, &n2) && !tv_field(&it, 3, &a3, &n3)) {
+                if ((tx_same(it.s + a1, n1, "lnx/x86_64", 10) || tx_same(it.s + a1, n1, "lnx/arm64", 9)) &&
+                    g_nabi < 512 && n1 < 24 && n2 < 32 && n3 < 24) {
+                    (void)tx_copy(g_abi[g_nabi].target, 24, it.s + a1, n1);
+                    (void)tx_copy(g_abi[g_nabi].op, 32, it.s + a2, n2);
+                    (void)tx_copy(g_abi[g_nabi].sysno, 24, it.s + a3, n3);
+                    g_nabi = g_nabi + 1;
+                }
+            }
+        }
+    }
+    mm_free(data);
+    return (g_nabiops > 0 && g_nabi > 0) ? 0 : -1;
+}
+
+static int load_sys_syscalls(const char *path) {
+    unsigned char *data = 0;
+    int64_t len = 0;
+    tx_iter_t it;
+    int cols = 0, rc = 0;
+    if (sy_read_file(path, &data, &len, 262144) != 0 || !data) return -1;
+    tx_iter_init(&it, (char *)data, (long)len);
+    while ((rc = tv_row_next(&it, &cols)) == 1) {
+        long rlen = it.len;
+        const char *row = it.s + it.off;
+        if (rlen == 0 || row[0] == '#' || cols < 3) continue;
+        long a0, n0, a1, n1, a2, n2;
+        if (!tv_field(&it, 0, &a0, &n0) && !tv_field(&it, 1, &a1, &n1) && !tv_field(&it, 2, &a2, &n2)) {
+            if (g_nsyp < 128 && n0 < 32 && n1 < 24 && n2 < 24) {
+                (void)tx_copy(g_syp[g_nsyp].name, 32, it.s + a0, n0);
+                (void)tx_copy(g_syp[g_nsyp].x64, 24, it.s + a1, n1);
+                (void)tx_copy(g_syp[g_nsyp].arm64, 24, it.s + a2, n2);
+                g_nsyp = g_nsyp + 1;
+            }
+        }
+    }
+    mm_free(data);
+    return g_nsyp > 0 ? 0 : -1;
+}
+
+static int in_abiops(const char *op, long n) {
+    int i;
+    for (i = 0; i < g_nabiops; i = i + 1) {
+        if (tx_same(g_abiops[i], tx_len(g_abiops[i], 32), op, n)) return 1;
+    }
+    return 0;
+}
+
+static const char *abi_sysno(const char *tgt, const char *op, long opn) {
+    int i;
+    long tl = tx_len(tgt, 24);
+    for (i = 0; i < g_nabi; i = i + 1) {
+        if (tx_same(g_abi[i].target, tx_len(g_abi[i].target, 24), tgt, tl) &&
+            tx_same(g_abi[i].op, tx_len(g_abi[i].op, 32), op, opn)) {
+            return g_abi[i].sysno;
+        }
+    }
+    return 0;
+}
+
+static const char *syp_lnx_sysno(const char *sym, int is_arm64) {
+    int i;
+    long sl = tx_len(sym, 32);
+    for (i = 0; i < g_nsyp; i = i + 1) {
+        if (tx_same(g_syp[i].name, tx_len(g_syp[i].name, 32), sym, sl)) {
+            return is_arm64 ? g_syp[i].arm64 : g_syp[i].x64;
+        }
+    }
+    return 0;
+}
+
+static int has_substr(const char *s, long n, const char *sub, long subn) {
+    long i;
+    if (subn <= 0 || n < subn) return 0;
+    for (i = 0; i <= n - subn; i = i + 1) {
+        if (tx_same(s + i, subn, sub, subn)) return 1;
+    }
+    return 0;
+}
+
+static int find_target(const char *os, long osn, const char *isa, long isal) {
+    int i;
+    for (i = 0; i < HS_NTGT; i = i + 1) {
+        if (tx_same(g_tgts[i][0], tx_len(g_tgts[i][0], 8), os, osn) &&
+            tx_same(g_tgts[i][1], tx_len(g_tgts[i][1], 16), isa, isal))
+            return i;
+    }
+    return -1;
+}
+
+static int validate_slots_table(const char *buf, long len, slot_spec_t *specs, char *why, long wcap) {
+    static const char *ok_tier[3] = {"m1_core", "abiops_ext", "sys_ext"};
+    static const char *ok_status[2] = {"frozen", "draft"};
+    tx_iter_t it;
+    int cols = 0, rc = 0, got_hdr = 0, s;
+    for (s = 0; s < HS_NSLOT; s = s + 1) specs[s].present = 0;
+
+    tx_iter_init(&it, (char *)buf, len);
+    while ((rc = tv_row_next(&it, &cols)) == 1) {
+        long rlen = it.len;
+        const char *row = it.s + it.off;
+        if (rlen == 0 || row[0] == '#') continue;
+        if (!got_hdr) {
+            const char *hdr = "slot\top\ttier\tstatus\tsource\tnargs\tguest_args\tflags_spec\tret_layout\terr_policy\tplatform_adapt";
+            got_hdr = 1;
+            if (cols != 11 || !tx_same(row, rlen, hdr, tx_len(hdr, 128))) {
+                (void)tx_copy(why, wcap, "slots-bad-header", 16);
+                return 1;
+            }
+            continue;
+        }
+        if (cols != 11) { (void)tx_copy(why, wcap, "slots-bad-cols", 14); return 1; }
+        long a[11], n[11];
+        int k;
+        for (k = 0; k < 11; k = k + 1) {
+            if (tv_field(&it, k, &a[k], &n[k]) || n[k] <= 0) {
+                (void)tx_copy(why, wcap, "slots-empty-field", 17);
+                return 1;
+            }
+        }
+        long long sv = 0, nv = 0;
+        if (parse_u64(it.s + a[0], n[0], &sv) != 0 || sv < 0 || sv >= HS_NSLOT) {
+            (void)tx_copy(why, wcap, "slots-bad-slot", 14); return 1;
+        }
+        s = (int)sv;
+        if (specs[s].present) { (void)tx_copy(why, wcap, "slots-dup-slot", 14); return 1; }
+        specs[s].present = 1;
+
+        if (!tx_same(it.s + a[1], n[1], g_ops[s], tx_len(g_ops[s], 24))) {
+            (void)tx_copy(why, wcap, "slots-op-mismatch", 17); return 1;
+        }
+        if (!in_list(it.s + a[2], n[2], ok_tier, 3)) {
+            (void)tx_copy(why, wcap, "slots-bad-tier", 14); return 1;
+        }
+        if (!in_list(it.s + a[3], n[3], ok_status, 2)) {
+            (void)tx_copy(why, wcap, "slots-bad-status", 16); return 1;
+        }
+        if (parse_u64(it.s + a[5], n[5], &nv) != 0 || nv < 0 || nv > 6) {
+            (void)tx_copy(why, wcap, "slots-bad-nargs", 15); return 1;
+        }
+        if (tx_same(it.s + a[3], n[3], "frozen", 6) &&
+            (!is_m1_core_slot(s) || !tx_same(it.s + a[2], n[2], "m1_core", 7) || !in_abiops(it.s + a[1], n[1]))) {
+            (void)tx_copy(why, wcap, "slots-noncore-frozen", 20); return 1;
+        }
+        if (tx_same(it.s + a[2], n[2], "sys_ext", 7) && !tx_same(it.s + a[3], n[3], "draft", 5)) {
+            (void)tx_copy(why, wcap, "slots-ext-not-draft", 19); return 1;
+        }
+        if ((s == 8 || s == 9) && !has_substr(it.s + a[8], n[8], "hs_stat64(64B_LE", 16)) {
+            (void)tx_copy(why, wcap, "slots-missing-stat64-layout", 27); return 1;
+        }
+        if (s == 14 && (!has_substr(it.s + a[7], n[7], "HS_PIPE_CLOEXEC=1", 17) ||
+                        !has_substr(it.s + a[10], n[10], "pipe2", 5))) {
+            (void)tx_copy(why, wcap, "slots-pipe-adapt-missing", 24); return 1;
+        }
+        if (s == 15 && (!has_substr(it.s + a[7], n[7], "HS_DUP_CLOEXEC=1", 16) ||
+                        !has_substr(it.s + a[10], n[10], "-ENOSYS", 7))) {
+            (void)tx_copy(why, wcap, "slots-dup2-adapt-missing", 24); return 1;
+        }
+        if (n[1] >= 32 || n[2] >= 16 || n[3] >= 16 || n[4] >= 128) {
+            (void)tx_copy(why, wcap, "slots-field-too-long", 20); return 1;
+        }
+        specs[s].nargs = (int)nv;
+        (void)tx_copy(specs[s].op, 32, it.s + a[1], n[1]);
+        (void)tx_copy(specs[s].tier, 16, it.s + a[2], n[2]);
+        (void)tx_copy(specs[s].status, 16, it.s + a[3], n[3]);
+        (void)tx_copy(specs[s].source, 128, it.s + a[4], n[4]);
+    }
+    if (!got_hdr) { (void)tx_copy(why, wcap, "slots-no-header", 15); return 1; }
+    for (s = 0; s < HS_NSLOT; s = s + 1) {
+        if (!specs[s].present) { (void)tx_copy(why, wcap, "slots-missing-slot", 18); return 1; }
+    }
+    return 0;
+}
+
+static int validate_table(const char *buf, long len, const slot_spec_t *specs,
+                          int *frozen_n, int *draft_n, int *abi_matched, int *ext_n,
+                          long *sums_out, char *why, long wcap) {
+    static const char *ok_argconv_a[10] = {
+        "plain", "hs_mmap_flags", "atfd_1_hs_o", "hs_prot_flags", "out_hs_stat64",
+        "atfd_hs_stat_flags", "hs_pipe_flags", "hs_dup_flags", "atfd_2_zero5", "atfd_1_zero"
+    };
+    static const char *ok_argconv_b[9] = {
+        "atfd_1", "hs_o_flags", "wcount", "bool_inv", "utf8to16",
+        "dword_sx", "overlapped", "utf8to16,handles", "utf16to8"
+    };
+    static const char *ok_ret[6] = {"none", "i64", "u64", "ptr", "fd", "pid"};
+    static const char *ok_errconv[5] = {"none", "negerrno", "errno2neg", "carry2neg", "lasterr2neg"};
+    static const char *ok_form[7] = {"syscall", "svc", "svc80", "shim", "tramp", "import", "winapi"};
+    static const char *ok_status[2] = {"frozen", "draft"};
+
+    int seen[HS_NTGT][HS_NSLOT];
+    long sum_bytes[HS_NTGT];
+    tx_iter_t it;
+    int cols = 0, rc = 0, got_hdr = 0, t, s;
+    for (t = 0; t < HS_NTGT; t = t + 1) {
+        sum_bytes[t] = 0;
+        for (s = 0; s < HS_NSLOT; s = s + 1) seen[t][s] = 0;
+    }
+    if (frozen_n) *frozen_n = 0;
+    if (draft_n) *draft_n = 0;
+    if (abi_matched) *abi_matched = 0;
+    if (ext_n) *ext_n = 0;
+
+    tx_iter_init(&it, (char *)buf, len);
+    while ((rc = tv_row_next(&it, &cols)) == 1) {
+        long rlen = it.len;
+        const char *row = it.s + it.off;
+        if (rlen == 0 || row[0] == '#') continue;
+        if (!got_hdr) {
+            const char *hdr = "os\tisa\top\tslot\tnargs\targconv\tret\terrconv\tform\tnative\tbytes_max\ttier\tstatus\tsource";
+            got_hdr = 1;
+            if (cols != 14 || !tx_same(row, rlen, hdr, tx_len(hdr, 128))) {
+                (void)tx_copy(why, wcap, "bad-header", 10);
+                return 1;
+            }
+            continue;
+        }
+        if (cols != 14) { (void)tx_copy(why, wcap, "bad-cols", 8); return 1; }
+        long a[14], n[14];
+        int k;
+        for (k = 0; k < 14; k = k + 1) {
+            if (tv_field(&it, k, &a[k], &n[k]) || n[k] <= 0) {
+                (void)tx_copy(why, wcap, "empty-field", 11);
+                return 1;
+            }
+        }
+        t = find_target(it.s + a[0], n[0], it.s + a[1], n[1]);
+        if (t < 0) { (void)tx_copy(why, wcap, "unknown-target", 14); return 1; }
+
+        long long slot_v = 0, nargs_v = 0, bmax_v = 0;
+        if (parse_u64(it.s + a[3], n[3], &slot_v) != 0 || slot_v < 0 || slot_v >= HS_NSLOT) {
+            (void)tx_copy(why, wcap, "bad-slot", 8); return 1;
+        }
+        s = (int)slot_v;
+        if (!tx_same(it.s + a[2], n[2], specs[s].op, tx_len(specs[s].op, 32))) {
+            (void)tx_copy(why, wcap, "op-slot-mismatch", 16); return 1;
+        }
+        if (seen[t][s]) { (void)tx_copy(why, wcap, "dup-slot", 8); return 1; }
+        seen[t][s] = 1;
+
+        if (parse_u64(it.s + a[4], n[4], &nargs_v) != 0 || nargs_v < 0 || nargs_v > 6) {
+            (void)tx_copy(why, wcap, "bad-nargs", 9); return 1;
+        }
+        if ((int)nargs_v != specs[s].nargs) {
+            (void)tx_copy(why, wcap, "nargs-slot-drift", 16); return 1;
+        }
+        if (!in_list(it.s + a[5], n[5], ok_argconv_a, 10) && !in_list(it.s + a[5], n[5], ok_argconv_b, 9)) {
+            (void)tx_copy(why, wcap, "bad-argconv", 11); return 1;
+        }
+        if (!in_list(it.s + a[6], n[6], ok_ret, 6)) {
+            (void)tx_copy(why, wcap, "bad-ret", 7); return 1;
+        }
+        if (!in_list(it.s + a[7], n[7], ok_errconv, 5)) {
+            (void)tx_copy(why, wcap, "bad-errconv", 11); return 1;
+        }
+        if (!in_list(it.s + a[8], n[8], ok_form, 7)) {
+            (void)tx_copy(why, wcap, "bad-form", 8); return 1;
+        }
+        if (parse_u64(it.s + a[10], n[10], &bmax_v) != 0 || bmax_v < 0) {
+            (void)tx_copy(why, wcap, "bad-bytes-max", 13); return 1;
+        }
+        sum_bytes[t] = sum_bytes[t] + (long)bmax_v;
+
+        /* Lock tier, source, and freeze boundary against hoststub-slots.tsv */
+        if (!tx_same(it.s + a[11], n[11], specs[s].tier, tx_len(specs[s].tier, 16))) {
+            (void)tx_copy(why, wcap, "tier-slot-drift", 15); return 1;
+        }
+        if (!in_list(it.s + a[12], n[12], ok_status, 2)) {
+            (void)tx_copy(why, wcap, "bad-status", 10); return 1;
+        }
+        if (!tx_same(it.s + a[13], n[13], specs[s].source, tx_len(specs[s].source, 128))) {
+            (void)tx_copy(why, wcap, "source-slot-drift", 17); return 1;
+        }
+        if (tx_same(it.s + a[12], n[12], "frozen", 6)) {
+            if (!((t == 0 || t == 1) && is_m1_core_slot(s) && tx_same(specs[s].status, tx_len(specs[s].status, 16), "frozen", 6))) {
+                (void)tx_copy(why, wcap, "draft-slot-marked-frozen", 24); return 1;
+            }
+            if (frozen_n) *frozen_n = *frozen_n + 1;
+        } else {
+            if (draft_n) *draft_n = *draft_n + 1;
+        }
+
+        /* Cross-check @abiops/@abi and exec/facts/sys-syscalls.tsv on Linux targets */
+        if (in_abiops(it.s + a[2], n[2])) {
+            if (abi_matched) *abi_matched = *abi_matched + 1;
+            if ((t == 0 || t == 1) && s != 5 && s != 9) {
+                char lnx_t[24];
+                if (cx_fmt(lnx_t, sizeof lnx_t, "lnx/%s", g_tgts[t][1]) == 0) {
+                    const char *exp_sys = abi_sysno(lnx_t, it.s + a[2], n[2]);
+                    if (exp_sys && !tx_same(exp_sys, 4, "none", 4) &&
+                        !tx_same(it.s + a[9], n[9], exp_sys, tx_len(exp_sys, 24))) {
+                        (void)tx_copy(why, wcap, "sysno-abi-drift", 15); return 1;
+                    }
+                }
+            }
+        } else {
+            if (ext_n) *ext_n = *ext_n + 1;
+        }
+
+        if (t == 0 || t == 1) {
+            const char *syp_sym = 0;
+            if (s == 5) syp_sym = "syp_openat";
+            else if (s == 11) syp_sym = "syp_pread";
+            else if (s == 14) syp_sym = "syp_pipe2";
+            else if (s == 17) syp_sym = "syp_getpid";
+            else if (s == 26) syp_sym = "syp_dents";
+            if (syp_sym) {
+                const char *exp_s = syp_lnx_sysno(syp_sym, t == 1);
+                if (!exp_s || !tx_same(it.s + a[9], n[9], exp_s, tx_len(exp_s, 24))) {
+                    (void)tx_copy(why, wcap, "sysno-syscalls-drift", 20); return 1;
+                }
+            }
+        }
+    }
+    if (!got_hdr) { (void)tx_copy(why, wcap, "no-header", 9); return 1; }
+    for (t = 0; t < HS_NTGT; t = t + 1) {
+        if (sums_out) sums_out[t] = sum_bytes[t];
+        for (s = 0; s < HS_NSLOT; s = s + 1) {
+            if (!seen[t][s]) { (void)tx_copy(why, wcap, "missing-slot", 12); return 1; }
+        }
+        if (sum_bytes[t] > g_budgets[t]) {
+            (void)tx_copy(why, wcap, "budget-exceeded", 15); return 1;
+        }
+    }
+    return 0;
+}
+
+/* Structured TSV mutation: locate row matching k0/k1/k2 on columns c0/c1/c2; drop row (col<0) or replace field col */
+static long mutate_tsv(const char *src, long len, int min_cols,
+                       int c0, const char *k0, int c1, const char *k1, int c2, const char *k2,
+                       int col, const char *rep, char *dst, long cap) {
+    tx_iter_t it;
+    int cols = 0, rc = 0;
+    long l0 = k0 ? tx_len(k0, 32) : 0, l1 = k1 ? tx_len(k1, 32) : 0, l2 = k2 ? tx_len(k2, 32) : 0;
+    tx_iter_init(&it, (char *)src, len);
+    while ((rc = tv_row_next(&it, &cols)) == 1) {
+        long rlen = it.len;
+        const char *row = it.s + it.off;
+        if (rlen == 0 || row[0] == '#' || row[0] == '@' || cols < min_cols) continue;
+        long a0, n0, a1, n1, a2, n2;
+        if (tv_field(&it, c0, &a0, &n0)) continue;
+        if (!tx_same(it.s + a0, n0, k0, l0)) continue;
+        if (c1 >= 0) {
+            if (tv_field(&it, c1, &a1, &n1) || !tx_same(it.s + a1, n1, k1, l1)) continue;
+        }
+        if (c2 >= 0) {
+            if (tv_field(&it, c2, &a2, &n2) || !tx_same(it.s + a2, n2, k2, l2)) continue;
+        }
+        long cut_a = 0, cut_b = 0, rl = 0;
+        if (col < 0) {
+            cut_a = it.off;
+            cut_b = it.off + it.len;
+            if (cut_b < len && src[cut_b] == '\n') cut_b = cut_b + 1;
+        } else {
+            long fa, fn;
+            if (tv_field(&it, col, &fa, &fn)) return -1;
+            cut_a = fa;
+            cut_b = fa + fn;
+            rl = rep ? tx_len(rep, 128) : 0;
+        }
+        long out_n = cut_a + rl + (len - cut_b);
+        if (out_n >= cap) return -1;
+        long i;
+        for (i = 0; i < cut_a; i = i + 1) dst[i] = src[i];
+        for (i = 0; i < rl; i = i + 1) dst[cut_a + i] = rep[i];
+        for (i = 0; i < len - cut_b; i = i + 1) dst[cut_a + rl + i] = src[cut_b + i];
+        dst[out_n] = 0;
+        return out_n;
+    }
+    return -1;
+}
+
+static void check_main_mutant(char *m, long mlen, const slot_spec_t *specs, const char *exp_why, const char *name) {
+    char why[64];
+    why[0] = 0;
+    if (mlen <= 0) { hs_ck(0, name); return; }
+    hs_ck(validate_table(m, mlen, specs, 0, 0, 0, 0, 0, why, 64) != 0 &&
+          tx_same(why, tx_len(why, 64), exp_why, tx_len(exp_why, 64)), name);
+}
+
+static void check_slots_mutant(char *m, long mlen, const char *exp_why, const char *name) {
+    slot_spec_t tmp[HS_NSLOT];
+    char why[64];
+    why[0] = 0;
+    if (mlen <= 0) { hs_ck(0, name); return; }
+    hs_ck(validate_slots_table(m, mlen, tmp, why, 64) != 0 &&
+          tx_same(why, tx_len(why, 64), exp_why, tx_len(exp_why, 64)), name);
+}
+
+int main(void) {
+    unsigned char *slots_data = 0, *data = 0;
+    int64_t slots_len = 0, len = 0;
+    slot_spec_t specs[HS_NSLOT];
+    char why[64];
+    int frozen_n = 0, draft_n = 0, abi_n = 0, ext_n = 0, t = 0;
+    long sums[HS_NTGT];
+    why[0] = 0;
+
+    hs_ck(load_lower_abi("exec/facts/lower-abi.tsv") == 0, "load-lower-abi");
+    hs_ck(load_sys_syscalls("exec/facts/sys-syscalls.tsv") == 0, "load-sys-syscalls");
+
+    if (sy_read_file("tools/tape/facts/hoststub-slots.tsv", &slots_data, &slots_len, 131072) != 0 || !slots_data) {
+        hs_ck(0, "read-hoststub-slots");
+        sy_printf("CHECK_HOSTSTUB\tpassed=%d\tfailed=%d\n", hs_pass, hs_fail);
+        return 1;
+    }
+    hs_ck(validate_slots_table((const char *)slots_data, (long)slots_len, specs, why, 64) == 0, "slots-table-valid-37");
+
+    if (sy_read_file("tools/tape/facts/hoststub.tsv", &data, &len, 131072) != 0 || !data) {
+        mm_free(slots_data);
+        hs_ck(0, "read-hoststub-table");
+        sy_printf("CHECK_HOSTSTUB\tpassed=%d\tfailed=%d\n", hs_pass, hs_fail);
+        return 1;
+    }
+
+    hs_ck(validate_table((const char *)data, (long)len, specs, &frozen_n, &draft_n, &abi_n, &ext_n, sums, why, 64) == 0 &&
+          frozen_n == 16 && draft_n == 206 && abi_n == 17 * HS_NTGT && ext_n == 20 * HS_NTGT,
+          "real-table-valid-6x37-frozen16-draft206");
+    sy_printf("HOSTSTUB_AUDIT\ttargets=%d\tslots=%d\tfrozen_rows=%d\tdraft_rows=%d\tabiops_rows=%d\tsys_ext_draft_rows=%d\n",
+              HS_NTGT, HS_NSLOT, frozen_n, draft_n, abi_n, ext_n);
+    for (t = 0; t < HS_NTGT; t = t + 1) {
+        sy_printf("HOSTSTUB_BUDGET\t%s/%s\tsum=%ld\tlimit=%d\n", g_tgts[t][0], g_tgts[t][1], sums[t], g_budgets[t]);
+    }
+
+    {
+        long mcap = (long)len + 512;
+        char *m = (char *)mm_alloc(mcap);
+        if (!m) { mm_free(slots_data); mm_free(data); return 2; }
+
+        /* Mutant 1: delete slot 8 (fstat) on win/arm64 -> missing-slot */
+        check_main_mutant(m, mutate_tsv((const char *)data, (long)len, 14, 0, "win", 1, "arm64", 2, "fstat", -1, 0, m, mcap),
+                          specs, "missing-slot", "mutant-delete-slot-rejected");
+
+        /* Mutant 2: duplicate slot 0 on lnx/x86_64 -> dup-slot */
+        if (len + 128 < mcap) {
+            long i;
+            for (i = 0; i < (long)len; i = i + 1) m[i] = (char)data[i];
+            const char *dup = "lnx\tx86_64\texit\t0\t1\tplain\tnone\tnone\tsyscall\t60\t0\tm1_core\tfrozen\texec/facts/lower-abi.tsv:@abiops+abi\n";
+            long dl = tx_len(dup, 160);
+            for (i = 0; i < dl; i = i + 1) m[len + i] = dup[i];
+            m[len + dl] = 0;
+            check_main_mutant(m, (long)len + dl, specs, "dup-slot", "mutant-dup-slot-rejected");
+        }
+
+        /* Mutant 3: exceed lnx/x86_64 512B budget via isatty bytes_max=999 -> budget-exceeded */
+        check_main_mutant(m, mutate_tsv((const char *)data, (long)len, 14, 0, "lnx", 1, "x86_64", 2, "isatty", 10, "999", m, mcap),
+                          specs, "budget-exceeded", "mutant-budget-exceeded-rejected");
+
+        /* Mutant 4: nargs=7 on mmap -> bad-nargs */
+        check_main_mutant(m, mutate_tsv((const char *)data, (long)len, 14, 0, "lnx", 1, "x86_64", 2, "mmap", 4, "7", m, mcap),
+                          specs, "bad-nargs", "mutant-nargs-gt6-rejected");
+
+        /* Mutant 5: lnx/x86_64 exit sysno drifted 60 -> 99 -> sysno-abi-drift */
+        check_main_mutant(m, mutate_tsv((const char *)data, (long)len, 14, 0, "lnx", 1, "x86_64", 2, "exit", 9, "99", m, mcap),
+                          specs, "sysno-abi-drift", "mutant-sysno-abi-drift-rejected");
+
+        /* Mutant 6: lnx/x86_64 pipe sysno drifted 293 -> 999 -> sysno-syscalls-drift */
+        check_main_mutant(m, mutate_tsv((const char *)data, (long)len, 14, 0, "lnx", 1, "x86_64", 2, "pipe", 9, "999", m, mcap),
+                          specs, "sysno-syscalls-drift", "mutant-sysno-syscalls-drift-rejected");
+
+        /* Mutant 7: osx/x86_64 exit slot 0 labelled as slot 1 -> op-slot-mismatch */
+        check_main_mutant(m, mutate_tsv((const char *)data, (long)len, 14, 0, "osx", 1, "x86_64", 2, "exit", 3, "1", m, mcap),
+                          specs, "op-slot-mismatch", "mutant-op-slot-mismatch-rejected");
+
+        /* Mutant 8: win/x86_64 spawn nargs drifted 4 -> 5 -> nargs-slot-drift */
+        check_main_mutant(m, mutate_tsv((const char *)data, (long)len, 14, 0, "win", 1, "x86_64", 2, "spawn", 4, "5", m, mcap),
+                          specs, "nargs-slot-drift", "mutant-nargs-cross-target-drift-rejected");
+
+        /* Mutant 9: marking sys_ext row (lnx/x86_64 pipe) as frozen -> draft-slot-marked-frozen */
+        check_main_mutant(m, mutate_tsv((const char *)data, (long)len, 14, 0, "lnx", 1, "x86_64", 2, "pipe", 12, "frozen", m, mcap),
+                          specs, "draft-slot-marked-frozen", "mutant-ext-marked-frozen-rejected");
+
+        /* Mutant 10: dropping hs_stat64 layout in hoststub-slots.tsv slot 8 -> slots-missing-stat64-layout */
+        if ((long)slots_len + 128 <= mcap) {
+            check_slots_mutant(m, mutate_tsv((const char *)slots_data, (long)slots_len, 11, 1, "fstat", -1, 0, -1, 0, 8, "raw_stat", m, mcap),
+                               "slots-missing-stat64-layout", "mutant-slots-fstat-layout-rejected");
+        }
+        mm_free(m);
+    }
+
+    mm_free(slots_data);
+    mm_free(data);
+    sy_printf("CHECK_HOSTSTUB\tpassed=%d\tfailed=%d\n", hs_pass, hs_fail);
+    return hs_fail ? 1 : 0;
+}

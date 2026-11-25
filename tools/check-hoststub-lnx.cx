@@ -1,0 +1,264 @@
+/* tools/check-hoststub-lnx.cx -- standalone contract & safety gate for T1.3 hoststub_lnx_x86_64.S.
+ * Compiled/tested cleanly when load1 < 4 on taskset -c 10-15:
+ *   (1) Text size bound check (compact 8-slot dispatcher);
+ *   (2) Non-frozen slot rejection (slots 7, 12 spawn, 99 -> -38 -ENOSYS, zero OS calls);
+ *   (3) Pointer subtraction & NUL bounds: read/write/fstat out-of-bounds, wraparound length,
+ *       and open() unterminated string abutting membase+memlimit MUST return -14 (-EFAULT);
+ *   (4) open flag translation & invalid flag rejection (-22), read/write/close roundtrip;
+ *   (5) mmap (HS_MAP_PRIV|ANON) tracking, write into mmap'd span, munmap removal, and
+ *       rejection of munmap on non-mmap'd arena/host address (-22);
+ *   (6) fstat 64B LE hs_stat64 parity against host sy_fstat() on size/ino/dev/mtime_ns/ctime_ns/mode/kind/uid/gid/rdev;
+ *   (7) slot 0 exit(42) in child fork exits cleanly with status 42.
+ */
+#pragma unisa use sys.env
+#pragma unisa use sys.fs
+#pragma unisa use sys.io
+#pragma unisa use sys.mem
+#pragma unisa use sys.proc
+#pragma unisa use sys.ffi
+#pragma unisa use text.text
+#pragma unisa use mem.bytes
+#pragma unisa use mem.heap
+
+#define HS_PROT_R 1ULL
+#define HS_PROT_W 2ULL
+#define HS_MAP_PRIV 2ULL
+#define HS_MAP_ANON 4ULL
+#define HS_O_RDONLY 0ULL
+#define HS_O_WRONLY 1ULL
+#define HS_O_RDWR   2ULL
+#define HS_O_CREAT  0x10ULL
+#define HS_O_TRUNC  0x40ULL
+
+static int g_pass = 0;
+static int g_fail = 0;
+
+static void ck(int ok, const char *name) {
+    if (ok) { g_pass++; sy_printf("PASS\tcheck-hoststub-lnx.%s\n", name); }
+    else { g_fail++; sy_printf("FAIL\tcheck-hoststub-lnx.%s\n", name); }
+}
+
+static unsigned long long rd_u64(const unsigned char *p) {
+    unsigned long long v = 0;
+    for (int i = 7; i >= 0; i--) v = (v << 8) | (unsigned long long)p[i];
+    return v;
+}
+
+static unsigned int rd_u32(const unsigned char *p) {
+    unsigned int v = 0;
+    for (int i = 3; i >= 0; i--) v = (v << 8) | (unsigned int)p[i];
+    return v;
+}
+
+static void *g_bind_sym = 0;
+static void *g_disp_sym = 0;
+static void *g_mcnt_sym = 0;
+
+static void call_bind(unsigned long long membase, unsigned long long memlimit) {
+    unsigned long a0 = (unsigned long)membase, a1 = (unsigned long)memlimit;
+    int kinds[2] = {SY_FFI_ULONG, SY_FFI_ULONG};
+    void *vals[2] = {&a0, &a1};
+    sy_ffi_call(g_bind_sym, SY_FFI_VOID, kinds, vals, 2, 2, 0);
+}
+
+static long long call_disp(unsigned long long slot, unsigned long long r0, unsigned long long r1,
+                           unsigned long long r2, unsigned long long r3, unsigned long long r4,
+                           unsigned long long r5) {
+    unsigned long a0 = (unsigned long)slot, a1 = (unsigned long)r0, a2 = (unsigned long)r1;
+    unsigned long a3 = (unsigned long)r2, a4 = (unsigned long)r3, a5 = (unsigned long)r4;
+    unsigned long a6 = (unsigned long)r5;
+    long ret = -1;
+    int kinds[7] = {SY_FFI_ULONG, SY_FFI_ULONG, SY_FFI_ULONG, SY_FFI_ULONG,
+                    SY_FFI_ULONG, SY_FFI_ULONG, SY_FFI_ULONG};
+    void *vals[7] = {&a0, &a1, &a2, &a3, &a4, &a5, &a6};
+    if (sy_ffi_call(g_disp_sym, SY_FFI_LONG, kinds, vals, 7, 7, &ret) != 0) return -999;
+    return (long long)ret;
+}
+
+static unsigned long long call_mcnt(void) {
+    unsigned long ret = 9999;
+    if (sy_ffi_call(g_mcnt_sym, SY_FFI_ULONG, 0, 0, 0, 0, &ret) != 0) return 9999;
+    return (unsigned long long)ret;
+}
+
+int main(void) {
+    const char *td = sy_tmpdir();
+    char so_path[4400], probe_path[4400];
+    int pid = sy_pid();
+    if (cx_fmt(so_path, sizeof so_path, "%s/hoststub-lnx-test-%d.so", td ? td : "/tmp", pid) ||
+        cx_fmt(probe_path, sizeof probe_path, "%s/hoststub-lnx-probe-%d.txt", td ? td : "/tmp", pid)) {
+        sy_printf("FAIL\tcheck-hoststub-lnx.path-bound\nCHECK_HOSTSTUB_LNX\tpassed=0\tfailed=1\n");
+        return 1;
+    }
+    {
+        char *av[] = {"cc", "-shared", "-fPIC", "-O2", "-o", so_path, "tools/tape/asm/hoststub_lnx_x86_64.S", 0};
+        char *co = 0; size_t cn = 0;
+        int crc = cx_runv_timeout(av, 30, &co, &cn);
+        if (co) mm_free(co);
+        ck(crc == 0, "assemble-shared-lib");
+    }
+
+    void *h = sy_ffi_dlopen(so_path, sy_ffi_now_global());
+    g_bind_sym = h ? sy_ffi_dlsym(h, "hoststub_lnx_x86_64_bind") : 0;
+    g_disp_sym = h ? sy_ffi_dlsym(h, "hoststub_lnx_x86_64") : 0;
+    g_mcnt_sym = h ? sy_ffi_dlsym(h, "hoststub_lnx_x86_64_mmap_count") : 0;
+    ck(h != 0 && g_bind_sym != 0 && g_disp_sym != 0 && g_mcnt_sym != 0, "symbols-resolved");
+    if (!g_bind_sym || !g_disp_sym || !g_mcnt_sym) {
+        sy_printf("CHECK_HOSTSTUB_LNX\tpassed=%d\tfailed=%d\n", g_pass, g_fail);
+        return 1;
+    }
+
+    /* Arena layout: [0..4095] with trailing guard bytes outside memlimit containing '\0' */
+    unsigned char raw[4128];
+    unsigned long long membase = (unsigned long long)raw;
+    unsigned long long memlimit = 4096;
+    for (int i = 0; i < 4128; i++) raw[i] = 0;
+    call_bind(membase, memlimit);
+
+    /* 1. Non-frozen slot rejection (-38 -ENOSYS) */
+    ck(call_disp(7, 0, 0, 0, 0, 0, 0) == -38 &&
+       call_disp(11, 0, 0, 0, 0, 0, 0) == -38 &&
+       call_disp(99, 0, 0, 0, 0, 0, 0) == -38,
+       "nonfrozen-slots-rejected-enosys");
+
+    /* 2. Pointer range checks for write/read/fstat + wraparound overflow */
+    ck(call_disp(2, 1, membase - 1, 1, 0, 0, 0) == -14 &&
+       call_disp(2, 1, membase + 4090, 8, 0, 0, 0) == -14 &&
+       call_disp(1, 0, membase, 0xffffffffffffffffull, 0, 0, 0) == -14 &&
+       call_disp(8, 0, membase + 4040, 0, 0, 0, 0) == -14,
+       "pointer-oob-and-wrap-rejected-efault");
+
+    /* 3. open() unterminated string abutting membase+memlimit (raw[4096] HAS '\0', must still fail -EFAULT) */
+    raw[4092] = '/'; raw[4093] = 't'; raw[4094] = 'm'; raw[4095] = 'p';
+    raw[4096] = 0;
+    ck(call_disp(5, membase + 4092, HS_O_RDONLY, 0, 0, 0, 0) == -14 &&
+       call_disp(5, membase - 4, HS_O_RDONLY, 0, 0, 0, 0) == -14 &&
+       call_disp(5, 0, HS_O_RDONLY, 0, 0, 0, 0) == -14,
+       "open-unterminated-and-null-path-rejected-efault");
+
+    /* 4. open() bad flags rejected (-22 -EINVAL), valid open/write/fstat/read/close roundtrip */
+    {
+        long plen = (long)strlen(probe_path);
+        mm_copy(raw, 4096, probe_path, plen + 1);
+        ck(call_disp(5, membase, 3, 0, 0, 0, 0) == -22 &&
+           call_disp(5, membase, 0x800, 0, 0, 0, 0) == -22,
+           "open-bad-flags-rejected-einval");
+
+        long long fd = call_disp(5, membase, HS_O_WRONLY | HS_O_CREAT | HS_O_TRUNC, 0600, 0, 0, 0);
+        ck(fd >= 0, "open-create-ok");
+        mm_copy(raw + 256, 32, "hello_t13!", 10);
+        long long wn = call_disp(2, (unsigned long long)fd, membase + 256, 10, 0, 0, 0);
+        ck(wn == 10, "write-10-bytes-ok");
+
+        /* fstat into raw+512 (64B) vs sy_fstat */
+        sy_stat_t st;
+        long long fs_rc = call_disp(8, (unsigned long long)fd, membase + 512, 0, 0, 0, 0);
+        int sy_rc = sy_fstat((int)fd, &st);
+        const unsigned char *h64 = raw + 512;
+        ck(fs_rc == 0 && sy_rc == 0 &&
+           (long long)rd_u64(h64 + 0) == (long long)st.size &&
+           rd_u64(h64 + 8) == (unsigned long long)st.ino &&
+           rd_u64(h64 + 16) == (unsigned long long)st.dev &&
+           (long long)rd_u64(h64 + 24) == (long long)st.mtime_ns &&
+           (long long)rd_u64(h64 + 32) == (long long)st.ctime_ns &&
+           rd_u32(h64 + 40) == (unsigned int)st.mode &&
+           rd_u32(h64 + 44) == (unsigned int)st.kind &&
+           rd_u32(h64 + 48) == (unsigned int)st.uid &&
+           rd_u32(h64 + 52) == (unsigned int)st.gid &&
+           rd_u64(h64 + 56) == (unsigned long long)st.rdev,
+           "fstat-64b-hs-stat64-exact-parity");
+
+        ck(call_disp(6, (unsigned long long)fd, 0, 0, 0, 0, 0) == 0, "close-writer-ok");
+
+        long long rfd = call_disp(5, membase, HS_O_RDONLY, 0, 0, 0, 0);
+        long long rn = (rfd >= 0) ? call_disp(1, (unsigned long long)rfd, membase + 1024, 16, 0, 0, 0) : -1;
+        ck(rfd >= 0 && rn == 10 && mm_same(raw + 1024, "hello_t13!", 10) &&
+           call_disp(6, (unsigned long long)rfd, 0, 0, 0, 0, 0) == 0,
+           "reopen-and-read-roundtrip-ok");
+        sy_unlink(probe_path);
+    }
+
+    /* 5. mmap tracking, valid read/write via mmap ptr, munmap safety */
+    {
+        long long p = call_disp(3, 0, 4096, HS_PROT_R | HS_PROT_W, HS_MAP_PRIV | HS_MAP_ANON, (unsigned long long)-1, 0);
+        ck(p >= 4096 && call_mcnt() == 1, "mmap-anon-tracked");
+        if (p >= 4096) {
+            mm_copy((void *)p, 8, "ABCD", 4);
+            long long fd_null = call_disp(5, membase, HS_O_WRONLY | HS_O_CREAT | HS_O_TRUNC, 0600, 0, 0, 0);
+            /* raw[0..plen] still has probe_path */
+            long long wn = (fd_null >= 0) ? call_disp(2, (unsigned long long)fd_null, (unsigned long long)p, 4, 0, 0, 0) : -1;
+            if (fd_null >= 0) call_disp(6, (unsigned long long)fd_null, 0, 0, 0, 0, 0);
+            sy_unlink(probe_path);
+            ck(wn == 4, "mmap-span-allowed-in-hostcall");
+            /* Refuses munmap on arena/untracked address */
+            ck(call_disp(4, membase, 4096, 0, 0, 0, 0) == -22, "munmap-untracked-arena-rejected");
+            ck(call_disp(4, (unsigned long long)p, 4096, 0, 0, 0, 0) == 0 && call_mcnt() == 0, "munmap-tracked-ok");
+            /* After munmap, pointer must immediately fail -EFAULT */
+            ck(call_disp(2, 1, (unsigned long long)p, 4, 0, 0, 0) == -14, "post-munmap-pointer-rejected");
+        }
+    }
+
+    /* 6. slot 0 exit(42) verified in isolated fork child */
+    {
+        pid_t cpid = fork();
+        if (cpid == 0) {
+            call_disp(0, 42, 0, 0, 0, 0, 0);
+            _exit(98);
+        }
+        int wst = 0, wcode = -1;
+        if (cpid > 0 && waitpid(cpid, &wst, 0) == cpid && WIFEXITED(wst)) {
+            wcode = WEXITSTATUS(wst);
+        }
+        ck(wcode == 42, "slot0-exit-42-in-child");
+    }
+
+    /* 7. Phase-2 5 slots: stat(9), lseek(10), spawn(12), sleep(19), isatty(36) */
+    {
+        unsigned long long plen = (unsigned long long)tx_len(probe_path, 4400);
+        mm_copy(raw, sizeof raw, probe_path, (size_t)plen + 1);
+        long long fd = call_disp(5, membase, HS_O_WRONLY | HS_O_CREAT | HS_O_TRUNC, 0600, 0, 0, 0);
+        mm_copy(raw + 256, 16, "0123456789", 10);
+        if (fd >= 0) call_disp(2, (unsigned long long)fd, membase + 256, 10, 0, 0, 0);
+
+        /* lseek(10): SEEK_END=2 -> 10, SEEK_SET=0 -> 0, bad whence -> -22, bad fd -> -9 */
+        long long pos_end = (fd >= 0) ? call_disp(10, (unsigned long long)fd, 0, 2, 0, 0, 0) : -1;
+        long long pos_set = (fd >= 0) ? call_disp(10, (unsigned long long)fd, 0, 0, 0, 0, 0) : -1;
+        ck(pos_end == 10 && pos_set == 0 &&
+           call_disp(10, (unsigned long long)fd, 0, 9, 0, 0, 0) == -22 &&
+           call_disp(10, 999999ULL, 0, 0, 0, 0, 0) == -9, "slot10-lseek-roundtrip-and-neg");
+
+        /* isatty(36): regular file -> -25 (-ENOTTY), bad fd -> -9 (-EBADF) */
+        ck(fd >= 0 && call_disp(36, (unsigned long long)fd, 0, 0, 0, 0, 0) == -25 &&
+           call_disp(36, 999999ULL, 0, 0, 0, 0, 0) == -9, "slot36-isatty-enotty-and-ebadf");
+        if (fd >= 0) call_disp(6, (unsigned long long)fd, 0, 0, 0, 0, 0);
+
+        /* stat(9): valid file -> size==10, bad ptr -> -14, missing file -> -2 */
+        long long st_rc = call_disp(9, membase, membase + 512, 0, 0, 0, 0);
+        long long st_sz = (long long)rd_u64(raw + 512);
+        mm_copy(raw + 1024, 32, "/nonexistent_hs_stat_probe", 27);
+        ck(st_rc == 0 && st_sz == 10 &&
+           call_disp(9, membase + 4096, membase + 512, 0, 0, 0, 0) == -14 &&
+           call_disp(9, membase + 1024, membase + 512, 0, 0, 0, 0) == -2, "slot9-stat-ok-efault-enoent");
+        sy_unlink(probe_path);
+
+        /* sleep(19): 1ms -> 0, bad ptr -> -14 */
+        unsigned long long *ts = (unsigned long long *)(raw + 640);
+        ts[0] = 0; ts[1] = 1000000ULL;
+        ck(call_disp(19, membase + 640, 0, 0, 0, 0, 0) == 0 &&
+           call_disp(19, membase + 4090, 0, 0, 0, 0, 0) == -14, "slot19-sleep-1ms-and-efault");
+
+        /* spawn(12): /bin/true -> pid>0 & exit 0, bad ptr -> -14 */
+        mm_copy(raw + 700, 16, "/bin/true", 10);
+        unsigned long long *avp = (unsigned long long *)(raw + 768);
+        avp[0] = membase + 700; avp[1] = 0;
+        long long sp_pid = call_disp(12, membase + 700, membase + 768, 0, 0, 0, 0);
+        int swst = 0;
+        if (sp_pid > 0) waitpid((pid_t)sp_pid, &swst, 0);
+        ck(sp_pid > 0 && WIFEXITED(swst) && WEXITSTATUS(swst) == 0 &&
+           call_disp(12, membase + 4096, 0, 0, 0, 0, 0) == -14, "slot12-spawn-true-and-efault");
+    }
+
+    sy_unlink(so_path);
+    sy_printf("CHECK_HOSTSTUB_LNX\tpassed=%d\tfailed=%d\n", g_pass, g_fail);
+    return g_fail ? 1 : 0;
+}

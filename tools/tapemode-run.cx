@@ -1,0 +1,341 @@
+/* tools/tapemode-run.cx -- T1.3 standalone Linux x86_64 harness for UTAPEBIN minor=3 slices.
+ * Reads a UTAPEBIN minor=3 container, validates header/sections/ident/M1-8-slot mask,
+ * computes overflow-safe linear memory size (DATA aligned 8B + BSS), initializes writable
+ * DATA+BSS, validates/binds hoststub_lnx_x86_64, runs tape_run_x86_64, and reports result.
+ * Usage:
+ *   sh ./unisacc.com tools/tapemode-run.cx -- [--so PATH] [--budget N] [--mem-extra N] <file.tapeslice> [args...]
+ *   sh ./unisacc.com tools/tapemode-run.cx -- [--so PATH] --self-test
+ */
+#pragma unisa use sys.env
+#pragma unisa use sys.fs
+#pragma unisa use sys.io
+#pragma unisa use sys.mem
+#pragma unisa use sys.proc
+#pragma unisa use sys.ffi
+#pragma unisa use text.text
+#pragma unisa use mem.bytes
+#pragma unisa use mem.heap
+#pragma unisa use tape.tapeslice_contract
+
+#define TR_DEFAULT_BUDGET 10000000ULL
+#define TR_DEFAULT_EXTRA  65536ULL
+
+static int tr_load_so(const char *so_path, void **out_bind, void **out_disp, void **out_run) {
+    char tmp_so[4400];
+    const char *use_path = so_path;
+    void *h;
+    if (!use_path || !use_path[0]) {
+        const char *td = sy_tmpdir();
+        if (cx_fmt(tmp_so, sizeof tmp_so, "%s/unisacc-tapemode-m1-%d.so", td ? td : "/tmp", sy_pid())) {
+            sy_eprintf("tapemode-run: path-bound\n");
+            return 1;
+        }
+        if (sy_exists("tools/tape/asm/tape_x86_64.S") != 1 ||
+            sy_exists("tools/tape/asm/hoststub_lnx_x86_64.S") != 1) {
+            sy_eprintf("tapemode-run: missing T1.2 or T1.3 assembly source\n");
+            return 1;
+        }
+        {
+            char *av[] = {"cc", "-shared", "-fPIC", "-O2", "-o", tmp_so,
+                          "tools/tape/asm/tape_x86_64.S", "tools/tape/asm/hoststub_lnx_x86_64.S", 0};
+            char *co = 0; size_t cn = 0;
+            int crc = cx_runv_timeout(av, 30, &co, &cn);
+            if (co) mm_free(co);
+            if (crc != 0) {
+                sy_eprintf("tapemode-run: compile failed\n");
+                return 1;
+            }
+        }
+        use_path = tmp_so;
+    }
+    h = sy_ffi_dlopen(use_path, sy_ffi_now_global());
+    if (!h) {
+        sy_eprintf("tapemode-run: dlopen failed: %s\n", sy_ffi_dlerror());
+        return 1;
+    }
+    *out_bind = sy_ffi_dlsym(h, "hoststub_lnx_x86_64_bind");
+    *out_disp = sy_ffi_dlsym(h, "hoststub_lnx_x86_64");
+    *out_run  = sy_ffi_dlsym(h, "tape_run_x86_64");
+    if (!*out_bind || !*out_disp || !*out_run) {
+        sy_eprintf("tapemode-run: dlsym missing symbol\n");
+        return 1;
+    }
+    return 0;
+}
+
+static long tr_build_selftest(unsigned char *b, long cap) {
+    int i, j;
+    const char *tags[6] = {"CODE", "DATA", "BSSZ", "SYMS", "RELO", "HOST"};
+    /* Minimal valid container: CODE = imm r0, 7; .exit r0 (wait: opcode 0=imm r0,7; opcode 42=.exit? wait: check tape-shape) */
+    /* Using two opcodes supported by T1.2 initial loop: opcode 0 (imm r0, 7 -> 0x00, 0x00, 0x00, 0x07 -> wait: check T1.2 format!) */
+    /* T1.2 decode format: byte0=opcode, regs packed, imm tag + LEB. Put single opcode 47 (nop) or opcode 0/42. */
+    unsigned long long offs[6] = {208, 216, 216, 224, 224, 224};
+    unsigned long long lens[6] = {5, 0, 8, 0, 0, 0};
+    unsigned long long cnts[6] = {2, 0, 1, 0, 0, 0};
+    if (cap < 224) return -1;
+    for (i = 0; i < 224; i++) b[i] = 0;
+    mm_copy(b, 8, "UTAPEBIN", 8);
+    ts_wr_u(b + 8, 2, 1);
+    ts_wr_u(b + 10, 2, 3);
+    ts_wr_u(b + 12, 2, 1);
+    ts_wr_u(b + 14, 2, 0);
+    ts_wr_u(b + 16, 4, 0);
+    ts_wr_u(b + 20, 4, 6);
+    ts_wr_u(b + 24, 4, 64);
+    ts_wr_u(b + 60, 4, 1);
+    for (i = 0; i < 6; i++) {
+        int d = 64 + 24 * i;
+        for (j = 0; j < 4; j++) b[d + j] = (unsigned char)tags[i][j];
+        ts_wr_u(b + d + 4, 8, offs[i]);
+        ts_wr_u(b + d + 12, 8, lens[i]);
+        ts_wr_u(b + d + 20, 4, cnts[i]);
+    }
+    /* CODE: op 0 (imm: r0=42 -> 0x00, regbyte=0xf0, immtag=0, leb=42), op 42 (.exit r0? Wait: opcode order!) */
+    /* In exec/facts/tape-shape.tsv: line3 is #0 imm, line45 is #42 .exit (0-indexed: 45-3=42!) */
+    b[208] = 0; b[209] = 0xf0; b[210] = 0; b[211] = 42;
+    b[212] = 42; b[213] = 0xf0;
+    ts_wr_u(b + 64 + 12, 8, 6);
+    ts_wr_u(b + 216, 8, 64);
+    ts_seal_ident(b, 224);
+    return 224;
+}
+
+static long tr_build_hellotest(unsigned char *b, long cap) {
+    int i, j;
+    const char *tags[6] = {"CODE", "DATA", "BSSZ", "SYMS", "RELO", "HOST"};
+    /* CODE at 208 len=23 (pad 1B -> 232), DATA at 232 len=12 (pad 4B -> 248), BSSZ at 248 len=8,
+     * SYMS/RELO at 256 len=0, HOST at 256 len=9 (slot=2 "write"), total=265. */
+    unsigned long long offs[6] = {208, 232, 248, 256, 256, 256};
+    unsigned long long lens[6] = {23, 12, 8, 0, 0, 9};
+    unsigned long long cnts[6] = {6, 1, 1, 0, 0, 1};
+    if (cap < 265) return -1;
+    for (i = 0; i < 265; i++) b[i] = 0;
+    mm_copy(b, 8, "UTAPEBIN", 8);
+    ts_wr_u(b + 8, 2, 1);
+    ts_wr_u(b + 10, 2, 3);
+    ts_wr_u(b + 12, 2, 1);
+    ts_wr_u(b + 14, 2, 0);
+    ts_wr_u(b + 16, 4, 0);
+    ts_wr_u(b + 20, 4, 6);
+    ts_wr_u(b + 24, 4, 64);
+    ts_wr_u(b + 60, 4, 1);
+    for (i = 0; i < 6; i++) {
+        int d = 64 + 24 * i;
+        for (j = 0; j < 4; j++) b[d + j] = (unsigned char)tags[i][j];
+        ts_wr_u(b + d + 4, 8, offs[i]);
+        ts_wr_u(b + d + 12, 8, lens[i]);
+        ts_wr_u(b + d + 20, 4, cnts[i]);
+    }
+    /* 0: imm r0, 1 (fd=1) */
+    b[208] = 0; b[209] = 0xf0; b[210] = 0; b[211] = 1;
+    /* 4: .lea r1, 0 (uleb tag=1, DATA[0]) */
+    b[212] = 25; b[213] = 0xf1; b[214] = 1; b[215] = 0;
+    /* 8: imm r2, 12 */
+    b[216] = 0; b[217] = 0xf2; b[218] = 0; b[219] = 12;
+    /* 12: .sys 2(write), r0, r1, r2 */
+    b[220] = 43; b[221] = 0x10; b[222] = 0xf2; b[223] = 1; b[224] = 2;
+    /* 17: imm r3, 0 */
+    b[225] = 0; b[226] = 0xf3; b[227] = 0; b[228] = 0;
+    /* 21: .exit r3 */
+    b[229] = 42; b[230] = 0xf3;
+    /* DATA: "hello tape!\n" (12B) */
+    mm_copy(b + 232, 12, "hello tape!\n", 12);
+    /* BSSZ: 64 */
+    ts_wr_u(b + 248, 8, 64);
+    /* HOST: slot=2, nlen=5, "write" */
+    ts_wr_u(b + 256, 2, 2);
+    ts_wr_u(b + 258, 2, 5);
+    mm_copy(b + 260, 5, "write", 5);
+    ts_seal_ident(b, 265);
+    return 265;
+}
+
+static int tr_exec_container(const unsigned char *img, long img_len,
+                             void *bind_fn, void *disp_fn, void *run_fn,
+                             unsigned long long budget, unsigned long long extra,
+                             int prog_argc, char **prog_argv, int quiet) {
+    char why[128];
+    unsigned long long code_len, data_off, data_len, bssz_off, bss_size;
+    unsigned long long data_aligned = 0, memlimit = 0, ibitmap_cap = 0;
+    const unsigned long long arena_cap = 0x40000000ull;
+    unsigned long long argv_at, argv_bytes, argv_data;
+    int argv_sizes[4095];
+    unsigned char *mem = 0, *ibm = 0;
+    unsigned long long args[12], result[5];
+    long long ret;
+    why[0] = 0;
+    if (ts_validate_container(img, img_len, why, sizeof why) != 0) {
+        sy_eprintf("tapemode-run: invalid container: %s\n", why);
+        return 2;
+    }
+    if (ts_validate_m1_host_support(img, img_len, why, sizeof why) != 0) {
+        sy_eprintf("tapemode-run: host support rejected: %s\n", why);
+        return 2;
+    }
+    code_len = ts_rd_u(img + 64 + 12, 8);
+    data_off = ts_rd_u(img + 64 + 24 + 4, 8);
+    data_len = ts_rd_u(img + 64 + 24 + 12, 8);
+    bssz_off = ts_rd_u(img + 64 + 48 + 4, 8);
+    bss_size = ts_rd_u(img + bssz_off, 8);
+    if (extra > 0xffffffffffffffffull - bss_size) {
+        sy_eprintf("tapemode-run: bss+extra overflow\n");
+        return 2;
+    }
+    /* Compute aligned DATA + BSS + extra arena with subtraction overflow guard */
+    if (ts_check_linear_bounds(data_len, bss_size + extra, 0x40000000ull, &data_aligned, why, sizeof why) != 0) {
+        sy_eprintf("tapemode-run: memory cap exceeded: %s\n", why);
+        return 2;
+    }
+    memlimit = data_aligned + bss_size + extra;
+    if (memlimit == 0) memlimit = 64;
+    if (prog_argc < 0 || prog_argc > 4095 || (prog_argc && !prog_argv)) return 2;
+    argv_at = (memlimit + 7ull) & ~7ull;
+    argv_bytes = ((unsigned long long)prog_argc + 1ull) * 8ull;
+    argv_data = argv_at + argv_bytes;
+    if (argv_data > arena_cap) return 2;
+    memlimit = argv_data;
+    for (int j = 0; j < prog_argc; j++) {
+        if (!prog_argv[j]) return 2;
+        long n = tx_len(prog_argv[j], (long)(arena_cap - memlimit));
+        if (n < 0) return 2;
+        argv_sizes[j] = (int)(n + 1);
+        memlimit += (unsigned long long)argv_sizes[j];
+    }
+    mem = (unsigned char *)mm_alloc((size_t)memlimit);
+    if (!mem) {
+        sy_eprintf("tapemode-run: arena alloc failed\n");
+        return 2;
+    }
+    for (unsigned long long i = 0; i < memlimit; i++) mem[i] = 0;
+    if (data_len > 0) mm_copy(mem, (long)memlimit, img + data_off, (long)data_len);
+    unsigned long long *guest_argv = (unsigned long long *)(mem + argv_at);
+    for (int j = 0; j < prog_argc; j++) {
+        long n = argv_sizes[j];
+        guest_argv[j] = (unsigned long long)(mem + argv_data);
+        mm_copy(mem + argv_data, (long)(memlimit - argv_data), prog_argv[j], n);
+        argv_data += (unsigned long long)n;
+    }
+
+    ibitmap_cap = (code_len >> 3) + ((code_len & 7ull) != 0ull ? 1ull : 0ull);
+    if (ibitmap_cap == 0) ibitmap_cap = 1;
+    ibm = (unsigned char *)mm_alloc((size_t)ibitmap_cap);
+    if (!ibm) {
+        mm_free(mem);
+        return 2;
+    }
+    for (unsigned long long i = 0; i < ibitmap_cap; i++) ibm[i] = 0;
+
+    {
+        unsigned long a0 = (unsigned long)mem, a1 = (unsigned long)memlimit;
+        int bk[2] = {SY_FFI_ULONG, SY_FFI_ULONG};
+        void *bv[2] = {&a0, &a1};
+        sy_ffi_call(bind_fn, SY_FFI_VOID, bk, bv, 2, 2, 0);
+    }
+
+    for (int i = 0; i < 12; i++) args[i] = 0;
+    for (int i = 0; i < 5; i++) result[i] = 0;
+    args[0] = 4;
+    args[1] = (unsigned long long)img;
+    args[2] = memlimit;
+    args[3] = budget;
+    args[4] = (unsigned long long)prog_argc;
+    args[5] = (unsigned long long)guest_argv;
+    args[6] = (unsigned long long)result;
+    args[7] = (unsigned long long)img_len;
+    args[8] = (unsigned long long)disp_fn;
+    args[9] = (unsigned long long)mem;
+    args[10] = (unsigned long long)ibm;
+    args[11] = ibitmap_cap;
+
+    {
+        void *ap = (void *)args;
+        int rk[1] = {SY_FFI_POINTER};
+        void *rv[1] = {&ap};
+        long rc_ffi = 0;
+        if (sy_ffi_call(run_fn, SY_FFI_LONG, rk, rv, 1, 1, &rc_ffi) != 0) ret = -999;
+        else ret = (long long)rc_ffi;
+    }
+    if (!quiet) {
+        sy_printf("TAPEMODE_RUN\tstatus=%llu\texit_code=%llu\tsteps=%llu\tfault_pc=%llu\tfault_reason=%llu\tret=%lld\n",
+                  result[0], result[1], result[2], result[3], result[4], ret);
+    }
+    mm_free(ibm);
+    mm_free(mem);
+    if (result[0] == 0) return (int)(result[1] & 255ull);
+    return 2;
+}
+
+static unsigned long long tr_parse_u64(const char *s) {
+    unsigned long long v = 0;
+    long i = 0;
+    if (!s || !s[0]) return 0;
+    while (s[i]) {
+        if (s[i] < '0' || s[i] > '9') return 0;
+        v = v * 10ull + (unsigned long long)(s[i] - '0');
+        i++;
+    }
+    return v;
+}
+
+int main(int argc, char **argv) {
+    const char *so_path = 0, *slice_path = 0;
+    unsigned long long budget = TR_DEFAULT_BUDGET, extra = TR_DEFAULT_EXTRA;
+    int self_test = 0, hello_test = 0, quiet = 0, i = 1, prog_argc = 0;
+    char **prog_argv = 0;
+    void *bind_fn = 0, *disp_fn = 0, *run_fn = 0;
+
+    while (i < argc) {
+        if (tx_eqz(argv[i], "--so") && i + 1 < argc) { so_path = argv[i + 1]; i += 2; }
+        else if (tx_eqz(argv[i], "--self-test")) { self_test = 1; i++; }
+        else if (tx_eqz(argv[i], "--hello-test")) { hello_test = 1; i++; }
+        else if (tx_eqz(argv[i], "--quiet")) { quiet = 1; i++; }
+        else if (tx_eqz(argv[i], "--budget") && i + 1 < argc) {
+            budget = tr_parse_u64(argv[i + 1]); i += 2;
+        } else if (tx_eqz(argv[i], "--mem-extra") && i + 1 < argc) {
+            extra = tr_parse_u64(argv[i + 1]); i += 2;
+        } else {
+            slice_path = argv[i];
+            prog_argc = argc - i;
+            prog_argv = argv + i;
+            break;
+        }
+    }
+    if (!self_test && !hello_test && !slice_path) {
+        sy_eprintf("tapemode-run: usage: [--so PATH] [--budget N] [--mem-extra N] (--self-test | --hello-test | <file.tapeslice> [args...])\n");
+        return 2;
+    }
+    if (tr_load_so(so_path, &bind_fn, &disp_fn, &run_fn) != 0) return 2;
+
+    if (self_test) {
+        unsigned char sb[256];
+        long slen = tr_build_selftest(sb, sizeof sb);
+        int rc = tr_exec_container(sb, slen, bind_fn, disp_fn, run_fn, budget, extra, 1, argv, 0);
+        if (rc == 42) {
+            sy_printf("TAPEMODE_RUN\tSELFTEST\tPASS\texit_code=42\n");
+            return 0;
+        }
+        sy_printf("TAPEMODE_RUN\tSELFTEST\tFAIL\trc=%d\n", rc);
+        return 1;
+    }
+    if (hello_test) {
+        unsigned char hb[320];
+        long hlen = tr_build_hellotest(hb, sizeof hb);
+        int rc = tr_exec_container(hb, hlen, bind_fn, disp_fn, run_fn, budget, extra, 1, argv, 0);
+        if (rc == 0) {
+            sy_printf("TAPEMODE_RUN\tHELLOTEST\tPASS\texit_code=0\n");
+            return 0;
+        }
+        sy_printf("TAPEMODE_RUN\tHELLOTEST\tFAIL\trc=%d\n", rc);
+        return 1;
+    }
+
+    unsigned char *raw = 0;
+    int64_t rlen = 0;
+    if (sy_read_file(slice_path, &raw, &rlen, 67108864) != 0 || !raw) {
+        sy_eprintf("tapemode-run: cannot read %s\n", slice_path);
+        return 2;
+    }
+    int rc = tr_exec_container(raw, (long)rlen, bind_fn, disp_fn, run_fn, budget, extra, prog_argc, prog_argv, quiet);
+    mm_free(raw);
+    return rc;
+}

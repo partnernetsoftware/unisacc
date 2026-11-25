@@ -1,0 +1,1627 @@
+/* tools/tapepack.cx -- M1 T1.1 deterministic UTAPEBIN v1.3 packer & roundtrip verifier.
+ *
+ * Usage:
+ *   sh ./unisacc.com tools/tapepack.cx -- INPUT.s -o OUT.tapeslice [--no-dce]
+ *   sh ./unisacc.com tools/tapepack.cx -- --check INPUT.s SLICE.tapeslice [--no-dce]
+ *
+ * Fixed normative contracts aligned 1:1 with tape/m0 facts & T1.2 tape_x86_64.S:
+ *   (1) 72-opcode table (0..71): 1:1 exact match with cx/compiler/tapeshape.cx ts_names[72]
+ *       and tools/tape/asm/tape_x86_64.S .Lshape[72]. Unknown opcodes are refused.
+ *   (2) Local labels & unresolved symbols:
+ *         - Function-scoped local labels (.L*, __unisacc_L*, __unisacc_R*, __argv_*) map
+ *           (func_idx, name) -> pruned target_insn_idx inside the same function.
+ *         - Duplicate local label in the same function: TAPEPACK_REFUSE duplicate-label <NAME> line=<LINE>.
+ *         - Unresolved symbol or cross-function local label reference:
+ *           TAPEPACK_REFUSE unresolved-symbol <NAME> line=<LINE> (never silently encoded as 0).
+ *         - Branch/call CODE byte offsets are solved by monotone fixed-point ULEB128 relaxation.
+ *   (3) CODE instruction wire format (exact match with tape_decode_x86_64 / tape_bitmap_x86_64):
+ *         - Byte 0: opcode (0..71), shape = Lshape[opcode] (nregs = low 4b, nimms = high 4b).
+ *         - Packed register nibbles ((nregs + 1) >> 1 bytes, odd trailing high nibble == 0xf0).
+ *         - Each immediate: 1-byte tag (0 = canonical SLEB128, 1 = canonical ULEB128) + LEB bytes.
+ *         - jump (27) / jumpz (28): tag=1 (ULEB128) holding exact CODE byte offset on ibitmap start.
+ *           --check verifies target_off < code_len and ibitmap[target_off] == 1 (else branch-target-mid-insn).
+ *   (4) RELO 16-byte row contract (aligned with tools/tape/facts/tapeslice-container.tsv &
+ *       tools/tape/tapeslice_contract.cx):
+ *         - Layout: pos u64 (0..7) | kind u8 (8: 0=code,1=data,2=bss,3=host) |
+ *                   width u8 (9: 1..10, exact LEB128 byte width) | rsv u16 (10..11: 0) | addend i32 (12..15).
+ *         - RELO.pos points to operand LEB128 byte offset in CODE (0 < pos < code_len,
+ *           width <= code_len - pos, [pos, pos + width) off ibitmap instruction-start bits).
+ *   (5) SYMS 16B rows, 8B-aligned zero-padded sections, exact file end, 32B zeroed-ident SHA-256 seal.
+ */
+#pragma unisa use sys.io
+#pragma unisa use sys.fs
+#pragma unisa use text.text
+#pragma unisa use mem.bytes
+#pragma unisa use mem.heap
+#pragma unisa use crypto.sha256
+
+#define TP_MAX_FUNCS 16384
+#define TP_MAX_STRS 8192
+#define TP_MAX_BSSS 4096
+#define TP_MAX_LABELS 131072
+#define TP_HASH_SZ 65536
+#define TP_HASH_MASK (TP_HASH_SZ - 1)
+#define TP_LHASH_SZ 262144
+#define TP_LHASH_MASK (TP_LHASH_SZ - 1)
+#define TP_HEADER_TOTAL 208
+#define TP_IDENT_OFF 28
+#define TP_IDENT_LEN 32
+#define TP_HOST_SLOTS 37
+#define TP_NUM_OPS 72
+
+#define TP_TGT_NONE 0
+#define TP_TGT_INSN 1
+
+typedef struct {
+    const char *name;
+    int nlen;
+    long start_off;
+    long end_off;
+    int start_line;
+    int live;
+    int first_insn;
+    int end_insn;
+    int code_off;
+} TpFunc;
+
+typedef struct {
+    const char *name;
+    int nlen;
+    const char *raw;
+    int rlen;
+    int live;
+    int data_off;
+} TpStr;
+
+typedef struct {
+    const char *name;
+    int nlen;
+    unsigned long long size;
+    unsigned long long bss_off;
+    int live;
+} TpBss;
+
+typedef struct {
+    int func_idx;
+    const char *name;
+    int nlen;
+    int insn_idx;
+    int line_no;
+} TpLabel;
+
+typedef struct {
+    int func_idx;
+    const char *line;
+    long len;
+    int line_no;
+} TpRawInsn;
+
+typedef struct {
+    unsigned char opcode;
+    unsigned char nregs;
+    unsigned char regs[6];
+    unsigned char nimms;
+    unsigned char imm_tags[5];   /* 0=SLEB128, 1=ULEB128 */
+    unsigned long long imms[5];
+    unsigned char target_kind;   /* TP_TGT_NONE or TP_TGT_INSN */
+    unsigned char target_imm_slot;
+    int target_idx;
+    unsigned char has_ext_relo;
+    unsigned char relo_kind;
+    unsigned char relo_width;
+    int relo_addend;
+    unsigned long long pc;
+    unsigned long long relo_pos;
+} TpInsn;
+
+typedef struct {
+    unsigned char *buf;
+    long len;
+    long cap;
+} TpVec;
+
+static TpFunc g_funcs[TP_MAX_FUNCS];
+static int g_nfuncs = 0;
+static TpStr g_strs[TP_MAX_STRS];
+static int g_nstrs = 0;
+static TpBss g_bsss[TP_MAX_BSSS];
+static int g_nbsss = 0;
+static TpLabel g_labels[TP_MAX_LABELS];
+static int g_nlabels = 0;
+static int g_fhash[TP_HASH_SZ];
+static int g_shash[TP_HASH_SZ];
+static int g_bhash[TP_HASH_SZ];
+static int g_lhash[TP_LHASH_SZ];
+static int g_queue[TP_MAX_FUNCS];
+
+static const char *g_sect_tags[6] = {"CODE", "DATA", "BSSZ", "SYMS", "RELO", "HOST"};
+
+/* Canonical 37 hoststub slots matching tools/tape/facts/hoststub-slots.tsv */
+static const char *g_host_names[TP_HOST_SLOTS] = {
+    "exit", "read", "write", "mmap", "munmap", "open", "close", "mprotect",
+    "fstat", "stat", "lseek", "pread", "spawn", "wait", "pipe", "dup2",
+    "kill", "getpid", "clock", "sleep", "getenvblock", "selfpath", "getcwd", "rename",
+    "unlink", "mkdir", "readdir", "ftruncate", "fsync", "chmod", "readlink", "dlopen",
+    "dlsym", "dlcall", "sigset", "sigret", "isatty"
+};
+
+/* Canonical 72-opcode table (0..71), 1:1 with cx/compiler/tapeshape.cx ts_names[72] */
+static const char *g_op_table[TP_NUM_OPS] = {
+    "imm", "mov", "add64", "sub64", "mul64", "xor64", "and64", "or64",
+    "shl64", "shr64", "lshr64", ".div", ".mod", ".udiv", ".umod", "slt64",
+    "sle64", "ult64", "ule64", "eq", "ne", "load64", "store64", ".ld",
+    ".st", ".lea", ".zero", "jump", "jumpz", "call", "callr", "callm",
+    ".hostcall", ".librarycall", ".libraryaddr", ".libraryfn", ".hostaddr", "ret", ".frame", ".arg",
+    ".print", ".write", ".exit", ".sys", ".sys6", ".argc", ".argv", "nop",
+    "fadd64", "fsub64", "fmul64", "fdiv64", "flt64", "fle64", "feq64", "fadd32",
+    "fsub32", "fmul32", "fdiv32", "flt32", "fle32", "feq32", "cvtid", "cvtud",
+    "cvtis", "cvtus", "cvtdi", "cvtdu", "cvtsd", "cvtds", "fsqrt64", "fsqrt32"
+};
+
+/* Exact .Lshape[72] table from tools/tape/asm/tape_x86_64.S (high nibble=nimms, low nibble=nregs) */
+static const unsigned char g_op_shape[TP_NUM_OPS] = {
+    0x11, 0x02,
+    0x03, 0x03, 0x03, 0x03, 0x03, 0x03, 0x03, 0x03, 0x03, 0x03,
+    0x03, 0x03, 0x03, 0x03, 0x03, 0x03, 0x03, 0x03, 0x03,
+    0x12, 0x12, 0x22, 0x22, 0x11, 0x21, 0x10, 0x11, 0x10, 0x01, 0x11,
+    0x02, 0x02, 0x51, 0x11, 0x11, 0x00, 0x10, 0x11, 0x01, 0x02, 0x01,
+    0x13, 0x16, 0x01, 0x02, 0x00,
+    0x03, 0x03, 0x03, 0x03, 0x03, 0x03, 0x03, 0x03, 0x03, 0x03, 0x03, 0x03, 0x03, 0x03,
+    0x02, 0x02, 0x02, 0x02, 0x02, 0x02, 0x02, 0x02, 0x02, 0x02
+};
+
+static int refuse(const char *why) {
+    sy_eprintf("TAPEPACK_REFUSE\t%s\n", why);
+    return 1;
+}
+
+static int refuse_sym(const char *kind, const char *name, int nlen, int line_no) {
+    char nb[256];
+    int n = nlen < 255 ? nlen : 255;
+    if (n > 0 && name) mm_copy(nb, sizeof nb, name, n);
+    nb[n > 0 ? n : 0] = 0;
+    sy_eprintf("TAPEPACK_REFUSE\t%s\t%s\tline=%d\n", kind, nb, line_no);
+    return 1;
+}
+
+static void tv_init(TpVec *v, long cap) {
+    v->buf = (unsigned char *)mm_alloc(cap > 0 ? cap : 64);
+    v->len = 0;
+    v->cap = v->buf ? (cap > 0 ? cap : 64) : 0;
+}
+
+static void tv_free(TpVec *v) {
+    if (v->buf) mm_free(v->buf);
+    v->buf = 0;
+    v->len = 0;
+    v->cap = 0;
+}
+
+static void tv_grow(TpVec *v, long need) {
+    long nc;
+    unsigned char *nb;
+    if (v->len + need <= v->cap) return;
+    nc = v->cap ? v->cap * 2 : 65536;
+    while (nc < v->len + need) nc *= 2;
+    nb = (unsigned char *)mm_alloc(nc);
+    if (!nb) return;
+    if (v->buf && v->len > 0) mm_copy(nb, nc, v->buf, v->len);
+    if (v->buf) mm_free(v->buf);
+    v->buf = nb;
+    v->cap = nc;
+}
+
+static void tv_push(TpVec *v, unsigned char b) {
+    tv_grow(v, 1);
+    if (v->len < v->cap) v->buf[v->len++] = b;
+}
+
+static void tv_push_u(TpVec *v, int k, unsigned long long val) {
+    int i;
+    tv_grow(v, k);
+    for (i = 0; i < k; i++) {
+        if (v->len < v->cap) v->buf[v->len++] = (unsigned char)(val & 255ull);
+        val >>= 8;
+    }
+}
+
+static int sleb_len(long long val) {
+    int n = 0, more = 1;
+    while (more) {
+        unsigned char byte = (unsigned char)(val & 0x7f);
+        val >>= 7;
+        if ((val == 0 && (byte & 0x40) == 0) || (val == -1 && (byte & 0x40) != 0)) more = 0;
+        n++;
+    }
+    return n;
+}
+
+static int uleb_len(unsigned long long val) {
+    int n = 0;
+    do {
+        val >>= 7;
+        n++;
+    } while (val != 0);
+    return n;
+}
+
+static int tv_push_sleb(TpVec *v, long long val) {
+    int n = 0, more = 1;
+    while (more) {
+        unsigned char byte = (unsigned char)(val & 0x7f);
+        val >>= 7;
+        if ((val == 0 && (byte & 0x40) == 0) || (val == -1 && (byte & 0x40) != 0)) more = 0;
+        else byte |= 0x80;
+        tv_push(v, byte);
+        n++;
+    }
+    return n;
+}
+
+static int tv_push_uleb(TpVec *v, unsigned long long val) {
+    int n = 0;
+    do {
+        unsigned char byte = (unsigned char)(val & 0x7full);
+        val >>= 7;
+        if (val != 0) byte |= 0x80;
+        tv_push(v, byte);
+        n++;
+    } while (val != 0);
+    return n;
+}
+
+/* Exact canonical LEB128 decoder matching tape_decode_x86_64 lines 73-132 */
+static int decode_leb_canon(const unsigned char *buf, long len, long *pos, int is_uleb, unsigned long long *out) {
+    unsigned long long res = 0;
+    int shift = 0;
+    unsigned char byte = 0, prev = 0;
+    for (;;) {
+        if (*pos >= len) return -1;
+        byte = buf[(*pos)++];
+        if (shift == 63) {
+            if (is_uleb) {
+                if (byte > 1) return -1;
+            } else {
+                if (byte != 0 && byte != 0x7f) return -1;
+            }
+        } else if (shift > 63) {
+            return -1;
+        }
+        res |= ((unsigned long long)(byte & 0x7fu)) << shift;
+        if ((byte & 0x80u) == 0) break;
+        prev = byte;
+        shift += 7;
+    }
+    if (is_uleb) {
+        if (shift > 0 && byte == 0) return -1;
+    } else {
+        if (shift > 0) {
+            if (byte == 0 && (prev & 0x40u) == 0) return -1;
+            if (byte == 0x7f && (prev & 0x40u) != 0) return -1;
+        }
+        if (shift < 57 && (byte & 0x40u) != 0) {
+            res |= (~0ull) << (shift + 7);
+        }
+    }
+    *out = res;
+    return 0;
+}
+
+static void tv_push_bytes(TpVec *v, const void *src, long n) {
+    if (n <= 0) return;
+    tv_grow(v, n);
+    if (v->len + n <= v->cap) {
+        mm_copy(v->buf + v->len, v->cap - v->len, src, n);
+        v->len += n;
+    }
+}
+
+static void tv_align8(TpVec *v) {
+    while ((v->len & 7) != 0) tv_push(v, 0);
+}
+
+static void wr_u(unsigned char *p, int k, unsigned long long val) {
+    int i;
+    for (i = 0; i < k; i++) {
+        p[i] = (unsigned char)(val & 255ull);
+        val >>= 8;
+    }
+}
+
+static unsigned long long rd_u(const unsigned char *p, int k) {
+    unsigned long long v = 0;
+    int i;
+    for (i = k - 1; i >= 0; i--) v = (v << 8) | (unsigned long long)(p[i] & 255u);
+    return v;
+}
+
+static void sha256_hex(const unsigned char dig[32], char out[65]) {
+    static const char hx[] = "0123456789abcdef";
+    int i;
+    for (i = 0; i < 32; i++) {
+        out[i * 2] = hx[(dig[i] >> 4) & 15];
+        out[i * 2 + 1] = hx[dig[i] & 15];
+    }
+    out[64] = 0;
+}
+
+static void compute_ident(const unsigned char *buf, long len, unsigned char out_dig[32]) {
+    unsigned char *tmp;
+    int i;
+    for (i = 0; i < 32; i++) out_dig[i] = 0;
+    if (!buf || len <= 0) return;
+    tmp = (unsigned char *)mm_alloc(len);
+    if (!tmp) return;
+    mm_copy(tmp, len, buf, len);
+    if (len >= TP_IDENT_OFF + TP_IDENT_LEN) {
+        for (i = 0; i < TP_IDENT_LEN; i++) tmp[TP_IDENT_OFF + i] = 0;
+    }
+    cx_sha256(tmp, (size_t)len, out_dig);
+    mm_free(tmp);
+}
+
+static unsigned int fnv_hash(const char *s, int n) {
+    unsigned int h = 2166136261u;
+    int i;
+    for (i = 0; i < n; i++) {
+        h ^= (unsigned char)s[i];
+        h *= 16777619u;
+    }
+    return h;
+}
+
+static unsigned int lhash_key(int func_idx, const char *s, int n) {
+    unsigned int h = fnv_hash(s, n);
+    h ^= (unsigned int)(func_idx + 1) * 2654435761u;
+    return h;
+}
+
+static int same_tok(const char *a, int an, const char *b, int bn) {
+    int i;
+    if (an != bn) return 0;
+    for (i = 0; i < an; i++) if (a[i] != b[i]) return 0;
+    return 1;
+}
+
+static int is_ident_char(char c) {
+    return (c >= 'a' && c <= 'z') || (c >= 'A' && c <= 'Z') ||
+           (c >= '0' && c <= '9') || c == '_' || c == '.' || c == '$';
+}
+
+static int is_local_label(const char *s, int n) {
+    int i;
+    if (n >= 11 && same_tok(s, 11, "__unisacc_L", 11)) return 1;
+    if (n >= 11 && same_tok(s, 11, "__unisacc_R", 11)) return 1;
+    if (n >= 7 && same_tok(s, 7, "__argv_", 7)) return 1;
+    for (i = 0; i < n; i++) if (s[i] == '.') return 1;
+    return 0;
+}
+
+static int fhash_find(const char *s, int n) {
+    unsigned int idx = fnv_hash(s, n) & TP_HASH_MASK;
+    while (g_fhash[idx] != 0) {
+        int id = g_fhash[idx] - 1;
+        if (same_tok(g_funcs[id].name, g_funcs[id].nlen, s, n)) return id;
+        idx = (idx + 1) & TP_HASH_MASK;
+    }
+    return -1;
+}
+
+static void fhash_put(int id) {
+    unsigned int idx = fnv_hash(g_funcs[id].name, g_funcs[id].nlen) & TP_HASH_MASK;
+    while (g_fhash[idx] != 0) idx = (idx + 1) & TP_HASH_MASK;
+    g_fhash[idx] = id + 1;
+}
+
+static int shash_find(const char *s, int n) {
+    unsigned int idx = fnv_hash(s, n) & TP_HASH_MASK;
+    while (g_shash[idx] != 0) {
+        int id = g_shash[idx] - 1;
+        if (same_tok(g_strs[id].name, g_strs[id].nlen, s, n)) return id;
+        idx = (idx + 1) & TP_HASH_MASK;
+    }
+    return -1;
+}
+
+static void shash_put(int id) {
+    unsigned int idx = fnv_hash(g_strs[id].name, g_strs[id].nlen) & TP_HASH_MASK;
+    while (g_shash[idx] != 0) idx = (idx + 1) & TP_HASH_MASK;
+    g_shash[idx] = id + 1;
+}
+
+static int bhash_find(const char *s, int n) {
+    unsigned int idx = fnv_hash(s, n) & TP_HASH_MASK;
+    while (g_bhash[idx] != 0) {
+        int id = g_bhash[idx] - 1;
+        if (same_tok(g_bsss[id].name, g_bsss[id].nlen, s, n)) return id;
+        idx = (idx + 1) & TP_HASH_MASK;
+    }
+    return -1;
+}
+
+static void bhash_put(int id) {
+    unsigned int idx = fnv_hash(g_bsss[id].name, g_bsss[id].nlen) & TP_HASH_MASK;
+    while (g_bhash[idx] != 0) idx = (idx + 1) & TP_HASH_MASK;
+    g_bhash[idx] = id + 1;
+}
+
+static int lhash_find(int func_idx, const char *s, int n) {
+    unsigned int idx = lhash_key(func_idx, s, n) & TP_LHASH_MASK;
+    while (g_lhash[idx] != 0) {
+        int id = g_lhash[idx] - 1;
+        if (g_labels[id].func_idx == func_idx && same_tok(g_labels[id].name, g_labels[id].nlen, s, n)) return id;
+        idx = (idx + 1) & TP_LHASH_MASK;
+    }
+    return -1;
+}
+
+static void lhash_put(int id) {
+    unsigned int idx = lhash_key(g_labels[id].func_idx, g_labels[id].name, g_labels[id].nlen) & TP_LHASH_MASK;
+    while (g_lhash[idx] != 0) idx = (idx + 1) & TP_LHASH_MASK;
+    g_lhash[idx] = id + 1;
+}
+
+static int lookup_op(const char *s, int n) {
+    int i;
+    for (i = 0; i < TP_NUM_OPS; i++) {
+        int l = (int)tx_len(g_op_table[i], 32);
+        if (same_tok(s, n, g_op_table[i], l)) return i;
+    }
+    return -1;
+}
+
+static int lookup_host_slot(const char *s, int n) {
+    int i;
+    for (i = 0; i < TP_HOST_SLOTS; i++) {
+        int l = (int)tx_len(g_host_names[i], 32);
+        if (same_tok(s, n, g_host_names[i], l)) return i;
+    }
+    /* Explicit legacy Linux runtime aliases mapped to canonical 37 hoststub slots */
+    if (same_tok(s, n, "syscall", 7)) return 12;
+    if (same_tok(s, n, "lstat", 5)) return 9;
+    if (same_tok(s, n, "gettimeofday", 12)) return 18;
+    if (same_tok(s, n, "getdents64", 10)) return 26;
+    if (same_tok(s, n, "ioctl", 5)) return 36;
+    if (same_tok(s, n, "fcntl", 5)) return 36;
+    if (same_tok(s, n, "poll", 4)) return 19;
+    return -1;
+}
+
+static int parse_reg(const char *s, int n) {
+    if (n == 2 && s[0] == 'r' && s[1] >= '0' && s[1] <= '9') return s[1] - '0';
+    if (n == 3 && s[0] == 'r' && s[1] == '1' && s[2] >= '0' && s[2] <= '5') return 10 + (s[2] - '0');
+    return -1;
+}
+
+static int parse_i64_tok(const char *s, int n, long long *out) {
+    int i = 0, neg = 0;
+    unsigned long long v = 0;
+    if (n <= 0) return -1;
+    if (s[0] == '-') { neg = 1; i = 1; }
+    if (i >= n) return -1;
+    for (; i < n; i++) {
+        if (s[i] < '0' || s[i] > '9') return -1;
+        v = v * 10ull + (unsigned long long)(s[i] - '0');
+    }
+    *out = neg ? -(long long)v : (long long)v;
+    return 0;
+}
+
+static int hex_val(char c) {
+    if (c >= '0' && c <= '9') return c - '0';
+    if (c >= 'a' && c <= 'f') return 10 + (c - 'a');
+    if (c >= 'A' && c <= 'F') return 10 + (c - 'A');
+    return -1;
+}
+
+static void unescape_str_into(TpVec *dst, const char *raw, int rlen) {
+    int i = 0;
+    while (i < rlen) {
+        if (raw[i] == '\\' && i + 1 < rlen) {
+            if (raw[i + 1] == 'x' && i + 3 < rlen) {
+                int hi = hex_val(raw[i + 2]), lo = hex_val(raw[i + 3]);
+                if (hi >= 0 && lo >= 0) {
+                    tv_push(dst, (unsigned char)((hi << 4) | lo));
+                    i += 4;
+                    continue;
+                }
+            } else if (raw[i + 1] == 'n') { tv_push(dst, 10); i += 2; continue; }
+            else if (raw[i + 1] == 't') { tv_push(dst, 9); i += 2; continue; }
+            else if (raw[i + 1] == 'r') { tv_push(dst, 13); i += 2; continue; }
+            else if (raw[i + 1] == '\\') { tv_push(dst, '\\'); i += 2; continue; }
+            else if (raw[i + 1] == '"') { tv_push(dst, '"'); i += 2; continue; }
+        }
+        tv_push(dst, (unsigned char)raw[i]);
+        i++;
+    }
+}
+
+static void parse_tape(const char *b, long n) {
+    long p = 0;
+    int cur_fn = -1, i, line_no = 1;
+    g_nfuncs = 0;
+    g_nstrs = 0;
+    g_nbsss = 0;
+    for (i = 0; i < TP_HASH_SZ; i++) {
+        g_fhash[i] = 0;
+        g_shash[i] = 0;
+        g_bhash[i] = 0;
+    }
+
+    while (p < n) {
+        long e = p;
+        while (e < n && b[e] != '\n') e++;
+        long ll = e - p;
+        if (ll > 0 && b[p + ll - 1] == '\r') ll--;
+
+        if (ll > 0 && b[p] != ' ' && b[p] != '\t') {
+            if (b[p] == '.' && !(ll >= 3 && b[p + 1] == 'L' && b[p + ll - 1] == ':')) {
+                if (ll > 5 && same_tok(b + p, 5, ".str ", 5) && g_nstrs < TP_MAX_STRS) {
+                    long k = p + 5, ns = k;
+                    while (k < p + ll && b[k] != ' ' && b[k] != '\t') k++;
+                    long ne = k;
+                    while (k < p + ll && b[k] != '"') k++;
+                    if (k < p + ll && b[k] == '"') {
+                        long rs = k + 1, re = p + ll - 1;
+                        while (re > rs && b[re] != '"') re--;
+                        g_strs[g_nstrs].name = b + ns;
+                        g_strs[g_nstrs].nlen = (int)(ne - ns);
+                        g_strs[g_nstrs].raw = b + rs;
+                        g_strs[g_nstrs].rlen = (int)(re - rs);
+                        g_strs[g_nstrs].live = 0;
+                        g_strs[g_nstrs].data_off = 0;
+                        shash_put(g_nstrs);
+                        g_nstrs++;
+                    }
+                } else if (ll > 5 && same_tok(b + p, 5, ".bss ", 5) && g_nbsss < TP_MAX_BSSS) {
+                    long k = p + 5, ns = k;
+                    while (k < p + ll && b[k] != ' ' && b[k] != '\t') k++;
+                    long ne = k;
+                    while (k < p + ll && (b[k] == ' ' || b[k] == '\t')) k++;
+                    long long sz = 0;
+                    if (parse_i64_tok(b + k, (int)(p + ll - k), &sz) == 0 && sz >= 0) {
+                        g_bsss[g_nbsss].name = b + ns;
+                        g_bsss[g_nbsss].nlen = (int)(ne - ns);
+                        g_bsss[g_nbsss].size = (unsigned long long)sz;
+                        g_bsss[g_nbsss].bss_off = 0;
+                        g_bsss[g_nbsss].live = 0;
+                        bhash_put(g_nbsss);
+                        g_nbsss++;
+                    }
+                }
+            } else if (b[p + ll - 1] == ':') {
+                int lname = (int)(ll - 1);
+                if (!is_local_label(b + p, lname) && g_nfuncs < TP_MAX_FUNCS) {
+                    if (cur_fn >= 0) g_funcs[cur_fn].end_off = p;
+                    cur_fn = g_nfuncs++;
+                    g_funcs[cur_fn].name = b + p;
+                    g_funcs[cur_fn].nlen = lname;
+                    g_funcs[cur_fn].start_off = p;
+                    g_funcs[cur_fn].end_off = n;
+                    g_funcs[cur_fn].start_line = line_no;
+                    g_funcs[cur_fn].live = 0;
+                    g_funcs[cur_fn].first_insn = -1;
+                    g_funcs[cur_fn].end_insn = -1;
+                    g_funcs[cur_fn].code_off = 0;
+                    fhash_put(cur_fn);
+                }
+            }
+        }
+        p = (e < n) ? (e + 1) : e;
+        line_no++;
+    }
+    if (cur_fn >= 0) g_funcs[cur_fn].end_off = n;
+}
+
+static void run_reachability_dce(const char *b) {
+    int qh = 0, qt = 0, i;
+    for (i = 0; i < g_nfuncs; i++) {
+        const char *nm = g_funcs[i].name;
+        int nl = g_funcs[i].nlen;
+        if (same_tok(nm, nl, "_start", 6) || same_tok(nm, nl, "main", 4) ||
+            same_tok(nm, nl, "__init", 6) || same_tok(nm, nl, "__main_ret", 10) ||
+            (nl >= 8 && same_tok(nm, 8, "__init_u", 8))) {
+            if (!g_funcs[i].live) {
+                g_funcs[i].live = 1;
+                g_queue[qt++] = i;
+            }
+        }
+    }
+    while (qh < qt) {
+        int fid = g_queue[qh++];
+        long p = g_funcs[fid].start_off;
+        long end = g_funcs[fid].end_off;
+        while (p < end) {
+            long e = p;
+            while (e < end && b[e] != '\n') e++;
+            if (e > p && (b[p] == ' ' || b[p] == '\t')) {
+                long k = p;
+                while (k < e && (b[k] == ' ' || b[k] == '\t')) k++;
+                long op_s = k;
+                while (k < e && b[k] != ' ' && b[k] != '\t') k++;
+                if (same_tok(b + op_s, (int)(k - op_s), ".sys", 4) ||
+                    same_tok(b + op_s, (int)(k - op_s), ".sys6", 5)) {
+                    while (k < e && b[k] != ',') k++;
+                }
+                while (k < e) {
+                    if (is_ident_char(b[k]) && !(b[k] >= '0' && b[k] <= '9')) {
+                        long ts = k;
+                        while (k < e && is_ident_char(b[k])) k++;
+                        int tl = (int)(k - ts);
+                        if (parse_reg(b + ts, tl) < 0) {
+                            int tf = fhash_find(b + ts, tl);
+                            if (tf >= 0 && !g_funcs[tf].live) {
+                                g_funcs[tf].live = 1;
+                                g_queue[qt++] = tf;
+                            }
+                            int ts_id = shash_find(b + ts, tl);
+                            if (ts_id >= 0) g_strs[ts_id].live = 1;
+                            int tb_id = bhash_find(b + ts, tl);
+                            if (tb_id >= 0) g_bsss[tb_id].live = 1;
+                        }
+                    } else {
+                        k++;
+                    }
+                }
+            }
+            p = (e < end) ? (e + 1) : e;
+        }
+    }
+}
+
+/* Parse one indented tape instruction line into canonical TpInsn.
+ * Refuses unknown opcode, unresolved host slot, or unresolved/cross-function symbol (never defaults to 0). */
+static int parse_insn_line(int func_idx, int line_no, const char *line, long ll,
+                           unsigned long long bss_base_off, int use_dce, int total_insns,
+                           TpInsn *out, unsigned char host_seen[TP_HOST_SLOTS]) {
+    long k = 0;
+    int i, op, rcnt = 0, icnt = 0;
+    unsigned char shape;
+
+    out->opcode = 0;
+    out->nregs = 0;
+    out->nimms = 0;
+    for (i = 0; i < 6; i++) out->regs[i] = 0;
+    for (i = 0; i < 5; i++) { out->imm_tags[i] = 0; out->imms[i] = 0; }
+    out->target_kind = TP_TGT_NONE;
+    out->target_imm_slot = 0;
+    out->target_idx = -1;
+    out->has_ext_relo = 0;
+    out->relo_kind = 0;
+    out->relo_width = 0;
+    out->relo_addend = 0;
+    out->pc = 0;
+    out->relo_pos = 0;
+
+    while (k < ll && (line[k] == ' ' || line[k] == '\t')) k++;
+    long op_s = k;
+    while (k < ll && line[k] != ' ' && line[k] != '\t') k++;
+    int op_len = (int)(k - op_s);
+    op = lookup_op(line + op_s, op_len);
+    if (op < 0 || op >= TP_NUM_OPS) return refuse_sym("unknown-opcode", line + op_s, op_len, line_no);
+    out->opcode = (unsigned char)op;
+    shape = g_op_shape[op];
+    out->nregs = (unsigned char)(shape & 0x0fu);
+    out->nimms = (unsigned char)((shape >> 4) & 0x0fu);
+
+    int host_slot = -1;
+    int is_sys = (op == 43 || op == 44); /* .sys or .sys6 */
+
+    while (k < ll) {
+        while (k < ll && (line[k] == ' ' || line[k] == '\t' || line[k] == ',')) k++;
+        if (k >= ll) break;
+        if (line[k] == '[') {
+            k++;
+            long rs = k;
+            while (k < ll && line[k] != '+' && line[k] != '-' && line[k] != ']') k++;
+            int rg = parse_reg(line + rs, (int)(k - rs));
+            if (rg >= 0 && rcnt < (int)out->nregs) out->regs[rcnt++] = (unsigned char)rg;
+            if (k < ll && (line[k] == '+' || line[k] == '-')) {
+                long os = k;
+                while (k < ll && line[k] != ']') k++;
+                long long ov = 0;
+                if (line[os] == '+') parse_i64_tok(line + os + 1, (int)(k - os - 1), &ov);
+                else parse_i64_tok(line + os, (int)(k - os), &ov);
+                if (icnt < (int)out->nimms) {
+                    out->imm_tags[icnt] = 0; /* SLEB */
+                    out->imms[icnt++] = (unsigned long long)ov;
+                }
+            }
+            if (k < ll && line[k] == ']') k++;
+        } else {
+            long ts = k;
+            while (k < ll && line[k] != ',' && line[k] != ' ' && line[k] != '\t') k++;
+            int tl = (int)(k - ts);
+            int rg = parse_reg(line + ts, tl);
+            long long iv = 0;
+            if (is_sys && host_slot < 0 && rg < 0) {
+                host_slot = lookup_host_slot(line + ts, tl);
+                if (host_slot < 0 || host_slot >= TP_HOST_SLOTS) {
+                    return refuse_sym("unresolved-symbol", line + ts, tl, line_no);
+                }
+                if (host_seen) host_seen[host_slot] = 1;
+                if (icnt < (int)out->nimms) {
+                    out->imm_tags[icnt] = 1; /* ULEB required by tape_run_x86_64 */
+                    out->imms[icnt++] = (unsigned long long)host_slot;
+                }
+                out->has_ext_relo = 1;
+                out->relo_kind = 3;
+                out->relo_addend = host_slot;
+            } else if (rg >= 0) {
+                if (rcnt < (int)out->nregs) out->regs[rcnt++] = (unsigned char)rg;
+            } else if (parse_i64_tok(line + ts, tl, &iv) == 0) {
+                if (icnt < (int)out->nimms) {
+                    out->imm_tags[icnt] = 0; /* SLEB */
+                    out->imms[icnt++] = (unsigned long long)iv;
+                }
+            } else {
+                /* Strict symbol resolution order:
+                 * 1) current function's local label table (no cross-function local labels!)
+                 * 2) .str table
+                 * 3) .bss table
+                 * 4) global function table
+                 * Anything else MUST fail closed with unresolved-symbol. */
+                int lid = lhash_find(func_idx, line + ts, tl);
+                if (lid >= 0) {
+                    int tidx = g_labels[lid].insn_idx;
+                    if (tidx < 0 || tidx >= total_insns) {
+                        return refuse_sym("label-no-target-insn", line + ts, tl, line_no);
+                    }
+                    if (icnt < (int)out->nimms) {
+                        out->target_kind = TP_TGT_INSN;
+                        out->target_imm_slot = (unsigned char)icnt;
+                        out->target_idx = tidx;
+                        out->imm_tags[icnt] = 1; /* ULEB CODE byte offset */
+                        out->imms[icnt++] = 0ull; /* relaxed by fixed-point pass */
+                    }
+                    continue;
+                }
+                int sid = shash_find(line + ts, tl);
+                if (sid >= 0 && (!use_dce || g_strs[sid].live)) {
+                    if (icnt < (int)out->nimms) {
+                        out->imm_tags[icnt] = 1;
+                        out->imms[icnt++] = (unsigned long long)g_strs[sid].data_off;
+                    }
+                    out->has_ext_relo = 1;
+                    out->relo_kind = 1;
+                    out->relo_addend = g_strs[sid].data_off;
+                    continue;
+                }
+                int bid = bhash_find(line + ts, tl);
+                if (bid >= 0 && (!use_dce || g_bsss[bid].live)) {
+                    if (icnt < (int)out->nimms) {
+                        out->imm_tags[icnt] = 1;
+                        out->imms[icnt++] = bss_base_off + g_bsss[bid].bss_off;
+                    }
+                    out->has_ext_relo = 1;
+                    out->relo_kind = 2;
+                    out->relo_addend = (int)g_bsss[bid].bss_off;
+                    continue;
+                }
+                int fid = fhash_find(line + ts, tl);
+                if (fid >= 0 && (!use_dce || g_funcs[fid].live) &&
+                    g_funcs[fid].first_insn >= 0 && g_funcs[fid].first_insn < total_insns) {
+                    if (icnt < (int)out->nimms) {
+                        out->target_kind = TP_TGT_INSN;
+                        out->target_imm_slot = (unsigned char)icnt;
+                        out->target_idx = g_funcs[fid].first_insn;
+                        out->imm_tags[icnt] = (op == 25) ? 0 : 1; /* .lea(25) func ptr -> SLEB tag=0 (CODE offset); call(29) -> ULEB tag=1 */
+                        out->imms[icnt++] = 0ull; /* relaxed to exact CODE byte offset */
+                    }
+                    if (op == 29 || op == 25) {
+                        out->has_ext_relo = 1;
+                        out->relo_kind = 0;
+                        out->relo_addend = 0;
+                    }
+                    continue;
+                }
+                return refuse_sym("unresolved-symbol", line + ts, tl, line_no);
+            }
+        }
+    }
+    if ((op == 27 || op == 28 || op == 29 || op == 43 || op == 44) && out->nimms > 0) {
+        out->imm_tags[0] = 1;
+    } else if (op == 25 && out->nimms > 0 && out->target_kind != TP_TGT_INSN) {
+        out->imm_tags[0] = 1;
+    }
+    return 0;
+}
+
+static int encoded_insn_size(const TpInsn *in) {
+    int sz = 1 + (((int)in->nregs + 1) >> 1);
+    int i;
+    for (i = 0; i < (int)in->nimms; i++) {
+        sz += 1 + (in->imm_tags[i] ? uleb_len(in->imms[i]) : sleb_len((long long)in->imms[i]));
+    }
+    return sz;
+}
+
+/* Encode instruction into CODE in exact tape_decode_x86_64 wire format (+ 16B RELO if has_ext_relo). */
+static void encode_insn(TpVec *code, TpVec *relo, TpInsn *in) {
+    int i, rbytes = ((int)in->nregs + 1) >> 1;
+    in->pc = (unsigned long long)code->len;
+    tv_push(code, in->opcode);
+    for (i = 0; i < rbytes; i++) {
+        unsigned char lo = (unsigned char)(in->regs[i * 2] & 0x0fu);
+        unsigned char hi = (i * 2 + 1 < (int)in->nregs) ? (unsigned char)(in->regs[i * 2 + 1] & 0x0fu) : 0x0fu;
+        tv_push(code, (unsigned char)(lo | (hi << 4)));
+    }
+    for (i = 0; i < (int)in->nimms; i++) {
+        tv_push(code, in->imm_tags[i] ? 1u : 0u);
+        unsigned long long op_pos = (unsigned long long)code->len;
+        int w = in->imm_tags[i] ? tv_push_uleb(code, in->imms[i]) : tv_push_sleb(code, (long long)in->imms[i]);
+        if (i == 0 && in->has_ext_relo) {
+            in->relo_pos = op_pos;
+            in->relo_width = (unsigned char)w;
+            tv_push_u(relo, 8, in->relo_pos);
+            tv_push(relo, in->relo_kind);
+            tv_push(relo, in->relo_width);
+            tv_push_u(relo, 2, 0);
+            tv_push_u(relo, 4, (unsigned long long)(unsigned int)in->relo_addend);
+        }
+    }
+}
+
+/* Decode instruction from CODE using exact tape_decode_x86_64 wire format. */
+static int decode_insn(const unsigned char *buf, long len, long *pos, TpInsn *out) {
+    int i, rbytes;
+    unsigned char shape;
+    if (*pos >= len) return -1;
+    out->pc = (unsigned long long)(*pos);
+    out->opcode = buf[(*pos)++];
+    if (out->opcode >= TP_NUM_OPS) return -1;
+    shape = g_op_shape[out->opcode];
+    out->nregs = (unsigned char)(shape & 0x0fu);
+    out->nimms = (unsigned char)((shape >> 4) & 0x0fu);
+    for (i = 0; i < 6; i++) out->regs[i] = 0;
+    for (i = 0; i < 5; i++) { out->imm_tags[i] = 0; out->imms[i] = 0; }
+    out->target_kind = TP_TGT_NONE;
+    out->target_imm_slot = 0;
+    out->target_idx = -1;
+    out->has_ext_relo = 0;
+    out->relo_kind = 0;
+    out->relo_width = 0;
+    out->relo_addend = 0;
+    out->relo_pos = 0;
+
+    rbytes = ((int)out->nregs + 1) >> 1;
+    if (*pos + rbytes > len) return -1;
+    if ((out->nregs & 1u) != 0) {
+        if ((buf[*pos + rbytes - 1] & 0xf0u) != 0xf0u) return -1;
+    }
+    for (i = 0; i < rbytes; i++) {
+        unsigned char rb = buf[(*pos)++];
+        out->regs[i * 2] = (unsigned char)(rb & 0x0fu);
+        if (i * 2 + 1 < (int)out->nregs) out->regs[i * 2 + 1] = (unsigned char)((rb >> 4) & 0x0fu);
+    }
+    for (i = 0; i < (int)out->nimms; i++) {
+        if (*pos >= len) return -1;
+        unsigned char tag = buf[(*pos)++];
+        if (tag > 1u) return -1;
+        out->imm_tags[i] = tag;
+        long start_p = *pos;
+        if (decode_leb_canon(buf, len, pos, tag != 0, &out->imms[i]) != 0) return -1;
+        if (i == 0) {
+            out->relo_pos = (unsigned long long)start_p;
+            out->relo_width = (unsigned char)(*pos - start_p);
+        }
+    }
+    return 0;
+}
+
+typedef struct {
+    long total;
+    long code_len;
+    long data_len;
+    long syms_len;
+    long relo_len;
+    long host_len;
+    int insns;
+    int funcs_kept;
+    int strs_kept;
+    int host_cnt;
+    unsigned long long bss_bytes;
+    int entry_off;
+    unsigned char file_sha[32];
+} TpStats;
+
+static int build_container(const char *src, long src_len, int use_dce,
+                           TpVec *out_container, TpInsn **out_insns_arr, int *out_ninsns,
+                           TpStats *st) {
+    TpVec code, data, syms, relo, host;
+    unsigned char host_seen[TP_HOST_SLOTS];
+    unsigned long long bss_total = 0, bss_base_off = 0;
+    int i, f, insns = 0, fkept = 0, skept = 0, hcnt = 0;
+    int entry_off = 0, main_off = 0;
+    int start_fn = -1, main_fn = -1;
+    TpRawInsn *raw_insns = 0;
+    int rcap = 4096;
+    TpInsn *iarr = 0;
+    unsigned long long *insn_off = 0;
+
+    parse_tape(src, src_len);
+    if (use_dce) run_reachability_dce(src);
+
+    g_nlabels = 0;
+    for (i = 0; i < TP_LHASH_SZ; i++) g_lhash[i] = 0;
+
+    tv_init(&code, 512 << 10);
+    tv_init(&data, 64 << 10);
+    tv_init(&syms, 256);
+    tv_init(&relo, 64 << 10);
+    tv_init(&host, 1024);
+    for (i = 0; i < TP_HOST_SLOTS; i++) host_seen[i] = 0;
+
+    /* 1. DATA: .str payloads (each followed by mandatory trailing NUL) + entry symbol names */
+    for (i = 0; i < g_nstrs; i++) {
+        if (use_dce && !g_strs[i].live) continue;
+        g_strs[i].data_off = (int)data.len;
+        unescape_str_into(&data, g_strs[i].raw, g_strs[i].rlen);
+        tv_push(&data, 0);
+        skept++;
+    }
+    int sym_start_off = (int)data.len;
+    tv_push_bytes(&data, "_start", 7);
+    int sym_main_off = (int)data.len;
+    tv_push_bytes(&data, "main", 5);
+    bss_base_off = ((unsigned long long)data.len + 7ull) & ~7ull;
+
+    /* 2. BSSZ: assign deterministic offsets and sum .bss size */
+    for (i = 0; i < g_nbsss; i++) {
+        if (use_dce && !g_bsss[i].live) continue;
+        g_bsss[i].bss_off = bss_total;
+        bss_total += g_bsss[i].size;
+    }
+
+    /* 3a. Pass 1: collect pruned instruction sequence & function-scoped local labels */
+    raw_insns = (TpRawInsn *)mm_alloc((long)rcap * (long)sizeof(TpRawInsn));
+    if (!raw_insns) {
+        tv_free(&code); tv_free(&data); tv_free(&syms); tv_free(&relo); tv_free(&host);
+        return refuse("oom-raw-insns");
+    }
+
+    for (f = 0; f < g_nfuncs; f++) {
+        long p, end;
+        int cur_line;
+        if (use_dce && !g_funcs[f].live) continue;
+        fkept++;
+        g_funcs[f].first_insn = insns;
+        if (same_tok(g_funcs[f].name, g_funcs[f].nlen, "_start", 6)) start_fn = f;
+        if (same_tok(g_funcs[f].name, g_funcs[f].nlen, "main", 4)) main_fn = f;
+        p = g_funcs[f].start_off;
+        end = g_funcs[f].end_off;
+        cur_line = g_funcs[f].start_line;
+        while (p < end) {
+            long e = p;
+            while (e < end && src[e] != '\n') e++;
+            long ll = e - p;
+            if (ll > 0 && src[p + ll - 1] == '\r') ll--;
+            if (ll > 0 && (src[p] == ' ' || src[p] == '\t')) {
+                if (insns >= rcap) {
+                    int ncap = rcap * 2;
+                    TpRawInsn *nr = (TpRawInsn *)mm_alloc((long)ncap * (long)sizeof(TpRawInsn));
+                    if (!nr) {
+                        mm_free(raw_insns);
+                        tv_free(&code); tv_free(&data); tv_free(&syms); tv_free(&relo); tv_free(&host);
+                        return refuse("oom-raw-insns");
+                    }
+                    mm_copy(nr, (long)ncap * (long)sizeof(TpRawInsn), raw_insns, (long)insns * (long)sizeof(TpRawInsn));
+                    mm_free(raw_insns);
+                    raw_insns = nr;
+                    rcap = ncap;
+                }
+                raw_insns[insns].func_idx = f;
+                raw_insns[insns].line = src + p;
+                raw_insns[insns].len = ll;
+                raw_insns[insns].line_no = cur_line;
+                insns++;
+            } else if (ll > 1 && src[p] != ' ' && src[p] != '\t' && src[p + ll - 1] == ':') {
+                int lname = (int)(ll - 1);
+                if (is_local_label(src + p, lname)) {
+                    if (lhash_find(f, src + p, lname) >= 0) {
+                        mm_free(raw_insns);
+                        tv_free(&code); tv_free(&data); tv_free(&syms); tv_free(&relo); tv_free(&host);
+                        return refuse_sym("duplicate-label", src + p, lname, cur_line);
+                    }
+                    if (g_nlabels >= TP_MAX_LABELS) {
+                        mm_free(raw_insns);
+                        tv_free(&code); tv_free(&data); tv_free(&syms); tv_free(&relo); tv_free(&host);
+                        return refuse("too-many-labels");
+                    }
+                    g_labels[g_nlabels].func_idx = f;
+                    g_labels[g_nlabels].name = src + p;
+                    g_labels[g_nlabels].nlen = lname;
+                    g_labels[g_nlabels].insn_idx = insns;
+                    g_labels[g_nlabels].line_no = cur_line;
+                    lhash_put(g_nlabels);
+                    g_nlabels++;
+                }
+            }
+            p = (e < end) ? (e + 1) : e;
+            cur_line++;
+        }
+        g_funcs[f].end_insn = insns;
+    }
+
+    /* 3b. Pass 2: parse all instructions and strictly resolve symbols */
+    if (insns > 0) {
+        iarr = (TpInsn *)mm_alloc((long)insns * (long)sizeof(TpInsn));
+        insn_off = (unsigned long long *)mm_alloc((long)insns * (long)sizeof(unsigned long long));
+        if (!iarr || !insn_off) {
+            if (iarr) mm_free(iarr);
+            if (insn_off) mm_free(insn_off);
+            mm_free(raw_insns);
+            tv_free(&code); tv_free(&data); tv_free(&syms); tv_free(&relo); tv_free(&host);
+            return refuse("oom-insns");
+        }
+    }
+
+    for (i = 0; i < insns; i++) {
+        if (parse_insn_line(raw_insns[i].func_idx, raw_insns[i].line_no,
+                            raw_insns[i].line, raw_insns[i].len,
+                            bss_base_off, use_dce, insns, &iarr[i], host_seen) != 0) {
+            if (iarr) mm_free(iarr);
+            if (insn_off) mm_free(insn_off);
+            mm_free(raw_insns);
+            tv_free(&code); tv_free(&data); tv_free(&syms); tv_free(&relo); tv_free(&host);
+            return 1;
+        }
+    }
+    mm_free(raw_insns);
+
+    /* 3c. Pass 3: monotone fixed-point ULEB128 relaxation for exact CODE byte offsets */
+    if (insns > 0) {
+        int iter, converged = 0;
+        for (i = 0; i < insns; i++) insn_off[i] = 0;
+        for (iter = 0; iter < 16; iter++) {
+            unsigned long long off = 0;
+            int changed = 0;
+            for (i = 0; i < insns; i++) {
+                if (insn_off[i] != off) {
+                    insn_off[i] = off;
+                    changed = 1;
+                }
+                off += (unsigned long long)encoded_insn_size(&iarr[i]);
+            }
+            for (i = 0; i < insns; i++) {
+                if (iarr[i].target_kind == TP_TGT_INSN) {
+                    unsigned long long want = insn_off[iarr[i].target_idx];
+                    int slot = (int)iarr[i].target_imm_slot;
+                    if (iarr[i].imms[slot] != want) {
+                        iarr[i].imms[slot] = want;
+                        if (iarr[i].has_ext_relo && iarr[i].relo_kind == 0) {
+                            iarr[i].relo_addend = (int)want;
+                        }
+                        changed = 1;
+                    }
+                }
+            }
+            if (!changed && iter > 0) {
+                converged = 1;
+                break;
+            }
+        }
+        if (!converged) {
+            mm_free(iarr);
+            mm_free(insn_off);
+            tv_free(&code); tv_free(&data); tv_free(&syms); tv_free(&relo); tv_free(&host);
+            return refuse("relax-not-converged");
+        }
+        if (start_fn >= 0 && g_funcs[start_fn].first_insn >= 0 && g_funcs[start_fn].first_insn < insns) {
+            entry_off = (int)insn_off[g_funcs[start_fn].first_insn];
+        }
+        if (main_fn >= 0 && g_funcs[main_fn].first_insn >= 0 && g_funcs[main_fn].first_insn < insns) {
+            main_off = (int)insn_off[g_funcs[main_fn].first_insn];
+        }
+        /* 3d. Pass 4: emit final CODE bytes & exact RELO offsets */
+        for (i = 0; i < insns; i++) {
+            encode_insn(&code, &relo, &iarr[i]);
+        }
+        mm_free(insn_off);
+    }
+
+    /* 4. SYMS: deterministic 2-row table (_start, main), 16B each */
+    tv_push_u(&syms, 4, (unsigned long long)sym_start_off);
+    tv_push(&syms, 0); tv_push(&syms, 1); tv_push_u(&syms, 2, 0);
+    tv_push_u(&syms, 8, (unsigned long long)entry_off);
+
+    tv_push_u(&syms, 4, (unsigned long long)sym_main_off);
+    tv_push(&syms, 0); tv_push(&syms, 1); tv_push_u(&syms, 2, 0);
+    tv_push_u(&syms, 8, (unsigned long long)main_off);
+
+    /* 5. HOST: canonical ascending slot order 0..36 */
+    for (i = 0; i < TP_HOST_SLOTS; i++) {
+        if (!host_seen[i]) continue;
+        long nl = tx_len(g_host_names[i], 32);
+        tv_push_u(&host, 2, (unsigned long long)i);
+        tv_push_u(&host, 2, (unsigned long long)nl);
+        tv_push_bytes(&host, g_host_names[i], nl);
+        hcnt++;
+    }
+
+    /* 6. Assemble UTAPEBIN v1.3 8B-aligned 6-section container */
+    tv_init(out_container, TP_HEADER_TOTAL + code.len + data.len + syms.len + relo.len + host.len + 128);
+    for (i = 0; i < TP_HEADER_TOTAL; i++) tv_push(out_container, 0);
+
+    unsigned long long offs[6], lens[6], cnts[6];
+    tv_align8(out_container); offs[0] = (unsigned long long)out_container->len; lens[0] = (unsigned long long)code.len; cnts[0] = (unsigned long long)insns;
+    tv_push_bytes(out_container, code.buf, code.len);
+
+    tv_align8(out_container); offs[1] = (unsigned long long)out_container->len; lens[1] = (unsigned long long)data.len; cnts[1] = (unsigned long long)skept;
+    tv_push_bytes(out_container, data.buf, data.len);
+
+    tv_align8(out_container); offs[2] = (unsigned long long)out_container->len; lens[2] = 8; cnts[2] = 1;
+    tv_push_u(out_container, 8, bss_total);
+
+    tv_align8(out_container); offs[3] = (unsigned long long)out_container->len; lens[3] = (unsigned long long)syms.len; cnts[3] = (unsigned long long)(syms.len / 16);
+    tv_push_bytes(out_container, syms.buf, syms.len);
+
+    tv_align8(out_container); offs[4] = (unsigned long long)out_container->len; lens[4] = (unsigned long long)relo.len; cnts[4] = (unsigned long long)(relo.len / 16);
+    tv_push_bytes(out_container, relo.buf, relo.len);
+
+    tv_align8(out_container); offs[5] = (unsigned long long)out_container->len; lens[5] = (unsigned long long)host.len; cnts[5] = (unsigned long long)hcnt;
+    tv_push_bytes(out_container, host.buf, host.len);
+
+    /* Fill 64B header + 144B directory */
+    mm_copy(out_container->buf, 8, "UTAPEBIN", 8);
+    wr_u(out_container->buf + 8, 2, 1);
+    wr_u(out_container->buf + 10, 2, 3);
+    wr_u(out_container->buf + 12, 2, 1);
+    wr_u(out_container->buf + 14, 2, 0);
+    wr_u(out_container->buf + 16, 4, (unsigned long long)entry_off);
+    wr_u(out_container->buf + 20, 4, 6);
+    wr_u(out_container->buf + 24, 4, 64);
+    wr_u(out_container->buf + 60, 4, 1);
+    for (i = 0; i < 6; i++) {
+        int d = 64 + 24 * i;
+        mm_copy(out_container->buf + d, 4, g_sect_tags[i], 4);
+        wr_u(out_container->buf + d + 4, 8, offs[i]);
+        wr_u(out_container->buf + d + 12, 8, lens[i]);
+        wr_u(out_container->buf + d + 20, 4, cnts[i]);
+    }
+    /* Seal ident (bytes 28..59) */
+    {
+        unsigned char dig[32];
+        compute_ident(out_container->buf, out_container->len, dig);
+        mm_copy(out_container->buf + TP_IDENT_OFF, TP_IDENT_LEN, dig, TP_IDENT_LEN);
+    }
+
+    if (st) {
+        st->total = out_container->len;
+        st->code_len = code.len;
+        st->data_len = data.len;
+        st->syms_len = syms.len;
+        st->relo_len = relo.len;
+        st->host_len = host.len;
+        st->insns = insns;
+        st->funcs_kept = fkept;
+        st->strs_kept = skept;
+        st->host_cnt = hcnt;
+        st->bss_bytes = bss_total;
+        st->entry_off = entry_off;
+        cx_sha256(out_container->buf, (size_t)out_container->len, st->file_sha);
+    }
+    if (out_insns_arr) {
+        *out_insns_arr = iarr;
+    } else if (iarr) {
+        mm_free(iarr);
+    }
+    if (out_ninsns) *out_ninsns = insns;
+
+    tv_free(&code);
+    tv_free(&data);
+    tv_free(&syms);
+    tv_free(&relo);
+    tv_free(&host);
+    return 0;
+}
+
+static void ibit_set(unsigned char *bm, unsigned long long off) {
+    bm[off >> 3] |= (unsigned char)(1u << (off & 7ull));
+}
+
+static int ibit_get(const unsigned char *bm, unsigned long long off) {
+    return (bm[off >> 3] & (unsigned char)(1u << (off & 7ull))) != 0;
+}
+
+/* Full UTAPEBIN v1.3 container validation + ibitmap branch/RELO contracts + decoded roundtrip */
+static int verify_slice_roundtrip(const char *src, long src_len,
+                                  const unsigned char *buf, long len,
+                                  int use_dce) {
+    unsigned long long offs[6], lens[6], cnts[6];
+    int i;
+
+    if (!buf || len < TP_HEADER_TOTAL + 8) return refuse("short-header");
+    if (!same_tok((const char *)buf, 8, "UTAPEBIN", 8)) return refuse("bad-magic");
+    if (rd_u(buf + 8, 2) != 1ull) return refuse("bad-major");
+    if (rd_u(buf + 10, 2) != 3ull) return refuse("bad-minor");
+    if (rd_u(buf + 12, 2) != 1ull) return refuse("bad-endian");
+    if (rd_u(buf + 14, 2) != 0ull) return refuse("bad-flags");
+    unsigned long long entry_off = rd_u(buf + 16, 4);
+    if (rd_u(buf + 20, 4) != 6ull) return refuse("bad-nsect");
+    if (rd_u(buf + 24, 4) != 64ull) return refuse("bad-dir-off");
+    if (rd_u(buf + 60, 4) > 6ull) return refuse("bad-origin");
+
+    /* 1. Verify ident SHA-256 seal */
+    {
+        unsigned char dig[32];
+        compute_ident(buf, len, dig);
+        for (i = 0; i < 32; i++) {
+            if (dig[i] != buf[TP_IDENT_OFF + i]) return refuse("ident-mismatch");
+        }
+    }
+
+    /* 2. Validate 6-section directory, strict 8B alignment, all-zero padding, exact file end */
+    {
+        unsigned long long prev_end = TP_HEADER_TOTAL;
+        for (i = 0; i < 6; i++) {
+            int d = 64 + 24 * i;
+            if (!same_tok((const char *)buf + d, 4, g_sect_tags[i], 4)) return refuse("bad-sect-tag");
+            offs[i] = rd_u(buf + d + 4, 8);
+            lens[i] = rd_u(buf + d + 12, 8);
+            cnts[i] = rd_u(buf + d + 20, 4);
+            unsigned long long aligned = prev_end + ((8ull - (prev_end & 7ull)) & 7ull);
+            if (offs[i] != aligned) return refuse("sect-unaligned-or-gap");
+            if (offs[i] > (unsigned long long)len || lens[i] > (unsigned long long)len - offs[i]) {
+                return refuse("sect-len-oob");
+            }
+            while (prev_end < offs[i]) {
+                if (buf[prev_end] != 0) return refuse("nonzero-padding");
+                prev_end++;
+            }
+            prev_end = offs[i] + lens[i];
+        }
+        if (prev_end != (unsigned long long)len) return refuse("trailing-bytes");
+    }
+
+    /* 3. Validate BSSZ, SYMS, RELO (bounds + 1..10 canonical LEB width), HOST contracts */
+    if (lens[2] != 8ull || cnts[2] != 1ull) return refuse("bad-bssz-shape");
+
+    if ((lens[3] & 15ull) != 0 || lens[3] != cnts[3] * 16ull) return refuse("bad-syms-len");
+    for (i = 0; i < (int)cnts[3]; i++) {
+        const unsigned char *row = buf + offs[3] + (unsigned long long)i * 16ull;
+        unsigned long long noff = rd_u(row, 4);
+        unsigned char sect = row[4];
+        unsigned char kind = row[5];
+        unsigned long long rsv = rd_u(row + 6, 2);
+        if (sect > 3 || kind > 3 || rsv != 0) return refuse("bad-syms-row");
+        if (noff >= lens[1] || buf[offs[1] + noff] == 0) return refuse("syms-name-oob");
+        unsigned long long p = noff;
+        while (p < lens[1] && buf[offs[1] + p] != 0) p++;
+        if (p >= lens[1]) return refuse("syms-name-unterminated");
+    }
+
+    if ((lens[4] & 15ull) != 0 || lens[4] != cnts[4] * 16ull) return refuse("bad-relo-len");
+    for (i = 0; i < (int)cnts[4]; i++) {
+        const unsigned char *row = buf + offs[4] + (unsigned long long)i * 16ull;
+        unsigned long long rpos = rd_u(row, 8);
+        unsigned char rkind = row[8];
+        unsigned char rwidth = row[9];
+        unsigned long long rrsv = rd_u(row + 10, 2);
+        if (rrsv != 0) return refuse("relo-rsv-nonzero");
+        if (rkind > 3) return refuse("relo-bad-kind");
+        if (rwidth < 1 || rwidth > 10) return refuse("relo-bad-width");
+        if (rpos == 0 || rpos >= lens[0] || (unsigned long long)rwidth > lens[0] - rpos) {
+            return refuse("relo-pos-oob");
+        }
+    }
+
+    {
+        unsigned long long hp = 0;
+        int prev_slot = -1;
+        unsigned int hseen = 0;
+        while (hp < lens[5]) {
+            if (lens[5] - hp < 4ull) return refuse("host-truncated");
+            int slot = (int)rd_u(buf + offs[5] + hp, 2);
+            unsigned long long nlen = rd_u(buf + offs[5] + hp + 2, 2);
+            hp += 4;
+            if (slot < 0 || slot >= TP_HOST_SLOTS || slot <= prev_slot) return refuse("host-slot-order");
+            if (nlen > lens[5] - hp) return refuse("host-name-oob");
+            long want_len = tx_len(g_host_names[slot], 32);
+            if ((long)nlen != want_len || !same_tok((const char *)buf + offs[5] + hp, (int)nlen, g_host_names[slot], (int)want_len)) {
+                return refuse("host-slot-mismatch");
+            }
+            hp += nlen;
+            prev_slot = slot;
+            hseen++;
+        }
+        if (hseen != (unsigned int)cnts[5]) return refuse("host-cnt-mismatch");
+    }
+
+    /* 4. Pass A (container-intrinsic): decode CODE, build ibitmap, verify entry_off,
+     *    verify every jump(27)/jumpz(28) target lands on ibitmap start (else branch-target-mid-insn),
+     *    and verify every RELO [pos, pos+width) is off ibitmap start bits. */
+    {
+        long clen = (long)lens[0];
+        long bm_bytes = (clen >> 3) + ((clen & 7) != 0) + 1;
+        unsigned char *ibitmap = (unsigned char *)mm_alloc(bm_bytes);
+        const unsigned char *cbuf = buf + offs[0];
+        long cpos = 0, k;
+        int dec_cnt = 0;
+
+        if (!ibitmap) return refuse("oom-ibitmap");
+        for (k = 0; k < bm_bytes; k++) ibitmap[k] = 0;
+
+        while (cpos < clen) {
+            TpInsn din;
+            ibit_set(ibitmap, (unsigned long long)cpos);
+            if (decode_insn(cbuf, clen, &cpos, &din) != 0) {
+                mm_free(ibitmap);
+                return refuse("code-decode-error");
+            }
+            dec_cnt++;
+        }
+        if (dec_cnt != (int)cnts[0]) {
+            mm_free(ibitmap);
+            return refuse("code-cnt-mismatch");
+        }
+        if (clen > 0 && (entry_off >= (unsigned long long)clen || !ibit_get(ibitmap, entry_off))) {
+            mm_free(ibitmap);
+            return refuse("entry-off-not-insn-start");
+        }
+
+        /* Verify every jump/jumpz instruction target offset against ibitmap BEFORE source diff */
+        cpos = 0;
+        while (cpos < clen) {
+            TpInsn din;
+            if (decode_insn(cbuf, clen, &cpos, &din) != 0) {
+                mm_free(ibitmap);
+                return refuse("code-decode-error");
+            }
+            if (din.opcode == 27 || din.opcode == 28) { /* jump or jumpz */
+                if (din.imm_tags[0] != 1u) {
+                    mm_free(ibitmap);
+                    return refuse("branch-not-uleb");
+                }
+                if (din.imms[0] >= (unsigned long long)clen) {
+                    mm_free(ibitmap);
+                    return refuse("branch-target-oob");
+                }
+                if (!ibit_get(ibitmap, din.imms[0])) {
+                    mm_free(ibitmap);
+                    return refuse("branch-target-mid-insn");
+                }
+            } else if (din.opcode == 25 && din.imm_tags[0] == 0u) {
+                if ((long long)din.imms[0] < 0 || din.imms[0] >= (unsigned long long)clen) {
+                    mm_free(ibitmap);
+                    return refuse("lea-code-target-oob");
+                }
+                if (!ibit_get(ibitmap, din.imms[0])) {
+                    mm_free(ibitmap);
+                    return refuse("lea-code-target-mid-insn");
+                }
+            }
+        }
+
+        /* Enforce [pos, pos+width) off ibitmap instruction-start bits for every RELO row */
+        for (i = 0; i < (int)cnts[4]; i++) {
+            const unsigned char *rrow = buf + offs[4] + (unsigned long long)i * 16ull;
+            unsigned long long rpos = rd_u(rrow, 8);
+            unsigned int rw = (unsigned int)rrow[9], b;
+            for (b = 0; b < rw; b++) {
+                if (ibit_get(ibitmap, rpos + (unsigned long long)b)) {
+                    mm_free(ibitmap);
+                    return refuse("relo-pos-on-insn-start");
+                }
+            }
+        }
+        mm_free(ibitmap);
+    }
+
+    /* 5. Pass B (source roundtrip): rebuild expected stream from INPUT.s and verify exact match */
+    TpVec expected_container;
+    TpInsn *exp_insns = 0;
+    int exp_ninsns = 0;
+    TpStats exp_st;
+    if (build_container(src, src_len, use_dce, &expected_container, &exp_insns, &exp_ninsns, &exp_st) != 0) {
+        return 1;
+    }
+
+    /* 5a. Verify every selected .str payload in DATA matches byte-for-byte and carries trailing NUL */
+    {
+        const unsigned char *dbuf = buf + offs[1];
+        unsigned long long dlen = lens[1];
+        TpVec sv;
+        tv_init(&sv, 256);
+        for (i = 0; i < g_nstrs; i++) {
+            long k;
+            if (use_dce && !g_strs[i].live) continue;
+            sv.len = 0;
+            unescape_str_into(&sv, g_strs[i].raw, g_strs[i].rlen);
+            unsigned long long soff = (unsigned long long)g_strs[i].data_off;
+            if (soff >= dlen || (unsigned long long)sv.len >= dlen - soff) {
+                tv_free(&sv);
+                tv_free(&expected_container);
+                if (exp_insns) mm_free(exp_insns);
+                return refuse("str-data-oob");
+            }
+            for (k = 0; k < sv.len; k++) {
+                if (dbuf[soff + (unsigned long long)k] != sv.buf[k]) {
+                    tv_free(&sv);
+                    tv_free(&expected_container);
+                    if (exp_insns) mm_free(exp_insns);
+                    return refuse("str-data-mismatch");
+                }
+            }
+            if (dbuf[soff + (unsigned long long)sv.len] != 0) {
+                tv_free(&sv);
+                tv_free(&expected_container);
+                if (exp_insns) mm_free(exp_insns);
+                return refuse("str-missing-trailing-nul");
+            }
+        }
+        tv_free(&sv);
+    }
+
+    {
+        const unsigned char *cbuf = buf + offs[0];
+        long clen = (long)lens[0];
+        long cpos = 0;
+        int dec_cnt = 0;
+        int relo_idx = 0;
+
+        while (cpos < clen) {
+            TpInsn din;
+            if (decode_insn(cbuf, clen, &cpos, &din) != 0) {
+                tv_free(&expected_container);
+                if (exp_insns) mm_free(exp_insns);
+                return refuse("code-decode-error");
+            }
+            if (dec_cnt >= exp_ninsns) {
+                tv_free(&expected_container);
+                if (exp_insns) mm_free(exp_insns);
+                return refuse("roundtrip-insn-count-mismatch");
+            }
+            {
+                const TpInsn *ein = &exp_insns[dec_cnt];
+                int r;
+                if (din.opcode != ein->opcode || din.nregs != ein->nregs ||
+                    din.nimms != ein->nimms || din.pc != ein->pc) {
+                    tv_free(&expected_container);
+                    if (exp_insns) mm_free(exp_insns);
+                    return refuse("roundtrip-insn-mismatch");
+                }
+                for (r = 0; r < (int)din.nregs; r++) {
+                    if (din.regs[r] != ein->regs[r]) {
+                        tv_free(&expected_container);
+                        if (exp_insns) mm_free(exp_insns);
+                        return refuse("roundtrip-insn-mismatch");
+                    }
+                }
+                for (r = 0; r < (int)din.nimms; r++) {
+                    if (din.imm_tags[r] != ein->imm_tags[r] || din.imms[r] != ein->imms[r]) {
+                        tv_free(&expected_container);
+                        if (exp_insns) mm_free(exp_insns);
+                        return refuse("roundtrip-insn-mismatch");
+                    }
+                }
+                if (ein->has_ext_relo) {
+                    if (relo_idx >= (int)cnts[4]) {
+                        tv_free(&expected_container);
+                        if (exp_insns) mm_free(exp_insns);
+                        return refuse("relo-underflow");
+                    }
+                    const unsigned char *rrow = buf + offs[4] + (unsigned long long)relo_idx * 16ull;
+                    if (rd_u(rrow, 8) != din.relo_pos || rrow[8] != ein->relo_kind || rrow[9] != din.relo_width) {
+                        tv_free(&expected_container);
+                        if (exp_insns) mm_free(exp_insns);
+                        return refuse("relo-insn-mismatch");
+                    }
+                    relo_idx++;
+                }
+            }
+            dec_cnt++;
+        }
+
+        if (dec_cnt != exp_ninsns) {
+            tv_free(&expected_container);
+            if (exp_insns) mm_free(exp_insns);
+            return refuse("roundtrip-insn-count-mismatch");
+        }
+        if (relo_idx != (int)cnts[4]) {
+            tv_free(&expected_container);
+            if (exp_insns) mm_free(exp_insns);
+            return refuse("relo-trailing-rows");
+        }
+    }
+
+    /* 6. Verify bit-identical full-file deterministic SHA-256 against rebuilt container */
+    {
+        unsigned char got_sha[32];
+        char hx[65];
+        cx_sha256(buf, (size_t)len, got_sha);
+        if (len != expected_container.len) {
+            tv_free(&expected_container);
+            if (exp_insns) mm_free(exp_insns);
+            return refuse("roundtrip-length-mismatch");
+        }
+        for (i = 0; i < 32; i++) {
+            if (got_sha[i] != exp_st.file_sha[i]) {
+                tv_free(&expected_container);
+                if (exp_insns) mm_free(exp_insns);
+                return refuse("roundtrip-sha256-mismatch");
+            }
+        }
+        sha256_hex(got_sha, hx);
+        sy_printf("TAPEPACK_CHECK\tPASS\tdce=%d\tbytes=%ld\tinsns=%d\tfuncs=%d\trelo=%ld\thost_slots=%d\tsha256=%s\n",
+                  use_dce, len, exp_st.insns, exp_st.funcs_kept, exp_st.relo_len / 16, exp_st.host_cnt, hx);
+    }
+
+    tv_free(&expected_container);
+    if (exp_insns) mm_free(exp_insns);
+    return 0;
+}
+
+int main(int argc, char **argv) {
+    int check_mode = 0;
+    int use_dce = 1;
+    const char *in_path = 0;
+    const char *out_path = 0;
+    const char *slice_path = 0;
+    int i;
+
+    for (i = 1; i < argc; i++) {
+        if (tx_eqz(argv[i], "--check")) check_mode = 1;
+        else if (tx_eqz(argv[i], "--no-dce")) use_dce = 0;
+        else if (tx_eqz(argv[i], "-o") && i + 1 < argc) out_path = argv[++i];
+        else if (!in_path) in_path = argv[i];
+        else if (check_mode && !slice_path) slice_path = argv[i];
+        else return refuse("unknown-arg");
+    }
+
+    if (!in_path) {
+        sy_eprintf("usage: tapepack INPUT.s -o OUT.tapeslice [--no-dce]\n"
+                   "       tapepack --check INPUT.s SLICE.tapeslice [--no-dce]\n");
+        return 2;
+    }
+
+    unsigned char *raw = 0;
+    int64_t rn = 0;
+    if (sy_read_file(in_path, &raw, &rn, 32 << 20) || !raw || rn <= 0) {
+        return refuse("read-input-failed");
+    }
+
+    if (check_mode) {
+        unsigned char *sbuf = 0;
+        int64_t sn = 0;
+        if (!slice_path) {
+            mm_free(raw);
+            return refuse("missing-slice-path");
+        }
+        if (sy_read_file(slice_path, &sbuf, &sn, 32 << 20) || !sbuf || sn <= 0) {
+            mm_free(raw);
+            return refuse("read-slice-failed");
+        }
+        int rc = verify_slice_roundtrip((const char *)raw, (long)rn, sbuf, (long)sn, use_dce);
+        mm_free(sbuf);
+        mm_free(raw);
+        return rc;
+    }
+
+    if (!out_path) {
+        mm_free(raw);
+        return refuse("missing-output-path");
+    }
+
+    TpVec container;
+    TpStats st;
+    if (build_container((const char *)raw, (long)rn, use_dce, &container, 0, 0, &st) != 0) {
+        mm_free(raw);
+        return 1;
+    }
+    mm_free(raw);
+
+    if (sy_write_file(out_path, container.buf, container.len, 0644) != 0) {
+        tv_free(&container);
+        return refuse("write-slice-failed");
+    }
+    {
+        char hx[65];
+        sha256_hex(st.file_sha, hx);
+        sy_printf("TAPEPACK_OK\tdce=%d\ttotal=%ld\tcode=%ld\tdata=%ld\tbssz=8\tsyms=%ld\trelo=%ld\thost=%ld\tinsns=%d\tfuncs=%d\tstrs=%d\thost_slots=%d\tbss_bytes=%llu\tsha256=%s\n",
+                  use_dce, st.total, st.code_len, st.data_len, st.syms_len, st.relo_len, st.host_len,
+                  st.insns, st.funcs_kept, st.strs_kept, st.host_cnt, st.bss_bytes, hx);
+    }
+    tv_free(&container);
+    return 0;
+}

@@ -1,0 +1,264 @@
+/* tools/check-tape-m0-linkage.cx -- T0.4 cross-table linkage verification across:
+ *   (1) tools/tape/facts/tapeslice-container.tsv + tools/tape/tapeslice_contract.cx (T0.1)
+ *   (2) tools/tape/facts/hoststub-slots.tsv + tools/tape/facts/hoststub.tsv (T0.2)
+ *   (3) tools/tape/facts/tapemode-abi.tsv (T0.3)
+ *   (4) exec/facts/tape-shape.tsv (72-opcode canonical shape byte table + optional .S .Lshape check)
+ * Verifies B1..B6 cross-contract invariants in one run with structured positive and negative assertions. */
+#pragma unisa use sys.fs
+#pragma unisa use sys.io
+#pragma unisa use text.text
+#pragma unisa use text.iter
+#pragma unisa use tsvx.read
+#pragma unisa use mem.heap
+#pragma unisa use tape.tapeslice_contract
+
+static int ml_pass = 0;
+static int ml_fail = 0;
+
+static void ml_ck(int ok, const char *name) {
+    if (ok) { ml_pass++; sy_printf("PASS\tcheck-tape-m0-linkage.%s\n", name); }
+    else { ml_fail++; sy_printf("FAIL\tcheck-tape-m0-linkage.%s\n", name); }
+}
+
+static int parse_u64_val(const char *s, long n, unsigned long long *out) {
+    unsigned long long v = 0;
+    long i;
+    if (n <= 0) return -1;
+    for (i = 0; i < n; i++) {
+        if (s[i] < '0' || s[i] > '9') return -1;
+        v = v * 10ull + (unsigned long long)(s[i] - '0');
+    }
+    *out = v;
+    return 0;
+}
+
+static int shape_nibbles(const char *s, long n, unsigned char *out_byte) {
+    int nregs = 0, nimms = 0;
+    long i = 0;
+    if (n == 0) { *out_byte = 0; return 0; }
+    while (i < n) {
+        long e = i;
+        while (e < n && s[e] != ',') e++;
+        if (e - i != 1) return -1;
+        if (s[i] == 'r') nregs++;
+        else if (s[i] == 'i' || s[i] == 'L' || s[i] == 's') nimms++;
+        else return -1;
+        i = (e < n) ? (e + 1) : e;
+    }
+    if (nregs > 15 || nimms > 15) return -1;
+    *out_byte = (unsigned char)(((nimms & 15) << 4) | (nregs & 15));
+    return 0;
+}
+
+static int load_tape_shapes(unsigned char out_bytes[72], int *out_cnt) {
+    unsigned char *data = 0;
+    int64_t len = 0;
+    tx_iter_t it;
+    int cols = 0, rc = 0, n = 0;
+    if (sy_read_file("exec/facts/tape-shape.tsv", &data, &len, 65536) != 0 || !data) return -1;
+    tx_iter_init(&it, (char *)data, (long)len);
+    while ((rc = tv_row_next(&it, &cols)) == 1) {
+        long rlen = it.len;
+        const char *row = it.s + it.off;
+        long a0, n0, a1, n1;
+        unsigned char b = 0;
+        if (rlen == 0 || row[0] == '#') continue;
+        if (cols != 2) { mm_free(data); return -1; }
+        if (tv_field(&it, 0, &a0, &n0) || tv_field(&it, 1, &a1, &n1) || n0 <= 0) {
+            mm_free(data); return -1;
+        }
+        if (n >= 72 || shape_nibbles(it.s + a1, n1, &b) != 0) { mm_free(data); return -1; }
+        out_bytes[n++] = b;
+    }
+    mm_free(data);
+    *out_cnt = n;
+    return n == 72 ? 0 : -1;
+}
+
+static int hex_nibble(char c) {
+    if (c >= '0' && c <= '9') return c - '0';
+    if (c >= 'a' && c <= 'f') return c - 'a' + 10;
+    if (c >= 'A' && c <= 'F') return c - 'A' + 10;
+    return -1;
+}
+
+static int parse_asm_byte_tok(const char *s, long n, unsigned char *out) {
+    if (n >= 3 && s[0] == '0' && (s[1] == 'x' || s[1] == 'X')) {
+        unsigned long long v = 0;
+        long i;
+        for (i = 2; i < n; i++) {
+            int d = hex_nibble(s[i]);
+            if (d < 0) return -1;
+            v = (v << 4) | (unsigned long long)d;
+        }
+        if (v > 255ull) return -1;
+        *out = (unsigned char)v;
+        return 0;
+    } else {
+        unsigned long long v = 0;
+        if (parse_u64_val(s, n, &v) != 0 || v > 255ull) return -1;
+        *out = (unsigned char)v;
+        return 0;
+    }
+}
+
+/* Parse .Lshape: .byte / .fill rows from an assembly source and match against 72-byte authoritative table. */
+static int verify_asm_lshape(const unsigned char want[72], int *checked_asm) {
+    unsigned char *data = 0;
+    int64_t len = 0;
+    unsigned char got[72];
+    int ngot = 0, in_lshape = 0, i;
+    long pos = 0;
+    *checked_asm = 0;
+    if (sy_exists("tools/tape/asm/tape_x86_64.S") != 1) return 0;
+    if (sy_read_file("tools/tape/asm/tape_x86_64.S", &data, &len, 262144) != 0 || !data) return -1;
+    while (pos < (long)len) {
+        long e = pos;
+        while (e < (long)len && data[e] != '\n') e++;
+        long a = pos, b = e;
+        while (a < b && (data[a] == ' ' || data[a] == '\t')) a++;
+        while (b > a && (data[b - 1] == ' ' || data[b - 1] == '\t' || data[b - 1] == '\r')) b--;
+        if (!in_lshape) {
+            if (b - a == 8 && tx_same((const char *)data + a, 8, ".Lshape:", 8)) in_lshape = 1;
+        } else {
+            if (b - a >= 5 && tx_prefix((const char *)data + a, b - a, ".byte", 5)) {
+                long k = a + 5;
+                while (k < b) {
+                    while (k < b && (data[k] == ' ' || data[k] == '\t' || data[k] == ',')) k++;
+                    long ks = k;
+                    while (k < b && data[k] != ',' && data[k] != ' ' && data[k] != '\t') k++;
+                    if (k > ks) {
+                        unsigned char val = 0;
+                        if (ngot >= 72 || parse_asm_byte_tok((const char *)data + ks, k - ks, &val) != 0) {
+                            mm_free(data); return -1;
+                        }
+                        got[ngot++] = val;
+                    }
+                }
+            } else if (b - a >= 5 && tx_prefix((const char *)data + a, b - a, ".fill", 5)) {
+                long k = a + 5, toks_s[3], toks_l[3], nt = 0;
+                while (k < b && nt < 3) {
+                    while (k < b && (data[k] == ' ' || data[k] == '\t' || data[k] == ',')) k++;
+                    long ks = k;
+                    while (k < b && data[k] != ',' && data[k] != ' ' && data[k] != '\t') k++;
+                    if (k > ks) { toks_s[nt] = ks; toks_l[nt] = k - ks; nt++; }
+                }
+                if (nt != 3) { mm_free(data); return -1; }
+                unsigned long long rpt = 0, sz = 0;
+                unsigned char val = 0;
+                if (parse_u64_val((const char *)data + toks_s[0], toks_l[0], &rpt) != 0 ||
+                    parse_u64_val((const char *)data + toks_s[1], toks_l[1], &sz) != 0 || sz != 1 ||
+                    parse_asm_byte_tok((const char *)data + toks_s[2], toks_l[2], &val) != 0) {
+                    mm_free(data); return -1;
+                }
+                while (rpt-- > 0) {
+                    if (ngot >= 72) { mm_free(data); return -1; }
+                    got[ngot++] = val;
+                }
+            } else if (b > a) {
+                break;
+            }
+        }
+        pos = (e < (long)len) ? (e + 1) : e;
+    }
+    mm_free(data);
+    if (ngot != 72) return -1;
+    for (i = 0; i < 72; i++) {
+        if (got[i] != want[i]) return -1;
+    }
+    *checked_asm = 1;
+    return 0;
+}
+
+static int file_has_substr(const char *path, const char *sub) {
+    unsigned char *d = 0;
+    int64_t n = 0;
+    long subn = tx_len(sub, 256);
+    int ok = 0;
+    if (sy_read_file(path, &d, &n, 262144) != 0 || !d) return 0;
+    ok = (tx_find((const char *)d, (long)n, sub, subn) >= 0);
+    mm_free(d);
+    return ok;
+}
+
+int main(void) {
+    unsigned char shapes[72];
+    int nshapes = 0, checked_asm = 0;
+    unsigned char *ht = 0;
+    int64_t htn = 0;
+    unsigned long long m1_mask = 0;
+    int spawn_draft = 0;
+    char why[64];
+
+    /* 1. T0.1 + T0.2 hoststub-slots linkage: compute canonical M1 mask from real hoststub-slots.tsv */
+    if (sy_read_file("tools/tape/facts/hoststub-slots.tsv", &ht, &htn, 65536) == 0 && ht) {
+        tx_iter_t it;
+        int cols = 0, rc = 0, got_hdr = 0;
+        tx_iter_init(&it, (char *)ht, (long)htn);
+        while ((rc = tv_row_next(&it, &cols)) == 1) {
+            long rlen = it.len;
+            const char *row = it.s + it.off;
+            long a0, n0, a1, n1, a2, n2, a3, n3;
+            unsigned long long slot = 0;
+            if (rlen == 0 || row[0] == '#') continue;
+            if (!got_hdr) { got_hdr = 1; continue; }
+            if (cols >= 4 && !tv_field(&it, 0, &a0, &n0) && !tv_field(&it, 1, &a1, &n1) &&
+                !tv_field(&it, 2, &a2, &n2) && !tv_field(&it, 3, &a3, &n3)) {
+                if (parse_u64_val(it.s + a0, n0, &slot) == 0 && slot < 64) {
+                    if (tx_same(it.s + a2, n2, "m1_core", 7) && tx_same(it.s + a3, n3, "frozen", 6)) {
+                        m1_mask |= (1ull << slot);
+                    }
+                    if (slot == 12 && tx_same(it.s + a1, n1, "spawn", 5) && tx_same(it.s + a3, n3, "draft", 5)) {
+                        spawn_draft = 1;
+                    }
+                }
+            }
+        }
+        why[0] = 0;
+        ml_ck(ts_validate_host_table((const char *)ht, (long)htn, why, 64) == 0 &&
+              m1_mask == 383ull && spawn_draft == 1,
+              "hoststub-slots-mask-383-and-spawn-draft");
+        mm_free(ht);
+    } else {
+        ml_ck(0, "hoststub-slots-mask-383-and-spawn-draft");
+    }
+
+    /* 2. B1 RELO pos semantics unified across T0.1 table and T0.3 table */
+    ml_ck(file_has_substr("tools/tape/facts/tapeslice-container.tsv", "operand LEB128 byte offset") &&
+          file_has_substr("tools/tape/facts/tapemode-abi.tsv", "copy_zero_relo_pre_entry") &&
+          file_has_substr("tools/tape/facts/tapemode-abi.tsv", "CODE/DATA/HOST RELO"),
+          "relo-operand-offset-and-pre-entry-order");
+
+    /* 3. B2 & B3 guest pointer unification, subtraction bounds, NUL gate, and M1 status=2/fault_reason=6 */
+    ml_ck(file_has_substr("tools/tape/facts/hoststub-slots.tsv", "Unified 64-bit real host pointers") &&
+          file_has_substr("tools/tape/facts/hoststub-slots.tsv", "status=2, fault_reason=6") &&
+          file_has_substr("tools/tape/facts/hoststub-slots.tsv", "NUL strictly before membase+memlimit") &&
+          file_has_substr("tools/tape/facts/tapemode-abi.tsv", "real_host_ptr") &&
+          file_has_substr("tools/tape/facts/tapemode-abi.tsv", "mask_383_before_dispatch") &&
+          file_has_substr("tools/tape/facts/tapemode-abi.tsv", "fault_reason=6"),
+          "guest-real-ptr-nul-and-m1-fault6-linked");
+
+    /* 4. B4 ts_check_linear_bounds overflow-safe alignment + BSS subtraction edge checks */
+    {
+        unsigned long long al = 0;
+        why[0] = 0;
+        ml_ck(ts_check_linear_bounds(0, 0, 0, &al, why, 64) == 0 && al == 0 &&
+              ts_check_linear_bounds(17, 40, 64, &al, why, 64) == 0 && al == 24 &&
+              ts_check_linear_bounds(17, 41, 64, &al, why, 64) != 0 &&
+              ts_check_linear_bounds(0xfffffffffffffffaull, 0, 0xffffffffffffffffull, &al, why, 64) != 0,
+              "linear-bounds-subtraction-edges");
+    }
+
+    /* 5. B5 72-opcode canonical tape-shape.tsv generation + optional asm .Lshape match */
+    if (load_tape_shapes(shapes, &nshapes) == 0 && nshapes == 72 &&
+        shapes[0] == 0x11 && shapes[37] == 0x00 && shapes[71] == 0x02) {
+        int asm_rc = verify_asm_lshape(shapes, &checked_asm);
+        ml_ck(asm_rc == 0, "tape-shape-72-opcodes-match");
+        sy_printf("TAPE_SHAPE_CHECK\topcodes=%d\tasm_lshape_verified=%d\n", nshapes, checked_asm);
+    } else {
+        ml_ck(0, "tape-shape-72-opcodes-match");
+    }
+
+    sy_printf("CHECK_TAPE_M0_LINKAGE\tpassed=%d\tfailed=%d\n", ml_pass, ml_fail);
+    return ml_fail ? 1 : 0;
+}
