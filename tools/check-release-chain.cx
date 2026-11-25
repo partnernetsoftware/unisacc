@@ -427,12 +427,45 @@ int main(int argc, char **argv) {
             if (sy_remove_all(m89)) return 2;
         }
 
-        /* Readback verification: if a later row in version-seq.tsv is already marked public, readback refuses */
+        /* Readback verification: maximum numeric published version wins regardless of row order;
+         * if a higher numeric version or malformed published version appears, readback refuses. */
+        const char *latest_first =
+            "slot\tversion\tclass\tstate\tnote\n"
+            "2\t0.0.99\tc\t\xe8\xbf\x9b\xe8\xa1\x8c\xe4\xb8\xad\tnow\n"
+            "3\t0.1.0\tc\t\xe8\xbf\x9b\xe8\xa1\x8c\xe4\xb8\xad\tunpublished\n"
+            "1\t0.0.98\tc\t\xe5\xb7\xb2\xe5\x85\xac\xe5\xbc\x80\told\n";
+        if (cx_write(vseq, latest_first, strlen(latest_first))) return 2;
+        r = actual(m1);
+        ck(r.rc == 0 && has(&r, "VERSION_SEQ_MARK\tUPDATED\tversion=0.0.99"),
+           "mark-version-seq-readback-maximum-before-older-row");
+        np_free(&r);
+
+        /* A numerically newer published version refuses even across a minor carry. */
         const char * disordered_vs = "slot\tversion\tclass\tstate\tnote\n1\t0.0.98\tc\t\xe5\xb7\xb2\xe5\x85\xac\xe5\xbc\x80\told\n2\t0.0.99\tc\t\xe8\xbf\x9b\xe8\xa1\x8c\xe4\xb8\xad\tnow\n3\t0.1.0\tc\t\xe5\xb7\xb2\xe5\x85\xac\xe5\xbc\x80\tlater\n";
         if (cx_write(vseq, disordered_vs, strlen(disordered_vs))) return 2;
         r = actual(m1);
         ck(r.rc == 2 && r.err && strstr(r.err, "REFUSE VERSION_SEQ_MARK") != 0 && strstr(r.err, "readback-verify-failed") != 0,
            "mark-version-seq-readback-not-last-public-refused");
+        np_free(&r);
+
+        const char *higher_first =
+            "slot\tversion\tclass\tstate\tnote\n"
+            "3\t0.0.100\tc\t\xe5\xb7\xb2\xe5\x85\xac\xe5\xbc\x80\tnewer\n"
+            "2\t0.0.99\tc\t\xe5\xb7\xb2\xe5\x85\xac\xe5\xbc\x80\tolder\n";
+        if (cx_write(vseq, higher_first, strlen(higher_first))) return 2;
+        r = actual(m1);
+        ck(r.rc == 2 && r.err && strstr(r.err, "readback-verify-failed version=0.0.99 last_public=0.0.100"),
+           "mark-version-seq-readback-newer-number-before-target-refused");
+        np_free(&r);
+
+        const char *bad_public =
+            "slot\tversion\tclass\tstate\tnote\n"
+            "1\t00.0.98\tc\t\xe5\xb7\xb2\xe5\x85\xac\xe5\xbc\x80\tmalformed\n"
+            "2\t0.0.99\tc\t\xe5\xb7\xb2\xe5\x85\xac\xe5\xbc\x80\ttarget\n";
+        if (cx_write(vseq, bad_public, strlen(bad_public))) return 2;
+        r = actual(m1);
+        ck(r.rc == 2 && r.err && strstr(r.err, "readback-verify-failed version=0.0.99 last_public=none"),
+           "mark-version-seq-readback-malformed-public-version-refused");
         np_free(&r);
 
         if (cx_write(vseq, seed_vs, strlen(seed_vs))) return 2;
@@ -442,6 +475,17 @@ int main(int argc, char **argv) {
         r = actual(m2);
         ck(r.rc == 2 && r.err && strstr(r.err, "REFUSE VERSION_SEQ_MARK") != 0, "mark-version-seq-missing-refused");
         np_free(&r);
+
+        const char *no_public =
+            "slot\tversion\tclass\tstate\tnote\n"
+            "3\t0.1.0\tc\t\xe8\xbf\x9b\xe8\xa1\x8c\xe4\xb8\xad\tunpublished\n";
+        if (cx_write(vseq, no_public, strlen(no_public))) return 2;
+        r = actual(m1);
+        rb = cx_read(vseq, &rn);
+        ck(r.rc == 2 && r.err && strstr(r.err, "REFUSE VERSION_SEQ_MARK version=0.0.99 hits=0") &&
+           rb && rn == strlen(no_public) && !memcmp(rb, no_public, rn),
+           "mark-version-seq-no-public-or-target-row-refused");
+        free(rb); np_free(&r);
         if (sy_remove_all(mrepo)) return 2;
     }
     /* (4c) R71 backup-evidence pre-gate: copies 7 chain+prerun artifacts to out-of-repo backup with sha256 manifest, and refuses execute (step 5) when missing or tampered */

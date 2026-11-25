@@ -41,6 +41,7 @@
  * rc 0 chain done or stopped before execute, 1 a step failed, 2 usage.
  * Check: tools/check-release-chain.cx. */
 #pragma unisa use cxlib.netpack
+#pragma unisa use cxlib.releaseseq
 #pragma unisa use sys.fs
 #pragma unisa use sys.proc
 #pragma unisa use sys.io
@@ -1001,13 +1002,12 @@ static int commit_version_seq_and_index(const char *repo, const char *ver, const
 }
 
 static int verify_version_seq_readback(const char *table, const char *ver, char *last_pub, size_t lcap) {
+    last_pub[0] = 0;
     size_t rn = 0;
     char *rb = cx_read(table, &rn);
     if (!rb) return 0;
     const char *pub = "\xe5\xb7\xb2\xe5\x85\xac\xe5\xbc\x80";
-    size_t pubn = 9, vn = strlen(ver), pos = 0;
-    int ver_pub = 0;
-    last_pub[0] = 0;
+    size_t pubn = 9, pos = 0;
     while (pos < rn) {
         size_t ls = pos;
         while (pos < rn && rb[pos] != '\n') pos++;
@@ -1024,15 +1024,21 @@ static int verify_version_seq_readback(const char *table, const char *ver, char 
         }
         if (nc >= 4 && ce[3] - cs[3] == pubn && !memcmp(rb + cs[3], pub, pubn)) {
             size_t vl = ce[1] - cs[1];
-            if (vl > 0 && vl < lcap) {
-                mm_copy(last_pub, lcap, rb + cs[1], vl);
-                last_pub[vl] = 0;
-            }
-            if (vl == vn && !memcmp(rb + cs[1], ver, vn)) ver_pub = 1;
+            char published_version[24];
+            if (!vl || vl >= sizeof published_version || vl >= lcap || memchr(rb + cs[1], 0, vl) ||
+                mm_copy(published_version, sizeof published_version, rb + cs[1], vl)) goto malformed;
+            published_version[vl] = 0;
+            if (!rs_version(published_version)) goto malformed;
+            if ((!last_pub[0] || rs_precedes(last_pub, published_version)) &&
+                mm_copy(last_pub, lcap, published_version, vl + 1)) goto malformed;
         }
     }
     free(rb);
-    return ver_pub && !strcmp(last_pub, ver);
+    return last_pub[0] && !strcmp(last_pub, ver);
+malformed:
+    last_pub[0] = 0;
+    free(rb);
+    return 0;
 }
 
 static int cmd_mark_version_seq(int argc, char **argv) {
