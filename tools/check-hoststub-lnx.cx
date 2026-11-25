@@ -117,7 +117,7 @@ int main(void) {
 
     /* 1. Non-frozen slot rejection (-38 -ENOSYS) */
     ck(call_disp(7, 0, 0, 0, 0, 0, 0) == -38 &&
-       call_disp(12, 0, 0, 0, 0, 0, 0) == -38 &&
+       call_disp(11, 0, 0, 0, 0, 0, 0) == -38 &&
        call_disp(99, 0, 0, 0, 0, 0, 0) == -38,
        "nonfrozen-slots-rejected-enosys");
 
@@ -210,6 +210,52 @@ int main(void) {
             wcode = WEXITSTATUS(wst);
         }
         ck(wcode == 42, "slot0-exit-42-in-child");
+    }
+
+    /* 7. Phase-2 5 slots: stat(9), lseek(10), spawn(12), sleep(19), isatty(36) */
+    {
+        unsigned long long plen = (unsigned long long)tx_len(probe_path, 4400);
+        mm_copy(raw, sizeof raw, probe_path, (size_t)plen + 1);
+        long long fd = call_disp(5, membase, HS_O_WRONLY | HS_O_CREAT | HS_O_TRUNC, 0600, 0, 0, 0);
+        mm_copy(raw + 256, 16, "0123456789", 10);
+        if (fd >= 0) call_disp(2, (unsigned long long)fd, membase + 256, 10, 0, 0, 0);
+
+        /* lseek(10): SEEK_END=2 -> 10, SEEK_SET=0 -> 0, bad whence -> -22, bad fd -> -9 */
+        long long pos_end = (fd >= 0) ? call_disp(10, (unsigned long long)fd, 0, 2, 0, 0, 0) : -1;
+        long long pos_set = (fd >= 0) ? call_disp(10, (unsigned long long)fd, 0, 0, 0, 0, 0) : -1;
+        ck(pos_end == 10 && pos_set == 0 &&
+           call_disp(10, (unsigned long long)fd, 0, 9, 0, 0, 0) == -22 &&
+           call_disp(10, 999999ULL, 0, 0, 0, 0, 0) == -9, "slot10-lseek-roundtrip-and-neg");
+
+        /* isatty(36): regular file -> -25 (-ENOTTY), bad fd -> -9 (-EBADF) */
+        ck(fd >= 0 && call_disp(36, (unsigned long long)fd, 0, 0, 0, 0, 0) == -25 &&
+           call_disp(36, 999999ULL, 0, 0, 0, 0, 0) == -9, "slot36-isatty-enotty-and-ebadf");
+        if (fd >= 0) call_disp(6, (unsigned long long)fd, 0, 0, 0, 0, 0);
+
+        /* stat(9): valid file -> size==10, bad ptr -> -14, missing file -> -2 */
+        long long st_rc = call_disp(9, membase, membase + 512, 0, 0, 0, 0);
+        long long st_sz = (long long)rd_u64(raw + 512);
+        mm_copy(raw + 1024, 32, "/nonexistent_hs_stat_probe", 27);
+        ck(st_rc == 0 && st_sz == 10 &&
+           call_disp(9, membase + 4096, membase + 512, 0, 0, 0, 0) == -14 &&
+           call_disp(9, membase + 1024, membase + 512, 0, 0, 0, 0) == -2, "slot9-stat-ok-efault-enoent");
+        sy_unlink(probe_path);
+
+        /* sleep(19): 1ms -> 0, bad ptr -> -14 */
+        unsigned long long *ts = (unsigned long long *)(raw + 640);
+        ts[0] = 0; ts[1] = 1000000ULL;
+        ck(call_disp(19, membase + 640, 0, 0, 0, 0, 0) == 0 &&
+           call_disp(19, membase + 4090, 0, 0, 0, 0, 0) == -14, "slot19-sleep-1ms-and-efault");
+
+        /* spawn(12): /bin/true -> pid>0 & exit 0, bad ptr -> -14 */
+        mm_copy(raw + 700, 16, "/bin/true", 10);
+        unsigned long long *avp = (unsigned long long *)(raw + 768);
+        avp[0] = membase + 700; avp[1] = 0;
+        long long sp_pid = call_disp(12, membase + 700, membase + 768, 0, 0, 0, 0);
+        int swst = 0;
+        if (sp_pid > 0) waitpid((pid_t)sp_pid, &swst, 0);
+        ck(sp_pid > 0 && WIFEXITED(swst) && WEXITSTATUS(swst) == 0 &&
+           call_disp(12, membase + 4096, 0, 0, 0, 0, 0) == -14, "slot12-spawn-true-and-efault");
     }
 
     sy_unlink(so_path);

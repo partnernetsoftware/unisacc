@@ -126,12 +126,6 @@ hoststub_lnx_x86_64_mmap_count:
 .type hoststub_lnx_x86_64,@function
 hoststub_lnx_x86_64:
     /* rdi=slot_id, rsi=r0, rdx=r1, rcx=r2, r8=r3, r9=r4, 8(%rsp)=r5 */
-    cmpq $8, %rdi
-    ja .Lnosys
-    movl $0x17f, %eax
-    btl %edi, %eax
-    jnc .Lnosys
-
     cmpl $0, %edi
     je .Lslot_exit
     cmpl $1, %edi
@@ -146,8 +140,19 @@ hoststub_lnx_x86_64:
     je .Lslot_open
     cmpl $6, %edi
     je .Lslot_close
-    /* slot == 8 */
-    jmp .Lslot_fstat
+    cmpl $8, %edi
+    je .Lslot_fstat
+    cmpl $9, %edi
+    je .Lslot_stat
+    cmpl $10, %edi
+    je .Lslot_lseek
+    cmpl $12, %edi
+    je .Lslot_spawn
+    cmpl $19, %edi
+    je .Lslot_sleep
+    cmpl $36, %edi
+    je .Lslot_isatty
+    jmp .Lnosys
 
 .Lnosys:
     movq $-38, %rax
@@ -357,6 +362,7 @@ hoststub_lnx_x86_64:
     syscall
     testq %rax, %rax
     js .Lfstat_done
+.Lfstat_fill:
     movq 152(%rsp), %r10        /* out ptr */
     /* 0: size (st_size @48) */
     movq 48(%rsp), %rax
@@ -406,6 +412,138 @@ hoststub_lnx_x86_64:
     xorl %eax, %eax
 .Lfstat_done:
     addq $160, %rsp
+    ret
+
+.Lslot_stat:
+    /* r0=path(%rsi), r1=out(%rdx), r2=flags(%rcx) */
+    testq $-2, %rcx
+    jnz .Leinval
+    pushq %rsi
+    pushq %rdx
+    pushq %rcx
+    movq %rsi, %rdi
+    call .Lchk_cstr
+    testq %rax, %rax
+    jnz .Lstat_bad3
+    movq 8(%rsp), %rdi
+    movl $64, %esi
+    call .Lchk_span
+    testq %rax, %rax
+    jnz .Lstat_bad3
+    popq %rcx                   /* flags */
+    popq %r10                   /* out ptr */
+    popq %rsi                   /* path */
+    pushq %r10
+    subq $152, %rsp
+    movq $-100, %rdi            /* AT_FDCWD */
+    movq %rsp, %rdx
+    xorl %r10d, %r10d
+    testl $1, %ecx
+    jz .Lstat_call
+    movl $0x100, %r10d          /* AT_SYMLINK_NOFOLLOW */
+.Lstat_call:
+    movl $262, %eax             /* sys_newfstatat */
+    syscall
+    testq %rax, %rax
+    js .Lfstat_done
+    jmp .Lfstat_fill
+.Lstat_bad3:
+    addq $24, %rsp
+    ret
+
+.Lslot_lseek:
+    /* r0=fd(%rsi), r1=off(%rdx), r2=whence(%rcx) */
+    cmpq $2, %rcx
+    ja .Leinval
+    movl %esi, %edi
+    movq %rdx, %rsi
+    movl %ecx, %edx
+    movl $8, %eax               /* sys_lseek */
+    syscall
+    ret
+
+.Lslot_spawn:
+    /* r0=path(%rsi), r1=argv(%rdx), r2=envp(%rcx) */
+    pushq %rsi
+    pushq %rdx
+    pushq %rcx
+    movq %rsi, %rdi
+    call .Lchk_cstr
+    testq %rax, %rax
+    jnz .Lstat_bad3
+    movq 8(%rsp), %rdi
+    testq %rdi, %rdi
+    jz .Lspawn_chk_env
+    movl $8, %esi
+    call .Lchk_span
+    testq %rax, %rax
+    jnz .Lstat_bad3
+.Lspawn_chk_env:
+    movq 0(%rsp), %rdi
+    testq %rdi, %rdi
+    jz .Lspawn_fork
+    movl $8, %esi
+    call .Lchk_span
+    testq %rax, %rax
+    jnz .Lstat_bad3
+.Lspawn_fork:
+    movl $57, %eax              /* sys_fork */
+    syscall
+    testq %rax, %rax
+    js .Lstat_bad3
+    jnz .Lspawn_parent
+    /* child */
+    popq %rdx                   /* envp */
+    popq %rsi                   /* argv */
+    popq %rdi                   /* path */
+    movl $59, %eax              /* sys_execve */
+    syscall
+    movl $127, %edi
+    movl $231, %eax             /* sys_exit_group */
+    syscall
+.Lspawn_parent:
+    addq $24, %rsp
+    ret
+
+.Lslot_sleep:
+    /* r0=req(%rsi), r1=rem(%rdx) */
+    pushq %rsi
+    pushq %rdx
+    movq %rsi, %rdi
+    movl $16, %esi
+    call .Lchk_span
+    testq %rax, %rax
+    jnz .Lsleep_bad2
+    movq 0(%rsp), %rdi
+    testq %rdi, %rdi
+    jz .Lsleep_call
+    movl $16, %esi
+    call .Lchk_span
+    testq %rax, %rax
+    jnz .Lsleep_bad2
+.Lsleep_call:
+    popq %rsi                   /* rem */
+    popq %rdi                   /* req */
+    movl $35, %eax              /* sys_nanosleep */
+    syscall
+    ret
+.Lsleep_bad2:
+    addq $16, %rsp
+    ret
+
+.Lslot_isatty:
+    /* r0=fd(%rsi) */
+    subq $72, %rsp
+    movl %esi, %edi
+    movl $0x5401, %esi          /* TCGETS */
+    movq %rsp, %rdx
+    movl $16, %eax              /* sys_ioctl */
+    syscall
+    addq $72, %rsp
+    testq %rax, %rax
+    jnz .Lisatty_ret
+    movq $1, %rax
+.Lisatty_ret:
     ret
 .size hoststub_lnx_x86_64,.-hoststub_lnx_x86_64
 
