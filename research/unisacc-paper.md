@@ -8,7 +8,7 @@
 
 ## 摘要
 
-unisacc 是 neural-network-based compiler：编译阶段由整数阈值网络与通用执行器运行，权重由 TSV 表 DSL 构造，不由训练得到。T1 是声明域上逐键相等（定义 2），不是样本拟合。决策网络实例是 18 个决策阶段。网络编译器实例是七个字节流阶段：preprocess (pp)、lex、parse、opt、prune、lowering、encode + image (enc)；parse2 是同合同的实现名，不另开阶段。域外键失败；不读 logits；拒绝不回退到表。N1 = N2 = N3 是五个具名目标（osx/arm64、lnx/arm64、lnx/x86-64、win/arm64、win/x86-64）上未签名连续代字节同一，不是语义自举。键身份：op-74 合计 8,509 键；op-87 标签合计 8,769 键；封口前不可互换。源身份 `910f1e0a` / `0.0.42` 不是密封发布测量。裁判台账为 `../archive/docs-2026-11/research/referee.tsv`。本文贡献是构造精确整数决策网络并以 T1 穷举核对；学习式训练对照不在本文，见预注册 A2。枚举证明网络 = 表，不证明表 = C。
+unisacc 是 neural-network-based compiler：编译阶段由整数阈值网络与通用执行器运行，权重由 TSV 表 DSL 构造，不由训练得到。T1 是声明域上逐键相等（定义 2），不是样本拟合。决策网络实例是 18 个决策阶段。网络编译器实例是七个字节流阶段：preprocess (pp)、lex、parse、opt、prune、lowering、encode + image (enc)；parse2 是同合同的实现名，不另开阶段。域外键失败；不读 logits；拒绝不回退到表。N1 = N2 = N3 是五个具名目标（osx/arm64、lnx/arm64、lnx/x86-64、win/arm64、win/x86-64）上未签名连续代字节同一，不是语义自举。键身份：op-74 合计 8,509 键；op-87 标签合计 8,769 键；封口前不可互换。源身份 `910f1e0a` / `0.0.42` 不是密封发布测量。裁判台账为 `d11b06f23693218:research/referee.tsv`。本文贡献是构造精确整数决策网络并以 T1 穷举核对；学习式训练对照不在本文，见预注册 A2。枚举证明网络 = 表，不证明表 = C。
 
 **关键词**：neural-network-based compiler；constructed weights；T1；byte-for-byte self-hosting；N1=N2=N3
 
@@ -42,9 +42,9 @@ $$
 
 对每个键一个隐藏单元的 one-hot 构造给出精确网络，宽度上界 $|K|$（Lean `naive_exact`）。出货决策阶段用立方体覆盖把隐藏层收成布尔合取、输出层收成整数投票（立方体覆盖；细节见 `research/paper-a-notes.md`）。notes 中的参数计数 796,490→71,828 不是本 tip 的新测。`decision_list_exact` 只覆盖全局单色的首次命中子情形，不证明出货网络。发布检查是声明域上的整数网络与严格 argmax，错或并列即拒绝。
 
-op-74 合计 8,509 键与 op-87 标签合计 8,769 键是两套身份，封口前不可互换。本 tip 活 `weights/gold` 十八阶段 `#field` 域积为 8,770（相对 `../archive/docs-2026-11/research/seal-remeasure-20261009.md` 的 8,769，差在 opinfo 72→73；`weights/gold/opinfo.tsv` 头为 73 keys）。隐藏单元合计 569，与 README stages 表及 `weights/built.json` 一致。8,770 不是 8,509，也不与标签 8,769 混写。combo 是 isel∪abi 的对照，不在出货路径上；下表合计含该行。
+op-74 合计 8,509 键与 op-87 标签合计 8,769 键是两套身份，封口前不可互换。本 tip 活 `weights/gold` 十八阶段 `#field` 域积为 8,770（相对 `d11b06f23693218:research/seal-remeasure-20261009.md` 的 8,769，差在 opinfo 72→73；`weights/gold/opinfo.tsv` 头为 73 keys）。隐藏单元合计 569，与 README stages 表及 `weights/built.json` 一致。8,770 不是 8,509，也不与标签 8,769 混写。combo 是 isel∪abi 的对照，不在出货路径上；下表合计含该行。
 
-下表由 `python3 -m unisa docs` 写入标记之间（`../archive/testing-c43-legacy/tests/docs.sh` 在不一致时失败）。
+下表由 `python3 -m unisa docs` 写入标记之间（`8d78fbc83015605:tests/docs.sh` 在不一致时失败）。
 
 <!-- stages-zh:begin -->
 | 阶段 | 键字段 × 词表大小 | 输出 | 键数 | 单元 | T1 |
@@ -94,7 +94,7 @@ tape：8 个 64 位寄存器与 `SHAPE` 中 71 种操作。执行器不含 C、t
 
 **决策网络实例。** 经典递归下降、lowering 与镜像写出在决策点 `ask`；无回退。**网络编译器实例。** 通用执行器跑上表七段；模型拒绝即报错。本 tip 无同身份规模或速度测量，本文不主张这些数字。
 
-阈值前缀求值与声明式返回不改变网络答案：同一网络、同一求和；网络—表检查仍覆盖包括返回在内的每个观察。宿主代码保留装载、`../archive/reference-c/src/tapelink.c`、`../archive/reference-c/src/asmtext.c`、`../archive/reference-c/src/fwdstub.c`。构建期 Python 属于可信基。
+阈值前缀求值与声明式返回不改变网络答案：同一网络、同一求和；网络—表检查仍覆盖包括返回在内的每个观察。宿主代码保留装载、`b902c8fbfb1366d:src/tapelink.c`、`b902c8fbfb1366d:src/asmtext.c`、`b902c8fbfb1366d:src/fwdstub.c`。构建期 Python 属于可信基。
 
 ## 5　自举、T1 与裁判
 
@@ -110,12 +110,12 @@ T1：每个立方体网络在声明域的每个键上按部署算术运行；错
 
 六目标折叠：机器模型只认 lowering 给出的（OS，调用号）。六份 (stdout, exit) 彼此一致并与 tape 参考 VM 一致。去掉 macOS 系统调用号的 class 位必须得到 4/6。本 tip 无原生/仿真矩阵，本文不填这张表。
 
-外部裁判只覆盖登记范围。台账 `../archive/docs-2026-11/research/referee.tsv`：8 个阶段有具名的外部裁判，6 个阶段只有实现间一致性，2 个阶段尚无直接裁判。因此 8/18 个阶段有覆盖范围明确的外部裁判。下表只列 external 行，是指针，不是全域 C 证明。
+外部裁判只覆盖登记范围。台账 `d11b06f23693218:research/referee.tsv`：8 个阶段有具名的外部裁判，6 个阶段只有实现间一致性，2 个阶段尚无直接裁判。因此 8/18 个阶段有覆盖范围明确的外部裁判。下表只列 external 行，是指针，不是全域 C 证明。
 
 | 裁判 | 核对 |
 |---|---|
-| 预处理 | `exec/pp/macrocheck.py`，`../archive/testing-c43-legacy/tests/ccparity.sh`，对 `cc -E -P` |
-| 解析 | `../archive/testing-c43-legacy/tests/warn.sh`，对 `cc -Wall` 的 (行, 类别) |
+| 预处理 | `exec/pp/macrocheck.py`，`8d78fbc83015605:tests/ccparity.sh`，对 `cc -E -P` |
+| 解析 | `8d78fbc83015605:tests/warn.sh`，对 `cc -Wall` 的 (行, 类别) |
 | 类型 | `_Generic`；4,275 键中的 1,400 |
 | ABI | 宿主系统调用头；仅实际宿主 OS/架构 |
 | 优先级 | 324 对；291 可区分且一致，33 不可区分 |
@@ -158,7 +158,7 @@ T1：每个立方体网络在声明域的每个键上按部署算术运行；错
 |---|---|
 | 源树 | main `910f1e0a`；`src/version.h` 为 `0.0.42`。不是公开 Latest，也不是密封发布测量。 |
 
-指针：`../archive/docs-2026-11/research/referee.tsv`，`research/formalization-roadmap.md`，`research/lean/`，`research/prior-art.md`，`research/paper-a-notes.md`。
+指针：`d11b06f23693218:research/referee.tsv`，`research/formalization-roadmap.md`，`research/lean/`，`research/prior-art.md`，`research/paper-a-notes.md`。
 
 ```bash
 python3 -m unisa build-weights

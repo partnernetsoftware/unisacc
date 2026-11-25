@@ -57,7 +57,7 @@ package (P4)                          2904461   32.2%  P 4; 40 models, 1823 stag
 
 ### 2. 可行性与风险评估
 1. **自解压桩实现复杂度(中等, 可控)**:
-   - 现有 `../ext/textx/deflate.cx` 已有纯 `.cx` 解压实现, 可编译出一个极小 `win/x86_64` 桩 PE(仅需 `CreateFileA`/`ReadFile`/`WriteFile`/`CreateProcessA`, 无外部 DLL 依赖), 将自身 gzip 切片解压至 `%LOCALAPPDATA%\unisacc\unisacc-<key>.exe` 后拉起并透传命令行与退出码, 复用与 Unix 相同的 `UNISA_CONTAINER` 环境变量机制。
+   - 现有 `fab2451e91822a9:cx/text/deflate.cx` 已有纯 `.cx` 解压实现, 可编译出一个极小 `win/x86_64` 桩 PE(仅需 `CreateFileA`/`ReadFile`/`WriteFile`/`CreateProcessA`, 无外部 DLL 依赖), 将自身 gzip 切片解压至 `%LOCALAPPDATA%\unisacc\unisacc-<key>.exe` 后拉起并透传命令行与退出码, 复用与 Unix 相同的 `UNISA_CONTAINER` 环境变量机制。
 2. **Windows 启动延迟(低风险, 冷/热分离)**:
    - 首次冷启动解压 `3.4 MiB` 约 20-40 ms, 命中缓存后仅增加一次极小桩进程 `CreateProcess` 开销(~5-15 ms), 对编译器场景可接受; 但须注意管道/句柄继承、Ctrl-C 信号与父子进程退出码透传。
 3. **杀软与 SmartScreen 误报(高风险, 最大阻力)**:

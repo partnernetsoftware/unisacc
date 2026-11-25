@@ -22,7 +22,7 @@
 
 - 批 A(三元回扫根修): 修复 `exec/parse2/{return-result,return-stack,errors-template}.tsv` 三元表达式回扫类型丢失与浮点/字符串分支问题。
 - 批 B(cx 后缀判据放宽与单段名诊断): 放宽无 `.cx` 后缀可执行脚本运行判据(`cxu_iscxunit` 与驱动 6 处), 补全单段模块名诊断文案并同步三源等价表 `build/cx0-three-source-diff.tsv`。
-- 批 C(A1a 内建核心 U0-U3): 实现未实现 `__builtin_*` 具名拒绝(U0)、`__builtin_{clz,ctz,popcount,parity,ffs}[l|ll]` 常量折叠与运行期展开(U1, 含 `b08` 常量折叠与 `b15` 取址拒绝)、`__builtin_bswap{16,32,64}`(U2)、`__builtin_unreachable` 与 `__builtin_trap`(U3, 含 `ACV.voidsrc` 禁止 `void` 当值); 全部裸立即数收敛至事实表 `exec/facts/bi-const.tsv`。注: 按 `../archive/plans-pre090/v0.0.89.md` 已定口径, `__builtin_trap` 采取零地址写触发 `SIGSEGV`(rc 139, 非 `SIGILL` rc 132), `tests/check-a1a-u3.cx` 判据已同步对齐。
+- 批 C(A1a 内建核心 U0-U3): 实现未实现 `__builtin_*` 具名拒绝(U0)、`__builtin_{clz,ctz,popcount,parity,ffs}[l|ll]` 常量折叠与运行期展开(U1, 含 `b08` 常量折叠与 `b15` 取址拒绝)、`__builtin_bswap{16,32,64}`(U2)、`__builtin_unreachable` 与 `__builtin_trap`(U3, 含 `ACV.voidsrc` 禁止 `void` 当值); 全部裸立即数收敛至事实表 `exec/facts/bi-const.tsv`。注: 按 `b37e4e38374c947:plans/v0.0.89.md` 已定口径, `__builtin_trap` 采取零地址写触发 `SIGSEGV`(rc 139, 非 `SIGILL` rc 132), `tests/check-a1a-u3.cx` 判据已同步对齐。
 - 批 D(`ds-attr-leak`): 修复 `src/drivestream.cx` 流属性泄漏。
 - 批 E(`safedel-tmpshadow`): 修复 `include/unisa_safedel.h` 在 `$TMPDIR` 根目录存在外部瞬时 `.git` 时 `cx_rmtree` 误判拒删问题, 同步 4 项派生物(`include/cx-flat.h`、`exec/facts/pp-autoinc-gen.tsv`、`build/lane-inputs.tsv`、`build/libc-decls.tsv`)。
 

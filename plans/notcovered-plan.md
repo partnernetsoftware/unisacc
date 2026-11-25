@@ -37,7 +37,7 @@
 - 分类由 gen.cx 按所在网与文案关键词机械判定,是初分,边界行(例如 `width`、`type`、`declaration` 这类一个词的文案)需在第 0 期逐行复核;kind 列同理。
 - "同类拒绝文案"不止 "not covered"。实测还有三族未带该前缀的拒绝:`reject: multiple definitions of this function`、`more than 32 uses in one unit`(驱动,候选已放到 48)、`field overflow`(core_field_fill)。本次未普查这三族,列为第 0 期补查项。
 - `exec/facts/k2-errors.tsv` 把 11 条 "not covered: expected X" 之类改写成参考诊断文本(例如 `expected ')'`),所以用户看到的 `expected ')'`、`this is not the start of an expression`、`unknown identifier` 背后也可能是覆盖缺口而不是用户笔误(y05、y07、y08 即是)。
-- 现成工具核对:`tools/tape-gap.cx` 只查某目标 lowering 缺口(输入 TAPE 与 TARGET),不覆盖前端拒绝;`../tests/manifests/tool-index.tsv` 里没有任何枚举拒绝文案的工具,本普查不重复已有能力。
+- 现成工具核对:`tools/tape-gap.cx` 只查某目标 lowering 缺口(输入 TAPE 与 TARGET),不覆盖前端拒绝;`aae56513fbb4b64:build/tool-index.tsv` 里没有任何枚举拒绝文案的工具,本普查不重复已有能力。
 
 硬上限(kind=cap,18 条,按主调度要求单列为缺口类):单元数 128(units 网 `CMPI unit 128`,曾由 64 放到 128,提交 1c66a90b3d、9c8c45f366)、每单元 use 32(候选 48,驱动文案)、调用实参多于 6 个(文案仍在,8 个整型实参实跑已通过,r14)、host 前推调用数 8192、#include 拼接 4000、头文件续行 4096、#error 文本 283 字节、结构体编号容量、结构体成员容量、shape 描述符容量、enum 描述符池、函数签名池、递归签名等价上限、签名图等价预算、setjmp 临时深度与嵌套深度、对象重定位容量、整型常量超 int、有序源布局事实上限。每条的实际数值与是否可达须在第 0 期逐条实测后填表。
 

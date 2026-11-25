@@ -45,8 +45,8 @@ TBD 批:PASS TBD、FAIL TBD、UNKNOWN TBD、INVALID TBD (待 S2 整链、S3 严�
   - (3) 单元 `113` 例 `unit-e2-compare` 对拍 (`diff=0`): `TBD` (分支开发期实测待绑定冻结候选回执 `release/evidence/0.0.95/unit-e2-compare.txt`);
   - (4) 阳性对照(证明对拍比较器可检出真实差异, 由 `omp-go` 补齐中): `TBD` (`release/evidence/0.0.95/positive-control.txt`)。
 - **步数门与 `e2` 推理毫秒门(提交后树 `40df7913c5` 参考, 冻结候选须重测入回执)**:
-  - `examples/hello.c` (`-run`, `HELLO_OBJ_CMP=IDENTICAL`): `e2` 步数 `1200813 -> 484709` (`-59.6%`), `e2` 推理耗时 `56.0 ms -> 42.7 ms` (见 `../archive/plans-skipped/v0.0.95.md` 第七节; 冻结候选实测回执 `TBD`);
-  - `tools/phase-budget.cx` (`-c`, `PB_OBJ_CMP=IDENTICAL`): `e2` 步数 `3960979 -> 2478603` (`-37.4%`), `e2` 推理耗时 `172.4 ms -> 123.7 ms` (见 `../archive/plans-skipped/v0.0.95.md` 第七节; 冻结候选实测回执 `TBD`)。
+  - `examples/hello.c` (`-run`, `HELLO_OBJ_CMP=IDENTICAL`): `e2` 步数 `1200813 -> 484709` (`-59.6%`), `e2` 推理耗时 `56.0 ms -> 42.7 ms` (见 `15cf2019d7611ff:plans/v0.0.95.md` 第七节; 冻结候选实测回执 `TBD`);
+  - `tools/phase-budget.cx` (`-c`, `PB_OBJ_CMP=IDENTICAL`): `e2` 步数 `3960979 -> 2478603` (`-37.4%`), `e2` 推理耗时 `172.4 ms -> 123.7 ms` (见 `15cf2019d7611ff:plans/v0.0.95.md` 第七节; 冻结候选实测回执 `TBD`)。
 - **`ci-early` 原生样本**: `TBD` (`release/evidence/0.0.95/ci-early.txt`, 未拿到样本前不得声称 osx/win 经实机验证)。
 - **严格预跑 (`PRERUN_MERGE`)**: `TBD` (`release/evidence/v0.0.95-strict-TBD.tsv`, `strict-final.tsv sha256=TBD`)。
   - `expected-fail`: `TBD` (逐条列出 `release/evidence/0.0.95/expected-fail.tsv` 全部行; 0 项须显式写 0 项)。

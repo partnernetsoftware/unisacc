@@ -44,7 +44,7 @@
 ## 负控(改 cwd 的 evidence 源,不是 layout 副本)
 
 release-exec 第 4 步读 evidence 的顺序:若 cwd 有 `release/evidence/<ver>/evidence-rows.tsv`,先同步到
-`../../release/evidence.tsv`(release-exec.cx:1297-1311);否则用 cwd 的 `release/evidence.tsv`(:1527-1528)。
+`outdir/evidence.tsv`(release-exec.cx:1297-1311);否则用 cwd 的 `release/evidence.tsv`(:1527-1528)。
 `--layout` 下的副本从不参与。106 树无 evidence 目录,所以直接改 cwd 的 evidence 源:
 
     cp -a $T/tree $T/tree-neg

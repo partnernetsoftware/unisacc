@@ -71,7 +71,7 @@ e01-exec-steps.md、e01-closure.md。源码行号均指 d750ad123c 的 tools/ �
 ### B2 负控改错文件:改 layout 副本无效
 
 - 源码:第 4 步先 sync_evidence_rows (release-exec.cx:1297-1311):若 cwd 有
-  `release/evidence/<ver>/evidence-rows.tsv`,把它写到 `../../release/evidence.tsv`(--dry);否则退回 cwd 的
+  `release/evidence/<ver>/evidence-rows.tsv`,把它写到 `outdir/evidence.tsv`(--dry);否则退回 cwd 的
   `release/evidence.tsv`(:1527-1528)。检查只读这两个之一。
 - 页把 `$T/layout-neg/release/evidence.tsv` 改一行再跑,--layout 的这份副本从不被 release-exec 读取,负控不会红。
   应改 cwd 的 `release/evidence/<ver>/evidence-rows.tsv`(或先造 `--out DIR` 下的 evidence.tsv 并传 --out);

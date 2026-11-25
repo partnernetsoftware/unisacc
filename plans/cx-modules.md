@@ -44,7 +44,7 @@
 CX2/CX3 设计已采纳（cc 2026-10-23）：`research/cx2-module-design.md`——`#pragma unisa use NAME` 只在使用者所在目录解析（点号=子目录，`std.*` 保留），
 CXIF 由单趟扫描导出非 static 函数原型与类型、按哈希写临时头并作为该单元的强制 include（`src/cxmod.c` 共享），`-cx-plan`/`-cx-interface` 两个旗标驱动系统 cc 对拍；
 CX3 分三步：`.cx` 中 `#include` 拒绝 → `extern` 拒绝（prelude 接管 `environ`，以单文件规则封住「未定义外部对象读零」）→ 调用未声明函数拒绝（设计期实测：跨单元隐式声明调用目前被接受）。
-CX2a = 共享 `src/cxmod.c` + 两端前端接线 + 两旗标 + `../archive/testing-c43-legacy/tests/flownetw0.cx` 改 `use`，闸 11 负例 + 9 正例（含 `.c` 输出逐字节不变）。
+CX2a = 共享 `src/cxmod.c` + 两端前端接线 + 两旗标 + `8d78fbc83015605:tests/flownetw0.cx` 改 `use`，闸 11 负例 + 9 正例（含 `.c` 输出逐字节不变）。
 
 顺序：CX0 → CX2a → CX1 → CX2 迁移 → CX3；CX2b 包清单与 CX2c 的 v0 文法检查都不动产品字节；CX4 的 lint 棘轮可与 CX1 起并行。CX1 起的产品改动与 0.0.43 收口（ruling R10）冲突时，归 0.0.44；CX0、CX2b、CX2c 与 CX4 闸本身不动字节，0.0.43 内即可落。
 
@@ -101,7 +101,7 @@ int main(void) { char *s = strdup("ab"); return s && s[0]=='a' ? 3 : 1; }
 
 ## 136. 2026-10-30 入口 -O2 冷构造超 55 秒
 
-已装产品的驱动按 `../archive/reference-py/exec/c/buildcompiler.sh` 的 `$via -O2` 构造。本入口此前是 `sh ./unisacc.com -o /tmp/grk-cx-line/entry src/unisacc.cx`，没有 `-O`，级别是 0。`tests/cxstd_main.cx` 的 `-S`、`-run` 和六个 `-o` 在 12 秒 bound 下被记 `TIMEOUT`：产品 `-S` 墙钟 69241699 ns 退出 0，新侧退出 142、stdout 0。
+已装产品的驱动按 `9617a8b1cf7c2c5:exec/c/buildcompiler.sh` 的 `$via -O2` 构造。本入口此前是 `sh ./unisacc.com -o /tmp/grk-cx-line/entry src/unisacc.cx`，没有 `-O`，级别是 0。`tests/cxstd_main.cx` 的 `-S`、`-run` 和六个 `-o` 在 12 秒 bound 下被记 `TIMEOUT`：产品 `-S` 墙钟 69241699 ns 退出 0，新侧退出 142、stdout 0。
 
 整只 `-O2 -o /tmp/grk-cx-line/entry src/unisacc.cx` 用 `tools/bound 55`。退出 142，stdout 0，stderr 0，墙钟 55069059812 ns。入口文件仍是 1122568 字节，没有临时产物留下。这是构造红项。
 
@@ -109,7 +109,7 @@ int main(void) { char *s = strdup("ab"); return s && s[0]=='a' ? 3 : 1; }
 
 ## 137. 2026-10-30 tapebin 容器头收进 tapegate
 
-`../archive/reference-c/src/tapebin.c` 里容器头、节目录、填充和名字池边界的纯判断改走已有的 `tapegate`。新函数是 `tb2_magic`、`tb2_fixed`、`tb2_nsec`、`tb2_origin`、`tb2_align`、`tb2_row`、`tb2_zeros`、`tb2_extra`、`tb2_end`、`tb2_name_byte`、`tb2_name_empty`、`tb2_span`。没有新模块，没有新的 `use`，构造表没有新增参数。哈希、记录正文和读文件仍在 C。`sh ./unisacc.com ../archive/reference-c/tools/check-compiler-units.cx` 两次退出 0，两次 stdout 相同，两次 stderr 相同，都打印 `CHECK_COMPILER_UNITS failed=0`。这次检查直接调用这些函数，没有编译 `tapebin.c`。这不是产品安装、六目标或 `--all`。整只 `-O2` 入口冷构造仍是构造红项。整棵重构还没完成。
+`b902c8fbfb1366d:src/tapebin.c` 里容器头、节目录、填充和名字池边界的纯判断改走已有的 `tapegate`。新函数是 `tb2_magic`、`tb2_fixed`、`tb2_nsec`、`tb2_origin`、`tb2_align`、`tb2_row`、`tb2_zeros`、`tb2_extra`、`tb2_end`、`tb2_name_byte`、`tb2_name_empty`、`tb2_span`。没有新模块，没有新的 `use`，构造表没有新增参数。哈希、记录正文和读文件仍在 C。`sh ./unisacc.com 00366e48ceaf685:tools/check-compiler-units.cx` 两次退出 0，两次 stdout 相同，两次 stderr 相同，都打印 `CHECK_COMPILER_UNITS failed=0`。这次检查直接调用这些函数，没有编译 `tapebin.c`。这不是产品安装、六目标或 `--all`。整只 `-O2` 入口冷构造仍是构造红项。整棵重构还没完成。
 
 ```mermaid
 flowchart TD
@@ -194,7 +194,7 @@ flowchart TD
 
 ## 142. 2026-10-30 入口按两只 -O2 对象构造
 
-整只 `src/unisacc.cx` 的 `-O2 -funit` 是 54.5 秒，再链接缺 `clock_gettime`。现在拆开。`src/entryexec.cx` 使用 `executor` 和 `packmodel`。`src/drive.cx` 和 `src/stages.cx` 不再 `use` 这两份，改成函数里声明后按名字调用。宿主符号放在 `src/hostnative.cx`，只链进这只入口。`../ext/sysx/process_group.cx` 没有改，仍只有 `setpgid`。`hostnative` 定义 `clock_gettime`、`mmap`、`mprotect`、`munmap`。`dlopen`、`dlsym`、`dlclose`、`dlerror` 不能在对象文件里写成 host FFI 槽，所以调用时从已经映射的 libc 符号表里找。
+整只 `src/unisacc.cx` 的 `-O2 -funit` 是 54.5 秒，再链接缺 `clock_gettime`。现在拆开。`src/entryexec.cx` 使用 `executor` 和 `packmodel`。`src/drive.cx` 和 `src/stages.cx` 不再 `use` 这两份，改成函数里声明后按名字调用。宿主符号放在 `src/hostnative.cx`，只链进这只入口。`3aae1b76974cd68:cx/runtime/process_group.cx` 没有改，仍只有 `setpgid`。`hostnative` 定义 `clock_gettime`、`mmap`、`mprotect`、`munmap`。`dlopen`、`dlsym`、`dlclose`、`dlerror` 不能在对象文件里写成 host FFI 槽，所以调用时从已经映射的 libc 符号表里找。
 
 三只都是 `sh ./unisacc.com -O2 -c -b lnx/x86_64 -funit`，退出 0，stdout 0，stderr 0。执行器对象 1254152 字节，墙钟 16698966748 ns。驱动对象 3998448 字节，墙钟 38656618611 ns。`hostnative` 对象 68888 字节，墙钟 2532400590 ns。
 
@@ -495,7 +495,7 @@ flowchart TD
 
 ## 159. 2026-10-30 入口改走汇编核心
 
-`src/executor.cx` 改为 `#pragma unisa use core.kernel`。`core_run` 走包里的 UNIKERN1 汇编核心，签名仍是 `cx/core/execute.cx` 那份。`ex_touch` 只留 `core_run_take` 和 `core_run_budget`，所以 `transition.o` 还在。`alu`、`stack`、`output`、`sparse`、`bytes` 只给旧的 `core.execute` 用，已从 `tools/entry-build.cx` 拿掉。表里本来没有单独的 `execute`、`coregate`、`memory` 对象。对象数从 38 收到 33。`cx/core/execute.cx` 和 `../cx/sys/kernel.cx` 正文没改。
+`src/executor.cx` 改为 `#pragma unisa use core.kernel`。`core_run` 走包里的 UNIKERN1 汇编核心，签名仍是 `cx/core/execute.cx` 那份。`ex_touch` 只留 `core_run_take` 和 `core_run_budget`，所以 `transition.o` 还在。`alu`、`stack`、`output`、`sparse`、`bytes` 只给旧的 `core.execute` 用，已从 `tools/entry-build.cx` 拿掉。表里本来没有单独的 `execute`、`coregate`、`memory` 对象。对象数从 38 收到 33。`cx/core/execute.cx` 和 `3aae1b76974cd68:cx/core/kernel.cx` 正文没改。
 
 第一代是 `out/grk-entry-build-12`。构造器是仓库根 `unisacc.com`，sha256 `79fb84e65a10b55ce40be5f68746748acbd38f441944046c0a5dfa5718bc0c32`，3035300 字节，via=sh。33 只对象都成功。`executor.o` sha256 `7e43832ce6f40fd34bd6c22bd1e812ddef09f843d1b588b4d175d4db9e3216bc`，308632 字节，ns=2646934991，最慢 e4 推理 ns=1001281213。`entry.elf` sha256 `8ec81c4d2f3746e662610ff8dd31ea2dec4fa3165dd99b748978b05251fb0f1f`，995040 字节，ns=5492598339，最慢 lower 推理 ns=2084739749。package_offset 1399280，package_bytes 1636020。候选 sha256 `11b7a23ad760970590a28350da189f8391cde3649c8053f936b3756b7715747d`，2631060 字节。拼接 ns=16494322，slow_kind=UNMEASURED。
 

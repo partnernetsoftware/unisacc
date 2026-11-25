@@ -25,7 +25,7 @@
 | **A 角色** | 现有 ujs construct 臂上的表/种子材料复用，非终态「只在 ujs 里改到全表驱动」路线。 |
 | **B 角色** | 新开 m4，按 unisacc「流×网」从零构造编译；ujs **M3 仅产品旁路**。 |
 | **C 角色** | 与 B 合并口径（更干净切法 = B+C 叙事），非并行第三条产品线。 |
-| **最小合同** | [`m4-flow-net-contract-draft.md`](../archive/docs-2026-11/research/m4-flow-net-contract-draft.md)（ujs 开发起草；真源在 `research/`）。 |
+| **最小合同** | [`d11b06f23693218:m4-flow-net-contract-draft.md`](m4-flow-net-contract-draft.md)（ujs 开发起草；真源在 `research/`）。 |
 | **实现落点** | 同仓 **`m4/`** 优先（暂定名；可辩证）。 |
 
 **论文 ↔ ujs 开发对齐**：Paper B 主图 **gold → IntNet → flow → bytes**；口诀 **4 stream × 10 nets → `\0asm`**（方法证明弧）。**现状出货**口诀 **1 M3 × 10 nets → `\0asm`** 仅脚注旁路，**≠ 主张中心**（见合同 §2）。
@@ -38,6 +38,6 @@
 
 ## 6. 下一步
 
-1. **ujs 开发**：按 [`m4-flow-net-contract-draft.md`](../archive/docs-2026-11/research/m4-flow-net-contract-draft.md) 在 **`m4/`** 落地第一刀（acc exact + 一条源 → `\0asm`）；合同变更回写该文件与本卡。
+1. **ujs 开发**：按 [`d11b06f23693218:m4-flow-net-contract-draft.md`](m4-flow-net-contract-draft.md) 在 **`m4/`** 落地第一刀（acc exact + 一条源 → `\0asm`）；合同变更回写该文件与本卡。
 2. **论文撰写员**：已做 `ujs-paper.md` **主张中心最小翻转**（摘要/§2/§4/Appendix C·D）；全篇重写仍另裁。
 3. 执行卡点与 §5 约束照旧；路径或暂定名变更须回写本卡。

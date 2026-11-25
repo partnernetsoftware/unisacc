@@ -48,7 +48,7 @@
   - `tools/lane-inputs-gen.cx` 增加 `build/core-closure.tsv` 全部真实单元必须在 SID 中的硬断言, 并使 `ext/` 下所有非 SID 常规文件归 `lane B ext-non-sid`;
   - 新增并登记守门批次 `ident-v3`(`tools/check-ident-v3.cx`, 先红 `15/21` -> 转绿 `21/21`, 证据已入仓(其后已归档)), 独立双层包 oracle `tests/identity.cx` 同步升级(`303/303 PASS`)。
 - Z5 层次整理收尾:
-  - 删除 `cx/text/{build,deflate,json,num}.cx` 4 条类甲反向软链与 `cx/workspace/{mem,sys}`, 将 `../ext/stream/rw.cx`、`cx/path/path.cx`、`cx/os/{osx,utc}.cx`、`cx/workspace/*` 迁入 `ext/`(`build/product-links.tsv` 类甲软链清零: `total=18 class_a=0 class_b=18`), 并在 `7be3cc5d4b` 修正 `ext/fsx/path`、`tests/workspace`、`tools/workspace` 3 处目录软链;
+  - 删除 `cx/text/{build,deflate,json,num}.cx` 4 条类甲反向软链与 `cx/workspace/{mem,sys}`, 将 `fab2451e91822a9:cx/stream/rw.cx`、`cx/path/path.cx`、`cx/os/{osx,utc}.cx`、`cx/workspace/*` 迁入 `ext/`(`build/product-links.tsv` 类甲软链清零: `total=18 class_a=0 class_b=18`), 并在 `7be3cc5d4b` 修正 `ext/fsx/path`、`tests/workspace`、`tools/workspace` 3 处目录软链;
   - `cxroot.tsv` 更新模块映射并保留 `text.{build,deflate,json,num}` 兼容映射供 `apps/csih` 28 个文件过渡;
   - `ext/path/path.cx` 改用 `sy_os_name()` 消除 `#ifdef _WIN32`, `ext/os/{osx,utc}.cx` 与 `ext/path/path.cx` 去除无用 `#pragma unisa dock`。
 - B3 收回无用 `dock` 授权与 `ext-dock-exceptions.tsv` 清零:

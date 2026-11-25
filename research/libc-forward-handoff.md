@@ -2,7 +2,7 @@
 
 状态：**holder 纪要，不是设计、不是测量。** 未跑任何命令、未改代码。
 本文件只记录一件事：项目所有者对 libc 路线的裁定，与请 cc-unisacc 接手安排。
-既有的诊断与方案在 [libc-unify-design.md](../archive/docs-2026-11/research/libc-unify-design.md)（design only），
+既有的诊断与方案在 [d11b06f23693218:libc-unify-design.md](libc-unify-design.md)（design only），
 本纪要与之不重复，只做"来龙去脉 + 裁定 + 移交"三件事。
 
 ## 1. 来龙去脉（一句话版）
@@ -30,7 +30,7 @@
 probe 对 reference 逐字节相等才落地，否则保持 named refusal）：
 
 - 平台拆分是否成立：macOS 转发（纯收缩，Mach-O writer 已有
-  `LC_LOAD_DYLIB` 与 dl* 四个 eager bind，见 `../archive/reference-py/unisa/image/macho.py` 注释）、
+  `LC_LOAD_DYLIB` 与 dl* 四个 eager bind，见 `5e912b23de9c7d5:unisa/image/macho.py` 注释）、
   Windows 转发 Win32 + 自带 fd 表（不能省 fd 表）、Linux 停 syscall、
   stdio/string/math 保留自研的理由是否仍然成立。
 - step 2（macOS 文件 I/O + 时间转发 libSystem）是否可落地、改动边界在哪；
@@ -45,7 +45,7 @@ probe 对 reference 逐字节相等才落地，否则保持 named refusal）：
 
 ## 4. 由本会话已核实、可供复核的落点（供 cc-unisacc 取用，非结论）
 
-- 每个原生映像里，通用执行核（`../archive/reference-c/exec/c/core.c`）本身很小；`__text` 的大头
+- 每个原生映像里，通用执行核（`b902c8fbfb1366d:exec/c/core.c`）本身很小；`__text` 的大头
   是随带库按 `-O2` 整份编入、且六目标近似重复。字节归因口径见
   `prd.md` §3.14 生成区，不再此处重复。
 - Mach-O 产出物带 `LC_LOAD_DYLIB → /usr/lib/libSystem.B.dylib`，当前
