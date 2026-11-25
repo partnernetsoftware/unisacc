@@ -106,6 +106,7 @@ G2预算夹具的成功行遵循 `tests/run-batch.cx` 标记合同：`CHECK_G2_B
 - `tools/gen-header-idents.cx -- --write|--check|--count`:生成与核对 `build/header-idents.tsv`;检查 `tools/check-gen-header-idents.cx`(批次 header-idents)。
 - `tools/diag-census.cx`:前端诊断普查(S0),统计 s9 静默接受的 17 类候选违例;`--self-test`,检查 `tools/check-diag-census.cx`(批次 diag-census)。
 - `tools/release-members.cx -- DIR NEW_MANIFEST APE OSX_ARM OSX_X64 CACHE_ARM CACHE_X64`:生成与核对无 header 五角色签名交接清单(`--check DIR MANIFEST`);检查 `tools/check-release-members.cx`,只证明字节与结构,不认证签名或最终候选资格。
+- `tools/tapepack.cx -- INPUT.s -o OUT.tapeslice [--no-dce]`(`--check INPUT.s SLICE.tapeslice [--no-dce]`):将 `-S` 文本 tape 确定性打包为 UTAPEBIN minor=3 六段 `.tapeslice` 容器并做往返校验;检查 `tools/check-tapepack.cx`(批次 tapepack)。
 
 
 #### 2.1 日常（运行、改写、查询）

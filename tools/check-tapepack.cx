@@ -1,0 +1,850 @@
+/* tools/check-tapepack.cx -- deterministic 18-group verification suite for tools/tapepack.cx.
+ *
+ * Covers:
+ *   1. pack-and-check-dce (non-empty RELO positive roundtrip + tl_dce pruning)
+ *   2. determinism-identical-sha256 (two independent packs match bit-for-bit)
+ *   3. pack-no-dce-and-cross-reject (--no-dce retains dead symbols; cross --check rejects)
+ *   4. mutate-ident-rejected (flipping 1 bit in ident -> ident-mismatch)
+ *   5. mutate-code-resealed-rejected (mutating CODE + re-sealing ident -> roundtrip-insn-mismatch)
+ *   6. mutate-relo-rsv-resealed-rejected (setting RELO rsv nonzero + re-sealing -> relo-rsv-nonzero)
+ *   7. mutate-host-name-resealed-rejected (mutating HOST slot name + re-sealing -> host-slot-mismatch)
+ *   8. mutate-syms-name-off-oob-resealed-rejected (SYMS name_off >= data_len -> syms-name-oob)
+ *   9. mutate-syms-unterminated-resealed-rejected (erase NUL terminator in DATA -> syms-name-unterminated)
+ *  10. mutate-relo-pos-oob-resealed-rejected (RELO pos+width > code_len and pos == 0 -> relo-pos-oob)
+ *  11. mutate-relo-width-invalid-resealed-rejected (RELO width 0, 11 -> relo-bad-width; wrong width -> relo-insn-mismatch)
+ *  12. full-72-opcode-and-nonempty-relo-roundtrip (all 72 ts_names opcodes + non-empty RELO + determinism)
+ *  13. local-label-forward-and-backward-branch-offsets (.Lloop=8 backward & .Ldone=18 forward exact ULEB + --check)
+ *  14. unresolved-symbol-rejected (jump .Lundef -> TAPEPACK_REFUSE unresolved-symbol .Lundef line=...)
+ *  15. duplicate-local-label-rejected (two .Ldup: in same fn -> TAPEPACK_REFUSE duplicate-label .Ldup line=...)
+ *  16. mutate-branch-target-mid-insn-resealed-rejected (target_off=19 mid-insn + re-seal -> branch-target-mid-insn)
+ *  17. cross-function-local-label-rejected (foo defines .Lonly_in_foo:, main jumps to it -> unresolved-symbol)
+ *  18. str-trailing-nul-before-syms (.str "/dev/zero" carries NUL before "_start\0"; erasing it -> str-missing-trailing-nul)
+ */
+#pragma unisa use sys.io
+#pragma unisa use sys.fs
+#pragma unisa use sys.posix
+#pragma unisa use sys.proc
+#pragma unisa use sysx.process
+#pragma unisa use text.text
+#pragma unisa use mem.bytes
+#pragma unisa use mem.heap
+#pragma unisa use crypto.sha256
+
+#define CTP_PW 4096
+#define CTP_IDENT_OFF 28
+#define CTP_IDENT_LEN 32
+
+static int g_pass = 0;
+static int g_fail = 0;
+static char g_tmp[CTP_PW];
+static char g_bin[CTP_PW];
+
+static void ck(int ok, const char *name) {
+    if (ok) {
+        g_pass++;
+        sy_printf("PASS\tcheck-tapepack.%s\n", name);
+    } else {
+        g_fail++;
+        sy_printf("FAIL\tcheck-tapepack.%s\n", name);
+    }
+}
+
+static int ctp_has(const char *buf, const char *sub) {
+    size_t i, j, bl, sl;
+    if (!buf || !sub) return 0;
+    bl = strlen(buf);
+    sl = strlen(sub);
+    if (sl == 0) return 1;
+    if (sl > bl) return 0;
+    for (i = 0; i + sl <= bl; i++) {
+        for (j = 0; j < sl && buf[i + j] == sub[j]; j++) {}
+        if (j == sl) return 1;
+    }
+    return 0;
+}
+
+static unsigned long long ctp_rd_u(const unsigned char *p, int k) {
+    unsigned long long v = 0;
+    int i;
+    for (i = k - 1; i >= 0; i--) v = (v << 8) | (unsigned long long)(p[i] & 255u);
+    return v;
+}
+
+static void ctp_wr_u(unsigned char *p, int k, unsigned long long v) {
+    int i;
+    for (i = 0; i < k; i++) {
+        p[i] = (unsigned char)(v & 255ull);
+        v >>= 8;
+    }
+}
+
+static void reseal_ident(unsigned char *buf, long len) {
+    unsigned char dig[32];
+    int i;
+    if (!buf || len < 208) return;
+    for (i = 0; i < CTP_IDENT_LEN; i++) buf[CTP_IDENT_OFF + i] = 0;
+    cx_sha256(buf, (size_t)len, dig);
+    mm_copy(buf + CTP_IDENT_OFF, CTP_IDENT_LEN, dig, CTP_IDENT_LEN);
+}
+
+static int file_sha256_bytes(const char *path, unsigned char out[32], long *out_len) {
+    unsigned char *b = 0;
+    int64_t n = 0;
+    if (sy_read_file(path, &b, &n, 16 << 20) || !b || n < 0) {
+        if (b) mm_free(b);
+        return -1;
+    }
+    cx_sha256(b, (size_t)n, out);
+    if (out_len) *out_len = (long)n;
+    mm_free(b);
+    return 0;
+}
+
+static int run_cmd(char **av, int timeout_s, int *out_rc, char *out_buf, size_t cap) {
+    np_result r = {0};
+    char why[256];
+    long n = 0;
+    int tr = np_run(av, ".", 0, timeout_s, &r, why, sizeof why);
+    *out_rc = tr ? 124 : r.rc;
+    out_buf[0] = 0;
+    if (r.out && r.outn > 0) {
+        long t = (long)r.outn < (long)cap - 1 ? (long)r.outn : (long)cap - 1;
+        mm_copy(out_buf, (long)cap, r.out, t);
+        n += t;
+    }
+    if (r.err && r.errn > 0 && n < (long)cap - 1) {
+        long t = (long)r.errn < (long)cap - 1 - n ? (long)r.errn : (long)cap - 1 - n;
+        mm_copy(out_buf + n, (long)cap - n, r.err, t);
+        n += t;
+    }
+    out_buf[n] = 0;
+    np_free(&r);
+    return tr;
+}
+
+static const char *SAMPLE_DCE_TAPE =
+    "_start:\n"
+    "  call __init\n"
+    "  call main\n"
+    "  jump __main_ret\n"
+    "__init:\n"
+    "  ret\n"
+    "__main_ret:\n"
+    "  imm r0, 0\n"
+    "  .sys exit, r0\n"
+    "  .exit\n"
+    ".str live_msg \"hello\\n\"\n"
+    ".str dead_msg \"never_used_dead_string\"\n"
+    ".bss live_buf 64\n"
+    ".bss dead_buf 4096\n"
+    "helper:\n"
+    "  .frame 16\n"
+    "  add64 r0, r0, r1\n"
+    "  .lea r2, live_buf\n"
+    "  store64 [r2+0], r0\n"
+    "  load64 r3, [r2+0]\n"
+    "  ret\n"
+    "main:\n"
+    "  .frame 16\n"
+    "  imm r0, 10\n"
+    "  imm r1, 32\n"
+    "  call helper\n"
+    "  imm r0, 1\n"
+    "  .lea r1, live_msg\n"
+    "  imm r2, 6\n"
+    "  .sys write, r0, r1, r2\n"
+    "  imm r0, 0\n"
+    "  ret\n"
+    "dead_fn:\n"
+    "  .frame 32\n"
+    "  .lea r0, dead_msg\n"
+    "  .lea r1, dead_buf\n"
+    "  .sys open, r0, r1, r2\n"
+    "  ret\n";
+
+/* Covers all 72 canonical opcodes in cx/compiler/tapeshape.cx ts_names[72] + non-empty RELO */
+static const char *SAMPLE_72_OPS_TAPE =
+    "_start:\n"
+    "  .argc r0\n"
+    "  .argv r1, r0\n"
+    "  call main\n"
+    "  .sys exit, r0\n"
+    "  .exit\n"
+    ".str fmt_s \"ok\\x21\\t\\r\\n\"\n"
+    ".bss scratch 256\n"
+    "callee:\n"
+    "  .frame 16\n"
+    "  .arg r0, 0\n"
+    "  imm r1, 5\n"
+    "  mov r2, r0\n"
+    "  add64 r2, r2, r1\n"
+    "  sub64 r2, r2, r1\n"
+    "  mul64 r2, r2, r1\n"
+    "  xor64 r2, r2, r1\n"
+    "  and64 r2, r2, r1\n"
+    "  or64 r2, r2, r1\n"
+    "  shl64 r2, r2, r1\n"
+    "  shr64 r2, r2, r1\n"
+    "  lshr64 r2, r2, r1\n"
+    "  .div r2, r2, r1\n"
+    "  .mod r3, r2, r1\n"
+    "  .udiv r4, r2, r1\n"
+    "  .umod r5, r2, r1\n"
+    "  slt64 r3, r2, r1\n"
+    "  sle64 r4, r2, r1\n"
+    "  ult64 r5, r2, r1\n"
+    "  ule64 r6, r2, r1\n"
+    "  eq r3, r2, r1\n"
+    "  ne r4, r2, r1\n"
+    "  load64 r5, [r6+0]\n"
+    "  store64 [r6+0], r5\n"
+    "  .ld r7, [r6-8]\n"
+    "  .st [r6-8], r7\n"
+    "  .lea r8, fmt_s\n"
+    "  .zero r9\n"
+    "  jumpz r3, __unisacc_L1\n"
+    "  jump __unisacc_L2\n"
+    "__unisacc_L1:\n"
+    "  nop\n"
+    "  .print r2\n"
+    "  .write r8, r1\n"
+    "__unisacc_L2:\n"
+    "  fadd64 r0, r0, r1\n"
+    "  fsub64 r0, r0, r1\n"
+    "  fmul64 r0, r0, r1\n"
+    "  fdiv64 r0, r0, r1\n"
+    "  flt64 r3, r0, r1\n"
+    "  fle64 r3, r0, r1\n"
+    "  feq64 r3, r0, r1\n"
+    "  fadd32 r0, r0, r1\n"
+    "  fsub32 r0, r0, r1\n"
+    "  fmul32 r0, r0, r1\n"
+    "  fdiv32 r0, r0, r1\n"
+    "  flt32 r3, r0, r1\n"
+    "  fle32 r3, r0, r1\n"
+    "  feq32 r3, r0, r1\n"
+    "  cvtid r0, r2\n"
+    "  cvtud r0, r2\n"
+    "  cvtis r0, r2\n"
+    "  cvtus r0, r2\n"
+    "  cvtdi r2, r0\n"
+    "  cvtdu r2, r0\n"
+    "  cvtsd r0, r0\n"
+    "  cvtds r0, r0\n"
+    "  fsqrt64 r0, r0\n"
+    "  fsqrt32 r0, r0\n"
+    "  ret\n"
+    "main:\n"
+    "  .frame 32\n"
+    "  imm r0, 7\n"
+    "  imm r1, 3\n"
+    "  .lea r11, callee\n"
+    "  callr r11\n"
+    "  callm r7, 0\n"
+    "  .hostcall r1, r0\n"
+    "  .librarycall r1, r0\n"
+    "  .libraryaddr r1, fmt_s\n"
+    "  .libraryfn r1, fmt_s\n"
+    "  .hostaddr r1, fmt_s\n"
+    "  .lea r2, scratch\n"
+    "  .sys6 mmap, r0, r1, r2, r3, r4, r5\n"
+    "  ret\n";
+
+int main(void) {
+    char obuf[8192];
+    int rc = -1;
+
+    if (sy_mkdtemp("/tmp", "check-tapepack", g_tmp, sizeof g_tmp) != 0) return 2;
+    if (cx_fmt(g_bin, sizeof g_bin, "%s/tapepack.bin", g_tmp)) return 2;
+
+    /* Compile tools/tapepack.cx once into private scratch binary */
+    {
+        char *av[] = {"sh", "./unisacc.com", "tools/tapepack.cx", "-o", g_bin, 0};
+        (void)run_cmd(av, 45, &rc, obuf, sizeof obuf);
+        if (rc != 0) {
+            sy_eprintf("check-tapepack: compile tools/tapepack.cx failed rc=%d\n%s\n", rc, obuf);
+            return 1;
+        }
+    }
+
+    char in_s[CTP_PW], sl_a[CTP_PW], sl_b[CTP_PW], sl_nodce[CTP_PW], sl_mut[CTP_PW], full_s[CTP_PW], full_a[CTP_PW], full_b[CTP_PW];
+    (void)cx_fmt(in_s, sizeof in_s, "%s/sample.s", g_tmp);
+    (void)cx_fmt(sl_a, sizeof sl_a, "%s/a.tapeslice", g_tmp);
+    (void)cx_fmt(sl_b, sizeof sl_b, "%s/b.tapeslice", g_tmp);
+    (void)cx_fmt(sl_nodce, sizeof sl_nodce, "%s/nodce.tapeslice", g_tmp);
+    (void)cx_fmt(sl_mut, sizeof sl_mut, "%s/mut.tapeslice", g_tmp);
+    (void)cx_fmt(full_s, sizeof full_s, "%s/full72.s", g_tmp);
+    (void)cx_fmt(full_a, sizeof full_a, "%s/full72_a.tapeslice", g_tmp);
+    (void)cx_fmt(full_b, sizeof full_b, "%s/full72_b.tapeslice", g_tmp);
+
+    (void)sy_write_file(in_s, SAMPLE_DCE_TAPE, (int64_t)strlen(SAMPLE_DCE_TAPE), 0644);
+    (void)sy_write_file(full_s, SAMPLE_72_OPS_TAPE, (int64_t)strlen(SAMPLE_72_OPS_TAPE), 0644);
+
+    /* Group 1: pack-and-check-dce (also asserts non-empty RELO positive roundtrip) */
+    {
+        int pack_ok = 0, chk_ok = 0;
+        char *pav[] = {g_bin, in_s, "-o", sl_a, 0};
+        (void)run_cmd(pav, 20, &rc, obuf, sizeof obuf);
+        if (rc == 0 && ctp_has(obuf, "TAPEPACK_OK\tdce=1\t") &&
+            ctp_has(obuf, "\tfuncs=5\t") && ctp_has(obuf, "\tstrs=1\t") &&
+            ctp_has(obuf, "\thost_slots=2\t") && ctp_has(obuf, "\tbss_bytes=64\t") &&
+            !ctp_has(obuf, "\trelo=0\t")) {
+            pack_ok = 1;
+        }
+        char *cav[] = {g_bin, "--check", in_s, sl_a, 0};
+        (void)run_cmd(cav, 20, &rc, obuf, sizeof obuf);
+        if (rc == 0 && ctp_has(obuf, "TAPEPACK_CHECK\tPASS\tdce=1\t") && !ctp_has(obuf, "\trelo=0\t")) chk_ok = 1;
+        ck(pack_ok && chk_ok, "pack-and-check-dce");
+    }
+
+    /* Group 2: determinism-identical-sha256 */
+    {
+        unsigned char ha[32], hb[32];
+        long la = 0, lb = 0;
+        int i, same = 0;
+        char *pav[] = {g_bin, in_s, "-o", sl_b, 0};
+        (void)run_cmd(pav, 20, &rc, obuf, sizeof obuf);
+        if (rc == 0 && file_sha256_bytes(sl_a, ha, &la) == 0 && file_sha256_bytes(sl_b, hb, &lb) == 0 && la == lb && la >= 208) {
+            same = 1;
+            for (i = 0; i < 32; i++) if (ha[i] != hb[i]) same = 0;
+        }
+        ck(same, "determinism-identical-sha256");
+    }
+
+    /* Group 3: pack-no-dce-and-cross-reject */
+    {
+        int p_ok = 0, c_ok = 0, cross_rej = 0;
+        char *pav[] = {g_bin, in_s, "-o", sl_nodce, "--no-dce", 0};
+        (void)run_cmd(pav, 20, &rc, obuf, sizeof obuf);
+        if (rc == 0 && ctp_has(obuf, "TAPEPACK_OK\tdce=0\t") &&
+            ctp_has(obuf, "\tfuncs=6\t") && ctp_has(obuf, "\tstrs=2\t") &&
+            ctp_has(obuf, "\thost_slots=3\t") && ctp_has(obuf, "\tbss_bytes=4160\t")) {
+            p_ok = 1;
+        }
+        char *cav1[] = {g_bin, "--check", in_s, sl_nodce, "--no-dce", 0};
+        (void)run_cmd(cav1, 20, &rc, obuf, sizeof obuf);
+        if (rc == 0 && ctp_has(obuf, "TAPEPACK_CHECK\tPASS\tdce=0\t")) c_ok = 1;
+
+        char *cav2[] = {g_bin, "--check", in_s, sl_nodce, 0};
+        (void)run_cmd(cav2, 20, &rc, obuf, sizeof obuf);
+        if (rc != 0 && ctp_has(obuf, "TAPEPACK_REFUSE\t")) cross_rej = 1;
+        ck(p_ok && c_ok && cross_rej, "pack-no-dce-and-cross-reject");
+    }
+
+    /* Load sl_a bytes for Groups 4..11 mutation tests */
+    unsigned char *orig = 0;
+    int64_t orig_n = 0;
+    int have_orig = (sy_read_file(sl_a, &orig, &orig_n, 4 << 20) == 0 && orig && orig_n >= 208);
+
+    /* Group 4: mutate-ident-rejected */
+    {
+        int ok = 0;
+        if (have_orig) {
+            unsigned char *m = (unsigned char *)mm_alloc((long)orig_n);
+            if (m) {
+                mm_copy(m, (long)orig_n, orig, (long)orig_n);
+                m[CTP_IDENT_OFF] ^= 0x01u;
+                (void)sy_write_file(sl_mut, m, orig_n, 0644);
+                mm_free(m);
+                char *cav[] = {g_bin, "--check", in_s, sl_mut, 0};
+                (void)run_cmd(cav, 20, &rc, obuf, sizeof obuf);
+                if (rc != 0 && ctp_has(obuf, "TAPEPACK_REFUSE\tident-mismatch")) ok = 1;
+            }
+        }
+        ck(ok, "mutate-ident-rejected");
+    }
+
+    /* Group 5: mutate-code-resealed-rejected */
+    {
+        int ok = 0;
+        if (have_orig) {
+            unsigned char *m = (unsigned char *)mm_alloc((long)orig_n);
+            if (m) {
+                mm_copy(m, (long)orig_n, orig, (long)orig_n);
+                unsigned long long code_off = ctp_rd_u(m + 68, 8);
+                unsigned long long code_len = ctp_rd_u(m + 76, 8);
+                if (code_len > 2 && code_off + code_len <= (unsigned long long)orig_n) {
+                    /* Change opcode 29 (call, shape 0x10) -> 27 (jump, same shape 0x10) so decode succeeds and roundtrip catches it */
+                    m[code_off] = 27u;
+                    reseal_ident(m, (long)orig_n);
+                    (void)sy_write_file(sl_mut, m, orig_n, 0644);
+                    char *cav[] = {g_bin, "--check", in_s, sl_mut, 0};
+                    (void)run_cmd(cav, 20, &rc, obuf, sizeof obuf);
+                    if (rc != 0 && ctp_has(obuf, "TAPEPACK_REFUSE\troundtrip-insn-mismatch")) ok = 1;
+                }
+                mm_free(m);
+            }
+        }
+        ck(ok, "mutate-code-resealed-rejected");
+    }
+
+    /* Group 6: mutate-relo-rsv-resealed-rejected */
+    {
+        int ok = 0;
+        if (have_orig) {
+            unsigned char *m = (unsigned char *)mm_alloc((long)orig_n);
+            if (m) {
+                mm_copy(m, (long)orig_n, orig, (long)orig_n);
+                unsigned long long relo_off = ctp_rd_u(m + 164, 8);
+                unsigned long long relo_len = ctp_rd_u(m + 172, 8);
+                if (relo_len >= 16 && relo_off + relo_len <= (unsigned long long)orig_n) {
+                    ctp_wr_u(m + relo_off + 10, 2, 1);
+                    reseal_ident(m, (long)orig_n);
+                    (void)sy_write_file(sl_mut, m, orig_n, 0644);
+                    char *cav[] = {g_bin, "--check", in_s, sl_mut, 0};
+                    (void)run_cmd(cav, 20, &rc, obuf, sizeof obuf);
+                    if (rc != 0 && ctp_has(obuf, "TAPEPACK_REFUSE\trelo-rsv-nonzero")) ok = 1;
+                }
+                mm_free(m);
+            }
+        }
+        ck(ok, "mutate-relo-rsv-resealed-rejected");
+    }
+
+    /* Group 7: mutate-host-name-resealed-rejected */
+    {
+        int ok = 0;
+        if (have_orig) {
+            unsigned char *m = (unsigned char *)mm_alloc((long)orig_n);
+            if (m) {
+                mm_copy(m, (long)orig_n, orig, (long)orig_n);
+                unsigned long long host_off = ctp_rd_u(m + 188, 8);
+                unsigned long long host_len = ctp_rd_u(m + 196, 8);
+                if (host_len >= 6 && host_off + host_len <= (unsigned long long)orig_n) {
+                    m[host_off + 4] ^= 0x20u;
+                    reseal_ident(m, (long)orig_n);
+                    (void)sy_write_file(sl_mut, m, orig_n, 0644);
+                    char *cav[] = {g_bin, "--check", in_s, sl_mut, 0};
+                    (void)run_cmd(cav, 20, &rc, obuf, sizeof obuf);
+                    if (rc != 0 && ctp_has(obuf, "TAPEPACK_REFUSE\thost-slot-mismatch")) ok = 1;
+                }
+                mm_free(m);
+            }
+        }
+        ck(ok, "mutate-host-name-resealed-rejected");
+    }
+
+    /* Group 8: mutate-syms-name-off-oob-resealed-rejected */
+    {
+        int ok = 0;
+        if (have_orig) {
+            unsigned char *m = (unsigned char *)mm_alloc((long)orig_n);
+            if (m) {
+                mm_copy(m, (long)orig_n, orig, (long)orig_n);
+                unsigned long long data_len = ctp_rd_u(m + 100, 8);
+                unsigned long long syms_off = ctp_rd_u(m + 140, 8);
+                unsigned long long syms_len = ctp_rd_u(m + 148, 8);
+                if (syms_len >= 16 && syms_off + syms_len <= (unsigned long long)orig_n) {
+                    ctp_wr_u(m + syms_off, 4, data_len);
+                    reseal_ident(m, (long)orig_n);
+                    (void)sy_write_file(sl_mut, m, orig_n, 0644);
+                    char *cav[] = {g_bin, "--check", in_s, sl_mut, 0};
+                    (void)run_cmd(cav, 20, &rc, obuf, sizeof obuf);
+                    if (rc != 0 && ctp_has(obuf, "TAPEPACK_REFUSE\tsyms-name-oob")) ok = 1;
+                }
+                mm_free(m);
+            }
+        }
+        ck(ok, "mutate-syms-name-off-oob-resealed-rejected");
+    }
+
+    /* Group 9: mutate-syms-unterminated-resealed-rejected */
+    {
+        int ok = 0;
+        if (have_orig) {
+            unsigned char *m = (unsigned char *)mm_alloc((long)orig_n);
+            if (m) {
+                mm_copy(m, (long)orig_n, orig, (long)orig_n);
+                unsigned long long data_off = ctp_rd_u(m + 92, 8);
+                unsigned long long data_len = ctp_rd_u(m + 100, 8);
+                unsigned long long syms_off = ctp_rd_u(m + 140, 8);
+                unsigned long long syms_len = ctp_rd_u(m + 148, 8);
+                if (syms_len >= 16 && data_len > 0 && data_off + data_len <= (unsigned long long)orig_n) {
+                    unsigned long long noff = ctp_rd_u(m + syms_off, 4);
+                    unsigned long long k;
+                    for (k = noff; k < data_len; k++) {
+                        if (m[data_off + k] == 0) m[data_off + k] = 'X';
+                    }
+                    reseal_ident(m, (long)orig_n);
+                    (void)sy_write_file(sl_mut, m, orig_n, 0644);
+                    char *cav[] = {g_bin, "--check", in_s, sl_mut, 0};
+                    (void)run_cmd(cav, 20, &rc, obuf, sizeof obuf);
+                    if (rc != 0 && ctp_has(obuf, "TAPEPACK_REFUSE\tsyms-name-unterminated")) ok = 1;
+                }
+                mm_free(m);
+            }
+        }
+        ck(ok, "mutate-syms-unterminated-resealed-rejected");
+    }
+
+    /* Group 10: mutate-relo-pos-oob-resealed-rejected (both pos+width > code_len and pos == 0) */
+    {
+        int oob_ok = 0, zero_ok = 0;
+        if (have_orig) {
+            unsigned char *m = (unsigned char *)mm_alloc((long)orig_n);
+            if (m) {
+                unsigned long long code_len = ctp_rd_u(orig + 76, 8);
+                unsigned long long relo_off = ctp_rd_u(orig + 164, 8);
+                unsigned long long relo_len = ctp_rd_u(orig + 172, 8);
+                if (code_len >= 4 && relo_len >= 16 && relo_off + relo_len <= (unsigned long long)orig_n) {
+                    mm_copy(m, (long)orig_n, orig, (long)orig_n);
+                    ctp_wr_u(m + relo_off, 8, code_len);
+                    reseal_ident(m, (long)orig_n);
+                    (void)sy_write_file(sl_mut, m, orig_n, 0644);
+                    char *cav1[] = {g_bin, "--check", in_s, sl_mut, 0};
+                    (void)run_cmd(cav1, 20, &rc, obuf, sizeof obuf);
+                    if (rc != 0 && ctp_has(obuf, "TAPEPACK_REFUSE\trelo-pos-oob")) oob_ok = 1;
+
+                    mm_copy(m, (long)orig_n, orig, (long)orig_n);
+                    ctp_wr_u(m + relo_off, 8, 0);
+                    reseal_ident(m, (long)orig_n);
+                    (void)sy_write_file(sl_mut, m, orig_n, 0644);
+                    char *cav2[] = {g_bin, "--check", in_s, sl_mut, 0};
+                    (void)run_cmd(cav2, 20, &rc, obuf, sizeof obuf);
+                    if (rc != 0 && ctp_has(obuf, "TAPEPACK_REFUSE\trelo-pos-oob")) zero_ok = 1;
+                }
+                mm_free(m);
+            }
+        }
+        ck(oob_ok && zero_ok, "mutate-relo-pos-oob-resealed-rejected");
+    }
+
+    /* Group 11: mutate-relo-width-invalid-resealed-rejected (width=0, width=11 -> relo-bad-width; wrong width=2 -> relo-insn-mismatch) */
+    {
+        int w0 = 0, w11 = 0, wm = 0;
+        if (have_orig) {
+            unsigned char *m = (unsigned char *)mm_alloc((long)orig_n);
+            if (m) {
+                unsigned long long relo_off = ctp_rd_u(orig + 164, 8);
+                unsigned long long relo_len = ctp_rd_u(orig + 172, 8);
+                if (relo_len >= 16 && relo_off + relo_len <= (unsigned long long)orig_n) {
+                    mm_copy(m, (long)orig_n, orig, (long)orig_n);
+                    m[relo_off + 9] = 0;
+                    reseal_ident(m, (long)orig_n);
+                    (void)sy_write_file(sl_mut, m, orig_n, 0644);
+                    char *cav0[] = {g_bin, "--check", in_s, sl_mut, 0};
+                    (void)run_cmd(cav0, 20, &rc, obuf, sizeof obuf);
+                    if (rc != 0 && ctp_has(obuf, "TAPEPACK_REFUSE\trelo-bad-width")) w0 = 1;
+
+                    mm_copy(m, (long)orig_n, orig, (long)orig_n);
+                    m[relo_off + 9] = 11;
+                    reseal_ident(m, (long)orig_n);
+                    (void)sy_write_file(sl_mut, m, orig_n, 0644);
+                    char *cav1[] = {g_bin, "--check", in_s, sl_mut, 0};
+                    (void)run_cmd(cav1, 20, &rc, obuf, sizeof obuf);
+                    if (rc != 0 && ctp_has(obuf, "TAPEPACK_REFUSE\trelo-bad-width")) w11 = 1;
+
+                    mm_copy(m, (long)orig_n, orig, (long)orig_n);
+                    m[relo_off + 9] = (m[relo_off + 9] == 2) ? 3 : 2;
+                    reseal_ident(m, (long)orig_n);
+                    (void)sy_write_file(sl_mut, m, orig_n, 0644);
+                    char *cav2[] = {g_bin, "--check", in_s, sl_mut, 0};
+                    (void)run_cmd(cav2, 20, &rc, obuf, sizeof obuf);
+                    if (rc != 0 && (ctp_has(obuf, "TAPEPACK_REFUSE\trelo-insn-mismatch") || ctp_has(obuf, "TAPEPACK_REFUSE\trelo-pos-on-insn-start"))) wm = 1;
+                }
+                mm_free(m);
+            }
+        }
+        ck(w0 && w11 && wm, "mutate-relo-width-invalid-resealed-rejected");
+    }
+    if (orig) mm_free(orig);
+
+    /* Group 12: full-72-opcode-and-nonempty-relo-roundtrip */
+    {
+        unsigned char ha[32], hb[32];
+        long la = 0, lb = 0;
+        int i, p1 = 0, p2 = 0, c1 = 0, det = 0;
+        char *pav1[] = {g_bin, full_s, "-o", full_a, 0};
+        char *pav2[] = {g_bin, full_s, "-o", full_b, 0};
+        char *cav[] = {g_bin, "--check", full_s, full_a, 0};
+        (void)run_cmd(pav1, 20, &rc, obuf, sizeof obuf);
+        p1 = (rc == 0 && ctp_has(obuf, "TAPEPACK_OK\tdce=1\t") && !ctp_has(obuf, "\trelo=0\t"));
+        (void)run_cmd(pav2, 20, &rc, obuf, sizeof obuf);
+        p2 = (rc == 0 && ctp_has(obuf, "TAPEPACK_OK\tdce=1\t") && !ctp_has(obuf, "\trelo=0\t"));
+        (void)run_cmd(cav, 20, &rc, obuf, sizeof obuf);
+        c1 = (rc == 0 && ctp_has(obuf, "TAPEPACK_CHECK\tPASS\tdce=1\t") && !ctp_has(obuf, "\trelo=0\t"));
+        if (file_sha256_bytes(full_a, ha, &la) == 0 && file_sha256_bytes(full_b, hb, &lb) == 0 && la == lb && la >= 208) {
+            det = 1;
+            for (i = 0; i < 32; i++) if (ha[i] != hb[i]) det = 0;
+        }
+        ck(p1 && p2 && c1 && det, "full-72-opcode-and-nonempty-relo-roundtrip");
+    }
+
+    /* Group 13: local-label-forward-and-backward-branch-offsets */
+    char br_s[CTP_PW], br_sl[CTP_PW], br_mut[CTP_PW];
+    (void)cx_fmt(br_s, sizeof br_s, "%s/branch.s", g_tmp);
+    (void)cx_fmt(br_sl, sizeof br_sl, "%s/branch.tapeslice", g_tmp);
+    (void)cx_fmt(br_mut, sizeof br_mut, "%s/branch_mid.tapeslice", g_tmp);
+    {
+        const char *br_src =
+            "_start:\n"
+            "  imm r4, 3\n"
+            "  imm r5, 1\n"
+            ".Lloop:\n"
+            "  jumpz r4, .Ldone\n"
+            "  sub64 r4, r4, r5\n"
+            "  jump .Lloop\n"
+            ".Ldone:\n"
+            "  imm r0, 1\n"
+            "  .lea r1, message\n"
+            "  imm r2, 10\n"
+            "  .sys write, r0, r1, r2\n"
+            "  imm r0, 0\n"
+            "  .exit r0\n"
+            ".str message \"branch ok\\n\"\n"
+            ".end\n";
+        int p_ok = 0, c_ok = 0, off_ok = 0;
+        (void)sy_write_file(br_s, br_src, (int64_t)strlen(br_src), 0644);
+        char *pav[] = {g_bin, br_s, "-o", br_sl, 0};
+        (void)run_cmd(pav, 20, &rc, obuf, sizeof obuf);
+        p_ok = (rc == 0 && ctp_has(obuf, "TAPEPACK_OK\tdce=1\t") && ctp_has(obuf, "\tinsns=11\t"));
+        char *cav[] = {g_bin, "--check", br_s, br_sl, 0};
+        (void)run_cmd(cav, 20, &rc, obuf, sizeof obuf);
+        c_ok = (rc == 0 && ctp_has(obuf, "TAPEPACK_CHECK\tPASS\tdce=1\t"));
+        {
+            unsigned char *bb = 0;
+            int64_t bn = 0;
+            if (sy_read_file(br_sl, &bb, &bn, 1 << 20) == 0 && bb && bn >= 208) {
+                unsigned long long coff = ctp_rd_u(bb + 68, 8);
+                unsigned long long clen = ctp_rd_u(bb + 76, 8);
+                /* Exact expected wire layout:
+                 * [0..3]=imm r4,3; [4..7]=imm r5,1;
+                 * [8..11]=jumpz r4,.Ldone (op=28, r4|0xf0=0xf4, tag=1, uleb=18);
+                 * [12..14]=sub64 r4,r4,r5;
+                 * [15..17]=jump .Lloop (op=27, tag=1, uleb=8);
+                 * [18..21]=imm r0,1 ... total code_len=41. */
+                if (clen == 41 && coff + clen <= (unsigned long long)bn &&
+                    bb[coff + 8] == 28u && bb[coff + 10] == 1u && bb[coff + 11] == 18u &&
+                    bb[coff + 15] == 27u && bb[coff + 16] == 1u && bb[coff + 17] == 8u) {
+                    off_ok = 1;
+                }
+                mm_free(bb);
+            }
+        }
+        ck(p_ok && c_ok && off_ok, "local-label-forward-and-backward-branch-offsets");
+    }
+
+    /* Group 14: unresolved-symbol-rejected */
+    {
+        char u_s[CTP_PW], u_sl[CTP_PW];
+        const char *u_src =
+            "_start:\n"
+            "  imm r0, 0\n"
+            "  jump .Lundef\n"
+            "  .exit r0\n";
+        (void)cx_fmt(u_s, sizeof u_s, "%s/undef.s", g_tmp);
+        (void)cx_fmt(u_sl, sizeof u_sl, "%s/undef.tapeslice", g_tmp);
+        (void)sy_write_file(u_s, u_src, (int64_t)strlen(u_src), 0644);
+        char *pav[] = {g_bin, u_s, "-o", u_sl, 0};
+        (void)run_cmd(pav, 20, &rc, obuf, sizeof obuf);
+        ck(rc != 0 && ctp_has(obuf, "TAPEPACK_REFUSE") &&
+           ctp_has(obuf, "unresolved-symbol") && ctp_has(obuf, ".Lundef") &&
+           ctp_has(obuf, "line=3"),
+           "unresolved-symbol-rejected");
+    }
+
+    /* Group 15: duplicate-local-label-rejected */
+    {
+        char d_s[CTP_PW], d_sl[CTP_PW];
+        const char *d_src =
+            "_start:\n"
+            ".Ldup:\n"
+            "  nop\n"
+            ".Ldup:\n"
+            "  imm r0, 0\n"
+            "  .exit r0\n";
+        (void)cx_fmt(d_s, sizeof d_s, "%s/dup.s", g_tmp);
+        (void)cx_fmt(d_sl, sizeof d_sl, "%s/dup.tapeslice", g_tmp);
+        (void)sy_write_file(d_s, d_src, (int64_t)strlen(d_src), 0644);
+        char *pav[] = {g_bin, d_s, "-o", d_sl, 0};
+        (void)run_cmd(pav, 20, &rc, obuf, sizeof obuf);
+        ck(rc != 0 && ctp_has(obuf, "TAPEPACK_REFUSE") &&
+           ctp_has(obuf, "duplicate-label") && ctp_has(obuf, ".Ldup") &&
+           ctp_has(obuf, "line=4"),
+           "duplicate-local-label-rejected");
+    }
+
+    /* Group 16: mutate-branch-target-mid-insn-resealed-rejected */
+    {
+        int ok = 0;
+        unsigned char *bb = 0;
+        int64_t bn = 0;
+        if (sy_read_file(br_sl, &bb, &bn, 1 << 20) == 0 && bb && bn >= 208) {
+            unsigned long long coff = ctp_rd_u(bb + 68, 8);
+            unsigned long long clen = ctp_rd_u(bb + 76, 8);
+            if (clen == 41 && coff + clen <= (unsigned long long)bn) {
+                /* Mutate jumpz target_off from 18 (.Ldone start) -> 19 (mid-insn inside imm r0, 1) */
+                bb[coff + 11] = 19u;
+                reseal_ident(bb, (long)bn);
+                (void)sy_write_file(br_mut, bb, bn, 0644);
+                char *cav[] = {g_bin, "--check", br_s, br_mut, 0};
+                (void)run_cmd(cav, 20, &rc, obuf, sizeof obuf);
+                if (rc != 0 && ctp_has(obuf, "TAPEPACK_REFUSE\tbranch-target-mid-insn")) ok = 1;
+            }
+            mm_free(bb);
+        }
+        ck(ok, "mutate-branch-target-mid-insn-resealed-rejected");
+    }
+
+    /* Group 17: cross-function-local-label-rejected */
+    {
+        char x_s[CTP_PW], x_sl[CTP_PW];
+        const char *x_src =
+            "_start:\n"
+            "  call foo\n"
+            "  call main\n"
+            "  imm r0, 0\n"
+            "  .exit r0\n"
+            "foo:\n"
+            ".Lonly_in_foo:\n"
+            "  ret\n"
+            "main:\n"
+            "  jump .Lonly_in_foo\n"
+            "  ret\n";
+        (void)cx_fmt(x_s, sizeof x_s, "%s/cross.s", g_tmp);
+        (void)cx_fmt(x_sl, sizeof x_sl, "%s/cross.tapeslice", g_tmp);
+        (void)sy_write_file(x_s, x_src, (int64_t)strlen(x_src), 0644);
+        char *pav[] = {g_bin, x_s, "-o", x_sl, 0};
+        (void)run_cmd(pav, 20, &rc, obuf, sizeof obuf);
+        ck(rc != 0 && ctp_has(obuf, "TAPEPACK_REFUSE") &&
+           ctp_has(obuf, "unresolved-symbol") && ctp_has(obuf, ".Lonly_in_foo") &&
+           ctp_has(obuf, "line=10"),
+           "cross-function-local-label-rejected");
+    }
+
+    /* Group 18: str-trailing-nul-before-syms */
+    {
+        char n_s[CTP_PW], n_sl[CTP_PW], n_mut[CTP_PW];
+        const char *n_src =
+            "_start:\n"
+            "  .lea r0, devzero\n"
+            "  imm r1, 0\n"
+            "  imm r2, 0\n"
+            "  .sys open, r0, r1, r2\n"
+            "  imm r0, 0\n"
+            "  .exit r0\n"
+            ".str devzero \"/dev/zero\"\n";
+        int p_ok = 0, c_ok = 0, nul_ok = 0, mut_ok = 0;
+        (void)cx_fmt(n_s, sizeof n_s, "%s/devzero.s", g_tmp);
+        (void)cx_fmt(n_sl, sizeof n_sl, "%s/devzero.tapeslice", g_tmp);
+        (void)cx_fmt(n_mut, sizeof n_mut, "%s/devzero_nonul.tapeslice", g_tmp);
+        (void)sy_write_file(n_s, n_src, (int64_t)strlen(n_src), 0644);
+        char *pav[] = {g_bin, n_s, "-o", n_sl, 0};
+        (void)run_cmd(pav, 20, &rc, obuf, sizeof obuf);
+        p_ok = (rc == 0 && ctp_has(obuf, "TAPEPACK_OK\tdce=1\t"));
+        char *cav[] = {g_bin, "--check", n_s, n_sl, 0};
+        (void)run_cmd(cav, 20, &rc, obuf, sizeof obuf);
+        c_ok = (rc == 0 && ctp_has(obuf, "TAPEPACK_CHECK\tPASS\tdce=1\t"));
+        {
+            unsigned char *bb = 0;
+            int64_t bn = 0;
+            if (sy_read_file(n_sl, &bb, &bn, 1 << 20) == 0 && bb && bn >= 208) {
+                unsigned long long doff = ctp_rd_u(bb + 92, 8);
+                unsigned long long dlen = ctp_rd_u(bb + 100, 8);
+                /* DATA must be: "/dev/zero\0_start\0main\0" (10 + 7 + 5 = 22 bytes) */
+                if (dlen == 22 && doff + dlen <= (unsigned long long)bn &&
+                    memcmp(bb + doff, "/dev/zero", 9) == 0 && bb[doff + 9] == 0 &&
+                    memcmp(bb + doff + 10, "_start", 7) == 0) {
+                    nul_ok = 1;
+                    /* Mutate trailing NUL at DATA[9] -> 'X' and re-seal ident; --check must refuse */
+                    bb[doff + 9] = 'X';
+                    reseal_ident(bb, (long)bn);
+                    (void)sy_write_file(n_mut, bb, bn, 0644);
+                    char *cav2[] = {g_bin, "--check", n_s, n_mut, 0};
+                    (void)run_cmd(cav2, 20, &rc, obuf, sizeof obuf);
+                    if (rc != 0 && ctp_has(obuf, "TAPEPACK_REFUSE\tstr-missing-trailing-nul")) mut_ok = 1;
+                }
+                mm_free(bb);
+            }
+        }
+        ck(p_ok && c_ok && nul_ok && mut_ok, "str-trailing-nul-before-syms");
+    }
+
+    /* Group 19: func-lea-sleb-tag0-data-lea-uleb-tag1-and-tamper-reject */
+    {
+        char f_s[CTP_PW], f_sl[CTP_PW], f_mut1[CTP_PW], f_mut2[CTP_PW];
+        const char *f_src =
+            "_start:\n"
+            "  .lea r0, target_fn\n"
+            "  callr r0\n"
+            "  .lea r1, msg\n"
+            "  .lea r2, buf\n"
+            "  call target_fn\n"
+            "  imm r0, 0\n"
+            "  .exit r0\n"
+            "target_fn:\n"
+            "  ret\n"
+            ".str msg \"hi\"\n"
+            ".bss buf 16\n";
+        int p_ok = 0, c_ok = 0, wire_ok = 0, mut_tag_ok = 0, mut_mid_ok = 0;
+        (void)cx_fmt(f_s, sizeof f_s, "%s/func_lea.s", g_tmp);
+        (void)cx_fmt(f_sl, sizeof f_sl, "%s/func_lea.tapeslice", g_tmp);
+        (void)cx_fmt(f_mut1, sizeof f_mut1, "%s/func_lea_tag1.tapeslice", g_tmp);
+        (void)cx_fmt(f_mut2, sizeof f_mut2, "%s/func_lea_mid.tapeslice", g_tmp);
+        (void)sy_write_file(f_s, f_src, (int64_t)strlen(f_src), 0644);
+        char *pav[] = {g_bin, f_s, "-o", f_sl, 0};
+        (void)run_cmd(pav, 20, &rc, obuf, sizeof obuf);
+        p_ok = (rc == 0 && ctp_has(obuf, "TAPEPACK_OK\tdce=1\t"));
+        char *cav[] = {g_bin, "--check", f_s, f_sl, 0};
+        (void)run_cmd(cav, 20, &rc, obuf, sizeof obuf);
+        c_ok = (rc == 0 && ctp_has(obuf, "TAPEPACK_CHECK\tPASS\tdce=1\t"));
+        {
+            unsigned char *bb = 0;
+            int64_t bn = 0;
+            if (sy_read_file(f_sl, &bb, &bn, 1 << 20) == 0 && bb && bn >= 208) {
+                unsigned long long coff = ctp_rd_u(bb + 68, 8);
+                unsigned long long clen = ctp_rd_u(bb + 76, 8);
+                /* Expected CODE layout:
+                 *  off 0: .lea(25), 0xf0, tag=0(SLEB), val=target_off (4 bytes)
+                 *  off 4: callr(30), 0xf0 (2 bytes)
+                 *  off 6: .lea(25), 0xf1, tag=1(ULEB), val=0 (4 bytes)
+                 *  off 10: .lea(25), 0xf2, tag=1(ULEB), val=bss_off (4 bytes)
+                 *  off 14: call(29), tag=1(ULEB), val=target_off (3 bytes) */
+                if (clen >= 18 && coff + clen <= (unsigned long long)bn &&
+                    bb[coff + 0] == 25u && bb[coff + 1] == 0xf0u && bb[coff + 2] == 0u && bb[coff + 3] > 0u &&
+                    bb[coff + 4] == 30u && bb[coff + 5] == 0xf0u &&
+                    bb[coff + 6] == 25u && bb[coff + 7] == 0xf1u && bb[coff + 8] == 1u &&
+                    bb[coff + 10] == 25u && bb[coff + 11] == 0xf2u && bb[coff + 12] == 1u &&
+                    bb[coff + 14] == 29u && bb[coff + 15] == 1u) {
+                    wire_ok = 1;
+                    /* Tamper 1: flip func .lea tag 0 -> 1 and reseal ident -> must refuse */
+                    unsigned char *m1 = (unsigned char *)mm_alloc((long)bn);
+                    if (m1) {
+                        mm_copy(m1, (long)bn, bb, (long)bn);
+                        m1[coff + 2] = 1u;
+                        reseal_ident(m1, (long)bn);
+                        (void)sy_write_file(f_mut1, m1, bn, 0644);
+                        mm_free(m1);
+                        char *cav1[] = {g_bin, "--check", f_s, f_mut1, 0};
+                        (void)run_cmd(cav1, 20, &rc, obuf, sizeof obuf);
+                        if (rc != 0 && ctp_has(obuf, "TAPEPACK_REFUSE\troundtrip-insn-mismatch")) mut_tag_ok = 1;
+                    }
+                    /* Tamper 2: point func .lea (tag=0) at mid-insn byte 1 and reseal -> must refuse */
+                    unsigned char *m2 = (unsigned char *)mm_alloc((long)bn);
+                    if (m2) {
+                        mm_copy(m2, (long)bn, bb, (long)bn);
+                        m2[coff + 3] = 1u;
+                        reseal_ident(m2, (long)bn);
+                        (void)sy_write_file(f_mut2, m2, bn, 0644);
+                        mm_free(m2);
+                        char *cav2[] = {g_bin, "--check", f_s, f_mut2, 0};
+                        (void)run_cmd(cav2, 20, &rc, obuf, sizeof obuf);
+                        if (rc != 0 && ctp_has(obuf, "TAPEPACK_REFUSE\tlea-code-target-mid-insn")) mut_mid_ok = 1;
+                    }
+                }
+                mm_free(bb);
+            }
+        }
+        ck(p_ok && c_ok && wire_ok && mut_tag_ok && mut_mid_ok, "func-lea-sleb-tag0-and-tamper-reject");
+    }
+
+    {
+        char *rmv[] = {"rm", "-rf", g_tmp, 0};
+        np_result r = {0};
+        char why[128];
+        (void)np_run(rmv, 0, 0, 10, &r, why, sizeof why);
+        np_free(&r);
+    }
+    sy_printf("CHECK_TAPEPACK\tpassed=%d\tfailed=%d\n", g_pass, g_fail);
+    return g_fail ? 1 : 0;
+}
