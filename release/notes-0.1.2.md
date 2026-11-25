@@ -1,6 +1,6 @@
 # unisacc 0.1.2 发布说明(前端与系统层合装;2026-11-25)
 
-状态: <CI_STATUS_PLACEHOLDER>
+状态: 六目标 CI 全绿 (run 45638397154, attempt=1), 候选已量化通过 (QUALIFIED)
 
 ## 1. 真实身份
 
@@ -10,8 +10,8 @@
 | 链后修补与并入 (`post-chain-merge`) | `C10=4e8aa13c61598429fad27a78d747da1675d0093f` (仅 `tests/daily-compile-smoke.tsv`) + 并入 `origin/main=e3f12440f5f052ee105b0bba6075ec5cc6c4f582` (`d806a5b4e7`, 仅文档/研究 18 文件) + `3dfa49e57` (`research/ccogweco/broken-links.tsv:2` 路径脱敏); 实算 `SOURCES_SID` 均不变 |
 | 发布 APE SHA256 (`unisacc.com`) | `e31c413a1287a935c62df9e5c9820f91d7d760ea7e3c2c1480f99f8fc6a7c269` (`8,992,558` 字节) |
 | 源快照 `SID6` (`SOURCES_SID`) | `88e190bdb8bc45df16e06ff9b22d959df08adf6105fb23598edc3c25b50bc8b6` |
-| `X` 提交 | `<X_COMMIT_PLACEHOLDER>` |
-| CI run | `<CI_RUN_PLACEHOLDER>` |
+| `X` 提交 | `d71c949779477f25e1f592420325e1bdccc58b52` (`v0.1.2 X: candidate table`) |
+| CI run | `45638397154` (`candidate-native.yml`, `attempt=1`, `6/6 targets success`, `CANDIDATE_QUALIFY pass=42 fail=0 not_run=0 invalid=0`) |
 | `pkg.bin` | `4d13b970d75732d61126e67f1f4574a70f48eb9675b95900453dfd370d3b4f1b` |
 | `slice-win-arm64` | `4eb534a4bfb838e96a5227a0f1d4520f2f1732cd58ba84cde32b35bab07b219e` |
 | `unisacc.com.build.json` / `build.json` | `b3b9f7ad80adc46790751f044b98d32de5edfe876837767ee1dc2ee24854863a` |
