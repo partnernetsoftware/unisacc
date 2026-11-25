@@ -1,0 +1,41 @@
+#pragma unisa use runtime.holdframe
+#pragma unisa use runtime.stagehandoff
+#pragma unisa use runtime.routestep
+#pragma unisa use text.fmt
+int dv_fwd_splice(const char *, int, const char **, unsigned char **, long *, char *, int);
+
+#define UNIT_ROWS 257
+static char names[UNIT_ROWS][32];
+static const char *sources[UNIT_ROWS];
+int module_units_forward(void) {
+    char line[128], expected[32], forward[32], why[128];
+    unsigned char *out; long outn;
+    int n, failed = 0;
+    for (int i = 0; i < UNIT_ROWS; i++) {
+        tx_snprintf(names[i], sizeof names[i], "unit%d.c", i);
+        sources[i] = names[i];
+    }
+    FILE *table = fopen("tests/module/boundary.tsv", "r");
+    if (!table || !fgets(line, sizeof line, table)) return 2;
+    while (fgets(line, sizeof line, table)) {
+        if (sscanf(line, "%d %31s %31s", &n, expected, forward) != 3 || n < 1 || n > UNIT_ROWS) return 2;
+        if (n < 127) continue;
+        unsigned char frame[8] = {4,0,0,0,0,0,0,0};
+        if (hf_keep(frame, 8, 0, 0)) return 2;
+        sources[1] = "/nonexistent-module-unit-stub.c";
+        why[0] = 0; out = 0; outn = 0;
+        int rc = dv_fwd_splice("lnx/x86_64", n + 1, sources, &out, &outn, why, sizeof why);
+        int ok = !strcmp(forward, "accept") ? rc == 5 : rc == 1 && !strcmp(why, "forwarding stub");
+        printf("%s\tforward-original-%d\tstatus=%d\n", ok ? "PASS" : "FAIL", n, rc);
+        if (!ok) failed++;
+    }
+    fclose(table);
+    sources[0] = "tests/module/root.cx";
+    out = 0; outn = 0; why[0] = 0;
+    int rc = dv_fwd_splice("lnx/x86_64", 2, sources, &out, &outn, why, sizeof why);
+    int ok = rc == 1 && !strcmp(why, "forwarding stub") && !out && !outn;
+    printf("%s\tforwarding-missing-frame\n", ok ? "PASS" : "FAIL");
+    if (!ok) failed++;
+    printf("MODULE_UNITS_FORWARD\tfailed=%d\n", failed);
+    return failed ? 1 : 0;
+}

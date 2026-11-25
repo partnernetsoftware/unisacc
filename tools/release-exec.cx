@@ -233,10 +233,13 @@ static int index_ref(const char *a, const char *b, char *o, long cap) {
     return found && o[0] && !tx_eqz(o, "-") && !tx_eqz(o, "pending");
 }
 static void sha_file(const char *path, char hex[65]) {
-    char o[200]; char *v[] = {"sha256sum", "--", (char *)path, 0};
+    char o[80];
+    char *v[] = {"sh", "-c", "exec sha256sum < \"$1\"", "release-sha256", (char *)path, 0};
     hex[0] = 0;
-    if (run(v, 30, o, sizeof o) || tlen(o) < 64) return;
+    if (run(v, 30, o, sizeof o) || tlen(o) != 67 ||
+        !tx_eqz(o + 64, "  -")) return;
     memcpy(hex, o, 64); hex[64] = 0;
+    if (!is_hex(hex, 64)) hex[0] = 0;
 }
 static int pushed(const char *sha) {
     char *v[] = {"git", "merge-base", "--is-ancestor", (char *)sha, "origin/main", 0};
@@ -297,7 +300,12 @@ static void rollback(void) {
     }
     sy_printf("ROLLBACK\t%d\t%s\trelease/rollback.txt (1): back to draft, Latest -> %s; tag never deleted\n", cur_step, dry ? "PLAN" : "RUN", prevtag);
     { int r1 = act(a, 30, 0, 0), r2 = act(b, 30, 0, 0);
-      if (!dry) sy_printf("ROLLBACK\t%d\tRESULT\tdraft_rc=%d\tlatest_rc=%d\n", cur_step, r1, r2); }
+      if (!dry) {
+          char note[100];
+          cx_fmt(note, sizeof note, "draft_rc=%d latest_rc=%d", r1, r2);
+          sy_printf("ROLLBACK\t%d\tRESULT\tdraft_rc=%d\tlatest_rc=%d\n", cur_step, r1, r2);
+          index_row("rollback", r1 || r2 ? "FAIL" : "PASS", "release/rollback.txt", note);
+      } }
 }
 
 /* ---- G1: strict evidence --------------------------------------------------------- */
@@ -363,7 +371,7 @@ static void find_strict(void) {
 }
 /* Fold qualify's append-only evidence in its recorded order, like --resume.
    RAW identifies the execution associated with the latest structured row. */
-typedef struct { char id[128], status[8], rc[16]; int reason, allowed, witnessed, segment, unresolved_raw_unknown; } strict_batch;
+typedef struct { char id[128], status[8], rc[16], window_leaf[240]; int reason, allowed, witnessed, segment, unresolved_raw_unknown, window_raw; } strict_batch;
 static strict_batch strict_batches[1024];
 static int strict_count;
 static strict_batch *strict_slot(const char *id) {
@@ -375,6 +383,7 @@ static int strict_reason(const char *s) {
     if(tx_eqz(s,"no-producer"))return 1;
     if(tx_eqz(s,"load-wait-timeout"))return 2;
     if(tx_eqz(s,"outer-timeout"))return 3;
+    if(tx_eqz(s,"window-timeout"))return 4;
     return 0;
 }
 /* Split exact fields, rejecting extra columns and embedded NUL or CR. */
@@ -385,6 +394,32 @@ static int strict_split(char *s,long n,char **fields,int cap) {
         if(s[i]=='\t'){if(count==cap)return 0;s[i]=0;fields[count++]=s+i+1;}
     }
     s[n]=0;return count;
+}
+static int strict_window_elapsed(const char *s) {
+    int ms=0;
+    for(;*s;s++){
+        if(*s<'0'||*s>'9')return 0;
+        if(ms<53000)ms=ms*10+(*s-'0');
+    }
+    return ms>=53000;
+}
+static int strict_window_evidence(const char *leaf,const char *raw,long size) {
+    char path[4500],buf[16385];long used=0,at=0,len;const char *line;
+    if(cx_fmt(path,sizeof path,"%s/%s",evdir,leaf))return 0;
+    int fd=sy_open(path,O_RDONLY|O_NONBLOCK|O_NOFOLLOW,0);
+    if(fd<0)return 0;
+    sy_stat_t st;int valid=!sy_fstat(fd,&st)&&st.kind=='f';
+    while(valid&&used<(long)sizeof buf){
+        long got=sy_read(fd,buf+used,sizeof buf-used);
+        if(!got)break;
+        if(got<0){valid=0;break;}
+        used+=got;
+    }
+    sy_close(fd);
+    if(!valid||used==(long)sizeof buf)return 0;
+    while(line_next(buf,used,&at,&line,&len))
+        if(len==size&&!memcmp(line,raw,size))return 1;
+    return 0;
 }
 static int producer_evidence(const char *id,const char *leaf) {
     char path[4500],prefix[240],buf[16385];long at=0,len,used=0;const char *line;
@@ -427,6 +462,8 @@ static void strict_exceptions(void) {
         strict_batch *b=strict_slot(f[0]);
         if(b->allowed || !(b->allowed=strict_reason(f[1])))refuse("STRICT_UNKNOWN","duplicate batch or unknown reason in expected-unmeasured.tsv");
         if(b->allowed==1 && (nf!=3||!producer_evidence(b->id,f[2])))refuse("STRICT_UNKNOWN","no-producer needs matching affected evidence");
+        if(b->allowed==4 && (nf!=3||!f[2][0]||f[2][0]=='.'||strchr(f[2],'/')||
+           cx_fmt(b->window_leaf,sizeof b->window_leaf,"%s",f[2])))refuse("STRICT_UNKNOWN","window-timeout needs matching evidence file");
     }
     free(t);
 }
@@ -484,17 +521,21 @@ static void strict_terminals(char *t,long n) {
         if(tx_eqz(f[0],"NETREGEN_DIFF"))continue;
         if(tx_eqz(f[0],"RAW")){
             if(!tx_eqz(f[1],"BATCH_RUN"))refuse("STRICT_UNKNOWN","invalid RAW row");
-            const char *id=0,*st=0,*sha=0,*rc=0;
+            const char *id=0,*st=0,*sha=0,*rc=0,*transport=0,*assertions=0;
             for(int i=2;i<nf;i++){
                 if(!strncmp(f[i],"id=",3)){if(id)refuse("STRICT_UNKNOWN","duplicate RAW id");id=f[i]+3;}
                 if(!strncmp(f[i],"status=",7)){if(st)refuse("STRICT_UNKNOWN","duplicate RAW status");st=f[i]+7;}
                 if(!strncmp(f[i],"candidate=",10)){if(sha)refuse("STRICT_UNKNOWN","duplicate RAW candidate");sha=f[i]+10;}
                 if(!strncmp(f[i],"rc=",3)){if(rc)refuse("STRICT_UNKNOWN","duplicate RAW rc");rc=f[i]+3;}
+                if(!strncmp(f[i],"transport=",10)){if(transport)refuse("STRICT_UNKNOWN","duplicate RAW transport");transport=f[i]+10;}
+                if(!strncmp(f[i],"assertions=",11)){if(assertions)refuse("STRICT_UNKNOWN","duplicate RAW assertions");assertions=f[i]+11;}
             }
             if(!id||!st||!sha||!rc)refuse("STRICT_UNKNOWN","incomplete RAW");
             strict_batch *b=strict_slot(id);
             if(!b->status[0])refuse("STRICT_UNKNOWN","RAW without a corresponding batch row");
             b->witnessed=tx_eqz(sha,cand.sha[0])&&tx_eqz(b->status,st)&&tx_eqz(b->rc,rc);
+            b->window_raw=b->reason==4&&b->allowed==4&&b->segment==table&&b->witnessed&&transport&&assertions&&
+                tx_eqz(transport,"-1")&&tx_eqz(assertions,"UNMEASURED")&&strict_window_evidence(b->window_leaf,s,len);
             if(tx_eqz(st,"FAIL") && !b->witnessed)refuse("STRICT_UNKNOWN","FAIL receipt differs from its batch row");
             if(tx_eqz(st,"UNKNOWN") && !b->witnessed)refuse("STRICT_UNKNOWN","UNKNOWN receipt differs from its batch row");
             continue;
@@ -514,6 +555,10 @@ static void strict_terminals(char *t,long n) {
            affected producer diagnostic is required by strict_exceptions. */
         if(tx_eqz(f[3],"3") && (tx_eqz(f[8],"no-BATCH_RUN rc=3") ||
            tx_eqz(f[8],"no-BATCH_RUN rc=3;load_wait>6") || tx_eqz(f[8],"no-BATCH_RUN rc=3;load_wait>3")))b->reason=1;
+        if(b->reason==4)b->reason=0; /* A literal strict note is not a timing witness. */
+        b->window_raw=0;
+        if(tx_eqz(f[2],"UNKNOWN") && tx_eqz(f[3],"0") && tx_eqz(f[4],cand.sha[0]) &&
+           strict_window_elapsed(f[5]) && tx_eqz(f[8],"transport-failed-raw-neg1"))b->reason=4;
         unknowns=-1;
     }
     for(int i=0;i<strict_count;i++){
@@ -522,7 +567,7 @@ static void strict_terminals(char *t,long n) {
         if(b->allowed && !tx_eqz(b->status,"UNKNOWN"))refuse("STRICT_UNKNOWN",b->id);
         if(!b->status[0])continue;
         if(tx_eqz(b->status,"UNKNOWN")){
-            if(!b->reason||b->allowed!=b->reason)refuse("STRICT_UNKNOWN",b->id);
+            if(!b->reason||b->allowed!=b->reason||(b->reason==4&&!b->window_raw))refuse("STRICT_UNKNOWN",b->id);
         }else if(!b->witnessed)refuse("STRICT_UNKNOWN",b->id);
     }
     if(table && unknowns<0)refuse("STRICT_UNKNOWN","missing final SUMMARY");
@@ -1417,6 +1462,53 @@ static void step_y1(void) {
 }
 
 /* ---- step 5: publish ------------------------------------------------------------------------ */
+static int readback_prewarmed;
+
+/* Same outer argv and inherited environment as the public readback smoke.
+ * release-ape keeps candidate probe diagnostics private on success, so only
+ * the two checkout tool lookups are visible here. */
+static void readback_prewarm(void) {
+    char launcher[4600], tool[4600], ape[4600], sha[65], why[256];
+    char *v[] = {"sh", launcher, tool, "--", "smoke", ape, 0};
+    char *env[] = {"UNISACC_RR_TIME=1", 0};
+    np_result r = {0};
+    int hits = 0, misses = 0, ok;
+    if (cx_fmt(launcher, sizeof launcher, "%s/%s", here, checkout_product + 2) ||
+        cx_fmt(tool, sizeof tool, "%s/tools/chain-step.cx", here) ||
+        cx_fmt(ape, sizeof ape, "%s/%s", layout, cand.name[0])) die("readback prewarm path");
+    sha_file(ape, sha);
+    if (!tx_eqz(sha, cand.sha[0])) die("readback prewarm candidate SHA mismatch");
+    /* A successful first smoke can fill one cold layer. Only a second observation
+     * can then prove readiness. Do not retry a transport or smoke failure. */
+    for (int attempt = 0; attempt < 2; attempt++) {
+        hits = misses = 0;
+        show(v, "PREWARM");
+        ok = !np_run(v, here, env, 45, &r, why, sizeof why) && !r.rc && !r.residue;
+        if (ok && r.err) {
+            static const char prefix[] = "RR_TIME\tlookup_hit=";
+            long at = 0, n; const char *line;
+            while (line_next(r.err, (long)r.errn, &at, &line, &n)) {
+                long k = sizeof prefix - 1, start = k;
+                int positive = 0;
+                if (n <= k || memcmp(line, prefix, k)) continue;
+                while (k < n && line[k] >= '0' && line[k] <= '9') positive |= line[k++] != '0';
+                if (k > start && k < n && line[k] == '\t' && positive) hits++;
+                else misses++;
+            }
+        }
+        np_free(&r);
+        if (!ok || (hits == 2 && !misses)) break;
+    }
+    if (!ok || hits != 2 || misses) {
+        sy_printf("GATE\t%d\tREADBACK_PREWARM\tFAIL\tsmoke_ok=%d hits=%d misses=%d\n", cur_step, ok, hits, misses);
+        emit_phase(2);
+        /* This is a local readiness failure, not a reason to undo a public release on resume. */
+        die("RELEASE_EXEC_GATE_READBACK_PREWARM: run release-exec --warm with the same checkout, --layout, --out and cache environment before resuming");
+    }
+    gate_pass("READBACK_PREWARM", "smoke passed; chain-step and release-ape hit");
+    readback_prewarmed = 1;
+}
+
 static void step_publish(void) {
     char json[4500], log[4500], ref[600]; int st;
     char *v[] = {"gh", "-R", REPO, "release", "edit", cand.tag, "--draft=false", "--latest", 0};
@@ -1430,6 +1522,7 @@ static void step_publish(void) {
     if (st == 2 || (dry && index_ref("publish", "exec-5-publish", ref, sizeof ref))) { published = 1; show(v, "DONE"); say("SKIP", "release already public", cand.tag); }
     else if (cur_step < from_step && !dry) refuse("RESUME", "release not public for a verify-only step");
     else {
+        if (!dry) readback_prewarm();
         if (act(v, 30, 0, 0)) refuse("PUBLIC_SHA", "gh release edit --draft=false failed");
         if (!dry) { published = 1; if (release_state() != 2) refuse("PUBLIC_SHA", "release still draft after edit"); index_row("publish", "-", cand.tag, "isDraft=false, Latest"); }
     }
@@ -1452,6 +1545,15 @@ static void step_readback(void) {
         else { gate_pass("PUBLIC_SHA", "evidence public-readback.txt READBACK_SHA equals candidate"); gate_pass("READBACK", "evidence public-readback.txt rc=0 (recorded)"); }
         return;
     }
+    if (cur_step < from_step) {
+        if (evidence_readback_ok("public-readback.txt", 1) != 1) {
+            /* A verify-only resume must not mutate an already public release. */
+            die("RELEASE_EXEC_GATE_READBACK: recorded public readback missing or invalid; resume from step 6");
+        }
+        gate_pass("READBACK", "public readback evidence verified");
+        return;
+    }
+    if (!readback_prewarmed) readback_prewarm();
     sy_mkdir(fresh, 0755);
     if (act(dl, 55, 0, 0)) refuse("PUBLIC_SHA", "public download failed");
     cx_fmt(p, sizeof p, "%s/%s", fresh, cand.name[0]); sha_file(p, hex);
@@ -1655,14 +1757,28 @@ static int warm_identity(char *why, long cap) {
     if (cx_fmt(warm_receipt, sizeof warm_receipt, "%s/warm-%s.tsv", outdir, warm_key)) { cx_fmt(why, cap, "receipt path"); return 1; }
     return 0;
 }
-/* 1 receipt present and equal, 0 absent, -1 present but different (tampered) */
-static int warm_receipt_state(void) {
+/* Read the out receipt first; a published copy can have a scrubbed root. */
+static int warm_receipt_at(const char *path) {
     long n; char *t; int same;
-    if (sy_exists(warm_receipt) != 1) return 0;
-    t = slurp(warm_receipt, &n);
-    same = t && n == (long)warm_row.n && !memcmp(t, warm_row.p, warm_row.n);
+    int present = sy_exists(path);
+    if (!present) return 0;
+    if (present < 0 || !(t = slurp(path, &n))) return -1;
+    same = n == (long)warm_row.n && !memcmp(t, warm_row.p, warm_row.n);
+    if (!same) {
+        np_buf scrubbed = {0};
+        scrub_home_put(&scrubbed, warm_row.p, (long)warm_row.n);
+        same = n == (long)scrubbed.n && !memcmp(t, scrubbed.p, scrubbed.n);
+        free(scrubbed.p);
+    }
     free(t);
     return same ? 1 : -1;
+}
+static int warm_receipt_state(void) {
+    char path[4600];
+    int st = warm_receipt_at(warm_receipt);
+    if (st) return st;
+    if (cx_fmt(path, sizeof path, "%s/warm-%s.tsv", evdir, warm_key)) return -1;
+    return warm_receipt_at(path);
 }
 static void warm_argv(int i, char **v, char *tp, long cap) {
     if (warm_abs[i]) cx_fmt(tp, cap, "%s/%s", here, warm_tool[i]); else cx_fmt(tp, cap, "%s", warm_tool[i]);
@@ -1733,7 +1849,7 @@ static int warm_main(void) {
         miss = warm_probes("after-rewarm");
     }
     if (miss) { sy_eprintf("release-exec: REFUSE RELEASE_EXEC_GATE_WARM %d target(s) not served from the run cache after warm-up\n", miss); return 2; }
-    if (!st && sy_write_atomic(warm_receipt, warm_row.p, warm_row.n, 0644)) { sy_eprintf("release-exec: REFUSE RELEASE_EXEC_GATE_WARM receipt write\n"); return 2; }
+    if (sy_exists(warm_receipt) != 1 && sy_write_atomic(warm_receipt, warm_row.p, warm_row.n, 0644)) { sy_eprintf("release-exec: REFUSE RELEASE_EXEC_GATE_WARM receipt write\n"); return 2; }
     sy_printf("WARM\tRESULT\tREADY\tkey=%s\ttargets=5\n", warm_key);
     return 0;
 }

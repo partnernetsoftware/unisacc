@@ -41,6 +41,7 @@
 
 static int failed, notrun;
 static char g_root[4096], g_tool[4400];
+static const char *g_tool_bin;
 
 static void say(const char *v, const char *name, const char *why) { sy_printf("%s\tinstall-ape.%s\t%s\n", v, name, why ? why : ""); }
 static void ck(int ok, const char *name, const char *why) { if (!ok) failed++; say(ok ? "PASS" : "FAIL", name, ok ? "" : why); }
@@ -50,7 +51,8 @@ static int sha_of(const char *p, char h[65]) { size_t n = 0; char *b = cx_read(p
 /* run the tool with ARGS (already a vector tail); output into OUT; the exit code or -1 */
 static int tool(const char *root, const char *ape, const char *sha, int write, char *out, int cap) {
     char *v[9]; int k = 0, cut = 0;
-    v[k++] = "sh"; v[k++] = "./unisacc.com"; v[k++] = g_tool; v[k++] = "--";
+    if (g_tool_bin && g_tool_bin[0]) { v[k++] = (char *)g_tool_bin; }
+    else { v[k++] = "sh"; v[k++] = "./unisacc.com"; v[k++] = g_tool; v[k++] = "--"; }
     v[k++] = (char *)root; v[k++] = (char *)ape; v[k++] = (char *)sha;
     if (write) v[k++] = "--write";
     v[k] = 0;
@@ -119,7 +121,8 @@ static int run_sh(const char *cmd, char *out, int cap) {
 }
 static int tool_args(char **args, char *out, int cap) {
     char *v[16]; int k = 0, cut = 0, i;
-    v[k++] = "sh"; v[k++] = "./unisacc.com"; v[k++] = g_tool; v[k++] = "--";
+    if (g_tool_bin && g_tool_bin[0]) { v[k++] = (char *)g_tool_bin; }
+    else { v[k++] = "sh"; v[k++] = "./unisacc.com"; v[k++] = g_tool; v[k++] = "--"; }
     for (i = 0; args[i] && k < 15; i++) v[k++] = args[i];
     v[k] = 0;
     return pr_run_merged(v, 55, out, cap, &cut);
@@ -305,7 +308,11 @@ static void cand_cases(const char *work, const char *cwork, const char *ape, con
             if (write_file(rp, "{}\n", 0644)) return;
             ck(tool_args(ra, out, (int)sizeof out) == 1 && has(out, "backup-file-not-in-manifest"), "cand-rollback-refuses-unlisted-file", out);
             (void)sy_unlink(rp);
-            if (cx_fmt(cmd, sizeof cmd, "UNISACC_INSTALL_APE_FAULT=rollback-step-2 sh ./unisacc.com '%s' -- '%s' --rollback --write", g_tool, root)) return;
+            if (g_tool_bin && g_tool_bin[0]) {
+                if (cx_fmt(cmd, sizeof cmd, "UNISACC_INSTALL_APE_FAULT=rollback-step-2 '%s' '%s' --rollback --write", g_tool_bin, root)) return;
+            } else {
+                if (cx_fmt(cmd, sizeof cmd, "UNISACC_INSTALL_APE_FAULT=rollback-step-2 sh ./unisacc.com '%s' -- '%s' --rollback --write", g_tool, root)) return;
+            }
             ck(run_sh(cmd, out, (int)sizeof out) == 1 && has(out, "rollback-step-failed-root-unchanged"), "cand-rollback-midway-failure-refused", out);
             sha_named(root, "unisacc.com", ac); sha_named(root, "ape-receipt.txt", ar); sha_named(root, "unisacc.com.ape.sha256", as); sha_named(root, "unisacc.com.candidate.tsv", am);
             ck(tx_eqz(ac, hc) && tx_eqz(ar, hr) && tx_eqz(as, hs2) && tx_eqz(am, hm) && !tree_has_rollback_tmp(root) && index_lines(root) == 3 && sy_exists(nd) == 1,
@@ -392,7 +399,16 @@ static void pub_backup_cases(const char *work, const char *ape, const char *real
 int main(int argc, char **argv) {
     char work[4400], ape[4400], root[4400], com[4400], dev[4400], rec[4400], junk[4400], fake[4400];
     char want[65], h0[65], h1[65], out[2048], launcher[4400], cwork[4400];
-    const char *td = getenv("TMPDIR");
+    const char *td = getenv("TMPDIR"), *mode = 0;
+    int w = 1;
+    for (int i = 1; i < argc; i++) {
+        if (tx_eqz(argv[i], "--tool") && i + 1 < argc) { g_tool_bin = argv[++i]; continue; }
+        if (tx_eqz(argv[i], "--mode") && i + 1 < argc) { mode = argv[++i]; continue; }
+        argv[w++] = argv[i];
+    }
+    argc = w;
+    if (mode && !tx_eqz(mode, "basic") && !tx_eqz(mode, "split2")) { sy_eprintf("check-install-ape: unknown --mode %s\n", mode); return 2; }
+    int do_basic = !mode || tx_eqz(mode, "basic"), do_split2 = !mode || tx_eqz(mode, "split2");
     int a = argc >= 2 && tx_eqz(argv[1], "--") ? 2 : 1;
     int have_ape = 0;
     if (sy_realpath(argc > a ? argv[a] : ".", g_root, (int)sizeof g_root) < 0) { sy_eprintf("check-install-ape: root\n"); return 2; }
@@ -408,6 +424,7 @@ int main(int argc, char **argv) {
     if (cx_fmt(launcher, sizeof launcher, "%s/launcher.sh", work)) return 2;
     if (write_file(com, "#!/bin/sh\necho old-launcher\n", 0755)) return 2;
 
+    if (do_basic) {
     sha_of(com, h0);
     /* neg: no footer, right sha */
     if (write_file(launcher, "#!/bin/sh\necho unisacc 0.0.0\n", 0755)) return 2;
@@ -415,13 +432,14 @@ int main(int argc, char **argv) {
     ck(tool(root, launcher, want, 1, out, (int)sizeof out) == 1 && has(out, "no-UNIPKG1-footer"), "neg-no-footer", out);
     sha_of(com, h1);
     ck(tx_eqz(h0, h1), "neg-no-footer-left-old-file", "unisacc.com changed");
+    }
 
     if (!have_ape) {
-        say("NOT_RUN", "positive-cases", "no footered APE available (ROOT/unisacc.com is the launcher script and no APE argument)");
-        notrun++;
+        ck(0, "ape-present", "no footered APE available (fail-closed: missing APE must fail)");
     } else {
         char real[65]; long ape_bytes = 0;
         { size_t n = 0; char *b = cx_read(ape, &n); if (!b) return 2; ape_bytes = (long)n; cx_sha256_hex(b, n, real); mm_free(b); }
+        if (do_basic) {
         /* neg: wrong sha */
         ck(tool(root, ape, "0000000000000000000000000000000000000000000000000000000000000000", 1, out, (int)sizeof out) == 1 && has(out, "sha-mismatch"), "neg-sha-mismatch", out);
         sha_of(com, h1);
@@ -455,6 +473,8 @@ int main(int argc, char **argv) {
         sha_of(dev, h1);
         ck(tx_eqz(h0, h1), "keep-existing-dev", "unisacc-dev was overwritten");
         (void)junk;
+        }
+        if (do_split2) {
         /* build.json sync and rollback: a root with a split2 record and a unisacc.com.dev directory */
         {   char bj[4400], bjp[4400], sdir[4400], sprev[4400], rb[4400], first[65], back[65], text[2048];
             size_t tn = 0; char *t;
@@ -462,7 +482,8 @@ int main(int argc, char **argv) {
             if (cx_fmt(bj, sizeof bj, "%s/unisacc.com.build.json", root) || cx_fmt(bjp, sizeof bjp, "%s/unisacc.com.build.json.split-prev", root) ||
                 cx_fmt(sdir, sizeof sdir, "%s/unisacc.com.dev", root) || cx_fmt(sprev, sizeof sprev, "%s/unisacc.com.dev.split-prev", root) ||
                 cx_fmt(rb, sizeof rb, "%s/rollback.out", work)) return 2;
-            if (write_file(com, "#!/bin/sh\necho third-launcher\n", 0755) || sy_unlink(dev)) return 2;
+            if (write_file(com, "#!/bin/sh\necho third-launcher\n", 0755)) return 2;
+            (void)sy_unlink(dev);
             if (sy_mkdir(sdir, 0755)) return 2;
             if (record_fixture(bj, 1, "split2", "aa")) return 2;
             sha_of(com, h0); sha_of(bj, first);
@@ -578,7 +599,9 @@ int main(int argc, char **argv) {
                 ck(tool_args(ra, out, (int)sizeof out) == 1 && has(out, "no-candidate-backup"), "rollback-without-backup-refuses", out);
                 sha_of(com, back);
                 ck(tx_eqz(back, hb) && sy_exists(dev) == 1, "rollback-without-backup-left-root-alone", back); }
-            v[k++] = "sh"; v[k++] = "./unisacc.com"; v[k++] = g_tool; v[k++] = "--"; v[k++] = root; v[k++] = "--rollback-split"; v[k++] = "--write"; v[k] = 0;
+            if (g_tool_bin && g_tool_bin[0]) { v[k++] = (char *)g_tool_bin; }
+            else { v[k++] = "sh"; v[k++] = "./unisacc.com"; v[k++] = g_tool; v[k++] = "--"; }
+            v[k++] = root; v[k++] = "--rollback-split"; v[k++] = "--write"; v[k] = 0;
             rrc = pr_run_merged(v, 50, out, (int)sizeof out, &cut);
             ck(rrc == 0 && has(out, "ROLLED_BACK"), "rollback", out);
             sha_of(com, back);
@@ -623,6 +646,8 @@ int main(int argc, char **argv) {
             }
             (void)rb;
         }
+        }
+        if (do_basic) {
         /* The candidate Root lives outside every removal whitelist (temp roots, <repo>/out, .trash, the chains cache),
            like the real Root: a private mkdtemp directory under $HOME/.cache.  Backup removal must work there. */
         {   const char *home = sy_env("HOME");
@@ -637,6 +662,7 @@ int main(int argc, char **argv) {
                 /* bring the private fixture under the temp scratch, then remove both with the bounded safedel below */
                 if (cx_fmt(cache, sizeof cache, "%s/croot-moved", work) || sy_rename(cwork, cache)) sy_eprintf("check-install-ape: private fixture %s kept\n", cwork);
             }
+        }
         }
     }
     {   char why[200]; /* two copied tools/cx/ext trees exceed cx_rmtree's default ceiling of 1000 entries */

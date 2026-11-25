@@ -1,0 +1,366 @@
+/* Usage: seal-precheck.cx -- EVIDENCE_DIR. See plans/seal-precheck.md. */
+#pragma unisa use sys.fs
+#pragma unisa use sys.posix
+#pragma unisa use text.fmt
+
+static const char *root, *ape;
+static const char *targets[]={"lnx/x86_64","lnx/arm64","osx/x86_64","osx/arm64","win/x86_64","win/arm64"};
+static const char *statuses[]={"PASS","FAIL","UNKNOWN","INVALID"};
+static const char *ids[8192];
+static const char *batch_ape[8192];
+static int state[8192], witnessed[8192], segment[8192], counts[4], nb, passed;
+static const char *strict_header="batch\tdomain\tstatus\trc\tcandidate\tms\tload1\tretries\tnote";
+typedef struct { char *next; const char *error; } seal_table;
+
+static char *seal_next(seal_table *t) {
+    while (t->next && *t->next) {
+        char *r=t->next;
+        t->next=strchr(r,'\n');
+        *t->next++=0;
+        if (*r && *r!='#') return r;
+    }
+    return 0;
+}
+static int seal_relative(const char *s) {
+    if (!*s || *s=='/' || s[strlen(s)-1]=='/') return 0;
+    while (*s) {
+        size_t n=strcspn(s,"/");
+        if (!n || (n==1 && *s=='.') || (n==2 && !strncmp(s,"..",2))) return 0;
+        s+=n;
+        if (*s) s++;
+    }
+    return 1;
+}
+static seal_table seal_open(const char *name,const char *header,const char *missing) {
+    char path[4096], real[4096];
+    size_t n=0;
+    sy_stat_t st;
+    seal_table t={0,missing};
+    if (!seal_relative(name) || cx_fmt(path,sizeof path,"%s/%s",root,name)) return t;
+    if (sy_realpath(path,real,sizeof real)<0 || strcmp(path,real)) return t;
+    if (sy_lstat(path,&st) || st.kind!='f' || st.size<=0 || st.size>16777216) return t;
+    char *s=cx_read(path,&n);
+    if (!s || !n) return t;
+    t.error="malformed-table";
+    if (n>16777216 || s[n-1]!='\n' || memchr(s,0,n) || memchr(s,'\r',n)) return t;
+    t.next=s;
+    char *row=header?seal_next(&t):s;
+    if (row && (!header || !strcmp(header,row))) t.error=0;
+    return t;
+}
+static int seal_split(char *s,char **f,int cap) {
+    int n=0;
+    while (s && n<cap) {
+        f[n++]=s;
+        s=strchr(s,'\t');
+        if (s) *s++=0;
+    }
+    return s?-1:n;
+}
+static int seal_find(const char *s,const char **list,int n) {
+    for (int i=0;i<n;i++) if (!strcmp(s,list[i])) return i;
+    return -1;
+}
+static long seal_num(const char *s) {
+    long n=0;
+    if (!*s || strlen(s)>10) return -1;
+    while (*s) {
+        if (*s<'0' || *s>'9') return -1;
+        n=n*10+*s++-'0';
+    }
+    return n;
+}
+static int seal_sha(const char *s) {
+    return strlen(s)==64 && strspn(s,"0123456789abcdef")==64;
+}
+static const char *seal_summary(char **f,int n,int part,int nlocal) {
+    const char *keys[]={"batches=","PASS=","FAIL=","UNKNOWN=","INVALID="};
+    int wanted[]={nlocal,0,0,0,0};
+    for (int i=0;i<nb;i++) if (segment[i]==part) wanted[1+state[i]]++;
+    if (!nlocal || n<7) return "invalid-strict-summary";
+    for (int i=0;i<5;i++) {
+        size_t k=strlen(keys[i]);
+        if (strncmp(f[i+1],keys[i],k) || seal_num(f[i+1]+k)!=wanted[i]) return "strict-count-mismatch";
+    }
+    const char *current=0;
+    for (int i=6;i<n;i++) if (!strncmp(f[i],"ape_sha256=",11)) {
+        if (current || !seal_sha(f[i]+11)) return "invalid-strict-candidate";
+        current=f[i]+11;
+    }
+    if (!current || (ape && strcmp(ape,current))) return "strict-summary-candidate-mismatch";
+    ape=current;
+    return 0;
+}
+static int seal_raw(char **f,int n,int last) {
+    if (last<0 || n<6 || strcmp(f[1],"BATCH_RUN")) return 0;
+    const char *keys[]={"id=","status=","rc=","candidate="};
+    const char *values[]={ids[last],"PASS","0",batch_ape[last]};
+    int mask=0;
+    for (int i=2;i<n;i++) for (int j=0;j<4;j++) {
+        size_t k=strlen(keys[j]);
+        if (strncmp(f[i],keys[j],k)) continue;
+        if ((mask&(1<<j)) || strcmp(f[i]+k,values[j])) return 0;
+        mask|=1<<j;
+    }
+    return mask==15;
+}
+static const char *seal_strict(void) {
+    seal_table t=seal_open("strict.tsv",strict_header,"missing-strict");
+    if (t.error) return t.error;
+    char *r;
+    int part=1, done=0, nlocal=0, last=-1;
+    while ((r=seal_next(&t))) {
+        if (!strcmp(r,strict_header)) {
+            if (!done) return "incomplete-strict-segment";
+            part++;
+            done=0;
+            nlocal=0;
+            last=-1;
+            continue;
+        }
+        char *f[64];
+        int n=seal_split(r,f,64);
+        if (n<2) return "malformed-strict-row";
+        if (!strcmp(f[0],"RAW")) {
+            if (done || last<0) return "orphan-strict-raw";
+            witnessed[last]=seal_raw(f,n,last);
+            last=-1;
+            continue;
+        }
+        if (!strcmp(f[0],"COUNT") ||
+            !strcmp(f[0],"NETREGEN_DIFF") || !strcmp(f[0],"CHECKPOINT")) continue;
+        if (done) return "strict-row-after-summary";
+        last=-1;
+        if (!strcmp(f[0],"SUMMARY")) {
+            const char *error=seal_summary(f,n,part,nlocal);
+            if (error) return error;
+            done=1;
+            continue;
+        }
+        int k=n==9?seal_find(f[2],statuses,4):-1;
+        if (k<0 || !*f[0]) return "invalid-strict-batch";
+        if (k==0 && (!seal_sha(f[4]) || strcmp(f[3],"0"))) return "invalid-strict-pass";
+        int i=seal_find(f[0],ids,nb);
+        if (i<0) {
+            if (nb==8192) return "strict-batch-capacity";
+            i=nb++;
+            ids[i]=f[0];
+        }
+        if (segment[i]!=part) nlocal++;
+        segment[i]=part;
+        batch_ape[i]=f[4];
+        witnessed[i]=0;
+        state[i]=k;
+        last=i;
+    }
+    if (!done || !nb || !ape) return "missing-strict-summary-or-batches";
+    for (int i=0;i<nb;i++) {
+        counts[state[i]]++;
+        if (!state[i] && (!witnessed[i] || strcmp(batch_ape[i],ape))) return "strict-pass-receipt-mismatch";
+    }
+    return 0;
+}
+static const char *seal_expected(int unknown,int *matched) {
+    seal_table t=unknown?seal_open("expected-unmeasured.tsv","batch\treason\tevidence","missing-expected-unmeasured"):
+        seal_open("expected-fail.tsv","batch\texpected\treason","missing-expected-fail");
+    if (t.error) return t.error;
+    int seen[8192]={0};
+    char *r;
+    while ((r=seal_next(&t))) {
+        char *f[3];
+        if (seal_split(r,f,3)!=3 || !*f[0] || !*f[1] || !*f[2]) return "invalid-expectation";
+        int i=seal_find(f[0],ids,nb);
+        if (i<0) continue;
+        if (seen[i]++) return "duplicate-expectation";
+        if ((!unknown && state[i]==1) || (unknown && state[i]==2 && !strcmp(f[1],"no-producer"))) (*matched)++;
+    }
+    return 0;
+}
+static const char *seal_claims(int *claims) {
+    const char *h="id\tversion\tkind\tstate\tsubject\tmissing\taction\twrite_domain\towner\tevidence\tupdated";
+    seal_table t=seal_open("state-unverified.tsv",h,"missing-unverified");
+    if (t.error) return t.error;
+    const char *kinds[]={"stale-claim","no-run","provenance","violation","flaky","pre-existing-bug","e2e-dry",
+        "compiler-gap","product-gap","contract-gap","oracle-gap","coverage-gap","ratchet-debt","planned",
+        "hygiene","process-gap","harness-gap"};
+    int totals[17]={0}, n=0;
+    const char *seen[2048];
+    char *r;
+    while ((r=seal_next(&t))) {
+        char *f[11];
+        if (seal_split(r,f,11)!=11 || !*f[0] || n==2048 || seal_find(f[0],seen,n)>=0) return "invalid-unverified-row";
+        seen[n++]=f[0];
+        int k=seal_find(f[2],kinds,17);
+        if (k<0) return "unknown-unverified-kind";
+        if (!strcmp(f[3],"CLOSED") && *f[9] && strcmp(f[9],"-")) continue;
+        if (strcmp(f[3],"OPEN") && strcmp(f[3],"UNVERIFIED")) return "invalid-unverified-state";
+        totals[k]++;
+        if (k<7 || (k==16 && !strcmp(f[0],"U21"))) (*claims)++;
+    }
+    for (int i=0;i<17;i++) printf("SEAL_KIND\t%s\t%d\n",kinds[i],totals[i]);
+    return n?0:"missing-unverified-rows";
+}
+static const char *seal_ledger(int *open) {
+    seal_table t=seal_open("p0-ledger.tsv",0,"missing-p0-ledger");
+    if (t.error) return t.error;
+    char *r=seal_next(&t);
+    const char *legacy="id\t描述\t等级\t关闭车\t证据";
+    const char *current="id\t描述\t等级\t关闭车\t证据\tstate\tclosure_evidence";
+    int cols=r && !strcmp(r,current)?7:5;
+    if (!r || (cols==5 && strcmp(r,legacy))) return "invalid-p0-header";
+    int n=0;
+    const char *seen[2048];
+    while ((r=seal_next(&t))) {
+        char *f[7];
+        if (seal_split(r,f,7)!=cols || !*f[0] || !*f[2] || n==2048 || seal_find(f[0],seen,n)>=0) return "invalid-p0-row";
+        seen[n++]=f[0];
+        if (cols==7 && !strcmp(f[5],"CLOSED")) {
+            seal_table proof=seal_open(f[6],0,"missing-p0-closure-proof");
+            if (proof.error) return proof.error;
+        } else {
+            if (cols==7 && strcmp(f[5],"OPEN")) return "invalid-p0-state";
+            if (!strcmp(f[2],"P0")) (*open)++;
+        }
+    }
+    return n?0:"missing-p0-rows";
+}
+static const char *seal_checklist(int *usable) {
+    seal_table t=seal_open("checklist.tsv","item\tcategory\tbatch","missing-checklist");
+    if (t.error) return t.error;
+    const char *cats[]={"2.1","2.2","2.3","2.4","2.5"};
+    int used[30]={0}, linked[8192]={0}, quota[]={8,8,6,4,4};
+    char *r;
+    while ((r=seal_next(&t))) {
+        char *f[3];
+        if (seal_split(r,f,3)!=3) return "invalid-checklist-row";
+        long id=seal_num(f[0]);
+        int k=seal_find(f[1],cats,5), b=seal_find(f[2],ids,nb);
+        if (id<1 || id>30 || k<0 || used[id-1]++ || --quota[k]<0) return "invalid-checklist-mapping";
+        if (b<0) return "missing-checklist-batch";
+        if (linked[b]++) return "duplicate-checklist-batch";
+        if (!state[b]) (*usable)++;
+    }
+    for (int i=0;i<5;i++) if (quota[i]) return "missing-checklist-rows";
+    return 0;
+}
+static const char *seal_fixed(const char *name) {
+    seal_table t=seal_open(name,0,"missing-fixedpoint-evidence");
+    if (t.error) return t.error;
+    char *r=seal_next(&t);
+    const char *old="target\tg2_rel\tg2_sha256\tg3_sha256\tbytes\tverdict";
+    const char *now="target\tg2_path\tg2_sha256\tg3_path\tg3_sha256\tbytes\tverdict";
+    int cols=r && !strcmp(r,now)?7:6, mask=0;
+    if (!r || (cols==6 && strcmp(r,old))) return "invalid-fixedpoint-header";
+    while ((r=seal_next(&t))) {
+        if (!strncmp(r,"CHAIN\t",6)) continue;
+        char *f[7];
+        if (seal_split(r,f,7)!=cols) return "invalid-fixedpoint-row";
+        int i=seal_find(f[0],targets,6);
+        if (i<0 || (mask&(1<<i)) || !seal_relative(f[1]) ||
+            (cols==7 && !seal_relative(f[3])) || !seal_sha(f[2]) ||
+            strcmp(f[2],f[cols-3]) || seal_num(f[cols-2])<=0 || strcmp(f[cols-1],"SAME")) return "fixedpoint-target-mismatch";
+        mask|=1<<i;
+    }
+    return mask==63?0:"missing-fixedpoint-target";
+}
+typedef struct {
+    int releases, ci, frontend, timings, published;
+    const char *versions[3], *timed[3], *errors[4];
+} seal_evidence;
+
+static const char *seal_release(seal_evidence *e,char **f) {
+    int i=e->releases;
+    if (i==3 || seal_find(f[1],e->versions,i)>=0) return "invalid-release-order";
+    if (strcmp(f[2],"PUBLISHED") && (i!=2 || strcmp(f[2],"CANDIDATE"))) return "invalid-release-state";
+    const char *error=seal_fixed(f[4]);
+    if (error) e->errors[0]=error;
+    if (i==2 && (!ape || strcmp(f[3],ape))) e->errors[0]="fixedpoint-candidate-mismatch";
+    if (!strcmp(f[2],"PUBLISHED")) e->published++;
+    e->versions[e->releases++]=f[1];
+    return 0;
+}
+static const char *seal_timing(seal_evidence *e,char **f,int proof) {
+    int i=e->timings;
+    if (i==3 || seal_find(f[1],e->timed,i)>=0) return "invalid-timing-version";
+    char *end=strchr(f[2],'/');
+    if (!end) return "invalid-timing-row";
+    *end++=0;
+    long start=seal_num(f[2]), finish=seal_num(end);
+    if (!proof || start<=0 || finish<start || finish-start>7200) e->errors[3]="public-wall-clock-over-limit-or-missing";
+    e->timed[e->timings++]=f[1];
+    return 0;
+}
+static const char *seal_attest(seal_evidence *e) {
+    seal_table t=seal_open("seal-evidence.tsv","kind\tkey\tvalue\tape_sha256\tref","missing-seal-evidence");
+    if (t.error) return t.error;
+    const char *phases[]={"A","B1","B2"};
+    char *r;
+    while ((r=seal_next(&t))) {
+        char *f[5];
+        if (seal_split(r,f,5)!=5 || !*f[1] || !*f[2] || !seal_relative(f[4])) return "invalid-evidence-row";
+        if (!strcmp(f[0],"release")) {
+            const char *error=seal_release(e,f);
+            if (error) return error;
+            continue;
+        }
+        seal_table proof=seal_open(f[4],0,"missing-evidence-reference");
+        if (!strcmp(f[0],"ci")) {
+            int i=seal_find(f[1],targets,6);
+            if (i<0 || (e->ci&(1<<i))) return "invalid-ci-target";
+            e->ci|=1<<i;
+            if (proof.error || strcmp(f[2],"QUALIFIED") || !ape || strcmp(f[3],ape)) e->errors[1]="ci-target-not-qualified";
+        } else if (!strcmp(f[0],"frontend")) {
+            int i=seal_find(f[1],phases,3);
+            if (i<0 || (e->frontend&(1<<i))) return "invalid-frontend-phase";
+            e->frontend|=1<<i;
+            if (proof.error || strcmp(f[2],"PASS")) e->errors[2]="frontend-phase-incomplete";
+        } else if (!strcmp(f[0],"timing")) {
+            const char *error=seal_timing(e,f,!proof.error);
+            if (error) return error;
+        } else return "unknown-evidence-kind";
+    }
+    return 0;
+}
+static void seal_gate(int n,const char *error) {
+    printf("SEAL_GATE\t%d\t%s\treason=%s\n",n,error?"REFUSE":"PASS",error?error:"-");
+    if (!error) passed++;
+}
+int main(int argc,char **argv) {
+    if (argc!=2) { fprintf(stderr,"SEAL_PRECHECK\tREFUSE\treason=usage\n"); return 2; }
+    char canonical[4096];
+    if (sy_realpath(argv[1],canonical,sizeof canonical)<0) {
+        for (int i=1;i<=7;i++) seal_gate(i,"missing-evidence-directory");
+        printf("SEAL_PRECHECK\tREFUSE\tpassed=0\tfailed=7\n");
+        return 2;
+    }
+    root=canonical;
+    int expected=0, registered=0, p0=0, claims=0, usable=0;
+    const char *strict=seal_strict();
+    const char *fail=seal_expected(0,&expected), *unknown=seal_expected(1,&registered);
+    seal_evidence e={0};
+    const char *evidence=seal_attest(&e);
+    seal_gate(1,evidence?evidence:e.releases!=3?"missing-release-rows":e.errors[0]);
+    const char *qualified=strict?strict:fail?fail:unknown;
+    if (!qualified && (counts[1] || counts[2] || counts[3])) qualified="strict-nonpass";
+    if (!qualified) qualified=evidence?evidence:e.ci!=63?"missing-ci-cells":e.errors[1];
+    printf("SEAL_STRICT\tFAIL=%d\tUNKNOWN=%d\tINVALID=%d\texpected_fail=%d\tregistered_no_producer=%d\n",
+        counts[1],counts[2],counts[3],expected,registered);
+    seal_gate(2,qualified);
+    const char *ledger=seal_ledger(&p0);
+    printf("SEAL_P0\topen=%d\n",p0);
+    seal_gate(3,ledger?ledger:p0?"open-p0":0);
+    const char *unverified=seal_claims(&claims);
+    printf("SEAL_UNVERIFIED\tclaim_count=%d\tlimit=3\n",claims);
+    seal_gate(4,unverified?unverified:claims>3?"claim-limit":0);
+    seal_gate(5,evidence?evidence:e.frontend!=7?"missing-frontend-phases":e.errors[2]);
+    const char *timing=evidence?evidence:e.timings!=3 || e.published!=3?"missing-public-timings":e.errors[3];
+    if (!timing) for (int i=0;i<3;i++) {
+        if (strcmp(e.timed[i],e.versions[i])) timing="timing-release-order-mismatch";
+    }
+    seal_gate(6,timing);
+    const char *checklist=strict?strict:seal_checklist(&usable);
+    printf("SEAL_CHECKLIST\tPASS=%d/30\tmin=25\n",usable);
+    seal_gate(7,checklist?checklist:usable<25?"checklist-below-threshold":0);
+    printf("SEAL_PRECHECK\t%s\tpassed=%d\tfailed=%d\n",passed==7?"PASS":"REFUSE",passed,7-passed);
+    return passed==7?0:2;
+}

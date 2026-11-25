@@ -8,14 +8,15 @@
 #pragma unisa use sysx.run
 #pragma unisa use sys.posix
 #pragma unisa use sys.env
+#pragma unisa use mem.heap
 
 static int failed;
 static void ck(int ok, const char *name) { if (!ok) failed++; printf("%s\tslice-migration-gen.%s\n", ok ? "PASS" : "FAIL", name); }
-static int run(const char *arg, char *err, long cap) {
+static int run_in(const char *dir, const char *arg, char *err, long cap) {
     char *argv[] = {"sh", "./unisacc.com", "tools/slice-migration-gen.cx", "--", (char *)arg, 0};
     int ofd, efd, pid, ex = 0, code = 0, sig = 0; long n = 0, r; char junk[4096];
     if (!arg) argv[3] = 0;
-    pid = px_spawn_spool(argv, 0, SY_SPAWN_STDERR_SPLIT, &ofd, &efd);
+    pid = px_spawn_spool(argv, dir, SY_SPAWN_STDERR_SPLIT, &ofd, &efd);
     if (pid < 0) return -1;
     while ((r = sy_read(efd, err + n, cap - 1 - n)) > 0) n += r;
     err[n] = 0;
@@ -24,6 +25,7 @@ static int run(const char *arg, char *err, long cap) {
     if (sy_wait_status(pid, 0, &ex, &code, &sig) != pid || !ex) return -1;
     return code;
 }
+static int run(const char *arg, char *err, long cap) { return run_in(0, arg, err, cap); }
 static int has(const char *b, long n, const char *s) {
     long m = tx_len(s, 256), i, j;
     if (!b || !s || m <= 0 || m > n) return 0;
@@ -44,6 +46,52 @@ int main(void) {
         && has(d, (long)dn, "\n## 4. 需要新建的生成器") && has(d, (long)dn, "\n## 5. 与 M10b"), "five-sections");
     ck(d && has(d, (long)dn, "| 1 | m25.o `cx/compiler/rtsharedname.cx` |"), "pilot-rtsharedname-first");
     ck(d && has(d, (long)dn, "合计:99 单元") && has(d, (long)dn, "对照(2026-11-07 旧基线 `88f265cc17`"), "total-99-and-baseline-diff");
+    {   char root[4096], tmp[4400], p[4400], q[4400]; size_t un = 0, fn = 0; char *ut, *ft;
+        if (sy_realpath(".", root, sizeof root) >= 0 && !sy_mkdtemp(sy_tmpdir(), "u08-sm-", tmp, sizeof tmp)) {
+            const char *links[] = {"unisacc.com", "tools", "cx", "ext", "src", "cxroot.tsv", 0};
+            if (!cx_fmt(p, sizeof p, "%s/plans", tmp) && !sy_mkdir(p, 0755)) {
+                for (int i = 0; links[i]; i++) {
+                    if (!cx_fmt(p, sizeof p, "%s/%s", root, links[i]) && !cx_fmt(q, sizeof q, "%s/%s", tmp, links[i])) (void)sy_symlink(p, q);
+                }
+                ut = cx_read("plans/unit-text.tsv", &un);
+                if (ut && !cx_fmt(p, sizeof p, "%s/plans/unit-text.tsv", tmp)) (void)cx_write(p, ut, un);
+                if (d && !cx_fmt(p, sizeof p, "%s/plans/slice-nn-migration.md", tmp)) (void)cx_write(p, d, dn);
+                ft = cx_read("plans/slice-units.tsv", &fn);
+                if (ft && fn > 0) {
+                    long nl = 0, t1 = -1, t2 = -1;
+                    while (nl < (long)fn) {
+                        long e = nl; while (e < (long)fn && ft[e] != '\n') e++;
+                        if (e > nl && ft[nl] != '#' && !(e - nl >= 4 && ft[nl] == 'k' && ft[nl+1] == 'e' && ft[nl+2] == 'y' && ft[nl+3] == '\t')) {
+                            t1 = nl; while (t1 < e && ft[t1] != '\t') t1++;
+                            if (t1 < e) { t1++; t2 = t1; while (t2 < e && ft[t2] != '\t') t2++; }
+                            if (t2 > t1 && t2 <= e) break;
+                            t1 = -1; t2 = -1;
+                        }
+                        nl = e < (long)fn ? e + 1 : e;
+                    }
+                    if (t1 > 0 && t2 > t1 && !cx_fmt(p, sizeof p, "%s/plans/slice-units.tsv", tmp)) {
+                        const char *bad = "cx/compiler/no_such_u08_source.cx";
+                        long bl = tx_len(bad, 128), nlen = (long)fn - (t2 - t1) + bl;
+                        char *nb = mm_alloc((size_t)nlen + 1);
+                        if (nb) {
+                            long k = 0;
+                            for (long j = 0; j < t1; j++) nb[k++] = ft[j];
+                            for (long j = 0; j < bl; j++) nb[k++] = bad[j];
+                            for (long j = t2; j < (long)fn; j++) nb[k++] = ft[j];
+                            if (cx_write(p, nb, (size_t)k) == 0) {
+                                rc = run_in(tmp, "--check", e, sizeof e);
+                                ck(rc != 0 && has(e, tx_len(e, sizeof e), "source-missing") && has(e, tx_len(e, sizeof e), bad), "source-missing-refused");
+                            } else { ck(0, "source-missing-refused"); }
+                            mm_free(nb);
+                        } else { ck(0, "source-missing-refused"); }
+                    } else { ck(0, "source-missing-refused"); }
+                } else { ck(0, "source-missing-refused"); }
+                if (ut) mm_free(ut);
+                if (ft) mm_free(ft);
+            } else { ck(0, "source-missing-refused"); }
+            (void)sy_remove_all(tmp);
+        } else { ck(0, "source-missing-refused"); }
+    }
     printf("CHECK_SLICE_MIGRATION_GEN\tfailed=%d\n", failed);
     return failed ? 1 : 0;
 }

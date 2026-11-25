@@ -256,6 +256,114 @@ static int kit_fixture(void) {
     printf("CHECK_DVQUALIFY\tpass=%d\tfail=%d\n",passed,failed);
     return !!failed;
 }
+/* The scripted product exits before its fixture package bytes. */
+static int selector_ape(const char *path, const char *script) {
+    static const char payload[]="P 3 selector fixture\n";
+    char footer[16]="UNIPKG1\n";
+    footer[8]=sizeof payload-1;
+    return sy_write_file(path,script,strlen(script),0755) ||
+           sy_append_file(path,payload,sizeof payload-1,0755) || sy_append_file(path,footer,sizeof footer,0755);
+}
+
+/* Drive both selector phases through real tq_native and the on-disk cache.
+ * The scripted APE emits a plan and installs an executable without a cold compile. */
+static int selector_fixture(void) {
+    char tools[4500],src[4500],dst[4500],ape[4500],ape2[4500],bare[4500],cache[4500],builds[4500],runs[4500],layout[4400]="";
+    char companion[4500];
+    char changed[4096];
+    const char *launcher=
+        "#!/bin/sh\n"
+        "case \"$1\" in\n"
+        " --version) echo 'unisacc 9.9.9-selector';;\n"
+        " -cx-plan) [ \"$0\" = \"$PWD/unisacc.com\" ] || exit 2\n"
+        "   printf '0\\t%s\\n1\\ttools/selector-unit.cx\\n' \"$2\";;\n"
+        " tools/affected.cx|*/tools/affected.cx) [ \"$2\" = -o ] || exit 2\n"
+        "   model=$(cat \"${UNISA_CONTAINER:-tests/selector-companion.bin}\") || exit 2\n"
+        "   printf B >> \"$TMPDIR/selector-builds\"\n"
+        "   { printf '#!/bin/sh\\nmodel=%s\\n' \"$model\" && cat \"${0%/*}/tools/selector.native\"; } > \"$3\" && chmod 700 \"$3\";;\n"
+        " *) exit 2;;\n"
+        "esac\nexit\n";
+    const char *selector=
+        /* The launcher inserts a shebang and the model value before this body. */
+        "[ \"$1\" = --ids ] && [ \"$2\" = alpha ] && [ \"$3\" = --native-run-batch ] || exit 2\n"
+        "if [ \"$4\" = --prep-only ]; then printf 'PREPARED\\tnative-run-batch\\tfixture\\n'; exit 0; fi\n"
+        "[ \"$4\" = --prepare-materials ] && [ \"$5\" = --run ] || exit 2\n"
+        "printf X >> \"$TMPDIR/selector-runs\"\n"
+        "s=$(sha256sum ./unisacc.com); printf 'BATCH_RUN\\tid=alpha\\tstatus=PASS\\trc=0\\tcandidate=%s\\tmarker=%s\\n' \"${s%% *}\" \"$model\"\n";
+    if(cx_fmt(tools,sizeof tools,"%s/tools",repo) || sy_mkdir(tools,0700) ||
+       cx_fmt(src,sizeof src,"%s/tools/affected.cx",root) || cx_fmt(dst,sizeof dst,"%s/affected.cx",tools) ||
+       sy_copy(src,dst,0644) ||
+       cx_fmt(ape,sizeof ape,"%s/selector-ape.com",tmp) || selector_ape(ape,launcher) ||
+       cx_fmt(ape2,sizeof ape2,"%s/selector-ape2.com",tmp) ||
+       cx_fmt(changed,sizeof changed,"%s\n# Different candidate APE bytes.\n",launcher) ||
+       selector_ape(ape2,changed) || cx_fmt(bare,sizeof bare,"%s/selector-bare.com",tmp) ||
+       sy_write_file(bare,launcher,strlen(launcher),0755) ||
+       cx_fmt(cache,sizeof cache,"UNISACC_TOOLPREP_CACHE=%s/selector-cache",tmp) ||
+       cx_fmt(builds,sizeof builds,"%s/selector-builds",tmp) || cx_fmt(runs,sizeof runs,"%s/selector-runs",tmp) ||
+       put(tools,"bound","#!/bin/sh\nshift\nexec \"$@\"\n",0755) ||
+       put(tools,"selector.native",selector,0755) ||
+       put(tools,"selector-unit.cx","const char *selector_path(void) { return \"relative\"; }\n",0644))return 2;
+    if(put(repo,"tests/selector.container","model-a\n",0644) ||
+       put(repo,"tests/selector-companion.bin","side-a\n",0644) ||
+       cx_fmt(companion,sizeof companion,"%s/tests/selector-companion.bin",repo))return 2;
+    char *commit[]={"git","-C",repo,"-c","user.name=f","-c","user.email=f@localhost","-c","commit.gpgsign=false",
+                    "commit","-q","--allow-empty","-m","selector fixture",0};
+    enum { BASE, SAME, SAME_BYTES, NEW_CLOSURE, NEW_CONTAINER, NEW_APE, FILE_MACRO, SAME_MACRO,
+           SIDE_A, SIDE_B, SIDE_MISSING };
+    static const struct { const char *label, *model; int new_layout, hit, builds; } cases[]={
+        {"selector-first-builds",                   "model-a",1,0,1},
+        {"selector-second-reuses-same-layout",      "model-a",0,1,1},
+        {"selector-cross-layout-same-bytes-reuses", "model-a",1,1,1},
+        {"selector-cross-layout-new-closure-builds","model-a",1,0,2},
+        {"selector-cross-layout-new-container-builds","model-b",1,0,3},
+        {"selector-new-candidate-builds",           "model-b",1,0,4},
+        {"selector-path-macro-first-builds",        "model-b",1,0,5},
+        {"selector-path-macro-still-disables-reuse", "model-b",0,0,6},
+        {"selector-external-companion-first-builds","side-a",1,0,7},
+        {"selector-external-companion-changed-builds","side-b",1,0,8},
+        {"selector-external-companion-missing-refused",0,1,0,8},
+    };
+    for(size_t i=0;i<sizeof cases/sizeof cases[0];i++){
+        if(i==NEW_CLOSURE && put(tools,"selector-unit.cx","const char *selector_path(void) { return \"changed\"; }\n",0644))return 2;
+        if(i==NEW_CONTAINER && put(repo,"tests/selector.container","model-b\n",0644))return 2;
+        if(i==FILE_MACRO && put(tools,"selector-unit.cx","const char *selector_path(void) { return __" "FILE__; }\n",0644))return 2;
+        if(i==SIDE_A && put(tools,"selector-unit.cx","const char *selector_path(void) { return \"changed\"; }\n",0644))return 2;
+        if(i==SIDE_B && put(repo,"tests/selector-companion.bin","side-b\n",0644))return 2;
+        if(i==SIDE_MISSING && sy_unlink(companion))return 2;
+        if(i==BASE || i==SAME_BYTES || i==NEW_CLOSURE || i==NEW_CONTAINER || i==FILE_MACRO || i>=SIDE_A){
+            int rc;
+            if(!git("add","-A","--","tools","tests") || !runv(commit,0,10,&rc) || rc)return 2;
+        }
+        char *v[]={"env",cache,"DVQUALIFY_NATIVE_RUN_BATCH=1","DEVSVC_SOCK=",
+                   i>=SIDE_A ? "UNISA_CONTAINER=" : "UNISA_CONTAINER=tests/selector.container",
+                   bin,repo,"--candidate",i>=SIDE_A ? bare : i<NEW_APE ? ape : ape2,"--ids","alpha","--out",ev,0};
+        int rc; char current[4400], marker[32];
+        if(!runv(v,root,12,&rc))return 2;
+        char *e=cx_read(ev,0);
+        int matched=e && !evidence_layout(e,current,sizeof current) &&
+                    (cases[i].new_layout ? strcmp(current,layout)!=0 : !strcmp(current,layout));
+        if(i==SIDE_MISSING){
+            check(cases[i].label,matched && rc==1 && has(out,"NATIVE_RUNBATCH_FALLBACK\treason=selector-preparation") &&
+                  !has(out,"QUALIFY_SELECTOR_PREP\t") && !has(e,"\nRAW\tBATCH_RUN\tid=alpha\t") &&
+                  has(e,"\nSUMMARY\tbatches=1\tPASS=0\tFAIL=0\tUNKNOWN=1\tINVALID=0"));
+            free(e);continue;
+        }
+        int ran=matched && !cx_fmt(layout,sizeof layout,"%s",current) &&
+                has(out,cases[i].new_layout ? "QUALIFY_LAYOUT_MATERIAL\tprepared\t" : "QUALIFY_LAYOUT_MATERIAL\treused\t") &&
+                !cx_fmt(marker,sizeof marker,"\tmarker=%s\n",cases[i].model) && has(e,marker) &&
+                has(e,"\nRAW\tBATCH_RUN\tid=alpha\tstatus=PASS\t") && has(out,"QUALIFY_PREP\tfirst=alpha\trc=0\t") &&
+                has(out,"QUALIFY_BATCH\talpha\tPASS");
+        free(e);
+        const char *row=strstr(out,"QUALIFY_SELECTOR_PREP\t");
+        int hit=row && has(row,"\treused=1\n"), miss=row && has(row,"\treused=0\n");
+        if(row){const char *end=strchr(row,'\n');if(end)printf("%.*s\n",(int)(end-row),row);}
+        size_t n=0,m=0; char *b=cx_read(builds,&n),*r=cx_read(runs,&m);
+        int counts=b && r && n==(size_t)cases[i].builds && m==i+1;
+        check(cases[i].label,rc==0 && ran && counts && (cases[i].hit ? hit : miss));
+        free(b);free(r);
+    }
+    return 0;
+}
 int main(int argc, char **argv) {
     char why[512]; int rc = -1;
     if (sy_cwd(root, sizeof root) < 0 || sy_mkdtemp("/tmp", "dvqualify-check", tmp, sizeof tmp)) return 2;
@@ -423,6 +531,7 @@ int main(int argc, char **argv) {
       if(!runv(advance,0,20,&rc)||rc)return 2;
       check("same-ape-different-head-new-layout",runv(v,0,40,&rc) && rc==0 &&
             has(out,"QUALIFY_LAYOUT_MATERIAL\tprepared\t") && has(out,"QUALIFY_BATCH\talpha\tPASS")); }
+    if(selector_fixture())return 2;
     }
     if(!part || part==3){
     { char *v[] = {bin, repo, "--candidate", apep, "--ids", "alpha,beta,bad,gamma,delta", "--out", ev,

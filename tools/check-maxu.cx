@@ -1,5 +1,8 @@
-/* Check that 127 chained modules plus the root fit and the next module is
-   refused by the 128-unit limit. An older installed product fails until rebuilt. */
+/* Check the front-unit cap from exec/facts/limits.tsv FRONT_UNIT_MAX:
+   cap-1 chained modules plus the root fill the cap exactly (-cx-plan rc 0); one more
+   module makes cap+1 and is refused with "more than <cap> units in one program".
+   The cap is read from the table, so the check follows the product; an older
+   installed product fails until it is rebuilt. */
 #pragma unisa use sysx.process
 #pragma unisa use sys.proc
 #pragma unisa use sys.fs
@@ -10,8 +13,24 @@
 #pragma unisa use mem.heap
 #pragma unisa use cxlib.ckassert
 
-
-
+/* the FRONT_UNIT_MAX value of exec/facts/limits.tsv under ROOT; 0 on success */
+static int read_cap(const char *root, int *cap) {
+    char p[4400], line[256];
+    FILE *f;
+    if (cx_fmt(p, sizeof p, "%s/exec/facts/limits.tsv", root)) return 1;
+    f = fopen(p, "r");
+    if (!f) return 1;
+    while (fgets(line, sizeof line, f)) {
+        int v;
+        if (!strncmp(line, "FRONT_UNIT_MAX\t", 15) && sscanf(line + 15, "%d", &v) == 1 && v > 1 && v < 1024) {
+            *cap = v;
+            fclose(f);
+            return 0;
+        }
+    }
+    fclose(f);
+    return 1;
+}
 
 static int write_module(const char *path, int k, int next) {
     int fd;
@@ -34,11 +53,11 @@ static int write_module(const char *path, int k, int next) {
 }
 
 int main(int argc, char **argv) {
-    char root[4096], com[4400], bound[4400], work[4400], mainc[4400], mc[4400];
+    char root[4096], com[4400], bound[4400], work[4400], mainc[4400], mc[4400], want[64];
     char *v[8];
     char why[512];
     np_result r;
-    int fd, k;
+    int fd, k, cap = 0, wl;
     root[0] = 0;
     if (argc >= 2 && argv[1][0] == '/') { if (tx_copy(com, 4400, argv[1], tx_len(argv[1], 4400))) return 2; }
     else {
@@ -46,31 +65,35 @@ int main(int argc, char **argv) {
         if (cx_fmt(com, sizeof com, "%s/unisacc.com", root)) return 2;
     }
     if (root[0] == 0 && sy_cwd(root, 4096) < 0) return 2;
+    if (read_cap(root, &cap)) { printf("FAIL\tread-front-unit-max\n"); return 2; }
     if (cx_fmt(bound, sizeof bound, "%s/tools/bound", root)) return 2;
     if (cx_fmt(work, sizeof work, "/tmp/maxu-%d", sy_pid())) return 2;
     if (sy_mkdir(work, 0700)) return 2;
-    /* 127 modules and the root occupy all 128 unit slots. */
-    for (k = 0; k < 127; k++) {
+    /* cap-1 modules and the root occupy all cap unit slots. */
+    for (k = 0; k < cap - 1; k++) {
         if (cx_fmt(mc, sizeof mc, "%s/m%d.cx", work, k)) return 2;
-        if (write_module(mc, k, k < 126 ? k + 1 : -1)) return 2;
+        if (write_module(mc, k, k < cap - 2 ? k + 1 : -1)) return 2;
     }
     if (cx_fmt(mainc, sizeof mainc, "%s/main.cx", work)) return 2;
     fd = sy_open_new(mainc, 0644);
     if (fd < 0) return 2;
     if (sy_write_all(fd, "#pragma unisa use m0\n", 21) || sy_close(fd)) return 2;
     v[0] = bound; v[1] = "50"; v[2] = com; v[3] = "-cx-plan"; v[4] = mainc; v[5] = 0;
-    if (np_run(v, root, 0, 50, &r, why, sizeof why)) { printf("FAIL\t127-run\n"); return 2; }
-    ck(r.rc == 0, "127-modules-plan-rc0");
+    if (np_run(v, root, 0, 50, &r, why, sizeof why)) { printf("FAIL\tcap-minus-1-run\n"); return 2; }
+    ck(r.rc == 0, "cap-minus-1-modules-plan-rc0");
     np_free(&r);
-    /* One additional module makes 129 units. */
-    if (cx_fmt(mc, sizeof mc, "%s/m127.cx", work)) return 2;
-    if (write_module(mc, 127, -1)) return 2;
-    if (cx_fmt(mc, sizeof mc, "%s/m126.cx", work)) return 2;
-    if (write_module(mc, 126, 127)) return 2;
+    /* One additional module makes cap+1 units. */
+    if (cx_fmt(mc, sizeof mc, "%s/m%d.cx", work, cap - 1)) return 2;
+    if (write_module(mc, cap - 1, -1)) return 2;
+    if (cx_fmt(mc, sizeof mc, "%s/m%d.cx", work, cap - 2)) return 2;
+    if (write_module(mc, cap - 2, cap - 1)) return 2;
+    if (cx_fmt(want, sizeof want, "more than %d units", cap)) return 2;
+    wl = tx_len(want, sizeof want);
+    if (wl <= 0) return 2;
     v[0] = bound; v[1] = "50"; v[2] = com; v[3] = "-cx-plan"; v[4] = mainc; v[5] = 0;
-    if (np_run(v, root, 0, 50, &r, why, sizeof why)) { printf("FAIL\t128-run\n"); return 2; }
-    ck(r.rc == 1 && (r.err && tx_find(r.err, tx_len(r.err, 1 << 20), "more than 128 units", tx_len("more than 128 units", 128)) >= 0), "128-modules-refused-named");
+    if (np_run(v, root, 0, 50, &r, why, sizeof why)) { printf("FAIL\tcap-run\n"); return 2; }
+    ck(r.rc == 1 && r.err && tx_find(r.err, tx_len(r.err, 1 << 20), want, wl) >= 0, "cap-modules-refused-named");
     np_free(&r);
-    printf("CHECK_MAXU\tfailed=%d\n", ck_failures());
+    printf("CHECK_MAXU\tfailed=%d\tcap=%d\n", ck_failures(), cap);
     return ck_failures() ? 1 : 0;
 }

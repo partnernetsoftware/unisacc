@@ -473,7 +473,7 @@ static int cs_snap(const char *rev, const char *out) {
         char got[128];
         int ofd = -1, pid, ex = 0, code = 0, sig = 0;
         char *v[5];
-        long timeout_deadline_ms = sy_now_ms() + 10000; /* bound: git rev-parse is fast; refuse hangs */
+        long timeout_deadline_ms = sy_now_ms() + 10000; /* reject a late result */
         v[0] = "/bin/sh"; v[1] = "-c"; v[2] = cmd; v[3] = 0;
         pid = sy_spawn_pipe(v, ".", SY_SPAWN_NO_PATH, &ofd, 0);
         if (pid < 0) cs_die("spawn", "git");
@@ -483,12 +483,13 @@ static int cs_snap(const char *rev, const char *out) {
             if (r > 0) n = r;
             sy_close(ofd);
         }
-        if (sy_wait_status(pid, 0, &ex, &code, &sig) < 0 || sy_now_ms() > timeout_deadline_ms || (ex ? code : 128 + sig)) {
-            sy_kill(pid);
+        int waited = sy_wait_status(pid, 0, &ex, &code, &sig);
+        got[n] = 0;
+        /* A successful blocking wait reaps pid. An error does not establish ownership. */
+        if (waited != pid || sy_now_ms() > timeout_deadline_ms || (ex ? code : 128 + sig)) {
             sy_eprintf("chain-step: rev-parse ex=%d code=%d sig=%d got=%.80s\n", ex, code, sig, got);
             cs_die("rev", rev);
         }
-        got[n] = 0;
         while (n > 0 && (got[n - 1] == '\n' || got[n - 1] == '\r')) got[--n] = 0;
         if (n != 40) cs_die("rev not 40 hex", rev);
         for (i = 0; i < 40; i++) full[i] = got[i];

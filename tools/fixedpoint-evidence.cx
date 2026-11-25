@@ -1,0 +1,391 @@
+/* Generate fixed-point release evidence from a completed chain.
+ * Usage: fixedpoint-evidence.cx -- CHAIN_OUT VERSION [EVIDENCE_REPO_ROOT] [--write-notes]
+ * The compare ledger binds the actual stdout. The six packed g2 inputs are
+ * checked against both g3 and the APE receipt. INDEX publishes both files last.
+ * FIXEDPOINT_NOTE supplies the release notes sentence. --write-notes also
+ * appends it once to the existing release notes for the given version.
+ * Check: tools/check-fixedpoint-evidence.cx. */
+#pragma unisa use sys.fs
+#pragma unisa use sys.posix
+#pragma unisa use sys.sha
+#pragma unisa use sys.time
+#pragma unisa use text.fmt
+#pragma unisa use mem.heap
+#pragma unisa use cxlib.netpack
+
+#define FP_PATH 4400
+#define FP_TEXT (64L << 20)
+#define FP_ASSET (128L << 20)
+
+typedef struct {
+    const char *target, *leaf;
+    char path[2][256], sha[65];
+    long bytes;
+    int seen;
+} FpSlice;
+
+static FpSlice slices[] = {
+    {"lnx/x86_64","lnx-x86_64/entry.elf"},
+    {"lnx/arm64","lnx-arm64/entry.elf"},
+    {"osx/x86_64","osx-x86_64/slice-osx-x86_64"},
+    {"osx/arm64","osx-arm64/slice-osx-arm64"},
+    {"win/x86_64","win-x86_64/slice-win-x86_64"},
+    {"win/arm64","win-arm64/slice-win-arm64"},
+};
+static char chain[FP_PATH], root[FP_PATH];
+static const char *note_sentence = "六目标自举不动点 g2 与 g3 的六片摘要逐项相等，6/6 SAME。";
+
+static void refuse(const char *reason) {
+    fprintf(stderr,"FIXEDPOINT_EVIDENCE\tREFUSE\t%s\n",reason);
+    exit(2);
+}
+
+static void join(char *out, const char *dir, const char *leaf) {
+    if (cx_fmt(out,FP_PATH,"%s/%s",dir,leaf)) refuse("path-bound");
+}
+
+static int hexadecimal(const char *value) {
+    return strlen(value) == 64 && strspn(value,"0123456789abcdef") == 64;
+}
+
+static long number(const char *value, long limit) {
+    long result = 0;
+    if (!*value) return -1;
+    for (; *value; value++) {
+        if (*value < '0' || *value > '9' || result > (limit-(*value-'0'))/10) return -1;
+        result = result*10 + (*value-'0');
+    }
+    return result;
+}
+
+static int version_ok(const char *version) {
+    if (strlen(version) > 32) return 0;
+    for (int i = 0; i < 3; i++) {
+        size_t n = strspn(version,"0123456789");
+        if (!n || (n > 1 && *version == '0')) return 0;
+        version += n;
+        if (i != 2 && *version++ != '.') return 0;
+    }
+    return !*version;
+}
+
+static int fields(char *line, char **parts, int cap) {
+    for (int i = 0; i < cap; i++) {
+        parts[i] = line;
+        char *tab = strchr(line,'\t');
+        if (!tab) return i + 1;
+        *tab = 0;
+        line = tab + 1;
+    }
+    return -1;
+}
+
+static int relative(const char *path) {
+    for (const char *p = path;;) {
+        size_t n = strcspn(p,"/");
+        /* Preserve an internal tilde component for the final privacy check.
+         * A leading home abbreviation still takes the external-role path. */
+        if (p != path && n == 1 && p[0] == '~' && p[1] == '/') {
+            p += 2;
+            continue;
+        }
+        if (!n || strspn(p,"abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789._-") < n ||
+            (n == 1 && *p == '.') || (n == 2 && !memcmp(p,"..",2))) return 0;
+        if (!p[n]) return 1;
+        p += n + 1;
+    }
+}
+
+static char *evidence(const char *leaf, size_t *size) {
+    char path[FP_PATH], real[FP_PATH]; sy_stat_t st;
+    join(path,chain,leaf);
+    if (sy_realpath(path,real,sizeof real) < 0 || strcmp(path,real) ||
+        sy_lstat(path,&st) || st.kind != 'f' || st.size <= 0 || st.size > FP_TEXT) refuse("input-evidence-file");
+    char *data = cx_read(path,size);
+    if (!data || *size != (size_t)st.size || data[*size-1] != '\n' ||
+        memchr(data,0,*size) || memchr(data,'\r',*size)) refuse("input-evidence-text");
+    return data;
+}
+
+/* The last compare attempt owns the verdict; memo-on entry requires the
+ * immediately preceding full memo-free recheck and shutdown inside compare. */
+static long compare_proof(np_buf *table) {
+    size_t size;
+    char *data = evidence("checkpoint.tsv",&size);
+    int done = 0;
+    for (char *p = data; *p;) {
+        char *end = strchr(p,'\n'), *part[8]; *end = 0;
+        int n = fields(p,part,8);
+        if (n >= 2 && !strcmp(part[1],"compare")) {
+            if (strcmp(part[0],"DONE")) refuse("compare-not-done");
+            done = 1;
+        }
+        p = end+1;
+    }
+    mm_free(data);
+    if (!done) refuse("compare-checkpoint-missing");
+    data = evidence("chain-run.tsv",&size);
+    long attempt = 0, previous = 0, recheck = 0;
+    int previous_recheck = 0, memo = 0, good = 0;
+    for (char *p = data; *p;) {
+        char *end = strchr(p,'\n'); *end = 0;
+        if (!strncmp(p,"ATTEMPT\t",8)) {
+            char *f[8];
+            if (fields(p,f,8) != 7) refuse("attempt-schema");
+            long id = number(f[1],2147483647);
+            if (id <= 0) refuse("attempt-number");
+            int valid = !strcmp(f[3],"rc=0") && !strcmp(f[4],"residue=0") &&
+                        !strncmp(f[5],"bound=",6) && number(f[5]+6,2147483647) > 0;
+            if (!strcmp(f[2],"phase=compare")) {
+                if (id <= attempt) refuse("compare-attempt-order");
+                attempt = id;
+                memo = !strcmp(f[6],"memo=on");
+                recheck = memo && previous_recheck && previous == id-1 ? previous : 0;
+                good = valid && (!strcmp(f[6],"memo=off") || recheck);
+            }
+            previous = id;
+            previous_recheck = valid && !strcmp(f[2],"phase=compare-recheck") && !strcmp(f[6],"memo=off");
+        }
+        p = end+1;
+    }
+    mm_free(data);
+    if (!attempt || !good) refuse("compare-attempt-not-proved");
+    char leaf[100];
+    if (memo) {
+        if (cx_fmt(leaf,sizeof leaf,"chain-run-%ld.stdout",recheck)) refuse("compare-log-path");
+        data = evidence(leaf,&size);
+        int proofs = 0;
+        for (char *p = data; *p;) {
+            char *end = strchr(p,'\n'); *end = 0;
+            if (!strcmp(p,"RECHECK\tbefore=compare\tfull=1\tmemo=off\tbuilt=0")) proofs++;
+            p = end+1;
+        }
+        mm_free(data);
+        if (proofs != 1) refuse("compare-recheck-proof");
+    }
+    if (cx_fmt(leaf,sizeof leaf,"chain-run-%ld.stdout",attempt)) refuse("compare-log-path");
+    data = evidence(leaf,&size);
+    int seen = 0, off = 0;
+    for (char *p = data; *p;) {
+        char *end = strchr(p,'\n'); *end = 0;
+        if (!strcmp(p,"SHAMEMO\tchain\toff\treason=reached-compare")) {
+            if (off || seen) refuse("compare-memo-order");
+            off = 1;
+        }
+        if (off && !strncmp(p,"SHAMEMO\tchain\ton\t",17)) refuse("compare-memo-reopened");
+        if (!strncmp(p,"CHAIN\tfixedpoint\t",17)) {
+            if (memo && !off) refuse("compare-memo-proof");
+            const char *v = p+17;
+            int bit = 0;
+            if (!strncmp(v,"objects=same\tcount=",19) && number(v+19,2147483647) > 0) bit = 1;
+            else if (!strcmp(v,"kernels=same\tcount=2")) bit = 2;
+            else if (!strcmp(v,"slices=same\tcount=6")) bit = 4;
+            else if (!strcmp(v,"product=same")) bit = 8;
+            else if (!strncmp(v,"package=present\tsha=",20) && hexadecimal(v+20)) bit = 16;
+            else refuse("fixedpoint-verdict");
+            if (seen & bit) refuse("fixedpoint-duplicate-proof");
+            seen |= bit;
+            np_puts(table,"# "); np_puts(table,p); np_puts(table,"\n");
+        }
+        p = end+1;
+    }
+    mm_free(data);
+    if ((seen & 15) != 15) refuse("fixedpoint-proof-missing");
+    return attempt;
+}
+
+static long asset(const char *leaf, char hash[65]) {
+    char path[FP_PATH], actual[FP_PATH];
+    unsigned char *data = 0; int64_t n = 0; sy_stat_t st;
+    join(path,chain,leaf);
+    if (sy_realpath(path,actual,sizeof actual) < 0 || strcmp(path,actual) ||
+        sy_lstat(path,&st) || st.kind != 'f' || st.size <= 0 || st.size > FP_ASSET ||
+        sy_read_file(path,&data,&n,FP_ASSET) || n != st.size || sy_sha256_hex(data,(long)n,hash))
+        refuse("artifact-read");
+    mm_free(data);
+    return (long)n;
+}
+
+static void slice_table(np_buf *table) {
+    np_puts(table,"target\tg2_path\tg2_sha256\tg3_path\tg3_sha256\tbytes\tverdict\n");
+    for (int i = 0; i < 6; i++) {
+        FpSlice *s = &slices[i];
+        char g3[65], row[768];
+        for (int g = 0; g < 2; g++)
+            if (cx_fmt(s->path[g],sizeof s->path[g],"fixedpoint/g%d/%s",g+2,s->leaf)) refuse("slice-path");
+        s->bytes = asset(s->path[0],s->sha);
+        if (asset(s->path[1],g3) != s->bytes || strcmp(s->sha,g3)) refuse("slice-mismatch");
+        if (cx_fmt(row,sizeof row,"%s\t%s\t%s\t%s\t%s\t%ld\tSAME\n",
+                  s->target,s->path[0],s->sha,s->path[1],g3,s->bytes)) refuse("slice-row");
+        np_puts(table,row);
+    }
+}
+
+static const char *aux[] = {"p3","cache-manager-source","cache-manager-constructor",
+    "cache-manager/osx/x86_64","cache-manager/osx/arm64","p3-package.body",
+    "source/osx/x86_64","source/osx/arm64","replacement/osx/x86_64","replacement/osx/arm64"};
+static void receipt(np_buf *dest) {
+    size_t n;
+    char *data = evidence("ape-final/ape-receipt.txt",&n);
+    int packed = 0, mode = 0, claim = 0, auxiliary = 0;
+    for (char *p = data; *p;) {
+        char *end = strchr(p,'\n'), *f[5]; *end = 0;
+        int count = fields(p,f,5);
+        if (count == 2 && !strcmp(f[0],"cache-manager-mode")) {
+            if (mode++ || (strcmp(f[1],"EXPLICIT_INPUTS") && strcmp(f[1],"BUILT_CURRENT_PRODUCT"))) refuse("receipt-mode");
+            np_puts(dest,f[0]); np_puts(dest,"\t"); np_puts(dest,f[1]); np_puts(dest,"\n");
+        } else if (count == 2 && !strcmp(f[0],"replacement-claim")) {
+            if (claim++ || strcmp(f[1],"BYTE_PRESERVING_REPACK_NOT_SIGNATURE_VERIFICATION")) refuse("receipt-claim");
+            np_puts(dest,f[0]); np_puts(dest,"\t"); np_puts(dest,f[1]); np_puts(dest,"\n");
+        } else {
+            if (count != 4 || !*f[1] || strncmp(f[2],"sha=",4) || !hexadecimal(f[2]+4) ||
+                strncmp(f[3],"bytes=",6)) refuse("receipt-fields");
+            long bytes = number(f[3]+6,2147483647);
+            if (bytes <= 0) refuse("receipt-size");
+            int target = -1, other = -1;
+            for (int i = 0; i < 6; i++) if (!strcmp(f[0],slices[i].target)) target = i;
+            for (int i = 0; i < (int)(sizeof aux / sizeof *aux); i++) if (!strcmp(f[0],aux[i])) other = i;
+            const char *path = 0;
+            char full[FP_PATH], row[FP_PATH+200];
+            if (target >= 0) {
+                FpSlice *s = &slices[target];
+                join(full,chain,s->path[0]);
+                if (s->seen++ || (strcmp(f[1],full) && strcmp(f[1],s->path[0])) ||
+                    strcmp(f[2]+4,s->sha) || bytes != s->bytes) refuse("receipt-g2-binding");
+                path = s->path[0];
+            } else if (!strcmp(f[0],"unisacc-next.com")) {
+                char hash[65];
+                path = "ape-final/unisacc-next.com";
+                join(full,chain,path);
+                if (packed++ || (strcmp(f[1],full) && strcmp(f[1],path)) ||
+                    asset(path,hash) != bytes || strcmp(f[2]+4,hash)) refuse("receipt-ape-binding");
+            } else if (other >= 0) {
+                if (auxiliary & (1 << other)) refuse("receipt-duplicate");
+                auxiliary |= 1 << other;
+                size_t z = strlen(chain);
+                if (!strncmp(f[1],chain,z) && f[1][z]=='/' && relative(f[1]+z+1)) path = f[1]+z+1;
+                else if (relative(f[1])) path = f[1];
+                else {
+                    if (cx_fmt(full,sizeof full,"external/%s",f[0])) refuse("receipt-redaction");
+                    path = full;
+                }
+            } else refuse("receipt-key");
+            if (cx_fmt(row,sizeof row,"%s\t%s\t%s\t%s\n",f[0],path,f[2],f[3])) refuse("receipt-row");
+            np_puts(dest,row);
+        }
+        p = end+1;
+    }
+    mm_free(data);
+    if (!packed) refuse("receipt-ape-missing");
+    for (int i = 0; i < 6; i++) if (!slices[i].seen) refuse("receipt-target-missing");
+}
+
+static void directory(const char *path) {
+    sy_stat_t st;
+    int rc = sy_lstat(path,&st);
+    if (rc == -ENOENT) {
+        (void)sy_mkdir(path,0755);
+        rc = sy_lstat(path,&st);
+    }
+    if (rc || st.kind != 'd') refuse("output-directory");
+}
+
+static int existing(const char *path, np_buf *expected) {
+    sy_stat_t st;
+    int rc = sy_lstat(path,&st);
+    if (rc == -ENOENT) return 0;
+    if (rc || st.kind != 'f' || st.size != (long)expected->n) refuse("output-conflict");
+    size_t n = 0; char *s = cx_read(path,&n);
+    if (!s || n != expected->n || memcmp(s,expected->p,n)) refuse("output-conflict");
+    mm_free(s);
+    return 1;
+}
+
+static void release_notes(const char *release, const char *version) {
+    char leaf[64], path[FP_PATH]; sy_stat_t st; size_t n;
+    if (cx_fmt(leaf,sizeof leaf,"notes-%s.md",version)) refuse("notes-path");
+    join(path,release,leaf);
+    if (sy_lstat(path,&st) || st.kind != 'f' || st.size <= 0 || st.size > FP_TEXT) refuse("notes-file");
+    char *data = cx_read(path,&n);
+    if (!data || n != (size_t)st.size || memchr(data,0,n)) refuse("notes-text");
+    if (!strstr(data,note_sentence)) {
+        np_buf updated = {0};
+        np_put(&updated,data,n);
+        np_puts(&updated,data[n-1]=='\n'?"\n":"\n\n");
+        np_puts(&updated,note_sentence); np_puts(&updated,"\n");
+        if (sy_write_atomic(path,updated.p,(long)updated.n,0644)) refuse("notes-write");
+        mm_free(updated.p);
+    }
+    mm_free(data);
+}
+
+static void publish(const char *version, const char *note, np_buf *table, np_buf *ape, int write_notes) {
+    char dir[FP_PATH], rdir[FP_PATH], evidence_dir[FP_PATH];
+    char index[FP_PATH], out[FP_PATH], sanitized[FP_PATH];
+    join(rdir,root,"release"); directory(rdir);
+    join(evidence_dir,rdir,"evidence"); directory(evidence_dir);
+    join(dir,evidence_dir,version); directory(dir);
+    int guard = sy_open(dir,O_RDONLY,0);
+    if (guard < 0 || sy_flock(guard,2|4)) refuse("output-busy");
+    join(out,dir,"fixedpoint-6targets.tsv"); join(sanitized,dir,"ape-receipt.txt"); join(index,dir,"INDEX.tsv");
+    int table_present = existing(out,table), ape_present = existing(sanitized,ape), indexed = 0;
+    sy_stat_t st;
+    int stat_rc = sy_lstat(index,&st);
+    if (stat_rc != -ENOENT) {
+        if (stat_rc || st.kind != 'f' || st.size > FP_TEXT) refuse("index-file");
+        if (st.size) {
+            size_t size; char *text = cx_read(index,&size);
+            if (!text || size != (size_t)st.size || text[size-1] != '\n' || memchr(text,0,size)) refuse("index-text");
+            for (char *p = text; *p;) {
+                char *end = strchr(p,'\n'); *end = 0;
+                if (!strncmp(p,"fixedpoint-6targets\t",20)) {
+                    char *f[6];
+                    if (indexed++ || fields(p,f,6) != 5 || strcmp(f[2],"PASS") ||
+                        strcmp(f[3],"fixedpoint-6targets.tsv") || strcmp(f[4],note) ||
+                        !table_present || !ape_present) refuse("index-conflict");
+                }
+                p = end+1;
+            }
+            mm_free(text);
+        }
+    }
+    if ((!table_present && sy_write_atomic(out,table->p,(long)table->n,0644)) ||
+        (!ape_present && sy_write_atomic(sanitized,ape->p,(long)ape->n,0644))) refuse("output-write");
+    if (write_notes) release_notes(rdir,version);
+    if (!indexed) {
+        char timestamp[32], line[512]; sy_ts_t now;
+        if (sy_wall(&now) || sy_local_fmt(timestamp,sizeof timestamp,"%Y-%m-%d %H:%M:%S %z",now.sec) != 25 ||
+            cx_fmt(line,sizeof line,"fixedpoint-6targets\t%s\tPASS\tfixedpoint-6targets.tsv\t%s\n",timestamp,note))
+            refuse("index-row");
+        int fd = sy_open(index,O_WRONLY|O_CREAT|O_APPEND|O_NOFOLLOW,0644);
+        if (fd < 0 || sy_write_all(fd,line,(long)strlen(line)) || sy_close(fd)) refuse("index-write");
+    }
+    if (sy_close(guard)) refuse("output-close");
+}
+
+static int private_path(const char *data) {
+    return strstr(data,"/" "home/") || strstr(data,"/" "root/") ||
+        strstr(data,"/" "Users/") || strstr(data,"~/");
+}
+
+int main(int argc, char **argv) {
+    int write_notes = argc > 3 && !strcmp(argv[argc-1],"--write-notes");
+    argc -= write_notes;
+    if (argc < 3 || argc > 4 || !version_ok(argv[2])) refuse("usage");
+    if (sy_realpath(argv[1],chain,sizeof chain) < 0 ||
+        sy_realpath(argc == 4 ? argv[3] : ".",root,sizeof root) < 0) refuse("root");
+    np_buf table = {0}, ape = {0};
+    long attempt = compare_proof(&table);
+    slice_table(&table);
+    receipt(&ape);
+    char table_sha[65], ape_sha[65], note[300];
+    if (private_path(table.p) || private_path(ape.p) ||
+        sy_sha256_hex(table.p,(long)table.n,table_sha) || sy_sha256_hex(ape.p,(long)ape.n,ape_sha) ||
+        cx_fmt(note,sizeof note,"slices=6/6 SAME compare_attempt=%ld fixedpoint_sha=%s ape_receipt_sha=%s",attempt,table_sha,ape_sha))
+        refuse("output-identity");
+    publish(argv[2],note,&table,&ape,write_notes);
+    mm_free(table.p); mm_free(ape.p);
+    printf("FIXEDPOINT_EVIDENCE\tPASS\tversion=%s\ttargets=6\tcompare_attempt=%ld\n",argv[2],attempt);
+    printf("FIXEDPOINT_NOTE\t%s\n",note_sentence);
+    return 0;
+}

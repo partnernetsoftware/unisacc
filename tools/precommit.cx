@@ -1845,12 +1845,34 @@ static int toolsreg_here(void) {
     if (!wt_top[0] || cx_fmt(p, sizeof p, "%s/tests/tools-compile.cx", wt_top)) return 0;
     return sy_exists(p) == 1;
 }
+/* Hard-clamped upper bound for run.cx --list output (default 16 MiB; env may only tighten >= 1 MiB for fixtures).
+ * Known limitation: buffers full output up to 16 MiB before scanning (non-streaming, bounded memory). */
+static long pc_list_max_cap(void) {
+    long def_cap = 16L << 20, min_cap = 1L << 20;
+    const char *s = sy_env("UNISACC_PRECOMMIT_LIST_MAX");
+    if (!s || !s[0]) return def_cap;
+    long v = 0;
+    for (const char *p = s; *p; p++) {
+        if (*p < '0' || *p > '9') return def_cap;
+        int d = *p - '0';
+        if (v > (def_cap - d) / 10) return def_cap;
+        v = v * 10 + d;
+    }
+    if (v < min_cap) return min_cap;
+    return v;
+}
 static int cov_eval(const char *tag, const char *reg, long rn, const char *cov, long cn, char *idv, int idcap) {
     char dir[1200], tdir[1300], p[1500], cwd[1100]; long a, total = 0; char *b = 0;
+    long max_cap = pc_list_max_cap();
     if (wt_runcx() != 1 || cx_fmt(cwd, sizeof cwd, "%s", wt_top) || cov_dir(tag, dir, sizeof dir)) return -1;
     if (from_run && cov_flow(tag)) {
         cur_gate = "coveval"; slurp_okrc = 255; b = gate_slurp(0, &total); slurp_okrc = 0; cur_gate = 0;
         if (!b) return -1;
+        if (total > max_cap) {
+            mm_free(b);
+            (void)cx_fmt(idv, (size_t)idcap, "runlist-output-exceeded-cap-%ld", max_cap);
+            return 2;
+        }
     } else {
     if (!cov_flow(tag)) {
         if (tx_eqz(tag, "idx")) (void)tx_copy(pc_cov_idx_dir, sizeof pc_cov_idx_dir, dir, tx_len(dir, 1100));
@@ -1870,11 +1892,12 @@ static int cov_eval(const char *tag, const char *reg, long rn, const char *cov, 
         cur_gate = "coveval"; mm_free(gate_slurp(gv, &gn)); cur_gate = 0;
         idv[0] = 0; return 0;
     }
-    { int ofd, pid, ex = 0, code = 0, sig = 0; long r;
+    { int ofd, pid, ex = 0, code = 0, sig = 0; long r, cap = 1L << 20;
+      if (cap > max_cap) cap = max_cap;
       /* from inside DIR with a relative source: the run-cache then keys the source below the working directory, root-independent, so the second and later runs
          hit the cache although each run has a fresh private directory (an absolute path outside the working directory is part of the key verbatim) */
       char *ev[] = {"sh", "-c", "cd \"$0\" && exec sh ./unisacc.com tests/run.cx -- --list 2>&1", dir, 0};
-      b = mm_alloc(1 << 20);
+      b = mm_alloc((size_t)cap + 1);
       if (!b) return -1;
       pid = sy_spawn_pipe(ev, 0, 0, &ofd, 0);
       if (pid < 0) { mm_free(b); return -1; }
@@ -1882,9 +1905,34 @@ static int cov_eval(const char *tag, const char *reg, long rn, const char *cov, 
       { long deadline = sy_now_ms() + 30000;
         for (;;) { sy_pollfd_t pf; long left = deadline - sy_now_ms(); pf.fd = ofd; pf.events = SY_POLLIN; pf.revents = 0;
           if (left <= 0 || sy_poll(&pf, 1, left) <= 0) { pc_active_child_pid = 0; sy_close(ofd); sy_kill(pid); mm_free(b); return -1; }
-          r = sy_read(ofd, b + total, (1 << 20) - 1 - total); if (r <= 0) break; total += r; if (total >= (1 << 20) - 2) break; } }
+          if (total >= cap) {
+              if (cap < max_cap) {
+                  long ncap = cap * 2; char *nb;
+                  if (ncap > max_cap) ncap = max_cap;
+                  nb = mm_alloc((size_t)ncap + 1);
+                  if (!nb) { pc_active_child_pid = 0; sy_close(ofd); sy_kill(pid); mm_free(b); return -1; }
+                  for (long j = 0; j < total; j++) nb[j] = b[j];
+                  mm_free(b); b = nb; cap = ncap;
+              } else {
+                  char extra = 0; long er = sy_read(ofd, &extra, 1);
+                  if (er > 0) {
+                      pc_active_child_pid = 0; sy_close(ofd); sy_kill(pid); sy_wait_status(pid, 0, &ex, &code, &sig);
+                      mm_free(b);
+                      (void)cx_fmt(idv, (size_t)idcap, "runlist-output-exceeded-cap-%ld", max_cap);
+                      return 2;
+                  }
+                  if (er < 0) { pc_active_child_pid = 0; sy_close(ofd); sy_kill(pid); mm_free(b); return -1; }
+                  break;
+              }
+          }
+          r = sy_read(ofd, b + total, (size_t)(cap - total));
+          if (r == 0) break;
+          if (r < 0) { pc_active_child_pid = 0; sy_close(ofd); sy_kill(pid); mm_free(b); return -1; }
+          total += r; } }
       pc_active_child_pid = 0;
-      sy_close(ofd); sy_wait_status(pid, 0, &ex, &code, &sig); b[total] = 0; }
+      sy_close(ofd);
+      if (sy_wait_status(pid, 0, &ex, &code, &sig) != pid || !ex) { mm_free(b); return -1; }
+      b[total] = 0; }
     }
     { a = tx_find(b, total, "unknown-coverage row=", 21);
       idv[0] = 0;
@@ -3735,6 +3783,10 @@ int main(int argc, char **argv) {
           blocked += cov_blk + bpi_gate();
           cur_gate = "runlist"; slurp_okrc = 2; lout = slurp(lv, &ln); slurp_okrc = 0; cur_gate = 0;
           if (!lout) { sy_eprintf("precommit: tests/run.cx --list did not run\n"); return 1; }
+          if (ln > pc_list_max_cap()) {
+              sy_eprintf("precommit: BLOCKED runlist-output-exceeded-cap-%ld (got=%ld)\n", pc_list_max_cap(), ln);
+              blocked++;
+          }
           if (!cov_blk && tx_find(lout, ln, "metadata_valid=1", 16) < 0) {
               long at2 = 0;
               sy_eprintf("precommit: tests/run.cx --list metadata_valid!=1\n");
