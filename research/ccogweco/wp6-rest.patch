@@ -1,0 +1,38 @@
+diff --git a/tools/check-npfault.cx b/tools/check-npfault.cx
+index b2225ca..2f4cac6 100644
+--- a/tools/check-npfault.cx
++++ b/tools/check-npfault.cx
+@@ -40,12 +40,16 @@ static int copy_stable(const char *src, const char *dst) {
+     return 1;
+ }
+ 
+-/* one run-batch invocation; merged into R.  Extra env entries are passed as ENV1/ENV2 (0 when unused). */
++/* one run-batch invocation; merged into R.  Extra env entries are passed as ENV1/ENV2 (0 when unused).
++   本检查一次运行要起 4 次 run-batch:先在本检查的私有目录把 tests/run-batch.cx 编成一个原生执行体,
++   之后每次直接调用它,不再让产品每回冷编一遍(与 all-waves 的 SESSION/executor/run-batch 同形). */
++static char rbnat[4600];
+ static void batch(const char *id, const char *outdir, const char *env1, const char *env2, np_result *r) {
+     char *v[10]; char *envs[3]; int n = 0; char why[1200];
+     envs[0] = (char *)env1; envs[1] = (char *)env2; envs[2] = 0;
+-    v[n++] = "sh"; v[n++] = "./unisacc.com"; v[n++] = "tests/run-batch.cx"; v[n++] = "--";
+-    v[n++] = root; v[n++] = (char *)outdir; v[n++] = (char *)id; v[n] = 0;
++    if (rbnat[0]) { v[n++] = rbnat; v[n++] = root; v[n++] = (char *)outdir; v[n++] = (char *)id; v[n] = 0; }
++    else { v[n++] = "sh"; v[n++] = "./unisacc.com"; v[n++] = "tests/run-batch.cx"; v[n++] = "--";
++    v[n++] = root; v[n++] = (char *)outdir; v[n++] = (char *)id; v[n] = 0; }
+     {   int t = np_run(v, root, env1 ? envs : 0, 60, r, why, sizeof why);
+         if (t && !r->errn) { fprintf(stderr, "check-npfault: transport %s\n", why); exit(2); }
+     }
+@@ -65,6 +69,13 @@ int main(void) {
+     {   int i;
+         for (i = 0; i < 4; i++) { if (cx_fmt(ob[i], sizeof ob[i], "%s/o%d", hold, i)) die("path bound"); if (sy_mkdir(ob[i], 0700) < 0) die("mkdir out"); }
+     }
++    {   /* 一次现场编译,四个用例共用:去掉产品每次冷编 tests/run-batch.cx 的重复成本 */
++        char *bv[6]; np_result br = {0}; char bwhy[512];
++        if (cx_fmt(rbnat, sizeof rbnat, "%s/run-batch", hold)) die("path bound");
++        bv[0] = "sh"; bv[1] = "./unisacc.com"; bv[2] = "tests/run-batch.cx"; bv[3] = "-o"; bv[4] = rbnat; bv[5] = 0;
++        if (np_run(bv, root, 0, 55, &br, bwhy, sizeof bwhy) || br.rc) die("native run-batch");
++        np_free(&br);
++    }
+     if (cx_fmt(bpath, sizeof bpath, "%s/batches.tsv", tabs) || cx_fmt(cpath, sizeof cpath, "%s/coverage.tsv", tabs)) die("path bound");
+     /* private copy of both tables plus one row whose entry outlives the bound */
+     if (copy_stable("tests/batches.tsv", bpath) || copy_stable("tests/coverage.tsv", cpath)) die("copy tables");
