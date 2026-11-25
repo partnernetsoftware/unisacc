@@ -359,7 +359,9 @@ tape_run_x86_64:
     cmpl $42,%eax
     je .Lrun_exit
     cmpl $43,%eax
-    je .Lrun_write
+    je .Lrun_sys
+    cmpl $44,%eax
+    je .Lrun_sys
     cmpl $47,%eax
     je .Lrun_next
     jmp .Lrun_opcode
@@ -565,38 +567,48 @@ tape_run_x86_64:
     addq %rdx,%rax
     jc .Lrun_memory
     jmp .Lrun_store
-.Lrun_write:
+.Lrun_sys:
     testb $1,3(%rsp)
     jz .Lrun_host
-    cmpq $2,8(%rsp)
+    movq 8(%rsp),%rdi
+    cmpq $8,%rdi
+    ja .Lrun_host
+    cmpq $7,%rdi
+    je .Lrun_host
+    testq %rdi,%rdi
+    jz .Lrun_exit
+    cmpq $3,%rdi
+    jne .Lrun_sys_dispatch
+    cmpl $44,%eax
     jne .Lrun_host
+.Lrun_sys_dispatch:
     movq 64(%r12),%r11
     testq %r11,%r11
     jz .Lrun_host
     movq 48(%rsp,%rcx,8),%rsi
     movq 48(%rsp,%rdx,8),%rdx
     movzbl 5(%rsp),%ecx
+    movl %ecx,%r10d
     andl $15,%ecx
     movq 48(%rsp,%rcx,8),%rcx
-    movq 16(%r12),%rax
-    subq %rcx,%rax
-    jb .Lrun_memory
-    movq 72(%r12),%rdi
-    testq %rdi,%rdi
-    jz .Lrun_memory
-    movq %rdx,%r8
-    subq %rdi,%r8
-    jb .Lrun_memory
-    cmpq %rax,%r8
-    ja .Lrun_memory
-    movq %rdx,%rax
-    addq %rcx,%rax
-    jc .Lrun_memory
-    movl $2,%edi
     xorl %r8d,%r8d
     xorl %r9d,%r9d
+    cmpl $44,%eax
+    jne .Lrun_sys_short
+    shrl $4,%r10d
+    movq 48(%rsp,%r10,8),%r8
+    movzbl 6(%rsp),%r10d
+    movl %r10d,%eax
+    andl $15,%eax
+    movq 48(%rsp,%rax,8),%r9
+    shrl $4,%r10d
+    movq 48(%rsp,%r10,8),%rax
+    jmp .Lrun_sys_call
+.Lrun_sys_short:
+    xorl %eax,%eax
+.Lrun_sys_call:
     subq $16,%rsp
-    movq $0,(%rsp)
+    movq %rax,(%rsp)
     call *%r11
     addq $16,%rsp
     movq %rax,48(%rsp)
