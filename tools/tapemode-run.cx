@@ -157,6 +157,9 @@ static int tr_exec_container(const unsigned char *img, long img_len,
     char why[128];
     unsigned long long code_len, data_off, data_len, bssz_off, bss_size;
     unsigned long long data_aligned = 0, memlimit = 0, ibitmap_cap = 0;
+    const unsigned long long arena_cap = 0x40000000ull;
+    unsigned long long argv_at, argv_bytes, argv_data;
+    int argv_sizes[4095];
     unsigned char *mem = 0, *ibm = 0;
     unsigned long long args[12], result[5];
     long long ret;
@@ -185,6 +188,19 @@ static int tr_exec_container(const unsigned char *img, long img_len,
     }
     memlimit = data_aligned + bss_size + extra;
     if (memlimit == 0) memlimit = 64;
+    if (prog_argc < 0 || prog_argc > 4095 || (prog_argc && !prog_argv)) return 2;
+    argv_at = (memlimit + 7ull) & ~7ull;
+    argv_bytes = ((unsigned long long)prog_argc + 1ull) * 8ull;
+    argv_data = argv_at + argv_bytes;
+    if (argv_data > arena_cap) return 2;
+    memlimit = argv_data;
+    for (int j = 0; j < prog_argc; j++) {
+        if (!prog_argv[j]) return 2;
+        long n = tx_len(prog_argv[j], (long)(arena_cap - memlimit));
+        if (n < 0) return 2;
+        argv_sizes[j] = (int)(n + 1);
+        memlimit += (unsigned long long)argv_sizes[j];
+    }
     mem = (unsigned char *)mm_alloc((size_t)memlimit);
     if (!mem) {
         sy_eprintf("tapemode-run: arena alloc failed\n");
@@ -192,6 +208,13 @@ static int tr_exec_container(const unsigned char *img, long img_len,
     }
     for (unsigned long long i = 0; i < memlimit; i++) mem[i] = 0;
     if (data_len > 0) mm_copy(mem, (long)memlimit, img + data_off, (long)data_len);
+    unsigned long long *guest_argv = (unsigned long long *)(mem + argv_at);
+    for (int j = 0; j < prog_argc; j++) {
+        long n = argv_sizes[j];
+        guest_argv[j] = (unsigned long long)(mem + argv_data);
+        mm_copy(mem + argv_data, (long)(memlimit - argv_data), prog_argv[j], n);
+        argv_data += (unsigned long long)n;
+    }
 
     ibitmap_cap = (code_len >> 3) + ((code_len & 7ull) != 0ull ? 1ull : 0ull);
     if (ibitmap_cap == 0) ibitmap_cap = 1;
@@ -216,7 +239,7 @@ static int tr_exec_container(const unsigned char *img, long img_len,
     args[2] = memlimit;
     args[3] = budget;
     args[4] = (unsigned long long)prog_argc;
-    args[5] = (unsigned long long)prog_argv;
+    args[5] = (unsigned long long)guest_argv;
     args[6] = (unsigned long long)result;
     args[7] = (unsigned long long)img_len;
     args[8] = (unsigned long long)disp_fn;

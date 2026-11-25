@@ -338,6 +338,27 @@ tape_run_x86_64:
     movq %rax,184(%rsp)
     addq %rdx,%rcx
     jc .Lrun_container
+    movq 32(%r12),%r8
+    cmpq $4095,%r8
+    ja .Lrun_container
+    movq 40(%r12),%r9
+    testq %r9,%r9
+    jnz .Lrun_argv_check
+    testq %r8,%r8
+    jnz .Lrun_container
+    jmp .Lrun_stack_top
+.Lrun_argv_check:
+    testq $7,%r9
+    jnz .Lrun_container
+    cmpq %rax,%r9
+    jb .Lrun_container
+    subq %r9,%rcx
+    jc .Lrun_container
+    leaq 8(,%r8,8),%r8
+    cmpq %r8,%rcx
+    jb .Lrun_container
+    movq %r9,%rcx
+.Lrun_stack_top:
     movq %rcx,104(%rsp)
 .Lrun_next:
     movq %rbx,%rax
@@ -396,9 +417,24 @@ tape_run_x86_64:
     je .Lrun_sys
     cmpl $44,%eax
     je .Lrun_sys
+    cmpl $45,%eax
+    je .Lrun_argc
+    cmpl $46,%eax
+    je .Lrun_argv
     cmpl $47,%eax
     je .Lrun_next
     jmp .Lrun_opcode
+.Lrun_argc:
+    movq 32(%r12),%rax
+    jmp .Lrun_store
+.Lrun_argv:
+    movq 48(%rsp,%rdx,8),%r8
+    xorl %eax,%eax
+    cmpq 32(%r12),%r8
+    jae .Lrun_store
+    movq 40(%r12),%rax
+    movq (%rax,%r8,8),%rax
+    jmp .Lrun_store
 .Lrun_mem:
     movl %eax,%r10d
     movq $8,%r9
@@ -563,6 +599,8 @@ tape_run_x86_64:
     jnc .Lrun_stack
     movq 72(%r12),%rax
     addq 16(%r12),%rax
+    cmpq $0,40(%r12)
+    cmovneq 40(%r12),%rax
     cmpq %rax,%rcx
     ja .Lrun_stack
 .Lrun_frame_set:
