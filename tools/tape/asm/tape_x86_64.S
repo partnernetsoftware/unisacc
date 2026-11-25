@@ -348,6 +348,10 @@ tape_run_x86_64:
 .Lrun_noncmp:
     cmpl $25,%eax
     je .Lrun_lea
+    cmpl $27,%eax
+    je .Lrun_jump
+    cmpl $28,%eax
+    je .Lrun_jumpz
     cmpl $42,%eax
     je .Lrun_exit
     cmpl $43,%eax
@@ -355,6 +359,27 @@ tape_run_x86_64:
     cmpl $47,%eax
     je .Lrun_next
     jmp .Lrun_opcode
+.Lrun_jumpz:
+    cmpq $0,48(%rsp,%rcx,8)
+    jne .Lrun_next
+.Lrun_jump:
+    testb $1,3(%rsp)
+    jz .Lrun_code
+    movq 8(%rsp),%rax
+    movq %r15,%rdx
+    subq %r14,%rdx
+    cmpq %rdx,%rax
+    jae .Lrun_code
+    movq %rax,%rdx
+    shrq $3,%rdx
+    movq 80(%r12),%r8
+    movzbl (%r8,%rdx),%r8d
+    movl %eax,%ecx
+    andl $7,%ecx
+    btl %ecx,%r8d
+    jnc .Lrun_code
+    leaq (%r14,%rax),%rbx
+    jmp .Lrun_next
 .Lrun_imm:
     movq 8(%rsp),%rax
     jmp .Lrun_store
