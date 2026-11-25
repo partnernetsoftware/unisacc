@@ -24,7 +24,7 @@
 | D | 前端覆盖三期完成 | 准入第 5 条;A 在 0.0.100、B1 在 0.0.107、B2 是 0.0.109 | 0.0.109(agy-flow) | 无 | 按 109 计划 |
 | E | 整链起到公开连续 3 版不超过 120 分钟 | 准入第 6 条 | 第一、二、三车的实测记录 | 无 | 随各版 |
 | F | 能用清单 30 过 25 | 准入第 7 条 | 清单本身要定稿 | 无 | 未估 |
-| G | CXM_MAXU 256 产品级验证(CHECK_MAXU、UNIT_BOUNDARY、129/200/256 -o) | 0.0.107 第二车判据 | 新产品候选 | 有:research/ccogweco/cxm-maxu-256.patch | 新产品上三批合计约 1 到 2 分钟 |
+| G | CXM_MAXU 256 产品级验证(CHECK_MAXU、UNIT_BOUNDARY、129/200/256 -o) | 0.0.107 第二车判据 | 新产品候选 | 有:archive/research-2026-11-25/ccogweco/cxm-maxu-256.patch | 新产品上三批合计约 1 到 2 分钟 |
 | H | 变异门超时杀进程组(G38 清单) | 0.0.125 必做验收 | 静态件已有交接;动态断言待做 | 有:research/ccogweco/mutation-gate-static-1-3-6.patch(旧版,待 ompgpt 重做) | 夹具单跑目标 20 秒内 |
 | I | 126 转发入口容量崩溃修复与具名拒绝 | version-seq 第 44 行;R26/R24 取证 | 生成处插桩(宿主侧只能整链候选上做) | 无 | 未估,须整链候选 |
 | J | 103 新判据落地(0.1.x 首件) | cc 决定 103 归 0.1.x;新判据见 research/ccogweco/v0103-new-criteria.md | one.cx 已找回;新夹具需写 | 夹具草案在判据文件附录 | 基准每轮 5x2x5 次,空机约数分钟 |

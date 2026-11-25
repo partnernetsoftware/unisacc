@@ -6,7 +6,7 @@
 
 - (1) 整体裁决以当次候选 strict 汇总为准:预跑完成前,下列候选上条目均为 UNMEASURED,不记 PASS。
 - (2) B1 2/3 与 3/3:第二车已合 module-units 三分片(a7b2dd86c5);B1 的 7.2 与 t10 夹具与登记的完整重放以 v0.0.107 候选上的 c99-tentative-array-incomplete、c99-array-param-typedef、c99-extern-array-incomplete、c99-global-redecl-conflict 四批实跑为准,当前 UNMEASURED。证据:plans/v0.0.107.md、research/ccogweco/r35-b1-assets-fixedpoint.md。
-- (3) CXM_MAXU 256 只到前端与计划层:-o 链接层仍为 128,超限以 `link unit ordinal bound exceeded (tokenlocations.UNIT_MAX=128)` 具名拒绝;产品级 CHECK_MAXU、UNIT_BOUNDARY 与 129/200/256 -o 全链须在新候选实跑,当前 UNMEASURED。证据:research/ccogweco/cxm-maxu-256.patch、research/ccogweco/cxm-maxu-256-evidence.md。
+- (3) CXM_MAXU 256 只到前端与计划层:-o 链接层仍为 128,超限以 `link unit ordinal bound exceeded (tokenlocations.UNIT_MAX=128)` 具名拒绝;产品级 CHECK_MAXU、UNIT_BOUNDARY 与 129/200/256 -o 全链须在新候选实跑,当前 UNMEASURED。证据:archive/research-2026-11-25/ccogweco/cxm-maxu-256.patch、research/ccogweco/cxm-maxu-256-evidence.md。
 - (4) 单元缓存键不覆盖导入模块接口(E02):结构体扩字段类改动后旧布局对象可能被复用;决定不改产品键、只留检查例作已知红复现,按已知缺口入本版与封版说明,不改 kind。证据:research/ccogweco/e02-closure.md、research/ccogweco/unverified-extra-rows.md。
 - (5) sy_proc_kill 回收后 pid 复用竞态:U33 保留 P1,随 0.0.125 的 sy_child_t 状态位收口;发布链 chain-step.cx:486-487 的"回收后再杀"同类 P0 已按 R38 升级并入 107 追加集(第七笔),修复须在 107 候选上实跑并附夹具。证据:research/ccogweco/p0-ledger.tsv、research/ccogweco/u33-callsite-audit.md。
 - (6) UNKNOWN 两项无生产者(cx-booter-ape 的 booter-raw-elf 与 old-checker):按已登记无生产者路径处置,不冒充 PASS。证据:release/evidence/0.0.105/expected-unmeasured.tsv(同口径沿用)、s9 的 *-deferred.tsv。

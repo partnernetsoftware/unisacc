@@ -1,6 +1,6 @@
 # CXM_MAXU 256 私有重放:证据(ccogweco, 第二车 0.0.107 候选)
 
-补丁: research/ccogweco/cxm-maxu-256.patch(29 文件)。基线: v0.0.106 车头在制作期间两次前移(4258ae1f83 -> f8c0de2157 -> 55d9badfac22), 本补丁在最新 55d9badfac22 的干净 archive 上 git apply --check 整份通过。
+补丁: archive/research-2026-11-25/ccogweco/cxm-maxu-256.patch(29 文件)。基线: v0.0.106 车头在制作期间两次前移(4258ae1f83 -> f8c0de2157 -> 55d9badfac22), 本补丁在最新 55d9badfac22 的干净 archive 上 git apply --check 整份通过。
 做法: git archive 车头到私有目录(不 clone, 不动 v0.0.106 工作树), 顺序重放 63ee420bd5 的 17 文件, 补 plans/v0.0.106.md 第 4 项漏改, 派生表与接口表由工具重算。
 范围决定(按 cc G31 与代价测量): CXM_MAXU/DV_MAXU 128 -> 256 在前端与计划层落地; 链接层磁带序数预算 UNIT_MAX 128 不整体抬高(它触序数预算与模型网身份, 约 10 个消费者), 改名为具名容量拒绝, 留待后续。故本件在 -o 层仍是 128。
 

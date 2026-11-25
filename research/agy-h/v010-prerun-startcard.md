@@ -87,9 +87,9 @@ printf '%s\n' "$PRERUN_PID" > "$PR/prerun-drive.pid"
 
 ## 5. `done.WNNNN` 与进程存活判活 (`prerun-watch` v3 值守规范)
 
-1. 每次(`+0m` 起每 `10` 分钟) 只读执行 [prerun-watch.cx](prerun-watch.cx) v3:
+1. 每次(`+0m` 起每 `10` 分钟) 只读执行 [prerun-watch.cx](../../tools/prerun-watch.cx) v3:
 ```sh
-sh ./unisacc.com research/agy-h/prerun-watch.cx -- \
+sh ./unisacc.com tools/prerun-watch.cx -- \
   --prerun-dir "$PR" --rate-tsv "$RATE_TSV" --prerun-start "$T_PRERUN" --now "$(date +%s)"
 ```
 (若未落 `prerun-drive.pid`, 显式追加 `--pid "$PRERUN_PID"`; 若使用自定义增量日志文件名, 追加 `--daemon-log FILE`)。

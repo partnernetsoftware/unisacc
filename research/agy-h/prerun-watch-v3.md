@@ -1,7 +1,7 @@
 # prerun-watch v3 设计与验收说明 (`resume` 期间以 `done.WNNNN` 与进程存活判活)
 
-交付窗口: `agy-h` | 代码路径: [prerun-watch.cx](prerun-watch.cx) (`633` 行), [check-prerun-watch.cx](check-prerun-watch.cx) (`427` 行)
-适用基线: `main c67b497670` (仅写于 `research/agy-h/`, 不动共享树与 `tests/` 登记表, 待工具线解冻后入 `tools/` 并 `register.cx` 登记)
+交付窗口: `agy-h` | 代码路径: [prerun-watch.cx](../../tools/prerun-watch.cx) (`633` 行), [check-prerun-watch.cx](../../tools/check-prerun-watch.cx) (`427` 行)
+适用基线: `main c67b497670` (设计定稿稿, 正式代码已由 `ab3e335580` 合入 `tools/prerun-watch.cx` 与 `tools/check-prerun-watch.cx`)
 
 ---
 
@@ -30,7 +30,7 @@
 ## 3. 实测验收证据 (本轮已全部实跑通过)
 
 1. `cx-lint`:
-   `sh ./unisacc.com tools/cx-lint.cx -- research/agy-h/prerun-watch.cx research/agy-h/check-prerun-watch.cx`
+   `sh ./unisacc.com tools/cx-lint.cx -- tools/prerun-watch.cx tools/check-prerun-watch.cx`
    实测: `CX_LINT files=2 findings=0 elapsed_ms=11`, `LINT_RC=0` (零 `#include`, 全用 `sys.fs`/`sys.posix`/`text.text`/`tsvx.read`/`mem.bytes`)。
 2. `check-prerun-watch.cx` (`12` 个合成离线夹具, 覆盖 `v2` `8` 例及 `v3` `4` 例):
    - 新增 Case `9`: `v3-stale-stop-suppressed-by-done-files-and-live-pid` (验证旧 `PRERUN_STOP` 下由 `done.W0004..5` + 活 PID 压制判 `RUNNING 6/10` 且子窗 `done.W0003.z01` 不虚增主计数);
@@ -39,7 +39,7 @@
    - 新增 Case `12`: `v3-refuse-bad-pid-and-missing-done-dir` (坏 PID 与不存在目录严格拒绝 `rc=2`)。
    实测热态耗时: `CHECK_PRERUN_WATCH passed=12 failed=0`, `WARM_MS=4307`, `RC=0`。
 3. `0.0.107` 第二轮真实目录回放(`~/.cache/unisacc/prerun/v0.0.107-63354b4a2c` + `prerun-rate-107-r2.tsv`):
-   - 命令: `sh ./unisacc.com research/agy-h/prerun-watch.cx -- --prerun-dir "$PR2" --rate-tsv research/agy-h/prerun-rate-107-r2.tsv --prerun-start 1795556342 --now 1795561194`
+   - 命令: `sh ./unisacc.com tools/prerun-watch.cx -- --prerun-dir "$PR2" --rate-tsv research/agy-h/prerun-rate-107-r2.tsv --prerun-start 1795556342 --now 1795561194`
    - 实测(修正原 `v2` `INCOMPLETE 240/241 rc=1` 误报):
 ```text
 PRERUN_WATCH	state=DONE	done=241/241	rate_inc=2.86	rate_cum=2.98	eta_min=0	rc124=W0000,W0001,W0014,W0015,W0017,W0088,W0091,W0093,W0185,W0220	lanes=2	last=W0240	phase=normal
