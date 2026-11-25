@@ -150,6 +150,30 @@ int main(int argc, char **argv) {
             if (!has(out, row)) reasons = 0;
         }
         ck(reasons, "every unreachable cap names a reason");
+        {
+            static const char *fact_rows[] = {
+                "CAP_FACT\terror-text-283\tERR_TEXT_MAX\t283\texec/pp/directive-scan-result.tsv:12",
+                "CAP_FACT\tinclude-splices-4000\tINCLUDE_SPLICE_MAX\t4000\texec/pp/directive-body-byte.tsv:43;exec/pp/directive-body-byte.tsv:46",
+                "CAP_FACT\tcontinuation-4096\tCONTINUATION_MAX\t4096\texec/pp/directive-body-byte.tsv:79",
+                "CAP_FACT\tconstant-beyond-int\tINT_CONST_BITS\t63\texec/parse2/unarycontrol-result.tsv:177",
+                "CAP_FACT\tenum-pool\tENUM_POOL\t128\texec/parse2/enumtypes-result.tsv:8",
+                "CAP_FACT\tsignature-pool\tSIGNATURE_POOL\t8192\texec/parse2/functiontypes-result.tsv:28",
+                "CAP_FACT\tsetjmp-expr-depth\tSETJMP_EXPR_DEPTH_MAX\t40\texec/parse2/setjmpcontrol-result.tsv:86",
+                "CAP_FACT\tstruct-id\tSTRUCT_ID_MAX\t2049\texec/parse2/control-result.tsv:510",
+                "CAP_FACT\tstruct-member\tSTRUCT_MEMBER_MAX\t512\texec/parse2/control-result.tsv:575",
+                "CAP_FACT\tforward-calls-8192\tFORWARD_CALL_MAX\t8192\texec/parse2/forward-result.tsv:17",
+                "CAP_FACT\trelocation-capacity\tRELOC_MAX\t262144\texec/enc/x86object-result.tsv:30;exec/enc/armobject-result.tsv:35",
+                "CAP_FACT\tlayoutfacts-sid\tLAYOUT_SID_MAX\t128\texec/parse2/layoutfacts-result.tsv:10",
+                "CAP_FACT\tsignature-eq-depth\tSIG_EQ_DEPTH_MAX\t31\texec/parse2/functiontypes-result.tsv:388",
+                "CAP_FACT\tsetjmp-temp-depth\tSETJMP_TEMP_MIN\t0\texec/parse2/setjmpcontrol-result.tsv:89",
+                "CAP_FACT\tshape-span\tSHAPE_SPAN\t67108864\texec/parse2/shape-result.tsv:120",
+                "CAP_FACT\tmodelgraph-budget\tMODELGRAPH_NODE_MAX\t17409\texec/modelgraphequality-result.tsv:12",
+                "CAP_FACT\ttoken-position-span\tTOKEN_POS_SPAN\t67108864\texec/parse2/control-result.tsv:2231",
+            };
+            int all_facts = 1;
+            for (int i = 0; i < 17; i++) if (!has(out, fact_rows[i])) all_facts = 0;
+            ck(all_facts, "all 17 cap values and source sites are read from exec/facts/k2-caps.tsv unchanged");
+        }
     }
 
     /* (2) judging logic with fixture products */
@@ -189,10 +213,28 @@ int main(int argc, char **argv) {
     rc = run_tool("--only", "no-such-cap", 0, 0, 0);
     ck(rc == 1 && has(out, "measured=0"), "an unknown --only id measures nothing and exits 1");
 
-    /* (4) the real product: the eight reachable fast caps still have a live edge (about 15 s) */
+    /* (4) the real product: red-before-green table mutation (change 1 value -> that 1 cap fails), then all 8 fast caps MEASURED */
     if (skip_real) {
         printf("UNMEASURED\treal-product\t--no-real was passed; the eight fast caps were not run\n");
     } else if (exists(product)) {
+        size_t fn = 0;
+        char *fb = cx_read("exec/facts/k2-caps.tsv", &fn);
+        char mut_caps[CKC_DIR];
+        join(mut_caps, sizeof mut_caps, work, "k2-caps-mut.tsv");
+        long hit = fb ? tx_find(fb, (long)fn, "ERR_TEXT_MAX\t283", 16) : -1;
+        ck(hit >= 0, "k2-caps.tsv has ERR_TEXT_MAX 283 for mutation probe");
+        if (fb && hit >= 0) {
+            fb[hit + 15] = '0'; /* mutate 283 -> 280 */
+            if (cx_write(mut_caps, fb, fn)) die("cannot write", mut_caps);
+            rc = run_tool("--list", "--caps", mut_caps, 0, 0);
+            ck(rc == 0 && has(out, "CAP_FACT\terror-text-283\tERR_TEXT_MAX\t280\t") &&
+               has(out, "CAP_FACT\tstruct-member\tSTRUCT_MEMBER_MAX\t512\t"),
+               "mutating ERR_TEXT_MAX 283 -> 280 in table changes only that row in --list");
+            rc = run_tool("--only", "error-text-283", "--caps", mut_caps, 0);
+            ck(rc == 1 && has(out, "CAP\terror-text-283\tFAIL\tpast-cap rc=1"),
+               "mutating ERR_TEXT_MAX 283 -> 280 in table makes cap-probe error-text-283 turn RED");
+            mm_free(fb);
+        }
         rc = run_tool("--work", work, 0, 0, 0);
         ck(rc == 0 && has(out, "measured=8\tunreachable=8\tskipped=1\tfailed=0"), "real product: 8 fast caps MEASURED, none failed");
     } else {

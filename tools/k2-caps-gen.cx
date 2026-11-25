@@ -1,0 +1,347 @@
+/* tools/k2-caps-gen.cx -- generate and check exec/facts/k2-caps-consts.tsv from exec/facts/k2-caps.tsv,
+ * preserving one-version legacy aliases (MAXISPL, ENUM_LIMIT, SBB, POSSPAN, STRUCT_LIMIT) and verifying
+ * that all 19 consumer guard sites (including multi-site caps joined by ';') and legacy constant tables match exec/facts/k2-caps.tsv.
+ *
+ * Usage:
+ *   sh ./unisacc.com tools/k2-caps-gen.cx -- --check [--root DIR] [--facts PATH] [--out PATH]
+ *   sh ./unisacc.com tools/k2-caps-gen.cx -- --write [--root DIR] [--facts PATH] [--out PATH]
+ */
+#pragma unisa use sys.fs
+#pragma unisa use sys.io
+#pragma unisa use text.text
+#pragma unisa use mem.heap
+
+#define KC_NCAP 17
+
+typedef struct {
+    const char *name;
+    const char *legacy_alias; /* 0 if literal in table, else legacy constant name */
+    const char *legacy_file;  /* legacy constant table relative path, or 0 */
+    const char *legacy_pat;   /* pattern prefix in legacy_file, or 0 */
+} kc_spec_t;
+
+static const kc_spec_t specs[KC_NCAP] = {
+    {"ERR_TEXT_MAX",          0,              0,                               0},
+    {"INCLUDE_SPLICE_MAX",    0,              0,                               0},
+    {"CONTINUATION_MAX",      "MAXISPL",      "exec/facts/pp-layout.tsv",      "MAXISPL\t"},
+    {"INT_CONST_BITS",        0,              0,                               0},
+    {"ENUM_POOL",             "ENUM_LIMIT",   "exec/facts/enumtypes.tsv",      "=ENUM_LIMIT\tjson\t"},
+    {"SIGNATURE_POOL",        "SBB",          "exec/facts/functiontypes.tsv",  "=SBB\tjson\t"},
+    {"SETJMP_EXPR_DEPTH_MAX", 0,              0,                               0},
+    {"STRUCT_ID_MAX",         "STRUCT_LIMIT", "exec/facts/k2-control.tsv",     "\"STRUCT_LIMIT\":"},
+    {"STRUCT_MEMBER_MAX",     0,              0,                               0},
+    {"FORWARD_CALL_MAX",      0,              0,                               0},
+    {"RELOC_MAX",             0,              0,                               0},
+    {"LAYOUT_SID_MAX",        0,              0,                               0},
+    {"SIG_EQ_DEPTH_MAX",      0,              0,                               0},
+    {"SETJMP_TEMP_MIN",       0,              0,                               0},
+    {"SHAPE_SPAN",            "POSSPAN",      "exec/facts/gen2-constants.tsv", "POSSPAN\t"},
+    {"MODELGRAPH_NODE_MAX",   0,              0,                               0},
+    {"TOKEN_POS_SPAN",        "POSSPAN",      "exec/facts/gen2-constants.tsv", "POSSPAN\t"},
+};
+
+typedef struct {
+    char name[64];
+    char val_str[32];
+    long long val;
+    char source[160];
+    char purpose[160];
+} kc_row_t;
+
+static kc_row_t rows[KC_NCAP];
+
+static int parse_int64(const char *s, long long *out) {
+    int i = 0, neg = 0;
+    long long v = 0;
+    if (!s || !s[0]) return -1;
+    if (s[0] == '-') { neg = 1; i++; if (!s[i]) return -1; }
+    for (; s[i]; i++) {
+        if (s[i] < '0' || s[i] > '9') return -1;
+        v = v * 10 + (s[i] - '0');
+    }
+    *out = neg ? -v : v;
+    return 0;
+}
+
+static int read_nth_line(const char *path, int want_line, char *out, size_t cap) {
+    size_t n = 0, at = 0;
+    int ln = 0;
+    char *b = (char *)cx_read(path, &n);
+    if (!b) return -1;
+    while (at < n) {
+        size_t e = at;
+        while (e < n && b[e] != '\n') e++;
+        ln++;
+        if (ln == want_line) {
+            size_t len = e - at;
+            if (len > 0 && b[at + len - 1] == '\r') len--;
+            if (len >= cap) { mm_free(b); return -1; }
+            for (size_t i = 0; i < len; i++) out[i] = b[at + i];
+            out[len] = 0;
+            mm_free(b);
+            return 0;
+        }
+        at = e + 1;
+    }
+    mm_free(b);
+    return -1;
+}
+
+static int verify_one_source(const char *root, const kc_row_t *r, const kc_spec_t *sp,
+                             const char *site, int check_legacy) {
+    long colon = tx_chr(site, tx_len(site, 160), ':');
+    char rel[160], full[4400], linebuf[4096], pat[96];
+    long long lno = 0;
+    if (colon <= 0) {
+        sy_eprintf("k2-caps-gen: FAIL malformed source '%s' for %s\n", site, r->name);
+        return -1;
+    }
+    for (long i = 0; i < colon; i++) rel[i] = site[i];
+    rel[colon] = 0;
+    if (parse_int64(site + colon + 1, &lno) != 0 || lno <= 0) {
+        sy_eprintf("k2-caps-gen: FAIL invalid line number in '%s' for %s\n", site, r->name);
+        return -1;
+    }
+    if (cx_fmt(full, sizeof full, "%s/%s", root, rel) ||
+        read_nth_line(full, (int)lno, linebuf, sizeof linebuf) != 0) {
+        sy_eprintf("k2-caps-gen: FAIL cannot read %s:%lld for %s\n", rel, lno, r->name);
+        return -1;
+    }
+    if (tx_eqz(r->name, "INT_CONST_BITS")) {
+        if (r->val != 63 || tx_find(linebuf, tx_len(linebuf, sizeof linebuf), "DEAD.big", 8) < 0) {
+            sy_eprintf("k2-caps-gen: FAIL %s=%lld drift vs %s (expected 63 and DEAD.big)\n",
+                       r->name, r->val, site);
+            return -1;
+        }
+        return 0;
+    }
+    if (sp->legacy_alias) {
+        size_t fn = 0;
+        char lfull[4400], lpat[128], *fb;
+        if (cx_fmt(pat, sizeof pat, "\"%s\"", sp->legacy_alias) ||
+            tx_find(linebuf, tx_len(linebuf, sizeof linebuf), pat, tx_len(pat, sizeof pat)) < 0) {
+            sy_eprintf("k2-caps-gen: FAIL %s source %s missing alias %s\n", r->name, site, sp->legacy_alias);
+            return -1;
+        }
+        if (check_legacy) {
+            if (cx_fmt(lfull, sizeof lfull, "%s/%s", root, sp->legacy_file) ||
+                cx_fmt(lpat, sizeof lpat, "%s%s", sp->legacy_pat, r->val_str)) {
+                return -1;
+            }
+            fb = (char *)cx_read(lfull, &fn);
+            if (!fb || tx_find(fb, (long)fn, lpat, tx_len(lpat, sizeof lpat)) < 0) {
+                if (fb) mm_free(fb);
+                sy_eprintf("k2-caps-gen: FAIL %s=%s drift vs legacy %s (%s)\n",
+                           r->name, r->val_str, sp->legacy_file, sp->legacy_alias);
+                return -1;
+            }
+            mm_free(fb);
+        }
+    } else {
+        char p1[64], p2[64], pc[96];
+        long ll = tx_len(linebuf, sizeof linebuf);
+        if (cx_fmt(p1, sizeof p1, ",%s]", r->val_str) ||
+            cx_fmt(p2, sizeof p2, ", %s]", r->val_str) ||
+            cx_fmt(pc, sizeof pc, "\"%s\"", r->name))
+            return -1;
+        if (tx_find(linebuf, ll, p1, tx_len(p1, sizeof p1)) < 0 &&
+            tx_find(linebuf, ll, p2, tx_len(p2, sizeof p2)) < 0 &&
+            tx_find(linebuf, ll, pc, tx_len(pc, sizeof pc)) < 0) {
+            sy_eprintf("k2-caps-gen: FAIL %s=%s drift vs %s (%s)\n", r->name, r->val_str, site, linebuf);
+            return -1;
+        }
+    }
+    return 0;
+}
+
+static int verify_source_and_legacy(const char *root, int idx, int *site_count) {
+    const kc_row_t *r = &rows[idx];
+    const kc_spec_t *sp = &specs[idx];
+    char site[160];
+    size_t i = 0, s_at = 0;
+    int first = 1;
+    while (1) {
+        char ch = r->source[i];
+        if (ch == ';' || ch == 0) {
+            if (s_at == 0) {
+                sy_eprintf("k2-caps-gen: FAIL empty source segment in '%s' for %s\n", r->source, r->name);
+                return -1;
+            }
+            site[s_at] = 0;
+            if (verify_one_source(root, r, sp, site, first) != 0) return -1;
+            *site_count += 1;
+            first = 0;
+            s_at = 0;
+            if (ch == 0) break;
+        } else {
+            if (s_at + 1 >= sizeof site) return -1;
+            site[s_at++] = ch;
+        }
+        i++;
+    }
+    return 0;
+}
+
+static int load_caps(const char *facts_path) {
+    size_t n = 0, at = 0;
+    char *b = (char *)cx_read(facts_path, &n);
+    int nr = 0;
+    if (!b || n == 0) {
+        if (b) mm_free(b);
+        sy_eprintf("k2-caps-gen: FAIL cannot read %s\n", facts_path);
+        return -1;
+    }
+    while (at < n) {
+        size_t e = at;
+        while (e < n && b[e] != '\n') e++;
+        size_t len = e - at;
+        if (len > 0 && b[at + len - 1] == '\r') len--;
+        if (len > 0 && b[at] != '#') {
+            char line[512], *cols[5];
+            int nc = 1;
+            if (len >= sizeof line || nr >= KC_NCAP) { mm_free(b); return -1; }
+            for (size_t i = 0; i < len; i++) line[i] = b[at + i];
+            line[len] = 0;
+            cols[0] = line;
+            for (size_t i = 0; i < len; i++) {
+                if (line[i] == '\t') {
+                    if (nc >= 5) { mm_free(b); return -1; }
+                    line[i] = 0;
+                    cols[nc++] = line + i + 1;
+                }
+            }
+            if (nc != 4 || !cols[0][0] || !cols[1][0] || !cols[2][0] || !cols[3][0]) {
+                mm_free(b);
+                sy_eprintf("k2-caps-gen: FAIL row %d needs 4 non-empty columns\n", nr + 1);
+                return -1;
+            }
+            if (!tx_eqz(cols[0], specs[nr].name)) {
+                mm_free(b);
+                sy_eprintf("k2-caps-gen: FAIL row %d name '%s' != expected '%s'\n",
+                           nr + 1, cols[0], specs[nr].name);
+                return -1;
+            }
+            if (parse_int64(cols[1], &rows[nr].val) != 0) {
+                mm_free(b);
+                sy_eprintf("k2-caps-gen: FAIL row %d invalid integer '%s'\n", nr + 1, cols[1]);
+                return -1;
+            }
+            if (tx_find(cols[3], tx_len(cols[3], 160), "not covered:", 12) >= 0) {
+                mm_free(b);
+                sy_eprintf("k2-caps-gen: FAIL row %d purpose must not contain 'not covered:'\n", nr + 1);
+                return -1;
+            }
+            cx_fmt(rows[nr].name, sizeof rows[nr].name, "%s", cols[0]);
+            cx_fmt(rows[nr].val_str, sizeof rows[nr].val_str, "%s", cols[1]);
+            cx_fmt(rows[nr].source, sizeof rows[nr].source, "%s", cols[2]);
+            cx_fmt(rows[nr].purpose, sizeof rows[nr].purpose, "%s", cols[3]);
+            nr++;
+        }
+        at = e + 1;
+    }
+    mm_free(b);
+    if (nr != KC_NCAP) {
+        sy_eprintf("k2-caps-gen: FAIL expected %d rows, got %d\n", KC_NCAP, nr);
+        return -1;
+    }
+    return 0;
+}
+
+static int render_consts(char *out, size_t cap, size_t *out_len) {
+    size_t pos = 0;
+    int i;
+    if (cx_fmt(out, cap,
+               "# exec/facts/k2-caps-consts.tsv: written by tools/k2-caps-gen.cx from exec/facts/k2-caps.tsv, do not edit\n"))
+        return -1;
+    pos = (size_t)tx_len(out, (long)cap);
+    for (i = 0; i < KC_NCAP; i++) {
+        if (cx_fmt(out + pos, cap - pos, "=%s\tint\t%lld\n", rows[i].name, rows[i].val)) return -1;
+        pos += (size_t)tx_len(out + pos, (long)(cap - pos));
+    }
+    /* Preserve one-version legacy aliases (MAXISPL, ENUM_LIMIT, SBB, POSSPAN, STRUCT_LIMIT) */
+    if (cx_fmt(out + pos, cap - pos,
+               "=MAXISPL\tint\t%lld\n"
+               "=ENUM_LIMIT\tint\t%lld\n"
+               "=SBB\tint\t%lld\n"
+               "=POSSPAN\tint\t%lld\n"
+               "=STRUCT_LIMIT\tint\t%lld\n"
+               "=CAPS\tjson\t{",
+               rows[2].val, rows[4].val, rows[5].val, rows[14].val, rows[7].val))
+        return -1;
+    pos += (size_t)tx_len(out + pos, (long)(cap - pos));
+    for (i = 0; i < KC_NCAP; i++) {
+        if (cx_fmt(out + pos, cap - pos, "%s\"%s\":%lld", i ? "," : "", rows[i].name, rows[i].val)) return -1;
+        pos += (size_t)tx_len(out + pos, (long)(cap - pos));
+    }
+    if (cx_fmt(out + pos, cap - pos,
+               ",\"MAXISPL\":%lld,\"ENUM_LIMIT\":%lld,\"SBB\":%lld,\"POSSPAN\":%lld,\"STRUCT_LIMIT\":%lld}\n",
+               rows[2].val, rows[4].val, rows[5].val, rows[14].val, rows[7].val))
+        return -1;
+    pos += (size_t)tx_len(out + pos, (long)(cap - pos));
+    *out_len = pos;
+    return 0;
+}
+
+int main(int argc, char **argv) {
+    const char *root = ".";
+    const char *facts_arg = 0;
+    const char *out_arg = 0;
+    int mode = -1, i, site_count = 0;
+    char facts_path[4400], out_path[4400];
+    static char rendered[16384];
+    size_t rlen = 0;
+
+    for (i = 1; i < argc; i++) {
+        if (tx_eqz(argv[i], "--check")) mode = 0;
+        else if (tx_eqz(argv[i], "--write")) mode = 1;
+        else if (tx_eqz(argv[i], "--root") && i + 1 < argc) root = argv[++i];
+        else if (tx_eqz(argv[i], "--facts") && i + 1 < argc) facts_arg = argv[++i];
+        else if (tx_eqz(argv[i], "--out") && i + 1 < argc) out_arg = argv[++i];
+        else {
+            sy_eprintf("k2-caps-gen: REFUSE usage: --check|--write [--root DIR] [--facts PATH] [--out PATH]\n");
+            return 2;
+        }
+    }
+    if (mode < 0) {
+        sy_eprintf("k2-caps-gen: REFUSE usage: --check|--write [--root DIR] [--facts PATH] [--out PATH]\n");
+        return 2;
+    }
+    if (facts_arg) cx_fmt(facts_path, sizeof facts_path, "%s", facts_arg);
+    else cx_fmt(facts_path, sizeof facts_path, "%s/exec/facts/k2-caps.tsv", root);
+    if (out_arg) cx_fmt(out_path, sizeof out_path, "%s", out_arg);
+    else cx_fmt(out_path, sizeof out_path, "%s/exec/facts/k2-caps-consts.tsv", root);
+
+    if (load_caps(facts_path) != 0) return 1;
+    if (rows[14].val != rows[16].val) {
+        sy_eprintf("k2-caps-gen: FAIL SHAPE_SPAN (%lld) != TOKEN_POS_SPAN (%lld) while sharing POSSPAN alias\n",
+                   rows[14].val, rows[16].val);
+        return 1;
+    }
+    for (i = 0; i < KC_NCAP; i++) {
+        if (verify_source_and_legacy(root, i, &site_count) != 0) return 1;
+    }
+    if (render_consts(rendered, sizeof rendered, &rlen) != 0) {
+        sy_eprintf("k2-caps-gen: FAIL render buffer overflow\n");
+        return 1;
+    }
+    if (mode == 1) {
+        if (cx_write(out_path, rendered, rlen) != 0) {
+            sy_eprintf("k2-caps-gen: FAIL cannot write %s\n", out_path);
+            return 2;
+        }
+        sy_printf("K2_CAPS_GEN\tWROTE\tcaps=%d\taliases=5\tsites=%d\tout=%s\n", KC_NCAP, site_count, out_path);
+        return 0;
+    }
+    {
+        size_t cn = 0;
+        char *cur = (char *)cx_read(out_path, &cn);
+        int same = (cur && cn == rlen && tx_same(cur, (long)cn, rendered, (long)rlen));
+        if (cur) mm_free(cur);
+        if (!same) {
+            sy_eprintf("k2-caps-gen: DIFF %s\n", out_path);
+            return 1;
+        }
+        sy_printf("K2_CAPS_GEN\tSAME\tcaps=%d\taliases=5\tsites=%d\tout=%s\n", KC_NCAP, site_count, out_path);
+        return 0;
+    }
+}

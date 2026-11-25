@@ -1,0 +1,202 @@
+/* tools/check-k2-caps-gen.cx -- checks tools/k2-caps-gen.cx.
+ *
+ *   sh ./unisacc.com tools/check-k2-caps-gen.cx
+ *
+ * Verifies:
+ *   (1) --check on current repo passes (K2_CAPS_GEN SAME caps=17 aliases=5 sites=19);
+ *   (2) --write produces byte-identical exec/facts/k2-caps-consts.tsv with all 17 canonical caps
+ *       and 5 preserved legacy aliases (MAXISPL, ENUM_LIMIT, SBB, POSSPAN, STRUCT_LIMIT);
+ *   (3) mutating a value in k2-caps.tsv (ERR_TEXT_MAX 283 -> 280) is caught by --check (rc=1);
+ *   (4) mutating k2-caps-consts.tsv is caught by --check (DIFF, rc=1);
+ *   (5) mutating secondary audited consumer sites (exec/pp/directive-body-byte.tsv:46 and
+ *       exec/enc/armobject-result.tsv:35) in a scratch root is caught by --check (rc=1).
+ */
+#pragma unisa use sys.fs
+#pragma unisa use sys.io
+#pragma unisa use sys.env
+#pragma unisa use sys.proc
+#pragma unisa use text.text
+#pragma unisa use mem.heap
+#pragma unisa use cxlib.procrun
+
+static int assertions, failed;
+static char out[65536];
+
+static void ck(int ok, const char *what) {
+    assertions++;
+    if (!ok) failed++;
+    sy_printf("%s\t%s\n", ok ? "PASS" : "FAIL", what);
+}
+
+static int has(const char *s, const char *needle) {
+    return tx_find(s, tx_len(s, 65536), needle, tx_len(needle, 4096)) >= 0;
+}
+
+static int copy_file(const char *src, const char *dst) {
+    size_t n = 0;
+    char *b = (char *)cx_read(src, &n);
+    int rc;
+    if (!b) return -1;
+    rc = cx_write(dst, b, n);
+    mm_free(b);
+    return rc;
+}
+
+int main(void) {
+    char work[1024], bin[1200], f_mut[1200], o_tmp[1200], sroot[1200];
+    int cut = 0, rc;
+
+    cx_fmt(work, sizeof work, "%s/k2-caps-gen-check-%d", sy_tmpdir(), (int)sy_pid());
+    if (sy_mkdir_all(work, 0700) != 0) return 2;
+    cx_fmt(bin, sizeof bin, "%s/k2-caps-gen.bin", work);
+    cx_fmt(f_mut, sizeof f_mut, "%s/k2-caps-mut.tsv", work);
+    cx_fmt(o_tmp, sizeof o_tmp, "%s/k2-caps-consts.tsv", work);
+    cx_fmt(sroot, sizeof sroot, "%s/root", work);
+
+    {
+        char *v[] = {"sh", "./unisacc.com", "tools/k2-caps-gen.cx", "-o", bin, 0};
+        rc = pr_run_merged(v, 55, out, (int)sizeof out, &cut);
+        ck(rc == 0 && !cut, "k2-caps-gen compiles");
+        if (rc != 0) {
+            sy_printf("CHECK_K2_CAPS_GEN\tassertions=%d\tfailed=%d\n", assertions, failed);
+            return 1;
+        }
+    }
+
+    /* (1) --check on current repo */
+    {
+        char *v[] = {bin, "--check", 0};
+        rc = pr_run_merged(v, 30, out, (int)sizeof out, &cut);
+        ck(rc == 0 && has(out, "K2_CAPS_GEN\tSAME\tcaps=17\taliases=5\tsites=19"),
+           "repo --check passes with 17 caps, 5 legacy aliases, and 19 consumer sites");
+    }
+
+    /* (2) --write to scratch output and verify all 17 caps + 5 legacy aliases */
+    {
+        char *vw[] = {bin, "--write", "--out", o_tmp, 0};
+        char *vc[] = {bin, "--check", "--out", o_tmp, 0};
+        size_t on = 0;
+        char *ob;
+        rc = pr_run_merged(vw, 30, out, (int)sizeof out, &cut);
+        ck(rc == 0 && has(out, "K2_CAPS_GEN\tWROTE\tcaps=17\taliases=5"), "--write produces k2-caps-consts.tsv");
+        rc = pr_run_merged(vc, 30, out, (int)sizeof out, &cut);
+        ck(rc == 0 && has(out, "K2_CAPS_GEN\tSAME\tcaps=17\taliases=5"), "--check after --write is SAME");
+        ob = (char *)cx_read(o_tmp, &on);
+        ck(ob != 0 && has(ob, "=ERR_TEXT_MAX\tint\t283\n") &&
+           has(ob, "=CONTINUATION_MAX\tint\t4096\n") &&
+           has(ob, "=MAXISPL\tint\t4096\n") &&
+           has(ob, "=ENUM_LIMIT\tint\t128\n") &&
+           has(ob, "=SBB\tint\t8192\n") &&
+           has(ob, "=POSSPAN\tint\t67108864\n") &&
+           has(ob, "=STRUCT_LIMIT\tint\t2049\n"),
+           "generated file contains canonical caps and all 5 legacy aliases");
+        if (ob) mm_free(ob);
+    }
+
+    /* (3) mutating ERR_TEXT_MAX 283 -> 280 in k2-caps.tsv must fail --check */
+    {
+        size_t fn = 0;
+        char *fb = (char *)cx_read("exec/facts/k2-caps.tsv", &fn);
+        long hit = fb ? tx_find(fb, (long)fn, "ERR_TEXT_MAX\t283", 16) : -1;
+        ck(hit >= 0, "ERR_TEXT_MAX 283 present in exec/facts/k2-caps.tsv");
+        if (fb && hit >= 0) {
+            fb[hit + 15] = '0'; /* 283 -> 280 */
+            cx_write(f_mut, fb, fn);
+            char *vm[] = {bin, "--check", "--facts", f_mut, "--out", o_tmp, 0};
+            rc = pr_run_merged(vm, 30, out, (int)sizeof out, &cut);
+            ck(rc == 1 && has(out, "ERR_TEXT_MAX=280 drift"), "mutating ERR_TEXT_MAX 283 -> 280 is rejected by --check");
+            mm_free(fb);
+        }
+    }
+
+    /* (4) mutating k2-caps-consts.tsv output must fail --check */
+    {
+        cx_write(o_tmp, "# drifted\n", 10);
+        char *vd[] = {bin, "--check", "--out", o_tmp, 0};
+        rc = pr_run_merged(vd, 30, out, (int)sizeof out, &cut);
+        ck(rc == 1 && has(out, "DIFF"), "drifted k2-caps-consts.tsv is rejected by --check");
+    }
+
+    /* (5) mutating secondary consumer sites (directive-body-byte.tsv:46 and armobject-result.tsv:35) must fail --check */
+    {
+        static const char *dirs[] = {
+            "exec/pp", "exec/parse2", "exec/enc", "exec", "exec/facts"
+        };
+        static const char *files[] = {
+            "exec/facts/k2-caps.tsv",
+            "exec/facts/k2-caps-consts.tsv",
+            "exec/facts/pp-layout.tsv",
+            "exec/facts/enumtypes.tsv",
+            "exec/facts/functiontypes.tsv",
+            "exec/facts/k2-control.tsv",
+            "exec/facts/gen2-constants.tsv",
+            "exec/pp/directive-scan-result.tsv",
+            "exec/pp/directive-body-byte.tsv",
+            "exec/parse2/unarycontrol-result.tsv",
+            "exec/parse2/enumtypes-result.tsv",
+            "exec/parse2/functiontypes-result.tsv",
+            "exec/parse2/setjmpcontrol-result.tsv",
+            "exec/parse2/control-result.tsv",
+            "exec/parse2/forward-result.tsv",
+            "exec/parse2/layoutfacts-result.tsv",
+            "exec/parse2/shape-result.tsv",
+            "exec/modelgraphequality-result.tsv",
+            "exec/enc/x86object-result.tsv",
+            "exec/enc/armobject-result.tsv",
+        };
+        int copied = 1;
+        for (int i = 0; i < 5; i++) {
+            char d[1400];
+            cx_fmt(d, sizeof d, "%s/%s", sroot, dirs[i]);
+            if (sy_mkdir_all(d, 0700) != 0) copied = 0;
+        }
+        for (int i = 0; i < 20; i++) {
+            char dst[1400];
+            cx_fmt(dst, sizeof dst, "%s/%s", sroot, files[i]);
+            if (copy_file(files[i], dst) != 0) copied = 0;
+        }
+        ck(copied, "scratch root populated for secondary consumer drift probes");
+        if (copied) {
+            char *vr[] = {bin, "--check", "--root", sroot, 0};
+            char p_pp[1400], p_arm[1400];
+            size_t sn = 0;
+            char *sb;
+            long h2;
+            rc = pr_run_merged(vr, 30, out, (int)sizeof out, &cut);
+            ck(rc == 0 && has(out, "K2_CAPS_GEN\tSAME\tcaps=17\taliases=5\tsites=19"),
+               "scratch root baseline --check passes");
+
+            cx_fmt(p_pp, sizeof p_pp, "%s/exec/pp/directive-body-byte.tsv", sroot);
+            sb = (char *)cx_read(p_pp, &sn);
+            h2 = sb ? tx_find(sb, (long)sn, "IN62\t62\tINC1\t[[\"MARK\",\"NME\"],[\"CMPI\",\"NINCL\",4000]]", 51) : -1;
+            ck(h2 >= 0, "IN62 4000 guard line present in scratch directive-body-byte.tsv");
+            if (sb && h2 >= 0) {
+                long voff = h2 + tx_find(sb + h2, 64, "4000]", 5);
+                sb[voff + 3] = '1'; /* 4000 -> 4001 on secondary site line 46 */
+                cx_write(p_pp, sb, sn);
+                rc = pr_run_merged(vr, 30, out, (int)sizeof out, &cut);
+                ck(rc == 1 && has(out, "INCLUDE_SPLICE_MAX=4000 drift vs exec/pp/directive-body-byte.tsv:46"),
+                   "mutating secondary INCLUDE_SPLICE_MAX site (directive-body-byte.tsv:46) fails --check");
+                mm_free(sb);
+            }
+            copy_file("exec/pp/directive-body-byte.tsv", p_pp);
+
+            cx_fmt(p_arm, sizeof p_arm, "%s/exec/enc/armobject-result.tsv", sroot);
+            sb = (char *)cx_read(p_arm, &sn);
+            h2 = sb ? tx_find(sb, (long)sn, "\"ao_limit\",262144]", 18) : -1;
+            ck(h2 >= 0, "AO.record 262144 guard line present in scratch armobject-result.tsv");
+            if (sb && h2 >= 0) {
+                long voff = h2 + 11;
+                sb[voff + 5] = '5'; /* 262144 -> 262145 on arm64 site line 35 */
+                cx_write(p_arm, sb, sn);
+                rc = pr_run_merged(vr, 30, out, (int)sizeof out, &cut);
+                ck(rc == 1 && has(out, "RELOC_MAX=262144 drift vs exec/enc/armobject-result.tsv:35"),
+                   "mutating arm64 RELOC_MAX site (armobject-result.tsv:35) fails --check");
+                mm_free(sb);
+            }
+        }
+    }
+
+    sy_printf("CHECK_K2_CAPS_GEN\tassertions=%d\tfailed=%d\n", assertions, failed);
+    return failed ? 1 : 0;
+}
