@@ -342,6 +342,9 @@ R75/R78/R69/R69.6/R79/R81 等仍跟踪项已归档全文于 archive/prd_mempalac
 - 起链前红两处:门 20(导出已核 identity helper,sha 00aa0909a219)与门 23(上条);首次 bg-candidate start 被外层 58 秒限在严格 preflight 阶段中断(链未起),重起放后台限 300 秒;chain-ready 全量第二轮 READY yes failed=none。
 - 首窗预期 rc=124 各一次,按 S1 在 2 分钟内续跑;第 30 分钟完成窗数小于 110 改保守档。
 
+## 决定:0.0.xx 系列停工,旧分支改名素材(2026-11-25 13:16,cc 执行)
+- 0.0.xx 版本系列已停,不再接受提交;旧未合并分支 v0.0.102、103、104、108、123、125 已改名为 src/v0.0.NN(哈希不变),只作重放素材来源;新开发只在 v0.1.x 工作树(.claude/worktrees/v0.1.N,分支 v0.1.N)。0.0.108 的 9 个提交由 0.1.1 重放(见 plans/v0.1.1 与 research/agyneon/v011-impl-prep.md);0.0.109 前端 B2 补丁对应 0.1.2,0.0.125 对应 0.1.3,0.0.126 对应 0.1.4。分支去向与状态台账见 research/ccogweco/branch-ledger.md。回滚:git branch -m src/v0.0.NN v0.0.NN。
+
 ## 决定:0.1.0 公开与 v0.1.x 开发流改进(2026-11-25 12:05,cc 执行,fable 方案采纳)
 
 - 事实:v0.1.0 于 2026-11-25 11:55:05 +0800 公开(Latest),APE b7cae17b1ae557a4907247e3168db56925504819f98d15f1b75a2da2de8fa97f,SOURCES_SID 37ff46cd(与 0.0.107 相同);Y1=7375d05e33、Y2=7dc318425d、release-post 三笔 177b6326f5/c3e39dc4cf/d1e0616c31;T1=08:59:43 到公开 175.4 分钟,准入线 T1+120 与 T2+45 未满足(如实披露)。0.1.0 不再是零 B 提交纯封存车:B-t 四文件(三 tools 夹具、一 tests/env-semantics.tsv 到期表),零触 SID 与产品闭包,证明 research/cdx/path-b-proof-010.md。
