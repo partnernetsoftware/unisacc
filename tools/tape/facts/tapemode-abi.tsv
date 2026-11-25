@@ -1,0 +1,28 @@
+# tools/tape/facts/tapemode-abi.tsv -- T0.3 tape mode kernel entry ABI contract (M0/M1 tool-line)
+item	x86_64	arm64	width	rule
+header_magic	UNIKERN1	UNIKERN1	8	reuse existing UNIKERN1 40-byte header (isa, entry, slot, length)
+header_size	40	40	4	header length in bytes; M2 reserves 16-byte dual slot (slot + slot+8) with pre-load bounds check in kernel.cx
+mode	args[0]=4	args[0]=4	8	0..3 reserved by existing core_run/transition (+2 on Windows arm64 -> 6); M1 standalone harness calls tape_run_<isa> directly; M2 bridge_arm64.S:17-34 and bridge_x86_64.S must dispatch mode=4 (or 6 on Win arm64) BEFORE existing bit1/bit0 check
+entry_sym	tape_run_x86_64	tape_run_arm64	8	M1 standalone entry symbol (SysV/AAPCS64 C ABI: int64_t tape_run(uint64_t *args)); bridge dispatch deferred to M2
+win_arm64_offset	0	+2	8	preserve existing Windows arm64 +2 args offset rule unchanged (mode=4 becomes 6)
+vreg	rbx->frame[0..15]	x19->frame[0..15]	8	16 virtual 64-bit registers r0..r15 in caller/interpreter frame slots; not pinned to physical regs in interpreter mode
+membase	r15	x20	8	linear memory base register (x20 callee-saved on arm64, avoiding x28 reserved by run_arm64.S:38 split stack) points to host DATA start; real pointers without hashing
+arg_container	args[1]	args[1]	8	mapped UTAPEBIN container base address (read-only CODE/DATA/HOST sections)
+arg_container_len	args[7]	args[7]	8	mapped UTAPEBIN container length in bytes; interpreter validates section table bounds against [args[1], args[1]+args[7]) before execution
+arg_membase	args[9]	args[9]	8	writable DATA+BSS linear memory buffer pre-allocated and initialized by harness/loader (copy read-only DATA template from args[1], zero BSS), length=args[2]; loaded into membase (r15/x20); interpreter never stores to read-only container args[1]
+arg_memlimit	args[2]	args[2]	8	linear memory upper bound in bytes (DATA+BSS); load/store check access_size<=memlimit && off<=memlimit-access_size (unsigned overflow-safe), else status=2 fault_reason=2
+arg_budget	args[3]	args[3]	8	instruction step budget; exhaustion returns status=3 (same code as core_run timeout)
+arg_argc	args[4]	args[4]	8	program argument count passed to tape entry
+arg_argv	args[5]	args[5]	8	program argument vector pointer passed to tape entry
+arg_result	args[6]	args[6]	8	pointer to TapeResult struct (5 x u64: status, exit_code, steps_used, fault_pc, fault_reason)
+arg_hostcall_fn	args[8]	args[8]	8	M1 standalone harness passes hoststub dispatcher fn ptr directly in args[8]; M2 reads it from UNIKERN1 slot+8
+arg_ibitmap	args[10]	args[10]	8	writable instruction-boundary bitmap buffer allocated by harness/loader (size >= (code_len>>3)+((code_len&7)!=0)); must not overlap CODE, writable DATA+BSS, or result struct; interpreter zeroes and populates it in one linear pass without host stack alloca or allocator calls
+arg_ibitmap_cap	args[11]	args[11]	8	capacity of args[10] in bytes; interpreter validates args[10]!=0 && args[11]>=((code_len>>3)+((code_len&7)!=0)) before building bitmap, else status=2 fault_reason=7
+code_bounds	[code_base,code_end)	[code_base,code_end)	8	every instruction fetch (opcode+operands width, overflow-safe) must stay within CODE bounds, and callr target must land on a decoded instruction boundary (reject mid-operand jumps); else status=2 fault_reason=3/4
+callstack	rsp_frame_chain	sp_frame_chain	8	host stack frame chain (.frame N allocates local slots; call pushes return tape PC; max depth 4096 frames or status=2)
+hostcall_slot	slot+8	slot+8	8	M2 second kernel service slot (16-byte dual slot reservation in UNIKERN1) points to hoststub dispatcher(uint64_t slot_id, uint64_t r0..r5)->int64_t; return value written to vreg r0
+hostcall_args	rdi=slot,rsi..r9=r0..r4,stack=r5	x0=slot,x1..x6=r0..r5	8	hoststub dispatcher ABI: negative errno-equivalent on error, no allocation or longjmp or tape callback
+fault_status	status=2	status=2	8	bad opcode, mem out-of-bounds, code/callr out-of-bounds, or stack overflow sets result.status=2 and emits one named panic line
+fault_reason_enum	u64_enum	u64_enum	8	0=none, 1=bad_opcode, 2=mem_oob, 3=code_oob, 4=callr_oob, 5=stack_overflow, 6=bad_hostcall, 7=bad_container
+budget_status	status=3	status=3	8	step budget exhausted sets result.status=3 and returns without panic
+exit_value	result.exit_code	result.exit_code	8	normal .exit sets result.status=0 and stores exit value in result.exit_code (also returned in rax/x0)

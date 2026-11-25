@@ -1,0 +1,177 @@
+/* tools/check-tapemode-abi.cx -- contract and mutation checks for tools/tape/facts/tapemode-abi.tsv.
+ * Checks header, 5 columns, positive integer width, unique item keys, required ABI keys,
+ * semantic invariants (mode=4, arm64 membase=x20, hostcall_slot=slot+8, args[7], args[8]),
+ * and 6 red-green mutations (missing key, width=0, dup item, mode=1, slot+8->slot, arm64 x28). */
+#pragma unisa use sys.fs
+#pragma unisa use text.text
+#pragma unisa use text.iter
+#pragma unisa use tsvx.read
+#pragma unisa use mem.heap
+
+static int g_pass = 0;
+static int g_fail = 0;
+
+static void ck(int ok, const char *name) {
+    if (ok) { g_pass = g_pass + 1; printf("PASS\tcheck-tapemode-abi.%s\n", name); }
+    else { g_fail = g_fail + 1; printf("FAIL\tcheck-tapemode-abi.%s\n", name); }
+}
+
+static int parse_pos_int(const char *s, long n) {
+    long i = 0; long v = 0;
+    if (n <= 0) return 0;
+    for (i = 0; i < n; i = i + 1) {
+        if (s[i] < '0' || s[i] > '9') return 0;
+        v = v * 10 + (s[i] - '0');
+        if (v > 1000000) return 0;
+    }
+    return v > 0;
+}
+
+static int validate_table(const char *buf, long len, char *why, long wcap) {
+    static const char *req[] = {
+        "mode", "entry_sym", "vreg", "membase",
+        "arg_container", "arg_container_len", "arg_membase", "arg_memlimit", "arg_budget",
+        "arg_result", "arg_hostcall_fn", "arg_ibitmap", "arg_ibitmap_cap", "code_bounds", "callstack",
+        "hostcall_slot", "hostcall_args", "fault_status", "fault_reason_enum",
+        "budget_status", "exit_value", 0
+    };
+    int seen_req[20];
+    char items[64][48];
+    int nitems = 0;
+    int i;
+    tx_iter_t it;
+    int cols = 0;
+    int rc = 0;
+    int got_hdr = 0;
+    for (i = 0; i < 20; i = i + 1) seen_req[i] = 0;
+    tx_iter_init(&it, (char *)buf, len);
+    while ((rc = tv_row_next(&it, &cols)) == 1) {
+        long rlen = it.len;
+        const char *row = it.s + it.off;
+        if (rlen == 0 || row[0] == '#') continue;
+        if (!got_hdr) {
+            got_hdr = 1;
+            if (cols != 5 || !tx_same(row, rlen, "item\tx86_64\tarm64\twidth\trule", 28)) {
+                (void)tx_copy(why, wcap, "bad-header", 10);
+                return 1;
+            }
+            continue;
+        }
+        if (cols != 5) { (void)tx_copy(why, wcap, "bad-cols", 8); return 1; }
+        long a0, n0, a1, n1, a2, n2, a3, n3, a4, n4;
+        if (tv_field(&it, 0, &a0, &n0) || tv_field(&it, 1, &a1, &n1) ||
+            tv_field(&it, 2, &a2, &n2) || tv_field(&it, 3, &a3, &n3) ||
+            tv_field(&it, 4, &a4, &n4)) {
+            (void)tx_copy(why, wcap, "field-err", 9); return 1;
+        }
+        if (n0 <= 0 || n0 >= 48 || n1 <= 0 || n2 <= 0 || n4 <= 0) {
+            (void)tx_copy(why, wcap, "empty-field", 11); return 1;
+        }
+        if (!parse_pos_int(it.s + a3, n3)) {
+            (void)tx_copy(why, wcap, "bad-width", 9); return 1;
+        }
+        /* Semantic invariants */
+        if (tx_same(it.s + a0, n0, "mode", 4) &&
+            (!tx_same(it.s + a1, n1, "args[0]=4", 9) || !tx_same(it.s + a2, n2, "args[0]=4", 9))) {
+            (void)tx_copy(why, wcap, "bad-mode", 8); return 1;
+        }
+        if (tx_same(it.s + a0, n0, "membase", 7) &&
+            (!tx_same(it.s + a1, n1, "r15", 3) || !tx_same(it.s + a2, n2, "x20", 3))) {
+            (void)tx_copy(why, wcap, "bad-membase", 11); return 1;
+        }
+        if (tx_same(it.s + a0, n0, "hostcall_slot", 13) &&
+            (!tx_same(it.s + a1, n1, "slot+8", 6) || !tx_same(it.s + a2, n2, "slot+8", 6))) {
+            (void)tx_copy(why, wcap, "bad-hostcall-slot", 17); return 1;
+        }
+        if (tx_same(it.s + a0, n0, "arg_container_len", 17) &&
+            (!tx_same(it.s + a1, n1, "args[7]", 7) || !tx_same(it.s + a2, n2, "args[7]", 7))) {
+            (void)tx_copy(why, wcap, "bad-container-len", 17); return 1;
+        }
+        if (tx_same(it.s + a0, n0, "arg_hostcall_fn", 15) &&
+            (!tx_same(it.s + a1, n1, "args[8]", 7) || !tx_same(it.s + a2, n2, "args[8]", 7))) {
+            (void)tx_copy(why, wcap, "bad-hostcall-fn", 15); return 1;
+        }
+        if (tx_same(it.s + a0, n0, "arg_membase", 11) &&
+            (!tx_same(it.s + a1, n1, "args[9]", 7) || !tx_same(it.s + a2, n2, "args[9]", 7))) {
+            (void)tx_copy(why, wcap, "bad-membase-arg", 15); return 1;
+        }
+        if (tx_same(it.s + a0, n0, "arg_ibitmap", 11) &&
+            (!tx_same(it.s + a1, n1, "args[10]", 8) || !tx_same(it.s + a2, n2, "args[10]", 8))) {
+            (void)tx_copy(why, wcap, "bad-ibitmap", 11); return 1;
+        }
+        if (tx_same(it.s + a0, n0, "arg_ibitmap_cap", 15) &&
+            (!tx_same(it.s + a1, n1, "args[11]", 8) || !tx_same(it.s + a2, n2, "args[11]", 8))) {
+            (void)tx_copy(why, wcap, "bad-ibitmap-cap", 15); return 1;
+        }
+        for (i = 0; i < nitems; i = i + 1) {
+            if (tx_same(items[i], (long)strlen(items[i]), it.s + a0, n0)) {
+                (void)tx_copy(why, wcap, "dup-item", 8); return 1;
+            }
+        }
+        if (nitems >= 64) { (void)tx_copy(why, wcap, "too-many", 8); return 1; }
+        (void)tx_copy(items[nitems], 48, it.s + a0, n0);
+        nitems = nitems + 1;
+        for (i = 0; req[i]; i = i + 1) {
+            if (tx_same(req[i], (long)strlen(req[i]), it.s + a0, n0)) seen_req[i] = 1;
+        }
+    }
+    if (!got_hdr || nitems < 18) { (void)tx_copy(why, wcap, "too-few-rows", 12); return 1; }
+    for (i = 0; req[i]; i = i + 1) {
+        if (!seen_req[i]) { (void)tx_copy(why, wcap, "missing-req-key", 15); return 1; }
+    }
+    return 0;
+}
+
+int main(void) {
+    unsigned char *data = 0;
+    int64_t len = 0;
+    char why[64];
+    why[0] = 0;
+    if (sy_read_file("tools/tape/facts/tapemode-abi.tsv", &data, &len, 65536) != 0 || !data) {
+        printf("FAIL\tcheck-tapemode-abi.read-table\n");
+        printf("CHECK_TAPEMODE_ABI\tpassed=0\tfailed=1\n");
+        return 1;
+    }
+    ck(validate_table((const char *)data, (long)len, why, 64) == 0, "real-table-valid");
+    mm_free(data);
+
+    /* Mutation 1: missing required key */
+    {
+        const char *m1 = "item\tx86_64\tarm64\twidth\trule\nmode\targs[0]=4\targs[0]=4\t8\tok\n";
+        why[0] = 0;
+        ck(validate_table(m1, (long)strlen(m1), why, 64) != 0, "mutant-missing-req-rejected");
+    }
+    /* Mutation 2: width=0 rejected */
+    {
+        const char *m2 = "item\tx86_64\tarm64\twidth\trule\nmode\targs[0]=4\targs[0]=4\t0\tbad\n";
+        why[0] = 0;
+        ck(validate_table(m2, (long)strlen(m2), why, 64) != 0 && tx_same(why, (long)strlen(why), "bad-width", 9), "mutant-zero-width-rejected");
+    }
+    /* Mutation 3: duplicate item rejected */
+    {
+        const char *m3 = "item\tx86_64\tarm64\twidth\trule\nmode\targs[0]=4\targs[0]=4\t8\tr1\nmode\targs[0]=4\targs[0]=4\t8\tr2\n";
+        why[0] = 0;
+        ck(validate_table(m3, (long)strlen(m3), why, 64) != 0 && tx_same(why, (long)strlen(why), "dup-item", 8), "mutant-dup-item-rejected");
+    }
+    /* Mutation 4: mode=1 rejected */
+    {
+        const char *m4 = "item\tx86_64\tarm64\twidth\trule\nmode\targs[0]=1\targs[0]=1\t8\tbad\n";
+        why[0] = 0;
+        ck(validate_table(m4, (long)strlen(m4), why, 64) != 0 && tx_same(why, (long)strlen(why), "bad-mode", 8), "mutant-mode-1-rejected");
+    }
+    /* Mutation 5: hostcall_slot=slot (missing +8) rejected */
+    {
+        const char *m5 = "item\tx86_64\tarm64\twidth\trule\nhostcall_slot\tslot\tslot\t8\tbad\n";
+        why[0] = 0;
+        ck(validate_table(m5, (long)strlen(m5), why, 64) != 0 && tx_same(why, (long)strlen(why), "bad-hostcall-slot", 17), "mutant-slot-no-plus8-rejected");
+    }
+    /* Mutation 6: arm64 membase=x28 (clashes with run_arm64.S split stack) rejected */
+    {
+        const char *m6 = "item\tx86_64\tarm64\twidth\trule\nmembase\tr15\tx28\t8\tbad\n";
+        why[0] = 0;
+        ck(validate_table(m6, (long)strlen(m6), why, 64) != 0 && tx_same(why, (long)strlen(why), "bad-membase", 11), "mutant-arm64-x28-rejected");
+    }
+
+    printf("CHECK_TAPEMODE_ABI\tpassed=%d\tfailed=%d\n", g_pass, g_fail);
+    return g_fail ? 1 : 0;
+}
