@@ -26,6 +26,7 @@
 #pragma unisa use mem.heap
 #pragma unisa use text.text
 #pragma unisa use cxlib.ckrun
+#pragma unisa use cxlib.releaseseq
 
 static int failed, unverified;
 static void ck(int ok, const char *name) { if (ok) sy_printf("PASS\tcheck-constexpr-sizeof.%s\n", name); else { failed++; sy_printf("FAIL\tcheck-constexpr-sizeof.%s\n", name); } }
@@ -49,7 +50,7 @@ static void die(const char *s) { sy_eprintf("check-constexpr-sizeof: REFUSE %s\n
 
 int main(void) {
     char out[4096], dir[512], script[1200];
-    int minor = 0, i;
+    char version[24]; int i;
     ckk_sh("check-constexpr-sizeof", "d=$(mktemp -d \"${TMPDIR:-/tmp}/check-constexpr-sizeof-XXXXXX\") && printf '%s' \"$d\"", dir, sizeof dir);
     if (!dir[0] || dir[0] != '/') die("no temporary directory");
 
@@ -66,10 +67,8 @@ int main(void) {
        "grep -c \"^atom${t}CE\\.off\\.open${t}\\*${t}OFF\\.open${t}.*CE\\.sizeof\\.expr\\.done\" $f; echo END", out, sizeof out);
     ck(ckk_has(out, sizeof out, "0\n1\n1\n1\nEND") && tx_len(out, sizeof out) == 12, "table-offsetof-enters-the-control-offsetof-rows-else-nonconstant");
 
-    ckk_sh("check-constexpr-sizeof", "sh ./unisacc.com --version", out, sizeof out);
-    {   long at = tx_find(out, tx_len(out, sizeof out), "unisacc 0.0.", 12);
-        if (at < 0) die("product version line");
-        for (at += 12; out[at] >= '0' && out[at] <= '9'; at++) minor = minor * 10 + (out[at] - '0'); }
+    if (ckk_sh("check-constexpr-sizeof", "sh ./unisacc.com --version", out, sizeof out) ||
+        rs_product_version(out, version)) die("product version line");
 
     ckk_probe("check-constexpr-sizeof", dir, "p1", SRC_P1, out, sizeof out);
     ck(ckk_has(out, sizeof out, "A 16\nRC=0"), "paren-sizeof-object-file-scope-bound");
@@ -88,7 +87,7 @@ int main(void) {
         for (i = 0; i < 8; i++) {
             ckk_probe("check-constexpr-sizeof", dir, leaf[i], src[i], out, sizeof out);
             if (ckk_has(out, sizeof out, want[i])) ck(1, nm[i]);
-            else if (minor < 69 && ckk_has(out, sizeof out, "not covered: ")) { unverified++; sy_printf("UNVERIFIED\tcheck-constexpr-sizeof.%s\tinstalled=0.0.%d predates the constexpr rows\n", nm[i], minor); }
+            else if (rs_precedes(version, "0.0.69") && ckk_has(out, sizeof out, "not covered: ")) { unverified++; sy_printf("UNVERIFIED\tcheck-constexpr-sizeof.%s\tinstalled=%s predates the constexpr rows\n", nm[i], version); }
             else ck(0, nm[i]);
         }
     }

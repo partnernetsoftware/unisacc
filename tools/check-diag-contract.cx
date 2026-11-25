@@ -2,7 +2,7 @@
    with the installed product (sh ./unisacc.com FIXTURE, cwd tests/diagfx, serial, 50 s bound each) and must
    (1) exit non-zero, (2) print FIXTURE:LINE (next char not a digit) on stderr, (3) print the named substring,
    (4) have no stderr line starting with the bare "reject:".
-   Table: GROUP FIXTURE LINE SUBSTR STATUS EXPIRY (TAB; '#' comments).  STATUS is PASS or KNOWN-GAP (EXPIRY 0.0.N).
+   Table: GROUP FIXTURE LINE SUBSTR STATUS EXPIRY (TAB; '#' comments).  STATUS is PASS or KNOWN-GAP (EXPIRY: canonical three-part version).
    A group is a gap when any of its rows is KNOWN-GAP.  Verdicts per row: PASS row must meet the contract; a
    KNOWN-GAP row that now meets it is PROMOTE (fail: turn it into PASS, the ratchet only goes down); any other
    status is a hard fail.  Ratchet: the number of KNOWN-GAP groups must not exceed DC_GAP_BASELINE (15, 实测 18 组中 3 组过).
@@ -13,6 +13,7 @@
 #pragma unisa use sys.proc
 #pragma unisa use text.text
 #pragma unisa use cxlib.procrun
+#pragma unisa use cxlib.releaseseq
 
 #define DC_GAP_BASELINE 15
 #define MAXR 128
@@ -35,7 +36,7 @@ static const char *lint_row(const char *g, const char *f, const char *l, const c
     for (p = l; *p; p++) if (*p < '0' || *p > '9') return "line is not a number";
     if (atoi(l) < 1) return "line must be >= 1";
     if (strcmp(t, "PASS") && strcmp(t, "KNOWN-GAP")) return "status must be PASS or KNOWN-GAP";
-    if (!strcmp(t, "KNOWN-GAP") && strncmp(e, "0.0.", 4)) return "KNOWN-GAP needs an expiry version 0.0.N";
+    if (!strcmp(t, "KNOWN-GAP") && !rs_version(e)) return "KNOWN-GAP needs a canonical three-part expiry version";
     return 0;
 }
 
@@ -72,6 +73,13 @@ static void selftest(void) {
     else { printf("DETECTED\tneg-text-expectation\n"); d++; }
     if (!lint_row("c1", "f.cx", "", "x", "PASS", "-")) bad("selftest", "empty line expectation passed lint");
     else { printf("DETECTED\tneg-line-removed-lint\n"); d++; }
+    if (lint_row("c1", "f.cx", "3", "x", "KNOWN-GAP", "0.0.99") ||
+        lint_row("c1", "f.cx", "3", "x", "KNOWN-GAP", "0.1.1"))
+        bad("selftest", "canonical expiry rejected");
+    if (!lint_row("c1", "f.cx", "3", "x", "KNOWN-GAP", "0.0.invalid") ||
+        !lint_row("c1", "f.cx", "3", "x", "KNOWN-GAP", "0.1.1.1"))
+        bad("selftest", "malformed expiry passed lint");
+    else { printf("DETECTED\tneg-expiry-version-shape\n"); d++; }
     if (judge(0, 0, 1, "f.cx:31:1: error: argument count\n", "f.cx", "3", "argument count")) bad("selftest", "line prefix 31 accepted for 3");
     /* mutations must change the verdict */
     k = ratchet_ok(0, DC_GAP_BASELINE + 1) != ratchet_ok(1, DC_GAP_BASELINE + 1);
