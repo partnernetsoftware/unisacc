@@ -802,6 +802,8 @@ tape_run_x86_64:
     orl %r10d,%r8d
     jmp .Lrun_sys_call
 .Lrun_sys_short:
+    cmpq $8,%rdi
+    je .Lrun_fstat
     xorl %eax,%eax
 .Lrun_sys_call:
     subq $16,%rsp
@@ -813,6 +815,101 @@ tape_run_x86_64:
     jmp .Lrun_next
 .Lrun_sys_einval:
     movq $-22,%rax
+    jmp .Lrun_sys_result
+.pushsection .rodata
+.Lstat_kind:
+    .zero 98
+    .byte 6,2,4,0,8
+    .zero 5
+    .byte 10
+    .zero 3
+    .byte 1,0,0,12
+    .zero 140
+.popsection
+.Lrun_fstat:
+    /* Project the Linux x86_64 fields consumed by sys.fs from hs_stat64.
+       Fields not supplied by the frozen ABI are not part of this projection. */
+    movq %rdx,%rdi
+    movq %rdx,%rax
+    subq 72(%r12),%rax
+    jb .Lrun_fstat_mapped
+    movq 16(%r12),%r9
+    subq $144,%r9
+    jb .Lrun_fstat_mapped
+    cmpq %r9,%rax
+    jbe .Lrun_fstat_call
+.Lrun_fstat_mapped:
+    subq $16,%rsp
+    movq %rsi,(%rsp)
+    movq %r11,8(%rsp)
+    movl $144,%r9d
+    movl $2,%r8d
+    call hoststub_lnx_x86_64_map_access
+    movq (%rsp),%rsi
+    movq 8(%rsp),%r11
+    addq $16,%rsp
+    testq %rax,%rax
+    jnz .Lrun_sys_result
+.Lrun_fstat_call:
+    subq $80,%rsp
+    movq %rdi,8(%rsp)
+    movq %rdi,%rdx
+    movl $8,%edi
+    movq $0,(%rsp)
+    call *%r11
+    testq %rax,%rax
+    jnz .Lrun_fstat_done
+    movq 8(%rsp),%rdi
+    movq %rdi,%rsi
+    leaq 16(%rsp),%rdi
+    movl $8,%ecx
+    rep movsq
+    movq 8(%rsp),%rdi
+    xorl %eax,%eax
+    movl $18,%ecx
+    rep stosq
+    movq 8(%rsp),%rdi
+    movq 16(%rsp),%rax
+    movq %rax,48(%rdi)
+    movq 24(%rsp),%rax
+    movq %rax,8(%rdi)
+    movq 32(%rsp),%rax
+    movq %rax,0(%rdi)
+    movl 56(%rsp),%eax
+    movzbl 60(%rsp),%ecx
+    leaq .Lstat_kind(%rip),%rdx
+    movzbl (%rdx,%rcx),%ecx
+    shll $12,%ecx
+    orl %ecx,%eax
+    movl %eax,24(%rdi)
+    movq 64(%rsp),%rax
+    movq %rax,28(%rdi)
+    movq 72(%rsp),%rax
+    movq %rax,40(%rdi)
+    movl $1000000000,%ecx
+    movq 40(%rsp),%rax
+    cqto
+    idivq %rcx
+    testq %rdx,%rdx
+    jns .Lrun_fstat_mtime
+    decq %rax
+    addq %rcx,%rdx
+.Lrun_fstat_mtime:
+    movq %rax,88(%rdi)
+    movq %rdx,96(%rdi)
+    movq 48(%rsp),%rax
+    cqto
+    idivq %rcx
+    testq %rdx,%rdx
+    jns .Lrun_fstat_ctime
+    decq %rax
+    addq %rcx,%rdx
+.Lrun_fstat_ctime:
+    movq %rax,104(%rdi)
+    movq %rdx,112(%rdi)
+    xorl %eax,%eax
+.Lrun_fstat_done:
+    addq $80,%rsp
     jmp .Lrun_sys_result
 .Lrun_memory:
     movl $2,%edx
