@@ -11,6 +11,17 @@ static int report(char *file,char *kind,char *id) {
     char *v[]={image,"--sample",file,"--kind",kind,"--job",id,"--window-ms","60000",0};
     return ck_run(v,out,sizeof out);
 }
+static int report_with_out(char *file,char *jout,char *kind,char *id) {
+    char *v[]={image,"--sample",file,"--job-out",jout,"--kind",kind,"--job",id,"--window-ms","60000",0};
+    return ck_run(v,out,sizeof out);
+}
+static int report_inst(char *inst,char *kind,char *id) {
+    char *v[]={image,"--instance",inst,"--kind",kind,"--job",id,"--window-ms","60000",0};
+    return ck_run(v,out,sizeof out);
+}
+static int put_file(const char *path,const char *text) {
+    return sy_write_atomic(path,text,strlen(text),0644);
+}
 int main(int argc,char **argv){
     char root[4096],temp[4096],why[256];
     char *fixture="tests/cases/dvreport-timing.tsv",*id="21409114678-1156501";
@@ -23,6 +34,82 @@ int main(int argc,char **argv){
     ck(report("/dev/null","git.commit",id)==0 && strstr(out,"longest=UNMEASURED"),"empty-events");
     ck(report(fixture,"other",id)==0 && strstr(out,"advice=UNMEASURED"),"unknown-command");
     ck(report(fixture,"git.commit","another-job")==0 && strstr(out,"share_pct=UNMEASURED"),"other-job-excluded");
+    /* Timeout phase attribution: --job-out and --instance jobs/<id>/out recover stalled COMMIT_PHASE instead of longest=other */
+    {
+        char o1[4200],o2[4200],o3[4200],inst[4200],jdir[4300],evp[4300],jout[4400];
+        const char *s1 =
+            "COMMIT_PHASE\tname=select\tstate=end\tms=231\n"
+            "COMMIT_PHASE\tname=gates\tstate=begin\n"
+            "COMMIT_PHASE\tname=affected-canary\tstate=begin\n"
+            "COMMIT_PHASE\tname=affected-canary\tstate=end\tms=10077\n"
+            "COMMIT_PHASE\tname=derive\tstate=begin\n"
+            "COMMIT_PHASE\tname=derive\tstate=end\tms=1630\n"
+            "COMMIT_PHASE\tname=tlibfrozen\tstate=begin\n"
+            "COMMIT_PHASE\tname=tlibfrozen\tstate=end\tms=12481\n"
+            "COMMIT_PHASE\tname=tlibapi\tstate=begin\n"
+            "X\ttimeout\trc=124\tms=60005\tvia=service\trun=/tmp/mock-1\n"
+            "GIT_COMMIT\trc=124\tcommit=none\tpushed=0\tms=60022\treason=timeout\n";
+        const char *s2 =
+            "COMMIT_PHASE\tname=select\tstate=end\tms=167\n"
+            "COMMIT_PHASE\tname=gates\tstate=begin\n"
+            "COMMIT_PHASE\tname=affected-canary\tstate=begin\n"
+            "COMMIT_PHASE\tname=affected-canary\tstate=end\tms=8668\n"
+            "COMMIT_PHASE\tname=derive\tstate=begin\n"
+            "COMMIT_PHASE\tname=derive\tstate=end\tms=1482\n"
+            "COMMIT_PHASE\tname=tlibfrozen\tstate=begin\n"
+            "COMMIT_PHASE\tname=tlibfrozen\tstate=end\tms=36225\n"
+            "X\ttimeout\trc=124\tms=60036\tvia=service\trun=/tmp/mock-2\n"
+            "GIT_COMMIT\trc=124\tcommit=none\tpushed=0\tms=60118\treason=timeout\n";
+        const char *s3 =
+            "COMMIT_PHASE\tname=select\tstate=end\tms=199\n"
+            "COMMIT_PHASE\tname=gates\tstate=begin\n"
+            "COMMIT_PHASE\tname=tlibapi\tstate=begin\n"
+            "COMMIT_PHASE\tname=tlibapi\tstate=end\tms=418\n"
+            "COMMIT_PHASE\tname=lintr1\tstate=begin\n"
+            "COMMIT_PHASE\tname=lintr1\tstate=end\tms=48\n"
+            "COMMIT_PHASE\tname=ratchets\tstate=begin\n"
+            "X\ttimeout\trc=124\tms=60007\tvia=service\trun=/tmp/mock-3\n"
+            "GIT_COMMIT\trc=124\tcommit=none\tpushed=0\tms=60024\treason=timeout\n";
+        const char *ev_text =
+            "EV\t1\t1795619983\tphase\tcmd=git.commit\tphase=launcher\tms=13\tinput=deadbeef\trc=0\tload1=11.50\tjob=22047309465-2244159\n"
+            "EV\t2\t1795619983\tphase\tcmd=git.commit\tphase=other\tms=60165\tinput=deadbeef\trc=124\tload1=11.50\tjob=22047309465-2244159\n"
+            "EV\t3\t1795619983\tphase\tcmd=git.commit\tphase=total\tms=60178\tinput=deadbeef\trc=124\tload1=11.50\tjob=22047309465-2244159\n";
+        cx_fmt(o1,sizeof o1,"%s/out1",temp); cx_fmt(o2,sizeof o2,"%s/out2",temp); cx_fmt(o3,sizeof o3,"%s/out3",temp);
+        cx_fmt(inst,sizeof inst,"%s/inst",temp); cx_fmt(jdir,sizeof jdir,"%s/jobs/22047309465-2244159",inst);
+        cx_fmt(evp,sizeof evp,"%s/events.tsv",inst); cx_fmt(jout,sizeof jout,"%s/out",jdir);
+        if(!put_file(o1,s1) && !put_file(o2,s2) && !put_file(o3,s3) &&
+           !sy_mkdir_all(jdir,0700) && !put_file(evp,ev_text) && !put_file(jout,s3)) {
+            /* Keep measured longest/share_pct intact; inferred stalled_phase/max_done_phase reported separately */
+            ck(report_with_out(fixture,o1,"git.commit",id)==0 &&
+               strstr(out,"longest=other\tshare_pct=100\t")!=0 &&
+               strstr(out,"advice=split-phase:tlibapi")!=0 &&
+               strstr(out,"stalled_phase=tlibapi")!=0 &&
+               strstr(out,"max_done_phase=tlibfrozen:12481ms")!=0,"timeout-stalled-in-tlibapi");
+            ck(report_with_out(fixture,o2,"git.commit",id)==0 &&
+               strstr(out,"longest=other\tshare_pct=100\t")!=0 &&
+               strstr(out,"advice=split-phase:after:tlibfrozen")!=0 &&
+               strstr(out,"stalled_phase=after:tlibfrozen")!=0 &&
+               strstr(out,"max_done_phase=tlibfrozen:36225ms")!=0,"timeout-stalled-after-tlibfrozen");
+            ck(report_with_out(fixture,o3,"git.commit",id)==0 &&
+               strstr(out,"longest=other\tshare_pct=100\t")!=0 &&
+               strstr(out,"advice=split-phase:ratchets")!=0 &&
+               strstr(out,"stalled_phase=ratchets")!=0,"timeout-stalled-in-ratchets");
+            ck(report_inst(inst,"git.commit","22047309465-2244159")==0 &&
+               strstr(out,"longest=other\tshare_pct=100\t")!=0 &&
+               strstr(out,"advice=split-phase:ratchets")!=0 &&
+               strstr(out,"stalled_phase=ratchets")!=0,"instance-keeps-measured-other-and-infers-stalled");
+            ck(report_with_out("/dev/null",o1,"git.commit",id)==0 &&
+               strstr(out,"longest=UNMEASURED\tshare_pct=UNMEASURED\t")!=0 &&
+               strstr(out,"stalled_phase=tlibapi")!=0,"job-out-alone-never-fabricates-measured-longest");
+            sy_unlink(o1); sy_unlink(o2); sy_unlink(o3);
+            sy_unlink(jout); sy_unlink(evp);
+            sy_rmdir(jdir);
+            { char jroot[4300]; cx_fmt(jroot,sizeof jroot,"%s/jobs",inst); sy_rmdir(jroot); }
+            sy_rmdir(inst);
+        } else {
+            ck(0,"timeout-fixtures-setup");
+        }
+    }
     if(argc==1)sy_unlink(image);
     sy_rmdir(temp);
     printf("CHECK_DVREPORT\tpassed=%d\tfailed=%d\n",ck_assertions()-ck_failures(),ck_failures());

@@ -924,8 +924,9 @@ static int serve(long ttl, long idle) {
 }
 
 /* ---- 客户端 ---- */
-static int spawn_server_polls(const char *root, const char *ttl, const char *idle, int polls) {
+static int spawn_server_until(const char *root, const char *ttl, const char *idle, int polls, long deadline_ms) {
     char prod[PW], self[PW]; sy_spawn_t o; sy_child_t ch; int i, c;
+    if (deadline_ms > 0 && sy_now_ms() >= deadline_ms) return -1;
     F(prod, sizeof prod, "%s/%s", root, cfg.product); F(self, sizeof self, "%s/%s", root, cfg.self);
     {   const char *sb = getenv("DEVSVC_SELF_BIN");   /* 固定版本入口(tools/dv.cx)给的本执行体路径:所起服务与客户端同一版本 */
         char *v[] = {"sh", prod, self, "--", "serve", "--ttl", (char *)ttl, "--idle", (char *)idle, 0};
@@ -935,15 +936,38 @@ static int spawn_server_polls(const char *root, const char *ttl, const char *idl
         if (sy_proc_spawn(&o, &ch)) return -1; }
     for (i = 0; i < polls; i++) {
         sy_exit_t st;
-        c = try_connect(200);
+        long ct = 200, sl = 100;
+        if (deadline_ms > 0) {
+            long rem = deadline_ms - sy_now_ms();
+            if (rem <= 0) return -1;
+            if (rem < ct) ct = rem;
+        }
+        c = try_connect(ct);
         if (c >= 0) return c;
-        if (sy_proc_try_wait(&ch, &st) == 1) { c = try_connect(200); return c >= 0 ? c : -1; }   /* 拉起进程已退:不再空等 */
-        sy_sleep_ms(100);
+        if (sy_proc_try_wait(&ch, &st) == 1) {
+            long ct2 = 200;
+            if (deadline_ms > 0) {
+                long rem = deadline_ms - sy_now_ms();
+                if (rem <= 0) return -1;
+                if (rem < ct2) ct2 = rem;
+            }
+            c = try_connect(ct2);
+            return c >= 0 ? c : -1;
+        }   /* 拉起进程已退:不再空等 */
+        if (deadline_ms > 0) {
+            long rem = deadline_ms - sy_now_ms();
+            if (rem <= 0) return -1;
+            if (rem < sl) sl = rem;
+        }
+        sy_sleep_ms(sl);
     }
     return -1;
 }
+static int spawn_server_polls(const char *root, const char *ttl, const char *idle, int polls) {
+    return spawn_server_until(root, ttl, idle, polls, 0);
+}
 static int spawn_server(const char *root, const char *ttl, const char *idle) {
-    return spawn_server_polls(root,ttl,idle,400);
+    return spawn_server_until(root, ttl, idle, 400, 0);
 }
 /* Set when this command's flow/x saw a node timeout. Only then does
  * timing_finish start the repo server (first-timeout timing); a command
@@ -959,26 +983,52 @@ static void timing_finish(int rc) {
     }
     dt_finish(sockp,rc);
 }
-/* 发一行请求,响应收进 resp。autostart=1 时连不上就拉起。返回 0 OK、1 ERR、3 连不上。 */
-static int request(const char *root, const char *line, int autostart) {
-    int c = try_connect(1500); long r; sy_deadline_t d;
+/* 发一行请求,响应收进 resp。autostart=1 时连不上就拉起。deadline_ms>0 时连接与收发均受总截止封顶; 到期超时返回 1 (ERR deadline-exceeded)而非 3(no instance); deadline_ms<=0 走原路径。返回 0 OK、1 ERR、3 连不上。 */
+static int request_until(const char *root, const char *line, int autostart, long deadline_ms) {
+    long c_ms = 1500, io_ms = 58000;
+    if (deadline_ms > 0) {
+        long rem = deadline_ms - sy_now_ms();
+        if (rem <= 0) { rn = snprintf(resp, sizeof resp, "ERR\tdeadline-exceeded\towner=deadline\n"); return 1; }
+        if (rem < c_ms) c_ms = rem;
+        if (rem < io_ms) io_ms = rem;
+    }
+    int c = try_connect(c_ms); long r; sy_deadline_t d;
     if (c < 0 && autostart) {
+        if (deadline_ms > 0 && sy_now_ms() >= deadline_ms) { rn = snprintf(resp, sizeof resp, "ERR\tdeadline-exceeded\towner=deadline\n"); return 1; }
         if (c == -ECONNREFUSED) sy_unlink(sockp);
-        c = spawn_server(root, "1800", "300");
+        c = spawn_server_until(root, "1800", "300", 400, deadline_ms);
     }
     rn = 0; resp[0] = 0;
-    if (c < 0) return 3;
+    if (c < 0) {
+        if (deadline_ms > 0 && sy_now_ms() >= deadline_ms) { rn = snprintf(resp, sizeof resp, "ERR\tdeadline-exceeded\towner=deadline\n"); return 1; }
+        return 3;
+    }
     if (lkpfx[0] && (!strncmp(line, "lock-acquire\t", 13) || !strncmp(line, "lock-release\t", 13))) {   /* 非主工作树:普通锁加工作树前缀,freeze 为全仓共享锁不加前缀 */
         if (strncmp(line + 13, "freeze\t", 7)) {
             static char pl[1024]; F(pl, sizeof pl, "%.13s%s%s", line, lkpfx, line + 13); line = pl;
         }
     }
-    d = sy_deadline_in(58000);
-    if (sy_send_all_until(c, line, strlen(line), d) || sy_send_all_until(c, "\n", 1, d)) { sy_close(c); return 3; }
+    if (deadline_ms > 0) {
+        long rem = deadline_ms - sy_now_ms();
+        if (rem <= 0) { sy_close(c); rn = snprintf(resp, sizeof resp, "ERR\tdeadline-exceeded\towner=deadline\n"); return 1; }
+        if (rem < io_ms) io_ms = rem;
+    }
+    d = sy_deadline_in(io_ms);
+    if (sy_send_all_until(c, line, strlen(line), d) || sy_send_all_until(c, "\n", 1, d)) {
+        sy_close(c);
+        if (deadline_ms > 0 && sy_now_ms() >= deadline_ms) { rn = snprintf(resp, sizeof resp, "ERR\tdeadline-exceeded\towner=deadline\n"); return 1; }
+        return 3;
+    }
     while (rn < (long)sizeof resp - 1) { r = sy_recv_until(c, resp + rn, sizeof resp - 1 - rn, d); if (r <= 0) break; rn += r; }
     resp[rn] = 0; sy_close(c);
-    if (rn == 0) return 3;
+    if (rn == 0) {
+        if (deadline_ms > 0 && sy_now_ms() >= deadline_ms) { rn = snprintf(resp, sizeof resp, "ERR\tdeadline-exceeded\towner=deadline\n"); return 1; }
+        return 3;
+    }
     return strncmp(resp, "OK\t", 3) ? 1 : 0;
+}
+static int request(const char *root, const char *line, int autostart) {
+    return request_until(root, line, autostart, 0);
 }
 static int say(int rc) { if (rn) fputs(resp, stdout); else if (rc == 3) fprintf(stderr, "devsvc: no instance at %s\n", sockp); return rc; }
 static const char *opt(int argc, char **argv, const char *name, const char *def) {
