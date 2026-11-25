@@ -29,13 +29,13 @@ static int parse_pos_int(const char *s, long n) {
 
 static int validate_table(const char *buf, long len, char *why, long wcap) {
     static const char *req[] = {
-        "mode", "entry_sym", "vreg", "membase",
-        "arg_container", "arg_container_len", "arg_membase", "arg_memlimit", "arg_budget",
-        "arg_result", "arg_hostcall_fn", "arg_ibitmap", "arg_ibitmap_cap", "code_bounds", "callstack",
-        "hostcall_slot", "hostcall_args", "fault_status", "fault_reason_enum",
-        "budget_status", "exit_value", 0
+        "mode", "entry_sym", "vreg", "membase", "ptr_model",
+        "arg_container", "arg_container_len", "arg_membase", "arg_memlimit", "mem_init_order",
+        "arg_budget", "arg_result", "arg_hostcall_fn", "arg_ibitmap", "arg_ibitmap_cap",
+        "code_bounds", "callstack", "hostcall_slot", "hostcall_args", "m1_hostcall_gate",
+        "fault_status", "fault_reason_enum", "budget_status", "exit_value", 0
     };
-    int seen_req[20];
+    int seen_req[32];
     char items[64][48];
     int nitems = 0;
     int i;
@@ -43,7 +43,7 @@ static int validate_table(const char *buf, long len, char *why, long wcap) {
     int cols = 0;
     int rc = 0;
     int got_hdr = 0;
-    for (i = 0; i < 20; i = i + 1) seen_req[i] = 0;
+    for (i = 0; i < 32; i = i + 1) seen_req[i] = 0;
     tx_iter_init(&it, (char *)buf, len);
     while ((rc = tv_row_next(&it, &cols)) == 1) {
         long rlen = it.len;
@@ -102,6 +102,14 @@ static int validate_table(const char *buf, long len, char *why, long wcap) {
         if (tx_same(it.s + a0, n0, "arg_ibitmap_cap", 15) &&
             (!tx_same(it.s + a1, n1, "args[11]", 8) || !tx_same(it.s + a2, n2, "args[11]", 8))) {
             (void)tx_copy(why, wcap, "bad-ibitmap-cap", 15); return 1;
+        }
+        if (tx_same(it.s + a0, n0, "ptr_model", 9) &&
+            (!tx_same(it.s + a1, n1, "real_host_ptr", 13) || !tx_same(it.s + a2, n2, "real_host_ptr", 13))) {
+            (void)tx_copy(why, wcap, "bad-ptr-model", 13); return 1;
+        }
+        if (tx_same(it.s + a0, n0, "m1_hostcall_gate", 16) &&
+            (!tx_same(it.s + a1, n1, "mask_383_before_dispatch", 24) || !tx_same(it.s + a2, n2, "mask_383_before_dispatch", 24))) {
+            (void)tx_copy(why, wcap, "bad-m1-gate", 11); return 1;
         }
         for (i = 0; i < nitems; i = i + 1) {
             if (tx_same(items[i], (long)strlen(items[i]), it.s + a0, n0)) {
@@ -170,6 +178,18 @@ int main(void) {
         const char *m6 = "item\tx86_64\tarm64\twidth\trule\nmembase\tr15\tx28\t8\tbad\n";
         why[0] = 0;
         ck(validate_table(m6, (long)strlen(m6), why, 64) != 0 && tx_same(why, (long)strlen(why), "bad-membase", 11), "mutant-arm64-x28-rejected");
+    }
+    /* Mutation 7: mixed pointer model rejected */
+    {
+        const char *m7 = "item\tx86_64\tarm64\twidth\trule\nptr_model\toffset\treal_host_ptr\t8\tbad\n";
+        why[0] = 0;
+        ck(validate_table(m7, (long)strlen(m7), why, 64) != 0 && tx_same(why, (long)strlen(why), "bad-ptr-model", 13), "mutant-ptr-model-mismatch-rejected");
+    }
+    /* Mutation 8: M1 dispatcher gate disabled rejected */
+    {
+        const char *m8 = "item\tx86_64\tarm64\twidth\trule\nm1_hostcall_gate\tallow_draft\tallow_draft\t8\tbad\n";
+        why[0] = 0;
+        ck(validate_table(m8, (long)strlen(m8), why, 64) != 0 && tx_same(why, (long)strlen(why), "bad-m1-gate", 11), "mutant-m1-gate-bypass-rejected");
     }
 
     printf("CHECK_TAPEMODE_ABI\tpassed=%d\tfailed=%d\n", g_pass, g_fail);

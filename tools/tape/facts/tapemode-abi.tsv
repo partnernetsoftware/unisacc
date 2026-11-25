@@ -6,11 +6,13 @@ mode	args[0]=4	args[0]=4	8	0..3 reserved by existing core_run/transition (+2 on 
 entry_sym	tape_run_x86_64	tape_run_arm64	8	M1 standalone entry symbol (SysV/AAPCS64 C ABI: int64_t tape_run(uint64_t *args)); bridge dispatch deferred to M2
 win_arm64_offset	0	+2	8	preserve existing Windows arm64 +2 args offset rule unchanged (mode=4 becomes 6)
 vreg	rbx->frame[0..15]	x19->frame[0..15]	8	16 virtual 64-bit registers r0..r15 in caller/interpreter frame slots; not pinned to physical regs in interpreter mode
-membase	r15	x20	8	linear memory base register (x20 callee-saved on arm64, avoiding x28 reserved by run_arm64.S:38 split stack) points to host DATA start; real pointers without hashing
-arg_container	args[1]	args[1]	8	mapped UTAPEBIN container base address (read-only CODE/DATA/HOST sections)
+membase	r15	x20	8	linear memory base register (x20 callee-saved on arm64, avoiding x28 reserved by run_arm64.S:38 split stack) points to writable DATA start; unified real host pointers across load/store, .lea/RELO, argv, mmap, and hoststub
+ptr_model	real_host_ptr	real_host_ptr	8	all guest pointers are 64-bit real host pointers within [membase, membase+memlimit) (or tracked M1 mmap spans); load/store and hoststub entry check addr>=membase && len<=memlimit && (addr-membase)<=memlimit-len using unsigned overflow-safe subtraction, and open(utf8_z*) verifies NUL within [addr, membase+memlimit) BEFORE OS syscall
+arg_container	args[1]	args[1]	8	mapped UTAPEBIN container base address (read-only CODE/DATA/HOST image passed to interpreter; if CODE RELO entries exist, loader prepares and relocates writable buffer BEFORE passing read-only relocated image in args[1])
 arg_container_len	args[7]	args[7]	8	mapped UTAPEBIN container length in bytes; interpreter validates section table bounds against [args[1], args[1]+args[7]) before execution
-arg_membase	args[9]	args[9]	8	writable DATA+BSS linear memory buffer pre-allocated and initialized by harness/loader (copy read-only DATA template from args[1], zero BSS), length=args[2]; loaded into membase (r15/x20); interpreter never stores to read-only container args[1]
-arg_memlimit	args[2]	args[2]	8	linear memory upper bound in bytes (DATA+BSS); load/store check access_size<=memlimit && off<=memlimit-access_size (unsigned overflow-safe), else status=2 fault_reason=2
+arg_membase	args[9]	args[9]	8	writable DATA+BSS linear memory buffer pre-allocated by harness/loader, length=args[2]; loaded into membase (r15/x20); interpreter never stores to read-only args[1]
+arg_memlimit	args[2]	args[2]	8	linear memory upper bound in bytes; subtraction overflow-safe check requires data_len<=~7ull && ((data_len+7)&~7)<=memlimit-bss_size; load/store verify access_size<=memlimit && (addr-membase)<=memlimit-access_size, else status=2 fault_reason=2
+mem_init_order	copy_zero_relo_pre_entry	copy_zero_relo_pre_entry	8	strictly BEFORE calling tape_run at entry_off: (1) validate container+ibitmap+RELO and overflow-safe aligned DATA+BSS<=args[2], (2) copy DATA to args[9], (3) zero align pad+BSS, (4) apply all CODE/DATA/HOST RELO entries
 arg_budget	args[3]	args[3]	8	instruction step budget; exhaustion returns status=3 (same code as core_run timeout)
 arg_argc	args[4]	args[4]	8	program argument count passed to tape entry
 arg_argv	args[5]	args[5]	8	program argument vector pointer passed to tape entry
@@ -21,7 +23,8 @@ arg_ibitmap_cap	args[11]	args[11]	8	capacity of args[10] in bytes; interpreter v
 code_bounds	[code_base,code_end)	[code_base,code_end)	8	every instruction fetch (opcode+operands width, overflow-safe) must stay within CODE bounds, and callr target must land on a decoded instruction boundary (reject mid-operand jumps); else status=2 fault_reason=3/4
 callstack	rsp_frame_chain	sp_frame_chain	8	host stack frame chain (.frame N allocates local slots; call pushes return tape PC; max depth 4096 frames or status=2)
 hostcall_slot	slot+8	slot+8	8	M2 second kernel service slot (16-byte dual slot reservation in UNIKERN1) points to hoststub dispatcher(uint64_t slot_id, uint64_t r0..r5)->int64_t; return value written to vreg r0
-hostcall_args	rdi=slot,rsi..r9=r0..r4,stack=r5	x0=slot,x1..x6=r0..r5	8	hoststub dispatcher ABI: negative errno-equivalent on error, no allocation or longjmp or tape callback
+hostcall_args	rdi=slot,rsi..r9=r0..r4,stack=r5	x0=slot,x1..x6=r0..r5	8	hoststub dispatcher ABI: validates pointer bounds and utf8_z NUL before OS syscall; negative errno-equivalent on error; no allocation or longjmp or tape callback
+m1_hostcall_gate	mask_383_before_dispatch	mask_383_before_dispatch	8	M1 allows ONLY frozen mask 383ull ({0..6,8}); any non-frozen or draft slot (incl. slot 12 spawn) or slot>=37 MUST fault status=2 fault_reason=6 BEFORE calling dispatcher (never call arg_hostcall_fn)
 fault_status	status=2	status=2	8	bad opcode, mem out-of-bounds, code/callr out-of-bounds, or stack overflow sets result.status=2 and emits one named panic line
 fault_reason_enum	u64_enum	u64_enum	8	0=none, 1=bad_opcode, 2=mem_oob, 3=code_oob, 4=callr_oob, 5=stack_overflow, 6=bad_hostcall, 7=bad_container
 budget_status	status=3	status=3	8	step budget exhausted sets result.status=3 and returns without panic

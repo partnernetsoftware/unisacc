@@ -198,7 +198,7 @@ int ts_validate_container(const unsigned char *b, long len, char *why, long wcap
                 unsigned int rwidth = (unsigned int)row[9];
                 unsigned long long rrsv = ts_rd_u(row + 10, 2);
                 if (rkind > 3 || rwidth < 1 || rwidth > 10 || rrsv != 0) return ts_fail(why, wcap, "bad-relo-record");
-                if (rpos >= code_len || (unsigned long long)rwidth > code_len - rpos) return ts_fail(why, wcap, "bad-relo-record");
+                if (rpos == 0 || rpos >= code_len || (unsigned long long)rwidth > code_len - rpos) return ts_fail(why, wcap, "bad-relo-record");
             }
         }
         if (i == 5) {
@@ -252,7 +252,40 @@ int ts_validate_entry_ibitmap(const unsigned char *b, long len, const unsigned c
         if ((((unsigned int)ibitmap[byte_idx] >> (entry_off & 7ull)) & 1u) == 0u) {
             return ts_fail(why, wcap, "entry-not-on-insn-boundary");
         }
+        {
+            int rd = TS_DIR_OFF + 24 * 4;
+            unsigned long long rsoff = ts_rd_u(b + rd + 4, 8);
+            unsigned long long rscnt = ts_rd_u(b + rd + 20, 4);
+            unsigned long long rr;
+            for (rr = 0; rr < rscnt; rr++) {
+                const unsigned char *row = b + rsoff + (rr << 4);
+                unsigned long long rpos = ts_rd_u(row, 8);
+                unsigned int rwidth = (unsigned int)row[9], k;
+                for (k = 0; k < rwidth; k++) {
+                    unsigned long long p = rpos + (unsigned long long)k;
+                    unsigned long long pb = p >> 3;
+                    if (pb >= (unsigned long long)ibitmap_cap || (((unsigned int)ibitmap[pb] >> (p & 7ull)) & 1u) != 0u) {
+                        return ts_fail(why, wcap, "relo-crosses-insn-boundary");
+                    }
+                }
+            }
+        }
     }
+    if (why && wcap > 0) why[0] = 0;
+    return 0;
+}
+
+/* Overflow-safe subtraction check for 8-byte aligned DATA + BSS inside memlimit. */
+int ts_check_linear_bounds(unsigned long long data_len, unsigned long long bss_size,
+                           unsigned long long memlimit, unsigned long long *out_data_aligned,
+                           char *why, long wcap) {
+    unsigned long long aligned;
+    if (data_len > 0xffffffffffffffffull - 7ull) return ts_fail(why, wcap, "data-align-overflow");
+    aligned = (data_len + 7ull) & ~7ull;
+    if (bss_size > memlimit || aligned > memlimit - bss_size) {
+        return ts_fail(why, wcap, "linear-mem-oob");
+    }
+    if (out_data_aligned) *out_data_aligned = aligned;
     if (why && wcap > 0) why[0] = 0;
     return 0;
 }

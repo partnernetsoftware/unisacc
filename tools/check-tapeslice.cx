@@ -81,6 +81,59 @@ static long build_sample_container(unsigned char *b) {
     return 224;
 }
 
+/* Build a complete non-empty 312-byte container exercising CODE, DATA, BSSZ, SYMS, RELO, HOST:
+ * - CODE: off=208, len=6, cnt=2 (insn0 @0 len=3, insn1 @3 len=3 -> ibitmap=0x09), padded to 216
+ * - DATA: off=216, len=9, cnt=2 ("main\0foo\0"), padded to 232
+ * - BSSZ: off=232, len=8, cnt=1 (bss_size=64)
+ * - SYMS: off=240, len=32, cnt=2 (name_off=0 sect=0 kind=0 val=0; name_off=5 sect=1 kind=1 val=0)
+ * - RELO: off=272, len=32, cnt=2 (pos=1 kind=1 width=2 addend=0; pos=4 kind=2 width=2 addend=16)
+ * - HOST: off=304, len=8, cnt=1 (slot=0 "exit")
+ */
+static long build_nonempty_container(unsigned char *b) {
+    int i, j;
+    const char *tags[6] = {"CODE", "DATA", "BSSZ", "SYMS", "RELO", "HOST"};
+    unsigned long long offs[6] = {208, 216, 232, 240, 272, 304};
+    unsigned long long lens[6] = {6, 9, 8, 32, 32, 8};
+    unsigned long long cnts[6] = {2, 2, 1, 2, 2, 1};
+    for (i = 0; i < 312; i++) b[i] = 0;
+    for (i = 0; i < 8; i++) b[i] = (unsigned char)TS_MAGIC[i];
+    ts_wr_u(b + 8, 2, TS_MAJOR);
+    ts_wr_u(b + 10, 2, TS_MINOR);
+    ts_wr_u(b + 12, 2, TS_ENDIAN);
+    ts_wr_u(b + 14, 2, 0);
+    ts_wr_u(b + 16, 4, 3);
+    ts_wr_u(b + 20, 4, TS_NSECT);
+    ts_wr_u(b + 24, 4, TS_DIR_OFF);
+    ts_wr_u(b + TS_ORIGIN_OFF, 4, 1);
+    for (i = 0; i < 6; i++) {
+        int d = TS_DIR_OFF + 24 * i;
+        for (j = 0; j < 4; j++) b[d + j] = (unsigned char)tags[i][j];
+        ts_wr_u(b + d + 4, 8, offs[i]);
+        ts_wr_u(b + d + 12, 8, lens[i]);
+        ts_wr_u(b + d + 20, 4, cnts[i]);
+    }
+    /* CODE[0..5] */
+    b[208] = 1; b[209] = 0; b[210] = 0;
+    b[211] = 1; b[212] = 0; b[213] = 0;
+    /* DATA[0..8] = "main\0foo\0" */
+    mm_copy(b + 216, 9, "main\0foo\0", 9);
+    /* BSSZ = 64 */
+    ts_wr_u(b + 232, 8, 64);
+    /* SYMS row 0 @240: name_off=0, sect=0, kind=0, rsv=0, val=0 */
+    ts_wr_u(b + 240, 4, 0); b[244] = 0; b[245] = 0; ts_wr_u(b + 246, 2, 0); ts_wr_u(b + 248, 8, 0);
+    /* SYMS row 1 @256: name_off=5, sect=1, kind=1, rsv=0, val=0 */
+    ts_wr_u(b + 256, 4, 5); b[260] = 1; b[261] = 1; ts_wr_u(b + 262, 2, 0); ts_wr_u(b + 264, 8, 0);
+    /* RELO row 0 @272: pos=1, kind=1, width=2, rsv=0, addend=0 */
+    ts_wr_u(b + 272, 8, 1); b[280] = 1; b[281] = 2; ts_wr_u(b + 282, 2, 0); ts_wr_u(b + 284, 4, 0);
+    /* RELO row 1 @288: pos=4, kind=2, width=2, rsv=0, addend=16 */
+    ts_wr_u(b + 288, 8, 4); b[296] = 2; b[297] = 2; ts_wr_u(b + 298, 2, 0); ts_wr_u(b + 300, 4, 16);
+    /* HOST @304: slot=0 "exit" */
+    ts_wr_u(b + 304, 2, 0); ts_wr_u(b + 306, 2, 4);
+    mm_copy(b + 308, 4, "exit", 4);
+    ts_seal_ident(b, 312);
+    return 312;
+}
+
 static long append_host_rec(unsigned char *dst, long pos, unsigned long long slot, const char *name) {
     long nlen = 0, k;
     while (name[nlen]) nlen++;
@@ -308,6 +361,89 @@ int main(void) {
                    tx_eqz(why, "unknown-host-slot"));
         ck(decl_ok && undecl_rej && m1_rej && unk_rej,
            "mutant-undeclared-hostcall-in-code-rejected");
+    }
+
+    /* T0.4 B1/B4/B6: non-empty CODE/DATA/BSSZ/SYMS/RELO/HOST positive + negative SYMS/RELO/overflow fixtures */
+    {
+        unsigned char nbuf[512], nmut[512], nbm[1];
+        long nlen = build_nonempty_container(nbuf);
+        unsigned long long d_aligned = 0;
+        nbm[0] = 0x09; /* bit 0 (insn0) + bit 3 (insn1) */
+        why[0] = 0;
+        ck(ts_validate_entry_ibitmap(nbuf, nlen, nbm, 1, why, 64) == 0 &&
+           ts_validate_m1_host_support(nbuf, nlen, why, 64) == 0,
+           "nonempty-syms-relo-container-accepted");
+
+        /* SYMS name_off >= data_len */
+        mm_copy(nmut, 512, nbuf, nlen);
+        ts_wr_u(nmut + 256, 4, 9);
+        ts_seal_ident(nmut, nlen);
+        why[0] = 0;
+        ck(ts_validate_container(nmut, nlen, why, 64) != 0 && tx_eqz(why, "bad-syms-record"),
+           "mutant-syms-name-oob-rejected");
+
+        /* SYMS unterminated string in DATA (overwrite trailing NUL at DATA[8] with 'x') */
+        mm_copy(nmut, 512, nbuf, nlen);
+        nmut[216 + 8] = 'x';
+        ts_seal_ident(nmut, nlen);
+        why[0] = 0;
+        ck(ts_validate_container(nmut, nlen, why, 64) != 0 && tx_eqz(why, "bad-syms-record"),
+           "mutant-syms-unterminated-rejected");
+
+        /* RELO bad width (0 and 11) */
+        {
+            int w0_rej = 0, w11_rej = 0;
+            mm_copy(nmut, 512, nbuf, nlen);
+            nmut[281] = 0;
+            ts_seal_ident(nmut, nlen);
+            why[0] = 0;
+            w0_rej = (ts_validate_container(nmut, nlen, why, 64) != 0 && tx_eqz(why, "bad-relo-record"));
+            nmut[281] = 11;
+            ts_seal_ident(nmut, nlen);
+            why[0] = 0;
+            w11_rej = (ts_validate_container(nmut, nlen, why, 64) != 0 && tx_eqz(why, "bad-relo-record"));
+            ck(w0_rej && w11_rej, "mutant-relo-bad-width-rejected");
+        }
+
+        /* RELO pos+width past code_len, pos==0, and u64 wraparound */
+        {
+            int oob_rej = 0, pos0_rej = 0, wrap_rej = 0;
+            mm_copy(nmut, 512, nbuf, nlen);
+            ts_wr_u(nmut + 288, 8, 5); /* pos=5, width=2 > code_len=6 */
+            ts_seal_ident(nmut, nlen);
+            why[0] = 0;
+            oob_rej = (ts_validate_container(nmut, nlen, why, 64) != 0 && tx_eqz(why, "bad-relo-record"));
+
+            ts_wr_u(nmut + 272, 8, 0); /* pos=0 hits opcode byte */
+            ts_seal_ident(nmut, nlen);
+            why[0] = 0;
+            pos0_rej = (ts_validate_container(nmut, nlen, why, 64) != 0 && tx_eqz(why, "bad-relo-record"));
+
+            ts_wr_u(nmut + 272, 8, 0xffffffffffffffffull); /* u64 wraparound */
+            ts_seal_ident(nmut, nlen);
+            why[0] = 0;
+            wrap_rej = (ts_validate_container(nmut, nlen, why, 64) != 0 && tx_eqz(why, "bad-relo-record"));
+            ck(oob_rej && pos0_rej && wrap_rej, "mutant-relo-oob-pos0-wrap-rejected");
+        }
+
+        /* RELO spanning into insn1 opcode boundary at offset 3 (pos=2, width=2 -> [2,3]) */
+        mm_copy(nmut, 512, nbuf, nlen);
+        ts_wr_u(nmut + 272, 8, 2);
+        ts_wr_u(nmut + 280, 1, 1); /* keep width=2 at +281, change pos=2 */
+        nmut[281] = 2;
+        ts_seal_ident(nmut, nlen);
+        why[0] = 0;
+        ck(ts_validate_container(nmut, nlen, why, 64) == 0 &&
+           ts_validate_entry_ibitmap(nmut, nlen, nbm, 1, why, 64) != 0 &&
+           tx_eqz(why, "relo-crosses-insn-boundary"),
+           "mutant-relo-crosses-insn-boundary-rejected");
+
+        /* Overflow-safe DATA alignment + BSS subtraction check */
+        why[0] = 0;
+        ck(ts_check_linear_bounds(9, 64, 80, &d_aligned, why, 64) == 0 && d_aligned == 16 &&
+           ts_check_linear_bounds(9, 64, 79, &d_aligned, why, 64) != 0 &&
+           ts_check_linear_bounds(0xfffffffffffffffdull, 8, 0xffffffffffffffffull, &d_aligned, why, 64) != 0,
+           "linear-bounds-subtraction-overflow-safe");
     }
 
     sy_printf("CHECK_TAPESLICE\tpassed=%d\tfailed=%d\n", g_pass, g_fail);
