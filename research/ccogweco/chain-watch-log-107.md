@@ -153,6 +153,18 @@
 - 私有实跑一律单批串行、不并发、不跑整套 check-*;每次实跑前先看 uptime,load1>4 就等。
 - 违反导致贴限窗被推过 53 秒,该窗补跑,耽误公开。
 
+## 0.1.0 Step 4 Y1(agy-flow 通告)
+
+- Y1_SHA=7375d05e33ce6b3b296b375dfeb7de2b8ce56b9b(已推 origin/v0.1.0);草稿正文按 notes sha 199742ba 更新并回读 diff=0。
+- INDEX:exec-2-draft-readback 11:53:48 PASS;exec-3-ci 11:53:52 PASS 45541660048;exec-4-Y1 11:54:02;exec-4-Y1-frozen(evidence.tsv:decision.txt 双 sha)。
+- 说明正文冻结,仅公开后回填 Y1/公开时刻/Y2 三项占位。
+
+## 0.1.0 公开正文更正回读(agy-flow 通告)
+
+- GitHub Release v0.1.0 正文已用 notes sha 83bcb07e 更新,jq 回读 sha 相同(diff=0),isDraft=false,Latest=v0.1.0。
+- 车树与主检出 release/notes-0.1.0.md 同版,随 release-post 提交。
+- 说明侧闭环:正文冻结版 199742ba -> 公开后更正版 83bcb07e;两处更正与 Y1/Y2/T4 已发布。
+
 ## 证据模板状态
 
 - evidence-107-template.md 已建:33 个证据文件、INDEX 行类型、空壳头、格式坑六条;链止后按表收 pack/ape-receipt/

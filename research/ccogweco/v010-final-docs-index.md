@@ -5,7 +5,7 @@
 
 | 页 | sha256 前 16 | 用途 |
 |---|---|---|
-| notes-0.1.0-final.md | a360483b3fbb3fe3 | 公开说明定稿骨架(链后回填;身份/整链/准入/缺口) |
+| notes-0.1.0-final.md | 85a29f75a9591157 | 公开说明终版(含公开后更正与 Y1/Y2/T4、条件 6 实测) |
 | notes-0.1.0-skeleton-v2.md | ac1e4fa4006b257d | 说明骨架 v2(早期版本,保留参考) |
 | v010-admission-forecast.md | de86cb3bfa4163f8 | 准入条件 1-6 达成预估与 T1+120/T2+45 两线 |
 | seal-parallel-prep.md | 61ec51f8cde54b70 | 封版车并行预做合同与零改动三硬断言(含修正后的切片映射) |
