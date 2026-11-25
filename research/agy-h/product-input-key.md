@@ -34,7 +34,7 @@ env_contract	<64hex>
 (1) `sources_sid`（核心源闭包，直接调用 `seed/ident` 的 `source-packages-v3`，见 `seed/ident.c:278-313`）:
 - 物理根目录集合:
   - 12 个逻辑包与目录(`seed/ident.c:139, 152-165, 287-289`): `cx/sys`、`cx/mem`、`cx/text`、`cx/core`、`cx/driver`、`cx/runtime`、`cx/compiler`、`src`、`exec`、`seed`、`weights`、`include`，外加 `cx` 全目录、`kernel`、`iterate/kernel/typekw.tsv`，以及归属 `ext/memx`、`ext/textx`、`ext/sysx`、`ext/crypto`、`ext/flownet`、`flownet` 下的有效源输入；
-  - 13 个构建支持工具(`seed/ident.c:279` `support[]`): `tools/{bound, bound.c, cxbin, safedel.cx, lib.sh, build_ref.sh, export_ref.sh, refshim.h, reffoot.h, sourceflat.cx, ape-pack.cx, release-ape.cx, cxlib/releaseversion.cx}`；
+  - 13 个构建支持工具(`seed/ident.c:279` `support[]`): `tools/{bound, bound.c, cxbin, safedel.cx, lib.sh, build_ref.sh, export_ref.sh, refshim.h, reffoot.h, sourceflat.cx, ape-pack.cx, release-ape.cx, ../../tools/cxlib/releaseversion.cx}`；
   - 3 个额外支撑(`seed/ident.c:280` `extra_support[]`): `build/core-closure.tsv`、`cxroot.tsv`、`ext/textx/deflate.cx`；
   - 软链规则(`Rule L.1`, `seed/ident.c:219-223`): `cx/` 或 `src/` 下指向七目录外的文件只记录 `aliases` 拓扑路径对，不拉取外部目标文件字节；
   - 显式过滤(`seed/ident.c:41-64, 201-205`): 仅收 `.py/.c/.cx/.h/.inc/.tsv/.json/.sh`（及 `exec/c/asm/` 下 `.S` 汇编），排除 `cx/check_{memory,owned}.cx`、`exec/` 下以 `check.{sh,py,cx}` 结尾的检查脚本、`probes/` 下 `.c`/`.h`、`README.md`、`.DS_Store`、`seed/` 非白名单文件（`seed/` 只收 `tbl.c, net.c, json.h, gen.c, facts.h, ident.c, blob.c, sha256.h, pack.c, compilerpack.c, ape.c`）。
@@ -42,7 +42,7 @@ env_contract	<64hex>
 (2) `toolchain_ident`（构造器与构建链配方闭包，补全 `seed/ident.c` 未涵盖的构造成因）:
 - 当前作为起链构造器的已安装产品身份(`split2` `product_digest`，格式同 `seed/ident.c:365-370` 与 `tools/cxlib/productpkg.cx`，即 `unisacc.com` 与 `unisacc.com.dev` 的内容哈希与长度)；
 - 影响产品字节生成的链构造工具链源码闭包(SHA-256 排序逐行拼接):
-  `tools/candidate-chain.cx`、`tools/chain-step.cx`、`tools/release-build.cx`、`tools/build.cx`、`tools/kernel-build.cx`、`tools/product-build.cx`、`tools/source-job-wave.cx`、`tools/pc-wave.cx`、`tools/selfhost.cx`、`tools/cxlib/nninputs.cx`、`tools/cxlib/netpack.cx`、`tools/cxlib/kernelsha.cx`、`tools/cxlib/productpkg.cx`、`tools/cxlib/netsel.cx`、及其全部传递 `#pragma unisa use` 依赖；
+  `tools/candidate-chain.cx`、`tools/chain-step.cx`、`tools/release-build.cx`、`tools/build.cx`、`tools/kernel-build.cx`、`../../archive/chain-legacy/tools/product-build.cx`、`tools/source-job-wave.cx`、`tools/pc-wave.cx`、`../../archive/chain-legacy/tests/selfhost.cx`、`tools/cxlib/nninputs.cx`、`tools/cxlib/netpack.cx`、`tools/cxlib/kernelsha.cx`、`tools/cxlib/productpkg.cx`、`tools/cxlib/netsel.cx`、及其全部传递 `#pragma unisa use` 依赖；
 - 宿主 C 编译器与汇编/链接工具身份（如 `cc --version` 与目标 ABI 标志指纹），防止同源不同宿主编译器产出混用。
 
 (3) `asm_side` 与 `env_contract`:

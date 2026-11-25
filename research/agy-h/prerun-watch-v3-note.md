@@ -12,7 +12,7 @@
 2. 至 `06:52:25` (`+4.0m`), 实地核查观测到:
    - `strict-W0213.tsv` 已落盘 `SUMMARY batches=8 PASS=8 FAIL=0` (`check-daily-compile-smoke PASS rc=0 5073ms assertions=8`);
    - `prerun-daemon.out` 已连续推进 `W0213..W0219` 共 `7` 窗全绿(`done=221/241`), 并进入 `W0220` `PRERUN_RECOVER` (`from_jobs=8 to_jobs=1`), `done.WNNNN` 标记文件数升至 `220`, `PGID=3661284` 进程存活(`etimes=244s`)。
-3. 但同期运行 `sh ./unisacc.com research/agy-h/prerun-watch.cx -- --prerun-dir ... --now ...` 仍持续输出 `PRERUN_WATCH state=STOPPED done=214/241 last=W0213` (`PW_RC=1`), 读数完全停留在 `06:43:26` 的上一轮红停历史状态。
+3. 但同期运行 `sh ./unisacc.com ../../tools/prerun-watch.cx -- --prerun-dir ... --now ...` 仍持续输出 `PRERUN_WATCH state=STOPPED done=214/241 last=W0213` (`PW_RC=1`), 读数完全停留在 `06:43:26` 的上一轮红停历史状态。
 
 ---
 
@@ -20,7 +20,7 @@
 
 1. `tools/prerun-drive.cx` 仅将过程日志行打印至标准输出(`tools/prerun-drive.cx:1174,1782,2158,2174` 等 `printf` 输出 `PRERUN_WINDOW`、`PRERUN_FROZEN_SOURCE`、`PRERUN_RUN` 等), 自身不直接按窗追加 `<out>/supervise.log`。
 2. 初次全量启动时外层脚本把标准输出重定向至 `<out>/supervise.log`; 而 `--resume` 重启守护为保留停机现场或分离重启输出, 将标准输出改向 `<out>/prerun-daemon.out`, 仅计划在运行结束收尾时再合并回 `supervise.log`。
-3. `research/agy-h/prerun-watch.cx:410-413` 在使用 `--prerun-dir` 时只拼接读取 `%s/supervise.log`, 且 `pw_load_log` (`prerun-watch.cx:255-263`) 按文件内最后一个 `PRERUN_STOP`/`PRERUN_PRODUCT_RED_STOP` 与最后一个 `PRERUN_WINDOW` 行序裁定 `state=STOPPED`。因此只要 `--resume` 实时输出仍停留在 `prerun-daemon.out` 中、尚未并回 `supervise.log`, `prerun-watch` 就必然滞后并误报陈旧的 `STOPPED`。
+3. `../../tools/prerun-watch.cx:410-413` 在使用 `--prerun-dir` 时只拼接读取 `%s/supervise.log`, 且 `pw_load_log` (`prerun-watch.cx:255-263`) 按文件内最后一个 `PRERUN_STOP`/`PRERUN_PRODUCT_RED_STOP` 与最后一个 `PRERUN_WINDOW` 行序裁定 `state=STOPPED`。因此只要 `--resume` 实时输出仍停留在 `prerun-daemon.out` 中、尚未并回 `supervise.log`, `prerun-watch` 就必然滞后并误报陈旧的 `STOPPED`。
 
 ---
 

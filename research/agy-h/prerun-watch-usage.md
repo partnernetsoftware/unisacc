@@ -3,8 +3,8 @@
 编写窗口: `agy-h`
 生效范围: `0.0.107` 严格预跑 (`2-lane`) 值守期间每 `10` 分钟采样(以及异常/完工复核)。
 版本与生效边界(`cdx` 二审 + `cc` 裁定 -> `v2` 纯只读版):
-- `v2` 已按二审与 `cc` 决定完成并同步更新 `research/agy-h/prerun-watch.cx`、`research/agy-h/check-prerun-watch.cx` 及 `research/agy-h/prerun-watch.patch`: 移除 `--append-rate` 改纯只读(传入 `--append-rate` 返回 `rc=2 reason=unknown-arg`), 校验全部 `15` 列 `prerun-rate.tsv` 表头(`rate-header-mismatch`), `state=DONE` 且末行已含 `done==total` 时自动取末次采样时间与倒数第二行算 `rate_inc`/`rate_cum`, `status=DONE` 但窗口未满改判 `INCOMPLETE` (`rc=1`), `cx-lint findings=0`, 离线 `8/0` 夹具通过且 `0.0.106` 实跑得 `done=238/238 rate_inc=3.33 rate_cum=1.94`。
-- `107` 预跑期间按"不触冻结 `tests/`"原则直接只读运行 `research/agy-h/prerun-watch.cx`, 速率采样继续由值守窗口人工或单独命令写入 `$PR` 目录自己的速率日志; 补丁 `research/agy-h/prerun-watch.patch` 待解冻后并入 `0.0.108` 工具线并登记批次。
+- `v2` 已按二审与 `cc` 决定完成并同步更新 `../../tools/prerun-watch.cx`、`../../tools/check-prerun-watch.cx` 及 `research/agy-h/prerun-watch.patch`: 移除 `--append-rate` 改纯只读(传入 `--append-rate` 返回 `rc=2 reason=unknown-arg`), 校验全部 `15` 列 `prerun-rate.tsv` 表头(`rate-header-mismatch`), `state=DONE` 且末行已含 `done==total` 时自动取末次采样时间与倒数第二行算 `rate_inc`/`rate_cum`, `status=DONE` 但窗口未满改判 `INCOMPLETE` (`rc=1`), `cx-lint findings=0`, 离线 `8/0` 夹具通过且 `0.0.106` 实跑得 `done=238/238 rate_inc=3.33 rate_cum=1.94`。
+- `107` 预跑期间按"不触冻结 `tests/`"原则直接只读运行 `../../tools/prerun-watch.cx`, 速率采样继续由值守窗口人工或单独命令写入 `$PR` 目录自己的速率日志; 补丁 `research/agy-h/prerun-watch.patch` 待解冻后并入 `0.0.108` 工具线并登记批次。
 
 ---
 

@@ -15,14 +15,14 @@
 
 ## Abstract
 
-We present **UJS**, a closed JavaScript subset (**UJS-1**) that *transfers* the construct-don't-train discipline of UNISA SH [cite A]: finite gold tables become an integer IntNet; exactness on table nets is checked by full key-space enumeration (`acc`). **Paper B’s claim center** is the **constructed IntNet / table nets / (target) stream-derivation pipeline** for closed JS → **`\0asm`** (gold → IntNet → flow → bytes; provisional **m4** contract in `research/m4-flow-net-contract-draft.md`). **Paper A owns the method kernel** (enumeration and Lean samples such as `naive_exact`, `decision_list_exact`, `cong_of_pointwise`, `asks_subset_K`). Paper B **cites** that kernel; it does **not** re-prove IntNet existence and does **not** claim that A’s discharges automatically transfer to every UJS walker.
+We present **UJS**, a closed JavaScript subset (**UJS-1**) that *transfers* the construct-don't-train discipline of UNISA SH [cite A]: finite gold tables become an integer IntNet; exactness on table nets is checked by full key-space enumeration (`acc`). **Paper B’s claim center** is the **constructed IntNet / table nets / (target) stream-derivation pipeline** for closed JS → **`\0asm`** (gold → IntNet → flow → bytes; provisional **m4** contract in `../archive/docs-2026-11/research/m4-flow-net-contract-draft.md`). **Paper A owns the method kernel** (enumeration and Lean samples such as `naive_exact`, `decision_list_exact`, `cong_of_pointwise`, `asks_subset_K`). Paper B **cites** that kernel; it does **not** re-prove IntNet existence and does **not** claim that A’s discharges automatically transfer to every UJS walker.
 
 **Product surface (2026-10):** the shipped day-to-day tool is **`ujs.com`** (APE／六目标／host1 oracle／`--verify` 验面; pure `unisacc.com`+`.cx`). That surface is **evidence of the productivity-tool class**, not proof that the method arc (IntNet／m4) is discharged. The **M3 spine** (`compiler.ujs` → `compiler_core.wasm`) remains **scaffolding** for Pages—**not** Paper B’s claim center and **not** an IntNet. Construct／jtape remains the **method** arm (`method_construct`). **现状出货 ≠ 主张中心** (Appendix D). Claims are suite names already in the repository; we invent no throughput numbers.
 
 **谱系提醒：** 旧稿「companion to A／A owns kernel, B cites」仍可用于方法核引用；**产品与问题派生方向**以 `ujs/prd.md` §0.1b 为准（B→A），改口时勿写成「UJS 挂在 unisacc 产品树下」。
 
 **摘要（可选）**  
-UJS 把 UNISA SH [cite A] 的构造法迁到闭合 JS：**主张中心** = 构造 IntNet / 表阶段 /（目标）流推导管线（闭合 JS→`\0asm`；见 `research/m4-flow-net-contract-draft.md`）。方法核在 A；B **引用**，**不**声称 A 卸责自动覆盖每张 UJS 表。**M3 出货**（`compiler_core`、**mainBody** 字节对照）= 工程旁路/脚手架，**不是**主贡献，也不是「Web 编译器 = 表网络」。**现状出货 ≠ 主张中心**。语言子集写 **UJS-1_ship**，勿与全表 UJS-1 等同。
+UJS 把 UNISA SH [cite A] 的构造法迁到闭合 JS：**主张中心** = 构造 IntNet / 表阶段 /（目标）流推导管线（闭合 JS→`\0asm`；见 `../archive/docs-2026-11/research/m4-flow-net-contract-draft.md`）。方法核在 A；B **引用**，**不**声称 A 卸责自动覆盖每张 UJS 表。**M3 出货**（`compiler_core`、**mainBody** 字节对照）= 工程旁路/脚手架，**不是**主贡献，也不是「Web 编译器 = 表网络」。**现状出货 ≠ 主张中心**。语言子集写 **UJS-1_ship**，勿与全表 UJS-1 等同。
 
 ---
 
@@ -38,7 +38,7 @@ Neural components in compilers and runtimes are usually *trained* heuristics wit
 
 ## 2. Contributions
 
-1. **Claim center (construct spine).** **Constructed IntNet / UJS table nets / (target) stream pipeline** for a closed JS subset → **`\0asm`**, with gold → IntNet → flow → bytes as the paper figure (provisional **4 × 10 → `\0asm`** mnemonic; `research/m4-flow-net-contract-draft.md`). Method transfer (not re-proof): same Shell proposition and P-discipline as [cite A], including **IC** and wasm `isel`/`enc`/`reloc` when tables ship; IntNet proofs stay in A.
+1. **Claim center (construct spine).** **Constructed IntNet / UJS table nets / (target) stream pipeline** for a closed JS subset → **`\0asm`**, with gold → IntNet → flow → bytes as the paper figure (provisional **4 × 10 → `\0asm`** mnemonic; `../archive/docs-2026-11/research/m4-flow-net-contract-draft.md`). Method transfer (not re-proof): same Shell proposition and P-discipline as [cite A], including **IC** and wasm `isel`/`enc`/`reloc` when tables ship; IntNet proofs stay in A.
 2. **M3 as scaffolding, not thesis.** **M3** (`compiler.ujs` → `compiler_core.wasm`; main-body twin-tests) documents **现状出货** and Python-free ship—it is **旁路 / historical scaffolding**, not the main Paper B contribution and not an IntNet instance. Construct path (**jtape / fold / acc / icfold**) carries method acceptance.
 3. **Web product surface**: `wasm_run` / UXE Pages; default compile path **`compiler_core.wasm`** (P0); Python construct is not a ship dependency (`web-build` remains a *dev / engine* path, not Pages emit).
 4. **Cross-host front parity** where dual fronts still exist; parity reduces drift, it does not replace [cite A].
@@ -98,9 +98,9 @@ src ──► iterate/compiler.ujs (M3) ──► compiler_core.wasm
 
 Nets that remain table-shaped when present: `lex`, `parse`, `scope`, `type`, `shape`, `irsel`, `ic`, `isel`, `enc`, `reloc` (exact at ship when that table ships). M3 expands a **classical** AST→wasm subset independently of baking those golds.
 
-**Ten UJS nets vs eighteen UNISA fact networks.** UJS carries **ten** table nets (listed above; one gold table = one net). Paper A’s C product is **two layers** [cite A]: a **seven-stream-stage byte pipeline** (`preprocess` → `lex` → `parse` → `opt` → `prune` → `lowering` → `encode`+image; `README.md`, `exec/pipeline/image-stages.tsv`) and, orthogonally, **eighteen** fact/decision networks in `unisa/gold.py` (`pp`, `lex`, `parse`, `type`, `scope`, `irsel`, `enc`, `reloc`, `regmap`, `tyinfo`, `pfconv`, `peep`, `opinfo`, `prec`, `binsel`, `isel`, `abi`, `combo`)—the eighteen are **ask nets**, not eighteen stream-stages. Shared *names* across UJS, the stream-stages, and those nets (e.g. `type`, `irsel`, `isel`, `lex`) are **not** the same gold tables: field vocabularies and backend targets differ (UJS `isel` keys on `JOPS` / wasm forms; UNISA `isel` adds `arch`; UNISA adds C/multi-target nets such as `peep`, `abi`, `combo` that UJS does not register).
+**Ten UJS nets vs eighteen UNISA fact networks.** UJS carries **ten** table nets (listed above; one gold table = one net). Paper A’s C product is **two layers** [cite A]: a **seven-stream-stage byte pipeline** (`preprocess` → `lex` → `parse` → `opt` → `prune` → `lowering` → `encode`+image; `README.md`, `exec/pipeline/image-stages.tsv`) and, orthogonally, **eighteen** fact/decision networks in `../archive/reference-py/unisa/gold.py` (`pp`, `lex`, `parse`, `type`, `scope`, `irsel`, `enc`, `reloc`, `regmap`, `tyinfo`, `pfconv`, `peep`, `opinfo`, `prec`, `binsel`, `isel`, `abi`, `combo`)—the eighteen are **ask nets**, not eighteen stream-stages. Shared *names* across UJS, the stream-stages, and those nets (e.g. `type`, `irsel`, `isel`, `lex`) are **not** the same gold tables: field vocabularies and backend targets differ (UJS `isel` keys on `JOPS` / wasm forms; UNISA `isel` adds `arch`; UNISA adds C/multi-target nets such as `peep`, `abi`, `combo` that UJS does not register).
 
-**Key-space scale (FULL gold; counts from `ujs/seed/construct/gold.py` and `unisa/gold.py`).** Illustrative |K|: UJS `irsel` 117, `type` 1863, `isel` 42; same-named UNISA nets are larger (`irsel` ≈ 420, `type` ≈ 4275, `isel` ≈ 174), before counting UNISA-only nets.
+**Key-space scale (FULL gold; counts from `ujs/seed/construct/gold.py` and `../archive/reference-py/unisa/gold.py`).** Illustrative |K|: UJS `irsel` 117, `type` 1863, `isel` 42; same-named UNISA nets are larger (`irsel` ≈ 420, `type` ≈ 4275, `isel` ≈ 174), before counting UNISA-only nets.
 
 **Runtime `ask` vs enumeration (`acc`).** Do **not** claim that all ten nets drive compilation via `oracle.ask`. On the construct path, walkers call `ask` on `lex`, `parse`, `scope`, `type`, `shape`, and `ic` (`ujs/seed/construct/front/`, `vm.py`); wasm emit/lower call `isel`, `enc`, and `reloc` when enabled (`emit_wasm.py`, `lower_wasm.py`). **`irsel` is checked only by full-key `acc` against gold** — there is no runtime `ask("irsel", …)` in the UJS tree.
 
@@ -129,7 +129,7 @@ UJS cites these by reference. **B’s extra P-2 obligation:** each new *table* n
 
 ### 5.2 UJS-1 language (closed) vs UJS-1_ship
 
-**UJS-1 (spec):** values `null | bool | i64 | f64 | str | list | dict | fn | tup`; locals → lexical outer → globals; permanent reject outside tables (no `eval`, prototypes, `this`/`new`/`class`, async, RegExp engine). Full clause table: `ujs/prd.md` / `archive/prd-v1.0.md`.
+**UJS-1 (spec):** values `null | bool | i64 | f64 | str | list | dict | fn | tup`; locals → lexical outer → globals; permanent reject outside tables (no `eval`, prototypes, `this`/`new`/`class`, async, RegExp engine). Full clause table: `ujs/prd.md` / `../ujs/archive/prd-v1.0.md`.
 
 **UJS-1_ship (M3 / Pages path, as of compiler v18):** growing classical subset sufficient for Asteroid + drone and the self-hosting compiler—control (`if` / `else if` / `while` / …), i64/f64 arith, list/dict/index/`setidx`, unary `-`/`!`, `&&`/`||` (i64 short-circuit), **ASCII string literals 0–255 + concat + return**, globals inject / `host_*` / `run_step`.
 
@@ -167,8 +167,8 @@ Where a JS front and a Python front both exist, packed images must match on shar
 |---|---|---|
 | Method kernel | [cite A] Lean + `unisa acc` | Not re-run as B’s novelty |
 | UJS table exactness (when tables ship) | `acc` / construct via `ujs.sh` | FULL gold; SHIP_ACC |
-| Construct fold / icfold / front parity | `tests/ujs.sh` (where enabled) | agree / identical images |
-| Full path-B emit corpus | `tests/ujs2wasm.sh` (under `ujs.sh`) | includes probes **outside** UJS-1_ship (e.g. `arrow`, long-form `str` via Python tools, …) |
+| Construct fold / icfold / front parity | `../archive/testing-c43-legacy/tests/ujs.sh` (where enabled) | agree / identical images |
+| Full path-B emit corpus | `../archive/testing-c43-legacy/tests/ujs2wasm.sh` (under `ujs.sh`) | includes probes **outside** UJS-1_ship (e.g. `arrow`, long-form `str` via Python tools, …) |
 | M3 compiler self-host + P0 | `ujs2wasm_compiler.sh` | **mainBody** stage2≡stage1; sim/drone **mainBody**≡stage0; default bridge=`compiler_core.wasm`; no ship `emit_wasm` / no A-core copy; missing `compiler.wasm` = FAIL |
 | UJS-1_ship fold on **core** | same | §6.2 corpus + inject step |
 | Optional tinyvm validate | same (when binary found / `UJS_REQUIRE_TINYVM=1`) | `module validate` only—**not** execution twin |
@@ -271,7 +271,7 @@ Full ES · equating UJS-1_ship with full UJS-1 · equating M3 with IntNet · rea
 
 | | unisacc ([cite A] C product) | UJS (this paper) |
 |---|---|---|
-| **Claim center (provisional m4)** | — | **4 stream × 10 table nets → `\0asm`** (method proof arc; `research/m4-flow-net-contract-draft.md`) |
+| **Claim center (provisional m4)** | — | **4 stream × 10 table nets → `\0asm`** (method proof arc; `../archive/docs-2026-11/research/m4-flow-net-contract-draft.md`) |
 | **Compressed spine (现状出货 ≠ 主张中心)** | 7 stream-stages × 18 fact/decision nets → **native** (six platforms) | 1 **M3 ship** spine × 10 table nets → **`\0asm`** — **product footnote only** |
 | **Method arm (not ship numerator)** | exec / table-driven reference (Paper C) | **construct / jtape** → emit / `ujs2wasm` (when tables ship); seeds **m4** figure |
 

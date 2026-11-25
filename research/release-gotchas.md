@@ -15,7 +15,7 @@
 
 证据入口:
 - 源码:`tools/release-flow.cx:140-158`(SEGMENT_IDENTITY / STRICT_ORDER_IDENTITY)
-- 0.0.94 INDEX 两段预跑说明:`release/evidence/0.0.94/INDEX.tsv` 行 `prefreeze-strict` / `postfreeze-strict`(段一 F4、段二 F5 折叠叙述);严格表路径 `release/v0.0.94-strict-2026-11-23.tsv`(INDEX 相对引用)
+- 0.0.94 INDEX 两段预跑说明:`release/evidence/0.0.94/INDEX.tsv` 行 `prefreeze-strict` / `postfreeze-strict`(段一 F4、段二 F5 折叠叙述);严格表路径 `../release/evidence/v0.0.94-strict-2026-11-23.tsv`(INDEX 相对引用)
 
 自校验:是。`release-flow` 已拒错值;建议在 `release-chain plan` 或 inputs 预检再算一遍拼接哈希并打印期望 digest,避免进入 prep 才红。
 

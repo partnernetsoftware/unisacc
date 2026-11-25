@@ -267,7 +267,7 @@ void ax_die(const char *tool, int rc, const char *fmt, ...);         /* 取代 2
 int  ax_close(int h);
 ```
 - 约定(来自近 100 条提交反复修的行为,定成合同):未识别选项 rc 2 并具名;`--help` rc 0 且输出等于 ax_usage;缺必填项逐个具名;`--opt=value` 与 `--opt value` 等价;`--` 之后不解析。
-- 事实表适用处:选项表就是事实;`build/tool-index.tsv` 的 usage 列现由头注释抽取,迁移后可由 `TOOL --help` 的输出生成,头注释与实际解析不再漂移。
+- 事实表适用处:选项表就是事实;`../tests/manifests/tool-index.tsv` 的 usage 列现由头注释抽取,迁移后可由 `TOOL --help` 的输出生成,头注释与实际解析不再漂移。
 - 负控(gold 表):未知选项、重复的单值选项、整数越界、缺值、必填缺失、`--` 后的 `--x` 原样、空 argv、选项名前缀歧义一律按精确匹配拒绝。
 - 写域:`ext/argx/args.cx`、`cxroot.tsv` 一行、新包行、`tools/check-ext-argx.cx`、`tests/cases/argx/`、面表行、登记行。
 - 验收:`sh ./unisacc.com tools/check-ext-argx.cx` 末行 `failed=0`;试点 devsvc-core 的一个子命令族(doc)改用后 `tools/check-devsvc.cx` 相应组断言全过且 `devsvc doc --help` rc 0(现状 rc 2 并报 bad doc arguments,本次实测)。
@@ -380,7 +380,7 @@ W1、W3、W4、W5、W7 写域互不相交,可并行派五个子代理,每个 15 
 | E6 | `tools/cxlib/receipt.cx`、relsha、shamemo、toolprep 的闭包内容键 | 三处各自实现"遍历加逐文件 sha 拼接" | fsx_tree_sha256 单源 | 缓存键算法单源(候选池 M 第六条要求);约 150 行 |
 | E7 | cx-lint 与棘轮 | 无"禁止新增手写轮子"规则 | W0 的 dup-census 棘轮;cx-lint 加规则:新文件定义 `ck`、`slurp`、`spawn_pipe_bounded`、`one_file` 等底表内名字即告警,并提示对应库函数 | 冗余行数 26213 成为只减不增的读数,每版公开后读一次 |
 | E8 | flow 的 search 与 glob 算子(`tools/cxlib/flowfile.cx` 内私有 glob 匹配) | glob 匹配器私有;O6 glob 算子待做 | 匹配器移到 fsx_glob_match,flowfile 反过来用它 | plans/devsvc.md O6 的落地成本降为加一个算子入口 |
-| E9 | `build/tool-index.tsv` 的 usage 列 | 从头注释抽取,多行为空 | 由 `TOOL --help`(ax_usage)生成 | usage 为空的行数成为可清零的读数 |
+| E9 | `../tests/manifests/tool-index.tsv` 的 usage 列 | 从头注释抽取,多行为空 | 由 `TOOL --help`(ax_usage)生成 | usage 为空的行数成为可清零的读数 |
 | E10 | `prd_cx_spec.md` 5.1 对照表与 4 节速查 | 推荐 np_run、tx_iter 加 tv_row_next | 每个包入库时把对照表对应行改成新入口,并删 5.2 里已不成立的限制 | 规范与库一致;修掉 2.1 节列的两处文档不一致 |
 
 合计可删量(估算口径:逐字相同的按精确值,其余按可替换比例折算):P1 加 P2 约 5300 行、P4 约 2700 行、P5 约 1500 行、P3 约 520 行、P6 约 800 行、P7 约 1100 行、P8 约 600 行、P10 约 500 行,合计约 13000 行,约为冗余上限 26213 行的一半、tools 总量的 7%。这是推算,不是实测;实测读数由 W0 的棘轮给出。

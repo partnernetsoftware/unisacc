@@ -2,7 +2,7 @@
 
 作者:csr(共同执行人) 日期:2026-11-23  
 状态:私有草稿(main 静默期不落库);公开后落 `research/post-publish-checklist.md`  
-依据:`archive/research-2026-11-25/2026-11-23/freeze-runbook-draft.md` 第四节;`~/.local/share/unisacc/research/` 各补丁目录;归档草稿验收结论。
+依据:`../archive/research-2026-11/research/2026-11-23/freeze-runbook-draft.md` 第四节;`~/.local/share/unisacc/research/` 各补丁目录;归档草稿验收结论。
 
 硬前置:0.0.94 已公开发布(Y2 完成)、main 静默解除、集成者宣布可写 main。  
 每项给出:命令、验收行、归属窗口、gatekeeper 是否必需。未实跑不写 PASS。

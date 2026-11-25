@@ -20,7 +20,7 @@
 | 切片 | 内容 | 写域 | 核心接口/命令 | A 类数 | 估计(加倍口径) | 排期 |
 |---|---|---|---|---|---|---|
 | 甲 (B1) | 清单 `cxpkg.tsv` (`CXPKG1`: N/V/K/S/D/X/E/C) 解析与校验 | `tools/cxpkg/man.cx`、`tools/cxpkg.cx`、`tools/check-cxpkg-man.cx`、`tests/manifests/cxpkg-man/` | `pm_load(file, m)`; `cxpkg init`; `cxpkg check [DIR]` | 0 | 1 天 | 首批派发 |
-| 乙 (B2) | `resolve` 建 `cxpkg/<名>` 软链、生成 `cxroot.tsv` 与 `why` 诊断 | `tools/cxpkg/resolve.cx`、`tools/check-cxpkg-resolve.cx`、`tests/manifests/cxpkg-resolve/` | `cxpkg resolve [--check] [--core DIR]`; `cxpkg why NAME` | 0 | 2 天 | 首批并行(目标 `0.0.91` Z5 冻结前可用) |
+| 乙 (B2) | `resolve` 建 `cxpkg/<名>` 软链、生成 `cxroot.tsv` 与 `why` 诊断 | `../ext/net/resolve.cx`、`tools/check-cxpkg-resolve.cx`、`tests/manifests/cxpkg-resolve/` | `cxpkg resolve [--check] [--core DIR]`; `cxpkg why NAME` | 0 | 2 天 | 首批并行(目标 `0.0.91` Z5 冻结前可用) |
 | 丙 (B3) | 锁 `cxlock.tsv` (`CXLOCK1`)、包树 sha256 完整性校验与最小版本选择 | `tools/cxpkg/lock.cx`、`tools/check-cxpkg-lock.cx`、`tests/manifests/cxpkg-lock/` | `cxpkg lock`; `cxpkg verify` | 0 | 2 天 | 首批并行 |
 | 丁 | 离线/钉提交号安装器(`path:` 与 `git:URL#40位提交号`,无安装脚本) | `tools/cxpkg/store.cx`、`tools/check-cxpkg-install.cx` | `cxpkg install [--frozen]`; `cxpkg list` | 0 | 3 天 | B1-B3 收口后二批 |
 | 戊 | 索引与发布(`cxpkg-index.tsv`、search/publish;服务化门槛 50 包 / 10 第三方作者) | 规划 | `cxpkg index --write/--check`; `search`/`publish` | 0 | 4 天 | 后期规划 |

@@ -48,7 +48,7 @@
 
 ## (4) `G1 v2 window-timeout` 与 `precommit-list-cap` 证据
 
-- `precommit-list-cap` (`headers=tree`, 4 次串行真实 `precommit.cx` 子进程调用) 在同候选 `APE2` 与同布局下连跑四次: `W9915` (`55557ms`)、`W9915b` (`55530ms, load1=1.82`)、`W9915c` (`55486ms, load1=1.93`)、`W9915d` (`55492ms, load1=2.21`), 均触 `tools/run-batch.cx:264` 的 53 秒子进程硬限 (`UNKNOWN 0`, `transport-failed-raw-neg1`, `assertions=UNMEASURED`)。
+- `precommit-list-cap` (`headers=tree`, 4 次串行真实 `precommit.cx` 子进程调用) 在同候选 `APE2` 与同布局下连跑四次: `W9915` (`55557ms`)、`W9915b` (`55530ms, load1=1.82`)、`W9915c` (`55486ms, load1=1.93`)、`W9915d` (`55492ms, load1=2.21`), 均触 `../../tests/run-batch.cx:264` 的 53 秒子进程硬限 (`UNKNOWN 0`, `transport-failed-raw-neg1`, `assertions=UNMEASURED`)。
 - 按 `G1 v2` 登记 `release/evidence/0.0.107/expected-unmeasured.tsv` (`precommit-list-cap<TAB>window-timeout<TAB>list-cap-margin.md`) 与 `release/evidence/0.0.107/list-cap-margin.md` (同载于 `INDEX.tsv` `precommit-list-cap-window-timeout WAIVED`), 并在公开说明披露三批贴限批次 (`precommit-list-cap 55.5s`、`slow-split 51.1s`、`premerge-selfcheck-main/rd 50.3s/49.9s`), 排入 `0.1.1` 拆批。
 
 ## (5) `W9994` (`premerge-selfcheck` 两分片) 补跑
