@@ -1,0 +1,416 @@
+/* tools/check-host-surface.cx -- host surface count ratchet (6 targets: syscalls, frozen tape host slots, lower-abi gaps).
+ *
+ *   cx tools/check-host-surface.cx -- [--check] [--root DIR]
+ *   cx tools/check-host-surface.cx -- --print [--root DIR]
+ *   cx tools/check-host-surface.cx -- --self-test
+ *
+ * Reads:
+ *   - <root>/exec/facts/sys-syscalls.tsv (non-zero entries per target column 1..6)
+ *   - <root>/tools/tape/facts/hoststub-slots.tsv (rows with status=frozen)
+ *   - <root>/exec/facts/lower-abi.tsv (@abi rows with selected=0 per target)
+ *   - <root>/build/host-surface-baseline.tsv (target, syscall_cap, host_slot_cap, tape_gap_cap, note)
+ *
+ * Exits 0 when all 6 targets satisfy actual <= cap, 1 on any cap violation or malformed baseline, 2 on usage/I/O error.
+ * 20th ratchet in tools/ratchets.cx. */
+#pragma unisa use sys.fs
+#pragma unisa use sys.env
+#pragma unisa use text.text
+#pragma unisa use mem.heap
+#pragma unisa use sys.proc
+
+enum { HS_NTARGET = 6 };
+
+static const char *hs_targets[HS_NTARGET] = {
+    "lnx/x86_64", "lnx/arm64", "osx/x86_64", "osx/arm64", "win/x86_64", "win/arm64"
+};
+
+typedef struct {
+    int seen;
+    int syscall_cap;
+    int host_slot_cap;
+    int tape_gap_cap;
+} HsBase;
+
+typedef struct {
+    int syscalls[HS_NTARGET];
+    int host_slots;
+    int tape_gaps[HS_NTARGET];
+} HsActual;
+
+static int hs_target_idx(const char *s, long n) {
+    int i;
+    for (i = 0; i < HS_NTARGET; i++) {
+        long tl = tx_len(hs_targets[i], 32);
+        if (n == tl && tx_same(s, n, hs_targets[i], tl)) return i;
+    }
+    return -1;
+}
+
+static int hs_parse_nonneg(const char *s, long n, int *out) {
+    long i, v = 0;
+    if (n <= 0 || n > 9) return -1;
+    for (i = 0; i < n; i++) {
+        if (s[i] < '0' || s[i] > '9') return -1;
+        v = v * 10 + (s[i] - '0');
+    }
+    *out = (int)v;
+    return 0;
+}
+
+static int hs_is_nonzero_cell(const char *s, long n) {
+    long i = 0;
+    if (n <= 0) return 0;
+    if (n == 1 && s[0] == '0') return 0;
+    if (s[0] == '-') i = 1;
+    if (i >= n) return 0;
+    for (; i < n; i++) {
+        if (s[i] < '0' || s[i] > '9') return 1;
+    }
+    for (i = (s[0] == '-' ? 1 : 0); i < n; i++) {
+        if (s[i] != '0') return 1;
+    }
+    return 0;
+}
+
+static int hs_count_syscalls(const char *root, int out[HS_NTARGET]) {
+    char p[4096];
+    size_t sz = 0;
+    char *b;
+    long at = 0;
+    int i;
+    for (i = 0; i < HS_NTARGET; i++) out[i] = 0;
+    if (cx_fmt(p, sizeof p, "%s/exec/facts/sys-syscalls.tsv", root)) return -2;
+    b = cx_read(p, &sz);
+    if (!b) { fprintf(stderr, "host-surface: cannot read %s\n", p); return -2; }
+    while (at < (long)sz) {
+        long e = tx_chr(b + at, (long)sz - at, '\n');
+        long ln = e < 0 ? (long)sz - at : e;
+        const char *l = b + at;
+        long rln = ln;
+        if (rln > 0 && l[rln - 1] == '\r') rln--;
+        if (rln > 0 && l[0] != '#') {
+            int t;
+            for (t = 0; t < HS_NTARGET; t++) {
+                long fo = 0, fl = 0;
+                if (!tx_field(l, rln, '\t', t + 1, &fo, &fl)) {
+                    if (hs_is_nonzero_cell(l + fo, fl)) out[t]++;
+                }
+            }
+        }
+        at += (e < 0 ? ln : e + 1);
+    }
+    mm_free(b);
+    return 0;
+}
+
+static int hs_count_host_slots(const char *root, int *out_frozen) {
+    char p[4096];
+    size_t sz = 0;
+    char *b;
+    long at = 0;
+    int frozen = 0;
+    if (cx_fmt(p, sizeof p, "%s/tools/tape/facts/hoststub-slots.tsv", root)) return -2;
+    b = cx_read(p, &sz);
+    if (!b) { fprintf(stderr, "host-surface: cannot read %s\n", p); return -2; }
+    while (at < (long)sz) {
+        long e = tx_chr(b + at, (long)sz - at, '\n');
+        long ln = e < 0 ? (long)sz - at : e;
+        const char *l = b + at;
+        long rln = ln;
+        if (rln > 0 && l[rln - 1] == '\r') rln--;
+        if (rln > 0 && l[0] != '#' && !tx_prefix(l, rln, "slot\t", 5)) {
+            long fo = 0, fl = 0;
+            if (!tx_field(l, rln, '\t', 3, &fo, &fl) && fl == 6 && tx_same(l + fo, 6, "frozen", 6)) {
+                frozen++;
+            }
+        }
+        at += (e < 0 ? ln : e + 1);
+    }
+    mm_free(b);
+    *out_frozen = frozen;
+    return 0;
+}
+
+static int hs_count_tape_gaps(const char *root, int out[HS_NTARGET]) {
+    char p[4096];
+    size_t sz = 0;
+    char *b;
+    long at = 0;
+    int i, in_abi = 0;
+    for (i = 0; i < HS_NTARGET; i++) out[i] = 0;
+    if (cx_fmt(p, sizeof p, "%s/exec/facts/lower-abi.tsv", root)) return -2;
+    b = cx_read(p, &sz);
+    if (!b) { fprintf(stderr, "host-surface: cannot read %s\n", p); return -2; }
+    while (at < (long)sz) {
+        long e = tx_chr(b + at, (long)sz - at, '\n');
+        long ln = e < 0 ? (long)sz - at : e;
+        const char *l = b + at;
+        long rln = ln;
+        if (rln > 0 && l[rln - 1] == '\r') rln--;
+        if (rln > 0 && l[0] == '@') {
+            in_abi = tx_prefix(l, rln, "@abi\t", 5);
+        } else if (in_abi && rln > 0 && l[0] == '\t') {
+            long to = 0, tl = 0, so = 0, sl = 0;
+            if (!tx_field(l, rln, '\t', 1, &to, &tl) && !tx_field(l, rln, '\t', 13, &so, &sl)) {
+                int ti = hs_target_idx(l + to, tl);
+                if (ti >= 0 && sl == 1 && l[so] == '0') out[ti]++;
+            }
+        }
+        at += (e < 0 ? ln : e + 1);
+    }
+    mm_free(b);
+    return 0;
+}
+
+static int hs_measure(const char *root, HsActual *act) {
+    if (hs_count_syscalls(root, act->syscalls)) return -2;
+    if (hs_count_host_slots(root, &act->host_slots)) return -2;
+    if (hs_count_tape_gaps(root, act->tape_gaps)) return -2;
+    return 0;
+}
+
+static int hs_load_baseline(const char *root, HsBase base[HS_NTARGET]) {
+    char p[4096];
+    size_t sz = 0;
+    char *b;
+    long at = 0;
+    int i, bad = 0;
+    for (i = 0; i < HS_NTARGET; i++) {
+        base[i].seen = 0;
+        base[i].syscall_cap = 0;
+        base[i].host_slot_cap = 0;
+        base[i].tape_gap_cap = 0;
+    }
+    if (cx_fmt(p, sizeof p, "%s/build/host-surface-baseline.tsv", root)) return -2;
+    b = cx_read(p, &sz);
+    if (!b) { fprintf(stderr, "host-surface: cannot read %s\n", p); return -2; }
+    while (at < (long)sz) {
+        long e = tx_chr(b + at, (long)sz - at, '\n');
+        long ln = e < 0 ? (long)sz - at : e;
+        const char *l = b + at;
+        long rln = ln;
+        if (rln > 0 && l[rln - 1] == '\r') rln--;
+        if (rln > 0 && l[0] != '#' && !tx_prefix(l, rln, "target\t", 7)) {
+            long o0 = 0, l0 = 0, o1 = 0, l1 = 0, o2 = 0, l2 = 0, o3 = 0, l3 = 0;
+            if (tx_field(l, rln, '\t', 0, &o0, &l0) || tx_field(l, rln, '\t', 1, &o1, &l1) ||
+                tx_field(l, rln, '\t', 2, &o2, &l2) || tx_field(l, rln, '\t', 3, &o3, &l3)) {
+                fprintf(stderr, "host-surface: malformed baseline row: %.*s\n", (int)rln, l);
+                bad++;
+            } else {
+                int ti = hs_target_idx(l + o0, l0);
+                int sc = 0, hc = 0, tc = 0;
+                if (ti < 0) {
+                    fprintf(stderr, "host-surface: unknown target in baseline: %.*s\n", (int)l0, l + o0);
+                    bad++;
+                } else if (base[ti].seen) {
+                    fprintf(stderr, "host-surface: duplicate target in baseline: %s\n", hs_targets[ti]);
+                    bad++;
+                } else if (hs_parse_nonneg(l + o1, l1, &sc) || hs_parse_nonneg(l + o2, l2, &hc) || hs_parse_nonneg(l + o3, l3, &tc)) {
+                    fprintf(stderr, "host-surface: invalid integer cap for %s\n", hs_targets[ti]);
+                    bad++;
+                } else {
+                    base[ti].seen = 1;
+                    base[ti].syscall_cap = sc;
+                    base[ti].host_slot_cap = hc;
+                    base[ti].tape_gap_cap = tc;
+                }
+            }
+        }
+        at += (e < 0 ? ln : e + 1);
+    }
+    mm_free(b);
+    for (i = 0; i < HS_NTARGET; i++) {
+        if (!base[i].seen) {
+            fprintf(stderr, "host-surface: missing target in baseline: %s\n", hs_targets[i]);
+            bad++;
+        }
+    }
+    return bad ? -1 : 0;
+}
+
+static void hs_cmp_metric(const char *target, const char *metric, int actual, int cap, int *fails, int *tips, int emit) {
+    if (actual > cap) {
+        if (emit) printf("HOST_SURFACE_RATCHET\tFAIL\ttarget=%s\tmetric=%s\tactual=%d\tcap=%d\n", target, metric, actual, cap);
+        (*fails)++;
+    } else if (actual < cap) {
+        if (emit) printf("HOST_SURFACE_RATCHET\tTIP\ttarget=%s\tmetric=%s\tactual=%d\tcap=%d\n", target, metric, actual, cap);
+        (*tips)++;
+    }
+}
+
+static int hs_check_root(const char *root, int emit, int *out_fails, int *out_tips) {
+    HsActual act;
+    HsBase base[HS_NTARGET];
+    int i, rc, fails = 0, tips = 0;
+    rc = hs_measure(root, &act);
+    if (rc) return 2;
+    rc = hs_load_baseline(root, base);
+    if (rc == -2) return 2;
+    if (rc == -1) {
+        if (emit) {
+            printf("HOST_SURFACE_RATCHET\tstatus=FAIL\ttargets=%d\tfails=1\ttips=0\n", HS_NTARGET);
+            printf("host-surface: FAIL: malformed or incomplete baseline\n");
+        }
+        if (out_fails) *out_fails = 1;
+        if (out_tips) *out_tips = 0;
+        return 1;
+    }
+    for (i = 0; i < HS_NTARGET; i++) {
+        hs_cmp_metric(hs_targets[i], "syscall_cap", act.syscalls[i], base[i].syscall_cap, &fails, &tips, emit);
+        hs_cmp_metric(hs_targets[i], "host_slot_cap", act.host_slots, base[i].host_slot_cap, &fails, &tips, emit);
+        hs_cmp_metric(hs_targets[i], "tape_gap_cap", act.tape_gaps[i], base[i].tape_gap_cap, &fails, &tips, emit);
+    }
+    if (emit) {
+        printf("HOST_SURFACE_RATCHET\tstatus=%s\ttargets=%d\tfails=%d\ttips=%d\n", fails ? "FAIL" : "PASS", HS_NTARGET, fails, tips);
+        printf("host-surface: %s: targets=%d fails=%d tips=%d\n", fails ? "FAIL" : "ok", HS_NTARGET, fails, tips);
+    }
+    if (out_fails) *out_fails = fails;
+    if (out_tips) *out_tips = tips;
+    return fails ? 1 : 0;
+}
+
+static int hs_write_file(const char *path, const char *text) {
+    return cx_write(path, text, (size_t)tx_len(text, 1 << 16));
+}
+
+static int hs_selftest(void) {
+    char d[4096], p[4200];
+    int passed = 0, failed = 0, rc, nf = 0, nt = 0;
+    const char *base_sys =
+        "# name\tlnx_x86_64\tlnx_arm64\tosx_x86_64\tosx_arm64\twin_x86_64\twin_arm64\tfallback\n"
+        "syp_ok\t1\t1\t1\t1\t0\t0\t0\n"
+        "syp_at_fdcwd\t-100\t-100\t-2\t-2\t-1\t-1\t-1\n";
+    const char *extra_sys =
+        "# name\tlnx_x86_64\tlnx_arm64\tosx_x86_64\tosx_arm64\twin_x86_64\twin_arm64\tfallback\n"
+        "syp_ok\t1\t1\t1\t1\t0\t0\t0\n"
+        "syp_at_fdcwd\t-100\t-100\t-2\t-2\t-1\t-1\t-1\n"
+        "syp_dummy\t999\t0\t0\t0\t0\t0\t0\n";
+    const char *base_slots =
+        "slot\top\ttier\tstatus\tsource\n"
+        "0\texit\tm1_core\tfrozen\tx\n"
+        "1\tread\tm1_core\tfrozen\tx\n"
+        "7\tmprotect\tabiops_ext\tdraft\tx\n";
+    const char *extra_slots =
+        "slot\top\ttier\tstatus\tsource\n"
+        "0\texit\tm1_core\tfrozen\tx\n"
+        "1\tread\tm1_core\tfrozen\tx\n"
+        "2\twrite\tm1_core\tfrozen\tx\n";
+    const char *base_abi =
+        "@abi\ttarget:str\top:str\tsysno:str\targs:json\tret:str\tgate:str\tnrreg:str\targshape:str\tretconv:str\twinimp:str\twinapi:str\tform:str\tselected:int\n"
+        "\tlnx/x86_64\tpoll\t7\t[]\ti64\t0\trax\ta\tr\t-\t-\tf\t1\n"
+        "\twin/x86_64\tpoll\t0\t[]\ti64\t0\trax\ta\tr\t-\t-\tf\t0\n"
+        "@abisel\ttarget:str\top:str\n";
+    const char *extra_abi =
+        "@abi\ttarget:str\top:str\tsysno:str\targs:json\tret:str\tgate:str\tnrreg:str\targshape:str\tretconv:str\twinimp:str\twinapi:str\tform:str\tselected:int\n"
+        "\tlnx/x86_64\tpoll\t7\t[]\ti64\t0\trax\ta\tr\t-\t-\tf\t1\n"
+        "\twin/x86_64\tpoll\t0\t[]\ti64\t0\trax\ta\tr\t-\t-\tf\t0\n"
+        "\twin/x86_64\tsyscall\t0\t[]\ti64\t0\trax\ta\tr\t-\t-\tf\t0\n"
+        "@abisel\ttarget:str\top:str\n";
+    const char *base_cap =
+        "target\tsyscall_cap\thost_slot_cap\ttape_gap_cap\tnote\n"
+        "lnx/x86_64\t2\t2\t0\ttest\n"
+        "lnx/arm64\t2\t2\t0\ttest\n"
+        "osx/x86_64\t2\t2\t0\ttest\n"
+        "osx/arm64\t2\t2\t0\ttest\n"
+        "win/x86_64\t1\t2\t1\ttest\n"
+        "win/arm64\t1\t2\t0\ttest\n";
+    const char *tip_cap =
+        "target\tsyscall_cap\thost_slot_cap\ttape_gap_cap\tnote\n"
+        "lnx/x86_64\t3\t2\t0\ttest\n"
+        "lnx/arm64\t2\t2\t0\ttest\n"
+        "osx/x86_64\t2\t2\t0\ttest\n"
+        "osx/arm64\t2\t2\t0\ttest\n"
+        "win/x86_64\t1\t2\t1\ttest\n"
+        "win/arm64\t1\t2\t0\ttest\n";
+    const char *missing_cap =
+        "target\tsyscall_cap\thost_slot_cap\ttape_gap_cap\tnote\n"
+        "lnx/x86_64\t2\t2\t0\ttest\n";
+
+    if (cx_fmt(d, sizeof d, "%s/hs-selftest-%d", sy_tmpdir(), (int)sy_pid())) return 2;
+    sy_mkdir(d, 0700);
+    cx_fmt(p, sizeof p, "%s/exec", d); sy_mkdir(p, 0700);
+    cx_fmt(p, sizeof p, "%s/exec/facts", d); sy_mkdir(p, 0700);
+    cx_fmt(p, sizeof p, "%s/tools", d); sy_mkdir(p, 0700);
+    cx_fmt(p, sizeof p, "%s/tools/tape", d); sy_mkdir(p, 0700);
+    cx_fmt(p, sizeof p, "%s/tools/tape/facts", d); sy_mkdir(p, 0700);
+    cx_fmt(p, sizeof p, "%s/build", d); sy_mkdir(p, 0700);
+
+    cx_fmt(p, sizeof p, "%s/exec/facts/sys-syscalls.tsv", d); hs_write_file(p, base_sys);
+    cx_fmt(p, sizeof p, "%s/tools/tape/facts/hoststub-slots.tsv", d); hs_write_file(p, base_slots);
+    cx_fmt(p, sizeof p, "%s/exec/facts/lower-abi.tsv", d); hs_write_file(p, base_abi);
+    cx_fmt(p, sizeof p, "%s/build/host-surface-baseline.tsv", d); hs_write_file(p, base_cap);
+
+    /* Case 1: exact match passes */
+    rc = hs_check_root(d, 0, &nf, &nt);
+    if (rc == 0 && nf == 0 && nt == 0) passed++; else { failed++; fprintf(stderr, "host-surface: selftest-exact failed rc=%d nf=%d nt=%d\n", rc, nf, nt); }
+
+    /* Case 2: +1 syscall fails */
+    cx_fmt(p, sizeof p, "%s/exec/facts/sys-syscalls.tsv", d); hs_write_file(p, extra_sys);
+    rc = hs_check_root(d, 0, &nf, &nt);
+    if (rc == 1 && nf == 1) passed++; else { failed++; fprintf(stderr, "host-surface: selftest-syscall-grow failed rc=%d nf=%d\n", rc, nf); }
+    hs_write_file(p, base_sys);
+
+    /* Case 3: +1 frozen slot fails across all 6 targets */
+    cx_fmt(p, sizeof p, "%s/tools/tape/facts/hoststub-slots.tsv", d); hs_write_file(p, extra_slots);
+    rc = hs_check_root(d, 0, &nf, &nt);
+    if (rc == 1 && nf == 6) passed++; else { failed++; fprintf(stderr, "host-surface: selftest-slot-grow failed rc=%d nf=%d\n", rc, nf); }
+    hs_write_file(p, base_slots);
+
+    /* Case 4: +1 tape gap fails */
+    cx_fmt(p, sizeof p, "%s/exec/facts/lower-abi.tsv", d); hs_write_file(p, extra_abi);
+    rc = hs_check_root(d, 0, &nf, &nt);
+    if (rc == 1 && nf == 1) passed++; else { failed++; fprintf(stderr, "host-surface: selftest-gap-grow failed rc=%d nf=%d\n", rc, nf); }
+    hs_write_file(p, base_abi);
+
+    /* Case 5: actual < cap emits tip and passes */
+    cx_fmt(p, sizeof p, "%s/build/host-surface-baseline.tsv", d); hs_write_file(p, tip_cap);
+    rc = hs_check_root(d, 0, &nf, &nt);
+    if (rc == 0 && nf == 0 && nt == 1) passed++; else { failed++; fprintf(stderr, "host-surface: selftest-tip failed rc=%d nf=%d nt=%d\n", rc, nf, nt); }
+
+    /* Case 6: missing targets in baseline fails */
+    hs_write_file(p, missing_cap);
+    rc = hs_check_root(d, 0, &nf, &nt);
+    if (rc == 1) passed++; else { failed++; fprintf(stderr, "host-surface: selftest-missing-target failed rc=%d\n", rc); }
+
+    /* Cleanup */
+    cx_fmt(p, sizeof p, "%s/exec/facts/sys-syscalls.tsv", d); sy_unlink(p);
+    cx_fmt(p, sizeof p, "%s/tools/tape/facts/hoststub-slots.tsv", d); sy_unlink(p);
+    cx_fmt(p, sizeof p, "%s/exec/facts/lower-abi.tsv", d); sy_unlink(p);
+    cx_fmt(p, sizeof p, "%s/build/host-surface-baseline.tsv", d); sy_unlink(p);
+    cx_fmt(p, sizeof p, "%s/exec/facts", d); sy_rmdir(p);
+    cx_fmt(p, sizeof p, "%s/exec", d); sy_rmdir(p);
+    cx_fmt(p, sizeof p, "%s/tools/tape/facts", d); sy_rmdir(p);
+    cx_fmt(p, sizeof p, "%s/tools/tape", d); sy_rmdir(p);
+    cx_fmt(p, sizeof p, "%s/tools", d); sy_rmdir(p);
+    cx_fmt(p, sizeof p, "%s/build", d); sy_rmdir(p);
+    sy_rmdir(d);
+
+    printf("HOST_SURFACE_SELFTEST\tpassed=%d\tfailed=%d\n", passed, failed);
+    return failed ? 1 : 0;
+}
+
+int main(int argc, char **argv) {
+    const char *root = ".";
+    int mode_print = 0, mode_selftest = 0, i;
+    for (i = 1; i < argc; i++) {
+        if (tx_eqz(argv[i], "--check")) continue;
+        else if (tx_eqz(argv[i], "--print")) mode_print = 1;
+        else if (tx_eqz(argv[i], "--self-test")) mode_selftest = 1;
+        else if (tx_eqz(argv[i], "--root") && i + 1 < argc) root = argv[++i];
+        else {
+            fprintf(stderr, "usage: tools/check-host-surface.cx [--check|--print|--self-test] [--root DIR]\n");
+            return 2;
+        }
+    }
+    if (mode_selftest) return hs_selftest();
+    if (mode_print) {
+        HsActual act;
+        if (hs_measure(root, &act)) return 2;
+        printf("target\tsyscall_cap\thost_slot_cap\ttape_gap_cap\tnote\n");
+        for (i = 0; i < HS_NTARGET; i++) {
+            printf("%s\t%d\t%d\t%d\tv0.1.4 initial baseline\n", hs_targets[i], act.syscalls[i], act.host_slots, act.tape_gaps[i]);
+        }
+        return 0;
+    }
+    return hs_check_root(root, 1, 0, 0);
+}
