@@ -49,7 +49,8 @@ static int has_err(const char *s) { return result.err && strstr(result.err, s) !
 static char *dup_out(void) { size_t n = result.out ? strlen(result.out) : 0; char *p = mm_alloc(n + 1); if (p) { if (n && mm_copy(p, n + 1, result.out, n)) { mm_free(p); return 0; } p[n] = 0; } return p; }
 static int fixture(void) {
     char p[6000], *base;
-    if (cx_fmt(p, sizeof p, "%s/tests", root) || sy_mkdir_all(p, 0700)) return 2;
+    if (cx_fmt(p, sizeof p, "%s/tests", root) || sy_mkdir_all(p, 0700)
+        || cx_fmt(p, sizeof p, "%s/src", root) || sy_mkdir_all(p, 0700)) return 2;
     if (link_repo("tools") || link_repo("cx") || link_repo("ext") || link_repo("exec") || link_repo("cxroot.tsv") || link_repo("unisacc.com")) return 2;
     if (put("tests/run-batch.cx", "/* list-only fixture: never run */\nint main(void){return 2;}\n") || put("tests/a.cx","/* candidate preprocessor fixture */\nint main(void){return 0;}\n")
         || put("tests/d.cx", "/* candidate whole-product fixture */\nint main(void){return 0;}\n")
@@ -97,6 +98,40 @@ static int fixture(void) {
     ck(run_in(root, "--files", PP, 0, 0, 0) == 2 && has_err("BATCH_PRODUCT_INPUT_UNDECLARED\tid=d\tplaceholder={candidate}") && !tk_has(result.out, "AFFECTED"), "undeclared-refused");
     if (put(TABLE, unk)) return 2;
     ck(run_in(root, "--files", PP, 0, 0, 0) == 2 && has_err("BATCH_PRODUCT_INPUT_UNKNOWN\tid=ghost"), "unknown-id-refused");
+    /* (6) {unitcache-product} require rule: selects declared batch via=declared on src/host.cx and refuses undeclared consumer */
+    if (!put("tests/u.cx", "/* unitcache-product consumer fixture */\nint main(void){return 0;}\n")
+        && !put("src/host.cx", "/* host fixture */\nint host_stub(void){return 0;}\n")) {
+        char reg_u[4500], cov_u[2500], tbl_u_ok[2500], tbl_u_miss[2500];
+        if (!cx_fmt(reg_u, sizeof reg_u, "%s%s%s%s%s%s", rh,
+              "a\tIMPLEMENTED\tcontract\ttests/a.cx\tSOURCE\tlnx/x86_64\t10\t-\ttests/a.cx\t{root};{candidate};{out}\tfixture.a\trc0:A\tproduct\tdaily\n",
+              "b\tIMPLEMENTED\tinterfaces\ttests/b.cx\tSOURCE\tlnx/x86_64\t10\t-\ttests/b.cx\t-\tfixture.b\trc0:B\tproduct\tdaily\n",
+              "c\tIMPLEMENTED\tinterfaces\ttests/c.cx\tSOURCE\tlnx/x86_64\t10\t-\ttests/c.cx\t{root};{out}\tfixture.c\trc0:C\tproduct\tdaily\n",
+              "d\tIMPLEMENTED\tcontract\ttests/d.cx\tSOURCE\tlnx/x86_64\t10\t-\ttests/d.cx\t{root};{candidate};{out}\tfixture.d\trc0:D\tproduct\tdaily\n",
+              "u\tIMPLEMENTED\tproduct\ttests/u.cx\tSOURCE\tlnx/x86_64\t10\tunitcache-product\ttests/u.cx\t{unitcache-product}\tfixture.u\trc0:U\tproduct\tdaily\n")
+            && !cx_fmt(cov_u, sizeof cov_u, "%s%s%s%s%s%s", ch,
+              "fixture.a\tcontract\tIMPLEMENTED_SEPARATE_BATCH\tfixture a\ttests/a.cx\n",
+              "fixture.b\tinterfaces\tIMPLEMENTED_SEPARATE_BATCH\tfixture b\ttests/b.cx\n",
+              "fixture.c\tinterfaces\tIMPLEMENTED_SEPARATE_BATCH\tfixture c\ttests/c.cx\n",
+              "fixture.d\tcontract\tIMPLEMENTED_SEPARATE_BATCH\tfixture d\ttests/d.cx\n",
+              "fixture.u\tproduct\tIMPLEMENTED_SEPARATE_BATCH\tfixture u\ttests/u.cx\n")
+            && !cx_fmt(tbl_u_ok, sizeof tbl_u_ok, "%s%s%s%s%s%s%s", head, req,
+              "require\t{unitcache-product}\t-\tunitcache-product consumer\n",
+              ra, rd, rc, "id\tu\tsrc/host.cx,src/runcache.cx\tunitcache fixture\n")
+            && !cx_fmt(tbl_u_miss, sizeof tbl_u_miss, "%s%s%s%s%s%s", head, req,
+              "require\t{unitcache-product}\t-\tunitcache-product consumer\n",
+              ra, rd, rc)
+            && !put("tests/batches.tsv", reg_u) && !put("tests/coverage.tsv", cov_u)) {
+            if (!put(TABLE, tbl_u_ok))
+                ck(run_in(root, "--files", "src/host.cx", "--plan", 0, 0) == 0
+                   && tk_has(result.out, "AFFECTED\tu\t")
+                   && tk_has(result.out, "\tvia=declared\treason=declared:src/host.cx"),
+                   "unitcache-product-declared-hit");
+            if (!put(TABLE, tbl_u_miss))
+                ck(run_in(root, "--files", "src/host.cx", 0, 0, 0) == 2
+                   && has_err("BATCH_PRODUCT_INPUT_UNDECLARED\tid=u\tplaceholder={unitcache-product}"),
+                   "unitcache-product-undeclared-refused");
+        }
+    }
     mm_free(base);
     return 0;
 }
@@ -124,6 +159,98 @@ static int real(void) {
       }
       free(r);
       ck(ok && seen > 0 && !miss, "real-pp-batches-selected");
+    }
+    { /* unit-frontcache-* (12 daily + 1 commit split guard = 13 siblings) and run-warm (14th id row):
+         Layer 1: explicit declaration presence in tests/batch-product-inputs.tsv for all 7 product paths across all 12 unit-frontcache-* rows, plus run-warm and unit-frontcache-equiv3-split.
+         Layer 2: real affected.cx selection on src/host.cx:
+                  - all 12 unit-frontcache-* + run-warm are selected; run-warm (whose check-run-warm.cx has no tests/batches.tsv literal edge) hits via=declared:src/host.cx and is dropped under --no-product-inputs;
+                  - at --tier commit on src/host.cx, 0 of the 13 daily rows leak into commit tier;
+                  - on tools/check-unit-frontcache.cx edit, default tier selects all 13 siblings (12 daily + 1 split), while --tier commit selects only unit-frontcache-equiv3-split. */
+      static const char *uf_daily[] = {
+          "unit-frontcache-equiv0", "unit-frontcache-equiv1", "unit-frontcache-equiv2",
+          "unit-frontcache-equiv3", "unit-frontcache-equiv3b", "unit-frontcache-equiv4",
+          "unit-frontcache-neg", "unit-frontcache-race", "unit-frontcache-stderr",
+          "unit-frontcache-switch", "unit-frontcache-concurrent", "unit-frontcache-budget",
+          "run-warm", 0
+      };
+      static const char *decl7[] = {
+          "src/runcache.cx", "src/host.cx", "src/drive.cx", "cx/compiler/cxscratch.cx",
+          "cx/runtime/rcident.cx", "src/driveplan.cx", "cx/sys/proc.cx", 0
+      };
+      int pi, i;
+      /* Layer 1: verify all 12 unit-frontcache-* rows explicitly list all 7 paths, plus run-warm and unit-frontcache-equiv3-split exist. */
+      {
+          size_t tn; char *tb = cx_read(TABLE, &tn);
+          int dmiss = 0;
+          if (!tb) return 2;
+          if (!strstr(tb, "\nrequire\t{unitcache-product}\t-\t")) dmiss++;
+          if (!strstr(tb, "\nid\tunit-frontcache-equiv3-split\ttools/check-unit-frontcache.cx,tests/batches.tsv\t")) dmiss++;
+          if (!strstr(tb, "\nid\trun-warm\tsrc/runcache.cx,src/host.cx,src/drive.cx,cx/runtime/rcident.cx,")) dmiss++;
+          for (i = 0; i < 12; i++) {
+              char row_pfx[200]; char *pos;
+              if (cx_fmt(row_pfx, sizeof row_pfx, "\nid\t%s\t", uf_daily[i])) { free(tb); return 2; }
+              pos = strstr(tb, row_pfx);
+              if (!pos) { dmiss++; fprintf(stderr, "UF_DECL_ROW_MISSING %s\n", uf_daily[i]); continue; }
+              char *eol = strchr(pos + 1, '\n');
+              if (eol) *eol = 0;
+              for (pi = 0; decl7[pi]; pi++) {
+                  if (!strstr(pos + 1, decl7[pi])) {
+                      dmiss++; fprintf(stderr, "UF_DECL_PATH_MISSING %s %s\n", uf_daily[i], decl7[pi]);
+                  }
+              }
+              if (eol) *eol = '\n';
+          }
+          free(tb);
+          ck(!dmiss, "real-unit-frontcache-explicit-7-decls-present");
+      }
+      /* Layer 2a: on src/host.cx at --tier daily, all 13 daily rows are selected and run-warm hits via=declared:src/host.cx. */
+      {
+          int rc_h = run_in(repo, "--files", "src/host.cx", "--tier", "daily", "--plan");
+          int miss_h = 0;
+          for (i = 0; i < 13; i++) {
+              char want[200];
+              if (cx_fmt(want, sizeof want, "AFFECTED\t%s\twhy=src/host.cx\t", uf_daily[i]) || !tk_has(result.out, want)) {
+                  miss_h++; fprintf(stderr, "UF_HOST_MISSING %s\n", uf_daily[i]);
+              }
+          }
+          if (!tk_has(result.out, "AFFECTED\trun-warm\twhy=src/host.cx\tvia=declared\treason=declared:")) {
+              miss_h++; fprintf(stderr, "UF_RUNWARM_DECLARED_MISSING\n");
+          }
+          ck(rc_h == 0 && !miss_h, "real-unit-frontcache-host-selected-and-runwarm-declared");
+      }
+      /* Layer 2b: diff proof on src/host.cx: disabling product-inputs drops run-warm (no use/literal masking). */
+      {
+          int rc_no = run_in(repo, "--files", "src/host.cx", "--no-product-inputs", 0, 0);
+          ck(rc_no == 0 && !tk_has(result.out, "AFFECTED\trun-warm\t"), "real-run-warm-host-declared-only-diff");
+      }
+      /* Layer 2c: at --tier commit on src/host.cx, 0 of the 13 daily rows leak into commit tier. */
+      {
+          int rc_c = run_in(repo, "--files", "src/host.cx", "--tier", "commit", "--plan");
+          int leak_c = 0;
+          for (i = 0; i < 13; i++) {
+              char want[200];
+              if (cx_fmt(want, sizeof want, "AFFECTED\t%s\t", uf_daily[i]) || tk_has(result.out, want)) {
+                  leak_c++; fprintf(stderr, "UF_COMMIT_LEAK %s\n", uf_daily[i]);
+              }
+          }
+          ck(rc_c == 0 && !leak_c, "real-unit-frontcache-product-commit-boundary");
+      }
+      /* Layer 2d: tools/check-unit-frontcache.cx edit: default selects all 13 siblings, commit selects only split. */
+      int rc_t = run_in(repo, "--files", "tools/check-unit-frontcache.cx", "--plan", 0, 0);
+      int miss_all = 0;
+      for (i = 0; i < 12; i++) {
+          char want[200];
+          if (cx_fmt(want, sizeof want, "AFFECTED\t%s\t", uf_daily[i]) || !tk_has(result.out, want)) miss_all++;
+      }
+      if (!tk_has(result.out, "AFFECTED\tunit-frontcache-equiv3-split\t")) miss_all++;
+      ck(rc_t == 0 && !miss_all, "real-unit-frontcache-13-siblings-on-check-edit");
+      int rc_tc = run_in(repo, "--files", "tools/check-unit-frontcache.cx", "--tier", "commit", "--plan");
+      int leak_tc = !tk_has(result.out, "AFFECTED\tunit-frontcache-equiv3-split\t");
+      for (i = 0; i < 12; i++) {
+          char want[200];
+          if (cx_fmt(want, sizeof want, "AFFECTED\t%s\t", uf_daily[i]) || tk_has(result.out, want)) leak_tc++;
+      }
+      ck(rc_tc == 0 && !leak_tc, "real-unit-frontcache-check-edit-commit-only-split");
     }
     printf("REAL_COUNTS\tunchanged=%d\tdeclared=%d\n", nb, nn);
     mm_free(base);
