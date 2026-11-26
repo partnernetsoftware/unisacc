@@ -2301,6 +2301,31 @@ static int cr_build_ident_helper(const char *repo, const char *out_path, char sr
     return 0;
 }
 
+static int cr_pin_ident_helper_dir(const char *ih_path) {
+    const char *home = sy_env("HOME");
+    char managed[4400], dir[4400], pin[4400], tmp[4400];
+    if (!home || !home[0] || !ih_path || !ih_path[0]) return 0;
+    if (cx_fmt(managed, sizeof managed, "%s/.cache/unisacc/ident-helper", home)) return -1;
+    tx_copy(dir, sizeof dir, ih_path, tx_len(ih_path, sizeof dir));
+    long n = tx_len(dir, sizeof dir);
+    while (n > 0 && dir[n - 1] != '/') n--;
+    if (n <= 1) return 0;
+    dir[n - 1] = 0;
+    if (!tx_eqz(dir, managed)) return 0;
+    if (sy_mkdir_all(dir, 0755) != 0) return -1;
+    if (cx_fmt(pin, sizeof pin, "%s/.no-purge", dir) ||
+        cx_fmt(tmp, sizeof tmp, "%s/.no-purge.tmp.%d", dir, sy_pid())) return -1;
+    if (sy_write_file(tmp, "ident-helper\n", 13, 0644) != 0) {
+        sy_unlink(tmp);
+        return -1;
+    }
+    if (sy_rename(tmp, pin) != 0) {
+        sy_unlink(tmp);
+        return -1;
+    }
+    return 0;
+}
+
 static int cmd_prepare_helper(const char *repo, const char *helper_out) {
     long t0 = sy_now_ms();
     char ih_path[4400], src_sha[65], bin_sha[65];
@@ -2314,6 +2339,14 @@ static int cmd_prepare_helper(const char *repo, const char *helper_out) {
             return 1;
         }
         printf("CHAIN_READY_PREPARE_HELPER\tstatus=FAIL\treason=%s\n", err_why ? err_why : "helper-path-failed");
+        return 2;
+    }
+    if (cr_pin_ident_helper_dir(ih_path) != 0) {
+        printf("CHAIN_READY_PREPARE_HELPER\tstatus=FAIL\treason=pin-write-failed\tpath=%s\n", ih_path);
+        return 2;
+    }
+    if (cr_pin_ident_helper_dir(ih_path) != 0) {
+        printf("CHAIN_READY_PREPARE\tstatus=FAIL\tstep=ident-helper\treason=pin-write-failed\tpath=%s\n", ih_path);
         return 2;
     }
     if (cr_build_ident_helper(repo, ih_path, src_sha, bin_sha, &rebuilt)) {
@@ -2356,6 +2389,14 @@ static int cmd_prepare(const char *repo, const char *helper_out) {
     const char *err_why = 0;
     if (cr_resolve_target_helper_path(helper_out, ih_path, sizeof ih_path, &err_why) != 0) {
         printf("CHAIN_READY_PREPARE\tstatus=FAIL\tstep=ident-helper\treason=%s\n", err_why ? err_why : "no-HOME-for-helper");
+        return 2;
+    }
+    if (cr_pin_ident_helper_dir(ih_path) != 0) {
+        printf("CHAIN_READY_PREPARE_HELPER\tstatus=FAIL\treason=pin-write-failed\tpath=%s\n", ih_path);
+        return 2;
+    }
+    if (cr_pin_ident_helper_dir(ih_path) != 0) {
+        printf("CHAIN_READY_PREPARE\tstatus=FAIL\tstep=ident-helper\treason=pin-write-failed\tpath=%s\n", ih_path);
         return 2;
     }
     if (cr_build_ident_helper(repo, ih_path, src_sha, bin_sha, &rebuilt)) {
