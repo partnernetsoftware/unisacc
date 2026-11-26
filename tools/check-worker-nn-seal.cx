@@ -1,0 +1,198 @@
+/* tools/check-worker-nn-seal.cx -- lexical-stripped worker template NN boot+seal check.
+ * Covered: lexical-strip (comments + strings), order (pm_open < cxn_boot < cxn_seal),
+ * and no_ext literal 1 (recognizes only call forms without whitespace: pm_open(/cxn_boot(/cxn_seal().
+ * UNCOVERED: control-flow-reachability, consumer-call-order, e2e-runtime, pm-open-call-forms-with-whitespace.
+ * --e2e is UNIMPLEMENTED and explicitly refuses with rc=2. */
+#pragma unisa use sys.fs
+#pragma unisa use sys.io
+#pragma unisa use sys.proc
+#pragma unisa use sys.posix
+
+static int ends_with(const char *s, const char *suf) {
+    size_t ls = strlen(s), lf = strlen(suf);
+    return ls >= lf && strcmp(s + ls - lf, suf) == 0;
+}
+
+/* Strip C comments and string/char literals while preserving newlines. */
+static void strip_c_lex(const char *in, long n, char *out) {
+    long i = 0;
+    int st = 0; /* 0=code, 1=line_cmt, 2=blk_cmt, 3=str, 4=chr */
+    while (i < n) {
+        char c = in[i], nx = (i + 1 < n) ? in[i + 1] : 0;
+        if (st == 0) {
+            if (c == '/' && nx == '/') { out[i++] = ' '; out[i++] = ' '; st = 1; continue; }
+            if (c == '/' && nx == '*') { out[i++] = ' '; out[i++] = ' '; st = 2; continue; }
+            if (c == '"') { out[i++] = ' '; st = 3; continue; }
+            if (c == '\'') { out[i++] = ' '; st = 4; continue; }
+            out[i++] = c;
+        } else if (st == 1) {
+            if (c == '\n') { out[i++] = '\n'; st = 0; } else { out[i++] = ' '; }
+        } else if (st == 2) {
+            if (c == '*' && nx == '/') { out[i++] = ' '; out[i++] = ' '; st = 0; }
+            else { out[i++] = (c == '\n') ? '\n' : ' '; }
+        } else if (st == 3) {
+            if (c == '\\' && i + 1 < n) { out[i++] = ' '; out[i++] = (nx == '\n') ? '\n' : ' '; }
+            else if (c == '"') { out[i++] = ' '; st = 0; }
+            else { out[i++] = (c == '\n') ? '\n' : ' '; }
+        } else {
+            if (c == '\\' && i + 1 < n) { out[i++] = ' '; out[i++] = (nx == '\n') ? '\n' : ' '; }
+            else if (c == '\'') { out[i++] = ' '; st = 0; }
+            else { out[i++] = (c == '\n') ? '\n' : ' '; }
+        }
+    }
+    out[n] = 0;
+}
+
+static int line_at(const char *s, long off) {
+    int l = 1;
+    for (long i = 0; i < off; i++) if (s[i] == '\n') l++;
+    return l;
+}
+
+static int is_extern_line(const char *s, long off) {
+    long i = off;
+    while (i > 0 && s[i - 1] != '\n') i--;
+    while (s[i] == ' ' || s[i] == '\t') i++;
+    return strncmp(s + i, "extern ", 7) == 0;
+}
+
+static int check_boot_no_ext_one(const char *s, long off) {
+    const char *p = s + off + 9; /* after "cxn_boot(" */
+    const char *c1 = strchr(p, ',');
+    if (!c1) return 0;
+    p = c1 + 1;
+    while (*p == ' ' || *p == '\t' || *p == '\n') p++;
+    if (p[0] != '1') return 0;
+    p++;
+    while (*p == ' ' || *p == '\t' || *p == '\n') p++;
+    return p[0] == ',';
+}
+
+static int check_template_buf(const char *path, const char *raw, long n, int quiet) {
+    char *clean = (char *)malloc((size_t)n + 1);
+    if (!clean) return 1;
+    strip_c_lex(raw, n, clean);
+
+    long pm_offs[64];
+    int npm = 0;
+    long p = 0;
+    while (p < n && npm < 64) {
+        const char *hit = strstr(clean + p, "pm_open(");
+        if (!hit) break;
+        long off = (long)(hit - clean);
+        if (!is_extern_line(clean, off)) pm_offs[npm++] = off;
+        p = off + 8;
+    }
+    if (npm == 0) { free(clean); return 0; }
+
+    int bad = 0;
+    long first_boot = -1, first_seal = -1;
+    for (int k = 0; k < npm; k++) {
+        long lo = pm_offs[k], hi = (k + 1 < npm) ? pm_offs[k + 1] : n;
+        long b_off = -1, s_off = -1;
+        int bad_noext = 0;
+        p = lo;
+        while (p < hi) {
+            const char *hit = strstr(clean + p, "cxn_boot(");
+            if (!hit) break;
+            long off = (long)(hit - clean);
+            if (off >= hi) break;
+            if (!is_extern_line(clean, off)) {
+                if (b_off < 0) b_off = off;
+                if (!check_boot_no_ext_one(clean, off)) bad_noext = 1;
+            }
+            p = off + 9;
+        }
+        p = lo;
+        while (p < hi) {
+            const char *hit = strstr(clean + p, "cxn_seal(");
+            if (!hit) break;
+            long off = (long)(hit - clean);
+            if (off >= hi) break;
+            if (!is_extern_line(clean, off) && s_off < 0) s_off = off;
+            p = off + 9;
+        }
+        if (k == 0) { first_boot = b_off; first_seal = s_off; }
+        if (b_off < 0) { if (!quiet) printf("CHECK_WORKER_NN_SEAL_FAIL file=%s pm_idx=%d reason=missing-cxn_boot\n", path, k); bad = 1; }
+        if (bad_noext) { if (!quiet) printf("CHECK_WORKER_NN_SEAL_FAIL file=%s pm_idx=%d reason=bad-no_ext\n", path, k); bad = 1; }
+        if (s_off < 0) { if (!quiet) printf("CHECK_WORKER_NN_SEAL_FAIL file=%s pm_idx=%d reason=missing-cxn_seal\n", path, k); bad = 1; }
+        if (b_off >= 0 && s_off >= 0 && s_off < b_off) { if (!quiet) printf("CHECK_WORKER_NN_SEAL_FAIL file=%s pm_idx=%d reason=seal-before-boot\n", path, k); bad = 1; }
+    }
+
+    if (!bad && !quiet) {
+        printf("CHECK_WORKER_NN_SEAL_PASS file=%s pm_line=%d boot_line=%d seal_line=%d\n",
+               path, line_at(clean, pm_offs[0]), line_at(clean, first_boot), line_at(clean, first_seal));
+    }
+    free(clean);
+    return bad;
+}
+
+static int check_template_file(const char *path, int quiet) {
+    unsigned char *raw = 0; int64_t n = 0;
+    if (sy_read_file(path, &raw, &n, 2 << 20) != 0 || !raw) {
+        if (!quiet) printf("CHECK_WORKER_NN_SEAL_FAIL file=%s reason=read-failed\n", path);
+        return 1;
+    }
+    int rc = check_template_buf(path, (const char *)raw, (long)n, quiet);
+    free(raw);
+    return rc;
+}
+
+static void scan_dir_rec(const char *dir, int *checked, int *failed) {
+    sy_dir_t d;
+    if (sy_dir_open(&d, dir) != 0) { (*failed)++; return; }
+    while (sy_dir_next(&d) == 1) {
+        char path[512];
+        sy_stat_t st;
+        if (strcmp(d.name, ".") == 0 || strcmp(d.name, "..") == 0) continue;
+        if (cx_fmt(path, sizeof path, "%s/%s", dir, d.name)) { (*failed)++; break; }
+        if (sy_lstat(path, &st) == 0 && st.kind == 'd') {
+            scan_dir_rec(path, checked, failed);
+        } else if (ends_with(d.name, ".cx.in")) {
+            (*checked)++;
+            *failed += check_template_file(path, 0);
+        }
+    }
+    sy_dir_close(&d);
+}
+
+static int run_mutants(void) {
+    int killed = 0;
+    const char *m_del = "int main(void){ pm_open(0,0,0,0); cxn_boot(0,1,0,0,0); return 0; }\n";
+    const char *m_ord = "int main(void){ pm_open(0,0,0,0); cxn_seal(); cxn_boot(0,1,0,0,0); return 0; }\n";
+    const char *m_ne0 = "int main(void){ pm_open(0,0,0,0); cxn_boot(0,0,0,0,0); cxn_seal(); return 0; }\n";
+    const char *m_2nd = "int main(void){ pm_open(0,0,0,0); cxn_boot(0,1,0,0,0); cxn_seal(); cxn_boot(0,0,0,0,0); return 0; }\n";
+    const char *m_str = "int main(void){ pm_open(0,0,0,0); const char *s=\"cxn_boot(0,1,0,0,0); cxn_seal();\"; return 0; }\n";
+    const char *m_cmt = "int main(void){ pm_open(0,0,0,0); /* cxn_boot(0,1,0,0,0); cxn_seal(); */ return 0; }\n";
+    const char *m_exp = "int main(void){ pm_open(0,0,0,0); cxn_boot(0,1-1,0,0,0); cxn_seal(); return 0; }\n";
+    const char *m_2pm = "int main(void){ pm_open(0,0,0,0); cxn_boot(0,1,0,0,0); cxn_seal(); pm_open(0,0,0,0); return 0; }\n";
+    killed += (check_template_buf("mut-del", m_del, (long)strlen(m_del), 1) != 0);
+    killed += (check_template_buf("mut-ord", m_ord, (long)strlen(m_ord), 1) != 0);
+    killed += (check_template_buf("mut-ne0", m_ne0, (long)strlen(m_ne0), 1) != 0);
+    killed += (check_template_buf("mut-2nd", m_2nd, (long)strlen(m_2nd), 1) != 0);
+    killed += (check_template_buf("mut-str", m_str, (long)strlen(m_str), 1) != 0);
+    killed += (check_template_buf("mut-cmt", m_cmt, (long)strlen(m_cmt), 1) != 0);
+    killed += (check_template_buf("mut-exp", m_exp, (long)strlen(m_exp), 1) != 0);
+    killed += (check_template_buf("mut-2pm", m_2pm, (long)strlen(m_2pm), 1) != 0);
+    return killed;
+}
+
+int main(int argc, char **argv) {
+    const char *dir = "tools/templates";
+    int checked = 0, failed = 0, mut_killed = 0;
+    for (int i = 1; i < argc; i++) {
+        if (strcmp(argv[i], "--e2e") == 0) {
+            printf("CHECK_WORKER_NN_SEAL_E2E status=UNIMPLEMENTED\n");
+            return 2;
+        } else if (strcmp(argv[i], "--dir") == 0 && i + 1 < argc) {
+            dir = argv[++i];
+        }
+    }
+    scan_dir_rec(dir, &checked, &failed);
+    mut_killed = run_mutants();
+    if (mut_killed != 8) failed += (8 - mut_killed);
+    printf("CHECK_WORKER_NN_SEAL_UNCOVERED items=control-flow-reachability,consumer-call-order,e2e-runtime,pm-open-call-forms-with-whitespace\n");
+    printf("CHECK_WORKER_NN_SEAL\tpassed=%d\tfailed=%d\tchecked=%d\tmut_killed=%d\n",
+           checked + mut_killed - failed, failed, checked, mut_killed);
+    return failed == 0 ? 0 : 1;
+}
