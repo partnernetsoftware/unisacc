@@ -1064,7 +1064,8 @@ static void gate_assets(void) {
     if (rcand_verify(&cand, layout, 7, why, sizeof why)) refuse("ASSETS", why);
     cx_fmt(p, sizeof p, "%s/%s", layout, cand.name[6]); sha_file(p, hex);
     if (!tx_eqz(hex, cand.sha[6])) refuse("ASSETS", "SHA256SUMS sha differs from candidate");
-    gate_pass("ASSETS", "six assets equal candidate sha256");
+    if (cand.extra_n == 0) gate_pass("ASSETS", "six assets equal candidate sha256");
+    else { char msg[96]; cx_fmt(msg, sizeof msg, "%d assets equal candidate sha256", rcand_upload_count(&cand)); gate_pass("ASSETS", msg); }
 }
 /* SHA256SUMS text vs files in dir: every listed line must hash equal; returns count or -1 */
 static int sums_check(const char *dir, const char *sums, long sn, char *bad, long cap) {
@@ -1089,18 +1090,22 @@ static int evidence_readback_ok(const char *leaf, int need_public) {
         char want[120]; cx_fmt(want, sizeof want, "READBACK_SHA %s %s", cand.name[0], cand.sha[0]);
         ok = has(t, n, "rc=0") && has(t, n, "\"isDraft\":false") && has(t, n, want) && !has(t, n, " FAIL");
     } else {
-        int i, k = 0;
+        int i, k = 0, want = rcand_sums_count(&cand);
         for (i = 0; i < 6; i++) {
             char w[300]; if (rcand_skip(&cand, i)) continue;
             cx_fmt(w, sizeof w, "%s: OK", cand.name[i]); if (has(t, n, w)) k++;
         }
-        ok = k == 5 && !has(t, n, "FAILED");
+        for (i = 0; i < cand.extra_n; i++) {
+            char w[300];
+            cx_fmt(w, sizeof w, "%s: OK", cand.extra_name[i]); if (has(t, n, w)) k++;
+        }
+        ok = k == want && !has(t, n, "FAILED");
     }
     free(t);
     return ok;
 }
 static void draft_readback(void) {
-    char tmp[4500], p[4800], bad[300], line[512]; long sn; char *s; int k, i;
+    char tmp[4500], p[4800], bad[300], line[512]; long sn; char *s; int k, i, want = rcand_sums_count(&cand);
     char *v[] = {"gh", "-R", REPO, "release", "download", cand.tag, "-D", tmp, "--clobber", 0};
     if (cx_fmt(tmp, sizeof tmp, "%s/draft-download", outdir)) die("path");
     if (dry) {
@@ -1115,16 +1120,25 @@ static void draft_readback(void) {
     if (act(v, 55, 0, 0)) refuse("DRAFT_READBACK", "gh release download failed");
     if (cx_fmt(p, sizeof p, "%s/SHA256SUMS", tmp) || !(s = slurp(p, &sn))) refuse("DRAFT_READBACK", "SHA256SUMS not downloaded");
     k = sums_check(tmp, s, sn, bad, sizeof bad);
-    if (k != 5) { free(s); refuse("DRAFT_READBACK", k < 0 ? bad : "SHA256SUMS does not list five assets"); }
+    if (k != want) {
+        char msg[128];
+        free(s);
+        if (k < 0) refuse("DRAFT_READBACK", bad);
+        if (want == 5) refuse("DRAFT_READBACK", "SHA256SUMS does not list five assets");
+        cx_fmt(msg, sizeof msg, "SHA256SUMS listed %d assets, expected %d", k, want);
+        refuse("DRAFT_READBACK", msg);
+    }
     { np_buf b = {0}; now_text();
       cx_fmt(line, sizeof line, "# draft %s download %s via gh release download (release-exec)\n", cand.tag, timebuf); np_puts(&b, line);
       for (i = 0; i < 6; i++) { if (rcand_skip(&cand, i)) continue; cx_fmt(line, sizeof line, "%s: OK\n", cand.name[i]); np_puts(&b, line); }
+      for (i = 0; i < cand.extra_n; i++) { cx_fmt(line, sizeof line, "%s: OK\n", cand.extra_name[i]); np_puts(&b, line); }
       np_put(&b, s, (size_t)sn);
       cx_fmt(p, sizeof p, "%s/draft-readback.txt", evdir);
       if (cx_write(p, b.p, b.n)) die("draft evidence write");
       free(b.p); }
     free(s);
-    gate_pass("DRAFT_READBACK", "five assets match downloaded SHA256SUMS");
+    if (want == 5) gate_pass("DRAFT_READBACK", "five assets match downloaded SHA256SUMS");
+    else { cx_fmt(line, sizeof line, "%d assets match downloaded SHA256SUMS", want); gate_pass("DRAFT_READBACK", line); }
     index_row("draft-readback", "PASS", "draft-readback.txt", "gh release download, SHA256SUMS OK");
 }
 /* 0 none, 1 draft, 2 public; -1 not queried (dry) */
@@ -1140,10 +1154,11 @@ static int release_state(void) {
 }
 static void step_draft(void) {
     int st, i, n = 0, ev;
-    char files[7][4500]; char *up[20];
+    char files[11][4500]; char *up[24];
     char *cr[] = {"gh", "-R", REPO, "release", "create", cand.tag, "--draft", "--title", cand.version, "--target", cand.commit, 0};
     up[n++] = "gh"; up[n++] = "-R"; up[n++] = REPO; up[n++] = "release"; up[n++] = "upload"; up[n++] = cand.tag;
     for (i = 0; i < 7; i++) { if (rcand_skip(&cand, i)) continue; cx_fmt(files[i], sizeof files[i], "%s/%s", layout, cand.name[i]); up[n++] = files[i]; }
+    for (i = 0; i < cand.extra_n; i++) { cx_fmt(files[7 + i], sizeof files[7 + i], "%s/%s", layout, cand.extra_name[i]); up[n++] = files[7 + i]; }
     up[n++] = "--clobber"; up[n] = 0;
     if (!(dry && xsha[0] == '{') && !pushed(xsha)) refuse("X_PUSHED", "X not pushed");
     gate_assets();
