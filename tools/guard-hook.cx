@@ -10,6 +10,12 @@
  *                $HOME/.cache/unisacc/devsvc/native-fallback 的 mtime 在 30 分钟内则放行(mtime 精度为秒)。
  *   写域占用     Edit/Write 且设 UNISACC_AGENT 时,查 $UNISACC_DOMAINS(缺省 $HOME/.cache/unisacc/domains.tsv,
  *                列 agent 前缀 到期秒 ...),仓内路径被他人未过期前缀占用则拒绝。
+ *   SEND-GATE-MIN 纯无状态 PreToolUse 发信内容闸(零租约/限流写盘、零 CLI 子命令、零子进程、零跨仓依赖,仅审 Bash 中 mux/bin/envelope):
+ *                - BROADCAST-IDLE: 拦 mux broadcast/@all 含待命状态词、单次逗号收件人 >2(TARGET-CAP)或同命令串接 >2 次发信;
+ *                - PAUSE-FORM: 拦无交付物路径/无 7+ 位 hex SHA/无结构化表/无 [暂停-需裁决] 标签的裸待命/裸状态汇报;
+ *                - EMPTY-BODY: 拦空或全空白正文及缺失/不可读 --body-file/@file(跳过 --help/-h/--dry-run);
+ *                - BRANCH-NAME: 拦正文/标题中显式建切的不规范分支名(允许 main/v0.N.M/devsvc*);
+ *                - 逃生口: 环境变量 MUX_URGENT=<非空理由> 放行 BROADCAST-IDLE 与 PAUSE-FORM。
  *   GUARD-EDIT-V1 Bash 命令:写仓库根 out/、git clone/worktree add(版本工作树除外)、mkdir 工作目录、
  *                git stash/clean/reset --hard/checkout --/restore ./--no-verify/--autostash、python/bun/node/perl/ruby 作命令、
  *                sed -i、perl -i、awk -i inplace、ex/ed/vi/vim/nvim、tee、重定向写仓内,sh -c 正文递归一层,python -c open 写。
@@ -391,7 +397,7 @@ static char *check_seg(char *t, char **curp) {
             if (!hook) return fmt("%s 作命令:不得用 python/bun/node/perl/ruby 写脚本,请用 sh ./unisacc.com FILE.cx -- ARGS 写 .cx", first, 0);
         }
     }
-    if (eq(first, "git") || eq(first, "gh") || eq(first, "mux")) return 0;
+    if (eq(first, "git") || eq(first, "gh")) return 0;
     {
         char **args = w + k + 1; long na = nw - k - 1; int any = 0;
         if (na < 0) na = 0;
@@ -547,6 +553,8 @@ static int bout(const char *cmd) {
     return 0;
 }
 
+static char *sgm_check_mux_cmd(const char *cmd, const char *cwd);
+
 static char *check(const char *cmd, const char *cwd, int depth) {
     char *s = strip_bodies(cmd), *cur = sdup(*cwd ? cwd : REPO);
     long n = sl(s), i = 0, st = 0;
@@ -569,7 +577,520 @@ static char *check(const char *cmd, const char *cwd, int depth) {
     if (depth < 1) { char *r = shc(cmd, cur); if (r) return r; }
     if (py_c(cmd) && open_w(cmd) && !has(cmd, "/tmp/") && !bout(cmd) && !has(cmd, "cc-work") && !has(cmd, "CLAUDE_JOB_DIR"))
         return sdup("python -c open(...,'w') 写文件");
+    if (depth == 0) {
+        char *sg = sgm_check_mux_cmd(cmd, *cwd ? cwd : REPO);
+        if (sg) return sg;
+    }
     return 0;
+}
+
+/* ===== SEND-GATE-MIN: pure stateless PreToolUse content & target-cap gates (zero state files, zero child procs) ===== */
+static const char *sgm_base(const char *p) {
+    const char *r = p;
+    for (; *p; p++) if (*p == '/') r = p + 1;
+    return r;
+}
+static int sgm_is_mux_cmd(const char *b) { return eq(b, "mux") || eq(b, "mux-bun") || eq(b, "mux-rust"); }
+static int sgm_is_sh_cmd(const char *b) { return eq(b, "sh") || eq(b, "bash") || eq(b, "zsh") || eq(b, "dash"); }
+static int sgm_is_sh_c_flag(const char *a) {
+    long i = 1;
+    if (!a || a[0] != '-') return 0;
+    while (a[i] >= 'a' && a[i] <= 'z') i++;
+    return i > 1 && a[i] == 0 && a[i - 1] == 'c';
+}
+static int sgm_is_env_assign(const char *x) {
+    long i = 0;
+    if (!x || !(isal(x[0]) || x[0] == '_')) return 0;
+    while (x[i] && (iswd(x[i]))) i++;
+    return x[i] == '=';
+}
+static char *sgm_fold_line_cont(const char *cmd) {
+    long n = sl(cmd), i = 0, o = 0;
+    char *s = (char *)mm_alloc(n + 2);
+    while (i < n) {
+        if (cmd[i] == '\\' && i + 1 < n && cmd[i + 1] == '\n') { i += 2; continue; }
+        if (cmd[i] == '\\' && i + 2 < n && cmd[i + 1] == '\r' && cmd[i + 2] == '\n') { i += 3; continue; }
+        s[o++] = cmd[i++];
+    }
+    s[o] = 0;
+    return s;
+}
+static char *sgm_strip_heredocs(const char *cmd0) {
+    const char *cmd = sgm_fold_line_cont(cmd0);
+    long n = sl(cmd), i = 0, o = 0;
+    char *end = 0, *s = (char *)mm_alloc(n + 2);
+    while (i <= n) {
+        long e = i, j, a, b;
+        while (e < n && cmd[e] != '\n') e++;
+        if (end) {
+            a = i; b = e;
+            while (a < b && isws(cmd[a])) a++;
+            while (b > a && isws(cmd[b - 1])) b--;
+            if (b - a == sl(end) && sw(cmd + a, end)) end = 0;
+            i = e + 1;
+            continue;
+        }
+        if (o > 0) s[o++] = '\n';
+        mm_copy(s + o, n + 2 - o, cmd + i, e - i);
+        o += e - i;
+        for (j = i; j + 1 < e; j++) {
+            long k = j + 2, st;
+            char qc = 0;
+            if (cmd[j] != '<' || cmd[j + 1] != '<') continue;
+            if (k < e && cmd[k] == '-') k++;
+            while (k < e && isws(cmd[k])) k++;
+            if (k < e && (cmd[k] == '\'' || cmd[k] == '"')) { qc = cmd[k]; k++; }
+            st = k;
+            if (!(k < e && (isal(cmd[k]) || cmd[k] == '_'))) continue;
+            while (k < e && iswd(cmd[k])) k++;
+            if (qc && !(k < e && cmd[k] == qc)) continue;
+            end = dupn(cmd + st, k - st);
+            break;
+        }
+        i = e + 1;
+    }
+    s[o] = 0;
+    return s;
+}
+static void sgm_split_segs(const char *cmd0, char ***out_segs, long *out_n) {
+    const char *cmd = sgm_strip_heredocs(cmd0);
+    long n = sl(cmd), i = 0, st = 0, cap = 16, ns = 0;
+    char **segs = (char **)mm_alloc(sizeof(char *) * cap);
+    int in_sq = 0, in_dq = 0;
+    while (i <= n) {
+        int sep = 0;
+        if (i == n) sep = -1;
+        else if (!in_sq && !in_dq) {
+            if (cmd[i] == '\'' ) { in_sq = 1; i++; continue; }
+            if (cmd[i] == '"') { in_dq = 1; i++; continue; }
+            if (cmd[i] == '\\' && i + 1 < n) { i += 2; continue; }
+            if (cmd[i] == ';' || cmd[i] == '\n' || cmd[i] == '(' || cmd[i] == ')' || cmd[i] == '`') sep = 1;
+            else if ((cmd[i] == '&' && cmd[i + 1] == '&') || (cmd[i] == '|' && cmd[i + 1] == '|') || (cmd[i] == '$' && cmd[i + 1] == '(')) sep = 2;
+            else if (cmd[i] == '|') sep = 1;
+            else if (cmd[i] == '&' && !(i > 0 && (cmd[i - 1] == '>' || cmd[i - 1] == '<')) && cmd[i + 1] != '>') sep = 1;
+        } else if (in_sq) {
+            if (cmd[i] == '\'') in_sq = 0;
+            i++; continue;
+        } else {
+            if (cmd[i] == '\\' && i + 1 < n) { i += 2; continue; }
+            if (cmd[i] == '"') in_dq = 0;
+            i++; continue;
+        }
+        if (sep) {
+            long a = st, b = i;
+            while (a < b && isws(cmd[a])) a++;
+            while (b > a && isws(cmd[b - 1])) b--;
+            if (ns == cap) { cap *= 2; char **ns2 = (char **)mm_alloc(sizeof(char *) * cap); mm_copy(ns2, sizeof(char *) * cap, segs, sizeof(char *) * ns); segs = ns2; }
+            segs[ns++] = dupn(cmd + a, b - a);
+            if (sep < 0) break;
+            i += sep; st = i;
+        } else i++;
+    }
+    *out_segs = segs; *out_n = ns;
+}
+static void sgm_tokenize(const char *seg, char ***out_w, long *out_n) {
+    long n = sl(seg), i = 0, cap = 16, nw = 0;
+    char **w = (char **)mm_alloc(sizeof(char *) * cap);
+    while (i < n) {
+        while (i < n && isws(seg[i])) i++;
+        if (i >= n) break;
+        char *buf = (char *)mm_alloc(n - i + 4);
+        long o = 0;
+        while (i < n && !isws(seg[i])) {
+            if (seg[i] == '\'') {
+                i++;
+                while (i < n && seg[i] != '\'') buf[o++] = seg[i++];
+                if (i < n) i++;
+            } else if (seg[i] == '"') {
+                i++;
+                while (i < n && seg[i] != '"') {
+                    if (seg[i] == '\\' && i + 1 < n && (seg[i + 1] == '"' || seg[i + 1] == '\\' || seg[i + 1] == '$' || seg[i + 1] == '`')) i++;
+                    buf[o++] = seg[i++];
+                }
+                if (i < n) i++;
+            } else if (seg[i] == '\\' && i + 1 < n) {
+                i++; buf[o++] = seg[i++];
+            } else {
+                buf[o++] = seg[i++];
+            }
+        }
+        buf[o] = 0;
+        if (nw == cap) { cap *= 2; char **w2 = (char **)mm_alloc(sizeof(char *) * cap); mm_copy(w2, sizeof(char *) * cap, w, sizeof(char *) * nw); w = w2; }
+        w[nw++] = buf;
+    }
+    *out_w = w; *out_n = nw;
+}
+static long sgm_unwrap_cmd(char **w, long nw, const char **env_urg_out) {
+    long k = 0;
+    *env_urg_out = 0;
+    while (k < nw) {
+        if (eq(w[k], "{")) { k++; continue; }
+        if (sgm_is_env_assign(w[k])) {
+            if (sw(w[k], "MUX_URGENT=")) *env_urg_out = w[k] + 11;
+            k++; continue;
+        }
+        const char *b = sgm_base(w[k]);
+        if (eq(b, "env")) {
+            k++;
+            while (k < nw && w[k][0] == '-') {
+                if (eq(w[k], "--")) { k++; break; }
+                if (eq(w[k], "-u") && k + 1 < nw) k += 2;
+                else k++;
+            }
+            continue;
+        }
+        if (eq(b, "timeout")) {
+            k++;
+            while (k < nw && w[k][0] == '-') {
+                if (eq(w[k], "--")) { k++; break; }
+                if ((eq(w[k], "-k") || eq(w[k], "-s")) && k + 1 < nw) k += 2;
+                else k++;
+            }
+            if (k < nw) k++;
+            continue;
+        }
+        if (eq(b, "command")) {
+            long ck = k + 1; int lookup = 0;
+            while (ck < nw && w[ck][0] == '-') {
+                if (eq(w[ck], "--")) { ck++; break; }
+                if (has(w[ck], "v") || has(w[ck], "V")) { lookup = 1; break; }
+                ck++;
+            }
+            if (lookup) break;
+            k = ck;
+            continue;
+        }
+        if (eq(b, "exec") || eq(b, "nohup") || eq(b, "nice") || eq(b, "stdbuf") || eq(b, "time")) {
+            k++;
+            while (k < nw && w[k][0] == '-') {
+                if (eq(w[k], "--")) { k++; break; }
+                if ((eq(w[k], "-a") || eq(w[k], "-n") || eq(w[k], "-i") || eq(w[k], "-o") || eq(w[k], "-e")) && k + 1 < nw) k += 2;
+                else k++;
+            }
+            continue;
+        }
+        break;
+    }
+    return k;
+}
+static int sgm_urgent_active(const char *env_urg) {
+    const char *u = env_urg ? env_urg : envs("MUX_URGENT");
+    if (!u) return 0;
+    long i, nonws = 0;
+    for (i = 0; u[i]; i++) if (!isws(u[i])) nonws++;
+    return nonws > 0;
+}
+static int sgm_has_idle_phrase(const char *s) {
+    static const char *ps[] = {"待命", "等待新指令", "已就绪", "无后续动作", "按兵不动", "挂机", "静止", 0};
+    int i;
+    if (!s || !*s) return 0;
+    for (i = 0; ps[i]; i++) if (has(s, ps[i])) return 1;
+    return 0;
+}
+static int sgm_has_hex7(const char *s) {
+    long i, run = 0;
+    if (!s) return 0;
+    for (i = 0; ; i++) {
+        char c = s[i];
+        int hx = (c >= '0' && c <= '9') || (c >= 'a' && c <= 'f') || (c >= 'A' && c <= 'F');
+        if (hx) run++;
+        else {
+            if (run >= 7 && !iswd(c)) {
+                long st = i - run;
+                if (st == 0 || !iswd(s[st - 1])) return 1;
+            }
+            run = 0;
+            if (!c) break;
+        }
+    }
+    return 0;
+}
+static int sgm_has_deliverable_evidence(const char *text) {
+    static const char *markers[] = {
+        "~/.local/share/", "tools/", "tests/", "plans/", "src/", "cx/", "release/", "build/",
+        ".patch", ".tsv", ".md", ".cx", "|---|", "| --- |", "\t",
+        "派工", "队列", "裁定", "复核", "子集", "暂停", "(1)", "(2)", "UNCOVERED", "rc0", "rc=0",
+        "收到", "预演", "清单", "起链", "状态询问", "请回", 0
+    };
+    int i;
+    if (!text) return 0;
+    for (i = 0; markers[i]; i++) if (has(text, markers[i])) return 1;
+    if (sgm_has_hex7(text)) return 1;
+    return 0;
+}
+static long sgm_count_targets(const char *tgt) {
+    if (!tgt || !*tgt) return 0;
+    long c = 1, i;
+    for (i = 0; tgt[i]; i++) if (tgt[i] == ',') c++;
+    return c;
+}
+static int sgm_is_all_target(const char *tgt) {
+    if (!tgt) return 0;
+    return eq(tgt, "@all") || eq(tgt, "all") || has(tgt, ":all") || has(tgt, ":@all") || has(tgt, ",@all");
+}
+static int sgm_valid_branch(const char *nm) {
+    if (!nm || !*nm) return 1;
+    if (eq(nm, "main") || sw(nm, "devsvc")) return 1;
+    if (nm[0] == 'v' && rs_version(nm + 1)) return 1;
+    return 0;
+}
+static int sgm_is_branch_ch(char c) {
+    return isal(c) || isdg(c) || c == '.' || c == '-' || c == '_' || c == '/';
+}
+static char *sgm_check_branch_name(const char *text) {
+    static const char *pats[] = {
+        "git checkout -b ", "git checkout -B ", "git switch -c ", "git switch -C ",
+        "git worktree add -b ", "git worktree add -B ", "新建分支 ", "切分支 ", 0
+    };
+    int pi;
+    if (!text) return 0;
+    for (pi = 0; pats[pi]; pi++) {
+        long pl = sl(pats[pi]), n = sl(text), p = 0;
+        while (p + pl < n) {
+            if (sw(text + p, pats[pi])) {
+                long q = p + pl;
+                while (q < n && (isws(text[q]) || text[q] == '\'' || text[q] == '"' || text[q] == '`' ||
+                       (text[q] == '\\' && q + 1 < n && (text[q + 1] == '\'' || text[q + 1] == '"' || text[q + 1] == '`')))) {
+                    if (text[q] == '\\') q += 2; else q++;
+                }
+                long e = q;
+                while (e < n && sgm_is_branch_ch(text[e])) e++;
+                if (e > q) {
+                    char *br = dupn(text + q, e - q);
+                    if (!sgm_valid_branch(br))
+                        return fmt("SEND-GATE[BRANCH-NAME] 拒绝:不规范分支名 '%s'(仅允许 main / v0.N.M / devsvc*)", br, 0);
+                }
+                p = e > q ? e : p + pl;
+            } else p++;
+        }
+    }
+    return 0;
+}
+static int sgm_seg_creates_empty(const char *cmd, long redir_idx) {
+    long s = redir_idx;
+    while (s > 0 && cmd[s - 1] != ';' && cmd[s - 1] != '\n' && cmd[s - 1] != '&' && cmd[s - 1] != '|') s--;
+    while (s < redir_idx && isws(cmd[s])) s++;
+    long e = redir_idx;
+    while (e > s && isws(cmd[e - 1])) e--;
+    if (e == s) return 1;
+    char *pre = dupn(cmd + s, e - s);
+    if (eq(pre, ":") || eq(pre, "true") || eq(pre, "echo") || sw(pre, "cat /dev/null")) return 1;
+    char **w = 0; long nw = 0;
+    sgm_tokenize(pre, &w, &nw);
+    if (nw <= 0) return 1;
+    const char *b = sgm_base(w[0]);
+    if (eq(b, "echo") || eq(b, "printf")) {
+        long start = 1;
+        if (eq(b, "echo")) {
+            while (start < nw && (eq(w[start], "-n") || eq(w[start], "-e") || eq(w[start], "-E"))) start++;
+        } else {
+            if (start < nw && has(w[start], "%")) start++;
+        }
+        if (start >= nw) return 1;
+        long wi, nonws = 0;
+        for (wi = start; wi < nw; wi++) {
+            long ci;
+            for (ci = 0; w[wi][ci]; ci++) if (!isws(w[wi][ci])) { nonws = 1; break; }
+        }
+        if (!nonws) return 1;
+    }
+    return 0;
+}
+static int sgm_same_cmd_creates(const char *cmd, const char *raw_bf, const char *expanded_bf, const char *abs_bf, int *out_empty) {
+    if (out_empty) *out_empty = 0;
+    if (!cmd || !raw_bf || !*raw_bf) return 0;
+    const char *leaf = sgm_base(raw_bf);
+    long n = sl(cmd), i, ll = sl(leaf), rl = sl(raw_bf), el = expanded_bf ? sl(expanded_bf) : 0, al = abs_bf ? sl(abs_bf) : 0;
+    for (i = 0; i < n; i++) {
+        int is_redir = 0;
+        long rpos = i;
+        if (cmd[i] == '>') {
+            is_redir = 1;
+            if (i + 1 < n && cmd[i + 1] == '>') i++;
+        } else if ((i == 0 || isws(cmd[i - 1]) || cmd[i - 1] == '|' || cmd[i - 1] == ';') && sw(cmd + i, "tee") && isws(cmd[i + 3])) {
+            is_redir = 1;
+            i += 3;
+            while (i < n && isws(cmd[i])) i++;
+            if (i + 2 < n && cmd[i] == '-' && cmd[i + 1] == 'a' && isws(cmd[i + 2])) i += 2;
+        }
+        if (!is_redir) continue;
+        long p = i + 1;
+        while (p < n && isws(cmd[p])) p++;
+        if (p < n && (cmd[p] == '\'' || cmd[p] == '"')) p++;
+        long e = p;
+        while (e < n && !isws(cmd[e]) && cmd[e] != '\'' && cmd[e] != '"' && cmd[e] != ';' && cmd[e] != '&' && cmd[e] != '|') e++;
+        long tl = e - p;
+        if (tl <= 0) continue;
+        int hit = 0;
+        if (tl == rl && sw(cmd + p, raw_bf)) hit = 1;
+        else if (el > 0 && tl == el && sw(cmd + p, expanded_bf)) hit = 1;
+        else if (al > 0 && tl == al && sw(cmd + p, abs_bf)) hit = 1;
+        else if (ll > 0 && tl > ll && cmd[e - ll - 1] == '/' && sw(cmd + e - ll, leaf)) hit = 1;
+        if (hit) {
+            if (cmd[rpos] == '>' && out_empty && sgm_seg_creates_empty(cmd, rpos)) *out_empty = 1;
+            return 1;
+        }
+    }
+    return 0;
+}
+static int sgm_is_tmp_body_path(const char *raw_bf, const char *expanded_bf, const char *abs_bf) {
+    if (raw_bf && (sw(raw_bf, "/tmp/") || sw(raw_bf, "$CLAUDE_JOB_DIR/tmp/") || sw(raw_bf, "${CLAUDE_JOB_DIR}/tmp/") ||
+                   sw(raw_bf, "$TMPDIR/") || sw(raw_bf, "${TMPDIR}/"))) return 1;
+    if (expanded_bf && (sw(expanded_bf, "/tmp/") || (JOB[0] && sw(expanded_bf, cat2(JOB, "/tmp/"))))) return 1;
+    if (abs_bf && (sw(abs_bf, "/tmp/") || (JOB[0] && sw(abs_bf, cat2(JOB, "/tmp/"))))) return 1;
+    return 0;
+}
+static char *sgm_check_mux_cmd_depth(const char *cmd, const char *cwd, int depth, long *send_count_io, const char *inh_urg) {
+    if (!has(cmd, "mux") && !has(cmd, "envelope")) return 0;
+    char **segs = 0; long ns = 0, si;
+    const char *seen_bf[32]; long n_seen_bf = 0;
+    sgm_split_segs(cmd, &segs, &ns);
+    for (si = 0; si < ns; si++) {
+        char **w = 0; long nw = 0, k = 0;
+        const char *env_urg = 0;
+        sgm_tokenize(segs[si], &w, &nw);
+        k = sgm_unwrap_cmd(w, nw, &env_urg);
+        if (k >= nw) continue;
+        const char *eff_urg = env_urg ? env_urg : inh_urg;
+        int urg = sgm_urgent_active(eff_urg);
+        const char *base = sgm_base(w[k]);
+        if (depth < 1 && sgm_is_sh_cmd(base)) {
+            long sk = k + 1;
+            while (sk < nw && w[sk][0] == '-') {
+                if (sgm_is_sh_c_flag(w[sk]) && sk + 1 < nw) {
+                    char *sr = sgm_check_mux_cmd_depth(w[sk + 1], cwd, depth + 1, send_count_io, eff_urg);
+                    if (sr) return sr;
+                    break;
+                }
+                sk++;
+            }
+            continue;
+        }
+        int is_bcast = 0, is_env = 0;
+        long arg_start = -1;
+        if (sgm_is_mux_cmd(base)) {
+            long mk = k + 1;
+            while (mk < nw && w[mk][0] == '-') {
+                if ((eq(w[mk], "--session") || eq(w[mk], "-s")) && mk + 1 < nw) { mk += 2; continue; }
+                if (sw(w[mk], "--session=")) { mk++; continue; }
+                break;
+            }
+            if (mk < nw && eq(w[mk], "broadcast")) { is_bcast = 1; arg_start = mk + 1; }
+            else if (mk < nw && eq(w[mk], "envelope")) { is_env = 1; arg_start = mk + 1; }
+        } else if (eq(base, "envelope")) {
+            is_env = 1; arg_start = k + 1;
+        }
+        if (!is_bcast && !is_env) continue;
+        if (is_bcast) {
+            (*send_count_io)++;
+            if (*send_count_io > 2 && !urg) {
+                return sdup("SEND-GATE[BROADCAST-IDLE] 拒绝:单条命令串接发信超过上限(最多 2 次),请合并或设 MUX_URGENT='理由'");
+            }
+            char *btxt = sdup(""); long bi, nonws = 0;
+            for (bi = arg_start; bi < nw; bi++) {
+                if (bi == arg_start && eq(w[bi], "--")) continue;
+                btxt = !*btxt ? sdup(w[bi]) : cat2(cat2(btxt, " "), w[bi]);
+            }
+            for (bi = 0; btxt[bi]; bi++) if (!isws(btxt[bi])) { nonws = 1; break; }
+            if (!nonws)
+                return sdup("SEND-GATE[EMPTY-BODY] 拒绝:信封正文不得为空或全空白");
+            if (sgm_has_idle_phrase(btxt) && !urg)
+                return sdup("SEND-GATE[BROADCAST-IDLE] 拒绝:禁止向广播通道发送裸待命/状态播报;紧急情况请设 MUX_URGENT='理由'");
+            {
+                char *bwhy = sgm_check_branch_name(btxt);
+                if (bwhy) return bwhy;
+            }
+            continue;
+        }
+        /* Parse envelope options (read-only; --from confers zero exemption). */
+        long i; int dry = 0, help = 0, literal = 0, use_stdin = 0;
+        const char *body_file = 0;
+        for (i = arg_start; i < nw && (sw(w[i], "--") || eq(w[i], "-h")); i++) {
+            const char *a = w[i], *val = 0;
+            if (eq(a, "--")) { i++; break; }
+            if (eq(a, "--dry-run")) { dry = 1; continue; }
+            if (eq(a, "--help") || eq(a, "-h")) { help = 1; continue; }
+            if (eq(a, "--literal")) { literal = 1; continue; }
+            if (eq(a, "--stdin")) { use_stdin = 1; continue; }
+            if (longopt(a, "--body-file", &val)) { body_file = val ? val : (i + 1 < nw ? w[++i] : 0); continue; }
+            if (longopt(a, "--from", &val) || longopt(a, "--session", &val) || longopt(a, "--caller-pane", &val)) {
+                if (!val && i + 1 < nw) i++;
+                continue;
+            }
+            break;
+        }
+        if (help || dry || i + 1 >= nw) continue;
+        const char *target = w[i], *title = w[i + 1];
+        if (sgm_count_targets(target) > 2 && !urg)
+            return fmt("SEND-GATE[BROADCAST-IDLE] 拒绝:单次发信逗号分隔收件人超过 2 个(TARGET-CAP > 2): %s", target, 0);
+        char *body = sdup("");
+        int deferred_body = 0, same_create = 0, same_empty = 0, dup_bf = 0;
+        if (!body_file && !use_stdin) {
+            long pi;
+            for (pi = i + 2; pi < nw; pi++) body = pi == i + 2 ? sdup(w[pi]) : cat2(cat2(body, " "), w[pi]);
+            if (!literal && body[0] == '@' && body[1]) body_file = body + 1;
+            else if (!literal && eq(body, "-")) use_stdin = 1;
+        }
+        if (body_file && *body_file) {
+            long bi;
+            for (bi = 0; bi < n_seen_bf; bi++) if (eq(seen_bf[bi], body_file)) dup_bf = 1;
+            if (n_seen_bf < 32) seen_bf[n_seen_bf++] = body_file;
+            char *bf = repl_var(repl_home(sdup(body_file)), "CLAUDE_JOB_DIR", JOB);
+            char *abs = bf[0] == '/' ? resolve("", bf) : resolve(cwd, bf);
+            same_create = sgm_same_cmd_creates(cmd, body_file, bf, abs, &same_empty);
+            int is_tmp = sgm_is_tmp_body_path(body_file, bf, abs);
+            int has_unexp_var = has(bf, "$");
+            sy_stat_t st;
+            if (same_create) {
+                if (same_empty)
+                    return sdup("SEND-GATE[EMPTY-BODY] 拒绝:信封正文不得为空或全空白");
+                deferred_body = 1;
+            } else if (has_unexp_var) {
+                deferred_body = 1;
+            } else if (sy_lstat(abs, &st) == 0) {
+                unsigned char *fb = 0; int64_t fn = 0;
+                if (st.kind == 'f' && sy_read_file(abs, &fb, &fn, 4 << 20) == 0 && fb) {
+                    body = dupn((const char *)fb, (long)fn);
+                    mm_free(fb);
+                } else {
+                    return fmt("SEND-GATE[EMPTY-BODY] 拒绝:无法读取信封正文文件 %s(非常规文件/无权限/超 4MiB)", body_file, 0);
+                }
+            } else if (is_tmp) {
+                deferred_body = 1;
+            } else {
+                return fmt("SEND-GATE[EMPTY-BODY] 拒绝:无法读取信封正文文件 %s(缺失/无权限/超 4MiB)", body_file, 0);
+            }
+        }
+        if (!use_stdin && !deferred_body) {
+            long bi, nonws = 0;
+            for (bi = 0; body[bi]; bi++) if (!isws(body[bi])) { nonws = 1; break; }
+            if (!nonws) return sdup("SEND-GATE[EMPTY-BODY] 拒绝:信封正文不得为空或全空白");
+        }
+        char *full = deferred_body ? sdup(title) : cat2(cat2(title, "\n"), body);
+        const char *ev_src = same_create ? cmd : full;
+        int distinct_task = !sgm_is_all_target(target) &&
+            ((same_create && !dup_bf && sgm_has_deliverable_evidence(cmd)) ||
+             (!deferred_body && sl(body) >= 120 && sgm_has_deliverable_evidence(full)));
+        if (!distinct_task) {
+            (*send_count_io)++;
+            if (*send_count_io > 2 && !urg) {
+                return sdup("SEND-GATE[BROADCAST-IDLE] 拒绝:单条命令串接发信超过上限(最多 2 次),请合并或设 MUX_URGENT='理由'");
+            }
+        }
+        if (sgm_is_all_target(target) && sgm_has_idle_phrase(ev_src) && !urg)
+            return sdup("SEND-GATE[BROADCAST-IDLE] 拒绝:禁止向 @all 广播待命/闲置状态;紧急情况请设 MUX_URGENT='理由'");
+        if ((!deferred_body || same_create) && sgm_has_idle_phrase(ev_src) && !has(ev_src, "[暂停-需裁决]") && !sgm_has_deliverable_evidence(ev_src) && !urg)
+            return sdup("SEND-GATE[PAUSE-FORM] 拒绝:无交付物路径/SHA/结构化表且未带 [暂停-需裁决] 的裸待命汇报;紧急情况请设 MUX_URGENT='理由'");
+        {
+            char *bwhy = sgm_check_branch_name(ev_src);
+            if (bwhy) return bwhy;
+        }
+    }
+    return 0;
+}
+static char *sgm_check_mux_cmd(const char *cmd, const char *cwd) {
+    long send_count = 0;
+    return sgm_check_mux_cmd_depth(cmd, cwd, 0, &send_count, 0);
 }
 
 static double wall_s(void) { sy_ts_t t; if (sy_wall(&t) != 0) return 0; return (double)t.sec + (double)t.nsec / 1e9; }
@@ -830,6 +1351,7 @@ int main(void) {
         {
             char *why = check(cmd, cwd, 0);
             if (!why) { warn(cmd, root); return 0; }
+            if (sw(why, "SEND-GATE[")) { sy_eprintf("%s\n", why); return 2; }
             sy_eprintf("GUARD-EDIT-V1 拒绝:%s。仓内文件只用 Edit/Write 工具或 .cx 工具(tools/edit-span.cx、tools/refactor.cx)修改;临时产物写 $CLAUDE_JOB_DIR/tmp 或 /tmp,不要建克隆或 out/ 子目录。协同决定写入 prd_mempalace.md,不追加过程账本\n", why);
             return 2;
         }

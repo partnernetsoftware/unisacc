@@ -422,6 +422,190 @@ static long count_lines(const char *path) {
     mm_free(b); return c;
 }
 static long count_sub(const char *s, const char *p) { long c = 0; for (; *s; s++) if (sw(s, p)) c++; return c; }
+static int has_sub(const char *s, const char *p) { return count_sub(s, p) > 0; }
+static long failed, sgm_cases;
+static void ck_sgm(int ok, const char *name) {
+    sgm_cases++;
+    if (ok) sy_printf("ok\t%s\n", name);
+    else { sy_printf("FAIL\t%s\n", name); failed++; }
+}
+
+static int run_raw_json(char **argv, const char *dir, const char *json, int *rc, char **err) {
+    char pin[1200], perr[1200], fb[1200]; sy_spawn_t o; sy_exit_t st; int fi, fe; unsigned char *b = 0; int64_t n = 0;
+    tx_snprintf(fb, sizeof fb, "%s/.cache/unisacc/devsvc/native-fallback", H);
+    sy_unlink(fb);
+    sy_setenv("UNISACC_AGENT", "", 1);
+    tx_snprintf(pin, sizeof pin, "%s/sgm-in.json", dir);
+    tx_snprintf(perr, sizeof perr, "%s/sgm-err.txt", dir);
+    sy_write_file(pin, json, sl(json), 0644);
+    sy_unlink(perr);
+    fi = sy_open_read(pin); fe = sy_open_new(perr, 0644);
+    if (fi < 0 || fe < 0) return -1;
+    sy_spawn_init(&o); o.argv = argv; o.in_fd = fi; o.out_fd = SY_STDIO_NULL; o.err_fd = fe; o.pgroup = -1; o.deadline_ms = 20000;
+    if (sy_proc_run(&o, &st) != 0) { sy_close(fi); sy_close(fe); return -1; }
+    sy_close(fi); sy_close(fe);
+    *rc = st.exited ? st.code : 128 + st.sig;
+    if (sy_read_file(perr, &b, &n, 1 << 20) != 0) { *err = (char *)""; return 0; }
+    { char *s = (char *)mm_alloc(n + 1); if (n) mm_copy(s, n + 1, b, n); s[n] = 0; *err = s; mm_free(b); }
+    return 0;
+}
+
+static int sgm_expect(char **cmd, const char *dir, const char *cmd_s, int want_rc, const char *want_sub) {
+    char jbuf[4096]; int rc = -1; char *err = (char *)"";
+    tx_snprintf(jbuf, sizeof jbuf, "{\"tool_name\":\"Bash\",\"tool_input\":{\"command\":\"%s\"},\"cwd\":\"/r/repo\"}", cmd_s);
+    if (run_raw_json(cmd, dir, jbuf, &rc, &err) != 0) return 0;
+    if (rc != want_rc || (*want_sub && !has_sub(err, want_sub))) {
+        sy_eprintf("SGM_DIAG\trc=%d\twant=%d\tsub=%s\terr=%s\n", rc, want_rc, want_sub, err);
+        return 0;
+    }
+    return 1;
+}
+
+static void check_send_gate_minimal(char **cmd, const char *dir) {
+    char b_ok[1200], b_empty[1200], b_miss[1200];
+    sy_setenv("MUX_URGENT", "", 1);
+    tx_snprintf(b_ok, sizeof b_ok, "%s/sgm-body-ok.txt", T);
+    tx_snprintf(b_empty, sizeof b_empty, "%s/sgm-body-empty.txt", T);
+    tx_snprintf(b_miss, sizeof b_miss, "/r/repo/sgm-body-missing.txt");
+    const char *ok_txt = "本轮静态复核已完成，详见 tools/guard-hook.cx 与提交 0a51af27，下一件待命接续。";
+    sy_write_file(b_ok, ok_txt, sl(ok_txt), 0644);
+    sy_write_file(b_empty, "", 0, 0644);
+
+    /* (1) Malformed JSON -> fail-open rc=0 */
+    {
+        int rc = -1; char *err = (char *)"";
+        ck_sgm(run_raw_json(cmd, dir, "{\"tool_name\":\"Bash\",\"tool_input\":{\"command\":\"mux envelope 1:a t 待命", &rc, &err) == 0 && rc == 0,
+               "sgm-malformed-json-fail-open");
+    }
+
+    /* (2) Legal long Chinese task envelope -> rc=0 */
+    ck_sgm(sgm_expect(cmd, dir, "mux envelope 1:cc 'v0.1.4 进度汇总' '本轮已完成候选 13 纯内容闸实现与静态交叉核验，准备进入下一批次复核。'", 0, ""),
+           "sgm-legal-long-chinese-task-green");
+    /* (3) Status report WITH deliverable path -> rc=0 */
+    ck_sgm(sgm_expect(cmd, dir, "mux envelope 1:cc '收口回执' '补丁已落盘 ~/.local/share/unisacc/research/agy-flow/v014/guard-send-gate-minimal.patch，当前待命。'", 0, ""),
+           "sgm-legal-status-with-path-green");
+    /* (4) Status report WITH >=7 hex SHA -> rc=0 */
+    ck_sgm(sgm_expect(cmd, dir, "mux envelope 1:cc '核验完成' '基线 0a51af27 校验无误，已就绪。'", 0, ""),
+           "sgm-legal-status-with-sha-green");
+    /* (5) Explicit [暂停-需裁决] pause tag -> rc=0 */
+    ck_sgm(sgm_expect(cmd, dir, "mux envelope 1:cc '停机请示' '[暂停-需裁决] 需确认主分支策略，当前待命。'", 0, ""),
+           "sgm-legal-pause-tag-green");
+    /* (6) Bare idle report without path/SHA/tag -> rc=2 SEND-GATE[PAUSE-FORM] */
+    ck_sgm(sgm_expect(cmd, dir, "mux envelope 1:cc '状态同步' '本轮暂无任务，原地待命等待新指令。'", 2, "SEND-GATE[PAUSE-FORM]"),
+           "sgm-bare-idle-pause-form-red");
+    /* (6b) bin/envelope and bin/mux envelope both enforced (legal green + bare idle red) */
+    ck_sgm(sgm_expect(cmd, dir, "bin/envelope 1:cc '进度回执' '已核对 tools/guard-hook.cx 与 0a51af27，待命。'", 0, ""),
+           "sgm-bin-envelope-legal-green");
+    ck_sgm(sgm_expect(cmd, dir, "bin/envelope 1:cc '状态同步' '原地待命等待新指令。'", 2, "SEND-GATE[PAUSE-FORM]"),
+           "sgm-bin-envelope-bare-idle-red");
+    ck_sgm(sgm_expect(cmd, dir, "bin/mux envelope 1:cc '状态同步' '原地待命等待新指令。'", 2, "SEND-GATE[PAUSE-FORM]"),
+           "sgm-bin-mux-envelope-bare-idle-red");
+    /* (6c) Legal --help, -h, --dry-run before positional args -> rc=0; positional '--dry-run' body still checked -> rc=2 */
+    ck_sgm(sgm_expect(cmd, dir, "mux envelope --help", 0, ""), "sgm-legal-help-flag-green");
+    ck_sgm(sgm_expect(cmd, dir, "mux envelope -h", 0, ""), "sgm-legal-h-flag-green");
+    ck_sgm(sgm_expect(cmd, dir, "mux envelope --dry-run 1:cc '空预演' ''", 0, ""), "sgm-legal-dry-run-flag-green");
+    ck_sgm(sgm_expect(cmd, dir, "mux envelope 1:cc '状态' '--dry-run 原地待命'", 2, "SEND-GATE[PAUSE-FORM]"),
+           "sgm-positional-dry-run-body-red");
+    /* (7) mux broadcast / @all idle -> rc=2 SEND-GATE[BROADCAST-IDLE] */
+    ck_sgm(sgm_expect(cmd, dir, "mux envelope @all '全员状态' '全部窗口原地待命，无后续动作。'", 2, "SEND-GATE[BROADCAST-IDLE]"),
+           "sgm-broadcast-idle-at-all-red");
+    ck_sgm(sgm_expect(cmd, dir, "mux broadcast '全部窗口原地待命，无后续动作。'", 2, "SEND-GATE[BROADCAST-IDLE]"),
+           "sgm-mux-broadcast-subcmd-idle-red");
+    /* (8) Comma-separated target count: 2 allowed (rc=0), 3 refused (rc=2), quoted commas in title/body allowed (rc=0) */
+    ck_sgm(sgm_expect(cmd, dir, "mux envelope 1:a,1:b '双方派工' '请按计划推进 tools/guard-hook.cx 修改。'", 0, ""),
+           "sgm-target-cap-2-comma-green");
+    ck_sgm(sgm_expect(cmd, dir, "mux envelope 1:a,1:b,1:c '三方派工' '请按计划推进 tools/guard-hook.cx 修改。'", 2, "SEND-GATE[BROADCAST-IDLE]"),
+           "sgm-target-cap-gt2-comma-red");
+    ck_sgm(sgm_expect(cmd, dir, "mux envelope 1:cc '项1,项2,项3' '正文含 a,b,c,d 与 tools/guard-hook.cx 证据。'", 0, ""),
+           "sgm-quoted-commas-in-title-body-green");
+    /* (9) Chained sends in single Bash command: 2 allowed (rc=0), 3 refused (rc=2), cmd separators inside body allowed (rc=0) */
+    ck_sgm(sgm_expect(cmd, dir, "mux envelope 1:a 't1' '完成 tools/a.cx' && mux envelope 1:b 't2' '完成 tools/b.cx'", 0, ""),
+           "sgm-chained-sends-2-green");
+    ck_sgm(sgm_expect(cmd, dir, "mux envelope 1:a 't1' '任务1' && mux envelope 1:b 't2' '任务2' && mux envelope 1:c 't3' '任务3'", 2, "SEND-GATE[BROADCAST-IDLE]"),
+           "sgm-chained-sends-gt2-red");
+    ck_sgm(sgm_expect(cmd, dir, "mux envelope 1:cc '复盘' '命令 a && mux envelope 1:x t1 b1 && mux envelope 1:y t2 b2 详见 tools/guard-hook.cx'", 0, ""),
+           "sgm-cmd-separators-in-body-green");
+    /* (10) Empty / whitespace-only body -> rc=2 SEND-GATE[EMPTY-BODY] */
+    ck_sgm(sgm_expect(cmd, dir, "mux envelope 1:cc '空正文' '   '", 2, "SEND-GATE[EMPTY-BODY]"),
+           "sgm-empty-body-whitespace-red");
+    /* (11) --body-file and @file: same-cmd printf/redirect to tmp -> rc=0; same-cmd empty/idle -> rc=2; existing 0-byte -> rc=2; missing non-tmp -> rc=2; readable -> rc=0 */
+    ck_sgm(sgm_expect(cmd, dir, "printf '%s\\n' '完成 tools/guard-hook.cx' > $CLAUDE_JOB_DIR/tmp/cc70.txt; mux envelope --body-file $CLAUDE_JOB_DIR/tmp/cc70.txt -- 1:cc '同命令先写后读'", 0, ""),
+           "sgm-same-cmd-printf-body-file-green");
+    ck_sgm(sgm_expect(cmd, dir, "T=$CLAUDE_JOB_DIR/tmp; printf '%s\\n' '完成 tools/guard-hook.cx' > $T/af90.txt; mux envelope --body-file $T/af90.txt -- 1:cc '变量同命令先写后读'", 0, ""),
+           "sgm-same-cmd-var-body-file-green");
+    ck_sgm(sgm_expect(cmd, dir, "printf '   ' > $CLAUDE_JOB_DIR/tmp/empty70.txt; mux envelope --body-file $CLAUDE_JOB_DIR/tmp/empty70.txt -- 1:cc '同命令写空白'", 2, "SEND-GATE[EMPTY-BODY]"),
+           "sgm-same-cmd-empty-body-file-red");
+    ck_sgm(sgm_expect(cmd, dir, "printf '%s\\n' '本轮暂无任务，原地待命等待新指令。' > $CLAUDE_JOB_DIR/tmp/idle70.txt; mux envelope --body-file $CLAUDE_JOB_DIR/tmp/idle70.txt -- 1:cc '状态同步'", 2, "SEND-GATE[PAUSE-FORM]"),
+           "sgm-same-cmd-bare-idle-body-file-red");
+    {
+        char c_zero[1600], c_at_zero[1600], c_miss[1600], c_ok[1600], c_at_miss[1600], c_at_ok[1600];
+        tx_snprintf(c_zero, sizeof c_zero, "mux envelope --body-file %s -- 1:cc '空文件'", b_empty);
+        tx_snprintf(c_at_zero, sizeof c_at_zero, "mux envelope 1:cc '空@文件' @%s", b_empty);
+        tx_snprintf(c_miss, sizeof c_miss, "mux envelope --body-file %s -- 1:cc '缺文件'", b_miss);
+        tx_snprintf(c_ok, sizeof c_ok, "mux envelope --body-file %s -- 1:cc '读文件放行'", b_ok);
+        tx_snprintf(c_at_miss, sizeof c_at_miss, "mux envelope 1:cc '缺@文件' @%s", b_miss);
+        tx_snprintf(c_at_ok, sizeof c_at_ok, "mux envelope 1:cc '读@文件放行' @%s", b_ok);
+        ck_sgm(sgm_expect(cmd, dir, c_zero, 2, "SEND-GATE[EMPTY-BODY]"), "sgm-existing-zero-byte-body-file-red");
+        ck_sgm(sgm_expect(cmd, dir, c_at_zero, 2, "SEND-GATE[EMPTY-BODY]"), "sgm-existing-zero-byte-at-file-red");
+        ck_sgm(sgm_expect(cmd, dir, c_miss, 2, "SEND-GATE[EMPTY-BODY]"), "sgm-missing-body-file-red");
+        ck_sgm(sgm_expect(cmd, dir, c_ok, 0, ""), "sgm-readable-body-file-green");
+        ck_sgm(sgm_expect(cmd, dir, c_at_miss, 2, "SEND-GATE[EMPTY-BODY]"), "sgm-missing-at-file-red");
+        ck_sgm(sgm_expect(cmd, dir, c_at_ok, 0, ""), "sgm-readable-at-file-green");
+    }
+    /* (12) Invalid branch name in envelope body -> rc=2 SEND-GATE[BRANCH-NAME] */
+    ck_sgm(sgm_expect(cmd, dir, "mux envelope 1:cc '建分支' '请执行 git checkout -b bad_tmp_branch 进行开发。'", 2, "SEND-GATE[BRANCH-NAME]"),
+           "sgm-branch-name-bad-red");
+    /* (13) Valid branch name v0.1.4 / devsvc-mutex -> rc=0 */
+    ck_sgm(sgm_expect(cmd, dir, "mux envelope 1:cc '建分支' '请执行 git checkout -b v0.1.4 与 git worktree add -b devsvc-mutex 推进。'", 0, ""),
+           "sgm-branch-name-valid-green");
+    /* (14) MUX_URGENT in body or empty/whitespace MUX_URGENT cannot authorize; non-empty env or real env authorizes */
+    ck_sgm(sgm_expect(cmd, dir, "mux envelope @all '状态' '正文提及 MUX_URGENT=1 但未设环境，原地待命。'", 2, "SEND-GATE[BROADCAST-IDLE]"),
+           "sgm-mux-urgent-in-body-not-auth-red");
+    ck_sgm(sgm_expect(cmd, dir, "MUX_URGENT='   ' mux envelope @all '状态' '空白理由不得放行，原地待命。'", 2, "SEND-GATE[BROADCAST-IDLE]"),
+           "sgm-mux-urgent-empty-not-auth-red");
+    ck_sgm(sgm_expect(cmd, dir, "MUX_URGENT='紧急止血通知' mux envelope @all '紧急暂停' '全员原地待命。'", 0, ""),
+           "sgm-mux-urgent-escape-green");
+    sy_setenv("MUX_URGENT", "真实进程环境紧急止血", 1);
+    ck_sgm(sgm_expect(cmd, dir, "mux envelope @all '真实环境紧急暂停' '全员原地待命。'", 0, ""),
+           "sgm-mux-urgent-real-env-green");
+    sy_setenv("MUX_URGENT", "", 1);
+    /* (15) mux output redirect into repo still blocked by GUARD-EDIT-V1 -> rc=2 */
+    ck_sgm(sgm_expect(cmd, dir, "mux ls > /r/repo/x.txt", 2, "GUARD-EDIT-V1"),
+           "sgm-mux-redirect-repo-red");
+    /* (16) agyneon2 review-c13 B1..B8 adversarial regression cases */
+    ck_sgm(sgm_expect(cmd, dir, "MUX_URGENT=x echo hi && mux envelope 1:a 't1' '完成 tools/a.cx' && mux envelope 1:b 't2' '完成 tools/b.cx' && mux envelope 1:c 't3' '完成 tools/c.cx'", 2, "SEND-GATE[BROADCAST-IDLE]"),
+           "sgm-adv-b1-urgent-no-cross-seg-leak-red");
+    ck_sgm(sgm_expect(cmd, dir, "mux envelope 1:a 't1' '原地待命' & mux envelope 1:b 't2' '原地待命' & mux envelope 1:c 't3' '完成 tools/a.cx'", 2, "SEND-GATE[PAUSE-FORM]"),
+           "sgm-adv-b2-bg-ampersand-split-red");
+    ck_sgm(sgm_expect(cmd, dir, "(mux envelope 1:cc '状态' '原地待命')", 2, "SEND-GATE[PAUSE-FORM]"),
+           "sgm-adv-b3-subshell-parens-red");
+    ck_sgm(sgm_expect(cmd, dir, "sh -c 'mux envelope @all 状态 原地待命'", 2, "SEND-GATE[BROADCAST-IDLE]"),
+           "sgm-adv-b4-sh-c-1level-red");
+    ck_sgm(sgm_expect(cmd, dir, "command mux envelope @all '状态' '原地待命'", 2, "SEND-GATE[BROADCAST-IDLE]"),
+           "sgm-adv-b5-command-wrapper-red");
+    ck_sgm(sgm_expect(cmd, dir, "mux envelope 1:cc '建分支' '请执行 git checkout -b '\\\\''bad_tmp'\\\\'' 开发 tools/a.cx'", 2, "SEND-GATE[BRANCH-NAME]"),
+           "sgm-adv-b6-quoted-branch-name-red");
+    ck_sgm(sgm_expect(cmd, dir, "mux broadcast '   '", 2, "SEND-GATE[EMPTY-BODY]"),
+           "sgm-adv-b7-bcast-empty-body-red");
+    ck_sgm(sgm_expect(cmd, dir, "mux broadcast '请执行 git checkout -b bad_tmp_branch'", 2, "SEND-GATE[BRANCH-NAME]"),
+           "sgm-adv-b8-bcast-bad-branch-red");
+    /* (17) v3 replay-diff regression cases: body mentioning mux envelope multiple times, normal dispatch with '暂停'/'待命', heredoc with mux examples */
+    ck_sgm(sgm_expect(cmd, dir, "mux envelope 1:cc '单发引用' '正文内多次引用 mux envelope 1:a t1 b1; mux envelope 1:b t2 b2; mux envelope 1:c t3 b3; mux envelope 1:d t4 b4 不计入调用点'", 0, ""),
+           "sgm-body-mentions-mux-envelope-single-send-green");
+    ck_sgm(sgm_expect(cmd, dir, "mux envelope 1:agyneon '候选 19 拆安全子集' '正常派工:请按复核意见修改，若遇阻塞可先暂停并在汇报中说明待命原因。'", 0, ""),
+           "sgm-normal-dispatch-with-pause-word-green");
+    ck_sgm(sgm_expect(cmd, dir, "cat <<'EOF' > $CLAUDE_JOB_DIR/tmp/hd70.txt\\n示例(详见 tools/guard-hook.cx):\\nmux envelope 1:a 't1' 'b1'\\nmux envelope 1:b 't2' 'b2'\\nmux envelope 1:c 't3' 'b3'\\nEOF\\nmux envelope --body-file $CLAUDE_JOB_DIR/tmp/hd70.txt -- 1:cc 'heredoc 示例单发'", 0, ""),
+           "sgm-heredoc-with-mux-examples-green");
+    /* (18) review-c13-v3 N4..N7 adversarial regression cases (--from cc untrusted + backslash-newline continuation + stdbuf -o L) */
+    ck_sgm(sgm_expect(cmd, dir, "mux \\\\\\nenvelope @all 状态 原地待命", 2, "SEND-GATE[BROADCAST-IDLE]"),
+           "sgm-adv-v3-n4-backslash-newline-red");
+    ck_sgm(sgm_expect(cmd, dir, "echo ok > /tmp/a1; mux envelope --from cc --body-file /tmp/a1 -- 1:a t1; mux envelope --from cc --body-file /tmp/a1 -- 1:b t2; mux envelope --from cc --body-file /tmp/a1 -- 1:c t3", 2, "SEND-GATE[BROADCAST-IDLE]"),
+           "sgm-adv-v3-n5-from-cc-same-file-cap-red");
+    ck_sgm(sgm_expect(cmd, dir, "printf '%s' '原地待命' > /tmp/a2; mux envelope --from cc --body-file /tmp/a2 -- 1:a 状态", 2, "SEND-GATE[PAUSE-FORM]"),
+           "sgm-adv-v3-n6-from-cc-same-cmd-idle-red");
+    ck_sgm(sgm_expect(cmd, dir, "stdbuf -o L mux envelope @all 状态 原地待命", 2, "SEND-GATE[BROADCAST-IDLE]"),
+           "sgm-adv-v3-n7-stdbuf-space-opt-red");
+}
 
 static int run_case(char **argv, long i, const char *dir, int *rc, char **err) {
     char pin[1200], perr[1200], fb[1200], *json; sy_spawn_t o; sy_exit_t st; int fi, fe; unsigned char *b = 0; int64_t n = 0;
@@ -454,7 +638,7 @@ static void cesc(const char *s) {
 }
 
 int main(int argc, char **argv) {
-    char dir[1200], tab[1300], warnf[1300], *def[4]; char **cmd; long i, failed = 0;
+    char dir[1200], tab[1300], warnf[1300], *def[4]; char **cmd; long i;
     int gen = argc > 1 && sw(argv[1], "--gen") && argv[1][5] == 0;
     const char *home = sy_env("HOME"); long now = sy_wall_s();
     def[0] = (char *)"sh"; def[1] = (char *)"./unisacc.com"; def[2] = (char *)"tools/guard-hook.cx"; def[3] = 0;
@@ -497,7 +681,8 @@ int main(int argc, char **argv) {
         } else sy_printf("ok\t%s\trc=%d\n", FX[i].name, rc);
     }
     if (gen) { sy_printf("};\n"); sy_remove_all(H); sy_remove_all(T); return failed ? 1 : 0; }
-    sy_printf("CHECK_GUARD_HOOK\tcases=%ld failed=%ld\n", NFX, failed);
+    check_send_gate_minimal(cmd, dir);
+    sy_printf("CHECK_GUARD_HOOK\tcases=%ld failed=%ld\n", NFX + sgm_cases, failed);
     sy_remove_all(H); sy_remove_all(T);
     return failed ? 1 : 0;
 }
