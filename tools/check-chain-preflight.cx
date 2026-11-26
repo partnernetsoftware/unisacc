@@ -480,12 +480,32 @@ int main(void) {
 
     /* 17. --shard sixtarget|snap|all isolates sixtarget nodes from chain-to-snap and refuses unknown shard names */
     {
-        char t_snap_fail[1200], t_six_fail[1200], gcmd[2400];
+        char t_snap_fail[1200], t_six_fail[1200], t_mark[1200], markp[1200], tbuf[2400], gcmd[2400];
+        size_t mn = 0; char *mb = 0;
         wr_file(p2repo, "build/version-seq.tsv", "slot\tversion\tclass\tstate\tnote\n1\t0.0.1\ttest\t已公开\tfixture\n");
         cx_fmt(gcmd, sizeof gcmd,
             "cd '%s' && git tag -d v0.0.36 >/dev/null 2>&1; git add build/version-seq.tsv && "
             "git -c user.name=fx -c user.email=fx@local -c core.hooksPath=/dev/null -c commit.gpgsign=false commit -qm clean_seq", p2repo);
         ckk_sh("CHECK_CHAIN_PREFLIGHT", gcmd, out, sizeof out);
+
+        cx_fmt(markp, sizeof markp, "%s/pf-exec-mark.txt", fx);
+        cx_fmt(t_mark, sizeof t_mark, "%s/table-mark.tsv", fx);
+        cx_fmt(tbuf, sizeof tbuf,
+            "name\tpatterns\tcmd\ttimeout_s\n"
+            "root-types\t*\tsh ./unisacc.com tools/chain-preflight.cx -- --item root-types\t10\n"
+            "snap-cache-types\t*\tsh ./unisacc.com tools/chain-preflight.cx -- --item snap-cache-types\t10\n"
+            "parse2-bind\t*\tsh ./unisacc.com tools/chain-preflight.cx -- --item parse2-bind\t30\n"
+            "sys-six-target-0\tcx/sys/\tsh -c 'printf A >> \"%s\"'\t30\n"
+            "chain-to-snap\ttools/candidate-chain.cx\tsh -c 'printf B >> \"%s\"'\t30\n", markp, markp);
+        wr_file(fx, "table-mark.tsv", tbuf);
+
+        (void)sy_unlink(markp);
+        cx_fmt(arg, sizeof arg, "--table %s --root %s --repo %s --snap-base %s --rev %s", t_mark, root_ok, p2repo, snap_base, ok_sha);
+        mb = (run_pf(arg, out, sizeof out) == 0) ? cx_read(markp, &mn) : 0;
+        ck(mb && mn == 2 && ((mb[0] == 'A' && mb[1] == 'B') || (mb[0] == 'B' && mb[1] == 'A')) &&
+           has(out, "verdict=PASS\tfailed=-\tnodes=5\t"),
+           "shard-default-no-flag-records-both-ab", out);
+        if (mb) { free(mb); mb = 0; }
 
         cx_fmt(t_snap_fail, sizeof t_snap_fail, "%s/table-snap-fail.tsv", fx);
         wr_file(fx, "table-snap-fail.tsv",
