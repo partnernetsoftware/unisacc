@@ -72,6 +72,52 @@ static void git(const char *dir, const char *a, const char *b, const char *c) {
     run(v, out, sizeof out);
 }
 
+/* Parse active line-start #define NRK <N> from ratchets source without scanning source via tx_find. */
+static int cr_read_nrk(const char *path) {
+    size_t sz = 0;
+    char *buf = cx_read(path, &sz);
+    long pos = 0;
+    int blk_cmt = 0;
+    int val = -1;
+    if (!buf) return -1;
+    while (pos < (long)sz) {
+        long eol = pos;
+        long cur = pos;
+        while (eol < (long)sz && buf[eol] != '\n') eol++;
+        while (cur < eol) {
+            if (blk_cmt) {
+                if (cur + 1 < eol && buf[cur] == '*' && buf[cur + 1] == '/') { blk_cmt = 0; cur += 2; }
+                else cur++;
+                continue;
+            }
+            if (cur + 1 < eol && buf[cur] == '/' && buf[cur + 1] == '*') { blk_cmt = 1; cur += 2; continue; }
+            if (cur + 1 < eol && buf[cur] == '/' && buf[cur + 1] == '/') break;
+            if (buf[cur] == ' ' || buf[cur] == '\t') { cur++; continue; }
+            if (cur + 7 < eol && !memcmp(buf + cur, "#define", 7) && (buf[cur + 7] == ' ' || buf[cur + 7] == '\t')) {
+                long q = cur + 7;
+                while (q < eol && (buf[q] == ' ' || buf[q] == '\t')) q++;
+                if (q + 3 < eol && !memcmp(buf + q, "NRK", 3) && (buf[q + 3] == ' ' || buf[q + 3] == '\t')) {
+                    long d = q + 3, acc = 0;
+                    while (d < eol && (buf[d] == ' ' || buf[d] == '\t')) d++;
+                    if (d < eol && buf[d] >= '0' && buf[d] <= '9') {
+                        while (d < eol && buf[d] >= '0' && buf[d] <= '9' && acc < 10000) {
+                            acc = acc * 10 + (buf[d] - '0');
+                            d++;
+                        }
+                        if (acc > 0 && (d == eol || buf[d] == ' ' || buf[d] == '\t' || buf[d] == '\r' || buf[d] == '/'))
+                            val = (int)acc;
+                    }
+                }
+            }
+            break;
+        }
+        if (val > 0) break;
+        pos = (eol < (long)sz) ? eol + 1 : eol;
+    }
+    mm_free(buf);
+    return val;
+}
+
 static int merge_cr_shards(int nfiles, char **files) {
     int got_core = 0, got_launch = 0;
     long tot_pass = 0, tot_fail = 0;
@@ -153,10 +199,29 @@ int main(int argc, char **argv) {
     jt("derive-outer-timeout-shard-names-unfinished-generators", "derive:doc-links,tool-index,table-index", "DERIVE\tdoc-links\tOK\t11000\n", "142", "FAIL", "failed_generator=tool-index(TIMEOUT),table-index(TIMEOUT)");
     jt("derive-no-summary-fail", "derive", "garbage\n", "0", "FAIL", "no DERIVE_SUMMARY");
     /* 2b: ok must equal <repo>/tools/ratchets.cx line-start #define NRK (comments skipped). */
-    jt("ratchets-19-pass", "ratchets", "RATCHET\tcxraw\tok\tx\nRATCHETS\tok=19\tfail=0\telapsed_ms=5\n", "0", "PASS", "ok=19");
-    jt("ratchets-18-short-fail", "ratchets", "RATCHETS\tok=18\tfail=0\telapsed_ms=5\n", "0", "FAIL", "want_ok=");
-    jt("ratchets-slack-warn-pass", "ratchets", "RATCHET\tcxraw\tok\tcxraw: ok: 896 units, 677 calls (baseline 13491); 0 above baseline, 11 below (--write ratchets down)\nRATCHETS\tok=19\tfail=0\telapsed_ms=5\n", "0", "PASS", "WARN ratchet-slack cxraw_below=11");
-    jt("ratchets-fail1-fail", "ratchets", "RATCHET\tcheck-literal\tFAIL\tLITERAL\nRATCHETS\tok=18\tfail=1\telapsed_ms=5\n", "1", "FAIL", "fail=1");
+    {
+        int nrk = cr_read_nrk("tools/ratchets.cx");
+        ck(nrk > 0, "ratchets-nrk-fact-read");
+        if (nrk > 0) {
+            char r_ok[128], r_ok_frag[32], r_short[128], r_over[128], r_want_frag[32], r_slack[280], r_fail1[160];
+            cx_fmt(r_ok, sizeof r_ok, "RATCHET\tcxraw\tok\tx\nRATCHETS\tok=%d\tfail=0\telapsed_ms=5\n", nrk);
+            cx_fmt(r_ok_frag, sizeof r_ok_frag, "ok=%d", nrk);
+            cx_fmt(r_short, sizeof r_short, "RATCHETS\tok=%d\tfail=0\telapsed_ms=5\n", nrk - 1);
+            cx_fmt(r_over, sizeof r_over, "RATCHETS\tok=%d\tfail=0\telapsed_ms=5\n", nrk + 1);
+            cx_fmt(r_want_frag, sizeof r_want_frag, "want_ok=%d", nrk);
+            cx_fmt(r_slack, sizeof r_slack,
+                   "RATCHET\tcxraw\tok\tcxraw: ok: 896 units, 677 calls (baseline 13491); 0 above baseline, 11 below (--write ratchets down)\nRATCHETS\tok=%d\tfail=0\telapsed_ms=5\n",
+                   nrk);
+            cx_fmt(r_fail1, sizeof r_fail1,
+                   "RATCHET\tcheck-literal\tFAIL\tLITERAL\nRATCHETS\tok=%d\tfail=1\telapsed_ms=5\n",
+                   nrk - 1);
+            jt("ratchets-roster-pass", "ratchets", r_ok, "0", "PASS", r_ok_frag);
+            jt("ratchets-short-fail", "ratchets", r_short, "0", "FAIL", r_want_frag);
+            jt("ratchets-over-fail", "ratchets", r_over, "0", "FAIL", r_want_frag);
+            jt("ratchets-slack-warn-pass", "ratchets", r_slack, "0", "PASS", "WARN ratchet-slack cxraw_below=11");
+            jt("ratchets-fail1-fail", "ratchets", r_fail1, "1", "FAIL", "fail=1");
+        }
+    }
     {
         char nrkdir[420], toolsdir[440], rkpath[460];
         const char *body_miss = "/* no NRK define in this fixture */\nint x;\n";
