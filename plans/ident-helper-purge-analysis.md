@@ -4,12 +4,12 @@
 
 ## (1) 精确归因、行号与删除完成区分
 
-- **定时器与脚本**: `/home/devali/repos/moltbaby/systemd/services/system-cleanup.service:7` 指向 `moltbaby/systemd/scripts/system-cleanup.sh`, 由每小时触发的 `system-cleanup.timer` 驱动。
+- **定时器与脚本**: `~/repos/moltbaby/systemd/services/system-cleanup.service:7` 指向 `moltbaby/systemd/scripts/system-cleanup.sh`, 由每小时触发的 `system-cleanup.timer` 驱动。
 - **清理条件与删除分支**:
   - `system-cleanup.sh:90-91` 调用 `purge_stale_children_2h "$HOME/.cache/unisacc"`。
   - `:68` 筛选顶层 `-amin +120 -mmin +120` 且不含 `evidence-*` 的目录; `:70` 检查 `$entry/.no-purge`; `:74` 对整棵子树执行 `find "$entry" \( -amin -120 -o -mmin -120 \) -print -quit`; `:75` 打印 `purge dir: ...`; `:77` 执行 `rm -rf "$entry" 2>/dev/null || true` (删除错误被吞)。
 - **进入删除分支 vs 删除完成**:
-  - `journalctl --user -u system-cleanup.service` 在 `2026-11-27 03:00:03` (以及当天 `00:00:05`) 均记录 `purge dir: /home/devali/.cache/unisacc/ident-helper`, 证明清理脚本在 `:75` 进入了删除分支 (并非被 `.no-purge` 或 `-amin -120` 跳过)。
+  - `journalctl --user -u system-cleanup.service` 在 `2026-11-27 03:00:03` (以及当天 `00:00:05`) 均记录 `purge dir: ~/.cache/unisacc/ident-helper`, 证明清理脚本在 `:75` 进入了删除分支 (并非被 `.no-purge` 或 `-amin -120` 跳过)。
   - 正式链 `ctx` 阶段 `chain-run-9.stderr` 报错 `identity-helper-absolute-path-required errno=2` (由 `tools/source-package.cx:105` 对绝对路径执行解析时遇到 `ENOENT` 发出; 而 `:358` 仅拒非绝对路径参数) 与现场目录缺失共同证实 `:77` 的 `rm -rf` 删除已完成。
 
 ## (2) 钉住时机、全入口覆盖与并发窗口
