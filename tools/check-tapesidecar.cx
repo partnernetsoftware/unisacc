@@ -16,36 +16,9 @@
 #pragma unisa use text.fmt
 #pragma unisa use mem.heap
 #pragma unisa use mem.bytes
-#pragma unisa use cxlib.netpack
+#pragma unisa use cxlib.procrun
+#pragma unisa use cxlib.ckrun
 #pragma unisa use cxlib.tapesidecar
-
-static int g_pass, g_fail;
-
-static void ck(int ok, const char *name, const char *detail) {
-    if (ok) { g_pass++; printf("PASS\t%s\n", name); }
-    else { g_fail++; printf("FAIL\t%s\tdetail=%s\n", name, detail && detail[0] ? detail : "-"); }
-}
-
-static int run_av(const char *cwd, char **av, char *out, long ocap, int *rc_out) {
-    np_result r = {0};
-    char why[256] = {0};
-    if (out && ocap > 0) out[0] = 0;
-    if (np_run(av, cwd, 0, 45, &r, why, sizeof why)) { np_free(&r); return -1; }
-    *rc_out = r.rc;
-    if (out && ocap > 1) {
-        size_t n = 0;
-        for (size_t i = 0; i < r.outn && n + 1 < (size_t)ocap; i++) out[n++] = r.out[i];
-        for (size_t i = 0; i < r.errn && n + 1 < (size_t)ocap; i++) out[n++] = r.err[i];
-        out[n] = 0;
-    }
-    np_free(&r);
-    return 0;
-}
-
-static int run_sh(const char *cwd, const char *cmd, char *out, long ocap, int *rc_out) {
-    char *av[] = {"sh", "-c", (char *)cmd, 0};
-    return run_av(cwd, av, out, ocap, rc_out);
-}
 
 static void write_f(const char *p, const char *s, size_t n) {
     if (cx_write(p, s, n)) sy_exit(2);
@@ -53,6 +26,11 @@ static void write_f(const char *p, const char *s, size_t n) {
 
 static void write_s(const char *p, const char *s) {
     write_f(p, s, (size_t)tx_len(s, 1 << 20));
+}
+
+static int out_contains(const pr_result *r, const char *want, long wlen) {
+    return (r->out && tx_contains(r->out, (long)r->outn, want, wlen)) ||
+           (r->err && tx_contains(r->err, (long)r->errn, want, wlen));
 }
 
 static int seed_tape_dir(const char *root_dir, int name_first, const char *so_body, const char *sl_body) {
@@ -88,7 +66,7 @@ int main(int argc, char **argv) {
             else return 2;
         }
     }
-    char cwd[4096], work[4096], rdir[4400], other[4400], p[4600], q[4600], out[8192];
+    char cwd[4096], work[4096], rdir[4400], other[4400], p[4600], q[4600];
     const char *err = 0;
     if (sy_realpath(".", cwd, sizeof cwd) < 0) return 2;
     if (sy_mkdtemp(sy_tmpdir(), "check-tapesidecar-", work, sizeof work) != 0) return 2;
@@ -100,26 +78,26 @@ int main(int argc, char **argv) {
 
     if (run_unit) {
         /* 1. Absent ROOT/tape/ -> PASS (backward compatible with public roots) */
-        ck(ts_verify_root_tape(rdir, &err) == 0, "verify.absent-tape-dir-passes", err);
+        ckk_ok(ts_verify_root_tape(rdir, &err) == 0, "verify.absent-tape-dir-passes");
 
         /* 2. Valid tape/ with sha-first and name-first manifest layouts */
-        ck(seed_tape_dir(rdir, 0, "so-bytes-v1", "slice-bytes-v1") == 0 &&
-           ts_verify_root_tape(rdir, &err) == 0, "verify.valid-sha-first-passes", err);
-        ck(seed_tape_dir(rdir, 1, "so-bytes-v2", "slice-bytes-v2") == 0 &&
-           ts_verify_root_tape(rdir, &err) == 0, "verify.valid-name-first-passes", err);
+        ckk_ok(seed_tape_dir(rdir, 0, "so-bytes-v1", "slice-bytes-v1") == 0 &&
+               ts_verify_root_tape(rdir, &err) == 0, "verify.valid-sha-first-passes");
+        ckk_ok(seed_tape_dir(rdir, 1, "so-bytes-v2", "slice-bytes-v2") == 0 &&
+               ts_verify_root_tape(rdir, &err) == 0, "verify.valid-name-first-passes");
 
         /* 3. Missing manifest.tsv -> FAIL (kills m2) */
         cx_fmt(p, sizeof p, "%s/tape/manifest.tsv", rdir);
         sy_unlink(p);
-        ck(ts_verify_root_tape(rdir, &err) != 0 && err && tx_eqz(err, "tape-manifest-missing"),
-           "verify.missing-manifest-refused", err);
+        ckk_ok(ts_verify_root_tape(rdir, &err) != 0 && err && tx_eqz(err, "tape-manifest-missing"),
+               "verify.missing-manifest-refused");
 
         /* 4. Manifest world-writable -> FAIL trusted_owner (kills m4) */
         seed_tape_dir(rdir, 1, "so-bytes-v2", "slice-bytes-v2");
         cx_fmt(p, sizeof p, "%s/tape/manifest.tsv", rdir);
-        ck(sy_chmod(p, 0666) == 0 && ts_verify_root_tape(rdir, &err) != 0 &&
-           err && tx_eqz(err, "tape-manifest-untrusted-owner"),
-           "verify.world-writable-manifest-refused", err);
+        ckk_ok(sy_chmod(p, 0666) == 0 && ts_verify_root_tape(rdir, &err) != 0 &&
+               err && tx_eqz(err, "tape-manifest-untrusted-owner"),
+               "verify.world-writable-manifest-refused");
 
         /* 5. Oversized manifest (>65536 bytes) -> FAIL (kills gatekeeper m7) */
         seed_tape_dir(rdir, 1, "so-bytes-v2", "slice-bytes-v2");
@@ -133,16 +111,16 @@ int main(int argc, char **argv) {
             cx_fmt(p, sizeof p, "%s/tape/manifest.tsv", rdir);
             write_f(p, big, big_n);
             mm_free(big);
-            ck(ts_verify_root_tape(rdir, &err) != 0 && err && tx_eqz(err, "tape-manifest-unreadable"),
-               "verify.oversized-manifest-refused", err);
+            ckk_ok(ts_verify_root_tape(rdir, &err) != 0 && err && tx_eqz(err, "tape-manifest-unreadable"),
+                   "verify.oversized-manifest-refused");
         }
 
         /* 6. Manifest listing itself ("manifest.tsv") -> FAIL (kills survivor id=3) */
         seed_tape_dir(rdir, 1, "so-bytes-v2", "slice-bytes-v2");
         cx_fmt(p, sizeof p, "%s/tape/manifest.tsv", rdir);
         write_s(p, "name\tsha256\tbytes\nmanifest.tsv\t0000000000000000000000000000000000000000000000000000000000000000\t10\n");
-        ck(ts_verify_root_tape(rdir, &err) != 0 && err && tx_eqz(err, "tape-manifest-malformed"),
-           "verify.manifest-self-entry-refused", err);
+        ckk_ok(ts_verify_root_tape(rdir, &err) != 0 && err && tx_eqz(err, "tape-manifest-malformed"),
+               "verify.manifest-self-entry-refused");
 
         /* 7. Manifest duplicate member row -> FAIL (kills m5) */
         seed_tape_dir(rdir, 1, "so-bytes-v2", "slice-bytes-v2");
@@ -152,81 +130,81 @@ int main(int argc, char **argv) {
             cx_fmt(man, sizeof man, "name\tsha256\tbytes\ntapemode.so\t%s\t11\ntapemode.so\t%s\t11\n", s_so, s_so);
             cx_fmt(p, sizeof p, "%s/tape/manifest.tsv", rdir);
             write_s(p, man);
-            ck(ts_verify_root_tape(rdir, &err) != 0 && err && tx_eqz(err, "tape-manifest-duplicate"),
-               "verify.duplicate-manifest-row-refused", err);
+            ckk_ok(ts_verify_root_tape(rdir, &err) != 0 && err && tx_eqz(err, "tape-manifest-duplicate"),
+                   "verify.duplicate-manifest-row-refused");
         }
 
         /* 8. Manifest lists missing member -> FAIL (kills m1) */
         seed_tape_dir(rdir, 1, "so-bytes-v2", "slice-bytes-v2");
         cx_fmt(p, sizeof p, "%s/tape/m53.tapeslice", rdir);
         sy_unlink(p);
-        ck(ts_verify_root_tape(rdir, &err) != 0 && err && tx_eqz(err, "tape-member-missing"),
-           "verify.missing-member-refused", err);
+        ckk_ok(ts_verify_root_tape(rdir, &err) != 0 && err && tx_eqz(err, "tape-member-missing"),
+               "verify.missing-member-refused");
 
         /* 9. Member bytes mismatch -> FAIL */
         seed_tape_dir(rdir, 1, "so-bytes-v2", "slice-bytes-v2");
         cx_fmt(p, sizeof p, "%s/tape/tapemode.so", rdir);
         write_s(p, "so-bytes-v2-extra");
-        ck(ts_verify_root_tape(rdir, &err) != 0 && err && tx_eqz(err, "tape-member-bytes-mismatch"),
-           "verify.member-bytes-mismatch-refused", err);
+        ckk_ok(ts_verify_root_tape(rdir, &err) != 0 && err && tx_eqz(err, "tape-member-bytes-mismatch"),
+               "verify.member-bytes-mismatch-refused");
 
         /* 10. Tampered manifest sha (same size) -> FAIL */
         seed_tape_dir(rdir, 1, "so-bytes-v2", "slice-bytes-v2");
         cx_fmt(p, sizeof p, "%s/tape/manifest.tsv", rdir);
         write_s(p, "name\tsha256\tbytes\ntapemode.so\t0000000000000000000000000000000000000000000000000000000000000000\t11\n");
-        ck(ts_verify_root_tape(rdir, &err) != 0 && err && tx_eqz(err, "tape-member-sha-mismatch"),
-           "verify.tampered-manifest-sha-refused", err);
+        ckk_ok(ts_verify_root_tape(rdir, &err) != 0 && err && tx_eqz(err, "tape-member-sha-mismatch"),
+               "verify.tampered-manifest-sha-refused");
 
         /* 11. Empty manifest / dotdot member -> FAIL */
         write_s(p, "name\tsha256\tbytes\n");
-        ck(ts_verify_root_tape(rdir, &err) != 0 && err && tx_eqz(err, "tape-manifest-empty"),
-           "verify.empty-manifest-refused", err);
+        ckk_ok(ts_verify_root_tape(rdir, &err) != 0 && err && tx_eqz(err, "tape-manifest-empty"),
+               "verify.empty-manifest-refused");
         write_s(p, "name\tsha256\tbytes\n../evil.so\t0000000000000000000000000000000000000000000000000000000000000000\t4\n");
-        ck(ts_verify_root_tape(rdir, &err) != 0 && err && tx_eqz(err, "tape-manifest-malformed"),
-           "verify.dotdot-member-refused", err);
+        ckk_ok(ts_verify_root_tape(rdir, &err) != 0 && err && tx_eqz(err, "tape-manifest-malformed"),
+               "verify.dotdot-member-refused");
 
         /* 12. Unlisted rogue file in tape/ -> FAIL */
         seed_tape_dir(rdir, 1, "so-bytes-v2", "slice-bytes-v2");
         cx_fmt(p, sizeof p, "%s/tape/rogue.so", rdir);
         write_s(p, "evil");
-        ck(ts_verify_root_tape(rdir, &err) != 0 && err && tx_eqz(err, "tape-unlisted-entry"),
-           "verify.unlisted-file-refused", err);
+        ckk_ok(ts_verify_root_tape(rdir, &err) != 0 && err && tx_eqz(err, "tape-unlisted-entry"),
+               "verify.unlisted-file-refused");
 
         /* 13. World-writable tape/ or member -> FAIL trusted_owner (via L0 sy_chmod) */
         seed_tape_dir(rdir, 1, "so-bytes-v2", "slice-bytes-v2");
         cx_fmt(p, sizeof p, "%s/tape", rdir);
-        ck(sy_chmod(p, 0777) == 0 && ts_verify_root_tape(rdir, &err) != 0 &&
-           err && tx_eqz(err, "tape-dir-untrusted-owner"),
-           "verify.world-writable-tape-dir-refused", err);
+        ckk_ok(sy_chmod(p, 0777) == 0 && ts_verify_root_tape(rdir, &err) != 0 &&
+               err && tx_eqz(err, "tape-dir-untrusted-owner"),
+               "verify.world-writable-tape-dir-refused");
         sy_chmod(p, 0755);
         cx_fmt(p, sizeof p, "%s/tape/tapemode.so", rdir);
-        ck(sy_chmod(p, 0666) == 0 && ts_verify_root_tape(rdir, &err) != 0 &&
-           err && tx_eqz(err, "tape-member-untrusted-owner"),
-           "verify.world-writable-member-refused", err);
+        ckk_ok(sy_chmod(p, 0666) == 0 && ts_verify_root_tape(rdir, &err) != 0 &&
+               err && tx_eqz(err, "tape-member-untrusted-owner"),
+               "verify.world-writable-member-refused");
 
         /* 14. Symlink ROOT/tape, symlink manifest, symlink member -> FAIL (via L0 sy_symlink) */
         cx_fmt(p, sizeof p, "%s/tape", rdir);
         cx_fmt(q, sizeof q, "%s/tape", other);
         sy_remove_all(p);
-        ck(sy_symlink(q, p) == 0 && ts_verify_root_tape(rdir, &err) != 0 &&
-           err && tx_eqz(err, "tape-dir-symlink"),
-           "verify.symlink-tape-dir-refused", err);
+        ckk_ok(sy_symlink(q, p) == 0 && ts_verify_root_tape(rdir, &err) != 0 &&
+               err && tx_eqz(err, "tape-dir-symlink"),
+               "verify.symlink-tape-dir-refused");
 
         seed_tape_dir(rdir, 1, "so-ext", "sl-ext");
         cx_fmt(p, sizeof p, "%s/tape/manifest.tsv", rdir);
         cx_fmt(q, sizeof q, "%s/tape/manifest.tsv", other);
         sy_unlink(p);
-        ck(sy_symlink(q, p) == 0 && ts_verify_root_tape(rdir, &err) != 0 &&
-           err && tx_eqz(err, "tape-manifest-symlink"),
-           "verify.symlink-manifest-refused", err);
+        ckk_ok(sy_symlink(q, p) == 0 && ts_verify_root_tape(rdir, &err) != 0 &&
+               err && tx_eqz(err, "tape-manifest-symlink"),
+               "verify.symlink-manifest-refused");
 
         seed_tape_dir(rdir, 1, "so-ext", "sl-ext");
         cx_fmt(p, sizeof p, "%s/tape/tapemode.so", rdir);
         cx_fmt(q, sizeof q, "%s/tape/tapemode.so", other);
         sy_unlink(p);
-        ck(sy_symlink(q, p) == 0 && ts_verify_root_tape(rdir, &err) != 0 &&
-           err && tx_eqz(err, "tape-member-symlink"),
-           "verify.symlink-member-refused", err);
+        ckk_ok(sy_symlink(q, p) == 0 && ts_verify_root_tape(rdir, &err) != 0 &&
+               err && tx_eqz(err, "tape-member-symlink"),
+               "verify.symlink-member-refused");
 
         /* 15. ts_resolve_tape_so boundary & negative controls (R1/R2, R14, m3, m6, missing so/dir) */
         seed_tape_dir(rdir, 1, "so-real", "sl-real");
@@ -237,59 +215,59 @@ int main(int argc, char **argv) {
         {
             char resolved[4400], nonape[4600], slape[4600], sldir[4600], tp[4600];
             /* 15a. Unset both env vars -> resolves strictly inside <ape_dir>/tape/tapemode.so */
-            ck(ts_resolve_tape_so(rdir, 0, 0, resolved, sizeof resolved, &err) == 0 &&
-               tx_contains(resolved, tx_len(resolved, sizeof resolved), "/tape/tapemode.so", 17),
-               "ape-self.unset-resolves-inside-tape", err);
+            ckk_ok(ts_resolve_tape_so(rdir, 0, 0, resolved, sizeof resolved, &err) == 0 &&
+                   tx_contains(resolved, tx_len(resolved, sizeof resolved), "/tape/tapemode.so", 17),
+                   "ape-self.unset-resolves-inside-tape");
             /* 15b. R1/R2: empty/NULL env_ape_self with non-empty env_container -> refused */
-            ck(ts_resolve_tape_so(rdir, "", q, resolved, sizeof resolved, &err) != 0 &&
-               err && tx_eqz(err, "ape-self-missing-for-container"),
-               "ape-self.empty-self-with-container-refused", err);
-            ck(ts_resolve_tape_so(rdir, 0, q, resolved, sizeof resolved, &err) != 0 &&
-               err && tx_eqz(err, "ape-self-missing-for-container"),
-               "ape-self.null-self-with-container-refused", err);
+            ckk_ok(ts_resolve_tape_so(rdir, "", q, resolved, sizeof resolved, &err) != 0 &&
+                   err && tx_eqz(err, "ape-self-missing-for-container"),
+                   "ape-self.empty-self-with-container-refused");
+            ckk_ok(ts_resolve_tape_so(rdir, 0, q, resolved, sizeof resolved, &err) != 0 &&
+                   err && tx_eqz(err, "ape-self-missing-for-container"),
+                   "ape-self.null-self-with-container-refused");
             /* 15c. R14: symlink ape_dir_abs itself -> refused */
             cx_fmt(sldir, sizeof sldir, "%s/root_link", work);
-            ck(sy_symlink(other, sldir) == 0 && ts_resolve_tape_so(sldir, 0, 0, resolved, sizeof resolved, &err) != 0 &&
-               err && tx_eqz(err, "tape-root-symlink"),
-               "ape-self.symlink-ape-dir-refused", err);
+            ckk_ok(sy_symlink(other, sldir) == 0 && ts_resolve_tape_so(sldir, 0, 0, resolved, sizeof resolved, &err) != 0 &&
+                   err && tx_eqz(err, "tape-root-symlink"),
+                   "ape-self.symlink-ape-dir-refused");
             /* 15d. Matching UNISACC_APE_SELF + UNISA_CONTAINER in same root with APE magic -> PASS */
-            ck(ts_resolve_tape_so(rdir, p, p, resolved, sizeof resolved, &err) == 0 &&
-               tx_contains(resolved, tx_len(resolved, sizeof resolved), "/tape/tapemode.so", 17),
-               "ape-self.matching-same-root-passes", err);
+            ckk_ok(ts_resolve_tape_so(rdir, p, p, resolved, sizeof resolved, &err) == 0 &&
+                   tx_contains(resolved, tx_len(resolved, sizeof resolved), "/tape/tapemode.so", 17),
+                   "ape-self.matching-same-root-passes");
             /* 15e. Gatekeeper m6: world-writable APE self file -> refused (ape-self-untrusted) */
-            ck(sy_chmod(p, 0666) == 0 && ts_resolve_tape_so(rdir, p, p, resolved, sizeof resolved, &err) != 0 &&
-               err && tx_eqz(err, "ape-self-untrusted"),
-               "ape-self.world-writable-ape-refused", err);
+            ckk_ok(sy_chmod(p, 0666) == 0 && ts_resolve_tape_so(rdir, p, p, resolved, sizeof resolved, &err) != 0 &&
+                   err && tx_eqz(err, "ape-self-untrusted"),
+                   "ape-self.world-writable-ape-refused");
             sy_chmod(p, 0644);
             /* 15f. UNISACC_APE_SELF pointing elsewhere -> refused */
-            ck(ts_resolve_tape_so(rdir, q, q, resolved, sizeof resolved, &err) != 0 &&
-               err && tx_eqz(err, "ape-self-outside-root"),
-               "ape-self.pointing-elsewhere-refused", err);
+            ckk_ok(ts_resolve_tape_so(rdir, q, q, resolved, sizeof resolved, &err) != 0 &&
+                   err && tx_eqz(err, "ape-self-outside-root"),
+                   "ape-self.pointing-elsewhere-refused");
             /* 15g. UNISACC_APE_SELF != UNISA_CONTAINER -> refused */
-            ck(ts_resolve_tape_so(rdir, p, q, resolved, sizeof resolved, &err) != 0 &&
-               err && tx_eqz(err, "ape-self-container-mismatch"),
-               "ape-self.container-mismatch-refused", err);
+            ckk_ok(ts_resolve_tape_so(rdir, p, q, resolved, sizeof resolved, &err) != 0 &&
+                   err && tx_eqz(err, "ape-self-container-mismatch"),
+                   "ape-self.container-mismatch-refused");
             /* 15h. Bare relative UNISACC_APE_SELF -> refused */
-            ck(ts_resolve_tape_so(rdir, "unisacc.com", "unisacc.com", resolved, sizeof resolved, &err) != 0 &&
-               err && tx_eqz(err, "ape-self-unresolvable"),
-               "ape-self.bare-relative-refused", err);
+            ckk_ok(ts_resolve_tape_so(rdir, "unisacc.com", "unisacc.com", resolved, sizeof resolved, &err) != 0 &&
+                   err && tx_eqz(err, "ape-self-unresolvable"),
+                   "ape-self.bare-relative-refused");
             /* 15i. Non-APE file -> refused */
             cx_fmt(nonape, sizeof nonape, "%s/not-an-ape.com", rdir);
             write_s(nonape, "#!/bin/sh\necho hi\n");
-            ck(ts_resolve_tape_so(rdir, nonape, nonape, resolved, sizeof resolved, &err) != 0 &&
-               err && tx_eqz(err, "ape-self-not-ape"),
-               "ape-self.non-ape-magic-refused", err);
+            ckk_ok(ts_resolve_tape_so(rdir, nonape, nonape, resolved, sizeof resolved, &err) != 0 &&
+                   err && tx_eqz(err, "ape-self-not-ape"),
+                   "ape-self.non-ape-magic-refused");
             /* 15j. Symlink APE -> refused */
             cx_fmt(slape, sizeof slape, "%s/link.com", rdir);
-            ck(sy_symlink(p, slape) == 0 && ts_resolve_tape_so(rdir, slape, slape, resolved, sizeof resolved, &err) != 0 &&
-               err && tx_eqz(err, "ape-self-untrusted"),
-               "ape-self.symlink-ape-refused", err);
+            ckk_ok(sy_symlink(p, slape) == 0 && ts_resolve_tape_so(rdir, slape, slape, resolved, sizeof resolved, &err) != 0 &&
+                   err && tx_eqz(err, "ape-self-untrusted"),
+                   "ape-self.symlink-ape-refused");
             /* 15k. Resolve under tampered tapemode.so -> refused (kills m3) */
             cx_fmt(tp, sizeof tp, "%s/tape/tapemode.so", rdir);
             write_s(tp, "SO-REAL");
-            ck(ts_resolve_tape_so(rdir, p, p, resolved, sizeof resolved, &err) != 0 &&
-               err && tx_eqz(err, "tape-member-sha-mismatch"),
-               "ape-self.resolve-tampered-so-refused", err);
+            ckk_ok(ts_resolve_tape_so(rdir, p, p, resolved, sizeof resolved, &err) != 0 &&
+                   err && tx_eqz(err, "tape-member-sha-mismatch"),
+                   "ape-self.resolve-tampered-so-refused");
             /* 15l. Resolve when manifest valid but tapemode.so absent -> tape-so-missing */
             {
                 char s_sl[65], man[512], mf[4600];
@@ -300,14 +278,14 @@ int main(int argc, char **argv) {
                 cx_fmt(mf, sizeof mf, "%s/m53.tapeslice", tp); write_s(mf, "sl-only");
                 cx_fmt(man, sizeof man, "name\tsha256\tbytes\nm53.tapeslice\t%s\t7\n", s_sl);
                 cx_fmt(mf, sizeof mf, "%s/manifest.tsv", tp); write_s(mf, man);
-                ck(ts_resolve_tape_so(rdir, p, p, resolved, sizeof resolved, &err) != 0 &&
-                   err && tx_eqz(err, "tape-so-missing"),
-                   "ape-self.resolve-so-missing-refused", err);
+                ckk_ok(ts_resolve_tape_so(rdir, p, p, resolved, sizeof resolved, &err) != 0 &&
+                       err && tx_eqz(err, "tape-so-missing"),
+                       "ape-self.resolve-so-missing-refused");
                 /* 15m. Resolve when tape/ dir absent -> tape-dir-missing */
                 sy_remove_all(tp);
-                ck(ts_resolve_tape_so(rdir, p, p, resolved, sizeof resolved, &err) != 0 &&
-                   err && tx_eqz(err, "tape-dir-missing"),
-                   "ape-self.resolve-tape-dir-missing-refused", err);
+                ckk_ok(ts_resolve_tape_so(rdir, p, p, resolved, sizeof resolved, &err) != 0 &&
+                       err && tx_eqz(err, "tape-dir-missing"),
+                       "ape-self.resolve-tape-dir-missing-refused");
             }
         }
     } /* end run_unit */
@@ -319,7 +297,7 @@ int main(int argc, char **argv) {
         const char *ape_body = "#!/bin/sh\nif [ \"$1\" = \"--version\" ]; then echo \"unisacc 0.1.3\"; exit 0; fi\n";
         long ape_len = tx_len(ape_body, 512);
         const char *c13 = "0123456789012345678901234567890123456789";
-        int rc = -1;
+        pr_result pr;
         sy_sha256_hex(ape_body, ape_len, ape_sha);
 
         cx_fmt(repo, sizeof repo, "%s/e2e_repo", work);
@@ -349,41 +327,49 @@ int main(int argc, char **argv) {
             "set -e; cd '%s'; git init -q -b main; git config user.name t; git config user.email t@t; git config commit.gpgsign false; "
             "git add -A; GIT_AUTHOR_DATE='2026-11-25T10:00:00+0800' GIT_COMMITTER_DATE='2026-11-25T10:00:00+0800' git commit -qm c1; "
             "GIT_COMMITTER_DATE='2026-11-25T10:00:00+0800' git tag -a -m v0.1.3 v0.1.3", repo);
-        run_sh(cwd, cmd, out, sizeof out, &rc);
-        ck(rc == 0, "e2e.fixture-setup", out);
-
+        {
+            char *sv[] = {"sh", "-c", cmd, 0};
+            ckk_ok(pr_run("tapesidecar-git", sv, cwd, 0, 45, &pr) == 0 && pr.rc == 0, "e2e.fixture-setup");
+            pr_free(&pr);
+        }
         {
             char *cv[] = {"sh", "./unisacc.com", "-o", rcbin, "tools/root-current.cx", 0};
-            ck(run_av(cwd, cv, out, sizeof out, &rc) == 0 && rc == 0, "e2e.compile-root-current", out);
+            ckk_ok(pr_run("tapesidecar-cc", cv, cwd, 0, 45, &pr) == 0 && pr.rc == 0, "e2e.compile-root-current");
+            pr_free(&pr);
         }
         {
             char *rv[] = {rcbin, "--repo", repo, "--root", froot, 0};
-            run_av(cwd, rv, out, sizeof out, &rc);
-            ck(rc == 0 && tx_contains(out, tx_len(out, sizeof out), "ROOT_CURRENT\tPASS\texpect=0.1.3", 30),
-               "e2e.root-current-no-tape-passes", out);
+            int t = pr_run("tapesidecar-e2e1", rv, cwd, 0, 45, &pr);
+            ckk_ok(t == 0 && pr.rc == 0 && out_contains(&pr, "ROOT_CURRENT\tPASS\texpect=0.1.3", 30),
+                   "e2e.root-current-no-tape-passes");
+            pr_free(&pr);
 
             seed_tape_dir(froot, 1, "e2e-so", "e2e-slice");
-            run_av(cwd, rv, out, sizeof out, &rc);
-            ck(rc == 0 && tx_contains(out, tx_len(out, sizeof out), "ROOT_CURRENT\tPASS\texpect=0.1.3", 30),
-               "e2e.root-current-valid-tape-passes", out);
+            t = pr_run("tapesidecar-e2e2", rv, cwd, 0, 45, &pr);
+            ckk_ok(t == 0 && pr.rc == 0 && out_contains(&pr, "ROOT_CURRENT\tPASS\texpect=0.1.3", 30),
+                   "e2e.root-current-valid-tape-passes");
+            pr_free(&pr);
 
             cx_fmt(p, sizeof p, "%s/tape/manifest.tsv", froot);
             write_s(p, "name\tsha256\tbytes\ntapemode.so\tffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffff\t6\n");
-            run_av(cwd, rv, out, sizeof out, &rc);
-            ck(rc == 1 && tx_contains(out, tx_len(out, sizeof out), "reason=tape-member-sha-mismatch", 31),
-               "e2e.root-current-tampered-manifest-red", out);
+            t = pr_run("tapesidecar-e2e3", rv, cwd, 0, 45, &pr);
+            ckk_ok(t == 0 && pr.rc == 1 && out_contains(&pr, "reason=tape-member-sha-mismatch", 31),
+                   "e2e.root-current-tampered-manifest-red");
+            pr_free(&pr);
 
             cx_fmt(p, sizeof p, "%s/tape", froot);
             cx_fmt(q, sizeof q, "%s/tape", other);
             sy_remove_all(p);
             sy_symlink(q, p);
-            run_av(cwd, rv, out, sizeof out, &rc);
-            ck(rc == 1 && tx_contains(out, tx_len(out, sizeof out), "reason=tape-dir-symlink", 23),
-               "e2e.root-current-symlink-tape-red", out);
+            t = pr_run("tapesidecar-e2e4", rv, cwd, 0, 45, &pr);
+            ckk_ok(t == 0 && pr.rc == 1 && out_contains(&pr, "reason=tape-dir-symlink", 23),
+                   "e2e.root-current-symlink-tape-red");
+            pr_free(&pr);
         }
     }
 
     (void)sy_remove_all(work);
-    printf("CHECK_TAPESIDECAR\tpassed=%d\tfailed=%d\n", g_pass, g_fail);
-    return g_fail ? 1 : 0;
+    int nbad = 0, ntot = ckk_okcount(&nbad);
+    printf("CHECK_TAPESIDECAR\tpassed=%d\tfailed=%d\n", ntot - nbad, nbad);
+    return nbad ? 1 : 0;
 }
