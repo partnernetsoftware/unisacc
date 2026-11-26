@@ -37,8 +37,10 @@
  *      core, never the reverse;
  *   5. the core module file set is frozen by tests/cx-module-freeze.tsv: a
  *      frozen-set module lacking a row fails (FREEZE-NEW) and a row whose file
- *      is gone fails (FREEZE-STALE). The set may only shrink: adding a core
- *      module means editing the table, which is the review point;
+ *      is gone fails (FREEZE-STALE). A walk I/O error other than ENOENT fails
+ *      (FREEZE-OPEN, FREEZE-LSTAT, FREEZE-DIR); ENOENT alone is absence.
+ *      The set may only shrink: adding a core module means editing the table,
+ *      which is the review point;
  *      sys.dlcall/sys.sig and the other moved-out modules are not in it.
  *
  * Observed counts are printed for the receipt; they are not assertions.
@@ -74,6 +76,7 @@ static char cl_line[CL_PATH];
 static int cl_edges, cl_same, cl_down, cl_up, cl_amb, cl_out, cl_unres, cl_fail;
 static int cl_amb_out, cl_io, cl_cur_line, cl_cond;
 static int cl_ext, cl_ext_bad, cl_frz_new, cl_frz_stale;
+static int cl_frz_open_rc, cl_frz_lstat_rc, cl_frz_dir_rc;
 static char cl_frz[CL_FRZ][CL_PATH];
 static int cl_nfrz;
 static int cl_und_lex, cl_und_recon, cl_und_meta, cl_und_io, cl_und_total;
@@ -425,9 +428,15 @@ static void cl_frz_walk(const char *rel, int depth, int *seen) {
     if (depth > 8) { cl_frz_new = cl_frz_new + 1; sy_eprintf("FAIL\tFREEZE-DEPTH\t%s\n", rel); cl_fail = cl_fail + 1; return; }
     cl_join(full, sizeof full, cl_root, rel);
     fd = sy_open(full, O_RDONLY | O_DIRECTORY, 0);
-    if (fd < 0) return;
+    if (fd < 0) {
+        if (fd != -ENOENT) {
+            cl_frz_open_rc = fd; cl_fail = cl_fail + 1;
+            sy_eprintf("FAIL\tFREEZE-OPEN\t%s\t%d\n", rel, fd);
+        }
+        return;
+    }
     n = sy_dir_names(fd, names, sizeof names);
-    if (n < 0) { sy_close(fd); return; }
+    if (n < 0) { sy_close(fd); cl_frz_dir_rc = n; cl_fail = cl_fail + 1; sy_eprintf("FAIL\tFREEZE-DIR\t%s\tdirent %d\n", rel, n); return; }
     i = 0;
     for (k = 0; k < n; k++) {
         long len;
@@ -438,7 +447,15 @@ static void cl_frz_walk(const char *rel, int depth, int *seen) {
         {
             sy_stat_t st;
             cl_join(full, sizeof full, cl_root, sub);
-            if (sy_lstat(full, &st) < 0) continue;   /* a directory symlink is a second entry of one source, never a new module */
+            {   int lrc = sy_lstat(full, &st);
+                if (lrc < 0) {
+                    if (lrc != -ENOENT) {
+                        cl_frz_lstat_rc = lrc; cl_fail = cl_fail + 1;
+                        sy_eprintf("FAIL\tFREEZE-LSTAT\t%s\t%d\n", sub, lrc);
+                    }
+                    continue;   /* ENOENT: name vanished between readdir and lstat */
+                }
+            }
             if (st.kind == 'd') { if (cl_frz_wanted(sub) || cl_at(sub, "cx/core/") || cl_at(sub, "cx/cx0/")) cl_frz_walk(sub, depth + 1, seen); continue; }
             if (st.kind != 'f' || !cl_frz_wanted(sub)) continue;
             {   long sl = tx_len(sub, CL_PATH);
@@ -1064,6 +1081,96 @@ static void cl_fixtures(void) {
       rc2 = cl_unesc("abc", 3, out, 3); fx_note(rc2 < 0, "manifest-unescape-too-long");
       rc2 = cl_unesc("\\q", 2, out, sizeof out); fx_note(rc2 == 0 && tx_eqz(out, "\\q"), "manifest-unescape-unknown-kept");
       rc2 = cl_unesc("", 0, out, sizeof out); fx_note(rc2 == 0 && out[0] == 0, "manifest-unescape-empty");
+    }
+    /* K: sibling after a subdirectory is still seen; dirent overflow is not silent.
+       Open/lstat errors other than ENOENT are named; ENOENT stays silent. */
+    {
+        int seen[8], i2, j2;
+        char reln[CL_PATH], nm[200];
+        char tp[CL_PATH];
+        fx_case_start("k-sib");
+        fx_write("cx/cx0/proj/old.cx", "int old_x(void) { return 1; }\n");
+        fx_write("cx/cx0/newmod.cx", "int new_x(void) { return 1; }\n");
+        fx_write("tests/cx-module-freeze.tsv", "cx/cx0/proj/old.cx\told\n");
+        cx_fmt(tp, sizeof tp, "%s/tests/cx-module-freeze.tsv", fx_base);
+        fx_note(cl_frz_load(tp) == 0, "k-freeze-load");
+        cl_fail = 0; cl_frz_new = 0;
+        for (i2 = 0; i2 < 8; i2++) seen[i2] = 0;
+        cl_frz_walk("cx/cx0", 0, seen);
+        fx_note(cl_frz_new == 1 && seen[0] == 1, "k-sibling-after-subdir");
+        fx_case_start("k-depth");
+        fx_write("cx/cx0/a/b/c/d/e/f/g/h/i/x.cx", "int x(void) { return 0; }\n");
+        cl_fail = 0; cl_frz_new = 0;
+        cl_frz_walk("cx/cx0", 0, seen);
+        fx_note(cl_fail >= 1, "k-depth-refused");
+        fx_case_start("k-enospc");
+        fx_mkdirp("cx/cx0/sub");
+        fx_write("cx/cx0/sub/keep.cx", "int keep(void) { return 0; }\n");
+        fx_write("cx/cx0/sib.cx", "int sib(void) { return 0; }\n");
+        for (i2 = 0; i2 < 120; i2++) {
+            for (j2 = 0; j2 < 180; j2++) nm[j2] = 'a';
+            nm[176] = '0' + (i2 / 100) % 10;
+            nm[177] = '0' + (i2 / 10) % 10;
+            nm[178] = '0' + i2 % 10;
+            nm[179] = 0;
+            cx_fmt(reln, sizeof reln, "cx/cx0/%s", nm);
+            fx_write(reln, "x\n");
+        }
+        cl_fail = 0; cl_frz_dir_rc = 0;
+        cl_frz_walk("cx/cx0", 0, seen);
+        fx_note(cl_fail >= 1 && cl_frz_dir_rc == -28, "k-enospc-dirent-28");
+        fx_case_start("k-open-eacces");
+        fx_mkdirp("cx/cx0/closed");
+        {
+            char p[CL_PATH];
+            cx_fmt(p, sizeof p, "%s/cx/cx0/closed", fx_base);
+            fx_note(sy_chmod(p, 0) == 0, "k-open-chmod");
+            cl_fail = 0; cl_frz_open_rc = 0;
+            cl_frz_walk("cx/cx0/closed", 0, seen);
+            fx_note(cl_fail >= 1 && cl_frz_open_rc == -EACCES, "k-freeze-open-eacces");
+        }
+        fx_case_start("k-open-enotdir");
+        fx_write("cx/cx0/notadir.cx", "int x(void) { return 0; }\n");
+        cl_fail = 0; cl_frz_open_rc = 0;
+        cl_frz_walk("cx/cx0/notadir.cx", 0, seen);
+        fx_note(cl_fail >= 1 && cl_frz_open_rc == -ENOTDIR, "k-freeze-open-enotdir");
+        fx_case_start("k-open-enoent");
+        cl_fail = 0; cl_frz_open_rc = 99;
+        cl_frz_walk("cx/cx0/missing", 0, seen);
+        fx_note(cl_fail == 0 && cl_frz_open_rc == 99, "k-freeze-open-enoent-silent");
+        fx_case_start("k-lstat-eacces");
+        fx_write("cx/cx0/nosearch/a.cx", "int a(void) { return 0; }\n");
+        {
+            char p[CL_PATH];
+            cx_fmt(p, sizeof p, "%s/cx/cx0/nosearch", fx_base);
+            fx_note(sy_chmod(p, 0444) == 0, "k-lstat-chmod");
+            cl_fail = 0; cl_frz_lstat_rc = 0;
+            cl_frz_walk("cx/cx0/nosearch", 0, seen);
+            fx_note(cl_fail >= 1 && cl_frz_lstat_rc == -EACCES, "k-freeze-lstat-eacces");
+        }
+    }
+    /* L: the two diag fixtures are exact whitelist pairs; a different module is not. */
+    fx_case_start("l-diag");
+    fx_write("tests/cxlayers-unresolved.tsv", "tests/diagfx/k_use.cx\thttps\tdiag fixture\ntests/diagfx/x3_modseg.cx\ttext.nope\tdiag fixture\n");
+    fx_note(fx_load_wl() == 0, "l-whitelist-load");
+    fx_reset();
+    cl_unresolved("tests/diagfx/k_use.cx", "https", -2);
+    cl_unresolved("tests/diagfx/x3_modseg.cx", "text.nope", -2);
+    fx_note(cl_unres == 2 && cl_fail == 0, "l-exact-pairs");
+    fx_reset();
+    cl_unresolved("tests/diagfx/k_use.cx", "https.other", -2);
+    fx_note(cl_fail >= 1, "l-wrong-mod-refused");
+    /* M: plans/ is L3 by prefix; an L2 use of it is still an upward refusal. */
+    fx_case_start("m-plans");
+    fx_write("tests/cx-layers.tsv", "cx/compiler/\tL2\tcompiler\nplans/\tL3\tplans\n");
+    {
+        char ltp[CL_PATH], dst[CL_PATH];
+        cx_fmt(ltp, sizeof ltp, "%s/tests/cx-layers.tsv", fx_base);
+        fx_note(cl_layer_load(ltp) == 0, "m-layer-load");
+        cl_join(dst, sizeof dst, fx_base, "plans/p.cx");
+        fx_reset();
+        cl_edge("cx/compiler/u.cx", dst);
+        fx_note(cl_up >= 1 && cl_fail >= 1, "m-plans-up-refused");
     }
     sy_printf("CX_LAYERS_FIXTURES\tchecks=%d\tfailed=%d\n", fx_checks, fx_fail);
 }
