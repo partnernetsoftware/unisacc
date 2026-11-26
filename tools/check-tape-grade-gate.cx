@@ -1,0 +1,319 @@
+/* tools/check-tape-grade-gate.cx -- executable G0-G3 tape grade contract.
+ *
+ *   cx tools/check-tape-grade-gate.cx -- --self-test [--pins FILE]
+ *   cx tools/check-tape-grade-gate.cx -- --check FILE [--pins FILE]
+ *   cx tools/check-tape-grade-gate.cx -- --self-test --mutant unmeasured-as-pass|stop-41|skip-g2
+ *
+ * A receipt row is TAB separated, in this order:
+ *   tier status native_rc tape_rc native_sha tape_sha cut_native cut_tape complete
+ *   native_ms tape_ms load1 g2_first g2_cold candidate_ape_sha tape_container_sha
+ *   input_manifest_sha target argv_layout_sha attempt_id raw_receipt_sha
+ *   g3_hot1_ms g3_hot2_ms g3_hot3_ms g3_readonly g3_writes gens
+ * Rules: status only PASS|STOP|UNMEASURED|FAIL; tier only 16|64|102; load1 > 6 is UNMEASURED;
+ * G0 needs equal rc, equal non-zero cuts, complete=1 and equal 64-hex output SHA; G1 16/64 <=25x,
+ * 25<x<=40 UNMET, strictly >40 STOP, exactly 40 not STOP, 102 <=55000 ms; G2 needs 7 identity
+ * fields as 64-hex (including raw_receipt_sha) and first<=3x, cold<=1.1x; G3 needs three present
+ * hot reads each <=17 ms, readonly=1, writes=0, gens=3. Missing numbers are UNMEASURED, never PASS.
+ * --pins lstat regular; header exactly T16_FAULT_PINS_V1<TAB><64hex><TAB><64hex>, exactly 9 unique
+ * data rows name<TAB><64hex>, no extra non-empty line. Self-test builds its own pins fixtures.
+ * Mutants weaken one rule; the self-test must then fail (red).
+ * Summary: CHECK_TAPE_GRADE_GATE cases=N failed=M ; exit 1 when M>0.
+ */
+#pragma unisa use sys.fs
+#pragma unisa use sys.posix
+#pragma unisa use text.text
+#pragma unisa use mem.bytes
+
+static int failed, tg_cases, tg_mut;
+
+static int tg_eq(const char *a, const char *b) { while (*a && *a == *b) { a++; b++; } return *a == *b; }
+static void ck(int ok, const char *name) {
+    printf("%s\ttape-grade-gate.%s\n", ok ? "PASS" : "FAIL", name);
+    tg_cases++;
+    if (!ok) failed++;
+}
+static int tg_hex64(const char *s) {
+    for (int i = 0; i < 64; i++) {
+        char c = s[i];
+        if (!((c >= '0' && c <= '9') || (c >= 'a' && c <= 'f'))) return 0;
+    }
+    return s[64] == 0;
+}
+static int tg_uint(const char *s, long *out) {
+    if (!s || !s[0]) return 0;
+    long v = 0;
+    for (int i = 0; s[i]; i++) {
+        if (s[i] < '0' || s[i] > '9') return 0;
+        v = v * 10 + (s[i] - '0');
+        if (v > 1000000000000L) return 0;
+    }
+    *out = v;
+    return 1;
+}
+static int tg_dbl(const char *s, double *out) {
+    if (!s || !s[0]) return 0;
+    char *end = 0;
+    double v = strtod(s, &end);
+    if (!end || *end || v <= 0.0) return 0;
+    *out = v;
+    return 1;
+}
+static char *tg_field(char *line, int k) {
+    char *p = line;
+    for (int i = 0; i < k; i++) { p = strchr(p, '\t'); if (!p) return 0; p++; }
+    return p;
+}
+/* returns 0 PASS, 1 FAIL, 2 UNMEASURED, 3 STOP */
+static int tg_grade(char *line, char *why, long cap) {
+    char *f[27];
+    {
+        char *p = line;
+        for (int i = 0; i < 27; i++) {
+            f[i] = p;
+            char *t = strchr(p, '\t');
+            if (!t) { for (int k = i + 1; k < 27; k++) f[k] = (char *)""; break; }
+            *t = 0; p = t + 1;
+        }
+    }
+    if (!tg_eq(f[1], "PASS") && !tg_eq(f[1], "STOP") && !tg_eq(f[1], "UNMEASURED") && !tg_eq(f[1], "FAIL")) {
+        cx_fmt(why, (size_t)cap, "STATUS_ENUM"); return 1;
+    }
+    if (!tg_eq(f[0], "16") && !tg_eq(f[0], "64") && !tg_eq(f[0], "102")) {
+        cx_fmt(why, (size_t)cap, "TIER_ENUM"); return 1;
+    }
+    if (tg_eq(f[1], "STOP")) { cx_fmt(why, (size_t)cap, "STOP"); return 3; }
+    if (tg_eq(f[1], "FAIL")) { cx_fmt(why, (size_t)cap, "FAIL"); return 1; }
+    if (tg_eq(f[1], "UNMEASURED")) { cx_fmt(why, (size_t)cap, "UNMEASURED"); return tg_mut == 1 ? 0 : 2; }
+    long nrc, trc, cn, ct, comp;
+    if (!tg_uint(f[2], &nrc) || !tg_uint(f[3], &trc) || !tg_uint(f[6], &cn) || !tg_uint(f[7], &ct) || !tg_uint(f[8], &comp)) {
+        cx_fmt(why, (size_t)cap, "G0_NUM"); return 1;
+    }
+    if (nrc != trc) { cx_fmt(why, (size_t)cap, "G0_EXIT_CODE"); return 1; }
+    if (!tg_hex64(f[4]) || !tg_hex64(f[5]) || !tg_eq(f[4], f[5])) { cx_fmt(why, (size_t)cap, "G0_SHA"); return 1; }
+    if (cn <= 0 || ct <= 0 || cn != ct || comp != 1) { cx_fmt(why, (size_t)cap, "G0_CUT"); return 1; }
+    double nm, tm, load1;
+    if (!tg_dbl(f[9], &nm) || !tg_dbl(f[10], &tm)) { cx_fmt(why, (size_t)cap, "G1_NO_TIME"); return 2; }
+    if (!tg_dbl(f[11], &load1)) { cx_fmt(why, (size_t)cap, "LOAD_MISSING"); return 2; }
+    if (load1 > 6.0) { cx_fmt(why, (size_t)cap, "LOAD_POLLUTED"); return 2; }
+    if (tg_eq(f[0], "102")) {
+        if (tm > 55000.0) { cx_fmt(why, (size_t)cap, "G1_102_OVER_55S"); return 1; }
+    } else {
+        double x = tm / nm;
+        double lim = tg_mut == 2 ? 41.0 : 40.0;
+        if (x > lim) { cx_fmt(why, (size_t)cap, "G1_STOP_OVER_40"); return 3; }
+        if (x > 25.0) { cx_fmt(why, (size_t)cap, "G1_UNMET_OVER_25"); return 1; }
+    }
+    if (tg_mut != 3) {
+        if (!f[12][0] || !f[13][0]) { cx_fmt(why, (size_t)cap, "G2_UNMEASURED"); return tg_mut == 1 ? 0 : 2; }
+        double gf, gc;
+        if (!tg_dbl(f[12], &gf) || !tg_dbl(f[13], &gc)) { cx_fmt(why, (size_t)cap, "G2_NUM"); return 1; }
+        if (!f[17][0] || !f[19][0]) { cx_fmt(why, (size_t)cap, "G2_IDENTITY"); return tg_mut == 1 ? 0 : 2; }
+        for (int i = 14; i <= 20; i++) { if (i == 17 || i == 19) continue;
+            if (!tg_hex64(f[i])) { cx_fmt(why, (size_t)cap, "G2_IDENTITY"); return tg_mut == 1 ? 0 : 2; }
+        }
+        if (gf > 3.0) { cx_fmt(why, (size_t)cap, "G2_FIRST_OVER_3"); return 1; }
+        if (gc > 1.1) { cx_fmt(why, (size_t)cap, "G2_COLD_OVER_1_1"); return 1; }
+    }
+    double h1, h2, h3; long ro, wr, gens;
+    if (!tg_dbl(f[21], &h1)) { cx_fmt(why, (size_t)cap, "G3_UNMEASURED"); return 2; }
+    if (!tg_dbl(f[22], &h2)) { cx_fmt(why, (size_t)cap, "G3_UNMEASURED"); return 2; }
+    if (!tg_dbl(f[23], &h3)) { cx_fmt(why, (size_t)cap, "G3_UNMEASURED"); return 2; }
+    if (!tg_uint(f[24], &ro) || !tg_uint(f[25], &wr) || !tg_uint(f[26], &gens)) { cx_fmt(why, (size_t)cap, "G3_UNMEASURED"); return 2; }
+    if (ro != 1 || wr != 0 || gens != 3) { cx_fmt(why, (size_t)cap, "G3_NOT_PASS"); return 1; }
+    if (h1 > 17.0 || h2 > 17.0 || h3 > 17.0) { cx_fmt(why, (size_t)cap, "G3_HOT_OVER_17"); return 1; }
+    cx_fmt(why, (size_t)cap, "PASS");
+    return 0;
+}
+static int tg_case(const char *name, const char *line, int want, const char *want_why) {
+    char buf[4096], why[96];
+    mm_copy(buf, sizeof buf, line, tx_len(line, 4096) + 1);
+    int got = tg_grade(buf, why, sizeof why);
+    ck(got == want && tg_eq(why, want_why), name);
+    return got == want && tg_eq(why, want_why);
+}
+#define HEX1 "1111111111111111111111111111111111111111111111111111111111111111"
+#define HEX2 "2222222222222222222222222222222222222222222222222222222222222222"
+#define BASE_FIELDS "\t0\t0\t" HEX1 "\t" HEX1 "\t7\t7\t1\t1000\t20000\t2.0\t2.0\t1.0\t" HEX1 "\t" HEX1 "\t" HEX1 "\tnative\t" HEX1 "\tattempt-1\t" HEX1 "\t10\t11\t12\t1\t0\t3"
+static const char *OK_ROW   = "16\tPASS" BASE_FIELDS;
+static const char *BAD_SHA  = "16\tPASS\t0\t0\t" HEX1 "\t" HEX2 "\t7\t7\t1\t1000\t20000\t2.0\t2.0\t1.0\t" HEX1 "\t" HEX1 "\t" HEX1 "\tnative\t" HEX1 "\tattempt-1\t" HEX1 "\t10\t11\t12\t1\t0\t3";
+static const char *BAD_RC   = "16\tPASS\t0\t1\t" HEX1 "\t" HEX1 "\t7\t7\t1\t1000\t20000\t2.0\t2.0\t1.0\t" HEX1 "\t" HEX1 "\t" HEX1 "\tnative\t" HEX1 "\tattempt-1\t" HEX1 "\t10\t11\t12\t1\t0\t3";
+static const char *BAD_ST   = "16\tBOGUS" BASE_FIELDS;
+static const char *BAD_TIER = "999\tPASS" BASE_FIELDS;
+static const char *BAD_LOAD = "16\tPASS\t0\t0\t" HEX1 "\t" HEX1 "\t7\t7\t1\t1000\t20000\t8.5\t2.0\t1.0\t" HEX1 "\t" HEX1 "\t" HEX1 "\tnative\t" HEX1 "\tattempt-1\t" HEX1 "\t10\t11\t12\t1\t0\t3";
+static const char *BAD_G2ID = "16\tPASS\t0\t0\t" HEX1 "\t" HEX1 "\t7\t7\t1\t1000\t20000\t2.0\t2.0\t1.0\ta\t" HEX1 "\t" HEX1 "\tnative\t" HEX1 "\tattempt-1\t" HEX1 "\t10\t11\t12\t1\t0\t3";
+static const char *NO_H1   = "16\tPASS\t0\t0\t" HEX1 "\t" HEX1 "\t7\t7\t1\t1000\t20000\t2.0\t2.0\t1.0\t" HEX1 "\t" HEX1 "\t" HEX1 "\tnative\t" HEX1 "\tattempt-1\t" HEX1 "\t\t11\t12\t1\t0\t3";
+static const char *NO_WR   = "16\tPASS\t0\t0\t" HEX1 "\t" HEX1 "\t7\t7\t1\t1000\t20000\t2.0\t2.0\t1.0\t" HEX1 "\t" HEX1 "\t" HEX1 "\tnative\t" HEX1 "\tattempt-1\t" HEX1 "\t10\t11\t12\t1\t\t";
+static const char *BAD_TAIL = "16\tPASS\t0\t0\t" HEX1 "\t" HEX1 "\t7\t7\t1\t1000garbage\t20000\t2.0\t2.0\t1.0\t" HEX1 "\t" HEX1 "\t" HEX1 "\tnative\t" HEX1 "\tattempt-1\t" HEX1 "\t10\t11\t12\t1\t0\t3";
+
+static int tg_write(const char *path, const char *a, const char *b) {
+    sy_unlink(path);
+    FILE *f = fopen(path, "w");
+    if (!f) return -1;
+    if (a) fputs(a, f);
+    if (b) fputs(b, f);
+    fclose(f);
+    return 0;
+}
+static int tg_pins(const char *path, char *why, long cap) {
+    sy_stat_t st;
+    if (sy_lstat(path, &st) || st.kind != 'f') { cx_fmt(why, (size_t)cap, "PIN_LSTAT"); return -1; }
+    size_t z = 0; char *b = cx_read(path, &z);
+    if (!b) { cx_fmt(why, (size_t)cap, "PIN_READ"); return -1; }
+    int header = 0, rows = 0, bad = 0;
+    char names[16][64]; int nn = 0;
+    for (char *p = b; p && *p; ) {
+        char *e = strchr(p, '\n'); if (e) *e = 0;
+        long n = tx_len(p, 4096);
+        if (n == 0) { p = e ? e + 1 : 0; continue; }
+        if (p[0] == '#') { p = e ? e + 1 : 0; continue; }
+        if (!header) {
+            char *t1 = strchr(p, '\t');
+            if (!t1) bad++;
+            else {
+                *t1 = 0;
+                char *s1 = t1 + 1;
+                char *t2 = strchr(s1, '\t');
+                if (!t2) bad++;
+                else {
+                    *t2 = 0;
+                    if (!tg_eq(p, "T16_FAULT_PINS_V1") || tx_len(s1, 128) != 64 || !tg_hex64(s1) ||
+                        tx_len(t2 + 1, 128) != 64 || !tg_hex64(t2 + 1)) bad++;
+                    else header = 1;
+                }
+            }
+        } else {
+            char *t = strchr(p, '\t');
+            if (!t || t[1 + 64] != 0 || !tg_hex64(t + 1)) bad++;
+            else {
+                *t = 0;
+                if (!p[0] || tx_len(p, 64) >= 63) bad++;
+                for (int i = 0; i < nn; i++) if (tg_eq(names[i], p)) bad++;
+                if (nn < 9) { mm_copy(names[nn], 63, p, tx_len(p, 64) + 1); nn++; }
+                rows++;
+            }
+        }
+        p = e ? e + 1 : 0;
+    }
+    free(b);
+    if (!header) { cx_fmt(why, (size_t)cap, "PIN_HEADER"); return -1; }
+    if (rows != 9) { cx_fmt(why, (size_t)cap, "PIN_ROWS=%d", rows); return -1; }
+    if (bad) { cx_fmt(why, (size_t)cap, "PIN_BAD=%d", bad); return -1; }
+    cx_fmt(why, (size_t)cap, "PIN_OK");
+    return 0;
+}
+static int tg_pins_file(const char *dir, const char *name, const char *body) {
+    char p[600]; cx_fmt(p, sizeof p, "%s/%s", dir, name);
+    if (tg_write(p, body, 0)) return -1;
+    return 0;
+}
+static int tg_check_file(const char *path) {
+    sy_stat_t st;
+    if (sy_lstat(path, &st) || st.kind != 'f') { printf("FAIL\ttape-grade-gate.check-lstat\n"); failed++; return 1; }
+    size_t z = 0; char *b = cx_read(path, &z);
+    if (!b) { printf("FAIL\ttape-grade-gate.check-read\n"); failed++; return 1; }
+    long rows = 0, bad = 0, unm = 0;
+    for (char *p = b; p && *p; ) {
+        char *e = strchr(p, '\n'); if (e) *e = 0;
+        if (p[0] && p[0] != '#') {
+            char buf[4096], why[96];
+            long len = tx_len(p, 4096);
+            if (len < 0 || len >= 4096) { bad++; printf("FAIL\ttape-grade-gate.receipt-row-too-long\n"); }
+            else {
+                mm_copy(buf, sizeof buf, p, len + 1);
+                int got = tg_grade(buf, why, sizeof why);
+                rows++;
+                if (got == 2) { unm++; printf("UNMEASURED\ttape-grade-gate.receipt\t%s\n", why); }
+                else if (got != 0) { bad++; printf("FAIL\ttape-grade-gate.receipt\tgot=%d\t%s\n", got, why); }
+            }
+        }
+        p = e ? e + 1 : 0;
+    }
+    free(b);
+    tg_cases++;
+    const char *stat_word = (bad || rows == 0) ? "FAIL" : (unm ? "UNMEASURED" : "PASS");
+    printf("%s\ttape-grade-gate.check-file\trows=%ld\tbad=%ld\tunmeasured=%ld\n", stat_word, rows, bad, unm);
+    if (bad || unm || rows == 0) { failed++; return 1; }
+    return 0;
+}
+int main(int argc, char **argv) {
+    int self = 0; const char *check = 0, *pins = 0;
+    for (int i = 1; i < argc; i++) {
+        if (tg_eq(argv[i], "--self-test")) self = 1;
+        else if (tg_eq(argv[i], "--check") && i + 1 < argc) check = argv[++i];
+        else if (tg_eq(argv[i], "--pins") && i + 1 < argc) pins = argv[++i];
+        else if (tg_eq(argv[i], "--mutant") && i + 1 < argc) {
+            const char *m = argv[++i];
+            if (tg_eq(m, "unmeasured-as-pass")) tg_mut = 1;
+            else if (tg_eq(m, "stop-41")) tg_mut = 2;
+            else if (tg_eq(m, "skip-g2")) tg_mut = 3;
+            else { fprintf(stderr, "unknown mutant %s\n", m); return 2; }
+        }
+    }
+    if (!self && !check) { fprintf(stderr, "usage: --self-test | --check FILE [--pins FILE] [--mutant NAME]\n"); return 2; }
+    if (self) {
+        char tmp[600]; const char *td = getenv("TMPDIR"); if (!td || !td[0]) td = "/tmp";
+        cx_fmt(tmp, sizeof tmp, "%s/tape-grade-pins-%ld", td, (long)getpid());
+        sy_mkdir(tmp, 0700);
+        char body[4096]; long o = 0;
+        o += snprintf(body + o, sizeof body - o, "T16_FAULT_PINS_V1\t" HEX1 "\t" HEX1 "\n");
+        for (int i = 0; i < 9; i++) o += snprintf(body + o, sizeof body - o, "case%d\t" HEX1 "\n", i);
+        tg_pins_file(tmp, "valid.tsv", body);
+        body[0] = 0; o = 0;
+        o += snprintf(body + o, sizeof body - o, "T16_FAULT_PINS_V1\t" HEX1 "\t" HEX1 "\n");
+        for (int i = 0; i < 8; i++) o += snprintf(body + o, sizeof body - o, "case%d\t" HEX1 "\n", i);
+        tg_pins_file(tmp, "del1.tsv", body);
+        body[0] = 0; o = 0;
+        for (int i = 0; i < 9; i++) o += snprintf(body + o, sizeof body - o, "case%d\t" HEX1 "\n", i);
+        tg_pins_file(tmp, "nohdr.tsv", body);
+        body[0] = 0; o = 0;
+        o += snprintf(body + o, sizeof body - o, "T16_FAULT_PINS_V1\t" HEX1 "\t" HEX1 "\n");
+        for (int i = 0; i < 10; i++) o += snprintf(body + o, sizeof body - o, "case%d\t" HEX1 "\n", i);
+        tg_pins_file(tmp, "extra.tsv", body);
+        char vp[600], sp[600], why[96];
+        cx_fmt(vp, sizeof vp, "%s/valid.tsv", tmp);
+        cx_fmt(sp, sizeof sp, "%s/sym.tsv", tmp);
+        sy_unlink(sp); sy_symlink(vp, sp);
+        ck(tg_pins(vp, why, sizeof why) == 0, "pins-valid-nine");
+        ck(tg_pins(sp, why, sizeof why) != 0, "pins-symlink-refused");
+        ck(tg_pins(sp, why, sizeof why) != 0 && tg_eq(why, "PIN_LSTAT"), "pins-regular-file");
+        char dp[600], np[600], ep[600];
+        cx_fmt(dp, sizeof dp, "%s/del1.tsv", tmp);
+        cx_fmt(np, sizeof np, "%s/nohdr.tsv", tmp);
+        cx_fmt(ep, sizeof ep, "%s/extra.tsv", tmp);
+        ck(tg_pins(dp, why, sizeof why) != 0, "pins-missing-row");
+        ck(tg_pins(np, why, sizeof why) != 0 && tg_eq(why, "PIN_HEADER"), "pins-header-required");
+        ck(tg_pins(ep, why, sizeof why) != 0, "pins-extra-row");
+
+        tg_case("all-pass", OK_ROW, 0, "PASS");
+        tg_case("102-at-55s", "102\tPASS\t0\t0\t" HEX1 "\t" HEX1 "\t7\t7\t1\t1000\t55000\t2.0\t2.0\t1.0\t" HEX1 "\t" HEX1 "\t" HEX1 "\tnative\t" HEX1 "\tattempt-1\t" HEX1 "\t10\t10\t10\t1\t0\t3", 0, "PASS");
+        tg_case("102-over-55s", "102\tPASS\t0\t0\t" HEX1 "\t" HEX1 "\t7\t7\t1\t1000\t55001\t2.0\t2.0\t1.0", 1, "G1_102_OVER_55S");
+        tg_case("16-25x-exact", "16\tPASS\t0\t0\t" HEX1 "\t" HEX1 "\t7\t7\t1\t1000\t25000\t2.0\t2.0\t1.0\t" HEX1 "\t" HEX1 "\t" HEX1 "\tnative\t" HEX1 "\tattempt-1\t" HEX1 "\t10\t10\t10\t1\t0\t3", 0, "PASS");
+        tg_case("16-over-25x", "16\tPASS\t0\t0\t" HEX1 "\t" HEX1 "\t7\t7\t1\t1000\t25001\t2.0\t2.0\t1.0", 1, "G1_UNMET_OVER_25");
+        tg_case("16-40x-exact-not-stop", "16\tPASS\t0\t0\t" HEX1 "\t" HEX1 "\t7\t7\t1\t1000\t40000\t2.0\t2.0\t1.0", 1, "G1_UNMET_OVER_25");
+        tg_case("16-over-40x-stop", "16\tPASS\t0\t0\t" HEX1 "\t" HEX1 "\t7\t7\t1\t1000\t40001\t2.0\t2.0\t1.0", 3, "G1_STOP_OVER_40");
+        tg_case("sha-mismatch", BAD_SHA, 1, "G0_SHA");
+        tg_case("exit-code-mismatch", BAD_RC, 1, "G0_EXIT_CODE");
+        tg_case("status-enum", BAD_ST, 1, "STATUS_ENUM");
+        tg_case("tier-enum", BAD_TIER, 1, "TIER_ENUM");
+        tg_case("load-polluted", BAD_LOAD, 2, "LOAD_POLLUTED");
+        tg_case("g2-identity-not-hex", BAD_G2ID, 2, "G2_IDENTITY");
+        tg_case("g3-hot1-missing", NO_H1, 2, "G3_UNMEASURED");
+        tg_case("g3-writes-missing", NO_WR, 2, "G3_UNMEASURED");
+        tg_case("trailing-garbage", BAD_TAIL, 2, "G1_NO_TIME");
+        int l1 = tg_case("g2-first-over-3x", "16\tPASS\t0\t0\t" HEX1 "\t" HEX1 "\t7\t7\t1\t1000\t20000\t2.0\t3.01\t1.0\t" HEX1 "\t" HEX1 "\t" HEX1 "\tnative\t" HEX1 "\tattempt-1\t" HEX1 "\t10\t10\t10\t1\t0\t3", 1, "G2_FIRST_OVER_3");
+        int l2 = tg_case("g2-cold-over-1-1", "16\tPASS\t0\t0\t" HEX1 "\t" HEX1 "\t7\t7\t1\t1000\t20000\t2.0\t2.0\t1.11\t" HEX1 "\t" HEX1 "\t" HEX1 "\tnative\t" HEX1 "\tattempt-1\t" HEX1 "\t10\t10\t10\t1\t0\t3", 1, "G2_COLD_OVER_1_1");
+        int l3 = tg_case("g3-hot-over-17", "16\tPASS\t0\t0\t" HEX1 "\t" HEX1 "\t7\t7\t1\t1000\t20000\t2.0\t2.0\t1.0\t" HEX1 "\t" HEX1 "\t" HEX1 "\tnative\t" HEX1 "\tattempt-1\t" HEX1 "\t17.1\t10\t10\t1\t0\t3", 1, "G3_HOT_OVER_17");
+        ck(l1 && l2 && l3, "limit-boundary-both-sides");
+        tg_case("g3-hot-17-exact", "16\tPASS\t0\t0\t" HEX1 "\t" HEX1 "\t7\t7\t1\t1000\t20000\t2.0\t2.0\t1.0\t" HEX1 "\t" HEX1 "\t" HEX1 "\tnative\t" HEX1 "\tattempt-1\t" HEX1 "\t17\t10\t10\t1\t0\t3", 0, "PASS");
+        tg_case("g3-gens-2", "16\tPASS\t0\t0\t" HEX1 "\t" HEX1 "\t7\t7\t1\t1000\t20000\t2.0\t2.0\t1.0\t" HEX1 "\t" HEX1 "\t" HEX1 "\tnative\t" HEX1 "\tattempt-1\t" HEX1 "\t10\t10\t10\t1\t0\t2", 1, "G3_NOT_PASS");
+        tg_case("unmeasured-not-pass", "16\tUNMEASURED\t0\t0", 2, "UNMEASURED");
+    }
+    if (pins) {
+        char why2[96];
+        int pr = tg_pins(pins, why2, sizeof why2);
+        ck(pr == 0, "pins-cli");
+    }
+    if (check) tg_check_file(check);
+    printf("CHECK_TAPE_GRADE_GATE\tcases=%d\tfailed=%d\tmutant=%d\n", tg_cases, failed, tg_mut);
+    return failed ? 1 : 0;
+}
