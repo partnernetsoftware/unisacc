@@ -1,14 +1,19 @@
 /* tools/root-current.cx -- check that installed ROOT/unisacc.com matches latest published release.
  *
- *   cx tools/root-current.cx -- [--repo DIR] [--root DIR] [--no-candidate-ahead]
+ *   cx tools/root-current.cx -- [--repo DIR] [--root DIR] [--no-candidate-ahead] [--expect-ref main|HEAD]
  *
- * Expected version rule: read "已公开" versions strictly from main:build/version-seq.tsv (HEAD only when no
- * main ref exists; disk only outside git), require a v<V> git tag for EVERY "已公开" row (fail-closed on
- * missing tags, NEVER falling back to slot order), and rank by creatordate (same-second tie-break: annotated
- * tag > commit ancestry > rs_precedes semantic order > slot order). Expected SHA comes from exhaustive
- * cross-check across candidate.tsv / evidence/<V>/ape-receipt.txt / public-readback.txt (conflicts refused).
+ * Expected version rule: strict public/thaw mode (--no-candidate-ahead or --expect-ref main) reads ONLY
+ * from main:<rel> and fails closed if refs/heads/main is absent. --expect-ref HEAD (disallowed with
+ * --no-candidate-ahead) reads ONLY from HEAD:<rel> and fails closed if HEAD is unreadable. Default compat
+ * mode (neither --expect-ref nor --no-candidate-ahead) selects one source once: main if refs/heads/main
+ * exists, else HEAD if HEAD resolves, else disk; all files in a run come from that single resolved source,
+ * and PASS/WARN/RED lines report the actual source in expect_ref=main|HEAD|disk.
+ * Require a v<V> git tag for EVERY "已公开" row (fail-closed on missing tags, NEVER falling back to
+ * slot order), and rank by creatordate (same-second tie-break: annotated tag > commit ancestry >
+ * rs_precedes semantic order > slot order). Expected SHA comes from exhaustive cross-check across
+ * candidate.tsv / evidence/<V>/ape-receipt.txt / public-readback.txt (conflicts refused).
  * Candidate exception: ROOT/unisacc.com.candidate.tsv with version > expected prints PASS + WARN=candidate-root-ahead
- * unless --no-candidate-ahead is passed (mandatory for freeze thaw).
+ * unless --no-candidate-ahead is passed (mandatory for freeze thaw, which also refuses --expect-ref HEAD).
  * Exit 0 on PASS, 1 on RED/drift, 2 on usage error.
  */
 #pragma unisa use sys.fs
@@ -75,25 +80,53 @@ static int crc_git_rc0(const char *repo, char **argv) {
     return (!fail && rc == 0) ? 0 : -1;
 }
 
+enum { CRC_REF_AUTO = 0, CRC_REF_MAIN = 1, CRC_REF_HEAD = 2 };
+enum { CRC_SRC_UNSET = 0, CRC_SRC_MAIN = 1, CRC_SRC_HEAD = 2, CRC_SRC_DISK = 3 };
+static int g_ref_mode = CRC_REF_AUTO;
+static int g_repo_src = CRC_SRC_UNSET;
+
+static const char *crc_src_name(void) {
+    if (g_repo_src == CRC_SRC_MAIN) return "main";
+    if (g_repo_src == CRC_SRC_HEAD) return "HEAD";
+    if (g_repo_src == CRC_SRC_DISK) return "disk";
+    if (g_ref_mode == CRC_REF_MAIN) return "main";
+    if (g_ref_mode == CRC_REF_HEAD) return "HEAD";
+    return "-";
+}
+
+static int crc_resolve_repo_source(const char *repo, int no_cand_ahead, const char **err_reason) {
+    if (no_cand_ahead && g_ref_mode == CRC_REF_AUTO) g_ref_mode = CRC_REF_MAIN;
+    int eff_mode = g_ref_mode;
+    char *chk_main[] = {"git", "show-ref", "--verify", "--quiet", "refs/heads/main", 0};
+    char *chk_head[] = {"git", "rev-parse", "--verify", "--quiet", "HEAD^{commit}", 0};
+    if (eff_mode == CRC_REF_MAIN) {
+        if (crc_git_rc0(repo, chk_main) == 0) { g_repo_src = CRC_SRC_MAIN; return 0; }
+        *err_reason = "expect-ref-main-missing";
+        return -1;
+    }
+    if (eff_mode == CRC_REF_HEAD) {
+        if (crc_git_rc0(repo, chk_head) == 0) { g_repo_src = CRC_SRC_HEAD; return 0; }
+        *err_reason = "expect-ref-head-missing";
+        return -1;
+    }
+    if (crc_git_rc0(repo, chk_main) == 0) { g_repo_src = CRC_SRC_MAIN; return 0; }
+    if (crc_git_rc0(repo, chk_head) == 0) { g_repo_src = CRC_SRC_HEAD; return 0; }
+    g_repo_src = CRC_SRC_DISK;
+    return 0;
+}
+
 static char *crc_read_repo_file(const char *repo, const char *rel, size_t *outn) {
     char spec[512], *b = 0;
     *outn = 0;
-    char *chk_main[] = {"git", "show-ref", "--verify", "--quiet", "refs/heads/main", 0};
-    if (crc_git_rc0(repo, chk_main) == 0) {
-        if (cx_fmt(spec, sizeof spec, "main:%s", rel)) return 0;
+    if (g_repo_src == CRC_SRC_MAIN || g_repo_src == CRC_SRC_HEAD) {
+        const char *ref = (g_repo_src == CRC_SRC_MAIN) ? "main" : "HEAD";
+        if (cx_fmt(spec, sizeof spec, "%s:%s", ref, rel)) return 0;
         char *av[] = {"git", "show", spec, 0};
         if (crc_git(repo, av, &b, outn) == 0 && b && *outn > 0) return b;
         if (b) mm_free(b);
         return 0;
     }
-    char *chk_head[] = {"git", "rev-parse", "--verify", "--quiet", "HEAD", 0};
-    if (crc_git_rc0(repo, chk_head) == 0) {
-        if (cx_fmt(spec, sizeof spec, "HEAD:%s", rel)) return 0;
-        char *av[] = {"git", "show", spec, 0};
-        if (crc_git(repo, av, &b, outn) == 0 && b && *outn > 0) return b;
-        if (b) mm_free(b);
-        return 0;
-    }
+    if (g_repo_src != CRC_SRC_DISK) return 0;
     char path[4400];
     if (cx_fmt(path, sizeof path, "%s/%s", repo, rel)) return 0;
     return cx_read(path, outn);
@@ -629,10 +662,23 @@ int main(int argc, char **argv) {
         else if (tx_eqz(argv[i], "--repo") && i + 1 < argc) repo = argv[++i];
         else if (tx_eqz(argv[i], "--root") && i + 1 < argc) root = argv[++i];
         else if (tx_eqz(argv[i], "--no-candidate-ahead")) no_cand_ahead = 1;
-        else {
-            fprintf(stderr, "usage: cx tools/root-current.cx -- [--repo DIR] [--root DIR] [--no-candidate-ahead]\n");
+        else if (tx_eqz(argv[i], "--expect-ref") && i + 1 < argc) {
+            const char *rv = argv[++i];
+            if (tx_eqz(rv, "main")) g_ref_mode = CRC_REF_MAIN;
+            else if (tx_eqz(rv, "HEAD")) g_ref_mode = CRC_REF_HEAD;
+            else {
+                fprintf(stderr, "usage: cx tools/root-current.cx -- [--repo DIR] [--root DIR] [--no-candidate-ahead] [--expect-ref main|HEAD]\n");
+                return 2;
+            }
+        } else {
+            fprintf(stderr, "usage: cx tools/root-current.cx -- [--repo DIR] [--root DIR] [--no-candidate-ahead] [--expect-ref main|HEAD]\n");
             return 2;
         }
+    }
+    if (no_cand_ahead && g_ref_mode == CRC_REF_HEAD) {
+        printf("ROOT_CURRENT\tRED\treason=expect-ref-head-disallowed\texpect=-\texpect_sha=-\tactual=-\tactual_sha=-\texpect_ref=HEAD\n");
+        fprintf(stderr, "root-current: REFUSE --expect-ref HEAD disallowed with --no-candidate-ahead\n");
+        return 2;
     }
     if (!root || !root[0]) root = repo;
     char root_clean[4096], repo_abs[4096], root_abs[4096];
@@ -664,16 +710,22 @@ int main(int argc, char **argv) {
     }
 
     char actual_ver[64], actual_sha[65], expect_ver[32], expect_sha[65], vdet[64];
-    const char *ver_src = "-", *sha_src = "-", *act_err = 0;
+    const char *ver_src = "-", *sha_src = "-", *act_err = 0, *src_err = 0;
     int is_cand = 0;
+    if (crc_resolve_repo_source(repo_abs, no_cand_ahead, &src_err) != 0) {
+        printf("ROOT_CURRENT\tRED\treason=%s\texpect=-\texpect_sha=-\tactual=-\tactual_sha=-\texpect_ref=%s\n",
+               src_err ? src_err : "expect-ref-missing", crc_src_name());
+        return 1;
+    }
     if (crc_actual_root(repo_abs, root_abs, actual_ver, actual_sha, &is_cand, &act_err) != 0) {
         expect_ver[0] = 0; vdet[0] = 0;
         (void)crc_expect_version(repo_abs, expect_ver, &ver_src, vdet);
-        printf("ROOT_CURRENT\tRED\treason=%s\texpect=%s\texpect_sha=-\tactual=%s\tactual_sha=%s\tfix=cx tools/release-post.cx -- run --version %s --execute\n",
+        printf("ROOT_CURRENT\tRED\treason=%s\texpect=%s\texpect_sha=-\tactual=%s\tactual_sha=%s\texpect_ref=%s\tfix=cx tools/release-post.cx -- run --version %s --execute\n",
                act_err ? act_err : "root-unreadable",
                expect_ver[0] ? expect_ver : "-",
                actual_ver[0] ? actual_ver : "-",
                actual_sha[0] ? actual_sha : "-",
+               crc_src_name(),
                expect_ver[0] ? expect_ver : "V");
         return 1;
     }
@@ -682,8 +734,8 @@ int main(int argc, char **argv) {
     if (ev_rc != 0) {
         const char *ereason = ev_rc == -3 ? "published-version-missing-tag"
                             : (ev_rc == -2 ? "git-tags-unreadable" : "expected-version-unknown");
-        printf("ROOT_CURRENT\tRED\treason=%s\tmissing=%s\texpect=-\texpect_sha=-\tactual=%s\tactual_sha=%s\n",
-               ereason, vdet[0] ? vdet : "-", actual_ver, actual_sha);
+        printf("ROOT_CURRENT\tRED\treason=%s\tmissing=%s\texpect=-\texpect_sha=-\tactual=%s\tactual_sha=%s\texpect_ref=%s\n",
+               ereason, vdet[0] ? vdet : "-", actual_ver, actual_sha, crc_src_name());
         return 1;
     }
 
@@ -692,44 +744,44 @@ int main(int argc, char **argv) {
     int rc_r = crc_receipt_sha(repo_abs, expect_ver, rcpt_sha);
     int rc_p = crc_readback_sha(repo_abs, expect_ver, rb_sha);
     if (rc_c == -2 || rc_r == -2 || rc_p == -2) {
-        printf("ROOT_CURRENT\tRED\treason=expected-sha-malformed\texpect=%s\texpect_sha=-\tactual=%s\tactual_sha=%s\n",
-               expect_ver, actual_ver, actual_sha);
+        printf("ROOT_CURRENT\tRED\treason=expected-sha-malformed\texpect=%s\texpect_sha=-\tactual=%s\tactual_sha=%s\texpect_ref=%s\n",
+               expect_ver, actual_ver, actual_sha, crc_src_name());
         return 1;
     }
     if (rc_c == -3 || rc_r == -3 || rc_p == -3 ||
         (rc_c == 0 && rc_r == 0 && !tx_eqz(cand_sha, rcpt_sha)) ||
         (rc_c == 0 && rc_p == 0 && !tx_eqz(cand_sha, rb_sha)) ||
         (rc_r == 0 && rc_p == 0 && !tx_eqz(rcpt_sha, rb_sha))) {
-        printf("ROOT_CURRENT\tRED\treason=expected-sha-conflict\texpect=%s\texpect_sha=-\tactual=%s\tactual_sha=%s\n",
-               expect_ver, actual_ver, actual_sha);
+        printf("ROOT_CURRENT\tRED\treason=expected-sha-conflict\texpect=%s\texpect_sha=-\tactual=%s\tactual_sha=%s\texpect_ref=%s\n",
+               expect_ver, actual_ver, actual_sha, crc_src_name());
         return 1;
     }
     if (rc_c == 0) { cx_fmt(expect_sha, sizeof expect_sha, "%s", cand_sha); sha_src = "candidate.tsv"; }
     else if (rc_r == 0) { cx_fmt(expect_sha, sizeof expect_sha, "%s", rcpt_sha); sha_src = "ape-receipt.txt"; }
     else if (rc_p == 0) { cx_fmt(expect_sha, sizeof expect_sha, "%s", rb_sha); sha_src = "public-readback.txt"; }
     else {
-        printf("ROOT_CURRENT\tRED\treason=expected-sha-missing\texpect=%s\texpect_sha=-\tactual=%s\tactual_sha=%s\n",
-               expect_ver, actual_ver, actual_sha);
+        printf("ROOT_CURRENT\tRED\treason=expected-sha-missing\texpect=%s\texpect_sha=-\tactual=%s\tactual_sha=%s\texpect_ref=%s\n",
+               expect_ver, actual_ver, actual_sha, crc_src_name());
         return 1;
     }
 
     if (tx_eqz(actual_ver, expect_ver) && tx_eqz(actual_sha, expect_sha)) {
-        printf("ROOT_CURRENT\tPASS\texpect=%s\texpect_sha=%s\tactual=%s\tactual_sha=%s\tsource=%s:%s\n",
-               expect_ver, expect_sha, actual_ver, actual_sha, ver_src, sha_src);
+        printf("ROOT_CURRENT\tPASS\texpect=%s\texpect_sha=%s\tactual=%s\tactual_sha=%s\tsource=%s:%s\texpect_ref=%s\n",
+               expect_ver, expect_sha, actual_ver, actual_sha, ver_src, sha_src, crc_src_name());
         return 0;
     }
     if (is_cand && rs_precedes(expect_ver, actual_ver)) {
         if (no_cand_ahead) {
-            printf("ROOT_CURRENT\tRED\treason=candidate-root-ahead-disallowed\texpect=%s\texpect_sha=%s\tactual=%s\tactual_sha=%s\tsource=%s\n",
-                   expect_ver, expect_sha, actual_ver, actual_sha, ver_src);
+            printf("ROOT_CURRENT\tRED\treason=candidate-root-ahead-disallowed\texpect=%s\texpect_sha=%s\tactual=%s\tactual_sha=%s\tsource=%s\texpect_ref=%s\n",
+                   expect_ver, expect_sha, actual_ver, actual_sha, ver_src, crc_src_name());
             return 1;
         }
-        printf("ROOT_CURRENT\tPASS\texpect=%s\texpect_sha=%s\tactual=%s\tactual_sha=%s\tWARN=candidate-root-ahead\tsource=%s\n",
-               expect_ver, expect_sha, actual_ver, actual_sha, ver_src);
+        printf("ROOT_CURRENT\tPASS\texpect=%s\texpect_sha=%s\tactual=%s\tactual_sha=%s\tWARN=candidate-root-ahead\tsource=%s\texpect_ref=%s\n",
+               expect_ver, expect_sha, actual_ver, actual_sha, ver_src, crc_src_name());
         return 0;
     }
     const char *why = !tx_eqz(actual_ver, expect_ver) ? "version-mismatch" : "sha-mismatch";
-    printf("ROOT_CURRENT\tRED\treason=%s\texpect=%s\texpect_sha=%s\tactual=%s\tactual_sha=%s\tsource=%s:%s\tfix=cx tools/release-post.cx -- run --version %s --execute\n",
-           why, expect_ver, expect_sha, actual_ver, actual_sha, ver_src, sha_src, expect_ver);
+    printf("ROOT_CURRENT\tRED\treason=%s\texpect=%s\texpect_sha=%s\tactual=%s\tactual_sha=%s\tsource=%s:%s\texpect_ref=%s\tfix=cx tools/release-post.cx -- run --version %s --execute\n",
+           why, expect_ver, expect_sha, actual_ver, actual_sha, ver_src, sha_src, crc_src_name(), expect_ver);
     return 1;
 }
