@@ -25,15 +25,12 @@ enum {
     M53_S1_FALLBACK = 3,
     M53_S1_MAX_IMG = 4194304L,
     M53_S1_MAX_IN = 16777216L,
-    M53_S1_M1_MASK = 383ULL
+    M53_S1_M1_MASK = 383ULL,
+    M53_RES_STATUS = 0,
+    M53_RES_STEPS = 1,
+    M53_RES_FAULT = 2,
+    M53_RES_RET = 3
 };
-
-typedef struct {
-    unsigned long long status;
-    unsigned long long steps;
-    unsigned long long fault_reason;
-    int ret_val;
-} m53_fn_result_t;
 
 static int m53_s1_state;
 static int m53_s1_busy;
@@ -376,7 +373,7 @@ static int m53_load_exec(const char *tape_dir, const char *so_ovr, const char **
         *reason_out = "exec-absent";
         return -1;
     }
-    m53_s1_tsl = im;
+    for (rc = 0; rc < TSL_I_WORDS; rc++) m53_s1_tsl[rc] = im[rc];
     m53_s1_bind_fn = tsl_addr(&m53_s1_tsl, 0);
     m53_s1_disp_fn = tsl_addr(&m53_s1_tsl, 1);
     m53_s1_run_fn = tsl_addr(&m53_s1_tsl, 2);
@@ -426,13 +423,13 @@ static void m53_s1_boot(const char *mode, const char *so_ovr) {
 static int m53_fn_call_bytes_int(const unsigned char *img, long img_len,
                                  void *bind_fn, void *disp_fn, void *run_fn,
                                  const char *sym_name, const unsigned char *bytes, long len,
-                                 unsigned long long budget, m53_fn_result_t *out) {
+                                 unsigned long long budget, unsigned long long out[4]) {
     unsigned long long data_aligned, copy_n, in_off, in_end, argv_at, argbuf_off, memlimit, ibitmap_cap;
     unsigned char *mem = 0, *ibm = 0;
     unsigned long long args[12], result[5], *guest_argv;
     char *abuf, *a0, *a1, *a2;
     int i;
-    if (!out || !m53_s1_tsl.base || len > M53_S1_MAX_IN) return -1;
+    if (!out || !m53_s1_tsl[TSL_I_BASE] || len > M53_S1_MAX_IN) return -1;
     if (m53_s1_data_len > ~7ULL) return -2;
     data_aligned = (m53_s1_data_len + 7ULL) & ~7ULL;
     if (m53_s1_bss_size > 0x20000000ULL - 65536ULL - data_aligned) return -2;
@@ -471,10 +468,10 @@ static int m53_fn_call_bytes_int(const unsigned char *img, long img_len,
         args[10] = (unsigned long long)ibm; args[11] = ibitmap_cap;
         (void)tsl_call2(&m53_s1_tsl, run_fn, (long)args, 0L);
     }
-    out->status = result[0];
-    out->steps = result[2];
-    out->fault_reason = result[4];
-    out->ret_val = (int)(result[1] & 255ULL);
+    out[M53_RES_STATUS] = result[0];
+    out[M53_RES_STEPS] = result[2];
+    out[M53_RES_FAULT] = result[4];
+    out[M53_RES_RET] = (unsigned long long)(int)(result[1] & 255ULL);
     mm_free(ibm); mm_free(mem);
     return 0;
 }
@@ -482,8 +479,8 @@ static int m53_fn_call_bytes_int(const unsigned char *img, long img_len,
 int cxsa_valid_s1(const unsigned char *data, long length) {
     int native_ret = cxsa_valid(data, length);
     const char *mode = sy_env("UNISACC_M53_S1"), *so_ovr, *so_s;
-    m53_fn_result_t res;
-    int call_rc;
+    unsigned long long res[4];
+    int call_rc, tape_ret;
     if (!mode || !mode[0] || m53_eqz(mode, "0") || m53_eqz(mode, "native")) return native_ret;
     if (m53_s1_busy) { sy_eprintf("M53_S1_FALLBACK\treason=reentrant\n"); return native_ret; }
     m53_s1_busy = 1;
@@ -513,14 +510,15 @@ int cxsa_valid_s1(const unsigned char *data, long length) {
     }
     call_rc = m53_fn_call_bytes_int(m53_s1_img, m53_s1_img_len,
                                     m53_s1_bind_fn, m53_s1_disp_fn, m53_s1_run_fn,
-                                    "cxsa_valid", data, length, 2000000ULL, &res);
-    if (call_rc != 0 || res.status != 0ULL) {
+                                    "cxsa_valid", data, length, 2000000ULL, res);
+    if (call_rc != 0 || res[M53_RES_STATUS] != 0ULL) {
         sy_eprintf("M53_S1_FALLBACK\treason=vm-fail\tstatus=%llu\tfault=%llu\n",
-                   call_rc ? 99ULL : res.status, call_rc ? 0ULL : res.fault_reason);
+                   call_rc ? 99ULL : res[M53_RES_STATUS], call_rc ? 0ULL : res[M53_RES_FAULT]);
         m53_s1_busy = 0; return native_ret;
     }
-    if (res.ret_val != native_ret) {
-        sy_eprintf("M53_S1_FALLBACK\treason=mismatch\tnative=%d\ttape=%d\n", native_ret, res.ret_val);
+    tape_ret = (int)res[M53_RES_RET];
+    if (tape_ret != native_ret) {
+        sy_eprintf("M53_S1_FALLBACK\treason=mismatch\tnative=%d\ttape=%d\n", native_ret, tape_ret);
     }
     m53_s1_busy = 0;
     return native_ret;
