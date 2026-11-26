@@ -74,13 +74,14 @@
  *  20-ident-helper UNISACC_IDENT_HELPER must be set and point to an executable regular file (default:
  *                  ~/.cache/unisacc/ident-helper/identity-helper-real5, built from seed/ident.c).
  *  23-freeze-armed the freeze commit F is the chain start commit (release speed-up rule, R27 S2): an unexpired
- *                  build/freeze.tsv row whose owner equals DEVSVC_OWNER or UNISACC_INTEGRATOR (or a PUSH-FREEZE
- *                  marker with one of them set); origin/main commits not in HEAD touch zero PIK1 product-input
+ *                  committed build/freeze.tsv row (5 cols: sid, 40-hex HEAD-ancestor base, owner, deadline, non-empty paths;
+ *                  build/freeze.tsv clean against HEAD) whose owner equals DEVSVC_OWNER or UNISACC_INTEGRATOR (or a
+ *                  PUSH-FREEZE marker with one of them set); origin/main commits not in HEAD touch zero PIK1 product-input
  *                  paths (canonical seed/ident.c closure + toolchain_ident build recipes; non-product paths stay
  *                  green); build/tlib-packages.tsv, build/layer-api and build/iface-hash.tsv clean and last changed
  *                  in the freeze commit or before it.  Each FAIL is named FREEZE_NOT_ARMED|FREEZE_TABLE_MALFORMED|
- *                  FREEZE_OWNER_MISMATCH|FREEZE_SOURCE_UNREADABLE|FREEZE_ORIGIN_MAIN_UNKNOWN|FREEZE_BEHIND_MAIN|
- *                  FREEZE_TLIB_AFTER_FREEZE.
+ *                  FREEZE_TABLE_DIRTY|FREEZE_OWNER_MISMATCH|FREEZE_SOURCE_UNREADABLE|FREEZE_ORIGIN_MAIN_UNKNOWN|
+ *                  FREEZE_BEHIND_MAIN|FREEZE_TLIB_AFTER_FREEZE.
  * Items 1-3 and 5-6 run at most four at a time; 4 follows with its own 8 lanes.  Every child runs under
  * tools/bound.  Read only: temporary files go to the system temp dir, never into the repo. */
 #pragma unisa use sys.proc
@@ -1559,13 +1560,70 @@ static int fa_same(const char *a, long an, const char *b) {
     }
     return 1;
 }
-/* 1 PASS, 0 FAIL; every FAIL names one of FREEZE_NOT_ARMED FREEZE_TABLE_MALFORMED FREEZE_OWNER_MISMATCH
+static int fa_is_hex40(const char *s, long n) {
+    if (!s || n != 40) return 0;
+    for (long i = 0; i < 40; i++) {
+        char c = s[i];
+        if (!((c >= '0' && c <= '9') || (c >= 'a' && c <= 'f'))) return 0;
+    }
+    return 1;
+}
+static int fa_has_paths(const char *l, long ln, long c3) {
+    if (c3 < 0 || c3 + 1 >= ln) return 0;
+    if (tx_chr(l + c3 + 1, ln - c3 - 1, '\t') >= 0) return 0;
+    for (long i = c3 + 1; i < ln; i++) {
+        if (l[i] != ' ' && l[i] != '\t' && l[i] != '\r') return 1;
+    }
+    return 0;
+}
+static int fa_base_ancestor(const char *repo, const char *base, long bl, char *ev, int cap) {
+    char sha[64], spec[80];
+    if (!base || bl <= 0 || bl >= (long)sizeof sha) {
+        cx_fmt(ev, (size_t)cap, "FREEZE_TABLE_MALFORMED bad freeze base length");
+        return 0;
+    }
+    mm_copy(sha, sizeof sha, base, bl);
+    sha[bl] = 0;
+    if (cx_fmt(spec, sizeof spec, "%s^{commit}", sha)) {
+        cx_fmt(ev, (size_t)cap, "FREEZE_TABLE_MALFORMED bad freeze base %.40s", sha);
+        return 0;
+    }
+    char *cv[] = {"git", "cat-file", "-e", spec, 0};
+    int cr = fa_git(repo, cv, 0, 0);
+    if (cr < 0) {
+        cx_fmt(ev, (size_t)cap, "FREEZE_SOURCE_UNREADABLE git cat-file on freeze base %.12s failed", sha);
+        return 0;
+    }
+    if (cr != 0) {
+        cx_fmt(ev, (size_t)cap, "FREEZE_TABLE_MALFORMED build/freeze.tsv base %.12s is not a valid commit in repo", sha);
+        return 0;
+    }
+    char *av[] = {"git", "merge-base", "--is-ancestor", sha, "HEAD", 0};
+    int ar = fa_git(repo, av, 0, 0);
+    if (ar < 0) {
+        cx_fmt(ev, (size_t)cap, "FREEZE_SOURCE_UNREADABLE git merge-base --is-ancestor %.12s HEAD failed", sha);
+        return 0;
+    }
+    if (ar != 0) {
+        cx_fmt(ev, (size_t)cap, "FREEZE_TABLE_MALFORMED build/freeze.tsv base %.12s is not an ancestor of HEAD", sha);
+        return 0;
+    }
+    return 1;
+}
+/* 1 PASS, 0 FAIL; every FAIL names one of FREEZE_NOT_ARMED FREEZE_TABLE_MALFORMED FREEZE_TABLE_DIRTY FREEZE_OWNER_MISMATCH
    FREEZE_SOURCE_UNREADABLE FREEZE_ORIGIN_MAIN_UNKNOWN FREEZE_BEHIND_MAIN FREEZE_TLIB_AFTER_FREEZE. */
 static int freeze_armed(const char *repo, char *ev, int cap) {
     const char *own = getenv("DEVSVC_OWNER"), *integ = getenv("UNISACC_INTEGRATOR");
-    char p[4400], common[4400], buf[256], tlib_c[64], frz_c[64], armed_by[200];
+    char p[4400], common[4400], buf[256], fdirty[256], tlib_c[64], frz_c[64], armed_by[200];
     size_t fn = 0; char *ft; long at = 0, now = sy_wall_s(); int active = 0, matched = 0, marker = 0, table_rows_owner_bad = 0;
     char bad_owner[80]; int64_t behind = 0, non_pik1 = 0; bad_owner[0] = 0; armed_by[0] = 0;
+    {   char *fdv[] = {"git", "status", "--porcelain", "--untracked-files=all", "--", "build/freeze.tsv", 0};
+        if (fa_git(repo, fdv, fdirty, sizeof fdirty)) {
+            put_ev(ev, cap, "FREEZE_SOURCE_UNREADABLE git status on build/freeze.tsv failed");
+            return 0;
+        }
+        if (fdirty[0]) { cx_fmt(ev, (size_t)cap, "FREEZE_TABLE_DIRTY uncommitted build/freeze.tsv diff (freeze table must match HEAD): %.120s", fdirty); return 0; }
+    }
     if (cx_fmt(p, sizeof p, "%s/build/freeze.tsv", repo)) return 0;
     {   int ex = sy_exists(p);
         if (ex < 0) { cx_fmt(ev, (size_t)cap, "FREEZE_SOURCE_UNREADABLE %s", p); return 0; }
@@ -1575,16 +1633,26 @@ static int freeze_armed(const char *repo, char *ev, int cap) {
         long e = tx_chr(ft + at, (long)fn - at, '\n'), ln = e < 0 ? (long)fn - at : e;
         const char *l = ft + at; long c0, c1, c2, c3; int64_t dl = 0;
         at += ln + 1;
+        while (ln > 0 && l[ln - 1] == '\r') ln--;
         if (ln == 0 || l[0] == '#') continue;
         c0 = tx_chr(l, ln, '\t'); c1 = c0 < 0 ? -1 : tx_chr(l + c0 + 1, ln - c0 - 1, '\t');
         if (c1 >= 0) c1 += c0 + 1;
         c2 = c1 < 0 ? -1 : tx_chr(l + c1 + 1, ln - c1 - 1, '\t');
         if (c2 >= 0) c2 += c1 + 1;
         c3 = c2 < 0 ? -1 : tx_chr(l + c2 + 1, ln - c2 - 1, '\t');
-        c3 = c3 < 0 ? ln : c3 + c2 + 1;
-        if (c2 < 0 || c3 - c2 - 1 <= 0 || c3 - c2 - 1 > 18 || tx_to_i64(l + c2 + 1, c3 - c2 - 1, 10, &dl) || dl <= 0) {
-            mm_free(ft); cx_fmt(ev, (size_t)cap, "FREEZE_TABLE_MALFORMED build/freeze.tsv row: %.80s (need sid base owner deadline_epoch_s paths)", l); return 0;
+        if (c3 >= 0) c3 += c2 + 1;
+        {   long dl_end = c3 < 0 ? ln : c3;
+            if (c2 < 0 || dl_end - c2 - 1 <= 0 || dl_end - c2 - 1 > 18 || tx_to_i64(l + c2 + 1, dl_end - c2 - 1, 10, &dl) || dl <= 0) {
+                mm_free(ft); cx_fmt(ev, (size_t)cap, "FREEZE_TABLE_MALFORMED build/freeze.tsv row: %.80s (need sid base owner deadline_epoch_s paths)", l); return 0;
+            }
         }
+        if (c0 <= 0 || c3 < 0 || c2 - c1 - 1 <= 0 || !fa_has_paths(l, ln, c3)) {
+            cx_fmt(ev, (size_t)cap, "FREEZE_TABLE_MALFORMED build/freeze.tsv 5-column/paths check failed: %.80s", l); mm_free(ft); return 0;
+        }
+        if (!fa_is_hex40(l + c0 + 1, c1 - c0 - 1)) {
+            cx_fmt(ev, (size_t)cap, "FREEZE_TABLE_MALFORMED build/freeze.tsv base must be 40-hex commit: %.80s", l); mm_free(ft); return 0;
+        }
+        if (!fa_base_ancestor(repo, l + c0 + 1, c1 - c0 - 1, ev, cap)) { mm_free(ft); return 0; }
         if ((long)dl <= now) continue;
         active++;
         if (fa_same(l + c1 + 1, c2 - c1 - 1, own) || fa_same(l + c1 + 1, c2 - c1 - 1, integ)) {
@@ -1637,9 +1705,10 @@ static int freeze_armed(const char *repo, char *ev, int cap) {
         if (buf[0]) { cx_fmt(ev, (size_t)cap, "FREEZE_TLIB_AFTER_FREEZE uncommitted numbering change after the freeze: %.120s", buf); return 0; } }
     {   char *tv[] = {"git", "log", "-1", "--format=%H", "HEAD", "--", "build/tlib-packages.tsv", "build/layer-api", "build/iface-hash.tsv", 0};
         char *fv[] = {"git", "log", "-1", "--format=%H", "HEAD", "--", "build/freeze.tsv", 0};
-        char *dv[] = {"git", "status", "--porcelain", "--", "build/freeze.tsv", 0};
+        char *dv[] = {"git", "status", "--porcelain", "--untracked-files=all", "--", "build/freeze.tsv", 0};
         if (fa_git(repo, tv, tlib_c, sizeof tlib_c) || fa_git(repo, dv, buf, sizeof buf)) { put_ev(ev, cap, "FREEZE_SOURCE_UNREADABLE git log on the numbering files failed"); return 0; }
-        if (matched && !buf[0] && tlib_c[0]) {
+        if (buf[0]) { cx_fmt(ev, (size_t)cap, "FREEZE_TABLE_DIRTY uncommitted build/freeze.tsv diff: %.120s", buf); return 0; }
+        if (matched && tlib_c[0]) {
             /* the freeze row is committed: the last numbering commit must be the freeze commit or an ancestor of it */
             if (fa_git(repo, fv, frz_c, sizeof frz_c) || !frz_c[0]) { put_ev(ev, cap, "FREEZE_SOURCE_UNREADABLE git log build/freeze.tsv failed"); return 0; }
             if (!tx_eqz(tlib_c, frz_c)) {

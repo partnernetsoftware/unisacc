@@ -86,15 +86,22 @@ static int ready(const char *tree, const char *r, const char *env) {
     cx_fmt(c, sizeof c, "env -u DEVSVC_OWNER -u UNISACC_INTEGRATOR %s sh " UC " tools/chain-ready.cx -- --repo '%s' --only 23-freeze-armed", env, r);
     return sh_in(tree, c);
 }
-#define ROW_OK "printf 'sid1\\tbase\\tcc\\t4102444800\\tsrc\\n' > build/freeze.tsv"
+#define ROW_OK "printf 'sid1\\t%s\\tcc\\t4102444800\\tsrc\\n' \"$(git rev-parse HEAD)\" > build/freeze.tsv"
 #define COMMIT_PUSH " && " G "add -A && " G "commit -qm step && git push -q origin main"
 
 typedef struct { const char *name, *setup, *env, *want_rc_kind, *frag; } Case;
 /* want: "FAIL" (rc 1 and the named reason) or "PASS" (rc 0 and the fragment) */
 static const Case cases[] = {
     {"not-armed-no-row", "true", "DEVSVC_OWNER=cc", "FAIL", "FREEZE_NOT_ARMED"},
-    {"expired-row", "printf 'sid1\\tbase\\tcc\\t1\\tsrc\\n' > build/freeze.tsv" COMMIT_PUSH, "DEVSVC_OWNER=cc", "FAIL", "FREEZE_NOT_ARMED"},
-    {"malformed-row", "printf 'sid1\\tbase\\tcc\\tabc\\tsrc\\n' > build/freeze.tsv" COMMIT_PUSH, "DEVSVC_OWNER=cc", "FAIL", "FREEZE_TABLE_MALFORMED"},
+    {"expired-row", "printf 'sid1\\t%s\\tcc\\t1\\tsrc\\n' \"$(git rev-parse HEAD)\" > build/freeze.tsv" COMMIT_PUSH, "DEVSVC_OWNER=cc", "FAIL", "FREEZE_NOT_ARMED"},
+    {"malformed-row", "printf 'sid1\\t%s\\tcc\\tabc\\tsrc\\n' \"$(git rev-parse HEAD)\" > build/freeze.tsv" COMMIT_PUSH, "DEVSVC_OWNER=cc", "FAIL", "FREEZE_TABLE_MALFORMED"},
+    {"uncommitted-freeze-row-refused", "printf 'FAKE-UNCOMMITTED\\t0000000000000000000000000000000000000000\\tcc\\t4102444800\\t*\\n' > build/freeze.tsv", "DEVSVC_OWNER=cc", "FAIL", "FREEZE_TABLE_DIRTY"},
+    {"uncommitted-append-after-freeze-refused", ROW_OK COMMIT_PUSH " && printf 'FAKE-UNCOMMITTED\\t0000000000000000000000000000000000000000\\tcc\\t4102444800\\t*\\n' >> build/freeze.tsv", "DEVSVC_OWNER=cc", "FAIL", "FREEZE_TABLE_DIRTY"},
+    {"malformed-4col-missing-paths-refused", "printf 'FAKE-4COL\\t%s\\tcc\\t4102444800\\n' \"$(git rev-parse HEAD)\" > build/freeze.tsv" COMMIT_PUSH, "DEVSVC_OWNER=cc", "FAIL", "FREEZE_TABLE_MALFORMED build/freeze.tsv 5-column/paths check failed"},
+    {"malformed-nonhex-base-refused", "printf 'FAKE-BADBASE\\tnot-a-commit\\tcc\\t4102444800\\t*\\n' > build/freeze.tsv" COMMIT_PUSH, "DEVSVC_OWNER=cc", "FAIL", "FREEZE_TABLE_MALFORMED build/freeze.tsv base must be 40-hex commit"},
+    {"non-ancestor-zero-base-refused", "printf 'FAKE-ZEROBASE\\t0000000000000000000000000000000000000000\\tcc\\t4102444800\\tsrc\\n' > build/freeze.tsv" COMMIT_PUSH, "DEVSVC_OWNER=cc", "FAIL", "FREEZE_TABLE_MALFORMED"},
+    {"non-ancestor-orphan-base-refused", "ORPH=$(git commit-tree HEAD^{tree} -m orphan) && printf 'FAKE-ORPHAN\\t%s\\tcc\\t4102444800\\tsrc\\n' \"$ORPH\" > build/freeze.tsv" COMMIT_PUSH, "DEVSVC_OWNER=cc", "FAIL", "FREEZE_TABLE_MALFORMED"},
+    {"empty-paths-refused", "printf 'FAKE-EMPTYPATHS\\t%s\\tcc\\t4102444800\\t   \\n' \"$(git rev-parse HEAD)\" > build/freeze.tsv" COMMIT_PUSH, "DEVSVC_OWNER=cc", "FAIL", "FREEZE_TABLE_MALFORMED"},
     {"owner-mismatch", ROW_OK COMMIT_PUSH, "DEVSVC_OWNER=other", "FAIL", "FREEZE_OWNER_MISMATCH active freeze row owner=cc"},
     {"marker-without-owner-env", "touch .git/PUSH-FREEZE", "", "FAIL", "FREEZE_OWNER_MISMATCH PUSH-FREEZE"},
 #define ADV_MAIN(step, msg) " && { F=$(git rev-parse HEAD); git checkout -qb tmpadv && " step " && " G "add -A && " G "commit -qm " msg " && git update-ref refs/remotes/origin/main HEAD && git checkout -qf main && git reset -q --hard \"$F\" && git branch -qD tmpadv; }"
@@ -146,7 +153,6 @@ static const Case cases[] = {
     {"armed-owner", ROW_OK COMMIT_PUSH, "DEVSVC_OWNER=cc", "PASS", "armed: freeze.tsv sid=sid1 owner=cc"},
     {"armed-integrator", ROW_OK COMMIT_PUSH, "UNISACC_INTEGRATOR=CC", "PASS", "armed: freeze.tsv sid=sid1"},
     {"armed-numbering-in-freeze-commit", ROW_OK " && printf 'h\\t3\\n' > build/iface-hash.tsv" COMMIT_PUSH, "DEVSVC_OWNER=cc", "PASS", "numbering files unchanged after the freeze"},
-    {"armed-uncommitted-row", ROW_OK, "DEVSVC_OWNER=cc", "PASS", "armed: freeze.tsv"},
     {"armed-marker-with-owner", "touch .git/PUSH-FREEZE", "UNISACC_INTEGRATOR=cc", "PASS", "armed: PUSH-FREEZE marker owner-env=cc"},
 };
 #define NCASES ((int)(sizeof cases / sizeof cases[0]))
@@ -175,6 +181,10 @@ static const Mut muts[] = {
     {"drop-fetch", "if (!(nofetch && nofetch[0] == '1')) {", "if (0) {", "origin-advanced-fetch-behind"},
     {"drop-tlib-dirty", "if (buf[0]) { cx_fmt(ev, (size_t)cap, \"FREEZE_TLIB_AFTER_FREEZE uncommitted", "if (0) { cx_fmt(ev, (size_t)cap, \"FREEZE_TLIB_AFTER_FREEZE uncommitted", "numbering-uncommitted"},
     {"drop-tlib-order", "if (r == 1) { cx_fmt(ev, (size_t)cap, \"FREEZE_TLIB_AFTER_FREEZE", "if (0) { cx_fmt(ev, (size_t)cap, \"FREEZE_TLIB_AFTER_FREEZE", "numbering-after-freeze"},
+    {"drop-freeze-dirty", "if (fdirty[0]) { cx_fmt(ev, (size_t)cap, \"FREEZE_TABLE_DIRTY", "if (0 && fdirty[0]) { cx_fmt(ev, (size_t)cap, \"FREEZE_TABLE_DIRTY", "uncommitted-freeze-row-refused"},
+    {"drop-5col-paths-check", "if (c0 <= 0 || c3 < 0 || c2 - c1 - 1 <= 0 || !fa_has_paths(l, ln, c3)) {", "if (0) {", "malformed-4col-missing-paths-refused"},
+    {"drop-base-hex-check", "if (!fa_is_hex40(l + c0 + 1, c1 - c0 - 1)) {", "if (0) {", "malformed-nonhex-base-refused"},
+    {"drop-base-ancestor-check", "if (!fa_base_ancestor(repo, l + c0 + 1, c1 - c0 - 1, ev, cap)) {", "if (0) {", "non-ancestor-orphan-base-refused"},
 };
 #define NMUTS ((int)(sizeof muts / sizeof muts[0]))
 
