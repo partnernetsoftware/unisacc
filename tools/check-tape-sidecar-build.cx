@@ -1,17 +1,32 @@
-/* tools/check-tape-sidecar-build.cx -- contract checks and negative controls for tools/tape-sidecar-build.cx. */
+/* tools/check-tape-sidecar-build.cx -- contract checks and negative controls for tools/tape-sidecar-build.cx
+ * and tools/release-ape.cx --with-tape-sidecar gating. */
 #pragma unisa use sys.fs
 #pragma unisa use sys.io
 #pragma unisa use sys.proc
 #pragma unisa use sys.env
 #pragma unisa use text.text
 #pragma unisa use mem.heap
+#pragma unisa use mem.bytes
 #pragma unisa use cxlib.procrun
 
 static int g_pass = 0, g_fail = 0;
+static const char SLOT[32] = "UNISACC_VERSION_SLOT_0000000000";
 
 static void ck(int ok, const char *name, const char *detail) {
     if (ok) { g_pass++; sy_printf("PASS\tcheck-tape-sidecar-build.%s\n", name); }
     else { g_fail++; sy_printf("FAIL\tcheck-tape-sidecar-build.%s\t%s\n", name, detail ? detail : ""); }
+}
+
+static int receipt_has_key(const char *buf, size_t n, const char *key) {
+    long kl = tx_len(key, 64);
+    size_t i = 0;
+    while (i < n) {
+        size_t ls = i;
+        while (i < n && buf[i] != '\n') i++;
+        if ((long)(i - ls) > kl && tx_same(buf + ls, kl, key, kl) && buf[ls + (size_t)kl] == '\t') return 1;
+        if (i < n) i++;
+    }
+    return 0;
 }
 
 static int run_tool(char **av, char *out, int cap) {
@@ -20,17 +35,87 @@ static int run_tool(char **av, char *out, int cap) {
     return pr_run_merged(av, 45, out, cap, &cut);
 }
 
+static void w32(unsigned char *p, unsigned long n) {
+    for (int i = 0; i < 4; i++) p[i] = (unsigned char)(n >> (i * 8));
+}
+
+static unsigned int r16(const unsigned char *p) {
+    return (unsigned int)p[0] | ((unsigned int)p[1] << 8);
+}
+
+static unsigned int r32(const unsigned char *p) {
+    return (unsigned int)p[0] | ((unsigned int)p[1] << 8) |
+           ((unsigned int)p[2] << 16) | ((unsigned int)p[3] << 24);
+}
+
+static unsigned long r64(const unsigned char *p) {
+    return (unsigned long)r32(p) | ((unsigned long)r32(p + 4) << 32);
+}
+
+static int sha_file(const char *p, char hex[65], long *bytes_out) {
+    size_t n = 0;
+    char *b = cx_read(p, &n);
+    if (!b) return -1;
+    cx_sha256_hex(b, n, hex);
+    if (bytes_out) *bytes_out = (long)n;
+    mm_free(b);
+    return 0;
+}
+
+static int write_repacked_manifest(const char *dir, const char *so_p, const char *s1, const char *s2) {
+    char mf_p[700], so_sha[65], body[512];
+    long so_bytes = 0;
+    if (sha_file(so_p, so_sha, &so_bytes) != 0) return -1;
+    if (cx_fmt(mf_p, sizeof mf_p, "%s/manifest.tsv", dir)) return -1;
+    if (cx_fmt(body, sizeof body,
+               "# tape-sidecar-manifest-v1 target=lnx/x86_64 src_tape=%s src_hoststub=%s\ntapemode.so\t%s\t%ld\n",
+               s1, s2, so_sha, so_bytes)) return -1;
+    return cx_write(mf_p, body, (size_t)tx_len(body, sizeof body));
+}
+
+static void mk_macho(const char *p, unsigned long cpu, int tag) {
+    unsigned char b[80] = {0};
+    w32(b, 0xfeedfacfUL); w32(b + 4, cpu); w32(b + 8, 3); w32(b + 12, 2);
+    w32(b + 16, 1); w32(b + 20, 16); w32(b + 32, 0x1d); w32(b + 36, 16);
+    w32(b + 40, 48); w32(b + 44, 32);
+    for (int i = 48; i < 80; i++) b[i] = (unsigned char)(tag + i);
+    (void)cx_write(p, b, sizeof b);
+}
+
+static void mk_macho_signed(const char *p, unsigned long cpu, int tag) {
+    unsigned char b[256] = {0};
+    w32(b, 0xfeedfacfUL); w32(b + 4, cpu); w32(b + 8, 3); w32(b + 12, 2);
+    w32(b + 16, 1); w32(b + 20, 16); w32(b + 32, 0x1d); w32(b + 36, 16);
+    w32(b + 40, 128); w32(b + 44, 128);
+    for (int i = 48; i < 96; i++) b[i] = (unsigned char)(tag + i);
+    (void)mm_copy(b + 96, 32, SLOT, 32);
+    unsigned char *s = b + 128, *cd = s + 20;
+    s[0] = 0xfa; s[1] = 0xde; s[2] = 0x0c; s[3] = 0xc0; s[7] = 128; s[11] = 1; s[19] = 20;
+    cd[0] = 0xfa; cd[1] = 0xde; cd[2] = 0x0c; cd[3] = 0x02; cd[7] = 108; cd[9] = 2; cd[10] = 4;
+    cd[15] = 2; cd[19] = 76; cd[31] = 1; cd[35] = 128; cd[36] = 32; cd[37] = 2; cd[39] = 12;
+    (void)cx_write(p, b, sizeof b);
+}
+
 int main(void) {
-    char tmp[512], out_dir[600], skip_dir[600], so_p[700], mf_p[700], sym_dir[600], sym_so[700], out[8192];
+    char tmp[512], out_dir[600], skip_dir[600], so_p[700], mf_p[700], sym_dir[600], sym_so[700];
+    char pair_dir[600], pair_mf[700], pair_so[700];
+    char bad_dir[600], bad_so[700];
+    char s1[65], s2[65], out[8192];
     const char *td = sy_tmpdir();
     int rc;
+
     if (sy_mkdtemp(td && td[0] ? td : "/tmp", "check-tsb", tmp, sizeof tmp) != 0) return 2;
+    if (sha_file("tools/tape/asm/tape_x86_64.S", s1, 0) != 0 ||
+        sha_file("tools/tape/asm/hoststub_lnx_x86_64.S", s2, 0) != 0) return 2;
     if (cx_fmt(out_dir, sizeof out_dir, "%s/tape", tmp) ||
         cx_fmt(skip_dir, sizeof skip_dir, "%s/skip", tmp) ||
         cx_fmt(so_p, sizeof so_p, "%s/tapemode.so", out_dir) ||
         cx_fmt(mf_p, sizeof mf_p, "%s/manifest.tsv", out_dir) ||
         cx_fmt(sym_dir, sizeof sym_dir, "%s/sym", tmp) ||
-        cx_fmt(sym_so, sizeof sym_so, "%s/tapemode.so", sym_dir)) return 2;
+        cx_fmt(sym_so, sizeof sym_so, "%s/tapemode.so", sym_dir) ||
+        cx_fmt(pair_dir, sizeof pair_dir, "%s/pair", tmp) ||
+        cx_fmt(pair_mf, sizeof pair_mf, "%s/manifest.tsv", pair_dir) ||
+        cx_fmt(pair_so, sizeof pair_so, "%s/tapemode.so", pair_dir)) return 2;
 
     /* 1. Build lnx/x86_64 sidecar */
     {
@@ -54,17 +139,17 @@ int main(void) {
         ck(rc == 0 && strstr(out, "TAPEMODE_RUN\tSELFTEST\tPASS\texit_code=42") != 0, "built-so-selftest-pass", out);
     }
 
-    /* 3b. P2' ELF contract: zero relocations (incl. .rela.plt), zero DT_NEEDED, zero W+X PT_LOAD */
+    /* 3b. Cross-check ELF contract via readelf under LC_ALL=C */
     {
-        char *av_r[] = {"readelf", "-rW", so_p, 0};
+        char *av_r[] = {"env", "LC_ALL=C", "readelf", "-rW", so_p, 0};
         rc = run_tool(av_r, out, (int)sizeof out);
         ck(rc == 0 && strstr(out, "There are no relocations in this file.") != 0, "elf-zero-relocations", out);
 
-        char *av_d[] = {"readelf", "-d", so_p, 0};
+        char *av_d[] = {"env", "LC_ALL=C", "readelf", "-d", so_p, 0};
         rc = run_tool(av_d, out, (int)sizeof out);
         ck(rc == 0 && strstr(out, "(NEEDED)") == 0, "elf-zero-needed", out);
 
-        char *av_l[] = {"readelf", "-lW", so_p, 0};
+        char *av_l[] = {"env", "LC_ALL=C", "readelf", "-lW", so_p, 0};
         rc = run_tool(av_l, out, (int)sizeof out);
         ck(rc == 0 && strstr(out, "RWE") == 0 && strstr(out, "R E") != 0, "elf-no-wx-segment", out);
     }
@@ -97,7 +182,80 @@ int main(void) {
         ck(rc == 1 && strstr(out, "so-not-regular") != 0, "neg-symlink-so-refused", out);
     }
 
-    /* 7. Negative: 1-byte corruption of tapemode.so refused by --check */
+    /* 7. Negative: paired publish refuses when OUT/manifest.tsv is a directory and leaves no partial tapemode.so */
+    {
+        sy_mkdir(pair_dir, 0755);
+        sy_mkdir(pair_mf, 0755);
+        char *av[] = {"sh", "./unisacc.com", "tools/tape-sidecar-build.cx", "--", ".", pair_dir, 0}; /* lint:allow R1-product tests paired publish refusal via checkout product */
+        rc = run_tool(av, out, (int)sizeof out);
+        ck(rc == 1 && strstr(out, "dst-not-regular") != 0 && sy_exists(pair_so) != 1,
+           "neg-pair-dst-manifest-dir-no-partial", out);
+    }
+
+    /* 8. Negative: repacked .so WITH relocations (missing -Bsymbolic) refused by --check */
+    if (!cx_fmt(bad_dir, sizeof bad_dir, "%s/bad-reloc", tmp) && !cx_fmt(bad_so, sizeof bad_so, "%s/tapemode.so", bad_dir)) {
+        sy_mkdir(bad_dir, 0755);
+        char *ccv[] = {"cc", "-shared", "-fPIC", "-nostdlib", "-O2", "-Wl,--hash-style=sysv", "-Wl,-z,norelro",
+                       "-o", bad_so, "tools/tape/asm/tape_x86_64.S", "tools/tape/asm/hoststub_lnx_x86_64.S", 0};
+        rc = run_tool(ccv, out, (int)sizeof out);
+        int mw = (rc == 0) ? write_repacked_manifest(bad_dir, bad_so, s1, s2) : -1;
+        char *av[] = {"sh", "./unisacc.com", "tools/tape-sidecar-build.cx", "--", "--check", ".", bad_dir, 0}; /* lint:allow R1-product tests reloc refusal via checkout product */
+        rc = (mw == 0) ? run_tool(av, out, (int)sizeof out) : -1;
+        ck(rc == 1 && strstr(out, "so-has-relocations") != 0, "neg-repacked-reloc-so-refused", out);
+    }
+
+    /* 9. Negative: repacked .so WITH DT_NEEDED (zero reloc, linked with -nostdlib -lc) refused by --check */
+    if (!cx_fmt(bad_dir, sizeof bad_dir, "%s/bad-needed", tmp) && !cx_fmt(bad_so, sizeof bad_so, "%s/tapemode.so", bad_dir)) {
+        sy_mkdir(bad_dir, 0755);
+        char *ccv[] = {"cc", "-shared", "-fPIC", "-nostdlib", "-O2", "-Wl,-Bsymbolic", "-Wl,--hash-style=sysv", "-Wl,-z,norelro",
+                       "-Wl,--no-as-needed", "-o", bad_so, "tools/tape/asm/tape_x86_64.S", "tools/tape/asm/hoststub_lnx_x86_64.S", "-lc", 0};
+        rc = run_tool(ccv, out, (int)sizeof out);
+        int mw = (rc == 0) ? write_repacked_manifest(bad_dir, bad_so, s1, s2) : -1;
+        char *av[] = {"sh", "./unisacc.com", "tools/tape-sidecar-build.cx", "--", "--check", ".", bad_dir, 0}; /* lint:allow R1-product tests needed refusal via checkout product */
+        rc = (mw == 0) ? run_tool(av, out, (int)sizeof out) : -1;
+        ck(rc == 1 && strstr(out, "so-has-needed") != 0, "neg-repacked-needed-so-refused", out);
+    }
+
+    /* 10. Negative: repacked .so with W+X (no R, p_flags=3) PT_LOAD refused by --check */
+    if (!cx_fmt(bad_dir, sizeof bad_dir, "%s/bad-wx", tmp) && !cx_fmt(bad_so, sizeof bad_so, "%s/tapemode.so", bad_dir)) {
+        size_t n = 0;
+        char *b = cx_read(so_p, &n);
+        sy_mkdir(bad_dir, 0755);
+        if (b && n >= 64) {
+            unsigned long phoff = r64((const unsigned char *)b + 32);
+            unsigned int phentsz = r16((const unsigned char *)b + 54);
+            unsigned int phnum = r16((const unsigned char *)b + 56);
+            for (unsigned int i = 0; i < phnum; i++) {
+                unsigned char *ph = (unsigned char *)b + phoff + (unsigned long)i * phentsz;
+                if (r32(ph) == 1) { w32(ph + 4, 3); break; } /* PF_W|PF_X without PF_R */
+            }
+            (void)cx_write(bad_so, b, n);
+            mm_free(b);
+        }
+        int mw = write_repacked_manifest(bad_dir, bad_so, s1, s2);
+        char *av[] = {"sh", "./unisacc.com", "tools/tape-sidecar-build.cx", "--", "--check", ".", bad_dir, 0}; /* lint:allow R1-product tests wx refusal via checkout product */
+        rc = (mw == 0) ? run_tool(av, out, (int)sizeof out) : -1;
+        ck(rc == 1 && strstr(out, "so-wx-segment") != 0, "neg-repacked-wx-so-refused", out);
+    }
+
+    /* 11. Negative: zero-reloc zero-needed .so missing required hoststub symbols refused by --check */
+    if (!cx_fmt(bad_dir, sizeof bad_dir, "%s/bad-sym", tmp) && !cx_fmt(bad_so, sizeof bad_so, "%s/tapemode.so", bad_dir)) {
+        char mini_s[700];
+        sy_mkdir(bad_dir, 0755);
+        if (!cx_fmt(mini_s, sizeof mini_s, "%s/mini.S", bad_dir)) {
+            const char *asm_src = ".text\n.globl tape_run_x86_64\ntape_run_x86_64:\n  ret\n";
+            (void)cx_write(mini_s, asm_src, (size_t)tx_len(asm_src, 128));
+            char *ccv[] = {"cc", "-shared", "-fPIC", "-nostdlib", "-O2", "-Wl,-Bsymbolic", "-Wl,--hash-style=sysv", "-Wl,-z,norelro",
+                           "-o", bad_so, mini_s, 0};
+            rc = run_tool(ccv, out, (int)sizeof out);
+            int mw = (rc == 0) ? write_repacked_manifest(bad_dir, bad_so, s1, s2) : -1;
+            char *av[] = {"sh", "./unisacc.com", "tools/tape-sidecar-build.cx", "--", "--check", ".", bad_dir, 0}; /* lint:allow R1-product tests missing sym refusal via checkout product */
+            rc = (mw == 0) ? run_tool(av, out, (int)sizeof out) : -1;
+            ck(rc == 1 && strstr(out, "so-missing-symbols") != 0, "neg-repacked-missing-sym-refused", out);
+        }
+    }
+
+    /* 12. Negative: 1-byte corruption of tapemode.so refused by manifest-mismatch BEFORE ELF check */
     {
         size_t n = 0;
         char *b = cx_read(so_p, &n);
@@ -111,11 +269,97 @@ int main(void) {
         ck(rc == 1 && strstr(out, "manifest-mismatch") != 0, "neg-corrupt-so-refused", out);
     }
 
-    /* 8. Negative: missing asm sources in empty root refused with rc=2 */
+    /* 13. Negative: missing asm sources in empty root refused with rc=2 */
     {
         char *av[] = {"sh", "./unisacc.com", "tools/tape-sidecar-build.cx", "--", tmp, skip_dir, 0}; /* lint:allow R1-product tests missing source refusal via checkout product */
         rc = run_tool(av, out, (int)sizeof out);
         ck(rc == 2 && strstr(out, "missing-asm-sources") != 0, "neg-missing-sources-refused", out);
+    }
+
+    /* 14. release-ape pack gating: default OFF works without cc, no OUT/tape/, no receipt tape lines;
+     *     explicit --with-tape-sidecar builds OUT/tape/ and records both receipt lines. */
+    {
+        char fx[600], f0[700], f1[700], f2[700], f3[700], f4[700], f5[700], m0[700], m1[700];
+        char nocc_bin[600], p_off[600], p_on[600], p_off_tape[700], p_off_rcpt[700], p_on_tape[700], p_on_rcpt[700];
+        if (!cx_fmt(fx, sizeof fx, "%s/pack-fx", tmp) &&
+            !cx_fmt(f0, sizeof f0, "%s/p3", fx) && !cx_fmt(f1, sizeof f1, "%s/win", fx) &&
+            !cx_fmt(f2, sizeof f2, "%s/lx64", fx) && !cx_fmt(f3, sizeof f3, "%s/la64", fx) &&
+            !cx_fmt(f4, sizeof f4, "%s/ox64", fx) && !cx_fmt(f5, sizeof f5, "%s/oa64", fx) &&
+            !cx_fmt(m0, sizeof m0, "%s/mx64", fx) && !cx_fmt(m1, sizeof m1, "%s/ma64", fx) &&
+            !cx_fmt(nocc_bin, sizeof nocc_bin, "%s/nocc-bin", tmp) &&
+            !cx_fmt(p_off, sizeof p_off, "%s/pack-off", tmp) &&
+            !cx_fmt(p_on, sizeof p_on, "%s/pack-on", tmp) &&
+            !cx_fmt(p_off_tape, sizeof p_off_tape, "%s/tape", p_off) &&
+            !cx_fmt(p_off_rcpt, sizeof p_off_rcpt, "%s/ape-receipt.txt", p_off) &&
+            !cx_fmt(p_on_tape, sizeof p_on_tape, "%s/tape", p_on) &&
+            !cx_fmt(p_on_rcpt, sizeof p_on_rcpt, "%s/ape-receipt.txt", p_on)) {
+            unsigned char p4[22] = {'P', ' ', '4', ' ', '\n', 0};
+            unsigned char pe[1536] = {0};
+            unsigned char lx[64] = {0};
+            sy_mkdir(fx, 0755);
+            sy_mkdir(nocc_bin, 0755);
+            (void)mm_copy(p4 + 6, 16, "UNIPKG1\n", 8);
+            p4[14] = 6;
+            (void)cx_write(f0, p4, sizeof p4);
+            pe[0] = 'M'; pe[1] = 'Z'; w32(pe + 60, 64); pe[64] = 'P'; pe[65] = 'E';
+            pe[68] = 0x64; pe[69] = 0x86; pe[70] = 1; pe[84] = 240; pe[88] = 0x0b; pe[89] = 2;
+            w32(pe + 120, 4096); w32(pe + 124, 512); w32(pe + 144, 8192); w32(pe + 148, 1024); w32(pe + 196, 16);
+            (void)mm_copy(pe + 328, sizeof pe - 328, ".text", 5);
+            w32(pe + 336, 16); w32(pe + 340, 4096); w32(pe + 344, 512); w32(pe + 348, 1024);
+            (void)mm_copy(pe + 600, 32, SLOT, 32);
+            (void)cx_write(f1, pe, sizeof pe);
+            (void)mm_copy(lx, sizeof lx, "linux-one", 9);
+            (void)mm_copy(lx + 9, 32, SLOT, 32);
+            (void)cx_write(f2, lx, 41);
+            lx[6] = 't';
+            (void)cx_write(f3, lx, 41);
+            mk_macho_signed(f4, 0x1000007UL, 1);
+            mk_macho_signed(f5, 0x100000cUL, 2);
+            mk_macho(m0, 0x1000007UL, 43);
+            mk_macho(m1, 0x100000cUL, 44);
+
+            /* Shadow cc with a failing stub in PATH to prove default pack needs no cc */
+            {
+                char fake_cc[700], path_env[1024];
+                const char *old_path = sy_env("PATH");
+                if (!cx_fmt(fake_cc, sizeof fake_cc, "%s/cc", nocc_bin) &&
+                    !cx_write(fake_cc, "#!/bin/sh\nexit 127\n", 19) &&
+                    !cx_fmt(path_env, sizeof path_env, "PATH=%s:%s", nocc_bin, old_path ? old_path : "/usr/bin:/bin")) {
+                    (void)sy_chmod(fake_cc, 0755);
+                    char *av_off[] = {"env", path_env, "sh", "./unisacc.com", "tools/release-ape.cx", "--", /* lint:allow R1-product tests default pack without cc */
+                                      "pack", "--cache-manager-osx", m0, m1,
+                                      p_off, f0, f1, f2, f3, f4, f5, 0};
+                    rc = run_tool(av_off, out, (int)sizeof out);
+                    size_t rn = 0;
+                    char *rcpt = cx_read(p_off_rcpt, &rn);
+                    ck(rc == 0 && sy_exists(p_off_tape) != 1 && rcpt &&
+                       !receipt_has_key(rcpt, rn, "tape/tapemode.so") &&
+                       !receipt_has_key(rcpt, rn, "tape/manifest.tsv"),
+                       "release-ape-default-off-no-cc", out);
+                    if (rcpt) mm_free(rcpt);
+                }
+            }
+
+            /* Explicit --with-tape-sidecar builds OUT/tape/ and records both receipt lines */
+            {
+                char *av_on[] = {"sh", "./unisacc.com", "tools/release-ape.cx", "--", /* lint:allow R1-product tests opt-in sidecar pack */
+                                 "pack", "--with-tape-sidecar", "--cache-manager-osx", m0, m1,
+                                 p_on, f0, f1, f2, f3, f4, f5, 0};
+                rc = run_tool(av_on, out, (int)sizeof out);
+                size_t rn = 0;
+                char *rcpt = cx_read(p_on_rcpt, &rn);
+                int chk_rc = -1;
+                if (rc == 0) {
+                    char *chk_av[] = {"sh", "./unisacc.com", "tools/tape-sidecar-build.cx", "--", "--check", ".", p_on_tape, 0}; /* lint:allow R1-product checks packed sidecar */
+                    chk_rc = run_tool(chk_av, out, (int)sizeof out);
+                }
+                ck(rc == 0 && chk_rc == 0 && sy_exists(p_on_tape) == 1 && rcpt &&
+                   receipt_has_key(rcpt, rn, "tape/tapemode.so") &&
+                   receipt_has_key(rcpt, rn, "tape/manifest.tsv"),
+                   "release-ape-opt-in-with-tape-sidecar", out);
+                if (rcpt) mm_free(rcpt);
+            }
+        }
     }
 
     {
