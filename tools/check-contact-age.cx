@@ -1,0 +1,196 @@
+/* tools/check-contact-age.cx -- self-check for tools/contact-age.cx.
+ *
+ *   cx tools/check-contact-age.cx -- [--tool PATH] [--unisacc PATH] [--tmp DIR]
+ *
+ * Builds small JSONL fixtures, runs the tool in a subprocess, and asserts both
+ * minutes and NONE rows. Cases: newest/second envelope, timestamp offset,
+ * name-prefix separation (cdx vs cdx2 vs cdx2b, agy vs agy-flow), colon and
+ * end-of-text boundaries, absent name, missing tool red.
+ * Fixtures live under $TMPDIR/contact-age-check-<pid>/ and are kept for debugging.
+ * All copies use mm_copy with an explicit capacity; any refusal is a hard error.
+ * Summary: CHECK_CONTACT_AGE cases=N failed=M (exit 1 when failed>0).
+ */
+#pragma unisa use sys.fs
+#pragma unisa use sys.posix
+#pragma unisa use sys.proc
+#pragma unisa use sys.env
+#pragma unisa use text.text
+#pragma unisa use mem.heap
+#pragma unisa use mem.bytes
+
+static int failed, cases;
+static char DIR[512], TOOL[512], UNISACC[512];
+
+static long sl(const char *s) { long n = 0; while (s[n]) n++; return n; }
+static int eq(const char *a, const char *b) { while (*a && *a == *b) { a++; b++; } return *a == *b; }
+
+/* append S to B at *O, cap is the full buffer capacity; newline stays caller's. */
+static int put(char *b, long cap, long *o, const char *s) {
+    long n = sl(s);
+    if (*o < 0 || n < 0 || *o + n > cap - 1) return -1;
+    if (mm_copy(b + *o, cap - *o, s, n)) return -1;
+    *o += n;
+    b[*o] = 0;
+    return 0;
+}
+static int mkdirs(const char *p) {
+    char b[600];
+    long n = sl(p), rc = 0;
+    if (n >= (long)sizeof b) return -1;
+    if (mm_copy(b, sizeof b, p, n + 1)) return -1;
+    for (long i = 1; i < n; i++) if (b[i] == '/') { b[i] = 0; sy_mkdir(b, 0755); b[i] = '/'; }
+    sy_mkdir(b, 0755);
+    return rc;
+}
+static int write_lines(const char *path, const char *const *lines) {
+    long cap = 1, o = 0;
+    for (int i = 0; lines[i]; i++) cap += sl(lines[i]);
+    char *b = (char *)mm_alloc(cap);
+    if (!b) return -1;
+    b[0] = 0;
+    for (int i = 0; lines[i]; i++) if (put(b, cap, &o, lines[i])) { mm_free(b); return -1; }
+    int rc = sy_write_file(path, b, o, 0644);
+    mm_free(b);
+    return rc ? -1 : 0;
+}
+
+static const char *L1 = "{\"type\":\"user\",\"timestamp\":\"2026-11-26T10:00:00.000Z\",\"text\":\"ccogweco,你有新消息来自 cdx, 标题：一\"}\n";
+static const char *L2 = "{\"type\":\"user\",\"timestamp\":\"2026-11-26T10:15:00.000Z\",\"text\":\"ccogweco,你有新消息来自 cdx, 内容\"}\n";
+static const char *L3 = "{\"type\":\"user\",\"timestamp\":\"2026-11-26T10:10:00.000Z\",\"text\":\"ccogweco,你有新消息来自 agyneon (自报身份)\"}\n";
+static const char *L4 = "{\"type\":\"user\",\"timestamp\":\"2026-11-26T10:20:00.000Z\",\"text\":\"x 你有新消息来自 cdx2 标题\"}\n";
+static const char *L5 = "{\"type\":\"assistant\",\"timestamp\":\"2026-11-26T10:30:00.000Z\",\"text\":\"no envelope here\"}\n";
+static const char *P1 = "{\"type\":\"user\",\"timestamp\":\"2026-11-26T10:20:00.000Z\",\"text\":\"a 你有新消息来自 cdx2 标题\"}\n";
+static const char *P2 = "{\"type\":\"user\",\"timestamp\":\"2026-11-26T10:25:00.000Z\",\"text\":\"b 你有新消息来自 cdx2b 标题\"}\n";
+static const char *P3 = "{\"type\":\"assistant\",\"timestamp\":\"2026-11-26T10:30:00.000Z\",\"text\":\"tail\"}\n";
+static const char *P4 = "{\"type\":\"user\",\"timestamp\":\"2026-11-26T10:22:00.000Z\",\"text\":\"d 你有新消息来自 agy-flow 标题\"}\n";
+static const char *O1 = "{\"type\":\"user\",\"timestamp\":\"2026-11-26T10:23:00.000Z\",\"text\":\"o 你有新消息来自 cdx 标题\"}\n";
+static const char *O2 = "{\"type\":\"assistant\",\"timestamp\":\"2026-11-26T10:30:00.000Z\",\"text\":\"tail\"}\n";
+static const char *C1 = "{\"type\":\"user\",\"timestamp\":\"2026-11-26T10:12:00.000Z\",\"text\":\"c 你有新消息来自 cdx: 标题\"}\n";
+static const char *C2 = "{\"type\":\"assistant\",\"timestamp\":\"2026-11-26T10:30:00.000Z\",\"text\":\"tail\"}\n";
+static const char *E1 = "{\"type\":\"user\",\"timestamp\":\"2026-11-26T10:10:00.000Z\",\"text\":\"e 你有新消息来自 cdx\"}\n";
+static const char *E2 = "{\"type\":\"assistant\",\"timestamp\":\"2026-11-26T10:30:00.000Z\",\"text\":\"tail\"}\n";
+
+static int run_tool(const char *fx, char *out, long cap) {
+    char pout[600];
+    cx_fmt(pout, sizeof pout, "%s/out.txt", DIR);
+    const char *av[14]; int k = 0;
+    av[k++] = "sh"; av[k++] = UNISACC; av[k++] = TOOL; av[k++] = "--"; av[k++] = fx;
+    av[k++] = "cdx"; av[k++] = "agyneon"; av[k++] = "cdx2"; av[k++] = "cdx2b"; av[k++] = "agy"; av[k++] = "agy-flow"; av[k] = 0;
+    const char *av2[14]; int m = 0;
+    for (int i = 0; i < k; i++) av2[m++] = av[i];
+    av2[m++] = "cd"; av2[m] = 0;
+    sy_unlink(pout);
+    int fd = sy_open_new(pout, 0644);
+    if (fd < 0) return -1;
+    sy_spawn_t o; sy_exit_t st;
+    sy_spawn_init(&o); o.argv = av2; o.in_fd = SY_STDIO_NULL; o.out_fd = fd; o.err_fd = SY_STDIO_NULL;
+    o.pgroup = -1; o.deadline_ms = 20000;
+    int rc = sy_proc_run(&o, &st);
+    sy_close(fd);
+    if (rc != 0) return -2;
+    if (st.exited && st.code != 0) return st.code;
+    size_t n = 0; char *b = cx_read(pout, &n);
+    if (!b) return -3;
+    long c = (long)n < cap - 1 ? (long)n : cap - 1;
+    if (mm_copy(out, cap - 1, b, c)) { free(b); return -4; }
+    out[c] = 0; free(b);
+    return 0;
+}
+static int has_line(const char *out, const char *line) {
+    const char *p = out;
+    while (*p) {
+        const char *e = strchr(p, '\n'); long n = e ? e - p : sl(p);
+        char b[512];
+        if (n < (long)sizeof b) {
+            if (mm_copy(b, sizeof b, p, n)) return 0;
+            b[n] = 0;
+            if (eq(b, line)) return 1;
+        }
+        p = e ? e + 1 : p + n;
+    }
+    return 0;
+}
+static void want(const char *out, const char *line) {
+    cases++;
+    if (!has_line(out, line)) { failed++; fprintf(stdout, "FAIL\tmissing\t%s\n", line); }
+}
+static void expect_rc(const char *fx, int want_rc, const char *tag) {
+    char out[8192], saved[512];
+    cases++;
+    if (want_rc != 0) { cx_fmt(saved, sizeof saved, "%s", TOOL); cx_fmt(TOOL, sizeof TOOL, "%s", "/nonexistent/contact-age.cx"); }
+    int rc = run_tool(fx, out, sizeof out);
+    if (want_rc != 0) cx_fmt(TOOL, sizeof TOOL, "%s", saved);
+    if (want_rc == 0 && rc != 0) { failed++; fprintf(stdout, "FAIL\t%s\trc=%d\n", tag, rc); }
+    if (want_rc != 0 && rc == 0) { failed++; fprintf(stdout, "FAIL\t%s\texpected-red\n", tag); }
+}
+
+int main(int argc, char **argv) {
+    cx_fmt(TOOL, sizeof TOOL, "%s", "tools/contact-age.cx");
+    cx_fmt(UNISACC, sizeof UNISACC, "%s", "./unisacc.com");
+    for (int i = 1; i < argc; i++) {
+        if (eq(argv[i], "--tool") && i + 1 < argc) cx_fmt(TOOL, sizeof TOOL, "%s", argv[++i]);
+        else if (eq(argv[i], "--unisacc") && i + 1 < argc) cx_fmt(UNISACC, sizeof UNISACC, "%s", argv[++i]);
+        else if (eq(argv[i], "--tmp") && i + 1 < argc) cx_fmt(DIR, sizeof DIR, "%s", argv[++i]);
+    }
+    if (!DIR[0]) {
+        const char *t = getenv("TMPDIR"); if (!t || !t[0]) t = "/tmp";
+        cx_fmt(DIR, sizeof DIR, "%s/contact-age-check-%ld", t, (long)getpid());
+    }
+    if (mkdirs(DIR)) { fprintf(stdout, "FAIL\ttmpdir\n"); return 1; }
+    char f1[600], f2[600], f3[600], f4[600], f5[600];
+    cx_fmt(f1, sizeof f1, "%s/base.jsonl", DIR);
+    cx_fmt(f2, sizeof f2, "%s/prefix.jsonl", DIR);
+    cx_fmt(f3, sizeof f3, "%s/offset.jsonl", DIR);
+    cx_fmt(f4, sizeof f4, "%s/colon.jsonl", DIR);
+    cx_fmt(f5, sizeof f5, "%s/endtext.jsonl", DIR);
+    const char *base[] = { L1, L2, L3, L4, L5, 0 };
+    const char *prefix[] = { P1, P2, P4, P3, 0 };
+    const char *offset[] = { O1, O2, 0 };
+    const char *colon[] = { C1, C2, 0 };
+    const char *endtext[] = { E1, E2, 0 };
+    if (write_lines(f1, base) || write_lines(f2, prefix) || write_lines(f3, offset) ||
+        write_lines(f4, colon) || write_lines(f5, endtext)) {
+        fprintf(stdout, "FAIL\tfixture-write\n"); return 1;
+    }
+
+    /* green: base fixture; now=10:30 */
+    char out[8192];
+    cases++;
+    if (run_tool(f1, out, sizeof out) != 0) { failed++; fprintf(stdout, "FAIL\tbase\trc\n"); }
+    else {
+        want(out, "CONTACT\tcdx\t15\t2026-11-26T10:15:00.000Z");
+        want(out, "CONTACT\tagyneon\t20\t2026-11-26T10:10:00.000Z");
+        want(out, "CONTACT\tcdx2\t10\t2026-11-26T10:20:00.000Z");
+        want(out, "CONTACT\tcdx2b\tNONE\t-");
+        want(out, "CONTACT\tcd\tNONE\t-");
+        want(out, "CONTACT\tagy\tNONE\t-");
+        want(out, "CONTACT\tagy-flow\tNONE\t-");
+    }
+    /* offset variant: cdx@10:23 vs now 10:30 -> 7 */
+    cases++;
+    if (run_tool(f3, out, sizeof out) != 0) { failed++; fprintf(stdout, "FAIL\toffset\trc\n"); }
+    else want(out, "CONTACT\tcdx\t7\t2026-11-26T10:23:00.000Z");
+    /* prefix separation: cdx must not match cdx2/cdx2b; cdx2 must not match cdx2b; agy must not match agy-flow */
+    cases++;
+    if (run_tool(f2, out, sizeof out) != 0) { failed++; fprintf(stdout, "FAIL\tprefix\trc\n"); }
+    else {
+        want(out, "CONTACT\tcdx2\t10\t2026-11-26T10:20:00.000Z");
+        want(out, "CONTACT\tcdx2b\t5\t2026-11-26T10:25:00.000Z");
+        want(out, "CONTACT\tcdx\tNONE\t-");
+        want(out, "CONTACT\tagyneon\tNONE\t-");
+        want(out, "CONTACT\tagy-flow\t8\t2026-11-26T10:22:00.000Z");
+        want(out, "CONTACT\tagy\tNONE\t-");
+    }
+    /* colon boundary: name followed by ':' must still match */
+    cases++;
+    if (run_tool(f4, out, sizeof out) != 0) { failed++; fprintf(stdout, "FAIL\tcolon\trc\n"); }
+    else want(out, "CONTACT\tcdx\t18\t2026-11-26T10:12:00.000Z");
+    /* end-of-text boundary: name at the very end of the JSON text field must match */
+    cases++;
+    if (run_tool(f5, out, sizeof out) != 0) { failed++; fprintf(stdout, "FAIL\tendtext\trc\n"); }
+    else want(out, "CONTACT\tcdx\t20\t2026-11-26T10:10:00.000Z");
+    /* red: missing tool must exit non-zero (proves the harness can go red) */
+    expect_rc(f1, 1, "missing-tool");
+    fprintf(stdout, "CHECK_CONTACT_AGE\tcases=%d\tfailed=%d\n", cases, failed);
+    return failed ? 1 : 0;
+}

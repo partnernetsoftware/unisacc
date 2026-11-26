@@ -1,0 +1,78 @@
+/* contact-age.cx -- minutes since each window's last envelope header in the session transcript.
+ * usage: cx contact-age.cx -- TRANSCRIPT.jsonl NAME...
+ * line per NAME: CONTACT<TAB>name<TAB>minutes|NONE<TAB>timestamp
+ */
+#pragma unisa use sys.fs
+#pragma unisa use sys.io
+#pragma unisa use text.text
+#pragma unisa use mem.heap
+#pragma unisa use mem.bytes
+
+static long parse_ts(const char *p) {
+    /* 2026-11-26T09:14:10.268Z -> minutes since epoch-ish key (UTC), enough for differences */
+    long y = 0, mo = 0, d = 0, h = 0, mi = 0;
+    int i;
+    for (i = 0; i < 4; i++) y = y * 10 + (p[i] - '0');
+    mo = (p[5] - '0') * 10 + (p[6] - '0');
+    d = (p[8] - '0') * 10 + (p[9] - '0');
+    h = (p[11] - '0') * 10 + (p[12] - '0');
+    mi = (p[14] - '0') * 10 + (p[15] - '0');
+    return (((y * 12 + mo) * 31 + d) * 24 + h) * 60 + mi;
+}
+
+/* name boundary: ASCII alnum, '-' and '_' continue a window name; anything else
+ * (space, comma, colon, paren, quote, newline, tab, backslash, UTF-8 lead byte)
+ * ends it, so "cdx" never matches "cdx2" and "agy" never matches "agy-flow". */
+static int name_end(unsigned char c) {
+    if ((c >= '0' && c <= '9') || (c >= 'A' && c <= 'Z') || (c >= 'a' && c <= 'z')) return 0;
+    if (c == '-' || c == '_') return 0;
+    return 1;
+}
+
+int main(int argc, char **argv) {
+    long n = 0;
+    char *buf;
+    int a;
+    if (argc < 3) { sy_printf("usage: contact-age TRANSCRIPT NAME...\n"); return 2; }
+    buf = cx_read(argv[1], &n);
+    if (!buf) { sy_printf("read failed\n"); return 2; }
+    long now_key = 0;
+    {   /* newest timestamp in file = "now" reference */
+        long i;
+        for (i = n - 1; i > 40; i--) {
+            if (buf[i] == 'Z' && buf[i - 4] == '.' && buf[i - 24] == '"') {
+                now_key = parse_ts(buf + i - 23);
+                break;
+            }
+        }
+    }
+    for (a = 2; a < argc; a++) {
+        char needle[160];
+        long best = -1, i, nl;
+        char tsbuf[40];
+        cx_fmt(needle, sizeof needle, "\xe4\xbd\xa0\xe6\x9c\x89\xe6\x96\xb0\xe6\xb6\x88\xe6\x81\xaf\xe6\x9d\xa5\xe8\x87\xaa %s", argv[a]);
+        nl = tx_len(needle, sizeof needle);
+        tsbuf[0] = 0;
+        for (i = 0; i + nl < n; i++) {
+            if (buf[i] == needle[0] && memcmp(buf + i, needle, (size_t)nl) == 0) {
+                unsigned char c = (unsigned char)buf[i + nl];
+                if (name_end(c)) {
+                    /* find the next "timestamp":"..." after this point on the same record */
+                    long j, ls = i, le = i;
+                    while (ls > 0 && buf[ls - 1] != '\n') ls--;
+                    while (le < n && buf[le] != '\n') le++;
+                    for (j = ls; j + 12 < le; j++) {
+                        if (memcmp(buf + j, "\"timestamp\":\"", 13) == 0) {
+                            long k = parse_ts(buf + j + 13);
+                            if (k > best) { best = k; memcpy(tsbuf, buf + j + 13, 24); tsbuf[24] = 0; }
+                            break;
+                        }
+                    }
+                }
+            }
+        }
+        if (best < 0) sy_printf("CONTACT\t%s\tNONE\t-\n", argv[a]);
+        else sy_printf("CONTACT\t%s\t%ld\t%s\n", argv[a], now_key - best, tsbuf);
+    }
+    return 0;
+}
