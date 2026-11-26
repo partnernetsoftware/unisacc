@@ -1,7 +1,7 @@
 # v0.1.6 tools-compile 层 1 有界并发池与 LPT 排程补丁草案说明
 
 - 上游设计: `w-agyneon2/plans/v0.1.6-tools-compile-load-bound.md` (第 3 节层 1)
-- 补丁草案: `/home/devali/repos/unisacc/.claude/worktrees/w-agyneon3/.work/tools-compile-bounded-pool.patch` (针对 `tests/tools-compile.cx`, 冻结期**未应用**)
+- 补丁草案: `~/repos/unisacc/.claude/worktrees/w-agyneon3/.work/tools-compile-bounded-pool.patch` (针对 `tests/tools-compile.cx`, 冻结期**未应用**)
 - 状态声明: 仅静态设计与补丁草案, **未执行编译、冷测试、生成器或批次**, 运行态指标均为 **`UNMEASURED`**.
 
 ## (1) 补丁草案核心改动
