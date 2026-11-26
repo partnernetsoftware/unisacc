@@ -1,0 +1,130 @@
+/* tools/check-prerun-rebase-plan.cx -- self-test for prerun-drive rebase-rev --plan in an isolated private archive. */
+#pragma unisa use sys.fs
+#pragma unisa use sys.io
+#pragma unisa use sys.proc
+#pragma unisa use text.text
+#pragma unisa use mem.bytes
+
+static int passed = 0, failed = 0;
+static void ck(int ok, const char *name) {
+    if (ok) { passed++; printf("PASS\t%s\n", name); }
+    else { failed++; printf("FAIL\t%s\n", name); }
+}
+
+static int run_cmd(char **av, char *buf, size_t cap, int *rc) {
+    char *o = 0; size_t n = 0;
+    *rc = cx_runv_timeout(av, 90, &o, &n);
+    if (buf && cap > 0) {
+        size_t m = n < cap - 1 ? n : cap - 1;
+        if (o && m && mm_copy(buf, (long)cap, o, (long)m)) buf[0] = 0;
+        buf[m] = 0;
+    }
+    free(o);
+    return 0;
+}
+
+static int in_range(int idx, int start, int count) {
+    return idx >= start && idx < start + count;
+}
+
+int main(int argc, char **argv) {
+    char tmp[256], repo[300], fdir[300], odir[300], out[8192], cmd[1024], r0[64], r1[64], r2[64], r3[64];
+    int rc = 0, start = 1, count = 8;
+    for (int i = 1; i < argc; i++) {
+        if (!strcmp(argv[i], "--case-range") && i + 2 < argc) {
+            start = atoi(argv[++i]);
+            count = atoi(argv[++i]);
+            if (start < 1 || count < 1) return 2;
+        } else {
+            fprintf(stderr, "usage: check-prerun-rebase-plan.cx -- [--case-range A N]\n");
+            return 2;
+        }
+    }
+    cx_fmt(tmp, sizeof tmp, "/tmp/check-rebase-plan-%d", (int)sy_pid());
+    cx_fmt(repo, sizeof repo, "%s/repo", tmp);
+    cx_fmt(fdir, sizeof fdir, "%s/from", tmp);
+    cx_fmt(odir, sizeof odir, "%s/out", tmp);
+    sy_mkdir_all(repo, 0755);
+    sy_mkdir_all(fdir, 0755);
+
+    /* Create isolated private archive repo (never mutates caller's repo) */
+    cx_fmt(cmd, sizeof cmd,
+           "orig=$(pwd)/unisacc.com; git archive HEAD | tar -x -C %s && cd %s && git init -q && git config user.email t@local && git config user.name t && git add -A && git commit -qm base && ln -sf \"$orig\" %s/unisacc.com && git -C %s rev-parse HEAD",
+           repo, repo, repo, repo);
+    { char *iv[] = {"sh", "-c", cmd, 0}; run_cmd(iv, r0, sizeof r0, &rc); r0[40] = 0; }
+    if (strlen(r0) != 40) return 2;
+
+    /* Prepare read-only from_dir */
+    { char p[340];
+      cx_fmt(p, sizeof p, "%s/ids.txt", fdir); cx_write(p, "run-warm\nlint\n", 14);
+      cx_fmt(p, sizeof p, "%s/pass.ids", fdir); cx_write(p, "run-warm\n", 9);
+      cx_fmt(p, sizeof p, "%s/env.tsv", fdir);
+      char eb[128]; cx_fmt(eb, sizeof eb, "rev\t%s\n", r0); cx_write(p, eb, strlen(eb)); }
+
+    /* 1. no --plan refused */
+    if (in_range(1, start, count)) {
+        char *v[] = {"sh", "./unisacc.com", "tools/prerun-drive.cx", "--", "rebase-rev", "--from-dir", fdir, "--to-rev", r0, "--root", repo, 0};
+        run_cmd(v, out, sizeof out, &rc); ck(rc == 2, "no-plan-refused");
+    }
+
+    /* 2. bad --to-rev refused */
+    if (in_range(2, start, count)) {
+        char *v[] = {"sh", "./unisacc.com", "tools/prerun-drive.cx", "--", "rebase-rev", "--from-dir", fdir, "--to-rev", "deadbeef", "--root", repo, "--plan", 0};
+        run_cmd(v, out, sizeof out, &rc); ck(rc == 2, "bad-rev-refused");
+    }
+
+    /* 3. missing --from-dir refused */
+    if (in_range(3, start, count)) {
+        char *v[] = {"sh", "./unisacc.com", "tools/prerun-drive.cx", "--", "rebase-rev", "--from-dir", "/tmp/no-such-dir-9999", "--to-rev", r0, "--root", repo, "--plan", 0};
+        run_cmd(v, out, sizeof out, &rc); ck(rc == 2, "missing-from-dir-refused");
+    }
+
+    /* 4. --out equals --from-dir refused */
+    if (in_range(4, start, count)) {
+        char *v[] = {"sh", "./unisacc.com", "tools/prerun-drive.cx", "--", "rebase-rev", "--from-dir", fdir, "--to-rev", r0, "--root", repo, "--plan", "--out", fdir, 0};
+        run_cmd(v, out, sizeof out, &rc); ck(rc == 2, "out-equals-from-refused");
+    }
+
+    /* 5. same rev -> reuse=1 rerun=1 */
+    if (in_range(5, start, count)) {
+        char *v[] = {"sh", "./unisacc.com", "tools/prerun-drive.cx", "--", "rebase-rev", "--from-dir", fdir, "--to-rev", r0, "--root", repo, "--plan", "--out", odir, 0};
+        run_cmd(v, out, sizeof out, &rc);
+        ck(rc == 0 && strstr(out, "PRERUN_REBASE_PLAN\t") && strstr(out, "changed_files=0\treuse=1\trerun=1\tmode=plan"), "same-rev-reuse");
+    }
+
+    if (start <= 8 && start + count - 1 >= 6) {
+        /* 6. doc-only commit from /tmp cwd -> reuse=1 rerun=1 */
+        cx_fmt(cmd, sizeof cmd, "cd %s && mkdir -p docs && echo '# doc' > docs/c2-noop.md && git add docs/c2-noop.md && git commit -qm doc && git rev-parse HEAD", repo);
+        { char *c1[] = {"sh", "-c", cmd, 0}; run_cmd(c1, r1, sizeof r1, &rc); r1[40] = 0; }
+        if (in_range(6, start, count)) {
+            cx_fmt(cmd, sizeof cmd, "w=$(pwd); cd /tmp && sh \"$w/unisacc.com\" \"$w/tools/prerun-drive.cx\" -- rebase-rev --from-dir %s --to-rev %s --root %s --plan", fdir, r1, repo);
+            char *v[] = {"sh", "-c", cmd, 0};
+            run_cmd(v, out, sizeof out, &rc);
+            ck(rc == 0 && strstr(out, "changed_files=1\treuse=1\trerun=1\tmode=plan"), "doc-change-reuse");
+        }
+
+        /* 7. rename src/host.cx -> docs/renamed.md from /tmp cwd -> reuse=0 rerun=2 */
+        cx_fmt(cmd, sizeof cmd, "cd %s && git mv src/host.cx docs/renamed.md && git commit -qm ren && git rev-parse HEAD", repo);
+        { char *c2[] = {"sh", "-c", cmd, 0}; run_cmd(c2, r2, sizeof r2, &rc); r2[40] = 0; }
+        if (in_range(7, start, count)) {
+            cx_fmt(cmd, sizeof cmd, "w=$(pwd); cd /tmp && sh \"$w/unisacc.com\" \"$w/tools/prerun-drive.cx\" -- rebase-rev --from-dir %s --from-rev %s --to-rev %s --root %s --plan", fdir, r1, r2, repo);
+            char *v[] = {"sh", "-c", cmd, 0};
+            run_cmd(v, out, sizeof out, &rc);
+            ck(rc == 0 && strstr(out, "reuse=0\trerun=2\tmode=plan"), "rename-host-rerun");
+        }
+
+        /* 8. >256 files -> conservative rerun -> reuse=0 rerun=2 */
+        if (in_range(8, start, count)) {
+            cx_fmt(cmd, sizeof cmd, "cd %s && mkdir -p docs/many && for i in $(seq 1 260); do echo x > docs/many/f$i.md; done && git add docs/many && git commit -qm many && git rev-parse HEAD", repo);
+            { char *c3[] = {"sh", "-c", cmd, 0}; run_cmd(c3, r3, sizeof r3, &rc); r3[40] = 0; }
+            cx_fmt(cmd, sizeof cmd, "w=$(pwd); cd /tmp && sh \"$w/unisacc.com\" \"$w/tools/prerun-drive.cx\" -- rebase-rev --from-dir %s --from-rev %s --to-rev %s --root %s --plan", fdir, r2, r3, repo);
+            char *v[] = {"sh", "-c", cmd, 0};
+            run_cmd(v, out, sizeof out, &rc);
+            ck(rc == 0 && strstr(out, "changed_files=260\treuse=0\trerun=2\tmode=plan"), "over-256-conservative-rerun");
+        }
+    }
+
+    { char *rm[] = {"rm", "-rf", tmp, 0}; run_cmd(rm, out, sizeof out, &rc); }
+    printf("CHECK_PRERUN_REBASE_PLAN\tpassed=%d\tfailed=%d\n", passed, failed);
+    return failed ? 1 : 0;
+}

@@ -2955,9 +2955,173 @@ static int pd_cmd_prepare(const char *from_chain_dir, const char *root_arg, cons
     return 0;
 }
 
+static int pd_is_hex40(const char *s) {
+    if (!s) return 0;
+    for (int i = 0; i < 40; i++) {
+        char c = s[i];
+        if (!((c >= '0' && c <= '9') || (c >= 'a' && c <= 'f'))) return 0;
+    }
+    return s[40] == 0;
+}
+
+static int pd_git_is_commit(const char *repo, const char *rev) {
+    char *av[] = {"git", "-C", (char *)repo, "cat-file", "-t", (char *)rev, 0};
+    char *out = 0; size_t on = 0;
+    if (!pd_is_hex40(rev)) return 0;
+    if (cx_runv_timeout(av, 10, &out, &on) != 0 || !out) { free(out); return 0; }
+    int ok = (on >= 6 && !strncmp(out, "commit", 6));
+    free(out);
+    return ok;
+}
+
+static int pd_cmd_rebase_rev_plan(const char *from_dir, const char *from_rev_arg, const char *to_rev,
+                                  const char *root_arg, const char *out_dir, int plan_mode) {
+    char from_rev[64] = {0}, repo[PD_PW] = {0};
+    if (!plan_mode) return pd_refuse("rebase-rev-requires-plan");
+    if (!from_dir || !from_dir[0] || !to_rev || !to_rev[0]) return pd_refuse("rebase-rev-requires-from-dir-and-to-rev");
+    { sy_stat_t st; if (sy_stat(from_dir, &st) || st.kind != 'd') return pd_refuse("missing-from-dir"); }
+    if (!root_arg || !root_arg[0]) root_arg = ".";
+    if (sy_realpath(root_arg, repo, sizeof repo) < 0) return pd_refuse("bad-root");
+    if (!pd_git_is_commit(repo, to_rev)) return pd_refuse("invalid-to-rev");
+    if (from_rev_arg && from_rev_arg[0]) {
+        cx_fmt(from_rev, sizeof from_rev, "%s", from_rev_arg);
+    } else {
+        char ep[PD_PW]; size_t en = 0; char *eb = 0;
+        if (cx_fmt(ep, sizeof ep, "%s/env.tsv", from_dir)) return pd_refuse("path-too-long");
+        eb = cx_read(ep, &en);
+        if (!eb) return pd_refuse("missing-from-rev-and-env-tsv");
+        for (size_t i = 0; i < en; ) {
+            size_t j = i; while (j < en && eb[j] != '\n') j++;
+            if (j - i > 4 && !strncmp(eb + i, "rev\t", 4)) {
+                size_t vl = j - i - 4; if (vl > 40) vl = 40;
+                mm_copy(from_rev, sizeof from_rev, eb + i + 4, vl); from_rev[vl] = 0;
+                break;
+            }
+            i = j + 1;
+        }
+        free(eb);
+    }
+    if (!pd_git_is_commit(repo, from_rev)) return pd_refuse("invalid-from-rev");
+
+    char ids_p[PD_PW];
+    if (cx_fmt(ids_p, sizeof ids_p, "%s/ids.txt", from_dir)) return pd_refuse("path-too-long");
+    if (pd_load_ids(ids_p)) return pd_refuse("read-ids-file");
+
+    static char pass_ids[4096][128]; int npass = 0;
+    { char pp[PD_PW]; size_t pn = 0; char *pb = 0;
+      if (!cx_fmt(pp, sizeof pp, "%s/pass.ids", from_dir) && (pb = cx_read(pp, &pn)) != 0) {
+          for (size_t i = 0; i < pn && npass < 4096; ) {
+              size_t j = i; while (j < pn && pb[j] != '\n' && pb[j] != '\r') j++;
+              if (j > i && j - i < 128) {
+                  mm_copy(pass_ids[npass], 128, pb + i, j - i);
+                  pass_ids[npass][j - i] = 0;
+                  npass++;
+              }
+              while (j < pn && (pb[j] == '\n' || pb[j] == '\r')) j++;
+              i = j;
+          }
+          free(pb);
+      }
+    }
+
+    char range[128]; cx_fmt(range, sizeof range, "%s..%s", from_rev, to_rev);
+    char *dv[] = {"git", "-C", repo, "diff", "--name-status", "--no-renames", range, 0};
+    char *dout = 0; size_t dlen = 0;
+    if (cx_runv_timeout(dv, 20, &dout, &dlen) != 0) { free(dout); return pd_refuse("git-diff-failed"); }
+    char *cfiles[256]; int ncf = 0, total_cf = 0, conservative = 0;
+    if (dout) {
+        for (size_t i = 0; i < dlen; ) {
+            size_t j = i; while (j < dlen && dout[j] != '\n') j++;
+            if (j > i) {
+                total_cf++;
+                if (dout[i] == 'D') conservative = 1;
+                size_t tab = i; while (tab < j && dout[tab] != '\t') tab++;
+                if (tab + 1 < j && ncf < 256) { dout[j] = 0; cfiles[ncf++] = dout + tab + 1; }
+                else { conservative = 1; }
+            }
+            i = j + 1;
+        }
+    }
+
+    static char aff_ids[4096][128]; int naff = 0;
+    if (!conservative && ncf > 0) {
+        char *av[276]; int k = 0; char uc[PD_PW];
+        cx_fmt(uc, sizeof uc, "%s/unisacc.com", repo);
+        av[k++] = "sh"; av[k++] = "-c"; av[k++] = "cd \"$1\" && shift && exec \"$@\""; av[k++] = "_"; av[k++] = repo;
+        av[k++] = "sh"; av[k++] = uc; av[k++] = "tools/affected.cx"; av[k++] = "--"; av[k++] = "--list-only"; av[k++] = "--files";
+        for (int i = 0; i < ncf && k < 274; i++) av[k++] = cfiles[i];
+        av[k] = 0;
+        char *aout = 0; size_t alen = 0;
+        if (cx_runv_timeout(av, 60, &aout, &alen) != 0 || !aout) { free(aout); free(dout); return pd_refuse("affected-failed"); }
+        if (strstr(aout, "unreadable")) conservative = 1;
+        for (size_t i = 0; !conservative && i < alen && naff < 4096; ) {
+            size_t j = i; while (j < alen && aout[j] != '\n') j++;
+            if (j - i > 9 && !strncmp(aout + i, "AFFECTED\t", 9)) {
+                size_t s = i + 9, e = s;
+                while (e < j && aout[e] != '\t') e++;
+                if (e > s && e - s < 128) {
+                    mm_copy(aff_ids[naff], 128, aout + s, e - s);
+                    aff_ids[naff][e - s] = 0;
+                    naff++;
+                }
+            }
+            i = j + 1;
+        }
+        free(aout);
+    }
+    free(dout);
+
+    int n_reuse = 0, n_rerun = 0;
+    FILE *pf = 0;
+    if (out_dir && out_dir[0]) {
+        char rf[PD_PW], ro[PD_PW], op[PD_PW];
+        if (sy_realpath(from_dir, rf, sizeof rf) == 0 && sy_realpath(out_dir, ro, sizeof ro) == 0 && !strcmp(rf, ro)) {
+            return pd_refuse("out-dir-equals-from-dir");
+        }
+        if (!strcmp(from_dir, out_dir)) return pd_refuse("out-dir-equals-from-dir");
+        sy_mkdir_all(out_dir, 0755);
+        if (cx_fmt(op, sizeof op, "%s/rebase-plan.tsv", out_dir) || !(pf = fopen(op, "w"))) {
+            return pd_refuse("cannot-write-rebase-plan");
+        }
+        fprintf(pf, "batch\taction\n");
+    }
+    for (int i = 0; i < pd_nids; i++) {
+        const char *id = pd_ids[i];
+        int is_pass = 0, is_aff = conservative ? 1 : 0;
+        for (int j = 0; j < npass; j++) if (!strcmp(id, pass_ids[j])) { is_pass = 1; break; }
+        for (int j = 0; !is_aff && j < naff; j++) if (!strcmp(id, aff_ids[j])) { is_aff = 1; break; }
+        if (is_pass && !is_aff) {
+            n_reuse++;
+            if (pf) fprintf(pf, "%s\tREUSE\n", id);
+        } else {
+            n_rerun++;
+            if (pf) fprintf(pf, "%s\tRERUN\n", id);
+        }
+    }
+    if (pf) fclose(pf);
+    printf("PRERUN_REBASE_PLAN_UNCOVERED\titems=over-256-files-conservative-rerun,unregistered-batch\n");
+    printf("PRERUN_REBASE_PLAN\tfrom_rev=%s\tto_rev=%s\tchanged_files=%d\treuse=%d\trerun=%d\tmode=plan\n",
+           from_rev, to_rev, total_cf, n_reuse, n_rerun);
+    return 0;
+}
+
 int main(int argc, char **argv) {
-    if (argc < 2) return pd_refuse("usage: prepare|plan|run|merge|archive|replay");
+    if (argc < 2) return pd_refuse("usage: prepare|plan|run|merge|archive|replay|rebase-rev");
     const char *sub = argv[1];
+    if (tx_eqz(sub, "rebase-rev") || tx_eqz(sub, "--rebase-rev")) {
+        const char *from_d = 0, *from_r = 0, *to_r = 0, *root_d = 0, *out_d = 0;
+        int plan_mode = 0;
+        for (int i = 2; i < argc; i++) {
+            if (tx_eqz(argv[i], "--from-dir") && i + 1 < argc) from_d = argv[++i];
+            else if (tx_eqz(argv[i], "--from-rev") && i + 1 < argc) from_r = argv[++i];
+            else if (tx_eqz(argv[i], "--to-rev") && i + 1 < argc) to_r = argv[++i];
+            else if (tx_eqz(argv[i], "--root") && i + 1 < argc) root_d = argv[++i];
+            else if ((tx_eqz(argv[i], "--out") || tx_eqz(argv[i], "--dir")) && i + 1 < argc) out_d = argv[++i];
+            else if (tx_eqz(argv[i], "--plan")) plan_mode = 1;
+            else return pd_refuse("unknown-rebase-rev-arg");
+        }
+        return pd_cmd_rebase_rev_plan(from_d, from_r, to_r, root_d, out_d, plan_mode);
+    }
     if (tx_eqz(sub, "prepare")) {
         const char *chain_d = 0, *root_d = 0, *ver = 0, *out_d = 0, *ids_f = 0, *times_f = 0, *prio_f = 0, *heavy_f = 0;
         int win_sz = 10, warmup = -1;
