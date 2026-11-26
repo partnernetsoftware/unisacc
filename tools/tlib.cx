@@ -1002,6 +1002,8 @@ static int cmd_kit(const char *outdir, const char *cache, int par, int use_cache
     tp_puts(&k, "kit\t1\nproduct_sha\t"); tp_puts(&k, product_sha); tp_puts(&k, "\n");
     names = tp_names(root, &nn);
     if (!names) return say(2, "UNREADABLE", "build/tlib-packages.tsv", "no package table");
+    static char skip_pkgs[MAXLIB][64];
+    int nskip_q = 0;
     while (i < nn) {
         char pkg[64];
         e = i;
@@ -1022,8 +1024,11 @@ static int cmd_kit(const char *outdir, const char *cache, int par, int use_cache
                     else { npkg_built++; nobj_built += last_obj_built; }
                 }
             }
-            if (rc) { nskip++; sy_printf("TLIB_KIT\tskipped\t%s\trc=%d\n", pkg, rc); }
-            else {   /* pk is the package, libs[MAXLIB - 1] its tlib (kept, built or taken from the cache) */
+            if (rc) {
+                if (nskip_q < MAXLIB && !cx_fmt(skip_pkgs[nskip_q], sizeof skip_pkgs[nskip_q], "%s", pkg)) nskip_q++;
+                nskip++;
+                sy_printf("TLIB_KIT\tskipped\t%s\trc=%d\n", pkg, rc);
+            } else {   /* pk is the package, libs[MAXLIB - 1] its tlib (kept, built or taken from the cache) */
                 KitLib *K = &kitlibs[nlib];
                 if (cx_fmt(K->pkg, sizeof K->pkg, "%s", pk.pkg) || cx_fmt(K->ver, sizeof K->ver, "%s", pk.version) ||
                     cx_fmt(K->content, sizeof K->content, "%s", libs[MAXLIB - 1].content) ||
@@ -1035,6 +1040,46 @@ static int cmd_kit(const char *outdir, const char *cache, int par, int use_cache
         i = e + 1;
     }
     mm_free(names);
+    /* Retry skipped packages once dependencies built later in the same pass are present. */
+    while (nskip_q > 0) {
+        int progressed = 0, rem = 0, si;
+        for (si = 0; si < nskip_q; si++) {
+            if (nlib >= MAXLIB - 1) { mm_free(k.b); return say(1, "FAILED", outdir, "more packages than the link takes"); }
+            rc = cmd_build(skip_pkgs[si], outdir, cache, par, use_cache);
+            if (!rc) {
+                KitLib *K = &kitlibs[nlib];
+                nbuilt++;
+                if (last_pkg_hit) npkg_hit++;
+                else { npkg_built++; nobj_built += last_obj_built; }
+                if (cx_fmt(K->pkg, sizeof K->pkg, "%s", pk.pkg) || cx_fmt(K->ver, sizeof K->ver, "%s", pk.version) ||
+                    cx_fmt(K->content, sizeof K->content, "%s", libs[MAXLIB - 1].content) ||
+                    cx_fmt(K->api, sizeof K->api, "%s", libs[MAXLIB - 1].api)) return 2;
+                tp_puts(&k, "lib\t"); tp_puts(&k, pk.pkg); tp_puts(&k, "@"); tp_puts(&k, pk.version); tp_puts(&k, ".tlib\n");
+                nlib++;
+                progressed = 1;
+            } else {
+                if (rem != si) (void)cx_fmt(skip_pkgs[rem], sizeof skip_pkgs[rem], "%s", skip_pkgs[si]);
+                rem++;
+                sy_printf("TLIB_KIT\tskipped\t%s\trc=%d\n", skip_pkgs[si], rc);
+            }
+        }
+        nskip_q = rem;
+        nskip = rem;
+        if (!progressed) break;
+    }
+    if (nskip_q > 0) {
+        char miss[1024]; long ml = 0; int si;
+        miss[0] = 0;
+        for (si = 0; si < nskip_q; si++) {
+            long pl = tx_len(skip_pkgs[si], 64);
+            if (si && ml + 1 < (long)sizeof miss) miss[ml++] = ',';
+            if (ml + pl < (long)sizeof miss) { tx_copy(miss + ml, (long)sizeof miss - ml, skip_pkgs[si], pl); ml += pl; }
+            miss[ml] = 0;
+        }
+        mm_free(k.b);
+        sy_printf("TLIB_KIT\tincomplete\t%s\n", miss);
+        return say(1, "INCOMPLETE", miss, "kit skipped packages");
+    }
     if (nlib < 1) { mm_free(k.b); return say(1, "FAILED", outdir, "no package built"); }
     if (k.bad || !k.b) { mm_free(k.b); return say(1, "FAILED", outdir, "out of memory"); }
     if (image_ok && !retired && oself + 1 == k.n && mm_same(old, k.b, k.n)) {

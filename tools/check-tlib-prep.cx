@@ -332,8 +332,8 @@ int main(int argc, char **argv) {
         if (tp_kit_dir(root, shared, sizeof shared)) fatal("tp_kit_dir");
         use_kit_dir(shared);
         rc = build_kit(shared, &kit, &kn);
-        ck(rc == 0 && count("PREPARED\ttlib-kit\t") == 1 && kit && sy_exists(image) == 1, "kit-built-and-prepared-once");
-        if (rc || !kit) { if (last) (void)sy_write_all(1, last, (long)lastn); fatal("no kit: the remaining cases cannot run"); }
+        ck(rc == 0 && count("PREPARED\ttlib-kit\t") == 1 && has("\tskipped=0\t") && kit && sy_exists(image) == 1, "kit-built-and-prepared-once");
+        if (rc || !kit || !has("\tskipped=0\t")) { if (last) (void)sy_write_all(1, last, (long)lastn); fatal("no complete kit (skipped!=0 or failed): the remaining cases cannot run"); }
         sy_printf("PREPARED\ttlib-prep-shared-kit\tpath=%s\tno-test-result\n", shared);
         /* private copy for (1b) so the shared kit stays intact for sibling batches */
         if (copy_kit(shared, privkit, kit, (long)kn, 0, 0)) fatal("private kit copy for 1b");
@@ -371,6 +371,18 @@ int main(int argc, char **argv) {
             same = again && an == kn && mm_same(again, kit, (long)kn);
             mm_free(again);
             ck(ok && rc == 0 && count("TLIB_BUILD\t") == 1 && has("rebuilt=1") && has("image=kept") && same, "damaged-tlib-alone-is-built-again");
+        }
+        {
+            char nroot[4600], nbld[4700], ntab[4750], nout[4600], nkit[4700];
+            const char *bad_tbl = "# pkg\tversion\tapi_sha\troots\texclude\tdeps\tnote\nfx.broken\t0.1.0\taaa\tno_such_dir\t-\t-\tnote\n";
+            if (!cx_fmt(nroot, sizeof nroot, "%s/neg-root", work) && !cx_fmt(nbld, sizeof nbld, "%s/build", nroot) &&
+                !cx_fmt(ntab, sizeof ntab, "%s/tlib-packages.tsv", nbld) && !cx_fmt(nout, sizeof nout, "%s/neg-out", work) &&
+                !cx_fmt(nkit, sizeof nkit, "%s/kit.tsv", nout) &&
+                !sy_mkdir(nroot, 0700) && !sy_mkdir(nbld, 0700) && !cx_write(ntab, bad_tbl, tx_len(bad_tbl, 512))) {
+                char *nv[] = {"sh", product, "tools/tlib.cx", "--", "kit", "--out", nout, "--root", nroot, "--product", product, 0};
+                rc = run(nv, 30);
+                ck(rc != 0 && has("TLIB_KIT\tincomplete\tfx.broken\n") && sy_exists(nkit) != 1, "incomplete-kit-refused-and-names-skipped-pkg");
+            } else ck(0, "incomplete-kit-refused-and-names-skipped-pkg");
         }
         /* restore image/kitdir to the shared kit for any later all-mode cases */
         use_kit_dir(shared);
