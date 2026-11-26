@@ -1,44 +1,44 @@
 /* tools/devsvc.cx -- 仓开发服务(基础版):一个仓一个实例的有界常驻服务,加同一文件里的 CLI 客户端。
  * 批次 devsvc(tools/check-devsvc.cx)。设计稿 plans/devsvc.md。本仓配置表 tools/devsvc-repo.tsv(或 $DEVSVC_REPO_TABLE)。
  *
- *   sh ./unisacc.com tools/devsvc.cx -- config                         打印所读配置表(CFG 行含 lock、lockdomain 写域、doc 规则、table 身份,末行 DEVSVC_CONFIG);表缺失或缺键 rc 3
- *   sh ./unisacc.com tools/devsvc.cx -- start [--ttl S] [--idle S]     起实例(已在则报 already);默认 ttl 1800 s、idle 300 s
- *   sh ./unisacc.com tools/devsvc.cx -- ping | stop
- *   sh ./unisacc.com tools/devsvc.cx -- lock acquire NAME --owner O [--ttl S]   (默认 600 s,freeze 锁默认 7200 s,上限 7200 s;同属主再拿即续期;freeze 为全仓共享防误操作写窗口锁,不防恶意冒充,冻结强拦截以 precommit build/freeze.tsv 为准)
- *   sh ./unisacc.com tools/devsvc.cx -- lock release NAME --owner O
- *   sh ./unisacc.com tools/devsvc.cx -- lock list
- *   sh ./unisacc.com tools/devsvc.cx -- run [--local] TOOL.cx [ARGS...]   用缓存的原生执行体跑已有工具;stdout/rc 即工具自己的
- *   sh ./unisacc.com tools/devsvc.cx -- events [--since N]             事件环(容量 256);N 为上次见到的 seq
- *   sh ./unisacc.com tools/devsvc.cx -- events emit KIND TEXT
+ *   cx tools/devsvc.cx -- config                         打印所读配置表(CFG 行含 lock、lockdomain 写域、doc 规则、table 身份,末行 DEVSVC_CONFIG);表缺失或缺键 rc 3
+ *   cx tools/devsvc.cx -- start [--ttl S] [--idle S]     起实例(已在则报 already);默认 ttl 1800 s、idle 300 s
+ *   cx tools/devsvc.cx -- ping | stop
+ *   cx tools/devsvc.cx -- lock acquire NAME --owner O [--ttl S]   (默认 600 s,freeze 锁默认 7200 s,上限 7200 s;同属主再拿即续期;freeze 为全仓共享防误操作写窗口锁,不防恶意冒充,冻结强拦截以 precommit build/freeze.tsv 为准)
+ *   cx tools/devsvc.cx -- lock release NAME --owner O
+ *   cx tools/devsvc.cx -- lock list
+ *   cx tools/devsvc.cx -- run [--local] TOOL.cx [ARGS...]   用缓存的原生执行体跑已有工具;stdout/rc 即工具自己的
+ *   cx tools/devsvc.cx -- events [--since N]             事件环(容量 256);N 为上次见到的 seq
+ *   cx tools/devsvc.cx -- events emit KIND TEXT
  *   事件同时追加到实例目录 events.tsv(EV seq ts kind text;超 $DEVSVC_EV_ROTATE 字节,缺省 4 MB,轮转为 events.tsv.1);
  *   f/x/flow/doc/git/run/register/derive 命令结束各记一条 <命令>.<子命令> owner pid rc ms。owner 依次取 $DEVSVC_OWNER、
  *   $CLAUDE_JOB_ID(至多 40 字节字母数字连字符,否则丢弃)、有 $TMUX 时 pane-<$TMUX_PANE 数字>、auto-<pid>;各窗口(cc、cdx、子代理)应设 $DEVSVC_OWNER。
  *   追加字段(旧列不动):x.git/x.gh 带 sub=<第一个非选项参数>;git.commit 带 class=ok|timeout|args|<COMMIT_OWN_FAIL 类别>|other。
  *   f write|edit|edits 的这条事件另带 path= 与写后 sha=。成功的 f 写入或 git commit 涉及 exec/、seed/ 下的路径,且本检出已构造过
  *   cx-dev bundle 而没有在跑的 `cx-dev --watch` 时,后台拉起一个事件预建进程(不阻塞本命令;记事件 cxdev.watch;$DEVSVC_CXDEV_WATCH=0 关闭;见 cxdev_kick)。
- *   sh ./unisacc.com tools/devsvc.cx -- git log|diff|show|status ARGS|blame|ls-files ...   只读透传,不取锁,stdout 上限 1 MB 超出打 DEVSVC_TRUNCATED
- *   sh ./unisacc.com tools/devsvc.cx -- git unstage PATH... [--owner O]   在 git-land 锁内只恢复指定索引项，操作进行中整体拒绝。
- *   sh ./unisacc.com tools/devsvc.cx -- events on-change PATH...       只读接入:跑 on-change --dry-run,把 ON_CHANGE 行入环
- *   sh ./unisacc.com tools/devsvc.cx -- status [--paths]               各工作目录未提交数、在途进程、实例与锁(不拉起实例)
- *   sh ./unisacc.com tools/devsvc.cx -- tool-index [--sha] [--key] [--cache DIR] [--timeout-ms N]   工具索引按内容身份现查(转 tools/derived-query.cx):
+ *   cx tools/devsvc.cx -- git log|diff|show|status ARGS|blame|ls-files ...   只读透传,不取锁,stdout 上限 1 MB 超出打 DEVSVC_TRUNCATED
+ *   cx tools/devsvc.cx -- git unstage PATH... [--owner O]   在 git-land 锁内只恢复指定索引项，操作进行中整体拒绝。
+ *   cx tools/devsvc.cx -- events on-change PATH...       只读接入:跑 on-change --dry-run,把 ON_CHANGE 行入环
+ *   cx tools/devsvc.cx -- status [--paths]               各工作目录未提交数、在途进程、实例与锁(不拉起实例)
+ *   cx tools/devsvc.cx -- tool-index [--sha] [--key] [--cache DIR] [--timeout-ms N]   工具索引按内容身份现查(转 tools/derived-query.cx):
  *     正文到 stdout,结果行 DQ tool-index hit|miss|recovered key= sha= 到 stderr;缓存 ~/.cache/unisacc/derived/tool-index/<key>.tsv,损坏即删并现算
- *   sh ./unisacc.com tools/devsvc.cx -- serve [--ttl S] [--idle S]     前台跑服务循环(start 即后台起它)
- *   sh ./unisacc.com tools/devsvc.cx -- flow run FILE.tsv|- --par N [--deadline-ms N] [--cat] [--run DIR] [--owner O] [--lock-wait-ms N]
- *   sh ./unisacc.com tools/devsvc.cx -- flow - [同上选项]             从 stdin 读节点表(格式见 tools/cxlib/flowexec.cx 头注:id op deps args)
+ *   cx tools/devsvc.cx -- serve [--ttl S] [--idle S]     前台跑服务循环(start 即后台起它)
+ *   cx tools/devsvc.cx -- flow run FILE.tsv|- --par N [--deadline-ms N] [--cat] [--run DIR] [--owner O] [--lock-wait-ms N]
+ *   cx tools/devsvc.cx -- flow - [同上选项]             从 stdin 读节点表(格式见 tools/cxlib/flowexec.cx 头注:id op deps args)
  *   flow 加 --txn(或节点表里一行 `txn 1`):事务化,全部 file.*、doc.* 写节点先暂存不落盘,锁按名排序一次取齐(含写路径所属共享表锁),
  *     整组试编(被写 .cx 加直接消费者,`txn_consumers N` 设上限)、登记表成对校验、磁盘未被他人改动全过才逐文件原子落盘,否则整组不落盘;
  *     结果行 `NODE TXN ok|fail ... FLOW_TXN committed ...|TXN_ABORT reason= node= path= ...`,明细在 RUN/out/TXN.out
- *   sh ./unisacc.com tools/devsvc.cx -- f read PATH [OFF LIM]          内容到 stdout,结果行 F read ok sha= lines= bytes= 到 stderr
- *   sh ./unisacc.com tools/devsvc.cx -- f write PATH --from SRC [--expect-sha X] [--mkdir] [--owner O] [--lock-wait-ms N]
- *   sh ./unisacc.com tools/devsvc.cx -- f edit PATH --old-file A --new-file B [--expect-sha X] [--all] [--chomp]   (--chomp:两文件各去掉末尾一个换行)
+ *   cx tools/devsvc.cx -- f read PATH [OFF LIM]          内容到 stdout,结果行 F read ok sha= lines= bytes= 到 stderr
+ *   cx tools/devsvc.cx -- f write PATH --from SRC [--expect-sha X] [--mkdir] [--owner O] [--lock-wait-ms N]
+ *   cx tools/devsvc.cx -- f edit PATH --old-file A --new-file B [--expect-sha X] [--all] [--chomp]   (--chomp:两文件各去掉末尾一个换行)
  *   flow 与 x 必须显式 --par N(1..32,单节点也写;flow 可在节点表写一行 `par N`,命令行优先),缺省 rc 2 REFUSE missing --par
- *   sh ./unisacc.com tools/devsvc.cx -- x --par N [--timeout-ms N] [--cwd D] -- ARGV...   单条命令:stdout/stderr 原样转出,结果行 X 到 stderr,退出码即命令的
+ *   cx tools/devsvc.cx -- x --par N [--timeout-ms N] [--cwd D] -- ARGV...   单条命令:stdout/stderr 原样转出,结果行 X 到 stderr,退出码即命令的
  *   x|flow|wait 输出控制:--tail N、--head N、--grep S(固定串,可多次,行级或)、--summary(每节点一行 SUM id rc ms lines first);
  *     任一给出即合并 stdout/stderr 过滤,全量落 run 目录 full.out(wait 为作业 out),略去行时打 DEVSVC_TRIMMED shown=N total=M,末行 OUT=路径;不给时行为不变
  *   x|flow|git commit|register|derive 加 --bg:立即打印 JOB id run=DIR(实例目录 jobs/<id>/),作业在独立会话跑,deadline 与锁照旧,结束记 job.done
- *   sh ./unisacc.com tools/devsvc.cx -- wait JOB [--timeout-ms N]      等作业(默认 50000,上限 55000):结束打输出尾部(至多 8 KB)与 JOB_DONE,rc 即作业的;超时 WAIT_TIMEOUT rc 124,不杀作业
- *   sh ./unisacc.com tools/devsvc.cx -- jobs                           列在途与最近 30 个作业
- *   sh ./unisacc.com tools/devsvc.cx -- events --wait KIND [--since SEQ] [--timeout-ms N]   阻塞等某类事件(缺省只等新事件),超时 rc 124
+ *   cx tools/devsvc.cx -- wait JOB [--timeout-ms N]      等作业(默认 50000,上限 55000):结束打输出尾部(至多 8 KB)与 JOB_DONE,rc 即作业的;超时 WAIT_TIMEOUT rc 124,不杀作业
+ *   cx tools/devsvc.cx -- jobs                           列在途与最近 30 个作业
+ *   cx tools/devsvc.cx -- events --wait KIND [--since SEQ] [--timeout-ms N]   阻塞等某类事件(缺省只等新事件),超时 rc 124
  *
  * flow/f/x:引擎(cxlib.flowexec、cxlib.flowfile)在客户端进程里跑,服务提供锁与事件环;这三个子命令不拉起实例,无实例时照跑但不取锁、
  *   不入环(汇总行 via=local)。flow 输出每节点一行 `NODE id 状态 rc= ms= 摘要 [sha=]`,末行 DEVSVC_FLOW(含 wall_ms、peak、via、locks、run=RUN 目录);
