@@ -480,7 +480,8 @@ static int lookup_host_slot(const char *s, int n) {
         if (same_tok(s, n, g_host_names[i], l)) return i;
     }
     /* Explicit legacy Linux runtime aliases mapped to canonical 37 hoststub slots */
-    if (same_tok(s, n, "syscall", 7)) return 12;
+    /* NOTE: raw Linux `.sys/.sys6 syscall` (AF_ALG, mremap, etc.) is NOT slot 12 (spawn);
+     * it is parsed/validated in full and lowered to `imm r0, -38` (-ENOSYS) in parse_insn_line(). */
     if (same_tok(s, n, "lstat", 5)) return 9;
     if (same_tok(s, n, "gettimeofday", 12)) return 18;
     if (same_tok(s, n, "getdents64", 10)) return 26;
@@ -718,6 +719,41 @@ static int parse_insn_line(int func_idx, int line_no, const char *line, long ll,
 
     int host_slot = -1;
     int is_sys = (op == 43 || op == 44); /* .sys or .sys6 */
+    if (is_sys) {
+        long sk = k;
+        while (sk < ll && (line[sk] == ' ' || line[sk] == '\t' || line[sk] == ',')) sk++;
+        if (sk < ll && line[sk] != '[') {
+            long ts = sk;
+            while (sk < ll && line[sk] != ',' && line[sk] != ' ' && line[sk] != '\t') sk++;
+            if (same_tok(line + ts, (int)(sk - ts), "syscall", 7)) {
+                int raw_rcnt = 0;
+                k = sk;
+                while (k < ll) {
+                    while (k < ll && (line[k] == ' ' || line[k] == '\t' || line[k] == ',')) k++;
+                    if (k >= ll) break;
+                    if (line[k] == '[') return refuse("raw-syscall-bad-operand");
+                    long rts = k;
+                    while (k < ll && line[k] != ',' && line[k] != ' ' && line[k] != '\t') k++;
+                    if (parse_reg(line + rts, (int)(k - rts)) < 0) return refuse("raw-syscall-bad-operand");
+                    raw_rcnt++;
+                }
+                if (raw_rcnt != (int)out->nregs) return refuse("raw-syscall-bad-arity");
+                out->opcode = 0;       /* imm */
+                out->nregs = 1;
+                out->regs[0] = 0;      /* r0 (matches tape_x86_64.S .Lrun_sys_result) */
+                out->nimms = 1;
+                out->imm_tags[0] = 0;  /* SLEB128 */
+                out->imms[0] = (unsigned long long)(-38LL);
+                out->has_ext_relo = 0;
+                out->relo_kind = 0;
+                out->relo_addend = 0;
+                out->target_kind = 0;
+                out->target_imm_slot = 0;
+                out->target_idx = -1;
+                return 0;
+            }
+        }
+    }
 
     while (k < ll) {
         while (k < ll && (line[k] == ' ' || line[k] == '\t' || line[k] == ',')) k++;

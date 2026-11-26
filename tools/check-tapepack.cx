@@ -19,6 +19,7 @@
  *  16. mutate-branch-target-mid-insn-resealed-rejected (target_off=19 mid-insn + re-seal -> branch-target-mid-insn)
  *  17. cross-function-local-label-rejected (foo defines .Lonly_in_foo:, main jumps to it -> unresolved-symbol)
  *  18. str-trailing-nul-before-syms (.str "/dev/zero" carries NUL before "_start\0"; erasing it -> str-missing-trailing-nul)
+ *  19. raw-syscall-alias-no-spawn-slot12-enosys (.sys/.sys6 syscall validated then lowered to imm r0,-38 without HOST slot 12; bad tail/arity refused; real spawn rejected by M1-383)
  */
 #pragma unisa use sys.io
 #pragma unisa use sys.fs
@@ -836,6 +837,134 @@ int main(void) {
             }
         }
         ck(p_ok && c_ok && wire_ok && mut_tag_ok && mut_mid_ok, "func-lea-sleb-tag0-and-tamper-reject");
+    }
+
+    /* 19. Raw Linux .sys/.sys6 syscall (AF_ALG / mremap): parse & validate all operands first,
+     *     then lower to imm r0, -38 (-ENOSYS) without emitting HOST slot 12 (spawn);
+     *     bad tail operand or missing operands MUST be refused; real .sys spawn stays slot 12
+     *     and is rejected by M1-383 tapemode-run while lowered slice executes fallback cleanly. */
+    {
+        const char *af_src =
+            "_start:\n"
+            "  imm r0, 41\n"
+            "  .sys6 syscall, r0, r1, r2, r3, r4, r5\n"
+            "  imm r1, -38\n"
+            "  eq r2, r0, r1\n"
+            "  jumpz r2, .Lbad\n"
+            "  imm r0, 99\n"
+            "  .sys syscall, r0, r1, r2\n"
+            "  imm r1, -38\n"
+            "  eq r2, r0, r1\n"
+            "  jumpz r2, .Lbad\n"
+            "  imm r0, 42\n"
+            "  .exit r0\n"
+            ".Lbad:\n"
+            "  imm r0, 1\n"
+            "  .exit r0\n"
+            "syscall:\n"
+            "  imm r0, 0\n"
+            "  .exit r0\n";
+        const char *neg_srcs[] = {
+            "_start:\n  .sys syscall, r0, r1\n  .exit r0\n",
+            "_start:\n  .sys syscall, r0, r1, r2, r3\n  .exit r0\n",
+            "_start:\n  .sys6 syscall, r0, r1, r2, r3, r4\n  .exit r0\n",
+            "_start:\n  .sys6 syscall, r0, r1, r2, r3, r4, r5, r6\n  .exit r0\n",
+            "_start:\n  .sys6 syscall, r0, r1, r2\n  .exit r0\n",
+            "_start:\n  .sys syscall, r0, r1, 1\n  .exit r0\n",
+            "_start:\n  .sys syscall, r0, r1, [r2]\n  .exit r0\n",
+            "_start:\n  .sys r0, syscall, r1, r2\n  .exit r0\n",
+            "_start:\n.Lloc:\n  .sys syscall, r0, r1, .Lloc\n  .exit r0\n",
+            "_start:\n  .sys6 syscall, r0, r1, r2, r3, r4, helper\n  .exit r0\nhelper:\n  .exit r0\n"
+        };
+        const char *neg_msgs[] = {
+            "TAPEPACK_REFUSE\traw-syscall-bad-arity",
+            "TAPEPACK_REFUSE\traw-syscall-bad-arity",
+            "TAPEPACK_REFUSE\traw-syscall-bad-arity",
+            "TAPEPACK_REFUSE\traw-syscall-bad-arity",
+            "TAPEPACK_REFUSE\traw-syscall-bad-arity",
+            "TAPEPACK_REFUSE\traw-syscall-bad-operand",
+            "TAPEPACK_REFUSE\traw-syscall-bad-operand",
+            "TAPEPACK_REFUSE\tunresolved-symbol",
+            "TAPEPACK_REFUSE\traw-syscall-bad-operand",
+            "TAPEPACK_REFUSE\traw-syscall-bad-operand"
+        };
+        const char *sp_src =
+            "_start:\n"
+            "  .sys spawn, r0, r1, r2\n"
+            "  .exit r0\n";
+        char af_s[CTP_PW], af_sl[CTP_PW], neg_s[CTP_PW], neg_sl[CTP_PW], sp_s[CTP_PW], sp_sl[CTP_PW];
+        int af_ok = 0, af_chk = 0, af_wire = 0, neg_ok = 1, sp_ok = 0, sp_slot12 = 0, sp_m1_rej = 0, fb_run_ok = 0;
+        int ni;
+        (void)cx_fmt(af_s, sizeof af_s, "%s/af_syscall.s", g_tmp);
+        (void)cx_fmt(af_sl, sizeof af_sl, "%s/af_syscall.tapeslice", g_tmp);
+        (void)cx_fmt(sp_s, sizeof sp_s, "%s/real_spawn.s", g_tmp);
+        (void)cx_fmt(sp_sl, sizeof sp_sl, "%s/real_spawn.tapeslice", g_tmp);
+        (void)sy_write_file(af_s, af_src, (int64_t)strlen(af_src), 0644);
+        (void)sy_write_file(sp_s, sp_src, (int64_t)strlen(sp_src), 0644);
+
+        char *pav1[] = {g_bin, af_s, "-o", af_sl, 0};
+        (void)run_cmd(pav1, 20, &rc, obuf, sizeof obuf);
+        af_ok = (rc == 0 && ctp_has(obuf, "TAPEPACK_OK\tdce=1\t") && ctp_has(obuf, "host_slots=0\t"));
+        char *cav1[] = {g_bin, "--check", af_s, af_sl, 0};
+        (void)run_cmd(cav1, 20, &rc, obuf, sizeof obuf);
+        af_chk = (rc == 0 && ctp_has(obuf, "TAPEPACK_CHECK\tPASS\tdce=1\t") && ctp_has(obuf, "host_slots=0\t"));
+        {
+            unsigned char *bb = 0; int64_t bn = 0;
+            if (sy_read_file(af_sl, &bb, &bn, 1 << 20) == 0 && bb && bn >= 208) {
+                unsigned long long coff = ctp_rd_u(bb + 68, 8);
+                unsigned long long clen = ctp_rd_u(bb + 76, 8);
+                unsigned long long relo_len = ctp_rd_u(bb + 172, 8);
+                unsigned long long hcnt = ctp_rd_u(bb + 204, 4);
+                int imm_hits = 0;
+                unsigned long long ci;
+                if (coff + clen <= (unsigned long long)bn) {
+                    for (ci = 0; ci + 4 <= clen; ci++) {
+                        if (bb[coff + ci] == 0u && bb[coff + ci + 1] == 0xf0u &&
+                            bb[coff + ci + 2] == 0u && bb[coff + ci + 3] == 0x5au) {
+                            imm_hits++;
+                        }
+                    }
+                }
+                if (imm_hits == 2 && relo_len == 0ull && hcnt == 0ull) af_wire = 1;
+                mm_free(bb);
+            }
+        }
+
+        for (ni = 0; ni < 10; ni++) {
+            (void)cx_fmt(neg_s, sizeof neg_s, "%s/raw_neg_%d.s", g_tmp, ni);
+            (void)cx_fmt(neg_sl, sizeof neg_sl, "%s/raw_neg_%d.tapeslice", g_tmp, ni);
+            (void)sy_write_file(neg_s, neg_srcs[ni], (int64_t)strlen(neg_srcs[ni]), 0644);
+            char *pav_n[] = {g_bin, neg_s, "-o", neg_sl, 0};
+            (void)run_cmd(pav_n, 20, &rc, obuf, sizeof obuf);
+            if (rc == 0 || !ctp_has(obuf, neg_msgs[ni])) neg_ok = 0;
+        }
+
+        /* Real .sys spawn still maps to slot 12 and is rejected by M1-383 tapemode-run */
+        char *pav2[] = {g_bin, sp_s, "-o", sp_sl, 0};
+        (void)run_cmd(pav2, 20, &rc, obuf, sizeof obuf);
+        sp_ok = (rc == 0 && ctp_has(obuf, "TAPEPACK_OK\tdce=1\t") && ctp_has(obuf, "host_slots=1\t"));
+        {
+            unsigned char *bb = 0; int64_t bn = 0;
+            if (sy_read_file(sp_sl, &bb, &bn, 1 << 20) == 0 && bb && bn >= 208) {
+                unsigned long long hoff = ctp_rd_u(bb + 188, 8);
+                unsigned long long hcnt = ctp_rd_u(bb + 204, 4);
+                if (hcnt == 1ull && hoff + 4 <= (unsigned long long)bn && ctp_rd_u(bb + hoff, 2) == 12ull) sp_slot12 = 1;
+                mm_free(bb);
+            }
+        }
+        ck(af_ok && af_chk && af_wire && neg_ok && sp_ok && sp_slot12,
+           "raw-syscall-static-and-negatives");
+        if (sy_exists("tools/tape/asm/tape_x86_64.S") == 1) {
+            char *rav_sp[] = {"sh", "./unisacc.com", "tools/tapemode-run.cx", "--", sp_sl, 0};
+            (void)run_cmd(rav_sp, 30, &rc, obuf, sizeof obuf);
+            sp_m1_rej = (rc == 2 && ctp_has(obuf, "m1-unsupported-host-slot"));
+            char *rav_af[] = {"sh", "./unisacc.com", "tools/tapemode-run.cx", "--", af_sl, 0};
+            (void)run_cmd(rav_af, 30, &rc, obuf, sizeof obuf);
+            fb_run_ok = (rc == 42 && ctp_has(obuf, "exit_code=42"));
+            ck(sp_m1_rej && fb_run_ok, "raw-syscall-tapemode-run");
+        } else {
+            ck(0, "raw-syscall-tapemode-run-missing-asm");
+        }
     }
 
     {
