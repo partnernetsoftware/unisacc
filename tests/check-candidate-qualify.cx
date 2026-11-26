@@ -11,6 +11,7 @@
 #pragma unisa use sys.io
 #pragma unisa use sys.sig
 #pragma unisa use text.text
+#pragma unisa use mem.bytes
 
 #define SHA "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
 #define COMMIT "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb"
@@ -22,6 +23,113 @@ static char dir[512], tool[600];
 static int failed;
 
 static void ck(int ok, const char *name) { if (!ok) failed++; printf("%s\t%s\n", ok ? "PASS" : "FAIL", name); }
+
+struct wf_facts {
+    int readable;
+    int runner_seen[6];
+    int reject_draft_residue;
+    int candidate_calls_cell;
+    int report_calls_aggregate;
+    int cell_tools_precompiles_stdio;
+    int cell_tools_precompiles_stream;
+    int cell_tools_writes_manifest;
+};
+
+static int wf_span_has(const char *s, size_t n, const char *w) {
+    size_t k = strlen(w), i;
+    if (!k || n < k) return 0;
+    for (i = 0; i + k <= n; i++) if (!memcmp(s + i, w, k)) return 1;
+    return 0;
+}
+
+static void wf_parse_yaml(const char *path, struct wf_facts *f) {
+    static const char *runner_val[6] = {"ubuntu-24.04", "ubuntu-24.04-arm", "macos-15-intel", "macos-15", "windows-2025", "windows-11-arm"};
+    size_t sz = 0, at = 0;
+    char *buf = cx_read(path, &sz);
+    char job[64];
+    int in_jobs = 0, in_steps = 0, in_run = 0, run_indent = 0, i;
+    memset(f, 0, sizeof *f);
+    if (!buf) return;
+    f->readable = 1;
+    job[0] = 0;
+    while (at < sz) {
+        size_t e = at, len, ind = 0, tn;
+        const char *ls = buf + at, *t;
+        while (e < sz && buf[e] != '\n') e++;
+        len = e - at;
+        at = e < sz ? e + 1 : e;
+        while (len > 0 && ls[len - 1] == '\r') len--;
+        if (wf_span_has(ls, len, "C43_") || wf_span_has(ls, len, "0.0.43") || wf_span_has(ls, len, "NOT_READY"))
+            f->reject_draft_residue = 1;
+        while (ind < len && ls[ind] == ' ') ind++;
+        t = ls + ind;
+        tn = len - ind;
+        if (!tn || t[0] == '#') continue;
+        if (in_run) {
+            if ((int)ind > run_indent) {
+                if (tx_eqz(job, "cell-tools")) {
+                    if (wf_span_has(t, tn, "cell-tools/stdio-crossunit-$s") && wf_span_has(t, tn, "tests/stdio-crossunit.cx"))
+                        f->cell_tools_precompiles_stdio = 1;
+                    if (wf_span_has(t, tn, "cell-tools/check-stream-pipe-$s") && wf_span_has(t, tn, "tests/check-stream-pipe.cx"))
+                        f->cell_tools_precompiles_stream = 1;
+                    if (wf_span_has(t, tn, "cell-tools/manifest.tsv"))
+                        f->cell_tools_writes_manifest = 1;
+                } else if (tx_eqz(job, "candidate")) {
+                    if (wf_span_has(t, tn, "tests/candidate-qualify.cx -- cell"))
+                        f->candidate_calls_cell = 1;
+                } else if (tx_eqz(job, "report")) {
+                    if (wf_span_has(t, tn, "tests/candidate-qualify.cx -- aggregate"))
+                        f->report_calls_aggregate = 1;
+                }
+                continue;
+            }
+            in_run = 0;
+        }
+        if (ind == 0) {
+            in_jobs = (tn >= 5 && !memcmp(t, "jobs:", 5));
+            in_steps = 0;
+            job[0] = 0;
+            continue;
+        }
+        if (!in_jobs) continue;
+        if (ind == 2 && t[0] != '-') {
+            const char *col = memchr(t, ':', tn);
+            if (col && col > t) {
+                size_t kn = (size_t)(col - t) < sizeof job - 1 ? (size_t)(col - t) : sizeof job - 1;
+                (void)mm_copy(job, sizeof job, t, kn);
+                job[kn] = 0;
+                in_steps = 0;
+            }
+            continue;
+        }
+        if (!in_steps) {
+            if (tx_eqz(job, "candidate") && t[0] == '-') {
+                const char *rk = "runner:";
+                size_t rkl = 7, p;
+                for (p = 0; p + rkl <= tn; p++) {
+                    if (!memcmp(t + p, rk, rkl)) {
+                        const char *v = t + p + rkl, *ve;
+                        size_t vn;
+                        while (v < t + tn && *v == ' ') v++;
+                        ve = v;
+                        while (ve < t + tn && *ve != ',' && *ve != '}' && *ve != ' ') ve++;
+                        vn = (size_t)(ve - v);
+                        for (i = 0; i < 6; i++)
+                            if (strlen(runner_val[i]) == vn && !memcmp(v, runner_val[i], vn))
+                                f->runner_seen[i] = 1;
+                    }
+                }
+            }
+            if (ind == 4 && tn >= 6 && !memcmp(t, "steps:", 6)) in_steps = 1;
+            continue;
+        }
+        if (tn >= 4 && !memcmp(t, "run:", 4)) {
+            in_run = 1;
+            run_indent = (int)ind;
+        }
+    }
+    free(buf);
+}
 
 /* every cell PASS, except that target/check TT/CC gets ROW (a whole line, or "" to drop it); TT<0: no change; DROP drops a file */
 static void fixture(int tt, int cc, const char *row, int drop) {
@@ -86,15 +194,159 @@ int main(void) {
         ev = cx_read(out, &n);
         ck(ev && strstr(ev, "\tidentity\tFAIL\t") && strstr(ev, "\tsmoke\tNOT_RUN\t") && !strstr(ev, "\tPASS\t"), "cell-identity-failure-runs-nothing");
         free(ev); }
-    {   size_t n = 0; char *y = cx_read(".github/workflows/candidate-native.yml", &n); int i;
-        static const char *runner[6] = {"runner: ubuntu-24.04,", "runner: ubuntu-24.04-arm,", "runner: macos-15-intel,", "runner: macos-15,", "runner: windows-2025,", "runner: windows-11-arm,"};
-        ck(y != 0, "workflow-readable");
-        if (y) {
-            for (i = 0; i < 6; i++) ck(strstr(y, runner[i]) != 0, runner[i]);
-            ck(!strstr(y, "C43_") && !strstr(y, "0.0.43") && !strstr(y, "NOT_READY"), "workflow-no-draft-residue");
-            ck(strstr(y, "tests/candidate-qualify.cx -- cell") && strstr(y, "tests/candidate-qualify.cx -- aggregate"), "workflow-calls-the-tool");
-            free(y);
+    {   static const char *runner[6] = {"runner: ubuntu-24.04,", "runner: ubuntu-24.04-arm,", "runner: macos-15-intel,", "runner: macos-15,", "runner: windows-2025,", "runner: windows-11-arm,"};
+        struct wf_facts wf; int i;
+        wf_parse_yaml(".github/workflows/candidate-native.yml", &wf);
+        ck(wf.readable, "workflow-readable");
+        if (wf.readable) {
+            for (i = 0; i < 6; i++) ck(wf.runner_seen[i], runner[i]);
+            ck(!wf.reject_draft_residue, "workflow-no-draft-residue");
+            ck(wf.candidate_calls_cell && wf.report_calls_aggregate, "workflow-calls-the-tool");
+            ck(wf.cell_tools_precompiles_stdio && wf.cell_tools_precompiles_stream && wf.cell_tools_writes_manifest, "workflow-precompiles-osx-cell-drivers");
         } }
+    {   /* osx/* precompiled cell-tools dispatch: Mach-O 64 magic + cputype + manifest.tsv binding + no STREAM_PREPARE. */
+        char wd[600], ctd[650], mf[700], sp_stub[700], sc_stub[700], sc_tsv[700], *ev = 0; size_t n = 0;
+        np_result r; char why[512];
+        static const unsigned char macho_x64[8] = { 0xcf, 0xfa, 0xed, 0xfe, 0x07, 0x00, 0x00, 0x01 };
+        static const unsigned char macho_arm64[8] = { 0xcf, 0xfa, 0xed, 0xfe, 0x0c, 0x00, 0x00, 0x01 };
+        static const unsigned char elf_hdr[8] = { 0x7f, 'E', 'L', 'F', 0x02, 0x01, 0x01, 0x00 };
+        if (cx_fmt(wd, sizeof wd, "%s/osx-cell", dir) || cx_fmt(ctd, sizeof ctd, "%s/cell-tools", wd) ||
+            cx_fmt(mf, sizeof mf, "%s/manifest.tsv", ctd) ||
+            cx_fmt(sp_stub, sizeof sp_stub, "%s/check-stream-pipe-osx-x86_64", ctd) ||
+            cx_fmt(sc_stub, sizeof sc_stub, "%s/stdio-crossunit-osx-x86_64", ctd) ||
+            cx_fmt(sc_tsv, sizeof sc_tsv, "%s/stdio.tsv", wd) ||
+            sy_mkdir(wd, 0700) || sy_mkdir(ctd, 0700)) return 2;
+        /* (a) invalid target traversal refused */
+        {   char *v[] = {tool, "stream-parts", "../evil", SHA, COMMIT, 0};
+            memset(&r, 0, sizeof r);
+            ck(!np_run(v, wd, 0, 20, &r, why, sizeof why) && r.rc == 2, "osx-unknown-target-traversal-refused");
+            np_free(&r); }
+        /* (b) missing precompiled binaries on osx/x86_64 and osx/arm64 fail closed without STREAM_PREPARE */
+        {   char *v[] = {tool, "stream-parts", "osx/x86_64", SHA, COMMIT, 0};
+            memset(&r, 0, sizeof r);
+            ck(!np_run(v, wd, 0, 20, &r, why, sizeof why) && r.rc == 1 && r.out &&
+               strstr(r.out, "missing precompiled cell-tools/check-stream-pipe-osx-x86_64") &&
+               !strstr(r.out, "STREAM_PREPARE"), "osx-missing-precompiled-stream-pipe-refused");
+            np_free(&r); }
+        {   char *v[] = {tool, "stream-parts", "osx/arm64", SHA, COMMIT, 0};
+            memset(&r, 0, sizeof r);
+            ck(!np_run(v, wd, 0, 20, &r, why, sizeof why) && r.rc == 1 && r.out &&
+               strstr(r.out, "missing precompiled cell-tools/check-stream-pipe-osx-arm64") &&
+               !strstr(r.out, "STREAM_PREPARE"), "osx-arm64-missing-precompiled-refused");
+            np_free(&r); }
+        {   char *v[] = {tool, "stdio-part", "osx/x86_64", SHA, COMMIT, sc_tsv, 0};
+            memset(&r, 0, sizeof r);
+            ck(!np_run(v, wd, 0, 20, &r, why, sizeof why) && r.rc == 1, "osx-missing-precompiled-stdio-crossunit-refused");
+            np_free(&r);
+            ev = cx_read(sc_tsv, &n);
+            ck(ev && strstr(ev, "osx/x86_64\tstdio-crossunit\tFAIL\t1\t0\t" SHA "\t" COMMIT "\tmissing precompiled cell-tools/stdio-crossunit-osx-x86_64"),
+               "osx-missing-precompiled-stdio-crossunit-row");
+            free(ev); }
+        /* (c) 0-byte file and directory at cell-tools path refused */
+        if (cx_write(sp_stub, "", 0) || sy_mkdir(sc_stub, 0700)) return 2;
+        {   char *v[] = {tool, "stream-parts", "osx/x86_64", SHA, COMMIT, 0};
+            memset(&r, 0, sizeof r);
+            ck(!np_run(v, wd, 0, 20, &r, why, sizeof why) && r.rc == 1 && r.out &&
+               strstr(r.out, "missing precompiled cell-tools/check-stream-pipe-osx-x86_64"), "osx-zero-byte-precompiled-refused");
+            np_free(&r); }
+        {   char *v[] = {tool, "stdio-part", "osx/x86_64", SHA, COMMIT, sc_tsv, 0};
+            memset(&r, 0, sizeof r);
+            ck(!np_run(v, wd, 0, 20, &r, why, sizeof why) && r.rc == 1, "osx-dir-precompiled-refused");
+            np_free(&r); }
+        sy_rmdir(sc_stub);
+        /* (d) 4-byte truncated file ("BAD!") refused at entry before STREAM_PART */
+        if (cx_write(sp_stub, "BAD!", 4)) return 2;
+        {   char *v[] = {tool, "stream-parts", "osx/x86_64", SHA, COMMIT, 0};
+            memset(&r, 0, sizeof r);
+            ck(!np_run(v, wd, 0, 20, &r, why, sizeof why) && r.rc == 1 && r.out &&
+               strstr(r.out, "truncated precompiled Mach-O (<8 bytes): cell-tools/check-stream-pipe-osx-x86_64") &&
+               !strstr(r.out, "STREAM_PART"), "osx-truncated-4byte-precompiled-refused");
+            np_free(&r); }
+        /* (e) wrong-arch ELF header and wrong Mach-O cputype (arm64 on x86_64) refused at entry */
+        if (cx_write(sc_stub, (const char *)elf_hdr, sizeof elf_hdr) ||
+            cx_write(sp_stub, (const char *)macho_arm64, sizeof macho_arm64)) return 2;
+        {   char *v[] = {tool, "stdio-part", "osx/x86_64", SHA, COMMIT, sc_tsv, 0};
+            memset(&r, 0, sizeof r);
+            ck(!np_run(v, wd, 0, 20, &r, why, sizeof why) && r.rc == 1, "osx-wrong-magic-elf-precompiled-refused");
+            np_free(&r);
+            ev = cx_read(sc_tsv, &n);
+            ck(ev && strstr(ev, "bad Mach-O magic in cell-tools/stdio-crossunit-osx-x86_64 (got 0x464c457f, want 0xfeedfacf)"),
+               "osx-wrong-magic-elf-precompiled-row");
+            free(ev); }
+        {   char *v[] = {tool, "stream-parts", "osx/x86_64", SHA, COMMIT, 0};
+            memset(&r, 0, sizeof r);
+            ck(!np_run(v, wd, 0, 20, &r, why, sizeof why) && r.rc == 1 && r.out &&
+               strstr(r.out, "wrong Mach-O cputype in cell-tools/check-stream-pipe-osx-x86_64 (got 0x0100000c, want 0x01000007)"),
+               "osx-wrong-cputype-arm64-on-x64-refused");
+            np_free(&r); }
+        /* (f) valid 8-byte Mach-O x86_64 header + payload: refused when manifest.tsv is missing, sha mismatches, or APE_SHA mismatches */
+        {   static const char sp_tail[] = "\necho \"PASS\tstub-$SP_PART\"\necho \"CHECK_STREAM_PIPE\tfailed=0\"\n";
+            static const char sc_tail[] = "\necho \"PASS\tab-fclose-runs\"\necho \"STDIO_CROSSUNIT\tassertions=8\tfailed=0\tnot_run=0\"\n";
+            char sp_buf[256], sc_buf[256], sp_sha[65], sc_sha[65], mf_bad_sha[600], mf_bad_id[600], mf_good[600];
+            size_t sp_len = 8 + sizeof sp_tail - 1, sc_len = 8 + sizeof sc_tail - 1;
+            memcpy(sp_buf, macho_x64, 8); memcpy(sp_buf + 8, sp_tail, sizeof sp_tail - 1);
+            memcpy(sc_buf, macho_x64, 8); memcpy(sc_buf + 8, sc_tail, sizeof sc_tail - 1);
+            cx_sha256_hex(sp_buf, sp_len, sp_sha);
+            cx_sha256_hex(sc_buf, sc_len, sc_sha);
+            if (cx_write(sp_stub, sp_buf, sp_len) || cx_write(sc_stub, sc_buf, sc_len)) return 2;
+            {   char *v[] = {tool, "stream-parts", "osx/x86_64", SHA, COMMIT, "--test-macho-sh", 0};
+                memset(&r, 0, sizeof r);
+                ck(!np_run(v, wd, 0, 20, &r, why, sizeof why) && r.rc == 1 && r.out &&
+                   strstr(r.out, "missing cell-tools/manifest.tsv"), "osx-missing-manifest-refused");
+                np_free(&r); }
+            if (cx_fmt(mf_bad_sha, sizeof mf_bad_sha,
+                       SHA "\t" COMMIT "\tcell-tools/check-stream-pipe-osx-x86_64\t0000000000000000000000000000000000000000000000000000000000000000\n"
+                       SHA "\t" COMMIT "\tcell-tools/stdio-crossunit-osx-x86_64\t%s\n", sc_sha) ||
+                cx_write(mf, mf_bad_sha, strlen(mf_bad_sha))) return 2;
+            {   char *v[] = {tool, "stream-parts", "osx/x86_64", SHA, COMMIT, "--test-macho-sh", 0};
+                memset(&r, 0, sizeof r);
+                ck(!np_run(v, wd, 0, 20, &r, why, sizeof why) && r.rc == 1 && r.out &&
+                   strstr(r.out, "cell-tools sha256 mismatch for cell-tools/check-stream-pipe-osx-x86_64"), "osx-spoof-sha-mismatch-refused");
+                np_free(&r); }
+            if (cx_fmt(mf_bad_id, sizeof mf_bad_id,
+                       "dddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddd\t" COMMIT "\tcell-tools/stdio-crossunit-osx-x86_64\t%s\n", sc_sha) ||
+                cx_write(mf, mf_bad_id, strlen(mf_bad_id))) return 2;
+            {   char *v[] = {tool, "stdio-part", "osx/x86_64", SHA, COMMIT, sc_tsv, "--test-macho-sh", 0};
+                memset(&r, 0, sizeof r);
+                ck(!np_run(v, wd, 0, 20, &r, why, sizeof why) && r.rc == 1, "osx-manifest-identity-mismatch-refused");
+                np_free(&r);
+                ev = cx_read(sc_tsv, &n);
+                ck(ev && strstr(ev, "cell-tools manifest identity mismatch for cell-tools/stdio-crossunit-osx-x86_64"),
+                   "osx-manifest-identity-mismatch-row");
+                free(ev); }
+            /* (g) matching manifest.tsv + Mach-O 64 header: runs precompiled drivers without STREAM_PREPARE */
+            if (cx_fmt(mf_good, sizeof mf_good,
+                       SHA "\t" COMMIT "\tcell-tools/check-stream-pipe-osx-x86_64\t%s\n"
+                       SHA "\t" COMMIT "\tcell-tools/stdio-crossunit-osx-x86_64\t%s\n", sp_sha, sc_sha) ||
+                cx_write(mf, mf_good, strlen(mf_good))) return 2;
+            {   char *v[] = {tool, "stream-parts", "osx/x86_64", SHA, COMMIT, "--test-macho-sh", 0};
+                memset(&r, 0, sizeof r);
+                ck(!np_run(v, wd, 0, 20, &r, why, sizeof why) && r.rc == 0 && r.out &&
+                   !strstr(r.out, "STREAM_PREPARE") &&
+                   strstr(r.out, "STREAM_PART\tpart=basic\trc=0\t") &&
+                   strstr(r.out, "STREAM_PART\tpart=e-compare\trc=0\t") &&
+                   strstr(r.out, "CHECK_STREAM_PIPE failed=0 parts=basic,stdio,multi,reject,e-ref,e-0,e-1,e-2,e-3,e-4,e-compare"),
+                   "osx-precompiled-stream-parts-no-prepare");
+                np_free(&r); }
+            {   char *v[] = {tool, "stdio-part", "osx/x86_64", SHA, COMMIT, sc_tsv, "--test-macho-sh", 0};
+                memset(&r, 0, sizeof r);
+                ck(!np_run(v, wd, 0, 20, &r, why, sizeof why) && r.rc == 0, "osx-precompiled-stdio-crossunit-runs-binary");
+                np_free(&r);
+                ev = cx_read(sc_tsv, &n);
+                ck(ev && strstr(ev, "osx/x86_64\tstdio-crossunit\tPASS\t0\t") && strstr(ev, "\t" SHA "\t" COMMIT "\tSTDIO_CROSSUNIT"),
+                   "osx-precompiled-stdio-crossunit-pass-row");
+                free(ev); }
+            /* (h) non-osx target (lnx/x86_64) does not consult cell-tools/*-osx-* */
+            {   char *v[] = {tool, "stdio-part", "lnx/x86_64", SHA, COMMIT, sc_tsv, 0};
+                memset(&r, 0, sizeof r);
+                (void)np_run(v, wd, 0, 20, &r, why, sizeof why);
+                np_free(&r);
+                ev = cx_read(sc_tsv, &n);
+                ck(ev && strstr(ev, "lnx/x86_64\tstdio-crossunit\tFAIL\t") && !strstr(ev, "cell-tools/"),
+                   "lnx-does-not-use-osx-cell-tools");
+                free(ev); }
+        }
+    }
     printf("CHECK_CANDIDATE_QUALIFY\tfailed=%d\n", failed);
     return failed ? 1 : 0;
 }

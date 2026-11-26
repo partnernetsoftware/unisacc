@@ -45,6 +45,11 @@ static int cq_hex(const char *s, size_t n) {
 
 static int cq_target_ok(const char *t) { int i; for (i = 0; i < CQ_TARGETS; i++) if (tx_eqz(t, cq_target[i])) return 1; return 0; }
 
+static int cq_test_macho_sh;   /* unit-test only (--test-macho-sh on stream-parts/stdio-part): run sh payload after verified 8-byte Mach-O header */
+static int cq_is_osx(void);
+static int cq_osx_precompiled(const char *stem, char *out, size_t cap, char *why, size_t wcap);
+static int cq_split(char *line, char **f, int cap);
+
 /* ---------- cell ---------- */
 static FILE *cq_out;
 static const char *cq_t, *cq_sha, *cq_commit;
@@ -222,17 +227,120 @@ static int cq_identity(const char *target, char *why, size_t wl) {
     return 0;
 }
 
+static int cq_is_osx(void) {
+    return cq_t && (!strcmp(cq_t, "osx/x86_64") || !strcmp(cq_t, "osx/arm64"));
+}
+
+static int cq_osx_precompiled(const char *stem, char *out, size_t cap, char *why, size_t wcap) {
+    sy_stat_t st;
+    size_t n = 0, mn = 0;
+    unsigned char *b;
+    char *mb, *line, actual_sha[65];
+    unsigned int magic, cpu, want_cpu;
+    int found = 0;
+    if (!cq_is_osx() || cx_fmt(out, cap, "cell-tools/%s-osx-%s", stem, cq_t + 4)) {
+        if (cx_fmt(why, wcap, "cell-tools path overflow for %s", stem)) why[0] = 0;
+        return -1;
+    }
+    if (sy_stat(out, &st) != 0 || st.kind != 'f' || st.size <= 0) {
+        if (cx_fmt(why, wcap, "missing precompiled %s", out)) why[0] = 0;
+        return -1;
+    }
+    if (st.size < 8) {
+        if (cx_fmt(why, wcap, "truncated precompiled Mach-O (<8 bytes): %s", out)) why[0] = 0;
+        return -1;
+    }
+    b = (unsigned char *)cq_slurp(out, &n);
+    if (!b || n < 8) {
+        if (b) free(b);
+        if (cx_fmt(why, wcap, "truncated precompiled Mach-O (<8 bytes): %s", out)) why[0] = 0;
+        return -1;
+    }
+    magic = (unsigned int)b[0] | ((unsigned int)b[1] << 8) | ((unsigned int)b[2] << 16) | ((unsigned int)b[3] << 24);
+    cpu   = (unsigned int)b[4] | ((unsigned int)b[5] << 8) | ((unsigned int)b[6] << 16) | ((unsigned int)b[7] << 24);
+    want_cpu = !strcmp(cq_t, "osx/x86_64") ? 0x01000007U : 0x0100000CU;
+    cx_sha256_hex((const char *)b, n, actual_sha);
+    free(b);
+    if (magic != 0xFEEDFACFU) {
+        if (cx_fmt(why, wcap, "bad Mach-O magic in %s (got 0x%08x, want 0xfeedfacf)", out, magic)) why[0] = 0;
+        return -1;
+    }
+    if (cpu != want_cpu) {
+        if (cx_fmt(why, wcap, "wrong Mach-O cputype in %s (got 0x%08x, want 0x%08x)", out, cpu, want_cpu)) why[0] = 0;
+        return -1;
+    }
+    mb = cq_slurp("cell-tools/manifest.tsv", &mn);
+    if (!mb) {
+        if (cx_fmt(why, wcap, "missing cell-tools/manifest.tsv for %s", out)) why[0] = 0;
+        return -1;
+    }
+    for (line = mb; line < mb + mn && *line; ) {
+        char *e = strchr(line, '\n'), *f[4];
+        if (e) *e = 0;
+        if (*line) {
+            if (cq_split(line, f, 4) == 4 && tx_eqz(f[2], out)) {
+                found = 1;
+                if (!cq_sha || !cq_commit || !tx_eqz(f[0], cq_sha) || !tx_eqz(f[1], cq_commit)) {
+                    free(mb);
+                    if (cx_fmt(why, wcap, "cell-tools manifest identity mismatch for %s", out)) why[0] = 0;
+                    return -1;
+                }
+                if (!cq_hex(f[3], 64) || !tx_eqz(f[3], actual_sha)) {
+                    free(mb);
+                    if (cx_fmt(why, wcap, "cell-tools sha256 mismatch for %s", out)) why[0] = 0;
+                    return -1;
+                }
+                break;
+            }
+        }
+        if (!e) break;
+        line = e + 1;
+    }
+    free(mb);
+    if (!found) {
+        if (cx_fmt(why, wcap, "unlisted in cell-tools/manifest.tsv: %s", out)) why[0] = 0;
+        return -1;
+    }
+    if (sy_chmod(out, 0755) != 0) {
+        if (cx_fmt(why, wcap, "sy_chmod 0755 failed for %s", out)) why[0] = 0;
+        return -1;
+    }
+    return 0;
+}
+
+static void cq_stdio_crossunit(void) {
+    if (cq_is_osx()) {
+        char pre_bin[256], pre_why[300];
+        if (cq_osx_precompiled("stdio-crossunit", pre_bin, sizeof pre_bin, pre_why, sizeof pre_why) != 0) {
+            cq_row("stdio-crossunit", "FAIL", 1, 0, pre_why);
+            return;
+        }
+        {
+            char *v_pre[] = {pre_bin, 0};
+            char *v_sh[] = {"sh", "-c", "tail -c +9 \"$1\" | sh", "macho-sh", pre_bin, 0};
+            cq_batch("stdio-crossunit", cq_test_macho_sh ? v_sh : v_pre, "STDIO_CROSSUNIT\t");
+        }
+    } else {
+        char *v[] = {"sh", "./unisacc.com", "tests/stdio-crossunit.cx", 0};
+        cq_batch("stdio-crossunit", v, "STDIO_CROSSUNIT\t");
+    }
+}
+
 /* Caller retains the first failing part. Each child has its own cq_exec deadline. */
 static int cq_stream_parts(char *detail,size_t cap,int show_assertions) {
     static const char *names[]={"basic","stdio","multi","reject","e-ref","e-0","e-1","e-2","e-3","e-4","e-compare"};
-    char session[2400],shared[2500];int ok=1;
+    char session[2400],shared[2500],pre_bin[256],pre_why[300];int ok=1,use_pre=cq_is_osx();
+    if(use_pre && cq_osx_precompiled("check-stream-pipe",pre_bin,sizeof pre_bin,pre_why,sizeof pre_why)!=0){
+        cx_fmt(detail,cap,"%s",pre_why);return 0;
+    }
     if(sy_mkdtemp(sy_tmpdir(),"cq-stream",session,sizeof session)||
        cx_fmt(shared,sizeof shared,"SP_SESSION=%s",session)){
         cx_fmt(detail,cap,"stream part session unavailable");return 0;
     }
-    /* Warm just this program. The real source entry and the candidate are
-       still exercised for every part, including when the cache is unavailable. */
-    {
+    /* On non-osx targets, warm just this program. On osx/*, cell-tools precompiles
+       check-stream-pipe-osx-<arch> so STREAM_PREPARE is omitted and each STREAM_PART
+       executes the precompiled driver binary directly against the candidate ./unisacc.com. */
+    if(!use_pre){
         char *warm[]={"sh","./unisacc.com","--warm","tests/check-stream-pipe.cx",0};
         np_result prepared={0};char why[512];long start=sy_now_ms();
         int rc=cq_exec(warm,&prepared,why,sizeof why);
@@ -241,7 +349,10 @@ static int cq_stream_parts(char *detail,size_t cap,int show_assertions) {
     }
     for(size_t i=0;i<sizeof names/sizeof names[0];i++){
         char part[64],why[512];np_result r={0};
-        char *v[]={"sh","./unisacc.com","tests/check-stream-pipe.cx",0};
+        char *v_src[]={"sh","./unisacc.com","tests/check-stream-pipe.cx",0};
+        char *v_pre[]={pre_bin,0};
+        char *v_sh[]={"sh","-c","tail -c +9 \"$1\" | sh","macho-sh",pre_bin,0};
+        char **v=use_pre?(cq_test_macho_sh?v_sh:v_pre):v_src;
         char *env[]={part,shared,0};
         if(cx_fmt(part,sizeof part,"SP_PART=%s",names[i]))exit(2);
         long start=sy_now_ms();cq_env=env;
@@ -311,7 +422,7 @@ static int cq_cell(const char *target, const char *out) {
         good = rc == 0 && r.outn == 14 && !memcmp(r.out, "candidate-run\n", 14);
         cq_row("run", good ? "PASS" : "FAIL", rc, sy_now_ms() - t, good ? "default -run printed the literal" : (rc < 0 ? w : (r.errn ? r.err : "wrong rc or stdout")));
         if (rc >= 0) np_free(&r); }
-    {   char *v[] = {"sh", "./unisacc.com", "tests/stdio-crossunit.cx", 0}; cq_batch("stdio-crossunit", v, "STDIO_CROSSUNIT\t"); }
+    cq_stdio_crossunit();
     { char detail[500];long start=sy_now_ms();int ok=cq_stream_parts(detail,sizeof detail,0);
       cq_row("stream-pipe",ok?"PASS":"FAIL",ok?0:1,sy_now_ms()-start,detail); }
     {   char *v[] = {"sh", "./unisacc.com", "tests/run.cx", "--", "--smoke", 0}; cq_batch("smoke", v, "SMOKE\tassertions=16\tfailed=0"); }
@@ -393,13 +504,39 @@ static int cq_aggregate(const char *dir, const char *out) {
 }
 
 int main(int argc, char **argv) {
-    if(argc==2 && tx_eqz(argv[1],"stream-parts")){
-        char detail[500];int ok=cq_stream_parts(detail,sizeof detail,1);
+    /* stream-parts (without TARGET: tools/check-stream-pipe-parts.cx; with TARGET APE_SHA COMMIT: unit-test entry) */
+    if((argc==2 || argc==5 || argc==6) && tx_eqz(argv[1],"stream-parts")){
+        char detail[500];
+        if(argc>=5){
+            if(!cq_target_ok(argv[2])){fprintf(stderr,"candidate-qualify: unknown target %s\n",argv[2]);return 2;}
+            if(!cq_hex(argv[3],64)||!cq_hex(argv[4],40)){fprintf(stderr,"candidate-qualify: APE_SHA must be 64 and COMMIT 40 lowercase hex\n");return 2;}
+            if(argc==6){
+                if(!tx_eqz(argv[5],"--test-macho-sh")){fprintf(stderr,"candidate-qualify: unknown flag %s\n",argv[5]);return 2;}
+                cq_test_macho_sh=1;
+            }
+            cq_t=argv[2];cq_sha=argv[3];cq_commit=argv[4];
+        }
+        int ok=cq_stream_parts(detail,sizeof detail,1);
         puts(detail);return ok?0:1;
+    }
+    /* stdio-part TARGET APE_SHA COMMIT OUT.tsv [--test-macho-sh] (unit-test entry for cq_stdio_crossunit) */
+    if((argc==6 || argc==7) && tx_eqz(argv[1],"stdio-part")){
+        if(!cq_target_ok(argv[2])){fprintf(stderr,"candidate-qualify: unknown target %s\n",argv[2]);return 2;}
+        if(!cq_hex(argv[3],64)||!cq_hex(argv[4],40)){fprintf(stderr,"candidate-qualify: APE_SHA must be 64 and COMMIT 40 lowercase hex\n");return 2;}
+        if(argc==7){
+            if(!tx_eqz(argv[6],"--test-macho-sh")){fprintf(stderr,"candidate-qualify: unknown flag %s\n",argv[6]);return 2;}
+            cq_test_macho_sh=1;
+        }
+        cq_t=argv[2];cq_sha=argv[3];cq_commit=argv[4];
+        cq_out=fopen(argv[5],"wb");
+        if(!cq_out){fprintf(stderr,"candidate-qualify: cannot write %s\n",argv[5]);return 2;}
+        cq_stdio_crossunit();
+        fclose(cq_out);
+        return cq_failed?1:0;
     }
     if (argc == 6 && tx_eqz(argv[1], "cell")) { cq_sha = argv[3]; cq_commit = argv[4]; }
     else if (argc == 6 && tx_eqz(argv[1], "aggregate")) { cq_sha = argv[2]; cq_commit = argv[3]; }
-    else { fprintf(stderr, "usage: cell TARGET APE_SHA COMMIT OUT.tsv | aggregate APE_SHA COMMIT DIR OUT.md\n"); return 2; }
+    else { fprintf(stderr, "usage: cell TARGET APE_SHA COMMIT OUT.tsv | aggregate APE_SHA COMMIT DIR OUT.md | stream-parts [TARGET APE_SHA COMMIT [--test-macho-sh]] | stdio-part TARGET APE_SHA COMMIT OUT.tsv [--test-macho-sh]\n"); return 2; }
     if (!cq_hex(cq_sha, 64) || !cq_hex(cq_commit, 40)) { fprintf(stderr, "candidate-qualify: APE_SHA must be 64 and COMMIT 40 lowercase hex\n"); return 2; }
     return tx_eqz(argv[1], "cell") ? cq_cell(argv[2], argv[5]) : cq_aggregate(argv[4], argv[5]);
 }

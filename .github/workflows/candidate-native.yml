@@ -166,11 +166,19 @@ jobs:
           cp candidate/unisacc.com ./unisacc.com; chmod +x ./unisacc.com
           mkdir -p cell-tools
           # win keeps its pwsh adapter: the cell tool needs POSIX fork/fcntl and does not compile for win/x86_64.
+          : > cell-tools/manifest.tsv
           for t in osx/x86_64 osx/arm64; do
-            o=cell-tools/candidate-qualify-${t%/*}-${t#*/}
-            timeout 120 sh ./unisacc.com -b "$t" -o "$o" tests/candidate-qualify.cx
-            ls -l "$o"
+            s=${t%/*}-${t#*/}
+            timeout 120 sh ./unisacc.com -b "$t" -o "cell-tools/candidate-qualify-$s" tests/candidate-qualify.cx
+            timeout 60 sh ./unisacc.com -b "$t" -o "cell-tools/stdio-crossunit-$s" tests/stdio-crossunit.cx
+            timeout 60 sh ./unisacc.com -b "$t" -o "cell-tools/check-stream-pipe-$s" tests/check-stream-pipe.cx
+            for b in "cell-tools/candidate-qualify-$s" "cell-tools/stdio-crossunit-$s" "cell-tools/check-stream-pipe-$s"; do
+              bsha=$(sha256sum "$b" | cut -d' ' -f1)
+              printf '%s\t%s\t%s\t%s\n' "$APE_SHA" "$COMMIT" "$b" "$bsha" >> cell-tools/manifest.tsv
+            done
+            ls -l "cell-tools/candidate-qualify-$s" "cell-tools/stdio-crossunit-$s" "cell-tools/check-stream-pipe-$s"
           done
+          cat cell-tools/manifest.tsv
           for t in lnx/x86_64 lnx/arm64 osx/x86_64 osx/arm64 win/x86_64 win/arm64; do
             ext=""
             if [ "${t%/*}" = win ]; then ext=".exe"; fi
@@ -244,8 +252,9 @@ jobs:
           if [ "${{ matrix.os }}" = lnx ]; then
             sh ./unisacc.com tests/candidate-qualify.cx -- cell "$TARGET" "$APE_SHA" "$COMMIT" "$EVIDENCE"
           else
-            tool=cell-tools/candidate-qualify-${{ matrix.os }}-${{ matrix.arch }}
-            chmod +x "$tool"
+            s=${{ matrix.os }}-${{ matrix.arch }}
+            tool=cell-tools/candidate-qualify-$s
+            chmod +x "$tool" "cell-tools/stdio-crossunit-$s" "cell-tools/check-stream-pipe-$s"
             "$tool" cell "$TARGET" "$APE_SHA" "$COMMIT" "$EVIDENCE"
           fi
       - name: Run L0 SURF probe (POSIX)
