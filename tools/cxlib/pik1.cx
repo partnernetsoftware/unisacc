@@ -1,0 +1,1161 @@
+/* tools/cxlib/pik1.cx -- Canonical PIK1 product-input closure derived from seed/ident.c + toolchain_ident build recipes.
+ * Fail-closed: if seed/ident.c is absent, fails to compile, or refuses the tree, returns < 0 instead of falling back.
+ */
+#pragma unisa module pik1
+#pragma unisa use sys.fs
+#pragma unisa use sys.io
+#pragma unisa use sys.proc
+#pragma unisa use sys.env
+#pragma unisa use sys.sha
+#pragma unisa use sys.posix
+#pragma unisa use text.text
+#pragma unisa use text.fmt
+#pragma unisa use mem.heap
+#pragma unisa use mem.bytes
+#pragma unisa use sysx.run
+
+static long pk_cap_override = 0;
+
+int pik1_set_capture_cap(long bytes) {
+    if (bytes <= 0) {
+        pk_cap_override = 0;
+        return 0;
+    }
+    pk_cap_override = bytes;
+    return 0;
+}
+
+static int pk_run_cmd(char **argv, const char *cwd, int secs, int apply_cap,
+                      px_result *res, char *why, size_t wcap) {
+    px_opts o;
+    px_opts_init(&o);
+    o.argv = argv;
+    o.cwd = cwd;
+    o.deadline_ms = (long)secs * 1000L;
+    o.out_cap = (apply_cap && pk_cap_override > 0) ? pk_cap_override : (16L << 20);
+    o.err_cap = (apply_cap && pk_cap_override > 0) ? pk_cap_override : (16L << 20);
+    o.kill_tree = 1;
+    if (px_run(&o, res) != 0) {
+        cx_fmt(why, wcap, "spawn failed: %.120s", argv[0]);
+        px_result_free(res);
+        return -1;
+    }
+    if (res->timed_out) {
+        cx_fmt(why, wcap, "command timed out: %.120s", argv[0]);
+        px_result_free(res);
+        return -1;
+    }
+    if (res->truncated & (PX_TRUNC_OUT | PX_TRUNC_ERR)) {
+        cx_fmt(why, wcap, "capture truncated: %.120s", argv[0]);
+        px_result_free(res);
+        return -1;
+    }
+    if (res->code != 0) {
+        cx_fmt(why, wcap, "command failed rc=%d %.120s", res->code, res->err ? res->err : argv[0]);
+        px_result_free(res);
+        return -1;
+    }
+    return 0;
+}
+
+static int pk_read_rev_blob(const char *repo, const char *rev, const char *rel, char **out, size_t *outn) {
+    char p[4600];
+    *out = 0; *outn = 0;
+    if (!rev || !rev[0]) {
+        if (cx_fmt(p, sizeof p, "%s/%s", repo, rel)) return -1;
+        *out = cx_read(p, outn);
+        return *out ? 0 : -1;
+    }
+    char spec[512], why[200];
+    if (cx_fmt(spec, sizeof spec, "%s:%s", rev, rel)) return -1;
+    char *av[] = {"git", "-c", "core.quotePath=false", "show", spec, 0};
+    px_result r = {0};
+    if (pk_run_cmd(av, repo, 20, 0, &r, why, sizeof why) != 0 || !r.out) {
+        px_result_free(&r);
+        return -1;
+    }
+    *out = mm_alloc((long)r.outn + 1);
+    if (!*out) { px_result_free(&r); return -1; }
+    if (r.outn) mm_copy(*out, (long)r.outn + 1, r.out, (long)r.outn);
+    (*out)[r.outn] = 0;
+    *outn = r.outn;
+    px_result_free(&r);
+    return 0;
+}
+
+static int pk_compile_ident(const char *repo, const char *rev, char bin_out[4096], char *why, size_t wcap) {
+    char *ic = 0, *sh = 0; size_t icn = 0, shn = 0;
+    char h1[65], h2[65], comb[200], key[65];
+    if (pk_read_rev_blob(repo, rev, "seed/ident.c", &ic, &icn) != 0 || icn == 0) {
+        if (ic) mm_free(ic);
+        cx_fmt(why, wcap, "seed/ident.c missing or unreadable rev=%s", rev ? rev : "WORKTREE");
+        return -1;
+    }
+    if (sy_sha256_hex(ic, (long)icn, h1)) { mm_free(ic); cx_fmt(why, wcap, "sha256 failed"); return -1; }
+    h2[0] = '-'; h2[1] = 0;
+    if (pk_read_rev_blob(repo, rev, "seed/sha256.h", &sh, &shn) == 0 && sh && shn > 0) {
+        if (sy_sha256_hex(sh, (long)shn, h2)) { mm_free(ic); mm_free(sh); cx_fmt(why, wcap, "sha256.h hash failed"); return -1; }
+    }
+    cx_fmt(comb, sizeof comb, "%s\n%s\n", h1, h2);
+    if (sy_sha256_hex(comb, (long)strlen(comb), key)) { mm_free(ic); if (sh) mm_free(sh); return -1; }
+    if (cx_fmt(bin_out, 4096, "%s/pik1-ident-%.24s.bin", sy_tmpdir(), key)) {
+        mm_free(ic); if (sh) mm_free(sh); cx_fmt(why, wcap, "tmpdir path bound"); return -1;
+    }
+    if (access(bin_out, X_OK) == 0) {
+        mm_free(ic); if (sh) mm_free(sh);
+        return 0;
+    }
+    char sdir[4096], icp[4400], shp[4400], tmpbin[4400];
+    if (sy_mkdtemp(sy_tmpdir(), "pik1-cc-", sdir, sizeof sdir) != 0) {
+        mm_free(ic); if (sh) mm_free(sh); cx_fmt(why, wcap, "mkdtemp failed"); return -1;
+    }
+    if (cx_fmt(icp, sizeof icp, "%s/ident.c", sdir) || cx_write(icp, ic, icn)) {
+        mm_free(ic); if (sh) mm_free(sh); sy_remove_all(sdir); cx_fmt(why, wcap, "write ident.c failed"); return -1;
+    }
+    if (sh && shn > 0 && (cx_fmt(shp, sizeof shp, "%s/sha256.h", sdir) || cx_write(shp, sh, shn))) {
+        mm_free(ic); mm_free(sh); sy_remove_all(sdir); cx_fmt(why, wcap, "write sha256.h failed"); return -1;
+    }
+    mm_free(ic); if (sh) mm_free(sh);
+    cx_fmt(tmpbin, sizeof tmpbin, "%s.tmp.%d", bin_out, sy_pid());
+    const char *cc = getenv("CC");
+    if (!cc || !cc[0]) cc = "cc";
+    char *av[] = {(char *)cc, "-std=c99", "-O2", "-w", "-I", sdir, icp, "-o", tmpbin, 0};
+    px_result r = {0};
+    if (pk_run_cmd(av, sdir, 30, 0, &r, why, wcap) != 0) {
+        sy_remove_all(sdir); (void)sy_unlink(tmpbin);
+        return -1;
+    }
+    px_result_free(&r);
+    sy_remove_all(sdir);
+    if (sy_chmod(tmpbin, 0755) || sy_rename(tmpbin, bin_out)) {
+        (void)sy_unlink(tmpbin);
+        cx_fmt(why, wcap, "install ident binary failed");
+        return -1;
+    }
+    return 0;
+}
+
+typedef struct {
+    char *lc;
+    size_t lcn;
+    char *la;
+    size_t lan;
+    char *rcp;
+    size_t rcpn;
+    char root_real[4096];
+} PkClosure;
+
+static void pk_closure_free(PkClosure *c) {
+    if (c->lc) mm_free(c->lc);
+    if (c->la) mm_free(c->la);
+    if (c->rcp) mm_free(c->rcp);
+    mm_fill(c, sizeof *c, 0, sizeof *c);
+}
+
+typedef struct {
+    char **v;
+    int n;
+    int cap;
+} PkVec;
+
+static void pk_vec_free(PkVec *pv) {
+    for (int i = 0; i < pv->n; i++) mm_free(pv->v[i]);
+    if (pv->v) mm_free(pv->v);
+    pv->v = 0; pv->n = 0; pv->cap = 0;
+}
+
+static int pk_vec_has(const PkVec *pv, const char *s) {
+    for (int i = 0; i < pv->n; i++) if (tx_eqz(pv->v[i], s)) return 1;
+    return 0;
+}
+
+static int pk_vec_push(PkVec *pv, const char *s) {
+    if (!s || !s[0] || pk_vec_has(pv, s)) return 0;
+    if (pv->n == pv->cap) {
+        int ncap = pv->cap ? pv->cap * 2 : 64;
+        char **nv = (char **)mm_alloc((long)ncap * (long)sizeof(char *));
+        if (!nv) return -1;
+        if (pv->n > 0) mm_copy(nv, (long)ncap * (long)sizeof(char *), pv->v, (long)pv->n * (long)sizeof(char *));
+        if (pv->v) mm_free(pv->v);
+        pv->v = nv; pv->cap = ncap;
+    }
+    long sl = (long)strlen(s);
+    char *cp = (char *)mm_alloc(sl + 1);
+    if (!cp) return -1;
+    mm_copy(cp, sl + 1, s, sl + 1);
+    pv->v[pv->n++] = cp;
+    return 0;
+}
+
+static int pk_norm_rel(const char *base_dir, const char *tgt, char *out, size_t cap) {
+    char raw[1024];
+    const char *segs[64];
+    int seg_l[64], ns = 0;
+    if (!tgt || !tgt[0]) return -1;
+    if (base_dir && base_dir[0]) {
+        if (cx_fmt(raw, sizeof raw, "%s/%s", base_dir, tgt)) return -1;
+    } else {
+        if (cx_fmt(raw, sizeof raw, "%s", tgt)) return -1;
+    }
+    size_t i = 0;
+    while (raw[i]) {
+        while (raw[i] == '/') i++;
+        if (!raw[i]) break;
+        size_t s = i;
+        while (raw[i] && raw[i] != '/') i++;
+        size_t l = i - s;
+        if (l == 1 && raw[s] == '.') continue;
+        if (l == 2 && raw[s] == '.' && raw[s + 1] == '.') {
+            if (ns <= 0) return -1;
+            ns--;
+            continue;
+        }
+        if (ns >= 64) return -1;
+        segs[ns] = raw + s;
+        seg_l[ns] = (int)l;
+        ns++;
+    }
+    if (ns == 0) return -1;
+    size_t pos = 0;
+    for (int k = 0; k < ns; k++) {
+        if (k > 0) {
+            if (pos + 1 >= cap) return -1;
+            out[pos++] = '/';
+        }
+        if (pos + (size_t)seg_l[k] >= cap) return -1;
+        mm_copy(out + pos, (long)(cap - pos), segs[k], seg_l[k]);
+        pos += (size_t)seg_l[k];
+    }
+    out[pos] = 0;
+    return 0;
+}
+
+static void pk_strip_root(const char *tree_root, const char *root_real, const char *p, char *rel, size_t cap) {
+    rel[0] = 0;
+    if (!p || !p[0]) return;
+    if (p[0] != '/') {
+        (void)pk_norm_rel(0, p, rel, cap);
+        return;
+    }
+    long tl = (long)strlen(tree_root);
+    if (tl > 0 && !strncmp(p, tree_root, (size_t)tl) && p[tl] == '/') {
+        (void)pk_norm_rel(0, p + tl + 1, rel, cap);
+        return;
+    }
+    long rl = (long)strlen(root_real);
+    if (rl > 0 && !strncmp(p, root_real, (size_t)rl) && p[rl] == '/') {
+        (void)pk_norm_rel(0, p + rl + 1, rel, cap);
+    }
+}
+
+static int pk_add_symlink_hops(const char *tree_root, const char *root_real, const char *start_rel,
+                               PkVec *all_set, PkVec *q, char *why, size_t wcap) {
+    char cur[512], next[512], abs[4600], ltgt[1024], bdir[512];
+    if (!start_rel || !start_rel[0]) { cx_fmt(why, wcap, "empty rel path"); return -1; }
+    if (pk_norm_rel(0, start_rel, cur, sizeof cur) != 0) {
+        cx_fmt(why, wcap, "path normalize failed: %.120s", start_rel);
+        return -1;
+    }
+    for (int hop = 0; hop < 16; hop++) {
+        if (pk_vec_push(all_set, cur) != 0 || (q && pk_vec_push(q, cur) != 0)) {
+            cx_fmt(why, wcap, "extras alloc failed");
+            return -1;
+        }
+        int redirected = 0;
+        for (size_t i = 0; cur[i]; i++) {
+            if (cur[i] != '/') continue;
+            if (i >= sizeof bdir) {
+                cx_fmt(why, wcap, "dir prefix truncated: %.120s", cur);
+                return -1;
+            }
+            mm_copy(bdir, sizeof bdir, cur, (long)i);
+            bdir[i] = 0;
+            if (cx_fmt(abs, sizeof abs, "%s/%s", tree_root, bdir)) {
+                cx_fmt(why, wcap, "path truncated: %.120s", bdir);
+                return -1;
+            }
+            sy_stat_t dst;
+            int drc = sy_lstat(abs, &dst);
+            if (drc != 0) {
+                if (drc == -ENOENT) { cx_fmt(why, wcap, "dangling dir hop: %.120s", bdir); return -1; }
+                cx_fmt(why, wcap, "lstat failed: %.120s", bdir);
+                return -1;
+            }
+            if (dst.kind == 'l') {
+                if (pk_vec_push(all_set, bdir) != 0) { cx_fmt(why, wcap, "extras alloc failed"); return -1; }
+                long k = sy_readlink(abs, ltgt, (long)sizeof ltgt - 1);
+                if (k <= 0) { cx_fmt(why, wcap, "readlink failed: %.120s", bdir); return -1; }
+                ltgt[k] = 0;
+                char pdir[512];
+                size_t sl = i;
+                while (sl > 0 && bdir[sl - 1] != '/') sl--;
+                if (sl > 0) sl--;
+                mm_copy(pdir, sizeof pdir, bdir, (long)sl);
+                pdir[sl] = 0;
+                char nbase[512];
+                if (ltgt[0] == '/') pk_strip_root(tree_root, root_real, ltgt, nbase, sizeof nbase);
+                else if (pk_norm_rel(pdir, ltgt, nbase, sizeof nbase) != 0) nbase[0] = 0;
+                if (!nbase[0] || pk_norm_rel(nbase, cur + i + 1, next, sizeof next) != 0) {
+                    cx_fmt(why, wcap, "symlink escapes or truncates root: %.120s", bdir);
+                    return -1;
+                }
+                if (cx_fmt(cur, sizeof cur, "%s", next)) {
+                    cx_fmt(why, wcap, "path truncated: %.120s", next);
+                    return -1;
+                }
+                redirected = 1;
+                break;
+            }
+        }
+        if (redirected) continue;
+        if (cx_fmt(abs, sizeof abs, "%s/%s", tree_root, cur)) {
+            cx_fmt(why, wcap, "path truncated: %.120s", cur);
+            return -1;
+        }
+        sy_stat_t st;
+        int lrc = sy_lstat(abs, &st);
+        if (lrc != 0) {
+            cx_fmt(why, wcap, "dangling or unreadable path: %.120s", cur);
+            return -1;
+        }
+        if (st.kind == 'l') {
+            long k = sy_readlink(abs, ltgt, (long)sizeof ltgt - 1);
+            if (k <= 0) { cx_fmt(why, wcap, "readlink failed: %.120s", cur); return -1; }
+            ltgt[k] = 0;
+            size_t sl = strlen(cur);
+            while (sl > 0 && cur[sl - 1] != '/') sl--;
+            if (sl > 0) sl--;
+            if (sl >= sizeof bdir) { cx_fmt(why, wcap, "dir truncated: %.120s", cur); return -1; }
+            mm_copy(bdir, sizeof bdir, cur, (long)sl);
+            bdir[sl] = 0;
+            if (ltgt[0] == '/') pk_strip_root(tree_root, root_real, ltgt, next, sizeof next);
+            else if (pk_norm_rel(bdir, ltgt, next, sizeof next) != 0) next[0] = 0;
+            if (!next[0] || tx_eqz(next, cur)) {
+                cx_fmt(why, wcap, "symlink escapes or loops: %.120s", cur);
+                return -1;
+            }
+            if (cx_fmt(cur, sizeof cur, "%s", next)) {
+                cx_fmt(why, wcap, "path truncated: %.120s", next);
+                return -1;
+            }
+            continue;
+        }
+        return 0;
+    }
+    cx_fmt(why, wcap, "symlink hop limit exceeded: %.120s", start_rel);
+    return -1;
+}
+
+static int pk_resolve_use(const char *tree_root, const char *unit, const char *name,
+                          const char *croot, size_t cn, char *out, size_t cap,
+                          char *why, size_t wcap) {
+    char dir[256], sub[256], abs[4600];
+    size_t dl = strlen(unit), nl = strlen(name), i;
+    while (dl > 0 && unit[dl - 1] != '/') dl--;
+    if (dl >= sizeof dir || nl >= sizeof sub) {
+        cx_fmt(why, wcap, "use path too long: %.120s", name);
+        return -1;
+    }
+    mm_copy(dir, sizeof dir, unit, (long)dl);
+    dir[dl] = 0;
+    for (i = 0; i < nl; i++) sub[i] = name[i] == '.' ? '/' : name[i];
+    sub[i] = 0;
+    if (cx_fmt(out, cap, "%s%s.cx", dir, sub) || cx_fmt(abs, sizeof abs, "%s/%s", tree_root, out)) {
+        cx_fmt(why, wcap, "use path truncated: %.120s", name);
+        return -1;
+    }
+    {
+        sy_stat_t st;
+        int lrc = sy_lstat(abs, &st);
+        if (lrc == 0) return 0;
+        if (lrc != -ENOENT) { cx_fmt(why, wcap, "use lstat failed: %.120s", out); return -1; }
+    }
+    size_t best = 0, bdb = 0, bde = 0, p = 0;
+    int found = 0;
+    while (croot && p < cn) {
+        size_t ls = p, le;
+        while (p < cn && croot[p] != '\n') p++;
+        le = p;
+        if (p < cn) p++;
+        if (le - ls < 5 || croot[ls] != 'R' || croot[ls + 1] != '\t') continue;
+        size_t pb = ls + 2, pe = pb;
+        while (pe < le && croot[pe] != '\t') pe++;
+        if (pe >= le) continue;
+        size_t pl = pe - pb;
+        if ((nl == pl || (nl > pl && name[pl] == '.')) &&
+            !memcmp(name, croot + pb, pl) && (!found || pl > best)) {
+            found = 1; best = pl; bdb = pe + 1; bde = le;
+        }
+    }
+    if (!found) {
+        cx_fmt(why, wcap, "unresolved use %.80s in %.120s", name, unit);
+        return -1;
+    }
+    if (best == nl) {
+        if (cx_fmt(out, cap, "%.*s.cx", (int)(bde - bdb), croot + bdb)) {
+            cx_fmt(why, wcap, "use out truncated: %.120s", name);
+            return -1;
+        }
+    } else {
+        if (cx_fmt(out, cap, "%.*s/%s.cx", (int)(bde - bdb), croot + bdb, sub + best + 1)) {
+            cx_fmt(why, wcap, "use out truncated: %.120s", name);
+            return -1;
+        }
+    }
+    if (cx_fmt(abs, sizeof abs, "%s/%s", tree_root, out)) {
+        cx_fmt(why, wcap, "use abs truncated: %.120s", out);
+        return -1;
+    }
+    sy_stat_t st;
+    if (sy_lstat(abs, &st) != 0) {
+        cx_fmt(why, wcap, "missing use target: %.120s", out);
+        return -1;
+    }
+    return 0;
+}
+
+static int pk_scan_cx_uses(const char *tree_root, const char *root_real, const char *unit,
+                           const char *croot, size_t cn, PkVec *all_set, PkVec *q,
+                           char *why, size_t wcap) {
+    char abs[4600];
+    size_t ul = strlen(unit);
+    if (ul < 3 || !tx_eqz(unit + ul - 3, ".cx")) return 0;
+    if (cx_fmt(abs, sizeof abs, "%s/%s", tree_root, unit)) {
+        cx_fmt(why, wcap, "path truncated: %.120s", unit);
+        return -1;
+    }
+    sy_stat_t st;
+    if (sy_stat(abs, &st) != 0 || st.kind != 'f') {
+        cx_fmt(why, wcap, "unreadable extra cx unit: %.120s", unit);
+        return -1;
+    }
+    size_t n = 0;
+    char *b = cx_read(abs, &n);
+    if (!b) {
+        cx_fmt(why, wcap, "read extra cx unit failed: %.120s", unit);
+        return -1;
+    }
+    static const char *words[3] = {"pragma", "unisa", "use"};
+    size_t p = 0;
+    while (p < n) {
+        size_t ls = p, le;
+        while (p < n && b[p] != '\n') p++;
+        le = p;
+        if (p < n) p++;
+        size_t a = ls;
+        int k, ok = 1;
+        while (a < le && (b[a] == ' ' || b[a] == '\t')) a++;
+        if (a >= le || b[a] != '#') continue;
+        a++;
+        for (k = 0; k < 3 && ok; k++) {
+            size_t wl = strlen(words[k]);
+            while (a < le && (b[a] == ' ' || b[a] == '\t')) a++;
+            if (a + wl > le || memcmp(b + a, words[k], wl)) ok = 0;
+            else a += wl;
+        }
+        if (!ok || a >= le || (b[a] != ' ' && b[a] != '\t')) continue;
+        while (a < le && (b[a] == ' ' || b[a] == '\t')) a++;
+        size_t mb = a;
+        while (a < le && (b[a] == '.' || b[a] == '_' || (b[a] >= '0' && b[a] <= '9') ||
+               (b[a] >= 'a' && b[a] <= 'z') || (b[a] >= 'A' && b[a] <= 'Z'))) a++;
+        char name[256], rel[512];
+        if (a == mb || a - mb >= sizeof name) {
+            cx_fmt(why, wcap, "malformed use directive in %.120s", unit);
+            mm_free(b);
+            return -1;
+        }
+        mm_copy(name, sizeof name, b + mb, (long)(a - mb));
+        name[a - mb] = 0;
+        if (pk_resolve_use(tree_root, unit, name, croot, cn, rel, sizeof rel, why, wcap) != 0) {
+            mm_free(b);
+            return -1;
+        }
+        if (pk_add_symlink_hops(tree_root, root_real, rel, all_set, q, why, wcap) != 0) {
+            mm_free(b);
+            return -1;
+        }
+    }
+    mm_free(b);
+    return 0;
+}
+
+static int pk_is_hex64(const char *s, long n) {
+    if (!s || n != 64) return 0;
+    for (long i = 0; i < 64; i++) {
+        char c = s[i];
+        if (!((c >= '0' && c <= '9') || (c >= 'a' && c <= 'f'))) return 0;
+    }
+    return 1;
+}
+
+static int pk_diff_status_ok(const char *st, long stl) {
+    if (!st || stl <= 0) return 0;
+    if (st[0] == 'A' || st[0] == 'D' || st[0] == 'M' || st[0] == 'T' || st[0] == 'U' || st[0] == 'X') {
+        return stl == 1;
+    }
+    if (st[0] == 'R' || st[0] == 'C') {
+        if (stl != 4) return 0;
+        for (long i = 1; i < 4; i++) {
+            if (st[i] < '0' || st[i] > '9') return 0;
+        }
+        int score = (st[1] - '0') * 100 + (st[2] - '0') * 10 + (st[3] - '0');
+        return score >= 0 && score <= 100;
+    }
+    return 0;
+}
+
+static int pk_status_xy_ok(char x, char y) {
+    if (x == '?' && y == '?') return 1;
+    if (x == '!' && y == '!') return 1;
+    if ((x == 'A' && (y == 'A' || y == 'U')) ||
+        (x == 'D' && (y == 'D' || y == 'U')) ||
+        (x == 'U' && (y == 'A' || y == 'D' || y == 'U'))) {
+        return 1;
+    }
+    if (x == ' ' && (y == 'M' || y == 'T' || y == 'D' || y == 'A')) return 1;
+    if ((x == 'M' || x == 'T' || x == 'A' || x == 'R' || x == 'C') &&
+        (y == ' ' || y == 'M' || y == 'T' || y == 'D')) {
+        return 1;
+    }
+    if (x == 'D' && y == ' ') return 1;
+    return 0;
+}
+
+static int pk_collect_extras(const char *tree_root, PkClosure *c, char *why, size_t wcap) {
+    static const char *const roots[] = {
+        "tools/bound", "tools/bound.c", "tools/cxbin", "tools/safedel.cx", "tools/lib.sh",
+        "tools/build_ref.sh", "tools/export_ref.sh", "tools/refshim.h", "tools/reffoot.h",
+        "tools/sourceflat.cx", "tools/ape-pack.cx", "tools/release-ape.cx", "tools/whole-front.cx",
+        "tools/cxlib/releaseversion.cx", "tools/candidate-chain.cx", "tools/chain-step.cx",
+        "tools/chain-run.cx", "tools/release-build.cx", "tools/build.cx", "tools/kernel-build.cx",
+        "tools/product-build.cx", "tools/source-job-wave.cx", "tools/pc-wave.cx", "tools/selfhost.cx",
+        "build/core-closure.tsv", "cxroot.tsv", 0
+    };
+    PkVec extras = {0}, q = {0};
+    char crp[4600];
+    size_t cn = 0;
+    char *croot = 0;
+    if (cx_fmt(crp, sizeof crp, "%s/cxroot.tsv", tree_root)) {
+        cx_fmt(why, wcap, "cxroot path truncated");
+        return -1;
+    }
+    {
+        sy_stat_t crst;
+        int cr_lrc = sy_lstat(crp, &crst);
+        if (cr_lrc == 0) {
+            croot = cx_read(crp, &cn);
+            if (!croot) {
+                cx_fmt(why, wcap, "cxroot.tsv unreadable");
+                return -1;
+            }
+        } else if (cr_lrc != -ENOENT) {
+            cx_fmt(why, wcap, "cxroot.tsv lstat failed");
+            return -1;
+        }
+    }
+    for (int i = 0; roots[i]; i++) {
+        char abs[4600]; sy_stat_t st;
+        if (cx_fmt(abs, sizeof abs, "%s/%s", tree_root, roots[i])) {
+            pk_vec_free(&q); pk_vec_free(&extras); if (croot) mm_free(croot);
+            cx_fmt(why, wcap, "extra root path truncated: %.120s", roots[i]);
+            return -1;
+        }
+        int lrc = sy_lstat(abs, &st);
+        if (lrc == -ENOENT) continue;
+        if (lrc != 0) {
+            pk_vec_free(&q); pk_vec_free(&extras); if (croot) mm_free(croot);
+            cx_fmt(why, wcap, "extra root lstat failed: %.120s", roots[i]);
+            return -1;
+        }
+        if (pk_add_symlink_hops(tree_root, c->root_real, roots[i], &extras, &q, why, wcap) != 0) {
+            pk_vec_free(&q); pk_vec_free(&extras); if (croot) mm_free(croot);
+            return -1;
+        }
+    }
+    for (int qi = 0; qi < q.n; qi++) {
+        if (pk_scan_cx_uses(tree_root, c->root_real, q.v[qi], croot, cn, &extras, &q, why, wcap) != 0) {
+            pk_vec_free(&q); pk_vec_free(&extras); if (croot) mm_free(croot);
+            return -1;
+        }
+    }
+    pk_vec_free(&q);
+    if (croot) mm_free(croot);
+    /* Include intermediate symlink hops for all entries in seed/ident.c list-current & list-aliases */
+    if (c->lc && c->lcn > 0 && c->lc[c->lcn - 1] != '\n') {
+        pk_vec_free(&extras);
+        cx_fmt(why, wcap, "list-current missing trailing newline");
+        return -1;
+    }
+    if (c->la && c->lan > 0 && c->la[c->lan - 1] != '\n') {
+        pk_vec_free(&extras);
+        cx_fmt(why, wcap, "list-aliases missing trailing newline");
+        return -1;
+    }
+    long at = 0;
+    while (c->lc && at < (long)c->lcn) {
+        long e = tx_chr(c->lc + at, (long)c->lcn - at, '\n');
+        long ln = e < 0 ? (long)c->lcn - at : e;
+        const char *l = c->lc + at;
+        at += ln + 1;
+        if (ln <= 0) {
+            pk_vec_free(&extras);
+            cx_fmt(why, wcap, "list-current empty row");
+            return -1;
+        }
+        long t = tx_chr(l, ln, '\t');
+        if (t <= 0 || t >= 512) {
+            pk_vec_free(&extras);
+            cx_fmt(why, wcap, "list-current entry truncated or malformed");
+            return -1;
+        }
+        if (!pk_is_hex64(l + t + 1, ln - (t + 1))) {
+            pk_vec_free(&extras);
+            cx_fmt(why, wcap, "list-current bad digest or extra column");
+            return -1;
+        }
+        {
+            char rel[512];
+            mm_copy(rel, sizeof rel, l, t); rel[t] = 0;
+            if (pk_add_symlink_hops(tree_root, c->root_real, rel, &extras, 0, why, wcap) != 0) {
+                pk_vec_free(&extras);
+                return -1;
+            }
+        }
+    }
+    at = 0;
+    while (c->la && at < (long)c->lan) {
+        long e = tx_chr(c->la + at, (long)c->lan - at, '\n');
+        long ln = e < 0 ? (long)c->lan - at : e;
+        const char *l = c->la + at;
+        at += ln + 1;
+        if (ln <= 0) {
+            pk_vec_free(&extras);
+            cx_fmt(why, wcap, "list-aliases empty row");
+            return -1;
+        }
+        long t1 = tx_chr(l, ln, '\t');
+        if (t1 <= 0) {
+            pk_vec_free(&extras);
+            cx_fmt(why, wcap, "list-aliases malformed row (missing col 1)");
+            return -1;
+        }
+        long t2 = tx_chr(l + t1 + 1, ln - t1 - 1, '\t');
+        if (t2 <= 0) {
+            pk_vec_free(&extras);
+            cx_fmt(why, wcap, "list-aliases malformed row (missing col 2)");
+            return -1;
+        }
+        long ll = t2;
+        long col3 = t1 + 1 + t2 + 1;
+        if (ll >= 512 || col3 >= ln || tx_chr(l + col3, ln - col3, '\t') >= 0) {
+            pk_vec_free(&extras);
+            cx_fmt(why, wcap, "list-aliases malformed row (col 3 invalid)");
+            return -1;
+        }
+        {
+            char logi[512], rel[512];
+            mm_copy(logi, sizeof logi, l + t1 + 1, ll); logi[ll] = 0;
+            pk_strip_root(tree_root, c->root_real, logi, rel, sizeof rel);
+            if (!rel[0]) {
+                pk_vec_free(&extras);
+                cx_fmt(why, wcap, "list-aliases path outside root: %.120s", logi);
+                return -1;
+            }
+            if (pk_add_symlink_hops(tree_root, c->root_real, rel, &extras, 0, why, wcap) != 0) {
+                pk_vec_free(&extras);
+                return -1;
+            }
+        }
+    }
+    size_t tot = 0;
+    for (int i = 0; i < extras.n; i++) tot += strlen(extras.v[i]) + 1;
+    if (tot > 0) {
+        c->rcp = (char *)mm_alloc((long)tot + 1);
+        if (!c->rcp) {
+            pk_vec_free(&extras);
+            cx_fmt(why, wcap, "extras alloc failed");
+            return -1;
+        }
+        size_t pos = 0;
+        for (int i = 0; i < extras.n; i++) {
+            size_t sl = strlen(extras.v[i]);
+            mm_copy(c->rcp + pos, (long)(tot + 1 - pos), extras.v[i], (long)sl);
+            pos += sl;
+            c->rcp[pos++] = '\n';
+        }
+        c->rcp[pos] = 0;
+        c->rcpn = pos;
+    }
+    pk_vec_free(&extras);
+    return 0;
+}
+
+static int pk_run_ident_dir(const char *ident_bin, const char *dir, PkClosure *out, char *why, size_t wcap) {
+    mm_fill(out, sizeof *out, 0, sizeof *out);
+    if (sy_realpath(dir, out->root_real, sizeof out->root_real) < 0) {
+        cx_fmt(why, wcap, "realpath failed on %.200s", dir);
+        return -1;
+    }
+    {
+        char *av[] = {(char *)ident_bin, (char *)dir, "list-current", 0};
+        px_result r = {0};
+        if (pk_run_cmd(av, dir, 25, 1, &r, why, wcap) != 0 || !r.out) {
+            px_result_free(&r);
+            return -1;
+        }
+        out->lc = mm_alloc((long)r.outn + 1);
+        if (!out->lc) { px_result_free(&r); cx_fmt(why, wcap, "list-current alloc failed"); return -1; }
+        if (r.outn) mm_copy(out->lc, (long)r.outn + 1, r.out, (long)r.outn);
+        out->lc[r.outn] = 0;
+        out->lcn = (size_t)r.outn;
+        px_result_free(&r);
+    }
+    {
+        char *av[] = {(char *)ident_bin, (char *)dir, "list-aliases", 0};
+        px_result r = {0};
+        if (pk_run_cmd(av, dir, 25, 1, &r, why, wcap) != 0) {
+            pk_closure_free(out);
+            return -1;
+        }
+        if (r.out && r.outn > 0) {
+            out->la = mm_alloc((long)r.outn + 1);
+            if (!out->la) { px_result_free(&r); pk_closure_free(out); cx_fmt(why, wcap, "list-aliases alloc failed"); return -1; }
+            mm_copy(out->la, (long)r.outn + 1, r.out, (long)r.outn);
+            out->la[r.outn] = 0;
+            out->lan = (size_t)r.outn;
+        }
+        px_result_free(&r);
+    }
+    if (pk_collect_extras(dir, out, why, wcap) != 0) {
+        pk_closure_free(out);
+        return -1;
+    }
+    return 0;
+}
+
+static int pk_closure_for_rev(const char *repo, const char *rev, PkClosure *out, char *why, size_t wcap) {
+    char ident_bin[4096];
+    if (pk_compile_ident(repo, rev, ident_bin, why, wcap) != 0) return -1;
+    if (!rev || !rev[0]) {
+        return pk_run_ident_dir(ident_bin, repo, out, why, wcap);
+    }
+    static const char *const sid_roots[] = {
+        "seed", "include", "src", "exec", "weights", "cx", "kernel",
+        "iterate/kernel/typekw.tsv", "ext", "tools",
+        "build/core-closure.tsv", "cxroot.tsv", 0
+    };
+    char *ls_av[48]; int lc = 0;
+    ls_av[lc++] = "git"; ls_av[lc++] = "-c"; ls_av[lc++] = "core.quotePath=false";
+    ls_av[lc++] = "ls-tree"; ls_av[lc++] = "--name-only"; ls_av[lc++] = "-z"; ls_av[lc++] = (char *)rev; ls_av[lc++] = "--";
+    for (int i = 0; sid_roots[i]; i++) ls_av[lc++] = (char *)sid_roots[i];
+    ls_av[lc] = 0;
+    px_result lr = {0};
+    if (pk_run_cmd(ls_av, repo, 20, 1, &lr, why, wcap) != 0) {
+        return -1;
+    }
+    if (lr.outn > 0 && lr.out[lr.outn - 1] != '\0') {
+        px_result_free(&lr);
+        cx_fmt(why, wcap, "truncated ls-tree -z output rev=%s", rev);
+        return -1;
+    }
+    char snap[4096], tarp[4200];
+    if (sy_mkdtemp(sy_tmpdir(), "pik1-snap-", snap, sizeof snap) != 0) {
+        px_result_free(&lr);
+        cx_fmt(why, wcap, "mkdtemp snap failed");
+        return -1;
+    }
+    cx_fmt(tarp, sizeof tarp, "%s.tar", snap);
+    char *ar_av[64]; int ac = 0;
+    ar_av[ac++] = "git"; ar_av[ac++] = "archive"; ar_av[ac++] = "--format=tar";
+    ar_av[ac++] = "--output"; ar_av[ac++] = tarp; ar_av[ac++] = (char *)rev; ar_av[ac++] = "--";
+    long at = 0;
+    while (lr.out && at < lr.outn && ac < 62) {
+        const char *item = lr.out + at;
+        long il = (long)strlen(item);
+        if (il <= 0) {
+            px_result_free(&lr); sy_remove_all(snap);
+            cx_fmt(why, wcap, "empty item in ls-tree -z rev=%s", rev);
+            return -1;
+        }
+        ar_av[ac++] = (char *)item;
+        at += il + 1;
+    }
+    ar_av[ac] = 0;
+    if (lr.out && at < lr.outn) {
+        px_result_free(&lr); sy_remove_all(snap);
+        cx_fmt(why, wcap, "ls-tree arg count bound exceeded rev=%s", rev);
+        return -1;
+    }
+    if (ac <= 7) {
+        px_result_free(&lr);
+        sy_remove_all(snap);
+        cx_fmt(why, wcap, "empty SID root tree rev=%s", rev);
+        return -1;
+    }
+    {
+        px_result ar = {0};
+        if (pk_run_cmd(ar_av, repo, 25, 0, &ar, why, wcap) != 0) {
+            px_result_free(&lr); (void)sy_unlink(tarp); sy_remove_all(snap);
+            return -1;
+        }
+        px_result_free(&ar);
+    }
+    px_result_free(&lr);
+    {
+        char *tv[] = {"tar", "-xf", tarp, "-C", snap, 0};
+        px_result tr = {0};
+        int fail = pk_run_cmd(tv, snap, 25, 0, &tr, why, wcap) != 0;
+        px_result_free(&tr);
+        (void)sy_unlink(tarp);
+        if (fail) {
+            sy_remove_all(snap);
+            return -1;
+        }
+    }
+    int rc = pk_run_ident_dir(ident_bin, snap, out, why, wcap);
+    sy_remove_all(snap);
+    return rc;
+}
+
+int pik1_is_build_recipe(const char *p) {
+    static const char *const recipes[] = {
+        "tools/candidate-chain.cx", "tools/chain-step.cx", "tools/chain-run.cx", "tools/release-build.cx",
+        "tools/build.cx", "tools/kernel-build.cx", "tools/product-build.cx", "tools/source-job-wave.cx",
+        "tools/pc-wave.cx", "tools/selfhost.cx", "tools/whole-front.cx",
+        "tools/cxlib/nninputs.cx", "tools/cxlib/netpack.cx", "tools/cxlib/kernelsha.cx",
+        "tools/cxlib/productpkg.cx", "tools/cxlib/netsel.cx", "tools/cxlib/codec.cx",
+        "tools/cxlib/packagefooter.cx", "tools/cxlib/chainfacts.cx", "tools/cxlib/chainroot.cx",
+        "tools/cxlib/envcompat.cx", "tools/cxlib/procrun.cx", "tools/cxlib/netwire.cx",
+        "tools/cxlib/limits.cx", 0
+    };
+    if (!p || !p[0]) return 0;
+    for (int i = 0; recipes[i]; i++) {
+        if (tx_eqz(p, recipes[i])) return 1;
+    }
+    return 0;
+}
+
+static int pk_match_rel_or_abs(const char *fld, long flen, const char *root_real, const char *path, long plen) {
+    if (flen == plen && !memcmp(fld, path, (size_t)plen)) return 1;
+    if (root_real && root_real[0]) {
+        long rl = (long)strlen(root_real);
+        if (flen == rl + 1 + plen && !memcmp(fld, root_real, (size_t)rl) &&
+            fld[rl] == '/' && !memcmp(fld + rl + 1, path, (size_t)plen)) {
+            return 1;
+        }
+    }
+    return 0;
+}
+
+static int pk_closure_contains(const PkClosure *c, const char *path) {
+    if (!path || !path[0]) return 0;
+    if (pik1_is_build_recipe(path)) return 1;
+    long plen = (long)strlen(path);
+    long at = 0;
+    while (c->lc && at < (long)c->lcn) {
+        long e = tx_chr(c->lc + at, (long)c->lcn - at, '\n');
+        long ln = e < 0 ? (long)c->lcn - at : e;
+        const char *l = c->lc + at;
+        at += ln + 1;
+        if (ln == 0) continue;
+        long t = tx_chr(l, ln, '\t');
+        if (t == plen && !memcmp(l, path, (size_t)plen)) return 1;
+    }
+    at = 0;
+    while (c->la && at < (long)c->lan) {
+        long e = tx_chr(c->la + at, (long)c->lan - at, '\n');
+        long ln = e < 0 ? (long)c->lan - at : e;
+        const char *l = c->la + at;
+        at += ln + 1;
+        /* format: <pkg>\t<logical>\t<target> */
+        long t1 = tx_chr(l, ln, '\t');
+        if (t1 < 0) continue;
+        long t2 = tx_chr(l + t1 + 1, ln - t1 - 1, '\t');
+        if (t2 < 0) continue;
+        t2 += t1 + 1;
+        if (pk_match_rel_or_abs(l + t1 + 1, t2 - t1 - 1, c->root_real, path, plen)) return 1;
+        if (pk_match_rel_or_abs(l + t2 + 1, ln - t2 - 1, c->root_real, path, plen)) return 1;
+    }
+    at = 0;
+    while (c->rcp && at < (long)c->rcpn) {
+        long e = tx_chr(c->rcp + at, (long)c->rcpn - at, '\n');
+        long ln = e < 0 ? (long)c->rcpn - at : e;
+        const char *l = c->rcp + at;
+        at += ln + 1;
+        if (ln == plen && !memcmp(l, path, (size_t)plen)) return 1;
+    }
+    return 0;
+}
+
+/* Compares git diff base_rev...target_rev (including rename sources) against the union of seed/ident.c closures.
+ * Returns 0 on success (populating counts), -1 if seed/ident.c or git fails (fail-closed).
+ */
+int pik1_rev_delta(const char *repo, const char *base_rev, const char *target_rev,
+                   int64_t *pik1_hits, int64_t *non_pik1, char *first_pik1, size_t first_cap,
+                   char *why, size_t why_cap) {
+    char range[320];
+    *pik1_hits = 0; *non_pik1 = 0;
+    if (first_pik1 && first_cap) first_pik1[0] = 0;
+    if (why && why_cap) why[0] = 0;
+    if (cx_fmt(range, sizeof range, "%s...%s", base_rev, target_rev)) {
+        cx_fmt(why, why_cap, "range path bound");
+        return -1;
+    }
+    char *dv[] = {"git", "-c", "core.quotePath=false", "diff", "-M", "-C", "--name-status", "-z", range, 0};
+    px_result dr = {0};
+    if (pk_run_cmd(dv, repo, 20, 1, &dr, why, why_cap) != 0) {
+        return -1;
+    }
+    if (!dr.out || dr.outn == 0) {
+        px_result_free(&dr);
+        return 0;
+    }
+    if (dr.out[dr.outn - 1] != '\0') {
+        cx_fmt(why, why_cap, "truncated git diff -z output");
+        px_result_free(&dr);
+        return -1;
+    }
+    PkClosure c_base = {0}, c_tgt = {0};
+    if (pk_closure_for_rev(repo, base_rev, &c_base, why, why_cap) != 0) {
+        px_result_free(&dr);
+        return -1;
+    }
+    if (pk_closure_for_rev(repo, target_rev, &c_tgt, why, why_cap) != 0) {
+        pk_closure_free(&c_base);
+        px_result_free(&dr);
+        return -1;
+    }
+    long at = 0;
+    while (at < dr.outn) {
+        const char *st = dr.out + at;
+        long stl = (long)strlen(st);
+        at += stl + 1;
+        if (!pk_diff_status_ok(st, stl) || at >= dr.outn) {
+            cx_fmt(why, why_cap, "unknown or truncated git diff -z status: %.32s", st);
+            pk_closure_free(&c_base); pk_closure_free(&c_tgt); px_result_free(&dr);
+            return -1;
+        }
+        const char *p1 = dr.out + at;
+        long p1l = (long)strlen(p1);
+        at += p1l + 1;
+        if (p1l <= 0) {
+            cx_fmt(why, why_cap, "empty path in git diff -z record");
+            pk_closure_free(&c_base); pk_closure_free(&c_tgt); px_result_free(&dr);
+            return -1;
+        }
+        const char *p2 = 0;
+        if (st[0] == 'R' || st[0] == 'C') {
+            if (at >= dr.outn) {
+                cx_fmt(why, why_cap, "truncated rename/copy record in git diff -z");
+                pk_closure_free(&c_base); pk_closure_free(&c_tgt); px_result_free(&dr);
+                return -1;
+            }
+            p2 = dr.out + at;
+            long p2l = (long)strlen(p2);
+            at += p2l + 1;
+            if (p2l <= 0) {
+                cx_fmt(why, why_cap, "empty target path in rename/copy git diff -z");
+                pk_closure_free(&c_base); pk_closure_free(&c_tgt); px_result_free(&dr);
+                return -1;
+            }
+        }
+        int hit1 = pk_closure_contains(&c_base, p1) || pk_closure_contains(&c_tgt, p1);
+        int hit2 = p2 ? (pk_closure_contains(&c_base, p2) || pk_closure_contains(&c_tgt, p2)) : 0;
+        if (hit1) {
+            if (first_pik1 && first_cap && !first_pik1[0]) cx_fmt(first_pik1, first_cap, "%.170s", p1);
+            (*pik1_hits)++;
+        } else {
+            (*non_pik1)++;
+        }
+        if (p2) {
+            if (hit2) {
+                if (first_pik1 && first_cap && !first_pik1[0]) cx_fmt(first_pik1, first_cap, "%.170s", p2);
+                (*pik1_hits)++;
+            } else {
+                (*non_pik1)++;
+            }
+        }
+    }
+    pk_closure_free(&c_base);
+    pk_closure_free(&c_tgt);
+    px_result_free(&dr);
+    return 0;
+}
+
+/* Evaluates current working tree dirty/untracked/renamed paths against worktree + HEAD seed/ident.c closures.
+ * Returns 0 on success, -1 on failure (fail-closed).
+ */
+int pik1_worktree_hits(const char *repo, int *dirty_total, int *pik1_hits, char *first_path, size_t cap,
+                       char *why, size_t why_cap) {
+    char *sv[] = {"git", "-c", "core.quotePath=false", "status", "--porcelain", "-z", "--untracked-files=all", 0};
+    px_result r = {0};
+    *dirty_total = 0; *pik1_hits = 0;
+    if (first_path && cap) first_path[0] = 0;
+    if (why && why_cap) why[0] = 0;
+    if (pk_run_cmd(sv, repo, 20, 1, &r, why, why_cap) != 0) {
+        return -1;
+    }
+    if (!r.out || r.outn == 0) {
+        px_result_free(&r);
+        return 0;
+    }
+    if (r.out[r.outn - 1] != '\0') {
+        cx_fmt(why, why_cap, "truncated git status -z output");
+        px_result_free(&r);
+        return -1;
+    }
+    PkClosure c_wt = {0}, c_hd = {0};
+    if (pk_closure_for_rev(repo, 0, &c_wt, why, why_cap) != 0) {
+        px_result_free(&r);
+        return -1;
+    }
+    if (pk_closure_for_rev(repo, "HEAD", &c_hd, why, why_cap) != 0) {
+        pk_closure_free(&c_wt);
+        px_result_free(&r);
+        return -1;
+    }
+    long at = 0;
+    while (at < r.outn) {
+        const char *ent = r.out + at;
+        long el = (long)strlen(ent);
+        at += el + 1;
+        if (el <= 3 || ent[2] != ' ' || !pk_status_xy_ok(ent[0], ent[1])) {
+            cx_fmt(why, why_cap, "malformed git status -z record");
+            pk_closure_free(&c_wt); pk_closure_free(&c_hd); px_result_free(&r);
+            return -1;
+        }
+        char x = ent[0], y = ent[1];
+        const char *p1 = ent + 3;
+        const char *p2 = 0;
+        if (x == 'R' || x == 'C' || y == 'R' || y == 'C') {
+            if (at >= r.outn) {
+                cx_fmt(why, why_cap, "truncated rename/copy record in git status -z");
+                pk_closure_free(&c_wt); pk_closure_free(&c_hd); px_result_free(&r);
+                return -1;
+            }
+            p2 = r.out + at;
+            long p2l = (long)strlen(p2);
+            at += p2l + 1;
+            if (p2l <= 0) {
+                cx_fmt(why, why_cap, "empty target path in git status -z");
+                pk_closure_free(&c_wt); pk_closure_free(&c_hd); px_result_free(&r);
+                return -1;
+            }
+        }
+        (*dirty_total)++;
+        int hit = pk_closure_contains(&c_wt, p1) || pk_closure_contains(&c_hd, p1) ||
+                  (p2 && (pk_closure_contains(&c_wt, p2) || pk_closure_contains(&c_hd, p2)));
+        if (hit) {
+            const char *rep = (p2 && (pk_closure_contains(&c_wt, p2) || pk_closure_contains(&c_hd, p2)) &&
+                               !(pk_closure_contains(&c_wt, p1) || pk_closure_contains(&c_hd, p1))) ? p2 : p1;
+            if (first_path && cap && !*pik1_hits) cx_fmt(first_path, cap, "path=%s", rep);
+            (*pik1_hits)++;
+        } else if (first_path && cap && !first_path[0]) {
+            cx_fmt(first_path, cap, "path=%s", p1);
+        }
+    }
+    pk_closure_free(&c_wt);
+    pk_closure_free(&c_hd);
+    px_result_free(&r);
+    return 0;
+}
+
+/* Evaluates a single commit against its parent's and its own seed/ident.c closure (fail-closed < 0).
+ * Returns 1 if any touched path (including rename source) is in PIK1 closure, 0 otherwise.
+ */
+int pik1_commit_touches(const char *repo, const char *commit, char *first_path, size_t cap,
+                        char *why, size_t why_cap) {
+    char par[96];
+    if (first_path && cap) first_path[0] = 0;
+    if (why && why_cap) why[0] = 0;
+    char *dv[] = {"git", "-c", "core.quotePath=false", "diff-tree", "--no-commit-id", "-M", "-C", "--name-status", "-r", "-z", (char *)commit, 0};
+    px_result dr = {0};
+    if (pk_run_cmd(dv, repo, 20, 1, &dr, why, why_cap) != 0) {
+        return -1;
+    }
+    if (!dr.out || dr.outn == 0) {
+        px_result_free(&dr);
+        return 0;
+    }
+    if (dr.out[dr.outn - 1] != '\0') {
+        cx_fmt(why, why_cap, "truncated git diff-tree -z output");
+        px_result_free(&dr);
+        return -1;
+    }
+    PkClosure c_cur = {0}, c_par = {0};
+    int have_par = 0;
+    if (pk_closure_for_rev(repo, commit, &c_cur, why, why_cap) != 0) {
+        px_result_free(&dr);
+        return -1;
+    }
+    if (!cx_fmt(par, sizeof par, "%s^", commit)) {
+        char *pv[] = {"git", "rev-parse", "--verify", par, 0};
+        px_opts po; px_result pr = {0};
+        px_opts_init(&po); po.argv = pv; po.cwd = repo; po.deadline_ms = 10000; po.kill_tree = 1;
+        if (px_run(&po, &pr) != 0 || pr.timed_out || (pr.truncated & (PX_TRUNC_OUT | PX_TRUNC_ERR))) {
+            cx_fmt(why, why_cap, "git rev-parse parent failed");
+            px_result_free(&pr); pk_closure_free(&c_cur); px_result_free(&dr);
+            return -1;
+        }
+        int par_ok = (pr.code == 0);
+        px_result_free(&pr);
+        if (par_ok) {
+            if (pk_closure_for_rev(repo, par, &c_par, why, why_cap) != 0) {
+                pk_closure_free(&c_cur);
+                px_result_free(&dr);
+                return -1;
+            }
+            have_par = 1;
+        }
+    }
+    int hit = 0;
+    long at = 0;
+    while (at < dr.outn) {
+        const char *st = dr.out + at;
+        long stl = (long)strlen(st);
+        at += stl + 1;
+        if (!pk_diff_status_ok(st, stl) || at >= dr.outn) {
+            cx_fmt(why, why_cap, "unknown or truncated git diff-tree -z status: %.32s", st);
+            pk_closure_free(&c_cur); if (have_par) pk_closure_free(&c_par); px_result_free(&dr);
+            return -1;
+        }
+        const char *p1 = dr.out + at;
+        long p1l = (long)strlen(p1);
+        at += p1l + 1;
+        if (p1l <= 0) {
+            cx_fmt(why, why_cap, "empty path in git diff-tree -z record");
+            pk_closure_free(&c_cur); if (have_par) pk_closure_free(&c_par); px_result_free(&dr);
+            return -1;
+        }
+        const char *p2 = 0;
+        if (st[0] == 'R' || st[0] == 'C') {
+            if (at >= dr.outn) {
+                cx_fmt(why, why_cap, "truncated rename/copy in git diff-tree -z");
+                pk_closure_free(&c_cur); if (have_par) pk_closure_free(&c_par); px_result_free(&dr);
+                return -1;
+            }
+            p2 = dr.out + at;
+            long p2l = (long)strlen(p2);
+            at += p2l + 1;
+            if (p2l <= 0) {
+                cx_fmt(why, why_cap, "empty target path in rename/copy git diff-tree -z");
+                pk_closure_free(&c_cur); if (have_par) pk_closure_free(&c_par); px_result_free(&dr);
+                return -1;
+            }
+        }
+        if (pk_closure_contains(&c_cur, p1) || (have_par && pk_closure_contains(&c_par, p1))) {
+            if (first_path && cap) cx_fmt(first_path, cap, "commit=%.12s path=%s", commit, p1);
+            hit = 1;
+            break;
+        }
+        if (p2 && (pk_closure_contains(&c_cur, p2) || (have_par && pk_closure_contains(&c_par, p2)))) {
+            if (first_path && cap) cx_fmt(first_path, cap, "commit=%.12s path=%s", commit, p2);
+            hit = 1;
+            break;
+        }
+    }
+    pk_closure_free(&c_cur);
+    if (have_par) pk_closure_free(&c_par);
+    px_result_free(&dr);
+    return hit;
+}

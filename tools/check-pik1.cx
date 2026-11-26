@@ -1,0 +1,123 @@
+/* tools/check-pik1.cx -- unit contract tests for cxlib.pik1 (build recipe filter, rev delta, worktree hits, commit touches, capture cap, typechange T).
+ *   cx tools/check-pik1.cx --
+ * Prints PASS/FAIL per case and CHECK_PIK1<TAB>passed=N<TAB>failed=M; exit 0 only when failed=0.
+ */
+#pragma unisa use cxlib.pik1
+#pragma unisa use cxlib.procrun
+#pragma unisa use sys.fs
+#pragma unisa use sys.env
+#pragma unisa use sys.posix
+#pragma unisa use text.text
+#pragma unisa use text.fmt
+#pragma unisa use mem.heap
+
+static int g_pass, g_fail;
+static char g_root[4096];
+
+static void pk_ck(int ok, const char *name, const char *why) {
+    if (ok) {
+        g_pass++;
+        printf("PASS\tcheck-pik1.%s\n", name);
+    } else {
+        g_fail++;
+        printf("FAIL\tcheck-pik1.%s\twhy=%.200s\n", name, why ? why : "");
+    }
+}
+
+static int pk_sh(const char *cmd) {
+    char *av[4] = {"sh", "-c", (char *)cmd, 0};
+    pr_result r = {0};
+    if (pr_run("check-pik1", av, g_root, 0, 30, &r) != 0) {
+        pr_free(&r);
+        return -1;
+    }
+    int rc = r.rc;
+    pr_free(&r);
+    return rc;
+}
+
+int main(void) {
+    if (sy_realpath(".", g_root, sizeof g_root) < 0) return 2;
+    char tmpd[512], repo[768], cmd[8192];
+    if (sy_mkdtemp(sy_tmpdir(), "check-pik1-", tmpd, sizeof tmpd) != 0) return 2;
+    if (cx_fmt(repo, sizeof repo, "%s/repo", tmpd)) return 2;
+
+    /* 1. pik1_is_build_recipe unit checks */
+    pk_ck(pik1_is_build_recipe("tools/cxlib/codec.cx") == 1, "recipe-codec", "tools/cxlib/codec.cx");
+    pk_ck(pik1_is_build_recipe("tools/release-build.cx") == 1, "recipe-release-build", "tools/release-build.cx");
+    pk_ck(pik1_is_build_recipe("tools/freeze-cut.cx") == 0, "non-recipe-freeze-cut", "tools/freeze-cut.cx");
+
+    /* 2. Seed minimal repo with seed/ident.c matching canonical skeleton layout */
+    if (cx_fmt(cmd, sizeof cmd,
+        "set -e; R='%s'; mkdir -p \"$R/seed\" \"$R/src\" \"$R/research\" \"$R/tools/cxlib\" \"$R/cx/runtime\" \"$R/include\" "
+        "\"$R/cx/sys\" \"$R/cx/mem\" \"$R/cx/text\" \"$R/cx/core\" \"$R/cx/driver\" \"$R/cx/compiler\" "
+        "\"$R/exec/c/asm\" \"$R/exec/c/cxlib\" \"$R/weights\" \"$R/kernel\" \"$R/iterate/kernel\" \"$R/build/layer-api\" \"$R/ext/textx\"; "
+        "cp '%s/seed/ident.c' \"$R/seed/ident.c\"; "
+        "if [ -f '%s/seed/sha256.h' ]; then cp '%s/seed/sha256.h' \"$R/seed/sha256.h\"; fi; "
+        "for f in iterate/kernel/typekw.tsv build/core-closure.tsv ext/textx/deflate.cx "
+        "tools/bound tools/bound.c tools/cxbin tools/safedel.cx tools/lib.sh tools/build_ref.sh tools/export_ref.sh "
+        "tools/refshim.h tools/reffoot.h tools/sourceflat.cx tools/ape-pack.cx tools/release-ape.cx tools/cxlib/releaseversion.cx "
+        "include/README.md weights/.keep kernel/.keep exec/.keep cx/sys/.keep cx/mem/.keep cx/text/.keep "
+        "cx/core/.keep cx/driver/.keep cx/runtime/.keep cx/compiler/.keep; do : > \"$R/$f\"; done; "
+        "printf 'R\\tcxlib\\ttools/cxlib\\nR\\truntime\\tcx/runtime\\nR\\tsys\\tcx/sys\\n' > \"$R/cxroot.tsv\"; "
+        "printf 'int a=1;\\n' > \"$R/src/a.c\"; "
+        "printf 'int c=1;\\n' > \"$R/cx/runtime/codec.cx\"; "
+        "ln -s ../../cx/runtime/codec.cx \"$R/tools/cxlib/codec.cx\"; "
+        "printf 'doc\\n' > \"$R/research/doc.md\"; "
+        "git -C \"$R\" init -q -b main; git -C \"$R\" config user.name t; git -C \"$R\" config user.email t@t; git -C \"$R\" config commit.gpgsign false; "
+        "git -C \"$R\" add -A; git -C \"$R\" commit -qm base; git -C \"$R\" tag base_tag; "
+        "printf 'doc2\\n' > \"$R/research/doc.md\"; git -C \"$R\" add research/doc.md; git -C \"$R\" commit -qm doc_step; git -C \"$R\" tag doc_tag; "
+        "printf 'int a=2;\\n' > \"$R/src/a.c\"; git -C \"$R\" add src/a.c; git -C \"$R\" commit -qm sid_step; git -C \"$R\" tag sid_tag; "
+        "rm -f \"$R/src/a.c\"; ln -s ../include/README.md \"$R/src/a.c\"; git -C \"$R\" add src/a.c; git -C \"$R\" commit -qm tc_step; git -C \"$R\" tag tc_tag",
+        repo, g_root, g_root, g_root) || pk_sh(cmd) != 0) {
+        pk_ck(0, "setup-repo", "init failed");
+        printf("CHECK_PIK1\tpassed=%d\tfailed=%d\n", g_pass, g_fail);
+        return 1;
+    }
+
+    int64_t hits = 0, non_hits = 0;
+    char first[256], why[512];
+    int dirty = 0, wt_hits = 0;
+
+    /* 3. Clean worktree & doc-only rev delta / commit touches */
+    pk_ck(pik1_worktree_hits(repo, &dirty, &wt_hits, first, sizeof first, why, sizeof why) == 0 && dirty == 0 && wt_hits == 0,
+          "worktree-clean", why);
+    pk_ck(pik1_rev_delta(repo, "base_tag", "doc_tag", &hits, &non_hits, first, sizeof first, why, sizeof why) == 0 && hits == 0 && non_hits == 1,
+          "rev-delta-doc-only", why);
+    pk_ck(pik1_commit_touches(repo, "doc_tag", first, sizeof first, why, sizeof why) == 0,
+          "commit-touches-doc-only", why);
+
+    /* 4. SID source rev delta + commit touches + T typechange */
+    pk_ck(pik1_rev_delta(repo, "doc_tag", "sid_tag", &hits, &non_hits, first, sizeof first, why, sizeof why) == 0 && hits == 1 && tx_eqz(first, "src/a.c"),
+          "rev-delta-sid-hit", why);
+    pk_ck(pik1_commit_touches(repo, "sid_tag", first, sizeof first, why, sizeof why) == 1 && tx_eqz(first, "commit=sid_tag path=src/a.c"),
+          "commit-touches-sid", first);
+    pk_ck(pik1_rev_delta(repo, "sid_tag", "tc_tag", &hits, &non_hits, first, sizeof first, why, sizeof why) == 0 && hits == 1 && tx_eqz(first, "src/a.c"),
+          "rev-delta-typechange-T", why);
+
+    /* 5. Worktree untracked non-SID, dirty SID, and worktree ' T' typechange */
+    if (!cx_fmt(cmd, sizeof cmd, "printf 'note\\n' > '%s/research/u.md'", repo) && pk_sh(cmd) == 0) {
+        pk_ck(pik1_worktree_hits(repo, &dirty, &wt_hits, first, sizeof first, why, sizeof why) == 0 && dirty == 1 && wt_hits == 0,
+              "worktree-untracked-non-sid", why);
+    } else pk_ck(0, "worktree-untracked-non-sid", "setup");
+
+    if (!cx_fmt(cmd, sizeof cmd, "rm -f '%s/src/a.c' && printf 'int wt=1;\\n' > '%s/src/a.c'", repo, repo) && pk_sh(cmd) == 0) {
+        pk_ck(pik1_worktree_hits(repo, &dirty, &wt_hits, first, sizeof first, why, sizeof why) == 0 && wt_hits == 1 && tx_eqz(first, "path=src/a.c"),
+              "worktree-typechange-T-sid", first);
+    } else pk_ck(0, "worktree-typechange-T-sid", "setup");
+
+    /* 6. Capture truncation guard */
+    pik1_set_capture_cap(8);
+    int cap_rc = pik1_rev_delta(repo, "base_tag", "sid_tag", &hits, &non_hits, first, sizeof first, why, sizeof why);
+    pik1_set_capture_cap(0);
+    pk_ck(cap_rc < 0 && tx_find(why, (long)tx_len(why, sizeof why), "capture truncated", 17) >= 0,
+          "capture-cap-truncation-refused", why);
+
+    /* 7. Missing repo fail-closed */
+    pk_ck(pik1_commit_touches(repo, "nonexistent_ref_xyz", first, sizeof first, why, sizeof why) < 0,
+          "commit-touches-missing-ref-fail-closed", why);
+
+    (void)sy_remove_all(tmpd);
+    printf("CHECK_PIK1\tpassed=%d\tfailed=%d\n", g_pass, g_fail);
+    return g_fail ? 1 : 0;
+}
