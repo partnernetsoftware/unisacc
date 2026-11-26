@@ -1,25 +1,69 @@
 /* Check unit-limit literals in the product driver and module planner. */
 #pragma unisa use text.text
-static int literal(const char *s) {
-    int i;
-    for (i = 0; s[i]; i++) if ((i == 0 || !(s[i-1] >= '0' && s[i-1] <= '9')) &&
-        (!strncmp(s+i,"63",2) || !strncmp(s+i,"64",2) || !strncmp(s+i,"96",2) || !strncmp(s+i,"128",3))) {
-        int n = s[i] == '1' ? 3 : 2;
-        if (!(s[i+n] >= '0' && s[i+n] <= '9')) return 1;
+static int is_lim_tok(const char *q) {
+    if (!strncmp(q, "63", 2) || !strncmp(q, "64", 2) || !strncmp(q, "96", 2) || !strncmp(q, "128", 3)) {
+        int n = *q == '1' ? 3 : 2;
+        if (!(q[n] >= '0' && q[n] <= '9')) return 1;
     }
     return 0;
+}
+static int literal(const char *s) {
+    int i;
+    for (i = 0; s[i]; i++) if ((i == 0 || !(s[i-1] >= '0' && s[i-1] <= '9')) && is_lim_tok(s + i)) return 1;
+    return 0;
+}
+static const char *find_sub(const char *s, const char *pat) {
+    size_t i, pl = strlen(pat);
+    for (i = 0; s[i]; i++) if (!strncmp(s + i, pat, pl)) return s + i;
+    return 0;
+}
+static int pat_lit(const char *s, const char *pat) {
+    size_t pl = strlen(pat);
+    const char *p;
+    for (p = find_sub(s, pat); p; p = find_sub(p + pl, pat)) {
+        const char *q = p + pl;
+        if (*q == '=') q++;
+        while (*q == ' ' || *q == '\t') q++;
+        if (is_lim_tok(q)) return 1;
+    }
+    return 0;
+}
+static int line_bad(const char *line) {
+    int relevant;
+    if (find_sub(line, "too many sources (limit %d)") && find_sub(line, ">= DV_MAXU")) return 0;
+    relevant = pat_lit(line, "dv_srcv[") || pat_lit(line, "*nsrc >") || pat_lit(line, "nsrc >") ||
+               pat_lit(line, "*nu >") || pat_lit(line, "cxm_n >=") ||
+               (find_sub(line, "u >= CXM_MAXU") && literal(line)) ||
+               pat_lit(line, "#define CXM_MAXU") || pat_lit(line, "#define DV_MAXU") ||
+               (find_sub(line, "units in one program") && find_sub(line, "more than") && literal(line));
+    return relevant ? 1 : 0;
+}
+static int selftest(void) {
+    static const char *pos[] = {
+        "        ((fwd || nsrc > 1) && ((cxt_text(tgt, 0, nsrc > 1 ? nsrc : 2, warn, lvl, r2, 96, why2, 128) == 0 && cxn_probe_route(pm_along, r2, preason, 128)) ||\n",
+        "        (mode2 == 3 && nsrc > 1 && cxt_text(tgt, 5, 1, warn, lvl, r2, 96, why2, 128) == 0 && cxn_probe_route(pm_along, r2, preason, 128)))) ||\n",
+        "        ((fwd || nsrc > 1) && tgt && (tl = tx_len(tgt, 80)) > 0 && tl + 6 <= 96 && !tx_copy(ur, 96, tgt, tl) && !tx_copy(ur + tl, 96 - tl, \"/unit\", 5) && cxn_probe_route(pm_along, ur, preason, 128))) : 0;\n",
+        0
+    };
+    static const char *neg[] = {
+        "if (*nu > 63) return 1;\n",
+        "if (*nsrc >= 64) return 1;\n",
+        "#define CXM_MAXU 96\n",
+        "static const char *dv_srcv[128];\n",
+        "if (nsrc >= 128) return 1;\n",
+        0
+    };
+    int i, bad = 0;
+    for (i = 0; pos[i]; i++) if (line_bad(pos[i])) { fprintf(stderr, "unit-limit: selftest-pos:%d: false positive\n", i + 1); bad++; }
+    for (i = 0; neg[i]; i++) if (!line_bad(neg[i])) { fprintf(stderr, "unit-limit: selftest-neg:%d: missed violation\n", i + 1); bad++; }
+    return bad;
 }
 static int check(const char *path) {
     FILE *f = fopen(path,"r"); char line[4096]; int no = 0, bad = 0;
     if (!f) { fprintf(stderr,"unit-limit: cannot read %s\n",path); return 1; }
     while (fgets(line,sizeof line,f)) {
-        int relevant; no++;
-        relevant = strstr(line,"dv_srcv[") || strstr(line,"*nsrc >") || strstr(line,"nsrc >") ||
-                   strstr(line,"*nu >") || strstr(line,"cxm_n >=") || strstr(line,"u >= CXM_MAXU") ||
-                   strstr(line,"#define CXM_MAXU") || strstr(line,"#define DV_MAXU") ||
-                   (strstr(line,"units in one program") && strstr(line,"more than"));
-        if (strstr(line, "too many sources (limit %d)") && strstr(line, ">= DV_MAXU")) relevant = 0;
-        if (relevant && literal(line)) {
+        no++;
+        if (line_bad(line)) {
             fprintf(stderr,"unit-limit: %s:%d: bare unit limit\n",path,no); bad++;
         }
     }
@@ -29,12 +73,11 @@ static int walk(const char *dir, int depth) {
     DIR *d; struct dirent *e; int bad = 0;
     if (depth > 32 || !(d = opendir(dir))) { fprintf(stderr, "unit-limit: cannot open %s\n", dir); return 1; }
     for (;;) {
-        char path[4096]; struct stat st; int n; size_t z;
+        char path[4096]; struct stat st; size_t z;
         errno = 0; e = readdir(d);
         if (!e) { if (errno) { fprintf(stderr, "unit-limit: cannot read %s\n", dir); bad++; } break; }
         if (!strcmp(e->d_name, ".") || !strcmp(e->d_name, "..")) continue;
-        n = snprintf(path, sizeof path, "%s/%s", dir, e->d_name);
-        if (n < 0 || n >= (int)sizeof path || lstat(path, &st)) { fprintf(stderr, "unit-limit: stat %s\n", dir); bad++; continue; }
+        if (cx_fmt(path, sizeof path, "%s/%s", dir, e->d_name) || lstat(path, &st)) { fprintf(stderr, "unit-limit: stat %s\n", dir); bad++; continue; }
         if (S_ISDIR(st.st_mode)) bad += walk(path, depth + 1);
         else if (S_ISREG(st.st_mode)) { z = strlen(path); if (z >= 3 && !strcmp(path + z - 3, ".cx")) bad += check(path); }
     }
@@ -43,7 +86,12 @@ static int walk(const char *dir, int depth) {
 }
 int main(int argc,char **argv) {
     int i, bad = 0;
+    if (argc == 2 && !strcmp(argv[1], "--self-test")) {
+        bad = selftest();
+        printf("UNIT_LIMIT_SELFTEST\tpos=3\tneg=5\tviolations=%d\n", bad);
+        return bad ? 1 : 0;
+    }
     if (argc > 1) { for (i=1;i<argc;i++) bad += check(argv[i]); }
-    else { bad += walk("src", 0); bad += walk("cx/compiler", 0); bad += walk("cx/driver", 0); }
+    else { bad += selftest(); bad += walk("src", 0); bad += walk("cx/compiler", 0); bad += walk("cx/driver", 0); }
     printf("UNIT_LIMIT\tviolations=%d\n",bad); return bad ? 1 : 0;
 }

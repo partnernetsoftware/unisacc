@@ -162,7 +162,8 @@ static void script(Buf *o, const Row *rows, int nrows, int embedded) {
     bs(o, "if [ ! -x \"$t\" ]; then\n");
     bs(o, "  tail -c +$o \"$0\" | head -c $n | gzip -dc > \"$t.$$\" && chmod +x \"$t.$$\" && mv -f \"$t.$$\" \"$t\" || { rm -f \"$t.$$\"; exit 1; }\n");
     bs(o, "fi\n");
-    if (embedded) bs(o, "UNISA_CONTAINER=\"$0\"; export UNISA_CONTAINER\n");
+    if (embedded) bs(o, "UNISA_CONTAINER=\"$0\"; UNISACC_APE_SELF=\"$0\"; export UNISA_CONTAINER UNISACC_APE_SELF\n");
+    else bs(o, "unset UNISACC_APE_SELF\n");
     bs(o, "exec \"$t\" \"$@\"\n");
 }
 

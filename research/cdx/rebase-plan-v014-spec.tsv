@@ -1,0 +1,34 @@
+id	场景	来源	固定输入与操作	可判定期望	必红变异
+P01	只读入口	GK2,GK4,GK7,GK9,CDX2,CDX3	正常、重跑、拒绝路径各跑一次；out 含 frozen-root、frozen-source.rev、done、strict、日志与无关哨兵，仓根另置哨兵	每路按其场景退出；仅 stdout/stderr 有新输出；源仓与 out 前后路径、类型、模式、内容散列、链接目标及 mtime/ctime 一致，允许读取引起 atime 变化；临时材料只准在 out 和源仓之外并回收	M01 去掉 plan 写保护，在成功或拒绝路径写 rev、替根、unlink done、写日志或发布新证据；分别具名红
+P02	禁用执行入口	GK2,GK9,CDX2	同一可生成计划的输入，分别省略 --plan 或请求执行模式	非零 REFUSE plan-required 或 execute-unavailable；无计划成功摘要、无文件变动	M02 恢复旧默认执行并写 rev
+P03	过期证据一：只读目录	GK2,GK4,GK7,CDX2,CDX3	非特权身份对 out 设 0555，先验读与列举成功而创建哨兵失败；4 窗全为有效 PASS，唯一 W0001 依赖有改动	rc=0；W0001 RERUN dep-hit 且 hit 为确切路径；其余 RETAIN，汇总 retained=3 rerun=1 sampled=0；全部旧原件仍在	M03 用是否能删除 done 决定可否出计划，或静默调用 unlink/写 rev；用操作跟踪确认零写尝试
+P04	过期证据二：done 是目录	GK4,GK6,GK7,CDX3	W0001 的 done 标记换成非空目录，目录内带哨兵，其余窗口合法	非零 REFUSE done-not-regular window=W0001；无成功摘要；目录及哨兵原样	M04 只按 done 文件名认标记，跳过类型校验
+P05	过期证据三：目录不可列	GK4,GK7,CDX3	非特权身份将 out 设为 0311，先验能按已知路径读 rev、却不能枚举目录；至少存在 1 个 done	非零 REFUSE dir-open-failed 并保留 EACCES；无保留或成功摘要	M05 把 sy_dir_open 失败当空目录
+P06	过期证据四：rev 被篡改	GK2,GK6,GK7,CDX2	frozen-source.rev 改成真实存在的 new SHA；frozen-root 的提交和真实 strict 的 source 仍是 old SHA；对照相同内容的诚实 old rev	篡改版非零 REFUSE source-rev-mismatch；诚实版按真实依赖输出 RERUN；两版都零写入	M06 只信 rev 文本，old==new 直接保留
+P07	过期证据五：空 strict	GK3,GK6,GK7,CDX3	有效 done.W0001 对应零字节 strict，另有 3 个合法全 PASS 窗	rc=0；W0001 RERUN non-pass-or-missing，hit=-；retained=3 rerun=1 sampled=0	M07 以不存在 FAIL 字样或只凭 done 认全 PASS
+P08	中途枚举错误	GK4,CDX3	目录正常打开且已返回 1 个合法 done，再让实际目录读取边返回 EIO；证明注入命中	非零 REFUSE dir-read-failed errno=EIO；无部分成功计划或成功摘要	M08 将 sy_dir_next<0 当 EOF
+P09	符号链接证据	GK4,GK6,CDX3	done 或 strict 各换成指向 out 之外的符号链接；目标放可辨内容	done 非零 REFUSE done-not-regular；strict 不得读外部目标或 RETAIN，标 RERUN non-pass-or-missing；链接及目标不变	M09 lstat/无跟随校验改为跟随链接
+P10	新 REV 规范化	GK2,CDX2	接受合法目标分支或 HEAD，解析完成后移动符号引用到另一提交；记录每个 Git 与 SID helper 调用实参	快照只使用第一次解析的规范 40 位小写 SHA；祖先、diff、归档身份、输出 new 均与该 SHA 相等，零写入	M10 在祖先、diff 或身份重新使用原始 new_rev
+P11	非法旧 REV 与新 REV	GK2,GK6,GK7,CDX2	旧 rev 分别写 branch、短 SHA、39/41 位、非十六进制、含额外行、40 位不存在 SHA；新 rev 用无法解析值和 --help	各非零拒绝，旧值 reason=invalid-old-rev，新值 reason=invalid-new-rev；无计划摘要和后续身份操作	M11 去掉形状检查或将选项样文本或不存在提交放行
+P12	冻结根独立身份	GK2,GK6,CDX2	旧 rev 与 strict source 合法一致，但 frozen-root 为另一 SHA 或缺失；正常组固定归档老根	不一致或缺失非零 REFUSE frozen-root-mismatch；正常组可生成计划且原根未替换	M12 不校验 frozen-root，或用当前 checkout 代替冻结根
+P13	严格证据 source 校验	GK2,GK6,CDX2,CDX3	根及旧 rev 匹配；一个严格证据的 source 改成其它 SHA，另测缺 source 或写两条冲突头	每例非零 REFUSE source-rev-mismatch，指明窗口；无部分计划成功；全部旧原件不变	M13 忽略 strict source 或只读第一条头
+P14	祖先门	GK2,GK7,CDX2	同一基点的分叉两提交，旧与新规范 SHA 有效且相同产品 SID	非零 REFUSE non-ancestor；不以 SID 相同替代祖先关系	M14 去掉 merge-base 检查
+P15	真实 SID 与源码闭包	GK1,GK9,CDX1	两个真实提交仅改一个产品源码，使用同一固定 seed/ident.c 构造的真实 helper 分别对两棵归档树实算；另跑一组仅改文档的同 SID 对照	产品组两 SID 不等，非零 REFUSE sid-mismatch；纯文档组不被路径前缀一律拒绝；记录两个 64 位 SID 与所用 40 位提交；helper argv 直调，无 sh -c	M15 用四目录树或 /bin/echo 冒充真实 SID，或去掉 SID 及产品输入闭包拒绝
+P16	身份输入 tools/bound.c	GK1,GK7,CDX1	仅改 tools/bound.c 内容，其他同 P15；四旧目录 Git 树哈希保持相同	真实 SID 改变；只读子集非零 REFUSE sid-mismatch hit=tools/bound.c；不得保留窗	M16 把 tools 前缀变更直接放行，或身份用四树替代
+P17	身份输入 tools/release-ape.cx	GK1,GK7,CDX1	仅改 tools/release-ape.cx 内容，其他同 P15	真实 SID 改变；非零 REFUSE sid-mismatch hit=tools/release-ape.cx；不得保留窗	M17 从身份闭包漏掉 release-ape.cx 并按 tools 前缀放行
+P18	身份输入 build/core-closure.tsv	GK1,GK7,CDX1	仅改 build/core-closure.tsv 内容，其他同 P15	真实 SID 改变；非零 REFUSE sid-mismatch hit=build/core-closure.tsv；不得保留窗	M18 从身份闭包漏掉该表并按 build 前缀放行
+P19	身份 helper 失败	GK1,GK9,CDX1	真实 helper 先作正向对照，再分别模拟非零、空输出、非法长度、读取截断；不把模拟结果当身份	各非零 REFUSE sid-helper-failed；无计划成功摘要且不回退旧算法	M19 helper 失败后以空值、相同常量或四树决定同 SID
+P20	间接依赖命中	GK3,GK7,GK9,CDX3	提交只改非 SID 的 cxlib 支持文件；tests/batches.tsv 的 SOURCE 与 tests/batch-product-inputs.tsv 经 affected.cx 反查到 W0001；真实 strict 不含该文件路径；共 4 个窗	rc=0；仅 W0001 RERUN dep-hit，hit 为该实际路径；其余 RETAIN，无抽样掩盖；输出与独立闭包查询一致	M20 恢复 strstr(strict,path)，或只看直接入口而跳过间接闭包
+P21	路径精确相交	GK3,CDX3	同 SID 改 tests/a.cx，W0001 只依赖 tests/a.cx.bak，strict note/RAW 故意含 tests/a.cx；4 窗均无真命中	rc=0；四窗 RETAIN，rerun=0 sampled=0；不得以拼写包含关系命中	M21 改为任一文本出现或路径前缀命中
+P22	严格汇总 FAIL=0	GK3,GK7,CDX3	至少三窗使用真实格式的 PASS 数据行、RAW 和 SUMMARY 含 FAIL=0 UNKNOWN=0 INVALID=0；同 SID 无依赖交集，保留池小于 5	rc=0；逐窗 RETAIN；retained=有效窗数 rerun=0 sampled=0；只认批次记录 status 列	M22 strstr 查包含制表符的 FAIL，或把 SUMMARY 当失败数据
+P23	非 PASS 与缺证据	GK3,GK6,GK7,CDX3	分窗放真实结构的 FAIL、UNKNOWN、INVALID、TIMEOUT、SKIP 及未知状态；另两窗分别缺 strict、只有头与 SUMMARY 无批次；对照全 PASS 窗	rc=0；每个非 PASS、无有效批次和缺文件窗都 RERUN non-pass-or-missing；本组对照窗 RETAIN；汇总与逐窗数一致	M23 忽略状态列，只枚举三个红状态，或把表头与 SUMMARY 认作批次
+P24	依赖闭包查询失败	GK3,GK9,CDX3	批次不存在、产品输入表损坏或 affected 查询失败分别造例	非零 REFUSE dependency-unresolved 并指出关联窗口、批次与原因；禁止默认为无交集	M24 查询错误或批次缺失后按空依赖继续
+P25	超过 512 条路径	GK5,GK7,CDX3	600 个排序固定的短非 SID 路径，确保真实 git 输出未截断；唯一依赖命中排第 600 项；另测 512/513 边界	允许完整处理或显式拒绝。成功时 changed=600 且末项对应窗口 RERUN dep-hit，512/513 亦完整；否则非零 REFUSE changed-capacity 且无成功摘要；不得 changed=512 成功	M25 在 512 处 break 并继续算计划
+P26	Git 输出截断	GK3,GK5,GK7,CDX3	用真实提交产生超过进程输出上限的 diff；预检确认 r.truncated=1；另测输出未截断的大样本	截断时非零 REFUSE diff-truncated，独立于数组容量，无计划成功摘要；未截断按容量合同	M26 移除 r.truncated 检查
+P27	done 容量与名称	GK5,GK7,CDX3	至少 1025 个有效窗口，末窗为唯一 dep-hit；另作一个 done. 前缀但超长或无法解析的名称	成功则完整列 1025 窗含末窗命中；容量不足则非零 REFUSE done-capacity；非法名非零 REFUSE invalid-done-name；不得静默跳过	M27 到 1024 条停收，或遇超长名字直接 continue
+P28	抽样只取保留池	GK3,GK7,CDX3	候选中至少一个非 PASS、一个 dep-hit；另建独立保留池规模 4、5、9、10、49、50、60，乱序创建并重复输出	按窗口 ID 稳定排序选前 K 个有效保留窗；K=floor(N/10)，N>=5 至少 1，N>=50 至少 5；对应 K=0/1/1/1/4/5/6；抽样行 RERUN sample-10pct hit=-，不得重复取已重跑窗；汇总 sampled=K	M28 取混合列表末窗、把样本加到已重跑窗、去掉抽样或依赖枚举顺序
+P29	真实 W0118 回放	GK1,GK3,GK7,GK9,CDX1,CDX3	私有复制 ~/.unisacc-worktree-backups/prerun-v012-stop-W0118-20261125 的冻结根、rev、done 与 strict；C7=719012b5e808b2c7efc825164420e86d4e753b52，C10=4e8aa13c61598429fad27a78d747da1675d0093f；原件不执行工具	先记录快照清单与散列、冻结根 HEAD 和真实 Git diff；证明 cx/sys/posix.cx 在差集中且真实 SID 变化；非零 REFUSE sid-mismatch hit= 真实产品输入，绝不输出可复用计划；原件与副本均不变；快照不可得则具名缺证据并验收失败	M29 放行真实产品输入；用同名合成提交替代真实快照须因身份校验失败
+P30	真实 strict 结构的同 SID 对照	GK3,GK7,CDX3	从 W0118 快照选至少 3 个数据全 PASS 且含原始 SUMMARY 的窗口，保留原字节；在真实 C7 的独立私有分支新增纯文档提交作为 new，原根仍 C7	独立标记无依赖交集时 rc=0 全 RETAIN，无抽样；old/new 与同 SID 可回算；禁止事后剥离 SUMMARY；文档变更不得被产品路径规则拒绝	M30 恢复文本 FAIL 匹配，或只准 tools/build/tests 前缀
+P31	计划输出与一致性	GK3,GK7,GK9,CDX3	表驱动对照至少一 RETAIN、一 dep-hit、一非 PASS 与一次抽样，另跑两种拒绝；逐行读结构化输出	成功仅有一条 REBASE_PLAN_SUMMARY；合法 done 与 REBASE_PLAN_WIN 一一对应，window/action/reason/hit 精确；retained+rerun=窗口总数，sampled 为 rerun 子集，changed 为完整路径数；拒绝非零且不发布成功计划	M31 将窗口漏报、重复、错 reason、错 hit 或篡改任一汇总字段
+P32	登记、派生与实物验收	GK7,GK8,GK9,CDX4	固定候选交付树，运行批次登记及覆盖、工具编译清单、manifest、prd.md 能力速查对账；运行 cxtrunc 适用棘轮	新增检查可经登记批次运行；注册一致、适用 lint/棘轮通过；计划不宣称已执行或具事务保证；逐案原行含 rc/输出/前后状态及耗时	M32 分别遗漏批次、覆盖、manifest、编译库存或文档项，并把未实跑写成通过
+P33	检查器独立验收	GK7,GK9,CDX4	基准为 research/agyneon/rebase-plan-only-design.md；GK1 至 GK9 按 gk-rebase-v3.md 第 (f) 节编号，CDX1 至 CDX4 按该文第 (b) 节编号；逐列解析本表，固定 ID 分派，保存隔离输入、原行和单点变异	33 个具名条目各执行一次且每条逐判据断言；未知、重复、零断言或未测均红；变异须达到目标并具名失败，编译失败或墙钟超时另列；记录冷跑时间，超批预算分片	M33 删除一条、加未知键、只数退出码或把编译失败记为杀死，须报具名夹具失败

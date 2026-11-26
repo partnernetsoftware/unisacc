@@ -8,6 +8,7 @@
  * OUT 须在仓内(夹具 .cx 要能解析模块)。CMD 默认 "sh ./unisacc.com";--base 给出改动前的产品时,
  * switch 模式另核 UNISACC_RUN_CACHE=0 产物与改动前逐字节相同。每个模式一次调用,内层子进程各自有界。
  *   equiv0..equiv4  26 例分五片,片内并行。每例三编:关缓存、存储跑、移走运行缓存条目后的全命中跑;
+ *                   先在独立 TMPDIR 预备 CXIF,不预热被测的单元及运行缓存。
  *                   三份 -o 镜像逐字节相同,存储跑与命中跑写出的运行缓存条目(含依赖清单)逐字节相同,
  *                   命中跑不得有未命中。
  *   neg             负例:头内容变、只改一个源、-D 变、换序、翻字节、截断、遮蔽头出现、改帧标志、改依赖清单路径;每步产物与关缓存相同。
@@ -83,7 +84,10 @@ static int capture_finish(FcCapture *r, int merged) {
     sy_exit_t ex; int done = 0, bad = 0, timed = 0;
     if (!r->started) return 127;
     int fd = merged ? r->child.out_fd : r->child.err_fd;
-    while (sy_now_ms() < r->child.deadline_at_ms) {
+    /* try_wait repurposes the child deadline slot after reaping; keep
+       the original bound while the pipe still has data to drain. */
+    long deadline = r->child.deadline_at_ms;
+    while (sy_now_ms() < deadline) {
         sy_pollfd_t p; p.fd = fd; p.events = SY_POLLIN; p.revents = 0;
         int pr = sy_poll(&p, 1, 10);
         if (pr < 0 && pr != -EINTR) { bad = 1; break; }
@@ -222,6 +226,7 @@ static void fixtures(const char *w) {
 }
 static int one_case(int k) {
     char w[700], args[2400], env[900], a[900], b[900], d[900], ds[900], dt[900], cmd[3000];
+    char scratch[800], refenv[900];
     int rx, rc_, rd, ok, dq;
     if (k < 0 || k >= NCASE) return 2;
     cx_fmt(w, sizeof w, "%s/c%d", OUT, k); sy_mkdir(w, 0755);
@@ -237,10 +242,19 @@ static int one_case(int k) {
         cx_fmt(args, sizeof args, "%s", CASES[k]);
     }
     cx_fmt(d, sizeof d, "%s/D", w); cx_fmt(ds, sizeof ds, "%s/Ds", w); cx_fmt(dt, sizeof dt, "%s/Dt", w);
-    cx_fmt(env, sizeof env, "UNISACC_E3CACHE=%s UNISACC_RR_TIME=1", d);
+    /* CXIF lookup can refresh mtime/ctime. Keep that outside the UPM2
+       input-age guard, without warming or filtering the caches under test. */
+    if (cx_fmt(scratch, sizeof scratch, "%s/cxif", w) || sy_mkdir(scratch, 0700) ||
+        cx_fmt(refenv, sizeof refenv, "TMPDIR='%s' UNISACC_RUN_CACHE=0", scratch) ||
+        cx_fmt(cmd, sizeof cmd, "%s %s %s -cx-plan >/dev/null", refenv, PROD, args) ||
+        (sh(cmd), sy_sleep_ms(2000))) {   /* prep exit status is not asserted: a fixture may legitimately fail to compile, the legs below compare outcomes */
+        sy_printf("CASE\t%s\tFAIL\tprepare isolated CXIF scratch\n", CASES[k]);
+        return 1;
+    }
+    if (cx_fmt(env, sizeof env, "TMPDIR='%s' UNISACC_E3CACHE=%s UNISACC_RR_TIME=1", scratch, d)) return 1;
     {
         FcCapture rx_cap, rc_cap;
-        int sx = cc_start(&rx_cap, PROD, "UNISACC_RUN_CACHE=0", args, w, "x");
+        int sx = cc_start(&rx_cap, PROD, refenv, args, w, "x");
         int sc = cc_start(&rc_cap, PROD, env, args, w, "c");
         rx = sx ? sx : cc_finish(&rx_cap, w, "x");
         rc_ = sc ? sc : cc_finish(&rc_cap, w, "c");

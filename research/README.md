@@ -42,7 +42,7 @@ A 研究给定有限控制表到网络的精确构造，不证明控制表自动
 | [`ujs-paper.md`](ujs-paper.md) | 正文草稿：构造脊 + M3 出货脊 |
 | [`ujs-paper-outline.md`](ujs-paper-outline.md) | 一页提纲 |
 
-验收分层见 `ujs/prd.md` #4：`tests/ujs.sh` · `tests/ujs2wasm_compiler.sh` · `tests/uxe_ship_js.sh` · UXE 另门。
+验收分层见 `ujs/prd.md` #4：`8d78fbc83015605:tests/ujs.sh` · `8d78fbc83015605:tests/ujs2wasm_compiler.sh` · `8d78fbc83015605:tests/uxe_ship_js.sh` · UXE 另门。
 
 **Paper C**
 

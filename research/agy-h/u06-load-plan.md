@@ -17,9 +17,9 @@
 
 | 对象 | 读取文件 / 目录 | 写入文件 / 目录 | 与对方的交集 |
 |---|---|---|---|
-| `tools/tsv-lint.cx` | `exec/pp/` (`-manifest.tsv`、`-byte.tsv`、`-result.tsv`、`-template.tsv`)、`exec/parse2/`、`exec/facts/` (`.tsv`)、`tools/tsv-lint-policy.tsv`、`build/tsv-lint-baseline.tsv` (`0.0.92` 起) | 无 (只读审计并输出 stdout) | 不读 `build/tool-index.tsv`、`build/table-index.tsv`、`$TMPDIR/unisacc-derive-last.tsv`、`.native_tool.path`、`submit-patch-bin` |
+| `tools/tsv-lint.cx` | `exec/pp/` (`-manifest.tsv`、`-byte.tsv`、`-result.tsv`、`-template.tsv`)、`exec/parse2/`、`exec/facts/` (`.tsv`)、`tools/tsv-lint-policy.tsv`、`build/tsv-lint-baseline.tsv` (`0.0.92` 起) | 无 (只读审计并输出 stdout) | 不读 `aae56513fbb4b64:build/tool-index.tsv`、`build/table-index.tsv`、`$TMPDIR/unisacc-derive-last.tsv`、`.native_tool.path`、`submit-patch-bin` |
 | `tools/check-tsv-lint.cx` | 同上 (第 223-224 行对 `--root .` 调 `tsv-lint`), 外加 `tools/tsv-lint.cx` 源文件与 `tools/tsv-lint-cases/` | 仅 `$TMPDIR/tsv-lint-check-XXXXXX` 私有夹具 | 不读写 `80155036e6` 修改的任何表与临时文件路径 |
-| `80155036e6` (5 文件修复) | 仓库目录树、源码与 `build/layer-api/` 等 | `tools/tool-index.cx:119` (`build/tool-index.tsv`、`build/table-index.tsv` 及 devmeta 镜像改 `sy_write_atomic`); `tools/derive.cx:90` (`$TMPDIR/unisacc-derive-last.tsv` 改 `sy_write_atomic`); `tools/check-candidate-chain.cx:836` (`.native_tool.path` / `.native_gen.path` 改 `sy_write_atomic`); `tools/check-submit-patch.cx:55` (`%s.bin` 私有命名) | 所修复写路径中没有任何一条落入 `tsv-lint.cx` 读集; 历史上 `build/tsv-lint-baseline.tsv` 且晚至 `0.0.92` (`74c0c7c43c`) 才引入 |
+| `80155036e6` (5 文件修复) | 仓库目录树、源码与 `build/layer-api/` 等 | `tools/tool-index.cx:119` (`aae56513fbb4b64:build/tool-index.tsv`、`build/table-index.tsv` 及 devmeta 镜像改 `sy_write_atomic`); `tools/derive.cx:90` (`$TMPDIR/unisacc-derive-last.tsv` 改 `sy_write_atomic`); `tools/check-candidate-chain.cx:836` (`.native_tool.path` / `.native_gen.path` 改 `sy_write_atomic`); `tools/check-submit-patch.cx:55` (`%s.bin` 私有命名) | 所修复写路径中没有任何一条落入 `tsv-lint.cx` 读集; 历史上 `build/tsv-lint-baseline.tsv` 且晚至 `0.0.92` (`74c0c7c43c`) 才引入 |
 
 关键推论 (待本方案实验证伪/证实):
 (1) `tool-index --write` 与 `tsv-lint --check` 并行空跑 50 轮无读写交集, 不能用来证明 `80155036e6` 修复了 `U06`;

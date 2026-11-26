@@ -1,0 +1,182 @@
+diff --git a/cx/sys/time.cx b/cx/sys/time.cx
+index df17233..9020991 100644
+--- a/cx/sys/time.cx
++++ b/cx/sys/time.cx
+@@ -1,5 +1,6 @@
+ #pragma unisa module time
+ #pragma unisa dock
++#pragma unisa use sys.env
+ /* L0 sys/time: clocks, local-time text, sleeping and file times (plans/cx-layers.md).
+    L0 exception (agreed for cx/sys/ only): <time.h>, <poll.h> and <sys/time.h>
+    are not in the implicit prelude, and the carried headers already hold the
+@@ -75,6 +76,51 @@ int sy_local_fmt(char *out, int cap, const char *fmt, long sec) {
+     return (int)n;
+ }
+ 
++/* Test seam, same shape as UNISACC_PROC_INJECT_*: UNISACC_TIME_INJECT_EINTR=1
++   makes every poll below nap 5 ms (or the requested time when shorter) and
++   return EINTR, and UNISACC_TIME_INJECT_PID limits it to that pid. Unset in
++   production; it only exercises the interrupted-path timing, not new behavior. */
++static int syt_inject_eintr(void) {
++#ifdef _WIN32
++    return 0;
++#else
++    const char *v = sy_env("UNISACC_TIME_INJECT_EINTR");
++    const char *p;
++    if (!v || v[0] != '1' || v[1]) return 0;
++    p = sy_env("UNISACC_TIME_INJECT_PID");
++    if (p && p[0]) {
++        long want = 0, me = (long)getpid();
++        int i = 0;
++        while (p[i] >= '0' && p[i] <= '9') { want = want * 10 + (p[i] - '0'); i++; }
++        if (want > 0 && want != me) return 0;
++    }
++    return 1;
++#endif
++}
++
++/* Number of injected EINTR returns so far; the check proves the seam fired. */
++static long syt_inject_n;
++long sy_time_eintr_injected(void) { return syt_inject_n; }
++
++/* poll with the injection seam above. Never returns EINTR when the seam is off. */
++static int syt_poll(struct pollfd *fds, unsigned long n, int ms) {
++#ifdef _WIN32
++    (void)fds; (void)n; (void)ms;
++    return -ENOSYS;
++#else
++    if (syt_inject_eintr()) {
++        struct timespec q;
++        q.tv_sec = 0;
++        q.tv_nsec = (long)(ms > 0 && ms < 5 ? ms : 5) * 1000000L;
++        nanosleep(&q, NULL);
++        syt_inject_n++;
++        errno = EINTR;
++        return -1;
++    }
++    return poll(fds, n, ms);
++#endif
++}
++
+ /* Windows has no poll: a nap is the carried nanosleep (Sleep), and there is no
+    readiness wait for an fd. Elsewhere both are poll. The exported functions have
+    no #if. */
+@@ -84,7 +130,17 @@ static int syt_nap(int ms) {
+     q.tv_sec = ms / 1000; q.tv_nsec = (long)(ms % 1000) * 1000000L;
+     return nanosleep(&q, NULL);
+ #else
+-    return poll(NULL, 0, ms);
++    long end = sy_now_ms() + ms;
++    for (;;) {
++        long left = end - sy_now_ms();
++        if (left <= 0) return 0;
++        if (left > 2000000000L) left = 2000000000L;
++        if (syt_poll(NULL, 0, (int)left) < 0) {
++            if (errno == EINTR) continue;   /* re-enter with the time that is left */
++            return -errno;
++        }
++        return 0;
++    }
+ #endif
+ }
+ static int syt_readable(int fd, long ms) {
+@@ -93,24 +149,33 @@ static int syt_readable(int fd, long ms) {
+     return -ENOSYS;
+ #else
+     struct pollfd p;
+-    int r;
++    long end = ms >= 0 ? sy_now_ms() + ms : 0;
+     p.fd = fd; p.events = POLLIN; p.revents = 0;
+-    do r = poll(&p, 1, ms < 0 ? -1 : (int)(ms > 2000000000L ? 2000000000L : ms));
+-    while (r < 0 && errno == EINTR);
+-    if (r < 0) return -errno;
+-    return r > 0 ? 1 : 0;
++    for (;;) {
++        long left = ms < 0 ? -1 : end - sy_now_ms();
++        int r;
++        if (ms >= 0 && left <= 0) return 0;   /* deadline reached: timed out */
++        r = syt_poll(&p, 1, left < 0 ? -1 : (int)(left > 2000000000L ? 2000000000L : left));
++        if (r < 0) {
++            if (errno == EINTR) continue;     /* deadline is movement, not a retry */
++            return -errno;
++        }
++        return r > 0 ? 1 : 0;
++    }
+ #endif
+ }
+ 
+ /* Sleep MS milliseconds (poll with no fds; Windows: Sleep); an interruption resumes
+-   for what is left. 0, or -errno. */
++   for what is left and the whole call never runs past MS. 0, or -errno. */
+ int sy_sleep_ms(long ms) {
+-    long end = sy_now_ms() + ms, left = ms;
+-    while (left > 0) {
+-        if (syt_nap((int)(left > 2000000000L ? 2000000000L : left)) < 0 && errno != EINTR) return -errno;
+-        left = end - sy_now_ms();
++    long end = sy_now_ms() + ms;
++    for (;;) {
++        long left = end - sy_now_ms();
++        int rc;
++        if (left <= 0) return 0;
++        rc = syt_nap((int)(left > 2000000000L ? 2000000000L : left));
++        if (rc < 0) return rc;
+     }
+-    return 0;
+ }
+ 
+ /* Wait up to MS (negative: forever) for FD to be readable (or hung up).
+diff --git a/tools/check-time-eintr.cx b/tools/check-time-eintr.cx
+new file mode 100644
+index 0000000..6e5f617
+--- /dev/null
++++ b/tools/check-time-eintr.cx
+@@ -0,0 +1,49 @@
++/* tools/check-time-eintr.cx -- sy_sleep_ms / sy_readable honor one deadline across EINTR.
++ *
++ *   UNISACC_TIME_INJECT_EINTR=1 (set here, with UNISACC_TIME_INJECT_PID = this
++ *   pid) makes every poll nap 5 ms (or the requested time when shorter) and
++ *   return EINTR, so a loop that reuses the full timeout never returns and one
++ *   that recomputes the remaining monotonic time returns at the deadline.
++ *
++ *   (1) sy_sleep_ms(200): 0, wall 190..1000 ms, seam fired more than once.
++ *   (2) sy_readable(pipe read end with no data, 200): 0 (timed out), wall
++ *       190..1000 ms. Run this file under a wrapper timeout: without the
++ *       deadline recompute the call never returns.
++ *   Exit 0 all pass; 1 otherwise. */
++#pragma unisa use sys.time
++#pragma unisa use sys.posix
++#pragma unisa use sys.proc
++
++static long ck_fail;
++
++static void ck(int ok, const char *what) {
++    if (ok) printf("PASS\t%s\n", what);
++    else { printf("FAIL\t%s\n", what); ck_fail++; }
++}
++
++int main(void) {
++    long t0, t1, rc;
++    int fds[2];
++    char me[32];
++    if (setenv("UNISACC_TIME_INJECT_EINTR", "1", 1) != 0) { printf("FAIL\tsetenv\n"); return 1; }
++    cx_fmt(me, sizeof me, "%ld", (long)getpid());
++    if (setenv("UNISACC_TIME_INJECT_PID", me, 1) != 0) { printf("FAIL\tsetenv pid\n"); return 1; }
++
++    t0 = sy_now_ms();
++    rc = sy_sleep_ms(200);
++    t1 = sy_now_ms();
++    ck(rc == 0, "sleep rc=0 under continuous EINTR");
++    ck(t1 - t0 >= 190 && t1 - t0 <= 1000, "sleep wall inside 190..1000 ms");
++    ck(sy_time_eintr_injected() > 1, "injected EINTR reached the poll seam");
++
++    if (pipe(fds) != 0) { printf("FAIL\tpipe\n"); return 1; }
++    t0 = sy_now_ms();
++    rc = sy_readable(fds[0], 200);   /* write end open: no data, no hang-up */
++    t1 = sy_now_ms();
++    close(fds[0]); close(fds[1]);
++    ck(rc == 0, "readable returns 0 (timeout) under continuous EINTR");
++    ck(t1 - t0 >= 190 && t1 - t0 <= 1000, "readable wall inside 190..1000 ms");
++
++    printf("CHECK_TIME_EINTR\t%s\tfail=%ld\n", ck_fail ? "FAIL" : "PASS", ck_fail);
++    return ck_fail ? 1 : 0;
++}

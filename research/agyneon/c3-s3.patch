@@ -1,0 +1,201 @@
+--- a/ext/sysx/reaper.cx
++++ b/ext/sysx/reaper.cx
+@@ -159,7 +159,7 @@
+    "pid(start) ..." for the survivors, at most CAP bytes. KEEP entries (the
+    caller's other live children) are never stopped, killed or swept. */
+ 
+-int rp_kill_tree(int root, int deadline_ms, const int *keep, int nkeep, char *rep, int cap) {
++static int rp_kill_tree_impl(int root, int deadline_ms, const int *keep, int nkeep, char *rep, int cap, int keep_root) {
+     sy_kt_ent e[SY_KT_MAX];
+     int n = 0, rg = 0, rp = 0, i, round, residue = 0, added, freeze_rounds, sweep_rounds;
+     long long rst = 0;
+@@ -185,9 +185,27 @@
+     for (i = 0; i < n; i++) sy_signal(e[i].pid, SIGKILL);
+     if (rg == root && rg > 1) sy_killpg(rg, SIGKILL);     /* the group, only when it is root's own */
+     round = 0;
+-    while (round++ < SY_KT_ROOT_WAIT) {
+-        if (sy_wait_status(root, SY_WAIT_NOHANG, 0, 0, 0) == root) break;
+-        sy_sleep_ms(2);
++    {
++        int root_exited = 0;
++        while (round++ < SY_KT_ROOT_WAIT) {
++            if (keep_root) {
++                int pp = 0, pg = 0, krc;
++                long long st = 0;
++                char stt = 0;
++                krc = kt_stat(root, &pp, &pg, &st, &stt);
++                if (krc == -ENOENT || (krc == 0 && (st != rst || stt == 'Z' || stt == 'X'))) {
++                    root_exited = 1;
++                    break;
++                }
++            } else {
++                if (sy_wait_status(root, SY_WAIT_NOHANG, 0, 0, 0) == root) {
++                    root_exited = 1;
++                    break;
++                }
++            }
++            sy_sleep_ms(2);
++        }
++        if (keep_root && !root_exited) return -ETIMEDOUT;
+     }
+     /* Orphans stop being descendants when their parent dies: with the subreaper
+        set they are children of this process and carry a starttime not before
+@@ -225,6 +243,7 @@
+         int pp = 0, pg = 0;
+         long long st = 0;
+         char stt = 0;
++        if (keep_root && e[i].pid == root) continue;
+         while (sy_wait_status(e[i].pid, SY_WAIT_NOHANG, 0, 0, 0) == e[i].pid) ;
+         if (kt_stat(e[i].pid, &pp, &pg, &st, &stt) != 0) continue;
+         if (st != e[i].start || stt == 'Z' || stt == 'X') continue;
+@@ -246,6 +265,14 @@
+     return residue;
+ }
+ 
++int rp_kill_tree(int root, int deadline_ms, const int *keep, int nkeep, char *rep, int cap) {
++    return rp_kill_tree_impl(root, deadline_ms, keep, nkeep, rep, cap, 0);
++}
++
++int rp_kill_tree_keep_root(int root, int deadline_ms, const int *keep, int nkeep, char *rep, int cap) {
++    return rp_kill_tree_impl(root, deadline_ms, keep, nkeep, rep, cap, 1);
++}
++
+ int rp_subreaper(void) {
+     return sy_child_subreaper() == 0 ? 0 : -ENOSYS; /* ENOSYS: refuse, subreaper unavailable */
+ }
+--- a/ext/sysx/run.cx
++++ b/ext/sysx/run.cx
+@@ -109,7 +109,7 @@
+ static void px_kill(sy_child_t *c, int tree, px_result *r) {
+     char rep[256];
+     int sv = -1;
+-    if (tree) sv = rp_kill_tree(c->pid, 2000, 0, 0, rep, (int)sizeof rep);
++    if (tree) sv = rp_kill_tree_keep_root(c->pid, 2000, 0, 0, rep, (int)sizeof rep);
+     if (sv < 0) sy_proc_kill(c, 9);
+     r->residue = sv;
+ }
+@@ -124,7 +124,9 @@
+     char chunk[16384];
+     long t0, deadline, ocap = 0, ecap = 0;
+     int infd = -1, rc, open_o, open_e, timed = 0, dummy = 0;
++    int poll_err = 0, read_err = 0, oom = 0, wait_err = 0, end_rc = 0;
+     if (!o || !r || !o->argv || !o->argv[0] || o->deadline_ms <= 0 || o->out_cap < 0 || o->err_cap < 0) return -EINVAL;
++    memset(&st, 0, sizeof st);
+     r->code = 0; r->timed_out = 0; r->sig = 0; r->truncated = 0; r->residue = 0; r->wall_ms = 0;
+     r->out = r->err = 0; r->outn = r->errn = r->out_total = r->err_total = 0;
+     t0 = sy_now_ms();
+@@ -155,39 +157,56 @@
+         if (open_o) { io = n; p[n].fd = c.out_fd; p[n].events = SY_POLLIN; p[n].revents = 0; n++; }
+         if (open_e) { ie = n; p[n].fd = c.err_fd; p[n].events = SY_POLLIN; p[n].revents = 0; n++; }
+         k = sy_poll(p, n, left > 200 ? 200 : left);
+-        if (k < 0) continue;
++        if (k < 0) {
++            if (k == -EINTR) continue;
++            poll_err = k;
++            break;
++        }
+         if (io >= 0 && p[io].revents) {
+             g = sy_read(c.out_fd, chunk, (long)sizeof chunk);
+             if (g > 0) {
+                 r->out_total += g;
+-                if (px_put(&r->out, &r->outn, &ocap, o->out_cap, chunk, g, &r->truncated, PX_TRUNC_OUT)) { timed = -1; break; }
++                if (px_put(&r->out, &r->outn, &ocap, o->out_cap, chunk, g, &r->truncated, PX_TRUNC_OUT)) { oom = 1; break; }
++            } else if (g == -EINTR) {
++                continue;
++            } else if (g < 0) {
++                read_err = (int)g;
++                break;
+             } else open_o = 0;
+         }
+         if (ie >= 0 && p[ie].revents) {
+             g = sy_read(c.err_fd, chunk, (long)sizeof chunk);
+             if (g > 0) {
+                 r->err_total += g;
+-                if (px_put(&r->err, &r->errn, &ecap, o->err_cap, chunk, g, &r->truncated, PX_TRUNC_ERR)) { timed = -1; break; }
++                if (px_put(&r->err, &r->errn, &ecap, o->err_cap, chunk, g, &r->truncated, PX_TRUNC_ERR)) { oom = 1; break; }
++            } else if (g == -EINTR) {
++                continue;
++            } else if (g < 0) {
++                read_err = (int)g;
++                break;
+             } else open_e = 0;
+         }
+     }
+-    if (!timed) {
++    if (!timed && !poll_err && !read_err && !oom) {
+         for (;;) {
+             long now = sy_now_ms();
+             int w = sy_proc_try_wait(&c, &st);
+             if (w == 1) break;
+-            if (w < 0) { timed = -1; break; }
++            if (w < 0) { wait_err = w; break; }
+             if (now >= deadline) { timed = 1; break; }
+             sy_sleep_ms(deadline - now < 5 ? deadline - now : 5);
+         }
+     }
+-    if (timed) {
+-        px_kill(&c, o->kill_tree, r);
+-        while (sy_proc_try_wait(&c, &st) == 0) sy_sleep_ms(2);
+-        if (timed > 0) st.timed_out = 1;
++    if (timed || poll_err || read_err || oom || wait_err) {
++        if (timed > 0) px_kill(&c, o->kill_tree, r);
++        end_rc = sy_proc_end(&c, 200, &st);
++        if (timed > 0 && end_rc == 0) st.timed_out = 1;
+     }
+     sy_proc_close(&c);
+-    if (timed < 0) { px_result_free(r); return -ENOMEM; }
++    {
++        int err = poll_err ? poll_err : (read_err ? read_err : (oom ? -ENOMEM : (wait_err ? wait_err : end_rc)));
++        if (err < 0) { px_result_free(r); memset(r, 0, sizeof *r); return err; }
++    }
+     r->timed_out = st.timed_out;
+     r->sig = st.sig;
+     r->code = sy_exit_code(&st);
+--- a/cx/sys/proc.cx
++++ b/cx/sys/proc.cx
+@@ -830,16 +830,34 @@
+                 r = sy_proc_kill(c, SIGKILL);
+                 if (r < 0 && r != -ESRCH) return r;
+                 timed = 1;
++                r = 0;
+                 break;
+             }
+             sy_sleep_ms(now + 5 > c->deadline_at_ms ? c->deadline_at_ms - now : 5);
+         }
+-        if (r == 1) return 0;
++        if (r == 1) {
++            if (timed) c->deadline_at_ms |= (1L << 32);
++            return 0;
++        }
+         if (r < 0) return r;
+     }
++    if (timed) {
++        long end_at = syp_now_ms() + 200;
++        int rounds = 0;
++        for (;;) {
++            r = syp_reap(c, 1, st);
++            if (r == 1) {
++                c->deadline_at_ms |= (1L << 32);
++                if (st) st->timed_out = 1;
++                return 0;
++            }
++            if (r < 0) return r;
++            if (syp_now_ms() >= end_at || rounds++ >= 40) return -ETIMEDOUT;
++            sy_sleep_ms(5);
++        }
++    }
+     r = syp_reap(c, 0, st);
+     if (r < 0) return r;
+-    if (st && timed) st->timed_out = 1;
+     return 0;
+ }
+ 
+@@ -858,6 +876,8 @@
+     end = syp_now_ms() + grace_ms;
+     sy_proc_kill(c, SIGTERM);
+     for (g = 0; g < grace_ms; g += 5) {
++        r = sy_proc_try_wait(c, st);
++        if (r != 0) return r < 0 ? r : 0;
+         if (syp_now_ms() >= end) break;
+         sy_sleep_ms(5);
+     }

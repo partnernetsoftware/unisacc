@@ -2,7 +2,7 @@
 
 目标版本: `0.0.106` (tag `v0.0.106`, 仓 `partnernetsoftware/unisacc`)
 冻结链提交 (`targetCommitish`): `2e8a19a342251910d53010f51002b14a4ca7f916` (短写 `2e8a19a342`)
-候选真源: `.claude/worktrees/v0.0.106/release/candidate.tsv` 与 `.claude/worktrees/v0.0.106/release/evidence/0.0.106/`
+候选真源: `2e8a19a342:release/candidate.tsv` 与 `.claude/worktrees/v0.0.106/release/evidence/0.0.106/`
 说明: 公开 (`exec-5-publish`) 后立即可逐条运行的本地只读命令, 单条均可在 60 秒内完成; 不改仓库工作区, 不写 `out/`。
 
 ---
@@ -89,7 +89,7 @@ git fetch origin tag v0.0.106 --no-tags && git rev-parse 'refs/tags/v0.0.106^{co
 
 ## 2. 六件资产下载与 SHA-256 核验 (`/tmp/v106-verify`)
 
-说明: `.claude/worktrees/v0.0.106/release/candidate.tsv` 第 17-18 列 `zip` / `zip_sha256` 为 `-` (`tools/cxlib/releasecandidate.cx:48` `rcand_skip(&c, 5)` 跳过 `zip`), 实际随 Release 上传与校验的资产共 6 件 (`SHA256SUMS` 文件本身列举前 5 件并自成第 6 件资产)。
+说明: `2e8a19a342:release/candidate.tsv` 第 17-18 列 `zip` / `zip_sha256` 为 `-` (`tools/cxlib/releasecandidate.cx:48` `rcand_skip(&c, 5)` 跳过 `zip`), 实际随 Release 上传与校验的资产共 6 件 (`SHA256SUMS` 文件本身列举前 5 件并自成第 6 件资产)。
 
 ### (1) 命令原行 (≤60 秒局部只读核验)
 

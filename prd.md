@@ -29,13 +29,13 @@
 **六条常见误解**（不要按直觉读）：
 
 1. 「7 流」与「18 网」不是同一批东西的两种叫法——流是**字节管道阶段**，网是**由 ask 事实表构造的 NN**（定义见 §0.1）。
-2. `class Stage`（旧 `unisa/gold.py`）表示**网**，不是流。
-3. 旧 `unisa/control/net.py` 的 `Net` 是**神经网络模型**，不是事实网。
+2. `class Stage`（旧 `archive/reference-py/unisa/gold.py`）表示**网**，不是流。
+3. 旧 `archive/reference-py/unisa/control/net.py` 的 `Net` 是**神经网络模型**，不是事实网。
 4. m4 的「4 流」是**四个字节段**（lex/front/select/encode），不是 4 张决策网。
 5. `phase` 三义：book phase（记账）/ release phase（发布）/ 历史 compiler phase（实为 segment）。
 6. `STAGE_NETS` 只是 isel、abi 两张不在 `TABLES` 里的网（15+2+1=18）。
 
-**禁用写法**：裸 `stage` 一律写 `stream-stage`（流）或 `net`（网）；「网」专指 §0.1 定义的构造 NN；包里的执行单元写 `model`（模型 ≠ 网，一个模型可含网+生成程序+常量）；旧 `unisa/control/net.py` 那类训练用神经网络写「训练模型」。
+**禁用写法**：裸 `stage` 一律写 `stream-stage`（流）或 `net`（网）；「网」专指 §0.1 定义的构造 NN；包里的执行单元写 `model`（模型 ≠ 网，一个模型可含网+生成程序+常量）；旧 `archive/reference-py/unisa/control/net.py` 那类训练用神经网络写「训练模型」。
 
 ### 0.1 范式与核心概念（定义；全文以此为准）
 
@@ -147,6 +147,7 @@ G2预算夹具的成功行遵循 `tests/run-batch.cx` 标记合同：`CHECK_G2_B
 | C47双段观察消费 | `lower-row-origin.cx`、`encoder-record-origin.cx`、`arm-encoder-record-origin.cx` 的显式 `--watch-bundle`；共享 `cxlib.watchbundle`，登记 `register.cx … --args '分号分隔参数'` | 两段最多2M条/128MiB，旧单文件预算不变；manifest/execution/每段SHA及连续序号全核，新证书绑定实际manifest；有界拼接，非恒定内存 |
 | 登记清单配对 | `tools/reg-manifest.cx -- --check/--write`:`tests/manifests/ID.tsv` 三行(batch/coverage/packages)对批次表、覆盖表、batch-packages 三处逐字核对,缺哪张表点名 MISSING,内容不同 MISMATCH;`register.cx` 成功后自动写清单;夹具 `check-reg-manifest.cx`,批次 reg-manifest |
 | 批次与工具源容量 | `tools/check-batch-cap.cx --` 核单一容量来源、准备入口拒绝和调度边界，`--report-literals` 输出带类别的字面量报告 | 默认模式登记一个批次，预跑窗口数仍由 `PD_MAX_WINS` 独立限定 |
+| 进程所有权转移 | `tools/check-proc-own-table.cx --` 逐格核进程槽状态、句柄状态与返回，已知未测格由 `tools/proc-own-unmeasured.tsv` 登记 | 批次 `check-proc-own-table` |
 | 运行器身份 | `run-batch.cx`、`precommit.cx`、`register.cx` 启动时打印一条 `RUNNER_IDENTITY`，记录 HEAD、排序后的脏路径摘要与差异类型；夹具 `tools/check-dirtywatch.cx`，批次 runner-identity |
 | 登记表由清单生成 | `tools/tables-gen.cx -- --check/--write [--index]`:清单所有的行以 `tests/manifests/ID.tsv` 为准(batch、coverage,以及可选可重复的 `compile` 行 -> `tests/tools-compile-sources.tsv`);`--check` 报 STALE/MISSING 退出 1,`--write` 替换、追加、按字节序插入;无清单的旧行不动,计入 legacy;precommit 生成闸按索引拒绝 | 只覆盖已有清单的批次(现 34 份,旧行约 1027 条未迁入);夹具 `check-tables-gen.cx`,批次 tables-gen |
 | 表覆盖度量 | `tools/table-cover.cx -- [--root DIR] [--list F] [--decls F] [--samples F] [--net NAME] [--tsv OUT]`:exec/ 每张表一行(类别 facts/result/manifest/other、table-deps 网行数、表头生成标记与生成器有无 --check、check-decide 规则、tests 与 check-* 字面量、声明表细前缀与裸 exec/ 行、affected 选批数与抽样组、cover=direct/net/coarse-only/empty),末行 TABLE_COVER 汇总;`--groups` 列抽样组代表、`--probe TABLE` 跑一次 affected 出 SAMPLE 行 | 只读不跑生成器;字面量只认字面路径,计算出的路径看不见;组共享的 aff 与自测有差(证据 release/evidence/table-cover-2026-11-18.tsv);夹具 `check-table-cover.cx`,批次 table-cover |
@@ -646,7 +647,7 @@ sh ./unisacc.com tests/run.cx -- --smoke | --all | --list
 | `include/` | 头文件（cx.h 前导 + 69 个 std 头） |
 | `tests/` | 测试套件（batches/coverage 注册表 + 19 域矩阵 + 各层测试 .cx） |
 | `tools/` | 开发工具（733 个 .cx，`git ls-files 'tools/*.cx'` 2026-11-11：生成器/棘轮/refactor/symindex/all-waves…）；`tools/cxlib/` 为工具共享库（rechunk、netpack、resolver 等，不进源 SID） |
-| `ext/` | 扩展包（包清单见真源 `build/tlib-packages.tsv` 与 `ext/` 目录）；目录不在源 SID 根集，但 `ext/sysx`（15 个 `.cx`）、`ext/memx/arena.cx`、`ext/textx`（4 个 `.cx`）经目录与文件符号链接（`cx/sys` 9 + `cx/mem` 1 + `cx/text` 4 及 `src/cx` 下 `sysx` 目录链接）参与现行源 SID（`source-packages-v2` `realpath` 跟随，`ext/crypto` 与其余 `ext/` 包不参与；2026-11-21 实测，`seed/ident.c list-current` 与 `tools/lane-inputs-gen.cx:208-275`） |
+| `ext/` | 扩展包（包清单见真源 `build/tlib-packages.tsv` 与 `ext/` 目录）；目录不在源 SID 根集，但 `ext/sysx`（15 个 `.cx`）、`cx/mem/arena.cx`、`ext/textx`（4 个 `.cx`）经目录与文件符号链接（`cx/sys` 9 + `cx/mem` 1 + `cx/text` 4 及 `src/cx` 下 `sysx` 目录链接）参与现行源 SID（`source-packages-v2` `realpath` 跟随，`ext/crypto` 与其余 `ext/` 包不参与；2026-11-21 实测，`seed/ident.c list-current` 与 `tools/lane-inputs-gen.cx:208-275`） |
 | `build/` | 构造图与前提规则表：graph.tsv（构造图，规模见 §3.7）、hardwire.tsv（第二真值硬连线模式）、preflight-rules.tsv（0.0.50 撞到的隐性前提，0.0.51 PF 预检输入）；构造链维护者所有，不进源 SID |
 | `plans/` | 计划与设计：各版 v0.0.4x / 5x-unisacc.md（最新 v0.0.58）、structure-5-layer.md、standing-goal.md、release-notes-0.0.46 至 0.0.48 与 0.0.53 至 0.0.55；已完成的归档到 archive/plans，2026-11 文档清理移走的（含 release-notes-0.0.45、0.0.48.1、0.0.49 至 0.0.52）在 archive/docs-2026-11/plans |
 | `docs/` | 规格/术语与目录地图（glossary.md、toolchain.md、tapebin-v1*、docs/cx/；条款篇 prd_spec.md 在根） |
@@ -661,7 +662,7 @@ sh ./unisacc.com tests/run.cx -- --smoke | --all | --list
 <a id="repo-map"></a>
 ### 8.1 目录补充与「我想做 X 去哪里」（并入自原仓库目录地图，已归档 archive/docs-2026-11e/REPO-MAP.md；2026-11-14 核对路径）
 
-- 源 SID 规则：`seed/ident.c` 的 `list-current`（`source-packages-v2`）根目录集为 `exec src kernel include weights seed cx`，加 `iterate/kernel/typekw.tsv` 与 `tools/` 下 13 个支撑文件（以 `list-current` 实际输出为准，不手抄数目）。`ext/` 目录不在根集，但 `collect()` 经 `realpath` 跟随目录与文件符号链接（`cx/sys` 9 + `cx/mem` 1 + `cx/text` 4 及 `sysx` 目录链接），故 `ext/sysx`（15 个 `.cx`）、`ext/memx/arena.cx` 与 `ext/textx`（4 个 `.cx`）实际参与现行源 SID，`ext/crypto` 与其余 `ext/` 包不参与（2026-11-21 实测；归类规则见 `tools/lane-inputs-gen.cx:208-275`）。产品输入（冻结面）：`src/ cx/ exec/ include/ seed/ weights/ kernel/` 及上述经链接进入 `build/lane-inputs.tsv` A 类的 `ext/` 路径，冻结后不得改动；其余目录可改但须过棘轮与元数据闸。
+- 源 SID 规则：`seed/ident.c` 的 `list-current`（`source-packages-v2`）根目录集为 `exec src kernel include weights seed cx`，加 `iterate/kernel/typekw.tsv` 与 `tools/` 下 13 个支撑文件（以 `list-current` 实际输出为准，不手抄数目）。`ext/` 目录不在根集，但 `collect()` 经 `realpath` 跟随目录与文件符号链接（`cx/sys` 9 + `cx/mem` 1 + `cx/text` 4 及 `sysx` 目录链接），故 `ext/sysx`（15 个 `.cx`）、`cx/mem/arena.cx` 与 `ext/textx`（4 个 `.cx`）实际参与现行源 SID，`ext/crypto` 与其余 `ext/` 包不参与（2026-11-21 实测；归类规则见 `tools/lane-inputs-gen.cx:208-275`）。产品输入（冻结面）：`src/ cx/ exec/ include/ seed/ weights/ kernel/` 及上述经链接进入 `build/lane-inputs.tsv` A 类的 `ext/` 路径，冻结后不得改动；其余目录可改但须过棘轮与元数据闸。
 - 补充路径：`.github/`（CI 工作流 candidate-native、ci、candidate-raw-export、admission-capsule、defender-scan、macos-sign、windows-signing，集成者所有）；`scripts/`（信任包 / Authenticode 检查脚本）；`skills/unisacc-cx`（技能）；`iterate/`（早期构造器，仅 typekw.tsv 进源 SID，移动会改产品面）；根文件 `cxroot.tsv`（cx 根登记）、`Makefile`（薄入口）、`ape-receipt.txt`（APE 回执）。
 - 被 git 忽略的本地残留：`out/`（产物、日志、候选；交接单写 `out/<窗口>-handoff-*.md`，不入库）、`unisacc.com`（已装产品）、`unisacc-dev`（安装回滚脚本）、`*.split-prev`、`tmp/`、`node_modules/`。
 

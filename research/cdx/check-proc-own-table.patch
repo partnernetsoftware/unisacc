@@ -1,0 +1,402 @@
+diff --git a/tools/check-proc-own-table.cx b/tools/check-proc-own-table.cx
+new file mode 100644
+index 0000000..1316017
+--- /dev/null
++++ b/tools/check-proc-own-table.cx
+@@ -0,0 +1,396 @@
++#pragma unisa use sys.proc
++#pragma unisa use sys.time
++
++#define FIELD_COUNT 10
++#define TABLE_ROWS 90
++
++typedef struct { int live, abandoned, lost; } Counts;
++
++static Counts counts(void) {
++    Counts c;
++    sy_proc_own_stats(&c.live, &c.abandoned, &c.lost);
++    return c;
++}
++
++static int same_counts(Counts a, Counts b) {
++    return a.live == b.live && a.abandoned == b.abandoned && a.lost == b.lost;
++}
++
++static int eq(const char *a, const char *b) { return strcmp(a, b) == 0; }
++
++static const char *slot(Counts c, int has_handle) {
++    if (c.live == 1 && !c.abandoned && !c.lost) return "LIVE";
++    if (!c.live && c.abandoned == 1 && !c.lost) return "ABANDONED";
++    if (!c.live && !c.abandoned && c.lost == 1)
++        return has_handle ? "LOST_LIVE" : "LOST_UNRESOLVED";
++    if (!c.live && !c.abandoned && !c.lost) return "FREE";
++    return "UNOBSERVED_SLOT";
++}
++
++static const char *handle(sy_child_t *c) {
++    if (c->pid == -3) return "REAPED";
++    if (c->pid == -2) return "DETACHED";
++    if (c->pid == -1) return "STALE";
++    if (c->pid > 0) return "LIVE";
++    return "NONE";
++}
++
++static int spawn(sy_child_t *c, int running, long deadline) {
++    const char *av_run[] = {"/bin/sleep", "5", 0};
++    const char *av_exit[] = {"/bin/sh", "-c", "exit 7", 0};
++    sy_spawn_t o;
++    sy_spawn_init(&o);
++    o.argv = running ? av_run : av_exit;
++    o.in_fd = o.out_fd = o.err_fd = SY_STDIO_NULL;
++    o.deadline_ms = deadline;
++    return sy_proc_spawn(&o, c);
++}
++
++static void dispose(sy_child_t *c, int pid) {
++    sy_proc_close(c);
++    if (pid > 0) {
++        if (sy_wait(pid, 1) == -EAGAIN) {
++            sy_signal(pid, SIGKILL);
++            (void)sy_wait(pid, 0);
++        }
++    }
++}
++
++static int call_handle(const char *event, sy_child_t *c, sy_exit_t *st, int until_reaped) {
++    int r;
++    long until;
++    if (eq(event, "wait")) return sy_proc_wait(c, st);
++    if (eq(event, "kill")) return sy_proc_kill(c, 0);
++    if (eq(event, "end")) return sy_proc_end(c, 0, st);
++    if (eq(event, "close")) return sy_proc_close(c);
++    until = sy_now_ms() + 200;
++    do {
++        r = sy_proc_try_wait(c, st);
++        if (!until_reaped || r || sy_now_ms() >= until) return r;
++        sy_sleep_ms(1);
++    } while (1);
++}
++
++static int rc_ok(const char *want, int got, int injected, int pid) {
++    char num[40];
++    if (eq(want, "-EINTR|-errno")) return injected == EINTR && got == -EINTR;
++    if (eq(want, "-EPERM|-errno")) return injected == EPERM && got == -EPERM;
++    if (eq(want, "-ECHILD|-errno")) return got == -ECHILD;
++    if (eq(want, "-ECHILD")) return got == -ECHILD;
++    if (eq(want, "-EINVAL")) return got == -EINVAL;
++    if (eq(want, "-ESRCH")) return got == -ESRCH;
++    if (eq(want, "-EPERM")) return got == -EPERM;
++    if (eq(want, "-ENOMEM")) return got == -ENOMEM;
++    if (eq(want, "-ETIMEDOUT")) return got == -ETIMEDOUT;
++    if (eq(want, "-EAGAIN")) return got == -EAGAIN;
++    if (eq(want, "pid")) return got == pid && pid > 0;
++    if (eq(want, "0_rem")) return got == 0;
++    if (eq(want, "pos_rem")) return got > 0;
++    snprintf(num, sizeof num, "%d", got);
++    return eq(want, num);
++}
++
++static const char *exit_out(sy_exit_t *st, int cached, int end_killed) {
++    if (!st->exited && !st->code && !st->sig && !st->timed_out && !st->raw)
++        return "zeroed";
++    if (st->timed_out && (st->sig == SIGKILL || (st->exited && st->code == 7)))
++        return "real_timed_out";
++    if (st->exited && st->code == 7 && !st->sig && st->raw == (7 << 8))
++        return cached ? "cached" : "real";
++    if (end_killed && !st->exited && (st->sig == SIGTERM || st->sig == SIGKILL) && st->raw == st->sig)
++        return "real";
++    return "UNEXPECTED_EXIT";
++}
++
++static const char *inject_name(int e) {
++    if (e == EINTR) return "UNISACC_PROC_INJECT_WAIT_ERR";
++    if (e == ECHILD) return "UNISACC_PROC_INJECT_ECHILD";
++    if (e == EPERM) return "UNISACC_PROC_INJECT_KILL_EPERM";
++    return 0;
++}
++
++static void inject(int pid, int e) {
++    char buf[40];
++    const char *key = inject_name(e);
++    if (!key) return;
++    snprintf(buf, sizeof buf, "%d", pid);
++    setenv("UNISACC_PROC_INJECT_PID", buf, 1);
++    setenv(key, "1", 1);
++}
++
++static void clear_inject(int e) {
++    const char *key = inject_name(e);
++    if (!key) return;
++    unsetenv(key);
++    unsetenv("UNISACC_PROC_INJECT_PID");
++}
++
++static int observe_handle(char **f, int line) {
++    sy_child_t c, owner;
++    sy_exit_t out, check;
++    Counts before, after;
++    const char *pre, *post, *output, *release;
++    int pid, inject_error = 0, r, okay, running, owner_copy = 0;
++    int lost = eq(f[0], "LOST_LIVE");
++    int cached = eq(f[1], "REAPED");
++    int detached = eq(f[1], "DETACHED");
++    int stale = eq(f[1], "STALE");
++    int is_end = eq(f[2], "end");
++    int is_wait = eq(f[2], "wait") || eq(f[2], "try_wait");
++    int deadline = line == 20 || line == 22;
++    if (!(is_wait || is_end || eq(f[2], "kill") || eq(f[2], "close"))) return -1;
++    if (line == 21 || line == 23 || line == 24 || line == 31 || line == 33) return -1;
++    if (line < 17 || line > 67 || (line >= 54 && line <= 57)) return -1;
++    running = !(eq(f[3], "reaped") || eq(f[3], "reaped_same_id") || cached || line == 34);
++    if (spawn(&c, running, deadline ? 1 : 0)) return 0;
++    pid = c.pid;
++    if (cached && sy_proc_wait(&c, &check)) { dispose(&c, pid); return 0; }
++    if (detached && sy_proc_close(&c)) { dispose(&c, pid); return 0; }
++    if (stale) { owner = c; c.own_gen++; owner_copy = 1; }
++    if (lost) {
++        inject(pid, ECHILD);
++        r = sy_proc_try_wait(&c, &check);
++        clear_inject(ECHILD);
++        if (r != -ECHILD) { dispose(&c, pid); return 0; }
++    }
++    before = counts();
++    pre = slot(before, c.pid > 0);
++    okay = (eq(f[0], "ANY") || eq(f[0], pre)) &&
++           (stale ? c.own_gen != owner.own_gen && c.own_slot == owner.own_slot
++                  : eq(f[1], handle(&c)));
++    if (eq(f[3], "err_recoverable") || eq(f[3], "err_wait_recoverable")) inject_error = EINTR;
++    if (eq(f[3], "err_echild") || eq(f[3], "err_wait_echild")) inject_error = ECHILD;
++    if (eq(f[3], "err_eperm") || line == 22 || line == 34 || line == 35) inject_error = EPERM;
++    if (deadline) sy_sleep_ms(3);
++    if (line == 34) sy_sleep_ms(10);
++    inject(pid, inject_error);
++    memset(&out, 0x55, sizeof out);
++    r = call_handle(f[2], &c, &out, eq(f[3], "reaped") || eq(f[3], "reaped_same_id"));
++    clear_inject(inject_error);
++    after = counts();
++    if (line == 67) {
++        int detached_after = eq(handle(&c), "DETACHED");
++        int lost_retained = !after.live && !after.abandoned && after.lost == 1;
++        dispose(&c, pid);
++        if (r == 0 && detached_after && lost_retained) return -1;
++        printf("OBS\tline=67\trc=%d\tdetached=%d\tlost=%d\n",
++               r, detached_after, after.lost);
++        return 0;
++    }
++    post = eq(f[0], "ANY") && same_counts(before, after) ? "UNCHANGED" : slot(after, c.pid > 0);
++    output = is_wait || is_end ? exit_out(&out, cached, is_end) : "N/A";
++    if (cached && is_end && eq(output, "zeroed") && sy_proc_try_wait(&c, &check) == 1 &&
++        eq(exit_out(&check, 1, 0), "cached")) output = "zeroed_out_only";
++    release = cached && same_counts(before, after) ? "already" :
++              !eq(pre, "FREE") && !eq(pre, "UNOBSERVED_SLOT") &&
++              eq(slot(after, c.pid > 0), "FREE") ? "yes" : "no";
++    okay = okay && eq(f[4], post) && eq(f[5], handle(&c)) &&
++           rc_ok(f[6], r, inject_error, pid) && eq(f[7], output) && eq(f[8], release);
++    if (!okay) printf("OBS\tslot=%s\thandle=%s\trc=%d\tout=%s\trelease=%s\n",
++                      post, handle(&c), r, output, release);
++    if (owner_copy) dispose(&owner, pid);
++    else dispose(&c, pid);
++    return okay;
++}
++
++static int observe_raw(char **f, int line) {
++    sy_child_t c;
++    sy_exit_t st;
++    sy_rusage_t usage = {-17, -18, -19};
++    Counts before, after;
++    int registered = !eq(f[3], "reaped_unregistered");
++    int failed = eq(f[3], "err_echild_or_fail");
++    int running = eq(f[3], "running_wnohang") || eq(f[2], "sy_kill");
++    int pid, r, okay, exited = -17, code = -18, sig = -19;
++    const char *output = "N/A";
++    const char *post_handle = "UNCHANGED";
++    const char *post_slot;
++    const char *release;
++    memset(&c, 0, sizeof c);
++    c.in_fd = c.out_fd = c.err_fd = -1;
++    if (line == 93) return -1;
++    if (registered) {
++        if (spawn(&c, running, 0)) return 0;
++        pid = c.pid;
++        if (line == 94) {
++            inject(pid, ECHILD);
++            r = sy_proc_try_wait(&c, &st);
++            clear_inject(ECHILD);
++            if (r != -ECHILD) { dispose(&c, pid); return 0; }
++        }
++        if (failed) {
++            /* Finish the child without consuming its L0 slot. */
++            if (waitpid(pid, 0, 0) != pid) { dispose(&c, pid); return 0; }
++        }
++    } else {
++        pid = fork();
++        if (!pid) {
++            if (running) sy_sleep_ms(500);
++            _exit(7);
++        }
++        if (pid < 0) return 0;
++    }
++    before = counts();
++    if (eq(f[2], "sy_wait")) r = sy_wait(pid, running && !failed);
++    else if (eq(f[2], "sy_wait_status")) r = sy_wait_status(pid, running && !failed, &exited, &code, &sig);
++    else if (eq(f[2], "sy_wait_any")) r = sy_wait_any(running && !failed, &exited, &code, &sig);
++    else if (eq(f[2], "sy_wait_rusage")) r = sy_wait_rusage(pid, running && !failed, &usage);
++    else r = sy_kill(pid);
++    after = counts();
++    if (eq(f[2], "sy_wait_status") || eq(f[2], "sy_wait_any"))
++        output = exited == 1 && code == 7 && sig == 0 ? "exited_code_sig" :
++                 exited == -17 && code == -18 && sig == -19 ? "unchanged" : "BAD_STATUS";
++    if (eq(f[2], "sy_wait_rusage"))
++        output = usage.user_ms >= 0 && usage.sys_ms >= 0 && usage.maxrss_kb >= 0 ? "usage" :
++                 usage.user_ms == -17 && usage.sys_ms == -18 && usage.maxrss_kb == -19 ? "unchanged" : "BAD_USAGE";
++    if (registered && !after.live && !after.abandoned && !after.lost) {
++        if (sy_proc_try_wait(&c, &st) == -ESRCH && eq(handle(&c), "STALE"))
++            post_handle = "STALE_IF_LIVE_ELSE_UNCHANGED";
++        else post_handle = "BAD_HANDLE";
++    }
++    post_slot = same_counts(before, after) ? "UNCHANGED" : slot(after, c.pid > 0);
++    release = eq(post_slot, "FREE") ? "yes" : "no";
++    okay = eq(f[4], post_slot) && eq(f[5], post_handle) && eq(f[7], output) &&
++           eq(f[8], release) && (eq(f[6], "status")
++              ? r == (eq(f[2], "sy_kill") ? 128 + SIGKILL : 7) : rc_ok(f[6], r, 0, pid));
++    if (!okay) printf("OBS\tslot=%s\thandle=%s\trc=%d\tout=%s\trelease=%s\n",
++                      post_slot, post_handle, r, output, release);
++    dispose(&c, pid);
++    if (failed) return -1; /* No private observation of the retained orphaned slot. */
++    return okay;
++}
++
++static int observe_spawn(char **f, int line) {
++    sy_child_t c, hold[64];
++    Counts after;
++    int r, i, okay;
++    if (line == 6) {
++        setenv("UNISACC_PROC_INJECT_ATEXIT_FAIL", "1", 1);
++        r = spawn(&c, 0, 0);
++        unsetenv("UNISACC_PROC_INJECT_ATEXIT_FAIL");
++        after = counts();
++        return eq(f[4], slot(after, 0)) && eq(f[5], handle(&c)) &&
++               rc_ok(f[6], r, 0, 0) && eq(f[7], "N/A") && eq(f[8], "no");
++    }
++    if (line == 8) {
++        for (i = 0; i < 64 && !spawn(&hold[i], 1, 0); i++) {}
++        r = spawn(&c, 1, 0);
++        after = counts();
++        okay = i == 64 && after.live == 64 && !after.abandoned && !after.lost &&
++               eq(f[4], "ALL_FULL") && eq(f[5], handle(&c)) && rc_ok(f[6], r, 0, 0) &&
++               eq(f[7], "N/A") && eq(f[8], "no");
++        if (!r) dispose(&c, c.pid);
++        while (i > 0) { i--; dispose(&hold[i], hold[i].pid); }
++        return okay;
++    }
++    return -1;
++}
++
++static int observe_drain(char **f, int line) {
++    sy_child_t abandoned, retained;
++    Counts before, after;
++    int apid, rpid = 0, r, okay;
++    const char *post;
++    const char *release;
++    if (spawn(&abandoned, 1, 0)) return 0;
++    apid = abandoned.pid;
++    if (sy_proc_close(&abandoned)) { dispose(&abandoned, apid); return 0; }
++    if (line == 73) {
++        if (spawn(&retained, 1, 0)) { dispose(&abandoned, apid); return 0; }
++        rpid = retained.pid;
++    }
++    before = counts();
++    r = sy_proc_own_drain(100);
++    after = counts();
++    post = line == 54 ? "FREE" : line == 72
++        ? "CONFIRMED_ABANDONED_AND_LOST_ABANDONED_FREED_REST_KEPT"
++        : "CONFIRMED_REAPED_FREED_REST_KEPT";
++    release = line == 54 ? "yes" : line == 72 ? "confirmed_reap_only" : "partial";
++    okay = before.abandoned == 1 && before.live == (rpid != 0) && !before.lost &&
++           !after.abandoned && after.live == before.live && !after.lost &&
++           eq(f[4], post) && eq(f[5], line == 54 ? "UNCHANGED" : "NONE") &&
++           eq(f[7], "N/A") && eq(f[8], release) && r == after.live &&
++           rc_ok(f[6], r, 0, 0) && eq(handle(&abandoned), "DETACHED");
++    dispose(&abandoned, apid);
++    if (rpid) dispose(&retained, rpid);
++    return okay;
++}
++
++static int observe_fork_owner(char **f) {
++    sy_child_t child;
++    int pid, r, okay;
++    Counts before;
++    if (spawn(&child, 1, 0)) return 0;
++    before = counts();
++    pid = fork();
++    if (!pid) {
++        Counts c = counts();
++        _exit(c.live || c.abandoned || c.lost ? 1 : 0);
++    }
++    r = pid > 0 ? sy_wait(pid, 0) : -EIO;
++    okay = r == 0 && before.live == 1 && same_counts(before, counts()) &&
++           eq(f[4], "FREE_IN_CHILD") && eq(f[5], "NONE_IN_CHILD") &&
++           rc_ok(f[6], r, 0, 0) && eq(f[7], "N/A") && eq(f[8], "no");
++    dispose(&child, child.pid);
++    return okay;
++}
++
++static int observe(char **f, int line) {
++    if (line == 54 || line == 72 || line == 73) return observe_drain(f, line);
++    if (line == 74) return observe_fork_owner(f);
++    if (line >= 75) {
++        /* These error cases require same-generation stale/LOST slot observation. */
++        if (eq(f[3], "err_echild_or_fail")) return -1;
++        if (!eq(f[2], "sy_wait") && !eq(f[2], "sy_wait_status") && !eq(f[2], "sy_wait_any") &&
++            !eq(f[2], "sy_wait_rusage") && !eq(f[2], "sy_kill")) return 0;
++        return observe_raw(f, line);
++    }
++    if (line <= 16) return observe_spawn(f, line);
++    return observe_handle(f, line);
++}
++
++static int split(char *s, char **f) {
++    int fields = 1;
++    f[0] = s;
++    while (*s && *s != '\n' && *s != '\r') {
++        if (*s == '\t') {
++            if (fields == FIELD_COUNT) return 0;
++            *s = 0;
++            f[fields++] = s + 1;
++        }
++        s++;
++    }
++    *s = 0;
++    if (fields != FIELD_COUNT) return 0;
++    for (int i = 0; i < fields; i++) if (!f[i][0]) return 0;
++    return 1;
++}
++
++int main(int argc, char **argv) {
++    const char *path = argc == 2 ? argv[1] : "tools/proc-own-transitions.tsv";
++    FILE *in;
++    char buf[1024], *f[FIELD_COUNT];
++    int line = 0, rows = 0, asserted = 0, pass = 0, fail = 0, missing = 0;
++    int bad = 0;
++    if (argc > 2 || !(in = fopen(path, "rb"))) return 2;
++    while (fgets(buf, sizeof buf, in)) {
++        int r;
++        line++;
++        if (!strchr(buf, '\n') && !feof(in)) { bad = 1; break; }
++        if (buf[0] == '#') continue;
++        if (line == 4 && eq(buf, "slot_state\thandle_state\tevent\toutcome\tnext_slot_state\tnext_handle_state\trc\texit_out\tslot_release\tnote\n"))
++            continue;
++        rows++;
++        if (!split(buf, f)) { printf("FAIL\tline=%d\tinvalid-tsv\n", line); fail++; continue; }
++        r = observe(f, line);
++        if (r < 0) missing++;
++        else { asserted++; if (r) pass++; else fail++; }
++        printf("%s\tline=%d\t%s\t%s\t%s\t%s\n",
++               r < 0 ? "UNOBSERVED" : r ? "PASS" : "FAIL", line, f[0], f[1], f[2], f[3]);
++    }
++    if (ferror(in)) bad = 1;
++    fclose(in);
++    printf("CHECK_PROC_OWN_TABLE\trows=%d\tasserted=%d\tpass=%d\tfail=%d\tunobserved=%d\n",
++           rows, asserted, pass, fail, missing);
++    return bad || rows != TABLE_ROWS || asserted != rows || fail || missing;
++}

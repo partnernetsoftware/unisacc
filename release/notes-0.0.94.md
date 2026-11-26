@@ -120,7 +120,7 @@
 - (2) **`pipe2` (`sy_pipe2`) 在 `osx` 上非原子**: `osx` 无原生 `pipe2` 系统调用, `cx/sys/proc.cx:225-240` 在 `osx` 上用 `pipe` 加 `fcntl(F_SETFD/F_SETFL)` 非原子模拟(多线程并发 `fork+exec` 下存在描述子泄漏竞态窗口, 不可声称原子 `CLOEXEC`); 在 `win` 上为 `-ENOSYS` 具名拒绝 (`cx/sys/proc.cx:221-223`);
 - (3) **`sy_child_subreaper` 在 `osx`/`win` 为 `-ENOSYS` 具名拒绝**: `sy_child_subreaper` (`Z1a`, `cx/sys/posix.cx`) 仅在 `lnx` (`x86_64=157`, `arm64=167`) 经 `prctl(PR_SET_CHILD_SUBREAPER)` 实现, 在 `osx` 与 `win` 四目标上调用号表项为 `0`, 均为 `-ENOSYS` 具名拒绝;
 - (4) **`win` 停止信号为 `-ENOSYS` 具名拒绝**: `exec/facts/signal-targets.tsv` 在 `win` 仅保留进程内兼容数值(非原生 POSIX 信号投递), `ext/sysx/reaper.cx` 的 `sy_kill_tree` 在 `win` 及无 `/proc` 的 `osx` 均为 `-ENOSYS` 具名拒绝;
-- (5) **`0.0.95` 独立版本边界**: `0.0.95` (分支 `v0.0.95`, `e2` 重扫修复主线, `plans/v0.0.95.md`) 为独立候选与独立版本槽, 其产品改动、严格证据、未判定项与回滚方案均不并入本版 `0.0.94`。
+- (5) **`0.0.95` 独立版本边界**: `0.0.95` (分支 `v0.0.95`, `e2` 重扫修复主线, `15cf2019d7611ff:plans/v0.0.95.md`) 为独立候选与独立版本槽, 其产品改动、严格证据、未判定项与回滚方案均不并入本版 `0.0.94`。
 
 ## 回滚方案
 

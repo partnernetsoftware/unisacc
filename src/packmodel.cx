@@ -1,4 +1,5 @@
 #pragma unisa module packmodel
+#pragma unisa use driver.nnext
 #pragma unisa use runtime.packagefooter
 #pragma unisa use runtime.package_decode
 #pragma unisa use runtime.package_lifetime
@@ -44,11 +45,8 @@ static int pm_bytes_eq(const unsigned char *a, const unsigned char *b, int n) {
 static CxPackageDecode pm_dec;
 static int pm_held;
 
-int pm_close(void) {
-    if (pm_held) cxpl_release(&pm_dec.package, pm_drop);
-    pm_held = 0;
-    return 0;
-}
+static void pm_drop_held(void) { pm_held && (cxpl_release(&pm_dec.package, pm_drop), 1); pm_held = 0; }
+int pm_close(void) { pm_drop_held(); cxn_close(); return 0; }
 
 int pm_open(const unsigned char *data, long n, char *why, int cap) {
     PackageFooter foot;
@@ -70,7 +68,7 @@ int pm_open(const unsigned char *data, long n, char *why, int cap) {
         pm_why(why, cap, "bad or missing package footer"); return 1;
     }
     span = data + foot.package_offset;
-    pm_close();
+    pm_drop_held();
     pm_zero(&pm_dec, (long)sizeof pm_dec);
     pm_dec.allocate = pm_alloc;
     pm_dec.release = pm_drop;
@@ -87,9 +85,9 @@ int pm_open(const unsigned char *data, long n, char *why, int cap) {
 
 int pm_model(const char *route, const char *stage, const unsigned char **bytes, long *n,
              int *raw, unsigned *crc, int *compressed) {
-    int i;
-    CxPackage *p;
+    int i, tr; CxPackage *p; extern unsigned ex_crc32(char *, int);
     if (!pm_held || !route || !stage || !bytes || !n || !raw || !crc || !compressed) return 4;
+    if ((tr = cxn_try_load(stage, bytes, n, raw, crc, compressed, ex_crc32)) != 2) return tr;
     p = &pm_dec.package;
     i = 0;
     while (i < p->s) {

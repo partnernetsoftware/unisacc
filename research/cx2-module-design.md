@@ -11,7 +11,7 @@
 |---|---|
 | A `.cx` unit gets `cx.h` forced in front of the `-include` list. The decision is made per unit and keyed on the suffix (`unit_includes` in the product; `cxu` in `fe_load` in the reference). `.c` units keep exactly the CLI list | compiler.c:397, front_parse.c:6586 |
 | Several sources make **one** program (`fe_units`: "there is no linker"). Product units are compiled per unit and may run in a parallel forked pool, and the unit cache is keyed by path | front_parse.c:6638, compiler.c:805-870 |
-| Shared driver code already has a precedent: `src/fwdstub.c` is `#include`d by both `exec/c/compiler.c:169` and `unisacc.c:16` | grep |
+| Shared driver code already has a precedent: `b902c8fbfb1366d:src/fwdstub.c` is `#include`d by both `b902c8fbfb1366d:exec/c/compiler.c:169` and `unisacc.c:16` | grep |
 | `#pragma` is not honoured: E2 only handles push/pop_macro and drops the rest. `-E` emits **no** `# line "file"` markers | front_pp.c:1540, 2727; -E probe **[measured]** |
 | An undefined extern **object** reads as 0 (`extern int zz; printf zz` gives `0`, rc 0) | W0 + re-probe **[measured]** |
 | **An implicit function declaration is accepted across units**: `a.cx: return g(3);` with no prototype, plus `b.cx: int g(int x){return x+1;}`, gives rc 4 | probe **[measured]** |
@@ -120,7 +120,7 @@ There is one external namespace per program, as in C. The API name prefix (`fw0_
 1. `src/cxmod.c`: pragma scan, resolution, closure/cycle, projector, collision merge.
 2. Product: in `compiler.c`, before the unit loops, but only if some source ends in `.cx`. Expand `sources[]`, then make `UNIT_INCLUDES(path)` pick a **per-unit** list: `cx.h` followed by the CXIF files of that unit's uses. Reference: the same expansion in `unisacc.c`'s driver, plus `fe_load` taking the per-unit list instead of the single `cxu` flag.
 3. The two flags `-cx-plan` and `-cx-interface`.
-4. Pilot migration of `tests/flownetw0.cx`: delete its 3 hand prototypes, add `#pragma unisa use flownetw0mod`, and change the gate to `-run tests/flownetw0.cx -- .`.
+4. Pilot migration of `8d78fbc83015605:tests/flownetw0.cx`: delete its 3 hand prototypes, add `#pragma unisa use flownetw0mod`, and change the gate to `-run tests/flownetw0.cx -- .`.
 
 **Not in CX2a:** opaque, `std.X` other than `std.cx`, CX3 refusals, record-form CXIF, and caching.
 

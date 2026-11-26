@@ -1,5 +1,6 @@
 #pragma unisa module time
 #pragma unisa dock
+#pragma unisa use sys.env
 /* L0 sys/time: clocks, local-time text, sleeping and file times (plans/cx-layers.md).
    L0 exception (agreed for cx/sys/ only): <time.h>, <poll.h> and <sys/time.h>
    are not in the implicit prelude, and the carried headers already hold the
@@ -75,6 +76,46 @@ int sy_local_fmt(char *out, int cap, const char *fmt, long sec) {
     return (int)n;
 }
 
+/* Test seam, same shape as UNISACC_PROC_INJECT_* but default off and exact:
+   it fires only when UNISACC_TIME_INJECT_EINTR=1 AND UNISACC_TIME_INJECT_PID
+   is the decimal text of this process, compared as bytes (no arithmetic, so an
+   over-long digit string cannot wrap into a valid pid; omitted/foreign pid or
+   a pid with extra characters = off).  Armed: every poll below naps 5 ms (or
+   the requested time when shorter) and returns EINTR. */
+static int syt_inject_eintr(void) {
+#ifdef _WIN32
+    return 0;
+#else
+    const char *v = sy_env("UNISACC_TIME_INJECT_EINTR");
+    const char *p;
+    char me[32];
+    if (!v || v[0] != '1' || v[1]) return 0;
+    p = sy_env("UNISACC_TIME_INJECT_PID");
+    if (!p || !p[0]) return 0;
+    if (cx_fmt(me, sizeof me, "%ld", (long)getpid())) return 0;
+    return !strcmp(p, me);
+#endif
+}
+
+/* poll with the injection seam above. Never returns EINTR when the seam is off;
+   firing is observable from outside (a ready fd reports 0 under the seam). */
+static int syt_poll(struct pollfd *fds, unsigned long n, int ms) {
+#ifdef _WIN32
+    (void)fds; (void)n; (void)ms;
+    return -ENOSYS;
+#else
+    if (syt_inject_eintr()) {
+        struct timespec q;
+        q.tv_sec = 0;
+        q.tv_nsec = (long)(ms > 0 && ms < 5 ? ms : 5) * 1000000L;
+        nanosleep(&q, NULL);
+        errno = EINTR;
+        return -1;
+    }
+    return poll(fds, n, ms);
+#endif
+}
+
 /* Windows has no poll: a nap is the carried nanosleep (Sleep), and there is no
    readiness wait for an fd. Elsewhere both are poll. The exported functions have
    no #if. */
@@ -84,7 +125,17 @@ static int syt_nap(int ms) {
     q.tv_sec = ms / 1000; q.tv_nsec = (long)(ms % 1000) * 1000000L;
     return nanosleep(&q, NULL);
 #else
-    return poll(NULL, 0, ms);
+    long end = sy_now_ms() + ms;
+    for (;;) {
+        long left = end - sy_now_ms();
+        if (left <= 0) return 0;
+        if (left > 2000000000L) left = 2000000000L;
+        if (syt_poll(NULL, 0, (int)left) < 0) {
+            if (errno == EINTR) continue;   /* re-enter with the time that is left */
+            return -errno;
+        }
+        return 0;
+    }
 #endif
 }
 static int syt_readable(int fd, long ms) {
@@ -93,24 +144,36 @@ static int syt_readable(int fd, long ms) {
     return -ENOSYS;
 #else
     struct pollfd p;
-    int r;
+    long end = ms >= 0 ? sy_now_ms() + ms : 0;
+    int first = 1;
     p.fd = fd; p.events = POLLIN; p.revents = 0;
-    do r = poll(&p, 1, ms < 0 ? -1 : (int)(ms > 2000000000L ? 2000000000L : ms));
-    while (r < 0 && errno == EINTR);
-    if (r < 0) return -errno;
-    return r > 0 ? 1 : 0;
+    for (;;) {
+        long left = ms < 0 ? -1 : end - sy_now_ms();
+        int wait, r;
+        if (ms >= 0 && left < 0) left = 0;                    /* a late clock is still one poll(0) */
+        if (ms >= 0 && !first && left <= 0) return 0;          /* budget spent after the first poll */
+        wait = left < 0 ? -1 : (int)(left > 2000000000L ? 2000000000L : left);
+        r = syt_poll(&p, 1, wait);                             /* ms==0 still asks once */
+        if (r < 0) {
+            if (errno == EINTR) { first = 0; continue; }       /* re-enter with what is left */
+            return -errno;
+        }
+        return r > 0 ? 1 : 0;
+    }
 #endif
 }
 
 /* Sleep MS milliseconds (poll with no fds; Windows: Sleep); an interruption resumes
-   for what is left. 0, or -errno. */
+   for what is left and the whole call never runs past MS. 0, or -errno. */
 int sy_sleep_ms(long ms) {
-    long end = sy_now_ms() + ms, left = ms;
-    while (left > 0) {
-        if (syt_nap((int)(left > 2000000000L ? 2000000000L : left)) < 0 && errno != EINTR) return -errno;
-        left = end - sy_now_ms();
+    long end = sy_now_ms() + ms;
+    for (;;) {
+        long left = end - sy_now_ms();
+        int rc;
+        if (left <= 0) return 0;
+        rc = syt_nap((int)(left > 2000000000L ? 2000000000L : left));
+        if (rc < 0) return rc;
     }
-    return 0;
 }
 
 /* Wait up to MS (negative: forever) for FD to be readable (or hung up).

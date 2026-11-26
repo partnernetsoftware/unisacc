@@ -42,7 +42,7 @@ env_contract	<64hex>
 (2) `toolchain_ident`（构造器与构建链配方闭包，补全 `seed/ident.c` 未涵盖的构造成因）:
 - 当前作为起链构造器的已安装产品身份(`split2` `product_digest`，格式同 `seed/ident.c:365-370` 与 `tools/cxlib/productpkg.cx`，即 `unisacc.com` 与 `unisacc.com.dev` 的内容哈希与长度)；
 - 影响产品字节生成的链构造工具链源码闭包(SHA-256 排序逐行拼接):
-  `tools/candidate-chain.cx`、`tools/chain-step.cx`、`tools/release-build.cx`、`tools/build.cx`、`tools/kernel-build.cx`、`tools/product-build.cx`、`tools/source-job-wave.cx`、`tools/pc-wave.cx`、`tools/selfhost.cx`、`tools/cxlib/nninputs.cx`、`tools/cxlib/netpack.cx`、`tools/cxlib/kernelsha.cx`、`tools/cxlib/productpkg.cx`、`tools/cxlib/netsel.cx`、及其全部传递 `#pragma unisa use` 依赖；
+  `tools/candidate-chain.cx`、`tools/chain-step.cx`、`tools/release-build.cx`、`tools/build.cx`、`tools/kernel-build.cx`、`c4e88da2b21888b:tools/product-build.cx`、`tools/source-job-wave.cx`、`tools/pc-wave.cx`、`tools/selfhost.cx`、`tools/cxlib/nninputs.cx`、`tools/cxlib/netpack.cx`、`tools/cxlib/kernelsha.cx`、`tools/cxlib/productpkg.cx`、`tools/cxlib/netsel.cx`、及其全部传递 `#pragma unisa use` 依赖；
 - 宿主 C 编译器与汇编/链接工具身份（如 `cc --version` 与目标 ABI 标志指纹），防止同源不同宿主编译器产出混用。
 
 (3) `asm_side` 与 `env_contract`:
