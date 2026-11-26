@@ -1,0 +1,375 @@
+#pragma unisa module tapesidecar
+#pragma unisa use sys.fs
+#pragma unisa use sys.posix
+#pragma unisa use sys.env
+#pragma unisa use sys.sha
+#pragma unisa use text.text
+#pragma unisa use text.fmt
+#pragma unisa use text.conv
+#pragma unisa use mem.heap
+#pragma unisa use mem.bytes
+
+/* tools/cxlib/tapesidecar.cx -- tool-side ROOT/tape/ manifest & trusted_owner verification
+ * library plus tool-side <ape_dir>/tape/tapemode.so path boundary helper.
+ * (Product loaders such as cx/driver/nnext.cx and P3' carry their own equivalent boundary checks.)
+ *
+ * Contract:
+ *  - ts_verify_root_tape(root_abs, err_reason):
+ *      * ROOT/tape/ absent (-ENOENT) -> returns 0 (backward compatible with public roots).
+ *      * ROOT/tape/ present -> must be a real directory (not symlink) passing sy_stat_trusted_owner;
+ *        opened via O_NOFOLLOW fd and verified with sy_fstat; manifest.tsv and every listed member
+ *        are opened via sy_openat_read_nofollow on that directory fd, fstat-verified (regular file,
+ *        trusted_owner, exact size), and read directly from the same fd (no lstat-then-path TOCTOU).
+ *        No unlisted entries may exist in ROOT/tape/.
+ *  - ts_resolve_tape_so(ape_dir_abs, env_ape_self, env_container, out_path, out_cap, err_reason):
+ *      * Rejects symlink ape_dir_abs itself (tape-root-symlink).
+ *      * UNISACC_APE_SELF contract:
+ *          - Both env_ape_self and env_container empty/NULL -> non-APE-wrapper mode; skip APE self
+ *            header check and resolve strictly under <ape_dir_abs>/tape/tapemode.so.
+ *          - env_ape_self empty/NULL while env_container non-empty -> refused (ape-self-missing-for-container).
+ *          - env_ape_self non-empty -> must equal env_container verbatim, contain '/', be a regular
+ *            non-symlink trusted_owner file whose canonical parent strictly equals ape_dir_abs and
+ *            whose O_NOFOLLOW fd starts with "MZqFpD='".
+ *      * Verifies ROOT/tape/ via ts_verify_root_tape (requiring ROOT/tape/ to exist).
+ *      * Resolves <ape_dir_abs>/tape/tapemode.so as a regular non-symlink trusted_owner file
+ *        whose canonical path strictly stays inside <ape_dir_abs>/tape/.
+ */
+
+#define TS_MAX_MEMBERS 32
+#define TS_MAX_FILE_BYTES (64 * 1024 * 1024)
+
+static int ts_hex64(const char *s, long n) {
+    if (!s || n != 64) return 0;
+    for (long i = 0; i < 64; i++) {
+        char c = s[i];
+        if (!((c >= '0' && c <= '9') || (c >= 'a' && c <= 'f'))) return 0;
+    }
+    return 1;
+}
+
+static int ts_alnum(char c) {
+    return (c >= 'a' && c <= 'z') || (c >= 'A' && c <= 'Z') || (c >= '0' && c <= '9');
+}
+
+static int ts_safe_basename(const char *s, long n) {
+    if (!s || n <= 0 || n >= 200) return 0;
+    if (!ts_alnum(s[0])) return 0;
+    for (long i = 0; i < n; i++) {
+        char c = s[i];
+        if (!ts_alnum(c) && c != '.' && c != '_' && c != '-') return 0;
+    }
+    if (n == 12 && tx_same(s, 12, "manifest.tsv", 12)) return 0;
+    return 1;
+}
+
+static int ts_parse_pos_i64(const char *s, long n, int64_t *out) {
+    if (!s || n <= 0 || n > 18) return -1;
+    for (long i = 0; i < n; i++) if (s[i] < '0' || s[i] > '9') return -1;
+    int64_t v = 0;
+    if (tx_to_i64(s, n, 10, &v) != 0 || v <= 0) return -1;
+    *out = v;
+    return 0;
+}
+
+static int ts_ape_header_fd(int fd) {
+    char head[8];
+    return fd >= 0 && sy_reg_size(fd) >= 8 && sy_read_full(fd, head, 8) == 0 &&
+        tx_same(head, 8, "MZqFpD='", 8);
+}
+
+static int ts_set_err(const char **err_reason, const char *msg) {
+    if (err_reason) *err_reason = msg;
+    return -1;
+}
+
+/* Open leaf inside verified directory fd with O_NOFOLLOW, fstat-check regular + trusted_owner,
+ * and read all bytes from that same fd (eliminates lstat-then-path TOCTOU). */
+static int ts_read_at_nofollow(int dfd, const char *leaf, long uid, size_t max_bytes,
+                               char **out_buf, size_t *out_n, int64_t *out_size,
+                               const char **err_reason, const char *e_missing,
+                               const char *e_sym, const char *e_notreg,
+                               const char *e_owner, const char *e_unreadable) {
+    *out_buf = 0; *out_n = 0; *out_size = 0;
+    int fd = sy_openat_read_nofollow(dfd, leaf);
+    if (fd < 0) {
+        if (fd == -ENOENT) return ts_set_err(err_reason, e_missing);
+        if (fd == -ELOOP) return ts_set_err(err_reason, e_sym);
+        return ts_set_err(err_reason, e_unreadable);
+    }
+    sy_stat_t st;
+    if (sy_fstat(fd, &st) != 0) { sy_close(fd); return ts_set_err(err_reason, e_unreadable); }
+    if (st.kind != 'f') { sy_close(fd); return ts_set_err(err_reason, e_notreg); }
+    if (!sy_stat_trusted_owner(&st, uid)) { sy_close(fd); return ts_set_err(err_reason, e_owner); }
+    if (st.size < 0 || (size_t)st.size > max_bytes) { sy_close(fd); return ts_set_err(err_reason, e_unreadable); }
+    size_t cap = (size_t)st.size;
+    char *buf = (char *)mm_alloc((long)(cap + 1));
+    if (!buf) { sy_close(fd); return ts_set_err(err_reason, e_unreadable); }
+    size_t got = 0;
+    while (got < cap) {
+        long r = sy_read(fd, buf + got, (long)(cap - got));
+        if (r < 0) { mm_free(buf); sy_close(fd); return ts_set_err(err_reason, e_unreadable); }
+        if (r == 0) break;
+        got += (size_t)r;
+    }
+    char extra_byte;
+    long more = sy_read(fd, &extra_byte, 1);
+    sy_close(fd);
+    if (more != 0 || got != cap) { mm_free(buf); return ts_set_err(err_reason, e_unreadable); }
+    buf[got] = 0;
+    *out_buf = buf;
+    *out_n = got;
+    *out_size = (int64_t)st.size;
+    return 0;
+}
+
+int ts_verify_root_tape(const char *root_abs, const char **err_reason) {
+    char tape_dir[4400];
+    sy_stat_t tst;
+    if (err_reason) *err_reason = 0;
+    if (!root_abs || root_abs[0] != '/') return ts_set_err(err_reason, "tape-root-invalid");
+    if (cx_fmt(tape_dir, sizeof tape_dir, "%s/tape", root_abs)) return ts_set_err(err_reason, "tape-path-bound");
+    int lrc = sy_lstat(tape_dir, &tst);
+    if (lrc == -ENOENT) return 0;
+    if (lrc != 0) return ts_set_err(err_reason, "tape-dir-unreadable");
+    if (tst.kind == 'l') return ts_set_err(err_reason, "tape-dir-symlink");
+    if (tst.kind != 'd') return ts_set_err(err_reason, "tape-dir-not-dir");
+    long uid = sy_euid();
+    if (!sy_stat_trusted_owner(&tst, uid)) return ts_set_err(err_reason, "tape-dir-untrusted-owner");
+
+    int dfd = sy_open_dir_nofollow(tape_dir);
+    if (dfd < 0) return ts_set_err(err_reason, "tape-dir-unreadable");
+    if (sy_fstat(dfd, &tst) != 0 || tst.kind != 'd' || !sy_stat_trusted_owner(&tst, uid)) {
+        sy_close(dfd);
+        return ts_set_err(err_reason, "tape-dir-untrusted-owner");
+    }
+
+    char *mb = 0; size_t mn = 0; int64_t msize = 0;
+    if (ts_read_at_nofollow(dfd, "manifest.tsv", uid, 65536, &mb, &mn, &msize, err_reason,
+                            "tape-manifest-missing", "tape-manifest-symlink",
+                            "tape-manifest-not-regular", "tape-manifest-untrusted-owner",
+                            "tape-manifest-unreadable") != 0) {
+        sy_close(dfd);
+        return -1;
+    }
+    if (!mb || mn == 0) {
+        if (mb) mm_free(mb);
+        sy_close(dfd);
+        return ts_set_err(err_reason, "tape-manifest-malformed");
+    }
+    for (size_t i = 0; i < mn; i++) {
+        if (mb[i] == 0) { mm_free(mb); sy_close(dfd); return ts_set_err(err_reason, "tape-manifest-malformed"); }
+    }
+
+    char names[TS_MAX_MEMBERS][204];
+    char shas[TS_MAX_MEMBERS][65];
+    int64_t sizes[TS_MAX_MEMBERS];
+    int nmem = 0;
+    long at = 0;
+    int first_data = 1;
+    while (at < (long)mn) {
+        long e = at;
+        while (e < (long)mn && mb[e] != '\n') e++;
+        const char *l = mb + at;
+        long ln = e - at;
+        at = e + 1;
+        if (ln > 0 && l[ln - 1] == '\r') ln--;
+        if (ln <= 0 || l[0] == '#') continue;
+
+        long f0o = 0, f0l = 0, f1o = 0, f1l = 0, f2o = 0, f2l = 0, f3o = 0, f3l = 0;
+        if (tx_field(l, ln, '\t', 0, &f0o, &f0l) != 0 ||
+            tx_field(l, ln, '\t', 1, &f1o, &f1l) != 0 ||
+            tx_field(l, ln, '\t', 2, &f2o, &f2l) != 0 ||
+            tx_field(l, ln, '\t', 3, &f3o, &f3l) == 0) {
+            mm_free(mb); sy_close(dfd);
+            return ts_set_err(err_reason, "tape-manifest-malformed");
+        }
+        if (first_data) {
+            first_data = 0;
+            if ((f0l == 4 && tx_same(l + f0o, 4, "name", 4) && f1l == 6 && tx_same(l + f1o, 6, "sha256", 6)) ||
+                (f0l == 6 && tx_same(l + f0o, 6, "sha256", 6) && f1l == 5 && tx_same(l + f1o, 5, "bytes", 5))) {
+                continue;
+            }
+        }
+        if (nmem >= TS_MAX_MEMBERS) { mm_free(mb); sy_close(dfd); return ts_set_err(err_reason, "tape-manifest-malformed"); }
+
+        const char *ns = 0, *ss = 0, *bs = 0;
+        long nl = 0, sl = 0, bl = 0;
+        if (ts_hex64(l + f0o, f0l)) {
+            ss = l + f0o; sl = f0l;
+            bs = l + f1o; bl = f1l;
+            ns = l + f2o; nl = f2l;
+        } else if (ts_hex64(l + f1o, f1l)) {
+            ns = l + f0o; nl = f0l;
+            ss = l + f1o; sl = f1l;
+            bs = l + f2o; bl = f2l;
+        } else {
+            mm_free(mb); sy_close(dfd);
+            return ts_set_err(err_reason, "tape-manifest-malformed");
+        }
+        int64_t fbytes = 0;
+        if (!ts_safe_basename(ns, nl) || sl != 64 || ts_parse_pos_i64(bs, bl, &fbytes) != 0) {
+            mm_free(mb); sy_close(dfd);
+            return ts_set_err(err_reason, "tape-manifest-malformed");
+        }
+        mm_copy(names[nmem], sizeof names[0], ns, nl); names[nmem][nl] = 0;
+        mm_copy(shas[nmem], 65, ss, 64); shas[nmem][64] = 0;
+        sizes[nmem] = fbytes;
+        for (int k = 0; k < nmem; k++) {
+            if (tx_eqz(names[k], names[nmem])) {
+                mm_free(mb); sy_close(dfd);
+                return ts_set_err(err_reason, "tape-manifest-duplicate");
+            }
+        }
+        nmem++;
+    }
+    mm_free(mb);
+    if (nmem == 0) { sy_close(dfd); return ts_set_err(err_reason, "tape-manifest-empty"); }
+
+    for (int i = 0; i < nmem; i++) {
+        char *fb = 0; size_t fn = 0; int64_t fsz = 0;
+        char got_sha[65];
+        if (ts_read_at_nofollow(dfd, names[i], uid, TS_MAX_FILE_BYTES, &fb, &fn, &fsz, err_reason,
+                                "tape-member-missing", "tape-member-symlink",
+                                "tape-member-not-regular", "tape-member-untrusted-owner",
+                                "tape-member-unreadable") != 0) {
+            sy_close(dfd);
+            return -1;
+        }
+        if (fsz != sizes[i]) {
+            mm_free(fb); sy_close(dfd);
+            return ts_set_err(err_reason, "tape-member-bytes-mismatch");
+        }
+        int sh_rc = sy_sha256_hex(fb, (long)fn, got_sha);
+        mm_free(fb);
+        if (sh_rc != 0 || !tx_eqz(got_sha, shas[i])) {
+            sy_close(dfd);
+            return ts_set_err(err_reason, "tape-member-sha-mismatch");
+        }
+    }
+    sy_close(dfd);
+
+    sy_dir_t d;
+    if (sy_dir_open(&d, tape_dir) != 0) return ts_set_err(err_reason, "tape-dir-unreadable");
+    int next;
+    while ((next = sy_dir_next(&d)) == 1) {
+        if (tx_eqz(d.name, ".") || tx_eqz(d.name, "..") || tx_eqz(d.name, "manifest.tsv")) continue;
+        int found = 0;
+        for (int i = 0; i < nmem; i++) {
+            if (tx_eqz(d.name, names[i])) { found = 1; break; }
+        }
+        if (!found) {
+            sy_dir_close(&d);
+            return ts_set_err(err_reason, "tape-unlisted-entry");
+        }
+    }
+    sy_dir_close(&d);
+    if (next < 0) return ts_set_err(err_reason, "tape-dir-unreadable");
+    return 0;
+}
+
+int ts_resolve_tape_so(const char *ape_dir_abs, const char *env_ape_self, const char *env_container,
+                       char *out_path, int out_cap, const char **err_reason) {
+    char dir_clean[4096], dir_canon[4096], tape_dir[4400], so_path[4600], so_canon[4096];
+    sy_stat_t st;
+    if (err_reason) *err_reason = 0;
+    if (out_path && out_cap > 0) out_path[0] = 0;
+    if (!ape_dir_abs || ape_dir_abs[0] != '/' || !out_path || out_cap <= 0) {
+        return ts_set_err(err_reason, "tape-invalid-args");
+    }
+    long dlen = tx_len(ape_dir_abs, sizeof dir_clean - 1);
+    mm_copy(dir_clean, sizeof dir_clean, ape_dir_abs, dlen);
+    while (dlen > 1 && dir_clean[dlen - 1] == '/') dlen--;
+    dir_clean[dlen] = 0;
+    if (sy_lstat(dir_clean, &st) != 0) return ts_set_err(err_reason, "tape-root-unresolvable");
+    if (st.kind == 'l') return ts_set_err(err_reason, "tape-root-symlink");
+    if (st.kind != 'd') return ts_set_err(err_reason, "tape-root-not-dir");
+    if (sy_realpath(dir_clean, dir_canon, sizeof dir_canon) < 0) {
+        return ts_set_err(err_reason, "tape-root-unresolvable");
+    }
+    long uid = sy_euid();
+
+    int has_self = (env_ape_self && env_ape_self[0]);
+    int has_cont = (env_container && env_container[0]);
+    if (!has_self && has_cont) {
+        return ts_set_err(err_reason, "ape-self-missing-for-container");
+    }
+    if (has_self) {
+        if (!has_cont || !tx_eqz(env_ape_self, env_container)) {
+            return ts_set_err(err_reason, "ape-self-container-mismatch");
+        }
+        long slen = tx_len(env_ape_self, 4096);
+        int has_slash = 0;
+        for (long i = 0; i < slen; i++) if (env_ape_self[i] == '/') { has_slash = 1; break; }
+        if (!has_slash) return ts_set_err(err_reason, "ape-self-unresolvable");
+
+        if (sy_lstat(env_ape_self, &st) != 0) return ts_set_err(err_reason, "ape-self-unresolvable");
+        if (st.kind != 'f' || !sy_stat_trusted_owner(&st, uid)) {
+            return ts_set_err(err_reason, "ape-self-untrusted");
+        }
+
+        char self_canon[4096];
+        if (sy_realpath(env_ape_self, self_canon, sizeof self_canon) < 0) {
+            return ts_set_err(err_reason, "ape-self-unresolvable");
+        }
+        long at = tx_len(self_canon, sizeof self_canon);
+        while (at > 0 && self_canon[at - 1] != '/') at--;
+        if (at <= 0) return ts_set_err(err_reason, "ape-self-unresolvable");
+        const char *leaf = self_canon + at;
+        char self_parent[4096];
+        long plen = at > 1 ? at - 1 : 1;
+        mm_copy(self_parent, sizeof self_parent, self_canon, plen);
+        self_parent[plen] = 0;
+
+        if (!tx_eqz(self_parent, dir_canon)) {
+            return ts_set_err(err_reason, "ape-self-outside-root");
+        }
+        int pfd = sy_open_dir_nofollow(self_parent);
+        if (pfd < 0) return ts_set_err(err_reason, "ape-self-untrusted");
+        if (sy_fstat(pfd, &st) != 0 || st.kind != 'd' || !sy_stat_trusted_owner(&st, uid)) {
+            sy_close(pfd);
+            return ts_set_err(err_reason, "ape-self-untrusted");
+        }
+        int afd = sy_openat_read_nofollow(pfd, leaf);
+        sy_close(pfd);
+        if (afd < 0) return ts_set_err(err_reason, "ape-self-untrusted");
+        int is_ape = ts_ape_header_fd(afd);
+        sy_close(afd);
+        if (!is_ape) return ts_set_err(err_reason, "ape-self-not-ape");
+    }
+
+    if (cx_fmt(tape_dir, sizeof tape_dir, "%s/tape", dir_canon)) {
+        return ts_set_err(err_reason, "tape-path-bound");
+    }
+    if (sy_lstat(tape_dir, &st) == -ENOENT) {
+        return ts_set_err(err_reason, "tape-dir-missing");
+    }
+    if (ts_verify_root_tape(dir_canon, err_reason) != 0) return -1;
+
+    if (cx_fmt(so_path, sizeof so_path, "%s/tapemode.so", tape_dir)) {
+        return ts_set_err(err_reason, "tape-path-bound");
+    }
+    int src = sy_lstat(so_path, &st);
+    if (src == -ENOENT) return ts_set_err(err_reason, "tape-so-missing");
+    if (src != 0) return ts_set_err(err_reason, "tape-so-unreadable");
+    if (st.kind != 'f') return ts_set_err(err_reason, "tape-so-not-regular");
+    if (!sy_stat_trusted_owner(&st, uid)) return ts_set_err(err_reason, "tape-so-untrusted-owner");
+    if (sy_realpath(so_path, so_canon, sizeof so_canon) < 0) {
+        return ts_set_err(err_reason, "tape-so-unresolvable");
+    }
+
+    char want_prefix[4600];
+    if (cx_fmt(want_prefix, sizeof want_prefix, "%s/", tape_dir)) {
+        return ts_set_err(err_reason, "tape-path-bound");
+    }
+    long wpl = tx_len(want_prefix, sizeof want_prefix);
+    long scl = tx_len(so_canon, sizeof so_canon);
+    if (scl <= wpl || !tx_same(so_canon, wpl, want_prefix, wpl)) {
+        return ts_set_err(err_reason, "tape-so-escaped");
+    }
+    for (long i = wpl; i < scl; i++) {
+        if (so_canon[i] == '/') return ts_set_err(err_reason, "tape-so-escaped");
+    }
+    if (scl >= out_cap) return ts_set_err(err_reason, "tape-path-bound");
+    mm_copy(out_path, out_cap, so_canon, scl + 1);
+    return 0;
+}
