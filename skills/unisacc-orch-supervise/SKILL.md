@@ -35,6 +35,7 @@ description: 编排者督导多个执行者窗口与后台作业、做定期巡�
 | 残锁 | 列 devsvc 锁与 private index 锁,持锁 PID 不在才清,只清自己的 |
 | 孤儿轮询壳 | pgrep 找无父会话的 while/sleep 壳,按真实 PID 终止,先在账本写一行 |
 | 在途作业 | 核每个作业的输入身份、deadline、真实 PID |
+| 工作位置 | 每轮三数:(1)`/tmp` 里 unisacc-session-、chain-ready-check-、check-guard-hook.d.、cx-layers- 等族近 2 小时新增数(应接近 0,窗口 TMPDIR 已指向自己的 w- 树);(2)`~/.local/share/unisacc` 近 2 小时新增文件数(应为 0,历史 .patch/.md 只读);(3)`git worktree list` 的 w- 树与在岗窗口对账(孤儿树删,每窗口一棵)。超线点名窗口并让其删,不看口头回执。整仓副本(含 cx/ 与 tools/ 的目录)出现在 /tmp 或 ~/.local/share 即违规 |
 | 根版本漂移 | 每轮巡检调用 `cx tools/root-current.cx` (门 `24-root-current`, 原设计称门 20), 解冻必传 `--no-candidate-ahead`, 否则红灯禁止解冻 |
 
 ## (7) 任务板
@@ -62,6 +63,8 @@ description: 编排者督导多个执行者窗口与后台作业、做定期巡�
 - 工具:devsvc f write/edit 在版本工作目录下相对路径会落到主检出,一律用绝对路径;改文件不用 sed -i;主调度自己的提交也走 devsvc 或 commit-own,原生 git commit 会使 devsvc 因 unowned-pending 拒绝推送。
 
 ## (10) 通用纪律补充
+
+- 每个窗口基本只在自己的仓内私有工作树 `.claude/worktrees/w-<窗口名>` 里工作(2026-11-26 所有者令):在树里提交并交提交号,编排者 cherry-pick 落库;报告写树内 `.work/`;`/tmp` 与 `~/.local/share/unisacc` 不是工作目录。派工信必带"工作位置"一段(见 unisacc-orch-dispatch)。
 
 - 单写手:预跑目录、起链、公开步骤、共享检出索引同一时刻只有一个写手;并发起手式会互相删目录。
 - 证据不得删:补跑与恢复命令禁止 `rm`、`mv`、覆盖证据文件;会话压缩后恢复的执行者首轮先读最新信封再动手,信封里复述"保留某文件"类约束。

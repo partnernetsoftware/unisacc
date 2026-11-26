@@ -50,7 +50,7 @@ description: 对执行者交付做对抗复核并裁决能否落库时调用;覆
 
 ## (6) 落库前补跑项
 
-- 在最新 origin/main 私有副本(`git archive` 解到 `$CLAUDE_JOB_DIR/tmp`)apply,列重叠冲突。
+- 在你自己的 w- 树里 `git checkout --detach` 到最新 origin/main(或交付提交的基点),`git cherry-pick` 交付提交,列重叠冲突;不再用 `git archive` 解整仓到 /tmp(在 w- 树里,devsvc 拦 checkout 时仅限该树用 `DEVSVC_ALLOW_DANGEROUS=1` 前缀)。
 - 跑 `tools/affected.cx --files ... --run` 选出的批次。
 - 改过的每个 .cx 用已装产品实编一遍。
 - 涉及 register 的跑冷环境 33 秒门。

@@ -9,27 +9,28 @@ description: 编排者向执行者窗口或子代理派工、并把交付落库�
 
 ## (1) 五段简报
 
-每份简报固定五段,缺一段不派:
+每份简报固定六段,缺一段不派(第六段"工作位置"是 2026-11-26 所有者令加的):
 
 - 目标:一句话可验收的结果。原因:模糊目标会让执行者自行扩大范围。
 - 写域:只许改的路径清单。原因:写域互不相交才能并行,越界改动会打断别的车道。
 - 验收:命令加预期值(退出码、关键输出行)。原因:没有预期值的验收无法判定。
 - 截止:单个子代理不超过 15 分钟,12 分钟催收尾。原因:长任务失控后上下文与证据都难回收。
 - 禁区:不改写域外、不删断言、不缩覆盖、不放宽时限、不提交他人路径、不 stash/reset/clean/checkout。
+- 工作位置:树路径(`.claude/worktrees/w-<窗口名>`)、基点提交号、交付等于"在该树里提交并交提交号"、报告放该树 `.work/`。原因:不写位置,执行者会各自把整仓解到 /tmp 或 ~/.local/share(2026-11-26 实测 /tmp 38GB、research 12GB,含 100 多份整仓副本)。
 
 ## (2) 通用规则
 
 - 中文、无 emoji、箭头写 ->,编号写 (1)(2)。
 - 命令 55 秒内;长作业用 `sh ./unisacc.com tools/devsvc.cx -- x --bg` 加 `wait --timeout-ms`。原因:铁律 60 秒上限,留 5 秒给清理。
-- 临时产物 `mktemp -d $CLAUDE_JOB_DIR/tmp/xxx.XXXXXX`,不写仓库 out/。
+- 临时产物:一次性小物写 `$CLAUDE_JOB_DIR/tmp`,不写仓库 out/;每条跑检查、冷测、register、commit-own 的命令前加 `export TMPDIR=<自己的 w- 树>/.work/tmp`,让工具会话根落进自己的树。严禁往 /tmp 与 ~/.local/share/unisacc 新建仓树副本、补丁、报告或工作目录(这两处不是工作目录;/tmp 只留 tmux 与 claude 运行文件)。
 - 改仓内文件只用 devsvc `f write/edit` 或 Edit/Write,不用 sed/awk/python/perl。
 - 不用 load1 做任何判定。原因:负载不是根因,rc 2 与 REFUSE 默认当确定性缺陷。
 - 同一失败连续两次即停手回报证据,不换说法重试。
 
 ## (3) 分支与工作目录
 
-- 分支只有两类:`main`(集成与发布)和每个开发中版本一条 `vX.Y.Z`。不按单元、任务或执行者另建分支或工作树。原因:CLAUDE.md 只规定这两类,按单元分叉会制造合并债与孤儿分支。
-- 版本分支的工作目录是仓内 `.claude/worktrees/vX.Y.Z`,根放 `unisacc.com` 与 `unisacc.com.build.json` 指向共享检出同名文件的符号链接(已忽略,不提交)。直接 `git worktree add` 被守卫钩子 `tools/guard-hook.cx` 拒绝,经 `sh ./unisacc.com tools/devsvc.cx -- x --par 1 -- git worktree add ...` 建。
+- 分支只有两类:`main`(集成与发布)和每个开发中版本一条 `vX.Y.Z`;每个窗口另有一棵仓内常驻私有工作树 `.claude/worktrees/w-<窗口名>`(分离头或窗口自有提交,不是长期分支)。窗口一律在自己的 w- 树里工作、提交、交提交号;编排者在目标分支的工作树里 `git cherry-pick <提交号>` 落库(同一对象库,冲突由 git 直接报,取代"交补丁文件再 apply")。建树:`EnterWorktree` 工具建 `w-<窗口名>` 后 `ExitWorktree keep`,根放 `unisacc.com` 符号链接与 `.work/`(两者写进该树 `info/exclude`),守卫钩子放行形态见 tools/guard-hook.cx。原因:2026-11-26 复盘,窗口没有常驻私有树才各自 git archive 整仓到 /tmp,基点漂移只能靠落库时 apply --check 发现。
+- 版本分支的工作目录是仓内 `.claude/worktrees/vX.Y.Z`,窗口的 w- 树与它共用对象库;根放 `unisacc.com` 与 `unisacc.com.build.json` 指向共享检出同名文件的符号链接(已忽略,不提交)。直接 `git worktree add` 被守卫钩子 `tools/guard-hook.cx` 拒绝,经 `sh ./unisacc.com tools/devsvc.cx -- x --par 1 -- git worktree add ...` 建。
 - 多个窗口共用同一检出(main 共享检出或版本工作目录),各自只提交自己的路径(`devsvc git commit --whole 路径`,即 commit-own 的设计目的)。devsvc 与产线工具线(tools/ tests/ build/ plans/ skills/ 的 C 类改动)直接在 main 共享检出上提交。
 
 ## (4) 提交与推送组合
