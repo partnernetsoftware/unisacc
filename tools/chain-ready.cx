@@ -808,6 +808,227 @@ static int j_p1file(const char *o, long n) {
     return 1;
 }
 
+static int cr_bcmp(const char *a, long al, const char *b, long bl) {
+    long m = al < bl ? al : bl, i;
+    for (i = 0; i < m; i++) {
+        int d = (unsigned char)a[i] - (unsigned char)b[i];
+        if (d) return d;
+    }
+    return al < bl ? -1 : (al > bl ? 1 : 0);
+}
+
+/* 25-tools-compile-shards (v0.1.6 item 6):
+ * Verifies tools-compile shard count S from `tests/tools-compile.cx -- --shards <repo>` against:
+ *   (1) `tests/tools-compile-sources.tsv` (sorted C byte order, valid `tools/... .cx\t(regular|symlink)` rows,
+ *       and `(n_sources + 7) / 8 == S`);
+ *   (2) `tests/batches.tsv` (every `tools-compile-000 .. tools-compile-(S-1)` registered once as IMPLEMENTED,
+ *       entry `tests/tools-compile.cx`, args `{root};{out};N`, oracle `rc0:TOOLS_COMPILE`, tier daily|commit;
+ *       no out-of-range or duplicate `tools-compile-NNN` rows);
+ *   (3) `tests/manifests/tools-compile-NNN.tsv` (when present: no orphan >= S, and mandatory tail manifest S-1 exists). */
+static int cr_check_tools_compile_shards(const char *repo, const char *root, const char *o, long n, int rc, char *ev, int cap) {
+    const char *eff_repo = (repo && repo[0]) ? repo : ".";
+    const char *eff_root = (root && root[0]) ? root : eff_repo;
+    char probe_out[256], tc_path[4400], src_path[4400], bat_path[4400], mdir_path[4400], tail_mpath[4400];
+    long plen = 0;
+    int prc = rc;
+    (void)eff_root;
+    if (o && n > 0) {
+        plen = n < (long)sizeof probe_out - 1 ? n : (long)sizeof probe_out - 1;
+        mm_copy(probe_out, sizeof probe_out, o, (size_t)plen);
+        probe_out[plen] = 0;
+    } else {
+        if (tx_eqz(eff_repo, ".")) {
+            cx_fmt(tc_path, sizeof tc_path, "tests/tools-compile.cx");
+        } else if (cx_fmt(tc_path, sizeof tc_path, "%s/tests/tools-compile.cx", eff_repo)) {
+            cx_fmt(ev, (size_t)cap, "TOOLS_COMPILE_SHARDS\tFAIL\tpath-overflow:tests/tools-compile.cx");
+            return 0;
+        }
+        char *av[] = {"./tools/bound", "30", "sh", (char *)UC, tc_path, "--", "--shards", (char *)eff_repo, 0}; /* lint:allow R1 invokes tools-compile shard probe via product */
+        np_result rr = {0};
+        char rwhy[200];
+        rwhy[0] = 0;
+        int fail = np_run(av, 0, 0, 35, &rr, rwhy, sizeof rwhy);
+        probe_out[0] = 0;
+        if (rr.out && rr.outn > 0) {
+            plen = (long)rr.outn < (long)sizeof probe_out - 1 ? (long)rr.outn : (long)sizeof probe_out - 1;
+            mm_copy(probe_out, sizeof probe_out, rr.out, (size_t)plen);
+            probe_out[plen] = 0;
+        }
+        prc = fail ? -1 : rr.rc;
+        np_free(&rr);
+        if (fail || prc != 0) {
+            while (plen > 0 && (probe_out[plen - 1] == '\n' || probe_out[plen - 1] == '\r')) probe_out[--plen] = 0;
+            cx_fmt(ev, (size_t)cap, "TOOLS_COMPILE_SHARDS\tFAIL\tshards-probe-failed:rc=%d out=%.160s",
+                   prc, probe_out[0] ? probe_out : (rwhy[0] ? rwhy : "empty"));
+            return 0;
+        }
+    }
+    while (plen > 0 && (probe_out[plen - 1] == '\n' || probe_out[plen - 1] == '\r' || probe_out[plen - 1] == ' ' || probe_out[plen - 1] == '\t'))
+        probe_out[--plen] = 0;
+    int64_t s_val = -1;
+    if (prc != 0 || plen <= 0 || tx_to_i64(probe_out, plen, 10, &s_val) != 0 || s_val <= 0 || s_val > 999) {
+        cx_fmt(ev, (size_t)cap, "TOOLS_COMPILE_SHARDS\tFAIL\tshards-probe-invalid:rc=%d out=%.120s", prc, probe_out);
+        return 0;
+    }
+    int s_probe = (int)s_val;
+
+    /* (1) Verify tests/tools-compile-sources.tsv */
+    size_t sn = 0;
+    char *sb = 0;
+    if (cx_fmt(src_path, sizeof src_path, "%s/tests/tools-compile-sources.tsv", eff_repo) || !(sb = cx_read(src_path, &sn)) || sn == 0) {
+        if (sb) mm_free(sb);
+        cx_fmt(ev, (size_t)cap, "TOOLS_COMPILE_SHARDS\tFAIL\ttools-compile-sources-missing:path=%s/tests/tools-compile-sources.tsv", eff_repo);
+        return 0;
+    }
+    int n_sources = 0, s_lineno = 0;
+    char prev_src[256];
+    long prev_len = 0, at = 0;
+    prev_src[0] = 0;
+    while (at < (long)sn) {
+        long e = tx_chr(sb + at, (long)sn - at, '\n');
+        long ln = e < 0 ? (long)sn - at : e;
+        const char *l = sb + at;
+        at += (e < 0 ? (long)sn - at : e + 1);
+        if (ln > 0 && l[ln - 1] == '\r') ln--;
+        s_lineno++;
+        if (ln == 0) continue;
+        long tab = tx_chr(l, ln, '\t');
+        const char *kstr = tab >= 0 ? l + tab + 1 : "";
+        long klen = tab >= 0 ? ln - tab - 1 : 0;
+        int kind_ok = (klen == 7 && !memcmp(kstr, "regular", 7)) || (klen == 7 && !memcmp(kstr, "symlink", 7));
+        if (tab <= 9 || !tx_prefix(l, tab, "tools/", 6) || memcmp(l + tab - 3, ".cx", 3) != 0 || !kind_ok || tx_chr(kstr, klen, '\t') >= 0) {
+            mm_free(sb);
+            cx_fmt(ev, (size_t)cap, "TOOLS_COMPILE_SHARDS\tFAIL\ttools-compile-sources-malformed:line=%d", s_lineno);
+            return 0;
+        }
+        if (prev_len > 0 && cr_bcmp(prev_src, prev_len, l, tab) >= 0) {
+            mm_free(sb);
+            cx_fmt(ev, (size_t)cap, "TOOLS_COMPILE_SHARDS\tFAIL\ttools-compile-sources-unsorted:line=%d", s_lineno);
+            return 0;
+        }
+        prev_len = tab < (long)sizeof prev_src - 1 ? tab : (long)sizeof prev_src - 1;
+        mm_copy(prev_src, sizeof prev_src, l, (size_t)prev_len);
+        prev_src[prev_len] = 0;
+        n_sources++;
+    }
+    mm_free(sb);
+    int s_table = (n_sources + 7) / 8;
+    if (n_sources <= 0 || s_table != s_probe) {
+        cx_fmt(ev, (size_t)cap, "TOOLS_COMPILE_SHARDS\tFAIL\tshard-count-mismatch:probe=%d sources_table=%d sources=%d (fix: sh ./unisacc.com tools/derive.cx -- --write --only tools-compile-sources)",
+               s_probe, s_table, n_sources);
+        return 0;
+    }
+
+    /* (2) Verify tests/batches.tsv */
+    size_t bn = 0;
+    char *bb = 0;
+    if (cx_fmt(bat_path, sizeof bat_path, "%s/tests/batches.tsv", eff_repo) || !(bb = cx_read(bat_path, &bn)) || bn == 0) {
+        if (bb) mm_free(bb);
+        cx_fmt(ev, (size_t)cap, "TOOLS_COMPILE_SHARDS\tFAIL\tbatches-tsv-unreadable:path=%s/tests/batches.tsv", eff_repo);
+        return 0;
+    }
+    unsigned char seen[1000];
+    int i, reg_count = 0;
+    for (i = 0; i < 1000; i++) seen[i] = 0;
+    at = 0;
+    while (at < (long)bn) {
+        long e = tx_chr(bb + at, (long)bn - at, '\n');
+        long ln = e < 0 ? (long)bn - at : e;
+        const char *l = bb + at;
+        at += (e < 0 ? (long)bn - at : e + 1);
+        if (ln > 0 && l[ln - 1] == '\r') ln--;
+        if (ln == 0 || l[0] == '#' || (ln >= 3 && !memcmp(l, "id\t", 3)) || (ln >= 9 && !memcmp(l, "batch_id\t", 9))) continue;
+        const char *fs[16];
+        long fl[16];
+        int nf = 0;
+        long p = 0;
+        while (nf < 16) {
+            long t = tx_chr(l + p, ln - p, '\t');
+            fs[nf] = l + p;
+            if (t < 0) { fl[nf++] = ln - p; break; }
+            fl[nf++] = t;
+            p += t + 1;
+        }
+        if (nf < 1 || !tx_prefix(fs[0], fl[0], "tools-compile-", 14)) continue;
+        int idx = -1;
+        if (fl[0] == 17 &&
+            fs[0][14] >= '0' && fs[0][14] <= '9' &&
+            fs[0][15] >= '0' && fs[0][15] <= '9' &&
+            fs[0][16] >= '0' && fs[0][16] <= '9') {
+            idx = (fs[0][14] - '0') * 100 + (fs[0][15] - '0') * 10 + (fs[0][16] - '0');
+        }
+        if (idx < 0 || idx >= s_probe) {
+            char bad_id[64];
+            long il = fl[0] < 60 ? fl[0] : 60;
+            mm_copy(bad_id, sizeof bad_id, fs[0], (size_t)il);
+            bad_id[il] = 0;
+            mm_free(bb);
+            cx_fmt(ev, (size_t)cap, "TOOLS_COMPILE_SHARDS\tFAIL\tout-of-range-batch:id=%s max_shard=%03d", bad_id, s_probe - 1);
+            return 0;
+        }
+        if (seen[idx]) {
+            mm_free(bb);
+            cx_fmt(ev, (size_t)cap, "TOOLS_COMPILE_SHARDS\tFAIL\tduplicate-batch:id=tools-compile-%03d", idx);
+            return 0;
+        }
+        char exp_args[32];
+        cx_fmt(exp_args, sizeof exp_args, "{root};{out};%d", idx);
+        long eal = (long)tx_len(exp_args, sizeof exp_args);
+        /* Real 14-column tests/batches.tsv schema:
+         * 0:id 1:implementation 2:layer 3:source 4:mode 5:platform 6:budget_seconds 7:materials 8:entry 9:args 10:coverage 11:expect 12:headers 13:tier */
+        int state_ok = (nf > 1 && fl[1] == 11 && !memcmp(fs[1], "IMPLEMENTED", 11));
+        int entry_ok = (nf > 8 && fl[8] == 22 && !memcmp(fs[8], "tests/tools-compile.cx", 22));
+        int args_ok  = (nf > 9 && fl[9] == eal && !memcmp(fs[9], exp_args, (size_t)eal));
+        int orac_ok  = (nf > 11 && fl[11] >= 17 && !memcmp(fs[11], "rc0:TOOLS_COMPILE", 17));
+        int tier_ok  = (nf > 13 && ((fl[13] == 5 && !memcmp(fs[13], "daily", 5)) || (fl[13] == 6 && !memcmp(fs[13], "commit", 6))));
+        if (!state_ok || !entry_ok || !args_ok || !orac_ok || !tier_ok) {
+            mm_free(bb);
+            cx_fmt(ev, (size_t)cap, "TOOLS_COMPILE_SHARDS\tFAIL\tbatch-contract-drift:id=tools-compile-%03d (expected IMPLEMENTED tests/tools-compile.cx {root};{out};%d rc0:TOOLS_COMPILE)",
+                   idx, idx);
+            return 0;
+        }
+        seen[idx] = 1;
+        reg_count++;
+    }
+    mm_free(bb);
+    for (i = 0; i < s_probe; i++) {
+        if (!seen[i]) {
+            cx_fmt(ev, (size_t)cap, "TOOLS_COMPILE_SHARDS\tFAIL\tunregistered-shard:id=tools-compile-%03d expected_range=000..%03d registered=%d/%d (fix: register tools-compile-%03d in tests/batches.tsv and tests/manifests/tools-compile-%03d.tsv)",
+                   i, s_probe - 1, reg_count, s_probe, i, i);
+            return 0;
+        }
+    }
+
+    /* (3) Verify tests/manifests/tools-compile-NNN.tsv (when manifests directory contains tools-compile-* files) */
+    int n_manifest = 0;
+    if (!cx_fmt(mdir_path, sizeof mdir_path, "%s/tests/manifests", eff_repo)) {
+        sy_stat_t dst, mst;
+        if (sy_lstat(mdir_path, &dst) == 0 && dst.kind == 'd') {
+            for (i = 0; i < s_probe + 16; i++) {
+                if (!cx_fmt(tail_mpath, sizeof tail_mpath, "%s/tests/manifests/tools-compile-%03d.tsv", eff_repo, i) &&
+                    sy_lstat(tail_mpath, &mst) == 0) {
+                    if (i >= s_probe || mst.kind != 'f') {
+                        cx_fmt(ev, (size_t)cap, "TOOLS_COMPILE_SHARDS\tFAIL\torphan-manifest:file=tools-compile-%03d.tsv max_shard=%03d", i, s_probe - 1);
+                        return 0;
+                    }
+                    n_manifest++;
+                }
+            }
+            if (n_manifest > 0) {
+                if (cx_fmt(tail_mpath, sizeof tail_mpath, "%s/tests/manifests/tools-compile-%03d.tsv", eff_repo, s_probe - 1) ||
+                    sy_lstat(tail_mpath, &mst) != 0 || mst.kind != 'f') {
+                    cx_fmt(ev, (size_t)cap, "TOOLS_COMPILE_SHARDS\tFAIL\tmissing-tail-manifest:path=tests/manifests/tools-compile-%03d.tsv", s_probe - 1);
+                    return 0;
+                }
+            }
+        }
+    }
+
+    cx_fmt(ev, (size_t)cap, "TOOLS_COMPILE_SHARDS\tPASS\tshards=%d\tsources=%d\tbatches=%d/%d\tmanifests=%d",
+           s_probe, n_sources, reg_count, s_probe, n_manifest);
+    return 1;
+}
+
 static int judge_kind(const char *kind, const char *o, long n, int rc, char *ev, int cap) {
     long kl = (long)tx_len(kind, 256);
     if (tx_eqz(kind, "rev")) return j_rev(o, n, rc, ev, cap);
@@ -818,6 +1039,7 @@ static int judge_kind(const char *kind, const char *o, long n, int rc, char *ev,
     if (tx_eqz(kind, "tri")) return j_tri(o, n, rc, ev, cap);
     if (tx_eqz(kind, "extract")) return j_extract(o, n, rc, ev, cap);
     if (tx_eqz(kind, "chain")) return j_chain(o, n, rc, ev, cap);
+    if (tx_eqz(kind, "tools-compile-shards")) return cr_check_tools_compile_shards(cr_repo, cr_repo, o, n, rc, ev, cap);
     if (tx_eqz(kind, "chain-shards")) return j_chain_shards_text(o, n, rc, ev, cap);
     if (tx_eqz(kind, "affected") || tx_prefix(kind, (long)tx_len(kind, 64), "affected:", 9)) return j_affected(o, n, rc, ev, cap);
     if (tx_eqz(kind, "inflight")) return j_inflight(o, n, ev, cap);
@@ -1303,7 +1525,8 @@ static int rf_cand_commit(const char *repo, const char *ver, char *dst, int cap)
     X(CR_G_22_PREMERGE_UNION4, "22-premerge-union4") \
     X(CR_G_22_PREMERGE_UNION5, "22-premerge-union5") \
     X(CR_G_23_FREEZE_ARMED, "23-freeze-armed") \
-    X(CR_G_24_ROOT_CURRENT, "24-root-current")
+    X(CR_G_24_ROOT_CURRENT, "24-root-current") \
+    X(CR_G_25_TOOLS_COMPILE_SHARDS, "25-tools-compile-shards")
 enum CrGateId {
 #define CR_GATE_ENUM(id, str) id,
     CR_GATE_ROSTER(CR_GATE_ENUM)
@@ -1928,6 +2151,8 @@ static int freeze_armed(const char *repo, char *ev, int cap) {
 
 static int cr_strict_helper = 0;
 static int cr_require_persist = 0;
+static const char *cr_prerun_plan = 0;
+static const char *cr_expect_helper_sha = 0;
 
 static int cr_abs_from_cwd(const char *p, char *out, size_t cap) {
     char cwd[2048];
@@ -2100,6 +2325,12 @@ static int cr_verify_helper_receipt(const char *repo, const char *ih, int strict
         cx_fmt(ev, cap, "UNISACC_IDENT_HELPER not-executable path=%s (fix: chmod +x or --prepare-helper)", ih);
         return 0;
     }
+    if (cr_expect_helper_sha && cr_expect_helper_sha[0]) {
+        if (cr_sha256_file(ih, cur_bin) || !tx_eqz(cur_bin, cr_expect_helper_sha)) {
+            cx_fmt(ev, cap, "helper-pin-sha-mismatch expected=%.12s actual=%.12s path=%s", cr_expect_helper_sha, cur_bin, ih);
+            return 0;
+        }
+    }
     if (cx_fmt(rpath, sizeof rpath, "%s.ident", ih)) {
         cx_fmt(ev, cap, "helper-receipt-path-overflow path=%s", ih);
         return 0;
@@ -2114,7 +2345,11 @@ static int cr_verify_helper_receipt(const char *repo, const char *ih, int strict
             cx_fmt(ev, cap, "helper-receipt-missing path=%s (fix: sh ./unisacc.com tools/chain-ready.cx -- --prepare-helper --helper-out %s)", rpath, ih);
             return 0;
         }
-        cx_fmt(ev, cap, "UNISACC_IDENT_HELPER=%s executable", ih);
+        if (cr_expect_helper_sha && cr_expect_helper_sha[0]) {
+            cx_fmt(ev, cap, "UNISACC_IDENT_HELPER=%s executable pinned_sha=%.12s", ih, cr_expect_helper_sha);
+        } else {
+            cx_fmt(ev, cap, "UNISACC_IDENT_HELPER=%s executable", ih);
+        }
         return 1;
     }
     rb = cx_read(rpath, &rn);
@@ -2142,7 +2377,11 @@ static int cr_verify_helper_receipt(const char *repo, const char *ih, int strict
             return 0;
         }
     }
-    cx_fmt(ev, cap, "UNISACC_IDENT_HELPER=%s executable verified=1 src_sha=%.12s", ih, cur_src);
+    if (cr_expect_helper_sha && cr_expect_helper_sha[0]) {
+        cx_fmt(ev, cap, "UNISACC_IDENT_HELPER=%s executable verified=1 src_sha=%.12s pinned_sha=%.12s", ih, cur_src, cr_expect_helper_sha);
+    } else {
+        cx_fmt(ev, cap, "UNISACC_IDENT_HELPER=%s executable verified=1 src_sha=%.12s", ih, cur_src);
+    }
     return 1;
 }
 
@@ -2194,11 +2433,115 @@ static int cr_lookup_chain_env(const char *tb, size_t tn, const char *name, size
     return found;
 }
 
+static int cr_path_inside_git_repo(const char *path, char *git_root, size_t cap) {
+    char cur[4400], gitp[4420];
+    sy_stat_t st;
+    if (!path || path[0] != '/' || cx_fmt(cur, sizeof cur, "%s", path)) return 0;
+    size_t cl = strlen(cur);
+    while (cl > 1 && cur[cl - 1] == '/') cur[--cl] = 0;
+    while (cl > 1) {
+        if (!cx_fmt(gitp, sizeof gitp, "%s/.git", cur) && sy_lstat(gitp, &st) == 0) {
+            cx_fmt(git_root, cap, "%s", cur);
+            return 1;
+        }
+        char *sl = strrchr(cur, '/');
+        if (!sl || sl == cur) break;
+        *sl = 0;
+        cl = (size_t)(sl - cur);
+    }
+    return 0;
+}
+
+static int cr_check_tmpdir_git(char *git_root, size_t cap) {
+    const char *td = getenv("TMPDIR");
+    char probe[4400], real[4400];
+    git_root[0] = 0;
+    if (!td || !td[0]) return 0;
+    if (td[0] != '/') {
+        cx_fmt(git_root, cap, "%s", td);
+        return -1;
+    }
+    if (cr_path_inside_git_repo(td, git_root, cap)) return 1;
+    if (cx_fmt(probe, sizeof probe, "%s", td) == 0) {
+        for (;;) {
+            if (sy_realpath(probe, real, sizeof real) > 0) {
+                if (cr_path_inside_git_repo(real, git_root, cap)) return 1;
+                break;
+            }
+            char *sl = strrchr(probe, '/');
+            if (!sl || sl == probe) break;
+            *sl = 0;
+        }
+    }
+    return 0;
+}
+
+static int cr_buf_has_batch_tok(const char *buf, size_t n, const char *batch_id) {
+    size_t bl = strlen(batch_id), p = 0;
+    while (p < n) {
+        size_t e = p;
+        while (e < n && buf[e] != '\n') e++;
+        size_t ll = e - p;
+        const char *l = buf + p;
+        p = e + 1;
+        if (ll > 0 && l[ll - 1] == '\r') ll--;
+        size_t i = 0;
+        while (i < ll && (l[i] == ' ' || l[i] == '\t')) i++;
+        if (i >= ll || l[i] == '#') continue;
+        while (i < ll) {
+            while (i < ll && (l[i] == ' ' || l[i] == '\t' || l[i] == ',' || l[i] == ';')) i++;
+            size_t ts = i;
+            while (i < ll && l[i] != ' ' && l[i] != '\t' && l[i] != ',' && l[i] != ';') i++;
+            size_t tl = i - ts;
+            if (tl == bl && !memcmp(l + ts, batch_id, bl)) return 1;
+        }
+    }
+    return 0;
+}
+
+static int cr_plan_has_batch(const char *plan_path, const char *batch_id) {
+    sy_stat_t st;
+    if (!plan_path || !plan_path[0] || sy_lstat(plan_path, &st) != 0) return -1;
+    if (st.kind == 'd') {
+        char sub[4400];
+        size_t n = 0;
+        char *b = 0;
+        int any_read = 0, hit = 0;
+        if (!cx_fmt(sub, sizeof sub, "%s/windows.tsv", plan_path) && (b = cx_read(sub, &n))) {
+            any_read = 1;
+            if (cr_buf_has_batch_tok(b, n, batch_id)) hit = 1;
+            mm_free(b);
+        }
+        if (!hit && !cx_fmt(sub, sizeof sub, "%s/ids.txt", plan_path) && (b = cx_read(sub, &n))) {
+            any_read = 1;
+            if (cr_buf_has_batch_tok(b, n, batch_id)) hit = 1;
+            mm_free(b);
+        }
+        return any_read ? hit : -1;
+    }
+    size_t n = 0;
+    char *b = cx_read(plan_path, &n);
+    if (!b) return -1;
+    int hit = cr_buf_has_batch_tok(b, n, batch_id);
+    mm_free(b);
+    return hit;
+}
+
+static int cr_booter_chain_out_valid(const char *bco) {
+    char p1[4400], p2[4400];
+    sy_stat_t s1, s2;
+    if (!bco || bco[0] != '/') return 0;
+    if (cx_fmt(p1, sizeof p1, "%s/fixedpoint/g2/lnx-x86_64/entry.elf", bco) ||
+        cx_fmt(p2, sizeof p2, "%s/seal.tsv", bco)) return 0;
+    return (sy_lstat(p1, &s1) == 0 && s1.kind == 'f' &&
+            sy_lstat(p2, &s2) == 0 && s2.kind == 'f');
+}
+
 static int cr_check_env_clean(const char *repo, int allow_future_deadline, char *bad, size_t cap, double *at_out, int *st_out) {
     extern char **environ;
     double at = 0.0; const char *why = 0;
     int st = be_deadline(&at, &why);
-    char cpath[4400], pol[32];
+    char cpath[4400], pol[32], git_root[400];
     const char *eff_repo = (repo && repo[0]) ? repo : ".";
     size_t tn = 0; char *tb = 0; int defdeny = 1;
     bad[0] = 0;
@@ -2208,6 +2551,32 @@ static int cr_check_env_clean(const char *repo, int allow_future_deadline, char 
         char one[200];
         cx_fmt(one, sizeof one, "%s (%s)", be_name(), st < 0 ? why : "bound-deadline-active");
         cr_append_bad(bad, cap, one);
+    }
+    int td_git = cr_check_tmpdir_git(git_root, sizeof git_root);
+    if (td_git < 0) {
+        char one[240];
+        cx_fmt(one, sizeof one, "TMPDIR (relative-path: %.160s)", git_root);
+        cr_append_bad(bad, cap, one);
+    } else if (td_git > 0) {
+        char one[240];
+        cx_fmt(one, sizeof one, "TMPDIR (inside-git-repo: %.160s)", git_root);
+        cr_append_bad(bad, cap, one);
+    }
+    const char *plan_p = (cr_prerun_plan && cr_prerun_plan[0]) ? cr_prerun_plan : getenv("UNISACC_PRERUN_PLAN");
+    int need_booter = 0;
+    if (plan_p && plan_p[0]) {
+        int pb = cr_plan_has_batch(plan_p, "cx-booter-ape");
+        if (pb < 0) {
+            cr_append_bad(bad, cap, "prerun-plan (unreadable)");
+        } else if (pb > 0) {
+            need_booter = 1;
+            const char *bco = getenv("UNISACC_BOOTER_CHAIN_OUT");
+            if (!bco || !bco[0]) {
+                cr_append_bad(bad, cap, "UNISACC_BOOTER_CHAIN_OUT (missing for planned cx-booter-ape)");
+            } else if (!cr_booter_chain_out_valid(bco)) {
+                cr_append_bad(bad, cap, "UNISACC_BOOTER_CHAIN_OUT (invalid-or-unsealed-chain-out for cx-booter-ape)");
+            }
+        }
     }
     if (cx_fmt(cpath, sizeof cpath, "%s/build/chain-env.tsv", eff_repo) || !(tb = cx_read(cpath, &tn))) {
         cr_append_bad(bad, cap, "build/chain-env.tsv (unreadable)");
@@ -2226,7 +2595,9 @@ static int cr_check_env_clean(const char *repo, int allow_future_deadline, char 
             continue;
         }
         if (kl == 15 && !memcmp(s, "UNISA_CONTAINER", 15)) continue;
-        if (kl <= 8 || strncmp(s, "UNISACC_", 8) != 0) continue;
+        if (kl < 8 || strncmp(s, "UNISACC_", 8) != 0) continue;
+        if (need_booter && kl == 24 && !memcmp(s, "UNISACC_BOOTER_CHAIN_OUT", 24)) continue;
+        if (plan_p && plan_p[0] && kl == 19 && !memcmp(s, "UNISACC_PRERUN_PLAN", 19)) continue;
         int found = cr_lookup_chain_env(tb, tn, s, (size_t)kl, pol, sizeof pol, &defdeny);
         if (found) {
             if (tx_eqz(pol, "deny") && val[0] != 0) {
@@ -2628,6 +2999,21 @@ int main(int argc, char **argv) {
                 pf_bound_s = argv[++a];
             }
             else if (tx_eqz(argv[a], "--chain-base") && a + 1 < argc) chain_base_arg = argv[++a];
+            else if (tx_eqz(argv[a], "--prerun-plan") && a + 1 < argc) cr_prerun_plan = argv[++a];
+            else if (tx_eqz(argv[a], "--ident-helper-sha256") && a + 1 < argc) {
+                const char *hs = argv[++a];
+                size_t hl = hs ? strlen(hs) : 0;
+                int hok = (hl == 64);
+                for (size_t hi = 0; hi < hl && hok; hi++) {
+                    char c = hs[hi];
+                    if (!((c >= '0' && c <= '9') || (c >= 'a' && c <= 'f'))) hok = 0;
+                }
+                if (!hok) {
+                    fprintf(stderr, "chain-ready: bad --ident-helper-sha256 %s (expected 64 lowercase hex chars)\n", hs ? hs : "");
+                    return 2;
+                }
+                cr_expect_helper_sha = hs;
+            }
             else if (tx_eqz(argv[a], "--disk-free-gb") && a + 1 < argc) {
                 int64_t dv = -1; tx_to_i64(argv[a + 1], (long)tx_len(argv[a + 1], 16), 10, &dv); disk_override_gb = (long)dv; a++;
             } else if (tx_eqz(argv[a], "--pik1-capture-cap") && a + 1 < argc) {
@@ -3175,6 +3561,13 @@ int main(int argc, char **argv) {
             cx_fmt(ev, sizeof ev, "%.580s", out_buf);
             row_judged_g(CR_G_24_ROOT_CURRENT, 1, ev, sy_now_ms() - t0);
         }
+    }
+    /* 25-tools-compile-shards (v0.1.6 item 6): tools-compile shard count vs tools-compile-sources.tsv, batches.tsv, and tests/manifests */
+    if (WANT_G(CR_G_25_TOOLS_COMPILE_SHARDS)) {
+        char ev[640]; long t0 = sy_now_ms();
+        const char *eff_root = (rootarg && rootarg[0]) ? rootarg : repo;
+        int ok = cr_check_tools_compile_shards(repo, eff_root, 0, 0, 0, ev, sizeof ev);
+        row_judged_g(CR_G_25_TOOLS_COMPILE_SHARDS, ok, ev, sy_now_ms() - t0);
     }
     {
         int w12 = WANT_G(CR_G_12_ROOT_FILES), w12p = WANT_G(CR_G_12P_PREFLIGHT_ENTRY);

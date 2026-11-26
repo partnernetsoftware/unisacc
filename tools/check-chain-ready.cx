@@ -405,6 +405,79 @@ int main(int argc, char **argv) {
         rc = run(v, out, sizeof out);
         ck(rc == 0 && has(out, "10-envhygiene\tPASS") && has(out, "inside a bound window"), "envhygiene-future-deadline-pass");
     }
+    /* v0.1.6 item 6 red-first tests for 10-envhygiene: unregistered empty UNISACC_*, TMPDIR inside any git repo (direct & symlink), and missing/unsealed UNISACC_BOOTER_CHAIN_OUT when cx-booter-ape is in the plan */
+    {   char *v[] = {"./tools/bound", "60", "env", "-u", "UNISACC_BOUND_DEADLINE_MONO", "-u", "UNISACC_RUN_CACHE", "-u", "UNISACC_CACHE_DIR", "UNISACC_UNKNOWN_EMPTY=",
+                     "sh", UC, "tools/chain-ready.cx", "--", "--only", "10-envhygiene", 0};
+        rc = run(v, out, sizeof out);
+        ck(rc == 1 && has(out, "10-envhygiene\tFAIL") && has(out, "UNISACC_UNKNOWN_EMPTY") && has(out, "unregistered in build/chain-env.tsv") && has(out, "READY\tno"),
+           "envhygiene-unregistered-empty-unisacc-var-refused");
+    }
+    {   char grepo[420], gsub[440], gtmp[460], glink[420], env_td1[500], env_td2[500];
+        cx_fmt(grepo, sizeof grepo, "%s/env-git-repo", tmpd);
+        cx_fmt(gsub, sizeof gsub, "%s/sub", grepo);
+        cx_fmt(gtmp, sizeof gtmp, "%s/tmp", gsub);
+        cx_fmt(glink, sizeof glink, "%s/env-git-link", tmpd);
+        { char *iv[] = {"./tools/bound", "20", "git", "init", "-q", grepo, 0}; run(iv, out, sizeof out); }
+        sy_mkdir(gsub, 0755); sy_mkdir(gtmp, 0755);
+        (void)sy_symlink(gtmp, glink);
+        cx_fmt(env_td1, sizeof env_td1, "TMPDIR=%s", gtmp);
+        cx_fmt(env_td2, sizeof env_td2, "TMPDIR=%s", glink);
+        {   char *v[] = {"./tools/bound", "60", "env", "-u", "UNISACC_BOUND_DEADLINE_MONO", "-u", "UNISACC_RUN_CACHE", "-u", "UNISACC_CACHE_DIR", env_td1,
+                         "sh", UC, "tools/chain-ready.cx", "--", "--only", "10-envhygiene", 0};
+            rc = run(v, out, sizeof out);
+            ck(rc == 1 && has(out, "10-envhygiene\tFAIL") && has(out, "TMPDIR") && has(out, "inside-git-repo") && has(out, "READY\tno"),
+               "envhygiene-tmpdir-inside-git-repo-refused");
+        }
+        {   char *v[] = {"./tools/bound", "60", "env", "-u", "UNISACC_BOUND_DEADLINE_MONO", "-u", "UNISACC_RUN_CACHE", "-u", "UNISACC_CACHE_DIR", env_td2,
+                         "sh", UC, "tools/chain-ready.cx", "--", "--only", "10-envhygiene", 0};
+            rc = run(v, out, sizeof out);
+            ck(rc == 1 && has(out, "10-envhygiene\tFAIL") && has(out, "TMPDIR") && has(out, "inside-git-repo") && has(out, "READY\tno"),
+               "envhygiene-tmpdir-symlink-into-git-repo-refused");
+        }
+    }
+    {   char bplan_with[420], bplan_no[420], bdir_bad[420], bdir_ok[420], d1[440], d2[450], d3[460], elfp[480], sealp[460], env_bad[500], env_ok[500];
+        const char *pw = "# window-lanes=3\nwindow\tlane\tbatches\n0\t0\ttools-compile-000,cx-booter-ape\n";
+        const char *pn = "# window-lanes=3\nwindow\tlane\tbatches\n0\t0\ttools-compile-000\n";
+        cx_fmt(bplan_with, sizeof bplan_with, "%s/plan-with-booter.tsv", tmpd);
+        cx_fmt(bplan_no, sizeof bplan_no, "%s/plan-no-booter.tsv", tmpd);
+        cx_fmt(bdir_bad, sizeof bdir_bad, "%s/booter-bad", tmpd);
+        cx_fmt(bdir_ok, sizeof bdir_ok, "%s/booter-ok", tmpd);
+        cx_write(bplan_with, pw, tx_len(pw, 256));
+        cx_write(bplan_no, pn, tx_len(pn, 256));
+        sy_mkdir(bdir_bad, 0755);
+        sy_mkdir(bdir_ok, 0755);
+        cx_fmt(d1, sizeof d1, "%s/fixedpoint", bdir_ok); sy_mkdir(d1, 0755);
+        cx_fmt(d2, sizeof d2, "%s/g2", d1); sy_mkdir(d2, 0755);
+        cx_fmt(d3, sizeof d3, "%s/lnx-x86_64", d2); sy_mkdir(d3, 0755);
+        cx_fmt(elfp, sizeof elfp, "%s/entry.elf", d3); cx_write(elfp, "ELF\n", 4);
+        cx_fmt(sealp, sizeof sealp, "%s/seal.tsv", bdir_ok); cx_write(sealp, "sealed\t1\n", 9);
+        cx_fmt(env_bad, sizeof env_bad, "UNISACC_BOOTER_CHAIN_OUT=%s", bdir_bad);
+        cx_fmt(env_ok, sizeof env_ok, "UNISACC_BOOTER_CHAIN_OUT=%s", bdir_ok);
+        {   char *v[] = {"./tools/bound", "60", "env", "-u", "UNISACC_BOUND_DEADLINE_MONO", "-u", "UNISACC_RUN_CACHE", "-u", "UNISACC_CACHE_DIR", "-u", "UNISACC_BOOTER_CHAIN_OUT",
+                         "sh", UC, "tools/chain-ready.cx", "--", "--only", "10-envhygiene", "--prerun-plan", bplan_with, 0};
+            rc = run(v, out, sizeof out);
+            ck(rc == 1 && has(out, "10-envhygiene\tFAIL") && has(out, "UNISACC_BOOTER_CHAIN_OUT") && has(out, "cx-booter-ape") && has(out, "READY\tno"),
+               "envhygiene-booter-chain-out-missing-when-cx-booter-ape-in-plan-refused");
+        }
+        {   char *v[] = {"./tools/bound", "60", "env", "-u", "UNISACC_BOUND_DEADLINE_MONO", "-u", "UNISACC_RUN_CACHE", "-u", "UNISACC_CACHE_DIR", env_bad,
+                         "sh", UC, "tools/chain-ready.cx", "--", "--only", "10-envhygiene", "--prerun-plan", bplan_with, 0};
+            rc = run(v, out, sizeof out);
+            ck(rc == 1 && has(out, "10-envhygiene\tFAIL") && has(out, "UNISACC_BOOTER_CHAIN_OUT") && has(out, "invalid-or-unsealed-chain-out") && has(out, "READY\tno"),
+               "envhygiene-booter-chain-out-unsealed-when-cx-booter-ape-in-plan-refused");
+        }
+        {   char *v[] = {"./tools/bound", "60", "env", "-u", "UNISACC_BOUND_DEADLINE_MONO", "-u", "UNISACC_RUN_CACHE", "-u", "UNISACC_CACHE_DIR", env_ok,
+                         "sh", UC, "tools/chain-ready.cx", "--", "--only", "10-envhygiene", "--prerun-plan", bplan_with, 0};
+            rc = run(v, out, sizeof out);
+            ck(rc == 0 && has(out, "10-envhygiene\tPASS") && has(out, "READY\tyes"),
+               "envhygiene-booter-chain-out-valid-when-cx-booter-ape-in-plan-pass");
+        }
+        {   char *v[] = {"./tools/bound", "60", "env", "-u", "UNISACC_BOUND_DEADLINE_MONO", "-u", "UNISACC_RUN_CACHE", "-u", "UNISACC_CACHE_DIR", "-u", "UNISACC_BOOTER_CHAIN_OUT",
+                         "sh", UC, "tools/chain-ready.cx", "--", "--only", "10-envhygiene", "--prerun-plan", bplan_no, 0};
+            rc = run(v, out, sizeof out);
+            ck(rc == 0 && has(out, "10-envhygiene\tPASS") && has(out, "READY\tyes"),
+               "envhygiene-booter-chain-out-not-required-when-cx-booter-ape-absent-pass");
+        }
+    }
     /* is_negfix: the real function text is cut out of chain-ready.cx into a tiny probe program (no interface change) */
     {   size_t sn; char *src = cx_read("tools/chain-ready.cx", &sn); long a = -1, b = -1, i;
         static const char *P[] = {"tests/cxclash/main.cx", "tools/install-fixes/iproto/main.cx", "tools/install-fixes/iproto/user.cx", "tools/symindex/fixture/proto/user.cx",
@@ -752,7 +825,7 @@ int main(int argc, char **argv) {
                     "15-gen-all", "16-disk-free", "17-root-public", "18-parse2-gen", "19-chain-preflight",
                     "19a-preflight-sixtarget", "19b-preflight-snap", "20-ident-helper", "21-verseq-gen",
                     "22-premerge-union", "22-premerge-union2", "22-premerge-union3", "22-premerge-union4", "22-premerge-union5",
-                    "23-freeze-armed", "24-root-current", 0
+                    "23-freeze-armed", "24-root-current", "25-tools-compile-shards", 0
                 };
                 size_t crn = 0; char *crs = cx_read("tools/chain-ready.cx", &crn);
                 int ok_ss = (crs != 0 && has(crs, "#define CR_GATE_ROSTER(X)") &&
@@ -814,15 +887,18 @@ int main(int argc, char **argv) {
                 cx_fmt(list_f, sizeof list_f, "%s/aff-list-out.txt", tmpd);
                 cx_write(ih_def, "#!/bin/sh\nexit 0\n", 17); chmod(ih_def, 0700);
                 cx_fmt(dcmd, sizeof dcmd,
-                    "rm -rf '%s' && mkdir -p '%s/tools' '%s/build' '%s/plans' '%s/release' '%s/src' && "
-                    "ln -sT '%s/cx' '%s/cx' && ln -s '%s/cxroot.tsv' '%s/cxroot.tsv' && "
-                    "ln -sT '%s/tools/cxlib' '%s/tools/cxlib' && ln -s '%s/tools/bound' '%s/tools/bound' && ln -s '%s/tools/bound.c' '%s/tools/bound.c' && "
-                    "ln -s '%s/tools/chain-ready.cx' '%s/tools/chain-ready.cx' && "
-                    "{ [ ! -e '%s/ext' ] || ln -sT '%s/ext' '%s/ext'; } && "
-                    "cp build/chain-env.tsv '%s/build/chain-env.tsv' && "
-                    "printf 'UNISACC_FREEZE_NO_FETCH\\tallow\\tfixture\\n' >> '%s/build/chain-env.tsv' && "
-                    "printf '#define NRK 19\\n' > '%s/tools/ratchets.cx' && "
-                    "cat > '%s/unisacc.com' << 'EOFDEFUC'\n"
+                    "D='%s' && C='%s' && "
+                    "rm -rf \"$D\" && mkdir -p \"$D/tools\" \"$D/build\" \"$D/plans\" \"$D/release\" \"$D/src\" \"$D/tests\" && "
+                    "ln -sT \"$C/cx\" \"$D/cx\" && ln -s \"$C/cxroot.tsv\" \"$D/cxroot.tsv\" && "
+                    "ln -sT \"$C/tools/cxlib\" \"$D/tools/cxlib\" && ln -s \"$C/tools/bound\" \"$D/tools/bound\" && ln -s \"$C/tools/bound.c\" \"$D/tools/bound.c\" && "
+                    "ln -s \"$C/tools/chain-ready.cx\" \"$D/tools/chain-ready.cx\" && "
+                    "{ [ ! -e \"$C/ext\" ] || ln -sT \"$C/ext\" \"$D/ext\"; } && "
+                    "cp build/chain-env.tsv \"$D/build/chain-env.tsv\" && "
+                    "printf 'UNISACC_FREEZE_NO_FETCH\\tallow\\tfixture\\n' >> \"$D/build/chain-env.tsv\" && "
+                    "printf '#define NRK 19\\n' > \"$D/tools/ratchets.cx\" && "
+                    "printf 'tools/a.cx\\tregular\\n' > \"$D/tests/tools-compile-sources.tsv\" && "
+                    "printf 'id\\timplementation\\tlayer\\tsource\\tmode\\tplatform\\tbudget_seconds\\tmaterials\\tentry\\targs\\tcoverage\\texpect\\theaders\\ttier\\ntools-compile-000\\tIMPLEMENTED\\tcontract\\ttests/tools-compile.cx\\tSOURCE\\tlnx/x86_64\\t55\\t-\\ttests/tools-compile.cx\\t{root};{out};0\\ttools.compile-all\\trc0:TOOLS_COMPILE\\tproduct\\tdaily\\n' > \"$D/tests/batches.tsv\" && "
+                    "cat > \"$D/unisacc.com\" << 'EOFDEFUC'\n"
                     "#!/bin/sh\n"
                     "if [ \"$1\" = \"--version\" ]; then printf 'unisacc 0.0.87\\n'; exit 0; fi\n"
                     "tool=\"$1\"; shift\n"
@@ -855,14 +931,15 @@ int main(int argc, char **argv) {
                     "  tools/verseq-gen.cx) printf 'VERSEQ_SUMMARY\\tchecks=5\\tfail=0\\n'; exit 0;;\n"
                     "  tools/premerge-union.cx) printf 'PREMERGE_UNION_SUMMARY\\tverdict=PASS\\tshard=prep\\tconflict=0\\tgen_fail=0\\tderive_drift=0\\tderive_refused=0\\tcheck_derive_fail=0\\tms=1\\n'; exit 0;;\n"
                     "  tools/root-current.cx) printf 'ROOT_CURRENT\\tPASS\\texpect=0.0.87\\texpect_sha=0000\\tactual_sha=0000\\n'; exit 0;;\n"
+                    "  */tests/tools-compile.cx|tests/tools-compile.cx) printf '1\\n'; exit 0;;\n"
                     "  *) exit 0;;\n"
                     "esac\n"
                     "EOFDEFUC\n"
-                    "chmod +x '%s/unisacc.com' && "
-                    "sha=$(sha256sum '%s/unisacc.com' | cut -d' ' -f1) && "
-                    "sz=$(wc -c < '%s/unisacc.com' | tr -d ' ') && "
-                    "cd '%s' && git init -q -b v0.0.87 && git config user.email t@t && git config user.name t && "
-                    "printf '/cx\\n/cxroot.tsv\\n/ext\\n/tools\\n/unisacc.com\\n/unisacc.com.build.json\\n/release\\n/build/chain-env.tsv\\n' > .gitignore && "
+                    "chmod +x \"$D/unisacc.com\" && "
+                    "sha=$(sha256sum \"$D/unisacc.com\" | cut -d' ' -f1) && "
+                    "sz=$(wc -c < \"$D/unisacc.com\" | tr -d ' ') && "
+                    "cd \"$D\" && git init -q -b v0.0.87 && git config user.email t@t && git config user.name t && "
+                    "printf '/cx\\n/cxroot.tsv\\n/ext\\n/tools\\n/tests\\n/unisacc.com\\n/unisacc.com.build.json\\n/release\\n/build/chain-env.tsv\\n' > .gitignore && "
                     "printf 'slot\\tversion\\tclass\\tstate\\tnote\\n1\\t0.0.1\\ttest\\t已公开\\tfixture\\n' > build/version-seq.tsv && "
                     "printf '# path\\tlane\\tsource\\nsrc/a.txt\\tA\\tsid-list-current\\nsrc/b.txt\\tA\\tsid-list-current\\n' > build/lane-inputs.tsv && "
                     "printf 'planned_units=5\\na_class=前端声明兼容\\na_files_cap=2\\n' > plans/v0.0.87.md && "
@@ -873,12 +950,7 @@ int main(int argc, char **argv) {
                     "touch .git/PUSH-FREEZE && "
                     "printf '{\"product_digest\":\"%%s\",\"bytes\":%%s,\"commit\":\"%%s\",\"sources_sha256\":\"0000\"}\\n' \"$sha\" \"$sz\" \"$head_sha\" > unisacc.com.build.json && "
                     "printf 'repo\\ttag\\tcommit\\tversion\\nr\\tv0.0.87\\t%%s\\t0.0.87\\n' \"$head_sha\" > release/candidate.tsv",
-                    drepo, drepo, drepo, drepo, drepo, drepo,
-                    cwd_core, drepo, cwd_core, drepo,
-                    cwd_core, drepo, cwd_core, drepo, cwd_core, drepo,
-                    cwd_core, drepo,
-                    cwd_core, cwd_core, drepo,
-                    drepo, drepo, drepo, drepo, cwd_core, drepo, drepo, drepo, drepo);
+                    drepo, cwd_core, cwd_core);
                 char *sv[] = {"./tools/bound", "25", "sh", "-c", dcmd, 0};
                 int s_rc = run(sv, out, sizeof out);
                 if (s_rc == 0) {
@@ -1030,6 +1102,32 @@ int main(int argc, char **argv) {
         {   char *v[] = {"./tools/bound", "40", "env", env_noexec, "sh", UC, "tools/chain-ready.cx", "--", "--only", "20-ident-helper", 0};
             rc = run(v, out, sizeof out);
             ck(rc == 1 && has(out, "20-ident-helper\tFAIL") && has(out, "not-executable") && has(out, "READY\tno"), "ident-helper-20-mut3-not-executable-fail");
+        }
+        /* v0.1.6 item 6 red-first tests for 20-ident-helper existence and SHA-256 pin */
+        {   char ih_sym[360], env_sym[420], shacmd[800];
+            cx_fmt(ih_sym, sizeof ih_sym, "%s/ident-sym-core", tmpd);
+            (void)sy_symlink(ih_ok, ih_sym);
+            cx_fmt(env_sym, sizeof env_sym, "UNISACC_IDENT_HELPER=%s", ih_sym);
+            {   char *v[] = {"./tools/bound", "40", "env", env_sym, "sh", UC, "tools/chain-ready.cx", "--", "--only", "20-ident-helper", 0};
+                rc = run(v, out, sizeof out);
+                ck(rc == 1 && has(out, "20-ident-helper\tFAIL") && has(out, "missing-or-not-regular") && has(out, "READY\tno"),
+                   "ident-helper-20-mut4-symlink-refused");
+            }
+            cx_fmt(shacmd, sizeof shacmd,
+                "H=$(sha256sum '%s' | cut -d' ' -f1) && "
+                "UNISACC_IDENT_HELPER='%s' sh '%s' tools/chain-ready.cx -- --only 20-ident-helper --ident-helper-sha256 \"$H\"",
+                ih_ok, ih_ok, UC);
+            {   char *v[] = {"./tools/bound", "40", "sh", "-c", shacmd, 0};
+                rc = run(v, out, sizeof out);
+                ck(rc == 0 && has(out, "20-ident-helper\tPASS") && has(out, "pinned_sha=") && has(out, "READY\tyes"),
+                   "ident-helper-20-pin-sha256-match-pass");
+            }
+            {   char *v[] = {"./tools/bound", "40", "env", env_ok, "sh", UC, "tools/chain-ready.cx", "--", "--only", "20-ident-helper",
+                             "--ident-helper-sha256", "0000000000000000000000000000000000000000000000000000000000000000", 0};
+                rc = run(v, out, sizeof out);
+                ck(rc == 1 && has(out, "20-ident-helper\tFAIL") && has(out, "helper-pin-sha-mismatch") && has(out, "READY\tno"),
+                   "ident-helper-20-pin-sha256-mismatch-refused");
+            }
         }
     }
     /* 16-disk-free (safe subset, cc 2026-11-24 裁定 (b)): the thresholds are still 8G/20G, the number now
@@ -1222,6 +1320,151 @@ int main(int argc, char **argv) {
             ck(src != 0 && has(src, "g_premerge0[10] = \"--branch\"") && has(src, "g_premerge4[10] = \"--branch\""),
                "premerge-22-source-pins-branch-forwarding");
             if (src) mm_free(src);
+        }
+    }
+    /* 25-tools-compile-shards (v0.1.6 item 6 red-first tests): tools-compile shard registration consistency */
+    {
+        char tcrepo[420], d[460], f[480], buf[4096];
+        int i, pos;
+        cx_fmt(tcrepo, sizeof tcrepo, "%s/tcrepo", tmpd);
+        sy_mkdir(tcrepo, 0755);
+        cx_fmt(d, sizeof d, "%s/tests", tcrepo); sy_mkdir(d, 0755);
+        cx_fmt(d, sizeof d, "%s/tests/manifests", tcrepo); sy_mkdir(d, 0755);
+        cx_fmt(d, sizeof d, "%s/tools", tcrepo); sy_mkdir(d, 0755);
+        {
+            const char *probe =
+                "int main(int argc, char **argv) {\n"
+                "    (void)argc; (void)argv;\n"
+                "    puts(\"2\");\n"
+                "    return 0;\n"
+                "}\n";
+            cx_fmt(f, sizeof f, "%s/tests/tools-compile.cx", tcrepo);
+            cx_write(f, probe, tx_len(probe, 512));
+        }
+        pos = 0;
+        for (i = 0; i < 16; i++) {
+            char line[64];
+            cx_fmt(line, sizeof line, "tools/t%02d.cx\tregular\n", i);
+            int ll = (int)tx_len(line, sizeof line);
+            mm_copy(buf + pos, sizeof buf - (size_t)pos, line, (size_t)ll);
+            pos += ll;
+        }
+        buf[pos] = 0;
+        cx_fmt(f, sizeof f, "%s/tests/tools-compile-sources.tsv", tcrepo);
+        cx_write(f, buf, (size_t)pos);
+        {
+            const char *batches_ok =
+                "id\timplementation\tlayer\tsource\tmode\tplatform\tbudget_seconds\tmaterials\tentry\targs\tcoverage\texpect\theaders\ttier\n"
+                "tools-compile-000\tIMPLEMENTED\tcontract\ttests/tools-compile.cx\tSOURCE\tlnx/x86_64\t55\t-\ttests/tools-compile.cx\t{root};{out};0\ttools.compile-all\trc0:TOOLS_COMPILE\tproduct\tdaily\n"
+                "tools-compile-001\tIMPLEMENTED\tcontract\ttests/tools-compile.cx\tSOURCE\tlnx/x86_64\t55\t-\ttests/tools-compile.cx\t{root};{out};1\ttools.compile-all\trc0:TOOLS_COMPILE\tproduct\tdaily\n";
+            cx_fmt(f, sizeof f, "%s/tests/batches.tsv", tcrepo);
+            cx_write(f, batches_ok, tx_len(batches_ok, 1024));
+        }
+        cx_fmt(f, sizeof f, "%s/tests/manifests/tools-compile-000.tsv", tcrepo);
+        cx_write(f, "case_id\n", 8);
+        cx_fmt(f, sizeof f, "%s/tests/manifests/tools-compile-001.tsv", tcrepo);
+        cx_write(f, "case_id\n", 8);
+
+        {
+            char *v[] = {"./tools/bound", "40", "sh", UC, "tools/chain-ready.cx", "--", "--repo", tcrepo, "--only", "25-tools-compile-shards", 0};
+            rc = run(v, out, sizeof out);
+            ck(rc == 0 && has(out, "25-tools-compile-shards\tPASS") && has(out, "shards=2") && has(out, "sources=16") && has(out, "batches=2/2") && has(out, "manifests=2") && has(out, "READY\tyes"),
+               "tools-compile-shards-25-synthetic-16-sources-2-shards-pass");
+        }
+        {
+            const char *batches_missing_tail =
+                "id\timplementation\tlayer\tsource\tmode\tplatform\tbudget_seconds\tmaterials\tentry\targs\tcoverage\texpect\theaders\ttier\n"
+                "tools-compile-000\tIMPLEMENTED\tcontract\ttests/tools-compile.cx\tSOURCE\tlnx/x86_64\t55\t-\ttests/tools-compile.cx\t{root};{out};0\ttools.compile-all\trc0:TOOLS_COMPILE\tproduct\tdaily\n";
+            cx_fmt(f, sizeof f, "%s/tests/batches.tsv", tcrepo);
+            cx_write(f, batches_missing_tail, tx_len(batches_missing_tail, 1024));
+            char *v[] = {"./tools/bound", "40", "sh", UC, "tools/chain-ready.cx", "--", "--repo", tcrepo, "--only", "25-tools-compile-shards", 0};
+            rc = run(v, out, sizeof out);
+            ck(rc == 1 && has(out, "25-tools-compile-shards\tFAIL") && has(out, "unregistered-shard:id=tools-compile-001") && has(out, "expected_range=000..001") && has(out, "registered=1/2") && has(out, "READY\tno"),
+               "tools-compile-shards-25-mut1-missing-tail-batch-refused");
+        }
+        {
+            const char *batches_ok =
+                "id\timplementation\tlayer\tsource\tmode\tplatform\tbudget_seconds\tmaterials\tentry\targs\tcoverage\texpect\theaders\ttier\n"
+                "tools-compile-000\tIMPLEMENTED\tcontract\ttests/tools-compile.cx\tSOURCE\tlnx/x86_64\t55\t-\ttests/tools-compile.cx\t{root};{out};0\ttools.compile-all\trc0:TOOLS_COMPILE\tproduct\tdaily\n"
+                "tools-compile-001\tIMPLEMENTED\tcontract\ttests/tools-compile.cx\tSOURCE\tlnx/x86_64\t55\t-\ttests/tools-compile.cx\t{root};{out};1\ttools.compile-all\trc0:TOOLS_COMPILE\tproduct\tdaily\n";
+            cx_fmt(f, sizeof f, "%s/tests/batches.tsv", tcrepo);
+            cx_write(f, batches_ok, tx_len(batches_ok, 1024));
+            cx_fmt(f, sizeof f, "%s/tests/manifests/tools-compile-001.tsv", tcrepo);
+            sy_unlink(f);
+            char *v[] = {"./tools/bound", "40", "sh", UC, "tools/chain-ready.cx", "--", "--repo", tcrepo, "--only", "25-tools-compile-shards", 0};
+            rc = run(v, out, sizeof out);
+            ck(rc == 1 && has(out, "25-tools-compile-shards\tFAIL") && has(out, "missing-tail-manifest:path=tests/manifests/tools-compile-001.tsv") && has(out, "READY\tno"),
+               "tools-compile-shards-25-mut2-missing-tail-manifest-refused");
+            cx_write(f, "case_id\n", 8);
+        }
+        {
+            pos = 0;
+            for (i = 0; i < 8; i++) {
+                char line[64];
+                cx_fmt(line, sizeof line, "tools/t%02d.cx\tregular\n", i);
+                int ll = (int)tx_len(line, sizeof line);
+                mm_copy(buf + pos, sizeof buf - (size_t)pos, line, (size_t)ll);
+                pos += ll;
+            }
+            buf[pos] = 0;
+            cx_fmt(f, sizeof f, "%s/tests/tools-compile-sources.tsv", tcrepo);
+            cx_write(f, buf, (size_t)pos);
+            char *v[] = {"./tools/bound", "40", "sh", UC, "tools/chain-ready.cx", "--", "--repo", tcrepo, "--only", "25-tools-compile-shards", 0};
+            rc = run(v, out, sizeof out);
+            ck(rc == 1 && has(out, "25-tools-compile-shards\tFAIL") && has(out, "shard-count-mismatch:probe=2 sources_table=1 sources=8") && has(out, "READY\tno"),
+               "tools-compile-shards-25-mut3-source-table-count-mismatch-refused");
+            pos = 0;
+            for (i = 0; i < 16; i++) {
+                char line[64];
+                cx_fmt(line, sizeof line, "tools/t%02d.cx\tregular\n", i);
+                int ll = (int)tx_len(line, sizeof line);
+                mm_copy(buf + pos, sizeof buf - (size_t)pos, line, (size_t)ll);
+                pos += ll;
+            }
+            buf[pos] = 0;
+            cx_write(f, buf, (size_t)pos);
+        }
+        {
+            const char *batches_oor =
+                "id\timplementation\tlayer\tsource\tmode\tplatform\tbudget_seconds\tmaterials\tentry\targs\tcoverage\texpect\theaders\ttier\n"
+                "tools-compile-000\tIMPLEMENTED\tcontract\ttests/tools-compile.cx\tSOURCE\tlnx/x86_64\t55\t-\ttests/tools-compile.cx\t{root};{out};0\ttools.compile-all\trc0:TOOLS_COMPILE\tproduct\tdaily\n"
+                "tools-compile-001\tIMPLEMENTED\tcontract\ttests/tools-compile.cx\tSOURCE\tlnx/x86_64\t55\t-\ttests/tools-compile.cx\t{root};{out};1\ttools.compile-all\trc0:TOOLS_COMPILE\tproduct\tdaily\n"
+                "tools-compile-002\tIMPLEMENTED\tcontract\ttests/tools-compile.cx\tSOURCE\tlnx/x86_64\t55\t-\ttests/tools-compile.cx\t{root};{out};2\ttools.compile-all\trc0:TOOLS_COMPILE\tproduct\tdaily\n";
+            cx_fmt(f, sizeof f, "%s/tests/batches.tsv", tcrepo);
+            cx_write(f, batches_oor, tx_len(batches_oor, 1024));
+            char *v[] = {"./tools/bound", "40", "sh", UC, "tools/chain-ready.cx", "--", "--repo", tcrepo, "--only", "25-tools-compile-shards", 0};
+            rc = run(v, out, sizeof out);
+            ck(rc == 1 && has(out, "25-tools-compile-shards\tFAIL") && has(out, "out-of-range-batch:id=tools-compile-002") && has(out, "READY\tno"),
+               "tools-compile-shards-25-mut4-out-of-range-batch-refused");
+        }
+        {
+            const char *batches_ok =
+                "id\timplementation\tlayer\tsource\tmode\tplatform\tbudget_seconds\tmaterials\tentry\targs\tcoverage\texpect\theaders\ttier\n"
+                "tools-compile-000\tIMPLEMENTED\tcontract\ttests/tools-compile.cx\tSOURCE\tlnx/x86_64\t55\t-\ttests/tools-compile.cx\t{root};{out};0\ttools.compile-all\trc0:TOOLS_COMPILE\tproduct\tdaily\n"
+                "tools-compile-001\tIMPLEMENTED\tcontract\ttests/tools-compile.cx\tSOURCE\tlnx/x86_64\t55\t-\ttests/tools-compile.cx\t{root};{out};1\ttools.compile-all\trc0:TOOLS_COMPILE\tproduct\tdaily\n";
+            cx_fmt(f, sizeof f, "%s/tests/batches.tsv", tcrepo);
+            cx_write(f, batches_ok, tx_len(batches_ok, 1024));
+            pos = 0;
+            {
+                const char *s0 = "tools/t01.cx\tregular\ntools/t00.cx\tregular\n";
+                int l0 = (int)tx_len(s0, 128);
+                mm_copy(buf, sizeof buf, s0, (size_t)l0);
+                pos = l0;
+            }
+            for (i = 2; i < 16; i++) {
+                char line[64];
+                cx_fmt(line, sizeof line, "tools/t%02d.cx\tregular\n", i);
+                int ll = (int)tx_len(line, sizeof line);
+                mm_copy(buf + pos, sizeof buf - (size_t)pos, line, (size_t)ll);
+                pos += ll;
+            }
+            buf[pos] = 0;
+            cx_fmt(f, sizeof f, "%s/tests/tools-compile-sources.tsv", tcrepo);
+            cx_write(f, buf, (size_t)pos);
+            char *v[] = {"./tools/bound", "40", "sh", UC, "tools/chain-ready.cx", "--", "--repo", tcrepo, "--only", "25-tools-compile-shards", 0};
+            rc = run(v, out, sizeof out);
+            ck(rc == 1 && has(out, "25-tools-compile-shards\tFAIL") && has(out, "tools-compile-sources-unsorted:line=2") && has(out, "READY\tno"),
+               "tools-compile-shards-25-mut5-unsorted-sources-refused");
         }
     }
     }
