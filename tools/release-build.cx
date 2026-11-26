@@ -1049,6 +1049,78 @@ static int rb_same_file(const char *a, const char *b) {
    untouched (mtime/inode kept). A differing product is staged in a sibling
    directory and renamed over (per-file atomic, safe against concurrent
    freezes). A split product (unisacc.com.dev) keeps the plain full copy. */
+/* Copy optional paired ROOT/tape/{tapemode.so,manifest.tsv} into snapshot DIR/tape/.
+   Refuses symlinks, unpaired files, or manifest/so sha mismatch. Clears stale DIR/tape when ROOT has no tape/. */
+static int rb_verify_tape_manifest(const char *so_p, const char *mf_p) {
+    size_t sn = 0, mn = 0; char *sb, *mb; char so_sha[65]; long at = 0, off = 0, len = 0; int found = 0;
+    sb = cx_read(so_p, &sn);
+    if (!sb || sn == 0) { if (sb) mm_free(sb); return -1; }
+    cx_sha256_hex(sb, sn, so_sha);
+    mm_free(sb);
+    mb = cx_read(mf_p, &mn);
+    if (!mb || mn == 0) { if (mb) mm_free(mb); return -1; }
+    while (at < (long)mn) {
+        long e = at, ln, v = 0, q;
+        while (e < (long)mn && mb[e] != '\n') e++;
+        ln = e - at;
+        if (ln > 0 && mb[at + ln - 1] == '\r') ln--;
+        if (ln > 0 && mb[at] != '#') {
+            if (tx_field(mb + at, ln, '\t', 0, &off, &len) != 0) { mm_free(mb); return -1; }
+            if (len == 11 && tx_same(mb + at + off, 11, "tapemode.so", 11)) {
+                if (found) { mm_free(mb); return -1; }
+                if (tx_field(mb + at, ln, '\t', 1, &off, &len) != 0 || len != 64 || !tx_same(mb + at + off, 64, so_sha, 64)) { mm_free(mb); return -1; }
+                if (tx_field(mb + at, ln, '\t', 2, &off, &len) != 0 || len < 1 || len > 18) { mm_free(mb); return -1; }
+                for (q = 0; q < len; q++) { char c = mb[at + off + q]; if (c < '0' || c > '9') { mm_free(mb); return -1; } v = v * 10 + (c - '0'); }
+                if ((size_t)v != sn) { mm_free(mb); return -1; }
+                found = 1;
+            }
+        }
+        at = e + 1;
+    }
+    mm_free(mb);
+    return found ? 0 : -1;
+}
+
+static void rb_freeze_tape(const char *root, const char *dir) {
+    static const char *names[2] = {"tape/tapemode.so", "tape/manifest.tsv"};
+    char std[RB_FULL], dtd[RB_FULL], s0[RB_FULL], s1[RB_FULL], s[RB_FULL], d[RB_FULL], t[RB_FULL];
+    sy_stat_t st_sd, st_dd, st0, st1;
+    int r_sd, r_dd, r0, r1, i;
+    if (cx_fmt(std, sizeof std, "%s/tape", root) || cx_fmt(dtd, sizeof dtd, "%s/tape", dir) ||
+        cx_fmt(s0, sizeof s0, "%s/%s", root, names[0]) || cx_fmt(s1, sizeof s1, "%s/%s", root, names[1])) rb_die("path");
+    r_sd = sy_lstat(std, &st_sd);
+    if (r_sd == 0 && st_sd.kind != 'd') rb_die("copy tape: source tape not dir");
+    if (r_sd != 0 && r_sd != -ENOENT) rb_die("copy tape: stat source tape");
+    r0 = (r_sd == 0) ? sy_lstat(s0, &st0) : -ENOENT;
+    r1 = (r_sd == 0) ? sy_lstat(s1, &st1) : -ENOENT;
+    if (r0 == -ENOENT && r1 == -ENOENT) {
+        r_dd = sy_lstat(dtd, &st_dd);
+        if (r_dd == -ENOENT) return;
+        if (r_dd != 0 || st_dd.kind != 'd') rb_die("copy tape: snapshot tape not dir");
+        for (i = 0; i < 2; i++) {
+            if (cx_fmt(d, sizeof d, "%s/%s", dir, names[i])) rb_die("path");
+            if (sy_lstat(d, &st0) == 0) { if (st0.kind != 'f' || sy_unlink(d)) rb_die("copy tape: clear stale"); }
+        }
+        if (sy_rmdir(dtd)) rb_die("copy tape: rmdir stale");
+        return;
+    }
+    if (r0 != 0 || r1 != 0 || st0.kind != 'f' || st1.kind != 'f') rb_die("copy tape: incomplete or non-regular sidecar");
+    if (rb_verify_tape_manifest(s0, s1) != 0) rb_die("copy tape: manifest sha mismatch");
+    r_dd = sy_lstat(dtd, &st_dd);
+    if (r_dd == 0 && st_dd.kind != 'd') rb_die("copy tape: snapshot tape not dir");
+    if (r_dd == -ENOENT && sy_mkdir(dtd, 0755)) rb_die("copy tape: mkdir");
+    for (i = 0; i < 2; i++) {
+        if (cx_fmt(s, sizeof s, "%s/%s", root, names[i]) || cx_fmt(d, sizeof d, "%s/%s", dir, names[i])) rb_die("path");
+        if (sy_lstat(d, &st0) == 0) {
+            if (st0.kind != 'f') rb_die("copy tape: snapshot target not regular");
+            if (rb_same_file(s, d)) continue;
+        }
+        if (cx_fmt(t, sizeof t, "%s/.fz-%d-%d", dtd, i, (int)getpid())) rb_die("path");
+        if (sy_copy(s, t, i == 0 ? 0755 : 0644)) { (void)sy_unlink(t); rb_die("copy tape: copy"); }
+        if (sy_rename(t, d)) { (void)sy_unlink(t); rb_die("copy tape: rename"); }
+    }
+}
+
 static void rb_freeze_product(const char *root, const char *dir) {
     char sdev[RB_FULL], a[RB_FULL], b[RB_FULL], tmp[RB_FULL], cmd[2048];
     char *sh[4];
@@ -1058,6 +1130,7 @@ static void rb_freeze_product(const char *root, const char *dir) {
         if (cx_fmt(cmd, sizeof cmd, "cp %s/unisacc.com.build.json %s/unisacc.com.build.json", root, dir)) rb_die("path");
         sh[0] = "sh"; sh[1] = "-c"; sh[2] = cmd; sh[3] = 0;
         if (rb_pipe("copy compiler", sh, root, 0, 0)) rb_die("copy compiler");
+        rb_freeze_tape(root, dir);
         return;
     }
     {
@@ -1069,6 +1142,7 @@ static void rb_freeze_product(const char *root, const char *dir) {
             same = rb_same_file(a, b);
         }
         if (same) {
+            rb_freeze_tape(root, dir);
             sy_printf("release-build\tfreeze-product\tunchanged\n");
             return;
         }
@@ -1087,6 +1161,7 @@ static void rb_freeze_product(const char *root, const char *dir) {
        guarded cx_rmtree is only the fallback; a bootstrap-built release-build embeds a guard that predates the
        HOME/.cache/unisacc/chains whitelist and would refuse the stage dir under the chains root. */
     if (sy_rmdir(tmp) && cx_rmtree(tmp)) rb_die("copy compiler: stage-cleanup");
+    rb_freeze_tape(root, dir);
     sy_printf("release-build\tfreeze-product\trewritten\n");
 }
 

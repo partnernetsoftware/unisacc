@@ -30,6 +30,7 @@
  * Prints PASS/FAIL/NOT_RUN per case and CHECK_INSTALL_APE<TAB>failed=N<TAB>not_run=M; exit 0 only when failed=0. */
 #pragma unisa use cxlib.productpkg
 #pragma unisa use sys.fs
+#pragma unisa use sys.posix
 #pragma unisa use sys.io
 #pragma unisa use sys.proc
 #pragma unisa use sys.env
@@ -396,6 +397,229 @@ static void pub_backup_cases(const char *work, const char *ape, const char *real
     }
 }
 
+static int write_tape_manifest(const char *mf_path, const char *so_path, const char *tag) {
+    char sha[65], body[256];
+    size_t n = 0;
+    char *b = cx_read(so_path, &n);
+    if (!b) return -1;
+    cx_sha256_hex(b, n, sha);
+    mm_free(b);
+    if (cx_fmt(body, sizeof body, "# tape-sidecar-manifest-v1 tag=%s\ntapemode.so\t%s\t%ld\n", tag, sha, (long)n)) return -1;
+    return write_file(mf_path, body, 0644);
+}
+
+static void tape_sidecar_cases(const char *work, const char *ape, const char *real) {
+    char troot[4400], src1[4400], src2[4400], src3[4400], src_notape[4400], src_half[4400], src_badmf[4400];
+    char tdir1[4400], tdir2[4400], tdir3[4400], tdir_half[4400], tdir_badmf[4400];
+    char ape1[4400], ape2[4400], ape3[4400], ape_notape[4400], ape_half[4400], ape_badmf[4400];
+    char so1[4400], mf1[4400], so2[4400], mf2[4400], so3[4400], mf3[4400], so_half[4400], so_badmf[4400], mf_badmf[4400];
+    char rtd[4400], rso[4400], rmf[4400], bso[4400], junk[4400], extdir[4400], extso[4400], btd[4400];
+    char hso1[65], hmf1[65], hso2[65], hmf3[65], got[65], out[8192];
+    sy_stat_t st;
+    char *ba[4], *ra[4];
+    if (cx_fmt(troot, sizeof troot, "%s/troot", work) || cx_fmt(src1, sizeof src1, "%s/tsrc1", work) ||
+        cx_fmt(src2, sizeof src2, "%s/tsrc2", work) || cx_fmt(src3, sizeof src3, "%s/tsrc3", work) ||
+        cx_fmt(src_notape, sizeof src_notape, "%s/tsrc_nt", work) || cx_fmt(src_half, sizeof src_half, "%s/tsrc_half", work) ||
+        cx_fmt(src_badmf, sizeof src_badmf, "%s/tsrc_badmf", work) ||
+        cx_fmt(tdir1, sizeof tdir1, "%s/tape", src1) || cx_fmt(tdir2, sizeof tdir2, "%s/tape", src2) ||
+        cx_fmt(tdir3, sizeof tdir3, "%s/tape", src3) || cx_fmt(tdir_half, sizeof tdir_half, "%s/tape", src_half) ||
+        cx_fmt(tdir_badmf, sizeof tdir_badmf, "%s/tape", src_badmf) ||
+        cx_fmt(ape1, sizeof ape1, "%s/unisacc.com", src1) || cx_fmt(ape2, sizeof ape2, "%s/unisacc.com", src2) ||
+        cx_fmt(ape3, sizeof ape3, "%s/unisacc.com", src3) || cx_fmt(ape_notape, sizeof ape_notape, "%s/unisacc.com", src_notape) ||
+        cx_fmt(ape_half, sizeof ape_half, "%s/unisacc.com", src_half) || cx_fmt(ape_badmf, sizeof ape_badmf, "%s/unisacc.com", src_badmf) ||
+        cx_fmt(so1, sizeof so1, "%s/tapemode.so", tdir1) || cx_fmt(mf1, sizeof mf1, "%s/manifest.tsv", tdir1) ||
+        cx_fmt(so2, sizeof so2, "%s/tapemode.so", tdir2) || cx_fmt(mf2, sizeof mf2, "%s/manifest.tsv", tdir2) ||
+        cx_fmt(so3, sizeof so3, "%s/tapemode.so", tdir3) || cx_fmt(mf3, sizeof mf3, "%s/manifest.tsv", tdir3) ||
+        cx_fmt(so_half, sizeof so_half, "%s/tapemode.so", tdir_half) ||
+        cx_fmt(so_badmf, sizeof so_badmf, "%s/tapemode.so", tdir_badmf) || cx_fmt(mf_badmf, sizeof mf_badmf, "%s/manifest.tsv", tdir_badmf) ||
+        cx_fmt(rtd, sizeof rtd, "%s/tape", troot) || cx_fmt(rso, sizeof rso, "%s/tape/tapemode.so", troot) ||
+        cx_fmt(rmf, sizeof rmf, "%s/tape/manifest.tsv", troot) || cx_fmt(extdir, sizeof extdir, "%s/ext_sentinel", work) ||
+        cx_fmt(extso, sizeof extso, "%s/tapemode.so", extdir)) { ck(0, "tape-sidecar-setup", "path"); return; }
+    if (sy_mkdir(troot, 0755) || sy_mkdir(src1, 0755) || sy_mkdir(src2, 0755) || sy_mkdir(src3, 0755) ||
+        sy_mkdir(src_notape, 0755) || sy_mkdir(src_half, 0755) || sy_mkdir(src_badmf, 0755) ||
+        sy_mkdir(tdir1, 0755) || sy_mkdir(tdir2, 0755) || sy_mkdir(tdir3, 0755) ||
+        sy_mkdir(tdir_half, 0755) || sy_mkdir(tdir_badmf, 0755) || sy_mkdir(extdir, 0755) ||
+        sy_copy(ape, ape1, 0755) || sy_copy(ape, ape2, 0755) || sy_copy(ape, ape3, 0755) ||
+        sy_copy(ape, ape_notape, 0755) || sy_copy(ape, ape_half, 0755) || sy_copy(ape, ape_badmf, 0755) ||
+        write_file(so1, "ELF-TAPE-V1\n", 0755) || write_tape_manifest(mf1, so1, "v1") ||
+        write_file(so2, "ELF-TAPE-V2-UPDATED\n", 0755) || write_tape_manifest(mf2, so2, "v2") ||
+        write_file(so3, "ELF-TAPE-V2-UPDATED\n", 0755) || write_tape_manifest(mf3, so3, "v2-meta-only") ||
+        write_file(so_half, "ELF-TAPE-HALF\n", 0755) ||
+        write_file(so_badmf, "ELF-TAPE-BAD\n", 0755) ||
+        write_file(mf_badmf, "tapemode.so\t0000000000000000000000000000000000000000000000000000000000000000\t13\n", 0644) ||
+        write_file(extso, "EXTERNAL-SENTINEL-MUST-SURVIVE\n", 0755)) {
+        ck(0, "tape-sidecar-setup", "fixtures"); return;
+    }
+    sha_of(so1, hso1); sha_of(mf1, hmf1); sha_of(so2, hso2); sha_of(mf3, hmf3);
+    /* 0. G4 + B1: install no-tape root -> backup -> install with tape -> nonempty ROOT/tape refuses rollback BEFORE touching root;
+       removing the extra entry lets rollback succeed and remove ROOT/tape completely. */
+    ck(tool(troot, ape_notape, real, 1, out, (int)sizeof out) == 0 && has(out, "INSTALLED"), "tape-g4-seed-notape-root", out);
+    ba[0] = troot; ba[1] = "--backup"; ba[2] = "--write"; ba[3] = 0;
+    ra[0] = troot; ra[1] = "--rollback"; ra[2] = "--write"; ra[3] = 0;
+    ck(tool_args(ba, out, (int)sizeof out) == 0 && has(out, "BACKUP"), "tape-g4-backup-notape", out);
+    ck(tool(troot, ape1, real, 1, out, (int)sizeof out) == 0 && has(out, "TAPE_SYNCED"), "tape-g4-sync-v1", out);
+    {
+        char stray[4400], com_p[4400], hcom_before[65], hcom_after[65];
+        if (cx_fmt(stray, sizeof stray, "%s/.install.5.99999", rtd) ||
+            cx_fmt(com_p, sizeof com_p, "%s/unisacc.com", troot) ||
+            write_file(stray, "STRAY\n", 0644) || sha_of(com_p, hcom_before)) { ck(0, "tape-g4-nonempty-setup", "write"); return; }
+        ck(tool_args(ra, out, (int)sizeof out) == 1 && has(out, "rollback-tape-dir-not-empty"), "tape-g4-nonempty-rollback-refused", out);
+        sha_of(com_p, hcom_after);
+        ck(tx_eqz(hcom_before, hcom_after) && sy_exists(rso) == 1 && sy_exists(rmf) == 1,
+           "tape-g4-nonempty-rollback-keeps-root-and-tape", "root or tape modified before refusal");
+        (void)sy_unlink(stray);
+    }
+    ck(tool_args(ra, out, (int)sizeof out) == 0 && has(out, "ROLLED_BACK"), "tape-g4-rollback-notape", out);
+    ck(sy_lstat(rtd, &st) == -ENOENT, "tape-g4-rollback-removes-tape-dir", rtd);
+    /* 1. install syncs paired tape/{tapemode.so,manifest.tsv} with real sha */
+    ck(tool(troot, ape1, real, 1, out, (int)sizeof out) == 0 && has(out, "TAPE_SYNCED"), "tape-sidecar-install-syncs", out);
+    sha_of(rso, got); ck(tx_eqz(got, hso1), "tape-sidecar-install-so-matches", got);
+    sha_of(rmf, got); ck(tx_eqz(got, hmf1), "tape-sidecar-install-manifest-matches", got);
+    /* 2. backup captures tape/*, second install updates tape/*, manifest-only update also prints TAPE_SYNCED */
+    ck(tool_args(ba, out, (int)sizeof out) == 0 && has(out, "BACKUP"), "tape-sidecar-backup", out);
+    ck(tool(troot, ape2, real, 1, out, (int)sizeof out) == 0 && has(out, "ALREADY") && has(out, "TAPE_SYNCED"), "tape-sidecar-already-updates-so", out);
+    sha_of(rso, got); ck(tx_eqz(got, hso2), "tape-sidecar-updated-to-v2", got);
+    ck(tool(troot, ape3, real, 1, out, (int)sizeof out) == 0 && has(out, "TAPE_SYNCED"), "tape-sidecar-manifest-only-change-synced", out);
+    sha_of(rmf, got); ck(tx_eqz(got, hmf3), "tape-sidecar-manifest-only-matches", got);
+    /* 3. rollback restores old tape/* and removes backup/tape cleanly */
+    ck(tool_args(ra, out, (int)sizeof out) == 0 && has(out, "ROLLED_BACK"), "tape-sidecar-rollback", out);
+    sha_of(rso, got); ck(tx_eqz(got, hso1), "tape-sidecar-rollback-restores-so-v1", got);
+    sha_of(rmf, got); ck(tx_eqz(got, hmf1), "tape-sidecar-rollback-restores-manifest-v1", got);
+    /* 4. neg: unpaired sidecar & manifest sha mismatch refused */
+    ck(tool(troot, ape_half, real, 1, out, (int)sizeof out) == 1 && has(out, "tape-sidecar-incomplete"), "tape-neg-unpaired-refused", out);
+    ck(tool(troot, ape_badmf, real, 1, out, (int)sizeof out) == 1 && has(out, "tape-manifest-sha-mismatch"), "tape-neg-manifest-sha-refused", out);
+    /* 5. installing no-tape APE over tape-carrying root clears ROOT/tape completely */
+    ck(tool(troot, ape_notape, real, 1, out, (int)sizeof out) == 0 && has(out, "TAPE_CLEARED"), "tape-notape-source-clears-old-tape", out);
+    ck(sy_lstat(rtd, &st) == -ENOENT, "tape-notape-source-removed-tape-dir", rtd);
+    /* 6. neg: symlinked ROOT/tape refused without touching external sentinel */
+    ck(sy_symlink(extdir, rtd) == 0, "tape-symlink-root-setup", rtd);
+    ck(tool(troot, ape1, real, 1, out, (int)sizeof out) == 1 && has(out, "tape-dir-not-directory"), "tape-neg-symlink-root-refused", out);
+    ck(sy_exists(extso) == 1, "tape-neg-symlink-root-sentinel-intact", extso);
+    (void)sy_unlink(rtd);
+    /* 7. neg: symlinked backup/tape refused by ia_drop_backup BEFORE unlinking external sentinel */
+    ck(tool(troot, ape1, real, 1, out, (int)sizeof out) == 0 && has(out, "TAPE_SYNCED"), "tape-reinstall-v1", out);
+    ck(tool_args(ba, out, (int)sizeof out) == 0 && has(out, "BACKUP"), "tape-sidecar-backup2", out);
+    if (cx_fmt(bso, sizeof bso, "%s/.unisacc-root-backups/%s/tape/tapemode.so", troot, real) ||
+        cx_fmt(btd, sizeof btd, "%s/.unisacc-root-backups/%s/tape", troot, real) ||
+        write_file(bso, "TAMPERED-SO\n", 0755)) { ck(0, "tape-sidecar-tamper-setup", "write"); return; }
+    ck(tool_args(ra, out, (int)sizeof out) == 1 && has(out, "backup-file-differs-from-manifest"), "tape-sidecar-tampered-backup-refused", out);
+    /* replace backup/tape with symlink to extdir -> backup overwrite must refuse AND keep extso intact */
+    (void)sy_unlink(bso);
+    if (cx_fmt(junk, sizeof junk, "%s/.unisacc-root-backups/%s/tape/manifest.tsv", troot, real)) return;
+    (void)sy_unlink(junk);
+    (void)sy_rmdir(btd);
+    ck(sy_symlink(extdir, btd) == 0, "tape-symlink-backup-setup", btd);
+    ck(tool_args(ba, out, (int)sizeof out) == 1 && has(out, "backup-not-removable"), "tape-neg-symlink-backup-refused", out);
+    ck(sy_exists(extso) == 1, "tape-neg-symlink-backup-sentinel-intact", extso);
+    (void)sy_unlink(btd);
+
+    /* 8. B2 + B3: different-body install (non-ALREADY path):
+       - unpaired sidecar refuses BEFORE writing .unisacc.com.install.* / .unisacc.com.ape.sha256.* temps;
+       - non-empty ROOT/tape on no-tape source refuses BEFORE deleting tapemode.so/manifest.tsv or replacing body;
+       - clean no-tape install replaces body and clears ROOT/tape. */
+    {
+        char droot[4400], dcom[4400], dtd[4400], dso[4400], dmf[4400], dstray[4400], hold[65], hnow[65];
+        sy_dir_t dd; int temp_left = 0;
+        if (cx_fmt(droot, sizeof droot, "%s/troot_diff", work) ||
+            cx_fmt(dcom, sizeof dcom, "%s/unisacc.com", droot) ||
+            cx_fmt(dtd, sizeof dtd, "%s/tape", droot) ||
+            cx_fmt(dso, sizeof dso, "%s/tape/tapemode.so", droot) ||
+            cx_fmt(dmf, sizeof dmf, "%s/tape/manifest.tsv", droot) ||
+            cx_fmt(dstray, sizeof dstray, "%s/tape/.install.5.99999", droot) ||
+            sy_mkdir(droot, 0755) || write_file(dcom, "#!/bin/sh\necho old-diff-body\n", 0755) ||
+            sha_of(dcom, hold)) { ck(0, "tape-diff-body-setup", "setup"); return; }
+        ck(tool(droot, ape_half, real, 1, out, (int)sizeof out) == 1 && has(out, "tape-sidecar-incomplete"),
+           "tape-diff-body-unpaired-refused", out);
+        sha_of(dcom, hnow);
+        if (sy_dir_open(&dd, droot) == 0) {
+            while (sy_dir_next(&dd) > 0) {
+                if (tx_same(dd.name, 21, ".unisacc.com.install.", 21) ||
+                    tx_same(dd.name, 24, ".unisacc.com.ape.sha256.", 24)) temp_left++;
+            }
+            (void)sy_dir_close(&dd);
+        }
+        ck(tx_eqz(hold, hnow) && temp_left == 0, "tape-diff-body-unpaired-zero-temp-residue", "body changed or temp left");
+        ck(tool(droot, ape1, real, 1, out, (int)sizeof out) == 0 && has(out, "INSTALLED") && has(out, "TAPE_SYNCED"),
+           "tape-diff-body-install-syncs", out);
+        /* Reset body to old launcher (non-ALREADY) + drop stray entry in tape/ -> no-tape install must refuse without deleting tape files */
+        if (write_file(dcom, "#!/bin/sh\necho old-diff-body-2\n", 0755) || sha_of(dcom, hold) ||
+            write_file(dstray, "STRAY\n", 0644)) { ck(0, "tape-diff-body-stray-setup", "setup"); return; }
+        ck(tool(droot, ape_notape, real, 1, out, (int)sizeof out) == 1 && has(out, "tape-cleanup-failed"),
+           "tape-diff-body-nonempty-clear-refused", out);
+        sha_of(dcom, hnow);
+        ck(tx_eqz(hold, hnow) && sy_exists(dso) == 1 && sy_exists(dmf) == 1,
+           "tape-diff-body-nonempty-clear-keeps-root-and-tape", "root or tape modified before refusal");
+        (void)sy_unlink(dstray);
+        ck(tool(droot, ape_notape, real, 1, out, (int)sizeof out) == 0 && has(out, "INSTALLED") && has(out, "TAPE_CLEARED"),
+           "tape-diff-body-clean-clear-succeeds", out);
+        ck(sy_lstat(dtd, &st) == -ENOENT, "tape-diff-body-clean-clear-removed-dir", dtd);
+    }
+
+    /* 9. B3: real release-build.cx freeze entry test for rb_freeze_tape (copy, clear stale, reject bad sha) */
+    {
+        char fzr[4400], fzc[4400], fztd[4400], fzso[4400], fzmf[4400], fzcom[4400], fzbj[4400];
+        char cmd[9000], fzout[4096], snap_dir[4400], snap_so[4400], snap_mf[4400], snap_td[4400];
+        char *shv[4]; int cut = 0, frc; long fzl, si;
+        if (cx_fmt(fzr, sizeof fzr, "%s/fzroot", work) || cx_fmt(fzc, sizeof fzc, "%s/fzhome", work) ||
+            cx_fmt(fztd, sizeof fztd, "%s/tape", fzr) || cx_fmt(fzso, sizeof fzso, "%s/tapemode.so", fztd) ||
+            cx_fmt(fzmf, sizeof fzmf, "%s/manifest.tsv", fztd) || cx_fmt(fzcom, sizeof fzcom, "%s/unisacc.com", fzr) ||
+            cx_fmt(fzbj, sizeof fzbj, "%s/unisacc.com.build.json", fzr) ||
+            sy_mkdir(fzr, 0755) || sy_mkdir(fzc, 0755) || sy_mkdir(fztd, 0755) ||
+            sy_copy(ape, fzcom, 0755) || write_file(fzbj, "{\"schema\":1}\n", 0644) ||
+            write_file(fzso, "ELF-FZ-V1\n", 0755) || write_tape_manifest(fzmf, fzso, "fz-v1")) {
+            ck(0, "rb-freeze-tape-setup", "setup"); return;
+        }
+        if (cx_fmt(cmd, sizeof cmd,
+                   "cd '%s' && git init -q && git config user.email t@t && git config user.name t && "
+                   "printf 'x\\n' > a && git add a && git commit -q -m init", fzr)) return;
+        shv[0] = "sh"; shv[1] = "-c"; shv[2] = cmd; shv[3] = 0;
+        frc = pr_run_merged(shv, 30, fzout, (int)sizeof fzout, &cut);
+        if (frc != 0) { ck(0, "rb-freeze-tape-git-init", fzout); return; }
+        /* 9a. freeze copies paired tape/* into isolated HOME snapshot */
+        if (cx_fmt(cmd, sizeof cmd, "HOME='%s' sh '%s/unisacc.com' '%s/tools/release-build.cx' -- freeze '%s'",
+                   fzc, g_root, g_root, fzr)) return;
+        shv[2] = cmd;
+        frc = pr_run_merged(shv, 45, fzout, (int)sizeof fzout, &cut);
+        fzl = tx_len(fzout, (long)sizeof fzout);
+        snap_dir[0] = 0;
+        for (si = 0; si + 5 < fzl; si++) {
+            if (tx_same(fzout + si, 5, "snap=", 5)) {
+                long e = si + 5;
+                while (e < fzl && fzout[e] != '\n' && fzout[e] != '\t' && fzout[e] != ' ') e++;
+                if (e - (si + 5) < (long)sizeof snap_dir) {
+                    mm_copy(snap_dir, (long)sizeof snap_dir, fzout + si + 5, e - (si + 5));
+                    snap_dir[e - (si + 5)] = 0;
+                }
+                break;
+            }
+        }
+        if (!snap_dir[0] || cx_fmt(snap_td, sizeof snap_td, "%s/tape", snap_dir) ||
+            cx_fmt(snap_so, sizeof snap_so, "%s/tapemode.so", snap_td) ||
+            cx_fmt(snap_mf, sizeof snap_mf, "%s/manifest.tsv", snap_td)) {
+            ck(0, "rb-freeze-tape-copies-pair", fzout);
+        } else {
+            char h1[65], h2[65];
+            sha_of(fzso, h1); sha_of(snap_so, h2);
+            ck(frc == 0 && sy_exists(snap_so) == 1 && sy_exists(snap_mf) == 1 && tx_eqz(h1, h2),
+               "rb-freeze-tape-copies-pair", fzout);
+            /* 9b. removing source tape/* and re-freezing clears stale snapshot tape/* */
+            (void)sy_unlink(fzso); (void)sy_unlink(fzmf); (void)sy_rmdir(fztd);
+            frc = pr_run_merged(shv, 45, fzout, (int)sizeof fzout, &cut);
+            ck(frc == 0 && sy_lstat(snap_td, &st) == -ENOENT, "rb-freeze-tape-clears-stale", fzout);
+        }
+        /* 9c. bad manifest sha is rejected by real release-build freeze */
+        if (sy_mkdir(fztd, 0755) || write_file(fzso, "ELF-FZ-BAD\n", 0755) ||
+            write_file(fzmf, "tapemode.so\t0000000000000000000000000000000000000000000000000000000000000000\t11\n", 0644)) {
+            ck(0, "rb-freeze-tape-bad-setup", "setup"); return;
+        }
+        frc = pr_run_merged(shv, 45, fzout, (int)sizeof fzout, &cut);
+        fzl = tx_len(fzout, (long)sizeof fzout);
+        ck(frc != 0 && json_has(fzout, fzl, "manifest sha mismatch", 21), "rb-freeze-tape-rejects-bad-sha", fzout);
+        /* Remove fixture .git so unisa_safedel can clean work cleanly at exit */
+        if (!cx_fmt(cmd, sizeof cmd, "rm -rf '%s/.git'", fzr)) { shv[2] = cmd; (void)pr_run_merged(shv, 15, fzout, (int)sizeof fzout, &cut); }
+    }
+}
+
 int main(int argc, char **argv) {
     char work[4400], ape[4400], root[4400], com[4400], dev[4400], rec[4400], junk[4400], fake[4400];
     char want[65], h0[65], h1[65], out[2048], launcher[4400], cwork[4400];
@@ -659,6 +883,7 @@ int main(int argc, char **argv) {
                    "cand-fixture-outside-removal-whitelist", cwork);
                 cand_cases(work, cwork, ape, real, ape_bytes);
                 pub_backup_cases(work, ape, real);
+                tape_sidecar_cases(work, ape, real);
                 /* bring the private fixture under the temp scratch, then remove both with the bounded safedel below */
                 if (cx_fmt(cache, sizeof cache, "%s/croot-moved", work) || sy_rename(cwork, cache)) sy_eprintf("check-install-ape: private fixture %s kept\n", cwork);
             }

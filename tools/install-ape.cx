@@ -42,6 +42,7 @@
  * An L3 tool: no #include, no direct libc call. */
 #pragma unisa use runtime.packagefooter
 #pragma unisa use sys.fs
+#pragma unisa use sys.posix
 #pragma unisa use sys.io
 #pragma unisa use sys.proc
 #pragma unisa use sys.sig
@@ -285,11 +286,94 @@ static void ia_emit_identity(const char *root) {
 #define IA_KEEP 3
 #define IA_MARK "unisacc.com.candidate.tsv"
 #define IA_BDIR ".unisacc-root-backups"
-#define IA_NSAVED 5
+#define IA_NSAVED 7
 #define IA_MANIFEST "manifest.tsv"
-static const char *ia_saved[IA_NSAVED] = {"unisacc.com", "unisacc.com.build.json", "ape-receipt.txt", "unisacc.com.ape.sha256", IA_MARK};
+static const char *ia_saved[IA_NSAVED] = {"unisacc.com", "unisacc.com.build.json", "ape-receipt.txt", "unisacc.com.ape.sha256", IA_MARK, "tape/tapemode.so", "tape/manifest.tsv"};
 static const char *g_cand_rev, *g_cand_dir;
 static char g_cand_ver[160];
+
+static int ia_is_exec(int idx) { return idx == 0 || idx == 5; }
+static int ia_ensure_tape_dir(const char *base, int *created_out) {
+    char td[4400]; sy_stat_t st; int r;
+    if (created_out) *created_out = 0;
+    if (ia_join(td, (int)sizeof td, base, "tape")) return -1;
+    r = sy_lstat(td, &st);
+    if (r == 0) return st.kind == 'd' ? 0 : -1;
+    if (r != -ENOENT) return -1;
+    if (sy_mkdir(td, 0755) != 0) return -1;
+    if (created_out) *created_out = 1;
+    return 0;
+}
+static int ia_verify_tape_manifest(const char *so_p, const char *mf_p, char so_sha[65], long *so_bytes) {
+    sy_stat_t st; size_t mn = 0; char *mb; long at = 0, off = 0, len = 0; int found = 0;
+    if (sy_lstat(so_p, &st) != 0 || st.kind != 'f') return -1;
+    if (sy_lstat(mf_p, &st) != 0 || st.kind != 'f') return -1;
+    if (ia_sha(so_p, so_sha, so_bytes) != 0) return -1;
+    mb = cx_read(mf_p, &mn);
+    if (!mb || mn == 0) { if (mb) mm_free(mb); return -1; }
+    while (at < (long)mn) {
+        long e = at, ln, v = 0, q;
+        while (e < (long)mn && mb[e] != '\n') e++;
+        ln = e - at;
+        if (ln > 0 && mb[at + ln - 1] == '\r') ln--;
+        if (ln > 0 && mb[at] != '#') {
+            if (tx_field(mb + at, ln, '\t', 0, &off, &len) != 0) { mm_free(mb); return -1; }
+            if (len == 11 && tx_same(mb + at + off, 11, "tapemode.so", 11)) {
+                if (found) { mm_free(mb); return -1; }
+                if (tx_field(mb + at, ln, '\t', 1, &off, &len) != 0 || len != 64 || !tx_same(mb + at + off, 64, so_sha, 64)) { mm_free(mb); return -1; }
+                if (tx_field(mb + at, ln, '\t', 2, &off, &len) != 0 || len < 1 || len > 18) { mm_free(mb); return -1; }
+                for (q = 0; q < len; q++) { char c = mb[at + off + q]; if (c < '0' || c > '9') { mm_free(mb); return -1; } v = v * 10 + (c - '0'); }
+                if (v != *so_bytes) { mm_free(mb); return -1; }
+                found = 1;
+            }
+        }
+        at = e + 1;
+    }
+    mm_free(mb);
+    return found ? 0 : -1;
+}
+/* Pre-check that ROOT/tape (if present) is a real directory containing at most the two known sidecar names
+   (tapemode.so, manifest.tsv).  Returns 0 if absent or clean, 1 if an unexpected entry is present (name in BAD_NAME),
+   -1 if ROOT/tape is not a real directory, -2 if unreadable. */
+static int ia_tape_dir_only_known(const char *root, char *bad_name, int bl) {
+    char td[4400]; sy_stat_t st; sy_dir_t d; int r;
+    if (bad_name && bl > 0) bad_name[0] = 0;
+    if (ia_join(td, (int)sizeof td, root, "tape")) return -2;
+    r = sy_lstat(td, &st);
+    if (r == -ENOENT) return 0;
+    if (r != 0) return -2;
+    if (st.kind != 'd') return -1;
+    if (sy_dir_open(&d, td) != 0) return -2;
+    while (sy_dir_next(&d) > 0) {
+        if (tx_eqz(d.name, ".") || tx_eqz(d.name, "..")) continue;
+        if (tx_eqz(d.name, "tapemode.so") || tx_eqz(d.name, "manifest.tsv")) continue;
+        if (bad_name && bl > 0) (void)cx_fmt(bad_name, (size_t)bl, "%s/%s", td, d.name);
+        (void)sy_dir_close(&d);
+        return 1;
+    }
+    (void)sy_dir_close(&d);
+    return 0;
+}
+
+static int ia_remove_tape_dir(const char *root, int *removed_out, char *why, int wl) {
+    char td[4400], p[4400]; sy_stat_t st; int i, r;
+    if (removed_out) *removed_out = 0;
+    if (ia_join(td, (int)sizeof td, root, "tape")) { cx_fmt(why, (size_t)wl, "path"); return -1; }
+    r = sy_lstat(td, &st);
+    if (r == -ENOENT) return 0;
+    if (r != 0) { cx_fmt(why, (size_t)wl, "cannot stat %s (rc %d)", td, r); return -1; }
+    if (st.kind != 'd') { cx_fmt(why, (size_t)wl, "%s is not a directory", td); return -1; }
+    for (i = 5; i < IA_NSAVED; i++) {
+        if (ia_join(p, (int)sizeof p, root, ia_saved[i])) { cx_fmt(why, (size_t)wl, "path"); return -1; }
+        r = sy_lstat(p, &st);
+        if (r == -ENOENT) continue;
+        if (r != 0 || st.kind != 'f') { cx_fmt(why, (size_t)wl, "%s is not a regular file", p); return -1; }
+        if ((r = sy_unlink(p)) != 0) { cx_fmt(why, (size_t)wl, "cannot remove %s (rc %d)", p, r); return -1; }
+    }
+    if ((r = sy_rmdir(td)) != 0) { cx_fmt(why, (size_t)wl, "cannot remove %s (rc %d; non-empty tape dir?)", td, r); return -1; }
+    if (removed_out) *removed_out = 1;
+    return 0;
+}
 
 static int ia_hexn(const char *s, int n) {
     int i;
@@ -325,18 +409,29 @@ static void ia_index_write(const char *root, char shas[16][65], int k) {
    removed with rmdir, so any other entry makes the removal fail instead of being deleted.  0 when D is gone (or was
    absent); otherwise -1 with WHY naming the entry that could not be removed (D then still exists). */
 static int ia_drop_backup(const char *d, char *why, int wl) {
-    char p[4400]; sy_stat_t st; int i, r;
+    char p[4400], td[4400]; sy_stat_t st; int i, r, has_tape_dir = 0;
     r = sy_lstat(d, &st);
     if (r == -ENOENT) return 0;
     if (r) { cx_fmt(why, (size_t)wl, "cannot stat %s (rc %d)", d, r); return -1; }
     if (st.kind != 'd') { cx_fmt(why, (size_t)wl, "%s is not a directory", d); return -1; }
+    /* Check d/tape BEFORE unlinking any d/tape/* entries so a symlinked d/tape can never delete external files. */
+    if (ia_join(td, (int)sizeof td, d, "tape")) { cx_fmt(why, (size_t)wl, "path too long under %s", d); return -1; }
+    r = sy_lstat(td, &st);
+    if (r == 0) {
+        if (st.kind != 'd') { cx_fmt(why, (size_t)wl, "%s is not a directory", td); return -1; }
+        has_tape_dir = 1;
+    } else if (r != -ENOENT) { cx_fmt(why, (size_t)wl, "cannot stat %s (rc %d)", td, r); return -1; }
     for (i = 0; i <= IA_NSAVED; i++) {
+        if (i >= 5 && i < IA_NSAVED && !has_tape_dir) continue;
         if (ia_join(p, (int)sizeof p, d, i < IA_NSAVED ? ia_saved[i] : IA_MANIFEST)) { cx_fmt(why, (size_t)wl, "path too long under %s", d); return -1; }
         r = sy_lstat(p, &st);
         if (r == -ENOENT) continue;
         if (r) { cx_fmt(why, (size_t)wl, "cannot stat %s (rc %d)", p, r); return -1; }
         if (st.kind == 'd') { cx_fmt(why, (size_t)wl, "%s is a directory", p); return -1; }
         if ((r = sy_unlink(p)) != 0) { cx_fmt(why, (size_t)wl, "cannot remove %s (rc %d)", p, r); return -1; }
+    }
+    if (has_tape_dir) {
+        if ((r = sy_rmdir(td)) != 0) { cx_fmt(why, (size_t)wl, "cannot remove %s (rc %d; an entry outside the backup set?)", td, r); return -1; }
     }
     if ((r = sy_rmdir(d)) != 0) { cx_fmt(why, (size_t)wl, "cannot remove %s (rc %d; an entry outside the backup set?)", d, r); return -1; }
     return 0;
@@ -355,11 +450,22 @@ static void ia_backup(const char *root) {
     if (ia_drop_backup(d, why, (int)sizeof why)) ia_refuse("backup-not-removable", why);
     if (sy_mkdir(d, 0755)) ia_die("cannot make the backup");
     man[0] = 0;
+    {   char rtd[4400]; sy_stat_t tst; int tr;
+        if (ia_join(rtd, (int)sizeof rtd, root, "tape")) ia_die("path");
+        tr = sy_lstat(rtd, &tst);
+        if (tr == 0 && tst.kind != 'd') ia_refuse("tape-dir-not-directory", rtd);
+    }
     for (i = 0; i < IA_NSAVED; i++) {
+        sy_stat_t sst;
         if (ia_join(s, (int)sizeof s, root, ia_saved[i]) || ia_join(t, (int)sizeof t, d, ia_saved[i])) ia_die("path");
-        if (sy_exists(s) != 1) continue;
+        if (i >= 5) {
+            int sr = sy_lstat(s, &sst);
+            if (sr == -ENOENT) continue;
+            if (sr != 0 || sst.kind != 'f') ia_refuse("tape-sidecar-not-regular", s);
+            if (ia_ensure_tape_dir(d, 0)) ia_die("cannot make backup tape directory");
+        } else if (sy_exists(s) != 1) continue;
         if (ia_sha(s, hs, &sb)) ia_die("cannot read a Root file for the backup");
-        if (sy_copy(s, t, i == 0 ? 0755 : 0644)) ia_die("cannot copy into the backup");
+        if (sy_copy(s, t, ia_is_exec(i) ? 0755 : 0644)) ia_die("cannot copy into the backup");
         if (ia_sha(t, ht, &tb) || !tx_eqz(hs, ht) || sb != tb || (i == 0 && (!tx_eqz(ht, cur) || tb != cb))) ia_die("backup copy differs from the Root");
         if (cx_fmt(man + mw, sizeof man - (size_t)mw, "%s\t%s\t%ld\n", ia_saved[i], ht, tb)) ia_die("backup manifest");
         mw += tx_len(man + mw, (long)sizeof man - mw);
@@ -483,29 +589,73 @@ static int ia_rollback_backup(const char *root, int write) {
     for (i = 0; i < IA_NSAVED; i++) {
         if (!listed[i]) continue;
         if (ia_join(s, (int)sizeof s, d, ia_saved[i])) ia_die("path");
-        if (sy_copy(s, tmpn[i], i == 0 ? 0755 : 0644) || ia_sha(tmpn[i], h, &b) || !tx_eqz(h, msha[i]) || b != mbytes[i]) {
+        if (sy_copy(s, tmpn[i], ia_is_exec(i) ? 0755 : 0644) || ia_sha(tmpn[i], h, &b) || !tx_eqz(h, msha[i]) || b != mbytes[i]) {
             for (j = 0; j <= i; j++) (void)sy_unlink(tmpn[j]);
             ia_refuse("rollback-copy-failed-root-unchanged", s);
         }
     }
-    /* phase 2: move each present Root file aside, put the backup file in its place */
-    for (i = 0; i < IA_NSAVED; i++) {
-        int fail = 0;
-        if (i == fault) fail = 1;
-        if (!fail && sy_exists(tgt[i]) == 1) { if (sy_rename(tgt[i], oldn[i])) fail = 1; else moved[i] = 1; }
-        if (!fail && listed[i]) { if (sy_rename(tmpn[i], tgt[i])) fail = 1; else placed[i] = 1; }
-        if (fail) {
-            int lost = 0;
-            for (j = i; j >= 0; j--) {
-                if (moved[j]) { if (sy_rename(oldn[j], tgt[j])) lost = 1; }
-                else if (placed[j]) { if (sy_unlink(tgt[j])) lost = 1; }
+    /* Pre-check ROOT/tape is not a symlink and (when backup has no tape/*) contains no unknown entries BEFORE touching any Root file. */
+    {   char rtd[4400], bad_ent[4600]; sy_stat_t tst; int tr;
+        if (ia_join(rtd, (int)sizeof rtd, root, "tape")) ia_die("path");
+        tr = sy_lstat(rtd, &tst);
+        if (tr == 0 && tst.kind != 'd') {
+            for (j = 0; j < IA_NSAVED; j++) if (listed[j]) (void)sy_unlink(tmpn[j]);
+            ia_refuse("tape-dir-not-directory", rtd);
+        }
+        if (tr != 0 && tr != -ENOENT) {
+            for (j = 0; j < IA_NSAVED; j++) if (listed[j]) (void)sy_unlink(tmpn[j]);
+            ia_refuse("tape-dir-unreadable", rtd);
+        }
+        if (tr == 0 && !listed[5] && !listed[6]) {
+            int ok = ia_tape_dir_only_known(root, bad_ent, (int)sizeof bad_ent);
+            if (ok != 0) {
+                for (j = 0; j < IA_NSAVED; j++) if (listed[j]) (void)sy_unlink(tmpn[j]);
+                if (ok == 1) ia_refuse("rollback-tape-dir-not-empty", bad_ent[0] ? bad_ent : rtd);
+                ia_refuse("rollback-tape-dir-unreadable", rtd);
             }
-            for (j = 0; j < IA_NSAVED; j++) if (listed[j] && !placed[j]) (void)sy_unlink(tmpn[j]);
-            if (lost) ia_die("rollback failed and the Root could not be put back; see .rollback-old.* in the Root");
-            ia_refuse("rollback-step-failed-root-unchanged", ia_saved[i]);
+        }
+    }
+    /* phase 2: move each present Root file aside, put the backup file in its place */
+    {   int created_tape = 0;
+        for (i = 0; i < IA_NSAVED; i++) {
+            int fail = 0;
+            if (i == fault) fail = 1;
+            if (!fail && i >= 5) {
+                sy_stat_t sst; int sr = sy_lstat(tgt[i], &sst);
+                if (sr == 0) {
+                    if (sst.kind != 'f' || sy_rename(tgt[i], oldn[i])) fail = 1;
+                    else moved[i] = 1;
+                } else if (sr != -ENOENT) fail = 1;
+            } else if (!fail && sy_exists(tgt[i]) == 1) { if (sy_rename(tgt[i], oldn[i])) fail = 1; else moved[i] = 1; }
+            if (!fail && listed[i] && i >= 5) {
+                int c = 0;
+                if (ia_ensure_tape_dir(root, &c)) fail = 1;
+                else if (c) created_tape = 1;
+            }
+            if (!fail && listed[i]) { if (sy_rename(tmpn[i], tgt[i])) fail = 1; else placed[i] = 1; }
+            if (fail) {
+                int lost = 0;
+                for (j = i; j >= 0; j--) {
+                    if (moved[j]) { if (sy_rename(oldn[j], tgt[j])) lost = 1; }
+                    else if (placed[j]) { if (sy_unlink(tgt[j])) lost = 1; }
+                }
+                for (j = 0; j < IA_NSAVED; j++) if (listed[j] && !placed[j]) (void)sy_unlink(tmpn[j]);
+                if (created_tape) { char rtd[4400]; if (!ia_join(rtd, (int)sizeof rtd, root, "tape")) (void)sy_rmdir(rtd); }
+                if (lost) ia_die("rollback failed and the Root could not be put back; see .rollback-old.* in the Root");
+                ia_refuse("rollback-step-failed-root-unchanged", ia_saved[i]);
+            }
         }
     }
     for (i = 0; i < IA_NSAVED; i++) if (moved[i]) (void)sy_unlink(oldn[i]);
+    /* G4: if the restored backup had no tape/* entries, remove empty ROOT/tape dir (refuse if non-empty). */
+    if (!listed[5] && !listed[6]) {
+        char rtd[4400]; sy_stat_t tst; int tr;
+        if (ia_join(rtd, (int)sizeof rtd, root, "tape")) ia_die("path");
+        tr = sy_lstat(rtd, &tst);
+        if (tr == 0) {
+            if (tst.kind != 'd' || sy_rmdir(rtd) != 0) ia_refuse("rollback-tape-dir-not-empty", rtd);
+        } else if (tr != -ENOENT) ia_refuse("rollback-tape-dir-unreadable", rtd);
+    }
     if (ia_sha(tgt[0], h, &b) || !tx_eqz(h, shas[k - 1])) ia_die("restored Root differs from the backup");
     if (ia_drop_backup(d, why, (int)sizeof why)) {
         sy_printf("INSTALL_APE\tREFUSED\tbackup-not-removable\t%s\tindex-kept\n", why);
@@ -602,9 +752,153 @@ static int ia_candidate(const char *root, const char *dirarg, int write) {
     return ia_install(root, apep, got, write);
 }
 
+/* Three-phase optional tape sidecar sync:
+   1. ia_tape_prepare: read-only validation BEFORE any file is written to ROOT (rejects unpaired sidecar,
+      symlinks, manifest sha mismatch, or non-empty ROOT/tape on clear with zero side effects).
+   2. ia_tape_stage: copy needed sidecars to temporary names under ROOT/tape/.install.N.PID and re-hash
+      BEFORE renaming unisacc.com; any failure cleans both tape temps and caller's clean1/clean2.
+   3. ia_tape_commit / ia_tape_abort: rename staged temps into place (or clear ROOT/tape) ONLY after
+      unisacc.com rename succeeds; abort removes staged temps and newly created ROOT/tape. */
+typedef struct {
+    int mode; /* 0 = no-op, 1 = clear ROOT/tape, 2 = sync pair */
+    int need[2];
+    int created_dir;
+    char src[2][4400];
+    char dst[2][4400];
+    char tmp[2][4400];
+    char sha[2][65];
+    long bytes[2];
+    char so_sha[65];
+    long so_bytes;
+} ia_tape_plan_t;
+
+static void ia_tape_abort(const char *root, ia_tape_plan_t *p) {
+    int k;
+    if (!p) return;
+    for (k = 0; k < 2; k++) if (p->tmp[k][0]) { (void)sy_unlink(p->tmp[k]); p->tmp[k][0] = 0; }
+    if (p->created_dir) {
+        char rtd[4400];
+        if (!ia_join(rtd, (int)sizeof rtd, root, "tape")) (void)sy_rmdir(rtd);
+        p->created_dir = 0;
+    }
+}
+
+static void ia_tape_prepare(const char *root, const char *ape, ia_tape_plan_t *p) {
+    char dir[4096], std[4400], src_so[4400], src_mf[4400], rtd[4400], bad_ent[4600];
+    char hd[65];
+    long l = tx_len(ape, (long)sizeof dir - 1), db = 0;
+    sy_stat_t st_dir, st_so, st_mf, rtd_st;
+    int r_dir, r_so, r_mf, r_rtd, k;
+    p->mode = 0; p->need[0] = p->need[1] = 0; p->created_dir = 0;
+    p->tmp[0][0] = p->tmp[1][0] = 0; p->so_sha[0] = 0; p->so_bytes = 0;
+    while (l > 0 && ape[l - 1] != '/') l--;
+    if (l <= 0) return;
+    mm_copy(dir, (long)sizeof dir, ape, l - 1);
+    dir[l - 1] = 0;
+    if (ia_join(std, (int)sizeof std, dir, "tape") ||
+        ia_join(src_so, (int)sizeof src_so, dir, ia_saved[5]) ||
+        ia_join(src_mf, (int)sizeof src_mf, dir, ia_saved[6]) ||
+        ia_join(rtd, (int)sizeof rtd, root, "tape")) ia_die("path");
+    r_dir = sy_lstat(std, &st_dir);
+    if (r_dir == 0 && st_dir.kind != 'd') ia_refuse("tape-dir-not-directory", std);
+    if (r_dir != 0 && r_dir != -ENOENT) ia_refuse("tape-dir-unreadable", std);
+    r_so = (r_dir == 0) ? sy_lstat(src_so, &st_so) : -ENOENT;
+    r_mf = (r_dir == 0) ? sy_lstat(src_mf, &st_mf) : -ENOENT;
+    if (r_so == -ENOENT && r_mf == -ENOENT) {
+        r_rtd = sy_lstat(rtd, &rtd_st);
+        if (r_rtd == -ENOENT) { p->mode = 0; return; }
+        if (r_rtd != 0 || rtd_st.kind != 'd') ia_refuse("tape-cleanup-failed", rtd);
+        if (ia_tape_dir_only_known(root, bad_ent, (int)sizeof bad_ent) != 0)
+            ia_refuse("tape-cleanup-failed", bad_ent[0] ? bad_ent : rtd);
+        for (k = 0; k < 2; k++) {
+            char dp[4400]; sy_stat_t dst_st; int dr;
+            if (ia_join(dp, (int)sizeof dp, root, ia_saved[5 + k])) ia_die("path");
+            dr = sy_lstat(dp, &dst_st);
+            if (dr == 0 && dst_st.kind != 'f') ia_refuse("tape-cleanup-failed", dp);
+            if (dr != 0 && dr != -ENOENT) ia_refuse("tape-cleanup-failed", dp);
+        }
+        p->mode = 1;
+        return;
+    }
+    if (r_so != 0 || r_mf != 0) ia_refuse("tape-sidecar-incomplete", std);
+    if (st_so.kind != 'f' || st_mf.kind != 'f') ia_refuse("tape-sidecar-not-regular", std);
+    if (ia_verify_tape_manifest(src_so, src_mf, p->so_sha, &p->so_bytes) != 0) ia_refuse("tape-manifest-sha-mismatch", src_mf);
+    r_rtd = sy_lstat(rtd, &rtd_st);
+    if (r_rtd == 0 && rtd_st.kind != 'd') ia_refuse("tape-dir-not-directory", rtd);
+    if (r_rtd != 0 && r_rtd != -ENOENT) ia_refuse("tape-dir-not-directory", rtd);
+    p->mode = 2;
+    for (k = 0; k < 2; k++) {
+        sy_stat_t dst_st; int dr;
+        if (ia_join(p->src[k], (int)sizeof p->src[k], dir, ia_saved[5 + k]) ||
+            ia_join(p->dst[k], (int)sizeof p->dst[k], root, ia_saved[5 + k])) ia_die("path");
+        if (ia_sha(p->src[k], p->sha[k], &p->bytes[k])) ia_die("cannot read sidecar file");
+        dr = sy_lstat(p->dst[k], &dst_st);
+        if (dr == 0 && dst_st.kind != 'f') ia_refuse("tape-sidecar-not-regular", p->dst[k]);
+        if (dr != 0 && dr != -ENOENT) ia_refuse("tape-sidecar-not-regular", p->dst[k]);
+        if (dr == 0 && ia_sha(p->dst[k], hd, &db) == 0 && tx_eqz(p->sha[k], hd) && p->bytes[k] == db) p->need[k] = 0;
+        else p->need[k] = 1;
+    }
+}
+
+static void ia_tape_stage(const char *root, ia_tape_plan_t *p, const char *clean1, const char *clean2) {
+    char ht[65]; long tb = 0; int k;
+    if (!p || p->mode != 2 || (!p->need[0] && !p->need[1])) return;
+    if (ia_ensure_tape_dir(root, &p->created_dir)) {
+        if (clean1) (void)sy_unlink(clean1);
+        if (clean2) (void)sy_unlink(clean2);
+        ia_refuse("tape-dir-not-directory", root);
+    }
+    for (k = 0; k < 2; k++) {
+        if (!p->need[k]) continue;
+        if (cx_fmt(p->tmp[k], sizeof p->tmp[k], "%s/tape/.install.%d.%d", root, 5 + k, sy_pid())) {
+            ia_tape_abort(root, p);
+            if (clean1) (void)sy_unlink(clean1);
+            if (clean2) (void)sy_unlink(clean2);
+            ia_die("path");
+        }
+        if (sy_copy(p->src[k], p->tmp[k], ia_is_exec(5 + k) ? 0755 : 0644)) {
+            ia_tape_abort(root, p);
+            if (clean1) (void)sy_unlink(clean1);
+            if (clean2) (void)sy_unlink(clean2);
+            ia_die("cannot copy tape sidecar");
+        }
+        if (ia_sha(p->tmp[k], ht, &tb) || !tx_eqz(p->sha[k], ht) || p->bytes[k] != tb) {
+            char badp[4400];
+            mm_copy(badp, (long)sizeof badp, p->tmp[k], tx_len(p->tmp[k], (long)sizeof badp - 1) + 1);
+            ia_tape_abort(root, p);
+            if (clean1) (void)sy_unlink(clean1);
+            if (clean2) (void)sy_unlink(clean2);
+            ia_refuse("tape-copy-differs-from-source", badp);
+        }
+    }
+}
+
+static void ia_tape_commit(const char *root, ia_tape_plan_t *p) {
+    char why[512]; int k, synced = 0;
+    if (!p || p->mode == 0) return;
+    if (p->mode == 1) {
+        int removed = 0;
+        if (ia_remove_tape_dir(root, &removed, why, (int)sizeof why)) ia_refuse("tape-cleanup-failed", why);
+        if (removed) sy_printf("INSTALL_APE\tTAPE_CLEARED\t%s/tape\n", root);
+        return;
+    }
+    for (k = 0; k < 2; k++) {
+        if (!p->need[k]) continue;
+        if (sy_rename(p->tmp[k], p->dst[k])) {
+            ia_tape_abort(root, p);
+            ia_die("cannot rename tape sidecar");
+        }
+        p->tmp[k][0] = 0;
+        synced = 1;
+    }
+    p->created_dir = 0;
+    if (synced) sy_printf("INSTALL_APE\tTAPE_SYNCED\t%s\t%ld\n", p->so_sha, p->so_bytes);
+}
+
 /* install APE over ROOT/unisacc.com.  want = expected sha; write = do it.  Returns the exit code. */
 static int ia_install(const char *root, const char *ape, const char *want, int write) {
     char got[65], cur[65], com[4400], dev[4400], tmp[4400], rec[4400], rtmp[4400], line[4400], ver[160];
+    ia_tape_plan_t tp;
     long bytes = 0, cb = 0;
     int pid = sy_pid(), had_dev, had_split;
     if (!ia_hex64(want)) ia_refuse("expected-sha-not-64-hex", want);
@@ -616,7 +910,14 @@ static int ia_install(const char *root, const char *ape, const char *want, int w
         ia_join(rec, (int)sizeof rec, root, "unisacc.com.ape.sha256")) ia_die("path");
     if (cx_fmt(tmp, sizeof tmp, "%s/.unisacc.com.install.%d", root, pid) || cx_fmt(rtmp, sizeof rtmp, "%s/.unisacc.com.ape.sha256.%d", root, pid)) ia_die("path");
     if (ia_sha(com, cur, &cb) == 0 && tx_eqz(cur, got)) {
-        if (write) { ia_sync_record(root, ape, got, bytes); ia_write_receipt(root, ape, got, bytes); ia_mark(root, got, bytes); }
+        if (write) {
+            ia_tape_prepare(root, ape, &tp);
+            ia_tape_stage(root, &tp, 0, 0);
+            ia_sync_record(root, ape, got, bytes);
+            ia_write_receipt(root, ape, got, bytes);
+            ia_mark(root, got, bytes);
+            ia_tape_commit(root, &tp);
+        }
         sy_printf("INSTALL_APE\tALREADY\t%s\t%ld\t%s\n", got, bytes, ver);
         return 0;
     }
@@ -624,6 +925,8 @@ static int ia_install(const char *root, const char *ape, const char *want, int w
         sy_printf("INSTALL_APE\tDRYRUN\t%s\t%ld\t%s\n", got, bytes, ver);
         return 0;
     }
+    /* Read-only tape sidecar validation BEFORE any backup or file write to ROOT. */
+    ia_tape_prepare(root, ape, &tp);
     had_dev = sy_exists(dev);
     if (!had_dev && sy_exists(com)) {
         int f = ia_has_footer(com);
@@ -649,7 +952,10 @@ static int ia_install(const char *root, const char *ape, const char *want, int w
     if (ia_sha(tmp, cur, &cb) || !tx_eqz(cur, got) || cb != bytes) { (void)sy_unlink(tmp); ia_refuse("copy-differs-from-source", tmp); }
     if (cx_fmt(line, sizeof line, "%s\t%ld\t%s\n", got, bytes, "unisacc.com")) { (void)sy_unlink(tmp); ia_die("record"); }
     if (cx_write(rtmp, line, (size_t)tx_len(line, (long)sizeof line))) { (void)sy_unlink(tmp); (void)sy_unlink(rtmp); ia_die("cannot write the record"); }
-    if (sy_rename(tmp, com)) { (void)sy_unlink(tmp); (void)sy_unlink(rtmp); ia_die("cannot rename over unisacc.com"); }
+    /* Stage verified tape sidecars to temporary names BEFORE renaming unisacc.com; commit only after com rename succeeds. */
+    ia_tape_stage(root, &tp, tmp, rtmp);
+    if (sy_rename(tmp, com)) { ia_tape_abort(root, &tp); (void)sy_unlink(tmp); (void)sy_unlink(rtmp); ia_die("cannot rename over unisacc.com"); }
+    ia_tape_commit(root, &tp);
     if (sy_rename(rtmp, rec)) { (void)sy_unlink(rtmp); ia_die("installed, but the record could not be written"); }
     ia_sync_record(root, ape, got, bytes);
     ia_write_receipt(root, ape, got, bytes);
