@@ -1,0 +1,188 @@
+/* tools/check-release-keepalive.cx -- contract & safety checks for tools/release-keepalive.cx.
+ *
+ *   sh ./unisacc.com tools/check-release-keepalive.cx --
+ * Final line: CHECK_RELEASE_KEEPALIVE<TAB>passed=N<TAB>failed=M
+ */
+#pragma unisa use sys.fs
+#pragma unisa use sys.posix
+#pragma unisa use sys.io
+#pragma unisa use sys.proc
+#pragma unisa use sys.sig
+#pragma unisa use sys.env
+#pragma unisa use sys.time
+#pragma unisa use text.text
+#pragma unisa use text.fmt
+#pragma unisa use mem.heap
+#pragma unisa use cxlib.netpack
+
+static int g_pass, g_fail;
+
+static void ck(int ok, const char *name, const char *detail) {
+    if (ok) { g_pass++; printf("PASS\t%s\n", name); }
+    else { g_fail++; printf("FAIL\t%s\tdetail=%s\n", name, detail && detail[0] ? detail : "-"); }
+}
+
+static int run_av(const char *cwd, char **av, char *out, long ocap, int *rc_out) {
+    np_result r = {0};
+    char why[256] = {0};
+    if (out && ocap > 0) out[0] = 0;
+    if (np_run(av, cwd, 0, 45, &r, why, sizeof why)) { np_free(&r); return -1; }
+    *rc_out = r.rc;
+    if (out && ocap > 1) {
+        size_t n = 0;
+        for (size_t i = 0; i < r.outn && n + 1 < (size_t)ocap; i++) out[n++] = r.out[i];
+        for (size_t i = 0; i < r.errn && n + 1 < (size_t)ocap; i++) out[n++] = r.err[i];
+        out[n] = 0;
+    }
+    np_free(&r);
+    return 0;
+}
+
+static int has_marker(const char *dir, const char *ver) {
+    char p[4800];
+    if (cx_fmt(p, sizeof p, "%s/.keepalive-v%s", dir, ver)) return 0;
+    return sy_exists(p) == 1;
+}
+
+int main(void) {
+    char cwd[4096], work[4096], bin[4400], cache[4400], outside[4400], p[4800], out[8192];
+    int rc = -1;
+    if (sy_realpath(".", cwd, sizeof cwd) < 0) return 2;
+    if (sy_mkdtemp(sy_tmpdir(), "check-rkeep-", work, sizeof work) != 0) return 2;
+    cx_fmt(bin, sizeof bin, "%s/release-keepalive.bin", work);
+    cx_fmt(cache, sizeof cache, "%s/cache", work);
+    cx_fmt(outside, sizeof outside, "%s/outside", work);
+    sy_mkdir_all(cache, 0755);
+    sy_mkdir_all(outside, 0755);
+
+    /* Compile once for fast sub-second invocations */
+    {
+        char *cv[] = {"sh", "./unisacc.com", "-o", bin, "tools/release-keepalive.cx", 0};
+        ck(run_av(cwd, cv, out, sizeof out, &rc) == 0 && rc == 0, "compile.release-keepalive", out);
+        if (rc != 0) { sy_remove_all(work); printf("CHECK_RELEASE_KEEPALIVE\tpassed=%d\tfailed=%d\n", g_pass, g_fail); return 1; }
+    }
+
+    /* 1. Argument validation refusals (rc=2) */
+    {
+        char *v1[] = {bin, "../evil", "--cache-dir", cache, 0};
+        ck(run_av(cwd, v1, out, sizeof out, &rc) == 0 && rc == 2, "arg.bad-version-refused", out);
+        char *v2[] = {bin, "0.1.5", "--rounds", "0", "--cache-dir", cache, 0};
+        ck(run_av(cwd, v2, out, sizeof out, &rc) == 0 && rc == 2, "arg.zero-rounds-refused", out);
+        char *v3[] = {bin, "0.1.5", "--rounds", "99", "--cache-dir", cache, 0};
+        ck(run_av(cwd, v3, out, sizeof out, &rc) == 0 && rc == 2, "arg.over-rounds-refused", out);
+        char *v4[] = {bin, "0.1.5", "--interval-s", "9999", "--cache-dir", cache, 0};
+        ck(run_av(cwd, v4, out, sizeof out, &rc) == 0 && rc == 2, "arg.over-interval-refused", out);
+        char *v5[] = {bin, "0.1.5", "--cache-dir", "relative/dir", 0};
+        ck(run_av(cwd, v5, out, sizeof out, &rc) == 0 && rc == 2, "arg.relative-cache-refused", out);
+    }
+
+    /* 2. Seed allowlisted 0.1.5 dirs, rehearsal dirs, unrelated dirs, and symlink traps */
+    const char *want_dirs[] = {
+        "chains/bg-b1/0123456789abcdef0123456789abcdef01234567",
+        "chains/snap",
+        "chains/snap/0123456789-deadbeef",
+        "prerun/v0.1.5-0123456789",
+        "prerun/rehearsal-v0.1.5-abcdef0",
+        "release-v0.1.5-0123456789",
+        "rehearsal-v0.1.5-0123456789",
+        "evidence-staging-0.1.5",
+        "prerun-backups",
+        0
+    };
+    const char *skip_dirs[] = {
+        "unrelated-dir",
+        "release-v0.1.4-old",
+        "evidence-staging-0.1.4",
+        "prerun/v0.1.4-old",
+        "chains/bg-b1/not-hex-dir",
+        0
+    };
+    for (int i = 0; want_dirs[i]; i++) { cx_fmt(p, sizeof p, "%s/%s", cache, want_dirs[i]); sy_mkdir_all(p, 0755); }
+    for (int i = 0; skip_dirs[i]; i++) { cx_fmt(p, sizeof p, "%s/%s", cache, skip_dirs[i]); sy_mkdir_all(p, 0755); }
+
+    /* Symlink trap 1: symlink dir matching release-v0.1.5-* pointing outside */
+    cx_fmt(p, sizeof p, "%s/release-v0.1.5-symlink-trap", cache);
+    sy_symlink(outside, p);
+
+    /* Symlink trap 2: pre-planted symlink marker inside prerun-backups pointing to outside/sentinel */
+    char sentinel[4600], trap_mk[4600];
+    cx_fmt(sentinel, sizeof sentinel, "%s/sentinel", outside);
+    cx_write(sentinel, "UNTOUCHED\n", 10);
+    cx_fmt(trap_mk, sizeof trap_mk, "%s/prerun-backups/.keepalive-v0.1.5", cache);
+    sy_symlink(sentinel, trap_mk);
+
+    /* Run 2 rounds with interval=0 */
+    {
+        char *rv[] = {bin, "0.1.5", "--rounds", "2", "--interval-s", "0", "--cache-dir", cache, 0};
+        ck(run_av(cwd, rv, out, sizeof out, &rc) == 0 && rc == 0 &&
+           tx_contains(out, tx_len(out, sizeof out), "RELEASE_KEEPALIVE\tstatus=DONE\tversion=0.1.5\trounds_done=2", 57),
+           "run.two-rounds-done", out);
+    }
+
+    /* Verify all real non-trapped target dirs got .keepalive-v0.1.5 with round=2 */
+    int all_touched = 1;
+    for (int i = 0; want_dirs[i]; i++) {
+        if (tx_eqz(want_dirs[i], "prerun-backups")) continue; /* has symlink trap */
+        cx_fmt(p, sizeof p, "%s/%s", cache, want_dirs[i]);
+        if (!has_marker(p, "0.1.5")) all_touched = 0;
+    }
+    ck(all_touched, "allowlist.all-critical-dirs-touched", "-");
+
+    /* Verify marker TSV field 2 reflects round=2 */
+    {
+        cx_fmt(p, sizeof p, "%s/release-v0.1.5-0123456789/.keepalive-v0.1.5", cache);
+        size_t n = 0; char *b = cx_read(p, &n);
+        long fo = 0, fl = 0;
+        int ok = b && tx_field(b, (long)n, '\t', 2, &fo, &fl) == 0 && fl == 7 && tx_same(b + fo, 7, "round=2", 7);
+        ck(ok, "marker.records-round-2", b ? b : "-");
+        if (b) mm_free(b);
+    }
+
+    /* Verify NO unrelated dir was touched */
+    int none_outside = 1;
+    for (int i = 0; skip_dirs[i]; i++) {
+        cx_fmt(p, sizeof p, "%s/%s", cache, skip_dirs[i]);
+        if (has_marker(p, "0.1.5")) none_outside = 0;
+    }
+    ck(none_outside, "allowlist.unrelated-dirs-untouched", "-");
+
+    /* Verify absent evidence-vault-0.1.5 was NOT created */
+    cx_fmt(p, sizeof p, "%s/evidence-vault-0.1.5", cache);
+    ck(sy_exists(p) == 0, "allowlist.missing-dir-not-created", "-");
+
+    /* Verify symlink traps were NOT followed */
+    ck(!has_marker(outside, "0.1.5"), "safety.symlink-dir-not-followed", "-");
+    {
+        size_t n = 0; char *b = cx_read(sentinel, &n);
+        ck(b && n == 10 && tx_same(b, 10, "UNTOUCHED\n", 10), "safety.symlink-marker-not-overwritten", b ? b : "-");
+        if (b) mm_free(b);
+    }
+
+    /* 3. Explicit --rev filter only touches named rev under chains/bg-b1 */
+    {
+        char rev_a[4600], rev_b[4600];
+        cx_fmt(rev_a, sizeof rev_a, "%s/chains/bg-b1/aaaaaaa111111111111111111111111111111111", cache);
+        cx_fmt(rev_b, sizeof rev_b, "%s/chains/bg-b1/bbbbbbb222222222222222222222222222222222", cache);
+        sy_mkdir_all(rev_a, 0755); sy_mkdir_all(rev_b, 0755);
+        char *rv[] = {bin, "0.1.5", "--rounds", "1", "--interval-s", "0", "--cache-dir", cache,
+                      "--rev", "aaaaaaa111111111111111111111111111111111", 0};
+        ck(run_av(cwd, rv, out, sizeof out, &rc) == 0 && rc == 0 &&
+           has_marker(rev_a, "0.1.5") && !has_marker(rev_b, "0.1.5"),
+           "rev-filter.touches-only-named-rev", out);
+    }
+
+    /* 4. Deadline enforcement: --rounds 5 --interval-s 2 --max-seconds 1 exits cleanly with status=DEADLINE */
+    {
+        long t0 = sy_now_ms();
+        char *rv[] = {bin, "0.1.5", "--rounds", "5", "--interval-s", "2", "--max-seconds", "1", "--cache-dir", cache, 0};
+        int r0 = run_av(cwd, rv, out, sizeof out, &rc);
+        long dt = sy_now_ms() - t0;
+        ck(r0 == 0 && rc == 0 && dt < 3500 &&
+           tx_contains(out, tx_len(out, sizeof out), "RELEASE_KEEPALIVE\tstatus=DEADLINE", 33),
+           "bound.deadline-exits-cleanly", out);
+    }
+
+    (void)sy_remove_all(work);
+    printf("CHECK_RELEASE_KEEPALIVE\tpassed=%d\tfailed=%d\n", g_pass, g_fail);
+    return g_fail ? 1 : 0;
+}
