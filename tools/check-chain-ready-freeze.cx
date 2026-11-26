@@ -40,13 +40,43 @@ static int sh_in(const char *dir, const char *cmd) {
     return sy_wait_status(pid, 0, &ex, &code, &sig) == pid && ex ? code : -1;
 }
 #define G "git -c user.name=t -c user.email=t@t -c commit.gpgsign=false "
-/* a fresh repo R with bare origin: numbering files committed and pushed (commit A) */
+static void build_skel(void) {
+    char c[4800];
+    cx_fmt(c, sizeof c,
+        "set -e; S='%s/skel'; rm -rf \"$S\"; mkdir -p \"$S/seed\" \"$S/include\" "
+        "\"$S/cx/sys\" \"$S/cx/mem\" \"$S/cx/text\" \"$S/cx/core\" \"$S/cx/driver\" \"$S/cx/runtime\" \"$S/cx/compiler\" "
+        "\"$S/src\" \"$S/exec/c/asm\" \"$S/exec/c/cxlib\" \"$S/weights\" \"$S/kernel\" \"$S/iterate/kernel\" \"$S/tools/cxlib\" \"$S/ext/textx\" \"$S/build/layer-api\"; "
+        "cp '%s/seed/ident.c' \"$S/seed/ident.c\"; "
+        "if [ -f '%s/seed/sha256.h' ]; then cp '%s/seed/sha256.h' \"$S/seed/sha256.h\"; fi; "
+        "for f in iterate/kernel/typekw.tsv build/core-closure.tsv cxroot.tsv ext/textx/deflate.cx "
+        "tools/bound tools/bound.c tools/cxbin tools/safedel.cx tools/lib.sh tools/build_ref.sh tools/export_ref.sh "
+        "tools/refshim.h tools/reffoot.h tools/sourceflat.cx tools/ape-pack.cx tools/release-ape.cx tools/cxlib/releaseversion.cx "
+        "include/README.md src/.keep weights/.keep kernel/.keep exec/.keep cx/sys/.keep cx/mem/.keep cx/text/.keep "
+        "cx/core/.keep cx/driver/.keep cx/runtime/.keep cx/compiler/.keep; do "
+        "  : > \"$S/$f\"; "
+        "done; "
+        "printf 'R\\tcxlib\\ttools/cxlib\\nR\\truntime\\tcx/runtime\\nR\\tsys\\tcx/sys\\n' > \"$S/cxroot.tsv\"; "
+        "printf 'int codec_stub(void) { return 0; }\\n' > \"$S/cx/runtime/codec.cx\"; "
+        "ln -s ../../cx/runtime/codec.cx \"$S/tools/cxlib/codec.cx\"; "
+        "ln -s ../../../tools/cxlib/codec.cx \"$S/exec/c/cxlib/codec.cx\"; "
+        "ln -s ../cx/sys \"$S/tools/sys\"; "
+        "printf 'int sys_dummy = 1;\\n' > \"$S/cx/sys/dummy.cx\"; "
+        "printf 'int dep_v = 1;\\n' > \"$S/tools/cxlib/custom_dep.cx\"; "
+        "printf '#pragma unisa use cxlib.custom_dep\\nint rb_init = 1;\\n' > \"$S/tools/release-build.cx\"; "
+        "printf 'int init_c = 1;\\n' > \"$S/src/old_mod.c\"; "
+        "printf 'int ext_tgt = 1;\\n' > \"$S/ext/alias_target.cx\"; "
+        "ln -s ../ext/alias_target.cx \"$S/cx/alias_link.cx\"; "
+        "printf 'p\\t1\\n' > \"$S/build/tlib-packages.tsv\"; printf 'h\\t1\\n' > \"$S/build/iface-hash.tsv\"; "
+        "printf 'a\\n' > \"$S/build/layer-api/x.tsv\"; printf 'x\\n' > \"$S/f.txt\"",
+        tmpd, cwd, cwd, cwd);
+    if (sh_in(tmpd, c)) printf("SETUP\tskel\t%.300s\n", out);
+}
+/* a fresh repo R with bare origin: canonical seed/ident.c skeleton + numbering files committed and pushed (commit A) */
 static void fresh(const char *r) {
     char c[2000];
-    cx_fmt(c, sizeof c, "rm -rf '%s' '%s.git' && git init -q --bare '%s.git' && git init -q -b main '%s' && cd '%s' && "
-           "mkdir -p build/layer-api && printf 'p\\t1\\n' > build/tlib-packages.tsv && printf 'h\\t1\\n' > build/iface-hash.tsv && "
-           "printf 'a\\n' > build/layer-api/x.tsv && printf 'x\\n' > f.txt && " G "add -A && " G "commit -qm A && "
-           "git remote add origin '%s.git' && git push -q origin main", r, r, r, r, r, r);
+    cx_fmt(c, sizeof c, "rm -rf '%s' '%s.git' && git init -q --bare '%s.git' && cp -a '%s/skel' '%s' && cd '%s' && "
+           "git init -q -b main && " G "add -A && " G "commit -qm A && "
+           "git remote add origin '%s.git' && git push -q origin main", r, r, r, tmpd, r, r, r);
     if (sh_in(tmpd, c)) printf("SETUP\tfresh\t%.300s\n", out);
 }
 static void in_repo(const char *r, const char *cmd) { if (sh_in(r, cmd)) printf("SETUP\t%s\t%.300s\n", cmd, out); }
@@ -67,9 +97,49 @@ static const Case cases[] = {
     {"malformed-row", "printf 'sid1\\tbase\\tcc\\tabc\\tsrc\\n' > build/freeze.tsv" COMMIT_PUSH, "DEVSVC_OWNER=cc", "FAIL", "FREEZE_TABLE_MALFORMED"},
     {"owner-mismatch", ROW_OK COMMIT_PUSH, "DEVSVC_OWNER=other", "FAIL", "FREEZE_OWNER_MISMATCH active freeze row owner=cc"},
     {"marker-without-owner-env", "touch .git/PUSH-FREEZE", "", "FAIL", "FREEZE_OWNER_MISMATCH PUSH-FREEZE"},
-    {"behind-origin-main", ROW_OK COMMIT_PUSH " && git update-ref refs/remotes/origin/main $(" G "commit-tree HEAD^{tree} -p HEAD -m other)", "DEVSVC_OWNER=cc UNISACC_FREEZE_NO_FETCH=1", "FAIL", "FREEZE_BEHIND_MAIN behind=1"},
+#define ADV_MAIN(step, msg) " && { F=$(git rev-parse HEAD); git checkout -qb tmpadv && " step " && " G "add -A && " G "commit -qm " msg " && git update-ref refs/remotes/origin/main HEAD && git checkout -qf main && git reset -q --hard \"$F\" && git branch -qD tmpadv; }"
+    {"behind-origin-main", ROW_OK COMMIT_PUSH ADV_MAIN("printf 'int p=1;\\n' > cx/core/pik1.cx", "pik1-adv"), "DEVSVC_OWNER=cc UNISACC_FREEZE_NO_FETCH=1", "FAIL", "FREEZE_BEHIND_MAIN behind=1"},
+    {"behind-origin-main-toolchain-pik1", ROW_OK COMMIT_PUSH ADV_MAIN("printf 'int b=1;\\n' > tools/release-build.cx", "tc-adv"), "DEVSVC_OWNER=cc UNISACC_FREEZE_NO_FETCH=1", "FAIL", "FREEZE_BEHIND_MAIN behind=1"},
+    {"behind-origin-main-tools-cxlib-codec", ROW_OK COMMIT_PUSH ADV_MAIN("rm -f tools/cxlib/codec.cx && printf 'int codec_sym = 2;\\n' > tools/cxlib/codec.cx", "codec-sym"), "DEVSVC_OWNER=cc UNISACC_FREEZE_NO_FETCH=1", "FAIL", "FREEZE_BEHIND_MAIN behind=1"},
+    {"behind-origin-main-cx-runtime-codec-symlink", ROW_OK COMMIT_PUSH ADV_MAIN("printf 'int codec_sym = 2;\\n' > cx/runtime/codec.cx", "rt-codec"), "DEVSVC_OWNER=cc UNISACC_FREEZE_NO_FETCH=1", "FAIL", "FREEZE_BEHIND_MAIN behind=1"},
+    {"behind-origin-main-recipe-use-dep", ROW_OK COMMIT_PUSH ADV_MAIN("printf 'int dep_v = 2;\\n' > tools/cxlib/custom_dep.cx", "recipe-dep"), "DEVSVC_OWNER=cc UNISACC_FREEZE_NO_FETCH=1", "FAIL", "FREEZE_BEHIND_MAIN behind=1"},
+    {"behind-origin-main-real-symlink-closure-pass", ROW_OK COMMIT_PUSH ADV_MAIN("mkdir -p research/doc && printf 'ok\\n' > research/doc/x.md", "real-sym-doc"), "DEVSVC_OWNER=cc UNISACC_FREEZE_NO_FETCH=1", "PASS", "PIK1 unchanged"},
+    {"behind-origin-main-seed-gold-lex", ROW_OK COMMIT_PUSH ADV_MAIN("printf 'int gl=1;\\n' > seed/gold_lex_label.c", "gold-lex"), "DEVSVC_OWNER=cc UNISACC_FREEZE_NO_FETCH=1", "FAIL", "FREEZE_BEHIND_MAIN behind=1"},
+    {"behind-origin-main-seed-unisa-ape", ROW_OK COMMIT_PUSH ADV_MAIN("printf 'int ua=1;\\n' > seed/unisa_ape.c", "unisa-ape"), "DEVSVC_OWNER=cc UNISACC_FREEZE_NO_FETCH=1", "FAIL", "FREEZE_BEHIND_MAIN behind=1"},
+    {"behind-origin-main-include-non-readme", ROW_OK COMMIT_PUSH ADV_MAIN("printf 'non-readme\\n' > include/custom_note.txt", "inc-txt"), "DEVSVC_OWNER=cc UNISACC_FREEZE_NO_FETCH=1", "FAIL", "FREEZE_BEHIND_MAIN behind=1"},
+    {"behind-origin-main-include-readme-pass", ROW_OK COMMIT_PUSH ADV_MAIN("printf 'doc\\n' > include/README.md", "inc-readme"), "DEVSVC_OWNER=cc UNISACC_FREEZE_NO_FETCH=1", "PASS", "PIK1 unchanged"},
+    {"behind-origin-main-alias-target", ROW_OK COMMIT_PUSH ADV_MAIN("printf 'int ext_tgt = 2;\\n' > ext/alias_target.cx", "alias-tgt"), "DEVSVC_OWNER=cc UNISACC_FREEZE_NO_FETCH=1", "FAIL", "FREEZE_BEHIND_MAIN behind=1"},
+    {"behind-origin-main-alias-symlink", ROW_OK COMMIT_PUSH ADV_MAIN("ln -s ../ext/alias_target.cx cx/alias_second.cx", "alias-sym"), "DEVSVC_OWNER=cc UNISACC_FREEZE_NO_FETCH=1", "FAIL", "FREEZE_BEHIND_MAIN behind=1"},
+    {"behind-origin-main-git-rename-src", ROW_OK COMMIT_PUSH ADV_MAIN("mkdir -p research && git mv src/old_mod.c research/moved_doc.md", "git-ren"), "DEVSVC_OWNER=cc UNISACC_FREEZE_NO_FETCH=1", "FAIL", "FREEZE_BEHIND_MAIN behind=1"},
+    {"behind-origin-main-typechange-file-to-symlink", ROW_OK COMMIT_PUSH ADV_MAIN("rm -f src/old_mod.c && ln -s ../include/README.md src/old_mod.c", "tc-f2s"), "DEVSVC_OWNER=cc UNISACC_FREEZE_NO_FETCH=1", "FAIL", "FREEZE_BEHIND_MAIN behind=1"},
+    {"behind-origin-main-typechange-symlink-to-file", ROW_OK COMMIT_PUSH ADV_MAIN("rm -f cx/alias_link.cx && printf 'int restored = 1;\\n' > cx/alias_link.cx", "tc-s2f"), "DEVSVC_OWNER=cc UNISACC_FREEZE_NO_FETCH=1", "FAIL", "FREEZE_BEHIND_MAIN behind=1"},
+    {"behind-origin-main-missing-ident-fail-closed", ROW_OK COMMIT_PUSH ADV_MAIN("git rm -q seed/ident.c", "rm-ident"), "DEVSVC_OWNER=cc UNISACC_FREEZE_NO_FETCH=1", "FAIL", "FREEZE_SOURCE_UNREADABLE"},
+    {"behind-origin-main-dangling-codec-unreadable", ROW_OK COMMIT_PUSH ADV_MAIN("git rm -q cx/runtime/codec.cx", "rm-rt-codec"), "DEVSVC_OWNER=cc UNISACC_FREEZE_NO_FETCH=1", "FAIL", "FREEZE_SOURCE_UNREADABLE"},
+    {"behind-origin-main-extra-recipe-unreadable", ROW_OK COMMIT_PUSH ADV_MAIN("ln -sf /nonexistent/broken_recipe.cx tools/release-build.cx", "dangling-recipe"), "DEVSVC_OWNER=cc UNISACC_FREEZE_NO_FETCH=1", "FAIL", "FREEZE_SOURCE_UNREADABLE"},
+    {"behind-origin-main-cxroot-unreadable", ROW_OK COMMIT_PUSH ADV_MAIN("ln -sf /nonexistent/broken_cxroot.tsv cxroot.tsv", "dangling-cxroot"), "DEVSVC_OWNER=cc UNISACC_FREEZE_NO_FETCH=1", "FAIL", "FREEZE_SOURCE_UNREADABLE"},
+    {"behind-origin-main-malformed-aliases-unreadable", ROW_OK COMMIT_PUSH ADV_MAIN(
+        "printf '%s\\n' '#include <stdio.h>' '#include <string.h>' "
+        "'int main(int argc, char **argv) {' "
+        "'  if (argc > 2 && !strcmp(argv[2], \"list-aliases\")) { printf(\"bad_alias_missing_tabs\\n\"); return 0; }' "
+        "'  printf(\"src/old_mod.c\\t0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef\\n\");' "
+        "'  return 0;' '}' > seed/ident.c",
+        "bad-aliases"), "DEVSVC_OWNER=cc UNISACC_FREEZE_NO_FETCH=1", "FAIL", "FREEZE_SOURCE_UNREADABLE list-aliases malformed row"},
+    {"behind-origin-main-malformed-digest-unreadable", ROW_OK COMMIT_PUSH ADV_MAIN(
+        "printf '%s\\n' '#include <stdio.h>' '#include <string.h>' "
+        "'int main(int argc, char **argv) {' "
+        "'  if (argc > 2 && !strcmp(argv[2], \"list-aliases\")) { return 0; }' "
+        "'  printf(\"src/old_mod.c\\tBAD_SHORT_DIGEST\\n\");' "
+        "'  return 0;' '}' > seed/ident.c",
+        "bad-digest"), "DEVSVC_OWNER=cc UNISACC_FREEZE_NO_FETCH=1", "FAIL", "FREEZE_SOURCE_UNREADABLE list-current bad digest"},
+    {"behind-origin-main-research-pass", ROW_OK COMMIT_PUSH ADV_MAIN("mkdir -p research/agy-h && printf 'doc\\n' > research/agy-h/note.md", "doc-adv"), "DEVSVC_OWNER=cc UNISACC_FREEZE_NO_FETCH=1", "PASS", "PIK1 unchanged"},
+    {"behind-origin-main-plans-tools-pass", ROW_OK COMMIT_PUSH ADV_MAIN("mkdir -p plans && printf 'plan\\n' > plans/v9.9.9.md && printf 'tool\\n' > tools/freeze-cut.cx", "tool-adv"), "DEVSVC_OWNER=cc UNISACC_FREEZE_NO_FETCH=1", "PASS", "PIK1 unchanged"},
+    {"behind-origin-main-empty-pass", ROW_OK COMMIT_PUSH " && git update-ref refs/remotes/origin/main $(" G "commit-tree HEAD^{tree} -p HEAD -m empty-adv)", "DEVSVC_OWNER=cc UNISACC_FREEZE_NO_FETCH=1", "PASS", "PIK1 unchanged"},
+    {"behind-origin-main-seed-readme-pass", ROW_OK COMMIT_PUSH ADV_MAIN("printf 'doc\\n' > seed/README.md", "seed-doc"), "DEVSVC_OWNER=cc UNISACC_FREEZE_NO_FETCH=1", "PASS", "PIK1 unchanged"},
+    {"behind-origin-main-exec-exclude-pass", ROW_OK COMMIT_PUSH ADV_MAIN("mkdir -p exec/sub && printf 'c\\n' > exec/sub/foo_check.cx && printf 's\\n' > exec/bar_check.sh && printf 'o\\n' > cx/check_memory.cx", "exec-ex"), "DEVSVC_OWNER=cc UNISACC_FREEZE_NO_FETCH=1", "PASS", "PIK1 unchanged"},
+    {"behind-origin-main-exec-facts-pik1", ROW_OK COMMIT_PUSH ADV_MAIN("mkdir -p exec/facts && printf 'd\\n' > exec/facts/derive.tsv", "exec-facts"), "DEVSVC_OWNER=cc UNISACC_FREEZE_NO_FETCH=1", "FAIL", "FREEZE_BEHIND_MAIN behind=1"},
     {"no-origin-main", ROW_OK COMMIT_PUSH " && git update-ref -d refs/remotes/origin/main", "DEVSVC_OWNER=cc UNISACC_FREEZE_NO_FETCH=1", "FAIL", "FREEZE_ORIGIN_MAIN_UNKNOWN"},
-    {"origin-advanced-fetch-behind", ROW_OK COMMIT_PUSH " && { O=$(git remote get-url origin); C=$(" G "commit-tree HEAD^{tree} -p HEAD -m remote-adv); git push -q \"$O\" \"$C\":refs/heads/main && git update-ref refs/remotes/origin/main HEAD; }", "DEVSVC_OWNER=cc", "FAIL", "FREEZE_BEHIND_MAIN behind=1"},
+    {"origin-advanced-fetch-behind", ROW_OK COMMIT_PUSH " && { F=$(git rev-parse HEAD); O=$(git remote get-url origin); git checkout -qb tmpadv && printf 'int s=1;\\n' > src/pik1.c && " G "add src/pik1.c && " G "commit -qm remote-pik1 && git push -q \"$O\" HEAD:refs/heads/main && git checkout -qf main && git reset -q --hard \"$F\" && git branch -qD tmpadv && git update-ref refs/remotes/origin/main \"$F\"; }", "DEVSVC_OWNER=cc", "FAIL", "FREEZE_BEHIND_MAIN behind=1"},
+    {"origin-advanced-research-fetch-pass", ROW_OK COMMIT_PUSH " && { F=$(git rev-parse HEAD); O=$(git remote get-url origin); git checkout -qb tmpadv && mkdir -p research/doc && printf 'ok\\n' > research/doc/p.md && " G "add research/doc/p.md && " G "commit -qm remote-doc && git push -q \"$O\" HEAD:refs/heads/main && git checkout -qf main && git reset -q --hard \"$F\" && git branch -qD tmpadv && git update-ref refs/remotes/origin/main \"$F\"; }", "DEVSVC_OWNER=cc", "PASS", "PIK1 unchanged"},
     {"fetch-failed-unknown", ROW_OK COMMIT_PUSH " && git remote set-url origin /nonexistent-freeze-origin-url", "DEVSVC_OWNER=cc", "FAIL", "FREEZE_ORIGIN_MAIN_UNKNOWN git fetch origin failed"},
     {"numbering-after-freeze", ROW_OK COMMIT_PUSH " && printf 'h\\t2\\n' > build/iface-hash.tsv" COMMIT_PUSH, "DEVSVC_OWNER=cc", "FAIL", "FREEZE_TLIB_AFTER_FREEZE numbering commit"},
     {"numbering-uncommitted", ROW_OK COMMIT_PUSH " && printf 'p\\t2\\n' > build/tlib-packages.tsv", "DEVSVC_OWNER=cc", "FAIL", "FREEZE_TLIB_AFTER_FREEZE uncommitted"},
@@ -99,7 +169,9 @@ static const Mut muts[] = {
     {"drop-malformed", "mm_free(ft); cx_fmt(ev, (size_t)cap, \"FREEZE_TABLE_MALFORMED", "continue; cx_fmt(ev, (size_t)cap, \"FREEZE_TABLE_MALFORMED", "malformed-row"},
     {"drop-owner-mismatch", "if (!matched && table_rows_owner_bad) {", "if (0 && table_rows_owner_bad) {", "owner-mismatch"},
     {"drop-marker-owner", "if (!(own && own[0]) && !(integ && integ[0])) { put_ev", "if (0) { put_ev", "marker-without-owner-env"},
-    {"drop-behind", "if (behind > 0) {", "if (0) {", "behind-origin-main"},
+    {"drop-behind", "if (pik1_hits > 0) {", "if (0) {", "behind-origin-main"},
+    {"drop-pik1-classify", "if (pik1_rev_delta(repo, \"HEAD\", \"refs/remotes/origin/main\", &pik1_hits, &non_pik1, first_pik1, sizeof first_pik1, pwhy, sizeof pwhy) != 0) {", "pik1_hits = 0; non_pik1 = 1; if (0) {", "behind-origin-main"},
+    {"always-pik1-classify", "if (behind > 0) {\n            if (pik1_rev_delta(repo, \"HEAD\", \"refs/remotes/origin/main\", &pik1_hits, &non_pik1, first_pik1, sizeof first_pik1, pwhy, sizeof pwhy) != 0) {", "if (behind > 0) {\n            pik1_hits = 1;\n            if (0 && pik1_rev_delta(repo, \"HEAD\", \"refs/remotes/origin/main\", &pik1_hits, &non_pik1, first_pik1, sizeof first_pik1, pwhy, sizeof pwhy) != 0) {", "behind-origin-main-research-pass"},
     {"drop-fetch", "if (!(nofetch && nofetch[0] == '1')) {", "if (0) {", "origin-advanced-fetch-behind"},
     {"drop-tlib-dirty", "if (buf[0]) { cx_fmt(ev, (size_t)cap, \"FREEZE_TLIB_AFTER_FREEZE uncommitted", "if (0) { cx_fmt(ev, (size_t)cap, \"FREEZE_TLIB_AFTER_FREEZE uncommitted", "numbering-uncommitted"},
     {"drop-tlib-order", "if (r == 1) { cx_fmt(ev, (size_t)cap, \"FREEZE_TLIB_AFTER_FREEZE", "if (0) { cx_fmt(ev, (size_t)cap, \"FREEZE_TLIB_AFTER_FREEZE", "numbering-after-freeze"},
@@ -301,8 +373,76 @@ int main(int argc, char **argv) {
     if (do_merge) return merge_shards(argc - merge_at, argv + merge_at);
     if (sy_cwd(cwd, sizeof cwd)) { puts("FAIL\tcwd"); return 1; }
     if (sy_mkdtemp(sy_tmpdir(), "chain-ready-freeze-", tmpd, sizeof tmpd) != 0) { puts("FAIL\ttmpdir"); return 1; }
+    build_skel();
     if (run_cases) {
         for (int k = 0; k < NCASES; k++) { char nm[200]; cx_fmt(nm, sizeof nm, "%s-%s", cases[k].name, cases[k].want_rc_kind); fz_ck(run_case(cwd, k), nm); }
+        {
+            char rcap[600], cmd[2000];
+            cx_fmt(rcap, sizeof rcap, "%s/rcap_trunc", tmpd);
+            fresh(rcap);
+            in_repo(rcap, ROW_OK COMMIT_PUSH ADV_MAIN("printf 'int cap_p=2;\\n' > cx/core/pik1.cx", "cap-trunc"));
+            cx_fmt(cmd, sizeof cmd,
+                   "env -u DEVSVC_OWNER -u UNISACC_INTEGRATOR DEVSVC_OWNER=cc UNISACC_FREEZE_NO_FETCH=1 "
+                   "sh " UC " tools/chain-ready.cx -- --repo '%s' --only 23-freeze-armed --pik1-capture-cap 16",
+                   rcap);
+            int cap_rc = sh_in(cwd, cmd);
+            fz_ck(cap_rc == 1 && fz_seen("23-freeze-armed\tFAIL") && fz_seen("FREEZE_SOURCE_UNREADABLE") &&
+                  fz_seen("capture truncated") && fz_seen("READY\tno"),
+                  "pik1-capture-truncation-prod-entry-fail-closed");
+        }
+        {
+            char fgdir[600], scmd[2400];
+            cx_fmt(fgdir, sizeof fgdir, "%s/fakegit_rc", tmpd);
+            cx_fmt(scmd, sizeof scmd,
+                "set -e; RG=$(command -v git); mkdir -p '%s'; "
+                "cat > '%s/git' << 'EOFGIT'\n"
+                "#!/bin/sh\n"
+                "case \"$*\" in\n"
+                "  *\"--name-status -z\"*)\n"
+                "    if [ -n \"$FAKE_DIFFZ_MODE\" ] && [ \"$FAKE_DIFFZ_MODE\" = \"bare_r\" ]; then\n"
+                "      printf 'R\\0src/old_mod.c\\0src/new_mod.c\\0'; exit 0\n"
+                "    elif [ -n \"$FAKE_DIFFZ_MODE\" ] && [ \"$FAKE_DIFFZ_MODE\" = \"r101\" ]; then\n"
+                "      printf 'R101\\0src/old_mod.c\\0src/new_mod.c\\0'; exit 0\n"
+                "    elif [ -n \"$FAKE_DIFFZ_MODE\" ] && [ \"$FAKE_DIFFZ_MODE\" = \"c075\" ]; then\n"
+                "      printf 'C075\\0src/old_mod.c\\0research/copied_doc.md\\0'; exit 0\n"
+                "    fi\n"
+                "    ;;\n"
+                "esac\n"
+                "exec \"$REAL_GIT\" \"$@\"\n"
+                "EOFGIT\n"
+                "chmod +x '%s/git'", fgdir, fgdir, fgdir);
+            if (sh_in(cwd, scmd) != 0) {
+                fz_ck(0, "pik1-fakegit-setup");
+            } else {
+                char cmd2[2000], rcap[600];
+                cx_fmt(rcap, sizeof rcap, "%s/rcap_trunc", tmpd);
+
+                cx_fmt(cmd2, sizeof cmd2,
+                       "env -u DEVSVC_OWNER -u UNISACC_INTEGRATOR PATH='%s:'\"$PATH\" REAL_GIT=$(command -v git) FAKE_DIFFZ_MODE=bare_r "
+                       "DEVSVC_OWNER=cc UNISACC_FREEZE_NO_FETCH=1 sh " UC " tools/chain-ready.cx -- --repo '%s' --only 23-freeze-armed",
+                       fgdir, rcap);
+                int rc1 = sh_in(cwd, cmd2);
+                fz_ck(rc1 == 1 && fz_seen("23-freeze-armed\tFAIL") && fz_seen("FREEZE_SOURCE_UNREADABLE") &&
+                      fz_seen("unknown or truncated git diff"), "pik1-bare-r-score-refused");
+
+                cx_fmt(cmd2, sizeof cmd2,
+                       "env -u DEVSVC_OWNER -u UNISACC_INTEGRATOR PATH='%s:'\"$PATH\" REAL_GIT=$(command -v git) FAKE_DIFFZ_MODE=r101 "
+                       "DEVSVC_OWNER=cc UNISACC_FREEZE_NO_FETCH=1 sh " UC " tools/chain-ready.cx -- --repo '%s' --only 23-freeze-armed",
+                       fgdir, rcap);
+                int rc2 = sh_in(cwd, cmd2);
+                fz_ck(rc2 == 1 && fz_seen("23-freeze-armed\tFAIL") && fz_seen("FREEZE_SOURCE_UNREADABLE") &&
+                      fz_seen("unknown or truncated git diff"), "pik1-r101-score-refused");
+
+                cx_fmt(cmd2, sizeof cmd2,
+                       "env -u DEVSVC_OWNER -u UNISACC_INTEGRATOR PATH='%s:'\"$PATH\" REAL_GIT=$(command -v git) FAKE_DIFFZ_MODE=c075 "
+                       "DEVSVC_OWNER=cc UNISACC_FREEZE_NO_FETCH=1 sh " UC " tools/chain-ready.cx -- --repo '%s' --only 23-freeze-armed",
+                       fgdir, rcap);
+                int rc3 = sh_in(cwd, cmd2);
+                fz_ck(rc3 == 1 && fz_seen("23-freeze-armed\tFAIL") && fz_seen("FREEZE_BEHIND_MAIN behind=1") &&
+                      fz_seen("first=src/old_mod.c"),
+                      "pik1-c075-3digit-score-accepted");
+            }
+        }
     }
     if (!no_mut) mutants(mfrom, mcount);
     if (sy_remove_all(tmpd)) fprintf(stderr, "check-chain-ready-freeze: cleanup failed %s\n", tmpd);
