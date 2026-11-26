@@ -1,0 +1,219 @@
+#pragma unisa module tape_soload
+#pragma unisa use sys.mem
+#pragma unisa use mem.bytes
+
+enum {
+    TSL_PG = 4096,
+    TSL_MAX_FILE = 1048576,
+    TSL_MAX_SPAN = 4194304,
+    TSL_MAX_PH = 16,
+    TSL_MAX_LOAD = 8,
+    TSL_MAX_SYM = 64,
+    TSL_MAX_DYN = 64
+};
+
+/* Reject codes: 1 short, 2 ident, 3 type, 4 machine, 5 phdr, 6 load-bounds, 7 align,
+ * 8 overlap, 9 span, 10 wx, 11 dyn, 12 reloc, 13 needed, 14 symtab, 15 sym-missing,
+ * 16 sym-range, 17 map, 18 protect, 19 abi, 20 tls-or-init. */
+typedef struct {
+    unsigned long long off, va, fsz, msz;
+    unsigned fl;
+} tsl_seg_t;
+
+typedef struct {
+    unsigned char *base;
+    long map_len;
+    int conv;
+    void *stub;
+    tsl_seg_t seg[TSL_MAX_LOAD];
+    int nseg;
+    unsigned long long span, sym_va[3];
+} tsl_img_t;
+
+static const unsigned char tsl_probe[4] = { 0x48, 0x89, 0xf8, 0xc3 };
+static const unsigned char tsl_stub[31] = {
+    0x55, 0x48, 0x89, 0xe5, 0x41, 0x51, 0x48, 0x83, 0xe4, 0xf0, 0x49, 0x89, 0xf2,
+    0x48, 0x89, 0xfe, 0x48, 0x89, 0xc7, 0x41, 0xff, 0xd2, 0x4c, 0x8b, 0x4d, 0xf8,
+    0x48, 0x89, 0xec, 0x5d, 0xc3
+};
+
+static unsigned tsl_u16(const unsigned char *p) { return (unsigned)p[0] | ((unsigned)p[1] << 8); }
+static unsigned tsl_u32(const unsigned char *p) { return tsl_u16(p) | (tsl_u16(p + 2) << 16); }
+static unsigned long long tsl_u64(const unsigned char *p) {
+    return (unsigned long long)tsl_u32(p) | ((unsigned long long)tsl_u32(p + 4) << 32);
+}
+
+static int tsl_v2o(const tsl_img_t *im, unsigned long long v, unsigned long long need,
+                   unsigned long long *off) {
+    int i;
+    for (i = 0; i < im->nseg; i++) {
+        const tsl_seg_t *s = &im->seg[i];
+        if (v >= s->va && need <= s->fsz && v - s->va <= s->fsz - need) {
+            *off = s->off + (v - s->va);
+            return 0;
+        }
+    }
+    return -1;
+}
+
+int tsl_check(const unsigned char *b, long n, const char *const names[3], tsl_img_t *im) {
+    unsigned long long phoff, dyn_off = 0, dyn_sz = 0, symtab = 0, strtab = 0, strsz = 0;
+    unsigned long long hash = 0, nsym = 0, o, so, no;
+    unsigned phnum, i, k;
+    int have_dyn = 0, have_hash = 0, j, exec_i = -1;
+    im->nseg = 0; im->span = 0; im->base = 0; im->map_len = 0;
+    im->sym_va[0] = 0; im->sym_va[1] = 0; im->sym_va[2] = 0;
+    if (!b || n < 64 || n > TSL_MAX_FILE) return 1;
+    if (b[0] != 0x7f || b[1] != 'E' || b[2] != 'L' || b[3] != 'F' ||
+        b[4] != 2 || b[5] != 1 || b[6] != 1) return 2;
+    if (tsl_u16(b + 16) != 3) return 3;
+    if (tsl_u16(b + 18) != 62) return 4;
+    phoff = tsl_u64(b + 32);
+    phnum = tsl_u16(b + 56);
+    if (tsl_u16(b + 54) != 56 || phnum == 0 || phnum > TSL_MAX_PH) return 5;
+    if (phoff > (unsigned long long)n || (unsigned long long)phnum * 56ULL > (unsigned long long)n - phoff) return 5;
+    for (i = 0; i < phnum; i++) {
+        const unsigned char *p = b + phoff + (unsigned long long)i * 56ULL;
+        unsigned ty = tsl_u32(p), fl = tsl_u32(p + 4);
+        unsigned long long off = tsl_u64(p + 8), va = tsl_u64(p + 16);
+        unsigned long long fsz = tsl_u64(p + 32), msz = tsl_u64(p + 40);
+        if (ty == 7) return 20;
+        if (ty == 3) return 13;
+        if (ty == 0x6474e551U && (fl & 1U)) return 10;
+        if (ty == 2U) { dyn_off = off; dyn_sz = fsz; have_dyn = 1; }
+        if (ty != 1U) continue;
+        if (im->nseg >= TSL_MAX_LOAD) return 5;
+        if (off > (unsigned long long)n || fsz > (unsigned long long)n - off) return 6;
+        if (msz < fsz || msz == 0) return 6;
+        if (va > TSL_MAX_SPAN || msz > TSL_MAX_SPAN - va) return 9;
+        if ((off & 4095ULL) != (va & 4095ULL)) return 7;
+        if ((fl & 2U) && (fl & 1U)) return 10;
+        if (!(fl & 4U)) return 10;
+        for (j = 0; j < im->nseg; j++) {
+            unsigned long long a0 = im->seg[j].va & ~4095ULL;
+            unsigned long long a1 = (im->seg[j].va + im->seg[j].msz + 4095ULL) & ~4095ULL;
+            unsigned long long b0 = va & ~4095ULL;
+            unsigned long long b1 = (va + msz + 4095ULL) & ~4095ULL;
+            if (b0 < a1 && a0 < b1) return 8;
+        }
+        if (fl & 1U) {
+            if (exec_i >= 0) return 10;
+            exec_i = im->nseg;
+        }
+        im->seg[im->nseg].off = off;
+        im->seg[im->nseg].va = va;
+        im->seg[im->nseg].fsz = fsz;
+        im->seg[im->nseg].msz = msz;
+        im->seg[im->nseg].fl = fl;
+        im->nseg++;
+        if (((va + msz + 4095ULL) & ~4095ULL) > im->span) {
+            im->span = (va + msz + 4095ULL) & ~4095ULL;
+        }
+    }
+    if (im->nseg == 0 || exec_i < 0 || im->span == 0) return 6;
+    if (!have_dyn || dyn_sz < 16 || (dyn_sz % 16ULL) != 0 || dyn_sz / 16ULL > TSL_MAX_DYN) return 11;
+    if (dyn_off > (unsigned long long)n || dyn_sz > (unsigned long long)n - dyn_off) return 11;
+    for (o = 0; o < dyn_sz; o += 16ULL) {
+        unsigned long long tag = tsl_u64(b + dyn_off + o);
+        unsigned long long val = tsl_u64(b + dyn_off + o + 8);
+        if (tag == 0) break;
+        if (tag == 1ULL) return 13;
+        if (tag == 2ULL || tag == 7ULL || tag == 8ULL || tag == 17ULL || tag == 18ULL ||
+            tag == 22ULL || tag == 23ULL || tag == 35ULL || tag == 36ULL ||
+            tag == 0x6ffffff9ULL || tag == 0x6ffffffaULL) return 12;
+        if (tag == 12ULL || tag == 13ULL || tag == 25ULL || tag == 26ULL || tag == 32ULL) return 20;
+        if (tag == 6ULL) symtab = val;
+        if (tag == 5ULL) strtab = val;
+        if (tag == 10ULL) strsz = val;
+        if (tag == 4ULL) { hash = val; have_hash = 1; }
+        if (tag == 11ULL && val != 24ULL) return 14;
+    }
+    if (!symtab || !strtab || strsz == 0 || strsz > 65536ULL) return 14;
+    if (have_hash) {
+        if (tsl_v2o(im, hash, 8ULL, &o)) return 14;
+        nsym = tsl_u32(b + o + 4);
+    } else if (strtab > symtab && ((strtab - symtab) % 24ULL) == 0ULL) {
+        nsym = (strtab - symtab) / 24ULL;
+    }
+    if (nsym < 2ULL || nsym > TSL_MAX_SYM) return 14;
+    if (tsl_v2o(im, symtab, nsym * 24ULL, &so) || tsl_v2o(im, strtab, strsz, &no)) return 14;
+    if (b[no + strsz - 1] != 0) return 14;
+    for (k = 0; k < 3; k++) {
+        unsigned long long hit = 0, s;
+        int found = 0;
+        if (!names || !names[k] || !names[k][0]) return 15;
+        for (s = 1; s < nsym && !found; s++) {
+            const unsigned char *e = b + so + s * 24ULL;
+            unsigned long long nm = tsl_u32(e), q = 0;
+            if (nm >= strsz) return 14;
+            while (names[k][q] && nm + q < strsz && b[no + nm + q] == (unsigned char)names[k][q]) q++;
+            if (names[k][q] || nm + q >= strsz || b[no + nm + q] != 0) continue;
+            if (e[4] != 0x12 || tsl_u16(e + 6) == 0) return 16;
+            hit = tsl_u64(e + 8);
+            found = 1;
+        }
+        if (!found) return 15;
+        if (hit < im->seg[exec_i].va || hit - im->seg[exec_i].va >= im->seg[exec_i].fsz) return 16;
+        im->sym_va[k] = hit;
+    }
+    return 0;
+}
+
+void tsl_unload(tsl_img_t *im) {
+    if (im && im->base) {
+        (void)sy_unmap(im->base, im->map_len);
+        im->base = 0; im->map_len = 0; im->stub = 0; im->conv = 0;
+    }
+}
+
+int tsl_map(const unsigned char *b, long n, tsl_img_t *im) {
+    void *p = 0;
+    unsigned char *sp;
+    long r;
+    int i;
+    long total = (long)im->span + TSL_PG;
+    (void)n;
+    if (!b || !im || im->nseg <= 0 || im->span == 0) return 17;
+    if (sy_map_none(&p, total) != 0 || !p) return 17;
+    im->base = (unsigned char *)p;
+    im->map_len = total;
+    for (i = 0; i < im->nseg; i++) {
+        tsl_seg_t *s = &im->seg[i];
+        unsigned long long lo = s->va & ~4095ULL;
+        unsigned long long hi = (s->va + s->msz + 4095ULL) & ~4095ULL, k;
+        if (sy_protect_rw(im->base + lo, (long)(hi - lo)) != 0) { tsl_unload(im); return 18; }
+        for (k = lo; k < hi; k++) im->base[k] = 0;
+        if (s->fsz && mm_copy(im->base + s->va, (long)(hi - s->va), b + s->off, (long)s->fsz)) {
+            tsl_unload(im); return 18;
+        }
+    }
+    sp = im->base + im->span;
+    if (sy_protect_rw(sp, TSL_PG) != 0) { tsl_unload(im); return 18; }
+    for (i = 0; i < 4; i++) sp[i] = tsl_probe[i];
+    for (i = 0; i < 31; i++) sp[16 + i] = tsl_stub[i];
+    if (sy_protect_rx(sp, TSL_PG) != 0) { tsl_unload(im); return 18; }
+    for (i = 0; i < im->nseg; i++) {
+        tsl_seg_t *s = &im->seg[i];
+        unsigned long long lo = s->va & ~4095ULL;
+        unsigned long long hi = (s->va + s->msz + 4095ULL) & ~4095ULL;
+        if (!(s->fl & 2U) && sy_protect_rx(im->base + lo, (long)(hi - lo)) != 0) {
+            tsl_unload(im); return 18;
+        }
+    }
+    r = ((long (*)(long, long, long))(void *)sp)(11, 22, 33);
+    if (r == 11) im->conv = 1;
+    else if (r == 22) im->conv = 2;
+    else { tsl_unload(im); return 19; }
+    im->stub = (void *)(sp + 16);
+    return 0;
+}
+
+void *tsl_addr(const tsl_img_t *im, int k) {
+    if (!im || !im->base || k < 0 || k >= 3) return 0;
+    return (void *)(im->base + im->sym_va[k]);
+}
+
+long tsl_call2(const tsl_img_t *im, void *fn, long a, long b) {
+    if (im->conv == 1) return ((long (*)(long, long))fn)(a, b);
+    return ((long (*)(long, long, void *))im->stub)(a, b, fn);
+}
