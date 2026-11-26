@@ -4,6 +4,6 @@ int fib(int n) {
 }
 
 int main(void) {
-    printf("%d\n", fib(10));
+    printf("%d\n", fib(30));
     return 0;
 }
