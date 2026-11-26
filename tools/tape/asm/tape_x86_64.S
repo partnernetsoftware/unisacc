@@ -248,10 +248,17 @@ tape_run_x86_64:
     pushq %r13
     pushq %r14
     pushq %r15
-    /* Locals followed by 4096 pairs of return PC and guest stack pointer. */
-    subq $65744,%rsp
+    pushq %rbp
+    /* Locals followed by 4096 pairs of return PC and guest stack pointer,
+       cached indirect target at 65728, prev_pc at 65736, init_budget at 65744
+       (16B aligned). Contract: args and CODE are immutable and non-aliasing
+       with writable guest memory and result during tape_run_x86_64. */
+    subq $65768,%rsp
     movq %rdi,%r12
     movq %rdx,%r13
+    movq 24(%r12),%rbp
+    movq %rbp,65744(%rsp)
+    movq $0,65736(%rsp)
     xorq %rax,%rax
     movq %r13,%rdi
     movl $5,%ecx
@@ -388,14 +395,34 @@ tape_run_x86_64:
 .Lrun_stack_top:
     movq %rcx,104(%rsp)
 .Lrun_next:
-    movq %rbx,%rax
-    subq %r14,%rax
-    movq %rax,24(%r13)
-    movq 16(%r13),%rax
-    cmpq 24(%r12),%rax
-    jae .Lrun_budget
+    movq %rbx,65736(%rsp)
+    testq %rbp,%rbp
+    jz .Lrun_budget
     cmpq %r15,%rbx
     jae .Lrun_code
+    movzbl (%rbx),%eax
+    /* A1 fast path: op 2..20 (3-reg ALU/shift/div/cmp, fixed 3 bytes). */
+    leal -2(%rax),%ecx
+    cmpl $18,%ecx
+    jbe .Lfast_3reg
+    /* A1 fast path: op 1 (mov, fixed 2 bytes). */
+    cmpl $1,%eax
+    je .Lfast_mov
+    /* A1 fast path: op 0 (imm with 1-byte non-neg SLEB, 4 bytes). */
+    testl %eax,%eax
+    jz .Lfast_imm
+    /* A1 fast path: op 28 (jumpz with 1-byte ULEB, 4 bytes). */
+    cmpl $28,%eax
+    je .Lfast_jumpz
+    /* A1 fast path: op 27 (jump with 1-byte ULEB, 3 bytes). */
+    cmpl $27,%eax
+    je .Lfast_jump
+    /* A1 fast path: op 37 (ret, 1 byte) and op 47 (nop, 1 byte). */
+    cmpl $37,%eax
+    je .Lfast_ret
+    cmpl $47,%eax
+    je .Lfast_nop
+.Lslow_decode:
     movq %rbx,%rdi
     movq %r15,%rsi
     movq %rsp,%rdx
@@ -403,58 +430,85 @@ tape_run_x86_64:
     testq %rax,%rax
     jz .Lrun_opcode
     movq %rax,%rbx
-    incq 16(%r13)
+    decq %rbp
     movzbl 0(%rsp),%eax
     movzbl 4(%rsp),%ecx
     movl %ecx,%edx
     andl $15,%ecx
     shrl $4,%edx
-    cmpl $0,%eax
-    je .Lrun_imm
-    cmpl $1,%eax
-    je .Lrun_mov
-    cmpl $7,%eax
-    jbe .Lrun_bit_arith
-    cmpl $10,%eax
-    jbe .Lrun_shift
-    cmpl $15,%eax
-    jb .Lrun_divide
-    cmpl $20,%eax
-    jbe .Lrun_compare
-.Lrun_noncmp:
-    cmpl $24,%eax
-    jbe .Lrun_mem
-    cmpl $25,%eax
-    je .Lrun_lea
-    cmpl $26,%eax
-    je .Lrun_mem
-    cmpl $27,%eax
-    je .Lrun_jump
-    cmpl $28,%eax
-    je .Lrun_jumpz
-    cmpl $29,%eax
-    je .Lrun_call
-    cmpl $30,%eax
-    je .Lrun_callr
-    cmpl $31,%eax
-    je .Lrun_callm
-    cmpl $37,%eax
-    je .Lrun_ret
-    cmpl $38,%eax
-    je .Lrun_frame
-    cmpl $42,%eax
-    je .Lrun_exit
-    cmpl $43,%eax
-    je .Lrun_sys
-    cmpl $44,%eax
-    je .Lrun_sys
-    cmpl $45,%eax
-    je .Lrun_argc
-    cmpl $46,%eax
-    je .Lrun_argv
-    cmpl $47,%eax
-    je .Lrun_next
-    jmp .Lrun_opcode
+    cmpl $48,%eax
+    jae .Lrun_opcode
+    leaq .Lrun_jtab(%rip),%r8
+    movslq (%r8,%rax,4),%r9
+    addq %r8,%r9
+    jmp *%r9
+.Lfast_imm:
+    cmpb $0,2(%rbx)
+    jne .Lslow_decode
+    movzbl 3(%rbx),%eax
+    testb $0xc0,%al
+    jnz .Lslow_decode
+    movzbl 1(%rbx),%ecx
+    andl $15,%ecx
+    addq $4,%rbx
+    decq %rbp
+    movq %rax,48(%rsp,%rcx,8)
+    jmp .Lrun_next
+.Lfast_mov:
+    movzbl 1(%rbx),%ecx
+    addq $2,%rbx
+    decq %rbp
+    movl %ecx,%edx
+    andl $15,%ecx
+    shrl $4,%edx
+    movq 48(%rsp,%rdx,8),%rax
+    movq %rax,48(%rsp,%rcx,8)
+    jmp .Lrun_next
+.Lfast_3reg:
+    movzbl 1(%rbx),%ecx
+    movzbl 2(%rbx),%r10d
+    addq $3,%rbx
+    decq %rbp
+    movl %ecx,%edx
+    andl $15,%ecx
+    shrl $4,%edx
+    andl $15,%r10d
+    leaq .Lrun_jtab(%rip),%r8
+    movslq (%r8,%rax,4),%r9
+    addq %r8,%r9
+    jmp *%r9
+.Lfast_jump:
+    cmpb $1,1(%rbx)
+    jne .Lslow_decode
+    movzbl 2(%rbx),%eax
+    testb $0x80,%al
+    jnz .Lslow_decode
+    addq $3,%rbx
+    decq %rbp
+    xorl %r11d,%r11d
+    jmp .Lrun_checked_target
+.Lfast_jumpz:
+    cmpb $1,2(%rbx)
+    jne .Lslow_decode
+    movzbl 3(%rbx),%eax
+    testb $0x80,%al
+    jnz .Lslow_decode
+    movzbl 1(%rbx),%ecx
+    andl $15,%ecx
+    addq $4,%rbx
+    decq %rbp
+    cmpq $0,48(%rsp,%rcx,8)
+    jne .Lrun_next
+    xorl %r11d,%r11d
+    jmp .Lrun_checked_target
+.Lfast_ret:
+    incq %rbx
+    decq %rbp
+    jmp .Lrun_ret
+.Lfast_nop:
+    incq %rbx
+    decq %rbp
+    jmp .Lrun_next
 .Lrun_argc:
     movq 32(%r12),%rax
     jmp .Lrun_store
@@ -720,64 +774,61 @@ tape_run_x86_64:
 .Lrun_store:
     movq %rax,48(%rsp,%rcx,8)
     jmp .Lrun_next
-.Lrun_bit_arith:
-    movq 48(%rsp,%rdx,8),%r8
-    movzbl 5(%rsp),%edx
-    andl $15,%edx
-    movq 48(%rsp,%rdx,8),%r9
-    cmpl $3,%eax
-    jb .Lrun_add
-    je .Lrun_sub
-    cmpl $5,%eax
-    jb .Lrun_mul
-    je .Lrun_xor
-    cmpl $6,%eax
-    je .Lrun_and
-    orq %r9,%r8
-    jmp .Lrun_arith_result
-.Lrun_add:
-    addq %r9,%r8
-    jmp .Lrun_arith_result
-.Lrun_sub:
-    subq %r9,%r8
-    jmp .Lrun_arith_result
-.Lrun_mul:
-    imulq %r9,%r8
-    jmp .Lrun_arith_result
-.Lrun_xor:
-    xorq %r9,%r8
-    jmp .Lrun_arith_result
-.Lrun_and:
-    andq %r9,%r8
-.Lrun_arith_result:
-    movq %r8,%rax
-    jmp .Lrun_store
-.Lrun_shift:
-    movq 48(%rsp,%rdx,8),%r8
-    movzbl 5(%rsp),%edx
-    andl $15,%edx
-    movl %ecx,%r10d
-    movq 48(%rsp,%rdx,8),%rcx
-    cmpl $8,%eax
-    je .Lrun_shl
-    cmpl $9,%eax
-    je .Lrun_sar
-    shrq %cl,%r8
-    jmp .Lrun_shift_done
-.Lrun_shl:
-    shlq %cl,%r8
-    jmp .Lrun_shift_done
-.Lrun_sar:
-    sarq %cl,%r8
-.Lrun_shift_done:
-    movl %r10d,%ecx
-    jmp .Lrun_arith_result
+.Lop_add:
+    movq 48(%rsp,%rdx,8),%rax
+    addq 48(%rsp,%r10,8),%rax
+    movq %rax,48(%rsp,%rcx,8)
+    jmp .Lrun_next
+.Lop_sub:
+    movq 48(%rsp,%rdx,8),%rax
+    subq 48(%rsp,%r10,8),%rax
+    movq %rax,48(%rsp,%rcx,8)
+    jmp .Lrun_next
+.Lop_mul:
+    movq 48(%rsp,%rdx,8),%rax
+    imulq 48(%rsp,%r10,8),%rax
+    movq %rax,48(%rsp,%rcx,8)
+    jmp .Lrun_next
+.Lop_xor:
+    movq 48(%rsp,%rdx,8),%rax
+    xorq 48(%rsp,%r10,8),%rax
+    movq %rax,48(%rsp,%rcx,8)
+    jmp .Lrun_next
+.Lop_and:
+    movq 48(%rsp,%rdx,8),%rax
+    andq 48(%rsp,%r10,8),%rax
+    movq %rax,48(%rsp,%rcx,8)
+    jmp .Lrun_next
+.Lop_or:
+    movq 48(%rsp,%rdx,8),%rax
+    orq 48(%rsp,%r10,8),%rax
+    movq %rax,48(%rsp,%rcx,8)
+    jmp .Lrun_next
+.Lop_shl:
+    movq 48(%rsp,%rdx,8),%rax
+    movl %ecx,%r8d
+    movq 48(%rsp,%r10,8),%rcx
+    shlq %cl,%rax
+    movq %rax,48(%rsp,%r8,8)
+    jmp .Lrun_next
+.Lop_sar:
+    movq 48(%rsp,%rdx,8),%rax
+    movl %ecx,%r8d
+    movq 48(%rsp,%r10,8),%rcx
+    sarq %cl,%rax
+    movq %rax,48(%rsp,%r8,8)
+    jmp .Lrun_next
+.Lop_shr:
+    movq 48(%rsp,%rdx,8),%rax
+    movl %ecx,%r8d
+    movq 48(%rsp,%r10,8),%rcx
+    shrq %cl,%rax
+    movq %rax,48(%rsp,%r8,8)
+    jmp .Lrun_next
 .Lrun_divide:
+    movq 48(%rsp,%r10,8),%r9
     movl %eax,%r10d
     movq 48(%rsp,%rdx,8),%rax
-    movzbl 5(%rsp),%edx
-    andl $15,%edx
-    movq 48(%rsp,%rdx,8),%r9
     testq %r9,%r9
     jz .Lrun_opcode
     cmpl $13,%r10d
@@ -798,41 +849,48 @@ tape_run_x86_64:
     testl $1,%r10d
     cmovzq %rdx,%rax
     jmp .Lrun_store
-.Lrun_compare:
+.Lop_slt:
     movq 48(%rsp,%rdx,8),%r8
-    movzbl 5(%rsp),%edx
-    andl $15,%edx
-    cmpq 48(%rsp,%rdx,8),%r8
-    setl %r8b
-    setle %r9b
-    seta %r10b
-    setb %r11b
-    sete %dl
-    cmpl $16,%eax
-    jb .Lrun_cmp_slt
-    je .Lrun_cmp_sle
-    cmpl $18,%eax
-    jb .Lrun_cmp_ult
-    je .Lrun_cmp_ule
-    cmpl $19,%eax
-    je .Lrun_cmp_eq
-    xorb $1,%dl
-.Lrun_cmp_eq:
-    movzbl %dl,%eax
-    jmp .Lrun_store
-.Lrun_cmp_slt:
-    movzbl %r8b,%eax
-    jmp .Lrun_store
-.Lrun_cmp_sle:
-    movzbl %r9b,%eax
-    jmp .Lrun_store
-.Lrun_cmp_ult:
-    movzbl %r11b,%eax
-    jmp .Lrun_store
-.Lrun_cmp_ule:
-    movzbl %r10b,%eax
-    xorl $1,%eax
-    jmp .Lrun_store
+    xorl %eax,%eax
+    cmpq 48(%rsp,%r10,8),%r8
+    setl %al
+    movq %rax,48(%rsp,%rcx,8)
+    jmp .Lrun_next
+.Lop_sle:
+    movq 48(%rsp,%rdx,8),%r8
+    xorl %eax,%eax
+    cmpq 48(%rsp,%r10,8),%r8
+    setle %al
+    movq %rax,48(%rsp,%rcx,8)
+    jmp .Lrun_next
+.Lop_ult:
+    movq 48(%rsp,%rdx,8),%r8
+    xorl %eax,%eax
+    cmpq 48(%rsp,%r10,8),%r8
+    setb %al
+    movq %rax,48(%rsp,%rcx,8)
+    jmp .Lrun_next
+.Lop_ule:
+    movq 48(%rsp,%rdx,8),%r8
+    xorl %eax,%eax
+    cmpq 48(%rsp,%r10,8),%r8
+    setbe %al
+    movq %rax,48(%rsp,%rcx,8)
+    jmp .Lrun_next
+.Lop_eq:
+    movq 48(%rsp,%rdx,8),%r8
+    xorl %eax,%eax
+    cmpq 48(%rsp,%r10,8),%r8
+    sete %al
+    movq %rax,48(%rsp,%rcx,8)
+    jmp .Lrun_next
+.Lop_ne:
+    movq 48(%rsp,%rdx,8),%r8
+    xorl %eax,%eax
+    cmpq 48(%rsp,%r10,8),%r8
+    setne %al
+    movq %rax,48(%rsp,%rcx,8)
+    jmp .Lrun_next
 .Lrun_lea:
     movq 8(%rsp),%rax
     testb $1,3(%rsp)
@@ -1021,8 +1079,9 @@ tape_run_x86_64:
     movq $0,24(%r13)
     jmp .Lrun_return
 .Lrun_container:
-    movl $7,%edx
-    jmp .Lrun_fault
+    movl $2,%eax
+    movq $7,32(%r13)
+    jmp .Lrun_status
 .Lrun_code:
     movl $3,%edx
     jmp .Lrun_fault
@@ -1031,13 +1090,21 @@ tape_run_x86_64:
 .Lrun_fault:
     movl $2,%eax
     movq %rdx,32(%r13)
-    jmp .Lrun_status
+    jmp .Lrun_status_pc
 .Lrun_budget:
     movl $3,%eax
+.Lrun_status_pc:
+    movq 65736(%rsp),%rdx
+    subq %r14,%rdx
+    movq %rdx,24(%r13)
 .Lrun_status:
     movq %rax,0(%r13)
 .Lrun_return:
-    addq $65744,%rsp
+    movq 65744(%rsp),%rdx
+    subq %rbp,%rdx
+    movq %rdx,16(%r13)
+    addq $65768,%rsp
+    popq %rbp
     popq %r15
     popq %r14
     popq %r13
@@ -1050,6 +1117,57 @@ tape_run_x86_64:
 .size tape_run_x86_64,.-tape_run_x86_64
 
 .section .rodata
+/* A1 PIC relative jump table for opcodes 0..47 (zero relocations). */
+.p2align 2
+.Lrun_jtab:
+    .long .Lrun_imm-.Lrun_jtab          /* 0: imm */
+    .long .Lrun_mov-.Lrun_jtab          /* 1: mov */
+    .long .Lop_add-.Lrun_jtab           /* 2: add */
+    .long .Lop_sub-.Lrun_jtab           /* 3: sub */
+    .long .Lop_mul-.Lrun_jtab           /* 4: mul */
+    .long .Lop_xor-.Lrun_jtab           /* 5: xor */
+    .long .Lop_and-.Lrun_jtab           /* 6: and */
+    .long .Lop_or-.Lrun_jtab            /* 7: or */
+    .long .Lop_shl-.Lrun_jtab           /* 8: shl */
+    .long .Lop_sar-.Lrun_jtab           /* 9: sar */
+    .long .Lop_shr-.Lrun_jtab           /* 10: shr */
+    .long .Lrun_divide-.Lrun_jtab       /* 11: sdiv */
+    .long .Lrun_divide-.Lrun_jtab       /* 12: srem */
+    .long .Lrun_divide-.Lrun_jtab       /* 13: udiv */
+    .long .Lrun_divide-.Lrun_jtab       /* 14: urem */
+    .long .Lop_slt-.Lrun_jtab           /* 15: slt */
+    .long .Lop_sle-.Lrun_jtab           /* 16: sle */
+    .long .Lop_ult-.Lrun_jtab           /* 17: ult */
+    .long .Lop_ule-.Lrun_jtab           /* 18: ule */
+    .long .Lop_eq-.Lrun_jtab            /* 19: eq */
+    .long .Lop_ne-.Lrun_jtab            /* 20: ne */
+    .long .Lrun_mem-.Lrun_jtab          /* 21: load64 */
+    .long .Lrun_mem-.Lrun_jtab          /* 22: store64 */
+    .long .Lrun_mem-.Lrun_jtab          /* 23: loadn */
+    .long .Lrun_mem-.Lrun_jtab          /* 24: storen */
+    .long .Lrun_lea-.Lrun_jtab          /* 25: lea */
+    .long .Lrun_mem-.Lrun_jtab          /* 26: zero */
+    .long .Lrun_jump-.Lrun_jtab         /* 27: jump */
+    .long .Lrun_jumpz-.Lrun_jtab        /* 28: jumpz */
+    .long .Lrun_call-.Lrun_jtab         /* 29: call */
+    .long .Lrun_callr-.Lrun_jtab        /* 30: callr */
+    .long .Lrun_callm-.Lrun_jtab        /* 31: callm */
+    .long .Lrun_opcode-.Lrun_jtab       /* 32 */
+    .long .Lrun_opcode-.Lrun_jtab       /* 33 */
+    .long .Lrun_opcode-.Lrun_jtab       /* 34 */
+    .long .Lrun_opcode-.Lrun_jtab       /* 35 */
+    .long .Lrun_opcode-.Lrun_jtab       /* 36 */
+    .long .Lrun_ret-.Lrun_jtab          /* 37: ret */
+    .long .Lrun_frame-.Lrun_jtab        /* 38: frame */
+    .long .Lrun_opcode-.Lrun_jtab       /* 39 */
+    .long .Lrun_opcode-.Lrun_jtab       /* 40 */
+    .long .Lrun_opcode-.Lrun_jtab       /* 41 */
+    .long .Lrun_exit-.Lrun_jtab         /* 42: exit */
+    .long .Lrun_sys-.Lrun_jtab          /* 43: sys */
+    .long .Lrun_sys-.Lrun_jtab          /* 44: sys6 */
+    .long .Lrun_argc-.Lrun_jtab         /* 45: argc */
+    .long .Lrun_argv-.Lrun_jtab         /* 46: argv */
+    .long .Lrun_next-.Lrun_jtab         /* 47: nop */
 /* High nibble: immediate operands. Low nibble: register operands.
    Order is the opcode order in exec/facts/tape-shape.tsv. */
 .Lshape:
