@@ -1,6 +1,6 @@
 # unisacc 0.1.5 发布说明
 
-状态：降级版公开发布。整体裁决 `NOT_QUALIFIED`：全套 s9 本版未跑，严格证据只覆盖慢车道分片与逐批补跑，不得称全批资格。nn 迁移起步未达成（能力就绪）：私有候选已验证（agyneon3 私有安装根 APE：stream e2 与 G5，`w-agy-h/.work/release-evidence-nn-start.md:47-51` 的 PASS 行）；公开候选及分发不据此升格；m53 影子对拍默认关。公开上传为 0.1.3 的五件被哈希实体加 `SHA256SUMS` 本身，共六件；本版不随公开发布资产分发 `tape/tapemode.so` 与 `tape/m53.tapeslice`，最终以正式资产单回读为准。
+状态：降级版公开发布。整体裁决 `NOT_QUALIFIED`：全套 s9 本版未跑，严格证据只覆盖正式预跑的 593 批（末行胜合并：593 通过、0 失败、0 未覆盖、7 条被取代），不得称全批资格。nn 迁移起步未达成（能力就绪）：私有候选已验证（agyneon3 私有安装根 APE：stream e2 与 G5，`w-agy-h/.work/release-evidence-nn-start.md:47-51` 的 PASS 行）；公开候选及分发不据此升格；m53 影子对拍默认关。公开上传为 0.1.3 的五件被哈希实体加 `SHA256SUMS` 本身，共六件；本版不随公开发布资产分发 `tape/tapemode.so` 与 `tape/m53.tapeslice`，最终以正式资产单回读为准。
 
 ## 真实身份
 
@@ -13,7 +13,9 @@
 | m53 切片（集成验证件） | `9f9294c428e5a797f5ce926440c2cba78857f0a3223201ef7d1ef5ff35a02544` | `w-agyneon3/.work/report-merged-candidate-v2.md` |
 | m53 切片（独立另打件） | `c47cdd0610f5dbb471ddc3da59a64a523374108b08b46418a0ac9a9f822e1d2f` | `w-agyneon/.work/report-merged-candidate-repro2.md:16` |
 | entry-build 中间产物 | `candidate=7826db82fe539612bafe363dbaa1198f7eac20ef6d5b74115abe440fde4d5719`, `4984060`B（与 agyneon3 同一中间产物一致；非发行 APE） | `w-agyneon/.work/report-merged-candidate-repro2.md:25` |
-| 发布 APE、F、`SOURCES_SID`、CI | 待正式链与 `release-exec` 回执 | `release/candidate.tsv` |
+| 重冻结与正式链 | C0a `3f54d1970`、C0b `ba12b08df`；彩排、chain 1、从失败目录续跑的 chain 2 的 APE 同为 `sha=824e3f05f72a485293bf0c33ea877c3f905ca3ef7c31a447473931f6ffa1fb1c`, `9384540`B | `chains/bg-b1/a03168fa.../exit.tsv:1`、`85d271c2.../exit.tsv:1`、`ape-receipt.txt:12` |
+| 冻结提交与发布 APE | 冻结 `ba12b08dfddefea5a5e9241f095ede4e7f83473d`；APE 同上；CI `待发布回执` | `~/.cache/unisacc/prerun/v0.1.5-ba12b08dfd/strict-final.tsv:3` |
+| 发布 F、`SOURCES_SID` | 待 `release-exec` 回执 | `release/candidate.tsv` |
 
 身份口径：`0a27a652` 是历史私有验证件（自报 0.1.3）；`e9ce30ee0` 是 agyneon3 的集成实测基线；`01d77868c` 是第二轮复现基线；`c47cdd06` 是独立另打容器，不是 `9f9294c4` 那一件。
 
@@ -25,9 +27,17 @@
 (4) **函数级调用入口（增量 0）**（`c72fdcd6a`）：`tapepack.cx` 将导出名称放入 `DATA`、16B 条目放入 `SYMS`；`tape_x86_64.S mode=5`；`CHECK_FUNC_ENTRY passed=12 failed=0`、`CHECK_TAPEPACK passed=19 failed=0`（`research/agyneon/v014/review-func-entry.md:19、21`）。
 (5) **工具与门**：`28136e237`（check-tape-grade-gate 29 例）、`6ead29acd`（root-current 门 24 与 release-post）、`dff492cce`（check-prerun-rebase-plan 3 冷片）、`af3e98239`（T1(b) v3 `CHECK_INSTALL_APE failed=0 not_run=0`，覆盖缺口见 `report-t1b-v3.md:44-48`）。
 (6) **结构 ID 容量修复**：第二次彩排的 win/arm64 gen2 e3 触及结构 ID 容量——整品 parse2 对 win/arm64 的 105 个单元需要 2085 个 ID，而当时容量 2048（常量 2049 为排他上界），0.1.3 只用了 2047。`99e6f0b61` 将前端 `STRUCT_ID_MAX` 从 2049 调到 4096（排他上界，不是可用 ID 个数）；`855fa3dfd` 在两处驱动 `tape_soload` 与 `stream_s1` 移除三个结构体定义（struct-free driver units）。两提交已在版本分支；证据 `report-win-arm64-struct-cap.md`、`reh2.txt`、`exec/facts/k2-caps.tsv:10`；新候选是否通过以完整回执为准。
+(7) **工具编译分片登记与预跑配置**：首次预跑 03:10 因 `tools-compile-001` rc=2 停止，需要 202 个分片而 `tests/batches.tsv` 只登记 201 个（`tests/tools-compile.cx:315`）；`77b35cf08` 用 `register --tool --sync` 补行。重冻结后正式预跑以 3 lanes 起跑，04:16 后升到 5 lanes，出现 58 秒超时并重试至通过。预跑计划覆盖 179 个唯一 `tools-compile` id；另有候选 APE 上全 202 分片单跑，201 个通过，shard 137 在 load 36 下超时、单独重跑通过，该单跑不计入严格证据。证据：`report-toolsreg-gate-gap.md`、`strict-W*.stderr`、`77b35cf08` 提交说明。
 
 ## 严格证据
 
+- 正式预跑末行胜合并：`release/evidence/v0.1.5-strict-20261127c.tsv`，331 个窗口合并为 593 批，593 通过、0 失败、0 未覆盖、7 条被取代（`SUPERSEDED=7`）。前两次合并保留为证据：`v0.1.5-strict-20261127.tsv` 为 585 通过 / 7 失败 / 1 未覆盖，`…b.tsv` 为 591 / 2 / 0。
+- 首轮 7 个失败与 1 个未覆盖的定因与重跑（同一候选 APE `824e3f05...`；重跑 X9019/X9020 在更新的 main HEAD `bd023bab4` 上，源树与冻结提交 `ba12b08df` 不同、APE 字节相同）：
+  - `cx-booter-ape`（未覆盖）：运行环境缺 `UNISACC_BOOTER_CHAIN_OUT`；补上后重跑通过。来源 `w-cdx/.work/report-v015-prerun-three-root-causes.md` 第 (2) 节。
+  - `release-board`、`check-prerun-drive-infra`、`slow-split`：`TMPDIR` 落在 v0.1.5 git 工作树内，被当作外层仓；改用仓外 `TMPDIR` 重跑通过。来源 `w-agyneon3/.work/report-tmpdir-in-repo-hypothesis.md` 第 1-3 节。
+  - `chain-ready-launch`、`chain-ready-launch-b`：运行继承了 `UNISACC_*`（含 `UNISACC_IDENT_HELPER`）环境；清理环境重跑通过。来源：预跑重跑回执 X9019/X9020。
+  - `check-ln-noderef`：真实缺陷，`tools/check-release-post.cx:78、79、82`；main `bd023bab4` 修复。来源 `w-cdx/.work/report-v015-prerun-three-root-causes.md` 第 (1) 节。
+  - `retcheck`：真实基线违例（`check-facts-gen`、`check-target-gen`、`check-guard-hook`）；main `1c23d0393` 修复且未抬高基线。来源：重跑回执 X9019/X9020。
 - m53 影子对拍：`CHECK_SLICE_NN_M53_S1	PASS	vectors=28	ok=29	fail=0	mutations=3	candidate_ape_sha=0a27a652d446c53d53d15eaac029a5df6a8478a01b7813cc8caf4f4f6a15a39e	tape_container_sha=9f9294c428e5a797f5ce926440c2cba78857f0a3223201ef7d1ef5ff35a02544`（`w-agy-h/.work/release-evidence-nn-start.md:21-37`）。
 - G5 子模式（`f8dc7a0740` 修复后，非 ELF APE 改经 `sh` 执行）：`CHECK_SLICE_NN_M53_S1_G5	PASS	cases=4	ok=5	fail=0`，仍用同一 `0a27a652...` 与 `f387e22e...`（`w-agy-h/.work/release-evidence-nn-start.md:55-56`）。
 - 确定性：修前同树两次构建摘要不同（agyneon `4ba6ff69...` 对 `4acef2a1...`，agyneon3 私有集成 `f387e22e...`，均 `14368`B）；仅去 build-id 仍有临时对象名 `STT_FILE` 差异，加 `-Wl,-s` 剥离后才通过；修后 `01d77868c` 两目录重建逐字节一致，`941583e6...`、`13552`B、`SO_DET_CMP=EQUAL`（`w-agyneon/.work/report-merged-candidate-repro2.md:8-11`、`w-agyneon3/.work/report-build-id-det.md:9-23`）。
@@ -45,6 +55,7 @@
 (4) `seen` 只比路径身份；`tapecall` 客体指针回传留增量 2；方案 A 的 `A1`/`A2`/`A5`/`A6` 部署前置以冻结决策为准。
 (5) 链 bootstrap：彩排已选 0.0.105 开发根（`934c7c0bc...`，0.1.3 链 vault）作版本工作树实体 `unisacc.com`。`report-rehearsal-67p4.md` 第 3-4 节记录该旧根可编译 25 个 controller 文件、0.1.2/0.1.3 根拒绝；0.1.3 正式链历史回执记 `bootstrap_sha=934c7c0bc09a9a4d2e107b8d6bdc855553cf05f64dbb7d6c1e5fefdb42117dd1`；`ad5c3e72a` 引入拒绝门。该报告不提供 0.1.5 最终正式链引导摘要，也不单凭报错证明内部比较分支；0.1.5 终态等该轮回执。
 (6) 链事实：彩排链两次失败后通过（第一次 bootstrap 根 0.0.105，第二次结构 ID 容量）；失败目录保留在 `chains/bg-b1/failed-1` 与 `chains/bg-b1/failed-2`；彩排终态约 02:05 回填。
+(7) 重冻结与预跑：首次预跑 03:10 因 `tools-compile-201` 登记缺口停止，`0.1.5-FREEZE` 解除（`3eae545df`），新 C0a/C0b 为 `3f54d1970` / `ba12b08df`；旧预跑证据作废。正式预跑 3 lanes 起跑、04:16 后 5 lanes，58 秒超时重试至通过；末行胜合并 `593/593/0/0`，前两次合并保留。首轮 7 失败与 1 未覆盖的定因见严格证据；重跑在更新的 main HEAD `bd023bab4` 上，源树与冻结提交不同、APE 字节相同，此差异如实保留。事故账本 `plans/v0.1.5-incident-ledger.tsv`。
 
 ## 回退办法
 
