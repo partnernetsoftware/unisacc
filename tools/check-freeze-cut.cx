@@ -1,0 +1,491 @@
+/* tools/check-freeze-cut.cx -- red-then-green contract check for tools/freeze-cut.cx (batch freeze-cut).
+ * Tests precondition refusals (bad version, polluted env, symlink root, missing owner, non-public prev slot,
+ * active prev freeze, dirty product source before cut), single-command --cut (C0a numbering commit + C0b
+ * isolated freeze row commit), --check PASS, and post-cut tamper mutations.
+ * Final line: CHECK_FREEZE_CUT<TAB>passed=N<TAB>failed=M
+ */
+#pragma unisa use fsx.fs
+#pragma unisa use sys.fs
+#pragma unisa use sys.io
+#pragma unisa use sys.proc
+#pragma unisa use sys.posix
+#pragma unisa use text.text
+#pragma unisa use text.fmt
+#pragma unisa use mem.heap
+#pragma unisa use mem.bytes
+#pragma unisa use cxlib.procrun
+
+static int g_pass, g_fail;
+static char g_root[4096];
+
+static void ck(int ok, const char *name, const pr_result *r) {
+    if (ok) {
+        g_pass++;
+        printf("PASS\t%s\n", name);
+    } else {
+        g_fail++;
+        printf("FAIL\t%s\trc=%d\tout=%.200s\terr=%.200s\n",
+               name, r ? r->rc : -1,
+               (r && r->out) ? r->out : "",
+               (r && r->err) ? r->err : "");
+    }
+}
+
+static int fc_sh(const char *cwd, const char *cmd, int timeout_s, pr_result *r) {
+    char *av[4] = {"sh", "-c", (char *)cmd, 0};
+    mm_fill(r, sizeof *r, 0, sizeof *r);
+    if (pr_run("check-freeze-cut", av, cwd, 0, timeout_s, r) != 0) return -1;
+    return r->rc;
+}
+
+static int fc_has(const pr_result *r, const char *lit) {
+    long ll = tx_len(lit, 512);
+    if (!r || ll <= 0) return 0;
+    if (r->out && r->outn > 0 && tx_find(r->out, (long)r->outn, lit, ll) >= 0) return 1;
+    if (r->err && r->errn > 0 && tx_find(r->err, (long)r->errn, lit, ll) >= 0) return 1;
+    return 0;
+}
+
+static int run_fc(const char *env_pre, const char *args, pr_result *r) {
+    char cmd[8192];
+    if (cx_fmt(cmd, sizeof cmd,
+               "env -u UNISACC_RUN_CACHE -u UNISACC_CACHE_DIR -u UNISACC_FREEZE_NO_FETCH "
+               "-u UNISACC_BOUND_DEADLINE_MONO %s sh '%s/unisacc.com' '%s/tools/freeze-cut.cx' -- %s",
+               env_pre ? env_pre : "", g_root, g_root, args)) return -1;
+    return fc_sh(g_root, cmd, 45, r);
+}
+
+static void init_repo(const char *repo, const char *state67) {
+    char shcmd[16384]; pr_result r;
+    cx_fmt(shcmd, sizeof shcmd,
+        "set -e; rm -rf '%s'; mkdir -p '%s/build/layer-api' '%s/release' '%s/plans' '%s/src' '%s/research' "
+        "'%s/seed' '%s/include' '%s/cx/sys' '%s/cx/mem' '%s/cx/text' '%s/cx/core' '%s/cx/driver' '%s/cx/runtime' '%s/cx/compiler' "
+        "'%s/exec/c/asm' '%s/weights' '%s/kernel' '%s/iterate/kernel' '%s/tools/cxlib' '%s/ext/textx'; "
+        "cp '%s/seed/ident.c' '%s/seed/ident.c'; "
+        "if [ -f '%s/seed/sha256.h' ]; then cp '%s/seed/sha256.h' '%s/seed/sha256.h'; fi; "
+        "cd '%s'; "
+        "for f in iterate/kernel/typekw.tsv build/core-closure.tsv cxroot.tsv ext/textx/deflate.cx "
+        "tools/bound tools/bound.c tools/cxbin tools/safedel.cx tools/lib.sh tools/build_ref.sh tools/export_ref.sh "
+        "tools/refshim.h tools/reffoot.h tools/sourceflat.cx tools/ape-pack.cx tools/release-ape.cx tools/cxlib/releaseversion.cx "
+        "include/README.md weights/.keep kernel/.keep exec/.keep cx/sys/.keep cx/mem/.keep cx/text/.keep "
+        "cx/core/.keep cx/driver/.keep cx/runtime/.keep cx/compiler/.keep; do : > \"$f\"; done; "
+        "printf 'ape\\n' > unisacc.com; printf '{\"version\":\"0.1.2\"}\\n' > unisacc.com.build.json; "
+        "printf '# slot\\tversion\\tclass\\tstate\\tnote\\n"
+        "67\\t0.1.2\\t基线主题(C1+C2)\\t%s\\t编排者 2026-11-25 立项 0.1.2;计划 plans/v0.1.2.md\\n' > build/version-seq.tsv; "
+        "H1='1111111111111111111111111111111111111111111111111111111111111111'; "
+        "printf 'repo\\ttag\\tcommit\\tversion\\tworkflow\\tworkflow_ref\\tci_run_id\\t"
+        "ape\\tape_sha256\\tpackage\\tpackage_sha256\\twin_arm64\\twin_arm64_sha256\\t"
+        "record\\trecord_sha256\\tbuild_alias\\tbuild_alias_sha256\\tzip\\tzip_sha256\\tchecksums\\tchecksums_sha256\\n"
+        "org/repo\\tv0.1.2\\t11223344556677889900aabbccddeeff00112233\\t0.1.2\\tcandidate-native.yml\\tv0.1.2\\t45638397154\\t"
+        "unisacc.com\\t'\"$H1\"'\\tpkg.bin\\t'\"$H1\"'\\tslice-win-arm64\\t'\"$H1\"'\\t"
+        "unisacc.com.build.json\\t'\"$H1\"'\\tbuild.json\\t'\"$H1\"'\\t-\\t-\\tSHA256SUMS\\t'\"$H1\"'\\n' > release/candidate.tsv; "
+        "printf '# candidate_sid\\tbase_commit\\towner\\tdeadline_epoch_s\\tpaths\\n"
+        "# 0.1.2-FREEZE\\t11223344556677889900aabbccddeeff00112233\\tcc\\t4102444800\\tsrc\\n' > build/freeze.tsv; "
+        "printf '# 0.1.2 计划:基线主题\\nplanned_units=8\\ndone_units=UNMEASURED\\nunplanned_units=0\\na_class=基线主题\\na_files_cap=24\\nfreeze_at=TBD\\n' > plans/v0.1.2.md; "
+        "printf 'p\\t1\\n' > build/tlib-packages.tsv; printf 'h\\t1\\n' > build/iface-hash.tsv; printf 'x\\n' > build/layer-api/x.tsv; "
+        "printf 'int a = 1;\\n' > src/a.c; printf 'doc\\n' > research/r.md; "
+        "git init -q -b main; git config user.name test; git config user.email t@local; git config commit.gpgsign false; "
+        "git add -A; git commit -qm init",
+        repo, repo, repo, repo, repo, repo, repo, repo, repo, repo, repo, repo, repo, repo, repo, repo, repo, repo, repo, repo, repo,
+        g_root, repo, g_root, g_root, repo, repo, state67);
+    (void)fc_sh(g_root, shcmd, 30, &r);
+    pr_free(&r);
+}
+
+int main(void) {
+    if (sy_realpath(".", g_root, sizeof g_root) < 0) return 2;
+    int sc = 0;
+    if (fsx_scratch(&sc, "check-fcut-") != 0) return 2;
+    const char *dir = fsx_scratch_dir(sc);
+    if (!dir) return 2;
+
+    char repo[1024], args[2048], shcmd[4096];
+    pr_result r;
+
+    cx_fmt(repo, sizeof repo, "%s/repo_cut", dir);
+    init_repo(repo, "\xe5\xb7\xb2\xe5\x85\xac\xe5\xbc\x80"); /* 已公开 */
+
+    /* 1. Bad version format refused */
+    cx_fmt(args, sizeof args, "--cut --repo '%s' --version 0.1 --topic foo --owner cc --no-derive", repo);
+    run_fc("", args, &r);
+    ck(r.rc == 2 && fc_has(&r, "REFUSE\tFREEZE_CUT\tbad-version"), "mut-bad-version-refused", &r);
+    pr_free(&r);
+
+    /* 2. Polluted env refused */
+    cx_fmt(args, sizeof args, "--check --repo '%s' --version 0.1.3 --owner cc --no-derive", repo);
+    run_fc("UNISACC_FREEZE_NO_FETCH=1", args, &r);
+    ck(r.rc == 2 && fc_has(&r, "REFUSE\tFREEZE_CUT\tpolluted-env"), "mut-polluted-env-refused", &r);
+    pr_free(&r);
+
+    /* 3. Missing owner refused */
+    cx_fmt(args, sizeof args, "--cut --repo '%s' --version 0.1.3 --topic foo --no-derive", repo);
+    run_fc("-u DEVSVC_OWNER -u UNISACC_INTEGRATOR", args, &r);
+    ck(r.rc == 2 && fc_has(&r, "REFUSE\tFREEZE_CUT\towner-unset"), "mut-owner-unset-refused", &r);
+    pr_free(&r);
+
+    /* 4. Symlink Root file refused */
+    cx_fmt(shcmd, sizeof shcmd, "cd '%s' && mv unisacc.com unisacc.com.real && ln -s unisacc.com.real unisacc.com", repo);
+    fc_sh(g_root, shcmd, 15, &r); pr_free(&r);
+    cx_fmt(args, sizeof args, "--cut --repo '%s' --version 0.1.3 --topic foo --owner cc --no-derive", repo);
+    run_fc("", args, &r);
+    ck(r.rc == 2 && fc_has(&r, "REFUSE\tFREEZE_CUT\troot-file-symlink"), "mut-root-symlink-refused", &r);
+    pr_free(&r);
+    cx_fmt(shcmd, sizeof shcmd, "cd '%s' && rm -f unisacc.com && mv unisacc.com.real unisacc.com", repo);
+    fc_sh(g_root, shcmd, 15, &r); pr_free(&r);
+
+    /* 5. Previous version not public refused */
+    char rbad_prev[1024];
+    cx_fmt(rbad_prev, sizeof rbad_prev, "%s/repo_prev", dir);
+    init_repo(rbad_prev, "\xe8\xbf\x9b\xe8\xa1\x8c\xe4\xb8\xad"); /* 进行中 */
+    cx_fmt(args, sizeof args, "--cut --repo '%s' --version 0.1.3 --topic foo --owner cc --no-derive", rbad_prev);
+    run_fc("", args, &r);
+    ck(r.rc == 2 && fc_has(&r, "REFUSE\tFREEZE_CUT\tprev-version-not-public"), "mut-prev-not-public-refused", &r);
+    pr_free(&r);
+
+    /* 6. Active unthawed freeze row refused */
+    cx_fmt(shcmd, sizeof shcmd,
+           "cd '%s' && printf '0.1.2-FREEZE\\t11223344556677889900aabbccddeeff00112233\\tcc\\t4102444800\\tsrc\\n' >> build/freeze.tsv && "
+           "git add build/freeze.tsv && git commit -qm active-frz", repo);
+    fc_sh(g_root, shcmd, 15, &r); pr_free(&r);
+    cx_fmt(args, sizeof args, "--cut --repo '%s' --version 0.1.3 --topic foo --owner cc --no-derive", repo);
+    run_fc("", args, &r);
+    ck(r.rc == 2 && fc_has(&r, "REFUSE\tFREEZE_CUT\tprev-freeze-still-active"), "mut-prev-freeze-active-refused", &r);
+    pr_free(&r);
+    cx_fmt(shcmd, sizeof shcmd, "cd '%s' && git reset -q --hard HEAD~1", repo);
+    fc_sh(g_root, shcmd, 15, &r); pr_free(&r);
+
+    /* 7. Dirty product source before numbering refused */
+    cx_fmt(shcmd, sizeof shcmd, "cd '%s' && printf 'int dirty = 1;\\n' >> src/a.c", repo);
+    fc_sh(g_root, shcmd, 15, &r); pr_free(&r);
+    cx_fmt(args, sizeof args, "--cut --repo '%s' --version 0.1.3 --topic foo --owner cc --no-derive", repo);
+    run_fc("", args, &r);
+    ck(r.rc == 2 && fc_has(&r, "REFUSE\tFREEZE_CUT\tnumbering-step-touched-product-source"), "mut-dirty-product-refused", &r);
+    pr_free(&r);
+    cx_fmt(shcmd, sizeof shcmd, "cd '%s' && git checkout -q -- src/a.c", repo);
+    fc_sh(g_root, shcmd, 15, &r); pr_free(&r);
+
+    /* 8. --check before cut must fail */
+    cx_fmt(args, sizeof args, "--check --repo '%s' --version 0.1.3 --owner cc --no-derive", repo);
+    run_fc("", args, &r);
+    ck(r.rc != 0, "mut-check-before-cut-fails", &r);
+    pr_free(&r);
+
+    /* 9. Pre-cut deadline refusals (zero file mutation) + mid-cut rollback & resume */
+    cx_fmt(args, sizeof args,
+           "--cut --repo '%s' --version 0.1.3 --topic '生命周期与切片车' --owner cc --deadline-s 0 --no-derive", repo);
+    run_fc("", args, &r);
+    ck(r.rc == 2 && fc_has(&r, "REFUSE\tFREEZE_CUT\tbad-deadline-s"), "mut-deadline-s-zero-refused", &r);
+    pr_free(&r);
+
+    cx_fmt(args, sizeof args,
+           "--cut --repo '%s' --version 0.1.3 --topic '生命周期与切片车' --owner cc --deadline-epoch 1 --no-derive", repo);
+    run_fc("", args, &r);
+    ck(r.rc == 2 && fc_has(&r, "REFUSE\tFREEZE_CUT\tdeadline-expired"), "mut-deadline-epoch-past-refused", &r);
+    pr_free(&r);
+
+    cx_fmt(args, sizeof args,
+           "--cut --repo '%s' --version 0.1.3 --topic '生命周期与切片车' --owner cc --deadline-s 9223372036854775800 --no-derive", repo);
+    run_fc("", args, &r);
+    ck(r.rc == 2 && fc_has(&r, "REFUSE\tFREEZE_CUT\tdeadline-overflow"), "mut-deadline-s-overflow-refused", &r);
+    pr_free(&r);
+
+    {   char repo_snap[1024];
+        cx_fmt(repo_snap, sizeof repo_snap, "%s/repo_snap_err", dir);
+        init_repo(repo_snap, "\xe5\xb7\xb2\xe5\x85\xac\xe5\xbc\x80"); /* 已公开 */
+        cx_fmt(shcmd, sizeof shcmd,
+            "cd '%s' && cp build/version-seq.tsv '%s/snap_seq.pre' && cp release/candidate.tsv '%s/snap_cand.pre' && "
+            "printf '# 0.1.3 计划:sn\\n' > plans/v0.1.3.md && git add plans/v0.1.3.md && git commit -qm snap-plan && "
+            "git update-index --assume-unchanged plans/v0.1.3.md && chmod 0000 plans/v0.1.3.md",
+            repo_snap, dir, dir);
+        fc_sh(g_root, shcmd, 15, &r); pr_free(&r);
+        cx_fmt(args, sizeof args,
+               "--cut --repo '%s' --version 0.1.3 --topic '生命周期与切片车' --owner cc --deadline-s 7200 --use-existing-plan --no-derive",
+               repo_snap);
+        run_fc("", args, &r);
+        ck(r.rc == 2 && fc_has(&r, "REFUSE\tFREEZE_CUT\ttxn-snapshot-failed"), "mut-snapshot-plan-unreadable-refused", &r);
+        pr_free(&r);
+        cx_fmt(shcmd, sizeof shcmd,
+            "cd '%s' && chmod 0644 plans/v0.1.3.md && cmp -s build/version-seq.tsv '%s/snap_seq.pre' && cmp -s release/candidate.tsv '%s/snap_cand.pre' && echo SNAP_CLEAN",
+            repo_snap, dir, dir);
+        fc_sh(g_root, shcmd, 15, &r);
+        ck(r.rc == 0 && fc_has(&r, "SNAP_CLEAN"), "snapshot-failure-leaves-repo-clean", &r);
+        pr_free(&r);
+    }
+
+    {   char repo_stat[1024];
+        cx_fmt(repo_stat, sizeof repo_stat, "%s/repo_plan_stat", dir);
+        init_repo(repo_stat, "\xe5\xb7\xb2\xe5\x85\xac\xe5\xbc\x80"); /* 已公开 */
+        cx_fmt(shcmd, sizeof shcmd, "cd '%s' && chmod 0000 plans", repo_stat);
+        fc_sh(g_root, shcmd, 15, &r); pr_free(&r);
+        cx_fmt(args, sizeof args,
+               "--cut --repo '%s' --version 0.1.3 --topic '生命周期与切片车' --owner cc --deadline-s 7200 --no-derive",
+               repo_stat);
+        run_fc("", args, &r);
+        ck(r.rc == 2 && fc_has(&r, "REFUSE\tFREEZE_CUT\tplan-stat-failed"), "mut-plan-stat-eacces-refused", &r);
+        pr_free(&r);
+        cx_fmt(shcmd, sizeof shcmd, "chmod 0755 '%s/plans'", repo_stat);
+        fc_sh(g_root, shcmd, 15, &r); pr_free(&r);
+    }
+
+    /* 9a. Mid-cut failure triggers full transactional rollback (version-seq + candidate restored cleanly), then clean --cut succeeds */
+    cx_fmt(shcmd, sizeof shcmd,
+        "cd '%s' && cp build/version-seq.tsv /tmp/fcut_seq.pre && cp release/candidate.tsv /tmp/fcut_cand.pre && "
+        "printf '# 0.1.9 计划:bad\\nplanned_units=8\\ndone_units=UNMEASURED\\nunplanned_units=0\\na_class=x\\na_files_cap=24\\nfreeze_at=TBD\\n' > plans/v0.1.3.md && "
+        "git add plans/v0.1.3.md && git commit -qm bad-existing-plan", repo);
+    fc_sh(g_root, shcmd, 15, &r); pr_free(&r);
+    cx_fmt(args, sizeof args,
+           "--cut --repo '%s' --version 0.1.3 --topic '生命周期与切片车' --a-class '生命周期与切片车' --planned-units 8 --a-files-cap 24 --owner cc --deadline-s 7200 --use-existing-plan --no-derive",
+           repo);
+    run_fc("", args, &r);
+    ck(r.rc == 2 && fc_has(&r, "REFUSE\tFREEZE_CUT\tplan-version-mismatch"), "mut-midcut-plan-failure-refused", &r);
+    pr_free(&r);
+    cx_fmt(shcmd, sizeof shcmd,
+        "cd '%s' && cmp -s build/version-seq.tsv /tmp/fcut_seq.pre && cmp -s release/candidate.tsv /tmp/fcut_cand.pre && "
+        "rm -f /tmp/fcut_seq.pre /tmp/fcut_cand.pre && git reset -q --hard HEAD~1 && echo RB_CLEAN", repo);
+    fc_sh(g_root, shcmd, 15, &r);
+    ck(r.rc == 0 && fc_has(&r, "RB_CLEAN"), "midcut-rollback-restores-seq-and-candidate", &r);
+    pr_free(&r);
+
+    /* 9b. Happy path --cut (resuming after rollback) + --check + git commit & candidate 4-col check */
+    cx_fmt(args, sizeof args,
+           "--cut --repo '%s' --version 0.1.3 --topic '生命周期与切片车' --a-class '生命周期与切片车' --planned-units 8 --a-files-cap 24 --owner cc --deadline-s 7200 --no-derive",
+           repo);
+    run_fc("", args, &r);
+    ck(r.rc == 0 && fc_has(&r, "FREEZE_CUT\tPASS\tversion=0.1.3\tslot=68"), "cut-single-command-pass", &r);
+    pr_free(&r);
+
+    cx_fmt(args, sizeof args, "--check --repo '%s' --version 0.1.3 --owner cc --no-derive", repo);
+    run_fc("", args, &r);
+    ck(r.rc == 0 && fc_has(&r, "FREEZE_CUT\tCHECK_PASS\tversion=0.1.3\tslot=68"), "check-after-cut-pass", &r);
+    pr_free(&r);
+
+    /* Verify C0a and C0b git history + candidate.tsv (tag/commit reset/version/workflow_ref/ci_run_id=0/zero asset SHAs) + freeze base_commit + plans/v0.1.3.md */
+    cx_fmt(shcmd, sizeof shcmd,
+        "cd '%s' && "
+        "C0A=$(git rev-parse HEAD~1) && "
+        "PRE=$(git rev-parse HEAD~2) && "
+        "Z64='0000000000000000000000000000000000000000000000000000000000000000' && "
+        "BASE=$(awk -F'\\t' '$1==\"0.1.3-FREEZE\"{print $2}' build/freeze.tsv) && "
+        "[ \"$C0A\" = \"$BASE\" ] && "
+        "FDIFF=$(git diff-tree --no-commit-id --name-only -r HEAD) && "
+        "[ \"$FDIFF\" = \"build/freeze.tsv\" ] && "
+        "grep -q '^# 0.1.3 计划:生命周期与切片车' plans/v0.1.3.md && "
+        "grep -q '^planned_units=8$' plans/v0.1.3.md && "
+        "grep -q '^a_files_cap=24$' plans/v0.1.3.md && "
+        "grep -q 'plans/v0.1.3.md' plans/v0.1.3.md && "
+        "awk -F'\\t' -v p=\"$PRE\" -v z=\"$Z64\" 'NR==2{exit(($2==\"v0.1.3\" && $3==p && $4==\"0.1.3\" && $6==\"v0.1.3\" && $7==\"0\" && $9==z && $11==z && $13==z && $15==z && $17==z && $21==z)?0:1)}' release/candidate.tsv && "
+        "echo STRUCT_OK", repo);
+    fc_sh(g_root, shcmd, 15, &r);
+    ck(r.rc == 0 && fc_has(&r, "STRUCT_OK"), "cut-git-structure-exact", &r);
+    pr_free(&r);
+
+    /* 10. Tamper mutations caught by --check */
+    /* 10a: ci_run_id nonzero refused */
+    cx_fmt(shcmd, sizeof shcmd,
+        "cd '%s' && awk -F'\\t' 'BEGIN{OFS=\"\\t\"} NR==2{$7=\"999\"} {print}' release/candidate.tsv > release/cand.tmp && "
+        "mv -f release/cand.tmp release/candidate.tsv && git add release/candidate.tsv && git commit -qm bad-runid", repo);
+    fc_sh(g_root, shcmd, 15, &r); pr_free(&r);
+    cx_fmt(args, sizeof args, "--check --repo '%s' --version 0.1.3 --owner cc --no-derive", repo);
+    run_fc("", args, &r);
+    ck(r.rc == 2 && fc_has(&r, "REFUSE\tFREEZE_CUT\tcandidate-ci-run-id-nonzero"), "mut-check-ci-run-id-nonzero-refused", &r);
+    pr_free(&r);
+    cx_fmt(shcmd, sizeof shcmd, "cd '%s' && git reset -q --hard HEAD~1", repo);
+    fc_sh(g_root, shcmd, 15, &r); pr_free(&r);
+
+    /* 10b: freeze commit mixed with product file */
+    cx_fmt(shcmd, sizeof shcmd,
+        "cd '%s' && printf 'int m = 1;\\n' >> src/a.c && git add src/a.c build/freeze.tsv && git commit -q --amend --no-edit", repo);
+    fc_sh(g_root, shcmd, 15, &r); pr_free(&r);
+    cx_fmt(args, sizeof args, "--check --repo '%s' --version 0.1.3 --owner cc --no-derive", repo);
+    run_fc("", args, &r);
+    ck(r.rc == 2 && fc_has(&r, "REFUSE\tFREEZE_CUT\tfreeze-commit-mixed"), "mut-check-freeze-mixed-refused", &r);
+    pr_free(&r);
+
+    /* 10b: tlib after freeze refused (reset back clean first, then commit iface-hash after freeze) */
+    cx_fmt(shcmd, sizeof shcmd,
+        "cd '%s' && git reset -q --hard HEAD@{1} && printf 'h\\t2\\n' > build/iface-hash.tsv && git add build/iface-hash.tsv && git commit -qm late-tlib", repo);
+    fc_sh(g_root, shcmd, 15, &r); pr_free(&r);
+    cx_fmt(args, sizeof args, "--check --repo '%s' --version 0.1.3 --owner cc --no-derive", repo);
+    run_fc("", args, &r);
+    ck(r.rc == 2 && fc_has(&r, "REFUSE\tFREEZE_CUT\ttlib-after-freeze"), "mut-check-tlib-after-freeze-refused", &r);
+    pr_free(&r);
+
+    /* 10c: plan R1 mismatch caught by --check */
+    cx_fmt(shcmd, sizeof shcmd,
+        "cd '%s' && git reset -q --hard HEAD~1 && sed -i '1s/0.1.3/0.1.4/' plans/v0.1.3.md && git add plans/v0.1.3.md && git commit -qm bad-plan", repo);
+    fc_sh(g_root, shcmd, 15, &r); pr_free(&r);
+    cx_fmt(args, sizeof args, "--check --repo '%s' --version 0.1.3 --owner cc --no-derive", repo);
+    run_fc("", args, &r);
+    ck(r.rc == 2 && fc_has(&r, "REFUSE\tFREEZE_CUT\tplan-version-mismatch"), "mut-check-plan-r1-refused", &r);
+    pr_free(&r);
+
+    /* 10d: stale candidate.tsv commit caught by --check */
+    cx_fmt(shcmd, sizeof shcmd,
+        "cd '%s' && git reset -q --hard HEAD~1 && awk -F'\\t' 'BEGIN{OFS=\"\\t\"} NR==2{$3=\"11223344556677889900aabbccddeeff00112233\"} {print}' release/candidate.tsv > release/cand.tmp && "
+        "mv -f release/cand.tmp release/candidate.tsv && git add release/candidate.tsv && git commit -qm stale-commit", repo);
+    fc_sh(g_root, shcmd, 15, &r); pr_free(&r);
+    cx_fmt(args, sizeof args, "--check --repo '%s' --version 0.1.3 --owner cc --no-derive", repo);
+    run_fc("", args, &r);
+    ck(r.rc == 2 && (fc_has(&r, "REFUSE\tFREEZE_CUT\tcandidate-commit-not-reset") || fc_has(&r, "REFUSE\tFREEZE_CUT\tcandidate-commit-not-ancestor")),
+       "mut-check-stale-candidate-commit-refused", &r);
+    pr_free(&r);
+
+    /* 10e: stale non-zero asset sha256 caught by --check */
+    cx_fmt(shcmd, sizeof shcmd,
+        "cd '%s' && git reset -q --hard HEAD~1 && awk -F'\\t' 'BEGIN{OFS=\"\\t\"} NR==2{$9=\"1111111111111111111111111111111111111111111111111111111111111111\"} {print}' release/candidate.tsv > release/cand.tmp && "
+        "mv -f release/cand.tmp release/candidate.tsv && git add release/candidate.tsv && git commit -qm stale-sha", repo);
+    fc_sh(g_root, shcmd, 15, &r); pr_free(&r);
+    cx_fmt(args, sizeof args, "--check --repo '%s' --version 0.1.3 --owner cc --no-derive", repo);
+    run_fc("", args, &r);
+    ck(r.rc == 2 && fc_has(&r, "REFUSE\tFREEZE_CUT\tcandidate-asset-sha-not-reset"), "mut-check-stale-asset-sha-refused", &r);
+    pr_free(&r);
+
+    /* 11. --no-commit stages C0a only and NEVER writes UNCOMMITTED freeze row into build/freeze.tsv */
+    char repo_nc[1024];
+    cx_fmt(repo_nc, sizeof repo_nc, "%s/repo_nocommit", dir);
+    init_repo(repo_nc, "\xe5\xb7\xb2\xe5\x85\xac\xe5\xbc\x80"); /* 已公开 */
+    cx_fmt(shcmd, sizeof shcmd, "cd '%s' && git rev-parse HEAD > '%s/nc.head' && cp build/freeze.tsv '%s/nc_frz.pre'", repo_nc, dir, dir);
+    fc_sh(g_root, shcmd, 15, &r); pr_free(&r);
+    cx_fmt(args, sizeof args,
+           "--cut --repo '%s' --version 0.1.3 --topic '无提交预演' --owner cc --deadline-s 7200 --no-derive --no-commit",
+           repo_nc);
+    run_fc("", args, &r);
+    ck(r.rc == 0 && fc_has(&r, "FREEZE_CUT\tPASS_UNCOMMITTED\tversion=0.1.3"), "no-commit-stages-c0a-only", &r);
+    pr_free(&r);
+    cx_fmt(shcmd, sizeof shcmd,
+        "cd '%s' && PRE=$(cat '%s/nc.head') && [ \"$(git rev-parse HEAD)\" = \"$PRE\" ] && "
+        "STAGED=$(git diff --cached --name-only | LC_ALL=C sort | tr '\\n' ',') && "
+        "[ \"$STAGED\" = \"build/version-seq.tsv,plans/v0.1.3.md,release/candidate.tsv,\" ] && "
+        "[ -z \"$(git diff --name-only)\" ] && "
+        "cmp -s build/freeze.tsv '%s/nc_frz.pre' && "
+        "! grep -q 'UNCOMMITTED' build/freeze.tsv && ! grep -q '0.1.3-FREEZE' build/freeze.tsv && "
+        "[ -f plans/v0.1.3.md ] && awk -F'\\t' '$1==\"68\" && $2==\"0.1.3\"{ok=1} END{exit !ok}' build/version-seq.tsv && echo NC_OK",
+        repo_nc, dir, dir);
+    fc_sh(g_root, shcmd, 15, &r);
+    ck(r.rc == 0 && fc_has(&r, "NC_OK"), "no-commit-freeze-tsv-clean", &r);
+    pr_free(&r);
+
+    /* 12. Rollback sentinel preservation (no git reset --hard) & restore error detection */
+    char repo_rb[1024];
+    cx_fmt(repo_rb, sizeof repo_rb, "%s/repo_rb", dir);
+    init_repo(repo_rb, "\xe5\xb7\xb2\xe5\x85\xac\xe5\xbc\x80"); /* 已公开 */
+    cx_fmt(shcmd, sizeof shcmd,
+        "cd '%s' && cp build/version-seq.tsv '%s/rb_seq.pre' && cp release/candidate.tsv '%s/rb_cand.pre' && "
+        ": > tools/derive.cx && "
+        "cat > unisacc.com << 'EOFSH'\n"
+        "#!/bin/sh\n"
+        "printf 'SENTINEL_PRESERVED\\n' > research/r.md\n"
+        "exit 1\n"
+        "EOFSH\n"
+        "chmod +x unisacc.com && git add unisacc.com tools/derive.cx && git commit -qm fake-derive-sentinel",
+        repo_rb, dir, dir);
+    fc_sh(g_root, shcmd, 15, &r); pr_free(&r);
+    cx_fmt(args, sizeof args,
+           "--cut --repo '%s' --version 0.1.3 --topic '回滚哨兵测试' --owner cc --deadline-s 7200",
+           repo_rb);
+    run_fc("", args, &r);
+    ck(r.rc == 2 && fc_has(&r, "REFUSE\tFREEZE_CUT\tderive-table-index-failed"), "rb-derive-failure-triggers-rollback", &r);
+    pr_free(&r);
+    cx_fmt(shcmd, sizeof shcmd,
+        "cd '%s' && cmp -s build/version-seq.tsv '%s/rb_seq.pre' && cmp -s release/candidate.tsv '%s/rb_cand.pre' && "
+        "[ ! -e plans/v0.1.3.md ] && grep -q '^SENTINEL_PRESERVED$' research/r.md && echo SENTINEL_OK",
+        repo_rb, dir, dir);
+    fc_sh(g_root, shcmd, 15, &r);
+    ck(r.rc == 0 && fc_has(&r, "SENTINEL_OK"), "rollback-preserves-sentinel-no-reset-hard", &r);
+    pr_free(&r);
+
+    /* 12a. Post-C0a+C0b commit rollback (HEAD actually advances, then fc_do_check fails -> git reset --soft + sentinel preserved) */
+    char repo_rbh[1024];
+    cx_fmt(repo_rbh, sizeof repo_rbh, "%s/repo_rb_head", dir);
+    init_repo(repo_rbh, "\xe5\xb7\xb2\xe5\x85\xac\xe5\xbc\x80"); /* 已公开 */
+    cx_fmt(shcmd, sizeof shcmd,
+        "cd '%s' && git rev-parse HEAD > '%s/rbh.head' && "
+        "cp build/version-seq.tsv '%s/rbh_seq.pre' && cp release/candidate.tsv '%s/rbh_cand.pre' && cp build/freeze.tsv '%s/rbh_frz.pre' && "
+        ": > tools/derive.cx && : > tools/verseq-gen.cx && "
+        "cat > unisacc.com << 'EOFSH'\n"
+        "#!/bin/sh\n"
+        "if [ \"$1\" = \"tools/derive.cx\" ] && [ \"$3\" = \"--check\" ]; then\n"
+        "  git rev-parse HEAD > research/injected_head.txt\n"
+        "  printf 'SENTINEL_HEAD_PRESERVED\\n' > research/r.md\n"
+        "  printf 'UNTRACKED_SENTINEL\\n' > research/untracked_sentinel.md\n"
+        "  exit 1\n"
+        "fi\n"
+        "exit 0\n"
+        "EOFSH\n"
+        "chmod +x unisacc.com && git add unisacc.com tools/derive.cx tools/verseq-gen.cx && git commit -qm fake-post-commit-rb && "
+        "git rev-parse HEAD > '%s/rbh.head'",
+        repo_rbh, dir, dir, dir, dir, dir);
+    fc_sh(g_root, shcmd, 15, &r); pr_free(&r);
+    cx_fmt(args, sizeof args,
+           "--cut --repo '%s' --version 0.1.3 --topic '后提交回滚哨兵测试' --owner cc --deadline-s 7200",
+           repo_rbh);
+    run_fc("", args, &r);
+    ck(r.rc == 2 && fc_has(&r, "REFUSE\tFREEZE_CUT\ttable-index-drift"), "rb-post-commit-failure-triggers-rollback", &r);
+    pr_free(&r);
+    cx_fmt(shcmd, sizeof shcmd,
+        "cd '%s' && PRE=$(cat '%s/rbh.head') && INJ=$(cat research/injected_head.txt) && "
+        "printf 'INJECTED_HEAD=%%s PRE_HEAD=%%s\\n' \"$INJ\" \"$PRE\" && "
+        "[ -n \"$INJ\" ] && [ \"$INJ\" != \"$PRE\" ] && [ \"$(git rev-parse HEAD)\" = \"$PRE\" ] && "
+        "[ -z \"$(git diff --cached --name-only)\" ] && "
+        "cmp -s build/version-seq.tsv '%s/rbh_seq.pre' && cmp -s release/candidate.tsv '%s/rbh_cand.pre' && cmp -s build/freeze.tsv '%s/rbh_frz.pre' && "
+        "[ ! -e plans/v0.1.3.md ] && grep -q '^SENTINEL_HEAD_PRESERVED$' research/r.md && "
+        "grep -q '^UNTRACKED_SENTINEL$' research/untracked_sentinel.md && echo SENTINEL_HEAD_OK",
+        repo_rbh, dir, dir, dir, dir);
+    fc_sh(g_root, shcmd, 15, &r);
+    ck(r.rc == 0 && fc_has(&r, "SENTINEL_HEAD_OK") && fc_has(&r, "INJECTED_HEAD="), "rollback-post-commit-preserves-sentinel", &r);
+    pr_free(&r);
+
+    /* 12b. Rollback restore error is detected and reported loudly (NEVER ignored) */
+    char repo_rbe[1024];
+    cx_fmt(repo_rbe, sizeof repo_rbe, "%s/repo_rbe", dir);
+    init_repo(repo_rbe, "\xe5\xb7\xb2\xe5\x85\xac\xe5\xbc\x80"); /* 已公开 */
+    cx_fmt(shcmd, sizeof shcmd,
+        "cd '%s' && printf '# 0.1.9 计划:bad\\nplanned_units=8\\ndone_units=UNMEASURED\\nunplanned_units=0\\na_class=x\\na_files_cap=24\\nfreeze_at=TBD\\n' > plans/v0.1.3.md && "
+        "git add plans/v0.1.3.md && git commit -qm bad-plan && chmod 0555 plans", repo_rbe);
+    fc_sh(g_root, shcmd, 15, &r); pr_free(&r);
+    cx_fmt(args, sizeof args,
+           "--cut --repo '%s' --version 0.1.3 --topic '回滚错检' --owner cc --deadline-s 7200 --use-existing-plan --no-derive",
+           repo_rbe);
+    run_fc("", args, &r);
+    ck(r.rc == 2 && fc_has(&r, "REFUSE\tFREEZE_CUT\trollback-failed") && fc_has(&r, "restore-plan"), "rollback-restore-error-reported-loudly", &r);
+    pr_free(&r);
+    cx_fmt(shcmd, sizeof shcmd, "chmod 0755 '%s/plans'", repo_rbe);
+    fc_sh(g_root, shcmd, 15, &r); pr_free(&r);
+
+    /* 13. Worktree porcelain ' T' typechange (file <-> symlink) classified as PIK1 change & invalid XY rejected */
+    char repo_tc[1024];
+    cx_fmt(repo_tc, sizeof repo_tc, "%s/repo_typechange", dir);
+    init_repo(repo_tc, "\xe5\xb7\xb2\xe5\x85\xac\xe5\xbc\x80"); /* 已公开 */
+    cx_fmt(shcmd, sizeof shcmd, "cd '%s' && rm -f src/a.c && ln -s ../include/README.md src/a.c", repo_tc);
+    fc_sh(g_root, shcmd, 15, &r); pr_free(&r);
+    cx_fmt(args, sizeof args,
+           "--cut --repo '%s' --version 0.1.3 --topic '类型变更正控' --owner cc --deadline-s 7200 --no-derive",
+           repo_tc);
+    run_fc("", args, &r);
+    ck(r.rc == 2 && fc_has(&r, "REFUSE\tFREEZE_CUT\tnumbering-step-touched-product-source"), "worktree-typechange-file-to-symlink-sid-detected", &r);
+    pr_free(&r);
+
+    {   char fg[1024], envp[1200];
+        cx_fmt(fg, sizeof fg, "%s/fakegit_xy", dir);
+        cx_fmt(shcmd, sizeof shcmd,
+            "mkdir -p '%s' && cat > '%s/git' << 'EOFXY'\n"
+            "#!/bin/sh\n"
+            "case \"$*\" in\n"
+            "  *\"status --porcelain -z\"*) printf '?M src/a.c\\0'; exit 0 ;;\n"
+            "esac\n"
+            "exec \"$REAL_GIT\" \"$@\"\n"
+            "EOFXY\nchmod +x '%s/git'", fg, fg, fg);
+        fc_sh(g_root, shcmd, 15, &r); pr_free(&r);
+        cx_fmt(envp, sizeof envp, "REAL_GIT=\"$(command -v git)\" PATH='%s:'\"$PATH\"", fg);
+        cx_fmt(args, sizeof args,
+               "--cut --repo '%s' --version 0.1.3 --topic '畸形状态负控' --owner cc --deadline-s 7200 --no-derive",
+               repo_tc);
+        run_fc(envp, args, &r);
+        ck(r.rc == 2 && fc_has(&r, "REFUSE\tFREEZE_CUT\tgit-status-failed"), "worktree-bad-status-xy-refused", &r);
+        pr_free(&r);
+    }
+
+    fsx_scratch_drop(sc);
+    printf("CHECK_FREEZE_CUT\tpassed=%d\tfailed=%d\n", g_pass, g_fail);
+    return g_fail ? 1 : 0;
+}
