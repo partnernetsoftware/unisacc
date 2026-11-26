@@ -27,6 +27,18 @@ static void ck_nn(int ok, const char *name) {
     if (!ok) g_fail = g_fail + 1;
 }
 
+static void check_ape_owner_policy(void) {
+    sy_stat_t st = {0};
+    st.uid = 2102;
+    st.mode = 0700;
+    ck_nn(!sy_stat_trusted_owner(&st, 2101), "ape-owner-policy-foreign-refused");
+    ck_nn(sy_stat_trusted_owner(&st, 2102), "ape-owner-policy-euid-allowed");
+    st.uid = 0;
+    ck_nn(sy_stat_trusted_owner(&st, 2101), "ape-owner-policy-root-allowed");
+    st.mode = 0770;
+    ck_nn(!sy_stat_trusted_owner(&st, 2101), "ape-owner-policy-writable-root-refused");
+}
+
 static void *pk_alloc_fn(void *p, size_t n) { return realloc(p, n ? n : 1); }
 static void pk_free_fn(void *p) { free(p); }
 
@@ -161,6 +173,173 @@ static int stub_rspl_compile_clo(const char *a, int b, const char *c, unsigned c
     return 1;
 }
 
+static int is_launch_ape(const char *path) {
+    char magic[8];
+    int fd = sy_open_read(path);
+    if (fd < 0) return 0;
+    int rc = sy_reg_size(fd) >= (long)sizeof magic ? sy_read_full(fd, magic, sizeof magic) : -1;
+    sy_close(fd);
+    return !rc && tx_same(magic, sizeof magic, "MZqFpD='", 8);
+}
+
+static void check_ape_leg(const char *ape, const char *cwd, const char *src, const char *cache,
+                          const char *dir, const char *path_dir, int outcome, const char *name) {
+    char ecache[4400], ep[4400], why[200];
+    np_result r = {0};
+    if (cx_fmt(ecache, sizeof ecache, "UNISACC_CACHE_DIR=%s", cache)) { ck_nn(0, name); return; }
+    /* Poison both inputs before entering the actual APE shell. The wrapper
+     * must replace them, not depend on the test removing inherited values. */
+    char *v[16] = {"env", "UNISA_CONTAINER=/not-an-ape.pkg", "UNISACC_APE_SELF=/not-the-launcher.com",
+        ecache, outcome >= 6 ? "UNISACC_RUN_CACHE=0" : "UNISACC_RUN_CACHE=1", "UNISACC_RR_TIME=1"};
+    int at = 6;
+    if (outcome == 3) v[at++] = "UNISACC_PHASE=build";
+    if (path_dir) {
+        if (cx_fmt(ep, sizeof ep, "PATH=%s:/usr/bin:/bin", path_dir)) { ck_nn(0, name); return; }
+        v[at++] = ep;
+    } else v[at++] = "sh";
+    v[at++] = (char *)ape;
+    if (dir) { v[at++] = "--nn-dir"; v[at++] = (char *)dir; }
+    v[at++] = "-run"; v[at++] = (char *)src; v[at] = 0;
+    int spawned = np_run(v, cwd, 0, 6, &r, why, sizeof why) == 0, good = 0;
+    if (spawned && outcome == 1) {
+        good = r.rc == 1 && has_bytes(r.err, r.errn, "external nn") &&
+            (has_bytes(r.err, r.errn, "-ELOOP") || has_bytes(r.err, r.errn, "-ENOTDIR"));
+    } else if (spawned && outcome == 2) {
+        good = r.rc == 1 && has_bytes(r.err, r.errn, "bad UNINETB1N magic");
+    } else if (spawned && (outcome == 3 || outcome == 7)) {
+        good = r.rc == 42 && (has_bytes(r.err, r.errn, "RR_TIME\tmodel\tstage=e2\tsource=raw\t") ||
+            has_bytes(r.err, r.errn, "RR_TIME\tmodel\tstage=e2\tsource=inflate\t")) &&
+            !has_bytes(r.err, r.errn, "external nn");
+    } else if (spawned && outcome == 4) {
+        good = r.rc == 1 && has_bytes(r.err, r.errn, "external nn APE beside directory owner or write permissions refused");
+    } else if (spawned && outcome == 5) {
+        good = r.rc == 1 && has_bytes(r.err, r.errn, "external nn APE beside file owner, write permissions or link count refused");
+    } else if (spawned && outcome == 6) {
+        good = r.rc == 42 && has_bytes(r.err, r.errn, "external nn APE beside disabled: untrusted parent") &&
+            (has_bytes(r.err, r.errn, "RR_TIME\tmodel\tstage=e2\tsource=raw\t") ||
+             has_bytes(r.err, r.errn, "RR_TIME\tmodel\tstage=e2\tsource=inflate\t"));
+    } else if (spawned) {
+        good = r.rc == 42 && has_bytes(r.err, r.errn, "RR_TIME\tinference\tstage=e2") &&
+            !has_bytes(r.err, r.errn, "RR_TIME\tlookup_hit=");
+    }
+    if (!good) printf("APE_E2E_LEG\tcase=%s\trc=%d\terr=%.*s\n", name, spawned ? r.rc : -1,
+        (int)(r.errn < 400 ? r.errn : 400), r.err ? r.err : "");
+    ck_nn(good, name);
+    np_free(&r);
+}
+
+static void check_ape_name_matrix(const char *product, const char *base, const char *cwd,
+                                   const char *src, const char *cache, const unsigned char *e2, long e2n) {
+    static const char *const cases[] = {"original", "renamed", "unisacc-com"};
+    const char *original = product;
+    for (const char *p = product; *p; p++) if (*p == '/') original = p+1;
+    const char *names[] = {original, "renamed-candidate", "unisacc.com"};
+    char override[4160], ov_nb[4200], link[4200], aliases[4160], wrong[4200], wrong_nb[4240];
+    int ready = !cx_fmt(override, sizeof override, "%s/ape-explicit-nn", base) &&
+        !cx_fmt(ov_nb, sizeof ov_nb, "%s/e2.nb", override) &&
+        !cx_fmt(link, sizeof link, "%s/ape-linked-nn", base) && !sy_mkdir(override, 0700) &&
+        !write_file_bytes(ov_nb, e2, e2n) && !sy_symlink(override, link) &&
+        !cx_fmt(aliases, sizeof aliases, "%s/ape-aliases", base) && !sy_mkdir(aliases, 0700) &&
+        !cx_fmt(wrong, sizeof wrong, "%s/nn", aliases) && !sy_mkdir(wrong, 0700) &&
+        !cx_fmt(wrong_nb, sizeof wrong_nb, "%s/e2.nb", wrong) &&
+        !write_file_bytes(wrong_nb, (const unsigned char *)"BADMAGIC!", 9);
+    ck_nn(ready, "e2e-ape-matrix-setup");
+    if (!ready) return;
+    for (int i = 0; i < 3; i++) {
+        char folder[4160], ape[4400], alias[4300], side[4200], nb[4240], label[96], why[200];
+        int ok = !cx_fmt(folder, sizeof folder, "%s/ape-name-%s", base, cases[i]) &&
+            !cx_fmt(ape, sizeof ape, "%s/%s", folder, names[i]) &&
+            !cx_fmt(alias, sizeof alias, "%s/%s", aliases, cases[i]) &&
+            !cx_fmt(side, sizeof side, "%s/nn", folder) && !cx_fmt(nb, sizeof nb, "%s/e2.nb", side) &&
+            !sy_mkdir(folder, 0700) && !sy_mkdir(side, 0700) && !write_file_bytes(nb, e2, e2n);
+        np_result r = {0};
+        char *cp[] = {"cp", "--", (char *)product, ape, 0};
+        if (ok) ok = !np_run(cp, ".", 0, 5, &r, why, sizeof why) && r.rc == 0;
+        np_free(&r);
+        char *cmp[] = {"cmp", "--", (char *)product, ape, 0};
+        if (ok) ok = !np_run(cmp, ".", 0, 5, &r, why, sizeof why) && r.rc == 0;
+        np_free(&r);
+        if (ok) ok = !sy_chmod(ape, 0700) && !sy_symlink(ape, alias);
+        cx_fmt(label, sizeof label, "e2e-ape-%s-copy", cases[i]);
+        ck_nn(ok, label);
+        if (!ok) continue;
+        cx_fmt(label, sizeof label, "e2e-ape-%s-beside", cases[i]);
+        check_ape_leg(ape, cwd, src, cache, 0, 0, 0, label);
+        cx_fmt(label, sizeof label, "e2e-ape-%s-relative-launch", cases[i]);
+        check_ape_leg(names[i], folder, src, cache, 0, 0, 0, label);
+        cx_fmt(label, sizeof label, "e2e-ape-%s-cross-directory-link", cases[i]);
+        check_ape_leg(alias, cwd, src, cache, 0, 0, 0, label);
+        cx_fmt(label, sizeof label, "e2e-ape-%s-path-search", cases[i]);
+        check_ape_leg(names[i], cwd, src, cache, 0, folder, 0, label);
+        if (i == 0) {
+            ok = !sy_chmod(folder, 0777);
+            ck_nn(ok, "e2e-ape-writable-parent-fixture");
+            if (ok) {
+                check_ape_leg(ape, cwd, src, cache, 0, 0, 6, "e2e-ape-writable-parent-disabled");
+                check_ape_leg(ape, cwd, src, cache, side, 0, 0, "e2e-ape-explicit-accepts-writable-parent");
+            }
+            ok = !sy_chmod(folder, 0700) && !sy_chmod(side, 0770);
+            ck_nn(ok, "e2e-ape-writable-nn-fixture");
+            if (ok) check_ape_leg(ape, cwd, src, cache, 0, 0, 4, "e2e-ape-writable-nn-refused");
+            ck_nn(!sy_chmod(side, 0700), "e2e-ape-writable-nn-restore");
+            ok = !sy_chmod(nb, 0660);
+            ck_nn(ok, "e2e-ape-writable-stage-fixture");
+            if (ok) {
+                check_ape_leg(ape, cwd, src, cache, 0, 0, 5, "e2e-ape-writable-stage-refused");
+                check_ape_leg(ape, cwd, src, cache, side, 0, 0, "e2e-ape-explicit-accepts-writable-stage");
+            }
+            ck_nn(!sy_chmod(nb, 0600), "e2e-ape-writable-stage-restore");
+            char extra[1200], why[128];
+            cx_fmt(extra, sizeof extra, "%s/extra.nb", side);
+            char *hard[] = {"ln", "--", nb, extra, 0};
+            np_result lr = {0};
+            ok = np_run(hard, cwd, 0, 4, &lr, why, sizeof why) == 0 && lr.rc == 0;
+            np_free(&lr);
+            ck_nn(ok, "e2e-ape-hardlinked-stage-fixture");
+            if (ok) {
+                check_ape_leg(ape, cwd, src, cache, 0, 0, 5, "e2e-ape-hardlinked-stage-refused");
+                check_ape_leg(ape, cwd, src, cache, side, 0, 0, "e2e-ape-explicit-accepts-hardlinked-stage");
+                ck_nn(!sy_unlink(extra), "e2e-ape-hardlinked-stage-restore");
+            }
+            char saved[4240];
+            ok = !cx_fmt(saved, sizeof saved, "%s/nn.saved", folder) && !sy_rename(side, saved);
+            ck_nn(ok, "e2e-ape-default-nn-move-fixture");
+            if (ok) {
+                int prepared = !sy_symlink(saved, side);
+                ck_nn(prepared, "e2e-ape-default-nn-symlink-fixture");
+                if (prepared) {
+                    check_ape_leg(ape, cwd, src, cache, 0, 0, 1, "e2e-ape-default-nn-symlink-refused");
+                    ck_nn(!sy_unlink(side), "e2e-ape-default-nn-symlink-remove");
+                }
+                prepared = !write_file_bytes(side, (const unsigned char *)"file", 4);
+                ck_nn(prepared, "e2e-ape-default-nn-nondirectory-fixture");
+                if (prepared) {
+                    check_ape_leg(ape, cwd, src, cache, 0, 0, 1, "e2e-ape-default-nn-nondirectory-refused");
+                    ck_nn(!sy_unlink(side), "e2e-ape-default-nn-nondirectory-remove");
+                }
+                prepared = !sy_chmod(folder, 0777);
+                ck_nn(prepared, "e2e-ape-writable-parent-absent-nn-fixture");
+                if (prepared) check_ape_leg(ape, cwd, src, cache, 0, 0, 7, "e2e-ape-writable-parent-absent-nn-silent");
+                ck_nn(!sy_chmod(folder, 0700) && !sy_rename(saved, side), "e2e-ape-default-nn-restore");
+            }
+        }
+        cx_fmt(label, sizeof label, "e2e-ape-%s-corrupt-setup", cases[i]);
+        ok = !write_file_bytes(nb, (const unsigned char *)"BADMAGIC!", 9);
+        ck_nn(ok, label);
+        if (!ok) continue;
+        cx_fmt(label, sizeof label, "e2e-ape-%s-explicit", cases[i]);
+        check_ape_leg(ape, cwd, src, cache, override, 0, 0, label);
+        cx_fmt(label, sizeof label, "e2e-ape-%s-nofollow", cases[i]);
+        check_ape_leg(ape, cwd, src, cache, link, 0, 1, label);
+        cx_fmt(label, sizeof label, "e2e-ape-%s-corrupt", cases[i]);
+        check_ape_leg(ape, cwd, src, cache, 0, 0, 2, label);
+        cx_fmt(label, sizeof label, "e2e-ape-%s-chain-skips-corrupt-beside", cases[i]);
+        check_ape_leg(ape, cwd, src, cache, 0, 0, 3, label);
+        cx_fmt(label, sizeof label, "e2e-ape-%s-chain-skips-forbidden-explicit", cases[i]);
+        check_ape_leg(ape, cwd, src, cache, link, 0, 3, label);
+    }
+}
+
 static void run_e2e(const char *cand_path, const char *base_dir, const unsigned char *real_e2, long real_e2_n) {
     char cmd[8192], cand_bin[4200], nn_dir[4200], e2_nb[4400], cache_dir[4200];
     char work_dir[4200], link_dir[4200], link_cand[4400], h_cx[4400];
@@ -201,6 +380,8 @@ static void run_e2e(const char *cand_path, const char *base_dir, const unsigned 
     ck_nn(r.rc == 42 && has_bytes(r.err, r.errn, "RR_TIME\tlookup_hit=2") &&
           !has_bytes(r.err, r.errn, "RR_TIME\tinference"), "e2e-builtin-warm-cache-hit");
     np_free(&r);
+
+    check_ape_name_matrix(cand_path, base_dir, work_dir, h_cx, cache_dir, real_e2, real_e2_n);
 
     /* (E2) Beside nn/ with REAL extracted UNINETB1N model bypasses warm builtin cache */
     cx_fmt(cmd, sizeof cmd, "mkdir -p '%s'", nn_dir);
@@ -712,6 +893,7 @@ static void run_e2e(const char *cand_path, const char *base_dir, const unsigned 
 }
 
 int main(int argc, char **argv) {
+    check_ape_owner_policy();
     CxcState st;
     char why[128], base_dir[4096], dir[4200], nb[4400], env_nn[4200], long560[4400], long4200[4600], cmd[4096];
     char *av1[4], *av2[3], *av3[2];
@@ -739,6 +921,7 @@ int main(int argc, char **argv) {
     unsetenv("UNISACC_CTOR"); unsetenv("UNISACC_CHAIN_PHASE_BOUND_S");
     unsetenv("UNISACC_CHAIN_TOOLS_EPOCH"); unsetenv("UNISACC_CHAIN_SHAMEMO");
     unsetenv("UNISACC_IDENTITY_HELPER"); unsetenv("UNISA_CONTAINER");
+    unsetenv("UNISACC_APE_SELF");
     unsetenv("UNISACC_CACHE_DIR"); unsetenv("UNISACC_RUN_SPLIT");
 
     /* Unknown / unbooted default-deny & L0 bad-arg invariants */
@@ -996,8 +1179,30 @@ int main(int argc, char **argv) {
         setenv("UNISA_CONTAINER", "/some/pkg.bin", 1);
         ck_nn(cxn_boot(0, 0, 0, why, sizeof why) == 0 && cxn_dir_get() == 0, "container-pkg-forces-builtin");
         setenv("UNISA_CONTAINER", "./unisacc.com", 1);
-        ck_nn(cxn_boot(dir, 0, 0, why, sizeof why) == 0 && cxn_dir_present() == 1, "container-self-com-allows-ext");
+        unsetenv("UNISACC_APE_SELF");
+        ck_nn(cxn_boot(dir, 0, 0, why, sizeof why) == 0 && cxn_dir_get() == 0, "container-named-unisacc-com-needs-launcher-marker");
+        setenv("UNISACC_APE_SELF", "./some-other.com", 1);
+        ck_nn(cxn_boot(dir, 0, 0, why, sizeof why) == 0 && cxn_dir_get() == 0, "mismatched-container-marker-stays-disabled");
+        setenv("UNISA_CONTAINER", beside_e2, 1);
+        setenv("UNISACC_APE_SELF", beside_e2, 1);
+        ck_nn(cxn_boot(dir, 0, 0, why, sizeof why) == 0 && cxn_dir_get() == 0, "matching-model-path-is-not-shell-ape");
+        setenv("UNISA_CONTAINER", "./missing-outer", 1);
+        setenv("UNISACC_APE_SELF", "./missing-outer", 1);
+        ck_nn(cxn_boot(0, 0, 0, why, sizeof why) < 0 &&
+            tx_eqz(why, "external nn APE launch path cannot be resolved"), "matching-missing-ape-path-refused");
         unsetenv("UNISA_CONTAINER");
+        ck_nn(cxn_boot(dir, 0, 0, why, sizeof why) == 0 && cxn_dir_present() == 1, "raw-entry-ignores-unpaired-marker");
+        if (e2e_cand && is_launch_ape(e2e_cand)) {
+            setenv("UNISA_CONTAINER", e2e_cand, 1);
+            setenv("UNISACC_APE_SELF", e2e_cand, 1);
+            ck_nn(cxn_boot(dir, 0, 0, why, sizeof why) == 0 && cxn_dir_present() == 1, "launcher-matched-ape-allows-explicit");
+        }
+        setenv("UNISACC_PHASE", "A", 1);
+        ck_nn(cxn_boot(dir, 0, 0, why, sizeof why) == 0 && cxn_dir_get() == 0, "chain-env-wins-over-launcher");
+        unsetenv("UNISACC_PHASE");
+        ck_nn(cxn_boot(dir, 0, "/some/pkg.bin", why, sizeof why) == 0 &&
+            cxn_dir_get() == 0, "models-win-over-launcher");
+        unsetenv("UNISACC_APE_SELF"); unsetenv("UNISA_CONTAINER");
     }
 
     /* Corrupt magic refused before cache */
@@ -1130,7 +1335,10 @@ int main(int argc, char **argv) {
     }
 
     if (e2e_cand && real_e2) {
-        run_e2e(e2e_cand, base_dir, real_e2, real_e2_n);
+        int ape = is_launch_ape(e2e_cand);
+        ck_nn(ape, "e2e-requires-packed-shell-ape");
+        if (ape) setenv("XDG_CACHE_HOME", base_dir, 1);
+        if (ape) run_e2e(e2e_cand, base_dir, real_e2, real_e2_n);
     }
 
     if (real_e2) free(real_e2);

@@ -126,7 +126,11 @@ static void script(Buf *s, long off[4], long len[4], char key[4][17]) {
             "  tail -c +$o \"$0\" | head -c $n | gzip -dc > \"$t.$$\" && chmod +x \"$t.$$\" && mv -f \"$t.$$\" \"$t\" || { rm -f \"$t.$$\"; exit 1; }\n"
             "fi\n";
         put(s, rest, (long)strlen(rest));
-        if (embedded) put(s, "UNISA_CONTAINER=\"$0\"; export UNISA_CONTAINER\n", 45);
+        static const char launch[] =
+            "UNISA_CONTAINER=\"$0\"; UNISACC_APE_SELF=\"$0\"; export UNISA_CONTAINER UNISACC_APE_SELF\n";
+        static const char clear[] = "unset UNISACC_APE_SELF\n";
+        if (embedded) put(s, launch, sizeof launch - 1);
+        else put(s, clear, sizeof clear - 1);
         put(s, "exec \"$t\" \"$@\"\n", 15);
     }
 }

@@ -116,6 +116,7 @@
 - 提交门不跑受影响批次(E4):precommit 只派生与评估提交树,不实跑 affected 选出的批次,改被多处 use 的模块可绿进 main。入口:源已佚(2026-11-24 复核,E4 评审原临时文件已无)。清零:提交门接 affected --run 有界子集并带负控。
 - affected 曾因 tests/batch-product-inputs 漏行全线 rc2,已修 c1709e5506;需补"表缺行即具名拒绝"负控,防再次静默。
 - run-batch 断言计数盲区(E9):零断言或计数不进结论的批次可记 PASS,候选清单源已佚(2026-11-24 复核,E9 zero-candidates 原临时文件已无);不据此删批,逐批补断言或标 UNKNOWN。
+- v0.1.3/C0f 的外置 NN 启动边界待 v0.1.4 收口。候选批若从一个 APE 启动工具、再执行裸切片，继承的同值外壳标记可把旁置解析到启动工具的 APE。安装根旁放置 `nn` 之前，候选批须显式设 `UNISACC_NN_MODE=builtin`；下一版补候选入口的回归。裸切片默认旁置沿用旧规则；下一版验证并统一双信任规则。证据：C0f 真打包 E2E 与 `~/.local/share/unisacc/research/cc/gk-c0f-r2.md` 的 S4、N2。回退：候选入口继续显式强制内置，不用外置旁置。
 - tls13-get 证书检查曾失效(已修 7f277e7344);修复前经该工具取得的外部内容不视为已验真。
 - old-product-assets:0.0.101 将登记为旧产物基线,由 agy-flow 执行;登记前旧产物对比无基线,结论记 UNKNOWN。
 
