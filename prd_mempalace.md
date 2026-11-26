@@ -359,3 +359,67 @@ R75/R78/R69/R69.6/R79/R81 等仍跟踪项已归档全文于 archive/prd_mempalac
 - 冻结与前置:main 上 0.1.0-FREEZE 提交 c26d9f47e8(base=eb57262f30,deadline 12:00 epoch 1795579200),车树 F=a11d28fc0a;ompgpt 三项封板硬断言(SOURCES_SID、CLOSURE、FREEZE_METADATA added=1 deleted=0)全 PASS;env -i 下 chain-ready --version 0.1.0 全 23 门 PASS(READY yes failed=none 133666)。
 - 链止 09:26:30 +0800(epoch 1795569990,耗时 26.8m = 1607s):EXIT rc=0 why=exited;APE=b7cae17b1ae557a4907247e3168db56925504819f98d15f1b75a2da2de8fa97f(8991230 B,unisacc 0.1.0);fixedpoint 四同 objects=same(102) kernels=same(2) slices=same(6) product=same package=c4120564b66c2dbc540644c98fce10ee0665cc996197de5b4c72aebdb15f8a24,六目标 g2/g3 6/6 SAME(FIXEDPOINT_EVIDENCE PASS compare_attempt=245)。
 - 预跑起 09:29:39 +0800(epoch 1795570179,旧 pid=817099 因 W0000=module-units-limits 冷 kit/材料连续两次 58041ms rc=124 于 09:32:30 PRERUN_STOP 退出);按 cc 放行将 W0000 改为 module-units-forward(module-units-limits 移入 W0244 normal 窗)并在同 frozen-root 与同布局 tree-6cve4rtr 手动预热 PASS(elapsed_ms=25332)后,于 09:37:31 +0800(epoch 1795570651,pid=872413)以 --resume 重起,W0000..W0021 全 PASS(rc=0);W0022(precommit-list-cap,设计性贴限批)两次 58037/58034ms rc=124 因未传 --keep-going 于 09:47:30 PRERUN_STOP,按 cc 放行保留原 443B strict-W0022.tsv、在 load1=1.43 同布局外层 timeout 75s 单跑产出 strict-W9922-precommit-list-cap.tsv(UNKNOWN ms=55587 transport=-1 assertions=UNMEASURED)与 done.W0022(fail-kept=1)后,于 09:52:02 +0800(epoch 1795571522,pid=964623)带 --keep-going --resume 从 W0023 续跑至 W0212;W0212(env-semantics)因 tests/env-semantics.tsv:22-29 八行 expires=0.0.110 被 0.1.0 版号跨过红停,写 done.W0212(fail-kept=1)于 10:44:04(epoch 1795574644,pid=1303501)从 W0213 续跑至 W0217;W0217(xunit-fnptr)因 tools/check-xunit-fnptr.cx:97 硬编码 tx_find("unisacc 0.0.",12) 红停(rc=2),经 cc 裁定写 done.W0217(fail-kept=1,保留 strict-W0217.tsv 原件)并并入四文件路径 B-t 补丁后,于 10:47:13 +0800(epoch 1795574833,pid=1335474)从 W0218 续跑余 27 窗并于 10:57:40 达 245/245 DONE(PRERUN_RUN status=DONE ran=27 skipped=218);S2 补跑 tsv-lint-root:旧件 strict-W9923-tsv-lint-root.tsv(UNKNOWN ms=55557 load1=1.68,因外层 75s 超时截断于次轮重试无 SUMMARY 行,误清后从 cat 日志还原 restored-from-report,sha256=58683c81163a8a7c18eddb314b23f34b7b8cf67e533adc05e87b6a5811c4e1ab)由同布局热态单跑 strict-W9923b-tsv-lint-root.tsv(PASS ms=11733 load1=1.83 assertions=2,sha256=d99db704c32f0dca8b5f2bf6c78763cc06f47a622b9885f58f4aae407467b0a9)折叠为 SUPERSEDED;输出 ~/.cache/unisacc/prerun/v0.1.0-a11d28fc0a。
+
+# v0.1.3 记忆宫殿留痕终稿(已公开;未入仓)
+
+状态:终稿(2026-11-26),供 `prd_mempalace.md` 合并;发布前版本另存 `.draft`。数字只引已有文件原行并写来源;命令一律 `cx`(受控发布链起跑例外)。
+
+## 1. 决定与依据
+
+- 冻结:`0.1.3-FREEZE` 的 base 提交为 `37f197cbfc6a510c9cd787327ce4647bedab95c4`(来源:`build/freeze.tsv` 原行);起链 REV 与候选绑定为 `f485ec9a2bf02a7204b0d40b4b048ebd8a652a7a`(来源:整链账本 `chain-ledger-0.1.3.txt` 的 `chain#5` 行)。
+- 候选身份:tag `v0.1.3`,commit `f485ec9a2b…`,APE `unisacc.com` sha256 `eb6741afe2d54c4a7e867b229aea903f1650a797508623869f858c0b197d3575`(来源:`release/candidate.tsv` 0.1.3 行;字节 `9232894` 来源:`notes-evidence.txt` 的 `APE_SUMMARY`)。
+- C0 系列修复(来源:版本树 `git log` 原行):
+  - `d07d9640c` C0c:check-unit-frontcache 隔离并预热 CXIF 暂存,修正收割后读 deadline;
+  - `b5968b6c6` C0d:不再断言 CXIF 预备命令退出码(夹具可合法编译失败);x/c/d 腿与 2 秒等待不变;
+  - `a0c4fc828` C0e:冻结期限 +12h,base 不变;
+  - `37f197cbf` C0f:真实 APE 的外部 nn 默认旁置(启动头配对 `UNISA_CONTAINER` 与 `UNISACC_APE_SELF`,父目录 fd 校验属主/权限/链接,保留 chain-forced 与 `--models` 禁用);
+  - `f485ec9a2b` C0f-freeze:重挂 `0.1.3-FREEZE`(base C0f,期限 +12h)。
+- 预跑补跑 W9901-W9906(来源:`release/evidence/0.1.3/windows/` 同名 strict 文件原行):
+  - W9901 tsv-lint-root PASS 11187 ms load1=4.42;
+  - W9902 bpidecl PASS 2469 ms load1=4.18;
+  - W9903 lane-key-probes PASS 20755 ms load1=3.92;
+  - W9904 slow-split 两行:UNKNOWN 55512 ms load1=3.93,FAIL 55635 ms load1=4.14 retries=1;
+  - W9905 slow-split PASS 21690 ms load1=2.53;
+  - W9906 slow-split PASS 20897 ms load1=5.76。
+  - 合并口径:549 个唯一批折叠后 `549/549 PASS`,原行保留(来源:`INDEX.tsv` 的 `strict` 行原行 `PRERUN_MERGE … SUPERSEDED=1`)。
+- `windows/` 布局:298 个窗口文件(含 W9901-W9906)由证据根移入 `windows/`;原因:release-exec 的 Y1/Y2 会把证据根顶层全部普通文件拼进单条 commit-own 调用,上限 64 路径(来源:`INDEX.tsv` 的 `layout-change` 行;搬移提交见 `0c28bce04` 等 15 个 part)。逐文件 sha 与分组摘要 sha 不变。
+
+## 2. 证据入口
+
+- 索引:`release/evidence/0.1.3/INDEX.tsv`,2026-11-26 16:37 +0800(发布 Y2 后)现算 sha256 `8eefbb8a55221fe7316dc6c924d775d5ddee3fef8d8448ff029d1effabf311ac`;cdx r4 签收快照 `9e75d208…` 与中间态 `02989d6d…` 为更早时点,以本次现算为终态。
+- 聚合算法:`release/evidence/0.1.3/AGGREGATION.md`,sha256 `31cd9b6cb4dd7acddc2a0996fadf89efcef995940bcb3ac94b6f028ca235f039`。
+- 已知缺口:`release/evidence/0.1.3/known-gaps.md`,sha256 `992753336cce77cf2f8fc05adeeef12ab374916d6bf1e782b0aeaaa8f363928f`。
+- 清单:`file-manifest.tsv`(归档时 944 条数据行 = 树内 946 文件减 INDEX 与 file-manifest;物理行数含表头为 945);`evidence-rows.tsv` 在 release-exec Step 4/7 会同步改写,清单记归档提交时点原行(来源:`AGGREGATION.md` 收录范围段)。
+
+## 3. 发布终态事实(2026-11-26)
+
+- 候选 X:`427a53281`;Y1:`0a6809420`;Y2:`6f9780fe9`;post-publish:`bc952cf3d`;thaw:`88e7e3210`;主检出合入:`24e7f4d6a`。
+- 公开读回:发布资产 `ape_sha256` 读回与 `eb6741afe2d54c4a7e867b229aea903f1650a797508623869f858c0b197d3575` 一致;release `isDraft=false`,标记 `Latest`。
+- 装根:根已装 `0.1.3`(`cx --version` 输出 `unisacc 0.1.3`,`sha256sum unisacc.com` = `eb6741af…`);装前备份为 `0.1.2`(`e31c413a…`);`root-identity` 装前单份另存 `~/.cache/unisacc/prerun-backups/root-identity.pre-0.1.3.md`。
+- CI 终态见第 4 节。
+
+## 4. 阻塞与未验证(承接 known-gaps 第 5 节)
+
+- C3 S3 59 格(59A/59B、M1-M6)未完成;S1 `syp_reap` 的 `deadline_at_ms` 字段复用留 v0.1.4。
+- `prerun-drive --rebase-rev --plan`(P01-P33)未落。
+- devsvc 提交互斥 v5.3 余项(30 秒单片归一、b 片与真实 commit 证据)仍被复核阻断。
+- CXIF 读探测续龄:本版以测试补偿绕过,根治留 v0.1.4。
+- 外部 NN 的 E2E 全矩阵 `UNMEASURED`;Darwin/Windows 与其它交叉目标的外部权重旁置 `UNCOVERED`(来源:`known-gaps.md` 第 1 节)。该 NN 矩阵通过也不销 C0f 遗留:`S4`(候选批次须显式 `UNISACC_NN_MODE=builtin`)与 `N2`(普通资格 APE 自容器环境与裸切片默认旁置两套信任规则)仍未验证,单列于 v0.1.4。
+- CI:首轮 run `45779825447` 为 `FAIL`,其中 `osx/x86_64` 单格报 55 秒子进程超时(超时数绑定该首轮 job 原行);同候选重派 run `45781798885`(X 提交 `427a532816fde450cd7f87da90df66e77ef3ea16`)最终全六格 `success`,裁决 `QUALIFIED`;资格只采同一 attempt 的最终六格。
+- `osx/x86_64` 贴限根因(agy-flow 取证,来源:`research/agy-flow/v014/osx-x64-cell-timing.md`):该格所用 osx 与 lnx-arm64 缓存全关,netpack 闭包冷编膨胀 `+32%` 到 `+39%`;v0.1.4 根治方向为 `STREAM_PREPARE` 一次 `-o` 编译复用,不放宽 55 秒限。
+- tape:16 档 `94.037` 倍、64 档 `114.316` 倍为旧逐步入口证据,102 未完成,15 倍门未过;M1X 未启动(来源:`known-gaps.md` 第 4 节)。
+
+## 5. 事故:缓存清理定时器误删
+
+- 事实:2026-11-26 `13:00:11` 前后,`chains/bg-b1.bak-pre-C0c` 与两个 `prerun/v0.1.3-*.superseded-*` 目录消失,含三份红停原件 `evidence-red-*` 与 `bfdd1448b`、`d07d9640c` 两条旧链。
+- 归因:用户 journal 显示 `system-cleanup.service` 于 `13:00:03` 到 `13:00:13` 运行;`13:00:11` 报 `/tmp and 2h caches cleaned` 与 `unisacc stale artifacts cleaned`;unit 的 `ExecStart` 指向 moltbaby 脚本,脚本对 `~/.cache/unisacc/{prerun,chains/snap,chains,顶层}` 与 `~/.claude/jobs/*/tmp` 的子目录按 120 分钟 atime/mtime 规则 `rm -rf`(排除 `.*`/`*.lock`/`*.sock`)。journal 无逐目录原行,归因为据目录 mtime 与源码规则的推定。
+- 处置与终态:2026-11-26 15:48 曾加 `prerun/`、`chains/` 父级与 `chains/snap/` 钉住标记;发布后 `16:35` 已撤除,三处现均不存在;keepalive 已停(无 `keepalive-0.1.3` 进程)。保留的钉住标记(当前实数五枚,均 0 字节):`release-v0.1.3-f485ec9a2b/.no-purge`、`evidence-staging-0.1.3/.no-purge`、`evidence-vault-0.1.3/.no-purge`、`prerun-backups/.no-purge`、本会话 `~/.claude/jobs/7f46e032/tmp/.no-purge`;父级 `prerun/`、`chains/`、`chains/snap/` 三枚已于 16:35 撤除。moltbaby 侧提交 `02837a44e`(提交说明为尊重 `.no-purge`、豁免 `evidence-*` 并记录清理路径)。顶层 `~/.cache/unisacc/.no-purge` 不存在,不声称已加。
+- 证据:缺件记录 `incident-red/ABSENT.md`;重建引用 `reconstruct-chain-ledger-0.1.3*.txt` 与 `reconstruct-prerun4-supervise.out`,均标非原件;保护库 `~/.cache/unisacc/evidence-vault-0.1.3/`。
+
+## 6. 回滚办法
+
+- 证据(仅限尚未公开且只撤己方提交):按提交逆序撤销 `e1771a6e9`(八步 evidence-rows 与 windows 路径前缀)及 `windows/` 搬移的 15 个 part 提交;恢复 `release/evidence/0.1.3/` 到上一固定提交。已公开后不删原件,只追加更正记录并保留撤回说明。
+- 候选:撤销 `427a53281`(candidate 表 X 行)即回到未登记状态;不触已生成资产。
+- 装根:工作目录为仓根,先 `cx tools/install-ape.cx -- . --rollback` 看 `ROLLBACK_DRYRUN`,再 `cx tools/install-ape.cx -- . --rollback --write` 恢复装前备份(按清单逐文件核验后复制,见 `tools/install-ape.cx` 用法);装前另存一份根身份文件(`root-identity` 单份留档);回滚后实跑 `cx --version` 与 `sha256sum unisacc.com` 读回版本与根 APE SHA,核等于装前值。版本树当前无 `check-root-current` 工具,不以不存在的入口作为回滚步骤。
+- 缓存钉住:逐枚撤销上述五枚 `.no-purge` 即可恢复清理行为(`release-v0.1.3-f485ec9a2b`、`evidence-staging-0.1.3`、`evidence-vault-0.1.3`、`prerun-backups`、本会话 tmp);该动作只影响缓存保留,不影响产品与证据。
+- 不涉及 `SOURCES_SID` 的回滚;任何证据撤销都不得改写已公开资产或已发送的发布说明。
