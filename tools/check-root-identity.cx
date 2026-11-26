@@ -1,6 +1,6 @@
 /* tools/check-root-identity.cx -- plans/root-identity.md agrees with the installed product.
  *
- *   sh ./unisacc.com tools/check-root-identity.cx -- ROOT [--emit]
+ *   cx tools/check-root-identity.cx -- ROOT [--emit]
  *
  * The document used to carry three sha256 lines typed by hand, which nothing could check. It now
  * carries a block the machine reads and writes:
@@ -165,11 +165,16 @@ int main(int argc, char **argv) {
         } else {
             size_t rn = 0;
             char *rb = cx_read(rec, &rn);
-            int has = rb && rn > 0 && (memchr(rb, 0, rn) == 0) &&
-                      (strstr(rb, "\"artifact_sha256\":") != 0);
+            size_t alen = strlen("\"artifact_sha256\":"), slen = strlen("\"sources_sha256\":");
+            int has = 0, has_src = 0;
+            if (rb && rn > 0 && (memchr(rb, 0, rn) == 0)) {
+                size_t bi;
+                for (bi = 0; bi + alen <= rn; bi++) if (memcmp(rb + bi, "\"artifact_sha256\":", alen) == 0) { has = 1; break; }
+                for (bi = 0; bi + slen <= rn; bi++) if (memcmp(rb + bi, "\"sources_sha256\":", slen) == 0) { has_src = 1; break; }
+            }
             ok(rb && rn > 0, "build-record-readable");
             ok(!has, "build-record-has-no-artifact-section");
-            ok(rb && strstr(rb, "\"sources_sha256\":") != 0, "build-record-keeps-sources");
+            ok(has_src, "build-record-keeps-sources");
             /* B5c follow-up: the record must carry the manifest identity fields that
                tools/source-package.cx root_epoch_execution_record rebuilds and compares
                byte for byte.  ident.c writes them; a record without them can never pass
@@ -246,7 +251,10 @@ int main(int argc, char **argv) {
                 ok(found && rb && row_rsha[0] && tx_eqz(rhex, row_rsha), "build-record-sha256-matches-candidate");
                 if (found && rb) {
                     char pat[160];
-                    if (!cx_fmt(pat, sizeof pat, "\"commit\": \"%s\"", row_commit)) commit_eq = strstr(rb, pat) != 0;
+                    if (!cx_fmt(pat, sizeof pat, "\"commit\": \"%s\"", row_commit)) {
+                        size_t pl = strlen(pat), bi;
+                        for (bi = 0; bi + pl <= rn; bi++) if (memcmp(rb + bi, pat, pl) == 0) { commit_eq = 1; break; }
+                    }
                 }
                 ok(commit_eq, "build-record-commit-matches-candidate");
                 if (!ri_helper[0] || !ri_sources[0]) {
@@ -261,7 +269,10 @@ int main(int argc, char **argv) {
                     for (k = 0; good && k < 64; k++) if (!((out[k] >= '0' && out[k] <= '9') || (out[k] >= 'a' && out[k] <= 'f'))) good = 0;
                     if (good) {
                         out[64] = 0;
-                        if (rb && !cx_fmt(pat, sizeof pat, "\"sources_sha256\": \"%s\"", out)) sid_eq = strstr(rb, pat) != 0;
+                        if (rb && !cx_fmt(pat, sizeof pat, "\"sources_sha256\": \"%s\"", out)) {
+                            size_t pl = strlen(pat), bi;
+                            for (bi = 0; bi + pl <= rn; bi++) if (memcmp(rb + bi, pat, pl) == 0) { sid_eq = 1; break; }
+                        }
                         ok(sid_eq, "build-record-sources-sha256-matches-recomputed");
                     } else {
                         not_run++;
