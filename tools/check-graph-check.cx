@@ -223,6 +223,22 @@ static void route_cases(const char *source, int mutation_only) {
         if (out) mm_free(out);
         sy_unlink(rp);
     }
+    /* fixture-helper isolation: only exact "\"fixture-helper\"" in the helper parameter slot is skipped;
+       substring/wrong-slot spoofing or broken real paths must still fail */
+    {   const char *hf = "static int rs_h(const char *helper, const char *t, const char *slug, const char *note) { fmt(tag, \"gen1-%s-units\", slug); return 0; }\n";
+        if (cx_fmt(src, sizeof src, "%s%sint main(void) {\n    if (argc == 5) return rs_h(\"fixture-helper\", \"win/x86_64\", \"win-x86_64\", \"-\");\n    if (rf(\"win/x86_64\", \"win-x86_64\", 0)) return 1;\n    if (rs_h(helper, \"win/x86_64\", \"win-x86_64\", \"-\")) return 1;\n    mark(outdir, \"gen1-osx-arm64-merge\", 0);\n}\n", ROUTE_FN, hf)
+            || put("route-fixture-skip.cx", src, rp, sizeof rp)) { printf("FAIL\troute-fixture-skip\twrite\n"); failed++; return; }
+        route_expect("route-fixture-skip", gp, rp, 0, 0, 0);
+        sy_unlink(rp);
+        if (cx_fmt(src, sizeof src, "%s%sint main(void) {\n    if (argc == 5) return rs_h(\"x-fixture-helper\", \"win/x86_64\", \"win-x86_64\", \"fixture-helper\");\n    if (rf(\"win/x86_64\", \"win-x86_64\", 0)) return 1;\n    if (rs_h(helper, \"win/x86_64\", \"win-x86_64\", \"-\")) return 1;\n    mark(outdir, \"gen1-osx-arm64-merge\", 0);\n}\n", ROUTE_FN, hf)
+            || put("route-fixture-spoof.cx", src, rp, sizeof rp)) { printf("FAIL\troute-fixture-spoof\twrite\n"); failed++; return; }
+        route_expect("route-fixture-spoof", gp, rp, 1, "ROUTE_MISMATCH\twin-x86_64\t(order)\tgraph=front,merge,units (", "chain=units,front,merge (");
+        sy_unlink(rp);
+        if (cx_fmt(src, sizeof src, "%s%sint main(void) {\n    if (argc == 5) return rs_h(\"fixture-helper\", \"win/x86_64\", \"win-x86_64\", \"-\");\n    if (rf(\"win/x86_64\", \"win-x86_64\", 0)) return 1;\n    mark(outdir, \"gen1-osx-arm64-merge\", 0);\n}\n", ROUTE_FN, hf)
+            || put("route-fixture-real-missing.cx", src, rp, sizeof rp)) { printf("FAIL\troute-fixture-real-missing\twrite\n"); failed++; return; }
+        route_expect("route-fixture-real-missing", gp, rp, 1, "ROUTE_MISMATCH\twin-x86_64\tunits\tgraph=gen1.win-x86_64.units (", "chain=absent (");
+        sy_unlink(rp);
+    }
     sy_unlink(gp); sy_unlink(gp2);
     /* the real graph against the real chain driver: what is recognised, then that nothing differs, then a
        copy that routes Win like Mac.  The copy's count is the real count plus 8, so a difference that is
@@ -239,7 +255,7 @@ static void route_cases(const char *source, int mutation_only) {
            Generation 1 excludes the dynamic later-generation span call. */
         const char *body =
             "stub-x64\twf_fronts\t-\t7\twf_fronts($1, $2, $3, $4, $5, $6, 1)\t-\tsafe\tany\t$5=g_mt_target[st->b]\n"
-            "omit-span\twf_win_span\t-\t6\t0\t-\tsafe\tany\t$4=1\n";
+            "omit-span\twf_win_span\t-\t6\t0\t-\tsafe\tany\t$5=g_mt_target[st->b]\n";
         if (!b || put("win-as-mac-rules.tsv", body, rules, sizeof rules)) {
             printf("FAIL\troute-real-win-as-mac\tread source or write rules failed\n"); failed++; free(b); return;
         }

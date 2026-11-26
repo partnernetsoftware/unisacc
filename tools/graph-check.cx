@@ -266,7 +266,7 @@ static void check_hardwire(void) {
     mm_free(b);
 }
 /* ---- route ---- */
-typedef struct { char fn[64], phase[32]; int gate, gen, line; } RFn; /* tag and optional generation parameter */
+typedef struct { char fn[64], phase[32]; int gate, gen, helper, line; } RFn; /* tag and optional gen/helper parameter */
 typedef struct { char target[32], phase[32], via[64]; int line; long pos; } REv;   /* the chain runs PHASE for TARGET */
 static RFn rfn[64]; static int nrfn;
 static REv rev[512]; static int nrev;
@@ -305,19 +305,23 @@ static void route_functions(const char *b, long n) {
         for (ns = paren; ns > fs && ident(b[ns - 1]); ns--) ;
         if (nrfn == 64) { fprintf(stderr, "graph-check: more than 64 route tags in %s\n", route_path); exit(2); }
         put_s(rfn[nrfn].fn, 64, b + ns, paren - ns); phase_norm(rfn[nrfn].phase, b + s, e - s);
-        rfn[nrfn].gate = -1; rfn[nrfn].gen = -1; rfn[nrfn].line = line_of(b, at);
-        if (dynamic) {
-            long p = paren + 1, ps = p; int idx = 0;
-            for (; p < at; p++) if (b[p] == ',' || b[p] == ')') {
-                long z = p, a;
-                while (z > ps && !ident(b[z - 1])) z--;
-                for (a = z; a > ps && ident(b[a - 1]); a--) ;
-                if (tx_same(b + a, z - a, "gen", 3)) rfn[nrfn].gen = idx;
-                if (b[p] == ')') break;
-                idx++; ps = p + 1;
+        rfn[nrfn].gate = -1; rfn[nrfn].gen = -1; rfn[nrfn].helper = -1; rfn[nrfn].line = line_of(b, at);
+        {   long p = paren + 1, ps = p; int idx = 0, depth = 0;
+            for (; p < at; p++) {
+                if (b[p] == '(') depth++;
+                else if (b[p] == ')' && depth > 0) depth--;
+                else if (b[p] == ',' || b[p] == ')') {
+                    long z = p, a;
+                    while (z > ps && !ident(b[z - 1])) z--;
+                    for (a = z; a > ps && ident(b[a - 1]); a--) ;
+                    if (dynamic && tx_same(b + a, z - a, "gen", 3)) rfn[nrfn].gen = idx;
+                    if (tx_same(b + a, z - a, "helper", 6)) rfn[nrfn].helper = idx;
+                    if (b[p] == ')') break;
+                    idx++; ps = p + 1;
+                }
             }
             /* Without a generation parameter this format cannot identify a gen1 route. */
-            if (rfn[nrfn].gen < 0) continue;
+            if (dynamic && rfn[nrfn].gen < 0) continue;
         }
         for (j = paren; j < at; ) {
             long g = tx_find(b + j, at - j, "if (!", 5), ge;
@@ -417,6 +421,7 @@ static void route_calls(const char *b, long n) {
             if (!ntl) continue;
             for (ti = 0; ti < ntl; ti++) for (k = f; k < nrfn; k++) {
                 if (!tx_eqz(rfn[k].fn, rfn[f].fn)) continue;
+                if (rfn[k].helper >= 0 && rfn[k].helper < na && tx_eqz(arg[rfn[k].helper], "\"fixture-helper\"")) continue;
                 if (rfn[k].gen >= 0 && (rfn[k].gen >= na || !tx_eqz(arg[rfn[k].gen], "1"))) continue;
                 if (rfn[k].gate >= 0 && rfn[k].gate < na && tx_eqz(arg[rfn[k].gate], "0")) continue;
                 if (rfn[k].gate >= 0 && rfn[k].gate < na && tx_eqz(arg[rfn[k].gate], "st->b < 2") && tb[ti] >= 2) continue;
