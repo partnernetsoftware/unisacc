@@ -1,0 +1,288 @@
+/* tools/release-keepalive.cx -- bounded keepalive for release/rehearsal critical cache dirs.
+ *
+ *   sh ./unisacc.com tools/release-keepalive.cx -- VERSION
+ *       [--rounds N] [--interval-s S] [--max-seconds T] [--cache-dir DIR] [--rev HEX]...
+ *
+ * Prevents hourly cleanup timers (e.g. system-cleanup.timer, ~120 min threshold) from removing
+ * active release or rehearsal chain directories under ~/.cache/unisacc (or --cache-dir):
+ *   - chains/bg-b1/<rev> (explicit --rev or hex-named direct children)
+ *   - chains/snap (and its direct children)
+ *   - prerun/v<VERSION>-*, prerun/rehearsal-v<VERSION>-*, prerun/rehearsal-<VERSION>-*
+ *   - release-v<VERSION>-*, rehearsal-v<VERSION>-*, rehearsal-release-v<VERSION>-*
+ *   - evidence-staging-<VERSION>[ -* ], evidence-vault-<VERSION>[ -* ]
+ *   - prerun-backups
+ *
+ * Bounded by --rounds (default 12, max 48) and --max-seconds (default 21600, max 43200).
+ * Never follows symlinks (dir or marker), never creates missing target dirs, never touches
+ * paths outside the explicit allowlist. Exits 0 on DONE/DEADLINE, 2 on usage/arg refusal.
+ */
+#pragma unisa use sys.fs
+#pragma unisa use sys.posix
+#pragma unisa use sys.env
+#pragma unisa use sys.time
+#pragma unisa use text.text
+#pragma unisa use text.fmt
+#pragma unisa use text.conv
+#pragma unisa use cxlib.releaseversion
+
+#define RK_MAX_REVS 8
+
+static int rk_is_hex_rev(const char *s) {
+    long n = tx_len(s, 64);
+    if (n < 7 || n > 40) return 0;
+    for (long i = 0; i < n; i++) {
+        char c = s[i];
+        if (!((c >= '0' && c <= '9') || (c >= 'a' && c <= 'f'))) return 0;
+    }
+    return 1;
+}
+
+static int rk_safe_child(const char *name) {
+    long n = tx_len(name, 256);
+    if (n <= 0 || name[0] == '.') return 0;
+    for (long i = 0; i < n; i++) {
+        if (name[i] == '/' || name[i] == '\\') return 0;
+    }
+    return 1;
+}
+
+static int rk_has_prefix(const char *s, const char *pre) {
+    long pl = tx_len(pre, 256), sl = tx_len(s, 512);
+    return sl >= pl && tx_same(s, pl, pre, pl);
+}
+
+static int rk_touch_dir(const char *dir, const char *ver, int round, long wall_s, long uid, int *touched, int *skipped) {
+    sy_stat_t st, mst;
+    if (sy_lstat(dir, &st) != 0) return 0;
+    if (st.kind != 'd' || !sy_stat_trusted_owner(&st, uid)) {
+        (*skipped)++;
+        return 0;
+    }
+    int dfd = sy_open_dir_nofollow(dir);
+    if (dfd < 0) { (*skipped)++; return 0; }
+    if (sy_fstat(dfd, &st) != 0 || st.kind != 'd' || !sy_stat_trusted_owner(&st, uid)) {
+        sy_close(dfd);
+        (*skipped)++;
+        return 0;
+    }
+    sy_close(dfd);
+
+    char marker[4600], body[256];
+    if (cx_fmt(marker, sizeof marker, "%s/.keepalive-v%s", dir, ver)) {
+        (*skipped)++;
+        return 0;
+    }
+    int mlrc = sy_lstat(marker, &mst);
+    if (mlrc == 0 && mst.kind != 'f') {
+        /* Refuse to overwrite symlinks or non-regular files. */
+        (*skipped)++;
+        return 0;
+    }
+    if (cx_fmt(body, sizeof body, "keepalive\tversion=%s\tround=%d\twall_s=%ld\n", ver, round, wall_s)) {
+        (*skipped)++;
+        return 0;
+    }
+    long blen = tx_len(body, sizeof body);
+    if (sy_write_atomic(marker, body, (size_t)blen, 0600) != 0) {
+        (*skipped)++;
+        return 0;
+    }
+    (*touched)++;
+    return 1;
+}
+
+static void rk_scan_prefix(const char *parent, const char *const *prefixes, int npref,
+                           const char *ver, int round, long wall_s, long uid, int *touched, int *skipped) {
+    sy_stat_t st;
+    if (sy_lstat(parent, &st) != 0 || st.kind != 'd' || !sy_stat_trusted_owner(&st, uid)) return;
+    sy_dir_t d;
+    if (sy_dir_open(&d, parent) != 0) return;
+    while (sy_dir_next(&d) == 1) {
+        if (!rk_safe_child(d.name)) continue;
+        int match = 0;
+        for (int i = 0; i < npref; i++) {
+            if (rk_has_prefix(d.name, prefixes[i])) { match = 1; break; }
+        }
+        if (!match) continue;
+        char child[4600];
+        if (cx_fmt(child, sizeof child, "%s/%s", parent, d.name)) continue;
+        rk_touch_dir(child, ver, round, wall_s, uid, touched, skipped);
+    }
+    sy_dir_close(&d);
+}
+
+static void rk_run_round(const char *cache, const char *ver, const char revs[][48], int nrevs,
+                         int round, long wall_s, long uid, int *touched, int *skipped) {
+    char p[4600], p1[96], p2[96], p3[96], p4[96], p5[96];
+
+    /* 1. Fixed single dirs */
+    if (!cx_fmt(p, sizeof p, "%s/prerun-backups", cache)) rk_touch_dir(p, ver, round, wall_s, uid, touched, skipped);
+    if (!cx_fmt(p, sizeof p, "%s/evidence-staging-%s", cache, ver)) rk_touch_dir(p, ver, round, wall_s, uid, touched, skipped);
+    if (!cx_fmt(p, sizeof p, "%s/evidence-vault-%s", cache, ver)) rk_touch_dir(p, ver, round, wall_s, uid, touched, skipped);
+
+    /* 2. chains/snap and its direct child snapshot dirs */
+    if (!cx_fmt(p, sizeof p, "%s/chains/snap", cache)) {
+        rk_touch_dir(p, ver, round, wall_s, uid, touched, skipped);
+        sy_stat_t st;
+        if (sy_lstat(p, &st) == 0 && st.kind == 'd' && sy_stat_trusted_owner(&st, uid)) {
+            sy_dir_t d;
+            if (sy_dir_open(&d, p) == 0) {
+                while (sy_dir_next(&d) == 1) {
+                    if (!rk_safe_child(d.name)) continue;
+                    char sub[4800];
+                    if (!cx_fmt(sub, sizeof sub, "%s/%s", p, d.name)) {
+                        rk_touch_dir(sub, ver, round, wall_s, uid, touched, skipped);
+                    }
+                }
+                sy_dir_close(&d);
+            }
+        }
+    }
+
+    /* 3. chains/bg-b1/<rev> */
+    if (!cx_fmt(p, sizeof p, "%s/chains/bg-b1", cache)) {
+        if (nrevs > 0) {
+            for (int i = 0; i < nrevs; i++) {
+                char sub[4800];
+                if (!cx_fmt(sub, sizeof sub, "%s/%s", p, revs[i])) {
+                    rk_touch_dir(sub, ver, round, wall_s, uid, touched, skipped);
+                }
+            }
+        } else {
+            sy_stat_t st;
+            if (sy_lstat(p, &st) == 0 && st.kind == 'd' && sy_stat_trusted_owner(&st, uid)) {
+                sy_dir_t d;
+                if (sy_dir_open(&d, p) == 0) {
+                    while (sy_dir_next(&d) == 1) {
+                        if (!rk_is_hex_rev(d.name)) continue;
+                        char sub[4800];
+                        if (!cx_fmt(sub, sizeof sub, "%s/%s", p, d.name)) {
+                            rk_touch_dir(sub, ver, round, wall_s, uid, touched, skipped);
+                        }
+                    }
+                    sy_dir_close(&d);
+                }
+            }
+        }
+    }
+
+    /* 4. prerun/v<VERSION>-* and rehearsal variants */
+    if (!cx_fmt(p, sizeof p, "%s/prerun", cache) &&
+        !cx_fmt(p1, sizeof p1, "v%s-", ver) &&
+        !cx_fmt(p2, sizeof p2, "rehearsal-v%s-", ver) &&
+        !cx_fmt(p3, sizeof p3, "rehearsal-%s-", ver)) {
+        const char *prefs[3] = {p1, p2, p3};
+        rk_scan_prefix(p, prefs, 3, ver, round, wall_s, uid, touched, skipped);
+    }
+
+    /* 5. Top-level release-v<VERSION>-*, rehearsal-v<VERSION>-*, rehearsal-release-v<VERSION>-*,
+     *    evidence-staging-<VERSION>-*, evidence-vault-<VERSION>-* */
+    if (!cx_fmt(p1, sizeof p1, "release-v%s-", ver) &&
+        !cx_fmt(p2, sizeof p2, "rehearsal-v%s-", ver) &&
+        !cx_fmt(p3, sizeof p3, "rehearsal-release-v%s-", ver) &&
+        !cx_fmt(p4, sizeof p4, "evidence-staging-%s-", ver) &&
+        !cx_fmt(p5, sizeof p5, "evidence-vault-%s-", ver)) {
+        const char *prefs[5] = {p1, p2, p3, p4, p5};
+        rk_scan_prefix(cache, prefs, 5, ver, round, wall_s, uid, touched, skipped);
+    }
+}
+
+static int rk_usage(const char *why) {
+    fprintf(stderr, "release-keepalive: REFUSE %s\n", why);
+    fprintf(stderr, "usage: release-keepalive.cx -- VERSION [--rounds N] [--interval-s S] [--max-seconds T] [--cache-dir DIR] [--rev HEX]\n");
+    return 2;
+}
+
+int main(int argc, char **argv) {
+    const char *ver = 0, *cache_arg = 0;
+    int64_t rounds = 12, interval_s = 1500, max_s = 21600;
+    char revs[RK_MAX_REVS][48];
+    int nrevs = 0;
+
+    for (int i = 1; i < argc; i++) {
+        if (tx_eqz(argv[i], "--")) continue;
+        else if (tx_eqz(argv[i], "--rounds") && i + 1 < argc) {
+            const char *s = argv[++i];
+            if (tx_to_i64(s, (long)tx_len(s, 32), 10, &rounds) != 0 || rounds < 1 || rounds > 48) {
+                return rk_usage("rounds must be 1..48");
+            }
+        } else if (tx_eqz(argv[i], "--interval-s") && i + 1 < argc) {
+            const char *s = argv[++i];
+            if (tx_to_i64(s, (long)tx_len(s, 32), 10, &interval_s) != 0 || interval_s < 0 || interval_s > 3600) {
+                return rk_usage("interval-s must be 0..3600");
+            }
+        } else if (tx_eqz(argv[i], "--max-seconds") && i + 1 < argc) {
+            const char *s = argv[++i];
+            if (tx_to_i64(s, (long)tx_len(s, 32), 10, &max_s) != 0 || max_s < 1 || max_s > 43200) {
+                return rk_usage("max-seconds must be 1..43200");
+            }
+        } else if (tx_eqz(argv[i], "--cache-dir") && i + 1 < argc) {
+            cache_arg = argv[++i];
+        } else if (tx_eqz(argv[i], "--rev") && i + 1 < argc) {
+            const char *rv = argv[++i];
+            if (!rk_is_hex_rev(rv) || nrevs >= RK_MAX_REVS) return rk_usage("invalid or too many --rev");
+            cx_fmt(revs[nrevs], sizeof revs[0], "%s", rv);
+            nrevs++;
+        } else if (argv[i][0] != '-' && !ver) {
+            ver = argv[i];
+        } else {
+            return rk_usage("unknown or malformed argument");
+        }
+    }
+
+    if (!ver || !rv_valid(ver)) return rk_usage("valid canonical VERSION required");
+
+    char cache_clean[4096], cache_abs[4096];
+    if (cache_arg && cache_arg[0]) {
+        if (cache_arg[0] != '/') return rk_usage("--cache-dir must be absolute");
+        if (cx_fmt(cache_clean, sizeof cache_clean, "%s", cache_arg)) return rk_usage("cache-dir path bound");
+    } else {
+        const char *home = sy_env("HOME");
+        if (!home || home[0] != '/') return rk_usage("HOME must be absolute");
+        if (cx_fmt(cache_clean, sizeof cache_clean, "%s/.cache/unisacc", home)) return rk_usage("cache-dir path bound");
+    }
+    long clen = tx_len(cache_clean, sizeof cache_clean - 1);
+    while (clen > 1 && cache_clean[clen - 1] == '/') clen--;
+    cache_clean[clen] = 0;
+
+    sy_stat_t cst;
+    long uid = sy_euid();
+    if (sy_lstat(cache_clean, &cst) != 0 || cst.kind != 'd' || !sy_stat_trusted_owner(&cst, uid)) {
+        return rk_usage("cache-dir missing, symlink, or untrusted owner");
+    }
+    if (sy_realpath(cache_clean, cache_abs, sizeof cache_abs) < 0) {
+        return rk_usage("cache-dir unresolvable");
+    }
+
+    long deadline_ms = sy_now_ms() + (long)max_s * 1000L;
+    int rounds_done = 0, total_touched = 0, total_skipped = 0, hit_deadline = 0;
+
+    for (int r = 1; r <= (int)rounds; r++) {
+        if (sy_now_ms() >= deadline_ms) { hit_deadline = 1; break; }
+        int touched = 0, skipped = 0;
+        long ws = sy_wall_s();
+        rk_run_round(cache_abs, ver, revs, nrevs, r, ws, uid, &touched, &skipped);
+        rounds_done = r;
+        total_touched += touched;
+        total_skipped += skipped;
+        printf("KEEPALIVE_ROUND\tround=%d/%ld\ttouched=%d\tskipped=%d\twall_s=%ld\n",
+               r, (long)rounds, touched, skipped, ws);
+        fflush(stdout);
+        if (r < (int)rounds && interval_s > 0) {
+            long wake_ms = sy_now_ms() + (long)interval_s * 1000L;
+            while (sy_now_ms() < wake_ms) {
+                if (sy_now_ms() >= deadline_ms) { hit_deadline = 1; break; }
+                long left = wake_ms - sy_now_ms();
+                long dl_left = deadline_ms - sy_now_ms();
+                if (dl_left < left) left = dl_left;
+                if (left <= 0) { hit_deadline = 1; break; }
+                sy_sleep_ms(left > 500 ? 500 : left);
+            }
+            if (hit_deadline) break;
+        }
+    }
+
+    printf("RELEASE_KEEPALIVE\tstatus=%s\tversion=%s\trounds_done=%d\ttotal_touched=%d\ttotal_skipped=%d\n",
+           hit_deadline ? "DEADLINE" : "DONE", ver, rounds_done, total_touched, total_skipped);
+    return 0;
+}
