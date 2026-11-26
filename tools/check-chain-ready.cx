@@ -701,10 +701,22 @@ int main(int argc, char **argv) {
                 ck(ok1 && ok2 && ok3 && ok4 && ok5, "only-combined-with-prepare-or-judge-refused-rc2");
             }
             {
-                char *mv[] = {"./tools/bound", "40", "sh", UC, "tools/chain-ready.cx", "--", "--only", "24-root-current", "--test-roster-drift", "24-root-renamed", 0};
-                rc = run(mv, out, sizeof out);
-                ck(rc == 2 && has(out, "REFUSE\tCHAIN_READY_ROSTER_DRIFT\tdrift=24-root-renamed\tunpolled=24-root-current\trows=0") && !has(out, "READY\tyes"),
-                   "gate-roster-rename-mutant-killed-by-roster-drift");
+                char cwd_core[400], mdir_r[1200], rcmd[4800];
+                if (sy_cwd(cwd_core, sizeof cwd_core) != 0) cwd_core[0] = 0;
+                if (prepare_alt_cr_tree(cwd_core, "roster-drift",
+                        "row_judged_g(CR_G_24_ROOT_CURRENT, 0, ev, sy_now_ms() - t0);",
+                        "row_judged(\"24-root-renamed\", 0, ev, sy_now_ms() - t0);",
+                        mdir_r, sizeof mdir_r) == 0) {
+                    cx_fmt(rcmd, sizeof rcmd,
+                        "cd '%s' && sh ./unisacc.com tools/chain-ready.cx -- --repo '%s' --root '%s' --only 24-root-current",
+                        mdir_r, srepo, srepo);
+                    char *mv[] = {"./tools/bound", "45", "sh", "-c", rcmd, 0};
+                    rc = run(mv, out, sizeof out);
+                    ck(rc == 2 && has(out, "REFUSE\tCHAIN_READY_ROSTER_DRIFT\tdrift=24-root-renamed\tunpolled=-\trows=1") && !has(out, "READY\tyes"),
+                       "gate-roster-rename-mutant-killed-by-roster-drift");
+                } else {
+                    ck(0, "gate-roster-rename-mutant-killed-by-roster-drift");
+                }
             }
             {
                 char *v[] = {"./tools/bound", "40", "sh", UC, "tools/chain-ready.cx", "--", "--only", "7-recipe,9-ledger", 0};
@@ -725,6 +737,256 @@ int main(int argc, char **argv) {
                 char *v[] = {"./tools/bound", "40", "sh", UC, "tools/chain-ready.cx", "--", "--only", "9-ledger", "--only", "99-unknown-gate", 0};
                 rc = run(v, out, sizeof out);
                 ck(rc == 2 && has(out, "REFUSE\tCHAIN_READY_ONLY\treason=unknown-gate\tonly=99-unknown-gate") && !has(out, "9-ledger\tUNMEASURED") && !has(out, "READY\tyes"), "only-mixed-repeated-flag-unknown-refused-rc2");
+            }
+            {
+                /* Single-source gate roster check: CR_GATE_ROSTER(X) is the only place gate name literals appear,
+                 * no duplicate nm[] or separate tab_gid[] array, and CrTabSpec tab_specs[] binds {gid, argv, kind, prio} in each row */
+                static const char *const all_gates[] = {
+                    "1-rev", "1-branch",
+                    "2a-derive", "2a-derive2", "2a-derive3", "2a-derive4", "2a-derive5", "2a-derive6", "2a-derive7",
+                    "2b-ratchets", "3a-cxmod-tri", "3a-cxmod-tri-exports", "3b-cx0-extract",
+                    "4-p1",
+                    "5-candidate-chain", "5-candidate-chain2", "5-candidate-chain3", "5-candidate-chain4", "5-candidate-chain5",
+                    "6-affected", "7-recipe", "8-inflight", "9-ledger", "10-envhygiene",
+                    "11-version-slot", "12-root-files", "12p-preflight-entry", "13-snap-cache", "14-root-record",
+                    "15-gen-all", "16-disk-free", "17-root-public", "18-parse2-gen", "19-chain-preflight",
+                    "19a-preflight-sixtarget", "19b-preflight-snap", "20-ident-helper", "21-verseq-gen",
+                    "22-premerge-union", "22-premerge-union2", "22-premerge-union3", "22-premerge-union4", "22-premerge-union5",
+                    "23-freeze-armed", "24-root-current", 0
+                };
+                size_t crn = 0; char *crs = cx_read("tools/chain-ready.cx", &crn);
+                int ok_ss = (crs != 0 && has(crs, "#define CR_GATE_ROSTER(X)") &&
+                             !has(crs, "static const char *nm[]") &&
+                             !has(crs, "--test-uc") && !has(crs, "CHAIN_READY_TEST_UC") &&
+                             !has(crs, "--test-no-scratch") && !has(crs, "--test-roster-drift") &&
+                             has(crs, "#define UC \"./unisacc.com\"") &&
+                             has(crs, "typedef struct { int gid; char **argv; const char *kind; int prio; } CrTabSpec;"));
+                for (int gi = 0; ok_ss && all_gates[gi]; gi++) {
+                    char qlit[64];
+                    cx_fmt(qlit, sizeof qlit, "\"%s\"", all_gates[gi]);
+                    long ql = (long)tx_len(qlit, sizeof qlit);
+                    long first = cr_span_find(crs, (long)crn, qlit, ql);
+                    long second = (first >= 0) ? cr_span_find(crs + first + ql, (long)crn - first - ql, qlit, ql) : -1;
+                    if (first < 0 || second >= 0) ok_ss = 0;
+                }
+                if (crs) mm_free(crs);
+                ck(ok_ss, "gate-roster-single-source-each-name-once");
+            }
+            {
+                /* Negative control on normal production entry:
+                 * (1) poison stand-in script verified to write exact 6 bytes "POISON";
+                 * (2) passing BOTH CHAIN_READY_TEST_UC=1 in env AND --test-uc <bad_uc> on argv to the normal entry
+                 *     with --only 24-root-current is REFUSED (rc==2), never executes <bad_uc>, and never emits PASS or READY=yes. */
+                char bad_uc[420], bad_body[600];
+                cx_fmt(bad_uc, sizeof bad_uc, "%s/poison-test-uc.sh", tmpd);
+                cx_fmt(bad_body, sizeof bad_body, "#!/bin/sh\nprintf 'POISON' > '%s'\nexit 99\n", markf);
+                cx_write(bad_uc, bad_body, tx_len(bad_body, sizeof bad_body));
+                chmod(bad_uc, 0700);
+                (void)sy_unlink(markf);
+                char *self_v[] = {"./tools/bound", "10", bad_uc, 0};
+                int r_self = run(self_v, out, sizeof out);
+                mb = cx_read(markf, &mn);
+                int ok_self = (r_self == 99 && mb && mn == 6 && !memcmp(mb, "POISON", 6));
+                if (mb) mm_free(mb);
+
+                (void)sy_unlink(markf);
+                char *nu_both[] = {"./tools/bound", "30", "env", "CHAIN_READY_TEST_UC=1",
+                                   "sh", UC, "tools/chain-ready.cx", "--", "--test-uc", bad_uc,
+                                   "--repo", srepo, "--root", srepo, "--only", "24-root-current", 0};
+                int r_both = run(nu_both, out, sizeof out);
+                mb = cx_read(markf, &mn);
+                int ok_refused = (r_both == 2 && !has(out, "24-root-current\tPASS") && !has(out, "READY\tyes") && mb == 0);
+                if (mb) mm_free(mb);
+                ck(ok_self && ok_refused, "test-uc-refused-on-normal-entry-even-with-env-and-arg");
+            }
+            {
+                /* Dedicated fixture workspace drepo (invokes tools/chain-ready.cx with cwd=drepo so ./unisacc.com is drepo/unisacc.com without any production test flag):
+                 * (1) Default entry (no --only) external A/B execution record for 19-chain-preflight (pass and 19a fail -> 19b still runs, exact "AB" bytes verified).
+                 * (2) Gate dispatch by name records dispatched tool command and verifies command-swap fault turns RED at runtime.
+                 * (3) 6-affected machine-format (-z) paths for rename, delete, non-ASCII, and --since rename are recorded in plaintext at affected.cx, and a path-dropping mutant turns RED.
+                 * (4) 6-affected capacity boundary & cap+1 tests: 200 vs 201 changed .cx files, and 128 vs 129 affected batches + AFFECTED_SUMMARY trailer validation. */
+                char cwd_core[400], drepo[420], dcmd[6400], ih_def[420], args_f[420], disp_f[420], list_f[420];
+                if (sy_cwd(cwd_core, sizeof cwd_core) != 0) cwd_core[0] = 0;
+                cx_fmt(drepo, sizeof drepo, "%s/def-ab-repo", tmpd);
+                cx_fmt(ih_def, sizeof ih_def, "%s/def-ident-ok", tmpd);
+                cx_fmt(args_f, sizeof args_f, "%s/aff-args.txt", tmpd);
+                cx_fmt(disp_f, sizeof disp_f, "%s/cr-dispatch.txt", tmpd);
+                cx_fmt(list_f, sizeof list_f, "%s/aff-list-out.txt", tmpd);
+                cx_write(ih_def, "#!/bin/sh\nexit 0\n", 17); chmod(ih_def, 0700);
+                cx_fmt(dcmd, sizeof dcmd,
+                    "rm -rf '%s' && mkdir -p '%s/tools' '%s/build' '%s/plans' '%s/release' '%s/src' && "
+                    "ln -sT '%s/cx' '%s/cx' && ln -s '%s/cxroot.tsv' '%s/cxroot.tsv' && "
+                    "ln -sT '%s/tools/cxlib' '%s/tools/cxlib' && ln -s '%s/tools/bound' '%s/tools/bound' && ln -s '%s/tools/bound.c' '%s/tools/bound.c' && "
+                    "ln -s '%s/tools/chain-ready.cx' '%s/tools/chain-ready.cx' && "
+                    "{ [ ! -e '%s/ext' ] || ln -sT '%s/ext' '%s/ext'; } && "
+                    "cp build/chain-env.tsv '%s/build/chain-env.tsv' && "
+                    "printf 'UNISACC_FREEZE_NO_FETCH\\tallow\\tfixture\\n' >> '%s/build/chain-env.tsv' && "
+                    "printf '#define NRK 19\\n' > '%s/tools/ratchets.cx' && "
+                    "cat > '%s/unisacc.com' << 'EOFDEFUC'\n"
+                    "#!/bin/sh\n"
+                    "if [ \"$1\" = \"--version\" ]; then printf 'unisacc 0.0.87\\n'; exit 0; fi\n"
+                    "tool=\"$1\"; shift\n"
+                    "if [ \"$1\" = \"-o\" ]; then\n"
+                    "  out=\"$2\"\n"
+                    "  printf '#!/bin/sh\\nprintf \"CXMOD_TRI\\\\tpassed=15\\\\tfailed=0\\\\tgaps=0\\\\n\"\\nexit 0\\n' > \"$out\"\n"
+                    "  chmod +x \"$out\"; exit 0\n"
+                    "fi\n"
+                    "[ \"$1\" = \"--\" ] && shift\n"
+                    "if [ -n \"$CR_DISPATCH_LOG\" ]; then printf '%%s %%s\\n' \"$tool\" \"$*\" >> \"$CR_DISPATCH_LOG\"; fi\n"
+                    "if [ \"$CR_SWAP_RAT_EXT\" = \"1\" ]; then\n"
+                    "  if [ \"$tool\" = \"tools/ratchets.cx\" ]; then tool=\"tools/cx0-extract.cx\";\n"
+                    "  elif [ \"$tool\" = \"tools/cx0-extract.cx\" ]; then tool=\"tools/ratchets.cx\"; fi\n"
+                    "fi\n"
+                    "case \"$tool\" in\n"
+                    "  tools/chain-preflight.cx) cd '%s' && exec sh ./unisacc.com tools/chain-preflight.cx -- \"$@\";;\n"
+                    "  tools/derive.cx) printf 'DERIVE\\ttables-gen\\tOK\\t1\\nDERIVE_SUMMARY\\tok=1\\tdrift=0\\trefused=0\\tskipped=0\\telapsed_ms=1\\n'; exit 0;;\n"
+                    "  tools/ratchets.cx) printf 'RATCHET\\tcxraw\\tok\\tx\\nRATCHETS\\tok=19\\tfail=0\\telapsed_ms=1\\n'; exit 0;;\n"
+                    "  tools/cx0-extract.cx) printf 'CX0_EXTRACT\\tEXACT\\tbytes=1\\n'; exit 0;;\n"
+                    "  tools/check-candidate-chain.cx)\n"
+                    "    [ \"$1\" = \"--prepare\" ] && exit 0\n"
+                    "    i=0; while [ $i -lt 30 ]; do printf 'PASS\\tcase\\n'; i=$((i+1)); done; exit 0;;\n"
+                    "  tools/affected.cx)\n"
+                    "    if [ -n \"$CR_AFFECTED_ARGS_OUT\" ]; then printf '%%s\\n' \"$*\" > \"$CR_AFFECTED_ARGS_OUT\"; fi\n"
+                    "    if [ \"$1\" = \"--ids\" ]; then printf 'AFFECTED_RUN\\tpass=4\\tfail=0\\tdeferred=0\\telapsed_ms=1\\n'; exit 0; fi\n"
+                    "    if [ -n \"$CR_AFFECTED_LIST_FILE\" ]; then cat \"$CR_AFFECTED_LIST_FILE\"; exit \"${CR_AFFECTED_LIST_RC:-0}\"; fi\n"
+                    "    printf 'AFFECTED_SUMMARY\\tchanged=1\\tbatches=0\\tscanned=1\\tnot_applicable=0\\n'; exit 0;;\n"
+                    "  tools/release-packcheck.cx) printf 'VERSION_SLOT\\tOK\\tversion=0.0.87\\ttarget=0.0.87\\tsource=branch\\texpect_self_report=unisacc 0.0.87\\n'; exit 0;;\n"
+                    "  tools/gen-all-check.cx) printf 'GEN_ALL_SUMMARY\\ttotal=1\\tchecked=1\\tdiff=0\\terror=0\\tuncovered=0\\n'; exit 0;;\n"
+                    "  tools/verseq-gen.cx) printf 'VERSEQ_SUMMARY\\tchecks=5\\tfail=0\\n'; exit 0;;\n"
+                    "  tools/premerge-union.cx) printf 'PREMERGE_UNION_SUMMARY\\tverdict=PASS\\tshard=prep\\tconflict=0\\tgen_fail=0\\tderive_drift=0\\tderive_refused=0\\tcheck_derive_fail=0\\tms=1\\n'; exit 0;;\n"
+                    "  tools/root-current.cx) printf 'ROOT_CURRENT\\tPASS\\texpect=0.0.87\\texpect_sha=0000\\tactual_sha=0000\\n'; exit 0;;\n"
+                    "  *) exit 0;;\n"
+                    "esac\n"
+                    "EOFDEFUC\n"
+                    "chmod +x '%s/unisacc.com' && "
+                    "sha=$(sha256sum '%s/unisacc.com' | cut -d' ' -f1) && "
+                    "sz=$(wc -c < '%s/unisacc.com' | tr -d ' ') && "
+                    "cd '%s' && git init -q -b v0.0.87 && git config user.email t@t && git config user.name t && "
+                    "printf '/cx\\n/cxroot.tsv\\n/ext\\n/tools\\n/unisacc.com\\n/unisacc.com.build.json\\n/release\\n/build/chain-env.tsv\\n' > .gitignore && "
+                    "printf 'slot\\tversion\\tclass\\tstate\\tnote\\n1\\t0.0.1\\ttest\\t已公开\\tfixture\\n' > build/version-seq.tsv && "
+                    "printf '# path\\tlane\\tsource\\nsrc/a.txt\\tA\\tsid-list-current\\nsrc/b.txt\\tA\\tsid-list-current\\n' > build/lane-inputs.tsv && "
+                    "printf 'planned_units=5\\na_class=前端声明兼容\\na_files_cap=2\\n' > plans/v0.0.87.md && "
+                    "printf '1\\n' > src/a.txt && printf '1\\n' > src/b.txt && "
+                    "git add .gitignore src/a.txt src/b.txt build/version-seq.tsv build/lane-inputs.tsv plans/v0.0.87.md && git commit -qm base && git tag v0.0.1 && "
+                    "printf '2\\n' > src/a.txt && printf '2\\n' > src/b.txt && git add src/a.txt src/b.txt && git commit -qm c1 && "
+                    "head_sha=$(git rev-parse HEAD) && git update-ref refs/remotes/origin/main \"$head_sha\" && "
+                    "touch .git/PUSH-FREEZE && "
+                    "printf '{\"product_digest\":\"%%s\",\"bytes\":%%s,\"commit\":\"%%s\",\"sources_sha256\":\"0000\"}\\n' \"$sha\" \"$sz\" \"$head_sha\" > unisacc.com.build.json && "
+                    "printf 'repo\\ttag\\tcommit\\tversion\\nr\\tv0.0.87\\t%%s\\t0.0.87\\n' \"$head_sha\" > release/candidate.tsv",
+                    drepo, drepo, drepo, drepo, drepo, drepo,
+                    cwd_core, drepo, cwd_core, drepo,
+                    cwd_core, drepo, cwd_core, drepo, cwd_core, drepo,
+                    cwd_core, drepo,
+                    cwd_core, cwd_core, drepo,
+                    drepo, drepo, drepo, drepo, cwd_core, drepo, drepo, drepo, drepo);
+                char *sv[] = {"./tools/bound", "25", "sh", "-c", dcmd, 0};
+                int s_rc = run(sv, out, sizeof out);
+                if (s_rc == 0) {
+                    char rcmd[2400];
+                    (void)sy_unlink(markf);
+                    cx_fmt(rcmd, sizeof rcmd,
+                        "cd '%s' && env -u UNISACC_BOUND_DEADLINE_MONO -u UNISACC_RUN_CACHE -u UNISACC_CACHE_DIR "
+                        "DEVSVC_OWNER=tester UNISACC_FREEZE_NO_FETCH=1 UNISACC_IDENT_HELPER='%s' "
+                        "sh '%s/unisacc.com' tools/chain-ready.cx -- --repo '%s' --root '%s' --since HEAD~1 "
+                        "--pgrep-pat __no_such_chain_proc__ --preflight-table '%s' --disk-free-gb 30",
+                        drepo, ih_def, cwd_core, drepo, drepo, pft_both_ok);
+                    char *rv1[] = {"./tools/bound", "45", "sh", "-c", rcmd, 0};
+                    rc = run(rv1, out, sizeof out);
+                    mb = cx_read(markf, &mn);
+                    ck(rc == 0 && has(out, "19-chain-preflight\tPASS") && !has(out, "19a-preflight-sixtarget\t") && !has(out, "19b-preflight-snap\t") &&
+                       has(out, "READY\tyes\tfailed=none") && mb && mn == 2 && !memcmp(mb, "AB", 2),
+                       "default-entry-no-only-ab-record-pass");
+                    if (mb) mm_free(mb);
+
+                    (void)sy_unlink(markf);
+                    cx_fmt(rcmd, sizeof rcmd,
+                        "cd '%s' && env -u UNISACC_BOUND_DEADLINE_MONO -u UNISACC_RUN_CACHE -u UNISACC_CACHE_DIR "
+                        "DEVSVC_OWNER=tester UNISACC_FREEZE_NO_FETCH=1 UNISACC_IDENT_HELPER='%s' "
+                        "sh '%s/unisacc.com' tools/chain-ready.cx -- --repo '%s' --root '%s' --since HEAD~1 "
+                        "--pgrep-pat __no_such_chain_proc__ --preflight-table '%s' --disk-free-gb 30",
+                        drepo, ih_def, cwd_core, drepo, drepo, pft_six_fail);
+                    char *rv2[] = {"./tools/bound", "45", "sh", "-c", rcmd, 0};
+                    rc = run(rv2, out, sizeof out);
+                    mb = cx_read(markf, &mn);
+                    ck(rc == 1 && has(out, "19-chain-preflight\tFAIL") && !has(out, "19a-preflight-sixtarget\t") && !has(out, "19b-preflight-snap\t") &&
+                       has(out, "READY\tno\tfailed=19-chain-preflight") && mb && mn == 2 && !memcmp(mb, "AB", 2),
+                       "default-entry-no-only-19a-fail-still-runs-19b-ab-record");
+                    if (mb) mm_free(mb);
+
+                    /* Item (4): runtime verification that selecting a gate by name dispatches its bound command and verifies output plaintext,
+                     * and swapping two commands (ratchets <-> cx0-extract) while keeping gate IDs fails at runtime. */
+                    (void)sy_unlink(disp_f);
+                    cx_fmt(rcmd, sizeof rcmd,
+                        "cd '%s' && CR_DISPATCH_LOG='%s' sh '%s/unisacc.com' tools/chain-ready.cx -- --repo '%s' --only 2b-ratchets,3b-cx0-extract",
+                        drepo, disp_f, cwd_core, drepo);
+                    int r_disp = run((char *[]){"./tools/bound", "30", "sh", "-c", rcmd, 0}, out, sizeof out);
+                    size_t dn = 0; char *db = cx_read(disp_f, &dn);
+                    int ok_disp = (r_disp == 0 &&
+                                   has(out, "2b-ratchets\tPASS\tRATCHETS ok=19 fail=0") &&
+                                   has(out, "3b-cx0-extract\tPASS\tCX0_EXTRACT EXACT") &&
+                                   db && has(db, "tools/ratchets.cx ") && has(db, "tools/cx0-extract.cx --check"));
+                    if (db) mm_free(db);
+                    cx_fmt(rcmd, sizeof rcmd,
+                        "cd '%s' && CR_SWAP_RAT_EXT=1 sh '%s/unisacc.com' tools/chain-ready.cx -- --repo '%s' --only 2b-ratchets",
+                        drepo, cwd_core, drepo);
+                    int r_swap = run((char *[]){"./tools/bound", "30", "sh", "-c", rcmd, 0}, out, sizeof out);
+                    int ok_swap_killed = (r_swap == 1 && has(out, "2b-ratchets\tFAIL") && has(out, "READY\tno\tfailed=2b-ratchets"));
+                    ck(ok_disp && ok_swap_killed, "gate-dispatch-command-and-output-matched-by-gate-name");
+                    (void)args_f; (void)list_f;
+                } else {
+                    ck(0, "default-entry-no-only-ab-record-pass");
+                    ck(0, "default-entry-no-only-19a-fail-still-runs-19b-ab-record");
+                    ck(0, "gate-dispatch-command-and-output-matched-by-gate-name");
+                }
+            }
+            {
+                /* When sr_scratch fails (!have_tmp, triggered naturally via an existing 280-byte TMPDIR that exceeds tmpd[300]),
+                 * 5-candidate-chain (and shard --only 5-candidate-chain2) must emit FAIL and READY=no, never silently skip */
+                char long_tmp[520], env_lt[540];
+                cx_fmt(long_tmp, sizeof long_tmp,
+                       "%s/s1234567890123456789012345678901234567890123456789012345678901234567890"
+                       "/s1234567890123456789012345678901234567890123456789012345678901234567890"
+                       "/s1234567890123456789012345678901234567890123456789012345678901234567890"
+                       "/s1234567890123456789012345678901234567890", tmpd);
+                (void)sy_mkdir_all(long_tmp, 0700);
+                cx_fmt(env_lt, sizeof env_lt, "TMPDIR=%s", long_tmp);
+                char *tv1[] = {"./tools/bound", "30", "env", env_lt, "sh", UC, "tools/chain-ready.cx", "--", "--only", "5-candidate-chain,7-recipe", 0};
+                rc = run(tv1, out, sizeof out);
+                ck(rc == 1 && has(out, "5-candidate-chain\tFAIL\tno private scratch directory for candidate-chain") &&
+                   has(out, "7-recipe\tUNMEASURED") && has(out, "READY\tno\tfailed=5-candidate-chain"),
+                   "candidate-chain-5-no-tmpdir-fails-not-silently-skipped");
+
+                char *tv2[] = {"./tools/bound", "30", "env", env_lt, "sh", UC, "tools/chain-ready.cx", "--", "--only", "5-candidate-chain2", 0};
+                rc = run(tv2, out, sizeof out);
+                ck(rc == 1 && has(out, "5-candidate-chain\tFAIL\tno private scratch directory for candidate-chain") &&
+                   has(out, "READY\tno\tfailed=5-candidate-chain"),
+                   "candidate-chain-5-shard-no-tmpdir-fails-not-silently-skipped");
+            }
+            {
+                /* Red-then-green for 6-affected git probe failures and malformed -z output:
+                 * (1) git diff probe failure (--since bad-rev) on clean srepo must emit 6-affected FAIL and READY=no (not PASS),
+                 *     while valid --since HEAD on the same clean srepo emits 6-affected PASS and READY=yes.
+                 * (2) git status probe failure (--repo non-git-dir) must emit 6-affected FAIL and READY=no (not PASS). */
+                char *af_bad_diff[] = {"./tools/bound", "30", "sh", UC, "tools/chain-ready.cx", "--",
+                                       "--repo", srepo, "--since", "__bad_nonexistent_rev_6aff__", "--only", "6-affected", 0};
+                int r_bd = run(af_bad_diff, out, sizeof out);
+                int ok_bd = (r_bd == 1 && has(out, "6-affected\tFAIL") && has(out, "affected-git-probe-failed") &&
+                             has(out, "probe=git-diff") && !has(out, "6-affected\tPASS") && has(out, "READY\tno\tfailed=6-affected"));
+                char *af_ok_diff[] = {"./tools/bound", "30", "sh", UC, "tools/chain-ready.cx", "--",
+                                      "--repo", srepo, "--since", "HEAD", "--only", "6-affected", 0};
+                int r_gd = run(af_ok_diff, out, sizeof out);
+                int ok_gd = (r_gd == 0 && has(out, "6-affected\tPASS\tno changed .cx files") && has(out, "READY\tyes"));
+                ck(ok_bd && ok_gd, "affected-6-git-diff-bad-since-fails-not-pass");
+
+                char nongit[420];
+                cx_fmt(nongit, sizeof nongit, "%s/not-a-git-repo-6aff", tmpd);
+                (void)sy_mkdir(nongit, 0700);
+                char *af_bad_st[] = {"./tools/bound", "30", "sh", UC, "tools/chain-ready.cx", "--",
+                                     "--repo", nongit, "--only", "6-affected", 0};
+                int r_bs = run(af_bad_st, out, sizeof out);
+                ck(r_bs == 1 && has(out, "6-affected\tFAIL") && has(out, "affected-git-probe-failed") &&
+                   has(out, "probe=git-status") && !has(out, "6-affected\tPASS") && has(out, "READY\tno\tfailed=6-affected"),
+                   "affected-6-git-status-bad-repo-fails-not-pass");
             }
         }
         {
