@@ -212,19 +212,37 @@ static int m53_copy_file(const char *src, const char *dst, int mode) {
     return rc;
 }
 
+static int m53_is_elf_file(const char *path) {
+    unsigned char h[4];
+    int fd = sy_open_read(path);
+    long r;
+    if (fd < 0) return 0;
+    r = sy_read(fd, h, 4);
+    sy_close(fd);
+    return r == 4 && h[0] == 0x7f && h[1] == 'E' && h[2] == 'L' && h[3] == 'F';
+}
+
 static int m53_run_stream_with_env(const char *cand_ape, const char *stdin_path,
                                    char *err_out, long ecap) {
     px_opts o = {0};
     px_result r = {0};
     char e_ape[600];
-    char *av[4] = {(char *)cand_ape, "stream", "e2", 0};
+    char *av_sh[5] = {"sh", (char *)cand_ape, "stream", "e2", 0};
+    char *av_elf[4] = {(char *)cand_ape, "stream", "e2", 0};
     char *env[4] = {"UNISACC_M53_S1=1", 0, "UNISACC_M53_S1_SO=", 0};
+    const char *prev_so = sy_env("UNISACC_M53_S1_SO");
+    char *saved_so = 0;
     int rc;
     if (cx_fmt(e_ape, sizeof e_ape, "UNISACC_APE_SELF=%s", cand_ape)) return -1;
     env[1] = e_ape;
-    /* Ensure UNISACC_M53_S1_SO stays unset (empty override would still check "", pass unset env by omitting). */
-    env[2] = 0;
-    o.argv = av;
+    if (prev_so) {
+        long sl = tx_len(prev_so, 1024);
+        saved_so = (char *)mm_alloc((size_t)sl + 1);
+        if (saved_so) mm_copy(saved_so, (size_t)sl + 1, prev_so, (size_t)sl + 1);
+        sy_unsetenv("UNISACC_M53_S1_SO");
+    }
+    /* Ensure UNISACC_M53_S1_SO stays empty/unset so sidecar tapemode.so discovery runs. */
+    o.argv = m53_is_elf_file(cand_ape) ? av_elf : av_sh;
     o.stdin_path = stdin_path;
     o.deadline_ms = 30000;
     o.out_cap = 8192;
@@ -232,7 +250,12 @@ static int m53_run_stream_with_env(const char *cand_ape, const char *stdin_path,
     o.kill_tree = 1;
     o.env_add = env;
     if (err_out && ecap > 0) err_out[0] = 0;
-    if (px_run(&o, &r) != 0) { px_result_free(&r); return -1; }
+    if (px_run(&o, &r) != 0) {
+        px_result_free(&r);
+        if (saved_so) { sy_setenv("UNISACC_M53_S1_SO", saved_so, 1); mm_free(saved_so); }
+        return -1;
+    }
+    if (saved_so) { sy_setenv("UNISACC_M53_S1_SO", saved_so, 1); mm_free(saved_so); }
     if (err_out && ecap > 0 && r.err && r.errn > 0) {
         long n = r.errn < (ecap - 1) ? r.errn : (ecap - 1);
         mm_copy(err_out, (size_t)ecap, r.err, n);
