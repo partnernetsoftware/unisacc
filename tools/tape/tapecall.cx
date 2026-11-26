@@ -1,0 +1,198 @@
+#pragma unisa module tapecall
+/* tools/tape/tapecall.cx -- Increment-0 function-level call entry for UTAPEBIN v1.3 slices.
+ *
+ * Contract:
+ *   (1) Container validation (fail-closed): ts_validate_container + ts_validate_m1_host_support
+ *       (frozen mask 383) + ts_check_linear_bounds before any VM entry.
+ *   (2) Symbol lookup: resolves exported symbol in 16B SYMS table against DATA NUL strings.
+ *   (3) Guest memory isolation: copies native input bytes (data, len) into guest linear arena
+ *       [data_aligned + bss_size, memlimit) so guest NEVER observes native heap/stack pointers.
+ *       If data == NULL, guest receives r0 = 0 (preserving C NULL semantics).
+ *   (4) Integer return (Increment 0): invokes tape_run_x86_64 with mode=5 (TAPE_MODE_CALL),
+ *       passes (guest_ptr, len) in r0..r1, returns full 64-bit integer from result[1].
+ *       Pointer-into-input returns (e.g. cxr_member) are deferred to Increment 2.
+ *   (5) Fail-open fallback: any validation/lookup/VM failure returns non-zero with a named
+ *       reason in `why`, instructing the caller to fall back cleanly to native execution.
+ */
+#pragma unisa use sys.ffi
+#pragma unisa use text.text
+#pragma unisa use mem.bytes
+#pragma unisa use mem.heap
+#pragma unisa use tapeslice_contract
+
+#define TC_HEADER_TOTAL 208
+#define TC_ARENA_CAP    0x40000000ULL
+#define TC_STACK_EXTRA 65536ULL
+
+typedef struct {
+    const unsigned char *img;
+    long img_len;
+    void *dl_handle;
+    void *bind_fn;
+    void *disp_fn;
+    void *run_fn;
+    unsigned long long code_len;
+    unsigned long long data_off;
+    unsigned long long data_len;
+    unsigned long long bss_size;
+    unsigned long long syms_off;
+    unsigned long long syms_cnt;
+} TcSlice;
+
+static int tc_fail(char *why, long wcap, const char *msg) {
+    if (why && wcap > 0) {
+        long n = tx_len(msg, wcap - 1);
+        if (n > 0) mm_copy(why, wcap, msg, n);
+        why[n > 0 ? n : 0] = 0;
+    }
+    return 1;
+}
+
+int tc_open(const unsigned char *img, long img_len, const char *so_path,
+            TcSlice *out, char *why, long wcap) {
+    unsigned long long data_aligned = 0;
+    if (!img || img_len < TC_HEADER_TOTAL || !so_path || !so_path[0] || !out) {
+        return tc_fail(why, wcap, "bad-arg");
+    }
+    if (ts_validate_container(img, img_len, why, wcap) != 0) return 1;
+    if (ts_validate_m1_host_support(img, img_len, why, wcap) != 0) return 1;
+
+    out->img = img;
+    out->img_len = img_len;
+    out->code_len = ts_rd_u(img + 64 + 12, 8);
+    out->data_off = ts_rd_u(img + 64 + 24 + 4, 8);
+    out->data_len = ts_rd_u(img + 64 + 24 + 12, 8);
+    {
+        unsigned long long bssz_off = ts_rd_u(img + 64 + 48 + 4, 8);
+        out->bss_size = ts_rd_u(img + bssz_off, 8);
+    }
+    out->syms_off = ts_rd_u(img + 64 + 72 + 4, 8);
+    out->syms_cnt = ts_rd_u(img + 64 + 72 + 20, 4);
+
+    if (out->bss_size > TC_ARENA_CAP - TC_STACK_EXTRA) return tc_fail(why, wcap, "bss-overflow");
+    if (ts_check_linear_bounds(out->data_len, out->bss_size + TC_STACK_EXTRA, TC_ARENA_CAP, &data_aligned, why, wcap) != 0) {
+        return 1;
+    }
+
+    out->dl_handle = sy_ffi_dlopen(so_path, sy_ffi_now_global());
+    if (!out->dl_handle) return tc_fail(why, wcap, "dlopen-failed");
+    out->bind_fn = sy_ffi_dlsym(out->dl_handle, "hoststub_lnx_x86_64_bind");
+    out->disp_fn = sy_ffi_dlsym(out->dl_handle, "hoststub_lnx_x86_64");
+    out->run_fn  = sy_ffi_dlsym(out->dl_handle, "tape_run_x86_64");
+    if (!out->bind_fn || !out->disp_fn || !out->run_fn) return tc_fail(why, wcap, "dlsym-missing");
+    if (why && wcap > 0) why[0] = 0;
+    return 0;
+}
+
+int tc_lookup_sym(const TcSlice *s, const char *sym, unsigned long long *out_code_off, char *why, long wcap) {
+    unsigned long long r;
+    long slen;
+    if (!s || !s->img || !sym || !sym[0] || !out_code_off) return tc_fail(why, wcap, "bad-arg");
+    slen = tx_len(sym, 256);
+    for (r = 0; r < s->syms_cnt; r++) {
+        const unsigned char *row = s->img + s->syms_off + r * 16ull;
+        unsigned long long noff = ts_rd_u(row, 4);
+        unsigned long long coff = ts_rd_u(row + 8, 8);
+        if (noff < s->data_len) {
+            const char *nm = (const char *)(s->img + s->data_off + noff);
+            long avail = (long)(s->data_len - noff);
+            if (slen < avail && nm[slen] == 0 && memcmp(nm, sym, (size_t)slen) == 0) {
+                if (coff >= s->code_len) return tc_fail(why, wcap, "sym-code-oob");
+                *out_code_off = coff;
+                if (why && wcap > 0) why[0] = 0;
+                return 0;
+            }
+        }
+    }
+    return tc_fail(why, wcap, "sym-not-found");
+}
+
+int tc_call_bytes_i64(const TcSlice *s, unsigned long long code_off,
+                      const unsigned char *data, long len,
+                      unsigned long long budget,
+                      long long *out_ret, unsigned long long *out_steps,
+                      char *why, long wcap) {
+    unsigned long long data_aligned = 0, copy_bytes = 0, in_off = 0, memlimit = 0, ibm_cap = 0;
+    unsigned char *mem = 0, *ibm = 0;
+    unsigned long long call_args[6];
+    unsigned long long args[12], result[5];
+    long ret = -1;
+    int i;
+
+    if (!s || !s->img || !s->run_fn || !out_ret) return tc_fail(why, wcap, "bad-arg");
+    if (len < 0) {
+        copy_bytes = 0;
+    } else if (data) {
+        copy_bytes = (unsigned long long)len;
+    }
+    if (copy_bytes > TC_ARENA_CAP - TC_STACK_EXTRA) return tc_fail(why, wcap, "input-too-large");
+    {
+        unsigned long long extra_need = ((copy_bytes + 7ull) & ~7ull) + TC_STACK_EXTRA;
+        if (extra_need > TC_ARENA_CAP - s->bss_size) return tc_fail(why, wcap, "arena-overflow");
+        if (ts_check_linear_bounds(s->data_len, s->bss_size + extra_need, TC_ARENA_CAP, &data_aligned, why, wcap) != 0) {
+            return 1;
+        }
+        in_off = (data_aligned + s->bss_size + 7ull) & ~7ull;
+        memlimit = in_off + extra_need;
+    }
+
+    mem = (unsigned char *)mm_alloc((size_t)memlimit);
+    if (!mem) return tc_fail(why, wcap, "oom-arena");
+    for (unsigned long long k = 0; k < memlimit; k++) mem[k] = 0;
+    if (s->data_len > 0) mm_copy(mem, (long)memlimit, s->img + s->data_off, (long)s->data_len);
+    if (data && copy_bytes > 0) mm_copy(mem + in_off, (long)(memlimit - in_off), data, (long)copy_bytes);
+
+    ibm_cap = (s->code_len + 7ull) >> 3;
+    if (ibm_cap == 0) ibm_cap = 1;
+    ibm = (unsigned char *)mm_alloc((size_t)ibm_cap);
+    if (!ibm) { mm_free(mem); return tc_fail(why, wcap, "oom-ibitmap"); }
+    for (unsigned long long k = 0; k < ibm_cap; k++) ibm[k] = 0;
+
+    {
+        unsigned long a0 = (unsigned long)mem, a1 = (unsigned long)memlimit;
+        int bk[2] = {SY_FFI_ULONG, SY_FFI_ULONG};
+        void *bv[2] = {&a0, &a1};
+        if (sy_ffi_call(s->bind_fn, SY_FFI_VOID, bk, bv, 2, 2, 0) != 0) {
+            mm_free(ibm); mm_free(mem);
+            return tc_fail(why, wcap, "bind-failed");
+        }
+    }
+
+    for (i = 0; i < 6; i++) call_args[i] = 0;
+    call_args[0] = data ? (unsigned long long)(unsigned long)(mem + in_off) : 0ull;
+    call_args[1] = (unsigned long long)len;
+
+    for (i = 0; i < 5; i++) result[i] = 0;
+    args[0]  = 5ull; /* TAPE_MODE_CALL */
+    args[1]  = (unsigned long long)(unsigned long)s->img;
+    args[2]  = memlimit;
+    args[3]  = budget;
+    args[4]  = code_off;
+    args[5]  = (unsigned long long)(unsigned long)call_args;
+    args[6]  = (unsigned long long)(unsigned long)result;
+    args[7]  = (unsigned long long)s->img_len;
+    args[8]  = (unsigned long long)(unsigned long)s->disp_fn;
+    args[9]  = (unsigned long long)(unsigned long)mem;
+    args[10] = (unsigned long long)(unsigned long)ibm;
+    args[11] = ibm_cap;
+
+    {
+        unsigned long ap = (unsigned long)args;
+        int rk[1] = {SY_FFI_ULONG};
+        void *rv[1] = {&ap};
+        if (sy_ffi_call(s->run_fn, SY_FFI_LONG, rk, rv, 1, 1, &ret) != 0) {
+            mm_free(ibm); mm_free(mem);
+            return tc_fail(why, wcap, "ffi-call-failed");
+        }
+    }
+
+    mm_free(ibm);
+    mm_free(mem);
+
+    if (out_steps) *out_steps = result[2];
+    if (result[0] == 3ull) return tc_fail(why, wcap, "vm-budget");
+    if (result[0] != 0ull) return tc_fail(why, wcap, "vm-fault");
+    *out_ret = (long long)result[1];
+    if (why && wcap > 0) why[0] = 0;
+    return 0;
+}

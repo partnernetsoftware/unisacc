@@ -51,6 +51,7 @@ static int receipt_line(char *r, long cap, long *at, const char *key, const char
 static const char *ra_manager[2];
 static const char *ra_osx[2];
 static int ra_built_managers;
+static int ra_with_tape_sidecar;
 /* This validates a thin executable identity, never signature trust. */
 static unsigned long ra_u32(const unsigned char *p) { return (unsigned long)p[0] | (unsigned long)p[1]<<8 | (unsigned long)p[2]<<16 | (unsigned long)p[3]<<24; }
 static void ra_macho(const char *path,unsigned long cpu) {
@@ -125,6 +126,26 @@ static int pack(char **argv, int nslice) {
         for (k = 7; k >= 0; k--) len = (len << 8) | (unsigned char)c[cn - 8 + k];
         if (len != (long)qn || !tx_same(c + cn - 16 - qn, (long)qn, q, (long)qn)) ra_die("packed package differs from the payload", com);
         mm_free(c); mm_free(q);
+    }
+    if (ra_with_tape_sidecar) {
+        char tdir[4400], tso[4400], tmf[4400];
+        if (sy_exists("tools/tape-sidecar-build.cx") != 1 ||
+            sy_exists("tools/tape/asm/tape_x86_64.S") != 1 ||
+            sy_exists("tools/tape/asm/hoststub_lnx_x86_64.S") != 1)
+            ra_die("tape-sidecar sources missing", out);
+        if (cx_fmt(tdir, sizeof tdir, "%s/tape", out) ||
+            cx_fmt(tso, sizeof tso, "%s/tape/tapemode.so", out) ||
+            cx_fmt(tmf, sizeof tmf, "%s/tape/manifest.tsv", out)) ra_die("tape path too long", out);
+        {
+            char *tv[] = {"sh", "./unisacc.com", "tools/tape-sidecar-build.cx", "--", "--target", "lnx/x86_64", ".", tdir, 0};
+            rc = run(tv, log, sizeof log);
+            if (rc != 0 || sy_exists(tso) != 1 || sy_exists(tmf) != 1) {
+                sy_eprintf("%s", log);
+                ra_die("tape-sidecar-build failed", tdir);
+            }
+        }
+        if (receipt_line(receipt, sizeof receipt, &at, "tape/tapemode.so", tso) ||
+            receipt_line(receipt, sizeof receipt, &at, "tape/manifest.tsv", tmf)) ra_die("cannot hash tape sidecar", tdir);
     }
     if (cx_write(rp, receipt, (size_t)at)) ra_die("cannot write", rp);
     sy_printf("%sRELEASE_APE\tPACKED\t%s\n", receipt, com);
@@ -252,6 +273,7 @@ static int devlnx(const char *out, const char *p3, const char *lnxelf) {
 int main(int argc, char **argv) {
     if(argc>1&&tx_eqz(argv[1],"pack")){
         int p=2;while(p<argc&&argv[p][0]=='-'){
+            if(tx_eqz(argv[p],"--with-tape-sidecar")&&!ra_with_tape_sidecar){ra_with_tape_sidecar=1;p+=1;continue;}
             if(p+2>=argc)ra_die("pack option arguments",argv[p]);
             if(tx_eqz(argv[p],"--cache-manager-osx")&&!ra_manager[0]){ra_manager[0]=argv[p+1];ra_manager[1]=argv[p+2];}
             else if(tx_eqz(argv[p],"--osx-slices")&&!ra_osx[0]){ra_osx[0]=argv[p+1];ra_osx[1]=argv[p+2];}
@@ -264,6 +286,6 @@ int main(int argc, char **argv) {
     if ((argc == 9 || argc == 10) && tx_eqz(argv[1], "pack")) return pack(argv + 2, argc - 4);
     if (argc == 5 && tx_eqz(argv[1], "dev-lnx")) return devlnx(argv[2], argv[3], argv[4]);
     if (argc == 3 && tx_eqz(argv[1], "smoke")) return smoke(argv[2]);
-    sy_eprintf("usage: release-ape.cx pack [--cache-manager-osx X64 ARM64] [--osx-slices X64 ARM64] OUT P3 WIN_X86_64 LNX_X86_64 LNX_ARM64 OSX_X86_64 OSX_ARM64 [WIN_ARM64] | dev-lnx OUT P3 LNX_ELF | smoke FILE\n");
+    sy_eprintf("usage: release-ape.cx pack [--with-tape-sidecar] [--cache-manager-osx X64 ARM64] [--osx-slices X64 ARM64] OUT P3 WIN_X86_64 LNX_X86_64 LNX_ARM64 OSX_X86_64 OSX_ARM64 [WIN_ARM64] | dev-lnx OUT P3 LNX_ELF | smoke FILE\n");
     return 2;
 }

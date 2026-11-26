@@ -2,24 +2,62 @@
 /* Product tape linker. No libc and no posix. The driver injects byte
    emission and failure, and owns the output buffer. One link at a time. */
 static int (*tl_emit)(int);
+static int (*tl_emit_span)(const char *, int);
 static int (*tl_die)(char *);
+static char tl_obuf[4096];
+static int tl_opos;
+static int tl_emit_err;
+static unsigned char tl_idtab[256];
+static int tl_idtab_ready;
+static void tl_init_idtab(void) {
+    int i;
+    if (tl_idtab_ready) return;
+    i = 0; while (i < 256) { tl_idtab[i] = 0; i = i + 1; }
+    i = 65; while (i <= 90) { tl_idtab[i] = 1; i = i + 1; }
+    i = 97; while (i <= 122) { tl_idtab[i] = 1; i = i + 1; }
+    i = 48; while (i <= 57) { tl_idtab[i] = 1; i = i + 1; }
+    tl_idtab[95] = 1; tl_idtab[46] = 1; tl_idtab[36] = 1;
+    tl_idtab_ready = 1;
+}
+static int tl_flush(void) {
+    int k; int r;
+    if (tl_opos <= 0) return tl_emit_err;
+    if (tl_emit_span) { r = tl_emit_span(tl_obuf, tl_opos); tl_opos = 0; if (r && !tl_emit_err) tl_emit_err = r; return tl_emit_err; }
+    k = 0; while (k < tl_opos) { r = tl_emit(tl_obuf[k] & 255); if (r && !tl_emit_err) { tl_emit_err = r; tl_opos = 0; return tl_emit_err; } k = k + 1; }
+    tl_opos = 0;
+    return tl_emit_err;
+}
 int tl_bind(int (*emit)(int), int (*die)(char *)) {
     if (!emit || !die) return 1;
-    tl_emit = emit; tl_die = die; return 0;
+    tl_init_idtab();
+    tl_emit = emit; tl_emit_span = 0; tl_emit_err = 0; tl_die = die; return 0;
 }
-static int tl_o(int c) { return tl_emit(c); }
+int tl_bind_span(int (*emit_span)(const char *, int), int (*die)(char *)) {
+    if (!emit_span || !die) return 1;
+    tl_init_idtab();
+    tl_emit = 0; tl_emit_span = emit_span; tl_emit_err = 0; tl_die = die; return 0;
+}
+static int tl_o(int c) {
+    int r;
+    if (tl_opos >= 4096) { r = tl_flush(); if (r) return r; }
+    tl_obuf[tl_opos] = (char)(c & 255);
+    tl_opos = tl_opos + 1;
+    return tl_emit_err;
+}
 static int tl_fail(char *m) { return tl_die(m); }
 #define TL_HASH 262144
 #define TL_MAXG 65536
 #define TL_GP 1048576
 #define TL_NP 2097152
 static int *tl_hat; static int *tl_hlen; static int *tl_hkind;   /* per unit: offset+1 into tl_t */
+static unsigned int *tl_hepoch; static unsigned int tl_epoch;
 static char *tl_t;
 static char *tl_gpool; static int tl_gend;                                 /* global objects already defined */
 static int *tl_gat; static int *tl_glen; static int tl_ng;
 static int tl_inits;                                                        /* units that had an __init_u */
 int tl_isid(int c) {
-    return (c >= 65 && c <= 90) || (c >= 97 && c <= 122) || (c >= 48 && c <= 57) || c == 95 || c == 46 || c == 36;
+    if (!tl_idtab_ready) tl_init_idtab();
+    return (c >= 0 && c < 256) ? tl_idtab[c] : 0;
 }
 int tl_hash(char *s, int n) {
     unsigned long h; int k; h = 5381; k = 0;
@@ -33,17 +71,25 @@ int tl_same(char *a, int n, char *b, int m) {
 }
 int tl_is(char *s, int n, char *lit) { int k; k = 0; while (lit[k]) k = k + 1; return tl_same(s, n, lit, k); }
 int tl_slot(char *s, int n) {               /* the slot holding s, or the empty slot where it would go */
-    int h; h = tl_hash(s, n);
-    while (tl_hat[h]) {
-        if (tl_same(tl_t + tl_hat[h] - 1, tl_hlen[h], s, n)) return h;
+    unsigned long hv; int k; int h;
+    hv = 5381; k = 0;
+    while (k < n) { hv = (hv * 33 + (s[k] & 255)) & 4294967295; k = k + 1; }
+    h = (int)(hv & (TL_HASH - 1));
+    while (tl_hepoch[h] == tl_epoch) {
+        if (tl_hlen[h] == n) {
+            char *p = tl_t + tl_hat[h] - 1;
+            k = 0;
+            while (k < n && p[k] == s[k]) k = k + 1;
+            if (k == n) return h;
+        }
         h = (h + 1) & (TL_HASH - 1);
     }
     return h;
 }
-int tl_kind(char *s, int n) { int h; h = tl_slot(s, n); return tl_hat[h] ? tl_hkind[h] : 0; }
+int tl_kind(char *s, int n) { int h; h = tl_slot(s, n); return (tl_hepoch[h] == tl_epoch) ? tl_hkind[h] : 0; }
 int tl_put(char *s, int n, int kind) {
     int h; h = tl_slot(s, n);
-    if (tl_hat[h] == 0) { tl_hat[h] = (int)(s - tl_t) + 1; tl_hlen[h] = n; tl_hkind[h] = kind; }
+    if (tl_hepoch[h] != tl_epoch) { tl_hepoch[h] = tl_epoch; tl_hat[h] = (int)(s - tl_t) + 1; tl_hlen[h] = n; tl_hkind[h] = kind; }
     else { if (kind == 2) tl_hkind[h] = 2; }      /* `.global` wins over a definition seen first */
     return 0;
 }
@@ -60,14 +106,37 @@ int tl_gadd(char *s, int n) {
     tl_gend = tl_gend + n; tl_ng = tl_ng + 1;
     return 0;
 }
-int tl_os(char *s, int n) { int k; k = 0; while (k < n) { tl_o(s[k] & 255); k = k + 1; } return 0; }
-int tl_num(int v) { char d[16]; int n; n = 0; if (v == 0) { tl_o(48); return 0; }
-    while (v > 0) { d[n] = 48 + v % 10; v = v / 10; n = n + 1; }
-    while (n > 0) { n = n - 1; tl_o(d[n]); } return 0; }
+int tl_os(char *s, int n) {
+    int k; int r;
+    if (n <= 0) return tl_emit_err;
+    if (tl_opos + n <= 4096) {
+        k = 0; while (k < n) { tl_obuf[tl_opos + k] = s[k]; k = k + 1; }
+        tl_opos = tl_opos + n;
+        return tl_emit_err;
+    }
+    r = tl_flush(); if (r && !tl_emit_err) tl_emit_err = r;
+    if (n <= 4096) {
+        k = 0; while (k < n) { tl_obuf[k] = s[k]; k = k + 1; }
+        tl_opos = n;
+        return tl_emit_err;
+    }
+    if (tl_emit_span) { r = tl_emit_span(s, n); if (r && !tl_emit_err) tl_emit_err = r; return tl_emit_err; }
+    k = 0; while (k < n) { r = tl_emit(s[k] & 255); if (r && !tl_emit_err) { tl_emit_err = r; return tl_emit_err; } k = k + 1; } return tl_emit_err;
+}
+int tl_num(int v) {
+    char d[16]; int k;
+    if (v == 0) return tl_os("0", 1);
+    k = 16;
+    while (v > 0) { k = k - 1; d[k] = 48 + v % 10; v = v / 10; }
+    return tl_os(d + k, 16 - k);
+}
 /* a name, renamed for unit u when it is this unit's own */
 int tl_name(char *s, int n, int u) {
-    if (tl_is(s, n, "__init_u")) { tl_os("__init_u", 8); tl_num(u); return 0; }
-    if (tl_is(s, n, "_start") || tl_is(s, n, "__init")) { tl_os(s, n); return 0; }
+    if (n <= 0) return 0;
+    if (s[0] == 95) {
+        if (n == 8 && tl_same(s, n, "__init_u", 8)) { tl_os("__init_u", 8); tl_num(u); return 0; }
+        if (n == 6 && (tl_same(s, n, "_start", 6) || tl_same(s, n, "__init", 6))) { tl_os(s, n); return 0; }
+    }
     if (tl_kind(s, n) == 1) { tl_os("__u", 3); tl_num(u); tl_o(95); }
     tl_os(s, n);
     return 0;
@@ -75,6 +144,7 @@ int tl_name(char *s, int n, int u) {
 /* the operands of a line from p to e: identifiers renamed, strings copied */
 int tl_operands(char *t, int p, int e, int u) {
     int q;
+    if (!tl_idtab_ready) tl_init_idtab();
     while (p < e) {
         if (t[p] == 34) {
             q = p + 1;
@@ -82,19 +152,21 @@ int tl_operands(char *t, int p, int e, int u) {
             if (q < e) q = q + 1;
             tl_os(t + p, q - p); p = q; continue;
         }
-        if (tl_isid(t[p] & 255) && (t[p] < 48 || t[p] > 57) && t[p] != 46 && t[p] != 36) {
-            q = p; while (q < e && tl_isid(t[q] & 255)) q = q + 1;
+        if (tl_idtab[(unsigned char)t[p]] && (t[p] < 48 || t[p] > 57) && t[p] != 46 && t[p] != 36) {
+            q = p; while (q < e && tl_idtab[(unsigned char)t[q]]) q = q + 1;
             tl_name(t + p, q - p, u); p = q; continue;
         }
-        if (tl_isid(t[p] & 255)) {            /* a number or a register-like word: as it is */
-            q = p; while (q < e && tl_isid(t[q] & 255)) q = q + 1;
+        if (tl_idtab[(unsigned char)t[p]]) {            /* a number or a register-like word: as it is */
+            q = p; while (q < e && tl_idtab[(unsigned char)t[q]]) q = q + 1;
             tl_os(t + p, q - p); p = q; continue;
         }
-        tl_o(t[p] & 255); p = p + 1;
+        q = p + 1;
+        while (q < e && t[q] != 34 && !tl_idtab[(unsigned char)t[q]]) q = q + 1;
+        tl_os(t + p, q - p); p = q;
     }
     return 0;
 }
-int tl_word(char *t, int p, int e) { int q; q = p; while (q < e && tl_isid(t[q] & 255)) q = q + 1; return q; }
+int tl_word(char *t, int p, int e) { int q; if (!tl_idtab_ready) tl_init_idtab(); q = p; while (q < e && tl_idtab[(unsigned char)t[q]]) q = q + 1; return q; }
 int tl_inset(int *at, int *ln, int cnt, char *s, int n); int tl_addname(int *at, int *ln, int *cnt, char *s, int n);
 static int *tl_gdef_at; static int *tl_gdef_len; static int tl_ngdef;    /* R20-3: names some unit gave an initialiser */
 /* R20-3: a unit tape's first record must be `.unit 2` (exactly once); an
@@ -172,35 +244,32 @@ int tl_unitver(char *t, int n) {
 }
 static int tl_loose;                        /* some unit had an instruction before its first label */
 int tl_unit(char *t, int n, int u) {
-    int i; int e; int j; int q; int pass; int first; int located; int lab;
+    int i; int e; int j; int q; int first; int located; int lab;
     lab = 0;
     i = 0; while (i < 128) { tl_source_map[i] = -1; i++; }
     /* Prefix semantics belong to the first real local TU, if one exists.
        Reserve its mapping early, without inheriting its later filename. */
     first = -1; located = 0;
     tl_t = t;
-    i = 0; while (i < TL_HASH) { tl_hat[i] = 0; i = i + 1; }
-    pass = 0;
-    while (pass < 2) {                        /* 0: .global names; 1: everything defined here */
-        i = 0;
-        while (i < n) {
-            e = i; while (e < n && t[e] != 10) e = e + 1;
-            if (e > i) {
-                if (t[i] == 46) {
-                    j = i + 1; q = tl_word(t, j, e);
-                    if (pass == 0 && first < 0 && tl_same(t + j, q - j, "unit", 4) && q < e && t[q] == 32) {
-                        int id; int tail;
-                        if (tl_frame(t, q + 1, e, &id, &tail)) first = id;
-                    }
-                    if (pass == 0 && tl_same(t + j, q - j, "global", 6)) { j = q + 1; q = tl_word(t, j, e); tl_put(t + j, q - j, 2); }
-                    if (pass == 1 && (tl_same(t + j, q - j, "bss", 3) || tl_same(t + j, q - j, "str", 3))) {
-                        j = q + 1; q = tl_word(t, j, e); tl_put(t + j, q - j, 1);
-                    }
-                } else { if (pass == 1 && t[i] != 32 && t[i] != 9 && t[e - 1] == 58) tl_put(t + i, e - 1 - i, 1); }
-            }
-            i = e + 1;
+    tl_epoch = tl_epoch + 1u;
+    if (tl_epoch == 0u) { tl_epoch = 1u; i = 0; while (i < TL_HASH) { tl_hepoch[i] = 0u; i = i + 1; } }
+    i = 0;
+    while (i < n) {
+        e = i; while (e < n && t[e] != 10) e = e + 1;
+        if (e > i) {
+            if (t[i] == 46) {
+                j = i + 1; q = tl_word(t, j, e);
+                if (first < 0 && q - j == 4 && tl_same(t + j, 4, "unit", 4) && q < e && t[q] == 32) {
+                    int id; int tail;
+                    if (tl_frame(t, q + 1, e, &id, &tail)) first = id;
+                }
+                if (q - j == 6 && tl_same(t + j, 6, "global", 6)) { j = q + 1; q = tl_word(t, j, e); tl_put(t + j, q - j, 2); }
+                else if (q - j == 3 && (tl_same(t + j, 3, "bss", 3) || tl_same(t + j, 3, "str", 3))) {
+                    j = q + 1; q = tl_word(t, j, e); tl_put(t + j, q - j, 1);
+                }
+            } else { if (t[i] != 32 && t[i] != 9 && t[e - 1] == 58) tl_put(t + i, e - 1 - i, 1); }
         }
-        pass = pass + 1;
+        i = e + 1;
     }
     i = 0;
     while (i < n) {
@@ -284,7 +353,7 @@ int tl_unit(char *t, int n, int u) {
         tl_o(10);
         i = e + 1;
     }
-    return 0;
+    return tl_flush();
 }
 /* ---- archives (R17-3): GNU/BSD `ar` format, written and read in memory ----
    `unisacc ar rcs|t|x LIB.a [members]`.  Member names longer than 15 bytes
@@ -375,7 +444,7 @@ int tl_finish(int u) {
     while (k < u) { tl_os("  call __init_u", 15); tl_num(k); tl_os("\n", 1); k = k + 1; }
     tl_os("  ret\n", 6);
     tl_os(".end\n", 5);
-    return 0;
+    return tl_flush();
 }
 int tl_needs(char *t, long n) {                              /* defines something still undefined? */
     long i; long e; int l;
@@ -456,8 +525,15 @@ static int tl_dslot(char *s, int n) {
     while (k < n) { h = (h * 33 + (s[k] & 255)) & 4294967295; k = k + 1; }
     k = (int)(h & (unsigned long)tl_dmask);
     while (tl_dh[k]) {
-        a = tl_dh[k] - 1;
-        if (tl_same(tl_db + a, tl_word(tl_db, a, a + n + 1) - a, s, n)) return k;
+        if (tl_dh[k] > 0) {
+            a = tl_dh[k] - 1;
+            if (tl_same(tl_db + a, tl_word(tl_db, a, a + n + 1) - a, s, n)) return k;
+        } else {
+            int j; int idx;
+            j = -tl_dh[k] - 1;
+            idx = tl_dum[j];
+            if (tl_same(tl_npool + tl_ext_at[idx], tl_ext_len[idx], s, n)) return k;
+        }
         k = (k + 1) & tl_dmask;
     }
     return k;
@@ -472,6 +548,7 @@ static void tl_dlive(int g) {
 static void tl_dscan(long i, long e, int addr) {
     char *b; long p; long q; int k; int j; int m;
     b = tl_db; p = i;
+    if (!tl_idtab_ready) tl_init_idtab();
     if (b[p] == 32 || b[p] == 9) {
         while (p < e && (b[p] == 32 || b[p] == 9)) p = p + 1;
         q = p; while (q < e && b[q] != 32 && b[q] != 9) q = q + 1;
@@ -486,21 +563,15 @@ static void tl_dscan(long i, long e, int addr) {
             while (q < e && b[q] != 34) { if (b[q] == 92) q = q + 1; q = q + 1; }
             p = q + 1; continue;
         }
-        if (tl_isid(b[p] & 255) && (b[p] < 48 || b[p] > 57) && b[p] != 46 && b[p] != 36) {
-            q = p; while (q < e && tl_isid(b[q] & 255)) q = q + 1;
+        if (tl_idtab[(unsigned char)b[p]] && (b[p] < 48 || b[p] > 57) && b[p] != 46 && b[p] != 36) {
+            q = p; while (q < e && tl_idtab[(unsigned char)b[q]]) q = q + 1;
             m = (int)(q - p);
             k = tl_dslot(b + p, m);
-            if (tl_dh[k]) tl_dlive(tl_dg[k]);
-            else if (!addr) {
-                j = 0;
-                while (j < tl_dnu) {
-                    if (tl_same(tl_npool + tl_ext_at[tl_dum[j]], tl_ext_len[tl_dum[j]], b + p, m)) tl_dus[j] = 1;
-                    j = j + 1;
-                }
-            }
+            if (tl_dh[k] > 0) tl_dlive(tl_dg[k]);
+            else if (tl_dh[k] < 0 && !addr) tl_dus[-tl_dh[k] - 1] = 1;
             p = q; continue;
         }
-        if (tl_isid(b[p] & 255)) { while (p < e && tl_isid(b[p] & 255)) p = p + 1; continue; }
+        if (tl_idtab[(unsigned char)b[p]]) { while (p < e && tl_idtab[(unsigned char)b[p]]) p = p + 1; continue; }
         p = p + 1;
     }
 }
@@ -520,8 +591,8 @@ long tl_dce(char *b, long n) {
         }
         i = e + 1;
     }
-    hsz = 1024; while (hsz < 2 * nl + 2 && hsz < 67108864) hsz = hsz * 2;
-    if (hsz < 2 * nl + 2) return n;
+    hsz = 1024; while (hsz < 2 * (nl + tl_dnu) + 2 && hsz < 67108864) hsz = hsz * 2;
+    if (hsz < 2 * (nl + tl_dnu) + 2) return n;
     tl_dh = mm_zalloc((long)hsz * (long)sizeof(int)); tl_dg = mm_zalloc((long)hsz * (long)sizeof(int));
     tl_dat = mm_zalloc((long)(ng + 2) * (long)sizeof(int)); tl_dst = mm_zalloc((long)ng + 2);
     tl_dstk = mm_zalloc((long)(ng + 2) * (long)sizeof(int));
@@ -558,6 +629,14 @@ long tl_dce(char *b, long n) {
     }
     if (bad) goto out;
     tl_dat[g + 1] = (int)n;
+    k = 0;
+    while (k < tl_dnu) {
+        int idx; int hs;
+        idx = tl_dum[k];
+        hs = tl_dslot(tl_npool + tl_ext_at[idx], tl_ext_len[idx]);
+        if (tl_dh[hs] == 0) tl_dh[hs] = -(k + 1);
+        k = k + 1;
+    }
     i = 0;
     while (i < n) {                           /* column-0 lines that are not labels stay, so what they name lives */
         e = i; while (e < n && b[e] != 10) e = e + 1;
@@ -584,7 +663,11 @@ long tl_dce(char *b, long n) {
         e = i; while (e < n && b[e] != 10) e = e + 1;
         while (g < ng && i >= tl_dat[g + 1]) g = g + 1;
         if ((tl_dst[g] & 1) || e == i || (b[i] != 32 && b[i] != 9 && (b[i] == 46 || b[e - 1] != 58))) {
-            j = i; while (j < e) { b[w] = b[j]; w = w + 1; j = j + 1; }
+            if (e > i) {
+                if (w != i) {
+                    j = i; while (j < e) { b[w] = b[j]; w = w + 1; j = j + 1; }
+                } else w = w + (e - i);
+            }
             if (e < n) { b[w] = 10; w = w + 1; }
         } else if (b[i] != 32 && b[i] != 9 && !tl_loc(b + i, (int)(e - 1 - i))) {  /* a dropped function: its exported name is no longer defined */
             k = 0;
@@ -727,6 +810,7 @@ static int tl_tables(void) {
     tl_hat = mm_zalloc((long)TL_HASH * (long)sizeof(int));
     tl_hlen = mm_zalloc((long)TL_HASH * (long)sizeof(int));
     tl_hkind = mm_zalloc((long)TL_HASH * (long)sizeof(int));
+    tl_hepoch = mm_zalloc((long)TL_HASH * (long)sizeof(unsigned int));
     tl_gpool = mm_zalloc((long)TL_GP);
     tl_gat = mm_zalloc((long)TL_MAXG * (long)sizeof(int));
     tl_glen = mm_zalloc((long)TL_MAXG * (long)sizeof(int));
@@ -740,7 +824,7 @@ static int tl_tables(void) {
     tl_fw_at = mm_zalloc((long)TL_MAXG * (long)sizeof(int));
     tl_fw_len = mm_zalloc((long)TL_MAXG * (long)sizeof(int));
     if (!tl_fw_at || !tl_fw_len) return 1;
-    if (!tl_hat || !tl_hlen || !tl_hkind || !tl_gpool || !tl_gat || !tl_glen ||
+    if (!tl_hat || !tl_hlen || !tl_hkind || !tl_hepoch || !tl_gpool || !tl_gat || !tl_glen ||
         !tl_gdef_at || !tl_gdef_len || !tl_npool || !tl_def_at || !tl_def_len || !tl_ext_at || !tl_ext_len)
         return 1;
     tl_tab_on = 1;
@@ -751,7 +835,7 @@ int tl_begin(void) {
     if (tl_tables()) { tl_fail("link: out of memory\n"); return 1; }
     tl_source_next = 0;
     tl_ng = 0; tl_gend = 0; tl_nend = 0; tl_ndef = 0; tl_next = 0; tl_ngdef = 0; tl_has_entry = 0; tl_inits = 0; tl_nfw = 0;
-    tl_loose = 0; tl_dn = 0; tl_dcut = 0;
+    tl_loose = 0; tl_dn = 0; tl_dcut = 0; tl_opos = 0; tl_emit_err = 0;
     return 0;
 }
 void tl_adopt_first(void) {

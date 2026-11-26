@@ -1,0 +1,671 @@
+/* tools/check-slice-nn-m53-s1.cx -- S1 contract, 28-vector in-proc shadow parity, 3-mutant kill, failure contract & G5 sidecar discovery E2E for m53 (cxsa_valid_s1).
+ * Usage: sh ./unisacc.com tools/check-slice-nn-m53-s1.cx --
+ *        sh ./unisacc.com tools/check-slice-nn-m53-s1.cx -- --g5-candidate PRIV_APE_PATH
+ *        sh ./unisacc.com tools/check-slice-nn-m53-s1.cx -- child COUNT LEN PTR_OK S1 SO [APE_SELF]
+ * Last line: CHECK_SLICE_NN_M53_S1\tPASS|FAIL\tvectors=28\tok=N\tfail=M\tmutations=3\tcandidate_ape_sha=...\ttape_container_sha=...
+ *      (G5): CHECK_SLICE_NN_M53_S1_G5\tPASS|FAIL\tcases=4\tok=N\tfail=M\tcandidate_ape_sha=...\tsidecar_so_sha=...
+ */
+#pragma unisa use sys.fs
+#pragma unisa use sys.io
+#pragma unisa use sys.env
+#pragma unisa use sys.posix
+#pragma unisa use sysx.run
+#pragma unisa use cxlib.procrun
+#pragma unisa use driver.stream_s1
+#pragma unisa use text.text
+#pragma unisa use mem.bytes
+#pragma unisa use mem.heap
+
+static int n_ok, failed;
+static const char *g_m53_self = "tools/check-slice-nn-m53-s1.cx";
+
+static void ck(int cond, const char *name) {
+    if (cond) {
+        n_ok++;
+        printf("PASS\t%s\n", name);
+    } else {
+        failed++;
+        printf("FAIL\t%s\n", name);
+    }
+}
+
+static int m53_write_bytes(const char *path, const unsigned char *b, long n, int mode) {
+    int fd = sy_open(path, O_RDWR | O_CREAT | O_TRUNC, mode);
+    if (fd < 0) return -1;
+    if (n > 0 && sy_write_all(fd, b, n) != 0) { sy_close(fd); return -1; }
+    sy_close(fd);
+    return 0;
+}
+
+static void m53_wr_u(unsigned char *p, int k, unsigned long long v) {
+    int i = 0;
+    while (i < k) { p[i] = (unsigned char)(v & 255ULL); v >>= 8; i++; }
+}
+
+static int m53_spawn_capture_ape(char **av, const char *env_s1, const char *env_so, const char *env_ape,
+                                 char *out, int ocap, char *err, int ecap) {
+    pr_result r;
+    int t, rc;
+    long n, m;
+    if (env_s1) sy_setenv("UNISACC_M53_S1", env_s1, 1); else sy_unsetenv("UNISACC_M53_S1");
+    if (env_so) sy_setenv("UNISACC_M53_S1_SO", env_so, 1); else sy_unsetenv("UNISACC_M53_S1_SO");
+    if (env_ape) sy_setenv("UNISACC_APE_SELF", env_ape, 1); else sy_unsetenv("UNISACC_APE_SELF");
+    t = pr_run("m53-s1", av, ".", 0, 40, &r);
+    sy_unsetenv("UNISACC_M53_S1");
+    sy_unsetenv("UNISACC_M53_S1_SO");
+    sy_unsetenv("UNISACC_APE_SELF");
+    n = (long)r.outn < (long)ocap - 1 ? (long)r.outn : (long)ocap - 1;
+    if (n > 0 && r.out) mm_copy(out, ocap, r.out, n);
+    out[n > 0 ? n : 0] = 0;
+    m = (long)r.errn < (long)ecap - 1 ? (long)r.errn : (long)ecap - 1;
+    if (m > 0 && r.err) mm_copy(err, ecap, r.err, m);
+    err[m > 0 ? m : 0] = 0;
+    rc = t ? -1 : r.rc;
+    pr_free(&r);
+    return rc;
+}
+
+static int m53_spawn_capture(char **av, const char *env_s1, const char *env_so,
+                             char *out, int ocap, char *err, int ecap) {
+    return m53_spawn_capture_ape(av, env_s1, env_so, 0, out, ocap, err, ecap);
+}
+
+static int m53_oracle(const unsigned char *data, long len) {
+    if (!data || len < 4) return 0;
+    unsigned long c = (unsigned long)data[0] | ((unsigned long)data[1] << 8) |
+                      ((unsigned long)data[2] << 16) | ((unsigned long)data[3] << 24);
+    if (c > 1000000UL) return 0;
+    return len == 4 + (long)c * 9;
+}
+
+static int m53_child(int argc, char **argv) {
+    /* argv: child COUNT LEN PTR_OK S1 SO [APE_SELF] */
+    unsigned long cnt = argc >= 3 ? (unsigned long)atol(argv[2]) : 0;
+    long len = argc >= 4 ? atol(argv[3]) : 4;
+    int ptr_ok = argc >= 5 ? atoi(argv[4]) : 1;
+    const char *s1 = argc >= 6 ? argv[5] : "-";
+    const char *so = argc >= 7 ? argv[6] : "-";
+    const char *ape = argc >= 8 ? argv[7] : "-";
+    unsigned char *buf = (unsigned char *)mm_alloc((size_t)(len > 16 ? len : 16));
+    int got;
+    if (!buf) return 2;
+    for (long i = 0; i < (len > 16 ? len : 16); i++) buf[i] = 0;
+    buf[0] = (unsigned char)(cnt & 255u);
+    buf[1] = (unsigned char)((cnt >> 8) & 255u);
+    buf[2] = (unsigned char)((cnt >> 16) & 255u);
+    buf[3] = (unsigned char)((cnt >> 24) & 255u);
+    if (!tx_eqz(s1, "-")) sy_setenv("UNISACC_M53_S1", s1, 1); else sy_unsetenv("UNISACC_M53_S1");
+    if (!tx_eqz(so, "-")) sy_setenv("UNISACC_M53_S1_SO", so, 1); else sy_unsetenv("UNISACC_M53_S1_SO");
+    if (!tx_eqz(ape, "-")) sy_setenv("UNISACC_APE_SELF", ape, 1); else sy_unsetenv("UNISACC_APE_SELF");
+    got = cxsa_valid_s1(ptr_ok ? buf : 0, len);
+    sy_unsetenv("UNISACC_M53_S1");
+    sy_unsetenv("UNISACC_M53_S1_SO");
+    sy_unsetenv("UNISACC_APE_SELF");
+    mm_free(buf);
+    printf("M53\t%d\n", got);
+    return 0;
+}
+
+static int m53_child28(int argc, char **argv) {
+    /* argv: child28 S1 SO */
+    static unsigned char vbuf[9000016];
+    static const unsigned long cnts[28] = {
+        0, 0, 0, 0, 0, 0, 1, 1, 1, 1,
+        2, 2, 3, 10, 10, 100, 100, 500, 1000, 1000,
+        10000, 50000, 1000000, 1000000, 1000000, 1000001, 0xffffffffUL, 1
+    };
+    static const long lens[28] = {
+        4, 0, 3, -1, 5, 4, 13, 12, 14, 0,
+        22, 21, 31, 94, 95, 904, 903, 4504, 9004, 9005,
+        90004, 450004, 9000004, 9000003, 9000005, 9000013, 4, 13
+    };
+    static const int ptr_ok[28] = {
+        1, 1, 1, 1, 1, 0, 1, 1, 1, 0,
+        1, 1, 1, 1, 1, 1, 1, 1, 1, 1,
+        1, 1, 1, 1, 1, 1, 1, 1
+    };
+    const char *s1 = argc >= 3 ? argv[2] : "-";
+    const char *so = argc >= 4 ? argv[3] : "-";
+    int mismatches = 0, v;
+    for (int i = 0; i < 64; i++) vbuf[i] = 0;
+    if (!tx_eqz(s1, "-")) sy_setenv("UNISACC_M53_S1", s1, 1); else sy_unsetenv("UNISACC_M53_S1");
+    if (!tx_eqz(so, "-")) sy_setenv("UNISACC_M53_S1_SO", so, 1); else sy_unsetenv("UNISACC_M53_S1_SO");
+    for (v = 0; v < 28; v++) {
+        vbuf[0] = (unsigned char)(cnts[v] & 255u);
+        vbuf[1] = (unsigned char)((cnts[v] >> 8) & 255u);
+        vbuf[2] = (unsigned char)((cnts[v] >> 16) & 255u);
+        vbuf[3] = (unsigned char)((cnts[v] >> 24) & 255u);
+        const unsigned char *p = ptr_ok[v] ? vbuf : 0;
+        int got = cxsa_valid_s1(p, lens[v]);
+        int exp = m53_oracle(p, lens[v]);
+        if (got != exp) mismatches++;
+    }
+    sy_unsetenv("UNISACC_M53_S1");
+    sy_unsetenv("UNISACC_M53_S1_SO");
+    printf("M53_28\t%d\t%d\n", mismatches == 0 ? 1 : 0, mismatches);
+    return mismatches == 0 ? 0 : 1;
+}
+
+static void m53_write_swap_container(const char *path) {
+    unsigned char buf[224], dig[32];
+    const char *tags[6] = {"CODE", "DATA", "BSSZ", "SYMS", "RELO", "HOST"};
+    const unsigned long long offs[6] = {208, 216, 216, 224, 224, 224};
+    const unsigned long long lens[6] = {6, 0, 8, 0, 0, 0};
+    const unsigned long long cnts[6] = {2, 0, 1, 0, 0, 0};
+    int i, j;
+    for (i = 0; i < (int)sizeof buf; i++) buf[i] = 0;
+    mm_copy(buf, 8, "UTAPEBIN", 8);
+    m53_wr_u(buf + 8, 2, 1); m53_wr_u(buf + 10, 2, 3);
+    m53_wr_u(buf + 12, 2, 1); m53_wr_u(buf + 20, 4, 6); m53_wr_u(buf + 24, 4, 64);
+    for (i = 0; i < 6; i++) {
+        int d = 64 + 24 * i;
+        for (j = 0; j < 4; j++) buf[d + j] = (unsigned char)tags[i][j];
+        m53_wr_u(buf + d + 4, 8, offs[i]);
+        m53_wr_u(buf + d + 12, 8, lens[i]);
+        m53_wr_u(buf + d + 20, 4, cnts[i]);
+    }
+    buf[208] = 0; buf[209] = 0xf0; buf[210] = 0; buf[211] = 0;
+    buf[212] = 42; buf[213] = 0xf0;
+    m53_wr_u(buf + 216, 8, 64);
+    cx_sha256(buf, sizeof buf, dig);
+    for (i = 0; i < 32; i++) buf[28 + i] = dig[i];
+    (void)m53_write_bytes(path, buf, (long)sizeof buf, 0600);
+}
+
+static const char *m53_guest_src(void) {
+    return
+    "static unsigned long g_u64(const char *s) {\n"
+    "    unsigned long v = 0; int i = 0;\n"
+    "    while (s[i] >= '0' && s[i] <= '9') { v = v * 10UL + (unsigned long)(s[i] - '0'); i++; }\n"
+    "    return v;\n"
+    "}\n"
+    "static long g_i64(const char *s) {\n"
+    "    long v = 0; int i = 0, neg = 0;\n"
+    "    if (s[0] == '-') { neg = 1; i = 1; }\n"
+    "    while (s[i] >= '0' && s[i] <= '9') { v = v * 10L + (long)(s[i] - '0'); i++; }\n"
+    "    return neg ? -v : v;\n"
+    "}\n"
+    "int main(int argc, char **argv) {\n"
+    "    const char *abi = \"M53S1ABI1\";\n"
+    "    const unsigned char *data;\n"
+    "    long length;\n"
+    "    unsigned long count;\n"
+    "    if (abi[0] != 'M' || argc < 3) return 2;\n"
+    "    data = (const unsigned char *)g_u64(argv[1]);\n"
+    "    length = g_i64(argv[2]);\n"
+    "    if (!data || length < 4) return 0;\n"
+    "    count = (unsigned long)data[0] | ((unsigned long)data[1] << 8) |\n"
+    "            ((unsigned long)data[2] << 16) | ((unsigned long)data[3] << 24);\n"
+    "    if (count > 1000000UL) return 0;\n"
+    "    return length == 4 + (long)count * 9 ? 1 : 0;\n"
+    "}\n";
+}
+
+static int m53_copy_file(const char *src, const char *dst, int mode) {
+    unsigned char *buf = 0;
+    int64_t len = 0;
+    int rc;
+    if (sy_read_file(src, &buf, &len, 16777216) != 0 || !buf) return -1;
+    rc = m53_write_bytes(dst, buf, (long)len, mode);
+    if (rc == 0) (void)sy_chmod(dst, mode);
+    mm_free(buf);
+    return rc;
+}
+
+static int m53_is_elf_file(const char *path) {
+    unsigned char h[4];
+    int fd = sy_open_read(path);
+    long r;
+    if (fd < 0) return 0;
+    r = sy_read(fd, h, 4);
+    sy_close(fd);
+    return r == 4 && h[0] == 0x7f && h[1] == 'E' && h[2] == 'L' && h[3] == 'F';
+}
+
+static int m53_run_stream_with_env(const char *cand_ape, const char *stdin_path,
+                                   char *err_out, long ecap) {
+    px_opts o = {0};
+    px_result r = {0};
+    char e_ape[600];
+    char *av_sh[5] = {"sh", (char *)cand_ape, "stream", "e2", 0};
+    char *av_elf[4] = {(char *)cand_ape, "stream", "e2", 0};
+    char *env[4] = {"UNISACC_M53_S1=1", 0, "UNISACC_M53_S1_SO=", 0};
+    const char *prev_so = sy_env("UNISACC_M53_S1_SO");
+    char *saved_so = 0;
+    int rc;
+    if (cx_fmt(e_ape, sizeof e_ape, "UNISACC_APE_SELF=%s", cand_ape)) return -1;
+    env[1] = e_ape;
+    if (prev_so) {
+        long sl = tx_len(prev_so, 1024);
+        saved_so = (char *)mm_alloc((size_t)sl + 1);
+        if (saved_so) mm_copy(saved_so, (size_t)sl + 1, prev_so, (size_t)sl + 1);
+        sy_unsetenv("UNISACC_M53_S1_SO");
+    }
+    /* Ensure UNISACC_M53_S1_SO stays empty/unset so sidecar tapemode.so discovery runs. */
+    o.argv = m53_is_elf_file(cand_ape) ? av_elf : av_sh;
+    o.stdin_path = stdin_path;
+    o.deadline_ms = 30000;
+    o.out_cap = 8192;
+    o.err_cap = ecap > 0 ? ecap - 1 : 0;
+    o.kill_tree = 1;
+    o.env_add = env;
+    if (err_out && ecap > 0) err_out[0] = 0;
+    if (px_run(&o, &r) != 0) {
+        px_result_free(&r);
+        if (saved_so) { sy_setenv("UNISACC_M53_S1_SO", saved_so, 1); mm_free(saved_so); }
+        return -1;
+    }
+    if (saved_so) { sy_setenv("UNISACC_M53_S1_SO", saved_so, 1); mm_free(saved_so); }
+    if (err_out && ecap > 0 && r.err && r.errn > 0) {
+        long n = r.errn < (ecap - 1) ? r.errn : (ecap - 1);
+        mm_copy(err_out, (size_t)ecap, r.err, n);
+        err_out[n] = 0;
+    }
+    rc = r.code;
+    px_result_free(&r);
+    return rc;
+}
+
+static int m53_run_g5_candidate(const char *cand_ape) {
+    char real_ape[512], parent[512], p_tape[560], p_so[600], p_slice[600], tmp[512], p_in[600];
+    char ape_sha[65], so_sha[65], err[2048];
+    unsigned char *orig_so = 0, *ab = 0;
+    int64_t orig_len = 0, al = 0;
+    sy_stat_t st;
+    int orig_mode = 0755, rc;
+    long n, at;
+    const unsigned char payload[39] = {
+        'U','S','L','A','T','T','R','T', 4,0,0,0, 0,0,0,0,
+        'i','n','t',' ','f','(','v','o','i','d',')','{','r','e','t','u','r','n',' ','0',';','}','\n'
+    };
+    const char *td = sy_env_or("TMPDIR", "/tmp");
+    ape_sha[0] = '-'; ape_sha[1] = 0;
+    so_sha[0] = '-'; so_sha[1] = 0;
+    if (!cand_ape || !cand_ape[0] || sy_realpath(cand_ape, real_ape, (int)sizeof real_ape) < 0) {
+        ck(0, "G5-cand-resolve-ape");
+        goto done_g5;
+    }
+    n = tx_len(real_ape, (long)sizeof real_ape);
+    at = n;
+    while (at > 0 && real_ape[at - 1] != '/') at--;
+    if (at <= 0 || at >= (long)sizeof parent) { ck(0, "G5-cand-parent"); goto done_g5; }
+    mm_copy(parent, (size_t)sizeof parent, real_ape, (size_t)(at > 1 ? at - 1 : 1));
+    parent[at > 1 ? at - 1 : 1] = 0;
+    if (cx_fmt(p_tape, sizeof p_tape, "%s/tape", parent) ||
+        cx_fmt(p_so, sizeof p_so, "%s/tapemode.so", p_tape) ||
+        cx_fmt(p_slice, sizeof p_slice, "%s/m53.tapeslice", p_tape)) return 2;
+
+    if (sy_read_file(real_ape, &ab, &al, 67108864) == 0 && ab && al > 0) {
+        cx_sha256_hex(ab, (size_t)al, ape_sha);
+        mm_free(ab);
+    }
+    if (sy_stat(p_so, &st) == 0) orig_mode = st.mode & 0777;
+    if (sy_read_file(p_so, &orig_so, &orig_len, 16777216) == 0 && orig_so && orig_len > 0) {
+        cx_sha256_hex(orig_so, (size_t)orig_len, so_sha);
+    }
+    ck(tx_len(ape_sha, 70) == 64 && orig_so != 0 && sy_exists(p_slice) == 1, "G5-cand-sidecar-assets-present");
+    if (!orig_so || sy_exists(p_slice) != 1) goto done_g5;
+
+    if (sy_mkdtemp(td, "m53g5-", tmp, sizeof tmp) != 0) return 2;
+    if (cx_fmt(p_in, sizeof p_in, "%s/stream_in.c", tmp)) return 2;
+    if (m53_write_bytes(p_in, payload, (long)sizeof payload, 0600) != 0) { (void)sy_remove_all(tmp); return 2; }
+
+    /* Case 1: clean sidecar discovery under UNISACC_M53_S1=1 */
+    rc = m53_run_stream_with_env(real_ape, p_in, err, sizeof err);
+    ck(rc == 0 && !strstr(err, "M53_S1_FALLBACK"), "G5-cand-sidecar-ok");
+
+    /* Case 2: missing tapemode.so -> exec-absent fallback */
+    (void)sy_unlink(p_so);
+    rc = m53_run_stream_with_env(real_ape, p_in, err, sizeof err);
+    ck(rc == 0 && strstr(err, "M53_S1_FALLBACK\treason=exec-absent") != 0, "G5-cand-so-missing-fallback");
+
+    /* Case 3: replaced corrupt tapemode.so -> exec-absent fallback */
+    (void)m53_write_bytes(p_so, (const unsigned char *)"CORRUPT_NOT_ELF\n", 16, 0755);
+    (void)sy_chmod(p_so, 0755);
+    rc = m53_run_stream_with_env(real_ape, p_in, err, sizeof err);
+    ck(rc == 0 && strstr(err, "M53_S1_FALLBACK\treason=exec-absent") != 0, "G5-cand-so-replaced-fallback");
+
+    /* Case 4: restored tapemode.so chmod 0666 -> untrusted fallback */
+    (void)m53_write_bytes(p_so, orig_so, (long)orig_len, orig_mode);
+    (void)sy_chmod(p_so, 0666);
+    rc = m53_run_stream_with_env(real_ape, p_in, err, sizeof err);
+    ck(rc == 0 && strstr(err, "M53_S1_FALLBACK\treason=untrusted") != 0, "G5-cand-so-mode0666-fallback");
+
+    (void)m53_write_bytes(p_so, orig_so, (long)orig_len, orig_mode);
+    (void)sy_chmod(p_so, orig_mode);
+    (void)sy_remove_all(tmp);
+done_g5:
+    if (orig_so) mm_free(orig_so);
+    printf("CHECK_SLICE_NN_M53_S1_G5\t%s\tcases=4\tok=%d\tfail=%d\tcandidate_ape_sha=%s\tsidecar_so_sha=%s\n",
+           failed ? "FAIL" : "PASS", n_ok, failed, ape_sha, so_sha);
+    return failed ? 1 : 0;
+}
+
+int main(int argc, char **argv) {
+    char root[512], ape_sha[65], slice_sha[65], out[2048], err[2048];
+    char p_so[640], p_guest[640], p_s[640], p_slice[640], p_swap[640], p_empty[640];
+    char p_trunc[640], p_badseal[640], p_sym[640], p_perm[640], p_mut_s[640], p_mut_sl[640];
+    const char *u = sy_env_or("UNISACC", "./unisacc.com"); /* lint:allow R1-product default product fallback for S1 check harness */
+    const char *tmp = sy_env_or("TMPDIR", "/tmp");
+    int rc;
+    if (argc >= 2 && tx_eqz(argv[1], "child")) return m53_child(argc, argv);
+    if (argc >= 2 && tx_eqz(argv[1], "child28")) return m53_child28(argc, argv);
+    if (argc >= 3 && tx_eqz(argv[1], "--g5-candidate")) return m53_run_g5_candidate(argv[2]);
+    if (argc > 0 && argv[0] && argv[0][0]) g_m53_self = argv[0];
+    if (sy_mkdtemp(tmp, "m53chk-", root, sizeof root) != 0) return 2;
+    if (cx_fmt(p_so, sizeof p_so, "%s/tapemode.so", root) ||
+        cx_fmt(p_guest, sizeof p_guest, "%s/m53_guest.cx", root) ||
+        cx_fmt(p_s, sizeof p_s, "%s/m53_guest.s", root) ||
+        cx_fmt(p_slice, sizeof p_slice, "%s/m53.tapeslice", root) ||
+        cx_fmt(p_swap, sizeof p_swap, "%s/swap.tapeslice", root) ||
+        cx_fmt(p_empty, sizeof p_empty, "%s/empty.tapeslice", root) ||
+        cx_fmt(p_trunc, sizeof p_trunc, "%s/trunc.tapeslice", root) ||
+        cx_fmt(p_badseal, sizeof p_badseal, "%s/badseal.tapeslice", root) ||
+        cx_fmt(p_sym, sizeof p_sym, "%s/sym.tapeslice", root) ||
+        cx_fmt(p_perm, sizeof p_perm, "%s/perm.tapeslice", root) ||
+        cx_fmt(p_mut_s, sizeof p_mut_s, "%s/mut.s", root) ||
+        cx_fmt(p_mut_sl, sizeof p_mut_sl, "%s/mut.tapeslice", root)) return 2;
+
+    /* A1: Candidate APE identity + tapemode.so + real m53.tapeslice */
+    {
+        unsigned char *ab = 0; int64_t al = 0;
+        const char *ape_p = sy_env("UNISACC_APE_SELF");
+        if (!ape_p || !ape_p[0]) ape_p = u;
+        ape_sha[0] = '-'; ape_sha[1] = 0;
+        if (sy_read_file(ape_p, &ab, &al, 67108864) == 0 && ab && al > 0) {
+            cx_sha256_hex(ab, (size_t)al, ape_sha);
+            mm_free(ab);
+        }
+        ck(tx_len(ape_sha, 70) == 64, "A1-candidate-ape-sha");
+
+        char *cc_av[] = {"cc", "-shared", "-fPIC", "-nostdlib", "-O2", "-Wl,-Bsymbolic", "-Wl,--hash-style=sysv", "-Wl,-z,norelro",
+                         "-o", p_so, "tools/tape/asm/tape_x86_64.S", "tools/tape/asm/hoststub_lnx_x86_64.S", 0};
+        rc = m53_spawn_capture(cc_av, 0, 0, out, sizeof out, err, sizeof err);
+        ck(rc == 0 && sy_exists(p_so) == 1, "A1-build-tapemode-so");
+
+        ck(m53_write_bytes(p_guest, (const unsigned char *)m53_guest_src(), tx_len(m53_guest_src(), 1 << 16), 0600) == 0,
+           "A1-write-m53-guest");
+        char *c_av[] = {"sh", (char *)u, p_guest, "-S", "-o", p_s, 0}; /* lint:allow R1-product compiles S1 m53 guest slice */
+        rc = m53_spawn_capture(c_av, 0, 0, out, sizeof out, err, sizeof err);
+        ck(rc == 0 && sy_exists(p_s) == 1, "A1-compile-guest-S");
+
+        char *pk_av[] = {"sh", (char *)u, "tools/tapepack.cx", "--", p_s, "-o", p_slice, 0};
+        rc = m53_spawn_capture(pk_av, 0, 0, out, sizeof out, err, sizeof err);
+        slice_sha[0] = '-'; slice_sha[1] = 0;
+        {
+            unsigned char *sb = 0; int64_t sl = 0;
+            if (sy_read_file(p_slice, &sb, &sl, 4194304) == 0 && sb && sl > 0) {
+                cx_sha256_hex(sb, (size_t)sl, slice_sha);
+                mm_free(sb);
+            }
+        }
+        ck(rc == 0 && tx_len(slice_sha, 70) == 64 && strstr(out, "TAPEPACK_OK\t") != 0,
+           "A1-pack-m53-tapeslice");
+    }
+
+    /* A2: Default OFF invariance + existing check-stream-attributes oracle */
+    {
+        char *av[] = {"sh", (char *)u, "-run", (char *)g_m53_self, "--", "child", "1", "13", "1", "0", "-", 0};
+        rc = m53_spawn_capture(av, 0, 0, out, sizeof out, err, sizeof err);
+        ck(rc == 0 && tx_eqz(out, "M53\t1\n") && !strstr(err, "M53_S1_FALLBACK"), "A2-default-native-clean");
+
+        char *av_st[] = {"sh", (char *)u, "tools/check-stream-attributes.cx", "--", 0};
+        rc = m53_spawn_capture(av_st, 0, 0, out, sizeof out, err, sizeof err);
+        ck(rc == 0 && strstr(out, "CXSTREAM_ATTRIBUTES\tfailed=0") != 0 && !strstr(err, "M53_S1_FALLBACK"),
+           "A2-existing-stream-attributes-pass");
+    }
+
+    /* A3: In-process 28 vectors against m53.tapeslice + native oracle */
+    {
+        static unsigned char vbuf[9000016];
+        unsigned long cnts[28] = {
+            0, 0, 0, 0, 0, 0, 1, 1, 1, 1,
+            2, 2, 3, 10, 10, 100, 100, 500, 1000, 1000,
+            10000, 50000, 1000000, 1000000, 1000000, 1000001, 0xffffffffUL, 1
+        };
+        long lens[28] = {
+            4, 0, 3, -1, 5, 4, 13, 12, 14, 0,
+            22, 21, 31, 94, 95, 904, 903, 4504, 9004, 9005,
+            90004, 450004, 9000004, 9000003, 9000005, 9000013, 4, 13
+        };
+        int ptr_ok[28] = {
+            1, 1, 1, 1, 1, 0, 1, 1, 1, 0,
+            1, 1, 1, 1, 1, 1, 1, 1, 1, 1,
+            1, 1, 1, 1, 1, 1, 1, 1
+        };
+        int all_ok = 1;
+        for (int i = 0; i < 64; i++) vbuf[i] = 0;
+        sy_setenv("UNISACC_M53_S1", p_slice, 1);
+        sy_setenv("UNISACC_M53_S1_SO", p_so, 1);
+        for (int v = 0; v < 28; v++) {
+            vbuf[0] = (unsigned char)(cnts[v] & 255u);
+            vbuf[1] = (unsigned char)((cnts[v] >> 8) & 255u);
+            vbuf[2] = (unsigned char)((cnts[v] >> 16) & 255u);
+            vbuf[3] = (unsigned char)((cnts[v] >> 24) & 255u);
+            const unsigned char *p = ptr_ok[v] ? vbuf : 0;
+            int got = cxsa_valid_s1(p, lens[v]);
+            int exp = m53_oracle(p, lens[v]);
+            if (got != exp) { all_ok = 0; break; }
+        }
+        sy_unsetenv("UNISACC_M53_S1");
+        sy_unsetenv("UNISACC_M53_S1_SO");
+        ck(all_ok, "A3-inproc-28-vectors-parity");
+        /* Split-pipe zero-fallback proof across all 28 parity vectors (no silent -run fallback) */
+        {
+            char *av28[] = {"sh", (char *)u, "-run", (char *)g_m53_self, "--", "child28", p_slice, p_so, 0};
+            rc = m53_spawn_capture(av28, 0, 0, out, sizeof out, err, sizeof err);
+            ck(rc == 0 && tx_eqz(out, "M53_28\t1\t0\n") && !strstr(err, "M53_S1_FALLBACK"), "A3-28-vectors-zero-fallback");
+        }
+        /* Split-pipe zero-fallback proof on live m53 execution */
+        {
+            char *av[] = {"sh", (char *)u, "-run", (char *)g_m53_self, "--", "child", "10", "94", "1", p_slice, p_so, 0};
+            rc = m53_spawn_capture(av, 0, 0, out, sizeof out, err, sizeof err);
+            ck(rc == 0 && tx_eqz(out, "M53\t1\n") && !strstr(err, "M53_S1_FALLBACK"), "A3-exec-match-zero-fallback");
+        }
+    }
+
+    /* A4: 3 Mutants (M1 boundary constant 1000000 -> 5 in m53_guest.s, M2 truncated container, M3 bad ident seal) */
+    {
+        size_t sz = 0;
+        char *asm_s = cx_read(p_s, &sz);
+        int replaced = 0;
+        if (asm_s && sz > 7) {
+            const char *cstr = "1000000";
+            for (long k = 0; k + 7 <= (long)sz; k++) {
+                if (mm_same(asm_s + k, cstr, 7)) {
+                    asm_s[k] = ' '; asm_s[k+1] = ' '; asm_s[k+2] = ' ';
+                    asm_s[k+3] = ' '; asm_s[k+4] = ' '; asm_s[k+5] = ' '; asm_s[k+6] = '5';
+                    replaced = 1;
+                    break;
+                }
+            }
+            if (replaced && m53_write_bytes(p_mut_s, (unsigned char *)asm_s, (long)sz, 0600) == 0) {
+                char *pk_m[] = {"sh", (char *)u, "tools/tapepack.cx", "--", p_mut_s, "-o", p_mut_sl, 0};
+                rc = m53_spawn_capture(pk_m, 0, 0, out, sizeof out, err, sizeof err);
+            } else rc = -1;
+            free(asm_s);
+        } else rc = -1;
+        ck(replaced && rc == 0, "A4-M1-pack-cap-constant-mutant");
+        {
+            /* count=10, len=94 -> native returns 1, mutated container (>5) returns 0 -> caught as mismatch! */
+            char *av[] = {"sh", (char *)u, "-run", (char *)g_m53_self, "--", "child", "10", "94", "1", p_mut_sl, p_so, 0};
+            rc = m53_spawn_capture(av, 0, 0, out, sizeof out, err, sizeof err);
+            ck(rc == 0 && tx_eqz(out, "M53\t1\n") && strstr(err, "M53_S1_FALLBACK\treason=mismatch") != 0,
+               "A4-M1-cap-constant-caught-failopen");
+        }
+        {
+            unsigned char *sb = 0; int64_t sl = 0;
+            if (sy_read_file(p_slice, &sb, &sl, 4194304) == 0 && sb && sl > 250) {
+                (void)m53_write_bytes(p_trunc, sb, 180, 0600);
+                sb[28] ^= 1;
+                (void)m53_write_bytes(p_badseal, sb, (long)sl, 0600);
+                mm_free(sb);
+            }
+        }
+        {
+            char *av2[] = {"sh", (char *)u, "-run", (char *)g_m53_self, "--", "child", "1", "13", "1", p_trunc, p_so, 0};
+            rc = m53_spawn_capture(av2, 0, 0, out, sizeof out, err, sizeof err);
+            ck(rc == 0 && tx_eqz(out, "M53\t1\n") && strstr(err, "M53_S1_FALLBACK\treason=corrupt") != 0,
+               "A4-M2-truncated-container-failopen");
+
+            char *av3[] = {"sh", (char *)u, "-run", (char *)g_m53_self, "--", "child", "1", "13", "1", p_badseal, p_so, 0};
+            rc = m53_spawn_capture(av3, 0, 0, out, sizeof out, err, sizeof err);
+            ck(rc == 0 && tx_eqz(out, "M53\t1\n") && strstr(err, "M53_S1_FALLBACK\treason=corrupt") != 0,
+               "A4-M3-bad-seal-failopen");
+        }
+    }
+
+    /* A5: Failure contract (absent, empty, swap, symlink, chmod 0666 owner/mode, exec-absent, bare-rel -> native & clean stdout) */
+    {
+        char p_miss[640], p_noso[640];
+        if (cx_fmt(p_miss, sizeof p_miss, "%s/missing.tapeslice", root) ||
+            cx_fmt(p_noso, sizeof p_noso, "%s/missing.so", root)) return 2;
+        (void)m53_write_bytes(p_empty, (const unsigned char *)"", 0, 0600);
+        m53_write_swap_container(p_swap);
+        (void)sy_symlink(p_slice, p_sym);
+        {
+            unsigned char *sb = 0; int64_t sl = 0;
+            if (sy_read_file(p_slice, &sb, &sl, 4194304) == 0 && sb && sl > 0) {
+                (void)m53_write_bytes(p_perm, sb, (long)sl, 0666);
+                sy_chmod(p_perm, 0666);
+                mm_free(sb);
+            }
+        }
+        char *a_abs[] = {"sh", (char *)u, "-run", (char *)g_m53_self, "--", "child", "1", "13", "1", p_miss, p_so, 0};
+        rc = m53_spawn_capture(a_abs, 0, 0, out, sizeof out, err, sizeof err);
+        ck(rc == 0 && tx_eqz(out, "M53\t1\n") && strstr(err, "M53_S1_FALLBACK\treason=absent") != 0, "A5-absent-failopen-stdout-clean");
+
+        char *a_emp[] = {"sh", (char *)u, "-run", (char *)g_m53_self, "--", "child", "1", "13", "1", p_empty, p_so, 0};
+        rc = m53_spawn_capture(a_emp, 0, 0, out, sizeof out, err, sizeof err);
+        ck(rc == 0 && tx_eqz(out, "M53\t1\n") && strstr(err, "M53_S1_FALLBACK\treason=empty") != 0, "A5-empty-failopen-stdout-clean");
+
+        char *a_swp[] = {"sh", (char *)u, "-run", (char *)g_m53_self, "--", "child", "1", "13", "1", p_swap, p_so, 0};
+        rc = m53_spawn_capture(a_swp, 0, 0, out, sizeof out, err, sizeof err);
+        ck(rc == 0 && tx_eqz(out, "M53\t1\n") && strstr(err, "M53_S1_FALLBACK\treason=swap") != 0, "A5-swap-failopen-stdout-clean");
+
+        char *a_sym[] = {"sh", (char *)u, "-run", (char *)g_m53_self, "--", "child", "1", "13", "1", p_sym, p_so, 0};
+        rc = m53_spawn_capture(a_sym, 0, 0, out, sizeof out, err, sizeof err);
+        ck(rc == 0 && tx_eqz(out, "M53\t1\n") && strstr(err, "M53_S1_FALLBACK\treason=untrusted") != 0, "A5-symlink-untrusted-failopen");
+
+        char *a_prm[] = {"sh", (char *)u, "-run", (char *)g_m53_self, "--", "child", "1", "13", "1", p_perm, p_so, 0};
+        rc = m53_spawn_capture(a_prm, 0, 0, out, sizeof out, err, sizeof err);
+        ck(rc == 0 && tx_eqz(out, "M53\t1\n") && strstr(err, "M53_S1_FALLBACK\treason=untrusted") != 0, "A5-mode0666-untrusted-failopen");
+
+        char *a_nso[] = {"sh", (char *)u, "-run", (char *)g_m53_self, "--", "child", "1", "13", "1", p_slice, p_noso, 0};
+        rc = m53_spawn_capture(a_nso, 0, 0, out, sizeof out, err, sizeof err);
+        ck(rc == 0 && tx_eqz(out, "M53\t1\n") && strstr(err, "M53_S1_FALLBACK\treason=exec-absent") != 0, "A5-exec-absent-failopen");
+
+        char *a_rel[] = {"sh", (char *)u, "-run", (char *)g_m53_self, "--", "child", "1", "13", "1", "bare_rel.tapeslice", p_so, 0};
+        rc = m53_spawn_capture(a_rel, 0, 0, out, sizeof out, err, sizeof err);
+        ck(rc == 0 && tx_eqz(out, "M53\t1\n") && strstr(err, "M53_S1_FALLBACK\treason=absent") != 0, "A5-bare-rel-refused-failopen");
+    }
+
+    /* G5: Sidecar discovery E2E skeleton (UNISACC_M53_S1=1, UNISACC_APE_SELF=<priv>/unisacc.com, NO UNISACC_M53_S1_SO) */
+    {
+        char g_dir[560], g_tape[600], g_ape[640], g_sl[640], g_so[640], g_dum_c[640], g_dum_so[640];
+        unsigned char elf_hdr[64];
+        int i;
+        if (cx_fmt(g_dir, sizeof g_dir, "%s/g5_priv", root) ||
+            cx_fmt(g_tape, sizeof g_tape, "%s/tape", g_dir) ||
+            cx_fmt(g_ape, sizeof g_ape, "%s/unisacc.com", g_dir) ||
+            cx_fmt(g_sl, sizeof g_sl, "%s/m53.tapeslice", g_tape) ||
+            cx_fmt(g_so, sizeof g_so, "%s/tapemode.so", g_tape) ||
+            cx_fmt(g_dum_c, sizeof g_dum_c, "%s/dummy.c", root) ||
+            cx_fmt(g_dum_so, sizeof g_dum_so, "%s/dummy.so", root)) return 2;
+        for (i = 0; i < 64; i++) elf_hdr[i] = 0;
+        elf_hdr[0] = 0x7f; elf_hdr[1] = 'E'; elf_hdr[2] = 'L'; elf_hdr[3] = 'F';
+        elf_hdr[4] = 2; elf_hdr[5] = 1; elf_hdr[6] = 1;
+        (void)sy_mkdir(g_dir, 0755); (void)sy_chmod(g_dir, 0755);
+        (void)sy_mkdir(g_tape, 0755); (void)sy_chmod(g_tape, 0755);
+        (void)m53_write_bytes(g_ape, elf_hdr, 64, 0755);
+        (void)m53_copy_file(p_slice, g_sl, 0644);
+        (void)m53_copy_file(p_so, g_so, 0755);
+
+        {
+            const char *dsrc = "int m53_g5_dummy(void) { return 7; }\n";
+            (void)m53_write_bytes(g_dum_c, (const unsigned char *)dsrc, tx_len(dsrc, 256), 0644);
+            char *cc_d[] = {"cc", "-shared", "-fPIC", "-nostdlib", "-O2", "-Wl,-Bsymbolic", "-Wl,--hash-style=sysv", "-Wl,-z,norelro",
+                            "-o", g_dum_so, g_dum_c, 0};
+            rc = m53_spawn_capture(cc_d, 0, 0, out, sizeof out, err, sizeof err);
+            ck(rc == 0 && sy_exists(g_dum_so) == 1, "G5-build-dummy-so");
+        }
+
+        /* G5-1: sidecar discovered cleanly under UNISACC_M53_S1=1 */
+        {
+            char *av[] = {"sh", (char *)u, "-run", (char *)g_m53_self, "--", "child", "1", "13", "1", "1", "-", g_ape, 0};
+            rc = m53_spawn_capture_ape(av, 0, 0, 0, out, sizeof out, err, sizeof err);
+            ck(rc == 0 && tx_eqz(out, "M53\t1\n") && !strstr(err, "M53_S1_FALLBACK"), "G5-sidecar-discovered-zero-fallback");
+        }
+
+        /* G5-2: anti-spoof kill -- swap sidecar slice to M1 mutant -> proves sidecar .so + slice ran */
+        (void)m53_copy_file(p_mut_sl, g_sl, 0644);
+        {
+            char *av[] = {"sh", (char *)u, "-run", (char *)g_m53_self, "--", "child", "10", "94", "1", "1", "-", g_ape, 0};
+            rc = m53_spawn_capture_ape(av, 0, 0, 0, out, sizeof out, err, sizeof err);
+            ck(rc == 0 && tx_eqz(out, "M53\t1\n") && strstr(err, "M53_S1_FALLBACK\treason=mismatch") != 0,
+               "G5-sidecar-mutant-kills-proof");
+        }
+        (void)m53_copy_file(p_slice, g_sl, 0644);
+
+        /* G5-3: sidecar tapemode.so missing -> exec-absent fallback */
+        (void)sy_unlink(g_so);
+        {
+            char *av[] = {"sh", (char *)u, "-run", (char *)g_m53_self, "--", "child", "1", "13", "1", "1", "-", g_ape, 0};
+            rc = m53_spawn_capture_ape(av, 0, 0, 0, out, sizeof out, err, sizeof err);
+            ck(rc == 0 && tx_eqz(out, "M53\t1\n") && strstr(err, "M53_S1_FALLBACK\treason=exec-absent") != 0,
+               "G5-sidecar-so-missing-failopen");
+        }
+
+        /* G5-4: sidecar tapemode.so replaced by corrupt bytes -> exec-absent fallback + detail */
+        (void)m53_write_bytes(g_so, (const unsigned char *)"CORRUPT_NOT_ELF\n", 16, 0755);
+        {
+            char *av[] = {"sh", (char *)u, "-run", (char *)g_m53_self, "--", "child", "1", "13", "1", "1", "-", g_ape, 0};
+            rc = m53_spawn_capture_ape(av, 0, 0, 0, out, sizeof out, err, sizeof err);
+            ck(rc == 0 && tx_eqz(out, "M53\t1\n") && strstr(err, "M53_S1_FALLBACK\treason=exec-absent") != 0 &&
+               strstr(err, "\tdetail=") != 0,
+               "G5-sidecar-so-corrupt-bytes-failopen");
+        }
+
+        /* G5-5: sidecar tapemode.so replaced by valid ELF .so missing symbols -> exec-absent fallback */
+        (void)m53_copy_file(g_dum_so, g_so, 0755);
+        {
+            char *av[] = {"sh", (char *)u, "-run", (char *)g_m53_self, "--", "child", "1", "13", "1", "1", "-", g_ape, 0};
+            rc = m53_spawn_capture_ape(av, 0, 0, 0, out, sizeof out, err, sizeof err);
+            ck(rc == 0 && tx_eqz(out, "M53\t1\n") && strstr(err, "M53_S1_FALLBACK\treason=exec-absent") != 0,
+               "G5-sidecar-so-dummy-replace-failopen");
+        }
+
+        /* G5-6: sidecar tapemode.so chmod 0666 -> untrusted fallback */
+        (void)m53_copy_file(p_so, g_so, 0666);
+        (void)sy_chmod(g_so, 0666);
+        {
+            char *av[] = {"sh", (char *)u, "-run", (char *)g_m53_self, "--", "child", "1", "13", "1", "1", "-", g_ape, 0};
+            rc = m53_spawn_capture_ape(av, 0, 0, 0, out, sizeof out, err, sizeof err);
+            ck(rc == 0 && tx_eqz(out, "M53\t1\n") && strstr(err, "M53_S1_FALLBACK\treason=untrusted") != 0,
+               "G5-sidecar-so-mode0666-untrusted");
+        }
+
+        /* G5-7: sidecar tapemode.so containing relocations (.rela.plt without -Bsymbolic) -> exec-absent fallback */
+        {
+            char g_rel_so[640];
+            if (cx_fmt(g_rel_so, sizeof g_rel_so, "%s/reloc_bad.so", root)) return 2;
+            char *cc_rel[] = {"cc", "-shared", "-fPIC", "-nostdlib", "-O2", "-o", g_rel_so,
+                              "tools/tape/asm/tape_x86_64.S", "tools/tape/asm/hoststub_lnx_x86_64.S", 0};
+            rc = m53_spawn_capture(cc_rel, 0, 0, out, sizeof out, err, sizeof err);
+            if (rc == 0 && m53_copy_file(g_rel_so, g_so, 0755) == 0) {
+                char *av[] = {"sh", (char *)u, "-run", (char *)g_m53_self, "--", "child", "1", "13", "1", "1", "-", g_ape, 0};
+                rc = m53_spawn_capture_ape(av, 0, 0, 0, out, sizeof out, err, sizeof err);
+                ck(rc == 0 && tx_eqz(out, "M53\t1\n") && strstr(err, "M53_S1_FALLBACK\treason=exec-absent") != 0 &&
+                   strstr(err, "\tdetail=") != 0,
+                   "G5-sidecar-so-reloc-rejected-failopen");
+            } else {
+                ck(0, "G5-sidecar-so-reloc-rejected-failopen");
+            }
+        }
+    }
+
+    (void)sy_remove_all(root);
+    printf("CHECK_SLICE_NN_M53_S1\t%s\tvectors=28\tok=%d\tfail=%d\tmutations=3\tcandidate_ape_sha=%s\ttape_container_sha=%s\n",
+           failed ? "FAIL" : "PASS", n_ok, failed, ape_sha, slice_sha);
+    return failed ? 1 : 0;
+}

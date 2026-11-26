@@ -257,7 +257,10 @@ tape_run_x86_64:
     movl $5,%ecx
     rep stosq
     cmpq $4,0(%r12)
+    je .Lrun_mode_ok
+    cmpq $5,0(%r12)
     jne .Lrun_container
+.Lrun_mode_ok:
     movq 8(%r12),%r14
     testq %r14,%r14
     jz .Lrun_container
@@ -291,6 +294,10 @@ tape_run_x86_64:
     cmpq %rsi,%rdx
     jb .Lrun_container
     movl 16(%r14),%ebx
+    cmpq $5,0(%r12)
+    jne .Lrun_entry_ok
+    movq 32(%r12),%rbx
+.Lrun_entry_ok:
     cmpq %rsi,%rbx
     jae .Lrun_container
     addq %rax,%r14
@@ -339,6 +346,8 @@ tape_run_x86_64:
     movq %rax,184(%rsp)
     addq %rdx,%rcx
     jc .Lrun_container
+    cmpq $5,0(%r12)
+    je .Lrun_call_args
     movq 32(%r12),%r8
     cmpq $4095,%r8
     ja .Lrun_container
@@ -347,6 +356,23 @@ tape_run_x86_64:
     jnz .Lrun_argv_check
     testq %r8,%r8
     jnz .Lrun_container
+    jmp .Lrun_stack_top
+.Lrun_call_args:
+    movq 40(%r12),%r9
+    testq %r9,%r9
+    jz .Lrun_stack_top
+    movq 0(%r9),%r8
+    movq %r8,48(%rsp)
+    movq 8(%r9),%r8
+    movq %r8,56(%rsp)
+    movq 16(%r9),%r8
+    movq %r8,64(%rsp)
+    movq 24(%r9),%r8
+    movq %r8,72(%rsp)
+    movq 32(%r9),%r8
+    movq %r8,80(%rsp)
+    movq 40(%r9),%r8
+    movq %r8,88(%rsp)
     jmp .Lrun_stack_top
 .Lrun_argv_check:
     testq $7,%r9
@@ -641,7 +667,14 @@ tape_run_x86_64:
 .Lrun_ret:
     movq 176(%rsp),%rcx
     testq %rcx,%rcx
-    jz .Lrun_stack
+    jnz .Lrun_ret_pop
+    cmpq $5,0(%r12)
+    jne .Lrun_stack
+    movq 48(%rsp),%rax
+    movq %rax,8(%r13)
+    movq $0,24(%r13)
+    jmp .Lrun_return
+.Lrun_ret_pop:
     decq %rcx
     movq %rcx,176(%rsp)
     shlq $4,%rcx
@@ -666,8 +699,11 @@ tape_run_x86_64:
     jnc .Lrun_stack
     movq 72(%r12),%rax
     addq 16(%r12),%rax
+    cmpq $4,0(%r12)
+    jne .Lrun_frame_bound
     cmpq $0,40(%r12)
     cmovneq 40(%r12),%rax
+.Lrun_frame_bound:
     cmpq %rax,%rcx
     ja .Lrun_stack
 .Lrun_frame_set:

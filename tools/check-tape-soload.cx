@@ -1,0 +1,464 @@
+/* tools/check-tape-soload.cx -- Stage 1 (17 corruption cases + 3 mutants + optional tape-so-corrupt TSV consumer) and Stage 2 (1000-loop clobber-all stress + real .so bind) for driver.tape_soload in both -run and -funit ELF modes.
+ * Usage:
+ *   sh ./unisacc.com tools/check-tape-soload.cx -- [--stage 1|--stage 2]
+ *   sh ./unisacc.com tools/check-tape-soload.cx -- --corrupt-tsv OUTDIR/cases.tsv
+ *   Last line (--stage 1): CHECK_TAPE_SOLOAD\tPASS|FAIL\tcases=17\tmode=run,elf
+ *   Last line (--stage 2): CHECK_TAPE_SOLOAD\tPASS|FAIL\tstage=2\tloops=1000\tmode=run,elf
+ */
+#pragma unisa use driver.tape_soload
+#pragma unisa use sys.fs
+#pragma unisa use sys.posix
+#pragma unisa use sys.io
+#pragma unisa use sys.env
+#pragma unisa use sys.mem
+#pragma unisa use sysx.run
+#pragma unisa use text.text
+#pragma unisa use mem.bytes
+#pragma unisa use mem.heap
+
+static int g_ok, g_fail;
+static const char *g_self = "tools/check-tape-soload.cx";
+static const char *const g_syms[3] = {
+    "hoststub_lnx_x86_64_bind",
+    "hoststub_lnx_x86_64",
+    "tape_run_x86_64"
+};
+
+static void ck(int ok, const char *name) {
+    if (ok) { g_ok++; printf("PASS\t%s\n", name); }
+    else { g_fail++; printf("FAIL\t%s\n", name); }
+}
+
+static unsigned t_u16(const unsigned char *p) { return (unsigned)p[0] | ((unsigned)p[1] << 8); }
+static unsigned t_u32(const unsigned char *p) { return t_u16(p) | (t_u16(p + 2) << 16); }
+static unsigned long long t_u64(const unsigned char *p) {
+    return (unsigned long long)t_u32(p) | ((unsigned long long)t_u32(p + 4) << 32);
+}
+static void w_u32(unsigned char *p, unsigned v) {
+    p[0] = (unsigned char)(v & 255U); p[1] = (unsigned char)((v >> 8) & 255U);
+    p[2] = (unsigned char)((v >> 16) & 255U); p[3] = (unsigned char)((v >> 24) & 255U);
+}
+static void w_u64(unsigned char *p, unsigned long long v) {
+    int i;
+    for (i = 0; i < 8; i++) { p[i] = (unsigned char)(v & 255ULL); v >>= 8; }
+}
+
+static int run_cmd(char **av, char *out, long ocap, char *err, long ecap) {
+    px_opts o = {0};
+    px_result r = {0};
+    int rc;
+    o.argv = av;
+    o.deadline_ms = 30000;
+    o.out_cap = ocap > 0 ? ocap - 1 : 0;
+    o.err_cap = ecap > 0 ? ecap - 1 : 0;
+    o.kill_tree = 1;
+    if (out && ocap > 0) out[0] = 0;
+    if (err && ecap > 0) err[0] = 0;
+    if (px_run(&o, &r) != 0) { px_result_free(&r); return -1; }
+    if (out && ocap > 0 && r.out && r.outn > 0) {
+        long n = r.outn < ocap - 1 ? r.outn : ocap - 1;
+        mm_copy(out, (size_t)ocap, r.out, n); out[n] = 0;
+    }
+    if (err && ecap > 0 && r.err && r.errn > 0) {
+        long n = r.errn < ecap - 1 ? r.errn : ecap - 1;
+        mm_copy(err, (size_t)ecap, r.err, n); err[n] = 0;
+    }
+    rc = r.code;
+    px_result_free(&r);
+    return rc;
+}
+
+static void find_ph(const unsigned char *b, unsigned ty, int nth, unsigned long long *out_phoff) {
+    unsigned long long phoff = t_u64(b + 32);
+    unsigned phnum = t_u16(b + 56), i;
+    int seen = 0;
+    *out_phoff = 0;
+    for (i = 0; i < phnum; i++) {
+        unsigned long long p = phoff + (unsigned long long)i * 56ULL;
+        if (t_u32(b + p) == ty) {
+            if (seen == nth) { *out_phoff = p; return; }
+            seen++;
+        }
+    }
+}
+
+typedef struct {
+    const char *name;
+    int want_rc;
+} bad_case_t;
+
+static int build_bad_case(const unsigned char *good, long gn, int idx,
+                          unsigned char **out_buf, long *out_len) {
+    unsigned char *m = (unsigned char *)mm_alloc((size_t)(gn > 64 ? gn : 64));
+    unsigned long long p0 = 0, p1 = 0, p2 = 0, plast = 0, pdyn = 0;
+    unsigned phnum, i;
+    if (!m) return -1;
+    mm_copy(m, gn, good, gn);
+    *out_buf = m;
+    *out_len = gn;
+
+    find_ph(m, 1U, 0, &p0);
+    find_ph(m, 1U, 1, &p1);
+    find_ph(m, 1U, 2, &p2);
+    find_ph(m, 2U, 0, &pdyn);
+    phnum = t_u16(m + 56);
+    for (i = 0; i < phnum; i++) {
+        unsigned long long po = t_u64(m + 32) + (unsigned long long)i * 56ULL;
+        if (t_u32(m + po) == 1U) plast = po;
+    }
+
+    if (idx == 0) { *out_len = 0; return 1; }                           /* 1: empty */
+    if (idx == 1) { *out_len = 63; return 1; }                          /* 1: trunc 63 */
+    if (idx == 2) { *out_len = (long)(t_u64(m + 32) + 28ULL); return 5; } /* 5: trunc phdr */
+    if (idx == 3) {                                                     /* 6: trunc last PT_LOAD */
+        unsigned long long o = t_u64(m + plast + 8), fz = t_u64(m + plast + 32);
+        *out_len = (long)(o + (fz > 8 ? fz / 2 : 1));
+        return 6;
+    }
+    if (idx == 4) { m[4] = 1; return 2; }                               /* 2: bad ident (ELF32) */
+    if (idx == 5) { m[16] = 2; m[17] = 0; return 3; }                   /* 3: ET_EXEC != ET_DYN */
+    if (idx == 6) { m[18] = 183; m[19] = 0; return 4; }                 /* 4: EM_AARCH64 != EM_X86_64 */
+    if (idx == 7) { w_u64(m + p1 + 32, 0x7fffffffULL); return 6; }      /* 6: filesz OOB */
+    if (idx == 8) { w_u64(m + p1 + 40, t_u64(m + p1 + 32) - 4ULL); return 6; } /* 6: memsz < filesz */
+    if (idx == 9) { w_u64(m + p1 + 16, t_u64(m + p1 + 16) + 8ULL); return 7; } /* 7: off%4096 != va%4096 */
+    if (idx == 10) { w_u64(m + p2 + 16, t_u64(m + p1 + 16)); return 8; }       /* 8: overlap seg2 vs seg1 */
+    if (idx == 11) { w_u64(m + plast + 40, 1ULL << 40); return 9; }            /* 9: span > MAX */
+    if (idx == 12) {                                                           /* 10: W+X on RE segment */
+        unsigned long long p_re = 0;
+        for (i = 0; i < phnum; i++) {
+            unsigned long long po = t_u64(m + 32) + (unsigned long long)i * 56ULL;
+            if (t_u32(m + po) == 1U && (t_u32(m + po + 4) & 1U)) { p_re = po; break; }
+        }
+        w_u32(m + p_re + 4, 7U);
+        return 10;
+    }
+    if (idx == 13) {                                                    /* 12: dynamic tag -> DT_RELA (7) */
+        unsigned long long doff = t_u64(m + pdyn + 8);
+        w_u64(m + doff, 7ULL);
+        return 12;
+    }
+    if (idx == 14) {                                                    /* 13: dynamic tag -> DT_NEEDED (1) */
+        unsigned long long doff = t_u64(m + pdyn + 8);
+        w_u64(m + doff, 1ULL);
+        return 13;
+    }
+    if (idx == 15) {                                                    /* 15: sym-missing in dynstr */
+        for (long k = 0; k + 15 <= gn; k++) {
+            if (mm_same(m + k, "tape_run_x86_64", 15)) { m[k] = 'X'; break; }
+        }
+        return 15;
+    }
+    if (idx == 16) {                                                    /* 16: sym-range OOB */
+        unsigned long long doff = t_u64(m + pdyn + 8), dsz = t_u64(m + pdyn + 32);
+        unsigned long long symva = 0, strva = 0, strsz = 0, symoff = 0, stroff = 0;
+        tsl_img_t im_tmp;
+        if (tsl_check(good, gn, g_syms, &im_tmp) == 0) {
+            for (unsigned long long d = 0; d + 16ULL <= dsz; d += 16ULL) {
+                unsigned long long tag = t_u64(m + doff + d), val = t_u64(m + doff + d + 8);
+                if (tag == 0) break;
+                if (tag == 6ULL) symva = val;
+                if (tag == 5ULL) strva = val;
+                if (tag == 10ULL) strsz = val;
+            }
+            for (int si = 0; si < (int)im_tmp[TSL_I_NSEG]; si++) {
+                int sb = TSL_I_SEG0 + si * TSL_S_STRIDE;
+                unsigned long long s_off = im_tmp[sb + TSL_S_OFF];
+                unsigned long long s_va = im_tmp[sb + TSL_S_VA];
+                unsigned long long s_fsz = im_tmp[sb + TSL_S_FSZ];
+                if (symva >= s_va && symva < s_va + s_fsz)
+                    symoff = s_off + (symva - s_va);
+                if (strva >= s_va && strva < s_va + s_fsz)
+                    stroff = s_off + (strva - s_va);
+            }
+            if (symoff && stroff) {
+                for (unsigned long long s = 1; s < 32; s++) {
+                    unsigned long long eo = symoff + s * 24ULL;
+                    if (eo + 24ULL > (unsigned long long)gn) break;
+                    unsigned noff = t_u32(m + eo);
+                    if (noff + 15ULL < strsz && mm_same(m + stroff + noff, "tape_run_x86_64", 15)) {
+                        w_u64(m + eo + 8, 0x3000ULL);
+                        break;
+                    }
+                }
+            }
+        } else {
+            /* Force nonzero invalid st_value in .dynsym anyway if tsl_check stub returned 0 without segments */
+            for (long k = 0; k + 24 <= gn; k++) {
+                if (m[k + 4] == 0x12 && t_u64(m + k + 8) > 0 && t_u64(m + k + 8) < 0x3000ULL) {
+                    w_u64(m + k + 8, 0x3000ULL);
+                }
+            }
+        }
+        return 16;
+    }
+    return -1;
+}
+
+static const bad_case_t g_bad_cases[17] = {
+    {"S1-empty-1", 1},
+    {"S1-trunc63-1", 1},
+    {"S1-trunc-phdr-5", 5},
+    {"S1-trunc-load-6", 6},
+    {"S1-ident-2", 2},
+    {"S1-type-3", 3},
+    {"S1-machine-4", 4},
+    {"S1-filesz-oob-6", 6},
+    {"S1-memsz-lt-filesz-6", 6},
+    {"S1-align-7", 7},
+    {"S1-overlap-8", 8},
+    {"S1-span-9", 9},
+    {"S1-wx-10", 10},
+    {"S1-reloc-12", 12},
+    {"S1-needed-13", 13},
+    {"S1-sym-missing-15", 15},
+    {"S1-sym-range-16", 16}
+};
+
+static int child_stage1(const char *so_path) {
+    unsigned char *good = 0;
+    int64_t gn = 0;
+    tsl_img_t im;
+    int pass_cnt = 0, fail_cnt = 0, i, rc;
+    if (sy_read_file(so_path, &good, &gn, 2097152) != 0 || !good) {
+        printf("CHILD_STAGE1\tFAIL\tunreadable\n");
+        return 1;
+    }
+    rc = tsl_check(good, (long)gn, g_syms, &im);
+    if (rc != 0) {
+        printf("CHILD_STAGE1\tFAIL\tgood-check=%d\n", rc);
+        mm_free(good); return 1;
+    }
+    rc = tsl_map(good, (long)gn, &im);
+    if (rc != 0 || ((int)im[TSL_I_CONV] != 1 && (int)im[TSL_I_CONV] != 2) || !tsl_addr(&im, 0) || !tsl_addr(&im, 1) || !tsl_addr(&im, 2)) {
+        printf("CHILD_STAGE1\tFAIL\tgood-map=%d\tconv=%d\n", rc, (int)im[TSL_I_CONV]);
+        tsl_unload(&im); mm_free(good); return 1;
+    }
+    printf("CHILD_STAGE1_GOOD\tconv=%d\tnseg=%d\tspan=%llu\n", (int)im[TSL_I_CONV], (int)im[TSL_I_NSEG], im[TSL_I_SPAN]);
+    tsl_unload(&im);
+
+    for (i = 0; i < 17; i++) {
+        unsigned char *mb = 0;
+        long ml = 0;
+        int want = build_bad_case(good, (long)gn, i, &mb, &ml);
+        int got = tsl_check(mb, ml, g_syms, &im);
+        if (got == want) {
+            pass_cnt++;
+            printf("PASS\tchild-%s\tgot=%d\n", g_bad_cases[i].name, got);
+        } else {
+            fail_cnt++;
+            printf("FAIL\tchild-%s\twant=%d\tgot=%d\n", g_bad_cases[i].name, want, got);
+        }
+        if (mb) mm_free(mb);
+    }
+    mm_free(good);
+    printf("CHILD_STAGE1_SUMMARY\tcases=17\tok=%d\tfail=%d\n", pass_cnt, fail_cnt);
+    return fail_cnt ? 1 : 0;
+}
+
+static int child_stage2(const char *so_path) {
+    unsigned char *good = 0;
+    int64_t gn = 0;
+    tsl_img_t im;
+    void *tpg = 0, *clob_fn = 0, *arena = 0;
+    unsigned char *tp;
+    static const unsigned char clob_code[26] = {
+        0x48, 0x8d, 0x04, 0x37, /* lea (%rdi,%rsi), %rax */
+        0x31, 0xc9,             /* xor %ecx, %ecx */
+        0x31, 0xd2,             /* xor %edx, %edx */
+        0x31, 0xf6,             /* xor %esi, %esi */
+        0x31, 0xff,             /* xor %edi, %edi */
+        0x45, 0x31, 0xc0,       /* xor %r8d, %r8d */
+        0x45, 0x31, 0xc9,       /* xor %r9d, %r9d */
+        0x45, 0x31, 0xd2,       /* xor %r10d, %r10d */
+        0x45, 0x31, 0xdb,       /* xor %r11d, %r11d */
+        0xc3, 0x90              /* ret; nop */
+    };
+    long sum_i = 0, sum_r = 0, acc_a = 17, acc_b = 25;
+    int i, rc, conv, all_42 = 1;
+
+    if (sy_read_file(so_path, &good, &gn, 2097152) != 0 || !good) return 1;
+    rc = tsl_check(good, (long)gn, g_syms, &im);
+    if (rc != 0) { mm_free(good); return 1; }
+    rc = tsl_map(good, (long)gn, &im);
+    mm_free(good);
+    if (rc != 0) return 1;
+
+    if (sy_map_none(&tpg, 4096) != 0 || !tpg || sy_protect_rw(tpg, 4096) != 0) {
+        tsl_unload(&im); return 1;
+    }
+    tp = (unsigned char *)tpg;
+    for (i = 0; i < 26; i++) tp[64 + i] = clob_code[i];
+    if (sy_protect_rx(tpg, 4096) != 0) {
+        (void)sy_unmap(tpg, 4096); tsl_unload(&im); return 1;
+    }
+    clob_fn = (void *)(tp + 64);
+
+    for (i = 0; i < 1000; i++) {
+        long a = 19 + (long)i;
+        long b = 23 - (long)i;
+        long r = tsl_call2(&im, clob_fn, a, b);
+        if (r != 42) all_42 = 0;
+        sum_i += (long)i;
+        sum_r += r;
+        acc_a += 3;
+        acc_b += 7;
+    }
+    conv = (int)im[TSL_I_CONV];
+    (void)sy_unmap(tpg, 4096);
+
+    if (!all_42 || sum_i != 499500L || sum_r != 42000L || acc_a != 3017L || acc_b != 7025L) {
+        printf("CHILD_STAGE2\tFAIL\tall42=%d\tsum_i=%ld\tsum_r=%ld\ta=%ld\tb=%ld\n",
+               all_42, sum_i, sum_r, acc_a, acc_b);
+        tsl_unload(&im); return 1;
+    }
+
+    if (sy_map_none(&arena, 4096) != 0 || !arena || sy_protect_rw(arena, 4096) != 0) {
+        tsl_unload(&im); return 1;
+    }
+    (void)tsl_call2(&im, tsl_addr(&im, 0), (long)arena, 4096L);
+    (void)sy_unmap(arena, 4096);
+    tsl_unload(&im);
+    printf("CHILD_STAGE2\tPASS\tloops=1000\tsum_r=%ld\tsum_i=%ld\tconv=%d\n", sum_r, sum_i, conv);
+    return 0;
+}
+
+static int run_corrupt_tsv(const char *tsv_path) {
+    size_t tn = 0;
+    char *tb = cx_read(tsv_path, &tn);
+    long pos = 0;
+    int total = 0, ok = 0, fail = 0;
+    if (!tb || tn == 0) {
+        if (tb) free(tb);
+        printf("CHECK_TAPE_SOLOAD_TSV\tFAIL\tunreadable=%s\n", tsv_path);
+        return 1;
+    }
+    while (pos < (long)tn) {
+        long le = pos;
+        while (le < (long)tn && tb[le] != '\n') le++;
+        long llen = le - pos;
+        if (llen > 0 && tb[pos + llen - 1] == '\r') llen--;
+        if (llen > 0 && tb[pos] != '#') {
+            char line[1024];
+            long c = llen < (long)sizeof line - 1 ? llen : (long)sizeof line - 1;
+            mm_copy(line, sizeof line, tb + pos, c);
+            line[c] = 0;
+            char *t1 = strchr(line, '\t');
+            char *t2 = t1 ? strchr(t1 + 1, '\t') : 0;
+            if (t1 && t2) {
+                char *t3 = strchr(t2 + 1, '\t');
+                *t1 = 0; *t2 = 0;
+                if (t3) *t3 = 0;
+                const char *cname = line;
+                const char *cfile = t1 + 1;
+                const char *cexp = t2 + 1;
+                if (!tx_eqz(cname, "name") && !tx_eqz(cexp, "expect_code") && !tx_eqz(cexp, "expect_rc")) {
+                    int want = atoi(cexp);
+                    unsigned char *fb = 0;
+                    int64_t fn = 0;
+                    tsl_img_t im;
+                    int got = -1;
+                    if (sy_read_file(cfile, &fb, &fn, 2097152) == 0) {
+                        got = tsl_check(fb ? fb : (const unsigned char *)"", (long)fn, g_syms, &im);
+                        if (fb) mm_free(fb);
+                    }
+                    total++;
+                    if (got == want) { ok++; printf("PASS\ttsv-%s\tgot=%d\n", cname, got); }
+                    else { fail++; printf("FAIL\ttsv-%s\twant=%d\tgot=%d\n", cname, want, got); }
+                }
+            }
+        }
+        pos = le + 1;
+    }
+    free(tb);
+    printf("CHECK_TAPE_SOLOAD_TSV\t%s\tcases=%d\tok=%d\tfail=%d\n",
+           (total > 0 && fail == 0) ? "PASS" : "FAIL", total, ok, fail);
+    return (total > 0 && fail == 0) ? 0 : 1;
+}
+
+int main(int argc, char **argv) {
+    const char *stage = "all";
+    const char *u = sy_env_or("UNISACC", "./unisacc.com"); /* lint:allow R1-product default harness product */
+    const char *tmp = sy_env_or("TMPDIR", "/tmp");
+    char root[512], p_so[640], p_elf[640], out[8192], err[2048];
+    int rc, i;
+
+    if (argc >= 3 && tx_eqz(argv[1], "--child-stage1")) return child_stage1(argv[2]);
+    if (argc >= 3 && tx_eqz(argv[1], "--child-stage2")) return child_stage2(argv[2]);
+    if (argc >= 3 && tx_eqz(argv[1], "--corrupt-tsv")) return run_corrupt_tsv(argv[2]);
+    for (i = 1; i + 1 < argc; i++) {
+        if (tx_eqz(argv[i], "--stage")) stage = argv[i + 1];
+    }
+
+    if (sy_mkdtemp(tmp, "tslchk-", root, sizeof root) != 0) return 2;
+    if (cx_fmt(p_so, sizeof p_so, "%s/tapemode.so", root) ||
+        cx_fmt(p_elf, sizeof p_elf, "%s/soload_probe.elf", root)) return 2;
+
+    {
+        char *cc_av[] = {"cc", "-shared", "-fPIC", "-nostdlib", "-O2", "-Wl,-Bsymbolic",
+                         "-Wl,--hash-style=sysv", "-Wl,-z,norelro", "-o", p_so,
+                         "tools/tape/asm/tape_x86_64.S", "tools/tape/asm/hoststub_lnx_x86_64.S", 0};
+        rc = run_cmd(cc_av, out, sizeof out, err, sizeof err);
+        ck(rc == 0 && sy_exists(p_so) == 1, "build-good-tapemode-so");
+    }
+    {
+        char *elf_av[] = {"sh", (char *)u, "-O2", "-b", "lnx/x86_64", (char *)g_self, "-o", p_elf, 0}; /* lint:allow R1-product builds ELF mode test probe */
+        rc = run_cmd(elf_av, out, sizeof out, err, sizeof err);
+        ck(rc == 0 && sy_exists(p_elf) == 1, "compile-funit-elf-probe");
+    }
+
+    if (tx_eqz(stage, "1") || tx_eqz(stage, "all")) {
+        char *av_run[] = {"sh", (char *)u, "-run", (char *)g_self, "--", "--child-stage1", p_so, 0};
+        rc = run_cmd(av_run, out, sizeof out, err, sizeof err);
+        printf("%s", out);
+        ck(rc == 0 && strstr(out, "CHILD_STAGE1_SUMMARY\tcases=17\tok=17\tfail=0") != 0, "stage1-run-mode-17");
+
+        char *av_elf[] = {p_elf, "--child-stage1", p_so, 0};
+        rc = run_cmd(av_elf, out, sizeof out, err, sizeof err);
+        printf("%s", out);
+        ck(rc == 0 && strstr(out, "CHILD_STAGE1_SUMMARY\tcases=17\tok=17\tfail=0") != 0 &&
+           strstr(out, "CHILD_STAGE1_GOOD\tconv=2\t") != 0, "stage1-elf-mode-17-conv2");
+
+        if (sy_exists("tools/tape-so-corrupt.cx") == 1) {
+            char tsc_dir[640], tsc_man[680];
+            if (cx_fmt(tsc_dir, sizeof tsc_dir, "%s/tsc_out", root) == 0 &&
+                cx_fmt(tsc_man, sizeof tsc_man, "%s/manifest.tsv", tsc_dir) == 0) {
+                (void)sy_mkdir(tsc_dir, 0755);
+                char *av_tsc[] = {"sh", (char *)u, "tools/tape-so-corrupt.cx", "--", "--in", p_so, "--out-dir", tsc_dir, 0};
+                rc = run_cmd(av_tsc, out, sizeof out, err, sizeof err);
+                ck(rc == 0 && strstr(out, "TAPE_SO_CORRUPT\tOK\t") != 0 && sy_exists(tsc_man) == 1, "stage1-gen-tape-so-corrupt");
+
+                char *av_tr[] = {"sh", (char *)u, "-run", (char *)g_self, "--", "--corrupt-tsv", tsc_man, 0};
+                rc = run_cmd(av_tr, out, sizeof out, err, sizeof err);
+                printf("%s", out);
+                ck(rc == 0 && strstr(out, "CHECK_TAPE_SOLOAD_TSV\tPASS\t") != 0, "stage1-run-tape-so-corrupt-tsv");
+
+                char *av_te[] = {p_elf, "--corrupt-tsv", tsc_man, 0};
+                rc = run_cmd(av_te, out, sizeof out, err, sizeof err);
+                printf("%s", out);
+                ck(rc == 0 && strstr(out, "CHECK_TAPE_SOLOAD_TSV\tPASS\t") != 0, "stage1-elf-tape-so-corrupt-tsv");
+            }
+        }
+    }
+
+    if (tx_eqz(stage, "2") || tx_eqz(stage, "all")) {
+        char *av_run2[] = {"sh", (char *)u, "-run", (char *)g_self, "--", "--child-stage2", p_so, 0};
+        rc = run_cmd(av_run2, out, sizeof out, err, sizeof err);
+        printf("%s", out);
+        ck(rc == 0 && strstr(out, "CHILD_STAGE2\tPASS\tloops=1000\t") != 0, "stage2-run-mode-1000");
+
+        char *av_elf2[] = {p_elf, "--child-stage2", p_so, 0};
+        rc = run_cmd(av_elf2, out, sizeof out, err, sizeof err);
+        printf("%s", out);
+        ck(rc == 0 && strstr(out, "CHILD_STAGE2\tPASS\tloops=1000\t") != 0, "stage2-elf-mode-1000");
+    }
+
+    (void)sy_remove_all(root);
+    if (tx_eqz(stage, "1")) {
+        printf("CHECK_TAPE_SOLOAD\t%s\tcases=17\tmode=run,elf\n", g_fail ? "FAIL" : "PASS");
+    } else if (tx_eqz(stage, "2")) {
+        printf("CHECK_TAPE_SOLOAD\t%s\tstage=2\tloops=1000\tmode=run,elf\n", g_fail ? "FAIL" : "PASS");
+    } else {
+        printf("CHECK_TAPE_SOLOAD\t%s\tcases=17\tstage=1,2\tloops=1000\tmode=run,elf\n", g_fail ? "FAIL" : "PASS");
+    }
+    return g_fail ? 1 : 0;
+}
