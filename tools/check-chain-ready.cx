@@ -14,6 +14,12 @@
 #define UC "./unisacc.com" /* lint:allow R1 fixtures run tools/chain-ready.cx under the installed product */
 static int passed, failed;
 static char tmpd[300];
+static int launch_from = 0, launch_count = -1;
+static int l_in_range(int idx) {
+    if (idx < launch_from) return 0;
+    if (launch_count >= 0 && idx >= launch_from + launch_count) return 0;
+    return 1;
+}
 
 static void ck(int ok, const char *name) {
     if (ok) { passed++; printf("PASS\t%s\n", name); } else { failed++; printf("FAIL\t%s\n", name); }
@@ -112,6 +118,14 @@ int main(int argc, char **argv) {
             else { printf("FAIL\tbad-part\t%s\n", part_name); return 2; }
         } else if (tx_eqz(argv[a], "--merge-shards") && a + 1 < argc) {
             return merge_cr_shards(argc - (a + 1), argv + a + 1);
+        } else if (tx_eqz(argv[a], "--case-range") && a + 2 < argc) {
+            int64_t f64 = -1, c64 = -1;
+            const char *fs = argv[a + 1], *cs = argv[a + 2];
+            if (tx_to_i64(fs, (long)tx_len(fs, 16), 10, &f64) ||
+                tx_to_i64(cs, (long)tx_len(cs, 16), 10, &c64) || f64 < 0 || c64 <= 0) {
+                printf("FAIL\tbad-case-range\t%s %s\n", fs, cs); return 2;
+            }
+            launch_from = (int)f64; launch_count = (int)c64; a += 2;
         } else {
             printf("FAIL\tbad-arg\t%s\n", argv[a]); return 2;
         }
@@ -705,34 +719,55 @@ int main(int argc, char **argv) {
             "cd '%s' && git init -q -b main && git -c user.name=t -c user.email=t@t -c commit.gpgsign=false add -A && "
             "git -c user.name=t -c user.email=t@t -c commit.gpgsign=false commit -qm prep",
             prepo, prepo, prepo, prepo, prepo, prepo, prepo, prepo, prepo, prepo, prepo, prepo, prepo, prepo);
-        { char *sv[] = {"./tools/bound", "20", "sh", "-c", cmd, 0}; rc = run(sv, out, sizeof out); ck(rc == 0, "prep-fixture-setup"); }
+        { char *sv[] = {"./tools/bound", "20", "sh", "-c", cmd, 0}; rc = run(sv, out, sizeof out);
+          if (l_in_range(0)) ck(rc == 0, "prep-fixture-setup");
+          else if (rc != 0) { ck(0, "prep-fixture-setup"); return 2; }
+        }
+        /* Ensure helper/prepare baseline exists when a shard starts mid-launch without case 6 or case 24 */
+        if (!l_in_range(6) && (l_in_range(7) || l_in_range(8) || l_in_range(10) || l_in_range(11) || l_in_range(12) || l_in_range(13))) {
+            cx_fmt(cmd, sizeof cmd,
+                "env -u UNISACC_BOUND_DEADLINE_MONO -u UNISACC_RUN_CACHE -u UNISACC_CACHE_DIR -u UNISACC_FREEZE_NO_FETCH "
+                "sh ./unisacc.com tools/chain-ready.cx -- --prepare --repo '%s' --helper-out '%s' >/dev/null",
+                prepo, ih);
+            char *pv0[] = {"./tools/bound", "50", "sh", "-c", cmd, 0};
+            if (run(pv0, out, sizeof out) != 0) { ck(0, "prep-helper-shard-prereq"); return 2; }
+        } else if (!l_in_range(6) && !l_in_range(24) && (l_in_range(25) || l_in_range(26) || l_in_range(27) || l_in_range(28))) {
+            cx_fmt(cmd, sizeof cmd, "cp /bin/true '%s' && chmod +x '%s'", ih, ih);
+            char *hv0[] = {"./tools/bound", "10", "sh", "-c", cmd, 0};
+            (void)run(hv0, out, sizeof out);
+        }
         /* (1) UNISACC_FREEZE_NO_FETCH must fail 10-envhygiene and be rejected by --launch-env */
-        {   char *v[] = {"./tools/bound", "40", "env", "-u", "UNISACC_BOUND_DEADLINE_MONO", "-u", "UNISACC_RUN_CACHE", "-u", "UNISACC_CACHE_DIR",
+        if (l_in_range(1)) {
+            char *v[] = {"./tools/bound", "40", "env", "-u", "UNISACC_BOUND_DEADLINE_MONO", "-u", "UNISACC_RUN_CACHE", "-u", "UNISACC_CACHE_DIR",
                          "UNISACC_FREEZE_NO_FETCH=1", "sh", UC, "tools/chain-ready.cx", "--", "--only", "10-envhygiene", 0};
             rc = run(v, out, sizeof out);
             ck(rc == 1 && has(out, "10-envhygiene\tFAIL") && has(out, "UNISACC_FREEZE_NO_FETCH") && has(out, "READY\tno"),
                "envhygiene-freeze-no-fetch-refused");
         }
-        {   char *v[] = {"./tools/bound", "40", "env", "-u", "UNISACC_BOUND_DEADLINE_MONO", "-u", "UNISACC_RUN_CACHE", "-u", "UNISACC_CACHE_DIR",
+        if (l_in_range(2)) {
+            char *v[] = {"./tools/bound", "40", "env", "-u", "UNISACC_BOUND_DEADLINE_MONO", "-u", "UNISACC_RUN_CACHE", "-u", "UNISACC_CACHE_DIR",
                          "UNISACC_FREEZE_NO_FETCH=1", "UNISACC_IDENT_HELPER=/bin/true", "sh", UC, "tools/chain-ready.cx", "--", "--launch-env", "--repo", prepo, 0};
             rc = run(v, out, sizeof out);
             ck(rc == 2 && has(out, "REFUSE\tLAUNCH_ENV\treason=polluted-env") && has(out, "UNISACC_FREEZE_NO_FETCH"),
                "launch-env-mut-freeze-no-fetch-refused");
         }
-        {   char *v[] = {"./tools/bound", "40", "env", "-u", "UNISACC_BOUND_DEADLINE_MONO", "-u", "UNISACC_CACHE_DIR", "-u", "UNISACC_FREEZE_NO_FETCH",
+        if (l_in_range(3)) {
+            char *v[] = {"./tools/bound", "40", "env", "-u", "UNISACC_BOUND_DEADLINE_MONO", "-u", "UNISACC_CACHE_DIR", "-u", "UNISACC_FREEZE_NO_FETCH",
                          "UNISACC_RUN_CACHE=1", "UNISACC_IDENT_HELPER=/bin/true", "sh", UC, "tools/chain-ready.cx", "--", "--launch-env", "--repo", prepo, 0};
             rc = run(v, out, sizeof out);
             ck(rc == 2 && has(out, "REFUSE\tLAUNCH_ENV\treason=polluted-env") && has(out, "UNISACC_RUN_CACHE"),
                "launch-env-mut-run-cache-refused");
         }
-        {   char *v[] = {"./tools/bound", "40", "env", "-u", "UNISACC_BOUND_DEADLINE_MONO", "-u", "UNISACC_RUN_CACHE", "-u", "UNISACC_FREEZE_NO_FETCH",
+        if (l_in_range(4)) {
+            char *v[] = {"./tools/bound", "40", "env", "-u", "UNISACC_BOUND_DEADLINE_MONO", "-u", "UNISACC_RUN_CACHE", "-u", "UNISACC_FREEZE_NO_FETCH",
                          "UNISACC_CACHE_DIR=/tmp/x", "UNISACC_IDENT_HELPER=/bin/true", "sh", UC, "tools/chain-ready.cx", "--", "--launch-env", "--repo", prepo, 0};
             rc = run(v, out, sizeof out);
             ck(rc == 2 && has(out, "REFUSE\tLAUNCH_ENV\treason=polluted-env") && has(out, "UNISACC_CACHE_DIR"),
                "launch-env-mut-cache-dir-refused");
         }
         /* (2) Missing helper under --launch-env must refuse (keep HOME so run-cache hits instead of cold-compiling) */
-        {   const char *uhome = getenv("HOME");
+        if (l_in_range(5)) {
+            const char *uhome = getenv("HOME");
             if (!uhome || !uhome[0]) uhome = "/tmp";
             cx_fmt(cmd, sizeof cmd,
                 "env -i HOME='%s' PATH=/usr/bin:/bin TMPDIR=/tmp sh ./unisacc.com tools/chain-ready.cx -- --launch-env --repo '%s' --helper-out '%s'",
@@ -743,7 +778,8 @@ int main(int argc, char **argv) {
                "launch-env-mut-missing-helper-refused");
         }
         /* (3) --prepare builds helper, refreshes table-index baseline, prewarms derive-native in bounded shards */
-        {   cx_fmt(cmd, sizeof cmd,
+        if (l_in_range(6)) {
+            cx_fmt(cmd, sizeof cmd,
                 "env -u UNISACC_BOUND_DEADLINE_MONO -u UNISACC_RUN_CACHE -u UNISACC_CACHE_DIR -u UNISACC_FREEZE_NO_FETCH "
                 "sh ./unisacc.com tools/chain-ready.cx -- --prepare --repo '%s' --helper-out '%s'",
                 prepo, ih);
@@ -756,7 +792,8 @@ int main(int argc, char **argv) {
                "prepare-builds-helper-prewarms-and-refreshes-table-index");
         }
         /* (4) After --prepare: --launch-env succeeds and prints canonical env -i line */
-        {   cx_fmt(cmd, sizeof cmd,
+        if (l_in_range(7)) {
+            cx_fmt(cmd, sizeof cmd,
                 "env -i HOME=\"$HOME\" PATH=/usr/bin:/bin TMPDIR=/tmp DEVSVC_OWNER=cc UNISACC_IDENT_HELPER='%s' "
                 "sh ./unisacc.com tools/chain-ready.cx -- --launch-env --repo '%s' --version 0.1.3",
                 ih, prepo);
@@ -767,7 +804,8 @@ int main(int argc, char **argv) {
                "launch-env-clean-prints-canonical-env-i");
         }
         /* (5) 2a-derive inside prepo after --prepare: table-index is clean and batch-packages-gen runs isolated */
-        {   cx_fmt(cmd, sizeof cmd,
+        if (l_in_range(8)) {
+            cx_fmt(cmd, sizeof cmd,
                 "cd '%s' && sh '%s/unisacc.com' '%s/tools/chain-ready.cx' -- --repo . --only 2a-derive",
                 prepo, cwd, cwd);
             char *dv[] = {"./tools/bound", "60", "sh", "-c", cmd, 0};
@@ -776,7 +814,8 @@ int main(int argc, char **argv) {
                "derive-2a-after-prepare-isolated-pass");
         }
         /* (6) Gap (1) regression check: re-inject table-index drift -> 2a-derive fails specifically naming table-index(DRIFT) */
-        {   cx_fmt(cmd, sizeof cmd,
+        if (l_in_range(9)) {
+            cx_fmt(cmd, sizeof cmd,
                 "cd '%s' && touch build/.table_drift && sh '%s/unisacc.com' '%s/tools/chain-ready.cx' -- --repo . --only 2a-derive",
                 prepo, cwd, cwd);
             char *dv[] = {"./tools/bound", "60", "sh", "-c", cmd, 0};
@@ -785,14 +824,16 @@ int main(int argc, char **argv) {
                "derive-2a-detects-table-index-drift-independently");
         }
         /* (7) 20-ident-helper strict verification + tampering & seed mutation checks */
-        {   cx_fmt(cmd, sizeof cmd,
+        if (l_in_range(10)) {
+            cx_fmt(cmd, sizeof cmd,
                 "UNISACC_IDENT_HELPER='%s' sh ./unisacc.com tools/chain-ready.cx -- --repo '%s' --only 20-ident-helper --strict-helper",
                 ih, prepo);
             char *hv[] = {"./tools/bound", "40", "sh", "-c", cmd, 0};
             rc = run(hv, out, sizeof out);
             ck(rc == 0 && has(out, "20-ident-helper\tPASS"), "ident-helper-strict-verified-pass");
         }
-        {   cx_fmt(cmd, sizeof cmd,
+        if (l_in_range(11)) {
+            cx_fmt(cmd, sizeof cmd,
                 "UNISACC_IDENT_HELPER='%s/tools/bound' sh ./unisacc.com tools/chain-ready.cx -- --repo '%s' --only 20-ident-helper --strict-helper",
                 prepo, prepo);
             char *hv[] = {"./tools/bound", "40", "sh", "-c", cmd, 0};
@@ -800,7 +841,8 @@ int main(int argc, char **argv) {
             ck(rc == 1 && has(out, "20-ident-helper\tFAIL") && has(out, "helper-receipt-missing"),
                "ident-helper-mut-strict-unverified-refused");
         }
-        {   cx_fmt(cmd, sizeof cmd,
+        if (l_in_range(12)) {
+            cx_fmt(cmd, sizeof cmd,
                 "cp '%s' '%s.bak' && printf 'X' >> '%s' && "
                 "UNISACC_IDENT_HELPER='%s' sh ./unisacc.com tools/chain-ready.cx -- --repo '%s' --only 20-ident-helper; "
                 "r=$?; mv -f '%s.bak' '%s'; exit $r",
@@ -810,7 +852,8 @@ int main(int argc, char **argv) {
             ck(rc == 1 && has(out, "20-ident-helper\tFAIL") && has(out, "helper-sha-mismatch"),
                "ident-helper-mut-tamper-1byte-refused");
         }
-        {   cx_fmt(cmd, sizeof cmd,
+        if (l_in_range(13)) {
+            cx_fmt(cmd, sizeof cmd,
                 "printf '/* mut */\\n' >> '%s/seed/ident.c' && "
                 "UNISACC_IDENT_HELPER='%s' sh ./unisacc.com tools/chain-ready.cx -- --repo '%s' --only 20-ident-helper",
                 prepo, ih, prepo);
@@ -820,7 +863,8 @@ int main(int argc, char **argv) {
                "ident-helper-mut-seed-changed-refused");
         }
         /* (8) Blocker 4: build/chain-env.tsv authority (allow UNISACC_CHAIN_SEGMENT_TOKEN + dynamic table edit), non-UNISACC identity vars, quoting & --rev/--strict-helper passthrough */
-        {   cx_fmt(cmd, sizeof cmd,
+        if (l_in_range(14)) {
+            cx_fmt(cmd, sizeof cmd,
                 "env -u UNISACC_BOUND_DEADLINE_MONO -u UNISACC_RUN_CACHE -u UNISACC_CACHE_DIR -u UNISACC_FREEZE_NO_FETCH "
                 "UNISACC_CHAIN_SEGMENT_TOKEN=seg123 sh ./unisacc.com tools/chain-ready.cx -- --repo '%s' --only 10-envhygiene",
                 prepo);
@@ -828,7 +872,8 @@ int main(int argc, char **argv) {
             rc = run(ev, out, sizeof out);
             ck(rc == 0 && has(out, "10-envhygiene\tPASS"), "envhygiene-chain-env-allow-segment-token-pass");
         }
-        {   cx_fmt(cmd, sizeof cmd,
+        if (l_in_range(15)) {
+            cx_fmt(cmd, sizeof cmd,
                 "printf 'UNISACC_DYN_TEST_ALLOW\\tallow\\tfixture-dynamic-table\\n' >> '%s/build/chain-env.tsv' && "
                 "env -u UNISACC_BOUND_DEADLINE_MONO -u UNISACC_RUN_CACHE -u UNISACC_CACHE_DIR -u UNISACC_FREEZE_NO_FETCH "
                 "UNISACC_DYN_TEST_ALLOW=1 sh ./unisacc.com tools/chain-ready.cx -- --repo '%s' --only 10-envhygiene",
@@ -837,22 +882,26 @@ int main(int argc, char **argv) {
             rc = run(ev, out, sizeof out);
             ck(rc == 0 && has(out, "10-envhygiene\tPASS"), "envhygiene-reads-repo-chain-env-tsv-dynamically");
         }
-        {   char *ev[] = {"./tools/bound", "40", "env", "-u", "UNISACC_BOUND_DEADLINE_MONO", "-u", "UNISACC_RUN_CACHE", "-u", "UNISACC_CACHE_DIR",
+        if (l_in_range(16)) {
+            char *ev[] = {"./tools/bound", "40", "env", "-u", "UNISACC_BOUND_DEADLINE_MONO", "-u", "UNISACC_RUN_CACHE", "-u", "UNISACC_CACHE_DIR",
                           "PYTHONHASHSEED=0", "sh", UC, "tools/chain-ready.cx", "--", "--only", "10-envhygiene", 0};
             rc = run(ev, out, sizeof out);
             ck(rc == 1 && has(out, "10-envhygiene\tFAIL") && has(out, "PYTHONHASHSEED"), "envhygiene-non-unisacc-pythonhashseed-refused");
         }
-        {   char *ev[] = {"./tools/bound", "40", "env", "-u", "UNISACC_BOUND_DEADLINE_MONO", "-u", "UNISACC_RUN_CACHE", "-u", "UNISACC_CACHE_DIR",
+        if (l_in_range(17)) {
+            char *ev[] = {"./tools/bound", "40", "env", "-u", "UNISACC_BOUND_DEADLINE_MONO", "-u", "UNISACC_RUN_CACHE", "-u", "UNISACC_CACHE_DIR",
                           "E1=bad", "sh", UC, "tools/chain-ready.cx", "--", "--only", "10-envhygiene", 0};
             rc = run(ev, out, sizeof out);
             ck(rc == 1 && has(out, "10-envhygiene\tFAIL") && has(out, "E1"), "envhygiene-non-unisacc-e1-refused");
         }
-        {   char *ev[] = {"./tools/bound", "40", "env", "-u", "UNISACC_BOUND_DEADLINE_MONO", "-u", "UNISACC_RUN_CACHE", "-u", "UNISACC_CACHE_DIR",
+        if (l_in_range(18)) {
+            char *ev[] = {"./tools/bound", "40", "env", "-u", "UNISACC_BOUND_DEADLINE_MONO", "-u", "UNISACC_RUN_CACHE", "-u", "UNISACC_CACHE_DIR",
                           "E2_MODE=bad", "sh", UC, "tools/chain-ready.cx", "--", "--only", "10-envhygiene", 0};
             rc = run(ev, out, sizeof out);
             ck(rc == 1 && has(out, "10-envhygiene\tFAIL") && has(out, "E2_MODE"), "envhygiene-non-unisacc-e2-mode-refused");
         }
-        {   cx_fmt(cmd, sizeof cmd,
+        if (l_in_range(19)) {
+            cx_fmt(cmd, sizeof cmd,
                 "env -i HOME=\"$HOME\" PATH=/usr/bin:/bin TMPDIR=/tmp E1=leak UNISACC_IDENT_HELPER=/bin/true "
                 "sh ./unisacc.com tools/chain-ready.cx -- --launch-env --repo '%s'",
                 prepo);
@@ -860,7 +909,7 @@ int main(int argc, char **argv) {
             rc = run(lv, out, sizeof out);
             ck(rc == 2 && has(out, "REFUSE\tLAUNCH_ENV\treason=polluted-env") && has(out, "E1"), "launch-env-non-unisacc-e1-refused");
         }
-        {   /* Re-prepare seed helper from cwd so run-cache hits without a separate cold compile */
+        if (l_in_range(20)) { /* Re-prepare seed helper from cwd so run-cache hits without a separate cold compile */
             cx_fmt(cmd, sizeof cmd,
                 "env -u UNISACC_BOUND_DEADLINE_MONO -u UNISACC_RUN_CACHE -u UNISACC_CACHE_DIR -u UNISACC_FREEZE_NO_FETCH "
                 "UNISACC_PREP_CACHE=/tmp/pc UNISACC_DEVSVC_DIR=/tmp/ds UNISACC_TMPDIR=/tmp/td "
@@ -871,7 +920,8 @@ int main(int argc, char **argv) {
             rc = run(ev5, out, sizeof out);
             ck(rc == 0 && has(out, "10-envhygiene\tPASS"), "envhygiene-restored-5-allowed-vars-pass");
         }
-        {   /* Baseline compatibility: empty-string UNISACC_RUN_CACHE / UNISACC_CACHE_DIR pass, unknown empty UNISACC_* refuses */
+        /* Baseline compatibility: empty-string UNISACC_RUN_CACHE / UNISACC_CACHE_DIR pass, unknown empty UNISACC_* refuses */
+        if (l_in_range(21)) {
             cx_fmt(cmd, sizeof cmd,
                 "env -u UNISACC_BOUND_DEADLINE_MONO -u UNISACC_FREEZE_NO_FETCH "
                 "UNISACC_RUN_CACHE= UNISACC_CACHE_DIR= "
@@ -880,16 +930,18 @@ int main(int argc, char **argv) {
             char *ev0[] = {"./tools/bound", "40", "sh", "-c", cmd, 0};
             rc = run(ev0, out, sizeof out);
             ck(rc == 0 && has(out, "10-envhygiene\tPASS"), "envhygiene-empty-cache-vars-allowed-pass");
-
+        }
+        if (l_in_range(22)) {
             cx_fmt(cmd, sizeof cmd,
                 "env -u UNISACC_BOUND_DEADLINE_MONO -u UNISACC_RUN_CACHE -u UNISACC_CACHE_DIR -u UNISACC_FREEZE_NO_FETCH "
                 "UNISACC_UNKNOWN_LEAK= "
                 "sh ./unisacc.com tools/chain-ready.cx -- --repo '%s' --only 10-envhygiene",
                 prepo);
+            char *ev0[] = {"./tools/bound", "40", "sh", "-c", cmd, 0};
             rc = run(ev0, out, sizeof out);
             ck(rc == 1 && has(out, "10-envhygiene\tFAIL") && has(out, "UNISACC_UNKNOWN_LEAK"), "envhygiene-unknown-empty-unisacc-refused");
         }
-        {   /* C0f compatibility: UNISACC_APE_SELF is allowed by build/chain-env.tsv both paired with UNISA_CONTAINER and standalone (nnext.cx checks pair equality) */
+        if (l_in_range(23)) { /* C0f compatibility: UNISACC_APE_SELF is allowed by build/chain-env.tsv both paired with UNISA_CONTAINER and standalone (nnext.cx checks pair equality) */
             cx_fmt(cmd, sizeof cmd,
                 "env -u UNISACC_BOUND_DEADLINE_MONO -u UNISACC_RUN_CACHE -u UNISACC_CACHE_DIR -u UNISACC_FREEZE_NO_FETCH "
                 "UNISA_CONTAINER=/tmp/renamed-outer.com UNISACC_APE_SELF=/tmp/renamed-outer.com "
@@ -899,7 +951,8 @@ int main(int argc, char **argv) {
             rc = run(eva, out, sizeof out);
             ck(rc == 0 && has(out, "10-envhygiene\tPASS"), "envhygiene-ape-self-match-renamed-pass");
         }
-        {   cx_fmt(cmd, sizeof cmd,
+        if (l_in_range(24)) {
+            cx_fmt(cmd, sizeof cmd,
                 "env -u UNISACC_BOUND_DEADLINE_MONO -u UNISACC_RUN_CACHE -u UNISACC_CACHE_DIR -u UNISACC_FREEZE_NO_FETCH "
                 "sh ./unisacc.com tools/chain-ready.cx -- --prepare --repo '%s' --helper-out '%s' >/dev/null && "
                 "H40=$(git -C '%s' rev-parse HEAD) && "
@@ -926,7 +979,8 @@ int main(int argc, char **argv) {
                !has(out, "--rev 'HEAD'") && !has(out, "HEAD_HEX40"),
                "launch-env-resolves-short-rev-and-executes-clean");
         }
-        {   /* Empty git repo (unborn HEAD) with omitted default --rev MUST fail cleanly without emitting placeholder */
+        /* Empty git repo (unborn HEAD) with omitted default --rev MUST fail cleanly without emitting placeholder */
+        if (l_in_range(25)) {
             cx_fmt(cmd, sizeof cmd,
                 "UREPO='%s/unborn_repo' && mkdir -p \"$UREPO/build\" && git -C \"$UREPO\" init -q && "
                 "cp '%s/build/chain-env.tsv' \"$UREPO/build/chain-env.tsv\" && "
@@ -938,7 +992,8 @@ int main(int argc, char **argv) {
             ck(rc == 2 && has(out, "REFUSE\tLAUNCH_ENV\treason=rev-unresolved") && !has(out, "CHAIN_READY_LAUNCH_ENV") && !has(out, "HEAD_HEX40"),
                "launch-env-default-unborn-head-no-placeholder");
         }
-        {   cx_fmt(cmd, sizeof cmd,
+        if (l_in_range(26)) {
+            cx_fmt(cmd, sizeof cmd,
                 "env -i HOME=\"$HOME\" PATH=/usr/bin:/bin TMPDIR=/tmp UNISACC_IDENT_HELPER='%s' "
                 "sh ./unisacc.com tools/chain-ready.cx -- --launch-env --repo '%s' --rev deadbeef1234",
                 ih, prepo);
@@ -946,7 +1001,8 @@ int main(int argc, char **argv) {
             rc = run(lv, out, sizeof out);
             ck(rc == 2 && has(out, "REFUSE\tLAUNCH_ENV\treason=rev-unresolved"), "launch-env-unresolved-rev-refused");
         }
-        {   cx_fmt(cmd, sizeof cmd,
+        if (l_in_range(27)) {
+            cx_fmt(cmd, sizeof cmd,
                 "OVERLONG=$(printf '%%0160d' 0 | tr 0 a) && "
                 "env -i HOME=\"$HOME\" PATH=/usr/bin:/bin TMPDIR=/tmp UNISACC_IDENT_HELPER='%s' "
                 "sh ./unisacc.com tools/chain-ready.cx -- --launch-env --repo '%s' --rev \"$OVERLONG\"",
@@ -955,7 +1011,8 @@ int main(int argc, char **argv) {
             rc = run(lv, out, sizeof out);
             ck(rc == 2 && has(out, "REFUSE\tLAUNCH_ENV\treason=bad-rev"), "launch-env-overlong-rev-refused");
         }
-        {   cx_fmt(cmd, sizeof cmd,
+        if (l_in_range(28)) {
+            cx_fmt(cmd, sizeof cmd,
                 "env -i HOME=\"$HOME\" PATH=/usr/bin:/bin TMPDIR=/tmp UNISACC_IDENT_HELPER='%s' "
                 "sh ./unisacc.com tools/chain-ready.cx -- --launch-env --repo '%s' --chain-base rel/path",
                 ih, prepo);
