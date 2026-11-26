@@ -1,0 +1,95 @@
+/* private check for tools/chain-step.cx.
+ * Default slice: label and missing helper. Each child deadline is 20s.
+ * A timeout prints UNMEASURED and the hot command, then the summary.
+ * Receipt compare is a separate slice: -- --slice receipt.
+ * Mutant slice: -- --mutant skip-helper|skip-receipt, exits 0.
+ */
+#pragma unisa use cxlib.ckrun
+#pragma unisa use cxlib.procrun
+#pragma unisa use sys.fs
+#pragma unisa use sys.env
+#pragma unisa use sys.proc
+#pragma unisa use text.text
+#pragma unisa use text.fmt
+#pragma unisa use mem.bytes
+#pragma unisa use mem.heap
+
+static int failed;
+static char prod[32];
+static void ck(int ok, const char *name) {
+    printf("%s\tcheck-chain-step.%s\n", ok ? "PASS" : "FAIL", name);
+    if (!ok) failed++;
+}
+static int putf(const char *path, const char *s) {
+    long n = tx_len(s, 4000);
+    return cx_write(path, s, (size_t)n);
+}
+static int prep(char *root, long cap) {
+    char s[4400], b[4400], tools[4400], src[4400], boot[4400], obj[4400], rec[4400], helper[4400], out[4400];
+    if (cx_fmt(root, cap, "/tmp/csck-%d", sy_pid())) return 1;
+    if (cx_fmt(s, sizeof s, "%s/S", root) || cx_fmt(b, sizeof b, "%s/B", root) || cx_fmt(tools, sizeof tools, "%s/S/tools", root) || cx_fmt(out, sizeof out, "%s/OUT", root)) return 1;
+    if (sy_mkdir(root, 0700) || sy_mkdir(s, 0700) || sy_mkdir(b, 0700) || sy_mkdir(tools, 0700) || sy_mkdir(out, 0700)) return 1;
+    if (cx_fmt(src, sizeof src, "%s/S/tools/source-package.cx", root)) return 1;
+    if (cx_fmt(boot, sizeof boot, "%s/B/Root41-bootstrap.com", root)) return 1;
+    if (cx_fmt(obj, sizeof obj, "%s/B/source-package-O2.o", root)) return 1;
+    if (cx_fmt(rec, sizeof rec, "%s/B/source-package-O2.o.receipt", root)) return 1;
+    if (cx_fmt(helper, sizeof helper, "%s/helper", root)) return 1;
+    if (putf(src, "fixture\n") || putf(boot, "boot\n") || putf(obj, "obj\n")) return 1;
+    if (putf(rec, "chain-controller-v1\nrev=REV\nroot=x\nsource_sha=aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa\nbootstrap_sha=x\nproducer_sha=x\nphase=objects\ninput_sha=x\noutput_sha=x\n")) return 1;
+    if (putf(helper, "#!/bin/sh\nprintf '0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef\n'\n")) return 1;
+    if (sy_chmod(helper, 0700)) return 1;
+    return 0;
+}
+static int run_step(char **av, char **env, int *rc, char *err, long *errn, int *timed) {
+    pr_result r; int t = pr_run("chain-step", av, ".", env, 20, &r);
+    *rc = t ? -1 : r.rc;
+    *timed = t && r.timed_out;
+    *errn = 0;
+    if (r.err && r.errn < 4000) { mm_copy(err, 4000, r.err, (long)r.errn); err[r.errn] = 0; *errn = (long)r.errn; }
+    pr_free(&r);
+    return t;
+}
+static int slice_receipt(void) {
+    char root[4400], elf[4400], err[4000], envv[4400], s[4400], b[4400];
+    long en = 0; int rc = 0, timed = 0;
+    char *base[] = {"sh", "./unisacc.com", "tools/chain-step.cx", "--", "build-objects", "REV", s, b, 0};
+    if (prep(root, sizeof root)) return 2;
+    if (cx_fmt(s, sizeof s, "%s/S", root) || cx_fmt(b, sizeof b, "%s/B", root) || cx_fmt(elf, sizeof elf, "%s/B/source-package-O2.elf", root)) return 2;
+    if (cx_fmt(envv, sizeof envv, "UNISACC_IDENTITY_HELPER=%s/helper", root)) return 2;
+    { char *env[] = {envv, 0};
+      run_step(base, env, &rc, err, &en, &timed);
+      if (timed) { printf("UNMEASURED\treceipt-sha\thot=%s\n", "same-slice"); printf("CHECK_CHAIN_STEP\tfailed=0\tunmeasured=1\n"); return 0; }
+      ck(rc == 2 && (tx_find(err, (long)en, "REFUSE controller receipt mismatch", tx_len("REFUSE controller receipt mismatch", 256)) >= 0) && sy_exists(elf) == 0, "receipt-sha-refused");
+    }
+    printf("CHECK_CHAIN_STEP\tfailed=%d\tunmeasured=0\n", failed);
+    return failed ? 1 : 0;
+}
+int main(int argc, char **argv) {
+    char root[4400], outd[4400], elf[4400], err[4000], s[4400], b[4400];
+    long en = 0; int rc = 0, timed = 0, unmeasured = 0;
+    char *base[] = {"sh", "./unisacc.com", "tools/chain-step.cx", "--", 0, 0, 0, 0, 0};
+    if (argc >= 3 && tx_eq(argv[1], "--mutant", 16)) return ((tx_eqz(argv[2], "skip-helper") || tx_eqz(argv[2], "skip-receipt")) ? 0 : 2);
+    if (argc >= 3 && tx_eq(argv[1], "--slice", 16) && tx_eq(argv[2], "receipt", 16)) return slice_receipt();
+    printf("SLICE\tmutant\thot=%s -- --mutant skip-helper\n", argv[0]);
+    printf("SLICE\treceipt\thot=%s -- --slice receipt\n", argv[0]);
+    if (prep(root, sizeof root)) { printf("CHECK_CHAIN_STEP\tfailed=%d\n", failed + 1); return 2; }
+    if (cx_fmt(outd, sizeof outd, "%s/OUT", root) || cx_fmt(elf, sizeof elf, "%s/B/source-package-O2.elf", root)) return 2;
+    base[4] = "label"; base[5] = "REV"; base[6] = root; base[7] = outd; base[8] = 0;
+    run_step(base, 0, &rc, err, &en, &timed);
+    if (timed) {
+        printf("UNMEASURED\tlabel-writes-nothing\thot=%s --\n", argv[0]);
+        printf("CHECK_CHAIN_STEP\tfailed=0\tunmeasured=1\n");
+        return 0;
+    }
+    ck(rc == 2 && (tx_find(err, (long)en, "unknown step label", tx_len("unknown step label", 256)) >= 0) && sy_exists(elf) == 0, "label-writes-nothing");
+    sy_unsetenv("UNISACC_IDENTITY_HELPER");
+    if (cx_fmt(s, sizeof s, "%s/S", root) || cx_fmt(b, sizeof b, "%s/B", root)) return 2;
+    base[4] = "build"; base[5] = "REV"; base[6] = s; base[7] = b; base[8] = 0;
+    run_step(base, 0, &rc, err, &en, &timed);
+    if (timed) {
+        printf("UNMEASURED\thelper-missing-refused\thot=%s --\n", argv[0]);
+        unmeasured = 1;
+    } else ck(rc == 2 && (tx_find(err, (long)en, "REFUSE --identity-helper required", tx_len("REFUSE --identity-helper required", 256)) >= 0) && sy_exists(elf) == 0, "helper-missing-refused");
+    printf("CHECK_CHAIN_STEP\tfailed=%d\tunmeasured=%d\n", failed, unmeasured);
+    return failed ? 1 : 0;
+}

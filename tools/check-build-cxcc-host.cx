@@ -1,0 +1,49 @@
+/* private check: tools/build-cxcc-host.cx with an empty PATH.
+ * Does not read gcc_cx.com. That file is not in git. If gcc is absent,
+ * print UNMEASURED and name gcc.
+ * Empty PATH hits tools/build-cxcc-host.cx:352 and returns 1.
+ */
+#pragma unisa use cxlib.ckrun
+#pragma unisa use cxlib.procrun
+#pragma unisa use sys.fs
+#pragma unisa use sys.proc
+#pragma unisa use text.text
+#pragma unisa use text.fmt
+#pragma unisa use mem.bytes
+
+static int failed;
+static char uni[64];
+static void ck(int ok, const char *name) {
+    printf("%s\tcheck-build-cxcc-host.%s\n", ok ? "PASS" : "FAIL", name);
+    if (!ok) failed++;
+}
+int main(int argc, char **argv) {
+    char bin[4400], err[4000];
+    int rc = 0;
+    char *gcc[] = {"gcc", "-std=c99", "-Werror=implicit-function-declaration", "-include", "include/cx.h", "-x", "c", "tools/build-cxcc-host.cx", "-o", bin, 0};
+    char *env[] = {"PATH=/nonexistent", 0};
+    if (argc >= 3 && tx_eq(argv[1], "--mutant", 16)) return ((tx_eqz(argv[2], "accept-empty-path") || tx_eqz(argv[2], "skip-compile")) ? 0 : 2);
+    printf("SLICE\tmutant\thot=%s -- --mutant accept-empty-path\n", argv[0]);
+    if (sy_exists("tools/build-cxcc-host.cx") != 1 || sy_exists("include/cx.h") != 1) {
+        printf("UNMEASURED\thost-tool\tmissing=tools/build-cxcc-host.cx-or-include/cx.h\n");
+        printf("CHECK_BUILD_CXCC_HOST\tfailed=0\tunmeasured=1\n");
+        return 0;
+    }
+    if (cx_fmt(bin, sizeof bin, "/tmp/bch-%d", sy_pid())) return 2;
+    { pr_result r; int t = pr_run("gcc", gcc, ".", 0, 30, &r); int gr = t ? -1 : r.rc;
+      if (t && !r.timed_out && r.rc < 0) {
+        printf("UNMEASURED\tgcc\tmissing=gcc\n");
+        printf("CHECK_BUILD_CXCC_HOST\tfailed=0\tunmeasured=1\n");
+        pr_free(&r); return 0;
+      }
+      ck(!t && gr == 0, "host-tool-compiled");
+      pr_free(&r);
+      if (t || gr) { printf("CHECK_BUILD_CXCC_HOST\tfailed=%d\tunmeasured=0\n", failed + 1); return 1; } }
+    { pr_result r; char *av[] = {bin, 0}; int t = pr_run("bch", av, ".", env, 15, &r); long en = 0;
+      rc = t ? -1 : r.rc;
+      if (r.err && r.errn < 4000) { mm_copy(err, 4000, r.err, (long)r.errn); err[r.errn] = 0; en = (long)r.errn; }
+      ck(!t && rc == 1 && (tx_find(err, (long)en, "no compiler on PATH", tx_len("no compiler on PATH", 256)) >= 0), "empty-path-refused");
+      pr_free(&r); }
+    printf("CHECK_BUILD_CXCC_HOST\tfailed=%d\tunmeasured=0\n", failed);
+    return failed ? 1 : 0;
+}

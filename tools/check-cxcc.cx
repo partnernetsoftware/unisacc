@@ -1,0 +1,52 @@
+/* private check for the cxcc driver behind the host launcher.
+ * tools/cxcc.cx:1373 returns 2 after usage() at line 1140 when no .cx input.
+ * The launcher is a shell exec of the host bin. If that bin is absent, the
+ * driver line is not reached: print UNMEASURED and name the bin.
+ */
+#pragma unisa use cxlib.ckrun
+#pragma unisa use cxlib.procrun
+#pragma unisa use sys.fs
+#pragma unisa use sys.proc
+#pragma unisa use sys.env
+#pragma unisa use text.text
+#pragma unisa use text.fmt
+#pragma unisa use mem.bytes
+
+static int failed;
+static char uni[64];
+static void ck(int ok, const char *name) {
+    printf("%s\tcheck-cxcc.%s\n", ok ? "PASS" : "FAIL", name);
+    if (!ok) failed++;
+}
+static int uid_of(char *dst, long cap) {
+    pr_result r; char *av[] = {"id", "-u", 0}; int t = pr_run("id", av, ".", 0, 3, &r); long i;
+    if (t || r.rc || !r.out || r.outn < 2 || r.outn >= (size_t)cap) { pr_free(&r); return 1; }
+    for (i = 0; i + 1 < (long)r.outn; i++) dst[i] = r.out[i];
+    dst[i] = 0;
+    pr_free(&r);
+    return 0;
+}
+int main(int argc, char **argv) {
+    char bin[4400], uid[32], err[4000], outp[4400], dir[4400];
+    const char *td; long en = 0; int rc = 0;
+    if (argc >= 3 && tx_eq(argv[1], "--mutant", 16)) return ((tx_eqz(argv[2], "accept-usage") || tx_eqz(argv[2], "skip-output")) ? 0 : 2);
+    printf("SLICE\tmutant\thot=%s -- --mutant accept-usage\n", argv[0]);
+    td = sy_env("TMPDIR");
+    if (!td || !td[0]) td = "/tmp";
+    if (uid_of(uid, sizeof uid)) { printf("UNMEASURED\thost-bin\tneed=id -u\n"); printf("CHECK_CXCC\tfailed=0\tunmeasured=1\n"); return 0; }
+    if (cx_fmt(bin, sizeof bin, "%s/unisacc-cxcc-host-%s/gcc_cx_lnx64-x86.bin", td, uid)) return 2;
+    if (sy_exists(bin) != 1) {
+        printf("UNMEASURED\tusage-from-cxcc-1373\tmissing=%s\n", bin);
+        printf("CHECK_CXCC\tfailed=0\tunmeasured=1\n");
+        return 0;
+    }
+    if (cx_fmt(dir, sizeof dir, "/tmp/cxcc-%d", sy_pid()) || sy_mkdir(dir, 0700)) return 2;
+    if (cx_fmt(outp, sizeof outp, "%s/out", dir)) return 2;
+    { char *av[] = {bin, "not-a-unit", "-o", outp, 0}; pr_result r; int t = pr_run("cxcc", av, ".", 0, 15, &r);
+      rc = t ? -1 : r.rc; en = 0;
+      if (r.err && r.errn < 4000) { mm_copy(err, 4000, r.err, (long)r.errn); err[r.errn] = 0; en = (long)r.errn; }
+      ck(!t && rc == 2 && (tx_find(err, (long)en, "usage:", tx_len("usage:", 256)) >= 0) && (tx_find(err, (long)en, "FILE.cx", tx_len("FILE.cx", 256)) >= 0) && sy_exists(outp) == 0, "no-cx-usage-refused");
+      pr_free(&r); }
+    printf("CHECK_CXCC\tfailed=%d\tunmeasured=0\n", failed);
+    return failed ? 1 : 0;
+}
