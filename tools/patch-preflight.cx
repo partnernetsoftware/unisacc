@@ -1,0 +1,884 @@
+/* cx tools/patch-preflight.cx -- PATCH [--contract TSV] [--prior PATCH]
+ *      [--repo DIR] [--seeds TSV] [--run]
+ * Static inspection never executes an applied script or a declared check.
+ * Covered scope: KIND_CK/KIND_RECORD/KIND_CHECK exact identifier classification,
+ *   wrapped ck_pg vs empty ck_fake with constant-zero counter, single-exit simple
+ *   wrapper body non-zero counter mutation.
+ * Uncovered items (PATCH_PREFLIGHT_UNCOVERED items=multi-exit,counter-binding,macro-expansion):
+ *   multi-exit returns covering all condition values, local counter alias/shadow
+ *   binding vs main() return counter, and macro expansion scope. verdict=STATIC_ONLY
+ *   is a lexical/structural preflight only and does not exclude these three classes. */
+#pragma unisa use sys.fs
+#pragma unisa use sys.io
+#pragma unisa use sys.sha
+#pragma unisa use sys.time
+#pragma unisa use sys.posix
+#pragma unisa use sysx.run
+#pragma unisa use text.conv
+#pragma unisa use text.text
+#pragma unisa use text.fmt
+#pragma unisa use text.num
+#pragma unisa use mem.heap
+#pragma unisa use mem.bytes
+
+enum { PF_PATH = 4096, PF_ROWS = 1024, PF_FILES = 512, PF_PATCH = 16 << 20, PF_TEXT = 4 << 20 };
+typedef struct { char *v[6]; int n, line, hit; } PfRow;
+typedef struct { char *file, *raw, *code; long n; } PfSource;
+static PfRow rows[PF_ROWS];
+static int nr, bad, draft;
+static long deadline;
+static char work[PF_PATH], tree[PF_PATH];
+static char *changed[PF_FILES];
+static long source_bytes;
+static int nchanged;
+static PfSource source[PF_FILES];
+static int nsources;
+
+static int fail(const char *reason, const char *site) {
+    sy_eprintf("PREFLIGHT_FAIL\treason=%s\tsite=%s\n", reason, site ? site : "-");
+    bad++;
+    return 0;
+}
+
+static long len(const char *s) { return tx_len(s, 32L << 20); }
+static int prefix(const char *s, const char *p) { return tx_prefix(s, len(s), p, len(p)); }
+static int suffix(const char *s, const char *p) {
+    long n = len(s), k = len(p);
+    return n >= k && tx_same(s + n - k, k, p, k);
+}
+static int ident(int c) { return c == '_' || (c >= '0' && c <= '9') || (c >= 'a' && c <= 'z') || (c >= 'A' && c <= 'Z'); }
+static int white(int c) { return c == ' ' || c == '\t' || c == '\n' || c == '\r'; }
+static int take_hex(const char *s, int n) {
+    if (len(s) != n) return 0;
+    for (int i = 0; i < n; i++) if (!(s[i] >= '0' && s[i] <= '9') && !(s[i] >= 'a' && s[i] <= 'f')) return 0;
+    return 1;
+}
+static int word(const char *s, long n, const char *key, long k) {
+    if (k <= 0) return 0;
+    for (long i = 0; i + k <= n; i++) {
+        if (s[i] != key[0] || (i && ident(s[i - 1])) || (i + k < n && ident(s[i + k]))) continue;
+        if (tx_same(s + i, k, key, k)) return 1;
+    }
+    return 0;
+}
+static int relpath(const char *s) {
+    long n = len(s), start = 0;
+    if (!n || n >= PF_PATH) return 0;
+    for (long i = 0; i <= n; i++) {
+        if (i == n || s[i] == '/') {
+            long k = i - start;
+            if (!k || (k == 1 && s[start] == '.') || (k == 2 && tx_same(s + start, k, "..", 2)) ||
+                (k == 4 && tx_same(s + start, k, ".git", 4))) return 0;
+            start = i + 1;
+        } else if (s[i] <= 32 || s[i] == ':' || s[i] == '\\' || s[i] == 127) return 0;
+    }
+    return 1;
+}
+static int cols(char *s, char **v, int cap) {
+    int n = 1;
+    v[0] = s;
+    for (long i = 0; s[i]; i++) if (s[i] == '\t') {
+        if (n == cap) return 0;
+        s[i] = 0;
+        v[n++] = s + i + 1;
+    }
+    for (int i = 0; i < n; i++) if (!v[i][0]) return 0;
+    return n;
+}
+static char *read_text(const char *p, long cap, long *n) {
+    sy_stat_t st;
+    if (sy_stat(p, &st) || st.kind != 'f' || st.size > cap) return 0;
+    unsigned char *b = 0;
+    int64_t got = 0;
+    if (sy_read_file(p, &b, &got, cap) || !b) return 0;
+    for (long i = 0; i < got; i++) if (!b[i]) { mm_free(b); return 0; }
+    *n = (long)got;
+    return (char *)b;
+}
+static int line_next(char **at, char *end, char **out) {
+    if (*at == end) return 0;
+    char *p = *at;
+    while (p < end && *p != '\n') { if (*p == '\r') return -1; p++; }
+    if (p == end) return -1;
+    *out = *at;
+    *p = 0;
+    *at = p + 1;
+    return 1;
+}
+static int key(const PfRow *r, const char *s) { return tx_eqz(r->v[0], s); }
+static PfRow *one(const char *k, int required) {
+    PfRow *out = 0;
+    for (int i = 0; i < nr; i++) if (key(&rows[i], k)) {
+        if (out) { fail("contract-duplicate", k); return 0; }
+        out = &rows[i];
+    }
+    if (required && !out) fail("contract-missing-field", k);
+    return out;
+}
+static int number(const char *s, long n, int *out) {
+    int64_t a = 0;
+    if (n < 1 || n > 9) return 0;
+    for (long i = 0; i < n; i++) if (s[i] < '0' || s[i] > '9') return 0;
+    if (tx_to_i64(s, n, 10, &a) || a <= 0) return 0;
+    *out = (int)a;
+    return 1;
+}
+static int contract(char *b, long n, long patch_lines) {
+    char *at = b, *s;
+    int rc, line = 0, specs = 0, checks = 0, guards = 0, callees = 0;
+    while ((rc = line_next(&at, b + n, &s)) > 0) {
+        line++;
+        if (!s[0] || s[0] == '#') continue;
+        if (nr == PF_ROWS) return fail("contract-too-many-rows", 0);
+        PfRow *r = &rows[nr++];
+        r->line = line;
+        r->n = cols(s, r->v, 6);
+        if (!r->n) return fail("contract-columns", s);
+        int min = 0, max = 0;
+        if (key(r,"base") || key(r,"patch-sha256") || key(r,"derive") || key(r,"harness") || key(r,"site-search")) min = max = 2;
+        else if (key(r,"spec-item") || key(r,"site") || key(r,"negative")) min = max = 4;
+        else if (key(r,"guard-symbol") || key(r,"check-real")) min = max = 3;
+        else if (key(r,"callee")) { min = 3; max = 5; }
+        if (!min || r->n < min || r->n > max) return fail("contract-columns", r->v[0]);
+        if (key(r,"spec-item")) {
+            if (tx_eqz(r->v[2], "implemented")) {
+                int first = 0, last = 0;
+                long k = tx_find(r->v[3], len(r->v[3]), "-", 1);
+                if (!number(r->v[3], k < 0 ? len(r->v[3]) : k, &first) || first > patch_lines ||
+                    (k >= 0 && (!number(r->v[3] + k + 1, len(r->v[3]) - k - 1, &last) || last < first || last > patch_lines)))
+                    fail("spec-patch-line", r->v[1]);
+            }
+            for (int j = 0; j < nr - 1; j++) if (key(&rows[j],"spec-item") && tx_eqz(rows[j].v[1],r->v[1])) fail("spec-duplicate",r->v[1]);
+            if (tx_eqz(r->v[2], "deferred")) draft = 1;
+            else if (!tx_eqz(r->v[2], "implemented")) fail("spec-status", r->v[1]);
+            specs++;
+        }
+        if (key(r,"check-real")) checks++;
+        if (key(r,"guard-symbol")) guards++;
+        if (key(r,"callee")) callees++;
+    }
+    if (rc < 0) fail("contract-line-framing", 0);
+    if (!specs) fail("contract-missing-field", "spec-item");
+    if (!checks) fail("contract-missing-field", "check-real");
+    if (!guards) fail("contract-missing-field", "guard-symbol");
+    if (!callees) fail("contract-missing-field", "callee");
+    return !bad;
+}
+
+static int command(const char *stage, char **av, const char *cwd, long ms, int allow_miss, px_result *r) {
+    px_opts o = {0};
+    long now = sy_now_ms(), left = deadline - now;
+    if (now < 0 || left <= 0) return fail("static-deadline", stage);
+    o.argv = av; o.cwd = cwd; o.deadline_ms = ms < left ? ms : left;
+    o.out_cap = PF_TEXT; o.err_cap = 65536; o.kill_tree = 1;
+    int rc = px_run(&o, r);
+    if (rc || r->timed_out || r->residue || r->truncated || (r->code && !(allow_miss && r->code == 1))) {
+        sy_eprintf("PREFLIGHT_CHILD\tstage=%s\tspawn=%d\trc=%d\ttimeout=%d\ttruncated=%d\tresidue=%d\n",
+            stage, rc, r->code, r->timed_out, r->truncated, r->residue);
+        if (r->errn) (void)sy_write_all(2, r->err, r->errn);
+        return fail(stage, 0);
+    }
+    return 1;
+}
+static int simple(const char *tag, char **av, const char *cwd, long ms) {
+    px_result r = {0};
+    int ok = command(tag, av, cwd, ms, 0, &r);
+    px_result_free(&r);
+    return ok;
+}
+/* clean environment and disable repo discovery outside the private tar root. */
+#define PF_EXEC "/usr/bin/env", "-i", "PATH=/usr/bin:/bin", "LC_ALL=C", "GIT_CONFIG_NOSYSTEM=1", "GIT_CEILING_DIRECTORIES=/tmp"
+static int apply(char *repo, char *base, char *frozen) {
+    char tar[PF_PATH], archive_opt[PF_PATH + 16];
+    if (cx_fmt(tar, sizeof tar, "%s/base.tar", work) || cx_fmt(archive_opt, sizeof archive_opt, "--output=%s", tar))
+        return fail("staging-path", 0);
+    char *verify[] = { PF_EXEC, "git", "-C", repo, "rev-parse", "--verify", base, 0 };
+    px_result r = {0};
+    int ok = command("base-resolve", verify, repo, 2500, 0, &r);
+    if (ok && (r.outn != 41 || r.out[40] != '\n' || !tx_same(r.out, 40, base, 40))) ok = fail("base-not-exact", base);
+    px_result_free(&r);
+    if (!ok) return 0;
+    char *type[] = { PF_EXEC, "git", "-C", repo, "cat-file", "-t", base, 0 };
+    ok = command("base-type", type, repo, 2500, 0, &r);
+    if (ok && (r.outn != 7 || !tx_same(r.out, 7, "commit\n", 7))) ok = fail("base-not-commit", base);
+    px_result_free(&r);
+    if (!ok) return 0;
+    char *pack[] = { PF_EXEC, "git", "-C", repo, "archive", "--format=tar", archive_opt, base, 0 };
+    char *unpack[] = { PF_EXEC, "tar", "-xf", tar, "-C", tree, 0 };
+    char *check[] = { PF_EXEC, "git", "apply", "--check", "--", frozen, 0 };
+    char *write[] = { PF_EXEC, "git", "apply", "--", frozen, 0 };
+    if (!simple("base-archive", pack, repo, 16000) || !simple("base-unpack", unpack, tree, 12000) ||
+        !simple("patch-apply-check", check, tree, 7000) || !simple("patch-apply-private", write, tree, 7000)) return 0;
+    char *stat[] = { PF_EXEC, "git", "apply", "--numstat", "-z", "--", frozen, 0 };
+    ok = command("patch-numstat", stat, tree, 5000, 0, &r);
+    for (long i = 0; ok && i < r.outn;) {
+        int tabs = 0;
+        while (i < r.outn && r.out[i] && tabs != 2) if (r.out[i++] == '\t') tabs++;
+        if (tabs != 2 || i >= r.outn || !r.out[i]) { ok = fail("patch-path-format", 0); break; }
+        char *p = r.out + i;
+        while (i < r.outn && r.out[i]) i++;
+        if (i == r.outn || !relpath(p) || nchanged == PF_FILES) { ok = fail("patch-path-format", p); break; }
+        long n = len(p) + 1;
+        char *copy = mm_alloc(n);
+        if (!copy || mm_copy(copy, n, p, n)) { ok = fail("allocation", p); break; }
+        changed[nchanged++] = copy;
+        i++;
+    }
+    px_result_free(&r);
+    return ok && (nchanged || fail("patch-no-file", 0));
+}
+
+static int locate(const char *anchor, char *path, int *line) {
+    long i = tx_find(anchor, len(anchor), ":", 1);
+    if (i <= 0 || i >= PF_PATH || mm_copy(path, PF_PATH, anchor, i)) return 0;
+    path[i] = 0;
+    return relpath(path) && number(anchor + i + 1, len(anchor + i + 1), line);
+}
+static int inside_file(const char *rel, char *p) {
+    char real[PF_PATH];
+    sy_stat_t st;
+    long m = len(tree);
+    if (!relpath(rel) || cx_fmt(p, PF_PATH, "%s/%s", tree, rel) || sy_realpath(p, real, sizeof real) < 0 ||
+        !tx_prefix(real, len(real), tree, m) || real[m] != '/' || !tx_eqz(real, p) || sy_lstat(p, &st)) return 0;
+    return st.kind == 'f';
+}
+/* Preserve offsets, blank comments, optionally blank string and char literals. */
+static void lex(char *out, const char *in, long n, int keep_strings) {
+    int state = 0, quote = 0, escape = 0;
+    for (long i = 0; i < n; i++) {
+        int c = in[i], next = i + 1 < n ? in[i + 1] : 0;
+        if (state == 1) { out[i] = c == '\n' ? '\n' : ' '; if (c == '\n') state = 0; }
+        else if (state == 2) {
+            out[i] = c == '\n' ? '\n' : ' ';
+            if (c == '*' && next == '/') { out[++i] = ' '; state = 0; }
+        } else if (state == 3) {
+            out[i] = keep_strings || c == '\n' ? c : ' ';
+            if (escape) escape = 0;
+            else if (c == '\\') escape = 1;
+            else if (c == quote) state = 0;
+        } else if (c == '/' && (next == '/' || next == '*')) {
+            out[i++] = ' '; out[i] = ' ';
+            state = next == '/' ? 1 : 2;
+        } else if (c == '"' || c == '\'') {
+            out[i] = keep_strings ? c : ' '; state = 3; quote = c;
+        } else out[i] = c;
+    }
+    out[n] = 0;
+}
+static PfSource *get_source(char *path) {
+    char file[PF_PATH];
+    for (int i = 0; i < nsources; i++) if (tx_eqz(source[i].file, path)) return &source[i];
+    if (nsources == PF_FILES || !inside_file(path, file)) return 0;
+    PfSource *s = &source[nsources];
+    char *raw = read_text(file, PF_TEXT, &s->n);
+    if (!raw) return 0;
+    if (s->n > (32L << 20) - source_bytes) { mm_free(raw); return 0; }
+    s->code = mm_alloc(s->n + 1);
+    long n = len(path) + 1;
+    s->file = mm_alloc(n);
+    if (!s->code || !s->file || mm_copy(s->file, n, path, n)) { mm_free(raw); return 0; }
+    lex(s->code, raw, s->n, 0);
+    s->raw = raw;
+    source_bytes += s->n;
+    nsources++;
+    return s;
+}
+static long line_start(const PfSource *s, int line) {
+    long i = 0;
+    for (; i < s->n && line > 1; i++) if (s->raw[i] == '\n') line--;
+    return line == 1 && i < s->n ? i : -1;
+}
+static long line_end(const char *s, long i, long n) { while (i < n && s[i] != '\n') i++; return i; }
+static long skipspace(const char *s, long i, long end) { while (i < end && white(s[i])) i++; return i; }
+static long matching(const char *s, long i, long n, int open, int close) {
+    int depth = 0;
+    for (; i < n; i++) {
+        if (s[i] == open) depth++;
+        if (s[i] == close && --depth == 0) return i;
+    }
+    return -1;
+}
+static int guard_text(const char *s, long n, const char *name, long k, const char *arg) {
+    if (!arg) return word(s, n, name, k);
+    if (k > n || !tx_same(s,k,name,k)) return 0;
+    long a = skipspace(s,k,n);
+    if (a == n || s[a++] != '(') return 0;
+    long e = matching(s,a-1,n,'(',')');
+    return e < 0 ? -1 : word(s+a,e-a,arg,len(arg));
+}
+static void record_site(const char *p, int line) {
+    char k[PF_PATH + 20];
+    if (cx_fmt(k, sizeof k, "%s:%d", p, line)) { fail("guard-path-length", p); return; }
+    for (int i = 0; i < nr; i++) if (key(&rows[i],"site") && tx_eqz(rows[i].v[1], k)) {
+        rows[i].hit = 1;
+        return;
+    }
+    fail("site-uncovered", k);
+}
+static void grep_scope(const char *scope, const char *name, const char *arg) {
+    char full[PF_PATH], real[PF_PATH];
+    sy_stat_t st;
+    if (scope && (cx_fmt(full,sizeof full,"%s/%s",tree,scope) || sy_lstat(full,&st) ||
+        (st.kind != 'f' && st.kind != 'd') || sy_realpath(full,real,sizeof real) < 0 || !tx_eqz(full,real))) {
+        fail("guard-scope-unreadable",scope);
+        return;
+    }
+    char *av[] = { PF_EXEC, "git", "--literal-pathspecs", "grep", "--no-index", "-z", "-n", "-I", "-F",
+        "-e", (char *)name, "--", (char *)scope, 0 };
+    px_result r = {0};
+    if (!command("guard-grep", av, tree, 6000, 1, &r)) goto done;
+    for (long i = 0; i < r.outn;) {
+        long p = i, l, t;
+        int line;
+        while (i < r.outn && r.out[i]) i++;
+        if (i == r.outn || !relpath(r.out + p)) { fail("guard-grep-framing", scope); break; }
+        l = ++i;
+        while (i < r.outn && r.out[i]) i++;
+        if (i == r.outn || !number(r.out + l, i - l, &line)) { fail("guard-grep-framing", scope); break; }
+        t = ++i;
+        while (i < r.outn && r.out[i] != '\n') i++;
+        if (i == r.outn) { fail("guard-grep-framing", scope); break; }
+        if (!arg) {
+            if (guard_text(r.out + t, i - t, name, len(name), 0)) record_site(r.out + p, line);
+        } else {
+            PfSource *x = get_source(r.out + p);
+            long a = x ? line_start(x, line) : -1;
+            if (a < 0) { fail("guard-source-unreadable", r.out + p); break; }
+            long stop = line_end(x->code, a, x->n), k = len(name);
+            for (long j = a; j + k <= stop; j++) if ((!j || !ident(x->code[j-1])) && tx_same(x->code+j,k,name,k)) {
+                int yes = guard_text(x->code+j,x->n-j,name,k,arg);
+                if (yes < 0) fail("guard-call-unclosed", r.out+p);
+                if (yes > 0) { record_site(r.out+p,line); break; }
+            }
+        }
+        i++;
+    }
+done:
+    px_result_free(&r);
+}
+static void guards(void) {
+    for (int i = 0; i < nr; i++) {
+        PfRow *r = &rows[i];
+        if (!key(r,"guard-symbol")) continue;
+        char name[192], *sym = r->v[1];
+        long n = len(sym), colon = tx_find(sym,n,":",1), dot = tx_find(sym,n,".",1);
+        const char *arg = colon >= 0 ? sym + colon + 1 : 0;
+        if (colon < 0 && dot >= 0) { sym += dot + 1; n -= dot + 1; }
+        if (colon >= 0) n = colon;
+        int ok = n > 0 && n < (long)sizeof name && (!arg || arg[0]);
+        for (long j = 0; ok && j < n; j++) if (!ident(sym[j])) ok = 0;
+        for (long j = 0; ok && arg && arg[j]; j++) if (!ident(arg[j])) ok = 0;
+        if (!ok || mm_copy(name,sizeof name,sym,n)) { fail("guard-symbol-format",r->v[1]); continue; }
+        name[n] = 0;
+        if (tx_eqz(r->v[2],"changed")) {
+            for (int j = 0; j < nchanged; j++) {
+                char p[PF_PATH];
+                sy_stat_t st;
+                if (cx_fmt(p,sizeof p,"%s/%s",tree,changed[j])) { fail("guard-path-length",changed[j]); continue; }
+                if (sy_lstat(p,&st) == -ENOENT) continue; /* Applied deletion. */
+                grep_scope(changed[j],name,arg);
+            }
+        } else if (tx_eqz(r->v[2],"all")) grep_scope(0,name,arg);
+        else if (relpath(r->v[2])) grep_scope(r->v[2],name,arg);
+        else {
+            const char *p = r->v[2];
+            int any = 0, ok_list = 1;
+            while (*p) {
+                while (*p == ' ') p++;
+                if (!*p) break;
+                long k = 0;
+                while (p[k] && p[k] != ' ') k++;
+                char item[PF_PATH];
+                if (k >= PF_PATH || mm_copy(item, sizeof item, p, k)) { ok_list = 0; break; }
+                item[k] = 0;
+                if (!relpath(item)) { ok_list = 0; break; }
+                grep_scope(item, name, arg);
+                any = 1;
+                p += k;
+            }
+            if (!any || !ok_list) fail("guard-scope",r->v[2]);
+        }
+    }
+    for (int i = 0; i < nr; i++) if (key(&rows[i],"site")) {
+        PfRow *r = &rows[i];
+        if (!tx_eqz(r->v[2],"guarded") && !tx_eqz(r->v[2],"not-applicable")) fail("site-disposition",r->v[1]);
+        for (int j = 0; j < i; j++) if (key(&rows[j],"site") && tx_eqz(rows[j].v[1],r->v[1])) fail("site-duplicate",r->v[1]);
+        if (!r->hit) fail("site-stale", r->v[1]);
+    }
+}
+
+static int quoted_option(const char *s, long n, const char *opt) {
+    long k = len(opt);
+    if (k < 3 || opt[0] != '-' || opt[1] != '-') return 0;
+    for (long i = 0; i + k + 2 <= n; i++)
+        if (s[i] == '"' && s[i+k+1] == '"' && tx_same(s+i+1,k,opt,k)) return 1;
+    return 0;
+}
+static void callees(const char *delta, long delta_n) {
+    for (int i = 0; i < nr; i++) if (key(&rows[i],"callee")) {
+        PfRow *r = &rows[i];
+        char file[PF_PATH]; int line;
+        if (r->n == 4 || !locate(r->v[2], file, &line)) { fail("callee-anchor-format",r->v[1]); continue; }
+        PfSource *s = get_source(file);
+        long start = s ? line_start(s,line) : -1;
+        if (start < 0) { fail("callee-source-line", r->v[2]); continue; }
+        long e = line_end(s->code,start,s->n), k = len(r->v[1]);
+        if (r->n == 5 && tx_eqz(r->v[3],"argv")) {
+            char *line_no_comments = mm_alloc(e-start+1);
+            if (!line_no_comments) { fail("allocation",r->v[2]); continue; }
+            lex(line_no_comments,s->raw+start,e-start,1);
+            if (!quoted_option(line_no_comments,e-start,r->v[4]) ||
+                !word(delta,delta_n,r->v[1],k) || !quoted_option(delta,delta_n,r->v[4]))
+                fail("callee-argv-mismatch",r->v[2]);
+            mm_free(line_no_comments);
+            continue;
+        }
+        if (r->n == 5 && !tx_eqz(r->v[3],"def")) { fail("callee-kind",r->v[2]); continue; }
+        int found = 0;
+        long decl = skipspace(s->code,start,e);
+        for (long a = start; a + k <= e; a++) {
+            if ((a && ident(s->code[a-1])) || !tx_same(s->code+a,k,r->v[1],k)) continue;
+            if (a <= decl || word(s->code+decl,a-decl,"if",2) || word(s->code+decl,a-decl,"while",5) ||
+                word(s->code+decl,a-decl,"for",3) || word(s->code+decl,a-decl,"switch",6) ||
+                word(s->code+decl,a-decl,"return",6)) continue;
+            int type = 1;
+            for (long j = decl; j < a; j++) if (!(ident(s->code[j]) || white(s->code[j]) || s->code[j] == '*')) type = 0;
+            if (!type) continue;
+            long p = skipspace(s->code,a+k,e);
+            if (p == e || s->code[p] != '(') continue;
+            long end = e;
+            for (int n = 0; n < 8 && end < s->n; n++) end = line_end(s->code,end+1,s->n);
+            long q = matching(s->code,p,end,'(',')');
+            if (q < 0) continue;
+            q = skipspace(s->code,q+1,end);
+            if (q >= end || s->code[q] != '{') continue;
+            if (r->n == 5 && tx_find(s->raw+start,q-start,r->v[4],len(r->v[4])) < 0) continue;
+            found = 1; break;
+        }
+        if (!found) fail("callee-undefined",r->v[1]);
+    }
+}
+static int derive_bits(const PfRow *r) {
+    if (!r || tx_eqz(r->v[1],"none")) return 0;
+    const char *p = r->v[1];
+    const char *const names[] = { "layer-api", "iface-hash", "coreapi", "cx0-extract" };
+    int bits = 0;
+    for (;;) {
+        long n = 0;
+        while (p[n] && p[n] != ';') n++;
+        int bit = 0;
+        for (int i = 0; i < 4; i++) if (tx_same(p,n,names[i],len(names[i]))) bit = 1 << i;
+        if (!bit || (bits & bit)) { fail("derive-format",r->v[1]); return 0; }
+        bits |= bit;
+        if (!p[n]) return bits;
+        p += n+1;
+    }
+}
+static void derives(PfRow *r) {
+    int bits = derive_bits(r);
+    for (int i = 0; i < nchanged; i++) {
+        const char *p = changed[i];
+        if (!(prefix(p,"cx/") || prefix(p,"ext/"))) continue;
+        if (!(suffix(p,".cx") || suffix(p,".c") || suffix(p,".h") || suffix(p,".c.in"))) continue;
+        int need = prefix(p,"cx/cx0/") || tx_eqz(p,"cx/compiler/cxmod.cx") ? 15 : 7;
+        if ((bits & need) != need)
+            fail("derive-required",p);
+    }
+}
+static int nonconstant(const char *s, long a, long b) {
+    for (long i = a; i < b; i++) if ((i == a || !ident(s[i-1])) && ident(s[i]) && (s[i] < '0' || s[i] > '9')) {
+        long j = i+1;
+        while (j < b && ident(s[j])) j++;
+        if (!tx_same(s+i,j-i,"true",4) && !tx_same(s+i,j-i,"false",5) && !tx_same(s+i,j-i,"NULL",4)) return 1;
+        i = j-1;
+    }
+    return 0;
+}
+static int is_void_cast_before(const char *s, long start, long pos) {
+    long p = pos;
+    while (p > start && white(s[p-1])) p--;
+    if (p <= start || s[p-1] != ')') return 0;
+    p--;
+    while (p > start && white(s[p-1])) p--;
+    if (p - 4 < start || !tx_same(s + p - 4, 4, "void", 4)) return 0;
+    p -= 4;
+    while (p > start && white(s[p-1])) p--;
+    return p > start && s[p-1] == '(';
+}
+static int param_tested_in_body(const char *s, long a, long b, const char *p, long plen) {
+    if (plen <= 0) return 0;
+    for (long i = a; i + plen <= b; i++) {
+        if ((i > a && ident(s[i-1])) || (i + plen < b && ident(s[i+plen])) || !tx_same(s+i,plen,p,plen)) continue;
+        if (is_void_cast_before(s, a, i)) continue;
+        return 1;
+    }
+    return 0;
+}
+static int var_mutated_nonzero(const char *s, long a, long b, const char *v, long vlen) {
+    for (long i = a; i + vlen <= b; i++) {
+        if ((i > a && ident(s[i-1])) || (i + vlen < b && ident(s[i+vlen])) || !tx_same(s+i,vlen,v,vlen)) continue;
+        long pre = i;
+        while (pre > a && white(s[pre-1])) pre--;
+        if (pre - 2 >= a && s[pre-1] == '+' && s[pre-2] == '+') return 1;
+        long post = skipspace(s, i + vlen, b);
+        if (post + 1 < b && s[post] == '+' && s[post+1] == '+') return 1;
+        if (post + 1 < b && (s[post] == '+' || s[post] == '|') && s[post+1] == '=') {
+            long rhs = skipspace(s, post + 2, b);
+            if (rhs < b && !(s[rhs] == '0' && (rhs + 1 == b || !ident(s[rhs+1])))) return 1;
+        }
+        if (post < b && s[post] == '=' && (post + 1 == b || s[post+1] != '=') &&
+            (post == a || (s[post-1] != '!' && s[post-1] != '<' && s[post-1] != '>' && s[post-1] != '='))) {
+            long rhs = skipspace(s, post + 1, b);
+            if (rhs < b && !(s[rhs] == '0' && (rhs + 1 == b || !ident(s[rhs+1])))) return 1;
+        }
+    }
+    return 0;
+}
+static int extract_param_name(const char *s, long pa, long pb, int idx, char *out, long cap) {
+    int cur = 0, depth = 0;
+    long seg_a = pa;
+    for (long i = pa; i <= pb; i++) {
+        if (i < pb && (s[i] == '(' || s[i] == '[')) depth++;
+        else if (i < pb && (s[i] == ')' || s[i] == ']')) depth--;
+        else if (i == pb || (!depth && s[i] == ',')) {
+            if (cur == idx) {
+                long e = i;
+                while (e > seg_a && !ident(s[e-1])) e--;
+                long b = e;
+                while (b > seg_a && ident(s[b-1])) b--;
+                long len_p = e - b;
+                if (len_p <= 0 || len_p >= cap || tx_same(s+b,len_p,"void",4)) return 0;
+                if (mm_copy(out, cap, s+b, len_p)) return 0;
+                out[len_p] = 0;
+                return 1;
+            }
+            cur++;
+            seg_a = i + 1;
+        }
+    }
+    return 0;
+}
+static const char *const fail_vars[] = { "failed", "failures", "g_fail", "fail", "bad", "errs" };
+enum { NFVARS = 6 };
+static int wrapper_propagates(const PfSource *s, const char *fn, long fn_len, int cond_idx, int can_fail, const int *ret_fvar) {
+    int found_def = 0;
+    for (long i = 0; i + fn_len < s->n; i++) {
+        if ((i && ident(s->code[i-1])) || ident(s->code[i+fn_len]) || !tx_same(s->code+i,fn_len,fn,fn_len)) continue;
+        long p = skipspace(s->code, i + fn_len, s->n);
+        if (p >= s->n || s->code[p] != '(') continue;
+        long q = matching(s->code, p, s->n, '(', ')');
+        if (q < 0) continue;
+        long brace = skipspace(s->code, q + 1, s->n);
+        if (brace >= s->n || s->code[brace] != '{') continue;
+        long bend = matching(s->code, brace, s->n, '{', '}');
+        if (bend < 0) continue;
+        found_def = 1;
+        char pname[128];
+        if (!extract_param_name(s->code, p + 1, q, cond_idx, pname, sizeof pname)) return 0;
+        if (!param_tested_in_body(s->code, brace + 1, bend, pname, len(pname))) return 0;
+        if (can_fail && guard_text(s->code + brace + 1, bend - brace - 1, "ck", 2, pname) > 0) return 1;
+        for (int f = 0; f < NFVARS; f++) {
+            if (ret_fvar[f] && var_mutated_nonzero(s->code, brace + 1, bend, fail_vars[f], len(fail_vars[f])))
+                return 1;
+        }
+        return 0;
+    }
+    if (!found_def && fn_len == 2 && tx_same(fn, 2, "ck", 2) && can_fail) return 1;
+    return 0;
+}
+static int helper_calls_ck_on_first_param(const PfSource *s, const char *fn, long fn_len, int can_fail, const int *ret_fvar) {
+    for (long i = 0; i + fn_len < s->n; i++) {
+        if ((i && ident(s->code[i-1])) || ident(s->code[i+fn_len]) || !tx_same(s->code+i,fn_len,fn,fn_len)) continue;
+        long p = skipspace(s->code, i + fn_len, s->n);
+        if (p >= s->n || s->code[p] != '(') continue;
+        long q = matching(s->code, p, s->n, '(', ')');
+        if (q < 0) continue;
+        long brace = skipspace(s->code, q + 1, s->n);
+        if (brace >= s->n || s->code[brace] != '{') continue;
+        long bend = matching(s->code, brace, s->n, '{', '}');
+        if (bend < 0) continue;
+        char pname[128];
+        if (!extract_param_name(s->code, p + 1, q, 0, pname, sizeof pname)) return 0;
+        long plen = len(pname);
+        for (long j = brace + 1; j + 2 < bend; j++) {
+            if ((j > brace + 1 && ident(s->code[j-1])) || !tx_same(s->code+j,2,"ck",2) || ident(s->code[j+2])) continue;
+            long ca = skipspace(s->code, j + 2, bend);
+            if (ca >= bend || s->code[ca] != '(') continue;
+            long cb = matching(s->code, ca, bend, '(', ')');
+            if (cb < 0) continue;
+            long comma = -1;
+            int depth = 0;
+            for (long m = ca + 1; m < cb; m++) {
+                if (s->code[m] == '(' || s->code[m] == '[') depth++;
+                else if (s->code[m] == ')' || s->code[m] == ']') depth--;
+                else if (!depth && s->code[m] == ',') { comma = m; break; }
+            }
+            if (comma < 0) continue;
+            if (!nonconstant(s->code, ca + 1, comma)) continue;
+            if (word(s->code + comma + 1, cb - comma - 1, pname, plen) &&
+                wrapper_propagates(s, "ck", 2, 0, can_fail, ret_fvar))
+                return 1;
+        }
+    }
+    return 0;
+}
+static long main_open(PfSource *s) {
+    for (long i = 0; i + 4 < s->n; i++) {
+        if ((i && ident(s->code[i-1])) || !tx_same(s->code+i,4,"main",4)) continue;
+        long a = skipspace(s->code,i+4,s->n);
+        if (a == s->n || s->code[a] != '(') continue;
+        long b = matching(s->code,a,s->n,'(',')');
+        if (b < 0) return -1;
+        b = skipspace(s->code,b+1,s->n);
+        if (b < s->n && s->code[b] == '{') return b;
+    }
+    return -1;
+}
+enum { KIND_CK = 1, KIND_RECORD = 2, KIND_CHECK = 3 };
+static int named_assertion(PfSource *s, const char *label) {
+    long main = main_open(s);
+    if (main < 0) return 0;
+    long end = matching(s->code,main,s->n,'{','}');
+    if (end < 0) return 0;
+    long l = len(label);
+    int can_fail = 0, ret_fvar[NFVARS] = {0};
+    for (long i = main; i + 7 < end; i++) {
+        if (i && ident(s->code[i-1])) continue;
+        if (tx_same(s->code+i,6,"return",6) && white(s->code[i+6])) {
+            long a = i+6, b = a;
+            while (b < end && s->code[b] != ';' && s->code[b] != '}') b++;
+            if (b < end && s->code[b] == ';') {
+                can_fail |= word(s->code+a,b-a,"ck_failures",11);
+                for (int f = 0; f < NFVARS; f++)
+                    if (word(s->code+a,b-a,fail_vars[f],len(fail_vars[f]))) ret_fvar[f] = 1;
+            }
+        }
+    }
+    for (long i = 0; i < s->n; i++) {
+        if (i && ident(s->code[i-1])) continue;
+        long k = 0;
+        int kind = 0;
+        if (i + 9 <= s->n && tx_same(s->code+i,9,"ck_record",9) && (i + 9 == s->n || !ident(s->code[i+9]))) {
+            k = 9; kind = KIND_RECORD;
+        } else if (i + 5 <= s->n && tx_same(s->code+i,5,"check",5) && (i + 5 == s->n || !ident(s->code[i+5]))) {
+            k = 5; kind = KIND_CHECK;
+        } else if (i + 2 <= s->n && tx_same(s->code+i,2,"ck",2)) {
+            if (i + 2 == s->n || !ident(s->code[i+2])) {
+                k = 2; kind = KIND_CK;
+            } else if (s->code[i+2] == '_') {
+                long u = i + 3;
+                while (u < s->n && ident(s->code[u])) u++;
+                if (u > i + 3) { k = u - i; kind = KIND_CK; }
+            }
+        }
+        if (!kind) continue;
+        long a = skipspace(s->code,i+k,s->n);
+        if (a == s->n || s->code[a] != '(') continue;
+        long b = matching(s->code,a,s->n,'(',')'), colon = -1, arg = a+1;
+        int depth = 0, commas = 0;
+        if (b < 0) continue;
+        for (long j = a+1; j < b; j++) {
+            if (s->code[j] == '(' || s->code[j] == '[' || s->code[j] == '{') depth++;
+            if (s->code[j] == ')' || s->code[j] == ']' || s->code[j] == '}') depth--;
+            if (!depth && s->code[j] == ',') {
+                if (++commas == (kind == KIND_RECORD ? 2 : 1)) { colon = j; break; }
+                arg = j+1;
+            }
+        }
+        if (colon < 0) continue;
+        long t = skipspace(s->raw,kind == KIND_CHECK ? arg : colon+1,b);
+        long stop = kind == KIND_CHECK ? colon : b;
+        if (t+l+2 > stop || s->raw[t] != '"' || s->raw[t+l+1] != '"' || !tx_same(s->raw+t+1,l,label,l) ||
+            skipspace(s->raw,t+l+2,stop) != stop) continue;
+        if (kind == KIND_CHECK && nonconstant(s->code,colon+1,b)) {
+            if (wrapper_propagates(s, "check", 5, 1, can_fail, ret_fvar)) return 1;
+        } else if (kind == KIND_CK && nonconstant(s->code,arg,colon)) {
+            if (wrapper_propagates(s, s->code + i, k, 0, can_fail, ret_fvar)) return 1;
+        } else if (kind == KIND_RECORD && nonconstant(s->code,arg,colon)) {
+            for (int f = 0; f < NFVARS; f++)
+                if (ret_fvar[f] && word(s->code+a+1,arg-a-1,fail_vars[f],len(fail_vars[f]))) return 1;
+        }
+    }
+    for (long i = 0; i < s->n; i++) {
+        if (i && ident(s->code[i-1])) continue;
+        if (!ident(s->code[i]) || (s->code[i] >= '0' && s->code[i] <= '9')) continue;
+        long u = i + 1;
+        while (u < s->n && ident(s->code[u])) u++;
+        long fn_len = u - i;
+        long a = skipspace(s->code, u, s->n);
+        if (a >= s->n || s->code[a] != '(') { i = u - 1; continue; }
+        long b = matching(s->code, a, s->n, '(', ')');
+        if (b < 0) { i = u - 1; continue; }
+        long comma = -1;
+        int depth = 0;
+        for (long j = a + 1; j < b; j++) {
+            if (s->code[j] == '(' || s->code[j] == '[') depth++;
+            else if (s->code[j] == ')' || s->code[j] == ']') depth--;
+            else if (!depth && s->code[j] == ',') { comma = j; break; }
+        }
+        long stop = comma >= 0 ? comma : b;
+        long t = skipspace(s->raw, a + 1, stop);
+        if (t + l + 2 <= stop && s->raw[t] == '"' && s->raw[t+l+1] == '"' &&
+            tx_same(s->raw+t+1, l, label, l) && skipspace(s->raw, t+l+2, stop) == stop) {
+            if (helper_calls_ck_on_first_param(s, s->code + i, fn_len, can_fail, ret_fvar)) return 1;
+        }
+        i = u - 1;
+    }
+    return 0;
+}
+static void checks(void) {
+    for (int i = 0; i < nr; i++) if (key(&rows[i],"check-real")) {
+        PfRow *r = &rows[i];
+        PfSource *s = get_source(r->v[1]);
+        if (!s) fail("check-source-unreadable",r->v[1]);
+        else if (!named_assertion(s,r->v[2])) fail("check-cannot-fail",r->v[1]);
+    }
+}
+
+static int trigger(const char *p, long n, const char *keys) {
+    for (long a = 0, k = len(keys); a < k;) {
+        while (a < k && white(keys[a])) a++;
+        long b = a;
+        while (b < k && !white(keys[b])) b++;
+        if (b-a >= 2 && word(p,n,keys+a,b-a)) return 1;
+        a = b;
+    }
+    return 0;
+}
+static void negatives(const char *path, const char *delta, long delta_n) {
+    long n;
+    char *b = read_text(path, 1 << 20, &n), *at = b, *s;
+    if (!b) { fail("negative-seeds-unreadable",path); return; }
+    int rc = line_next(&at,b+n,&s), count = 0;
+    if (rc != 1 || !tx_eqz(s,"类\t触发面\t必答负例\t匹配(补丁内容关键词)\t真实阻断出处\t期望(断言名或 N/A)")) {
+        fail("negative-seeds-header",path); mm_free(b); return;
+    }
+    char *last_seed = 0;
+    while ((rc=line_next(&at,b+n,&s)) > 0) {
+        char *v[6];
+        if (cols(s,v,6) != 6) { fail("negative-seeds-columns",path); break; }
+        count++;
+        if (tx_eqz(v[5],"同上") && last_seed) v[5] = last_seed;
+        else last_seed = v[5];
+        int needed = trigger(delta,delta_n,v[3]);
+        int found = 0;
+        for (int i = 0; i < nr; i++) {
+            PfRow *r = &rows[i];
+            if (!key(r,"negative") || !tx_eqz(r->v[1],v[5])) continue;
+            r->hit = 1;
+            found++;
+            if (!needed) continue;
+            if (tx_eqz(r->v[2],"N/A")) {
+                if (tx_eqz(r->v[3],"-")) fail("negative-na-reason",r->v[1]);
+                continue;
+            }
+            int assertion = 0;
+            for (int j = 0; j < nr && !assertion; j++) if (key(&rows[j],"check-real")) {
+                PfSource *x = get_source(rows[j].v[1]);
+                if (x) assertion = named_assertion(x,r->v[2]);
+            }
+            if (!assertion || tx_eqz(r->v[3],"-")) fail("negative-no-assertion-or-mutation",r->v[1]);
+        }
+        if (needed && !found) fail("negative-unanswered",v[5]);
+        if (found > 1) fail("negative-duplicate",v[5]);
+    }
+    for (int i = 0; i < nr; i++) if (key(&rows[i],"negative") && !rows[i].hit)
+        fail("negative-unknown-seed",rows[i].v[1]);
+    if (rc < 0 || !count) fail("negative-seeds-framing",path);
+    mm_free(b);
+}
+/* Only changed hunk lines are inputs to the seed matcher; file names and context aren't. */
+static char *surfaces(const char *b, long n, long *outn, int additions_only) {
+    char *out = mm_alloc(n+1);
+    int hunk = 0;
+    if (!out) return 0;
+    *outn = 0;
+    for (long i = 0; i < n;) {
+        long e = line_end(b,i,n), k = e-i;
+        if (k >= 3 && tx_same(b+i,3,"@@ ",3)) hunk = 1;
+        else if (k >= 11 && tx_same(b+i,11,"diff --git ",11)) hunk = 0;
+        else if (hunk && k > 1 && (b[i] == '+' || (!additions_only && b[i] == '-')) &&
+            !(k >= 6 && (tx_same(b+i,6,"+++ b/",6) || tx_same(b+i,6,"--- a/",6)))) {
+            if (mm_copy(out+*outn,n+1-*outn,b+i+1,k-1)) { mm_free(out); return 0; }
+            *outn += k-1;
+            out[(*outn)++] = '\n';
+        }
+        i = e+1;
+    }
+    out[*outn] = 0;
+    return out;
+}
+
+int main(int argc, char **argv) {
+    char *patch = 0, *contract_path = 0, *prior = 0, *repo = ".", *seeds = 0;
+    char cpath[PF_PATH], seedpath[PF_PATH], absolute_repo[PF_PATH], frozen[PF_PATH], sha[65];
+    int run = 0, made = 0, repo_set = 0;
+    for (int i = 1; i < argc; i++) {
+        if (tx_eqz(argv[i],"--contract") && i+1 < argc && !contract_path) contract_path = argv[++i];
+        else if (tx_eqz(argv[i],"--prior") && i+1 < argc && !prior) prior = argv[++i];
+        else if (tx_eqz(argv[i],"--repo") && i+1 < argc && !repo_set) { repo = argv[++i]; repo_set = 1; }
+        else if (tx_eqz(argv[i],"--seeds") && i+1 < argc && !seeds) seeds = argv[++i];
+        else if (tx_eqz(argv[i],"--run") && !run) run = 1;
+        else if (!patch && argv[i][0] != '-') patch = argv[i];
+        else { fail("usage",argv[i]); goto done; }
+    }
+    if (!patch || sy_realpath(repo,absolute_repo,sizeof absolute_repo) < 0) { fail("usage-or-repo",repo); goto done; }
+    if (!contract_path) {
+        if (cx_fmt(cpath,sizeof cpath,"%s.contract.tsv",patch)) { fail("contract-path",patch); goto done; }
+        contract_path = cpath;
+    }
+    if (!seeds) {
+        if (cx_fmt(seedpath,sizeof seedpath,"%s/build/review-negatives.tsv",absolute_repo)) { fail("seeds-path",repo); goto done; }
+        seeds = seedpath;
+    }
+    long pn = 0, cn = 0, pl = 0;
+    char *pb = read_text(patch,PF_PATCH,&pn);
+    if (!pb || !pn || sy_sha256_any_hex(pb,pn,sha)) { fail("patch-read",patch); goto done; }
+    if (prior) {
+        long oldn = 0;
+        char *old = read_text(prior,PF_PATCH,&oldn);
+        if (!old || !oldn) { fail("prior-read",prior); goto done; }
+        int same = tx_same(pb,pn,old,oldn);
+        mm_free(old);
+        if (same) { fail("IDENTICAL_TO_PRIOR",sha); goto done; }
+    }
+    for (long i = 0; i < pn; i++) if (pb[i] == '\n') pl++;
+    if (pb[pn-1] != '\n') pl++;
+    char *cb = read_text(contract_path,1<<20,&cn);
+    if (!cb) { fail("contract-unreadable",contract_path); goto done; }
+    if (!contract(cb,cn,pl)) goto done;
+    PfRow *base = one("base",1), *digest = one("patch-sha256",1), *derive = one("derive",0);
+    if (!base || !digest || bad) goto done;
+    if (!take_hex(base->v[1],40)) { fail("base-not-sha40",base->v[1]); goto done; }
+    if (!take_hex(digest->v[1],64) || !tx_eqz(sha,digest->v[1])) { fail("patch-sha256-mismatch",sha); goto done; }
+    if (draft) { sy_printf("PREFLIGHT_DRAFT\treason=deferred-spec-items\n"); goto done; }
+    long now = sy_now_ms();
+    if (now < 0) { fail("monotonic-clock",0); goto done; }
+    deadline = now + 50000;
+    if (sy_mkdtemp("/tmp","patch-preflight",work,sizeof work)) { fail("staging-dir",0); goto done; }
+    made = 1;
+    if (cx_fmt(tree,sizeof tree,"%s/tree",work) || sy_mkdir(tree,0700) ||
+        cx_fmt(frozen,sizeof frozen,"%s/input.patch",work) || sy_write_file(frozen,pb,pn,0600)) {
+        fail("staging-prepare",0); goto done;
+    }
+    if (!apply(absolute_repo,base->v[1],frozen)) goto done;
+    derives(derive);
+    guards();
+    checks();
+    long dn, an;
+    char *delta = surfaces(pb,pn,&dn,0), *added = surfaces(pb,pn,&an,1);
+    if (!delta || !added) fail("patch-surface-allocation",0);
+    else {
+        callees(added,an);
+        negatives(seeds,delta,dn);
+    }
+    mm_free(added);
+    mm_free(delta);
+done:
+    if (made && sy_remove_all(work)) fail("staging-cleanup",work);
+    const char *st = bad ? "FAIL" : draft ? "DRAFT" : "PASS";
+    const char *verdict = bad ? "FAIL" : draft ? "DRAFT" : run ? "UNMEASURED" : "STATIC_ONLY";
+    sy_printf("PATCH_PREFLIGHT_UNCOVERED items=multi-exit,counter-binding,macro-expansion note=STATIC_ONLY_does_not_exclude_multi-exit_counter-binding_macro-expansion\n");
+    sy_printf("PATCH_PREFLIGHT static=%s compile=UNMEASURED harness=UNMEASURED mutants=UNMEASURED verdict=%s uncovered=multi-exit,counter-binding,macro-expansion\n",st,verdict);
+    return bad ? 1 : draft || run ? 2 : 0;
+}

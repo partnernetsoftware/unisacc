@@ -1,0 +1,214 @@
+/* cx tools/check-patch-preflight.cx -- [--tool PATH] */
+#pragma unisa use sys.fs
+#pragma unisa use sys.io
+#pragma unisa use sys.sha
+#pragma unisa use sys.time
+#pragma unisa use sys.posix
+#pragma unisa use sysx.run
+#pragma unisa use text.fmt
+#pragma unisa use text.text
+#pragma unisa use cxlib.ckassert
+
+static const char base_source[] =
+    "static void retry(char *outp) {\n"
+    "    sy_unlink(outp);\n"
+    "}\n"
+    "static void recover(char *outp) {\n"
+    "    sy_unlink(outp);\n"
+    "}\n";
+/* C5: one changed deletion site does not bring its unchanged sibling into the author's contract. */
+static const char patch_bytes[] =
+    "diff --git a/tools/prerun-drive.cx b/tools/prerun-drive.cx\n"
+    "--- a/tools/prerun-drive.cx\n"
+    "+++ b/tools/prerun-drive.cx\n"
+    "@@ -1,6 +1,6 @@\n"
+    " static void retry(char *outp) {\n"
+    "-    sy_unlink(outp);\n"
+    "+    if (!protected_window(outp)) sy_unlink(outp);\n"
+    " }\n"
+    " static void recover(char *outp) {\n"
+    "     sy_unlink(outp);\n"
+    " }\n";
+static const char wrong_base_delta[] =
+    "diff --git a/tools/prerun-drive.cx b/tools/prerun-drive.cx\n"
+    "--- a/tools/prerun-drive.cx\n"
+    "+++ b/tools/prerun-drive.cx\n"
+    "@@ -1,3 +1,3 @@\n"
+    " static void never_in_base(char *outp) {\n"
+    "-    sy_unlink(outp);\n"
+    "+    if (!protected_window(outp)) sy_unlink(outp);\n"
+    " }\n";
+/* C3 S1: an exported function change is not a tools-only patch. */
+static const char exported_delta[] =
+    "diff --git a/cx/sys/proc.cx b/cx/sys/proc.cx\n"
+    "--- a/cx/sys/proc.cx\n"
+    "+++ b/cx/sys/proc.cx\n"
+    "@@ -1 +1 @@\n"
+    "-int inherited(void) { return 0; }\n"
+    "+int inherited(void) { return 1; }\n";
+static const char passable_check[] =
+    "int main(int argc, char **argv) {\n"
+    "    ck(argc == 1, \"evidence-exists-refused\");\n"
+    "    return ck_failures() ? 1 : 0;\n"
+    "}\n";
+/* Candidate 8's old draft, preserving executable lines of the blocked check; comment is a decoy. */
+static const char constant_check[] =
+    "/* ck(argc != 1, \"evidence-exists-refused\"); return ck_failures(); */\n"
+    "int main(void) {\n"
+    "    printf(\"CHECK_OBJECT_REPRO_DRAFT status=DRAFT_ONLY\\n\");\n"
+    "    return 0;\n"
+    "}\n";
+/* Candidate 10's 5-char ck_pg wrapper around ck() + g_fail++ (must not collide with 5-char check() arg order). */
+static const char wrapped_check[] =
+    "static int g_fail;\n"
+    "static void ck_pg(int ok, const char *n) { ck(ok, n); if (!ok) g_fail++; }\n"
+    "int main(int argc, char **argv) {\n"
+    "    ck_pg(argc == 1, \"evidence-exists-refused\");\n"
+    "    printf(\"CHECK_PROC_OWN_GEN\\tfailed=%d\\n\", g_fail);\n"
+    "    return g_fail ? 1 : 0;\n"
+    "}\n";
+/* Adversarial no-op wrapper ck_fake with constant-zero g_fail=0 and decoy failed= string (must be refused). */
+static const char fake_wrapped_check[] =
+    "static int g_fail = 0;\n"
+    "static void ck_fake(int ok, const char *n) { (void)ok; (void)n; }\n"
+    "int main(int argc, char **argv) {\n"
+    "    ck_fake(argc == 1, \"evidence-exists-refused\");\n"
+    "    printf(\"CHECK_PROC_OWN_GEN\\tfailed=%d\\n\", g_fail);\n"
+    "    return g_fail ? 1 : 0;\n"
+    "}\n";
+static const char seeds[] =
+    "类\t触发面\t必答负例\t匹配(补丁内容关键词)\t真实阻断出处\t期望(断言名或 N/A)\n"
+    "B\t站点清扫\t删除口全部\tsy_unlink\treview-agyneon.md:13\tdelete-site-fully-guarded\n";
+static const char both_sites[] =
+    "site\ttools/prerun-drive.cx:2\tguarded\tprotected_window before unlink\n"
+    "site\ttools/prerun-drive.cx:5\tnot-applicable\tbaseline sibling accounted for\n";
+static const char one_site[] = "site\ttools/prerun-drive.cx:2\tguarded\tprotected_window before unlink\n";
+static const char neg[] = "negative\tdelete-site-fully-guarded\tevidence-exists-refused\tremove-check\n";
+static char tmp[4096], repo[4096], tool[4096], sha[65], base[41], patch[4096], prior[4096], table_path[4096], seed_path[4096];
+static long deadline;
+
+static int has(const px_result *r, const char *s) {
+    return r->out && tx_find(r->out,r->outn,s,tx_len(s,4096)) >= 0;
+}
+static int write_text(const char *root, const char *rel, const char *text) {
+    char p[4096];
+    return !cx_fmt(p,sizeof p,"%s/%s",root,rel) && !sy_write_file(p,text,tx_len(text,16384),0600);
+}
+static int child(char **av, const char *cwd, px_result *r) {
+    px_opts o = {0};
+    long left = deadline - sy_now_ms();
+    if (left < 1) return -1;
+    o.argv=av; o.cwd=cwd; o.deadline_ms=left; o.out_cap=32768; o.err_cap=16384; o.merge_err=1; o.kill_tree=1;
+    if (px_run(&o,r) || r->residue || r->truncated || r->timed_out) return -1;
+    return r->code;
+}
+#define GIT "/usr/bin/env", "-i", "PATH=/usr/bin:/bin", "GIT_CONFIG_NOSYSTEM=1", "git"
+static int git(char **av) {
+    px_result r = {0};
+    int rc = child(av,repo,&r);
+    if (rc && r.outn) (void)sy_write_all(2,r.out,r.outn);
+    px_result_free(&r);
+    return rc;
+}
+static int setup(void) {
+    char p[4096];
+    if (cx_fmt(repo,sizeof repo,"%s/repo",tmp) || sy_mkdir(repo,0700)) return 0;
+    const char *const dirs[] = { "tools", "cx", "cx/sys" };
+    for (int i = 0; i < 3; i++) if (cx_fmt(p,sizeof p,"%s/%s",repo,dirs[i]) || sy_mkdir(p,0700)) return 0;
+    if (!write_text(repo,"tools/prerun-drive.cx",base_source) ||
+        !write_text(repo,"tools/calls.cx","static int protected_window(char *p) { return *p != 0; }\n") ||
+        !write_text(repo,"tools/check-real.cx",passable_check) ||
+        !write_text(repo,"tools/check-object-repro-draft.cx",constant_check) ||
+        !write_text(repo,"tools/check-wrapped-real.cx",wrapped_check) ||
+        !write_text(repo,"tools/check-wrapped-fake.cx",fake_wrapped_check) ||
+        !write_text(repo,"cx/sys/proc.cx","int inherited(void) { return 0; }\n") ||
+        !write_text(tmp,"seeds.tsv",seeds) || !write_text(tmp,"prior.patch",patch_bytes)) return 0;
+    char *init[] = { GIT, "init", "-q", 0 };
+    char *add[] = { GIT, "add", "--all", 0 };
+    char *commit[] = { GIT,"-c","user.name=fixture","-c","user.email=fixture@localhost","-c","commit.gpgsign=false","commit","-qm","base",0 };
+    char *rev[] = { GIT, "rev-parse", "HEAD", 0 };
+    if (git(init) || git(add) || git(commit)) return 0;
+    px_result r = {0};
+    int rc = child(rev,repo,&r);
+    if (!rc && r.outn == 41 && r.out[40] == '\n') {
+        for (int i = 0; i < 40; i++) base[i] = r.out[i];
+        base[40] = 0;
+    }
+    px_result_free(&r);
+    return base[0] && !cx_fmt(patch,sizeof patch,"%s/subject.patch",tmp) &&
+        !cx_fmt(prior,sizeof prior,"%s/prior.patch",tmp) && !cx_fmt(table_path,sizeof table_path,"%s/contract.tsv",tmp) &&
+        !cx_fmt(seed_path,sizeof seed_path,"%s/seeds.tsv",tmp);
+}
+static void probe(const char *name, const char *patch_text, const char *sites, const char *callee, const char *check_path,
+                  const char *negative, const char *status, const char *opt, int expected, const char *msg, int corrupt) {
+    char table[8192];
+    long n = tx_len(patch_text,16384);
+    int ok = n > 0 && !sy_sha256_any_hex(patch_text,n,sha) && !sy_write_file(patch,patch_text,n,0600);
+    if (ok && corrupt) sha[0] = sha[0] == '0' ? '1' : '0';
+    if (ok) ok = !cx_fmt(table,sizeof table,
+        "base\t%s\npatch-sha256\t%s\nspec-item\tD1\t%s\t%s\n"
+        "guard-symbol\tsy_unlink:outp\ttools/prerun-drive.cx\n%s"
+        "callee\t%s\ttools/calls.cx:1\nderive\tnone\n"
+        "check-real\t%s\tevidence-exists-refused\n%s",base,sha,status,
+        tx_eqz(status,"deferred") ? "unisa-tape-emit-deferred" : "6",sites,callee,check_path,negative) &&
+        !sy_write_file(table_path,table,tx_len(table,sizeof table),0600);
+    px_result r = {0};
+    if (ok) {
+        char *av[] = { "cx",tool,"--",patch,"--repo",repo,"--contract",table_path,"--seeds",seed_path,(char *)opt,
+            opt && tx_eqz(opt,"--prior") ? prior : 0,0 };
+        int rc = child(av,0,&r);
+        ok = rc == expected && has(&r,msg) &&
+             has(&r,"PATCH_PREFLIGHT_UNCOVERED items=multi-exit,counter-binding,macro-expansion") &&
+             has(&r,"uncovered=multi-exit,counter-binding,macro-expansion");
+        if (expected) ok = ok && !has(&r,"verdict=STATIC_ONLY");
+        if (!ok) sy_eprintf("CHECK_PATCH_PREFLIGHT_CASE\tid=%s\trc=%d\texpected=%d\n",name,rc,expected);
+    }
+    if (!ok && r.outn) (void)sy_write_all(2,r.out,r.outn);
+    ck(ok,name);
+    px_result_free(&r);
+}
+int main(int argc, char **argv) {
+    if (ck_receipt_begin(&argc,argv) < 0) return 2;
+    int made = 0;
+    if (argc == 3 && tx_eqz(argv[1],"--tool")) {
+        if (sy_realpath(argv[2],tool,sizeof tool) < 0) return 2;
+    } else if (argc == 1) {
+        char self[4096];
+        int n = sy_realpath(argv[0],self,sizeof self);
+        if (n < 0) return 2;
+        while (n && self[n-1] != '/') n--;
+        self[n] = 0;
+        if (cx_fmt(tool,sizeof tool,"%spatch-preflight.cx",self)) return 2;
+    } else return 2;
+    long now = sy_now_ms();
+    if (now >= 0) {
+        deadline = now + 50000;
+        made = !sy_mkdtemp("/tmp","check-patch-preflight",tmp,sizeof tmp);
+    }
+    int ready = made && setup();
+    ck(ready,"fixture-committed-base");
+    if (ready) {
+        const char *real = "tools/check-real.cx", *f = "protected_window", *impl = "implemented";
+        probe("covered-sites-and-real-check",patch_bytes,both_sites,f,real,neg,impl,0,0,"verdict=STATIC_ONLY",0);
+        probe("unchanged-unlink-missing",patch_bytes,one_site,f,real,neg,impl,0,1,"reason=site-uncovered\tsite=tools/prerun-drive.cx:5",0);
+        probe("nonexistent-tx-pre-refused",patch_bytes,both_sites,"tx_pre",real,neg,impl,0,1,"reason=callee-undefined\tsite=tx_pre",0);
+        probe("draft-only-check-refused",patch_bytes,both_sites,f,"tools/check-object-repro-draft.cx",neg,impl,0,1,"reason=check-cannot-fail",0);
+        probe("wrapped-ck-pg-real-check-accepted",patch_bytes,both_sites,f,"tools/check-wrapped-real.cx",neg,impl,0,0,"verdict=STATIC_ONLY",0);
+        probe("fake-wrapper-zero-counter-refused",patch_bytes,both_sites,f,"tools/check-wrapped-fake.cx",neg,impl,0,1,"reason=check-cannot-fail",0);
+        probe("unanswered-deletion-seed",patch_bytes,both_sites,f,real,"",impl,0,1,"reason=negative-unanswered\tsite=delete-site-fully-guarded",0);
+        probe("same-bytes-other-file-refused",patch_bytes,both_sites,f,real,neg,impl,"--prior",1,"reason=IDENTICAL_TO_PRIOR",0);
+        probe("deferred-only-direction-review",patch_bytes,both_sites,f,real,neg,"deferred",0,2,"verdict=DRAFT",0);
+        probe("run-unmeasured-nonzero",patch_bytes,both_sites,f,real,neg,impl,"--run",2,"compile=UNMEASURED harness=UNMEASURED mutants=UNMEASURED verdict=UNMEASURED",0);
+        probe("digest-mismatch-refused",patch_bytes,both_sites,f,real,neg,impl,0,1,"reason=patch-sha256-mismatch",1);
+        probe("correct-digest-wrong-context-refused",wrong_base_delta,both_sites,f,real,neg,impl,0,1,"reason=patch-apply-check",0);
+        probe("product-interface-derive-missing",exported_delta,both_sites,f,real,"",impl,0,1,"reason=derive-required\tsite=cx/sys/proc.cx",0);
+        char *dirty[] = { GIT, "status", "--porcelain", 0 };
+        px_result r = {0};
+        ck(!child(dirty,repo,&r) && !r.outn,"base-worktree-unchanged");
+        px_result_free(&r);
+    }
+    if (made && sy_remove_all(tmp)) ck(0,"fixture-cleanup");
+    sy_printf("CHECK_PATCH_PREFLIGHT\tchecks=%d\tfailed=%d\n",ck_assertions(),ck_failures());
+    ck_receipt_finish();
+    return ck_failures() ? 1 : 0;
+}
