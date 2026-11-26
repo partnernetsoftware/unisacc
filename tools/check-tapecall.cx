@@ -1,0 +1,84 @@
+/* tools/check-tapecall.cx -- thin contract check for tools/tape/tapecall.cx (tc_open/tc_lookup_sym/tc_call_bytes_i64). */
+#pragma unisa use sys.io
+#pragma unisa use sys.fs
+#pragma unisa use text.text
+#pragma unisa use mem.bytes
+#pragma unisa use mem.heap
+#pragma unisa use tape.tapeslice_contract
+#pragma unisa use tape.tapecall
+
+static int g_pass = 0, g_fail = 0;
+
+static void ck(int ok, const char *name) {
+    if (ok) { g_pass++; sy_printf("PASS\tcheck-tapecall.%s\n", name); }
+    else { g_fail++; sy_printf("FAIL\tcheck-tapecall.%s\n", name); }
+}
+
+/* Build a minimal valid UTAPEBIN v1.3 container declaring HOST slot 12 (spawn) to test M1-383 rejection. */
+static long build_slot12_container(unsigned char *b, long cap) {
+    int i, j;
+    const char *tags[6] = {"CODE", "DATA", "BSSZ", "SYMS", "RELO", "HOST"};
+    /* CODE at 208 len=6 (pad 2->216), DATA at 216 len=0, BSSZ at 216 len=8 (->224),
+     * SYMS at 224 len=0, RELO at 224 len=0, HOST at 224 len=9 (slot=12, len=5, "spawn"), total=233. */
+    unsigned long long offs[6] = {208, 216, 216, 224, 224, 224};
+    unsigned long long lens[6] = {6, 0, 8, 0, 0, 9};
+    unsigned long long cnts[6] = {2, 0, 1, 0, 0, 1};
+    if (cap < 233) return -1;
+    for (i = 0; i < 233; i++) b[i] = 0;
+    mm_copy(b, 8, "UTAPEBIN", 8);
+    ts_wr_u(b + 8, 2, 1); ts_wr_u(b + 10, 2, 3); ts_wr_u(b + 12, 2, 1);
+    ts_wr_u(b + 14, 2, 0); ts_wr_u(b + 16, 4, 0); ts_wr_u(b + 20, 4, 6);
+    ts_wr_u(b + 24, 4, 64); ts_wr_u(b + 60, 4, 1);
+    for (i = 0; i < 6; i++) {
+        int d = 64 + 24 * i;
+        for (j = 0; j < 4; j++) b[d + j] = (unsigned char)tags[i][j];
+        ts_wr_u(b + d + 4, 8, offs[i]);
+        ts_wr_u(b + d + 12, 8, lens[i]);
+        ts_wr_u(b + d + 20, 4, cnts[i]);
+    }
+    b[208] = 0; b[209] = 0xf0; b[210] = 0; b[211] = 0;
+    b[212] = 42; b[213] = 0xf0;
+    ts_wr_u(b + 216, 8, 64);
+    ts_wr_u(b + 224, 2, 12);
+    ts_wr_u(b + 226, 2, 5);
+    mm_copy(b + 228, 5, "spawn", 5);
+    ts_seal_ident(b, 233);
+    return 233;
+}
+
+int main(void) {
+    TcSlice sl;
+    char why[128];
+    unsigned char short_buf[32];
+    unsigned char slot12_buf[256];
+    unsigned long long coff = 0;
+    long long ret = 0;
+    int i;
+    for (i = 0; i < 32; i++) short_buf[i] = 0;
+
+    /* 1. tc_open null/short args rejected */
+    ck(tc_open(0, 0, "/nonexistent.so", &sl, why, sizeof why) != 0 && tx_eqz(why, "bad-arg"), "open-null-arg-rejected");
+    ck(tc_open(short_buf, 32, "/nonexistent.so", &sl, why, sizeof why) != 0 && tx_eqz(why, "bad-arg"), "open-short-buf-rejected");
+
+    /* 2. tc_open rejects valid container with M1-unsupported host slot 12 (spawn) BEFORE dlopen */
+    {
+        long n = build_slot12_container(slot12_buf, sizeof slot12_buf);
+        ck(n == 233 && tc_open(slot12_buf, n, "/nonexistent.so", &sl, why, sizeof why) != 0 &&
+           tx_eqz(why, "m1-unsupported-host-slot"), "open-slot12-m1-383-rejected");
+    }
+
+    /* 3. tc_open rejects tampered ident BEFORE dlopen */
+    {
+        long n = build_slot12_container(slot12_buf, sizeof slot12_buf);
+        slot12_buf[210] ^= 0x01;
+        ck(n == 233 && tc_open(slot12_buf, n, "/nonexistent.so", &sl, why, sizeof why) != 0 &&
+           tx_eqz(why, "bad-ident"), "open-bad-ident-rejected");
+    }
+
+    /* 4. tc_lookup_sym & tc_call_bytes_i64 argument bounds */
+    ck(tc_lookup_sym(0, "cxsa_valid", &coff, why, sizeof why) != 0 && tx_eqz(why, "bad-arg"), "lookup-null-slice-rejected");
+    ck(tc_call_bytes_i64(0, 0, 0, 0, 1000ull, &ret, 0, why, sizeof why) != 0 && tx_eqz(why, "bad-arg"), "call-null-slice-rejected");
+
+    sy_printf("CHECK_TAPECALL\tpassed=%d\tfailed=%d\n", g_pass, g_fail);
+    return g_fail ? 1 : 0;
+}

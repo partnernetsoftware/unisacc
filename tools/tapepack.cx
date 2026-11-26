@@ -133,6 +133,9 @@ static int g_shash[TP_HASH_SZ];
 static int g_bhash[TP_HASH_SZ];
 static int g_lhash[TP_LHASH_SZ];
 static int g_queue[TP_MAX_FUNCS];
+#define TP_MAX_EXPORTS 64
+static const char *g_exports[TP_MAX_EXPORTS];
+static int g_nexports = 0;
 
 static const char *g_sect_tags[6] = {"CODE", "DATA", "BSSZ", "SYMS", "RELO", "HOST"};
 
@@ -613,6 +616,15 @@ static void parse_tape(const char *b, long n) {
     if (cur_fn >= 0) g_funcs[cur_fn].end_off = n;
 }
 
+static int is_exported_sym(const char *nm, int nl) {
+    int i;
+    for (i = 0; i < g_nexports; i++) {
+        int el = (int)tx_len(g_exports[i], 256);
+        if (same_tok(nm, nl, g_exports[i], el)) return 1;
+    }
+    return 0;
+}
+
 static void run_reachability_dce(const char *b) {
     int qh = 0, qt = 0, i;
     for (i = 0; i < g_nfuncs; i++) {
@@ -620,7 +632,7 @@ static void run_reachability_dce(const char *b) {
         int nl = g_funcs[i].nlen;
         if (same_tok(nm, nl, "_start", 6) || same_tok(nm, nl, "main", 4) ||
             same_tok(nm, nl, "__init", 6) || same_tok(nm, nl, "__main_ret", 10) ||
-            (nl >= 8 && same_tok(nm, 8, "__init_u", 8))) {
+            (nl >= 8 && same_tok(nm, 8, "__init_u", 8)) || is_exported_sym(nm, nl)) {
             if (!g_funcs[i].live) {
                 g_funcs[i].live = 1;
                 g_queue[qt++] = i;
@@ -964,6 +976,18 @@ static int build_container(const char *src, long src_len, int use_dce,
     tv_push_bytes(&data, "_start", 7);
     int sym_main_off = (int)data.len;
     tv_push_bytes(&data, "main", 5);
+    int exp_name_off[TP_MAX_EXPORTS];
+    int exp_fn_idx[TP_MAX_EXPORTS];
+    for (i = 0; i < g_nexports; i++) {
+        int el = (int)tx_len(g_exports[i], 256);
+        exp_name_off[i] = (int)data.len;
+        tv_push_bytes(&data, g_exports[i], el + 1);
+        exp_fn_idx[i] = fhash_find(g_exports[i], el);
+        if (exp_fn_idx[i] < 0) {
+            tv_free(&code); tv_free(&data); tv_free(&syms); tv_free(&relo); tv_free(&host);
+            return refuse_sym("export-symbol-not-found", g_exports[i], el, 0);
+        }
+    }
     bss_base_off = ((unsigned long long)data.len + 7ull) & ~7ull;
 
     /* 2. BSSZ: assign deterministic offsets and sum .bss size */
@@ -1113,6 +1137,12 @@ static int build_container(const char *src, long src_len, int use_dce,
         if (main_fn >= 0 && g_funcs[main_fn].first_insn >= 0 && g_funcs[main_fn].first_insn < insns) {
             main_off = (int)insn_off[g_funcs[main_fn].first_insn];
         }
+        for (i = 0; i < g_nexports; i++) {
+            int ef = exp_fn_idx[i];
+            if (ef >= 0 && g_funcs[ef].first_insn >= 0 && g_funcs[ef].first_insn < insns) {
+                g_funcs[ef].code_off = (int)insn_off[g_funcs[ef].first_insn];
+            }
+        }
         /* 3d. Pass 4: emit final CODE bytes & exact RELO offsets */
         for (i = 0; i < insns; i++) {
             encode_insn(&code, &relo, &iarr[i]);
@@ -1128,6 +1158,12 @@ static int build_container(const char *src, long src_len, int use_dce,
     tv_push_u(&syms, 4, (unsigned long long)sym_main_off);
     tv_push(&syms, 0); tv_push(&syms, 1); tv_push_u(&syms, 2, 0);
     tv_push_u(&syms, 8, (unsigned long long)main_off);
+    for (i = 0; i < g_nexports; i++) {
+        int ef = exp_fn_idx[i];
+        tv_push_u(&syms, 4, (unsigned long long)exp_name_off[i]);
+        tv_push(&syms, 0); tv_push(&syms, 1); tv_push_u(&syms, 2, 0);
+        tv_push_u(&syms, 8, (unsigned long long)g_funcs[ef].code_off);
+    }
 
     /* 5. HOST: canonical ascending slot order 0..36 */
     for (i = 0; i < TP_HOST_SLOTS; i++) {
@@ -1563,6 +1599,10 @@ int main(int argc, char **argv) {
     for (i = 1; i < argc; i++) {
         if (tx_eqz(argv[i], "--check")) check_mode = 1;
         else if (tx_eqz(argv[i], "--no-dce")) use_dce = 0;
+        else if (tx_eqz(argv[i], "--export") && i + 1 < argc) {
+            if (g_nexports >= TP_MAX_EXPORTS) return refuse("too-many-exports");
+            g_exports[g_nexports++] = argv[++i];
+        }
         else if (tx_eqz(argv[i], "-o") && i + 1 < argc) out_path = argv[++i];
         else if (!in_path) in_path = argv[i];
         else if (check_mode && !slice_path) slice_path = argv[i];

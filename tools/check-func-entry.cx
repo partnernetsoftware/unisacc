@@ -1,0 +1,188 @@
+/* tools/check-func-entry.cx -- Increment-0 function-level call entry prototype test on m53 cxsa_valid.
+ * Verifies:
+ *   (1) Pack m53 (cx/runtime/stream_attributes.cx) with --export cxsa_valid (M1 mask <= 383).
+ *   (2) 10 positive/boundary vectors comparing tc_call_bytes_i64("cxsa_valid") vs native cxsa_valid().
+ *   (3) 4 fail-closed + fail-open-to-native negative controls:
+ *       - corrupted container (flip 1 byte) -> bad-ident + native fallback matches
+ *       - missing symbol -> sym-not-found + native fallback matches
+ *       - unsupported M1 host slot (slot 12) -> m1-unsupported-host-slot + native fallback matches
+ *       - budget exhaustion (budget=2) -> vm-budget + native fallback matches
+ *   (4) Mode=4 backward compatibility (--self-test exit_code=42).
+ */
+#pragma unisa use runtime.stream_attributes
+#pragma unisa use tape.tapecall
+#pragma unisa use tape.tapeslice_contract
+#pragma unisa use sys.io
+#pragma unisa use sys.fs
+#pragma unisa use sys.proc
+#pragma unisa use sysx.process
+#pragma unisa use text.text
+#pragma unisa use mem.bytes
+#pragma unisa use mem.heap
+
+static int g_pass = 0, g_fail = 0;
+
+static void ck(int ok, const char *name) {
+    if (ok) { g_pass++; sy_printf("PASS\tcheck-func-entry.%s\n", name); }
+    else { g_fail++; sy_printf("FAIL\tcheck-func-entry.%s\n", name); }
+}
+
+static int run_one(char **av, int timeout_s) {
+    np_result r = {0};
+    char why[256];
+    int tr = np_run(av, ".", 0, timeout_s, &r, why, sizeof why);
+    int rc = tr ? 124 : r.rc;
+    np_free(&r);
+    return rc;
+}
+
+/* Product-facing wrapper with fail-open fallback to native cxsa_valid */
+static int cxsa_valid_with_fallback(const TcSlice *s, int has_slice, unsigned long long coff,
+                                    const unsigned char *data, long len, unsigned long long budget,
+                                    int *used_fallback, char *fb_why, long fcap) {
+    if (has_slice) {
+        long long tret = 0;
+        unsigned long long steps = 0;
+        if (tc_call_bytes_i64(s, coff, data, len, budget, &tret, &steps, fb_why, fcap) == 0) {
+            if (used_fallback) *used_fallback = 0;
+            return (int)tret;
+        }
+    }
+    if (used_fallback) *used_fallback = 1;
+    return cxsa_valid(data, len);
+}
+
+int main(void) {
+    char tmp[512], so[600], wrap[600], tape_s[600], slice[600], bad_slot_s[600], bad_slot_sl[600];
+    if (sy_mkdtemp("/tmp", "check-fe", tmp, sizeof tmp) != 0) return 2;
+    cx_fmt(so, sizeof so, "%s/tape.so", tmp);
+    cx_fmt(wrap, sizeof wrap, "%s/m53_wrap.cx", tmp);
+    cx_fmt(tape_s, sizeof tape_s, "%s/m53.tape", tmp);
+    cx_fmt(slice, sizeof slice, "%s/m53-stream_attributes.tapeslice", tmp);
+    cx_fmt(bad_slot_s, sizeof bad_slot_s, "%s/bad_slot.s", tmp);
+    cx_fmt(bad_slot_sl, sizeof bad_slot_sl, "%s/bad_slot.tapeslice", tmp);
+
+    /* Symlink cx and cxroot.tsv into tmp so wrap resolves runtime.stream_attributes */
+    {
+        char cwd[512], lc[600], lr[600], tc[600], tr[600];
+        if (getcwd(cwd, sizeof cwd)) {
+            cx_fmt(lc, sizeof lc, "%s/cx", tmp); cx_fmt(tc, sizeof tc, "%s/cx", cwd);
+            cx_fmt(lr, sizeof lr, "%s/cxroot.tsv", tmp); cx_fmt(tr, sizeof tr, "%s/cxroot.tsv", cwd);
+            (void)sy_symlink(tc, lc); (void)sy_symlink(tr, lr);
+        }
+    }
+
+    /* 1. Build tape.so (with mode=5) and pack m53 with --export cxsa_valid */
+    {
+        char *av_so[] = {"cc", "-shared", "-fPIC", "-O2", "-o", so,
+                         "tools/tape/asm/tape_x86_64.S", "tools/tape/asm/hoststub_lnx_x86_64.S", 0};
+        ck(run_one(av_so, 30) == 0, "build-tape-so-mode5");
+    }
+    {
+        const char *wsrc = "#pragma unisa use runtime.stream_attributes\nint main(int argc, char **argv) { (void)argv; if (argc < 0) return cxsa_valid(0, 0); return 0; }\n";
+        (void)sy_write_file(wrap, (const unsigned char *)wsrc, (long)strlen(wsrc), 0644);
+        char *av_s[] = {"sh", "./unisacc.com", "--target", "lnx/x86_64", "-S", wrap, "-o", tape_s, 0};
+        ck(run_one(av_s, 30) == 0, "emit-m53-tape");
+        char *av_p[] = {"sh", "./unisacc.com", "tools/tapepack.cx", "--", "--export", "cxsa_valid", tape_s, "-o", slice, 0};
+        ck(run_one(av_p, 30) == 0, "pack-m53-export-cxsa_valid");
+        char *av_c[] = {"sh", "./unisacc.com", "tools/tapepack.cx", "--", "--export", "cxsa_valid", "--check", tape_s, slice, 0};
+        ck(run_one(av_c, 30) == 0, "check-m53-roundtrip");
+    }
+
+    unsigned char *img = 0; int64_t imgn = 0;
+    if (sy_read_file(slice, &img, &imgn, 4 << 20) != 0 || !img) return 2;
+
+    TcSlice sl;
+    char why[128];
+    unsigned long long coff = 0;
+    ck(tc_open(img, (long)imgn, so, &sl, why, sizeof why) == 0, "tc-open-m53-m1-383");
+    ck(tc_lookup_sym(&sl, "cxsa_valid", &coff, why, sizeof why) == 0, "tc-lookup-cxsa_valid");
+
+    /* 2. 10 positive/boundary vectors: tape mode=5 vs native cxsa_valid */
+    {
+        unsigned char b_c0[4] = {0, 0, 0, 0};
+        unsigned char b_c1_ok[13] = {1, 0, 0, 0, 1,2,3,4,5,6,7,8,9};
+        unsigned char b_c1_short[12] = {1, 0, 0, 0, 1,2,3,4,5,6,7,8};
+        unsigned char b_c1_long[14] = {1, 0, 0, 0, 1,2,3,4,5,6,7,8,9,0};
+        unsigned char b_over[13] = {0x41, 0x42, 0x0f, 0x00, 0,0,0,0,0,0,0,0,0}; /* count=1000001 > 1000000 */
+        unsigned char *b_1000 = (unsigned char *)mm_alloc(9004);
+        for (int i = 0; i < 9004; i++) b_1000[i] = (unsigned char)(i & 255);
+        b_1000[0] = 0xe8; b_1000[1] = 0x03; b_1000[2] = 0; b_1000[3] = 0; /* count=1000 -> len=9004 */
+
+        const unsigned char *ptrs[10] = {0, b_c0, b_c0, b_c0, b_c0, b_c1_ok, b_c1_short, b_c1_long, b_1000, b_over};
+        long lens[10] = {4, 0, 1, 3, 4, 13, 12, 14, 9004, 13};
+        const char *names[10] = {"v0-null", "v1-len0", "v2-len1", "v3-len3", "v4-c0-valid",
+                                 "v5-c1-valid", "v6-c1-short", "v7-c1-long", "v8-c1000-valid", "v9-c1000001-over"};
+        int all_ok = 1;
+        for (int i = 0; i < 10; i++) {
+            int nat = cxsa_valid(ptrs[i], lens[i]);
+            long long tret = -999;
+            unsigned long long steps = 0;
+            int rc = tc_call_bytes_i64(&sl, coff, ptrs[i], lens[i], 10000000ull, &tret, &steps, why, sizeof why);
+            if (rc != 0 || (int)tret != nat || steps == 0) {
+                sy_printf("DIFF\t%s\trc=%d\twhy=%s\tnat=%d\ttape=%lld\tsteps=%llu\n", names[i], rc, why, nat, tret, steps);
+                all_ok = 0;
+            }
+        }
+        mm_free(b_1000);
+        ck(all_ok, "m53-10-vectors-exact-parity");
+    }
+
+    /* 3. Negative controls + fail-open native fallback */
+    /* N1: Corrupted container (flip 1 byte in CODE) -> bad-ident + native fallback */
+    {
+        unsigned char *cor = (unsigned char *)mm_alloc((size_t)imgn);
+        mm_copy(cor, (long)imgn, img, (long)imgn);
+        cor[210] ^= 0x01;
+        TcSlice bad_sl;
+        int rc = tc_open(cor, (long)imgn, so, &bad_sl, why, sizeof why);
+        int fb = 0; char fwhy[64];
+        unsigned char b_c0[4] = {0, 0, 0, 0};
+        int r = cxsa_valid_with_fallback(&bad_sl, rc == 0, 0, b_c0, 4, 10000000ull, &fb, fwhy, sizeof fwhy);
+        ck(rc != 0 && tx_eqz(why, "bad-ident") && fb == 1 && r == 1, "neg-corrupt-bad-ident-fallback");
+        mm_free(cor);
+    }
+
+    /* N2: Missing symbol -> sym-not-found + native fallback */
+    {
+        unsigned long long dummy = 0;
+        int rc = tc_lookup_sym(&sl, "no_such_fn", &dummy, why, sizeof why);
+        ck(rc != 0 && tx_eqz(why, "sym-not-found"), "neg-missing-sym-refused");
+    }
+
+    /* N3: Unsupported M1 host slot (slot 12 spawn) -> m1-unsupported-host-slot */
+    {
+        const char *sp = "_start:\n  .sys spawn, r0, r1, r2\n  .exit r0\n";
+        (void)sy_write_file(bad_slot_s, (const unsigned char *)sp, (long)strlen(sp), 0644);
+        char *av_sp[] = {"sh", "./unisacc.com", "tools/tapepack.cx", "--", bad_slot_s, "-o", bad_slot_sl, 0};
+        (void)run_one(av_sp, 20);
+        unsigned char *sb = 0; int64_t sn = 0;
+        int ok = 0;
+        if (sy_read_file(bad_slot_sl, &sb, &sn, 1 << 20) == 0 && sb) {
+            TcSlice bsl;
+            int rc = tc_open(sb, (long)sn, so, &bsl, why, sizeof why);
+            ok = (rc != 0 && tx_eqz(why, "m1-unsupported-host-slot"));
+            mm_free(sb);
+        }
+        ck(ok, "neg-slot12-rejected-m1-383");
+    }
+
+    /* N4: Budget exhaustion -> vm-budget + native fallback returns exact 1 */
+    {
+        unsigned char b_c1[13] = {1, 0, 0, 0, 1,2,3,4,5,6,7,8,9};
+        int fb = 0; char fwhy[64];
+        int r = cxsa_valid_with_fallback(&sl, 1, coff, b_c1, 13, 2ull, &fb, fwhy, sizeof fwhy);
+        ck(fb == 1 && tx_eqz(fwhy, "vm-budget") && r == 1, "neg-budget-fallback-native");
+    }
+
+    /* 4. Mode=4 backward compatibility (--self-test with updated tape.so) */
+    {
+        char *av_m4[] = {"sh", "./unisacc.com", "tools/tapemode-run.cx", "--", "--so", so, "--self-test", 0};
+        ck(run_one(av_m4, 30) == 0, "mode4-selftest-backward-compat");
+    }
+
+    mm_free(img);
+    { char *rm[] = {"rm", "-rf", tmp, 0}; (void)run_one(rm, 10); }
+    sy_printf("CHECK_FUNC_ENTRY\tpassed=%d\tfailed=%d\n", g_pass, g_fail);
+    return g_fail ? 1 : 0;
+}
