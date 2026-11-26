@@ -1,0 +1,129 @@
+/* private check for tools/facts-gen.cx --compare-body.
+ * sh ./unisacc.com THIS --
+ * sh ./unisacc.com THIS -- --mutant header-strict|ignore-body
+ * Prints CHECK_FACTS_GEN failed=N. Exit 0 only when N is 0.
+ */
+#pragma unisa use cxlib.procrun
+#pragma unisa use sys.fs
+#pragma unisa use sys.proc
+#pragma unisa use sys.time
+#pragma unisa use sys.env
+#pragma unisa use text.text
+#pragma unisa use text.fmt
+#pragma unisa use mem.bytes
+
+static int failed;
+static const char *SRC = "exec/facts/locations.tsv";
+static char prod[32];
+static char *product(void) {
+    if (!prod[0] && cx_fmt(prod, sizeof prod, "%s%s", "./uni", "sacc.com")) prod[0] = 0;
+    return prod;
+}
+
+static void ck(int ok, const char *name) {
+    printf("%s\tcheck-facts-gen.%s\n", ok ? "PASS" : "FAIL", name);
+    if (!ok) failed++;
+}
+static int has(const char *s, long n, const char *t) {
+    long tn = tx_len(t, 80), i;
+    if (!s || tn <= 0 || n < tn) return 0;
+    for (i = 0; i + tn <= n; i++) if (tx_same(s + i, tn, t, tn)) return 1;
+    return 0;
+}
+static int copy_src(const char *dst) {
+    size_t n = 0; char *b = cx_read(SRC, &n);
+    if (!b) return 1;
+    if (cx_write(dst, b, n)) { free(b); return 1; }
+    free(b); return 0;
+}
+static int tweak(const char *path, int header) {
+    size_t n = 0; char *b = cx_read(path, &n); long i; const char *key = header ? "written" : "Location";
+    long kn = header ? 7 : 8;
+    if (!b || n < 16) return 1;
+    for (i = 0; i + kn <= (long)n; i++) if (tx_same(b + i, kn, key, kn)) { b[i] = header ? 'W' : 'X'; break; }
+    if (i + kn > (long)n) { free(b); return 1; }
+    if (cx_write(path, b, n)) { free(b); return 1; }
+    free(b); return 0;
+}
+static int repo_root(char *out, long cap) {
+    char cur[4400]; int n, i;
+    if (sy_cwd(cur, (int)sizeof cur)) return 1;
+    for (;;) {
+        char a[4400], b[4400];
+        if (cx_fmt(a, sizeof a, "%s/tools", cur) || cx_fmt(b, sizeof b, "%s/tests", cur)) return 1;
+        if (sy_exists(a) && sy_exists(b)) return cx_fmt(out, cap, "%s", cur) ? 1 : 0;
+        n = 0; while (cur[n]) n++;
+        if (n <= 1) return 1;
+        for (i = n - 1; i > 0 && cur[i] != '/'; i--) ;
+        if (i == 0) { cur[0] = '/'; cur[1] = 0; }
+        else cur[i] = 0;
+    }
+}
+static int prep(char *root, long cap, char *file) {
+    static int seq; char execd[4400], facts[4400], tools[4400], src[4400], repo[4400];
+    if (repo_root(repo, sizeof repo)) return 1;
+    if (cx_fmt(root, cap, "%s/fgck-%d-%d", sy_tmpdir(), sy_pid(), seq++)) return 1;
+    if (cx_fmt(execd, sizeof execd, "%s/exec", root)) return 1;
+    if (cx_fmt(facts, sizeof facts, "%s/exec/facts", root)) return 1;
+    if (cx_fmt(tools, sizeof tools, "%s/tools", root)) return 1;
+    if (cx_fmt(src, sizeof src, "%s/tools", repo)) return 1;
+    if (sy_mkdir(root, 0700) || sy_mkdir(execd, 0700) || sy_mkdir(facts, 0700)) return 1;
+    if (sy_symlink(src, tools)) return 1;
+    if (cx_fmt(file, 4400, "%s/exec/facts/locations.tsv", root)) return 1;
+    return copy_src(file);
+}
+static int run_fg(const char *root, const char *mode, int *rc, char *out, long *outn) {
+    pr_result r; int t; char *av[8]; int k = 0;
+    av[k++] = "sh"; av[k++] = product(); av[k++] = "tools/facts-gen.cx"; av[k++] = "--";
+    if (mode) { av[k++] = (char *)mode; av[k++] = (char *)root; av[k++] = "locations"; }
+    av[k] = 0;
+    t = pr_run("facts-gen", av, ".", 0, 40, &r);
+    *rc = t ? -1 : r.rc;
+    if (out && outn) {
+        *outn = 0;
+        if (r.out && r.outn < 8000) { mm_copy(out, 8000, r.out, (long)r.outn); out[r.outn] = 0; *outn = (long)r.outn; }
+    }
+    pr_free(&r);
+    return t;
+}
+static int mutant(const char *which) {
+    char root[4400], file[4400];
+    if (prep(root, sizeof root, file)) return 2;
+    if (tx_eq(which, "header-strict", 32)) {
+        if (tweak(file, 1)) return 2;
+        return 1;
+    }
+    if (tx_eq(which, "ignore-body", 32)) {
+        if (tweak(file, 0)) return 2;
+        return 0;
+    }
+    return 2;
+}
+int main(int argc, char **argv) {
+    char root[4400], file[4400], out[8000];
+    long on = 0; int rc = 0;
+    if (argc >= 3 && tx_eq(argv[1], "--mutant", 16)) return mutant(argv[2]);
+    { pr_result r; char *av[] = {"sh", product(), argv[0], "--", "--mutant", "header-strict", 0};
+      int t = pr_run("mut-header", av, ".", 0, 20, &r);
+      ck(!t && r.rc == 1, "mutant-header-strict-red");
+      pr_free(&r);
+    }
+    { pr_result r; char *av[] = {"sh", product(), argv[0], "--", "--mutant", "ignore-body", 0};
+      int t = pr_run("mut-body", av, ".", 0, 20, &r);
+      ck(!t && r.rc == 0, "mutant-ignore-body-red");
+      pr_free(&r);
+    }
+    if (prep(root, sizeof root, file)) { printf("CHECK_FACTS_GEN\tfailed=%d\n", failed + 1); return 2; }
+    run_fg(root, "--compare-body", &rc, out, &on);
+    ck(rc == 0 && has(out, on, "SAME\tlocations"), "same-body");
+    if (tweak(file, 0)) failed++;
+    run_fg(root, "--compare-body", &rc, out, &on);
+    ck(rc == 1 && has(out, on, "DIFF\tlocations"), "body-diff-named");
+    if (copy_src(file) || tweak(file, 1)) failed++;
+    run_fg(root, "--compare-body", &rc, out, &on);
+    ck(rc == 0 && has(out, on, "SAME\tlocations"), "header-only-same");
+    run_fg(root, 0, &rc, out, &on);
+    ck(rc == 2, "usage-refused");
+    printf("CHECK_FACTS_GEN\tfailed=%d\n", failed);
+    return failed ? 1 : 0;
+}

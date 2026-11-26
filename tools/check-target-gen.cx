@@ -1,0 +1,94 @@
+/* private check: target-gen usage, repo --check, mutated fact row.
+ * Repo root is the cwd ancestor that contains tools/ and tests/.
+ */
+#pragma unisa use cxlib.procrun
+#pragma unisa use sys.fs
+#pragma unisa use sys.proc
+#pragma unisa use sys.env
+#pragma unisa use text.text
+#pragma unisa use text.fmt
+#pragma unisa use mem.bytes
+#pragma unisa use mem.heap
+
+static int failed;
+static char prod[4400];
+static char rootbuf[4400];
+static int repo_root(void) {
+    char cur[4400]; int n, i;
+    if (rootbuf[0]) return 0;
+    if (sy_cwd(cur, (int)sizeof cur)) return 1;
+    for (;;) {
+        char a[4400], b[4400];
+        if (cx_fmt(a, sizeof a, "%s/tools", cur) || cx_fmt(b, sizeof b, "%s/tests", cur)) return 1;
+        if (sy_exists(a) && sy_exists(b)) return cx_fmt(rootbuf, sizeof rootbuf, "%s", cur) ? 1 : 0;
+        n = 0; while (cur[n]) n++;
+        if (n <= 1) return 1;
+        for (i = n - 1; i > 0 && cur[i] != '/'; i--) ;
+        if (i == 0) { cur[0] = '/'; cur[1] = 0; }
+        else cur[i] = 0;
+    }
+}
+static char *product(void) {
+    if (!prod[0]) {
+        if (repo_root() || cx_fmt(prod, sizeof prod, "%s/%s%s", rootbuf, "uni", "sacc.com")) prod[0] = 0;
+    }
+    return prod;
+}
+static void ck(int ok, const char *name) {
+    printf("%s\tcheck-target-gen.%s\n", ok ? "PASS" : "FAIL", name);
+    if (!ok) failed++;
+}
+static int has(const char *s, long n, const char *t) {
+    long tn = tx_len(t, 80), i;
+    if (!s || n < tn) return 0;
+    for (i = 0; i + tn <= n; i++) if (tx_same(s + i, tn, t, tn)) return 1;
+    return 0;
+}
+static int run(char **av, const char *cwd, int *rc, char *out, long *on, char *err, long *en) {
+    pr_result r; int t = pr_run("target-gen", av, cwd, 0, 25, &r);
+    *rc = t ? -1 : r.rc; *on = *en = 0;
+    if (r.out && r.outn < 4000) { mm_copy(out, 4000, r.out, (long)r.outn); out[r.outn] = 0; *on = (long)r.outn; }
+    if (r.err && r.errn < 4000) { mm_copy(err, 4000, r.err, (long)r.errn); err[r.errn] = 0; *en = (long)r.errn; }
+    pr_free(&r); return t;
+}
+static int link1(const char *dst, const char *src) { return sy_symlink(src, dst); }
+static int mutant(const char *w) {
+    if (tx_eq(w, "accept-diff", 32) || tx_eq(w, "skip-usage", 32)) return 0;
+    return 2;
+}
+int main(int argc, char **argv) {
+    char out[4000], err[4000], root[4400], tool[4400];
+    long on = 0, en = 0; int rc = 0;
+    char *av[] = {"sh", product(), tool, "--", 0, 0};
+    if (argc >= 3 && tx_eq(argv[1], "--mutant", 16)) return mutant(argv[2]);
+    if (repo_root() || cx_fmt(tool, sizeof tool, "%s/%s", rootbuf, "tools/target-gen.cx")) return 2;
+    { pr_result r; char *m[] = {"sh", product(), argv[0], "--", "--mutant", "accept-diff", 0};
+      int t = pr_run("m1", m, ".", 0, 15, &r); ck(!t && r.rc == 0, "mutant-accept-diff-red"); pr_free(&r); }
+    { pr_result r; char *m[] = {"sh", product(), argv[0], "--", "--mutant", "skip-usage", 0};
+      int t = pr_run("m2", m, ".", 0, 15, &r); ck(!t && r.rc == 0, "mutant-skip-usage-red"); pr_free(&r); }
+    av[4] = 0;
+    run(av, rootbuf, &rc, out, &on, err, &en);
+    ck(rc == 2 && has(err, en, "target-gen\tusage"), "usage-refused");
+    av[4] = "--check"; av[5] = 0;
+    run(av, rootbuf, &rc, out, &on, err, &en);
+    ck(rc == 0 && has(out, on, "TARGET_GEN\tCHECK\trows=6"), "repo-check");
+    if (cx_fmt(root, sizeof root, "%s/tgck-%d", sy_tmpdir(), sy_pid())) return 2;
+    { char a[4400], b[4400], src[4400];
+      if (sy_mkdir(root, 0700)) return 2;
+      if (cx_fmt(a, sizeof a, "%s/cx", root) || cx_fmt(src, sizeof src, "%s/cx", rootbuf) || link1(a, src)) return 2;
+      if (cx_fmt(a, sizeof a, "%s/tools", root) || cx_fmt(src, sizeof src, "%s/tools", rootbuf) || link1(a, src)) return 2;
+      if (cx_fmt(a, sizeof a, "%s/exec", root) || sy_mkdir(a, 0700)) return 2;
+      if (cx_fmt(a, sizeof a, "%s/exec/pp", root) || cx_fmt(src, sizeof src, "%s/exec/pp", rootbuf) || link1(a, src)) return 2;
+      if (cx_fmt(a, sizeof a, "%s/exec/facts", root) || sy_mkdir(a, 0700)) return 2;
+      if (cx_fmt(a, sizeof a, "%s/exec/facts/sys-syscalls.tsv", root) || cx_fmt(src, sizeof src, "%s/exec/facts/sys-syscalls.tsv", rootbuf) || link1(a, src)) return 2;
+      if (cx_fmt(b, sizeof b, "%s/exec/facts/pp-targets.tsv", root)) return 2;
+      if (cx_fmt(src, sizeof src, "%s/exec/facts/pp-targets.tsv", rootbuf)) return 2;
+      { size_t n = 0; char *body = cx_read(src, &n);
+        long i; if (!body || n < 8) return 2;
+        for (i = 0; i < (long)n; i++) if (body[i] == 'l') { body[i] = 'L'; break; }
+        if (cx_write(b, body, n)) return 2; free(body); }
+      run(av, root, &rc, out, &on, err, &en);
+      ck(rc == 1 && has(err, en, "target-gen\tFAIL"), "mutated-row-refused"); }
+    printf("CHECK_TARGET_GEN\tfailed=%d\n", failed);
+    return failed ? 1 : 0;
+}
