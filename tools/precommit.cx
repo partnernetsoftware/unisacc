@@ -180,6 +180,7 @@ static const char gt_builtin[] =
     "toolsreg\tADRT\ttools/*.cx\n"
     "runlist\tACMR\ttests/coverage.tsv tests/batches.tsv tests/batch-product-inputs.tsv\n"
     "facts\tACMR\tinclude exec/facts\n"
+    "env-semantics\tACMRDT\tcx src exec/c tests/env-semantics.tsv tools/check-env-semantics.cx release/candidate.tsv\n"
     "ledger\tACMR\tarchive/agentwork-retire-2026-11/ledger.tsv\n"
     "affected-canary\tACMRD\ttests/batches.tsv tests/batch-product-inputs.tsv tests/coverage.tsv cxroot.tsv tools/affected.cx tools/cxlib ext cx\n"
     "cx\tACMR\t*.cx\n";
@@ -3649,6 +3650,7 @@ int main(int argc, char **argv) {
     if (argc == 1) { int fr = flow_route(); if (fr >= 0) return fr; }
     char *rv[] = {"sh", "./unisacc.com", "tools/ratchets.cx", 0};
     char *fgv[] = {"sh", "./unisacc.com", "tools/facts-gen.cx", "--", "--check", ".", "pp-autoinc-gen", 0};
+    char *esv[] = {"sh", "./unisacc.com", "tools/check-env-semantics.cx", "--", 0};
     char *lv[] = {"sh", "./unisacc.com", "tests/run.cx", "--", "--list", 0};
     char *names = gate_diff("cx", &sn), *rows;
     if (!names) { sy_eprintf("precommit: git diff --cached failed\n"); return 1; }
@@ -3863,6 +3865,37 @@ int main(int argc, char **argv) {
               blocked++;
           }
       }
+    }
+    /* env-semantics gate: a commit touching cx/, src/, exec/c/, tests/env-semantics.tsv or
+       tools/check-env-semantics.cx must keep static UNISA_ and UNISACC_ read points in sync with tests/env-semantics.tsv. */
+    { long esn; char *enames = gate_diff("env-semantics", &esn);
+      if (!enames) { sy_eprintf("precommit: git diff --cached (env-semantics) failed\n"); return 1; }
+      if (esn > 0) {
+          char *erows; int b0 = blocked, es_rc, n_sum = 0, n_ok = 0; long eat = 0;
+          cur_gate = "env-semantics"; slurp_okrc = 1; erows = slurp(esv, &rn); es_rc = slurp_last_rc; slurp_okrc = 0; cur_gate = 0;
+          if (!erows) { sy_eprintf("precommit: tools/check-env-semantics.cx did not run (rc=%d)\n", es_rc); return 1; }
+          if (!plan_dir) {
+              while (eat < rn) {
+                  long ee = tx_chr(erows + eat, rn - eat, '\n'), el = ee < 0 ? rn - eat : ee;
+                  if (tx_prefix(erows + eat, el, "CHECK_ENV_SEMANTICS\t", 20)) {
+                      n_sum++;
+                      if (el >= 29 && tx_find(erows + eat, el, "\tassertions=", 12) >= 0 &&
+                          tx_same(erows + eat + el - 9, 9, "\tfailed=0", 9)) n_ok++;
+                  }
+                  eat += el + 1;
+              }
+              if (n_sum != 1) {
+                  sy_eprintf("precommit: blocked:incomplete:env-semantics: summary_lines=%d rc=%d\n", n_sum, es_rc);
+                  blocked++;
+              } else if (es_rc != 0 || n_ok != 1) {
+                  sy_eprintf("precommit: env-semantics static check failed (rc=%d ok=%d); run cx tools/check-env-semantics.cx\n", es_rc, n_ok);
+                  blocked++;
+              }
+          }
+          mm_free(erows);
+          if (blocked > b0) pc_mark_block("env-semantics", "env-semantics-drift");
+      }
+      mm_free(enames);
     }
     { int b0 = blocked; blocked += conflict_marker_gate(); if (blocked > b0) pc_mark_block("conflict-markers", "merge-conflict-markers"); }
     { int b0 = blocked; blocked += ratchet_baseline_gate(); if (blocked > b0) pc_mark_block("ratchets", "ratchet-baseline-raised"); }

@@ -413,7 +413,7 @@ R75/R78/R69/R69.6/R79/R81 等仍跟踪项已归档全文于 archive/prd_mempalac
 
 - 事实:2026-11-26 `13:00:11` 前后,`chains/bg-b1.bak-pre-C0c` 与两个 `prerun/v0.1.3-*.superseded-*` 目录消失,含三份红停原件 `evidence-red-*` 与 `bfdd1448b`、`d07d9640c` 两条旧链。
 - 归因:用户 journal 显示 `system-cleanup.service` 于 `13:00:03` 到 `13:00:13` 运行;`13:00:11` 报 `/tmp and 2h caches cleaned` 与 `unisacc stale artifacts cleaned`;unit 的 `ExecStart` 指向 moltbaby 脚本,脚本对 `~/.cache/unisacc/{prerun,chains/snap,chains,顶层}` 与 `~/.claude/jobs/*/tmp` 的子目录按 120 分钟 atime/mtime 规则 `rm -rf`(排除 `.*`/`*.lock`/`*.sock`)。journal 无逐目录原行,归因为据目录 mtime 与源码规则的推定。
-- 处置与终态:2026-11-26 15:48 曾加 `prerun/`、`chains/` 父级与 `chains/snap/` 钉住标记;发布后 `16:35` 已撤除,三处现均不存在;keepalive 已停(无 `keepalive-0.1.3` 进程)。保留的钉住标记(当前实数五枚,均 0 字节):`release-v0.1.3-f485ec9a2b/.no-purge`、`evidence-staging-0.1.3/.no-purge`、`evidence-vault-0.1.3/.no-purge`、`prerun-backups/.no-purge`、本会话 `~/.claude/jobs/7f46e032/tmp/.no-purge`;父级 `prerun/`、`chains/`、`chains/snap/` 三枚已于 16:35 撤除。moltbaby 侧提交 `02837a44e`(提交说明为尊重 `.no-purge`、豁免 `evidence-*` 并记录清理路径)。顶层 `~/.cache/unisacc/.no-purge` 不存在,不声称已加。
+- 处置与终态:2026-11-26 15:48 曾加 `prerun/`、`chains/` 父级与 `chains/snap/` 钉住标记;发布后 `16:35` 已撤除,三处现均不存在;keepalive 已停(无 `keepalive-0.1.3` 进程)。保留的钉住标记(当前实数五枚,均 0 字节):`release-v0.1.3-f485ec9a2b/.no-purge`、`evidence-staging-0.1.3/.no-purge`、`evidence-vault-0.1.3/.no-purge`、`prerun-backups/.no-purge`、本会话 job 目录下 tmp 的 `.no-purge`;父级 `prerun/`、`chains/`、`chains/snap/` 三枚已于 16:35 撤除。moltbaby 侧提交 `02837a44e`(提交说明为尊重 `.no-purge`、豁免 `evidence-*` 并记录清理路径)。顶层 `~/.cache/unisacc/.no-purge` 不存在,不声称已加。
 - 证据:缺件记录 `incident-red/ABSENT.md`;重建引用 `reconstruct-chain-ledger-0.1.3*.txt` 与 `reconstruct-prerun4-supervise.out`,均标非原件;保护库 `~/.cache/unisacc/evidence-vault-0.1.3/`。
 
 ## 6. 回滚办法
