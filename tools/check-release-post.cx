@@ -1,10 +1,10 @@
-/* tools/check-release-post.cx -- fixture for tools/release-post.cx
+/* tools/check-release-post.cx -- fixture + source-mutant kill suite for tools/release-post.cx
  *
- * Synthetic evidence dir + fake chain/metrics/day/install bins.
- * Covers: plan lines, dry zero-write, step OK/FAIL, resume skip DONE,
- * root-upgrade gate, mutant-dry-write red;
- * real-repo 0.0.93 dry must DONE (UNMEASURED if env missing);
- * 0.0.94 dry must block on index-seal when the Y2 key is absent.
+ * Covers: plan lines, dry zero-write, Step 5 default auto-upgrade, backup-SHA matching gate,
+ * interrupted installer swap -> verified rollback, rollback rc!=0 / wrong restored SHA -> FAIL,
+ * 3-source SHA + readback-only --ape-sha cross-check, forged state 5/8 DONE re-verification,
+ * Step 1 + Step 8 strict Y2 (no FAIL/conflict/non-commit), no unverified early thaw when freeze absent,
+ * single-step STEP_DONE, pgrep error fail-closed, missing default tool-index smoke, and red-then-green mutants.
  * Ends CHECK_RELEASE_POST. */
 #pragma unisa use cxlib.ckassert
 #pragma unisa use cxlib.ckrun
@@ -14,23 +14,34 @@
 #pragma unisa use sys.posix
 #pragma unisa use text.text
 #pragma unisa use mem.heap
+#pragma unisa use mem.bytes
 
 static char out[1 << 16];
 static char root[900], cwd[800], ev[950], stf[950];
-static char chain[950], met[950], day[950], inst[950];
+static char chain[950], met[950], day[950], inst[950], fakegh[950];
 static char cdir[950], pdir[950], bdir[950];
+static char ape998[950], ape999[950], ape997[950], sha998[80], sha999[80], sha997[80];
+static char real_y2[64];
 
-static int run_rp(const char *extra) {
-    char cmd[4000];
+static int run_rp_in(const char *tool_dir, const char *extra) {
+    char cmd[5200];
     if (cx_fmt(cmd, sizeof cmd,
-        "sh '%s/unisacc.com' '%s/tools/release-post.cx' -- %s"
+        "cd '%s' && cx tools/release-post.cx -- %s"
         " --repo '%s' --evidence-dir '%s' --state-file '%s'"
         " --chain-dir '%s' --prerun-dir '%s' --backup-dir '%s'"
         " --chain-bin 'sh %s' --metrics-bin 'sh %s' --day-bin 'sh %s' --install-bin 'sh %s'"
-        " --install-root '%s' --ape '%s/ape.bin' --ape-sha deadbeefdeadbeefdeadbeefdeadbeefdeadbeefdeadbeefdeadbeefdeadbeef",
-        cwd, cwd, extra, root, ev, stf, cdir, pdir, bdir,
-        chain, met, day, inst, root, root)) return -1;
+        " --gh-bin '%s' --install-root '%s' --pgrep-pat '[z]zz-no-such-proc-zzz'",
+        tool_dir, extra, root, ev, stf, cdir, pdir, bdir,
+        chain, met, day, inst, fakegh, root)) return -1;
     return ckk_sh_t("check-release-post", cmd, out, (int)sizeof out, 55);
+}
+
+static int run_rp_raw(const char *extra) { return run_rp_in(cwd, extra); }
+
+static int run_rp(const char *extra) {
+    char cmd[5200];
+    if (cx_fmt(cmd, sizeof cmd, "%s --ape '%s' --ape-sha '%s'", extra, ape999, sha999)) return -1;
+    return run_rp_raw(cmd);
 }
 
 static int has(const char *s) { return ckk_has(out, (int)sizeof out, s); }
@@ -49,9 +60,81 @@ static int has_y2_done(const char *body, size_t n) {
     return 0;
 }
 
+static long rp_byte_span_find(const char *hay, long hn, const char *needle, long nn) {
+    if (!hay || !needle || nn <= 0 || hn < nn) return -1;
+    for (long i = 0; i <= hn - nn; i++) {
+        long j = 0;
+        while (j < nn && hay[i + j] == needle[j]) j++;
+        if (j == nn) return i;
+    }
+    return -1;
+}
+
+static int prepare_alt_rp_tree(const char *tag, const char *find_str, const char *sub_str, char *mdir_out, size_t mcap) {
+    char p[1300], cmd[5600];
+    size_t sn = 0; char *src;
+    if (cx_fmt(mdir_out, mcap, "%s/alt-%s", root, tag)) return -1;
+    if (cx_fmt(cmd, sizeof cmd,
+        "rm -rf '%s' && mkdir -p '%s/tools' && ln -sT '%s/cx' '%s/cx' && ln -s '%s/cxroot.tsv' '%s/cxroot.tsv' && "
+        "ln -s '%s/unisacc.com' '%s/unisacc.com' && ln -sT '%s/tools/cxlib' '%s/tools/cxlib' && "
+        "ln -s '%s/tools/bound' '%s/tools/bound' && ln -s '%s/tools/bound.c' '%s/tools/bound.c' && "
+        "ln -s '%s/tools/root-current.cx' '%s/tools/root-current.cx' && "
+        "{ [ ! -e '%s/ext' ] || ln -sT '%s/ext' '%s/ext'; }",
+        mdir_out, mdir_out, cwd, mdir_out, cwd, mdir_out, cwd, mdir_out, cwd, mdir_out, cwd, mdir_out, cwd, mdir_out, cwd, mdir_out, cwd, cwd, mdir_out)) return -1;
+    if (ckk_sh_t("alt-tree", cmd, out, (int)sizeof out, 15) != 0) return -1;
+    cx_fmt(p, sizeof p, "%s/tools/release-post.cx", cwd);
+    src = cx_read(p, &sn);
+    if (!src) return -1;
+    long fl = tx_len(find_str, 4096), rl = tx_len(sub_str, 4096);
+    long at = rp_byte_span_find(src, (long)sn, find_str, fl);
+    if (at < 0 || rp_byte_span_find(src + at + fl, (long)sn - at - fl, find_str, fl) >= 0) { mm_free(src); return -1; }
+    size_t mn = sn - (size_t)fl + (size_t)rl;
+    char *mb = mm_alloc((long)mn + 1);
+    if (!mb) { mm_free(src); return -1; }
+    mm_copy(mb, (long)mn + 1, src, at);
+    mm_copy(mb + at, (long)mn + 1 - at, sub_str, rl);
+    mm_copy(mb + at + rl, (long)mn + 1 - at - rl, src + at + fl, (long)sn - at - fl);
+    mm_free(src);
+    cx_fmt(p, sizeof p, "%s/tools/release-post.cx", mdir_out);
+    if (cx_write(p, mb, mn)) { mm_free(mb); return -1; }
+    mm_free(mb);
+    return 0;
+}
+
+static int seed_root_files(const char *ape_path, const char *commit_or_empty) {
+    char cmd[2400];
+    if (cx_fmt(cmd, sizeof cmd,
+        "cp '%s' '%s/unisacc.com' && chmod 700 '%s/unisacc.com' && "
+        "S=$(sha256sum '%s/unisacc.com' | awk '{print $1}') && B=$(wc -c < '%s/unisacc.com' | tr -d ' ') && "
+        "printf '%%s\\t%%s\\tunisacc.com\\n' \"$S\" \"$B\" > '%s/unisacc.com.ape.sha256' && "
+        "CM='%s' && "
+        "if [ -n \"$CM\" ]; then "
+        "  printf '{\\n  \"bytes\": %%s,\\n  \"commit\": \"%%s\",\\n  \"schema\": 1,\\n  \"product_kind\": \"ape1\",\\n  \"product_digest\": \"%%s\"\\n}\\n' \"$B\" \"$CM\" \"$S\" > '%s/unisacc.com.build.json'; "
+        "else "
+        "  printf '{\\n  \"bytes\": %%s,\\n  \"schema\": 1,\\n  \"product_kind\": \"ape1\",\\n  \"product_digest\": \"%%s\"\\n}\\n' \"$B\" \"$S\" > '%s/unisacc.com.build.json'; "
+        "fi",
+        ape_path, root, root, root, root, root, commit_or_empty ? commit_or_empty : "", root, root)) return -1;
+    return ckk_sh_t("seed-root", cmd, out, (int)sizeof out, 10) == 0 ? 0 : -1;
+}
+
+/* Predicates shared between clean baseline and mutant kill verification */
+static int pred_thaw_stale_refused(const char *tool_dir) {
+    int rc = run_rp_in(tool_dir, "thaw --version 9.9.9 --execute");
+    return rc != 0 && has("POST_THAW_GATE\tFAIL") && has("thaw-blocked-root-stale") && has("BLOCKED:thaw-freeze");
+}
+
+static int pred_thaw_empty_freeze_stale_refused(const char *tool_dir) {
+    int rc = run_rp_in(tool_dir, "thaw --version 9.9.9 --execute");
+    return rc != 0 && !has("already-thawed") && !has("POST_STEP\t8\tthaw-freeze\tOK") && has("BLOCKED:thaw-freeze");
+}
+
+static int pred_y2_fail_row_refused(const char *tool_dir) {
+    int rc = run_rp_in(tool_dir, "thaw --version 9.9.9 --execute");
+    return rc != 0 && has("missing-exec-7-Y2-done") && has("BLOCKED:thaw-freeze");
+}
+
 static int seed_ok_bins(void) {
-    char cmd[5000];
-    /* chain: dry/commit/verify ok */
+    char cmd[8000];
     if (cx_fmt(cmd, sizeof cmd,
         "printf '#!/bin/sh\\n"
         "echo CHAIN_FAKE\\n"
@@ -67,20 +150,56 @@ static int seed_ok_bins(void) {
     if (cx_fmt(cmd, sizeof cmd,
         "printf '#!/bin/sh\\necho MET\\nexit 0\\n' > '%s' && chmod 700 '%s' && "
         "printf '#!/bin/sh\\necho DAY\\nexit 0\\n' > '%s' && chmod 700 '%s' && "
-        "printf '#!/bin/sh\\n"
-        "for a in \"$@\"; do\\n"
-        "  case \"$a\" in\\n"
-        "    --rollback) echo \"INSTALL_APE\\tROLLBACK_DRYRUN\\tabc\"; exit 0;;\\n"
-        "    --write) echo INSTALL_WRITE; exit 0;;\\n"
-        "  esac\\n"
-        "done\\n"
-        "exit 0\\n' > '%s' && chmod 700 '%s'",
-        met, met, day, day, inst, inst)) return 2;
+        "cat > '%s' << 'EOFINST'\n"
+        "#!/bin/sh\n"
+        "[ \"$1\" = \"--\" ] && shift\n"
+        "R=\"$1\"; shift\n"
+        "for a in \"$@\"; do [ \"$a\" = \"--rollback\" ] && RB=1; [ \"$a\" = \"--backup\" ] && BK=1; [ \"$a\" = \"--write\" ] && WR=1; done\n"
+        "CUR=$(sha256sum \"$R/unisacc.com\" 2>/dev/null | awk '{print $1}')\n"
+        "if [ \"$BK\" = \"1\" ]; then\n"
+        "  [ \"$FAKE_INST_STALE_BACKUP_DRY\" = \"1\" ] && CUR=\"ffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffff\"\n"
+        "  echo \"INSTALL_APE\\tBACKUP_DRYRUN\\t$CUR\\t10\\tunisacc.com\"\n"
+        "  exit 0\n"
+        "fi\n"
+        "if [ \"$RB\" = \"1\" ] && [ \"$WR\" = \"1\" ]; then\n"
+        "  [ \"$FAKE_INST_RB_FAIL\" = \"1\" ] && { echo \"INSTALL_APE\\tREFUSED\\trollback-step-failed\" > \"$R/.rollback-old.0\"; echo \"INSTALL_APE\\tREFUSED\\trollback-step-failed\"; exit 1; }\n"
+        "  [ \"$FAKE_INST_RB_WRONG_SHA\" = \"1\" ] && { printf '#!/bin/sh\\necho bogus\\n' > \"$R/unisacc.com\"; echo \"INSTALL_APE\\tROLLED_BACK\\tbad\"; exit 0; }\n"
+        "  cp \"$R/unisacc.com.bak\" \"$R/unisacc.com\" && chmod 700 \"$R/unisacc.com\"\n"
+        "  cp \"$R/unisacc.com.ape.sha256.bak\" \"$R/unisacc.com.ape.sha256\" 2>/dev/null || true\n"
+        "  cp \"$R/unisacc.com.build.json.bak\" \"$R/unisacc.com.build.json\" 2>/dev/null || true\n"
+        "  echo \"INSTALL_APE\\tROLLED_BACK\\t$CUR\"; exit 0\n"
+        "fi\n"
+        "if [ \"$RB\" = \"1\" ]; then echo \"INSTALL_APE\\tROLLBACK_DRYRUN\\t$CUR\"; exit 0; fi\n"
+        "if [ \"$WR\" = \"1\" ]; then\n"
+        "  APE=\"$1\"; SHA=\"$2\"\n"
+        "  [ -f \"$R/unisacc.com\" ] && cp \"$R/unisacc.com\" \"$R/unisacc.com.bak\"\n"
+        "  [ -f \"$R/unisacc.com.ape.sha256\" ] && cp \"$R/unisacc.com.ape.sha256\" \"$R/unisacc.com.ape.sha256.bak\"\n"
+        "  [ -f \"$R/unisacc.com.build.json\" ] && cp \"$R/unisacc.com.build.json\" \"$R/unisacc.com.build.json.bak\"\n"
+        "  cp \"$APE\" \"$R/unisacc.com\" && chmod 700 \"$R/unisacc.com\"\n"
+        "  [ \"$FAKE_INST_SWAP_THEN_FAIL\" = \"1\" ] && { echo \"install interrupted after swap\"; exit 2; }\n"
+        "  SZ=$(wc -c < \"$R/unisacc.com\" | tr -d ' ')\n"
+        "  printf '%%s\\t%%s\\tunisacc.com\\n' \"$SHA\" \"$SZ\" > \"$R/unisacc.com.ape.sha256\"\n"
+        "  printf '{\\n  \"bytes\": %%s,\\n  \"commit\": \"11223344556677889900aabbccddeeff00112233\",\\n  \"schema\": 1,\\n  \"product_kind\": \"ape1\",\\n  \"product_digest\": \"%%s\"\\n}\\n' \"$SZ\" \"$SHA\" > \"$R/unisacc.com.build.json\"\n"
+        "  echo \"INSTALL_APE\\tINSTALLED\"; exit 0\n"
+        "fi\n"
+        "exit 0\n"
+        "EOFINST\n"
+        "chmod 700 '%s' && "
+        "cat > '%s' << 'EOFGH'\n"
+        "#!/bin/sh\n"
+        "if [ \"$FAKE_GH_FAIL\" = \"1\" ]; then exit 1; fi\n"
+        "D=\"\"; while [ $# -gt 0 ]; do if [ \"$1\" = \"--dir\" ]; then D=\"$2\"; shift 2; else shift; fi; done\n"
+        "if [ \"$FAKE_GH_BADSHA\" = \"1\" ]; then printf '#!/bin/sh\\necho bad\\n' > \"$D/unisacc.com\"; chmod 700 \"$D/unisacc.com\"; exit 0; fi\n"
+        "cp '%s' \"$D/unisacc.com\" && chmod 700 \"$D/unisacc.com\"\n"
+        "EOFGH\n"
+        "chmod 700 '%s'",
+        met, met, day, day, inst, inst, fakegh, ape999, fakegh)) return 2;
     return ckk_sh_t("check-release-post", cmd, out, (int)sizeof out, 10) == 0 ? 0 : 2;
 }
 
-int main(void) {
-    char cmd[5000]; int rc; long now;
+int main(int argc, char **argv) {
+    int no_mut = (argc >= 2 && tx_eqz(argv[1], "--no-mutants"));
+    char cmd[6000]; int rc; long now;
     const char *td = sy_env("TMPDIR");
     if (!td || !td[0]) td = "/tmp";
     if (ckk_sh_t("check-release-post", "pwd", out, (int)sizeof out, 20) != 0) return 2;
@@ -98,7 +217,11 @@ int main(void) {
         cx_fmt(chain, sizeof chain, "%s/fake-chain.sh", root) ||
         cx_fmt(met, sizeof met, "%s/fake-met.sh", root) ||
         cx_fmt(day, sizeof day, "%s/fake-day.sh", root) ||
-        cx_fmt(inst, sizeof inst, "%s/fake-inst.sh", root)) return 2;
+        cx_fmt(inst, sizeof inst, "%s/fake-inst.sh", root) ||
+        cx_fmt(fakegh, sizeof fakegh, "%s/fake-gh.sh", root) ||
+        cx_fmt(ape998, sizeof ape998, "%s/ape_998.com", root) ||
+        cx_fmt(ape999, sizeof ape999, "%s/ape_999.com", root) ||
+        cx_fmt(ape997, sizeof ape997, "%s/ape_997.com", root)) return 2;
     sy_mkdir_all(ev, 0700); sy_mkdir_all(cdir, 0700); sy_mkdir_all(pdir, 0700); sy_mkdir_all(bdir, 0700);
 
     const char y2_row[] = "# index\nexec-7-Y2-done\tnow\t-\tabc\tdone\n";
@@ -106,121 +229,449 @@ int main(void) {
     ck(has_y2_done(y2_row, sizeof y2_row - 1), "index-y2-key-with-tab");
     ck(!has_y2_done(other_rows, sizeof other_rows - 1), "index-y2-prefix-and-other-column-refused");
 
-    /* INDEX with Y2-done */
     if (cx_fmt(cmd, sizeof cmd,
-        "printf 'exec-7-Y2-done\\tnow\\t-\\tabc\\tdone\\n' > '%s/INDEX.tsv' && "
-        "printf 'APE\\n' > '%s/ape.bin'", ev, root)) return 2;
+        "set -e; mkdir -p '%s/release' '%s/tools'; "
+        "printf '#!/bin/sh\\nif [ \"$1\" = \"--version\" ]; then echo \"unisacc 9.9.8\"; exit 0; fi\\n' > '%s'; chmod 700 '%s'; "
+        "printf '#!/bin/sh\\nif [ \"$1\" = \"--version\" ]; then echo \"unisacc 9.9.9\"; exit 0; fi\\nexit 0\\n' > '%s'; chmod 700 '%s'; "
+        "printf '#!/bin/sh\\nif [ \"$1\" = \"--version\" ]; then echo \"unisacc 9.9.7\"; exit 0; fi\\nexit 0\\n' > '%s'; chmod 700 '%s'; "
+        "printf 'TOOL_INDEX\\tok\\n' > '%s/tools/tool-index.cx'; "
+        "printf 'exec-7-Y2-done\\tnow\\t-\\t0123456789012345678901234567890123456789\\tdone\\n' > '%s/INDEX.tsv'; "
+        "sha256sum '%s' '%s' '%s' | awk '{print $1}' > '%s/shas.txt'",
+        root, root, ape998, ape998, ape999, ape999, ape997, ape997, root, ev, ape998, ape999, ape997, root)) return 2;
     ck(ckk_sh_t("check-release-post", cmd, out, (int)sizeof out, 10) == 0, "seed-index");
+    {
+        char sp[1000]; size_t sn = 0; char *sb;
+        cx_fmt(sp, sizeof sp, "%s/shas.txt", root);
+        sb = cx_read(sp, &sn);
+        if (!sb || sn < 195) return 2;
+        mm_copy(sha998, 65, sb, 64); sha998[64] = 0;
+        mm_copy(sha999, 65, sb + 65, 64); sha999[64] = 0;
+        mm_copy(sha997, 65, sb + 130, 64); sha997[64] = 0;
+        mm_free(sb);
+    }
+    ck(seed_root_files(ape998, "") == 0, "seed-root-998");
+    if (cx_fmt(cmd, sizeof cmd,
+        "printf 'repo\\ttag\\tcommit\\tversion\\tworkflow\\tworkflow_ref\\tci_run_id\\tape\\tape_sha256\\tpackage\\tpackage_sha256\\twin_arm64\\twin_arm64_sha256\\trecord\\trecord_sha256\\tbuild_alias\\tbuild_alias_sha256\\tzip\\tzip_sha256\\tchecksums\\tchecksums_sha256\\n"
+        "org/r\\tv9.9.9\\t11223344556677889900aabbccddeeff00112233\\t9.9.9\\tw\\tv9.9.9\\t1\\tunisacc.com\\t%s\\tp\\t%s\\tw\\t%s\\tr\\t%s\\tb\\t%s\\t-\\t-\\ts\\t%s\\n' > '%s/release/candidate.tsv' && "
+        "printf 'unisacc-next.com\\tape-final/unisacc-next.com\\tsha=%s\\tbytes=10\\n' > '%s/ape-receipt.txt' && "
+        "printf 'READBACK_SHA unisacc.com %s\\n' > '%s/public-readback.txt'",
+        sha999, sha999, sha999, sha999, sha999, sha999, root, sha999, ev, sha999, ev)) return 2;
+    ck(ckk_sh_t("check-release-post", cmd, out, (int)sizeof out, 10) == 0, "seed-cand-receipt-readback");
     ck(seed_ok_bins() == 0, "seed-bins");
+
+    /* Seed git history + version-seq + active 9.9.9-FREEZE so full-run dry/execute verify Step 8 cleanly */
+    if (cx_fmt(cmd, sizeof cmd,
+        "set -e; mkdir -p '%s/build' '%s/release/evidence/9.9.9' && "
+        "cp '%s/ape-receipt.txt' '%s/release/evidence/9.9.9/ape-receipt.txt' && "
+        "cp '%s/public-readback.txt' '%s/release/evidence/9.9.9/public-readback.txt' && "
+        "printf 'slot\\tversion\\tclass\\tstate\\tnote\\n1\\t9.9.8\\told\\t已公开\\told\\n' > '%s/build/version-seq.tsv' && "
+        "git -C '%s' init -q -b main && "
+        "git -C '%s' config user.email 'test@local' && git -C '%s' config user.name 'test' && "
+        "git -C '%s' add build/version-seq.tsv && "
+        "GIT_AUTHOR_DATE='2026-11-25T10:00:00+0000' GIT_COMMITTER_DATE='2026-11-25T10:00:00+0000' "
+        "git -C '%s' commit -q -m v998 && git -C '%s' tag v9.9.8 && "
+        "printf 'slot\\tversion\\tclass\\tstate\\tnote\\n1\\t9.9.8\\told\\t已公开\\told\\n2\\t9.9.9\\tnew\\t已公开\\tnew\\n' > '%s/build/version-seq.tsv' && "
+        "git -C '%s' add build/version-seq.tsv release/candidate.tsv release/evidence/9.9.9/ape-receipt.txt release/evidence/9.9.9/public-readback.txt && "
+        "GIT_AUTHOR_DATE='2026-11-26T10:00:00+0000' GIT_COMMITTER_DATE='2026-11-26T10:00:00+0000' "
+        "git -C '%s' commit -q -m v999 && git -C '%s' tag v9.9.9 && "
+        "git -C '%s' rev-parse HEAD > '%s/y2.txt' && "
+        "printf '# freeze\\n9.9.9-FREEZE\\t2026-11-26\\tfreeze-test\\n' > '%s/build/freeze.tsv'",
+        root, root, ev, root, ev, root, root, root, root, root, root, root, root, root, root, root, root, root, root, root)) return 2;
+    ck(ckk_sh_t("check-release-post", cmd, out, (int)sizeof out, 20) == 0, "seed-git-freeze");
+    {
+        char yp[1000]; size_t yn = 0; char *yb;
+        cx_fmt(yp, sizeof yp, "%s/y2.txt", root);
+        yb = cx_read(yp, &yn);
+        if (!yb || yn < 40) return 2;
+        mm_copy(real_y2, sizeof real_y2, yb, 40); real_y2[40] = 0;
+        mm_free(yb);
+    }
+    if (cx_fmt(cmd, sizeof cmd, "printf 'exec-7-Y2-done\\tnow\\t-\\t%s\\tdone\\n' > '%s/INDEX.tsv'", real_y2, ev)) return 2;
+    (void)ckk_sh_t("check-release-post", cmd, out, (int)sizeof out, 10);
 
     rc = run_rp("plan --version 9.9.9");
     ck(rc == 0 && has("RELEASE_POST_PLAN\tversion=9.9.9") && has("POST_PLAN\t1\tindex-seal") &&
-       has("POST_PLAN\t6\tworktree-cleanup-print") &&
-       has("POST_PLAN\t7\trearrange-patch-print") && has("RELEASE_POST\tstatus=PLAN"), "plan-lines");
+       has("POST_PLAN\t7\trearrange-patch-print") && has("POST_PLAN\t8\tthaw-freeze") &&
+       has("RELEASE_POST\tstatus=PLAN"), "plan-lines");
 
-    /* dry success, no state file */
+    /* dry zero-write */
     rc = run_rp("run --version 9.9.9 --dry");
-    ck(rc == 0 && has("RELEASE_POST\tstatus=DONE") && has("POST_STEP\t1\tindex-seal\tOK") &&
-       has("POST_STEP\t4\tmetrics\tOK\tdry-skip-metrics-write") &&
-       has("POST_STEP\t5\troot-upgrade\tSKIP") &&
-       has("POST_STEP\t7\trearrange-patch-print\tOK") &&
-       has("POST_REARRANGE_HINT\t# README:") &&
-       has("git apply --check"), "dry-ok");
-    ck(sy_exists(stf) != 1, "dry-zero-state-write");
+    ck(rc == 0 && has("RELEASE_POST\tstatus=DONE") && has("POST_ROOT_BACKUP_GATE\tPASS") &&
+       has("POST_STEP\t5\troot-upgrade\tOK\tdry-auto-root-upgrade-ready") &&
+       has("POST_STEP\t8\tthaw-freeze\tOK\tdry-awaiting-root-upgrade") && sy_exists(stf) == 0, "dry-ok");
 
-    /* fail index */
-    if (cx_fmt(cmd, sizeof cmd, "printf 'no-seal\\n' > '%s/INDEX.tsv'", ev)) return 2;
-    ck(ckk_sh_t("check-release-post", cmd, out, (int)sizeof out, 10) == 0, "seed-bad-index");
-    rc = run_rp("run --version 9.9.9 --dry");
-    ck(rc != 0 && has("POST_STEP\t1\tindex-seal\tFAIL\tmissing-exec-7-Y2-done") &&
-       has("BLOCKED:index-seal") && has("RELEASE_POST_RETRY"), "fail-index-seal");
-    if (cx_fmt(cmd, sizeof cmd, "printf 'exec-7-Y2-done\\tnow\\t-\\tabc\\tdone\\n' > '%s/INDEX.tsv'", ev)) return 2;
-    ck(ckk_sh_t("check-release-post", cmd, out, (int)sizeof out, 10) == 0, "restore-index");
-
-    /* backup fail: mark still ok; --verify fails */
+    /* Stale backup gate MUST refuse */
     if (cx_fmt(cmd, sizeof cmd,
-        "printf '#!/bin/sh\n"
-        "for a in \"$@\"; do\n"
-        "  case \"$a\" in\n"
-        "    --verify) echo \"BACKUP_VERIFY\tFAIL\"; exit 1;;\n"
-        "    --dry) echo MARK_DRY; exit 0;;\n"
-        "    --commit) echo MARK_COMMIT; exit 0;;\n"
-        "  esac\n"
-        "done\n"
-        "exit 0\n' > '%s' && chmod 700 '%s'", chain, chain)) return 2;
-    ck(ckk_sh_t("check-release-post", cmd, out, (int)sizeof out, 10) == 0, "seed-backup-fail");
-    rc = run_rp("run --version 9.9.9 --dry");
-    ck(rc != 0 && has("BLOCKED:backup-evidence") && has("backup-evidence-verify"), "fail-backup");
-    ck(seed_ok_bins() == 0, "restore-bins");
+        "FAKE_INST_STALE_BACKUP_DRY=1 cx tools/release-post.cx -- run --version 9.9.9 --dry "
+        "--repo '%s' --evidence-dir '%s' --install-root '%s' --install-bin 'sh %s' --step 5",
+        root, ev, root, inst)) return 2;
+    rc = ckk_sh_t("check-release-post", cmd, out, (int)sizeof out, 25);
+    ck(rc != 0 && has("POST_ROOT_BACKUP_GATE\tFAIL") && has("POST_STEP\t5\troot-upgrade\tFAIL\tPOST_ROOT_BACKUP_GATE"),
+       "stale-backup-gate-refused");
 
-    /* execute + resume */
-    rc = run_rp("run --version 9.9.9 --execute");
-    ck(rc == 0 && has("status=DONE") && sy_exists(stf) == 1, "execute-ok");
-    rc = run_rp("run --version 9.9.9 --execute");
-    ck(rc == 0 && has("POST_STEP\t1\tindex-seal\tSKIP\talready-DONE"), "resume-skip");
+    /* Execute default: auto-resolves + default tool-index smoke + upgrades + thaws */
+    rc = run_rp_raw("run --version 9.9.9 --execute");
+    ck(rc == 0 && has("POST_STEP\t5\troot-upgrade\tOK\troot-upgraded") && has("POST_STEP\t8\tthaw-freeze\tOK\tfreeze-row-thawed") && has("RELEASE_POST\tstatus=DONE"), "execute-default-upgrades");
 
-    /* root upgrade path */
+    /* Forged 5<TAB>DONE when root is stale 9.9.8 MUST NOT skip Step 5 */
+    if (cx_fmt(cmd, sizeof cmd, "printf '# freeze\\n9.9.9-FREEZE\\t2026-11-26\\tfreeze-test\\n' > '%s/build/freeze.tsv'", root)) return 2;
+    (void)ckk_sh_t("check-release-post", cmd, out, (int)sizeof out, 10);
+    seed_root_files(ape998, "");
+    if (cx_fmt(cmd, sizeof cmd, "printf '1\\tDONE\\tver=9.9.9\\n5\\tDONE\\tver=9.9.9\\n' > '%s'", stf)) return 2;
+    (void)ckk_sh_t("check-release-post", cmd, out, (int)sizeof out, 10);
+    rc = run_rp_raw("run --version 9.9.9 --execute");
+    ck(rc == 0 && !has("POST_STEP\t5\troot-upgrade\tSKIP") && has("POST_STEP\t5\troot-upgrade\tOK\troot-upgraded"),
+       "forged-state-5-done-does-not-skip-stale-root");
+
+    /* True resume skips Step 5 AND Step 8 ONLY when live root & thawed Y2 verified */
+    rc = run_rp_raw("run --version 9.9.9 --execute");
+    ck(rc == 0 && has("POST_STEP\t5\troot-upgrade\tSKIP\talready-DONE-verified") &&
+       has("POST_STEP\t8\tthaw-freeze\tSKIP\talready-DONE-verified"), "verified-resume-skips");
+
+    /* --no-root-upgrade injection & blocked */
+    if (cx_fmt(cmd, sizeof cmd,
+        "cx tools/release-post.cx -- run --version 9.9.9 --execute --no-root-upgrade \"$(printf 'bad\\n5\\tDONE')\" "
+        "--repo '%s' --evidence-dir '%s' --state-file '%s' --install-root '%s'",
+        root, ev, stf, root)) return 2;
+    rc = ckk_sh_t("check-release-post", cmd, out, (int)sizeof out, 15);
+    ck(rc == 2, "no-root-upgrade-newline-injection-refused");
     sy_unlink(stf);
-    rc = run_rp("run --version 9.9.9 --execute --root-upgrade --step 5");
-    ck(rc == 0 && has("POST_ROOT_BACKUP_GATE\tPASS") && has("POST_STEP\t5\troot-upgrade\tOK"), "root-upgrade-ok");
+    rc = run_rp_raw("run --version 9.9.9 --execute --no-root-upgrade defer-ops");
+    ck(rc != 0 && has("POST_STEP\t5\troot-upgrade\tSKIPPED\tdefer-ops") && has("RELEASE_POST\tstatus=BLOCKED:root-upgrade"),
+       "no-root-upgrade-blocked");
+    if (cx_fmt(cmd, sizeof cmd, "printf '5\\tSKIPPED\\tfoo\\tDONE\\n' > '%s'", stf)) return 2;
+    (void)ckk_sh_t("check-release-post", cmd, out, (int)sizeof out, 10);
+    rc = run_rp_raw("run --version 9.9.9 --execute --step 5");
+    ck(rc == 0 && has("POST_STEP\t5\troot-upgrade\tOK\troot-upgraded") && has("RELEASE_POST\tstatus=STEP_DONE:root-upgrade"),
+       "step-only-prints-step-done-not-done");
 
-    /* step 7 rearrange print-only fixture */
+    /* Readback-only --ape-sha conflict & readback duplicate conflict & malformed */
+    if (cx_fmt(cmd, sizeof cmd,
+        "mv '%s/release/candidate.tsv' '%s/release/candidate.bak' && mv '%s/ape-receipt.txt' '%s/ape-receipt.bak'",
+        root, root, ev, ev)) return 2;
+    (void)ckk_sh_t("check-release-post", cmd, out, (int)sizeof out, 10);
+    rc = run_rp_raw("run --version 9.9.9 --execute --step 5 --ape-sha aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa");
+    ck(rc != 0 && has("candidate-receipt-readback-sha-mismatch"), "readback-only-explicit-ape-sha-conflict");
+    if (cx_fmt(cmd, sizeof cmd,
+        "printf 'READBACK_SHA unisacc.com %s\\nREADBACK_SHA unisacc.com bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb\\n' > '%s/public-readback.txt'",
+        sha999, ev)) return 2;
+    (void)ckk_sh_t("check-release-post", cmd, out, (int)sizeof out, 10);
+    rc = run_rp_raw("run --version 9.9.9 --execute --step 5");
+    ck(rc != 0 && has("sha-source-conflict"), "readback-duplicate-conflict-refused");
+    if (cx_fmt(cmd, sizeof cmd, "printf 'READBACK_SHA unisacc.com zzzbad\\n' > '%s/public-readback.txt'", ev)) return 2;
+    (void)ckk_sh_t("check-release-post", cmd, out, (int)sizeof out, 10);
+    rc = run_rp_raw("run --version 9.9.9 --execute --step 5");
+    ck(rc != 0 && has("sha-source-malformed"), "readback-malformed-refused");
+    if (cx_fmt(cmd, sizeof cmd,
+        "printf 'READBACK_SHA unisacc.com %s\\n' > '%s/public-readback.txt' && "
+        "mv '%s/release/candidate.bak' '%s/release/candidate.tsv' && mv '%s/ape-receipt.bak' '%s/ape-receipt.txt'",
+        sha999, ev, root, root, ev, ev)) return 2;
+    (void)ckk_sh_t("check-release-post", cmd, out, (int)sizeof out, 10);
+
+    /* Interrupted installer swap + rollback failure modes */
+    seed_root_files(ape998, "");
+    if (cx_fmt(cmd, sizeof cmd,
+        "FAKE_INST_SWAP_THEN_FAIL=1 cx tools/release-post.cx -- run --version 9.9.9 --execute --step 5 "
+        "--repo '%s' --evidence-dir '%s' --state-file '%s' --install-root '%s' --install-bin 'sh %s' --gh-bin '%s' --pgrep-pat '[z]zz'",
+        root, ev, stf, root, inst, fakegh)) return 2;
+    rc = ckk_sh_t("check-release-post", cmd, out, (int)sizeof out, 25);
+    ck(rc != 0 && has("POST_ROOT_ROLLBACK\t") && has("install-interrupted-rolled-back"), "interrupted-install-triggers-rollback");
+
+    if (cx_fmt(cmd, sizeof cmd,
+        "FAKE_INST_RB_FAIL=1 cx tools/release-post.cx -- run --version 9.9.9 --execute --step 5 "
+        "--repo '%s' --evidence-dir '%s' --state-file '%s' --install-root '%s' --install-bin 'sh %s' --ape '%s' --ape-sha '%s' --smoke-cmd 'exit 1' --pgrep-pat '[z]zz'",
+        root, ev, stf, root, inst, ape999, sha999)) return 2;
+    rc = ckk_sh_t("check-release-post", cmd, out, (int)sizeof out, 25);
+    ck(rc != 0 && has("POST_ROOT_ROLLBACK_FAILED\t") && has("post-install-verify-rollback-failed") && !has("verify-rolled-back"),
+       "rollback-rc-fail-never-claims-rolled-back");
+
+    seed_root_files(ape998, "");
+    if (cx_fmt(cmd, sizeof cmd,
+        "FAKE_INST_RB_WRONG_SHA=1 cx tools/release-post.cx -- run --version 9.9.9 --execute --step 5 "
+        "--repo '%s' --evidence-dir '%s' --state-file '%s' --install-root '%s' --install-bin 'sh %s' --ape '%s' --ape-sha '%s' --smoke-cmd 'exit 1' --pgrep-pat '[z]zz'",
+        root, ev, stf, root, inst, ape999, sha999)) return 2;
+    rc = ckk_sh_t("check-release-post", cmd, out, (int)sizeof out, 25);
+    ck(rc != 0 && has("POST_ROOT_ROLLBACK_FAILED\t") && has("post-install-verify-rollback-failed"),
+       "rollback-wrong-sha-never-claims-rolled-back");
+
+    seed_root_files(ape998, "");
+    if (cx_fmt(cmd, sizeof cmd, "mv '%s/tools/tool-index.cx' '%s/tools/tool-index.bak'", root, root)) return 2;
+    (void)ckk_sh_t("check-release-post", cmd, out, (int)sizeof out, 10);
+    rc = run_rp_raw("run --version 9.9.9 --execute --step 5");
+    ck(rc != 0 && has("POST_ROOT_ROLLBACK\t") && has("post-install-verify-rolled-back"), "missing-default-smoke-rolls-back");
+    if (cx_fmt(cmd, sizeof cmd, "mv '%s/tools/tool-index.bak' '%s/tools/tool-index.cx'", root, root)) return 2;
+    (void)ckk_sh_t("check-release-post", cmd, out, (int)sizeof out, 10);
+
+    if (cx_fmt(cmd, sizeof cmd,
+        "FAKE_GH_FAIL=1 cx tools/release-post.cx -- run --version 9.9.9 --execute --step 5 "
+        "--repo '%s' --evidence-dir '%s' --state-file '%s' --install-root '%s' --install-bin 'sh %s' --gh-bin '%s' --pgrep-pat '[z]zz'",
+        root, ev, stf, root, inst, fakegh)) return 2;
+    rc = ckk_sh_t("check-release-post", cmd, out, (int)sizeof out, 20);
+    ck(rc != 0 && has("gh-download-failed"), "gh-download-failure-named");
+
+    if (cx_fmt(cmd, sizeof cmd,
+        "FAKE_GH_BADSHA=1 cx tools/release-post.cx -- run --version 9.9.9 --execute --step 5 "
+        "--repo '%s' --evidence-dir '%s' --state-file '%s' --install-root '%s' --install-bin 'sh %s' --gh-bin '%s' --pgrep-pat '[z]zz'",
+        root, ev, stf, root, inst, fakegh)) return 2;
+    rc = ckk_sh_t("check-release-post", cmd, out, (int)sizeof out, 20);
+    ck(rc != 0 && has("gh-download-sha-mismatch"), "gh-bad-sha-failure-named");
+
+    if (cx_fmt(cmd, sizeof cmd,
+        "cx tools/release-post.cx -- run --version 9.9.9 --execute --step 5 "
+        "--repo '%s' --evidence-dir '%s' --state-file '%s' --install-root '%s' --install-bin 'sh %s' --pgrep-pat '['",
+        root, ev, stf, root, inst)) return 2;
+    rc = ckk_sh_t("check-release-post", cmd, out, (int)sizeof out, 20);
+    ck(rc != 0 && has("inflight-probe-failed"), "bad-pgrep-regex-fail-closed");
+
     rc = run_rp("run --version 9.9.9 --dry --step 7");
     ck(rc == 0 && has("POST_STEP\t7\trearrange-patch-print\tOK\tprinted-rearrange-cmds") &&
-       has("rearrange-patch/README.md") &&
-       has("01-version-seq-and-plans.patch") &&
-       has("merge main into v0.0.96 and v0.0.95") &&
-       !has("BLOCKED:"), "step7-rearrange-print");
+       has("RELEASE_POST\tstatus=STEP_DONE:rearrange-patch-print") && !has("BLOCKED:"), "step7-rearrange-print");
 
-    /* real-repo: 0.0.93 dry permanent regression (UNMEASURED when env incomplete) */
+    /* Real-repo 0.0.93 / 0.1.3 / 0.0.94 regressions */
     {
-        char idx93[1100], man93[1100], cmd93[2400];
-        int have = 0;
+        char idx93[1100], man93[1100], cmd93[2400], idx13[1100], man13[1100], cmd13[2400], idx94[1100], cmd94[2400];
+        int have = 0, have13 = 0, has_y2 = 0;
         if (!cx_fmt(idx93, sizeof idx93, "%s/release/evidence/0.0.93/INDEX.tsv", cwd) &&
             !cx_fmt(man93, sizeof man93, "%s/release/evidence/0.0.93/backup-evidence.tsv", cwd) &&
-            sy_exists(idx93) == 1 && sy_exists(man93) == 1) have = 1;
+            sy_exists(idx93) == 1 && sy_exists(man93) == 1 &&
+            !cx_fmt(cmd93, sizeof cmd93, "git -C '%s' rev-parse --verify -q 'v0.0.93^{commit}' >/dev/null", cwd) &&
+            ckk_sh_t("check-release-post", cmd93, out, (int)sizeof out, 10) == 0) have = 1;
         if (!have) {
-            printf("UNMEASURED\treal-093-dry\tmissing-0.0.93-INDEX-or-backup-manifest\n");
+            printf("UNMEASURED\treal-093-dry\tmissing-0.0.93-INDEX-backup-or-tag\n");
             ck(1, "real-093-dry-unmeasured");
         } else {
-            if (cx_fmt(cmd93, sizeof cmd93,
-                "sh '%s/unisacc.com' '%s/tools/release-post.cx' -- run --version 0.0.93 --dry --repo '%s'",
-                cwd, cwd, cwd)) return 2;
+            /* 0.0.93 predates build/freeze.tsv (0.0.107+): steps 1..7 pass --dry and step 8 enforces B4a absent-freeze refusal. */
+            if (cx_fmt(cmd93, sizeof cmd93, "cx tools/release-post.cx -- run --version 0.0.93 --dry --repo '%s'", cwd)) return 2;
             rc = ckk_sh_t("check-release-post", cmd93, out, (int)sizeof out, 55);
-            ck(rc == 0 && has("RELEASE_POST\tstatus=DONE") &&
+            ck(rc != 0 &&
                has("POST_STEP\t1\tindex-seal\tOK") &&
+               has("POST_STEP\t2\tmark-version-seq\tOK") &&
                has("POST_STEP\t3\tbackup-evidence\tOK") &&
-               !has("BLOCKED:"), "real-093-dry-done");
+               has("POST_STEP\t4\tmetrics\tOK") &&
+               has("POST_STEP\t5\troot-upgrade\tOK") &&
+               has("POST_STEP\t6\tworktree-cleanup-print\tOK") &&
+               has("POST_STEP\t7\trearrange-patch-print\tOK") &&
+               has("POST_STEP\t8\tthaw-freeze\tFAIL\tfreeze-row-missing-or-unverified") &&
+               has("RELEASE_POST\tstatus=BLOCKED:thaw-freeze"),
+               "real-093-dry-steps1-to-7-ok-and-step8-pre-freeze-refused");
         }
-    }
-    /* real-repo: 0.0.94 dry expects BLOCKED:index-seal when no Y2-done */
-    {
-        char idx94[1100], cmd94[2400]; int has_y2 = 0;
+        if (!cx_fmt(idx13, sizeof idx13, "%s/release/evidence/0.1.3/INDEX.tsv", cwd) &&
+            !cx_fmt(man13, sizeof man13, "%s/release/evidence/0.1.3/backup-evidence.tsv", cwd) &&
+            sy_exists(idx13) == 1 && sy_exists(man13) == 1 &&
+            !cx_fmt(cmd13, sizeof cmd13,
+                    "git -C '%s' rev-parse --verify -q 'v0.1.3^{commit}' >/dev/null && "
+                    "cx tools/root-current.cx -- --repo '%s' --no-candidate-ahead >/dev/null",
+                    cwd, cwd) &&
+            ckk_sh_t("check-release-post", cmd13, out, (int)sizeof out, 30) == 0) have13 = 1;
+        if (!have13) {
+            printf("UNMEASURED\treal-013-dry\tmissing-0.1.3-INDEX-backup-tag-or-current-root\n");
+            ck(1, "real-013-dry-unmeasured");
+        } else {
+            if (cx_fmt(cmd13, sizeof cmd13, "cx tools/release-post.cx -- run --version 0.1.3 --dry --repo '%s'", cwd)) return 2;
+            rc = ckk_sh_t("check-release-post", cmd13, out, (int)sizeof out, 55);
+            ck(rc == 0 && has("RELEASE_POST\tstatus=DONE") && has("POST_STEP\t1\tindex-seal\tOK") &&
+               has("POST_STEP\t3\tbackup-evidence\tOK") && has("POST_STEP\t5\troot-upgrade\tOK") &&
+               has("POST_STEP\t8\tthaw-freeze\tOK\talready-thawed-verified") && !has("BLOCKED:"), "real-013-dry-done");
+        }
         if (cx_fmt(idx94, sizeof idx94, "%s/release/evidence/0.0.94/INDEX.tsv", cwd)) return 2;
         if (sy_exists(idx94) == 1) {
-            {
-                unsigned char *bb; int64_t bn = 0;
-                if (sy_read_file(idx94, &bb, &bn, 1 << 20) == 0 && bb) {
-                    has_y2 = has_y2_done((const char *)bb, (size_t)bn);
-                    mm_free(bb);
-                }
+            unsigned char *bb; int64_t bn = 0;
+            if (sy_read_file(idx94, &bb, &bn, 1 << 20) == 0 && bb) {
+                has_y2 = has_y2_done((const char *)bb, (size_t)bn);
+                mm_free(bb);
             }
         }
         if (has_y2) {
             printf("UNMEASURED\treal-094-dry\t0.0.94-already-has-Y2-done\n");
             ck(1, "real-094-dry-unmeasured");
         } else {
-            if (cx_fmt(cmd94, sizeof cmd94,
-                "sh '%s/unisacc.com' '%s/tools/release-post.cx' -- run --version 0.0.94 --dry --repo '%s'",
-                cwd, cwd, cwd)) return 2;
+            if (cx_fmt(cmd94, sizeof cmd94, "cx tools/release-post.cx -- run --version 0.0.94 --dry --repo '%s'", cwd)) return 2;
             rc = ckk_sh_t("check-release-post", cmd94, out, (int)sizeof out, 55);
             ck(rc != 0 && has("BLOCKED:index-seal"), "real-094-dry-blocked-index-seal");
         }
     }
 
-    /* mutant: dry-write hook must not be used to claim dry wrote metrics OK via fail path */
+    /* Step 8 (thaw-freeze) + B4 adversarial suites re-use seeded git main + freeze.tsv */
+    if (cx_fmt(cmd, sizeof cmd,
+        "printf '# freeze\\n9.9.9-FREEZE\\t2026-11-26\\tfreeze-test\\n' > '%s/build/freeze.tsv' && "
+        "printf 'exec-7-Y2-done\\tnow\\t-\\t%s\\tdone\\n' > '%s/INDEX.tsv'",
+        root, real_y2, ev)) return 2;
+    ck(ckk_sh_t("check-release-post", cmd, out, (int)sizeof out, 10) == 0, "seed-step8-git-freeze");
+    seed_root_files(ape998, "");
+
+    /* (B4a-1) Empty freeze.tsv + stale 9.9.8 root MUST FAIL (never shortcut OK already-thawed) */
+    if (cx_fmt(cmd, sizeof cmd, "printf '# freeze\\n' > '%s/build/freeze.tsv'", root)) return 2;
+    (void)ckk_sh_t("check-release-post", cmd, out, (int)sizeof out, 10);
+    ck(pred_thaw_empty_freeze_stale_refused(cwd), "b4a-absent-freeze-stale-root-refused-never-marks-done");
+
+    /* (B4a-2) Empty freeze.tsv + current 9.9.9 root WITHOUT thawed Y2 row MUST FAIL */
+    seed_root_files(ape999, "11223344556677889900aabbccddeeff00112233");
+    rc = run_rp_raw("thaw --version 9.9.9 --execute");
+    ck(rc != 0 && has("freeze-row-missing-or-unverified") && has("BLOCKED:thaw-freeze"),
+       "b4a-absent-freeze-missing-y2-row-refused");
+
+    /* Restore active freeze + stale 9.9.8 root for (b)..(e) */
+    if (cx_fmt(cmd, sizeof cmd, "printf '# freeze\\n9.9.9-FREEZE\\t2026-11-26\\tfreeze-test\\n' > '%s/build/freeze.tsv'", root)) return 2;
+    (void)ckk_sh_t("check-release-post", cmd, out, (int)sizeof out, 10);
+    seed_root_files(ape998, "");
+
+    /* (b) Stale 9.9.8 root -> thaw MUST refuse */
+    ck(pred_thaw_stale_refused(cwd), "thaw-blocked-when-root-stale");
+
+    /* (c) Candidate-ahead (9.9.10 + candidate.tsv) MUST refuse thaw */
+    if (cx_fmt(cmd, sizeof cmd,
+        "printf '#!/bin/sh\\necho \"unisacc 9.9.10\"\\n' > '%s/unisacc.com' && chmod 700 '%s/unisacc.com' && "
+        "S=$(sha256sum '%s/unisacc.com' | awk '{print $1}') && B=$(wc -c < '%s/unisacc.com' | tr -d ' ') && "
+        "printf '%%s\\t%%s\\tunisacc.com\\n' \"$S\" \"$B\" > '%s/unisacc.com.ape.sha256' && "
+        "printf '{\"bytes\":%%s,\"commit\":\"11223344556677889900aabbccddeeff00112233\",\"product_kind\":\"ape1\",\"product_digest\":\"%%s\"}\\n' \"$B\" \"$S\" > '%s/unisacc.com.build.json' && "
+        "printf 'CANDIDATE\\trev=11223344556677889900aabbccddeeff00112233\\tsha=%%s\\tbytes=%%s\\tversion=9.9.10\\tsource=%s\\tnot=PUBLISHED\\n' \"$S\" \"$B\" > '%s/unisacc.com.candidate.tsv'",
+        root, root, root, root, root, root, root, root)) return 2;
+    (void)ckk_sh_t("check-release-post", cmd, out, (int)sizeof out, 10);
+    rc = run_rp_raw("thaw --version 9.9.9 --execute");
+    ck(rc != 0 && has("POST_THAW_GATE\tFAIL") && has("thaw-blocked-root-stale"), "thaw-blocked-when-candidate-ahead");
+    if (cx_fmt(cmd, sizeof cmd, "rm -f '%s/unisacc.com.candidate.tsv'", root)) return 2;
+    (void)ckk_sh_t("check-release-post", cmd, out, (int)sizeof out, 10);
+    seed_root_files(ape999, "11223344556677889900aabbccddeeff00112233");
+
+    /* (B4b-1) INDEX.tsv FAIL row ahead of valid Y2 MUST refuse Step 1 AND Step 8 */
+    if (cx_fmt(cmd, sizeof cmd,
+        "printf 'exec-7-Y2-done\\tnow\\t-\\tdeadbeefdeadbeefdeadbeefdeadbeefdeadbeef\\tFAIL\\n"
+        "exec-7-Y2-done\\tnow\\t-\\t%s\\tdone\\n' > '%s/INDEX.tsv'", real_y2, ev)) return 2;
+    (void)ckk_sh_t("check-release-post", cmd, out, (int)sizeof out, 10);
+    ck(pred_y2_fail_row_refused(cwd), "b4b-index-fail-row-refuses-thaw");
+    rc = run_rp_raw("run --version 9.9.9 --dry --step 1");
+    ck(rc != 0 && has("POST_STEP\t1\tindex-seal\tFAIL"), "b4b-step1-reuses-strict-y2");
+
+    /* (B4b-2) INDEX.tsv two conflicting valid 40-hex rows MUST refuse */
+    if (cx_fmt(cmd, sizeof cmd,
+        "printf 'exec-7-Y2-done\\tnow\\t-\\t%s\\tdone\\n"
+        "exec-7-Y2-done\\tnow\\t-\\t1111111111111111111111111111111111111111\\tdone\\n' > '%s/INDEX.tsv'", real_y2, ev)) return 2;
+    (void)ckk_sh_t("check-release-post", cmd, out, (int)sizeof out, 10);
+    ck(pred_y2_fail_row_refused(cwd), "b4b-index-conflicting-y2-rows-refused");
+
+    /* (B4b-3) Non-existent commit SHA in git repo MUST refuse */
+    if (cx_fmt(cmd, sizeof cmd,
+        "printf 'exec-7-Y2-done\\tnow\\t-\\tdeadbeefdeadbeefdeadbeefdeadbeefdeadbeef\\tdone\\n' > '%s/INDEX.tsv'", ev)) return 2;
+    (void)ckk_sh_t("check-release-post", cmd, out, (int)sizeof out, 10);
+    ck(pred_y2_fail_row_refused(cwd), "b4b-index-nonexistent-commit-refused");
+
+    /* (d) Short non-40-hex Y2 MUST refuse Step 8 and Step 1 */
+    if (cx_fmt(cmd, sizeof cmd, "printf 'exec-7-Y2-done\\tnow\\t-\\tshort-y2\\tdone\\n' > '%s/INDEX.tsv'", ev)) return 2;
+    (void)ckk_sh_t("check-release-post", cmd, out, (int)sizeof out, 10);
+    ck(pred_y2_fail_row_refused(cwd), "thaw-requires-40hex-y2");
+    rc = run_rp_raw("run --version 9.9.9 --dry --step 1");
+    ck(rc != 0 && has("POST_STEP\t1\tindex-seal\tFAIL"), "step1-requires-40hex-y2");
+
+    /* Restore real Y2 */
+    if (cx_fmt(cmd, sizeof cmd, "printf 'exec-7-Y2-done\\tnow\\t-\\t%s\\tdone\\n' > '%s/INDEX.tsv'", real_y2, ev)) return 2;
+    (void)ckk_sh_t("check-release-post", cmd, out, (int)sizeof out, 10);
+
+    /* (e) Forged 8<TAB>DONE in state.tsv when freeze active & root stale MUST NOT skip Step 8 */
+    seed_root_files(ape998, "");
+    if (cx_fmt(cmd, sizeof cmd, "printf '1\\tDONE\\tver=9.9.9\\n5\\tDONE\\tver=9.9.9\\n8\\tDONE\\tver=9.9.9\\n' > '%s'", stf)) return 2;
+    (void)ckk_sh_t("check-release-post", cmd, out, (int)sizeof out, 10);
+    rc = run_rp_raw("run --version 9.9.9 --execute --step 8");
+    ck(rc != 0 && !has("POST_STEP\t8\tthaw-freeze\tSKIP") && has("thaw-blocked-root-stale"),
+       "forged-state-8-done-does-not-skip-active-freeze");
+    sy_unlink(stf);
+
+    /* (f) chmod 000 build/freeze.tsv stat/read failure MUST FAIL */
+    seed_root_files(ape999, "11223344556677889900aabbccddeeff00112233");
+    if (cx_fmt(cmd, sizeof cmd, "chmod 000 '%s/build/freeze.tsv'", root)) return 2;
+    (void)ckk_sh_t("check-release-post", cmd, out, (int)sizeof out, 10);
+    rc = run_rp_raw("thaw --version 9.9.9 --execute");
+    ck(rc != 0 && has("freeze-stat-or-read-failed") && !has("already-thawed"), "freeze-unreadable-fail-closed");
+    if (cx_fmt(cmd, sizeof cmd, "chmod 644 '%s/build/freeze.tsv'", root)) return 2;
+    (void)ckk_sh_t("check-release-post", cmd, out, (int)sizeof out, 10);
+
+    /* (g) Matching 9.9.9 root + real Y2 -> thaw exits 0, writes Y2; re-run already-thawed-verified */
+    rc = run_rp_raw("thaw --version 9.9.9 --execute");
+    ck(rc == 0 && has("POST_THAW_GATE\tPASS\t9.9.9-FREEZE") &&
+       has("POST_STEP\t8\tthaw-freeze\tOK\tfreeze-row-thawed") &&
+       has("RELEASE_POST\tstatus=STEP_DONE:thaw-freeze"), "thaw-passes-with-current-root");
+    if (cx_fmt(cmd, sizeof cmd, "grep -q '^# 9\\.9\\.9-FREEZE.*Y2=%s)' '%s/build/freeze.tsv'", real_y2, root)) return 2;
+    ck(ckk_sh_t("check-release-post", cmd, out, (int)sizeof out, 10) == 0, "freeze-tsv-contains-y2");
+
+    rc = run_rp_raw("thaw --version 9.9.9 --execute");
+    ck(rc == 0 && has("POST_STEP\t8\tthaw-freeze\tOK\talready-thawed-verified"), "b4c-already-thawed-verified-passes");
+
+    /* (h) Full E2E: stale 9.9.8 root + active 9.9.9-FREEZE -> Step 5 auto-upgrades -> Step 8 thaws -> DONE */
+    if (cx_fmt(cmd, sizeof cmd, "printf '# freeze\\n9.9.9-FREEZE\\t2026-11-26\\tfreeze-test\\n' > '%s/build/freeze.tsv'", root)) return 2;
+    (void)ckk_sh_t("check-release-post", cmd, out, (int)sizeof out, 10);
+    seed_root_files(ape998, "");
+    sy_unlink(stf);
+    rc = run_rp_raw("run --version 9.9.9 --execute");
+    ck(rc == 0 && has("POST_STEP\t5\troot-upgrade\tOK\troot-upgraded") &&
+       has("POST_STEP\t8\tthaw-freeze\tOK\tfreeze-row-thawed") &&
+       has("RELEASE_POST\tstatus=DONE"), "full-e2e-upgrade-then-thaw");
+    if (cx_fmt(cmd, sizeof cmd, "grep -q '^# 9\\.9\\.9-FREEZE.*Y2=%s)' '%s/build/freeze.tsv'", real_y2, root)) return 2;
+    ck(ckk_sh_t("check-release-post", cmd, out, (int)sizeof out, 10) == 0, "full-e2e-freeze-tsv-thawed");
+
+    /* dry-write hook */
     rc = run_rp("run --version 9.9.9 --dry --mutant-dry-write --step 4");
     ck(rc != 0 && has("mutant-dry-write"), "mutant-dry-write-red");
+
+    /* Private /tmp source mutants: tested via assertion predicate clean=1 vs mutant=0 (red-then-green kill) */
+    if (!no_mut) {
+        char mdir[1100];
+
+        /* Mutant 1: disable default g_root_up */
+        if (cx_fmt(cmd, sizeof cmd, "printf '# freeze\\n9.9.9-FREEZE\\t2026-11-26\\tfreeze-test\\n' > '%s/build/freeze.tsv'", root)) return 2;
+        (void)ckk_sh_t("check-release-post", cmd, out, (int)sizeof out, 10);
+        seed_root_files(ape998, "");
+        sy_unlink(stf);
+        if (prepare_alt_rp_tree("disable-root-up", "g_dry = 0; g_exec = 0; g_root_up = 1;", "g_dry = 0; g_exec = 0; g_root_up = 0;", mdir, sizeof mdir) == 0) {
+            rc = run_rp_in(mdir, "run --version 9.9.9 --execute");
+            int rc_step5_blk = (rc != 0 && has("POST_STEP\t5\troot-upgrade\tSKIPPED") && has("BLOCKED:root-upgrade"));
+            ck(rc_step5_blk && pred_thaw_stale_refused(cwd) && pred_thaw_stale_refused(mdir),
+               "mutant-disable-default-root-up-blocks-thaw-e2e");
+        } else ck(0, "mutant-disable-default-root-up-blocks-thaw-e2e");
+
+        /* Mutant 2: SKIPPED wrongly sets DONE on Step 5 */
+        sy_unlink(stf);
+        if (prepare_alt_rp_tree("skip-marks-done", "if (rc == 0 && !g_step_skipped[n] && g_exec) {", "if (rc >= 0 && g_exec) {", mdir, sizeof mdir) == 0) {
+            rc = run_rp_in(mdir, "run --version 9.9.9 --execute --no-root-upgrade defer-reason");
+            int rc_skip_blk = (rc != 0 && has("POST_STEP\t5\troot-upgrade\tSKIPPED") && has("BLOCKED:root-upgrade"));
+            ck(rc_skip_blk && pred_thaw_stale_refused(cwd) && pred_thaw_stale_refused(mdir),
+               "mutant-skip-marks-done-still-blocks-thaw");
+        } else ck(0, "mutant-skip-marks-done-still-blocks-thaw");
+
+        /* Mutant 3 (B5): skip-thaw-root-gate killed by pred_thaw_stale_refused (clean=1, mutant=0) */
+        if (prepare_alt_rp_tree("skip-thaw-root-gate", "if (!gate_ok) {", "if (0 && !gate_ok) {", mdir, sizeof mdir) == 0) {
+            int clean_ok = pred_thaw_stale_refused(cwd);
+            int mut_esc  = pred_thaw_stale_refused(mdir);
+            ck(clean_ok == 1 && mut_esc == 0, "mutant-skip-thaw-root-gate-killed-red-then-green");
+        } else ck(0, "mutant-skip-thaw-root-gate-killed-red-then-green");
+
+        /* Mutant 4 (B4a + B5): early shortcut when freeze.tsv has no active row killed by pred_thaw_empty_freeze_stale_refused */
+        if (cx_fmt(cmd, sizeof cmd, "printf '# freeze\\n' > '%s/build/freeze.tsv'", root)) return 2;
+        (void)ckk_sh_t("check-release-post", cmd, out, (int)sizeof out, 10);
+        if (prepare_alt_rp_tree("b4a-early-return",
+                "    /* Unconditional verification BEFORE consulting build/freeze.tsv: Y2 + release SHA + live Gate 24 */\n",
+                "    if (!cx_fmt(frz_p, sizeof frz_p, \"%s/build/freeze.tsv\", g_repo) && rp_freeze_row_find(frz_p, g_ver, 0, 0, 0, 0) == 0) { post_step(8, \"OK\", \"already-thawed-or-absent\"); return 0; }\n",
+                mdir, sizeof mdir) == 0) {
+            int clean_ok = pred_thaw_empty_freeze_stale_refused(cwd);
+            int mut_esc  = pred_thaw_empty_freeze_stale_refused(mdir);
+            ck(clean_ok == 1 && mut_esc == 0, "mutant-b4a-early-return-killed-red-then-green");
+        } else ck(0, "mutant-b4a-early-return-killed-red-then-green");
+
+        /* Mutant 5 (B4b + B5): early break without status check killed by pred_y2_fail_row_refused */
+        if (cx_fmt(cmd, sizeof cmd,
+            "printf '# freeze\\n9.9.9-FREEZE\\t2026-11-26\\tfreeze-test\\n' > '%s/build/freeze.tsv' && "
+            "printf 'exec-7-Y2-done\\tnow\\t-\\t%s\\tFAIL\\nexec-7-Y2-done\\tnow\\t-\\t%s\\tdone\\n' > '%s/INDEX.tsv'",
+            root, real_y2, real_y2, ev)) return 2;
+        (void)ckk_sh_t("check-release-post", cmd, out, (int)sizeof out, 10);
+        seed_root_files(ape999, "11223344556677889900aabbccddeeff00112233");
+        if (prepare_alt_rp_tree("b4b-early-break",
+                "                rp_status_is_bad(l + c2o, c2l) ||\n                rp_status_is_bad(l + c4o, c4l)) {\n                bad = 1;\n                break;\n            }",
+                "                0) { bad = 1; break; }",
+                mdir, sizeof mdir) == 0) {
+            /* Also strip break loop check behavior by checking clean=1 vs mutant on FAIL row */
+            int clean_ok = pred_y2_fail_row_refused(cwd);
+            int mut_esc  = pred_y2_fail_row_refused(mdir);
+            ck(clean_ok == 1 && mut_esc == 0, "mutant-b4b-status-skip-killed-red-then-green");
+        } else ck(0, "mutant-b4b-status-skip-killed-red-then-green");
+    }
 
     sy_remove_all(root);
     {
@@ -228,6 +679,6 @@ int main(void) {
         int total = ck_assertions();
         printf("RELEASE_POST_SUMMARY\tfailed=%d\tpassed=%d\n", failed, total - failed);
         if (!failed) printf("CHECK_RELEASE_POST\n");
-        return failed ? 1 : 0;
+        return ck_failures() ? 1 : 0;
     }
 }

@@ -1,0 +1,665 @@
+/* tools/check-root-current.cx -- red-then-green + private source-mutant kill suite for tools/root-current.cx,
+ * chain-ready 24-root-current gate, and status --section root.
+ *   cx tools/check-root-current.cx -- [--no-mutants] [--case-range A N]
+ * Zero --mutant-* backdoor flags in production tools; mutations run against a private /tmp copy.
+ * Final line: CHECK_ROOT_CURRENT<TAB>passed=N<TAB>failed=M
+ */
+#pragma unisa use sys.fs
+#pragma unisa use sys.io
+#pragma unisa use sys.proc
+#pragma unisa use sys.posix
+#pragma unisa use sys.env
+#pragma unisa use text.text
+#pragma unisa use text.conv
+#pragma unisa use text.fmt
+#pragma unisa use mem.heap
+#pragma unisa use mem.bytes
+
+typedef struct {
+    int rc;
+    char *out;
+    long outn;
+} ccrc_res;
+
+typedef struct {
+    int pid;
+    int fd;
+    ccrc_res res;
+} ccrc_job;
+
+static int g_pass, g_fail;
+static int g_from = 0, g_count = -1;
+static char g_cwd[4096];
+static ccrc_res r;
+
+static void res_free(ccrc_res *rp) {
+    if (!rp) return;
+    if (rp->out) mm_free(rp->out);
+    rp->out = 0;
+    rp->outn = 0;
+    rp->rc = 0;
+}
+
+static int in_range(int idx) {
+    if (idx < g_from) return 0;
+    if (g_count >= 0 && idx >= g_from + g_count) return 0;
+    return 1;
+}
+
+static int any_in_range(int lo, int hi) {
+    for (int i = lo; i <= hi; i++) if (in_range(i)) return 1;
+    return 0;
+}
+
+static void ck(int ok, const char *name) {
+    if (ok) { g_pass++; printf("PASS\t%s\n", name); }
+    else {
+        g_fail++;
+        printf("FAIL\t%s\trc=%d\tout=%.240s\n", name, r.rc, r.out ? r.out : "");
+    }
+}
+
+static int has(const ccrc_res *rp, const char *lit) {
+    long ll = tx_len(lit, 512);
+    if (!rp || ll <= 0) return 0;
+    if (rp->out && rp->outn > 0 && tx_find(rp->out, rp->outn, lit, ll) >= 0) return 1;
+    return 0;
+}
+
+static int job_start(ccrc_job *jb, const char *cmd) {
+    char *av[6];
+    mm_fill(jb, sizeof *jb, 0, sizeof *jb);
+    jb->res.rc = -1;
+    av[0] = "./tools/bound";
+    av[1] = "45";
+    av[2] = "sh";
+    av[3] = "-c";
+    av[4] = (char *)cmd;
+    av[5] = 0;
+    jb->pid = sy_spawn_pipe(av, 0, 0, &jb->fd, 0);
+    if (jb->pid <= 0) return -1;
+    return 0;
+}
+
+static int job_wait(ccrc_job *jb) {
+    long cap = 1 << 15, n = 0, rd;
+    int ex = 0, code = 0, sig = 0;
+    char *b = mm_alloc(cap);
+    if (jb->pid <= 0) {
+        if (b) mm_free(b);
+        jb->res.rc = -1;
+        return -1;
+    }
+    while (b && (rd = sy_read(jb->fd, b + n, cap - 1 - n)) > 0) {
+        n += rd;
+        if (n + 1 >= cap) {
+            long ncap = cap * 2;
+            char *nb = mm_grow(b, ncap);
+            if (!nb) break;
+            b = nb; cap = ncap;
+        }
+    }
+    if (b) b[n] = 0;
+    sy_close(jb->fd);
+    jb->fd = -1;
+    jb->res.out = b;
+    jb->res.outn = n;
+    jb->res.rc = (sy_wait_status(jb->pid, 0, &ex, &code, &sig) == jb->pid && ex) ? code : -1;
+    jb->pid = 0;
+    return jb->res.rc;
+}
+
+static int run_sh(const char *cmd, ccrc_res *rp) {
+    ccrc_job jb;
+    mm_fill(rp, sizeof *rp, 0, sizeof *rp);
+    if (job_start(&jb, cmd) != 0) { rp->rc = -1; return -1; }
+    job_wait(&jb);
+    *rp = jb.res;
+    return rp->rc;
+}
+
+static long byte_span_find(const char *hay, long hn, const char *needle, long nn) {
+    if (!hay || !needle || nn <= 0 || hn < nn) return -1;
+    for (long i = 0; i <= hn - nn; i++) {
+        long j = 0;
+        while (j < nn && hay[i + j] == needle[j]) j++;
+        if (j == nn) return i;
+    }
+    return -1;
+}
+
+static int prepare_alt_tree(const char *dir, const char *tag, const char *find_str, const char *sub_str, char *mdir_out, size_t mcap) {
+    char p[1400], cmd[4800];
+    size_t sn = 0; char *src;
+    if (cx_fmt(mdir_out, mcap, "%s/alt-%s", dir, tag)) return -1;
+    if (cx_fmt(cmd, sizeof cmd,
+        "rm -rf '%s' && mkdir -p '%s/tools' && ln -sT '%s/cx' '%s/cx' && ln -s '%s/cxroot.tsv' '%s/cxroot.tsv' && "
+        "ln -s '%s/unisacc.com' '%s/unisacc.com' && ln -sT '%s/tools/cxlib' '%s/tools/cxlib' && "
+        "{ [ ! -e '%s/ext' ] || ln -sT '%s/ext' '%s/ext'; }",
+        mdir_out, mdir_out, g_cwd, mdir_out, g_cwd, mdir_out, g_cwd, mdir_out, g_cwd, mdir_out, g_cwd, g_cwd, mdir_out)) return -1;
+    if (run_sh(cmd, &r) != 0) { res_free(&r); return -1; }
+    res_free(&r);
+    cx_fmt(p, sizeof p, "%s/tools/root-current.cx", g_cwd);
+    src = cx_read(p, &sn);
+    if (!src) return -1;
+    long fl = tx_len(find_str, 4096), rl = tx_len(sub_str, 4096);
+    long at = byte_span_find(src, (long)sn, find_str, fl);
+    if (at < 0 || byte_span_find(src + at + fl, (long)sn - at - fl, find_str, fl) >= 0) { mm_free(src); return -1; }
+    size_t mn = sn - (size_t)fl + (size_t)rl;
+    char *mb = mm_alloc((long)mn + 1);
+    if (!mb) { mm_free(src); return -1; }
+    mm_copy(mb, (long)mn + 1, src, at);
+    mm_copy(mb + at, (long)mn + 1 - at, sub_str, rl);
+    mm_copy(mb + at + rl, (long)mn + 1 - at - rl, src + at + fl, (long)sn - at - fl);
+    mm_free(src);
+    cx_fmt(p, sizeof p, "%s/tools/root-current.cx", mdir_out);
+    if (cx_write(p, mb, mn)) { mm_free(mb); return -1; }
+    mm_free(mb);
+    return 0;
+}
+
+static int start_crc_job(ccrc_job *jb, const char *tool_dir, const char *repo, const char *rroot, const char *extra) {
+    char cmd[4096];
+    if (cx_fmt(cmd, sizeof cmd, "cd '%s' && cx tools/root-current.cx -- --repo '%s' --root '%s'%s%s",
+               tool_dir, repo, rroot, (extra && extra[0]) ? " " : "", extra ? extra : "")) return -1;
+    return job_start(jb, cmd);
+}
+
+static int run_crc_in(const char *tool_dir, const char *repo, const char *rroot, const char *extra) {
+    ccrc_job jb;
+    if (start_crc_job(&jb, tool_dir, repo, rroot, extra) != 0) { res_free(&r); r.rc = -1; return -1; }
+    job_wait(&jb);
+    r = jb.res;
+    return r.rc;
+}
+
+static int match_stale_root_red(const ccrc_res *rp) {
+    return rp && rp->rc == 1 && has(rp, "ROOT_CURRENT\tRED\treason=version-mismatch\texpect=0.1.2") && has(rp, "actual=0.1.1");
+}
+static int match_missing_bjson_red(const ccrc_res *rp) {
+    return rp && rp->rc == 1 && has(rp, "ROOT_CURRENT\tRED\treason=root-build-json-missing");
+}
+static int match_empty_cand_red(const ccrc_res *rp) {
+    return rp && rp->rc == 1 && has(rp, "ROOT_CURRENT\tRED\treason=candidate-marker-invalid");
+}
+static int match_expect_012_red(const ccrc_res *rp) {
+    return rp && rp->rc == 1 && has(rp, "expect=0.1.2");
+}
+static int match_missing_tag_fails_closed(const ccrc_res *rp) {
+    return rp && rp->rc == 1 && has(rp, "reason=published-version-missing-tag");
+}
+
+static int pred_missing_bjson_red(const char *tool_dir, const char *repo, const char *rroot) {
+    run_crc_in(tool_dir, repo, rroot, "--no-candidate-ahead");
+    int ok = match_missing_bjson_red(&r);
+    res_free(&r); return ok;
+}
+static int pred_empty_cand_red(const char *tool_dir, const char *repo, const char *rroot) {
+    run_crc_in(tool_dir, repo, rroot, "");
+    int ok = match_empty_cand_red(&r);
+    res_free(&r); return ok;
+}
+static int pred_missing_tag_fails_closed(const char *tool_dir, const char *repo, const char *rroot) {
+    run_crc_in(tool_dir, repo, rroot, "");
+    int ok = match_missing_tag_fails_closed(&r);
+    res_free(&r); return ok;
+}
+
+int main(int argc, char **argv) {
+    int no_mut = 0;
+    for (int a = 1; a < argc; a++) {
+        if (tx_eqz(argv[a], "--no-mutants")) {
+            no_mut = 1;
+        } else if (tx_eqz(argv[a], "--case-range") && a + 2 < argc) {
+            int64_t f64 = -1, c64 = -1;
+            const char *fs = argv[a + 1], *cs = argv[a + 2];
+            if (tx_to_i64(fs, (long)tx_len(fs, 16), 10, &f64) ||
+                tx_to_i64(cs, (long)tx_len(cs, 16), 10, &c64) || f64 < 0 || c64 <= 0) {
+                printf("FAIL\tbad-case-range\t%s %s\n", fs, cs);
+                return 2;
+            }
+            g_from = (int)f64;
+            g_count = (int)c64;
+            a += 2;
+        } else {
+            printf("FAIL\tbad-arg\t%s\n", argv[a]);
+            return 2;
+        }
+    }
+    if (sy_realpath(".", g_cwd, sizeof g_cwd) < 0) return 2;
+    char dir[512];
+    if (sy_mkdtemp(sy_tmpdir(), "check-rcur-", dir, sizeof dir) != 0) return 2;
+
+    char repo[1024], rroot[1024], cmd[8192];
+    cx_fmt(repo, sizeof repo, "%s/repo", dir);
+    cx_fmt(rroot, sizeof rroot, "%s/root", dir);
+
+    /* Shared shell helper script to populate ROOT binary + .ape.sha256 + .build.json matching exact bytes/sha/commit */
+    cx_fmt(cmd, sizeof cmd,
+        "set -e; mkdir -p '%s/build' '%s/release/evidence/0.1.2' '%s'; "
+        "cat > '%s/seed_root.sh' << 'EOFS'\n"
+        "#!/bin/sh\n"
+        "set -e\n"
+        "APE=\"$1\"; R=\"$2\"; CM=\"$3\"\n"
+        "cp \"$APE\" \"$R/unisacc.com\"; chmod +x \"$R/unisacc.com\"\n"
+        "S=$(sha256sum \"$R/unisacc.com\" | awk '{print $1}')\n"
+        "B=$(wc -c < \"$R/unisacc.com\" | tr -d ' ')\n"
+        "printf '%%s\\t%%s\\tunisacc.com\\n' \"$S\" \"$B\" > \"$R/unisacc.com.ape.sha256\"\n"
+        "if [ -n \"$CM\" ]; then\n"
+        "  printf '{\\n  \"bytes\": %%s,\\n  \"commit\": \"%%s\",\\n  \"schema\": 1,\\n  \"product_kind\": \"ape1\",\\n  \"product_digest\": \"%%s\"\\n}\\n' \"$B\" \"$CM\" \"$S\" > \"$R/unisacc.com.build.json\"\n"
+        "else\n"
+        "  printf '{\\n  \"bytes\": %%s,\\n  \"schema\": 1,\\n  \"product_kind\": \"ape1\",\\n  \"product_digest\": \"%%s\"\\n}\\n' \"$B\" \"$S\" > \"$R/unisacc.com.build.json\"\n"
+        "fi\n"
+        "EOFS\n"
+        "chmod +x '%s/seed_root.sh'; "
+        "printf '#!/bin/sh\\nif [ \"$1\" = \"--version\" ]; then echo \"unisacc 0.1.1\"; exit 0; fi\\n' > '%s/ape_011'; chmod +x '%s/ape_011'; "
+        "printf '#!/bin/sh\\nif [ \"$1\" = \"--version\" ]; then echo \"unisacc 0.1.2\"; exit 0; fi\\n' > '%s/ape_012'; chmod +x '%s/ape_012'; "
+        "printf '#!/bin/sh\\nif [ \"$1\" = \"--version\" ]; then echo \"unisacc 0.1.2\"; exit 0; fi\\n# extra\\n' > '%s/ape_012_badsha'; chmod +x '%s/ape_012_badsha'; "
+        "printf '#!/bin/sh\\nif [ \"$1\" = \"--version\" ]; then echo \"unisacc 0.1.3\"; exit 0; fi\\n' > '%s/ape_013'; chmod +x '%s/ape_013'; "
+        "S12=$(sha256sum '%s/ape_012' | awk '{print $1}'); "
+        "S13=$(sha256sum '%s/ape_013' | awk '{print $1}'); "
+        "C12='0123456789012345678901234567890123456789'; "
+        "C13='fedcba9876543210fedcba9876543210fedcba98'; "
+        "sh '%s/seed_root.sh' '%s/ape_011' '%s' ''; "
+        "cd '%s'; "
+        "printf '# slot\\tversion\\tclass\\tstate\\tnote\\n1\\t0.1.1\\tc\\t已公开\\tp1\\n2\\t0.1.2\\tc\\t已公开\\tp2\\n3\\t0.1.3\\tc\\t建议\\tp3\\n' > build/version-seq.tsv; "
+        "printf 'repo\\ttag\\tcommit\\tversion\\tworkflow\\tworkflow_ref\\tci_run_id\\tape\\tape_sha256\\tpackage\\tpackage_sha256\\twin_arm64\\twin_arm64_sha256\\trecord\\trecord_sha256\\tbuild_alias\\tbuild_alias_sha256\\tzip\\tzip_sha256\\tchecksums\\tchecksums_sha256\\n' > release/candidate.tsv; "
+        "git init -q -b main; git config user.name t; git config user.email t@t; git config commit.gpgsign false; "
+        "git add -A; GIT_AUTHOR_DATE='2026-11-24T10:00:00+0800' GIT_COMMITTER_DATE='2026-11-24T10:00:00+0800' git commit -qm c1; "
+        "GIT_COMMITTER_DATE='2026-11-24T10:00:00+0800' git tag -a -m v0.1.1 v0.1.1; "
+        "printf 'org/r\\tv0.1.2\\t'\"$C12\"'\\t0.1.2\\tw\\tv0.1.2\\t1\\tunisacc.com\\t'\"$S12\"'\\tp\\t'\"$S12\"'\\tw\\t'\"$S12\"'\\tr\\t'\"$S12\"'\\tb\\t'\"$S12\"'\\t-\\t-\\ts\\t'\"$S12\"'\\n' >> release/candidate.tsv; "
+        "git add release/candidate.tsv; GIT_AUTHOR_DATE='2026-11-25T10:00:00+0800' GIT_COMMITTER_DATE='2026-11-25T10:00:00+0800' git commit -qm c2; "
+        "GIT_COMMITTER_DATE='2026-11-25T10:00:00+0800' git tag -a -m v0.1.2 v0.1.2",
+        repo, repo, rroot, dir, dir, dir, dir, dir, dir, dir, dir, dir, dir, dir, dir, dir, dir, rroot, repo);
+    run_sh(cmd, &r);
+    if (in_range(0)) ck(r.rc == 0, "fixture-setup");
+    else if (r.rc != 0) { res_free(&r); return 2; }
+    res_free(&r);
+
+    /* 1, 2, 3 inspect the read-only fixture-setup state (repo=0.1.2, rroot=0.1.1); run concurrently when selected. */
+    {
+        ccrc_job j1, j2, j3;
+        int r1 = in_range(1), r2 = in_range(2), r3 = in_range(3);
+        int s1 = -1, s2 = -1, s3 = -1;
+        if (r1) s1 = start_crc_job(&j1, g_cwd, repo, rroot, "");
+        if (r2) {
+            cx_fmt(cmd, sizeof cmd, "cx tools/chain-ready.cx -- --only 24-root-current --repo '%s' --root '%s'", repo, rroot);
+            s2 = job_start(&j2, cmd);
+        }
+        if (r3) {
+            cx_fmt(cmd, sizeof cmd, "cx tools/status.cx -- --fast --no-fetch --section root --root '%s' 2>&1", repo);
+            s3 = job_start(&j3, cmd);
+        }
+        if (r1) {
+            if (s1 == 0) { job_wait(&j1); r = j1.res; } else { mm_fill(&r, sizeof r, 0, sizeof r); r.rc = -1; }
+            ck(match_stale_root_red(&r), "red-stale-root-detected");
+            res_free(&r);
+        }
+        if (r2) {
+            if (s2 == 0) { job_wait(&j2); r = j2.res; } else { mm_fill(&r, sizeof r, 0, sizeof r); r.rc = -1; }
+            ck(r.rc == 1 && has(&r, "24-root-current\tFAIL") && has(&r, "READY\tno"), "chain-ready-24-red-makes-ready-no");
+            res_free(&r);
+        }
+        if (r3) {
+            if (s3 == 0) { job_wait(&j3); r = j3.res; } else { mm_fill(&r, sizeof r, 0, sizeof r); r.rc = -1; }
+            ck(has(&r, "root\tcurrent\t"), "status-section-root-emits-row");
+            res_free(&r);
+        }
+    }
+
+    /* 4. Same version string (0.1.2) + valid companion files but wrong ape binary sha -> RED sha-mismatch */
+    if (in_range(4)) {
+        cx_fmt(cmd, sizeof cmd,
+            "sh '%s/seed_root.sh' '%s/ape_012_badsha' '%s' '0123456789012345678901234567890123456789' && "
+            "cx tools/root-current.cx -- --repo '%s' --root '%s'",
+            dir, dir, rroot, repo, rroot);
+        run_sh(cmd, &r);
+        ck(r.rc == 1 && has(&r, "ROOT_CURRENT\tRED\treason=sha-mismatch\texpect=0.1.2") && has(&r, "actual=0.1.2"),
+           "red-same-version-wrong-sha"); res_free(&r);
+    }
+
+    /* 5. Symlink root binary refused */
+    if (in_range(5)) {
+        cx_fmt(cmd, sizeof cmd, "rm -f '%s/unisacc.com' && ln -s '%s/ape_012' '%s/unisacc.com' && cx tools/root-current.cx -- --repo '%s' --root '%s'",
+               rroot, dir, rroot, repo, rroot);
+        run_sh(cmd, &r);
+        ck(r.rc == 1 && has(&r, "ROOT_CURRENT\tRED\treason=root-not-regular"), "negative-symlink-root-refused"); res_free(&r);
+    }
+
+    /* 6. Duplicate conflicting readback SHAs -> RED expected-sha-conflict */
+    if (in_range(6)) {
+        cx_fmt(cmd, sizeof cmd,
+            "rm -f '%s/unisacc.com' && sh '%s/seed_root.sh' '%s/ape_012' '%s' '0123456789012345678901234567890123456789' && "
+            "cd '%s' && mkdir -p release/evidence/0.1.2 && "
+            "printf 'READBACK_SHA unisacc.com ' > release/evidence/0.1.2/public-readback.txt && "
+            "sha256sum '%s/ape_012' | awk '{print $1}' >> release/evidence/0.1.2/public-readback.txt && "
+            "printf 'READBACK_SHA unisacc.com aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa\\n' >> release/evidence/0.1.2/public-readback.txt && "
+            "git add release/evidence/0.1.2/public-readback.txt && git commit -qm rbconflict && git tag -f -a -m v0.1.2 v0.1.2 && "
+            "cd '%s' && cx tools/root-current.cx -- --repo '%s' --root '%s'",
+            rroot, dir, dir, rroot, repo, dir, g_cwd, repo, rroot);
+        run_sh(cmd, &r);
+        ck(r.rc == 1 && has(&r, "reason=expected-sha-conflict"), "red-readback-duplicate-conflict"); res_free(&r);
+    }
+
+    /* 7. Restore clean 0.1.2 commit -> Green (also seed clean 0.1.2 when later cases 8..16 run in a slice) */
+    if (any_in_range(7, 16)) {
+        cx_fmt(cmd, sizeof cmd,
+            "cd '%s' && if [ \"$(git log -1 --format=%%s)\" = \"rbconflict\" ]; then git reset -q --hard HEAD~1 && git tag -f -a -m v0.1.2 v0.1.2; fi && "
+            "rm -f '%s/unisacc.com' && sh '%s/seed_root.sh' '%s/ape_012' '%s' '0123456789012345678901234567890123456789'",
+            repo, rroot, dir, dir, rroot);
+        run_sh(cmd, &r); res_free(&r);
+    }
+    if (in_range(7)) {
+        cx_fmt(cmd, sizeof cmd, "cx tools/root-current.cx -- --repo '%s' --root '%s'", repo, rroot);
+        run_sh(cmd, &r);
+        ck(r.rc == 0 && has(&r, "ROOT_CURRENT\tPASS\texpect=0.1.2"), "green-matching-root-passes"); res_free(&r);
+    }
+
+    if (in_range(8)) {
+        cx_fmt(cmd, sizeof cmd, "cx tools/chain-ready.cx -- --only 24-root-current --repo '%s' --root '%s'", repo, rroot);
+        run_sh(cmd, &r);
+        ck(r.rc == 0 && has(&r, "24-root-current\tPASS") && has(&r, "READY\tyes"), "chain-ready-24-green-ready-yes"); res_free(&r);
+    }
+
+    /* B2 companion & symlinked --root directory adversarial negatives on otherwise matching 0.1.2 root */
+    if (in_range(9)) {
+        cx_fmt(cmd, sizeof cmd, "ln -sfn '%s' '%s/root_link' && cx tools/root-current.cx -- --repo '%s' --root '%s/root_link'",
+               rroot, dir, repo, dir);
+        run_sh(cmd, &r);
+        ck(r.rc == 1 && has(&r, "reason=root-dir-symlink"), "b2-symlink-root-dir-refused"); res_free(&r);
+    }
+
+    if (in_range(10)) {
+        cx_fmt(cmd, sizeof cmd, "mv '%s/unisacc.com.build.json' '%s/bjson.save'", rroot, dir);
+        run_sh(cmd, &r); res_free(&r);
+        ck(pred_missing_bjson_red(g_cwd, repo, rroot), "b2-missing-build-json-refused");
+    }
+
+    if (in_range(11)) {
+        cx_fmt(cmd, sizeof cmd,
+            "ln -sf /nonexistent '%s/unisacc.com.build.json' && "
+            "printf '0000000000000000000000000000000000000000000000000000000000000000\\t10\\tunisacc.com\\n' > '%s/unisacc.com.ape.sha256' && "
+            "cx tools/root-current.cx -- --repo '%s' --root '%s' --no-candidate-ahead",
+            rroot, rroot, repo, rroot);
+        run_sh(cmd, &r);
+        ck(r.rc == 1 && has(&r, "ROOT_CURRENT\tRED\treason="), "b2-dangling-bjson-and-bad-sha-record-refused"); res_free(&r);
+    }
+
+    if (in_range(12)) {
+        cx_fmt(cmd, sizeof cmd,
+            "rm -f '%s/unisacc.com.build.json' && "
+            "S12=$(sha256sum '%s/ape_012' | awk '{print $1}') && B12=$(wc -c < '%s/ape_012' | tr -d ' ') && "
+            "printf '%%s\\t%%s\\tunisacc.com\\n' \"$S12\" \"$B12\" > '%s/unisacc.com.ape.sha256' && "
+            "printf '{\\n  \"bytes\": 10,\\n  \"commit\": \"0123456789012345678901234567890123456789\",\\n  \"product_kind\": \"ape1\",\\n  \"product_digest\": \"0000000000000000000000000000000000000000000000000000000000000000\"\\n}\\n' > '%s/unisacc.com.build.json' && "
+            "cx tools/root-current.cx -- --repo '%s' --root '%s' --no-candidate-ahead",
+            rroot, dir, dir, rroot, rroot, repo, rroot);
+        run_sh(cmd, &r);
+        ck(r.rc == 1 && has(&r, "reason=root-build-json-digest-mismatch"), "b2-stale-build-json-digest-refused"); res_free(&r);
+    }
+
+    if (in_range(13)) {
+        cx_fmt(cmd, sizeof cmd,
+            "rm -f '%s/unisacc.com.build.json' && "
+            "S12=$(sha256sum '%s/ape_012' | awk '{print $1}') && B12=$(wc -c < '%s/ape_012' | tr -d ' ') && "
+            "printf '%%s\\t%%s\\tunisacc.com\\n' \"$S12\" \"$B12\" > '%s/unisacc.com.ape.sha256' && "
+            "printf '{\\n  \"bytes\": %%s,\\n  \"commit\": \"aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa\",\\n  \"product_kind\": \"ape1\",\\n  \"product_digest\": \"%%s\"\\n}\\n' \"$B12\" \"$S12\" > '%s/unisacc.com.build.json' && "
+            "sh ./unisacc.com tools/root-current.cx -- --repo '%s' --root '%s'",
+            rroot, dir, dir, rroot, rroot, repo, rroot);
+        run_sh(cmd, &r);
+        ck(r.rc == 1 && has(&r, "reason=root-build-json-commit-mismatch"), "b2-stale-build-json-commit-refused"); res_free(&r);
+    }
+
+    if (any_in_range(10, 13)) {
+        cx_fmt(cmd, sizeof cmd, "rm -f '%s/unisacc.com.build.json' '%s/bjson.save' && sh '%s/seed_root.sh' '%s/ape_012' '%s' '0123456789012345678901234567890123456789'",
+               rroot, dir, dir, dir, rroot);
+        run_sh(cmd, &r); res_free(&r);
+    }
+
+    /* 8. Missing published tag (partial) MUST fail closed */
+    if (in_range(14)) {
+        cx_fmt(cmd, sizeof cmd, "git -C '%s' tag -d v0.1.2 >/dev/null && cx tools/root-current.cx -- --repo '%s' --root '%s'", repo, repo, rroot);
+        run_sh(cmd, &r);
+        ck(r.rc == 1 && has(&r, "reason=published-version-missing-tag\tmissing=0.1.2"), "missing-partial-tag-fails-closed"); res_free(&r);
+    }
+
+    if (in_range(15)) {
+        cx_fmt(cmd, sizeof cmd, "git -C '%s' tag -d v0.1.2 >/dev/null 2>&1 || true; git -C '%s' tag -d v0.1.1 >/dev/null", repo, repo);
+        run_sh(cmd, &r); res_free(&r);
+        ck(pred_missing_tag_fails_closed(g_cwd, repo, rroot), "missing-all-tags-fails-closed");
+    }
+    if (any_in_range(14, 15)) {
+        cx_fmt(cmd, sizeof cmd, "cd '%s' && GIT_COMMITTER_DATE='2026-11-24T10:00:00+0800' git tag -f -a -m v0.1.1 v0.1.1 HEAD~1 && "
+               "GIT_COMMITTER_DATE='2026-11-25T10:00:00+0800' git tag -f -a -m v0.1.2 v0.1.2 HEAD", repo);
+        run_sh(cmd, &r); res_free(&r);
+    }
+
+    /* 9. Same-second creatordate tie-break chooses descendant 0.1.2 over ancestor 0.1.1 */
+    if (in_range(16)) {
+        char repo_tie[1024];
+        cx_fmt(repo_tie, sizeof repo_tie, "%s/repo_tie", dir);
+        cx_fmt(cmd, sizeof cmd,
+            "set -e; cp -a '%s' '%s'; cd '%s'; "
+            "GIT_COMMITTER_DATE='2026-11-25T12:00:00+0800' git tag -f -a -m v0.1.1 v0.1.1 HEAD~1; "
+            "GIT_COMMITTER_DATE='2026-11-25T12:00:00+0800' git tag -f -a -m v0.1.2 v0.1.2 HEAD; "
+            "cd '%s'; cx tools/root-current.cx -- --repo '%s' --root '%s'",
+            repo, repo_tie, repo_tie, g_cwd, repo_tie, rroot);
+        run_sh(cmd, &r);
+        ck(r.rc == 0 && has(&r, "ROOT_CURRENT\tPASS\texpect=0.1.2"), "same-second-tiebreak-picks-descendant"); res_free(&r);
+    }
+
+    /* 10. Slot-order trap: higher slot 0.1.0 tagged EARLIER than 0.0.105 -> expect 0.0.105 */
+    char repo_tag[1024];
+    cx_fmt(repo_tag, sizeof repo_tag, "%s/repo_tagorder", dir);
+    if (any_in_range(17, 19)) {
+        cx_fmt(cmd, sizeof cmd,
+            "set -e; mkdir -p '%s/build' '%s/release/evidence/0.0.105'; "
+            "printf '#!/bin/sh\\nif [ \"$1\" = \"--version\" ]; then echo \"unisacc 0.0.105\"; exit 0; fi\\n' > '%s/ape_105'; chmod +x '%s/ape_105'; "
+            "printf '#!/bin/sh\\nif [ \"$1\" = \"--version\" ]; then echo \"unisacc 0.1.0\"; exit 0; fi\\n' > '%s/ape_010'; chmod +x '%s/ape_010'; "
+            "S105=$(sha256sum '%s/ape_105' | awk '{print $1}'); S010=$(sha256sum '%s/ape_010' | awk '{print $1}'); "
+            "cd '%s'; "
+            "printf '# slot\\tversion\\tclass\\tstate\\tnote\\n1\\t0.0.105\\tc\\t已公开\\tp105\\n2\\t0.0.120\\tc\\t建议\\tp120\\n3\\t0.1.0\\tc\\t已公开\\tp010\\n' > build/version-seq.tsv; "
+            "printf 'unisacc-next.com\\tape-final/unisacc-next.com\\tsha='\"$S105\"'\\tbytes=10\\n' > release/evidence/0.0.105/ape-receipt.txt; "
+            "mkdir -p release/evidence/0.1.0; printf 'unisacc-next.com\\tape-final/unisacc-next.com\\tsha='\"$S010\"'\\tbytes=10\\n' > release/evidence/0.1.0/ape-receipt.txt; "
+            "git init -q -b main; git config user.name t; git config user.email t@t; git config commit.gpgsign false; "
+            "git add -A; GIT_AUTHOR_DATE='2026-11-23T10:00:00+0800' GIT_COMMITTER_DATE='2026-11-23T10:00:00+0800' git commit -qm base; "
+            "GIT_COMMITTER_DATE='2026-11-24T10:00:00+0800' git tag -a -m v0.1.0 v0.1.0; "
+            "GIT_COMMITTER_DATE='2026-11-25T10:00:00+0800' git tag -a -m v0.0.105 v0.0.105",
+            repo_tag, repo_tag, dir, dir, dir, dir, dir, dir, repo_tag);
+        run_sh(cmd, &r);
+        if (in_range(17)) ck(r.rc == 0, "tagorder-setup");
+        else if (r.rc != 0) { res_free(&r); return 2; }
+        res_free(&r);
+    }
+    if (in_range(18)) {
+        cx_fmt(cmd, sizeof cmd, "sh '%s/seed_root.sh' '%s/ape_010' '%s' '' && cx tools/root-current.cx -- --repo '%s' --root '%s'",
+               dir, dir, rroot, repo_tag, rroot);
+        run_sh(cmd, &r);
+        ck(r.rc == 1 && has(&r, "expect=0.0.105\t") && has(&r, "actual=0.1.0"), "slot-order-trap-picks-latest-tag-time-not-slot"); res_free(&r);
+    }
+    if (in_range(19)) {
+        cx_fmt(cmd, sizeof cmd, "sh '%s/seed_root.sh' '%s/ape_105' '%s' '' && cx tools/root-current.cx -- --repo '%s' --root '%s'",
+               dir, dir, rroot, repo_tag, rroot);
+        run_sh(cmd, &r);
+        ck(r.rc == 0 && has(&r, "ROOT_CURRENT\tPASS\texpect=0.0.105"), "slot-order-trap-green-when-latest-tag-installed"); res_free(&r);
+    }
+
+    /* 11. Worktree lagging behind main STILL reads main:version-seq (0.1.2 > 0.1.1) */
+    if (in_range(20)) {
+        cx_fmt(cmd, sizeof cmd,
+            "cd '%s' && git checkout -q -b wt011 HEAD~1 && sh '%s/seed_root.sh' '%s/ape_011' '%s' '' && "
+            "cd '%s' && cx tools/root-current.cx -- --repo '%s' --root '%s'",
+            repo, dir, dir, rroot, g_cwd, repo, rroot);
+        run_sh(cmd, &r);
+        ck(r.rc == 1 && has(&r, "expect=0.1.2\t") && has(&r, "actual=0.1.1"), "worktree-lagging-reads-main-version-seq"); res_free(&r);
+    }
+
+    /* 12 & B3. Candidate marker validation */
+    if (any_in_range(21, 22)) {
+        cx_fmt(cmd, sizeof cmd,
+            "cd '%s' && git checkout -q main && "
+            "C13='fedcba9876543210fedcba9876543210fedcba98'; "
+            "sh '%s/seed_root.sh' '%s/ape_013' '%s' \"$C13\" && "
+            ": > '%s/unisacc.com.candidate.tsv'",
+            repo, dir, dir, rroot, rroot);
+        run_sh(cmd, &r); res_free(&r);
+    }
+    if (in_range(21)) ck(pred_empty_cand_red(g_cwd, repo, rroot), "b3-empty-candidate-marker-refused");
+
+    if (in_range(22)) {
+        cx_fmt(cmd, sizeof cmd, "cx tools/chain-ready.cx -- --only 24-root-current --repo '%s' --root '%s'", repo, rroot);
+        run_sh(cmd, &r);
+        ck(r.rc == 1 && has(&r, "24-root-current\tFAIL") && has(&r, "READY\tno"), "b3-empty-candidate-blocks-gate24"); res_free(&r);
+    }
+
+    if (any_in_range(23, 25) && !any_in_range(21, 22)) {
+        cx_fmt(cmd, sizeof cmd,
+            "cd '%s' && git checkout -q main && C13='fedcba9876543210fedcba9876543210fedcba98' && "
+            "sh '%s/seed_root.sh' '%s/ape_013' '%s' \"$C13\"",
+            repo, dir, dir, rroot);
+        run_sh(cmd, &r); res_free(&r);
+    }
+    if (any_in_range(23, 25)) {
+        cx_fmt(cmd, sizeof cmd,
+            "S13=$(sha256sum '%s/ape_013' | awk '{print $1}'); B13=$(wc -c < '%s/ape_013' | tr -d ' '); "
+            "C13='fedcba9876543210fedcba9876543210fedcba98'; "
+            "printf 'CANDIDATE\\trev='\"$C13\"'\\tsha='\"$S13\"'\\tbytes='\"$B13\"'\\tversion=0.1.3\\tsource=%s\\tnot=PUBLISHED\\n' > '%s/unisacc.com.candidate.tsv' && "
+            "cx tools/root-current.cx -- --repo '%s' --root '%s'",
+            dir, dir, dir, rroot, repo, rroot);
+        run_sh(cmd, &r);
+        if (in_range(23)) ck(r.rc == 1 && has(&r, "reason=candidate-marker-invalid"), "b3-candidate-missing-in-candidate-tsv-refused");
+        res_free(&r);
+    }
+
+    /* Add 0.1.3 candidate row -> PASS+WARN normally, REFUSED under --no-candidate-ahead */
+    if (any_in_range(24, 25)) {
+        cx_fmt(cmd, sizeof cmd,
+            "cd '%s' && C13='fedcba9876543210fedcba9876543210fedcba98' && Z64='0000000000000000000000000000000000000000000000000000000000000000' && "
+            "if [ \"$(git log -1 --format=%%s)\" != \"cand013\" ]; then "
+            "printf 'org/r\\tv0.1.3\\t'\"$C13\"'\\t0.1.3\\tw\\tv0.1.3\\t0\\tunisacc.com\\t'\"$Z64\"'\\tp\\t'\"$Z64\"'\\tw\\t'\"$Z64\"'\\tr\\t'\"$Z64\"'\\tb\\t'\"$Z64\"'\\t-\\t-\\ts\\t'\"$Z64\"'\\n' >> release/candidate.tsv && "
+            "git add release/candidate.tsv && git commit -qm cand013; fi && "
+            "cd '%s' && cx tools/root-current.cx -- --repo '%s' --root '%s'",
+            repo, g_cwd, repo, rroot);
+        run_sh(cmd, &r);
+        if (in_range(24)) ck(r.rc == 0 && has(&r, "ROOT_CURRENT\tPASS") && has(&r, "WARN=candidate-root-ahead"), "candidate-ahead-pass-with-warn");
+        res_free(&r);
+    }
+
+    if (in_range(25)) {
+        cx_fmt(cmd, sizeof cmd, "cx tools/root-current.cx -- --repo '%s' --root '%s' --no-candidate-ahead", repo, rroot);
+        run_sh(cmd, &r);
+        ck(r.rc == 1 && has(&r, "reason=candidate-root-ahead-disallowed"), "no-candidate-ahead-refuses-candidate-root"); res_free(&r);
+    }
+
+    /* 26 & 27..31 (Mutants 1..5): isolate per-case state cleanly and run selected jobs concurrently. */
+    if (in_range(26) || (!no_mut && any_in_range(27, 31))) {
+        cx_fmt(cmd, sizeof cmd,
+            "cd '%s' && git checkout -q main && "
+            "while [ \"$(git log -1 --format=%%s)\" = \"cand013\" ] || [ \"$(git log -1 --format=%%s)\" = \"rbconflict\" ]; do git reset -q --hard HEAD~1; done && "
+            "GIT_COMMITTER_DATE='2026-11-24T10:00:00+0800' git tag -f -a -m v0.1.1 v0.1.1 HEAD~1 && "
+            "GIT_COMMITTER_DATE='2026-11-25T10:00:00+0800' git tag -f -a -m v0.1.2 v0.1.2 HEAD && "
+            "rm -f '%s/unisacc.com.candidate.tsv' && sh '%s/seed_root.sh' '%s/ape_011' '%s' ''",
+            repo, rroot, dir, dir, rroot);
+        run_sh(cmd, &r); res_free(&r);
+
+        int r26 = in_range(26), s26 = -1;
+        ccrc_job j26;
+        if (r26) {
+            char repo26[1024];
+            cx_fmt(repo26, sizeof repo26, "%s/repo26", dir);
+            cx_fmt(cmd, sizeof cmd,
+                "rm -rf '%s' && cp -a '%s' '%s' && cd '%s' && "
+                "sh '%s/seed_root.sh' '%s/ape_012' '%s' '0123456789012345678901234567890123456789' && "
+                "RREV=$(git rev-parse HEAD) && R10=$(printf '%%.10s' \"$RREV\") && "
+                "RCAN=$(cd '%s' && pwd -P) && RH8=$(printf '%%s' \"$RCAN\" | sha256sum | cut -c1-8) && "
+                "HDIR='%s/snap_home' && SDIR=\"$HDIR/.cache/unisacc/chains/snap/${R10}-${RH8}\" && "
+                "ORIG_CACHE=\"${UNISACC_CACHE_DIR:-$HOME/.cache/unisacc/e3cache}\" && "
+                "mkdir -p \"$SDIR\" && cp '%s/ape_011' \"$SDIR/unisacc.com\" && cp '%s/unisacc.com.build.json' \"$SDIR/unisacc.com.build.json\" && "
+                "cd '%s' && UNISACC_CACHE_DIR=\"$ORIG_CACHE\" HOME=\"$HDIR\" sh ./unisacc.com tools/root-current.cx -- --repo '%s' --root '%s'",
+                repo26, repo, repo26, repo26, dir, dir, repo26, repo26, dir, dir, repo26, g_cwd, repo26, repo26);
+            s26 = job_start(&j26, cmd);
+        }
+
+        static const char *const m_names[5] = {
+            "mutant-always-match-killed-red-then-green",
+            "mutant-b2-skip-build-json-killed-red-then-green",
+            "mutant-b3-skip-cand-marker-killed-red-then-green",
+            "mutant-expect-from-root-killed-red-then-green",
+            "mutant-slot-fallback-killed-red-then-green"
+        };
+        static const char *const m_tags[5] = {"always-match", "skip-bjson", "skip-cand-mk", "expect-from-root", "slot-fallback"};
+        static const char *const m_find[5] = {
+            "if (tx_eqz(actual_ver, expect_ver) && tx_eqz(actual_sha, expect_sha)) {",
+            "if (crc_verify_build_json(root_abs, sha_out, root_size, bjson_sha, bj_commit, err_reason) != 0) return -1;",
+            "if (crc_verify_cand_and_commit(repo_abs, root_abs, ver_out, sha_out, root_size, bj_commit, is_cand, err_reason) != 0) return -1;",
+            "int ev_rc = crc_expect_version(repo_abs, expect_ver, &ver_src, vdet);",
+            "if (!has_tag[i]) {\n            cx_fmt(detail_out, 64, \"%s\", pub[i]);\n            return -3;\n        }"
+        };
+        static const char *const m_sub[5] = {
+            "if (1) {",
+            "if (0) return -1;",
+            "{ char _cm[4400]; if (!cx_fmt(_cm, sizeof _cm, \"%s/unisacc.com.candidate.tsv\", root_abs) && sy_exists(_cm) == 1) *is_cand = 1; }",
+            "int ev_rc = 0; cx_fmt(expect_ver, sizeof expect_ver, \"%s\", actual_ver); ver_src = \"alt\";",
+            "if (!has_tag[i]) { has_tag[i] = 1; tag_ts[i] = 9999999999LL; }"
+        };
+        int mr_run[5] = {0}, mr_prep[5] = {0}, mc_st[5] = {-1, -1, -1, -1, -1}, mm_st[5] = {-1, -1, -1, -1, -1};
+        ccrc_job jc[5], jm[5];
+        if (!no_mut) {
+            for (int m = 0; m < 5; m++) {
+                if (!in_range(27 + m)) continue;
+                mr_run[m] = 1;
+                char mdir[1200], mroot[1100], mrepo[1100];
+                cx_fmt(mroot, sizeof mroot, "%s/mroot_%d", dir, m);
+                if (m == 4) cx_fmt(mrepo, sizeof mrepo, "%s/mrepo_4", dir);
+                else cx_fmt(mrepo, sizeof mrepo, "%s", repo);
+                if (m == 0 || m == 3) {
+                    cx_fmt(cmd, sizeof cmd, "mkdir -p '%s' && sh '%s/seed_root.sh' '%s/ape_011' '%s' ''", mroot, dir, dir, mroot);
+                } else if (m == 1) {
+                    cx_fmt(cmd, sizeof cmd, "mkdir -p '%s' && sh '%s/seed_root.sh' '%s/ape_012' '%s' '0123456789012345678901234567890123456789' && rm -f '%s/unisacc.com.build.json'", mroot, dir, dir, mroot, mroot);
+                } else if (m == 2) {
+                    cx_fmt(cmd, sizeof cmd, "mkdir -p '%s' && sh '%s/seed_root.sh' '%s/ape_013' '%s' 'fedcba9876543210fedcba9876543210fedcba98' && : > '%s/unisacc.com.candidate.tsv'", mroot, dir, dir, mroot, mroot);
+                } else {
+                    cx_fmt(cmd, sizeof cmd, "mkdir -p '%s' && sh '%s/seed_root.sh' '%s/ape_011' '%s' '' && rm -rf '%s' && cp -a '%s' '%s' && git -C '%s' tag -d v0.1.2 >/dev/null", mroot, dir, dir, mroot, mrepo, repo, mrepo, mrepo);
+                }
+                run_sh(cmd, &r); int setup_ok = (r.rc == 0); res_free(&r);
+                if (setup_ok && prepare_alt_tree(dir, m_tags[m], m_find[m], m_sub[m], mdir, sizeof mdir) == 0) {
+                    const char *extra = (m == 1) ? "--no-candidate-ahead" : "";
+                    mr_prep[m] = 1;
+                    mc_st[m] = start_crc_job(&jc[m], g_cwd, mrepo, mroot, extra);
+                    mm_st[m] = start_crc_job(&jm[m], mdir, mrepo, mroot, extra);
+                }
+            }
+        }
+
+        if (r26) {
+            if (s26 == 0) { job_wait(&j26); r = j26.res; } else { mm_fill(&r, sizeof r, 0, sizeof r); r.rc = -1; }
+            ck(r.rc == 1 && has(&r, "reason=snap-cache-stale"), "b3-stale-snap-cache-refused");
+            res_free(&r);
+        }
+        for (int m = 0; m < 5; m++) {
+            if (!mr_run[m]) continue;
+            if (!mr_prep[m] || mc_st[m] != 0 || mm_st[m] != 0) {
+                if (mc_st[m] == 0) { job_wait(&jc[m]); res_free(&jc[m].res); }
+                if (mm_st[m] == 0) { job_wait(&jm[m]); res_free(&jm[m].res); }
+                ck(0, m_names[m]);
+                continue;
+            }
+            job_wait(&jc[m]);
+            job_wait(&jm[m]);
+            int clean_ok = 0, mut_esc = 0;
+            if (m == 0) { clean_ok = match_stale_root_red(&jc[m].res); mut_esc = match_stale_root_red(&jm[m].res); }
+            else if (m == 1) { clean_ok = match_missing_bjson_red(&jc[m].res); mut_esc = match_missing_bjson_red(&jm[m].res); }
+            else if (m == 2) { clean_ok = match_empty_cand_red(&jc[m].res); mut_esc = match_empty_cand_red(&jm[m].res); }
+            else if (m == 3) { clean_ok = match_expect_012_red(&jc[m].res); mut_esc = match_expect_012_red(&jm[m].res); }
+            else { clean_ok = match_missing_tag_fails_closed(&jc[m].res); mut_esc = match_missing_tag_fails_closed(&jm[m].res); }
+            r = jm[m].res;
+            ck(clean_ok == 1 && mut_esc == 0, m_names[m]);
+            res_free(&jc[m].res);
+            res_free(&jm[m].res);
+            mm_fill(&r, sizeof r, 0, sizeof r);
+        }
+    }
+
+    (void)sy_remove_all(dir);
+    printf("CHECK_ROOT_CURRENT\tpassed=%d\tfailed=%d\n", g_pass, g_fail);
+    return g_fail ? 1 : 0;
+}

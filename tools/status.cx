@@ -1,6 +1,6 @@
 /* tools/status.cx -- one-command status summary (git, chain, derive, batches, residue) as TSV rows.
  *
- *   cx tools/status.cx -- [--tsv OUT] [--fast] [--section git,chain,derive,batches,residue]
+ *   cx tools/status.cx -- [--tsv OUT] [--fast] [--section git,chain,derive,batches,residue,root]
  *        [--root DIR] [--tmp DIR] [--no-fetch] [--git-bin PATH] [--git-secs N] [--pg-pat STR]
  *
  * Rows: section<TAB>key<TAB>value<TAB>age_s<TAB>source.  Last line: STATUS ok=N warn=N stale=N
@@ -14,6 +14,7 @@
 #pragma unisa use sys.posix
 #pragma unisa use text.text
 #pragma unisa use mem.heap
+#pragma unisa use mem.bytes
 #pragma unisa use sysx.process
 
 static int n_ok, n_warn, n_stale;
@@ -345,6 +346,37 @@ static void sec_residue(void) {
     }
 }
 
+/* ---------------- root currency ---------------- */
+static void sec_root(void) {
+    char vs[4400], rccom[4400], val[600];
+    cx_fmt(rccom, sizeof rccom, "%s/unisacc.com", g_root); /* lint:allow R1 inspect target root path */
+    cx_fmt(vs, sizeof vs, "%s/build/version-seq.tsv", g_root);
+    if (sy_exists(vs) != 1 && sy_exists(rccom) != 1) {
+        unmeasured("root", "current", "no build/version-seq.tsv or unisacc.com", rccom);
+        return;
+    }
+    if (sy_exists("tools/root-current.cx") != 1) {
+        unmeasured("root", "current", "tools/root-current.cx not in cwd", rccom);
+        return;
+    }
+    char *v[] = {"./tools/bound", "20", "sh", "./unisacc.com", "tools/root-current.cx", "--", "--repo", (char *)g_root, "--root", (char *)g_root, 0}; /* lint:allow R1 status delegates root check */
+    np_result r = {0}; char why[200] = {0};
+    int tr = np_run(v, 0, 0, 22, &r, why, sizeof why);
+    if (tr || r.residue) {
+        np_free(&r);
+        unmeasured("root", "current", why[0] ? why : "root-current timed out", rccom);
+        return;
+    }
+    long cn = (r.out && r.outn > 0) ? ((long)r.outn < 580 ? (long)r.outn : 580) : 0;
+    if (cn > 0) mm_copy(val, sizeof val, r.out, cn);
+    val[cn] = 0;
+    while (cn > 0 && (val[cn - 1] == '\n' || val[cn - 1] == '\r')) val[--cn] = 0;
+    int valid_pass = (r.rc == 0 && tx_prefix(val, cn, "ROOT_CURRENT\tPASS\t", 18));
+    np_free(&r);
+    if (!valid_pass && !val[0]) cx_fmt(val, sizeof val, "RED invalid-root-current-output");
+    emit("root", "current", val, -1, rccom, valid_pass ? 0 : 1);
+}
+
 /* ---------------- full-mode read-only checks ---------------- */
 static void sec_checks(void) {
     static const char *nm[3] = {"tool-index", "iface-hash", "tables-gen"};
@@ -401,6 +433,7 @@ int main(int argc, char **argv) {
     if (want(sec, "derive")) sec_derive(fast);
     if (want(sec, "batches")) sec_batches();
     if (want(sec, "residue")) sec_residue();
+    if (want(sec, "root")) sec_root();
     if (!fast && !sec) sec_checks();
     printf("STATUS ok=%d warn=%d stale=%d\n", n_ok, n_warn, n_stale);
     if (tsv) { fprintf(tsv, "STATUS ok=%d warn=%d stale=%d\n", n_ok, n_warn, n_stale); fclose(tsv); }

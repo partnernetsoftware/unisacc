@@ -1,10 +1,10 @@
 /* tools/release-post.cx -- orchestrate S10 post-publish steps (handbook section 4).
  *
- *   sh ./unisacc.com tools/release-post.cx -- plan --version V
- *   sh ./unisacc.com tools/release-post.cx -- run --version V --dry|--execute
- *       [--step N] [--root-upgrade] [--repo DIR] [--evidence-dir DIR]
+ *   cx tools/release-post.cx -- plan --version V
+ *   cx tools/release-post.cx -- run|thaw --version V --dry|--execute
+ *       [--step N] [--no-root-upgrade REASON] [--root-upgrade] [--repo DIR] [--evidence-dir DIR]
  *       [--chain-dir DIR] [--prerun-dir DIR] [--backup-dir DIR]
- *       [--state-file PATH] [--cleanup-doc PATH]
+ *       [--state-file PATH] [--cleanup-doc PATH] [--gh-bin CMD] [--smoke-cmd CMD] [--pgrep-pat PAT]
  *       [--chain-bin CMD] [--metrics-bin CMD] [--day-bin CMD] [--install-bin CMD]
  *       [--install-root DIR] [--ape PATH] [--ape-sha SHA] [--mutant-dry-write]
  *
@@ -12,35 +12,44 @@
  * backup --verify uses release/evidence/V/backup-evidence.tsv unless --backup-dir set;
  * version-metrics-gen, day-metrics, install-ape are existing tools. Never --push.
  * Writes require --execute. --dry is read-only (state file untouched). Each child
- * under tools/bound 55. Re-run skips DONE steps in the state file (--execute).
- * Step 5 (root) only with --execute --root-upgrade. Step 6 prints cleanup cmds only.
- * Step 7 prints rearrange-patch apply cmds only (never apply; needs orchestrator order).
- * Lines: POST_STEP<TAB>n<TAB>name<TAB>OK|FAIL|SKIP<TAB>detail ; final
- * RELEASE_POST<TAB>status=DONE|BLOCKED:name .
+ * under tools/bound 55. Re-run skips DONE steps only after verifying live resources for side-effect steps.
+ * Step 5 (root-upgrade) runs by default under --execute; skipping requires --no-root-upgrade REASON
+ * (no control/tab/newline; writes SKIPPED state, never DONE, exits BLOCKED:root-upgrade).
+ * Step 6 prints cleanup cmds only. Step 7 prints rearrange-patch apply cmds only.
+ * Step 8 (thaw-freeze / `thaw`) verifies exact Y2 40-hex commit, version release SHA, and
+ * `cx tools/root-current.cx -- --no-candidate-ahead` before atomically thawing build/freeze.tsv.
+ * Lines: POST_STEP<TAB>n<TAB>name<TAB>OK|FAIL|SKIP|SKIPPED|DEFERRED<TAB>detail ; final
+ * RELEASE_POST<TAB>status=DONE|STEP_DONE:name|BLOCKED:name .
  */
 #pragma unisa use cxlib.ckrun
 #pragma unisa use sys.fs
 #pragma unisa use sys.env
 #pragma unisa use sys.time
 #pragma unisa use sys.proc
+#pragma unisa use sys.posix
+#pragma unisa use sys.sha
 #pragma unisa use text.text
+#pragma unisa use text.fmt
 #pragma unisa use mem.heap
 #pragma unisa use mem.bytes
+#pragma unisa use cxlib.releaseseq
 
-#define RP_STEPS 7
+#define RP_STEPS 8
 
 static char g_ver[40], g_repo[900], g_evdir[1100], g_state[1100];
 static char g_chain_dir[900], g_prerun_dir[900], g_backup_dir[900];
 static char g_chain_bin[900], g_metrics_bin[900], g_day_bin[900], g_install_bin[900];
 static char g_install_root[900], g_ape[900], g_ape_sha[80], g_cleanup_doc[1100];
+static char g_no_root_up_reason[256], g_gh_bin[256], g_smoke_cmd[900], g_pgrep_pat[256];
 static int g_dry, g_exec, g_root_up, g_step_only, g_mutant_dry_write;
-static int g_done[RP_STEPS + 1];
+static int g_done[RP_STEPS + 1], g_step_skipped[RP_STEPS + 1];
+static char g_step_state[RP_STEPS + 1][32], g_step_detail[RP_STEPS + 1][200];
 
 static const char *step_name(int n) {
     static const char *nm[] = {
         "-", "index-seal", "mark-version-seq", "backup-evidence",
         "metrics", "root-upgrade", "worktree-cleanup-print",
-        "rearrange-patch-print"
+        "rearrange-patch-print", "thaw-freeze"
     };
     if (n < 1 || n > RP_STEPS) return "-";
     return nm[n];
@@ -48,7 +57,7 @@ static const char *step_name(int n) {
 
 static int die_usage(const char *m) {
     fprintf(stderr, "release-post: %s\n", m);
-    fprintf(stderr, "usage: plan|run --version V --dry|--execute [--step N] [--root-upgrade] ...\n");
+    fprintf(stderr, "usage: plan|run|thaw --version V --dry|--execute [--step N] [--no-root-upgrade REASON] ...\n");
     return 2;
 }
 
@@ -75,34 +84,48 @@ static int has_line_prefix(const char *buf, const char *pref) {
 
 static void load_state(void) {
     unsigned char *b; int64_t n; long i = 0; int k;
-    for (k = 1; k <= RP_STEPS; k++) g_done[k] = 0;
+    for (k = 1; k <= RP_STEPS; k++) { g_done[k] = 0; g_step_skipped[k] = 0; g_step_state[k][0] = 0; g_step_detail[k][0] = 0; }
     if (!g_state[0] || sy_exists(g_state) != 1) return;
     if (sy_read_file(g_state, &b, &n, 1 << 16) < 0 || !b) return;
     while (i < n) {
-        long s = i, e; int step = 0;
+        long s = i, e;
         while (i < n && b[i] != '\n') i++;
         e = i; if (i < n) i++;
+        if (e > s && b[e - 1] == '\r') e--;
         if (e <= s || b[s] == '#') continue;
-        if (s + 2 <= e && b[s] >= '1' && b[s] <= '6' && b[s + 1] == '\t') {
-            step = b[s] - '0';
-            if (tx_find((char *)b + s, e - s, "\tDONE", 5) >= 0) g_done[step] = 1;
+        long ln = e - s; const char *l = (const char *)b + s;
+        long c0o = 0, c0l = 0, c1o = 0, c1l = 0, c2o = 0, c2l = 0;
+        if (tx_field(l, ln, '\t', 0, &c0o, &c0l) != 0 || c0l != 1) continue;
+        char sc = l[c0o];
+        if (sc < '1' || sc > '0' + RP_STEPS) continue;
+        if (tx_field(l, ln, '\t', 1, &c1o, &c1l) != 0 || c1l != 4 || !tx_same(l + c1o, 4, "DONE", 4)) continue;
+        if (tx_field(l, ln, '\t', 2, &c2o, &c2l) == 0 && c2l > 4 && tx_same(l + c2o, 4, "ver=", 4)) {
+            long vl = tx_len(g_ver, 40);
+            if (c2l - 4 != vl || !tx_same(l + c2o + 4, vl, g_ver, vl)) continue;
         }
+        g_done[sc - '0'] = 1;
     }
     mm_free(b);
 }
 
 static int save_state(void) {
-    char body[400]; long n = 0; int k;
+    char body[2048]; long n = 0; int k;
     if (!g_exec || !g_state[0]) return 0;
     if (g_dry) return 0;
     body[0] = 0;
     for (k = 1; k <= RP_STEPS; k++) {
-        char line[40];
-        if (cx_fmt(line, sizeof line, "%d\t%s\n", k, g_done[k] ? "DONE" : "PEND")) return -1;
+        char line[320];
+        if (g_done[k]) {
+            if (cx_fmt(line, sizeof line, "%d\tDONE\tver=%s\n", k, g_ver)) return -1;
+        } else if (g_step_state[k][0]) {
+            if (cx_fmt(line, sizeof line, "%d\t%s\t%s\n", k, g_step_state[k], g_step_detail[k][0] ? g_step_detail[k] : "-")) return -1;
+        } else {
+            if (cx_fmt(line, sizeof line, "%d\tPEND\n", k)) return -1;
+        }
         { long l = tx_len(line, sizeof line); if (n + l >= (long)sizeof body) return -1;
           mm_copy(body + n, sizeof body - n, line, l); n += l; }
     }
-    return sy_write_file(g_state, body, (int64_t)n, 0600);
+    return sy_write_atomic(g_state, body, (size_t)n, 0600);
 }
 
 static int mark_done(int n) {
@@ -110,16 +133,235 @@ static int mark_done(int n) {
     return save_state();
 }
 
+static int rp_hex64(const char *s, long n) {
+    if (!s || n != 64) return 0;
+    for (long i = 0; i < 64; i++) {
+        char c = s[i];
+        if (!((c >= '0' && c <= '9') || (c >= 'a' && c <= 'f'))) return 0;
+    }
+    return 1;
+}
+
+static int rp_file_sha(const char *path, char hex[65]) {
+    size_t n = 0; char *b = cx_read(path, &n);
+    hex[0] = 0;
+    if (!b) return -1;
+    int rc = sy_sha256_hex(b, (long)n, hex);
+    mm_free(b);
+    return rc ? -1 : 0;
+}
+
+/* Return 0 found unique, -1 missing/absent, -2 malformed, -3 duplicate conflict */
+static int rp_parse_candidate(const char *repo, const char *ver, char gh_repo[128], char sha_out[65]) {
+    char p[1200]; size_t n = 0; char *b;
+    gh_repo[0] = 0; sha_out[0] = 0;
+    if (cx_fmt(p, sizeof p, "%s/release/candidate.tsv", repo)) return -1;
+    if (sy_exists(p) != 1) return -1;
+    if (!(b = cx_read(p, &n))) return -2;
+    long nl = tx_chr(b, (long)n, '\n');
+    if (nl < 0) { mm_free(b); return -2; }
+    long at = nl + 1, vl_want = tx_len(ver, 40);
+    int found = 0;
+    while (at < (long)n) {
+        long e = at; while (e < (long)n && b[e] != '\n') e++;
+        long ln = e - at; const char *l = b + at; at = e + 1;
+        if (ln <= 0 || l[0] == '#') continue;
+        long ro = 0, rl = 0, vo = 0, vl = 0, ao = 0, al = 0;
+        if (tx_field(l, ln, '\t', 3, &vo, &vl) != 0) { mm_free(b); return -2; }
+        if (vl == vl_want && tx_same(l + vo, vl, ver, vl)) {
+            if (tx_field(l, ln, '\t', 0, &ro, &rl) == 0 && rl > 0 && rl < 127 && !gh_repo[0]) {
+                mm_copy(gh_repo, 128, l + ro, rl); gh_repo[rl] = 0;
+            }
+            if (tx_field(l, ln, '\t', 8, &ao, &al) != 0 || !rp_hex64(l + ao, al)) {
+                mm_free(b); return -2;
+            }
+            char tmp[65]; mm_copy(tmp, 65, l + ao, 64); tmp[64] = 0;
+            if (!found) { mm_copy(sha_out, 65, tmp, 65); found = 1; }
+            else if (!tx_eqz(sha_out, tmp)) { mm_free(b); return -3; }
+        }
+    }
+    mm_free(b);
+    return found ? 0 : -1;
+}
+
+/* Return 0 found unique, -1 missing/absent, -2 malformed, -3 duplicate conflict */
+static int rp_parse_receipt(const char *evdir, char path_out[900], char sha_out[65]) {
+    char p[1200]; size_t n = 0; char *b;
+    path_out[0] = 0; sha_out[0] = 0;
+    if (cx_fmt(p, sizeof p, "%s/ape-receipt.txt", evdir)) return -1;
+    if (sy_exists(p) != 1) return -1;
+    if (!(b = cx_read(p, &n))) return -2;
+    long at = 0; int found = 0;
+    while (at < (long)n) {
+        long e = at; while (e < (long)n && b[e] != '\n') e++;
+        const char *l = b + at; long ln = e - at;
+        if (ln > 0 && l[ln - 1] == '\r') ln--;
+        at = e + 1;
+        if (ln > 17 && tx_same(l, 17, "unisacc-next.com\t", 17)) {
+            long po = 0, pl = 0;
+            if (!path_out[0] && tx_field(l, ln, '\t', 1, &po, &pl) == 0 && pl > 0 && pl < 899) {
+                mm_copy(path_out, 900, l + po, pl); path_out[pl] = 0;
+            }
+            long sh = tx_find(l, ln, "\tsha=", 5);
+            if (sh < 0 || sh + 69 > ln || !rp_hex64(l + sh + 5, 64) ||
+                (sh + 69 < ln && l[sh + 69] != '\t')) {
+                mm_free(b); return -2;
+            }
+            char tmp[65]; mm_copy(tmp, 65, l + sh + 5, 64); tmp[64] = 0;
+            if (!found) { mm_copy(sha_out, 65, tmp, 65); found = 1; }
+            else if (!tx_eqz(sha_out, tmp)) { mm_free(b); return -3; }
+        }
+    }
+    mm_free(b);
+    return found ? 0 : -1;
+}
+
+/* Return 0 found unique, -1 missing/absent, -2 malformed, -3 duplicate conflict */
+static int rp_parse_readback(const char *evdir, char sha_out[65]) {
+    char p[1200]; size_t n = 0; char *b;
+    sha_out[0] = 0;
+    if (cx_fmt(p, sizeof p, "%s/public-readback.txt", evdir)) return -1;
+    if (sy_exists(p) != 1) return -1;
+    if (!(b = cx_read(p, &n))) return -2;
+    long at = 0; int found = 0;
+    while (at < (long)n) {
+        long e = at; while (e < (long)n && b[e] != '\n') e++;
+        const char *l = b + at; long ln = e - at;
+        if (ln > 0 && l[ln - 1] == '\r') ln--;
+        at = e + 1;
+        if (ln >= 25 && (tx_same(l, 25, "READBACK_SHA unisacc.com ", 25) ||
+                         tx_same(l, 25, "READBACK_SHA\tunisacc.com\t", 25))) {
+            if (ln < 89 || !rp_hex64(l + 25, 64) ||
+                (ln > 89 && l[89] != ' ' && l[89] != '\t')) {
+                mm_free(b); return -2;
+            }
+            char tmp[65]; mm_copy(tmp, 65, l + 25, 64); tmp[64] = 0;
+            if (!found) { mm_copy(sha_out, 65, tmp, 65); found = 1; }
+            else if (!tx_eqz(sha_out, tmp)) { mm_free(b); return -3; }
+        }
+    }
+    mm_free(b);
+    return found ? 0 : -1;
+}
+
+static int rp_resolve_want_sha(char want_sha[65], char gh_repo[128], char rcpt_path[900],
+                               int allow_bare_cli, const char **err_detail) {
+    char cand_sha[65], rcpt_sha[65], rb_sha[65];
+    int rc_c = rp_parse_candidate(g_repo, g_ver, gh_repo, cand_sha);
+    int rc_r = rp_parse_receipt(g_evdir, rcpt_path, rcpt_sha);
+    int rc_p = rp_parse_readback(g_evdir, rb_sha);
+    want_sha[0] = 0; *err_detail = 0;
+    if (rc_c == -2 || rc_r == -2 || rc_p == -2) { *err_detail = "sha-source-malformed"; return -1; }
+    if (rc_c == -3 || rc_r == -3 || rc_p == -3) { *err_detail = "sha-source-conflict"; return -1; }
+    if ((rc_c == 0 && rc_r == 0 && !tx_eqz(cand_sha, rcpt_sha)) ||
+        (rc_c == 0 && rc_p == 0 && !tx_eqz(cand_sha, rb_sha)) ||
+        (rc_r == 0 && rc_p == 0 && !tx_eqz(rcpt_sha, rb_sha))) {
+        *err_detail = "candidate-receipt-readback-sha-mismatch";
+        return -1;
+    }
+    if (g_ape_sha[0]) {
+        if (!rp_hex64(g_ape_sha, tx_len(g_ape_sha, 80))) { *err_detail = "bad-ape-sha"; return -1; }
+        if ((rc_c == 0 && !tx_eqz(g_ape_sha, cand_sha)) ||
+            (rc_r == 0 && !tx_eqz(g_ape_sha, rcpt_sha)) ||
+            (rc_p == 0 && !tx_eqz(g_ape_sha, rb_sha))) {
+            *err_detail = "candidate-receipt-readback-sha-mismatch";
+            return -1;
+        }
+        if (!allow_bare_cli && rc_c != 0 && rc_r != 0 && rc_p != 0) {
+            *err_detail = "missing-authoritative-sha";
+            return -1;
+        }
+        cx_fmt(want_sha, 65, "%s", g_ape_sha);
+        return 0;
+    }
+    if (rc_c == 0) { cx_fmt(want_sha, 65, "%s", cand_sha); return 0; }
+    if (rc_r == 0) { cx_fmt(want_sha, 65, "%s", rcpt_sha); return 0; }
+    if (rc_p == 0) { cx_fmt(want_sha, 65, "%s", rb_sha); return 0; }
+    return -1;
+}
+
+static int rp_root_version_matches(const char *root_com, const char *ver) {
+    char cmd[1200], out[512];
+    if (cx_fmt(cmd, sizeof cmd, "sh '%s' --version", root_com)) return 0;
+    out[0] = 0;
+    if (ckk_sh_t("rp-root-ver", cmd, out, (int)sizeof out, 20) != 0) return 0;
+    if (!tx_same(out, 8, "unisacc ", 8)) return 0;
+    long vl = tx_len(ver, 40), at = 8;
+    if (!tx_same(out + at, vl, ver, vl)) return 0;
+    char endc = out[at + vl];
+    return endc == 0 || endc == '\n' || endc == '\r' || endc == ' ' || endc == '\t' || endc == '(';
+}
+
+static int rp_check_installed_record(const char *root, const char *want_sha) {
+    char rec[1100]; size_t n = 0; char *b;
+    if (cx_fmt(rec, sizeof rec, "%s/unisacc.com.ape.sha256", root)) return 0;
+    if (!(b = cx_read(rec, &n))) return 0;
+    int ok = ((long)n >= 65 && tx_same(b, 64, want_sha, 64) && b[64] == '\t');
+    mm_free(b);
+    return ok;
+}
+
+static int rp_backup_gate_ok(const char *root_com, const char *old_sha, const char *out_buf) {
+    (void)root_com;
+    /* Require ROLLBACK_DRYRUN matching an existing index OR BACKUP_DRYRUN matching exact current old_sha */
+    char want_rb[128], want_bk[128];
+    if (cx_fmt(want_bk, sizeof want_bk, "INSTALL_APE\tBACKUP_DRYRUN\t%s\t", old_sha)) return 0;
+    if (has_line_prefix(out_buf, want_bk)) return 1;
+    if (cx_fmt(want_rb, sizeof want_rb, "INSTALL_APE\tROLLBACK_DRYRUN\t%s", old_sha)) return 0;
+    if (has_line_prefix(out_buf, want_rb)) return 1;
+    /* Fallback: if backup index exists, verify its newest entry is old_sha and manifest exists */
+    if (!old_sha[0] || old_sha[0] == '-') return 0;
+    return 0;
+}
+
+static int rp_root_is_live_current(const char *ver, const char *root_dir, char want_sha_out[65]) {
+    char gh_repo[128], rcpt_path[900], root_com[1024], cur_sha[65];
+    const char *edet = 0;
+    if (rp_resolve_want_sha(want_sha_out, gh_repo, rcpt_path, 1, &edet) != 0 || !want_sha_out[0]) return 0;
+    if (cx_fmt(root_com, sizeof root_com, "%s/unisacc.com", root_dir)) return 0; /* lint:allow R1 verify target root binary */
+    sy_stat_t st;
+    if (sy_lstat(root_com, &st) != 0 || st.kind != 'f') return 0;
+    if (rp_file_sha(root_com, cur_sha) != 0 || !tx_eqz(cur_sha, want_sha_out)) return 0;
+    if (!rp_check_installed_record(root_dir, want_sha_out)) return 0;
+    if (!rp_root_version_matches(root_com, ver)) return 0;
+    return 1;
+}
+
+static int rp_do_rollback(const char *root_com, const char *want_sha, const char *old_sha, const char *reason_tag) {
+    char cmd[2400], out[1 << 14], rb_sha2[65];
+    int rb_rc = -1;
+    if (!cx_fmt(cmd, sizeof cmd, "%s -- '%s' --rollback --write", g_install_bin, g_install_root)) {
+        rb_rc = run_bound("rp-rollback", cmd, out, (int)sizeof out);
+    }
+    if (rp_file_sha(root_com, rb_sha2) != 0) cx_fmt(rb_sha2, sizeof rb_sha2, "-");
+    int ok = (rb_rc == 0 && has_line_prefix(out, "INSTALL_APE\tROLLED_BACK\t") &&
+              old_sha[0] && old_sha[0] != '-' && tx_eqz(rb_sha2, old_sha));
+    if (ok) {
+        printf("POST_ROOT_ROLLBACK\tattempted_sha=%s\trestored_sha=%s\told_sha=%s\treason=%s\n",
+               want_sha, rb_sha2, old_sha, reason_tag);
+        cx_fmt(g_step_state[5], sizeof g_step_state[5], "FAIL");
+        cx_fmt(g_step_detail[5], sizeof g_step_detail[5], "%s-rolled-back", reason_tag);
+        post_step(5, "FAIL", g_step_detail[5]);
+        return 1;
+    }
+    printf("POST_ROOT_ROLLBACK_FAILED\tattempted_sha=%s\trestored_sha=%s\texpect_old_sha=%s\trb_rc=%d\treason=%s\n",
+           want_sha, rb_sha2, old_sha, rb_rc, reason_tag);
+    cx_fmt(g_step_state[5], sizeof g_step_state[5], "FAIL");
+    cx_fmt(g_step_detail[5], sizeof g_step_detail[5], "%s-rollback-failed", reason_tag);
+    post_step(5, "FAIL", g_step_detail[5]);
+    return 1;
+}
+
+static int rp_extract_y2_strict(char y2_out[64]);
+
 static int step_index_seal(void) {
-    char path[1200]; size_t n = 0; char *b;
+    char path[1200], y2[64];
     if (cx_fmt(path, sizeof path, "%s/INDEX.tsv", g_evdir)) return -1;
     if (sy_exists(path) != 1) { post_step(1, "FAIL", "missing-INDEX"); return 1; }
-    b = cx_read(path, &n);
-    if (!b) { post_step(1, "FAIL", "read-INDEX"); return 1; }
-    if (!has_line_prefix(b, "exec-7-Y2-done")) {
-        free(b); post_step(1, "FAIL", "missing-exec-7-Y2-done"); return 1;
+    if (rp_extract_y2_strict(y2) != 0) {
+        post_step(1, "FAIL", "missing-exec-7-Y2-done");
+        return 1;
     }
-    free(b);
     post_step(1, "OK", "INDEX-has-Y2-done");
     return 0;
 }
@@ -141,8 +383,6 @@ static int step_mark_version_seq(void) {
 
 static int step_backup(void) {
     char cmd[2400], out[1 << 15]; int rc;
-    /* --verify reads release/evidence/V/backup-evidence.tsv (or --backup-dir/manifest).
-     * Do not invent evidence/V/backup/: that path is not the available form. */
     if (g_backup_dir[0]) {
         if (cx_fmt(cmd, sizeof cmd,
                    "%s backup-evidence --version %s --repo %s --backup-dir %s --verify",
@@ -178,22 +418,155 @@ static int step_metrics(void) {
 }
 
 static int step_root_upgrade(void) {
-    char cmd[2000], out[1 << 14]; int rc;
-    if (!g_root_up) { post_step(5, "SKIP", "no-root-upgrade-flag"); return 0; }
-    if (!g_exec) { post_step(5, "SKIP", "dry-no-root-upgrade"); return 0; }
-    if (cx_fmt(cmd, sizeof cmd, "%s -- %s --rollback", g_install_bin, g_install_root)) return -1;
+    char cmd[3000], out[1 << 14]; int rc;
+    if (!g_root_up) {
+        g_step_skipped[5] = 1;
+        cx_fmt(g_step_state[5], sizeof g_step_state[5], "SKIPPED");
+        cx_fmt(g_step_detail[5], sizeof g_step_detail[5], "%s", g_no_root_up_reason);
+        post_step(5, "SKIPPED", g_no_root_up_reason);
+        return 1;
+    }
+
+    char gh_repo[128], rcpt_path[900], want_sha[65];
+    const char *edet = 0;
+    int rres = rp_resolve_want_sha(want_sha, gh_repo, rcpt_path, 1, &edet);
+    if (rres != 0 && edet) {
+        post_step(5, "FAIL", edet);
+        return 1;
+    }
+
+    char root_com[1024], old_sha[65], new_sha[65], mid_sha[65];
+    if (cx_fmt(root_com, sizeof root_com, "%s/unisacc.com", g_install_root)) return -1; /* lint:allow R1 inspect target root binary */
+    if (rp_file_sha(root_com, old_sha) != 0) cx_fmt(old_sha, sizeof old_sha, "-");
+
+    /* Backup gate: verify backup/rollback corresponds to the ACTUAL current root SHA */
+    if (cx_fmt(cmd, sizeof cmd, "%s -- %s --backup", g_install_bin, g_install_root)) return -1;
     rc = run_bound("rp-root-gate", cmd, out, (int)sizeof out);
-    if (rc != 0 || !has_line_prefix(out, "INSTALL_APE\tROLLBACK_DRYRUN")) {
-        printf("POST_ROOT_BACKUP_GATE\tFAIL\n");
+    if (rc != 0 || !rp_backup_gate_ok(root_com, old_sha, out)) {
+        printf("POST_ROOT_BACKUP_GATE\tFAIL\told_sha=%s\n", old_sha);
         post_step(5, "FAIL", "POST_ROOT_BACKUP_GATE");
         return 1;
     }
-    printf("POST_ROOT_BACKUP_GATE\tPASS\n");
-    if (!g_ape[0] || !g_ape_sha[0]) { post_step(5, "FAIL", "missing-ape-or-sha"); return 1; }
-    if (cx_fmt(cmd, sizeof cmd, "%s -- %s %s %s --write",
-               g_install_bin, g_install_root, g_ape, g_ape_sha)) return -1;
+    printf("POST_ROOT_BACKUP_GATE\tPASS\told_sha=%s\n", old_sha);
+
+    if (!g_exec) {
+        post_step(5, "OK", want_sha[0] ? "dry-auto-root-upgrade-ready" : "dry-needs-ape-sha");
+        return 0;
+    }
+
+    if (!want_sha[0]) { post_step(5, "FAIL", "missing-ape-sha"); return 1; }
+
+    /* In-flight guard: distinguish pgrep rc=0 (DEFERRED), rc=1 (clear), error/other (FAIL fail-closed) */
+    if (g_pgrep_pat[0]) {
+        char pgcmd[700], pgout[512];
+        if (cx_fmt(pgcmd, sizeof pgcmd, "pgrep -f '%s' >/dev/null 2>&1; echo PGRC=$?", g_pgrep_pat) ||
+            ckk_sh_t("rp-inflight", pgcmd, pgout, (int)sizeof pgout, 10) != 0) {
+            post_step(5, "FAIL", "inflight-probe-failed");
+            return 1;
+        }
+        if (has_line_prefix(pgout, "PGRC=0")) {
+            cx_fmt(g_step_state[5], sizeof g_step_state[5], "DEFERRED");
+            cx_fmt(g_step_detail[5], sizeof g_step_detail[5], "inflight-chain-or-prerun");
+            post_step(5, "DEFERRED", "inflight-chain-or-prerun");
+            return 1;
+        }
+        if (!has_line_prefix(pgout, "PGRC=1")) {
+            cx_fmt(g_step_state[5], sizeof g_step_state[5], "FAIL");
+            cx_fmt(g_step_detail[5], sizeof g_step_detail[5], "inflight-probe-failed");
+            post_step(5, "FAIL", "inflight-probe-failed");
+            return 1;
+        }
+    }
+
+    char ape_use[1100], dl_dir[1024], got_sha[65];
+    ape_use[0] = 0; dl_dir[0] = 0;
+    if (g_ape[0]) {
+        if (rp_file_sha(g_ape, got_sha) != 0 || !tx_eqz(got_sha, want_sha)) {
+            post_step(5, "FAIL", "ape-arg-sha-mismatch"); return 1;
+        }
+        cx_fmt(ape_use, sizeof ape_use, "%s", g_ape);
+    } else {
+        char ev_ape[1100];
+        if (!cx_fmt(ev_ape, sizeof ev_ape, "%s/unisacc.com", g_evdir) &&
+            rp_file_sha(ev_ape, got_sha) == 0 && tx_eqz(got_sha, want_sha)) {
+            cx_fmt(ape_use, sizeof ape_use, "%s", ev_ape);
+        } else if (rcpt_path[0] && rp_file_sha(rcpt_path, got_sha) == 0 && tx_eqz(got_sha, want_sha)) {
+            cx_fmt(ape_use, sizeof ape_use, "%s", rcpt_path);
+        } else {
+            const char *td = sy_env("TMPDIR"); if (!td || !td[0]) td = "/tmp";
+            if (cx_fmt(dl_dir, sizeof dl_dir, "%s/rp-dl-%d-%ld", td, sy_pid(), sy_wall_s()) ||
+                sy_mkdir_all(dl_dir, 0700) != 0) {
+                post_step(5, "FAIL", "mktemp-download-dir"); return 1;
+            }
+            if (gh_repo[0]) {
+                cx_fmt(cmd, sizeof cmd, "%s release download 'v%s' -R '%s' --pattern unisacc.com --dir '%s'",
+                       g_gh_bin, g_ver, gh_repo, dl_dir);
+            } else {
+                cx_fmt(cmd, sizeof cmd, "%s release download 'v%s' --pattern unisacc.com --dir '%s'",
+                       g_gh_bin, g_ver, dl_dir);
+            }
+            rc = run_bound("rp-gh-dl", cmd, out, (int)sizeof out);
+            if (rc != 0 || cx_fmt(ape_use, sizeof ape_use, "%s/unisacc.com", dl_dir) ||
+                sy_exists(ape_use) != 1) {
+                sy_remove_all(dl_dir);
+                post_step(5, "FAIL", "gh-download-failed");
+                return 1;
+            }
+            if (rp_file_sha(ape_use, got_sha) != 0 || !tx_eqz(got_sha, want_sha)) {
+                sy_remove_all(dl_dir);
+                post_step(5, "FAIL", "gh-download-sha-mismatch");
+                return 1;
+            }
+        }
+    }
+
+    if (cx_fmt(cmd, sizeof cmd, "%s -- '%s' '%s' %s --write",
+               g_install_bin, g_install_root, ape_use, want_sha)) {
+        if (dl_dir[0]) sy_remove_all(dl_dir);
+        return -1;
+    }
     rc = run_bound("rp-install", cmd, out, (int)sizeof out);
-    if (rc != 0) { post_step(5, "FAIL", "install-ape-write"); return 1; }
+    if (dl_dir[0]) sy_remove_all(dl_dir);
+    if (rc != 0) {
+        if (rp_file_sha(root_com, mid_sha) != 0) cx_fmt(mid_sha, sizeof mid_sha, "-");
+        if (!tx_eqz(mid_sha, old_sha)) {
+            return rp_do_rollback(root_com, want_sha, old_sha, "install-interrupted");
+        }
+        post_step(5, "FAIL", "install-ape-write");
+        return 1;
+    }
+
+    /* Post-install verification: sha256 + record + --version + mandatory smoke; failure triggers verified rollback */
+    int v_ok = (rp_file_sha(root_com, new_sha) == 0 && tx_eqz(new_sha, want_sha));
+    if (v_ok) v_ok = rp_check_installed_record(g_install_root, want_sha);
+    if (v_ok) v_ok = rp_root_version_matches(root_com, g_ver);
+    if (v_ok) {
+        if (g_smoke_cmd[0]) {
+            char qsmk[2400], scmd[2600]; long qi = 0;
+            for (long i = 0; g_smoke_cmd[i] && qi + 5 < (long)sizeof qsmk; i++) {
+                if (g_smoke_cmd[i] == '\'') {
+                    qsmk[qi++] = '\''; qsmk[qi++] = '\\'; qsmk[qi++] = '\''; qsmk[qi++] = '\'';
+                } else {
+                    qsmk[qi++] = g_smoke_cmd[i];
+                }
+            }
+            qsmk[qi] = 0;
+            if (cx_fmt(scmd, sizeof scmd, "sh -c '%s'", qsmk) ||
+                run_bound("rp-smoke", scmd, out, (int)sizeof out) != 0) v_ok = 0;
+        } else {
+            char tix[1100];
+            if (cx_fmt(tix, sizeof tix, "%s/tools/tool-index.cx", g_repo) || sy_exists(tix) != 1 ||
+                cx_fmt(cmd, sizeof cmd, "sh '%s' '%s' -- --check --root '%s'", root_com, tix, g_repo) ||
+                run_bound("rp-smoke", cmd, out, (int)sizeof out) != 0) {
+                v_ok = 0;
+            }
+        }
+    }
+    if (!v_ok) {
+        return rp_do_rollback(root_com, want_sha, old_sha, "post-install-verify");
+    }
+
+    printf("POST_ROOT_SNAP_SYNC\thint=warm tools via cx tools/tool-index.cx -- --check; check 13-snap-cache before next chain\n");
     post_step(5, "OK", "root-upgraded");
     return 0;
 }
@@ -209,7 +582,6 @@ static int step_worktree_print(void) {
     return 0;
 }
 
-/* Print-only: agyneon rearrange patches after mark-version-seq; never git apply here. */
 static int step_rearrange_print(void) {
     const char *dir = "$HOME/.local/share/unisacc/research/rearrange-patch";
     printf("POST_REARRANGE_HINT\t# after mark-version-seq: apply 3 patches then merge main into v0.0.96 and v0.0.95\n");
@@ -224,11 +596,314 @@ static int step_rearrange_print(void) {
     return 0;
 }
 
+static int rp_hex40(const char *s, long n) {
+    if (!s || n != 40) return 0;
+    int all_zero = 1;
+    for (long i = 0; i < 40; i++) {
+        char c = s[i];
+        if (!((c >= '0' && c <= '9') || (c >= 'a' && c <= 'f'))) return 0;
+        if (c != '0') all_zero = 0;
+    }
+    return !all_zero;
+}
+
+static int rp_status_is_bad(const char *s, long n) {
+    static const char *const bads[] = {"FAIL", "BLOCKED", "REFUSE", "REFUSED", "ERROR", "ABORT", "CANCEL", "CANCELED"};
+    if (!s || n <= 0) return 0;
+    for (int i = 0; i < (int)(sizeof bads / sizeof bads[0]); i++) {
+        long bl = tx_len(bads[i], 32);
+        if (n >= bl && tx_same(s, bl, bads[i], bl)) {
+            if (n == bl) return 1;
+            char c = s[bl];
+            if (c == ' ' || c == '\t' || c == ':' || c == '=' || c == '-' || c == '_') return 1;
+        }
+    }
+    return 0;
+}
+
+static int rp_y2_commit_exists_if_git(const char *repo, const char *y2) {
+    char cmd[1400], out[256];
+    if (!repo || !repo[0] || !rp_hex40(y2, tx_len(y2, 64))) return 0;
+    if (cx_fmt(cmd, sizeof cmd,
+        "if git -C '%s' rev-parse --git-dir >/dev/null 2>&1; then "
+        "[ \"$(git -C '%s' cat-file -t '%s' 2>/dev/null)\" = 'commit' ]; "
+        "fi", repo, repo, y2)) return 0;
+    out[0] = 0;
+    return ckk_sh_t("rp-y2-git", cmd, out, (int)sizeof out, 15) == 0;
+}
+
+static int rp_extract_y2_strict(char y2_out[64]) {
+    char p[1200]; size_t n = 0; char *b;
+    y2_out[0] = 0;
+    if (cx_fmt(p, sizeof p, "%s/INDEX.tsv", g_evdir) || sy_exists(p) != 1 || !(b = cx_read(p, &n))) return -1;
+    long at = 0; int found = 0, bad = 0;
+    while (at < (long)n) {
+        long e = at; while (e < (long)n && b[e] != '\n') e++;
+        const char *l = b + at; long ln = e - at;
+        if (ln > 0 && l[ln - 1] == '\r') ln--;
+        at = e + 1;
+        if (ln <= 0 || l[0] == '#') continue;
+        long c0o = 0, c0l = 0;
+        if (tx_field(l, ln, '\t', 0, &c0o, &c0l) != 0) continue;
+        if (c0l == 14 && tx_same(l + c0o, 14, "exec-7-Y2-done", 14)) {
+            long c2o = 0, c2l = 0, fo = 0, fl = 0, c4o = 0, c4l = 0;
+            if (tx_field(l, ln, '\t', 2, &c2o, &c2l) != 0 ||
+                tx_field(l, ln, '\t', 3, &fo, &fl) != 0 ||
+                tx_field(l, ln, '\t', 4, &c4o, &c4l) != 0 ||
+                c4l <= 0 ||
+                !rp_hex40(l + fo, fl) ||
+                rp_status_is_bad(l + c2o, c2l) ||
+                rp_status_is_bad(l + c4o, c4l)) {
+                bad = 1;
+                break;
+            }
+            char tmp[64];
+            mm_copy(tmp, sizeof tmp, l + fo, 40); tmp[40] = 0;
+            if (!found) {
+                mm_copy(y2_out, 64, tmp, 41);
+                found = 1;
+            } else if (!tx_eqz(y2_out, tmp)) {
+                bad = 1;
+                break;
+            }
+        }
+    }
+    mm_free(b);
+    if (bad || !found) { y2_out[0] = 0; return -1; }
+    if (!rp_y2_commit_exists_if_git(g_repo, y2_out)) { y2_out[0] = 0; return -1; }
+    return 0;
+}
+
+/* Return 1 active row found (match_s/match_e optional), 0 no active row/file absent, -1 read/stat error */
+static int rp_freeze_row_find(const char *frz_p, const char *ver, char **buf_out, size_t *fn_out, long *ms_out, long *me_out) {
+    char key[64];
+    int fe = sy_exists(frz_p);
+    if (fe < 0) return -1;
+    if (fe == 0) return 0;
+    if (cx_fmt(key, sizeof key, "%s-FREEZE\t", ver)) return -1;
+    size_t fn = 0; char *fb = cx_read(frz_p, &fn);
+    if (!fb) return -1;
+    long at = 0, match_s = -1, match_e = -1, keyl = tx_len(key, 64);
+    while (at < (long)fn) {
+        long e = at; while (e < (long)fn && fb[e] != '\n') e++;
+        long ln = e - at;
+        if (ln >= keyl && tx_same(fb + at, keyl, key, keyl)) {
+            match_s = at; match_e = e; break;
+        }
+        at = e + 1;
+    }
+    if (match_s < 0) { mm_free(fb); return 0; }
+    if (buf_out && fn_out && ms_out && me_out) {
+        *buf_out = fb; *fn_out = fn; *ms_out = match_s; *me_out = match_e;
+    } else {
+        mm_free(fb);
+    }
+    return 1;
+}
+
+/* Verify build/freeze.tsv contains an already-thawed comment row "# <VER>-FREEZE\t...Y2=<y2>" */
+static int rp_freeze_has_thawed_y2(const char *frz_p, const char *ver, const char *y2) {
+    char pfx[64], y2tok[80];
+    if (sy_exists(frz_p) != 1 || cx_fmt(pfx, sizeof pfx, "# %s-FREEZE\t", ver) ||
+        cx_fmt(y2tok, sizeof y2tok, "Y2=%s", y2)) return 0;
+    size_t fn = 0; char *fb = cx_read(frz_p, &fn);
+    if (!fb) return 0;
+    long at = 0, pfxl = tx_len(pfx, sizeof pfx), y2l = tx_len(y2tok, sizeof y2tok);
+    int ok = 0;
+    while (at < (long)fn) {
+        long e = at; while (e < (long)fn && fb[e] != '\n') e++;
+        const char *l = fb + at; long ln = e - at;
+        if (ln > 0 && l[ln - 1] == '\r') ln--;
+        at = e + 1;
+        if (ln >= pfxl && tx_same(l, pfxl, pfx, pfxl)) {
+            long ypos = tx_find(l, ln, y2tok, y2l);
+            if (ypos >= 0 && (ypos == 0 || l[ypos - 1] == ' ' || l[ypos - 1] == '\t' || l[ypos - 1] == '(')) {
+                long endp = ypos + y2l;
+                if (endp == ln || l[endp] == ')' || l[endp] == ' ' || l[endp] == '\t') {
+                    ok = 1;
+                    break;
+                }
+            }
+        }
+    }
+    mm_free(fb);
+    return ok;
+}
+
+static int rp_extract_out_field(const char *out, long olen, const char *key_pfx, char *val_out, int vcap) {
+    long klen = tx_len(key_pfx, 64);
+    long at = tx_find(out, olen, key_pfx, klen);
+    val_out[0] = 0;
+    if (at < 0) return -1;
+    long p = at + klen, k = 0;
+    while (p < olen && out[p] != '\t' && out[p] != '\n' && out[p] != '\r' && k + 1 < vcap) val_out[k++] = out[p++];
+    val_out[k] = 0;
+    return k > 0 ? 0 : -1;
+}
+
+static int rp_thaw_gate_current(const char *want_sha, int allow_newer_public, char out[4096]) {
+    char cmd[3200], root_com[1024], live_sha[65];
+    char crc_path[1200], runner[1200];
+    out[0] = 0;
+    if (sy_exists("tools/root-current.cx") == 1) cx_fmt(crc_path, sizeof crc_path, "tools/root-current.cx");
+    else if (cx_fmt(crc_path, sizeof crc_path, "%s/tools/root-current.cx", g_repo) || sy_exists(crc_path) != 1) return 0;
+    if (sy_exists("./unisacc.com") == 1) cx_fmt(runner, sizeof runner, "sh ./unisacc.com");
+    else if (!cx_fmt(runner, sizeof runner, "%s/unisacc.com", g_repo) && sy_exists(runner) == 1) {
+        char tmp_r[1250]; cx_fmt(tmp_r, sizeof tmp_r, "sh '%s'", runner);
+        mm_copy(runner, sizeof runner, tmp_r, tx_len(tmp_r, sizeof tmp_r) + 1);
+    } else cx_fmt(runner, sizeof runner, "cx");
+    if (cx_fmt(cmd, sizeof cmd, "%s '%s' -- --repo '%s' --root '%s' --no-candidate-ahead",
+               runner, crc_path, g_repo, g_install_root)) return 0;
+    int rrc = run_bound("rp-thaw-gate", cmd, out, 4096);
+    long olen = tx_len(out, 4096);
+    if (rrc != 0 || !has_line_prefix(out, "ROOT_CURRENT\tPASS\t") || tx_find(out, olen, "WARN=", 5) >= 0) return 0;
+    if (allow_newer_public) {
+        char act_ver[64];
+        if (rp_extract_out_field(out, olen, "\tactual=", act_ver, sizeof act_ver) != 0) return 0;
+        if (rs_precedes(act_ver, g_ver)) return 0;
+        return 1;
+    }
+    char exp_ver_tok[64], act_ver_tok[64], exp_wsha_tok[96], exp_asha_tok[96];
+    cx_fmt(exp_ver_tok, sizeof exp_ver_tok, "\texpect=%s\t", g_ver);
+    cx_fmt(act_ver_tok, sizeof act_ver_tok, "\tactual=%s\t", g_ver);
+    cx_fmt(exp_wsha_tok, sizeof exp_wsha_tok, "\texpect_sha=%s\t", want_sha);
+    cx_fmt(exp_asha_tok, sizeof exp_asha_tok, "\tactual_sha=%s\t", want_sha);
+    int gate_ok = (tx_find(out, olen, exp_ver_tok, tx_len(exp_ver_tok, sizeof exp_ver_tok)) >= 0 &&
+                   tx_find(out, olen, exp_wsha_tok, tx_len(exp_wsha_tok, sizeof exp_wsha_tok)) >= 0 &&
+                   tx_find(out, olen, act_ver_tok, tx_len(act_ver_tok, sizeof act_ver_tok)) >= 0 &&
+                   tx_find(out, olen, exp_asha_tok, tx_len(exp_asha_tok, sizeof exp_asha_tok)) >= 0);
+    if (!gate_ok) return 0;
+    if (cx_fmt(root_com, sizeof root_com, "%s/unisacc.com", g_install_root) ||
+        rp_file_sha(root_com, live_sha) != 0 || !tx_eqz(live_sha, want_sha) ||
+        !rp_root_version_matches(root_com, g_ver)) {
+        return 0;
+    }
+    return 1;
+}
+
+static int step_thaw_freeze(void) {
+    char frz_p[1200], out[4096], y2[64], want_sha[65], gh_repo[128], rcpt_path[900];
+    size_t fn = 0; char *fb = 0; long match_s = -1, match_e = -1;
+
+    /* Unconditional verification BEFORE consulting build/freeze.tsv: Y2 + release SHA + live Gate 24 */
+    if (rp_extract_y2_strict(y2) != 0) {
+        post_step(8, "FAIL", "missing-exec-7-Y2-done");
+        return 1;
+    }
+    const char *edet = 0;
+    if (rp_resolve_want_sha(want_sha, gh_repo, rcpt_path, 0, &edet) != 0 || !want_sha[0]) {
+        post_step(8, "FAIL", edet ? edet : "missing-release-sha-for-version");
+        return 1;
+    }
+
+    int dry_pipeline = (g_dry && g_step_only == 0);
+    int gate_ok = 0;
+    if (!dry_pipeline) {
+        gate_ok = rp_thaw_gate_current(want_sha, 0, out);
+        if (!gate_ok) {
+            printf("POST_THAW_GATE\tFAIL\t%s\n", out[0] ? out : "root-current-failed");
+            cx_fmt(g_step_state[8], sizeof g_step_state[8], "FAIL");
+            cx_fmt(g_step_detail[8], sizeof g_step_detail[8], "thaw-blocked-root-stale");
+            post_step(8, "FAIL", "thaw-blocked-root-stale");
+            return 1;
+        }
+    }
+
+    if (cx_fmt(frz_p, sizeof frz_p, "%s/build/freeze.tsv", g_repo)) return -1;
+    int fstat = rp_freeze_row_find(frz_p, g_ver, &fb, &fn, &match_s, &match_e);
+    if (fstat < 0) { post_step(8, "FAIL", "freeze-stat-or-read-failed"); return 1; }
+    if (fstat == 0) {
+        if (!rp_freeze_has_thawed_y2(frz_p, g_ver, y2)) {
+            post_step(8, "FAIL", "freeze-row-missing-or-unverified");
+            return 1;
+        }
+        if (dry_pipeline && !rp_thaw_gate_current(want_sha, 1, out)) {
+            printf("POST_THAW_GATE\tFAIL\t%s\n", out[0] ? out : "root-current-failed");
+            post_step(8, "FAIL", "thaw-blocked-root-stale");
+            return 1;
+        }
+        printf("POST_THAW_GATE\tPASS\t%s-FREEZE\n", g_ver);
+        post_step(8, "OK", "already-thawed-verified");
+        return 0;
+    }
+
+    if (dry_pipeline) {
+        gate_ok = rp_thaw_gate_current(want_sha, 0, out);
+        mm_free(fb);
+        if (gate_ok) {
+            printf("POST_THAW_GATE\tPASS\t%s-FREEZE\n", g_ver);
+            post_step(8, "OK", "dry-ready-to-thaw");
+            return 0;
+        }
+        if (g_root_up) {
+            post_step(8, "OK", "dry-awaiting-root-upgrade");
+            return 0;
+        }
+        printf("POST_THAW_GATE\tFAIL\t%s\n", out[0] ? out : "root-current-failed");
+        post_step(8, "FAIL", "thaw-blocked-root-stale");
+        return 1;
+    }
+
+    printf("POST_THAW_GATE\tPASS\t%s-FREEZE\n", g_ver);
+
+    char dbuf[64];
+    if (ckk_sh_t("rp-date", "date +%Y-%m-%d", dbuf, (int)sizeof dbuf, 5) == 0) {
+        long dl = tx_len(dbuf, sizeof dbuf);
+        while (dl > 0 && (dbuf[dl - 1] == '\n' || dbuf[dl - 1] == '\r')) dbuf[--dl] = 0;
+    } else {
+        cx_fmt(dbuf, sizeof dbuf, "unknown");
+    }
+    size_t ncap = fn + 256;
+    char *nb = mm_alloc((long)ncap);
+    if (!nb) { mm_free(fb); return -1; }
+    size_t pos = 0;
+    if (match_s > 0) { mm_copy(nb, (long)ncap, fb, match_s); pos = (size_t)match_s; }
+    char repl[1024];
+    long rlen = match_e - match_s;
+    if (rlen > 700) rlen = 700;
+    if (cx_fmt(repl, sizeof repl, "# %.*s (published %s Y2=%s)", (int)rlen, fb + match_s, dbuf, y2)) {
+        mm_free(nb); mm_free(fb); return -1;
+    }
+    size_t rsl = (size_t)tx_len(repl, sizeof repl);
+    if (pos + rsl + (fn - (size_t)match_e) + 2 >= ncap) { mm_free(nb); mm_free(fb); return -1; }
+    mm_copy(nb + pos, (long)(ncap - pos), repl, (long)rsl); pos += rsl;
+    if ((size_t)match_e < fn) {
+        mm_copy(nb + pos, (long)(ncap - pos), fb + match_e, (long)(fn - (size_t)match_e));
+        pos += fn - (size_t)match_e;
+    }
+    mm_free(fb);
+    int wrc = sy_write_atomic(frz_p, nb, pos, 0644);
+    mm_free(nb);
+    if (wrc != 0) { post_step(8, "FAIL", "freeze-write-failed"); return 1; }
+    post_step(8, "OK", "freeze-row-thawed");
+    return 0;
+}
+
 static int run_one(int n) {
     int rc;
     if (g_exec && g_done[n] && !(g_step_only > 0 && g_step_only == n)) {
-        post_step(n, "SKIP", "already-DONE");
-        return 0;
+        if (n == 5) {
+            char wsha[65];
+            if (rp_root_is_live_current(g_ver, g_install_root, wsha)) {
+                post_step(5, "SKIP", "already-DONE-verified");
+                return 0;
+            }
+            g_done[5] = 0;
+        } else if (n == 8) {
+            char frz_p[1200], wsha[65], y2[64];
+            if (rp_extract_y2_strict(y2) == 0 &&
+                !cx_fmt(frz_p, sizeof frz_p, "%s/build/freeze.tsv", g_repo) &&
+                rp_freeze_row_find(frz_p, g_ver, 0, 0, 0, 0) == 0 &&
+                rp_freeze_has_thawed_y2(frz_p, g_ver, y2) &&
+                rp_root_is_live_current(g_ver, g_install_root, wsha)) {
+                post_step(8, "SKIP", "already-DONE-verified");
+                return 0;
+            }
+            g_done[8] = 0;
+        } else {
+            post_step(n, "SKIP", "already-DONE");
+            return 0;
+        }
     }
     if (g_step_only > 0 && n != g_step_only) return 0;
     switch (n) {
@@ -239,9 +914,14 @@ static int run_one(int n) {
     case 5: rc = step_root_upgrade(); break;
     case 6: rc = step_worktree_print(); break;
     case 7: rc = step_rearrange_print(); break;
+    case 8: rc = step_thaw_freeze(); break;
     default: return 2;
     }
-    if (rc == 0 && g_exec) mark_done(n);
+    if (rc == 0 && !g_step_skipped[n] && g_exec) {
+        if (mark_done(n) != 0) { post_step(n, "FAIL", "state-write-failed"); return 1; }
+    } else if (rc != 0 && g_exec) {
+        if (save_state() != 0) post_step(n, "FAIL", "state-write-failed");
+    }
     return rc;
 }
 
@@ -252,15 +932,24 @@ static void print_plan(void) {
     printf("RELEASE_POST\tstatus=PLAN\n");
 }
 
+static int valid_reason_text(const char *s) {
+    if (!s || !s[0] || s[0] == '-') return 0;
+    for (long i = 0; s[i]; i++) {
+        unsigned char c = (unsigned char)s[i];
+        if (c < 0x20 || c == '\t' || c == '\n' || c == '\r') return 0;
+    }
+    return 1;
+}
+
 static int cmd_run(void) {
     int i, rc;
     if (!g_dry && !g_exec) return die_usage("run needs --dry or --execute");
     if (g_dry && g_exec) return die_usage("--dry and --execute conflict");
     if (!g_ver[0]) return die_usage("--version required");
+    if (g_step_only < 0 || g_step_only > RP_STEPS) return die_usage("--step out of range");
     if (!g_repo[0] && cx_fmt(g_repo, sizeof g_repo, ".")) return 2;
     if (!g_evdir[0] && cx_fmt(g_evdir, sizeof g_evdir, "%s/release/evidence/%s", g_repo, g_ver)) return 2;
     if (!g_state[0] && cx_fmt(g_state, sizeof g_state, "%s/release-post-state.tsv", g_evdir)) return 2;
-    /* chain/prerun/backup dirs only when caller sets them; --verify needs none by default */
     if (!g_chain_bin[0] && cx_fmt(g_chain_bin, sizeof g_chain_bin, "sh ./unisacc.com tools/release-chain.cx --")) return 2;
     if (!g_metrics_bin[0] && cx_fmt(g_metrics_bin, sizeof g_metrics_bin, "sh ./unisacc.com tools/version-metrics-gen.cx")) return 2;
     if (!g_day_bin[0] && cx_fmt(g_day_bin, sizeof g_day_bin, "sh ./unisacc.com tools/day-metrics.cx")) return 2;
@@ -272,23 +961,27 @@ static int cmd_run(void) {
         rc = run_one(i);
         if (rc != 0) {
             printf("RELEASE_POST\tstatus=BLOCKED:%s\n", step_name(i));
-            printf("RELEASE_POST_RETRY\tsh ./unisacc.com tools/release-post.cx -- run --version %s --execute --step %d\n",
+            printf("RELEASE_POST_RETRY\tcx tools/release-post.cx -- run --version %s --execute --step %d\n",
                    g_ver, i);
             return 1;
         }
     }
-    printf("RELEASE_POST\tstatus=DONE\n");
+    if (g_step_only > 0) printf("RELEASE_POST\tstatus=STEP_DONE:%s\n", step_name(g_step_only));
+    else printf("RELEASE_POST\tstatus=DONE\n");
     return 0;
 }
 
 int main(int argc, char **argv) {
     const char *cmd = 0; int a = 1;
-    g_dry = 0; g_exec = 0; g_root_up = 0; g_step_only = 0; g_mutant_dry_write = 0;
+    g_dry = 0; g_exec = 0; g_root_up = 1; g_step_only = 0; g_mutant_dry_write = 0;
     g_ver[0] = g_repo[0] = g_evdir[0] = g_state[0] = 0;
     g_chain_dir[0] = g_prerun_dir[0] = g_backup_dir[0] = 0;
     g_chain_bin[0] = g_metrics_bin[0] = g_day_bin[0] = g_install_bin[0] = 0;
     g_install_root[0] = g_ape[0] = g_ape_sha[0] = g_cleanup_doc[0] = 0;
-    if (argc < 2) return die_usage("need plan|run");
+    g_no_root_up_reason[0] = g_smoke_cmd[0] = 0;
+    cx_fmt(g_gh_bin, sizeof g_gh_bin, "gh");
+    cx_fmt(g_pgrep_pat, sizeof g_pgrep_pat, "tools/(candidate-chain|prerun-drive|release-build|kernel-build|selfhost)\\.cx");
+    if (argc < 2) return die_usage("need plan|run|thaw");
     cmd = argv[a++];
     for (; a < argc; a++) {
         if (tx_eqz(argv[a], "--version") && a + 1 < argc) {
@@ -296,6 +989,16 @@ int main(int argc, char **argv) {
         } else if (tx_eqz(argv[a], "--dry")) g_dry = 1;
         else if (tx_eqz(argv[a], "--execute")) g_exec = 1;
         else if (tx_eqz(argv[a], "--root-upgrade")) g_root_up = 1;
+        else if (tx_eqz(argv[a], "--no-root-upgrade")) {
+            if (a + 1 >= argc || !valid_reason_text(argv[a + 1])) {
+                return die_usage("--no-root-upgrade requires a clean single-line REASON");
+            }
+            g_root_up = 0;
+            if (cx_fmt(g_no_root_up_reason, sizeof g_no_root_up_reason, "%s", argv[++a])) return 2;
+        }
+        else if (tx_eqz(argv[a], "--gh-bin") && a + 1 < argc) { if (cx_fmt(g_gh_bin, sizeof g_gh_bin, "%s", argv[++a])) return 2; }
+        else if (tx_eqz(argv[a], "--smoke-cmd") && a + 1 < argc) { if (cx_fmt(g_smoke_cmd, sizeof g_smoke_cmd, "%s", argv[++a])) return 2; }
+        else if (tx_eqz(argv[a], "--pgrep-pat") && a + 1 < argc) { if (cx_fmt(g_pgrep_pat, sizeof g_pgrep_pat, "%s", argv[++a])) return 2; }
         else if (tx_eqz(argv[a], "--mutant-dry-write")) g_mutant_dry_write = 1;
         else if (tx_eqz(argv[a], "--step") && a + 1 < argc) g_step_only = (int)strtol(argv[++a], 0, 10);
         else if (tx_eqz(argv[a], "--repo") && a + 1 < argc) { if (cx_fmt(g_repo, sizeof g_repo, "%s", argv[++a])) return 2; }
@@ -320,5 +1023,6 @@ int main(int argc, char **argv) {
         return 0;
     }
     if (tx_eqz(cmd, "run")) return cmd_run();
-    return die_usage("need plan|run");
+    if (tx_eqz(cmd, "thaw")) { g_step_only = 8; return cmd_run(); }
+    return die_usage("need plan|run|thaw");
 }

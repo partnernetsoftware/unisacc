@@ -154,13 +154,62 @@ static int merge_cr_shards(int nfiles, char **files) {
     return 0;
 }
 
+static long cr_span_find(const char *hay, long hn, const char *needle, long nn) {
+    if (!hay || !needle || nn <= 0 || hn < nn) return -1;
+    for (long i = 0; i <= hn - nn; i++) {
+        long j = 0;
+        while (j < nn && hay[i + j] == needle[j]) j++;
+        if (j == nn) return i;
+    }
+    return -1;
+}
+
+static int prepare_alt_cr_tree(const char *cwd, const char *tag, const char *find_str, const char *sub_str, char *mdir_out, size_t mcap) {
+    char p[1400], cmd[4800], out[1024];
+    size_t sn = 0; char *src;
+    if (cx_fmt(mdir_out, mcap, "%s/alt-cr-%s", tmpd, tag)) return -1;
+    if (cx_fmt(cmd, sizeof cmd,
+        "rm -rf '%s' && mkdir -p '%s/tools' && ln -sT '%s/cx' '%s/cx' && ln -s '%s/cxroot.tsv' '%s/cxroot.tsv' && "
+        "ln -s '%s/unisacc.com' '%s/unisacc.com' && ln -sT '%s/tools/cxlib' '%s/tools/cxlib' && "
+        "ln -s '%s/tools/bound' '%s/tools/bound' && ln -s '%s/tools/bound.c' '%s/tools/bound.c' && "
+        "{ [ ! -e '%s/ext' ] || ln -sT '%s/ext' '%s/ext'; }",
+        mdir_out, mdir_out, cwd, mdir_out, cwd, mdir_out, cwd, mdir_out, cwd, mdir_out, cwd, mdir_out, cwd, mdir_out, cwd, cwd, mdir_out)) return -1;
+    char *sv[] = {"./tools/bound", "15", "sh", "-c", cmd, 0};
+    if (run(sv, out, sizeof out) != 0) return -1;
+    cx_fmt(p, sizeof p, "%s/tools/chain-ready.cx", cwd);
+    src = cx_read(p, &sn);
+    if (!src) return -1;
+    long fl = tx_len(find_str, 4096), rl = tx_len(sub_str, 4096);
+    long at = cr_span_find(src, (long)sn, find_str, fl);
+    if (at < 0 || cr_span_find(src + at + fl, (long)sn - at - fl, find_str, fl) >= 0) { mm_free(src); return -1; }
+    size_t mn = sn - (size_t)fl + (size_t)rl;
+    char *mb = mm_alloc((long)mn + 1);
+    if (!mb) { mm_free(src); return -1; }
+    mm_copy(mb, (long)mn + 1, src, at);
+    mm_copy(mb + at, (long)mn + 1 - at, sub_str, rl);
+    mm_copy(mb + at + rl, (long)mn + 1 - at - rl, src + at + fl, (long)sn - at - fl);
+    mm_free(src);
+    cx_fmt(p, sizeof p, "%s/tools/chain-ready.cx", mdir_out);
+    if (cx_write(p, mb, mn)) { mm_free(mb); return -1; }
+    mm_free(mb);
+    return 0;
+}
+
+static int run_cr_in(const char *tdir, const char *subcmd, char *out, int ocap) {
+    char cmd[4800];
+    if (cx_fmt(cmd, sizeof cmd, "cd '%s' && sh ./unisacc.com tools/chain-ready.cx -- %s", tdir, subcmd)) return -1;
+    char *av[] = {"./tools/bound", "45", "sh", "-c", cmd, 0};
+    return run(av, out, ocap);
+}
+
 int main(int argc, char **argv) {
-    int run_core = 1, run_launch = 1; const char *part_name = "all";
+    int run_core = 1, run_launch = 1, run_ident = 1; const char *part_name = "all";
     for (int a = 1; a < argc; a++) {
         if (tx_eqz(argv[a], "--part") && a + 1 < argc) {
             part_name = argv[++a];
-            if (tx_eqz(part_name, "core")) { run_core = 1; run_launch = 0; }
-            else if (tx_eqz(part_name, "launch")) { run_core = 0; run_launch = 1; }
+            if (tx_eqz(part_name, "core")) { run_core = 1; run_launch = 0; run_ident = 0; }
+            else if (tx_eqz(part_name, "launch")) { run_core = 0; run_launch = 1; run_ident = 0; }
+            else if (tx_eqz(part_name, "ident")) { run_core = 0; run_launch = 0; run_ident = 1; }
             else { printf("FAIL\tbad-part\t%s\n", part_name); return 2; }
         } else if (tx_eqz(argv[a], "--merge-shards") && a + 1 < argc) {
             return merge_cr_shards(argc - (a + 1), argv + a + 1);
@@ -171,7 +220,7 @@ int main(int argc, char **argv) {
                 tx_to_i64(cs, (long)tx_len(cs, 16), 10, &c64) || f64 < 0 || c64 <= 0) {
                 printf("FAIL\tbad-case-range\t%s %s\n", fs, cs); return 2;
             }
-            launch_from = (int)f64; launch_count = (int)c64; a += 2;
+            launch_from = (int)f64; launch_count = (int)c64; run_ident = 0; a += 2;
         } else {
             printf("FAIL\tbad-arg\t%s\n", argv[a]); return 2;
         }
@@ -1086,6 +1135,160 @@ int main(int argc, char **argv) {
             ck(rc == 2 && has(out, "REFUSE\tLAUNCH_ENV\treason=bad-chain-base"), "launch-env-relative-chain-base-refused");
         }
     }
+    }
+    if (run_ident) {
+        char irepo[400], cwd[400], ih_real[400], ih_sym[400], ih_fail[400], ih_persist[512], ph_link[512], cmd[4096], sub[2048];
+        if (sy_cwd(cwd, sizeof cwd) != 0) cwd[0] = 0;
+        cx_fmt(irepo, sizeof irepo, "%s/irepo", tmpd);
+        cx_fmt(ih_real, sizeof ih_real, "%s/ident-real", tmpd);
+        cx_fmt(ih_sym, sizeof ih_sym, "%s/ident-sym", tmpd);
+        cx_fmt(ih_fail, sizeof ih_fail, "%s/ident-fail", tmpd);
+        const char *home = getenv("HOME");
+        int have_home = (home && home[0] && home[0] == '/');
+        if (have_home) {
+            cx_fmt(ih_persist, sizeof ih_persist, "%s/.cache/unisacc/ident-helper/.test-c22-%d", home, (int)sy_pid());
+            cx_fmt(ph_link, sizeof ph_link, "%s/.cache/unisacc/ident-helper/.test-c22-link-%d", home, (int)sy_pid());
+        } else {
+            ih_persist[0] = 0; ph_link[0] = 0;
+        }
+        cx_fmt(cmd, sizeof cmd,
+            "mkdir -p '%s/seed' '%s/tools' '%s/build' && "
+            "cp build/chain-env.tsv '%s/build/chain-env.tsv' && "
+            "printf '#!/bin/sh\\nshift\\nexec \"$@\"\\n' > '%s/tools/bound' && chmod +x '%s/tools/bound' && "
+            "printf 'int sha_dummy = 1;\\n' > '%s/seed/sha256.h' && "
+            "printf '#include \"sha256.h\"\\nint main(void) { return sha_dummy - 1; }\\n' > '%s/seed/ident.c' && "
+            "git -C '%s' init -q && git -C '%s' config user.name t && git -C '%s' config user.email t@t && "
+            "git -C '%s' add -A && git -C '%s' commit -qm init && "
+            "cc -std=c99 -O2 '%s/seed/ident.c' -o '%s' && chmod 700 '%s' && "
+            "H1=$(sha256sum '%s/seed/ident.c' | awk '{print $1}') && H2=$(sha256sum '%s/seed/sha256.h' | awk '{print $1}') && "
+            "SS=$(printf 'ident.c=%%s\\nsha256.h=%%s\\n' \"$H1\" \"$H2\" | sha256sum | awk '{print $1}') && "
+            "BS=$(sha256sum '%s' | awk '{print $1}') && "
+            "printf 'src_sha=%%s\\nhelper_sha=%%s\\n' \"$SS\" \"$BS\" > '%s.ident' && "
+            "ln -sf '%s' '%s'",
+            irepo, irepo, irepo, irepo, irepo, irepo, irepo, irepo, irepo, irepo, irepo, irepo, irepo,
+            irepo, ih_real, ih_real, irepo, irepo, ih_real, ih_real, ih_real, ih_sym);
+        { char *sv[] = {"./tools/bound", "50", "sh", "-c", cmd, 0}; rc = run(sv, out, sizeof out); ck(rc == 0, "ident-fixture-setup"); }
+
+        /* RED 1: symlink helper binary MUST be refused even though target is executable */
+        cx_fmt(sub, sizeof sub, "UNISACC_IDENT_HELPER='%s' sh ./unisacc.com tools/chain-ready.cx -- --only 20-ident-helper --repo '%s'", ih_sym, irepo);
+        { char *v[] = {"./tools/bound", "30", "sh", "-c", sub, 0}; rc = run(v, out, sizeof out); ck(rc == 1 && has(out, "20-ident-helper\tFAIL") && has(out, "missing-or-not-regular"), "ident-symlink-helper-refused"); }
+
+        /* RED 2a: symlink .ident receipt MUST be refused */
+        cx_fmt(cmd, sizeof cmd, "cp '%s' '%s.copy' && cp '%s.ident' '%s.ident.real' && ln -sf '%s.ident.real' '%s.copy.ident'", ih_real, ih_real, ih_real, ih_real, ih_real, ih_real);
+        { char *sv[] = {"./tools/bound", "10", "sh", "-c", cmd, 0}; (void)run(sv, out, sizeof out); }
+        cx_fmt(sub, sizeof sub, "UNISACC_IDENT_HELPER='%s.copy' sh ./unisacc.com tools/chain-ready.cx -- --only 20-ident-helper --repo '%s' --strict-helper", ih_real, irepo);
+        { char *v[] = {"./tools/bound", "30", "sh", "-c", sub, 0}; rc = run(v, out, sizeof out); ck(rc == 1 && has(out, "20-ident-helper\tFAIL") && has(out, "helper-receipt-malformed"), "ident-symlink-receipt-refused"); }
+
+        /* RED 2b: trailing garbage on src_sha= AND conflicting duplicate lines MUST be refused */
+        cx_fmt(cmd, sizeof cmd,
+            "S=$(grep '^src_sha=' '%s.ident' | cut -d= -f2); H=$(grep '^helper_sha=' '%s.ident' | cut -d= -f2); "
+            "printf 'src_sha=%%sEXTRA_GARBAGE\\nhelper_sha=%%s\\n' \"$S\" \"$H\" > '%s.copy.ident'", ih_real, ih_real, ih_real);
+        { char *sv[] = {"./tools/bound", "10", "sh", "-c", cmd, 0}; (void)run(sv, out, sizeof out); }
+        rc = run((char *[]){"./tools/bound", "30", "sh", "-c", sub, 0}, out, sizeof out);
+        ck(rc == 1 && has(out, "helper-receipt-malformed"), "ident-kv-trailing-garbage-refused");
+
+        cx_fmt(cmd, sizeof cmd,
+            "S=$(grep '^src_sha=' '%s.ident' | cut -d= -f2); H=$(grep '^helper_sha=' '%s.ident' | cut -d= -f2); "
+            "printf 'src_sha=%%s\\nsrc_sha=0000000000000000000000000000000000000000000000000000000000000000\\nhelper_sha=%%s\\n' \"$S\" \"$H\" > '%s.copy.ident'", ih_real, ih_real, ih_real);
+        { char *sv[] = {"./tools/bound", "10", "sh", "-c", cmd, 0}; (void)run(sv, out, sizeof out); }
+        rc = run((char *[]){"./tools/bound", "30", "sh", "-c", sub, 0}, out, sizeof out);
+        ck(rc == 1 && has(out, "helper-receipt-malformed"), "ident-kv-duplicate-conflict-refused");
+
+        /* RED 3: failing script with matching SHA/src_sha receipt MUST be refused under --strict-helper */
+        cx_fmt(cmd, sizeof cmd,
+            "printf '#!/bin/sh\\nexit 1\\n' > '%s' && chmod 700 '%s' && "
+            "S=$(grep '^src_sha=' '%s.ident' | cut -d= -f2) && H=$(sha256sum '%s' | awk '{print $1}') && "
+            "printf 'src_sha=%%s\\nhelper_sha=%%s\\n' \"$S\" \"$H\" > '%s.ident'",
+            ih_fail, ih_fail, ih_real, ih_fail, ih_fail);
+        { char *sv[] = {"./tools/bound", "10", "sh", "-c", cmd, 0}; (void)run(sv, out, sizeof out); }
+        cx_fmt(sub, sizeof sub, "UNISACC_IDENT_HELPER='%s' sh ./unisacc.com tools/chain-ready.cx -- --only 20-ident-helper --repo '%s' --strict-helper", ih_fail, irepo);
+        rc = run((char *[]){"./tools/bound", "30", "sh", "-c", sub, 0}, out, sizeof out);
+        ck(rc == 1 && has(out, "20-ident-helper\tFAIL") && has(out, "helper-exec-probe-failed"), "ident-strict-broken-exec-refused");
+
+        /* --prepare-helper: builds/reuses persistent helper & refuses /tmp + symlink-to-/tmp */
+        cx_fmt(sub, sizeof sub, "--prepare-helper --repo '%s' --helper-out '%s/ephem-helper'", irepo, tmpd);
+        rc = run_cr_in(cwd, sub, out, sizeof out);
+        ck(rc == 1 && has(out, "REFUSE\tPREPARE_HELPER\treason=helper-ephemeral-path"), "ident-prepare-helper-ephemeral-tmp-refused");
+
+        if (have_home) {
+            cx_fmt(sub, sizeof sub, "--prepare-helper --repo '%s' --helper-out '%s'", irepo, ih_persist);
+            rc = run_cr_in(cwd, sub, out, sizeof out);
+            ck(rc == 0 && has(out, "action=rebuilt") && has(out, "CHAIN_READY_PREPARE_HELPER\tstatus=PREPARED"), "ident-prepare-helper-persistent-builds");
+
+            rc = run_cr_in(cwd, sub, out, sizeof out);
+            ck(rc == 0 && has(out, "action=reused") && has(out, "CHAIN_READY_PREPARE_HELPER\tstatus=PREPARED"), "ident-prepare-helper-persistent-reuses");
+
+            /* Symlink inside persistent HOME pointing into /tmp MUST be caught as ephemeral */
+            cx_fmt(cmd, sizeof cmd, "ln -sf '%s/ephem-link-tgt' '%s'", tmpd, ph_link);
+            { char *sv[] = {"./tools/bound", "10", "sh", "-c", cmd, 0}; (void)run(sv, out, sizeof out); }
+            cx_fmt(sub, sizeof sub, "--prepare-helper --repo '%s' --helper-out '%s'", irepo, ph_link);
+            rc = run_cr_in(cwd, sub, out, sizeof out);
+            ck(rc == 1 && has(out, "REFUSE\tPREPARE_HELPER\treason=helper-ephemeral-path"), "ident-prepare-helper-symlink-to-tmp-refused");
+
+            /* --require-persistent-helper refuses /tmp helper in 20-ident-helper and --launch-env, accepts persistent */
+            cx_fmt(sub, sizeof sub, "UNISACC_IDENT_HELPER='%s' sh ./unisacc.com tools/chain-ready.cx -- --only 20-ident-helper --repo '%s' --strict-helper --require-persistent-helper", ih_real, irepo);
+            rc = run((char *[]){"./tools/bound", "30", "sh", "-c", sub, 0}, out, sizeof out);
+            ck(rc == 1 && has(out, "20-ident-helper\tFAIL") && has(out, "helper-ephemeral-path"), "ident-require-persistent-refuses-tmp-gate20");
+
+            cx_fmt(sub, sizeof sub,
+                "env -i HOME=\"$HOME\" PATH=/usr/bin:/bin TMPDIR=/tmp UNISACC_IDENT_HELPER='%s' "
+                "sh ./unisacc.com tools/chain-ready.cx -- --launch-env --repo '%s' --strict-helper --require-persistent-helper",
+                ih_real, irepo);
+            rc = run((char *[]){"./tools/bound", "30", "sh", "-c", sub, 0}, out, sizeof out);
+            ck(rc == 2 && has(out, "REFUSE\tLAUNCH_ENV\treason=ident-helper-ephemeral"), "ident-require-persistent-refuses-tmp-launch-env");
+
+            cx_fmt(sub, sizeof sub,
+                "env -i HOME=\"$HOME\" PATH=/usr/bin:/bin TMPDIR=/tmp UNISACC_IDENT_HELPER='%s' "
+                "sh ./unisacc.com tools/chain-ready.cx -- --launch-env --repo '%s' --strict-helper --require-persistent-helper",
+                ih_persist, irepo);
+            rc = run((char *[]){"./tools/bound", "30", "sh", "-c", sub, 0}, out, sizeof out);
+            ck(rc == 0 && has(out, "CHAIN_READY_LAUNCH_ENV\tok=1") && has(out, "--require-persistent-helper"), "ident-require-persistent-accepts-persistent-launch-env");
+
+            cx_fmt(cmd, sizeof cmd, "rm -f '%s' '%s.ident' '%s'", ih_persist, ih_persist, ph_link);
+            { char *sv[] = {"./tools/bound", "10", "sh", "-c", cmd, 0}; (void)run(sv, out, sizeof out); }
+        } else {
+            ck(1, "ident-prepare-helper-persistent-builds");
+            ck(1, "ident-prepare-helper-persistent-reuses");
+            ck(1, "ident-prepare-helper-symlink-to-tmp-refused");
+            ck(1, "ident-require-persistent-refuses-tmp-gate20");
+            ck(1, "ident-require-persistent-refuses-tmp-launch-env");
+            ck(1, "ident-require-persistent-accepts-persistent-launch-env");
+        }
+
+        /* Non-R4 private source mutants (red-then-green kill: refusal passes on clean, turns RED on mutant) */
+        {
+            char mdir[1200];
+            if (prepare_alt_cr_tree(cwd, "lstat",
+                    "if (sy_lstat(ih, &hst) != 0 || hst.kind != 'f')",
+                    "struct stat _hst; if (stat(ih, &_hst) != 0 || !S_ISREG(_hst.st_mode))", mdir, sizeof mdir) == 0) {
+                cx_fmt(sub, sizeof sub, "--only 20-ident-helper --repo '%s'", irepo);
+                cx_fmt(cmd, sizeof cmd, "UNISACC_IDENT_HELPER='%s' sh ./unisacc.com tools/chain-ready.cx -- %s", ih_sym, sub);
+                int c_ok = (run((char *[]){"./tools/bound", "30", "sh", "-c", cmd, 0}, out, sizeof out) == 1 && has(out, "missing-or-not-regular"));
+                cx_fmt(cmd, sizeof cmd, "cd '%s' && UNISACC_IDENT_HELPER='%s' sh ./unisacc.com tools/chain-ready.cx -- %s", mdir, ih_sym, sub);
+                int m_ok = (run((char *[]){"./tools/bound", "45", "sh", "-c", cmd, 0}, out, sizeof out) == 1 && has(out, "missing-or-not-regular"));
+                ck(c_ok == 1 && m_ok == 0, "ident-mut-symlink-helper-killed-red-then-green");
+            } else ck(0, "ident-mut-symlink-helper-killed-red-then-green");
+
+            if (prepare_alt_cr_tree(cwd, "strict-probe",
+                    "    if (strict_req) {\n        if (cr_abs_from_cwd(ih, abs_ih, sizeof abs_ih) || cr_probe_helper_exec(repo, abs_ih) != 0) {",
+                    "    if (0) {\n        if (cr_abs_from_cwd(ih, abs_ih, sizeof abs_ih) || cr_probe_helper_exec(repo, abs_ih) != 0) {", mdir, sizeof mdir) == 0) {
+                cx_fmt(cmd, sizeof cmd, "UNISACC_IDENT_HELPER='%s' sh ./unisacc.com tools/chain-ready.cx -- --only 20-ident-helper --repo '%s' --strict-helper", ih_fail, irepo);
+                int c_ok = (run((char *[]){"./tools/bound", "30", "sh", "-c", cmd, 0}, out, sizeof out) == 1 && has(out, "helper-exec-probe-failed"));
+                cx_fmt(cmd, sizeof cmd, "cd '%s' && UNISACC_IDENT_HELPER='%s' sh ./unisacc.com tools/chain-ready.cx -- --only 20-ident-helper --repo '%s' --strict-helper", mdir, ih_fail, irepo);
+                int m_ok = (run((char *[]){"./tools/bound", "45", "sh", "-c", cmd, 0}, out, sizeof out) == 1 && has(out, "helper-exec-probe-failed"));
+                ck(c_ok == 1 && m_ok == 0, "ident-mut-exec-probe-killed-red-then-green");
+            } else ck(0, "ident-mut-exec-probe-killed-red-then-green");
+
+            if (prepare_alt_cr_tree(cwd, "persist",
+                    "    if (cr_require_persist && cr_is_ephemeral_path(ih)) {\n",
+                    "    if (0 && cr_is_ephemeral_path(ih)) {\n", mdir, sizeof mdir) == 0) {
+                cx_fmt(cmd, sizeof cmd, "UNISACC_IDENT_HELPER='%s' sh ./unisacc.com tools/chain-ready.cx -- --only 20-ident-helper --repo '%s' --strict-helper --require-persistent-helper", ih_real, irepo);
+                int c_ok = (run((char *[]){"./tools/bound", "30", "sh", "-c", cmd, 0}, out, sizeof out) == 1 && has(out, "helper-ephemeral-path"));
+                cx_fmt(cmd, sizeof cmd, "cd '%s' && UNISACC_IDENT_HELPER='%s' sh ./unisacc.com tools/chain-ready.cx -- --only 20-ident-helper --repo '%s' --strict-helper --require-persistent-helper", mdir, ih_real, irepo);
+                int m_ok = (run((char *[]){"./tools/bound", "45", "sh", "-c", cmd, 0}, out, sizeof out) == 1 && has(out, "helper-ephemeral-path"));
+                ck(c_ok == 1 && m_ok == 0, "ident-mut-persist-killed-red-then-green");
+            } else ck(0, "ident-mut-persist-killed-red-then-green");
+        }
     }
     printf("SHARD_RESULT\tpart=%s\tpassed=%d\tfailed=%d\trc=%d\n", part_name, passed, failed, failed ? 1 : 0);
     printf("CHAIN_READY_CHECK\tpassed=%d\tfailed=%d\n", passed, failed);

@@ -1,0 +1,733 @@
+/* tools/root-current.cx -- check that installed ROOT/unisacc.com matches latest published release.
+ *
+ *   cx tools/root-current.cx -- [--repo DIR] [--root DIR] [--no-candidate-ahead]
+ *
+ * Expected version rule: read "已公开" versions strictly from main:build/version-seq.tsv (HEAD only when no
+ * main ref exists; disk only outside git), require a v<V> git tag for EVERY "已公开" row (fail-closed on
+ * missing tags, NEVER falling back to slot order), and rank by creatordate (same-second tie-break: annotated
+ * tag > commit ancestry > rs_precedes semantic order > slot order). Expected SHA comes from exhaustive
+ * cross-check across candidate.tsv / evidence/<V>/ape-receipt.txt / public-readback.txt (conflicts refused).
+ * Candidate exception: ROOT/unisacc.com.candidate.tsv with version > expected prints PASS + WARN=candidate-root-ahead
+ * unless --no-candidate-ahead is passed (mandatory for freeze thaw).
+ * Exit 0 on PASS, 1 on RED/drift, 2 on usage error.
+ */
+#pragma unisa use sys.fs
+#pragma unisa use sys.io
+#pragma unisa use sys.proc
+#pragma unisa use sys.env
+#pragma unisa use sys.sha
+#pragma unisa use text.text
+#pragma unisa use text.fmt
+#pragma unisa use text.conv
+#pragma unisa use mem.heap
+#pragma unisa use mem.bytes
+#pragma unisa use cxlib.releaseseq
+#pragma unisa use cxlib.netpack
+#pragma unisa use cxlib.chainroot
+
+static int crc_hex64(const char *s, long n) {
+    if (!s || n != 64) return 0;
+    for (long i = 0; i < 64; i++) {
+        char c = s[i];
+        if (!((c >= '0' && c <= '9') || (c >= 'a' && c <= 'f'))) return 0;
+    }
+    return 1;
+}
+
+static int crc_hex40(const char *s, long n) {
+    if (!s || n != 40) return 0;
+    for (long i = 0; i < 40; i++) {
+        char c = s[i];
+        if (!((c >= '0' && c <= '9') || (c >= 'a' && c <= 'f'))) return 0;
+    }
+    return 1;
+}
+
+static int crc_git(const char *repo, char **argv, char **out, size_t *outn) {
+    np_result r = {0}; char why[200];
+    *out = 0; *outn = 0;
+    if (np_run(argv, repo, 0, 15, &r, why, sizeof why) || r.rc != 0) {
+        np_free(&r);
+        return -1;
+    }
+    if (r.out && r.outn > 0) {
+        *out = mm_alloc((long)r.outn + 1);
+        if (!*out) { np_free(&r); return -1; }
+        mm_copy(*out, (long)r.outn + 1, r.out, (long)r.outn);
+        (*out)[r.outn] = 0;
+        *outn = r.outn;
+    } else {
+        *out = mm_alloc(1);
+        if (!*out) { np_free(&r); return -1; }
+        (*out)[0] = 0;
+        *outn = 0;
+    }
+    np_free(&r);
+    return 0;
+}
+
+static int crc_git_rc0(const char *repo, char **argv) {
+    np_result r = {0}; char why[200];
+    int fail = np_run(argv, repo, 0, 10, &r, why, sizeof why);
+    int rc = r.rc;
+    np_free(&r);
+    return (!fail && rc == 0) ? 0 : -1;
+}
+
+static char *crc_read_repo_file(const char *repo, const char *rel, size_t *outn) {
+    char spec[512], *b = 0;
+    *outn = 0;
+    char *chk_main[] = {"git", "show-ref", "--verify", "--quiet", "refs/heads/main", 0};
+    if (crc_git_rc0(repo, chk_main) == 0) {
+        if (cx_fmt(spec, sizeof spec, "main:%s", rel)) return 0;
+        char *av[] = {"git", "show", spec, 0};
+        if (crc_git(repo, av, &b, outn) == 0 && b && *outn > 0) return b;
+        if (b) mm_free(b);
+        return 0;
+    }
+    char *chk_head[] = {"git", "rev-parse", "--verify", "--quiet", "HEAD", 0};
+    if (crc_git_rc0(repo, chk_head) == 0) {
+        if (cx_fmt(spec, sizeof spec, "HEAD:%s", rel)) return 0;
+        char *av[] = {"git", "show", spec, 0};
+        if (crc_git(repo, av, &b, outn) == 0 && b && *outn > 0) return b;
+        if (b) mm_free(b);
+        return 0;
+    }
+    char path[4400];
+    if (cx_fmt(path, sizeof path, "%s/%s", repo, rel)) return 0;
+    return cx_read(path, outn);
+}
+
+#define CRC_MAX_PUB 256
+
+static int crc_find_pub(char pub[][32], int npub, const char *v) {
+    for (int i = 0; i < npub; i++) if (tx_eqz(pub[i], v)) return i;
+    return -1;
+}
+
+/* Return 0 on resolved version, -1 seq unreadable/empty, -2 git tags unreadable, -3 published row missing v<V> tag (fail-closed) */
+static int crc_expect_version(const char *repo, char ver_out[32], const char **src_out, char detail_out[64]) {
+    static const char pub_kw[] = "\xe5\xb7\xb2\xe5\x85\xac\xe5\xbc\x80"; /* 已公开 */
+    size_t n = 0;
+    detail_out[0] = 0;
+    char *b = crc_read_repo_file(repo, "build/version-seq.tsv", &n);
+    if (!b) return -1;
+    char pub[CRC_MAX_PUB][32];
+    int has_tag[CRC_MAX_PUB], tag_annot[CRC_MAX_PUB];
+    int64_t tag_ts[CRC_MAX_PUB];
+    int npub = 0;
+    long at = 0;
+    while (at < (long)n) {
+        long e = at;
+        while (e < (long)n && b[e] != '\n') e++;
+        const char *l = b + at; long ln = e - at;
+        at = e + 1;
+        if (ln <= 0 || l[0] == '#') continue;
+        long voff = 0, vlen = 0, soff = 0, slen = 0;
+        if (tx_field(l, ln, '\t', 1, &voff, &vlen) != 0 ||
+            tx_field(l, ln, '\t', 3, &soff, &slen) != 0) continue;
+        if (slen != 9 || memcmp(l + soff, pub_kw, 9) != 0) continue;
+        if (vlen <= 0 || vlen >= 32) continue;
+        char vbuf[32];
+        mm_copy(vbuf, sizeof vbuf, l + voff, vlen); vbuf[vlen] = 0;
+        if (!rs_version(vbuf)) continue;
+        if (npub < CRC_MAX_PUB && crc_find_pub(pub, npub, vbuf) < 0) {
+            cx_fmt(pub[npub], 32, "%s", vbuf);
+            has_tag[npub] = 0; tag_annot[npub] = 0; tag_ts[npub] = -1;
+            npub++;
+        }
+    }
+    mm_free(b);
+    if (npub == 0) return -1;
+
+    char *tb = 0; size_t tn = 0;
+    char *tv[] = {"git", "for-each-ref", "--format=%(objecttype)%09%(creatordate:unix)%09%(refname:short)", "refs/tags/", 0};
+    if (crc_git(repo, tv, &tb, &tn) != 0 || !tb) {
+        if (tb) mm_free(tb);
+        return -2;
+    }
+    long p = 0;
+    while (p < (long)tn) {
+        long e = p;
+        while (e < (long)tn && tb[e] != '\n') e++;
+        const char *l = tb + p; long ln = e - p;
+        p = e + 1;
+        long to = 0, tl_type = 0, dso = 0, dsl = 0, no = 0, nl = 0;
+        if (tx_field(l, ln, '\t', 0, &to, &tl_type) != 0 ||
+            tx_field(l, ln, '\t', 1, &dso, &dsl) != 0 ||
+            tx_field(l, ln, '\t', 2, &no, &nl) != 0) continue;
+        int64_t ts = 0;
+        if (tx_to_i64(l + dso, dsl, 10, &ts) != 0) continue;
+        const char *t = l + no; long tl = nl;
+        if (tl > 5 && tx_prefix(t, tl, "tags/", 5)) { t += 5; tl -= 5; }
+        if (tl <= 1 || t[0] != 'v') continue;
+        t++; tl--;
+        if (tl >= 32) continue;
+        char tv_ver[32];
+        mm_copy(tv_ver, sizeof tv_ver, t, tl); tv_ver[tl] = 0;
+        int pidx = crc_find_pub(pub, npub, tv_ver);
+        if (pidx < 0) continue;
+        has_tag[pidx] = 1;
+        tag_ts[pidx] = ts;
+        tag_annot[pidx] = (tl_type == 3 && tx_same(l + to, 3, "tag", 3)) ? 1 : 0;
+    }
+    mm_free(tb);
+
+    for (int i = 0; i < npub; i++) {
+        if (!has_tag[i]) {
+            cx_fmt(detail_out, 64, "%s", pub[i]);
+            return -3;
+        }
+    }
+
+    int best_idx = 0;
+    int64_t best_ts = tag_ts[0];
+    int has_light = !tag_annot[0];
+    for (int i = 1; i < npub; i++) {
+        if (!tag_annot[i]) has_light = 1;
+        if (tag_ts[i] > best_ts) {
+            best_idx = i; best_ts = tag_ts[i];
+        } else if (tag_ts[i] == best_ts) {
+            char a_spec[64], b_spec[64];
+            cx_fmt(a_spec, sizeof a_spec, "refs/tags/v%s^{commit}", pub[best_idx]);
+            cx_fmt(b_spec, sizeof b_spec, "refs/tags/v%s^{commit}", pub[i]);
+            char *av1[] = {"git", "merge-base", "--is-ancestor", a_spec, b_spec, 0};
+            char *av2[] = {"git", "merge-base", "--is-ancestor", b_spec, a_spec, 0};
+            int a_anc_b = (crc_git_rc0(repo, av1) == 0);
+            int b_anc_a = (crc_git_rc0(repo, av2) == 0);
+            if (a_anc_b && !b_anc_a) { best_idx = i; }
+            else if (!a_anc_b && !b_anc_a) {
+                if (rs_precedes(pub[best_idx], pub[i])) best_idx = i;
+            } else if (a_anc_b && b_anc_a) {
+                if (tag_annot[i] > tag_annot[best_idx] ||
+                    (tag_annot[i] == tag_annot[best_idx] && rs_precedes(pub[best_idx], pub[i]))) {
+                    best_idx = i;
+                }
+            }
+        }
+    }
+    cx_fmt(ver_out, 32, "%s", pub[best_idx]);
+    *src_out = has_light ? "tag-creatordate-commit" : "tag-creatordate-annot";
+    return 0;
+}
+
+/* Return 0 found unique, -1 absent, -2 malformed, -3 duplicate conflict */
+static int crc_cand_row_for_ver(const char *repo, const char *ver, char sha_out[65], char commit_out[41]) {
+    sha_out[0] = 0;
+    if (commit_out) commit_out[0] = 0;
+    size_t n = 0;
+    char *b = crc_read_repo_file(repo, "release/candidate.tsv", &n);
+    if (!b) return -1;
+    long at = 0, nl = tx_chr(b, (long)n, '\n');
+    int row_no = 0, found = 0;
+    if (nl < 0) { mm_free(b); return -1; }
+    at = nl + 1;
+    while (at < (long)n) {
+        long e = at; while (e < (long)n && b[e] != '\n') e++;
+        long ln = e - at;
+        const char *l = b + at;
+        if (ln > 0 && l[ln - 1] == '\r') ln--;
+        at = e + 1;
+        if (ln <= 0 || l[0] == '#') continue;
+        row_no++;
+        long voff = 0, vlen = 0, coff = 0, clen = 0, aoff = 0, alen = 0;
+        if (tx_field(l, ln, '\t', 3, &voff, &vlen) != 0) { mm_free(b); return -2; }
+        if (vlen == (long)strlen(ver) && !memcmp(l + voff, ver, (size_t)vlen)) {
+            if (tx_field(l, ln, '\t', 2, &coff, &clen) != 0 || !crc_hex40(l + coff, clen) ||
+                tx_field(l, ln, '\t', 8, &aoff, &alen) != 0 || !crc_hex64(l + aoff, alen)) {
+                mm_free(b); return -2;
+            }
+            char tmp[65], ctmp[41];
+            mm_copy(tmp, 65, l + aoff, 64); tmp[64] = 0;
+            mm_copy(ctmp, 41, l + coff, 40); ctmp[40] = 0;
+            if (!found) {
+                mm_copy(sha_out, 65, tmp, 65);
+                if (commit_out) mm_copy(commit_out, 41, ctmp, 41);
+                found = 1;
+            } else if (!tx_eqz(sha_out, tmp) || (commit_out && !tx_eqz(commit_out, ctmp))) {
+                mm_free(b); return -3;
+            }
+        }
+        (void)row_no;
+    }
+    mm_free(b);
+    return found ? 0 : -1;
+}
+
+/* Return 0 found unique, -1 absent, -2 malformed, -3 duplicate conflict */
+static int crc_receipt_sha(const char *repo, const char *ver, char sha_out[65]) {
+    char rel[256];
+    sha_out[0] = 0;
+    if (cx_fmt(rel, sizeof rel, "release/evidence/%s/ape-receipt.txt", ver)) return -1;
+    size_t n = 0; char *b = crc_read_repo_file(repo, rel, &n);
+    if (!b) return -1;
+    long at = 0; int found = 0;
+    while (at < (long)n) {
+        long e = at; while (e < (long)n && b[e] != '\n') e++;
+        const char *l = b + at; long ln = e - at;
+        at = e + 1;
+        if (ln > 17 && tx_prefix(l, ln, "unisacc-next.com\t", 17)) {
+            long p = tx_find(l, ln, "\tsha=", 5);
+            if (p < 0 || p + 69 > ln || !crc_hex64(l + p + 5, 64)) {
+                mm_free(b); return -2;
+            }
+            if (p + 69 < ln && l[p + 69] != '\t' && l[p + 69] != '\r') { mm_free(b); return -2; }
+            char tmp[65]; mm_copy(tmp, 65, l + p + 5, 64); tmp[64] = 0;
+            if (!found) { mm_copy(sha_out, 65, tmp, 65); found = 1; }
+            else if (!tx_eqz(sha_out, tmp)) { mm_free(b); return -3; }
+        }
+    }
+    mm_free(b);
+    return found ? 0 : -1;
+}
+
+/* Return 0 found unique, -1 absent, -2 malformed, -3 duplicate conflict */
+static int crc_readback_sha(const char *repo, const char *ver, char sha_out[65]) {
+    char rel[256];
+    sha_out[0] = 0;
+    if (cx_fmt(rel, sizeof rel, "release/evidence/%s/public-readback.txt", ver)) return -1;
+    size_t n = 0; char *b = crc_read_repo_file(repo, rel, &n);
+    if (!b) return -1;
+    long at = 0; int found = 0;
+    while (at < (long)n) {
+        long e = at; while (e < (long)n && b[e] != '\n') e++;
+        const char *l = b + at; long ln = e - at;
+        if (ln > 0 && l[ln - 1] == '\r') ln--;
+        at = e + 1;
+        if (ln >= 25 && (tx_prefix(l, ln, "READBACK_SHA unisacc.com ", 25) ||
+                         tx_prefix(l, ln, "READBACK_SHA\tunisacc.com\t", 25))) {
+            if (ln < 89 || !crc_hex64(l + 25, 64) ||
+                (ln > 89 && l[89] != ' ' && l[89] != '\t')) {
+                mm_free(b); return -2;
+            }
+            char tmp[65]; mm_copy(tmp, 65, l + 25, 64); tmp[64] = 0;
+            if (!found) { mm_copy(sha_out, 65, tmp, 65); found = 1; }
+            else if (!tx_eqz(sha_out, tmp)) { mm_free(b); return -3; }
+        }
+    }
+    mm_free(b);
+    return found ? 0 : -1;
+}
+
+static int crc_ws(char c) {
+    return c == ' ' || c == '\t' || c == '\n' || c == '\r';
+}
+
+/* Parse flat top-level JSON KEY -> string (expect_str=1) or unsigned int64 (expect_str=0).
+   Returns 0 found unique, -1 absent, -2 malformed or duplicate. */
+static int crc_json_field(const char *j, long n, const char *key, int expect_str,
+                          char *str_out, int cap, int64_t *num_out) {
+    long kl = tx_len(key, 64), i = 0;
+    int depth = 0, found = 0;
+    if (str_out && cap > 0) str_out[0] = 0;
+    if (num_out) *num_out = 0;
+    while (i < n && crc_ws(j[i])) i++;
+    if (i >= n || j[i] != '{') return -2;
+    long last = n - 1;
+    while (last >= 0 && crc_ws(j[last])) last--;
+    if (last <= i || j[last] != '}') return -2;
+    while (i < n) {
+        char c = j[i];
+        if (c == '{') { depth++; i++; continue; }
+        if (c == '}') { if (depth == 0) return -2; depth--; i++; continue; }
+        if (c == '"') {
+            long ks = i + 1;
+            i++;
+            while (i < n && j[i] != '"') {
+                if (j[i] == '\\') { if (i + 1 >= n) return -2; i += 2; }
+                else i++;
+            }
+            if (i >= n) return -2;
+            long ke = i;
+            i++;
+            long p = i;
+            while (p < n && crc_ws(j[p])) p++;
+            if (depth == 1 && p < n && j[p] == ':' && ke - ks == kl && tx_same(j + ks, kl, key, kl)) {
+                if (found) return -2;
+                p++;
+                while (p < n && crc_ws(j[p])) p++;
+                if (expect_str) {
+                    if (p >= n || j[p] != '"') return -2;
+                    p++;
+                    long vs = p;
+                    while (p < n && j[p] != '"') {
+                        if (j[p] == '\\' || (unsigned char)j[p] < 0x20) return -2;
+                        p++;
+                    }
+                    if (p >= n || p - vs >= cap) return -2;
+                    mm_copy(str_out, cap, j + vs, p - vs);
+                    str_out[p - vs] = 0;
+                    i = p + 1;
+                } else {
+                    long vs = p;
+                    if (p >= n || j[p] < '0' || j[p] > '9') return -2;
+                    while (p < n && j[p] >= '0' && j[p] <= '9') p++;
+                    int64_t v = 0;
+                    if (tx_to_i64(j + vs, p - vs, 10, &v) != 0 || v <= 0) return -2;
+                    *num_out = v;
+                    i = p;
+                }
+                found = 1;
+            }
+            continue;
+        }
+        i++;
+    }
+    if (depth != 0) return -2;
+    return found ? 0 : -1;
+}
+
+static int crc_verify_ape_sha_record(const char *root_abs, const char *actual_sha, int64_t root_size, const char **err_reason) {
+    char p[4400];
+    if (cx_fmt(p, sizeof p, "%s/unisacc.com.ape.sha256", root_abs)) { *err_reason = "path-bound"; return -1; } /* lint:allow R1 inspect companion sha record */
+    sy_stat_t st;
+    int lrc = sy_lstat(p, &st);
+    if (lrc == -2) { *err_reason = "root-sha-record-missing"; return -1; }
+    if (lrc != 0) { *err_reason = "root-sha-record-unreadable"; return -1; }
+    if (st.kind != 'f') { *err_reason = "root-sha-record-not-regular"; return -1; }
+    size_t n = 0; char *b = cx_read(p, &n);
+    if (!b || n == 0 || n > 4096) { if (b) mm_free(b); *err_reason = "root-sha-record-malformed"; return -1; }
+    long ln = (long)n;
+    if (ln > 0 && b[ln - 1] == '\n') ln--;
+    if (ln > 0 && b[ln - 1] == '\r') ln--;
+    for (long i = 0; i < ln; i++) {
+        if (b[i] == '\n' || b[i] == '\r') { mm_free(b); *err_reason = "root-sha-record-malformed"; return -1; }
+    }
+    long f0o = 0, f0l = 0, f1o = 0, f1l = 0, f2o = 0, f2l = 0, f3o = 0, f3l = 0;
+    if (tx_field(b, ln, '\t', 0, &f0o, &f0l) != 0 ||
+        tx_field(b, ln, '\t', 1, &f1o, &f1l) != 0 ||
+        tx_field(b, ln, '\t', 2, &f2o, &f2l) != 0 ||
+        tx_field(b, ln, '\t', 3, &f3o, &f3l) == 0 ||
+        !crc_hex64(b + f0o, f0l) ||
+        f2l != 11 || !tx_same(b + f2o, 11, "unisacc.com", 11)) {
+        mm_free(b); *err_reason = "root-sha-record-malformed"; return -1;
+    }
+    if (!tx_same(b + f0o, 64, actual_sha, 64)) {
+        mm_free(b); *err_reason = "root-sha-record-mismatch"; return -1;
+    }
+    int64_t rbytes = 0;
+    for (long i = 0; i < f1l; i++) {
+        if (b[f1o + i] < '0' || b[f1o + i] > '9') { mm_free(b); *err_reason = "root-sha-record-malformed"; return -1; }
+    }
+    if (tx_to_i64(b + f1o, f1l, 10, &rbytes) != 0 || rbytes != root_size) {
+        mm_free(b); *err_reason = "root-sha-record-bytes-mismatch"; return -1;
+    }
+    mm_free(b);
+    return 0;
+}
+
+static int crc_verify_build_json(const char *root_abs, const char *actual_sha, int64_t root_size,
+                                 char bjson_sha_out[65], char commit_out[41], const char **err_reason) {
+    char p[4400], pkind[64], pdigest[80], cmbuf[64];
+    int64_t bj_bytes = 0;
+    bjson_sha_out[0] = 0; commit_out[0] = 0;
+    if (cx_fmt(p, sizeof p, "%s/unisacc.com.build.json", root_abs)) { *err_reason = "path-bound"; return -1; } /* lint:allow R1 inspect companion build json */
+    sy_stat_t st;
+    int lrc = sy_lstat(p, &st);
+    if (lrc == -2) { *err_reason = "root-build-json-missing"; return -1; }
+    if (lrc != 0) { *err_reason = "root-build-json-unreadable"; return -1; }
+    if (st.kind != 'f') { *err_reason = "root-build-json-not-regular"; return -1; }
+    size_t n = 0; char *b = cx_read(p, &n);
+    if (!b || n == 0 || n > 65536) { if (b) mm_free(b); *err_reason = "root-build-json-malformed"; return -1; }
+    if (sy_sha256_hex(b, (long)n, bjson_sha_out)) { mm_free(b); *err_reason = "root-build-json-malformed"; return -1; }
+    if (crc_json_field(b, (long)n, "product_kind", 1, pkind, sizeof pkind, 0) != 0 || !tx_eqz(pkind, "ape1")) {
+        mm_free(b); *err_reason = "root-build-json-invalid"; return -1;
+    }
+    if (crc_json_field(b, (long)n, "product_digest", 1, pdigest, sizeof pdigest, 0) != 0 ||
+        !crc_hex64(pdigest, tx_len(pdigest, sizeof pdigest)) || !tx_eqz(pdigest, actual_sha)) {
+        mm_free(b); *err_reason = "root-build-json-digest-mismatch"; return -1;
+    }
+    if (crc_json_field(b, (long)n, "bytes", 0, 0, 0, &bj_bytes) != 0 || bj_bytes != root_size) {
+        mm_free(b); *err_reason = "root-build-json-bytes-mismatch"; return -1;
+    }
+    int cm_rc = crc_json_field(b, (long)n, "commit", 1, cmbuf, sizeof cmbuf, 0);
+    mm_free(b);
+    if (cm_rc == -2) { *err_reason = "root-build-json-commit-invalid"; return -1; }
+    if (cm_rc == 0) {
+        if (!crc_hex40(cmbuf, tx_len(cmbuf, sizeof cmbuf))) { *err_reason = "root-build-json-commit-invalid"; return -1; }
+        mm_copy(commit_out, 41, cmbuf, 41);
+    }
+    return 0;
+}
+
+static int crc_verify_cand_and_commit(const char *repo_abs, const char *root_abs,
+                                      const char *actual_ver, const char *actual_sha, int64_t root_size,
+                                      const char *bj_commit, int *is_cand, const char **err_reason) {
+    char cand_mk[4400], row_sha[65], row_commit[41];
+    *is_cand = 0;
+    if (cx_fmt(cand_mk, sizeof cand_mk, "%s/unisacc.com.candidate.tsv", root_abs)) { *err_reason = "path-bound"; return -1; } /* lint:allow R1 inspect candidate marker beside target root */
+    sy_stat_t cmst;
+    int cm_lrc = sy_lstat(cand_mk, &cmst);
+    int row_rc = crc_cand_row_for_ver(repo_abs, actual_ver, row_sha, row_commit);
+    if (cm_lrc == -2) {
+        if (row_rc == 0 && (!bj_commit[0] || !tx_eqz(bj_commit, row_commit))) {
+            *err_reason = "root-build-json-commit-mismatch";
+            return -1;
+        }
+        return 0;
+    }
+    *is_cand = 1;
+    if (cm_lrc != 0 || cmst.kind != 'f') { *err_reason = "candidate-marker-invalid"; return -1; }
+    size_t n = 0; char *b = cx_read(cand_mk, &n);
+    if (!b || n == 0 || n > 4096) { if (b) mm_free(b); *err_reason = "candidate-marker-invalid"; return -1; }
+    long ln = (long)n;
+    if (ln > 0 && b[ln - 1] == '\n') ln--;
+    if (ln > 0 && b[ln - 1] == '\r') ln--;
+    for (long i = 0; i < ln; i++) {
+        if (b[i] == '\n' || b[i] == '\r') { mm_free(b); *err_reason = "candidate-marker-invalid"; return -1; }
+    }
+    if (ln < 10 || !tx_same(b, 10, "CANDIDATE\t", 10)) {
+        mm_free(b); *err_reason = "candidate-marker-invalid"; return -1;
+    }
+    char m_rev[41] = {0};
+    int got_rev = 0, got_sha = 0, got_bytes = 0, got_ver = 0, got_src = 0, got_not = 0;
+    for (int col = 1; ; col++) {
+        long fo = 0, fl = 0;
+        if (tx_field(b, ln, '\t', col, &fo, &fl) != 0) break;
+        const char *tok = b + fo;
+        if (fl > 4 && tx_same(tok, 4, "rev=", 4)) {
+            if (got_rev || !crc_hex40(tok + 4, fl - 4)) { mm_free(b); *err_reason = "candidate-marker-invalid"; return -1; }
+            mm_copy(m_rev, 41, tok + 4, 40); m_rev[40] = 0; got_rev = 1;
+        } else if (fl > 4 && tx_same(tok, 4, "sha=", 4)) {
+            if (got_sha || !crc_hex64(tok + 4, fl - 4) || !tx_same(tok + 4, 64, actual_sha, 64)) {
+                mm_free(b); *err_reason = "candidate-marker-invalid"; return -1;
+            }
+            got_sha = 1;
+        } else if (fl > 6 && tx_same(tok, 6, "bytes=", 6)) {
+            int64_t mb = 0;
+            for (long k = 6; k < fl; k++) {
+                if (tok[k] < '0' || tok[k] > '9') { mm_free(b); *err_reason = "candidate-marker-invalid"; return -1; }
+            }
+            if (got_bytes || tx_to_i64(tok + 6, fl - 6, 10, &mb) != 0 || mb != root_size) {
+                mm_free(b); *err_reason = "candidate-marker-invalid"; return -1;
+            }
+            got_bytes = 1;
+        } else if (fl > 8 && tx_same(tok, 8, "version=", 8)) {
+            long avl = tx_len(actual_ver, 64);
+            if (got_ver || fl - 8 != avl || !tx_same(tok + 8, avl, actual_ver, avl)) {
+                mm_free(b); *err_reason = "candidate-marker-invalid"; return -1;
+            }
+            got_ver = 1;
+        } else if (fl > 7 && tx_same(tok, 7, "source=", 7)) {
+            if (got_src || fl <= 7) { mm_free(b); *err_reason = "candidate-marker-invalid"; return -1; }
+            got_src = 1;
+        } else if (fl == 13 && tx_same(tok, 13, "not=PUBLISHED", 13)) {
+            if (got_not) { mm_free(b); *err_reason = "candidate-marker-invalid"; return -1; }
+            got_not = 1;
+        } else {
+            mm_free(b); *err_reason = "candidate-marker-invalid"; return -1;
+        }
+    }
+    mm_free(b);
+    if (!got_rev || !got_sha || !got_bytes || !got_ver || !got_src || !got_not) {
+        *err_reason = "candidate-marker-invalid"; return -1;
+    }
+    if (row_rc != 0) {
+        *err_reason = "candidate-marker-invalid"; return -1;
+    }
+    if (!bj_commit[0] || (!tx_eqz(bj_commit, row_commit) && !tx_eqz(bj_commit, m_rev))) {
+        *err_reason = "candidate-marker-invalid"; return -1;
+    }
+    return 0;
+}
+
+static int crc_snap_matches_file(const char *snap_file, const char *want_sha) {
+    sy_stat_t st;
+    if (sy_lstat(snap_file, &st) != 0 || st.kind != 'f') return 0;
+    size_t n = 0; char *b = cx_read(snap_file, &n);
+    if (!b) return 0;
+    char hex[65];
+    int ok = (sy_sha256_hex(b, (long)n, hex) == 0 && tx_eqz(hex, want_sha));
+    mm_free(b);
+    return ok;
+}
+
+static int crc_check_snap_for_rev(const char *root_abs, const char *rev, const char *actual_sha, const char *bjson_sha) {
+    char snap[4600], f[4800];
+    sy_stat_t st;
+    if (cr_snap(root_abs, rev, 0, snap, sizeof snap) != 0) return 0;
+    int lrc = sy_lstat(snap, &st);
+    if (lrc == -2) return 0;
+    if (lrc != 0 || st.kind != 'd') return -1;
+    if (cx_fmt(f, sizeof f, "%s/unisacc.com", snap) || !crc_snap_matches_file(f, actual_sha)) return -1;
+    if (cx_fmt(f, sizeof f, "%s/unisacc.com.build.json", snap) || !crc_snap_matches_file(f, bjson_sha)) return -1;
+    return 0;
+}
+
+static int crc_verify_snap_cache(const char *repo_abs, const char *root_abs,
+                                 const char *actual_sha, const char *bjson_sha, const char **err_reason) {
+    const char *dirs[2] = {root_abs, repo_abs};
+    int nd = tx_eqz(root_abs, repo_abs) ? 1 : 2;
+    for (int d = 0; d < nd; d++) {
+        char *rb = 0; size_t rn = 0;
+        char *av[] = {"git", "rev-parse", "--verify", "--quiet", "HEAD", 0};
+        if (crc_git(dirs[d], av, &rb, &rn) == 0 && rb) {
+            long ln = (long)rn;
+            while (ln > 0 && (rb[ln - 1] == '\n' || rb[ln - 1] == '\r')) ln--;
+            if (crc_hex40(rb, ln)) {
+                char rev[41]; mm_copy(rev, 41, rb, 40); rev[40] = 0;
+                mm_free(rb);
+                if (crc_check_snap_for_rev(root_abs, rev, actual_sha, bjson_sha) != 0) {
+                    *err_reason = "snap-cache-stale";
+                    return -1;
+                }
+                break;
+            }
+            mm_free(rb);
+        } else if (rb) {
+            mm_free(rb);
+        }
+    }
+    return 0;
+}
+
+static int crc_actual_root(const char *repo_abs, const char *root_abs,
+                           char ver_out[64], char sha_out[65], int *is_cand, const char **err_reason) {
+    char root_com[4400], bjson_sha[65], bj_commit[41];
+    ver_out[0] = 0; sha_out[0] = 0; *is_cand = 0; *err_reason = 0;
+    if (cx_fmt(root_com, sizeof root_com, "%s/unisacc.com", root_abs)) { *err_reason = "path-bound"; return -1; } /* lint:allow R1 inspects target root APE bytes directly */
+    sy_stat_t st;
+    if (sy_lstat(root_com, &st) != 0) { *err_reason = "root-missing"; return -1; }
+    if (st.kind != 'f') { *err_reason = "root-not-regular"; return -1; }
+    int64_t root_size = (int64_t)st.size;
+    size_t bn = 0; char *bytes = cx_read(root_com, &bn);
+    if (!bytes) { *err_reason = "root-unreadable"; return -1; }
+    int sh_fail = sy_sha256_hex(bytes, (long)bn, sha_out);
+    mm_free(bytes);
+    if (sh_fail) { *err_reason = "root-sha-failed"; return -1; }
+    char *av[] = {"sh", root_com, "--version", 0};
+    np_result r = {0}; char why[200];
+    if (np_run(av, 0, 0, 20, &r, why, sizeof why) || r.rc != 0 || !r.out || r.outn < 9 ||
+        !tx_prefix(r.out, (long)r.outn, "unisacc ", 8)) {
+        np_free(&r);
+        *err_reason = "root-version-failed";
+        return -1;
+    }
+    long k = 0;
+    for (size_t q = 8; q < r.outn && k < 63; q++) {
+        char c = r.out[q];
+        if (c == '\n' || c == '\r' || c == ' ' || c == '\t' || c == '(') break;
+        ver_out[k++] = c;
+    }
+    ver_out[k] = 0;
+    np_free(&r);
+    if (!ver_out[0]) { *err_reason = "root-version-failed"; return -1; }
+    if (crc_verify_ape_sha_record(root_abs, sha_out, root_size, err_reason) != 0) return -1;
+    if (crc_verify_build_json(root_abs, sha_out, root_size, bjson_sha, bj_commit, err_reason) != 0) return -1;
+    if (crc_verify_cand_and_commit(repo_abs, root_abs, ver_out, sha_out, root_size, bj_commit, is_cand, err_reason) != 0) return -1;
+    if (crc_verify_snap_cache(repo_abs, root_abs, sha_out, bjson_sha, err_reason) != 0) return -1;
+    return 0;
+}
+
+int main(int argc, char **argv) {
+    const char *repo = ".", *root = 0;
+    int no_cand_ahead = 0;
+    for (int i = 1; i < argc; i++) {
+        if (tx_eqz(argv[i], "--")) continue;
+        else if (tx_eqz(argv[i], "--repo") && i + 1 < argc) repo = argv[++i];
+        else if (tx_eqz(argv[i], "--root") && i + 1 < argc) root = argv[++i];
+        else if (tx_eqz(argv[i], "--no-candidate-ahead")) no_cand_ahead = 1;
+        else {
+            fprintf(stderr, "usage: cx tools/root-current.cx -- [--repo DIR] [--root DIR] [--no-candidate-ahead]\n");
+            return 2;
+        }
+    }
+    if (!root || !root[0]) root = repo;
+    char root_clean[4096], repo_abs[4096], root_abs[4096];
+    long rlen = tx_len(root, sizeof root_clean - 1);
+    mm_copy(root_clean, sizeof root_clean, root, rlen);
+    while (rlen > 1 && root_clean[rlen - 1] == '/') rlen--;
+    root_clean[rlen] = 0;
+    if (sy_realpath(repo, repo_abs, sizeof repo_abs) < 0) {
+        printf("ROOT_CURRENT\tRED\treason=repo-unreadable\texpect=-\texpect_sha=-\tactual=-\tactual_sha=-\n");
+        return 1;
+    }
+    sy_stat_t rst;
+    int rlrc = sy_lstat(root_clean, &rst);
+    if (rlrc != 0) {
+        printf("ROOT_CURRENT\tRED\treason=root-dir-unreadable\texpect=-\texpect_sha=-\tactual=-\tactual_sha=-\n");
+        return 1;
+    }
+    if (rst.kind == 'l') {
+        printf("ROOT_CURRENT\tRED\treason=root-dir-symlink\texpect=-\texpect_sha=-\tactual=-\tactual_sha=-\n");
+        return 1;
+    }
+    if (rst.kind != 'd') {
+        printf("ROOT_CURRENT\tRED\treason=root-dir-not-dir\texpect=-\texpect_sha=-\tactual=-\tactual_sha=-\n");
+        return 1;
+    }
+    if (sy_realpath(root_clean, root_abs, sizeof root_abs) < 0) {
+        printf("ROOT_CURRENT\tRED\treason=root-dir-unreadable\texpect=-\texpect_sha=-\tactual=-\tactual_sha=-\n");
+        return 1;
+    }
+
+    char actual_ver[64], actual_sha[65], expect_ver[32], expect_sha[65], vdet[64];
+    const char *ver_src = "-", *sha_src = "-", *act_err = 0;
+    int is_cand = 0;
+    if (crc_actual_root(repo_abs, root_abs, actual_ver, actual_sha, &is_cand, &act_err) != 0) {
+        expect_ver[0] = 0; vdet[0] = 0;
+        (void)crc_expect_version(repo_abs, expect_ver, &ver_src, vdet);
+        printf("ROOT_CURRENT\tRED\treason=%s\texpect=%s\texpect_sha=-\tactual=%s\tactual_sha=%s\tfix=cx tools/release-post.cx -- run --version %s --execute\n",
+               act_err ? act_err : "root-unreadable",
+               expect_ver[0] ? expect_ver : "-",
+               actual_ver[0] ? actual_ver : "-",
+               actual_sha[0] ? actual_sha : "-",
+               expect_ver[0] ? expect_ver : "V");
+        return 1;
+    }
+
+    int ev_rc = crc_expect_version(repo_abs, expect_ver, &ver_src, vdet);
+    if (ev_rc != 0) {
+        const char *ereason = ev_rc == -3 ? "published-version-missing-tag"
+                            : (ev_rc == -2 ? "git-tags-unreadable" : "expected-version-unknown");
+        printf("ROOT_CURRENT\tRED\treason=%s\tmissing=%s\texpect=-\texpect_sha=-\tactual=%s\tactual_sha=%s\n",
+               ereason, vdet[0] ? vdet : "-", actual_ver, actual_sha);
+        return 1;
+    }
+
+    char cand_sha[65], rcpt_sha[65], rb_sha[65];
+    int rc_c = crc_cand_row_for_ver(repo_abs, expect_ver, cand_sha, 0);
+    int rc_r = crc_receipt_sha(repo_abs, expect_ver, rcpt_sha);
+    int rc_p = crc_readback_sha(repo_abs, expect_ver, rb_sha);
+    if (rc_c == -2 || rc_r == -2 || rc_p == -2) {
+        printf("ROOT_CURRENT\tRED\treason=expected-sha-malformed\texpect=%s\texpect_sha=-\tactual=%s\tactual_sha=%s\n",
+               expect_ver, actual_ver, actual_sha);
+        return 1;
+    }
+    if (rc_c == -3 || rc_r == -3 || rc_p == -3 ||
+        (rc_c == 0 && rc_r == 0 && !tx_eqz(cand_sha, rcpt_sha)) ||
+        (rc_c == 0 && rc_p == 0 && !tx_eqz(cand_sha, rb_sha)) ||
+        (rc_r == 0 && rc_p == 0 && !tx_eqz(rcpt_sha, rb_sha))) {
+        printf("ROOT_CURRENT\tRED\treason=expected-sha-conflict\texpect=%s\texpect_sha=-\tactual=%s\tactual_sha=%s\n",
+               expect_ver, actual_ver, actual_sha);
+        return 1;
+    }
+    if (rc_c == 0) { cx_fmt(expect_sha, sizeof expect_sha, "%s", cand_sha); sha_src = "candidate.tsv"; }
+    else if (rc_r == 0) { cx_fmt(expect_sha, sizeof expect_sha, "%s", rcpt_sha); sha_src = "ape-receipt.txt"; }
+    else if (rc_p == 0) { cx_fmt(expect_sha, sizeof expect_sha, "%s", rb_sha); sha_src = "public-readback.txt"; }
+    else {
+        printf("ROOT_CURRENT\tRED\treason=expected-sha-missing\texpect=%s\texpect_sha=-\tactual=%s\tactual_sha=%s\n",
+               expect_ver, actual_ver, actual_sha);
+        return 1;
+    }
+
+    if (tx_eqz(actual_ver, expect_ver) && tx_eqz(actual_sha, expect_sha)) {
+        printf("ROOT_CURRENT\tPASS\texpect=%s\texpect_sha=%s\tactual=%s\tactual_sha=%s\tsource=%s:%s\n",
+               expect_ver, expect_sha, actual_ver, actual_sha, ver_src, sha_src);
+        return 0;
+    }
+    if (is_cand && rs_precedes(expect_ver, actual_ver)) {
+        if (no_cand_ahead) {
+            printf("ROOT_CURRENT\tRED\treason=candidate-root-ahead-disallowed\texpect=%s\texpect_sha=%s\tactual=%s\tactual_sha=%s\tsource=%s\n",
+                   expect_ver, expect_sha, actual_ver, actual_sha, ver_src);
+            return 1;
+        }
+        printf("ROOT_CURRENT\tPASS\texpect=%s\texpect_sha=%s\tactual=%s\tactual_sha=%s\tWARN=candidate-root-ahead\tsource=%s\n",
+               expect_ver, expect_sha, actual_ver, actual_sha, ver_src);
+        return 0;
+    }
+    const char *why = !tx_eqz(actual_ver, expect_ver) ? "version-mismatch" : "sha-mismatch";
+    printf("ROOT_CURRENT\tRED\treason=%s\texpect=%s\texpect_sha=%s\tactual=%s\tactual_sha=%s\tsource=%s:%s\tfix=cx tools/release-post.cx -- run --version %s --execute\n",
+           why, expect_ver, expect_sha, actual_ver, actual_sha, ver_src, sha_src, expect_ver);
+    return 1;
+}

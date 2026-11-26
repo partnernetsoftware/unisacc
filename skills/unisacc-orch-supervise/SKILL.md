@@ -35,6 +35,7 @@ description: 编排者督导多个执行者窗口与后台作业、做定期巡�
 | 残锁 | 列 devsvc 锁与 private index 锁,持锁 PID 不在才清,只清自己的 |
 | 孤儿轮询壳 | pgrep 找无父会话的 while/sleep 壳,按真实 PID 终止,先在账本写一行 |
 | 在途作业 | 核每个作业的输入身份、deadline、真实 PID |
+| 根版本漂移 | 每轮巡检调用 `cx tools/root-current.cx` (门 `24-root-current`, 原设计称门 20), 解冻必传 `--no-candidate-ahead`, 否则红灯禁止解冻 |
 
 ## (7) 任务板
 
