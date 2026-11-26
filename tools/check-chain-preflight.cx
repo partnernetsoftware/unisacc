@@ -478,6 +478,78 @@ int main(void) {
            "parse2-version-seq-30-unpublished-late-drift-caught-no-cap", out);
     }
 
+    /* 17. --shard sixtarget|snap|all isolates sixtarget nodes from chain-to-snap and refuses unknown shard names */
+    {
+        char t_snap_fail[1200], t_six_fail[1200], gcmd[2400];
+        wr_file(p2repo, "build/version-seq.tsv", "slot\tversion\tclass\tstate\tnote\n1\t0.0.1\ttest\t已公开\tfixture\n");
+        cx_fmt(gcmd, sizeof gcmd,
+            "cd '%s' && git tag -d v0.0.36 >/dev/null 2>&1; git add build/version-seq.tsv && "
+            "git -c user.name=fx -c user.email=fx@local -c core.hooksPath=/dev/null -c commit.gpgsign=false commit -qm clean_seq", p2repo);
+        ckk_sh("CHECK_CHAIN_PREFLIGHT", gcmd, out, sizeof out);
+
+        cx_fmt(t_snap_fail, sizeof t_snap_fail, "%s/table-snap-fail.tsv", fx);
+        wr_file(fx, "table-snap-fail.tsv",
+            "name\tpatterns\tcmd\ttimeout_s\n"
+            "root-types\t*\tsh ./unisacc.com tools/chain-preflight.cx -- --item root-types\t10\n"
+            "snap-cache-types\t*\tsh ./unisacc.com tools/chain-preflight.cx -- --item snap-cache-types\t10\n"
+            "parse2-bind\t*\tsh ./unisacc.com tools/chain-preflight.cx -- --item parse2-bind\t30\n"
+            "sys-six-target-0\tcx/sys/\ttrue\t30\n"
+            "chain-to-snap\ttools/candidate-chain.cx\tfalse\t30\n");
+
+        cx_fmt(t_six_fail, sizeof t_six_fail, "%s/table-six-fail.tsv", fx);
+        wr_file(fx, "table-six-fail.tsv",
+            "name\tpatterns\tcmd\ttimeout_s\n"
+            "root-types\t*\tsh ./unisacc.com tools/chain-preflight.cx -- --item root-types\t10\n"
+            "snap-cache-types\t*\tsh ./unisacc.com tools/chain-preflight.cx -- --item snap-cache-types\t10\n"
+            "parse2-bind\t*\tsh ./unisacc.com tools/chain-preflight.cx -- --item parse2-bind\t30\n"
+            "sys-six-target-0\tcx/sys/\tfalse\t30\n"
+            "chain-to-snap\ttools/candidate-chain.cx\ttrue\t30\n");
+
+        cx_fmt(arg, sizeof arg, "--shard sixtarget --table %s --root %s --repo %s --snap-base %s --rev %s", t_snap_fail, root_ok, p2repo, snap_base, ok_sha);
+        ck(run_pf(arg, out, sizeof out) == 0 &&
+           has(out, "PREFLIGHT_ITEM\tsys-six-target-0\tPASS\t") &&
+           !has(out, "PREFLIGHT_ITEM\tchain-to-snap\t") &&
+           has(out, "verdict=PASS\tfailed=-\tnodes=4\t") &&
+           has(out, "\tshard=sixtarget"),
+           "shard-sixtarget-runs-sixtarget-excludes-snap", out);
+
+        cx_fmt(arg, sizeof arg, "--shard snap --table %s --root %s --repo %s --snap-base %s --rev %s", t_snap_fail, root_ok, p2repo, snap_base, ok_sha);
+        ck(run_pf(arg, out, sizeof out) == 1 &&
+           has(out, "PREFLIGHT_ITEM\tchain-to-snap\tFAIL\t") &&
+           !has(out, "PREFLIGHT_ITEM\tsys-six-target-0\t") &&
+           has(out, "verdict=FAIL\tfailed=chain-to-snap\tnodes=4\t") &&
+           has(out, "\tshard=snap"),
+           "shard-snap-runs-snap-and-fails-when-snap-fails", out);
+
+        cx_fmt(arg, sizeof arg, "--shard snap --table %s --root %s --repo %s --snap-base %s --rev %s", t_six_fail, root_ok, p2repo, snap_base, ok_sha);
+        ck(run_pf(arg, out, sizeof out) == 0 &&
+           has(out, "PREFLIGHT_ITEM\tchain-to-snap\tPASS\t") &&
+           !has(out, "PREFLIGHT_ITEM\tsys-six-target-0\t") &&
+           has(out, "verdict=PASS\tfailed=-\tnodes=4\t") &&
+           has(out, "\tshard=snap"),
+           "shard-snap-passes-when-sixtarget-fails", out);
+
+        cx_fmt(arg, sizeof arg, "--shard sixtarget --table %s --root %s --repo %s --snap-base %s --rev %s", t_six_fail, root_ok, p2repo, snap_base, ok_sha);
+        ck(run_pf(arg, out, sizeof out) == 1 &&
+           has(out, "PREFLIGHT_ITEM\tsys-six-target-0\tFAIL\t") &&
+           !has(out, "PREFLIGHT_ITEM\tchain-to-snap\t") &&
+           has(out, "verdict=FAIL\tfailed=sys-six-target-0\tnodes=4\t") &&
+           has(out, "\tshard=sixtarget"),
+           "shard-sixtarget-fails-when-sixtarget-fails", out);
+
+        cx_fmt(arg, sizeof arg, "--shard badshard --table %s --root %s --repo %s --snap-base %s --rev %s", t_snap_fail, root_ok, p2repo, snap_base, ok_sha);
+        ck(run_pf(arg, out, sizeof out) == 2 &&
+           has(out, "REFUSE\tCHAIN_PREFLIGHT\treason=bad-shard\tshard=badshard\tavailable=all,sixtarget,snap"),
+           "shard-unknown-name-refused-rc2", out);
+
+        ck(run_pf("--shard", out, sizeof out) == 2,
+           "shard-missing-value-refused-rc2", out);
+
+        ck(run_pf("--prepare-snap-tools --repo .", out, sizeof out) == 0 &&
+           has(out, "PREFLIGHT_PREPARE\tstep=snap-tools\tstatus=PREPARED\tcandidate_chain="),
+           "prepare-snap-tools-outputs-prepared", out);
+    }
+
     cx_fmt(rmcmd, sizeof rmcmd, "rm -rf '%s'", fx);
     ckk_sh("CHECK_CHAIN_PREFLIGHT", rmcmd, out, sizeof out);
 

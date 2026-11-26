@@ -1,0 +1,68 @@
+#pragma unisa use cxlib.netpack
+#pragma unisa use sys.fs
+#pragma unisa use sys.io
+#pragma unisa use mem.heap
+
+static int g_pass = 0, g_fail = 0;
+
+static void chk(int cond, const char *name) {
+    if (cond) { g_pass++; sy_printf("PASS\tcheck-tape-so-corrupt.%s\n", name); }
+    else { g_fail++; sy_printf("FAIL\tcheck-tape-so-corrupt.%s\n", name); }
+}
+
+int main(void) {
+    char tmp[4096], good_so[4096], out_dir[4096], man[4096];
+    if (sy_mkdtemp("/tmp", "tape-corrupt-ck", tmp, sizeof tmp)) return 2;
+    if (cx_fmt(good_so, sizeof good_so, "%s/good.so", tmp)) return 2;
+    if (cx_fmt(out_dir, sizeof out_dir, "%s/out", tmp)) return 2;
+    if (cx_fmt(man, sizeof man, "%s/manifest.tsv", out_dir)) return 2;
+
+    np_result r = {0};
+    char why[256];
+    char *mk_av[] = {"mkdir", "-p", out_dir, 0};
+    chk(np_run(mk_av, ".", 0, 10, &r, why, sizeof why) == 0 && r.rc == 0, "mkdir-out");
+    np_free(&r);
+
+    char *cc_av[] = {"cc", "-shared", "-fPIC", "-Wl,-z,defs", "-o", good_so,
+                     "tools/tape/asm/tape_x86_64.S", "tools/tape/asm/hoststub_lnx_x86_64.S", 0};
+    chk(np_run(cc_av, ".", 0, 20, &r, why, sizeof why) == 0 && r.rc == 0, "build-good-so");
+    np_free(&r);
+
+    char *gen_av[] = {"sh", "./unisacc.com", "tools/tape-so-corrupt.cx", "--", "--in", good_so, "--out-dir", out_dir, 0};
+    chk(np_run(gen_av, ".", 0, 20, &r, why, sizeof why) == 0 && r.rc == 0 &&
+        r.out && strstr(r.out, "TAPE_SO_CORRUPT\tOK\tcount=16") != 0, "gen-16-variants");
+    np_free(&r);
+
+    unsigned char *mb = 0;
+    int64_t mn = 0;
+    chk(sy_read_file(man, &mb, &mn, 1 << 20) == 0 && mb && mn > 0, "manifest-read");
+    int rows = 0;
+    if (mb) {
+        for (int64_t i = 0; i < mn; i++) if (mb[i] == '\n') rows++;
+        mm_free(mb);
+    }
+    chk(rows == 17, "manifest-17-lines");
+
+    char p[4096];
+    unsigned char *vb = 0;
+    int64_t vn = 0;
+    cx_fmt(p, sizeof p, "%s/trunc-63.so", out_dir);
+    chk(sy_read_file(p, &vb, &vn, 1 << 20) == 0 && vn == 63, "trunc-63-size");
+    if (vb) { mm_free(vb); vb = 0; }
+
+    cx_fmt(p, sizeof p, "%s/not-et-dyn.so", out_dir);
+    chk(sy_read_file(p, &vb, &vn, 1 << 20) == 0 && vn > 20 && vb[16] == 2 && vb[17] == 0, "not-et-dyn-byte");
+    if (vb) { mm_free(vb); vb = 0; }
+
+    cx_fmt(p, sizeof p, "%s/not-x86-64.so", out_dir);
+    chk(sy_read_file(p, &vb, &vn, 1 << 20) == 0 && vn > 20 && vb[18] == 183 && vb[19] == 0, "not-x86-64-byte");
+    if (vb) { mm_free(vb); vb = 0; }
+
+    /* Negative: missing input */
+    char *neg_av[] = {"sh", "./unisacc.com", "tools/tape-so-corrupt.cx", "--", "--in", "/nonexistent/no.so", "--out-dir", out_dir, 0};
+    chk(np_run(neg_av, ".", 0, 10, &r, why, sizeof why) == 0 && r.rc == 2, "neg-missing-so-rc2");
+    np_free(&r);
+
+    sy_printf("CHECK_TAPE_SO_CORRUPT\tpassed=%d\tfailed=%d\n", g_pass, g_fail);
+    return g_fail ? 1 : 0;
+}

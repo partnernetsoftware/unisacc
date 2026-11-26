@@ -30,7 +30,7 @@ static void mktable(const char *dest,const RcCandidate *c,const char *ver,const 
 static int contains(const char *s,const char *needle){long i,n=length(s),m=length(needle);for(i=0;i+m<=n;i++)if(tx_same(s+i,m,needle,m))return 1;return 0;}
 int main(void){char src[4400],out[4400],p[4400],q[4400],text[8192],why[512]={0};char *v[12];int i,n;
     if(sy_cwd(root,sizeof root)<0)return 2;path(table,root,"release/testdata/layout-candidate.tsv");if(rcand_load(table,&candidate,why,sizeof why))return 2;
-    for(i=0;i<100;i++){n=tx_snprintf(tmp,sizeof tmp,"/tmp/check-release-layout-%d-%d",sy_pid(),i);if(n<0||n>=sizeof tmp)return 2;if(!sy_mkdir(tmp,0700))break;}if(i==100)return 2;
+    {const char *td=sy_env("TMPDIR");if(!td||!td[0])td="/tmp";for(i=0;i<100;i++){n=tx_snprintf(tmp,sizeof tmp,"%s/check-release-layout-%d-%d",td,sy_pid(),i);if(n<0||n>=sizeof tmp)return 2;if(!sy_mkdir(tmp,0700))break;}}if(i==100)return 2;
     path(src,tmp,"src");path(out,tmp,"out");if(sy_mkdir(src,0700))return 2;
     path(p,src,candidate.name[0]);writefile(p,"compiler fixture");path(p,src,candidate.name[1]);writefile(p,"package fixture");path(p,src,candidate.name[2]);writefile(p,"slice fixture");
     v[0]="sha256sum";v[1]="--";v[2]=candidate.name[0];v[3]=0;if(run(v,src,text,sizeof text)||length(text)<64)return 2;text[64]=0;n=tx_snprintf(q,sizeof q,"{\"product_digest\": \"%s\",\"schema\":1}\n",text);if(n<0||n>=sizeof q)return 2;path(p,src,candidate.name[3]);writefile(p,q);
@@ -78,6 +78,165 @@ int main(void){char src[4400],out[4400],p[4400],q[4400],text[8192],why[512]={0};
         path(p,o63,"unisacc-0.0.63-win-arm64.zip");writefile(p,"extra zip");ck(tool2(t63,"--check",o63)!=0,"v63-extra-zip-refused");
         ck(tool2(t62,src,o62)!=0,"v62-dash-zip-refused");
         ck(tool2(tbad,src,obad)!=0,"v63-named-zip-refused");
+    }
+    /* T1(a): table-driven asset count with backward-compatible optional extra sidecar columns. */
+    {
+        char t23[4400],t23d[4400],t23bad[4400],o23[4400],o23d[4400],so_sha[65],row[4400];
+        RcCandidate c23;
+        int g;
+        path(p,src,"tapemode.so");writefile(p,"tapemode sidecar fixture");
+        v[0]="sha256sum";v[1]="--";v[2]="tapemode.so";v[3]=0;
+        if(run(v,src,text,sizeof text)||length(text)<64)return 2;
+        tx_copy(so_sha,65,text,64);
+        path(t23,tmp,"c23.tsv");path(t23d,tmp,"c23dash.tsv");path(t23bad,tmp,"c23bad.tsv");
+        path(o23,tmp,"out23");path(o23d,tmp,"out23dash");
+        /* 23-col table with populated tape_so */
+        g=sy_open_new(t23,0600);if(g<0)return 2;
+        n=tx_snprintf(row,sizeof row,"repo\ttag\tcommit\tversion\tworkflow\tworkflow_ref\tci_run_id\tape\tape_sha256\tpackage\tpackage_sha256\twin_arm64\twin_arm64_sha256\trecord\trecord_sha256\tbuild_alias\tbuild_alias_sha256\tzip\tzip_sha256\tchecksums\tchecksums_sha256\ttape_so\ttape_so_sha256\n%s\t%s\t%s\t0.1.5\t%s\t%s\t%s",candidate.repo,candidate.tag,candidate.commit,candidate.workflow,candidate.workflow_ref,candidate.ci_run_id);
+        if(n<0||sy_write_all(g,row,n))return 2;
+        for(i=0;i<7;i++){const char *nm=i==5?"-":candidate.name[i],*sh=i==5?"-":candidate.sha[i];n=tx_snprintf(row,sizeof row,"\t%s\t%s",nm,sh);if(n<0||sy_write_all(g,row,n))return 2;}
+        n=tx_snprintf(row,sizeof row,"\ttapemode.so\t%s\n",so_sha);if(n<0||sy_write_all(g,row,n)||sy_close(g))return 2;
+        ck(rcand_load(t23,&c23,why,sizeof why)==0&&c23.extra_n==1&&rcand_sums_count(&c23)==6&&rcand_upload_count(&c23)==7,"t1a-extra-col-loads-six-sums");
+        ck(tool2(t23,src,o23)==0,"t1a-generate-layout-with-extra");
+        {   RcCandidate cp=c23;int r;
+            for(r=4;r<=6;r+=2){v[0]="sha256sum";v[1]="--";v[2]=cp.name[r];v[3]=0;if(run(v,o23,text,sizeof text)||length(text)<64)return 2;tx_copy(cp.sha[r],65,text,64);}
+            path(t23,tmp,"c23pinned.tsv");g=sy_open_new(t23,0600);if(g<0)return 2;
+            n=tx_snprintf(row,sizeof row,"repo\ttag\tcommit\tversion\tworkflow\tworkflow_ref\tci_run_id\tape\tape_sha256\tpackage\tpackage_sha256\twin_arm64\twin_arm64_sha256\trecord\trecord_sha256\tbuild_alias\tbuild_alias_sha256\tzip\tzip_sha256\tchecksums\tchecksums_sha256\ttape_so\ttape_so_sha256\n%s\t%s\t%s\t0.1.5\t%s\t%s\t%s",cp.repo,cp.tag,cp.commit,cp.workflow,cp.workflow_ref,cp.ci_run_id);
+            if(n<0||sy_write_all(g,row,n))return 2;
+            for(i=0;i<7;i++){const char *nm=i==5?"-":cp.name[i],*sh=i==5?"-":cp.sha[i];n=tx_snprintf(row,sizeof row,"\t%s\t%s",nm,sh);if(n<0||sy_write_all(g,row,n))return 2;}
+            n=tx_snprintf(row,sizeof row,"\ttapemode.so\t%s\n",so_sha);if(n<0||sy_write_all(g,row,n)||sy_close(g))return 2;
+        }
+        ck(tool2(t23,"--check",o23)==0,"t1a-check-layout-with-extra");
+        path(p,o23,"SHA256SUMS");{int f=sy_open_read(p);long got=f<0?-1:sy_read(f,text,sizeof text-1);int lines=0;long k;if(f>=0)sy_close(f);for(k=0;k<got;k++)if(text[k]=='\n')lines++;text[got<0?0:got]=0;ck(got>0&&lines==6&&contains(text,"tapemode.so"),"t1a-sums-cover-six-files");}
+        /* Negative control: corrupt tapemode.so -> refused */
+        path(p,o23,"tapemode.so");writefile(p,"Tapemode sidecar fixture");
+        ck(tool2(t23,"--check",o23)!=0,"t1a-extra-corruption-refused");
+        /* 23-col table with dash extra stays at 5 sums */
+        g=sy_open_new(t23d,0600);if(g<0)return 2;
+        n=tx_snprintf(row,sizeof row,"repo\ttag\tcommit\tversion\tworkflow\tworkflow_ref\tci_run_id\tape\tape_sha256\tpackage\tpackage_sha256\twin_arm64\twin_arm64_sha256\trecord\trecord_sha256\tbuild_alias\tbuild_alias_sha256\tzip\tzip_sha256\tchecksums\tchecksums_sha256\ttape_so\ttape_so_sha256\n%s\t%s\t%s\t0.1.5\t%s\t%s\t%s",candidate.repo,candidate.tag,candidate.commit,candidate.workflow,candidate.workflow_ref,candidate.ci_run_id);
+        if(n<0||sy_write_all(g,row,n))return 2;
+        for(i=0;i<7;i++){const char *nm=i==5?"-":candidate.name[i],*sh=i==5?"-":candidate.sha[i];n=tx_snprintf(row,sizeof row,"\t%s\t%s",nm,sh);if(n<0||sy_write_all(g,row,n))return 2;}
+        n=tx_snprintf(row,sizeof row,"\t-\t-\n");if(n<0||sy_write_all(g,row,n)||sy_close(g))return 2;
+        ck(rcand_load(t23d,&c23,why,sizeof why)==0&&c23.extra_n==0&&rcand_sums_count(&c23)==5,"t1a-dash-extra-keeps-five");
+        /* Negative control: mismatched extra header rejected */
+        g=sy_open_new(t23bad,0600);if(g<0)return 2;
+        n=tx_snprintf(row,sizeof row,"repo\ttag\tcommit\tversion\tworkflow\tworkflow_ref\tci_run_id\tape\tape_sha256\tpackage\tpackage_sha256\twin_arm64\twin_arm64_sha256\trecord\trecord_sha256\tbuild_alias\tbuild_alias_sha256\tzip\tzip_sha256\tchecksums\tchecksums_sha256\ttape_so\tbad_col\n%s\t%s\t%s\t0.1.5\t%s\t%s\t%s",candidate.repo,candidate.tag,candidate.commit,candidate.workflow,candidate.workflow_ref,candidate.ci_run_id);
+        if(n<0||sy_write_all(g,row,n))return 2;
+        for(i=0;i<7;i++){const char *nm=i==5?"-":candidate.name[i],*sh=i==5?"-":candidate.sha[i];n=tx_snprintf(row,sizeof row,"\t%s\t%s",nm,sh);if(n<0||sy_write_all(g,row,n))return 2;}
+        n=tx_snprintf(row,sizeof row,"\t-\t-\n");if(n<0||sy_write_all(g,row,n)||sy_close(g))return 2;
+        ck(rcand_load(t23bad,&c23,why,sizeof why)!=0,"t1a-bad-extra-header-refused");
+        /* B1: duplicate extra column key or reusing core column key must be refused */
+        {
+            char tdup[4400],tcore[4400];
+            path(tdup,tmp,"c25dup.tsv");path(tcore,tmp,"c23core.tsv");
+            g=sy_open_new(tdup,0600);if(g<0)return 2;
+            n=tx_snprintf(row,sizeof row,"repo\ttag\tcommit\tversion\tworkflow\tworkflow_ref\tci_run_id\tape\tape_sha256\tpackage\tpackage_sha256\twin_arm64\twin_arm64_sha256\trecord\trecord_sha256\tbuild_alias\tbuild_alias_sha256\tzip\tzip_sha256\tchecksums\tchecksums_sha256\ttape_so\ttape_so_sha256\ttape_so\ttape_so_sha256\n%s\t%s\t%s\t0.1.5\t%s\t%s\t%s",candidate.repo,candidate.tag,candidate.commit,candidate.workflow,candidate.workflow_ref,candidate.ci_run_id);
+            if(n<0||sy_write_all(g,row,n))return 2;
+            for(i=0;i<7;i++){const char *nm=i==5?"-":candidate.name[i],*sh=i==5?"-":candidate.sha[i];n=tx_snprintf(row,sizeof row,"\t%s\t%s",nm,sh);if(n<0||sy_write_all(g,row,n))return 2;}
+            n=tx_snprintf(row,sizeof row,"\t-\t-\ttapemode.so\t%s\n",so_sha);if(n<0||sy_write_all(g,row,n)||sy_close(g))return 2;
+            ck(rcand_load(tdup,&c23,why,sizeof why)!=0&&contains(why,"duplicate column name"),"t1a-b1-dup-extra-header-refused");
+
+            g=sy_open_new(tcore,0600);if(g<0)return 2;
+            n=tx_snprintf(row,sizeof row,"repo\ttag\tcommit\tversion\tworkflow\tworkflow_ref\tci_run_id\tape\tape_sha256\tpackage\tpackage_sha256\twin_arm64\twin_arm64_sha256\trecord\trecord_sha256\tbuild_alias\tbuild_alias_sha256\tzip\tzip_sha256\tchecksums\tchecksums_sha256\tape\tape_sha256\n%s\t%s\t%s\t0.1.5\t%s\t%s\t%s",candidate.repo,candidate.tag,candidate.commit,candidate.workflow,candidate.workflow_ref,candidate.ci_run_id);
+            if(n<0||sy_write_all(g,row,n))return 2;
+            for(i=0;i<7;i++){const char *nm=i==5?"-":candidate.name[i],*sh=i==5?"-":candidate.sha[i];n=tx_snprintf(row,sizeof row,"\t%s\t%s",nm,sh);if(n<0||sy_write_all(g,row,n))return 2;}
+            n=tx_snprintf(row,sizeof row,"\ttapemode.so\t%s\n",so_sha);if(n<0||sy_write_all(g,row,n)||sy_close(g))return 2;
+            ck(rcand_load(tcore,&c23,why,sizeof why)!=0&&contains(why,"duplicate column name"),"t1a-b1-core-extra-header-refused");
+        }
+        /* B2: c47-1-readback.cx step download + asset-sha + layout-generate must fetch and verify all extra assets */
+        {
+            char fbin[4400],ghp[4400],rbout[4400],rbscript[4400],exe[4400],pathenv[4600],ghs[2048];
+            /* Restore clean tapemode.so in o23 after negative test above */
+            path(p,o23,"tapemode.so");writefile(p,"tapemode sidecar fixture");
+            path(fbin,tmp,"fbin");if(sy_mkdir(fbin,0700))return 2;
+            path(ghp,fbin,"gh");
+            n=tx_snprintf(ghs,sizeof ghs,"#!/bin/sh\nif [ \"$2\" = download ]; then\n  dir=\"\"\n  while [ $# -gt 0 ]; do\n    case \"$1\" in\n      --dir) dir=\"$2\"; shift 2;;\n      --pattern) mkdir -p \"$dir\"; cp '%s/'\"$2\" \"$dir/\" 2>/dev/null || exit 1; shift 2;;\n      *) shift;;\n    esac\n  done\n  exit 0\nfi\nexit 0\n",o23);
+            if(n<0||n>=sizeof ghs)return 2;
+            writefile(ghp,ghs);
+            v[0]="chmod";v[1]="+x";v[2]=ghp;v[3]=0;if(run(v,root,0,0))return 2;
+            n=tx_snprintf(pathenv,sizeof pathenv,"PATH=%s:/usr/bin:/bin",fbin);if(n<0||n>=sizeof pathenv)return 2;
+            path(exe,root,"unisacc.com");path(rbscript,root,"release/tools/c47-1-readback.cx");
+            path(rbout,tmp,"rb23");
+            {char *rv[]={"env",pathenv,"sh",exe,rbscript,"--",root,t23,rbout,table,"true","--step","metadata",0};if(run(rv,root,text,sizeof text))return 2;}
+            {char *rv[]={"env",pathenv,"sh",exe,rbscript,"--",root,t23,rbout,table,"true","--step","tag",0};if(run(rv,root,text,sizeof text))return 2;}
+            {char *rv[]={"env",pathenv,"sh",exe,rbscript,"--",root,t23,rbout,table,"true","--step","download",0};
+             ck(run(rv,root,text,sizeof text)==0&&contains(text,"READBACK_STEP download PASS"),"t1a-b2-c47-download-fetches-extra");}
+            {char *rv[]={"env",pathenv,"sh",exe,rbscript,"--",root,t23,rbout,table,"true","--step","asset-sha",0};
+             ck(run(rv,root,text,sizeof text)==0&&contains(text,"READBACK_SHA tapemode.so"),"t1a-b2-c47-asset-sha-covers-extra");}
+        }
+        /* B3: release-run.cx step_layout_gen + step_backfill on 23-col table (both populated tape_so and dash -\t-) */
+        {
+            char rsrc[4400],rchain[4400],rod1[4400],rod2[4400],exe[4400],rrscript[4400],bsha[65];
+            const char *rinputs[10]={"p3.pkg","win-x86_64","lnx-x86_64","lnx-arm64","osx-x86_64","osx-arm64","win-arm64","cache-manager-x64","cache-manager-arm64","sources.tsv"};
+            path(rsrc,tmp,"rsrc");path(rchain,tmp,"rchain");if(sy_mkdir(rsrc,0700)||sy_mkdir(rchain,0700))return 2;
+            for(i=0;i<9;i++){path(p,rsrc,rinputs[i]);writefile(p,i==0?"package fixture":i==6?"slice fixture":"pack fixture\n");}
+            path(p,rsrc,"sources.tsv");writefile(p,"# fixture\n0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef\n");
+            path(p,rsrc,"tapemode.so");writefile(p,"tapemode sidecar fixture");
+            /* Minimal valid chain fixedpoint directory for resume after step 5 */
+            {const char *slugs[6]={"lnx-x86_64","lnx-arm64","osx-x86_64","osx-arm64","win-x86_64","win-arm64"};
+             const char *roles[6]={"lnx-x86_64/entry.elf","lnx-arm64/entry.elf","osx-x86_64/slice-osx-x86_64","osx-arm64/slice-osx-arm64","win-x86_64/slice-win-x86_64","win-arm64/slice-win-arm64"};
+             int gg,jj;
+             path(p,rchain,"fixedpoint");if(sy_mkdir(p,0700))return 2;
+             for(gg=2;gg<=3;gg++){
+                 n=tx_snprintf(p,sizeof p,"%s/fixedpoint/g%d",rchain,gg);if(n<0||sy_mkdir(p,0700))return 2;
+                 for(jj=0;jj<6;jj++){
+                     n=tx_snprintf(p,sizeof p,"%s/fixedpoint/g%d/%s",rchain,gg,slugs[jj]);if(n<0||sy_mkdir(p,0700))return 2;
+                     n=tx_snprintf(p,sizeof p,"%s/fixedpoint/g%d/%s",rchain,gg,roles[jj]);if(n<0)return 2;
+                     writefile(p,"slice\n");
+                 }
+             }
+             path(p,rchain,"checkpoint.tsv");writefile(p,"DONE\tcompare\twall_ms=0\tsha=-\n");
+             path(p,rchain,"chain-run.tsv");writefile(p,"ATTEMPT\t1\tphase=compare\trc=0\tresidue=0\tbound=60\tmemo=off\n");
+             path(p,rchain,"chain-run-1.stdout");writefile(p,"CHAIN\tfixedpoint\tobjects=same\tcount=44\nCHAIN\tfixedpoint\tkernels=same\tcount=2\nCHAIN\tfixedpoint\tslices=same\tcount=6\nCHAIN\tfixedpoint\tproduct=same\n");
+            }
+            path(exe,root,"unisacc.com");path(rrscript,root,"tools/release-run.cx");
+            /* Case 1: 23-col populated tape_so */
+            path(rod1,tmp,"rr-out23");if(sy_mkdir(rod1,0700))return 2;
+            path(p,rod1,"ape");if(sy_mkdir(p,0700))return 2;
+            path(p,rod1,"ape/unisacc-next.com");writefile(p,"compiler fixture");
+            path(p,rod1,"inject");writefile(p,"slice fixture");
+            path(p,rod1,"state.tsv");writefile(p,"STEP\t4\tape-pack\tDONE\nSTEP\t5\tinject\tDONE\n");
+            {   np_buf pb={0};
+                v[0]="sha256sum";v[1]="--";v[2]=t23;v[3]=0;if(run(v,root,text,sizeof text)||length(text)<64)return 2;text[64]=0;
+                n=tx_snprintf(row,sizeof row,"%s\n%s\n%s\n\n%s\n%s\n",root,t23,rsrc,rchain,text);if(n<0)return 2;
+                np_puts(&pb,row);
+                for(i=0;i<10;i++){
+                    path(q,rsrc,rinputs[i]);
+                    v[0]="sha256sum";v[1]="--";v[2]=q;v[3]=0;if(run(v,root,text,sizeof text)||length(text)<64)return 2;text[64]=0;
+                    n=tx_snprintf(row,sizeof row,"%s\t%s\n",rinputs[i],text);if(n<0)return 2;
+                    np_puts(&pb,row);
+                }
+                path(p,rod1,"pack-inputs.tsv");writefile(p,pb.p);
+            }
+            {char *rv[]={"sh",exe,rrscript,"--","--resume",rod1,0};
+             RcCandidate cbf;
+             path(q,rod1,"candidate.tsv");
+             ck(run(rv,root,text,sizeof text)==0&&rcand_load(q,&cbf,why,sizeof why)==0&&cbf.extra_n==1&&tx_eqz(cbf.extra_sha[0],so_sha),"t1a-b3-release-run-backfill-23col-extra");}
+            /* Case 2: 23-col dash -\t- */
+            path(rod2,tmp,"rr-out23d");if(sy_mkdir(rod2,0700))return 2;
+            path(p,rod2,"ape");if(sy_mkdir(p,0700))return 2;
+            path(p,rod2,"ape/unisacc-next.com");writefile(p,"compiler fixture");
+            path(p,rod2,"inject");writefile(p,"slice fixture");
+            path(p,rod2,"state.tsv");writefile(p,"STEP\t4\tape-pack\tDONE\nSTEP\t5\tinject\tDONE\n");
+            {   np_buf pb={0};
+                v[0]="sha256sum";v[1]="--";v[2]=t23d;v[3]=0;if(run(v,root,text,sizeof text)||length(text)<64)return 2;text[64]=0;
+                n=tx_snprintf(row,sizeof row,"%s\n%s\n%s\n\n%s\n%s\n",root,t23d,rsrc,rchain,text);if(n<0)return 2;
+                np_puts(&pb,row);
+                for(i=0;i<10;i++){
+                    path(q,rsrc,rinputs[i]);
+                    v[0]="sha256sum";v[1]="--";v[2]=q;v[3]=0;if(run(v,root,text,sizeof text)||length(text)<64)return 2;text[64]=0;
+                    n=tx_snprintf(row,sizeof row,"%s\t%s\n",rinputs[i],text);if(n<0)return 2;
+                    np_puts(&pb,row);
+                }
+                path(p,rod2,"pack-inputs.tsv");writefile(p,pb.p);
+            }
+            {char *rv[]={"sh",exe,rrscript,"--","--resume",rod2,0};
+             RcCandidate cbfd;
+             path(q,rod2,"candidate.tsv");
+             ck(run(rv,root,text,sizeof text)==0&&rcand_load(q,&cbfd,why,sizeof why)==0&&cbfd.extra_n==0&&rcand_sums_count(&cbfd)==5,"t1a-b3-release-run-backfill-23col-dash");}
+            (void)bsha;
+        }
+        (void)o23d;
     }
     v[0]="rm";v[1]="-rf";v[2]=tmp;v[3]=0;if(run(v,root,0,0))return 2;n=tx_snprintf(text,sizeof text,"RELEASE_LAYOUT_CHECK\tassertions=%d\tfailed=%d\n",assertions,failed);if(n<0||n>=sizeof text)return 2;print(text);return failed?1:0;
 }

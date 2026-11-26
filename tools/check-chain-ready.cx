@@ -531,6 +531,143 @@ int main(int argc, char **argv) {
             rc = run(v, out, sizeof out);
             ck(rc == 1 && has(out, "19-chain-preflight\tFAIL") && has(out, "a-files-over-cap") && has(out, "a_files=2 cap=1") && has(out, "READY\tno"), "preflight-19-a-files-over-cap");
         }
+        /* 19a-preflight-sixtarget & 19b-preflight-snap sub-gates + external execution log + --only unknown/truncated/over-cap refusal */
+        {
+            char pft_snap_fail[440], pft_six_fail[440], pft_both_ok[440], markf[440], tbuf[1200];
+            size_t mn = 0; char *mb = 0;
+            const char *p_ok = "planned_units=5\na_class=前端声明兼容\na_files_cap=2\n";
+            cx_fmt(markf, sizeof markf, "%s/pf-exec-mark.txt", tmpd);
+            cx_fmt(pft_snap_fail, sizeof pft_snap_fail, "%s/pft-snap-fail.tsv", tmpd);
+            cx_fmt(pft_six_fail, sizeof pft_six_fail, "%s/pft-six-fail.tsv", tmpd);
+            cx_fmt(pft_both_ok, sizeof pft_both_ok, "%s/pft-both-ok.tsv", tmpd);
+
+            cx_fmt(tbuf, sizeof tbuf,
+                "name\tpatterns\tcmd\ttimeout_s\n"
+                "root-types\t*\tsh ./unisacc.com tools/chain-preflight.cx -- --item root-types\t10\n"
+                "snap-cache-types\t*\tsh ./unisacc.com tools/chain-preflight.cx -- --item snap-cache-types\t10\n"
+                "parse2-bind\t*\tsh ./unisacc.com tools/chain-preflight.cx -- --item parse2-bind\t10\n"
+                "sys-six-target-0\tcx/sys/\tsh -c 'printf A >> \"%s\"'\t10\n"
+                "chain-to-snap\ttools/candidate-chain.cx\tsh -c 'printf B >> \"%s\"; exit 1'\t10\n", markf, markf);
+            cx_write(pft_snap_fail, tbuf, tx_len(tbuf, sizeof tbuf));
+
+            cx_fmt(tbuf, sizeof tbuf,
+                "name\tpatterns\tcmd\ttimeout_s\n"
+                "root-types\t*\tsh ./unisacc.com tools/chain-preflight.cx -- --item root-types\t10\n"
+                "snap-cache-types\t*\tsh ./unisacc.com tools/chain-preflight.cx -- --item snap-cache-types\t10\n"
+                "parse2-bind\t*\tsh ./unisacc.com tools/chain-preflight.cx -- --item parse2-bind\t10\n"
+                "sys-six-target-0\tcx/sys/\tsh -c 'printf A >> \"%s\"; exit 1'\t10\n"
+                "chain-to-snap\ttools/candidate-chain.cx\tsh -c 'printf B >> \"%s\"'\t10\n", markf, markf);
+            cx_write(pft_six_fail, tbuf, tx_len(tbuf, sizeof tbuf));
+
+            cx_fmt(tbuf, sizeof tbuf,
+                "name\tpatterns\tcmd\ttimeout_s\n"
+                "root-types\t*\tsh ./unisacc.com tools/chain-preflight.cx -- --item root-types\t10\n"
+                "snap-cache-types\t*\tsh ./unisacc.com tools/chain-preflight.cx -- --item snap-cache-types\t10\n"
+                "parse2-bind\t*\tsh ./unisacc.com tools/chain-preflight.cx -- --item parse2-bind\t10\n"
+                "sys-six-target-0\tcx/sys/\tsh -c 'printf A >> \"%s\"'\t10\n"
+                "chain-to-snap\ttools/candidate-chain.cx\tsh -c 'printf B >> \"%s\"'\t10\n", markf, markf);
+            cx_write(pft_both_ok, tbuf, tx_len(tbuf, sizeof tbuf));
+            cx_write(planf, p_ok, tx_len(p_ok, 256));
+            {
+                char *v[] = {"./tools/bound", "40", "sh", UC, "tools/chain-ready.cx", "--", "--repo", srepo, "--root", srepo, "--since", "HEAD~1", "--only", "19a-preflight-sixtarget", "--preflight-table", pft_snap_fail, 0};
+                (void)sy_unlink(markf);
+                rc = run(v, out, sizeof out);
+                mb = cx_read(markf, &mn);
+                ck(rc == 0 && has(out, "19a-preflight-sixtarget\tPASS") && has(out, "shard=sixtarget") && has(out, "a_files=2/2") && has(out, "READY\tyes") && mb && mn == 1 && mb[0] == 'A', "preflight-19a-sixtarget-pass-when-snap-fails");
+                if (mb) mm_free(mb);
+            }
+            {
+                char *v[] = {"./tools/bound", "40", "sh", UC, "tools/chain-ready.cx", "--", "--repo", srepo, "--root", srepo, "--since", "HEAD~1", "--only", "19a-preflight-sixtarget", "--preflight-table", pft_six_fail, 0};
+                (void)sy_unlink(markf);
+                rc = run(v, out, sizeof out);
+                mb = cx_read(markf, &mn);
+                ck(rc == 1 && has(out, "19a-preflight-sixtarget\tFAIL") && has(out, "sys-six-target-0") && has(out, "READY\tno") && mb && mn == 1 && mb[0] == 'A', "preflight-19a-sixtarget-fail-when-sixtarget-fails");
+                if (mb) mm_free(mb);
+            }
+            {
+                char *v[] = {"./tools/bound", "40", "sh", UC, "tools/chain-ready.cx", "--", "--repo", srepo, "--root", srepo, "--since", "HEAD~1", "--only", "19b-preflight-snap", "--preflight-table", pft_six_fail, 0};
+                (void)sy_unlink(markf);
+                rc = run(v, out, sizeof out);
+                mb = cx_read(markf, &mn);
+                ck(rc == 0 && has(out, "19b-preflight-snap\tPASS") && has(out, "shard=snap") && has(out, "a_files=2/2") && has(out, "READY\tyes") && mb && mn == 1 && mb[0] == 'B', "preflight-19b-snap-pass-when-sixtarget-fails");
+                if (mb) mm_free(mb);
+            }
+            {
+                char *v[] = {"./tools/bound", "40", "sh", UC, "tools/chain-ready.cx", "--", "--repo", srepo, "--root", srepo, "--since", "HEAD~1", "--only", "19b-preflight-snap", "--preflight-table", pft_snap_fail, 0};
+                (void)sy_unlink(markf);
+                rc = run(v, out, sizeof out);
+                mb = cx_read(markf, &mn);
+                ck(rc == 1 && has(out, "19b-preflight-snap\tFAIL") && has(out, "chain-to-snap") && has(out, "READY\tno") && mb && mn == 1 && mb[0] == 'B', "preflight-19b-snap-fail-when-snap-fails");
+                if (mb) mm_free(mb);
+            }
+            {
+                char *v[] = {"./tools/bound", "40", "sh", UC, "tools/chain-ready.cx", "--", "--repo", srepo, "--root", srepo, "--since", "HEAD~1", "--only", "19a-preflight-sixtarget,19b-preflight-snap", "--preflight-table", pft_six_fail, 0};
+                (void)sy_unlink(markf);
+                rc = run(v, out, sizeof out);
+                mb = cx_read(markf, &mn);
+                ck(rc == 1 && has(out, "19a-preflight-sixtarget\tFAIL") && has(out, "19b-preflight-snap\tPASS") && has(out, "READY\tno") && mb && mn == 2 && mb[0] == 'A' && mb[1] == 'B', "preflight-19a-fail-still-runs-19b-and-ready-no");
+                if (mb) mm_free(mb);
+            }
+            {
+                char *v[] = {"./tools/bound", "40", "sh", UC, "tools/chain-ready.cx", "--", "--repo", srepo, "--root", srepo, "--since", "HEAD~1", "--only", "19-chain-preflight", "--preflight-table", pft_snap_fail, 0};
+                (void)sy_unlink(markf);
+                rc = run(v, out, sizeof out);
+                mb = cx_read(markf, &mn);
+                ck(rc == 1 && has(out, "19-chain-preflight\tFAIL") && has(out, "chain-to-snap") && has(out, "READY\tno") && mb && mn == 2 && mb[0] == 'A' && mb[1] == 'B', "preflight-19-legacy-runs-both-shards-and-ready-no");
+                if (mb) mm_free(mb);
+            }
+            {
+                char *v[] = {"./tools/bound", "40", "sh", UC, "tools/chain-ready.cx", "--", "--repo", srepo, "--root", srepo, "--since", "HEAD~1", "--only", "19-chain-preflight,19a-preflight-sixtarget,19b-preflight-snap", "--preflight-table", pft_both_ok, 0};
+                (void)sy_unlink(markf);
+                rc = run(v, out, sizeof out);
+                mb = cx_read(markf, &mn);
+                ck(rc == 0 && has(out, "19a-preflight-sixtarget\tPASS") && has(out, "19b-preflight-snap\tPASS") && has(out, "19-chain-preflight\tPASS") && has(out, "READY\tyes") && mb && mn == 2 && mb[0] == 'A' && mb[1] == 'B', "preflight-19-19a-19b-combined-deduped-pass");
+                if (mb) mm_free(mb);
+            }
+            {
+                char *v[] = {"./tools/bound", "40", "sh", UC, "tools/chain-ready.cx", "--", "--only", "24-root-current-typo", 0};
+                rc = run(v, out, sizeof out);
+                ck(rc == 2 && has(out, "REFUSE\tCHAIN_READY_ONLY\treason=unknown-gate\tonly=24-root-current-typo") && has(out, "24-root-current") && !has(out, "READY\tyes"), "only-unknown-gate-refused-rc2");
+            }
+            {
+                char *v1[] = {"./tools/bound", "40", "sh", UC, "tools/chain-ready.cx", "--", "--only", "19-", 0};
+                char *v2[] = {"./tools/bound", "40", "sh", UC, "tools/chain-ready.cx", "--", "--only", "19-ch", 0};
+                int r1 = run(v1, out, sizeof out);
+                int ok1 = (r1 == 2 && has(out, "REFUSE\tCHAIN_READY_ONLY\treason=unknown-gate\tonly=19-"));
+                int r2 = run(v2, out, sizeof out);
+                int ok2 = (r2 == 2 && has(out, "REFUSE\tCHAIN_READY_ONLY\treason=unknown-gate\tonly=19-ch"));
+                ck(ok1 && ok2, "only-truncated-prefix-19-dash-refused-rc2");
+            }
+            {
+                char *v[] = {"./tools/bound", "40", "sh", UC, "tools/chain-ready.cx", "--", "--only",
+                             "7-recipe,9-ledger,7-recipe,9-ledger,7-recipe,9-ledger,7-recipe,9-ledger,"
+                             "7-recipe,9-ledger,7-recipe,9-ledger,7-recipe,9-ledger,7-recipe,9-ledger,"
+                             "7-recipe,9-ledger,7-recipe,9-ledger,7-recipe,9-ledger,7-recipe,9-ledger,"
+                             "7-recipe,9-ledger,7-recipe,9-ledger,7-recipe,9-ledger,7-recipe,9-ledger,7-recipe", 0};
+                rc = run(v, out, sizeof out);
+                ck(rc == 2 && has(out, "REFUSE\tCHAIN_READY_ONLY\treason=too-many-only\tcount=33\tmax=32") && !has(out, "READY\tyes"), "only-over-32-cap-refused-rc2");
+            }
+            {
+                char *v[] = {"./tools/bound", "40", "sh", UC, "tools/chain-ready.cx", "--", "--only", "7-recipe,9-ledger", 0};
+                rc = run(v, out, sizeof out);
+                ck(rc == 0 && has(out, "7-recipe\tUNMEASURED") && has(out, "9-ledger\tUNMEASURED") && has(out, "READY\tyes"), "only-known-comma-multi-pass");
+            }
+            {
+                char *v[] = {"./tools/bound", "40", "sh", UC, "tools/chain-ready.cx", "--", "--only", "7-recipe", "--only", "9-ledger", 0};
+                rc = run(v, out, sizeof out);
+                ck(rc == 0 && has(out, "7-recipe\tUNMEASURED") && has(out, "9-ledger\tUNMEASURED") && has(out, "READY\tyes"), "only-known-repeated-flag-multi-pass");
+            }
+            {
+                char *v[] = {"./tools/bound", "40", "sh", UC, "tools/chain-ready.cx", "--", "--only", "9-ledger,99-unknown-gate", 0};
+                rc = run(v, out, sizeof out);
+                ck(rc == 2 && has(out, "REFUSE\tCHAIN_READY_ONLY\treason=unknown-gate\tonly=99-unknown-gate") && !has(out, "9-ledger\tUNMEASURED") && !has(out, "READY\tyes"), "only-mixed-comma-unknown-refused-rc2");
+            }
+            {
+                char *v[] = {"./tools/bound", "40", "sh", UC, "tools/chain-ready.cx", "--", "--only", "9-ledger", "--only", "99-unknown-gate", 0};
+                rc = run(v, out, sizeof out);
+                ck(rc == 2 && has(out, "REFUSE\tCHAIN_READY_ONLY\treason=unknown-gate\tonly=99-unknown-gate") && !has(out, "9-ledger\tUNMEASURED") && !has(out, "READY\tyes"), "only-mixed-repeated-flag-unknown-refused-rc2");
+            }
+        }
         {
             const char *p_ok2 = "planned_units=5\na_class=前端声明兼容\na_files_cap=2\n";
             const char *vseq_drift = "slot\tversion\tclass\tstate\tnote\n1\t0.0.1\ttest\t已公开\tfixture\n2\t0.0.2\ttest\t进行中\tdrift\n";

@@ -152,11 +152,25 @@ int main(int argc,char **argv){
         if(tx_eqz(argv[5],"false")){char endpoint[512];if(cx_fmt(endpoint,sizeof endpoint,"repos/%s/git/ref/tags/%s",candidate.repo,candidate.tag))die("tag path");char *v[]={"gh","api",endpoint,"--jq",".object.sha",0};np_result r=command("tag",v,root,15);if(r.outn!=41||!tx_same(r.out,40,candidate.commit,40)||r.out[40]!='\n')die("tag commit");np_free(&r);}
     }
     if(step<0 || step==2){
-        char *fetch[]={"gh","release","download",candidate.tag,"--repo",candidate.repo,"--dir",download,"--pattern",candidate.name[0],"--pattern",candidate.name[1],"--pattern",candidate.name[2],"--pattern",candidate.name[3],0};run("download",fetch,root,25);
+        char *fetch[18+2*RCAND_MAX_EXTRA];int fn=0;
+        fetch[fn++]="gh";fetch[fn++]="release";fetch[fn++]="download";fetch[fn++]=candidate.tag;
+        fetch[fn++]="--repo";fetch[fn++]=candidate.repo;fetch[fn++]="--dir";fetch[fn++]=download;
+        for(i=0;i<4;i++){fetch[fn++]="--pattern";fetch[fn++]=candidate.name[i];}
+        for(i=0;i<candidate.extra_n;i++){fetch[fn++]="--pattern";fetch[fn++]=candidate.extra_name[i];}
+        fetch[fn]=0;
+        run("download",fetch,root,25);
         if(rcand_verify(&candidate,download,4,why,sizeof why))die(why);
     }
     if(step<0 || step==3){
-        char *hashes[]={"sha256sum","--",candidate.name[0],candidate.name[1],candidate.name[2],candidate.name[3],0};np_result hr=command("asset-sha",hashes,download,10);long pos=0;for(i=0;i<4;i++){char expected[384];int len=tx_snprintf(expected,sizeof expected,"%s  %s\n",candidate.sha[i],candidate.name[i]);if(len<0||len>=(int)sizeof expected||pos+len>(long)hr.outn||!tx_same(hr.out+pos,len,expected,len))die(role[i]);pos+=len;report_line("READBACK_SHA %s %s\n",candidate.name[i],candidate.sha[i]);}if(pos!=(long)hr.outn)die("asset SHA rows");np_free(&hr);
+        char *hashes[7+RCAND_MAX_EXTRA];int hn=0;
+        hashes[hn++]="sha256sum";hashes[hn++]="--";
+        for(i=0;i<4;i++)hashes[hn++]=candidate.name[i];
+        for(i=0;i<candidate.extra_n;i++)hashes[hn++]=candidate.extra_name[i];
+        hashes[hn]=0;
+        np_result hr=command("asset-sha",hashes,download,10);long pos=0;
+        for(i=0;i<4;i++){char expected[384];int len=tx_snprintf(expected,sizeof expected,"%s  %s\n",candidate.sha[i],candidate.name[i]);if(len<0||len>=(int)sizeof expected||pos+len>(long)hr.outn||!tx_same(hr.out+pos,len,expected,len))die(role[i]);pos+=len;report_line("READBACK_SHA %s %s\n",candidate.name[i],candidate.sha[i]);}
+        for(i=0;i<candidate.extra_n;i++){char expected[384];int len=tx_snprintf(expected,sizeof expected,"%s  %s\n",candidate.extra_sha[i],candidate.extra_name[i]);if(len<0||len>=(int)sizeof expected||pos+len>(long)hr.outn||!tx_same(hr.out+pos,len,expected,len))die("extra");pos+=len;report_line("READBACK_SHA %s %s\n",candidate.extra_name[i],candidate.extra_sha[i]);}
+        if(pos!=(long)hr.outn)die("asset SHA rows");np_free(&hr);
     }
     join(exe,sizeof exe,root,scripts[0]);join(p,sizeof p,download,candidate.name[0]);
     if(step<0 || step==4){

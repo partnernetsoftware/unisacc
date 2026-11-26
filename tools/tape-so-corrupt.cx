@@ -1,0 +1,216 @@
+#pragma unisa use sys.fs
+#pragma unisa use sys.io
+#pragma unisa use mem.heap
+#pragma unisa use mem.bytes
+
+static unsigned short u16le(const unsigned char *p) {
+    return (unsigned short)p[0] | ((unsigned short)p[1] << 8);
+}
+
+static unsigned int u32le(const unsigned char *p) {
+    return (unsigned int)p[0] | ((unsigned int)p[1] << 8) | ((unsigned int)p[2] << 16) | ((unsigned int)p[3] << 24);
+}
+
+static unsigned long long u64le(const unsigned char *p) {
+    unsigned long long v = 0;
+    for (int i = 0; i < 8; i++) v |= (unsigned long long)p[i] << (8 * i);
+    return v;
+}
+
+static void put16(unsigned char *p, unsigned short v) {
+    p[0] = (unsigned char)(v & 255);
+    p[1] = (unsigned char)((v >> 8) & 255);
+}
+
+static void put32(unsigned char *p, unsigned int v) {
+    for (int i = 0; i < 4; i++) p[i] = (unsigned char)((v >> (8 * i)) & 255);
+}
+
+static void put64(unsigned char *p, unsigned long long v) {
+    for (int i = 0; i < 8; i++) p[i] = (unsigned char)((v >> (8 * i)) & 255);
+}
+
+static int refuse(const char *why) {
+    sy_printf("TAPE_SO_CORRUPT\tREFUSE\t%s\n", why);
+    return 2;
+}
+
+static int va_to_off(const unsigned char *b, unsigned long long phoff, unsigned short phentsz, unsigned short phnum,
+                     unsigned long long va, unsigned long long *off_out) {
+    for (unsigned short i = 0; i < phnum; i++) {
+        const unsigned char *ph = b + phoff + (unsigned long long)i * phentsz;
+        if (u32le(ph) != 1u) continue; /* PT_LOAD */
+        unsigned long long p_off = u64le(ph + 8);
+        unsigned long long p_va = u64le(ph + 16);
+        unsigned long long p_fsz = u64le(ph + 32);
+        if (va >= p_va && va - p_va < p_fsz) {
+            *off_out = p_off + (va - p_va);
+            return 0;
+        }
+    }
+    return -1;
+}
+
+static int emit_variant(const char *out_dir, int mfd, const char *name, int expect_rc, const char *desc,
+                        const unsigned char *buf, long len) {
+    char path[4096];
+    if (cx_fmt(path, sizeof path, "%s/%s.so", out_dir, name)) return -1;
+    int fd = sy_open(path, O_WRONLY | O_CREAT | O_TRUNC, 0644);
+    if (fd < 0) return -1;
+    if (len > 0 && sy_write_all(fd, buf, len)) { sy_close(fd); return -1; }
+    if (sy_close(fd)) return -1;
+    char row[4600];
+    if (cx_fmt(row, sizeof row, "%s\t%s\t%d\t%s\n", name, path, expect_rc, desc)) return -1;
+    if (sy_write_all(mfd, row, (long)strlen(row))) return -1;
+    return 0;
+}
+
+int main(int argc, char **argv) {
+    const char *in_path = 0, *out_dir = 0;
+    for (int i = 1; i < argc; i++) {
+        if (!strcmp(argv[i], "--in") && i + 1 < argc) in_path = argv[++i];
+        else if (!strcmp(argv[i], "--out-dir") && i + 1 < argc) out_dir = argv[++i];
+        else return refuse("bad-args");
+    }
+    if (!in_path || !out_dir) return refuse("usage:--in GOOD_SO --out-dir OUT_DIR");
+
+    unsigned char *src = 0;
+    int64_t srclen64 = 0;
+    if (sy_read_file(in_path, &src, &srclen64, 32L << 20) || !src || srclen64 < 64) return refuse("read-good-so");
+    long n = (long)srclen64;
+    if (src[0] != 0x7f || src[1] != 'E' || src[2] != 'L' || src[3] != 'F' || src[4] != 2 || src[5] != 1)
+        return refuse("not-elf64-le");
+    if (u16le(src + 16) != 3) return refuse("not-et-dyn");
+    if (u16le(src + 18) != 62) return refuse("not-x86-64");
+
+    unsigned long long phoff = u64le(src + 32);
+    unsigned short phentsz = u16le(src + 54);
+    unsigned short phnum = u16le(src + 56);
+    if (phentsz < 56 || phnum == 0 || phoff + (unsigned long long)phentsz * phnum > (unsigned long long)n)
+        return refuse("bad-phdr");
+
+    int load_idx[16], nload = 0, exec_idx = -1, dyn_idx = -1;
+    for (unsigned short i = 0; i < phnum; i++) {
+        const unsigned char *ph = src + phoff + (unsigned long long)i * phentsz;
+        unsigned int pt = u32le(ph);
+        if (pt == 1u && nload < 16) {
+            if (u32le(ph + 4) & 1u) exec_idx = i;
+            load_idx[nload++] = (int)i;
+        } else if (pt == 2u) dyn_idx = (int)i;
+    }
+    if (nload < 2 || exec_idx < 0 || dyn_idx < 0) return refuse("missing-pt-load-or-dynamic");
+
+    const unsigned char *dyn_ph = src + phoff + (unsigned long long)dyn_idx * phentsz;
+    unsigned long long dyn_off = u64le(dyn_ph + 8);
+    unsigned long long dyn_fsz = u64le(dyn_ph + 32);
+    if (dyn_off + dyn_fsz > (unsigned long long)n || dyn_fsz < 16) return refuse("bad-dynamic");
+
+    unsigned long long strtab_va = 0, symtab_va = 0, strsz = 0;
+    for (unsigned long long off = dyn_off; off + 16 <= dyn_off + dyn_fsz; off += 16) {
+        long long tag = (long long)u64le(src + off);
+        unsigned long long val = u64le(src + off + 8);
+        if (tag == 0) break;
+        if (tag == 5) strtab_va = val;
+        else if (tag == 6) symtab_va = val;
+        else if (tag == 10) strsz = val;
+    }
+    unsigned long long str_off = 0, sym_off = 0;
+    if (!strtab_va || !symtab_va || !strsz ||
+        va_to_off(src, phoff, phentsz, phnum, strtab_va, &str_off) != 0 ||
+        va_to_off(src, phoff, phentsz, phnum, symtab_va, &sym_off) != 0)
+        return refuse("missing-dynsym-or-dynstr");
+
+    /* Locate tape_run_x86_64 in dynsym */
+    long target_sym_off = -1;
+    long target_str_off = -1;
+    for (unsigned long long s = sym_off; s + 24 <= (unsigned long long)n; s += 24) {
+        unsigned int st_name = u32le(src + s);
+        if (st_name >= strsz) break;
+        if (str_off + st_name + 16 <= (unsigned long long)n &&
+            !strcmp((const char *)(src + str_off + st_name), "tape_run_x86_64")) {
+            target_sym_off = (long)s;
+            target_str_off = (long)(str_off + st_name);
+            break;
+        }
+    }
+    if (target_sym_off < 0 || target_str_off < 0) return refuse("missing-tape_run_x86_64");
+
+    char man_path[4096];
+    if (cx_fmt(man_path, sizeof man_path, "%s/manifest.tsv", out_dir)) return refuse("path-too-long");
+    int mfd = sy_open(man_path, O_WRONLY | O_CREAT | O_TRUNC, 0644);
+    if (mfd < 0) return refuse("manifest-open");
+    const char *hdr = "name\tpath\texpect_rc\tdesc\n";
+    if (sy_write_all(mfd, hdr, (long)strlen(hdr))) { sy_close(mfd); return refuse("manifest-hdr"); }
+
+    unsigned char *w = (unsigned char *)mm_alloc(n);
+    if (!w) { sy_close(mfd); return refuse("oom"); }
+
+    int count = 0;
+    /* 1. trunc-0 (1) */
+    if (emit_variant(out_dir, mfd, "trunc-0", 1, "zero-length", w, 0)) return refuse("emit"); count++;
+    /* 2. trunc-63 (1) */
+    mm_copy(w, n, src, n);
+    if (emit_variant(out_dir, mfd, "trunc-63", 1, "truncated-63-bytes", w, 63)) return refuse("emit"); count++;
+    /* 3. trunc-phdr (5) */
+    long ph_mid = (long)(phoff + (unsigned long long)phentsz / 2);
+    if (emit_variant(out_dir, mfd, "trunc-phdr", 5, "truncated-mid-phdr", w, ph_mid)) return refuse("emit"); count++;
+    /* 4. trunc-last-load (6) */
+    const unsigned char *last_ph = src + phoff + (unsigned long long)load_idx[nload - 1] * phentsz;
+    long last_mid = (long)(u64le(last_ph + 8) + u64le(last_ph + 32) / 2);
+    if (emit_variant(out_dir, mfd, "trunc-last-load", 6, "truncated-mid-last-load", w, last_mid)) return refuse("emit"); count++;
+    /* 5. not-et-dyn (3) */
+    mm_copy(w, n, src, n); put16(w + 16, 2);
+    if (emit_variant(out_dir, mfd, "not-et-dyn", 3, "e_type=2", w, n)) return refuse("emit"); count++;
+    /* 6. not-x86-64 (4) */
+    mm_copy(w, n, src, n); put16(w + 18, 183);
+    if (emit_variant(out_dir, mfd, "not-x86-64", 4, "e_machine=183", w, n)) return refuse("emit"); count++;
+    /* 7. pt-load-oob (6) */
+    mm_copy(w, n, src, n);
+    put64(w + phoff + (unsigned long long)load_idx[1] * phentsz + 32, 0x7fffffffffffffffULL);
+    if (emit_variant(out_dir, mfd, "pt-load-oob", 6, "p_filesz-oob", w, n)) return refuse("emit"); count++;
+    /* 8. memsz-lt-filesz (6) */
+    mm_copy(w, n, src, n);
+    unsigned long long fsz0 = u64le(w + phoff + (unsigned long long)load_idx[0] * phentsz + 32);
+    put64(w + phoff + (unsigned long long)load_idx[0] * phentsz + 40, fsz0 > 0 ? fsz0 - 1 : 0);
+    if (emit_variant(out_dir, mfd, "memsz-lt-filesz", 6, "p_memsz<p_filesz", w, n)) return refuse("emit"); count++;
+    /* 9. off-vaddr-misaligned (7) */
+    mm_copy(w, n, src, n);
+    unsigned long long va0 = u64le(w + phoff + (unsigned long long)load_idx[0] * phentsz + 16);
+    put64(w + phoff + (unsigned long long)load_idx[0] * phentsz + 16, va0 + 8);
+    if (emit_variant(out_dir, mfd, "off-vaddr-misaligned", 7, "p_vaddr+8", w, n)) return refuse("emit"); count++;
+    /* 10. seg-overlap (8) */
+    mm_copy(w, n, src, n);
+    int ov_idx = nload > 2 ? load_idx[2] : load_idx[1];
+    put64(w + phoff + (unsigned long long)ov_idx * phentsz + 16, 0x1000ULL);
+    if (emit_variant(out_dir, mfd, "seg-overlap", 8, "segment-overlap", w, n)) return refuse("emit"); count++;
+    /* 11. span-overflow (9) */
+    mm_copy(w, n, src, n);
+    put64(w + phoff + (unsigned long long)load_idx[nload - 1] * phentsz + 40, 1ULL << 40);
+    if (emit_variant(out_dir, mfd, "span-overflow", 9, "span-1<<40", w, n)) return refuse("emit"); count++;
+    /* 12. wx-seg (10) */
+    mm_copy(w, n, src, n);
+    put32(w + phoff + (unsigned long long)exec_idx * phentsz + 4, 7u);
+    if (emit_variant(out_dir, mfd, "wx-seg", 10, "p_flags=7(W+X)", w, n)) return refuse("emit"); count++;
+    /* 13. reloc-present (12) */
+    mm_copy(w, n, src, n);
+    put64(w + dyn_off, 7ULL); /* DT_RELA */
+    if (emit_variant(out_dir, mfd, "reloc-present", 12, "dt_tag=7(DT_RELA)", w, n)) return refuse("emit"); count++;
+    /* 14. dt-needed (13) */
+    mm_copy(w, n, src, n);
+    put64(w + dyn_off, 1ULL); /* DT_NEEDED */
+    if (emit_variant(out_dir, mfd, "dt-needed", 13, "dt_tag=1(DT_NEEDED)", w, n)) return refuse("emit"); count++;
+    /* 15. sym-missing (15) */
+    mm_copy(w, n, src, n);
+    w[target_str_off] = (unsigned char)'X';
+    if (emit_variant(out_dir, mfd, "sym-missing", 15, "dynstr-mutated", w, n)) return refuse("emit"); count++;
+    /* 16. sym-oob (16) */
+    mm_copy(w, n, src, n);
+    put64(w + target_sym_off + 8, 0x3000ULL);
+    if (emit_variant(out_dir, mfd, "sym-oob", 16, "st_value=0x3000", w, n)) return refuse("emit"); count++;
+
+    sy_close(mfd);
+    mm_free(w);
+    mm_free(src);
+    sy_printf("TAPE_SO_CORRUPT\tOK\tcount=%d\tmanifest=%s\n", count, man_path);
+    return 0;
+}

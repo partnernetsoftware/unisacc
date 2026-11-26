@@ -207,6 +207,12 @@ static int shortcluster(const char *x, const char *letters, const char **val) {
 }
 static const char *const WT_REFUSE = "git clone/worktree add:不得另建克隆或工作树,直接在 ~/repos/unisacc 里工作";
 
+static int wtree_leaf_ok(const char *leaf) {
+    const char *q = leaf + 2;
+    if (leaf[0] != 'w' || leaf[1] != '-' || !*q) return 0;
+    for (; *q; q++) if (!(isdg(*q) || isal(*q) || *q == '.' || *q == '_' || *q == '-')) return 0;
+    return 1;
+}
 static const char *worktree_leaf(const char *cur, const char *path) {
     char *target = strip_q(path);
     if (!*target || hasc(target, '$') || hasc(target, '`')) return 0;
@@ -220,7 +226,43 @@ static const char *worktree_leaf(const char *cur, const char *path) {
         for (; *q; q++) if (!(isdg(*q) || isal(*q) || *q == '.' || *q == '_' || *q == '-')) return 0;
         return leaf;
     }
+    if (wtree_leaf_ok(leaf)) return leaf;
     return leaf[0] == 'v' && rs_version(leaf + 1) ? leaf : 0;
+}
+static char *canon(const char *p);
+static int under(const char *p, const char *d);
+/* the w- tree the current cwd sits in, or 0; every window is confined to its own leaf */
+static char *own_wtree_root(const char *cur) {
+    char *prefix = cat2(REPO, "/.claude/worktrees/");
+    if (!cur || !sw(cur, prefix)) return 0;
+    const char *leaf = cur + sl(prefix);
+    const char *q = leaf + 2;
+    if (leaf[0] != 'w' || leaf[1] != '-' || !*q) return 0;
+    for (; *q && *q != '/'; q++) if (!(isdg(*q) || isal(*q) || *q == '.' || *q == '_' || *q == '-')) return 0;
+    return cat2(prefix, dupn(leaf, q - leaf));
+}
+/* cwd is inside one of our own w- trees (never the shared checkout) */
+static int in_own_wtree(const char *cur) { return own_wtree_root(cur) != 0; }
+/* 破坏性 git 操作的目标必须落在当前窗口自己的 w- 树内;canon 展开符号链接,防软链逃到共享检出 */
+static int target_own_wtree(const char *tgt, const char *cur) {
+    char *root = own_wtree_root(cur);
+    if (!root || !tgt || !*tgt) return 0;
+    return under(canon(tgt), canon(root));
+}
+/* a path containing a ".." component before normalization is refused outright */
+static int has_dotdot(const char *p) {
+    while (p && *p) {
+        long n = 0;
+        while (*p == '/') p++;
+        while (p[n] && p[n] != '/') n++;
+        if (n == 2 && p[0] == '.' && p[1] == '.') return 1;
+        p += n;
+    }
+    return 0;
+}
+/* -C/--work-tree 目标与 GIT_WORK_TREE 环境值(若有)都必须落在当前窗口自己的 w- 树内 */
+static int tgt_ok(const char *tgt, const char *envtgt, const char *cur) {
+    return target_own_wtree(tgt, cur) && (!envtgt || target_own_wtree(envtgt, cur));
 }
 /* a[i] 是子命令;只拦创建/改名/复制出的新分支名 */
 static const char *branch_violation(char **a, long i, long n, const char *cur, int local) {
@@ -286,6 +328,10 @@ static const char *branch_violation(char **a, long i, long n, const char *cur, i
         if (wt) {
             const char *leaf = pos0 ? worktree_leaf(cur, pos0) : 0;
             if (!leaf) return WT_REFUSE;
+            if (wtree_leaf_ok(leaf)) {
+                if (!detach || created) return WT_REFUSE;
+                return 0;
+            }
             if (local && created) { const char *bv = branch_bad(created, force_branch); if (bv) return bv; }
             const char *branch = created ? created : (!detach ? pos1 : 0);
             if (branch && leaf[0] == 'v' && !eq(strip_q(branch), leaf)) return WT_REFUSE;
@@ -295,27 +341,38 @@ static const char *branch_violation(char **a, long i, long n, const char *cur, i
     return 0;
 }
 
-static const char *git_violation(char **a, long n, const char *cur) {
-    long i = 0, j; const char *sub; char *tgt = sdup(cur ? cur : "");
+static const char *git_violation(char **a, long n, const char *cur, const char *wte) {
+    long i = 0, j; const char *sub; char *tgt = sdup(cur ? cur : ""); char *envtgt = 0;
+#define OWN_WT_REFUSE "git 破坏性操作:目标必须是当前窗口自己的 .claude/worktrees/w-* 树,共享检出、其他窗口、软链逃逸一律拒"
     for (j = 0; j < n; j++) if (eq(a[j], "--autostash")) return "git --autostash 含 stash:共享 main 上不得 stash";
     while (i < n && a[i][0] == '-') {
-        if (eq(a[i], "-C") && i + 1 < n) {
-            char *d = strip_q(a[i + 1]);
-            if (*d && !hasc(d, '$') && !hasc(d, '`')) tgt = d[0] == '/' ? resolve("", d) : (*tgt ? resolve(tgt, d) : sdup(""));
+        const char *d = 0; long step = 1;
+        if ((eq(a[i], "-C") || eq(a[i], "--work-tree")) && i + 1 < n) { d = a[i + 1]; step = 2; }
+        else if (sw(a[i], "--work-tree=")) d = a[i] + 12;
+        if (d) {
+            char *p = strip_q(d);
+            if (has_dotdot(p)) return "git -C/--work-tree:路径含 .. 段,不得穿越";
+            if (*p && !hasc(p, '$') && !hasc(p, '`')) tgt = p[0] == '/' ? resolve("", p) : (*tgt ? resolve(tgt, p) : sdup(""));
             else tgt = sdup("");
         }
-        i += (eq(a[i], "-C") || eq(a[i], "-c") || eq(a[i], "--git-dir") || eq(a[i], "--work-tree") || eq(a[i], "--namespace")) ? 2 : 1;
+        i += (step == 2 || eq(a[i], "-c") || eq(a[i], "--git-dir") || eq(a[i], "--namespace")) ? 2 : 1;
+    }
+    if (wte && *wte) {
+        char *e = strip_q(wte);
+        if (has_dotdot(e)) return "git -C/--work-tree:路径含 .. 段,不得穿越";
+        if (*e && !hasc(e, '$') && !hasc(e, '`')) envtgt = e[0] == '/' ? resolve("", e) : (*tgt ? resolve(tgt, e) : sdup(""));
+        else envtgt = sdup("");
     }
     sub = i < n ? a[i] : "";
 #define REST(x) inlist(a, i + 1, n, x)
     if (eq(sub, "stash")) return "git stash:共享 main 上不得 stash/pop,需干净输入用 git archive 解到 $CLAUDE_JOB_DIR/tmp";
-    if (eq(sub, "clean")) return "git clean:共享 main 上不得 clean";
+    if (eq(sub, "clean")) return tgt_ok(tgt, envtgt, cur) ? 0 : (in_own_wtree(cur) ? OWN_WT_REFUSE : "git clean:共享 main 上不得 clean");
     if (eq(sub, "merge")) return "git merge:共享工作树不得裸 merge,请用 devsvc git merge 或在独立隔离根解冲突";
     if (eq(sub, "rebase")) return "git rebase:共享工作树不得裸 rebase,避免破坏他人工作区与索引";
     if (eq(sub, "pull")) return "git pull:共享工作树不得裸 pull,请用 devsvc git pull";
-    if (eq(sub, "reset") && REST("--hard")) return "git reset --hard:共享 main 上不得 reset";
-    if (eq(sub, "checkout") && (REST("--") || REST("."))) return "git checkout -- / .:不得还原他人路径";
-    if (eq(sub, "restore") && REST(".")) return "git restore .:不得还原他人路径";
+    if (eq(sub, "reset") && REST("--hard")) return tgt_ok(tgt, envtgt, cur) ? 0 : (in_own_wtree(cur) ? OWN_WT_REFUSE : "git reset --hard:共享 main 上不得 reset");
+    if (eq(sub, "checkout") && (REST("--") || REST("."))) return tgt_ok(tgt, envtgt, cur) ? 0 : (in_own_wtree(cur) ? OWN_WT_REFUSE : "git checkout -- / .:不得还原他人路径");
+    if (eq(sub, "restore") && REST(".")) return tgt_ok(tgt, envtgt, cur) ? 0 : (in_own_wtree(cur) ? OWN_WT_REFUSE : "git restore .:不得还原他人路径");
     if (eq(sub, "commit") && REST("--no-verify")) return "git commit --no-verify:不得绕过 precommit";
     if (eq(sub, "push") && REST("--no-verify")) return "git push --no-verify:不得绕过 precommit";
     int local = in_repo_dir(tgt);
@@ -358,6 +415,19 @@ static char *check_seg(char *t, char **curp) {
     }
     first = k < nw ? w[k] : "";
     { const char *p = first, *q; for (q = first; *q; q++) if (*q == '/') p = q + 1; first = p; }
+    if (eq(first, "env")) {
+        long m = k + 1;
+        while (m < nw) {
+            const char *y = w[m]; long q = 1;
+            if (eq(y, "-i") || eq(y, "--ignore-environment") || eq(y, "-0") || eq(y, "--null")) { m++; continue; }
+            if ((eq(y, "-u") || eq(y, "--unset")) && m + 1 < nw) { m += 2; continue; }
+            if (isal(y[0]) || y[0] == '_') { while (iswd(y[q])) q++; if (y[q] == '=') { m++; continue; } }
+            break;
+        }
+        k = m;
+        first = k < nw ? w[k] : "";
+        { const char *p = first, *q; for (q = first; *q; q++) if (*q == '/') p = q + 1; first = p; }
+    }
     if (eq(first, "cd") || eq(first, "pushd")) {
         char *d = repl_home(strip_q(k + 1 < nw ? w[k + 1] : ""));
         if (*d && !hasc(d, '$') && !hasc(d, '`')) *curp = d[0] == '/' ? resolve("", d) : (*cur ? resolve(cur, d) : sdup(""));
@@ -383,7 +453,11 @@ static char *check_seg(char *t, char **curp) {
             if (hitm) return sdup("mkdir 在 out/ 或 ~/work 下建工作目录:不得另建工作目录");
         }
     }
-    if (eq(first, "git")) { const char *g = git_violation(w + k + 1, nw - k - 1, cur); if (g) return sdup(g); }
+    if (eq(first, "git")) {
+        const char *wte = 0;
+        for (i = 0; i < k; i++) if (sw(w[i], "GIT_WORK_TREE=")) wte = w[i] + 14;
+        { const char *g = git_violation(w + k + 1, nw - k - 1, cur, wte); if (g) return sdup(g); }
+    }
     {
         int ip = 0;
         if (sw(first, "python")) { const char *q = first + 6; ip = 1; for (; *q; q++) if (!isdg(*q) && *q != '.') ip = 0; }
