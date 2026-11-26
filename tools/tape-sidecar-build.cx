@@ -1,0 +1,204 @@
+/* tools/tape-sidecar-build.cx -- build and verify lnx/x86_64 tape sidecar (tapemode.so + manifest.tsv).
+ *
+ * Usage:
+ *   cx tools/tape-sidecar-build.cx -- [--target TARGET] [--check] ROOT OUT_DIR
+ *
+ * Contract:
+ *   - Only lnx/x86_64 builds OUT_DIR/tapemode.so and OUT_DIR/manifest.tsv (requires host cc -shared -fPIC -O2).
+ *   - The other five targets (lnx/arm64, osx/x86_64, osx/arm64, win/x86_64, win/arm64) print SKIP and exit 0
+ *     without writing any files.
+ *   - Unknown targets refuse with rc=2.
+ *   - Verifies ELF magic and required FFI symbols (tape_run_x86_64, hoststub_lnx_x86_64, hoststub_lnx_x86_64_bind)
+ *     before atomic rename.
+ *   - --check verifies regular files (rejects symlinks), ELF + 3 symbols, manifest header source sha256 match
+ *     against ROOT/tools/tape/asm/*.S, and exact tapemode.so sha256 + bytes match.
+ */
+#pragma unisa use sys.env
+#pragma unisa use sys.fs
+#pragma unisa use sys.io
+#pragma unisa use sys.proc
+#pragma unisa use sys.ffi
+#pragma unisa use text.text
+#pragma unisa use mem.heap
+#pragma unisa use mem.bytes
+
+static int tsb_target_kind(const char *t) {
+    if (tx_eqz(t, "lnx/x86_64")) return 1;
+    if (tx_eqz(t, "lnx/arm64") || tx_eqz(t, "osx/x86_64") || tx_eqz(t, "osx/arm64") ||
+        tx_eqz(t, "win/x86_64") || tx_eqz(t, "win/arm64")) return 2;
+    return 0;
+}
+
+static int tsb_reg_sha(const char *path, char hex[65], long *bytes_out, int *is_elf) {
+    sy_stat_t st;
+    size_t n = 0;
+    char *b;
+    if (sy_lstat(path, &st) != 0 || st.kind != 'f') return -1;
+    b = cx_read(path, &n);
+    if (!b || (long)n != (long)st.size || n == 0) { if (b) mm_free(b); return -1; }
+    if (is_elf) *is_elf = (n >= 4 && (unsigned char)b[0] == 0x7f && b[1] == 'E' && b[2] == 'L' && b[3] == 'F') ? 1 : 0;
+    cx_sha256_hex(b, n, hex);
+    *bytes_out = (long)n;
+    mm_free(b);
+    return 0;
+}
+
+static int tsb_verify_symbols(const char *so_path) {
+    void *h = sy_ffi_dlopen(so_path, sy_ffi_now_global());
+    if (!h) return -1;
+    void *s1 = sy_ffi_dlsym(h, "tape_run_x86_64");
+    void *s2 = sy_ffi_dlsym(h, "hoststub_lnx_x86_64");
+    void *s3 = sy_ffi_dlsym(h, "hoststub_lnx_x86_64_bind");
+    return (s1 && s2 && s3) ? 0 : -1;
+}
+
+static int tsb_check_manifest(const char *out_dir, const char *s1, const char *s2) {
+    char so_p[4400], mf_p[4400], so_sha[65], want_head[256], want_row[256];
+    long so_bytes = 0;
+    int is_elf = 0;
+    sy_stat_t st;
+    size_t mn = 0;
+    char *mb;
+    if (cx_fmt(so_p, sizeof so_p, "%s/tapemode.so", out_dir) ||
+        cx_fmt(mf_p, sizeof mf_p, "%s/manifest.tsv", out_dir)) {
+        sy_printf("TAPE_SIDECAR_BUILD\tFAIL\treason=path-bound\n");
+        return 1;
+    }
+    if (sy_lstat(so_p, &st) != 0) { sy_printf("TAPE_SIDECAR_BUILD\tFAIL\treason=so-missing\n"); return 1; }
+    if (st.kind != 'f') { sy_printf("TAPE_SIDECAR_BUILD\tFAIL\treason=so-not-regular\n"); return 1; }
+    if (tsb_reg_sha(so_p, so_sha, &so_bytes, &is_elf) != 0) { sy_printf("TAPE_SIDECAR_BUILD\tFAIL\treason=so-unreadable\n"); return 1; }
+    if (!is_elf) { sy_printf("TAPE_SIDECAR_BUILD\tFAIL\treason=so-not-elf\n"); return 1; }
+    if (tsb_verify_symbols(so_p) != 0) { sy_printf("TAPE_SIDECAR_BUILD\tFAIL\treason=so-missing-symbols\n"); return 1; }
+    if (sy_lstat(mf_p, &st) != 0 || st.kind != 'f') { sy_printf("TAPE_SIDECAR_BUILD\tFAIL\treason=manifest-missing-or-not-regular\n"); return 1; }
+    mb = cx_read(mf_p, &mn);
+    if (!mb || mn == 0) { if (mb) mm_free(mb); sy_printf("TAPE_SIDECAR_BUILD\tFAIL\treason=manifest-unreadable\n"); return 1; }
+    if (cx_fmt(want_head, sizeof want_head, "# tape-sidecar-manifest-v1 target=lnx/x86_64 src_tape=%s src_hoststub=%s\n", s1, s2) ||
+        cx_fmt(want_row, sizeof want_row, "tapemode.so\t%s\t%ld\n", so_sha, so_bytes)) {
+        mm_free(mb);
+        sy_printf("TAPE_SIDECAR_BUILD\tFAIL\treason=format-bound\n");
+        return 1;
+    }
+    {
+        long hl = tx_len(want_head, sizeof want_head), rl = tx_len(want_row, sizeof want_row);
+        int ok = ((long)mn == hl + rl) && tx_same(mb, hl, want_head, hl) && tx_same(mb + hl, rl, want_row, rl);
+        mm_free(mb);
+        if (!ok) {
+            sy_printf("TAPE_SIDECAR_BUILD\tFAIL\treason=manifest-mismatch\n");
+            return 1;
+        }
+    }
+    sy_printf("TAPE_SIDECAR_BUILD\tCHECK_OK\ttarget=lnx/x86_64\tsha=%s\tbytes=%ld\n", so_sha, so_bytes);
+    return 0;
+}
+
+int main(int argc, char **argv) {
+    const char *target = "lnx/x86_64";
+    const char *pos[2];
+    int np = 0, check_only = 0, i;
+    char root_abs[4096], src_tape[4400], src_host[4400], s1[65], s2[65];
+    long b1 = 0, b2 = 0;
+    for (i = 1; i < argc; i++) {
+        if (tx_eqz(argv[i], "--")) continue;
+        if (tx_eqz(argv[i], "--check")) { check_only = 1; continue; }
+        if (tx_eqz(argv[i], "--target") && i + 1 < argc) { target = argv[++i]; continue; }
+        if (argv[i][0] == '-') {
+            sy_eprintf("tape-sidecar-build: usage: [--target TARGET] [--check] ROOT OUT_DIR\n");
+            return 2;
+        }
+        if (np < 2) pos[np++] = argv[i];
+        else { sy_eprintf("tape-sidecar-build: usage: [--target TARGET] [--check] ROOT OUT_DIR\n"); return 2; }
+    }
+    if (np != 2) {
+        sy_eprintf("tape-sidecar-build: usage: [--target TARGET] [--check] ROOT OUT_DIR\n");
+        return 2;
+    }
+    {
+        int tk = tsb_target_kind(target);
+        if (tk == 0) {
+            sy_printf("TAPE_SIDECAR_BUILD\tREFUSE\treason=unknown-target\ttarget=%s\n", target);
+            return 2;
+        }
+        if (tk == 2) {
+            sy_printf("TAPE_SIDECAR_BUILD\tSKIP\ttarget=%s\treason=unsupported-target\n", target);
+            return 0;
+        }
+    }
+    if (sy_realpath(pos[0], root_abs, (int)sizeof root_abs) < 0) {
+        sy_printf("TAPE_SIDECAR_BUILD\tREFUSE\treason=bad-root\n");
+        return 2;
+    }
+    if (cx_fmt(src_tape, sizeof src_tape, "%s/tools/tape/asm/tape_x86_64.S", root_abs) ||
+        cx_fmt(src_host, sizeof src_host, "%s/tools/tape/asm/hoststub_lnx_x86_64.S", root_abs)) {
+        sy_printf("TAPE_SIDECAR_BUILD\tREFUSE\treason=path-bound\n");
+        return 2;
+    }
+    if (tsb_reg_sha(src_tape, s1, &b1, 0) != 0 || tsb_reg_sha(src_host, s2, &b2, 0) != 0) {
+        sy_printf("TAPE_SIDECAR_BUILD\tREFUSE\treason=missing-asm-sources\n");
+        return 2;
+    }
+    if (check_only) return tsb_check_manifest(pos[1], s1, s2);
+
+    if (sy_exists(pos[1]) != 1 && sy_mkdir(pos[1], 0755) != 0) {
+        sy_printf("TAPE_SIDECAR_BUILD\tREFUSE\treason=mkdir-out-failed\n");
+        return 2;
+    }
+    {
+        char tmp_so[4400], dst_so[4400], tmp_mf[4400], dst_mf[4400], so_sha[65], mf_body[512];
+        char *log = 0;
+        size_t logn = 0;
+        long so_bytes = 0;
+        int is_elf = 0, rc;
+        int pid = sy_pid();
+        if (cx_fmt(tmp_so, sizeof tmp_so, "%s/.tapemode.so.%d", pos[1], pid) ||
+            cx_fmt(dst_so, sizeof dst_so, "%s/tapemode.so", pos[1]) ||
+            cx_fmt(tmp_mf, sizeof tmp_mf, "%s/.manifest.tsv.%d", pos[1], pid) ||
+            cx_fmt(dst_mf, sizeof dst_mf, "%s/manifest.tsv", pos[1])) {
+            sy_printf("TAPE_SIDECAR_BUILD\tREFUSE\treason=path-bound\n");
+            return 2;
+        }
+        {
+            char *av[] = {"cc", "-shared", "-fPIC", "-O2", "-o", tmp_so, src_tape, src_host, 0};
+            rc = cx_runv_timeout(av, 30, &log, &logn);
+        }
+        if (rc != 0) {
+            (void)sy_unlink(tmp_so);
+            if (log && logn) (void)sy_write_all(2, log, (long)logn);
+            if (log) mm_free(log);
+            sy_printf("TAPE_SIDECAR_BUILD\tFAIL\treason=cc-failed\trc=%d\n", rc);
+            return 1;
+        }
+        if (log) mm_free(log);
+        if (tsb_reg_sha(tmp_so, so_sha, &so_bytes, &is_elf) != 0 || !is_elf || tsb_verify_symbols(tmp_so) != 0) {
+            (void)sy_unlink(tmp_so);
+            sy_printf("TAPE_SIDECAR_BUILD\tFAIL\treason=built-so-invalid\n");
+            return 1;
+        }
+        (void)sy_chmod(tmp_so, 0755);
+        if (cx_fmt(mf_body, sizeof mf_body,
+                   "# tape-sidecar-manifest-v1 target=lnx/x86_64 src_tape=%s src_hoststub=%s\ntapemode.so\t%s\t%ld\n",
+                   s1, s2, so_sha, so_bytes)) {
+            (void)sy_unlink(tmp_so);
+            sy_printf("TAPE_SIDECAR_BUILD\tREFUSE\treason=manifest-bound\n");
+            return 2;
+        }
+        if (cx_write(tmp_mf, mf_body, (size_t)tx_len(mf_body, sizeof mf_body))) {
+            (void)sy_unlink(tmp_so); (void)sy_unlink(tmp_mf);
+            sy_printf("TAPE_SIDECAR_BUILD\tFAIL\treason=manifest-write-failed\n");
+            return 1;
+        }
+        (void)sy_chmod(tmp_mf, 0644);
+        if (sy_rename(tmp_so, dst_so) != 0) {
+            (void)sy_unlink(tmp_so); (void)sy_unlink(tmp_mf);
+            sy_printf("TAPE_SIDECAR_BUILD\tFAIL\treason=so-rename-failed\n");
+            return 1;
+        }
+        if (sy_rename(tmp_mf, dst_mf) != 0) {
+            (void)sy_unlink(tmp_mf);
+            sy_printf("TAPE_SIDECAR_BUILD\tFAIL\treason=manifest-rename-failed\n");
+            return 1;
+        }
+        sy_printf("TAPE_SIDECAR_BUILD\tBUILT\ttarget=lnx/x86_64\tso=%s\tsha=%s\tbytes=%ld\tsrc_tape=%s\tsrc_hoststub=%s\n",
+                  dst_so, so_sha, so_bytes, s1, s2);
+    }
+    return 0;
+}

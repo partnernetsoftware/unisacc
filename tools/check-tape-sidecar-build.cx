@@ -1,0 +1,112 @@
+/* tools/check-tape-sidecar-build.cx -- contract checks and negative controls for tools/tape-sidecar-build.cx. */
+#pragma unisa use sys.fs
+#pragma unisa use sys.io
+#pragma unisa use sys.proc
+#pragma unisa use sys.env
+#pragma unisa use text.text
+#pragma unisa use mem.heap
+#pragma unisa use cxlib.procrun
+
+static int g_pass = 0, g_fail = 0;
+
+static void ck(int ok, const char *name, const char *detail) {
+    if (ok) { g_pass++; sy_printf("PASS\tcheck-tape-sidecar-build.%s\n", name); }
+    else { g_fail++; sy_printf("FAIL\tcheck-tape-sidecar-build.%s\t%s\n", name, detail ? detail : ""); }
+}
+
+static int run_tool(char **av, char *out, int cap) {
+    int cut = 0;
+    out[0] = 0;
+    return pr_run_merged(av, 45, out, cap, &cut);
+}
+
+int main(void) {
+    char tmp[512], out_dir[600], skip_dir[600], so_p[700], mf_p[700], sym_dir[600], sym_so[700], out[8192];
+    const char *td = sy_tmpdir();
+    int rc;
+    if (sy_mkdtemp(td && td[0] ? td : "/tmp", "check-tsb", tmp, sizeof tmp) != 0) return 2;
+    if (cx_fmt(out_dir, sizeof out_dir, "%s/tape", tmp) ||
+        cx_fmt(skip_dir, sizeof skip_dir, "%s/skip", tmp) ||
+        cx_fmt(so_p, sizeof so_p, "%s/tapemode.so", out_dir) ||
+        cx_fmt(mf_p, sizeof mf_p, "%s/manifest.tsv", out_dir) ||
+        cx_fmt(sym_dir, sizeof sym_dir, "%s/sym", tmp) ||
+        cx_fmt(sym_so, sizeof sym_so, "%s/tapemode.so", sym_dir)) return 2;
+
+    /* 1. Build lnx/x86_64 sidecar */
+    {
+        char *av[] = {"sh", "./unisacc.com", "tools/tape-sidecar-build.cx", "--", ".", out_dir, 0}; /* lint:allow R1-product tests tape-sidecar-build via checkout product */
+        rc = run_tool(av, out, (int)sizeof out);
+        ck(rc == 0 && strstr(out, "TAPE_SIDECAR_BUILD\tBUILT\ttarget=lnx/x86_64") != 0 &&
+           sy_exists(so_p) == 1 && sy_exists(mf_p) == 1, "build-lnx-x86_64", out);
+    }
+
+    /* 2. --check passes on freshly built sidecar */
+    {
+        char *av[] = {"sh", "./unisacc.com", "tools/tape-sidecar-build.cx", "--", "--check", ".", out_dir, 0}; /* lint:allow R1-product checks tape-sidecar-build via checkout product */
+        rc = run_tool(av, out, (int)sizeof out);
+        ck(rc == 0 && strstr(out, "TAPE_SIDECAR_BUILD\tCHECK_OK\ttarget=lnx/x86_64") != 0, "check-built-ok", out);
+    }
+
+    /* 3. End-to-end execution: tapemode-run --so <built_so> --self-test returns exit_code=42 */
+    {
+        char *av[] = {"sh", "./unisacc.com", "tools/tapemode-run.cx", "--", "--so", so_p, "--self-test", 0}; /* lint:allow R1-product exercises built tapemode.so via checkout product */
+        rc = run_tool(av, out, (int)sizeof out);
+        ck(rc == 0 && strstr(out, "TAPEMODE_RUN\tSELFTEST\tPASS\texit_code=42") != 0, "built-so-selftest-pass", out);
+    }
+
+    /* 4. Five non-lnx/x86_64 targets skip cleanly without creating files */
+    {
+        static const char *others[5] = {"lnx/arm64", "osx/x86_64", "osx/arm64", "win/x86_64", "win/arm64"};
+        int all_ok = 1;
+        for (int i = 0; i < 5; i++) {
+            char *av[] = {"sh", "./unisacc.com", "tools/tape-sidecar-build.cx", "--", "--target", (char *)others[i], ".", skip_dir, 0}; /* lint:allow R1-product tests target skip via checkout product */
+            rc = run_tool(av, out, (int)sizeof out);
+            if (rc != 0 || strstr(out, "TAPE_SIDECAR_BUILD\tSKIP") == 0 || sy_exists(skip_dir) == 1) all_ok = 0;
+        }
+        ck(all_ok, "five-other-targets-skip-cleanly", out);
+    }
+
+    /* 5. Unknown target refused with rc=2 */
+    {
+        char *av[] = {"sh", "./unisacc.com", "tools/tape-sidecar-build.cx", "--", "--target", "plan9/mips", ".", skip_dir, 0}; /* lint:allow R1-product tests unknown target refusal via checkout product */
+        rc = run_tool(av, out, (int)sizeof out);
+        ck(rc == 2 && strstr(out, "unknown-target") != 0, "unknown-target-refused", out);
+    }
+
+    /* 6. Negative: symlink tapemode.so refused by --check */
+    {
+        sy_mkdir(sym_dir, 0755);
+        (void)sy_symlink(so_p, sym_so);
+        char *av[] = {"sh", "./unisacc.com", "tools/tape-sidecar-build.cx", "--", "--check", ".", sym_dir, 0}; /* lint:allow R1-product tests symlink refusal via checkout product */
+        rc = run_tool(av, out, (int)sizeof out);
+        ck(rc == 1 && strstr(out, "so-not-regular") != 0, "neg-symlink-so-refused", out);
+    }
+
+    /* 7. Negative: 1-byte corruption of tapemode.so refused by --check */
+    {
+        size_t n = 0;
+        char *b = cx_read(so_p, &n);
+        if (b && n > 64) {
+            b[n - 1] ^= 1;
+            (void)cx_write(so_p, b, n);
+            mm_free(b);
+        }
+        char *av[] = {"sh", "./unisacc.com", "tools/tape-sidecar-build.cx", "--", "--check", ".", out_dir, 0}; /* lint:allow R1-product tests corruption refusal via checkout product */
+        rc = run_tool(av, out, (int)sizeof out);
+        ck(rc == 1 && strstr(out, "manifest-mismatch") != 0, "neg-corrupt-so-refused", out);
+    }
+
+    /* 8. Negative: missing asm sources in empty root refused with rc=2 */
+    {
+        char *av[] = {"sh", "./unisacc.com", "tools/tape-sidecar-build.cx", "--", tmp, skip_dir, 0}; /* lint:allow R1-product tests missing source refusal via checkout product */
+        rc = run_tool(av, out, (int)sizeof out);
+        ck(rc == 2 && strstr(out, "missing-asm-sources") != 0, "neg-missing-sources-refused", out);
+    }
+
+    {
+        char *rm[] = {"rm", "-rf", tmp, 0};
+        (void)run_tool(rm, out, (int)sizeof out);
+    }
+    sy_printf("CHECK_TAPE_SIDECAR_BUILD\tpassed=%d\tfailed=%d\n", g_pass, g_fail);
+    return g_fail ? 1 : 0;
+}
