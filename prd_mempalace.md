@@ -423,3 +423,36 @@ R75/R78/R69/R69.6/R79/R81 等仍跟踪项已归档全文于 archive/prd_mempalac
 - 装根:工作目录为仓根,先 `cx tools/install-ape.cx -- . --rollback` 看 `ROLLBACK_DRYRUN`,再 `cx tools/install-ape.cx -- . --rollback --write` 恢复装前备份(按清单逐文件核验后复制,见 `tools/install-ape.cx` 用法);装前另存一份根身份文件(`root-identity` 单份留档);回滚后实跑 `cx --version` 与 `sha256sum unisacc.com` 读回版本与根 APE SHA,核等于装前值。版本树当前无 `check-root-current` 工具,不以不存在的入口作为回滚步骤。
 - 缓存钉住:逐枚撤销上述五枚 `.no-purge` 即可恢复清理行为(`release-v0.1.3-f485ec9a2b`、`evidence-staging-0.1.3`、`evidence-vault-0.1.3`、`prerun-backups`、本会话 tmp);该动作只影响缓存保留,不影响产品与证据。
 - 不涉及 `SOURCES_SID` 的回滚;任何证据撤销都不得改写已公开资产或已发送的发布说明。
+
+## 决定:v0.1.5 发布终态与 v0.1.6 起步(2026-11-27)
+
+### 当前版本
+
+- 0.1.5 已公开:`isDraft=false`、`Latest`、tag `v0.1.5` 指向 `ba12b08dfddefea5a5e9241f095ede4e7f83473d`;发布 APE `sha=824e3f05f72a485293bf0c33ea877c3f905ca3ef7c31a447473931f6ffa1fb1c`(`9384540`B);CI run `45902924617` 六目标通过;共享检出根已装 0.1.5;`origin/main=f69ad26fc073458de5d064957d3efab3f26add3e`。
+- 整体裁决 `NOT_QUALIFIED`:全套 s9 未跑;严格证据末行胜合并 `593 通过 / 0 失败 / 0 未覆盖 / 7 条被取代`;G2/G3 `UNMEASURED`。
+
+### 发布步骤与时间(INDEX.tsv 原行)
+
+- 06:08:58 `exec-1-post-chain-merge WAIVED`(`bfdb8c447`;REV..HEAD 只触 release 证据、说明与冻结域外 5 个 tools 文件);06:09:13 X=`2a06f6718`;06:09:22 `exec-2-draft-readback PASS`;06:09:31 CI 派发 `45902924617`;06:14:21 CI PASS 六目标;06:14:30 Y1=`b3e358eb2`;06:14:38 publish;06:14:53 `exec-6-public-readback PASS`;06:14:54/06:15:01 Y2=`ee829606c`;06:14:57 版本序标已公开;post=`5558ff432`、`6f4ac7b4f`。
+- 公开体:cdx 读回后定为五条被哈希实体加 `SHA256SUMS`,共六个上传资产;`public-readback.txt` 记 metadata/tag/download/asset-sha/checksums 全 PASS,`C47_1_READBACK PASS`。
+- 回滚入口:`release/rollback.txt`(draft、Latest 回 0.1.3、Y2/Y1/X 前向 revert、`install-ape --rollback`);m53 只清 `UNISACC_M53_S1` 回原生,源码撤回未经验证。
+
+### 证据与工具修复
+
+- 三次严格合并保留:`v0.1.5-strict-20261127.tsv` 585/7/1、`…b.tsv` 591/2/0、`…c.tsv` 593/0/0(`SUPERSEDED=7`)。
+- 首轮 7 失败与 1 未覆盖的定因:缺 `UNISACC_BOOTER_CHAIN_OUT`;`TMPDIR` 在仓内造成外层仓穿透;继承 `UNISACC_*` 环境;`check-ln-noderef` 真实缺陷修于 `bd023bab4`;`retcheck` 真实基线违例修于 `1c23d0393` 且未抬基线。
+- 重跑 X9019/X9020 用同一 APE,但源树在更新的 main HEAD `bd023bab4`,冻结提交为 `ba12b08df`;源不同、APE 字节相同,如实保留。
+- 预跑 3 lanes,04:16 后 5 lanes,58 秒超时重试至通过;`tools-compile` 计划覆盖 179 个唯一 id,另有候选 APE 全 202 分片单跑 201 通过、shard 137 在 load 36 超时后单独通过,不计入严格证据。
+
+### v0.1.6 波浪(已落 1/2/4/5)
+
+- Wave1 `d68f73d0f`:M1X-A slot-12 raw syscall lowering、负控与 S2/slot12-RO 验证计划。
+- Wave2 `d07a46b7b`:解释器 A1(48 项 PIC 跳表、专用三寄存器 handler、预算在 rbp、单一 init_budget 槽);作者树 22/22 明文差分、6/6 变异,cdx 两轮复核;速度 `UNMEASURED`。
+- Wave4 `e195a860d`:root-current `--expect-ref main|HEAD` 单源与严格解冻边界,cases 32-35;含 freeze/devsvc 缺口分析、门 24 OID 钉死设计与重冻结手册。
+- Wave5 `f69ad26fc`:root-current `--controller-canary` 与 `--expect-ref` 合并,要求真实对象产物;check-root-current 42/0、check-tapesidecar 42/0。
+- 开放:Wave3 gate19 安全子集(`b87930f83` 为暂存源;`c186529a9` 为 v0.1.7 6-affected,待复核后落);GV.compat 产品补丁(计划 `cd9cd0719`,实际补丁未落)。
+
+### 队列与未验证
+
+- `plans/v0.1.6-v017-queue.tsv` 15 行为当前优先级队列;Wave3 与 GV.compat 产品补丁仍开放。
+- 未验证:全套 s9、G2/G3、配对改名中断恢复、product-map 读集、公开根编译 25 controller 文件的前置门尚待 Wave 落地后实测;未跑项一律 `UNMEASURED`。
