@@ -1,6 +1,7 @@
 /* tools/check-tape-sidecar-build.cx -- contract checks and negative controls for tools/tape-sidecar-build.cx
  * and tools/release-ape.cx --with-tape-sidecar gating. */
 #pragma unisa use sys.fs
+#pragma unisa use sys.posix
 #pragma unisa use sys.io
 #pragma unisa use sys.proc
 #pragma unisa use sys.env
@@ -238,6 +239,40 @@ int main(void) {
         ck(rc == 1 && strstr(out, "so-wx-segment") != 0, "neg-repacked-wx-so-refused", out);
     }
 
+    /* 10b. Negative: repacked .so with DT_RELR (tag 36) in .dynamic refused by --check */
+    if (!cx_fmt(bad_dir, sizeof bad_dir, "%s/bad-relr", tmp) && !cx_fmt(bad_so, sizeof bad_so, "%s/tapemode.so", bad_dir)) {
+        size_t n = 0;
+        char *b = cx_read(so_p, &n);
+        sy_mkdir(bad_dir, 0755);
+        if (b && n >= 64) {
+            unsigned long phoff = r64((const unsigned char *)b + 32);
+            unsigned int phentsz = r16((const unsigned char *)b + 54);
+            unsigned int phnum = r16((const unsigned char *)b + 56);
+            for (unsigned int i = 0; i < phnum; i++) {
+                const unsigned char *ph = (const unsigned char *)b + phoff + (unsigned long)i * phentsz;
+                if (r32(ph) == 2) { /* PT_DYNAMIC */
+                    unsigned long doff = r64(ph + 8), dsz = r64(ph + 32);
+                    for (unsigned long o = 0; o + 16 <= dsz && doff + o + 16 <= n; o += 16) {
+                        unsigned long tag = r64((const unsigned char *)b + doff + o);
+                        if (tag == 0) break;
+                        if (tag == 30 || tag == 16) { /* replace DT_FLAGS/DT_SYMBOLIC with DT_RELR (36) */
+                            w32((unsigned char *)b + doff + o, 36);
+                            w32((unsigned char *)b + doff + o + 4, 0);
+                            break;
+                        }
+                    }
+                    break;
+                }
+            }
+            (void)cx_write(bad_so, b, n);
+            mm_free(b);
+        }
+        int mw = write_repacked_manifest(bad_dir, bad_so, s1, s2);
+        char *av[] = {"sh", "./unisacc.com", "tools/tape-sidecar-build.cx", "--", "--check", ".", bad_dir, 0}; /* lint:allow R1-product tests DT_RELR refusal via checkout product */
+        rc = (mw == 0) ? run_tool(av, out, (int)sizeof out) : -1;
+        ck(rc == 1 && strstr(out, "so-has-relocations") != 0, "neg-repacked-relr-so-refused", out);
+    }
+
     /* 11. Negative: zero-reloc zero-needed .so missing required hoststub symbols refused by --check */
     if (!cx_fmt(bad_dir, sizeof bad_dir, "%s/bad-sym", tmp) && !cx_fmt(bad_so, sizeof bad_so, "%s/tapemode.so", bad_dir)) {
         char mini_s[700];
@@ -332,7 +367,18 @@ int main(void) {
                     rc = run_tool(av_off, out, (int)sizeof out);
                     size_t rn = 0;
                     char *rcpt = cx_read(p_off_rcpt, &rn);
-                    ck(rc == 0 && sy_exists(p_off_tape) != 1 && rcpt &&
+                    int n_ents = 0, extra = 0;
+                    sy_dir_t dd;
+                    if (sy_dir_open(&dd, p_off) == 0) {
+                        while (sy_dir_next(&dd) > 0) {
+                            if (tx_eqz(dd.name, ".") || tx_eqz(dd.name, "..")) continue;
+                            n_ents++;
+                            if (!tx_eqz(dd.name, "unisacc-next.com") && !tx_eqz(dd.name, "ape-receipt.txt") &&
+                                !tx_eqz(dd.name, "p3-package.body")) extra++;
+                        }
+                        (void)sy_dir_close(&dd);
+                    }
+                    ck(rc == 0 && sy_exists(p_off_tape) != 1 && n_ents == 3 && extra == 0 && rcpt &&
                        !receipt_has_key(rcpt, rn, "tape/tapemode.so") &&
                        !receipt_has_key(rcpt, rn, "tape/manifest.tsv"),
                        "release-ape-default-off-no-cc", out);
