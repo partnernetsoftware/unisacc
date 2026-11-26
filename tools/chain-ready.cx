@@ -904,8 +904,11 @@ static void argv_set(Job *j, const char *name, int bound, ...) {
     (void)bound; j->name = name;
 }
 
-static char failed_names[1024]; static int nfail;
+static int cr_mark_gate_polled(const char *nm);
+static char failed_names[1024]; static int nfail, nrows_emitted;
 static void row(const char *item, const char *st, const char *ev, long ms) {
+    nrows_emitted++;
+    if (!tx_eqz(item, "3a-material")) (void)cr_mark_gate_polled(item);
     printf("%s\t%s\t%s\t%ld\n", item, st, ev, ms);
     if (tx_eqz(st, "FAIL") || tx_eqz(st, "SKIPPED")) {
         size_t l = tx_len(failed_names, sizeof failed_names);
@@ -1251,6 +1254,7 @@ static int rf_cand_commit(const char *repo, const char *ver, char *dst, int cap)
     mm_free(b); return found;
 }
 #define CR_ONLY_MAX 32
+#define CR_ONLY_BUF_CAP 4096
 static const char *const cr_gate_names[] = {
     "1-rev", "1-branch",
     "2a-derive", "2a-derive2", "2a-derive3", "2a-derive4", "2a-derive5", "2a-derive6", "2a-derive7",
@@ -1264,6 +1268,20 @@ static const char *const cr_gate_names[] = {
     "22-premerge-union", "22-premerge-union2", "22-premerge-union3", "22-premerge-union4", "22-premerge-union5",
     "23-freeze-armed", "24-root-current", 0
 };
+static char cr_polled_seen[64];
+static const char *cr_drift_name;
+static int cr_mark_gate_polled(const char *nm) {
+    int i;
+    if (!nm) return -1;
+    for (i = 0; cr_gate_names[i]; i++) {
+        if (tx_eqz(nm, cr_gate_names[i])) {
+            if (i < 64) cr_polled_seen[i] = 1;
+            return i;
+        }
+    }
+    if (!cr_drift_name) cr_drift_name = nm;
+    return -1;
+}
 static int cr_tok_matches_item(const char *tok, long tl, const char *nm) {
     long nl = (long)tx_len(nm, 64), dash = tx_chr(nm, nl, '-');
     if (tl <= 0 || dash <= 0) return 0;
@@ -1289,7 +1307,11 @@ static void cr_refuse_unknown_only(const char *tok, long tl) {
 static int cr_validate_only_arg(const char *arg, int *cnt_inout) {
     long al, at = 0;
     if (!arg || !arg[0]) { cr_refuse_unknown_only("", 0); return 0; }
-    al = (long)tx_len(arg, 512);
+    al = (long)tx_len(arg, CR_ONLY_BUF_CAP);
+    if (al >= CR_ONLY_BUF_CAP) {
+        printf("REFUSE\tCHAIN_READY_ONLY\treason=only-too-long\tbytes=%ld\tmax=%d\n", al, CR_ONLY_BUF_CAP - 1);
+        return 0;
+    }
     while (at <= al) {
         long c = tx_chr(arg + at, al - at, ',');
         long tl = c < 0 ? al - at : c;
@@ -1317,17 +1339,20 @@ static int cr_collect_and_validate_only(int argc, char **argv, const char **only
             size_t vl = strlen(val);
             if (!cr_validate_only_arg(val, &total_cnt)) return 0;
             if (pos + (seen ? 1 : 0) + vl + 1 >= cap) {
-                cr_refuse_unknown_only(val, (long)vl);
+                printf("REFUSE\tCHAIN_READY_ONLY\treason=only-too-long\tbytes=%ld\tmax=%ld\n", (long)(pos + vl), (long)cap - 1);
                 return 0;
             }
             if (seen) buf[pos++] = ',';
             mm_copy(buf + pos, cap - pos, val, vl + 1);
             pos += vl;
             seen = 1;
+        } else if (tx_eqz(argv[a], "--judge") && a + 3 < argc) {
+            a += 3;
         } else if ((tx_eqz(argv[a], "--repo") || tx_eqz(argv[a], "--helper-out") || tx_eqz(argv[a], "--since") ||
                     tx_eqz(argv[a], "--pgrep-pat") || tx_eqz(argv[a], "--version") || tx_eqz(argv[a], "--root") ||
-                    tx_eqz(argv[a], "--rev") || tx_eqz(argv[a], "--preflight-table") || tx_eqz(argv[a], "--chain-base") ||
-                    tx_eqz(argv[a], "--disk-free-gb") || tx_eqz(argv[a], "--pik1-capture-cap")) && a + 1 < argc) {
+                    tx_eqz(argv[a], "--rev") || tx_eqz(argv[a], "--preflight-table") || tx_eqz(argv[a], "--preflight-bound-s") ||
+                    tx_eqz(argv[a], "--test-roster-drift") ||
+                    tx_eqz(argv[a], "--chain-base") || tx_eqz(argv[a], "--disk-free-gb") || tx_eqz(argv[a], "--pik1-capture-cap")) && a + 1 < argc) {
             a++;
         }
     }
@@ -1336,8 +1361,9 @@ static int cr_collect_and_validate_only(int argc, char **argv, const char **only
 }
 static int cr_want_item(const char *only, const char *nm) {
     long ol, at = 0;
+    if (cr_mark_gate_polled(nm) < 0) return 0;
     if (!only) return 1;
-    ol = (long)tx_len(only, 512);
+    ol = (long)tx_len(only, CR_ONLY_BUF_CAP);
     if (ol <= 0) return 0;
     while (at <= ol) {
         long c = tx_chr(only + at, ol - at, ',');
@@ -1588,13 +1614,15 @@ static int check_version_scope(const char *repo, const char *revarg, const char 
     return 1;
 }
 
-/* chain-preflight.cx bounds each node to its table timeout_s (<=55s) via tools/bound; total gate <=180s */
-static int run_19_preflight(const char *repo, const char *root, const char *revarg, const char *since, const char *tver, const char *pftable, const char *shard, char *ev, int cap) {
-    char *v[20]; int k = 0, fd = -1, pid, ex = 0, code = 0, sig = 0, pass = 0, node_timeout_bounded = 1;
+/* chain-preflight.cx bounds each node to its table timeout_s (<=55s) via tools/bound; each shard invocation is also process-group bounded to bound_s (default 55s) */
+static int run_19_preflight(const char *repo, const char *root, const char *revarg, const char *since, const char *tver, const char *pftable, const char *shard, const char *bound_s, char *ev, int cap) {
+    char *v[24]; int k = 0, fd = -1, pid, ex = 0, code = 0, sig = 0, pass = 0, node_timeout_bounded = 1;
     char *out = 0; long n = 0, at = 0;
     char fail_item[240], sum_line[240], scope_ev[320];
+    const char *eff_bound = (bound_s && bound_s[0]) ? bound_s : "55";
     (void)node_timeout_bounded;
     fail_item[0] = 0; sum_line[0] = 0; scope_ev[0] = 0;
+    v[k++] = "./tools/bound"; v[k++] = (char *)eff_bound;
     v[k++] = "sh"; v[k++] = UC; v[k++] = "tools/chain-preflight.cx"; v[k++] = "--";
     v[k++] = "--strict"; v[k++] = "--root"; v[k++] = (char *)root; v[k++] = "--repo"; v[k++] = (char *)repo;
     v[k++] = "--rev"; v[k++] = (char *)(revarg && revarg[0] ? revarg : "HEAD");
@@ -1621,8 +1649,9 @@ static int run_19_preflight(const char *repo, const char *root, const char *reva
     }
     if (out) mm_free(out);
     if (!pass || !ex || code != 0) {
-        cx_fmt(ev, (size_t)cap, "READY=no chain-preflight rc=%d %s%s%s",
-               ex ? code : -1, sum_line[0] ? sum_line : "no CHAIN_PREFLIGHT line",
+        cx_fmt(ev, (size_t)cap, "READY=no chain-preflight rc=%d shard=%s bound_s=%s %s%s%s",
+               ex ? code : -1, shard && shard[0] ? shard : "all", eff_bound,
+               sum_line[0] ? sum_line : "shard-timeout-or-no-summary",
                fail_item[0] ? "; first: " : "", fail_item);
         return 0;
     }
@@ -2463,7 +2492,8 @@ static int resolve_premerge_branch(const char *repo, const char *explicit_tver, 
 
 int main(int argc, char **argv) {
     int fast = 0, a, do_prepare = 0, do_prepare_helper = 0, do_launch_env = 0, strict_helper = 0, require_persist = 0;
-    const char *repo = ".", *since = 0, *pat = "candidate-chain", *only = 0, *tver = 0, *rootarg = 0, *revarg = 0, *pftable = 0, *helper_out = 0;
+    const char *repo = ".", *since = 0, *pat = "candidate-chain", *only = 0, *tver = 0, *rootarg = 0, *revarg = 0, *pftable = 0, *pf_bound_s = "55", *roster_test_rename = 0, *helper_out = 0;
+    static char only_joined[CR_ONLY_BUF_CAP];
     long disk_override_gb = -1;
     long T0 = sy_now_ms();
     {
@@ -2472,7 +2502,8 @@ int main(int argc, char **argv) {
             if (tx_eqz(argv[a], "--repo") && a + 1 < argc) { repo = argv[++a]; cr_repo = repo; }
             else if (tx_eqz(argv[a], "--judge") && a + 3 < argc) {
                 judge_only = 1; jkind = argv[++a]; jfile = argv[++a]; jrcs = argv[++a];
-            } else if (judge_only) {
+            } else if (tx_eqz(argv[a], "--only") && a + 1 < argc) only = argv[++a];
+            else if (judge_only) {
                 fprintf(stderr, "usage: tools/chain-ready.cx -- [--repo DIR] --judge KIND FILE RC\n");
                 return 2;
             } else if (tx_eqz(argv[a], "--fast")) fast = 1;
@@ -2484,11 +2515,19 @@ int main(int argc, char **argv) {
             else if (tx_eqz(argv[a], "--helper-out") && a + 1 < argc) helper_out = argv[++a];
             else if (tx_eqz(argv[a], "--since") && a + 1 < argc) since = argv[++a];
             else if (tx_eqz(argv[a], "--pgrep-pat") && a + 1 < argc) pat = argv[++a];
-            else if (tx_eqz(argv[a], "--only") && a + 1 < argc) only = argv[++a];
             else if (tx_eqz(argv[a], "--version") && a + 1 < argc) tver = argv[++a];
             else if (tx_eqz(argv[a], "--root") && a + 1 < argc) rootarg = argv[++a];
             else if (tx_eqz(argv[a], "--rev") && a + 1 < argc) revarg = argv[++a];
             else if (tx_eqz(argv[a], "--preflight-table") && a + 1 < argc) pftable = argv[++a];
+            else if (tx_eqz(argv[a], "--test-roster-drift") && a + 1 < argc) roster_test_rename = argv[++a];
+            else if (tx_eqz(argv[a], "--preflight-bound-s") && a + 1 < argc) {
+                int64_t bv = -1;
+                if (tx_to_i64(argv[a + 1], (long)tx_len(argv[a + 1], 16), 10, &bv) || bv < 1 || bv > 55) {
+                    fprintf(stderr, "chain-ready: bad --preflight-bound-s %s (expected 1..55)\n", argv[a + 1]);
+                    return 2;
+                }
+                pf_bound_s = argv[++a];
+            }
             else if (tx_eqz(argv[a], "--chain-base") && a + 1 < argc) chain_base_arg = argv[++a];
             else if (tx_eqz(argv[a], "--disk-free-gb") && a + 1 < argc) {
                 int64_t dv = -1; tx_to_i64(argv[a + 1], (long)tx_len(argv[a + 1], 16), 10, &dv); disk_override_gb = (long)dv; a++;
@@ -2501,9 +2540,16 @@ int main(int argc, char **argv) {
                 pik1_set_capture_cap((long)cv);
                 a++;
             } else {
-                fprintf(stderr, "usage: tools/chain-ready.cx [-- [--fast] [--prepare] [--prepare-helper] [--launch-env] [--helper-out PATH] [--strict-helper] [--require-persistent-helper] [--repo DIR] [--root DIR] [--rev REV] [--since REV] [--pgrep-pat PAT] [--only ITEM-PREFIX] [--version V] [--preflight-table FILE] [--disk-free-gb N] [--chain-base ABS] | [--repo DIR] --judge KIND FILE RC]\n");
+                fprintf(stderr, "usage: tools/chain-ready.cx [-- [--fast] [--prepare] [--prepare-helper] [--launch-env] [--helper-out PATH] [--strict-helper] [--require-persistent-helper] [--repo DIR] [--root DIR] [--rev REV] [--since REV] [--pgrep-pat PAT] [--only ITEM-PREFIX] [--version V] [--preflight-table FILE] [--preflight-bound-s 1..55] [--disk-free-gb N] [--chain-base ABS] | [--repo DIR] --judge KIND FILE RC]\n");
                 return 2;
             }
+        }
+        if (!cr_collect_and_validate_only(argc, argv, &only, only_joined, sizeof only_joined)) {
+            return 2;
+        }
+        if (only && (do_prepare || do_prepare_helper || do_launch_env || judge_only)) {
+            printf("REFUSE\tCHAIN_READY_ONLY\treason=incompatible-mode\tonly=%s\n", only);
+            return 2;
         }
         cr_strict_helper = strict_helper;
         cr_require_persist = require_persist;
@@ -2537,11 +2583,6 @@ int main(int argc, char **argv) {
         (void)sy_unlink(tp); (void)sy_unlink(gp);
     }
     (void)argv_set; (void)changed;
-    char only_joined[512];
-    if (!cr_collect_and_validate_only(argc, argv, &only, only_joined, sizeof only_joined)) {
-        if (have_tmp) (void)sy_remove_all(tmpd);
-        return 2;
-    }
 
 #define WANT(nm) cr_want_item(only, (nm))
     /* job table: slot order is the report order; prios[] orders launch so heavy shards start first */
@@ -2646,7 +2687,8 @@ int main(int argc, char **argv) {
     g_tri[2] = g_tri_exports[2] = tri_image; g_tri[4] = tri_extract;
     for (k = 0; k < (int)(sizeof tab / sizeof tab[0]); k++) {
         int c, is_der = (k >= 2 && k <= 8), is_ch = (k >= 12 && k <= 16), is_pm = (k >= 21 && k <= 25);
-        if (!WANT(nm[k]) && !(k == 1 && WANT("1-rev")) && !(is_der && WANT("2a-derive")) && !(is_ch && WANT("5-candidate-chain")) && !(is_pm && WANT("22-premerge-union"))) continue;
+        int wk = WANT(nm[k]);
+        if (!wk && !(k == 1 && WANT("1-rev")) && !(is_der && WANT("2a-derive")) && !(is_ch && WANT("5-candidate-chain")) && !(is_pm && WANT("22-premerge-union"))) continue;
         if (is_ch && !have_tmp) continue;
         if (tx_eqz(kd[k], "tri") && !tri_scratch) continue;
         for (c = 0; tab[k][c]; c++) J[nj].argv[c] = tab[k][c];
@@ -2995,35 +3037,42 @@ int main(int argc, char **argv) {
         row_judged("23-freeze-armed", ok, ev, sy_now_ms() - t0);
     }
     /* 24-root-current (设计原称门 20; 现行 main 20-23 已占, 顺延编号 24): installed ROOT/unisacc.com must match latest published release + SHA */
-    if (WANT("24-root-current")) {
-        char ev[640], out_buf[4096]; long t0 = sy_now_ms();
-        const char *eff_root = (rootarg && rootarg[0]) ? rootarg : repo;
-        char *rv[] = {"./tools/bound", "25", "sh", "./unisacc.com", "tools/root-current.cx", "--", "--repo", (char *)repo, "--root", (char *)eff_root, 0}; /* lint:allow R1 invokes sibling gate tool via product */
-        np_result rr = {0}; char rwhy[200];
-        int fail = np_run(rv, 0, 0, 30, &rr, rwhy, sizeof rwhy);
-        out_buf[0] = 0;
-        if (rr.out && rr.outn > 0) {
-            long cn = rr.outn < (size_t)(sizeof out_buf - 1) ? (long)rr.outn : (long)sizeof out_buf - 1;
-            mm_copy(out_buf, sizeof out_buf, rr.out, cn); out_buf[cn] = 0;
-            while (cn > 0 && (out_buf[cn - 1] == '\n' || out_buf[cn - 1] == '\r')) out_buf[--cn] = 0;
-        }
-        int rrc = rr.rc;
-        np_free(&rr);
-        long olen = tx_len(out_buf, sizeof out_buf);
-        int has_nl = (tx_chr(out_buf, olen, '\n') >= 0);
-        if (fail || rrc != 0 || has_nl ||
-            !tx_prefix(out_buf, olen, "ROOT_CURRENT\tPASS\t", 18) ||
-            tx_find(out_buf, olen, "\texpect=", 8) < 0 ||
-            tx_find(out_buf, olen, "\texpect_sha=", 12) < 0 ||
-            tx_find(out_buf, olen, "\tactual_sha=", 12) < 0) {
-            cx_fmt(ev, sizeof ev, "%.580s", out_buf[0] ? out_buf : (rwhy[0] ? rwhy : "root-current invalid/empty output"));
-            row_judged("24-root-current", 0, ev, sy_now_ms() - t0);
-        } else {
-            cx_fmt(ev, sizeof ev, "%.580s", out_buf);
-            row_judged("24-root-current", 1, ev, sy_now_ms() - t0);
+    {
+        const char *g24_nm = (roster_test_rename && roster_test_rename[0]) ? roster_test_rename : "24-root-current";
+        if (WANT(g24_nm)) {
+            char ev[640], out_buf[4096]; long t0 = sy_now_ms();
+            const char *eff_root = (rootarg && rootarg[0]) ? rootarg : repo;
+            char *rv[] = {"./tools/bound", "25", "sh", "./unisacc.com", "tools/root-current.cx", "--", "--repo", (char *)repo, "--root", (char *)eff_root, 0}; /* lint:allow R1 invokes sibling gate tool via product */
+            np_result rr = {0}; char rwhy[200];
+            int fail = np_run(rv, 0, 0, 30, &rr, rwhy, sizeof rwhy);
+            out_buf[0] = 0;
+            if (rr.out && rr.outn > 0) {
+                long cn = rr.outn < (size_t)(sizeof out_buf - 1) ? (long)rr.outn : (long)sizeof out_buf - 1;
+                mm_copy(out_buf, sizeof out_buf, rr.out, cn); out_buf[cn] = 0;
+                while (cn > 0 && (out_buf[cn - 1] == '\n' || out_buf[cn - 1] == '\r')) out_buf[--cn] = 0;
+            }
+            int rrc = rr.rc;
+            np_free(&rr);
+            long olen = tx_len(out_buf, sizeof out_buf);
+            int has_nl = (tx_chr(out_buf, olen, '\n') >= 0);
+            if (fail || rrc != 0 || has_nl ||
+                !tx_prefix(out_buf, olen, "ROOT_CURRENT\tPASS\t", 18) ||
+                tx_find(out_buf, olen, "\texpect=", 8) < 0 ||
+                tx_find(out_buf, olen, "\texpect_sha=", 12) < 0 ||
+                tx_find(out_buf, olen, "\tactual_sha=", 12) < 0) {
+                cx_fmt(ev, sizeof ev, "%.580s", out_buf[0] ? out_buf : (rwhy[0] ? rwhy : "root-current invalid/empty output"));
+                row_judged(g24_nm, 0, ev, sy_now_ms() - t0);
+            } else {
+                cx_fmt(ev, sizeof ev, "%.580s", out_buf);
+                row_judged(g24_nm, 1, ev, sy_now_ms() - t0);
+            }
         }
     }
-    if (WANT("12-root-files") || WANT("12p-preflight-entry") || WANT("13-snap-cache") || WANT("14-root-record")) root_items(repo, rootarg ? rootarg : repo, revarg, only);
+    {
+        int w12 = WANT("12-root-files"), w12p = WANT("12p-preflight-entry");
+        int w13 = WANT("13-snap-cache"), w14 = WANT("14-root-record");
+        if (w12 || w12p || w13 || w14) root_items(repo, rootarg ? rootarg : repo, revarg, only);
+    }
     if (WANT("18-parse2-gen")) {
         char private_tree[4400], ev[640];
         long t0 = sy_now_ms();
@@ -3034,8 +3083,10 @@ int main(int argc, char **argv) {
     }
     {
         int w19_full = WANT("19-chain-preflight");
-        int w19_a = (only != 0) && WANT("19a-preflight-sixtarget");
-        int w19_b = (only != 0) && WANT("19b-preflight-snap");
+        int w19_a_raw = WANT("19a-preflight-sixtarget");
+        int w19_b_raw = WANT("19b-preflight-snap");
+        int w19_a = (only != 0) && w19_a_raw;
+        int w19_b = (only != 0) && w19_b_raw;
         int need_a = w19_full || w19_a;
         int need_b = w19_full || w19_b;
         char ev_a[640] = {0}, ev_b[640] = {0};
@@ -3043,12 +3094,12 @@ int main(int argc, char **argv) {
         int ok_a = 1, ok_b = 1;
         if (need_a) {
             long t0 = sy_now_ms();
-            ok_a = run_19_preflight(repo, rootarg ? rootarg : repo, revarg, since, tver, pftable, "sixtarget", ev_a, sizeof ev_a);
+            ok_a = run_19_preflight(repo, rootarg ? rootarg : repo, revarg, since, tver, pftable, "sixtarget", pf_bound_s, ev_a, sizeof ev_a);
             ms_a = sy_now_ms() - t0;
         }
         if (need_b) {
             long t0 = sy_now_ms();
-            ok_b = run_19_preflight(repo, rootarg ? rootarg : repo, revarg, since, tver, pftable, "snap", ev_b, sizeof ev_b);
+            ok_b = run_19_preflight(repo, rootarg ? rootarg : repo, revarg, since, tver, pftable, "snap", pf_bound_s, ev_b, sizeof ev_b);
             ms_b = sy_now_ms() - t0;
         }
         if (w19_a) row_judged("19a-preflight-sixtarget", ok_a, ev_a, ms_a);
@@ -3143,6 +3194,19 @@ int main(int argc, char **argv) {
     }
     if (WANT("7-recipe")) row("7-recipe", "UNMEASURED", "manual: recipe steps 1-5 (private root checkout of REV, commit-tree, UNISACC_IDENT_HELPER, fresh --out, 5400 s)", 0);
     if (WANT("9-ledger")) row("9-ledger", "UNMEASURED", "manual: one ledger line in prd_mempalace.md (REV, PID/PGID, deadline, output dir) before the chain", 0);
+    {
+        int gi;
+        const char *unpolled = 0;
+        for (gi = 0; cr_gate_names[gi]; gi++) {
+            if (gi >= 64 || !cr_polled_seen[gi]) { unpolled = cr_gate_names[gi]; break; }
+        }
+        if (cr_drift_name || unpolled || nrows_emitted <= 0) {
+            printf("REFUSE\tCHAIN_READY_ROSTER_DRIFT\tdrift=%s\tunpolled=%s\trows=%d\n",
+                   cr_drift_name ? cr_drift_name : "-", unpolled ? unpolled : "-", nrows_emitted);
+            if (have_tmp && sy_remove_all(tmpd)) fprintf(stderr, "chain-ready: scratch cleanup failed %s\n", tmpd);
+            return 2;
+        }
+    }
     printf("READY\t%s\t%s%s\t%ld\n", nfail ? "no" : "yes", nfail ? "failed=" : "failed=none", failed_names, sy_now_ms() - T0);
     if (have_tmp && sy_remove_all(tmpd)) fprintf(stderr, "chain-ready: scratch cleanup failed %s\n", tmpd);
     return nfail ? 1 : 0;

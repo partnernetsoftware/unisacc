@@ -625,6 +625,32 @@ int main(int argc, char **argv) {
                 if (mb) mm_free(mb);
             }
             {
+                char *v[] = {"./tools/bound", "40", "sh", UC, "tools/chain-ready.cx", "--", "--repo", srepo, "--root", srepo, "--since", "HEAD~1", "--only", "19", "--preflight-table", pft_both_ok, 0};
+                (void)sy_unlink(markf);
+                rc = run(v, out, sizeof out);
+                mb = cx_read(markf, &mn);
+                ck(rc == 0 && has(out, "19-chain-preflight\tPASS") && !has(out, "19a-preflight-sixtarget\t") && !has(out, "19b-preflight-snap\t") && has(out, "READY\tyes") && mb && mn == 2 && mb[0] == 'A' && mb[1] == 'B', "preflight-19-prefix-runs-both-shards-deduped-pass");
+                if (mb) mm_free(mb);
+            }
+            {
+                char pft_six_hang[400];
+                cx_fmt(pft_six_hang, sizeof pft_six_hang, "%s/pf-six-hang.tsv", tmpd);
+                cx_fmt(tbuf, sizeof tbuf,
+                    "name\tpatterns\tcmd\ttimeout_s\n"
+                    "root-types\t*\tsh ./unisacc.com tools/chain-preflight.cx -- --item root-types\t10\n"
+                    "snap-cache-types\t*\tsh ./unisacc.com tools/chain-preflight.cx -- --item snap-cache-types\t10\n"
+                    "parse2-bind\t*\tsh ./unisacc.com tools/chain-preflight.cx -- --item parse2-bind\t10\n"
+                    "sys-six-target-0\tcx/sys/\tsh -c 'printf A >> \"%s\"; sleep 5'\t30\n"
+                    "chain-to-snap\ttools/candidate-chain.cx\tsh -c 'printf B >> \"%s\"'\t10\n", markf, markf);
+                cx_write(pft_six_hang, tbuf, tx_len(tbuf, sizeof tbuf));
+                char *v1[] = {"./tools/bound", "40", "sh", UC, "tools/chain-ready.cx", "--", "--repo", srepo, "--root", srepo, "--since", "HEAD~1", "--only", "19a-preflight-sixtarget,19b-preflight-snap", "--preflight-table", pft_six_hang, "--preflight-bound-s", "1", 0};
+                (void)sy_unlink(markf);
+                rc = run(v1, out, sizeof out);
+                mb = cx_read(markf, &mn);
+                ck(rc == 1 && has(out, "19a-preflight-sixtarget\tFAIL") && has(out, "bound_s=1") && has(out, "19b-preflight-snap\tPASS") && has(out, "READY\tno") && mb && mn == 2 && mb[0] == 'A' && mb[1] == 'B', "preflight-19a-shard-timeout-still-runs-19b-and-ready-no");
+                if (mb) mm_free(mb);
+            }
+            {
                 char *v[] = {"./tools/bound", "40", "sh", UC, "tools/chain-ready.cx", "--", "--only", "24-root-current-typo", 0};
                 rc = run(v, out, sizeof out);
                 ck(rc == 2 && has(out, "REFUSE\tCHAIN_READY_ONLY\treason=unknown-gate\tonly=24-root-current-typo") && has(out, "24-root-current") && !has(out, "READY\tyes"), "only-unknown-gate-refused-rc2");
@@ -646,6 +672,39 @@ int main(int argc, char **argv) {
                              "7-recipe,9-ledger,7-recipe,9-ledger,7-recipe,9-ledger,7-recipe,9-ledger,7-recipe", 0};
                 rc = run(v, out, sizeof out);
                 ck(rc == 2 && has(out, "REFUSE\tCHAIN_READY_ONLY\treason=too-many-only\tcount=33\tmax=32") && !has(out, "READY\tyes"), "only-over-32-cap-refused-rc2");
+            }
+            {
+                /* 32 valid long gate names (32 * 20 - 1 = 639 bytes > 512 bytes): must pass without hitting old 512B buffer cap */
+                char *v[] = {"./tools/bound", "40", "sh", UC, "tools/chain-ready.cx", "--", "--repo", srepo, "--root", srepo, "--only",
+                             "12p-preflight-entry,12p-preflight-entry,12p-preflight-entry,12p-preflight-entry,"
+                             "12p-preflight-entry,12p-preflight-entry,12p-preflight-entry,12p-preflight-entry,"
+                             "12p-preflight-entry,12p-preflight-entry,12p-preflight-entry,12p-preflight-entry,"
+                             "12p-preflight-entry,12p-preflight-entry,12p-preflight-entry,12p-preflight-entry,"
+                             "12p-preflight-entry,12p-preflight-entry,12p-preflight-entry,12p-preflight-entry,"
+                             "12p-preflight-entry,12p-preflight-entry,12p-preflight-entry,12p-preflight-entry,"
+                             "12p-preflight-entry,12p-preflight-entry,12p-preflight-entry,12p-preflight-entry,"
+                             "12p-preflight-entry,12p-preflight-entry,12p-preflight-entry,12p-preflight-entry", 0};
+                rc = run(v, out, sizeof out);
+                ck(rc == 0 && has(out, "12p-preflight-entry\tPASS") && has(out, "READY\tyes"), "only-32-long-gate-names-over-512b-pass");
+            }
+            {
+                char *v1[] = {"./tools/bound", "40", "sh", UC, "tools/chain-ready.cx", "--", "--prepare", "--only", "bogus-gate", 0};
+                char *v2[] = {"./tools/bound", "40", "sh", UC, "tools/chain-ready.cx", "--", "--prepare-helper", "--only", "bogus-gate", 0};
+                char *v3[] = {"./tools/bound", "40", "sh", UC, "tools/chain-ready.cx", "--", "--launch-env", "--only", "bogus-gate", 0};
+                char *v4[] = {"./tools/bound", "40", "sh", UC, "tools/chain-ready.cx", "--", "--only", "bogus-gate", "--judge", "rev", "/dev/null", "0", 0};
+                char *v5[] = {"./tools/bound", "40", "sh", UC, "tools/chain-ready.cx", "--", "--prepare", "--only", "7-recipe", 0};
+                int ok1 = (run(v1, out, sizeof out) == 2 && has(out, "REFUSE\tCHAIN_READY_ONLY\treason=unknown-gate\tonly=bogus-gate"));
+                int ok2 = (run(v2, out, sizeof out) == 2 && has(out, "REFUSE\tCHAIN_READY_ONLY\treason=unknown-gate\tonly=bogus-gate"));
+                int ok3 = (run(v3, out, sizeof out) == 2 && has(out, "REFUSE\tCHAIN_READY_ONLY\treason=unknown-gate\tonly=bogus-gate"));
+                int ok4 = (run(v4, out, sizeof out) == 2 && has(out, "REFUSE\tCHAIN_READY_ONLY\treason=unknown-gate\tonly=bogus-gate"));
+                int ok5 = (run(v5, out, sizeof out) == 2 && has(out, "REFUSE\tCHAIN_READY_ONLY\treason=incompatible-mode\tonly=7-recipe"));
+                ck(ok1 && ok2 && ok3 && ok4 && ok5, "only-combined-with-prepare-or-judge-refused-rc2");
+            }
+            {
+                char *mv[] = {"./tools/bound", "40", "sh", UC, "tools/chain-ready.cx", "--", "--only", "24-root-current", "--test-roster-drift", "24-root-renamed", 0};
+                rc = run(mv, out, sizeof out);
+                ck(rc == 2 && has(out, "REFUSE\tCHAIN_READY_ROSTER_DRIFT\tdrift=24-root-renamed\tunpolled=24-root-current\trows=0") && !has(out, "READY\tyes"),
+                   "gate-roster-rename-mutant-killed-by-roster-drift");
             }
             {
                 char *v[] = {"./tools/bound", "40", "sh", UC, "tools/chain-ready.cx", "--", "--only", "7-recipe,9-ledger", 0};
