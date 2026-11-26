@@ -232,6 +232,7 @@ static int kit_fixture(void) {
        " if [ -n \"$KIT_TEST_WINDOW\" ]; then test \"$(cat \"$TMPDIR/kit-attempts\")\" = XX || exit 124;\n"
        " else test \"$(cat .git/kit-calls)\" = X || exit 124; fi\nfi\n%s",ape_text)||
        sy_write_file(apep,src,strlen(src),0755))return 2;
+    sy_unlink(ev);
     char *pos[]={"env","QG_CASE=boundary",bin,repo,"--candidate",apep,"--ids","alpha,beta","--out",ev,0};
     check("kit-before-first-wave",runv(pos,root,15,&rc)&&rc==0&&has(out,"QUALIFY_KIT")&&has(out,want)&&
           has(out,"alpha\tPASS")&&has(out,"beta\tPASS"));
@@ -239,6 +240,7 @@ static int kit_fixture(void) {
     check("kit-tampered-refused",runv(neg,root,15,&rc)&&rc!=0&&has(out,"kit-tampered")&&!has(out,"QUALIFY_BATCH"));
     const char *modes[]={"KIT_TEST_WINDOW=once","KIT_TEST_WINDOW=twice"};
     for(int i=0;i<2;i++){
+        sy_unlink(ev);
         char *v[]={"env","QG_CASE=boundary",(char*)modes[i],bin,repo,"--candidate",apep,"--ids","alpha","--out",ev,0};
         char path[4400],*e=0,*calls=0;
         size_t en=0,cn=0;
@@ -334,6 +336,7 @@ static int selector_fixture(void) {
             int rc;
             if(!git("add","-A","--","tools","tests") || !runv(commit,0,10,&rc) || rc)return 2;
         }
+        sy_unlink(ev);
         char *v[]={"env",cache,"DVQUALIFY_NATIVE_RUN_BATCH=1","DEVSVC_SOCK=",
                    i>=SIDE_A ? "UNISA_CONTAINER=" : "UNISA_CONTAINER=tests/selector.container",
                    bin,repo,"--candidate",i>=SIDE_A ? bare : i<NEW_APE ? ape : ape2,"--ids","alpha","--out",ev,0};
@@ -429,7 +432,7 @@ int main(int argc, char **argv) {
       check("list-domain-set", runv(v, 0, 30, &rc) && rc == 0 && has(out, "QUALIFY_LIST\talpha\tproduct-qualification\twindow=1") &&
             has(out, "QUALIFY_LIST\tbad\tproduct-qualification\twindow=2") && !has(out, "\tother\t") && has(out, "batches=3\tjobs=2\twindows=2")); }
     /* Q2 full run: two valid batches and one candidate mismatch */
-    { char *v[] = {bin, repo, "--candidate", apep, "--ids", "alpha,beta,bad", "--out", ev, "--jobs", "2", 0};
+    { sy_unlink(ev); char *v[] = {bin, repo, "--candidate", apep, "--ids", "alpha,beta,bad", "--out", ev, "--jobs", "2", 0};
       int ok = runv(v, 0, 50, &rc);
       check("mismatch-run-rc1", ok && rc == 1);
       char *e = cx_read(ev, 0), want[512], lay[4400], lc[4500];
@@ -460,7 +463,7 @@ int main(int argc, char **argv) {
     /* A live writer holds the evidence inode. Both contenders must leave
        its bytes intact; an alias must contend on the same lock. */
     {
-        char alias[4500];if(cx_fmt(alias,sizeof alias,"%s/ev-link",tmp) || symlink(ev,alias))return 2;
+        char alias[4500]; char *hl[]={"ln",ev,alias,0}; if(cx_fmt(alias,sizeof alias,"%s/ev-link",tmp) || !runv(hl,tmp,5,&rc) || rc)return 2;
         int fd=sy_open_read(ev);
         if(fd<0 || sy_flock(fd,2|4))return 2;
         size_t n=0;char *before=cx_read(ev,&n);
@@ -504,6 +507,7 @@ int main(int argc, char **argv) {
     if(!part || part==2){
     /* The reuse assertion needs a previously published layout. */
     if(part==2){
+        sy_unlink(ev);
         char *seed[]={bin,repo,"--candidate",apep,"--ids","alpha","--out",ev,0};
         if(!runv(seed,0,40,&rc) || rc)return 2;
         /* The exclude pattern has to be observed from this segment as well.  `--evidence` already asserts both
@@ -518,7 +522,7 @@ int main(int argc, char **argv) {
           free(le); }
     }
     /* Q3 valid-only run exits 0 */
-    { char *v[] = {bin, repo, "--candidate", apep, "--ids", "alpha,beta", "--out", ev, "--jobs", "1", 0};
+    { sy_unlink(ev); char *v[] = {bin, repo, "--candidate", apep, "--ids", "alpha,beta", "--out", ev, "--jobs", "1", 0};
       char *e = 0; int ok = runv(v, 0, 40, &rc); e = cx_read(ev, 0);
       check("valid-run-rc0", ok && rc == 0 && has(e, "\tPASS=2\tFAIL=0\tUNKNOWN=0\tINVALID=0\t"));
       check("same-input-reuses-layout-and-runs-both",has(out,"QUALIFY_LAYOUT_MATERIAL\treused\t") &&
@@ -526,15 +530,17 @@ int main(int argc, char **argv) {
       char path[4400];
       if(evidence_layout(e,path,sizeof path) || put(path,"tests/batches.tsv","changed after publication\n",0600))return 2;
       free(e);
+      sy_unlink(ev);
       check("changed-layout-rebuilt",runv(v,0,40,&rc) && rc==0 && has(out,"QUALIFY_LAYOUT_MATERIAL\tprepared\t"));
       char *advance[]={"git","-C",repo,"-c","user.name=f","-c","user.email=f@localhost","-c","commit.gpgsign=false","commit","-q","--allow-empty","-m","new source identity",0};
       if(!runv(advance,0,20,&rc)||rc)return 2;
+      sy_unlink(ev);
       check("same-ape-different-head-new-layout",runv(v,0,40,&rc) && rc==0 &&
             has(out,"QUALIFY_LAYOUT_MATERIAL\tprepared\t") && has(out,"QUALIFY_BATCH\talpha\tPASS")); }
     if(selector_fixture())return 2;
     }
     if(!part || part==3){
-    { char *v[] = {bin, repo, "--candidate", apep, "--ids", "alpha,beta,bad,gamma,delta", "--out", ev,
+    { sy_unlink(ev); char *v[] = {bin, repo, "--candidate", apep, "--ids", "alpha,beta,bad,gamma,delta", "--out", ev,
                    "--segment-batches", "2", 0};
       int ok = runv(v, 0, 40, &rc); char *e = cx_read(ev, 0);
       check("automatic-segments", ok && rc == 1 && has(e, "# segment=1 batches=2") &&
@@ -559,6 +565,7 @@ int main(int argc, char **argv) {
             has(out, "QUALIFY_BATCH\talpha\t") && has(out, "QUALIFY_BATCH\tbeta\t"));
       check("different-candidate-builds-new-layout",has(out,"QUALIFY_LAYOUT_MATERIAL\tprepared\t")); }
     {
+      sy_unlink(ev);
       char *first[] = {bin, repo, "--candidate", apep, "--ids", "reject,bad", "--out", ev, 0};
       char *again[] = {bin, repo, "--candidate", apep, "--ids", "reject,bad", "--resume", ev, 0};
       int ok = runv(first, 0, 40, &rc) && rc == 1 && has(out, "QUALIFY_BATCH\treject\tFAIL");
@@ -576,6 +583,29 @@ int main(int argc, char **argv) {
     { const char *launcher=sy_env_or("UNISACC","./unisacc.com"); /* lint:allow R1-product repository launcher for the real devsvc route check */
       char *v[] = {"sh", (char*)launcher, "tools/devsvc.cx", "--", "--dev", "qualify", "--ids", "alpha", "--list", 0};
       check("devsvc-qualify-entry", runv(v, root, 40, &rc) && rc == 0 && has(out, "QUALIFY_LIST\talpha\t")); }
+    { char w99[4400]; const char *sent = "# W9901 sentinel\n";
+      if (cx_fmt(w99, sizeof w99, "%s/strict-W9901-probe.tsv", tmp) || sy_write_file(w99, sent, strlen(sent), 0644)) return 2;
+      char *ref[] = {bin, repo, "--candidate", apep, "--ids", "alpha", "--out", w99, 0};
+      int r_ok = runv(ref, 0, 20, &rc) && rc == 2 && has(out, "evidence-file-exists-nonempty");
+      size_t sz = 0; char *after = cx_read(w99, &sz);
+      check("w99-nonempty-refused", r_ok && after && sz == strlen(sent) && !memcmp(after, sent, sz));
+      if (after) free(after);
+      char *ov[] = {bin, repo, "--candidate", apep, "--ids", "alpha", "--out", w99, "--allow-overwrite", 0};
+      check("w99-allow-overwrite-ok", runv(ov, 0, 40, &rc) && rc == 0 && has(out, "QUALIFY_BATCH\talpha\tPASS"));
+      char w99s[4400], w99l[4400];
+      if (cx_fmt(w99s, sizeof w99s, "%s/strict-W9901-sym.tsv", tmp) ||
+          cx_fmt(w99l, sizeof w99l, "%s/link-w9901.tsv", tmp) ||
+          sy_write_file(w99s, sent, strlen(sent), 0644) ||
+          symlink(w99s, w99l)) return 2;
+      char *sym1[] = {bin, repo, "--candidate", apep, "--ids", "alpha", "--out", w99l, 0};
+      int s1 = runv(sym1, 0, 20, &rc) && rc == 2 && has(out, "refusing symlink evidence path");
+      char *sym2[] = {bin, repo, "--candidate", apep, "--ids", "alpha", "--out", w99l, "--allow-overwrite", 0};
+      int s2 = runv(sym2, 0, 20, &rc) && rc == 2 && has(out, "refusing symlink evidence path");
+      size_t szs = 0; char *after_s = cx_read(w99s, &szs);
+      check("w99-symlink-refused", s1 && s2 && after_s && szs == strlen(sent) && !memcmp(after_s, sent, szs));
+      if (after_s) free(after_s);
+      char *mx[] = {bin, repo, "--candidate", apep, "--ids", "alpha", "--resume", w99, "--allow-overwrite", 0};
+      check("w99-resume-allow-overwrite-refused", runv(mx, 0, 20, &rc) && rc == 2 && has(out, "mutually exclusive")); }
     }
     { char *v[] = {"rm", "-rf", tmp, 0}; runv(v, 0, 30, &rc); }
     printf("CHECK_DVQUALIFY\tpass=%d\tfail=%d\n", passed, failed);
