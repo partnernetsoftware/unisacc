@@ -294,7 +294,7 @@ int main(int argc, char **argv) {
     if (run_e2e) {
         char repo[4400], froot[4400], rcbin[4400], buf[4096], cmd[4800];
         char ape_sha[65];
-        const char *ape_body = "#!/bin/sh\nif [ \"$1\" = \"--version\" ]; then echo \"unisacc 0.1.3\"; exit 0; fi\n";
+        const char *ape_body = "#!/bin/sh\nif [ \"$1\" = \"--version\" ]; then echo \"unisacc 0.1.3\"; exit 0; fi\nif [ \"$1\" = \"-O2\" ] && [ \"$2\" = \"-c\" ]; then if [ -f \"$PWD/.canary_fail\" ]; then echo 'reject: conflicting types for object (C99 6.7p4)' >&2; exit 1; fi; if [ -f \"$PWD/.canary_no_art\" ]; then exit 0; fi; out=\"\"; prev=\"\"; for a in \"$@\"; do if [ \"$prev\" = \"-o\" ]; then out=\"$a\"; fi; prev=\"$a\"; done; if [ -n \"$out\" ]; then printf '\\177ELF0123456789012345678901234567890123456789012345678901234567890123' > \"$out\"; fi; exit 0; fi\n";
         long ape_len = tx_len(ape_body, 512);
         const char *c13 = "0123456789012345678901234567890123456789";
         pr_result pr;
@@ -365,6 +365,33 @@ int main(int argc, char **argv) {
             ckk_ok(t == 0 && pr.rc == 1 && out_contains(&pr, "reason=tape-dir-symlink", 23),
                    "e2e.root-current-symlink-tape-red");
             pr_free(&pr);
+
+            /* 16b. --controller-canary: passes when controller sources & 3-TU compile succeed, RED on 6.7p4 refusal */
+            sy_remove_all(p);
+            cx_fmt(p, sizeof p, "%s/tools", repo); sy_mkdir_all(p, 0755);
+            cx_fmt(p, sizeof p, "%s/tools/source-package.cx", repo); write_s(p, "int sp(void){return 0;}\n");
+            cx_fmt(p, sizeof p, "%s/tools/source-job-wave.cx", repo); write_s(p, "int sjw(void){return 0;}\n");
+            {
+                char *rv_can[] = {rcbin, "--repo", repo, "--root", froot, "--controller-canary", 0};
+                t = pr_run("tapesidecar-e2e5", rv_can, cwd, 0, 45, &pr);
+                ckk_ok(t == 0 && pr.rc == 0 && out_contains(&pr, "ROOT_CURRENT\tPASS\texpect=0.1.3", 30),
+                       "e2e.root-current-controller-canary-passes");
+                pr_free(&pr);
+
+                cx_fmt(p, sizeof p, "%s/.canary_fail", repo); write_s(p, "1\n");
+                t = pr_run("tapesidecar-e2e6", rv_can, cwd, 0, 45, &pr);
+                ckk_ok(t == 0 && pr.rc == 1 && out_contains(&pr, "reason=root-controller-canary-failed", 36),
+                       "e2e.root-current-controller-canary-red");
+                pr_free(&pr);
+                sy_unlink(p);
+
+                cx_fmt(p, sizeof p, "%s/.canary_no_art", repo); write_s(p, "1\n");
+                t = pr_run("tapesidecar-e2e7", rv_can, cwd, 0, 45, &pr);
+                ckk_ok(t == 0 && pr.rc == 1 && out_contains(&pr, "reason=root-controller-canary-no-artifact", 41),
+                       "e2e.root-current-controller-canary-no-artifact-red");
+                pr_free(&pr);
+                sy_unlink(p);
+            }
         }
     }
 
