@@ -1,7 +1,9 @@
 /* tools/chain-ready.cx -- the nine pre-chain conditions of prd_mempalace.md "0.0.62 候选整链就绪判断" in one command.
  *
- *   sh ./unisacc.com tools/chain-ready.cx [-- [--fast] [--repo DIR] [--since REV] [--pgrep-pat PAT] [--only NAME] [--version V]]
- *   sh ./unisacc.com tools/chain-ready.cx -- --judge KIND FILE RC     (the pure judge on a saved output; fixtures)
+ *   cx tools/chain-ready.cx [-- [--fast] [--repo DIR] [--since REV] [--pgrep-pat PAT] [--only NAME] [--version V] [--strict-helper] [--helper-out PATH]]
+ *   cx tools/chain-ready.cx -- --prepare [--repo DIR] [--helper-out PATH]
+ *   cx tools/chain-ready.cx -- --launch-env [--repo DIR] [--root DIR] [--rev REV] [--version V] [--chain-base ABS] [--helper-out PATH] [--strict-helper]
+ *   cx tools/chain-ready.cx -- --judge KIND FILE RC     (the pure judge on a saved output; fixtures)
  *
  * One TSV row per item: ITEM  PASS|FAIL|UNMEASURED|SKIPPED  evidence  ms.  Last row:
  *   READY  yes|no  failed=<names>  ms
@@ -465,7 +467,8 @@ static int j_derive_shard(const char *o, long n, int rc, const char *shard_gens,
                 p += (c < 0 ? slen - p : c + 1);
             }
         }
-        if (failed_gens[0]) cx_fmt(ev, (size_t)cap, "no DERIVE_SUMMARY line, rc=%d failed_generator=%s", rc, failed_gens);
+        if (failed_gens[0]) cx_fmt(ev, (size_t)cap, "no DERIVE_SUMMARY line, rc=%d failed_generator=%s%s", rc, failed_gens,
+            has(failed_gens, (long)tx_len(failed_gens, sizeof failed_gens), "(TIMEOUT)") ? "; hint: run chain-ready --prepare" : "");
         else cx_fmt(ev, (size_t)cap, "no DERIVE_SUMMARY line, rc=%d", rc);
         return 0;
     }
@@ -478,13 +481,19 @@ static int j_derive_shard(const char *o, long n, int rc, const char *shard_gens,
         if (!d[0]) line_with(o, n, "\tREFUSED\t", d, sizeof d);
         if (!d[0]) line_with(o, n, "\tTIMEOUT\t", d, sizeof d);
         if (!d[0]) line_with(o, n, "\tNEEDS_BUMP\t", d, sizeof d);
-        if (failed_gens[0]) cx_fmt(ev, (size_t)cap, "failed_generator=%s %.60s; first: %.90s", failed_gens, l, d);
+        if (failed_gens[0]) cx_fmt(ev, (size_t)cap, "failed_generator=%s %.60s; first: %.90s%s", failed_gens, l, d,
+            (has(failed_gens, (long)tx_len(failed_gens, sizeof failed_gens), "(TIMEOUT)") ||
+             has(failed_gens, (long)tx_len(failed_gens, sizeof failed_gens), "table-index(DRIFT)")) ?
+            "; hint: run chain-ready --prepare" : "");
         else cx_fmt(ev, (size_t)cap, "%.60s; first: %.90s", l, d);
     }
     return 0;
 }
 static int j_derive(const char *o, long n, int rc, char *ev, int cap) {
     return j_derive_shard(o, n, rc, 0, ev, cap);
+}
+static int is_solo_job(const char *item) {
+    return tx_eqz(item, "derive:batch-packages-gen");
 }
 static int parse_ratchet_below(const char *o, long n, const char *tag) {
     char l[240]; const char *p;
@@ -1641,6 +1650,453 @@ static int freeze_armed(const char *repo, char *ev, int cap) {
     return 1;
 }
 
+static int cr_strict_helper = 0;
+
+static int cr_abs_from_cwd(const char *p, char *out, size_t cap) {
+    char cwd[2048];
+    if (!p || !p[0]) return -1;
+    if (p[0] == '/') return cx_fmt(out, cap, "%s", p);
+    if (sy_cwd(cwd, sizeof cwd) != 0) return cx_fmt(out, cap, "%s", p);
+    return cx_fmt(out, cap, "%s/%s", cwd, p);
+}
+
+static int cr_sha256_file(const char *path, char hex[65]) {
+    size_t n = 0; char *b = cx_read(path, &n);
+    int rc;
+    if (!b) return -1;
+    rc = sy_sha256_hex(b, (long)n, hex);
+    mm_free(b);
+    return rc ? -1 : 0;
+}
+
+static int cr_seed_ident_sha(const char *repo, char hex[65]) {
+    char pc[4400], ph[4400], h1[65], h2[65], comb[256];
+    h2[0] = '-'; h2[1] = 0;
+    if (cx_fmt(pc, sizeof pc, "%s/seed/ident.c", repo) || cr_sha256_file(pc, h1)) return -1;
+    if (!cx_fmt(ph, sizeof ph, "%s/seed/sha256.h", repo) && sy_exists(ph) == 1) {
+        if (cr_sha256_file(ph, h2)) return -1;
+    }
+    if (cx_fmt(comb, sizeof comb, "ident.c=%s\nsha256.h=%s\n", h1, h2)) return -1;
+    return sy_sha256_hex(comb, (long)tx_len(comb, sizeof comb), hex) ? -1 : 0;
+}
+
+static int cr_default_helper_path(char *out, size_t cap) {
+    const char *home = getenv("HOME");
+    if (!home || !home[0]) return -1;
+    return cx_fmt(out, cap, "%s/.cache/unisacc/ident-helper/identity-helper-real5", home);
+}
+
+static int cr_parse_kv_hex64(const char *buf, size_t len, const char *key, char out[65]) {
+    const char *p = buf;
+    size_t kl = strlen(key);
+    while (p && (size_t)(p - buf) + kl + 64 <= len) {
+        if (!memcmp(p, key, kl)) {
+            const char *v = p + kl;
+            for (int i = 0; i < 64; i++) {
+                char c = v[i];
+                if (!((c >= '0' && c <= '9') || (c >= 'a' && c <= 'f'))) return -1;
+                out[i] = c;
+            }
+            out[64] = 0;
+            return 0;
+        }
+        const char *nl = strchr(p, '\n');
+        if (!nl) break;
+        p = nl + 1;
+    }
+    return -1;
+}
+
+/* Returns 1 if PASS, 0 if FAIL (fills ev). Checks stat/X_OK and <ih>.ident receipt against repo seed/ident.c. */
+static int cr_verify_helper_receipt(const char *repo, const char *ih, int strict_req, char *ev, size_t cap) {
+    struct stat st;
+    char rpath[4400], rec_src[65], rec_bin[65], cur_src[65], cur_bin[65];
+    size_t rn = 0; char *rb;
+    if (!ih || !ih[0]) {
+        cx_fmt(ev, cap, "UNISACC_IDENT_HELPER unset (default: ~/.cache/unisacc/ident-helper/identity-helper-real5; fix: sh ./unisacc.com tools/chain-ready.cx -- --prepare)");
+        return 0;
+    }
+    if (stat(ih, &st) != 0 || !S_ISREG(st.st_mode)) {
+        cx_fmt(ev, cap, "UNISACC_IDENT_HELPER missing-or-not-regular path=%s (default: ~/.cache/unisacc/ident-helper/identity-helper-real5; fix: --prepare)", ih);
+        return 0;
+    }
+    if (access(ih, X_OK) != 0) {
+        cx_fmt(ev, cap, "UNISACC_IDENT_HELPER not-executable path=%s (fix: chmod +x or --prepare)", ih);
+        return 0;
+    }
+    if (cx_fmt(rpath, sizeof rpath, "%s.ident", ih)) {
+        cx_fmt(ev, cap, "helper-receipt-path-overflow path=%s", ih);
+        return 0;
+    }
+    if (sy_exists(rpath) != 1) {
+        if (strict_req) {
+            cx_fmt(ev, cap, "helper-receipt-missing path=%s (fix: sh ./unisacc.com tools/chain-ready.cx -- --prepare --helper-out %s)", rpath, ih);
+            return 0;
+        }
+        cx_fmt(ev, cap, "UNISACC_IDENT_HELPER=%s executable", ih);
+        return 1;
+    }
+    rb = cx_read(rpath, &rn);
+    if (!rb || cr_parse_kv_hex64(rb, rn, "src_sha=", rec_src) || cr_parse_kv_hex64(rb, rn, "helper_sha=", rec_bin)) {
+        if (rb) mm_free(rb);
+        cx_fmt(ev, cap, "helper-receipt-malformed path=%s (fix: --prepare)", rpath);
+        return 0;
+    }
+    mm_free(rb);
+    if (cr_sha256_file(ih, cur_bin) || !tx_eqz(cur_bin, rec_bin)) {
+        cx_fmt(ev, cap, "helper-sha-mismatch path=%s (fix: sh ./unisacc.com tools/chain-ready.cx -- --prepare --helper-out %s)", ih, ih);
+        return 0;
+    }
+    if (cr_seed_ident_sha(repo, cur_src)) {
+        cx_fmt(ev, cap, "helper-seed-source-unreadable repo=%s", repo);
+        return 0;
+    }
+    if (!tx_eqz(cur_src, rec_src)) {
+        cx_fmt(ev, cap, "helper-stale-source-changed path=%s (seed/ident.c changed; fix: sh ./unisacc.com tools/chain-ready.cx -- --prepare --helper-out %s)", ih, ih);
+        return 0;
+    }
+    cx_fmt(ev, cap, "UNISACC_IDENT_HELPER=%s executable verified=1 src_sha=%.12s", ih, cur_src);
+    return 1;
+}
+
+static void cr_append_bad(char *bad, size_t cap, const char *piece) {
+    size_t cur = strlen(bad), pl = strlen(piece);
+    if (cur + (cur ? 2 : 0) + pl < cap) {
+        if (cur) { bad[cur++] = ','; bad[cur++] = ' '; }
+        mm_copy(bad + cur, cap - cur, piece, (long)pl);
+        bad[cur + pl] = 0;
+    }
+}
+
+static void cr_print_sh_sq(const char *s) {
+    putchar('\'');
+    for (; s && *s; s++) {
+        if (*s == '\'') fputs("'\\''", stdout);
+        else putchar(*s);
+    }
+    putchar('\'');
+}
+
+static int cr_lookup_chain_env(const char *tb, size_t tn, const char *name, size_t nl, char *pol, size_t pcap, int *defdeny) {
+    size_t p = 0;
+    int found = 0;
+    *defdeny = 1;
+    pol[0] = 0;
+    while (tb && p < tn) {
+        size_t e = p;
+        while (e < tn && tb[e] != '\n') e++;
+        size_t ll = e - p;
+        const char *l = tb + p;
+        p = e + 1;
+        if (!ll || l[0] == '#' || (ll >= 5 && !memcmp(l, "name\t", 5))) continue;
+        long t1 = tx_chr(l, (long)ll, '\t');
+        if (t1 <= 0) continue;
+        long t2 = tx_chr(l + t1 + 1, (long)ll - t1 - 1, '\t');
+        size_t pl = t2 >= 0 ? (size_t)t2 : (ll - (size_t)t1 - 1);
+        if (t1 == 1 && l[0] == '*') {
+            *defdeny = (pl == 4 && !memcmp(l + t1 + 1, "deny", 4)) ? 1 : 0;
+            continue;
+        }
+        if ((size_t)t1 == nl && !memcmp(l, name, nl)) {
+            size_t cp = pl < pcap - 1 ? pl : pcap - 1;
+            mm_copy(pol, pcap, l + t1 + 1, (long)cp);
+            pol[cp] = 0;
+            found = 1;
+        }
+    }
+    return found;
+}
+
+static int cr_check_env_clean(const char *repo, int allow_future_deadline, char *bad, size_t cap, double *at_out, int *st_out) {
+    extern char **environ;
+    double at = 0.0; const char *why = 0;
+    int st = be_deadline(&at, &why);
+    char cpath[4400], pol[32];
+    const char *eff_repo = (repo && repo[0]) ? repo : ".";
+    size_t tn = 0; char *tb = 0; int defdeny = 1;
+    bad[0] = 0;
+    if (at_out) *at_out = at;
+    if (st_out) *st_out = st;
+    if (st < 0 || (!allow_future_deadline && st > 0)) {
+        char one[200];
+        cx_fmt(one, sizeof one, "%s (%s)", be_name(), st < 0 ? why : "bound-deadline-active");
+        cr_append_bad(bad, cap, one);
+    }
+    if (cx_fmt(cpath, sizeof cpath, "%s/build/chain-env.tsv", eff_repo) || !(tb = cx_read(cpath, &tn))) {
+        cr_append_bad(bad, cap, "build/chain-env.tsv (unreadable)");
+        return 0;
+    }
+    (void)cr_lookup_chain_env(tb, tn, "*", 1, pol, sizeof pol, &defdeny);
+    for (char **ep = environ; ep && *ep; ep++) {
+        const char *s = *ep, *eq = strchr(s, '=');
+        long kl = eq ? (long)(eq - s) : (long)strlen(s);
+        const char *val = eq ? eq + 1 : "";
+        if ((kl >= 2 && (!memcmp(s, "E1", 2) || !memcmp(s, "E2", 2) || !memcmp(s, "E3", 2) || !memcmp(s, "E4", 2))) ||
+            (kl >= 14 && !memcmp(s, "PYTHONHASHSEED", 14))) {
+            char one[200];
+            cx_fmt(one, sizeof one, "%.*s (affects-build-identity)", (int)(kl < 150 ? kl : 150), s);
+            cr_append_bad(bad, cap, one);
+            continue;
+        }
+        if (kl == 15 && !memcmp(s, "UNISA_CONTAINER", 15)) continue;
+        if (kl <= 8 || strncmp(s, "UNISACC_", 8) != 0) continue;
+        int found = cr_lookup_chain_env(tb, tn, s, (size_t)kl, pol, sizeof pol, &defdeny);
+        if (found) {
+            if (tx_eqz(pol, "deny") && val[0] != 0) {
+                char one[200];
+                cx_fmt(one, sizeof one, "%.*s", (int)(kl < 180 ? kl : 180), s);
+                cr_append_bad(bad, cap, one);
+            }
+        } else if (defdeny) {
+            char one[200];
+            cx_fmt(one, sizeof one, "%.*s (unregistered in build/chain-env.tsv)", (int)(kl < 140 ? kl : 140), s);
+            cr_append_bad(bad, cap, one);
+        }
+    }
+    mm_free(tb);
+    return bad[0] ? 0 : 1;
+}
+
+static int cr_build_ident_helper(const char *repo, const char *out_path, char src_sha[65], char bin_sha[65], int *rebuilt) {
+    char abs_out[4400], dir[4400], tmp_out[4400], rpath[4400], rtmp[4400], bound_abs[4400], why[200], rline[256];
+    char cur_src[65], rec_src[65], rec_bin[65], cur_bin[65];
+    size_t rn = 0; char *rb;
+    *rebuilt = 0;
+    if (cr_abs_from_cwd(out_path, abs_out, sizeof abs_out)) return -1;
+    if (cr_seed_ident_sha(repo, cur_src)) return -1;
+    if (!cx_fmt(rpath, sizeof rpath, "%s.ident", abs_out) &&
+        access(abs_out, X_OK) == 0 && sy_exists(rpath) == 1 &&
+        (rb = cx_read(rpath, &rn)) != 0) {
+        int same = (!cr_parse_kv_hex64(rb, rn, "src_sha=", rec_src) &&
+                    !cr_parse_kv_hex64(rb, rn, "helper_sha=", rec_bin) &&
+                    tx_eqz(cur_src, rec_src) &&
+                    !cr_sha256_file(abs_out, cur_bin) &&
+                    tx_eqz(cur_bin, rec_bin));
+        mm_free(rb);
+        if (same) {
+            tx_copy(src_sha, 65, cur_src, 64);
+            tx_copy(bin_sha, 65, cur_bin, 64);
+            return 0;
+        }
+    }
+    if (cx_fmt(dir, sizeof dir, "%s", abs_out)) return -1;
+    { char *sl = strrchr(dir, '/'); if (sl && sl != dir) { *sl = 0; if (sy_mkdir_all(dir, 0755)) return -1; } }
+    if (cx_fmt(tmp_out, sizeof tmp_out, "%s.tmp.%d", abs_out, sy_pid()) ||
+        cx_fmt(rtmp, sizeof rtmp, "%s.ident.tmp.%d", abs_out, sy_pid())) return -1;
+    {
+        char repo_bound[4400];
+        if (!cx_fmt(repo_bound, sizeof repo_bound, "%s/tools/bound", repo) && access(repo_bound, X_OK) == 0) {
+            cx_fmt(bound_abs, sizeof bound_abs, "./tools/bound");
+        } else if (cr_abs_from_cwd("./tools/bound", bound_abs, sizeof bound_abs)) return -1;
+    }
+    {
+        char *av[] = {bound_abs, "30", "cc", "-std=c99", "-D_POSIX_C_SOURCE=200809L", "-O2", "-w", "seed/ident.c", "-o", tmp_out, 0};
+        np_result r = {0};
+        if (np_run(av, repo, 0, 35, &r, why, sizeof why) || r.rc != 0) {
+            if (r.out && r.out[0]) fprintf(stderr, "%s\n", r.out);
+            np_free(&r);
+            return -1;
+        }
+        np_free(&r);
+    }
+    if (sy_chmod(tmp_out, 0755) || sy_rename(tmp_out, abs_out)) return -1;
+    if (cr_sha256_file(abs_out, cur_bin)) return -1;
+    if (cx_fmt(rline, sizeof rline, "src_sha=%s\nhelper_sha=%s\n", cur_src, cur_bin)) return -1;
+    if (cx_write(rtmp, rline, strlen(rline)) || sy_rename(rtmp, rpath)) return -1;
+    tx_copy(src_sha, 65, cur_src, 64);
+    tx_copy(bin_sha, 65, cur_bin, 64);
+    *rebuilt = 1;
+    return 0;
+}
+
+static int cr_run_repo_derive(const char *repo, const char *uc_abs, const char *b_abs, char **dargs, int secs, char *out, size_t cap) {
+    char repo_uc[4400], repo_b[4400], why[200];
+    const char *use_uc = uc_abs, *use_b = b_abs;
+    if (!cx_fmt(repo_uc, sizeof repo_uc, "%s/unisacc.com", repo) && access(repo_uc, X_OK) == 0) use_uc = "./unisacc.com";
+    if (!cx_fmt(repo_b, sizeof repo_b, "%s/tools/bound", repo) && access(repo_b, X_OK) == 0) use_b = "./tools/bound";
+    char *av[24]; char sec_s[16]; int k = 0;
+    cx_fmt(sec_s, sizeof sec_s, "%d", secs);
+    av[k++] = (char *)use_b; av[k++] = sec_s; av[k++] = "sh"; av[k++] = (char *)use_uc;
+    av[k++] = "tools/derive.cx"; av[k++] = "--";
+    for (int i = 0; dargs[i] && k < 23; i++) av[k++] = dargs[i];
+    av[k] = 0;
+    np_result r = {0};
+    if (np_run(av, repo, 0, secs + 5, &r, why, sizeof why)) { np_free(&r); return -1; }
+    if (out && cap > 0) {
+        size_t n = r.outn < cap - 1 ? r.outn : cap - 1;
+        if (n) mm_copy(out, cap, r.out, (long)n);
+        out[n] = 0;
+    }
+    int rc = r.rc;
+    np_free(&r);
+    return rc;
+}
+
+static int cmd_prepare(const char *repo, const char *helper_out) {
+    long t0 = sy_now_ms();
+    char ih_path[4400], uc_abs[4400], b_abs[4400], src_sha[65], bin_sha[65], out[4096];
+    int rebuilt = 0;
+    const char *env_ih = getenv("UNISACC_IDENT_HELPER");
+    if (helper_out && helper_out[0]) cx_fmt(ih_path, sizeof ih_path, "%s", helper_out);
+    else if (env_ih && env_ih[0]) cx_fmt(ih_path, sizeof ih_path, "%s", env_ih);
+    else if (cr_default_helper_path(ih_path, sizeof ih_path)) {
+        printf("CHAIN_READY_PREPARE\tstatus=FAIL\tstep=ident-helper\treason=no-HOME-for-helper\n");
+        return 2;
+    }
+    if (cr_build_ident_helper(repo, ih_path, src_sha, bin_sha, &rebuilt)) {
+        printf("CHAIN_READY_PREPARE\tstatus=FAIL\tstep=ident-helper\treason=build-failed\tpath=%s\n", ih_path);
+        return 2;
+    }
+    printf("CHAIN_READY_PREPARE_STEP\tstep=ident-helper\tstatus=PREPARED\taction=%s\tpath=%s\tsrc_sha=%.12s\thelper_sha=%.12s\n",
+           rebuilt ? "rebuilt" : "reused", ih_path, src_sha, bin_sha);
+
+    if (cr_abs_from_cwd(UC, uc_abs, sizeof uc_abs) || cr_abs_from_cwd("./tools/bound", b_abs, sizeof b_abs)) return 2;
+    static const char *prep_shards[] = {
+        "batch-packages-gen",
+        "tables-gen,signal-targets,cx-flatten,layer-api,iface-hash,st-gap,chain-phases",
+        "batch-domains,links,libc-decls,product-map,doc-links,tool-index,table-index,cx0-three-source",
+        0
+    };
+    int nshards = 0;
+    for (int s = 0; prep_shards[s]; s++) {
+        char *da[] = {"--check", "--prepare-native", "--only", (char *)prep_shards[s], 0};
+        int rc = cr_run_repo_derive(repo, uc_abs, b_abs, da, 45, out, sizeof out);
+        if (rc != 0) {
+            printf("CHAIN_READY_PREPARE\tstatus=FAIL\tstep=derive-native\tshard=%s\trc=%d\n", prep_shards[s], rc);
+            return 1;
+        }
+        nshards++;
+    }
+    printf("CHAIN_READY_PREPARE_STEP\tstep=derive-native\tstatus=PREPARED\tshards=%d\n", nshards);
+
+    const char *ti_act = "clean";
+    {
+        char *ca[] = {"--check", "--only", "table-index", 0};
+        int crc = cr_run_repo_derive(repo, uc_abs, b_abs, ca, 25, out, sizeof out);
+        if (crc != 0) {
+            char *wa[] = {"--write", "--only", "table-index", 0};
+            int wrc = cr_run_repo_derive(repo, uc_abs, b_abs, wa, 25, out, sizeof out);
+            if (wrc != 0 || cr_run_repo_derive(repo, uc_abs, b_abs, ca, 25, out, sizeof out) != 0) {
+                printf("CHAIN_READY_PREPARE\tstatus=FAIL\tstep=table-index\treason=refresh-failed\trc=%d\n", wrc);
+                return 1;
+            }
+            ti_act = "refreshed";
+        }
+    }
+    printf("CHAIN_READY_PREPARE_STEP\tstep=table-index\tstatus=PREPARED\taction=%s\n", ti_act);
+    printf("CHAIN_READY_PREPARE\tstatus=PREPARED\thelper=%s\tderive_native=%d/%d\ttable_index=%s\tms=%ld\n",
+           ih_path, nshards, nshards, ti_act, sy_now_ms() - t0);
+    return 0;
+}
+
+static void cr_print_launch_env_prefix(const char *home, const char *user, const char *pathbuf, const char *own, const char *ih_path) {
+    printf("env -i HOME="); cr_print_sh_sq(home);
+    printf(" USER="); cr_print_sh_sq(user);
+    printf(" LOGNAME="); cr_print_sh_sq(user);
+    printf(" TMPDIR=/tmp PATH="); cr_print_sh_sq(pathbuf);
+    printf(" DEVSVC_OWNER="); cr_print_sh_sq(own);
+    printf(" UNISACC_IDENT_HELPER="); cr_print_sh_sq(ih_path);
+}
+
+static int cmd_launch_env(const char *repo, const char *rootarg, const char *tver, const char *revarg, const char *helper_out, int strict_helper, const char *chain_base) {
+    char bad[512], ih_path[4400], ev[640], ver[32], rev[64], pathbuf[4600], repo_abs[4096], root_abs[4096];
+    if (!cr_check_env_clean(repo, 0, bad, sizeof bad, 0, 0)) {
+        printf("REFUSE\tLAUNCH_ENV\treason=polluted-env\tvar=%s\tfix: unset polluted variables or run under env -i\n", bad);
+        return 2;
+    }
+    if (sy_realpath(repo, repo_abs, sizeof repo_abs) < 0) {
+        printf("REFUSE\tLAUNCH_ENV\treason=bad-repo\tpath=%.120s\n", repo);
+        return 2;
+    }
+    const char *eff_root = rootarg && rootarg[0] ? rootarg : repo_abs;
+    if (sy_realpath(eff_root, root_abs, sizeof root_abs) < 0) {
+        printf("REFUSE\tLAUNCH_ENV\treason=bad-root\tpath=%.120s\n", eff_root);
+        return 2;
+    }
+    if (chain_base) {
+        size_t cl = strlen(chain_base);
+        if (cl == 0 || chain_base[0] != '/' || cl >= 2048) {
+            printf("REFUSE\tLAUNCH_ENV\treason=bad-chain-base\tpath=%.120s\n", chain_base);
+            return 2;
+        }
+        for (size_t i = 0; i < cl; i++) {
+            if ((unsigned char)chain_base[i] < 0x20 || chain_base[i] == 0x7f) {
+                printf("REFUSE\tLAUNCH_ENV\treason=bad-chain-base\tpath=control-char\n");
+                return 2;
+            }
+        }
+    }
+    if (tver) {
+        if (!tver[0] || !rv_valid(tver) || cx_fmt(ver, sizeof ver, "%s", tver)) {
+            printf("REFUSE\tLAUNCH_ENV\treason=bad-version\tversion=%.64s\n", tver);
+            return 2;
+        }
+    } else if (!seq_next_version(repo_abs, ver)) {
+        cx_fmt(ver, sizeof ver, "0.1.3");
+    }
+    const char *want_rev = revarg ? revarg : "HEAD";
+    {
+        size_t rl = strlen(want_rev);
+        if (rl == 0 || rl > 128) {
+            printf("REFUSE\tLAUNCH_ENV\treason=bad-rev\tdetail=%s\n", rl == 0 ? "empty" : "overlong");
+            return 2;
+        }
+        for (size_t i = 0; i < rl; i++) {
+            if ((unsigned char)want_rev[i] <= ' ' || want_rev[i] == 0x7f) {
+                printf("REFUSE\tLAUNCH_ENV\treason=bad-rev\tdetail=whitespace-or-control\n");
+                return 2;
+            }
+        }
+    }
+    if (!parse2_commit(repo_abs, want_rev, rev)) {
+        printf("REFUSE\tLAUNCH_ENV\treason=rev-unresolved\trev=%.120s\n", want_rev);
+        return 2;
+    }
+    {
+        size_t hl = strlen(rev);
+        int hex_ok = (hl == 40);
+        for (size_t i = 0; i < 40 && hex_ok; i++) {
+            char c = rev[i];
+            if (!((c >= '0' && c <= '9') || (c >= 'a' && c <= 'f'))) hex_ok = 0;
+        }
+        if (!hex_ok) {
+            printf("REFUSE\tLAUNCH_ENV\treason=rev-unresolved\trev=%.120s\n", want_rev);
+            return 2;
+        }
+    }
+    const char *env_ih = getenv("UNISACC_IDENT_HELPER");
+    if (helper_out && helper_out[0]) cx_fmt(ih_path, sizeof ih_path, "%s", helper_out);
+    else if (env_ih && env_ih[0]) cx_fmt(ih_path, sizeof ih_path, "%s", env_ih);
+    else if (cr_default_helper_path(ih_path, sizeof ih_path)) {
+        printf("REFUSE\tLAUNCH_ENV\treason=ident-helper-missing\tpath=-\tfix: sh ./unisacc.com tools/chain-ready.cx -- --prepare --repo %s\n", repo_abs);
+        return 2;
+    }
+    if (!cr_verify_helper_receipt(repo_abs, ih_path, strict_helper, ev, sizeof ev)) {
+        printf("REFUSE\tLAUNCH_ENV\treason=ident-helper-missing\tdetail=%s\n", ev);
+        return 2;
+    }
+    const char *home = getenv("HOME"); if (!home || !home[0]) home = "/root";
+    const char *user = getenv("USER"); if (!user || !user[0]) user = getenv("LOGNAME"); if (!user || !user[0]) user = "devali";
+    const char *own = getenv("DEVSVC_OWNER"); if (!own || !own[0]) own = "cc";
+    cx_fmt(pathbuf, sizeof pathbuf, "/usr/bin:/bin:%s/.local/bin", home);
+    printf("CHAIN_READY_LAUNCH_ENV\tok=1\thelper=%s\tversion=%s\trev=%s\trepo=%s\troot=%s\tbase=%s\n",
+           ih_path, ver, rev, repo_abs, root_abs, chain_base ? chain_base : "-");
+    cr_print_launch_env_prefix(home, user, pathbuf, own, ih_path);
+    printf(" sh ./unisacc.com tools/chain-ready.cx -- --repo "); cr_print_sh_sq(repo_abs);
+    printf(" --root "); cr_print_sh_sq(root_abs);
+    printf(" --version "); cr_print_sh_sq(ver);
+    printf(" --rev "); cr_print_sh_sq(rev);
+    if (chain_base) { printf(" --chain-base "); cr_print_sh_sq(chain_base); }
+    if (strict_helper) printf(" --strict-helper");
+    putchar('\n');
+    cr_print_launch_env_prefix(home, user, pathbuf, own, ih_path);
+    printf(" sh ./unisacc.com tools/bg-candidate.cx -- start --rev "); cr_print_sh_sq(rev);
+    printf(" --root "); cr_print_sh_sq(root_abs);
+    if (chain_base) { printf(" --base "); cr_print_sh_sq(chain_base); }
+    printf(" --deadline-s 9000\n");
+    return 0;
+}
+
 static int resolve_premerge_branch(const char *repo, const char *explicit_tver, const char *tver, char *out, size_t cap) {
     char cand[64], spec[96], cur[64];
     out[0] = 0;
@@ -1673,7 +2129,8 @@ static int resolve_premerge_branch(const char *repo, const char *explicit_tver, 
 }
 
 int main(int argc, char **argv) {
-    int fast = 0, a; const char *repo = ".", *since = 0, *pat = "candidate-chain", *only = 0, *tver = 0, *rootarg = 0, *revarg = 0, *pftable = 0;
+    int fast = 0, a, do_prepare = 0, do_launch_env = 0, strict_helper = 0;
+    const char *repo = ".", *since = 0, *pat = "candidate-chain", *only = 0, *tver = 0, *rootarg = 0, *revarg = 0, *pftable = 0, *helper_out = 0;
     long disk_override_gb = -1;
     long T0 = sy_now_ms();
     {
@@ -1686,6 +2143,10 @@ int main(int argc, char **argv) {
                 fprintf(stderr, "usage: tools/chain-ready.cx -- [--repo DIR] --judge KIND FILE RC\n");
                 return 2;
             } else if (tx_eqz(argv[a], "--fast")) fast = 1;
+            else if (tx_eqz(argv[a], "--prepare")) do_prepare = 1;
+            else if (tx_eqz(argv[a], "--launch-env")) do_launch_env = 1;
+            else if (tx_eqz(argv[a], "--strict-helper")) strict_helper = 1;
+            else if (tx_eqz(argv[a], "--helper-out") && a + 1 < argc) helper_out = argv[++a];
             else if (tx_eqz(argv[a], "--since") && a + 1 < argc) since = argv[++a];
             else if (tx_eqz(argv[a], "--pgrep-pat") && a + 1 < argc) pat = argv[++a];
             else if (tx_eqz(argv[a], "--only") && a + 1 < argc) only = argv[++a];
@@ -1697,10 +2158,17 @@ int main(int argc, char **argv) {
             else if (tx_eqz(argv[a], "--disk-free-gb") && a + 1 < argc) {
                 int64_t dv = -1; tx_to_i64(argv[a + 1], (long)tx_len(argv[a + 1], 16), 10, &dv); disk_override_gb = (long)dv; a++;
             } else {
-                fprintf(stderr, "usage: tools/chain-ready.cx [-- [--fast] [--repo DIR] [--root DIR] [--rev REV] [--since REV] [--pgrep-pat PAT] [--only ITEM-PREFIX] [--version V] [--preflight-table FILE] [--disk-free-gb N] [--chain-base ABS] | [--repo DIR] --judge KIND FILE RC]\n");
+                fprintf(stderr, "usage: tools/chain-ready.cx [-- [--fast] [--prepare] [--launch-env] [--helper-out PATH] [--strict-helper] [--repo DIR] [--root DIR] [--rev REV] [--since REV] [--pgrep-pat PAT] [--only ITEM-PREFIX] [--version V] [--preflight-table FILE] [--disk-free-gb N] [--chain-base ABS] | [--repo DIR] --judge KIND FILE RC]\n");
                 return 2;
             }
         }
+        cr_strict_helper = strict_helper;
+        if (do_prepare && do_launch_env) {
+            fprintf(stderr, "chain-ready: --prepare and --launch-env are mutually exclusive\n");
+            return 2;
+        }
+        if (do_prepare) return cmd_prepare(repo, helper_out);
+        if (do_launch_env) return cmd_launch_env(repo, rootarg, tver, revarg, helper_out, strict_helper, chain_base_arg);
         if (judge_only) {
             size_t n; char *b = cx_read(jfile, &n); char ev[512]; int ok;
             if (!b) { fprintf(stderr, "chain-ready: cannot read %s\n", jfile); return 2; }
@@ -1734,7 +2202,8 @@ int main(int argc, char **argv) {
     static char *g_derive3[] = {"./tools/bound", "45", "sh", UC, "tools/derive.cx", "--", "--check", "--only", "batch-packages-gen", 0};
     static char *g_derive4[] = {"./tools/bound", "45", "sh", UC, "tools/derive.cx", "--", "--check", "--only", "batch-domains,links,libc-decls,cx0-three-source", 0};
     static char *g_derive5[] = {"./tools/bound", "45", "sh", UC, "tools/derive.cx", "--", "--check", "--only", "product-map", 0};
-    static char *g_derive6[] = {"./tools/bound", "45", "sh", UC, "tools/derive.cx", "--", "--check", "--only", "doc-links,tool-index,table-index", 0};
+    static char *g_derive6[] = {"./tools/bound", "45", "sh", UC, "tools/derive.cx", "--", "--check", "--only", "doc-links,tool-index", 0};
+    static char *g_derive7[] = {"./tools/bound", "45", "sh", UC, "tools/derive.cx", "--", "--check", "--only", "table-index", 0};
     static char *g_rat[] = {"./tools/bound", "60", "sh", UC, "tools/ratchets.cx", 0};
     static char *g_tri[] = {"./tools/bound", "55", 0, "--core", 0, 0};
     static char *g_tri_exports[] = {"./tools/bound", "55", 0, "--exports", 0};
@@ -1755,7 +2224,7 @@ int main(int argc, char **argv) {
     static char *g_premerge4[] = {"./tools/bound", "55", "sh", UC, "tools/premerge-union.cx", "--", "--repo", 0, "--shard", "check-derive", 0, 0, 0};
     static char **tab[] = {
         g_status, g_branch,
-        g_derive1, g_derive2, g_derive3, g_derive4, g_derive5, g_derive6,
+        g_derive1, g_derive2, g_derive3, g_derive4, g_derive5, g_derive6, g_derive7,
         g_rat, g_tri, g_ext,
         g_chain1, g_chain2, g_chain3, g_chain4, g_chain5,
         g_pg, g_slot, g_genall, g_versq,
@@ -1764,7 +2233,7 @@ int main(int argc, char **argv) {
     };
     static const char *nm[] = {
         "1-rev", "1-branch",
-        "2a-derive", "2a-derive2", "2a-derive3", "2a-derive4", "2a-derive5", "2a-derive6",
+        "2a-derive", "2a-derive2", "2a-derive3", "2a-derive4", "2a-derive5", "2a-derive6", "2a-derive7",
         "2b-ratchets", "3a-cxmod-tri", "3b-cx0-extract",
         "5-candidate-chain", "5-candidate-chain2", "5-candidate-chain3", "5-candidate-chain4", "5-candidate-chain5",
         "8-inflight", "11-version-slot", "15-gen-all", "21-verseq-gen",
@@ -1778,7 +2247,8 @@ int main(int argc, char **argv) {
         "derive:batch-packages-gen",
         "derive:batch-domains,links,libc-decls,cx0-three-source",
         "derive:product-map",
-        "derive:doc-links,tool-index,table-index",
+        "derive:doc-links,tool-index",
+        "derive:table-index",
         "ratchets", "tri", "extract",
         "chain:core-a", "chain:core-b", "chain:core-c", "chain:objects", "chain:watch",
         "inflight", "slot", "genall", "versq",
@@ -1787,7 +2257,7 @@ int main(int argc, char **argv) {
     };
     static const int pr[] = {
         9, 9,
-        2, 1, 2, 1, 0, 2,
+        2, 1, 0, 1, 0, 2, 3,
         5, 4, 6,
         3, 3, 3, 3, 2,
         8, 7, 4, 6,
@@ -1825,7 +2295,7 @@ int main(int argc, char **argv) {
         row("3a-cxmod-tri", "FAIL", "no private material directory", 0);
     g_tri[2] = g_tri_exports[2] = tri_image; g_tri[4] = tri_extract;
     for (k = 0; k < (int)(sizeof tab / sizeof tab[0]); k++) {
-        int c, is_der = (k >= 2 && k <= 7), is_ch = (k >= 11 && k <= 15), is_pm = (k >= 20 && k <= 24);
+        int c, is_der = (k >= 2 && k <= 8), is_ch = (k >= 12 && k <= 16), is_pm = (k >= 21 && k <= 25);
         if (!WANT(nm[k]) && !(k == 1 && WANT("1-rev")) && !(is_der && WANT("2a-derive")) && !(is_ch && WANT("5-candidate-chain")) && !(is_pm && WANT("22-premerge-union"))) continue;
         if (is_ch && !have_tmp) continue;
         if (tx_eqz(kd[k], "tri") && !tri_scratch) continue;
@@ -1909,7 +2379,7 @@ int main(int argc, char **argv) {
         }
     }
     /* run: concurrency scaled by CPU cores and degraded under high load; sy_poll event-driven completion */
-    {   int done = 0, running = 0, running_der = 0, ncores = 0, load1 = 0;
+    {   int done = 0, running = 0, running_der = 0, running_solo = 0, ncores = 0, load1 = 0;
         int max_running = calc_max_running(&ncores, &load1);
         int ord[MAXJ], i, j;
         for (k = 0; k < nj; k++) { J[k].state = 0; ord[k] = k; }
@@ -1957,6 +2427,7 @@ int main(int argc, char **argv) {
             for (i = 0; i < nj && running + 2 < max_running; i++) {
                 int idx = ord[i];
                 if (J[idx].state != 0 || prios[idx] >= 2) continue;
+                if (is_solo_job(items[idx])) continue;
                 if (tx_prefix(items[idx], (long)tx_len(items[idx], 256), "derive:", 7) && running_der >= 4) continue;
                 if (start(&J[idx]) == 0) {
                     running++;
@@ -1974,14 +2445,17 @@ int main(int argc, char **argv) {
             if (pg[1].out) mm_free(pg[1].out);
         }
         while (done < nj) {
-            for (i = 0; i < nj && running < max_running; i++) {
-                int idx = ord[i], is_d;
+            for (i = 0; i < nj && running < max_running && !running_solo; i++) {
+                int idx = ord[i], is_d, is_s;
                 if (J[idx].state != 0) continue;
+                is_s = is_solo_job(items[idx]);
+                if (is_s && running > 0) continue;
                 is_d = tx_prefix(items[idx], (long)tx_len(items[idx], 256), "derive:", 7);
                 if (is_d && running_der >= 4) continue;
                 if (start(&J[idx]) == 0) {
                     running++;
                     if (is_d) running_der++;
+                    if (is_s) { running_solo = 1; break; }
                 } else { J[idx].ms = 0; J[idx].out = 0; J[idx].n = 0; J[idx].rc = -1; done++; }
             }
             if (running > 0) {
@@ -2014,6 +2488,7 @@ int main(int argc, char **argv) {
                             jb->state = 2;
                             running--;
                             if (tx_prefix(items[pl[i]], (long)tx_len(items[pl[i]], 256), "derive:", 7)) running_der--;
+                            if (is_solo_job(items[pl[i]])) running_solo = 0;
                             done++;
                         }
                     }
@@ -2147,41 +2622,8 @@ int main(int argc, char **argv) {
        whole runs answer FAIL for no reason.  A forced cache directory is a leak either way: it changes which
        build the chain reads.  The variable name comes from the helper so it is spelled in one place. */
     if (WANT("10-envhygiene")) {
-        char ev[640]; char bad[400] = {0}; long n2 = 0; double at = 0.0; const char *why = 0; int st = be_deadline(&at, &why);
-        if (st < 0) {
-            char one[200];
-            cx_fmt(one, sizeof one, "%s (%s)", be_name(), why);
-            tx_copy(bad, sizeof bad, one, tx_len(one, sizeof one)); n2 = (long)tx_len(bad, sizeof bad);
-        }
-        {   const char *leak[2]; int li;
-            leak[0] = "UNISACC_RUN_CACHE"; leak[1] = "UNISACC_CACHE_DIR";
-            for (li = 0; li < 2; li++) {
-                const char *v = getenv(leak[li]);
-                if (v && *v) { char one[140]; long l; cx_fmt(one, sizeof one, "%s%s", n2 ? ", " : "", leak[li]); l = (long)tx_len(one, sizeof one); if (n2 + l < (long)sizeof bad) { tx_copy(bad + n2, sizeof bad - (size_t)n2, one, l); n2 += l; } }
-            }
-        }
-        /* an UNISACC_* variable that tools/release-chain.cx (allowed_unisacc_env) would refuse at run time is a leak too:
-           keep this list equal to that one (UNISACC_CACHE_DIR is already judged above; the bound deadline variable is
-           judged by be_deadline). Seen: an exported UNISACC_PPEQ_PKG_ORIGINAL passed this gate and then failed release-chain run. */
-        {   extern char **environ;
-            static const char *ok[] = {"UNISACC_IDENT_HELPER", "UNISACC_PREP_CACHE", "UNISACC_DEVSVC_DIR", "UNISACC_TMPDIR",
-                                       "UNISACC_BATCH_TIMES", "UNISACC_COMMIT_OWN_RUN", "UNISACC_RUN_CACHE", "UNISACC_CACHE_DIR", "UNISACC_APE_SELF", 0};
-            char **ep; int oi;
-            for (ep = environ; ep && *ep; ep++) {
-                const char *eq; long kl; int known = 0;
-                if (strncmp(*ep, "UNISACC_", 8)) continue;
-                eq = strchr(*ep, '='); kl = eq ? (long)(eq - *ep) : (long)strlen(*ep);
-                for (oi = 0; ok[oi]; oi++) if ((long)strlen(ok[oi]) == kl && !memcmp(*ep, ok[oi], (size_t)kl)) known = 1;
-                if ((long)strlen(be_name()) == kl && !memcmp(*ep, be_name(), (size_t)kl)) known = 1;
-                if (!known) {
-                    char one[200]; long l;
-                    cx_fmt(one, sizeof one, "%s%.*s (unregistered, release-chain run refuses it)", n2 ? ", " : "", (int)kl, *ep);
-                    l = (long)tx_len(one, sizeof one);
-                    if (n2 + l < (long)sizeof bad) { tx_copy(bad + n2, sizeof bad - (size_t)n2, one, l); n2 += l; }
-                }
-            }
-        }
-        if (n2) {
+        char ev[640]; char bad[400] = {0}; double at = 0.0; int st = 0;
+        if (!cr_check_env_clean(repo, 1, bad, sizeof bad, &at, &st)) {
             cx_fmt(ev, sizeof ev, "environment leak: %s set before the chain (unset it, or start the chain through tools/bound)", bad);
             row_judged("10-envhygiene", 0, ev, 0);
         } else if (st == 1) {
@@ -2194,21 +2636,8 @@ int main(int argc, char **argv) {
     if (WANT("20-ident-helper")) {
         char ev[640];
         const char *ih = getenv("UNISACC_IDENT_HELPER");
-        if (!ih || !ih[0]) {
-            row_judged("20-ident-helper", 0, "UNISACC_IDENT_HELPER unset (default: ~/.cache/unisacc/ident-helper/identity-helper-real5; built from seed/ident.c)", 0);
-        } else {
-            struct stat st;
-            if (stat(ih, &st) != 0 || !S_ISREG(st.st_mode)) {
-                cx_fmt(ev, sizeof ev, "UNISACC_IDENT_HELPER missing-or-not-regular path=%s (default: ~/.cache/unisacc/ident-helper/identity-helper-real5)", ih);
-                row_judged("20-ident-helper", 0, ev, 0);
-            } else if (access(ih, X_OK) != 0) {
-                cx_fmt(ev, sizeof ev, "UNISACC_IDENT_HELPER not-executable path=%s (fix: chmod +x or rebuild from seed/ident.c)", ih);
-                row_judged("20-ident-helper", 0, ev, 0);
-            } else {
-                cx_fmt(ev, sizeof ev, "UNISACC_IDENT_HELPER=%s executable", ih);
-                row_judged("20-ident-helper", 1, ev, 0);
-            }
-        }
+        int ok = cr_verify_helper_receipt(repo, ih, cr_strict_helper, ev, sizeof ev);
+        row_judged("20-ident-helper", ok, ev, 0);
     }
     if (WANT("23-freeze-armed")) {
         char ev[640]; long t0 = sy_now_ms();

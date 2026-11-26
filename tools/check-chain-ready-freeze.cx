@@ -1,7 +1,7 @@
 /* tools/check-chain-ready-freeze.cx -- fixtures for chain-ready item 23-freeze-armed (R27 S2: the freeze commit F
  * is the chain start commit).  Every fixture is a private git repository with a private bare origin under the
  * system temp dir; the shared checkout is only read (tools/chain-ready.cx and its modules).
- *   sh ./unisacc.com tools/check-chain-ready-freeze.cx [-- --no-mutants]
+ *   cx tools/check-chain-ready-freeze.cx [-- [--no-mutants | --cases-only | --mutants-only | --mutant-index M | --mutant-range FROM COUNT | --merge-shards FILE...]]
  * Red cases, one per FAIL branch: no freeze row, expired row, malformed row, owner mismatch, PUSH-FREEZE without an
  * owner variable, HEAD behind origin/main, no origin/main, numbering commit after the freeze commit, uncommitted
  * numbering change.  Green cases: committed row with matching DEVSVC_OWNER, matching UNISACC_INTEGRATOR, numbering
@@ -13,6 +13,7 @@
 #pragma unisa use sys.fs
 #pragma unisa use sys.env
 #pragma unisa use text.text
+#pragma unisa use text.conv
 #pragma unisa use mem.heap
 #pragma unisa use mem.bytes
 #pragma unisa use sys.posix
@@ -116,38 +117,82 @@ static long fz_locate(const char *s, long sl, const char *p, long pl) {
     return -1;
 }
 
-static void mutants(void) {
-    char mt[600], c[4800], p[4500], warm[4400]; size_t sn = 0; char *src; int ok[NMUTS]; long wn = 0;
+static void mutants(int from, int count) {
+    char mt[600], c[4800], p[4500], warm[4400]; size_t sn = 0; char *src; int ok[NMUTS];
+    int end = from + count;
+    if (from < 0) from = 0;
+    if (end > NMUTS) end = NMUTS;
     cx_fmt(p, sizeof p, "%s/tools/chain-ready.cx", cwd);
     src = cx_read(p, &sn);
-    if (!src) { failed++; puts("FAIL\tmutant-source-unreadable"); return; }
-    warm[0] = 0;
-    for (int m = 0; m < NMUTS; m++) {
+    if (!src) {
+        failed++;
+        puts("FAIL\tmutant-source-unreadable");
+        for (int m = from; m < end; m++) {
+            printf("MUTANT_RESULT\tidx=%d\tname=%s\tcase=%s\tstatus=FAIL\trc=1\n", m, muts[m].name, muts[m].kcase);
+        }
+        return;
+    }
+    for (int m = from; m < end; m++) {
         const char *o = muts[m].old; long ol = (long)tx_len(o, 4096), nl = (long)tx_len(muts[m].neu, 4096);
         long at = fz_locate(src, (long)sn, o, ol);
         ok[m] = 0;
-        if (at < 0 || fz_locate(src + at + ol, (long)sn - at - ol, o, ol) >= 0 || case_index(muts[m].kcase) < 0) { failed++; printf("FAIL\tmutant-%s\tanchor not found exactly once\n", muts[m].name); continue; }
+        if (at < 0 || fz_locate(src + at + ol, (long)sn - at - ol, o, ol) >= 0 || case_index(muts[m].kcase) < 0) {
+            failed++;
+            printf("FAIL\tmutant-%s\tanchor not found exactly once\n", muts[m].name);
+            printf("MUTANT_RESULT\tidx=%d\tname=%s\tcase=%s\tstatus=FAIL\trc=1\n", m, muts[m].name, muts[m].kcase);
+            continue;
+        }
         cx_fmt(mt, sizeof mt, "%s/mut%d", tmpd, m);
         cx_fmt(c, sizeof c, "mkdir -p '%s/tools' && ln -sT '%s/cx' '%s/cx' && ln -s '%s/cxroot.tsv' '%s/cxroot.tsv' && ln -s '%s/unisacc.com' '%s/unisacc.com' && "
                "ln -sT '%s/tools/cxlib' '%s/tools/cxlib' && ln -s '%s/tools/bound' '%s/tools/bound' && { [ ! -e '%s/ext' ] || ln -sT '%s/ext' '%s/ext'; }",
                mt, cwd, mt, cwd, mt, cwd, mt, cwd, mt, cwd, mt, cwd, cwd, mt);
-        if (sh_in(tmpd, c)) { failed++; printf("FAIL\tmutant-%s-tree\t%.300s\n", muts[m].name, out); continue; }
+        if (sh_in(tmpd, c)) {
+            failed++;
+            printf("FAIL\tmutant-%s-tree\t%.300s\n", muts[m].name, out);
+            printf("MUTANT_RESULT\tidx=%d\tname=%s\tcase=%s\tstatus=FAIL\trc=1\n", m, muts[m].name, muts[m].kcase);
+            continue;
+        }
         size_t mn = sn - (size_t)ol + (size_t)nl; char *mb = mm_alloc((long)mn + 1);
-        if (!mb) { failed++; puts("FAIL\tmutant-alloc"); continue; }
+        if (!mb) {
+            failed++;
+            puts("FAIL\tmutant-alloc");
+            printf("MUTANT_RESULT\tidx=%d\tname=%s\tcase=%s\tstatus=FAIL\trc=1\n", m, muts[m].name, muts[m].kcase);
+            continue;
+        }
         mm_copy(mb, (long)mn + 1, src, at);
         mm_copy(mb + at, (long)mn + 1 - at, muts[m].neu, nl);
         mm_copy(mb + at + nl, (long)mn + 1 - at - nl, src + at + ol, (long)sn - at - ol);
         cx_fmt(p, sizeof p, "%s/tools/chain-ready.cx", mt);
         int w = cx_write(p, mb, mn); mm_free(mb);
-        if (w) { failed++; printf("FAIL\tmutant-%s\twrite\n", muts[m].name); continue; }
+        if (w) {
+            failed++;
+            printf("FAIL\tmutant-%s\twrite\n", muts[m].name);
+            printf("MUTANT_RESULT\tidx=%d\tname=%s\tcase=%s\tstatus=FAIL\trc=1\n", m, muts[m].name, muts[m].kcase);
+            continue;
+        }
         ok[m] = 1;
-        /* compile every mutant at once (one cold compile is about 17 s); the cases below then hit the run cache */
-        if (cx_fmt(warm + wn, sizeof warm - (size_t)wn, "(cd '%s' && sh " UC " tools/chain-ready.cx -- --only 9-ledger >/dev/null 2>&1) & ", mt)) { ok[m] = 0; failed++; puts("FAIL\tmutant-warm-capacity"); continue; }
-        wn = (long)tx_len(warm, sizeof warm);
     }
     mm_free(src);
-    if (wn && cx_fmt(warm + wn, sizeof warm - (size_t)wn, "wait") == 0) { bound_s = "50"; (void)sh_in(tmpd, warm); bound_s = "40"; }
-    for (int m = 0; m < NMUTS; m++) {
+    /* Warm-compile at most 2 mutants per batch so each shard stays well below the 55 s budget on 2 cores. */
+    for (int m = from; m < end; ) {
+        long wn = 0; int batch = 0;
+        warm[0] = 0;
+        while (m < end && batch < 2) {
+            if (ok[m]) {
+                cx_fmt(mt, sizeof mt, "%s/mut%d", tmpd, m);
+                if (cx_fmt(warm + wn, sizeof warm - (size_t)wn, "(cd '%s' && sh " UC " tools/chain-ready.cx -- --only 9-ledger >/dev/null 2>&1) & ", mt)) {
+                    ok[m] = 0; failed++; puts("FAIL\tmutant-warm-capacity");
+                    printf("MUTANT_RESULT\tidx=%d\tname=%s\tcase=%s\tstatus=FAIL\trc=1\n", m, muts[m].name, muts[m].kcase);
+                } else {
+                    wn = (long)tx_len(warm, sizeof warm);
+                    batch++;
+                }
+            }
+            m++;
+        }
+        if (wn && cx_fmt(warm + wn, sizeof warm - (size_t)wn, "wait") == 0) { bound_s = "48"; (void)sh_in(tmpd, warm); bound_s = "40"; }
+    }
+    for (int m = from; m < end; m++) {
         char nm[200]; if (!ok[m]) continue;
         cx_fmt(nm, sizeof nm, "mutant-%s-turns-%s", muts[m].name, muts[m].kcase);
         cx_fmt(mt, sizeof mt, "%s/mut%d", tmpd, m);
@@ -155,16 +200,111 @@ static void mutants(void) {
            even start (no 23-freeze-armed row) proves nothing, so it fails the check too */
         int still = run_case(mt, case_index(muts[m].kcase));
         int ran = fz_seen("23-freeze-armed\t");
-        if (!still && ran) { passed++; printf("PASS\t%s\n", nm); } else { failed++; printf("FAIL\t%s\t%s\n", nm, ran ? "mutant survived" : "mutant did not run"); }
+        if (!still && ran) {
+            passed++;
+            printf("PASS\t%s\n", nm);
+            printf("MUTANT_RESULT\tidx=%d\tname=%s\tcase=%s\tstatus=PASS\trc=0\n", m, muts[m].name, muts[m].kcase);
+        } else {
+            failed++;
+            printf("FAIL\t%s\t%s\n", nm, ran ? "mutant survived" : "mutant did not run");
+            printf("MUTANT_RESULT\tidx=%d\tname=%s\tcase=%s\tstatus=FAIL\trc=1\n", m, muts[m].name, muts[m].kcase);
+        }
     }
 }
 
+static int merge_shards(int nfiles, char **files) {
+    int seen[NMUTS], stat_ok[NMUTS];
+    int m_pass = 0, m_fail = 0, m_miss = 0, m_dup = 0;
+    for (int i = 0; i < NMUTS; i++) { seen[i] = 0; stat_ok[i] = 0; }
+    for (int f = 0; f < nfiles; f++) {
+        size_t n = 0; char *b = cx_read(files[f], &n);
+        if (!b) {
+            printf("FAIL\tmerge-shard-unreadable\t%s\n", files[f]);
+            printf("CHAIN_READY_FREEZE_MERGED\ttotal=%d\tpassed=0\tfailed=1\tmissing=%d\n", NMUTS, NMUTS);
+            return 1;
+        }
+        long at = 0;
+        while (at < (long)n) {
+            long e = at;
+            while (e < (long)n && b[e] != '\n') e++;
+            long ln = e - at;
+            const char *l = b + at;
+            at = e + 1;
+            if (ln > 14 && tx_prefix(l, ln, "MUTANT_RESULT\t", 14)) {
+                char row[512];
+                long cl = ln < (long)sizeof row - 1 ? ln : (long)sizeof row - 1;
+                mm_copy(row, sizeof row, l, cl); row[cl] = 0;
+                const char *ip = strstr(row, "\tidx=");
+                const char *np = strstr(row, "\tname=");
+                const char *sp = strstr(row, "\tstatus=");
+                const char *rp = strstr(row, "\trc=");
+                if (ip && np && sp && rp) {
+                    int64_t idx = -1, mrc = -1;
+                    long il = 0; while (ip[5 + il] >= '0' && ip[5 + il] <= '9') il++;
+                    long rl = 0; while (rp[4 + rl] >= '0' && rp[4 + rl] <= '9') rl++;
+                    if (il > 0 && !tx_to_i64(ip + 5, il, 10, &idx) && idx >= 0 && idx < NMUTS &&
+                        rl > 0 && !tx_to_i64(rp + 4, rl, 10, &mrc)) {
+                        long nl = (long)strlen(muts[idx].name);
+                        int nmatch = (!strncmp(np + 6, muts[idx].name, (size_t)nl) && (np[6 + nl] == '\t' || np[6 + nl] == 0));
+                        int ok_row = nmatch && (!strncmp(sp + 8, "PASS\t", 5) || tx_eqz(sp + 8, "PASS")) && mrc == 0;
+                        if (seen[idx]) m_dup++;
+                        seen[idx]++;
+                        if (ok_row && stat_ok[idx] != -1) stat_ok[idx] = 1;
+                        else stat_ok[idx] = -1;
+                    }
+                }
+            }
+        }
+        mm_free(b);
+    }
+    for (int i = 0; i < NMUTS; i++) {
+        if (!seen[i]) {
+            m_miss++;
+            printf("FAIL\tmerge-missing-mutant\tidx=%d\tname=%s\n", i, muts[i].name);
+        } else if (stat_ok[i] == 1) {
+            m_pass++;
+        } else {
+            m_fail++;
+            printf("FAIL\tmerge-failed-mutant\tidx=%d\tname=%s\n", i, muts[i].name);
+        }
+    }
+    printf("CHAIN_READY_FREEZE_MERGED\ttotal=%d\tpassed=%d\tfailed=%d\tmissing=%d\tdup=%d\n",
+           NMUTS, m_pass, m_fail, m_miss, m_dup);
+    return (m_fail || m_miss || m_pass != NMUTS) ? 1 : 0;
+}
+
 int main(int argc, char **argv) {
-    int no_mut = argc >= 2 && tx_eqz(argv[1], "--no-mutants");
+    int no_mut = 0, run_cases = 1, mfrom = 0, mcount = NMUTS, do_merge = 0;
+    int merge_at = 0;
+    for (int a = 1; a < argc; a++) {
+        if (tx_eqz(argv[a], "--no-mutants") || tx_eqz(argv[a], "--cases-only")) no_mut = 1;
+        else if (tx_eqz(argv[a], "--mutants-only")) run_cases = 0;
+        else if (tx_eqz(argv[a], "--mutant-index") && a + 1 < argc) {
+            int64_t idx = -1;
+            if (tx_to_i64(argv[a + 1], (long)tx_len(argv[a + 1], 16), 10, &idx) || idx < 0 || idx >= NMUTS) {
+                printf("FAIL\tbad-mutant-index\t%s\n", argv[a + 1]); return 2;
+            }
+            run_cases = 0; mfrom = (int)idx; mcount = 1; a++;
+        } else if (tx_eqz(argv[a], "--mutant-range") && a + 2 < argc) {
+            int64_t f = -1, c = -1;
+            if (tx_to_i64(argv[a + 1], (long)tx_len(argv[a + 1], 16), 10, &f) ||
+                tx_to_i64(argv[a + 2], (long)tx_len(argv[a + 2], 16), 10, &c) || f < 0 || c <= 0) {
+                printf("FAIL\tbad-mutant-range\n"); return 2;
+            }
+            mfrom = (int)f; mcount = (int)c; a += 2;
+        } else if (tx_eqz(argv[a], "--merge-shards") && a + 1 < argc) {
+            do_merge = 1; merge_at = a + 1; break;
+        } else {
+            printf("FAIL\tbad-arg\t%s\n", argv[a]); return 2;
+        }
+    }
+    if (do_merge) return merge_shards(argc - merge_at, argv + merge_at);
     if (sy_cwd(cwd, sizeof cwd)) { puts("FAIL\tcwd"); return 1; }
     if (sy_mkdtemp(sy_tmpdir(), "chain-ready-freeze-", tmpd, sizeof tmpd) != 0) { puts("FAIL\ttmpdir"); return 1; }
-    for (int k = 0; k < NCASES; k++) { char nm[200]; cx_fmt(nm, sizeof nm, "%s-%s", cases[k].name, cases[k].want_rc_kind); fz_ck(run_case(cwd, k), nm); }
-    if (!no_mut) mutants();
+    if (run_cases) {
+        for (int k = 0; k < NCASES; k++) { char nm[200]; cx_fmt(nm, sizeof nm, "%s-%s", cases[k].name, cases[k].want_rc_kind); fz_ck(run_case(cwd, k), nm); }
+    }
+    if (!no_mut) mutants(mfrom, mcount);
     if (sy_remove_all(tmpd)) fprintf(stderr, "check-chain-ready-freeze: cleanup failed %s\n", tmpd);
     printf("CHAIN_READY_FREEZE\tpassed=%d\tfailed=%d\n", passed, failed);
     return failed ? 1 : 0;
