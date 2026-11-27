@@ -353,7 +353,7 @@ static int rb_expected_m1_set(char keys[RB_M1_MAX][128], char leaves[RB_M1_MAX][
     for (int ti = 0; ti < cf_tu_count(); ti++) {
         const char *t = cf_tu_target(ti), *u = cf_tu_unit(ti);
         char lf[96];
-        if (!t || !u || !tx_eqz(t, "lnx/x86_64")) continue;
+        if (!t || !u || !tx_eqz(t, "lnx/x86_64")) return -1;
         if (cx_fmt(lf, sizeof lf, "%s.tapeslice", u)) return -1;
         int dup = 0;
         for (int j = 1; j < n; j++) if (tx_eqz(leaves[j], lf)) { dup = 1; break; }
@@ -365,19 +365,28 @@ static int rb_expected_m1_set(char keys[RB_M1_MAX][128], char leaves[RB_M1_MAX][
     }
     return n;
 }
+static int rb_expected_m1_count(void) {
+    char keys[RB_M1_MAX][128], leaves[RB_M1_MAX][96];
+    int n = rb_expected_m1_set(keys, leaves);
+    if (n < 3) rb_die("expected m1 tape set invalid");
+    return n;
+}
 
-/* Strict 1:1 check: every non-comment manifest row must belong to expected leaves[1..n-1] (no extra/dup rows). */
+/* Strict 1:1 check: every non-comment manifest row must have exactly 3 columns and belong to leaves[1..n-1]. */
 static int rb_verify_m1_manifest_exact_set(const char *mb, long mn, char leaves[RB_M1_MAX][96], int n) {
     long at = 0;
     int rows = 0, seen[RB_M1_MAX];
     for (int k = 0; k < RB_M1_MAX; k++) seen[k] = 0;
     while (at < mn) {
-        long e = at, ln, off = 0, flen = 0;
+        long e = at, ln, off = 0, flen = 0, o1 = 0, l1 = 0, o2 = 0, l2 = 0, o3 = 0, l3 = 0;
         while (e < mn && mb[e] != '\n') e++;
         ln = e - at;
         if (ln > 0 && mb[at + ln - 1] == '\r') ln--;
         if (ln > 0 && mb[at] != '#') {
-            if (tx_field(mb + at, ln, '\t', 0, &off, &flen) != 0) return -1;
+            if (tx_field(mb + at, ln, '\t', 0, &off, &flen) != 0 ||
+                tx_field(mb + at, ln, '\t', 1, &o1, &l1) != 0 ||
+                tx_field(mb + at, ln, '\t', 2, &o2, &l2) != 0 ||
+                tx_field(mb + at, ln, '\t', 3, &o3, &l3) == 0) return -1;
             int hit = -1;
             for (int k = 1; k < n; k++) {
                 if (flen == tx_len(leaves[k], 96) && tx_same(mb + at + off, flen, leaves[k], flen)) { hit = k; break; }
@@ -404,6 +413,7 @@ static int rb_verify_m1_manifest_entry(const char *mb, long mn, const char *leaf
             if (tx_field(mb + at, ln, '\t', 0, &off, &len) != 0) return -1;
             if (len == ll && tx_same(mb + at + off, len, leaf, ll)) {
                 if (found) return -1;
+                if (tx_field(mb + at, ln, '\t', 3, &off, &len) == 0) return -1;
                 if (tx_field(mb + at, ln, '\t', 1, &off, &len) != 0 || len != 64 || !tx_same(mb + at + off, 64, sha, 64)) return -1;
                 if (tx_field(mb + at, ln, '\t', 2, &off, &len) != 0 || len < 1 || len > 18) return -1;
                 for (q = 0; q < len; q++) {
@@ -431,10 +441,9 @@ static void rb_free_embed_tape(RbEmbedTape *et) {
 }
 
 static int rb_root_requires_tape(const char *root) {
-    char p[RB_FULL];
-    sy_stat_t st;
-    if (!root || !root[0] || cx_fmt(p, sizeof p, "%s/tools/tape-sidecar-build.cx", root)) return 0;
-    return (sy_lstat(p, &st) == 0 && st.kind == 'f') ? 1 : 0;
+    int st = cf_snap_tape_state(root);
+    if (st < 0) rb_die("REFUSE snapshot chain-facts tape_unit mismatch");
+    return st > 0 ? 1 : 0;
 }
 
 static int rb_verify_pkg_m1_tape(const unsigned char *buf, const CxPackage *c) {
@@ -492,9 +501,10 @@ static void rb_load_embed_tape(const char *root, const char *explicit_dir, const
         }
     }
     if (r == -ENOENT && !explicit_dir) {
-        if (rb_root_requires_tape(root)) rb_die("embed-tape required when root has tools/tape-sidecar-build.cx");
+        if (rb_root_requires_tape(root)) rb_die("embed-tape required by snapshot chain-facts tape_unit");
         return;
     }
+    if (cf_snap_tape_state(root) < 0) rb_die("REFUSE snapshot chain-facts tape_unit mismatch");
     if (r != 0 || st.kind != 'd') rb_die("embed-tape dir missing or not dir");
     et->n = rb_expected_m1_set(et->keys, et->leaves);
     if (et->n < 3) rb_die("embed-tape expected set invalid");
@@ -1187,7 +1197,7 @@ static int rb_p3(int argc, char **argv) {
             }
         }
         if (!found) rb_die("cx-flat.h missing");
-        if (et_required && rb_verify_pkg_m1_tape(out.p, c) != 3)
+        if (et_required && rb_verify_pkg_m1_tape(out.p, c) != rb_expected_m1_count())
             rb_die("p3 output missing required tape/lnx-x86_64/* F records");
     }
     mm_free(flat);
@@ -1805,10 +1815,11 @@ static int rb_release_models(const char *input, const char *output, int require_
         cxpk_decode(&dec,file,foot.package_length)) rb_die("release models: invalid package");
     CxPackage *p = &dec.package;
     if (p->ver != 4) rb_die("release models: P4 required");
+    int tape_want = rb_expected_m1_count();
     int tape_in = rb_verify_pkg_m1_tape(file, p);
-    if (tape_in < 0 || (tape_in > 0 && tape_in != 3))
+    if (tape_in < 0 || (tape_in > 0 && tape_in != tape_want))
         rb_die("release models: incomplete or corrupt tape/lnx-x86_64/* F records");
-    if (require_m1_tape && tape_in != 3)
+    if (require_m1_tape && tape_in != tape_want)
         rb_die("release models: missing required tape/lnx-x86_64/* F records");
     if (sn_count() != 7) rb_die("release models: changed image stage inventory");
     for (int h = 0; h < 7; h++) {
@@ -1849,11 +1860,11 @@ static int rb_release_models(const char *input, const char *output, int require_
         last = p->off[i] + p->len[i];
     }
     rb_put(&out,file+last,p->n-last);
-    if (tape_in == 3) {
+    if (tape_in == tape_want) {
         CxPackageDecode out_chk = {0};
         out_chk.allocate = rb_alloc;
         out_chk.release = rb_drop;
-        if (cxpk_decode(&out_chk, out.p, out.n) || rb_verify_pkg_m1_tape(out.p, &out_chk.package) != 3)
+        if (cxpk_decode(&out_chk, out.p, out.n) || rb_verify_pkg_m1_tape(out.p, &out_chk.package) != tape_want)
             rb_die("release models: lost tape/lnx-x86_64/* F records in output");
         cxpl_release(&out_chk.package, rb_drop);
     }

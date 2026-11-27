@@ -1046,11 +1046,9 @@ static int cc_parse_u64_tok(const unsigned char *p, long n, long *pos, unsigned 
     return 0;
 }
 static int cc_snap_requires_tape(const char *snap) {
-    char p1[4400], p2[4400], p3[4400];
-    if (cx_fmt(p1, sizeof p1, "%s/tools/tape-sidecar-build.cx", snap) ||
-        cx_fmt(p2, sizeof p2, "%s/tools/tapepack.cx", snap) ||
-        cx_fmt(p3, sizeof p3, "%s/cx/driver/stream_s1_m1.cx", snap)) die("path", "snap-tape-check");
-    return (fsize(p1) >= 0 || fsize(p2) >= 0 || fsize(p3) >= 0) ? 1 : 0;
+    int st = cf_snap_tape_state(snap);
+    if (st < 0) die("REFUSE snapshot chain-facts tape_unit mismatch", snap);
+    return st > 0 ? 1 : 0;
 }
 static const char *cc_m53_guest_for_snap(const char *snap, char stream_sha[65]) {
     static const char *m53_bin2 =
@@ -1143,6 +1141,7 @@ static int cc_p3_tape_expected_receipt(const char *root, const char *snap, const
         char c = rev_buf[i];
         if (!((c >= '0' && c <= '9') || (c >= 'a' && c <= 'f'))) return -1;
     }
+    if (cf_snap_tape_state(snap) <= 0) return -1;
     const char *m53_src = cc_m53_guest_for_snap(snap, sm1_sha);
     if (sy_sha256_hex(m53_src, (long)strlen(m53_src), mg_sha)) return -1;
     if (cc_file_sha_len(prod_p, prod_sha, 0) ||
@@ -1154,33 +1153,71 @@ static int cc_p3_tape_expected_receipt(const char *root, const char *snap, const
         cc_file_sha_len(tsl, m53_sha, m53_len) ||
         cc_file_sha_len(tmf, mf_sha, mf_len)) return -1;
     size_t mn = 0;
-    char *mb = cx_read(tmf, &mn), want_so_row[160], want_m53_row[160];
-    if (!mb || cx_fmt(want_so_row, sizeof want_so_row, "tapemode.so\t%s\t%ld\n", so_sha, *so_len) ||
-        cx_fmt(want_m53_row, sizeof want_m53_row, "m53.tapeslice\t%s\t%ld\n", m53_sha, *m53_len)) {
-        free(mb);
-        return -1;
+    char *mb = cx_read(tmf, &mn);
+    if (!mb) return -1;
+    char exp_leaves[16][96], exp_shas[16][65];
+    long exp_lens[16];
+    int nexp = 2;
+    if (cx_fmt(exp_leaves[0], 96, "tapemode.so") || cx_fmt(exp_shas[0], 65, "%s", so_sha) ||
+        cx_fmt(exp_leaves[1], 96, "m53.tapeslice") || cx_fmt(exp_shas[1], 65, "%s", m53_sha)) {
+        free(mb); return -1;
     }
-    int mf_ok = (strstr(mb, want_so_row) != 0 && strstr(mb, want_m53_row) != 0);
+    exp_lens[0] = *so_len;
+    exp_lens[1] = *m53_len;
+    int mf_ok = 1;
     char tu_extra[1024];
     tu_extra[0] = 0;
     for (int ti = 0; mf_ok && ti < cf_tu_count(); ti++) {
         const char *tgt = cf_tu_target(ti), *u = cf_tu_unit(ti);
-        if (!tgt || !u || strcmp(tgt, "lnx/x86_64") != 0 || strcmp(u, "m53") == 0) continue;
-        char gp[4400], sp[4400], gsha[65], ssha[65], wrow[160], erow[256];
+        if (!tgt || !u || strcmp(tgt, "lnx/x86_64") != 0) { mf_ok = 0; break; }
+        if (strcmp(u, "m53") == 0) continue;
+        if (nexp >= 16) { mf_ok = 0; break; }
+        char gp[4400], sp[4400], gsha[65], ssha[65], erow[256];
         long slen = 0;
         if (cx_fmt(gp, sizeof gp, "%s/exec/tape/guests/%s_guest.cx", snap, u) ||
             cx_fmt(sp, sizeof sp, "%s/%s.tapeslice", tdir, u) ||
             cc_file_sha_len(gp, gsha, 0) ||
             cc_file_sha_len(sp, ssha, &slen) ||
-            cx_fmt(wrow, sizeof wrow, "%s.tapeslice\t%s\t%ld\n", u, ssha, slen) ||
-            !strstr(mb, wrow) ||
+            cx_fmt(exp_leaves[nexp], 96, "%s.tapeslice", u) ||
+            cx_fmt(exp_shas[nexp], 65, "%s", ssha) ||
             cx_fmt(erow, sizeof erow, "%s_guest_sha=%s\n%s_sha=%s\n%s_bytes=%ld\n", u, gsha, u, ssha, u, slen)) {
             mf_ok = 0;
             break;
         }
+        exp_lens[nexp] = slen;
+        nexp++;
         size_t tl = strlen(tu_extra), el = strlen(erow);
         if (tl + el + 1 > sizeof tu_extra) { mf_ok = 0; break; }
         mm_copy(tu_extra + tl, (long)(sizeof tu_extra - tl), erow, (long)(el + 1));
+    }
+    if (mf_ok) {
+        long at = 0; int rows = 0, seen[16];
+        for (int k = 0; k < 16; k++) seen[k] = 0;
+        while (at < (long)mn) {
+            long e = at, ln, o0 = 0, l0 = 0, o1 = 0, l1 = 0, o2 = 0, l2 = 0, o3 = 0, l3 = 0;
+            while (e < (long)mn && mb[e] != '\n') e++;
+            ln = e - at;
+            if (ln > 0 && mb[at + ln - 1] == '\r') ln--;
+            if (ln > 0 && mb[at] != '#') {
+                if (tx_field(mb + at, ln, '\t', 0, &o0, &l0) != 0 ||
+                    tx_field(mb + at, ln, '\t', 1, &o1, &l1) != 0 ||
+                    tx_field(mb + at, ln, '\t', 2, &o2, &l2) != 0 ||
+                    tx_field(mb + at, ln, '\t', 3, &o3, &l3) == 0) { mf_ok = 0; break; }
+                int hit = -1;
+                for (int k = 0; k < nexp; k++) {
+                    long kl = (long)strlen(exp_leaves[k]);
+                    if (l0 == kl && tx_same(mb + at + o0, l0, exp_leaves[k], kl)) { hit = k; break; }
+                }
+                if (hit < 0 || seen[hit] || l1 != 64 || !tx_same(mb + at + o1, 64, exp_shas[hit], 64)) { mf_ok = 0; break; }
+                char wlen[32];
+                if (cx_fmt(wlen, sizeof wlen, "%ld", exp_lens[hit]) ||
+                    l2 != (long)strlen(wlen) || !tx_same(mb + at + o2, l2, wlen, l2)) { mf_ok = 0; break; }
+                seen[hit] = 1;
+                rows++;
+            }
+            at = e + 1;
+        }
+        if (rows != nexp) mf_ok = 0;
     }
     free(mb);
     if (!mf_ok) return -1;
@@ -1222,6 +1259,7 @@ static int cc_verify_p3_tape_receipt(const char *root, const char *snap, const c
 static int cc_check_routed_guests(const char *snap) {
     char miss[4400];
     int n = cf_check_routed_guests(snap, miss, sizeof miss);
+    if (n == -2) die("REFUSE snapshot chain-facts tape_unit mismatch", miss[0] ? miss : snap);
     if (n < 0) die("REFUSE routed guest missing", miss[0] ? miss : snap);
     return n;
 }
@@ -1554,7 +1592,7 @@ static void cc_verify_final_pack(const char *root, const char *snap, const char 
     (void)sy_unlink(e2_out);
     (void)sy_unlink(e1_out);
     if (bad) die("REFUSE final APE stream e3 post-pack check failed", final_ape);
-    sy_printf("POST_PACK_TAPE_VERIFY\tape=%s\tp4_records=3\tstream_e3=OK\n", final_ape);
+    sy_printf("POST_PACK_TAPE_VERIFY\tape=%s\tp4_records=%d\tstream_e3=OK\n", final_ape, 2 + cf_tu_count());
 }
 /* P2: g2/g3 的 Mac/Win 分相。构造器与对象目录取 fixedpoint/g<N>/lnx-x86_64(candidate 与 .o,
    与 chain-step 对 i>=2 的构造器选择一致);prepare 目录按代各建(wf-prep-g<N>、wf-span-prep-g<N>),不复用 gen1。 */
@@ -4394,7 +4432,7 @@ int main(int argc, char **argv) {
         if (chdir(snap)) die("chdir snap for pack version", snap);
         v[n++] = ape_tool; v[n++] = (char *)"--";
         v[n++] = (char *)"pack";
-        if (fsize("tools/tape-sidecar-build.cx") > 0) v[n++] = (char *)"--with-tape-sidecar";
+        if (cc_snap_requires_tape(snap)) v[n++] = (char *)"--with-tape-sidecar";
         v[n++] = (char *)"--cache-manager-osx"; v[n++] = (char *)cm64; v[n++] = (char *)cmarm;
         v[n++] = packed; v[n++] = release_pkg; v[n++] = win64; v[n++] = lnx64; v[n++] = lnxarm;
         v[n++] = osx64; v[n++] = osxarm; v[n++] = winarm; v[n++] = 0;
