@@ -1,0 +1,795 @@
+#pragma unisa module tape_exec
+/* cx/runtime/tape_exec.cx -- Single-source portable UTAPEBIN v1.3 tape executor.
+ *
+ * Frozen interface (100% ABI-isomorphic with tools/tape/asm/tape_x86_64.S):
+ *   typedef long long (*tape_disp_fn_t)(
+ *       unsigned long long slot_id, unsigned long long a0, unsigned long long a1,
+ *       unsigned long long a2, unsigned long long a3, unsigned long long a4,
+ *       unsigned long long a5);
+ *   const unsigned char *tape_decode_cx(const unsigned char *cur,
+ *       const unsigned char *end, unsigned char *rec48);
+ *   int tape_bitmap_cx(const unsigned char *code, unsigned long long len,
+ *       unsigned char *bitmap, unsigned long long cap);
+ *   long long tape_run_cx(const unsigned long long *args);
+ *
+ * Constraints:
+ *   - Zero #include, zero direct libc/POSIX, zero platform #if, zero heap allocation.
+ *   - Compiles for all 6 targets (lnx/osx/win x x86_64/arm64).
+ *   - Tracks active mmap spans internally per invocation (32 entries) so there is
+ *     no hidden dependency on hoststub_lnx_x86_64_map_access.
+ */
+
+typedef long long (*tape_disp_fn_t)(
+    unsigned long long slot_id,
+    unsigned long long a0,
+    unsigned long long a1,
+    unsigned long long a2,
+    unsigned long long a3,
+    unsigned long long a4,
+    unsigned long long a5);
+
+/* High nibble: immediate operand count. Low nibble: register operand count.
+ * Order matches exec/facts/tape-shape.tsv and tools/tape/asm/tape_x86_64.S .Lshape. */
+static const unsigned char te_shape[72] = {
+    0x11, 0x02,
+    0x03, 0x03, 0x03, 0x03, 0x03, 0x03, 0x03, 0x03, 0x03, 0x03,
+    0x03, 0x03, 0x03, 0x03, 0x03, 0x03, 0x03, 0x03, 0x03,
+    0x12, 0x12, 0x22, 0x22, 0x11, 0x21, 0x10, 0x11, 0x10, 0x01, 0x11,
+    0x02, 0x02, 0x51, 0x11, 0x11, 0x00, 0x10, 0x11, 0x01, 0x02, 0x01,
+    0x13, 0x16, 0x01, 0x02, 0x00,
+    0x03, 0x03, 0x03, 0x03, 0x03, 0x03, 0x03, 0x03, 0x03, 0x03,
+    0x03, 0x03, 0x03, 0x03,
+    0x02, 0x02, 0x02, 0x02, 0x02, 0x02, 0x02, 0x02, 0x02, 0x02
+};
+
+/* Maps hs_stat64 kind char ('b'=98..'s'=115) -> POSIX S_IFMT >> 12 nibble. */
+static unsigned int te_stat_kind_nibble(unsigned char ch) {
+    if (ch == 'b') return 6U;
+    if (ch == 'c') return 2U;
+    if (ch == 'd') return 4U;
+    if (ch == 'f') return 8U;
+    if (ch == 'l') return 10U;
+    if (ch == 'p') return 1U;
+    if (ch == 's') return 12U;
+    return 0U;
+}
+
+static unsigned int te_rd_u32(const unsigned char *p) {
+    return ((unsigned int)p[0]) |
+           (((unsigned int)p[1]) << 8) |
+           (((unsigned int)p[2]) << 16) |
+           (((unsigned int)p[3]) << 24);
+}
+
+static int te_rd_i32(const unsigned char *p) {
+    return (int)te_rd_u32(p);
+}
+
+static unsigned long long te_rd_u64(const unsigned char *p) {
+    unsigned long long lo = (unsigned long long)te_rd_u32(p);
+    unsigned long long hi = (unsigned long long)te_rd_u32(p + 4);
+    return lo | (hi << 32);
+}
+
+static void te_wr_u16(unsigned char *p, unsigned int v) {
+    p[0] = (unsigned char)(v & 0xffU);
+    p[1] = (unsigned char)((v >> 8) & 0xffU);
+}
+
+static void te_wr_u32(unsigned char *p, unsigned int v) {
+    p[0] = (unsigned char)(v & 0xffU);
+    p[1] = (unsigned char)((v >> 8) & 0xffU);
+    p[2] = (unsigned char)((v >> 16) & 0xffU);
+    p[3] = (unsigned char)((v >> 24) & 0xffU);
+}
+
+static void te_wr_u64(unsigned char *p, unsigned long long v) {
+    te_wr_u32(p, (unsigned int)(v & 0xffffffffULL));
+    te_wr_u32(p + 4, (unsigned int)(v >> 32));
+}
+
+static unsigned short te_rd_u16(const unsigned char *p) {
+    return (unsigned short)(((unsigned int)p[0]) | (((unsigned int)p[1]) << 8));
+}
+
+const unsigned char *tape_decode_cx(const unsigned char *cur,
+                                    const unsigned char *end,
+                                    unsigned char *rec48) {
+    unsigned char op;
+    unsigned char sh;
+    unsigned int nreg, nimm, reg_bytes, i;
+    if (!cur || !end || !rec48 || cur >= end) return 0;
+    op = *cur;
+    if (op >= 72U) return 0;
+    sh = te_shape[op];
+    nreg = (unsigned int)(sh & 15U);
+    nimm = (unsigned int)(sh >> 4);
+    rec48[0] = op;
+    rec48[1] = (unsigned char)nreg;
+    rec48[2] = (unsigned char)nimm;
+    rec48[3] = 0;
+    rec48[4] = 0;
+    rec48[5] = 0;
+    rec48[6] = 0;
+    rec48[7] = 0;
+    cur = cur + 1;
+
+    reg_bytes = (nreg + 1U) >> 1;
+    if ((unsigned long long)(end - cur) < (unsigned long long)reg_bytes) return 0;
+    if ((nreg & 1U) != 0U) {
+        if ((cur[reg_bytes - 1U] & 0xf0U) != 0xf0U) return 0;
+    }
+    for (i = 0U; i < reg_bytes; i++) {
+        rec48[4U + i] = cur[i];
+    }
+    cur = cur + reg_bytes;
+
+    for (i = 0U; i < nimm; i++) {
+        unsigned char tag;
+        unsigned int shift = 0U;
+        unsigned long long val = 0ULL;
+        unsigned char prev_b = 0U;
+        unsigned char b = 0U;
+        if (cur >= end) return 0;
+        tag = *cur;
+        cur = cur + 1;
+        if (tag > 1U) return 0;
+        if (tag != 0U) {
+            rec48[3] = (unsigned char)(rec48[3] | (unsigned char)(1U << i));
+        }
+        for (;;) {
+            unsigned long long low7;
+            if (cur >= end) return 0;
+            b = *cur;
+            cur = cur + 1;
+            low7 = (unsigned long long)(b & 127U);
+            if (shift == 63U) {
+                if (tag != 0U) {
+                    if (b > 1U) return 0;
+                } else {
+                    if (b != 0U && b != 127U) return 0;
+                }
+            }
+            val = val | (low7 << shift);
+            if ((b & 128U) == 0U) break;
+            prev_b = b;
+            shift = shift + 7U;
+        }
+        if (tag != 0U) {
+            if (shift != 0U && b == 0U) return 0;
+        } else {
+            if (shift != 0U) {
+                if (b == 0U && (prev_b & 64U) == 0U) return 0;
+                if (b == 127U && (prev_b & 64U) != 0U) return 0;
+            }
+            if (shift < 57U && (b & 64U) != 0U) {
+                val = val | (~0ULL << (shift + 7U));
+            }
+        }
+        te_wr_u64(rec48 + 8U + i * 8U, val);
+    }
+    return cur;
+}
+
+int tape_bitmap_cx(const unsigned char *code,
+                   unsigned long long len,
+                   unsigned char *bitmap,
+                   unsigned long long cap) {
+    unsigned long long need;
+    unsigned long long code_u, code_end_u, bm_u, bm_end_u, i;
+    const unsigned char *cur;
+    const unsigned char *end;
+    unsigned char rec48[48];
+
+    if (!code || len == 0ULL || !bitmap) return 2;
+    need = (len >> 3) + ((len & 7ULL) != 0ULL ? 1ULL : 0ULL);
+    if (cap < need) return 2;
+    code_u = (unsigned long long)code;
+    code_end_u = code_u + len;
+    if (code_end_u < code_u) return 2;
+    bm_u = (unsigned long long)bitmap;
+    bm_end_u = bm_u + need;
+    if (bm_end_u < bm_u) return 2;
+    if (!(code_u >= bm_end_u || bm_u >= code_end_u)) return 2;
+
+    for (i = 0ULL; i < need; i++) bitmap[i] = 0;
+
+    cur = code;
+    end = code + len;
+    while (cur < end) {
+        const unsigned char *nxt = tape_decode_cx(cur, end, rec48);
+        unsigned long long off;
+        if (!nxt) return 2;
+        off = (unsigned long long)(cur - code);
+        bitmap[off >> 3] = (unsigned char)(bitmap[off >> 3] | (unsigned char)(1U << (off & 7ULL)));
+        cur = nxt;
+    }
+    return 0;
+}
+
+typedef struct {
+    unsigned long long base[32];
+    unsigned long long len[32];
+    unsigned long long prot[32];
+} TeMapTab;
+
+static int te_map_access(const TeMapTab *mt, unsigned long long addr,
+                         unsigned long long width, unsigned long long req_prot) {
+    int i;
+    for (i = 0; i < 32; i++) {
+        if ((mt->prot[i] & req_prot) == 0ULL) continue;
+        if (mt->len[i] < width) continue;
+        if (addr < mt->base[i]) continue;
+        if (addr - mt->base[i] <= mt->len[i] - width) return 0;
+    }
+    return -14;
+}
+
+static int te_map_insert(TeMapTab *mt, unsigned long long addr,
+                         unsigned long long len, unsigned long long prot) {
+    int i;
+    if (len == 0ULL) return 1;
+    for (i = 0; i < 32; i++) {
+        if (mt->len[i] == 0ULL) {
+            mt->base[i] = addr;
+            mt->len[i] = len;
+            mt->prot[i] = prot;
+            return 1;
+        }
+    }
+    return 0;
+}
+
+static void te_map_remove(TeMapTab *mt, unsigned long long addr, unsigned long long len) {
+    int i;
+    if (len == 0ULL) return;
+    for (i = 0; i < 32; i++) {
+        if (mt->base[i] == addr && mt->len[i] == len) {
+            mt->base[i] = 0ULL;
+            mt->len[i] = 0ULL;
+            mt->prot[i] = 0ULL;
+            return;
+        }
+    }
+}
+
+static int te_mem_check(unsigned long long mem_base, unsigned long long mem_limit,
+                        const TeMapTab *mt, unsigned long long addr,
+                        unsigned long long width, unsigned long long req_prot) {
+    if (mem_base == 0ULL) return -14;
+    if (addr >= mem_base && mem_limit >= width && (addr - mem_base) <= (mem_limit - width)) {
+        return 0;
+    }
+    return te_map_access(mt, addr, width, req_prot);
+}
+
+static int te_check_relo_target(const unsigned char *slice, unsigned long long slice_len,
+                                unsigned long long target, unsigned long long *cached_target) {
+    unsigned long long relo_off, relo_len, rem;
+    const unsigned char *p;
+    if (*cached_target == target) return 1;
+    relo_off = te_rd_u64(slice + 164);
+    relo_len = te_rd_u64(slice + 172);
+    if ((relo_len & 15ULL) != 0ULL) return 0;
+    if (slice_len < relo_off) return 0;
+    if (relo_len > slice_len - relo_off) return 0;
+    p = slice + relo_off;
+    rem = relo_len;
+    while (rem != 0ULL) {
+        if (p[8] == 0U) {
+            long long addend = (long long)te_rd_i32(p + 12);
+            if ((unsigned long long)addend == target) {
+                *cached_target = target;
+                return 1;
+            }
+        }
+        p = p + 16;
+        rem = rem - 16ULL;
+    }
+    return 0;
+}
+
+static void te_project_fstat(unsigned char *dst144) {
+    unsigned char raw[64];
+    int i;
+    unsigned long long size_v, ino_v, dev_v, uid_gid_v, rdev_v;
+    long long mtime_ns, ctime_ns, sec, nsec;
+    unsigned int mode_v, kind_nib;
+
+    for (i = 0; i < 64; i++) raw[i] = dst144[i];
+    for (i = 0; i < 144; i++) dst144[i] = 0;
+
+    size_v = te_rd_u64(raw + 0);
+    ino_v = te_rd_u64(raw + 8);
+    dev_v = te_rd_u64(raw + 16);
+    mtime_ns = (long long)te_rd_u64(raw + 24);
+    ctime_ns = (long long)te_rd_u64(raw + 32);
+    mode_v = te_rd_u32(raw + 40);
+    kind_nib = te_stat_kind_nibble(raw[44]);
+    uid_gid_v = te_rd_u64(raw + 48);
+    rdev_v = te_rd_u64(raw + 56);
+
+    te_wr_u64(dst144 + 0, dev_v);
+    te_wr_u64(dst144 + 8, ino_v);
+    te_wr_u32(dst144 + 24, mode_v | (kind_nib << 12));
+    te_wr_u64(dst144 + 28, uid_gid_v);
+    te_wr_u64(dst144 + 40, rdev_v);
+    te_wr_u64(dst144 + 48, size_v);
+
+    sec = mtime_ns / 1000000000LL;
+    nsec = mtime_ns % 1000000000LL;
+    if (nsec < 0LL) { sec = sec - 1LL; nsec = nsec + 1000000000LL; }
+    te_wr_u64(dst144 + 88, (unsigned long long)sec);
+    te_wr_u64(dst144 + 96, (unsigned long long)nsec);
+
+    sec = ctime_ns / 1000000000LL;
+    nsec = ctime_ns % 1000000000LL;
+    if (nsec < 0LL) { sec = sec - 1LL; nsec = nsec + 1000000000LL; }
+    te_wr_u64(dst144 + 104, (unsigned long long)sec);
+    te_wr_u64(dst144 + 112, (unsigned long long)nsec);
+}
+
+long long tape_run_cx(const unsigned long long *args) {
+    unsigned long long *result;
+    unsigned long long init_budget, rem_budget;
+    unsigned long long mode_flags, mode_low;
+    const unsigned char *slice;
+    unsigned long long slice_len, code_off, code_len, entry_off;
+    const unsigned char *code_base;
+    const unsigned char *code_end;
+    unsigned char *ibm;
+    unsigned long long ibm_cap, ibm_need;
+    unsigned long long mem_base, mem_limit;
+    unsigned long long data_len, bss_off, bss_size, static_end, stack_floor, stack_top;
+    unsigned long long regs[16];
+    unsigned long long ret_pc[4096];
+    unsigned long long ret_sp[4096];
+    unsigned long long call_depth = 0ULL;
+    unsigned long long cached_indirect = ~0ULL;
+    const unsigned char *pc;
+    const unsigned char *prev_pc = 0;
+    unsigned char rec48[48];
+    TeMapTab mtab;
+    int i;
+
+    if (!args) return 2LL;
+    result = (unsigned long long *)args[6];
+    if (!result) return 2LL;
+
+    init_budget = args[3];
+    rem_budget = init_budget;
+    for (i = 0; i < 5; i++) result[i] = 0ULL;
+
+    mode_flags = args[0];
+    mode_low = mode_flags & 0xfffffffffffffeffULL;
+    if (mode_low != 4ULL && mode_low != 5ULL) {
+        result[0] = 2ULL;
+        result[4] = 7ULL;
+        return 2LL;
+    }
+
+    slice = (const unsigned char *)args[1];
+    slice_len = args[7];
+    if (!slice || slice_len < 208ULL) goto fail_container;
+    if ((unsigned long long)slice + slice_len < (unsigned long long)slice) goto fail_container;
+
+    /* UTAPEBIN v1.3 header & CODE section check */
+    if (te_rd_u64(slice + 0) != 0x4e49424550415455ULL) goto fail_container;
+    if (te_rd_u32(slice + 8) != 0x00030001U) goto fail_container;
+    if (te_rd_u32(slice + 12) != 1U) goto fail_container;
+    if (te_rd_u32(slice + 20) != 6U) goto fail_container;
+    if (te_rd_u32(slice + 24) != 64U) goto fail_container;
+    if (te_rd_u32(slice + 64) != 0x45444f43U) goto fail_container;
+
+    code_off = te_rd_u64(slice + 68);
+    if (code_off < 208ULL || (code_off & 7ULL) != 0ULL) goto fail_container;
+    if (slice_len < code_off) goto fail_container;
+    code_len = te_rd_u64(slice + 76);
+    if (slice_len - code_off < code_len) goto fail_container;
+
+    entry_off = (mode_low == 5ULL) ? args[4] : (unsigned long long)te_rd_u32(slice + 16);
+    if (entry_off >= code_len) goto fail_container;
+
+    code_base = slice + code_off;
+    code_end = code_base + code_len;
+    ibm = (unsigned char *)args[10];
+    ibm_cap = args[11];
+
+    if ((mode_flags & 0x100ULL) == 0ULL) {
+        if (tape_bitmap_cx(code_base, code_len, ibm, ibm_cap) != 0) goto fail_container;
+    } else {
+        if (!ibm) goto fail_container;
+        ibm_need = (code_len + 7ULL) >> 3;
+        if (ibm_cap < ibm_need) goto fail_container;
+    }
+
+    if ((ibm[entry_off >> 3] & (unsigned char)(1U << (entry_off & 7ULL))) == 0U) {
+        goto fail_container;
+    }
+
+    /* Validate DATA + BSSZ + linear arena + stack_floor/stack_top */
+    data_len = te_rd_u64(slice + 100);
+    if (data_len + 7ULL < data_len) goto fail_container;
+    static_end = (data_len + 7ULL) & ~7ULL;
+    if (te_rd_u64(slice + 124) != 8ULL) goto fail_container;
+    bss_off = te_rd_u64(slice + 116);
+    if (bss_off > slice_len - 8ULL) goto fail_container;
+    bss_size = te_rd_u64(slice + bss_off);
+    if (static_end + bss_size < static_end) goto fail_container;
+    static_end = static_end + bss_size;
+
+    mem_base = args[9];
+    mem_limit = args[2];
+    if (mem_limit < static_end) goto fail_container;
+    stack_floor = mem_base + static_end;
+    if (stack_floor < mem_base) goto fail_container;
+    stack_top = mem_base + mem_limit;
+    if (stack_top < mem_base) goto fail_container;
+
+    for (i = 0; i < 16; i++) regs[i] = 0ULL;
+    for (i = 0; i < 32; i++) { mtab.base[i] = 0ULL; mtab.len[i] = 0ULL; mtab.prot[i] = 0ULL; }
+
+    if (mode_low == 5ULL) {
+        if (args[5] != 0ULL) {
+            const unsigned long long *ca = (const unsigned long long *)args[5];
+            for (i = 0; i < 6; i++) regs[i] = ca[i];
+        }
+    } else {
+        unsigned long long argc = args[4];
+        unsigned long long argv = args[5];
+        if (argc > 4095ULL) goto fail_container;
+        if (argv != 0ULL) {
+            unsigned long long need_argv;
+            if ((argv & 7ULL) != 0ULL) goto fail_container;
+            if (argv < stack_floor) goto fail_container;
+            if (stack_top < argv) goto fail_container;
+            need_argv = 8ULL + (argc << 3);
+            if (stack_top - argv < need_argv) goto fail_container;
+            stack_top = argv;
+        } else {
+            if (argc != 0ULL) goto fail_container;
+        }
+    }
+    regs[7] = stack_top;
+
+    pc = code_base + entry_off;
+
+    for (;;) {
+        unsigned char op;
+        unsigned int r0, r1, r2;
+        const unsigned char *nxt;
+
+        prev_pc = pc;
+        if (rem_budget == 0ULL) {
+            result[0] = 3ULL;
+            result[3] = (unsigned long long)(prev_pc - code_base);
+            result[2] = init_budget - rem_budget;
+            return 3LL;
+        }
+        if (pc >= code_end) goto fail_code;
+
+        nxt = tape_decode_cx(pc, code_end, rec48);
+        if (!nxt) goto fail_opcode;
+        pc = nxt;
+        rem_budget = rem_budget - 1ULL;
+
+        op = rec48[0];
+        r0 = (unsigned int)(rec48[4] & 15U);
+        r1 = (unsigned int)(rec48[4] >> 4);
+        r2 = (unsigned int)(rec48[5] & 15U);
+
+        if (op == 0U) {
+            /* imm */
+            regs[r0] = te_rd_u64(rec48 + 8);
+        } else if (op == 1U) {
+            /* mov */
+            regs[r0] = regs[r1];
+        } else if (op >= 2U && op <= 20U) {
+            unsigned long long a = regs[r1];
+            unsigned long long b = regs[r2];
+            if (op == 2U) regs[r0] = a + b;
+            else if (op == 3U) regs[r0] = a - b;
+            else if (op == 4U) regs[r0] = (unsigned long long)((long long)a * (long long)b);
+            else if (op == 5U) regs[r0] = a ^ b;
+            else if (op == 6U) regs[r0] = a & b;
+            else if (op == 7U) regs[r0] = a | b;
+            else if (op == 8U) regs[r0] = a << (b & 63ULL);
+            else if (op == 9U) {
+                unsigned long long sh = b & 63ULL;
+                unsigned long long v = a >> sh;
+                if (sh != 0ULL && (a & 0x8000000000000000ULL) != 0ULL) {
+                    v = v | (~0ULL << (64ULL - sh));
+                }
+                regs[r0] = v;
+            }
+            else if (op == 10U) regs[r0] = a >> (b & 63ULL);
+            else if (op >= 11U && op <= 14U) {
+                if (b == 0ULL) goto fail_opcode;
+                if (op == 11U || op == 12U) {
+                    if (b == ~0ULL && a == 0x8000000000000000ULL) goto fail_opcode;
+                    if (op == 11U) regs[r0] = (unsigned long long)((long long)a / (long long)b);
+                    else regs[r0] = (unsigned long long)((long long)a % (long long)b);
+                } else {
+                    if (op == 13U) regs[r0] = a / b;
+                    else regs[r0] = a % b;
+                }
+            } else if (op == 15U) regs[r0] = ((long long)a < (long long)b) ? 1ULL : 0ULL;
+            else if (op == 16U) regs[r0] = ((long long)a <= (long long)b) ? 1ULL : 0ULL;
+            else if (op == 17U) regs[r0] = (a < b) ? 1ULL : 0ULL;
+            else if (op == 18U) regs[r0] = (a <= b) ? 1ULL : 0ULL;
+            else if (op == 19U) regs[r0] = (a == b) ? 1ULL : 0ULL;
+            else regs[r0] = (a != b) ? 1ULL : 0ULL;
+        } else if ((op >= 21U && op <= 24U) || op == 26U || op == 31U) {
+            /* Memory load/store/zero/callm */
+            unsigned long long width = 8ULL;
+            unsigned long long base_v, off_v, addr;
+            unsigned long long req_prot;
+            unsigned char *mp;
+            if (op == 23U || op == 24U || op == 26U) {
+                width = te_rd_u64(rec48 + 16);
+            }
+            if (op != 26U) {
+                if (width != 1ULL && width != 2ULL && width != 4ULL && width != 8ULL) {
+                    goto fail_opcode;
+                }
+            }
+            base_v = (op == 21U || op == 23U) ? regs[r1] : regs[r0];
+            off_v = te_rd_u64(rec48 + 8);
+            if ((long long)off_v >= 0LL) {
+                addr = base_v + off_v;
+                if (addr < base_v) goto fail_memory;
+            } else {
+                addr = base_v + off_v;
+                if (addr >= base_v) goto fail_memory;
+            }
+            req_prot = (op == 21U || op == 23U || op == 31U) ? 1ULL : 2ULL;
+            if (te_mem_check(mem_base, mem_limit, &mtab, addr, width, req_prot) != 0) {
+                goto fail_memory;
+            }
+            mp = (unsigned char *)addr;
+            if (op == 31U) {
+                /* callm */
+                unsigned long long tgt = te_rd_u64(mp);
+                if (tgt >= code_len) goto fail_code;
+                if ((ibm[tgt >> 3] & (unsigned char)(1U << (tgt & 7ULL))) == 0U) goto fail_code;
+                if (!te_check_relo_target(slice, slice_len, tgt, &cached_indirect)) goto fail_code;
+                if (call_depth >= 4096ULL) goto fail_stack;
+                if (regs[7] < 8ULL || regs[7] - 8ULL < stack_floor) goto fail_stack;
+                regs[7] = regs[7] - 8ULL;
+                ret_pc[call_depth] = (unsigned long long)(pc - code_base);
+                ret_sp[call_depth] = regs[7];
+                call_depth = call_depth + 1ULL;
+                pc = code_base + tgt;
+            } else if (op == 26U) {
+                /* zero */
+                unsigned long long k;
+                for (k = 0ULL; k < width; k++) mp[k] = 0;
+            } else if (op == 21U || op == 23U) {
+                /* load64 / loadn (sign-extended for 1/2/4 bytes) */
+                if (width == 8ULL) regs[r0] = te_rd_u64(mp);
+                else if (width == 4ULL) regs[r0] = (unsigned long long)(long long)te_rd_i32(mp);
+                else if (width == 2ULL) regs[r0] = (unsigned long long)(long long)(short)te_rd_u16(mp);
+                else regs[r0] = (unsigned long long)(long long)(signed char)mp[0];
+            } else {
+                /* store64 / storen */
+                unsigned long long v = regs[r1];
+                if (width == 8ULL) te_wr_u64(mp, v);
+                else if (width == 4ULL) te_wr_u32(mp, (unsigned int)v);
+                else if (width == 2ULL) te_wr_u16(mp, (unsigned int)v);
+                else mp[0] = (unsigned char)(v & 0xffU);
+            }
+        } else if (op == 25U) {
+            /* lea */
+            unsigned long long off_v = te_rd_u64(rec48 + 8);
+            if ((rec48[3] & 1U) != 0U) {
+                if (off_v > mem_limit) goto fail_memory;
+                if (mem_base == 0ULL) goto fail_memory;
+                if (mem_base + off_v < mem_base) goto fail_memory;
+                regs[r0] = mem_base + off_v;
+            } else {
+                if (off_v >= code_len) goto fail_code;
+                if ((ibm[off_v >> 3] & (unsigned char)(1U << (off_v & 7ULL))) == 0U) goto fail_code;
+                regs[r0] = off_v;
+            }
+        } else if (op == 27U || op == 28U || op == 29U) {
+            /* jump / jumpz / call */
+            if (op == 28U && regs[r0] != 0ULL) {
+                /* not taken */
+            } else {
+                unsigned long long tgt;
+                if ((rec48[3] & 1U) == 0U) goto fail_code;
+                tgt = te_rd_u64(rec48 + 8);
+                if (tgt >= code_len) goto fail_code;
+                if ((ibm[tgt >> 3] & (unsigned char)(1U << (tgt & 7ULL))) == 0U) goto fail_code;
+                if (op == 29U) {
+                    if (call_depth >= 4096ULL) goto fail_stack;
+                    if (regs[7] < 8ULL || regs[7] - 8ULL < stack_floor) goto fail_stack;
+                    regs[7] = regs[7] - 8ULL;
+                    ret_pc[call_depth] = (unsigned long long)(pc - code_base);
+                    ret_sp[call_depth] = regs[7];
+                    call_depth = call_depth + 1ULL;
+                }
+                pc = code_base + tgt;
+            }
+        } else if (op == 30U) {
+            /* callr */
+            unsigned long long tgt = regs[r0];
+            if (tgt >= code_len) goto fail_code;
+            if ((ibm[tgt >> 3] & (unsigned char)(1U << (tgt & 7ULL))) == 0U) goto fail_code;
+            if (!te_check_relo_target(slice, slice_len, tgt, &cached_indirect)) goto fail_code;
+            if (call_depth >= 4096ULL) goto fail_stack;
+            if (regs[7] < 8ULL || regs[7] - 8ULL < stack_floor) goto fail_stack;
+            regs[7] = regs[7] - 8ULL;
+            ret_pc[call_depth] = (unsigned long long)(pc - code_base);
+            ret_sp[call_depth] = regs[7];
+            call_depth = call_depth + 1ULL;
+            pc = code_base + tgt;
+        } else if (op == 37U) {
+            /* ret */
+            if (call_depth == 0ULL) {
+                if (mode_low != 5ULL) goto fail_stack;
+                result[0] = 0ULL;
+                result[1] = regs[0];
+                result[2] = init_budget - rem_budget;
+                result[3] = 0ULL;
+                result[4] = 0ULL;
+                return (long long)result[1];
+            }
+            call_depth = call_depth - 1ULL;
+            if (regs[7] != ret_sp[call_depth]) goto fail_stack;
+            regs[7] = regs[7] + 8ULL;
+            pc = code_base + ret_pc[call_depth];
+        } else if (op == 38U) {
+            /* frame */
+            unsigned long long delta = te_rd_u64(rec48 + 8);
+            unsigned long long sp = regs[7];
+            if ((long long)delta >= 0LL) {
+                if (sp < delta) goto fail_stack;
+                sp = sp - delta;
+                if (sp < stack_floor) goto fail_stack;
+            } else {
+                unsigned long long hi = mem_base + mem_limit;
+                unsigned long long nsp = sp - delta;
+                if (nsp < sp) goto fail_stack;
+                if (mode_flags == 4ULL && args[5] != 0ULL) hi = args[5];
+                if (nsp > hi) goto fail_stack;
+                sp = nsp;
+            }
+            regs[7] = sp;
+        } else if (op == 42U) {
+            /* exit */
+            result[0] = 0ULL;
+            result[1] = regs[r0];
+            result[2] = init_budget - rem_budget;
+            result[3] = 0ULL;
+            result[4] = 0ULL;
+            return (long long)result[1];
+        } else if (op == 43U || op == 44U) {
+            /* sys / sys6 */
+            unsigned long long slot_id;
+            tape_disp_fn_t disp;
+            unsigned long long a0, a1, a2, a3 = 0ULL, a4 = 0ULL, a5 = 0ULL;
+            long long sret;
+
+            if ((rec48[3] & 1U) == 0U) goto fail_host;
+            slot_id = te_rd_u64(rec48 + 8);
+            if (slot_id > 8ULL || slot_id == 7ULL) goto fail_host;
+            if (slot_id == 0ULL) {
+                result[0] = 0ULL;
+                result[1] = regs[r0];
+                result[2] = init_budget - rem_budget;
+                result[3] = 0ULL;
+                result[4] = 0ULL;
+                return (long long)result[1];
+            }
+            if (slot_id == 3ULL && op != 44U) goto fail_host;
+            if (args[8] == 0ULL) goto fail_host;
+            disp = (tape_disp_fn_t)args[8];
+
+            a0 = regs[r0];
+            a1 = regs[r1];
+            a2 = regs[r2];
+            if (op == 44U) {
+                unsigned int r3 = (unsigned int)(rec48[5] >> 4);
+                unsigned int r4 = (unsigned int)(rec48[6] & 15U);
+                unsigned int r5 = (unsigned int)(rec48[6] >> 4);
+                a3 = regs[r3];
+                a4 = regs[r4];
+                a5 = regs[r5];
+                if (slot_id == 3ULL) {
+                    /* Linux tape dialect mmap flags subset -> hs_flags */
+                    if ((a3 & ~35ULL) != 0ULL) {
+                        regs[0] = (unsigned long long)(-22LL);
+                        continue;
+                    }
+                    a3 = (a3 & 3ULL) | ((a3 >> 3) & 4ULL);
+                }
+                sret = disp(slot_id, a0, a1, a2, a3, a4, a5);
+                if (slot_id == 3ULL && (unsigned long long)sret <= (unsigned long long)(-4096LL)) {
+                    if (!te_map_insert(&mtab, (unsigned long long)sret, a1, a2)) {
+                        long long uret = disp(4ULL, (unsigned long long)sret, a1, 0ULL, 0ULL, 0ULL, 0ULL);
+                        if (uret != 0LL) goto fail_host;
+                        sret = -12LL;
+                    }
+                }
+                regs[0] = (unsigned long long)sret;
+            } else {
+                if (slot_id == 8ULL) {
+                    /* fstat: validate 144B buffer then project 64B hs_stat64 -> 144B */
+                    if (te_mem_check(mem_base, mem_limit, &mtab, a1, 144ULL, 2ULL) != 0) {
+                        regs[0] = (unsigned long long)(-14LL);
+                        continue;
+                    }
+                    sret = disp(8ULL, a0, a1, 0ULL, 0ULL, 0ULL, 0ULL);
+                    if (sret == 0LL) {
+                        te_project_fstat((unsigned char *)a1);
+                    }
+                    regs[0] = (unsigned long long)sret;
+                } else {
+                    sret = disp(slot_id, a0, a1, a2, 0ULL, 0ULL, 0ULL);
+                    if (slot_id == 4ULL && sret == 0LL) {
+                        te_map_remove(&mtab, a0, a1);
+                    }
+                    regs[0] = (unsigned long long)sret;
+                }
+            }
+        } else if (op == 45U) {
+            /* argc */
+            regs[r0] = args[4];
+        } else if (op == 46U) {
+            /* argv */
+            unsigned long long idx = regs[r1];
+            if (idx >= args[4]) {
+                regs[r0] = 0ULL;
+            } else {
+                const unsigned long long *av = (const unsigned long long *)args[5];
+                regs[r0] = av[idx];
+            }
+        } else if (op == 47U) {
+            /* nop */
+        } else {
+            goto fail_opcode;
+        }
+    }
+
+fail_container:
+    result[0] = 2ULL;
+    result[4] = 7ULL;
+    result[2] = init_budget - rem_budget;
+    return 2LL;
+
+fail_opcode:
+    result[0] = 2ULL;
+    result[4] = 1ULL;
+    result[3] = (unsigned long long)(prev_pc - code_base);
+    result[2] = init_budget - rem_budget;
+    return 2LL;
+
+fail_memory:
+    result[0] = 2ULL;
+    result[4] = 2ULL;
+    result[3] = (unsigned long long)(prev_pc - code_base);
+    result[2] = init_budget - rem_budget;
+    return 2LL;
+
+fail_code:
+    result[0] = 2ULL;
+    result[4] = 3ULL;
+    result[3] = (unsigned long long)(prev_pc - code_base);
+    result[2] = init_budget - rem_budget;
+    return 2LL;
+
+fail_stack:
+    result[0] = 2ULL;
+    result[4] = 5ULL;
+    result[3] = (unsigned long long)(prev_pc - code_base);
+    result[2] = init_budget - rem_budget;
+    return 2LL;
+
+fail_host:
+    result[0] = 2ULL;
+    result[4] = 6ULL;
+    result[3] = (unsigned long long)(prev_pc - code_base);
+    result[2] = init_budget - rem_budget;
+    return 2LL;
+}
