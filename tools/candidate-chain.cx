@@ -309,9 +309,13 @@ static int ctor_bound_secs(const char *bound, int want) {
     char secbuf[8];
     char *probe[] = {(char *)bound, secbuf, (char *)"true", 0};
     if (cx_fmt(secbuf, sizeof secbuf, "%d", want)) die("fmt", "secs");
-    if (!runv_secs(probe, 30)) return known = want;
+    int prc = runv_secs(probe, 30);
+    if (!prc) return known = want;
+    if (prc == 124) die_rc(124, "snapshot watchdog probe", bound);
     int frozen = cc_lim("ctor.frozen", 0);
-    if (want <= frozen || cx_fmt(secbuf, sizeof secbuf, "%d", frozen) || runv_secs(probe, 30)) die("REFUSE snapshot watchdog accepts neither the step bound nor the frozen range", bound);
+    if (want <= frozen || cx_fmt(secbuf, sizeof secbuf, "%d", frozen)) die("REFUSE snapshot watchdog accepts neither the step bound nor the frozen range", bound);
+    prc = runv_secs(probe, 30);
+    if (prc) die_rc(prc, "REFUSE snapshot watchdog accepts neither the step bound nor the frozen range", bound);
     sy_printf("CTOR_BOUND\tsnapshot-watchdog=%d\tstep-bound=%d\treason=frozen-range\n", frozen, want);
     return known = frozen;
 }
@@ -1437,19 +1441,21 @@ static void cc_verify_final_pack(const char *root, const char *snap, const char 
     cc_verify_pkg_tape(root, snap, outdir, pbody, "pack-body");
     cc_verify_pkg_tape(root, snap, outdir, final_ape, "pack-final-ape");
     if (cx_write(c1, "int main(void){return 0;}\n", 26)) die("post-pack e3 write", c1);
-    int bad = 0;
+    int bad = 0, bad_rc = 2;
     if (cx_fmt(cmd, sizeof cmd, "'%s' stream e2 --level 2 --source '%s' --no-external-nn < '%s' > '%s'",
                final_ape, c1, c1, e2_out)) bad = 1;
     if (!bad) {
         char *v[] = {"sh", "-c", cmd, 0};
-        if (runv_secs(v, cc_pb()) != 0 || fsize(e2_out) <= 0) bad = 1;
+        int rc = runv_secs(v, cc_pb());
+        if (rc != 0 || fsize(e2_out) <= 0) { bad = 1; if (rc == 124) bad_rc = 124; }
     }
     if (!bad) {
         if (cx_fmt(cmd, sizeof cmd, "'%s' stream e1 --level 2 --source '%s' --no-external-nn < '%s' > '%s'",
                    final_ape, c1, e2_out, e1_out)) bad = 1;
         else {
             char *v[] = {"sh", "-c", cmd, 0};
-            if (runv_secs(v, cc_pb()) != 0 || fsize(e1_out) <= 0) bad = 1;
+            int rc = runv_secs(v, cc_pb());
+            if (rc != 0 || fsize(e1_out) <= 0) { bad = 1; if (rc == 124) bad_rc = 124; }
         }
     }
     if (!bad) {
@@ -1458,10 +1464,13 @@ static void cc_verify_final_pack(const char *root, const char *snap, const char 
         else {
             char *v[] = {"sh", "-c", cmd, 0};
             pr_result r;
-            if (pr_run("post-pack-stream-e3", v, 0, 0, cc_pb(), &r) != 0 || r.rc != 0 || r.outn == 0 ||
+            int t = pr_run("post-pack-stream-e3", v, 0, 0, cc_pb(), &r);
+            if (t != 0 || r.residue != 0 || r.rc != 0 || r.outn == 0 ||
                 (r.out && strstr(r.out, "M53_M1_REFUSE") != 0) ||
                 (r.err && strstr(r.err, "M53_M1_REFUSE") != 0)) {
-                pr_echo(&r);
+                if ((t || r.residue) && r.why[0]) fprintf(stderr, "candidate-chain: %s\n", r.why);
+                else pr_echo(&r);
+                if (t && r.timed_out && !r.residue) bad_rc = 124;
                 bad = 1;
             }
             pr_free(&r);
@@ -1470,7 +1479,7 @@ static void cc_verify_final_pack(const char *root, const char *snap, const char 
     (void)sy_unlink(c1);
     (void)sy_unlink(e2_out);
     (void)sy_unlink(e1_out);
-    if (bad) die("REFUSE final APE stream e3 post-pack check failed", final_ape);
+    if (bad) die_rc(bad_rc, "REFUSE final APE stream e3 post-pack check failed", final_ape);
     sy_printf("POST_PACK_TAPE_VERIFY\tape=%s\tp4_records=3\tstream_e3=OK\n", final_ape);
 }
 /* P2: g2/g3 的 Mac/Win 分相。构造器与对象目录取 fixedpoint/g<N>/lnx-x86_64(candidate 与 .o,
@@ -1903,7 +1912,7 @@ static void gen1_entry(const char *outdir, const char *snap, const char *ctor,
     if (!(resume && ck_done(outdir, objtag))) {
         long t = sy_now_ms();
         hb(outdir, objtag, "start");
-        if (bound_ctor_eb(snap, ctor, ebt, pkg, gout, target, "--objects-only")) die("gen1 objects", gout);
+        { int rc = bound_ctor_eb(snap, ctor, ebt, pkg, gout, target, "--objects-only"); if (rc) die_rc(rc, "gen1 objects", gout); }
         mark(outdir, objtag, sy_now_ms() - t);
     } else {
         sy_printf("RESUME\t%s\n", objtag);
@@ -1911,7 +1920,7 @@ static void gen1_entry(const char *outdir, const char *snap, const char *ctor,
     }
     hb(outdir, tag, "start");
     long t = sy_now_ms();
-    if (bound_ctor_eb(snap, ctor, ebt, pkg, gout, target, "--link-only")) die("gen1 link", gout);
+    { int rc = bound_ctor_eb(snap, ctor, ebt, pkg, gout, target, "--link-only"); if (rc) die_rc(rc, "gen1 link", gout); }
     mark(outdir, tag, sy_now_ms() - t);
 }
 /* 相位原子清理: 相位未 DONE 时,删除上次失败留下的独占输出(下游工具以目标不存在为前提)。
@@ -2112,7 +2121,14 @@ static void g2_closures(const char *root, const char *outdir, const char *rev, c
     }
     if (reused) sy_printf("CLOSURE_PLAN\t%s\tmemo=unchanged-launcher-package-constructor-snapshot\n", prepare);
     else {
-    if (pr_run(prepare, list, 0, 0, 55, &result) || result.rc || result.residue) { pr_echo(&result); pr_free(&result); die("closure list", slug); }
+    int ct = pr_run(prepare, list, 0, 0, 55, &result);
+    if (ct || result.rc || result.residue) {
+        int crc = (ct && result.timed_out && !result.residue) ? 124 : 2;
+        if ((ct || result.residue) && result.why[0]) fprintf(stderr, "candidate-chain: %s\n", result.why);
+        else pr_echo(&result);
+        pr_free(&result);
+        die_rc(crc, "closure list", slug);
+    }
     if (result.outn && (!result.out || result.out[result.outn - 1] != '\n' || memchr(result.out, 0, result.outn))) { pr_free(&result); die("closure list text", slug); }
     }
     size_t oldn = 0; char *old = cx_read(manifest, &oldn);
@@ -2243,16 +2259,19 @@ static void run_g_lnx_pair(const char *root, const char *outdir, const char *rev
             exit(0);
         }
     }
+    int pair_rc = 2, pair_non124 = 0;
     for (int i = 0; i < 2; i++) {
         int st = 0;
         if (!pid[i]) continue;
         while (waitpid(pid[i], &st, 0) < 0) { if (errno != EINTR) die("pair wait", slugs[i]); }
         if (!WIFEXITED(st) || WEXITSTATUS(st)) {
             bad = 1;
+            if (WIFEXITED(st) && WEXITSTATUS(st) == 124 && !pair_non124) pair_rc = 124;
+            else { pair_non124 = 1; pair_rc = 2; }
             sy_printf("G_LNX_PAIR_FAIL\tg%d-%s\tstatus=%d\n", gen, slugs[i], st);
         }
     }
-    if (bad) die(gen == 2 ? "g2 lnx pair" : "g3 lnx pair", fp);
+    if (bad) die_rc(pair_rc, gen == 2 ? "g2 lnx pair" : "g3 lnx pair", fp);
 }
 static int job_has_record(const char *ctx, const char *id) {
     char rec[4400];
@@ -2346,7 +2365,16 @@ static void select_nets(const char *s) {
     v[n++] = "sh"; v[n++] = com; v[n++] = toolpath; v[n++] = "--"; v[n++] = "--root"; v[n++] = (char *)s; v[n++] = "--touch";
     for (int i = 0; i < ntouch; i++) v[n++] = (char *)touches[i];
     v[n] = 0; pr_result r;
-    if (pr_run("net-deps-touch", v, 0, 0, cc_pb(), &r) || r.rc) die("REFUSE net-deps --touch", s);
+    {
+        int nt = pr_run("net-deps-touch", v, 0, 0, cc_pb(), &r);
+        if (nt || r.rc || r.residue) {
+            int nrc = (nt && r.timed_out && !r.residue) ? 124 : 2;
+            if ((nt || r.residue) && r.why[0]) fprintf(stderr, "candidate-chain: %s\n", r.why);
+            else pr_echo(&r);
+            pr_free(&r);
+            die_rc(nrc, "REFUSE net-deps --touch", s);
+        }
+    }
     if (!r.out || !r.outn || r.out[r.outn - 1] != '\n' || memchr(r.out, 0, r.outn) || memchr(r.out, '\r', r.outn)) die("REFUSE net-deps wire", s);
     char *p = r.out; int footer = 0; nselected = 0;
     while (*p) {
@@ -2410,7 +2438,7 @@ static void verify_segment_jobs(const char *outdir,const char *s,const char *ctx
     if(!segment_verified_count)return;
     if(cx_fmt(path,sizeof path,"%s/segment-verify.ids",outdir)||cx_write(path,list,used)||cx_fmt(controller,sizeof controller,"%s/source-package-O2.elf",build))die("segment verify list",outdir);
     char *v[]={controller,"reuse-batch",(char *)s,(char *)ctx,path,0};long began=sy_now_ms();
-    if(pr_code_at("segment-reuse-batch",v,s,cc_pb()))die("REFUSE segment job identity/bytes",path);
+    {int rc=pr_code_at("segment-reuse-batch",v,s,cc_pb());if(rc)die_rc(rc,"REFUSE segment job identity/bytes",path);}
     sy_printf("SEGMENT_VERIFY\tjobs=%d\twall_ms=%ld\tscope=process-only\n",segment_verified_count,sy_now_ms()-began);
 }
 static void verify_reuse(const char *s, const char *ctx, const char *b, const char *id) {
@@ -2419,11 +2447,11 @@ static void verify_reuse(const char *s, const char *ctx, const char *b, const ch
     if (cx_fmt(controller, sizeof controller, "%s/source-package-O2.elf", b)) die("path", id);
     if (baseline_ctx && !job_has_record(ctx, id)) {
         char *a[] = {controller, "adopt-job", (char *)s, (char *)ctx, (char *)baseline_ctx, (char *)id, 0};
-        if (pr_code_at("adopt-job", a, s, cc_pb())) die("REFUSE adoption identity/bytes", id);
+        { int rc = pr_code_at("adopt-job", a, s, cc_pb()); if (rc) die_rc(rc, "REFUSE adoption identity/bytes", id); }
         return; /* adopt-job already performs the canonical final verification. */
     }
     char *v[] = {controller, "reuse-job", (char *)s, (char *)ctx, (char *)id, 0};
-    if (pr_code_at("reuse-job", v, s, cc_pb())) die("REFUSE unchanged job identity/bytes", id);
+    { int rc = pr_code_at("reuse-job", v, s, cc_pb()); if (rc) die_rc(rc, "REFUSE unchanged job identity/bytes", id); }
     sy_printf("REUSED\t%s\tidentity-and-bytes-verified\n", id);
 }
 static void invalidate_job(const char *outdir, const char *ctx, const char *b, const char *id) {
@@ -2501,7 +2529,7 @@ static int wave_phase(const char *outdir, const char *s, const char *ctx, const 
                 }
                 if (!action) for (int j = at; j < stop; j++) clean_stale_job(outdir, ctx, b, ids[j]);
                 long t0 = sy_now_ms();
-                if (sjw(s, ctx, b, phase, at, stop - at, action ? "finish-job" : "start-job")) die("job action", tag);
+                { int rc = sjw(s, ctx, b, phase, at, stop - at, action ? "finish-job" : "start-job"); if (rc) die_rc(rc, "job action", tag); }
                 long wall = sy_now_ms() - t0;
                 for (int j = at; j < stop; j++) {
                     if (cx_fmt(tag, sizeof tag, "jobs-%s-%d-%s", phase, j, action ? "finish" : "start")) die("phase", phase);
@@ -2668,7 +2696,16 @@ static void final_proof(const char *root, const char *ctx, const char *build, co
     }
     char line[256]; if (cx_fmt(line, sizeof line, "%s\n%s", id, index == 0 ? "tool-compilerpack\ntool-pack\n" : "") || cx_write(idsfile, line, strlen(line))) die("final ids", idsfile);
     char *v[] = {controller, "verify-jobs", (char *)root, (char *)ctx, idsfile, 0}; pr_result r;
-    if (pr_run("final net verification", v, root, 0, cc_pb(), &r) || r.rc || r.timed_out || r.residue) { pr_echo(&r); pr_free(&r); die("final canonical verification", id); }
+    {
+        int ft = pr_run("final net verification", v, root, 0, cc_pb(), &r);
+        if (ft || r.rc || r.timed_out || r.residue) {
+            int frc = (ft && r.timed_out && !r.residue) ? 124 : 2;
+            if ((ft || r.residue) && r.why[0]) fprintf(stderr, "candidate-chain: %s\n", r.why);
+            else pr_echo(&r);
+            pr_free(&r);
+            die_rc(frc, "final canonical verification", id);
+        }
+    }
     if (!r.out || strncmp(r.out, "VERIFY_JOBS\t", 12) || !strchr(r.out, '\n') || strchr(r.out, '\n')[1]) { pr_free(&r); die("final verification wire", id); }
     final_fingerprint(ctx, id + 4, after);
     if (strcmp(before, after)) { pr_free(&r); die("final artifacts changed during verification", id); }
@@ -2699,7 +2736,7 @@ static int jobs_ok(const char *root, const char *ctx, const char *build, const c
         !sm_sha(controller, vhash) && !cx_fmt(vkey, sizeof vkey, "verify-context\n%s\n%s\n%s\n%s\n%s\n%s\n", vhash, root, ctx, cch, bsh, brh) && !derived_shape(root, ctx, "jobs", vshape)) vmemo = 1;
     if (vmemo && !sm_value_get(vkey, vshape, vgot) && !strcmp(vgot, verified)) sy_printf("VERIFIED\tsource-package-context-v2\tmemo=unchanged-controller-snapshot-context\n");
     else {
-        if (pr_code_at("final context", v, root, cc_pb())) die("final current SID/context", ctx);
+        { int rc = pr_code_at("final context", v, root, cc_pb()); if (rc) die_rc(rc, "final current SID/context", ctx); }
         char again[65];
         if (vmemo && !derived_shape(root, ctx, "jobs", again) && !strcmp(again, vshape)) sm_value_put(vkey, vshape, verified); else vmemo = 0;
     }
@@ -2713,7 +2750,7 @@ static int jobs_ok(const char *root, const char *ctx, const char *build, const c
     {   /* The closing bracket is the same question: a hit needs the same key and the listing as it is now. */
         char after[65];
         if (vmemo && !derived_shape(root, ctx, "jobs", after) && !sm_value_get(vkey, after, vgot) && !strcmp(vgot, verified)) sy_printf("VERIFIED\tsource-package-context-v2\tmemo=unchanged-controller-snapshot-context\n");
-        else if (pr_code_at("final context", v, root, cc_pb())) die("final current SID/context changed", ctx);
+        else { int rc = pr_code_at("final context", v, root, cc_pb()); if (rc) die_rc(rc, "final current SID/context changed", ctx); }
     }
     sy_printf("FINAL\tmodels=%d\tidentity=current-SID-and-canonical-job-unions\tscope=frozen-run-stat-not-ABA\n", cf_net_count());
     return 0;
@@ -2744,7 +2781,7 @@ static int git_is_ancestor(const char *oldc, const char *newc) {
     v[3] = (char *)oldc; v[4] = (char *)newc; v[5] = 0;
     rc = cx_runv_timeout(v, 8, &o, &n);
     free(o);
-    return rc == 0;
+    return rc;
 }
 static int snap_ok(const char *dir, const char *rev, const char *helper) {
     char mark[4400], js[4400], ape[4400], h[65], commit[41], sid[65], dig[65], live[65];
@@ -2780,14 +2817,15 @@ static int snap_ok(const char *dir, const char *rev, const char *helper) {
     }
     if (!tx_eqz(h, dig)) die("REFUSE snap product SHA mismatch", ape);
     if (!tx_eqz(commit, rev)) {
-        if (!git_is_ancestor(commit, rev)) die("REFUSE snap receipt commit not ancestor", commit);
+        int arc = git_is_ancestor(commit, rev);
+        if (arc) die_rc(arc, "REFUSE snap receipt commit not ancestor", commit);
         sy_printf("BOOTSTRAP_FROM\tcommit=%s\tbootstrap_product=%s\n", commit, dig);
     }
     {
         char *v[3];
         v[0] = (char *)helper; v[1] = (char *)dir; v[2] = 0;
         rc = cx_runv_timeout(v, 8, &text, &hn);
-        if (rc || !text || hn != 65 || text[64] != '\n') { free(text); die("REFUSE live source SID", helper); }
+        if (rc || !text || hn != 65 || text[64] != '\n') { free(text); die_rc(rc, "REFUSE live source SID", helper); }
         for (k = 0; k < 64; k++) {
             char c = text[k];
             if (!((c >= '0' && c <= '9') || (c >= 'a' && c <= 'f'))) { free(text); die("REFUSE live source SID", helper); }
@@ -2817,7 +2855,7 @@ static void worker_nm_ok(const char *obj) {
     size_t n = 0;
     long at;
     v[0] = "nm"; v[1] = "-u"; v[2] = (char *)obj; v[3] = 0;
-    if (cx_runv_timeout(v, 8, &text, &n) || !text) { free(text); die("nm", obj); }
+    { int nrc = cx_runv_timeout(v, 8, &text, &n); if (nrc || !text) { free(text); die_rc(nrc, "nm", obj); } }
     at = tx_find(text, (long)n, "setpgid", 7);
     free(text);
     if (at >= 0) die("REFUSE worker.o libc setpgid", obj);
@@ -2832,7 +2870,7 @@ static int uc_guard(const char *root, const char *dir) {
     static const char sa[] = "int bf(int);\nint main(void){ return bf(1) - 2; }\n", sb[] = "int bf(int x){ return x + 1; }\n";
     if (cx_write(a, sa, sizeof sa - 1) || cx_write(b, sb, sizeof sb - 1)) return -1;
     if (cx_fmt(cmd, sizeof cmd, "UNISACC_RR_TIME=1 UNISACC_E3CACHE='%s/uc-guard-cache' sh '%s/unisacc.com' '%s' '%s' -o '%s/uc-guard.bin' 2>'%s'", dir, root, a, b, dir, err)) return -1;
-    { char *v[] = {"sh", "-c", cmd, 0}; if (runv_secs(v, cc_pb())) return -1; }
+    { char *v[] = {"sh", "-c", cmd, 0}; int urc = runv_secs(v, cc_pb()); if (urc) return urc == 124 ? -124 : -1; }
     e = cx_read(err, &en);
     if (!e) return -1;
     for (k = 0; k < 3; k++) {
@@ -3711,7 +3749,7 @@ int main(int argc, char **argv) {
         if (!cx_fmt(srcd, sizeof srcd, "%s/src", rpar) && sy_exists(srcd) != 0) {
             if (cx_fmt(srcgit, sizeof srcgit, "%s/.git", srcd) || fsize(srcgit) < 0) die("REFUSE private src exists but has no .git", srcd);
             char *hv[] = {"sh", "-c", "test \"$(git -C \"$1\" rev-parse HEAD)\" = \"$2\" && test -z \"$(git -C \"$1\" status --porcelain)\"", "sh", srcd, (char *)rev, 0};
-            if (runv_secs(hv, 30)) die("REFUSE private src worktree HEAD != --rev or worktree not clean", srcd);
+            { int hrc = runv_secs(hv, 30); if (hrc) die_rc(hrc, "REFUSE private src worktree HEAD != --rev or worktree not clean", srcd); }
             cx_fmt(g_srcroot, sizeof g_srcroot, "%s", srcd);
         }
         const char *ih = sy_env("UNISACC_IDENT_HELPER");
@@ -3746,7 +3784,7 @@ int main(int argc, char **argv) {
        table row needs no code of its own. The call sites before a step cover a run without --until. */
     if (until_phase && !recheck_only) residue_before(outdir, until_phase);
     chain_memo(until_phase, outdir);
-    if (!lane_phase && uc_guard(root, outdir)) die("REFUSE unit cache active inside the chain", "uc_guard");
+    { int u = !lane_phase ? uc_guard(root, outdir) : 0; if (u) die_rc(u == -124 ? 124 : 2, "REFUSE unit cache active inside the chain", "uc_guard"); }
     chain_paths(root, rev, snap);
     if (!g_tools_root[0]) {
         cx_fmt(g_tools_root, sizeof g_tools_root, "%s", snap);
@@ -3782,7 +3820,13 @@ int main(int argc, char **argv) {
                                     stage, stage, stage, stage, rev, stage, stage, stage,
                                     root, root, stage, root, root, stage)) {
                             char *shv[] = {(char *)"/bin/sh", (char *)"-c", cmd, 0};
-                            if (!runv_secs(shv, cc_pb())) {
+                            int src = runv_secs(shv, cc_pb());
+                            if (src == 124) {
+                                (void)sy_unlink(owner);
+                                sy_close(lockfd);
+                                die_rc(124, "snap archive", snap);
+                            }
+                            if (!src) {
                                 char smark[4400], srec[4400];
                                 if (!cx_fmt(smark, sizeof smark, "%s/.release-rev", stage) &&
                                     !cx_fmt(srec, sizeof srec, "%s/.chain-snap", stage) &&
@@ -3814,7 +3858,14 @@ int main(int argc, char **argv) {
                         "fi", rev, rev)) {
                 char *shv[] = {(char *)"/bin/sh", (char *)"-c", dcmd, 0};
                 pr_result r;
-                if (!pr_run("chain-driver-diff", shv, root, 0, 30, &r) && r.rc == 0) {
+                int dt = pr_run("chain-driver-diff", shv, root, 0, 30, &r);
+                if (dt || r.residue) {
+                    int drc = (dt && r.timed_out && !r.residue) ? 124 : 2;
+                    if (r.why[0]) fprintf(stderr, "candidate-chain: %s\n", r.why);
+                    pr_free(&r);
+                    die_rc(drc, "chain-driver-diff", dpath);
+                }
+                if (r.rc == 0) {
                     char dsha[65];
                     int dfiles = 0;
                     const char * ob = r.out ? r.out : "";

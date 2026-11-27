@@ -525,7 +525,7 @@ int main(int argc, char **argv) {
         if (cx_fmt(p, sizeof p, "%s/unisacc.com", td) || cx_write(p, fake_prepare, strlen(fake_prepare))) return 2;
         if (cx_fmt(p, sizeof p, "%s/wf-prep/receipt.txt", work) || sy_unlink(p)) return 2;
         const char *initial_rows = "DONE\tp3\tx\nDONE\tgen1-lnx-x86_64\tx\n";
-        if (cx_write(checkpoint, initial_rows, strlen(initial_rows)) || cx_fmt(cmd, sizeof cmd, "cd '%s' && '%s' --phases '%s' --rev %s --out '%s' --lane wf-prepare --until wf-prepare --resume 2>&1", td, candidate, phases, revision, run)) return 2;
+        if (cx_write(checkpoint, initial_rows, strlen(initial_rows)) || cx_fmt(cmd, sizeof cmd, "cd '%s' && '%s' --phases '%s' --rev %s --out '%s' --tools-root '%s' --lane wf-prepare --until wf-prepare --resume 2>&1", td, candidate, phases, revision, run, td)) return 2;
         ck(sh(cmd, out, sizeof out) == 0 && has(out, "RECEIPT\twf-prepare\t") && has(out, "status=UNTIL"), "gen1-first-prepare-publishes-canonical-tag");
         saved = cx_read(checkpoint, &saved_n);
         ck(saved && has(saved, "DONE\twf-prepare\t") && !has(saved, "wf-prep-g1") && !has(saved, "gen1-osx"), "gen1-first-prepare-no-alias-or-sibling-mark");
@@ -653,9 +653,32 @@ int main(int argc, char **argv) {
                        candidate, troot, tout, td, td, tdest)) return 2;
             int trc = sh(gcmd, out, sizeof out);
             ck(trc == 124 && has(out, "timeout after 1 s (process group killed)") && has(out, "candidate-chain: gen1-timeout-stub:"), "whole-front-timeout-yields-124");
+            {   /* Inner pr_run residue on timeout must map to rc 2 (never 124). */
+                char rcmd[14000];
+                if (cx_fmt(rcmd, sizeof rcmd, "UNISACC_NP_FAULT=residue %s", gcmd)) return 2;
+                int res_rc = sh(rcmd, out, sizeof out);
+                ck(res_rc == 2 && has(out, "(injected survived)") && has(out, "candidate-chain: gen1-timeout-stub:"), "whole-front-inner-residue-yields-2");
+            }
             if (cx_write(tpath, "#!/bin/sh\necho 'whole-front: REFUSE synthetic bad input' >&2\nexit 2\n", 68)) return 2;
             int rrc = sh(gcmd, out, sizeof out);
             ck(rrc == 2 && has(out, "whole-front: REFUSE synthetic bad input") && has(out, "candidate-chain: gen1-timeout-stub:"), "whole-front-refusal-yields-2");
+            {   /* Non-whole-front path (gen1-entry-fixture bound_ctor_eb) timeout -> 124, inner residue -> 2. */
+                char gs[4600], gt[4700], gb[4700], gc[4600], go[4600], ncmd[14000];
+                if (cx_fmt(gs, sizeof gs, "%s/wfto-snap", td) || cx_fmt(gt, sizeof gt, "%s/tools", gs) ||
+                    cx_fmt(gb, sizeof gb, "%s/bound", gt) || cx_fmt(gc, sizeof gc, "%s/wfto-ctor", td) ||
+                    cx_fmt(go, sizeof go, "%s/wfto-gout", td) ||
+                    sy_mkdir(gs, 0755) || sy_mkdir(gt, 0755) || sy_mkdir(go, 0755)) return 2;
+                if (cx_write(gb, "#!/bin/sh\nshift\nexec \"$@\"\n", 26) || sy_chmod(gb, 0755) ||
+                    cx_write(gc, "#!/bin/sh\nsleep 3\n", 18) || sy_chmod(gc, 0755)) return 2;
+                if (cx_fmt(ncmd, sizeof ncmd, "UNISACC_CHAIN_PHASE_BOUND_S=1 '%s' --gen1-entry-fixture '%s' '%s' '%s' unused package '%s' lnx/arm64 fresh gen1-lnx-fixture-objects 2>&1",
+                           candidate, tout, gs, gc, go)) return 2;
+                int ntrc = sh(ncmd, out, sizeof out);
+                ck(ntrc == 124 && has(out, "timeout after 1 s (process group killed)") && has(out, "candidate-chain: gen1 objects:"), "non-wf-gen1-entry-timeout-yields-124");
+                if (cx_fmt(ncmd, sizeof ncmd, "UNISACC_NP_FAULT=residue UNISACC_CHAIN_PHASE_BOUND_S=1 '%s' --gen1-entry-fixture '%s' '%s' '%s' unused package '%s' lnx/arm64 fresh gen1-lnx-fixture-objects 2>&1",
+                           candidate, tout, gs, gc, go)) return 2;
+                int nrrc = sh(ncmd, out, sizeof out);
+                ck(nrrc == 2 && has(out, "(injected survived)") && has(out, "candidate-chain: gen1 objects:"), "non-wf-gen1-entry-inner-residue-yields-2");
+            }
         }
         /* A kernels attempt killed at its bound leaves g2/kernel-route (and possibly a copied
            kernel) without phase-6.tsv; chain-step then refuses the retry. The rule is a row of the
@@ -1550,9 +1573,28 @@ int main(int argc, char **argv) {
                  native_tool, troot, tout, base_td, base_td, tdest)) { ck(0, "fmt"); return 1; }
       int trc = sh(gcmd, out, sizeof out);
       ck(trc == 124 && has(out, "timeout after 1 s (process group killed)") && has(out, "candidate-chain: gen1-timeout-stub:"), "core-whole-front-timeout-yields-124");
+      { char rcmd[14000];
+        if (cx_fmt(rcmd, sizeof rcmd, "UNISACC_NP_FAULT=residue %s", gcmd)) { ck(0, "fmt"); return 1; }
+        int res_rc = sh(rcmd, out, sizeof out);
+        ck(res_rc == 2 && has(out, "(injected survived)") && has(out, "candidate-chain: gen1-timeout-stub:"), "core-whole-front-inner-residue-yields-2"); }
       if (cx_write(tpath, "#!/bin/sh\necho 'whole-front: REFUSE synthetic bad input' >&2\nexit 2\n", 68)) { ck(0, "wfref-write"); return 1; }
       int rrc = sh(gcmd, out, sizeof out);
-      ck(rrc == 2 && has(out, "whole-front: REFUSE synthetic bad input") && has(out, "candidate-chain: gen1-timeout-stub:"), "core-whole-front-refusal-yields-2"); }
+      ck(rrc == 2 && has(out, "whole-front: REFUSE synthetic bad input") && has(out, "candidate-chain: gen1-timeout-stub:"), "core-whole-front-refusal-yields-2");
+      { char gs[4600], gt[4700], gb[4700], gc[4600], go[4600], ncmd[14000];
+        if (cx_fmt(gs, sizeof gs, "%s/core-wfto-snap", base_td) || cx_fmt(gt, sizeof gt, "%s/tools", gs) ||
+            cx_fmt(gb, sizeof gb, "%s/bound", gt) || cx_fmt(gc, sizeof gc, "%s/core-wfto-ctor", base_td) ||
+            cx_fmt(go, sizeof go, "%s/core-wfto-gout", base_td)) { ck(0, "fmt"); return 1; }
+        (void)sy_mkdir(gs, 0755); (void)sy_mkdir(gt, 0755); (void)sy_mkdir(go, 0755);
+        if (cx_write(gb, "#!/bin/sh\nshift\nexec \"$@\"\n", 26) || sy_chmod(gb, 0755) ||
+            cx_write(gc, "#!/bin/sh\nsleep 3\n", 18) || sy_chmod(gc, 0755)) { ck(0, "ctor-write"); return 1; }
+        if (cx_fmt(ncmd, sizeof ncmd, "UNISACC_CHAIN_PHASE_BOUND_S=1 '%s' --gen1-entry-fixture '%s' '%s' '%s' unused package '%s' lnx/arm64 fresh gen1-lnx-fixture-objects 2>&1",
+                   native_tool, tout, gs, gc, go)) { ck(0, "fmt"); return 1; }
+        int ntrc = sh(ncmd, out, sizeof out);
+        ck(ntrc == 124 && has(out, "timeout after 1 s (process group killed)") && has(out, "candidate-chain: gen1 objects:"), "core-non-wf-gen1-entry-timeout-yields-124");
+        if (cx_fmt(ncmd, sizeof ncmd, "UNISACC_NP_FAULT=residue UNISACC_CHAIN_PHASE_BOUND_S=1 '%s' --gen1-entry-fixture '%s' '%s' '%s' unused package '%s' lnx/arm64 fresh gen1-lnx-fixture-objects 2>&1",
+                   native_tool, tout, gs, gc, go)) { ck(0, "fmt"); return 1; }
+        int nrrc = sh(ncmd, out, sizeof out);
+        ck(nrrc == 2 && has(out, "(injected survived)") && has(out, "candidate-chain: gen1 objects:"), "core-non-wf-gen1-entry-inner-residue-yields-2"); } }
     }
     if(group==0||group==2){ char cmd[14000], product[4400], self[4400], launcher[4400], body[9000];
       /* Reuse the identity-checked native candidate prepared above, not a cold compilation per call. */
