@@ -794,6 +794,19 @@ static int fc_check_chain_ready(const char *repo, long t0_ms, long budget_ms, ch
         return -1;
     }
 
+    const char *stage_expect_row[11] = {
+        "2a-derive\tPASS\t",
+        "2a-derive\tPASS\t",
+        "2a-derive\tPASS\t",
+        "2b-ratchets\tPASS\t",
+        "3a-cxmod-tri\tPASS\t",
+        "3b-cx0-extract\tPASS\t",
+        "5-candidate-chain\tPASS\t",
+        "10-envhygiene\tPASS\t",
+        "15-gen-all\tPASS\t",
+        "22-premerge-union\tPASS\t",
+        "25-tools-compile-shards\tPASS\t"
+    };
     int si;
     for (si = 0; si < 11; si++) {
         int bound_s = fc_budget_remaining_s(t0_ms, budget_ms, 55, detail, cap);
@@ -805,7 +818,7 @@ static int fc_check_chain_ready(const char *repo, long t0_ms, long budget_ms, ch
         av[ac++] = env_path; av[ac++] = env_home; av[ac++] = env_tmp; av[ac++] = env_ih;
         if (env_owner[0]) av[ac++] = env_owner;
         av[ac++] = "sh"; av[ac++] = uc; av[ac++] = "tools/chain-ready.cx"; av[ac++] = "--";
-        av[ac++] = "--repo"; av[ac++] = abs_repo; av[ac++] = "--only"; av[ac++] = (char *)stage_gates[si];
+        av[ac++] = "--repo"; av[ac++] = abs_repo; av[ac++] = "--stage"; av[ac++] = (char *)stage_names[si];
         av[ac] = 0; /* lint:allow R1-product runs target repo chain-ready under clean env -i */
         np_result r = {0}; char why[200];
         if (np_run(av, abs_repo, 0, bound_s, &r, why, sizeof why)) {
@@ -824,13 +837,15 @@ static int fc_check_chain_ready(const char *repo, long t0_ms, long budget_ms, ch
                         (tx_find(r.out, (long)r.outn, "\tFAIL\t", 6) >= 0 ||
                          tx_find(r.out, (long)r.outn, "READY=no", 8) >= 0 ||
                          tx_find(r.out, (long)r.outn, "READY\tno", 8) >= 0));
-        if (r.rc != 0 || !ready_yes || has_fail) {
+        int has_exp_row = (r.out && r.outn > 0 &&
+                           tx_find(r.out, (long)r.outn, stage_expect_row[si], (long)strlen(stage_expect_row[si])) >= 0);
+        if (r.rc != 0 || !ready_yes || has_fail || !has_exp_row) {
             char mline[256];
             fc_first_match_line(r.out, r.outn, "\tFAIL\t", "REFUSE", mline, sizeof mline);
             if (!mline[0] && r.err && r.errn > 0) fc_first_match_line(r.err, r.errn, "REFUSE", "FAIL", mline, sizeof mline);
             cx_fmt(why_tag, 64, "chain-ready-failed");
-            cx_fmt(detail, cap, "stage=%s rc=%d ready=%d detail=%s",
-                   stage_names[si], r.rc, ready_yes, mline[0] ? mline : "-");
+            cx_fmt(detail, cap, "stage=%s rc=%d ready=%d exp_row=%d detail=%s",
+                   stage_names[si], r.rc, ready_yes, has_exp_row, mline[0] ? mline : "-");
             np_free(&r);
             return -1;
         }

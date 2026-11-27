@@ -682,6 +682,16 @@ int main(int argc, char **argv) {
             "    printf 'CHECK_SHARD_REGISTRY\\tsources=9\\tshards=2\\tmissing=0\\textra=0\\tdup=0\\tstatus=PASS\\n'\n"
             "    exit 0 ;;\n"
             "  *chain-ready.cx*)\n"
+            "    st_arg=\"\"\n"
+            "    prev=\"\"\n"
+            "    for a in \"$@\"; do\n"
+            "      if [ \"$prev\" = \"--stage\" ]; then st_arg=\"$a\"; fi\n"
+            "      prev=\"$a\"\n"
+            "    done\n"
+            "    if [ -z \"$st_arg\" ]; then\n"
+            "      printf '0-stage-entry\\tFAIL\\tmissing-stage-arg\\nREADY=no\\n'; exit 1\n"
+            "    fi\n"
+            "    printf '%%s\\n' \"$st_arg\" >> .git/stages_ran.log\n"
             "    for v in $(env | cut -d= -f1); do\n"
             "      case \"$v\" in\n"
             "        UNISACC_IDENT_HELPER) ;;\n"
@@ -691,6 +701,9 @@ int main(int argc, char **argv) {
             "    if [ -z \"$UNISACC_IDENT_HELPER\" ] || [ ! -f \"$UNISACC_IDENT_HELPER\" ]; then\n"
             "      printf '20-ident-helper\\tFAIL\\tmissing\\nREADY=no\\n'; exit 1\n"
             "    fi\n"
+            "    if [ -f \".git/fail_stage_$st_arg\" ]; then\n"
+            "      printf 'stage-%%s\\tFAIL\\tinjected-stage-fail\\nREADY=no\\n' \"$st_arg\"; exit 1\n"
+            "    fi\n"
             "    if [ -f .git/bad_chain_ready ]; then\n"
             "      printf '19-chain-preflight\\tFAIL\\tpreflight-red\\nREADY=no\\n'; exit 1\n"
             "    fi\n"
@@ -698,7 +711,18 @@ int main(int argc, char **argv) {
             "    if [ -f .git/need_strace_path ]; then\n"
             "      case \":$PATH:\" in *\":$HOME/.local/bin:\"*) ;; *) printf '2a-derive\\tFAIL\\treadset-needs-strace\\nREADY=no\\n'; exit 1 ;; esac\n"
             "    fi\n"
-            "    printf '10-envhygiene\\tPASS\\tclean\\n20-ident-helper\\tPASS\\tok\\nREADY=yes\\n'\n"
+            "    case \"$st_arg\" in\n"
+            "      derive-a|derive-b|derive-c) printf '2a-derive\\tPASS\\tok\\n' ;;\n"
+            "      ratchets) printf '2b-ratchets\\tPASS\\tok\\n' ;;\n"
+            "      tri-chain-a) printf '3a-cxmod-tri\\tPASS\\tok\\n' ;;\n"
+            "      tri-chain-b) printf '3b-cx0-extract\\tPASS\\tok\\n' ;;\n"
+            "      tri-chain-c) printf '5-candidate-chain\\tPASS\\tok\\n' ;;\n"
+            "      env-root) printf '10-envhygiene\\tPASS\\tclean\\n' ;;\n"
+            "      gen-preflight) printf '15-gen-all\\tPASS\\tok\\n20-ident-helper\\tPASS\\tok\\n' ;;\n"
+            "      union-a) printf '22-premerge-union\\tPASS\\tok\\n' ;;\n"
+            "      union-b) printf '23-freeze-armed\\tPASS\\tok\\n24-root-current\\tPASS\\tok\\n25-tools-compile-shards\\tPASS\\tok\\n' ;;\n"
+            "    esac\n"
+            "    printf 'READY=yes\\n'\n"
             "    exit 0 ;;\n"
             "esac\n"
             "exit 0\n"
@@ -759,6 +783,28 @@ int main(int argc, char **argv) {
         pr_free(&r);
         cx_fmt(shcmd, sizeof shcmd, "rm -f '%s/.git/bad_chain_ready'", repo_g4);
         fc_sh(g_root, shcmd, 10, &r); pr_free(&r);
+
+        /* 14b1b: Gate (b) verifies --stage entry runs all 11 stages and fails closed on derive-b, union-a, union-b */
+        {
+            cx_fmt(shcmd, sizeof shcmd, "touch '%s/.git/fail_stage_derive-b'", repo_g4);
+            fc_sh(g_root, shcmd, 10, &r); pr_free(&r);
+            run_fc(env_g4, args, &r);
+            int bad_db = (r.rc == 2 && fc_has(&r, "REFUSE\tFREEZE_CUT\tchain-ready-failed") && fc_has(&r, "stage=derive-b"));
+            pr_free(&r);
+            cx_fmt(shcmd, sizeof shcmd, "rm -f '%s/.git/fail_stage_derive-b' && touch '%s/.git/fail_stage_union-a'", repo_g4, repo_g4);
+            fc_sh(g_root, shcmd, 10, &r); pr_free(&r);
+            run_fc(env_g4, args, &r);
+            int bad_ua = (r.rc == 2 && fc_has(&r, "REFUSE\tFREEZE_CUT\tchain-ready-failed") && fc_has(&r, "stage=union-a"));
+            pr_free(&r);
+            cx_fmt(shcmd, sizeof shcmd, "rm -f '%s/.git/fail_stage_union-a' && touch '%s/.git/fail_stage_union-b'", repo_g4, repo_g4);
+            fc_sh(g_root, shcmd, 10, &r); pr_free(&r);
+            run_fc(env_g4, args, &r);
+            int bad_ub = (r.rc == 2 && fc_has(&r, "REFUSE\tFREEZE_CUT\tchain-ready-failed") && fc_has(&r, "stage=union-b"));
+            ck(bad_db && bad_ua && bad_ub, "mut-gate-b-new-split-stages-derive-b-union-a-union-b-refused", &r);
+            pr_free(&r);
+            cx_fmt(shcmd, sizeof shcmd, "rm -f '%s/.git/fail_stage_union-b'", repo_g4);
+            fc_sh(g_root, shcmd, 10, &r); pr_free(&r);
+        }
 
         /* 14b2: Gate (b) staged timeout gives named refusal chain-ready-stage-timeout:<stage> */
         cx_fmt(shcmd, sizeof shcmd, "touch '%s/.git/slow_chain_ready'", repo_g4);
