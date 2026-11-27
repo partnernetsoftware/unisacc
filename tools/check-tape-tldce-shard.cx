@@ -16,6 +16,7 @@
  */
 #pragma unisa use cxlib.netpack
 #pragma unisa use cxlib.sessionroot
+#pragma unisa use cxlib.receipt
 #pragma unisa use sys.fs
 #pragma unisa use sys.posix
 #pragma unisa use sys.io
@@ -155,7 +156,11 @@ int main(int argc, char **argv) {
 
     /* (5) R1: handoff meta identity verification rejects mismatched candidate/manifest/state sha */
     {
-        char stf[4200], outf[4200], metaf[4200], st_sha[65], out_sha[65], meta_txt[1024];
+        char stf[4200], outf[4200], metaf[4200], st_sha[65], out_sha[65], in_sha[65], in_buf[256];
+        char candA[65], candB[65], mfA[65];
+        mm_fill(candA, 65, 'a', 64); candA[64] = 0;
+        mm_fill(candB, 65, 'b', 64); candB[64] = 0;
+        mm_fill(mfA, 65, 'c', 64); mfA[64] = 0;
         cx_fmt(stf, sizeof stf, "%s/h_st.bin", tmp);
         cx_fmt(outf, sizeof outf, "%s/h_out.bin", tmp);
         cx_fmt(metaf, sizeof metaf, "%s/h_st.bin.meta", tmp);
@@ -163,16 +168,15 @@ int main(int argc, char **argv) {
         (void)sy_write_file(outf, "OUT_PAYLOAD", 11, 0644);
         (void)sha_hex(stf, st_sha);
         (void)sha_hex(outf, out_sha);
-        cx_fmt(meta_txt, sizeof meta_txt,
-               "run_id=r1\ncand_sha=candA\nmf_sha=mfA\nstage=unit\nseq=0\nstate_sha=%s\nout_sha=%s\n",
-               st_sha, out_sha);
-        (void)sy_write_file(metaf, meta_txt, (long)strlen(meta_txt), 0644);
+        cx_fmt(in_buf, sizeof in_buf, "%s\tunit\t0", mfA);
+        cx_sha256_hex((const unsigned char *)in_buf, strlen(in_buf), in_sha);
+        (void)rc_write2(metaf, "r1", candA, in_sha, out_sha, st_sha, 0);
         char *av_ok[] = {"sh", "./unisacc.com", "tools/tape-tldce-shard.cx", "--",
-                         "--verify-handoff", metaf, stf, outf, "r1", "candA", "mfA", "unit", "0", 0};
+                         "--verify-handoff", metaf, stf, outf, "r1", candA, mfA, "unit", "0", 0};
         (void)run_tool(av_ok, root, 20, &rc, obuf, sizeof obuf);
         int ok1 = (rc == 0);
         char *av_bad[] = {"sh", "./unisacc.com", "tools/tape-tldce-shard.cx", "--",
-                          "--verify-handoff", metaf, stf, outf, "r1", "candB", "mfA", "unit", "0", 0};
+                          "--verify-handoff", metaf, stf, outf, "r1", candB, mfA, "unit", "0", 0};
         (void)run_tool(av_bad, root, 20, &rc, obuf, sizeof obuf);
         int ok2 = (rc != 0 && strstr(obuf, "handoff-identity-mismatch") != 0);
         ck(ok1 && ok2, "R1-handoff-identity-binding");

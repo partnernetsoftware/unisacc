@@ -24,6 +24,7 @@
  */
 #pragma unisa use cxlib.netpack
 #pragma unisa use cxlib.sessionroot
+#pragma unisa use cxlib.receipt
 #pragma unisa use sys.fs
 #pragma unisa use sys.posix
 #pragma unisa use sys.io
@@ -513,25 +514,56 @@ static int parse_kv_line(const char *buf, const char *key, char *val, size_t cap
     return -1;
 }
 
+static void sha_str_hex(const char *s, char hex[65]) {
+    cx_sha256_hex((const unsigned char *)s, strlen(s), hex);
+}
+
+static int parse_tab_kv(const char *txt, const char *key, char *out, size_t cap) {
+    size_t kl = strlen(key);
+    const char *p = txt;
+    while (*p) {
+        const char *nl = strchr(p, '\n');
+        size_t len = nl ? (size_t)(nl - p) : strlen(p);
+        if (len > kl + 1 && strncmp(p, key, kl) == 0 && p[kl] == '\t') {
+            size_t vn = len - kl - 1;
+            if (vn >= cap) return -1;
+            mm_copy(out, (long)cap, p + kl + 1, (long)vn);
+            out[vn] = 0;
+            return 0;
+        }
+        if (!nl) break;
+        p = nl + 1;
+    }
+    return -1;
+}
+
 static int write_handoff_meta(const char *meta_path, const char *run_id, const char *cand_sha,
                               const char *mf_sha, const char *stage, int seq,
                               const char *st_path, const char *out_path) {
-    char st_sha[65], out_sha[65], txt[1024];
+    char st_sha[65], out_sha[65], in_sha[65], in_buf[512];
     if (sha_file_hex(st_path, st_sha) != 0) return -1;
     if (out_path && !(out_path[0] == '-' && out_path[1] == 0)) {
         if (sha_file_hex(out_path, out_sha) != 0) return -1;
     } else {
-        cx_fmt(out_sha, sizeof out_sha, "-");
+        mm_copy(out_sha, 65, st_sha, 65);
     }
-    if (cx_fmt(txt, sizeof txt,
-               "run_id=%s\ncand_sha=%s\nmf_sha=%s\nstage=%s\nseq=%d\nstate_sha=%s\nout_sha=%s\n",
-               run_id, cand_sha, mf_sha, stage, seq, st_sha, out_sha) != 0) return -1;
-    return sy_write_atomic(meta_path, txt, (long)strlen(txt), 0644);
+    if (cx_fmt(in_buf, sizeof in_buf, "%s\t%s\t%d", mf_sha, stage, seq) != 0) return -1;
+    sha_str_hex(in_buf, in_sha);
+    return rc_write2(meta_path, run_id, cand_sha, in_sha, out_sha, st_sha, 0);
 }
 
 static int verify_handoff_meta(const char *meta_path, const char *st_path, const char *out_path,
                                const char *exp_run, const char *exp_cand, const char *exp_mf,
                                const char *exp_stage, int exp_seq) {
+    if (rc_fresh(meta_path, exp_run) != 0 ||
+        rc_need(meta_path, "candidate_sha", "hex64") != 0 ||
+        rc_need(meta_path, "inputs_sha", "hex64") != 0 ||
+        rc_need(meta_path, "output_sha", "hex64") != 0 ||
+        rc_need(meta_path, "producer_sha", "hex64") != 0 ||
+        rc_need(meta_path, "rc", "int") != 0) {
+        sy_eprintf("tape-tldce-shard: REFUSE handoff-identity-mismatch stage=%s seq=%d (%s)\n", exp_stage, exp_seq, rc_why());
+        return -1;
+    }
     unsigned char *mb = 0; int64_t mn = 0;
     if (sy_read_file(meta_path, &mb, &mn, 65536) != 0 || !mb || mn <= 0) {
         if (mb) mm_free(mb);
@@ -542,19 +574,22 @@ static int verify_handoff_meta(const char *meta_path, const char *st_path, const
     if (!txt) { mm_free(mb); return -1; }
     mm_copy(txt, (long)mn + 1L, mb, (long)mn); txt[mn] = 0;
     mm_free(mb);
-    char r_id[128], c_sha[128], m_sha[128], stg[64], sq[32], s_sha[128], o_sha[128], exp_sq[32];
-    char cur_st[65], cur_out[65];
-    cx_fmt(exp_sq, sizeof exp_sq, "%d", exp_seq);
-    int ok = (parse_kv_line(txt, "run_id", r_id, sizeof r_id) == 0 && strcmp(r_id, exp_run) == 0 &&
-              parse_kv_line(txt, "cand_sha", c_sha, sizeof c_sha) == 0 && strcmp(c_sha, exp_cand) == 0 &&
-              parse_kv_line(txt, "mf_sha", m_sha, sizeof m_sha) == 0 && strcmp(m_sha, exp_mf) == 0 &&
-              parse_kv_line(txt, "stage", stg, sizeof stg) == 0 && strcmp(stg, exp_stage) == 0 &&
-              parse_kv_line(txt, "seq", sq, sizeof sq) == 0 && strcmp(sq, exp_sq) == 0 &&
-              parse_kv_line(txt, "state_sha", s_sha, sizeof s_sha) == 0 &&
-              parse_kv_line(txt, "out_sha", o_sha, sizeof o_sha) == 0 &&
-              sha_file_hex(st_path, cur_st) == 0 && strcmp(cur_st, s_sha) == 0);
-    if (ok && out_path && !(out_path[0] == '-' && out_path[1] == 0)) {
-        ok = (sha_file_hex(out_path, cur_out) == 0 && strcmp(cur_out, o_sha) == 0);
+    char c_sha[128], i_sha[128], p_sha[128], o_sha[128], r_rc[32];
+    char exp_in[65], in_buf[512], cur_st[65], cur_out[65];
+    if (cx_fmt(in_buf, sizeof in_buf, "%s\t%s\t%d", exp_mf, exp_stage, exp_seq) != 0) { mm_free(txt); return -1; }
+    sha_str_hex(in_buf, exp_in);
+    int ok = (parse_tab_kv(txt, "candidate_sha", c_sha, sizeof c_sha) == 0 && strcmp(c_sha, exp_cand) == 0 &&
+              parse_tab_kv(txt, "inputs_sha", i_sha, sizeof i_sha) == 0 && strcmp(i_sha, exp_in) == 0 &&
+              parse_tab_kv(txt, "producer_sha", p_sha, sizeof p_sha) == 0 &&
+              parse_tab_kv(txt, "output_sha", o_sha, sizeof o_sha) == 0 &&
+              parse_tab_kv(txt, "rc", r_rc, sizeof r_rc) == 0 && strcmp(r_rc, "0") == 0 &&
+              sha_file_hex(st_path, cur_st) == 0 && strcmp(cur_st, p_sha) == 0);
+    if (ok) {
+        if (out_path && !(out_path[0] == '-' && out_path[1] == 0)) {
+            ok = (sha_file_hex(out_path, cur_out) == 0 && strcmp(cur_out, o_sha) == 0);
+        } else {
+            ok = (strcmp(cur_st, o_sha) == 0);
+        }
     }
     mm_free(txt);
     if (!ok) {
@@ -567,24 +602,28 @@ static int verify_handoff_meta(const char *meta_path, const char *st_path, const
 static int verify_reuse_identity(const char *id_path, const char *cand_sha, const char *tl_sha,
                                  const char *drv_nat, const char *drv_slice,
                                  const char *so_path, const char *run_bin) {
+    if (rc_fresh(id_path, "reuse-v2") != 0 ||
+        rc_need(id_path, "candidate_sha", "hex64") != 0 ||
+        rc_need(id_path, "inputs_sha", "hex64") != 0 ||
+        rc_need(id_path, "output_sha", "hex64") != 0 ||
+        rc_need(id_path, "producer_sha", "hex64") != 0 ||
+        rc_need(id_path, "rc", "int") != 0) return -1;
     unsigned char *mb = 0; int64_t mn = 0;
     if (sy_read_file(id_path, &mb, &mn, 65536) != 0 || !mb || mn <= 0) { if (mb) mm_free(mb); return -1; }
     char *txt = (char *)mm_alloc((long)mn + 1L);
     if (!txt) { mm_free(mb); return -1; }
     mm_copy(txt, (long)mn + 1L, mb, (long)mn); txt[mn] = 0;
     mm_free(mb);
-    char c_sha[128], t_sha[128], n_sha[128], sl_sha[128], s_sha[128], r_sha[128];
-    char gn[65], gsl[65], gs[65], gr[65];
-    int ok = (parse_kv_line(txt, "cand_sha", c_sha, sizeof c_sha) == 0 && strcmp(c_sha, cand_sha) == 0 &&
-              parse_kv_line(txt, "tl_sha", t_sha, sizeof t_sha) == 0 && strcmp(t_sha, tl_sha) == 0 &&
-              parse_kv_line(txt, "drv_nat_sha", n_sha, sizeof n_sha) == 0 &&
-              parse_kv_line(txt, "drv_slice_sha", sl_sha, sizeof sl_sha) == 0 &&
-              parse_kv_line(txt, "so_sha", s_sha, sizeof s_sha) == 0 &&
-              parse_kv_line(txt, "run_bin_sha", r_sha, sizeof r_sha) == 0 &&
-              sha_file_hex(drv_nat, gn) == 0 && strcmp(gn, n_sha) == 0 &&
-              sha_file_hex(drv_slice, gsl) == 0 && strcmp(gsl, sl_sha) == 0 &&
-              sha_file_hex(so_path, gs) == 0 && strcmp(gs, s_sha) == 0 &&
-              sha_file_hex(run_bin, gr) == 0 && strcmp(gr, r_sha) == 0);
+    char c_sha[128], i_sha[128], o_sha[128], r_rc[32];
+    char gn[65], gsl[65], gs[65], gr[65], exp_out[65], obuf[512];
+    int ok = (parse_tab_kv(txt, "candidate_sha", c_sha, sizeof c_sha) == 0 && strcmp(c_sha, cand_sha) == 0 &&
+              parse_tab_kv(txt, "inputs_sha", i_sha, sizeof i_sha) == 0 && strcmp(i_sha, tl_sha) == 0 &&
+              parse_tab_kv(txt, "output_sha", o_sha, sizeof o_sha) == 0 &&
+              parse_tab_kv(txt, "rc", r_rc, sizeof r_rc) == 0 && strcmp(r_rc, "0") == 0 &&
+              sha_file_hex(drv_nat, gn) == 0 && sha_file_hex(drv_slice, gsl) == 0 &&
+              sha_file_hex(so_path, gs) == 0 && sha_file_hex(run_bin, gr) == 0 &&
+              cx_fmt(obuf, sizeof obuf, "%s\n%s\n%s\n%s", gn, gsl, gs, gr) == 0);
+    if (ok) { sha_str_hex(obuf, exp_out); ok = (strcmp(o_sha, exp_out) == 0); }
     mm_free(txt);
     return ok ? 0 : -1;
 }
@@ -592,13 +631,12 @@ static int verify_reuse_identity(const char *id_path, const char *cand_sha, cons
 static int write_reuse_identity(const char *id_path, const char *cand_sha, const char *tl_sha,
                                 const char *drv_nat, const char *drv_slice,
                                 const char *so_path, const char *run_bin) {
-    char gn[65], gsl[65], gs[65], gr[65], txt[1024];
+    char gn[65], gsl[65], gs[65], gr[65], obuf[512], out_sha[65];
     if (sha_file_hex(drv_nat, gn) != 0 || sha_file_hex(drv_slice, gsl) != 0 ||
         sha_file_hex(so_path, gs) != 0 || sha_file_hex(run_bin, gr) != 0) return -1;
-    if (cx_fmt(txt, sizeof txt,
-               "cand_sha=%s\ntl_sha=%s\ndrv_nat_sha=%s\ndrv_slice_sha=%s\nso_sha=%s\nrun_bin_sha=%s\n",
-               cand_sha, tl_sha, gn, gsl, gs, gr) != 0) return -1;
-    return sy_write_atomic(id_path, txt, (long)strlen(txt), 0644);
+    if (cx_fmt(obuf, sizeof obuf, "%s\n%s\n%s\n%s", gn, gsl, gs, gr) != 0) return -1;
+    sha_str_hex(obuf, out_sha);
+    return rc_write2(id_path, "reuse-v2", cand_sha, tl_sha, out_sha, cand_sha, 0);
 }
 
 static int touch_empty(const char *path) {

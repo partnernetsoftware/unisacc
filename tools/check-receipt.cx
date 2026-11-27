@@ -17,7 +17,12 @@ static void put(const char *rel, const char *s) {
     if (cx_write(p, s, strlen(s))) { fprintf(stderr, "check-receipt: cannot write %s\n", p); exit(2); }
 }
 static int hash(const char *ph, char h[65]) { return rc_hash_inputs(root, rd, tb, ph, h); }
-int main(void) {
+int main(int argc, char **argv) {
+    const char *opt_run_id = 0, *opt_out = 0;
+    for (int ai = 1; ai < argc; ai++) {
+        if (!strcmp(argv[ai], "--run-id") && ai + 1 < argc) opt_run_id = argv[++ai];
+        else if (!strcmp(argv[ai], "--out") && ai + 1 < argc) opt_out = argv[++ai];
+    }
     char h0[65], h1[65], up[65], t[500]; int i;
     char d[400];
     if (sy_mkdtemp(sy_tmpdir(), "recfix-", d, sizeof d)) { fprintf(stderr, "check-receipt: no tmpdir\n"); return 2; }
@@ -90,6 +95,32 @@ int main(void) {
             ok(rc_need(rec_del, "run_id", "id") == 2, "rc_need delete-run-step missing file refuses rc=2");
             ok(rc_fresh(rec_del, "run-1") == 2, "rc_fresh delete-run-step missing file refuses rc=2");
         }
+        {
+            char rec_dup[600], rec_noterm[600], rec_nul[600], nulb[32];
+            cx_fmt(rec_dup, sizeof rec_dup, "%s/rec/dup.receipt", root);
+            cx_fmt(rec_noterm, sizeof rec_noterm, "%s/rec/noterm.receipt", root);
+            cx_fmt(rec_nul, sizeof rec_nul, "%s/rec/nul.receipt", root);
+            cx_write(rec_dup, "run_id\ta\nrun_id\tb\n", 18);
+            cx_write(rec_noterm, "run_id\ta", 8);
+            memcpy(nulb, "run_id\ta\0b\n", 11);
+            cx_write(rec_nul, nulb, 11);
+            ok(rc_need(rec_dup, "run_id", "id") == 2, "rc_need duplicate key refuses rc=2");
+            ok(rc_need(rec_noterm, "run_id", "id") == 2, "rc_need unterminated line refuses rc=2");
+            ok(rc_need(rec_nul, "run_id", "id") == 2, "rc_need embedded NUL refuses rc=2");
+            {
+                char rec_sw[600], sw_buf[512];
+                cx_fmt(rec_sw, sizeof rec_sw, "%s/rec/swapped.receipt", root);
+                cx_fmt(sw_buf, sizeof sw_buf,
+                       "run_id\trun-2\ncandidate_sha\t%s\ninputs_sha\t%s\noutput_sha\t%s\nproducer_sha\t%s\nrc\t0\nbinding_sha\t%s\n",
+                       cand, h0, up, prod, cand);
+                cx_write(rec_sw, sw_buf, strlen(sw_buf));
+                ok(rc_fresh(rec_sw, "run-2") == 2, "rc_fresh swapped run_id without binding_sha refuses rc=2");
+            }
+        }
+    }
+    if (opt_run_id && opt_out) {
+        char c64[65]; memset(c64, 'e', 64); c64[64] = 0;
+        (void)rc_write2(opt_out, opt_run_id, c64, h0, up, c64, bad ? 1 : 0);
     }
     cx_rmtree(d);
     printf("CHECK_RECEIPT\ttotal=%d\tfailed=%d\n", total, bad);
