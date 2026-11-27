@@ -769,12 +769,141 @@ static int run_flow_shards(const char *label, const char *const *shards, int nsh
     return (failed || r != 0) ? 1 : 0;
 }
 
+static int ccx_stamp(const char *repo, const char *tmp, char *out, int cap) {
+    char source[2048], tree[128];
+    const char *inputs = "git rev-parse HEAD && git hash-object -- unisacc.com tools/precommit.cx tools/check-precommit-gates.cx tests/precommit-gates.tsv";
+    if (sh(inputs, source, sizeof source, 0)) return 1;
+    {   char cmd[2400];
+        if (cx_fmt(cmd, sizeof cmd, "git -C '%s' diff --quiet HEAD -- && git -C '%s' rev-parse HEAD", repo, repo) ||
+            sh(cmd, tree, sizeof tree, 0)) return 1;
+    }
+    return cx_fmt(out, cap, "ccx-ready-v1\ndir=%s\n%s%s", tmp, source, tree);
+}
+
+static int ccx_setup_repo(const char *tmp, char *out, int cap, int warm_tools) {
+    static char cmd[6000];
+    char root2[2048];
+    const char *warm = warm_tools
+        ? " && ( sh ./unisacc.com tools/precommit.cx -- --gates >/dev/null 2>&1 & sh ./unisacc.com tools/cx-lint.cx -- --help >/dev/null 2>&1 & sh ./unisacc.com tools/derive.cx -- --help >/dev/null 2>&1 & sh ./unisacc.com tools/ratchets.cx -- >/dev/null 2>&1 & wait )"
+        : "";
+    if (sy_realpath(".", root2, sizeof root2) < 0) return -1;
+    if (cx_fmt(cmd, sizeof cmd,
+        "mkdir -p '%s/repo' && git -C '%s' archive HEAD | tar -x -C '%s/repo' && "
+        "cp '%s/tools/precommit.cx' '%s/repo/tools/precommit.cx' && "
+        "cp '%s/tests/precommit-gates.tsv' '%s/repo/tests/precommit-gates.tsv' && "
+        "ln -s '%s/unisacc.com' '%s/repo/unisacc.com' && "
+        "cd '%s/repo' && git init -q && git config user.name pcg && git config user.email pcg@e && "
+        "git add -A && sh '%s/unisacc.com' '%s/tools/tool-index.cx' -- --tables --root '%s/repo' >/dev/null 2>&1 && "
+        "git add build/table-index.tsv && git commit -qm base%s && echo PREP_OK",
+        tmp, root2, tmp, root2, tmp, root2, tmp, root2, tmp, tmp, root2, root2, tmp, warm)) return -1;
+    return sh(cmd, out, cap, 0);
+}
+
+static int ccx_consume_ready(char *tmp, size_t tcap) {
+    char rpath[2500], flkp[2560], repo[2400], want[2600];
+    const char *home = sy_env("HOME");
+    unsigned char *saved = 0;
+    int64_t n = 0;
+    int lfd, li, bad = 1;
+    if (!home || !home[0] || cx_fmt(rpath, sizeof rpath, "%s/.cache/unisacc/check-precommit-gates/fx-canary-cxlib.ready", home) ||
+        cx_fmt(flkp, sizeof flkp, "%s/.cache/unisacc/check-precommit-gates/fx-canary-cxlib.flock", home))
+        return 1;
+    lfd = sy_open(flkp, 2 | 64, 0600);
+    if (lfd >= 0) for (li = 0; li < 600; li++) { if (sy_lockf(lfd, 1, 0) == 0) break; sy_sleep_ms(100); }
+    if (!sy_read_file(rpath, &saved, &n, 4096) && saved && n > 16 && !strncmp((const char *)saved, "ccx-ready-v1\ndir=", 17)) {
+        long i = 17, k = 0;
+        while (i < n && saved[i] != '\n' && k + 1 < (long)tcap) tmp[k++] = (char)saved[i++];
+        tmp[k] = 0;
+        if (k > 0 && saved[i] == '\n' && !cx_fmt(repo, sizeof repo, "%s/repo", tmp) &&
+            !ccx_stamp(repo, tmp, want, sizeof want) && n == (int64_t)strlen(want) &&
+            !memcmp(saved, want, (size_t)n) && !sy_unlink(rpath))
+            bad = 0;
+    }
+    free(saved);
+    if (lfd >= 0) { (void)sy_lockf(lfd, 0, 0); sy_close(lfd); }
+    return bad;
+}
+
+static void group_canary_cxlib(int prepared) {
+    static char out[16384], cmd[4096], tmp[256];
+    long nonce = sy_now_ms();
+    int pid = sy_pid(), run_rc;
+    if (prepared) {
+        if (ccx_consume_ready(tmp, sizeof tmp) != 0) die("fixture material identity");
+    } else {
+        int setup_rc, setup_ok;
+        if (cx_fmt(tmp, sizeof tmp, "%s/pc-ccx-%d-%ld", sy_tmpdir(), pid, nonce)) { ck(0, "canary-cxlib.tmp"); return; }
+        setup_rc = ccx_setup_repo(tmp, out, sizeof out, 0);
+        setup_ok = (setup_rc == 0 && has(out, "PREP_OK\n"));
+        ck(setup_ok, "canary.cxlib-fixture-setup");
+        if (!setup_ok) { if (failed) sy_printf("%s\n", out); (void)sy_remove_all(tmp); return; }
+    }
+    if (cx_fmt(cmd, sizeof cmd,
+        "cd '%s/repo' && printf '/* canary cxlib touch %d-%ld */\\n' >> tools/cxlib/platformscope.cx && "
+        "git add tools/cxlib/platformscope.cx && "
+        "sh ./unisacc.com tools/precommit.cx > cc.out 2> cc.err; echo CCRC=$?; "
+        "cat cc.out cc.err | grep -c 'AFFECTED_CANARY_PREWARM basis=worktree-binary prewarm_ms=' | sed 's/^/CCPW=/'; "
+        "cat cc.out cc.err | grep -c 'AFFECTED_CANARY ok basis=worktree-binary prewarm_ms=' | sed 's/^/CCOK=/'; "
+        "cat cc.out cc.err | grep -c 'BLOCKED affected-canary' | sed 's/^/CCBLK=/'",
+        tmp, pid, nonce)) {
+        (void)sy_remove_all(tmp);
+        ck(0, "canary-cxlib.fmt"); return;
+    }
+    run_rc = sh(cmd, out, sizeof out, 0);
+    (void)sy_remove_all(tmp);
+    ck(run_rc == 0 && has(out, "CCRC=0\n") && has(out, "CCPW=1\n") && has(out, "CCOK=1\n") && has(out, "CCBLK=0\n"), "canary.cxlib-change-prewarms-and-passes");
+    if (failed) sy_printf("%s\n", out);
+}
+
 int main(int argc, char **argv) {
     if (argc == 3 && tx_eqz(argv[1], "--fixture-register-tool")) return pcg_fixture_register(argv[2]);
     if (argc == 4 && tx_eqz(argv[1], "--fixture-batch")) return pcg_fixture_batch(argv[2],argv[3]);
     if (argc == 4 && tx_eqz(argv[1], "--prepare")) {
         if (strspn(argv[2], "abcdefghijklmnopqrstuvwxyz-") != strlen(argv[2])) return 2;
         if(tx_eqz(argv[3],"layout")){
+            if (tx_eqz(argv[2], "canary-cxlib")) {
+                static char out2[8192];
+                char tmp[256], cdir[2400], rpath[2500], flkp[2560], repo[2400], stamp[2600];
+                const char *home = sy_env("HOME");
+                long nonce = sy_now_ms();
+                int pid = sy_pid(), lfd, li, setup_rc;
+                ensure_self_bin();
+                if (sy_cwd(root, sizeof root) || !home || !home[0] ||
+                    cx_fmt(cdir, sizeof cdir, "%s/.cache/unisacc/check-precommit-gates", home) ||
+                    cx_fmt(rpath, sizeof rpath, "%s/fx-canary-cxlib.ready", cdir) ||
+                    cx_fmt(flkp, sizeof flkp, "%s/fx-canary-cxlib.flock", cdir) ||
+                    cx_fmt(tmp, sizeof tmp, "%s/pc-ccx-%d-%ld", sy_tmpdir(), pid, nonce) ||
+                    cx_fmt(repo, sizeof repo, "%s/repo", tmp)) die("path");
+                (void)sy_mkdir_all(cdir, 0755);
+                lfd = sy_open(flkp, 2 | 64, 0600);
+                if (lfd >= 0) for (li = 0; li < 600; li++) { if (sy_lockf(lfd, 1, 0) == 0) break; sy_sleep_ms(100); }
+                if (sy_exists(rpath) == 1) {
+                    unsigned char *old = 0; int64_t on = 0;
+                    if (!sy_read_file(rpath, &old, &on, 4096) && old && on > 16 && !strncmp((const char *)old, "ccx-ready-v1\ndir=", 17)) {
+                        char oldd[256]; long i = 17, k = 0;
+                        while (i < on && old[i] != '\n' && k + 1 < (long)sizeof oldd) oldd[k++] = (char)old[i++];
+                        oldd[k] = 0;
+                        if (k > 0) (void)sy_remove_all(oldd);
+                    }
+                    free(old);
+                    (void)sy_unlink(rpath);
+                }
+                setup_rc = ccx_setup_repo(tmp, out2, sizeof out2, 1);
+                if (setup_rc != 0 || !has(out2, "PREP_OK\n")) {
+                    sy_eprintf("PCG_PREP_CANARY\trc=%d\n%s\n", setup_rc, out2);
+                    (void)sy_remove_all(tmp);
+                    if (lfd >= 0) { (void)sy_lockf(lfd, 0, 0); sy_close(lfd); }
+                    die(setup_rc == 124 ? "canary-cxlib fixture setup deadline" : "canary-cxlib fixture setup");
+                }
+                if (ccx_stamp(repo, tmp, stamp, sizeof stamp) || sy_write_atomic(rpath, stamp, strlen(stamp), 0600)) {
+                    (void)sy_remove_all(tmp);
+                    if (lfd >= 0) { (void)sy_lockf(lfd, 0, 0); sy_close(lfd); }
+                    die("fixture readiness seal");
+                }
+                if (lfd >= 0) { (void)sy_lockf(lfd, 0, 0); sy_close(lfd); }
+                sy_printf("PREPARED\tfixture=canary-cxlib\ttool=layout\tno-test-result\n");
+                return 0;
+            }
             char stamp[2400];
             setup(argv[2],0);
             if(fixture_stamp(stamp,sizeof stamp)||sy_write_atomic(ready,stamp,strlen(stamp),0600))
@@ -798,12 +927,12 @@ int main(int argc, char **argv) {
         if (tx_eqz(argv[a], "--cases") && a + 1 < argc) group = argv[++a];
         else if (tx_eqz(argv[a], "--bench") && a + 1 < argc) bn = argv[++a];
         else if (tx_eqz(argv[a], "--prepared")) prepared=1;
-        else { sy_eprintf("check-precommit-gates: usage: check-precommit-gates.cx [-- --cases na|reuse|toolsreg|toolsreg-a|toolsreg-b|toolsreg-c|toolsreg-d|pc|all | --bench before|after]\n"); return 2; }
+        else { sy_eprintf("check-precommit-gates: usage: check-precommit-gates.cx [-- --cases na|canary-cxlib|reuse|toolsreg|toolsreg-a|toolsreg-b|toolsreg-c|toolsreg-d|pc|all | --bench before|after]\n"); return 2; }
     }
     if (bn && (tx_eqz(bn, "before") || tx_eqz(bn, "after"))) { setup("bench",prepared); bench(bn); unlock(); return 0; }
     if (!group || tx_eqz(group, "all")) {
-        static const char *const all_s[] = {"na", "reuse-verdict", "reuse-key", "reuse-commit", "toolsreg-a", "toolsreg-a2", "toolsreg-b", "toolsreg-c", "toolsreg-d", "tree-isolate", "stale-lock", "merge-disjoint"};
-        return run_flow_shards("all", all_s, 12, 4, t0);
+        static const char *const all_s[] = {"na", "canary-cxlib", "reuse-verdict", "reuse-key", "reuse-commit", "toolsreg-a", "toolsreg-a2", "toolsreg-b", "toolsreg-c", "toolsreg-d", "tree-isolate", "stale-lock", "merge-disjoint"};
+        return run_flow_shards("all", all_s, 13, 4, t0);
     }
     if (tx_eqz(group, "pc")) {
         static const char *const pc_s[] = {"tree-isolate", "stale-lock", "merge-disjoint"};
@@ -817,7 +946,8 @@ int main(int argc, char **argv) {
         static const char *const tr_s[] = {"toolsreg-a", "toolsreg-a2", "toolsreg-b", "toolsreg-c", "toolsreg-d"};
         return run_flow_shards("toolsreg", tr_s, 5, 5, t0);
     }
-    if (group && (tx_eqz(group, "tree-isolate") || tx_eqz(group, "stale-lock") || tx_eqz(group, "stale-lock-core") || tx_eqz(group, "stale-lock-e2e") || tx_eqz(group, "merge-disjoint"))) {
+    if (group && (tx_eqz(group, "canary-cxlib") || tx_eqz(group, "tree-isolate") || tx_eqz(group, "stale-lock") || tx_eqz(group, "stale-lock-core") || tx_eqz(group, "stale-lock-e2e") || tx_eqz(group, "merge-disjoint"))) {
+        if (tx_eqz(group, "canary-cxlib")) group_canary_cxlib(prepared);
         if (tx_eqz(group, "tree-isolate")) group_tree_isolate();
         if (tx_eqz(group, "stale-lock") || tx_eqz(group, "stale-lock-core")) group_stale_lock();
         if (tx_eqz(group, "stale-lock") || tx_eqz(group, "stale-lock-e2e")) group_stale_lock_e2e();
@@ -825,7 +955,7 @@ int main(int argc, char **argv) {
         sy_printf("CHECK_PRECOMMIT_GATES\tgroup=%s\tfailed=%d\twall_ms=%ld\n", group, failed, sy_now_ms() - t0);
         return failed ? 1 : 0;
     }
-    if (!tx_eqz(group, "na") && !tx_eqz(group, "reuse") && !tx_eqz(group, "reuse-verdict") && !tx_eqz(group, "reuse-key") && !tx_eqz(group, "reuse-commit") && !tx_eqz(group, "toolsreg") && !tx_eqz(group, "toolsreg-a") && !tx_eqz(group, "toolsreg-a2") && !tx_eqz(group, "toolsreg-b") && !tx_eqz(group, "toolsreg-c") && !tx_eqz(group, "toolsreg-d")) { sy_eprintf("check-precommit-gates: usage: check-precommit-gates.cx [-- --cases na|reuse|reuse-verdict|reuse-key|reuse-commit|toolsreg|toolsreg-a|toolsreg-a2|toolsreg-b|toolsreg-c|toolsreg-d|tree-isolate|stale-lock|merge-disjoint|pc|all | --bench before|after]\n"); return 2; }
+    if (!tx_eqz(group, "na") && !tx_eqz(group, "reuse") && !tx_eqz(group, "reuse-verdict") && !tx_eqz(group, "reuse-key") && !tx_eqz(group, "reuse-commit") && !tx_eqz(group, "toolsreg") && !tx_eqz(group, "toolsreg-a") && !tx_eqz(group, "toolsreg-a2") && !tx_eqz(group, "toolsreg-b") && !tx_eqz(group, "toolsreg-c") && !tx_eqz(group, "toolsreg-d")) { sy_eprintf("check-precommit-gates: usage: check-precommit-gates.cx [-- --cases na|canary-cxlib|reuse|reuse-verdict|reuse-key|reuse-commit|toolsreg|toolsreg-a|toolsreg-a2|toolsreg-b|toolsreg-c|toolsreg-d|tree-isolate|stale-lock|merge-disjoint|pc|all | --bench before|after]\n"); return 2; }
     setup(group,prepared);
     if (tx_eqz(group, "na")) group_na();
     else if (tx_eqz(group, "toolsreg")) group_toolsreg(0);
