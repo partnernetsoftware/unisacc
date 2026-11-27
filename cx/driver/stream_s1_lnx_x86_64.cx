@@ -1,0 +1,316 @@
+#pragma unisa module stream_s1
+#pragma unisa use runtime.packagefooter
+#pragma unisa use driver.tape_soload
+#pragma unisa use sys.env
+#pragma unisa use sys.fs
+#pragma unisa use sys.posix
+#pragma unisa use sys.io
+#pragma unisa use sys.sha
+#pragma unisa use mem.heap
+#pragma unisa use mem.bytes
+/* M1 authoritative embedded-carrier stream_s1 for lnx/x86_64:
+ * - Zero dependency on runtime.stream_attributes (no native cxsa_valid, no fallback).
+ * - Loads tape/lnx-x86_64/{manifest.tsv,tapemode.so,m53.tapeslice} from the APE's
+ *   P3/P4 package body (located via packagefooter_locate_bytes).
+ * - Returns 1 (valid), 0 (invalid attr table), or -2 (integrity/carrier refusal with
+ *   M53_M1_REFUSE\treason=<name>\tdetail=<int> on stderr). */
+
+enum {
+    M53_M1_UNBOOTED = 0,
+    M53_M1_READY = 2,
+    M53_M1_REFUSED = 3,
+    M53_M1_MAX_APE = 67108864L,
+    M53_M1_MAX_IN = 16777216L,
+    M53_M1_MASK = 383ULL
+};
+
+static int m53_m1_state;
+static int m53_m1_detail;
+static char m53_m1_reason[64];
+static unsigned char *m53_m1_slice;
+static long m53_m1_slice_len;
+static unsigned long long m53_m1_code_len;
+static unsigned long long m53_m1_data_off;
+static unsigned long long m53_m1_data_len;
+static unsigned long long m53_m1_bss_size;
+static tsl_img_t m53_m1_tsl;
+static void *m53_m1_bind_fn;
+static void *m53_m1_disp_fn;
+static void *m53_m1_run_fn;
+
+static long m53_m1_len(const char *s, long cap) {
+    long i = 0;
+    if (!s) return 0;
+    while (i < cap && s[i]) i++;
+    return i;
+}
+
+static void m53_m1_cpy(char *dst, long cap, const char *src) {
+    long i = 0;
+    if (!dst || cap <= 0) return;
+    if (src) while (src[i] && i + 1 < cap) { dst[i] = src[i]; i++; }
+    dst[i] = 0;
+}
+
+static int m53_m1_eq(const char *a, long al, const char *b, long bl) {
+    long i = 0;
+    if (al != bl) return 0;
+    while (i < al) { if (a[i] != b[i]) return 0; i++; }
+    return 1;
+}
+
+static unsigned long long m53_m1_u64(const unsigned char *p) {
+    unsigned long long v = 0;
+    int i;
+    for (i = 7; i >= 0; i--) v = (v << 8) | (unsigned long long)p[i];
+    return v;
+}
+
+static void m53_m1_hex(const unsigned char h[32], char out[65]) {
+    static const char hx[] = "0123456789abcdef";
+    int i;
+    for (i = 0; i < 32; i++) {
+        out[i * 2] = hx[(h[i] >> 4) & 15];
+        out[i * 2 + 1] = hx[h[i] & 15];
+    }
+    out[64] = 0;
+}
+
+static void m53_m1_emit_refuse(const char *reason, int detail) {
+    char buf[160], num[24];
+    long p = 0, i = 0, nn = 0;
+    const char *pre = "M53_M1_REFUSE\treason=";
+    const char *mid = "\tdetail=";
+    unsigned long long uv;
+    while (pre[i] && p + 1 < (long)sizeof buf) buf[p++] = pre[i++];
+    i = 0;
+    if (reason) while (reason[i] && p + 1 < (long)sizeof buf) buf[p++] = reason[i++];
+    i = 0;
+    while (mid[i] && p + 1 < (long)sizeof buf) buf[p++] = mid[i++];
+    if (detail < 0) { if (p + 1 < (long)sizeof buf) buf[p++] = '-'; uv = (unsigned long long)(-(long long)detail); }
+    else uv = (unsigned long long)detail;
+    if (uv == 0) num[nn++] = '0';
+    else while (uv > 0 && nn < (long)sizeof num) { num[nn++] = (char)('0' + (uv % 10ULL)); uv /= 10ULL; }
+    while (nn > 0 && p + 1 < (long)sizeof buf) buf[p++] = num[--nn];
+    if (p + 1 < (long)sizeof buf) buf[p++] = '\n';
+    (void)sy_write_all(2, buf, p);
+}
+
+static int m53_m1_fail(const char *reason, int detail) {
+    m53_m1_state = M53_M1_REFUSED;
+    m53_m1_detail = detail;
+    m53_m1_cpy(m53_m1_reason, sizeof m53_m1_reason, reason);
+    m53_m1_emit_refuse(reason, detail);
+    return -2;
+}
+
+static int m53_m1_parse_dec(const char *s, long n, long *out) {
+    long v = 0, i = 0;
+    if (n <= 0) return -1;
+    while (i < n) {
+        if (s[i] < '0' || s[i] > '9') return -1;
+        if (v > (M53_M1_MAX_APE - (long)(s[i] - '0')) / 10) return -1;
+        v = v * 10 + (long)(s[i] - '0');
+        i++;
+    }
+    *out = v;
+    return 0;
+}
+
+static int m53_m1_check_mf_line(const char *mf, long mfn, const char *name, const char sha[65], long bytes) {
+    long nl = m53_m1_len(name, 64), at = 0;
+    int found = 0;
+    while (at < mfn) {
+        long e = at;
+        while (e < mfn && mf[e] != '\n') e++;
+        long ln = e - at;
+        if (ln > 0 && mf[at] != '#') {
+            long t1 = -1, t2 = -1, i;
+            for (i = 0; i < ln; i++) {
+                if (mf[at + i] == '\t') {
+                    if (t1 < 0) t1 = i;
+                    else if (t2 < 0) t2 = i;
+                }
+            }
+            if (t1 == nl && m53_m1_eq(mf + at, t1, name, nl) && t2 > t1) {
+                long sl = t2 - (t1 + 1), bl = ln - (t2 + 1), bv = -1;
+                if (sl != 64 || !m53_m1_eq(mf + at + t1 + 1, 64, sha, 64)) return -1;
+                if (m53_m1_parse_dec(mf + at + t2 + 1, bl, &bv) != 0 || bv != bytes) return -1;
+                if (found) return -1;
+                found = 1;
+            }
+        }
+        at = e + 1;
+    }
+    return found ? 0 : -1;
+}
+
+static int m53_m1_validate_slice(const unsigned char *b, long n) {
+    unsigned long long hmask, clen, doff, dlen, bsz;
+    unsigned char zbuf[208], got[32];
+    int i;
+    if (!b || n < 208) return -1;
+    if (b[0] != 'U' || b[1] != 'T' || b[2] != 'A' || b[3] != 'P' ||
+        b[4] != 'E' || b[5] != 'B' || b[6] != 'I' || b[7] != 'N') return -1;
+    if (b[8] != 1 || b[9] != 3) return -1;
+    hmask = m53_m1_u64(b + 12);
+    if ((hmask & ~M53_M1_MASK) != 0ULL) return -1;
+    if (b[28] != 'M' || b[29] != '5' || b[30] != '3' || b[31] != 'S' ||
+        b[32] != '1' || b[33] != 'A' || b[34] != 'B' || b[35] != 'I' || b[36] != '1') return -1;
+    clen = m53_m1_u64(b + 76);
+    doff = m53_m1_u64(b + 84);
+    dlen = m53_m1_u64(b + 92);
+    bsz = m53_m1_u64(b + 100);
+    if (clen == 0ULL || doff + dlen > (unsigned long long)n) return -1;
+    for (i = 0; i < 208; i++) zbuf[i] = b[i];
+    for (i = 28; i < 60; i++) zbuf[i] = 0;
+    sy_sha256(zbuf, 208, got);
+    for (i = 0; i < 32; i++) if (got[i] != b[28 + i]) return -1;
+    m53_m1_code_len = clen;
+    m53_m1_data_off = doff;
+    m53_m1_data_len = dlen;
+    m53_m1_bss_size = bsz;
+    return 0;
+}
+
+static int m53_m1_boot(void) {
+    char selfp[4096];
+    const char *cpath = sy_env("UNISA_CONTAINER");
+    int fd = -1;
+    sy_stat_t st;
+    unsigned char *ape = 0;
+    long apen = 0;
+    PackageFooter pf;
+    const unsigned char *pkg;
+    long pkglen, pos = 0, nl = 0;
+    const unsigned char *mf_p = 0, *so_p = 0, *sl_p = 0;
+    long mf_n = 0, so_n = 0, sl_n = 0;
+    unsigned char h[32];
+    char so_sha[65], sl_sha[65];
+    int rc;
+
+    if (!cpath || !cpath[0]) {
+        if (sy_self_path(selfp, sizeof selfp) != 0) return m53_m1_fail("embed-container-missing", -ENOENT);
+        cpath = selfp;
+    }
+    fd = sy_open_read(cpath);
+    if (fd < 0) return m53_m1_fail("embed-container-missing", fd);
+    if (sy_fstat(fd, &st) != 0 || st.kind != 'f' || st.size <= 0 || st.size > M53_M1_MAX_APE) {
+        sy_close(fd);
+        return m53_m1_fail("embed-container-missing", -EINVAL);
+    }
+    apen = (long)st.size;
+    ape = (unsigned char *)mm_alloc(apen);
+    if (!ape) { sy_close(fd); return m53_m1_fail("embed-container-missing", -ENOMEM); }
+    if (sy_read_all(fd, ape, apen) != 0) {
+        mm_free(ape); sy_close(fd);
+        return m53_m1_fail("embed-container-missing", -EIO);
+    }
+    sy_close(fd);
+
+    if (!packagefooter_locate_bytes(ape, apen, &pf) ||
+        pf.package_offset < 0 || pf.package_length <= 0 ||
+        pf.package_offset + pf.package_length > apen) {
+        mm_free(ape);
+        return m53_m1_fail("embed-footer-invalid", 0);
+    }
+    pkg = ape + pf.package_offset;
+    pkglen = pf.package_length;
+
+    while (pos < pkglen && pkg[pos] != '\n') pos++;
+    if (pos >= pkglen || pkg[0] != 'P') { mm_free(ape); return m53_m1_fail("embed-footer-invalid", 0); }
+    pos++;
+    while (pos < pkglen) {
+        unsigned char kind = pkg[pos++];
+        long nlen = 0, dlen = 0, s = pos;
+        while (pos < pkglen && pkg[pos] != '\n') pos++;
+        if (pos >= pkglen) break;
+        if (kind == 'F') {
+            long sp = s;
+            while (sp < pos && pkg[sp] != ' ') sp++;
+            if (sp > s && sp + 1 < pos &&
+                m53_m1_parse_dec((const char *)(pkg + s), sp - s, &nlen) == 0 &&
+                m53_m1_parse_dec((const char *)(pkg + sp + 1), pos - (sp + 1), &dlen) == 0) {
+                pos++;
+                if (pos + nlen + dlen <= pkglen) {
+                    const char *nm = (const char *)(pkg + pos);
+                    const unsigned char *dat = pkg + pos + nlen;
+                    if (m53_m1_eq(nm, nlen, "tape/lnx-x86_64/manifest.tsv", 28)) {
+                        if (mf_p) { mm_free(ape); return m53_m1_fail("embed-resource-duplicate", 1); }
+                        mf_p = dat; mf_n = dlen;
+                    } else if (m53_m1_eq(nm, nlen, "tape/lnx-x86_64/tapemode.so", 27)) {
+                        if (so_p) { mm_free(ape); return m53_m1_fail("embed-resource-duplicate", 2); }
+                        so_p = dat; so_n = dlen;
+                    } else if (m53_m1_eq(nm, nlen, "tape/lnx-x86_64/m53.tapeslice", 29)) {
+                        if (sl_p) { mm_free(ape); return m53_m1_fail("embed-resource-duplicate", 3); }
+                        sl_p = dat; sl_n = dlen;
+                    }
+                    pos += nlen + dlen;
+                    continue;
+                }
+            }
+            break;
+        }
+        pos++;
+        (void)nl;
+    }
+
+    if (!mf_p) { mm_free(ape); return m53_m1_fail("embed-resource-missing", 1); }
+    if (!so_p) { mm_free(ape); return m53_m1_fail("embed-resource-missing", 2); }
+    if (!sl_p) { mm_free(ape); return m53_m1_fail("embed-resource-missing", 3); }
+
+    sy_sha256(so_p, so_n, h); m53_m1_hex(h, so_sha);
+    sy_sha256(sl_p, sl_n, h); m53_m1_hex(h, sl_sha);
+    if (m53_m1_check_mf_line((const char *)mf_p, mf_n, "tapemode.so", so_sha, so_n) != 0) {
+        mm_free(ape); return m53_m1_fail("embed-manifest-mismatch", 1);
+    }
+    if (m53_m1_check_mf_line((const char *)mf_p, mf_n, "m53.tapeslice", sl_sha, sl_n) != 0) {
+        mm_free(ape); return m53_m1_fail("embed-manifest-mismatch", 2);
+    }
+
+    if (m53_m1_validate_slice(sl_p, sl_n) != 0) {
+        mm_free(ape); return m53_m1_fail("embed-slice-corrupt", 1);
+    }
+    m53_m1_slice = (unsigned char *)mm_alloc(sl_n);
+    if (!m53_m1_slice) { mm_free(ape); return m53_m1_fail("embed-slice-corrupt", 1); }
+    mm_copy(m53_m1_slice, sl_n, sl_p, sl_n);
+    m53_m1_slice_len = sl_n;
+
+    rc = tsl_check(so_p, so_n, &m53_m1_tsl);
+    if (rc != 0) { mm_free(ape); return m53_m1_fail("embed-so-invalid", rc); }
+    rc = tsl_map(so_p, so_n, &m53_m1_tsl);
+    mm_free(ape);
+    if (rc != 0) return m53_m1_fail("embed-so-map-failed", rc);
+
+    m53_m1_bind_fn = tsl_addr(&m53_m1_tsl, 0);
+    m53_m1_disp_fn = tsl_addr(&m53_m1_tsl, 1);
+    m53_m1_run_fn = tsl_addr(&m53_m1_tsl, 2);
+    if (!m53_m1_bind_fn || !m53_m1_disp_fn || !m53_m1_run_fn) {
+        return m53_m1_fail("embed-so-map-failed", 20);
+    }
+    m53_m1_state = M53_M1_READY;
+    return 0;
+}
+
+int cxsa_valid_s1(const unsigned char *data, long length) {
+    unsigned long long res[4];
+    long r;
+    if (length < 0 || length > M53_M1_MAX_IN) {
+        m53_m1_emit_refuse("embed-input-too-large", 0);
+        return -2;
+    }
+    if (m53_m1_state == M53_M1_UNBOOTED) {
+        if (m53_m1_boot() != 0) return -2;
+    } else if (m53_m1_state != M53_M1_READY) {
+        m53_m1_emit_refuse(m53_m1_reason, m53_m1_detail);
+        return -2;
+    }
+    res[0] = 0; res[1] = 0; res[2] = 0; res[3] = 0;
+    r = tsl_call(&m53_m1_tsl, m53_m1_run_fn, (long)m53_m1_slice, (long)data, length);
+    (void)r;
+    if (res[0] != 0ULL) {
+        m53_m1_emit_refuse("embed-vm-fault", (int)res[0]);
+        return -2;
+    }
+    return res[3] ? 1 : 0;
+}
