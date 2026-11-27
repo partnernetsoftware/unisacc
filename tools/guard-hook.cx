@@ -249,6 +249,85 @@ static int target_own_wtree(const char *tgt, const char *cur) {
     if (!root || !tgt || !*tgt) return 0;
     return under(canon(tgt), canon(root));
 }
+static int in_repo_fp(const char *fp, const char *cp);
+static char *fmt(const char *f, const char *a, const char *b);
+static char *norm_ow_str(const char *raw) {
+    long a = 0, b, i, o = 0; char *d;
+    if (!raw) return sdup("");
+    raw = strip_q(raw);
+    b = sl(raw);
+    while (a < b && isws(raw[a])) a++;
+    while (b > a && isws(raw[b - 1])) b--;
+    if (b <= a || b - a >= 64) return sdup("");
+    d = (char *)mm_alloc(b - a + 1);
+    for (i = a; i < b; i++) {
+        unsigned char c = (unsigned char)raw[i];
+        if (c < 0x21 || c == 0x7f) return sdup("");
+        if (c >= 'A' && c <= 'Z') c = (unsigned char)(c + 32);
+        d[o++] = (char)c;
+    }
+    d[o] = 0;
+    return d;
+}
+static const char *drop_pane_pfx(const char *ow) {
+    const char *p = ow, *last = 0;
+    for (; *p; p++) if (*p == ':') last = p;
+    return (last && last[1]) ? last + 1 : ow;
+}
+static int owner_is_cc(const char *ow_raw) {
+    char *n = norm_ow_str(ow_raw);
+    const char *s = drop_pane_pfx(n);
+    return eq(s, "cc");
+}
+static char *resolve_window_wtree(const char *ow_raw, const char *cur, char **hint_out) {
+    char *n = norm_ow_str(ow_raw);
+    const char *s = drop_pane_pfx(n);
+    char *prefix = cat2(REPO, "/.claude/worktrees/");
+    if (*s && !eq(s, "cc")) {
+        char *leaf = sw(s, "w-") ? sdup(s) : cat2("w-", s);
+        if (wtree_leaf_ok(leaf)) {
+            char *wt = cat2(prefix, leaf);
+            if (hint_out) *hint_out = wt;
+            return wt;
+        }
+    }
+    {
+        char *cwt = own_wtree_root(cur);
+        if (cwt) {
+            if (hint_out) *hint_out = cwt;
+            return cwt;
+        }
+    }
+    if (hint_out) {
+        const char *ag = envs("UNISACC_AGENT");
+        char *an = norm_ow_str(ag ? ag : "");
+        const char *as = drop_pane_pfx(an);
+        if (*as && !eq(as, "cc")) {
+            char *leaf = sw(as, "w-") ? sdup(as) : cat2("w-", as);
+            *hint_out = cat2(prefix, leaf);
+        } else {
+            *hint_out = cat2(prefix, "w-<DEVSVC_OWNER>");
+        }
+    }
+    return 0;
+}
+static char *shared_checkout_write_bad(const char *raw_path, const char *cur, const char *flow_root, const char *ow_raw) {
+    char *p, *base, *abs_p, *can_p, *own_wt, *hint_wt = 0, *ow_n;
+    if (!raw_path || !*raw_path) return 0;
+    if (owner_is_cc(ow_raw)) return 0;
+    p = repl_home(strip_q(raw_path));
+    if (*JOB) p = repl_var(p, "CLAUDE_JOB_DIR", JOB);
+    if (!*p || hasc(p, '$') || hasc(p, '`')) return 0;
+    base = (flow_root && *flow_root) ? repl_home(strip_q(flow_root)) : sdup(cur && *cur ? cur : REPO);
+    abs_p = p[0] == '/' ? resolve("", p) : (*base ? resolve(base, p) : resolve(REPO, p));
+    can_p = canon(abs_p);
+    if (!in_repo_fp(abs_p, can_p)) return 0;
+    own_wt = resolve_window_wtree(ow_raw, cur, &hint_wt);
+    if (own_wt && under(abs_p, own_wt) && under(can_p, canon(own_wt)) && !eq(abs_p, own_wt)) return 0;
+    ow_n = norm_ow_str(ow_raw);
+    return fmt("共享检出写保护:非集成者(DEVSVC_OWNER=%s)不得写共享检出或非本窗口工作树,请在本窗口工作树 %s 内修改",
+               *ow_n ? ow_n : "unset", hint_wt);
+}
 /* a path containing a ".." component before normalization is refused outright */
 static int has_dotdot(const char *p) {
     while (p && *p) {
@@ -433,6 +512,50 @@ static char *check_seg(char *t, char **curp) {
         if (*d && !hasc(d, '$') && !hasc(d, '`')) *curp = d[0] == '/' ? resolve("", d) : (*cur ? resolve(cur, d) : sdup(""));
         else *curp = sdup("");
         return 0;
+    }
+    {
+        const char *seg_ow = envs("DEVSVC_OWNER"), *seg_fr = envs("UNISACC_FLOW_ROOT");
+        long di;
+        for (di = 0; di < k; di++) {
+            if (sw(w[di], "DEVSVC_OWNER=")) seg_ow = w[di] + 13;
+            else if (sw(w[di], "UNISACC_FLOW_ROOT=")) seg_fr = w[di] + 18;
+        }
+        for (di = k; di < nw; di++) {
+            char *tok = strip_q(w[di]);
+            const char *tb = tok, *tq;
+            for (tq = tok; *tq; tq++) if (*tq == '/') tb = tq + 1;
+            if (eq(tb, "devsvc.cx") || eq(tb, "devsvc-core.cx")) {
+                long si = di + 1, oi;
+                const char *eff_ow = seg_ow;
+                while (si < nw && (eq(w[si], "--") || eq(w[si], "--dev"))) si++;
+                for (oi = si; oi + 1 < nw; oi++) {
+                    if (eq(w[oi], "--owner")) {
+                        if (!owner_is_cc(w[oi + 1])) eff_ow = w[oi + 1];
+                        break;
+                    }
+                }
+                if (si + 2 < nw && eq(w[si], "f")) {
+                    const char *fop = w[si + 1], *tp = w[si + 2];
+                    if ((eq(fop, "write") || eq(fop, "edit") || eq(fop, "edits") || eq(fop, "append")) && tp[0] != '-') {
+                        char *sc = shared_checkout_write_bad(tp, cur, seg_fr, eff_ow);
+                        if (sc) return sc;
+                    }
+                } else if (si + 2 < nw && eq(w[si], "doc")) {
+                    const char *dop = w[si + 1], *tp = w[si + 2];
+                    if ((eq(dop, "create") || eq(dop, "set") || eq(dop, "append") || eq(dop, "remove") || eq(dop, "repair")) && tp[0] != '-') {
+                        char *sc = shared_checkout_write_bad(tp, cur, seg_fr, eff_ow);
+                        if (sc) return sc;
+                    }
+                }
+            } else if (eq(tb, "edit-span.cx")) {
+                long si = di + 1;
+                if (si < nw && eq(w[si], "--")) si++;
+                if (si < nw && w[si][0] != '-') {
+                    char *sc = shared_checkout_write_bad(w[si], cur, seg_fr, seg_ow);
+                    if (sc) return sc;
+                }
+            }
+        }
     }
     oa = (char **)mm_alloc(sizeof(char *) * (nw + 1));
     for (i = k + 1; i < nw; i++) if (w[i][0] != '-' && w[i][0]) oa[noa++] = w[i];
@@ -1403,6 +1526,18 @@ int main(void) {
         } else if (*fp && !rd && !fallback_ok()) {
             sy_eprintf("DEVSVC-ONLY 拒绝:仓内文件 %s 须经 devsvc 修改:sh ./unisacc.com tools/devsvc.cx -- f edit PATH --old-file A --new-file B 或 f write PATH --from SRC(或 flow - --par N 的 file.edit/file.write 节点),用法见 plans/devsvc.md 5a。devsvc 确实不可用时才 touch %s/.cache/unisacc/devsvc/native-fallback(30 分钟有效)并把原因报主调度。\n", fp, HOMEV);
             return 2;
+        }
+        if (!rd && *fp) {
+            const char *dow = envs("DEVSVC_OWNER");
+            const js_val *cv = js_get(root, "cwd");
+            const char *ecwd = js_kind(cv) == JS_STR ? js_str(cv) : "";
+            if ((dow && *dow) || (*ecwd && own_wtree_root(ecwd))) {
+                char *sc = shared_checkout_write_bad(fp, ecwd, envs("UNISACC_FLOW_ROOT"), dow);
+                if (sc) {
+                    sy_eprintf("GUARD-EDIT-V1 拒绝:%s (target=%s)\n", sc, fp);
+                    return 2;
+                }
+            }
         }
         if (!rd) {
             const char *agent = envs("UNISACC_AGENT");

@@ -197,12 +197,12 @@ static void chomp(char *s) { long n = strlen(s); while (n > 0 && (s[n - 1] == '\
 
 /* 一个 git 公共目录一个实例(同仓多个工作树共享);锁名由客户端加工作树前缀互不串:
    主工作树(公共目录 = 顶层/.git)不加前缀,其它工作树加 w<顶层摘要前 8 位>:,见 request() */
-static char lkpfx[16];
+static char lkpfx[16], main_root[PW];
 static int inst_dir(void) {
     const char *e = getenv(cfg.inst_env);
     const char *fc = getenv("DEVSVC_FG_CWD"), *ft = getenv("DEVSVC_FG_TOP"), *fm = getenv("DEVSVC_FG_COMMON");
     char out[2 * PW], common[PW], top[PW], home[PW], hex[65], cur[PW];
-    common[0] = top[0] = 0; lkpfx[0] = 0;
+    common[0] = top[0] = 0; lkpfx[0] = 0; main_root[0] = 0;
     if (fc && fc[0] == '/' && ft && ft[0] == '/' && fm && fm[0] == '/' &&
         !getenv("GIT_DIR") && !getenv("GIT_WORK_TREE") && !getenv("GIT_COMMON_DIR") && !getenv("GIT_INDEX_FILE") &&
         sy_cwd(cur, sizeof cur) >= 0 && !strcmp(cur, fc)) {
@@ -217,6 +217,12 @@ static int inst_dir(void) {
     if (top[0] && common[0]) {
         char mainp[PW]; F(mainp, sizeof mainp, "%s/.git", top);
         if (strcmp(mainp, common) && !sy_sha256_hex(top, strlen(top), hex)) { hex[8] = 0; F(lkpfx, sizeof lkpfx, "w%s:", hex); }
+    }
+    if (common[0]) {
+        char mc[PW]; F(mc, sizeof mc, "%s", common);
+        long cl = (long)strlen(mc);
+        if (cl > 5 && !strcmp(mc + cl - 5, "/.git")) mc[cl - 5] = 0;
+        if (sy_realpath(mc, main_root, sizeof main_root) < 0) F(main_root, sizeof main_root, "%s", mc);
     }
     if (e && *e) { if (snprintf(dir, sizeof dir, "%s", e) >= (int)sizeof dir) return -1; }
     else {
@@ -1961,6 +1967,105 @@ static long sep_line(const char *s, long n, long from, const char *sep, long *af
     return -1;
 }
 
+static int norm_lex_path(const char *in, char *out, size_t cap);
+static int resolve_norm_target(const char *base, const char *p, char *norm, size_t cap) {
+    char abs[PW * 2], preal[PW * 2];
+    if (!p || !*p) return -1;
+    if (p[0] == '/') {
+        if (snprintf(abs, sizeof abs, "%s", p) >= (int)sizeof abs) return -1;
+    } else if (base && base[0]) {
+        if (snprintf(abs, sizeof abs, "%s/%s", base, p) >= (int)sizeof abs) return -1;
+    } else return -1;
+    if (sy_realpath(abs, preal, sizeof preal) >= 0) {
+        return norm_lex_path(preal, norm, cap) ? 0 : -1;
+    }
+    {
+        char anc[PW * 2], areal[PW], comb[PW * 2], lex_abs[PW * 2];
+        if (!norm_lex_path(abs, anc, sizeof anc) || !norm_lex_path(abs, lex_abs, sizeof lex_abs)) return -1;
+        size_t al = strlen(anc);
+        while (al > 1) {
+            while (al > 1 && anc[al - 1] != '/') al--;
+            if (al <= 1) break;
+            anc[al - 1] = 0;
+            if (sy_realpath(anc, areal, sizeof areal) >= 0) {
+                const char *tail = lex_abs + (al - 1);
+                if (snprintf(comb, sizeof comb, "%s%s", areal, tail) >= (int)sizeof comb) return -1;
+                return norm_lex_path(comb, norm, cap) ? 0 : -1;
+            }
+            al--;
+        }
+        return norm_lex_path(lex_abs, norm, cap) ? 0 : -1;
+    }
+}
+static int shared_wleaf_ok(const char *leaf) {
+    const char *q;
+    if (!leaf || leaf[0] != 'w' || leaf[1] != '-' || !leaf[2]) return 0;
+    for (q = leaf + 2; *q; q++) {
+        char c = *q;
+        if (!((c >= 'a' && c <= 'z') || (c >= 'A' && c <= 'Z') || (c >= '0' && c <= '9') || c == '.' || c == '_' || c == '-')) return 0;
+    }
+    return 1;
+}
+static int shared_checkout_refuse(const char *root, const char *op, const char *path, int argc, char **argv) {
+    char wt_base[PW + 64], norm_t[PW * 2], rreal[PW], env_ow[64], arg_ow[64], own_wt[PW + 128], hint_wt[PW + 128];
+    const char *fr = getenv("UNISACC_FLOW_ROOT"), *raw_env = getenv("DEVSVC_OWNER"), *raw_arg = 0;
+    const char *base = (path && path[0] == '/') ? "" : (fr && *fr ? fr : root);
+    if (!main_root[0] || !path || !*path) return 0;
+    if (snprintf(wt_base, sizeof wt_base, "%s/.claude/worktrees", main_root) >= (int)sizeof wt_base) return 0;
+    if (sy_exists(wt_base) != 1) return 0;
+    if (resolve_norm_target(base, path, norm_t, sizeof norm_t) != 0) return 0;
+    if (!dv_under(norm_t, main_root)) return 0;
+    env_ow[0] = 0; arg_ow[0] = 0;
+    if (raw_env && *raw_env) (void)norm_owner(raw_env, env_ow, sizeof env_ow);
+    for (int i = 0; i + 1 < argc; i++) if (!strcmp(argv[i], "--owner")) { raw_arg = argv[i + 1]; break; }
+    if (raw_arg && *raw_arg) (void)norm_owner(raw_arg, arg_ow, sizeof arg_ow);
+    {
+        const char *es = strchr(env_ow, ':'); es = (es && es[1]) ? es + 1 : env_ow;
+        const char *as = strchr(arg_ow, ':'); as = (as && as[1]) ? as + 1 : arg_ow;
+        if (!strcmp(es, "cc") && (!as[0] || !strcmp(as, "cc"))) return 0;
+    }
+    own_wt[0] = 0; hint_wt[0] = 0;
+    {
+        const char *ow = env_ow[0] ? env_ow : arg_ow;
+        const char *s = strchr(ow, ':'); s = (s && s[1]) ? s + 1 : ow;
+        if (s[0] && strcmp(s, "cc")) {
+            char leaf[80];
+            int lrc = (!strncmp(s, "w-", 2)) ? cx_fmt(leaf, sizeof leaf, "%s", s) : cx_fmt(leaf, sizeof leaf, "w-%s", s);
+            if (!lrc && shared_wleaf_ok(leaf)) {
+                if (cx_fmt(own_wt, sizeof own_wt, "%s/%s", wt_base, leaf) ||
+                    cx_fmt(hint_wt, sizeof hint_wt, "%s", own_wt)) return 0;
+            }
+        }
+    }
+    if (!own_wt[0] && root && root[0]) {
+        if (sy_realpath(root, rreal, sizeof rreal) < 0 && cx_fmt(rreal, sizeof rreal, "%s", root)) return 0;
+        size_t wbl = strlen(wt_base);
+        if (!strncmp(rreal, wt_base, wbl) && rreal[wbl] == '/') {
+            const char *ls = rreal + wbl + 1, *le = ls;
+            char leaf[80];
+            while (*le && *le != '/') le++;
+            if (le > ls && (size_t)(le - ls) < sizeof leaf) {
+                mm_copy(leaf, sizeof leaf, ls, (size_t)(le - ls));
+                leaf[le - ls] = 0;
+                if (shared_wleaf_ok(leaf)) {
+                    if (cx_fmt(own_wt, sizeof own_wt, "%s/%s", wt_base, leaf) ||
+                        cx_fmt(hint_wt, sizeof hint_wt, "%s", own_wt)) return 0;
+                }
+            }
+        }
+    }
+    if (!hint_wt[0]) {
+        const char *au = auto_owner();
+        int hrc = (!strncmp(au, "w-", 2)) ? cx_fmt(hint_wt, sizeof hint_wt, "%s/%s", wt_base, au)
+                                          : cx_fmt(hint_wt, sizeof hint_wt, "%s/w-%s", wt_base, au);
+        if (hrc) return 0;
+    }
+    if (own_wt[0] && dv_under(norm_t, own_wt) && norm_t[strlen(own_wt)] == '/') return 0;
+    fprintf(stderr, "F\t%s\trefused\tREFUSE shared-checkout: owner=%s cannot write %s in shared checkout %s; use own worktree %s (nothing written)\n",
+            op, env_ow[0] ? env_ow : (arg_ow[0] ? arg_ow : auto_owner()), path, main_root, hint_wt);
+    return 1;
+}
+
 /* f read PATH [OFF LIM] | f write PATH --from SRC [--expect-sha X] [--mkdir] | f edit PATH --old-file A --new-file B [--expect-sha X] [--all] [--chomp]
    f write PATH --stdin | f edit PATH --stdin [--sep L] [--all] | f edits PATH --stdin [--sep L] [--sep-next L] [--expect-sha X]
    直接调 file 算子(单节点不必过引擎);write/edit 在有实例时先取路径锁。 */
@@ -1982,6 +2087,7 @@ static int cmd_f(const char *root, int argc, char **argv) {
             return 1;
         }
     }
+    if (wr && shared_checkout_refuse(root, op, path, argc, argv)) return 1;
     F(fop, sizeof fop, "file.%s", !strcmp(op, "edits") ? "write" : op);
     ab_kv(&b, "path", path, strlen(path));
     xs = opt(argc, argv, "--expect-sha", "");
@@ -4801,6 +4907,7 @@ static int main2(int argc, char **argv) {
         v[n] = 0; setenv("DEVSVC_SOCK", sockp, 1); run_deadline_ms = 1800000; return cmd_run(root, n, v);
     }
     if (!strcmp(cmd, "f") && argc >= 1 && argc <= 56 && !strcmp(argv[0], "append")) {   /* f append PATH (--from F | --line T) [--expect-sha X]:tools/dvfile.cx */
+        if (argc >= 2 && shared_checkout_refuse(root, "append", argv[1], argc, argv)) return 1;
         char *v[64]; int n = 0; v[n++] = "--quiet"; v[n++] = "tools/dvfile.cx"; v[n++] = (char *)root;
         for (int i = 0; i < argc; i++) v[n++] = argv[i];
         v[n] = 0; return cmd_run(root, n, v);

@@ -669,11 +669,82 @@ static void check_send_gate_minimal(char **cmd, const char *dir) {
            "sgm-adv-v3-n7-stdbuf-space-opt-red");
 }
 
+static int scg_expect_json(char **cmd, const char *dir, const char *owner, int fb_on, const char *json, int want_rc, const char *want_sub) {
+    char fb[1200]; int rc = -1; char *err = (char *)"";
+    if (cx_fmt(fb, sizeof fb, "%s/.cache/unisacc/devsvc/native-fallback", H) != 0) return 0;
+    sy_setenv("DEVSVC_OWNER", owner ? owner : "", 1);
+    if (run_raw_json(cmd, dir, json, &rc, &err) != 0) { sy_setenv("DEVSVC_OWNER", "", 1); return 0; }
+    if (fb_on) {
+        char pin[1200], perr[1200]; sy_spawn_t o; sy_exit_t st; int fi, fe; unsigned char *b = 0; int64_t n = 0;
+        sy_write_file(fb, "", 0, 0644);
+        if (cx_fmt(pin, sizeof pin, "%s/sgm-in.json", dir) != 0 || cx_fmt(perr, sizeof perr, "%s/sgm-err.txt", dir) != 0) {
+            sy_unlink(fb); sy_setenv("DEVSVC_OWNER", "", 1); return 0;
+        }
+        sy_write_file(pin, json, sl(json), 0644); sy_unlink(perr);
+        fi = sy_open_read(pin); fe = sy_open_new(perr, 0644);
+        if (fi < 0 || fe < 0) { sy_unlink(fb); sy_setenv("DEVSVC_OWNER", "", 1); return 0; }
+        sy_spawn_init(&o); o.argv = cmd; o.in_fd = fi; o.out_fd = SY_STDIO_NULL; o.err_fd = fe; o.pgroup = -1; o.deadline_ms = 20000;
+        if (sy_proc_run(&o, &st) != 0) { sy_close(fi); sy_close(fe); sy_unlink(fb); sy_setenv("DEVSVC_OWNER", "", 1); return 0; }
+        sy_close(fi); sy_close(fe); sy_unlink(fb);
+        rc = st.exited ? st.code : 128 + st.sig;
+        if (sy_read_file(perr, &b, &n, 1 << 20) == 0 && b) {
+            char *s = (char *)mm_alloc(n + 1); if (n) mm_copy(s, n + 1, b, n); s[n] = 0; err = s; mm_free(b);
+        } else err = (char *)"";
+    }
+    sy_setenv("DEVSVC_OWNER", "", 1);
+    if (rc != want_rc || (*want_sub && !has_sub(err, want_sub))) {
+        sy_eprintf("SCG_DIAG\trc=%d\twant=%d\tsub=%s\terr=%s\n", rc, want_rc, want_sub, err);
+        return 0;
+    }
+    return 1;
+}
+
+static void check_shared_checkout_guard(char **cmd, const char *dir) {
+    /* Red-first: non-cc owner writing tools/ratchets.cx in the shared checkout must be refused and print own worktree path */
+    ck_sgm(scg_expect_json(cmd, dir, "omp-grk", 0,
+           "{\"tool_name\":\"Bash\",\"tool_input\":{\"command\":\"sh ./unisacc.com tools/devsvc.cx -- f write tools/ratchets.cx --from /tmp/x\"},\"cwd\":\"/r/repo\"}",
+           2, "/r/repo/.claude/worktrees/w-omp-grk"),
+           "scg-non-cc-devsvc-f-write-ratchets-shared-red");
+    ck_sgm(scg_expect_json(cmd, dir, "omp-grk", 0,
+           "{\"tool_name\":\"Bash\",\"tool_input\":{\"command\":\"sh ./unisacc.com tools/devsvc.cx -- f edit /r/repo/tools/precommit.cx --old-file /tmp/a --new-file /tmp/b\"},\"cwd\":\"/r/repo\"}",
+           2, "/r/repo/.claude/worktrees/w-omp-grk"),
+           "scg-non-cc-devsvc-f-edit-precommit-shared-red");
+    ck_sgm(scg_expect_json(cmd, dir, "", 0,
+           "{\"tool_name\":\"Bash\",\"tool_input\":{\"command\":\"sh ./unisacc.com tools/devsvc.cx -- f write tools/ratchets.cx --from /tmp/x\"},\"cwd\":\"/r/repo\"}",
+           2, "/r/repo/.claude/worktrees/w-"),
+           "scg-unset-owner-devsvc-f-write-ratchets-shared-red");
+    ck_sgm(scg_expect_json(cmd, dir, "omp-grk", 0,
+           "{\"tool_name\":\"Bash\",\"tool_input\":{\"command\":\"sh ./unisacc.com tools/devsvc.cx -- f write .claude/worktrees/w-other/tools/ratchets.cx --from /tmp/x\"},\"cwd\":\"/r/repo\"}",
+           2, "/r/repo/.claude/worktrees/w-omp-grk"),
+           "scg-non-cc-other-wtree-devsvc-f-write-red");
+    ck_sgm(scg_expect_json(cmd, dir, "omp-grk", 0,
+           "{\"tool_name\":\"Bash\",\"tool_input\":{\"command\":\"sh ./unisacc.com tools/devsvc.cx -- f write tools/ratchets.cx --from /tmp/x\"},\"cwd\":\"/r/repo/.claude/worktrees/w-omp-grk\"}",
+           0, ""),
+           "scg-non-cc-own-wtree-rel-f-write-green");
+    ck_sgm(scg_expect_json(cmd, dir, "omp-grk", 0,
+           "{\"tool_name\":\"Bash\",\"tool_input\":{\"command\":\"sh ./unisacc.com tools/devsvc.cx -- f edit /r/repo/.claude/worktrees/w-omp-grk/tools/ratchets.cx --old-file /tmp/a --new-file /tmp/b\"},\"cwd\":\"/r/repo\"}",
+           0, ""),
+           "scg-non-cc-own-wtree-abs-f-edit-green");
+    ck_sgm(scg_expect_json(cmd, dir, "cc", 0,
+           "{\"tool_name\":\"Bash\",\"tool_input\":{\"command\":\"sh ./unisacc.com tools/devsvc.cx -- f write tools/ratchets.cx --from /tmp/x\"},\"cwd\":\"/r/repo\"}",
+           0, ""),
+           "scg-cc-integrator-shared-f-write-green");
+    ck_sgm(scg_expect_json(cmd, dir, "omp-grk", 1,
+           "{\"tool_name\":\"Edit\",\"tool_input\":{\"file_path\":\"/r/repo/tools/ratchets.cx\"}}",
+           2, "/r/repo/.claude/worktrees/w-omp-grk"),
+           "scg-non-cc-native-edit-shared-fallback-red");
+    ck_sgm(scg_expect_json(cmd, dir, "omp-grk", 1,
+           "{\"tool_name\":\"Edit\",\"tool_input\":{\"file_path\":\"/r/repo/.claude/worktrees/w-omp-grk/tools/ratchets.cx\"}}",
+           0, ""),
+           "scg-non-cc-native-edit-own-wtree-fallback-green");
+}
+
 static int run_case(char **argv, long i, const char *dir, int *rc, char **err) {
     char pin[1200], perr[1200], fb[1200], *json; sy_spawn_t o; sy_exit_t st; int fi, fe; unsigned char *b = 0; int64_t n = 0;
     tx_snprintf(fb, sizeof fb, "%s/.cache/unisacc/devsvc/native-fallback", H);
     if (FX[i].fb) sy_write_file(fb, "", 0, 0644); else sy_unlink(fb);
     sy_setenv("UNISACC_AGENT", FX[i].agent, 1);
+    sy_setenv("DEVSVC_OWNER", "", 1);
     json = subst(subst(FX[i].json, "@H@", H), "@T@", T);
     tx_snprintf(pin, sizeof pin, "%s/in.json", dir);
     tx_snprintf(perr, sizeof perr, "%s/err.txt", dir);
@@ -744,6 +815,7 @@ int main(int argc, char **argv) {
     }
     if (gen) { sy_printf("};\n"); sy_remove_all(H); sy_remove_all(T); return failed ? 1 : 0; }
     check_send_gate_minimal(cmd, dir);
+    check_shared_checkout_guard(cmd, dir);
     sy_printf("CHECK_GUARD_HOOK\tcases=%ld failed=%ld\n", NFX + sgm_cases, failed);
     sy_remove_all(H); sy_remove_all(T);
     return failed ? 1 : 0;
