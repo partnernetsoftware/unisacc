@@ -1,0 +1,601 @@
+/* tools/check-v019-exit.cx -- executable exit-criterion check for v0.1.9 (drop static libc/stdio copies).
+ *
+ * Usage:
+ *   sh ./unisacc.com tools/check-v019-exit.cx -- --self-test
+ *   sh ./unisacc.com tools/check-v019-exit.cx -- --judge-receipt PATH RUN_ID
+ *   sh ./unisacc.com tools/check-v019-exit.cx -- \
+ *     --base-chain CHAIN_DIR --cand-ape APE --cand-elf ELF --objs-dir OBJS_DIR \
+ *     [--repo REPO_DIR] [--hdr-pkg PKG] [--product PROD] \
+ *     [--files F1,F2,... | --range REV1..REV2] [--run-id ID] [--out-receipt PATH]
+ *
+ * Checks (criterion-first, RED on v0.1.7 c4d7281af, GREEN on v0.1.9 bc2177979):
+ *   (1) Receipt-bound ELF/APE/objects (receipt.txt order) + PT_LOAD R E net decrease >= 40,000 B;
+ *   (2) check-stdio-copies --obj-dir: all 20 required v0.1.9 units present by name, only m21.o carries
+ *       static vfmt core, allow list = {m21.o} + non-vfmt stubs {deps.o, driveplan.o} (<= 512 B, nm checked);
+ *   (3) diagnostics byte-identical cmp vs baseline APE with non-zero exact rc and non-empty stderr
+ *       (UNDEF, NOSTART, DRIVE_ENOENT, AS_BADOPT, AR_USAGE) + closed-fd2 + exact float/recovery bytes;
+ *   (4) tests/cxlibc.cx --check ok;
+ *   (5) six-target compile of changed .cx files via tools/check-six-target-compile.cx (refuses empty --files,
+ *       records exact product path + sha256);
+ *   (6) receipt v2 binding (rc_write2/rc_fresh) + --judge-receipt + --self-test execution mutations KILLED.
+ */
+#pragma unisa use sys.fs
+#pragma unisa use sys.io
+#pragma unisa use sys.env
+#pragma unisa use sys.posix
+#pragma unisa use sys.sha
+#pragma unisa use sys.time
+#pragma unisa use mem.heap
+#pragma unisa use mem.bytes
+#pragma unisa use text.text
+#pragma unisa use text.fmt
+#pragma unisa use cxlib.netpack
+#pragma unisa use cxlib.sessionroot
+#pragma unisa use cxlib.receipt
+
+enum {
+    V19_PW = 4400,
+    V19_MIN_DROP = 40000L,
+    V19_STUB_MAX = 512L,
+    V19_NREQ = 20
+};
+
+static const char *V19_REQ_UNITS[V19_NREQ] = {
+    "m0.o", "host.o", "driveface.o", "driveroute.o", "tapegate.o",
+    "drivelink.o", "executor.o", "driveunits.o", "driveargs.o", "stages.o",
+    "hostout.o", "m10.o", "m20.o", "m21.o", "m29.o",
+    "m35.o", "m42.o", "m43.o", "m44.o", "m51.o"
+};
+
+static int g_pass = 0;
+static int g_fail = 0;
+
+static void v19_rec(int ok, const char *name, const char *detail) {
+    sy_printf("%s\t%s\t%s\n", ok ? "PASS" : "FAIL", name, detail ? detail : "");
+    if (ok) g_pass++; else g_fail++;
+}
+
+static unsigned long long v19_rdu(const unsigned char *p, int k) {
+    unsigned long long v = 0;
+    for (int i = k - 1; i >= 0; i--) v = (v << 8) | (unsigned long long)p[i];
+    return v;
+}
+
+static void v19_wru(unsigned char *p, int k, unsigned long long v) {
+    for (int i = 0; i < k; i++) p[i] = (unsigned char)((v >> (8 * i)) & 255ULL);
+}
+
+static int v19_sha256_file(const char *path, char hex[65], long *len_out) {
+    size_t bn = 0;
+    char *b = cx_read(path, &bn);
+    if (!b) return 1;
+    if (len_out) *len_out = (long)bn;
+    int rc = sy_sha256_any_hex(b, (long)bn, hex);
+    mm_free(b);
+    return rc;
+}
+
+/* Parse ELF64 program headers and return sum of p_filesz for PT_LOAD (1) with PF_R|PF_X (5). */
+static long v19_elf_rx_bytes(const unsigned char *b, long bn) {
+    if (!b || bn < 64 || b[0] != 0x7f || b[1] != 'E' || b[2] != 'L' || b[3] != 'F' || b[4] != 2) return -1;
+    unsigned long long phoff = v19_rdu(b + 32, 8);
+    int phent = (int)v19_rdu(b + 54, 2);
+    int phnum = (int)v19_rdu(b + 56, 2);
+    if (phent < 56 || phnum <= 0) return -1;
+    if (phoff + (unsigned long long)phent * (unsigned long long)phnum > (unsigned long long)bn) return -1;
+    long total = 0;
+    for (int i = 0; i < phnum; i++) {
+        const unsigned char *ph = b + phoff + (unsigned long long)i * (unsigned long long)phent;
+        unsigned long long ptype = v19_rdu(ph + 0, 4);
+        unsigned long long pflags = v19_rdu(ph + 4, 4);
+        unsigned long long pfilesz = v19_rdu(ph + 32, 8);
+        if (ptype == 1ULL && (pflags & 5ULL) == 5ULL) {
+            if (pfilesz > 2147483647ULL) return -1;
+            total += (long)pfilesz;
+        }
+    }
+    return total;
+}
+
+static long v19_file_rx_bytes(const char *path) {
+    size_t bn = 0;
+    char *b = cx_read(path, &bn);
+    if (!b) return -1;
+    long rx = v19_elf_rx_bytes((const unsigned char *)b, (long)bn);
+    mm_free(b);
+    return rx;
+}
+
+static int v19_eval_pt_load(long base_rx, long cand_rx, long *drop_out) {
+    if (base_rx <= 0 || cand_rx <= 0) return 0;
+    long drop = base_rx - cand_rx;
+    if (drop_out) *drop_out = drop;
+    return drop >= V19_MIN_DROP ? 1 : 0;
+}
+
+static long v19_parse_dec(const char *s, long n) {
+    if (n <= 0) return -1;
+    long v = 0;
+    for (long i = 0; i < n; i++) {
+        if (s[i] < '0' || s[i] > '9') return -1;
+        v = v * 10L + (long)(s[i] - '0');
+    }
+    return v;
+}
+
+static int v19_contains(const char *hay, long hn, const char *needle) {
+    if (!hay || !needle) return 0;
+    long nn = tx_len(needle, 4096);
+    if (nn <= 0 || hn < nn) return 0;
+    for (long i = 0; i + nn <= hn; i++) {
+        if (tx_same(hay + i, nn, needle, nn)) return 1;
+    }
+    return 0;
+}
+
+/* Hash all objects in objs_dir following exact order from base_chain/fixedpoint/g2/lnx-x86_64/receipt.txt. */
+static int v19_bind_receipt_objs(const char *base_chain, const char *objs_dir,
+                                 char objs_sha[65], int *count_out, char *why, int wcap) {
+    char rp[V19_PW];
+    why[0] = 0;
+    if (cx_fmt(rp, sizeof rp, "%s/fixedpoint/g2/lnx-x86_64/receipt.txt", base_chain) != 0) {
+        cx_fmt(why, (size_t)wcap, "receipt-path-overflow");
+        return 1;
+    }
+    size_t bn = 0;
+    char *b = cx_read(rp, &bn);
+    if (!b) { cx_fmt(why, (size_t)wcap, "missing-receipt"); return 1; }
+
+    char *acc = (char *)mm_alloc(32768);
+    if (!acc) { mm_free(b); return 1; }
+    long apos = 0, pos = 0, n = (long)bn;
+    int cnt = 0;
+    while (pos < n) {
+        long s = pos;
+        while (pos < n && b[pos] != '\n') pos++;
+        long ln = pos - s;
+        pos++;
+        long tab = 0;
+        while (tab < ln && b[s + tab] != '\t') tab++;
+        if (tab >= 3 && b[s + tab - 2] == '.' && b[s + tab - 1] == 'o') {
+            char key[128], op[V19_PW], fsha[65], row[256];
+            if (tab >= (long)sizeof key) { mm_free(acc); mm_free(b); cx_fmt(why, (size_t)wcap, "bad-key"); return 1; }
+            mm_copy(key, (long)sizeof key, b + s, tab);
+            key[tab] = 0;
+            if (cx_fmt(op, sizeof op, "%s/%s", objs_dir, key) != 0) {
+                mm_free(acc); mm_free(b); cx_fmt(why, (size_t)wcap, "obj-path-overflow"); return 1;
+            }
+            long olen = 0;
+            if (v19_sha256_file(op, fsha, &olen) != 0 || olen <= 0) {
+                mm_free(acc); mm_free(b); cx_fmt(why, (size_t)wcap, "missing-obj=%s", key); return 1;
+            }
+            if (cx_fmt(row, sizeof row, "%s\t%s\t%ld\n", key, fsha, olen) != 0) {
+                mm_free(acc); mm_free(b); return 1;
+            }
+            long rl = tx_len(row, (long)sizeof row);
+            if (apos + rl + 1 > 32768) { mm_free(acc); mm_free(b); cx_fmt(why, (size_t)wcap, "acc-overflow"); return 1; }
+            mm_copy(acc + apos, 32768 - apos, row, rl);
+            apos += rl;
+            cnt++;
+        }
+    }
+    mm_free(b);
+    if (cnt == 0) { mm_free(acc); cx_fmt(why, (size_t)wcap, "zero-receipt-objs"); return 1; }
+    int hrc = sy_sha256_any_hex(acc, apos, objs_sha);
+    mm_free(acc);
+    if (count_out) *count_out = cnt;
+    return hrc;
+}
+
+/* Validate check-stdio-copies --obj-dir output:
+ * (a) ALL 20 required v0.1.9 units must be present by name;
+ * (b) only m21.o may carry static vfmt (>0), deps.o/driveplan.o <= V19_STUB_MAX, all others == 0. */
+static int v19_eval_stdio_output(const char *out, long n, char *why, int wcap,
+                                 long *m21_out, int *extra_out) {
+    int seen[V19_NREQ];
+    for (int i = 0; i < V19_NREQ; i++) seen[i] = 0;
+    int saw_m21 = 0, extra = 0, units = 0;
+    long m21_b = 0;
+    why[0] = 0;
+    long pos = 0;
+    while (pos < n) {
+        long start = pos;
+        while (pos < n && out[pos] != '\n') pos++;
+        long len = pos - start;
+        pos++;
+        const char *ln = out + start;
+        if (len > 13 && tx_prefix(ln, len, "UNIT obj-dir ", 13)) {
+            units++;
+            long sp = 13;
+            while (sp < len && ln[sp] != ' ') sp++;
+            if (sp >= len) continue;
+            long nlen = sp - 13;
+            long blen = len - sp - 1;
+            long bytes = v19_parse_dec(ln + sp + 1, blen);
+            if (bytes < 0) { cx_fmt(why, (size_t)wcap, "bad-bytes-line"); return 0; }
+            for (int r = 0; r < V19_NREQ; r++) {
+                long rl = tx_len(V19_REQ_UNITS[r], 64);
+                if (nlen == rl && tx_same(ln + 13, nlen, V19_REQ_UNITS[r], rl)) seen[r] = 1;
+            }
+            if (nlen == 5 && tx_same(ln + 13, 5, "m21.o", 5)) {
+                saw_m21 = 1;
+                m21_b = bytes;
+            } else if ((nlen == 6 && tx_same(ln + 13, 6, "deps.o", 6)) ||
+                       (nlen == 11 && tx_same(ln + 13, 11, "driveplan.o", 11))) {
+                if (bytes > V19_STUB_MAX) {
+                    extra++;
+                    if (!why[0]) cx_fmt(why, (size_t)wcap, "stub-exceeded=%.*s:%ld", (int)nlen, ln + 13, bytes);
+                }
+            } else if (bytes > 0) {
+                extra++;
+                if (!why[0]) cx_fmt(why, (size_t)wcap, "unexpected-stdio=%.*s:%ld", (int)nlen, ln + 13, bytes);
+            }
+        }
+    }
+    if (m21_out) *m21_out = m21_b;
+    if (extra_out) *extra_out = extra;
+    if (units == 0) { cx_fmt(why, (size_t)wcap, "no-unit-rows"); return 0; }
+    for (int r = 0; r < V19_NREQ; r++) {
+        if (!seen[r]) {
+            cx_fmt(why, (size_t)wcap, "missing-required-unit=%s", V19_REQ_UNITS[r]);
+            return 0;
+        }
+    }
+    if (!saw_m21 || m21_b <= 0) { cx_fmt(why, (size_t)wcap, "missing-m21-host"); return 0; }
+    return extra == 0 ? 1 : 0;
+}
+
+static int v19_bytes_equal(const char *a, long an, const char *b, long bn) {
+    if (an != bn) return 0;
+    for (long i = 0; i < an; i++) if (a[i] != b[i]) return 0;
+    return 1;
+}
+
+static int v19_run_sh(const char *cwd, const char *cmd, int timeout_s, np_result *r) {
+    char *av[] = {"sh", "-c", (char *)cmd, 0};
+    char why[128]; why[0] = 0;
+    mm_fill(r, (long)sizeof *r, 0, (long)sizeof *r);
+    return np_run(av, cwd, 0, timeout_s, r, why, sizeof why);
+}
+
+static int v19_self_test(void) {
+    int mut_killed = 0;
+    char cwd[V19_PW], tmp[V19_PW], why[128];
+    if (sy_cwd(cwd, (int)sizeof cwd) != 0) return 2;
+    if (sr_scratch("check-v019-selftest", tmp, (int)sizeof tmp) != 0) return 2;
+
+    /* 1. Synthetic ELF64 PT_LOAD R E parser test */
+    unsigned char elf[256];
+    mm_fill(elf, (long)sizeof elf, 0, (long)sizeof elf);
+    elf[0] = 0x7f; elf[1] = 'E'; elf[2] = 'L'; elf[3] = 'F'; elf[4] = 2; elf[5] = 1; elf[6] = 1;
+    v19_wru(elf + 32, 8, 64ULL);
+    v19_wru(elf + 54, 2, 56ULL);
+    v19_wru(elf + 56, 2, 2ULL);
+    v19_wru(elf + 64 + 0, 4, 1ULL); v19_wru(elf + 64 + 4, 4, 5ULL); v19_wru(elf + 64 + 32, 8, 1608598ULL);
+    v19_wru(elf + 120 + 0, 4, 1ULL); v19_wru(elf + 120 + 4, 4, 6ULL); v19_wru(elf + 120 + 32, 8, 48830ULL);
+    long rx = v19_elf_rx_bytes(elf, (long)sizeof elf);
+    v19_rec(rx == 1608598L, "selftest-elf64-rx-parse", "expected=1608598");
+
+    /* 2. Mutation 1: PT_LOAD R E drop < 40,000 B MUST FAIL */
+    long drop_bad = 0, drop_ok = 0;
+    int m1_red = v19_eval_pt_load(2049726L, 2015000L, &drop_bad);
+    int m1_ok = v19_eval_pt_load(2049726L, 1608598L, &drop_ok);
+    v19_rec(!m1_red && m1_ok && drop_bad == 34726L && drop_ok == 441128L,
+            "mut-pt-load-below-40k-killed", "drop=34726 refused, drop=441128 accepted");
+    if (!m1_red && m1_ok) mut_killed++;
+
+    /* 3. Mutation 2 & 3: extra stdio unit AND missing required unit MUST FAIL */
+    const char *good_stdio =
+        "UNIT obj-dir m0.o 0\nUNIT obj-dir host.o 0\nUNIT obj-dir driveface.o 0\n"
+        "UNIT obj-dir driveroute.o 0\nUNIT obj-dir tapegate.o 0\nUNIT obj-dir drivelink.o 0\n"
+        "UNIT obj-dir executor.o 0\nUNIT obj-dir driveunits.o 0\nUNIT obj-dir driveargs.o 0\n"
+        "UNIT obj-dir stages.o 0\nUNIT obj-dir hostout.o 0\nUNIT obj-dir m10.o 0\n"
+        "UNIT obj-dir m20.o 0\nUNIT obj-dir m21.o 17358\nUNIT obj-dir m29.o 0\n"
+        "UNIT obj-dir m35.o 0\nUNIT obj-dir m42.o 0\nUNIT obj-dir m43.o 0\n"
+        "UNIT obj-dir m44.o 0\nUNIT obj-dir m51.o 0\n"
+        "UNIT obj-dir deps.o 130\nUNIT obj-dir driveplan.o 130\n";
+    const char *bad_extra =
+        "UNIT obj-dir m0.o 0\nUNIT obj-dir host.o 0\nUNIT obj-dir driveface.o 0\n"
+        "UNIT obj-dir driveroute.o 22000\nUNIT obj-dir tapegate.o 0\nUNIT obj-dir drivelink.o 0\n"
+        "UNIT obj-dir executor.o 0\nUNIT obj-dir driveunits.o 0\nUNIT obj-dir driveargs.o 0\n"
+        "UNIT obj-dir stages.o 0\nUNIT obj-dir hostout.o 0\nUNIT obj-dir m10.o 0\n"
+        "UNIT obj-dir m20.o 0\nUNIT obj-dir m21.o 17358\nUNIT obj-dir m29.o 0\n"
+        "UNIT obj-dir m35.o 0\nUNIT obj-dir m42.o 0\nUNIT obj-dir m43.o 0\n"
+        "UNIT obj-dir m44.o 0\nUNIT obj-dir m51.o 0\n";
+    const char *bad_missing =
+        "UNIT obj-dir m0.o 0\nUNIT obj-dir host.o 0\nUNIT obj-dir m21.o 17358\n";
+    long m21b = 0; int ex = 0;
+    int m2_ok = v19_eval_stdio_output(good_stdio, tx_len(good_stdio, 4096), why, (int)sizeof why, &m21b, &ex);
+    int m2_red = v19_eval_stdio_output(bad_extra, tx_len(bad_extra, 4096), why, (int)sizeof why, &m21b, &ex);
+    v19_rec(m2_ok && !m2_red && ex == 1, "mut-extra-stdio-unit-killed", why);
+    if (m2_ok && !m2_red) mut_killed++;
+
+    int m3_red = v19_eval_stdio_output(bad_missing, tx_len(bad_missing, 4096), why, (int)sizeof why, &m21b, &ex);
+    v19_rec(!m3_red, "mut-missing-required-unit-killed", why);
+    if (!m3_red) mut_killed++;
+
+    /* 4. Mutation 4: 1-byte stderr drift MUST FAIL */
+    int m4_ok = v19_bytes_equal("link: missing _start\n", 21, "link: missing _start\n", 21);
+    int m4_red = v19_bytes_equal("link: missing _start\n", 21, "link: missing _starX\n", 21);
+    v19_rec(m4_ok && !m4_red, "mut-stderr-1byte-drift-killed", "1-byte diff rejected");
+    if (m4_ok && !m4_red) mut_killed++;
+
+    /* 5. Mutation 5: empty --files list MUST REFUSE (rc=2, never fall back to selftest) */
+    {
+        char *av[] = {"sh", "./unisacc.com", "tools/check-v019-exit.cx", "--",
+                      "--base-chain", tmp, "--cand-ape", tmp, "--cand-elf", tmp,
+                      "--objs-dir", tmp, "--files", "", 0};
+        np_result r; mm_fill(&r, (long)sizeof r, 0, (long)sizeof r);
+        int t = np_run(av, cwd, 0, 30, &r, why, sizeof why);
+        int ok = (t == 0 && r.rc == 2);
+        v19_rec(ok, "mut-empty-files-refused", ok ? "rc=2" : "did-not-refuse");
+        if (ok) mut_killed++;
+        np_free(&r);
+    }
+
+    /* 6. Mutation 6 & 7: feed-previous-output & delete-run-step via --judge-receipt */
+    {
+        char rec[V19_PW], miss[V19_PW], h64[65];
+        (void)sy_sha256_any_hex("v019-selftest", 13, h64);
+        cx_fmt(rec, sizeof rec, "%s/rec.tsv", tmp);
+        cx_fmt(miss, sizeof miss, "%s/no_such.tsv", tmp);
+        int wrc = rc_write2(rec, "run-1", h64, h64, h64, h64, 0);
+        char *av_ok[] = {"sh", "./unisacc.com", "tools/check-v019-exit.cx", "--", "--judge-receipt", rec, "run-1", 0};
+        char *av_prev[] = {"sh", "./unisacc.com", "tools/check-v019-exit.cx", "--", "--judge-receipt", rec, "run-2", 0};
+        char *av_del[] = {"sh", "./unisacc.com", "tools/check-v019-exit.cx", "--", "--judge-receipt", miss, "run-1", 0};
+        np_result ro, rp, rd;
+        mm_fill(&ro, (long)sizeof ro, 0, (long)sizeof ro);
+        mm_fill(&rp, (long)sizeof rp, 0, (long)sizeof rp);
+        mm_fill(&rd, (long)sizeof rd, 0, (long)sizeof rd);
+        int to = np_run(av_ok, cwd, 0, 30, &ro, why, sizeof why);
+        int tp = np_run(av_prev, cwd, 0, 30, &rp, why, sizeof why);
+        int td = np_run(av_del, cwd, 0, 30, &rd, why, sizeof why);
+        int ok = (wrc == 0 && to == 0 && ro.rc == 0 && tp == 0 && rp.rc == 2 && td == 0 && rd.rc == 2);
+        v19_rec(ok, "mut-feed-previous-output-and-delete-step-killed", "ok=0 prev=2 del=2");
+        if (ok) mut_killed += 2;
+        np_free(&ro); np_free(&rp); np_free(&rd);
+    }
+
+    sy_printf("CHECK_V019_EXIT_SELFTEST\tpassed=%d\tfailed=%d\tmutations_killed=%d\n",
+              g_pass, g_fail, mut_killed);
+    return g_fail ? 1 : 0;
+}
+
+int main(int argc, char **argv) {
+    int self_test = 0, has_files_opt = 0;
+    const char *base_chain = 0, *cand_ape = 0, *cand_elf = 0, *objs_dir = 0;
+    const char *repo = ".", *hdr_pkg = 0, *range = 0, *files_csv = 0;
+    const char *product = 0, *run_id_arg = 0, *out_receipt = 0;
+    for (int i = 1; i < argc; i++) {
+        if (tx_eqz(argv[i], "--")) continue;
+        else if (tx_eqz(argv[i], "--self-test")) self_test = 1;
+        else if (tx_eqz(argv[i], "--judge-receipt") && i + 2 < argc) {
+            const char *jp = argv[i + 1], *jid = argv[i + 2];
+            if (rc_fresh(jp, jid) == 0 && rc_need(jp, "rc", "int") == 0) {
+                sy_printf("PASS\tv019-exit-receipt\trun_id=%s\n", jid);
+                return 0;
+            }
+            return 2;
+        }
+        else if (tx_eqz(argv[i], "--base-chain") && i + 1 < argc) base_chain = argv[++i];
+        else if (tx_eqz(argv[i], "--cand-ape") && i + 1 < argc) cand_ape = argv[++i];
+        else if (tx_eqz(argv[i], "--cand-elf") && i + 1 < argc) cand_elf = argv[++i];
+        else if (tx_eqz(argv[i], "--objs-dir") && i + 1 < argc) objs_dir = argv[++i];
+        else if (tx_eqz(argv[i], "--repo") && i + 1 < argc) repo = argv[++i];
+        else if (tx_eqz(argv[i], "--hdr-pkg") && i + 1 < argc) hdr_pkg = argv[++i];
+        else if (tx_eqz(argv[i], "--product") && i + 1 < argc) product = argv[++i];
+        else if (tx_eqz(argv[i], "--range") && i + 1 < argc) range = argv[++i];
+        else if (tx_eqz(argv[i], "--files") && i + 1 < argc) { has_files_opt = 1; files_csv = argv[++i]; }
+        else if (tx_eqz(argv[i], "--run-id") && i + 1 < argc) run_id_arg = argv[++i];
+        else if (tx_eqz(argv[i], "--out-receipt") && i + 1 < argc) out_receipt = argv[++i];
+        else { sy_eprintf("check-v019-exit: unknown arg %s\n", argv[i]); return 2; }
+    }
+    if (self_test) return v19_self_test();
+    if (!base_chain || !cand_ape || !cand_elf || !objs_dir) {
+        sy_eprintf("usage: check-v019-exit.cx --self-test | --judge-receipt PATH RUN_ID | --base-chain DIR --cand-ape APE --cand-elf ELF --objs-dir DIR [--repo DIR] [--hdr-pkg PKG] [--product PROD] [--range R | --files F1,F2] [--run-id ID] [--out-receipt PATH]\n");
+        return 2;
+    }
+
+    /* Validate --files early: an empty --files list MUST REFUSE (rc=2), never fall back to selftest. */
+    char fargs[4096];
+    fargs[0] = 0;
+    if (has_files_opt) {
+        long fp = 0, cl = files_csv ? tx_len(files_csv, 3800) : 0;
+        int nfiles = 0, in_tok = 0;
+        for (long i = 0; i < cl && fp + 2 < (long)sizeof fargs; i++) {
+            char c = files_csv[i];
+            if (c == ',' || c == ' ' || c == '\t') {
+                if (in_tok) { fargs[fp++] = ' '; in_tok = 0; }
+            } else {
+                if (!in_tok) { nfiles++; in_tok = 1; }
+                fargs[fp++] = c;
+            }
+        }
+        fargs[fp] = 0;
+        if (nfiles == 0) {
+            sy_eprintf("check-v019-exit: REFUSE empty --files list\n");
+            return 2;
+        }
+    }
+
+    char cwd[V19_PW], tmp[V19_PW], det[512], run_id[96];
+    if (sy_cwd(cwd, (int)sizeof cwd) != 0) return 2;
+    if (sr_scratch("check-v019-exit", tmp, (int)sizeof tmp) != 0) return 2;
+    if (run_id_arg && run_id_arg[0]) cx_fmt(run_id, sizeof run_id, "%s", run_id_arg);
+    else cx_fmt(run_id, sizeof run_id, "v19-%d-%lld", (int)getpid(), (long long)sy_now_ms());
+
+    /* (1) Bind base/candidate ELF, APE, and receipt-ordered objects + PT_LOAD R E net decrease >= 40,000 B */
+    char base_elf[V19_PW], base_ape[V19_PW];
+    cx_fmt(base_elf, sizeof base_elf, "%s/fixedpoint/g2/lnx-x86_64/entry.elf", base_chain);
+    cx_fmt(base_ape, sizeof base_ape, "%s/ape-final/unisacc-next.com", base_chain);
+
+    char base_elf_sha[65], cand_elf_sha[65], base_ape_sha[65], cand_ape_sha[65], objs_sha[65], bind_why[128];
+    base_elf_sha[0] = cand_elf_sha[0] = base_ape_sha[0] = cand_ape_sha[0] = objs_sha[0] = 0;
+    int robj_cnt = 0;
+    int b_ok = (v19_sha256_file(base_elf, base_elf_sha, 0) == 0 &&
+                v19_sha256_file(cand_elf, cand_elf_sha, 0) == 0 &&
+                v19_sha256_file(base_ape, base_ape_sha, 0) == 0 &&
+                v19_sha256_file(cand_ape, cand_ape_sha, 0) == 0 &&
+                v19_bind_receipt_objs(base_chain, objs_dir, objs_sha, &robj_cnt, bind_why, (int)sizeof bind_why) == 0);
+
+    long base_rx = v19_file_rx_bytes(base_elf);
+    long cand_rx = v19_file_rx_bytes(cand_elf);
+    long drop = 0;
+    int ok1 = b_ok && v19_eval_pt_load(base_rx, cand_rx, &drop);
+    cx_fmt(det, sizeof det, "base=%ld cand=%ld drop=%ld min=%ld receipt_objs=%d bind=%s",
+           base_rx, cand_rx, drop, (long)V19_MIN_DROP, robj_cnt, b_ok ? "ok" : (bind_why[0] ? bind_why : "hash-fail"));
+    v19_rec(ok1, "gate1-pt-load-rx-drop", det);
+
+    /* (2) check-stdio-copies --obj-dir (all 20 required units + nm stub symbol verification) */
+    char cmd[8192];
+    np_result r;
+    cx_fmt(cmd, sizeof cmd, "sh '%s/unisacc.com' '%s/tools/check-stdio-copies.cx' -- --obj-dir '%s'",
+           cwd, cwd, objs_dir);
+    int tr = v19_run_sh(cwd, cmd, 55, &r);
+    char why[128]; why[0] = 0;
+    long m21b = 0; int extra = 0;
+    long out_len = r.out ? tx_len(r.out, 1048576L) : 0L;
+    int ok2_list = (tr == 0 && r.rc == 0 && v19_eval_stdio_output(r.out ? r.out : "", out_len, why, (int)sizeof why, &m21b, &extra));
+    np_free(&r);
+
+    /* Verify deps.o and driveplan.o stubs carry no _u_vfmt core symbol via nm */
+    int ok2_stubs = 0;
+    cx_fmt(cmd, sizeof cmd,
+        "set -e; "
+        "for s in deps.o driveplan.o; do "
+        "  test -f '%s/'\"$s\"; "
+        "  if nm -S '%s/'\"$s\" 2>/dev/null | grep -q '_u_vfmt'; then echo \"VFMT_IN_$s\"; exit 1; fi; "
+        "done; echo STUB_SYMS_OK",
+        objs_dir, objs_dir);
+    tr = v19_run_sh(cwd, cmd, 30, &r);
+    ok2_stubs = (tr == 0 && r.rc == 0);
+    np_free(&r);
+
+    int ok2 = ok2_list && ok2_stubs;
+    cx_fmt(det, sizeof det, "m21=%ld extra=%d stubs=%s why=%s",
+           m21b, extra, ok2_stubs ? "no-vfmt" : "bad-stub", why[0] ? why : "ok");
+    v19_rec(ok2, "gate2-stdio-copies-allowlist", det);
+
+    /* (3a) 5 stderr cmps with non-zero exact rc + non-empty stderr + closed-fd2 */
+    cx_fmt(cmd, sizeof cmd,
+        "set -e; T='%s/diag'; mkdir -p \"$T\"; "
+        "printf 'int missing_fn(void); int main(void){return missing_fn();}\\n' > \"$T/undef.c\"; "
+        "printf 'int helper(void){return 7;}\\n' > \"$T/nostart.c\"; "
+        "set +e; OK=1; "
+        "sh '%s' \"$T/undef.c\" -o \"$T/u1\" 2> \"$T/b1\"; b1=$?; sh '%s' \"$T/undef.c\" -o \"$T/u2\" 2> \"$T/c1\"; c1=$?; "
+        "[ \"$b1\" != 0 ] && [ \"$b1\" = \"$c1\" ] && test -s \"$T/c1\" && cmp -s \"$T/b1\" \"$T/c1\" || OK=0; "
+        "sh '%s' -c -funit -b lnx/x86_64 \"$T/nostart.c\" -o \"$T/ns.o\"; "
+        "sh '%s' -b lnx/x86_64 \"$T/ns.o\" -o \"$T/n1\" 2> \"$T/b2\"; b2=$?; sh '%s' -b lnx/x86_64 \"$T/ns.o\" -o \"$T/n2\" 2> \"$T/c2\"; c2=$?; "
+        "[ \"$b2\" != 0 ] && [ \"$b2\" = \"$c2\" ] && test -s \"$T/c2\" && cmp -s \"$T/b2\" \"$T/c2\" || OK=0; "
+        "sh '%s' \"$T/no_such.c\" 2> \"$T/b3\"; b3=$?; sh '%s' \"$T/no_such.c\" 2> \"$T/c3\"; c3=$?; "
+        "[ \"$b3\" != 0 ] && [ \"$b3\" = \"$c3\" ] && test -s \"$T/c3\" && cmp -s \"$T/b3\" \"$T/c3\" || OK=0; "
+        "sh '%s' as --bad-opt 2> \"$T/b4\"; b4=$?; sh '%s' as --bad-opt 2> \"$T/c4\"; c4=$?; "
+        "[ \"$b4\" != 0 ] && [ \"$b4\" = \"$c4\" ] && test -s \"$T/c4\" && cmp -s \"$T/b4\" \"$T/c4\" || OK=0; "
+        "sh '%s' ar 2> \"$T/b5\"; b5=$?; sh '%s' ar 2> \"$T/c5\"; c5=$?; "
+        "[ \"$b5\" != 0 ] && [ \"$b5\" = \"$c5\" ] && test -s \"$T/c5\" && cmp -s \"$T/b5\" \"$T/c5\" || OK=0; "
+        "sh '%s' \"$T/no_such.c\" 2>&-; cfd=$?; [ \"$cfd\" = 1 ] || OK=0; "
+        "echo \"DIAG5_OK=$OK rcs=$c1,$c2,$c3,$c4,$c5 CFD=$cfd\"; [ \"$OK\" = 1 ]",
+        tmp, base_ape, cand_ape, base_ape, base_ape, cand_ape, base_ape, cand_ape, base_ape, cand_ape, base_ape, cand_ape, cand_ape);
+    tr = v19_run_sh(cwd, cmd, 55, &r);
+    int ok3a = (tr == 0 && r.rc == 0);
+    long dlen = r.out ? tx_len(r.out, 80L) : 0L;
+    while (dlen > 0 && (r.out[dlen - 1] == '\n' || r.out[dlen - 1] == '\r')) dlen--;
+    cx_fmt(det, sizeof det, "rc=%d out=%.*s", tr ? 124 : r.rc, (int)dlen, r.out ? r.out : "");
+    v19_rec(ok3a, "gate3a-diag5-cmp-and-closed-fd2", det);
+    np_free(&r);
+
+    /* (3b) float formatting + non-sticky closed-fd2 recovery with exact output byte assertions */
+    char flt_cx[V19_PW];
+    cx_fmt(flt_cx, sizeof flt_cx, "%s/flt_cfd2.cx", tmp);
+    const char *flt_src =
+        "#pragma unisa use sys.io\n#pragma unisa use sys.fs\n"
+        "int main(void){\n"
+        "  double pi=3.14159265, big=1.25e100, sm=-0.000125;\n"
+        "  if (sy_printf(\"F=%.6f|%.2e|%.6f\\n\", pi, big, sm) <= 0) return 10;\n"
+        "  char pad[300]; for(int i=0;i<299;i++) pad[i]='x'; pad[299]=0;\n"
+        "  if (sy_printf(\"L=%s|%.2f|%s\\n\", pad, -42.75, pad) < 600) return 11;\n"
+        "  int pfd[2]; if (pipe(pfd)!=0) return 12;\n"
+        "  int sv=dup(2); if (sv<0) return 13; close(2);\n"
+        "  int rf=sy_eprintf(\"fail_%d\\n\", 1);\n"
+        "  dup2(pfd[1],2); close(pfd[1]);\n"
+        "  int ro=sy_eprintf(\"RECOVERED_FD2_OK!\\n\");\n"
+        "  dup2(sv,2); close(sv);\n"
+        "  char g[32]; long gn=sy_read(pfd[0], g, 31); close(pfd[0]);\n"
+        "  sy_printf(\"CFD2_RECOVERED=%ld\\n\", gn);\n"
+        "  if (gn!=18) return 14;\n"
+        "  return (rf<0 && ro==18) ? 0 : 15;\n"
+        "}\n";
+    (void)sy_write_file(flt_cx, flt_src, tx_len(flt_src, 4096), 0644);
+    if (hdr_pkg && hdr_pkg[0]) {
+        cx_fmt(cmd, sizeof cmd,
+               "ln -sf '%s/cxroot.tsv' '%s/cxroot.tsv' && ln -sfn '%s/cx' '%s/cx' && "
+               "chmod +x '%s' && UNISA_CONTAINER='%s' UNISACC_LOCAL=1 '%s' '%s' --",
+               cwd, tmp, cwd, tmp, cand_elf, hdr_pkg, cand_elf, flt_cx);
+    } else {
+        cx_fmt(cmd, sizeof cmd,
+               "ln -sf '%s/cxroot.tsv' '%s/cxroot.tsv' && ln -sfn '%s/cx' '%s/cx' && "
+               "sh '%s' '%s' --",
+               cwd, tmp, cwd, tmp, cand_ape, flt_cx);
+    }
+    tr = v19_run_sh(cwd, cmd, 55, &r);
+    long fout_n = r.out ? tx_len(r.out, 65536L) : 0L;
+    int has_flt = v19_contains(r.out, fout_n, "F=3.141593|1.25e+100|-0.000125\n");
+    int has_rec = v19_contains(r.out, fout_n, "CFD2_RECOVERED=18\n");
+    int ok3b = (tr == 0 && r.rc == 0 && has_flt && has_rec);
+    cx_fmt(det, sizeof det, "rc=%d hdr=%s flt_bytes=%s rec18=%s",
+           tr ? 124 : r.rc, hdr_pkg ? "pkg-hdr" : "ape", has_flt ? "exact" : "MISMATCH", has_rec ? "18" : "MISMATCH");
+    v19_rec(ok3b, "gate3b-float-and-nonsticky-closed-fd2", det);
+    np_free(&r);
+
+    /* (4) cxlibc --check ok */
+    cx_fmt(cmd, sizeof cmd, "cd '%s' && sh '%s/unisacc.com' tests/cxlibc.cx -- --check", repo, cwd);
+    tr = v19_run_sh(cwd, cmd, 55, &r);
+    int ok4 = (tr == 0 && r.rc == 0);
+    cx_fmt(det, sizeof det, "rc=%d", tr ? 124 : r.rc);
+    v19_rec(ok4, "gate4-cxlibc-check", det);
+    np_free(&r);
+
+    /* (5) six-target compile of changed .cx files via check-six-target-compile.cx, naming product + sha */
+    char prod_path[V19_PW], prod_sha[65];
+    if (product && product[0]) cx_fmt(prod_path, sizeof prod_path, "%s", product);
+    else cx_fmt(prod_path, sizeof prod_path, "%s/unisacc.com", cwd);
+    if (v19_sha256_file(prod_path, prod_sha, 0) != 0) cx_fmt(prod_sha, sizeof prod_sha, "MISSING");
+
+    if (has_files_opt) {
+        cx_fmt(cmd, sizeof cmd, "cd '%s' && sh '%s/unisacc.com' '%s/tools/check-six-target-compile.cx' -- --product '%s' %s",
+               repo, cwd, cwd, prod_path, fargs);
+    } else if (range && range[0]) {
+        cx_fmt(cmd, sizeof cmd, "cd '%s' && sh '%s/unisacc.com' '%s/tools/check-six-target-compile.cx' -- --product '%s' --range '%s'",
+               repo, cwd, cwd, prod_path, range);
+    } else {
+        cx_fmt(cmd, sizeof cmd, "cd '%s' && sh '%s/unisacc.com' '%s/tools/check-six-target-compile.cx' -- --product '%s' --self-test",
+               repo, cwd, cwd, prod_path);
+    }
+    tr = v19_run_sh(cwd, cmd, 180, &r);
+    int ok5 = (tr == 0 && r.rc == 0);
+    cx_fmt(det, sizeof det, "rc=%d mode=%s product=%s product_sha=%.16s",
+           tr ? 124 : r.rc, has_files_opt ? "files" : (range ? "range" : "selftest"), prod_path, prod_sha);
+    v19_rec(ok5, "gate5-six-target-compile", det);
+    np_free(&r);
+
+    /* (6) Receipt v2 binding (rc_write2 + rc_fresh) */
+    char self_path[V19_PW], self_sha[65], in_blob[512], inputs_sha[65], out_blob[256], output_sha[65];
+    cx_fmt(self_path, sizeof self_path, "%s/tools/check-v019-exit.cx", cwd);
+    if (v19_sha256_file(self_path, self_sha, 0) != 0) (void)sy_sha256_any_hex("check-v019-exit", 15, self_sha);
+    cx_fmt(in_blob, sizeof in_blob, "%s\t%s\t%s\t%s", base_elf_sha, cand_elf_sha, cand_ape_sha, objs_sha);
+    (void)sy_sha256_any_hex(in_blob, tx_len(in_blob, (long)sizeof in_blob), inputs_sha);
+    cx_fmt(out_blob, sizeof out_blob, "verdict=%s\tpassed=%d\tfailed=%d\tdrop=%ld",
+           g_fail == 0 ? "PASS" : "FAIL", g_pass, g_fail, drop);
+    (void)sy_sha256_any_hex(out_blob, tx_len(out_blob, (long)sizeof out_blob), output_sha);
+
+    char rec_path[V19_PW];
+    if (out_receipt && out_receipt[0]) cx_fmt(rec_path, sizeof rec_path, "%s", out_receipt);
+    else cx_fmt(rec_path, sizeof rec_path, "%s/v019-exit-receipt.tsv", tmp);
+    int rec_ok = (cand_ape_sha[0] && rc_write2(rec_path, run_id, cand_ape_sha, inputs_sha, output_sha, self_sha, g_fail ? 1 : 0) == 0 &&
+                  rc_fresh(rec_path, run_id) == 0);
+
+    sy_printf("CHECK_V019_EXIT\trun_id=%s\tverdict=%s\tpassed=%d\tfailed=%d\tpt_load_drop=%ld\tbase_elf_sha=%s\tcand_elf_sha=%s\tcand_ape_sha=%s\tobjs_sha=%s\treceipt=%s\treceipt_ok=%d\n",
+              run_id, g_fail == 0 ? "PASS" : "FAIL", g_pass, g_fail, drop,
+              base_elf_sha, cand_elf_sha, cand_ape_sha, objs_sha, rec_path, rec_ok);
+    return (g_fail || !rec_ok) ? 1 : 0;
+}

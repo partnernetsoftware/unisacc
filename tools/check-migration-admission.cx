@@ -1,0 +1,649 @@
+/* tools/check-migration-admission.cx -- migration admission gate (owner directive + fable ruling).
+ * Checks plans/migration-admission.tsv against plans/slice-units.tsv (row identity),
+ * plans/migration-cost-model.tsv (table-driven coefficients), prd_mempalace.md,
+ * and bound level=product receipts v2 (rc_fresh/binding_sha, hex64 candidate_sha, unit match).
+ */
+#pragma unisa use sys.fs
+#pragma unisa use sys.io
+#pragma unisa use sys.posix
+#pragma unisa use sys.sha
+#pragma unisa use text.text
+#pragma unisa use text.fmt
+#pragma unisa use mem.heap
+#pragma unisa use mem.bytes
+#pragma unisa use fsx.fs
+#pragma unisa use cxlib.receipt
+
+static char *cma_read_file(const char *path, size_t *out_len) {
+    FILE *f = fopen(path, "rb");
+    if (!f) return 0;
+    if (fseek(f, 0, SEEK_END) != 0) { fclose(f); return 0; }
+    long sz = ftell(f);
+    if (sz < 0) { fclose(f); return 0; }
+    rewind(f);
+    char *buf = (char *)mm_alloc((size_t)sz + 1);
+    if (!buf) { fclose(f); return 0; }
+    size_t nr = sz > 0 ? fread(buf, 1, (size_t)sz, f) : 0;
+    fclose(f);
+    buf[nr] = 0;
+    if (out_len) *out_len = nr;
+    return buf;
+}
+
+static int cma_write_file(const char *path, const char *buf, size_t len) {
+    FILE *f = fopen(path, "wb");
+    if (!f) return -1;
+    size_t nw = len > 0 ? fwrite(buf, 1, len, f) : 0;
+    fclose(f);
+    return nw == len ? 0 : -1;
+}
+
+static int cma_is_hex64(const char *s) {
+    if (!s) return 0;
+    int i = 0;
+    for (; s[i]; i++) {
+        char c = s[i];
+        if (!((c >= '0' && c <= '9') || (c >= 'a' && c <= 'f'))) return 0;
+    }
+    return i == 64;
+}
+
+static int cma_parse_i64(const char *s, int64_t *out) {
+    if (!s || !s[0]) return -1;
+    for (int i = 0; s[i]; i++) {
+        if (s[i] < '0' || s[i] > '9') return -1;
+    }
+    char *end = 0;
+    long long v = strtoll(s, &end, 10);
+    if (!end || *end != 0 || v < 0) return -1;
+    *out = (int64_t)v;
+    return 0;
+}
+
+static int cma_parse_double(const char *s, double *out) {
+    if (!s || !s[0]) return -1;
+    int dots = 0, digits = 0;
+    for (int i = 0; s[i]; i++) {
+        char c = s[i];
+        if (c >= '0' && c <= '9') digits++;
+        else if (c == '.') { dots++; if (dots > 1) return -1; }
+        else return -1;
+    }
+    if (digits == 0) return -1;
+    char *end = 0;
+    double v = strtod(s, &end);
+    if (!end || *end != 0) return -1;
+    if (!(v == v) || v < 0.0 || v >= 1e15) return -1;
+    *out = v;
+    return 0;
+}
+
+static int cma_rcpt_get(const char *buf, size_t len, const char *key, char *out, size_t cap) {
+    size_t kl = strlen(key), i = 0;
+    while (i < len) {
+        size_t e = i, tab;
+        while (e < len && buf[e] != '\n') e++;
+        for (tab = i; tab < e && buf[tab] != '\t'; tab++) {}
+        if (tab < e && tab - i == kl && memcmp(buf + i, key, kl) == 0) {
+            size_t vn = e - (tab + 1);
+            if (vn == 0 || vn >= cap) return -1;
+            mm_copy(out, cap, buf + tab + 1, vn);
+            out[vn] = 0;
+            return 0;
+        }
+        i = e + 1;
+    }
+    return -1;
+}
+
+static int cma_load_cost_model(const char *repo_dir, double *base_us, double *us_per_step) {
+    char cm_path[4400];
+    if (cx_fmt(cm_path, sizeof cm_path, "%s/plans/migration-cost-model.tsv", repo_dir)) return -1;
+    size_t n = 0;
+    char *b = cma_read_file(cm_path, &n);
+    if (!b) return -1;
+    char b_s[64], u_s[64];
+    int ok = (cma_rcpt_get(b, n, "base_us", b_s, sizeof b_s) == 0 &&
+              cma_rcpt_get(b, n, "us_per_step", u_s, sizeof u_s) == 0 &&
+              cma_parse_double(b_s, base_us) == 0 &&
+              cma_parse_double(u_s, us_per_step) == 0);
+    mm_free(b);
+    return ok ? 0 : -1;
+}
+
+static int cma_split_tabs(char *line, char **cols, int max_cols) {
+    int n = 0;
+    char *p = line;
+    while (n < max_cols) {
+        cols[n++] = p;
+        char *tab = strchr(p, '\t');
+        if (!tab) break;
+        *tab = 0;
+        p = tab + 1;
+    }
+    return n;
+}
+
+static int check_repo(const char *repo_dir, int verbose, int *out_pass, int *out_fail) {
+    int passed = 0, failed = 0;
+    char su_path[4400], ma_path[4400], mp_path[4400];
+    if (cx_fmt(su_path, sizeof su_path, "%s/plans/slice-units.tsv", repo_dir) ||
+        cx_fmt(ma_path, sizeof ma_path, "%s/plans/migration-admission.tsv", repo_dir) ||
+        cx_fmt(mp_path, sizeof mp_path, "%s/prd_mempalace.md", repo_dir)) {
+        if (out_pass) *out_pass = 0;
+        if (out_fail) *out_fail = 1;
+        return 1;
+    }
+
+    double base_us = 0.0, us_per_step = 0.0;
+    if (cma_load_cost_model(repo_dir, &base_us, &us_per_step) != 0) {
+        failed++;
+        if (verbose) printf("FAIL\tcost-model-missing-or-invalid\n");
+    } else {
+        passed++;
+        if (verbose) printf("PASS\tcost-model-loaded\tbase_us=%.2f\tus_per_step=%.5f\n", base_us, us_per_step);
+    }
+
+    static char su_units[256][64], ma_units[256][64];
+    int expected_units = 0;
+    size_t su_len = 0;
+    char *su = cma_read_file(su_path, &su_len);
+    if (!su) {
+        failed++;
+        if (verbose) printf("FAIL\tslice-units-missing\tpath=%s\n", su_path);
+    } else {
+        size_t i = 0;
+        while (i < su_len && expected_units < 256) {
+            size_t e = i;
+            while (e < su_len && su[e] != '\n') e++;
+            size_t l = e - i;
+            if (l > 0 && su[e - 1] == '\r') l--;
+            if (l > 0 && su[i] != '#') {
+                size_t tab = i;
+                while (tab < i + l && su[tab] != '\t') tab++;
+                size_t ul = tab - i;
+                if (ul > 0 && ul < 64) {
+                    mm_copy(su_units[expected_units], 64, su + i, ul);
+                    su_units[expected_units][ul] = 0;
+                    expected_units++;
+                }
+            }
+            i = e + 1;
+        }
+        mm_free(su);
+        if (expected_units > 0) {
+            passed++;
+            if (verbose) printf("PASS\tslice-units-count\tunits=%d\n", expected_units);
+        } else {
+            failed++;
+            if (verbose) printf("FAIL\tslice-units-empty\n");
+        }
+    }
+
+    size_t mp_len = 0;
+    char *mp = cma_read_file(mp_path, &mp_len);
+    if (!mp) {
+        failed++;
+        if (verbose) printf("FAIL\tprd-mempalace-missing\n");
+    } else {
+        const char *veto_txt = "\xe5\x8d\x95\xe5\x8d\x95\xe5\x85\x83\xe5\x87\x80\xe9\x99\x8d\xe4\xb8\x8d\xe8\xb6\xb3 2,000 B \xe5\x9b\x9e\xe9\x80\x80\xe5\x8e\x9f\xe7\x94\x9f";
+        if (tx_find(mp, (long)mp_len, veto_txt, (long)strlen(veto_txt)) >= 0) {
+            failed++;
+            if (verbose) printf("FAIL\twithdrawn-size-veto-text-present\tfile=prd_mempalace.md\n");
+        } else {
+            passed++;
+            if (verbose) printf("PASS\twithdrawn-size-veto-text-absent\n");
+        }
+        mm_free(mp);
+    }
+
+    size_t ma_len = 0;
+    char *ma = cma_read_file(ma_path, &ma_len);
+    if (!ma) {
+        failed++;
+        if (verbose) printf("FAIL\ttable-missing-or-incomplete\trows=0\texpected=%d\n", expected_units);
+    } else {
+        int rows = 0, measured_calls_n = 0;
+        double startup_cost_sum = 0.0;
+        size_t i = 0;
+        while (i < ma_len) {
+            size_t e = i;
+            while (e < ma_len && ma[e] != '\n') e++;
+            size_t l = e - i;
+            if (l > 0 && ma[e - 1] == '\r') l--;
+            if (l > 0 && ma[i] != '#' && !(l >= 5 && memcmp(ma + i, "unit\t", 5) == 0)) {
+                char *line = (char *)mm_alloc(l + 1);
+                if (!line) { failed++; break; }
+                mm_copy(line, l + 1, ma + i, l);
+                line[l] = 0;
+                char *cols[22];
+                int nc = cma_split_tabs(line, cols, 22);
+                if (nc < 18) {
+                    rows++;
+                    failed++;
+                    if (verbose) printf("FAIL\trow-bad-columns\trow=%d\tcols=%d\n", rows, nc);
+                } else {
+                    const char *unit = cols[0];
+                    if (rows < 256) {
+                        size_t ul = strlen(unit);
+                        if (ul < 64) mm_copy(ma_units[rows], 64, unit, ul + 1);
+                    }
+                    rows++;
+                    const char *golden_kind = cols[2];
+                    const char *golden_cases_s = cols[3];
+                    const char *golden_pass_s = cols[4];
+                    const char *path = cols[5];
+                    const char *calls_s = cols[6];
+                    const char *steps_s = cols[7];
+                    const char *cost_s = cols[8];
+                    const char *budget_s = cols[9];
+                    const char *blockers_s = cols[11];
+                    const char *source_kind = cols[12];
+                    const char *verdict = cols[16];
+                    const char *veto_reason = cols[17];
+
+                    if (nc >= 20) {
+                        const char *gen_friendly = cols[18];
+                        const char *entries_n_s = cols[19];
+                        if (strcmp(gen_friendly, "yes") != 0 && strcmp(gen_friendly, "no") != 0 &&
+                            strcmp(gen_friendly, "base-only") != 0 && strcmp(gen_friendly, "extended-only") != 0 &&
+                            strcmp(gen_friendly, "UNMEASURED") != 0 && strcmp(gen_friendly, "-") != 0) {
+                            failed++;
+                            if (verbose) printf("FAIL\tbad-gen-friendly\tunit=%s\tval=%s\n", unit, gen_friendly);
+                        }
+                        int64_t entries_n = 0;
+                        if (strcmp(entries_n_s, "UNMEASURED") != 0 && strcmp(entries_n_s, "-") != 0 &&
+                            (cma_parse_i64(entries_n_s, &entries_n) != 0 || entries_n < 0)) {
+                            failed++;
+                            if (verbose) printf("FAIL\tbad-entries-n\tunit=%s\tval=%s\n", unit, entries_n_s);
+                        }
+                    }
+
+                    if (strcmp(veto_reason, "size") == 0) {
+                        failed++;
+                        if (verbose) printf("FAIL\tveto-reason-size-forbidden\tunit=%s\n", unit);
+                    } else if (veto_reason[0] != 0 && strcmp(veto_reason, "-") != 0 &&
+                               strcmp(veto_reason, "correctness") != 0 &&
+                               strcmp(veto_reason, "speed") != 0 &&
+                               strcmp(veto_reason, "maintain") != 0 &&
+                               strcmp(veto_reason, "blocked") != 0) {
+                        failed++;
+                        if (verbose) printf("FAIL\tveto-reason-invalid\tunit=%s\treason=%s\n", unit, veto_reason);
+                    }
+
+                    if (strcmp(verdict, "ADMIT") != 0 && strcmp(verdict, "VETO") != 0 && strcmp(verdict, "PENDING") != 0) {
+                        failed++;
+                        if (verbose) printf("FAIL\tbad-verdict\tunit=%s\tverdict=%s\n", unit, verdict);
+                    } else if (strcmp(verdict, "ADMIT") == 0 && veto_reason[0] != 0 && strcmp(veto_reason, "-") != 0) {
+                        failed++;
+                        if (verbose) printf("FAIL\tadmit-has-veto-reason\tunit=%s\treason=%s\n", unit, veto_reason);
+                    } else if (strcmp(verdict, "VETO") == 0 &&
+                               strcmp(veto_reason, "correctness") != 0 &&
+                               strcmp(veto_reason, "speed") != 0 &&
+                               strcmp(veto_reason, "maintain") != 0 &&
+                               strcmp(veto_reason, "blocked") != 0) {
+                        failed++;
+                        if (verbose) printf("FAIL\tveto-missing-or-bad-reason\tunit=%s\treason=%s\n", unit, veto_reason);
+                    }
+
+                    if (strcmp(calls_s, "UNMEASURED") != 0) measured_calls_n++;
+
+                    if (strcmp(verdict, "ADMIT") == 0) {
+                        int row_ok = 1;
+                        if (strcmp(golden_kind, "enum-full") != 0 && strcmp(golden_kind, "byte-diff") != 0) {
+                            row_ok = 0;
+                            if (verbose) printf("FAIL\tadmit-bad-golden-kind\tunit=%s\tkind=%s\n", unit, golden_kind);
+                        }
+                        int64_t g_cases = 0, g_pass = 0, calls = 0, steps = 0, blockers = -1;
+                        double cost = 0.0, budget = 0.0;
+                        if (cma_parse_i64(golden_cases_s, &g_cases) != 0 || cma_parse_i64(golden_pass_s, &g_pass) != 0 ||
+                            g_cases <= 0 || g_pass != g_cases) {
+                            row_ok = 0;
+                            if (verbose) printf("FAIL\tadmit-golden-mismatch\tunit=%s\tpass=%s\tcases=%s\n", unit, golden_pass_s, golden_cases_s);
+                        }
+                        if (strcmp(path, "startup") != 0 && strcmp(path, "hot") != 0) {
+                            row_ok = 0;
+                            if (verbose) printf("FAIL\tadmit-bad-path\tunit=%s\tpath=%s\n", unit, path);
+                        }
+                        if (strcmp(calls_s, "UNMEASURED") == 0 || cma_parse_i64(calls_s, &calls) != 0 || calls < 0) {
+                            row_ok = 0;
+                            if (verbose) printf("FAIL\tadmit-calls-unmeasured\tunit=%s\n", unit);
+                        }
+                        if (cma_parse_i64(steps_s, &steps) != 0 || steps < 0) {
+                            row_ok = 0;
+                            if (verbose) printf("FAIL\tadmit-bad-steps\tunit=%s\n", unit);
+                        }
+                        if (cma_parse_double(cost_s, &cost) != 0 || cma_parse_double(budget_s, &budget) != 0) {
+                            row_ok = 0;
+                            if (verbose) printf("FAIL\tadmit-bad-cost-or-budget\tunit=%s\n", unit);
+                        } else if (row_ok) {
+                            double derived = (double)calls * (base_us + (double)steps * us_per_step);
+                            double diff = cost > derived ? cost - derived : derived - cost;
+                            double tol = derived * 0.05 + 0.5;
+                            if (diff > tol) {
+                                row_ok = 0;
+                                if (verbose) printf("FAIL\tadmit-cost-not-derived\tunit=%s\tcost=%.3f\tderived=%.3f\n", unit, cost, derived);
+                            }
+                            if (cost > budget) {
+                                row_ok = 0;
+                                if (verbose) printf("FAIL\tadmit-over-budget\tunit=%s\tcost=%.3f\tbudget=%.3f\n", unit, cost, budget);
+                            }
+                            if (strcmp(path, "startup") == 0) startup_cost_sum += cost;
+                        }
+                        if (cma_parse_i64(blockers_s, &blockers) != 0 || blockers != 0) {
+                            row_ok = 0;
+                            if (verbose) printf("FAIL\tadmit-blockers-nonzero\tunit=%s\tblockers=%s\n", unit, blockers_s);
+                        }
+                        if (strcmp(source_kind, "table") != 0 && strcmp(source_kind, "generator") != 0) {
+                            row_ok = 0;
+                            if (verbose) printf("FAIL\tadmit-bad-source-kind\tunit=%s\tsource=%s\n", unit, source_kind);
+                        }
+
+                        char rp[4400];
+                        if (cx_fmt(rp, sizeof rp, "%s/build/admission-receipts/%s.rcpt", repo_dir, unit)) {
+                            row_ok = 0;
+                        } else {
+                            size_t rn = 0;
+                            char *rb = cma_read_file(rp, &rn);
+                            if (!rb) {
+                                row_ok = 0;
+                                if (verbose) printf("FAIL\tadmit-missing-receipt\tunit=%s\n", unit);
+                            } else {
+                                char r_rid[160], r_cand[160], r_unit[160], r_lvl[64], r_gp[64], r_cp[64], r_sp[64], r_bl[64];
+                                if (cma_rcpt_get(rb, rn, "run_id", r_rid, sizeof r_rid) != 0 ||
+                                    cma_rcpt_get(rb, rn, "candidate_sha", r_cand, sizeof r_cand) != 0 ||
+                                    cma_rcpt_get(rb, rn, "unit", r_unit, sizeof r_unit) != 0 ||
+                                    cma_rcpt_get(rb, rn, "level", r_lvl, sizeof r_lvl) != 0 ||
+                                    cma_rcpt_get(rb, rn, "golden_pass", r_gp, sizeof r_gp) != 0 ||
+                                    cma_rcpt_get(rb, rn, "calls_per_run", r_cp, sizeof r_cp) != 0 ||
+                                    cma_rcpt_get(rb, rn, "steps_per_call", r_sp, sizeof r_sp) != 0 ||
+                                    cma_rcpt_get(rb, rn, "blockers_n", r_bl, sizeof r_bl) != 0) {
+                                    row_ok = 0;
+                                    if (verbose) printf("FAIL\tadmit-receipt-missing-field\tunit=%s\n", unit);
+                                } else if (!cma_is_hex64(r_cand)) {
+                                    row_ok = 0;
+                                    if (verbose) printf("FAIL\tadmit-receipt-short-digest\tunit=%s\n", unit);
+                                } else if (rc_fresh(rp, r_rid) != 0) {
+                                    row_ok = 0;
+                                    if (verbose) printf("FAIL\tadmit-receipt-binding-invalid\tunit=%s\twhy=%s\n", unit, rc_why());
+                                } else if (strcmp(r_unit, unit) != 0) {
+                                    row_ok = 0;
+                                    if (verbose) printf("FAIL\tadmit-receipt-unit-mismatch\tunit=%s\tgot=%s\n", unit, r_unit);
+                                } else if (strcmp(r_lvl, "product") != 0) {
+                                    row_ok = 0;
+                                    if (verbose) printf("FAIL\tadmit-level-not-product\tunit=%s\n", unit);
+                                } else if (strcmp(r_gp, golden_pass_s) != 0 ||
+                                           strcmp(r_cp, calls_s) != 0 ||
+                                           strcmp(r_sp, steps_s) != 0 ||
+                                           strcmp(r_bl, blockers_s) != 0) {
+                                    row_ok = 0;
+                                    if (verbose) printf("FAIL\tadmit-receipt-mismatch\tunit=%s\n", unit);
+                                }
+                                mm_free(rb);
+                            }
+                        }
+
+                        /* Hard-refuse every ADMIT until shared rc_verify lands */
+                        row_ok = 0;
+                        if (verbose) printf("FAIL\treceipt-verify-pending\tunit=%s\n", unit);
+
+                        if (!row_ok) failed++;
+                    }
+                }
+                mm_free(line);
+            }
+            i = e + 1;
+        }
+        mm_free(ma);
+
+        if (rows != expected_units || rows == 0) {
+            failed++;
+            if (verbose) printf("FAIL\ttable-missing-or-incomplete\trows=%d\texpected=%d\n", rows, expected_units);
+        } else {
+            int id_bad = 0;
+            for (int u = 0; u < expected_units; u++) {
+                int found = 0;
+                for (int m = 0; m < rows; m++) {
+                    if (strcmp(su_units[u], ma_units[m]) == 0) { found = 1; break; }
+                }
+                if (!found) { id_bad = 1; break; }
+            }
+            if (id_bad) {
+                failed++;
+                if (verbose) printf("FAIL\trow-identity-mismatch\n");
+            } else {
+                passed++;
+                if (verbose) printf("PASS\ttable-row-identity\trows=%d\n", rows);
+            }
+        }
+        if (rows > 0 && measured_calls_n == 0) {
+            failed++;
+            if (verbose) printf("FAIL\tall-calls-unmeasured\n");
+        } else if (rows > 0) {
+            passed++;
+            if (verbose) printf("PASS\tmeasured-calls-present\tcount=%d\n", measured_calls_n);
+        }
+        if (startup_cost_sum > 2000.0) {
+            failed++;
+            if (verbose) printf("FAIL\tstartup-budget-exceeded\tsum=%.2f\n", startup_cost_sum);
+        }
+    }
+
+    if (out_pass) *out_pass = passed;
+    if (out_fail) *out_fail = failed;
+    return failed ? 1 : 0;
+}
+
+static int setup_mock_repo(const char *dir, const char *su_unit, const char *ma_row, const char *mp_text,
+                           const char *rcpt_unit, const char *cand_sha, const char *level, const char *bind_sha) {
+    char p[4400], cmd[4600];
+    sy_mkdir(dir, 0755);
+    cx_fmt(cmd, sizeof cmd, "%s/plans", dir); sy_mkdir(cmd, 0755);
+    cx_fmt(cmd, sizeof cmd, "%s/build", dir); sy_mkdir(cmd, 0755);
+    cx_fmt(cmd, sizeof cmd, "%s/build/admission-receipts", dir); sy_mkdir(cmd, 0755);
+    if (cx_fmt(p, sizeof p, "%s/plans/migration-cost-model.tsv", dir)) return -1;
+    const char *cm = "base_us\t10.68\nus_per_step\t0.00177\n";
+    if (cma_write_file(p, cm, strlen(cm)) != 0) return -1;
+    if (cx_fmt(p, sizeof p, "%s/plans/slice-units.tsv", dir)) return -1;
+    char su_line[256];
+    cx_fmt(su_line, sizeof su_line, "%s\tcx/m25.cx\tm25\t-\t100\t0\t0\t-\tok\n", su_unit);
+    if (cma_write_file(p, su_line, strlen(su_line)) != 0) return -1;
+    if (cx_fmt(p, sizeof p, "%s/prd_mempalace.md", dir)) return -1;
+    if (cma_write_file(p, mp_text, strlen(mp_text)) != 0) return -1;
+    if (ma_row) {
+        if (cx_fmt(p, sizeof p, "%s/plans/migration-admission.tsv", dir)) return -1;
+        if (cma_write_file(p, ma_row, strlen(ma_row)) != 0) return -1;
+    }
+    if (rcpt_unit && cand_sha && level && bind_sha) {
+        if (cx_fmt(p, sizeof p, "%s/build/admission-receipts/m25.o.rcpt", dir)) return -1;
+        const char *z64 = "0000000000000000000000000000000000000000000000000000000000000000";
+        char rb[1024];
+        cx_fmt(rb, sizeof rb,
+               "run_id\trid1\ncandidate_sha\t%s\ninputs_sha\t%s\noutput_sha\t%s\nbinding_sha\t%s\n"
+               "unit\t%s\nlevel\t%s\ngolden_pass\t10\ncalls_per_run\t2\nsteps_per_call\t100\nblockers_n\t0\n",
+               cand_sha, z64, z64, bind_sha, rcpt_unit, level);
+        if (cma_write_file(p, rb, strlen(rb)) != 0) return -1;
+    }
+    return 0;
+}
+
+static int run_selftest(int verbose) {
+    int sc = 0, passed = 0, failed = 0;
+    if (fsx_scratch(&sc, "cma-st-") != 0) return 2;
+    const char *base = fsx_scratch_dir(sc);
+    char d[4400], art_p[4400], real_sha[65], bind_sha[65];
+    cx_fmt(art_p, sizeof art_p, "%s/real-artifact.bin", base);
+    const char *art_bytes = "real-m25-product-artifact-v1";
+    cma_write_file(art_p, art_bytes, strlen(art_bytes));
+    sy_sha256_hex(art_bytes, (long)strlen(art_bytes), real_sha);
+    const char *z64 = "0000000000000000000000000000000000000000000000000000000000000000";
+    char bind_in[256];
+    cx_fmt(bind_in, sizeof bind_in, "rid1\t%s\t%s", z64, z64);
+    sy_sha256_hex(bind_in, (long)strlen(bind_in), bind_sha);
+
+    const char *ok_row = "m25.o\ttable\tenum-full\t10\t10\tstartup\t2\t100\t21.714\t100.0\tdriveargs\t0\ttable\t1200\t9405\t-8205\tADMIT\t-\n";
+
+    cx_fmt(d, sizeof d, "%s/t1", base);
+    setup_mock_repo(d, "m25.o", ok_row, "# clean\n", "m25.o", real_sha, "product", bind_sha);
+    if (check_repo(d, 0, 0, 0) != 0) { passed++; if (verbose) printf("PASS\tmut-admit-hard-refused-until-rc-verify\n"); }
+    else { failed++; if (verbose) printf("FAIL\tmut-admit-hard-refused-until-rc-verify\n"); }
+
+    cx_fmt(d, sizeof d, "%s/t2", base);
+    setup_mock_repo(d, "m25.o", ok_row, "# clean\n", "m25.o", "abc123", "product", bind_sha);
+    if (check_repo(d, 0, 0, 0) != 0) { passed++; if (verbose) printf("PASS\tmut-short-digest-refused\n"); }
+    else { failed++; if (verbose) printf("FAIL\tmut-short-digest-refused\n"); }
+
+    cx_fmt(d, sizeof d, "%s/t3", base);
+    setup_mock_repo(d, "m25.o", ok_row, "# clean\n", "m25.o", real_sha, "product", z64);
+    if (check_repo(d, 0, 0, 0) != 0) { passed++; if (verbose) printf("PASS\tmut-bad-binding-sha-refused\n"); }
+    else { failed++; if (verbose) printf("FAIL\tmut-bad-binding-sha-refused\n"); }
+
+    cx_fmt(d, sizeof d, "%s/t4", base);
+    setup_mock_repo(d, "m25.o", ok_row, "# clean\n", "other.o", real_sha, "product", bind_sha);
+    if (check_repo(d, 0, 0, 0) != 0) { passed++; if (verbose) printf("PASS\tmut-wrong-unit-in-receipt-refused\n"); }
+    else { failed++; if (verbose) printf("FAIL\tmut-wrong-unit-in-receipt-refused\n"); }
+
+    cx_fmt(d, sizeof d, "%s/t5", base);
+    setup_mock_repo(d, "other.o", ok_row, "# clean\n", "m25.o", real_sha, "product", bind_sha);
+    if (check_repo(d, 0, 0, 0) != 0) { passed++; if (verbose) printf("PASS\tmut-row-identity-mismatch-refused\n"); }
+    else { failed++; if (verbose) printf("FAIL\tmut-row-identity-mismatch-refused\n"); }
+
+    {
+        double v_lim = 0.0, v_ok = 0.0;
+        if (cma_parse_double("1000000000000000", &v_lim) != 0 &&
+            cma_parse_double("999999999999999", &v_ok) == 0) {
+            passed++; if (verbose) printf("PASS\tmut-cost-1e15-boundary-refused\n");
+        } else {
+            failed++; if (verbose) printf("FAIL\tmut-cost-1e15-boundary-refused\n");
+        }
+    }
+
+    cx_fmt(d, sizeof d, "%s/t7", base);
+    setup_mock_repo(d, "m25.o", "m25.o\ttable\tenum-full\t10\t10\tstartup\t2\t100\t0x15\t100.0\tdriveargs\t0\ttable\t1200\t9405\t-8205\tADMIT\t-\n", "# clean\n", "m25.o", real_sha, "product", bind_sha);
+    if (check_repo(d, 0, 0, 0) != 0) { passed++; if (verbose) printf("PASS\tmut-cost-hex-refused\n"); }
+    else { failed++; if (verbose) printf("FAIL\tmut-cost-hex-refused\n"); }
+
+    cx_fmt(d, sizeof d, "%s/t8", base);
+    setup_mock_repo(d, "m25.o", "m25.o\ttable\tenum-full\t10\t10\tstartup\t2\t100\t-0\t100.0\tdriveargs\t0\ttable\t1200\t9405\t-8205\tADMIT\t-\n", "# clean\n", "m25.o", real_sha, "product", bind_sha);
+    if (check_repo(d, 0, 0, 0) != 0) { passed++; if (verbose) printf("PASS\tmut-cost-neg-zero-refused\n"); }
+    else { failed++; if (verbose) printf("FAIL\tmut-cost-neg-zero-refused\n"); }
+
+    cx_fmt(d, sizeof d, "%s/t9", base);
+    setup_mock_repo(d, "m25.o", "m25.o\ttable\tenum-full\t10\t10\tstartup\t2\t100\t 21.714\t100.0\tdriveargs\t0\ttable\t1200\t9405\t-8205\tADMIT\t-\n", "# clean\n", "m25.o", real_sha, "product", bind_sha);
+    if (check_repo(d, 0, 0, 0) != 0) { passed++; if (verbose) printf("PASS\tmut-cost-leading-space-refused\n"); }
+    else { failed++; if (verbose) printf("FAIL\tmut-cost-leading-space-refused\n"); }
+
+    cx_fmt(d, sizeof d, "%s/t10", base);
+    setup_mock_repo(d, "m25.o", "m25.o\ttable\tenum-full\t10\t10\tstartup\t2\t100\t21.714x\t100.0\tdriveargs\t0\ttable\t1200\t9405\t-8205\tADMIT\t-\n", "# clean\n", "m25.o", real_sha, "product", bind_sha);
+    if (check_repo(d, 0, 0, 0) != 0) { passed++; if (verbose) printf("PASS\tmut-cost-trailing-junk-refused\n"); }
+    else { failed++; if (verbose) printf("FAIL\tmut-cost-trailing-junk-refused\n"); }
+
+    cx_fmt(d, sizeof d, "%s/t11", base);
+    setup_mock_repo(d, "m25.o", "m25.o\ttable\tenum-full\t10\t10\tstartup\t2\t100\t21.714\t100.0\tdriveargs\t0\ttable\t1200\t9405\t-8205\tADMIT\tspeed\n", "# clean\n", "m25.o", real_sha, "product", bind_sha);
+    if (check_repo(d, 0, 0, 0) != 0) { passed++; if (verbose) printf("PASS\tmut-admit-with-veto-reason-refused\n"); }
+    else { failed++; if (verbose) printf("FAIL\tmut-admit-with-veto-reason-refused\n"); }
+
+    cx_fmt(d, sizeof d, "%s/t12", base);
+    setup_mock_repo(d, "m25.o", "m25.o\ttable\tenum-full\t10\t10\tstartup\t2\t100\t21.714\t100.0\tdriveargs\t0\ttable\t1200\t9405\t-8205\tVETO\t-\n", "# clean\n", "m25.o", real_sha, "product", bind_sha);
+    if (check_repo(d, 0, 0, 0) != 0) { passed++; if (verbose) printf("PASS\tmut-veto-empty-reason-refused\n"); }
+    else { failed++; if (verbose) printf("FAIL\tmut-veto-empty-reason-refused\n"); }
+
+    cx_fmt(d, sizeof d, "%s/t13", base);
+    setup_mock_repo(d, "m25.o", ok_row, "# clean\n", 0, 0, 0, 0);
+    if (check_repo(d, 0, 0, 0) != 0) { passed++; if (verbose) printf("PASS\tmut-admit-no-receipt-refused\n"); }
+    else { failed++; if (verbose) printf("FAIL\tmut-admit-no-receipt-refused\n"); }
+
+    cx_fmt(d, sizeof d, "%s/t14", base);
+    setup_mock_repo(d, "m25.o", ok_row, "# clean\n", "m25.o", real_sha, "table", bind_sha);
+    if (check_repo(d, 0, 0, 0) != 0) { passed++; if (verbose) printf("PASS\tmut-admit-level-table-only-refused\n"); }
+    else { failed++; if (verbose) printf("FAIL\tmut-admit-level-table-only-refused\n"); }
+
+    cx_fmt(d, sizeof d, "%s/t15", base);
+    setup_mock_repo(d, "m25.o", "m25.o\ttable\tenum-full\t10\t10\tstartup\t2\t100\tNaN\t100.0\tdriveargs\t0\ttable\t1200\t9405\t-8205\tADMIT\t-\n", "# clean\n", "m25.o", real_sha, "product", bind_sha);
+    if (check_repo(d, 0, 0, 0) != 0) { passed++; if (verbose) printf("PASS\tmut-cost-nan-refused\n"); }
+    else { failed++; if (verbose) printf("FAIL\tmut-cost-nan-refused\n"); }
+
+    cx_fmt(d, sizeof d, "%s/t16", base);
+    setup_mock_repo(d, "m25.o", "m25.o\ttable\tenum-full\t10\t10\tstartup\t2\t100\t-1.0\t100.0\tdriveargs\t0\ttable\t1200\t9405\t-8205\tADMIT\t-\n", "# clean\n", "m25.o", real_sha, "product", bind_sha);
+    if (check_repo(d, 0, 0, 0) != 0) { passed++; if (verbose) printf("PASS\tmut-cost-neg-refused\n"); }
+    else { failed++; if (verbose) printf("FAIL\tmut-cost-neg-refused\n"); }
+
+    cx_fmt(d, sizeof d, "%s/t17", base);
+    setup_mock_repo(d, "m25.o", 0, "# clean\n", 0, 0, 0, 0);
+    if (check_repo(d, 0, 0, 0) != 0) { passed++; if (verbose) printf("PASS\tmut-missing-table-refused\n"); }
+    else { failed++; if (verbose) printf("FAIL\tmut-missing-table-refused\n"); }
+
+    cx_fmt(d, sizeof d, "%s/t18", base);
+    setup_mock_repo(d, "m25.o", ok_row, "\xe5\x8d\x95\xe5\x8d\x95\xe5\x85\x83\xe5\x87\x80\xe9\x99\x8d\xe4\xb8\x8d\xe8\xb6\xb3 2,000 B \xe5\x9b\x9e\xe9\x80\x80\xe5\x8e\x9f\xe7\x94\x9f\n", "m25.o", real_sha, "product", bind_sha);
+    if (check_repo(d, 0, 0, 0) != 0) { passed++; if (verbose) printf("PASS\tmut-withdrawn-size-veto-text-refused\n"); }
+    else { failed++; if (verbose) printf("FAIL\tmut-withdrawn-size-veto-text-refused\n"); }
+
+    cx_fmt(d, sizeof d, "%s/t19", base);
+    setup_mock_repo(d, "m25.o", "m25.o\ttable\tenum-full\t10\t10\tstartup\t2\t100\t21.714\t100.0\tdriveargs\t0\ttable\t1200\t9405\t-8205\tVETO\tsize\n", "# clean\n", "m25.o", real_sha, "product", bind_sha);
+    if (check_repo(d, 0, 0, 0) != 0) { passed++; if (verbose) printf("PASS\tmut-veto-reason-size-refused\n"); }
+    else { failed++; if (verbose) printf("FAIL\tmut-veto-reason-size-refused\n"); }
+
+    cx_fmt(d, sizeof d, "%s/t20", base);
+    setup_mock_repo(d, "m25.o", "m25.o\ttable\tenum-full\t10\t10\tstartup\tUNMEASURED\t100\t21.714\t100.0\tdriveargs\t0\ttable\t1200\t9405\t-8205\tADMIT\t-\n", "# clean\n", "m25.o", real_sha, "product", bind_sha);
+    if (check_repo(d, 0, 0, 0) != 0) { passed++; if (verbose) printf("PASS\tmut-admit-calls-unmeasured-refused\n"); }
+    else { failed++; if (verbose) printf("FAIL\tmut-admit-calls-unmeasured-refused\n"); }
+
+    cx_fmt(d, sizeof d, "%s/t21", base);
+    setup_mock_repo(d, "m25.o", "m25.o\ttable\tenum-full\t10\t10\tstartup\t2\t100\t21.714\t100.0\tdriveargs\t0\ttable\t1200\t9405\t-8205\tPENDING\t-\n", "# clean\n", 0, 0, 0, 0);
+    if (check_repo(d, 0, 0, 0) == 0) { passed++; if (verbose) printf("PASS\tvalid-pending-row-pass\n"); }
+    else { failed++; if (verbose) printf("FAIL\tvalid-pending-row-pass\n"); }
+
+    fsx_scratch_drop(sc);
+    if (verbose) printf("CHECK_MIGRATION_ADMISSION_SELFTEST\tpassed=%d\tfailed=%d\n", passed, failed);
+    return failed ? 1 : 0;
+}
+
+int main(int argc, char **argv) {
+    if (argc >= 2 && strcmp(argv[1], "--selftest") == 0) {
+        return run_selftest(1);
+    }
+    if (argc >= 4 && strcmp(argv[1], "--produce") == 0) {
+        if (run_selftest(0) != 0) return 1;
+        char buf[512];
+        if (cx_fmt(buf, sizeof buf, "run_id=%s\nverdict=PASS\nfailed=0\n", argv[2])) return 2;
+        return cma_write_file(argv[3], buf, strlen(buf)) == 0 ? 0 : 2;
+    }
+    if (argc >= 4 && strcmp(argv[1], "--judge") == 0) {
+        const char *run_id = argv[2];
+        const char *ev_path = argv[3];
+        if (sy_exists(ev_path) != 1) {
+            printf("FAIL\tmigration_admission_missing\n");
+            return 1;
+        }
+        size_t evn = 0;
+        char *ev = cma_read_file(ev_path, &evn);
+        if (!ev) {
+            printf("FAIL\tmigration_admission_missing\n");
+            return 1;
+        }
+        char want[256];
+        cx_fmt(want, sizeof want, "run_id=%s\n", run_id);
+        int has_rid = (tx_find(ev, (long)evn, want, (long)strlen(want)) >= 0);
+        int has_pass = (tx_find(ev, (long)evn, "verdict=PASS\n", 13) >= 0 &&
+                        tx_find(ev, (long)evn, "failed=0\n", 9) >= 0);
+        mm_free(ev);
+        if (!has_rid) {
+            printf("FAIL\tmigration_admission_stale\n");
+            return 1;
+        }
+        if (!has_pass) {
+            printf("FAIL\tmigration_admission_exec\n");
+            return 1;
+        }
+        printf("PASS\tmigration_admission_exec\n");
+        return 0;
+    }
+
+    const char *repo_dir = ".";
+    if (argc >= 3 && strcmp(argv[1], "--repo") == 0) repo_dir = argv[2];
+    int passed = 0, failed = 0;
+    int rc = check_repo(repo_dir, 1, &passed, &failed);
+    printf("CHECK_MIGRATION_ADMISSION\tverdict=%s\tpassed=%d\tfailed=%d\n",
+           failed ? "RED" : "GREEN", passed, failed);
+    return rc;
+}

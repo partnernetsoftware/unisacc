@@ -344,6 +344,102 @@ int main(int argc, char **argv) {
            "f-relative-write-refused-when-flow-root-is-another-tree");
         if (unsetenv("UNISACC_FLOW_ROOT")) return 2;
         {   char *rm[] = {"rm", "-rf", "--", od, 0}; (void)cap2(rm, 0, out2, sizeof out2); } }
+    /* 共享检出写保护(红灯先行):存在 .claude/worktrees/w-* 时,非 cc 属主写共享检出/版本树/软链逃逸/未创建文件/不可解析路径及经 doc/flow/git 写入口均须闭锁拒绝并标明防误操作威胁模型;写自身 w- 工作树、外部临时目录或 DEVSVC_OWNER=cc 放行 */
+    {   char sd[300], fold[340], fnew[340], fshared[400], fown[460], fownnew[460], wtdir[400], wttools[430], vwttools[430], fvwt[460], fxtools[340], cldir[340];
+        char symdir[460], fnewshared[420], fnewsym[420], fflow[420], flowtsv[340], fdoc[420], fext[340];
+        int rr;
+        unsigned char *rb = 0; int64_t rn = 0;
+        F(sd, sizeof sd, "/tmp/devsvc-scg-%d", sy_pid()); F(fold, sizeof fold, "%s/old.txt", sd); F(fnew, sizeof fnew, "%s/new.txt", sd);
+        F(fext, sizeof fext, "%s/ext-allowed.txt", sd); F(flowtsv, sizeof flowtsv, "%s/scg-flow.tsv", sd);
+        F(fxtools, sizeof fxtools, "%s/tools", fx); F(fshared, sizeof fshared, "%s/tools/ratchets.cx", fx);
+        F(fnewshared, sizeof fnewshared, "%s/tools/not-yet-existing.cx", fx);
+        F(fnewsym, sizeof fnewsym, "%s/tools/not-yet-via-sym.cx", fx);
+        F(fflow, sizeof fflow, "%s/tools/flow-target.cx", fx);
+        F(fdoc, sizeof fdoc, "%s/plans/scg-doc.md", fx);
+        F(cldir, sizeof cldir, "%s/.claude", fx);
+        F(wtdir, sizeof wtdir, "%s/.claude/worktrees/w-omp-grk", fx); F(wttools, sizeof wttools, "%s/tools", wtdir);
+        F(vwttools, sizeof vwttools, "%s/.claude/worktrees/v0.1.8/tools", fx); F(fvwt, sizeof fvwt, "%s/ratchets.cx", vwttools);
+        F(fown, sizeof fown, "%s/tools/ratchets.cx", wtdir);
+        F(fownnew, sizeof fownnew, "%s/tools/new-own-file.cx", wtdir);
+        F(symdir, sizeof symdir, "%s/sym-shared-tools", wtdir);
+        (void)sy_mkdir_all(sd, 0755); (void)sy_mkdir_all(fxtools, 0755); (void)sy_mkdir_all(wttools, 0755); (void)sy_mkdir_all(vwttools, 0755);
+        (void)cx_write(fold, "old\n", 4); (void)cx_write(fnew, "new\n", 4);
+        (void)cx_write(fshared, "old\n", 4); (void)cx_write(fown, "old\n", 4); (void)cx_write(fvwt, "old\n", 4);
+        (void)sy_unlink(symdir); (void)sy_symlink(fxtools, symdir);
+        (void)sy_unlink(fnewshared); (void)sy_unlink(fnewsym); (void)sy_unlink(fflow); (void)sy_unlink(fdoc); (void)sy_unlink(fownnew);
+        if (setenv("DEVSVC_OWNER", "omp-grk", 1)) return 2;
+        /* (A) Refusal text names cooperating-window accident guard and caller-provided DEVSVC_OWNER (not authentication) */
+        {   char *v[] = {"f", "write", "tools/ratchets.cx", "--from", fnew, "--no-compile-check", 0}; rr = dvat(fx, out, sizeof out, v); }
+        rb = 0; rn = 0;
+        ck(rr == 1 && has("REFUSE shared-checkout") && has("cooperating-window accident guard") && has("not authentication") && has(wtdir)
+           && !sy_read_file(fshared, &rb, &rn, 64) && rb && rn == 4 && !memcmp(rb, "old\n", 4),
+           "f-write-shared-checkout-refused-for-non-cc");
+        if (rb) free(rb);
+        {   char *v[] = {"f", "edit", "tools/ratchets.cx", "--old-file", fold, "--new-file", fnew, "--no-compile-check", 0}; rr = dvat(fx, out, sizeof out, v); }
+        rb = 0; rn = 0;
+        ck(rr == 1 && has("REFUSE shared-checkout") && has(wtdir) && !sy_read_file(fshared, &rb, &rn, 64) && rb && rn == 4 && !memcmp(rb, "old\n", 4),
+           "f-edit-shared-checkout-refused-for-non-cc");
+        if (rb) free(rb);
+        /* (B) Fail closed on .. segments, symlink + .., not-yet-existing file, and unresolvable .. after missing dir */
+        {   char *v[] = {"f", "write", ".claude/worktrees/w-omp-grk/../../tools/not-yet-existing.cx", "--from", fnew, "--no-compile-check", 0};
+            rr = dvat(fx, out, sizeof out, v); }
+        ck(rr == 1 && has("REFUSE shared-checkout") && sy_exists(fnewshared) == 0,
+           "f-write-dotdot-not-yet-existing-refused-for-non-cc");
+        {   char *v[] = {"f", "write", ".claude/worktrees/w-omp-grk/sym-shared-tools/../tools/not-yet-via-sym.cx", "--from", fnew, "--no-compile-check", 0};
+            rr = dvat(fx, out, sizeof out, v); }
+        ck(rr == 1 && has("REFUSE shared-checkout") && sy_exists(fnewsym) == 0,
+           "f-write-symlink-dotdot-not-yet-existing-refused-for-non-cc");
+        {   char *v[] = {"f", "write", ".claude/worktrees/w-omp-grk/no-such-subdir-scg/../ratchets.cx", "--from", fnew, "--no-compile-check", 0};
+            rr = dvat(fx, out, sizeof out, v); }
+        ck(rr == 1 && has("REFUSE shared-checkout") && has("unresolvable write target"),
+           "f-write-unresolvable-missing-parent-dotdot-fails-closed");
+        /* (C) Single write boundary reached by doc create, flow file.write node, git add, and git commit */
+        {   char *v[] = {"doc", "create", "plans/scg-doc.md", "SCG Title", 0};
+            rr = dvat(fx, out, sizeof out, v); }
+        ck(rr == 1 && has("REFUSE shared-checkout") && sy_exists(fdoc) == 0,
+           "doc-create-shared-checkout-refused-for-non-cc");
+        {   char fbody[600];
+            F(fbody, sizeof fbody, "w1\tfile.write\t-\tpath=tools/flow-target.cx;from=%s;compile_check=0\n", fnew);
+            (void)cx_write(flowtsv, fbody, strlen(fbody));
+            {   char *v[] = {"flow", "run", flowtsv, "--par", "1", 0};
+                rr = dvat(fx, out, sizeof out, v); }
+            ck(rr == 1 && has("REFUSE shared-checkout") && sy_exists(fflow) == 0,
+               "flow-file-write-shared-checkout-refused-for-non-cc"); }
+        {   char *v[] = {"git", "add", "tools/ratchets.cx", 0};
+            rr = dvat(fx, out, sizeof out, v); }
+        ck(rr == 1 && has("REFUSE shared-checkout"),
+           "git-add-shared-checkout-refused-for-non-cc");
+        {   char *v[] = {"git", "commit", "-m", "scg test commit", "--whole", "tools/ratchets.cx", 0};
+            rr = dvat(fx, out, sizeof out, v); }
+        ck(rr == 1 && has("REFUSE shared-checkout"),
+           "git-commit-shared-checkout-refused-for-non-cc");
+        /* (D) Verified good cases: non-cc version-tree write refused; own worktree (existing + new), external temp dir, and cc allowed */
+        {   char *v[] = {"f", "write", ".claude/worktrees/v0.1.8/tools/ratchets.cx", "--from", fnew, "--no-compile-check", 0};
+            rr = dvat(fx, out, sizeof out, v); }
+        ck(rr == 1 && has("REFUSE shared-checkout"),
+           "f-write-version-worktree-refused-for-non-cc");
+        {   char *v[] = {"f", "write", fown, "--from", fnew, "--no-compile-check", 0}; rr = dvat(fx, out, sizeof out, v); }
+        rb = 0; rn = 0;
+        ck(rr == 0 && has("F\twrite\tok") && !sy_read_file(fown, &rb, &rn, 64) && rb && rn == 4 && !memcmp(rb, "new\n", 4),
+           "f-write-own-worktree-allowed-for-non-cc");
+        if (rb) free(rb);
+        {   char *v[] = {"f", "write", ".claude/worktrees/w-omp-grk/tools/new-own-file.cx", "--from", fnew, "--no-compile-check", 0};
+            rr = dvat(fx, out, sizeof out, v); }
+        ck(rr == 0 && has("F\twrite\tok") && sy_exists(fownnew) == 1,
+           "f-write-own-worktree-new-file-allowed-for-non-cc");
+        {   char *v[] = {"f", "write", fext, "--from", fnew, "--no-compile-check", 0};
+            rr = dvat(fx, out, sizeof out, v); }
+        ck(rr == 0 && has("F\twrite\tok") && sy_exists(fext) == 1,
+           "f-write-external-temp-allowed-for-non-cc");
+        if (setenv("DEVSVC_OWNER", "cc", 1)) return 2;
+        {   char *v[] = {"f", "write", "tools/ratchets.cx", "--from", fnew, "--no-compile-check", 0}; rr = dvat(fx, out, sizeof out, v); }
+        rb = 0; rn = 0;
+        ck(rr == 0 && has("F\twrite\tok") && !sy_read_file(fshared, &rb, &rn, 64) && rb && rn == 4 && !memcmp(rb, "new\n", 4),
+           "f-write-shared-checkout-allowed-for-cc");
+        if (rb) free(rb);
+        if (setenv("DEVSVC_OWNER", "chk-owner", 1)) return 2;
+        (void)sy_unlink(fshared);
+        {   char *rm1[] = {"rm", "-rf", "--", cldir, sd, 0}; (void)cap2(rm1, 0, out2, sizeof out2); } }
     ck(dv1("start", 0, 0, 0, 0, 0) == 0 && has("OK\talready"), "start-twice-already");
     ck(dv1("ping", 0, 0, 0, 0, 0) == 0 && has("OK\tpong"), "ping");
     ck(dv1("stop", 0, 0, 0, 0, 0) == 0 && has("OK\tstopping"), "a1-stop");

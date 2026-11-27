@@ -1,0 +1,102 @@
+/* tools/check-six-target-compile.cx -- Six-target compile check for .cx files or a git range.
+ *
+ * Usage:
+ *   sh ./unisacc.com tools/check-six-target-compile.cx -- --self-test
+ *   sh ./unisacc.com tools/check-six-target-compile.cx -- [--product PATH] --range REV1..REV2
+ *   sh ./unisacc.com tools/check-six-target-compile.cx -- [--product PATH] FILE1.cx [FILE2.cx...]
+ */
+#pragma unisa use cxlib.netpack
+#pragma unisa use cxlib.sessionroot
+#pragma unisa use sys.fs
+#pragma unisa use sys.io
+#pragma unisa use mem.bytes
+
+static const char *TGTS[6] = {
+    "lnx/x86_64", "lnx/arm64", "osx/x86_64", "osx/arm64", "win/x86_64", "win/arm64"
+};
+
+static int is_host_tool(const char *p) {
+    return (strncmp(p, "tools/", 6) == 0 || strncmp(p, "tests/", 6) == 0);
+}
+
+static int compile_one(const char *prod, const char *cwd, const char *file, const char *tgt, const char *out_o) {
+    char *av[] = {"sh", (char *)prod, "-O2", "-c", "-b", (char *)tgt, "-funit", (char *)file, "-o", (char *)out_o, 0};
+    np_result r; mm_fill(&r, (long)sizeof r, 0, (long)sizeof r);
+    char why[128]; why[0] = 0;
+    int tr = np_run(av, cwd, 0, 30, &r, why, sizeof why);
+    int rc = tr ? 124 : r.rc;
+    np_free(&r);
+    (void)sy_unlink(out_o);
+    return rc;
+}
+
+int main(int argc, char **argv) {
+    const char *prod = "./unisacc.com";
+    const char *range = 0;
+    int self_test = 0;
+    const char *files[128]; int nfiles = 0;
+    for (int i = 1; i < argc; i++) {
+        if (!strcmp(argv[i], "--self-test")) self_test = 1;
+        else if (!strcmp(argv[i], "--product") && i + 1 < argc) prod = argv[++i];
+        else if (!strcmp(argv[i], "--range") && i + 1 < argc) range = argv[++i];
+        else if (argv[i][0] != '-' && nfiles < 128) files[nfiles++] = argv[i];
+    }
+    char cwd[4096], tmp[4096];
+    if (!getcwd(cwd, sizeof cwd)) return 2;
+    if (sr_scratch("check-six-target-compile", tmp, (int)sizeof tmp) != 0) return 2;
+
+    if (self_test) {
+        int ok6 = 0, fail6 = 0;
+        for (int t = 0; t < 6; t++) {
+            char oo[4200]; cx_fmt(oo, sizeof oo, "%s/ok_%d.o", tmp, t);
+            if (compile_one(prod, cwd, "cx/core/bytes.cx", TGTS[t], oo) == 0) ok6++;
+            else fail6++;
+        }
+        char red_cx[4200], red_o[4200];
+        cx_fmt(red_cx, sizeof red_cx, "%s/red_lnx_only.cx", tmp);
+        cx_fmt(red_o, sizeof red_o, "%s/red_lnx_only.o", tmp);
+        const char *red_src = "int main(void) { return fork(); }\n";
+        if (sy_write_file(red_cx, red_src, (long)strlen(red_src), 0644) != 0) return 2;
+        int red_rc = compile_one(prod, cwd, red_cx, "win/x86_64", red_o);
+        (void)sy_unlink(red_cx);
+        int host_cls_ok = (is_host_tool("tools/build-objs-from-tree.cx") == 1 &&
+                           is_host_tool("tests/check-stages.cx") == 1 &&
+                           is_host_tool("cx/core/bytes.cx") == 0);
+        sy_printf("SELF_TEST\tbytes_6target=%d/6\tred_win_fork_rc=%d\thost_cls=%d\n", ok6, red_rc, host_cls_ok);
+        return (ok6 == 6 && fail6 == 0 && red_rc != 0 && host_cls_ok) ? 0 : 1;
+    }
+
+    char *range_buf = 0;
+    if (range) {
+        char cmd[512]; size_t on = 0;
+        cx_fmt(cmd, sizeof cmd, "git diff --name-only '%s' | grep '\\.cx$' || true", range);
+        if (cx_run_timeout(cmd, 15, &range_buf, &on) != 0) { free(range_buf); return 2; }
+        char *p = range_buf;
+        while (p && *p && nfiles < 128) {
+            char *nl = strchr(p, '\n');
+            if (nl) *nl = 0;
+            if (*p) files[nfiles++] = p;
+            if (!nl) break;
+            p = nl + 1;
+        }
+    }
+    if (nfiles == 0) { free(range_buf); sy_eprintf("check-six-target-compile: no .cx files\n"); return 2; }
+
+    sy_printf("file\tlnx/x86_64\tlnx/arm64\tosx/x86_64\tosx/arm64\twin/x86_64\twin/arm64\n");
+    int tot_ok = 0, tot_fail = 0;
+    for (int f = 0; f < nfiles; f++) {
+        int host_only = is_host_tool(files[f]);
+        sy_printf("SIX_TARGET\t%s", files[f]);
+        for (int t = 0; t < 6; t++) {
+            if (host_only && t > 0) { sy_printf("\tSKIP(host-tool)"); continue; }
+            char oo[4200]; cx_fmt(oo, sizeof oo, "%s/u%d_%d.o", tmp, f, t);
+            int rc = compile_one(prod, cwd, files[f], TGTS[t], oo);
+            if (rc == 0) { sy_printf("\tOK"); tot_ok++; }
+            else { sy_printf("\tFAIL(%d)", rc); tot_fail++; }
+        }
+        sy_printf("\n");
+    }
+    sy_printf("CHECK_SIX_TARGET_COMPILE\tfiles=%d\tok=%d\tfail=%d\n", nfiles, tot_ok, tot_fail);
+    free(range_buf);
+    return tot_fail == 0 ? 0 : 1;
+}

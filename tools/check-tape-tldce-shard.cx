@@ -12,7 +12,8 @@
  *   (5) Review R2: --reuse-dir with stale/unpinned candidate or tampered artifact refuses reuse-identity-mismatch;
  *   (6) Review R3: real timeout (--shard-timeout 1 with sleeping runner) refuses with why/TimeoutExpired and leaves no output;
  *   (7) Review R4: no-op runner (exits 0 with empty output) or read-only/unwritable out path is refused (never EQUAL);
- *   (8) Review R5: runner omitting dce_cut= field is refused (missing-dce-cut, never treated as 0).
+ *   (8) Review R5: runner omitting dce_cut= field is refused (missing-dce-cut, never treated as 0);
+ *   (9) Staged S1..S4: --stage prep/native/unit/dce-root/dce-bfs/compact e2e cmp=EQUAL, plus skip/tamper refusals.
  */
 #pragma unisa use cxlib.netpack
 #pragma unisa use cxlib.sessionroot
@@ -253,6 +254,93 @@ int main(int argc, char **argv) {
                        "--run-bin", nocut_sh, "--unit-shards", "1", "--dce-root-shards", "1", 0};
         (void)run_tool(avm, root, 30, &rc, obuf, sizeof obuf);
         ck(rc != 0 && strstr(obuf, "cmp=EQUAL") == 0, "R5-missing-dce-cut-refused");
+    }
+
+    /* (10) S1..S4: staged execution (--stage + --run-dir + --shard-idx) */
+    {
+        char sdir[4200], sout[4200];
+        cx_fmt(sdir, sizeof sdir, "%s/staged_e2e", tmp);
+        cx_fmt(sout, sizeof sout, "%s/staged_final.tape", tmp);
+        char *avp[] = {"sh", "./unisacc.com", "tools/tape-tldce-shard.cx", "--",
+                       "--manifest", mf, "--obj-dir", odir, "--reuse-dir", rdir,
+                       "--run-dir", sdir, "--stage", "prep",
+                       "--unit-shards", "2", "--dce-root-shards", "2", 0};
+        (void)run_tool(avp, root, 40, &rc, obuf, sizeof obuf);
+        int ok = (rc == 0 && strstr(obuf, "STAGE_PREP\t") != 0 && strstr(obuf, "SHARD_SLICE\t") != 0);
+
+        char *avn[] = {"sh", "./unisacc.com", "tools/tape-tldce-shard.cx", "--",
+                       "--manifest", mf, "--obj-dir", odir, "--reuse-dir", rdir,
+                       "--run-dir", sdir, "--stage", "native",
+                       "--unit-shards", "2", "--dce-root-shards", "2", 0};
+        if (ok) {
+            (void)run_tool(avn, root, 40, &rc, obuf, sizeof obuf);
+            ok = (rc == 0 && strstr(obuf, "NATIVE_REF\t") != 0);
+        }
+        for (int u = 0; ok && u < 2; u++) {
+            char uidx[16]; cx_fmt(uidx, sizeof uidx, "%d", u);
+            char *avu[] = {"sh", "./unisacc.com", "tools/tape-tldce-shard.cx", "--",
+                           "--manifest", mf, "--obj-dir", odir, "--reuse-dir", rdir,
+                           "--run-dir", sdir, "--stage", "unit", "--shard-idx", uidx,
+                           "--unit-shards", "2", "--dce-root-shards", "2", 0};
+            (void)run_tool(avu, root, 40, &rc, obuf, sizeof obuf);
+            ok = (rc == 0 && strstr(obuf, "kind=unit\t") != 0);
+        }
+        int skipped = 0;
+        for (int r = 0; ok && r < 2 && !skipped; r++) {
+            char ridx[16]; cx_fmt(ridx, sizeof ridx, "%d", r);
+            char *avr[] = {"sh", "./unisacc.com", "tools/tape-tldce-shard.cx", "--",
+                           "--manifest", mf, "--obj-dir", odir, "--reuse-dir", rdir,
+                           "--run-dir", sdir, "--stage", "dce-root", "--shard-idx", ridx,
+                           "--unit-shards", "2", "--dce-root-shards", "2", 0};
+            (void)run_tool(avr, root, 40, &rc, obuf, sizeof obuf);
+            ok = (rc == 0 && strstr(obuf, "kind=dce_root\t") != 0);
+            if (ok && strstr(obuf, "\tskip=1") != 0) skipped = 1;
+        }
+        for (int w = 0; ok && !skipped && w < 8; w++) {
+            char widx[16]; cx_fmt(widx, sizeof widx, "%d", w);
+            char *avw[] = {"sh", "./unisacc.com", "tools/tape-tldce-shard.cx", "--",
+                           "--manifest", mf, "--obj-dir", odir, "--reuse-dir", rdir,
+                           "--run-dir", sdir, "--stage", "dce-bfs", "--shard-idx", widx,
+                           "--unit-shards", "2", "--dce-root-shards", "2", 0};
+            (void)run_tool(avw, root, 40, &rc, obuf, sizeof obuf);
+            ok = (rc == 0 && strstr(obuf, "kind=dce_bfs\t") != 0);
+            if (ok && strstr(obuf, "\trem=0\t") != 0) break;
+        }
+        if (ok) {
+            char *avc[] = {"sh", "./unisacc.com", "tools/tape-tldce-shard.cx", "--",
+                           "--manifest", mf, "--obj-dir", odir, "--reuse-dir", rdir,
+                           "--run-dir", sdir, "--stage", "compact", "--out", sout,
+                           "--unit-shards", "2", "--dce-root-shards", "2", 0};
+            (void)run_tool(avc, root, 40, &rc, obuf, sizeof obuf);
+            ok = (rc == 0 && strstr(obuf, "TAPE_TLDCE_SHARD_SUMMARY\t") != 0 &&
+                  strstr(obuf, "cmp=EQUAL\t") != 0 && sy_exists(sout) == 1);
+        }
+        ck(ok, "S1-staged-e2e-cmp-equal");
+
+        /* S2: param mismatch between prep and native refuses stage-identity-mismatch */
+        (void)run_tool(avn, root, 30, &rc, obuf, sizeof obuf);
+        char *av_badp[] = {"sh", "./unisacc.com", "tools/tape-tldce-shard.cx", "--",
+                           "--manifest", mf, "--obj-dir", odir, "--reuse-dir", rdir,
+                           "--run-dir", sdir, "--stage", "native",
+                           "--unit-shards", "3", "--dce-root-shards", "2", 0};
+        (void)run_tool(av_badp, root, 30, &rc, obuf, sizeof obuf);
+        ck(rc != 0 && strstr(obuf, "stage-identity-mismatch") != 0, "S2-staged-param-tamper-refused");
+
+        /* S3: skipping unit shard 0 refuses handoff-identity-mismatch */
+        char sdir2[4200];
+        cx_fmt(sdir2, sizeof sdir2, "%s/staged_neg", tmp);
+        char *avp2[] = {"sh", "./unisacc.com", "tools/tape-tldce-shard.cx", "--",
+                        "--manifest", mf, "--obj-dir", odir, "--reuse-dir", rdir,
+                        "--run-dir", sdir2, "--stage", "prep",
+                        "--unit-shards", "2", "--dce-root-shards", "2", 0};
+        (void)run_tool(avp2, root, 30, &rc, obuf, sizeof obuf);
+        int p2ok = (rc == 0);
+        char *avu_skip[] = {"sh", "./unisacc.com", "tools/tape-tldce-shard.cx", "--",
+                            "--manifest", mf, "--obj-dir", odir, "--reuse-dir", rdir,
+                            "--run-dir", sdir2, "--stage", "unit", "--shard-idx", "1",
+                            "--unit-shards", "2", "--dce-root-shards", "2", 0};
+        (void)run_tool(avu_skip, root, 30, &rc, obuf, sizeof obuf);
+        ck(p2ok && rc != 0 && strstr(obuf, "handoff-identity-mismatch") != 0, "S3-staged-skip-unit-refused");
     }
 
     if (opt_run_id && opt_out) {

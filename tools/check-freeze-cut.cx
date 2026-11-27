@@ -9,6 +9,8 @@
 #pragma unisa use sys.io
 #pragma unisa use sys.proc
 #pragma unisa use sys.posix
+#pragma unisa use sys.sha
+#pragma unisa use sys.time
 #pragma unisa use text.text
 #pragma unisa use text.fmt
 #pragma unisa use mem.heap
@@ -92,8 +94,147 @@ static void init_repo(const char *repo, const char *state67) {
     pr_free(&r);
 }
 
-int main(void) {
+static char *fc_read_file(const char *path, size_t *out_len) {
+    FILE *f = fopen(path, "rb");
+    if (!f) return 0;
+    if (fseek(f, 0, SEEK_END) != 0) { fclose(f); return 0; }
+    long sz = ftell(f);
+    if (sz < 0) { fclose(f); return 0; }
+    rewind(f);
+    char *buf = (char *)mm_alloc((size_t)sz + 1);
+    if (!buf) { fclose(f); return 0; }
+    size_t nr = sz > 0 ? fread(buf, 1, (size_t)sz, f) : 0;
+    fclose(f);
+    buf[nr] = 0;
+    if (out_len) *out_len = nr;
+    return buf;
+}
+
+static int fc_write_file(const char *path, const char *buf, size_t len) {
+    FILE *f = fopen(path, "wb");
+    if (!f) return -1;
+    size_t nw = len > 0 ? fwrite(buf, 1, len, f) : 0;
+    fclose(f);
+    return nw == len ? 0 : -1;
+}
+
+/* Compute CR_GATE_ROSTER - union(stage_gates[5]); returns missing count (0 = complete). */
+static int check_staged_roster_coverage(const char *root, const char *drop_gate) {
+    char cr_path[4400], fc_path[4400];
+    if (cx_fmt(cr_path, sizeof cr_path, "%s/tools/chain-ready.cx", root) ||
+        cx_fmt(fc_path, sizeof fc_path, "%s/tools/freeze-cut.cx", root)) return -1;
+    size_t cr_len = 0, fc_len = 0;
+    char *cr = fc_read_file(cr_path, &cr_len);
+    char *fc = fc_read_file(fc_path, &fc_len);
+    if (!cr || !fc) { mm_free(cr); mm_free(fc); return -1; }
+
+    long cr_at = tx_find(cr, (long)cr_len, "#define CR_GATE_ROSTER(X)", 25);
+    long fc_at = tx_find(fc, (long)fc_len, "stage_gates[9]", 14);
+    if (cr_at < 0 || fc_at < 0) { mm_free(cr); mm_free(fc); return -1; }
+
+    char union_gates[128][64];
+    int n_union = 0;
+    long p = fc_at;
+    long fc_end = tx_find(fc + p, (long)fc_len - p, "};", 2);
+    if (fc_end < 0) { mm_free(cr); mm_free(fc); return -1; }
+    fc_end += p;
+    while (p < fc_end) {
+        while (p < fc_end && fc[p] != '"') p++;
+        if (p >= fc_end) break;
+        p++;
+        long q = p;
+        while (q < fc_end && fc[q] != '"') q++;
+        long cur = p;
+        while (cur < q) {
+            long comma = cur;
+            while (comma < q && fc[comma] != ',') comma++;
+            long gl = comma - cur;
+            if (gl > 0 && gl < 64 && n_union < 128) {
+                char g[64];
+                mm_copy(g, sizeof g, fc + cur, (size_t)gl);
+                g[gl] = 0;
+                if (!drop_gate || strcmp(g, drop_gate) != 0) {
+                    mm_copy(union_gates[n_union], 64, g, (size_t)gl + 1);
+                    n_union++;
+                }
+            }
+            cur = comma + 1;
+        }
+        p = q + 1;
+    }
+
+    int missing = 0;
+    p = cr_at;
+    long cr_end = tx_find(cr + p, (long)cr_len - p, "CR_GATE_ENUM", 12);
+    if (cr_end < 0) { mm_free(cr); mm_free(fc); return -1; }
+    cr_end += p;
+    while (p < cr_end) {
+        while (p < cr_end && cr[p] != '"') p++;
+        if (p >= cr_end) break;
+        p++;
+        long q = p;
+        while (q < cr_end && cr[q] != '"') q++;
+        long gl = q - p;
+        if (gl > 0 && gl < 64) {
+            char g[64];
+            mm_copy(g, sizeof g, cr + p, (size_t)gl);
+            g[gl] = 0;
+            int found = 0, i;
+            for (i = 0; i < n_union; i++) {
+                if (strcmp(g, union_gates[i]) == 0) { found = 1; break; }
+            }
+            if (!found) {
+                if (!drop_gate) fprintf(stderr, "ROSTER_MISSING=%s\n", g);
+                missing++;
+            }
+        }
+        p = q + 1;
+    }
+    mm_free(cr);
+    mm_free(fc);
+    return missing;
+}
+
+int main(int argc, char **argv) {
     if (sy_realpath(".", g_root, sizeof g_root) < 0) return 2;
+    if (argc >= 4 && strcmp(argv[1], "--produce") == 0) {
+        const char *run_id = argv[2];
+        const char *ev_path = argv[3];
+        if (check_staged_roster_coverage(g_root, 0) != 0) return 1;
+        char buf[512];
+        if (cx_fmt(buf, sizeof buf, "run_id=%s\nverdict=PASS\nfailed=0\n", run_id)) return 2;
+        return fc_write_file(ev_path, buf, strlen(buf)) == 0 ? 0 : 2;
+    }
+    if (argc >= 4 && strcmp(argv[1], "--judge") == 0) {
+        const char *run_id = argv[2];
+        const char *ev_path = argv[3];
+        if (sy_exists(ev_path) != 1) {
+            printf("FAIL\tfreeze_cut_evidence_missing\n");
+            return 1;
+        }
+        size_t evn = 0;
+        char *ev = fc_read_file(ev_path, &evn);
+        if (!ev) {
+            printf("FAIL\tfreeze_cut_evidence_missing\n");
+            return 1;
+        }
+        char want[256];
+        cx_fmt(want, sizeof want, "run_id=%s\n", run_id);
+        int has_rid = (tx_find(ev, (long)evn, want, (long)strlen(want)) >= 0);
+        int has_pass = (tx_find(ev, (long)evn, "verdict=PASS\n", 13) >= 0 &&
+                        tx_find(ev, (long)evn, "failed=0\n", 9) >= 0);
+        mm_free(ev);
+        if (!has_rid) {
+            printf("FAIL\tfreeze_cut_evidence_stale\n");
+            return 1;
+        }
+        if (!has_pass) {
+            printf("FAIL\tfreeze_cut_exec\n");
+            return 1;
+        }
+        printf("PASS\tfreeze_cut_exec\n");
+        return 0;
+    }
     int sc = 0;
     if (fsx_scratch(&sc, "check-fcut-") != 0) return 2;
     const char *dir = fsx_scratch_dir(sc);
@@ -543,6 +684,10 @@ int main(void) {
             "    if [ -f .git/bad_chain_ready ]; then\n"
             "      printf '19-chain-preflight\\tFAIL\\tpreflight-red\\nREADY=no\\n'; exit 1\n"
             "    fi\n"
+            "    if [ -f .git/slow_chain_ready ]; then sleep 57; fi\n"
+            "    if [ -f .git/need_strace_path ]; then\n"
+            "      case \":$PATH:\" in *\":$HOME/.local/bin:\"*) ;; *) printf '2a-derive\\tFAIL\\treadset-needs-strace\\nREADY=no\\n'; exit 1 ;; esac\n"
+            "    fi\n"
             "    printf '10-envhygiene\\tPASS\\tclean\\n20-ident-helper\\tPASS\\tok\\nREADY=yes\\n'\n"
             "    exit 0 ;;\n"
             "esac\n"
@@ -605,6 +750,144 @@ int main(void) {
         cx_fmt(shcmd, sizeof shcmd, "rm -f '%s/.git/bad_chain_ready'", repo_g4);
         fc_sh(g_root, shcmd, 10, &r); pr_free(&r);
 
+        /* 14b2: Gate (b) staged timeout gives named refusal chain-ready-stage-timeout:<stage> */
+        cx_fmt(shcmd, sizeof shcmd, "touch '%s/.git/slow_chain_ready'", repo_g4);
+        fc_sh(g_root, shcmd, 10, &r); pr_free(&r);
+        {   char cmd_slow[8192];
+            cx_fmt(cmd_slow, sizeof cmd_slow,
+                   "env -u UNISACC_RUN_CACHE -u UNISACC_CACHE_DIR -u UNISACC_FREEZE_NO_FETCH "
+                   "-u UNISACC_BOUND_DEADLINE_MONO -u UNISACC_BOOTER_CHAIN_OUT %s sh '%s/unisacc.com' '%s/tools/freeze-cut.cx' -- %s",
+                   env_g4, g_root, g_root, args);
+            fc_sh(g_root, cmd_slow, 70, &r);
+            ck(r.rc == 2 && fc_has(&r, "REFUSE\tFREEZE_CUT\tchain-ready-stage-timeout:derive-a"),
+               "mut-gate-b-chain-ready-stage-timeout-refused", &r);
+            pr_free(&r);
+        }
+        cx_fmt(shcmd, sizeof shcmd, "rm -f '%s/.git/slow_chain_ready'", repo_g4);
+        fc_sh(g_root, shcmd, 10, &r); pr_free(&r);
+
+        /* 14b3: Gate (b) staged chain-ready inherits caller PATH + $HOME/.local/bin (for strace) */
+        cx_fmt(shcmd, sizeof shcmd, "touch '%s/.git/need_strace_path'", repo_g4);
+        fc_sh(g_root, shcmd, 10, &r); pr_free(&r);
+        run_fc(env_g4, args, &r);
+        ck(r.rc == 0 && fc_has(&r, "FREEZE_CUT\tCHECK_PASS"),
+           "gate-b-chain-ready-inherits-local-bin-path", &r);
+        pr_free(&r);
+        cx_fmt(shcmd, sizeof shcmd, "rm -f '%s/.git/need_strace_path'", repo_g4);
+        fc_sh(g_root, shcmd, 10, &r); pr_free(&r);
+
+        /* 14b4: Gate (b) --stage-receipts DIR consumer checks (missing, stale, wrong rev, tampered roster_sha, non-READY, all valid) */
+        {
+            const char *snames[9] = {
+                "derive-a", "derive-b", "ratchets", "tri-chain-a", "tri-chain-b", "tri-chain-c", "env-root", "gen-preflight", "union-shards"
+            };
+            const char *sgates[9] = {
+                "1-rev,1-branch,2a-derive,2a-derive2,2a-derive3,2a-derive4",
+                "2a-derive5,2a-derive6,2a-derive7",
+                "2b-ratchets",
+                "3a-cxmod-tri,3a-cxmod-tri-exports",
+                "3b-cx0-extract,4-p1",
+                "5-candidate-chain,5-candidate-chain2,5-candidate-chain3,5-candidate-chain4,5-candidate-chain5",
+                "6-affected,7-recipe,8-inflight,9-ledger,10-envhygiene,11-version-slot,12-root-files,12p-preflight-entry,13-snap-cache,14-root-record",
+                "15-gen-all,16-disk-free,17-root-public,18-parse2-gen,19-chain-preflight,19a-preflight-sixtarget,19b-preflight-snap,20-ident-helper,21-verseq-gen",
+                "22-premerge-union,22-premerge-union2,22-premerge-union3,22-premerge-union4,22-premerge-union5,23-freeze-armed,24-root-current,25-tools-compile-shards"
+            };
+            char rbuf[4096], rsha[65], rdir[1200], args_rcpt[2400], head_rev[64];
+            size_t rp_pos = 0;
+            for (int si = 0; si < 9; si++) {
+                size_t sn = strlen(snames[si]), gn = strlen(sgates[si]);
+                mm_copy(rbuf + rp_pos, sizeof rbuf - rp_pos, snames[si], sn); rp_pos += sn;
+                rbuf[rp_pos++] = '\t';
+                mm_copy(rbuf + rp_pos, sizeof rbuf - rp_pos, sgates[si], gn); rp_pos += gn;
+                rbuf[rp_pos++] = '\n';
+            }
+            sy_sha256_hex(rbuf, (long)rp_pos, rsha);
+            cx_fmt(shcmd, sizeof shcmd, "git -C '%s' rev-parse HEAD", repo_g4);
+            fc_sh(g_root, shcmd, 10, &r);
+            mm_fill(head_rev, sizeof head_rev, 0, sizeof head_rev);
+            if (r.out && r.outn >= 40) { mm_copy(head_rev, sizeof head_rev, r.out, 40); head_rev[40] = 0; }
+            pr_free(&r);
+            cx_fmt(rdir, sizeof rdir, "%s/rcpts", dir);
+            sy_mkdir(rdir, 0755);
+            cx_fmt(args_rcpt, sizeof args_rcpt, "%s --stage-receipts '%s'", args, rdir);
+
+            const char *z64 = "0000000000000000000000000000000000000000000000000000000000000000";
+            char bind_in[256], bind_sha[65], rcpt_path[1400], rcpt_body[1024];
+            cx_fmt(bind_in, sizeof bind_in, "rid1\t%s\t%s", z64, z64);
+            sy_sha256_hex(bind_in, (long)strlen(bind_in), bind_sha);
+            long now_s = sy_wall_s();
+
+            for (int si = 0; si < 8; si++) {
+                cx_fmt(rcpt_path, sizeof rcpt_path, "%s/%s.rcpt", rdir, snames[si]);
+                cx_fmt(rcpt_body, sizeof rcpt_body,
+                       "run_id\trid1\ninputs_sha\t%s\noutput_sha\t%s\nbinding_sha\t%s\n"
+                       "rev\t%s\nstage\t%s\nverdict\tREADY\nroster_sha\t%s\nelapsed_ms\t10\nts_epoch_s\t%ld\n",
+                       z64, z64, bind_sha, head_rev, snames[si], rsha, now_s);
+                fc_write_file(rcpt_path, rcpt_body, strlen(rcpt_body));
+            }
+            /* 1. Missing 9th receipt -> chain-ready-receipts-missing:union-shards */
+            run_fc(env_g4, args_rcpt, &r);
+            ck(r.rc == 2 && fc_has(&r, "REFUSE\tFREEZE_CUT\tchain-ready-receipts-missing:union-shards"),
+               "mut-receipts-missing-stage-refused", &r);
+            pr_free(&r);
+
+            /* 2. Stale 9th receipt -> chain-ready-receipt-stale:union-shards */
+            cx_fmt(rcpt_path, sizeof rcpt_path, "%s/union-shards.rcpt", rdir);
+            cx_fmt(rcpt_body, sizeof rcpt_body,
+                   "run_id\trid1\ninputs_sha\t%s\noutput_sha\t%s\nbinding_sha\t%s\n"
+                   "rev\t%s\nstage\tunion-shards\nverdict\tREADY\nroster_sha\t%s\nelapsed_ms\t10\nts_epoch_s\t%ld\n",
+                   z64, z64, bind_sha, head_rev, rsha, now_s - 3600);
+            fc_write_file(rcpt_path, rcpt_body, strlen(rcpt_body));
+            run_fc(env_g4, args_rcpt, &r);
+            ck(r.rc == 2 && fc_has(&r, "REFUSE\tFREEZE_CUT\tchain-ready-receipt-stale:union-shards"),
+               "mut-receipts-stale-refused", &r);
+            pr_free(&r);
+
+            /* 3. Wrong rev -> chain-ready-receipt-rev-mismatch:union-shards */
+            cx_fmt(rcpt_body, sizeof rcpt_body,
+                   "run_id\trid1\ninputs_sha\t%s\noutput_sha\t%s\nbinding_sha\t%s\n"
+                   "rev\t1111111111111111111111111111111111111111\nstage\tunion-shards\nverdict\tREADY\nroster_sha\t%s\nelapsed_ms\t10\nts_epoch_s\t%ld\n",
+                   z64, z64, bind_sha, rsha, now_s);
+            fc_write_file(rcpt_path, rcpt_body, strlen(rcpt_body));
+            run_fc(env_g4, args_rcpt, &r);
+            ck(r.rc == 2 && fc_has(&r, "REFUSE\tFREEZE_CUT\tchain-ready-receipt-rev-mismatch:union-shards"),
+               "mut-receipts-wrong-rev-refused", &r);
+            pr_free(&r);
+
+            /* 4. Tampered roster_sha -> chain-ready-receipt-roster-mismatch:union-shards */
+            cx_fmt(rcpt_body, sizeof rcpt_body,
+                   "run_id\trid1\ninputs_sha\t%s\noutput_sha\t%s\nbinding_sha\t%s\n"
+                   "rev\t%s\nstage\tunion-shards\nverdict\tREADY\nroster_sha\t%s\nelapsed_ms\t10\nts_epoch_s\t%ld\n",
+                   z64, z64, bind_sha, head_rev, z64, now_s);
+            fc_write_file(rcpt_path, rcpt_body, strlen(rcpt_body));
+            run_fc(env_g4, args_rcpt, &r);
+            ck(r.rc == 2 && fc_has(&r, "REFUSE\tFREEZE_CUT\tchain-ready-receipt-roster-mismatch:union-shards"),
+               "mut-receipts-tampered-roster-sha-refused", &r);
+            pr_free(&r);
+
+            /* 5. Non-READY verdict -> chain-ready-receipt-not-ready:union-shards */
+            cx_fmt(rcpt_body, sizeof rcpt_body,
+                   "run_id\trid1\ninputs_sha\t%s\noutput_sha\t%s\nbinding_sha\t%s\n"
+                   "rev\t%s\nstage\tunion-shards\nverdict\tNOT_READY\nroster_sha\t%s\nelapsed_ms\t10\nts_epoch_s\t%ld\n",
+                   z64, z64, bind_sha, head_rev, rsha, now_s);
+            fc_write_file(rcpt_path, rcpt_body, strlen(rcpt_body));
+            run_fc(env_g4, args_rcpt, &r);
+            ck(r.rc == 2 && fc_has(&r, "REFUSE\tFREEZE_CUT\tchain-ready-receipt-not-ready:union-shards"),
+               "mut-receipts-not-ready-refused", &r);
+            pr_free(&r);
+
+            /* 6. All 9 valid -> CHECK_PASS + CHAIN_READY_RECEIPTS */
+            cx_fmt(rcpt_body, sizeof rcpt_body,
+                   "run_id\trid1\ninputs_sha\t%s\noutput_sha\t%s\nbinding_sha\t%s\n"
+                   "rev\t%s\nstage\tunion-shards\nverdict\tREADY\nroster_sha\t%s\nelapsed_ms\t10\nts_epoch_s\t%ld\n",
+                   z64, z64, bind_sha, head_rev, rsha, now_s);
+            fc_write_file(rcpt_path, rcpt_body, strlen(rcpt_body));
+            run_fc(env_g4, args_rcpt, &r);
+            ck(r.rc == 0 && fc_has(&r, "FREEZE_CUT\tCHECK_PASS") && fc_has(&r, "CHAIN_READY_RECEIPTS\tverdict=READY\tstages=9/9"),
+               "gate-b-stage-receipts-all-valid-pass", &r);
+            pr_free(&r);
+        }
+
         /* 14c: Gate (c) shard registry mismatch (missing shard row in tests/batches.tsv or tool failure) refused */
         cx_fmt(shcmd, sizeof shcmd, "touch '%s/.git/bad_shard_tool'", repo_g4);
         fc_sh(g_root, shcmd, 10, &r); pr_free(&r);
@@ -661,6 +944,8 @@ int main(void) {
     }
 
     fsx_scratch_drop(sc);
+    ck(check_staged_roster_coverage(g_root, 0) == 0, "staged-roster-coverage-complete", 0);
+    ck(check_staged_roster_coverage(g_root, "19-chain-preflight") > 0, "mut-staged-roster-drop-one-refused", 0);
     printf("CHECK_FREEZE_CUT\tpassed=%d\tfailed=%d\n", g_pass, g_fail);
     return g_fail ? 1 : 0;
 }

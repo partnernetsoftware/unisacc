@@ -1,0 +1,887 @@
+/* tools/check-v018-exit.cx -- executable exit-criterion check for v0.1.8 (M1 authoritative embed, lnx/x86_64).
+ *
+ * Usage:
+ *   sh ./unisacc.com tools/check-v018-exit.cx -- [--baseline CHAIN_DIR] [--native-ape PATH] [--repeat N] CHAIN_DIR
+ *   sh ./unisacc.com tools/check-v018-exit.cx -- --self-test
+ *
+ * Checks against a built chain directory (and 0.1.6 baseline chain c9275e775):
+ *   (1) lnx/x86_64 entry object list (from receipt.txt / .o objects, not stripped ELF)
+ *       has zero defined cxsa_valid symbols and at least one defined cxsa_valid_s1 symbol;
+ *   (2) lnx/x86_64 size rules vs 0.1.6 baseline chain c9275e775:
+ *       native unit bytes removed >= 3,770 B;
+ *       native .text net increase <= 26,000 B;
+ *       PT_LOAD R E net increase <= 25,000 B (no net decrease required);
+ *   (3) the other five slices (lnx-arm64, osx-x86_64, osx-arm64, win-x86_64, win-arm64)
+ *       are byte-identical to the baseline chain;
+ *   (4) four-same fixed point of the chain (compare log proof + g2 == g3 slices + ape-final present);
+ *   (5) stream e3 and e4 wall <= 2.0x native baseline (9 repeats, median, load1 recorded).
+ */
+#pragma unisa use sys.fs
+#pragma unisa use sys.io
+#pragma unisa use sys.env
+#pragma unisa use sys.posix
+#pragma unisa use sys.proc
+#pragma unisa use sys.time
+#pragma unisa use sys.sha
+#pragma unisa use text.text
+#pragma unisa use text.fmt
+#pragma unisa use text.conv
+#pragma unisa use mem.heap
+#pragma unisa use mem.bytes
+#pragma unisa use cxlib.netpack
+
+enum {
+    V18_PW = 4400,
+    V18_MAX_OBJS = 256,
+    V18_MAX_REPS = 25,
+    V18_MIN_UNIT_REMOVED = 3770,
+    V18_MAX_OBJ_TEXT_INC = 26000,
+    V18_MAX_ELF_RX_INC = 25000
+};
+
+typedef struct {
+    char key[64];
+    long bytes;
+} V18Obj;
+
+static int g_pass = 0;
+static int g_fail = 0;
+
+static void v18_rec(int ok, const char *name, const char *detail) {
+    if (ok) {
+        g_pass++;
+        sy_printf("PASS\tv018-exit.%s\t%s\n", name, (detail && detail[0]) ? detail : "-");
+    } else {
+        g_fail++;
+        sy_printf("FAIL\tv018-exit.%s\t%s\n", name, (detail && detail[0]) ? detail : "-");
+    }
+}
+
+static int v18_sha_bytes(const char *path, char sha_out[65], long *bytes_out) {
+    size_t n = 0;
+    char *b = cx_read(path, &n);
+    if (!b || n == 0) {
+        if (b) mm_free(b);
+        return -1;
+    }
+    cx_sha256_hex(b, n, sha_out);
+    if (bytes_out) *bytes_out = (long)n;
+    mm_free(b);
+    return 0;
+}
+
+static int v18_file_eq(const char *pa, const char *pb, long *ba_out, long *bb_out,
+                       char sha_a[65], char sha_b[65]) {
+    sha_a[0] = 0;
+    sha_b[0] = 0;
+    *ba_out = -1;
+    *bb_out = -1;
+    if (v18_sha_bytes(pa, sha_a, ba_out) != 0) return -1;
+    if (v18_sha_bytes(pb, sha_b, bb_out) != 0) return -2;
+    if (*ba_out != *bb_out) return 1;
+    if (!tx_eqz(sha_a, sha_b)) return 1;
+    return 0;
+}
+
+static int v18_load_receipt_objs(const char *rcpt_path, V18Obj *objs, int cap, int *n_out) {
+    size_t n = 0;
+    char *b = cx_read(rcpt_path, &n);
+    if (!b || n == 0) {
+        if (b) mm_free(b);
+        return -1;
+    }
+    *n_out = 0;
+    long at = 0;
+    while (at < (long)n) {
+        long e = at;
+        while (e < (long)n && b[e] != '\n' && b[e] != '\r') e++;
+        long ln = e - at;
+        const char *l = b + at;
+        at = e + 1;
+        if (ln <= 0) continue;
+        long t1 = tx_chr(l, ln, '\t');
+        if (t1 <= 2 || t1 >= 63) continue;
+        if (l[t1 - 2] != '.' || l[t1 - 1] != 'o') continue;
+        int has_sha = 0, has_bytes = 0;
+        long fp = t1 + 1;
+        while (fp < ln) {
+            long nt = tx_chr(l + fp, ln - fp, '\t');
+            long fl = (nt >= 0) ? nt : (ln - fp);
+            if (fl > 4 && l[fp] == 's' && l[fp + 1] == 'h' && l[fp + 2] == 'a' && l[fp + 3] == '=') has_sha = 1;
+            if (fl > 6 && l[fp] == 'b' && l[fp + 1] == 'y' && l[fp + 2] == 't' && l[fp + 3] == 'e' && l[fp + 4] == 's' && l[fp + 5] == '=') has_bytes = 1;
+            fp += fl + 1;
+        }
+        if (!has_sha || !has_bytes) continue;
+        char kbuf[64];
+        mm_copy(kbuf, sizeof kbuf, l, t1);
+        kbuf[t1] = 0;
+        int dup = 0;
+        for (int i = 0; i < *n_out; i++) {
+            if (tx_eqz(objs[i].key, kbuf)) { dup = 1; break; }
+        }
+        if (dup) continue;
+        if (*n_out >= cap) { mm_free(b); return -1; }
+        cx_fmt(objs[*n_out].key, sizeof objs[*n_out].key, "%s", kbuf);
+        objs[*n_out].bytes = 0;
+        (*n_out)++;
+    }
+    mm_free(b);
+    return (*n_out > 0) ? 0 : -1;
+}
+
+static int v18_resolve_obj_path(const char *g2_lnx, const char *key, char out[V18_PW]) {
+    if (cx_fmt(out, V18_PW, "%s/%s", g2_lnx, key)) return -1;
+    if (sy_exists(out) == 1) return 0;
+    if (cx_fmt(out, V18_PW, "%s/candidate/%s", g2_lnx, key)) return -1;
+    if (sy_exists(out) == 1) return 0;
+    return -1;
+}
+
+static int v18_nm_scan_obj(const char *obj_path, int *has_valid, int *has_valid_s1) {
+    char *av[] = {"/usr/bin/nm", "-g", "--defined-only", "-P", (char *)obj_path, 0};
+    np_result r = {0};
+    char why[128] = {0};
+    if (np_run(av, ".", 0, 15, &r, why, sizeof why) != 0 || r.rc != 0) {
+        np_free(&r);
+        return -1;
+    }
+    long at = 0;
+    while (r.out && at < (long)r.outn) {
+        long e = at;
+        while (e < (long)r.outn && r.out[e] != '\n' && r.out[e] != '\r') e++;
+        long ln = e - at;
+        const char *l = r.out + at;
+        at = e + 1;
+        if (ln <= 0) continue;
+        long sp = 0;
+        while (sp < ln && l[sp] != ' ' && l[sp] != '\t') sp++;
+        if (sp <= 0) continue;
+        long tp = sp;
+        while (tp < ln && (l[tp] == ' ' || l[tp] == '\t')) tp++;
+        if (tp < ln && (l[tp] == 'C' || l[tp] == 'c')) continue;
+        if (sp == 10 && !memcmp(l, "cxsa_valid", 10)) *has_valid = 1;
+        else if (sp == 13 && !memcmp(l, "cxsa_valid_s1", 13)) *has_valid_s1 = 1;
+    }
+    np_free(&r);
+    return 0;
+}
+
+static long v18_obj_text_size(const char *obj_path) {
+    char *av[] = {"/usr/bin/size", "-B", (char *)obj_path, 0};
+    np_result r = {0};
+    char why[128] = {0};
+    if (np_run(av, ".", 0, 10, &r, why, sizeof why) != 0 || r.rc != 0 || !r.out) {
+        np_free(&r);
+        return -1;
+    }
+    long at = 0;
+    int line_no = 0;
+    long text_sz = -1;
+    while (at < (long)r.outn) {
+        long e = at;
+        while (e < (long)r.outn && r.out[e] != '\n' && r.out[e] != '\r') e++;
+        long ln = e - at;
+        const char *l = r.out + at;
+        at = e + 1;
+        if (ln <= 0) continue;
+        line_no++;
+        if (line_no == 2) {
+            long p = 0;
+            while (p < ln && (l[p] == ' ' || l[p] == '\t')) p++;
+            long s = p;
+            while (p < ln && l[p] >= '0' && l[p] <= '9') p++;
+            int64_t val = -1;
+            if (p > s && tx_to_i64(l + s, p - s, 10, &val) == 0) text_sz = (long)val;
+            break;
+        }
+    }
+    np_free(&r);
+    return text_sz;
+}
+
+static long v18_elf_rx_filesz(const char *elf_path) {
+    char *av[] = {"/usr/bin/readelf", "-l", "-W", (char *)elf_path, 0};
+    np_result r = {0};
+    char why[128] = {0};
+    if (np_run(av, ".", 0, 10, &r, why, sizeof why) != 0 || r.rc != 0 || !r.out) {
+        np_free(&r);
+        return -1;
+    }
+    long at = 0;
+    long rx_sz = -1;
+    while (at < (long)r.outn) {
+        long e = at;
+        while (e < (long)r.outn && r.out[e] != '\n' && r.out[e] != '\r') e++;
+        long ln = e - at;
+        const char *l = r.out + at;
+        at = e + 1;
+        if (ln <= 0) continue;
+        long p = 0;
+        while (p < ln && (l[p] == ' ' || l[p] == '\t')) p++;
+        if (p + 4 <= ln && !memcmp(l + p, "LOAD", 4)) {
+            if (tx_find(l, ln, " R E ", 5) >= 0) {
+                /* readelf -l -W LOAD line: Type Offset VirtAddr PhysAddr FileSiz MemSiz Flg Align */
+                long tok = 0;
+                const char *f4 = 0;
+                long f4l = 0;
+                while (p < ln) {
+                    while (p < ln && (l[p] == ' ' || l[p] == '\t')) p++;
+                    long s = p;
+                    while (p < ln && l[p] != ' ' && l[p] != '\t') p++;
+                    if (p > s) {
+                        if (tok == 4) { f4 = l + s; f4l = p - s; break; }
+                        tok++;
+                    }
+                }
+                if (f4 && f4l > 2 && f4[0] == '0' && (f4[1] == 'x' || f4[1] == 'X')) {
+                    int64_t val = -1;
+                    if (tx_to_i64(f4 + 2, f4l - 2, 16, &val) == 0) {
+                        rx_sz = (long)val;
+                        break;
+                    }
+                }
+            }
+        }
+    }
+    np_free(&r);
+    return rx_sz;
+}
+
+static int v18_sum_chain_text(const char *chain_dir, V18Obj *objs, int n_objs,
+                              long *total_text_out, long *m53_text_out, char m53_key_out[64]) {
+    char g2[V18_PW];
+    if (cx_fmt(g2, sizeof g2, "%s/fixedpoint/g2/lnx-x86_64", chain_dir)) return -1;
+    long tot = 0;
+    *m53_text_out = -1;
+    m53_key_out[0] = 0;
+
+    /* Look up baseline m53 unit in closures.tsv if present. */
+    char m53_clos_key[64];
+    m53_clos_key[0] = 0;
+    {
+        char cp[V18_PW];
+        if (!cx_fmt(cp, sizeof cp, "%s/fixedpoint/g2/lnx-x86_64.closures.tsv", chain_dir)) {
+            size_t cn = 0;
+            char *cb = cx_read(cp, &cn);
+            if (cb) {
+                long at = 0;
+                while (at < (long)cn) {
+                    long e = at;
+                    while (e < (long)cn && cb[e] != '\n' && cb[e] != '\r') e++;
+                    long ln = e - at;
+                    const char *l = cb + at;
+                    at = e + 1;
+                    long t1 = tx_chr(l, ln, '\t');
+                    if (t1 > 2 && t1 < 63 && tx_find(l + t1, ln - t1, "stream_attributes.cx", 20) >= 0) {
+                        mm_copy(m53_clos_key, sizeof m53_clos_key, l, t1);
+                        m53_clos_key[t1] = 0;
+                        break;
+                    }
+                }
+                mm_free(cb);
+            }
+        }
+    }
+
+    for (int i = 0; i < n_objs; i++) {
+        char op[V18_PW];
+        if (v18_resolve_obj_path(g2, objs[i].key, op) != 0) return -1;
+        long tsz = v18_obj_text_size(op);
+        if (tsz < 0) return -1;
+        objs[i].bytes = tsz;
+        tot += tsz;
+        if (m53_clos_key[0] && tx_eqz(objs[i].key, m53_clos_key)) {
+            *m53_text_out = tsz;
+            cx_fmt(m53_key_out, 64, "%s", objs[i].key);
+        }
+    }
+    *total_text_out = tot;
+    return 0;
+}
+
+static int v18_check_size_rules(long removed_bytes, long base_tot, long cand_tot,
+                                long base_rx, long cand_rx,
+                                int *rm_ok, int *obj_ok, int *rx_ok) {
+    long obj_inc = cand_tot - base_tot;
+    long rx_inc = cand_rx - base_rx;
+    *rm_ok = (removed_bytes >= V18_MIN_UNIT_REMOVED);
+    *obj_ok = (base_tot > 0 && cand_tot > 0 && obj_inc <= V18_MAX_OBJ_TEXT_INC);
+    *rx_ok = (base_rx > 0 && cand_rx > 0 && rx_inc <= V18_MAX_ELF_RX_INC);
+    return (*rm_ok && *obj_ok && *rx_ok);
+}
+
+static void v18_check_c1_c2(const char *chain_dir, const char *base_dir) {
+    char rcpt[V18_PW], g2[V18_PW], base_rcpt[V18_PW], base_g2[V18_PW];
+    static V18Obj objs[V18_MAX_OBJS], base_objs[V18_MAX_OBJS];
+    int n_objs = 0, n_base = 0;
+    char detail[512];
+
+    if (cx_fmt(rcpt, sizeof rcpt, "%s/fixedpoint/g2/lnx-x86_64/receipt.txt", chain_dir) ||
+        cx_fmt(g2, sizeof g2, "%s/fixedpoint/g2/lnx-x86_64", chain_dir) ||
+        cx_fmt(base_rcpt, sizeof base_rcpt, "%s/fixedpoint/g2/lnx-x86_64/receipt.txt", base_dir) ||
+        cx_fmt(base_g2, sizeof base_g2, "%s/fixedpoint/g2/lnx-x86_64", base_dir)) {
+        v18_rec(0, "c1-path", "path-too-long");
+        return;
+    }
+
+    if (v18_load_receipt_objs(rcpt, objs, V18_MAX_OBJS, &n_objs) != 0) {
+        v18_rec(0, "c1-no-native-cxsa_valid", "receipt-missing-or-empty");
+        v18_rec(0, "c1-cxsa_valid_s1-defined", "receipt-missing-or-empty");
+        v18_rec(0, "c2-unit-removed", "receipt-missing-or-empty");
+        v18_rec(0, "c2-native-text-net", "receipt-missing-or-empty");
+        v18_rec(0, "c2-elf-rx-net", "receipt-missing-or-empty");
+        return;
+    }
+
+    int cnt_valid = 0, cnt_s1 = 0, nm_err = 0;
+    char first_valid_obj[64], first_s1_obj[64];
+    first_valid_obj[0] = 0;
+    first_s1_obj[0] = 0;
+    for (int i = 0; i < n_objs; i++) {
+        char op[V18_PW];
+        int hv = 0, hs = 0;
+        if (v18_resolve_obj_path(g2, objs[i].key, op) != 0 || v18_nm_scan_obj(op, &hv, &hs) != 0) {
+            nm_err++;
+            continue;
+        }
+        if (hv) {
+            cnt_valid++;
+            if (!first_valid_obj[0]) cx_fmt(first_valid_obj, 64, "%s", objs[i].key);
+        }
+        if (hs) {
+            cnt_s1++;
+            if (!first_s1_obj[0]) cx_fmt(first_s1_obj, 64, "%s", objs[i].key);
+        }
+    }
+    cx_fmt(detail, sizeof detail, "objs=%d nm_err=%d def_cxsa_valid=%d in=%s",
+           n_objs, nm_err, cnt_valid, first_valid_obj[0] ? first_valid_obj : "-");
+    v18_rec(nm_err == 0 && cnt_valid == 0, "c1-no-native-cxsa_valid", detail);
+
+    cx_fmt(detail, sizeof detail, "objs=%d nm_err=%d def_cxsa_valid_s1=%d in=%s",
+           n_objs, nm_err, cnt_s1, first_s1_obj[0] ? first_s1_obj : "-");
+    v18_rec(nm_err == 0 && cnt_s1 >= 1, "c1-cxsa_valid_s1-defined", detail);
+
+    /* (2) lnx/x86_64 v0.1.8 size rules vs 0.1.6 baseline chain */
+    if (v18_load_receipt_objs(base_rcpt, base_objs, V18_MAX_OBJS, &n_base) != 0) {
+        v18_rec(0, "c2-unit-removed", "baseline-receipt-missing");
+        v18_rec(0, "c2-native-text-net", "baseline-receipt-missing");
+        v18_rec(0, "c2-elf-rx-net", "baseline-receipt-missing");
+        return;
+    }
+    long base_tot = 0, base_m53 = -1, cand_tot = 0, dummy_m53 = -1;
+    char base_m53_key[64], dummy_key[64];
+    if (v18_sum_chain_text(base_dir, base_objs, n_base, &base_tot, &base_m53, base_m53_key) != 0) {
+        v18_rec(0, "c2-unit-removed", "baseline-size-failed");
+        v18_rec(0, "c2-native-text-net", "baseline-size-failed");
+        v18_rec(0, "c2-elf-rx-net", "baseline-size-failed");
+        return;
+    }
+    if (base_m53 <= 0) {
+        /* Fallback: locate baseline object defining cxsa_valid via nm. */
+        for (int i = 0; i < n_base; i++) {
+            char op[V18_PW];
+            int hv = 0, hs = 0;
+            if (v18_resolve_obj_path(base_g2, base_objs[i].key, op) == 0 &&
+                v18_nm_scan_obj(op, &hv, &hs) == 0 && hv) {
+                base_m53 = base_objs[i].bytes;
+                cx_fmt(base_m53_key, sizeof base_m53_key, "%s", base_objs[i].key);
+                break;
+            }
+        }
+    }
+    if (base_m53 <= 0) {
+        v18_rec(0, "c2-unit-removed", "baseline-m53-unit-not-found");
+        v18_rec(0, "c2-native-text-net", "baseline-m53-unit-not-found");
+        v18_rec(0, "c2-elf-rx-net", "baseline-m53-unit-not-found");
+        return;
+    }
+    if (v18_sum_chain_text(chain_dir, objs, n_objs, &cand_tot, &dummy_m53, dummy_key) != 0) {
+        v18_rec(0, "c2-unit-removed", "cand-size-failed");
+        v18_rec(0, "c2-native-text-net", "cand-size-failed");
+        v18_rec(0, "c2-elf-rx-net", "cand-size-failed");
+        return;
+    }
+    char base_elf[V18_PW], cand_elf[V18_PW];
+    long base_rx = -1, cand_rx = -1;
+    if (!cx_fmt(base_elf, sizeof base_elf, "%s/fixedpoint/g2/lnx-x86_64/entry.elf", base_dir))
+        base_rx = v18_elf_rx_filesz(base_elf);
+    if (!cx_fmt(cand_elf, sizeof cand_elf, "%s/fixedpoint/g2/lnx-x86_64/entry.elf", chain_dir))
+        cand_rx = v18_elf_rx_filesz(cand_elf);
+
+    long removed_bytes = (nm_err == 0 && cnt_valid == 0) ? base_m53 : 0;
+    long obj_inc = cand_tot - base_tot;
+    long rx_inc = (base_rx > 0 && cand_rx > 0) ? (cand_rx - base_rx) : -1;
+    int rm_ok = 0, obj_ok = 0, rx_ok = 0;
+    (void)v18_check_size_rules(removed_bytes, base_tot, cand_tot, base_rx, cand_rx, &rm_ok, &obj_ok, &rx_ok);
+
+    cx_fmt(detail, sizeof detail,
+           "m53_unit=%s m53_bytes=%ld removed_bytes=%ld min_removed=%d def_cxsa_valid=%d",
+           base_m53_key, base_m53, removed_bytes, V18_MIN_UNIT_REMOVED, cnt_valid);
+    v18_rec(rm_ok, "c2-unit-removed", detail);
+
+    cx_fmt(detail, sizeof detail,
+           "base_obj_text=%ld cand_obj_text=%ld obj_inc=%ld max_inc=%d",
+           base_tot, cand_tot, obj_inc, V18_MAX_OBJ_TEXT_INC);
+    v18_rec(obj_ok, "c2-native-text-net", detail);
+
+    cx_fmt(detail, sizeof detail,
+           "base_rx=%ld cand_rx=%ld rx_inc=%ld max_inc=%d",
+           base_rx, cand_rx, rx_inc, V18_MAX_ELF_RX_INC);
+    v18_rec(rx_ok, "c2-elf-rx-net", detail);
+}
+
+static void v18_check_c3(const char *chain_dir, const char *base_dir) {
+    static const char *const names[5] = {
+        "c3-slice-lnx-arm64", "c3-slice-osx-x86_64", "c3-slice-osx-arm64",
+        "c3-slice-win-x86_64", "c3-slice-win-arm64"
+    };
+    static const char *const rels[5] = {
+        "fixedpoint/g2/lnx-arm64/entry.elf",
+        "fixedpoint/g2/osx-x86_64/slice-osx-x86_64",
+        "fixedpoint/g2/osx-arm64/slice-osx-arm64",
+        "fixedpoint/g2/win-x86_64/slice-win-x86_64",
+        "fixedpoint/g2/win-arm64/slice-win-arm64"
+    };
+    for (int i = 0; i < 5; i++) {
+        char pa[V18_PW], pb[V18_PW], sa[65], sb[65], det[256];
+        long ba = -1, bb = -1;
+        if (cx_fmt(pa, sizeof pa, "%s/%s", base_dir, rels[i]) ||
+            cx_fmt(pb, sizeof pb, "%s/%s", chain_dir, rels[i])) {
+            v18_rec(0, names[i], "path-too-long");
+            continue;
+        }
+        int eq = v18_file_eq(pa, pb, &ba, &bb, sa, sb);
+        cx_fmt(det, sizeof det, "base_bytes=%ld cand_bytes=%ld base_sha=%.12s cand_sha=%.12s",
+               ba, bb, sa[0] ? sa : "-", sb[0] ? sb : "-");
+        v18_rec(eq == 0, names[i], det);
+    }
+}
+
+static long v18_parse_num(const char *s, long len) {
+    int64_t v = -1;
+    if (len <= 0 || tx_to_i64(s, len, 10, &v) != 0) return -1;
+    return (long)v;
+}
+
+static int v18_split_tabs(char *line, char *f[], int cap) {
+    int n = 0;
+    for (char *p = line; p && n < cap; ) {
+        f[n++] = p;
+        char *t = strchr(p, '\t');
+        if (!t) break;
+        *t = 0;
+        p = t + 1;
+    }
+    return n;
+}
+
+static void v18_check_c4(const char *chain_dir) {
+    char tsv_p[V18_PW], ape_p[V18_PW], det[256];
+    if (cx_fmt(tsv_p, sizeof tsv_p, "%s/chain-run.tsv", chain_dir) ||
+        cx_fmt(ape_p, sizeof ape_p, "%s/ape-final/unisacc-next.com", chain_dir)) {
+        v18_rec(0, "c4-four-same-fixedpoint", "path-too-long");
+        return;
+    }
+    size_t tn = 0;
+    char *tb = cx_read(tsv_p, &tn);
+    if (!tb || tn == 0) {
+        if (tb) mm_free(tb);
+        v18_rec(0, "c4-four-same-fixedpoint", "chain-run.tsv-missing");
+        return;
+    }
+    long attempt = 0, recheck = 0;
+    int success = 0, memo = 0;
+    long at = 0;
+    while (at < (long)tn) {
+        long e = at;
+        while (e < (long)tn && tb[e] != '\n' && tb[e] != '\r') e++;
+        tb[e] = 0;
+        char *l = tb + at;
+        at = e + 1;
+        if (!strncmp(l, "ATTEMPT\t", 8)) {
+            char *f[8];
+            int nf = v18_split_tabs(l, f, 8);
+            if (nf >= 7 && !strncmp(f[2], "phase=", 6) && !strncmp(f[3], "rc=", 3)) {
+                long id = v18_parse_num(f[1], (long)strlen(f[1]));
+                if (tx_eqz(f[2], "phase=compare-recheck") && tx_eqz(f[3], "rc=0") &&
+                    tx_eqz(f[6], "memo=off")) {
+                    recheck = id;
+                }
+                if (tx_eqz(f[2], "phase=compare")) {
+                    attempt = id;
+                    memo = tx_eqz(f[6], "memo=on");
+                    success = tx_eqz(f[3], "rc=0") && tx_eqz(f[4], "residue=0");
+                }
+            }
+        }
+    }
+    mm_free(tb);
+    if (attempt <= 0 || !success) {
+        cx_fmt(det, sizeof det, "compare-not-complete attempt=%ld success=%d", attempt, success);
+        v18_rec(0, "c4-four-same-fixedpoint", det);
+        return;
+    }
+
+    char out_p[V18_PW];
+    if (cx_fmt(out_p, sizeof out_p, "%s/chain-run-%ld.stdout", chain_dir, attempt)) {
+        v18_rec(0, "c4-four-same-fixedpoint", "path-too-long");
+        return;
+    }
+    size_t on = 0;
+    char *ob = cx_read(out_p, &on);
+    if (!ob || on == 0) {
+        if (ob) mm_free(ob);
+        v18_rec(0, "c4-four-same-fixedpoint", "compare-stdout-missing");
+        return;
+    }
+    int seen = 0, off = 0, bad_schema = 0;
+    long obj_cnt = 0;
+    static const char *const kind[4] = {"objects", "kernels", "slices", "product"};
+    at = 0;
+    while (at < (long)on) {
+        long e = at;
+        while (e < (long)on && ob[e] != '\n' && ob[e] != '\r') e++;
+        ob[e] = 0;
+        char *l = ob + at;
+        at = e + 1;
+        if (tx_eqz(l, "SHAMEMO\tchain\toff\treason=reached-compare")) {
+            if (seen || off) bad_schema = 1;
+            off = 1;
+        } else if (off && !strncmp(l, "SHAMEMO\tchain\ton\t", 17)) {
+            bad_schema = 1;
+        } else if (!strncmp(l, "CHAIN\tfixedpoint\t", 17)) {
+            char *f[8];
+            int nf = v18_split_tabs(l, f, 8);
+            if (nf < 3) { bad_schema = 1; continue; }
+            for (int k = 0; k < 4; k++) {
+                size_t z = strlen(kind[k]);
+                if (!strncmp(f[2], kind[k], z) && (f[2][z] == '=' || !f[2][z])) {
+                    if (memo && !off) bad_schema = 1;
+                    if (!tx_eqz(f[2] + z, "=same")) bad_schema = 1;
+                    if (k == 3) {
+                        if (nf != 3) bad_schema = 1;
+                    } else {
+                        long cnt = (nf == 4 && !strncmp(f[3], "count=", 6))
+                                   ? v18_parse_num(f[3] + 6, (long)strlen(f[3] + 6)) : -1;
+                        if (cnt <= 0 || (k == 1 && cnt != 2) || (k == 2 && cnt != 6)) bad_schema = 1;
+                        if (k == 0) obj_cnt = cnt;
+                    }
+                    seen |= (1 << k);
+                }
+            }
+        }
+    }
+    mm_free(ob);
+    (void)recheck;
+
+    static const char *const six[6] = {
+        "lnx-x86_64/entry.elf", "lnx-arm64/entry.elf",
+        "osx-x86_64/slice-osx-x86_64", "osx-arm64/slice-osx-arm64",
+        "win-x86_64/slice-win-x86_64", "win-arm64/slice-win-arm64"
+    };
+    int g_mismatch = 0;
+    for (int i = 0; i < 6; i++) {
+        char pa[V18_PW], pb[V18_PW], sa[65], sb[65];
+        long ba = 0, bb = 0;
+        if (cx_fmt(pa, sizeof pa, "%s/fixedpoint/g2/%s", chain_dir, six[i]) ||
+            cx_fmt(pb, sizeof pb, "%s/fixedpoint/g3/%s", chain_dir, six[i]) ||
+            v18_file_eq(pa, pb, &ba, &bb, sa, sb) != 0) {
+            g_mismatch++;
+        }
+    }
+    sy_stat_t ast;
+    int ape_ok = (sy_stat(ape_p, &ast) == 0 && ast.kind == 'f' && ast.size > 0);
+    cx_fmt(det, sizeof det, "attempt=%ld seen=%d/15 bad_schema=%d obj_cnt=%ld g2_g3_mismatch=%d ape=%d",
+           attempt, seen, bad_schema, obj_cnt, g_mismatch, ape_ok);
+    v18_rec(seen == 15 && !bad_schema && g_mismatch == 0 && ape_ok, "c4-four-same-fixedpoint", det);
+}
+
+static void v18_read_load1(char out[32]) {
+    unsigned char *b = 0;
+    int64_t n = 0;
+    cx_fmt(out, 32, "-");
+    if (sy_read_file("/proc/loadavg", &b, &n, 4096) == 0 && b && n > 0) {
+        int i = 0;
+        while (i < 31 && i < (int)n && b[i] != ' ' && b[i] != '\n' && b[i] != '\r') {
+            out[i] = (char)b[i];
+            i++;
+        }
+        out[i] = 0;
+    }
+    if (b) mm_free(b);
+}
+
+static int v18_run_redirected(const char *stdin_path, const char *stdout_path, const char *stderr_path,
+                              char *const argv[], int64_t *out_ns) {
+    int ifd = stdin_path ? sy_open(stdin_path, O_RDONLY, 0) : SY_STDIO_NULL;
+    int ofd = stdout_path ? sy_open(stdout_path, O_WRONLY | O_CREAT | O_TRUNC, 0644) : SY_STDIO_NULL;
+    int efd = stderr_path ? sy_open(stderr_path, O_WRONLY | O_CREAT | O_TRUNC, 0644) : SY_STDIO_NULL;
+    if ((stdin_path && ifd < 0) || (stdout_path && ofd < 0) || (stderr_path && efd < 0)) {
+        if (stdin_path && ifd >= 0) sy_close(ifd);
+        if (stdout_path && ofd >= 0) sy_close(ofd);
+        if (stderr_path && efd >= 0) sy_close(efd);
+        *out_ns = -1;
+        return -1;
+    }
+    sy_spawn_t o;
+    sy_exit_t st;
+    sy_spawn_init(&o);
+    o.argv = (char **)argv;
+    o.pgroup = -1;
+    o.deadline_ms = 30000;
+    o.in_fd = ifd;
+    o.out_fd = ofd;
+    o.err_fd = efd;
+    int64_t t0 = sy_mono_ns();
+    int rr = sy_proc_run(&o, &st);
+    int64_t t1 = sy_mono_ns();
+    if (stdin_path && ifd >= 0) sy_close(ifd);
+    if (stdout_path && ofd >= 0) sy_close(ofd);
+    if (stderr_path && efd >= 0) sy_close(efd);
+    *out_ns = (t0 >= 0 && t1 >= t0) ? (t1 - t0) : -1;
+    return rr ? -1 : sy_exit_code(&st);
+}
+
+static void v18_sort_i64(int64_t *a, int n) {
+    for (int i = 0; i < n; i++) {
+        for (int j = i + 1; j < n; j++) {
+            if (a[j] < a[i]) { int64_t tmp = a[i]; a[i] = a[j]; a[j] = tmp; }
+        }
+    }
+}
+
+static void v18_bench_stage(const char *tag, const char *stage, const char *in_file,
+                            const char *src_path, const char *tmp_dir,
+                            const char *nat_ape, const char *cand_ape, int reps) {
+    char outp[V18_PW], errp[V18_PW], det[384];
+    int64_t nat_ns[V18_MAX_REPS], cand_ns[V18_MAX_REPS];
+    if (cx_fmt(outp, sizeof outp, "%s/bench.out", tmp_dir) ||
+        cx_fmt(errp, sizeof errp, "%s/bench.err", tmp_dir)) {
+        v18_rec(0, tag, "path-too-long");
+        return;
+    }
+    char *nav[] = {"sh", (char *)nat_ape, "stream", (char *)stage, "--level", "2", "--source", (char *)src_path, "--no-external-nn", 0};
+    char *cav[] = {"sh", (char *)cand_ape, "stream", (char *)stage, "--level", "2", "--source", (char *)src_path, "--no-external-nn", 0};
+
+    int64_t w0 = 0, w1 = 0;
+    if (v18_run_redirected(in_file, outp, errp, nav, &w0) != 0 ||
+        v18_run_redirected(in_file, outp, errp, cav, &w1) != 0) {
+        v18_rec(0, tag, "warmup-failed");
+        return;
+    }
+
+    char l1_start[32], l1_end[32];
+    l1_start[0] = 0;
+    l1_end[0] = 0;
+    for (int i = 0; i < reps; i++) {
+        char ln[32], lc[32];
+        v18_read_load1(ln);
+        int rc_n = v18_run_redirected(in_file, outp, errp, nav, &nat_ns[i]);
+        v18_read_load1(lc);
+        int rc_c = v18_run_redirected(in_file, outp, errp, cav, &cand_ns[i]);
+        if (i == 0) cx_fmt(l1_start, sizeof l1_start, "%s", ln);
+        cx_fmt(l1_end, sizeof l1_end, "%s", lc);
+        if (rc_n != 0 || rc_c != 0 || nat_ns[i] <= 0 || cand_ns[i] <= 0) {
+            cx_fmt(det, sizeof det, "rep=%d rc_n=%d rc_c=%d", i + 1, rc_n, rc_c);
+            v18_rec(0, tag, det);
+            return;
+        }
+    }
+    v18_sort_i64(nat_ns, reps);
+    v18_sort_i64(cand_ns, reps);
+    int64_t nat_med = nat_ns[reps / 2];
+    int64_t cand_med = cand_ns[reps / 2];
+    double ratio = (double)cand_med / (double)(nat_med > 0 ? nat_med : 1);
+    cx_fmt(det, sizeof det,
+           "reps=%d nat_med_ms=%.3f cand_med_ms=%.3f ratio=%.3f limit=2.000 load1_start=%s load1_end=%s",
+           reps, (double)nat_med / 1e6, (double)cand_med / 1e6, ratio, l1_start, l1_end);
+    v18_rec(ratio <= 2.0, tag, det);
+}
+
+static void v18_rm_tmp_files(const char *tmp_dir) {
+    static const char *const fs[6] = {"case1.c", "c1-e2.out", "c1-e1.out", "c1-e3.out", "bench.out", "bench.err"};
+    char p[V18_PW];
+    for (int i = 0; i < 6; i++) {
+        if (!cx_fmt(p, sizeof p, "%s/%s", tmp_dir, fs[i])) (void)sy_unlink(p);
+    }
+    (void)rmdir(tmp_dir);
+}
+
+static void v18_check_c5(const char *chain_dir, const char *base_dir, const char *nat_override, int reps) {
+    char nat_ape[V18_PW], cand_ape[V18_PW];
+    if (nat_override && nat_override[0]) {
+        if (cx_fmt(nat_ape, sizeof nat_ape, "%s", nat_override)) { v18_rec(0, "c5-stream-e3-wall", "path"); return; }
+    } else {
+        if (cx_fmt(nat_ape, sizeof nat_ape, "%s/ape-final/unisacc-next.com", base_dir)) { v18_rec(0, "c5-stream-e3-wall", "path"); return; }
+    }
+    if (cx_fmt(cand_ape, sizeof cand_ape, "%s/ape-final/unisacc-next.com", chain_dir)) {
+        v18_rec(0, "c5-stream-e3-wall", "path");
+        v18_rec(0, "c5-stream-e4-wall", "path");
+        return;
+    }
+    if (sy_exists(nat_ape) != 1) {
+        v18_rec(0, "c5-stream-e3-wall", "native-ape-missing");
+        v18_rec(0, "c5-stream-e4-wall", "native-ape-missing");
+        return;
+    }
+    if (sy_exists(cand_ape) != 1) {
+        v18_rec(0, "c5-stream-e3-wall", "cand-ape-missing");
+        v18_rec(0, "c5-stream-e4-wall", "cand-ape-missing");
+        return;
+    }
+
+    char pat[] = "/tmp/check-v018-exit-XXXXXX";
+    if (!mkdtemp(pat)) {
+        v18_rec(0, "c5-stream-e3-wall", "mkdtemp-failed");
+        v18_rec(0, "c5-stream-e4-wall", "mkdtemp-failed");
+        return;
+    }
+    char c1_src[V18_PW], e2_out[V18_PW], e1_out[V18_PW], e3_out[V18_PW], errp[V18_PW];
+    static const char *c1_body =
+        "int value; __attribute__((constructor)) void init(void){value=7;} int main(void){return value;}\n";
+    if (cx_fmt(c1_src, sizeof c1_src, "%s/case1.c", pat) ||
+        cx_fmt(e2_out, sizeof e2_out, "%s/c1-e2.out", pat) ||
+        cx_fmt(e1_out, sizeof e1_out, "%s/c1-e1.out", pat) ||
+        cx_fmt(e3_out, sizeof e3_out, "%s/c1-e3.out", pat) ||
+        cx_fmt(errp, sizeof errp, "%s/bench.err", pat) ||
+        cx_write(c1_src, c1_body, (size_t)tx_len(c1_body, 256))) {
+        v18_rm_tmp_files(pat);
+        v18_rec(0, "c5-stream-e3-wall", "fixture-write-failed");
+        v18_rec(0, "c5-stream-e4-wall", "fixture-write-failed");
+        return;
+    }
+
+    (void)sy_unsetenv("UNISACC_NN_DIR");
+    int64_t gns = 0;
+    char *av_e2[] = {"sh", nat_ape, "stream", "e2", "--level", "2", "--source", c1_src, "--no-external-nn", 0};
+    char *av_e1[] = {"sh", nat_ape, "stream", "e1", "--level", "2", "--source", c1_src, "--no-external-nn", 0};
+    char *av_e3[] = {"sh", nat_ape, "stream", "e3", "--level", "2", "--source", c1_src, "--no-external-nn", 0};
+    sy_stat_t s2, s1, s3;
+    if (v18_run_redirected(c1_src, e2_out, errp, av_e2, &gns) != 0 ||
+        sy_stat(e2_out, &s2) != 0 || s2.size <= 0 ||
+        v18_run_redirected(e2_out, e1_out, errp, av_e1, &gns) != 0 ||
+        sy_stat(e1_out, &s1) != 0 || s1.size <= 0 ||
+        v18_run_redirected(e1_out, e3_out, errp, av_e3, &gns) != 0 ||
+        sy_stat(e3_out, &s3) != 0 || s3.size <= 0) {
+        v18_rm_tmp_files(pat);
+        v18_rec(0, "c5-stream-e3-wall", "material-gen-failed");
+        v18_rec(0, "c5-stream-e4-wall", "material-gen-failed");
+        return;
+    }
+
+    v18_bench_stage("c5-stream-e3-wall", "e3", e1_out, c1_src, pat, nat_ape, cand_ape, reps);
+    v18_bench_stage("c5-stream-e4-wall", "e4", e3_out, c1_src, pat, nat_ape, cand_ape, reps);
+    v18_rm_tmp_files(pat);
+}
+
+static int v18_self_test(void) {
+    char pat[] = "/tmp/check-v018-self-XXXXXX";
+    if (!mkdtemp(pat)) return 2;
+    char rpath[V18_PW], tpath[V18_PW];
+    static const char *sample_rcpt =
+        "rev\t0123456789abcdef0123456789abcdef01234567\n"
+        "m57.o\tsha=aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa\tbytes=123\n"
+        "m59.o\tsha=bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb\tbytes=456\n"
+        "entry.elf\tsha=cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc\tbytes=789\n";
+    if (cx_fmt(rpath, sizeof rpath, "%s/receipt.txt", pat) ||
+        cx_fmt(tpath, sizeof tpath, "%s/chain-run.tsv", pat) ||
+        cx_write(rpath, sample_rcpt, (size_t)tx_len(sample_rcpt, 1024))) {
+        (void)unlink(rpath);
+        (void)rmdir(pat);
+        return 2;
+    }
+    V18Obj objs[16];
+    int n = 0;
+    int rrc = v18_load_receipt_objs(rpath, objs, 16, &n);
+    v18_rec(rrc == 0 && n == 2 && tx_eqz(objs[0].key, "m57.o") && tx_eqz(objs[1].key, "m59.o"),
+            "selftest.receipt-parser", "n=2");
+
+    int64_t arr[9] = {90, 10, 50, 30, 80, 20, 70, 40, 60};
+    v18_sort_i64(arr, 9);
+    v18_rec(arr[4] == 50 && arr[0] == 10 && arr[8] == 90, "selftest.median9", "med=50");
+
+    char l1[32];
+    v18_read_load1(l1);
+    v18_rec(l1[0] >= '0' && l1[0] <= '9', "selftest.load1-read", l1);
+
+    int rm_ok = 0, obj_ok = 0, rx_ok = 0;
+    int ok_m1 = v18_check_size_rules(3770, 2721624, 2746891, 2025199, 2049726, &rm_ok, &obj_ok, &rx_ok);
+    int bad_rm = v18_check_size_rules(0, 2721624, 2721624, 2025199, 2025199, &rm_ok, &obj_ok, &rx_ok);
+    int bad_obj = v18_check_size_rules(3770, 2721624, 2721624 + 26001, 2025199, 2025199 + 25000, &rm_ok, &obj_ok, &rx_ok);
+    int bad_rx = v18_check_size_rules(3770, 2721624, 2721624 + 26000, 2025199, 2025199 + 25001, &rm_ok, &obj_ok, &rx_ok);
+    v18_rec(ok_m1 && !bad_rm && !bad_obj && !bad_rx, "selftest.size-rules", "3770/26000/25000");
+
+    (void)sy_unlink(rpath);
+    (void)sy_unlink(tpath);
+    (void)rmdir(pat);
+    sy_printf("CHECK_V018_EXIT_SELFTEST\tpassed=%d\tfailed=%d\n", g_pass, g_fail);
+    return g_fail ? 1 : 0;
+}
+
+static int v18_is_dir(const char *path) {
+    sy_stat_t st;
+    if (!path || !path[0]) return 0;
+    return sy_stat(path, &st) == 0 && st.kind == 'd';
+}
+
+int main(int argc, char **argv) {
+    const char *chain_dir = 0, *base_dir = 0, *nat_ape = 0;
+    int reps = 9, self_test = 0;
+    char def_base[V18_PW];
+
+    for (int i = 1; i < argc; i++) {
+        if (tx_eqz(argv[i], "--")) continue;
+        else if (tx_eqz(argv[i], "--self-test")) self_test = 1;
+        else if ((tx_eqz(argv[i], "--chain-dir")) && i + 1 < argc) chain_dir = argv[++i];
+        else if (tx_eqz(argv[i], "--baseline") && i + 1 < argc) base_dir = argv[++i];
+        else if (tx_eqz(argv[i], "--native-ape") && i + 1 < argc) nat_ape = argv[++i];
+        else if (tx_eqz(argv[i], "--repeat") && i + 1 < argc) {
+            int64_t rv = 0;
+            const char *rs = argv[++i];
+            if (tx_to_i64(rs, (long)strlen(rs), 10, &rv) != 0 || rv < 1 || rv > V18_MAX_REPS) {
+                sy_eprintf("check-v018-exit: bad --repeat %s\n", rs);
+                return 2;
+            }
+            reps = (int)rv;
+        } else if (tx_eqz(argv[i], "--help") || tx_eqz(argv[i], "-h")) {
+            sy_printf("usage: sh ./unisacc.com tools/check-v018-exit.cx -- [--baseline DIR] [--native-ape PATH] [--repeat N] [--self-test] CHAIN_DIR\n");
+            return 0;
+        } else if (argv[i][0] == '-') {
+            sy_eprintf("check-v018-exit: unknown option %s\n", argv[i]);
+            return 2;
+        } else if (!chain_dir) {
+            chain_dir = argv[i];
+        } else {
+            sy_eprintf("check-v018-exit: unexpected extra arg %s\n", argv[i]);
+            return 2;
+        }
+    }
+
+    if (self_test) return v18_self_test();
+    if (!chain_dir || !chain_dir[0]) {
+        sy_eprintf("check-v018-exit: CHAIN_DIR required\n");
+        return 2;
+    }
+    if (!base_dir || !base_dir[0]) {
+        const char *hm = sy_env("HOME");
+        if (!hm || !hm[0] ||
+            cx_fmt(def_base, sizeof def_base, "%s/.cache/unisacc/chains/bg-b1/c9275e7756acad801ff2f206b3aa6a891e8115a2", hm)) {
+            sy_eprintf("check-v018-exit: cannot resolve default baseline chain dir\n");
+            return 2;
+        }
+        base_dir = def_base;
+    }
+    if (!v18_is_dir(chain_dir) || !v18_is_dir(base_dir)) {
+        sy_eprintf("check-v018-exit: chain or baseline dir missing\n");
+        return 2;
+    }
+
+    v18_check_c1_c2(chain_dir, base_dir);
+    v18_check_c3(chain_dir, base_dir);
+    v18_check_c4(chain_dir);
+    v18_check_c5(chain_dir, base_dir, nat_ape, reps);
+
+    sy_printf("CHECK_V018_EXIT\tverdict=%s\tchain=%s\tbaseline=%s\tpassed=%d\tfailed=%d\n",
+              g_fail == 0 ? "GREEN" : "RED", chain_dir, base_dir, g_pass, g_fail);
+    return g_fail == 0 ? 0 : 1;
+}

@@ -33,9 +33,13 @@
 #pragma unisa use mem.bytes
 #pragma unisa use cxlib.netpack
 #pragma unisa use cxlib.releaseversion
+#pragma unisa use sys.sha
+#pragma unisa use cxlib.receipt
 #pragma unisa use cxlib.releaseseq
 #pragma unisa use cxlib.pik1
 #pragma unisa use cxlib.releasecandidate
+
+static const char *g_stage_receipts_dir = 0;
 
 static int refuse(const char *reason, const char *detail) {
     printf("REFUSE\tFREEZE_CUT\t%s\t%s\n", reason, detail && detail[0] ? detail : "-");
@@ -563,6 +567,28 @@ static int fc_check_gen_all(const char *repo, long t0_ms, long budget_ms, char *
     return 0;
 }
 
+static int fc_rcpt_get(const char *path, const char *key, char *buf, size_t cap) {
+    size_t n = 0, kl = strlen(key), i = 0;
+    char *t = cx_read(path, &n);
+    if (!t || !n) { free(t); return 1; }
+    while (i < n) {
+        size_t e = i, tab;
+        while (e < n && t[e] != '\n') e++;
+        for (tab = i; tab < e && t[tab] != '\t'; tab++) {}
+        if (tab < e && tab - i == kl && !memcmp(t + i, key, kl)) {
+            size_t vn = e - (tab + 1);
+            if (vn == 0 || vn >= cap) { free(t); return 1; }
+            mm_copy(buf, cap, t + tab + 1, vn);
+            buf[vn] = 0;
+            free(t);
+            return 0;
+        }
+        i = e + 1;
+    }
+    free(t);
+    return 1;
+}
+
 /* Gate (b): chain-ready preconditions under clean env -i launch environment */
 static int fc_check_chain_ready(const char *repo, long t0_ms, long budget_ms, char *why_tag, char *detail, size_t cap) {
     char abs_repo[4096], toolp[4400], uc[4400], rk[4400];
@@ -617,46 +643,202 @@ static int fc_check_chain_ready(const char *repo, long t0_ms, long budget_ms, ch
         cx_fmt(detail, cap, "UNISACC_IDENT_HELPER-not-found=%s", ih);
         return -1;
     }
-    int bound_s = fc_budget_remaining_s(t0_ms, budget_ms, 58, detail, cap);
-    if (bound_s < 0) { cx_fmt(why_tag, 64, "check-budget-exceeded"); return -1; }
     const char *hm = getenv("HOME");
     if (!hm || !hm[0]) hm = "/tmp";
-    char env_home[1200], env_tmp[4200], env_ih[4200];
+    const char *cp = getenv("PATH");
+    const char *d_owner = getenv("DEVSVC_OWNER");
+    char env_home[1200], env_tmp[4200], env_ih[4200], env_path[4400], env_owner[256];
     if (cx_fmt(env_home, sizeof env_home, "HOME=%s", hm) ||
         cx_fmt(env_tmp, sizeof env_tmp, "TMPDIR=%s", use_tmp) ||
-        cx_fmt(env_ih, sizeof env_ih, "UNISACC_IDENT_HELPER=%s", ih)) return -1;
-    char *av[] = {
-        "env", "-i",
-        "PATH=/usr/bin:/bin",
-        env_home,
-        env_tmp,
-        env_ih,
-        "sh", uc, "tools/chain-ready.cx", "--", "--repo", abs_repo, 0
-    }; /* lint:allow R1-product runs target repo chain-ready under clean env -i */
-    np_result r = {0}; char why[200];
-    if (np_run(av, abs_repo, 0, bound_s, &r, why, sizeof why)) {
-        cx_fmt(why_tag, 64, "chain-ready-failed");
-        cx_fmt(detail, cap, "transport=%s", why);
-        np_free(&r);
-        return -1;
+        cx_fmt(env_ih, sizeof env_ih, "UNISACC_IDENT_HELPER=%s", ih) ||
+        cx_fmt(env_path, sizeof env_path, "PATH=%s:%s/.local/bin", (cp && cp[0]) ? cp : "/usr/bin:/bin", hm)) return -1;
+    if (d_owner && d_owner[0]) cx_fmt(env_owner, sizeof env_owner, "DEVSVC_OWNER=%s", d_owner);
+    else env_owner[0] = 0;
+
+    const char *stage_names[9] = {
+        "derive-a", "derive-b", "ratchets", "tri-chain-a", "tri-chain-b", "tri-chain-c", "env-root", "gen-preflight", "union-shards"
+    };
+    const char *stage_gates[9] = {
+        "1-rev,1-branch,2a-derive,2a-derive2,2a-derive3,2a-derive4",
+        "2a-derive5,2a-derive6,2a-derive7",
+        "2b-ratchets",
+        "3a-cxmod-tri,3a-cxmod-tri-exports",
+        "3b-cx0-extract,4-p1",
+        "5-candidate-chain,5-candidate-chain2,5-candidate-chain3,5-candidate-chain4,5-candidate-chain5",
+        "6-affected,7-recipe,8-inflight,9-ledger,10-envhygiene,11-version-slot,12-root-files,12p-preflight-entry,13-snap-cache,14-root-record",
+        "15-gen-all,16-disk-free,17-root-public,18-parse2-gen,19-chain-preflight,19a-preflight-sixtarget,19b-preflight-snap,20-ident-helper,21-verseq-gen",
+        "22-premerge-union,22-premerge-union2,22-premerge-union3,22-premerge-union4,22-premerge-union5,23-freeze-armed,24-root-current,25-tools-compile-shards"
+    };
+
+    char head_rev[128];
+    cx_fmt(head_rev, sizeof head_rev, "unknown");
+    {
+        char *gav[] = {"git", "-C", abs_repo, "rev-parse", "HEAD", 0};
+        np_result gr = {0}; char gwhy[128];
+        if (np_run(gav, abs_repo, 0, 5, &gr, gwhy, sizeof gwhy) == 0 && gr.rc == 0 && gr.out && gr.outn > 0) {
+            size_t n = gr.outn;
+            while (n > 0 && (gr.out[n - 1] == '\n' || gr.out[n - 1] == '\r')) n--;
+            if (n > 0 && n < sizeof head_rev) {
+                mm_copy(head_rev, sizeof head_rev, gr.out, n);
+                head_rev[n] = 0;
+            }
+        }
+        np_free(&gr);
     }
-    int ready_yes = (r.out && r.outn > 0 &&
-                     (tx_find(r.out, (long)r.outn, "READY=yes", 9) >= 0 ||
-                      tx_find(r.out, (long)r.outn, "READY\tyes", 9) >= 0));
-    int has_fail = (r.out && r.outn > 0 &&
-                    (tx_find(r.out, (long)r.outn, "\tFAIL\t", 6) >= 0 ||
-                     tx_find(r.out, (long)r.outn, "READY=no", 8) >= 0 ||
-                     tx_find(r.out, (long)r.outn, "READY\tno", 8) >= 0));
-    if (r.rc != 0 || !ready_yes || has_fail) {
-        char mline[256];
-        fc_first_match_line(r.out, r.outn, "\tFAIL\t", "REFUSE", mline, sizeof mline);
-        if (!mline[0] && r.err && r.errn > 0) fc_first_match_line(r.err, r.errn, "REFUSE", "FAIL", mline, sizeof mline);
-        cx_fmt(why_tag, 64, "chain-ready-failed");
-        cx_fmt(detail, cap, "rc=%d ready=%d detail=%s", r.rc, ready_yes, mline[0] ? mline : "-");
-        np_free(&r);
-        return -1;
+
+    if (g_stage_receipts_dir && g_stage_receipts_dir[0]) {
+        char roster_buf[4096], expected_roster_sha[65];
+        size_t rpos = 0;
+        int si;
+        for (si = 0; si < 9; si++) {
+            size_t sn = strlen(stage_names[si]), gn = strlen(stage_gates[si]);
+            if (rpos + sn + gn + 2 >= sizeof roster_buf) return -1;
+            mm_copy(roster_buf + rpos, sizeof roster_buf - rpos, stage_names[si], sn); rpos += sn;
+            roster_buf[rpos++] = '\t';
+            mm_copy(roster_buf + rpos, sizeof roster_buf - rpos, stage_gates[si], gn); rpos += gn;
+            roster_buf[rpos++] = '\n';
+        }
+        if (sy_sha256_hex(roster_buf, (long)rpos, expected_roster_sha)) return -1;
+
+        char missing_list[512];
+        size_t mlen = 0;
+        missing_list[0] = 0;
+        int missing_n = 0;
+        for (si = 0; si < 9; si++) {
+            char rp[4400];
+            if (cx_fmt(rp, sizeof rp, "%s/%s.rcpt", g_stage_receipts_dir, stage_names[si])) return -1;
+            if (sy_exists(rp) != 1) {
+                size_t sl = strlen(stage_names[si]);
+                if (missing_n > 0 && mlen + 1 < sizeof missing_list) missing_list[mlen++] = ',';
+                if (mlen + sl < sizeof missing_list) {
+                    mm_copy(missing_list + mlen, sizeof missing_list - mlen, stage_names[si], sl);
+                    mlen += sl;
+                }
+                missing_list[mlen] = 0;
+                missing_n++;
+            }
+        }
+        if (missing_n > 0) {
+            cx_fmt(why_tag, 64, "chain-ready-receipts-missing:%s", missing_list);
+            cx_fmt(detail, cap, "dir=%s missing=%d", g_stage_receipts_dir, missing_n);
+            return -1;
+        }
+
+        long now_s = sy_wall_s();
+        for (si = 0; si < 9; si++) {
+            char rp[4400], r_run_id[160], r_rev[160], r_stage[160], r_verdict[160], r_roster[160], r_ts[160];
+            if (cx_fmt(rp, sizeof rp, "%s/%s.rcpt", g_stage_receipts_dir, stage_names[si])) return -1;
+            if (fc_rcpt_get(rp, "run_id", r_run_id, sizeof r_run_id) ||
+                fc_rcpt_get(rp, "rev", r_rev, sizeof r_rev) ||
+                fc_rcpt_get(rp, "stage", r_stage, sizeof r_stage) ||
+                fc_rcpt_get(rp, "verdict", r_verdict, sizeof r_verdict) ||
+                fc_rcpt_get(rp, "roster_sha", r_roster, sizeof r_roster) ||
+                fc_rcpt_get(rp, "ts_epoch_s", r_ts, sizeof r_ts)) {
+                cx_fmt(why_tag, 64, "chain-ready-receipt-malformed:%s", stage_names[si]);
+                cx_fmt(detail, cap, "rcpt=%s", rp);
+                return -1;
+            }
+            if (rc_fresh(rp, r_run_id) != 0) {
+                cx_fmt(why_tag, 64, "chain-ready-receipt-binding-invalid:%s", stage_names[si]);
+                cx_fmt(detail, cap, "why=%s", rc_why());
+                return -1;
+            }
+            if (strcmp(r_stage, stage_names[si]) != 0) {
+                cx_fmt(why_tag, 64, "chain-ready-receipt-stage-mismatch:%s", stage_names[si]);
+                cx_fmt(detail, cap, "got=%s", r_stage);
+                return -1;
+            }
+            if (strcmp(r_rev, head_rev) != 0) {
+                cx_fmt(why_tag, 64, "chain-ready-receipt-rev-mismatch:%s", stage_names[si]);
+                cx_fmt(detail, cap, "got=%s head=%s", r_rev, head_rev);
+                return -1;
+            }
+            if (strcmp(r_roster, expected_roster_sha) != 0) {
+                cx_fmt(why_tag, 64, "chain-ready-receipt-roster-mismatch:%s", stage_names[si]);
+                cx_fmt(detail, cap, "got=%s exp=%s", r_roster, expected_roster_sha);
+                return -1;
+            }
+            if (strcmp(r_verdict, "READY") != 0) {
+                cx_fmt(why_tag, 64, "chain-ready-receipt-not-ready:%s", stage_names[si]);
+                cx_fmt(detail, cap, "verdict=%s", r_verdict);
+                return -1;
+            }
+            int64_t ts_s = 0;
+            if (tx_to_i64(r_ts, (long)strlen(r_ts), 10, &ts_s) || ts_s <= 0 || now_s - ts_s > 1800 || ts_s - now_s > 60) {
+                cx_fmt(why_tag, 64, "chain-ready-receipt-stale:%s", stage_names[si]);
+                cx_fmt(detail, cap, "ts=%s now=%ld", r_ts, now_s);
+                return -1;
+            }
+        }
+        printf("CHAIN_READY_RECEIPTS\tverdict=READY\tstages=9/9\trev=%s\troster_sha=%s\n", head_rev, expected_roster_sha);
+        return 0;
     }
-    np_free(&r);
+
+    int si;
+    for (si = 0; si < 9; si++) {
+        int bound_s = fc_budget_remaining_s(t0_ms, budget_ms, 55, detail, cap);
+        if (bound_s < 0) { cx_fmt(why_tag, 64, "check-budget-exceeded"); return -1; }
+        long st0 = sy_now_ms();
+        char *av[16];
+        int ac = 0;
+        av[ac++] = "env"; av[ac++] = "-i";
+        av[ac++] = env_path; av[ac++] = env_home; av[ac++] = env_tmp; av[ac++] = env_ih;
+        if (env_owner[0]) av[ac++] = env_owner;
+        av[ac++] = "sh"; av[ac++] = uc; av[ac++] = "tools/chain-ready.cx"; av[ac++] = "--";
+        av[ac++] = "--repo"; av[ac++] = abs_repo; av[ac++] = "--only"; av[ac++] = (char *)stage_gates[si];
+        av[ac] = 0; /* lint:allow R1-product runs target repo chain-ready under clean env -i */
+        np_result r = {0}; char why[200];
+        if (np_run(av, abs_repo, 0, bound_s, &r, why, sizeof why)) {
+            if (strstr(why, "TimeoutExpired") != 0)
+                cx_fmt(why_tag, 64, "chain-ready-stage-timeout:%s", stage_names[si]);
+            else
+                cx_fmt(why_tag, 64, "chain-ready-failed");
+            cx_fmt(detail, cap, "stage=%s transport=%s", stage_names[si], why);
+            np_free(&r);
+            return -1;
+        }
+        int ready_yes = (r.out && r.outn > 0 &&
+                         (tx_find(r.out, (long)r.outn, "READY=yes", 9) >= 0 ||
+                          tx_find(r.out, (long)r.outn, "READY\tyes", 9) >= 0));
+        int has_fail = (r.out && r.outn > 0 &&
+                        (tx_find(r.out, (long)r.outn, "\tFAIL\t", 6) >= 0 ||
+                         tx_find(r.out, (long)r.outn, "READY=no", 8) >= 0 ||
+                         tx_find(r.out, (long)r.outn, "READY\tno", 8) >= 0));
+        if (r.rc != 0 || !ready_yes || has_fail) {
+            char mline[256];
+            fc_first_match_line(r.out, r.outn, "\tFAIL\t", "REFUSE", mline, sizeof mline);
+            if (!mline[0] && r.err && r.errn > 0) fc_first_match_line(r.err, r.errn, "REFUSE", "FAIL", mline, sizeof mline);
+            cx_fmt(why_tag, 64, "chain-ready-failed");
+            cx_fmt(detail, cap, "stage=%s rc=%d ready=%d detail=%s",
+                   stage_names[si], r.rc, ready_yes, mline[0] ? mline : "-");
+            np_free(&r);
+            return -1;
+        }
+        np_free(&r);
+        printf("CHAIN_READY_STAGE\tstage=%s\tverdict=READY\telapsed_ms=%ld\n",
+               stage_names[si], sy_now_ms() - st0);
+    }
+    char rev[128];
+    cx_fmt(rev, sizeof rev, "unknown");
+    {
+        char *gav[] = {"git", "-C", abs_repo, "rev-parse", "HEAD", 0};
+        np_result gr = {0}; char gwhy[128];
+        if (np_run(gav, abs_repo, 0, 5, &gr, gwhy, sizeof gwhy) == 0 && gr.rc == 0 && gr.out && gr.outn > 0) {
+            size_t n = gr.outn;
+            while (n > 0 && (gr.out[n - 1] == '\n' || gr.out[n - 1] == '\r')) n--;
+            if (n > 0 && n < sizeof rev) {
+                mm_copy(rev, sizeof rev, gr.out, n);
+                rev[n] = 0;
+            }
+        }
+        np_free(&gr);
+    }
+    char run_id[128];
+    const char *env_rid = getenv("UNISACC_RUN_ID");
+    if (env_rid && env_rid[0]) cx_fmt(run_id, sizeof run_id, "%s", env_rid);
+    else cx_fmt(run_id, sizeof run_id, "fc-%ld-%d", t0_ms, (int)getpid());
+    printf("CHAIN_READY_STAGED\tverdict=READY\tstages=7/7\trev=%s\trun_id=%s\tpid=%d\n",
+           rev, run_id, (int)getpid());
     return 0;
 }
 
@@ -1285,6 +1467,8 @@ int main(int argc, char **argv) {
             const char *val = argv[++i]; int64_t v = 0;
             if (tx_to_i64(val, (long)strlen(val), 10, &v)) return refuse("bad-a-files-cap", val);
             a_files_cap = (long)v;
+        } else if (tx_eqz(argv[i], "--stage-receipts") && i + 1 < argc) {
+            g_stage_receipts_dir = argv[++i];
         } else if (tx_eqz(argv[i], "--deadline-s") && i + 1 < argc) {
             const char *val = argv[++i]; int64_t v = 0;
             if (tx_to_i64(val, (long)strlen(val), 10, &v)) return refuse("bad-deadline-s", val);

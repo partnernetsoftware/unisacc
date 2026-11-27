@@ -1456,6 +1456,17 @@ static int pr_kept_bytes(const char *objs_dir, const PrBaseObj *objs, int n_objs
         i = e + 1;
     }
 
+    typedef struct {
+        char name[128];
+        int units_total;
+        int units_kept;
+        long obj_bytes;
+        long kept_bytes;
+        long dropped_bytes;
+    } KbFnAgg;
+    static KbFnAgg fn_agg[4096];
+    int n_agg = 0;
+
     long sum_obj = 0, sum_kept = 0, sum_drop = 0;
     for (int u = 0; u < n_objs; u++) {
         long kept = 0, drop = 0;
@@ -1479,12 +1490,44 @@ static int pr_kept_bytes(const char *objs_dir, const PrBaseObj *objs, int n_objs
             }
             if (live) { kept += unit_fns[u][f].bytes; fk++; }
             else { drop += unit_fns[u][f].bytes; }
+
+            int ai = -1;
+            for (int k = 0; k < n_agg; k++) {
+                if (tx_eqz(fn_agg[k].name, unit_fns[u][f].name)) { ai = k; break; }
+            }
+            if (ai < 0 && n_agg < 4096) {
+                ai = n_agg++;
+                cx_fmt(fn_agg[ai].name, sizeof fn_agg[ai].name, "%s", unit_fns[u][f].name);
+                fn_agg[ai].units_total = 0;
+                fn_agg[ai].units_kept = 0;
+                fn_agg[ai].obj_bytes = 0;
+                fn_agg[ai].kept_bytes = 0;
+                fn_agg[ai].dropped_bytes = 0;
+            }
+            if (ai >= 0) {
+                fn_agg[ai].units_total++;
+                fn_agg[ai].obj_bytes += unit_fns[u][f].bytes;
+                if (live) { fn_agg[ai].units_kept++; fn_agg[ai].kept_bytes += unit_fns[u][f].bytes; }
+                else { fn_agg[ai].dropped_bytes += unit_fns[u][f].bytes; }
+            }
         }
         sum_obj += unit_text[u];
         sum_kept += kept;
         sum_drop += drop;
         sy_printf("PRIV_RELINK_KEPT\tunit=%s\tmodule=%s\tobj_text=%ld\tkept_bytes=%ld\tdropped_bytes=%ld\tfuncs_total=%d\tfuncs_kept=%d\n",
                   objs[u].key, objs[u].mod[0] ? objs[u].mod : "-", unit_text[u], kept, drop, unit_nf[u], fk);
+    }
+    for (int a = 0; a < n_agg; a++) {
+        int best = a;
+        for (int b = a + 1; b < n_agg; b++) {
+            if (fn_agg[b].kept_bytes > fn_agg[best].kept_bytes) best = b;
+        }
+        if (best != a) { KbFnAgg tmp = fn_agg[a]; fn_agg[a] = fn_agg[best]; fn_agg[best] = tmp; }
+    }
+    for (int a = 0; a < n_agg; a++) {
+        sy_printf("PRIV_RELINK_KEPT_FN\tfn=%s\tunits_total=%d\tunits_kept=%d\tobj_bytes=%ld\tkept_bytes=%ld\tdropped_bytes=%ld\n",
+                  fn_agg[a].name, fn_agg[a].units_total, fn_agg[a].units_kept,
+                  fn_agg[a].obj_bytes, fn_agg[a].kept_bytes, fn_agg[a].dropped_bytes);
     }
     sy_printf("PRIV_RELINK_KEPT_SUMMARY\tunits=%d\tobj_text_sum=%ld\tkept_bytes_sum=%ld\tdropped_bytes_sum=%ld\ttl_dce_natural=%d\ttl_dce_cut=%d\n",
               n_objs, sum_obj, sum_kept, sum_drop, dce_natural, dce_cut);
@@ -1724,7 +1767,8 @@ int main(int argc, char **argv) {
     }
 
     if (kept_bytes_mode && !out_ape) {
-        return pr_kept_bytes(base_g2_lnx, base_objs, n_base);
+        const char *kb_dir = (objs_dir_in && objs_dir_in[0]) ? objs_dir_in : base_g2_lnx;
+        return pr_kept_bytes(kb_dir, base_objs, n_base);
     }
 
     if (query_unit || query_sym) {
