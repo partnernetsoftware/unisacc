@@ -1,0 +1,105 @@
+name: osx-m53-s1-parity
+on:
+  workflow_dispatch:
+    inputs:
+      source_commit:
+        description: 40-hex v0.1.9 source commit
+        required: true
+        type: string
+      candidate_url:
+        description: HTTPS download URL of the v0.1.9 private-chain unisacc.com candidate APE
+        required: true
+        type: string
+      candidate_sha256:
+        description: Expected 64-hex lowercase sha256 of the v0.1.9 private-chain candidate APE
+        required: true
+        type: string
+      candidate_receipt_url:
+        description: HTTPS URL of the trusted chain candidate receipt (PROMOTE_CHECK / candidate.tsv with rev and ape_sha)
+        required: true
+        type: string
+permissions:
+  contents: read
+jobs:
+  parity:
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - os: macos-15-intel
+            target: osx/x86_64
+          - os: macos-15
+            target: osx/arm64
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ inputs.source_commit }}
+      - name: Verify HEAD commit, trusted chain candidate receipt, and download + hash private-chain candidate APE
+        env:
+          SOURCE_COMMIT: ${{ inputs.source_commit }}
+          CANDIDATE_URL: ${{ inputs.candidate_url }}
+          CANDIDATE_SHA256: ${{ inputs.candidate_sha256 }}
+          CANDIDATE_RECEIPT_URL: ${{ inputs.candidate_receipt_url }}
+        run: |
+          set -eu
+          mkdir -p osx-m53-s1-evidence
+          printf '%s' "$SOURCE_COMMIT" | grep -Eq '^[0-9a-f]{40}$'
+          printf '%s' "$CANDIDATE_SHA256" | grep -Eq '^[0-9a-f]{64}$'
+          printf '%s' "$CANDIDATE_URL" | grep -Eq '^https://'
+          printf '%s' "$CANDIDATE_RECEIPT_URL" | grep -Eq '^https://'
+          HEAD_SHA="$(git rev-parse HEAD)"
+          test "$HEAD_SHA" = "$SOURCE_COMMIT"
+          curl -fsSL -o osx-m53-s1-evidence/candidate-chain.rcpt -- "$CANDIDATE_RECEIPT_URL"
+          grep -Eq "(^|[[:space:]])rev[=[:space:]]+${SOURCE_COMMIT}([[:space:]]|$)" osx-m53-s1-evidence/candidate-chain.rcpt
+          grep -Eq "(^|[[:space:]])ape_sha[=[:space:]]+${CANDIDATE_SHA256}([[:space:]]|$)" osx-m53-s1-evidence/candidate-chain.rcpt
+          curl -fsSL -o ./candidate-unisacc.com -- "$CANDIDATE_URL"
+          chmod +x ./candidate-unisacc.com
+          GOT_SHA="$(shasum -a 256 ./candidate-unisacc.com | awk '{print $1}')"
+          test "$GOT_SHA" = "$CANDIDATE_SHA256"
+      - name: Run both arms (portable tape_run_cx + native cxsa_valid), write v3 receipt + output + slice + locators, and judge via rc_verify
+        env:
+          SOURCE_COMMIT: ${{ inputs.source_commit }}
+          CANDIDATE_URL: ${{ inputs.candidate_url }}
+          EXPECT_TARGET: ${{ matrix.target }}
+        run: |
+          set -eu
+          NOW_TS="$(date +%s)"
+          RUN_ID="ci-${GITHUB_RUN_ID}-${{ matrix.os }}"
+          mkdir -p osx-m53-s1-evidence
+          sh ./candidate-unisacc.com tests/osx-m53-s1-parity.cx -- \
+            --receipt osx-m53-s1-evidence/m53-s1.rcpt \
+            --output osx-m53-s1-evidence/m53-s1.out \
+            --slice osx-m53-s1-evidence/m53_bin2.tapeslice \
+            --locators osx-m53-s1-evidence/locators.tsv \
+            --candidate-url "$CANDIDATE_URL" \
+            --run-id "$RUN_ID" \
+            --rev "$SOURCE_COMMIT" \
+            --candidate-file ./candidate-unisacc.com \
+            --expect-target "$EXPECT_TARGET" \
+            --ts "$NOW_TS"
+          sh ./candidate-unisacc.com tests/osx-m53-s1-parity.cx -- \
+            --judge \
+            --receipt osx-m53-s1-evidence/m53-s1.rcpt \
+            --output osx-m53-s1-evidence/m53-s1.out \
+            --slice osx-m53-s1-evidence/m53_bin2.tapeslice \
+            --run-id "$RUN_ID" \
+            --rev "$SOURCE_COMMIT" \
+            --candidate-file ./candidate-unisacc.com \
+            --expect-target "$EXPECT_TARGET" \
+            --producer osx-m53-s1-parity \
+            --purpose s1-parity \
+            --now-ts "$NOW_TS"
+          grep -Fx "$(printf 'target\t%s' "$EXPECT_TARGET")" osx-m53-s1-evidence/m53-s1.rcpt
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: m53-s1-evidence-${{ matrix.os }}-${{ github.run_id }}
+          path: |
+            osx-m53-s1-evidence/m53-s1.rcpt
+            osx-m53-s1-evidence/m53-s1.out
+            osx-m53-s1-evidence/m53_bin2.tapeslice
+            osx-m53-s1-evidence/locators.tsv
+            osx-m53-s1-evidence/candidate-chain.rcpt
+          if-no-files-found: error
