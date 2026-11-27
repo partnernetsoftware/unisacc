@@ -1,0 +1,323 @@
+/* tools/check-priv-relink.cx -- red-then-green contract check for tools/priv-relink.cx (batch priv-relink).
+ *
+ * Verifies:
+ *   1. Empty-change relink+repack is 100% byte-equal to the baseline APE.
+ *   2. Reproduces the M1 private APE from its 3 changed/added objects (and verified against
+ *      the live c9275e7756 chain & M1 objects when present: 9,408,023 B / 9,408,343 B,
+ *      reporting 101 objects EQUAL, relink+pack <= 60 s).
+ *   3. Untouched proof refusals (rc=2):
+ *      - One extra undeclared changed object -> REFUSE PRIV_RELINK unexpected-changed-object
+ *      - Undeclared added object -> REFUSE PRIV_RELINK unexpected-added-object
+ *      - Undeclared removed object -> REFUSE PRIV_RELINK unexpected-removed-object
+ *      - Hub unit modification without --allow-hub -> REFUSE PRIV_RELINK hub-unit-requires-full-chain
+ *      - sig_sha / build/layer-api drift -> REFUSE PRIV_RELINK sig-sha-drift
+ *      - Foreign P4 F-record modification or addition or bad CRC32 -> REFUSE PRIV_RELINK foreign-f-record-drift
+ *      - Symbol redefinition colliding with untouched unit -> REFUSE PRIV_RELINK symbol-diff-outside-unit
+ *      - Forbidden symbol present (--forbid-sym cxsa_valid) -> REFUSE PRIV_RELINK forbidden-symbol-present
+ *   4. Output verdict is strictly status=PREPARED scope=LOCAL (never PASS or QUALIFIED).
+ *
+ * Final line: CHECK_PRIV_RELINK<TAB>passed=N<TAB>failed=M
+ */
+#pragma unisa use fsx.fs
+#pragma unisa use sys.fs
+#pragma unisa use sys.io
+#pragma unisa use sys.proc
+#pragma unisa use sys.posix
+#pragma unisa use sys.sha
+#pragma unisa use text.text
+#pragma unisa use text.fmt
+#pragma unisa use mem.heap
+#pragma unisa use mem.bytes
+#pragma unisa use cxlib.procrun
+
+static int g_pass, g_fail;
+static char g_root[4096];
+
+static void ck(int ok, const char *name, const pr_result *r) {
+    if (ok) {
+        g_pass++;
+        sy_printf("PASS\t%s\n", name);
+    } else {
+        g_fail++;
+        sy_printf("FAIL\t%s\trc=%d\tout=%.240s\terr=%.240s\n",
+                  name, r ? r->rc : -1,
+                  (r && r->out) ? r->out : "",
+                  (r && r->err) ? r->err : "");
+    }
+}
+
+static int cpr_sh(const char *cwd, const char *cmd, int timeout_s, pr_result *r) {
+    char *av[4] = {"sh", "-c", (char *)cmd, 0};
+    mm_fill(r, sizeof *r, 0, sizeof *r);
+    if (pr_run("check-priv-relink", av, cwd, 0, timeout_s, r) != 0) return -1;
+    return r->rc;
+}
+
+static int cpr_has(const pr_result *r, const char *lit) {
+    long ll = tx_len(lit, 512);
+    if (!r || ll <= 0) return 0;
+    if (r->out && r->outn > 0 && tx_find(r->out, (long)r->outn, lit, ll) >= 0) return 1;
+    if (r->err && r->errn > 0 && tx_find(r->err, (long)r->errn, lit, ll) >= 0) return 1;
+    return 0;
+}
+
+static unsigned cpr_crc32(const unsigned char *p, long n) {
+    unsigned c = 4294967295U;
+    for (long i = 0; i < n; i++) {
+        c ^= (unsigned)p[i];
+        for (int j = 0; j < 8; j++) c = (c & 1U) ? ((c >> 1) ^ 3988292384U) : (c >> 1);
+    }
+    return c ^ 4294967295U;
+}
+
+static int write_p4_body(const char *path, const char *k1, const char *v1, const char *k2, const char *v2) {
+    char buf[4096];
+    long k1l = (long)strlen(k1), v1l = (long)strlen(v1);
+    unsigned c1 = cpr_crc32((const unsigned char *)v1, v1l);
+    int n = 0;
+    if (!k2) {
+        n = snprintf(buf, sizeof buf, "P 4 1 1 1\nD r s in out 0\nM 1 1 1 0\nAF %ld %ld %ld 0 %u\n%s%s",
+                     k1l, v1l, v1l, c1, k1, v1);
+    } else {
+        long k2l = (long)strlen(k2), v2l = (long)strlen(v2);
+        unsigned c2 = cpr_crc32((const unsigned char *)v2, v2l);
+        n = snprintf(buf, sizeof buf, "P 4 1 1 2\nD r s in out 0\nM 1 1 1 0\nAF %ld %ld %ld 0 %u\n%s%sF %ld %ld %ld 0 %u\n%s%s",
+                     k1l, v1l, v1l, c1, k1, v1, k2l, v2l, v2l, c2, k2, v2);
+    }
+    if (n <= 0 || (size_t)n >= sizeof buf) return -1;
+    return sy_write_atomic(path, buf, (size_t)n, 0644);
+}
+
+int main(void) {
+    if (sy_realpath(".", g_root, sizeof g_root) < 0) return 2;
+    int sc = 0;
+    if (fsx_scratch(&sc, "check-priv-relink-") != 0) return 2;
+    const char *dir = fsx_scratch_dir(sc);
+    if (!dir) return 2;
+
+    char fx[1024], chain[1024], repo[1024], base_api[1024], cmd[8192];
+    pr_result r;
+    cx_fmt(fx, sizeof fx, "%s/fx", dir);
+    cx_fmt(chain, sizeof chain, "%s/fx/chain", dir);
+    cx_fmt(repo, sizeof repo, "%s/fx/repo", dir);
+    cx_fmt(base_api, sizeof base_api, "%s/fx/base_api", dir);
+
+    /* Build a self-contained fixture repo + chain with 6 real ELF .o files (assembled with /usr/bin/as),
+     * valid P4 package body, mock linker + ape-pack, and receipt.txt */
+    cx_fmt(cmd, sizeof cmd,
+        "set -e; mkdir -p '%s/fixedpoint/g2/lnx-x86_64' '%s/fixedpoint/g2/win-x86_64' "
+        "'%s/fixedpoint/g2/lnx-arm64' '%s/fixedpoint/g2/osx-x86_64' '%s/fixedpoint/g2/osx-arm64' "
+        "'%s/fixedpoint/g2/win-arm64' '%s/cache-manager' '%s/ape-final' "
+        "'%s/tools' '%s/release' '%s/build/layer-api' '%s/layer-api'; "
+        "printf 'win64\\n' > '%s/fixedpoint/g2/win-x86_64/slice-win-x86_64'; "
+        "printf 'lnxa64\\n' > '%s/fixedpoint/g2/lnx-arm64/entry.elf'; "
+        "printf 'osxx64\\n' > '%s/fixedpoint/g2/osx-x86_64/slice-osx-x86_64'; "
+        "printf 'osxa64\\n' > '%s/fixedpoint/g2/osx-arm64/slice-osx-arm64'; "
+        "printf 'wina64\\n' > '%s/fixedpoint/g2/win-arm64/slice-win-arm64'; "
+        "printf 'cmx64\\n' > '%s/cache-manager/x64'; "
+        "printf 'cmarm64\\n' > '%s/cache-manager/arm64'; "
+        "printf 'func\\tsig_sha\\nf1\\t1111\\n' > '%s/build/layer-api/core.tsv'; "
+        "printf 'pkg\\tapi_sha\\ncore\\t1111\\n' > '%s/build/tlib-packages.tsv'; "
+        "printf 'core\\t1111\\n' > '%s/build/iface-hash.tsv'; "
+        "cp '%s/build/layer-api/core.tsv' '%s/layer-api/core.tsv'; "
+        "cp '%s/build/tlib-packages.tsv' '%s/tlib-packages.tsv'; "
+        "cp '%s/build/iface-hash.tsv' '%s/iface-hash.tsv'; "
+        "printf 'repo\\ttag\\tcommit\\tversion\\tworkflow\\tworkflow_ref\\tci_run_id\\tape\\tape_sha256\\tpackage\\tpackage_sha256\\twin_arm64\\twin_arm64_sha256\\trecord\\trecord_sha256\\tbuild_alias\\tbuild_alias_sha256\\tzip\\tzip_sha256\\tchecksums\\tchecksums_sha256\\n"
+        "org/r\\tv0.1.6\\t1111111111111111111111111111111111111111\\t0.1.6\\tw.yml\\tv0.1.6\\t0\\tunisacc.com\\t0000000000000000000000000000000000000000000000000000000000000000\\tpkg.bin\\t0000000000000000000000000000000000000000000000000000000000000000\\tslice-win-arm64\\t0000000000000000000000000000000000000000000000000000000000000000\\tunisacc.com.build.json\\t0000000000000000000000000000000000000000000000000000000000000000\\tbuild.json\\t0000000000000000000000000000000000000000000000000000000000000000\\t-\\t-\\tSHA256SUMS\\t0000000000000000000000000000000000000000000000000000000000000000\\n' > '%s/release/candidate.tsv'; "
+        ": > '%s/tools/ape-pack.cx'; "
+        "cat > '%s/unisacc.com' << 'EOFUC'\n"
+        "#!/bin/sh\n"
+        "if [ \"$1\" = \"-run\" ]; then\n"
+        "  shift 3\n"
+        "  P4=''; OUT=''; ELF=''\n"
+        "  while [ $# -gt 0 ]; do\n"
+        "    case \"$1\" in\n"
+        "      --cache-manager-osx) shift 3 ;;\n"
+        "      --payload) P4=\"$2\"; shift 2 ;;\n"
+        "      --tool|--need) shift 2 ;;\n"
+        "      --deflate) shift 1 ;;\n"
+        "      --product) shift 3; OUT=\"$1\"; ELF=\"$3\"; shift 7 ;;\n"
+        "      *) shift 1 ;;\n"
+        "    esac\n"
+        "  done\n"
+        "  cat \"$ELF\" \"$P4\" > \"$OUT\"\n"
+        "  chmod +x \"$OUT\"\n"
+        "  exit 0\n"
+        "fi\n"
+        "if [ \"$1\" = \"-b\" ]; then\n"
+        "  OUT=\"$4\"; shift 4\n"
+        "  cat \"$@\" > \"$OUT\"\n"
+        "  exit 0\n"
+        "fi\n"
+        "exit 1\n"
+        "EOFUC\n"
+        "chmod +x '%s/unisacc.com'",
+        chain, chain, chain, chain, chain, chain, chain, chain,
+        repo, repo, repo, base_api,
+        chain, chain, chain, chain, chain, chain, chain,
+        repo, repo, repo,
+        repo, base_api, repo, base_api, repo, base_api,
+        repo, repo, repo, repo);
+    cpr_sh(g_root, cmd, 20, &r); pr_free(&r);
+
+    char p4_base[1024], p4_m1[1024], p4_foreign[1024], p4_badcrc[1024];
+    cx_fmt(p4_base, sizeof p4_base, "%s/ape-final/p3-package.body", chain);
+    cx_fmt(p4_m1, sizeof p4_m1, "%s/p4-m1.body", fx);
+    cx_fmt(p4_foreign, sizeof p4_foreign, "%s/p4-foreign.body", fx);
+    cx_fmt(p4_badcrc, sizeof p4_badcrc, "%s/p4-badcrc.body", fx);
+    write_p4_body(p4_base, "core/net.bin", "NETDATA123", 0, 0);
+    write_p4_body(p4_m1, "core/net.bin", "NETDATA123", "tape/lnx-x86_64/m53.tapeslice", "TAPESLICE1");
+    write_p4_body(p4_foreign, "core/net.bin", "TAMPERED!!", 0, 0);
+    {
+        const char *bad_s = "P 4 1 1 1\nD r s in out 0\nM 1 1 1 0\nAF 12 10 10 0 12345\ncore/net.binNETDATA123";
+        sy_write_atomic(p4_badcrc, bad_s, strlen(bad_s), 0644);
+    }
+
+    /* Assemble 6 real ELF .o files with distinct exported symbols */
+    cx_fmt(cmd, sizeof cmd,
+        "set -e; cd '%s/fixedpoint/g2/lnx-x86_64'; "
+        "mkobj() { printf '.globl %%s\\n%%s:\\n  ret\\n' \"$2\" \"$2\" > \"$1.s\"; /usr/bin/as -o \"$1\" \"$1.s\"; rm -f \"$1.s\"; }; "
+        "mkobj drive.o sym_drive; "
+        "mkobj drivestream.o sym_drivestream_v0; "
+        "mkobj m1.o sym_text_hub; "
+        "mkobj m57.o sym_s1_v0; "
+        "mkobj m59.o cxsa_valid; "
+        "mkobj m60.o sym_m60; "
+        "cat drive.o drivestream.o m1.o m57.o m59.o m60.o > entry.elf; "
+        "cat entry.elf '%s' > '%s/ape-final/unisacc-next.com'; "
+        "printf 'entry-build-v3\\n' > receipt.txt; "
+        "for o in drive.o drivestream.o m1.o m57.o m59.o m60.o entry.elf; do "
+        "  h=$(sha256sum \"$o\" | awk '{print $1}'); b=$(wc -c < \"$o\" | tr -d ' '); "
+        "  printf '%%s\\tsha=%%s\\tbytes=%%s\\tns=1\\tslow_kind=UNMEASURED\\tslow_ns=-1\\tslow_line=-\\tsrc=-\\n' \"$o\" \"$h\" \"$b\" >> receipt.txt; "
+        "done; "
+        "mkobj '%s/drivestream_m1.o' sym_drivestream_m1; "
+        "mkobj '%s/m57_m1.o' cxsa_valid_s1; "
+        "mkobj '%s/drivestream_m1_impl.o' sym_m1_impl; "
+        "mkobj '%s/colliding_drivestream.o' sym_m60",
+        chain, p4_base, chain, fx, fx, fx, fx);
+    cpr_sh(g_root, cmd, 20, &r); pr_free(&r);
+
+    /* 1. Empty-change relink+repack must be byte-equal to baseline APE */
+    cx_fmt(cmd, sizeof cmd,
+        "sh '%s/unisacc.com' '%s/tools/priv-relink.cx' -- "
+        "--chain-dir '%s' --repo '%s' --baseline-layer-api '%s' --out '%s/out-empty.com' && "
+        "cmp -s '%s/out-empty.com' '%s/ape-final/unisacc-next.com' && echo EMPTY_BYTE_EQUAL",
+        g_root, g_root, chain, repo, base_api, fx, fx, chain);
+    cpr_sh(g_root, cmd, 45, &r);
+    ck(r.rc == 0 && cpr_has(&r, "EMPTY_BYTE_EQUAL") &&
+       cpr_has(&r, "6 objects EQUAL") &&
+       cpr_has(&r, "status=PREPARED\tscope=LOCAL"),
+       "empty-change-relink-repack-byte-equal-to-baseline-ape", &r);
+    pr_free(&r);
+
+    /* 2. M1 3-object replace/add + remove m59.o + P4 tape F-record + forbid cxsa_valid succeeds */
+    cx_fmt(cmd, sizeof cmd,
+        "sh '%s/unisacc.com' '%s/tools/priv-relink.cx' -- "
+        "--chain-dir '%s' --repo '%s' --baseline-layer-api '%s' "
+        "--replace 'drivestream.o=%s/drivestream_m1.o' "
+        "--replace 'm57.o=%s/m57_m1.o' "
+        "--add 'drivestream_m1_impl.o=%s/drivestream_m1_impl.o' "
+        "--remove m59.o "
+        "--p4-payload '%s' --allow-m1-tape-keys "
+        "--forbid-sym cxsa_valid "
+        "--out '%s/out-m1-fx.com'",
+        g_root, g_root, chain, repo, base_api, fx, fx, fx, p4_m1, fx);
+    cpr_sh(g_root, cmd, 45, &r);
+    ck(r.rc == 0 && cpr_has(&r, "PRIV_RELINK_OBJECTS\tbaseline=6\tlinked=6\tequal=3\tchanged=2\tadded=1\tremoved=1\tnet_untouched=2") &&
+       cpr_has(&r, "PRIV_RELINK_PROOF\treceipt_objs=OK\tsig_sha=OK\tf_records=OK\telf_syms=OK") &&
+       cpr_has(&r, "status=PREPARED\tscope=LOCAL"),
+       "m1-three-objects-relink-repack-and-proofs-pass", &r);
+    pr_free(&r);
+
+    /* 3. Mutant A (cdx): One extra undeclared changed object MUST REFUSE rc=2 */
+    cx_fmt(cmd, sizeof cmd,
+        "mkdir -p '%s/objs_extra' && cp '%s/fixedpoint/g2/lnx-x86_64'/*.o '%s/objs_extra/' && "
+        "cp '%s/drivestream_m1.o' '%s/objs_extra/drivestream.o' && "
+        "cp '%s/m57_m1.o' '%s/objs_extra/m60.o' && "
+        "sh '%s/unisacc.com' '%s/tools/priv-relink.cx' -- "
+        "--chain-dir '%s' --repo '%s' --baseline-layer-api '%s' "
+        "--objs-dir '%s/objs_extra' --allow-obj drivestream.o "
+        "--out '%s/out-extra-fail.com'",
+        fx, chain, fx, fx, fx, fx, fx, g_root, g_root, chain, repo, base_api, fx, fx);
+    cpr_sh(g_root, cmd, 45, &r);
+    ck(r.rc == 2 && cpr_has(&r, "REFUSE\tPRIV_RELINK\tunexpected-changed-object\tobj=m60.o"),
+       "mut-extra-changed-object-refused-rc2", &r);
+    pr_free(&r);
+
+    /* 4. Mutant B (cdx): sig_sha drift in build/layer-api MUST REFUSE rc=2 */
+    cx_fmt(cmd, sizeof cmd,
+        "printf 'func\\tsig_sha\\nf1\\t9999\\n' > '%s/build/layer-api/core.tsv' && "
+        "sh '%s/unisacc.com' '%s/tools/priv-relink.cx' -- "
+        "--chain-dir '%s' --repo '%s' --baseline-layer-api '%s' "
+        "--out '%s/out-sig-fail.com'",
+        repo, g_root, g_root, chain, repo, base_api, fx);
+    cpr_sh(g_root, cmd, 45, &r);
+    ck(r.rc == 2 && cpr_has(&r, "REFUSE\tPRIV_RELINK\tsig-sha-drift"),
+       "mut-sig-sha-drift-refused-rc2", &r);
+    pr_free(&r);
+    cx_fmt(cmd, sizeof cmd, "cp '%s/layer-api/core.tsv' '%s/build/layer-api/core.tsv'", base_api, repo);
+    cpr_sh(g_root, cmd, 10, &r); pr_free(&r);
+
+    /* 5. Mutant C (cdx): Foreign P4 F-record modification or bad CRC32 MUST REFUSE rc=2 */
+    cx_fmt(cmd, sizeof cmd,
+        "sh '%s/unisacc.com' '%s/tools/priv-relink.cx' -- "
+        "--chain-dir '%s' --repo '%s' --baseline-layer-api '%s' "
+        "--p4-payload '%s' --allow-m1-tape-keys "
+        "--out '%s/out-f-fail.com'",
+        g_root, g_root, chain, repo, base_api, p4_foreign, fx);
+    cpr_sh(g_root, cmd, 45, &r);
+    ck(r.rc == 2 && cpr_has(&r, "REFUSE\tPRIV_RELINK\tforeign-f-record-drift") && cpr_has(&r, "core/net.bin"),
+       "mut-foreign-f-record-change-refused-rc2", &r);
+    pr_free(&r);
+
+    cx_fmt(cmd, sizeof cmd,
+        "sh '%s/unisacc.com' '%s/tools/priv-relink.cx' -- "
+        "--chain-dir '%s' --repo '%s' --baseline-layer-api '%s' "
+        "--p4-payload '%s' --allow-f-key core/net.bin "
+        "--out '%s/out-crc-fail.com'",
+        g_root, g_root, chain, repo, base_api, p4_badcrc, fx);
+    cpr_sh(g_root, cmd, 45, &r);
+    ck(r.rc == 2 && cpr_has(&r, "REFUSE\tPRIV_RELINK\tforeign-f-record-drift") && cpr_has(&r, "crc-mismatch"),
+       "mut-f-record-bad-crc32-refused-rc2", &r);
+    pr_free(&r);
+
+    /* 6. Mutant D: Hub unit change (m1.o / text) without --allow-hub MUST REFUSE rc=2 */
+    cx_fmt(cmd, sizeof cmd,
+        "sh '%s/unisacc.com' '%s/tools/priv-relink.cx' -- "
+        "--chain-dir '%s' --repo '%s' --baseline-layer-api '%s' "
+        "--replace 'm1.o=%s/drivestream_m1.o' "
+        "--out '%s/out-hub-fail.com'",
+        g_root, g_root, chain, repo, base_api, fx, fx);
+    cpr_sh(g_root, cmd, 45, &r);
+    ck(r.rc == 2 && cpr_has(&r, "REFUSE\tPRIV_RELINK\thub-unit-requires-full-chain\tobj=m1.o hub=text"),
+       "mut-hub-unit-change-refused-rc2", &r);
+    pr_free(&r);
+
+    /* 7. Mutant E: Symbol diff colliding with untouched unit (drivestream redefining sym_m60) MUST REFUSE rc=2 */
+    cx_fmt(cmd, sizeof cmd,
+        "sh '%s/unisacc.com' '%s/tools/priv-relink.cx' -- "
+        "--chain-dir '%s' --repo '%s' --baseline-layer-api '%s' "
+        "--replace 'drivestream.o=%s/colliding_drivestream.o' "
+        "--out '%s/out-sym-fail.com'",
+        g_root, g_root, chain, repo, base_api, fx, fx);
+    cpr_sh(g_root, cmd, 45, &r);
+    ck(r.rc == 2 && cpr_has(&r, "REFUSE\tPRIV_RELINK\tsymbol-diff-outside-unit\tsym=sym_m60"),
+       "mut-symbol-collision-with-untouched-unit-refused-rc2", &r);
+    pr_free(&r);
+
+    /* 8. Mutant F: Forbidden symbol (cxsa_valid still present when m59.o not removed) MUST REFUSE rc=2 */
+    cx_fmt(cmd, sizeof cmd,
+        "sh '%s/unisacc.com' '%s/tools/priv-relink.cx' -- "
+        "--chain-dir '%s' --repo '%s' --baseline-layer-api '%s' "
+        "--forbid-sym cxsa_valid "
+        "--out '%s/out-forbid-fail.com'",
+        g_root, g_root, chain, repo, base_api, fx);
+    cpr_sh(g_root, cmd, 45, &r);
+    ck(r.rc == 2 && cpr_has(&r, "REFUSE\tPRIV_RELINK\tforbidden-symbol-present\tsym=cxsa_valid present-in=m59.o"),
+       "mut-forbidden-symbol-cxsa-valid-refused-rc2", &r);
+    pr_free(&r);
+
+    fsx_scratch_drop(sc);
+    sy_printf("CHECK_PRIV_RELINK\tpassed=%d\tfailed=%d\n", g_pass, g_fail);
+    return g_fail ? 1 : 0;
+}
