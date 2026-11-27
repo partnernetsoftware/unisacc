@@ -37,6 +37,10 @@ enum {
     V10_UNIT_SHARDS = 4
 };
 
+#define V10_FIXA_MANIFEST_SHA "13b3b8511e36350ec13a65beac69fcd1b4b3c89f0694da7c3687018742281ee1"
+#define V10_FIXA_MANIFEST_INPUT_SHA "bd0224e0494f3e8056095b63f31ac1a8b547d826fefb46800880dc9354ef8df0"
+#define V10_FIXA_BUILTIN_INPUT_SHA "364ea76b2a396f702b76c3648329f0a5cf945e0c25e8bd12adb2563317ce0d07"
+
 static int g_pass = 0;
 static int g_fail = 0;
 static int g_quiet_rec = 0;
@@ -53,7 +57,7 @@ static void v10_rec(int ok, const char *name, const char *detail) {
     }
 }
 
-/* Minimal M1 8-slot (mask <= 383) tl_dce driver matching tools/check-tape-tldce-speed.cx. */
+/* Minimal M1 8-slot (mask <= 383) tl_dce driver matching tools/check-tape-tldce-speed.cx (tl_bind_span). */
 static const char V10_TLDCE_DRIVER_SRC[] =
     "#pragma unisa use compiler.tapelink\n"
     "#pragma unisa use sys.fs\n"
@@ -63,16 +67,25 @@ static const char V10_TLDCE_DRIVER_SRC[] =
     "static unsigned char *g_ob = 0;\n"
     "static long g_on = 0;\n"
     "static long g_ocap = 0;\n"
-    "static int d_emit(int c) {\n"
-    "    if (g_on >= g_ocap) {\n"
-    "        long nc = g_ocap > 0 ? g_ocap * 2 : 1048576;\n"
+    "static int d_emit_span(const char *s, int n) {\n"
+    "    if (n <= 0) return 0;\n"
+    "    if (!s || (long)n > 0x3fffffffL - g_on) return 1;\n"
+    "    if (g_on + (long)n > g_ocap) {\n"
+    "        long need = g_on + (long)n;\n"
+    "        long nc = g_ocap > 0 ? g_ocap : 1048576L;\n"
+    "        while (nc < need) {\n"
+    "            if (nc > 0x3fffffffL / 2L) { nc = 0x3fffffffL; break; }\n"
+    "            nc *= 2L;\n"
+    "        }\n"
+    "        if (nc < need) return 1;\n"
     "        unsigned char *nb = (unsigned char *)mm_alloc(nc);\n"
     "        if (!nb) return 1;\n"
-    "        if (g_ob && g_on > 0) (void)mm_copy(nb, nc, g_ob, g_on);\n"
+    "        if (g_ob && g_on > 0 && mm_copy(nb, nc, g_ob, g_on) != 0) { mm_free(nb); return 1; }\n"
     "        if (g_ob) mm_free(g_ob);\n"
     "        g_ob = nb; g_ocap = nc;\n"
     "    }\n"
-    "    g_ob[g_on++] = (unsigned char)(c & 255);\n"
+    "    if (mm_copy(g_ob + g_on, g_ocap - g_on, s, (long)n) != 0) return 1;\n"
+    "    g_on += (long)n;\n"
     "    return 0;\n"
     "}\n"
     "static int d_die(char *m) {\n"
@@ -104,7 +117,7 @@ static const char V10_TLDCE_DRIVER_SRC[] =
     "int main(int argc, char **argv) {\n"
     "    if (argc < 3) return 2;\n"
     "    const char *out_path = argv[1];\n"
-    "    if (tl_bind(d_emit, d_die) || tl_begin()) return 3;\n"
+    "    if (tl_bind_span(d_emit_span, d_die) || tl_begin()) return 3;\n"
     "    int u = 0;\n"
     "    for (int i = 2; i < argc; i++) {\n"
     "        unsigned char *b = 0; long bn = 0, tl = 0;\n"
@@ -120,7 +133,7 @@ static const char V10_TLDCE_DRIVER_SRC[] =
     "    if (tl_check_undef() != 0) return 7;\n"
     "    if (tl_entry_missing() != 0) return 8;\n"
     "    if (tl_dce_cut() <= 0) return 11;\n"
-    "    tl_finish(u);\n"
+    "    if (tl_finish(u) != 0) return 13;\n"
     "    int fd = sy_open(out_path, O_WRONLY, 0);\n"
     "    if (fd < 0) return 9;\n"
     "    if (g_on > 0 && sy_write_all(fd, g_ob, g_on) != 0) { sy_close(fd); return 10; }\n"
@@ -304,8 +317,28 @@ static int v10_units_ok(int expected_units, int ran_units) {
     return expected_units >= V10_MIN_TIER102_UNITS && ran_units == expected_units;
 }
 
+static int v10_is_fixa_input_sha(const char *s) {
+    return s && (tx_eqz(s, V10_FIXA_BUILTIN_INPUT_SHA) || tx_eqz(s, V10_FIXA_MANIFEST_INPUT_SHA));
+}
+
+static int v10_tape_frame_ok(const char *obuf, unsigned long long *st_out, unsigned long long *ec_out,
+                             unsigned long long *stp_out, unsigned long long *a2_out) {
+    char line[512];
+    unsigned long long st = 99ull, ec = 99ull, stp = 0ull, a2u = 0ull;
+    int ok = (v10_find_line(obuf, "TAPEMODE_RUN\t", line, sizeof line) == 0 &&
+              v10_line_kv_u64(line, "status", &st) == 0 && st == 0ull &&
+              v10_line_kv_u64(line, "exit_code", &ec) == 0 && ec == 0ull &&
+              v10_line_kv_u64(line, "steps", &stp) == 0 && stp > 0ull &&
+              v10_line_kv_u64(line, "a2_used", &a2u) == 0 && a2u == 1ull);
+    if (st_out) *st_out = st;
+    if (ec_out) *ec_out = ec;
+    if (stp_out) *stp_out = stp;
+    if (a2_out) *a2_out = a2u;
+    return ok;
+}
+
 static void v10_harness_sha(char sha_out[65]) {
-    const char *tag = ";native=-O2;tape=-target=lnx/x86_64\n";
+    const char *tag = ";native=-O2;tape=-target=lnx/x86_64;run=-O2\n";
     size_t sl = strlen(V10_TLDCE_DRIVER_SRC), tl = strlen(tag);
     char *buf = (char *)mm_alloc((long)(sl + tl + 1));
     if (!buf) { mm_fill(sha_out, 65, '0', 64); sha_out[64] = 0; return; }
@@ -433,9 +466,9 @@ static int v10_load_frozen_baseline(const char *path, const char *expect_cand_sh
             cx_fmt(why, (int)wcap, "baseline-candidate-identity-mismatch");
             return -2;
         }
-        if (!tx_eqz(isha, expect_input_sha)) {
+        if (!tx_eqz(isha, expect_input_sha) || !v10_is_fixa_input_sha(isha)) {
             mm_free(b);
-            cx_fmt(why, (int)wcap, "baseline-input-identity-mismatch");
+            cx_fmt(why, (int)wcap, tx_eqz(isha, expect_input_sha) ? "baseline-input-not-fixa" : "baseline-input-identity-mismatch");
             return -3;
         }
         if (!tx_eqz(hsha, expect_harness_sha)) {
@@ -625,9 +658,9 @@ static void v10_resolve_shard_tool(const char *root, const char *explicit_tool, 
     }
 }
 
-static void v10_check_c1(const char *root, const char *cand_ape, const char *cand_sha,
-                         const char *t16_dir, const char *t16_man, const char *frozen_path,
-                         const char *write_frozen, int reps, int max_load_x100) {
+static void v10_check_c1_impl(const char *root, const char *cand_ape, const char *cand_sha,
+                              const char *t16_dir, const char *t16_man, const char *frozen_path,
+                              const char *write_frozen, int reps, int max_load_x100, int pin_fixa) {
     char tmp[V10_PW], detail[512], input_sha[65], harness_sha[65];
     if (sy_mkdtemp("/tmp", "check-v0110", tmp, sizeof tmp) != 0) {
         v10_rec(0, "c1-tier16-speed-15x", "mkdtemp-failed");
@@ -637,6 +670,15 @@ static void v10_check_c1(const char *root, const char *cand_ape, const char *can
     int nobjs = 0, bad_m = 0;
     const char *man_used = 0;
     if (t16_man && t16_man[0]) {
+        if (pin_fixa) {
+            char msha[65];
+            if (v10_sha_bytes(t16_man, msha, 0) != 0 || !tx_eqz(msha, V10_FIXA_MANIFEST_SHA)) {
+                cx_fmt(detail, sizeof detail, "REFUSE c1-input-not-fixa manifest_sha=%.12s want=13b3b8511e36", msha);
+                (void)sy_remove_all(tmp);
+                v10_rec(0, "c1-tier16-speed-15x", detail);
+                return;
+            }
+        }
         nobjs = v10_load_manifest(t16_man, t16_dir, objs, &bad_m);
         if (nobjs != 16 || bad_m != 0) {
             (void)sy_remove_all(tmp);
@@ -658,6 +700,15 @@ static void v10_check_c1(const char *root, const char *cand_ape, const char *can
         (void)sy_remove_all(tmp);
         v10_rec(0, "c1-tier16-speed-15x", "input-set-hash-failed");
         return;
+    }
+    if (pin_fixa) {
+        const char *want_in = man_used ? V10_FIXA_MANIFEST_INPUT_SHA : V10_FIXA_BUILTIN_INPUT_SHA;
+        if (!tx_eqz(input_sha, want_in)) {
+            cx_fmt(detail, sizeof detail, "REFUSE c1-input-not-fixa input=%.12s want=%.12s", input_sha, want_in);
+            (void)sy_remove_all(tmp);
+            v10_rec(0, "c1-tier16-speed-15x", detail);
+            return;
+        }
     }
     v10_harness_sha(harness_sha);
 
@@ -703,7 +754,7 @@ static void v10_check_c1(const char *root, const char *cand_ape, const char *can
     char *av1[] = {"sh", (char *)cand_ape, drv_cx, "-o", drv_nat, 0};
     char *av2[] = {"sh", (char *)cand_ape, "--target", "lnx/x86_64", "-S", drv_cx, "-o", drv_tape, 0};
     char *av3[] = {"sh", (char *)cand_ape, "tools/tapepack.cx", "--", drv_tape, "-o", drv_slice, 0};
-    char *av4[] = {"sh", (char *)cand_ape, "tools/tapemode-run.cx", "-o", run_bin, 0};
+    char *av4[] = {"sh", (char *)cand_ape, "-O2", "tools/tapemode-run.cx", "-o", run_bin, 0};
     const char *cc_bin = (sy_exists("/usr/bin/cc") == 1) ? "/usr/bin/cc" : "cc";
     char *av5[] = {(char *)cc_bin, "-shared", "-fPIC", "-O2", "-o", so_path,
                    "tools/tape/asm/tape_x86_64.S", "tools/tape/asm/hoststub_lnx_x86_64.S", 0};
@@ -785,6 +836,9 @@ static void v10_check_c1(const char *root, const char *cand_ape, const char *can
                 v10_rec(0, "c1-tier16-speed-15x", "native-repeat-failed");
                 return;
             }
+            char rep_l1[32] = "-";
+            (void)v10_read_load1_x100(rep_l1);
+            if (!g_quiet_rec) sy_printf("V0110_NATIVE_RUN\ti=%d\tms=%.3f\tload1=%s\n", r + 1, (double)nat_ns[r] / 1e6, rep_l1);
             (void)sy_unlink(nop);
         }
         int64_t sorted_ns[V10_MAX_REPS];
@@ -835,15 +889,12 @@ static void v10_check_c1(const char *root, const char *cand_ape, const char *can
         return;
     }
     int trc = 0;
-    if (v10_run_cmd(tav, root, 20, &trc, &wns, obuf, sizeof obuf, 0, 0, 0) != 0 || trc != 0) {
-        unsigned long long st = 99ull, ec = 99ull;
-        if (v10_find_line(obuf, "TAPEMODE_RUN\t", line, sizeof line) == 0) {
-            (void)v10_line_kv_u64(line, "status", &st);
-            (void)v10_line_kv_u64(line, "exit_code", &ec);
-        }
+    unsigned long long wst = 99ull, wec = 99ull, wstp = 0ull, wa2 = 0ull;
+    if (v10_run_cmd(tav, root, 20, &trc, &wns, obuf, sizeof obuf, 0, 0, 0) != 0 || trc != 0 ||
+        !v10_tape_frame_ok(obuf, &wst, &wec, &wstp, &wa2)) {
         cx_fmt(detail, sizeof detail,
-               "reps=%d cand_sha=%.12s baseline=%s nat_med_ms=%.3f tape_warmup=FAIL rc=%d status=%llu exit_code=%llu load1=%s",
-               reps, cand_sha, base_mode, (double)nat_med_ns / 1e6, trc, st, ec, l1_start);
+               "reps=%d cand_sha=%.12s baseline=%s nat_med_ms=%.3f tape_warmup=FAIL rc=%d status=%llu exit_code=%llu a2_used=%llu load1=%s",
+               reps, cand_sha, base_mode, (double)nat_med_ns / 1e6, trc, wst, wec, wa2, l1_start);
         (void)sy_remove_all(tmp);
         v10_rec(0, "c1-tier16-speed-15x", detail);
         return;
@@ -862,22 +913,25 @@ static void v10_check_c1(const char *root, const char *cand_ape, const char *can
         }
         tav[out_arg_idx] = tout;
         int tr = v10_run_cmd(tav, root, 20, &trc, &tape_ns[r], obuf, sizeof obuf, 0, 0, 0);
-        unsigned long long st = 99ull, ec = 99ull, stp = 0, tcut = 0, tu = 0;
-        int frame_ok = (v10_find_line(obuf, "TAPEMODE_RUN\t", line, sizeof line) == 0 &&
-                        v10_line_kv_u64(line, "status", &st) == 0 && st == 0ull &&
-                        v10_line_kv_u64(line, "exit_code", &ec) == 0 && ec == 0ull &&
-                        v10_line_kv_u64(line, "steps", &stp) == 0 && stp > 0ull);
+        unsigned long long st = 99ull, ec = 99ull, stp = 0, a2u = 0, tcut = 0, tu = 0;
+        int frame_ok = v10_tape_frame_ok(obuf, &st, &ec, &stp, &a2u);
         int drv_ok = (v10_find_line(obuf, "TLDCE_DRIVER\t", line, sizeof line) == 0 &&
                       v10_line_kv_u64(line, "units", &tu) == 0 && tu == 16ull &&
                       v10_line_kv_u64(line, "dce_cut", &tcut) == 0 && tcut == ref_cut);
+        char rep_l1[32] = "-";
+        (void)v10_read_load1_x100(rep_l1);
         if (tr != 0 || trc != 0 || !frame_ok || !drv_ok || !v10_files_eq(ref_out, tout)) {
             cmp_all = 0;
             cx_fmt(detail, sizeof detail,
-                   "reps=%d cand_sha=%.12s baseline=%s nat_med_ms=%.3f tape_rep=%d rc=%d status=%llu cmp_ok=0 load1=%s",
-                   reps, cand_sha, base_mode, (double)nat_med_ns / 1e6, r + 1, trc, st, l1_start);
+                   "reps=%d cand_sha=%.12s baseline=%s nat_med_ms=%.3f tape_rep=%d rc=%d status=%llu a2_used=%llu cmp_ok=0 load1=%s",
+                   reps, cand_sha, base_mode, (double)nat_med_ns / 1e6, r + 1, trc, st, a2u, rep_l1);
             (void)sy_remove_all(tmp);
             v10_rec(0, "c1-tier16-speed-15x", detail);
             return;
+        }
+        if (!g_quiet_rec) {
+            sy_printf("V0110_TAPE_RUN\ti=%d\tms=%.3f\tsteps=%llu\ta2_used=%llu\tcmp=MATCH\tload1=%s\n",
+                      r + 1, (double)tape_ns[r] / 1e6, stp, a2u, rep_l1);
         }
         (void)sy_unlink(tout);
     }
@@ -1200,7 +1254,7 @@ static int v10_self_test(const char *root) {
         char fpath[V10_PW], s1[65], s2[65], i1[65], i2[65], h1[65], h2[65], row[512], why[128];
         mm_fill(s1, 65, 'a', 64); s1[64] = 0;
         mm_fill(s2, 65, 'b', 64); s2[64] = 0;
-        mm_fill(i1, 65, 'c', 64); i1[64] = 0;
+        cx_fmt(i1, sizeof i1, "%s", V10_FIXA_BUILTIN_INPUT_SHA);
         mm_fill(i2, 65, 'd', 64); i2[64] = 0;
         mm_fill(h1, 65, 'e', 64); h1[64] = 0;
         mm_fill(h2, 65, 'f', 64); h2[64] = 0;
@@ -1408,13 +1462,33 @@ static int v10_self_test(const char *root) {
             int sp = g_pass, sf = g_fail;
             g_quiet_rec = 1;
             g_pass = 0; g_fail = 0;
-            v10_check_c1(root, unis, unis, nd_dir, nd_man, 0, 0, V10_GATE_REPS, 100000);
+            v10_check_c1_impl(root, unis, unis, nd_dir, nd_man, 0, 0, V10_GATE_REPS, 100000, 0);
             nd_ok = (g_fail == 1 && strstr(g_last_detail, "REFUSE input-no-dead-extern rc=11") != 0 &&
                      strstr(g_last_detail, "native-warmup-failed") == 0);
             g_quiet_rec = 0;
             g_pass = sp; g_fail = sf;
         }
         v10_rec(nd_ok, "selftest.item5-tier16-no-dead-extern-refusal", "rc11-named-input-refusal");
+
+        /* Item (6) red-first: require a2_used=1 (mutations killed), tl_bind_span in driver, and FixA manifest pin. */
+        {
+            unsigned long long st = 0, ec = 0, stp = 0, a2u = 0;
+            int a2_pos = v10_tape_frame_ok("TAPEMODE_RUN\tstatus=0\texit_code=0\tsteps=100\ta2_used=1\ta2_slots=4\n", &st, &ec, &stp, &a2u);
+            int a2_zero = !v10_tape_frame_ok("TAPEMODE_RUN\tstatus=0\texit_code=0\tsteps=100\ta2_used=0\ta2_slots=0\n", &st, &ec, &stp, &a2u);
+            int a2_miss = !v10_tape_frame_ok("TAPEMODE_RUN\tstatus=0\texit_code=0\tsteps=100\n", &st, &ec, &stp, &a2u);
+            int a2_badst = !v10_tape_frame_ok("TAPEMODE_RUN\tstatus=1\texit_code=0\tsteps=100\ta2_used=1\n", &st, &ec, &stp, &a2u);
+            int span_ok = (strstr(V10_TLDCE_DRIVER_SRC, "tl_bind_span(d_emit_span, d_die)") != 0 &&
+                           strstr(V10_TLDCE_DRIVER_SRC, "tl_bind(") == 0);
+            int sp = g_pass, sf = g_fail;
+            g_quiet_rec = 1;
+            g_pass = 0; g_fail = 0;
+            v10_check_c1_impl(root, unis, unis, nd_dir, nd_man, 0, 0, V10_GATE_REPS, 100000, 1);
+            int fixa_refused = (g_fail == 1 && strstr(g_last_detail, "REFUSE c1-input-not-fixa") != 0);
+            g_quiet_rec = 0;
+            g_pass = sp; g_fail = sf;
+            v10_rec(a2_pos && a2_zero && a2_miss && a2_badst && span_ok && fixa_refused,
+                    "selftest.item6-fixa-pin-span-and-a2-required", "tl_bind_span+a2_used=1+fixa-refusal");
+        }
     }
 
     (void)sy_remove_all(pat);
@@ -1501,7 +1575,7 @@ int main(int argc, char **argv) {
     }
 
     v10_resolve_shard_tool(root, shard_tool, shard_path);
-    v10_check_c1(root, prod_ape, cand_sha, t16_dir, t16_man, frozen_path, write_frozen, reps, max_load_x100);
+    v10_check_c1_impl(root, prod_ape, cand_sha, t16_dir, t16_man, frozen_path, write_frozen, reps, max_load_x100, 1);
     v10_check_c2_c3(root, prod_ape, shard_path, chain_dir, t102_dir, t102_man);
 
     sy_printf("CHECK_V0110_EXIT\tverdict=%s\tcandidate_sha=%.12s\tpassed=%d\tfailed=%d\n",
