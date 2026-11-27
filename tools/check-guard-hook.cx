@@ -700,10 +700,17 @@ static int scg_expect_json(char **cmd, const char *dir, const char *owner, int f
 }
 
 static void check_shared_checkout_guard(char **cmd, const char *dir) {
-    /* Red-first: non-cc owner writing tools/ratchets.cx in the shared checkout must be refused and print own worktree path */
+    char wsym_dir[1200], wsym_lnk[1200];
+    if (cx_fmt(wsym_dir, sizeof wsym_dir, "%s/.claude/worktrees/w-omp-grk", T) == 0 &&
+        cx_fmt(wsym_lnk, sizeof wsym_lnk, "%s/sym-shared-tools", wsym_dir) == 0) {
+        sy_mkdir_all(wsym_dir, 0755);
+        sy_unlink(wsym_lnk);
+        sy_symlink("/r/repo/tools", wsym_lnk);
+    }
+    /* Red-first (A)+(B)+(C)+(D): non-cc owner writing in shared checkout must fail closed with accident-guard threat model note */
     ck_sgm(scg_expect_json(cmd, dir, "omp-grk", 0,
            "{\"tool_name\":\"Bash\",\"tool_input\":{\"command\":\"sh ./unisacc.com tools/devsvc.cx -- f write tools/ratchets.cx --from /tmp/x\"},\"cwd\":\"/r/repo\"}",
-           2, "/r/repo/.claude/worktrees/w-omp-grk"),
+           2, "协作窗口防误操作守卫,调用方自报 DEVSVC_OWNER=omp-grk,非身份认证"),
            "scg-non-cc-devsvc-f-write-ratchets-shared-red");
     ck_sgm(scg_expect_json(cmd, dir, "omp-grk", 0,
            "{\"tool_name\":\"Bash\",\"tool_input\":{\"command\":\"sh ./unisacc.com tools/devsvc.cx -- f edit /r/repo/tools/precommit.cx --old-file /tmp/a --new-file /tmp/b\"},\"cwd\":\"/r/repo\"}",
@@ -717,6 +724,52 @@ static void check_shared_checkout_guard(char **cmd, const char *dir) {
            "{\"tool_name\":\"Bash\",\"tool_input\":{\"command\":\"sh ./unisacc.com tools/devsvc.cx -- f write .claude/worktrees/w-other/tools/ratchets.cx --from /tmp/x\"},\"cwd\":\"/r/repo\"}",
            2, "/r/repo/.claude/worktrees/w-omp-grk"),
            "scg-non-cc-other-wtree-devsvc-f-write-red");
+    /* (D) non-cc write to version tree v0.1.8 refused */
+    ck_sgm(scg_expect_json(cmd, dir, "omp-grk", 0,
+           "{\"tool_name\":\"Bash\",\"tool_input\":{\"command\":\"sh ./unisacc.com tools/devsvc.cx -- f write .claude/worktrees/v0.1.8/tools/ratchets.cx --from /tmp/x\"},\"cwd\":\"/r/repo\"}",
+           2, "/r/repo/.claude/worktrees/w-omp-grk"),
+           "scg-non-cc-version-wtree-devsvc-f-write-red");
+    /* (B) .. segments, symlink + .., symlink + not-yet-existing file, unresolvable $VAR / stripped quote -> fail closed */
+    ck_sgm(scg_expect_json(cmd, dir, "omp-grk", 0,
+           "{\"tool_name\":\"Bash\",\"tool_input\":{\"command\":\"sh ./unisacc.com tools/devsvc.cx -- f write .claude/worktrees/w-omp-grk/../../tools/not-yet-existing.cx --from /tmp/x\"},\"cwd\":\"/r/repo\"}",
+           2, "/r/repo/.claude/worktrees/w-omp-grk"),
+           "scg-non-cc-dotdot-not-yet-existing-red");
+    {
+        char jbuf[1600];
+        if (cx_fmt(jbuf, sizeof jbuf,
+                   "{\"tool_name\":\"Bash\",\"tool_input\":{\"command\":\"sh ./unisacc.com tools/devsvc.cx -- f write %s/../ratchets.cx --from /tmp/x\"},\"cwd\":\"/r/repo/.claude/worktrees/w-omp-grk\"}",
+                   wsym_lnk) == 0) {
+            ck_sgm(scg_expect_json(cmd, dir, "omp-grk", 0, jbuf, 2, "/r/repo/.claude/worktrees/w-omp-grk"),
+                   "scg-non-cc-symlink-dotdot-escape-red");
+        }
+        if (cx_fmt(jbuf, sizeof jbuf,
+                   "{\"tool_name\":\"Bash\",\"tool_input\":{\"command\":\"sh ./unisacc.com tools/devsvc.cx -- f write %s/lnk/tools/not-yet-existing.cx --from /tmp/x\"},\"cwd\":\"/r/repo/.claude/worktrees/w-omp-grk\"}",
+                   T) == 0) {
+            ck_sgm(scg_expect_json(cmd, dir, "omp-grk", 0, jbuf, 2, "/r/repo/.claude/worktrees/w-omp-grk"),
+                   "scg-non-cc-symlink-not-yet-existing-red");
+        }
+    }
+    ck_sgm(scg_expect_json(cmd, dir, "omp-grk", 0,
+           "{\"tool_name\":\"Bash\",\"tool_input\":{\"command\":\"sh ./unisacc.com tools/devsvc.cx -- f write $UNRESOLVED_TARGET --from /tmp/x\"},\"cwd\":\"/r/repo\"}",
+           2, "协作窗口防误操作守卫"),
+           "scg-non-cc-unresolved-var-fail-closed-red");
+    ck_sgm(scg_expect_json(cmd, dir, "omp-grk", 0,
+           "{\"tool_name\":\"Bash\",\"tool_input\":{\"command\":\"sh ./unisacc.com tools/devsvc.cx -- f write \\\"$UNRESOLVED_TARGET\\\" --from /tmp/x\"},\"cwd\":\"/r/repo\"}",
+           2, "协作窗口防误操作守卫"),
+           "scg-non-cc-quoted-var-fail-closed-red");
+    /* (C) additional entry points: doc mermaid and git commit in shared checkout */
+    ck_sgm(scg_expect_json(cmd, dir, "omp-grk", 0,
+           "{\"tool_name\":\"Bash\",\"tool_input\":{\"command\":\"sh ./unisacc.com tools/devsvc.cx -- doc mermaid prd.md S old=a new=b\"},\"cwd\":\"/r/repo\"}",
+           2, "/r/repo/.claude/worktrees/w-omp-grk"),
+           "scg-non-cc-doc-mermaid-shared-red");
+    ck_sgm(scg_expect_json(cmd, dir, "omp-grk", 0,
+           "{\"tool_name\":\"Bash\",\"tool_input\":{\"command\":\"sh ./unisacc.com tools/devsvc.cx -- git commit -m msg --whole tools/ratchets.cx\"},\"cwd\":\"/r/repo\"}",
+           2, "/r/repo/.claude/worktrees/w-omp-grk"),
+           "scg-non-cc-git-commit-shared-red");
+    ck_sgm(scg_expect_json(cmd, dir, "omp-grk", 0,
+           "{\"tool_name\":\"Bash\",\"tool_input\":{\"command\":\"sh ./unisacc.com tools/devsvc.cx -- git commit -m msg --whole tools/ratchets.cx\"},\"cwd\":\"/r/repo/.claude/worktrees/w-omp-grk\"}",
+           0, ""),
+           "scg-non-cc-git-commit-own-wtree-green");
     ck_sgm(scg_expect_json(cmd, dir, "omp-grk", 0,
            "{\"tool_name\":\"Bash\",\"tool_input\":{\"command\":\"sh ./unisacc.com tools/devsvc.cx -- f write tools/ratchets.cx --from /tmp/x\"},\"cwd\":\"/r/repo/.claude/worktrees/w-omp-grk\"}",
            0, ""),
@@ -725,6 +778,10 @@ static void check_shared_checkout_guard(char **cmd, const char *dir) {
            "{\"tool_name\":\"Bash\",\"tool_input\":{\"command\":\"sh ./unisacc.com tools/devsvc.cx -- f edit /r/repo/.claude/worktrees/w-omp-grk/tools/ratchets.cx --old-file /tmp/a --new-file /tmp/b\"},\"cwd\":\"/r/repo\"}",
            0, ""),
            "scg-non-cc-own-wtree-abs-f-edit-green");
+    ck_sgm(scg_expect_json(cmd, dir, "omp-grk", 0,
+           "{\"tool_name\":\"Bash\",\"tool_input\":{\"command\":\"sh ./unisacc.com tools/devsvc.cx -- f write /tmp/ext-allowed.txt --from /tmp/x\"},\"cwd\":\"/r/repo\"}",
+           0, ""),
+           "scg-non-cc-external-tmp-f-write-green");
     ck_sgm(scg_expect_json(cmd, dir, "cc", 0,
            "{\"tool_name\":\"Bash\",\"tool_input\":{\"command\":\"sh ./unisacc.com tools/devsvc.cx -- f write tools/ratchets.cx --from /tmp/x\"},\"cwd\":\"/r/repo\"}",
            0, ""),

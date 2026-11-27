@@ -311,22 +311,69 @@ static char *resolve_window_wtree(const char *ow_raw, const char *cur, char **hi
     }
     return 0;
 }
+/* 共享检出防误操作写守卫(威胁模型:防止协作窗口误写共享检出或非本窗口工作树,非对抗边界;
+ * 调用方自报的 DEVSVC_OWNER 仅作协作窗口路由标识,不作身份认证;
+ * 闭锁原则:目标路径含相对路径、.. 段、符号链接、尚不存在的文件或未展开变量时,先按父目录 realpath 语义逐段展开符号链接再接叶节点;
+ * 一旦目标无法可靠静态解析或落在共享根下且不在本窗口自己的 .claude/worktrees/w-<owner> 下,对非 cc 调用方一律闭锁拒绝) */
+static char *canon_strict(const char *base, const char *p) {
+    char *raw = (p[0] == '/') ? sdup(p) : cat2(cat2(base, "/"), p);
+    char *rest = raw, *done = sdup(""); int hops = 0;
+    while (*rest) {
+        long i = 0, s, e; char *seg, *cand, buf[4096]; sy_stat_t st; int lrc;
+        while (rest[i] == '/') i++;
+        s = i; while (rest[i] && rest[i] != '/') i++; e = i;
+        if (e == s) break;
+        seg = dupn(rest + s, e - s);
+        rest = sdup(rest + e);
+        if (eq(seg, ".")) continue;
+        if (eq(seg, "..")) {
+            long dl = sl(done);
+            while (dl > 0 && done[dl - 1] != '/') dl--;
+            if (dl > 0) dl--;
+            done = dupn(done, dl);
+            continue;
+        }
+        cand = cat2(cat2(done, "/"), seg);
+        lrc = sy_lstat(cand, &st);
+        if (lrc == 0 && st.kind == 'l') {
+            long n;
+            if (hops >= 40) return 0;
+            n = sy_readlink(cand, buf, sizeof buf - 1);
+            if (n <= 0) return 0;
+            buf[n] = 0; hops++;
+            rest = (buf[0] == '/') ? cat2(buf, rest) : cat2(cat2(*done ? done : "/", "/"), cat2(buf, rest));
+            done = sdup("");
+            continue;
+        }
+        done = cand;
+    }
+    return *done ? done : sdup("/");
+}
+static char *shared_checkout_refuse_msg(const char *ow_raw, const char *hint_wt) {
+    char *ow_n = norm_ow_str(ow_raw);
+    return fmt("共享检出写保护(协作窗口防误操作守卫,调用方自报 DEVSVC_OWNER=%s,非身份认证):非集成者不得写共享检出或非本窗口工作树,请在本窗口工作树 %s 内修改",
+               *ow_n ? ow_n : "unset", hint_wt ? hint_wt : ".claude/worktrees/w-<DEVSVC_OWNER>");
+}
 static char *shared_checkout_write_bad(const char *raw_path, const char *cur, const char *flow_root, const char *ow_raw) {
-    char *p, *base, *abs_p, *can_p, *own_wt, *hint_wt = 0, *ow_n;
-    if (!raw_path || !*raw_path) return 0;
+    char *p, *base, *can_p, *own_wt, *hint_wt = 0;
     if (owner_is_cc(ow_raw)) return 0;
+    own_wt = resolve_window_wtree(ow_raw, cur, &hint_wt);
+    if (!raw_path || !*raw_path) return shared_checkout_refuse_msg(ow_raw, hint_wt);
     p = repl_home(strip_q(raw_path));
     if (*JOB) p = repl_var(p, "CLAUDE_JOB_DIR", JOB);
-    if (!*p || hasc(p, '$') || hasc(p, '`')) return 0;
-    base = (flow_root && *flow_root) ? repl_home(strip_q(flow_root)) : sdup(cur && *cur ? cur : REPO);
-    abs_p = p[0] == '/' ? resolve("", p) : (*base ? resolve(base, p) : resolve(REPO, p));
-    can_p = canon(abs_p);
-    if (!in_repo_fp(abs_p, can_p)) return 0;
-    own_wt = resolve_window_wtree(ow_raw, cur, &hint_wt);
-    if (own_wt && under(abs_p, own_wt) && under(can_p, canon(own_wt)) && !eq(abs_p, own_wt)) return 0;
-    ow_n = norm_ow_str(ow_raw);
-    return fmt("共享检出写保护:非集成者(DEVSVC_OWNER=%s)不得写共享检出或非本窗口工作树,请在本窗口工作树 %s 内修改",
-               *ow_n ? ow_n : "unset", hint_wt);
+    if (!*p || hasc(p, '$') || hasc(p, '`')) return shared_checkout_refuse_msg(ow_raw, hint_wt);
+    base = (flow_root && *flow_root) ? repl_home(strip_q(flow_root)) : sdup(cur && *cur ? cur : "");
+    if (*JOB && *base) base = repl_var(base, "CLAUDE_JOB_DIR", JOB);
+    if (p[0] != '/' && (!*base || base[0] != '/' || hasc(base, '$') || hasc(base, '`')))
+        return shared_checkout_refuse_msg(ow_raw, hint_wt);
+    can_p = canon_strict(base, p);
+    if (!can_p) return shared_checkout_refuse_msg(ow_raw, hint_wt);
+    if (!under(can_p, REPO) && !under(can_p, canon(REPO))) return 0;
+    if (own_wt) {
+        char *can_wt = canon_strict("", own_wt);
+        if (can_wt && under(can_p, can_wt) && !eq(can_p, can_wt)) return 0;
+    }
+    return shared_checkout_refuse_msg(ow_raw, hint_wt);
 }
 /* a path containing a ".." component before normalization is refused outright */
 static int has_dotdot(const char *p) {
@@ -534,24 +581,48 @@ static char *check_seg(char *t, char **curp) {
                         break;
                     }
                 }
-                if (si + 2 < nw && eq(w[si], "f")) {
-                    const char *fop = w[si + 1], *tp = w[si + 2];
-                    if ((eq(fop, "write") || eq(fop, "edit") || eq(fop, "edits") || eq(fop, "append")) && tp[0] != '-') {
+                if (si + 1 < nw && eq(w[si], "f")) {
+                    char *fop = strip_q(w[si + 1]);
+                    int help = 0;
+                    for (oi = si + 1; oi < nw; oi++) if (eq(w[oi], "--help") || eq(w[oi], "-h")) help = 1;
+                    if (!help && (eq(fop, "write") || eq(fop, "edit") || eq(fop, "edits") || eq(fop, "append"))) {
+                        const char *tp = (si + 2 < nw && w[si + 2][0] != '-') ? w[si + 2] : "";
                         char *sc = shared_checkout_write_bad(tp, cur, seg_fr, eff_ow);
                         if (sc) return sc;
                     }
-                } else if (si + 2 < nw && eq(w[si], "doc")) {
-                    const char *dop = w[si + 1], *tp = w[si + 2];
-                    if ((eq(dop, "create") || eq(dop, "set") || eq(dop, "append") || eq(dop, "remove") || eq(dop, "repair")) && tp[0] != '-') {
-                        char *sc = shared_checkout_write_bad(tp, cur, seg_fr, eff_ow);
+                } else if (si + 1 < nw && eq(w[si], "doc")) {
+                    char *dop = strip_q(w[si + 1]);
+                    int help = 0;
+                    for (oi = si + 1; oi < nw; oi++) if (eq(w[oi], "--help") || eq(w[oi], "-h")) help = 1;
+                    if (!help && (eq(dop, "create") || eq(dop, "set") || eq(dop, "append") || eq(dop, "remove") || eq(dop, "mermaid") || eq(dop, "repair"))) {
+                        const char *tp = (si + 2 < nw && w[si + 2][0] != '-') ? w[si + 2] : "";
+                        char *sc = shared_checkout_write_bad(tp, cur, eq(dop, "create") ? 0 : seg_fr, eff_ow);
+                        if (sc) return sc;
+                    }
+                } else if (si + 1 < nw && eq(w[si], "git")) {
+                    char *gop = strip_q(w[si + 1]);
+                    int ro_flag = 0;
+                    const char *cwd_arg = 0;
+                    for (oi = si + 2; oi < nw; oi++) {
+                        if (eq(w[oi], "--help") || eq(w[oi], "-h") || eq(w[oi], "--status")) ro_flag = 1;
+                        else if (eq(w[oi], "--cwd")) cwd_arg = (oi + 1 < nw) ? w[++oi] : "";
+                    }
+                    if (!ro_flag && (eq(gop, "add") || eq(gop, "unstage") || eq(gop, "commit"))) {
+                        const char *probe = ".git-write-probe";
+                        if (cwd_arg) {
+                            char *cd_clean = strip_q(cwd_arg);
+                            probe = (*cd_clean && !hasc(cd_clean, '$') && !hasc(cd_clean, '`')) ? cat2(cd_clean, "/.git-write-probe") : "";
+                        }
+                        char *sc = shared_checkout_write_bad(probe, cur, 0, eff_ow);
                         if (sc) return sc;
                     }
                 }
             } else if (eq(tb, "edit-span.cx")) {
                 long si = di + 1;
                 if (si < nw && eq(w[si], "--")) si++;
-                if (si < nw && w[si][0] != '-') {
-                    char *sc = shared_checkout_write_bad(w[si], cur, seg_fr, seg_ow);
+                if (si < nw && !eq(w[si], "--help") && !eq(w[si], "-h")) {
+                    const char *tp = (w[si][0] != '-') ? w[si] : "";
+                    char *sc = shared_checkout_write_bad(tp, cur, seg_fr, seg_ow);
                     if (sc) return sc;
                 }
             }
