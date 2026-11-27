@@ -105,14 +105,28 @@ static int m53_ape_hdr(int fd) {
     return 0;
 }
 
+static int m53_is_win_target(void) {
+    const char *t = tn_self();
+    return t && (m53_eqz(t, "win/x86_64") || m53_eqz(t, "win/arm64"));
+}
+
+static int m53_is_sep(char c, int is_win) {
+    return c == '/' || (is_win && c == '\\');
+}
+
 static int m53_split_parent(const char *path, char *dir, long dcap, char *leaf, long lcap) {
+    int is_win = m53_is_win_target();
     long n = m53_len(path, 512), at = n, i;
     if (n <= 0 || n >= 512) return -EINVAL;
-    while (at > 0 && path[at - 1] != '/') at--;
+    while (at > 0 && !m53_is_sep(path[at - 1], is_win)) at--;
     if (at == 0) return -EINVAL;
     if (at == 1) {
         if (dcap < 2 || n - at + 1 > lcap) return -ENAMETOOLONG;
-        dir[0] = '/'; dir[1] = 0;
+        dir[0] = path[0]; dir[1] = 0;
+    } else if (is_win && at == 3 && path[1] == ':') {
+        /* Windows drive root (e.g. C:\file -> parent C:\) */
+        if (dcap < 4 || n - at + 1 > lcap) return -ENAMETOOLONG;
+        dir[0] = path[0]; dir[1] = path[1]; dir[2] = path[2]; dir[3] = 0;
     } else {
         if (at > dcap) return -ENAMETOOLONG;
         for (i = 0; i < at - 1; i++) dir[i] = path[i];
@@ -133,6 +147,11 @@ static int m53_open_checked_path(const char *path, int is_exec, const char **rea
         return -1;
     }
     pfd = sy_open_dir_nofollow(dir);
+    if (pfd == -ENOSYS) {
+        /* Named refusal on Windows in v0.1.9: handle-level reparse/owner checks are v0.1.10 work. */
+        *reason_out = "win-sidecar-unsupported";
+        return -1;
+    }
     if (pfd < 0) { *reason_out = pfd == -ENOENT ? (is_exec ? "exec-absent" : "absent") : "untrusted"; return -1; }
     if (sy_fstat(pfd, &st) != 0 || st.kind != 'd' || !sy_stat_trusted_owner(&st, uid)) {
         sy_close(pfd); *reason_out = "untrusted"; return -1;
@@ -163,6 +182,7 @@ static int m53_open_sidecar(const char *mode, char *resolved_dir, long rcap,
                 *reason_out = "absent"; return -1;
             }
             pfd = sy_open_dir_nofollow(dir);
+            if (pfd == -ENOSYS) { *reason_out = "win-sidecar-unsupported"; return -1; }
             if (pfd < 0) { *reason_out = pfd == -ENOENT ? "absent" : "untrusted"; return -1; }
             if (sy_fstat(pfd, &st) != 0 || st.kind != 'd' || !sy_stat_trusted_owner(&st, uid)) {
                 sy_close(pfd); *reason_out = "untrusted"; return -1;
@@ -177,6 +197,7 @@ static int m53_open_sidecar(const char *mode, char *resolved_dir, long rcap,
                 *reason_out = "absent"; return -1;
             }
             pfd = sy_open_dir_nofollow(dir);
+            if (pfd == -ENOSYS) { *reason_out = "win-sidecar-unsupported"; return -1; }
             if (pfd < 0) { *reason_out = pfd == -ENOENT ? "absent" : "untrusted"; return -1; }
             if (sy_fstat(pfd, &st) != 0 || st.kind != 'd' || !sy_stat_trusted_owner(&st, uid)) {
                 sy_close(pfd); *reason_out = "untrusted"; return -1;
@@ -472,7 +493,7 @@ static int m53_fn_call_bytes_int(const unsigned char *img, long img_len,
     if (m53_s1_abi_ver == 2) {
         unsigned long long *bin_blk = (unsigned long long *)(mem + argbuf_off);
         bin_blk[0] = bytes ? (unsigned long long)(mem + in_off) : 0ULL;
-        bin_blk[1] = (unsigned long long)len;
+        bin_blk[1] = (unsigned long long)(long long)len;
         bin_blk[2] = 0ULL;
         guest_argv[0] = (unsigned long long)(mem + argbuf_off + 16ULL);
         guest_argv[1] = (unsigned long long)bin_blk;
