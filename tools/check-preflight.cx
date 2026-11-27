@@ -15,6 +15,7 @@
  *         a SKIP into exit 1 while the same run without --strict exits 0; an unknown PHASE exits 2
  * Prints PASS/FAIL per assertion and CHECK_PREFLIGHT<TAB>failed=N; exit 0 only when failed=0. */
 #pragma unisa use sys.fs
+#pragma unisa use sys.sha
 #pragma unisa use text.text
 #pragma unisa use sys.env
 #pragma unisa use cxlib.netpack
@@ -25,6 +26,48 @@ static char root[4096], work[4400], out[32768];
 
 static void die(const char *s) { fprintf(stderr, "check-preflight: %s\n", s); exit(2); }
 static void ck(int ok, const char *name) { printf("%s\tcheck-preflight.%s\n", ok ? "PASS" : "FAIL", name); if (!ok) failed++; }
+
+static unsigned cp_crc32(const char *p, long n) {
+    unsigned c = 4294967295U;
+    for (long i = 0; i < n; i++) {
+        c ^= (unsigned)((unsigned char)p[i]);
+        for (int j = 0; j < 8; j++) c = (c & 1U) ? ((c >> 1) ^ 3988292384U) : (c >> 1);
+    }
+    return c ^ 4294967295U;
+}
+
+static void write_p4_records(const char *rel, int nr, const char **keys, const char **vals,
+                             const int *codecs, const unsigned *crc_xor, const char *prefix_sh) {
+    char d[4400], body[16384], full[20480], hdr[128], rhdr[128];
+    if (cx_fmt(d, sizeof d, "%s/%s", work, rel)) die("path");
+    if (cx_fmt(hdr, sizeof hdr, "P 4 1 1 %d\nD r s in out 0\nM 1 1 1 0\nA", nr)) die("p4 header");
+    long pos = (long)strlen(hdr);
+    if (mm_copy(body, (long)sizeof body, hdr, pos)) die("p4 header copy");
+    for (int i = 0; i < nr; i++) {
+        long kl = (long)strlen(keys[i]), vl = (long)strlen(vals[i]);
+        int cd = codecs ? codecs[i] : 0;
+        unsigned crc = cp_crc32(vals[i], vl) ^ (crc_xor ? crc_xor[i] : 0U);
+        if (cx_fmt(rhdr, sizeof rhdr, "F %ld %ld %ld %d %u\n", kl, vl, vl, cd, crc)) die("p4 rec");
+        long rl = (long)strlen(rhdr);
+        if (pos + rl + kl + vl >= (long)sizeof body) die("p4 rec bound");
+        if (mm_copy(body + pos, (long)sizeof body - pos, rhdr, rl) ||
+            mm_copy(body + pos + rl, (long)sizeof body - pos - rl, keys[i], kl) ||
+            mm_copy(body + pos + rl + kl, (long)sizeof body - pos - rl - kl, vals[i], vl)) die("p4 rec copy");
+        pos += rl + kl + vl;
+    }
+    if (prefix_sh && prefix_sh[0]) {
+        long sl = (long)strlen(prefix_sh);
+        if ((size_t)(sl + pos + 16) >= sizeof full) die("p4 ape full");
+        if (mm_copy(full, (long)sizeof full, prefix_sh, sl) ||
+            mm_copy(full + sl, (long)sizeof full - sl, body, pos) ||
+            mm_copy(full + sl + pos, 16, "UNIPKG1\n", 8)) die("p4 ape copy");
+        unsigned long plen = (unsigned long)pos;
+        for (int k = 0; k < 8; k++) full[sl + pos + 8 + k] = (char)((plen >> (k * 8)) & 255UL);
+        if (cx_write(d, full, (size_t)(sl + pos + 16)) || sy_chmod(d, 0755)) die(d);
+    } else {
+        if (cx_write(d, body, (size_t)pos) || sy_chmod(d, 0644)) die(d);
+    }
+}
 
 static void p(char *dst, const char *rel) { if (cx_fmt(dst, 4400, "%s/%s", work, rel)) die("path"); }
 static void mk(const char *rel) { char d[4400]; p(d, rel); if (sy_mkdir(d, 0700)) die(d); }
@@ -141,7 +184,11 @@ int main(void) {
     put("proot/unisacc.com.build.json", "{}\n", 0644);
     put("proot/tools/chain-step.cx", "v[4] = \"--rev\"; v[6] = \"freeze\";\n", 0644);
     put("proot/tools/release-build.cx", "    if (*p || ms < 1 || ms > cap) return cap;\nsy_eprintf(\"release-build: %s timeout after %ld ms (child killed)\\n\", label, ms);\n", 0644);
-    put("proot/compiler.p4.pkg", "P4 index hdr/cx.h hdr/cx-flat.h hdr/cx-nested.h\n", 0644);
+    {
+        const char *hdr_keys[2] = {"hdr/cx.h", "hdr/cx-flat.h"};
+        const char *hdr_vals[2] = {"/* cx.h */\n", "/* cx-flat.h */\n"};
+        write_p4_records("proot/compiler.p4.pkg", 2, hdr_keys, hdr_vals, 0, 0, 0);
+    }
     put("pbuild/source-package-O2.elf", "x", 0700);
     put("psnap/.release-rev", head, 0644);
     cx_fmt(json, sizeof json, "{\n  \"commit\": \"%s\"\n}\n", head);
@@ -189,6 +236,152 @@ int main(void) {
     }
     rc = run(0, 0, d1, d2, d3, head, 1, "PHASE=nowhere", 0);
     ck(rc == 2, "hook.unknown.exit2");
+
+    /* red-then-green: when SNAP has M1 tape tools, post-p3 decodes P4 and checks exact F records (no substring bypass) */
+    mk("psnap/tools");
+    put("psnap/tools/tape-sidecar-build.cx", "/* tape-sidecar-build */\n", 0644);
+    put("psnap/tools/tapepack.cx", "/* tapepack */\n", 0644);
+    rc = run(0, 0, d1, d2, d3, head, 1, "PHASE=post-p3", "--strict");
+    ck(rc == 1 && row_is(10, "FAIL") && strstr(out, "missing tape/lnx-x86_64/manifest.tsv") != 0, "hook.post-p3.missing-tape-records.FAIL");
+    {
+        /* Substring bypass attempt: a valid P4 package with hdr/cx.h, hdr/cx-flat.h, and a dummy F record whose body contains all 3 tape keys */
+        const char *sub_keys[3] = {"hdr/cx.h", "hdr/cx-flat.h", "other/notes.txt"};
+        const char *sub_vals[3] = {
+            "/* cx.h */\n",
+            "/* cx-flat.h */\n",
+            "tape/lnx-x86_64/manifest.tsv tape/lnx-x86_64/tapemode.so tape/lnx-x86_64/m53.tapeslice\n"
+        };
+        write_p4_records("proot/compiler.p4.pkg", 3, sub_keys, sub_vals, 0, 0, 0);
+        rc = run(0, 0, d1, d2, d3, head, 1, "PHASE=post-p3", "--strict");
+        ck(rc == 1 && row_is(10, "FAIL") && strstr(out, "missing tape/lnx-x86_64/manifest.tsv") != 0, "hook.post-p3.substring-only-fake-p4.FAIL");
+
+        const char *so_v = "ELF-tapemode-so-payload";
+        const char *sl_v = "UTAPEBIN-m53-tapeslice-payload";
+        char so_sha[65], sl_sha[65], mf_v[512];
+        if (sy_sha256_hex(so_v, (long)strlen(so_v), so_sha) ||
+            sy_sha256_hex(sl_v, (long)strlen(sl_v), sl_sha) ||
+            cx_fmt(mf_v, sizeof mf_v, "tapemode.so\t%s\t%lu\nm53.tapeslice\t%s\t%lu\n",
+                   so_sha, (unsigned long)strlen(so_v), sl_sha, (unsigned long)strlen(sl_v))) die("mf fmt");
+        const char *t_keys[5] = {
+            "hdr/cx.h", "hdr/cx-flat.h",
+            "tape/lnx-x86_64/manifest.tsv", "tape/lnx-x86_64/tapemode.so", "tape/lnx-x86_64/m53.tapeslice"
+        };
+        const char *t_vals[5] = {"/* cx.h */\n", "/* cx-flat.h */\n", mf_v, so_v, sl_v};
+
+        /* Bad CRC on tapemode.so F record -> FAIL */
+        unsigned bad_crc[5] = {0, 0, 0, 1U, 0};
+        write_p4_records("proot/compiler.p4.pkg", 5, t_keys, t_vals, 0, bad_crc, 0);
+        rc = run(0, 0, d1, d2, d3, head, 1, "PHASE=post-p3", "--strict");
+        ck(rc == 1 && row_is(10, "FAIL") && strstr(out, "invalid F record tape/lnx-x86_64/tapemode.so") != 0, "hook.post-p3.bad-crc-tape-record.FAIL");
+
+        /* Manifest SHA mismatch -> FAIL */
+        const char *bad_vals[5] = {"/* cx.h */\n", "/* cx-flat.h */\n", "tapemode.so\t0000\t23\nm53.tapeslice\t1111\t30\n", so_v, sl_v};
+        write_p4_records("proot/compiler.p4.pkg", 5, t_keys, bad_vals, 0, 0, 0);
+        rc = run(0, 0, d1, d2, d3, head, 1, "PHASE=post-p3", "--strict");
+        ck(rc == 1 && row_is(10, "FAIL") && strstr(out, "tape manifest SHA mismatch") != 0, "hook.post-p3.manifest-sha-mismatch.FAIL");
+
+        /* Valid 3 tape F records -> PASS */
+        write_p4_records("proot/compiler.p4.pkg", 5, t_keys, t_vals, 0, 0, 0);
+        rc = run(0, 0, d1, d2, d3, head, 1, "PHASE=post-p3", "--strict");
+        ck(rc == 0 && row_is(10, "PASS") && row_is(12, "PASS"), "hook.post-p3.with-tape-records.PASS");
+
+        /* Candidate-chain p3 tape receipt binding + post-pack final APE verification red-first cases */
+        mk("psnap/tools/tape"); mk("psnap/tools/tape/asm");
+        put("psnap/tools/tape/asm/tape_x86_64.S", "/* tape_x86_64.S */\n", 0644);
+        put("psnap/tools/tape/asm/hoststub_lnx_x86_64.S", "/* hoststub_lnx_x86_64.S */\n", 0644);
+        /* Mock proot/unisacc.com that handles tape-sidecar-build.cx, -S guest compile, and tapepack.cx */
+        put("proot/unisacc.com",
+            "#!/bin/sh\n"
+            "case \"$1\" in\n"
+            "  *tape-sidecar-build.cx)\n"
+            "    TDIR=\"$6\"\n"
+            "    printf '%s' 'ELF-tapemode-so-payload' > \"$TDIR/tapemode.so\"\n"
+            "    SHA=$(sha256sum \"$TDIR/tapemode.so\" | awk '{print $1}')\n"
+            "    LEN=$(wc -c < \"$TDIR/tapemode.so\" | tr -d ' ')\n"
+            "    printf 'tapemode.so\\t%s\\t%s\\n' \"$SHA\" \"$LEN\" > \"$TDIR/manifest.tsv\"\n"
+            "    exit 0 ;;\n"
+            "  *.m53_guest.cx)\n"
+            "    printf '.text\\n' > \"$4\"\n"
+            "    exit 0 ;;\n"
+            "  *tapepack.cx)\n"
+            "    printf '%s' 'UTAPEBIN-m53-tapeslice-payload' > \"$5\"\n"
+            "    exit 0 ;;\n"
+            "esac\n"
+            "exit 0\n", 0755);
+
+        char cout[4400];
+        p(cout, "chain-out");
+        mk("chain-out"); mk("chain-out/p3-run"); mk("chain-out/p3-run/tape"); mk("chain-out/p3-run/tape/lnx-x86_64");
+        put("chain-out/p3-run/tape/lnx-x86_64/tapemode.so", so_v, 0644);
+        put("chain-out/p3-run/tape/lnx-x86_64/m53.tapeslice", sl_v, 0644);
+        put("chain-out/p3-run/tape/lnx-x86_64/manifest.tsv", mf_v, 0644);
+        {
+            np_result rr = {0}; char why[256] = {0};
+            char *av[] = {"sh", "./unisacc.com", "tools/candidate-chain.cx", "--", "--p3-tape-fixture", d1, d3, cout, 0}; /* lint:allow R1-product invokes checkout product to test candidate-chain.cx fixture */
+            int rrc = (np_run(av, root, 0, 50, &rr, why, sizeof why) == 0) ? rr.rc : -1;
+            ck(rrc == 2 && rr.err && strstr(rr.err, "REFUSE p3 tape receipt mismatch") != 0, "cc.p3-tape.unreceipted-reuse.FAIL");
+            np_free(&rr);
+        }
+        /* Remove unreceipted dir, let cc_ensure_p3_tape build and write receipt.tsv, then verify reuse */
+        {
+            char tdir_rm[4400];
+            p(tdir_rm, "chain-out/p3-run/tape/lnx-x86_64");
+            if (cx_rmtree(tdir_rm)) die("rmtree unreceipted");
+            np_result rr1 = {0}, rr2 = {0}; char why[256] = {0};
+            char *av[] = {"sh", "./unisacc.com", "tools/candidate-chain.cx", "--", "--p3-tape-fixture", d1, d3, cout, 0}; /* lint:allow R1-product invokes checkout product to test candidate-chain.cx fixture */
+            int rrc1 = (np_run(av, root, 0, 50, &rr1, why, sizeof why) == 0) ? rr1.rc : -1;
+            int rrc2 = (np_run(av, root, 0, 50, &rr2, why, sizeof why) == 0) ? rr2.rc : -1;
+            ck(rrc1 == 0 && rr1.out && strstr(rr1.out, "P3_TAPE_BUILD\t") != 0 &&
+               rrc2 == 0 && rr2.out && strstr(rr2.out, "P3_TAPE_REUSE\t") != 0,
+               "cc.p3-tape.build-and-receipt-reuse.PASS");
+            np_free(&rr1); np_free(&rr2);
+        }
+        /* Mutate snapshot asm source -> reuse MUST refuse on receipt mismatch */
+        put("psnap/tools/tape/asm/tape_x86_64.S", "/* mutated tape_x86_64.S */\n", 0644);
+        {
+            np_result rr = {0}; char why[256] = {0};
+            char *av[] = {"sh", "./unisacc.com", "tools/candidate-chain.cx", "--", "--p3-tape-fixture", d1, d3, cout, 0}; /* lint:allow R1-product invokes checkout product to test candidate-chain.cx fixture */
+            int rrc = (np_run(av, root, 0, 30, &rr, why, sizeof why) == 0) ? rr.rc : -1;
+            ck(rrc == 2 && rr.err && strstr(rr.err, "REFUSE p3 tape receipt mismatch") != 0, "cc.p3-tape.mutated-source-reuse.FAIL");
+            np_free(&rr);
+        }
+        /* Restore snapshot asm source and test post-pack final APE verification */
+        put("psnap/tools/tape/asm/tape_x86_64.S", "/* tape_x86_64.S */\n", 0644);
+        mk("chain-out/ape-final");
+        /* Red 1: compiler.p4.pkg has only substring keys -> --pack-verify-fixture MUST refuse */
+        write_p4_records("chain-out/compiler.p4.pkg", 3, sub_keys, sub_vals, 0, 0, 0);
+        write_p4_records("chain-out/ape-final/p3-package.body", 5, t_keys, t_vals, 0, 0, 0);
+        write_p4_records("chain-out/ape-final/unisacc-next.com", 5, t_keys, t_vals, 0, 0,
+                         "#!/bin/sh\nprintf 'ok\\n'\nexit 0\n");
+        {
+            np_result rr = {0}; char why[256] = {0};
+            char *av[] = {"sh", "./unisacc.com", "tools/candidate-chain.cx", "--", "--pack-verify-fixture", d1, d3, cout, 0}; /* lint:allow R1-product invokes checkout product to test candidate-chain.cx fixture */
+            int rrc = (np_run(av, root, 0, 30, &rr, why, sizeof why) == 0) ? rr.rc : -1;
+            ck(rrc == 2 && rr.err && strstr(rr.err, "REFUSE package missing embedded tape record") != 0, "cc.pack-verify.substring-bypass.FAIL");
+            np_free(&rr);
+        }
+        /* Red 2: valid P4 packages in all 3 files, but final APE stream e3 outputs M53_M1_REFUSE -> MUST refuse */
+        write_p4_records("chain-out/compiler.p4.pkg", 5, t_keys, t_vals, 0, 0, 0);
+        write_p4_records("chain-out/ape-final/unisacc-next.com", 5, t_keys, t_vals, 0, 0,
+                         "#!/bin/sh\nif [ \"$2\" = \"e3\" ]; then echo M53_M1_REFUSE >&2; exit 2; fi\nprintf 'tok\\n'\nexit 0\n");
+        {
+            np_result rr = {0}; char why[256] = {0};
+            char *av[] = {"sh", "./unisacc.com", "tools/candidate-chain.cx", "--", "--pack-verify-fixture", d1, d3, cout, 0}; /* lint:allow R1-product invokes checkout product to test candidate-chain.cx fixture */
+            int rrc = (np_run(av, root, 0, 30, &rr, why, sizeof why) == 0) ? rr.rc : -1;
+            ck(rrc == 2 && rr.err && strstr(rr.err, "REFUSE final APE stream e3 post-pack check failed") != 0, "cc.pack-verify.stream-e3-fail.FAIL");
+            np_free(&rr);
+        }
+        /* Green: all 3 packages valid and all 3 stream stages (e2, e1, e3) produce output with rc=0 */
+        write_p4_records("chain-out/ape-final/unisacc-next.com", 5, t_keys, t_vals, 0, 0,
+                         "#!/bin/sh\nprintf 'stage-%s-ok\\n' \"$2\"\nexit 0\n");
+        {
+            np_result rr = {0}; char why[256] = {0};
+            char *av[] = {"sh", "./unisacc.com", "tools/candidate-chain.cx", "--", "--pack-verify-fixture", d1, d3, cout, 0}; /* lint:allow R1-product invokes checkout product to test candidate-chain.cx fixture */
+            int rrc = (np_run(av, root, 0, 30, &rr, why, sizeof why) == 0) ? rr.rc : -1;
+            ck(rrc == 0 && rr.out && strstr(rr.out, "POST_PACK_TAPE_VERIFY\t") != 0, "cc.pack-verify.full-post-pack.PASS");
+            np_free(&rr);
+        }
+    }
 
     if (cx_rmtree(work)) die("cleanup");
     printf("CHECK_PREFLIGHT\tfailed=%d\n", failed);
