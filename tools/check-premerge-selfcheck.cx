@@ -42,7 +42,7 @@ static void q(const char *name, const char *argfmt) {
     if (g_part == 2 && !in_rd) return;
     if (g_part == 1 && in_rd) return;
     if (cx_fmt(a, sizeof a, argfmt, g_tmp, g_tmp, g_tmp, g_tmp, g_tmp, g_tmp, g_tmp)) exit(2);
-    if (cx_fmt(l, sizeof l, "( TMPDIR=\"$T/td\" sh ./unisacc.com tools/premerge-selfcheck.cx -- %s > \"$T/o/%s.txt\" 2>&1; echo $? > \"$T/o/%s.rc\" ) & ", a, name, name)) exit(2);
+    if (cx_fmt(l, sizeof l, "( TMPDIR=\"$T/td\" \"$T/psc\" %s > \"$T/o/%s.txt\" 2>&1; echo $? > \"$T/o/%s.rc\" ) & ", a, name, name)) exit(2);
     qraw(l);
 }
 static void flush(void) {
@@ -229,9 +229,17 @@ int main(int argc, char **argv) {
     }
 
     }
-    /* warm the compile cache once so the parallel runs start from the cached binary */
-    cx_fmt(sc, sizeof sc, "TMPDIR=%s/td sh ./unisacc.com tools/premerge-selfcheck.cx -- --no-such-argument >/dev/null 2>&1; true", tmp);
-    sh(sc, 0, 0, 30);
+    /* prebuild the check target binary once before flush(); in main/orig run the source-identity -run probe concurrently with the build */
+    if (g_part != 2) {
+        cx_fmt(sc, sizeof sc,
+            "T=%s; mkdir -p \"$T/o\"; R=$(pwd); "
+            "( cd \"$T\" && TMPDIR=\"$T/td\" sh \"$R/unisacc.com\" \"$R/tools/premerge-selfcheck.cx\" -- --patch \"$T/good.patch\" --repo \"$T/r\" --base main --check true --out \"$T/ci.rec\" >/dev/null 2>&1; "
+            "test \"$(grep -o 'tool_sha256=[0-9a-f]*' \"$T/ci.rec\" | cut -d= -f2)\" = \"$(sha256sum \"$R/tools/premerge-selfcheck.cx\" | cut -c1-64)\" && echo CI_OK > \"$T/o/ci.txt\" ) & "
+            "sh ./unisacc.com tools/premerge-selfcheck.cx -o \"$T/psc\" >/dev/null 2>&1; brc=$?; wait; exit $brc", tmp);
+    } else {
+        cx_fmt(sc, sizeof sc, "sh ./unisacc.com tools/premerge-selfcheck.cx -o %s/psc >/dev/null 2>&1", tmp);
+    }
+    if (sh(sc, 0, 0, 55) != 0) { printf("premerge-selfcheck build failed\n"); return 2; }
 
     q("good", "--patch %s/good.patch --repo %s/r --base main "
               "--check 'git rev-parse HEAD >/dev/null && grep -q \"READY=yes\" tools/foo.cx && grep -q foo tools/check-foo.cx' --out %s/good.rec");
@@ -277,15 +285,11 @@ int main(int argc, char **argv) {
     q("a1", "--patch %s/stale.patch --repo %s/r2 --base main --check true --out %s/a1.rec");
     q("t1", "--patch %s/good.patch --repo %s/r --base main --check true --check-timeout 56 --out %s/t1.rec");
     /* an old receipt at --out does not survive a refusal */
-    qraw_main("( printf OLD > \"$T/pre.rec\"; TMPDIR=\"$T/td\" sh ./unisacc.com tools/premerge-selfcheck.cx -- --patch \"$T/nonexistent.patch\" --repo \"$T/r\" --check true --out \"$T/pre.rec\" >/dev/null 2>&1; "
+    qraw_main("( printf OLD > \"$T/pre.rec\"; TMPDIR=\"$T/td\" \"$T/psc\" --patch \"$T/nonexistent.patch\" --repo \"$T/r\" --check true --out \"$T/pre.rec\" >/dev/null 2>&1; "
          "test ! -e \"$T/pre.rec\" && echo PRE_GONE > \"$T/o/pre.txt\" ) & ");
-    /* the tool identity is its own source file whatever the working directory */
-    qraw_main("( R=$(pwd); cd \"$T\" && TMPDIR=\"$T/td\" sh \"$R/unisacc.com\" \"$R/tools/premerge-selfcheck.cx\" -- --patch \"$T/good.patch\" --repo \"$T/r\" --base main --check true --out \"$T/ci.rec\" >/dev/null 2>&1; "
-         "test \"$(grep -o 'tool_sha256=[0-9a-f]*' \"$T/ci.rec\" | cut -d= -f2)\" = \"$(sha256sum \"$R/tools/premerge-selfcheck.cx\" | cut -c1-64)\" && echo CI_OK > \"$T/o/ci.txt\" ) & ");
-    /* a nonexistent --repo is refused and the caller's repository is left alone.  Absolute spelling of the tool, so a cold compile (about 19 s):
-       the rd part carries this one and the main part the identity run above, which keeps the two parts' wall time close */
-    qraw_rd("( R=$(pwd); mkdir \"$T/cw\" && cd \"$T/cw\" && git init -q . && echo x > a && git add -A && git -c user.name=x -c user.email=x@x commit -qm c0 && echo u > u && "
-         "n1=$(git rev-list --count HEAD) && rc=0 && TMPDIR=\"$T/td\" sh \"$R/unisacc.com\" \"$R/tools/premerge-selfcheck.cx\" -- --patch \"$T/good.patch\" --repo \"$T/no-such-repo\" --check true --out \"$T/cw.rec\" >/dev/null 2>&1 || rc=$?; "
+    /* a nonexistent --repo is refused and the caller's repository is left alone */
+    qraw_rd("( mkdir \"$T/cw\" && cd \"$T/cw\" && git init -q . && echo x > a && git add -A && git -c user.name=x -c user.email=x@x commit -qm c0 && echo u > u && "
+         "n1=$(git rev-list --count HEAD) && rc=0 && TMPDIR=\"$T/td\" \"$T/psc\" --patch \"$T/good.patch\" --repo \"$T/no-such-repo\" --check true --out \"$T/cw.rec\" >/dev/null 2>&1 || rc=$?; "
          "n2=$(git rev-list --count HEAD) && test \"$rc\" = 2 && test \"$n1\" = \"$n2\" && test -f u && git status --porcelain | grep -q '^?? u' && test ! -e \"$T/cw.rec\" && echo CWD_UNTOUCHED > \"$T/o/cw.txt\" ) & ");
     q("pv-ok", "--patch %s/good.patch --repo %s/rp-ok --base main --check true --out %s/pv-ok.rec");
     q("pv-bad", "--patch %s/good.patch --repo %s/rp-bad --base main --check true --out %s/pv-bad.rec");
@@ -301,7 +305,7 @@ int main(int argc, char **argv) {
        (cxlib.faultinj sets all three to a path that does not exist, so a read that honours them fails) */
     {   char hkp[3000], hkc[3600];
         if (fi_gitenv(1, 0, hkp, sizeof hkp) != 0 ||
-            cx_fmt(hkc, sizeof hkc, "( %sTMPDIR=\"$T/td\" sh ./unisacc.com tools/premerge-selfcheck.cx -- "
+            cx_fmt(hkc, sizeof hkc, "( %sTMPDIR=\"$T/td\" \"$T/psc\" "
                    "--patch \"$T/good.patch\" --repo \"$T/r\" --base main --check true --out \"$T/hk.rec\" > \"$T/o/hk.txt\" 2>&1; echo $? > \"$T/o/hk.rc\" ) & ", hkp)) exit(2);
         qraw_main(hkc);
     }
