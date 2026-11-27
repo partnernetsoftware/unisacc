@@ -21,6 +21,7 @@
  *     [--product PATH] [--so PATH] [--run-bin PATH] [--reuse-dir DIR] [--out PATH]
  *     [--unit-shards N] [--dce-root-shards R] [--bfs-pops P]
  *     [--budget B] [--mem-extra M] [--shard-timeout S]
+ *     [--stage <all|prep|native|unit|dce-root|dce-bfs|compact>] [--run-dir DIR] [--shard-idx N]
  */
 #pragma unisa use cxlib.netpack
 #pragma unisa use cxlib.sessionroot
@@ -683,368 +684,747 @@ static int files_equal_nonempty(const char *a, const char *b, long *bytes_out, c
     return eq;
 }
 
+typedef struct {
+    char root[4096];
+    char prod[4096];
+    char cand_sha[65];
+    char mf_sha[65];
+    char tl_sha[65];
+    char run_id[64];
+    char tmp[4096];
+    char run_dir[4200];
+    char drv_nat[4200];
+    char drv_slice[4200];
+    char so_path[4200];
+    char run_bin[4200];
+    char out_copy[4096];
+    char b_str[32];
+    char m_str[32];
+    int n_objs;
+    int unit_shards;
+    int dce_root_shards;
+    int bfs_pops;
+    int shard_timeout;
+    char objs[SH_MAX_OBJS][512];
+    char obuf[65536];
+    char why[192];
+} ShardEnv;
+
+static int compute_stage_param_sha(const ShardEnv *e, unsigned long long budget, unsigned long long mem_extra, char out_sha[65]) {
+    char gn[65], gsl[65], gs[65], gr[65], buf[1024];
+    if (sha_file_hex(e->drv_nat, gn) != 0 || sha_file_hex(e->drv_slice, gsl) != 0 ||
+        sha_file_hex(e->so_path, gs) != 0 || sha_file_hex(e->run_bin, gr) != 0) return -1;
+    if (cx_fmt(buf, sizeof buf, "%s\t%s\t%d\t%d\t%d\t%llu\t%llu\t%d\t%s\t%s\t%s\t%s",
+               e->mf_sha, e->tl_sha, e->unit_shards, e->dce_root_shards, e->bfs_pops,
+               budget, mem_extra, e->shard_timeout, gn, gsl, gs, gr) != 0) return -1;
+    sha_str_hex(buf, out_sha);
+    return 0;
+}
+
+static int write_stage_run_meta(const ShardEnv *e, const char *param_sha) {
+    char stsv[4250], smeta[4250], row[256], tsha[65];
+    cx_fmt(stsv, sizeof stsv, "%s/stage_run.tsv", e->run_dir);
+    cx_fmt(smeta, sizeof smeta, "%s/stage_run.meta", e->run_dir);
+    if (cx_fmt(row, sizeof row, "run_id\t%s\nunits\t%d\nunit_shards\t%d\ndce_root_shards\t%d\n",
+               e->run_id, e->n_objs, e->unit_shards, e->dce_root_shards) != 0) return -1;
+    if (sy_write_atomic(stsv, row, (long)strlen(row), 0644) != 0) return -1;
+    if (sha_file_hex(stsv, tsha) != 0) return -1;
+    return rc_write2(smeta, "stage-v1", e->cand_sha, param_sha, tsha, e->tl_sha, 0);
+}
+
+static int verify_stage_run_meta(ShardEnv *e, const char *param_sha) {
+    char stsv[4250], smeta[4250];
+    cx_fmt(stsv, sizeof stsv, "%s/stage_run.tsv", e->run_dir);
+    cx_fmt(smeta, sizeof smeta, "%s/stage_run.meta", e->run_dir);
+    if (rc_fresh(smeta, "stage-v1") != 0 ||
+        rc_need(smeta, "candidate_sha", "hex64") != 0 ||
+        rc_need(smeta, "inputs_sha", "hex64") != 0 ||
+        rc_need(smeta, "output_sha", "hex64") != 0 ||
+        rc_need(smeta, "producer_sha", "hex64") != 0 ||
+        rc_need(smeta, "rc", "int") != 0) {
+        sy_eprintf("tape-tldce-shard: REFUSE stage-identity-mismatch (%s)\n", rc_why());
+        return -1;
+    }
+    unsigned char *mb = 0, *tb = 0; int64_t mn = 0, tn = 0;
+    if (sy_read_file(smeta, &mb, &mn, 65536) != 0 || !mb || mn <= 0) { if (mb) mm_free(mb); return -1; }
+    if (sy_read_file(stsv, &tb, &tn, 65536) != 0 || !tb || tn <= 0) { mm_free(mb); if (tb) mm_free(tb); return -1; }
+    char *mtxt = (char *)mm_alloc((long)mn + 1L), *ttxt = (char *)mm_alloc((long)tn + 1L);
+    if (!mtxt || !ttxt) { mm_free(mb); mm_free(tb); mm_free(mtxt); mm_free(ttxt); return -1; }
+    mm_copy(mtxt, (long)mn + 1L, mb, (long)mn); mtxt[mn] = 0; mm_free(mb);
+    mm_copy(ttxt, (long)tn + 1L, tb, (long)tn); ttxt[tn] = 0; mm_free(tb);
+    char c_sha[128], i_sha[128], o_sha[128], p_sha[128], r_rc[32], tsha[65];
+    int ok = (parse_tab_kv(mtxt, "candidate_sha", c_sha, sizeof c_sha) == 0 && strcmp(c_sha, e->cand_sha) == 0 &&
+              parse_tab_kv(mtxt, "inputs_sha", i_sha, sizeof i_sha) == 0 && strcmp(i_sha, param_sha) == 0 &&
+              parse_tab_kv(mtxt, "producer_sha", p_sha, sizeof p_sha) == 0 && strcmp(p_sha, e->tl_sha) == 0 &&
+              parse_tab_kv(mtxt, "output_sha", o_sha, sizeof o_sha) == 0 &&
+              parse_tab_kv(mtxt, "rc", r_rc, sizeof r_rc) == 0 && strcmp(r_rc, "0") == 0 &&
+              sha_file_hex(stsv, tsha) == 0 && strcmp(tsha, o_sha) == 0 &&
+              parse_tab_kv(ttxt, "run_id", e->run_id, sizeof e->run_id) == 0 && e->run_id[0] != 0);
+    mm_free(mtxt); mm_free(ttxt);
+    if (!ok) { sy_eprintf("tape-tldce-shard: REFUSE stage-identity-mismatch\n"); return -1; }
+    return 0;
+}
+
+static int write_stat_file(const char *path, long ms, unsigned long long steps) {
+    char buf[128];
+    if (cx_fmt(buf, sizeof buf, "ms\t%ld\nsteps\t%llu\n", ms, steps) != 0) return -1;
+    return sy_write_atomic(path, buf, (long)strlen(buf), 0644);
+}
+
+static int read_stat_file(const char *path, long *ms_out, unsigned long long *steps_out) {
+    unsigned char *b = 0; int64_t n = 0;
+    if (sy_read_file(path, &b, &n, 4096) != 0 || !b || n <= 0) { if (b) mm_free(b); return -1; }
+    char *t = (char *)mm_alloc((long)n + 1L);
+    if (!t) { mm_free(b); return -1; }
+    mm_copy(t, (long)n + 1L, b, (long)n); t[n] = 0; mm_free(b);
+    char m_s[32], s_s[32];
+    int ok = (parse_tab_kv(t, "ms", m_s, sizeof m_s) == 0 && parse_tab_kv(t, "steps", s_s, sizeof s_s) == 0);
+    if (ok) {
+        if (ms_out) *ms_out = atol(m_s);
+        if (steps_out) *steps_out = (unsigned long long)strtoull(s_s, 0, 10);
+    }
+    mm_free(t);
+    return ok ? 0 : -1;
+}
+
+static int write_dce_prog(const ShardEnv *e, const char *st_path, int dce_idx, const char *last_stage,
+                          unsigned long long skip, unsigned long long rem, int last_root, int bfs_rounds,
+                          int dce_shards, long dce_ms, long dce_max_ms, unsigned long long dce_steps) {
+    char ptsv[4250], pmeta[4250], buf[512];
+    cx_fmt(ptsv, sizeof ptsv, "%s/dce_prog.tsv", e->run_dir);
+    cx_fmt(pmeta, sizeof pmeta, "%s/dce_prog.meta", e->run_dir);
+    if (cx_fmt(buf, sizeof buf,
+               "dce_idx\t%d\nlast_stage\t%s\nskip\t%llu\nrem\t%llu\nlast_root\t%d\nbfs_rounds\t%d\ndce_shards\t%d\ndce_ms\t%ld\ndce_max_ms\t%ld\ndce_steps\t%llu\n",
+               dce_idx, last_stage, skip, rem, last_root, bfs_rounds, dce_shards, dce_ms, dce_max_ms, dce_steps) != 0) return -1;
+    if (sy_write_atomic(ptsv, buf, (long)strlen(buf), 0644) != 0) return -1;
+    return write_handoff_meta(pmeta, e->run_id, e->cand_sha, e->mf_sha, "dce_prog", dce_idx, st_path, ptsv);
+}
+
+static int read_dce_prog(const ShardEnv *e, int *dce_idx_out, char *last_stage_out, size_t lscap,
+                         unsigned long long *skip_out, unsigned long long *rem_out, int *last_root_out,
+                         int *bfs_rounds_out, int *dce_shards_out, long *dce_ms_out, long *dce_max_ms_out,
+                         unsigned long long *dce_steps_out) {
+    char ptsv[4250], pmeta[4250];
+    cx_fmt(ptsv, sizeof ptsv, "%s/dce_prog.tsv", e->run_dir);
+    cx_fmt(pmeta, sizeof pmeta, "%s/dce_prog.meta", e->run_dir);
+    unsigned char *b = 0; int64_t n = 0;
+    if (sy_read_file(ptsv, &b, &n, 16384) != 0 || !b || n <= 0) {
+        if (b) mm_free(b);
+        sy_eprintf("tape-tldce-shard: REFUSE missing-dce-progress\n");
+        return -1;
+    }
+    char *t = (char *)mm_alloc((long)n + 1L);
+    if (!t) { mm_free(b); return -1; }
+    mm_copy(t, (long)n + 1L, b, (long)n); t[n] = 0; mm_free(b);
+    char s_di[32], s_sk[32], s_rm[32], s_lr[32], s_br[32], s_ds[32], s_dm[32], s_dx[32], s_dp[32];
+    int ok = (parse_tab_kv(t, "dce_idx", s_di, sizeof s_di) == 0 &&
+              parse_tab_kv(t, "last_stage", last_stage_out, lscap) == 0 &&
+              parse_tab_kv(t, "skip", s_sk, sizeof s_sk) == 0 &&
+              parse_tab_kv(t, "rem", s_rm, sizeof s_rm) == 0 &&
+              parse_tab_kv(t, "last_root", s_lr, sizeof s_lr) == 0 &&
+              parse_tab_kv(t, "bfs_rounds", s_br, sizeof s_br) == 0 &&
+              parse_tab_kv(t, "dce_shards", s_ds, sizeof s_ds) == 0 &&
+              parse_tab_kv(t, "dce_ms", s_dm, sizeof s_dm) == 0 &&
+              parse_tab_kv(t, "dce_max_ms", s_dx, sizeof s_dx) == 0 &&
+              parse_tab_kv(t, "dce_steps", s_dp, sizeof s_dp) == 0);
+    mm_free(t);
+    if (!ok) { sy_eprintf("tape-tldce-shard: REFUSE invalid-dce-progress\n"); return -1; }
+    int di = atoi(s_di);
+    if (di < 1 || di >= 64) { sy_eprintf("tape-tldce-shard: REFUSE invalid-dce-idx\n"); return -1; }
+    char st_path[4250];
+    cx_fmt(st_path, sizeof st_path, "%s/t_dce_%d.st", e->run_dir, di - 1);
+    if (verify_handoff_meta(pmeta, st_path, ptsv, e->run_id, e->cand_sha, e->mf_sha, "dce_prog", di) != 0) return -1;
+    *dce_idx_out = di;
+    *skip_out = (unsigned long long)strtoull(s_sk, 0, 10);
+    *rem_out = (unsigned long long)strtoull(s_rm, 0, 10);
+    *last_root_out = atoi(s_lr);
+    *bfs_rounds_out = atoi(s_br);
+    *dce_shards_out = atoi(s_ds);
+    *dce_ms_out = atol(s_dm);
+    *dce_max_ms_out = atol(s_dx);
+    *dce_steps_out = (unsigned long long)strtoull(s_dp, 0, 10);
+    return 0;
+}
+
+static int step_native_ref(ShardEnv *e, unsigned long long *cut_out) {
+    char nat_out[4200], ntsv[4250], nmeta[4250];
+    cx_fmt(nat_out, sizeof nat_out, "%s/native_ref.tape", e->run_dir);
+    cx_fmt(ntsv, sizeof ntsv, "%s/nat_ref.tsv", e->run_dir);
+    cx_fmt(nmeta, sizeof nmeta, "%s/nat_ref.meta", e->run_dir);
+    if (touch_empty(nat_out) != 0) { sy_eprintf("tape-tldce-shard: REFUSE output-init-failed nat_out\n"); return 1; }
+    char *av_ref[SH_MAX_OBJS + 8]; int ap = 0, rc = 0;
+    av_ref[ap++] = e->drv_nat; av_ref[ap++] = "s"; av_ref[ap++] = nat_out;
+    for (int i = 0; i < e->n_objs; i++) av_ref[ap++] = e->objs[i];
+    av_ref[ap] = 0;
+    long nat_ms = 0;
+    if (run_cmd(av_ref, e->root, 55, &rc, &nat_ms, e->obuf, sizeof e->obuf, e->why, sizeof e->why) != 0 || rc != 0) {
+        (void)sy_unlink(nat_out);
+        sy_eprintf("tape-tldce-shard: native reference failed rc=%d\n", rc); return 1;
+    }
+    unsigned long long nat_dce_cut = 0;
+    if (strstr(e->obuf, "SHARD_NATIVE\t") == 0 || parse_u64_field(e->obuf, "dce_cut=", &nat_dce_cut) != 0) {
+        (void)sy_unlink(nat_out);
+        sy_eprintf("tape-tldce-shard: REFUSE missing-native-dce-cut\n"); return 1;
+    }
+    char rbuf[128];
+    if (cx_fmt(rbuf, sizeof rbuf, "units\t%d\nms\t%ld\ndce_cut\t%llu\n", e->n_objs, nat_ms, nat_dce_cut) != 0 ||
+        sy_write_atomic(ntsv, rbuf, (long)strlen(rbuf), 0644) != 0 ||
+        write_handoff_meta(nmeta, e->run_id, e->cand_sha, e->mf_sha, "native_ref", 0, nat_out, ntsv) != 0) {
+        (void)sy_unlink(nat_out);
+        sy_eprintf("tape-tldce-shard: REFUSE handoff-meta-write native_ref\n"); return 1;
+    }
+    if (cut_out) *cut_out = nat_dce_cut;
+    sy_printf("NATIVE_REF\tunits=%d\tms=%ld\tdce_cut=%llu\n", e->n_objs, nat_ms, nat_dce_cut);
+    return 0;
+}
+
+static int step_unit_shard(ShardEnv *e, int s, long *ms_out, unsigned long long *stp_out) {
+    int u_pos = 0;
+    for (int i = 0; i < s; i++) {
+        int rem_u = e->n_objs - u_pos;
+        int rem_s = e->unit_shards - i;
+        u_pos += (rem_u + rem_s - 1) / rem_s;
+    }
+    int take = ((e->n_objs - u_pos) + (e->unit_shards - s) - 1) / (e->unit_shards - s);
+    char prev_t[4200], prev_s[4200], prev_m[4200];
+    if (s > 0) {
+        cx_fmt(prev_t, sizeof prev_t, "%s/t_u%d.tape", e->run_dir, s - 1);
+        cx_fmt(prev_s, sizeof prev_s, "%s/t_u%d.st", e->run_dir, s - 1);
+        cx_fmt(prev_m, sizeof prev_m, "%s/t_u%d.st.meta", e->run_dir, s - 1);
+        if (verify_handoff_meta(prev_m, prev_s, prev_t, e->run_id, e->cand_sha, e->mf_sha, "unit", s - 1) != 0) return 1;
+    }
+    char utape[4200], ustate[4200], umeta[4200], ustat[4200];
+    cx_fmt(utape, sizeof utape, "%s/t_u%d.tape", e->run_dir, s);
+    cx_fmt(ustate, sizeof ustate, "%s/t_u%d.st", e->run_dir, s);
+    cx_fmt(umeta, sizeof umeta, "%s/t_u%d.st.meta", e->run_dir, s);
+    cx_fmt(ustat, sizeof ustat, "%s/t_u%d.stat", e->run_dir, s);
+    if (touch_empty(utape) != 0 || touch_empty(ustate) != 0) {
+        sy_eprintf("tape-tldce-shard: REFUSE output-init-failed unit %d\n", s); return 1;
+    }
+    char u_str[16]; cx_fmt(u_str, sizeof u_str, "%d", u_pos);
+    char *av[SH_MAX_OBJS + 16]; int k = 0, rc = 0; long ms = 0;
+    av[k++] = e->run_bin; av[k++] = "--so"; av[k++] = e->so_path;
+    av[k++] = "--budget"; av[k++] = e->b_str; av[k++] = "--mem-extra"; av[k++] = e->m_str;
+    av[k++] = e->drv_slice; av[k++] = "u"; av[k++] = utape;
+    av[k++] = (s == 0) ? "-" : prev_s;
+    av[k++] = ustate; av[k++] = u_str;
+    for (int j = 0; j < take; j++) av[k++] = e->objs[u_pos + j];
+    av[k] = 0;
+    if (run_cmd(av, e->root, e->shard_timeout, &rc, &ms, e->obuf, sizeof e->obuf, e->why, sizeof e->why) != 0 || rc != 0) {
+        (void)sy_unlink(utape); (void)sy_unlink(ustate);
+        sy_eprintf("tape-tldce-shard: unit shard %d failed rc=%d ms=%ld why=%s\n", s, rc, ms, e->why); return 1;
+    }
+    unsigned long long stp = 0;
+    if (strstr(e->obuf, "TAPEMODE_RUN\tstatus=0\texit_code=0\t") == 0 ||
+        strstr(e->obuf, "SHARD_UNIT\t") == 0 || parse_u64_field(e->obuf, "steps=", &stp) != 0) {
+        (void)sy_unlink(utape); (void)sy_unlink(ustate);
+        sy_eprintf("tape-tldce-shard: REFUSE incomplete-tape-frame unit=%d\n", s); return 1;
+    }
+    if (write_handoff_meta(umeta, e->run_id, e->cand_sha, e->mf_sha, "unit", s, ustate, utape) != 0 ||
+        write_stat_file(ustat, ms, stp) != 0) {
+        sy_eprintf("tape-tldce-shard: REFUSE handoff-meta-write unit=%d\n", s); return 1;
+    }
+    sy_printf("SHARD_RUN\tname=u%d\tkind=unit\tunits=%d\trc=%d\tms=%ld\tsteps=%llu\n", s, take, rc, ms, stp);
+    if (ms_out) *ms_out = ms;
+    if (stp_out) *stp_out = stp;
+    return 0;
+}
+
+static int step_dce_root(ShardEnv *e, int r, int dce_idx, unsigned long long *sk_out, long *ms_out, unsigned long long *stp_out) {
+    char u_last_t[4200], u_last_s[4200], u_last_m[4200];
+    cx_fmt(u_last_t, sizeof u_last_t, "%s/t_u%d.tape", e->run_dir, e->unit_shards - 1);
+    cx_fmt(u_last_s, sizeof u_last_s, "%s/t_u%d.st", e->run_dir, e->unit_shards - 1);
+    cx_fmt(u_last_m, sizeof u_last_m, "%s/t_u%d.st.meta", e->run_dir, e->unit_shards - 1);
+    if (verify_handoff_meta(u_last_m, u_last_s, u_last_t, e->run_id, e->cand_sha, e->mf_sha, "unit", e->unit_shards - 1) != 0) return 1;
+    char prev_st[4200], prev_m[4200];
+    if (dce_idx > 0) {
+        cx_fmt(prev_st, sizeof prev_st, "%s/t_dce_%d.st", e->run_dir, dce_idx - 1);
+        cx_fmt(prev_m, sizeof prev_m, "%s/t_dce_%d.st.meta", e->run_dir, dce_idx - 1);
+        if (verify_handoff_meta(prev_m, prev_st, "-", e->run_id, e->cand_sha, e->mf_sha, "dce_root", dce_idx - 1) != 0) return 1;
+    }
+    char dst[4200], dm[4200];
+    cx_fmt(dst, sizeof dst, "%s/t_dce_%d.st", e->run_dir, dce_idx);
+    cx_fmt(dm, sizeof dm, "%s/t_dce_%d.st.meta", e->run_dir, dce_idx);
+    if (touch_empty(dst) != 0) { sy_eprintf("tape-tldce-shard: REFUSE output-init-failed dce_root %d\n", r); return 1; }
+    char p_str[16], tot_str[16], u_t[32][4200];
+    cx_fmt(p_str, sizeof p_str, "%d", r); cx_fmt(tot_str, sizeof tot_str, "%d", e->dce_root_shards);
+    char *av[64]; int k = 0, rc = 0; long ms = 0;
+    av[k++] = e->run_bin; av[k++] = "--so"; av[k++] = e->so_path;
+    av[k++] = "--budget"; av[k++] = e->b_str; av[k++] = "--mem-extra"; av[k++] = e->m_str;
+    av[k++] = e->drv_slice; av[k++] = "r"; av[k++] = u_last_s;
+    av[k++] = (dce_idx == 0) ? "-" : prev_st;
+    av[k++] = dst; av[k++] = p_str; av[k++] = tot_str;
+    for (int s = 0; s < e->unit_shards; s++) {
+        cx_fmt(u_t[s], sizeof u_t[s], "%s/t_u%d.tape", e->run_dir, s);
+        av[k++] = u_t[s];
+    }
+    av[k] = 0;
+    if (run_cmd(av, e->root, e->shard_timeout, &rc, &ms, e->obuf, sizeof e->obuf, e->why, sizeof e->why) != 0 || rc != 0) {
+        (void)sy_unlink(dst);
+        sy_eprintf("tape-tldce-shard: dce root shard %d failed rc=%d ms=%ld why=%s\n", r, rc, ms, e->why); return 1;
+    }
+    unsigned long long stp = 0, sk = 0;
+    if (strstr(e->obuf, "TAPEMODE_RUN\tstatus=0\texit_code=0\t") == 0 ||
+        strstr(e->obuf, "SHARD_ROOT\t") == 0 ||
+        parse_u64_field(e->obuf, "steps=", &stp) != 0 ||
+        parse_u64_field(e->obuf, "skip=", &sk) != 0) {
+        (void)sy_unlink(dst);
+        sy_eprintf("tape-tldce-shard: REFUSE incomplete-tape-frame dce_root=%d\n", r); return 1;
+    }
+    if (write_handoff_meta(dm, e->run_id, e->cand_sha, e->mf_sha, "dce_root", dce_idx, dst, "-") != 0) return 1;
+    sy_printf("SHARD_RUN\tname=r%d\tkind=dce_root\trc=%d\tms=%ld\tsteps=%llu\tskip=%llu\n", r, rc, ms, stp, sk);
+    *sk_out = sk; *ms_out = ms; *stp_out = stp;
+    return 0;
+}
+
+static int step_dce_bfs(ShardEnv *e, int bfs_round, int dce_idx, const char *last_stage,
+                        unsigned long long *rem_out, long *ms_out, unsigned long long *stp_out) {
+    char u_last_s[4200], prev_st[4200], prev_m[4200];
+    cx_fmt(u_last_s, sizeof u_last_s, "%s/t_u%d.st", e->run_dir, e->unit_shards - 1);
+    cx_fmt(prev_st, sizeof prev_st, "%s/t_dce_%d.st", e->run_dir, dce_idx - 1);
+    cx_fmt(prev_m, sizeof prev_m, "%s/t_dce_%d.st.meta", e->run_dir, dce_idx - 1);
+    if (verify_handoff_meta(prev_m, prev_st, "-", e->run_id, e->cand_sha, e->mf_sha, last_stage, dce_idx - 1) != 0) return 1;
+    char dst[4200], dm[4200], pops_str[16], u_t[32][4200];
+    cx_fmt(dst, sizeof dst, "%s/t_dce_%d.st", e->run_dir, dce_idx);
+    cx_fmt(dm, sizeof dm, "%s/t_dce_%d.st.meta", e->run_dir, dce_idx);
+    cx_fmt(pops_str, sizeof pops_str, "%d", e->bfs_pops);
+    if (touch_empty(dst) != 0) { sy_eprintf("tape-tldce-shard: REFUSE output-init-failed dce_bfs %d\n", bfs_round); return 1; }
+    char *av[64]; int k = 0, rc = 0; long ms = 0;
+    av[k++] = e->run_bin; av[k++] = "--so"; av[k++] = e->so_path;
+    av[k++] = "--budget"; av[k++] = e->b_str; av[k++] = "--mem-extra"; av[k++] = e->m_str;
+    av[k++] = e->drv_slice; av[k++] = "w"; av[k++] = u_last_s;
+    av[k++] = prev_st; av[k++] = dst; av[k++] = pops_str;
+    for (int s = 0; s < e->unit_shards; s++) {
+        cx_fmt(u_t[s], sizeof u_t[s], "%s/t_u%d.tape", e->run_dir, s);
+        av[k++] = u_t[s];
+    }
+    av[k] = 0;
+    if (run_cmd(av, e->root, e->shard_timeout, &rc, &ms, e->obuf, sizeof e->obuf, e->why, sizeof e->why) != 0 || rc != 0) {
+        (void)sy_unlink(dst);
+        sy_eprintf("tape-tldce-shard: dce bfs shard %d failed rc=%d ms=%ld why=%s\n", bfs_round, rc, ms, e->why); return 1;
+    }
+    unsigned long long stp = 0, pops = 0, rem = 0;
+    if (strstr(e->obuf, "TAPEMODE_RUN\tstatus=0\texit_code=0\t") == 0 ||
+        strstr(e->obuf, "SHARD_BFS\t") == 0 ||
+        parse_u64_field(e->obuf, "steps=", &stp) != 0 ||
+        parse_u64_field(e->obuf, "pops=", &pops) != 0 ||
+        parse_u64_field(e->obuf, "rem=", &rem) != 0) {
+        (void)sy_unlink(dst);
+        sy_eprintf("tape-tldce-shard: REFUSE incomplete-tape-frame dce_bfs=%d\n", bfs_round); return 1;
+    }
+    if (write_handoff_meta(dm, e->run_id, e->cand_sha, e->mf_sha, "dce_bfs", dce_idx, dst, "-") != 0) return 1;
+    sy_printf("SHARD_RUN\tname=w%d\tkind=dce_bfs\tpops=%llu\trem=%llu\trc=%d\tms=%ld\tsteps=%llu\n", bfs_round, pops, rem, rc, ms, stp);
+    *rem_out = rem; *ms_out = ms; *stp_out = stp;
+    return 0;
+}
+
+static int step_compact(ShardEnv *e, int dce_idx, const char *last_stage, unsigned long long nat_dce_cut,
+                        int total_shards, long total_ms, long max_shard_ms, unsigned long long total_steps) {
+    char u_last_t[4200], u_last_s[4200], u_last_m[4200], dce_st[4200], dce_m[4200], nat_out[4200], ntsv[4250], nmeta[4250];
+    cx_fmt(u_last_t, sizeof u_last_t, "%s/t_u%d.tape", e->run_dir, e->unit_shards - 1);
+    cx_fmt(u_last_s, sizeof u_last_s, "%s/t_u%d.st", e->run_dir, e->unit_shards - 1);
+    cx_fmt(u_last_m, sizeof u_last_m, "%s/t_u%d.st.meta", e->run_dir, e->unit_shards - 1);
+    cx_fmt(dce_st, sizeof dce_st, "%s/t_dce_%d.st", e->run_dir, dce_idx - 1);
+    cx_fmt(dce_m, sizeof dce_m, "%s/t_dce_%d.st.meta", e->run_dir, dce_idx - 1);
+    cx_fmt(nat_out, sizeof nat_out, "%s/native_ref.tape", e->run_dir);
+    cx_fmt(ntsv, sizeof ntsv, "%s/nat_ref.tsv", e->run_dir);
+    cx_fmt(nmeta, sizeof nmeta, "%s/nat_ref.meta", e->run_dir);
+    if (verify_handoff_meta(u_last_m, u_last_s, u_last_t, e->run_id, e->cand_sha, e->mf_sha, "unit", e->unit_shards - 1) != 0) return 1;
+    if (verify_handoff_meta(nmeta, nat_out, ntsv, e->run_id, e->cand_sha, e->mf_sha, "native_ref", 0) != 0) return 1;
+    if (verify_handoff_meta(dce_m, dce_st, "-", e->run_id, e->cand_sha, e->mf_sha, last_stage, dce_idx - 1) != 0) return 1;
+    char tape_out[4200], n_str[16], u_t[32][4200];
+    cx_fmt(tape_out, sizeof tape_out, "%s/tape_final.tape", e->run_dir);
+    if (touch_empty(tape_out) != 0) { sy_eprintf("tape-tldce-shard: REFUSE output-init-failed tape_out\n"); return 1; }
+    cx_fmt(n_str, sizeof n_str, "%d", e->n_objs);
+    char *av[64]; int k = 0, rc = 0; long ms = 0;
+    av[k++] = e->run_bin; av[k++] = "--so"; av[k++] = e->so_path;
+    av[k++] = "--budget"; av[k++] = e->b_str; av[k++] = "--mem-extra"; av[k++] = e->m_str;
+    av[k++] = e->drv_slice; av[k++] = "c"; av[k++] = tape_out;
+    av[k++] = u_last_s; av[k++] = dce_st; av[k++] = n_str;
+    for (int s = 0; s < e->unit_shards; s++) {
+        cx_fmt(u_t[s], sizeof u_t[s], "%s/t_u%d.tape", e->run_dir, s);
+        av[k++] = u_t[s];
+    }
+    av[k] = 0;
+    if (run_cmd(av, e->root, e->shard_timeout, &rc, &ms, e->obuf, sizeof e->obuf, e->why, sizeof e->why) != 0 || rc != 0) {
+        (void)sy_unlink(tape_out);
+        sy_eprintf("tape-tldce-shard: dce compact shard failed rc=%d ms=%ld why=%s\n", rc, ms, e->why); return 1;
+    }
+    unsigned long long stp = 0, cut = 0;
+    if (strstr(e->obuf, "TAPEMODE_RUN\tstatus=0\texit_code=0\t") == 0 ||
+        strstr(e->obuf, "SHARD_COMPACT\t") == 0 ||
+        parse_u64_field(e->obuf, "steps=", &stp) != 0 ||
+        parse_u64_field(e->obuf, "dce_cut=", &cut) != 0) {
+        (void)sy_unlink(tape_out);
+        sy_eprintf("tape-tldce-shard: REFUSE missing-dce-cut or incomplete-tape-frame\n"); return 1;
+    }
+    sy_printf("SHARD_RUN\tname=c0\tkind=dce_compact\tdce_cut=%llu\trc=%d\tms=%ld\tsteps=%llu\n", cut, rc, ms, stp);
+    total_shards++; total_ms += ms; if (ms > max_shard_ms) max_shard_ms = ms; total_steps += stp;
+
+    long out_bytes = 0; char sha[65]; sha[0] = 0;
+    int eq = files_equal_nonempty(nat_out, tape_out, &out_bytes, sha);
+    int pass = (eq && cut == nat_dce_cut);
+    if (pass && e->out_copy[0]) {
+        unsigned char *fb = 0; int64_t fn = 0;
+        if (sy_read_file(tape_out, &fb, &fn, 64L * 1024L * 1024L) != 0 || !fb || fn <= 0 ||
+            sy_write_atomic(e->out_copy, fb, fn, 0644) != 0) {
+            if (fb) mm_free(fb);
+            sy_eprintf("tape-tldce-shard: REFUSE publish-out-failed path=%s\n", e->out_copy);
+            return 1;
+        }
+        mm_free(fb);
+    }
+    sy_printf("TAPE_TLDCE_SHARD_SUMMARY\tunits=%d\tshards=%d\ttotal_ms=%ld\tmax_shard_ms=%ld\ttotal_steps=%llu\tbytes=%ld\tdce_cut=%llu\tcmp=%s\tsha256=%s\n",
+              e->n_objs, total_shards, total_ms, max_shard_ms, total_steps, out_bytes, cut,
+              pass ? "EQUAL" : "DIFF", sha);
+    return pass ? 0 : 1;
+}
+
 int main(int argc, char **argv) {
     if (argc == 10 && !strcmp(argv[1], "--verify-handoff")) {
         return verify_handoff_meta(argv[2], argv[3], argv[4], argv[5], argv[6], argv[7], argv[8], atoi(argv[9])) == 0 ? 0 : 1;
     }
 
-    char manifest[4096] = "", obj_dir[4096] = "", prod[4096] = "", so_arg[4096] = "", run_arg[4096] = "";
-    char reuse_dir[4096] = "", out_copy[4096] = "";
-    int unit_shards = 4, dce_root_shards = 2, bfs_pops = 1400, shard_timeout = 55;
+    static ShardEnv e;
+    memset(&e, 0, sizeof e);
+    char manifest[4096] = "", obj_dir[4096] = "", so_arg[4096] = "", run_arg[4096] = "";
+    char reuse_dir[4096] = "", stage[32] = "all", run_dir_arg[4096] = "";
+    e.unit_shards = 4; e.dce_root_shards = 2; e.bfs_pops = 1400; e.shard_timeout = 55;
+    int shard_idx = -1;
     unsigned long long budget = 20000000000ull, mem_extra = 268435456ull;
 
     for (int i = 1; i < argc; i++) {
         if (!strcmp(argv[i], "--manifest") && i + 1 < argc) cx_fmt(manifest, sizeof manifest, "%s", argv[++i]);
         else if (!strcmp(argv[i], "--obj-dir") && i + 1 < argc) cx_fmt(obj_dir, sizeof obj_dir, "%s", argv[++i]);
-        else if (!strcmp(argv[i], "--product") && i + 1 < argc) cx_fmt(prod, sizeof prod, "%s", argv[++i]);
+        else if (!strcmp(argv[i], "--product") && i + 1 < argc) cx_fmt(e.prod, sizeof e.prod, "%s", argv[++i]);
         else if (!strcmp(argv[i], "--so") && i + 1 < argc) cx_fmt(so_arg, sizeof so_arg, "%s", argv[++i]);
         else if (!strcmp(argv[i], "--run-bin") && i + 1 < argc) cx_fmt(run_arg, sizeof run_arg, "%s", argv[++i]);
         else if (!strcmp(argv[i], "--reuse-dir") && i + 1 < argc) cx_fmt(reuse_dir, sizeof reuse_dir, "%s", argv[++i]);
-        else if (!strcmp(argv[i], "--out") && i + 1 < argc) cx_fmt(out_copy, sizeof out_copy, "%s", argv[++i]);
-        else if (!strcmp(argv[i], "--unit-shards") && i + 1 < argc) unit_shards = atoi(argv[++i]);
-        else if (!strcmp(argv[i], "--dce-root-shards") && i + 1 < argc) dce_root_shards = atoi(argv[++i]);
-        else if (!strcmp(argv[i], "--bfs-pops") && i + 1 < argc) bfs_pops = atoi(argv[++i]);
+        else if (!strcmp(argv[i], "--out") && i + 1 < argc) cx_fmt(e.out_copy, sizeof e.out_copy, "%s", argv[++i]);
+        else if (!strcmp(argv[i], "--unit-shards") && i + 1 < argc) e.unit_shards = atoi(argv[++i]);
+        else if (!strcmp(argv[i], "--dce-root-shards") && i + 1 < argc) e.dce_root_shards = atoi(argv[++i]);
+        else if (!strcmp(argv[i], "--bfs-pops") && i + 1 < argc) e.bfs_pops = atoi(argv[++i]);
         else if (!strcmp(argv[i], "--budget") && i + 1 < argc) budget = (unsigned long long)strtoull(argv[++i], 0, 10);
         else if (!strcmp(argv[i], "--mem-extra") && i + 1 < argc) mem_extra = (unsigned long long)strtoull(argv[++i], 0, 10);
-        else if (!strcmp(argv[i], "--shard-timeout") && i + 1 < argc) shard_timeout = atoi(argv[++i]);
+        else if (!strcmp(argv[i], "--shard-timeout") && i + 1 < argc) e.shard_timeout = atoi(argv[++i]);
+        else if (!strcmp(argv[i], "--stage") && i + 1 < argc) cx_fmt(stage, sizeof stage, "%s", argv[++i]);
+        else if (!strcmp(argv[i], "--run-dir") && i + 1 < argc) cx_fmt(run_dir_arg, sizeof run_dir_arg, "%s", argv[++i]);
+        else if (!strcmp(argv[i], "--shard-idx") && i + 1 < argc) shard_idx = atoi(argv[++i]);
         else {
             sy_eprintf("tape-tldce-shard: REFUSE unknown arg %s\n", argv[i]);
             return 2;
         }
     }
+    int is_all = (!strcmp(stage, "all"));
+    int is_prep = (!strcmp(stage, "prep"));
+    int is_native = (!strcmp(stage, "native"));
+    int is_unit = (!strcmp(stage, "unit"));
+    int is_root = (!strcmp(stage, "dce-root"));
+    int is_bfs = (!strcmp(stage, "dce-bfs"));
+    int is_compact = (!strcmp(stage, "compact"));
+    if (!is_all && !is_prep && !is_native && !is_unit && !is_root && !is_bfs && !is_compact) {
+        sy_eprintf("tape-tldce-shard: REFUSE unknown --stage %s\n", stage);
+        return 2;
+    }
+    if (!is_all && !run_dir_arg[0]) {
+        sy_eprintf("tape-tldce-shard: REFUSE --run-dir is required for --stage %s\n", stage);
+        return 2;
+    }
     if (!manifest[0] || !obj_dir[0]) {
         sy_eprintf("tape-tldce-shard: REFUSE --manifest and --obj-dir are required\n");
         return 2;
     }
-    if (unit_shards < 1 || unit_shards > 32 || dce_root_shards < 1 || dce_root_shards > 16 ||
-        bfs_pops < 1 || shard_timeout < 1 || shard_timeout > 60) {
+    if (e.unit_shards < 1 || e.unit_shards > 32 || e.dce_root_shards < 1 || e.dce_root_shards > 16 ||
+        e.bfs_pops < 1 || e.shard_timeout < 1 || e.shard_timeout > 60) {
         sy_eprintf("tape-tldce-shard: REFUSE invalid shard parameters (timeout must be 1..60)\n");
         return 2;
     }
 
-    char root[4096];
-    if (!getcwd(root, sizeof root)) return 2;
-    if (!prod[0]) cx_fmt(prod, sizeof prod, "%s/unisacc.com", root);
+    if (!getcwd(e.root, sizeof e.root)) return 2;
+    if (!e.prod[0]) cx_fmt(e.prod, sizeof e.prod, "%s/unisacc.com", e.root);
 
-    char cand_sha[65], mf_sha[65], tl_sha[65], tl_src[4200];
-    cx_fmt(tl_src, sizeof tl_src, "%s/cx/compiler/tapelink.cx", root);
-    if (sha_file_hex(prod, cand_sha) != 0 || sha_file_hex(manifest, mf_sha) != 0 || sha_file_hex(tl_src, tl_sha) != 0) {
+    char tl_src[4200];
+    cx_fmt(tl_src, sizeof tl_src, "%s/cx/compiler/tapelink.cx", e.root);
+    if (sha_file_hex(e.prod, e.cand_sha) != 0 || sha_file_hex(manifest, e.mf_sha) != 0 || sha_file_hex(tl_src, e.tl_sha) != 0) {
         sy_eprintf("tape-tldce-shard: REFUSE cannot hash candidate/manifest/tapelink\n");
         return 2;
     }
 
-    static char objs[SH_MAX_OBJS][512];
     int bad = 0;
-    int n_objs = load_manifest(manifest, obj_dir, objs, &bad);
-    if (n_objs <= 0 || bad) {
+    e.n_objs = load_manifest(manifest, obj_dir, e.objs, &bad);
+    if (e.n_objs <= 0 || bad) {
         sy_eprintf("tape-tldce-shard: REFUSE manifest verification failed\n");
         return 2;
     }
-    if (unit_shards > n_objs) unit_shards = n_objs;
+    if (e.unit_shards > e.n_objs) e.unit_shards = e.n_objs;
 
-    char tmp[4096], run_id[64], run_dir[4200];
-    cx_fmt(run_id, sizeof run_id, "%d-%lld", (int)getpid(), (long long)sy_mono_ns());
+    if (is_unit && (shard_idx < 0 || shard_idx >= e.unit_shards)) {
+        sy_eprintf("tape-tldce-shard: REFUSE invalid --shard-idx %d for unit (0..%d)\n", shard_idx, e.unit_shards - 1);
+        return 2;
+    }
+    if (is_root && (shard_idx < 0 || shard_idx >= e.dce_root_shards)) {
+        sy_eprintf("tape-tldce-shard: REFUSE invalid --shard-idx %d for dce-root (0..%d)\n", shard_idx, e.dce_root_shards - 1);
+        return 2;
+    }
+    if (is_bfs && (shard_idx < 0 || shard_idx >= SH_MAX_BFS_ROUNDS)) {
+        sy_eprintf("tape-tldce-shard: REFUSE invalid --shard-idx %d for dce-bfs\n", shard_idx);
+        return 2;
+    }
+
+    cx_fmt(e.run_id, sizeof e.run_id, "%d-%lld", (int)getpid(), (long long)sy_mono_ns());
     if (reuse_dir[0]) {
-        cx_fmt(tmp, sizeof tmp, "%s", reuse_dir);
-        (void)sy_mkdir(tmp, 0755);
+        cx_fmt(e.tmp, sizeof e.tmp, "%s", reuse_dir);
+        (void)sy_mkdir(e.tmp, 0755);
+    } else if (!is_all) {
+        cx_fmt(e.tmp, sizeof e.tmp, "%s", run_dir_arg);
+        (void)sy_mkdir(e.tmp, 0755);
     } else {
-        if (sr_scratch("tape-tldce-shard", tmp, (int)sizeof tmp) != 0) {
-            cx_fmt(tmp, sizeof tmp, "/tmp/tape-tldce-shard-%s", run_id);
-            if (sy_mkdir(tmp, 0755) != 0) return 2;
+        if (sr_scratch("tape-tldce-shard", e.tmp, (int)sizeof e.tmp) != 0) {
+            cx_fmt(e.tmp, sizeof e.tmp, "/tmp/tape-tldce-shard-%s", e.run_id);
+            if (sy_mkdir(e.tmp, 0755) != 0) return 2;
         }
     }
-    cx_fmt(run_dir, sizeof run_dir, "%s/run-%s", tmp, run_id);
-    if (sy_mkdir(run_dir, 0700) != 0) {
-        sy_eprintf("tape-tldce-shard: REFUSE cannot create run_dir %s\n", run_dir);
-        return 1;
-    }
 
-    char link_cx[4200], tgt_cx[4200], link_tsv[4200], tgt_tsv[4200];
-    cx_fmt(link_cx, sizeof link_cx, "%s/cx", tmp); cx_fmt(tgt_cx, sizeof tgt_cx, "%s/cx", root);
-    cx_fmt(link_tsv, sizeof link_tsv, "%s/cxroot.tsv", tmp); cx_fmt(tgt_tsv, sizeof tgt_tsv, "%s/cxroot.tsv", root);
-    (void)sy_unlink(link_cx); (void)sy_symlink(tgt_cx, link_cx);
-    (void)sy_unlink(link_tsv); (void)sy_symlink(tgt_tsv, link_tsv);
-
-    char drv_cx[4200], drv_nat[4200], drv_tape[4200], drv_slice[4200], so_path[4200], run_bin[4200], id_path[4200];
-    cx_fmt(drv_cx, sizeof drv_cx, "%s/tldce_shard.cx", tmp);
-    cx_fmt(drv_nat, sizeof drv_nat, "%s/tldce_shard_native", tmp);
-    cx_fmt(drv_tape, sizeof drv_tape, "%s/tldce_shard.tape", tmp);
-    cx_fmt(drv_slice, sizeof drv_slice, "%s/tldce_shard.tapeslice", tmp);
-    cx_fmt(id_path, sizeof id_path, "%s/reuse_identity.tsv", tmp);
-    if (so_arg[0]) cx_fmt(so_path, sizeof so_path, "%s", so_arg);
-    else cx_fmt(so_path, sizeof so_path, "%s/tapemode.so", tmp);
-    if (run_arg[0]) cx_fmt(run_bin, sizeof run_bin, "%s", run_arg);
-    else cx_fmt(run_bin, sizeof run_bin, "%s/tapemode_run", tmp);
-
-    static char obuf[65536];
-    char why[192];
-    int rc = 0; long ms = 0;
-    int reuse_hit = 0;
-
-    if (reuse_dir[0]) {
-        int any_existing = (sy_exists(drv_nat) == 1 || sy_exists(drv_slice) == 1 ||
-                            sy_exists(id_path) == 1);
-        if (any_existing) {
-            const char *chk_so = so_arg[0] ? so_path : so_path;
-            const char *chk_rb = run_arg[0] ? run_bin : run_bin;
-            char def_so[4200], def_rb[4200];
-            cx_fmt(def_so, sizeof def_so, "%s/tapemode.so", tmp);
-            cx_fmt(def_rb, sizeof def_rb, "%s/tapemode_run", tmp);
-            (void)chk_so; (void)chk_rb;
-            if (verify_reuse_identity(id_path, cand_sha, tl_sha, drv_nat, drv_slice, def_so, def_rb) != 0) {
-                sy_eprintf("tape-tldce-shard: REFUSE reuse-identity-mismatch dir=%s\n", reuse_dir);
+    if (is_all) {
+        cx_fmt(e.run_dir, sizeof e.run_dir, "%s/run-%s", e.tmp, e.run_id);
+        if (sy_mkdir(e.run_dir, 0700) != 0) {
+            sy_eprintf("tape-tldce-shard: REFUSE cannot create run_dir %s\n", e.run_dir);
+            return 1;
+        }
+    } else {
+        cx_fmt(e.run_dir, sizeof e.run_dir, "%s", run_dir_arg);
+        if (is_prep) {
+            char stsv[4250];
+            cx_fmt(stsv, sizeof stsv, "%s/stage_run.tsv", e.run_dir);
+            if (sy_exists(stsv) == 1) {
+                sy_eprintf("tape-tldce-shard: REFUSE stale-run-dir %s\n", e.run_dir);
                 return 2;
             }
-            reuse_hit = 1;
+            (void)sy_mkdir(e.run_dir, 0700);
+        } else if (sy_exists(e.run_dir) != 1) {
+            sy_eprintf("tape-tldce-shard: REFUSE missing-run-dir %s\n", e.run_dir);
+            return 2;
         }
     }
 
-    if (!reuse_hit) {
-        if (build_shard_cx(root, drv_cx) != 0) { sy_eprintf("tape-tldce-shard: failed to assemble driver\n"); return 1; }
-        char *av_nat[] = {"sh", prod, drv_cx, "-o", drv_nat, 0};
-        if (run_cmd(av_nat, root, 55, &rc, &ms, obuf, sizeof obuf, why, sizeof why) != 0 || rc != 0) {
-            sy_eprintf("tape-tldce-shard: native driver build failed rc=%d\n", rc); return 1;
-        }
-        char *av_tp[] = {"sh", prod, "--target", "lnx/x86_64", "-S", drv_cx, "-o", drv_tape, 0};
-        if (run_cmd(av_tp, root, 55, &rc, &ms, obuf, sizeof obuf, why, sizeof why) != 0 || rc != 0) {
-            sy_eprintf("tape-tldce-shard: tape emit failed rc=%d\n", rc); return 1;
-        }
-        char *av_pk[] = {"sh", prod, "tools/tapepack.cx", "--", drv_tape, "-o", drv_slice, 0};
-        if (run_cmd(av_pk, root, 55, &rc, &ms, obuf, sizeof obuf, why, sizeof why) != 0 || rc != 0) {
-            sy_eprintf("tape-tldce-shard: tapepack failed rc=%d\n", rc); return 1;
-        }
-        if (!so_arg[0]) {
-            char *av_so[] = {"sh", prod, "tools/tape-sidecar-build.cx", "--", root, tmp, 0};
-            if (run_cmd(av_so, root, 55, &rc, &ms, obuf, sizeof obuf, why, sizeof why) != 0 || rc != 0) {
-                sy_eprintf("tape-tldce-shard: sidecar build failed rc=%d\n", rc); return 1;
+    char drv_cx[4200], drv_tape[4200], id_path[4200];
+    cx_fmt(drv_cx, sizeof drv_cx, "%s/tldce_shard.cx", e.tmp);
+    cx_fmt(e.drv_nat, sizeof e.drv_nat, "%s/tldce_shard_native", e.tmp);
+    cx_fmt(drv_tape, sizeof drv_tape, "%s/tldce_shard.tape", e.tmp);
+    cx_fmt(e.drv_slice, sizeof e.drv_slice, "%s/tldce_shard.tapeslice", e.tmp);
+    cx_fmt(id_path, sizeof id_path, "%s/reuse_identity.tsv", e.tmp);
+    if (so_arg[0]) cx_fmt(e.so_path, sizeof e.so_path, "%s", so_arg);
+    else cx_fmt(e.so_path, sizeof e.so_path, "%s/tapemode.so", e.tmp);
+    if (run_arg[0]) cx_fmt(e.run_bin, sizeof e.run_bin, "%s", run_arg);
+    else cx_fmt(e.run_bin, sizeof e.run_bin, "%s/tapemode_run", e.tmp);
+
+    cx_fmt(e.b_str, sizeof e.b_str, "%llu", budget);
+    cx_fmt(e.m_str, sizeof e.m_str, "%llu", mem_extra);
+
+    if (is_all || is_prep) {
+        char link_cx[4200], tgt_cx[4200], link_tsv[4200], tgt_tsv[4200];
+        cx_fmt(link_cx, sizeof link_cx, "%s/cx", e.tmp); cx_fmt(tgt_cx, sizeof tgt_cx, "%s/cx", e.root);
+        cx_fmt(link_tsv, sizeof link_tsv, "%s/cxroot.tsv", e.tmp); cx_fmt(tgt_tsv, sizeof tgt_tsv, "%s/cxroot.tsv", e.root);
+        (void)sy_unlink(link_cx); (void)sy_symlink(tgt_cx, link_cx);
+        (void)sy_unlink(link_tsv); (void)sy_symlink(tgt_tsv, link_tsv);
+
+        int rc = 0; long ms = 0;
+        int reuse_hit = 0;
+        if (reuse_dir[0]) {
+            int any_existing = (sy_exists(e.drv_nat) == 1 || sy_exists(e.drv_slice) == 1 ||
+                                sy_exists(id_path) == 1);
+            if (any_existing) {
+                char def_so[4200], def_rb[4200];
+                cx_fmt(def_so, sizeof def_so, "%s/tapemode.so", e.tmp);
+                cx_fmt(def_rb, sizeof def_rb, "%s/tapemode_run", e.tmp);
+                if (verify_reuse_identity(id_path, e.cand_sha, e.tl_sha, e.drv_nat, e.drv_slice, def_so, def_rb) != 0) {
+                    sy_eprintf("tape-tldce-shard: REFUSE reuse-identity-mismatch dir=%s\n", reuse_dir);
+                    return 2;
+                }
+                reuse_hit = 1;
             }
         }
-        if (!run_arg[0]) {
-            char *av_rb[] = {"sh", prod, "tools/tapemode-run.cx", "-o", run_bin, 0};
-            if (run_cmd(av_rb, root, 55, &rc, &ms, obuf, sizeof obuf, why, sizeof why) != 0 || rc != 0) {
-                sy_eprintf("tape-tldce-shard: tapemode-run build failed rc=%d\n", rc); return 1;
+
+        if (!reuse_hit) {
+            if (build_shard_cx(e.root, drv_cx) != 0) { sy_eprintf("tape-tldce-shard: failed to assemble driver\n"); return 1; }
+            char *av_nat[] = {"sh", e.prod, drv_cx, "-o", e.drv_nat, 0};
+            if (run_cmd(av_nat, e.root, 55, &rc, &ms, e.obuf, sizeof e.obuf, e.why, sizeof e.why) != 0 || rc != 0) {
+                sy_eprintf("tape-tldce-shard: native driver build failed rc=%d\n", rc); return 1;
+            }
+            char *av_tp[] = {"sh", e.prod, "--target", "lnx/x86_64", "-S", drv_cx, "-o", drv_tape, 0};
+            if (run_cmd(av_tp, e.root, 55, &rc, &ms, e.obuf, sizeof e.obuf, e.why, sizeof e.why) != 0 || rc != 0) {
+                sy_eprintf("tape-tldce-shard: tape emit failed rc=%d\n", rc); return 1;
+            }
+            char *av_pk[] = {"sh", e.prod, "tools/tapepack.cx", "--", drv_tape, "-o", e.drv_slice, 0};
+            if (run_cmd(av_pk, e.root, 55, &rc, &ms, e.obuf, sizeof e.obuf, e.why, sizeof e.why) != 0 || rc != 0) {
+                sy_eprintf("tape-tldce-shard: tapepack failed rc=%d\n", rc); return 1;
+            }
+            if (!so_arg[0]) {
+                char *av_so[] = {"sh", e.prod, "tools/tape-sidecar-build.cx", "--", e.root, e.tmp, 0};
+                if (run_cmd(av_so, e.root, 55, &rc, &ms, e.obuf, sizeof e.obuf, e.why, sizeof e.why) != 0 || rc != 0) {
+                    sy_eprintf("tape-tldce-shard: sidecar build failed rc=%d\n", rc); return 1;
+                }
+            }
+            if (!run_arg[0]) {
+                char *av_rb[] = {"sh", e.prod, "tools/tapemode-run.cx", "-o", e.run_bin, 0};
+                if (run_cmd(av_rb, e.root, 55, &rc, &ms, e.obuf, sizeof e.obuf, e.why, sizeof e.why) != 0 || rc != 0) {
+                    sy_eprintf("tape-tldce-shard: tapemode-run build failed rc=%d\n", rc); return 1;
+                }
+            }
+            if (!so_arg[0] && !run_arg[0]) {
+                if (write_reuse_identity(id_path, e.cand_sha, e.tl_sha, e.drv_nat, e.drv_slice, e.so_path, e.run_bin) != 0) {
+                    sy_eprintf("tape-tldce-shard: failed to write reuse_identity.tsv\n"); return 1;
+                }
             }
         }
-        if (!so_arg[0] && !run_arg[0]) {
-            if (write_reuse_identity(id_path, cand_sha, tl_sha, drv_nat, drv_slice, so_path, run_bin) != 0) {
-                sy_eprintf("tape-tldce-shard: failed to write reuse_identity.tsv\n"); return 1;
+
+        unsigned long long hmask = 0; int hcnt = 0; long sbytes = 0;
+        if (inspect_slice_mask(e.drv_slice, &hmask, &hcnt, &sbytes) != 0 || (hmask & ~383ull) != 0) {
+            sy_eprintf("tape-tldce-shard: REFUSE slice host mask %llu exceeds M1 frozen 383\n", hmask);
+            return 1;
+        }
+        sy_printf("SHARD_SLICE\tbytes=%ld\thost_slots=%d\tmask=%llu\tsubset_m1_383=1\n", sbytes, hcnt, hmask);
+
+        if (is_prep) {
+            char param_sha[65];
+            if (compute_stage_param_sha(&e, budget, mem_extra, param_sha) != 0 ||
+                write_stage_run_meta(&e, param_sha) != 0) {
+                sy_eprintf("tape-tldce-shard: REFUSE stage-meta-write\n");
+                return 1;
             }
+            sy_printf("STAGE_PREP\trun_id=%s\trun_dir=%s\tunits=%d\tunit_shards=%d\tdce_root_shards=%d\n",
+                      e.run_id, e.run_dir, e.n_objs, e.unit_shards, e.dce_root_shards);
+            return 0;
+        }
+    } else {
+        char param_sha[65];
+        if (compute_stage_param_sha(&e, budget, mem_extra, param_sha) != 0 ||
+            verify_stage_run_meta(&e, param_sha) != 0) {
+            return 2;
+        }
+        if (is_native) return step_native_ref(&e, 0);
+        if (is_unit) return step_unit_shard(&e, shard_idx, 0, 0);
+        if (is_root) {
+            int dce_idx = 0, last_root = -1, bfs_rounds = 0, dce_shards = 0;
+            long dce_ms = 0, dce_max_ms = 0;
+            unsigned long long skip = 0, rem = 1ull, dce_steps = 0;
+            char last_stage[32] = "dce_root";
+            if (shard_idx > 0) {
+                if (read_dce_prog(&e, &dce_idx, last_stage, sizeof last_stage, &skip, &rem, &last_root,
+                                  &bfs_rounds, &dce_shards, &dce_ms, &dce_max_ms, &dce_steps) != 0) return 1;
+                if (strcmp(last_stage, "dce_root") != 0 || skip != 0 || last_root != shard_idx - 1) {
+                    sy_eprintf("tape-tldce-shard: REFUSE out-of-order dce-root idx=%d last_root=%d skip=%llu\n",
+                               shard_idx, last_root, skip);
+                    return 2;
+                }
+            }
+            long ms = 0; unsigned long long stp = 0, sk = 0;
+            if (step_dce_root(&e, shard_idx, dce_idx, &sk, &ms, &stp) != 0) return 1;
+            dce_idx++; dce_shards++; dce_ms += ms; if (ms > dce_max_ms) dce_max_ms = ms; dce_steps += stp;
+            char st_p[4200]; cx_fmt(st_p, sizeof st_p, "%s/t_dce_%d.st", e.run_dir, dce_idx - 1);
+            if (write_dce_prog(&e, st_p, dce_idx, "dce_root", sk, sk ? 0ull : 1ull, shard_idx, bfs_rounds,
+                               dce_shards, dce_ms, dce_max_ms, dce_steps) != 0) return 1;
+            return 0;
+        }
+        if (is_bfs) {
+            int dce_idx = 0, last_root = -1, bfs_rounds = 0, dce_shards = 0;
+            long dce_ms = 0, dce_max_ms = 0;
+            unsigned long long skip = 0, rem = 0, dce_steps = 0;
+            char last_stage[32] = "";
+            if (read_dce_prog(&e, &dce_idx, last_stage, sizeof last_stage, &skip, &rem, &last_root,
+                              &bfs_rounds, &dce_shards, &dce_ms, &dce_max_ms, &dce_steps) != 0) return 1;
+            if (skip != 0 || rem == 0 || bfs_rounds != shard_idx || last_root != e.dce_root_shards - 1) {
+                sy_eprintf("tape-tldce-shard: REFUSE invalid dce-bfs state idx=%d expected=%d skip=%llu rem=%llu\n",
+                           shard_idx, bfs_rounds, skip, rem);
+                return 2;
+            }
+            if (dce_idx >= 60) { sy_eprintf("tape-tldce-shard: BFS exceeded max rounds\n"); return 1; }
+            long ms = 0; unsigned long long stp = 0, next_rem = 0;
+            if (step_dce_bfs(&e, shard_idx, dce_idx, last_stage, &next_rem, &ms, &stp) != 0) return 1;
+            dce_idx++; bfs_rounds++; dce_shards++; dce_ms += ms; if (ms > dce_max_ms) dce_max_ms = ms; dce_steps += stp;
+            char st_p[4200]; cx_fmt(st_p, sizeof st_p, "%s/t_dce_%d.st", e.run_dir, dce_idx - 1);
+            if (write_dce_prog(&e, st_p, dce_idx, "dce_bfs", 0ull, next_rem, last_root, bfs_rounds,
+                               dce_shards, dce_ms, dce_max_ms, dce_steps) != 0) return 1;
+            return 0;
+        }
+        if (is_compact) {
+            int dce_idx = 0, last_root = -1, bfs_rounds = 0, dce_shards = 0;
+            long dce_ms = 0, dce_max_ms = 0;
+            unsigned long long skip = 0, rem = 1ull, dce_steps = 0;
+            char last_stage[32] = "";
+            if (read_dce_prog(&e, &dce_idx, last_stage, sizeof last_stage, &skip, &rem, &last_root,
+                              &bfs_rounds, &dce_shards, &dce_ms, &dce_max_ms, &dce_steps) != 0) return 1;
+            if (skip == 0 && (rem != 0 || last_root != e.dce_root_shards - 1)) {
+                sy_eprintf("tape-tldce-shard: REFUSE compact before bfs finished rem=%llu last_root=%d\n", rem, last_root);
+                return 2;
+            }
+            char ntsv[4250], cut_s[32];
+            cx_fmt(ntsv, sizeof ntsv, "%s/nat_ref.tsv", e.run_dir);
+            unsigned char *nb = 0; int64_t nn = 0;
+            if (sy_read_file(ntsv, &nb, &nn, 4096) != 0 || !nb || nn <= 0) {
+                if (nb) mm_free(nb);
+                sy_eprintf("tape-tldce-shard: REFUSE missing-native-ref-tsv\n"); return 1;
+            }
+            char *nt = (char *)mm_alloc((long)nn + 1L);
+            if (!nt) { mm_free(nb); return 1; }
+            mm_copy(nt, (long)nn + 1L, nb, (long)nn); nt[nn] = 0; mm_free(nb);
+            if (parse_tab_kv(nt, "dce_cut", cut_s, sizeof cut_s) != 0) {
+                mm_free(nt); sy_eprintf("tape-tldce-shard: REFUSE invalid-native-ref-tsv\n"); return 1;
+            }
+            unsigned long long nat_dce_cut = (unsigned long long)strtoull(cut_s, 0, 10);
+            mm_free(nt);
+            int total_shards = dce_shards;
+            long total_ms = dce_ms, max_shard_ms = dce_max_ms;
+            unsigned long long total_steps = dce_steps;
+            for (int s = 0; s < e.unit_shards; s++) {
+                char ustat[4200]; cx_fmt(ustat, sizeof ustat, "%s/t_u%d.stat", e.run_dir, s);
+                long ums = 0; unsigned long long ustp = 0;
+                if (read_stat_file(ustat, &ums, &ustp) == 0) {
+                    total_ms += ums; if (ums > max_shard_ms) max_shard_ms = ums; total_steps += ustp;
+                }
+                total_shards++;
+            }
+            return step_compact(&e, dce_idx, last_stage, nat_dce_cut, total_shards, total_ms, max_shard_ms, total_steps);
         }
     }
 
-    unsigned long long hmask = 0; int hcnt = 0; long sbytes = 0;
-    if (inspect_slice_mask(drv_slice, &hmask, &hcnt, &sbytes) != 0 || (hmask & ~383ull) != 0) {
-        sy_eprintf("tape-tldce-shard: REFUSE slice host mask %llu exceeds M1 frozen 383\n", hmask);
-        return 1;
-    }
-    sy_printf("SHARD_SLICE\tbytes=%ld\thost_slots=%d\tmask=%llu\tsubset_m1_383=1\n", sbytes, hcnt, hmask);
-
-    /* Step 1: Single-process native reference */
-    char nat_out[4200];
-    cx_fmt(nat_out, sizeof nat_out, "%s/native_ref.tape", run_dir);
-    if (touch_empty(nat_out) != 0) { sy_eprintf("tape-tldce-shard: REFUSE output-init-failed nat_out\n"); return 1; }
-    char *av_ref[SH_MAX_OBJS + 8]; int ap = 0;
-    av_ref[ap++] = drv_nat; av_ref[ap++] = "s"; av_ref[ap++] = nat_out;
-    for (int i = 0; i < n_objs; i++) av_ref[ap++] = objs[i];
-    av_ref[ap] = 0;
-    long nat_ms = 0;
-    if (run_cmd(av_ref, root, 55, &rc, &nat_ms, obuf, sizeof obuf, why, sizeof why) != 0 || rc != 0) {
-        (void)sy_unlink(nat_out);
-        sy_eprintf("tape-tldce-shard: native reference failed rc=%d\n", rc); return 1;
-    }
     unsigned long long nat_dce_cut = 0;
-    if (strstr(obuf, "SHARD_NATIVE\t") == 0 || parse_u64_field(obuf, "dce_cut=", &nat_dce_cut) != 0) {
-        (void)sy_unlink(nat_out);
-        sy_eprintf("tape-tldce-shard: REFUSE missing-native-dce-cut\n"); return 1;
-    }
-    sy_printf("NATIVE_REF\tunits=%d\tms=%ld\tdce_cut=%llu\n", n_objs, nat_ms, nat_dce_cut);
-
-    char b_str[32], m_str[32];
-    cx_fmt(b_str, sizeof b_str, "%llu", budget);
-    cx_fmt(m_str, sizeof m_str, "%llu", mem_extra);
+    if (step_native_ref(&e, &nat_dce_cut) != 0) return 1;
 
     int total_shards = 0;
     long total_ms = 0, max_shard_ms = 0;
     unsigned long long total_steps = 0;
 
-    /* Step 2: Unit shards under tape */
-    char u_tapes[32][4200], u_states[32][4200], u_metas[32][4200];
-    int u_pos = 0;
-    for (int s = 0; s < unit_shards; s++) {
-        if (s > 0 && verify_handoff_meta(u_metas[s - 1], u_states[s - 1], u_tapes[s - 1],
-                                         run_id, cand_sha, mf_sha, "unit", s - 1) != 0) return 1;
-        int rem_u = n_objs - u_pos;
-        int rem_s = unit_shards - s;
-        int take = (rem_u + rem_s - 1) / rem_s;
-        cx_fmt(u_tapes[s], sizeof u_tapes[s], "%s/t_u%d.tape", run_dir, s);
-        cx_fmt(u_states[s], sizeof u_states[s], "%s/t_u%d.st", run_dir, s);
-        cx_fmt(u_metas[s], sizeof u_metas[s], "%s/t_u%d.st.meta", run_dir, s);
-        if (touch_empty(u_tapes[s]) != 0 || touch_empty(u_states[s]) != 0) {
-            sy_eprintf("tape-tldce-shard: REFUSE output-init-failed unit %d\n", s); return 1;
-        }
-        char u_str[16]; cx_fmt(u_str, sizeof u_str, "%d", u_pos);
-        char *av[SH_MAX_OBJS + 16]; int k = 0;
-        av[k++] = run_bin; av[k++] = "--so"; av[k++] = so_path;
-        av[k++] = "--budget"; av[k++] = b_str; av[k++] = "--mem-extra"; av[k++] = m_str;
-        av[k++] = drv_slice; av[k++] = "u"; av[k++] = u_tapes[s];
-        av[k++] = (s == 0) ? "-" : u_states[s - 1];
-        av[k++] = u_states[s]; av[k++] = u_str;
-        for (int j = 0; j < take; j++) av[k++] = objs[u_pos + j];
-        av[k] = 0;
-        if (run_cmd(av, root, shard_timeout, &rc, &ms, obuf, sizeof obuf, why, sizeof why) != 0 || rc != 0) {
-            (void)sy_unlink(u_tapes[s]); (void)sy_unlink(u_states[s]);
-            sy_eprintf("tape-tldce-shard: unit shard %d failed rc=%d ms=%ld why=%s\n", s, rc, ms, why); return 1;
-        }
-        unsigned long long stp = 0;
-        if (strstr(obuf, "TAPEMODE_RUN\tstatus=0\texit_code=0\t") == 0 ||
-            strstr(obuf, "SHARD_UNIT\t") == 0 || parse_u64_field(obuf, "steps=", &stp) != 0) {
-            (void)sy_unlink(u_tapes[s]); (void)sy_unlink(u_states[s]);
-            sy_eprintf("tape-tldce-shard: REFUSE incomplete-tape-frame unit=%d\n", s); return 1;
-        }
-        if (write_handoff_meta(u_metas[s], run_id, cand_sha, mf_sha, "unit", s, u_states[s], u_tapes[s]) != 0) {
-            sy_eprintf("tape-tldce-shard: REFUSE handoff-meta-write unit=%d\n", s); return 1;
-        }
-        sy_printf("SHARD_RUN\tname=u%d\tkind=unit\tunits=%d\trc=%d\tms=%ld\tsteps=%llu\n", s, take, rc, ms, stp);
+    for (int s = 0; s < e.unit_shards; s++) {
+        long ms = 0; unsigned long long stp = 0;
+        if (step_unit_shard(&e, s, &ms, &stp) != 0) return 1;
         total_shards++; total_ms += ms; if (ms > max_shard_ms) max_shard_ms = ms; total_steps += stp;
-        u_pos += take;
     }
 
-    if (verify_handoff_meta(u_metas[unit_shards - 1], u_states[unit_shards - 1], u_tapes[unit_shards - 1],
-                            run_id, cand_sha, mf_sha, "unit", unit_shards - 1) != 0) return 1;
-
-    /* Step 3: DCE root-scan shards under tape */
-    char dce_st[64][4200], dce_meta[64][4200]; int dce_idx = 0; int dce_skipped = 0;
-    for (int r = 0; r < dce_root_shards; r++) {
-        if (dce_idx > 0 && verify_handoff_meta(dce_meta[dce_idx - 1], dce_st[dce_idx - 1], "-",
-                                               run_id, cand_sha, mf_sha, "dce_root", dce_idx - 1) != 0) return 1;
-        cx_fmt(dce_st[dce_idx], sizeof dce_st[dce_idx], "%s/t_dce_%d.st", run_dir, dce_idx);
-        cx_fmt(dce_meta[dce_idx], sizeof dce_meta[dce_idx], "%s/t_dce_%d.st.meta", run_dir, dce_idx);
-        if (touch_empty(dce_st[dce_idx]) != 0) {
-            sy_eprintf("tape-tldce-shard: REFUSE output-init-failed dce_root %d\n", r); return 1;
-        }
-        char p_str[16], tot_str[16];
-        cx_fmt(p_str, sizeof p_str, "%d", r); cx_fmt(tot_str, sizeof tot_str, "%d", dce_root_shards);
-        char *av[64]; int k = 0;
-        av[k++] = run_bin; av[k++] = "--so"; av[k++] = so_path;
-        av[k++] = "--budget"; av[k++] = b_str; av[k++] = "--mem-extra"; av[k++] = m_str;
-        av[k++] = drv_slice; av[k++] = "r"; av[k++] = u_states[unit_shards - 1];
-        av[k++] = (dce_idx == 0) ? "-" : dce_st[dce_idx - 1];
-        av[k++] = dce_st[dce_idx]; av[k++] = p_str; av[k++] = tot_str;
-        for (int s = 0; s < unit_shards; s++) av[k++] = u_tapes[s];
-        av[k] = 0;
-        if (run_cmd(av, root, shard_timeout, &rc, &ms, obuf, sizeof obuf, why, sizeof why) != 0 || rc != 0) {
-            (void)sy_unlink(dce_st[dce_idx]);
-            sy_eprintf("tape-tldce-shard: dce root shard %d failed rc=%d ms=%ld why=%s\n", r, rc, ms, why); return 1;
-        }
-        unsigned long long stp = 0, sk = 0;
-        if (strstr(obuf, "TAPEMODE_RUN\tstatus=0\texit_code=0\t") == 0 ||
-            strstr(obuf, "SHARD_ROOT\t") == 0 ||
-            parse_u64_field(obuf, "steps=", &stp) != 0 ||
-            parse_u64_field(obuf, "skip=", &sk) != 0) {
-            (void)sy_unlink(dce_st[dce_idx]);
-            sy_eprintf("tape-tldce-shard: REFUSE incomplete-tape-frame dce_root=%d\n", r); return 1;
-        }
-        if (write_handoff_meta(dce_meta[dce_idx], run_id, cand_sha, mf_sha, "dce_root", dce_idx,
-                               dce_st[dce_idx], "-") != 0) return 1;
-        sy_printf("SHARD_RUN\tname=r%d\tkind=dce_root\trc=%d\tms=%ld\tsteps=%llu\tskip=%llu\n", r, rc, ms, stp, sk);
+    int dce_idx = 0, dce_skipped = 0;
+    const char *last_dce_stage = "dce_root";
+    for (int r = 0; r < e.dce_root_shards; r++) {
+        long ms = 0; unsigned long long stp = 0, sk = 0;
+        if (step_dce_root(&e, r, dce_idx, &sk, &ms, &stp) != 0) return 1;
         total_shards++; total_ms += ms; if (ms > max_shard_ms) max_shard_ms = ms; total_steps += stp;
         dce_idx++;
         if (sk == 1ull) { dce_skipped = 1; break; }
     }
 
-    /* Step 4: DCE BFS worklist shards under tape (loop until rem==0) */
-    const char *last_dce_stage = "dce_root";
     if (!dce_skipped) {
         int bfs_round = 0;
         unsigned long long rem = 1ull;
-        char pops_str[16]; cx_fmt(pops_str, sizeof pops_str, "%d", bfs_pops);
         while (rem > 0ull) {
             if (bfs_round >= SH_MAX_BFS_ROUNDS || dce_idx >= 60) {
                 sy_eprintf("tape-tldce-shard: BFS exceeded max rounds\n"); return 1;
             }
-            if (verify_handoff_meta(dce_meta[dce_idx - 1], dce_st[dce_idx - 1], "-",
-                                    run_id, cand_sha, mf_sha, last_dce_stage, dce_idx - 1) != 0) return 1;
-            cx_fmt(dce_st[dce_idx], sizeof dce_st[dce_idx], "%s/t_dce_%d.st", run_dir, dce_idx);
-            cx_fmt(dce_meta[dce_idx], sizeof dce_meta[dce_idx], "%s/t_dce_%d.st.meta", run_dir, dce_idx);
-            if (touch_empty(dce_st[dce_idx]) != 0) {
-                sy_eprintf("tape-tldce-shard: REFUSE output-init-failed dce_bfs %d\n", bfs_round); return 1;
-            }
-            char *av[64]; int k = 0;
-            av[k++] = run_bin; av[k++] = "--so"; av[k++] = so_path;
-            av[k++] = "--budget"; av[k++] = b_str; av[k++] = "--mem-extra"; av[k++] = m_str;
-            av[k++] = drv_slice; av[k++] = "w"; av[k++] = u_states[unit_shards - 1];
-            av[k++] = dce_st[dce_idx - 1]; av[k++] = dce_st[dce_idx]; av[k++] = pops_str;
-            for (int s = 0; s < unit_shards; s++) av[k++] = u_tapes[s];
-            av[k] = 0;
-            if (run_cmd(av, root, shard_timeout, &rc, &ms, obuf, sizeof obuf, why, sizeof why) != 0 || rc != 0) {
-                (void)sy_unlink(dce_st[dce_idx]);
-                sy_eprintf("tape-tldce-shard: dce bfs shard %d failed rc=%d ms=%ld why=%s\n", bfs_round, rc, ms, why); return 1;
-            }
-            unsigned long long stp = 0, pops = 0;
-            if (strstr(obuf, "TAPEMODE_RUN\tstatus=0\texit_code=0\t") == 0 ||
-                strstr(obuf, "SHARD_BFS\t") == 0 ||
-                parse_u64_field(obuf, "steps=", &stp) != 0 ||
-                parse_u64_field(obuf, "pops=", &pops) != 0 ||
-                parse_u64_field(obuf, "rem=", &rem) != 0) {
-                (void)sy_unlink(dce_st[dce_idx]);
-                sy_eprintf("tape-tldce-shard: REFUSE incomplete-tape-frame dce_bfs=%d\n", bfs_round); return 1;
-            }
-            if (write_handoff_meta(dce_meta[dce_idx], run_id, cand_sha, mf_sha, "dce_bfs", dce_idx,
-                                   dce_st[dce_idx], "-") != 0) return 1;
+            long ms = 0; unsigned long long stp = 0;
+            if (step_dce_bfs(&e, bfs_round, dce_idx, last_dce_stage, &rem, &ms, &stp) != 0) return 1;
             last_dce_stage = "dce_bfs";
-            sy_printf("SHARD_RUN\tname=w%d\tkind=dce_bfs\tpops=%llu\trem=%llu\trc=%d\tms=%ld\tsteps=%llu\n",
-                      bfs_round, pops, rem, rc, ms, stp);
             total_shards++; total_ms += ms; if (ms > max_shard_ms) max_shard_ms = ms; total_steps += stp;
             dce_idx++; bfs_round++;
         }
     }
 
-    /* Step 5: DCE compact + check_undef + finish shard under tape */
-    if (verify_handoff_meta(dce_meta[dce_idx - 1], dce_st[dce_idx - 1], "-",
-                            run_id, cand_sha, mf_sha, last_dce_stage, dce_idx - 1) != 0) return 1;
-    char tape_out[4200];
-    cx_fmt(tape_out, sizeof tape_out, "%s/tape_final.tape", run_dir);
-    if (touch_empty(tape_out) != 0) { sy_eprintf("tape-tldce-shard: REFUSE output-init-failed tape_out\n"); return 1; }
-    char n_str[16]; cx_fmt(n_str, sizeof n_str, "%d", n_objs);
-    {
-        char *av[64]; int k = 0;
-        av[k++] = run_bin; av[k++] = "--so"; av[k++] = so_path;
-        av[k++] = "--budget"; av[k++] = b_str; av[k++] = "--mem-extra"; av[k++] = m_str;
-        av[k++] = drv_slice; av[k++] = "c"; av[k++] = tape_out;
-        av[k++] = u_states[unit_shards - 1]; av[k++] = dce_st[dce_idx - 1]; av[k++] = n_str;
-        for (int s = 0; s < unit_shards; s++) av[k++] = u_tapes[s];
-        av[k] = 0;
-        if (run_cmd(av, root, shard_timeout, &rc, &ms, obuf, sizeof obuf, why, sizeof why) != 0 || rc != 0) {
-            (void)sy_unlink(tape_out);
-            sy_eprintf("tape-tldce-shard: dce compact shard failed rc=%d ms=%ld why=%s\n", rc, ms, why); return 1;
-        }
-        unsigned long long stp = 0, cut = 0;
-        if (strstr(obuf, "TAPEMODE_RUN\tstatus=0\texit_code=0\t") == 0 ||
-            strstr(obuf, "SHARD_COMPACT\t") == 0 ||
-            parse_u64_field(obuf, "steps=", &stp) != 0 ||
-            parse_u64_field(obuf, "dce_cut=", &cut) != 0) {
-            (void)sy_unlink(tape_out);
-            sy_eprintf("tape-tldce-shard: REFUSE missing-dce-cut or incomplete-tape-frame\n"); return 1;
-        }
-        sy_printf("SHARD_RUN\tname=c0\tkind=dce_compact\tdce_cut=%llu\trc=%d\tms=%ld\tsteps=%llu\n", cut, rc, ms, stp);
-        total_shards++; total_ms += ms; if (ms > max_shard_ms) max_shard_ms = ms; total_steps += stp;
-
-        long out_bytes = 0; char sha[65]; sha[0] = 0;
-        int eq = files_equal_nonempty(nat_out, tape_out, &out_bytes, sha);
-        int pass = (eq && cut == nat_dce_cut);
-        if (pass && out_copy[0]) {
-            unsigned char *fb = 0; int64_t fn = 0;
-            if (sy_read_file(tape_out, &fb, &fn, 64L * 1024L * 1024L) != 0 || !fb || fn <= 0 ||
-                sy_write_atomic(out_copy, fb, fn, 0644) != 0) {
-                if (fb) mm_free(fb);
-                sy_eprintf("tape-tldce-shard: REFUSE publish-out-failed path=%s\n", out_copy);
-                return 1;
-            }
-            mm_free(fb);
-        }
-        sy_printf("TAPE_TLDCE_SHARD_SUMMARY\tunits=%d\tshards=%d\ttotal_ms=%ld\tmax_shard_ms=%ld\ttotal_steps=%llu\tbytes=%ld\tdce_cut=%llu\tcmp=%s\tsha256=%s\n",
-                  n_objs, total_shards, total_ms, max_shard_ms, total_steps, out_bytes, cut,
-                  pass ? "EQUAL" : "DIFF", sha);
-        return pass ? 0 : 1;
-    }
+    return step_compact(&e, dce_idx, last_dce_stage, nat_dce_cut, total_shards, total_ms, max_shard_ms, total_steps);
 }
