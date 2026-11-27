@@ -1,0 +1,200 @@
+/* tools/build-objs-from-tree.cx -- deterministic 20-unit object builder from a git rev + base chain.
+ *
+ * Usage:
+ *   sh ./unisacc.com tools/build-objs-from-tree.cx -- --self-test
+ *   sh ./unisacc.com tools/build-objs-from-tree.cx -- \
+ *     --rev GIT_REV --base-chain CHAIN_DIR --out-dir OUT_DIR [--entry-elf ELF] [--jobs N]
+ *
+ * Steps:
+ *   (1) Export GIT_REV via `git archive` into a clean scratch tree;
+ *   (2) Build the header container pkg-hdr.bin from GIT_REV's include/ tree using
+ *       `tools/dev-product.cx -- --hdr-only CHAIN_DIR/compiler.bootstrap.pkg`;
+ *   (3) Compile all 20 v0.1.9 units under UNISA_CONTAINER=pkg-hdr.bin UNISACC_LOCAL=1
+ *       via entry.elf with exact per-unit flags (-O1 for drive/host/driveface/driveroute/tapegate,
+ *       -O2 for the other 15; all with -c -funit -b lnx/x86_64 -DRT_EXTERN);
+ *   (4) Print deterministic SHA-256 and byte length for every .o.
+ */
+#pragma unisa use sys.fs
+#pragma unisa use sys.io
+#pragma unisa use sys.env
+#pragma unisa use sys.posix
+#pragma unisa use sys.sha
+#pragma unisa use mem.heap
+#pragma unisa use mem.bytes
+#pragma unisa use text.text
+#pragma unisa use text.fmt
+#pragma unisa use cxlib.netpack
+#pragma unisa use cxlib.sessionroot
+
+enum {
+    BO_PW = 4400,
+    BO_NUNITS = 20
+};
+
+typedef struct {
+    const char *key;
+    const char *opt;
+    const char *src;
+} BoUnit;
+
+static const BoUnit BO_UNITS[BO_NUNITS] = {
+    {"m0.o",         "-O1", "src/drive.cx"},
+    {"host.o",       "-O1", "src/host.cx"},
+    {"driveface.o",  "-O1", "src/driveface.cx"},
+    {"driveroute.o", "-O1", "src/driveroute.cx"},
+    {"tapegate.o",   "-O1", "cx/compiler/tapegate.cx"},
+    {"drivelink.o",  "-O2", "src/drivelink.cx"},
+    {"executor.o",   "-O2", "src/executor.cx"},
+    {"driveunits.o", "-O2", "src/driveunits.cx"},
+    {"driveargs.o",  "-O2", "src/driveargs.cx"},
+    {"stages.o",     "-O2", "src/stages.cx"},
+    {"hostout.o",    "-O2", "src/hostout.cx"},
+    {"m10.o",        "-O2", "cx/driver/fwdreplay.cx"},
+    {"m20.o",        "-O2", "cx/sys/time.cx"},
+    {"m21.o",        "-O2", "cx/sys/io.cx"},
+    {"m29.o",        "-O2", "cx/sys/proc.cx"},
+    {"m35.o",        "-O2", "cx/sys/posix.cx"},
+    {"m42.o",        "-O2", "cx/sys/runlaunch.cx"},
+    {"m43.o",        "-O2", "cx/compiler/cxscratch.cx"},
+    {"m44.o",        "-O2", "cx/runtime/source_frame.cx"},
+    {"fwdmerge.o",   "-O2", "cx/compiler/fwdmerge.cx"}
+};
+
+static int bo_run_sh(const char *cwd, const char *cmd, int timeout_s, np_result *r) {
+    char *av[] = {"sh", "-c", (char *)cmd, 0};
+    char why[128]; why[0] = 0;
+    mm_fill(r, (long)sizeof *r, 0, (long)sizeof *r);
+    return np_run(av, cwd, 0, timeout_s, r, why, sizeof why);
+}
+
+static int bo_sha256_file(const char *path, char hex[65], long *len_out) {
+    size_t bn = 0;
+    char *b = cx_read(path, &bn);
+    if (!b) return 1;
+    if (len_out) *len_out = (long)bn;
+    int rc = sy_sha256_any_hex(b, (long)bn, hex);
+    mm_free(b);
+    return rc;
+}
+
+static int bo_self_test(void) {
+    int pass = 0, fail = 0;
+    int o1 = 0, o2 = 0, dup = 0;
+    for (int i = 0; i < BO_NUNITS; i++) {
+        if (tx_eqz(BO_UNITS[i].opt, "-O1")) o1++;
+        else if (tx_eqz(BO_UNITS[i].opt, "-O2")) o2++;
+        for (int j = i + 1; j < BO_NUNITS; j++) {
+            if (tx_eqz(BO_UNITS[i].key, BO_UNITS[j].key)) dup++;
+        }
+    }
+    if (o1 == 5 && o2 == 15 && dup == 0) {
+        sy_printf("PASS\tunit-table-20-5o1-15o2-unique\to1=%d o2=%d dup=%d\n", o1, o2, dup);
+        pass++;
+    } else {
+        sy_printf("FAIL\tunit-table-20-5o1-15o2-unique\to1=%d o2=%d dup=%d\n", o1, o2, dup);
+        fail++;
+    }
+    /* Verify m21.o is present (carries _u_vfmt from rev include/) */
+    int has_m21 = 0;
+    for (int i = 0; i < BO_NUNITS; i++) {
+        if (tx_eqz(BO_UNITS[i].key, "m21.o") && tx_eqz(BO_UNITS[i].src, "cx/sys/io.cx")) has_m21 = 1;
+    }
+    if (has_m21) { sy_printf("PASS\tm21-io-included\tm21.o=cx/sys/io.cx\n"); pass++; }
+    else { sy_printf("FAIL\tm21-io-included\tmissing\n"); fail++; }
+
+    sy_printf("CHECK_BUILD_OBJS_FROM_TREE\tpassed=%d\tfailed=%d\n", pass, fail);
+    return fail ? 1 : 0;
+}
+
+int main(int argc, char **argv) {
+    int self_test = 0;
+    const char *rev = 0, *base_chain = 0, *out_dir = 0, *entry_elf = 0;
+    for (int i = 1; i < argc; i++) {
+        if (tx_eqz(argv[i], "--")) continue;
+        else if (tx_eqz(argv[i], "--self-test")) self_test = 1;
+        else if (tx_eqz(argv[i], "--rev") && i + 1 < argc) rev = argv[++i];
+        else if (tx_eqz(argv[i], "--base-chain") && i + 1 < argc) base_chain = argv[++i];
+        else if (tx_eqz(argv[i], "--out-dir") && i + 1 < argc) out_dir = argv[++i];
+        else if (tx_eqz(argv[i], "--entry-elf") && i + 1 < argc) entry_elf = argv[++i];
+        else { sy_eprintf("build-objs-from-tree: unknown arg %s\n", argv[i]); return 2; }
+    }
+    if (self_test) return bo_self_test();
+    if (!rev || !base_chain || !out_dir) {
+        sy_eprintf("usage: build-objs-from-tree.cx --self-test | --rev REV --base-chain DIR --out-dir DIR [--entry-elf ELF]\n");
+        return 2;
+    }
+
+    char cwd[BO_PW], tmp[BO_PW], cmd[8192];
+    if (sy_cwd(cwd, (int)sizeof cwd) != 0) return 2;
+    if (sr_scratch("build-objs-from-tree", tmp, (int)sizeof tmp) != 0) return 2;
+
+    char tree[BO_PW], hdr_dir[BO_PW], hdr_pkg[BO_PW], elf_copy[BO_PW], default_elf[BO_PW], boot_pkg[BO_PW];
+    cx_fmt(tree, sizeof tree, "%s/tree", tmp);
+    cx_fmt(hdr_dir, sizeof hdr_dir, "%s/hdr", tmp);
+    cx_fmt(hdr_pkg, sizeof hdr_pkg, "%s/pkg-hdr.bin", hdr_dir);
+    cx_fmt(elf_copy, sizeof elf_copy, "%s/entry.elf", tmp);
+    cx_fmt(default_elf, sizeof default_elf, "%s/fixedpoint/g2/lnx-x86_64/entry.elf", base_chain);
+    cx_fmt(boot_pkg, sizeof boot_pkg, "%s/compiler.bootstrap.pkg", base_chain);
+    const char *src_elf = (entry_elf && entry_elf[0]) ? entry_elf : default_elf;
+
+    /* (1) Export rev tree, copy entry.elf + chmod +x, build pkg-hdr.bin from rev include/ */
+    np_result r;
+    cx_fmt(cmd, sizeof cmd,
+        "set -e; mkdir -p '%s' '%s' '%s'; "
+        "git archive '%s' | tar -x -C '%s'; "
+        "ln -sf '%s/unisacc.com' '%s/unisacc.com'; "
+        "cp '%s' '%s' && chmod +x '%s'; "
+        "sh '%s/unisacc.com' '%s/tools/dev-product.cx' -- --tree '%s' --out '%s' --hdr-only '%s'",
+        tree, hdr_dir, out_dir, rev, tree, cwd, tree, src_elf, elf_copy, elf_copy, cwd, cwd, tree, hdr_dir, boot_pkg);
+    if (bo_run_sh(cwd, cmd, 55, &r) != 0 || r.rc != 0) {
+        sy_eprintf("build-objs-from-tree: prep/hdr-only failed rc=%d\n%s\n", r.rc, r.err ? r.err : "");
+        np_free(&r);
+        return 1;
+    }
+    np_free(&r);
+
+    char hdr_sha[65]; long hdr_len = 0;
+    if (bo_sha256_file(hdr_pkg, hdr_sha, &hdr_len) != 0) {
+        sy_eprintf("build-objs-from-tree: missing %s\n", hdr_pkg);
+        return 1;
+    }
+
+    /* (2) Compile all 20 units in two parallel waves (10 + 10) under UNISA_CONTAINER=pkg-hdr.bin */
+    for (int wave = 0; wave < 2; wave++) {
+        int lo = wave * 10, hi = lo + 10;
+        long pos = 0;
+        char part[2048];
+        cx_fmt(part, sizeof part, "set -e; cd '%s'; ", tree);
+        { long pl = tx_len(part, (long)sizeof part); if (pl > 0 && pos + pl < (long)sizeof cmd) { mm_copy(cmd + pos, (long)sizeof cmd - pos, part, pl); pos += pl; } }
+        for (int i = lo; i < hi; i++) {
+            cx_fmt(part, sizeof part,
+                "UNISA_CONTAINER='%s' UNISACC_LOCAL=1 '%s' -c -funit -b lnx/x86_64 %s -DRT_EXTERN '%s' -o '%s/%s' & ",
+                hdr_pkg, elf_copy, BO_UNITS[i].opt, BO_UNITS[i].src, out_dir, BO_UNITS[i].key);
+            long pl = tx_len(part, (long)sizeof part);
+            if (pl > 0 && pos + pl < (long)sizeof cmd) { mm_copy(cmd + pos, (long)sizeof cmd - pos, part, pl); pos += pl; }
+        }
+        if (pos + 5 < (long)sizeof cmd) { mm_copy(cmd + pos, (long)sizeof cmd - pos, "wait", 4); pos += 4; }
+        cmd[pos] = 0;
+        if (bo_run_sh(cwd, cmd, 55, &r) != 0 || r.rc != 0) {
+            sy_eprintf("build-objs-from-tree: wave %d compile failed rc=%d\n%s\n", wave, r.rc, r.err ? r.err : "");
+            np_free(&r);
+            return 1;
+        }
+        np_free(&r);
+    }
+
+    /* (3) Print deterministic SHA-256 of every .o */
+    for (int i = 0; i < BO_NUNITS; i++) {
+        char op[BO_PW], sha[65];
+        long olen = 0;
+        cx_fmt(op, sizeof op, "%s/%s", out_dir, BO_UNITS[i].key);
+        if (bo_sha256_file(op, sha, &olen) != 0) {
+            sy_eprintf("build-objs-from-tree: missing output %s\n", op);
+            return 1;
+        }
+        sy_printf("OBJ_SHA256\t%s\t%s\t%ld\t%s\t%s\n", BO_UNITS[i].key, sha, olen, BO_UNITS[i].opt, BO_UNITS[i].src);
+    }
+    sy_printf("BUILD_OBJS_FROM_TREE\trev=%s\tunits=%d\thdr_sha=%s\thdr_bytes=%ld\tstatus=OK\n",
+              rev, BO_NUNITS, hdr_sha, hdr_len);
+    return 0;
+}
