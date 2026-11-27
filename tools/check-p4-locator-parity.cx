@@ -1,0 +1,329 @@
+/* tools/check-p4-locator-parity.cx -- parity gate between the two P4 container locators:
+ *   (A) runtime.packagefooter: packagefooter_locate_bytes (bytes)
+ *   (B) cx/driver/stream_s1_m1.cx: m53_m1_locate_pkg_fd (bounded streaming fd)
+ *
+ * Compiles the real cx/driver/stream_s1_m1.cx source in a temp harness (appending a 3-line
+ * thin entry calling static m53_m1_locate_pkg_fd) alongside runtime.packagefooter, feeds the
+ * exact same fixture set to both, and asserts identical (verdict, offset, length) on every
+ * container/signed-PE/negative/collision case plus the documented raw-P4 fallback boundary.
+ *
+ * Marker: CHECK_P4_LOCATOR_PARITY. */
+#pragma unisa use sys.fs
+#pragma unisa use sys.io
+#pragma unisa use sys.env
+#pragma unisa use sys.posix
+#pragma unisa use text.text
+#pragma unisa use text.fmt
+#pragma unisa use mem.heap
+#pragma unisa use mem.bytes
+#pragma unisa use cxlib.netpack
+
+static int g_pass, g_fail;
+static void ck(int ok, const char *name) {
+    if (ok) { g_pass++; sy_printf("PASS\tp4-locator-parity.%s\n", name); }
+    else { g_fail++; sy_eprintf("FAIL\tp4-locator-parity.%s\n", name); }
+}
+
+static int run_cmd(const char *cwd, char **v, char *out, long cap, int secs) {
+    np_result r = {0}; char why[128] = {0};
+    int tr = np_run(v, cwd, 0, secs, &r, why, sizeof why);
+    long n = 0;
+    if (r.out && r.outn > 0) {
+        long m = (long)r.outn < cap - 1 ? (long)r.outn : cap - 1;
+        for (long i = 0; i < m; i++) out[n++] = r.out[i];
+    }
+    if (r.err && r.errn > 0 && n < cap - 1) {
+        long m = (long)r.errn < (cap - 1 - n) ? (long)r.errn : (cap - 1 - n);
+        for (long i = 0; i < m; i++) out[n++] = r.err[i];
+    }
+    out[n] = 0;
+    int rc = (tr || r.residue) ? -1 : r.rc;
+    np_free(&r);
+    return rc;
+}
+
+static void put_u16(unsigned char *p, unsigned v) {
+    p[0] = (unsigned char)(v & 0xffu);
+    p[1] = (unsigned char)((v >> 8) & 0xffu);
+}
+static void put_u32(unsigned char *p, unsigned long v) {
+    p[0] = (unsigned char)(v & 0xffUL);
+    p[1] = (unsigned char)((v >> 8) & 0xffUL);
+    p[2] = (unsigned char)((v >> 16) & 0xffUL);
+    p[3] = (unsigned char)((v >> 24) & 0xffUL);
+}
+static void put_u64(unsigned char *p, unsigned long long v) {
+    for (int i = 0; i < 8; i++) p[i] = (unsigned char)((v >> (8 * i)) & 0xffULL);
+}
+static void put_footer(unsigned char *p, unsigned long long plen) {
+    p[0] = 'U'; p[1] = 'N'; p[2] = 'I'; p[3] = 'P';
+    p[4] = 'K'; p[5] = 'G'; p[6] = '1'; p[7] = '\n';
+    put_u64(p + 8, plen);
+}
+
+/* Build a minimal valid PE32+ image (headers=512, 1 section raw=[512, 1024)),
+ * followed by payload at offset 1024, UNIPKG1\n footer, pad zero bytes (0..7),
+ * and an optional WIN_CERTIFICATE tail. Mutators allow bad-cert / collision cases. */
+static int write_pe_fixture(const char *path, const unsigned char *payload, long plen,
+                            int pad, int with_cert, int cert_mode, int sec_fake_footer, int dbl_footer) {
+    long hdr_end = 512, sec_end = 1024;
+    long foot_off = sec_end + plen;
+    long cert_off = foot_off + 16 + pad;
+    long cert_len = with_cert ? 16 : 0;
+    if (with_cert && cert_mode == 1) cert_len = 13; /* unaligned + 3 zero pad bytes -> total 16 */
+    long cert_total = with_cert ? ((cert_len + 7) & ~7L) : 0;
+    long total = cert_off + cert_total;
+    unsigned char *buf = (unsigned char *)mm_alloc(total);
+    if (!buf) return -1;
+    mm_fill(buf, total, 0, total);
+
+    /* DOS header: MZ + e_lfanew = 64 */
+    buf[0] = 'M'; buf[1] = 'Z';
+    put_u32(buf + 60, 64);
+
+    /* PE signature + COFF header at 64 (size 24) */
+    buf[64] = 'P'; buf[65] = 'E'; buf[66] = 0; buf[67] = 0;
+    put_u16(buf + 64 + 6, 1);    /* NumberOfSections = 1 */
+    put_u16(buf + 64 + 20, 240); /* SizeOfOptionalHeader = 240 (PE32+: 112 + 16*8) */
+
+    /* Optional header at 88 (PE32+: magic 0x020b, dirs at +112, SizeOfHeaders at +60) */
+    long opt = 88;
+    buf[opt] = 0x0b; buf[opt + 1] = 0x02;
+    put_u32(buf + opt + 60, (unsigned long)hdr_end);
+    put_u32(buf + opt + 112 - 4, 16); /* NumberOfRvaAndSizes = 16 */
+    if (with_cert) {
+        long c_off_hdr = (cert_mode == 2) ? (cert_off - 4) : cert_off; /* mode 2: misaligned cert offset */
+        long c_len_hdr = (cert_mode == 3) ? (cert_total - 2) : cert_total; /* mode 3: certlen != size - cert */
+        put_u32(buf + opt + 112 + 32, (unsigned long)c_off_hdr);
+        put_u32(buf + opt + 112 + 36, (unsigned long)c_len_hdr);
+    }
+
+    /* Section table at opt + 240 = 328 (1 section: SizeOfRawData=512, PointerToRawData=512) */
+    long sec = opt + 240;
+    put_u32(buf + sec + 16, 512);
+    put_u32(buf + sec + 20, 512);
+
+    if (sec_fake_footer) {
+        /* Fake UNIPKG1\n footer inside section raw data (must be ignored because real footer is at end) */
+        put_footer(buf + 512 + 128, 64ULL);
+    }
+
+    /* Payload + footer */
+    if (plen > 0) (void)mm_copy(buf + sec_end, total - sec_end, payload, plen);
+    put_footer(buf + foot_off, (unsigned long long)plen);
+
+    if (dbl_footer && pad >= 1) {
+        /* Second valid UNIPKG1\n footer inside the 0..7 pad window -> found == 2 -> both must refuse */
+        put_footer(buf + foot_off + 1, (unsigned long long)plen);
+    }
+    if (cert_mode == 4 && pad >= 1) {
+        /* Non-zero byte in pre-cert pad window */
+        buf[foot_off + 16] = 0x7f;
+    }
+
+    if (with_cert) {
+        put_u32(buf + cert_off, (unsigned long)cert_len);
+        buf[cert_off + 4] = 0; buf[cert_off + 5] = 2; /* wRevision = 0x0200 */
+        buf[cert_off + 6] = (cert_mode == 5) ? 9 : 2; /* wCertificateType = 0x0002 (mode 5: bad type) */
+        buf[cert_off + 7] = 0;
+        if (cert_mode == 6 && cert_total > cert_len) {
+            /* Non-zero byte in cert 8-byte alignment tail padding */
+            buf[cert_off + cert_len] = 0x55;
+        }
+    }
+
+    int rc = sy_write_file(path, buf, total, 0644);
+    mm_free(buf);
+    return rc;
+}
+
+int main(void) {
+    char repo[512], tmp[512], drv_cx[640], drv_bin[640], out[16384];
+    if (sy_realpath(".", repo, sizeof repo) < 0) return 2;
+    if (sy_mkdtemp(sy_tmpdir(), "p4-loc-par-", tmp, sizeof tmp) != 0) return 2;
+    if (cx_fmt(drv_cx, sizeof drv_cx, "%s/parity_drv.cx", tmp) ||
+        cx_fmt(drv_bin, sizeof drv_bin, "%s/parity_drv", tmp)) {
+        (void)sy_remove_all(tmp);
+        return 2;
+    }
+
+    /* Build temp driver embedding real cx/driver/stream_s1_m1.cx + thin parity main */
+    char s1_path[640];
+    size_t s1_n = 0;
+    if (cx_fmt(s1_path, sizeof s1_path, "%s/cx/driver/stream_s1_m1.cx", repo)) { (void)sy_remove_all(tmp); return 2; }
+    char *s1_src = cx_read(s1_path, &s1_n);
+    if (!s1_src || s1_n == 0) { if (s1_src) mm_free(s1_src); (void)sy_remove_all(tmp); return 2; }
+
+    /* Strip "#pragma unisa module ..." from the temp copy so it compiles as a standalone main unit */
+    const char *body = s1_src;
+    size_t body_n = s1_n;
+    if (body_n > 20 && tx_same(body, 19, "#pragma unisa modul", 19)) {
+        const char *nl = strchr(body, '\n');
+        if (nl) { body_n -= (size_t)(nl + 1 - body); body = nl + 1; }
+    }
+    const char *tail =
+        "\nint main(int argc, char **argv) {\n"
+        "    if (argc < 2) return 2;\n"
+        "    const char *p = argv[1];\n"
+        "    unsigned char *b = 0; int64_t bn = 0;\n"
+        "    if (sy_read_file(p, &b, &bn, 64L << 20) != 0 || !b) return 2;\n"
+        "    PackageFooter pf;\n"
+        "    int pf_ok = packagefooter_locate_bytes(b, (long)bn, &pf);\n"
+        "    mm_free(b);\n"
+        "    int fd = sy_open_read(p);\n"
+        "    if (fd < 0) return 2;\n"
+        "    long fd_off = -1, fd_len = -1;\n"
+        "    int fd_ok = (m53_m1_locate_pkg_fd(fd, (long)bn, &fd_off, &fd_len) == 0) ? 1 : 0;\n"
+        "    sy_close(fd);\n"
+        "    sy_printf(\"LOC\\tpf_ok=%d\\tpf_off=%ld\\tpf_len=%ld\\tfd_ok=%d\\tfd_off=%ld\\tfd_len=%ld\\n\",\n"
+        "              pf_ok, pf_ok ? pf.package_offset : -1L, pf_ok ? pf.package_length : -1L,\n"
+        "              fd_ok, fd_ok ? fd_off : -1L, fd_ok ? fd_len : -1L);\n"
+        "    return 0;\n"
+        "}\n";
+    const char *hdr = "#pragma unisa use sys.io\n";
+    size_t hdr_n = (size_t)tx_len(hdr, 64);
+    size_t tail_n = (size_t)tx_len(tail, 2048);
+    char *comb = (char *)mm_alloc((long)(hdr_n + body_n + tail_n + 1));
+    if (!comb) { mm_free(s1_src); (void)sy_remove_all(tmp); return 2; }
+    (void)mm_copy(comb, (long)(hdr_n + body_n + tail_n + 1), hdr, (long)hdr_n);
+    (void)mm_copy(comb + hdr_n, (long)(body_n + tail_n + 1), body, (long)body_n);
+    (void)mm_copy(comb + hdr_n + body_n, (long)(tail_n + 1), tail, (long)tail_n);
+    comb[hdr_n + body_n + tail_n] = 0;
+    mm_free(s1_src);
+    int wr_drv = cx_write(drv_cx, comb, hdr_n + body_n + tail_n);
+    mm_free(comb);
+
+    char lcmd[2048];
+    if (wr_drv != 0 || cx_fmt(lcmd, sizeof lcmd,
+                              "ln -sf '%s/cxroot.tsv' '%s/cx' '%s/include' '%s/ext' '%s/tools' '%s/' && "
+                              "sh ./unisacc.com '%s' -o '%s'",
+                              repo, repo, repo, repo, repo, tmp, drv_cx, drv_bin)) {
+        (void)sy_remove_all(tmp);
+        return 2;
+    }
+    char *vb[] = {"sh", "-c", lcmd, 0};
+    int rc_b = run_cmd(repo, vb, out, sizeof out, 35);
+    ck(rc_b == 0, "compile-real-stream-s1-m1-and-packagefooter-harness");
+    if (rc_b != 0) {
+        sy_eprintf("DIAG_BUILD\t%.300s\n", out);
+        (void)sy_remove_all(tmp);
+        sy_printf("CHECK_P4_LOCATOR_PARITY\tpassed=%d\tfailed=%d\n", g_pass, g_fail);
+        return 1;
+    }
+
+    const unsigned char p4_body[] = "P 4 0 0 0\n";
+    const long p4_len = 10;
+    /* P4 body containing literal UNIPKG1\n bytes inside payload */
+    unsigned char p4_inner[48];
+    mm_fill(p4_inner, sizeof p4_inner, 'x', sizeof p4_inner);
+    (void)mm_copy(p4_inner, sizeof p4_inner, "P 4 0 0 0\n", 10);
+    put_footer(p4_inner + 16, 12ULL);
+
+    char fpath[640];
+    /* Helper macro-like loop over 15 fixtures */
+    for (int tc = 0; tc < 15; tc++) {
+        const char *name = 0;
+        int expect_same = 1;
+        int want_pf = 0, want_fd = 0;
+        long want_off = -1, want_len = -1;
+        int wrc = -1;
+        if (cx_fmt(fpath, sizeof fpath, "%s/fx_%02d.bin", tmp, tc)) return 2;
+
+        if (tc == 0) {
+            name = "raw-p4-no-footer-documented-boundary";
+            wrc = sy_write_file(fpath, p4_body, p4_len, 0644);
+            expect_same = 0; want_pf = 0; want_fd = 1; want_off = 0; want_len = p4_len;
+        } else if (tc == 1) {
+            name = "standalone-p4-plus-footer";
+            unsigned char b[26]; (void)mm_copy(b, 26, p4_body, p4_len); put_footer(b + p4_len, (unsigned long long)p4_len);
+            wrc = sy_write_file(fpath, b, 26, 0644);
+            want_pf = 1; want_fd = 1; want_off = 0; want_len = p4_len;
+        } else if (tc == 2) {
+            name = "ape-prefix-plus-p4-plus-footer";
+            unsigned char b[128]; mm_fill(b, 128, 0x90, 128);
+            b[0] = 0x7f; b[1] = 'E'; b[2] = 'L'; b[3] = 'F';
+            (void)mm_copy(b + 102, 26, p4_body, p4_len); put_footer(b + 112, (unsigned long long)p4_len);
+            wrc = sy_write_file(fpath, b, 128, 0644);
+            want_pf = 1; want_fd = 1; want_off = 102; want_len = p4_len;
+        } else if (tc == 3) {
+            name = "signed-pe-cert-tail-pad-0";
+            const unsigned char p4_16[16] = "P 4 0 0 0\n      ";
+            wrc = write_pe_fixture(fpath, p4_16, 16, 0, 1, 0, 0, 0);
+            want_pf = 1; want_fd = 1; want_off = 1024; want_len = 16;
+        } else if (tc == 4) {
+            name = "signed-pe-cert-tail-pad-6";
+            wrc = write_pe_fixture(fpath, p4_body, p4_len, 6, 1, 0, 0, 0);
+            want_pf = 1; want_fd = 1; want_off = 1024; want_len = p4_len;
+        } else if (tc == 5) {
+            name = "signed-pe-cert-tail-unaligned-cert-zero-padded";
+            wrc = write_pe_fixture(fpath, p4_body, p4_len, 6, 1, 1, 0, 0);
+            want_pf = 1; want_fd = 1; want_off = 1024; want_len = p4_len;
+        } else if (tc == 6) {
+            name = "bad-cert-misaligned-offset";
+            wrc = write_pe_fixture(fpath, p4_body, p4_len, 6, 1, 2, 0, 0);
+            want_pf = 0; want_fd = 0;
+        } else if (tc == 7) {
+            name = "bad-cert-length-short-of-eof";
+            wrc = write_pe_fixture(fpath, p4_body, p4_len, 6, 1, 3, 0, 0);
+            want_pf = 0; want_fd = 0;
+        } else if (tc == 8) {
+            name = "bad-cert-nonzero-pre-cert-pad";
+            wrc = write_pe_fixture(fpath, p4_body, p4_len, 6, 1, 4, 0, 0);
+            want_pf = 0; want_fd = 0;
+        } else if (tc == 9) {
+            name = "bad-cert-wrong-type";
+            wrc = write_pe_fixture(fpath, p4_body, p4_len, 6, 1, 5, 0, 0);
+            want_pf = 0; want_fd = 0;
+        } else if (tc == 10) {
+            name = "bad-footer-p4-prefixed-len-overflow-fail-closed";
+            unsigned char b[26]; (void)mm_copy(b, 26, p4_body, p4_len); put_footer(b + p4_len, 9999ULL);
+            wrc = sy_write_file(fpath, b, 26, 0644);
+            want_pf = 0; want_fd = 0;
+        } else if (tc == 11) {
+            name = "bad-footer-p4-prefixed-len-zero-fail-closed";
+            unsigned char b[26]; (void)mm_copy(b, 26, p4_body, p4_len); put_footer(b + p4_len, 0ULL);
+            wrc = sy_write_file(fpath, b, 26, 0644);
+            want_pf = 0; want_fd = 0;
+        } else if (tc == 12) {
+            name = "bad-footer-magic-elf-container";
+            unsigned char b[64]; mm_fill(b, 64, 0, 64); b[0] = 0x7f; b[1] = 'E'; b[2] = 'L'; b[3] = 'F';
+            (void)mm_copy(b + 48, 8, "UNIPKG9\n", 8);
+            wrc = sy_write_file(fpath, b, 64, 0644);
+            want_pf = 0; want_fd = 0;
+        } else if (tc == 13) {
+            name = "collision-pe-section-fake-footer-ignored";
+            wrc = write_pe_fixture(fpath, p4_inner, (long)sizeof p4_inner, 0, 1, 0, 1, 0);
+            want_pf = 1; want_fd = 1; want_off = 1024; want_len = (long)sizeof p4_inner;
+        } else if (tc == 14) {
+            name = "collision-unsigned-pe-nonzero-pad-footer-refused";
+            /* Unsigned PE (cert=0): footer shifted back by 6 zero pad bytes must be refused by both */
+            wrc = write_pe_fixture(fpath, p4_body, p4_len, 6, 0, 0, 1, 0);
+            want_pf = 0; want_fd = 0;
+        }
+
+        char *vr[] = {drv_bin, fpath, 0};
+        int rc = (wrc == 0) ? run_cmd(repo, vr, out, sizeof out, 10) : -1;
+        char want_line[256];
+        int ok = 0;
+        if (rc == 0) {
+            if (expect_same) {
+                if (!cx_fmt(want_line, sizeof want_line, "LOC\tpf_ok=%d\tpf_off=%ld\tpf_len=%ld\tfd_ok=%d\tfd_off=%ld\tfd_len=%ld\n",
+                            want_pf, want_pf ? want_off : -1L, want_pf ? want_len : -1L,
+                            want_fd, want_fd ? want_off : -1L, want_fd ? want_len : -1L)) {
+                    ok = tx_eqz(out, want_line);
+                }
+            } else {
+                if (!cx_fmt(want_line, sizeof want_line, "LOC\tpf_ok=0\tpf_off=-1\tpf_len=-1\tfd_ok=1\tfd_off=%ld\tfd_len=%ld\n",
+                            want_off, want_len)) {
+                    ok = tx_eqz(out, want_line);
+                }
+            }
+        }
+        if (!ok) sy_eprintf("DIAG\tcase=%s\trc=%d\tgot=%.160s\n", name, rc, out);
+        ck(ok, name);
+    }
+
+    (void)sy_remove_all(tmp);
+    sy_printf("CHECK_P4_LOCATOR_PARITY\tpassed=%d\tfailed=%d\n", g_pass, g_fail);
+    return g_fail ? 1 : 0;
+}
