@@ -568,6 +568,54 @@ int main(void) {
         ck(run_pf("--prepare-snap-tools --repo .", out, sizeof out) == 0 &&
            has(out, "PREFLIGHT_PREPARE\tstep=snap-tools\tstatus=PREPARED\tcandidate_chain="),
            "prepare-snap-tools-outputs-prepared", out);
+
+        /* 18. chain-to-snap scans full stdout beyond 8 KB when a large (>24 KB) prefix precedes CANDIDATE_CHAIN status=UNTIL phase=snap */
+        {
+            char lrepo[1200], ltools[1300], lhome[1300], lsb[1300], gcmd[2400], lsha[64] = {0}, lcc[1400], scmd[2600];
+            static char big_cc[30000];
+            long bw = 0;
+            cx_fmt(lrepo, sizeof lrepo, "%s/large-snap-repo", fx);
+            cx_fmt(ltools, sizeof ltools, "%s/tools", lrepo);
+            cx_fmt(lhome, sizeof lhome, "%s/large-snap-home", fx);
+            cx_fmt(lsb, sizeof lsb, "%s/large-snap-base", fx);
+            mk_dir(ltools);
+            mk_dir(lhome);
+            mk_dir(lsb);
+            wr_file(lrepo, "unisacc.com", "#!/bin/sh\nif [ \"$2\" = -o ]; then cp \"$1\" \"$3\" && chmod 755 \"$3\"; exit 0; fi\nt=\"$1\"; shift 2; exec sh \"$t\" \"$@\"\n");
+            sy_chmod(lrepo, 0755);
+            {
+                char ucom[1300];
+                cx_fmt(ucom, sizeof ucom, "%s/unisacc.com", lrepo);
+                sy_chmod(ucom, 0755);
+            }
+            wr_file(lrepo, "unisacc.com.build.json", "{\"commit\":\"3224e3518e\"}");
+            wr_file(lrepo, "tools/preflight.cx", "#!/bin/sh\nexit 0\n");
+            wr_file(lrepo, "tools/whole-front.cx", "#!/bin/sh\nexit 0\n");
+            wr_file(lrepo, "tools/chain-step.cx", "#!/bin/sh\nexit 0\n");
+            bw += snprintf(big_cc + bw, sizeof big_cc - (size_t)bw, "#!/bin/sh\ncat <<'EOF'\n");
+            for (int li = 0; li < 400; li++) {
+                bw += snprintf(big_cc + bw, sizeof big_cc - (size_t)bw,
+                               "CHAIN_DRIVER_DIFF_PAD_%03d_0123456789abcdef0123456789abcdef0123456789abcdef\n", li);
+            }
+            bw += snprintf(big_cc + bw, sizeof big_cc - (size_t)bw,
+                           "CANDIDATE_CHAIN\tstatus=UNTIL\tphase=snap\nEOF\nexit 0\n");
+            cx_fmt(lcc, sizeof lcc, "%s/tools/candidate-chain.cx", lrepo);
+            sy_write_file(lcc, big_cc, bw, 0755);
+            sy_chmod(lcc, 0755);
+            cx_fmt(gcmd, sizeof gcmd,
+                "cd '%s' && git init -q && git add --all && "
+                "git -c user.name=fx -c user.email=fx@local -c core.hooksPath=/dev/null -c commit.gpgsign=false commit -qm large && "
+                "git rev-parse HEAD", lrepo);
+            ckk_sh("CHECK_CHAIN_PREFLIGHT", gcmd, out, sizeof out);
+            if (strlen(out) >= 40) { mm_copy(lsha, sizeof lsha, out, 40); lsha[40] = 0; }
+            cx_fmt(scmd, sizeof scmd,
+                "env -u UNISACC_INTEGRATOR HOME='%s' '%s' -- --item chain-to-snap --root '%s' --repo '%s' --rev '%s' --snap-base '%s' --cold",
+                lhome, pf_bin, lrepo, lrepo, lsha, lsb);
+            ck(ckk_sh("CHECK_CHAIN_PREFLIGHT", scmd, out, sizeof out) == 0 &&
+               has(out, "PREFLIGHT_ITEM\tchain-to-snap\tPASS\t") &&
+               has(out, "\tstatus=until-snap\t"),
+               "chain-to-snap-large-stdout-over-8kb-passes", out);
+        }
     }
 
     cx_fmt(rmcmd, sizeof rmcmd, "rm -rf '%s'", fx);

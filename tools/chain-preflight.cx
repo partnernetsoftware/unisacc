@@ -557,25 +557,38 @@ static int item_chain_to_snap_buf(const char *root, const char *repo, const char
         sy_chmod(ih_path, 0755);
     }
 
-    char cc_bin[1400] = {0}, cmd[4096], out[8192];
+    char cc_bin[1400] = {0}, snap_log[1600], cmd[4096], out[512];
+    unsigned char *full_out = 0;
+    int64_t full_n = 0;
+    if (cx_fmt(snap_log, sizeof snap_log, "%s/snap.log", tmp_base)) {
+        sy_remove_all(tmp_base);
+        cx_fmt(line_out, line_cap, "PREFLIGHT_ITEM\tchain-to-snap\tFAIL\trev=%s\trc=2\treason=tmp-path-overflow\tms=%ld\n",
+               tip, sy_now_ms() - t0);
+        return 1;
+    }
     pf_prepare_snap_tools(rrepo, tmp_out, force_cold, cc_bin, sizeof cc_bin);
     if (cc_bin[0]) {
-        cx_fmt(cmd, sizeof cmd, "cd '%s' && '%s' --rev '%s' --out '%s' --until snap 2>&1", rrepo, cc_bin, tip, tmp_out);
+        cx_fmt(cmd, sizeof cmd, "cd '%s' && '%s' --rev '%s' --out '%s' --until snap >'%s' 2>&1", rrepo, cc_bin, tip, tmp_out, snap_log);
     } else {
-        cx_fmt(cmd, sizeof cmd, "cd '%s' && sh ./unisacc.com tools/candidate-chain.cx -- --rev '%s' --out '%s' --until snap 2>&1",
-               rrepo, tip, tmp_out);
+        cx_fmt(cmd, sizeof cmd, "cd '%s' && sh ./unisacc.com tools/candidate-chain.cx -- --rev '%s' --out '%s' --until snap >'%s' 2>&1",
+               rrepo, tip, tmp_out, snap_log);
     }
     int rc = ckk_sh_t("CHAIN_PREFLIGHT", cmd, out, sizeof out, 50);
+    (void)sy_read_file(snap_log, &full_out, &full_n, 16 << 20);
     sy_remove_all(tmp_base);
 
-    if (rc == 0 && ckk_has(out, (int)sizeof out, "CANDIDATE_CHAIN\tstatus=UNTIL\tphase=snap")) {
+    const char *needle = "CANDIDATE_CHAIN\tstatus=UNTIL\tphase=snap";
+    long nlen = (long)strlen(needle);
+    if (rc == 0 && full_out && full_n >= nlen && tx_find((const char *)full_out, (long)full_n, needle, nlen) >= 0) {
+        mm_free(full_out);
         pf_normalize_worktree_snap(snap_base, tip);
         cx_fmt(line_out, line_cap, "PREFLIGHT_ITEM\tchain-to-snap\tPASS\trev=%s\tstatus=until-snap\trc=0\tms=%ld\n",
                tip, sy_now_ms() - t0);
         return 0;
     }
     char reason[320];
-    pf_extract_snap_reason(out, reason, sizeof reason);
+    pf_extract_snap_reason(full_out ? (const char *)full_out : out, reason, sizeof reason);
+    if (full_out) mm_free(full_out);
     cx_fmt(line_out, line_cap, "PREFLIGHT_ITEM\tchain-to-snap\tFAIL\trev=%s\trc=%d\treason=%s\tms=%ld\n",
            tip, rc ? rc : 1, reason, sy_now_ms() - t0);
     return 1;

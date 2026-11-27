@@ -1,8 +1,10 @@
 /* tools/check-chain-tool-identity.cx -- Verify that formal chain tools are pinned from the
  * --rev snapshot (or an explicit --tools-root escape recorded in the receipt), never mixed
- * from a drifted working checkout root.
+ * from a drifted working checkout root, including --repin, resume identity binding, and
+ * parsed option-table argv contract verification.
  *
- *   cx tools/check-chain-tool-identity.cx -- [ABS_OUT] [CANDIDATE_TOOL] [CHAIN_RUN_TOOL]
+ *   cx tools/check-chain-tool-identity.cx -- [--fast] [--run-id ID] [ABS_OUT] [CANDIDATE_TOOL] [CHAIN_RUN_TOOL]
+ *   cx tools/check-chain-tool-identity.cx -- --judge RUN_ID EVIDENCE_FILE
  *   cx tools/check-chain-tool-identity.cx -- --verify-chain-dir DIR [--repo DIR] [--rev HEX40] [--allow-override]
  *
  * Marker: CHECK_CHAIN_TOOL_IDENTITY failed=0. */
@@ -251,9 +253,43 @@ static int verify_chain_dir(const char *chain_dir, const char *repo, const char 
     return (checked > 0 && mismatches == 0) ? 0 : 1;
 }
 
+static const char *const k_valid_opt_table_src =
+    "static const struct { const char *name; int arity; } g_cc_opt_table[] = {\n"
+    "  {\"--rev\", 1}, {\"--out\", 1}, {\"--resume\", 0}, {\"--until\", 1},\n"
+    "  {\"--lane\", 1}, {\"--recheck-only\", 0}, {\"--jobs-segment-s\", 1},\n"
+    "  {\"--tools-root\", 1}, {\"--pin-all-tools\", 0}, {\"--cache-manager-osx\", 2},\n"
+    "  {\"--argv-contract\", 0}, {0, 0}\n"
+    "};\n"
+    "int main(void){return (int)(g_cc_opt_table[0].arity - 1);}\n";
+
 int main(int argc, char **argv) {
     char cwd[4400];
     if (sy_realpath(".", cwd, sizeof cwd) < 0) return 2;
+    if (argc == 4 && !strcmp(argv[1], "--judge")) {
+        const char *want_id = argv[2], *ev_path = argv[3];
+        size_t en = 0;
+        char *eb = cx_read(ev_path, &en);
+        if (!eb || en == 0) {
+            free(eb);
+            sy_printf("FAIL\tidentity-missing\n");
+            return 1;
+        }
+        char id_tag[512];
+        if (cx_fmt(id_tag, sizeof id_tag, "CHAIN_TOOL_IDENTITY_RUN\trun_id=%s\t", want_id) ||
+            !has_sub(eb, id_tag)) {
+            free(eb);
+            sy_printf("FAIL\tidentity-stale\n");
+            return 1;
+        }
+        int ok = has_sub(eb, "CHECK_CHAIN_TOOL_IDENTITY\tfailed=0\n") != 0;
+        free(eb);
+        if (ok) {
+            sy_printf("PASS\tidentity-result\n");
+            return 0;
+        }
+        sy_printf("FAIL\tidentity-result\n");
+        return 1;
+    }
     if (argc >= 3 && !strcmp(argv[1], "--verify-chain-dir")) {
         const char *cdir = argv[2], *repo = cwd, *rev = 0;
         int allow_ov = 0, mm = 0;
@@ -268,32 +304,87 @@ int main(int argc, char **argv) {
         return rc;
     }
 
-    char outroot[4400], cand_bin[4400], run_bin[4400], f[4400];
-    if (argc >= 2 && argv[1][0] == '/') tx_copy(outroot, sizeof outroot, argv[1], (long)strlen(argv[1]));
-    else if (cx_fmt(outroot, sizeof outroot, "%s", sy_tmpdir())) return 2;
+    char outroot[4400], cand_bin[4400], run_bin[4400], f[4400], run_id[512];
+    int fast_mode = 0, pos_idx = 0;
+    const char *pos_args[4] = {0, 0, 0, 0};
+    outroot[0] = 0; cand_bin[0] = 0; run_bin[0] = 0; run_id[0] = 0;
+    for (int i = 1; i < argc; i++) {
+        if (!strcmp(argv[i], "--fast")) { fast_mode = 1; continue; }
+        if (!strcmp(argv[i], "--run-id") && i + 1 < argc) {
+            const char *rid = argv[++i];
+            tx_copy(run_id, sizeof run_id, rid, (long)strlen(rid));
+            continue;
+        }
+        if (pos_idx < 3) pos_args[pos_idx++] = argv[i];
+    }
+    if (pos_args[0] && pos_args[0][0] == '/') {
+        tx_copy(outroot, sizeof outroot, pos_args[0], (long)strlen(pos_args[0]));
+        if (!run_id[0]) tx_copy(run_id, sizeof run_id, pos_args[0], (long)strlen(pos_args[0]));
+    } else if (pos_args[0] && !run_id[0]) {
+        tx_copy(run_id, sizeof run_id, pos_args[0], (long)strlen(pos_args[0]));
+    }
+    if (!outroot[0] && cx_fmt(outroot, sizeof outroot, "%s", sy_tmpdir())) return 2;
+    if (!run_id[0]) {
+        const char *env_rid = sy_env("UNISACC_RUN_ID");
+        if (env_rid && env_rid[0]) tx_copy(run_id, sizeof run_id, env_rid, (long)strlen(env_rid));
+        else if (cx_fmt(run_id, sizeof run_id, "cti-%ld-%d", sy_now_ms(), (int)sy_pid())) return 2;
+    }
     sy_mkdir(outroot, 0755);
     if (cx_fmt(f, sizeof f, "%s/cti-%ld-%d", outroot, sy_now_ms(), (int)sy_pid()) || sy_mkdir(f, 0755)) return 2;
 
-    if (argc >= 3 && argv[2][0] == '/' && sy_exists(argv[2]) == 1) {
-        tx_copy(cand_bin, sizeof cand_bin, argv[2], (long)strlen(argv[2]));
-    } else {
-        char why[512];
-        int reused = 0;
-        if (rn_prepare(cwd, "tools/candidate-chain.cx", f, cand_bin, sizeof cand_bin, &reused, why, sizeof why)) return 2;
-    }
-    if (argc >= 4 && argv[3][0] == '/' && sy_exists(argv[3]) == 1) {
-        tx_copy(run_bin, sizeof run_bin, argv[3], (long)strlen(argv[3]));
-    } else {
-        char why[512];
-        int reused = 0;
-        if (rn_prepare(cwd, "tools/chain-run.cx", f, run_bin, sizeof run_bin, &reused, why, sizeof why)) return 2;
-    }
-
-    /* Isolate HOME / TMPDIR / UNISACC_CHAIN_BASE inside the fixture. */
-    char orig_home[4400], orig_tmp[4400], fh[4400], ft[4400], ftc[4400], cbase[4500], repo[4400], repo_out[4400], ovdir[4400];
+    char orig_home[4400], orig_tmp[4400], cache_dir[4400];
     const char *eh = sy_env("HOME"), *et = sy_env("TMPDIR");
     if (cx_fmt(orig_home, sizeof orig_home, "%s", (eh && eh[0]) ? eh : "/tmp") ||
         cx_fmt(orig_tmp, sizeof orig_tmp, "%s", (et && et[0]) ? et : "/tmp")) return 2;
+    if (cx_fmt(cache_dir, sizeof cache_dir, "%s/.cache/unisacc/cti-runner-cache", orig_home) ||
+        mkparents(cache_dir) || (sy_mkdir(cache_dir, 0755) && sy_exists(cache_dir) != 1)) {
+        if (cx_fmt(cache_dir, sizeof cache_dir, "%s/unisacc-cti-runner-cache", orig_tmp) ||
+            (sy_mkdir(cache_dir, 0755) && sy_exists(cache_dir) != 1)) return 2;
+    }
+
+    int have_cand = (pos_args[1] && pos_args[1][0] == '/' && sy_exists(pos_args[1]) == 1);
+    int have_run = (pos_args[2] && pos_args[2][0] == '/' && sy_exists(pos_args[2]) == 1);
+    if (have_cand) tx_copy(cand_bin, sizeof cand_bin, pos_args[1], (long)strlen(pos_args[1]));
+    if (have_run) tx_copy(run_bin, sizeof run_bin, pos_args[2], (long)strlen(pos_args[2]));
+
+    if (!have_cand && !have_run) {
+        /* Prepare candidate-chain.cx and chain-run.cx concurrently into the persistent content-addressed cache. */
+        char cpath_file[4400];
+        if (cx_fmt(cpath_file, sizeof cpath_file, "%s/cand.bin.path", f)) return 2;
+        fflush(stdout);
+        fflush(stderr);
+        int pid = (int)fork();
+        if (pid == 0) {
+            char cbin[4400], why[512];
+            int reused = 0;
+            if (rn_prepare(cwd, "tools/candidate-chain.cx", cache_dir, cbin, sizeof cbin, &reused, why, sizeof why)) _exit(2);
+            if (cx_write(cpath_file, cbin, strlen(cbin))) _exit(2);
+            _exit(0);
+        }
+        char why_r[512];
+        int reused_r = 0, ex = 0, code = 1, sig = 0;
+        int rc_r = rn_prepare(cwd, "tools/chain-run.cx", cache_dir, run_bin, sizeof run_bin, &reused_r, why_r, sizeof why_r);
+        if (pid > 0) sy_wait_status(pid, 0, &ex, &code, &sig);
+        size_t cn = 0;
+        char *cb = cx_read(cpath_file, &cn);
+        if (rc_r || !ex || code != 0 || !cb || cn == 0 || cn >= sizeof cand_bin) { free(cb); return 2; }
+        tx_copy(cand_bin, sizeof cand_bin, cb, (long)cn);
+        free(cb);
+    } else {
+        if (!have_cand) {
+            char why[512];
+            int reused = 0;
+            if (rn_prepare(cwd, "tools/candidate-chain.cx", cache_dir, cand_bin, sizeof cand_bin, &reused, why, sizeof why)) return 2;
+        }
+        if (!have_run) {
+            char why[512];
+            int reused = 0;
+            if (rn_prepare(cwd, "tools/chain-run.cx", cache_dir, run_bin, sizeof run_bin, &reused, why, sizeof why)) return 2;
+        }
+    }
+
+    /* Isolate HOME / TMPDIR / UNISACC_CHAIN_BASE inside the fixture. */
+    char fh[4400], ft[4400], ftc[4400], cbase[4500], repo[4400], repo_out[4400], ovdir[4400];
     if (cx_fmt(fh, sizeof fh, "%s/home", f) || cx_fmt(ft, sizeof ft, "%s/tmp", f) ||
         cx_fmt(repo, sizeof repo, "%s/repo", f) || cx_fmt(repo_out, sizeof repo_out, "%s/repo/%s", f, OD) ||
         cx_fmt(ovdir, sizeof ovdir, "%s/override-root", f) ||
@@ -342,13 +433,10 @@ int main(int argc, char **argv) {
 
     /* Populate Commit 1 (REV): snapshot version of all chain tools (including entry-build.cx and chainfacts.cx). */
     for (int i = 0; g_specs[i].tool; i++) {
-        char body[1200];
+        char body[1600];
         if (cx_fmt(q, sizeof q, "%s/%s", repo, g_specs[i].rel)) return 2;
         if (!strcmp(g_specs[i].tool, "candidate-chain")) {
-            if (cx_fmt(body, sizeof body,
-                       "/* candidate-chain rev-v1 */\n"
-                       "/* \"--rev\" \"--out\" \"--resume\" \"--until\" \"--lane\" \"--recheck-only\" \"--jobs-segment-s\" \"--tools-root\" \"--pin-all-tools\" \"--cache-manager-osx\" */\n"
-                       "int main(void){return 0;}\n")) return 2;
+            if (cx_fmt(body, sizeof body, "/* candidate-chain rev-v1 */\n%s", k_valid_opt_table_src)) return 2;
         } else if (!strcmp(g_specs[i].tool, "entry-build")) {
             if (cx_fmt(body, sizeof body,
                        "/* entry-build rev-v1 (drivestream_m1) */\n"
@@ -433,9 +521,8 @@ int main(int argc, char **argv) {
 
     /* ---- CASE 1 (RED falsifier): old root-pinning behaviour & 9e2ac4df6 mixed root/snap evidence ---- */
     {
-        char red_out[4400], cp[4400], nat[4400];
+        char red_out[4400];
         if (cx_fmt(red_out, sizeof red_out, "%s/out-red-old-behaviour", repo) || sy_mkdir(red_out, 0755)) return 2;
-        /* Simulate the old behaviour: pinning entry-build (and chainfacts.cx) + whole-front + release-build + release-ape from root (main-v2-drifted) while chain rev is REV. */
         char id_path[4400], id_body[120];
         if (cx_fmt(id_path, sizeof id_path, "%s/chain-run.identity", red_out) ||
             cx_fmt(id_body, sizeof id_body, "rev=%s\nmode=full\ncandidate=source\n", rev) ||
@@ -452,13 +539,13 @@ int main(int argc, char **argv) {
         int red_mm = 0;
         int red_rc = verify_chain_dir(red_out, repo, rev, 0, 1, &red_mm);
         ck(red_rc == 1 && red_mm >= 6, "red-falsifier-root-pinned-tools-and-chainfacts-rejected");
-        (void)cp; (void)nat;
     }
 
     /* Also check live 9e2ac4df6 chain directory if present on this machine: must be caught as RED (mismatches >= 5). */
     {
         char live_9e2[4500];
-        if (!cx_fmt(live_9e2, sizeof live_9e2, "%s/.cache/unisacc/chains/bg-b1/9e2ac4df65f92ef394d1a6f122730d3ed942b809", orig_home) &&
+        if (!fast_mode &&
+            !cx_fmt(live_9e2, sizeof live_9e2, "%s/.cache/unisacc/chains/bg-b1/9e2ac4df65f92ef394d1a6f122730d3ed942b809", orig_home) &&
             sy_exists(live_9e2) == 1) {
             int live_mm = 0;
             int live_rc = verify_chain_dir(live_9e2, cwd, "9e2ac4df65f92ef394d1a6f122730d3ed942b809", 0, 1, &live_mm);
@@ -468,7 +555,8 @@ int main(int argc, char **argv) {
         }
     }
 
-    /* ---- CASE 2 (GREEN): formal chain takes tools from --rev snapshot even when root main has drifted ---- */
+    /* ---- CASE 2 (GREEN): formal chain takes tools from --rev snapshot even when root main has drifted,
+       writes diff only to OUT/chain-driver-diff.patch (1 summary line on stdout), and --repin compiles from tools_root ---- */
     if (sy_mkdir(repo_out, 0755) && sy_access(repo_out, 0)) return 2;
     {
         char green_out[4400], ih[4400], cmx[4400], cma[4400];
@@ -480,26 +568,26 @@ int main(int argc, char **argv) {
             putfile(cmx, "x64") || putfile(cma, "arm64")) return 2;
         if (sy_setenv("UNISACC_IDENT_HELPER", ih, 1)) return 2;
         if (sy_chdir(repo)) return 2;
-        /* Run chain-run for 1 segment (snap completes; pack is held or we run candidate-chain --until snap --pin-all-tools).
-           First run chain-run to verify chain-run.cx:1005-1012 compiles candidate-chain.cx from the snapshot, prints git diff origin/main REV,
-           and checks the argv contract. */
         char *cr_v[] = {
             run_bin, (char *)"--rev", rev, (char *)"--out", green_out,
+            (char *)"--max-attempts", (char *)"3",
             (char *)"--deadline-s", (char *)"300", (char *)"--",
             (char *)"--cache-manager-osx", cmx, cma,
             (char *)"--pin-all-tools", 0
         };
         char *cr_log = 0;
         size_t cr_log_n = 0;
-        (void)run_cmd(cr_v, 40, &cr_log, &cr_log_n);
+        (void)run_cmd(cr_v, 30, &cr_log, &cr_log_n);
         if (sy_chdir(cwd)) return 2;
 
-        /* 1. Verify git diff origin/main REV was printed and written to chain-driver-diff.patch */
+        /* 1. Verify git diff origin/main REV was written to chain-driver-diff.patch and ONLY a 1-line summary (files, bytes, sha) printed to stdout */
         char diff_patch[4400];
         size_t diff_n = 0;
         if (cx_fmt(diff_patch, sizeof diff_patch, "%s/chain-driver-diff.patch", green_out)) return 2;
         char *diff_b = cx_read(diff_patch, &diff_n);
         ck(cr_log && has_sub(cr_log, "CHAIN_DRIVER_DIFF\tbase=origin/main\trev=") != 0 &&
+           has_sub(cr_log, "\tdiff_files=") != 0 && has_sub(cr_log, "\tdiff_bytes=") != 0 &&
+           has_sub(cr_log, "\tdiff_sha=") != 0 && has_sub(cr_log, "diff --git ") == 0 &&
            diff_b && diff_n > 0 && has_sub(diff_b, "tools/entry-build.cx") != 0 &&
            has_sub(diff_b, "tools/cxlib/chainfacts.cx") != 0,
            "prints-git-diff-origin-main-rev-on-chain-driver-set");
@@ -533,18 +621,36 @@ int main(int argc, char **argv) {
            !strcmp(got_cf, want_cf),
            "eb-pinned-takes-entry-build-and-chainfacts-from-snapshot");
         free(cr_log);
+
+        /* 5. Verify default --repin candidate-chain compiles from tools_root (snapshot), NOT from drifted live root! */
+        (void)sy_unlink(build_trace);
+        if (sy_chdir(repo)) return 2;
+        char *rp_v[] = {
+            run_bin, (char *)"--rev", rev, (char *)"--out", green_out,
+            (char *)"--repin", (char *)"candidate-chain",
+            (char *)"--reason", (char *)"verify repin uses snapshot tools_root", 0
+        };
+        char *rp_log = 0;
+        int rp_rc = run_cmd(rp_v, 20, &rp_log, 0);
+        if (sy_chdir(cwd)) return 2;
+        bt_n = 0;
+        bt_b = cx_read(build_trace, &bt_n);
+        int rp_mm = -1;
+        int rp_vrc = verify_chain_dir(green_out, repo, rev, 0, 0, &rp_mm);
+        ck(rp_rc == 0 && bt_b && has_sub(bt_b, "/snap/") != 0 && has_sub(bt_b, "/tools/candidate-chain.cx") != 0 &&
+           rp_vrc == 0 && rp_mm == 0,
+           "repin-candidate-chain-compiles-from-tools-root-snapshot-not-live-root");
+        free(bt_b);
+        free(rp_log);
     }
 
-    /* ---- CASE 3: explicit --tools-root escape is recorded in receipt and verified ---- */
+    /* ---- CASE 3: explicit --tools-root escape is recorded in receipt, verified, and bound into resume identity ---- */
     {
         for (int i = 0; g_specs[i].tool; i++) {
-            char body[1200];
+            char body[1600];
             if (cx_fmt(q, sizeof q, "%s/%s", ovdir, g_specs[i].rel)) return 2;
             if (!strcmp(g_specs[i].tool, "candidate-chain")) {
-                if (cx_fmt(body, sizeof body,
-                           "/* candidate-chain override-v3 */\n"
-                           "/* \"--rev\" \"--out\" \"--resume\" \"--until\" \"--lane\" \"--recheck-only\" \"--jobs-segment-s\" \"--tools-root\" \"--pin-all-tools\" \"--cache-manager-osx\" */\n"
-                           "int main(void){return 0;}\n")) return 2;
+                if (cx_fmt(body, sizeof body, "/* candidate-chain override-v3 */\n%s", k_valid_opt_table_src)) return 2;
             } else if (!strcmp(g_specs[i].tool, "entry-build")) {
                 if (cx_fmt(body, sizeof body,
                            "/* entry-build override-v3 */\n#pragma unisa use cxlib.chainfacts\nint main(void){return 0;}\n")) return 2;
@@ -556,7 +662,9 @@ int main(int argc, char **argv) {
             }
             if (putfile(q, body)) return 2;
         }
-        if (cx_fmt(q, sizeof q, "%s/cxroot.tsv", ovdir) || putfile(q, "CXROOT1\nR\tcxlib\ttools/cxlib\n") ||
+        if (cx_fmt(q, sizeof q, "%s/tools/source-job-wave.cx", ovdir) ||
+            putfile(q, "/* source-job-wave override-v3 */\nint main(void){return 0;}\n") ||
+            cx_fmt(q, sizeof q, "%s/cxroot.tsv", ovdir) || putfile(q, "CXROOT1\nR\tcxlib\ttools/cxlib\n") ||
             cx_fmt(q, sizeof q, "%s/build/preflight-rules.tsv", ovdir) || putfile(q, "# override rules\n") ||
             cx_fmt(p, sizeof p, "%s/tools/templates/whole-front.cx.in", cwd) ||
             cx_fmt(q, sizeof q, "%s/tools/templates/whole-front.cx.in", ovdir) || copyf(p, q, 0644) ||
@@ -570,12 +678,13 @@ int main(int argc, char **argv) {
         if (sy_chdir(repo)) return 2;
         char *ov_v[] = {
             run_bin, (char *)"--rev", rev, (char *)"--out", ov_out,
-            (char *)"--tools-root", ovdir, (char *)"--deadline-s", (char *)"300",
+            (char *)"--tools-root", ovdir, (char *)"--max-attempts", (char *)"3",
+            (char *)"--deadline-s", (char *)"300",
             (char *)"--", (char *)"--cache-manager-osx", cmx, cma,
             (char *)"--pin-all-tools", 0
         };
         char *ov_log = 0;
-        (void)run_cmd(ov_v, 40, &ov_log, 0);
+        (void)run_cmd(ov_v, 30, &ov_log, 0);
         if (sy_chdir(cwd)) return 2;
 
         char recp[4400];
@@ -591,28 +700,85 @@ int main(int argc, char **argv) {
         ck(rc_strict == 1 && rc_allow == 0 && mm_allow == 0,
            "explicit-tools-root-refused-by-default-and-verified-with-allow-override");
         free(ov_log);
+
+        /* Resume identity check: resuming ov_out WITHOUT --tools-root (or after mutating a tool blob in ovdir) must be refused! */
+        if (sy_chdir(repo)) return 2;
+        char *mix_v[] = {
+            run_bin, (char *)"--rev", rev, (char *)"--out", ov_out,
+            (char *)"--max-attempts", (char *)"3", (char *)"--deadline-s", (char *)"300",
+            (char *)"--", (char *)"--cache-manager-osx", cmx, cma,
+            (char *)"--pin-all-tools", 0
+        };
+        char *mix_log = 0;
+        int mix_rc = run_cmd(mix_v, 15, &mix_log, 0);
+        if (sy_chdir(cwd)) return 2;
+
+        if (cx_fmt(q, sizeof q, "%s/tools/whole-front.cx", ovdir) ||
+            putfile(q, "/* whole-front mutated-v4 */\nint main(void){return 0;}\n")) return 2;
+        if (sy_chdir(repo)) return 2;
+        char *mut_log = 0;
+        int mut_rc = run_cmd(ov_v, 15, &mut_log, 0);
+        if (sy_chdir(cwd)) return 2;
+        ck(mix_rc == 2 && mix_log && has_sub(mix_log, "output identity mismatch") != 0 &&
+           mut_rc == 2 && mut_log && has_sub(mut_log, "output identity mismatch") != 0,
+           "resume-refuses-tools-root-or-tool-blob-sha-mismatch");
+        free(mix_log);
+        free(mut_log);
     }
 
-    /* ---- CASE 4: argv contract check refuses a snapshot candidate-chain missing a required flag ---- */
+    /* ---- CASE 4: parsed option table argv contract refuses comment-only literals, missing flags, and bad option arity ---- */
     {
-        char bad_tr[4400], bad_out[4400], bad_cc[4400];
+        char bad_tr[4400], bad_out1[4400], bad_out2[4400], bad_cc[4400];
         if (cx_fmt(bad_tr, sizeof bad_tr, "%s/bad-tools-root", f) ||
-            cx_fmt(bad_out, sizeof bad_out, "%s/%s/bad-argv", repo, OD) ||
+            cx_fmt(bad_out1, sizeof bad_out1, "%s/%s/bad-argv-comment", repo, OD) ||
+            cx_fmt(bad_out2, sizeof bad_out2, "%s/%s/bad-argv-arity", repo, OD) ||
             cx_fmt(bad_cc, sizeof bad_cc, "%s/tools/candidate-chain.cx", bad_tr) ||
             sy_mkdir(bad_tr, 0755) ||
-            /* Missing --jobs-segment-s and --tools-root */
-            putfile(bad_cc, "/* missing flags: \"--rev\" \"--out\" \"--resume\" \"--until\" */\nint main(void){return 0;}\n")) return 2;
+            /* 4a: ALL required option literals present ONLY inside a comment must be REFUSED! */
+            putfile(bad_cc,
+                    "/* \"--rev\" \"--out\" \"--resume\" \"--until\" \"--lane\" \"--recheck-only\" \"--jobs-segment-s\" \"--tools-root\" \"--pin-all-tools\" \"--cache-manager-osx\" */\n"
+                    "int main(void){return 0;}\n")) return 2;
         if (sy_chdir(repo)) return 2;
-        char *bad_v[] = {
-            run_bin, (char *)"--rev", rev, (char *)"--out", bad_out,
+        char *bad_v1[] = {
+            run_bin, (char *)"--rev", rev, (char *)"--out", bad_out1,
             (char *)"--tools-root", bad_tr, (char *)"--deadline-s", (char *)"30", 0
         };
-        char *bad_log = 0;
-        int bad_rc = run_cmd(bad_v, 20, &bad_log, 0);
+        char *bad_log1 = 0;
+        int bad_rc1 = run_cmd(bad_v1, 15, &bad_log1, 0);
         if (sy_chdir(cwd)) return 2;
-        ck(bad_rc == 2 && bad_log && has_sub(bad_log, "CHAIN_ARGV_CONTRACT\tstatus=FAIL\t") != 0,
+
+        /* 4b: Valid option table in candidate-chain.cx, but caller passes --cache-manager-osx with only 1 argument instead of 2 */
+        if (putfile(bad_cc, k_valid_opt_table_src)) return 2;
+        if (sy_chdir(repo)) return 2;
+        char *bad_v2[] = {
+            run_bin, (char *)"--rev", rev, (char *)"--out", bad_out2,
+            (char *)"--tools-root", bad_tr, (char *)"--deadline-s", (char *)"30",
+            (char *)"--", (char *)"--cache-manager-osx", (char *)"only-one-arg", (char *)"--pin-all-tools", 0
+        };
+        char *bad_log2 = 0;
+        int bad_rc2 = run_cmd(bad_v2, 15, &bad_log2, 0);
+        if (sy_chdir(cwd)) return 2;
+
+        /* 4c: Direct binary --argv-contract and --argv-contract --check on real cand_bin */
+        char *ac_list[] = {cand_bin, (char *)"--argv-contract", 0};
+        char *ac_ok[] = {cand_bin, (char *)"--argv-contract", (char *)"--check",
+                         (char *)"--rev", rev, (char *)"--out", bad_out2, (char *)"--resume",
+                         (char *)"--tools-root", bad_tr, (char *)"--cache-manager-osx", (char *)"a", (char *)"b",
+                         (char *)"--pin-all-tools", (char *)"--until", (char *)"snap", 0};
+        char *ac_bad[] = {cand_bin, (char *)"--argv-contract", (char *)"--check",
+                          (char *)"--rev", rev, (char *)"--bogus-option", 0};
+        char *ac_lout = 0, *ac_okout = 0, *ac_badout = 0;
+        int rc_acl = run_cmd(ac_list, 10, &ac_lout, 0);
+        int rc_aco = run_cmd(ac_ok, 10, &ac_okout, 0);
+        int rc_acb = run_cmd(ac_bad, 10, &ac_badout, 0);
+
+        ck(bad_rc1 == 2 && bad_log1 && has_sub(bad_log1, "CHAIN_ARGV_CONTRACT\tstatus=FAIL\t") != 0 &&
+           bad_rc2 == 2 && bad_log2 && has_sub(bad_log2, "CHAIN_ARGV_CONTRACT\tstatus=FAIL\t") != 0 &&
+           rc_acl == 0 && ac_lout && has_sub(ac_lout, "CANDIDATE_ARGV_CONTRACT\tstatus=OK\t") != 0 &&
+           rc_aco == 0 && ac_okout && has_sub(ac_okout, "CANDIDATE_ARGV_CHECK\tstatus=PASS\t") != 0 &&
+           rc_acb == 2 && ac_badout && has_sub(ac_badout, "CANDIDATE_ARGV_CHECK\tstatus=FAIL\topt=--bogus-option\t") != 0,
            "argv-contract-mismatch-refused-before-compile");
-        free(bad_log);
+        free(bad_log1); free(bad_log2); free(ac_lout); free(ac_okout); free(ac_badout);
     }
 
     (void)sy_setenv("HOME", orig_home, 1);
@@ -621,6 +787,8 @@ int main(int argc, char **argv) {
         char *rmv[] = {(char *)"rm", (char *)"-rf", f, 0};
         (void)run_cmd(rmv, 10, 0, 0);
     }
+    sy_printf("CHAIN_TOOL_IDENTITY_RUN\trun_id=%s\tmode=%s\tfailed=%d\n",
+              run_id, fast_mode ? "fast" : "default", failed);
     sy_printf("CHECK_CHAIN_TOOL_IDENTITY\tfailed=%d\n", failed);
     return failed ? 1 : 0;
 }
