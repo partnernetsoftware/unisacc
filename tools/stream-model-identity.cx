@@ -11,6 +11,7 @@
  * every counted row is SAME. `check`: self-test on the same inputs (hash twice equal; a one-byte in-memory tamper of
  * each compared model must be detected); it never writes. Positional flags because run-batch args cannot carry `--`. */
 #pragma unisa use cxlib.netpack
+#pragma unisa use runtime.packagefooter
 #pragma unisa use text.text
 
 static void die(const char *s) { fprintf(stderr, "stream-model-identity: REFUSE %s errno=%d\n", s, errno); exit(2); }
@@ -39,8 +40,11 @@ int main(int argc, char **argv) {
     size_t jn; char *js = cx_read(jp, &jn); if (!js) die("streams.json"); char jh[65]; cx_sha256_hex(js, jn, jh);
     size_t cn; char *cand = cx_read(argv[2], &cn); if (!cand) die("candidate"); char ch[65]; cx_sha256_hex(cand, cn, ch);
     PK = cand; PN = cn;
-    if (PN < 2 || PK[0] != 'P' || PK[1] != ' ') { unsigned long long ext = 0; if (PN < 16 || memcmp(PK + PN - 16, "UNIPKG1\n", 8)) die("candidate is neither P3 nor UNIPKG1-footer product");
-        for (int z = 7; z >= 0; z--) ext = (ext << 8) | (unsigned char)PK[PN - 8 + z]; if (!ext || ext > PN - 16) die("footer extent"); PK = cand + (PN - 16 - ext); PN = (size_t)ext; }
+    { PackageFooter pf;
+      if (PN <= 2147483647UL && packagefooter_locate_bytes((const unsigned char *)cand, (long)cn, &pf)) {
+          PK = cand + pf.package_offset; PN = (size_t)pf.package_length;
+      } else if (PN >= 16 && !memcmp(cand + PN - 16, "UNIPKG1\n", 8)) die("footer extent");
+      else if (PN < 2 || PK[0] != 'P' || PK[1] != ' ') die("candidate is neither P3 nor UNIPKG1-footer product"); }
     char ph[65]; cx_sha256_hex(PK, PN, ph);
     printf("IDENTITY\tstreams.json=%s\tcandidate_file=%s\tp3=%s\tmode=%s\n", jh, ch, ph, check ? "check" : "compare");
     /* P3 directory: P 3 pm ps nr; ps D lines; pm M lines + compressed bytes */

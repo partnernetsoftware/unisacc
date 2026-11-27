@@ -1,5 +1,6 @@
 /* End-to-end P3 payload refusals before library output creation. */
 #pragma unisa use sysx.process
+#pragma unisa use runtime.codec
 static int failed;
 int main(void) {
     char root[4096], dir[4096], pkg[4200], out[4200], product[4200], tool[4200], bound[4200], why[1024];
@@ -18,6 +19,52 @@ int main(void) {
         int ok=r.rc==2 && r.err && strstr(r.err,"cx-library-build: package-model-payload") && lstat(out,&st)!=0 && errno==ENOENT;
         printf("%s\t%s\n",ok?"PASS":"FAIL",i==0?"crc":i==1?"deflate":i==2?"marker":"truncated-network");
         if(!ok) failed++; np_free(&r);
+    }
+    {
+        char audit[4200];
+        if(cx_fmt(audit,sizeof audit,"%s/tools/audit-package-payload.cx",root)) return 2;
+        unsigned char raw_net[25]={'U','N','I','N','E','T','B','1','N',2,2,0,0,0,0,'Q',0,'H',0,0,0x80,4,0,0,0};
+        CxCodecCrc crc; uint32_t crc_val=0;
+        if(cxcodec_crc_init(&crc) || cxcodec_crc(&crc,(const char *)raw_net,25,&crc_val)) return 2;
+        char hdr[128];
+        if(cx_fmt(hdr,sizeof hdr,"P 3 1 1 0\nD route stage in out 0\nM 30 25 1 %u\n",(unsigned)crc_val)) return 2;
+        size_t hlen=strlen(hdr), blen=hlen+30;
+        unsigned char *buf=malloc(blen+16);
+        if(!buf) return 2;
+        for(size_t j=0;j<hlen;j++) buf[j]=(unsigned char)hdr[j];
+        buf[hlen]=1; buf[hlen+1]=25; buf[hlen+2]=0; buf[hlen+3]=230; buf[hlen+4]=255;
+        for(size_t j=0;j<25;j++) buf[hlen+5+j]=raw_net[j];
+        FILE *f=fopen(pkg,"wb");
+        if(!f || fwrite(buf,1,blen,f)!=blen || fclose(f)) return 2;
+        np_result r_bare={0};
+        char *av[]={bound,"15","sh",product,audit,"--",pkg,0};
+        if(np_run(av,root,0,18,&r_bare,why,sizeof why)) return 2;
+        memcpy(buf+blen,"UNIPKG1\n",8);
+        for(size_t j=0;j<8;j++) buf[blen+8+j]=(unsigned char)((blen>>(8*j))&255);
+        f=fopen(pkg,"wb");
+        if(!f || fwrite(buf,1,blen+16,f)!=blen+16 || fclose(f)) return 2;
+        np_result r={0};
+        if(np_run(av,root,0,18,&r,why,sizeof why)) return 2;
+        int ok=r_bare.rc==0 && r.rc==0 && !r_bare.errn && !r.errn && r_bare.outn>0 && r_bare.outn==r.outn && memcmp(r_bare.out,r.out,r.outn)==0 && strstr(r.out,"CXPAYLOAD_AUDIT\tP3\t1\n")!=0;
+        printf("%s\t%s\n",ok?"PASS":"FAIL","p3-with-footer-stripped");
+        if(!ok) failed++; np_free(&r_bare); np_free(&r);
+        memset(buf+blen+8,0,8);
+        f=fopen(pkg,"wb");
+        if(!f || fwrite(buf,1,blen+16,f)!=blen+16 || fclose(f)) return 2;
+        np_result r2={0};
+        if(np_run(av,root,0,18,&r2,why,sizeof why)) return 2;
+        int ok2=r2.rc==2 && r2.err && strstr(r2.err,"payload-audit: footer");
+        printf("%s\t%s\n",ok2?"PASS":"FAIL","p3-bad-footer-refused");
+        if(!ok2) failed++; np_free(&r2);
+        buf[2]='4';
+        f=fopen(pkg,"wb");
+        if(!f || fwrite(buf,1,blen+16,f)!=blen+16 || fclose(f)) return 2;
+        free(buf);
+        np_result r3={0};
+        if(np_run(av,root,0,18,&r3,why,sizeof why)) return 2;
+        int ok3=r3.rc==2 && r3.err && strstr(r3.err,"payload-audit: footer");
+        printf("%s\t%s\n",ok3?"PASS":"FAIL","p4-bad-footer-refused");
+        if(!ok3) failed++; np_free(&r3);
     }
     if(cx_rmtree(dir)) return 2;
     printf("CXLIBRARY_PAYLOAD\tfailed=%d\n",failed);

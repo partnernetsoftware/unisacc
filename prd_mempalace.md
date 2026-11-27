@@ -21,6 +21,18 @@
 
 ## 决定(别人必须遵守)
 
+### v0.1.9 编排决定(2026-11-28,cc 执行,依据 fable 裁定)
+
+- 决定(证据分层):LOCAL 证据留在各 piece 批次,formal negatives 只在发布前置门对正式链 APE 与 v3 回执执行,两层不得互相冒充;回滚:撤本条,恢复按 piece 各自 `--chain-ape` 结论拼接,formal negatives 记 UNMEASURED,不据此发布。
+- 决定(单一 v3 链回执):所有 `--chain-ape` 消费方统一使用 `candidate-chain.rcpt` 的 v3 契约,经 `rc_verify_out` 绑定 rev、target、candidate_sha、inputs_sha 与 output_path,不再读四列 `ape-receipt.txt`;回滚:撤本条,回退 `check-v019-formal-negatives` 与各消费方到旧回执,发布前置门保持阻塞。
+- 决定(freezescope 顺延):freezescope 登记与材料列缺口顺延 v0.1.10,v0.1.9 不宣称 freeze-scope 已闭;回滚:恢复三行材料列登记并重跑 33 秒批次,未过前仍不宣称已闭。
+- 决定(每次前进后冒烟):v0.1.9 每次 fast-forward 或集成换头后立即重跑 cdx2 集成冒烟,含 m25 两源用例,旧头 PASS 不迁移;回滚:撤本条只由所有者或 fable 裁定,已跳过冒烟的头全部改记 UNMEASURED 并在冻结前补跑。
+- 决定(一文件一写者):同一文件同一时刻只允许一个窗口写,其他窗口只发信封或补丁;提交只带自己路径;回滚:回退越界提交到写入前,按 `own-diff` 隔离后重放已审补丁,无法隔离时冻结写域重做。
+- 决定(sha 先验后报):报告任何提交必须附 devsvc 的 `GIT_COMMIT rc=0 commit=<sha>` 与 `git cat-file -t <sha>` 的 `commit` 输出;回滚:未带两行的 sha 一律拒收并重验,已发未验 sha 复核后重发,不重写历史。
+- 决定(共享 full-link 材料):piece D 的 objs1、objs2、closure1、closure2、link、verify 六阶段按 tree_sha 生成共享材料目录,所有消费方复用,不再各自重建;回滚:回退 `e81ed8e3f` 与五个 stage 批次,恢复各检查本地重建,共享材料记 UNMEASURED。
+- 决定(BOOTSTRAP_FROM 派生):由 `bg-candidate` 启动时从 snap 的 `unisacc.com.build.json` commit 派生 `BOOTSTRAP_FROM`,仅当该 commit 与 rev 不同时设置,`tools/preflight.cx:159-167` 仍按该值校验;预演 #1 与 #2 的 snap commit 均为 `c9275e7756acad801ff2f206b3aa6a891e8115a2`,并须给真实 `UNISACC_IDENT_HELPER`;回滚:撤本条恢复手工传值,未派生或与 build.json commit 不符时 preflight 拒绝,不得起链。
+- 决定(分段材料):超过 55 秒的整链材料走现有 materials 列与 affected --prepare-materials,不加 needs 列;v0.1.9 内整链断言不登记批次,只在预跑对同一候选实跑并如实写入发布说明;回滚:撤本条,恢复各检查自建材料,整链断言记 UNMEASURED。
+
 ### 所有者需求登记
 
 - 所有者需求不得静默砍掉:砍掉或顺延所有者提出的需求,必须在本节记一行(需求、原排期、新排期或砍掉、理由、日期),并在给所有者的回复里写明;只写进路线图"不做"行或风险节不算告知。依据:内存安全线曾被静默砍掉。入口:plans/memory-safety.md 第 0 节。
@@ -54,6 +66,7 @@
 - 单一编排者(2026-11-27 20:11 fable 裁定 A,cc 执行):编排者 cc 现为会话 b167683f;旧会话 7f46e032(sonnet 后台,PID 977984 PGID 977984,pty host 977978,转录 218400015 字节)终止,其无上限轮询子进程 PGID 2325592 一并终止;旧会话 11-27 的 'RULE: only cc lands on main' 广播与对 1ca56d751、f4163f7d3 的追查作废,两提交有效。依据:双 cc 并行重复派工与并发写记分表、prd_mempalace.md 不可回退。回退:claude --resume 7f46e032 转录(未删)。
 - v0.1.9 定义改定(2026-11-27 21:10 所有者令加 fable 裁定,cc 执行;取代第 51 行 v0.1.9 去 libc 定义,去 libc 顺延 v0.1.10):v0.1.9 = 六切片(lnx/osx/win 各 x86_64 与 arm64)同时开工的切片逻辑迁移,一类大改。共用层先行:单一 .cx 可移植执行器(与 lnx/x86_64 汇编执行器字节/rc/步数对拍)、切片身份去目标化与执行器选择事实表、rc_verify 落 main 加 target 字段、准入生成器加目标列。必达:lnx/x86_64 driveargs/m25/bind 到 S3;lnx/arm64 m53 S2 加批 A S1;osx 与 win 四片 m53 S1(默认关,CI 对拍回执)。覆盖 plans/version-roadmap.md:28"跨目标进下一版"。stream_s1_m1.cx 在执行器接口冻结后只由 ccogweco 改。链提速 A1-A5 为 main 工具线,不算版本内容。降级:某片 CI 红则选择表该片回 native 并如实写说明。回滚:选择表全回 native。
 - v0.1.8 不单独公开(2026-11-27 22:25 fable 裁定,cc 执行):M1 权威嵌入并入 v0.1.9 一起冻结发布;build/version-seq.tsv 行 71 改未公开、新增行 72 0.1.9;build/freeze.tsv 解除 0.1.8-FREEZE(main 解冻)。候选 42c8c297b 的整链(APE 10332c7e)、前置五门与三轮预跑证据仅作历史,不迁移到 v0.1.9;三轮预跑红项与 subset2 W0080 之后 45 个未跑窗口记 FAIL/UNKNOWN,不记 PASS。预跑红项(check-gen-all 精简仓夹具、devsvc 套接字路径、ratchets 写死计数、slow-split、chain-ready-launch-b)仍在 main 修,v0.1.9 从 main 冻结后重跑完整整链与整轮预跑。回退:11-28 中午前批 A 或 osx 仍无法冻结而上述红项已在 main 全绿,则从 main 冻结纯 M1 的 v0.1.8,行 71 改回进行中。v0.1.8 分支与工作树保留到 v0.1.9 公开后删除。
+- 准入 ADMIT 未启用(2026-11-27 23:10 fable 裁定,cc 执行):准入表生成器已落 main(b53850382),ADMIT 继续硬拒;CI 来源绑定 UNCOVERED。封口排 v0.1.10 main 工具线(agyneon3 写,cdx2 终审):新增 --fetch-ci --run-id 经本机 gh api 拉取运行与产物元数据(仓库、工作流路径与 blob、event、conclusion、head_sha=链回执 rev、产物 digest 本机复算),删除 --ci-record/--inputs-sha/--expect-tsv,批准生产者名单只读 origin/main 并加 workflow_path/workflow_blob/ruling_ref 列与授权门,expect 行自封印。v0.1.9 发布说明写:准入表生成器已落;ADMIT 未启用;CI 来源绑定未覆盖。已核:除生成器与检查外无工具消费 plans/migration-admission.tsv。
 - 磁带桥接接口边界(2026-11-27 fable 裁定选项 c):v0.1.9 不引入宿主句柄或回调桥,统一采用 driveargs 形态(宿主薄包装保留指针遍历、出参、回调与跨调用状态,仅拷贝有界字节跨界,guest 无状态且每次调用清 arena),仅暴露 call_u64、fetch_str、call_out 三个桥接原语(call_out 写固定输出区并校验 len <= caller cap 且 <= area,超限具名拒绝);按纯决策核心字节排序迁移,尺寸只记录,不作为回退判据(2026-11-27 迁移加速裁定撤回 2,000B 门槛)。依据:m25 证伪显示每单元定制桥开销约 5.8 KB 反增体积。入口:cx/driver/stream_s1_m1.cx、w/agyneon3 f137e7d01。回滚:改回本条并另立新版本设计有状态 guest 桥。
 - TapeRuntime 启动不设校验缓存(2026-11-27 裁定):TapeRuntime 启动加载内置磁带切片时不得设任何校验缓存跳过核验,每次启动均按真实字节与内容身份实核。依据:缓存校验结论违背不冒充执行铁律且会掩盖离线篡改。入口:cx/driver/stream_s1_m1.cx。回滚:仅在所有者修订铁律后经新版本引入有界验证缓存。
 - tier 64/102 VM 单元判定 stay-native(2026-11-27 fable 裁定):tier 64 真实 416.2M 步实测所有 [r6-OFF] 栈槽 ld/st 仅占动态步数 14.58%(加 [r7+OFF] 仅 24.3% < 25%),编译器级槽提升无法将 18.33x 压至 15x 以内,tier 64/102 VM 单元判定 stay-native,v0.1.x 退出门以该实测替代 tier 64/102 15x 要求(应用预定义回退,非放宽);事后 regalloc 原型停止,仅留 f5d1ab783 作静态统计工具。依据:tier 64 动态步数实测(load1 2.43)触发路线图预定义回退。入口:tools/check-tape-tldce-speed.cx。回滚:若未来出现可削减超 25% 动态步数的新架构,另开新版本重测 15x 门。

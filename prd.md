@@ -63,7 +63,7 @@ G2的 `fp_call` 仍属于 `chainargv` 现有局部char指针数组、n++追加�
 
 G2预算夹具的成功行遵循 `tests/run-batch.cx` 标记合同：`CHECK_G2_BUDGET_GEN` 后必须是行尾或TAB，不能用空格代替。真实批次验收同时核子进程rc、唯一标记和产品身份不变；负控的预期REFUSE日志完整保留，不据直接夹具rc0冒充批次PASS。
 
-推送本次提交用 `devsvc git commit --push`，或用 `devsvc git push FULL_SHA...` 显式给出本窗口的提交。快进直接推送，遇远端先行时只重放获授权的单父提交并在私有索引重算派生物。检查入口 `tools/check-push-replay.cx`。
+推送本次提交用 `devsvc git commit --push`，或用 `devsvc git push FULL_SHA...` 显式给出本窗口的提交。`devsvc git commit` 与 `--status [JOB]` 末行固定为 `COMMIT_RESULT\tCOMMITTED\tsha=<40>\tref=<branch>\tjob=<id>\ttip_contains=<yes|no>`（`tip_contains` 按 `refs/heads/<recorded ref>` 现场判定）或 `COMMIT_RESULT\tNOT_COMMITTED\treason=<timeout|refused|blocked|ref-mismatch|unbound|running>\tjob=<id>`，等待中先打 `COMMIT_PENDING\tjob=<id>\tNOT_COMMITTED_YET`；现场核验对象与分支用 `devsvc git verify SHA [--cwd WORKTREE]`（`VERIFIED sha= ref=` 或 `NOT_FOUND`）。快进直接推送，遇远端先行时只重放获授权的单父提交并在私有索引重算派生物。检查入口 `tools/check-push-replay.cx` 与 `tools/check-devsvc-git.cx`。
 
 固定执行体按 Git 公共目录隔离缓存。回退按工作树验证提交祖先、产品、配置与执行体摘要，执行体输入有未提交改动时不更新记录。私有试验用 `DV_PIN_DIR` 指定缓存目录。回归入口 `tools/check-devsvc-pin-scope.cx`。
 

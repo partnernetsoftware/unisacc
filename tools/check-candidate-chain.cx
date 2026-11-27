@@ -16,6 +16,7 @@
 #pragma unisa use cxlib.runnerprep
 #pragma unisa use cxlib.limits
 #pragma unisa use cxlib.chaincall
+#pragma unisa use cxlib.receipt
 
 static int failed;
 static void ck(int ok, const char *n) {
@@ -1594,7 +1595,127 @@ int main(int argc, char **argv) {
         if (cx_fmt(ncmd, sizeof ncmd, "UNISACC_NP_FAULT=residue UNISACC_CHAIN_PHASE_BOUND_S=1 '%s' --gen1-entry-fixture '%s' '%s' '%s' unused package '%s' lnx/arm64 fresh gen1-lnx-fixture-objects 2>&1",
                    native_tool, tout, gs, gc, go)) { ck(0, "fmt"); return 1; }
         int nrrc = sh(ncmd, out, sizeof out);
-        ck(nrrc == 2 && has(out, "(injected survived)") && has(out, "candidate-chain: gen1 objects:"), "core-non-wf-gen1-entry-inner-residue-yields-2"); } }
+        ck(nrrc == 2 && has(out, "(injected survived)") && has(out, "candidate-chain: gen1 objects:"), "core-non-wf-gen1-entry-inner-residue-yields-2");
+        /* Real MS_PACK entry (--pack-step-fixture) & v3 candidate-chain.rcpt (--verify-chain-rcpt):
+           (1) When v3 receipt write fails inside MS_PACK, checkpoint.tsv MUST NOT contain 'DONE\tpack\t';
+           (2) When v3 receipt write succeeds inside MS_PACK, v3 receipt is written & verified and 'DONE\tpack\t...\tsha=<cand_sha>' is published;
+           (3) Missing v3 receipt on resume, unbound checkpoint, or rev/input mismatch MUST refuse. */
+        { static const char *pk_slug[6] = {"win-x86_64", "lnx-x86_64", "lnx-arm64", "osx-x86_64", "osx-arm64", "win-arm64"};
+          static const char *pk_target[6] = {"win/x86_64", "lnx/x86_64", "lnx/arm64", "osx/x86_64", "osx/arm64", "win/arm64"};
+          static const int pk_rec[6] = {4, 0, 1, 2, 3, 5};
+          char rdir[4600], afdir[4700], fape[4800], arcpt[4800], pinp[4800], v3p[4800], ctid[4800], ckp[4800], rcmd[14000];
+          char froot[4600], fsnap[4600], ftools[4700], fstools[4700], fcom[4700], frb[4700], fra[4700], fcm64[4700], fcmarm[4700];
+          char ape_sha[65], in_sha[65], out_sha[65], ctid_txt[256], ck_pre[128], ck_good[256], ck_bad[256];
+          char pin_txt[4096], ar_txt[4096];
+          int pin_u = 0, ar_u = 0, ok_setup = 1;
+          const char *ape_bytes = "synthetic-final-ape-payload-bytes\n";
+          const char *bad_rev = "1111111111111111111111111111111111111111";
+          const char *fake_com_sh = "#!/bin/sh\nif [ \"$2\" = \"-o\" ]; then cp \"$1\" \"$3\" && chmod +x \"$3\"; exit 0; fi\nexec \"$@\"\n";
+          const char *fake_rb_sh = "#!/bin/sh\nprintf 'P 4 1 1 0\\n' > \"$3\"\nexit 0\n";
+          const char *fake_ra_sh = "#!/bin/sh\nexit 0\n";
+          if (cx_fmt(rdir, sizeof rdir, "%s/core-v3-rcpt", base_td) ||
+              cx_fmt(afdir, sizeof afdir, "%s/ape-final", rdir) ||
+              cx_fmt(fape, sizeof fape, "%s/unisacc-next.com", afdir) ||
+              cx_fmt(arcpt, sizeof arcpt, "%s/ape-receipt.txt", afdir) ||
+              cx_fmt(pinp, sizeof pinp, "%s/pack-inputs.tsv", rdir) ||
+              cx_fmt(v3p, sizeof v3p, "%s/candidate-chain.rcpt", afdir) ||
+              cx_fmt(ctid, sizeof ctid, "%s/chain-tools.identity", rdir) ||
+              cx_fmt(ckp, sizeof ckp, "%s/checkpoint.tsv", rdir) ||
+              cx_fmt(froot, sizeof froot, "%s/core-v3-froot", base_td) ||
+              cx_fmt(fsnap, sizeof fsnap, "%s/core-v3-fsnap", base_td) ||
+              cx_fmt(ftools, sizeof ftools, "%s/tools", froot) ||
+              cx_fmt(fstools, sizeof fstools, "%s/tools", fsnap) ||
+              cx_fmt(fcom, sizeof fcom, "%s/unisacc.com", froot) ||
+              cx_fmt(frb, sizeof frb, "%s/release-build.cx", fstools) ||
+              cx_fmt(fra, sizeof fra, "%s/release-ape.cx", fstools) ||
+              cx_fmt(fcm64, sizeof fcm64, "%s/cm-x64", froot) ||
+              cx_fmt(fcmarm, sizeof fcmarm, "%s/cm-arm64", froot)) { ck(0, "fmt"); return 1; }
+          (void)cx_rmtree(rdir);
+          (void)sy_mkdir(rdir, 0755); (void)sy_mkdir(afdir, 0755);
+          (void)sy_mkdir(froot, 0755); (void)sy_mkdir(fsnap, 0755);
+          (void)sy_mkdir(ftools, 0755); (void)sy_mkdir(fstools, 0755);
+          if (cx_write(fcom, fake_com_sh, strlen(fake_com_sh)) || sy_chmod(fcom, 0755) ||
+              cx_write(frb, fake_rb_sh, strlen(fake_rb_sh)) || sy_chmod(frb, 0755) ||
+              cx_write(fra, fake_ra_sh, strlen(fake_ra_sh)) || sy_chmod(fra, 0755) ||
+              cx_write(fcm64, "cm64", 4) || cx_write(fcmarm, "cmarm", 5)) { ck(0, "v3-fake-tools"); return 1; }
+          for (int pi = 0; pi < 6 && ok_setup; pi++) {
+              char sdir[4800], sp[4900], rp[4900], sbody[128], rbody[512], ssha[65], asha[65];
+              int is_lnx = !strncmp(pk_slug[pi], "lnx-", 4);
+              if (cx_fmt(sdir, sizeof sdir, "%s/fixedpoint/g2/%s", rdir, pk_slug[pi]) ||
+                  (is_lnx ? cx_fmt(sp, sizeof sp, "%s/entry.elf", sdir)
+                          : cx_fmt(sp, sizeof sp, "%s/slice-%s", sdir, pk_slug[pi])) ||
+                  cx_fmt(rp, sizeof rp, "%s/fixedpoint/g2/phase-%d.tsv", rdir, pk_rec[pi]) ||
+                  cx_fmt(sbody, sizeof sbody, "slice-bytes-%s\n", pk_slug[pi]) ||
+                  cx_fmt(asha, sizeof asha, "%064d", pi + 1)) { ok_setup = 0; break; }
+              if (cx_fmt(rcmd, sizeof rcmd, "mkdir -p '%s'", sdir) || sh(rcmd, out, sizeof out)) { ok_setup = 0; break; }
+              if (cx_write(sp, sbody, strlen(sbody)) || sy_sha256_hex(sbody, (long)strlen(sbody), ssha) ||
+                  cx_fmt(rbody, sizeof rbody, "chain-fixedpoint-v4\nrev\t%s\nphase\tg2\ntarget\t%s\nartifact_sha\t%s\n", rev, pk_target[pi], asha) ||
+                  cx_write(rp, rbody, strlen(rbody))) { ok_setup = 0; break; }
+              pin_u += snprintf(pin_txt + pin_u, sizeof pin_txt - (size_t)pin_u,
+                                "PACK_INPUT\t%s\tgen=g2\tpath=%s\tsha=%s\tbytes=%ld\treceipt_artifact_sha=%s\tprevious=%s\n",
+                                pk_target[pi], sp, ssha, (long)strlen(sbody), asha, pi == 2 ? "none" : "absent");
+              ar_u += snprintf(ar_txt + ar_u, sizeof ar_txt - (size_t)ar_u,
+                               "%s\t%s\tsha=%s\tbytes=%ld\n",
+                               pk_target[pi], sp, ssha, (long)strlen(sbody));
+          }
+          if (!ok_setup || cx_write(fape, ape_bytes, strlen(ape_bytes)) ||
+              sy_sha256_hex(ape_bytes, (long)strlen(ape_bytes), ape_sha)) { ck(0, "v3-rcpt-setup"); return 1; }
+          ar_u += snprintf(ar_txt + ar_u, sizeof ar_txt - (size_t)ar_u,
+                           "unisacc-next.com\t%s\tsha=%s\tbytes=%ld\n", fape, ape_sha, (long)strlen(ape_bytes));
+          if (sy_sha256_hex(pin_txt, (long)pin_u, in_sha) ||
+              cx_write(arcpt, ar_txt, (size_t)ar_u) ||
+              sy_sha256_hex(ar_txt, (long)ar_u, out_sha) ||
+              cx_fmt(ctid_txt, sizeof ctid_txt, "rev=%s\nmode=snapshot\n", rev) ||
+              cx_write(ctid, ctid_txt, strlen(ctid_txt)) ||
+              cx_fmt(ck_pre, sizeof ck_pre, "DONE\tsnap\twall_ms=1\tsha=-\n") ||
+              cx_fmt(ck_good, sizeof ck_good, "DONE\tsnap\twall_ms=1\tsha=-\nDONE\tpack\twall_ms=10\tsha=%s\n", ape_sha) ||
+              cx_fmt(ck_bad, sizeof ck_bad, "DONE\tsnap\twall_ms=1\tsha=-\nDONE\tpack\twall_ms=10\tsha=-\n") ||
+              cx_write(ckp, ck_pre, strlen(ck_pre))) { ck(0, "v3-rcpt-files"); return 1; }
+          /* (0) --pack-step-fixture without UNISACC_PIN_FIXTURE=1 MUST refuse (rc 2) */
+          if (cx_fmt(rcmd, sizeof rcmd, "UNISACC_CHAIN_RCPT_TS=1764266000 '%s' --pack-step-fixture '%s' '%s' --rev %s --out '%s' --cache-manager-osx '%s' '%s' --until pack 2>&1",
+                     native_tool, froot, fsnap, rev, rdir, fcm64, fcmarm)) { ck(0, "fmt"); return 1; }
+          ck(sh(rcmd, out, sizeof out) == 2 && has(out, "REFUSE --pack-step-fixture requires UNISACC_PIN_FIXTURE=1"),
+             "pack-step-fixture-without-pin-fixture-env-refused");
+          /* (1) Real MS_PACK entry with v3 receipt write forced to fail (v3p is a directory):
+             must refuse BEFORE writing DONE\tpack\t to checkpoint.tsv */
+          (void)sy_mkdir(v3p, 0755);
+          if (cx_fmt(rcmd, sizeof rcmd, "UNISACC_PIN_FIXTURE=1 UNISACC_CHAIN_RCPT_TS=1764266000 '%s' --pack-step-fixture '%s' '%s' --rev %s --out '%s' --cache-manager-osx '%s' '%s' --until pack 2>&1",
+                     native_tool, froot, fsnap, rev, rdir, fcm64, fcmarm)) { ck(0, "fmt"); return 1; }
+          int fail_pack_rc = sh(rcmd, out, sizeof out);
+          size_t ckn = 0; char *ckt = cx_read(ckp, &ckn);
+          ck(fail_pack_rc == 2 && has(out, "REFUSE write candidate-chain.rcpt failed") && ckt && !has(ckt, "DONE\tpack\t"),
+             "pack-v3-write-fail-does-not-publish-done-pack");
+          free(ckt);
+          (void)sy_rmdir(v3p);
+          /* (2) Real MS_PACK entry with writable v3p: writes & verifies v3 receipt first, then publishes DONE\tpack\t */
+          int ok_pack_rc = sh(rcmd, out, sizeof out);
+          ckt = cx_read(ckp, &ckn);
+          ck(ok_pack_rc == 0 && has(out, "CANDIDATE_CHAIN_RCPT\tmode=WRITE\t") && ckt && has(ckt, "DONE\tpack\t") && has(ckt, ape_sha),
+             "pack-v3-write-ok-publishes-done-pack-after-receipt");
+          free(ckt);
+          /* (3) Missing v3 receipt on resume / verify MUST refuse */
+          (void)sy_unlink(v3p);
+          if (cx_fmt(rcmd, sizeof rcmd, "UNISACC_CHAIN_RCPT_TS=1764266060 '%s' --verify-chain-rcpt '%s' %s 2>&1", native_tool, rdir, rev)) { ck(0, "fmt"); return 1; }
+          ck(sh(rcmd, out, sizeof out) == 2 && has(out, "REFUSE missing candidate-chain.rcpt on resume"), "chain-rcpt-v3-missing-on-resume-refused");
+          /* Re-run real MS_PACK entry cleanly to restore valid v3 receipt, then verify full pack identity binding */
+          (void)cx_write(ckp, ck_pre, strlen(ck_pre));
+          if (cx_fmt(rcmd, sizeof rcmd, "UNISACC_PIN_FIXTURE=1 UNISACC_CHAIN_RCPT_TS=1764266000 '%s' --pack-step-fixture '%s' '%s' --rev %s --out '%s' --cache-manager-osx '%s' '%s' --until pack 2>&1",
+                     native_tool, froot, fsnap, rev, rdir, fcm64, fcmarm) || sh(rcmd, out, sizeof out) != 0) { ck(0, "re-run-pack"); return 1; }
+          if (cx_fmt(rcmd, sizeof rcmd, "UNISACC_CHAIN_RCPT_TS=1764266060 '%s' --verify-chain-rcpt '%s' %s 2>&1", native_tool, rdir, rev)) { ck(0, "fmt"); return 1; }
+          ck(sh(rcmd, out, sizeof out) == 0 && has(out, "CANDIDATE_CHAIN_RCPT\tmode=VERIFY\t") && has(out, ape_sha) && has(out, in_sha) && has(out, out_sha), "chain-rcpt-v3-verify-pack-identity-ok");
+          /* Unbound pack checkpoint (sha=-) MUST refuse */
+          if (cx_write(ckp, ck_bad, strlen(ck_bad))) { ck(0, "write-ck-bad"); return 1; }
+          ck(sh(rcmd, out, sizeof out) == 2 && has(out, "REFUSE pack checkpoint missing or sha mismatch"), "chain-rcpt-v3-unbound-checkpoint-refused");
+          (void)cx_write(ckp, ck_good, strlen(ck_good));
+          /* Wrong rev in chain-tools.identity MUST refuse */
+          { char bad_ctid[256]; cx_fmt(bad_ctid, sizeof bad_ctid, "rev=%s\nmode=snapshot\n", bad_rev);
+            (void)cx_write(ctid, bad_ctid, strlen(bad_ctid));
+            ck(sh(rcmd, out, sizeof out) == 2 && has(out, "REFUSE chain identity rev mismatch"), "chain-rcpt-v3-wrong-chain-identity-rev-refused");
+            (void)cx_write(ctid, ctid_txt, strlen(ctid_txt)); }
+          /* Tampered pack-inputs.tsv MUST refuse */
+          if (cx_write(pinp, "tampered-pack-inputs\n", 21)) { ck(0, "tamper-pin"); return 1; }
+          ck(sh(rcmd, out, sizeof out) == 2 && has(out, "REFUSE pack-inputs.tsv"), "chain-rcpt-v3-tampered-inputs-refused");
+          if (cx_write(pinp, pin_txt, (size_t)pin_u)) { ck(0, "restore-pin"); return 1; } } } }
     }
     if(group==0||group==2){ char cmd[14000], product[4400], self[4400], launcher[4400], body[9000];
       /* Reuse the identity-checked native candidate prepared above, not a cold compilation per call. */

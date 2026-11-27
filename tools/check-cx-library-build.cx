@@ -53,7 +53,11 @@ int main(void) {
     if (mkdir(base, 0700)) die("mkdir-base");
     if (cx_fmt(relp, sizeof relp, "%s/cxlib-rel-pkg", root)) die("path-bound");
     if (cx_fmt(relo, sizeof relo, "%s/cxlib-rel-out", root)) die("path-bound");
-    { char *av[] = { boundp, "8", "sh", product, tool, 0 };
+    { char *pre[] = { boundp, "45", "sh", product, tool, "--", 0 };
+      char why[1024]; mm_fill(&r, sizeof r, 0, sizeof r);
+      if (np_run(pre, root, 0, 50, &r, why, sizeof why)) die(why);
+      np_free(&r); }
+    { char *av[] = { boundp, "8", "sh", product, tool, "--", 0 };
       call(av, &r); pass(phrase(&r, "cx-library-build: usage PACKAGE OUTPUT CC AR [LDFLAG...]"), "usage", &r); np_free(&r); }
     join(out, sizeof out, "abs-out");
     { char *av[] = { boundp, "8", "sh", product, tool, "--", "cxlib-rel-pkg", out, cc, ar, 0 };
@@ -94,6 +98,32 @@ int main(void) {
     putfile(pkg, "P 1 1 1\nD route stage in out 0\nM 1\nZ");
     { char *av[] = { boundp, "8", "sh", product, tool, "--", pkg, out, "/usr/bin/x86_64-linux-gnu-gcc-11", "/usr/bin/x86_64-linux-gnu-ar", 0 };
       call(av, &r); pass(phrase(&r, "cx-library-build: package-structure") && absent(out), "package-model-sentinel", &r); np_free(&r); }
+    join(pkg, sizeof pkg, "p4-with-footer"); join(out, sizeof out, "p4-with-footer-out");
+    { const char *body = "P 4 1 1 0\nD route stage in out 0\nM 1 1 0 3554254475\nA";
+      size_t blen = strlen(body);
+      unsigned char *buf = malloc(blen + 16);
+      if (!buf) die("alloc");
+      for (size_t j = 0; j < blen; j++) buf[j] = (unsigned char)body[j];
+      memcpy(buf + blen, "UNIPKG1\n", 8);
+      for (size_t j = 0; j < 8; j++) buf[blen + 8 + j] = (unsigned char)((blen >> (8 * j)) & 255);
+      FILE *f = fopen(pkg, "wb");
+      if (!f || fwrite(buf, 1, blen + 16, f) != blen + 16 || fclose(f)) die("setup-write");
+      free(buf);
+      char *av[] = { boundp, "15", "sh", product, tool, "--", pkg, out, "/usr/bin/x86_64-linux-gnu-gcc-11", "/usr/bin/x86_64-linux-gnu-ar", 0 };
+      call(av, &r); pass(phrase(&r, "cx-library-build: include-missing") && absent(out), "package-p4-with-footer-located", &r); np_free(&r); }
+    join(pkg, sizeof pkg, "p4-bad-footer"); join(out, sizeof out, "p4-bad-footer-out");
+    { const char *body = "P 4 1 1 0\nD route stage in out 0\nM 4 8 1 0\nxy";
+      size_t blen = strlen(body);
+      unsigned char *buf = malloc(blen + 16);
+      if (!buf) die("alloc");
+      for (size_t j = 0; j < blen; j++) buf[j] = (unsigned char)body[j];
+      memcpy(buf + blen, "UNIPKG1\n", 8);
+      memset(buf + blen + 8, 0, 8);
+      FILE *f = fopen(pkg, "wb");
+      if (!f || fwrite(buf, 1, blen + 16, f) != blen + 16 || fclose(f)) die("setup-write");
+      free(buf);
+      char *av[] = { boundp, "8", "sh", product, tool, "--", pkg, out, "/usr/bin/x86_64-linux-gnu-gcc-11", "/usr/bin/x86_64-linux-gnu-ar", 0 };
+      call(av, &r); pass(phrase(&r, "cx-library-build: package-footer") && absent(out), "package-p4-bad-footer-refused", &r); np_free(&r); }
     if (cx_rmtree(base)) die("cleanup");
     base[0] = 0;
     printf("NOT_RUN\tlibrary-compile-link-ffi-probe-foreign-host\n");
