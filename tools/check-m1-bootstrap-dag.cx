@@ -1,0 +1,289 @@
+/* tools/check-m1-bootstrap-dag.cx -- G2 bootstrap embed & Q-07 identity red-first check.
+ *
+ *   sh ./unisacc.com tools/check-m1-bootstrap-dag.cx --
+ *
+ * Verifies:
+ *   (1) release-build p3 --embed-tape DIR injects the 3 deterministic tape/lnx-x86_64/* F records
+ *       (codec=0, rawlen==len, real IEEE CRC32) into the single sealed P4 package without touching
+ *       coexisting non-tape resources;
+ *   (2) Fail-closed refusals: missing one tape file, manifest SHA mismatch, and P3 downgrade
+ *       (--no-compress-resources on P3 source) are all refused non-zero;
+ *   (3) Q-07 release-packcheck ape passes PACK_APE SAME when release-pack replays the identical
+ *       chain-sealed package/APE and refuses PACK_APE_CHANGED if 1 byte is mutated at the tail.
+ * Marker: CHECK_M1_BOOTSTRAP_DAG. */
+#pragma unisa use runtime.packagefooter
+#pragma unisa use runtime.package_decode
+#pragma unisa use runtime.package_lifetime
+#pragma unisa use runtime.model_number
+#pragma unisa use compiler.bindstage
+#pragma unisa use runtime.routestep
+#pragma unisa use runtime.codec
+#pragma unisa use sys.fs
+#pragma unisa use sys.io
+#pragma unisa use sys.env
+#pragma unisa use sys.posix
+#pragma unisa use sys.proc
+#pragma unisa use sys.sha
+#pragma unisa use text.text
+#pragma unisa use text.fmt
+#pragma unisa use mem.heap
+#pragma unisa use mem.bytes
+#pragma unisa use cxlib.netpack
+
+static int failed;
+static void ck(int ok, const char *name) {
+    if (!ok) { sy_eprintf("FAIL\tm1-g2.%s\n", name); failed++; }
+    else sy_printf("PASS\tm1-g2.%s\n", name);
+}
+static void *pk_alloc(void *prev, size_t n) { (void)prev; return mm_alloc((long)(n ? n : 1)); }
+static void pk_free(void *p) { if (p) mm_free(p); }
+static unsigned crc32_of(const char *p, int n) {
+    CxCodecCrc c; uint32_t out = 0;
+    if (cxcodec_crc_init(&c) || cxcodec_crc(&c, p, n, &out)) return 0;
+    return out;
+}
+static int run_cmd(char **v, char *out, long cap) {
+    np_result r = {0}; char why[128] = {0};
+    int tr = np_run(v, 0, 0, 40, &r, why, sizeof why);
+    long n = 0;
+    if (r.out && r.outn > 0) {
+        long m = (long)r.outn < cap - 1 ? (long)r.outn : cap - 1;
+        for (long i = 0; i < m; i++) out[n++] = r.out[i];
+    }
+    if (r.err && r.errn > 0 && n < cap - 1) {
+        long m = (long)r.errn < (cap - 1 - n) ? (long)r.errn : (cap - 1 - n);
+        for (long i = 0; i < m; i++) out[n++] = r.err[i];
+    }
+    out[n] = 0;
+    int rc = (tr || r.residue) ? -1 : r.rc;
+    np_free(&r);
+    return rc;
+}
+
+int main(int argc, char **argv) {
+    const char *verify_ape = 0, *expect_tape_dir = 0;
+    for (int ai = 1; ai < argc; ai++) {
+        if (tx_eqz(argv[ai], "--verify-final-ape") && ai + 1 < argc) verify_ape = argv[++ai];
+        else if (tx_eqz(argv[ai], "--expect-tape-dir") && ai + 1 < argc) expect_tape_dir = argv[++ai];
+    }
+    char tmp[512], fxroot[600], inc[640], tdir[640], tbad[640], p[700];
+    char src_p3[640], out_p4[640], out_bad[640], ape_a[640], ape_b[640], out[16384];
+    char so_sha[65], sl_sha[65], mf[512];
+    const char *so_body = "ELF-fake-tapemode-body-g2";
+    const char *sl_body = "UTAPEBIN-fake-m53-body-g2";
+    const char *flat_body = "/* fixture cx-flat.h */\n";
+    const char *bare_p3 = "P 3 1 1 1\nD r s in out 0\nM 1 1 1 0\nAF 4 5\nkeephello";
+    if (sy_mkdtemp(sy_tmpdir(), "m1-g2-", tmp, sizeof tmp) != 0) return 2;
+    if (cx_fmt(fxroot, sizeof fxroot, "%s/root", tmp) ||
+        cx_fmt(inc, sizeof inc, "%s/include", fxroot) ||
+        cx_fmt(tdir, sizeof tdir, "%s/tape-ok", tmp) ||
+        cx_fmt(tbad, sizeof tbad, "%s/tape-bad", tmp) ||
+        cx_fmt(src_p3, sizeof src_p3, "%s/src.p3", tmp) ||
+        cx_fmt(out_p4, sizeof out_p4, "%s/out.p4", tmp) ||
+        cx_fmt(out_bad, sizeof out_bad, "%s/out.bad", tmp) ||
+        cx_fmt(ape_a, sizeof ape_a, "%s/chain.ape", tmp) ||
+        cx_fmt(ape_b, sizeof ape_b, "%s/packed.ape", tmp)) return 2;
+    if (sy_mkdir_all(inc, 0755) || sy_mkdir_all(tdir, 0755) || sy_mkdir_all(tbad, 0755)) return 2;
+    if (cx_fmt(p, sizeof p, "%s/cx-flat.h", inc) || cx_write(p, flat_body, (size_t)tx_len(flat_body, 128))) return 2;
+    if (cx_write(src_p3, bare_p3, (size_t)tx_len(bare_p3, 256))) return 2;
+
+    (void)sy_sha256_hex(so_body, tx_len(so_body, 128), so_sha);
+    (void)sy_sha256_hex(sl_body, tx_len(sl_body, 128), sl_sha);
+    if (cx_fmt(mf, sizeof mf, "tapemode.so\t%s\t%ld\nm53.tapeslice\t%s\t%ld\n",
+               so_sha, tx_len(so_body, 128), sl_sha, tx_len(sl_body, 128))) return 2;
+    if (cx_fmt(p, sizeof p, "%s/manifest.tsv", tdir) || cx_write(p, mf, (size_t)tx_len(mf, sizeof mf))) return 2;
+    if (cx_fmt(p, sizeof p, "%s/tapemode.so", tdir) || cx_write(p, so_body, (size_t)tx_len(so_body, 128))) return 2;
+    if (cx_fmt(p, sizeof p, "%s/m53.tapeslice", tdir) || cx_write(p, sl_body, (size_t)tx_len(sl_body, 128))) return 2;
+
+    /* (1) Positive: release-build p3 --embed-tape injects all 3 records with codec=0 and real IEEE CRC32 */
+    {
+        char *v[] = {"sh", "./unisacc.com", "tools/release-build.cx", "--",
+                     "p3", fxroot, src_p3, out_p4, "--embed-tape", tdir, 0};
+        int rc = run_cmd(v, out, sizeof out);
+        size_t zn = 0; char *blob = cx_read(out_p4, &zn);
+        PackageFooter pf; CxPackageDecode dec; int ok = 0;
+        if (rc == 0 && blob && packagefooter_locate_bytes((const unsigned char *)blob, (long)zn, &pf)) {
+            mm_fill(&dec, (long)sizeof dec, 0, (long)sizeof dec);
+            dec.allocate = pk_alloc; dec.release = pk_free;
+            if (cxpk_decode(&dec, (const unsigned char *)blob + pf.package_offset, pf.package_length) == 0 &&
+                dec.package.ver == 4) {
+                static const char *keys[3] = {
+                    "tape/lnx-x86_64/manifest.tsv",
+                    "tape/lnx-x86_64/tapemode.so",
+                    "tape/lnx-x86_64/m53.tapeslice"
+                };
+                int hits = 0, keep_ok = 0;
+                const unsigned char *pb = (const unsigned char *)blob + pf.package_offset;
+                for (int i = 0; i < dec.package.nr; i++) {
+                    const CxPackageResource *r = &dec.package.res[i];
+                    if (r->n == 4 && tx_same((const char *)(pb + r->name), 4, "keep", 4)) keep_ok = 1;
+                    for (int k = 0; k < 3; k++) {
+                        long kl = tx_len(keys[k], 64);
+                        if (r->n == (int)kl && tx_same((const char *)(pb + r->name), r->n, keys[k], kl)) {
+                            unsigned want = crc32_of((const char *)(pb + r->data), r->len);
+                            if (r->codec == 0 && r->rawlen == r->len && r->len > 0 && r->crc == want) hits++;
+                        }
+                    }
+                }
+                ok = (hits == 3 && keep_ok == 1);
+                cxpl_release(&dec.package, pk_free);
+            }
+        }
+        if (blob) mm_free(blob);
+        ck(ok, "T2-p3-embed-tape-3-records-crc32-and-keep");
+    }
+
+    /* (2a) Fail-closed: missing m53.tapeslice in --embed-tape dir refused */
+    if (cx_fmt(p, sizeof p, "%s/manifest.tsv", tbad) || cx_write(p, mf, (size_t)tx_len(mf, sizeof mf))) return 2;
+    if (cx_fmt(p, sizeof p, "%s/tapemode.so", tbad) || cx_write(p, so_body, (size_t)tx_len(so_body, 128))) return 2;
+    {
+        char *v[] = {"sh", "./unisacc.com", "tools/release-build.cx", "--",
+                     "p3", fxroot, src_p3, out_bad, "--embed-tape", tbad, 0};
+        int rc = run_cmd(v, out, sizeof out);
+        ck(rc != 0 && strstr(out, "embed-tape") != 0, "T2-refuse-incomplete-embed-dir");
+    }
+
+    /* (2b) Fail-closed: manifest sha mismatch refused */
+    if (cx_fmt(p, sizeof p, "%s/m53.tapeslice", tbad) || cx_write(p, "tampered-slice", 14)) return 2;
+    {
+        char *v[] = {"sh", "./unisacc.com", "tools/release-build.cx", "--",
+                     "p3", fxroot, src_p3, out_bad, "--embed-tape", tbad, 0};
+        int rc = run_cmd(v, out, sizeof out);
+        ck(rc != 0 && strstr(out, "manifest sha/size mismatch") != 0, "T2-refuse-manifest-mismatch");
+    }
+
+    /* (2c) Fail-closed: --no-compress-resources (P3 output) with --embed-tape refused */
+    {
+        char *v[] = {"sh", "./unisacc.com", "tools/release-build.cx", "--",
+                     "p3", fxroot, src_p3, out_bad, "--no-compress-resources", "--embed-tape", tdir, 0};
+        int rc = run_cmd(v, out, sizeof out);
+        ck(rc != 0 && strstr(out, "embed-tape requires P4") != 0, "T2-refuse-p3-downgrade");
+    }
+
+    /* (3) Q-07: release-packcheck ape SAME on identical replay, REFUSE PACK_APE_CHANGED on 1-byte mutation */
+    {
+        size_t zn = 0; char *b = cx_read(out_p4, &zn);
+        int ok1 = 0, ok2 = 0;
+        if (b && zn > 16 && cx_write(ape_a, b, zn) == 0 && cx_write(ape_b, b, zn) == 0) {
+            char *v1[] = {"sh", "./unisacc.com", "tools/release-packcheck.cx", "--", "ape", ape_a, ape_b, 0};
+            int rc1 = run_cmd(v1, out, sizeof out);
+            ok1 = (rc1 == 0 && strstr(out, "PACK_APE\tSAME\t") != 0);
+            b[0] ^= 1;
+            if (cx_write(ape_b, b, zn) == 0) {
+                int rc2 = run_cmd(v1, out, sizeof out);
+                ok2 = (rc2 != 0 && strstr(out, "PACK_APE_CHANGED") != 0);
+            }
+        }
+        if (b) mm_free(b);
+        ck(ok1, "T2b-q07-identical-replay-same");
+        ck(ok2, "T2b-M2b-mutated-tail-pack-refused");
+    }
+
+    /* (4) Red-first fail-closed: when root has tools/tape-sidecar-build.cx, omitting --embed-tape MUST refuse */
+    {
+        char ttools[640], marker[700];
+        if (cx_fmt(ttools, sizeof ttools, "%s/tools", fxroot) ||
+            cx_fmt(marker, sizeof marker, "%s/tape-sidecar-build.cx", ttools) ||
+            sy_mkdir_all(ttools, 0755) ||
+            cx_write(marker, "/* marker */\n", 13)) return 2;
+        char *v_no[] = {"sh", "./unisacc.com", "tools/release-build.cx", "--",
+                        "p3", fxroot, src_p3, out_bad, 0};
+        int rc_no = run_cmd(v_no, out, sizeof out);
+        ck(rc_no != 0 && strstr(out, "embed-tape required") != 0, "T2c-refuse-omitted-embed-tape-on-m1-root");
+
+        char *v_ok[] = {"sh", "./unisacc.com", "tools/release-build.cx", "--",
+                        "p3", fxroot, src_p3, out_p4, "--embed-tape", tdir, 0};
+        int rc_ok = run_cmd(v_ok, out, sizeof out);
+        ck(rc_ok == 0, "T2d-pass-explicit-embed-tape-on-m1-root");
+
+        /* Red-first: release-models --require-m1-tape refuses a P4 package lacking tape records */
+        char bare_p4[640], rm_out[640];
+        if (cx_fmt(bare_p4, sizeof bare_p4, "%s/bare.p4", tmp) ||
+            cx_fmt(rm_out, sizeof rm_out, "%s/rm.p4", tmp)) return 2;
+        (void)sy_unlink(marker);
+        char *v_bare[] = {"sh", "./unisacc.com", "tools/release-build.cx", "--",
+                          "p3", fxroot, src_p3, bare_p4, 0};
+        int rc_bare = run_cmd(v_bare, out, sizeof out);
+        char *v_rm[] = {"sh", "./unisacc.com", "tools/release-build.cx", "--",
+                        "release-models", bare_p4, rm_out, "--require-m1-tape", 0};
+        int rc_rm = (rc_bare == 0) ? run_cmd(v_rm, out, sizeof out) : 0;
+        ck(rc_bare == 0 && rc_rm != 0 && strstr(out, "missing required tape") != 0,
+           "T2e-refuse-release-models-missing-m1-tape");
+    }
+
+    /* (5) Final APE gate (--verify-final-ape PATH [--expect-tape-dir DIR]):
+     *     decode P4, verify exact 3 F keys + codec=0 + rawlen==len + IEEE CRC32 + optional sha match vs DIR,
+     *     then run e2 -> e1 -> e3 as 3 separate checked steps (no shell pipe masking exit codes) and assert e3 output > 0. */
+    if (verify_ape && verify_ape[0]) {
+        size_t zn = 0; char *blob = cx_read(verify_ape, &zn);
+        PackageFooter pf; CxPackageDecode dec; int f_ok = 0;
+        if (blob && packagefooter_locate_bytes((const unsigned char *)blob, (long)zn, &pf)) {
+            mm_fill(&dec, (long)sizeof dec, 0, (long)sizeof dec);
+            dec.allocate = pk_alloc; dec.release = pk_free;
+            if (cxpk_decode(&dec, (const unsigned char *)blob + pf.package_offset, pf.package_length) == 0 &&
+                dec.package.ver == 4) {
+                static const char *keys[3] = {
+                    "tape/lnx-x86_64/manifest.tsv",
+                    "tape/lnx-x86_64/tapemode.so",
+                    "tape/lnx-x86_64/m53.tapeslice"
+                };
+                static const char *leaves[3] = { "manifest.tsv", "tapemode.so", "m53.tapeslice" };
+                int hits = 0, match_dir = 1;
+                const unsigned char *pb = (const unsigned char *)blob + pf.package_offset;
+                for (int i = 0; i < dec.package.nr; i++) {
+                    const CxPackageResource *r = &dec.package.res[i];
+                    for (int k = 0; k < 3; k++) {
+                        long kl = tx_len(keys[k], 64);
+                        if (r->n == (int)kl && tx_same((const char *)(pb + r->name), r->n, keys[k], kl)) {
+                            unsigned want = crc32_of((const char *)(pb + r->data), r->len);
+                            if (r->codec == 0 && r->rawlen == r->len && r->len > 0 && r->crc == want) {
+                                hits++;
+                                if (expect_tape_dir && expect_tape_dir[0]) {
+                                    char ep[700]; size_t en = 0; char *eb = 0;
+                                    if (cx_fmt(ep, sizeof ep, "%s/%s", expect_tape_dir, leaves[k]) ||
+                                        !(eb = cx_read(ep, &en)) || (long)en != (long)r->len ||
+                                        !mm_same(eb, pb + r->data, (long)r->len)) match_dir = 0;
+                                    if (eb) mm_free(eb);
+                                }
+                            }
+                        }
+                    }
+                }
+                f_ok = (hits == 3 && match_dir == 1);
+                cxpl_release(&dec.package, pk_free);
+            }
+        }
+        if (blob) mm_free(blob);
+        ck(f_ok, "T3a-final-ape-p4-has-3-tape-records");
+
+        char c1[640], f2[640], f1[640], f3[640], shcmd[1600];
+        sy_stat_t s2, s1, s3;
+        int e3_ok = 0;
+        if (!cx_fmt(c1, sizeof c1, "%s/e3.c", tmp) &&
+            !cx_fmt(f2, sizeof f2, "%s/e2.out", tmp) &&
+            !cx_fmt(f1, sizeof f1, "%s/e1.out", tmp) &&
+            !cx_fmt(f3, sizeof f3, "%s/e3.out", tmp) &&
+            !cx_write(c1, "int main(void){return 0;}\n", 26)) {
+            int ok2 = 0, ok1 = 0, ok3 = 0;
+            if (!cx_fmt(shcmd, sizeof shcmd, "\"%s\" stream e2 --level 2 --source \"%s\" --no-external-nn < \"%s\" > \"%s\"", verify_ape, c1, c1, f2)) {
+                char *v2[] = {"sh", "-c", shcmd, 0};
+                ok2 = (run_cmd(v2, out, sizeof out) == 0 && sy_stat(f2, &s2) == 0 && s2.size > 0);
+            }
+            if (ok2 && !cx_fmt(shcmd, sizeof shcmd, "\"%s\" stream e1 --level 2 --source \"%s\" --no-external-nn < \"%s\" > \"%s\"", verify_ape, c1, f2, f1)) {
+                char *v1[] = {"sh", "-c", shcmd, 0};
+                ok1 = (run_cmd(v1, out, sizeof out) == 0 && sy_stat(f1, &s1) == 0 && s1.size > 0);
+            }
+            if (ok1 && !cx_fmt(shcmd, sizeof shcmd, "\"%s\" stream e3 --level 2 --source \"%s\" --no-external-nn < \"%s\" > \"%s\"", verify_ape, c1, f1, f3)) {
+                char *v3[] = {"sh", "-c", shcmd, 0};
+                int rc3 = run_cmd(v3, out, sizeof out);
+                ok3 = (rc3 == 0 && strstr(out, "M53_M1_REFUSE") == 0 && sy_stat(f3, &s3) == 0 && s3.size > 0);
+            }
+            e3_ok = (ok2 && ok1 && ok3);
+        }
+        ck(e3_ok, "T3b-final-ape-stream-e3-ok");
+    }
+
+    (void)sy_remove_all(tmp);
+    sy_printf("CHECK_M1_BOOTSTRAP_DAG\tfailed=%d\n", failed);
+    return failed ? 1 : 0;
+}
