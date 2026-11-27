@@ -781,6 +781,12 @@ int main(int argc, char **argv) {
             mm_free(outp);
         }
         if (!rc) {
+            char bbuild[P], bcp[P];
+            rc = join(bbuild, grepo, "build") || sy_mkdir(bbuild, 0755) ||
+                 join(bcp, bbuild, "chain-phases.tsv") ||
+                 put(bbuild, "chain-phases.tsv", "phase\tname\n1\tprep\n");
+        }
+        if (!rc) {
             char bjc[256];
             cx_fmt(bjc, sizeof bjc, "{\"commit\":\"%s\"}\n", c1);
             rc = put(grepo, "unisacc.com.build.json", bjc);
@@ -823,6 +829,25 @@ int main(int argc, char **argv) {
             rc = cx_runv_timeout(sv, 20, &last, &lastn);
             ck(rc != 0 && last && strstr(last, "reason=bootstrap-from-not-ancestor") != 0,
                "bootstrap-from-non-ancestor-refused");
+        }
+        /* 5d: existing snap/unisacc.com.build.json differs from root's -> snap wins */
+        {
+            char sdir[P], snapd[P], bjc[256];
+            if (join(sdir, gbase, c2) == 0 && join(snapd, sdir, "snap") == 0) {
+                (void)sy_mkdir(sdir, 0755);
+                (void)sy_mkdir(snapd, 0755);
+                cx_fmt(bjc, sizeof bjc, "{\"commit\":\"%s\"}\n", c1);
+                (void)put(snapd, "unisacc.com.build.json", bjc);
+                cx_fmt(gsh, sizeof gsh, "env -u BOOTSTRAP_FROM '%s' start --root '%s' --base '%s' --rev '%s' --chain '%s' --deadline-s 10",
+                       bin, grepo, gbase, c2, gchain);
+                char *sv[] = {"sh", "-c", gsh, 0};
+                mm_free(last); last = 0; lastn = 0;
+                rc = cx_runv_timeout(sv, 20, &last, &lastn);
+                ck(rc == 0 && lines("BG_BOOTSTRAP_FROM", c1, 0, 0) == 1,
+                   "bootstrap-from-existing-snap-overrides-root");
+            } else {
+                ck(0, "bootstrap-from-existing-snap-overrides-root");
+            }
         }
     }
 

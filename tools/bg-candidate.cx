@@ -60,6 +60,7 @@
 #pragma unisa use mem.heap
 #pragma unisa use cxlib.limits
 #pragma unisa use cxlib.sessionroot
+#pragma unisa use cxlib.procrun
 #pragma unisa use sysx.reaper
 
 #define BG_PATH 4400
@@ -572,12 +573,17 @@ static int bg_json_commit(const char *s, char out[41]) {
     return p[40] == '"' ? 0 : 1;
 }
 static int derive_bootstrap_from(const char *rev) {
-    char js[BG_PATH], snap_c[41];
+    char js[BG_PATH], snap_js[BG_PATH], snap_c[41];
     size_t n = 0;
     char *j;
     const char *boot;
-    if (join(js, root, "unisacc.com.build.json")) return 1;
-    if (sy_exists(js) != 1) return 0;
+    if (cx_fmt(snap_js, sizeof snap_js, "%s/%s/snap/unisacc.com.build.json", base, rev) == 0 &&
+        sy_exists(snap_js) == 1) {
+        cx_fmt(js, sizeof js, "%s", snap_js);
+    } else {
+        if (join(js, root, "unisacc.com.build.json")) return 1;
+        if (sy_exists(js) != 1) return 0;
+    }
     j = cx_read(js, &n);
     if (!j) return 0;
     if (bg_json_commit(j, snap_c)) { mm_free(j); return 0; }
@@ -589,16 +595,16 @@ static int derive_bootstrap_from(const char *rev) {
         return 1;
     }
     {
-        np_result r = {0}; char why[256] = {0};
+        pr_result r;
         char *av[] = {"git", "-C", root, "merge-base", "--is-ancestor", snap_c, (char *)rev, 0};
-        int rc = np_run(av, ".", 0, 20, &r, why, sizeof why) ? -1 : r.rc;
-        np_free(&r);
+        int rc = pr_run("bg-bf", av, ".", 0, 20, &r) ? -1 : r.rc;
+        pr_free(&r);
         if (rc != 0) {
             sy_printf("BG_CANDIDATE\tREFUSE\treason=bootstrap-from-not-ancestor\tsnap=%s\trev=%s\n", snap_c, rev);
             return 1;
         }
     }
-    if (ec_setenv("BOOTSTRAP_FROM", snap_c, 1)) return 1;
+    if (setenv("BOOTSTRAP_FROM", snap_c, 1)) return 1;
     sy_printf("BG_BOOTSTRAP_FROM\tcommit=%s\tsource=build.json\n", snap_c);
     return 0;
 }
