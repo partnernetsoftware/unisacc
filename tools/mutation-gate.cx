@@ -874,6 +874,17 @@ static int is_infra_line(const char *s, size_t n) {
     return 0;
 }
 
+static int buf_has_infra(const char *b, size_t n) {
+    for (const char *s = b; s < b + n;) {
+        const char *e = memchr(s, '\n', (size_t)(b + n - s));
+        size_t len = (size_t)(e ? e - s : (b + n - s));
+        if (len && s[len - 1] == '\r') len--;
+        if (is_infra_line(s, len)) return 1;
+        s = e ? e + 1 : b + n;
+    }
+    return 0;
+}
+
 static int quality_check(const char *out, int rc, int check) {
     if (rc < 0 || rc >= 124) return Q_UNKNOWN;
     int named = 0, infrastructure = 0;
@@ -938,7 +949,7 @@ static void worker(void) {
     { char acc[1 << 15]; int ak = 0;
     for (s = tsv; s < tsv + n; s = e + 1) {
         char row[2048], file[1024], fp[2048], mp[1024], probe_path[1200], probed_marker[1200], probe_esc[2200], token[96], expect_tok[100], out[65536], cmd[8192];
-        int id, line, L, rc = 0, first_kill_rc = 0, i, verdict = 0, is_cov_row = 0, cov_probed = 0;
+        int id, line, L, rc = 0, first_kill_rc = 0, i, verdict = 0, is_cov_row = 0, cov_probed = 0, best_cov_rank = 0;
         int quality = Q_SURVIVED, quality_rc = 0, check_id = -1;
         long t0 = sy_now_ms();
         e = s; while (e < tsv + n && *e != '\n') e++;
@@ -948,8 +959,11 @@ static void worker(void) {
         { char *t1 = strchr(row, '\t'), *t2 = t1 ? strchr(t1 + 1, '\t') : 0, *t3 = t2 ? strchr(t2 + 1, '\t') : 0; if (!t2) continue; cp(file, (long)sizeof file - 1, t1 + 1, (long)(t2 - t1 - 1)); file[t2 - t1 - 1] = 0; line = atoi(t2 + 1); if (t3 && !strncmp(t3 + 1, "cov\t", 4)) is_cov_row = 1; }
         cx_fmt(fp, sizeof fp, "%s/%s", sd, file); cx_fmt(mp, sizeof mp, "%s/m/%d.line", g_out, id);
         cx_fmt(probe_path, sizeof probe_path, "%s/m/%d.probe", out_abs, id);
-        cx_fmt(probed_marker, sizeof probed_marker, "%s/m/%d.probed", out_abs, id);
-        sy_unlink(probe_path); sy_unlink(probed_marker);
+        sy_unlink(probe_path);
+        for (i = 0; i < g_nchk; i++) {
+            cx_fmt(probed_marker, sizeof probed_marker, "%s/m/%d.probed-%d", out_abs, id, i);
+            sy_unlink(probed_marker);
+        }
         cstr_esc(probe_esc, sizeof probe_esc, probe_path);
         cx_fmt(token, sizeof token, "%d-%d-%ld", id, (int)getpid(), t0);
         cx_fmt(expect_tok, sizeof expect_tok, "%s\n", token);
@@ -990,14 +1004,16 @@ static void worker(void) {
         }
         if (rc == 0 && verdict == 0) {
             for (i = 0; i < g_nchk; i++) {
-                char qc[4096]; shq(qc, sizeof qc, g_chk[i]);
+                char qc[4096]; int this_probed = 0;
+                shq(qc, sizeof qc, g_chk[i]);
                 cx_fmt(cmd, sizeof cmd, "cd %s && exec setsid -w sh -c %s 2>&1", q3, qc);
                 if (is_cov_row && g_scope_product) sy_unlink(probe_path);
                 out[0] = 0; rc = sh(cmd, out, sizeof out, 55);
                 if (is_cov_row && g_scope_product) {
                     size_t pn = 0; char *pb = slurp(probe_path, &pn);
                     if (pb && pn == strlen(expect_tok) && !memcmp(pb, expect_tok, pn)) {
-                        cov_probed = 1;
+                        this_probed = 1;
+                        cx_fmt(probed_marker, sizeof probed_marker, "%s/m/%d.probed-%d", out_abs, id, i);
                         spit(probed_marker, "1\n", 2);
                     }
                     if (pb) mm_free(pb);
@@ -1009,10 +1025,23 @@ static void worker(void) {
                         cx_fmt(p, sizeof p, "%s/m/%d.check-%d.log", g_out, id, i);
                         spit(p, out, strlen(out));
                     }
-                    if (observation > quality) { quality = observation; quality_rc = rc; check_id = i; }
+                    if (is_cov_row && g_scope_product) {
+                        int valid_cov = this_probed && !buf_has_infra(out, strlen(out)) &&
+                            (observation == Q_NAMED || observation == Q_WEAK ||
+                             (observation == Q_UNKNOWN && (rc == 139 || rc == 134 || rc == 135)));
+                        int rank = valid_cov ? (observation == Q_NAMED ? 4 : 3)
+                                 : (observation > Q_SURVIVED ? 2 : (this_probed ? 1 : 0));
+                        if (rank > best_cov_rank || (rank == best_cov_rank && observation > quality)) {
+                            best_cov_rank = rank;
+                            quality = observation; quality_rc = rc; check_id = i;
+                            cov_probed = this_probed;
+                        }
+                    } else if (observation > quality) {
+                        quality = observation; quality_rc = rc; check_id = i;
+                    }
                 }
                 if (!verdict && killed_by(out, rc)) { verdict = 1; first_kill_rc = rc; }
-                if (verdict && ((!(g_quality || g_scope_product)) || (quality == Q_NAMED && (!is_cov_row || cov_probed)))) break;
+                if (verdict && ((!(g_quality || g_scope_product)) || (!is_cov_row && quality == Q_NAMED) || (is_cov_row && g_scope_product && best_cov_rank == 4))) break;
             }
         }
         spit(fp, orig, on);
@@ -1102,15 +1131,7 @@ static int check_log_has_infra(int id, int check_idx) {
     if (cx_fmt(p, sizeof p, "%s/m/%d.check-%d.log", g_out, id, check_idx)) return 0;
     b = slurp(p, &n);
     if (!b) return 0;
-    int hit = 0;
-    for (const char *s = b; s < b + n;) {
-        const char *e = memchr(s, '\n', (size_t)(b + n - s));
-        if (!e) e = b + n;
-        size_t len = (size_t)(e - s);
-        if (len && s[len - 1] == '\r') len--;
-        if (is_infra_line(s, len)) { hit = 1; break; }
-        s = e < b + n ? e + 1 : e;
-    }
+    int hit = buf_has_infra(b, n);
     mm_free(b);
     return hit;
 }
@@ -1193,8 +1214,8 @@ static int report(void) {
         int qchk = (r && field(r, 5, qchk_s, sizeof qchk_s) && strcmp(qchk_s, "-")) ? atoi(qchk_s) : -1;
         int unexec = !r || q == Q_INVALID || !strncmp(r, "compile_fail", 12) || !strncmp(r, "build_fail", 10);
         char pm_path[1024];
-        cx_fmt(pm_path, sizeof pm_path, "%s/m/%d.probed", g_out, id);
-        int probed = g_scope_product && iscov && sy_exists(pm_path) == 1;
+        int probed = g_scope_product && iscov && qchk >= 0 &&
+            !cx_fmt(pm_path, sizeof pm_path, "%s/m/%d.probed-%d", g_out, id, qchk) && sy_exists(pm_path) == 1;
         int cov_live_kill = iscov && !unexec && probed && !check_log_has_infra(id, qchk) && (q == Q_NAMED || q == Q_WEAK || (q == Q_UNKNOWN && (qrc == 139 || qrc == 134 || qrc == 135)));
         int prod_named_kill = g_scope_product && !iscov && !unexec && q == Q_NAMED && check_log_has_named_assert(id, qchk);
         if (g_scope_product) {

@@ -311,6 +311,20 @@ static void scope_product_fixture(void) {
        "scope-product-segv-without-probe-not-live");
     if (rc != 1) printf("%.1200s\n", out);
 
+    /* Dual-check split: check 0 hits probe and exits 0; check 1 skips probe and exits 139 -> must NOT combine into cov_live */
+    cx_fmt(sc, sizeof sc,
+        "sh ./unisacc.com tools/mutation-gate.cx -- run --scope product --coverage-check "
+        "--build 'sh ./unisacc.com src/prod.cx tools/caller.cx -o .caller' "
+        "--repo %s/repo3 --base base --patch %s/prod.patch "
+        "--check 'if grep -q \"_mgf\" src/prod.cx; then ./.caller >/dev/null 2>&1 || true; exit 0; fi; o=$(./.caller); if test \"$o\" = \"5 10 22\"; then exit 0; fi; printf \"FAIL\\tprod-mismatch\\n\"; exit 1' --expect-fail prod-mismatch "
+        "--check 'if grep -q \"_mgf\" src/prod.cx; then kill -SEGV $$; fi; o=$(./.caller); if test \"$o\" = \"5 10 22\"; then exit 0; fi; printf \"FAIL\\tprod-mismatch\\n\"; exit 1' --expect-fail prod-mismatch "
+        "--out %s/sp-dualprobe --par 4 --max 10 --deadline-s 30 2>&1", T, T, T);
+    rc = ckk_sh_t("check-mutation-gate", sc, out, sizeof out, 35);
+    ck(rc == 1 && ckk_has(out, sizeof out, "MUTATION_DIFF scope=product hunks=1 mutants=5 killed=5 survived=0 not_live=0 cov_funcs=1 cov_live=0 cov_not_live=1 adjudicated=0 verdict=FAIL")
+       && ckk_has(out, sizeof out, "MD_NOT_LIVE src/prod.cx 1 cov cov"),
+       "scope-product-dual-check-split-probe-not-live");
+    if (rc != 1) printf("%.1200s\n", out);
+
     /* timeout (rc 124) must NOT count as killed or cov-killed; counts as not_live/cov_not_live reason timeout */
     cx_fmt(sc, sizeof sc,
         "sh ./unisacc.com tools/mutation-gate.cx -- run --scope product --coverage-check "
@@ -342,7 +356,7 @@ static void scope_product_fixture(void) {
     /* mid-run --build failure keeps planned mutants=5 denominator (5 = 4+0+1) and reports reason build_fail */
     cx_fmt(sc, sizeof sc,
         "sh ./unisacc.com tools/mutation-gate.cx -- run --scope product --coverage-check "
-        "--build 'if grep -q \"11\" src/prod.cx; then exit 1; fi; sh ./unisacc.com src/prod.cx tools/caller.cx -o .caller' "
+        "--build 'if grep -q \"t > 11\" src/prod.cx; then exit 1; fi; sh ./unisacc.com src/prod.cx tools/caller.cx -o .caller' "
         "--repo %s/repo3 --base base --patch %s/prod.patch "
         "--check 'o=$(./.caller); if test \"$o\" = \"5 10 22\"; then exit 0; fi; printf \"FAIL\\tprod-mismatch\\n\"; exit 1' "
         "--expect-fail prod-mismatch --out %s/sp-buildfail --par 4 --max 10 --deadline-s 30 2>&1", T, T, T);
