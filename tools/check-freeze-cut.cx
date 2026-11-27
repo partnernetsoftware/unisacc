@@ -9,6 +9,8 @@
 #pragma unisa use sys.io
 #pragma unisa use sys.proc
 #pragma unisa use sys.posix
+#pragma unisa use sys.sha
+#pragma unisa use sys.time
 #pragma unisa use text.text
 #pragma unisa use text.fmt
 #pragma unisa use mem.heap
@@ -127,7 +129,7 @@ static int check_staged_roster_coverage(const char *root, const char *drop_gate)
     if (!cr || !fc) { mm_free(cr); mm_free(fc); return -1; }
 
     long cr_at = tx_find(cr, (long)cr_len, "#define CR_GATE_ROSTER(X)", 25);
-    long fc_at = tx_find(fc, (long)fc_len, "stage_gates[7]", 14);
+    long fc_at = tx_find(fc, (long)fc_len, "stage_gates[9]", 14);
     if (cr_at < 0 || fc_at < 0) { mm_free(cr); mm_free(fc); return -1; }
 
     char union_gates[128][64];
@@ -773,6 +775,118 @@ int main(int argc, char **argv) {
         pr_free(&r);
         cx_fmt(shcmd, sizeof shcmd, "rm -f '%s/.git/need_strace_path'", repo_g4);
         fc_sh(g_root, shcmd, 10, &r); pr_free(&r);
+
+        /* 14b4: Gate (b) --stage-receipts DIR consumer checks (missing, stale, wrong rev, tampered roster_sha, non-READY, all valid) */
+        {
+            const char *snames[9] = {
+                "derive-a", "derive-b", "ratchets", "tri-chain-a", "tri-chain-b", "tri-chain-c", "env-root", "gen-preflight", "union-shards"
+            };
+            const char *sgates[9] = {
+                "1-rev,1-branch,2a-derive,2a-derive2,2a-derive3,2a-derive4",
+                "2a-derive5,2a-derive6,2a-derive7",
+                "2b-ratchets",
+                "3a-cxmod-tri,3a-cxmod-tri-exports",
+                "3b-cx0-extract,4-p1",
+                "5-candidate-chain,5-candidate-chain2,5-candidate-chain3,5-candidate-chain4,5-candidate-chain5",
+                "6-affected,7-recipe,8-inflight,9-ledger,10-envhygiene,11-version-slot,12-root-files,12p-preflight-entry,13-snap-cache,14-root-record",
+                "15-gen-all,16-disk-free,17-root-public,18-parse2-gen,19-chain-preflight,19a-preflight-sixtarget,19b-preflight-snap,20-ident-helper,21-verseq-gen",
+                "22-premerge-union,22-premerge-union2,22-premerge-union3,22-premerge-union4,22-premerge-union5,23-freeze-armed,24-root-current,25-tools-compile-shards"
+            };
+            char rbuf[4096], rsha[65], rdir[1200], args_rcpt[2400], head_rev[64];
+            size_t rp_pos = 0;
+            for (int si = 0; si < 9; si++) {
+                size_t sn = strlen(snames[si]), gn = strlen(sgates[si]);
+                mm_copy(rbuf + rp_pos, sizeof rbuf - rp_pos, snames[si], sn); rp_pos += sn;
+                rbuf[rp_pos++] = '\t';
+                mm_copy(rbuf + rp_pos, sizeof rbuf - rp_pos, sgates[si], gn); rp_pos += gn;
+                rbuf[rp_pos++] = '\n';
+            }
+            sy_sha256_hex(rbuf, (long)rp_pos, rsha);
+            cx_fmt(shcmd, sizeof shcmd, "git -C '%s' rev-parse HEAD", repo_g4);
+            fc_sh(g_root, shcmd, 10, &r);
+            mm_fill(head_rev, sizeof head_rev, 0, sizeof head_rev);
+            if (r.out && r.outn >= 40) { mm_copy(head_rev, sizeof head_rev, r.out, 40); head_rev[40] = 0; }
+            pr_free(&r);
+            cx_fmt(rdir, sizeof rdir, "%s/rcpts", dir);
+            sy_mkdir(rdir, 0755);
+            cx_fmt(args_rcpt, sizeof args_rcpt, "%s --stage-receipts '%s'", args, rdir);
+
+            const char *z64 = "0000000000000000000000000000000000000000000000000000000000000000";
+            char bind_in[256], bind_sha[65], rcpt_path[1400], rcpt_body[1024];
+            cx_fmt(bind_in, sizeof bind_in, "rid1\t%s\t%s", z64, z64);
+            sy_sha256_hex(bind_in, (long)strlen(bind_in), bind_sha);
+            long now_s = sy_wall_s();
+
+            for (int si = 0; si < 8; si++) {
+                cx_fmt(rcpt_path, sizeof rcpt_path, "%s/%s.rcpt", rdir, snames[si]);
+                cx_fmt(rcpt_body, sizeof rcpt_body,
+                       "run_id\trid1\ninputs_sha\t%s\noutput_sha\t%s\nbinding_sha\t%s\n"
+                       "rev\t%s\nstage\t%s\nverdict\tREADY\nroster_sha\t%s\nelapsed_ms\t10\nts_epoch_s\t%ld\n",
+                       z64, z64, bind_sha, head_rev, snames[si], rsha, now_s);
+                fc_write_file(rcpt_path, rcpt_body, strlen(rcpt_body));
+            }
+            /* 1. Missing 9th receipt -> chain-ready-receipts-missing:union-shards */
+            run_fc(env_g4, args_rcpt, &r);
+            ck(r.rc == 2 && fc_has(&r, "REFUSE\tFREEZE_CUT\tchain-ready-receipts-missing:union-shards"),
+               "mut-receipts-missing-stage-refused", &r);
+            pr_free(&r);
+
+            /* 2. Stale 9th receipt -> chain-ready-receipt-stale:union-shards */
+            cx_fmt(rcpt_path, sizeof rcpt_path, "%s/union-shards.rcpt", rdir);
+            cx_fmt(rcpt_body, sizeof rcpt_body,
+                   "run_id\trid1\ninputs_sha\t%s\noutput_sha\t%s\nbinding_sha\t%s\n"
+                   "rev\t%s\nstage\tunion-shards\nverdict\tREADY\nroster_sha\t%s\nelapsed_ms\t10\nts_epoch_s\t%ld\n",
+                   z64, z64, bind_sha, head_rev, rsha, now_s - 3600);
+            fc_write_file(rcpt_path, rcpt_body, strlen(rcpt_body));
+            run_fc(env_g4, args_rcpt, &r);
+            ck(r.rc == 2 && fc_has(&r, "REFUSE\tFREEZE_CUT\tchain-ready-receipt-stale:union-shards"),
+               "mut-receipts-stale-refused", &r);
+            pr_free(&r);
+
+            /* 3. Wrong rev -> chain-ready-receipt-rev-mismatch:union-shards */
+            cx_fmt(rcpt_body, sizeof rcpt_body,
+                   "run_id\trid1\ninputs_sha\t%s\noutput_sha\t%s\nbinding_sha\t%s\n"
+                   "rev\t1111111111111111111111111111111111111111\nstage\tunion-shards\nverdict\tREADY\nroster_sha\t%s\nelapsed_ms\t10\nts_epoch_s\t%ld\n",
+                   z64, z64, bind_sha, rsha, now_s);
+            fc_write_file(rcpt_path, rcpt_body, strlen(rcpt_body));
+            run_fc(env_g4, args_rcpt, &r);
+            ck(r.rc == 2 && fc_has(&r, "REFUSE\tFREEZE_CUT\tchain-ready-receipt-rev-mismatch:union-shards"),
+               "mut-receipts-wrong-rev-refused", &r);
+            pr_free(&r);
+
+            /* 4. Tampered roster_sha -> chain-ready-receipt-roster-mismatch:union-shards */
+            cx_fmt(rcpt_body, sizeof rcpt_body,
+                   "run_id\trid1\ninputs_sha\t%s\noutput_sha\t%s\nbinding_sha\t%s\n"
+                   "rev\t%s\nstage\tunion-shards\nverdict\tREADY\nroster_sha\t%s\nelapsed_ms\t10\nts_epoch_s\t%ld\n",
+                   z64, z64, bind_sha, head_rev, z64, now_s);
+            fc_write_file(rcpt_path, rcpt_body, strlen(rcpt_body));
+            run_fc(env_g4, args_rcpt, &r);
+            ck(r.rc == 2 && fc_has(&r, "REFUSE\tFREEZE_CUT\tchain-ready-receipt-roster-mismatch:union-shards"),
+               "mut-receipts-tampered-roster-sha-refused", &r);
+            pr_free(&r);
+
+            /* 5. Non-READY verdict -> chain-ready-receipt-not-ready:union-shards */
+            cx_fmt(rcpt_body, sizeof rcpt_body,
+                   "run_id\trid1\ninputs_sha\t%s\noutput_sha\t%s\nbinding_sha\t%s\n"
+                   "rev\t%s\nstage\tunion-shards\nverdict\tNOT_READY\nroster_sha\t%s\nelapsed_ms\t10\nts_epoch_s\t%ld\n",
+                   z64, z64, bind_sha, head_rev, rsha, now_s);
+            fc_write_file(rcpt_path, rcpt_body, strlen(rcpt_body));
+            run_fc(env_g4, args_rcpt, &r);
+            ck(r.rc == 2 && fc_has(&r, "REFUSE\tFREEZE_CUT\tchain-ready-receipt-not-ready:union-shards"),
+               "mut-receipts-not-ready-refused", &r);
+            pr_free(&r);
+
+            /* 6. All 9 valid -> CHECK_PASS + CHAIN_READY_RECEIPTS */
+            cx_fmt(rcpt_body, sizeof rcpt_body,
+                   "run_id\trid1\ninputs_sha\t%s\noutput_sha\t%s\nbinding_sha\t%s\n"
+                   "rev\t%s\nstage\tunion-shards\nverdict\tREADY\nroster_sha\t%s\nelapsed_ms\t10\nts_epoch_s\t%ld\n",
+                   z64, z64, bind_sha, head_rev, rsha, now_s);
+            fc_write_file(rcpt_path, rcpt_body, strlen(rcpt_body));
+            run_fc(env_g4, args_rcpt, &r);
+            ck(r.rc == 0 && fc_has(&r, "FREEZE_CUT\tCHECK_PASS") && fc_has(&r, "CHAIN_READY_RECEIPTS\tverdict=READY\tstages=9/9"),
+               "gate-b-stage-receipts-all-valid-pass", &r);
+            pr_free(&r);
+        }
 
         /* 14c: Gate (c) shard registry mismatch (missing shard row in tests/batches.tsv or tool failure) refused */
         cx_fmt(shcmd, sizeof shcmd, "touch '%s/.git/bad_shard_tool'", repo_g4);
