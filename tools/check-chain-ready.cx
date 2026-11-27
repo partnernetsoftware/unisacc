@@ -2033,11 +2033,12 @@ int main(int argc, char **argv) {
     if (run_stage) {
         char srepo[400], rdir[400], rdir_f[400], rcpt[480], head40[64], cmd[4096], cwd[400];
         char v_run_id[160], v_rev[160], v_stage[160], v_verdict[160], v_elapsed[160], v_roster[160], v_ts[160], v_rc[64], v_out_sha[128], exp_roster[65];
-        static const char *const exp_names[9] = {
-            "derive-a", "derive-b", "ratchets", "tri-chain-a", "tri-chain-b", "tri-chain-c", "env-root", "gen-preflight", "union-shards"
+        static const char *const exp_names[11] = {
+            "derive-a", "derive-b", "derive-c", "ratchets", "tri-chain-a", "tri-chain-b", "tri-chain-c", "env-root", "gen-preflight", "union-a", "union-b"
         };
-        static const char *const exp_gates[9] = {
-            "1-rev,1-branch,2a-derive,2a-derive2,2a-derive3,2a-derive4",
+        static const char *const exp_gates[11] = {
+            "1-rev,1-branch,2a-derive",
+            "2a-derive2,2a-derive3,2a-derive4",
             "2a-derive5,2a-derive6,2a-derive7",
             "2b-ratchets",
             "3a-cxmod-tri,3a-cxmod-tri-exports",
@@ -2045,11 +2046,12 @@ int main(int argc, char **argv) {
             "5-candidate-chain,5-candidate-chain2,5-candidate-chain3,5-candidate-chain4,5-candidate-chain5",
             "6-affected,7-recipe,8-inflight,9-ledger,10-envhygiene,11-version-slot,12-root-files,12p-preflight-entry,13-snap-cache,14-root-record",
             "15-gen-all,16-disk-free,17-root-public,18-parse2-gen,19-chain-preflight,19a-preflight-sixtarget,19b-preflight-snap,20-ident-helper,21-verseq-gen",
-            "22-premerge-union,22-premerge-union2,22-premerge-union3,22-premerge-union4,22-premerge-union5,23-freeze-armed,24-root-current,25-tools-compile-shards"
+            "22-premerge-union,22-premerge-union2,22-premerge-union3,22-premerge-union4,22-premerge-union5",
+            "23-freeze-armed,24-root-current,25-tools-compile-shards"
         };
         {
             char rbuf[4096]; size_t rpos = 0;
-            for (int si = 0; si < 9; si++) {
+            for (int si = 0; si < 11; si++) {
                 size_t sn = tx_len(exp_names[si], 128), gn = tx_len(exp_gates[si], 512);
                 mm_copy(rbuf + rpos, sizeof rbuf - rpos, exp_names[si], (long)sn); rpos += sn;
                 rbuf[rpos++] = '\t';
@@ -2106,12 +2108,12 @@ int main(int argc, char **argv) {
         }
 
         if (run_stage_cases) {
-            /* 1. --stage-list outputs the 9 roster-derived stages in order */
+            /* 1. --stage-list outputs the 11 roster-derived stages in order */
             {
                 char *av[] = {"./tools/bound", "40", "sh", UC, "tools/chain-ready.cx", "--", "--stage-list", 0};
                 rc = run(av, out, sizeof out);
-                ck(rc == 0 && tx_eqz(out, "derive-a\nderive-b\nratchets\ntri-chain-a\ntri-chain-b\ntri-chain-c\nenv-root\ngen-preflight\nunion-shards\n"),
-                   "stage-list-prints-9-stages");
+                ck(rc == 0 && tx_eqz(out, "derive-a\nderive-b\nderive-c\nratchets\ntri-chain-a\ntri-chain-b\ntri-chain-c\nenv-root\ngen-preflight\nunion-a\nunion-b\n"),
+                   "stage-list-prints-11-stages");
             }
             /* 2. Unknown stage name is refused with rc=2 */
             {
@@ -2174,29 +2176,41 @@ int main(int argc, char **argv) {
                    g_ok && f_ok && tx_eqz(v_verdict, "FAIL") && tx_eqz(v_rc, "1"),
                    "stage-ratchets-fail-writes-fail-receipt-rc1");
             }
-            /* 6. --stage derive-b runs only shards 5..7 (does not run shards 1..4) and writes derive-b.rcpt */
+            /* 6. --stage derive-a runs only shard 1 (does not expand 2a-derive to shards 2..7) and --stage derive-c runs only shards 5..7 */
             {
                 char dcalls[480]; size_t dcn = 0; char *dcb = 0;
                 cx_fmt(dcalls, sizeof dcalls, "%s/derive.calls", srepo);
                 (void)sy_unlink(dcalls);
                 cx_fmt(cmd, sizeof cmd,
                     "cd '%s' && DEVSVC_OWNER=agy-flow sh '%s/unisacc.com' '%s/tools/chain-ready.cx' -- "
-                    "--repo '%s' --stage derive-b --run-id rid-der-b --receipt-dir '%s'",
+                    "--repo '%s' --stage derive-a --run-id rid-der-a --receipt-dir '%s'",
+                    srepo, cwd, cwd, srepo, rdir);
+                char *av_a[] = {"./tools/bound", "40", "sh", "-c", cmd, 0};
+                int rc_a = run(av_a, out, sizeof out);
+                dcb = cx_read(dcalls, &dcn);
+                int only_1 = (dcb && has(dcb, "DERIVE_CALL\ttables-gen,layer-api,iface-hash,st-gap\n") &&
+                              !has(dcb, "chain-phases") && !has(dcb, "product-map") && !has(dcb, "table-index"));
+                if (dcb) mm_free(dcb);
+
+                (void)sy_unlink(dcalls);
+                cx_fmt(cmd, sizeof cmd,
+                    "cd '%s' && DEVSVC_OWNER=agy-flow sh '%s/unisacc.com' '%s/tools/chain-ready.cx' -- "
+                    "--repo '%s' --stage derive-c --run-id rid-der-c --receipt-dir '%s'",
                     srepo, cwd, cwd, srepo, rdir);
                 char *av[] = {"./tools/bound", "40", "sh", "-c", cmd, 0};
                 rc = run(av, out, sizeof out);
-                cx_fmt(rcpt, sizeof rcpt, "%s/derive-b.rcpt", rdir);
+                cx_fmt(rcpt, sizeof rcpt, "%s/derive-c.rcpt", rdir);
                 dcb = cx_read(dcalls, &dcn);
                 int only_567 = (dcb && has(dcb, "DERIVE_CALL\tproduct-map\n") &&
                                 has(dcb, "DERIVE_CALL\tdoc-links,tool-index\n") &&
                                 has(dcb, "DERIVE_CALL\ttable-index\n") &&
                                 !has(dcb, "tables-gen") && !has(dcb, "chain-phases"));
                 if (dcb) mm_free(dcb);
-                ck(rc == 0 && only_567 && rc_fresh(rcpt, "rid-der-b") == 0 &&
-                   cr_rcpt_get(rcpt, "stage", v_stage, sizeof v_stage) == 0 && tx_eqz(v_stage, "derive-b") &&
+                ck(rc_a == 0 && only_1 && rc == 0 && only_567 && rc_fresh(rcpt, "rid-der-c") == 0 &&
+                   cr_rcpt_get(rcpt, "stage", v_stage, sizeof v_stage) == 0 && tx_eqz(v_stage, "derive-c") &&
                    cr_rcpt_get(rcpt, "verdict", v_verdict, sizeof v_verdict) == 0 && tx_eqz(v_verdict, "READY") &&
                    cr_rcpt_get(rcpt, "rev", v_rev, sizeof v_rev) == 0 && tx_eqz(v_rev, head40),
-                   "stage-derive-b-runs-only-shards-5-6-7-and-resolves-head-rev");
+                   "stage-derive-a-and-c-isolate-shards-and-resolve-head-rev");
             }
         }
 
