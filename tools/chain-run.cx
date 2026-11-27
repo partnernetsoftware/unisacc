@@ -71,6 +71,7 @@
 #pragma unisa use cxlib.exitclass
 #pragma unisa use cxlib.awpath
 #pragma unisa use cxlib.sessionroot
+#pragma unisa use cxlib.receipt
 
 static const char *out;
 /* Every child call (its owner bound, exported bound, group seconds, or no call at all) is decided
@@ -319,8 +320,8 @@ static int account_retry(const char *who,int kind,const char *detail,int with_wi
     }
     append("chain-run.tsv",row); return 0;
 }
-/* A checkpoint alone is not a pack: the producer's output SHA and byte count must match. */
-static int verify_pack(void) {
+/* A checkpoint alone is not a pack: the producer's output SHA, byte count, and v3 candidate-chain.rcpt must match. */
+static int verify_pack_text(char hash_out[65]) {
     char p[4400],hash[65],want[65],file[4400],key[80]; size_t n=0; long bytes=-1;
     path(p,"ape-final/ape-receipt.txt"); char *b=cx_read(p,&n); if(!b) return 0;
     int found=0;
@@ -334,7 +335,75 @@ static int verify_pack(void) {
     path(p,"ape-final/unisacc-next.com"); if(strcmp(file,p)) return 0;
     b=cx_read(p,&n); if(!b) return 0;
     int ok=(long)n==bytes&&!sy_sha256_hex(b,(long)n,hash)&&!strcmp(hash,want);
-    free(b); return ok;
+    free(b);
+    if(ok&&hash_out) { memcpy(hash_out,hash,65); }
+    return ok;
+}
+static int verify_pack(const char *rev) {
+    char cand_sha[65], rcpt_txt[4400], pack_in[4400], v3_rcpt[4400], out_sha[65], in_sha[65], run_id[128];
+    size_t rn = 0, pn = 0;
+    if (!rev || !verify_pack_text(cand_sha)) return 0;
+    path(rcpt_txt, "ape-final/ape-receipt.txt");
+    path(pack_in, "pack-inputs.tsv");
+    path(v3_rcpt, "ape-final/candidate-chain.rcpt");
+    if (sy_exists(v3_rcpt) != 1 || cx_fmt(run_id, sizeof run_id, "chain-%s", rev)) return 0;
+    char *rb = cx_read(rcpt_txt, &rn);
+    if (!rb || sy_sha256_hex(rb, (long)rn, out_sha)) { free(rb); return 0; }
+    free(rb);
+    char *pb = cx_read(pack_in, &pn);
+    if (!pb || sy_sha256_hex(pb, (long)pn, in_sha)) { free(pb); return 0; }
+    free(pb);
+    rc_expect_t exp;
+    rc_verified_t got;
+    memset(&exp, 0, sizeof exp);
+    exp.run_id = run_id;
+    exp.rev = rev;
+    exp.unit = "candidate-ape";
+    exp.target = "lnx/x86_64";
+    exp.producer = "candidate-chain";
+    exp.purpose = "chain-ape";
+    exp.candidate_sha = cand_sha;
+    exp.inputs_sha = in_sha;
+    exp.output_sha = out_sha;
+    exp.output_path = rcpt_txt;
+    exp.expect_rc = 0;
+    exp.expect_verdict = "PASS";
+    exp.now_ts = (int64_t)sy_wall_s();
+    exp.max_age_s = 31536000;
+    exp.max_future_s = 3600;
+    exp.allow_fail_verdict = 0;
+    int vrc = rc_verify_out(v3_rcpt, &exp, &got);
+    rc_verified_free(&got);
+    return vrc == RC_OK;
+}
+static int recover_missing_v3_pack(void) {
+    char ckp[4400], tmp[4400], row[256];
+    size_t n = 0;
+    path(ckp, "checkpoint.tsv");
+    path(tmp, "checkpoint.tsv.new");
+    char *b = cx_read(ckp, &n);
+    if (!b) return 1;
+    FILE *f = fopen(tmp, "wb");
+    if (!f) { free(b); return 1; }
+    for (char *s = b; *s;) {
+        char *e = strchr(s, '\n');
+        size_t len = e ? (size_t)(e - s + 1) : strlen(s);
+        if (!(len >= 10 && !memcmp(s, "DONE\tpack\t", 10))) {
+            if (fwrite(s, 1, len, f) != len) { fclose(f); free(b); return 1; }
+        }
+        if (!e) break;
+        s = e + 1;
+    }
+    free(b);
+    if (fclose(f) || sy_rename(tmp, ckp)) return 1;
+    int p_idx = lookup("pack");
+    if (p_idx >= 0) {
+        plan[p_idx].state = 0;
+        plan[p_idx].recheck = 0;
+    }
+    if (!cx_fmt(row, sizeof row, "RECOVERY\t%ld\tphase=pack\treason=missing-v3-receipt\n", sy_wall_s()))
+        append("chain-run.tsv", row);
+    return 0;
 }
 /* No polling: each loop executes one bounded child or consumes a finite phase entry. */
 /* Only the forked owner scans /proc. The scheduler never owns a cr_run tree. */
@@ -1526,7 +1595,18 @@ int main(int argc,char **argv) {
     if(!pack) return blocker("pack","absent-final-phase",2);
     /* pack no longer waits for compare: the run is complete only when both are DONE. */
     if(lookup("compare")>=0&&!done("compare")) return blocker("compare","absent-final-phase",2);
-    if(!verify_pack()) return blocker("pack","missing-or-corrupt-pack-receipt",2);
+    {
+        char v3_rcpt[4400];
+        path(v3_rcpt, "ape-final/candidate-chain.rcpt");
+        if (!verify_pack(rev) && verify_pack_text(0) && sy_exists(v3_rcpt) == 0) {
+            if (recover_missing_v3_pack()) return blocker("pack", "missing-or-corrupt-pack-receipt", 2);
+            rc = schedule(rev, v, target, k, rehearse);
+            if (rc) return rc;
+            pack = done("pack");
+            if (!pack) return blocker("pack", "absent-final-phase", 2);
+        }
+    }
+    if(!verify_pack(rev)) return blocker("pack","missing-or-corrupt-pack-receipt",2);
     /* chain-watch is observational only; its loose DONE match is not completion authority. */
     if((rc=observe())) return rc==RC_SEGMENT?segment_expired("chain-watch"):rc;
     append("chain-run.tsv","PREPARED\tpack\tnot=PASS\n"); sy_printf("CHAIN_RUN\tPREPARED\tnot=PASS\n");
