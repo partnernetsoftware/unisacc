@@ -702,21 +702,42 @@ static int file_sha256_hex(const char *p, char hex[65]) {
     return rc ? -1 : 0;
 }
 
+static const char *const g_chain_driver_rels[] = {
+    "tools/candidate-chain.cx", "tools/chain-step.cx", "tools/whole-front.cx",
+    "tools/preflight.cx", "tools/release-build.cx", "tools/release-ape.cx",
+    "tools/chain-pace.cx", "tools/entry-build.cx", "tools/cxlib/chainfacts.cx",
+    "tools/kernel-route.cx", "tools/asm-source.cx", "tools/source-job-wave.cx",
+    "build/preflight-rules.tsv", "tools/templates/whole-front.cx.in",
+    "tools/templates/whole-win-span.cx.in", 0
+};
+
+static void record_outer_controller_receipt(const char *tool, const char *src_path, const char *native_sha) {
+    char shash[65], root_abs[4400], row[1200];
+    if (sy_realpath(".", root_abs, sizeof root_abs) < 0) cx_fmt(root_abs, sizeof root_abs, ".");
+    if (file_sha256_hex(src_path, shash)) cx_fmt(shash, sizeof shash, "-");
+    if (!cx_fmt(row, sizeof row,
+                "OUTER_CONTROLLER\ttool=%s\tpath=%s\troot=%s\tmode=live-root\tsrc_sha=%s\tnative_sha=%s\n",
+                tool, src_path, root_abs, shash, native_sha ? native_sha : "-")) {
+        append("chain-tools-receipt.tsv", row);
+    }
+}
+
 static void record_candidate_tool_receipt(const char *rev, const char *src_path, const char *native_sha) {
     char shash[65], row[2400];
-    if (!g_tools_root[0]) return;
+    const char *tr = g_tools_root[0] ? g_tools_root : ".";
+    const char *mode = g_tools_root_mode[0] ? g_tools_root_mode : (g_tools_root[0] ? "snapshot" : "fixture-root");
     if (file_sha256_hex(src_path, shash)) cx_fmt(shash, sizeof shash, "-");
     if (!cx_fmt(row, sizeof row,
                 "TOOLS_ROOT\trev=%s\tmode=%s\ttools_root=%s\n"
                 "TOOL_BLOB\ttool=candidate-chain\tpath=tools/candidate-chain.cx\ttools_root=%s\tmode=%s\tsrc_sha=%s\tnative_sha=%s\n"
                 "TOOL_PINNED\ttool=candidate-chain\tpath=tools/candidate-chain.cx\ttools_root=%s\tmode=%s\tsrc_sha=%s\tnative_sha=%s\n",
-                rev ? rev : "-", g_tools_root_mode[0] ? g_tools_root_mode : "snapshot", g_tools_root,
-                g_tools_root, g_tools_root_mode[0] ? g_tools_root_mode : "snapshot", shash, native_sha ? native_sha : "-",
-                g_tools_root, g_tools_root_mode[0] ? g_tools_root_mode : "snapshot", shash, native_sha ? native_sha : "-")) {
+                rev ? rev : "-", mode, tr,
+                tr, mode, shash, native_sha ? native_sha : "-",
+                tr, mode, shash, native_sha ? native_sha : "-")) {
         append("chain-tools-receipt.tsv", row);
     }
     sy_printf("CHAIN_TOOL_IDENTITY\ttool=candidate-chain\tpath=tools/candidate-chain.cx\ttools_root=%s\tmode=%s\tsrc_sha=%s\tnative_sha=%s\n",
-              g_tools_root, g_tools_root_mode[0] ? g_tools_root_mode : "snapshot", shash, native_sha ? native_sha : "-");
+              tr, mode, shash, native_sha ? native_sha : "-");
 }
 
 static int ensure_rev_snapshot(const char *rev, char *snap_out, size_t snap_cap) {
@@ -790,6 +811,23 @@ static int ensure_rev_snapshot(const char *rev, char *snap_out, size_t snap_cap)
     return 0;
 }
 
+static int resolve_tools_root(const char *rev) {
+    char snap_dir[4400];
+    if (g_tools_root[0]) return 0;
+    if (!ensure_rev_snapshot(rev, snap_dir, sizeof snap_dir) && sy_exists(snap_dir) == 1) {
+        cx_fmt(g_tools_root, sizeof g_tools_root, "%s", snap_dir);
+        cx_fmt(g_tools_root_mode, sizeof g_tools_root_mode, "%s", "snapshot");
+        return 0;
+    }
+    if (!cr_snap(".", rev, 0, snap_dir, sizeof snap_dir) && sy_exists(snap_dir) == 1) {
+        cx_fmt(g_tools_root, sizeof g_tools_root, "%s", snap_dir);
+        cx_fmt(g_tools_root_mode, sizeof g_tools_root_mode, "%s", "snapshot");
+        return 0;
+    }
+    if (sy_exists(".git") != 0) return -1;
+    return 0;
+}
+
 static void print_chain_driver_diff(const char *rev) {
     char dpath[4400], cmd[9000];
     path(dpath, "chain-driver-diff.patch");
@@ -808,18 +846,106 @@ static void print_chain_driver_diff(const char *rev) {
     char *shv[] = {"/bin/sh", "-c", cmd, 0};
     pr_result r;
     if (!pr_run("chain-driver-diff", shv, 0, 0, 30, &r) && r.rc == 0) {
-        (void)cx_write(dpath, r.out ? r.out : "", r.outn);
-        sy_printf("CHAIN_DRIVER_DIFF\tbase=origin/main\trev=%s\ttools_root=%s\tmode=%s\tdiff_bytes=%ld\n",
-                  rev, g_tools_root[0] ? g_tools_root : ".", g_tools_root_mode[0] ? g_tools_root_mode : "snapshot", (long)r.outn);
-        if (r.out && r.outn > 0) sy_write_all(1, r.out, (long)r.outn);
+        char dsha[65];
+        int dfiles = 0;
+        const char *ob = r.out ? r.out : "";
+        for (size_t di = 0; di + 11 <= r.outn; di++) {
+            if ((di == 0 || ob[di - 1] == '\n') && !memcmp(ob + di, "diff --git ", 11)) dfiles++;
+        }
+        if (sy_sha256_hex(ob, (long)r.outn, dsha)) cx_fmt(dsha, sizeof dsha, "%s", "-");
+        if (cx_write(dpath, ob, r.outn)) die("write chain-driver-diff.patch");
+        sy_printf("CHAIN_DRIVER_DIFF\tbase=origin/main\trev=%s\ttools_root=%s\tmode=%s\tdiff_files=%d\tdiff_bytes=%ld\tdiff_sha=%s\tpatch=%s\n",
+                  rev, g_tools_root[0] ? g_tools_root : ".", g_tools_root_mode[0] ? g_tools_root_mode : "snapshot",
+                  dfiles, (long)r.outn, dsha, dpath);
     }
     pr_free(&r);
 }
 
-static int has_quoted_opt(const char *src, const char *opt) {
-    char q[128];
-    if (cx_fmt(q, sizeof q, "\"%s\"", opt)) return 0;
-    return strstr(src, q) != 0;
+/* Strip C block and line comments from SRC into DST (preserving string/char literals).
+   Returns 0 on success, -1 on unclosed block comment. */
+static int strip_c_comments(const char *src, size_t n, char *dst) {
+    size_t i = 0, o = 0;
+    int in_str = 0, in_chr = 0;
+    while (i < n) {
+        char c = src[i];
+        if (in_str) {
+            dst[o++] = c;
+            if (c == '\\' && i + 1 < n) { dst[o++] = src[++i]; }
+            else if (c == '"') in_str = 0;
+            i++;
+            continue;
+        }
+        if (in_chr) {
+            dst[o++] = c;
+            if (c == '\\' && i + 1 < n) { dst[o++] = src[++i]; }
+            else if (c == '\'') in_chr = 0;
+            i++;
+            continue;
+        }
+        if (c == '"') { in_str = 1; dst[o++] = c; i++; continue; }
+        if (c == '\'') { in_chr = 1; dst[o++] = c; i++; continue; }
+        if (c == '/' && i + 1 < n && src[i + 1] == '*') {
+            i += 2;
+            int closed = 0;
+            while (i + 1 < n) {
+                if (src[i] == '*' && src[i + 1] == '/') { i += 2; closed = 1; break; }
+                i++;
+            }
+            if (!closed) return -1;
+            dst[o++] = ' ';
+            continue;
+        }
+        if (c == '/' && i + 1 < n && src[i + 1] == '/') {
+            i += 2;
+            while (i < n && src[i] != '\n') i++;
+            continue;
+        }
+        dst[o++] = c;
+        i++;
+    }
+    dst[o] = 0;
+    return 0;
+}
+
+static int default_opt_arity(const char *opt) {
+    static const struct { const char *name; int arity; } known[] = {
+        {"--rev", 1}, {"--out", 1}, {"--resume", 0}, {"--until", 1},
+        {"--lane", 1}, {"--plan", 0}, {"--recheck-only", 0}, {"--jobs-segment-s", 1},
+        {"--phases", 1}, {"--baseline-ctx", 1}, {"--job-index", 1}, {"--touch", 1},
+        {"--jobs", 4}, {"--worker-nm", 1}, {"--verify-snap", 2}, {"--identity-helper", 1},
+        {"--watch-baseline", 1}, {"--cc", 1}, {"--cache-manager-osx", 2}, {"--bootstrap", 1},
+        {"--tools-root", 1}, {"--pin-all-tools", 0}, {"--main-steps", 0}, {"--parallel", 1},
+        {"--argv-contract", 0}, {0, 0}
+    };
+    for (int i = 0; known[i].name; i++) {
+        if (!strcmp(opt, known[i].name)) return known[i].arity;
+    }
+    return -1;
+}
+
+/* Check that OPT appears in the comment-stripped source CODE as a real parsed option:
+   either in an option table entry {"--opt", ARITY} or in a parser comparison
+   tx_eqz(argv[...], "--opt") / strcmp(argv[...], "--opt"). Sets *arity_out >= 0 when matched. */
+static int has_parsed_opt(const char *code, const char *opt, int *arity_out) {
+    char pat_tbl[160], pat_tx[160], pat_sc[160];
+    if (cx_fmt(pat_tbl, sizeof pat_tbl, "{\"%s\",", opt) ||
+        cx_fmt(pat_tx, sizeof pat_tx, "tx_eqz(argv[i], \"%s\")", opt) ||
+        cx_fmt(pat_sc, sizeof pat_sc, "strcmp(argv[i], \"%s\")", opt)) return 0;
+    const char *t = strstr(code, pat_tbl);
+    if (t) {
+        const char *p = t + strlen(pat_tbl);
+        while (*p == ' ' || *p == '\t') p++;
+        if (*p >= '0' && *p <= '9') {
+            if (arity_out) *arity_out = *p - '0';
+            return 1;
+        }
+    }
+    if (strstr(code, pat_tx) || strstr(code, pat_sc)) {
+        int da = default_opt_arity(opt);
+        if (arity_out) *arity_out = da >= 0 ? da : 0;
+        return 1;
+    }
+    return 0;
 }
 
 static int check_candidate_argv_contract(const char *cand_src, char **extra_v, int extra_n, int need_tools_root_opt) {
@@ -833,29 +959,50 @@ static int check_candidate_argv_contract(const char *cand_src, char **extra_v, i
         sy_printf("CHAIN_ARGV_CONTRACT\tstatus=FAIL\tcandidate=%s\tmissing=source-unreadable\n", cand_src);
         return 1;
     }
+    char *code = (char *)malloc(n + 1);
+    if (!code || strip_c_comments(b, n, code) != 0) {
+        free(code);
+        free(b);
+        sy_printf("CHAIN_ARGV_CONTRACT\tstatus=FAIL\tcandidate=%s\tmissing=malformed-comments\n", cand_src);
+        return 1;
+    }
+    free(b);
     for (int i = 0; req[i]; i++) {
-        if (!has_quoted_opt(b, req[i])) {
+        int ar = -1;
+        if (!has_parsed_opt(code, req[i], &ar)) {
             sy_printf("CHAIN_ARGV_CONTRACT\tstatus=FAIL\tcandidate=%s\tmissing=%s\n", cand_src, req[i]);
-            free(b);
+            free(code);
             return 1;
         }
     }
-    if (need_tools_root_opt && !has_quoted_opt(b, "--tools-root")) {
-        sy_printf("CHAIN_ARGV_CONTRACT\tstatus=FAIL\tcandidate=%s\tmissing=--tools-root\n", cand_src);
-        free(b);
-        return 1;
+    if (need_tools_root_opt) {
+        int ar = -1;
+        if (!has_parsed_opt(code, "--tools-root", &ar) || ar != 1) {
+            sy_printf("CHAIN_ARGV_CONTRACT\tstatus=FAIL\tcandidate=%s\tmissing=--tools-root\n", cand_src);
+            free(code);
+            return 1;
+        }
     }
     for (int i = 0; i < extra_n; i++) {
         const char *a = extra_v[i];
-        if (!strncmp(a, "--", 2) && strcmp(a, "--") && strcmp(a, "--fixture-case")) {
-            if (!has_quoted_opt(b, a)) {
-                sy_printf("CHAIN_ARGV_CONTRACT\tstatus=FAIL\tcandidate=%s\tmissing=%s\n", cand_src, a);
-                free(b);
+        if (!strcmp(a, "--")) continue;
+        if (!strcmp(a, "--fixture-case")) { i++; continue; }
+        int ar = -1;
+        if (strncmp(a, "--", 2) != 0 || !has_parsed_opt(code, a, &ar)) {
+            sy_printf("CHAIN_ARGV_CONTRACT\tstatus=FAIL\tcandidate=%s\tmissing=%s\n", cand_src, a);
+            free(code);
+            return 1;
+        }
+        for (int vi = 1; vi <= ar; vi++) {
+            if (i + vi >= extra_n || !extra_v[i + vi][0] || !strncmp(extra_v[i + vi], "--", 2)) {
+                sy_printf("CHAIN_ARGV_CONTRACT\tstatus=FAIL\tcandidate=%s\tmissing=%s-value\n", cand_src, a);
+                free(code);
                 return 1;
             }
         }
+        i += ar;
     }
-    free(b);
+    free(code);
     char row[1200];
     if (!cx_fmt(row, sizeof row, "CHAIN_ARGV_CONTRACT\tstatus=PASS\tcandidate=%s\ttools_root=%s\tmode=%s\n",
                 cand_src, g_tools_root[0] ? g_tools_root : ".", g_tools_root_mode[0] ? g_tools_root_mode : "snapshot")) {
@@ -865,16 +1012,71 @@ static int check_candidate_argv_contract(const char *cand_src, char **extra_v, i
     return 0;
 }
 
+static int verify_compiled_candidate_argv(const char *cand_bin, const char *cand_src, const char *rev,
+                                          char **extra_v, int extra_n) {
+    size_t n = 0;
+    char *b = cx_read(cand_src, &n);
+    if (!b || !n) { free(b); return 0; }
+    char *code = (char *)malloc(n + 1);
+    if (!code || strip_c_comments(b, n, code) != 0) { free(code); free(b); return 1; }
+    free(b);
+    int ar = -1;
+    int has_probe = has_parsed_opt(code, "--argv-contract", &ar);
+    free(code);
+    if (!has_probe) return 0;
+    char *v[110];
+    int k = 0;
+    v[k++] = (char *)cand_bin;
+    v[k++] = (char *)"--argv-contract";
+    v[k++] = (char *)"--check";
+    v[k++] = (char *)"--rev"; v[k++] = (char *)rev;
+    v[k++] = (char *)"--out"; v[k++] = (char *)out;
+    v[k++] = (char *)"--resume";
+    if (tools_root_arg && g_tools_root[0]) {
+        v[k++] = (char *)"--tools-root";
+        v[k++] = g_tools_root;
+    }
+    for (int i = 0; i < extra_n && k < 104; i++) {
+        if (!strcmp(extra_v[i], "--fixture-case")) { i++; continue; }
+        v[k++] = extra_v[i];
+    }
+    v[k++] = (char *)"--until"; v[k++] = (char *)"snap";
+    v[k] = 0;
+    pr_result r;
+    int t = pr_run("argv-contract-probe", v, 0, 0, 15, &r);
+    int bad = t || r.rc != 0 || !r.out || !strstr(r.out, "CANDIDATE_ARGV_CHECK\tstatus=PASS");
+    if (bad) {
+        sy_printf("CHAIN_ARGV_CONTRACT\tstatus=FAIL\tcandidate=%s\tmissing=binary-argv-check-rejected\n", cand_src);
+    }
+    pr_free(&r);
+    return bad ? 1 : 0;
+}
+
 static int prepare_once_from(const char *phase, const char *logical_source, const char *compile_source,
                              const char *native, const char *override, int supervisor, const char *rev) {
-    char pin[4500], tmp[4500], saved[65], hash[65];
+    char pin[4500], spin[4500], tmp[4500], saved[65], hash[65], shash[65], srec[4800];
     const char *src_to_build = (compile_source && compile_source[0]) ? compile_source : logical_source;
-    if (cx_fmt(pin, sizeof pin, "%s.pin", native) || cx_fmt(tmp, sizeof tmp, "%s.new", native)) die("tool pin path");
+    int is_cand = !strcmp(logical_source, "tools/candidate-chain.cx");
+    if (cx_fmt(pin, sizeof pin, "%s.pin", native) ||
+        cx_fmt(spin, sizeof spin, "%s.src.pin", native) ||
+        cx_fmt(tmp, sizeof tmp, "%s.new", native)) die("tool pin path");
     int pinned = tool_pin_hash(pin, saved);
     const char *image = override ? override : native;
     if (pinned < 0) return blocker(phase, "pinned-tool-invalid-record", 2);
     if (pinned) {
         if (tool_native_hash(image, hash) || strcmp(saved, hash)) return blocker(phase, "pinned-tool-changed", 2);
+        if (is_cand && !override && g_tools_root[0]) {
+            size_t sn = 0;
+            char *sold = cx_read(spin, &sn);
+            if (file_sha256_hex(src_to_build, shash) ||
+                cx_fmt(srec, sizeof srec, "tools_root=%s\nmode=%s\nsrc_sha=%s\n",
+                       g_tools_root, g_tools_root_mode[0] ? g_tools_root_mode : "snapshot", shash) ||
+                !sold || sn != strlen(srec) || memcmp(sold, srec, sn) != 0) {
+                free(sold);
+                return blocker(phase, "pinned-tool-source-changed", 2);
+            }
+            free(sold);
+        }
         return 0;
     }
     if (override) {
@@ -895,8 +1097,20 @@ static int prepare_once_from(const char *phase, const char *logical_source, cons
     if (rc) return rc;
     if (tool_native_hash(tmp, hash) || sy_rename(tmp, native) || store_tool_pin(pin, hash, logical_source))
         return blocker(phase, "tool-pin-write", 2);
-    if (!strcmp(logical_source, "tools/candidate-chain.cx"))
+    if (is_cand) {
+        if (g_tools_root[0]) {
+            if (file_sha256_hex(src_to_build, shash)) cx_fmt(shash, sizeof shash, "-");
+            if (cx_fmt(srec, sizeof srec, "tools_root=%s\nmode=%s\nsrc_sha=%s\n",
+                       g_tools_root, g_tools_root_mode[0] ? g_tools_root_mode : "snapshot", shash) ||
+                sy_write_atomic(spin, srec, strlen(srec), 0644))
+                return blocker(phase, "tool-pin-write", 2);
+        }
         record_candidate_tool_receipt(rev, src_to_build, hash);
+    } else if (!strcmp(logical_source, "tools/chain-run.cx")) {
+        record_outer_controller_receipt("chain-run", logical_source, hash);
+    } else if (!strcmp(logical_source, "tools/chain-watch.cx")) {
+        record_outer_controller_receipt("chain-watch", logical_source, hash);
+    }
     return 0;
 }
 
@@ -904,10 +1118,24 @@ static int prepare_once(const char *phase, const char *source, const char *nativ
     return prepare_once_from(phase, source, source, native, override, supervisor, 0);
 }
 
+static int extract_identity_line(const char *identity, const char *key, char *out_val, size_t cap) {
+    char needle[128];
+    if (cx_fmt(needle, sizeof needle, "\n%s=", key)) return -1;
+    const char *p = strstr(identity, needle);
+    if (!p) return -1;
+    p += strlen(needle);
+    const char *e = strchr(p, '\n');
+    size_t len = e ? (size_t)(e - p) : strlen(p);
+    if (len == 0 || len >= cap) return -1;
+    if (tx_copy(out_val, (long)cap, p, (long)len)) return -1;
+    return 0;
+}
+
 /* An explicit recovery runs under both session locks, outside the budget.
    The intent precedes publication; a partial replacement fails closed. */
 static int repin_tool(const char *rev, const char *tool, const char *reason) {
-    char native[4400], pin[4500], tmp[4500], record[4400], prefix[64], source[128], compile_src[4500];
+    char native[4400], pin[4500], spin[4500], tmp[4500], record[4400], prefix[64], source[128], compile_src[4500];
+    char id_tr[4400], id_mode[32];
     char before[65] = "-", observed[65] = "-", after[65], log[1200];
     if (!reason || strlen(reason) > 240 || strpbrk(reason, "\t\r\n") ||
         strspn(reason, " \v\f") == strlen(reason)) die("repin reason");
@@ -920,11 +1148,32 @@ static int repin_tool(const char *rev, const char *tool, const char *reason) {
         n < strlen(prefix) || memcmp(identity, prefix, strlen(prefix))) die("repin session identity");
     const char *binding = is_watch ? "\nwatch=source\n" : "\ncandidate=source\n";
     int from_source = is_runner || strstr(identity, binding) != 0;
+    id_tr[0] = 0; id_mode[0] = 0;
+    int had_id_tr = (extract_identity_line(identity, "tools_root", id_tr, sizeof id_tr) == 0);
+    int had_id_mode = (extract_identity_line(identity, "tools_root_mode", id_mode, sizeof id_mode) == 0);
     free(identity);
     if (!from_source) return blocker("repin", "external-tool-session", 2);
     if (heartbeat_live()) return blocker("repin", "live-owner", 2);
+    if (!is_runner && !is_watch) {
+        if (had_id_tr) {
+            if (tools_root_arg && (strcmp(g_tools_root, id_tr) != 0 || (had_id_mode && strcmp(g_tools_root_mode, id_mode) != 0)))
+                die("repin session identity");
+            cx_fmt(g_tools_root, sizeof g_tools_root, "%s", id_tr);
+            cx_fmt(g_tools_root_mode, sizeof g_tools_root_mode, "%s", had_id_mode ? id_mode : "snapshot");
+            if (!strcmp(g_tools_root_mode, "snapshot") && sy_exists(g_tools_root) != 1) {
+                char snap_dir[4400];
+                if (ensure_rev_snapshot(rev, snap_dir, sizeof snap_dir) || sy_exists(g_tools_root) != 1)
+                    return blocker("repin", "snapshot-prepare-failed", 2);
+            }
+        } else if (!g_tools_root[0]) {
+            if (resolve_tools_root(rev) < 0)
+                return blocker("repin", "snapshot-prepare-failed", 2);
+        }
+    }
     path(native, is_runner ? "chain-run-native" : is_watch ? "chain-run-watch" : "chain-run-candidate");
-    if (cx_fmt(pin, sizeof pin, "%s.pin", native) || cx_fmt(tmp, sizeof tmp, "%s.new", native) ||
+    if (cx_fmt(pin, sizeof pin, "%s.pin", native) ||
+        cx_fmt(spin, sizeof spin, "%s.src.pin", native) ||
+        cx_fmt(tmp, sizeof tmp, "%s.new", native) ||
         cx_fmt(source, sizeof source, "tools/%s.cx", tool)) die("repin path");
     if (!is_runner && !is_watch && g_tools_root[0]) {
         if (cx_fmt(compile_src, sizeof compile_src, "%s/tools/%s.cx", g_tools_root, tool)) die("repin path");
@@ -932,6 +1181,10 @@ static int repin_tool(const char *rev, const char *tool, const char *reason) {
         if (cx_fmt(compile_src, sizeof compile_src, "%s", source)) die("repin path");
     }
     if (sy_exists(pin) == 0 && sy_exists(native) == 0) return blocker("repin", "no-previous-pin-or-image", 2);
+    if (!is_runner && !is_watch && g_tools_root[0]) {
+        if (check_candidate_argv_contract(compile_src, 0, 0, !strcmp(g_tools_root_mode, "override")))
+            return blocker("repin", "candidate-argv-contract-mismatch", 2);
+    }
     if (tool_pin_hash(pin, before) < 0 && cx_fmt(before, sizeof before, "invalid")) die("repin old pin");
     if (tool_native_hash(native, observed) && cx_fmt(observed, sizeof observed, "-")) die("repin old image");
     char *prepare[] = {"sh", "./unisacc.com", compile_src, "-o", tmp, 0};
@@ -945,7 +1198,17 @@ static int repin_tool(const char *rev, const char *tool, const char *reason) {
                now, tool, before, observed, after, reason)) die("repin receipt bound");
     append("chain-run.tsv", log);
     if (sy_rename(tmp, native) || store_tool_pin(pin, after, source)) return blocker("repin", "publish-failed", 2);
-    if (!is_runner && !is_watch) record_candidate_tool_receipt(rev, compile_src, after);
+    if (!is_runner && !is_watch) {
+        if (g_tools_root[0]) {
+            char shash[65], srec[4800];
+            if (file_sha256_hex(compile_src, shash)) cx_fmt(shash, sizeof shash, "-");
+            if (cx_fmt(srec, sizeof srec, "tools_root=%s\nmode=%s\nsrc_sha=%s\n",
+                       g_tools_root, g_tools_root_mode[0] ? g_tools_root_mode : "snapshot", shash) ||
+                sy_write_atomic(spin, srec, strlen(srec), 0644))
+                return blocker("repin", "publish-failed", 2);
+        }
+        record_candidate_tool_receipt(rev, compile_src, after);
+    }
     if (cx_fmt(log, sizeof log, "TOOL_REPIN\tstatus=landed\ttime=%ld\ttool=%s\tprior_sha=%s\tnew_sha=%s\treason=%s\n",
                now, tool, before, after, reason)) die("repin receipt bound");
     append("chain-run.tsv", log);
@@ -1114,6 +1377,8 @@ int main(int argc,char **argv) {
     char lock[4400]; path(lock,"chain-run.lock"); int lockfd=sy_open(lock,O_RDWR|O_CREAT,0644);
     if(lockfd<0||sy_flock(lockfd,2|4)) die("runner already owns output");
     if (repin) return repin_tool(rev, repin, reason);
+    int snap_rc = 0;
+    if (!candidate && !g_tools_root[0]) snap_rc = resolve_tools_root(rev);
     char identity[16000],p[4400];
     int used=snprintf(identity,sizeof identity,"rev=%s\nmode=%s\ncandidate=%s\nctor=%s\nobjects=%s\npkg=%s\n",rev,rehearse?"rehearse":"full",candidate?candidate:"source",ctor?ctor:"-",objs?objs:"-",pkg?pkg:"-");
     if(used<0||(size_t)used>=sizeof identity) die("identity bound");
@@ -1124,6 +1389,22 @@ int main(int argc,char **argv) {
        chain-run.budget and later invocations never reset it. */
     int bind=snprintf(identity+used,sizeof identity-used,"root=%s\nplan-semantics=%s\nwatch=%s\n",root_id,plan_hash,watch?watch:"source");
     if(bind<0||(size_t)bind>=sizeof identity-used) die("identity bound"); used+=bind;
+    if (g_tools_root[0]) {
+        int tb = snprintf(identity + used, sizeof identity - (size_t)used, "tools_root=%s\ntools_root_mode=%s\n",
+                          g_tools_root, g_tools_root_mode[0] ? g_tools_root_mode : "snapshot");
+        if (tb < 0 || (size_t)tb >= sizeof identity - (size_t)used) die("identity bound");
+        used += tb;
+        for (int ti = 0; g_chain_driver_rels[ti]; ti++) {
+            char tfp[4500], tsha[65];
+            if (!cx_fmt(tfp, sizeof tfp, "%s/%s", g_tools_root, g_chain_driver_rels[ti]) &&
+                !file_sha256_hex(tfp, tsha)) {
+                int nb = snprintf(identity + used, sizeof identity - (size_t)used, "tool_blob=%s:%s\n",
+                                  g_chain_driver_rels[ti], tsha);
+                if (nb < 0 || (size_t)nb >= sizeof identity - (size_t)used) die("identity bound");
+                used += nb;
+            }
+        }
+    }
     for(i=extra;i<argc;i++) { int n=snprintf(identity+used,sizeof identity-used,"arg=%s\n",argv[i]); if(n<0||(size_t)n>=sizeof identity-used) die("identity bound"); used+=n; }
     path(p,"chain-run.identity"); size_t n=0; char *old=cx_read(p,&n);
     if(old) { if(n!=(size_t)used||memcmp(old,identity,n)) die("output identity mismatch"); free(old); }
@@ -1199,17 +1480,8 @@ int main(int argc,char **argv) {
     }
     if (!(done("pack") && (lookup("compare") < 0 || done("compare")))) {
         char cand_compile_src[4500];
-        if (!g_tools_root[0] && !candidate) {
-            char snap_dir[4400];
-            if (!ensure_rev_snapshot(rev, snap_dir, sizeof snap_dir) && sy_exists(snap_dir) == 1) {
-                cx_fmt(g_tools_root, sizeof g_tools_root, "%s", snap_dir);
-                cx_fmt(g_tools_root_mode, sizeof g_tools_root_mode, "%s", "snapshot");
-            } else if (!cr_snap(".", rev, 0, snap_dir, sizeof snap_dir) && sy_exists(snap_dir) == 1) {
-                cx_fmt(g_tools_root, sizeof g_tools_root, "%s", snap_dir);
-                cx_fmt(g_tools_root_mode, sizeof g_tools_root_mode, "%s", "snapshot");
-            } else if (sy_exists(".git") != 0) {
-                return blocker("prepare-candidate", "snapshot-prepare-failed", 2);
-            }
+        if (!g_tools_root[0] && !candidate && snap_rc < 0) {
+            return blocker("prepare-candidate", "snapshot-prepare-failed", 2);
         }
         print_chain_driver_diff(rev);
         if (g_tools_root[0]) {
@@ -1223,6 +1495,10 @@ int main(int argc,char **argv) {
         path(native_candidate,"chain-run-candidate");
         prep_rc = prepare_once_from("prepare-candidate", "tools/candidate-chain.cx", cand_compile_src, native_candidate, candidate, 0, rev);
         if (prep_rc) return prep_rc;
+        if (!candidate && g_tools_root[0]) {
+            if (verify_compiled_candidate_argv(native_candidate, cand_compile_src, rev, argv + extra, argc - extra))
+                return blocker("prepare-candidate", "candidate-argv-contract-mismatch", 2);
+        }
         if (!candidate) candidate=native_candidate;
     }
     char *v[100]; int k=0;

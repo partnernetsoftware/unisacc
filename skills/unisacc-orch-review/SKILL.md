@@ -9,9 +9,9 @@ description: 对执行者交付做对抗复核并裁决能否落库时调用;覆
 
 ## (1) 人工评审前先检验证据新鲜度
 
-- 对以执行结果为验收证据的交付，先运行 `sh ./unisacc.com tools/mutation-gate.cx -- execution --produce '生产命令' --judge '判分命令' --assertion NAME`。两个命令都收到本轮 ID (`$1`) 和证据路径 (`$2`)。生产命令走实际入口并写证据，判分命令走真实验收判据、只读证据，并核本轮 ID。基线应以 rc 0 输出 `PASS<TAB>NAME`，拒绝应以 rc 1 输出 `FAIL<TAB>NAME`，标记写到 stdout 且单独成行。
+- 对以执行结果为验收证据的交付，先运行 `sh ./unisacc.com tools/mutation-gate.cx -- execution --produce '生产命令' --judge '判分命令' --assertion PASS_NAME --expect-missing MISSING_NAME --expect-stale STALE_NAME`。两个命令都收到本轮 ID (`$1`) 和证据路径 (`$2`)。生产命令走实际入口并写证据，判分命令走真实验收判据、只读证据，并核本轮 ID。基线以 rc 0 输出 `PASS<TAB>PASS_NAME`，拒绝以 rc 1 输出 `FAIL<TAB>MISSING_NAME` 或 `FAIL<TAB>STALE_NAME`，标记写到 stdout 且单独成行。两个拒绝名必须不同，且对应实际缺件与陈旧分支。
 - `delete-run-step` 省略本轮生产并移除证据。`feed-previous-output` 省略本轮生产，把此前通过的证据字节放到同一路径。两项 `MUTATION_EXECUTION` 都须为 `KILLED` 再进入人工评审。`SURVIVED` 退回修判据，`UNMEASURED` 补跑。不能用退出失败、超时或错断言折算为击杀。
-- 命令接线必须保持真实生产与判分职责。评审者核对判分不会在内部重新生产证据，且 ID 绑定到实际完整输入和执行。纯静态交付注明此步不适用。
+- 两种变异共用一个新 ID 和证据路径，随后同 ID 实跑必须通过。评审者核对判分不会在内部重新生产证据，且 ID 绑定到实际完整输入和执行。原始末行回放和 receipt 字段单测是不同验收入口，比较裁决前先对齐命令与材料。纯静态交付注明此步不适用。
 
 ## (2) 交付要求
 

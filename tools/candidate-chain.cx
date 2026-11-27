@@ -197,19 +197,20 @@ static char g_tools_root[4400], g_tools_root_mode[32];
 static int g_pin_all_tools;
 static const char *cc_tools_root(const char *root) {
     if (g_tools_root[0]) {
-        if (tx_eqz(g_tools_root_mode, "override")) return g_tools_root;
-        if (fsize(g_tools_root) >= 0) return g_tools_root;
+        if (fsize(g_tools_root) < 0) die("REFUSE chain tools_root missing or unreadable", g_tools_root);
+        return g_tools_root;
     }
     return root;
 }
 static void cc_append_receipt_row(const char *outdir, const char *row) {
     char p[4400];
-    if (!outdir || !outdir[0] || cx_fmt(p, sizeof p, "%s/chain-tools-receipt.tsv", outdir)) return;
+    if (!outdir || !outdir[0]) return;
+    if (cx_fmt(p, sizeof p, "%s/chain-tools-receipt.tsv", outdir)) die("path", "chain-tools-receipt");
     int fd = sy_open(p, O_WRONLY | O_CREAT | O_APPEND, 0644);
-    if (fd >= 0) {
-        (void)sy_write_all(fd, row, (long)strlen(row));
-        (void)sy_close(fd);
-    }
+    if (fd < 0) die("REFUSE chain-tools-receipt open failed", p);
+    long len = (long)strlen(row);
+    if (sy_write_all(fd, row, len) != 0) { (void)sy_close(fd); die("REFUSE chain-tools-receipt write failed", p); }
+    if (sy_close(fd)) die("REFUSE chain-tools-receipt close failed", p);
 }
 static void cc_record_pinned_tool(const char *outdir, const char *tool, const char *rel,
                                   const char *tr, const char *src_sha, const char *native_sha) {
@@ -348,10 +349,11 @@ static void step_hash(const char *path, char hash[65]) {
     free(b);
 }
 static void step_pin(const char *root, int secs) {
-    char pin[4400], tmp[4400], pintmp[4400], tool[4400], hash[65], shash[65], text[4800];
+    char pin[4400], spin[4400], tmp[4400], pintmp[4400], tool[4400], hash[65], shash[65], text[4800];
     const char *tr = cc_tools_root(root);
     if (step_native[0]) return;
     if (cx_fmt(step_native, sizeof step_native, "%s/chain-step.native", step_out) || cx_fmt(pin, sizeof pin, "%s/chain-step.pin", step_out) ||
+        cx_fmt(spin, sizeof spin, "%s/chain-step.src.pin", step_out) ||
         cx_fmt(tmp, sizeof tmp, "%s.new", step_native) || cx_fmt(pintmp, sizeof pintmp, "%s.new", pin) ||
         cx_fmt(tool, sizeof tool, "%s/tools/chain-step.cx", tr)) die("path", "chain-step pin");
     int lock = candidate_lock(step_native, "pin");
@@ -360,6 +362,14 @@ static void step_pin(const char *root, int secs) {
         step_hash(step_native, hash);
         if (cx_fmt(text, sizeof text, "chain-step-pin-v1\nnative_sha=%s\n", hash) || n != strlen(text) || memcmp(old, text, n)) die("REFUSE chain-step pin mismatch", pin);
         free(old);
+        if (tx_eqz(g_tools_root_mode, "override") && fsize(spin) >= 0) {
+            size_t sn = 0; char *sold = cx_read(spin, &sn);
+            if (fsize(tool) < 0) die("REFUSE chain-step pin source missing", tool);
+            step_hash(tool, shash);
+            if (!sold || cx_fmt(text, sizeof text, "src_sha=%s\n", shash) || sn != strlen(text) || memcmp(sold, text, sn))
+                die("REFUSE chain-step pin mismatch", pin);
+            free(sold);
+        }
     } else {
         /* No record: nothing of this output was produced by a pinned tool yet (a native without
            its record is what a killed attempt left and is replaced). */
@@ -371,6 +381,11 @@ static void step_pin(const char *root, int secs) {
         if (cx_fmt(text, sizeof text, "chain-step-pin-v1\nnative_sha=%s\n", hash)) die("chain-step pin record", pin);
         if (sy_chmod(tmp, 0755) || sy_rename(tmp, step_native)) die("publish chain-step native", step_native);
         if (cx_write(pintmp, text, strlen(text)) || sy_rename(pintmp, pin)) die("publish chain-step pin", pin);
+        if (g_tools_root[0] && shash[0] != '-') {
+            char stext[128];
+            if (cx_fmt(stext, sizeof stext, "src_sha=%s\n", shash) || cx_write(spin, stext, strlen(stext)))
+                die("publish chain-step src pin", spin);
+        }
         sy_printf("CHAIN_STEP_PIN\tbuilt=%s\tsha=%s\tsrc_sha=%s\n", step_native, hash, shash);
         cc_record_pinned_tool(step_out, "chain-step", "tools/chain-step.cx", tr, shash, hash);
     }
@@ -406,6 +421,13 @@ static const char *tool_pinned(const char *root, const char *tool, int secs, cha
         step_hash(native, hash);
         char nl2[200];
         if (cx_fmt(nl2, sizeof nl2, "\nnative_sha=%s\n", hash) || n < strlen(nl2) || memcmp(old + n - strlen(nl2), nl2, strlen(nl2))) die("REFUSE chain-tool pin mismatch", pin);
+        if (tx_eqz(g_tools_root_mode, "override")) {
+            char sl2[200];
+            if (fsize(tool) < 0) die("REFUSE chain-tool pin mismatch", pin);
+            step_hash(tool, shash);
+            if (cx_fmt(sl2, sizeof sl2, "\nsrc_sha=%s\n", shash) || !strstr(old, sl2))
+                die("REFUSE chain-tool pin mismatch", pin);
+        }
         free(old);
     } else {
         char *a[] = {(char *)tool, (char *)"-o", tmp, 0};
@@ -619,7 +641,7 @@ static int step_secs(const char *root, char **args, int secs) {
         kr_pin_env(root, step_out);
         v[n++] = step_native;
     } else {
-        if (cx_fmt(tool, sizeof tool, "%s/tools/chain-step.cx", root)) die("path", "chain-step");
+        if (cx_fmt(tool, sizeof tool, "%s/tools/chain-step.cx", cc_tools_root(root))) die("path", "chain-step");
         v[n++] = tool;
         v[n++] = (char *)"--";
     }
@@ -3385,6 +3407,51 @@ int main(int argc, char **argv) {
         cc_verify_final_pack(argv[2], argv[3], argv[4]);
         return 0;
     }
+    if (argc >= 2 && tx_eqz(argv[1], "--argv-contract")) {
+        typedef struct { const char *name; int arity; } cc_opt_spec;
+        static const cc_opt_spec g_cc_opt_table[] = {
+            {"--rev", 1}, {"--out", 1}, {"--resume", 0}, {"--until", 1},
+            {"--lane", 1}, {"--plan", 0}, {"--recheck-only", 0}, {"--jobs-segment-s", 1},
+            {"--phases", 1}, {"--baseline-ctx", 1}, {"--job-index", 1}, {"--touch", 1},
+            {"--jobs", 4}, {"--worker-nm", 1}, {"--verify-snap", 2}, {"--identity-helper", 1},
+            {"--watch-baseline", 1}, {"--cc", 1}, {"--cache-manager-osx", 2}, {"--bootstrap", 1},
+            {"--tools-root", 1}, {"--pin-all-tools", 0}, {"--main-steps", 0}, {"--parallel", 1},
+            {"--argv-contract", 0}, {0, 0}
+        };
+        if (argc == 2) {
+            int cnt = 0;
+            for (int oi = 0; g_cc_opt_table[oi].name; oi++) {
+                sy_printf("CANDIDATE_OPT\tname=%s\tarity=%d\n", g_cc_opt_table[oi].name, g_cc_opt_table[oi].arity);
+                cnt++;
+            }
+            sy_printf("CANDIDATE_ARGV_CONTRACT\tstatus=OK\topts=%d\n", cnt);
+            return 0;
+        }
+        if (argc >= 3 && tx_eqz(argv[2], "--check")) {
+            for (int ai = 3; ai < argc; ai++) {
+                const char *opt = argv[ai];
+                int arity = -1;
+                for (int oi = 0; g_cc_opt_table[oi].name; oi++) {
+                    if (tx_eqz(opt, g_cc_opt_table[oi].name)) { arity = g_cc_opt_table[oi].arity; break; }
+                }
+                if (arity < 0) {
+                    sy_printf("CANDIDATE_ARGV_CHECK\tstatus=FAIL\topt=%s\treason=unknown-option\n", opt);
+                    return 2;
+                }
+                for (int vi = 1; vi <= arity; vi++) {
+                    if (ai + vi >= argc || !argv[ai + vi][0] || !strncmp(argv[ai + vi], "--", 2)) {
+                        sy_printf("CANDIDATE_ARGV_CHECK\tstatus=FAIL\topt=%s\treason=missing-value\n", opt);
+                        return 2;
+                    }
+                }
+                ai += arity;
+            }
+            sy_printf("CANDIDATE_ARGV_CHECK\tstatus=PASS\targc=%d\n", argc - 3);
+            return 0;
+        }
+        sy_printf("CANDIDATE_ARGV_CHECK\tstatus=FAIL\topt=%s\treason=bad-subcommand\n", argv[2]);
+        return 2;
+    }
     if (argc == 5 && tx_eqz(argv[1], "--tool-pin-fixture")) {
         /* 夹具入口: --tool-pin-fixture ROOT OUT TOOL.cx,只做钉住并打印可执行体路径 */
         char nat[4400];
@@ -3735,10 +3802,16 @@ int main(int argc, char **argv) {
                 char *shv[] = {(char *)"/bin/sh", (char *)"-c", dcmd, 0};
                 pr_result r;
                 if (!pr_run("chain-driver-diff", shv, root, 0, 30, &r) && r.rc == 0) {
-                    (void)cx_write(dpath, r.out ? r.out : "", r.outn);
-                    sy_printf("CHAIN_DRIVER_DIFF\tbase=origin/main\trev=%s\ttools_root=%s\tmode=%s\tdiff_bytes=%ld\n",
-                              rev, cc_tools_root(root), g_tools_root_mode, (long)r.outn);
-                    if (r.out && r.outn > 0) sy_write_all(1, r.out, (long)r.outn);
+                    char dsha[65];
+                    int dfiles = 0;
+                    const char * ob = r.out ? r.out : "";
+                    for (size_t di = 0; di + 11 <= r.outn; di++) {
+                        if ((di == 0 || ob[di - 1] == '\n') && !memcmp(ob + di, "diff --git ", 11)) dfiles++;
+                    }
+                    if (sy_sha256_hex(ob, (long)r.outn, dsha)) cx_fmt(dsha, sizeof dsha, "%s", "-");
+                    if (cx_write(dpath, ob, r.outn)) die("write chain-driver-diff.patch", dpath);
+                    sy_printf("CHAIN_DRIVER_DIFF\tbase=origin/main\trev=%s\ttools_root=%s\tmode=%s\tdiff_files=%d\tdiff_bytes=%ld\tdiff_sha=%s\tpatch=%s\n",
+                              rev, cc_tools_root(root), g_tools_root_mode, dfiles, (long)r.outn, dsha, dpath);
                 }
                 pr_free(&r);
             }
@@ -3759,7 +3832,9 @@ int main(int argc, char **argv) {
                 "tools/templates/whole-win-span.cx.in", 0
             };
             const char *tr = cc_tools_root(root);
-            char row[1400], fp2[4400], sha[65];
+            char row[1400], fp2[4400], sha[65], ctid_path[4400], ctid_buf[16384];
+            int ctid_used = snprintf(ctid_buf, sizeof ctid_buf, "rev=%s\nmode=%s\ntools_root=%s\n", rev, g_tools_root_mode, tr);
+            if (ctid_used < 0 || (size_t)ctid_used >= sizeof ctid_buf) die("chain-tools identity bound", outdir);
             if (!cx_fmt(row, sizeof row, "TOOLS_ROOT\trev=%s\tmode=%s\ttools_root=%s\troot=%s\n",
                         rev, g_tools_root_mode, tr, root)) {
                 cc_append_receipt_row(outdir, row);
@@ -3768,11 +3843,27 @@ int main(int argc, char **argv) {
             for (int ti = 0; tnames[ti]; ti++) {
                 if (!cx_fmt(fp2, sizeof fp2, "%s/%s", tr, trels[ti]) && fsize(fp2) >= 0) {
                     step_hash(fp2, sha);
+                    int nb = snprintf(ctid_buf + ctid_used, sizeof ctid_buf - (size_t)ctid_used,
+                                      "tool_blob=%s\t%s\t%s\n", tnames[ti], trels[ti], sha);
+                    if (nb < 0 || (size_t)nb >= sizeof ctid_buf - (size_t)ctid_used) die("chain-tools identity bound", outdir);
+                    ctid_used += nb;
                     if (!cx_fmt(row, sizeof row,
                                 "TOOL_BLOB\ttool=%s\tpath=%s\ttools_root=%s\tmode=%s\tsrc_sha=%s\tnative_sha=-\n",
                                 tnames[ti], trels[ti], tr, g_tools_root_mode, sha))
                         cc_append_receipt_row(outdir, row);
                 }
+            }
+            if (cx_fmt(ctid_path, sizeof ctid_path, "%s/chain-tools.identity", outdir)) die("path", "chain-tools.identity");
+            if (fsize(ctid_path) >= 0) {
+                size_t old_n = 0;
+                char *old_id = cx_read(ctid_path, &old_n);
+                if (!old_id || old_n != (size_t)ctid_used || memcmp(old_id, ctid_buf, old_n) != 0) {
+                    free(old_id);
+                    die("REFUSE chain-tools identity mismatch on resume", ctid_path);
+                }
+                free(old_id);
+            } else {
+                if (cx_write(ctid_path, ctid_buf, (size_t)ctid_used)) die("write chain-tools.identity", ctid_path);
             }
         }
     }
@@ -3815,7 +3906,8 @@ int main(int argc, char **argv) {
                 if (cx_fmt(sp, sizeof sp, "%s/%s", snap, rf[ri]) || sy_stat(sp, &rst) || rst.kind != 'f')
                     die("REFUSE snap cache file not regular", sp);
             }
-            if (!cx_fmt(wtmpl, sizeof wtmpl, "%s/tools/templates/whole-front.cx.in", cc_tools_root(root)) && fsize(wtmpl) >= 0)
+            if (!cx_fmt(wtmpl, sizeof wtmpl, "%s/tools/templates/whole-front.cx.in",
+                        tx_eqz(g_tools_root_mode, "override") ? cc_tools_root(root) : root) && fsize(wtmpl) >= 0)
                 check_whole_front_template(wtmpl);
             if (g_pin_all_tools) {
                 static const char *const ptools[] = {"whole-front", "release-build", "release-ape", 0};
