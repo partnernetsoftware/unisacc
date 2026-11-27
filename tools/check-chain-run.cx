@@ -12,6 +12,7 @@
 #pragma unisa use cxlib.chaincall
 #pragma unisa use cxlib.limits
 #pragma unisa use cxlib.sessionroot
+#pragma unisa use cxlib.receipt
 #pragma unisa use sys.env
 static int bad;
 /* 1 when the runner output N bytes at O carries its "--out must be" refusal (plain byte comparison). */
@@ -77,8 +78,8 @@ static int image_suffix(const char *path, const char *suffix) {
     return same;
 }
 static int fake(int argc,char **argv) {
-    const char *out=0,*phase=0,*mode="ok"; int i;
-    for(i=1;i<argc;i++) { if(!strcmp(argv[i],"--out")&&i+1<argc) out=argv[++i]; else if(!strcmp(argv[i],"--until")&&i+1<argc) phase=argv[++i]; else if(!strcmp(argv[i],"--fixture-case")&&i+1<argc) mode=argv[++i]; }
+    const char *out=0,*phase=0,*mode="ok",*rev="aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"; int i;
+    for(i=1;i<argc;i++) { if(!strcmp(argv[i],"--rev")&&i+1<argc) rev=argv[++i]; else if(!strcmp(argv[i],"--out")&&i+1<argc) out=argv[++i]; else if(!strcmp(argv[i],"--until")&&i+1<argc) phase=argv[++i]; else if(!strcmp(argv[i],"--fixture-case")&&i+1<argc) mode=argv[++i]; }
     if(!out||!phase) return 0; /* watch */
     for(i=1;i<argc;i++) if(!strcmp(argv[i],"--recheck-only")) {
         /* the runner's full re-check attempt before compare/pack: no checkpoint, no phase work */
@@ -174,13 +175,26 @@ static int fake(int argc,char **argv) {
         }
         f=fopen(p,"ab");fprintf(f,"DONE\tjobs-tool-0-finish\tx\n");fclose(f);
     }
-    join(p,out,"checkpoint.tsv"); f=fopen(p,"ab");fprintf(f,"DONE\t%s\twall_ms=1\tsha=-\n",phase);fclose(f);
-    if(!strcmp(mode,"receipt-race")&&!strcmp(phase,"snap")) return 137;
     if(!strcmp(phase,"pack")) {
-        char dir[4400],file[4400],hash[65],body[5000];join(dir,out,"ape-final");sy_mkdir(dir,0755);join(file,dir,"unisacc-next.com");put(file,"fake");
+        char dir[4400],file[4400],pin[4400],v3p[4400],run_id[128],hash[65],in_sha[65],out_sha[65],body[5000],pbody[5000];
+        join(dir,out,"ape-final");sy_mkdir(dir,0755);join(file,dir,"unisacc-next.com");put(file,"fake");
         if(sy_sha256_hex("fake",4,hash)) return 2;
         cx_fmt(body,sizeof body,"unisacc-next.com\t%s\tsha=%s\tbytes=4\n",file,hash);join(p,dir,"ape-receipt.txt");put(p,body);
+        if(sy_sha256_hex(body,(long)strlen(body),out_sha)) return 2;
+        cx_fmt(pbody,sizeof pbody,"PACK_INPUT\tlnx/x86_64\tgen=g2\tpath=%s\tsha=%s\tbytes=4\treceipt_artifact_sha=%s\tprevious=none\n",file,hash,hash);
+        join(pin,out,"pack-inputs.tsv");put(pin,pbody);
+        if(sy_sha256_hex(pbody,(long)strlen(pbody),in_sha)) return 2;
+        cx_fmt(run_id,sizeof run_id,"chain-%s",rev);
+        join(v3p,dir,"candidate-chain.rcpt");
+        rc_v3_t rec;memset(&rec,0,sizeof rec);
+        rec.run_id=run_id;rec.rev=rev;rec.unit="candidate-ape";rec.target="lnx/x86_64";
+        rec.producer="candidate-chain";rec.purpose="chain-ape";
+        rec.candidate_sha=hash;rec.inputs_sha=in_sha;rec.output_sha=out_sha;
+        rec.rc=0;rec.verdict="PASS";rec.ts=(int64_t)sy_wall_s();
+        if(rc_write3(v3p,&rec)!=0) return 2;
     }
+    join(p,out,"checkpoint.tsv"); f=fopen(p,"ab");fprintf(f,"DONE\t%s\twall_ms=1\tsha=-\n",phase);fclose(f);
+    if(!strcmp(mode,"receipt-race")&&!strcmp(phase,"snap")) return 137;
     return 0;
 }
 static char root[4400],base[4400],self[4400],runner[4400];
@@ -840,6 +854,11 @@ int main(int argc,char **argv) {
     ck(call("reuse","ok","30","3",0)==2,"owned-corrupt-pack-refused");
     join(p,base,"reuse/ape-final/unisacc-next.com");put(p,"fake");
     ck(call("reuse","ok","30","3",0)==0,"owned-valid-pack-reused");
+    join(p,base,"reuse/ape-final/candidate-chain.rcpt");put(p,"corrupt-v3-receipt\n");
+    ck(call("reuse","ok","30","3",0)==2,"owned-corrupt-v3-pack-receipt-refused");
+    if(sy_unlink(p))return 2;
+    ck(call("reuse","ok","30","3",0)==0&&sy_exists(p)==1,"owned-missing-v3-pack-receipt-recovered-by-rerun");
+    join(p,base,"reuse/chain-run.tsv");ck(has(p,"RECOVERY\t")&&has(p,"phase=pack\treason=missing-v3-receipt"),"missing-v3-pack-recovery-logged");
     join(p,base,"stale");sy_mkdir(p,0755);join(p,base,"stale/checkpoint.tsv");put(p,"DONE\tpack\twall_ms=1\tsha=-\n");
     ck(call("stale","ok","30","3",0)==2,"unowned-pack-refused");
     ck(call("missing","missing","30","3",0)==2,"success-without-checkpoint-refused");
