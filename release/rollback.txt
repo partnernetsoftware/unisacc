@@ -1,34 +1,40 @@
-# 0.1.5 回滚方案(prev=0.1.3)
-# 候选链提交与 APE 身份待 release-exec 整链回填;上一版 0.1.3 身份: commit=f485ec9a2bf02a7204b0d40b4b048ebd8a652a7a, ci_run_id=45781798885, ape_sha256=eb6741afe2d54c4a7e867b229aea903f1650a797508623869f858c0b197d3575, package_sha256=4d13b970d75732d61126e67f1f4574a70f48eb9675b95900453dfd370d3b4f1b, win_arm64_sha256=9c15961e796b754798295bf5e59ae99aed404cd9c7d71fc348316f61f4d32a7f, record_sha256=a78b193aadae36c4b431b1c30180c1fd3f71832591b25ca43cb79caa6bc0b6cd, build_alias_sha256=a78b193aadae36c4b431b1c30180c1fd3f71832591b25ca43cb79caa6bc0b6cd, checksums_sha256=3154a38935316bd1a2ea0787893e523decf7618ae1b3b0af6a6ac290dc02b98a
-# 状态: X 提交与 Y1/Y2 身份由 release-exec 回填;本文件涵盖未公开前与公开后两套撤回办法。
+# 0.1.6 回滚方案(prev=0.1.5)
+# 上一版 0.1.5 身份: commit=ba12b08dfddefea5a5e9241f095ede4e7f83473d, ci_run_id=45902924617, ape_sha256=824e3f05f72a485293bf0c33ea877c3f905ca3ef7c31a447473931f6ffa1fb1c, package_sha256=0ae277d4d3a3182ed305e10bdebe182f791130b71b8a066ccc4feadebe8d3dc5, win_arm64_sha256=7229a0408eafdc3b21fa64d7f9d58629c0883e338fa21e23c9a6403046f3f639, record_sha256=24bdbc195296be65015561c2fd787f350291c9782f4bfc05848daba026aa3afa, build_alias_sha256=24bdbc195296be65015561c2fd787f350291c9782f4bfc05848daba026aa3afa, checksums_sha256=7affa9c4dcf7161212bf2e0f7fdf57cc85fd4b519fae32b9207dce4d24ca4e92
+# 本版 X, CI, Y1, Y2 只从 release/evidence/0.1.6/INDEX.tsv 取值. 候选表取 F 与 APE. 不假定尖括号会被替换. 记录不存在则跳过该步.
+# 上一版行取自 b3e358eb2:release/candidate.tsv, 不是 C0a 重置行 3f54d1970.
 
-(0) 未公开前(X/draft/CI/Y1 阶段)撤回办法:
-    # a. 若 CI 仍在运行先取消(CI run 待 release-exec 回填):
-    gh -R partnernetsoftware/unisacc run cancel <CI_RUN_ID>
-    # b. 保持草稿 release v0.1.5 为 draft 私有(永不删已公开 tag):
-    gh -R partnernetsoftware/unisacc release edit v0.1.5 --draft=true
-    # c. 在 v0.1.5 分支及已同步 main 上从新到旧前向 revert(禁止 reset/stash/checkout/force-push):
-    git revert --no-edit <Y1_COMMIT_SHA>
-    git revert --no-edit <X_COMMIT_SHA>
-    DEVSVC_OWNER=cc sh ./unisacc.com tools/devsvc.cx -- git push HEAD
+(0) 未公开前, 只在已确认持锁且发布提交确实存在的共享 main 上, 从新到旧做一次. 车树不重复撤销同一发布历史.
+    # 从 INDEX.tsv 读 CI, Y1, X. 缺行则跳过, 不执行空变量.
+    # CI 仍在运行才取消:
+    gh -R partnernetsoftware/unisacc run cancel "$CI_RUN_ID"
+    gh -R partnernetsoftware/unisacc release edit v0.1.6 --draft=true
+    git revert --no-edit "$Y1"
+    git revert --no-edit "$X"
+    # 有冲突立即停止. 推送范围经核后:
+    # devsvc git push --cwd "$MAIN" --range "$REMOTE0..$REVERT_HEAD"
 
-(1) 公开后(Step 5 publish 之后)将 GitHub Release v0.1.5 转回草稿并恢复 Latest 指向 v0.1.3:
-    gh -R partnernetsoftware/unisacc release edit v0.1.5 --draft=true
-    gh -R partnernetsoftware/unisacc release edit v0.1.3 --latest
+(1) 公开后将 GitHub Release v0.1.6 转回草稿并恢复 Latest 指向 v0.1.5. 前置: v0.1.5 存在且为公开.
+    gh -R partnernetsoftware/unisacc release edit v0.1.6 --draft=true
+    gh -R partnernetsoftware/unisacc release edit v0.1.5 --latest
 
-(2) 读回核验 v0.1.3 为 Latest 且 v0.1.5 为 Draft:
-    gh -R partnernetsoftware/unisacc release view v0.1.5 --json tagName,isDraft,isLatest,assets
-    gh -R partnernetsoftware/unisacc release view v0.1.3 --json tagName,isDraft,isLatest,assets
-    gh api repos/partnernetsoftware/unisacc/releases/latest --jq .tag_name
+(2) 读回. gh JSON 不用已拒绝的 Latest 字段.
+    gh -R partnernetsoftware/unisacc release view v0.1.6 --json tagName,isDraft,isPrerelease,targetCommitish,assets
+    gh -R partnernetsoftware/unisacc release view v0.1.5 --json tagName,isDraft,isPrerelease,targetCommitish,assets
+    test "$(gh api repos/partnernetsoftware/unisacc/releases/latest --jq .tag_name)" = v0.1.5
+    # 核 v0.1.6 为 draft, v0.1.5 为公开, 双方 tag OID 与实际资产集合.
 
-(3) 共享 main 与车树上从新到旧前向撤销发布提交(Y2、Y1、X,禁止 force-push):
-    git revert --no-edit <Y2_COMMIT_SHA>
-    git revert --no-edit <Y1_COMMIT_SHA>
-    git revert --no-edit <X_COMMIT_SHA>
-    DEVSVC_OWNER=cc sh ./unisacc.com tools/devsvc.cx -- git push HEAD
+(3) 共享 main 上从新到旧撤销 Y2, Y1, X 一次. 记录来自 release/evidence/0.1.6/INDEX.tsv. 缺行跳过. 禁止逐树重复撤销.
+    git revert --no-edit "$Y2"
+    git revert --no-edit "$Y1"
+    git revert --no-edit "$X"
+    # devsvc git push --cwd "$MAIN" --range "$REMOTE0..$REVERT_HEAD"
+    # 随后核 origin/main. 若仍在冻结期, 按维护者确认的解冻或中止步骤收尾.
 
-(4) 本机根回退(若已将 v0.1.5 APE 安装至本机检出根,核对 v0.1.3 APE sha256=eb6741afe2d54c4a7e867b229aea903f1650a797508623869f858c0b197d3575):
-    DEVSVC_OWNER=cc sh ./unisacc.com tools/install-ape.cx -- . --rollback --write
-
-# nn 起步开关回退:UNISACC_M53_S1 默认关闭;已显式启用时撤该环境变量即回原生路径;tapemode.so 本版不分发,无需回退 sidecar 资产。
-# --version=unisacc 0.1.3
+(4) 本机根. --rollback --write 只选最新本机备份, 不能单独当作选定 v0.1.5.
+    # 先核备份 manifest 锁定 v0.1.5 APE sha256=824e3f05f72a485293bf0c33ea877c3f905ca3ef7c31a447473931f6ffa1fb1c 与相邻 build record 24bdbc195296be65015561c2fd787f350291c9782f4bfc05848daba026aa3afa.
+    # 备份不符则新目录下载并核验后再装:
+    # DEVSVC_OWNER=cc sh ./unisacc.com tools/install-ape.cx -- "$MAIN" "$PREV_APE" "$PREV_APE_SHA" --write
+    # 安装后: sh "$MAIN/unisacc.com" --version 必须等于 unisacc 0.1.5, 并核两项摘要.
+    # 六件方案: 本机不得残留 tape/tapemode.so, tape/manifest.tsv, tape/m53.tapeslice.
+    # 九件方案安装撤回 UNMEASURED, 不能用注释里的版本 token 代替执行.
+# --version=unisacc 0.1.5
