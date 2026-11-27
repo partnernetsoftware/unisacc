@@ -30,6 +30,7 @@
 #pragma unisa use cxlib.procrun
 #pragma unisa use cxlib.chainfacts
 #pragma unisa use cxlib.receipt
+#pragma unisa use runtime.packagefooter
 
 static int n_ok, failed;
 static void ck_v(int cond, const char *mode, const char *name, const char *variant, const char *reason) {
@@ -77,45 +78,66 @@ static int parse_u64_sep(const unsigned char *p, long n, long *pos, unsigned lon
 static int make_crc_tampered_p4_key(const char *src_p4, const char *dst_p4, const char *target_key) {
     unsigned char *b = 0;
     int64_t n = 0;
-    long pos = 4, nl_k = tx_len(target_key, 128);
+    long pkg_off = 0, pkg_end = 0, pos = 0, nl_k = tx_len(target_key, 128);
     unsigned long pm = 0, ps = 0, nr = 0;
     int patched = 0;
-    if (sy_read_file(src_p4, &b, &n, 64L << 20) != 0 || !b || n < 10 || memcmp(b, "P 4 ", 4) != 0) { mm_free(b); return 1; }
-    if (parse_u64_sep(b, (long)n, &pos, &pm, ' ') ||
-        parse_u64_sep(b, (long)n, &pos, &ps, ' ') ||
-        parse_u64_sep(b, (long)n, &pos, &nr, '\n')) { mm_free(b); return 1; }
+    if (sy_read_file(src_p4, &b, &n, 64L << 20) != 0 || !b || n < 10) { mm_free(b); return 1; }
+    {
+        PackageFooter pf;
+        if (n <= 2147483647L && packagefooter_locate_bytes(b, (long)n, &pf)) {
+            pkg_off = (long)pf.package_offset;
+            pkg_end = pkg_off + (long)pf.package_length;
+        } else if (n >= 16 && memcmp(b + n - 16, "UNIPKG1\n", 8) == 0) {
+            mm_free(b);
+            return 1;
+        } else if (memcmp(b, "P 4 ", 4) == 0) {
+            pkg_off = 0;
+            pkg_end = (long)n;
+        } else {
+            mm_free(b);
+            return 1;
+        }
+    }
+    if (pkg_off < 0 || pkg_end > (long)n || pkg_end - pkg_off < 10 || memcmp(b + pkg_off, "P 4 ", 4) != 0) {
+        mm_free(b);
+        return 1;
+    }
+    pos = pkg_off + 4;
+    if (parse_u64_sep(b, pkg_end, &pos, &pm, ' ') ||
+        parse_u64_sep(b, pkg_end, &pos, &ps, ' ') ||
+        parse_u64_sep(b, pkg_end, &pos, &nr, '\n')) { mm_free(b); return 1; }
     for (unsigned long di = 0; di < ps; di++) {
-        if (pos + 2 > (long)n || b[pos] != 'D' || b[pos + 1] != ' ') { mm_free(b); return 1; }
-        while (pos < (long)n && b[pos] != '\n') pos++;
-        if (pos >= (long)n) { mm_free(b); return 1; }
+        if (pos + 2 > pkg_end || b[pos] != 'D' || b[pos + 1] != ' ') { mm_free(b); return 1; }
+        while (pos < pkg_end && b[pos] != '\n') pos++;
+        if (pos >= pkg_end) { mm_free(b); return 1; }
         pos++;
     }
     for (unsigned long mi = 0; mi < pm; mi++) {
         unsigned long mb = 0, mr = 0, mc = 0, mk = 0;
-        if (pos + 2 > (long)n || b[pos] != 'M' || b[pos + 1] != ' ') { mm_free(b); return 1; }
+        if (pos + 2 > pkg_end || b[pos] != 'M' || b[pos + 1] != ' ') { mm_free(b); return 1; }
         pos += 2;
-        if (parse_u64_sep(b, (long)n, &pos, &mb, ' ') || parse_u64_sep(b, (long)n, &pos, &mr, ' ') ||
-            parse_u64_sep(b, (long)n, &pos, &mc, ' ') || parse_u64_sep(b, (long)n, &pos, &mk, '\n') ||
-            mb > (unsigned long)((long)n - pos)) { mm_free(b); return 1; }
+        if (parse_u64_sep(b, pkg_end, &pos, &mb, ' ') || parse_u64_sep(b, pkg_end, &pos, &mr, ' ') ||
+            parse_u64_sep(b, pkg_end, &pos, &mc, ' ') || parse_u64_sep(b, pkg_end, &pos, &mk, '\n') ||
+            mb > (unsigned long)(pkg_end - pos)) { mm_free(b); return 1; }
         pos += (long)mb;
     }
     for (unsigned long ri = 0; ri < nr; ri++) {
         unsigned long kl = 0, dl = 0, rl = 0, co = 0, cr = 0;
-        if (pos + 2 > (long)n || b[pos] != 'F' || b[pos + 1] != ' ') { mm_free(b); return 1; }
+        if (pos + 2 > pkg_end || b[pos] != 'F' || b[pos + 1] != ' ') { mm_free(b); return 1; }
         pos += 2;
-        if (parse_u64_sep(b, (long)n, &pos, &kl, ' ') || parse_u64_sep(b, (long)n, &pos, &dl, ' ') ||
-            parse_u64_sep(b, (long)n, &pos, &rl, ' ') || parse_u64_sep(b, (long)n, &pos, &co, ' ') ||
-            parse_u64_sep(b, (long)n, &pos, &cr, '\n')) { mm_free(b); return 1; }
+        if (parse_u64_sep(b, pkg_end, &pos, &kl, ' ') || parse_u64_sep(b, pkg_end, &pos, &dl, ' ') ||
+            parse_u64_sep(b, pkg_end, &pos, &rl, ' ') || parse_u64_sep(b, pkg_end, &pos, &co, ' ') ||
+            parse_u64_sep(b, pkg_end, &pos, &cr, '\n')) { mm_free(b); return 1; }
         long crc_last = pos - 2;
-        if ((long)kl == nl_k && pos + (long)kl <= (long)n && memcmp(b + pos, target_key, (size_t)nl_k) == 0) {
+        if ((long)kl == nl_k && pos + (long)kl <= pkg_end && memcmp(b + pos, target_key, (size_t)nl_k) == 0) {
             b[crc_last] = (b[crc_last] == '0') ? '1' : '0';
             patched = 1;
             break;
         }
-        if (kl + dl > (unsigned long)((long)n - pos)) { mm_free(b); return 1; }
+        if (kl + dl > (unsigned long)(pkg_end - pos)) { mm_free(b); return 1; }
         pos += (long)(kl + dl);
     }
-    int wrc = patched ? sy_write_file(dst_p4, b, (long)n, 0644) : 1;
+    int wrc = patched ? sy_write_file(dst_p4, b, (long)n, 0755) : 1;
     mm_free(b);
     return wrc == 0 ? 0 : 1;
 }
@@ -231,12 +253,19 @@ static int run_chain_ape_pregate(const char *ape, const char *rcpt,
         if (!quiet) sy_printf("REFUSE\tFORMAL_CHAIN_PREGATE\tsession-dir-create-failed\tape_sha=%s\n", asha);
         return 2;
     }
+    {
+        char cwd[512], l[600], t[600];
+        if (getcwd(cwd, sizeof cwd) != 0) {
+            cx_fmt(l, sizeof l, "%s/cxroot.tsv", tmp); cx_fmt(t, sizeof t, "%s/cxroot.tsv", cwd); (void)sy_symlink(t, l);
+            cx_fmt(l, sizeof l, "%s/cx", tmp); cx_fmt(t, sizeof t, "%s/cx", cwd); (void)sy_symlink(t, l);
+        }
+    }
     cx_fmt(u1, sizeof u1, "%s/u1.cx", tmp);
     cx_fmt(u2, sizeof u2, "%s/u2.cx", tmp);
     cx_fmt(out_bin, sizeof out_bin, "%s/two_src_out", tmp);
     cx_fmt(bad_ape, sizeof bad_ape, "%s/bad_crc_m25.com", tmp);
-    const char *u1_code = "int f(void) { return 7; }\n";
-    const char *u2_code = "int f(void); int main(void) { return f() == 7 ? 0 : 1; }\n";
+    const char *u1_code = "#pragma unisa use sys.io\nint f(void) { sy_printf(\"u1\\n\"); return 7; }\n";
+    const char *u2_code = "#pragma unisa use sys.io\nint f(void); int main(void) { sy_printf(\"u2\\n\"); return f() == 7 ? 0 : 1; }\n";
     if (sy_write_file(u1, (const unsigned char *)u1_code, (long)strlen(u1_code), 0644) != 0 ||
         sy_write_file(u2, (const unsigned char *)u2_code, (long)strlen(u2_code), 0644) != 0) {
         (void)sy_remove_all(tmp);
@@ -496,6 +525,33 @@ static int run_all_checks(int want_obj, int want_parity, int want_bounds) {
     }
 
     if (want_parity) {
+    {
+        unsigned char *pb = 0; int64_t pn = 0;
+        int ape_wrap_ok = 0;
+        if (sy_read_file(good_p4, &pb, &pn, 64L << 20) == 0 && pb && pn > 10) {
+            char ape_w[320], ape_bad[320], ape_out[320];
+            cx_fmt(ape_w, sizeof ape_w, "%s/ape_wrap.com", tmp);
+            cx_fmt(ape_bad, sizeof ape_bad, "%s/ape_bad_footer.com", tmp);
+            cx_fmt(ape_out, sizeof ape_out, "%s/ape_wrap_tampered.com", tmp);
+            unsigned char *wb = mm_alloc(4 + (size_t)pn + 16);
+            if (wb) {
+                wb[0] = 0x7f; wb[1] = 'E'; wb[2] = 'L'; wb[3] = 'F';
+                for (int64_t j = 0; j < pn; j++) wb[4 + j] = pb[j];
+                memcpy(wb + 4 + (size_t)pn, "UNIPKG1\n", 8);
+                for (int j = 0; j < 8; j++) wb[4 + (size_t)pn + 8 + j] = (unsigned char)(((uint64_t)pn >> (8 * j)) & 255);
+                if (sy_write_file(ape_w, wb, 4 + (long)pn + 16, 0644) == 0) {
+                    int ok1 = (make_crc_tampered_p4_key(ape_w, ape_out, "tape/lnx-x86_64/m25.tapeslice") == 0);
+                    memset(wb + 4 + (size_t)pn + 8, 0, 8);
+                    int ok2 = (sy_write_file(ape_bad, wb, 4 + (long)pn + 16, 0644) == 0 &&
+                               make_crc_tampered_p4_key(ape_bad, ape_out, "tape/lnx-x86_64/m25.tapeslice") != 0);
+                    ape_wrap_ok = (ok1 && ok2);
+                }
+                mm_free(wb);
+            }
+            mm_free(pb);
+        }
+        ck_v(ape_wrap_ok, "LOCAL", "ape-p4-footer-crc-tamper", "local-ape-wrap", "footer-located-and-bad-footer-refused");
+    }
         /* 5. Value parity: native_probe vs s3_probe */
         cx_fmt(cmd, sizeof cmd, "'%s'", nat_bin);
         int r_nat = run_sh(cmd, nat_out, sizeof nat_out);
