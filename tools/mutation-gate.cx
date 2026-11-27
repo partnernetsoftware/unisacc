@@ -10,10 +10,12 @@
  *   mutation-gate.cx -- prep   (same options)  private tree + mutants + baseline check, bounded under 55 s
  *   mutation-gate.cx -- worker --out DIR --slot K   runs mutants with id % par == K in DIR/slot-K
  *   mutation-gate.cx -- report --out DIR [--min-score F] [--allow-uncovered FILE] [--adjudicated FILE]
- *   mutation-gate.cx -- execution --produce 'CMD' --judge 'CMD' --assertion NAME [--timeout-s N]
+ *   mutation-gate.cx -- execution --produce 'CMD' --judge 'CMD' --assertion PASS_NAME
+ *                           --expect-missing FAIL_NAME --expect-stale FAIL_NAME [--timeout-s N]
  *       Each command receives RUN_ID ($1) and EVIDENCE_PATH ($2) in the current checkout.
- *       Produce and judge a green run. Use fresh IDs for both mutations without running their producer.
+ *       Produce a previous green run, judge both mutations under a fresh ID, then prove that ID can pass.
  *       Judge stdout must contain exactly one matching PASS/FAIL<TAB>NAME line, with rc 0/1 respectively.
+ *       Missing evidence and stale evidence require different named refusals.
  *       Both fixed mutations must be killed. Infrastructure failures refuse with rc 2.
  *   mutation-gate.cx -- run|prep ... --report [--expect-fail NAME|--expect-rc N]...
  *       --report records assertion evidence per mutant without replacing the existing gate verdict.
@@ -947,26 +949,30 @@ static int run_all(const char *self) {
 }
 
 static int execution_command(const char *cmd, const char *id, const char *path, int secs,
-                             const char *assertion) {
+                             const char *pass_name, const char *fail_name) {
     char *argv[] = {"sh", "-c", (char *)cmd, "mutation-gate", (char *)id, (char *)path, 0};
     np_result res = {0};
     char why[256] = {0};
     int rc = np_run(argv, 0, 0, secs, &res, why, sizeof why);
     int result = 2;
     if (!rc && !res.residue && !res.timed_out && (res.rc == 0 || res.rc == 1)) {
-        if (!assertion) result = res.rc;
+        if (!pass_name) result = res.rc;
         else if (res.out) {
             const char *prefix = res.rc == 0 ? "PASS\t" : "FAIL\t";
-            long len = (long)strlen(assertion);
+            const char *name = res.rc == 0 ? pass_name : fail_name;
+            long len = name ? (long)strlen(name) : 0;
+            long pass_len = (long)strlen(pass_name);
             int matches = 0, records = 0;
             for (long at = 0; at < (long)res.outn;) {
                 long end = at;
                 while (end < (long)res.outn && res.out[end] != '\n') end++;
                 const char *line = res.out + at;
-                if (end < (long)res.outn && end - at == len + 5 && !memcmp(line + 5, assertion, (size_t)len) &&
-                    (!memcmp(line, "PASS\t", 5) || !memcmp(line, "FAIL\t", 5))) {
-                    records++;
-                    if (!memcmp(line, prefix, 5)) matches++;
+                if (end < (long)res.outn) {
+                    if (name && end - at == len + 5 && !memcmp(line, prefix, 5) &&
+                        !memcmp(line + 5, name, (size_t)len)) matches++;
+                    if ((end - at == pass_len + 5 && !memcmp(line, "PASS\t", 5) &&
+                         !memcmp(line + 5, pass_name, (size_t)pass_len)) ||
+                        (end - at >= 5 && !memcmp(line, "FAIL\t", 5))) records++;
                 }
                 at = end + 1;
             }
@@ -991,8 +997,13 @@ static unsigned char *execution_evidence(const char *path, int64_t *n) {
     return data;
 }
 
+static int execution_name_ok(const char *name) {
+    return name && *name && !strpbrk(name, "\r\n\t");
+}
+
 static int execution_gate(int argc, char **argv) {
     const char *produce = 0, *judge = 0, *assertion = 0;
+    const char *missing = 0, *stale = 0;
     int secs = 55;
     for (int i = 2; i < argc; i += 2) {
         if (i + 1 == argc) die2("missing value for", argv[i]);
@@ -1000,6 +1011,8 @@ static int execution_gate(int argc, char **argv) {
         if (!strcmp(argv[i], "--produce")) produce = v;
         else if (!strcmp(argv[i], "--judge")) judge = v;
         else if (!strcmp(argv[i], "--assertion")) assertion = v;
+        else if (!strcmp(argv[i], "--expect-missing")) missing = v;
+        else if (!strcmp(argv[i], "--expect-stale")) stale = v;
         else if (!strcmp(argv[i], "--timeout-s")) {
             char *end;
             long parsed = strtol(v, &end, 10);
@@ -1007,15 +1020,15 @@ static int execution_gate(int argc, char **argv) {
             secs = (int)parsed;
         } else die2("unknown execution option", argv[i]);
     }
-    if (!produce || !*produce || !judge || !*judge || !assertion || !*assertion || strpbrk(assertion, "\r\n\t"))
-        die2("usage", "execution --produce CMD --judge CMD --assertion NAME");
+    if (!produce || !*produce || !judge || !*judge || !execution_name_ok(assertion) ||
+        !execution_name_ok(missing) || !execution_name_ok(stale) || !strcmp(missing, stale))
+        die2("usage", "execution --produce CMD --judge CMD --assertion NAME --expect-missing NAME --expect-stale DIFFERENT_NAME");
 
-    char tmp[1024], path[1100], old_id[1100], delete_id[1100], replay_id[1100];
+    char tmp[1024], path[1100], old_id[1100], current_id[1100];
     if (sr_scratch("mutation-gate-execution", tmp, sizeof tmp)) die2("execution scratch", "");
     if (cx_fmt(path, sizeof path, "%s/evidence", tmp) ||
         sy_mkdtemp(tmp, "id-", old_id, sizeof old_id) ||
-        sy_mkdtemp(tmp, "id-", delete_id, sizeof delete_id) ||
-        sy_mkdtemp(tmp, "id-", replay_id, sizeof replay_id)) {
+        sy_mkdtemp(tmp, "id-", current_id, sizeof current_id)) {
         (void)sy_remove_all(tmp);
         die2("execution scratch", "");
     }
@@ -1023,16 +1036,37 @@ static int execution_gate(int argc, char **argv) {
     int64_t old_n = 0;
     unsigned char *old = 0;
     int deleted = 2, replayed = 2, result = 2;
-    if (execution_command(produce, old_id, path, secs, 0) || !(old = execution_evidence(path, &old_n)) ||
-        execution_command(judge, old_id, path, secs, assertion) || sy_unlink(path) != 0) {
+    if (execution_command(produce, old_id, path, secs, 0, 0) || !(old = execution_evidence(path, &old_n)) ||
+        execution_command(judge, old_id, path, secs, assertion, 0) || sy_unlink(path) != 0) {
         fprintf(stderr, "mutation-gate: REFUSE execution baseline\n");
         goto done;
     }
 
-    deleted = execution_command(judge, delete_id, path, secs, assertion);
+    deleted = execution_command(judge, current_id, path, secs, assertion, missing);
     sy_stat_t st;
     if (sy_lstat(path, &st) != -ENOENT || sy_write_file(path, old, (long)old_n, 0600) != 0) goto done;
-    replayed = execution_command(judge, replay_id, path, secs, assertion);
+    replayed = execution_command(judge, current_id, path, secs, assertion, stale);
+    int64_t replay_n = 0;
+    unsigned char *readback = execution_evidence(path, &replay_n);
+    int unchanged = readback && replay_n == old_n && mm_same(readback, old, (long)old_n);
+    mm_free(readback);
+    if (!unchanged) {
+        replayed = 2;
+        fprintf(stderr, "mutation-gate: REFUSE replay evidence changed by judge\n");
+        goto done;
+    }
+    if (sy_unlink(path) != 0 || execution_command(produce, current_id, path, secs, 0, 0) ||
+        !(readback = execution_evidence(path, &replay_n))) {
+        deleted = replayed = 2;
+        fprintf(stderr, "mutation-gate: REFUSE current positive control\n");
+        goto done;
+    }
+    mm_free(readback);
+    if (execution_command(judge, current_id, path, secs, assertion, 0) != 0) {
+        deleted = replayed = 2;
+        fprintf(stderr, "mutation-gate: REFUSE current positive control\n");
+        goto done;
+    }
     if (deleted != 2 && replayed != 2) result = (deleted == 1 && replayed == 1) ? 0 : 1;
 done:
     printf("MUTATION_EXECUTION\toperator=delete-run-step\tverdict=%s\n",

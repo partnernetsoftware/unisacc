@@ -128,7 +128,7 @@ static int execution_case(const char *produce, const char *judge, char *out, int
     char p[1024], j[1024], cmd[2500];
     if (ckk_shq(p, sizeof p, produce) || ckk_shq(j, sizeof j, judge) ||
         cx_fmt(cmd, sizeof cmd, "sh ./unisacc.com tools/mutation-gate.cx -- execution "
-               "--produce %s --judge %s --assertion fresh --timeout-s 3 2>&1", p, j)) return 2;
+               "--produce %s --judge %s --assertion fresh --expect-missing missing --expect-stale stale --timeout-s 3 2>&1", p, j)) return 2;
     int rc = ckk_sh_t("check-mutation-gate", cmd, out, cap, 22);
     fputs(out, stdout);
     return rc;
@@ -137,10 +137,16 @@ static int execution_case(const char *produce, const char *judge, char *out, int
 static void execution_fixture(void) {
     char out[4096];
     const char *produce = "printf '%s\\n' \"$1\" > \"$2\"";
-    const char *strict = "if test -f \"$2\" && IFS= read -r id < \"$2\" && test \"$id\" = \"$1\"; "
-                         "then printf 'PASS\\tfresh\\n'; else printf 'FAIL\\tfresh\\n'; exit 1; fi";
-    const char *weak = "if test -s \"$2\"; then printf 'PASS\\tfresh\\n'; else printf 'FAIL\\tfresh\\n'; exit 1; fi";
+    const char *strict = "if ! test -f \"$2\"; then printf 'FAIL\\tmissing\\n'; exit 1; fi; "
+                         "if IFS= read -r id < \"$2\" && test \"$id\" = \"$1\"; "
+                         "then printf 'PASS\\tfresh\\n'; else printf 'FAIL\\tstale\\n'; exit 1; fi";
+    const char *weak = "if test -s \"$2\"; then printf 'PASS\\tfresh\\n'; else printf 'FAIL\\tmissing\\n'; exit 1; fi";
     const char *broken = "if test -s \"$2\"; then printf 'PASS\\tfresh\\n'; else printf 'FAIL\\twrong\\n'; exit 1; fi";
+    const char *misclassified = "if test -f \"$2\" && IFS= read -r id < \"$2\" && test \"$id\" = \"$1\"; "
+                                "then printf 'PASS\\tfresh\\n'; else printf 'FAIL\\tmissing\\n'; exit 1; fi";
+    const char *destructive = "if ! test -f \"$2\"; then printf 'FAIL\\tmissing\\n'; exit 1; fi; "
+                              "if IFS= read -r id < \"$2\" && test \"$id\" = \"$1\"; then printf 'PASS\\tfresh\\n'; "
+                              "else rm -- \"$2\"; printf 'FAIL\\tstale\\n'; exit 1; fi";
     int rc = execution_case(produce, strict, out, sizeof out);
     ck(rc == 0 && strstr(out, "operator=delete-run-step\tverdict=KILLED\n") &&
        strstr(out, "operator=feed-previous-output\tverdict=KILLED\n"), "execution-kills-both");
@@ -149,6 +155,12 @@ static void execution_fixture(void) {
        strstr(out, "operator=feed-previous-output\tverdict=SURVIVED\n"), "execution-stale-output-survives-weak-judge");
     rc = execution_case(produce, broken, out, sizeof out);
     ck(rc == 2 && strstr(out, "operator=delete-run-step\tverdict=UNMEASURED\n"), "execution-wrong-assertion-refused");
+    rc = execution_case(produce, misclassified, out, sizeof out);
+    ck(rc == 2 && strstr(out, "operator=delete-run-step\tverdict=KILLED\n") &&
+       strstr(out, "operator=feed-previous-output\tverdict=UNMEASURED\n"), "execution-missing-reason-cannot-kill-replay");
+    rc = execution_case(produce, destructive, out, sizeof out);
+    ck(rc == 2 && strstr(out, "REFUSE replay evidence changed by judge") &&
+       strstr(out, "operator=feed-previous-output\tverdict=UNMEASURED\n"), "execution-judge-cannot-remove-replay-input");
     rc = execution_case(":", strict, out, sizeof out);
     ck(rc == 2 && strstr(out, "REFUSE execution baseline"), "execution-missing-baseline-refused");
 }
