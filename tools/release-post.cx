@@ -33,6 +33,7 @@
 #pragma unisa use mem.heap
 #pragma unisa use mem.bytes
 #pragma unisa use cxlib.releaseseq
+#pragma unisa use cxlib.releasecandidate
 
 #define RP_STEPS 8
 
@@ -516,6 +517,45 @@ static int step_root_upgrade(void) {
                 sy_remove_all(dl_dir);
                 post_step(5, "FAIL", "gh-download-sha-mismatch");
                 return 1;
+            }
+            {
+                char candp[1400], cwhy[256];
+                RcCandidate rcd;
+                if (!cx_fmt(candp, sizeof candp, "%s/release/candidate.tsv", g_repo) && sy_exists(candp) == 1) {
+                    if (rcand_load(candp, &rcd, cwhy, (int)sizeof cwhy) != 0) {
+                        sy_remove_all(dl_dir); post_step(5, "FAIL", "candidate-table-malformed"); return 1;
+                    }
+                    if (rcd.extra_n > 0) {
+                        if (!tx_eqz(rcd.version, g_ver) || !tx_eqz(rcd.sha[0], want_sha)) {
+                            sy_remove_all(dl_dir); post_step(5, "FAIL", "candidate-table-mismatch"); return 1;
+                        }
+                        char tdir[1400];
+                        if (cx_fmt(tdir, sizeof tdir, "%s/tape", dl_dir) || sy_mkdir_all(tdir, 0700) != 0) {
+                            sy_remove_all(dl_dir); post_step(5, "FAIL", "tape-stage-dir"); return 1;
+                        }
+                        for (int ei = 0; ei < rcd.extra_n; ei++) {
+                            char ep[1400], esha[80], dstp[1400];
+                            const char *en = rcd.extra_name[ei];
+                            if (!tx_eqz(en, "tapemode.so") && !tx_eqz(en, "tape-manifest.tsv") && !tx_eqz(en, "m53.tapeslice")) continue;
+                            if (gh_repo[0]) {
+                                cx_fmt(cmd, sizeof cmd, "%s release download 'v%s' -R '%s' --pattern '%s' --dir '%s'",
+                                       g_gh_bin, g_ver, gh_repo, en, dl_dir);
+                            } else {
+                                cx_fmt(cmd, sizeof cmd, "%s release download 'v%s' --pattern '%s' --dir '%s'",
+                                       g_gh_bin, g_ver, en, dl_dir);
+                            }
+                            rc = run_bound("rp-gh-dl-extra", cmd, out, (int)sizeof out);
+                            if (rc != 0 || cx_fmt(ep, sizeof ep, "%s/%s", dl_dir, en) || sy_exists(ep) != 1 ||
+                                rp_file_sha(ep, esha) != 0 || !tx_eqz(esha, rcd.extra_sha[ei])) {
+                                sy_remove_all(dl_dir); post_step(5, "FAIL", "gh-download-tape-sidecar-failed"); return 1;
+                            }
+                            const char *leaf = tx_eqz(en, "tape-manifest.tsv") ? "manifest.tsv" : en;
+                            if (cx_fmt(dstp, sizeof dstp, "%s/%s", tdir, leaf) || sy_rename(ep, dstp) != 0) {
+                                sy_remove_all(dl_dir); post_step(5, "FAIL", "tape-stage-rename-failed"); return 1;
+                            }
+                        }
+                    }
+                }
             }
         }
     }

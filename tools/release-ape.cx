@@ -24,6 +24,7 @@
 #pragma unisa use sys.sig
 #pragma unisa use text.text
 #pragma unisa use mem.heap
+#pragma unisa use mem.bytes
 #pragma unisa use cxlib.releaseversion
 
 #pragma unisa use cxlib.procrun
@@ -128,14 +129,15 @@ static int pack(char **argv, int nslice) {
         mm_free(c); mm_free(q);
     }
     if (ra_with_tape_sidecar) {
-        char tdir[4400], tso[4400], tmf[4400];
+        char tdir[4400], tso[4400], tmf[4400], tsl[4400];
         if (sy_exists("tools/tape-sidecar-build.cx") != 1 ||
             sy_exists("tools/tape/asm/tape_x86_64.S") != 1 ||
             sy_exists("tools/tape/asm/hoststub_lnx_x86_64.S") != 1)
             ra_die("tape-sidecar sources missing", out);
         if (cx_fmt(tdir, sizeof tdir, "%s/tape", out) ||
             cx_fmt(tso, sizeof tso, "%s/tape/tapemode.so", out) ||
-            cx_fmt(tmf, sizeof tmf, "%s/tape/manifest.tsv", out)) ra_die("tape path too long", out);
+            cx_fmt(tmf, sizeof tmf, "%s/tape/manifest.tsv", out) ||
+            cx_fmt(tsl, sizeof tsl, "%s/tape/m53.tapeslice", out)) ra_die("tape path too long", out);
         {
             char *tv[] = {"sh", "./unisacc.com", "tools/tape-sidecar-build.cx", "--", "--target", "lnx/x86_64", ".", tdir, 0};
             rc = run(tv, log, sizeof log);
@@ -143,6 +145,72 @@ static int pack(char **argv, int nslice) {
                 sy_eprintf("%s", log);
                 ra_die("tape-sidecar-build failed", tdir);
             }
+        }
+        if (sy_exists("tools/tapepack.cx") == 1) {
+            char mg_cx[4400], mg_s[4400], m53_sha[65], m53_row[256];
+            long m53_bytes = 0;
+            static const char *m53_src =
+                "static unsigned long g_u64(const char *s) {\n"
+                "    unsigned long v = 0; int i = 0;\n"
+                "    while (s[i] >= '0' && s[i] <= '9') { v = v * 10UL + (unsigned long)(s[i] - '0'); i++; }\n"
+                "    return v;\n"
+                "}\n"
+                "static long g_i64(const char *s) {\n"
+                "    long v = 0; int i = 0, neg = 0;\n"
+                "    if (s[0] == '-') { neg = 1; i = 1; }\n"
+                "    while (s[i] >= '0' && s[i] <= '9') { v = v * 10L + (long)(s[i] - '0'); i++; }\n"
+                "    return neg ? -v : v;\n"
+                "}\n"
+                "int main(int argc, char **argv) {\n"
+                "    const char *abi = \"M53S1ABI1\";\n"
+                "    const unsigned char *data;\n"
+                "    long length;\n"
+                "    unsigned long count;\n"
+                "    if (abi[0] != 'M' || argc < 3) return 2;\n"
+                "    data = (const unsigned char *)g_u64(argv[1]);\n"
+                "    length = g_i64(argv[2]);\n"
+                "    if (!data || length < 4) return 0;\n"
+                "    count = (unsigned long)data[0] | ((unsigned long)data[1] << 8) |\n"
+                "            ((unsigned long)data[2] << 16) | ((unsigned long)data[3] << 24);\n"
+                "    if (count > 1000000UL) return 0;\n"
+                "    return length == 4 + (long)count * 9 ? 1 : 0;\n"
+                "}\n";
+            if (cx_fmt(mg_cx, sizeof mg_cx, "%s/.m53_guest.cx", tdir) ||
+                cx_fmt(mg_s, sizeof mg_s, "%s/.m53_guest.s", tdir)) ra_die("m53 path too long", tdir);
+            if (cx_write(mg_cx, m53_src, (size_t)tx_len(m53_src, 4096))) ra_die("cannot write m53 guest", mg_cx);
+            {
+                char *cv[] = {"sh", "./unisacc.com", mg_cx, "-S", "-o", mg_s, 0};
+                rc = run(cv, log, sizeof log);
+                if (rc != 0 || sy_exists(mg_s) != 1) { (void)sy_unlink(mg_cx); sy_eprintf("%s", log); ra_die("m53 guest compile failed", mg_s); }
+            }
+            {
+                char *pv[] = {"sh", "./unisacc.com", "tools/tapepack.cx", "--", mg_s, "-o", tsl, 0};
+                rc = run(pv, log, sizeof log);
+                (void)sy_unlink(mg_cx); (void)sy_unlink(mg_s);
+                if (rc != 0 || sy_exists(tsl) != 1) { sy_eprintf("%s", log); ra_die("m53 tapepack failed", tsl); }
+            }
+            if (sha_of(tsl, m53_sha, &m53_bytes) ||
+                cx_fmt(m53_row, sizeof m53_row, "m53.tapeslice\t%s\t%ld\n", m53_sha, m53_bytes)) ra_die("cannot hash m53.tapeslice", tsl);
+            {
+                size_t mn = 0; char *mb = cx_read(tmf, &mn);
+                long rl = tx_len(m53_row, sizeof m53_row);
+                char mtmp[4400], *nb;
+                if (!mb || mn == 0 || cx_fmt(mtmp, sizeof mtmp, "%s/.manifest.m53.%d", tdir, (int)sy_pid())) {
+                    if (mb) mm_free(mb);
+                    ra_die("cannot update tape manifest", tmf);
+                }
+                nb = (char *)mm_alloc(mn + (size_t)rl + 1);
+                if (!nb) { mm_free(mb); ra_die("oom tape manifest", tmf); }
+                mm_copy(nb, mn + (size_t)rl + 1, mb, mn);
+                mm_copy(nb + mn, (size_t)rl + 1, m53_row, (size_t)rl);
+                mm_free(mb);
+                if (cx_write(mtmp, nb, mn + (size_t)rl) || sy_rename(mtmp, tmf)) {
+                    mm_free(nb); (void)sy_unlink(mtmp);
+                    ra_die("cannot write updated tape manifest", tmf);
+                }
+                mm_free(nb);
+            }
+            if (receipt_line(receipt, sizeof receipt, &at, "tape/m53.tapeslice", tsl)) ra_die("cannot hash m53.tapeslice", tsl);
         }
         if (receipt_line(receipt, sizeof receipt, &at, "tape/tapemode.so", tso) ||
             receipt_line(receipt, sizeof receipt, &at, "tape/manifest.tsv", tmf)) ra_die("cannot hash tape sidecar", tdir);

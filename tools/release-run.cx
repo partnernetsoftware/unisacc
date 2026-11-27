@@ -288,6 +288,22 @@ static void commit_backfill(void) {
         sy_eprintf("release-run: REFUSE RELEASE_PACK_NOT_FREEZE_POINT commit=%s tag=%s version=%s table_tag=%s table_version=%s\n", frozen, ftag, fver, cand.tag, cand.version);
         sy_exit(2);
     }
+    {   char ftmp[4448], fwhy[256]; RcCandidate fc;
+        if (cx_fmt(ftmp, sizeof ftmp, "%s/.freeze-cand-%d.tsv", out, (int)sy_pid()) ||
+            cx_write(ftmp, show, (size_t)tlen(show))) die("freeze-cand temp write");
+        int frc = rcand_load(ftmp, &fc, fwhy, sizeof fwhy);
+        (void)sy_unlink(ftmp);
+        if (frc != 0) die("RELEASE_PACK_NOT_FREEZE_POINT freeze candidate.tsv invalid");
+        int same = (fc.extra_cols == cand.extra_cols && fc.extra_n == cand.extra_n);
+        for (int k = 0; same && k < fc.extra_cols; k++) {
+            if (!tx_eqz(fc.extra_col_key[k], cand.extra_col_key[k]) ||
+                !tx_eqz(fc.extra_col_name[k], cand.extra_col_name[k])) same = 0;
+        }
+        if (!same) {
+            sy_eprintf("release-run: REFUSE RELEASE_PACK_FREEZE_ASSET_SCHEME_MISMATCH freeze_extra=%d table_extra=%d\n", fc.extra_n, cand.extra_n);
+            sy_exit(2);
+        }
+    }
     if (tx_eqz(cand.commit, frozen)) { emit("COMMIT_BACKFILL", "NOOP", frozen); return; }
     if (!hexn(cand.commit, 40)) commit_mismatch("placeholder-not-40hex", cand.commit, frozen);
     { char *v[] = {"git", "merge-base", "--is-ancestor", cand.commit, frozen, 0};
@@ -408,10 +424,14 @@ static void plan_step(int i, const char *name, const char *cmd, const char *gate
 }
 static void run_plan(void) {
     const char *R = "gh -R partnernetsoftware/unisacc";
-    char c[7][1200];
+    char c[7][1200], ex_list[512]; int ex_at = 0;
+    ex_list[0] = 0;
+    for (int i = 0; i < cand.extra_n; i++) {
+        if (!cx_fmt(ex_list + ex_at, sizeof ex_list - (size_t)ex_at, ",%s", cand.extra_name[i])) ex_at = (int)tlen(ex_list);
+    }
     if (cx_fmt(c[0], 1200, "sh ./unisacc.com tools/devsvc.cx -- git commit -m 'v%s X: candidate table' --whole release/candidate.tsv --push", cand.version) ||
-        cx_fmt(c[1], 1200, "%s release create %s --draft --title %s --target %s; %s release upload %s LAYOUT/{%s,%s,%s,%s,%s,%s} --clobber",
-            R, cand.tag, cand.version, cand.commit, R, cand.tag, cand.name[0], cand.name[1], cand.name[2], cand.name[3], cand.name[4], cand.name[6]) ||
+        cx_fmt(c[1], 1200, "%s release create %s --draft --title %s --target %s; %s release upload %s LAYOUT/{%s,%s,%s,%s,%s,%s%s} --clobber",
+            R, cand.tag, cand.version, cand.commit, R, cand.tag, cand.name[0], cand.name[1], cand.name[2], cand.name[3], cand.name[4], cand.name[6], ex_list) ||
         cx_fmt(c[2], 1200, "%s workflow run %s --ref %s -f commit={commit-x}; %s run watch {run-id}", R, cand.workflow, cand.workflow_ref, R) ||
         cx_fmt(c[3], 1200, "fill ci_run_id={run-id} in release/candidate.tsv; sh ./unisacc.com tools/release-decide.cx -- --candidate release/candidate.tsv --evidence EVIDENCE --assets LAYOUT; sh ./unisacc.com tools/devsvc.cx -- git commit -m 'v%s Y1' --whole release/candidate.tsv release/evidence/%s release/notes-%s.md --push", cand.version, cand.version, cand.version) ||
         cx_fmt(c[4], 1200, "%s release edit %s --draft=false --latest", R, cand.tag) ||
@@ -429,10 +449,32 @@ static void run_plan(void) {
 }
 /* 步 4:显式 --osx-slices + --cache-manager-osx。不用 BUILT_CURRENT_PRODUCT:
  * 那会拿当前产品重造 manager,产物身份随宿主漂移,重放不再确定。 */
+static int is_tape_sidecar_name(const char *nm) {
+    return tx_eqz(nm, "tapemode.so") || tx_eqz(nm, "tape-manifest.tsv") || tx_eqz(nm, "m53.tapeslice");
+}
+static int extra_needs_tape_sidecar(void) {
+    int has_so = 0, has_mf = 0, has_m53 = 0, any_tape = 0;
+    for (int i = 0; i < cand.extra_cols; i++) {
+        const char *k = cand.extra_col_key[i], *nm = cand.extra_col_name[i];
+        int is_tk = tx_eqz(k, "tape_so") || tx_eqz(k, "tape_manifest") || tx_eqz(k, "tape_m53");
+        int is_tn = is_tape_sidecar_name(nm);
+        if (tx_eqz(nm, "-")) continue;
+        if (!is_tk && !is_tn) continue;
+        any_tape++;
+        if (tx_eqz(k, "tape_so") && tx_eqz(nm, "tapemode.so")) has_so = 1;
+        else if (tx_eqz(k, "tape_manifest") && tx_eqz(nm, "tape-manifest.tsv")) has_mf = 1;
+        else if (tx_eqz(k, "tape_m53") && tx_eqz(nm, "m53.tapeslice")) has_m53 = 1;
+        else die("REFUSE tape-sidecar-column-role-mismatch");
+    }
+    if (any_tape == 0) return 0;
+    if (has_so && has_mf && has_m53 && any_tape == 3) return 1;
+    die("REFUSE tape-sidecar-partial-or-invalid-set");
+    return 0;
+}
 static void step_ape_pack(void) {
     char apedir[4400], ox[4400], om[4400], cmx[4400], cma[4400];
     char p3p[4400], wx[4400], lx[4400], la[4400], wa[4400];
-    char *v[20]; int n = 0;
+    char *v[24]; int n = 0;
     const char *src[9] = {"p3.pkg", "win-x86_64", "lnx-x86_64", "lnx-arm64", "osx-x86_64", "osx-arm64", "win-arm64", "cache-manager-x64", "cache-manager-arm64"};
     int i;
     pack_chain_gate();
@@ -446,6 +488,7 @@ static void step_ape_pack(void) {
     if (cx_fmt(wx, sizeof wx, "%s/win-x86_64", srcdir) || cx_fmt(lx, sizeof lx, "%s/lnx-x86_64", srcdir)) die("path");
     if (cx_fmt(la, sizeof la, "%s/lnx-arm64", srcdir) || cx_fmt(wa, sizeof wa, "%s/win-arm64", srcdir)) die("path");
     v[n++] = "sh"; v[n++] = "unisacc.com"; v[n++] = "tools/release-ape.cx"; v[n++] = "pack";
+    if (extra_needs_tape_sidecar()) v[n++] = "--with-tape-sidecar";
     v[n++] = "--osx-slices"; v[n++] = ox; v[n++] = om;
     v[n++] = "--cache-manager-osx"; v[n++] = cmx; v[n++] = cma;
     v[n++] = apedir; v[n++] = p3p; v[n++] = wx; v[n++] = lx; v[n++] = la; v[n++] = ox; v[n++] = om; v[n++] = wa;
@@ -454,6 +497,24 @@ static void step_ape_pack(void) {
     { char com[4400];
       if (cx_fmt(com, sizeof com, "%s/unisacc-next.com", apedir)) die("path");
       if (sy_exists(com) != 1) die("unisacc-next.com"); }
+    if (extra_needs_tape_sidecar()) {
+        char tdir[4400], tf[4400], sealp[4400], sealbuf[1024], sh_rcpt[65], sh_so[65], sh_mf[65], sh_m53[65];
+        if (cx_fmt(tdir, sizeof tdir, "%s/tape", apedir)) die("path");
+        if (cx_fmt(tf, sizeof tf, "%s/tapemode.so", tdir) || sy_exists(tf) != 1) die("ape/tape/tapemode.so missing");
+        sha_of(root, tf, sh_so);
+        if (cx_fmt(tf, sizeof tf, "%s/manifest.tsv", tdir) || sy_exists(tf) != 1) die("ape/tape/manifest.tsv missing");
+        sha_of(root, tf, sh_mf);
+        if (cx_fmt(tf, sizeof tf, "%s/m53.tapeslice", tdir) || sy_exists(tf) != 1) die("ape/tape/m53.tapeslice missing");
+        sha_of(root, tf, sh_m53);
+        char *cv[] = {"sh", "unisacc.com", "tools/tape-sidecar-build.cx", "--", "--check", "--require-m53", ".", tdir, 0};
+        if (child(cv, root)) die("tape-sidecar-build --check --require-m53 failed");
+        if (cx_fmt(tf, sizeof tf, "%s/ape-receipt.txt", apedir) || sy_exists(tf) != 1) die("ape-receipt.txt missing");
+        sha_of(root, tf, sh_rcpt);
+        if (cx_fmt(sealp, sizeof sealp, "%s/tape-pack-seal.tsv", out) ||
+            cx_fmt(sealbuf, sizeof sealbuf, "ape-receipt.txt\t%s\ntapemode.so\t%s\nmanifest.tsv\t%s\nm53.tapeslice\t%s\n",
+                   sh_rcpt, sh_so, sh_mf, sh_m53) ||
+            cx_write(sealp, sealbuf, (size_t)tlen(sealbuf))) die("tape-pack-seal write");
+    }
     cm_evidence();
     mark(4, "ape-pack", "DONE");
 }
@@ -598,13 +659,52 @@ static void step_layout_gen(void) {
     if (cx_fmt(b, sizeof b, "%s/%s", stagedir, cand.name[3])) die("path");
     write_build_json(b, ape_bytes, sources_sha, ape_sha);
     check_build_json_commit(b);
+    { int tape_mode = extra_needs_tape_sidecar();
+    if (tape_mode) {
+        char rcptp[4400], mfp[4400], sealp[4400], tso[4400], tm53[4400];
+        char sh_so[65], sh_mf[65], sh_m53[65], sh_rcpt[65], want[256];
+        size_t rn = 0, mn = 0, sn = 0; char *rb = 0, *mb = 0, *sb = 0;
+        if (cx_fmt(rcptp, sizeof rcptp, "%s/ape/ape-receipt.txt", out) ||
+            cx_fmt(tso, sizeof tso, "%s/ape/tape/tapemode.so", out) ||
+            cx_fmt(mfp, sizeof mfp, "%s/ape/tape/manifest.tsv", out) ||
+            cx_fmt(tm53, sizeof tm53, "%s/ape/tape/m53.tapeslice", out) ||
+            cx_fmt(sealp, sizeof sealp, "%s/tape-pack-seal.tsv", out)) die("tape path");
+        if (sy_exists(rcptp) != 1 || sy_exists(tso) != 1 || sy_exists(mfp) != 1 || sy_exists(tm53) != 1)
+            die("REFUSE tape-sidecar-missing-pack-outputs");
+        sha_of(root, tso, sh_so); sha_of(root, mfp, sh_mf); sha_of(root, tm53, sh_m53); sha_of(root, rcptp, sh_rcpt);
+        rb = cx_read(rcptp, &rn); mb = cx_read(mfp, &mn);
+        if (!rb || !mb) { if (rb) free(rb); if (mb) free(mb); die("REFUSE tape-sidecar-receipt-unreadable"); }
+        int ok = 1;
+        if (cx_fmt(want, sizeof want, "tape/tapemode.so\t%s\t", sh_so) || tx_find(rb, (long)rn, want, tlen(want)) < 0) ok = 0;
+        if (cx_fmt(want, sizeof want, "tape/manifest.tsv\t%s\t", sh_mf) || tx_find(rb, (long)rn, want, tlen(want)) < 0) ok = 0;
+        if (cx_fmt(want, sizeof want, "tape/m53.tapeslice\t%s\t", sh_m53) || tx_find(rb, (long)rn, want, tlen(want)) < 0) ok = 0;
+        if (cx_fmt(want, sizeof want, "tapemode.so\t%s\t", sh_so) || tx_find(mb, (long)mn, want, tlen(want)) < 0) ok = 0;
+        if (cx_fmt(want, sizeof want, "m53.tapeslice\t%s\t", sh_m53) || tx_find(mb, (long)mn, want, tlen(want)) < 0) ok = 0;
+        free(rb); free(mb);
+        if (!ok) die("REFUSE tape-sidecar-receipt-or-manifest-mismatch");
+        if (sy_exists(sealp) == 1) {
+            sb = cx_read(sealp, &sn);
+            int sok = (sb != 0);
+            if (sok && (cx_fmt(want, sizeof want, "ape-receipt.txt\t%s\n", sh_rcpt) || tx_find(sb, (long)sn, want, tlen(want)) < 0)) sok = 0;
+            if (sok && (cx_fmt(want, sizeof want, "tapemode.so\t%s\n", sh_so) || tx_find(sb, (long)sn, want, tlen(want)) < 0)) sok = 0;
+            if (sok && (cx_fmt(want, sizeof want, "manifest.tsv\t%s\n", sh_mf) || tx_find(sb, (long)sn, want, tlen(want)) < 0)) sok = 0;
+            if (sok && (cx_fmt(want, sizeof want, "m53.tapeslice\t%s\n", sh_m53) || tx_find(sb, (long)sn, want, tlen(want)) < 0)) sok = 0;
+            if (sb) free(sb);
+            if (!sok) die("REFUSE tape-sidecar-seal-mismatch");
+        }
+    }
     for (int i = 0; i < cand.extra_n; i++) {
-        if (cx_fmt(a, sizeof a, "%s/%s", srcdir, cand.extra_name[i])) die("path");
-        if (sy_exists(a) != 1) {
-            if (cx_fmt(a, sizeof a, "%s/%s", out, cand.extra_name[i]) || sy_exists(a) != 1) die(cand.extra_name[i]);
+        if (tape_mode && is_tape_sidecar_name(cand.extra_name[i])) {
+            const char *leaf = tx_eqz(cand.extra_name[i], "tape-manifest.tsv") ? "manifest.tsv" : cand.extra_name[i];
+            if (cx_fmt(a, sizeof a, "%s/ape/tape/%s", out, leaf) || sy_exists(a) != 1) die(cand.extra_name[i]);
+        } else {
+            if (cx_fmt(a, sizeof a, "%s/%s", srcdir, cand.extra_name[i])) die("path");
+            if (sy_exists(a) != 1) {
+                if (cx_fmt(a, sizeof a, "%s/%s", out, cand.extra_name[i]) || sy_exists(a) != 1) die(cand.extra_name[i]);
+            }
         }
         if (cx_fmt(b, sizeof b, "%s/%s", stagedir, cand.extra_name[i]) || sy_copy(a, b, 0755)) die("stage extra");
-    }
+    } }
     /* Initial candidate pins are unknown; derive the four source pins (plus any extra assets) from bytes. */
     np_buf pinned={0};
     np_puts(&pinned,"repo\ttag\tcommit\tversion\tworkflow\tworkflow_ref\tci_run_id\tape\tape_sha256\tpackage\tpackage_sha256\twin_arm64\twin_arm64_sha256\trecord\trecord_sha256\tbuild_alias\tbuild_alias_sha256\tzip\tzip_sha256\tchecksums\tchecksums_sha256");
@@ -713,8 +813,12 @@ static void step_commands(void) {
         if (!((cand.commit[i] >= '0' && cand.commit[i] <= '9') || (cand.commit[i] >= 'a' && cand.commit[i] <= 'f'))) c = 1;
       if (c) die("commit not hex"); }
     sy_printf("NEXT gh %s release create %s --draft --title %s --target %s\n", R, cand.tag, cand.version, cand.commit);
-    for (i = 0; i < 7; i++)
+    for (i = 0; i < 7; i++) {
+        if (rcand_skip(&cand, i)) continue;
         sy_printf("NEXT gh %s release upload %s %s/%s --clobber\n", R, cand.tag, layoutout, cand.name[i]);
+    }
+    for (i = 0; i < cand.extra_n; i++)
+        sy_printf("NEXT gh %s release upload %s %s/%s --clobber\n", R, cand.tag, layoutout, cand.extra_name[i]);
     /* X does not exist during local pack; execution resolves it after committing. */
     sy_printf("NEXT ci commit={commit-x} build_rev=%s\n", cand.commit);
     /* 改标签:只 edit --tag/--target,完整 40 位;不先删旧标签。 */
