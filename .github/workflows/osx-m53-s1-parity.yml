@@ -1,0 +1,66 @@
+name: osx-m53-s1-parity
+on:
+  push:
+    branches: [v0.1.9]
+  workflow_dispatch:
+    inputs:
+      source_commit:
+        description: 40-hex candidate commit
+        required: true
+        type: string
+permissions:
+  contents: read
+jobs:
+  parity:
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - os: macos-15-intel
+            target: osx/x86_64
+          - os: macos-15
+            target: osx/arm64
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ github.event_name == 'workflow_dispatch' && inputs.source_commit || github.sha }}
+      - uses: ./.github/actions/bootstrap-unisacc
+      - name: Run both arms (portable tape_run_cx + native cxsa_valid), write receipt + output, and verify
+        env:
+          SOURCE_COMMIT: ${{ github.event_name == 'workflow_dispatch' && inputs.source_commit || github.sha }}
+          EXPECT_TARGET: ${{ matrix.target }}
+        run: |
+          set -eu
+          printf '%s' "$SOURCE_COMMIT" | grep -Eq '^[0-9a-f]{40}$'
+          test -s ./unisacc.com
+          NOW_TS="$(date +%s)"
+          RUN_ID="ci-${GITHUB_RUN_ID}-${{ matrix.os }}"
+          mkdir -p osx-m53-s1-evidence
+          sh ./unisacc.com tests/osx-m53-s1-parity.cx -- \
+            --receipt osx-m53-s1-evidence/m53-s1.rcpt \
+            --output osx-m53-s1-evidence/m53-s1.out \
+            --run-id "$RUN_ID" \
+            --rev "$SOURCE_COMMIT" \
+            --candidate-file ./unisacc.com \
+            --expect-target "$EXPECT_TARGET" \
+            --ts "$NOW_TS"
+          sh ./unisacc.com tests/osx-m53-s1-parity.cx -- \
+            --judge \
+            --receipt osx-m53-s1-evidence/m53-s1.rcpt \
+            --output osx-m53-s1-evidence/m53-s1.out \
+            --run-id "$RUN_ID" \
+            --rev "$SOURCE_COMMIT" \
+            --candidate-file ./unisacc.com \
+            --expect-target "$EXPECT_TARGET" \
+            --now-ts "$NOW_TS"
+          grep -Fx "target	${EXPECT_TARGET}" osx-m53-s1-evidence/m53-s1.rcpt
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: m53-s1-evidence-${{ matrix.os }}-${{ github.run_id }}
+          path: |
+            osx-m53-s1-evidence/m53-s1.rcpt
+            osx-m53-s1-evidence/m53-s1.out
+          if-no-files-found: error
