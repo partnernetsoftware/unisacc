@@ -5,6 +5,7 @@
  * receipt all fail closed; the atomic write leaves no .new. Does not wire chain tools. */
 #pragma unisa use sys.fs
 #pragma unisa use sys.env
+#pragma unisa use sys.sha
 #pragma unisa use cxlib.receipt
 static int bad, total;
 static void ok(int cond, const char *what) {
@@ -17,6 +18,46 @@ static void put(const char *rel, const char *s) {
     if (cx_write(p, s, strlen(s))) { fprintf(stderr, "check-receipt: cannot write %s\n", p); exit(2); }
 }
 static int hash(const char *ph, char h[65]) { return rc_hash_inputs(root, rd, tb, ph, h); }
+static void test_v3_writer(const char *root_dir) {
+    char cand[65], inp[65], outh[65], zero64[65], rep64[65], r3[600], bind_exp[65];
+    char payload[2048], want[2304];
+    rc_v3_t base, badw;
+    size_t gotn = 0; char *got = 0;
+    sy_sha256_hex("candidate-v0111-real", 20L, cand);
+    sy_sha256_hex("inputs-contract-v3", 18L, inp);
+    sy_sha256_hex("output-bytes-real", 17L, outh);
+    memset(zero64, '0', 64); zero64[64] = 0;
+    memcpy(rep64, "deadbeefdeadbeefdeadbeefdeadbeefdeadbeefdeadbeefdeadbeefdeadbeef", 65);
+    cx_fmt(r3, sizeof r3, "%s/rec/v3-write.receipt", root_dir);
+
+    base.run_id = "run-v3-1001"; base.rev = "42c8c297b5"; base.unit = "check-v0111-exit";
+    base.producer = "tools/check-v0111-exit.cx"; base.purpose = "exit-gate";
+    base.candidate_sha = cand; base.inputs_sha = inp; base.output_sha = outh;
+    base.rc = 0; base.verdict = "PASS"; base.ts = 1764200000LL;
+
+    ok(rc_write3(r3, &base) == 0, "v3-writer: valid PASS receipt written");
+    cx_fmt(payload, sizeof payload,
+           "version\t3\nrun_id\t%s\nrev\t%s\nunit\t%s\nproducer\t%s\npurpose\t%s\n"
+           "candidate_sha\t%s\ninputs_sha\t%s\noutput_sha\t%s\nrc\t0\nverdict\tPASS\nts\t1764200000\n",
+           base.run_id, base.rev, base.unit, base.producer, base.purpose, cand, inp, outh);
+    sy_sha256_hex(payload, (long)strlen(payload), bind_exp);
+    cx_fmt(want, sizeof want, "%sbinding_sha\t%s\n", payload, bind_exp);
+    got = cx_read(r3, &gotn);
+    ok(got && gotn == strlen(want) && !memcmp(got, want, gotn), "v3-writer: exact 13-key wire format + full-field binding_sha");
+    free(got);
+
+    badw = base; badw.rc = 1; badw.verdict = "FAIL";
+    ok(rc_write3(r3, &badw) == 0, "v3-writer: consistent rc=1 FAIL written");
+    badw = base; badw.producer = ""; ok(rc_write3(r3, &badw) != 0, "v3-writer: refuses empty producer");
+    badw = base; badw.purpose = 0; ok(rc_write3(r3, &badw) != 0, "v3-writer: refuses null purpose");
+    badw = base; badw.candidate_sha = zero64; ok(rc_write3(r3, &badw) != 0, "v3-writer: refuses all-zero placeholder");
+    badw = base; badw.inputs_sha = rep64; ok(rc_write3(r3, &badw) != 0, "v3-writer: refuses deadbeef placeholder");
+    badw = base; badw.rc = 1; badw.verdict = "PASS"; ok(rc_write3(r3, &badw) != 0, "v3-writer: refuses rc=1 PASS");
+    badw = base; badw.rc = 0; badw.verdict = "FAIL"; ok(rc_write3(r3, &badw) != 0, "v3-writer: refuses rc=0 FAIL");
+    badw = base; badw.rc = (-2147483647 - 1); badw.verdict = "FAIL"; ok(rc_write3(r3, &badw) != 0, "v3-writer: refuses INT_MIN");
+    badw = base; badw.ts = -5LL; ok(rc_write3(r3, &badw) != 0, "v3-writer: refuses negative ts");
+    badw = base; badw.ts = 1764200000000LL; ok(rc_write3(r3, &badw) != 0, "v3-writer: refuses ms-unit ts");
+}
 int main(int argc, char **argv) {
     const char *opt_run_id = 0, *opt_out = 0;
     for (int ai = 1; ai < argc; ai++) {
@@ -125,6 +166,7 @@ int main(int argc, char **argv) {
             }
         }
     }
+    test_v3_writer(root);
     if (opt_run_id && opt_out) {
         char c64[65]; memset(c64, 'e', 64); c64[64] = 0;
         (void)rc_write2(opt_out, opt_run_id, c64, h0, up, c64, bad ? 1 : 0);

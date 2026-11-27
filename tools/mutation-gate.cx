@@ -1001,6 +1001,14 @@ static int execution_name_ok(const char *name) {
     return name && *name && !strpbrk(name, "\r\n\t");
 }
 
+static int execution_check_unchanged(const char *path, const unsigned char *expect, int64_t expect_n) {
+    int64_t an = 0;
+    unsigned char *after = execution_evidence(path, &an);
+    int same = after && an == expect_n && mm_same(after, expect, (long)expect_n);
+    mm_free(after);
+    return same ? 0 : 1;
+}
+
 static int execution_gate(int argc, char **argv) {
     const char *produce = 0, *judge = 0, *assertion = 0;
     const char *missing = 0, *stale = 0;
@@ -1037,7 +1045,8 @@ static int execution_gate(int argc, char **argv) {
     unsigned char *old = 0;
     int deleted = 2, replayed = 2, result = 2;
     if (execution_command(produce, old_id, path, secs, 0, 0) || !(old = execution_evidence(path, &old_n)) ||
-        execution_command(judge, old_id, path, secs, assertion, 0) || sy_unlink(path) != 0) {
+        execution_command(judge, old_id, path, secs, assertion, 0) ||
+        execution_check_unchanged(path, old, old_n) != 0 || sy_unlink(path) != 0) {
         fprintf(stderr, "mutation-gate: REFUSE execution baseline\n");
         goto done;
     }
@@ -1061,12 +1070,14 @@ static int execution_gate(int argc, char **argv) {
         fprintf(stderr, "mutation-gate: REFUSE current positive control\n");
         goto done;
     }
-    mm_free(readback);
-    if (execution_command(judge, current_id, path, secs, assertion, 0) != 0) {
+    if (execution_command(judge, current_id, path, secs, assertion, 0) != 0 ||
+        execution_check_unchanged(path, readback, replay_n) != 0) {
+        mm_free(readback);
         deleted = replayed = 2;
         fprintf(stderr, "mutation-gate: REFUSE current positive control\n");
         goto done;
     }
+    mm_free(readback);
     if (deleted != 2 && replayed != 2) result = (deleted == 1 && replayed == 1) ? 0 : 1;
 done:
     printf("MUTATION_EXECUTION\toperator=delete-run-step\tverdict=%s\n",
