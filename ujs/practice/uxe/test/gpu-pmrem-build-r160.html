@@ -3,7 +3,7 @@
 <pre id="r160">pending</pre>
 <script type="module">
 import { BufferAttribute, BufferGeometry, Camera, CubeTexture, DataTexture, LinearFilter, Mesh,
-  PMREMGenerator, RawShaderMaterial, REVISION, Scene, Vector3, WebGLRenderer,
+  Color, DoubleSide, MeshBasicMaterial, PlaneGeometry, PMREMGenerator, RawShaderMaterial, REVISION, Scene, Vector3, WebGLRenderer,
   WebGLRenderTarget } from "../../web/game/three.module.js";
 
 const output = document.querySelector("#r160");
@@ -218,12 +218,104 @@ async function testWide(renderer) {
   return result;
 }
 
+async function testScene(renderer) {
+  const side=256, stride=768, height=1024, atlasBytes=stride*height*4;
+  const scene=new Scene();
+  scene.background=new Color().setRGB(16/255,32/255,48/255);
+  const geometry=new PlaneGeometry(1,1);
+  const material=new MeshBasicMaterial({color:new Color().setRGB(224/255,64/255,80/255),side:DoubleSide});
+  const plane=new Mesh(geometry,material);
+  plane.position.z=2;
+  scene.add(plane);
+  const generator=new PMREMGenerator(renderer);
+  const first=new Uint16Array(384*256*4);
+  const halfBlur=generator._halfBlur;
+  generator._halfBlur=function (...args) {
+    halfBlur.apply(this,args);
+    if(args[2]===0 && args[3]===1 && args[5]==="latitudinal") {
+      renderer.readRenderTargetPixels(args[1],0,512,384,256,first);
+    }
+  };
+  const expected=generator.fromScene(scene);
+  try {
+    const canvas=document.createElement("canvas");
+    canvas.width=stride;
+    canvas.height=2*side;
+    const gl=canvas.getContext("webgl2",{antialias:false,preserveDrawingBuffer:true});
+    if(!gl) throw Error("capture framebuffer");
+    gl.disable(gl.DITHER);
+    gl.clearColor(16/255,32/255,48/255,1);
+    gl.clear(gl.COLOR_BUFFER_BIT);
+    // The independent capture draws the centered plane on the +Z face.
+    gl.enable(gl.SCISSOR_TEST);
+    gl.scissor(2*side+96,96,64,64);
+    gl.clearColor(224/255,64/255,80/255,1);
+    gl.clear(gl.COLOR_BUFFER_BIT);
+    const captured=new Uint8Array(stride*2*side*4);
+    gl.readPixels(0,0,stride,2*side,gl.RGBA,gl.UNSIGNED_BYTE,captured);
+    if(gl.getError()) throw Error("capture readback");
+
+    const binary=await (await fetch("file://"+query.get("dir")+"/probe.wasm")).arrayBuffer();
+    const {instance}=await WebAssembly.instantiate(binary);
+    const wasm=instance.exports;
+    const call=(op,a=0,b=0)=>Number(wasm.uxe_pmrem_build(BigInt(op),BigInt(a),BigInt(b)));
+    const memory=new Uint8Array(wasm.memory.buffer,call(14),5000000);
+    memory.set(captured,4096);
+    if(call(16)!==4096) throw Error("first scene blur");
+    const firstNative=new Float32Array(memory.buffer,memory.byteOffset+3158272,first.length);
+    const half=bits=>{
+      const exponent=(bits>>10)&31, fraction=bits&1023;
+      return 255*(exponent===0?fraction*2**-24:(1+fraction/1024)*2**(exponent-15));
+    };
+    let firstMax=0, firstOffset=0;
+    for(let i=0;i<first.length;i++) {
+      const difference=Math.abs(firstNative[i]-half(first[i]));
+      if(difference>firstMax) { firstMax=difference; firstOffset=i; }
+    }
+    if(call(4)!==128 || call(15,0,atlasBytes-1)!==-1 || call(15,0,atlasBytes)!==128 ||
+       call(3,8)!==1 || call(3,-2)!==1) throw Error("scene atlas state");
+    const reference=new Uint16Array(atlasBytes);
+    renderer.readRenderTargetPixels(expected,0,0,stride,height,reference);
+    let pixels=0, max=0, over=0;
+    const bandMax=[];
+    for(let band=0,tile=side;band<=10;band++,tile=Math.max(tile/2,16)) {
+      const yBase=4*(side-tile), xBase=48*Math.max(0,band-4);
+      let peak=0;
+      const comparisonX=query.has("mutate")&&band===5?xBase-48:xBase;
+      for(let y=0;y<2*tile;y++) for(let x=0;x<3*tile;x++) {
+        pixels++;
+        for(let channel=0;channel<4;channel++) {
+          const a=((yBase+y)*stride+xBase+x)*4+channel;
+          const b=((yBase+y)*stride+comparisonX+x)*4+channel;
+          const bits=reference[a], exponent=(bits>>10)&31, fraction=bits&1023;
+          const want=Math.round(255*(exponent===0?fraction*2**-24:(1+fraction/1024)*2**(exponent-15)));
+          const diff=Math.abs(want-memory[4096+b]);
+          max=Math.max(max,diff);
+          peak=Math.max(peak,diff);
+          if(diff>3) over++;
+        }
+      }
+      bandMax.push(peak);
+    }
+    return [pixels,max,over,...bandMax,firstMax,firstOffset];
+  } finally {
+    expected.dispose();
+    generator.dispose();
+    geometry.dispose();
+    material.dispose();
+  }
+}
+
 async function test() {
   if (REVISION !== "160") throw Error("three.js revision mismatch");
   const canvas = document.createElement("canvas");
   const context = canvas.getContext("webgl2", {antialias: false});
   if (!context) throw Error("WebGL2 unavailable");
   const renderer = new WebGLRenderer({canvas, context});
+  if(query.has("scene")) {
+    try { return await testScene(renderer); }
+    finally { renderer.dispose(); }
+  }
   if(query.has("wide")) {
     try { return await testWide(renderer); }
     finally { renderer.dispose(); }
