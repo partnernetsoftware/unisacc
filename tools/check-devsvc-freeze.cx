@@ -491,6 +491,44 @@ scope:
       ck("armed-freeze-window-branch-accepted",
          setup_ok && !wr(wt_win, "src/a.txt", "win edit\n") &&
          run_dv(repo, "worker1", ac_win, &rc) && rc == 0 && has(out, "FREEZE_SCOPE skip=worktree branch=w/agyneon3"));
+      /* Post-freeze main descendant branch (branched from C0b after C0a base_commit) and its 2nd commit pass;
+         renamed branch at advanced release tip and missing refs/heads/<branch> fail closed. */
+      { char wt_post[4400], wt_rtip[4400];
+        int p_ok = setup_ok &&
+                   !cx_fmt(wt_post, sizeof wt_post, "%s/wt-post", tmp) &&
+                   !cx_fmt(wt_rtip, sizeof wt_rtip, "%s/wt-rtip", tmp) &&
+                   sh_in(repo, "printf 'c0b\\n' > docs/c0b.txt && git add docs/c0b.txt && git -c user.name=fx -c user.email=fx@localhost -c commit.gpgsign=false commit -qm c0b") &&
+                   !cx_fmt(cmd, sizeof cmd,
+                           "git worktree add -q -b w/v019-post '%s' main && ln -s '%s/unisacc.com' '%s/unisacc.com' && "
+                           "git worktree add -q -b sneaky-tip '%s' refs/heads/v0.1.8 && ln -s '%s/unisacc.com' '%s/unisacc.com'",
+                           wt_post, root, wt_post, wt_rtip, root, wt_rtip) &&
+                   sh_in(repo, cmd);
+        char *ac_post1[] = {"git", "commit", "--cwd", wt_post, "-m", "post-freeze descendant commit 1", "--whole", "src/a.txt", 0};
+        char *ac_post2[] = {"git", "commit", "--cwd", wt_post, "-m", "post-freeze descendant commit 2", "--whole", "src/a.txt", 0};
+        char *ac_rtip[] = {"git", "commit", "--cwd", wt_rtip, "-m", "renamed branch at advanced release tip", "--whole", "src/a.txt", 0};
+        char *ac_post_miss[] = {"git", "commit", "--cwd", wt_post, "-m", "post-freeze with release ref missing", "--whole", "src/a.txt", 0};
+        ck("armed-freeze-post-freeze-main-descendant-branch-accepted",
+           p_ok && !wr(wt_post, "src/a.txt", "post c0b edit 1\n") &&
+           run_dv(repo, "worker1", ac_post1, &rc) && rc == 0 && has(out, "FREEZE_SCOPE skip=worktree branch=w/v019-post"));
+        ck("armed-freeze-renamed-branch-at-advanced-release-tip-refused",
+           p_ok && !wr(wt_rtip, "src/a.txt", "rtip edit\n") &&
+           run_dv(repo, "worker1", ac_rtip, &rc) && rc == 1 &&
+           has(out, "LOCK_HELD freeze owner=cc") && !has(out, "FREEZE_SCOPE skip="));
+        int del_ok = p_ok && !cx_fmt(cmd, sizeof cmd,
+            "git -C '%s' checkout -q --detach && git -C '%s' update-ref -d refs/heads/v0.1.8",
+            wt_v18, repo) && sh_in(repo, cmd);
+        int miss_refused = del_ok && !wr(wt_post, "src/a.txt", "post missing ref edit\n") &&
+            run_dv(repo, "worker1", ac_post_miss, &rc) && rc == 1 &&
+            has(out, "LOCK_HELD freeze owner=cc") && !has(out, "FREEZE_SCOPE skip=");
+        int rest_ok = del_ok && !cx_fmt(cmd, sizeof cmd,
+            "git -C '%s' update-ref refs/heads/v0.1.8 \"$(git -C '%s' rev-parse HEAD)\" && "
+            "git -C '%s' symbolic-ref HEAD refs/heads/v0.1.8 && "
+            "git -C '%s' restore --worktree src/a.txt",
+            repo, wt_v18, wt_v18, wt_post) && sh_in(repo, cmd);
+        ck("armed-freeze-release-ref-missing-fail-closed", miss_refused && rest_ok);
+        ck("armed-freeze-descendant-branch-second-commit-accepted",
+           rest_ok && !wr(wt_post, "src/a.txt", "post c0b edit 2\n") &&
+           run_dv(repo, "worker1", ac_post2, &rc) && rc == 0 && has(out, "FREEZE_SCOPE skip=worktree branch=w/v019-post")); }
       /* Unparsable sid fails closed (guards ujs too) */
       { char bad_row[512];
         int ok = setup_ok && !cx_fmt(bad_row, sizeof bad_row,
@@ -677,7 +715,7 @@ done:
     if (sy_exists(tmp) != 0) (void)sy_remove_all(tmp);
     if (sy_exists(inst) != 0) (void)sy_remove_all(inst);
     ck("cleanup-tmp-and-pin-removed", sy_exists(tmp) == 0 && sy_exists(inst) == 0);
-    int expected = lifecycle_only ? 22 : owner_only ? 10 : scope_only ? 24 : 0;
+    int expected = lifecycle_only ? 22 : owner_only ? 10 : scope_only ? 28 : 0;
     if (expected && passed + failed != expected) {
         fprintf(stderr, "DEVSVC_FREEZE_COUNT expected=%d actual=%d\n", expected, passed + failed);
         failed++;
