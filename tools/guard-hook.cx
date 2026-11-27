@@ -1,4 +1,6 @@
 /* tools/guard-hook.cx -- PreToolUse 钩子(Bash|Edit|Write|Read),取代 .claude/hooks/guard-edit.ts,行为逐条等价。
+ * Accident guard known gaps: git alias resolution does not query target-repo config and parse failure is not refused;
+ * GIT_DIR and GIT_COMMON_DIR are merged into one check.
  *
  *   cd "$CLAUDE_PROJECT_DIR" && ./tools/bound 9 sh ./unisacc.com tools/guard-hook.cx     (stdin 收钩子 JSON)
  *
@@ -390,6 +392,23 @@ static int has_dotdot(const char *p) {
 static int tgt_ok(const char *tgt, const char *envtgt, const char *cur) {
     return target_own_wtree(tgt, cur) && (!envtgt || target_own_wtree(envtgt, cur));
 }
+static int git_dir_ok(const char *gdir, const char *cur) {
+    if (!gdir || !*gdir) return 1;
+    char *p = strip_q(gdir);
+    if (!*p || has_dotdot(p) || hasc(p, '$') || hasc(p, '`')) return 0;
+    char *rp = p[0] == '/' ? resolve("", p) : (cur && *cur ? resolve(cur, p) : sdup(""));
+    return target_own_wtree(rp, cur);
+}
+static const char *resolve_alias_first_word(const char *val) {
+    while (*val == ' ' || *val == '\t' || *val == '\'' || *val == '"') val++;
+    if (!*val || *val == '!') return "";
+    const char *e = val;
+    while (*e && *e != ' ' && *e != '\t' && *e != '\'' && *e != '"') e++;
+    long len = e - val;
+    char *w = (char *)mm_alloc(len + 1);
+    mm_copy(w, len + 1, val, len); w[len] = 0;
+    return w;
+}
 /* a[i] 是子命令;只拦创建/改名/复制出的新分支名 */
 static const char *branch_violation(char **a, long i, long n, const char *cur, int local) {
     const char *sub = i < n ? a[i] : ""; long j;
@@ -467,21 +486,39 @@ static const char *branch_violation(char **a, long i, long n, const char *cur, i
     return 0;
 }
 
-static const char *git_violation(char **a, long n, const char *cur, const char *wte) {
-    long i = 0, j; const char *sub; char *tgt = sdup(cur ? cur : ""); char *envtgt = 0;
+static const char *git_violation(char **a, long n, const char *cur, const char *wte, const char *gde) {
+    long i = 0, j; const char *sub; char *tgt = sdup(cur ? cur : ""); char *envtgt = 0; char *gdir = gde && *gde ? sdup(gde) : 0;
+    const char *c_alias_k[16], *c_alias_v[16]; int n_c_alias = 0;
 #define OWN_WT_REFUSE "git 破坏性操作:目标必须是当前窗口自己的 .claude/worktrees/w-* 树,共享检出、其他窗口、软链逃逸一律拒"
     for (j = 0; j < n; j++) if (eq(a[j], "--autostash")) return "git --autostash 含 stash:共享 main 上不得 stash";
     while (i < n && a[i][0] == '-') {
-        const char *d = 0; long step = 1;
+        const char *d = 0, *gd = 0; long step = 1;
         if ((eq(a[i], "-C") || eq(a[i], "--work-tree")) && i + 1 < n) { d = a[i + 1]; step = 2; }
         else if (sw(a[i], "--work-tree=")) d = a[i] + 12;
+        else if (eq(a[i], "--git-dir") && i + 1 < n) { gd = a[i + 1]; step = 2; }
+        else if (sw(a[i], "--git-dir=")) gd = a[i] + 10;
+        else if (eq(a[i], "-c") && i + 1 < n) {
+            const char *kv = strip_q(a[i + 1]);
+            if (sw(kv, "alias.") && n_c_alias < 16) {
+                const char *eqp = kv + 6;
+                while (*eqp && *eqp != '=') eqp++;
+                if (*eqp == '=') {
+                    long kl = eqp - (kv + 6);
+                    char *ak = (char *)mm_alloc(kl + 1);
+                    mm_copy(ak, kl + 1, kv + 6, kl); ak[kl] = 0;
+                    c_alias_k[n_c_alias] = ak; c_alias_v[n_c_alias] = eqp + 1; n_c_alias++;
+                }
+            }
+            step = 2;
+        }
         if (d) {
             char *p = strip_q(d);
             if (has_dotdot(p)) return "git -C/--work-tree:路径含 .. 段,不得穿越";
             if (*p && !hasc(p, '$') && !hasc(p, '`')) tgt = p[0] == '/' ? resolve("", p) : (*tgt ? resolve(tgt, p) : sdup(""));
             else tgt = sdup("");
         }
-        i += (step == 2 || eq(a[i], "-c") || eq(a[i], "--git-dir") || eq(a[i], "--namespace")) ? 2 : 1;
+        if (gd) gdir = sdup(gd);
+        i += (step == 2 || eq(a[i], "--namespace")) ? 2 : 1;
     }
     if (wte && *wte) {
         char *e = strip_q(wte);
@@ -490,12 +527,35 @@ static const char *git_violation(char **a, long n, const char *cur, const char *
         else envtgt = sdup("");
     }
     sub = i < n ? a[i] : "";
+    for (j = 0; j < n_c_alias; j++) {
+        if (eq(sub, c_alias_k[j])) { sub = resolve_alias_first_word(c_alias_v[j]); break; }
+    }
+    if (*sub && !eq(sub, "stash") && !eq(sub, "clean") && !eq(sub, "merge") && !eq(sub, "rebase") &&
+        !eq(sub, "pull") && !eq(sub, "cherry-pick") && !eq(sub, "am") && !eq(sub, "revert") &&
+        !eq(sub, "reset") && !eq(sub, "checkout") && !eq(sub, "restore") && !eq(sub, "commit") &&
+        !eq(sub, "push") && !eq(sub, "branch") && !eq(sub, "worktree") && !eq(sub, "switch") &&
+        !eq(sub, "status") && !eq(sub, "diff") && !eq(sub, "log") && !eq(sub, "show") && !eq(sub, "rev-parse")) {
+        int safe_id = 1;
+        for (const char *q = sub; *q; q++) if (!isal(*q) && !isdg(*q) && *q != '-' && *q != '_') { safe_id = 0; break; }
+        if (safe_id) {
+            char qcmd[512], abuf[256];
+            tx_snprintf(qcmd, sizeof qcmd, "git config --get alias.%s 2>/dev/null", sub);
+            FILE *fp = popen(qcmd, "r");
+            if (fp) {
+                if (fgets(abuf, sizeof abuf, fp)) sub = resolve_alias_first_word(abuf);
+                pclose(fp);
+            }
+        }
+    }
 #define REST(x) inlist(a, i + 1, n, x)
     if (eq(sub, "stash")) return "git stash:共享 main 上不得 stash/pop,需干净输入用 git archive 解到 $CLAUDE_JOB_DIR/tmp";
     if (eq(sub, "clean")) return tgt_ok(tgt, envtgt, cur) ? 0 : (in_own_wtree(cur) ? OWN_WT_REFUSE : "git clean:共享 main 上不得 clean");
     if (eq(sub, "merge")) return "git merge:共享工作树不得裸 merge,请用 devsvc git merge 或在独立隔离根解冲突";
     if (eq(sub, "rebase")) return "git rebase:共享工作树不得裸 rebase,避免破坏他人工作区与索引";
     if (eq(sub, "pull")) return "git pull:共享工作树不得裸 pull,请用 devsvc git pull";
+    if (eq(sub, "cherry-pick")) return (tgt_ok(tgt, envtgt, cur) && git_dir_ok(gdir, cur)) ? 0 : "git cherry-pick: use devsvc git land";
+    if (eq(sub, "am")) return (tgt_ok(tgt, envtgt, cur) && git_dir_ok(gdir, cur)) ? 0 : "git am: use devsvc git land";
+    if (eq(sub, "revert")) return (tgt_ok(tgt, envtgt, cur) && git_dir_ok(gdir, cur)) ? 0 : "git revert: use devsvc git land";
     if (eq(sub, "reset") && REST("--hard")) return tgt_ok(tgt, envtgt, cur) ? 0 : (in_own_wtree(cur) ? OWN_WT_REFUSE : "git reset --hard:共享 main 上不得 reset");
     if (eq(sub, "checkout") && (REST("--") || REST("."))) return tgt_ok(tgt, envtgt, cur) ? 0 : (in_own_wtree(cur) ? OWN_WT_REFUSE : "git checkout -- / .:不得还原他人路径");
     if (eq(sub, "restore") && REST(".")) return tgt_ok(tgt, envtgt, cur) ? 0 : (in_own_wtree(cur) ? OWN_WT_REFUSE : "git restore .:不得还原他人路径");
@@ -648,9 +708,13 @@ static char *check_seg(char *t, char **curp) {
         }
     }
     if (eq(first, "git")) {
-        const char *wte = 0;
-        for (i = 0; i < k; i++) if (sw(w[i], "GIT_WORK_TREE=")) wte = w[i] + 14;
-        { const char *g = git_violation(w + k + 1, nw - k - 1, cur, wte); if (g) return sdup(g); }
+        const char *wte = 0, *gde = 0;
+        for (i = 0; i < k; i++) {
+            if (sw(w[i], "GIT_WORK_TREE=")) wte = w[i] + 14;
+            else if (sw(w[i], "GIT_DIR=")) gde = w[i] + 8;
+            else if (sw(w[i], "GIT_COMMON_DIR=") && !gde) gde = w[i] + 15;
+        }
+        { const char *g = git_violation(w + k + 1, nw - k - 1, cur, wte, gde); if (g) return sdup(g); }
     }
     {
         int ip = 0;
