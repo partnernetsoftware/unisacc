@@ -54,6 +54,7 @@
 #pragma unisa use runtime.package_lifetime
 #pragma unisa use runtime.model_number
 #pragma unisa use compiler.bindstage
+#pragma unisa use compiler.tapelink
 #pragma unisa use runtime.routestep
 #pragma unisa use cxlib.netpack
 #pragma unisa use cxlib.releaseversion
@@ -613,6 +614,39 @@ static int pr_extract_p4_slice(const unsigned char *buf, long n, const unsigned 
     return -1;
 }
 
+static void pr_fmt_f_key(const unsigned char *raw, long len, char *out, size_t cap) {
+    static const char hex[] = "0123456789abcdef";
+    size_t p = 0;
+    if (!out || cap == 0) return;
+    for (long i = 0; i < len && p + 5 < cap; i++) {
+        unsigned char c = raw[i];
+        if (c == 0) { out[p++] = '\\'; out[p++] = '0'; }
+        else if (c == '\n') { out[p++] = '\\'; out[p++] = 'n'; }
+        else if (c == '\r') { out[p++] = '\\'; out[p++] = 'r'; }
+        else if (c == '\t') { out[p++] = '\\'; out[p++] = 't'; }
+        else if (c < 32 || c >= 127) {
+            out[p++] = '\\'; out[p++] = 'x';
+            out[p++] = hex[(c >> 4) & 15];
+            out[p++] = hex[c & 15];
+        } else {
+            out[p++] = (char)c;
+        }
+    }
+    out[p] = 0;
+}
+
+static int pr_f_key_allowed(const unsigned char *raw, long len, const char *kname,
+                            char allow_f_keys[][128], int n_allow_f) {
+    for (int a = 0; a < n_allow_f; a++) {
+        const char *ak = allow_f_keys[a];
+        long al = (long)strlen(ak);
+        if (tx_eqz(ak, kname)) return 1;
+        if (al == len && memcmp(ak, raw, (size_t)len) == 0) return 1;
+        if (len > 1 && raw[0] == 0 && al == len - 1 && memcmp(ak, raw + 1, (size_t)(len - 1)) == 0) return 1;
+    }
+    return 0;
+}
+
 static int pr_verify_p4_f_records(const char *base_p4_path, const char *cand_p4_path,
                                   char allow_f_keys[][128], int n_allow_f,
                                   char *detail, size_t cap) {
@@ -670,9 +704,8 @@ static int pr_verify_p4_f_records(const char *base_p4_path, const char *cand_p4_
         if (cr->codec == 0 && cr->crc != 0) {
             unsigned got_crc = pr_crc32(cpkg + cr->data, (long)cr->len);
             if (got_crc != (unsigned)cr->crc) {
-                char kname[128];
-                long kl = (long)cr->n < 127 ? (long)cr->n : 127;
-                mm_copy(kname, sizeof kname, (const char *)(cpkg + cr->name), kl); kname[kl] = 0;
+                char kname[256];
+                pr_fmt_f_key(cpkg + cr->name, (long)cr->n, kname, sizeof kname);
                 cx_fmt(detail, cap, "crc-mismatch key=%s want=%u got=%u", kname, (unsigned)cr->crc, got_crc);
                 cxpl_release(&bdec.package, pr_pk_free);
                 cxpl_release(&cdec.package, pr_pk_free);
@@ -684,13 +717,9 @@ static int pr_verify_p4_f_records(const char *base_p4_path, const char *cand_p4_
     /* Every baseline F record not in allow_f_keys must exist in candidate P4 with identical bytes */
     for (int i = 0; i < bdec.package.nr; i++) {
         const CxPackageResource *br = &bdec.package.res[i];
-        char kname[128];
-        long kl = (long)br->n < 127 ? (long)br->n : 127;
-        mm_copy(kname, sizeof kname, (const char *)(bpkg + br->name), kl); kname[kl] = 0;
-        int allowed = 0;
-        for (int a = 0; a < n_allow_f; a++) {
-            if (tx_eqz(allow_f_keys[a], kname)) { allowed = 1; break; }
-        }
+        char kname[256];
+        pr_fmt_f_key(bpkg + br->name, (long)br->n, kname, sizeof kname);
+        int allowed = pr_f_key_allowed(bpkg + br->name, (long)br->n, kname, allow_f_keys, n_allow_f);
         int found = -1;
         for (int j = 0; j < cdec.package.nr; j++) {
             const CxPackageResource *cr = &cdec.package.res[j];
@@ -733,13 +762,9 @@ static int pr_verify_p4_f_records(const char *base_p4_path, const char *cand_p4_
             }
         }
         if (!in_base) {
-            char kname[128];
-            long kl = (long)cr->n < 127 ? (long)cr->n : 127;
-            mm_copy(kname, sizeof kname, (const char *)(cpkg + cr->name), kl); kname[kl] = 0;
-            int allowed = 0;
-            for (int a = 0; a < n_allow_f; a++) {
-                if (tx_eqz(allow_f_keys[a], kname)) { allowed = 1; break; }
-            }
+            char kname[256];
+            pr_fmt_f_key(cpkg + cr->name, (long)cr->n, kname, sizeof kname);
+            int allowed = pr_f_key_allowed(cpkg + cr->name, (long)cr->n, kname, allow_f_keys, n_allow_f);
             if (!allowed) {
                 cx_fmt(detail, cap, "added-foreign-f-record key=%s", kname);
                 cxpl_release(&bdec.package, pr_pk_free);
@@ -847,12 +872,638 @@ static int pr_check_forbid_syms(const char *objs_dir, char obj_names[][64], int 
     return 0;
 }
 
+static int pr_abs_from_cwd(const char *cwd, const char *p, char *out, size_t cap) {
+    if (!p || !p[0]) { if (out && cap) out[0] = 0; return 0; }
+    if (p[0] == '/') return cx_fmt(out, cap, "%s", p);
+    return cx_fmt(out, cap, "%s/%s", (cwd && cwd[0]) ? cwd : ".", p);
+}
+
+static void pr_choose_cx_cwd(const char *abs_repo, const char *tool_path, const char *uc_path,
+                             const char *caller_cwd, char *out, size_t cap) {
+    char p[PR_PW], realp[PR_PW];
+    if (!cx_fmt(p, sizeof p, "%s/cxroot.tsv", abs_repo) && sy_exists(p) == 1) {
+        cx_fmt(out, cap, "%s", abs_repo);
+        return;
+    }
+    if (tool_path && tool_path[0] && sy_realpath(tool_path, realp, sizeof realp) == 0) {
+        char *s1 = strrchr(realp, '/');
+        if (s1 && s1 > realp) {
+            *s1 = 0;
+            char *s2 = strrchr(realp, '/');
+            if (s2 && s2 > realp && tx_eqz(s2 + 1, "tools")) {
+                *s2 = 0;
+                if (!cx_fmt(p, sizeof p, "%s/cxroot.tsv", realp) && sy_exists(p) == 1) {
+                    cx_fmt(out, cap, "%s", realp);
+                    return;
+                }
+            }
+        }
+    }
+    if (uc_path && uc_path[0] && sy_realpath(uc_path, realp, sizeof realp) == 0) {
+        char *s1 = strrchr(realp, '/');
+        if (s1 && s1 > realp) {
+            *s1 = 0;
+            if (!cx_fmt(p, sizeof p, "%s/cxroot.tsv", realp) && sy_exists(p) == 1) {
+                cx_fmt(out, cap, "%s", realp);
+                return;
+            }
+        }
+    }
+    if (caller_cwd && caller_cwd[0] &&
+        !cx_fmt(p, sizeof p, "%s/cxroot.tsv", caller_cwd) && sy_exists(p) == 1) {
+        cx_fmt(out, cap, "%s", caller_cwd);
+        return;
+    }
+    cx_fmt(out, cap, "%s", abs_repo);
+}
+
+static void pr_src_to_pkg_mod(const char *src, char *pkg_mod, size_t pm_cap, char *stem, size_t st_cap) {
+    const char *p = src;
+    const char *hit = 0;
+    for (const char *q = src; *q; q++) {
+        if (q[0] == '/' &&
+            ((!strncmp(q + 1, "cx/", 3) && (hit = q + 4)) ||
+             (!strncmp(q + 1, "src/", 4) && (hit = q + 5)) ||
+             (!strncmp(q + 1, "ext/", 4) && (hit = q + 5)))) {
+            p = hit;
+        }
+    }
+    if (p == src) {
+        if (!strncmp(p, "cx/", 3)) p += 3;
+        else if (!strncmp(p, "src/", 4)) p += 4;
+        else if (!strncmp(p, "ext/", 4)) p += 4;
+    }
+    long l = (long)strlen(p);
+    if (l > 3 && !memcmp(p + l - 3, ".cx", 3)) l -= 3;
+    size_t k = 0;
+    for (long i = 0; i < l && k + 1 < pm_cap; i++) {
+        pkg_mod[k++] = (p[i] == '/') ? '.' : p[i];
+    }
+    pkg_mod[k] = 0;
+    const char *dot = strrchr(pkg_mod, '.');
+    cx_fmt(stem, st_cap, "%s", dot ? (dot + 1) : pkg_mod);
+}
+
+static int pr_plan_path_same(const char *abs_repo, const char *col_path, const char *rel_or_full) {
+    if (!col_path || !col_path[0] || !rel_or_full || !rel_or_full[0]) return 0;
+    if (tx_eqz(col_path, rel_or_full)) return 1;
+    char f1[PR_PW], f2[PR_PW], r1[PR_PW], r2[PR_PW];
+    if (col_path[0] == '/') {
+        if (cx_fmt(f1, sizeof f1, "%s", col_path)) return 0;
+    } else {
+        if (cx_fmt(f1, sizeof f1, "%s/%s", abs_repo, col_path)) return 0;
+    }
+    if (rel_or_full[0] == '/') {
+        if (cx_fmt(f2, sizeof f2, "%s", rel_or_full)) return 0;
+    } else {
+        if (cx_fmt(f2, sizeof f2, "%s/%s", abs_repo, rel_or_full)) return 0;
+    }
+    if (tx_eqz(f1, f2)) return 1;
+    if (sy_realpath(f1, r1, sizeof r1) == 0 && sy_realpath(f2, r2, sizeof r2) == 0 && tx_eqz(r1, r2)) return 1;
+    return 0;
+}
+
+static void pr_scan_plan_buf(const char *abs_repo, const char *buf, long n, int skip_memo_hdr,
+                             const char *routed_src, const char *def_src,
+                             const char *matched_unit, const char *mod_stem, int check_stem_leak,
+                             char *matched_line, long ml_cap, char *leaked_line, long ll_cap) {
+    long at = 0;
+    int first = 1;
+    char stem_cx[96];
+    cx_fmt(stem_cx, sizeof stem_cx, "%s.cx", mod_stem);
+    while (at < n) {
+        long e = at;
+        while (e < n && buf[e] != '\n' && buf[e] != '\r') e++;
+        long ln = e - at;
+        const char *l = buf + at;
+        at = e + 1;
+        if (first && skip_memo_hdr) {
+            first = 0;
+            if (ln >= 16 && !memcmp(l, "eb-plan-memo-v1\t", 16)) continue;
+        }
+        first = 0;
+        if (ln <= 0) continue;
+        long t1 = tx_chr(l, ln, '\t');
+        if (t1 <= 0) continue;
+        long t2 = tx_chr(l + t1 + 1, ln - (t1 + 1), '\t');
+        long plen = (t2 >= 0) ? t2 : (ln - (t1 + 1));
+        if (t1 >= 63 || plen <= 0 || plen >= PR_PW - 1) continue;
+        char col1[64], col2[PR_PW];
+        mm_copy(col1, sizeof col1, l, t1); col1[t1] = 0;
+        mm_copy(col2, sizeof col2, l + t1 + 1, plen); col2[plen] = 0;
+        if (pr_plan_path_same(abs_repo, col2, routed_src)) {
+            if (!matched_line[0]) cx_fmt(matched_line, ml_cap, "%s:%s", col1, col2);
+        } else {
+            int is_leak = 0;
+            if (def_src && def_src[0] && !tx_eqz(def_src, routed_src) &&
+                pr_plan_path_same(abs_repo, col2, def_src)) {
+                is_leak = 1;
+            } else if (check_stem_leak) {
+                if (matched_unit && matched_unit[0] && tx_eqz(col1, matched_unit)) is_leak = 1;
+                const char *sl = strrchr(col2, '/');
+                const char *bn = sl ? (sl + 1) : col2;
+                if (tx_eqz(bn, stem_cx)) is_leak = 1;
+            }
+            if (is_leak && !leaked_line[0]) cx_fmt(leaked_line, ll_cap, "%s:%s", col1, col2);
+        }
+    }
+}
+
+static int pr_show_route(const char *abs_repo, const char *caller_cwd,
+                         const char *query, const char *target,
+                         const PrBaseObj *base_objs, int n_base) {
+    char detail[512], unit_key[64], mod_stem[64], pkg_mod[128], def_src[256];
+    unit_key[0] = 0; mod_stem[0] = 0; pkg_mod[0] = 0; def_src[0] = 0;
+    char q_no_o[64];
+    long ql = (long)strlen(query);
+    long qsl = (ql > 2 && !memcmp(query + ql - 2, ".o", 2)) ? (ql - 2) : ql;
+    if (qsl > 63) qsl = 63;
+    mm_copy(q_no_o, sizeof q_no_o, query, qsl);
+    q_no_o[qsl] = 0;
+
+    /* 1. Resolve unit_key, mod_stem, pkg_mod from the chain's receipt.txt + lnx-x86_64.closures.tsv (base_objs),
+     *    the exact same authority that --resolve-unit uses (never stale 0.0.87 plans/slice-units.tsv). */
+    for (int i = 0; i < n_base; i++) {
+        const char *rk = base_objs[i].key;
+        const char *rs = base_objs[i].src;
+        const char *rm = base_objs[i].mod;
+        char rk_no_o[64], r_pm[128], r_st[64];
+        long rkl = (long)strlen(rk);
+        long rksl = (rkl > 2 && !memcmp(rk + rkl - 2, ".o", 2)) ? (rkl - 2) : rkl;
+        if (rksl > 63) rksl = 63;
+        mm_copy(rk_no_o, sizeof rk_no_o, rk, rksl); rk_no_o[rksl] = 0;
+        r_pm[0] = 0; r_st[0] = 0;
+        if (rs && rs[0]) pr_src_to_pkg_mod(rs, r_pm, sizeof r_pm, r_st, sizeof r_st);
+        const char *eff_st = (rm && rm[0]) ? rm : r_st;
+        if (tx_eqz(query, rk) || tx_eqz(q_no_o, rk_no_o) ||
+            (eff_st[0] && (tx_eqz(query, eff_st) || tx_eqz(q_no_o, eff_st) || pr_same_no_us(q_no_o, eff_st))) ||
+            (r_pm[0] && (tx_eqz(query, r_pm) || tx_eqz(q_no_o, r_pm))) ||
+            (r_st[0] && (tx_eqz(query, r_st) || pr_same_no_us(q_no_o, r_st)))) {
+            cx_fmt(unit_key, sizeof unit_key, "%s", rk);
+            if (rs && rs[0]) cx_fmt(def_src, sizeof def_src, "%s", rs);
+            cx_fmt(mod_stem, sizeof mod_stem, "%s", eff_st[0] ? eff_st : rk_no_o);
+            cx_fmt(pkg_mod, sizeof pkg_mod, "%s", r_pm[0] ? r_pm : mod_stem);
+            break;
+        }
+    }
+    if (!mod_stem[0]) {
+        const char *dot = strrchr(q_no_o, '.');
+        if (dot) {
+            cx_fmt(pkg_mod, sizeof pkg_mod, "%s", q_no_o);
+            cx_fmt(mod_stem, sizeof mod_stem, "%s", dot + 1);
+        } else {
+            cx_fmt(mod_stem, sizeof mod_stem, "%s", q_no_o);
+            cx_fmt(pkg_mod, sizeof pkg_mod, "%s", q_no_o);
+        }
+    }
+    if (!unit_key[0]) cx_fmt(unit_key, sizeof unit_key, "%s.o", mod_stem);
+
+    /* 2. Inspect build/chain-facts.tsv in abs_repo */
+    char cf_path[PR_PW];
+    size_t cfn = 0;
+    char *cfb = 0;
+    if (cx_fmt(cf_path, sizeof cf_path, "%s/build/chain-facts.tsv", abs_repo) ||
+        !(cfb = cx_read(cf_path, &cfn))) {
+        return pr_refuse("chain-facts-unreadable", cf_path);
+    }
+    char route_kind[32], routed_src[256], matched_unit[64], matched_mod[128];
+    route_kind[0] = 0; routed_src[0] = 0;
+    cx_fmt(matched_unit, sizeof matched_unit, "%s", unit_key);
+    cx_fmt(matched_mod, sizeof matched_mod, "%s", pkg_mod);
+
+    long at = 0;
+    while (at < (long)cfn) {
+        long e = at;
+        while (e < (long)cfn && cfb[e] != '\n' && cfb[e] != '\r') e++;
+        long ln = e - at;
+        const char *l = cfb + at;
+        at = e + 1;
+        if (ln <= 0 || l[0] == '#') continue;
+        long t1 = tx_chr(l, ln, '\t');
+        if (t1 <= 0) continue;
+        long t2 = tx_chr(l + t1 + 1, ln - (t1 + 1), '\t');
+        if (t2 <= 0) continue;
+        t2 += t1 + 1;
+        char sec[32], kcol[128], scol[256];
+        if (t1 >= 31 || (t2 - (t1 + 1)) >= 127 || (ln - (t2 + 1)) >= 255) continue;
+        mm_copy(sec, sizeof sec, l, t1); sec[t1] = 0;
+        mm_copy(kcol, sizeof kcol, l + t1 + 1, t2 - (t1 + 1)); kcol[t2 - (t1 + 1)] = 0;
+        mm_copy(scol, sizeof scol, l + t2 + 1, ln - (t2 + 1)); scol[ln - (t2 + 1)] = 0;
+        if (tx_eqz(sec, "root") && !def_src[0]) {
+            char rk_no_o[64], r_pm[128], r_st[64];
+            long rkl = (long)strlen(kcol);
+            long rksl = (rkl > 2 && !memcmp(kcol + rkl - 2, ".o", 2)) ? (rkl - 2) : rkl;
+            mm_copy(rk_no_o, sizeof rk_no_o, kcol, rksl); rk_no_o[rksl] = 0;
+            pr_src_to_pkg_mod(scol, r_pm, sizeof r_pm, r_st, sizeof r_st);
+            if (tx_eqz(kcol, unit_key) || pr_same_no_us(rk_no_o, mod_stem) || pr_same_no_us(r_st, mod_stem)) {
+                cx_fmt(def_src, sizeof def_src, "%s", scol);
+                cx_fmt(matched_unit, sizeof matched_unit, "%s", kcol);
+            }
+        } else if (tx_eqz(sec, "root_target")) {
+            const char *colon = strchr(kcol, ':');
+            if (!colon) continue;
+            long tl = (long)(colon - kcol);
+            if (tl != (long)strlen(target) || memcmp(kcol, target, (size_t)tl) != 0) continue;
+            const char *rk = colon + 1;
+            char rk_no_o[64];
+            long rkl = (long)strlen(rk);
+            long rksl = (rkl > 2 && !memcmp(rk + rkl - 2, ".o", 2)) ? (rkl - 2) : rkl;
+            mm_copy(rk_no_o, sizeof rk_no_o, rk, rksl); rk_no_o[rksl] = 0;
+            if (tx_eqz(rk, unit_key) || tx_eqz(rk, query) || tx_eqz(rk_no_o, q_no_o) ||
+                pr_same_no_us(rk_no_o, mod_stem) || pr_same_no_us(rk_no_o, q_no_o)) {
+                cx_fmt(route_kind, sizeof route_kind, "root_target");
+                cx_fmt(routed_src, sizeof routed_src, "%s", scol);
+                cx_fmt(matched_unit, sizeof matched_unit, "%s", rk);
+                break;
+            }
+        } else if (tx_eqz(sec, "module_target")) {
+            const char *colon = strchr(kcol, ':');
+            if (!colon) continue;
+            long tl = (long)(colon - kcol);
+            if (tl != (long)strlen(target) || memcmp(kcol, target, (size_t)tl) != 0) continue;
+            const char *mk = colon + 1;
+            const char *mdot = strrchr(mk, '.');
+            const char *mstem = mdot ? (mdot + 1) : mk;
+            if (tx_eqz(mk, pkg_mod) || tx_eqz(mk, query) || tx_eqz(mstem, mod_stem) ||
+                tx_eqz(mstem, q_no_o) || pr_same_no_us(mstem, mod_stem) || pr_same_no_us(mstem, q_no_o)) {
+                cx_fmt(route_kind, sizeof route_kind, "module_target");
+                cx_fmt(routed_src, sizeof routed_src, "%s", scol);
+                cx_fmt(matched_mod, sizeof matched_mod, "%s", mk);
+                for (int bi = 0; bi < n_base; bi++) {
+                    if (tx_eqz(base_objs[bi].mod, mstem) || pr_same_no_us(base_objs[bi].mod, mstem)) {
+                        cx_fmt(matched_unit, sizeof matched_unit, "%s", base_objs[bi].key);
+                        break;
+                    }
+                }
+                break;
+            }
+        }
+    }
+    mm_free(cfb);
+
+    if (!route_kind[0] || !routed_src[0]) {
+        cx_fmt(detail, sizeof detail, "query=%s target=%s unit=%s module=%s default_src=%s",
+               query, target, matched_unit, matched_mod, def_src[0] ? def_src : "-");
+        return pr_refuse("route-row-missing", detail);
+    }
+
+    char full_src[PR_PW];
+    if (cx_fmt(full_src, sizeof full_src, "%s/%s", abs_repo, routed_src) || sy_exists(full_src) != 1) {
+        cx_fmt(detail, sizeof detail, "query=%s target=%s kind=%s unit=%s module=%s src=%s",
+               query, target, route_kind, matched_unit, matched_mod, routed_src);
+        return pr_refuse("route-source-missing", detail);
+    }
+
+    char uc[PR_PW], eb_cx[PR_PW], cx_cwd[PR_PW], eb_tmp[PR_PW], eb_out[PR_PW], memo_path[PR_PW], why[128];
+    if (cx_fmt(uc, sizeof uc, "%s/unisacc.com", abs_repo) || /* lint:allow R1-product priv-relink invokes checkout product for entry-build route verification */
+        cx_fmt(eb_cx, sizeof eb_cx, "%s/tools/entry-build.cx", abs_repo)) {
+        return pr_refuse("path-bound", abs_repo);
+    }
+    if (sy_exists(eb_cx) != 1) return pr_refuse("entry-build-missing", eb_cx);
+    const char *td = sy_env("TMPDIR");
+    if (!td || !td[0]) td = "/tmp";
+    if (cx_fmt(eb_tmp, sizeof eb_tmp, "%s/priv-relink-plan-%d-%ld", td, (int)sy_pid(), sy_now_ms()) ||
+        cx_fmt(eb_out, sizeof eb_out, "%s/out", eb_tmp) ||
+        cx_fmt(memo_path, sizeof memo_path, "%s/plan.memo", eb_tmp)) {
+        return pr_refuse("path-bound", td);
+    }
+    (void)sy_remove_all(eb_tmp);
+    if (sy_mkdir_all(eb_out, 0755) != 0) return pr_refuse("mkdir-failed", eb_out);
+    pr_choose_cx_cwd(abs_repo, 0, uc, caller_cwd, cx_cwd, sizeof cx_cwd);
+    const char *old_memo_env = sy_env("UNISACC_EB_PLAN_MEMO");
+    char saved_memo[PR_PW];
+    saved_memo[0] = 0;
+    if (old_memo_env && old_memo_env[0]) cx_fmt(saved_memo, sizeof saved_memo, "%s", old_memo_env);
+    sy_setenv("UNISACC_EB_PLAN_MEMO", memo_path, 1);
+
+    char *plan_av[] = {"sh", uc, eb_cx, "--", (char *)abs_repo, uc, eb_out, "--target", (char *)target, "--closure-list", 0}; /* lint:allow R1-product priv-relink invokes checkout entry-build for whole-target route plan verification */
+    np_result pr = {0};
+    int run_rc = np_run(plan_av, cx_cwd, 0, 55, &pr, why, sizeof why);
+    if (saved_memo[0]) sy_setenv("UNISACC_EB_PLAN_MEMO", saved_memo, 1);
+    else sy_unsetenv("UNISACC_EB_PLAN_MEMO");
+
+    if (run_rc != 0 || pr.rc != 0) {
+        np_free(&pr);
+        (void)sy_remove_all(eb_tmp);
+        cx_fmt(detail, sizeof detail, "query=%s target=%s src=%s", query, target, routed_src);
+        return pr_refuse("route-cx-plan-failed", detail);
+    }
+
+    char matched_line[PR_PW + 64], leaked_line[PR_PW + 64];
+    matched_line[0] = 0; leaked_line[0] = 0;
+    if (tx_eqz(route_kind, "module_target")) {
+        if (pr.out && pr.outn > 0) {
+            pr_scan_plan_buf(abs_repo, pr.out, (long)pr.outn, 0, routed_src, def_src,
+                             matched_unit, mod_stem, 1,
+                             matched_line, sizeof matched_line, leaked_line, sizeof leaked_line);
+        }
+    } else {
+        /* root_target: verify no duplicate unrouted closure leaked into --closure-list,
+         * and verify the whole-target -cx-plan memo contains routed_src and NOT def_src. */
+        if (pr.out && pr.outn > 0) {
+            pr_scan_plan_buf(abs_repo, pr.out, (long)pr.outn, 0, routed_src, def_src,
+                             matched_unit, mod_stem, 0,
+                             matched_line, sizeof matched_line, leaked_line, sizeof leaked_line);
+        }
+        size_t mn = 0;
+        char *mb = cx_read(memo_path, &mn);
+        if (mb && mn > 0) {
+            pr_scan_plan_buf(abs_repo, mb, (long)mn, 1, routed_src, def_src,
+                             matched_unit, mod_stem, 0,
+                             matched_line, sizeof matched_line, leaked_line, sizeof leaked_line);
+        }
+        if (mb) mm_free(mb);
+    }
+    np_free(&pr);
+    (void)sy_remove_all(eb_tmp);
+
+    if (!matched_line[0] || leaked_line[0]) {
+        cx_fmt(detail, sizeof detail, "query=%s target=%s expected=%s plan_line=%s",
+               query, target, routed_src, leaked_line[0] ? leaked_line : "none");
+        return pr_refuse("entry-build-ignored-route", detail);
+    }
+
+    char src_sha[65];
+    long src_bytes = 0;
+    if (pr_file_sha_bytes(full_src, src_sha, &src_bytes) != 0) {
+        return pr_refuse("route-source-unreadable", routed_src);
+    }
+    sy_printf("PRIV_RELINK_ROUTE\tquery=%s\ttarget=%s\tkind=%s\tunit=%s\tmodule=%s\tsrc=%s\tsha256=%s\tbytes=%ld\tcx_plan=VERIFIED\tplan_line=%s\n",
+              query, target, route_kind, matched_unit, matched_mod, routed_src, src_sha, src_bytes, matched_line);
+    return 0;
+}
+
+/* ---- --kept-bytes: exact per-unit surviving function bytes after real compiler.tapelink tl_dce ---- */
+static char *kb_buf;
+static long kb_len;
+static long kb_cap;
+static int kb_err;
+
+static int kb_emit_span(const char *s, int n) {
+    if (kb_err || n < 0) return 1;
+    if (n == 0) return 0;
+    if (kb_len + n + 1 > kb_cap) {
+        long nc = kb_cap ? kb_cap * 2 : 65536L;
+        while (nc < kb_len + n + 1) nc *= 2;
+        char *nb = (char *)mm_alloc(nc);
+        if (!nb) { kb_err = 1; return 1; }
+        if (kb_buf && kb_len > 0) mm_copy(nb, nc, kb_buf, kb_len);
+        if (kb_buf) mm_free(kb_buf);
+        kb_buf = nb;
+        kb_cap = nc;
+    }
+    mm_copy(kb_buf + kb_len, kb_cap - kb_len, s, n);
+    kb_len += n;
+    kb_buf[kb_len] = 0;
+    return 0;
+}
+
+static int kb_emit_ch(int c) {
+    char ch = (char)(c & 255);
+    return kb_emit_span(&ch, 1);
+}
+
+static int kb_die_cb(char *msg) {
+    (void)msg;
+    kb_err = 1;
+    return 1;
+}
+
+static unsigned long long kb_rdu(const unsigned char *p, int k) {
+    unsigned long long v = 0;
+    for (int i = k - 1; i >= 0; i--) v = (v << 8) | (unsigned long long)p[i];
+    return v;
+}
+
+static int kb_is_local_label(const char *s, int n) {
+    int k = 0;
+    if (n > 4 && s[0] == '_' && s[1] == '_' && s[2] == 'u' && s[3] >= '0' && s[3] <= '9') {
+        k = 3;
+        while (k < n && s[k] >= '0' && s[k] <= '9') k++;
+        if (k >= n || s[k] != '_') return 0;
+        k++;
+    }
+    if (n - k < 12) return 0;
+    if (!tx_same(s + k, 10, "__unisacc_", 10)) return 0;
+    if (s[k + 10] != 'L' && s[k + 10] != 'R') return 0;
+    return 1;
+}
+
+typedef struct {
+    char name[128];
+    unsigned long long val;
+    long bytes;
+    int is_global;
+} KbFn;
+
+static int kb_extract_obj_funcs(const unsigned char *b, long bn, KbFn *fns, int cap, int *nf_out, long *text_sz_out) {
+    *nf_out = 0;
+    *text_sz_out = 0;
+    if (!b || bn < 64 || b[0] != 0x7f || b[1] != 'E' || b[2] != 'L' || b[3] != 'F' || b[4] != 2) return -1;
+    unsigned long long shoff = kb_rdu(b + 40, 8);
+    int shent = (int)kb_rdu(b + 58, 2);
+    int shnum = (int)kb_rdu(b + 60, 2);
+    int shstr = (int)kb_rdu(b + 62, 2);
+    if (shent < 64 || shnum <= 0 || shstr < 0 || shstr >= shnum) return -1;
+    if (shoff + (unsigned long long)shent * (unsigned long long)shnum > (unsigned long long)bn) return -1;
+    const unsigned char *sh_str_hdr = b + shoff + (unsigned long long)shstr * (unsigned long long)shent;
+    unsigned long long shstr_off = kb_rdu(sh_str_hdr + 24, 8);
+    unsigned long long shstr_sz = kb_rdu(sh_str_hdr + 32, 8);
+    if (shstr_off + shstr_sz > (unsigned long long)bn) return -1;
+    int text_idx = -1, sym_idx = -1, str_idx = -1;
+    unsigned long long text_sz = 0, sym_off = 0, sym_sz = 0, sym_ent = 0, str_off = 0, str_sz = 0;
+    for (int i = 0; i < shnum; i++) {
+        const unsigned char *sh = b + shoff + (unsigned long long)i * (unsigned long long)shent;
+        unsigned long long nm_off = kb_rdu(sh + 0, 4);
+        unsigned long long sh_type = kb_rdu(sh + 4, 4);
+        if (nm_off < shstr_sz) {
+            const char *sn = (const char *)(b + shstr_off + nm_off);
+            if (tx_eqz(sn, ".text")) { text_idx = i; text_sz = kb_rdu(sh + 32, 8); }
+        }
+        if (sh_type == 2ULL) {
+            sym_idx = i;
+            sym_off = kb_rdu(sh + 24, 8);
+            sym_sz = kb_rdu(sh + 32, 8);
+            str_idx = (int)kb_rdu(sh + 40, 4);
+            sym_ent = kb_rdu(sh + 56, 8);
+        }
+    }
+    *text_sz_out = (long)text_sz;
+    if (text_idx < 0 || text_sz == 0ULL || sym_idx < 0 || str_idx < 0 || str_idx >= shnum || sym_ent < 24ULL) return 0;
+    const unsigned char *str_sh = b + shoff + (unsigned long long)str_idx * (unsigned long long)shent;
+    str_off = kb_rdu(str_sh + 24, 8);
+    str_sz = kb_rdu(str_sh + 32, 8);
+    if (sym_off + sym_sz > (unsigned long long)bn || str_off + str_sz > (unsigned long long)bn) return -1;
+    int nf = 0;
+    long nsyms = (long)(sym_sz / sym_ent);
+    for (long i = 0; i < nsyms; i++) {
+        const unsigned char *sy = b + sym_off + (unsigned long long)i * sym_ent;
+        unsigned long long noff = kb_rdu(sy + 0, 4);
+        unsigned char info = sy[4];
+        int bind = (info >> 4) & 15;
+        int stype = info & 15;
+        int shndx = (int)kb_rdu(sy + 6, 2);
+        unsigned long long sval = kb_rdu(sy + 8, 8);
+        if (shndx != text_idx || stype == 3) continue;
+        if (noff == 0ULL || noff >= str_sz) continue;
+        const char *nm = (const char *)(b + str_off + noff);
+        long nl = tx_len(nm, 127);
+        if (nl <= 0 || kb_is_local_label(nm, (int)nl)) continue;
+        if (sval > text_sz) continue;
+        int dup = 0;
+        for (int j = 0; j < nf; j++) {
+            if (fns[j].val == sval) {
+                if (bind != 0 && !fns[j].is_global) {
+                    cx_fmt(fns[j].name, sizeof fns[j].name, "%s", nm);
+                    fns[j].is_global = 1;
+                }
+                dup = 1;
+                break;
+            }
+        }
+        if (dup || nf >= cap) continue;
+        cx_fmt(fns[nf].name, sizeof fns[nf].name, "%s", nm);
+        fns[nf].val = sval;
+        fns[nf].bytes = 0;
+        fns[nf].is_global = (bind != 0) ? 1 : 0;
+        nf++;
+    }
+    for (int i = 1; i < nf; i++) {
+        KbFn tmp = fns[i];
+        int j = i - 1;
+        while (j >= 0 && fns[j].val > tmp.val) { fns[j + 1] = fns[j]; j--; }
+        fns[j + 1] = tmp;
+    }
+    for (int i = 0; i < nf; i++) {
+        unsigned long long endv = (i + 1 < nf) ? fns[i + 1].val : text_sz;
+        fns[i].bytes = (endv >= fns[i].val) ? (long)(endv - fns[i].val) : 0L;
+    }
+    *nf_out = nf;
+    return 0;
+}
+
+static unsigned long kb_hash_str(const char *s, long n) {
+    unsigned long h = 5381UL;
+    for (long i = 0; i < n; i++) h = ((h * 33UL) + (unsigned long)(unsigned char)s[i]) & 0xffffffffUL;
+    return h;
+}
+
+static int pr_kept_bytes(const char *objs_dir, const PrBaseObj *objs, int n_objs) {
+    static KbFn unit_fns[PR_MAX_OBJS][512];
+    static int unit_nf[PR_MAX_OBJS];
+    static long unit_text[PR_MAX_OBJS];
+    kb_buf = 0; kb_len = 0; kb_cap = 0; kb_err = 0;
+    if (tl_bind(kb_emit_ch, kb_die_cb) || tl_bind_span(kb_emit_span, kb_die_cb) || tl_begin()) {
+        return pr_refuse("kept-bytes-init-failed", "tapelink");
+    }
+    for (int u = 0; u < n_objs; u++) {
+        char op[PR_PW];
+        size_t bn = 0;
+        if (cx_fmt(op, sizeof op, "%s/%s", objs_dir, objs[u].key)) return pr_refuse("path-bound", objs[u].key);
+        char *b = cx_read(op, &bn);
+        if (!b || bn == 0) { if (b) mm_free(b); return pr_refuse("kept-bytes-read-failed", op); }
+        kb_extract_obj_funcs((const unsigned char *)b, (long)bn, unit_fns[u], 512, &unit_nf[u], &unit_text[u]);
+        long tl = 0;
+        char *t = tl_tape(b, (long)bn, &tl);
+        if (t && tl > 0) {
+            if (u == 0) tl_adopt_first();
+            tl_unitver(t, (int)tl);
+            tl_unit(t, (int)tl, u);
+            tl_note_links(t, tl);
+        }
+        mm_free(b);
+        if (kb_err) { if (kb_buf) mm_free(kb_buf); return pr_refuse("kept-bytes-link-failed", objs[u].key); }
+    }
+    long before_len = kb_len;
+    long kept_len = tl_dce(kb_buf, kb_len);
+    int dce_natural = (kept_len < before_len || tl_dce_cut() > 0) ? 1 : 0;
+    if (!dce_natural) {
+        static const char probe[] = ".extern __pr_kept_dce_probe\n";
+        tl_note_links((char *)probe, (long)(sizeof probe - 1));
+        kept_len = tl_dce(kb_buf, kb_len);
+    }
+    int dce_cut = tl_dce_cut();
+
+    /* Index all surviving column-0 non-local labels in kb_buf[0 .. kept_len]. */
+    long hsz = 16384L;
+    while (hsz < 131072L && hsz < kept_len / 16L) hsz *= 2L;
+    long *ht_off = (long *)mm_alloc(hsz * (long)sizeof(long));
+    int *ht_len = (int *)mm_alloc(hsz * (long)sizeof(int));
+    if (!ht_off || !ht_len) {
+        if (ht_off) mm_free(ht_off);
+        if (ht_len) mm_free(ht_len);
+        if (kb_buf) mm_free(kb_buf);
+        return pr_refuse("kept-bytes-oom", "hash");
+    }
+    mm_fill(ht_off, hsz * (long)sizeof(long), 0, hsz * (long)sizeof(long));
+    mm_fill(ht_len, hsz * (long)sizeof(int), 0, hsz * (long)sizeof(int));
+    long mask = hsz - 1L;
+    long i = 0;
+    while (i < kept_len) {
+        long e = i;
+        while (e < kept_len && kb_buf[e] != '\n') e++;
+        if (e > i && kb_buf[i] != ' ' && kb_buf[i] != '\t' && kb_buf[i] != '.' && kb_buf[e - 1] == ':') {
+            long ln = e - 1 - i;
+            if (ln > 0 && !kb_is_local_label(kb_buf + i, (int)ln)) {
+                long slot = (long)(kb_hash_str(kb_buf + i, ln) & (unsigned long)mask);
+                while (ht_len[slot] > 0) {
+                    if (ht_len[slot] == (int)ln && tx_same(kb_buf + ht_off[slot], ln, kb_buf + i, ln)) break;
+                    slot = (slot + 1L) & mask;
+                }
+                if (ht_len[slot] == 0) { ht_off[slot] = i; ht_len[slot] = (int)ln; }
+            }
+        }
+        i = e + 1;
+    }
+
+    long sum_obj = 0, sum_kept = 0, sum_drop = 0;
+    for (int u = 0; u < n_objs; u++) {
+        long kept = 0, drop = 0;
+        int fk = 0;
+        for (int f = 0; f < unit_nf[u]; f++) {
+            char key[160];
+            long kl = 0;
+            if (unit_fns[u][f].is_global) {
+                cx_fmt(key, sizeof key, "%s", unit_fns[u][f].name);
+            } else {
+                cx_fmt(key, sizeof key, "__u%d_%s", u, unit_fns[u][f].name);
+            }
+            kl = tx_len(key, 159);
+            int live = 0;
+            if (kl > 0) {
+                long slot = (long)(kb_hash_str(key, kl) & (unsigned long)mask);
+                while (ht_len[slot] > 0) {
+                    if (ht_len[slot] == (int)kl && tx_same(kb_buf + ht_off[slot], kl, key, kl)) { live = 1; break; }
+                    slot = (slot + 1L) & mask;
+                }
+            }
+            if (live) { kept += unit_fns[u][f].bytes; fk++; }
+            else { drop += unit_fns[u][f].bytes; }
+        }
+        sum_obj += unit_text[u];
+        sum_kept += kept;
+        sum_drop += drop;
+        sy_printf("PRIV_RELINK_KEPT\tunit=%s\tmodule=%s\tobj_text=%ld\tkept_bytes=%ld\tdropped_bytes=%ld\tfuncs_total=%d\tfuncs_kept=%d\n",
+                  objs[u].key, objs[u].mod[0] ? objs[u].mod : "-", unit_text[u], kept, drop, unit_nf[u], fk);
+    }
+    sy_printf("PRIV_RELINK_KEPT_SUMMARY\tunits=%d\tobj_text_sum=%ld\tkept_bytes_sum=%ld\tdropped_bytes_sum=%ld\ttl_dce_natural=%d\ttl_dce_cut=%d\n",
+              n_objs, sum_obj, sum_kept, sum_drop, dce_natural, dce_cut);
+    mm_free(ht_off);
+    mm_free(ht_len);
+    if (kb_buf) mm_free(kb_buf);
+    kb_buf = 0; kb_len = 0; kb_cap = 0;
+    return 0;
+}
+
 int main(int argc, char **argv) {
     long t0_ms = sy_now_ms();
     const char *chain_dir = 0, *out_ape = 0, *repo = ".", *work_dir = 0, *objs_dir_in = 0;
     const char *p4_payload_in = 0, *base_layer_api = 0, *allow_hub = 0, *link_order = "auto";
-    const char *ver_in = 0, *receipt_out = 0, *query_unit = 0, *query_sym = 0;
+    const char *ver_in = 0, *receipt_out = 0, *query_unit = 0, *query_sym = 0, *show_route = 0, *target_in = "lnx/x86_64";
+    int kept_bytes_mode = 0;
     long budget_ms = 60000;
+    char caller_cwd[PR_PW];
+    if (sy_cwd(caller_cwd, sizeof caller_cwd) != 0) caller_cwd[0] = 0;
 
     static PrKeyPath rep_objs[PR_MAX_DECL], cmp_objs[PR_MAX_DECL], add_objs[PR_MAX_DECL], cmp_adds[PR_MAX_DECL];
     int n_rep = 0, n_cmp = 0, n_add = 0, n_cmp_add = 0;
@@ -903,6 +1554,12 @@ int main(int argc, char **argv) {
             query_unit = argv[++i];
         } else if (tx_eqz(argv[i], "--unit-by-symbol") && i + 1 < argc) {
             query_sym = argv[++i];
+        } else if (tx_eqz(argv[i], "--show-route") && i + 1 < argc) {
+            show_route = argv[++i];
+        } else if (tx_eqz(argv[i], "--target") && i + 1 < argc) {
+            target_in = argv[++i];
+        } else if (tx_eqz(argv[i], "--kept-bytes")) {
+            kept_bytes_mode = 1;
         } else if (tx_eqz(argv[i], "--add") && i + 1 < argc) {
             if (n_add >= PR_MAX_DECL || pr_parse_kv(argv[++i], add_objs[n_add].key, 64, add_objs[n_add].path, PR_PW) != 0)
                 return pr_refuse("bad-add-arg", argv[i]);
@@ -950,6 +1607,9 @@ int main(int argc, char **argv) {
                       "  --compile [UNIT=]SRC.cx    compile one unit source (auto-stages routed module <stem>.cx) with nice -n 19\n"
                       "  --resolve-unit SPEC        resolve module name, .o id, or sym:SYMBOL to current chain .o and exit\n"
                       "  --unit-by-symbol SYM       resolve global defined symbol SYM to its current chain .o owner and exit\n"
+                      "  --show-route MODULE        verify build/chain-facts.tsv route + -cx-plan and print selected source path & sha256\n"
+                      "  --target TARGET            target triple for --show-route (default: lnx/x86_64)\n"
+                      "  --kept-bytes               report per-unit surviving function .text bytes after real compiler.tapelink tl_dce\n"
                       "  --add KEY.o=PATH           add a new unit object\n"
                       "  --compile-add KEY.o=SRC.cx compile and add a new unit object\n"
                       "  --remove KEY.o             remove a baseline object (e.g. m59.o)\n"
@@ -963,6 +1623,9 @@ int main(int argc, char **argv) {
         }
     }
 
+    char abs_repo[PR_PW], abs_chain[PR_PW], detail[512];
+    if (sy_realpath(repo, abs_repo, sizeof abs_repo) < 0) return pr_refuse("bad-repo", repo);
+
     char def_chain[PR_PW];
     if (!chain_dir) {
         const char *hm = sy_env("HOME");
@@ -972,16 +1635,66 @@ int main(int argc, char **argv) {
             chain_dir = def_chain;
         }
     }
-    if (!chain_dir || (!out_ape && !query_unit && !query_sym)) {
+    if (show_route && show_route[0] && (!chain_dir || sy_realpath(chain_dir, abs_chain, sizeof abs_chain) < 0)) {
+        return pr_show_route(abs_repo, caller_cwd, show_route, target_in, 0, 0);
+    }
+    if (!chain_dir || (!out_ape && !query_unit && !query_sym && !show_route && !kept_bytes_mode)) {
         return pr_refuse("usage", "need --chain-dir DIR --out OUT_APE (run with --help for defaults)");
     }
     if (!tx_eqz(link_order, "auto") && !tx_eqz(link_order, "receipt") && !tx_eqz(link_order, "glob")) {
         return pr_refuse("bad-link-order", link_order);
     }
-
-    char abs_repo[PR_PW], abs_chain[PR_PW], detail[512];
-    if (sy_realpath(repo, abs_repo, sizeof abs_repo) < 0) return pr_refuse("bad-repo", repo);
     if (sy_realpath(chain_dir, abs_chain, sizeof abs_chain) < 0) return pr_refuse("bad-chain-dir", chain_dir);
+
+    static char abs_out_ape[PR_PW], abs_receipt_out[PR_PW], abs_p4_in[PR_PW], abs_objs_in[PR_PW], abs_base_api[PR_PW], abs_work_in[PR_PW];
+    if (out_ape && out_ape[0]) {
+        if (pr_abs_from_cwd(caller_cwd, out_ape, abs_out_ape, sizeof abs_out_ape)) return pr_refuse("path-bound", out_ape);
+        char out_dir[PR_PW];
+        cx_fmt(out_dir, sizeof out_dir, "%s", abs_out_ape);
+        char *sl = strrchr(out_dir, '/');
+        if (sl && sl > out_dir) { *sl = 0; (void)sy_mkdir_all(out_dir, 0755); }
+        out_ape = abs_out_ape;
+    }
+    if (receipt_out && receipt_out[0]) {
+        if (pr_abs_from_cwd(caller_cwd, receipt_out, abs_receipt_out, sizeof abs_receipt_out)) return pr_refuse("path-bound", receipt_out);
+        receipt_out = abs_receipt_out;
+    }
+    if (p4_payload_in && p4_payload_in[0]) {
+        if (pr_abs_from_cwd(caller_cwd, p4_payload_in, abs_p4_in, sizeof abs_p4_in)) return pr_refuse("path-bound", p4_payload_in);
+        p4_payload_in = abs_p4_in;
+    }
+    if (objs_dir_in && objs_dir_in[0]) {
+        if (pr_abs_from_cwd(caller_cwd, objs_dir_in, abs_objs_in, sizeof abs_objs_in)) return pr_refuse("path-bound", objs_dir_in);
+        objs_dir_in = abs_objs_in;
+    }
+    if (base_layer_api && base_layer_api[0]) {
+        if (pr_abs_from_cwd(caller_cwd, base_layer_api, abs_base_api, sizeof abs_base_api)) return pr_refuse("path-bound", base_layer_api);
+        base_layer_api = abs_base_api;
+    }
+    if (work_dir && work_dir[0]) {
+        if (pr_abs_from_cwd(caller_cwd, work_dir, abs_work_in, sizeof abs_work_in)) return pr_refuse("path-bound", work_dir);
+        work_dir = abs_work_in;
+    }
+    for (int i = 0; i < n_rep; i++) {
+        char tmp[PR_PW];
+        if (pr_abs_from_cwd(caller_cwd, rep_objs[i].path, tmp, sizeof tmp)) return pr_refuse("path-bound", rep_objs[i].path);
+        cx_fmt(rep_objs[i].path, PR_PW, "%s", tmp);
+    }
+    for (int i = 0; i < n_cmp; i++) {
+        char tmp[PR_PW];
+        if (pr_abs_from_cwd(caller_cwd, cmp_objs[i].path, tmp, sizeof tmp)) return pr_refuse("path-bound", cmp_objs[i].path);
+        cx_fmt(cmp_objs[i].path, PR_PW, "%s", tmp);
+    }
+    for (int i = 0; i < n_add; i++) {
+        char tmp[PR_PW];
+        if (pr_abs_from_cwd(caller_cwd, add_objs[i].path, tmp, sizeof tmp)) return pr_refuse("path-bound", add_objs[i].path);
+        cx_fmt(add_objs[i].path, PR_PW, "%s", tmp);
+    }
+    for (int i = 0; i < n_cmp_add; i++) {
+        char tmp[PR_PW];
+        if (pr_abs_from_cwd(caller_cwd, cmp_adds[i].path, tmp, sizeof tmp)) return pr_refuse("path-bound", cmp_adds[i].path);
+        cx_fmt(cmp_adds[i].path, PR_PW, "%s", tmp);
+    }
 
     /* 1. Load baseline receipt.txt + lnx-x86_64.closures.tsv */
     char base_g2_lnx[PR_PW], rcpt_p[PR_PW], base_elf_p[PR_PW], base_p4_p[PR_PW], base_ape_p[PR_PW];
@@ -1005,6 +1718,14 @@ int main(int argc, char **argv) {
         return pr_refuse("invalid-receipt", rcpt_p);
     }
     pr_load_closures(abs_chain, base_objs, n_base);
+
+    if (show_route && show_route[0]) {
+        return pr_show_route(abs_repo, caller_cwd, show_route, target_in, base_objs, n_base);
+    }
+
+    if (kept_bytes_mode && !out_ape) {
+        return pr_kept_bytes(base_g2_lnx, base_objs, n_base);
+    }
 
     if (query_unit || query_sym) {
         char qspec[128], rkey[64];
@@ -1167,8 +1888,9 @@ int main(int argc, char **argv) {
             return pr_refuse("add-obj-failed", add_objs[i].key);
     }
 
-    char uc[PR_PW];
+    char uc[PR_PW], cx_cwd[PR_PW];
     if (cx_fmt(uc, sizeof uc, "%s/unisacc.com", abs_repo)) return pr_refuse("path-bound", abs_repo); /* lint:allow R1-product priv-relink invokes checkout product for per-unit compile and relink */
+    pr_choose_cx_cwd(abs_repo, 0, uc, caller_cwd, cx_cwd, sizeof cx_cwd);
 
     for (int i = 0; i < n_cmp; i++) {
         char dp[PR_PW], staged_src[PR_PW], why[128];
@@ -1181,7 +1903,7 @@ int main(int argc, char **argv) {
             (char *)pr_rt_for(cmp_objs[i].key), "-o", dp, staged_src, 0
         }; /* lint:allow R1-product priv-relink invokes checkout product for per-unit compile */
         np_result r = {0};
-        if (np_run(av, abs_repo, 0, 20, &r, why, sizeof why) != 0 || r.rc != 0) {
+        if (np_run(av, cx_cwd, 0, 20, &r, why, sizeof why) != 0 || r.rc != 0) {
             np_free(&r);
             return pr_refuse("unit-compile-failed", cmp_objs[i].key);
         }
@@ -1198,7 +1920,7 @@ int main(int argc, char **argv) {
             (char *)pr_rt_for(cmp_adds[i].key), "-o", dp, staged_src, 0
         }; /* lint:allow R1-product priv-relink invokes checkout product for per-unit compile */
         np_result r = {0};
-        if (np_run(av, abs_repo, 0, 20, &r, why, sizeof why) != 0 || r.rc != 0) {
+        if (np_run(av, cx_cwd, 0, 20, &r, why, sizeof why) != 0 || r.rc != 0) {
             np_free(&r);
             return pr_refuse("unit-compile-add-failed", cmp_adds[i].key);
         }
@@ -1241,6 +1963,21 @@ int main(int argc, char **argv) {
             }
             n_changed++;
             cx_fmt(changed_keys[n_chg_keys++], 64, "%s", base_objs[i].key);
+        }
+    }
+
+    for (int i = 0; i < n_rep; i++) {
+        if (!pr_in_list(changed_keys, n_chg_keys, rep_objs[i].key)) {
+            cx_fmt(detail, sizeof detail, "unit=%s changed=%d (replacement object identical to baseline)",
+                   rep_objs[i].key, n_changed);
+            return pr_refuse("replacement-not-applied", detail);
+        }
+    }
+    for (int i = 0; i < n_cmp; i++) {
+        if (!pr_in_list(changed_keys, n_chg_keys, cmp_objs[i].key)) {
+            cx_fmt(detail, sizeof detail, "unit=%s changed=%d (compiled object identical to baseline)",
+                   cmp_objs[i].key, n_changed);
+            return pr_refuse("replacement-not-applied", detail);
         }
     }
 
@@ -1422,8 +2159,10 @@ int main(int argc, char **argv) {
         sl_win64, elf_stage, sl_lnxa64, sl_osxx64, sl_osxa64, sl_wina64, 0
     }; /* lint:allow R1-product priv-relink invokes checkout product for ape-pack */
     {
+        char pack_cwd[PR_PW];
+        pr_choose_cx_cwd(abs_repo, ape_pack_tool, uc, caller_cwd, pack_cwd, sizeof pack_cwd);
         np_result pr = {0}; char why[128];
-        if (np_run(pack_av, abs_repo, 0, 25, &pr, why, sizeof why) != 0 || pr.rc != 0 || sy_exists(out_ape) != 1) {
+        if (np_run(pack_av, pack_cwd, 0, 25, &pr, why, sizeof why) != 0 || pr.rc != 0 || sy_exists(out_ape) != 1) {
             np_free(&pr);
             return pr_refuse("repack-failed", out_ape);
         }
@@ -1436,6 +2175,17 @@ int main(int argc, char **argv) {
     char out_sha[65];
     long out_bytes = 0;
     if (pr_file_sha_bytes(out_ape, out_sha, &out_bytes) != 0) return pr_refuse("hash-ape-failed", out_ape);
+
+    if ((n_rep > 0 || n_cmp > 0) && sy_exists(base_ape_p) == 1) {
+        char base_ape_sha[65];
+        long base_ape_bytes = 0;
+        if (pr_file_sha_bytes(base_ape_p, base_ape_sha, &base_ape_bytes) == 0 &&
+            (n_changed == 0 || tx_eqz(out_sha, base_ape_sha))) {
+            cx_fmt(detail, sizeof detail, "changed=%d base_ape=%s out_ape=%s",
+                   n_changed, base_ape_sha, out_sha);
+            return pr_refuse("replacement-not-applied", detail);
+        }
+    }
 
     if (is_empty_change && sy_exists(base_ape_p) == 1) {
         char base_ape_sha[65];

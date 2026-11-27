@@ -36,7 +36,14 @@
 #pragma unisa use cxlib.netpack
 #pragma unisa use text.text
 #pragma unisa use cxlib.productpkg
+#pragma unisa use mem.heap
 #pragma unisa use mem.bytes
+#pragma unisa use runtime.packagefooter
+#pragma unisa use runtime.package_decode
+#pragma unisa use runtime.package_lifetime
+#pragma unisa use runtime.model_number
+#pragma unisa use compiler.bindstage
+#pragma unisa use runtime.routestep
 
 static const char *v_root, *v_build, *v_snap, *v_rev, *v_pkg;
 static int failed, skipped, passed;
@@ -219,7 +226,20 @@ static int op_env(const char *name, const char *want) {
 }
 
 /* The embedded header members are named in the P4 index; a package built without them
-   (0.0.50 Y-0 p3, 1534381 bytes) makes the downstream ctor fail on "no such file cx.h". */
+   (0.0.50 Y-0 p3, 1534381 bytes) makes the downstream ctor fail on "no such file cx.h".
+   Decode the P4 package with cxpk_decode and verify exact F records (key, codec, CRC32,
+   and when M1 tape is active in SNAP, the 3 tape/lnx-x86_64/* F records, manifest internal
+   SHA256/size consistency, and chain p3-run/tape/lnx-x86_64 build SHA equality). */
+static void *pf_pk_alloc(void *prev, size_t n) { (void)prev; return mm_alloc((long)(n ? n : 1)); }
+static void pf_pk_free(void *p) { if (p) mm_free(p); }
+static unsigned pf_crc32(const unsigned char *p, long n) {
+    unsigned c = 4294967295U;
+    for (long i = 0; i < n; i++) {
+        c ^= (unsigned)p[i];
+        for (int j = 0; j < 8; j++) c = (c & 1U) ? ((c >> 1) ^ 3988292384U) : (c >> 1);
+    }
+    return c ^ 4294967295U;
+}
 static int op_pkg(const char *pkg) {
     size_t n = 0;
     char *s = cx_read(pkg, &n), sha[65];
@@ -227,13 +247,137 @@ static int op_pkg(const char *pkg) {
     int k;
     if (!s) { cx_fmt(detail, sizeof detail, "unreadable: %s", pkg); return 0; }
     if (sy_sha256_hex(s, (long)n, sha)) { free(s); cx_fmt(detail, sizeof detail, "sha: %s", pkg); return 0; }
+    const unsigned char *pslice = 0;
+    long plen = 0;
+    PackageFooter pf;
+    if (packagefooter_locate_bytes((const unsigned char *)s, (long)n, &pf)) {
+        pslice = (const unsigned char *)s + pf.package_offset;
+        plen = pf.package_length;
+    } else if (n >= 4 && !memcmp(s, "P 4 ", 4)) {
+        pslice = (const unsigned char *)s;
+        plen = (long)n;
+    }
+    CxPackageDecode dec;
+    mm_fill(&dec, (long)sizeof dec, 0, (long)sizeof dec);
+    dec.allocate = pf_pk_alloc;
+    dec.release = pf_pk_free;
+    if (!pslice || cxpk_decode(&dec, pslice, plen) != 0 || dec.package.ver != 4) {
+        cxpl_release(&dec.package, pf_pk_free);
+        free(s);
+        cx_fmt(detail, sizeof detail, "missing hdr/cx.h (invalid P4 decode): %s bytes=%lu sha256=%s",
+               pkg, (unsigned long)n, sha);
+        return 0;
+    }
     for (k = 0; k < 2; k++) {
-        if (tx_find(s, (long)n, want[k], (long)strlen(want[k])) < 0) {
+        long kl = (long)strlen(want[k]);
+        int found = 0;
+        for (int i = 0; i < dec.package.nr; i++) {
+            const CxPackageResource *r = &dec.package.res[i];
+            if (r->n == (int)kl && !memcmp(pslice + r->name, want[k], (size_t)kl) && r->len > 0) {
+                found = 1;
+                break;
+            }
+        }
+        if (!found) {
+            cxpl_release(&dec.package, pf_pk_free);
             free(s);
             cx_fmt(detail, sizeof detail, "missing %s: %s bytes=%lu sha256=%s", want[k], pkg, (unsigned long)n, sha);
             return 0;
         }
     }
+    if (v_snap && v_snap[0]) {
+        char tsb[4400], tpk[4400], sm1[4400];
+        if (!cx_fmt(tsb, sizeof tsb, "%s/tools/tape-sidecar-build.cx", v_snap) &&
+            !cx_fmt(tpk, sizeof tpk, "%s/tools/tapepack.cx", v_snap) &&
+            !cx_fmt(sm1, sizeof sm1, "%s/cx/driver/stream_s1_m1.cx", v_snap) &&
+            (sy_exists(tsb) == 1 || sy_exists(tpk) == 1 || sy_exists(sm1) == 1)) {
+            static const char *twant[3] = {
+                "tape/lnx-x86_64/manifest.tsv",
+                "tape/lnx-x86_64/tapemode.so",
+                "tape/lnx-x86_64/m53.tapeslice"
+            };
+            char f_sha[3][65];
+            long f_len[3] = {0, 0, 0};
+            const char *mf_ptr = 0;
+            long mf_len = 0;
+            for (k = 0; k < 3; k++) {
+                long kl = (long)strlen(twant[k]);
+                int hits = 0;
+                for (int i = 0; i < dec.package.nr; i++) {
+                    const CxPackageResource *r = &dec.package.res[i];
+                    if (r->n == (int)kl && !memcmp(pslice + r->name, twant[k], (size_t)kl)) {
+                        hits++;
+                        unsigned wcrc = pf_crc32(pslice + r->data, (long)r->len);
+                        if (r->codec != 0 || r->rawlen != r->len || r->len <= 0 || r->crc != wcrc ||
+                            sy_sha256_hex((const char *)(pslice + r->data), (long)r->len, f_sha[k])) {
+                            cxpl_release(&dec.package, pf_pk_free);
+                            free(s);
+                            cx_fmt(detail, sizeof detail, "invalid F record %s (codec/len/crc): %s bytes=%lu sha256=%s",
+                                   twant[k], pkg, (unsigned long)n, sha);
+                            return 0;
+                        }
+                        f_len[k] = (long)r->len;
+                        if (k == 0) { mf_ptr = (const char *)(pslice + r->data); mf_len = (long)r->len; }
+                    }
+                }
+                if (hits != 1) {
+                    cxpl_release(&dec.package, pf_pk_free);
+                    free(s);
+                    cx_fmt(detail, sizeof detail, "missing %s: %s bytes=%lu sha256=%s", twant[k], pkg, (unsigned long)n, sha);
+                    return 0;
+                }
+            }
+            char row_so[160], row_m53[160];
+            if (cx_fmt(row_so, sizeof row_so, "tapemode.so\t%s\t%ld\n", f_sha[1], f_len[1]) ||
+                cx_fmt(row_m53, sizeof row_m53, "m53.tapeslice\t%s\t%ld\n", f_sha[2], f_len[2]) ||
+                tx_find(mf_ptr, mf_len, row_so, (long)strlen(row_so)) < 0 ||
+                tx_find(mf_ptr, mf_len, row_m53, (long)strlen(row_m53)) < 0) {
+                cxpl_release(&dec.package, pf_pk_free);
+                free(s);
+                cx_fmt(detail, sizeof detail, "tape manifest SHA mismatch in %s bytes=%lu sha256=%s",
+                       pkg, (unsigned long)n, sha);
+                return 0;
+            }
+            const char *slash = strrchr(pkg, '/');
+            if (slash) {
+                char outdir[4400], tdir[4400], trec[4400];
+                long dlen = (long)(slash - pkg);
+                if (dlen > 0 && dlen < (long)sizeof outdir &&
+                    !mm_copy(outdir, (long)sizeof outdir, pkg, dlen)) {
+                    outdir[dlen] = 0;
+                    if (!cx_fmt(tdir, sizeof tdir, "%s/p3-run/tape/lnx-x86_64", outdir) &&
+                        !cx_fmt(trec, sizeof trec, "%s/receipt.tsv", tdir) &&
+                        sy_exists(tdir) == 1) {
+                        static const char *tfiles[3] = {"manifest.tsv", "tapemode.so", "m53.tapeslice"};
+                        if (sy_exists(trec) != 1) {
+                            cxpl_release(&dec.package, pf_pk_free);
+                            free(s);
+                            cx_fmt(detail, sizeof detail, "missing tape receipt %s", trec);
+                            return 0;
+                        }
+                        for (k = 0; k < 3; k++) {
+                            char fp[4400], dsha[65];
+                            size_t dn = 0;
+                            char *db = 0;
+                            if (cx_fmt(fp, sizeof fp, "%s/%s", tdir, tfiles[k]) ||
+                                !(db = cx_read(fp, &dn)) ||
+                                (long)dn != f_len[k] ||
+                                sy_sha256_hex(db, (long)dn, dsha) ||
+                                strcmp(dsha, f_sha[k]) != 0) {
+                                free(db);
+                                cxpl_release(&dec.package, pf_pk_free);
+                                free(s);
+                                cx_fmt(detail, sizeof detail, "embedded %s differs from chain tape build %s", twant[k], fp);
+                                return 0;
+                            }
+                            free(db);
+                        }
+                    }
+                }
+            }
+        }
+    }
+    cxpl_release(&dec.package, pf_pk_free);
     free(s);
     return 1;
 }

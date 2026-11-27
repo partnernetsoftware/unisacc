@@ -804,6 +804,11 @@ static int pc_gate_waive_reason(const char *gate, char *why_out, size_t wcap) {
                     why_out[0] = 0;
                     return 0;
                 }
+                if (tx_eqz(gate, "genall") || tx_eqz(gate, "gen-all")) {
+                    why_out[0] = 0;
+                    sy_eprintf("precommit: REFUSE genall-waive-forbidden gate=genall (genall has no DEFERRED or WAIVE escape; timeout or error = refuse)\n");
+                    return 0;
+                }
                 return 1;
             }
         }
@@ -1423,6 +1428,16 @@ static int pc_handle_gate_unavailable(const char *gate, const char *unavail_tag,
                    unavail_tag, detail ? detail : "", rerun_cmd);
     }
     fz_st = freeze_window_status(fz_owner, sizeof fz_owner);
+    if (tx_eqz(gate, "genall") || tx_eqz(gate, "gen-all")) {
+        (void)pc_gate_waive_reason(gate, waive_why, sizeof waive_why);
+        if (fz_st != 0) {
+            sy_eprintf("precommit: BLOCKED freeze-gate-unavailable gate=genall reason=%s (active build/freeze.tsv window requires fail-closed verification; rerun: %s)\n",
+                       reason, rerun_cmd);
+        }
+        sy_eprintf("precommit: BLOCKED genall-no-deferred-escape gate=genall reason=%s (genall has no DEFERRED escape in build/deferred-gates.tsv; timeout or unavailable = refuse, merge commits included; rerun: %s)\n",
+                   reason, rerun_cmd);
+        return 1;
+    }
     if (fz_st != 0) {
         const char *who = sy_env("UNISACC_INTEGRATOR");
         if (fz_st == 1 && who && fz_owner[0] && tx_eqz(who, fz_owner) &&
@@ -2209,11 +2224,44 @@ static void dg_append_only(char *only_list, long cap, const char *name, int *too
     }
 }
 
+static int pc_is_merge_commit_in_progress(void) {
+    char *mv[] = {"git", "rev-parse", "-q", "--verify", "MERGE_HEAD", 0};
+    long mn = 0;
+    char *mo = slurp_run(mv, &mn);
+    int ok = (mo && mn >= 7);
+    if (mo) mm_free(mo);
+    return ok;
+}
+
+static char *pc_zbuf_concat(char *a, long *an, char *b, long bn) {
+    if (!b || bn <= 0) { if (b) mm_free(b); return a; }
+    if (!a || *an <= 0) { if (a) mm_free(a); *an = bn; return b; }
+    char *nb = mm_alloc((size_t)(*an + bn + 1));
+    if (!nb) { mm_free(b); return a; }
+    mm_copy(nb, (size_t)(*an + bn + 1), a, (size_t)(*an));
+    mm_copy(nb + *an, (size_t)(bn + 1), b, (size_t)bn);
+    *an += bn;
+    nb[*an] = 0;
+    mm_free(a);
+    mm_free(b);
+    return nb;
+}
+
 static int dg_genall_gate(const char *wt, const char *allz, long alln, const char *adz, long adn) {
     char gp[1200], only_list[512], scmd[2048];
     long pa = 0, gon = 0;
-    int hit = 0, tool_only = 1, blocked = 0, staged_total = 0, bound_s = 20, is_to = 0;
+    int hit = 0, tool_only = 1, blocked = 0, staged_total = 0, bound_s = 55, is_to = 0;
+    int is_merge = pc_is_merge_commit_in_progress();
     char *gout = 0;
+    {
+        const char *bs_env = sy_env("UNISACC_PRECOMMIT_GENALL_BOUND_S");
+        if (bs_env && bs_env[0]) {
+            int bv = 0;
+            for (int k = 0; bs_env[k] >= '0' && bs_env[k] <= '9' && k < 4; k++) bv = bv * 10 + (bs_env[k] - '0');
+            if (bv >= 1 && bv <= 55) bound_s = bv;
+        }
+    }
+    if (is_merge) tool_only = 0;
     if (pc_core_file_deleted("tools/gen-all-check.cx")) {
         sy_eprintf("precommit: BLOCKED genall-gate-deleted path=tools/gen-all-check.cx (core gen-all gate tool cannot be deleted)\n");
         return 1;
@@ -2262,13 +2310,12 @@ static int dg_genall_gate(const char *wt, const char *allz, long alln, const cha
         if (gex < 0) return 1;
         if (gex == 0) {
             if (freeze_window_active()) {
-                return pc_handle_gate_unavailable("genall", "GEN_ALL_GATE_UNAVAILABLE", 0, 20, staged_total,
+                return pc_handle_gate_unavailable("genall", "GEN_ALL_GATE_UNAVAILABLE", 0, bound_s, staged_total,
                                                   "(tools/gen-all-check.cx missing while prodgen inputs staged)",
                                                   "sh ./unisacc.com tools/gen-all-check.cx -- --root .");
             }
             return 0;
         }
-        if (dg_waived(wt, "gen-all")) return 0;
     }
     {
         const char *td = sy_tmpdir();
@@ -2415,8 +2462,20 @@ static int derive_gate(void) {
             sy_eprintf("precommit: BLOCKED git diff --cached (derive) failed\n");
             return 1;
         }
-        if (alln <= 0) { mm_free(allz); return 0; }
         adz = slurp(av2, &adn);
+        if (pc_is_merge_commit_in_progress()) {
+            char *mv1[] = {"git", "diff", "--cached", "--name-only", "-z", "MERGE_HEAD", 0};
+            char *mv2[] = {"git", "diff", "--cached", "--name-only", "--diff-filter=AD", "-z", "MERGE_HEAD", 0};
+            char *mv3[] = {"git", "diff", "--name-only", "-z", "HEAD", "MERGE_HEAD", 0};
+            long mn1 = 0, mn2 = 0, mn3 = 0;
+            char *mz1 = slurp_run(mv1, &mn1);
+            char *mz2 = slurp_run(mv2, &mn2);
+            char *mz3 = slurp_run(mv3, &mn3);
+            allz = pc_zbuf_concat(allz, &alln, mz1, mn1);
+            allz = pc_zbuf_concat(allz, &alln, mz3, mn3);
+            adz = pc_zbuf_concat(adz, &adn, mz2, mn2);
+        }
+        if (alln <= 0) { mm_free(allz); if (adz) mm_free(adz); return 0; }
     }
     {
         int dex = pc_exists_checked("derive", dp), tex = pc_exists_checked("derive", tp);
@@ -3813,8 +3872,8 @@ int main(int argc, char **argv) {
        repository that never had it (fixture) skips. */
     { long acn; char *acnames = gate_diff("affected-canary", &acn);
       if (!acnames) { sy_eprintf("precommit: BLOCKED git diff --cached (affected-canary read set) failed\n"); blocked++; }
-      else if (acn > 0 && sy_exists("tools/affected.cx") != 1) {
-          char *dv[] = {"git", "diff", "--cached", "--diff-filter=D", "--name-only", "--", "tools/affected.cx", 0}; long dn = 0; char *dd = slurp(dv, &dn);
+      else if (acn > 0 && (sy_exists("tools/affected.cx") != 1 || sy_exists("tests/batch-product-inputs.tsv") != 1)) {
+          char *dv[] = {"git", "diff", "--cached", "--diff-filter=D", "--name-only", "--", "tools/affected.cx", "tests/batch-product-inputs.tsv", 0}; long dn = 0; char *dd = slurp(dv, &dn);
           if (plan_dir) {}
           else if (!dd) { sy_eprintf("precommit: BLOCKED affected-canary cannot tell whether tools/affected.cx is deleted (git diff failed)\n"); blocked++; pc_mark_block("affected-canary", "affected-missing"); }
           else if (dn > 0) { sy_eprintf("precommit: BLOCKED affected-canary tools/affected.cx is deleted in this commit (the liveness canary cannot run)\n"); blocked++; pc_mark_block("affected-canary", "affected-missing"); }
@@ -3870,7 +3929,13 @@ int main(int argc, char **argv) {
        tools/check-env-semantics.cx must keep static UNISA_ and UNISACC_ read points in sync with tests/env-semantics.tsv. */
     { long esn; char *enames = gate_diff("env-semantics", &esn);
       if (!enames) { sy_eprintf("precommit: git diff --cached (env-semantics) failed\n"); return 1; }
-      if (esn > 0) {
+      if (esn > 0 && (sy_exists("tools/check-env-semantics.cx") != 1 || sy_exists("tests/env-semantics.tsv") != 1)) {
+          char *dv[] = {"git", "diff", "--cached", "--diff-filter=D", "--name-only", "--", "tools/check-env-semantics.cx", "tests/env-semantics.tsv", 0}; long dn = 0; char *dd = slurp(dv, &dn);
+          if (plan_dir) {}
+          else if (!dd || dn > 0) { sy_eprintf("precommit: BLOCKED env-semantics deleted in this commit\n"); blocked++; pc_mark_block("env-semantics", "env-semantics-drift"); }
+          else sy_eprintf("precommit: ENV_SEMANTICS skipped=1 reason=no-tools/check-env-semantics.cx (fixture repo)\n");
+          if (dd) mm_free(dd);
+      } else if (esn > 0) {
           char *erows; int b0 = blocked, es_rc, n_sum = 0, n_ok = 0; long eat = 0;
           cur_gate = "env-semantics"; slurp_okrc = 1; erows = slurp(esv, &rn); es_rc = slurp_last_rc; slurp_okrc = 0; cur_gate = 0;
           if (!erows) { sy_eprintf("precommit: tools/check-env-semantics.cx did not run (rc=%d)\n", es_rc); return 1; }

@@ -427,7 +427,7 @@ int main(void) {
             "printf 'int main(void){return 0;}\\n' > '%s/tools/gen-all-check.cx' && "
             "printf 'int main(void){return 0;}\\n' > '%s/tools/ledger-add.cx' && "
             "printf '# batches\\n' > '%s/tests/batches.tsv' && "
-            "cd '%s' && git init -q && git add exec/facts/derive.tsv tools/derive.cx tools/reg-manifest.cx tools/tables-gen.cx tools/gen-all-check.cx tools/ledger-add.cx tests/batches.tsv && "
+            "cd '%s' && git init -q -b main && git add exec/facts/derive.tsv tools/derive.cx tools/reg-manifest.cx tools/tables-gen.cx tools/gen-all-check.cx tools/ledger-add.cx tests/batches.tsv && "
             "git -c user.name=t -c user.email=t@t commit -q -m init",
             cwd, repo4, cwd, repo4, cwd, repo4, cwd, repo4, cwd, repo4, cwd, repo4,
             repo4, repo4, repo4, repo4, repo4, repo4, repo4, repo4)) cpd_abort("r4init");
@@ -510,7 +510,9 @@ int main(void) {
         ck(ok_tlib,
             "tlib-frozen-unavailable-does-not-bypass-tlib-api-gate: check-tlib-frozen failure still runs blocking tlib_api_gate");
 
-        /* 11e: Audit items 1 & 3 -- GATE_TIMEOUT vs UNAVAILABLE, non-freeze WARN DEFERRED_GATE + build/deferred-gates.tsv ledger, and chain-ready refusal */
+        /* 11e: Audit items 1 & 3 + Fable genall no-deferred-escape rule --
+         * derive timeout outside freeze still records DEFERRED_GATE + build/deferred-gates.tsv,
+         * while genall timeout NEVER defers (hard BLOCKED genall-no-deferred-escape, merge commits included) */
         if (cx_fmt(cmd, sizeof cmd,
             "cd '%s' && git reset -q && rm -rf pkgdemo build/deferred-gates.tsv .git/unisacc-deferred-gates.tsv && "
             "git rm -qf build/tlib-packages.tsv tools/check-tlib-frozen.cx tools/layer-api.cx && "
@@ -518,20 +520,24 @@ int main(void) {
             "printf 'links\\ttools/links.cx\\ttrue\\ttrue\\tbuild/links.tsv\\ttests/batches.tsv\\t1\\t10\\n' >> exec/facts/derive.tsv && "
             "cp '%s/tools/derive.cx' tools/derive.cx && "
             "mkdir -p include && printf '/* h */\\n' > include/a.h && "
-            "printf '#pragma unisa use sys.io\\n#pragma unisa use sys.env\\nint main(void){const char *m=sy_env(\"FAKE_GATE_RC\");if(m&&m[0]==49)return 142;if(m&&m[0]==50){sy_printf(\"GEN_CHECK\\\\tfacts-gen\\\\tERROR\\\\t5\\\\tboom\\\\nGEN_ALL_SUMMARY\\\\ttotal=1\\\\tpass=0\\\\tdiff=0\\\\terror=1\\\\tuncovered=0\\\\tms=5\\\\n\");return 2;}sy_printf(\"GEN_CHECK\\\\tfacts-gen\\\\tPASS\\\\t1\\\\t-\\\\nGEN_ALL_SUMMARY\\\\ttotal=1\\\\tpass=1\\\\tdiff=0\\\\terror=0\\\\tuncovered=0\\\\tms=1\\\\n\");return 0;}\\n' > '%s/genall-stub.cx' && "
+            "printf '#pragma unisa use sys.io\\n#pragma unisa use sys.env\\nint main(void){const char *m=sy_env(\"FAKE_GATE_RC\");const char *gm=sy_env(\"FAKE_GENALL_RC\");if(gm)m=gm;if(m&&m[0]==49)return 142;if(m&&m[0]==50){sy_printf(\"GEN_CHECK\\\\tfacts-gen\\\\tERROR\\\\t5\\\\tboom\\\\nGEN_ALL_SUMMARY\\\\ttotal=1\\\\tpass=0\\\\tdiff=0\\\\terror=1\\\\tuncovered=0\\\\tms=5\\\\n\");return 2;}if(m&&m[0]==51){sy_printf(\"GEN_CHECK\\\\tk2-gen2\\\\tDIFF\\\\t5\\\\texec/facts/k2-gen2.tsv\\\\nGEN_ALL_SUMMARY\\\\ttotal=46\\\\tpass=45\\\\tdiff=1\\\\terror=0\\\\tuncovered=0\\\\tms=5\\\\n\");return 1;}sy_printf(\"GEN_CHECK\\\\tfacts-gen\\\\tPASS\\\\t1\\\\t-\\\\nGEN_ALL_SUMMARY\\\\ttotal=1\\\\tpass=1\\\\tdiff=0\\\\terror=0\\\\tuncovered=0\\\\tms=1\\\\n\");return 0;}\\n' > '%s/genall-stub.cx' && "
             "cp '%s/genall-stub.cx' tools/gen-all-check.cx && "
             "git add exec/facts/derive.tsv tools/derive.cx tools/gen-all-check.cx include/a.h && "
             "git -c user.name=t -c user.email=t@t commit -q --no-verify -m setup-timeout && "
             "printf '# b-to\\n' >> tests/batches.tsv && printf '/* h2 */\\n' >> include/a.h && "
             "git add tests/batches.tsv include/a.h && "
+            "if FAKE_GATE_RC=1 UNISACC_PRECOMMIT_NO_ISOLATE=1 UNISACC_PRECOMMIT_SERIAL=1 sh ./unisacc.com tools/precommit.cx >/dev/null 2>&1; then echo FAIL_GENALL_TIMEOUT_ESCAPED; exit 1; fi; "
+            "out_gto=$(FAKE_GATE_RC=1 UNISACC_PRECOMMIT_NO_ISOLATE=1 UNISACC_PRECOMMIT_SERIAL=1 sh ./unisacc.com tools/precommit.cx 2>&1); "
+            "printf '%%s\\n' \"$out_gto\" | grep -q 'BLOCKED genall-no-deferred-escape gate=genall reason=GATE_TIMEOUT' || { echo FAIL_NO_GENALL_BLOCK_MSG; exit 1; }; "
+            "! grep -q 'genall' build/deferred-gates.tsv 2>/dev/null || { echo FAIL_GENALL_WROTE_DEFERRED; exit 1; }; "
+            "rm -rf build/deferred-gates.tsv .git/unisacc-deferred-gates.tsv && "
+            "git reset -q -- include/a.h && git checkout -q -- include/a.h && "
             "FAKE_GATE_RC=1 UNISACC_PRECOMMIT_NO_ISOLATE=1 UNISACC_PRECOMMIT_SERIAL=1 sh ./unisacc.com tools/precommit.cx",
             repo4, repo2, work, work)) cpd_abort("r4to");
         int rc_to = ckk_sh("check-precommit-derive", cmd, out, sizeof out);
         int ok_to = (rc_to == 0 &&
                      ckk_has(out, CPD_OUT, "GATE_TIMEOUT gate=derive") &&
-                     ckk_has(out, CPD_OUT, "GATE_TIMEOUT gate=genall") &&
-                     ckk_has(out, CPD_OUT, "WARN DEFERRED_GATE gate=derive reason=GATE_TIMEOUT") &&
-                     ckk_has(out, CPD_OUT, "WARN DEFERRED_GATE gate=genall reason=GATE_TIMEOUT"));
+                     ckk_has(out, CPD_OUT, "WARN DEFERRED_GATE gate=derive reason=GATE_TIMEOUT"));
 
         if (cx_fmt(cmd, sizeof cmd,
             "test -s '%s/build/deferred-gates.tsv' && "
@@ -540,8 +546,31 @@ int main(void) {
         int rc_cr1 = ckk_sh("check-precommit-derive", cmd, out, sizeof out);
         int ok_cr1 = (rc_cr1 != 0 && ckk_has(out, CPD_OUT, "deferred-gates-unverified"));
 
-        ck(ok_to && ok_cr1,
-            "timeout-emits-gate-timeout-records-deferred-ledger-and-chain-ready-fails: non-freeze timeout records build/deferred-gates.tsv and chain-ready 1-rev refuses");
+        /* Also test merge commit (MERGE_HEAD present) where parent 1 modified include/a.h and parent 2 modified tests/batches.tsv:
+         * dg_genall_gate MUST trigger on the merge commit and refuse on DIFF k2-gen2 or timeout! */
+        if (cx_fmt(cmd, sizeof cmd,
+            "cd '%s' && git reset -q && git checkout -q -- tests/batches.tsv && "
+            "rm -f build/deferred-gates.tsv .git/unisacc-deferred-gates.tsv && "
+            "MH=$(git rev-parse HEAD) && "
+            "printf '/* parent1-prodgen-edit */\\n' >> include/a.h && git add include/a.h && "
+            "git -c user.name=t -c user.email=t@t commit -q --no-verify -m p1-edit && "
+            "printf '%%s\\n' \"$MH\" > .git/MERGE_HEAD && "
+            "printf '# merge-side\\n' >> tests/batches.tsv && git add tests/batches.tsv && "
+            "out_mdiff=$(FAKE_GENALL_RC=3 UNISACC_PRECOMMIT_NO_ISOLATE=1 UNISACC_PRECOMMIT_SERIAL=1 sh ./unisacc.com tools/precommit.cx 2>&1); rc_mdiff=$?; "
+            "out_mto=$(FAKE_GENALL_RC=1 UNISACC_PRECOMMIT_NO_ISOLATE=1 UNISACC_PRECOMMIT_SERIAL=1 sh ./unisacc.com tools/precommit.cx 2>&1); rc_mto=$?; "
+            "rm -f .git/MERGE_HEAD && git reset -q --hard \"$MH\" && "
+            "printf '# b-to\\n' >> tests/batches.tsv && printf '/* h2 */\\n' >> include/a.h && "
+            "git add tests/batches.tsv include/a.h && "
+            "[ \"$rc_mdiff\" -ne 0 ] && [ \"$rc_mto\" -ne 0 ] && "
+            "printf '%%s\\n' \"$out_mdiff\" | grep -q 'BLOCKED product-table-drift GEN_CHECK\tk2-gen2\tDIFF' && "
+            "printf '%%s\\n' \"$out_mto\" | grep -q 'BLOCKED genall-no-deferred-escape gate=genall reason=GATE_TIMEOUT' && "
+            "echo MERGE_GENALL_REFUSED_OK",
+            repo4)) cpd_abort("r4mgen");
+        int rc_mgen = ckk_sh("check-precommit-derive", cmd, out, sizeof out);
+        int ok_mgen = (rc_mgen == 0 && ckk_has(out, CPD_OUT, "MERGE_GENALL_REFUSED_OK"));
+
+        ck(ok_to && ok_cr1 && ok_mgen,
+            "timeout-emits-gate-timeout-records-deferred-ledger-and-chain-ready-fails: non-freeze derive timeout records build/deferred-gates.tsv while genall timeout/DIFF refuses immediately including merge commits");
 
         /* 11f: Audit items 1, 2, 3, 6 -- active build/freeze.tsv makes GATE_TIMEOUT, *_GATE_UNAVAILABLE, gen-all ERROR-without-DIFF, and missing core tool fail-closed */
         if (cx_fmt(cmd, sizeof cmd,
@@ -774,14 +803,14 @@ int main(void) {
             "printf '/* s0 */\\n' >> include/a.h && printf '# s0\\n' >> tests/batches.tsv && printf 'int s0_x;\\n' > tests/s0_mod.cx && "
             "git add src include/a.h tests/batches.tsv tests/s0_mod.cx && "
             "! FAKE_GATE_RC=1 UNISACC_PRECOMMIT_NO_ISOLATE=1 UNISACC_INTEGRATOR=cdx UNISACC_PRECOMMIT_SERIAL=1 sh ./unisacc.com tools/precommit.cx >/dev/null 2>&1 && "
-            "FAKE_GATE_RC=1 UNISACC_PRECOMMIT_NO_ISOLATE=1 UNISACC_INTEGRATOR=cdx UNISACC_GATE_WAIVE='derive:s0-merge-1000,genall:s0-merge-1000,tlibfrozen:s0-merge-1000,lint:s0-merge-1000,ratchets:s0-merge-1000' UNISACC_PRECOMMIT_SERIAL=1 sh ./unisacc.com tools/precommit.cx && "
+            "! FAKE_GATE_RC=1 UNISACC_PRECOMMIT_NO_ISOLATE=1 UNISACC_INTEGRATOR=cdx UNISACC_GATE_WAIVE='derive:s0-merge-1000,genall:s0-merge-1000,tlibfrozen:s0-merge-1000,lint:s0-merge-1000,ratchets:s0-merge-1000' UNISACC_PRECOMMIT_SERIAL=1 sh ./unisacc.com tools/precommit.cx >/dev/null 2>&1 && "
+            "FAKE_GATE_RC=1 FAKE_GENALL_RC=0 UNISACC_PRECOMMIT_NO_ISOLATE=1 UNISACC_INTEGRATOR=cdx UNISACC_GATE_WAIVE='derive:s0-merge-1000,tlibfrozen:s0-merge-1000,lint:s0-merge-1000,ratchets:s0-merge-1000' UNISACC_PRECOMMIT_SERIAL=1 sh ./unisacc.com tools/precommit.cx && "
             "git -c user.name=t -c user.email=t@t commit -q --no-verify -m s0-merge-1000 && "
             "! (cd '%s' && sh ./unisacc.com tools/chain-ready.cx -- --repo '%s' --only 1-rev >/dev/null 2>&1) && "
             "cp '%s/tlib-stub.cx' tools/check-tlib-frozen.cx && "
             "ln -sf '%s/tools/cx-lint.cx' tools/cx-lint.cx && "
             "printf '#pragma unisa use sys.io\\nint main(void){sy_printf(\"RATCHETS\\\\tok=13\\\\tfail=0\\\\n\");return 0;}\\n' > tools/ratchets.cx && "
             "sh ./unisacc.com tools/precommit.cx -- --verify-deferred --gate derive && "
-            "sh ./unisacc.com tools/precommit.cx -- --verify-deferred --gate genall && "
             "sh ./unisacc.com tools/precommit.cx -- --verify-deferred --gate tlibfrozen && "
             "sh ./unisacc.com tools/precommit.cx -- --verify-deferred --gate lint && "
             "! (cd '%s' && sh ./unisacc.com tools/chain-ready.cx -- --repo '%s' --only 1-rev >/dev/null 2>&1) && "
@@ -793,7 +822,6 @@ int main(void) {
         int rc_s0 = ckk_sh("check-precommit-derive", cmd, out, sizeof out);
         int ok_s0 = (rc_s0 == 0 &&
                      ckk_has(out, CPD_OUT, "VERIFY_DEFERRED\tgate=derive\tstatus=PASS") &&
-                     ckk_has(out, CPD_OUT, "VERIFY_DEFERRED\tgate=genall\tstatus=PASS") &&
                      ckk_has(out, CPD_OUT, "VERIFY_DEFERRED\tgate=tlibfrozen\tstatus=PASS") &&
                      ckk_has(out, CPD_OUT, "VERIFY_DEFERRED\tgate=lint\tstatus=PASS") &&
                      ckk_has(out, CPD_OUT, "VERIFY_DEFERRED\tgate=ratchets\tstatus=PASS") &&
@@ -801,9 +829,9 @@ int main(void) {
                      ckk_has(out, CPD_OUT, "READY\tyes"));
         if (!ok_s0) fprintf(stderr, "11k FAIL rc=%d out:\n%s\n", rc_s0, out);
         ck(ok_s0,
-            "s0-1000-file-merge-waive-and-verify-deferred-per-gate-turns-chain-ready-green: 1000-file merge waived in freeze records dual anchors, per-gate verify-deferred on HEAD clears both with no WARN");
+            "s0-1000-file-merge-waive-and-verify-deferred-per-gate-turns-chain-ready-green: 1000-file merge waived in freeze (genall waive refused, must pass live) records dual anchors, per-gate verify-deferred on HEAD clears both with no WARN");
 
-        /* 11l (Gatekeeper items 5, 3, 4, 13 + overlong waive reason named refusal): */
+        /* 11l (Gatekeeper items 5, 3, 4, 13 + overlong waive reason named refusal + genall waive forbidden): */
         if (cx_fmt(cmd, sizeof cmd,
             "cd '%s' && rm -rf build/deferred-gates.tsv .git/unisacc-deferred-gates.tsv && "
             "sh ./unisacc.com tools/precommit.cx -- --verify-deferred --gate bogus >/dev/null 2>&1; "
@@ -812,21 +840,20 @@ int main(void) {
             "git add include/a.h tests/batches.tsv && "
             "if FAKE_GATE_RC=1 UNISACC_PRECOMMIT_NO_ISOLATE=1 UNISACC_INTEGRATOR=cdx UNISACC_GATE_WAIVE='derive:only-derive' UNISACC_PRECOMMIT_SERIAL=1 sh ./unisacc.com tools/precommit.cx >/dev/null 2>&1; then echo FAIL_4_PARTIAL_WAIVE; exit 1; fi; "
             "rm -rf build/deferred-gates.tsv .git/unisacc-deferred-gates.tsv && "
-            "if FAKE_GATE_RC=1 UNISACC_PRECOMMIT_NO_ISOLATE=1 UNISACC_INTEGRATOR=cdx UNISACC_GATE_WAIVE='derive:   ,genall:   ' UNISACC_PRECOMMIT_SERIAL=1 sh ./unisacc.com tools/precommit.cx >/dev/null 2>&1; then echo FAIL_5_WS_WAIVE; exit 1; fi; "
-            "if FAKE_GATE_RC=1 UNISACC_PRECOMMIT_NO_ISOLATE=1 UNISACC_INTEGRATOR=cdx UNISACC_GATE_WAIVE=\"$(printf 'derive:a\\nb,genall:ok')\" UNISACC_PRECOMMIT_SERIAL=1 sh ./unisacc.com tools/precommit.cx >/dev/null 2>&1; then echo FAIL_5_NL_WAIVE; exit 1; fi; "
+            "if FAKE_GATE_RC=1 UNISACC_PRECOMMIT_NO_ISOLATE=1 UNISACC_INTEGRATOR=cdx UNISACC_GATE_WAIVE='derive:   ' UNISACC_PRECOMMIT_SERIAL=1 sh ./unisacc.com tools/precommit.cx >/dev/null 2>&1; then echo FAIL_5_WS_WAIVE; exit 1; fi; "
+            "if FAKE_GATE_RC=1 UNISACC_PRECOMMIT_NO_ISOLATE=1 UNISACC_INTEGRATOR=cdx UNISACC_GATE_WAIVE=\"$(printf 'derive:a\\nb')\" UNISACC_PRECOMMIT_SERIAL=1 sh ./unisacc.com tools/precommit.cx >/dev/null 2>&1; then echo FAIL_5_NL_WAIVE; exit 1; fi; "
             "longr=$(printf 'a%%.0s' $(seq 1 135)); "
-            "out_long=$(FAKE_GATE_RC=1 UNISACC_PRECOMMIT_NO_ISOLATE=1 UNISACC_INTEGRATOR=cdx UNISACC_GATE_WAIVE=\"derive:$longr,genall:ok\" UNISACC_PRECOMMIT_SERIAL=1 sh ./unisacc.com tools/precommit.cx 2>&1); "
+            "out_long=$(FAKE_GATE_RC=1 FAKE_GENALL_RC=0 UNISACC_PRECOMMIT_NO_ISOLATE=1 UNISACC_INTEGRATOR=cdx UNISACC_GATE_WAIVE=\"derive:$longr\" UNISACC_PRECOMMIT_SERIAL=1 sh ./unisacc.com tools/precommit.cx 2>&1); "
             "if [ $? -eq 0 ]; then echo FAIL_OVERLONG_WAIVE_ALLOWED; exit 1; fi; "
             "printf '%%s\\n' \"$out_long\" | grep -q 'REFUSE waive-reason-too-long gate=derive len=135 max=127' || { echo FAIL_OVERLONG_MSG; printf '%%s\\n' \"$out_long\"; exit 1; }; "
             "rm -rf build/deferred-gates.tsv .git/unisacc-deferred-gates.tsv && "
-            "FAKE_GATE_RC=1 UNISACC_PRECOMMIT_NO_ISOLATE=1 UNISACC_INTEGRATOR=cdx UNISACC_GATE_WAIVE=\"$(printf 'derive:a\\tb,genall:c\\td')\" UNISACC_PRECOMMIT_SERIAL=1 sh ./unisacc.com tools/precommit.cx && "
+            "FAKE_GATE_RC=1 FAKE_GENALL_RC=0 UNISACC_PRECOMMIT_NO_ISOLATE=1 UNISACC_INTEGRATOR=cdx UNISACC_GATE_WAIVE=\"$(printf 'derive:a\\tb')\" UNISACC_PRECOMMIT_SERIAL=1 sh ./unisacc.com tools/precommit.cx && "
             "git -c user.name=t -c user.email=t@t commit -q --no-verify -m gk-tab-waive && "
-            "test \"$(wc -l < build/deferred-gates.tsv)\" = 2 && "
+            "test \"$(wc -l < build/deferred-gates.tsv)\" = 1 && "
             "while IFS= read -r ln; do nf=$(printf '%%s\\n' \"$ln\" | tr -cd '\\t' | wc -c); [ \"$nf\" -eq 8 ] || { echo FAIL_5_COLS_$nf; exit 1; }; done < build/deferred-gates.tsv && "
             "if FAKE_GATE_RC=1 sh ./unisacc.com tools/precommit.cx -- --verify-deferred --gate derive >/dev/null 2>&1; then echo FAIL_3_VERIFY_PASS_ON_FAIL; exit 1; fi; "
-            "test \"$(wc -l < build/deferred-gates.tsv)\" = 2 && "
+            "test \"$(wc -l < build/deferred-gates.tsv)\" = 1 && "
             "sh ./unisacc.com tools/precommit.cx -- --verify-deferred --gate derive && "
-            "sh ./unisacc.com tools/precommit.cx -- --verify-deferred --gate genall && "
             "(cd '%s' && sh ./unisacc.com tools/chain-ready.cx -- --repo '%s' --only 1-rev)",
             repo4, cwd, repo4)) cpd_abort("r4gkl");
         {

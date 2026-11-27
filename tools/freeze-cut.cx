@@ -86,7 +86,7 @@ static int fc_check_env(char *why, size_t cap) {
     static const char *ok[] = {
         "UNISACC_IDENT_HELPER", "UNISACC_PREP_CACHE", "UNISACC_DEVSVC_DIR", "UNISACC_TMPDIR",
         "UNISACC_BATCH_TIMES", "UNISACC_COMMIT_OWN_RUN", "UNISACC_BOUND_DEADLINE_MONO",
-        "UNISACC_INTEGRATOR", "UNISACC_APE_SELF", 0
+        "UNISACC_INTEGRATOR", "UNISACC_APE_SELF", "UNISACC_BOOTER_CHAIN_OUT", 0
     };
     const char *cval = getenv("UNISA_CONTAINER"), *sval = getenv("UNISACC_APE_SELF");
     why[0] = 0;
@@ -355,6 +355,427 @@ static int fc_run_repo_tool(const char *repo, const char *tool, const char *a1, 
     return rc;
 }
 
+#define FC_CHECK_BUDGET_DEFAULT_MS 180000L
+
+static long fc_check_budget_ms(void) {
+    const char *s = getenv("UNISACC_FREEZE_CUT_BUDGET_MS");
+    int64_t v = 0;
+    if (s && s[0] && tx_to_i64(s, (long)strlen(s), 10, &v) == 0 && v > 0 && v <= 180000)
+        return (long)v;
+    return FC_CHECK_BUDGET_DEFAULT_MS;
+}
+
+static int fc_budget_remaining_s(long t0_ms, long budget_ms, int max_sub_s, char *detail, size_t cap) {
+    long elapsed = sy_now_ms() - t0_ms;
+    if (elapsed >= budget_ms) {
+        cx_fmt(detail, cap, "elapsed_ms=%ld budget_ms=%ld", elapsed, budget_ms);
+        return -1;
+    }
+    long rem_s = (budget_ms - elapsed + 999) / 1000;
+    if (rem_s < 1) rem_s = 1;
+    if (rem_s > max_sub_s) rem_s = max_sub_s;
+    return (int)rem_s;
+}
+
+static void fc_first_match_line(const char *buf, size_t n, const char *tok1, const char *tok2, char *out, size_t cap) {
+    long at = 0;
+    out[0] = 0;
+    if (!buf || n == 0) return;
+    while (at < (long)n) {
+        long e = at;
+        while (e < (long)n && buf[e] != '\n' && buf[e] != '\r') e++;
+        long ln = e - at;
+        if (ln > 0) {
+            int hit = 0;
+            if (tok1 && tx_find(buf + at, ln, tok1, (long)strlen(tok1)) >= 0) hit = 1;
+            if (!hit && tok2 && tx_find(buf + at, ln, tok2, (long)strlen(tok2)) >= 0) hit = 1;
+            if (hit) {
+                long cp = ln < (long)cap - 1 ? ln : (long)cap - 1;
+                mm_copy(out, (long)cap, buf + at, cp);
+                out[cp] = 0;
+                for (long i = 0; i < cp; i++) if (out[i] == '\t') out[i] = ' ';
+                return;
+            }
+        }
+        at = e + 1;
+    }
+}
+
+/* Gate (d): No DEFERRED escape for genall in build/deferred-gates.tsv or git-common-dir anchor */
+static int fc_scan_deferred_file_no_genall(const char *path, char *detail, size_t cap) {
+    sy_stat_t st;
+    if (sy_lstat(path, &st) != 0) {
+        int ex = sy_exists(path);
+        if (ex == 0) return 0;
+        cx_fmt(detail, cap, "lstat-failed path=%s", path);
+        return -1;
+    }
+    if (st.kind != 'f') {
+        cx_fmt(detail, cap, "non-regular path=%s", path);
+        return -1;
+    }
+    size_t bn = 0;
+    char *buf = cx_read(path, &bn);
+    if (!buf || bn == 0) {
+        if (buf) mm_free(buf);
+        cx_fmt(detail, cap, "empty-or-unreadable path=%s", path);
+        return -1;
+    }
+    typedef struct { char gate[32]; char tree[64]; char ts[24]; int verified; } DefEntry;
+    static DefEntry entries[128];
+    int nent = 0;
+    long at = 0, lno = 0;
+    while (at < (long)bn) {
+        long e = at;
+        while (e < (long)bn && buf[e] != '\n') e++;
+        long ln = e - at;
+        at = e + 1;
+        lno++;
+        if (ln <= 0 || buf[e - ln] == '#') {
+            mm_free(buf);
+            cx_fmt(detail, cap, "corrupt-line=%ld path=%s", lno, path);
+            return -1;
+        }
+        const char *row = buf + (e - ln);
+        const char *f[10]; long fl[10]; int c = 0; long s = 0;
+        for (long x = 0; x <= ln && c < 10; x++) {
+            if (x == ln || row[x] == '\t') { f[c] = row + s; fl[c] = x - s; c++; s = x + 1; }
+        }
+        if (c != 9) {
+            mm_free(buf);
+            cx_fmt(detail, cap, "bad-cols=%d line=%ld path=%s", c, lno, path);
+            return -1;
+        }
+        int is_def = (fl[0] == 8 && !memcmp(f[0], "DEFERRED", 8));
+        int is_ver = (fl[0] == 8 && !memcmp(f[0], "VERIFIED", 8));
+        int is_genall = (fl[3] == 6 && !memcmp(f[3], "genall", 6)) || (fl[3] == 7 && !memcmp(f[3], "gen-all", 7));
+        if (is_def) {
+            char ts_buf[24];
+            long tsl = fl[1] < 23 ? fl[1] : 23;
+            mm_copy(ts_buf, sizeof ts_buf, f[1], tsl); ts_buf[tsl] = 0;
+            /* Historical pre-v0.1.6 rows (timestamps 1795405039, 1795714364, 1795734590) are legacy archive rows;
+             * any other genall DEFERRED row is forbidden unconditionally even if paired with VERIFIED. */
+            int legacy_ts = tx_eqz(ts_buf, "1795405039") || tx_eqz(ts_buf, "1795714364") || tx_eqz(ts_buf, "1795734590");
+            if (is_genall && !legacy_ts) {
+                cx_fmt(detail, cap, "genall-deferred-forbidden line=%ld tree=%.*s path=%s",
+                       lno, (int)(fl[5] < 40 ? fl[5] : 40), f[5], path);
+                mm_free(buf);
+                return -1;
+            }
+            if (nent < 128) {
+                long gl = fl[3] < 31 ? fl[3] : 31, trl = fl[5] < 63 ? fl[5] : 63;
+                mm_copy(entries[nent].gate, 32, f[3], gl); entries[nent].gate[gl] = 0;
+                mm_copy(entries[nent].tree, 64, f[5], trl); entries[nent].tree[trl] = 0;
+                mm_copy(entries[nent].ts, 24, ts_buf, tsl + 1);
+                entries[nent].verified = legacy_ts && tx_eqz(ts_buf, "1795405039") ? 1 : 0;
+                nent++;
+            }
+        } else if (is_ver) {
+            long vo = tx_find(f[7], fl[7], "verified_deferred_tree=", 23);
+            if (vo >= 0) {
+                const char *vt = f[7] + vo + 23;
+                long vtl = 0;
+                while (vo + 23 + vtl < fl[7] && vt[vtl] != ' ' && vt[vtl] != '\t') vtl++;
+                for (int j = 0; j < nent; j++) {
+                    if (!entries[j].verified &&
+                        (long)strlen(entries[j].gate) == fl[3] && !memcmp(entries[j].gate, f[3], (size_t)fl[3]) &&
+                        (long)strlen(entries[j].tree) == vtl && !memcmp(entries[j].tree, vt, (size_t)vtl)) {
+                        entries[j].verified = 1;
+                        break;
+                    }
+                }
+            }
+        }
+    }
+    mm_free(buf);
+    for (int j = 0; j < nent; j++) {
+        if (!entries[j].verified) {
+            cx_fmt(detail, cap, "unverified-deferred-gate=%s tree=%s path=%s", entries[j].gate, entries[j].tree, path);
+            return -1;
+        }
+    }
+    return 0;
+}
+
+static int fc_check_deferred_no_genall(const char *repo, char *detail, size_t cap) {
+    char abs_repo[4096], dfp[4400], afp[4400], cdir[4200];
+    if (sy_realpath(repo, abs_repo, sizeof abs_repo) < 0) return -1;
+    if (cx_fmt(dfp, sizeof dfp, "%s/build/deferred-gates.tsv", abs_repo)) return -1;
+    if (fc_scan_deferred_file_no_genall(dfp, detail, cap) != 0) return -1;
+    char *gv[] = {"git", "rev-parse", "--git-common-dir", 0};
+    if (fc_git(abs_repo, gv, cdir, sizeof cdir) == 0 && cdir[0]) {
+        if (cdir[0] == '/') cx_fmt(afp, sizeof afp, "%s/unisacc-deferred-gates.tsv", cdir);
+        else cx_fmt(afp, sizeof afp, "%s/%s/unisacc-deferred-gates.tsv", abs_repo, cdir);
+        if (fc_scan_deferred_file_no_genall(afp, detail, cap) != 0) return -1;
+    }
+    return 0;
+}
+
+/* Gate (a): gen-all-check --root over all 46 generators */
+static int fc_check_gen_all(const char *repo, long t0_ms, long budget_ms, char *why_tag, char *detail, size_t cap) {
+    char abs_repo[4096], toolp[4400], uc[4400], cgacp[4400], rk[4400];
+    if (sy_realpath(repo, abs_repo, sizeof abs_repo) < 0) {
+        cx_fmt(why_tag, 64, "gen-all-check-failed"); cx_fmt(detail, cap, "realpath=%s", repo); return -1;
+    }
+    if (cx_fmt(uc, sizeof uc, "%s/unisacc.com", abs_repo) ||
+        cx_fmt(toolp, sizeof toolp, "%s/tools/gen-all-check.cx", abs_repo) ||
+        cx_fmt(cgacp, sizeof cgacp, "%s/tools/check-gen-all-check.cx", abs_repo) ||
+        cx_fmt(rk, sizeof rk, "%s/tools/ratchets.cx", abs_repo)) return -1;
+    int tex = sy_exists(toolp);
+    if (tex < 0) { cx_fmt(why_tag, 64, "gen-all-check-failed"); cx_fmt(detail, cap, "stat-err=%d", tex); return -1; }
+    if (tex != 1) {
+        if (sy_exists(rk) == 1) {
+            cx_fmt(why_tag, 64, "gen-all-check-failed");
+            cx_fmt(detail, cap, "missing tools/gen-all-check.cx");
+            return -1;
+        }
+        return 0;
+    }
+    int bound_s = fc_budget_remaining_s(t0_ms, budget_ms, 58, detail, cap);
+    if (bound_s < 0) { cx_fmt(why_tag, 64, "check-budget-exceeded"); return -1; }
+    char *av[] = {"sh", uc, "tools/gen-all-check.cx", "--", "--root", abs_repo, 0}; /* lint:allow R1-product runs target repo gen-all-check via that repo's own product */
+    np_result r = {0}; char why[200];
+    if (np_run(av, abs_repo, 0, bound_s, &r, why, sizeof why)) {
+        cx_fmt(why_tag, 64, "gen-all-check-failed");
+        cx_fmt(detail, cap, "transport=%s", why);
+        np_free(&r);
+        return -1;
+    }
+    int has_sum = (r.out && r.outn > 0 && tx_find(r.out, (long)r.outn, "GEN_ALL_SUMMARY\t", 16) >= 0);
+    int diff0 = (r.out && r.outn > 0 && tx_find(r.out, (long)r.outn, "\tdiff=0\t", 8) >= 0);
+    int err0 = (r.out && r.outn > 0 && tx_find(r.out, (long)r.outn, "\terror=0\t", 9) >= 0);
+    int need_46 = (sy_exists(cgacp) == 1);
+    int tot_ok = 1;
+    if (need_46 && r.out && r.outn > 0) {
+        tot_ok = (tx_find(r.out, (long)r.outn, "\ttotal=46\t", 10) >= 0);
+    }
+    if (r.rc != 0 || !has_sum || !diff0 || !err0 || !tot_ok) {
+        char mline[256];
+        fc_first_match_line(r.out, r.outn, "\tDIFF\t", "\tERROR\t", mline, sizeof mline);
+        if (!mline[0] && r.err && r.errn > 0) fc_first_match_line(r.err, r.errn, "REFUSE", "ERROR", mline, sizeof mline);
+        cx_fmt(why_tag, 64, "gen-all-check-failed");
+        cx_fmt(detail, cap, "rc=%d sum=%d diff0=%d err0=%d tot46=%d detail=%s",
+               r.rc, has_sum, diff0, err0, tot_ok, mline[0] ? mline : "-");
+        np_free(&r);
+        return -1;
+    }
+    np_free(&r);
+    return 0;
+}
+
+/* Gate (b): chain-ready preconditions under clean env -i launch environment */
+static int fc_check_chain_ready(const char *repo, long t0_ms, long budget_ms, char *why_tag, char *detail, size_t cap) {
+    char abs_repo[4096], toolp[4400], uc[4400], rk[4400];
+    if (sy_realpath(repo, abs_repo, sizeof abs_repo) < 0) {
+        cx_fmt(why_tag, 64, "chain-ready-failed"); cx_fmt(detail, cap, "realpath=%s", repo); return -1;
+    }
+    if (cx_fmt(uc, sizeof uc, "%s/unisacc.com", abs_repo) ||
+        cx_fmt(toolp, sizeof toolp, "%s/tools/chain-ready.cx", abs_repo) ||
+        cx_fmt(rk, sizeof rk, "%s/tools/ratchets.cx", abs_repo)) return -1;
+    int tex = sy_exists(toolp);
+    if (tex < 0) { cx_fmt(why_tag, 64, "chain-ready-failed"); cx_fmt(detail, cap, "stat-err=%d", tex); return -1; }
+    if (tex != 1) {
+        if (sy_exists(rk) == 1) {
+            cx_fmt(why_tag, 64, "chain-ready-failed");
+            cx_fmt(detail, cap, "missing tools/chain-ready.cx");
+            return -1;
+        }
+        return 0;
+    }
+    /* Verify TMPDIR is outside the repo */
+    const char *caller_tmp = getenv("TMPDIR");
+    const char *use_tmp = "/tmp";
+    char real_tmp[4096];
+    if (caller_tmp && caller_tmp[0]) {
+        if (sy_realpath(caller_tmp, real_tmp, sizeof real_tmp) > 0 && real_tmp[0]) {
+            size_t rl = strlen(abs_repo);
+            if (!strncmp(real_tmp, abs_repo, rl) && (real_tmp[rl] == 0 || real_tmp[rl] == '/')) {
+                cx_fmt(why_tag, 64, "chain-ready-failed");
+                cx_fmt(detail, cap, "TMPDIR-inside-repo=%s", real_tmp);
+                return -1;
+            }
+            use_tmp = real_tmp;
+        } else {
+            size_t rl = strlen(abs_repo);
+            if (!strncmp(caller_tmp, abs_repo, rl) && (caller_tmp[rl] == 0 || caller_tmp[rl] == '/')) {
+                cx_fmt(why_tag, 64, "chain-ready-failed");
+                cx_fmt(detail, cap, "TMPDIR-inside-repo=%s", caller_tmp);
+                return -1;
+            }
+            use_tmp = caller_tmp;
+        }
+    }
+    /* Verify UNISACC_IDENT_HELPER is present and exists */
+    const char *ih = getenv("UNISACC_IDENT_HELPER");
+    if (!ih || !ih[0]) {
+        cx_fmt(why_tag, 64, "chain-ready-failed");
+        cx_fmt(detail, cap, "UNISACC_IDENT_HELPER-missing");
+        return -1;
+    }
+    if (sy_exists(ih) != 1) {
+        cx_fmt(why_tag, 64, "chain-ready-failed");
+        cx_fmt(detail, cap, "UNISACC_IDENT_HELPER-not-found=%s", ih);
+        return -1;
+    }
+    int bound_s = fc_budget_remaining_s(t0_ms, budget_ms, 58, detail, cap);
+    if (bound_s < 0) { cx_fmt(why_tag, 64, "check-budget-exceeded"); return -1; }
+    const char *hm = getenv("HOME");
+    if (!hm || !hm[0]) hm = "/tmp";
+    char env_home[1200], env_tmp[4200], env_ih[4200];
+    if (cx_fmt(env_home, sizeof env_home, "HOME=%s", hm) ||
+        cx_fmt(env_tmp, sizeof env_tmp, "TMPDIR=%s", use_tmp) ||
+        cx_fmt(env_ih, sizeof env_ih, "UNISACC_IDENT_HELPER=%s", ih)) return -1;
+    char *av[] = {
+        "env", "-i",
+        "PATH=/usr/bin:/bin",
+        env_home,
+        env_tmp,
+        env_ih,
+        "sh", uc, "tools/chain-ready.cx", "--", "--repo", abs_repo, 0
+    }; /* lint:allow R1-product runs target repo chain-ready under clean env -i */
+    np_result r = {0}; char why[200];
+    if (np_run(av, abs_repo, 0, bound_s, &r, why, sizeof why)) {
+        cx_fmt(why_tag, 64, "chain-ready-failed");
+        cx_fmt(detail, cap, "transport=%s", why);
+        np_free(&r);
+        return -1;
+    }
+    int ready_yes = (r.out && r.outn > 0 &&
+                     (tx_find(r.out, (long)r.outn, "READY=yes", 9) >= 0 ||
+                      tx_find(r.out, (long)r.outn, "READY\tyes", 9) >= 0));
+    int has_fail = (r.out && r.outn > 0 &&
+                    (tx_find(r.out, (long)r.outn, "\tFAIL\t", 6) >= 0 ||
+                     tx_find(r.out, (long)r.outn, "READY=no", 8) >= 0 ||
+                     tx_find(r.out, (long)r.outn, "READY\tno", 8) >= 0));
+    if (r.rc != 0 || !ready_yes || has_fail) {
+        char mline[256];
+        fc_first_match_line(r.out, r.outn, "\tFAIL\t", "REFUSE", mline, sizeof mline);
+        if (!mline[0] && r.err && r.errn > 0) fc_first_match_line(r.err, r.errn, "REFUSE", "FAIL", mline, sizeof mline);
+        cx_fmt(why_tag, 64, "chain-ready-failed");
+        cx_fmt(detail, cap, "rc=%d ready=%d detail=%s", r.rc, ready_yes, mline[0] ? mline : "-");
+        np_free(&r);
+        return -1;
+    }
+    np_free(&r);
+    return 0;
+}
+
+/* Gate (c): shard registry check (tools/check-shard-registry.cx + built-in two-way reconciler) */
+static int fc_check_shard_registry(const char *repo, long t0_ms, long budget_ms, char *why_tag, char *detail, size_t cap) {
+    char abs_repo[4096], toolp[4400], uc[4400], bp[4400];
+    if (sy_realpath(repo, abs_repo, sizeof abs_repo) < 0) {
+        cx_fmt(why_tag, 64, "shard-registry-failed"); cx_fmt(detail, cap, "realpath=%s", repo); return -1;
+    }
+    if (cx_fmt(uc, sizeof uc, "%s/unisacc.com", abs_repo) ||
+        cx_fmt(toolp, sizeof toolp, "%s/tools/check-shard-registry.cx", abs_repo) ||
+        cx_fmt(bp, sizeof bp, "%s/tests/batches.tsv", abs_repo)) return -1;
+    int tex = sy_exists(toolp);
+    int bex = sy_exists(bp);
+    if (tex < 0 || bex < 0) {
+        cx_fmt(why_tag, 64, "shard-registry-failed"); cx_fmt(detail, cap, "stat-err"); return -1;
+    }
+    if (tex == 1) {
+        int bound_s = fc_budget_remaining_s(t0_ms, budget_ms, 30, detail, cap);
+        if (bound_s < 0) { cx_fmt(why_tag, 64, "check-budget-exceeded"); return -1; }
+        char *av[] = {"sh", uc, "tools/check-shard-registry.cx", "--", "--root", abs_repo, 0}; /* lint:allow R1-product runs target repo check-shard-registry */
+        np_result r = {0}; char why[200];
+        if (np_run(av, abs_repo, 0, bound_s, &r, why, sizeof why)) {
+            cx_fmt(why_tag, 64, "shard-registry-failed");
+            cx_fmt(detail, cap, "transport=%s", why);
+            np_free(&r);
+            return -1;
+        }
+        int pass = (r.rc == 0 && r.out && r.outn > 0 &&
+                    tx_find(r.out, (long)r.outn, "CHECK_SHARD_REGISTRY\t", 21) >= 0 &&
+                    tx_find(r.out, (long)r.outn, "\tmissing=0\textra=0\tdup=0\tstatus=PASS", 36) >= 0);
+        if (!pass) {
+            char mline[256];
+            fc_first_match_line(r.out, r.outn, "SHARD_REG_", "CHECK_SHARD_REGISTRY", mline, sizeof mline);
+            cx_fmt(why_tag, 64, "shard-registry-failed");
+            cx_fmt(detail, cap, "rc=%d detail=%s", r.rc, mline[0] ? mline : "-");
+            np_free(&r);
+            return -1;
+        }
+        np_free(&r);
+    }
+    if (bex != 1) return 0;
+    size_t bn = 0;
+    char *bb = cx_read(bp, &bn);
+    if (!bb) {
+        cx_fmt(why_tag, 64, "shard-registry-failed"); cx_fmt(detail, cap, "unreadable=%s", bp); return -1;
+    }
+    if (tex != 1 && tx_find(bb, (long)bn, "tools-compile-", 14) < 0) {
+        mm_free(bb);
+        return 0;
+    }
+    char *gv[] = {"git", "-C", abs_repo, "ls-files", "-s", "-z", "--", "tools", 0};
+    np_result gr = {0}; char gwhy[128];
+    if (np_run(gv, abs_repo, 0, 15, &gr, gwhy, sizeof gwhy) != 0 || gr.rc != 0) {
+        mm_free(bb); np_free(&gr);
+        cx_fmt(why_tag, 64, "shard-registry-failed"); cx_fmt(detail, cap, "git-ls-files-failed"); return -1;
+    }
+    int nsrc = 0;
+    size_t pos = 0;
+    while (pos < gr.outn) {
+        size_t nul = pos;
+        while (nul < gr.outn && gr.out[nul] != 0) nul++;
+        const char *rec = gr.out + pos;
+        const char *tab = memchr(rec, '\t', nul - pos);
+        if (tab) {
+            size_t plen = (size_t)(nul - (size_t)(tab - gr.out) - 1);
+            const char *path = tab + 1;
+            if (plen >= 3 && memcmp(path + plen - 3, ".cx", 3) == 0) nsrc++;
+        }
+        pos = nul + 1;
+    }
+    np_free(&gr);
+    int want_shards = (nsrc + 7) / 8;
+    int *seen = (int *)mm_alloc((long)((want_shards > 0 ? want_shards : 1) * (int)sizeof(int)));
+    if (!seen) { mm_free(bb); return -1; }
+    mm_fill(seen, (long)((want_shards > 0 ? want_shards : 1) * (int)sizeof(int)), 0,
+            (long)((want_shards > 0 ? want_shards : 1) * (int)sizeof(int)));
+    int missing = 0, extra = 0, dup = 0;
+    char first_bad[128]; first_bad[0] = 0;
+    long at = 0;
+    while (at < (long)bn) {
+        long e = at;
+        while (e < (long)bn && bb[e] != '\n') e++;
+        long ln = e - at;
+        if (ln > 14 && memcmp(bb + at, "tools-compile-", 14) == 0) {
+            long k = 14, idx = 0, nd = 0;
+            while (k < ln && bb[at + k] >= '0' && bb[at + k] <= '9') {
+                idx = idx * 10 + (bb[at + k] - '0');
+                k++; nd++;
+            }
+            if (nd == 0 || k >= ln || bb[at + k] != '\t' || idx < 0 || idx >= want_shards) {
+                if (!first_bad[0]) cx_fmt(first_bad, sizeof first_bad, "extra:tools-compile-%.*s", (int)(k - 14), bb + at + 14);
+                extra++;
+            } else if (seen[idx]) {
+                if (!first_bad[0]) cx_fmt(first_bad, sizeof first_bad, "dup:tools-compile-%03ld", idx);
+                dup++;
+            } else {
+                seen[idx] = 1;
+            }
+        }
+        at = e + 1;
+    }
+    mm_free(bb);
+    for (int i = 0; i < want_shards; i++) {
+        if (!seen[i]) {
+            if (!first_bad[0]) cx_fmt(first_bad, sizeof first_bad, "missing:tools-compile-%03d", i);
+            missing++;
+        }
+    }
+    mm_free(seen);
+    if (missing || extra || dup) {
+        cx_fmt(why_tag, 64, "shard-registry-failed");
+        cx_fmt(detail, cap, "sources=%d shards=%d missing=%d extra=%d dup=%d first=%s",
+               nsrc, want_shards, missing, extra, dup, first_bad[0] ? first_bad : "-");
+        return -1;
+    }
+    return 0;
+}
+
 static int fc_do_check(const char *repo, const char *ver, const char *owner, int no_derive, int skip_root_check) {
     char detail[512], why_tag[64];
     if (!rv_valid(ver)) return refuse("bad-version", ver);
@@ -458,12 +879,33 @@ static int fc_do_check(const char *repo, const char *ver, const char *owner, int
         if (fc_git(repo, tav, 0, 0) != 0) return refuse("tlib-after-freeze", tlib_c);
     }
 
+    long check_t0_ms = sy_now_ms();
+    long check_budget_ms = fc_check_budget_ms();
+    if (fc_check_deferred_no_genall(repo, detail, sizeof detail) != 0) {
+        return refuse("deferred-gates-genall-escaped", detail);
+    }
+
     if (!no_derive) {
+        if (fc_budget_remaining_s(check_t0_ms, check_budget_ms, 58, detail, sizeof detail) < 0) {
+            return refuse("check-budget-exceeded", detail);
+        }
         if (fc_run_repo_tool(repo, "tools/derive.cx", "--check", "--only", "table-index") != 0) {
             return refuse("table-index-drift", "run derive --write --only table-index");
         }
         if (fc_run_repo_tool(repo, "tools/verseq-gen.cx", "--check", 0, 0) != 0) {
             return refuse("verseq-gen-failed", repo);
+        }
+        if (fc_check_gen_all(repo, check_t0_ms, check_budget_ms, why_tag, detail, sizeof detail) != 0) {
+            return refuse(why_tag, detail);
+        }
+        if (fc_check_shard_registry(repo, check_t0_ms, check_budget_ms, why_tag, detail, sizeof detail) != 0) {
+            return refuse(why_tag, detail);
+        }
+        if (fc_check_chain_ready(repo, check_t0_ms, check_budget_ms, why_tag, detail, sizeof detail) != 0) {
+            return refuse(why_tag, detail);
+        }
+        if (fc_budget_remaining_s(check_t0_ms, check_budget_ms, 58, detail, sizeof detail) < 0) {
+            return refuse("check-budget-exceeded", detail);
         }
     }
 

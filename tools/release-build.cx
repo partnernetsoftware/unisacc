@@ -382,18 +382,61 @@ static void rb_free_embed_tape(RbEmbedTape *et) {
     et->active = 0;
 }
 
-static void rb_load_embed_tape(const char *root, const char *explicit_dir, RbEmbedTape *et) {
+static int rb_root_requires_tape(const char *root) {
+    char p[RB_FULL];
+    sy_stat_t st;
+    if (!root || !root[0] || cx_fmt(p, sizeof p, "%s/tools/tape-sidecar-build.cx", root)) return 0;
+    return (sy_lstat(p, &st) == 0 && st.kind == 'f') ? 1 : 0;
+}
+
+static int rb_verify_pkg_m1_tape(const unsigned char *buf, const CxPackage *c) {
+    int k, i, seen[3] = {0, 0, 0}, idx[3] = {-1, -1, -1};
+    for (i = 0; i < c->nr; i++) {
+        const CxPackageResource *r = &c->res[i];
+        for (k = 0; k < 3; k++) {
+            long kl = tx_len(rb_m1_keys[k], 64);
+            if (r->n == (int)kl && tx_same((const char *)(buf + r->name), r->n, rb_m1_keys[k], kl)) {
+                if (r->codec != 0 || r->len <= 0 || r->rawlen != r->len) return -1;
+                if ((unsigned)dz_crc32(0, buf + r->data, r->len) != r->crc) return -1;
+                seen[k]++;
+                idx[k] = i;
+            }
+        }
+    }
+    if (seen[0] == 0 && seen[1] == 0 && seen[2] == 0) return 0;
+    if (seen[0] != 1 || seen[1] != 1 || seen[2] != 1) return -1;
+    for (k = 1; k < 3; k++) {
+        char sha[65];
+        const CxPackageResource *rm = &c->res[idx[0]];
+        const CxPackageResource *rk = &c->res[idx[k]];
+        cx_sha256_hex((const char *)(buf + rk->data), (size_t)rk->len, sha);
+        if (rb_verify_m1_manifest_entry((const char *)(buf + rm->data), (long)rm->len,
+                                        rb_m1_leaves[k], sha, (size_t)rk->len) != 0) return -1;
+    }
+    return 3;
+}
+
+static void rb_load_embed_tape(const char *root, const char *explicit_dir, const char *run_dir, RbEmbedTape *et) {
     char dir[RB_FULL], p[RB_FULL], sha[65];
     sy_stat_t st;
-    int r, k;
+    int r = -ENOENT, k;
     mm_fill(et, (long)sizeof *et, 0, (long)sizeof *et);
     if (explicit_dir) {
         if (cx_fmt(dir, sizeof dir, "%s", explicit_dir)) rb_die("embed-tape path");
+        r = sy_lstat(dir, &st);
     } else {
-        if (cx_fmt(dir, sizeof dir, "%s/tape/lnx-x86_64", root)) rb_die("embed-tape path");
+        if (run_dir && run_dir[0] && !cx_fmt(dir, sizeof dir, "%s/tape/lnx-x86_64", run_dir)) {
+            r = sy_lstat(dir, &st);
+        }
+        if (r == -ENOENT) {
+            if (cx_fmt(dir, sizeof dir, "%s/tape/lnx-x86_64", root)) rb_die("embed-tape path");
+            r = sy_lstat(dir, &st);
+        }
     }
-    r = sy_lstat(dir, &st);
-    if (r == -ENOENT && !explicit_dir) return;
+    if (r == -ENOENT && !explicit_dir) {
+        if (rb_root_requires_tape(root)) rb_die("embed-tape required when root has tools/tape-sidecar-build.cx");
+        return;
+    }
     if (r != 0 || st.kind != 'd') rb_die("embed-tape dir missing or not dir");
     for (k = 0; k < 3; k++) {
         if (cx_fmt(p, sizeof p, "%s/%s", dir, rb_m1_leaves[k])) rb_die("embed-tape file path");
@@ -689,7 +732,8 @@ static int rb_route_names(const char *routes, const unsigned char *body, long ds
    belongs to one canonical RUN; guard-init cannot reuse an earlier session. */
 static void rb_phase_bind(const char *root, const char *source, const char *nets,
                           const char *routes, const unsigned char *body,
-                          long ds, long ms, const CxPackage *pkg, int compress, int flat) {
+                          long ds, long ms, const CxPackage *pkg, int compress, int flat,
+                          const RbEmbedTape *et) {
     RbBuf b = {0}; char names[64][64] = {{0}};
     char run[RB_FULL], path[RB_FULL], ctx[RB_FULL], helper[RB_FULL], got[80], conf[RB_FULL];
     char epoch[128], flags[32], *e, *t; size_t en, tn; int i, fd; long z; sy_ts_t now;
@@ -734,6 +778,17 @@ static void rb_phase_bind(const char *root, const char *source, const char *nets
         rb_phase_hash(&b, path);
         if (cx_fmt(path, sizeof path, "%s/net-%s/result.net", nets, names[i])) rb_die("phase net");
         rb_phase_hash(&b, path);
+    }
+    if (et && et->active) {
+        int ek;
+        rb_put(&b, "tape=1\n", 7);
+        for (ek = 0; ek < 3; ek++) {
+            char ts[65];
+            cx_sha256_hex(et->data[ek], et->len[ek], ts);
+            rb_put(&b, ts, 64);
+        }
+    } else {
+        rb_put(&b, "tape=0\n", 7);
     }
     cx_sha256_hex(b.p, (size_t)b.n, rb_binding); mm_free(b.p);
     if (tx_eqz(rb_phase, "guard-init")) rb_phase_seal("binding", rb_binding, 64);
@@ -913,18 +968,21 @@ static int rb_p3(int argc, char **argv) {
     rb_walk(incdir, "", 0);
     if (!rb_nfiles) rb_die("empty include");
     rb_sort();
+    rb_load_embed_tape(argv[2], embed_tape_dir, rb_run, &et);
     if (rb_phase) {
         long ms = line_end;
         while (ms < res_at && !(body[ms] == 'M' && ms + 1 < res_at && body[ms + 1] == ' ')) ms++;
         if (ms >= res_at) rb_die("--nets M section");
-        rb_phase_bind(argv[2], argv[3], nets, routes, body, line_end, ms, pkg, compress, compress_flat);
+        rb_phase_bind(argv[2], argv[3], nets, routes, body, line_end, ms, pkg, compress, compress_flat, &et);
         if (!strncmp(rb_phase, "guard-", 6)) {
+            rb_free_embed_tape(&et);
             cxpl_release(pkg, rb_drop); mm_free(file);
             sy_printf("release-build\tp3-phase\t%s\tbinding=%s\n", rb_phase, rb_binding); return 0;
         }
         if (tx_eqz(rb_phase, "opguard-prep") || rb_opguard_isa()) {
             rb_root = argv[2]; rb_arity_load(argv[2]);
             rb_opguard_phase(rb_opguard_isa(), body, pkg, line_end, ms, nets, routes);
+            rb_free_embed_tape(&et);
             cxpl_release(pkg, rb_drop); mm_free(file);
             sy_printf("release-build\tp3-phase\t%s\tbinding=%s\n", rb_phase, rb_binding); return 0;
         }
@@ -932,11 +990,12 @@ static int rb_p3(int argc, char **argv) {
             RbBuf models = {0}; rb_root = argv[2]; rb_arity_load(argv[2]);
             rb_emit_models(&models, body, pkg, line_end, ms, nets, routes);
             rb_phase_seal("models", models.p, models.n); mm_free(models.p);
+            rb_free_embed_tape(&et);
             cxpl_release(pkg, rb_drop); mm_free(file);
             sy_printf("release-build\tp3-phase\tmodels\tbinding=%s\n", rb_binding); return 0;
         }
     } else if (rb_run) rb_die("--run requires --phase");
-    rb_load_embed_tape(argv[2], embed_tape_dir, &et);
+    int et_required = et.active || rb_root_requires_tape(argv[2]);
     kept = 0;
     for (i = 0; i < pkg->nr; i++)
         if (!rb_hdr(body + pkg->res[i].name, pkg->res[i].n) &&
@@ -1064,6 +1123,8 @@ static int rb_p3(int argc, char **argv) {
             }
         }
         if (!found) rb_die("cx-flat.h missing");
+        if (et_required && rb_verify_pkg_m1_tape(out.p, c) != 3)
+            rb_die("p3 output missing required tape/lnx-x86_64/* F records");
     }
     mm_free(flat);
     cxpl_release(&chk.package, rb_drop);
@@ -1511,7 +1572,7 @@ static int rb_whole(int argc, char **argv, const char *target) {
     v[n++] = "-o";
     v[n++] = image;
     for (i = 0; i < RB_WHOLE_SRC; i++) {
-        rb_cat(srcs[i], RB_FULL, argv[2], 1, cf_root_source_for(i, target));
+        rb_cat(srcs[i], RB_FULL, argv[2], 1, cf_root_source(i));
         v[n++] = srcs[i];
     }
     v[n] = 0;
@@ -1666,7 +1727,7 @@ static int rb_slice(int argc, char **argv) {
 
 /* Build the distributable package only after the bootstrap generations finish.
    Resolve hot members through the package directory; physical indices may move. */
-static int rb_release_models(const char *input, const char *output) {
+static int rb_release_models(const char *input, const char *output, int require_m1_tape) {
     int selected[7];
     size_t n;
     unsigned char *file = (unsigned char *)cx_read(input, &n);
@@ -1680,6 +1741,11 @@ static int rb_release_models(const char *input, const char *output) {
         cxpk_decode(&dec,file,foot.package_length)) rb_die("release models: invalid package");
     CxPackage *p = &dec.package;
     if (p->ver != 4) rb_die("release models: P4 required");
+    int tape_in = rb_verify_pkg_m1_tape(file, p);
+    if (tape_in < 0 || (tape_in > 0 && tape_in != 3))
+        rb_die("release models: incomplete or corrupt tape/lnx-x86_64/* F records");
+    if (require_m1_tape && tape_in != 3)
+        rb_die("release models: missing required tape/lnx-x86_64/* F records");
     if (sn_count() != 7) rb_die("release models: changed image stage inventory");
     for (int h = 0; h < 7; h++) {
         const char *official, *stage;
@@ -1719,6 +1785,14 @@ static int rb_release_models(const char *input, const char *output) {
         last = p->off[i] + p->len[i];
     }
     rb_put(&out,file+last,p->n-last);
+    if (tape_in == 3) {
+        CxPackageDecode out_chk = {0};
+        out_chk.allocate = rb_alloc;
+        out_chk.release = rb_drop;
+        if (cxpk_decode(&out_chk, out.p, out.n) || rb_verify_pkg_m1_tape(out.p, &out_chk.package) != 3)
+            rb_die("release models: lost tape/lnx-x86_64/* F records in output");
+        cxpl_release(&out_chk.package, rb_drop);
+    }
     unsigned char footer[16] = "UNIPKG1\n";
     unsigned long long bytes = out.n;
     for (int k = 0; k < 8; k++) { footer[8+k] = (unsigned char)bytes; bytes >>= 8; }
@@ -1730,7 +1804,8 @@ static int rb_release_models(const char *input, const char *output) {
 }
 
 int main(int argc, char **argv) {
-    if (argc == 4 && tx_eqz(argv[1], "release-models")) return rb_release_models(argv[2],argv[3]);
+    if (argc == 4 && tx_eqz(argv[1], "release-models")) return rb_release_models(argv[2], argv[3], 0);
+    if (argc == 5 && tx_eqz(argv[1], "release-models") && tx_eqz(argv[4], "--require-m1-tape")) return rb_release_models(argv[2], argv[3], 1);
     const char *rev = "HEAD";
     int i;
     if (argc >= 3 && tx_eqz(argv[1], "--rev")) {
