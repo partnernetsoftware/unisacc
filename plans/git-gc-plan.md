@@ -95,3 +95,23 @@ git gc --prune=30.days
 预期: 当前 9372 个小于 30 天的松散不可达对象仍会留下, 警告不会消失. 这是测量结果, 不是失败. 若之后要清警告, 须另一次授权, 且只能在 bundle 已校验之后使用更短的 `--prune`, 不能在本计划里直接 `git prune`.
 
 回滚: bundle 在 `~/.cache/unisacc/branch-archive/`, 不在仓库里. 若 gc 之后发现缺对象, 用 `git bundle unbundle` 或 `git fetch` 该 bundle 把提交取回, 再 `git update-ref` 挂回临时 ref. 本计划不删除该 bundle.
+
+## bundle 回执, 2026-11-27
+
+已执行安全的一半. 未跑 `git gc`, 未跑 `git prune`, 未删 `.git/gc.log`.
+
+路径: `/home/devali/.cache/unisacc/branch-archive/unreach-2026-11-27.bundle`
+
+sha256: `2cb385febedde528e582495c6005c35ff4f4ffff61ebedb62288dfce0e6196b2`
+
+大小: 92969698 字节.
+
+`git bundle verify` 退出 0, 文案 `is okay` 与 `The bundle records a complete history.` 临时 ref `refs/archive/unreach` 已删除, `REFS_LEFT=0`.
+
+内容: 633 个不可达提交, 每个一个 tip. 其中 reflog 还能摸到的 407 个是这 633 的子集, 已包含. `git bundle list-heads` 的 9 字符前缀与这 633 个提交差集为 0.
+
+证据前缀: 在 `plans/`, `prd_mempalace.md`, `release/`, `skills/`, `build/` 里命中的 42 个 9 字符前缀全部在 bundle 的 tip 里. `EVIDENCE_IN_BUNDLE 42`, `EVIDENCE_MISSING 0`.
+
+账本: `plans/omp-grk-ledger.tsv` 行 `GIT-GC-BUNDLE`.
+
+gc 本身由 cc 排到正规链结束之后. 本回执不授权 `git gc --prune=30.days`.
