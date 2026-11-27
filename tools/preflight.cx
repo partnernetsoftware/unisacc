@@ -41,6 +41,7 @@
 #pragma unisa use runtime.packagefooter
 #pragma unisa use runtime.package_decode
 #pragma unisa use runtime.package_lifetime
+#pragma unisa use runtime.codec
 #pragma unisa use runtime.model_number
 #pragma unisa use compiler.bindstage
 #pragma unisa use runtime.routestep
@@ -273,11 +274,22 @@ static int op_pkg(const char *pkg) {
         int found = 0;
         for (int i = 0; i < dec.package.nr; i++) {
             const CxPackageResource *r = &dec.package.res[i];
-            if (((r->n == (int)kl && !memcmp(pslice + r->name, want[k], (size_t)kl)) ||
-                 (r->n == (int)kl + 1 && pslice[r->name] == 0 && !memcmp(pslice + r->name + 1, want[k], (size_t)kl))) &&
-                r->len > 0) {
-                found = 1;
-                break;
+            if (r->n == (int)kl + 1 && pslice[r->name] == 0 && !memcmp(pslice + r->name + 1, want[k], (size_t)kl) && r->len > 0) {
+                int dec_ok = 0;
+                if (r->codec == 0) {
+                    if (r->rawlen == r->len && (r->crc == 0U || r->crc == pf_crc32(pslice + r->data, (long)r->len))) dec_ok = 1;
+                } else if (r->codec == 1 && r->rawlen > 0) {
+                    unsigned char *raw = (unsigned char *)mm_alloc((long)r->rawlen);
+                    if (raw) {
+                        if (cxcodec_inflate(raw, (unsigned long)r->rawlen, pslice + r->data, (unsigned long)r->len) == 0 &&
+                            pf_crc32(raw, (long)r->rawlen) == r->crc) dec_ok = 1;
+                        mm_free(raw);
+                    }
+                }
+                if (dec_ok) {
+                    found = 1;
+                    break;
+                }
             }
         }
         if (!found) {
