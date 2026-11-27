@@ -135,8 +135,11 @@ static int compare_m53(const char *ape_path, const char *rcpt_path, int verbose)
         if (nb) mm_free(nb);
         return 1;
     }
-    sy_sha256_hex(mb, (long)ml, msha);
-    sy_sha256_hex(nb, (long)nl, nsha);
+    if (sy_sha256_hex(mb, (long)ml, msha) || sy_sha256_hex(nb, (long)nl, nsha)) {
+        mm_free(mb); mm_free(nb);
+        if (verbose) printf("GOLDEN\tunit=m53\tstatus=RED\treason=digest-failed\n");
+        return 2;
+    }
     int has_m1_slice = (gm53_has_bytes(mb, (long)ml, "m53.tapeslice", 13) &&
                         gm53_has_bytes(mb, (long)ml, "tapemode.so", 11));
     mm_free(mb); mm_free(nb);
@@ -178,7 +181,7 @@ static int compare_m53(const char *ape_path, const char *rcpt_path, int verbose)
         if (ok_n && ok_m && nlen == mlen && memcmp(nat_buf, mig_buf, nlen) == 0) pass++;
     }
     long elapsed_ms = sy_now_ms() - t0;
-    if (off > 0) sy_sha256_hex((const char *)acc, (long)off, g_gm53_m.buffers_sha);
+    if (off > 0 && sy_sha256_hex((const char *)acc, (long)off, g_gm53_m.buffers_sha)) { mm_free(acc); fsx_scratch_drop(sc); return 2; }
     else g_gm53_m.buffers_sha[0] = 0;
     mm_free(acc);
     g_gm53_m.pass = pass; g_gm53_m.prod_nat = prod_nat; g_gm53_m.prod_mig = prod_mig; g_gm53_m.elapsed_ms = elapsed_ms;
@@ -268,25 +271,36 @@ static int gm53_write_metrics(const char *out_path, char out_sha[65]) {
     return sy_sha256_hex(body, (long)n, out_sha);
 }
 static int gm53_produce(const char *id, const char *rcpt, const char *ape, gm53_opt *o) {
-    char out_path[1200], out_sha[65], cand[65];
+    char out_path[1200], out_sha[65], cand[65], cpath[256];
     char *mb; size_t ml = 0;
     rc_v3_t r;
+    int rc;
     if (!id || !rcpt || !ape || !o->rev || !o->target || !o->inputs) return 2;
-    if (compare_m53(ape, 0, 0) != 0) return 1;
-    if (gm53_out_path(out_path, sizeof out_path, rcpt, o) != 0) return 2;
-    if (gm53_write_metrics(out_path, out_sha) != 0) return 2;
+    if (!o->fixture || (o->purpose && !strcmp(o->purpose, "admission"))) {
+        printf("REFUSE\tgolden-m53\tpurpose-admission-disabled\n");
+        return 2;
+    }
+    /* One private copy: hash and execute the same bytes, never reopen the mutable source. */
+    if (cx_fmt(cpath, sizeof cpath, "/tmp/gm53-cand-%d-%ld.com", (int)sy_pid(), (long)sy_wall_s())) return 2;
     mb = gm53_read_file(ape, &ml);
     if (!mb) return 2;
-    if (sy_sha256_hex(mb, (long)ml, cand)) { mm_free(mb); return 2; }
+    if (sy_sha256_hex(mb, (long)ml, cand) || gm53_write_file(cpath, mb, ml) != 0 || sy_chmod(cpath, 0755) != 0) {
+        mm_free(mb); sy_unlink(cpath); return 2;
+    }
     mm_free(mb);
+    if (compare_m53(cpath, 0, 0) != 0) { sy_unlink(cpath); return 1; }
+    if (gm53_out_path(out_path, sizeof out_path, rcpt, o) != 0) { sy_unlink(cpath); return 2; }
+    if (gm53_write_metrics(out_path, out_sha) != 0) { sy_unlink(cpath); return 2; }
     mm_fill(&r, (long)sizeof r, 0, (long)sizeof r);
     r.run_id = id; r.rev = o->rev; r.unit = o->unit; r.target = o->target;
     r.producer = "check-golden-m53";
-    r.purpose = o->fixture ? "admission-fixture" : "admission";
+    r.purpose = "admission-fixture";   /* formal admission disabled until M1 exec proof exists */
     r.candidate_sha = cand; r.inputs_sha = o->inputs; r.output_sha = out_sha;
     r.rc = 0; r.verdict = "PASS";
     r.ts = o->now_ts > 0 ? o->now_ts : (int64_t)sy_wall_s();
-    return rc_write3(rcpt, &r) ? 2 : 0;
+    rc = rc_write3(rcpt, &r) ? 2 : 0;
+    sy_unlink(cpath);
+    return rc;
 }
 static int gm53_judge(const char *id, const char *rcpt, gm53_opt *o) {
     char out_path[1200];
@@ -336,6 +350,18 @@ static int run_receipt_selftest(int verbose) {
     if (gm53_produce(id, rcpt, ape, &o) != 0) { if (verbose) printf("FAIL\treceipt-v3-produce\n"); goto done; }
     if (gm53_judge(id, rcpt, &o) != 0) { if (verbose) printf("FAIL\treceipt-v3-judge\n"); goto done; }
     if (verbose) printf("PASS\treceipt-v3-roundtrip\n");
+    {   char sub[65]; rc_expect_t e; int code;
+        if (sy_sha256_hex("substituted-candidate", 21, sub)) goto done;
+        mm_fill(&e, (long)sizeof e, 0, (long)sizeof e);
+        e.run_id = id; e.rev = rev; e.unit = "m53.o"; e.target = "lnx/x86_64";
+        e.candidate_sha = sub; e.inputs_sha = in_sha; e.output_path = out;
+        e.producer = "check-golden-m53"; e.purpose = "admission-fixture";
+        e.expect_rc = 0; e.expect_verdict = "PASS"; e.now_ts = o.now_ts;
+        e.max_age_s = 3600; e.max_future_s = 60;
+        code = rc_verify(rcpt, &e);
+        if (code != RC_ERR_CANDIDATE) { if (verbose) printf("FAIL\tcandidate-substitution-refused\n"); goto done; }
+        if (verbose) printf("PASS\tcandidate-substitution-refused\n");
+    }
     rc = 0;
 done:
     sy_unlink(ape); sy_unlink(rcpt); sy_unlink(out);
