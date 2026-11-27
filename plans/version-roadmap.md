@@ -12,9 +12,11 @@
 | v0.1.9 | 纯静态 libc 副本去除类 | 20 个上层产品单元去掉各自静态 libc 副本,printf 家族走 L0 `sy_*`/`mm_*`/`tx_*` | PT_LOAD R E 净减 `>=40,000`B;LOCAL 20 单元(按链回执的每单元 `-O` 级别,m0.o `-O2`)实测 PT_LOAD R E `0x187d1b`=`1,604,891`B,净减 `-444,835`B(`-21.70%`);entry.elf `78d933cc...`,APE `9,308,637`B/`67e52510...`;ccapi 独立重放 MATCH;recipe `tools/build-objs-from-tree.cx` main `3dfe1e7fd`,exit `check-v019-exit` main `7f399bbad`;旧 `-441,128`B/`0x188b96`/APE `1619e9a4` 已作废(m0 在 `-O1`);`check-stdio-copies` 锁 `_u_vfmt` 等为零;本版不含 tape 迁移与大小归因 | tape 迁移;VM 单元;六目标 | 5-7 天 |
 | v0.1.10 | tape 运行时范围 + 速度门(收窄) | tape 运行时(bridge、call_out、touched-span clear、guest-slim、A2、pack;w/agyneon3 13 提交加 self-audit 修复)与全部 102 单元在 tape 下运行 | 102 档 cmp EQUAL;16 档 `<=15x` 按身份指定单一 fixture;判据运行 GREEN LOCAL:`w/agyneon3-v0110-main c6890eb23`,tier 16 `14.113x`(FixA),c2/c3 `106/106`,身份元组(已装 0.1.6 根、FixA、harness `307a43835`);64/102 档 VM 单元按预设 fallback 判 stay-native(`14.58%<25%`);原生基线按候选身份冻结 | 迁移任何新单元;64/102 档 15x | 7-10 天,最不确定 |
 | v0.1.11 | 下一静态重复类 | 把重复静态实现收成一份: SHA-256 收为单个 L0 副本(`sy_sha256_bytes`,约 `55KB`),`cx_read`/`cx_write` 的 heap 与 `FILE*`(约 `45KB`),deps/driveplan,heap 批;RT_EXTERN 函数共享作为判后 side item(活代码仅 `63.7KB`) | 进入时按边界规则写判据并登记红检查;只可收紧;不承接 64/102 档 15x | 无独立类时不成版 | 未估计 |
-| v0.1.12 | 先拆后迁批 2 | 批 2 的 16 个单元进入迁移 | 进入时按 v0.1.11 测量重新设定 | 批 3、批 4 | 未估计 |
-| v0.1.13 | 剩余批并冻结 stay-native | 剩余迁移批 | 进入时按测量设定;冻结 `plans/stay-native.tsv` | 六目标 | 未估计 |
-| v0.1.14 | 六目标一致 + 出口门 | 7 个已迁单元在六目标权威 | 每目标 `cxsa_valid` 0、移出字节相等、fork 根回 1;`check-v01x-exit` 全绿 | v0.2.x | 7-14 天 |
+| v0.1.12 | 薄宿主调用表 + 表批 A(lnx/x86_64,默认路径) | TapeUnitSpec 行(~32B)+16-24B stub + 按签名 shape 复用宿主桩,把每单元宿主开销从 5.8-9KB 压到 200-600B;批 A m53(已完成)、driveargs、modelnumber、m25 | 批 A 每单元 calls_per_run `<=200`;shape 扫描 `<=16` 且 top 8 覆盖 `>=80%`;第三单元边际宿主成本 `<=600B`;golden 全枚举/字节对拍;启动预算 `<=2,000us`(含 0.91ms boot),热单元各 `<=1%` fixture 墙钟、合计 `<=10%`;尺寸只记录 | 批 B;六目标 | 未估计 |
+| v0.1.13 | 批 B + 先拆后迁批 2 | 批 B route、m20、m54(route 若按 token 则先做批入口);批 2 的 16 单元进入迁移 | 进入时按 v0.1.12 测量重设;同一 admission 三元组;尺寸只记录 | 批 3、批 4 | 未估计 |
+| v0.1.14 | 冷 VM 单元 + 剩余拆分 | 冷 VM 与剩余先拆后迁 | **新判据**(不追溯):tape wall-clock share 取代 tier 64/102 15x;stay-native 行必须有 re-entry 条件与复测日期,不得永久留 native | 有状态 guest | 未估计 |
+| v0.1.15 | 有状态 guest | tapelink 两回调原型、m16、m9、cxmod | 进入时写判据;admission 三元组不变 | 六目标 | 未估计 |
+| v0.1.16 | 六目标 + 出口门 | 全部默认路径迁移完成(最早) | 每目标 `cxsa_valid` 0、移出字节相等、fork 根回 1;`check-v01x-exit` 全绿 | v0.2.x | 7-14 天 |
 | v0.2.0 | nn 体积与步率(暂定先做) | 权重与 tape 步率改进 | 权重 `-15%`;tape 倍率 `15x -> 10x`;逐项评估相等;保留阈值 `max(3%, 2x 噪声)` | asm 热类;六目标 | 7-14 天 |
 | v0.2.1 | asm 热类 1(lnx/x86_64) | 前 5 个最热 stay-native 函数的 asm 重写 | 基准指令中位 `-10%`;`.text` 不增;其他目标保持参考实现;保留阈值按噪声带 | arm64;第二批热点 | 7-14 天 |
 | v0.2.2 | arm64 asm + 第二批热点 | 第二架构与第二批 asm | 每架构 `-8%`,其他地方零回退 | 六目标统一 | 7-14 天 |
@@ -46,7 +48,7 @@ LOCAL 原型证据(均不支持“按大小迁移”):
 ## v0.1.x 收尾与 v0.2.x 循环(fable 采纳,2026-11-27,所有者方向:v0.2.x = 持续自优化,asm 切片做到极限加 nn 迭代)
 
 - **v0.1.x 出口门**(一个检查 `check-v01x-exit`,开版即红):`plans/slice-units.tsv` 每个单元要么“留原生”要么“已迁且权威”;六目标各自 `cxsa_valid 0`、移出字节相等、fork 根回到 1;tape 16 档 `<=15x`,64/102 档 15x 项由预先定义的 stay-native 判定取代——证据:`agyneon` 真实 tier 64 `416.2M` 步、load1 2.43,全部 `[r6-OFF]` frame-slot ld/st `14.58%`(r6_64 `6.95%` + r6_n `7.62%`),加 `[r7+OFF]` 后 `24.3% < 25%`,故判 stay-native;这是应用预设 fallback,不是放宽;热启动 `<=1.10x` 新 v0.1.8。
-- **v0.1.x 尾段**:v0.1.6 载体;v0.1.7 作废(内容移入 v0.1.8);v0.1.8 M1 嵌入 lnx;v0.1.9 纯 libc 副本去除类(20 单元,LOCAL -444,835B / -21.70%,APE 9,308,637B sha 67e52510);六单元表批**未排槽**;v0.1.10 tape 运行时范围加收窄速度门(102 cmp EQUAL、16 档 15x,64/102 VM 判 stay-native);v0.1.11 下一静态重复类;v0.1.12 先拆后迁批 2;v0.1.13 剩余批并冻结留原生清单;v0.1.14 六目标一致加出口门(六目标一致从 v0.2.0 移到这里)。
+- **v0.1.x 尾段**:v0.1.6 载体;v0.1.7 作废(内容移入 v0.1.8);v0.1.8 M1 嵌入 lnx;v0.1.9 纯 libc 副本去除类(20 单元,LOCAL -444,835B / -21.70%,APE 9,308,637B sha 67e52510);六单元表批**未排槽**;v0.1.10 tape 运行时范围加收窄速度门(102 cmp EQUAL、16 档 15x,64/102 VM 判 stay-native);v0.1.11 下一静态重复类;v0.1.12 薄宿主调用表加表批 A;v0.1.13 批 B 加先拆后迁批 2;v0.1.14 冷 VM 与剩余拆分(新 wall-clock share 判据、stay-native 复测);v0.1.15 有状态 guest;v0.1.16 六目标加出口门(六目标一致从 v0.2.0 移到这里)。
 - **v0.2.x 循环**:账本 `build/opt-ledger.tsv` 绑定候选身份(每切片每目标 `.text` 字节;每基准指令数与中位墙钟,load1>2 记 NOISY;nn 权重字节与节点;tape 步数/原生指令)。基准集 `tests/bench/` 加 `build/bench-set.tsv`,v0.1.x 末冻结 12 项,只追加。候选:A=对性能最热的“留原生”函数做 asm 重写;B=从 gold 构造的 nn 结构/权重改动(不训练)。验证:A 以旧实现为 oracle,全枚举或 golden 字节 cmp,变异先红;B 逐项评估相等;两者都过字节等价回归。仅当目标指标超过噪声带 `>=3%`、其他回退 `<=1%`、六目标验证全绿才保留,否则当天回退并记 REJECTED。每个 v0.2.N = 一个改进类加一个目标增量。
 - **前三个**(阈值提议,v0.1.14 重新基线):v0.2.0 nn 体积与步率(暂定先做:权重 `-15%`,tape 倍率 `15x -> 10x`,评估相等);v0.2.1 lnx/x86_64 asm 热类 1(前 5 函数,基准指令中位 `-10%`,`.text` 不增,其他目标保持参考实现);v0.2.2 arm64 asm 加第二批热点(每架构 `-8%`,其他地方零回退)。
 - **v0.1.x 期间并行建设**(工具进 main):agy-flow 基准 harness、opt-ledger 与 devsvc 保留/回退门;agyneon 每函数指令画像(扩展 perf-hot);agyneon2 asm 切片构建路径(参考实现与 asm 双轨加字节比较器);agyneon3 nn 重建路径(gold 到权重到逐项评估,一条命令);agy-h 六目标 asm 验证矩阵与 CI 成本;cdx 对保留/回退门做对抗复核;ccogweco 出口门检查加留原生冻结清单生成器;omp-grk 基准噪声带(9 次重复)。
@@ -105,3 +107,12 @@ LOCAL 原型证据(均不支持“按大小迁移”):
 - v0.1.10 = tape 运行时范围(bridge、call_out、touched-span clear、guest-slim、A2、pack;w/agyneon3 13 提交加 self-audit 修复)加收窄速度门。tier 16 `<=15x` 的判据必须写明**一个** fixture 身份,不能拿不同 fixture 的数字互比。判据运行已在 `w/agyneon3-v0110-main c6890eb23` 得 GREEN LOCAL:tier 16 `14.113x`(FixA),c2/c3 `106/106`;身份元组 = 已装 0.1.6 根、FixA、harness `307a43835`。speed-gate 集 `14.58x` 与内置 fixture `15.65x-17.18x` 只作背景。102 档 cmp EQUAL;64/102 档 VM 单元仍按预设 fallback 判 stay-native。
 - v0.1.11 = 下一静态重复类:SHA-256 收为单个 L0 `sy_sha256_bytes`(约 `55KB`),`cx_read`/`cx_write` 的 heap 与 `FILE*`(约 `45KB`),deps/driveplan,heap 批;RT_EXTERN 函数共享只作判后 side item(活代码 `63.7KB`)。
 - 退出判据只可收紧,不可放宽;v0.1.12 及以后保持原样。
+
+## 追加裁定(2026-11-27:迁移加速)
+
+- 所有者指令:stay-native 不是终态,迁移继续;准入按**正确性、速度、可维护性**,尺寸只记录,从不否决。正式撤回 prd_mempalace.md 的“单单元净降不足 2,000 B 回退原生”条款。
+- 正确性:golden 全枚举或字节对拍。速度:calls_per_run 乘单次成本实测;启动预算 `<=2,000us`(含 0.91ms boot),热启动 `<=1.10x`;热单元各 `<=1%` fixture 墙钟、合计 `<=10%`。可维护性:源是表或生成器且带 `--check`。
+- 迁移顺序按成本升序:A m53(已完成)、driveargs、modelnumber、m25;B route、m20、m54(route 若按 token 则先做批入口);C 9 个纯核;D 冷 VM;E 有状态(tapelink 两回调原型、m16、m9、cxmod)。
+- 宿主开销三层:共享 TapeRuntime(M1 已付)、薄宿主调用表(TapeUnitSpec ~32B + 16-24B stub)、按签名 shape 复用宿主桩;每单元从 5.8-9KB 降到 200-600B(估计)。
+- 版本:v0.1.8 M1、v0.1.9 libc、v0.1.10 tape 运行时、v0.1.11 静态重复、新 v0.1.12 薄宿主表+批 A、v0.1.13 批 B+拆分 2、v0.1.14 冷 VM+剩余拆分(wall-clock share 新判据在此进入,不追溯;stay-native 行须写 re-entry 条件与复测日期)、v0.1.15 有状态 guest、v0.1.16 六目标+出口门(最早)。
+- falsifiers:批 A 任一单元 calls_per_run `>200`;shape 扫描 `>16` 或 top 8 `<80%`;第三单元边际宿主成本 `>600B`;v0.1.11 私有候选热启动 `>1.10x` 则不进入 v0.1.12。

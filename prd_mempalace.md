@@ -49,7 +49,7 @@
 - 整链工具取自 `--rev` 快照与分支合并规则(2026-11-27 fable 裁定):正式链工具一律取自 `--rev` 快照(工具身份 = 候选身份),仅显式 `--tools-root` 可逃生且须写入收据;`main -> 分支` 只经 merge,`分支 -> main` 只经冻结 merge,禁止把分支基点的提交 cherry-pick 到 main;纯编排工具(devsvc、flow、guard)仍在 main 改。依据:避免分支工具与候选脱节及跨基点 cherry-pick 污染。入口:tools/check-chain-tool-identity.cx。回滚:删除本条并恢复按工作区取工具。
 - 收据 v2 与人工复核前两项固定执行变异(2026-11-27 fable 裁定):扩展 tools/cxlib/receipt.cx v2(rc_write2 含 run_id/candidate_sha/inputs_sha/output_sha/producer_sha/rc/binding_sha,rc_need(rec,key,kind) 缺字段或格式非法一律拒 rc 2 无默认读,rc_fresh(rec,run_id) 核验新鲜度与绑定摘要),新增或修改的检查/复用点在人工复核前须过 mutation-gate execution 两项固定算子(delete-run-step、feed-previous-output 均 KILLED);首批迁移 check-v0110-exit.cx 与 tape-tldce-shard.cx。依据:cdx 回放证明 M2 可拦 3/3 历史缺陷交付。入口:tools/cxlib/receipt.cx、tools/mutation-gate.cx、w-cdx/.work/gate-falsifier-replay.md。回滚:撤回 6e6644530/bb7cd5287/c47093915 并移出两项固定算子门。
 - v0.1.9 定义能力 = 消除上层产品单元静态 libc 副本(2026-11-27 fable 裁定):v0.1.9 主能力定为上层产品单元移除每单元静态 libc/stdio 副本(printf 族迁至 L0 sy_*/mm_*/tx_*),src/ 与 cx/ 守 cxlibc 硬门;磁带迁移不再以体积为判据(改按 tl_dce 活逻辑字节 + golden 全量对拍判定,体积仅作记录)。依据:nm 实测 v0.1.7 g2 中 21 个单元含静态 stdio 核心共 322,888 B .text,首批 3 单元实降 99,193 B、次批 8 单元实降 169,542 B PT_LOAD R E。入口:w/agyneon2 6d6bc885b、w/agyneon bf5be06b2、tools/check-stdio-copies.cx。回滚:按版本分支回退对应提交并恢复原 tests/cxlibc.tsv 基线。
-- 磁带桥接接口边界(2026-11-27 fable 裁定选项 c):v0.1.9 不引入宿主句柄或回调桥,统一采用 driveargs 形态(宿主薄包装保留指针遍历、出参、回调与跨调用状态,仅拷贝有界字节跨界,guest 无状态且每次调用清 arena),仅暴露 call_u64、fetch_str、call_out 三个桥接原语(call_out 写固定输出区并校验 len <= caller cap 且 <= area,超限具名拒绝);按纯决策核心字节排序迁移,单单元净降不足 2,000 B 回退原生。依据:m25 证伪显示每单元定制桥开销约 5.8 KB 反增体积。入口:cx/driver/stream_s1_m1.cx、w/agyneon3 f137e7d01。回滚:改回本条并另立新版本设计有状态 guest 桥。
+- 磁带桥接接口边界(2026-11-27 fable 裁定选项 c):v0.1.9 不引入宿主句柄或回调桥,统一采用 driveargs 形态(宿主薄包装保留指针遍历、出参、回调与跨调用状态,仅拷贝有界字节跨界,guest 无状态且每次调用清 arena),仅暴露 call_u64、fetch_str、call_out 三个桥接原语(call_out 写固定输出区并校验 len <= caller cap 且 <= area,超限具名拒绝);按纯决策核心字节排序迁移,尺寸只记录,不作为回退判据(2026-11-27 迁移加速裁定撤回 2,000B 门槛)。依据:m25 证伪显示每单元定制桥开销约 5.8 KB 反增体积。入口:cx/driver/stream_s1_m1.cx、w/agyneon3 f137e7d01。回滚:改回本条并另立新版本设计有状态 guest 桥。
 - TapeRuntime 启动不设校验缓存(2026-11-27 裁定):TapeRuntime 启动加载内置磁带切片时不得设任何校验缓存跳过核验,每次启动均按真实字节与内容身份实核。依据:缓存校验结论违背不冒充执行铁律且会掩盖离线篡改。入口:cx/driver/stream_s1_m1.cx。回滚:仅在所有者修订铁律后经新版本引入有界验证缓存。
 - tier 64/102 VM 单元判定 stay-native(2026-11-27 fable 裁定):tier 64 真实 416.2M 步实测所有 [r6-OFF] 栈槽 ld/st 仅占动态步数 14.58%(加 [r7+OFF] 仅 24.3% < 25%),编译器级槽提升无法将 18.33x 压至 15x 以内,tier 64/102 VM 单元判定 stay-native,v0.1.x 退出门以该实测替代 tier 64/102 15x 要求(应用预定义回退,非放宽);事后 regalloc 原型停止,仅留 f5d1ab783 作静态统计工具。依据:tier 64 动态步数实测(load1 2.43)触发路线图预定义回退。入口:tools/check-tape-tldce-speed.cx。回滚:若未来出现可削减超 25% 动态步数的新架构,另开新版本重测 15x 门。
 
@@ -499,3 +499,12 @@ R75/R78/R69/R69.6/R79/R81 等仍跟踪项已归档全文于 archive/prd_mempalac
 ### 下一步
 
 - v0.1.7(计划 `plans/v0.1.7.md`)与 0.1.6 后续队列见 `plans/v0.1.6-v017-queue.tsv` 及 `plans/version-roadmap.md`;M1 五步与 module-evolution 逐单元循环优先。
+
+## 决定:迁移加速(2026-11-27,所有者指令 + fable 裁定)
+
+- 撤回“单单元净降不足 2,000 B 回退原生”:尺寸只记录,从不作为准入或回退判据;已写入桥接条款的该句由本条取代。
+- stay-native 不是终态,迁移继续;准入三元组:(1) 正确性 = golden 全枚举或字节对拍;(2) 速度 = `calls_per_run x 单次成本` 实测,启动预算 `<=2,000us`(含 0.91ms boot),热启动 `<=1.10x`;(3) 可维护性 = 源为表或生成器且带 `--check`。
+- 顺序按成本升序:A m53(已完成)、driveargs、modelnumber、m25;B route、m20、m54(route 若按 token 则先做批入口);C 9 个纯核;D 冷 VM;E 有状态(tapelink 两回调原型、m16、m9、cxmod)。
+- 宿主开销三层:共享 TapeRuntime(M1 已付)、薄宿主调用表(TapeUnitSpec ~32B + 16-24B stub)、按签名 shape 复用宿主桩;每单元 5.8-9KB 降至 200-600B(估计)。
+- 版本:v0.1.12 薄宿主表+批 A;v0.1.13 批 B+拆分 2;v0.1.14 冷 VM+剩余拆分(tape wall-clock share 新判据在此进入,不追溯;stay-native 行须写 re-entry 条件与复测日期);v0.1.15 有状态 guest;v0.1.16 六目标+出口门(最早)。
+- falsifiers:批 A 任一单元 `calls_per_run>200`;shape 扫描 `>16` 或 top 8 `<80%`;第三单元边际宿主成本 `>600B`;v0.1.11 私有候选热启动 `>1.10x` 则不进入 v0.1.12。
