@@ -19,6 +19,36 @@ int main(void) {
         printf("%s\t%s\n",ok?"PASS":"FAIL",i==0?"crc":i==1?"deflate":i==2?"marker":"truncated-network");
         if(!ok) failed++; np_free(&r);
     }
+    {
+        char audit[4200];
+        if(cx_fmt(audit,sizeof audit,"%s/tools/audit-package-payload.cx",root)) return 2;
+        const char *hdr="P 3 1 1 0\nD route stage in out 0\nM 14 9 1 0\n";
+        size_t hlen=strlen(hdr), blen=hlen+sizeof b;
+        unsigned char *buf=malloc(blen+16);
+        if(!buf) return 2;
+        b[0]=1; b[5]='U';
+        for(size_t j=0;j<hlen;j++) buf[j]=(unsigned char)hdr[j];
+        memcpy(buf+hlen,b,sizeof b);
+        memcpy(buf+blen,"UNIPKG1\n",8);
+        for(size_t j=0;j<8;j++) buf[blen+8+j]=(unsigned char)((blen>>(8*j))&255);
+        FILE *f=fopen(pkg,"wb");
+        if(!f || fwrite(buf,1,blen+16,f)!=blen+16 || fclose(f)) return 2;
+        np_result r={0};
+        char *av[]={bound,"15","sh",product,audit,"--",pkg,0};
+        if(np_run(av,root,0,18,&r,why,sizeof why)) return 2;
+        int ok=r.rc==1 && r.err && strstr(r.err,"payload-audit: model-or-structure");
+        printf("%s\t%s\n",ok?"PASS":"FAIL","p3-with-footer-stripped");
+        if(!ok) failed++; np_free(&r);
+        memset(buf+blen+8,0,8);
+        f=fopen(pkg,"wb");
+        if(!f || fwrite(buf,1,blen+16,f)!=blen+16 || fclose(f)) return 2;
+        free(buf);
+        np_result r2={0};
+        if(np_run(av,root,0,18,&r2,why,sizeof why)) return 2;
+        int ok2=r2.rc==2 && r2.err && strstr(r2.err,"payload-audit: footer");
+        printf("%s\t%s\n",ok2?"PASS":"FAIL","p3-bad-footer-refused");
+        if(!ok2) failed++; np_free(&r2);
+    }
     if(cx_rmtree(dir)) return 2;
     printf("CXLIBRARY_PAYLOAD\tfailed=%d\n",failed);
     return failed?1:0;
