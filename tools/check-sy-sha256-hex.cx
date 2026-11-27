@@ -1,0 +1,97 @@
+/* tools/check-sy-sha256-hex.cx -- verify sy_sha256_hex L0 fallback:
+ *   1. Compiles cx/sys/sha.cx across all 6 targets (lnx/osx/win x x86_64/arm64).
+ *   2. On lnx/x86_64, compares sy_sha256_hex (AF_ALG) vs cx_sha256_hex (software)
+ *      on fixed vectors: empty, 1 byte, 64 bytes, 65 bytes, 1 MiB.
+ * Marker: CHECK_SY_SHA256_HEX. */
+#pragma unisa use sys.fs
+#pragma unisa use sys.io
+#pragma unisa use sys.posix
+#pragma unisa use sys.sha
+#pragma unisa use sys.time
+#pragma unisa use mem.heap
+#pragma unisa use mem.bytes
+#pragma unisa use text.text
+#pragma unisa use cxlib.procrun
+
+static int g_pass, g_fail;
+static void ck(int ok, const char *name) {
+    if (ok) { g_pass++; sy_printf("PASS\t%s\n", name); }
+    else { g_fail++; sy_printf("FAIL\t%s\n", name); }
+}
+
+static int run_sh(const char *cmd, char *out, long cap) {
+    char *av[] = {"sh", "-c", (char *)cmd, 0};
+    pr_result r;
+    int t = pr_run("sy-sha", av, ".", 0, 55, &r);
+    long n = 0;
+    if (out && cap > 0) {
+        if (r.out && r.outn > 0) {
+            long m = (long)r.outn < cap - 1 ? (long)r.outn : cap - 1;
+            mm_copy(out, cap, r.out, m);
+            n += m;
+        }
+        if (r.err && r.errn > 0 && n < cap - 1) {
+            long m = (long)r.errn < cap - 1 - n ? (long)r.errn : cap - 1 - n;
+            mm_copy(out + n, cap - n, r.err, m);
+            n += m;
+        }
+        out[n] = 0;
+    }
+    int rc = t ? -1 : r.rc;
+    pr_free(&r);
+    return rc;
+}
+
+static int vec_match(const char *label, const void *data, long n) {
+    char h_sy[65], h_sw[65];
+    int rc = sy_sha256_hex(data, n, h_sy);
+    cx_sha256_hex(n > 0 ? data : (const void *)"", (size_t)n, h_sw);
+    int ok = (rc == 0 && strcmp(h_sy, h_sw) == 0);
+    ck(ok, label);
+    return ok;
+}
+
+int main(void) {
+    static const char *const targets[6] = {
+        "lnx/x86_64", "lnx/arm64", "osx/x86_64", "osx/arm64", "win/x86_64", "win/arm64"
+    };
+    char tmp[256], cmd[1024], out[4096];
+    cx_fmt(tmp, sizeof tmp, "/tmp/sy-sha-%lld", sy_now_ms());
+    if (sy_mkdir(tmp, 0700) != 0) {
+        ck(0, "session-tmpdir");
+        return 1;
+    }
+
+    for (int i = 0; i < 6; i++) {
+        char lbl[64];
+        cx_fmt(lbl, sizeof lbl, "compile-sha-%s", targets[i]);
+        cx_fmt(cmd, sizeof cmd, "sh ./unisacc.com -c -funit -b %s cx/sys/sha.cx -o '%s/sha_%d.o'", targets[i], tmp, i);
+        ck(run_sh(cmd, out, sizeof out) == 0, lbl);
+    }
+
+    /* 5 fixed vectors: empty, 1 byte, 64 bytes, 65 bytes, 1 MiB */
+    vec_match("digest-parity-empty", "", 0);
+    vec_match("digest-parity-1byte", "a", 1);
+    {
+        unsigned char b64[64], b65[65];
+        for (int i = 0; i < 64; i++) b64[i] = (unsigned char)(i & 0xff);
+        for (int i = 0; i < 65; i++) b65[i] = (unsigned char)((i * 3 + 1) & 0xff);
+        vec_match("digest-parity-64bytes", b64, 64);
+        vec_match("digest-parity-65bytes", b65, 65);
+    }
+    {
+        long n1m = 1048576L;
+        unsigned char *b1m = (unsigned char *)mm_alloc(n1m);
+        if (b1m) {
+            for (long i = 0; i < n1m; i++) b1m[i] = (unsigned char)((i * 7 + 13) & 0xff);
+            vec_match("digest-parity-1mib", b1m, n1m);
+            mm_free(b1m);
+        } else {
+            ck(0, "digest-parity-1mib");
+        }
+    }
+
+    (void)sy_remove_all(tmp);
+    sy_printf("CHECK_SY_SHA256_HEX\tpassed=%d\tfailed=%d\n", g_pass, g_fail);
+    return g_fail ? 1 : 0;
+}
