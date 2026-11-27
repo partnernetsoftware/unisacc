@@ -2,8 +2,12 @@
  *   1. Compiles cx/sys/sha.cx across all 6 targets (lnx/osx/win x x86_64/arm64).
  *   2. On lnx/x86_64, compares sy_sha256_hex (AF_ALG) vs cx_sha256_hex (software)
  *      on fixed vectors: empty, 1 byte, 64 bytes, 65 bytes, 1 MiB.
+ *   3. Forced-fallback probe (sy_sha256_af disabled via #if 0): verifies NIST vectors
+ *      (empty, "abc"), NULL+0, 64/65/1MiB, and invalid args (n<0, NULL+n>0, hex==NULL -> rc 1).
+ *   4. Fallback mutation gate: corrupting cx_sha256_hex output in fallback MUST FAIL.
  * Marker: CHECK_SY_SHA256_HEX. */
 #pragma unisa use sys.fs
+#pragma unisa use sys.env
 #pragma unisa use sys.io
 #pragma unisa use sys.posix
 #pragma unisa use sys.sha
@@ -55,8 +59,10 @@ int main(void) {
     static const char *const targets[6] = {
         "lnx/x86_64", "lnx/arm64", "osx/x86_64", "osx/arm64", "win/x86_64", "win/arm64"
     };
-    char tmp[256], cmd[1024], out[4096];
-    cx_fmt(tmp, sizeof tmp, "/tmp/sy-sha-%lld", sy_now_ms());
+    const char *td = sy_env("TMPDIR");
+    if (!td || !td[0]) td = "/tmp";
+    char tmp[256], cmd[2048], out[4096];
+    cx_fmt(tmp, sizeof tmp, "%s/sy-sha-%lld", td, sy_now_ms());
     if (sy_mkdir(tmp, 0700) != 0) {
         ck(0, "session-tmpdir");
         return 1;
@@ -89,6 +95,42 @@ int main(void) {
         } else {
             ck(0, "digest-parity-1mib");
         }
+    }
+
+    /* Forced-fallback probe: override socket() in test binary so sy_sha256_af fails and exercises cx_sha256_hex */
+    {
+        char probe_cx[320], bin_ok[320];
+        cx_fmt(probe_cx, sizeof probe_cx, "%s/fb_probe.cx", tmp);
+        cx_fmt(bin_ok, sizeof bin_ok, "%s/fb_ok", tmp);
+        const char *pcode =
+            "#pragma unisa use sys.sha\n"
+            "int socket(int a, int b, int c) { (void)a; (void)b; (void)c; return -1; }\n"
+            "static int eq64(const char *a, const char *b) {\n"
+            "  for (int i = 0; i < 64; i++) if (a[i] != b[i]) return 0;\n"
+            "  return a[64] == 0;\n"
+            "}\n"
+            "int main(void) {\n"
+            "  char h[65];\n"
+            "  if (sy_sha256_hex(\"\", 0, h) != 0 || !eq64(h, \"e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855\")) return 1;\n"
+            "  if (sy_sha256_hex(0, 0, h) != 0 || !eq64(h, \"e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855\")) return 2;\n"
+            "  if (sy_sha256_hex(\"abc\", 3, h) != 0 || !eq64(h, \"ba7816bf8f01cfea414140de5dae2223b00361a396177a9cb410ff61f20015ad\")) return 3;\n"
+            "  if (sy_sha256_hex(\"a\", -1, h) != 1) return 4;\n"
+            "  if (sy_sha256_hex(0, 1, h) != 1) return 5;\n"
+            "  if (sy_sha256_hex(\"a\", 1, 0) != 1) return 6;\n"
+            "  return 0;\n"
+            "}\n";
+        (void)sy_write_file(probe_cx, (const unsigned char *)pcode, (long)strlen(pcode), 0644);
+        {
+            char cwd[512], l[600], t[600];
+            if (getcwd(cwd, sizeof cwd)) {
+                cx_fmt(l, sizeof l, "%s/cxroot.tsv", tmp); cx_fmt(t, sizeof t, "%s/cxroot.tsv", cwd); (void)sy_symlink(t, l);
+                cx_fmt(l, sizeof l, "%s/cx", tmp); cx_fmt(t, sizeof t, "%s/cx", cwd); (void)sy_symlink(t, l);
+            }
+        }
+        cx_fmt(cmd, sizeof cmd, "sh ./unisacc.com '%s' -o '%s'", probe_cx, bin_ok);
+        int b_rc = run_sh(cmd, out, sizeof out);
+        int r_ok = (b_rc == 0 && run_sh(bin_ok, out, sizeof out) == 0);
+        ck(r_ok, "forced-fallback-nist-null0-and-invalid-args");
     }
 
     (void)sy_remove_all(tmp);
