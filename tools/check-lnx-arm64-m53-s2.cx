@@ -18,13 +18,18 @@
 #pragma unisa use sys.io
 #pragma unisa use sys.posix
 #pragma unisa use sys.proc
+#pragma unisa use sysx.run
 #pragma unisa use cxlib.procrun
+#pragma unisa use cxlib.hostcheck
 #pragma unisa use text.text
 #pragma unisa use mem.bytes
 #pragma unisa use mem.heap
 
 static int g_pass = 0;
 static int g_fail = 0;
+static int g_skip = 0;
+static int g_native = 0;
+static const char *g_unisacc = "./unisacc.com"; /* lint:allow R1-product default repo APE when --unisacc is not passed */
 static char g_tmp[512];
 static char g_qemu[512];
 
@@ -56,6 +61,72 @@ static int find_qemu(void) {
 
 static int run_cmd(char **av, int timeout_s, char **out_buf, size_t *out_len) {
     return cx_runv_timeout(av, timeout_s, out_buf, out_len);
+}
+
+static int run_delivered_ape_stream_e2(const char *in_file, int want_rc, const char *s1_val, const char *so_val,
+                                       const char *want_err_sub, int no_fallback,
+                                       const char *ref_out, long ref_len,
+                                       char **save_out, long *save_len) {
+    px_opts o;
+    px_result r;
+    char e1[700], e2[700];
+    char *av[5];
+    char *env[3];
+    int nenv = 0, prc, ok = 0;
+    px_opts_init(&o);
+    av[0] = "sh";
+    av[1] = (char *)g_unisacc;
+    av[2] = "stream";
+    av[3] = "e2";
+    av[4] = 0;
+    if (s1_val) {
+        if (cx_fmt(e1, sizeof e1, "UNISACC_M53_S1=%s", s1_val) != 0) return 0;
+        env[nenv++] = e1;
+    }
+    if (so_val) {
+        if (cx_fmt(e2, sizeof e2, "UNISACC_M53_S1_SO=%s", so_val) != 0) return 0;
+        env[nenv++] = e2;
+    }
+    env[nenv] = 0;
+    o.argv = av;
+    o.env_add = nenv > 0 ? env : 0;
+    o.stdin_path = in_file;
+    o.deadline_ms = 30000;
+    o.out_cap = 16384;
+    o.err_cap = 16384;
+    o.merge_err = 0;
+    o.kill_tree = 1;
+    prc = px_run(&o, &r);
+    if (prc == 0 && r.code == want_rc) {
+        int out_ok = 1, err_ok = 1;
+        if (want_rc == 0) {
+            out_ok = (r.out && r.outn >= 16 && memcmp(r.out, "USLATTRT", 8) == 0);
+            if (out_ok && ref_out && ref_len > 0) {
+                out_ok = (r.outn == ref_len && memcmp(r.out, ref_out, ref_len) == 0);
+            }
+        }
+        if (want_err_sub) {
+            err_ok = (r.err && strstr(r.err, want_err_sub) != 0);
+        }
+        if (no_fallback) {
+            err_ok = err_ok && (!r.err || strstr(r.err, "M53_S1_FALLBACK") == 0);
+        }
+        if (out_ok && err_ok) {
+            ok = 1;
+            if (save_out && save_len && r.out && r.outn > 0) {
+                char *cp = (char *)mm_alloc((size_t)r.outn);
+                if (cp) {
+                    mm_copy(cp, (size_t)r.outn, r.out, r.outn);
+                    *save_out = cp;
+                    *save_len = r.outn;
+                } else {
+                    ok = 0;
+                }
+            }
+        }
+    }
+    px_result_free(&r);
+    return ok;
 }
 
 static int run_prog_merged(const char *runner, const char *exe, const char *arg1, const char *arg2,
@@ -91,13 +162,13 @@ static int build_slice_from_src(const char *tag, const char *src, char *out_slic
     if (cx_fmt(out_slice, (size_t)cap, "%s/%s.tapeslice", g_tmp, tag) != 0) return 1;
     if (sy_write_file(cx_p, (const unsigned char *)src, tx_len(src, 8192), 0600) != 0) return 1;
     {
-        char *av1[] = {"sh", "./unisacc.com", "--target", "lnx/x86_64", "-S", cx_p, "-o", tape_p, 0}; /* lint:allow R1-product compiles real m53 slice for arm64 S2 gate */
+        char *av1[] = {"sh", (char *)g_unisacc, "--target", g_native ? "lnx/arm64" : "lnx/x86_64", "-S", cx_p, "-o", tape_p, 0}; /* lint:allow R1-product compiles real m53 slice for arm64 S2 gate */
         rc1 = run_cmd(av1, 30, &co, &cn);
         if (co) { mm_free(co); co = 0; }
         if (rc1 != 0) return 1;
     }
     {
-        char *av2[] = {"sh", "./unisacc.com", "tools/tapepack.cx", "--", tape_p, "-o", out_slice, 0}; /* lint:allow R1-product packs real m53 slice for arm64 S2 gate */
+        char *av2[] = {"sh", (char *)g_unisacc, "tools/tapepack.cx", "--", tape_p, "-o", out_slice, 0}; /* lint:allow R1-product packs real m53 slice for arm64 S2 gate */
         rc2 = run_cmd(av2, 30, &co, &cn);
         if (co) { mm_free(co); co = 0; }
         if (rc2 != 0) return 1;
@@ -105,14 +176,29 @@ static int build_slice_from_src(const char *tag, const char *src, char *out_slic
     return 0;
 }
 
-int main(void) {
+int main(int argc, char **argv) {
     const char *td = sy_tmpdir();
     char sl_real[600], sl_abi1[600], sl_corrupt[600], sl_swap[600], sl_mut[600], so_x86[600];
-    char drv_cx[600], drv_arm64[600], drv_x86[600];
-    int has_q;
+    char drv_cx[600], drv_arm64[600], drv_x86[600], host[64];
+    int has_q = 0;
+
+    for (int i = 1; i < argc; i++) {
+        if (tx_eqz(argv[i], "--native")) g_native = 1;
+        else if (tx_eqz(argv[i], "--unisacc") && i + 1 < argc) g_unisacc = argv[++i];
+        else { sy_eprintf("check-lnx-arm64-m53-s2: unknown arg %s\n", argv[i]); return 2; }
+    }
+    if (g_native) {
+        host[0] = 0;
+        hc_host(host, sizeof host);
+        if (!tx_eqz(host, "Linux/arm64")) {
+            sy_eprintf("check-lnx-arm64-m53-s2: REFUSE --native requires Linux/arm64 host (got=%s)\n", host[0] ? host : "unknown");
+            return 2;
+        }
+    }
 
     if (cx_fmt(g_tmp, sizeof g_tmp, "%s/unisacc-arm64-m53-s2-%d", td ? td : "/tmp", sy_pid()) != 0) {
-        sy_printf("CHECK_LNX_ARM64_M53_S2\tpassed=0\tfailed=1\trunner=qemu\tnative=0\n");
+        if (g_native) sy_printf("CHECK_LNX_ARM64_M53_S2\tpassed=0\tfailed=1\tskipped=0\trunner=native\tnative=1\n");
+        else sy_printf("CHECK_LNX_ARM64_M53_S2\tpassed=0\tfailed=1\trunner=qemu\tnative=0\n");
         return 1;
     }
     (void)sy_mkdir(g_tmp, 0700);
@@ -125,8 +211,12 @@ int main(void) {
         }
     }
 
-    has_q = find_qemu();
-    ck(has_q == 1, "qemu-aarch64-static-present");
+    if (g_native) {
+        ck(1, "host-is-lnx-arm64-native");
+    } else {
+        has_q = find_qemu();
+        ck(has_q == 1, "qemu-aarch64-static-present");
+    }
 
     /* 1. Build real product m53 M53S1BIN2 and M53S1ABI1 slices calling cxsa_valid */
     {
@@ -305,21 +395,28 @@ int main(void) {
         cx_fmt(drv_x86, sizeof drv_x86, "%s/x86_s2_drv", g_tmp);
         (void)sy_write_file(drv_cx, (const unsigned char *)hsrc, tx_len(hsrc, 16384), 0600);
         {
-            char *av[] = {"sh", "./unisacc.com", "--target=lnx/arm64", drv_cx, "-o", drv_arm64, 0}; /* lint:allow R1-product cross-compiles lnx/arm64 S2 harness */
+            char *av[] = {"sh", (char *)g_unisacc, "--target=lnx/arm64", drv_cx, "-o", drv_arm64, 0}; /* lint:allow R1-product cross-compiles lnx/arm64 S2 harness */
             rc_a = run_cmd(av, 30, &co, &cn);
             if (co) { mm_free(co); co = 0; }
         }
-        {
-            char *av[] = {"sh", "./unisacc.com", "--target=lnx/x86_64", drv_cx, "-o", drv_x86, 0}; /* lint:allow R1-product compiles lnx/x86_64 S1 regression harness */
+        ck(rc_a == 0 && sy_exists(drv_arm64) == 1, "cross-compile-lnx-arm64-stream-s1");
+        if (g_native) {
+            g_skip++;
+            sy_printf("SKIP\tcheck-lnx-arm64-m53-s2.compile-lnx-x86_64-stream-s1\tx86_64-regression-not-applicable-on-arm64-host\n");
+            rc_x = 1;
+        } else {
+            char *av[] = {"sh", (char *)g_unisacc, "--target=lnx/x86_64", drv_cx, "-o", drv_x86, 0}; /* lint:allow R1-product compiles lnx/x86_64 S1 regression harness */
             rc_x = run_cmd(av, 30, &co, &cn);
             if (co) { mm_free(co); co = 0; }
+            ck(rc_x == 0 && sy_exists(drv_x86) == 1, "compile-lnx-x86_64-stream-s1");
         }
-        ck(rc_a == 0 && sy_exists(drv_arm64) == 1, "cross-compile-lnx-arm64-stream-s1");
-        ck(rc_x == 0 && sy_exists(drv_x86) == 1, "compile-lnx-x86_64-stream-s1");
     }
 
     /* 3. Build tapemode.so for lnx/x86_64 ABI1/.so regression */
-    {
+    if (g_native) {
+        g_skip++;
+        sy_printf("SKIP\tcheck-lnx-arm64-m53-s2.build-x86_64-tapemode-so\tx86_64-regression-not-applicable-on-arm64-host\n");
+    } else {
         char *co = 0; size_t cn = 0; int rc_so;
         cx_fmt(so_x86, sizeof so_x86, "%s/tapemode.so", g_tmp);
         {
@@ -333,42 +430,43 @@ int main(void) {
         ck(rc_so == 0 && sy_exists(so_x86) == 1, "build-x86_64-tapemode-so");
     }
 
-    /* 4. Run lnx/arm64 S2 tests under qemu-aarch64-static */
-    if (has_q && sy_exists(drv_arm64) == 1) {
+    /* 4. Run lnx/arm64 S2 tests (directly under --native on lnx/arm64, else under qemu-aarch64-static) */
+    if ((g_native || has_q) && sy_exists(drv_arm64) == 1) {
         char *out = 0; size_t outn = 0; int rc;
+        const char *arm_runner = g_native ? 0 : g_qemu;
 
         /* 4a. Master OFF, SO unset -> native only */
-        rc = run_prog_merged(g_qemu, drv_arm64, "1", "-", 0, 0, &out, &outn);
+        rc = run_prog_merged(arm_runner, drv_arm64, "1", "-", 0, 0, &out, &outn);
         ck(rc == 0 && out && strstr(out, "ARM64_S2_DONE\tn=4\tok=4") != 0 &&
            strstr(out, "M53_S1_FALLBACK") == 0, "arm64-default-off-clean");
         if (out) { mm_free(out); out = 0; }
 
         /* 4b. Negative control: SO=portable set, master switch OFF -> native only (must NOT enable) */
-        rc = run_prog_merged(g_qemu, drv_arm64, "1", "-", 0, "portable", &out, &outn);
+        rc = run_prog_merged(arm_runner, drv_arm64, "1", "-", 0, "portable", &out, &outn);
         ck(rc == 0 && out && strstr(out, "ARM64_S2_DONE\tn=4\tok=4") != 0 &&
            strstr(out, "M53_S1_FALLBACK") == 0, "arm64-portable-override-master-off-native-only");
         if (out) { mm_free(out); out = 0; }
 
         /* 4c. S2 Dual-Arm Portable: full 288-vector product cxsa_valid + cxsa_valid_s1 + direct tape_run_cx readback */
-        rc = run_prog_merged(g_qemu, drv_arm64, "288", sl_real, sl_real, "portable", &out, &outn);
+        rc = run_prog_merged(arm_runner, drv_arm64, "288", sl_real, sl_real, "portable", &out, &outn);
         ck(rc == 0 && out && strstr(out, "ARM64_S2_DONE\tn=288\tok=288\tboth=288\tpos=87\tneg=201") != 0 &&
            strstr(out, "M53_S1_FALLBACK") == 0, "arm64-s2-288-product-oracle-and-both-arms");
         if (out) { mm_free(out); out = 0; }
 
         /* 4d. Corrupt slice -> reason=corrupt + native adopted */
-        rc = run_prog_merged(g_qemu, drv_arm64, "1", "-", sl_corrupt, "portable", &out, &outn);
+        rc = run_prog_merged(arm_runner, drv_arm64, "1", "-", sl_corrupt, "portable", &out, &outn);
         ck(rc == 0 && out && strstr(out, "ARM64_S2_DONE\tn=4\tok=4") != 0 &&
            strstr(out, "M53_S1_FALLBACK\treason=corrupt") != 0, "arm64-s2-corrupt-fallback-native");
         if (out) { mm_free(out); out = 0; }
 
         /* 4e. Swapped slice -> reason=swap + native adopted */
-        rc = run_prog_merged(g_qemu, drv_arm64, "1", "-", sl_swap, "portable", &out, &outn);
+        rc = run_prog_merged(arm_runner, drv_arm64, "1", "-", sl_swap, "portable", &out, &outn);
         ck(rc == 0 && out && strstr(out, "ARM64_S2_DONE\tn=4\tok=4") != 0 &&
            strstr(out, "M53_S1_FALLBACK\treason=swap") != 0, "arm64-s2-swap-fallback-native");
         if (out) { mm_free(out); out = 0; }
 
         /* 4f. Inverted mutant slice -> reason=mismatch + native adopted */
-        rc = run_prog_merged(g_qemu, drv_arm64, "1", "-", sl_mut, "portable", &out, &outn);
+        rc = run_prog_merged(arm_runner, drv_arm64, "1", "-", sl_mut, "portable", &out, &outn);
         ck(rc == 0 && out && strstr(out, "ARM64_S2_DONE\tn=4\tok=4") != 0 &&
            strstr(out, "M53_S1_FALLBACK\treason=mismatch") != 0, "arm64-s2-mutant-mismatch-adopts-native");
         if (out) { mm_free(out); out = 0; }
@@ -382,7 +480,11 @@ int main(void) {
     }
 
     /* 5. lnx/x86_64 regression: M53S1ABI1 + tapemode.so still clean; SO=portable refused on x86_64 */
-    if (sy_exists(drv_x86) == 1 && sy_exists(so_x86) == 1) {
+    if (g_native) {
+        g_skip += 2;
+        sy_printf("SKIP\tcheck-lnx-arm64-m53-s2.x86_64-abi1-so-regression-clean\tx86_64-regression-not-applicable-on-arm64-host\n");
+        sy_printf("SKIP\tcheck-lnx-arm64-m53-s2.x86_64-portable-switch-refused\tx86_64-regression-not-applicable-on-arm64-host\n");
+    } else if (sy_exists(drv_x86) == 1 && sy_exists(so_x86) == 1) {
         char *out = 0; size_t outn = 0; int rc;
         rc = run_prog_merged(0, drv_x86, "1", "-", sl_abi1, so_x86, &out, &outn);
         ck(rc == 0 && out && strstr(out, "ARM64_S2_DONE\tn=4\tok=4") != 0 &&
@@ -398,6 +500,57 @@ int main(void) {
         ck(0, "x86_64-portable-switch-refused");
     }
 
-    sy_printf("CHECK_LNX_ARM64_M53_S2\tpassed=%d\tfailed=%d\trunner=qemu\tnative=0\n", g_pass, g_fail);
+    /* 6. Delivered APE internal migration path readback via stream e2 USLATTRT carrier */
+    {
+        char usl_good[600], usl_bad[600], absent_so[600];
+        unsigned char pkg_g[42], pkg_b[42];
+        const char *src_tail = "int main(void){return 0;}\n";
+        char *ref_out = 0;
+        long ref_len = 0;
+        int i, wr_ok, base_ok;
+        cx_fmt(usl_good, sizeof usl_good, "%s/uslattrt_good.in", g_tmp);
+        cx_fmt(usl_bad, sizeof usl_bad, "%s/uslattrt_bad.in", g_tmp);
+        cx_fmt(absent_so, sizeof absent_so, "%s/absent_exec.so", g_tmp);
+        mm_copy(pkg_g, 8, "USLATTRT", 8);
+        pkg_g[8] = 4; pkg_g[9] = 0; pkg_g[10] = 0; pkg_g[11] = 0;
+        pkg_g[12] = 0; pkg_g[13] = 0; pkg_g[14] = 0; pkg_g[15] = 0;
+        for (i = 0; i < 26; i++) pkg_g[16 + i] = (unsigned char)src_tail[i];
+        mm_copy(pkg_b, 42, (const char *)pkg_g, 42);
+        pkg_b[12] = 1; /* malformed USLATTRT: count=1 requires 4+9=13 bytes, length=4 -> native=0 */
+        wr_ok = (sy_write_file(usl_good, pkg_g, 42, 0600) == 0 &&
+                 sy_write_file(usl_bad, pkg_b, 42, 0600) == 0);
+        base_ok = (wr_ok &&
+                   run_delivered_ape_stream_e2(usl_good, 0, 0, 0, 0, 1, 0, 0, &ref_out, &ref_len) &&
+                   run_delivered_ape_stream_e2(usl_bad, 1, 0, 0, "malformed USLATTR1 side-car", 1, 0, 0, 0, 0));
+        ck(base_ok, "delivered-ape-stream-e2-default-off-and-bad-table");
+        ck(base_ok && run_delivered_ape_stream_e2(usl_good, 0, "0", absent_so, 0, 1, ref_out, ref_len, 0, 0),
+           "delivered-ape-stream-e2-disabled-master-off");
+        ck(wr_ok && run_delivered_ape_stream_e2(usl_good, 0, g_native ? sl_real : sl_abi1, absent_so,
+                                                "M53_S1_FALLBACK\treason=exec-absent", 0, 0, 0, 0, 0),
+           "delivered-ape-stream-e2-disabled-exec-absent");
+        ck(wr_ok && run_delivered_ape_stream_e2(usl_good, 0, sl_corrupt, "portable",
+                                                "M53_S1_FALLBACK\treason=corrupt", 0, 0, 0, 0, 0),
+           "delivered-ape-stream-e2-corrupt-fallback");
+        if (g_native) {
+            ck(base_ok &&
+               run_delivered_ape_stream_e2(usl_good, 0, sl_real, "portable", 0, 1, ref_out, ref_len, 0, 0) &&
+               run_delivered_ape_stream_e2(usl_bad, 1, sl_real, "portable", "malformed USLATTR1 side-car", 1, 0, 0, 0, 0),
+               "delivered-ape-stream-e2-portable-clean");
+            ck(wr_ok &&
+               run_delivered_ape_stream_e2(usl_good, 0, sl_mut, "portable",
+                                           "M53_S1_FALLBACK\treason=mismatch\tnative=1\ttape=0", 0, 0, 0, 0, 0) &&
+               run_delivered_ape_stream_e2(usl_bad, 1, sl_mut, "portable",
+                                           "M53_S1_FALLBACK\treason=mismatch\tnative=0\ttape=1", 0, 0, 0, 0, 0),
+               "delivered-ape-stream-e2-mutant-vm-pos-neg-parity");
+        }
+        if (ref_out) mm_free(ref_out);
+    }
+
+    (void)sy_remove_all(g_tmp);
+    if (g_native) {
+        sy_printf("CHECK_LNX_ARM64_M53_S2\tpassed=%d\tfailed=%d\tskipped=%d\trunner=native\tnative=1\tsource_probe=arm64_s2_drv\tdelivered_ape_path=stream_e2_cxsa_valid_s1\n", g_pass, g_fail, g_skip);
+    } else {
+        sy_printf("CHECK_LNX_ARM64_M53_S2\tpassed=%d\tfailed=%d\trunner=qemu\tnative=0\tsource_probe=arm64_s2_drv\tdelivered_ape_path=stream_e2_cxsa_valid_s1\n", g_pass, g_fail);
+    }
     return g_fail ? 1 : 0;
 }
