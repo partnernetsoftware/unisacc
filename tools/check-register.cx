@@ -1162,6 +1162,42 @@ int main(int argc,char **argv) {
                        count_lines(pbpath, pid_np) == 0 && count_lines(pcpath, pid_np) == 0,
                        "material without producer refused by name and rolled back");
                 }
+                {
+                    const char *pid_bg = "check-reg-mat-budget";
+                    char *vbg[] = {"env", "UNISACC_REGISTER_MAT_BUDGET_MS=0", prepared_driver, "--materials", "entry-link:path", pid_bg, "tools/register-fixture.cx", "REGISTER_FIXTURE", "budget exhausted material", "tools/register-fixture.cx", 0};
+                    rc = run(vbg, out, sizeof out);
+                    ok(rc != 0 && strstr(out, "REGISTER_LAYOUT_SELFTEST\tid=check-reg-mat-budget\tstatus=REFUSE\treason=budget-exhausted-before-layout\t") != 0 &&
+                       strstr(out, "status=ROLLED_BACK") != 0 &&
+                       count_lines(pbpath, pid_bg) == 0 && count_lines(pcpath, pid_bg) == 0,
+                       "budget exhausted before layout refuses by name and rolls back");
+                }
+                {
+                    char trp[4400];
+                    if (cx_fmt(trp, sizeof trp, "%s/mat-retry.log", ptables) == 0) {
+                        const char *t_res = "PREPARED\tentry-link\tid=abc\nDEFERRED\tbid1\tkilled-at-deadline\tresidue=1\tsurvived=1234\n";
+                        const char *t_ok  = "PREPARED\tentry-link\tid=abc\nDEFERRED\tbid1\tkilled-at-deadline\n";
+                        const char *t_nop = "DEFERRED\tbid1\tkilled-at-deadline\n";
+                        const char *t_oid = "PREPARED\tentry-link\tid=abc\nDEFERRED\tother-id\tkilled-at-deadline\n";
+                        const char *t_sub = "note PREPARED\tentry-link\tid=abc\nDEFERRED\tbid1\tkilled-at-deadline\n";
+                        char *vt[] = {prepared_driver, "--test-mat-retry", "bid1", "0", "142", trp, 0};
+                        cx_write(trp, t_res, strlen(t_res));
+                        rc = run(vt, out, sizeof out);
+                        ok(rc == 0 && strstr(out, "MAT_RETRY\tretry=0\n") != 0, "killed-at-deadline with residue > 0 does not retry");
+                        cx_write(trp, t_ok, strlen(t_ok));
+                        rc = run(vt, out, sizeof out);
+                        ok(rc == 0 && strstr(out, "MAT_RETRY\tretry=1\n") != 0, "clean killed-at-deadline with PREPARED entry-link line retries");
+                        cx_write(trp, t_nop, strlen(t_nop));
+                        rc = run(vt, out, sizeof out);
+                        ok(rc == 0 && strstr(out, "MAT_RETRY\tretry=0\n") != 0, "killed-at-deadline without PREPARED entry-link line does not retry");
+                        cx_write(trp, t_oid, strlen(t_oid));
+                        rc = run(vt, out, sizeof out);
+                        ok(rc == 0 && strstr(out, "MAT_RETRY\tretry=0\n") != 0, "DEFERRED for another batch id does not retry");
+                        cx_write(trp, t_sub, strlen(t_sub));
+                        rc = run(vt, out, sizeof out);
+                        ok(rc == 0 && strstr(out, "MAT_RETRY\tretry=0\n") != 0, "non-line-start PREPARED entry-link substring does not retry");
+                        sy_unlink(trp);
+                    }
+                }
             }
             unsetenv("UNISACC_TABLES");
             if (!cx_fmt(pbpath, sizeof pbpath, "%s/batches.tsv", ptables)) sy_unlink(pbpath);

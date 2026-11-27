@@ -898,18 +898,81 @@ static int rg_batch_materials(const char *tab_path, const char *id, char *out, s
 
 static long rg_mat_deadline_ms = 0;
 
+static long rg_mat_budget_ms(void) {
+    const char *s = getenv("UNISACC_REGISTER_MAT_BUDGET_MS");
+    if (s && *s) {
+        long v = 0;
+        const char *p = s;
+        while (*p >= '0' && *p <= '9' && v <= 280000L) { v = v * 10L + (*p - '0'); p++; }
+        if (*p == 0) return v > 280000L ? 280000L : v;
+    }
+    return 280000L;
+}
+
+static int rg_bound_rem(long max_s, char out[16]) {
+    long lim = max_s;
+    if (rg_mat_deadline_ms > 0) {
+        long rem = (rg_mat_deadline_ms - sy_now_ms()) / 1000L;
+        if (rem < 2L) return -1;
+        if (rem < lim) lim = rem;
+    }
+    return cx_fmt(out, 16, "%ld", lim);
+}
+
+static int rg_should_retry_material_round(const char *buf, const char *id, int round, int rc) {
+    char want_def[256];
+    size_t wlen;
+    int has_prep_el = 0, has_prep_tk = 0;
+    int def_step = 0, def_killed_clean = 0, def_killed_dirty = 0;
+    const char *p = buf;
+    if (!buf || !id || cx_fmt(want_def, sizeof want_def, "DEFERRED\t%s\t", id)) return 0;
+    wlen = strlen(want_def);
+    while (*p) {
+        const char *eol = p;
+        size_t len;
+        while (*eol && *eol != '\n') eol++;
+        len = (size_t)(eol - p);
+        if (len > 0 && p[len - 1] == '\r') len--;
+        if ((len == 19 && !memcmp(p, "PREPARED\tentry-link", 19)) ||
+            (len > 19 && !memcmp(p, "PREPARED\tentry-link\t", 20))) {
+            has_prep_el = 1;
+        }
+        if ((len == 17 && !memcmp(p, "PREPARED\ttlib-kit", 17)) ||
+            (len > 17 && !memcmp(p, "PREPARED\ttlib-kit\t", 18))) {
+            has_prep_tk = 1;
+        }
+        if (len >= wlen && !memcmp(p, want_def, wlen)) {
+            const char *tail = p + wlen;
+            size_t tlen = len - wlen;
+            if ((tlen >= 35 && !memcmp(tail, "prepare-failed=stepwise-more-steps=", 35)) ||
+                (tlen >= 31 && !memcmp(tail, "prepare-failed=prebuild-budget=", 31)) ||
+                (tlen >= 33 && !memcmp(tail, "prepare-failed=prebuild-deadline=", 33))) {
+                def_step = 1;
+            } else if (tlen == 18 && !memcmp(tail, "killed-at-deadline", 18)) {
+                def_killed_clean = 1;
+            } else if (tlen > 18 && !memcmp(tail, "killed-at-deadline\t", 19)) {
+                def_killed_dirty = 1;
+            }
+        }
+        p = *eol ? eol + 1 : eol;
+    }
+    if (def_step) return 1;
+    if (def_killed_clean && !def_killed_dirty && has_prep_el) return 1;
+    if (round == 0 && rc == 142 && has_prep_tk && !def_killed_dirty) return 1;
+    return 0;
+}
+
 static int rg_run_affected_materials(const char *run_dir, const char *id,
                                      const char *envcache, const char *envprep,
                                      int use_dev, const char *devdir,
                                      char *buf, size_t cap,
                                      int *steps_out, char *no_prod_out, size_t npcap) {
-    char want_pass[256], want_def[256];
+    char want_pass[256];
     long deadline = rg_mat_deadline_ms > 0 ? rg_mat_deadline_ms : (sy_now_ms() + 280000L);
     int round, total_steps = 0;
     if (steps_out) *steps_out = 0;
     if (no_prod_out && npcap) no_prod_out[0] = 0;
-    if (cx_fmt(want_pass, sizeof want_pass, "BATCH_RUN\tid=%s\tstatus=PASS\t", id) ||
-        cx_fmt(want_def, sizeof want_def, "DEFERRED\t%s\t", id)) return 1;
+    if (cx_fmt(want_pass, sizeof want_pass, "BATCH_RUN\tid=%s\tstatus=PASS\t", id)) return 1;
     for (round = 0; round < 6; round++) {
         char *av[32]; char bound_s[16]; int n = 0; int rc;
         long rem_s = (deadline - sy_now_ms()) / 1000L;
@@ -948,14 +1011,7 @@ static int rg_run_affected_materials(const char *run_dir, const char *id,
             if (steps_out) *steps_out = total_steps;
             return 0;
         }
-        if (strstr(buf, want_def) &&
-            (strstr(buf, "prepare-failed=stepwise-more-steps=") ||
-             strstr(buf, "prepare-failed=prebuild-budget=") ||
-             strstr(buf, "prepare-failed=prebuild-deadline=") ||
-             (strstr(buf, "killed-at-deadline") && strstr(buf, "PREPARED\tentry-link")))) {
-            continue;
-        }
-        if (round == 0 && rc == 142 && strstr(buf, "PREPARED\ttlib-kit")) continue;
+        if (rg_should_retry_material_round(buf, id, round, rc)) continue;
         if (steps_out) *steps_out = total_steps;
         return rc ? rc : 1;
     }
@@ -970,17 +1026,33 @@ static int rg_run_affected_materials(const char *run_dir, const char *id,
    so the verdict is about the bytes a commit will carry (commit-own --new-tool passes its private index's tree). */
 static int rg_qualify_layout_selftest(const char *root,const char *id,const char *check_src,const char *files,const char *batchbin,int use_dev,const char *devdir,const char *treeish){
     char stage[4400],lay[4500],tar[4600],db[4500],dbarg[4600],gitlink[4600],out[4600],p[4600],src_abs[4600],ape[4096];
-    char privtmp[4600],coldcache[4600],coldprep[4600],envtmp[4700],envcache[4700],envprep[4700],want[128];
+    char privtmp[4600],coldcache[4600],coldprep[4600],envtmp[4700],envcache[4700],envprep[4700],want[128],bs[16];
     static char buf[1<<16];
     sy_stat_t st;
+    long lay_start = sy_now_ms();
+    if (rg_mat_deadline_ms > 0 && (rg_mat_deadline_ms - sy_now_ms()) / 1000L < 10L) {
+        printf("REGISTER_LAYOUT_SELFTEST\tid=%s\tstatus=REFUSE\treason=budget-exhausted-before-layout\trc=124\tms=0\n", id);
+        return 1;
+    }
     if(sy_mkdtemp(sy_tmpdir(),"unisacc-reg-layout-",stage,sizeof stage))return 2;
     rg_file(lay,sizeof lay,stage,"tree");
     if(sy_mkdir(lay,0700)){rg_clean_layout(stage);return 2;}
     rg_file(tar,sizeof tar,stage,"head.tar");
     {
-        char *ar[]={"./tools/bound","55","git","archive","-o",tar,(char *)(treeish?treeish:"HEAD"),0};
-        char *ex[]={"./tools/bound","55","tar","-xf",tar,"-C",lay,0};
-        if(run(ar,buf,sizeof buf)||run(ex,buf,sizeof buf)||sy_unlink(tar)){rg_clean_layout(stage);return 2;}
+        if (rg_bound_rem(55, bs)) {
+            rg_clean_layout(stage);
+            printf("REGISTER_LAYOUT_SELFTEST\tid=%s\tstatus=REFUSE\treason=budget-exhausted-before-layout\trc=124\tms=%ld\n", id, sy_now_ms() - lay_start);
+            return 1;
+        }
+        char *ar[]={"./tools/bound",bs,"git","archive","-o",tar,(char *)(treeish?treeish:"HEAD"),0};
+        if (run(ar, buf, sizeof buf)) { rg_clean_layout(stage); return 2; }
+        if (rg_bound_rem(55, bs)) {
+            rg_clean_layout(stage);
+            printf("REGISTER_LAYOUT_SELFTEST\tid=%s\tstatus=REFUSE\treason=budget-exhausted-before-layout\trc=124\tms=%ld\n", id, sy_now_ms() - lay_start);
+            return 1;
+        }
+        char *ex[]={"./tools/bound",bs,"tar","-xf",tar,"-C",lay,0};
+        if (run(ex, buf, sizeof buf) || sy_unlink(tar)) { rg_clean_layout(stage); return 2; }
     }
     /* Overlay the new batch source file and declared files (may be untracked/modified in worktree) plus live tables. */
     if(!treeish && check_src[0]!='/' && cx_fmt(src_abs,sizeof src_abs,"%s/%s",root,check_src)==0 && cx_fmt(p,sizeof p,"%s/%s",lay,check_src)==0){
@@ -1006,7 +1078,12 @@ static int rg_qualify_layout_selftest(const char *root,const char *id,const char
                         sy_unlink(p);
                         if(sy_copy(src_abs,p,0644)){rg_clean_layout(stage);return 2;}
                     }else if(st.kind=='d'||st.kind=='l'){
-                        char *cpv[]={"./tools/bound","20","cp","-a",src_abs,p,0};
+                        if (rg_bound_rem(20, bs)) {
+                            rg_clean_layout(stage);
+                            printf("REGISTER_LAYOUT_SELFTEST\tid=%s\tstatus=REFUSE\treason=budget-exhausted-before-layout\trc=124\tms=%ld\n", id, sy_now_ms() - lay_start);
+                            return 1;
+                        }
+                        char *cpv[]={"./tools/bound",bs,"cp","-a",src_abs,p,0};
                         sy_unlink(p);
                         if(run(cpv,buf,sizeof buf)){rg_clean_layout(stage);return 2;}
                     }
@@ -1028,10 +1105,27 @@ static int rg_qualify_layout_selftest(const char *root,const char *id,const char
     if(cx_fmt(dbarg,sizeof dbarg,"--separate-git-dir=%s",db)){rg_clean_layout(stage);return 2;}
     rg_file(gitlink,sizeof gitlink,lay,".git");
     {
-        char *init[]={"./tools/bound","15","env","-u","GIT_DIR","-u","GIT_WORK_TREE","-u","GIT_INDEX_FILE","git","-C",lay,"init","-q",dbarg,0};
-        char *add[]={"./tools/bound","55","env","-u","GIT_DIR","-u","GIT_WORK_TREE","-u","GIT_INDEX_FILE","git","-C",lay,"add","-Af","--",".",":(exclude)unisacc.com",0};
-        char *commit[]={"./tools/bound","55","env","-u","GIT_DIR","-u","GIT_WORK_TREE","-u","GIT_INDEX_FILE","git","-C",lay,"-c","user.name=register","-c","user.email=register@localhost","-c","commit.gpgsign=false","commit","-qm","register single-commit qualify layout",0};
-        if(run(init,buf,sizeof buf)||run(add,buf,sizeof buf)||run(commit,buf,sizeof buf)){sy_unlink(gitlink);rg_clean_layout(stage);return 2;}
+        if (rg_bound_rem(15, bs)) {
+            sy_unlink(gitlink); rg_clean_layout(stage);
+            printf("REGISTER_LAYOUT_SELFTEST\tid=%s\tstatus=REFUSE\treason=budget-exhausted-before-layout\trc=124\tms=%ld\n", id, sy_now_ms() - lay_start);
+            return 1;
+        }
+        char *init[]={"./tools/bound",bs,"env","-u","GIT_DIR","-u","GIT_WORK_TREE","-u","GIT_INDEX_FILE","git","-C",lay,"init","-q",dbarg,0};
+        if (run(init, buf, sizeof buf)) { sy_unlink(gitlink); rg_clean_layout(stage); return 2; }
+        if (rg_bound_rem(55, bs)) {
+            sy_unlink(gitlink); rg_clean_layout(stage);
+            printf("REGISTER_LAYOUT_SELFTEST\tid=%s\tstatus=REFUSE\treason=budget-exhausted-before-layout\trc=124\tms=%ld\n", id, sy_now_ms() - lay_start);
+            return 1;
+        }
+        char *add[]={"./tools/bound",bs,"env","-u","GIT_DIR","-u","GIT_WORK_TREE","-u","GIT_INDEX_FILE","git","-C",lay,"add","-Af","--",".",":(exclude)unisacc.com",0};
+        if (run(add, buf, sizeof buf)) { sy_unlink(gitlink); rg_clean_layout(stage); return 2; }
+        if (rg_bound_rem(55, bs)) {
+            sy_unlink(gitlink); rg_clean_layout(stage);
+            printf("REGISTER_LAYOUT_SELFTEST\tid=%s\tstatus=REFUSE\treason=budget-exhausted-before-layout\trc=124\tms=%ld\n", id, sy_now_ms() - lay_start);
+            return 1;
+        }
+        char *commit[]={"./tools/bound",bs,"env","-u","GIT_DIR","-u","GIT_WORK_TREE","-u","GIT_INDEX_FILE","git","-C",lay,"-c","user.name=register","-c","user.email=register@localhost","-c","commit.gpgsign=false","commit","-qm","register single-commit qualify layout",0};
+        if (run(commit, buf, sizeof buf)) { sy_unlink(gitlink); rg_clean_layout(stage); return 2; }
     }
     rg_file(p,sizeof p,lay,"out");if(sy_mkdir(p,0700)){sy_unlink(gitlink);rg_clean_layout(stage);return 2;}
     rg_file(out,sizeof out,p,"trial");rg_file(privtmp,sizeof privtmp,p,"cold-tmp");
@@ -1550,6 +1644,14 @@ int main(int argc, char **argv) {
         char *o=rg_layout_rows(argv[2],argv[3],pb,pn,&on);if(!o)return 2;
         fwrite(o,1,on,stdout);free(o);free(pb);return 0;
     }
+    if(argc==6 && tx_eqz(argv[1],"--test-mat-retry")){
+        size_t tn=0; char *tb=cx_read(argv[5],&tn);
+        if(!tb){fprintf(stderr,"register: test-mat-retry read %s\n",argv[5]);return 2;}
+        int r=rg_should_retry_material_round(tb,argv[2],atoi(argv[3]),atoi(argv[4]));
+        free(tb);
+        printf("MAT_RETRY\tretry=%d\n",r);
+        return 0;
+    }
     if(argc==4 && tx_eqz(argv[1],"--tool") && tx_eqz(argv[2],"--sync") && tx_eqz(argv[3],"--recover")){
         int fd=rg_try_lock(rg_lock_ms());if(fd<0)rg_die("recovery-lock-timeout",rg_lockpath());
         rg_report_retired();
@@ -1707,6 +1809,7 @@ int main(int argc, char **argv) {
         if (sy_realpath(".", root, sizeof root) < 0 || sy_realpath(sy_tmpdir(), tmpc, sizeof tmpc) < 0 || tx_snprintf(parent, sizeof parent, "%s/unisacc-affected-register-%s-%d", tmpc, id, sy_pid()) >= (int)sizeof parent
             || sy_mkdir(parent, 0700) != 0) { okrun = 0; fprintf(stderr, "register: cannot create the trial run directory register-%s-%d under %s (is the temp directory writable?)\n", id, sy_pid(), sy_tmpdir()); parent[0] = 0; }
         else if (!tx_eqz(materials, "-")) {
+            rg_mat_deadline_ms = sy_now_ms() + rg_mat_budget_ms();
             if (getenv("UNISACC_TABLES") && *getenv("UNISACC_TABLES")) {
                 okrun = (rg_qualify_layout_selftest(root, id, check, files, batchbin, use_dev, devdir, 0) == 0);
             } else {
@@ -1716,7 +1819,6 @@ int main(int argc, char **argv) {
                     cx_fmt(envp, sizeof envp, "UNISACC_PREP_CACHE=%s", tprep)) {
                     okrun = 0;
                 } else {
-                    rg_mat_deadline_ms = sy_now_ms() + 280000L;
                     rc = rg_run_affected_materials(root, id, 0, envp, use_dev, devdir, buf, sizeof buf, &steps, no_prod, sizeof no_prod);
                     (void)rg_clean_layout(tprep);
                     at = tx_find(buf, tx_len(buf, sizeof buf), "BATCH_RUN\t", 10);
@@ -1728,11 +1830,19 @@ int main(int argc, char **argv) {
                         okrun = rc == 0 && at >= 0 && tx_find(buf + at, tx_len(buf + at, sizeof buf), "status=PASS", 11) >= 0;
                     }
                     if (!okrun) fputs(buf, stderr);
-                    if (okrun) bpok = !rn_prepare(root, "tools/batch-packages-gen.cx", cache, bpbin, sizeof bpbin, &reused, why, sizeof why);
+                    if (okrun) {
+                        long rem_s = (rg_mat_deadline_ms - sy_now_ms()) / 1000L;
+                        if (rem_s < 10L) {
+                            printf("REGISTER_LAYOUT_SELFTEST\tid=%s\tstatus=REFUSE\treason=budget-exhausted-before-layout\trc=124\tms=0\n", id);
+                            okrun = 0;
+                        } else if (rem_s >= 60L) {
+                            bpok = !rn_prepare(root, "tools/batch-packages-gen.cx", cache, bpbin, sizeof bpbin, &reused, why, sizeof why);
+                        }
+                    }
                     if (okrun && rg_qualify_layout_selftest(root, id, check, files, batchbin, use_dev, devdir, 0) != 0) okrun = 0;
-                    rg_mat_deadline_ms = 0;
                 }
             }
+            rg_mat_deadline_ms = 0;
         } else {
             char *v[9]={"./tools/bound","58",batchbin};int argc_run=3;
             if(use_dev){v[argc_run++]="--candidate";v[argc_run++]=devdir;}
