@@ -3,6 +3,9 @@
 #pragma unisa use runtime.package_decode
 #pragma unisa use runtime.package_lifetime
 #pragma unisa use driver.tape_soload
+#pragma unisa use driver.executor_selection_table
+#pragma unisa use runtime.tape_exec
+#pragma unisa use sys.hostid
 #pragma unisa use sys.env
 #pragma unisa use sys.fs
 #pragma unisa use sys.time
@@ -93,6 +96,7 @@ typedef struct {
 typedef struct {
     int state;
     int busy;
+    int portable;
     unsigned long gen;
     M53CacheKey cache;
     TapeFDirEntry fdir[TAPE_RT_MAX_FDIR];
@@ -134,19 +138,35 @@ typedef struct {
 static TapeRuntime g_tape_rt;
 static TapeUnitState m53_m1_unit;
 
-static const TapeUnitSpec m53_m1_spec = {
-    "tape/lnx-x86_64/manifest.tsv",
-    "tape/lnx-x86_64/tapemode.so",
-    "tape/lnx-x86_64/m53.tapeslice",
-    "tapemode.so",
-    "m53.tapeslice",
-    "M53S1BIN2",
-    9L,
-    "cxsa_valid",
-    1ULL,
-    2000000ULL,
-    "M53_M1_REFUSE"
-};
+static const ExecutorSel *g_m53_sel;
+static char m53_mf_key[512], m53_so_key[512], m53_sl_key[512], m53_sl_leaf[128];
+static TapeUnitSpec m53_m1_spec;
+static int m53_spec_init(void) {
+    const ExecutorSel *e;
+    long al = 0;
+    if (g_m53_sel) return 0;
+    e = executor_sel_triple(tn_self());
+    if (!e) return -1;
+    if (cx_fmt(m53_mf_key, sizeof m53_mf_key, "%s/%s", e->tape_dir, e->manifest_key) ||
+        cx_fmt(m53_so_key, sizeof m53_so_key, "%s/%s", e->tape_dir, e->tapemode_key) ||
+        cx_fmt(m53_sl_key, sizeof m53_sl_key, "%s/%s.tapeslice", e->tape_dir, e->slice_prefix) ||
+        cx_fmt(m53_sl_leaf, sizeof m53_sl_leaf, "%s.tapeslice", e->slice_prefix)) return -1;
+    while (e->abi_tag[al] && al < 128) al++;
+    m53_m1_spec.mf_key = m53_mf_key;
+    m53_m1_spec.so_key = m53_so_key;
+    m53_m1_spec.sl_key = m53_sl_key;
+    m53_m1_spec.so_leaf = e->tapemode_key;
+    m53_m1_spec.sl_leaf = m53_sl_leaf;
+    m53_m1_spec.abi_tag = e->abi_tag;
+    m53_m1_spec.abi_tag_len = al;
+    m53_m1_spec.guest_sym = "cxsa_valid";
+    m53_m1_spec.max_ret = 9L;
+    m53_m1_spec.budget = 2000000ULL;
+    m53_m1_spec.refuse_tag = "M53_M1_REFUSE";
+    g_m53_sel = e;
+    return 0;
+}
+
 
 static long tape_mono_ns(void) {
     sy_ts_t t;
@@ -886,12 +906,14 @@ static int m53_m1_locate_pkg_fd(int fd, long apen, long *pkg_off_out, long *pkgl
 /* Boot or reload the ONE shared TapeRuntime per process (footer + P4 fdir + manifest + tapemode.so). */
 static int tape_rt_ensure(TapeUnitState *u, const TapeUnitSpec *sp, const char *cpath,
                           int *fd_inout, sy_stat_t *st_inout) {
-    static const char *const sym_names[3] = {
-        "hoststub_lnx_x86_64_bind",
-        "hoststub_lnx_x86_64",
-        "tape_run_x86_64"
-    };
+    const char *sym_names[3];
     TapeRuntime *rt = &g_tape_rt;
+    int portable;
+    if (m53_spec_init() != 0 || !g_m53_sel) return tape_unit_fail(u, sp, "executor-selection-unknown", 2);
+    sym_names[0] = g_m53_sel->hoststub_bind_sym;
+    sym_names[1] = g_m53_sel->hoststub_sym;
+    sym_names[2] = g_m53_sel->run_sym;
+    portable = m53_m1_eq(g_m53_sel->executor, 8L, "portable", 8L);
     TapeFDirEntry new_fdir[TAPE_RT_MAX_FDIR];
     int new_fn = 0, rc, i;
     long apen, pkg_off = 0, pkglen = 0, mf_len = 0, so_len = 0;
@@ -937,6 +959,11 @@ static int tape_rt_ensure(TapeUnitState *u, const TapeUnitSpec *sp, const char *
         tape_rt_drop(rt); rt->state = M53_M1_REFUSED;
         return tape_unit_fail(u, sp, er ? er : "embed-pkg-decode-failed", ed);
     }
+    if (portable) {   /* portable executor: no tapemode.so, no tsl; tape_run_cx is linked in-process */
+        mm_fill(&new_tsl, (long)sizeof new_tsl, 0, (long)sizeof new_tsl);
+        new_bind = 0; new_disp = 0; new_run = (void *)&tape_run_cx;
+        goto rt_ready;
+    }
     so_buf = tape_fdir_read_checked(*fd_inout, tape_fdir_find(new_fdir, new_fn, sp->so_key),
                                     1, M53_M1_MAX_SO, &so_len, &er, &ed);
     if (!so_buf) {
@@ -976,6 +1003,7 @@ static int tape_rt_ensure(TapeUnitState *u, const TapeUnitSpec *sp, const char *
         return tape_unit_fail(u, sp, "embed-so-map-failed", 20);
     }
 
+rt_ready:
     /* Atomic swap into shared TapeRuntime (bumps rt->gen so all units lazily re-verify slices). */
     tape_rt_drop(rt);
     for (i = 0; i < TSL_I_WORDS; i++) rt->tsl[i] = new_tsl[i];
@@ -986,6 +1014,7 @@ static int tape_rt_ensure(TapeUnitState *u, const TapeUnitSpec *sp, const char *
     rt->bind_fn = new_bind;
     rt->disp_fn = new_disp;
     rt->run_fn = new_run;
+    rt->portable = portable;
     m53_m1_cpy(rt->cache.path, (long)sizeof rt->cache.path, cpath);
     rt->cache.dev = st_inout->dev;
     rt->cache.ino = st_inout->ino;
@@ -1167,7 +1196,9 @@ static long tape_unit_vm_exec(TapeUnitState *u, const TapeUnitSpec *sp,
     long brc, rrc, ret;
     int i, det = 0, ibm_cached;
 
-    if (!rt->tsl[TSL_I_BASE] || !u->slice || !rt->bind_fn || !rt->disp_fn || !rt->run_fn) {
+    if (rt->portable) {
+        if (!u->slice || !rt->run_fn) { tape_emit_refuse(sp->refuse_tag, "embed-vm-call-failed", -1); return -2L; }
+    } else if (!rt->tsl[TSL_I_BASE] || !u->slice || !rt->bind_fn || !rt->disp_fn || !rt->run_fn) {
         tape_emit_refuse(sp->refuse_tag, "embed-vm-call-failed", -1);
         return -2L;
     }
@@ -1255,10 +1286,12 @@ static long tape_unit_vm_exec(TapeUnitState *u, const TapeUnitSpec *sp,
     }
     ibm = slot->ibm;
 
-    brc = tsl_call2(&rt->tsl, rt->bind_fn, (long)mem, (long)memlimit);
-    if (brc != 0L) {
-        tape_emit_refuse(sp->refuse_tag, "embed-vm-call-failed", (int)brc);
-        return -2L;
+    if (!rt->portable) {
+        brc = tsl_call2(&rt->tsl, rt->bind_fn, (long)mem, (long)memlimit);
+        if (brc != 0L) {
+            tape_emit_refuse(sp->refuse_tag, "embed-vm-call-failed", (int)brc);
+            return -2L;
+        }
     }
     for (i = 0; i < 12; i++) args[i] = 0ULL;
     for (i = 0; i < 5; i++) result[i] = M53_M1_RES_SENTINEL;
@@ -1270,12 +1303,12 @@ static long tape_unit_vm_exec(TapeUnitState *u, const TapeUnitSpec *sp,
     args[5] = (unsigned long long)guest_argv;
     args[6] = (unsigned long long)result;
     args[7] = (unsigned long long)u->slice_len;
-    args[8] = (unsigned long long)rt->disp_fn;
+    args[8] = rt->portable ? 0ULL : (unsigned long long)rt->disp_fn;
     args[9] = (unsigned long long)mem;
     args[10] = (unsigned long long)ibm;
     args[11] = ibitmap_cap;
 
-    rrc = tsl_call2(&rt->tsl, rt->run_fn, (long)args, 0L);
+    rrc = rt->portable ? (long)tape_run_cx(args) : tsl_call2(&rt->tsl, rt->run_fn, (long)args, 0L);
     if (!ibm_cached && result[0] == 0ULL) {
         slot->slice = u->slice;
         slot->slice_len = u->slice_len;
@@ -1384,7 +1417,9 @@ long tape_unit_call_bytes(TapeUnitState *u, const TapeUnitSpec *sp,
 }
 
 int cxsa_valid_s1(const unsigned char *data, long length) {
-    const char *env_s1 = sy_env("UNISACC_M53_S1");
+    const char *env_s1;
+    if (m53_spec_init() != 0) { tape_emit_refuse("M53_M1_REFUSE", "executor-selection-unknown", 2); return -2; }
+    env_s1 = sy_env("UNISACC_M53_S1");
     const char *env_so = sy_env("UNISACC_M53_S1_SO");
     if ((env_s1 && env_s1[0]) || (env_so && env_so[0])) {
         tape_emit_refuse(m53_m1_spec.refuse_tag, "embed-env-override-forbidden", 0);
