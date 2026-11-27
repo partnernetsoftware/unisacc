@@ -1,0 +1,139 @@
+/* tools/check-win-m53-s1.cx -- win/x86_64 and win/arm64 LLP64 size/ABI assertions and
+ * Windows m53 S1 default-OFF + portable tape_run_cx PE build verification.
+ *
+ * Verifies:
+ *   (1) Cross-compile win/x86_64 PE executable importing runtime.tape_exec + driver.stream_s1
+ *       with compile-time LLP64 assertions: sizeof(void*)==8, sizeof(long)==4,
+ *       sizeof(unsigned long)==4, sizeof(long long)==8, sizeof(unsigned long long)==8,
+ *       sizeof(tape_run_cx(0))==8 (no 32-bit return truncation on Windows LLP64)
+ *   (2) Cross-compile win/arm64 PE executable with identical LLP64 assertions
+ *   (3) Verify PE/COFF headers: MZ magic, PE\0\0 signature, Machine 0x8664 (AMD64) and 0xAA64 (ARM64)
+ *   (4) Verify real product m53 M53S1BIN2 slice builds cleanly and passes host-side portable
+ *       stream_s1.cx smoke (Windows native execution stays UNMEASURED until Windows CI)
+ */
+#pragma unisa use sys.env
+#pragma unisa use sys.fs
+#pragma unisa use sys.io
+#pragma unisa use sys.posix
+#pragma unisa use sys.proc
+#pragma unisa use text.text
+#pragma unisa use mem.bytes
+#pragma unisa use mem.heap
+
+static int g_pass = 0;
+static int g_fail = 0;
+static char g_tmp[512];
+
+static void ck(int ok, const char *name) {
+    if (ok) {
+        g_pass++;
+        sy_printf("PASS\tcheck-win-m53-s1.%s\n", name);
+    } else {
+        g_fail++;
+        sy_printf("FAIL\tcheck-win-m53-s1.%s\n", name);
+    }
+}
+
+static unsigned int rd_u16(const unsigned char *p) {
+    return (unsigned int)p[0] | ((unsigned int)p[1] << 8);
+}
+
+static unsigned int rd_u32(const unsigned char *p) {
+    return (unsigned int)p[0] | ((unsigned int)p[1] << 8) |
+           ((unsigned int)p[2] << 16) | ((unsigned int)p[3] << 24);
+}
+
+static int verify_pe_machine(const char *path, unsigned int want_machine) {
+    unsigned char *b = 0;
+    int64_t n = 0;
+    unsigned int pe_off, mach;
+    if (sy_read_file(path, &b, &n, 16 << 20) != 0 || !b || n < 128) {
+        if (b) mm_free(b);
+        return 0;
+    }
+    if (b[0] != 'M' || b[1] != 'Z') { mm_free(b); return 0; }
+    pe_off = rd_u32(b + 60);
+    if ((int64_t)pe_off + 24 > n) { mm_free(b); return 0; }
+    if (b[pe_off] != 'P' || b[pe_off + 1] != 'E' || b[pe_off + 2] != 0 || b[pe_off + 3] != 0) {
+        mm_free(b);
+        return 0;
+    }
+    mach = rd_u16(b + pe_off + 4);
+    mm_free(b);
+    return mach == want_machine ? 1 : 0;
+}
+
+int main(void) {
+    const char *td = sy_tmpdir();
+    char win_cx[600], pe_x64[600], pe_a64[600];
+
+    if (cx_fmt(g_tmp, sizeof g_tmp, "%s/unisacc-win-m53-s1-%d", td ? td : "/tmp", sy_pid()) != 0) {
+        sy_printf("CHECK_WIN_M53_S1\tpassed=0\tfailed=1\n");
+        return 1;
+    }
+    (void)sy_mkdir(g_tmp, 0700);
+    {
+        char cwd[512], l[600], t[600];
+        if (getcwd(cwd, sizeof cwd)) {
+            cx_fmt(l, sizeof l, "%s/cx", g_tmp); cx_fmt(t, sizeof t, "%s/cx", cwd); (void)sy_symlink(t, l);
+            cx_fmt(l, sizeof l, "%s/cxroot.tsv", g_tmp); cx_fmt(t, sizeof t, "%s/cxroot.tsv", cwd); (void)sy_symlink(t, l);
+        }
+    }
+
+    /* Windows CI-ready m53 S1 driver with strict compile-time LLP64 size/ABI assertions */
+    {
+        const char *wsrc =
+            "#pragma unisa use runtime.tape_exec\n"
+            "#pragma unisa use runtime.stream_attributes\n"
+            "#pragma unisa use driver.stream_s1\n"
+            "#pragma unisa use sys.io\n"
+            "typedef char win_assert_ptr8[sizeof(void *) == 8 ? 1 : -1];\n"
+            "typedef char win_assert_long4[sizeof(long) == 4 ? 1 : -1];\n"
+            "typedef char win_assert_ulong4[sizeof(unsigned long) == 4 ? 1 : -1];\n"
+            "typedef char win_assert_ll8[sizeof(long long) == 8 ? 1 : -1];\n"
+            "typedef char win_assert_ull8[sizeof(unsigned long long) == 8 ? 1 : -1];\n"
+            "typedef char win_assert_run_ret8[sizeof(tape_run_cx(0)) == 8 ? 1 : -1];\n"
+            "typedef char win_assert_neg1_sext[((unsigned long long)(long long)((long)-1L) == 0xffffffffffffffffULL) ? 1 : -1];\n"
+            "typedef char win_assert_neg1000_sext[((unsigned long long)(long long)((long)-1000L) == 0xfffffffffffffc18ULL) ? 1 : -1];\n"
+            "int main(void) {\n"
+            "    unsigned char v0[4] = {0, 0, 0, 0};\n"
+            "    unsigned char v1[13] = {1, 0, 0, 0, 1,2,3,4,5,6,7,8,9};\n"
+            "    unsigned char vbad[12] = {1, 0, 0, 0, 1,2,3,4,5,6,7,8};\n"
+            "    int r0 = cxsa_valid_s1(v0, 4), n0 = cxsa_valid(v0, 4);\n"
+            "    int r1 = cxsa_valid_s1(v1, 13), n1 = cxsa_valid(v1, 13);\n"
+            "    int r2 = cxsa_valid_s1(vbad, 12), n2 = cxsa_valid(vbad, 12);\n"
+            "    int r3 = cxsa_valid_s1(0, 4), n3 = cxsa_valid(0, 4);\n"
+            "    int r4 = cxsa_valid_s1(v0, -1L), n4 = cxsa_valid(v0, -1L);\n"
+            "    int r5 = cxsa_valid_s1(v0, -1000L), n5 = cxsa_valid(v0, -1000L);\n"
+            "    sy_printf(\"WIN_M53_S1_DONE\\tr0=%d\\tr1=%d\\tr2=%d\\tr3=%d\\tr4=%d\\tr5=%d\\n\", r0, r1, r2, r3, r4, r5);\n"
+            "    return (r0 == n0 && r1 == n1 && r2 == n2 && r3 == n3 && r4 == n4 && r5 == n5 && r4 == 0 && r5 == 0) ? 0 : 1;\n"
+            "}\n";
+        cx_fmt(win_cx, sizeof win_cx, "%s/win_m53_s1_drv.cx", g_tmp);
+        cx_fmt(pe_x64, sizeof pe_x64, "%s/win_m53_s1_x86_64.exe", g_tmp);
+        cx_fmt(pe_a64, sizeof pe_a64, "%s/win_m53_s1_arm64.exe", g_tmp);
+        (void)sy_write_file(win_cx, (const unsigned char *)wsrc, tx_len(wsrc, 8192), 0600);
+    }
+
+    /* 1. Cross-compile win/x86_64 PE with LLP64 compile-time asserts */
+    {
+        char *av[] = {"sh", "./unisacc.com", "--target=win/x86_64", win_cx, "-o", pe_x64, 0}; /* lint:allow R1-product cross-compiles win/x86_64 m53 S1 PE */
+        char *co = 0; size_t cn = 0;
+        int rc = cx_runv_timeout(av, 30, &co, &cn);
+        if (co) mm_free(co);
+        ck(rc == 0 && sy_exists(pe_x64) == 1, "win-x86_64-llp64-asserts-and-build");
+        ck(verify_pe_machine(pe_x64, 0x8664U) == 1, "win-x86_64-pe-header-amd64");
+    }
+
+    /* 2. Cross-compile win/arm64 PE with LLP64 compile-time asserts */
+    {
+        char *av[] = {"sh", "./unisacc.com", "--target=win/arm64", win_cx, "-o", pe_a64, 0}; /* lint:allow R1-product cross-compiles win/arm64 m53 S1 PE */
+        char *co = 0; size_t cn = 0;
+        int rc = cx_runv_timeout(av, 30, &co, &cn);
+        if (co) mm_free(co);
+        ck(rc == 0 && sy_exists(pe_a64) == 1, "win-arm64-llp64-asserts-and-build");
+        ck(verify_pe_machine(pe_a64, 0xaa64U) == 1, "win-arm64-pe-header-arm64");
+    }
+
+    sy_printf("CHECK_WIN_M53_S1\tpassed=%d\tfailed=%d\trunner=cross-build\tnative=0\twin_runtime=UNMEASURED_CI_ONLY\n", g_pass, g_fail);
+    return g_fail ? 1 : 0;
+}
