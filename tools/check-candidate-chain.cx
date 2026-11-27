@@ -403,6 +403,7 @@ int main(int argc, char **argv) {
     if (argc == 4 && tx_eqz(argv[1], "--lane-split")) {
         char td[4400], run[4500], phases[4500], candidate[4500], cmd[24000], p[4500], checkpoint[4500], work[4500];
         const char *revision = "979b56e4d918894670a71080970149112499d223";
+        (void)sy_setenv("UNISACC_IDENT_HELPER", "x", 0);
         if (sy_mkdir(argv[2], 0700) && !sy_exists(argv[2])) return 2;
         if (sy_realpath(".", cwd, sizeof cwd) < 0 || cx_fmt(td, sizeof td, "%s/lane-split-XXXXXX", argv[2]) || !mkdtemp(td) ||
             sy_realpath(td, p, sizeof p) < 0 || tx_copy(td, sizeof td, p, strlen(p)) ||
@@ -639,6 +640,22 @@ int main(int argc, char **argv) {
             w = cx_read(wtrace, &wn);
             ck(grc == 0 && has(out, "RESUME\tgen1-fixture-stub") && !has(out, "CLEANUP\t") && w && wn == 5, "finished-stub-reused-not-scrubbed");
             free(w);
+        }
+        /* A whole-front timeout must propagate rc 124 (so chain-run treats it as retryable and
+           derates width), while an explicit whole-front refusal must exit rc 2 (blocker). */
+        {
+            char troot[4600], tout[4600], tdest[4600], tpath[4700], gcmd[14000];
+            if (cx_fmt(troot, sizeof troot, "%s/wfto-root", td) || cx_fmt(tout, sizeof tout, "%s/wfto-out", td) ||
+                cx_fmt(tdest, sizeof tdest, "%s/x-stub", tout) || sy_mkdir(troot, 0755) || sy_mkdir(tout, 0755)) return 2;
+            if (cx_fmt(tpath, sizeof tpath, "%s/unisacc.com", troot) ||
+                cx_write(tpath, "#!/bin/sh\nsleep 3\n", 18)) return 2;
+            if (cx_fmt(gcmd, sizeof gcmd, "UNISACC_CHAIN_PHASE_BOUND_S=1 '%s' --wf-stub-fixture '%s' '%s' '%s/wfto-prep' osx/arm64 '%s/wfto-merged' '%s' gen1-timeout-stub 2>&1",
+                       candidate, troot, tout, td, td, tdest)) return 2;
+            int trc = sh(gcmd, out, sizeof out);
+            ck(trc == 124 && has(out, "timeout after 1 s (process group killed)") && has(out, "candidate-chain: gen1-timeout-stub:"), "whole-front-timeout-yields-124");
+            if (cx_write(tpath, "#!/bin/sh\necho 'whole-front: REFUSE synthetic bad input' >&2\nexit 2\n", 68)) return 2;
+            int rrc = sh(gcmd, out, sizeof out);
+            ck(rrc == 2 && has(out, "whole-front: REFUSE synthetic bad input") && has(out, "candidate-chain: gen1-timeout-stub:"), "whole-front-refusal-yields-2");
         }
         /* A kernels attempt killed at its bound leaves g2/kernel-route (and possibly a copied
            kernel) without phase-6.tsv; chain-step then refuses the retry. The rule is a row of the
@@ -1521,6 +1538,21 @@ int main(int argc, char **argv) {
       if (cx_fmt(cmd, sizeof cmd, "UNISACC_IDENT_HELPER=x '%s' %s", native_tool, pre)) { ck(0, "fmt"); return 1; }
       sh(cmd, out, sizeof out);
       ck(!has(out, "REFUSE chain-env"), "chain-env-helper-only-passes"); }
+    /* whole-front timeout propagates rc 124; whole-front refusal exits rc 2. */
+    { char troot[4600], tout[4600], tdest[4600], tpath[4700], gcmd[14000];
+      const char *base_td = argc > 1 ? argv[1] : sy_tmpdir();
+      if (cx_fmt(troot, sizeof troot, "%s/core-wfto-root", base_td) || cx_fmt(tout, sizeof tout, "%s/core-wfto-out", base_td) ||
+          cx_fmt(tdest, sizeof tdest, "%s/x-stub", tout)) { ck(0, "fmt"); return 1; }
+      (void)sy_mkdir(troot, 0755); (void)sy_mkdir(tout, 0755);
+      if (cx_fmt(tpath, sizeof tpath, "%s/unisacc.com", troot) ||
+          cx_write(tpath, "#!/bin/sh\nsleep 3\n", 18)) { ck(0, "wfto-write"); return 1; }
+      if (cx_fmt(gcmd, sizeof gcmd, "UNISACC_CHAIN_PHASE_BOUND_S=1 '%s' --wf-stub-fixture '%s' '%s' '%s/wfto-prep' osx/arm64 '%s/wfto-merged' '%s' gen1-timeout-stub 2>&1",
+                 native_tool, troot, tout, base_td, base_td, tdest)) { ck(0, "fmt"); return 1; }
+      int trc = sh(gcmd, out, sizeof out);
+      ck(trc == 124 && has(out, "timeout after 1 s (process group killed)") && has(out, "candidate-chain: gen1-timeout-stub:"), "core-whole-front-timeout-yields-124");
+      if (cx_write(tpath, "#!/bin/sh\necho 'whole-front: REFUSE synthetic bad input' >&2\nexit 2\n", 68)) { ck(0, "wfref-write"); return 1; }
+      int rrc = sh(gcmd, out, sizeof out);
+      ck(rrc == 2 && has(out, "whole-front: REFUSE synthetic bad input") && has(out, "candidate-chain: gen1-timeout-stub:"), "core-whole-front-refusal-yields-2"); }
     }
     if(group==0||group==2){ char cmd[14000], product[4400], self[4400], launcher[4400], body[9000];
       /* Reuse the identity-checked native candidate prepared above, not a cold compilation per call. */

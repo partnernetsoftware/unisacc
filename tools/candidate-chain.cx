@@ -34,6 +34,10 @@ static void die(const char *a, const char *b) {
     fprintf(stderr, "candidate-chain: %s%s%s\n", a, b ? ": " : "", b ? b : "");
     exit(2);
 }
+static void die_rc(int rc, const char *a, const char *b) {
+    fprintf(stderr, "candidate-chain: %s%s%s\n", a, b ? ": " : "", b ? b : "");
+    exit(rc == 124 ? 124 : 2);
+}
 /* Time bounds come from build/limits.tsv (cxlib.limits); an unknown id refuses. */
 static int cc_lim(const char *id, const char *scope) {
     double v = lm_get(id, scope);
@@ -159,6 +163,7 @@ static int pr_code_at(const char *label, char **v, const char *cwd, int secs) {
     segment_admit(secs);
     pr_result r;
     int t = pr_run(label, v, cwd, 0, secs, &r);
+    if (r.residue) { fprintf(stderr, "candidate-chain: %s\n", r.why[0] ? r.why : "surviving-processes"); pr_free(&r); return 2; }
     if (t && r.timed_out) { fprintf(stderr, "candidate-chain: %s\n", r.why); return 124; }
     if (t) { fprintf(stderr, "candidate-chain: %s\n", r.why); return 127; }
     pr_echo(&r);
@@ -280,7 +285,7 @@ static void preflight(const char *root, const char *hook, const char *rev, const
     v[n++] = tool; v[n++] = (char *)"--"; v[n++] = rules;
     v[n++] = a_root; v[n++] = a_build; v[n++] = a_snap; v[n++] = a_rev; v[n++] = a_pkg;
     v[n++] = a_hook; v[n++] = (char *)"--strict"; v[n] = 0;
-    if (bound_sh_secs(root, v, cc_pb())) die("REFUSE preflight", hook);
+    { int rc = bound_sh_secs(root, v, cc_pb()); if (rc) die_rc(rc, "REFUSE preflight", hook); }
     sy_printf("PREFLIGHT_HOOK\t%s\tok\n", hook);
 }
 /* Make CTOR executable (0755) only when its mode differs. An unconditional chmod moves the
@@ -374,7 +379,7 @@ static void step_pin(const char *root, int secs) {
         /* No record: nothing of this output was produced by a pinned tool yet (a native without
            its record is what a killed attempt left and is replaced). */
         char *a[] = {tool, (char *)"-o", tmp, 0};
-        if (bound_sh_secs(root, a, secs)) die("chain-step pin build", tool);
+        { int rc = bound_sh_secs(root, a, secs); if (rc) die_rc(rc, "chain-step pin build", tool); }
         step_hash(tmp, hash);
         if (fsize(tool) >= 0) step_hash(tool, shash);
         else cx_fmt(shash, sizeof shash, "%s", "-");
@@ -435,7 +440,7 @@ static const char *tool_pinned(const char *root, const char *tool, int secs, cha
         int rc = bound_sh_secs(root, a, secs);
         pin_busy = 0;
         if (rc && pin_soft) { sy_close(lock); return 0; }   /* the read-only watchdog may fail to build without stopping the chain */
-        if (rc) die("chain-tool pin build", tool);
+        if (rc) die_rc(rc, "chain-tool pin build", tool);
         step_hash(tool, shash);
         step_hash(tmp, hash);
         if (cx_fmt(text, sizeof text, "chain-tool-pin-v1\ntool=%s\nout=%s\nsrc_sha=%s\nnative_sha=%s\n", name, step_out, shash, hash)) die("chain-tool pin record", pin);
@@ -796,7 +801,7 @@ static void wf_stub(const char *root, const char *outdir, char *wft, char *prep,
     wf_scrub_dest(outdir, dest);
     v[n++] = wft; v[n++] = (char *)"--";
     v[n++] = (char *)"stub"; v[n++] = prep; v[n++] = (char *)target; v[n++] = phase; v[n++] = dest; v[n++] = 0;
-    if (bound_sh_secs(root, v, cc_front())) die(tag, dest);
+    { int rc = bound_sh_secs(root, v, cc_front()); if (rc) die_rc(rc, tag, dest); }
     mark(outdir, tag, sy_now_ms() - t0);
 }
 static int wf_fronts(const char *root, const char *outdir, const char *helper, int gen, const char *target, const char *slug, int want_stub) {
@@ -833,7 +838,7 @@ static int wf_fronts(const char *root, const char *outdir, const char *helper, i
             v[n++] = wft; v[n++] = (char *)"--";
             v[n++] = (char *)"front"; v[n++] = prep; v[n++] = (char *)target; v[n++] = parts[i];
             v[n++] = offset; v[n++] = amount; v[n++] = 0;
-            if (bound_sh_secs(root, v, cc_front())) die(tag, parts[i]);
+            { int rc = bound_sh_secs(root, v, cc_front()); if (rc) die_rc(rc, tag, parts[i]); }
             if (!i) slices = wf_inventory(outdir, gen, slug, parts[0], want_stub);
             mark(outdir, tag, 0);
         }
@@ -847,7 +852,7 @@ static int wf_fronts(const char *root, const char *outdir, const char *helper, i
         v[n++] = (char *)"merge"; v[n++] = prep; v[n++] = (char *)target; v[n++] = phase;
         for (i = 0; i < slices; i++) v[n++] = parts[i];
         v[n++] = 0;
-        if (bound_sh_secs(root, v, cc_front())) die(tag, phase);
+        { int rc = bound_sh_secs(root, v, cc_front()); if (rc) die_rc(rc, tag, phase); }
         mark(outdir, tag, 0);
     } else { sy_printf("RESUME\t%s\n", tag); if (until_phase && !strcmp(until_phase, tag)) exit(0); }
     if (!want_stub) return 0;
@@ -879,7 +884,7 @@ static int wf_span_prep(const char *root, const char *outdir, const char *helper
         if (sy_chdir(snap)) die("chdir", snap);
         n = bound_sh_secs(root, v, cc_front());
         if (sy_chdir(saved)) die("chdir", saved);
-        if (n) die("wf-span-prep", nout);
+        if (n) die_rc(n, "wf-span-prep", nout);
     } else sy_printf("WF_SPAN_PREP_EXISTING\t%s\n", rec);
     if (fsize(rec) < 0) die("wf-span-prep receipt", rec);
     mark(outdir, ptag, 0);
@@ -934,7 +939,7 @@ static int span_one_missing(const char *root, const char *outdir, const char *he
     for (i = 0; i < cf_root_count(); i++) v[n++] = span_roots[i];
     v[n] = 0;
     span_admit(tag);
-    if (bound_sh_secs(root, v, cc_front())) die(tag, dest);
+    { int rc = bound_sh_secs(root, v, cc_front()); if (rc) die_rc(rc, tag, dest); }
     mark(outdir, tag, 0);
     span_done();
     return 0;
@@ -1000,7 +1005,7 @@ static int span_one_fwd(const char *root, const char *outdir, const char *helper
     v[n++] = (char *)"--forward-stub"; v[n++] = (char *)stub;
     v[n] = 0;
     span_admit(tag);
-    if (bound_sh_secs(root, v, cc_front())) die(tag, dest);
+    { int rc = bound_sh_secs(root, v, cc_front()); if (rc) die_rc(rc, tag, dest); }
     mark(outdir, tag, 0);
     span_done();
     return 0;
@@ -1231,7 +1236,8 @@ static void cc_ensure_p3_tape(const char *root, const char *snap, const char *ru
     if (sy_mkdir(tdir, 0755) && fsize(tdir) < 0) die("mkdir", tdir);
     {
         char *tv[] = {tsb_tool, (char *)"--", (char *)"--target", (char *)"lnx/x86_64", (char *)snap, tdir, 0};
-        if (bound_sh(root, tv) || fsize(tso) <= 0 || fsize(tmf) <= 0) die("p3 tape-sidecar-build", tdir);
+        int trc = bound_sh(root, tv);
+        if (trc || fsize(tso) <= 0 || fsize(tmf) <= 0) die_rc(trc, "p3 tape-sidecar-build", tdir);
     }
     {
         const char *m53_src = cc_m53_guest_for_snap(snap, sm1_sha);
@@ -1240,9 +1246,10 @@ static void cc_ensure_p3_tape(const char *root, const char *snap, const char *ru
         if (cx_write(mg_cx, m53_src, strlen(m53_src))) die("write m53 guest", mg_cx);
         {
             char *cv[] = {mg_cx, (char *)"-S", (char *)"-o", mg_s, 0};
-            if (bound_sh(root, cv) || fsize(mg_s) <= 0) {
+            int crc = bound_sh(root, cv);
+            if (crc || fsize(mg_s) <= 0) {
                 (void)sy_unlink(mg_cx);
-                die("p3 m53 guest compile", mg_s);
+                die_rc(crc, "p3 m53 guest compile", mg_s);
             }
         }
         {
@@ -1250,7 +1257,7 @@ static void cc_ensure_p3_tape(const char *root, const char *snap, const char *ru
             int prc = bound_sh(root, pv);
             (void)sy_unlink(mg_cx);
             (void)sy_unlink(mg_s);
-            if (prc || fsize(tsl) <= 0) die("p3 m53 tapepack", tsl);
+            if (prc || fsize(tsl) <= 0) die_rc(prc, "p3 m53 tapepack", tsl);
         }
     }
     step_hash(tsl, m53_sha);
@@ -1561,7 +1568,7 @@ static int wf_prepare_gen(const char *root, const char *outdir, const char *help
         if (sy_chdir(snap)) die("chdir", snap);
         n = bound_sh_secs(root, v, cc_front());
         if (sy_chdir(saved)) die("chdir", saved);
-        if (n) die(ptag, nout);
+        if (n) die_rc(n, ptag, nout);
     }
     if (fsize(rec) < 0) die("wf-prep receipt", rec);
     mark(outdir, ptag, 0);
@@ -1598,7 +1605,7 @@ static void gen_slice_phase(const char *root, const char *outdir, const char *he
     a[6] = (char *)"--phase"; a[7] = phs; a[8] = (char *)"--target"; a[9] = (char *)g_mt_target[ti];
     a[10] = (char *)"--from-image"; a[11] = img; a[12] = (char *)"--identity-helper"; a[13] = (char *)helper; a[14] = 0;
     span_admit(ptag);
-    if (step(root, a)) die(ptag, fp);
+    { int rc = step(root, a); if (rc) die_rc(rc, ptag, fp); }
     mark(outdir, ptag, sy_now_ms() - t0);
 }
 
@@ -2028,7 +2035,7 @@ static void fp_call(const char *root,const char *rev,const char *snap,const char
     a[n++]="fixedpoint";a[n++]=(char *)rev;a[n++]=(char *)snap;a[n++]=(char *)pkg;a[n++]=(char *)gen1;a[n++]=(char *)fp;
     a[n++]="--phase";a[n++]=(char *)phase;a[n++]="--target";a[n++]=(char *)target;a[n++]="--identity-helper";a[n++]=(char *)helper;
     if(keys){a[n++]="--objects";a[n++]=(char *)keys;}else a[n++]="--link-only";
-    if(resume)a[n++]="--resume";a[n]=0;if(step(root,a))die(keys?"fixedpoint objects":"fixedpoint link",phase);
+    if(resume)a[n++]="--resume";a[n]=0;{int rc=step(root,a);if(rc)die_rc(rc,keys?"fixedpoint objects":"fixedpoint link",phase);}
 }
 /* One batch of uncommitted keys. Before it starts: if this attempt already committed a batch and
    the next one is not expected to fit before the attempt ends, yield (phase_yield). The estimate
@@ -2300,7 +2307,7 @@ static int warmup_tools(const char *root) {
         char *a[3];
         if (cx_fmt(p, sizeof p, "%s/%s", cc_tools_root(root), w[i])) die("path", w[i]);
         a[0] = p; a[1] = (char *)"-c"; a[2] = 0;
-        if (bound_sh_secs(root, a, cc_pb())) die("warmup", w[i]);
+        { int rc = bound_sh_secs(root, a, cc_pb()); if (rc) die_rc(rc, "warmup", w[i]); }
         sy_printf("WARMUP\t%s\n", w[i]);
     }
     return 0;
@@ -2906,7 +2913,7 @@ static int run_lane(const char *root, const char *outdir, const char *rev,
             else {
                 hb(outdir, ids[i], "start");
                 long began = sy_now_ms(); char *a[] = {(char *)ids[i], (char *)rev, (char *)snap, (char *)build, 0};
-                if (step(root, a)) die(ids[i], build);
+                { int rc = step(root, a); if (rc) die_rc(rc, ids[i], build); }
                 mark(outdir, ids[i], sy_now_ms() - began);
             }
             if (until_phase && !strcmp(until_phase, ids[i])) return 0;
@@ -2947,7 +2954,7 @@ static int run_lane(const char *root, const char *outdir, const char *rev,
                 cc_ensure_p3_tape(root, snap, run, tdir, sizeof tdir);
                 char *a[] = {rbt, "--", "p3", (char *)snap, srcpkg, phaseout, "--nets", nets, "--routes", rts, "--phase", stage, "--run", run,
                              tdir[0] ? (char *)"--embed-tape" : 0, tdir[0] ? tdir : 0, 0};
-                if (bound_sh(root, a)) die(lane_phase, run);
+                { int rc = bound_sh(root, a); if (rc) die_rc(rc, lane_phase, run); }
             }
             mark(outdir, lane_phase, sy_now_ms() - started);
             return 0;
@@ -3901,7 +3908,7 @@ int main(int argc, char **argv) {
         long t0 = sy_now_ms();
         char *a[4];
         a[0] = (char *)"snap"; a[1] = (char *)rev; a[2] = 0; a[3] = 0;
-        if (step(root, a)) die("snap", snap);
+        { int rc = step(root, a); if (rc) die_rc(rc, "snap", snap); }
         if (until_phase && tx_eqz(until_phase, "snap")) {
             static const char *rf[2] = {"unisacc.com", "unisacc.com.build.json"};
             char rp[4400], sp[4400], wtmpl[4400];
@@ -3982,7 +3989,7 @@ int main(int argc, char **argv) {
         char seed[4400];
         if (cx_fmt(seed, sizeof seed, "%s/identity-helper", build)) die("path", "seed helper");
         char *a[] = {"seed-helper", (char *)rev, snap, build, (char *)cc, 0};
-        if (step(root, a)) die("seed-helper", seed);
+        { int rc = step(root, a); if (rc) die_rc(rc, "seed-helper", seed); }
         if (sy_setenv("UNISACC_IDENTITY_HELPER", seed, 1)) die("env", "controller identity helper");
     }
     } break;
@@ -3995,7 +4002,7 @@ int main(int argc, char **argv) {
         const char *tag=st->id;
         if(!(resume && ck_done(outdir,tag))){
             long began=sy_now_ms();char *a[]={(char *)tag,(char *)rev,snap,build,0};
-            if(step(root,a))die(tag,build);mark(outdir,tag,sy_now_ms()-began);
+            {int rc=step(root,a);if(rc)die_rc(rc,tag,build);}mark(outdir,tag,sy_now_ms()-began);
         }else {sy_printf("RESUME\t%s\n",tag);if(until_phase&&!strcmp(until_phase,tag))exit(0);}
     } break;
     case MS_CTX: {
@@ -4006,7 +4013,7 @@ int main(int argc, char **argv) {
         if(cx_fmt(context_record,sizeof context_record,"%s/context.tsv",ctx))die("path","context record");
         if(fsize(context_record)<0)clean_phase_path(outdir,"ctx",ctx,0);
         a[0] = (char *)"ctx"; a[1] = (char *)rev; a[2] = snap; a[3] = build; a[4] = ctx; a[5] = (char *)cc; a[6] = 0;
-        if (step(root, a)) die("ctx", ctx);
+        { int rc = step(root, a); if (rc) die_rc(rc, "ctx", ctx); }
         mark(outdir, "ctx", sy_now_ms() - t0);
     } else sy_printf("RESUME\tctx\n");
     } break;
@@ -4015,7 +4022,7 @@ int main(int argc, char **argv) {
         long t0 = sy_now_ms();
         char *a[5];
         a[0] = (char *)"host"; a[1] = snap; a[2] = ctx; a[3] = build; a[4] = 0;
-        if (step(root, a)) die("host", "host");
+        { int rc = step(root, a); if (rc) die_rc(rc, "host", "host"); }
         mark(outdir, "host", sy_now_ms() - t0);
     } else sy_printf("RESUME\thost\n");
     } break;
@@ -4027,7 +4034,7 @@ int main(int argc, char **argv) {
         if (cx_fmt(louter, sizeof louter, "%s/outer", build)) die("path", "louter");
         clean_phase_path(outdir, "list", louter, 0);
         a[0] = (char *)"list"; a[1] = snap; a[2] = ctx; a[3] = build; a[4] = 0;
-        if (step(root, a)) die("list", "list");
+        { int rc = step(root, a); if (rc) die_rc(rc, "list", "list"); }
         mark(outdir, "list", sy_now_ms() - t0);
     } else sy_printf("RESUME\tlist\n");
     } break;
@@ -4069,7 +4076,7 @@ int main(int argc, char **argv) {
             clean_phase_path(outdir, "routes", routes, 0);
         }
         a[0] = (char *)"routes"; a[1] = (char *)rev; a[2] = snap; a[3] = jobs; a[4] = routes; a[5] = 0;
-        if (step(root, a)) die("routes", routes);
+        { int rc = step(root, a); if (rc) die_rc(rc, "routes", routes); }
         mark(outdir, "routes", sy_now_ms() - t0);
     } else sy_printf("RESUME\troutes\n");
     } break;
@@ -4112,7 +4119,7 @@ int main(int argc, char **argv) {
                 char *a[] = {rbt, "--", "p3", snap, srcpkg, phaseout, "--nets", nets, "--routes", rts, "--phase", stage, "--run", run,
                              tdir[0] ? (char *)"--embed-tape" : 0, tdir[0] ? tdir : 0, 0};
                 long started = sy_now_ms();
-                if (bound_sh(root, a)) die(tag, run);
+                { int rc = bound_sh(root, a); if (rc) die_rc(rc, tag, run); }
                 mark(outdir, tag, sy_now_ms() - started);
             }
             size_t pn = 0; char *pb = cx_read(phaseout, &pn);
@@ -4184,7 +4191,7 @@ int main(int argc, char **argv) {
                 if (sy_chdir(snap)) die("chdir", snap);
                 n = bound_sh_secs(root, v, cc_front());
                 if (sy_chdir(saved)) die("chdir", saved);
-                if (n) die("wf-prepare", nout);
+                if (n) die_rc(n, "wf-prepare", nout);
             } else sy_printf("WF_PREP_EXISTING\t%s\n", rec);
         }
         mark(outdir, "wf-prepare", sy_now_ms() - t0);
@@ -4227,7 +4234,7 @@ int main(int argc, char **argv) {
         a[0] = (char *)"fixedpoint"; a[1] = (char *)rev; a[2] = snap; a[3] = pkg; a[4] = gen1; a[5] = fp;
         a[6] = (char *)"--phase"; a[7] = (char *)st->id; a[8] = (char *)"--identity-helper"; a[9] = helper; a[10] = 0;
         if (st->a) residue_before(outdir, st->id);
-        if (step(root, a)) die(st->id, fp);
+        { int rc = step(root, a); if (rc) die_rc(rc, st->id, fp); }
         mark(outdir, st->id, sy_now_ms() - t0);
     } else sy_printf("RESUME\t%s\n", st->id);
     } break;
@@ -4268,9 +4275,9 @@ int main(int argc, char **argv) {
                 b2[0] = ctool; b2[1] = (char *)"-b"; b2[2] = (char *)"osx/arm64"; b2[3] = (char *)"-o"; b2[4] = cma; b2[5] = 0;
                 /* One shared 90 s budget (matches chain-phases.tsv row cache-manager = 90) for both builds. */
                 long cm_left = 90 - (sy_now_ms() - t0) / 1000;
-                if (bound_sh_secs(root, b1, 90)) die("cache-manager x64", cmx);
+                { int rc = bound_sh_secs(root, b1, 90); if (rc) die_rc(rc, "cache-manager x64", cmx); }
                 cm_left = 90 - (sy_now_ms() - t0) / 1000;
-                if (cm_left < 1 || bound_sh_secs(root, b2, (int)cm_left)) die("cache-manager arm64 (shared 90s budget)", cma);
+                { int rc = cm_left < 1 ? 124 : bound_sh_secs(root, b2, (int)cm_left); if (rc) die_rc(rc, "cache-manager arm64 (shared 90s budget)", cma); }
                 mark(outdir, "cache-manager", sy_now_ms() - t0);
             } else sy_printf("RESUME\tcache-manager\n");
             cm64 = cmx; cmarm = cma;
@@ -4291,7 +4298,7 @@ int main(int argc, char **argv) {
         if (cx_fmt(release_pkg, sizeof release_pkg, "%s/compiler.p4.pkg", outdir) ||
             cx_fmt(model_tool, sizeof model_tool, "%s/tools/release-build.cx", cc_tools_root(snap))) die("path", "release models");
         char *model_args[] = {model_tool, "--", "release-models", pkg, release_pkg, 0};
-        if (bound_sh(root, model_args)) die("release models", release_pkg);
+        { int rc = bound_sh(root, model_args); if (rc) die_rc(rc, "release models", release_pkg); }
         cc_verify_pkg_tape(root, snap, outdir, release_pkg, "pack-release-models");
         pack_inputs(outdir, pin, 1);
         if (fsize(win64) < 0 || fsize(lnx64) < 0 || fsize(osx64) < 0) die("pack missing slice", win64);
@@ -4303,7 +4310,7 @@ int main(int argc, char **argv) {
         v[n++] = (char *)"--cache-manager-osx"; v[n++] = (char *)cm64; v[n++] = (char *)cmarm;
         v[n++] = packed; v[n++] = release_pkg; v[n++] = win64; v[n++] = lnx64; v[n++] = lnxarm;
         v[n++] = osx64; v[n++] = osxarm; v[n++] = winarm; v[n++] = 0;
-        if (bound_sh_secs(root, v, cc_pb())) die("pack", packed);
+        { int rc = bound_sh_secs(root, v, cc_pb()); if (rc) die_rc(rc, "pack", packed); }
         if (chdir(root)) die("chdir root", root);
         cc_verify_final_pack(root, snap, outdir);
         mark(outdir, "pack", sy_now_ms() - t0);
