@@ -4444,10 +4444,11 @@ static int job_read(const char *jd, const char *name, char *out, long cap);
 static void commit_verdict_from_job(const char *root, const char *jd, const char *id, CommitVerdict *v) {
     char p[PW + 32], rstate[32], rrc[32], rcrc[32], rsha[64], rloc[64], rpub[64], rwork[PW], rref[200], rbef[64], raft[64], rbase[64], rwhy[32], rjob[64], rt[64], meta[4096], mwork[PW], mref[200];
     unsigned char *rbuf = 0; int64_t rlen = 0;
-    const char *w; int jrc = -1, prc = -1, crc = -1, rc_ok, meta_ok = 0, m_match = 0;
+    const char *w; int jrc = -1, prc = -1, crc = -1, rc_ok, meta_ok = 0, m_match = 0, have_receipt = 0;
     memset(v, 0, sizeof *v);
     if (job_read(jd, "rc", rt, sizeof rt) != 0 || strict_parse_int(rt, &jrc) != 0) jrc = -1;
     if (!cx_fmt(p, sizeof p, "%s/commit-receipt.tsv", jd) && !sy_read_file(p, &rbuf, &rlen, 65536) && rbuf) {
+        have_receipt = 1;
         kv_read_buf((const char *)rbuf, (long)rlen, "state", rstate, sizeof rstate);
         kv_read_buf((const char *)rbuf, (long)rlen, "rc", rrc, sizeof rrc);
         kv_read_buf((const char *)rbuf, (long)rlen, "commit_rc", rcrc, sizeof rcrc);
@@ -4509,8 +4510,22 @@ static void commit_verdict_from_job(const char *root, const char *jd, const char
         return;
     }
     if (!strcmp(rwhy, "timeout") || !strcmp(rwhy, "refused") || !strcmp(rwhy, "blocked") ||
-        !strcmp(rwhy, "ref-mismatch") || !strcmp(rwhy, "unbound")) {
+        !strcmp(rwhy, "ref-mismatch") || !strcmp(rwhy, "unbound") || !strcmp(rwhy, "publish-unknown")) {
         (void)cx_fmt(v->reason, sizeof v->reason, "%s", rwhy);
+    } else if (!have_receipt && meta_ok && jrc != 0) {
+        char op[PW + 16], tail[256]; unsigned char *ob = 0; int64_t on = 0;
+        int is_pub_unk = 0;
+        if (!cx_fmt(op, sizeof op, "%s/out", jd) && !sy_read_file(op, &ob, &on, 1L << 24) && ob) {
+            long end = (long)on;
+            while (end > 0 && (ob[end - 1] == '\n' || ob[end - 1] == '\r')) end--;
+            long st = end;
+            while (st > 0 && ob[st - 1] != '\n') st--;
+            if (!cx_fmt(tail, sizeof tail, "COMMIT_RESULT\tNOT_COMMITTED\treason=publish-unknown\tjob=%s", id) &&
+                end - st == (long)strlen(tail) && !memcmp(ob + st, tail, (size_t)(end - st)))
+                is_pub_unk = 1;
+            free(ob);
+        }
+        (void)cx_fmt(v->reason, sizeof v->reason, "%s", is_pub_unk ? "publish-unknown" : (jrc == 124 ? "timeout" : jrc == 2 ? "refused" : "blocked"));
     } else {
         (void)cx_fmt(v->reason, sizeof v->reason, "%s", jrc == 124 ? "timeout" : jrc == 2 ? "refused" : "blocked");
     }
@@ -5049,7 +5064,7 @@ static int cmd_git(const char *root, int argc, char **argv) {
         }
     }
     char owned[64]="",published[64]="",landed_base[64]="";
-    int commit_stage_ok = 0, verify_mismatch = 0;
+    int commit_stage_ok = 0, verify_mismatch = 0, push_attempted = 0;
     char bind_why[32] = "";
     {   x_last_err[0] = 0; x_last_out[0]=0;
         if(sha0[0])dt_identity(sha0);
@@ -5117,6 +5132,7 @@ static int cmd_git(const char *root, int argc, char **argv) {
             char *commits[]={owned};
             if(!owned[0]){fprintf(stderr,"GIT_PUSH_REFUSE\treason=missing-commit-receipt\n");rc=1;}
             else {
+                push_attempted = 1;
                 rc=git_push_owned(root,cwd,1,commits,1);
                 pushed=git_landed_receipt(x_last_out,1,published);
                 if(!pushed&&rc)pushed=git_landed_receipt(x_last_out,2,published);
@@ -5167,10 +5183,23 @@ static int cmd_git(const char *root, int argc, char **argv) {
         }
         if (in_bg && bg_job_dir[0]) {
             if (commit_receipt_write(bg_job_dir, bg_job_id, rc) != 0) {
+                int pub_unknown = (cv_committed && push_attempted && !pushed) ? 1 : 0;
                 fprintf(stderr, "devsvc: cannot persist commit receipt %s/commit-receipt.tsv\n", bg_job_dir);
+                if (pub_unknown) {
+                    fprintf(stderr, "devsvc: keep ref %s reason=publish-unknown (push attempted without publish marker)\n",
+                            cv_ref[0] ? cv_ref : "-");
+                } else if (cv_committed && !cv_published_sha[0] && !push_attempted && cv_ref[0] &&
+                           git_full_oid(cv_ref_before) && git_full_oid(cv_ref_after)) {
+                    char rspec[240], rbuf[256];
+                    if (!cx_fmt(rspec, sizeof rspec, "refs/heads/%s", cv_ref)) {
+                        char *uv[] = {"git", "-C", (char *)work, "update-ref", rspec, cv_ref_before, cv_ref_after, 0};
+                        if (runcap(uv, rbuf, sizeof rbuf) != 0)
+                            fprintf(stderr, "devsvc: cannot rollback ref %s\n", rspec);
+                    }
+                }
                 cv_committed = 0;
                 cv_sha[0] = 0; cv_local_sha[0] = 0; cv_published_sha[0] = 0;
-                F(cv_reason, sizeof cv_reason, "blocked");
+                F(cv_reason, sizeof cv_reason, "%s", pub_unknown ? "publish-unknown" : "blocked");
                 cv_commit_rc = 1;
                 if (rc == 0) rc = 1;
             } else {
@@ -5237,7 +5266,8 @@ static int bg_child(void *ud) {
             fprintf(stderr, "devsvc: cannot persist commit receipt %s/commit-receipt.tsv\n", j->jd);
             cv_committed = 0;
             cv_sha[0] = 0;
-            (void)cx_fmt(cv_reason, sizeof cv_reason, "blocked");
+            if (!cv_ready || strcmp(cv_reason, "publish-unknown") != 0)
+                (void)cx_fmt(cv_reason, sizeof cv_reason, "blocked");
             if (r == 0) r = 1;
         }
         report_window=FL_NODE_MS;report_end("git.commit",j->id);commit_result_emit(j->id, r);
