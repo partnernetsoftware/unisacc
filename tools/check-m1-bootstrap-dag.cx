@@ -84,6 +84,14 @@ int main(int argc, char **argv) {
         cx_fmt(ape_a, sizeof ape_a, "%s/chain.ape", tmp) ||
         cx_fmt(ape_b, sizeof ape_b, "%s/packed.ape", tmp)) return 2;
     if (sy_mkdir_all(inc, 0755) || sy_mkdir_all(tdir, 0755) || sy_mkdir_all(tbad, 0755)) return 2;
+    {
+        char fxb[640], fxcf[700];
+        size_t cfn = 0; char *cfb = cx_read("build/chain-facts.tsv", &cfn);
+        if (!cfb || !cfn || cx_fmt(fxb, sizeof fxb, "%s/build", fxroot) ||
+            cx_fmt(fxcf, sizeof fxcf, "%s/chain-facts.tsv", fxb) ||
+            sy_mkdir_all(fxb, 0755) || cx_write(fxcf, cfb, cfn)) { if (cfb) mm_free(cfb); return 2; }
+        mm_free(cfb);
+    }
     if (cx_fmt(p, sizeof p, "%s/cx-flat.h", inc) || cx_write(p, flat_body, (size_t)tx_len(flat_body, 128))) return 2;
     if (cx_write(src_p3, bare_p3, (size_t)tx_len(bare_p3, 256))) return 2;
 
@@ -181,14 +189,6 @@ int main(int argc, char **argv) {
 
     /* (4) Red-first fail-closed: when root has authoritative build/chain-facts.tsv tape_unit, omitting --embed-tape MUST refuse */
     {
-        char tbuild[640], marker[700];
-        size_t cfn = 0; char *cfb = cx_read("build/chain-facts.tsv", &cfn);
-        if (!cfb || !cfn ||
-            cx_fmt(tbuild, sizeof tbuild, "%s/build", fxroot) ||
-            cx_fmt(marker, sizeof marker, "%s/chain-facts.tsv", tbuild) ||
-            sy_mkdir_all(tbuild, 0755) ||
-            cx_write(marker, cfb, cfn)) { if (cfb) mm_free(cfb); return 2; }
-        mm_free(cfb);
         char *v_no[] = {"sh", "./unisacc.com", "tools/release-build.cx", "--",
                         "p3", fxroot, src_p3, out_bad, 0};
         int rc_no = run_cmd(v_no, out, sizeof out);
@@ -203,10 +203,15 @@ int main(int argc, char **argv) {
         char bare_p4[640], rm_out[640];
         if (cx_fmt(bare_p4, sizeof bare_p4, "%s/bare.p4", tmp) ||
             cx_fmt(rm_out, sizeof rm_out, "%s/rm.p4", tmp)) return 2;
-        (void)sy_unlink(marker);
-        char *v_bare[] = {"sh", "./unisacc.com", "tools/release-build.cx", "--",
-                          "p3", fxroot, src_p3, bare_p4, 0};
-        int rc_bare = run_cmd(v_bare, out, sizeof out);
+        const char *bare_body = "P 4 1 1 0\nD r s in out 0\nM 1 1 0 3554254475\nA";
+        size_t bl = (size_t)tx_len(bare_body, 128);
+        unsigned char full[160];
+        if (bl + 16 > sizeof full || mm_copy(full, (long)sizeof full, bare_body, (long)bl)) return 2;
+        const char *magic = "UNIPKG1\n";
+        for (int k = 0; k < 8; k++) full[bl + (size_t)k] = (unsigned char)magic[k];
+        unsigned long long ubl = (unsigned long long)bl;
+        for (int k = 0; k < 8; k++) { full[bl + 8 + (size_t)k] = (unsigned char)(ubl & 255U); ubl >>= 8; }
+        int rc_bare = cx_write(bare_p4, (const char *)full, bl + 16);
         char *v_rm[] = {"sh", "./unisacc.com", "tools/release-build.cx", "--",
                         "release-models", bare_p4, rm_out, "--require-m1-tape", 0};
         int rc_rm = (rc_bare == 0) ? run_cmd(v_rm, out, sizeof out) : 0;
