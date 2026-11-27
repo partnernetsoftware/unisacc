@@ -1,0 +1,123 @@
+#pragma unisa module m25_m1_impl
+#pragma unisa use driver.stream_s1_m1
+#pragma unisa use mem.heap
+#pragma unisa use mem.bytes
+#pragma unisa use text.text
+/* Authoritative S3 embedded-tape host wrapper for m25.o (cx/compiler/rtsharedname.cx).
+ * Scope of tape authority: group count, index bounds, symbol-count/used-count, and symbol
+ * membership (rts_covers/rts_used) are authoritatively decided by m25.tapeslice in the VM.
+ * Constant C-string pointers returned by rts_at/rts_used_name reside in this host bridge table
+ * (indexed by the VM-validated group/slot ID). Zero native fallback: carrier or VM failure
+ * refuses -2 with M25_M1_REFUSE and records m25_m1_last_err(). */
+static TapeUnitState m25_m1_unit;
+static int m25_m1_err;
+
+static const TapeUnitSpec *m25_m1_spec(void) {
+    static const TapeUnitSpec sp = {
+        "tape/lnx-x86_64/manifest.tsv",
+        "tape/lnx-x86_64/tapemode.so",
+        "tape/lnx-x86_64/m25.tapeslice",
+        "tapemode.so",
+        "m25.tapeslice",
+        "M25M1BIN1",
+        9L,
+        "main",
+        255ULL,
+        2000000ULL,
+        "M25_M1_REFUSE"
+    };
+    return &sp;
+}
+
+static long m25_m1_call_simple(unsigned char op, int idx, int sub) {
+    unsigned char req[3];
+    long r;
+    req[0] = op;
+    req[1] = (idx < -128 || idx > 127) ? (unsigned char)(signed char)-128 : (unsigned char)(signed char)idx;
+    req[2] = (sub < -128 || sub > 127) ? (unsigned char)(signed char)-128 : (unsigned char)(signed char)sub;
+    r = tape_unit_call_bytes(&m25_m1_unit, m25_m1_spec(), req, 3L);
+    m25_m1_err = (r < 0L) ? -2 : 0;
+    return r;
+}
+
+static long m25_m1_call_name(unsigned char op, int idx, const char *name) {
+    unsigned char sbuf[259];
+    unsigned char *req = sbuf;
+    long nl = 0L, r;
+    if (name) {
+        nl = tx_len(name, 65536L);
+        if (nl < 0L || nl >= 65536L) { m25_m1_err = -2; return -2L; }
+        if (nl > 256L) {
+            req = (unsigned char *)mm_alloc(3L + nl);
+            if (!req) { m25_m1_err = -2; return -2L; }
+        }
+        if (nl > 0L) mm_copy(req + 3, nl, name, nl);
+    }
+    req[0] = op;
+    req[1] = (idx < -128 || idx > 127) ? (unsigned char)(signed char)-128 : (unsigned char)(signed char)idx;
+    req[2] = name ? 1u : 0u;
+    r = tape_unit_call_bytes(&m25_m1_unit, m25_m1_spec(), req, 3L + nl);
+    if (req != sbuf) mm_free(req);
+    m25_m1_err = (r < 0L) ? -2 : 0;
+    return r;
+}
+
+int m25_m1_last_err(void) { return m25_m1_err; }
+
+int m25_m1_rts_count(void) {
+    long r = m25_m1_call_simple(0u, 0, 0);
+    return r < 0L ? -2 : (int)r;
+}
+
+int m25_m1_rts_at(int i, const char **group, const char **probe, int *provider,
+                  const char **unit_macro, const char **extern_macro) {
+    static const char *const groups[2] = {"stdio-state", "env-state"};
+    static const char *const probes[2] = {"_u_st_fd", "_unisa_envheap"};
+    long r;
+    if (!group || !probe || !provider || !unit_macro || !extern_macro) return 4;
+    r = m25_m1_call_simple(1u, i, 0);
+    if (r < 0L) return -2;
+    if (r == 0L && (i == 0 || i == 1)) {
+        *group = groups[i];
+        *probe = probes[i];
+        *provider = 0;
+        *unit_macro = "RT_UNIT";
+        *extern_macro = "RT_EXTERN";
+        return 0;
+    }
+    return (int)r;
+}
+
+int m25_m1_rts_symbol_count(int i) {
+    long r = m25_m1_call_simple(2u, i, 0);
+    if (r < 0L) return -2;
+    return r == 255L ? -1 : (int)r;
+}
+
+int m25_m1_rts_covers(int i, const char *name) {
+    long r = m25_m1_call_name(3u, i, name);
+    return r < 0L ? -2 : (int)r;
+}
+
+const char *m25_m1_rts_used_name(int i, int m) {
+    static const char *const names[4] = {"_u_st_wput", "_u_st_copy", "_unisa_envfind", "_unisa_map"};
+    long r = m25_m1_call_simple(4u, i, m);
+    if (r >= 1L && r <= 4L) return names[r - 1L];
+    return 0;
+}
+
+int m25_m1_rts_used_count(int i) {
+    long r = m25_m1_call_simple(5u, i, 0);
+    if (r < 0L) return -2;
+    return r == 255L ? -1 : (int)r;
+}
+
+int m25_m1_rts_used(int i, const char *name) {
+    long r = m25_m1_call_name(6u, i, name);
+    return r < 0L ? -2 : (int)r;
+}
+
+void m25_m1_stats(long *calls_out, long *slice_load_ns_out,
+                  long *first_ns_out, long *repeat_ns_out) {
+    tape_unit_stats(&m25_m1_unit, calls_out, slice_load_ns_out, first_ns_out, repeat_ns_out);
+}
