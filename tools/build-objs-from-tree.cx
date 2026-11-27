@@ -40,32 +40,30 @@ enum {
 typedef struct {
     const char *key;
     const char *chain_key;
-    const char *opt;
-    const char *chain_opt;
     const char *src;
 } BoUnit;
 
 static const BoUnit BO_UNITS[BO_NUNITS] = {
-    {"m0.o",         "m0.o",         "-O1", "-O2", "src/drive.cx"},
-    {"host.o",       "host.o",       "-O1", "-O1", "src/host.cx"},
-    {"driveface.o",  "driveface.o",  "-O1", "-O1", "src/driveface.cx"},
-    {"driveroute.o", "driveroute.o", "-O1", "-O1", "src/driveroute.cx"},
-    {"tapegate.o",   "tapegate.o",   "-O1", "-O1", "cx/compiler/tapegate.cx"},
-    {"drivelink.o",  "drivelink.o",  "-O2", "-O2", "src/drivelink.cx"},
-    {"executor.o",   "executor.o",   "-O2", "-O2", "src/executor.cx"},
-    {"driveunits.o", "driveunits.o", "-O2", "-O2", "src/driveunits.cx"},
-    {"driveargs.o",  "driveargs.o",  "-O2", "-O2", "src/driveargs.cx"},
-    {"stages.o",     "stages.o",     "-O2", "-O2", "src/stages.cx"},
-    {"hostout.o",    "hostout.o",    "-O2", "-O2", "src/hostout.cx"},
-    {"m10.o",        "m10.o",        "-O2", "-O2", "cx/driver/fwdreplay.cx"},
-    {"m20.o",        "m20.o",        "-O2", "-O2", "cx/sys/time.cx"},
-    {"m21.o",        "m21.o",        "-O2", "-O2", "cx/sys/io.cx"},
-    {"m29.o",        "m29.o",        "-O2", "-O2", "cx/sys/proc.cx"},
-    {"m35.o",        "m35.o",        "-O2", "-O2", "cx/sys/posix.cx"},
-    {"m42.o",        "m42.o",        "-O2", "-O2", "cx/sys/runlaunch.cx"},
-    {"m43.o",        "m43.o",        "-O2", "-O2", "cx/compiler/cxscratch.cx"},
-    {"m44.o",        "m44.o",        "-O2", "-O2", "cx/runtime/source_frame.cx"},
-    {"fwdmerge.o",   "m51.o",        "-O2", "-O2", "cx/compiler/fwdmerge.cx"}
+    {"m0.o",         "m0.o",         "src/drive.cx"},
+    {"host.o",       "host.o",       "src/host.cx"},
+    {"driveface.o",  "driveface.o",  "src/driveface.cx"},
+    {"driveroute.o", "driveroute.o", "src/driveroute.cx"},
+    {"tapegate.o",   "tapegate.o",   "cx/compiler/tapegate.cx"},
+    {"drivelink.o",  "drivelink.o",  "src/drivelink.cx"},
+    {"executor.o",   "executor.o",   "src/executor.cx"},
+    {"driveunits.o", "driveunits.o", "src/driveunits.cx"},
+    {"driveargs.o",  "driveargs.o",  "src/driveargs.cx"},
+    {"stages.o",     "stages.o",     "src/stages.cx"},
+    {"hostout.o",    "hostout.o",    "src/hostout.cx"},
+    {"m10.o",        "m10.o",        "cx/driver/fwdreplay.cx"},
+    {"m20.o",        "m20.o",        "cx/sys/time.cx"},
+    {"m21.o",        "m21.o",        "cx/sys/io.cx"},
+    {"m29.o",        "m29.o",        "cx/sys/proc.cx"},
+    {"m35.o",        "m35.o",        "cx/sys/posix.cx"},
+    {"m42.o",        "m42.o",        "cx/sys/runlaunch.cx"},
+    {"m43.o",        "m43.o",        "cx/compiler/cxscratch.cx"},
+    {"m44.o",        "m44.o",        "cx/runtime/source_frame.cx"},
+    {"fwdmerge.o",   "m51.o",        "cx/compiler/fwdmerge.cx"}
 };
 
 static int bo_safe_arg(const char *s) {
@@ -153,24 +151,77 @@ static int bo_read_chain_obj_level(const char *chain_dir, char *out, long cap) {
     return found ? 0 : 1;
 }
 
+/* Parse optimization level for unit_key from receipt object_level line (e.g. "object_level mode=... host.o=-O1 other=-O2"). */
+static int bo_resolve_opt_from_receipt(const char *lvl, const char *unit_key, char opt_out[16]) {
+    if (!lvl || !lvl[0] || !unit_key || !unit_key[0]) return 1;
+    char def_opt[16];
+    def_opt[0] = 0;
+    opt_out[0] = 0;
+    long n = tx_len(lvl, 2048), i = 0;
+    long klen = tx_len(unit_key, 128);
+    while (i < n) {
+        while (i < n && (lvl[i] == ' ' || lvl[i] == '\t')) i++;
+        long st = i;
+        while (i < n && lvl[i] != ' ' && lvl[i] != '\t') i++;
+        long len = i - st;
+        if (len <= 0) continue;
+        long eq = -1;
+        for (long j = 0; j < len; j++) {
+            if (lvl[st + j] == '=') { eq = j; break; }
+        }
+        if (eq <= 0 || eq + 1 >= len) continue;
+        const char *val = lvl + st + eq + 1;
+        long vlen = len - eq - 1;
+        if (vlen < 2 || vlen >= 15 || val[0] != '-' || val[1] != 'O') continue;
+        if (eq == 5 && tx_same(lvl + st, 5, "other", 5)) {
+            mm_copy(def_opt, sizeof def_opt, val, vlen);
+            def_opt[vlen] = 0;
+        }
+        if (eq == klen && tx_same(lvl + st, eq, unit_key, klen)) {
+            mm_copy(opt_out, 16, val, vlen);
+            opt_out[vlen] = 0;
+        }
+    }
+    if (!opt_out[0]) {
+        if (!def_opt[0]) return 1;
+        long dl = tx_len(def_opt, 16);
+        mm_copy(opt_out, 16, def_opt, dl + 1);
+    }
+    return 0;
+}
+
 static int bo_self_test(void) {
     int pass = 0, fail = 0;
-    int o1 = 0, o2 = 0, dup = 0, flag_diffs = 0;
+    int dup = 0;
     for (int i = 0; i < BO_NUNITS; i++) {
-        if (tx_eqz(BO_UNITS[i].opt, "-O1")) o1++;
-        else if (tx_eqz(BO_UNITS[i].opt, "-O2")) o2++;
-        if (!tx_eqz(BO_UNITS[i].opt, BO_UNITS[i].chain_opt)) flag_diffs++;
         for (int j = i + 1; j < BO_NUNITS; j++) {
             if (tx_eqz(BO_UNITS[i].key, BO_UNITS[j].key)) dup++;
         }
     }
-    if (o1 == 5 && o2 == 15 && dup == 0 && flag_diffs == 1) {
-        sy_printf("PASS\tunit-table-20-5o1-15o2-unique\to1=%d o2=%d dup=%d chain_opt_diffs=%d\n", o1, o2, dup, flag_diffs);
+    if (dup == 0) { sy_printf("PASS\tunit-table-20-unique\tunits=%d dup=0\n", BO_NUNITS); pass++; }
+    else { sy_printf("FAIL\tunit-table-20-unique\tdup=%d\n", dup); fail++; }
+
+    const char *sample_lvl = "object_level mode=o1-drivers drive.o=-O1 host.o=-O1 driveface.o=-O1 driveroute.o=-O1 cxmod.o=-O1 tapegate.o=-O1 other=-O2 target=lnx/x86_64";
+    int o1 = 0, o2 = 0, bad = 0;
+    char m0_opt[16]; m0_opt[0] = 0;
+    for (int i = 0; i < BO_NUNITS; i++) {
+        char o[16];
+        if (bo_resolve_opt_from_receipt(sample_lvl, BO_UNITS[i].chain_key, o) != 0) bad++;
+        else {
+            if (tx_eqz(o, "-O1")) o1++;
+            else if (tx_eqz(o, "-O2")) o2++;
+            else bad++;
+            if (tx_eqz(BO_UNITS[i].chain_key, "m0.o")) cx_fmt(m0_opt, sizeof m0_opt, "%s", o);
+        }
+    }
+    if (bad == 0 && o1 == 4 && o2 == 16 && tx_eqz(m0_opt, "-O2")) {
+        sy_printf("PASS\treceipt-object-level-parse\to1=%d o2=%d m0=%s\n", o1, o2, m0_opt);
         pass++;
     } else {
-        sy_printf("FAIL\tunit-table-20-5o1-15o2-unique\to1=%d o2=%d dup=%d chain_opt_diffs=%d\n", o1, o2, dup, flag_diffs);
+        sy_printf("FAIL\treceipt-object-level-parse\tbad=%d o1=%d o2=%d m0=%s\n", bad, o1, o2, m0_opt);
         fail++;
     }
+
     int has_m21 = 0, has_m51 = 0;
     for (int i = 0; i < BO_NUNITS; i++) {
         if (tx_eqz(BO_UNITS[i].key, "m21.o") && tx_eqz(BO_UNITS[i].src, "cx/sys/io.cx")) has_m21 = 1;
@@ -303,6 +354,20 @@ int main(int argc, char **argv) {
         cx_fmt(elf_copy, sizeof elf_copy, "%s/entry.elf", tmp) != 0 ||
         cx_fmt(arch_tar, sizeof arch_tar, "%s/tree.tar", tmp) != 0) return 2;
 
+    /* (3b) Read chain receipt object_level and resolve per-unit optimization flags (zero hand-coded table). */
+    char chain_lvl[512];
+    if (bo_read_chain_obj_level(chain_abs, chain_lvl, (long)sizeof chain_lvl) != 0) {
+        sy_eprintf("build-objs-from-tree: REFUSE missing object_level in %s/fixedpoint/g2/lnx-x86_64/receipt.txt\n", chain_abs);
+        return 2;
+    }
+    char unit_opts[BO_NUNITS][16];
+    for (int i = 0; i < BO_NUNITS; i++) {
+        if (bo_resolve_opt_from_receipt(chain_lvl, BO_UNITS[i].chain_key, unit_opts[i]) != 0) {
+            sy_eprintf("build-objs-from-tree: REFUSE cannot resolve opt for %s from receipt object_level\n", BO_UNITS[i].chain_key);
+            return 2;
+        }
+    }
+
     /* (4) Two-step git archive -> tar extract (no pipeline masking), then dev-product --hdr-only. */
     char cmd[BO_CMD_CAP];
     if (cx_fmt(cmd, sizeof cmd,
@@ -342,7 +407,7 @@ int main(int argc, char **argv) {
             if (cx_fmt(part, sizeof part,
                 "env -i PATH=\"$PATH\" LC_ALL=C TZ=UTC UNISA_CONTAINER='%s' UNISACC_LOCAL=1 "
                 "'%s' -c -funit -b lnx/x86_64 %s -DRT_EXTERN '%s' -o '%s/%s' & p%d=$!; ",
-                hdr_pkg, elf_copy, BO_UNITS[i].opt, BO_UNITS[i].src, out_abs, BO_UNITS[i].key, slot) != 0 ||
+                hdr_pkg, elf_copy, unit_opts[i], BO_UNITS[i].src, out_abs, BO_UNITS[i].key, slot) != 0 ||
                 bo_append(cmd, sizeof cmd, &pos, part) != 0) return 2;
         }
         if (bo_append(cmd, sizeof cmd, &pos,
@@ -372,7 +437,7 @@ int main(int argc, char **argv) {
             return 1;
         }
         if (cx_fmt(line, sizeof line, "OBJ_SHA256\t%s\t%s\t%ld\t%s\t%s\n",
-                   BO_UNITS[i].key, obj_shas[i], obj_lens[i], BO_UNITS[i].opt, BO_UNITS[i].src) != 0 ||
+                   BO_UNITS[i].key, obj_shas[i], obj_lens[i], unit_opts[i], BO_UNITS[i].src) != 0 ||
             bo_append(out_buf, sizeof out_buf, &out_pos, line) != 0) return 2;
     }
 
@@ -391,13 +456,9 @@ int main(int argc, char **argv) {
     }
 
     /* (8) All 20 objects + receipt verified: emit inputs, chain flag comparison, 20 OBJ_SHA256 rows, summary. */
-    char chain_lvl[512];
-    if (bo_read_chain_obj_level(chain_abs, chain_lvl, (long)sizeof chain_lvl) != 0) {
-        cx_fmt(chain_lvl, sizeof chain_lvl, "UNAVAILABLE");
-    }
     sy_printf("BUILD_OBJS_INPUTS\trun_id=%s\trev=%s\telf_sha=%s\telf_bytes=%ld\tdevprod_sha=%s\tbootpkg_sha=%s\thdr_sha=%s\thdr_bytes=%ld\ttool_sha=%s\n",
               run_id, rev_full, elf_sha, elf_len, devprod_sha, bootpkg_sha, hdr_sha, hdr_len, self_sha);
-    sy_printf("BUILD_OBJS_FLAGS_DIFF\tchain_receipt=%s\tnote=drive.o uses -DRT_UNIT -O1 (holds main); all other units including m0.o use -DRT_EXTERN; recipe builds m0.o at -O1 (chain m0.o is -O2), other 19 match chain opt+macro; fwdmerge.o->m51.o\n",
+    sy_printf("BUILD_OBJS_FLAGS_DIFF\tchain_receipt=%s\topt_source=receipt\tnote=all 20 units take opt directly from chain receipt object_level (4 -O1: host/driveface/driveroute/tapegate, 16 -O2 including m0.o); drive.o uses -DRT_UNIT (holds main), all other units use -DRT_EXTERN; fwdmerge.o->m51.o\n",
               chain_lvl);
     sy_printf("%s", out_buf);
     sy_printf("BUILD_OBJS_FROM_TREE\trun_id=%s\trev=%s\tunits=%d\thdr_sha=%s\thdr_bytes=%ld\tinputs_sha=%s\toutput_sha=%s\treceipt=%s\tstatus=OK\n",
