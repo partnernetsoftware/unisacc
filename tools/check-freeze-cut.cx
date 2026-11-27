@@ -50,7 +50,7 @@ static int run_fc(const char *env_pre, const char *args, pr_result *r) {
     char cmd[8192];
     if (cx_fmt(cmd, sizeof cmd,
                "env -u UNISACC_RUN_CACHE -u UNISACC_CACHE_DIR -u UNISACC_FREEZE_NO_FETCH "
-               "-u UNISACC_BOUND_DEADLINE_MONO %s sh '%s/unisacc.com' '%s/tools/freeze-cut.cx' -- %s",
+               "-u UNISACC_BOUND_DEADLINE_MONO -u UNISACC_BOOTER_CHAIN_OUT %s sh '%s/unisacc.com' '%s/tools/freeze-cut.cx' -- %s",
                env_pre ? env_pre : "", g_root, g_root, args)) return -1;
     return fc_sh(g_root, cmd, 45, r);
 }
@@ -257,6 +257,10 @@ int main(void) {
     cx_fmt(args, sizeof args, "--check --repo '%s' --version 0.1.3 --owner cc --no-derive", repo);
     run_fc("", args, &r);
     ck(r.rc == 0 && fc_has(&r, "FREEZE_CUT\tCHECK_PASS\tversion=0.1.3\tslot=68"), "check-after-cut-pass", &r);
+    pr_free(&r);
+
+    run_fc("UNISACC_BOOTER_CHAIN_OUT=/tmp/booter-chain-out", args, &r);
+    ck(r.rc == 0 && fc_has(&r, "FREEZE_CUT\tCHECK_PASS\tversion=0.1.3\tslot=68"), "check-booter-chain-out-env-allowed-pass", &r);
     pr_free(&r);
 
     /* Verify C0a and C0b git history + candidate.tsv (tag/commit reset/version/workflow_ref/ci_run_id=0/zero asset SHAs) + freeze base_commit + plans/v0.1.3.md */
@@ -482,6 +486,177 @@ int main(void) {
                repo_tc);
         run_fc(envp, args, &r);
         ck(r.rc == 2 && fc_has(&r, "REFUSE\tFREEZE_CUT\tgit-status-failed"), "worktree-bad-status-xy-refused", &r);
+        pr_free(&r);
+    }
+
+    /* 14. Four embedded pre-chain gates in --check (and --cut final check):
+     *   (a) gen-all-check --root over all 46 generators (DIFF k2-gen2 or total!=46 refused),
+     *   (b) chain-ready preconditions under clean env -i (missing UNISACC_IDENT_HELPER, TMPDIR inside repo, or READY=no refused),
+     *   (c) shard registry check (tools/check-shard-registry.cx + two-way tools/*.cx vs tools-compile-NNN reconcile),
+     *   (d) no DEFERRED escape for genall in build/deferred-gates.tsv (even if paired with VERIFIED). */
+    {   char repo_g4[1024], ih_bin[1024], ext_tmp[1024], env_g4[2048];
+        cx_fmt(repo_g4, sizeof repo_g4, "%s/repo_gates4", dir);
+        cx_fmt(ih_bin, sizeof ih_bin, "%s/ident-helper-stub", dir);
+        cx_fmt(ext_tmp, sizeof ext_tmp, "%s/ext_tmp", dir);
+        init_repo(repo_g4, "\xe5\xb7\xb2\xe5\x85\xac\xe5\xbc\x80"); /* 已公开 */
+        cx_fmt(shcmd, sizeof shcmd,
+            "mkdir -p '%s' && printf '#!/bin/sh\\nexit 0\\n' > '%s' && chmod +x '%s' && "
+            "cd '%s' && mkdir -p tests && printf 'research/*\\n!research/r.md\\n' >> .git/info/exclude && "
+            ": > tools/derive.cx && : > tools/verseq-gen.cx && : > tools/gen-all-check.cx && "
+            ": > tools/check-gen-all-check.cx && : > tools/chain-ready.cx && : > tools/check-shard-registry.cx && : > tools/ratchets.cx && "
+            "printf 'batch\\tdomain\\tcmd\\n' > tests/batches.tsv && "
+            "cat > unisacc.com << 'EOFG4'\n"
+            "#!/bin/sh\n"
+            "case \"$1\" in\n"
+            "  *derive.cx*) exit 0 ;;\n"
+            "  *verseq-gen.cx*) exit 0 ;;\n"
+            "  *gen-all-check.cx*)\n"
+            "    if [ -f .git/bad_genall_diff ]; then\n"
+            "      printf 'GEN_CHECK\\tk2-gen2\\tDIFF\\t12\\texec/facts/k2-gen2.tsv\\n'\n"
+            "      printf 'GEN_ALL_SUMMARY\\ttotal=46\\tpass=45\\tdiff=1\\terror=0\\tuncovered=0\\tms=35000\\n'\n"
+            "      exit 1\n"
+            "    fi\n"
+            "    if [ -f .git/bad_genall_count ]; then\n"
+            "      printf 'GEN_ALL_SUMMARY\\ttotal=45\\tpass=45\\tdiff=0\\terror=0\\tuncovered=0\\tms=35000\\n'\n"
+            "      exit 0\n"
+            "    fi\n"
+            "    printf 'GEN_ALL_SUMMARY\\ttotal=46\\tpass=46\\tdiff=0\\terror=0\\tuncovered=0\\tms=35000\\n'\n"
+            "    exit 0 ;;\n"
+            "  *check-shard-registry.cx*)\n"
+            "    if [ -f .git/bad_shard_tool ]; then\n"
+            "      printf 'SHARD_REG_MISSING\\ttools-compile-201\\n'\n"
+            "      printf 'CHECK_SHARD_REGISTRY\\tsources=1610\\tshards=202\\tmissing=1\\textra=0\\tdup=0\\tstatus=FAIL\\n'\n"
+            "      exit 1\n"
+            "    fi\n"
+            "    printf 'CHECK_SHARD_REGISTRY\\tsources=9\\tshards=2\\tmissing=0\\textra=0\\tdup=0\\tstatus=PASS\\n'\n"
+            "    exit 0 ;;\n"
+            "  *chain-ready.cx*)\n"
+            "    for v in $(env | cut -d= -f1); do\n"
+            "      case \"$v\" in\n"
+            "        UNISACC_IDENT_HELPER) ;;\n"
+            "        UNISACC_*) printf '10-envhygiene\\tFAIL\\tleaked=%%s\\nREADY=no\\n' \"$v\"; exit 1 ;;\n"
+            "      esac\n"
+            "    done\n"
+            "    if [ -z \"$UNISACC_IDENT_HELPER\" ] || [ ! -f \"$UNISACC_IDENT_HELPER\" ]; then\n"
+            "      printf '20-ident-helper\\tFAIL\\tmissing\\nREADY=no\\n'; exit 1\n"
+            "    fi\n"
+            "    if [ -f .git/bad_chain_ready ]; then\n"
+            "      printf '19-chain-preflight\\tFAIL\\tpreflight-red\\nREADY=no\\n'; exit 1\n"
+            "    fi\n"
+            "    printf '10-envhygiene\\tPASS\\tclean\\n20-ident-helper\\tPASS\\tok\\nREADY=yes\\n'\n"
+            "    exit 0 ;;\n"
+            "esac\n"
+            "exit 0\n"
+            "EOFG4\n"
+            "chmod +x unisacc.com && git add -A && "
+            "N_CX=$(git ls-files -- 'tools/*.cx' 'tools/**/*.cx' | wc -l) && "
+            "WANT_SH=$(( (N_CX + 7) / 8 )) && "
+            "i=0; while [ $i -lt $WANT_SH ]; do printf 'tools-compile-00%%d\\ttool-selfcheck\\ttrue\\n' $i >> tests/batches.tsv; i=$((i+1)); done && "
+            "git add tests/batches.tsv && git commit -qm g4-init",
+            ext_tmp, ih_bin, ih_bin, repo_g4);
+        fc_sh(g_root, shcmd, 15, &r); pr_free(&r);
+
+        cx_fmt(env_g4, sizeof env_g4, "TMPDIR='%s' UNISACC_IDENT_HELPER='%s'", ext_tmp, ih_bin);
+        cx_fmt(args, sizeof args,
+               "--cut --repo '%s' --version 0.1.3 --topic '四门联检' --a-class '四门联检' --planned-units 8 --a-files-cap 24 --owner cc --deadline-s 7200",
+               repo_g4);
+        run_fc(env_g4, args, &r);
+        ck(r.rc == 0 && fc_has(&r, "FREEZE_CUT\tPASS\tversion=0.1.3"), "g4-all-four-gates-green-cut-pass", &r);
+        pr_free(&r);
+
+        /* 14a: Gate (a) gen-all-check DIFF k2-gen2 (like a2e8b9703) or <46 generators refused */
+        cx_fmt(shcmd, sizeof shcmd, "touch '%s/.git/bad_genall_diff'", repo_g4);
+        fc_sh(g_root, shcmd, 10, &r); pr_free(&r);
+        cx_fmt(args, sizeof args, "--check --repo '%s' --version 0.1.3 --owner cc", repo_g4);
+        run_fc(env_g4, args, &r);
+        ck(r.rc == 2 && fc_has(&r, "REFUSE\tFREEZE_CUT\tgen-all-check-failed") && fc_has(&r, "k2-gen2"),
+           "mut-gate-a-genall-diff-k2-gen2-refused", &r);
+        pr_free(&r);
+
+        cx_fmt(shcmd, sizeof shcmd, "rm -f '%s/.git/bad_genall_diff' && touch '%s/.git/bad_genall_count'", repo_g4, repo_g4);
+        fc_sh(g_root, shcmd, 10, &r); pr_free(&r);
+        run_fc(env_g4, args, &r);
+        ck(r.rc == 2 && fc_has(&r, "REFUSE\tFREEZE_CUT\tgen-all-check-failed") && fc_has(&r, "tot46=0"),
+           "mut-gate-a-genall-under-46-generators-refused", &r);
+        pr_free(&r);
+        cx_fmt(shcmd, sizeof shcmd, "rm -f '%s/.git/bad_genall_count'", repo_g4);
+        fc_sh(g_root, shcmd, 10, &r); pr_free(&r);
+
+        /* 14b: Gate (b) chain-ready under env -i: missing UNISACC_IDENT_HELPER, TMPDIR inside repo, and chain-ready FAIL refused */
+        run_fc("-u UNISACC_IDENT_HELPER", args, &r);
+        ck(r.rc == 2 && fc_has(&r, "REFUSE\tFREEZE_CUT\tchain-ready-failed") && fc_has(&r, "UNISACC_IDENT_HELPER-missing"),
+           "mut-gate-b-missing-ident-helper-refused", &r);
+        pr_free(&r);
+
+        {   char env_in_tmp[2048];
+            cx_fmt(env_in_tmp, sizeof env_in_tmp, "TMPDIR='%s/research' UNISACC_IDENT_HELPER='%s'", repo_g4, ih_bin);
+            run_fc(env_in_tmp, args, &r);
+            ck(r.rc == 2 && fc_has(&r, "REFUSE\tFREEZE_CUT\tchain-ready-failed") && fc_has(&r, "TMPDIR-inside-repo"),
+               "mut-gate-b-tmpdir-inside-repo-refused", &r);
+            pr_free(&r);
+        }
+
+        cx_fmt(shcmd, sizeof shcmd, "touch '%s/.git/bad_chain_ready'", repo_g4);
+        fc_sh(g_root, shcmd, 10, &r); pr_free(&r);
+        run_fc(env_g4, args, &r);
+        ck(r.rc == 2 && fc_has(&r, "REFUSE\tFREEZE_CUT\tchain-ready-failed") && fc_has(&r, "19-chain-preflight"),
+           "mut-gate-b-chain-ready-red-refused", &r);
+        pr_free(&r);
+        cx_fmt(shcmd, sizeof shcmd, "rm -f '%s/.git/bad_chain_ready'", repo_g4);
+        fc_sh(g_root, shcmd, 10, &r); pr_free(&r);
+
+        /* 14c: Gate (c) shard registry mismatch (missing shard row in tests/batches.tsv or tool failure) refused */
+        cx_fmt(shcmd, sizeof shcmd, "touch '%s/.git/bad_shard_tool'", repo_g4);
+        fc_sh(g_root, shcmd, 10, &r); pr_free(&r);
+        run_fc(env_g4, args, &r);
+        ck(r.rc == 2 && fc_has(&r, "REFUSE\tFREEZE_CUT\tshard-registry-failed") && fc_has(&r, "tools-compile-201"),
+           "mut-gate-c-shard-registry-tool-missing-201-refused", &r);
+        pr_free(&r);
+        cx_fmt(shcmd, sizeof shcmd,
+            "rm -f '%s/.git/bad_shard_tool' && cd '%s' && cp tests/batches.tsv '%s/batches.bak' && "
+            "git reset -q --hard HEAD~1 && "
+            "printf 'tools-compile-999\\ttool-selfcheck\\ttrue\\n' >> tests/batches.tsv && "
+            "git add tests/batches.tsv && git commit -q --amend --no-edit && "
+            "C0A=$(git rev-parse HEAD) && "
+            "printf '# candidate_sid\\tbase_commit\\towner\\tdeadline_epoch_s\\tpaths\\n"
+            "# 0.1.2-FREEZE\\t11223344556677889900aabbccddeeff00112233\\tcc\\t4102444800\\tsrc\\n"
+            "0.1.3-FREEZE\\t%%s\\tcc\\t4102444800\\tsrc\\n' \"$C0A\" > build/freeze.tsv && "
+            "git add build/freeze.tsv && git commit -qm c0b-rearm",
+            repo_g4, repo_g4, dir);
+        fc_sh(g_root, shcmd, 15, &r); pr_free(&r);
+        run_fc(env_g4, args, &r);
+        ck(r.rc == 2 && fc_has(&r, "REFUSE\tFREEZE_CUT\tshard-registry-failed") && fc_has(&r, "extra=1"),
+           "mut-gate-c-shard-registry-extra-shard-refused", &r);
+        pr_free(&r);
+        cx_fmt(shcmd, sizeof shcmd,
+            "cd '%s' && git reset -q --hard HEAD~1 && cp '%s/batches.bak' tests/batches.tsv && "
+            "git add tests/batches.tsv && git commit -q --amend --no-edit && "
+            "C0A=$(git rev-parse HEAD) && "
+            "printf '# candidate_sid\\tbase_commit\\towner\\tdeadline_epoch_s\\tpaths\\n"
+            "# 0.1.2-FREEZE\\t11223344556677889900aabbccddeeff00112233\\tcc\\t4102444800\\tsrc\\n"
+            "0.1.3-FREEZE\\t%%s\\tcc\\t4102444800\\tsrc\\n' \"$C0A\" > build/freeze.tsv && "
+            "git add build/freeze.tsv && git commit -qm c0b-clean",
+            repo_g4, dir);
+        fc_sh(g_root, shcmd, 15, &r); pr_free(&r);
+
+        /* 14d: Gate (d) DEFERRED genall row in build/deferred-gates.tsv refused EVEN IF paired with VERIFIED */
+        cx_fmt(shcmd, sizeof shcmd,
+            "cd '%s' && git reset -q --hard HEAD~1 && "
+            "Z64='0000000000000000000000000000000000000000000000000000000000000000' && "
+            "printf 'DEFERRED\\t1800000001\\t%s\\tgenall\\tGATE_TIMEOUT\\t1111111111111111111111111111111111111111\\t2222222222222222222222222222222222222222\\tsh ./unisacc.com tools/gen-all-check.cx -- --root .\\t%%s\\n' \"$Z64\" > build/deferred-gates.tsv && "
+            "printf 'VERIFIED\\t1800000002\\t%s\\tgenall\\tVERIFY_DEFERRED_PASS\\t3333333333333333333333333333333333333333\\t4444444444444444444444444444444444444444\\tverified_deferred_tree=1111111111111111111111111111111111111111 cmd=gen-all-check\\t%%s\\n' \"$Z64\" >> build/deferred-gates.tsv && "
+            "cp build/deferred-gates.tsv .git/unisacc-deferred-gates.tsv && "
+            "git add build/deferred-gates.tsv && git commit -q --amend --no-edit && "
+            "C0A=$(git rev-parse HEAD) && "
+            "printf '# candidate_sid\\tbase_commit\\towner\\tdeadline_epoch_s\\tpaths\\n"
+            "# 0.1.2-FREEZE\\t11223344556677889900aabbccddeeff00112233\\tcc\\t4102444800\\tsrc\\n"
+            "0.1.3-FREEZE\\t%%s\\tcc\\t4102444800\\tsrc\\n' \"$C0A\" > build/freeze.tsv && "
+            "git add build/freeze.tsv && git commit -qm c0b-def",
+            repo_g4, repo_g4, repo_g4);
+        fc_sh(g_root, shcmd, 15, &r); pr_free(&r);
+        run_fc(env_g4, args, &r);
+        ck(r.rc == 2 && fc_has(&r, "REFUSE\tFREEZE_CUT\tdeferred-gates-genall-escaped") && fc_has(&r, "genall-deferred-forbidden"),
+           "mut-gate-d-deferred-genall-forbidden-even-when-verified", &r);
         pr_free(&r);
     }
 
