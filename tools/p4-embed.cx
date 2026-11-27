@@ -182,14 +182,11 @@ int main(int argc, char **argv) {
     }
     for (int i = 0; i < dec.package.nr; i++) {
         const CxPackageResource *r = &dec.package.res[i];
-        for (int k = 0; k < nrec; k++) {
-            long kl = (long)strlen(keys[k]);
-            if ((long)r->n == kl && memcmp(pkg + r->name, keys[k], (size_t)kl) == 0) {
-                cxpl_release(&dec.package, pe_free);
-                for (int e = 0; e < nex; e++) mm_free(ex_b[e]);
-                mm_free(in_b); mm_free(so_b); mm_free(sl_b);
-                return pe_die("duplicate-tape-resource");
-            }
+        if ((long)r->n > 16 && memcmp(pkg + r->name, "tape/lnx-x86_64/", 16) == 0) {
+            cxpl_release(&dec.package, pe_free);
+            for (int e = 0; e < nex; e++) mm_free(ex_b[e]);
+            mm_free(in_b); mm_free(so_b); mm_free(sl_b);
+            return pe_die("duplicate-tape-resource");
         }
     }
     int in_nr = dec.package.nr;
@@ -273,17 +270,27 @@ int main(int argc, char **argv) {
         for (int e = 0; e < nex; e++) { m_leaves[2 + e] = ex_leaf[e]; m_shas[2 + e] = ex_sha[e]; m_lens[2 + e] = (long)ex_n[e]; }
         for (int i = 0; i < dec.package.nr; i++) {
             const CxPackageResource *r = &dec.package.res[i];
+            int is_tape_ns = ((long)r->n > 16 && memcmp(out.p + r->name, "tape/lnx-x86_64/", 16) == 0);
+            int matched = -1;
             for (int k = 0; k < nrec; k++) {
                 long kl = (long)strlen(keys[k]);
-                if ((long)r->n == kl && memcmp(out.p + r->name, keys[k], (size_t)kl) == 0) {
-                    item_hits[k]++;
-                    if (k == 0) { dec_mf = out.p + r->data; dec_mfn = (long)r->len; mf_hits++; }
-                    else if ((long)r->len != vlens[k] || r->crc != pe_crc32(vals[k], vlens[k])) {
-                        cxpl_release(&dec.package, pe_free);
-                        free(out.p); for (int e = 0; e < nex; e++) mm_free(ex_b[e]);
-                        mm_free(in_b); mm_free(so_b); mm_free(sl_b);
-                        return pe_die("self-verify-record-mismatch");
-                    }
+                if ((long)r->n == kl && memcmp(out.p + r->name, keys[k], (size_t)kl) == 0) { matched = k; break; }
+            }
+            if (is_tape_ns && matched < 0) {
+                cxpl_release(&dec.package, pe_free);
+                free(out.p); for (int e = 0; e < nex; e++) mm_free(ex_b[e]);
+                mm_free(in_b); mm_free(so_b); mm_free(sl_b);
+                return pe_die("self-verify-orphan-tape-record");
+            }
+            if (matched >= 0) {
+                item_hits[matched]++;
+                if (matched == 0) { dec_mf = out.p + r->data; dec_mfn = (long)r->len; mf_hits++; }
+                else if (r->codec != 0 || (long)r->rawlen != vlens[matched] ||
+                         (long)r->len != vlens[matched] || r->crc != pe_crc32(vals[matched], vlens[matched])) {
+                    cxpl_release(&dec.package, pe_free);
+                    free(out.p); for (int e = 0; e < nex; e++) mm_free(ex_b[e]);
+                    mm_free(in_b); mm_free(so_b); mm_free(sl_b);
+                    return pe_die("self-verify-record-mismatch");
                 }
             }
         }

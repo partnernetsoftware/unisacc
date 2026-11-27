@@ -172,8 +172,87 @@ int main(void) {
                               "--extra", "bad leaf.tapeslice", ex1, 0};
             np_result r = {0}; char why[128] = {0};
             int t0 = np_run(av_ok, 0, 0, 40, &r, why, sizeof why);
-            ck(!t0 && !r.residue && r.rc == 0 && r.out && strstr(r.out, "extra=2") != 0, "positive-extra-2-slices-1to1");
+            int ex_ok = 0;
+            if (!t0 && !r.residue && r.rc == 0 && r.out && strstr(r.out, "extra=2") != 0) {
+                size_t en = 0;
+                char *eb = cx_read(ex_out, &en);
+                CxPackageDecode edec;
+                if (eb && en > 16) {
+                    mm_fill(&edec, (long)sizeof edec, 0, (long)sizeof edec);
+                    edec.allocate = pe_chk_alloc;
+                    edec.release = pe_chk_free;
+                    if (cxpk_decode(&edec, (const unsigned char *)eb, (long)en) == 0 && edec.package.ver == 4 && edec.package.nr == 6) {
+                        static const char *ekeys[5] = {
+                            "tape/lnx-x86_64/manifest.tsv",
+                            "tape/lnx-x86_64/tapemode.so",
+                            "tape/lnx-x86_64/m53.tapeslice",
+                            "tape/lnx-x86_64/bind.tapeslice",
+                            "tape/lnx-x86_64/m25.tapeslice"
+                        };
+                        int hits[5] = {0, 0, 0, 0, 0}, keep = 0, tape_ns = 0;
+                        const char *mf_p = 0; long mf_l = 0;
+                        for (int i = 0; i < edec.package.nr; i++) {
+                            const CxPackageResource *rr = &edec.package.res[i];
+                            if (rr->n == 4 && tx_same(eb + rr->name, 4, "keep", 4)) keep++;
+                            if (rr->n > 16 && tx_same(eb + rr->name, 16, "tape/lnx-x86_64/", 16)) tape_ns++;
+                            for (int k = 0; k < 5; k++) {
+                                long kl = tx_len(ekeys[k], 64);
+                                if (rr->n == (int)kl && tx_same(eb + rr->name, rr->n, ekeys[k], kl)) {
+                                    unsigned crc = pe_chk_crc32(eb + rr->data, rr->len);
+                                    if (rr->codec == 0 && rr->rawlen == rr->len && rr->len > 0 && rr->crc == crc) {
+                                        hits[k]++;
+                                        if (k == 0) { mf_p = eb + rr->data; mf_l = (long)rr->len; }
+                                    }
+                                }
+                            }
+                        }
+                        int mf_rows = 0, mf_bind = 0, mf_m25 = 0, mf_m53 = 0, mf_so = 0;
+                        if (mf_p && mf_l > 0) {
+                            long pos = 0;
+                            while (pos < mf_l) {
+                                long eol = pos;
+                                while (eol < mf_l && mf_p[eol] != '\n') eol++;
+                                long tab = pos;
+                                while (tab < eol && mf_p[tab] != '\t') tab++;
+                                long c0 = tab - pos;
+                                if (c0 > 0 && mf_p[pos] != '#' && !(c0 == 4 && tx_same(mf_p + pos, 4, "leaf", 4))) {
+                                    mf_rows++;
+                                    if (c0 == 11 && tx_same(mf_p + pos, 11, "tapemode.so", 11)) mf_so++;
+                                    else if (c0 == 13 && tx_same(mf_p + pos, 13, "m53.tapeslice", 13)) mf_m53++;
+                                    else if (c0 == 14 && tx_same(mf_p + pos, 14, "bind.tapeslice", 14)) mf_bind++;
+                                    else if (c0 == 13 && tx_same(mf_p + pos, 13, "m25.tapeslice", 13)) mf_m25++;
+                                }
+                                pos = eol + 1;
+                            }
+                        }
+                        if (keep == 1 && tape_ns == 5 && mf_rows == 4 &&
+                            mf_so == 1 && mf_m53 == 1 && mf_bind == 1 && mf_m25 == 1 &&
+                            hits[0] == 1 && hits[1] == 1 && hits[2] == 1 && hits[3] == 1 && hits[4] == 1) {
+                            ex_ok = 1;
+                        }
+                        cxpl_release(&edec.package, pe_chk_free);
+                    }
+                }
+                if (eb) mm_free(eb);
+            }
+            ck(ex_ok, "positive-extra-2-slices-1to1-readback");
             np_free(&r);
+            /* Orphan pre-existing tape/lnx-x86_64/* F record in input package must be refused */
+            {
+                char orph_in[640], orph_body[512];
+                const char *ok_key = "tape/lnx-x86_64/orphan.tapeslice";
+                const char *ok_val = "ORPHAN-SLICE";
+                unsigned ocrc = pe_chk_crc32(ok_val, 12);
+                if (!cx_fmt(orph_in, sizeof orph_in, "%s/orphan_in.p4", tmp) &&
+                    !cx_fmt(orph_body, sizeof orph_body, "P 4 1 1 1\nD r s in out 0\nM 1 1 1 0\nAF %ld 12 12 0 %u\n%s%s",
+                            (long)strlen(ok_key), ocrc, ok_key, ok_val) &&
+                    !cx_write(orph_in, orph_body, strlen(orph_body))) {
+                    int orc = run_embed(orph_in, so_p, sl_p, dup_p4, log, sizeof log);
+                    ck(orc != 0 && strstr(log, "duplicate-tape-resource") != 0, "refuse-orphan-tape-namespace-input");
+                } else {
+                    ck(0, "refuse-orphan-tape-namespace-input");
+                }
+            }
             t0 = np_run(av_dup, 0, 0, 40, &r, why, sizeof why);
             ck(!t0 && !r.residue && r.rc != 0 && r.err && strstr(r.err, "duplicate --extra leaf") != 0, "refuse-duplicate-extra-leaf");
             np_free(&r);
