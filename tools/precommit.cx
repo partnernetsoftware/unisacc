@@ -4037,29 +4037,46 @@ int main(int argc, char **argv) {
           const char *wtop = pc_work_top[0] ? pc_work_top : (pc_local_top[0] ? pc_local_top : pc_orig_cwd);
           char *cv[] = {"sh", "-c", "for f in tools/affected.cx cxroot.tsv tests/batches.tsv tests/batch-product-inputs.tsv tests/coverage.tsv; do cmp -s \"$f\" \"$0/$f\" || { echo DIFF; exit 0; }; done;"
                         " for d in tools/cxlib ext cx; do diff -rq \"$d\" \"$0/$d\" >/dev/null 2>&1 || { echo DIFF; exit 0; }; done; echo SAME", (char *)wtop, 0};
+          char *pwv[] = {"sh", "-c", "cd \"$0\" && unset GIT_DIR GIT_WORK_TREE GIT_INDEX_FILE &&"
+                        " exec sh ./unisacc.com tools/affected.cx -- --help 2>&1", (char *)wtop, 0};
           char *hv[] = {"sh", "-c", "cd \"$0\" && unset GIT_DIR GIT_WORK_TREE GIT_INDEX_FILE &&"
                         " exec sh ./unisacc.com tools/affected.cx -- --registry-check 2>&1", (char *)wtop, 0};
           char *iv[] = {"sh", "-c", "exec sh ./unisacc.com tools/affected.cx -- --registry-check 2>&1", 0};
-          long an, cn2; char *ao, *co; int b0_ac = blocked, arc, ato, hot; long t_ac = sy_now_ms();
+          long an, cn2, prewarm_ms = 0; char *ao = 0, *co; int b0_ac = blocked, arc = 0, ato = 0, hot; long t_ac = sy_now_ms();
           co = (plan_dir || !wtop[0]) ? 0 : slurp(cv, &cn2);
           hot = co && tx_find(co, cn2, "SAME", 4) >= 0; mm_free(co);
-          cur_gate = "affected-canary"; slurp_okrc = 255; slurp_bound_ms = hot ? 10000 : 30000;
-          ao = slurp(hot ? hv : iv, &an); arc = slurp_last_rc; ato = slurp_last_timeout;
-          slurp_bound_ms = 0; slurp_okrc = 0; cur_gate = 0;
-          if (plan_dir) {}
-          else if (!ao) { sy_eprintf("precommit: BLOCKED affected-canary %s (basis=%s bound %d s)\n", ato ? "timeout" : "did not run", hot ? "worktree-binary" : "staged-tree", hot ? 10 : 30); blocked++; }
-          else if (arc != 0 || tx_find(ao, an, "AFFECTED_REGISTRY_CHECK", 22) < 0) {
-              long at6 = 0; int shown = 0;
-              sy_eprintf("precommit: BLOCKED affected-canary tools/affected.cx rc=%d\n", arc);
-              while (at6 < an && shown < 8) { long e = tx_chr(ao + at6, an - at6, '\n'), l = e < 0 ? an - at6 : e;
-                  if (tx_find(ao + at6, l, "REFUSE", 6) >= 0 || tx_find(ao + at6, l, "UNDECLARED", 10) >= 0 ||
-                      tx_find(ao + at6, l, "UNKNOWN", 7) >= 0 || tx_find(ao + at6, l, "affected:", 9) >= 0) {
-                      sy_eprintf("precommit: affected-canary %.*s\n", (int)l, ao + at6); shown++; }
-                  at6 += l + 1; }
-              if (!shown) sy_eprintf("precommit: affected-canary tail: %.*s\n", (int)(an > 300 ? 300 : an), an > 300 ? ao + an - 300 : ao);
-              blocked++;
-          } else sy_eprintf("precommit: AFFECTED_CANARY ok basis=%s ms=%ld\n", hot ? "worktree-binary" : "staged-tree", sy_now_ms() - t_ac);
-          mm_free(ao);
+          if (!plan_dir && !from_run && hot) {
+              long pwn = 0, t_pw = sy_now_ms(); char *pwo; int pw_to;
+              slurp_okrc = 255; slurp_bound_ms = SLURP_DEADLINE_MS;
+              pwo = slurp(pwv, &pwn); pw_to = slurp_last_timeout;
+              slurp_bound_ms = 0; slurp_okrc = 0;
+              prewarm_ms = sy_now_ms() - t_pw;
+              if (!pwo) {
+                  sy_eprintf("precommit: BLOCKED affected-canary prewarm %s (basis=worktree-binary bound %d s)\n",
+                             pw_to ? "timeout" : "did not run", (int)(SLURP_DEADLINE_MS / 1000));
+                  blocked++;
+              } else sy_eprintf("precommit: AFFECTED_CANARY_PREWARM basis=worktree-binary prewarm_ms=%ld\n", prewarm_ms);
+              mm_free(pwo);
+          }
+          if (blocked == b0_ac) {
+              cur_gate = "affected-canary"; slurp_okrc = 255; slurp_bound_ms = hot ? 10000 : 30000;
+              ao = slurp(hot ? hv : iv, &an); arc = slurp_last_rc; ato = slurp_last_timeout;
+              slurp_bound_ms = 0; slurp_okrc = 0; cur_gate = 0;
+              if (plan_dir) {}
+              else if (!ao) { sy_eprintf("precommit: BLOCKED affected-canary %s (basis=%s bound %d s)\n", ato ? "timeout" : "did not run", hot ? "worktree-binary" : "staged-tree", hot ? 10 : 30); blocked++; }
+              else if (arc != 0 || tx_find(ao, an, "AFFECTED_REGISTRY_CHECK", 22) < 0) {
+                  long at6 = 0; int shown = 0;
+                  sy_eprintf("precommit: BLOCKED affected-canary tools/affected.cx rc=%d\n", arc);
+                  while (at6 < an && shown < 8) { long e = tx_chr(ao + at6, an - at6, '\n'), l = e < 0 ? an - at6 : e;
+                      if (tx_find(ao + at6, l, "REFUSE", 6) >= 0 || tx_find(ao + at6, l, "UNDECLARED", 10) >= 0 ||
+                          tx_find(ao + at6, l, "UNKNOWN", 7) >= 0 || tx_find(ao + at6, l, "affected:", 9) >= 0) {
+                          sy_eprintf("precommit: affected-canary %.*s\n", (int)l, ao + at6); shown++; }
+                      at6 += l + 1; }
+                  if (!shown) sy_eprintf("precommit: affected-canary tail: %.*s\n", (int)(an > 300 ? 300 : an), an > 300 ? ao + an - 300 : ao);
+                  blocked++;
+              } else sy_eprintf("precommit: AFFECTED_CANARY ok basis=%s prewarm_ms=%ld ms=%ld\n", hot ? "worktree-binary" : "staged-tree", prewarm_ms, sy_now_ms() - t_ac);
+              mm_free(ao);
+          }
           if (blocked > b0_ac) pc_mark_block("affected-canary", "affected-rc");
       }
       mm_free(acnames);
