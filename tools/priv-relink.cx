@@ -918,9 +918,20 @@ static void pr_choose_cx_cwd(const char *abs_repo, const char *tool_path, const 
 
 static void pr_src_to_pkg_mod(const char *src, char *pkg_mod, size_t pm_cap, char *stem, size_t st_cap) {
     const char *p = src;
-    if (!strncmp(p, "cx/", 3)) p += 3;
-    else if (!strncmp(p, "src/", 4)) p += 4;
-    else if (!strncmp(p, "ext/", 4)) p += 4;
+    const char *hit = 0;
+    for (const char *q = src; *q; q++) {
+        if (q[0] == '/' &&
+            ((!strncmp(q + 1, "cx/", 3) && (hit = q + 4)) ||
+             (!strncmp(q + 1, "src/", 4) && (hit = q + 5)) ||
+             (!strncmp(q + 1, "ext/", 4) && (hit = q + 5)))) {
+            p = hit;
+        }
+    }
+    if (p == src) {
+        if (!strncmp(p, "cx/", 3)) p += 3;
+        else if (!strncmp(p, "src/", 4)) p += 4;
+        else if (!strncmp(p, "ext/", 4)) p += 4;
+    }
     long l = (long)strlen(p);
     if (l > 3 && !memcmp(p + l - 3, ".cx", 3)) l -= 3;
     size_t k = 0;
@@ -933,7 +944,8 @@ static void pr_src_to_pkg_mod(const char *src, char *pkg_mod, size_t pm_cap, cha
 }
 
 static int pr_show_route(const char *abs_repo, const char *caller_cwd,
-                         const char *query, const char *target) {
+                         const char *query, const char *target,
+                         const PrBaseObj *base_objs, int n_base) {
     char detail[512], unit_key[64], mod_stem[64], pkg_mod[128], def_src[256];
     unit_key[0] = 0; mod_stem[0] = 0; pkg_mod[0] = 0; def_src[0] = 0;
     char q_no_o[64];
@@ -943,51 +955,30 @@ static int pr_show_route(const char *abs_repo, const char *caller_cwd,
     mm_copy(q_no_o, sizeof q_no_o, query, qsl);
     q_no_o[qsl] = 0;
 
-    /* 1. Try resolving via plans/slice-units.tsv in abs_repo or caller_cwd */
-    char su_path[PR_PW];
-    size_t sun = 0;
-    char *sub = 0;
-    if (!cx_fmt(su_path, sizeof su_path, "%s/plans/slice-units.tsv", abs_repo))
-        sub = cx_read(su_path, &sun);
-    if (!sub && caller_cwd && caller_cwd[0] &&
-        !cx_fmt(su_path, sizeof su_path, "%s/plans/slice-units.tsv", caller_cwd))
-        sub = cx_read(su_path, &sun);
-    if (sub) {
-        long at = 0;
-        while (at < (long)sun) {
-            long e = at;
-            while (e < (long)sun && sub[e] != '\n' && sub[e] != '\r') e++;
-            long ln = e - at;
-            const char *l = sub + at;
-            at = e + 1;
-            if (ln <= 0 || l[0] == '#') continue;
-            long t1 = tx_chr(l, ln, '\t');
-            if (t1 <= 0 || t1 >= 63) continue;
-            long t2 = tx_chr(l + t1 + 1, ln - (t1 + 1), '\t');
-            if (t2 <= 0 || t2 >= 255) continue;
-            t2 += t1 + 1;
-            long t3 = tx_chr(l + t2 + 1, ln - (t2 + 1), '\t');
-            if (t3 < 0) t3 = ln - (t2 + 1);
-            char rk[64], rs[256], rm[64], r_pm[128], r_st[64], rk_no_o[64];
-            mm_copy(rk, sizeof rk, l, t1); rk[t1] = 0;
-            mm_copy(rs, sizeof rs, l + t1 + 1, t2 - (t1 + 1)); rs[t2 - (t1 + 1)] = 0;
-            long mlen = t3 < 63 ? t3 : 63;
-            mm_copy(rm, sizeof rm, l + t2 + 1, mlen); rm[mlen] = 0;
-            long rkl = (long)strlen(rk);
-            long rksl = (rkl > 2 && !memcmp(rk + rkl - 2, ".o", 2)) ? (rkl - 2) : rkl;
-            mm_copy(rk_no_o, sizeof rk_no_o, rk, rksl); rk_no_o[rksl] = 0;
-            pr_src_to_pkg_mod(rs, r_pm, sizeof r_pm, r_st, sizeof r_st);
-            if (tx_eqz(query, rk) || tx_eqz(q_no_o, rk_no_o) ||
-                tx_eqz(query, rm) || tx_eqz(query, r_pm) || tx_eqz(query, r_st) ||
-                pr_same_no_us(q_no_o, rk_no_o) || pr_same_no_us(q_no_o, rm) || pr_same_no_us(q_no_o, r_st)) {
-                cx_fmt(unit_key, sizeof unit_key, "%s", rk);
-                cx_fmt(def_src, sizeof def_src, "%s", rs);
-                cx_fmt(pkg_mod, sizeof pkg_mod, "%s", r_pm);
-                cx_fmt(mod_stem, sizeof mod_stem, "%s", (rm[0] && !tx_eqz(rm, "-")) ? rm : r_st);
-                break;
-            }
+    /* 1. Resolve unit_key, mod_stem, pkg_mod from the chain's receipt.txt + lnx-x86_64.closures.tsv (base_objs),
+     *    the exact same authority that --resolve-unit uses (never stale 0.0.87 plans/slice-units.tsv). */
+    for (int i = 0; i < n_base; i++) {
+        const char *rk = base_objs[i].key;
+        const char *rs = base_objs[i].src;
+        const char *rm = base_objs[i].mod;
+        char rk_no_o[64], r_pm[128], r_st[64];
+        long rkl = (long)strlen(rk);
+        long rksl = (rkl > 2 && !memcmp(rk + rkl - 2, ".o", 2)) ? (rkl - 2) : rkl;
+        if (rksl > 63) rksl = 63;
+        mm_copy(rk_no_o, sizeof rk_no_o, rk, rksl); rk_no_o[rksl] = 0;
+        r_pm[0] = 0; r_st[0] = 0;
+        if (rs && rs[0]) pr_src_to_pkg_mod(rs, r_pm, sizeof r_pm, r_st, sizeof r_st);
+        const char *eff_st = (rm && rm[0]) ? rm : r_st;
+        if (tx_eqz(query, rk) || tx_eqz(q_no_o, rk_no_o) ||
+            (eff_st[0] && (tx_eqz(query, eff_st) || tx_eqz(q_no_o, eff_st) || pr_same_no_us(q_no_o, eff_st))) ||
+            (r_pm[0] && (tx_eqz(query, r_pm) || tx_eqz(q_no_o, r_pm))) ||
+            (r_st[0] && (tx_eqz(query, r_st) || pr_same_no_us(q_no_o, r_st)))) {
+            cx_fmt(unit_key, sizeof unit_key, "%s", rk);
+            if (rs && rs[0]) cx_fmt(def_src, sizeof def_src, "%s", rs);
+            cx_fmt(mod_stem, sizeof mod_stem, "%s", eff_st[0] ? eff_st : rk_no_o);
+            cx_fmt(pkg_mod, sizeof pkg_mod, "%s", r_pm[0] ? r_pm : mod_stem);
+            break;
         }
-        mm_free(sub);
     }
     if (!mod_stem[0]) {
         const char *dot = strrchr(q_no_o, '.');
@@ -1072,6 +1063,12 @@ static int pr_show_route(const char *abs_repo, const char *caller_cwd,
                 cx_fmt(route_kind, sizeof route_kind, "module_target");
                 cx_fmt(routed_src, sizeof routed_src, "%s", scol);
                 cx_fmt(matched_mod, sizeof matched_mod, "%s", mk);
+                for (int bi = 0; bi < n_base; bi++) {
+                    if (tx_eqz(base_objs[bi].mod, mstem) || pr_same_no_us(base_objs[bi].mod, mstem)) {
+                        cx_fmt(matched_unit, sizeof matched_unit, "%s", base_objs[bi].key);
+                        break;
+                    }
+                }
                 break;
             }
         }
@@ -1239,9 +1236,6 @@ int main(int argc, char **argv) {
 
     char abs_repo[PR_PW], abs_chain[PR_PW], detail[512];
     if (sy_realpath(repo, abs_repo, sizeof abs_repo) < 0) return pr_refuse("bad-repo", repo);
-    if (show_route && show_route[0]) {
-        return pr_show_route(abs_repo, caller_cwd, show_route, target_in);
-    }
 
     char def_chain[PR_PW];
     if (!chain_dir) {
@@ -1252,7 +1246,10 @@ int main(int argc, char **argv) {
             chain_dir = def_chain;
         }
     }
-    if (!chain_dir || (!out_ape && !query_unit && !query_sym)) {
+    if (show_route && show_route[0] && (!chain_dir || sy_realpath(chain_dir, abs_chain, sizeof abs_chain) < 0)) {
+        return pr_show_route(abs_repo, caller_cwd, show_route, target_in, 0, 0);
+    }
+    if (!chain_dir || (!out_ape && !query_unit && !query_sym && !show_route)) {
         return pr_refuse("usage", "need --chain-dir DIR --out OUT_APE (run with --help for defaults)");
     }
     if (!tx_eqz(link_order, "auto") && !tx_eqz(link_order, "receipt") && !tx_eqz(link_order, "glob")) {
@@ -1332,6 +1329,10 @@ int main(int argc, char **argv) {
         return pr_refuse("invalid-receipt", rcpt_p);
     }
     pr_load_closures(abs_chain, base_objs, n_base);
+
+    if (show_route && show_route[0]) {
+        return pr_show_route(abs_repo, caller_cwd, show_route, target_in, base_objs, n_base);
+    }
 
     if (query_unit || query_sym) {
         char qspec[128], rkey[64];
