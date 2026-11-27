@@ -405,6 +405,11 @@ int m53_m1_extract_tape(const unsigned char *pkg, long pkglen,
                         const unsigned char *out_p[3], long out_n[3],
                         const char **reason_out, int *detail_out) {
     const char *keys[3];
+    if (m53_spec_init() != 0) {
+        *reason_out = "embed-spec-init-failed";
+        *detail_out = 10;
+        return -1;
+    }
     keys[0] = m53_m1_spec.mf_key;
     keys[1] = m53_m1_spec.so_key;
     keys[2] = m53_m1_spec.sl_key;
@@ -822,6 +827,8 @@ static int tape_rt_scan_p4_fd(int fd, long pkg_off, long pkglen,
                     e->crc = (unsigned)fcrc;
                     e->codec = (int)fcod;
                     e->dup = 0;
+                } else {
+                    return -2;
                 }
             }
         } else {
@@ -869,12 +876,7 @@ static int m53_m1_locate_pkg_fd(int fd, long apen, long *pkg_off_out, long *pkgl
     unsigned char h4[4], foot[16];
     unsigned long long plen;
     if (apen < 4) return -1;
-    if (sy_lseek(fd, 0, 0) != 0 || sy_read_full(fd, h4, 4) != 0) return -1;
-    if (h4[0] == 'P' && h4[1] == ' ') {
-        *pkg_off_out = 0;
-        *pkglen_out = apen;
-        return 0;
-    }
+    /* 1. Check 16-byte UNIPKG1\n footer first (covers both APE and standalone P4 + footer). */
     if (apen >= 16 && sy_lseek(fd, apen - 16, 0) == apen - 16 && sy_read_full(fd, foot, 16) == 0 &&
         foot[0] == 85 && foot[1] == 78 && foot[2] == 73 && foot[3] == 80 &&
         foot[4] == 75 && foot[5] == 71 && foot[6] == 49 && foot[7] == 10) {
@@ -884,7 +886,10 @@ static int m53_m1_locate_pkg_fd(int fd, long apen, long *pkg_off_out, long *pkgl
             *pkglen_out = (long)plen;
             return 0;
         }
+        /* Footer magic present but length is invalid: refuse, never fall back to raw P4. */
+        return -1;
     }
+    /* 2. Check packagefooter_locate_bytes (handles signed PE/APE where cert trails footer). */
     {
         unsigned char *ape = (unsigned char *)mm_alloc(apen);
         PackageFooter pf;
@@ -899,8 +904,38 @@ static int m53_m1_locate_pkg_fd(int fd, long apen, long *pkg_off_out, long *pkgl
             ok = 1;
         }
         mm_free(ape);
-        return ok ? 0 : -1;
+        if (ok) return 0;
     }
+    /* 3. Only when no UNIPKG1 footer exists, accept raw standalone P4 starting with "P ". */
+    if (sy_lseek(fd, 0, 0) != 0 || sy_read_full(fd, h4, 4) != 0) return -1;
+    if (h4[0] == 'P' && h4[1] == ' ') {
+        *pkg_off_out = 0;
+        *pkglen_out = apen;
+        return 0;
+    }
+    return -1;
+}
+
+/* Direct check entry exercising m53_m1_locate_pkg_fd + tape_rt_scan_p4_fd on an open fd. */
+int m53_m1_locate_and_scan_fd(int fd, long apen, long *pkg_off_out, long *pkglen_out,
+                              int *fdir_n_out, const char **reason_out) {
+    TapeFDirEntry fdir[TAPE_RT_MAX_FDIR];
+    long off = 0, len = 0;
+    int fn = 0, src;
+    if (m53_m1_locate_pkg_fd(fd, apen, &off, &len) != 0) {
+        if (reason_out) *reason_out = "embed-footer-invalid";
+        return -1;
+    }
+    src = tape_rt_scan_p4_fd(fd, off, len, fdir, &fn);
+    if (src != 0) {
+        if (reason_out) *reason_out = (src == -2) ? "embed-fdir-overflow" : "embed-pkg-decode-failed";
+        return src;
+    }
+    if (pkg_off_out) *pkg_off_out = off;
+    if (pkglen_out) *pkglen_out = len;
+    if (fdir_n_out) *fdir_n_out = fn;
+    if (reason_out) *reason_out = "ok";
+    return 0;
 }
 
 /* Boot or reload the ONE shared TapeRuntime per process (footer + P4 fdir + manifest + tapemode.so). */
@@ -947,9 +982,12 @@ static int tape_rt_ensure(TapeUnitState *u, const TapeUnitSpec *sp, const char *
         tape_rt_drop(rt); rt->state = M53_M1_REFUSED;
         return tape_unit_fail(u, sp, "embed-footer-invalid", 0);
     }
-    if (tape_rt_scan_p4_fd(*fd_inout, pkg_off, pkglen, new_fdir, &new_fn) != 0) {
-        tape_rt_drop(rt); rt->state = M53_M1_REFUSED;
-        return tape_unit_fail(u, sp, "embed-pkg-decode-failed", 10);
+    {
+        int scan_rc = tape_rt_scan_p4_fd(*fd_inout, pkg_off, pkglen, new_fdir, &new_fn);
+        if (scan_rc != 0) {
+            tape_rt_drop(rt); rt->state = M53_M1_REFUSED;
+            return tape_unit_fail(u, sp, scan_rc == -2 ? "embed-fdir-overflow" : "embed-pkg-decode-failed", 10);
+        }
     }
 
     mf_buf = tape_fdir_read_checked(*fd_inout, tape_fdir_find(new_fdir, new_fn, sp->mf_key),

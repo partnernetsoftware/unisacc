@@ -13,6 +13,9 @@
 #pragma unisa use runtime.model_number
 #pragma unisa use compiler.bindstage
 #pragma unisa use runtime.routestep
+#pragma unisa use sys.fs
+#pragma unisa use sys.env
+#pragma unisa use sys.posix
 #pragma unisa use text.text
 #pragma unisa use text.fmt
 #pragma unisa use mem.heap
@@ -71,6 +74,24 @@ static long build_pkg(char *buf, long cap, int ver, int with_nontape_crc0,
         }
     }
     return pos;
+}
+
+static void wr_u64_le(unsigned char *p, unsigned long long v) {
+    for (int i = 0; i < 8; i++) p[i] = (unsigned char)((v >> (i * 8)) & 0xffULL);
+}
+
+static int run_locate_scan_bytes(const char *tmpd, const char *name, const unsigned char *data, long n,
+                                 long *off_out, long *len_out, int *fn_out, const char **reason_out) {
+    char p[600];
+    int fd, rc;
+    cx_fmt(p, sizeof p, "%s/%s", tmpd, name);
+    if (sy_write_file(p, data, n, 0600) != 0) return -9;
+    fd = sy_open_read(p);
+    if (fd < 0) return -8;
+    rc = m53_m1_locate_and_scan_fd(fd, n, off_out, len_out, fn_out, reason_out);
+    sy_close(fd);
+    (void)sy_unlink(p);
+    return rc;
 }
 
 int main(void) {
@@ -147,6 +168,86 @@ int main(void) {
         pos += tx_len(buf + pos, 131072 - pos);
         rc = m53_m1_extract_tape((const unsigned char *)buf, pos, tp, tn, &why, &det);
         ck(rc != 0 && why && tx_eqz(why, "embed-pkg-decode-failed") && det == 30, "B2-oversize-manifest-refused");
+    }
+
+    /* (8) Locate order + footer validation + TAPE_RT_MAX_FDIR overflow (m53_m1_locate_pkg_fd + tape_rt_scan_p4_fd) */
+    {
+        char tmpd[512];
+        if (sy_mkdtemp(sy_tmpdir(), "chk-m1-loc-", tmpd, sizeof tmpd) != 0) {
+            ck(0, "locate-tmpdir-init");
+        } else {
+            long raw_n = build_pkg(buf, 131072, 4, 1, -1, -1, -1, -1);
+            long off = -1, plen = -1;
+            int fn = -1;
+            const char *rwhy = 0;
+
+            /* (a) raw P4 without footer */
+            rc = run_locate_scan_bytes(tmpd, "raw.p4", (const unsigned char *)buf, raw_n, &off, &plen, &fn, &rwhy);
+            ck(rc == 0 && off == 0 && plen == raw_n && fn == 3, "locate-a-raw-p4-without-footer");
+
+            /* (b) standalone P4 starting with "P 4 " AND carrying UNIPKG1\n footer (compiler.bootstrap.pkg shape) */
+            {
+                unsigned char *sbuf = (unsigned char *)mm_alloc((size_t)(raw_n + 16));
+                if (sbuf) {
+                    mm_copy(sbuf, raw_n + 16, buf, raw_n);
+                    mm_copy(sbuf + raw_n, 16, "UNIPKG1\n", 8);
+                    wr_u64_le(sbuf + raw_n + 8, (unsigned long long)raw_n);
+                    rc = run_locate_scan_bytes(tmpd, "standalone_footer.pkg", sbuf, raw_n + 16, &off, &plen, &fn, &rwhy);
+                    ck(rc == 0 && off == 0 && plen == raw_n && fn == 3, "locate-b-standalone-p4-with-unipkg1-footer");
+
+                    /* (d1) corrupt footer length > file_size - 16 -> refused, never falls back to raw P4 */
+                    wr_u64_le(sbuf + raw_n + 8, (unsigned long long)(raw_n + 999));
+                    rc = run_locate_scan_bytes(tmpd, "corrupt_over.pkg", sbuf, raw_n + 16, &off, &plen, &fn, &rwhy);
+                    ck(rc != 0 && rwhy && tx_eqz(rwhy, "embed-footer-invalid"), "locate-d1-corrupt-footer-oversize-refused");
+
+                    /* (d2) corrupt footer length == 0 -> refused, never falls back to raw P4 */
+                    wr_u64_le(sbuf + raw_n + 8, 0ULL);
+                    rc = run_locate_scan_bytes(tmpd, "corrupt_zero.pkg", sbuf, raw_n + 16, &off, &plen, &fn, &rwhy);
+                    ck(rc != 0 && rwhy && tx_eqz(rwhy, "embed-footer-invalid"), "locate-d2-corrupt-footer-zero-refused");
+                    mm_free(sbuf);
+                } else {
+                    ck(0, "locate-b-alloc");
+                }
+            }
+
+            /* (c) APE with 4096B ELF prefix + appended P4 + UNIPKG1\n footer */
+            {
+                long pfx = 4096;
+                unsigned char *abuf = (unsigned char *)mm_alloc((size_t)(pfx + raw_n + 16));
+                if (abuf) {
+                    mm_fill(abuf, pfx + raw_n + 16, 0, pfx);
+                    abuf[0] = '\x7f'; abuf[1] = 'E'; abuf[2] = 'L'; abuf[3] = 'F';
+                    mm_copy(abuf + pfx, raw_n + 16, buf, raw_n);
+                    mm_copy(abuf + pfx + raw_n, 16, "UNIPKG1\n", 8);
+                    wr_u64_le(abuf + pfx + raw_n + 8, (unsigned long long)raw_n);
+                    rc = run_locate_scan_bytes(tmpd, "ape_footer.com", abuf, pfx + raw_n + 16, &off, &plen, &fn, &rwhy);
+                    ck(rc == 0 && off == pfx && plen == raw_n && fn == 3, "locate-c-ape-with-appended-p4-and-footer");
+                    mm_free(abuf);
+                } else {
+                    ck(0, "locate-c-alloc");
+                }
+            }
+
+            /* (e) TAPE_RT_MAX_FDIR overflow (65 distinct tape/* F-records) -> refused by name embed-fdir-overflow */
+            {
+                long pos = 0;
+                (void)cx_fmt(buf, 131072, "P 4 1 1 65\nD r s in out 0\nM 1 1 1 0\nA");
+                pos = tx_len(buf, 131072);
+                for (int i = 0; i < 65; i++) {
+                    char key[64];
+                    const char *val = "x";
+                    (void)cx_fmt(key, sizeof key, "tape/lnx-x86_64/u%02d.tapeslice", i);
+                    int kl = (int)tx_len(key, 64);
+                    unsigned c = calc_crc(val, 1);
+                    (void)cx_fmt(buf + pos, (size_t)(131072 - pos), "F %d 1 1 0 %u\n%s%s", kl, c, key, val);
+                    pos += tx_len(buf + pos, 131072 - pos);
+                }
+                rc = run_locate_scan_bytes(tmpd, "fdir_over.p4", (const unsigned char *)buf, pos, &off, &plen, &fn, &rwhy);
+                ck(rc == -2 && rwhy && tx_eqz(rwhy, "embed-fdir-overflow"), "fdir-overflow-65-tape-records-refused");
+            }
+
+            (void)sy_remove_all(tmpd);
+        }
     }
 
     mm_free(buf);
