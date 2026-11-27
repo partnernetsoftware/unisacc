@@ -18,6 +18,7 @@
 #pragma unisa use text.text
 #pragma unisa use cxlib.ckrun
 #pragma unisa use cxlib.netpack
+#pragma unisa use cxlib.limits
 
 typedef struct {
     char name[64];
@@ -430,6 +431,10 @@ static void pf_prepare_snap_tools(const char *rrepo, const char *tmp_out, int fo
     if (all_ok) {
         cx_fmt(cc_bin, cc_cap, "%s", cbin[0]);
     }
+    {
+        char udot[1200];
+        if (!cx_fmt(udot, sizeof udot, "%s/.used", cdir)) (void)sy_write_file(udot, "1\n", 2, 0644);
+    }
     if (!tmp_out || !tmp_out[0]) return;
     for (int k = 1; k < 4; k++) {
         unsigned char *nb = 0;
@@ -455,6 +460,65 @@ static void pf_prepare_snap_tools(const char *rrepo, const char *tmp_out, int fo
             }
         }
         mm_free(nb);
+    }
+}
+
+static void pf_sanitize_line(const char *src, long len, char *dst, size_t dcap) {
+    if (!dst || dcap == 0) return;
+    size_t cp = (size_t)len < dcap - 1 ? (size_t)len : dcap - 1;
+    if (cp) mm_copy(dst, dcap, src, cp);
+    dst[cp] = 0;
+    for (size_t i = 0; i < cp; i++) {
+        if (dst[i] == '\t' || dst[i] == '\r' || dst[i] == '\n') dst[i] = ' ';
+    }
+}
+
+static void pf_extract_fail_detail(const char *out, char *dbuf, size_t dcap, int timed_out) {
+    if (!dbuf || dcap == 0) return;
+    cx_fmt(dbuf, dcap, "%s", timed_out ? "timeout-no-output" : "no-output");
+    if (!out || !out[0]) return;
+    long n = (long)strlen(out), pos = 0;
+    const char *first = 0, *best = 0;
+    long first_len = 0, best_len = 0;
+    while (pos < n) {
+        long ls = pos;
+        while (pos < n && out[pos] != '\n') pos++;
+        long le = pos;
+        if (pos < n) pos++;
+        while (le > ls && (out[le - 1] == '\r' || out[le - 1] == ' ' || out[le - 1] == '\t')) le--;
+        if (le <= ls) continue;
+        const char *line = out + ls;
+        long len = le - ls;
+        if (!first) { first = line; first_len = len; }
+        if (tx_find(line, len, "SIXTARGET_FAIL", 14) >= 0 || tx_find(line, len, "FAIL\t", 5) >= 0 ||
+            tx_find(line, len, "REFUSE", 6) >= 0 || tx_find(line, len, "error:", 6) >= 0 ||
+            tx_find(line, len, "reject:", 7) >= 0) {
+            best = line;
+            best_len = len;
+            break;
+        }
+    }
+    if (best) pf_sanitize_line(best, best_len, dbuf, dcap);
+    else if (first) pf_sanitize_line(first, first_len, dbuf, dcap);
+}
+
+static void pf_append_child_out_lines(const char *name, const char *out, char *buf, size_t cap, size_t *pos) {
+    if (!out || !out[0] || !buf || *pos + 32 >= cap) return;
+    long n = (long)strlen(out), p = 0;
+    int emitted = 0;
+    while (p < n && emitted < 24 && *pos + 64 < cap) {
+        long ls = p;
+        while (p < n && out[p] != '\n') p++;
+        long le = p;
+        if (p < n) p++;
+        if (le > ls && out[le - 1] == '\r') le--;
+        if (le <= ls) continue;
+        char sl[512];
+        pf_sanitize_line(out + ls, le - ls, sl, sizeof sl);
+        int wrote = snprintf(buf + *pos, cap - *pos, "PREFLIGHT_CHILD_OUT\t%s\t%s\n", name, sl);
+        if (wrote <= 0 || (size_t)wrote >= cap - *pos) break;
+        *pos += (size_t)wrote;
+        emitted++;
     }
 }
 
@@ -539,23 +603,31 @@ static int item_chain_to_snap_buf(const char *root, const char *repo, const char
         }
     }
 
-    char tmp_base[1200], tmp_out[1400], tmp_build[1500], ih_path[1600];
+    char tmp_base[1200], tmp_out[1400], tmp_build[1500];
     if (cx_fmt(tmp_base, sizeof tmp_base, "%s/unisacc-session-pfsnap-%d-%ld", sy_tmpdir(), (int)sy_pid(), t0 % 1000000L) ||
         cx_fmt(tmp_out, sizeof tmp_out, "%s/%s", tmp_base, tip) ||
-        cx_fmt(tmp_build, sizeof tmp_build, "%s/build", tmp_out) ||
-        cx_fmt(ih_path, sizeof ih_path, "%s/identity-helper", tmp_build)) {
+        cx_fmt(tmp_build, sizeof tmp_build, "%s/build", tmp_out)) {
         cx_fmt(line_out, line_cap, "PREFLIGHT_ITEM\tchain-to-snap\tFAIL\trev=%s\trc=2\treason=tmp-path-overflow\tms=%ld\n",
                tip, sy_now_ms() - t0);
+        return 1;
+    }
+    const char *ih_env = sy_env("UNISACC_IDENT_HELPER");
+    sy_stat_t ihst;
+    if (!ih_env || !ih_env[0]) {
+        cx_fmt(line_out, line_cap,
+               "PREFLIGHT_ITEM\tchain-to-snap\tFAIL\trev=%s\trc=2\treason=REFUSE UNISACC_IDENT_HELPER unset\tms=%ld\n",
+               tip, sy_now_ms() - t0);
+        return 1;
+    }
+    if (sy_lstat(ih_env, &ihst) != 0 || ihst.kind != 'f' || access(ih_env, X_OK) != 0) {
+        cx_fmt(line_out, line_cap,
+               "PREFLIGHT_ITEM\tchain-to-snap\tFAIL\trev=%s\trc=2\treason=REFUSE UNISACC_IDENT_HELPER not-regular-executable (%s)\tms=%ld\n",
+               tip, ih_env, sy_now_ms() - t0);
         return 1;
     }
     sy_mkdir(tmp_base, 0755);
     sy_mkdir(tmp_out, 0755);
     sy_mkdir(tmp_build, 0755);
-    const char *ih_env = sy_env("UNISACC_IDENT_HELPER");
-    if (!ih_env || !ih_env[0]) {
-        sy_write_file(ih_path, "#!/bin/sh\nexit 0\n", 17, 0755);
-        sy_chmod(ih_path, 0755);
-    }
 
     char cc_bin[1400] = {0}, snap_log[1600], cmd[4096], out[512];
     unsigned char *full_out = 0;
@@ -847,25 +919,51 @@ int main(int argc, char **argv) {
     }
 
     char failed_list[512] = {0};
-    int nfailed = 0, ran_nodes = 0, n_sixtarget = 0;
+    int nfailed = 0, ran_nodes = 0, n_sixtarget = 0, has_pins = 0, has_snap = 0;
     int node_pids[32] = {0};
     int node_rcs[32] = {0};
+    int node_heavy[32] = {0};
+    int node_forked[32] = {0};
+    int active_total = 0, active_heavy = 0;
     int my_pid = (int)sy_pid();
+    int cap_heavy = (int)lm_get("s9.heavy.width", 0);
+    int cap_total = (int)lm_get("s9.flow.par", 0);
+    if (cap_heavy < 1) cap_heavy = 2;
+    if (cap_total < 1) cap_total = 4;
+    if (cap_total < cap_heavy) cap_total = cap_heavy;
 
     for (int i = 0; i < nnodes; i++) {
         if (!pf_node_in_shard(nodes[i].name, shard)) continue;
         if (strstr(nodes[i].cmd, "tools/sixtarget-precompile.cx") != 0) n_sixtarget++;
+        if (strstr(nodes[i].cmd, "tools/check-sourcepackage-pins.cx") != 0) has_pins = 1;
+        if (tx_eqz(nodes[i].name, "chain-to-snap") && strstr(nodes[i].cmd, "--item chain-to-snap") != 0) has_snap = 1;
     }
-    if (n_sixtarget >= 2) {
+    if (n_sixtarget >= 1) {
         char wout[512], wcmd[1024];
-        if (!tx_eqz(repo, ".") && !cx_fmt(wcmd, sizeof wcmd, "cd '%s' && sh ./unisacc.com tools/sixtarget-precompile.cx -- --mode files 2>/dev/null", repo)) { /* lint:allow R1 pre-warm sibling tool in run-cache before 4-way fork */
+        if (!tx_eqz(repo, ".") && !cx_fmt(wcmd, sizeof wcmd, "cd '%s' && sh ./unisacc.com tools/sixtarget-precompile.cx -- --mode files 2>/dev/null", repo)) { /* lint:allow R1 pre-warm sibling tool in run-cache before fork */
             (void)ckk_sh_t("CHAIN_PREFLIGHT", wcmd, wout, sizeof wout, 20);
         } else {
-            (void)ckk_sh_t("CHAIN_PREFLIGHT", "sh ./unisacc.com tools/sixtarget-precompile.cx -- --mode files 2>/dev/null", wout, sizeof wout, 20); /* lint:allow R1 pre-warm sibling tool in run-cache before 4-way fork */
+            (void)ckk_sh_t("CHAIN_PREFLIGHT", "sh ./unisacc.com tools/sixtarget-precompile.cx -- --mode files 2>/dev/null", wout, sizeof wout, 20); /* lint:allow R1 pre-warm sibling tool in run-cache before fork */
         }
     }
+    if (has_pins) {
+        char pout[512], pcmd[1024];
+        if (!tx_eqz(repo, ".") && !cx_fmt(pcmd, sizeof pcmd, "cd '%s' && sh ./unisacc.com tools/check-sourcepackage-pins.cx -- >/dev/null 2>&1", repo)) { /* lint:allow R1 pre-warm sibling tool in run-cache before fork */
+            (void)ckk_sh_t("CHAIN_PREFLIGHT", pcmd, pout, sizeof pout, 20);
+        } else {
+            (void)ckk_sh_t("CHAIN_PREFLIGHT", "sh ./unisacc.com tools/check-sourcepackage-pins.cx -- >/dev/null 2>&1", pout, sizeof pout, 20); /* lint:allow R1 pre-warm sibling tool in run-cache before fork */
+        }
+    }
+    int snap_prepped = 0;
+    if (has_snap) {
+        char rrepo[2048], pre_cc[1400] = {0};
+        if (sy_realpath(repo, rrepo, sizeof rrepo) < 0) cx_fmt(rrepo, sizeof rrepo, "%s", repo);
+        pf_prepare_snap_tools(rrepo, 0, force_cold, pre_cc, sizeof pre_cc);
+        snap_prepped = 1;
+    }
 
-    /* First run fast built-in items and launch external table nodes in parallel */
+    /* First run fast built-in items and launch external table nodes bounded by s9.flow.par / s9.heavy.width */
+    int wait_err = 0;
     for (int i = 0; i < nnodes; i++) {
         if (!pf_node_in_shard(nodes[i].name, shard)) continue;
         ran_nodes++;
@@ -878,50 +976,133 @@ int main(int argc, char **argv) {
         } else if (tx_eqz(nodes[i].name, "template-compile") && pf_check_template_sha(repo) != 0) {
             node_rcs[i] = 1;
         } else {
+            int is_heavy = (strstr(nodes[i].cmd, "tools/sixtarget-precompile.cx") != 0);
+            while (!wait_err && (active_total >= cap_total || (is_heavy && active_heavy >= cap_heavy))) {
+                int st = 0;
+                pid_t wpid = -1;
+                for (;;) {
+                    wpid = waitpid(-1, &st, 0);
+                    if (wpid < 0 && errno == EINTR) continue;
+                    break;
+                }
+                if (wpid <= 0) { wait_err = 1; break; }
+                int matched = 0;
+                for (int j = 0; j < i; j++) {
+                    if (node_pids[j] == (int)wpid) {
+                        node_pids[j] = 0;
+                        node_rcs[j] = (WIFEXITED(st) && WEXITSTATUS(st) == 0) ? 0 : 1;
+                        if (active_total > 0) active_total--;
+                        if (node_heavy[j] && active_heavy > 0) active_heavy--;
+                        matched = 1;
+                        break;
+                    }
+                }
+                if (!matched) { wait_err = 1; break; }
+            }
+            if (wait_err) {
+                node_rcs[i] = 1;
+                printf("PREFLIGHT_ITEM\t%s\tFAIL\trc=1\tms=0\tdetail=waitpid-failed\n", nodes[i].name);
+                continue;
+            }
             fflush(stdout);
             fflush(stderr);
             int cpid = (int)fork();
             if (cpid == 0) {
-                char line[1024], opath[512];
+                char opath[512];
+                size_t opos = 0;
+                char *obuf = (char *)mm_alloc(16384);
                 int crc = 0;
+                if (!obuf) _exit(1);
+                obuf[0] = 0;
                 if (tx_eqz(nodes[i].name, "chain-to-snap") && strstr(nodes[i].cmd, "--item chain-to-snap") != 0) {
-                    crc = item_chain_to_snap_buf(root, repo, eff_rev, snap_base, force_cold, line, sizeof line);
+                    crc = item_chain_to_snap_buf(root, repo, eff_rev, snap_base, snap_prepped ? 0 : force_cold, obuf, 16384);
+                    opos = strlen(obuf);
                 } else {
+                    int env_rc = 0;
+                    const char *env_op = 0;
                     if (eff_rev && !tx_eqz(eff_rev, "none") && !tx_eqz(eff_rev, "HEAD")) {
-                        sy_setenv("UNISACC_PREFLIGHT_REV", eff_rev, 1);
-                    }
-                    long nt0 = sy_now_ms();
-                    char out[2048], subcmd[1024];
-                    if (!tx_eqz(repo, ".") && !cx_fmt(subcmd, sizeof subcmd, "cd '%s' && %s", repo, nodes[i].cmd)) {
-                        crc = ckk_sh_t("CHAIN_PREFLIGHT", subcmd, out, sizeof out, nodes[i].timeout_s);
+                        env_op = "setenv";
+                        env_rc = sy_setenv("UNISACC_PREFLIGHT_REV", eff_rev, 1);
                     } else {
-                        crc = ckk_sh_t("CHAIN_PREFLIGHT", nodes[i].cmd, out, sizeof out, nodes[i].timeout_s);
+                        env_op = "unsetenv";
+                        env_rc = sy_unsetenv("UNISACC_PREFLIGHT_REV");
                     }
-                    cx_fmt(line, sizeof line, "PREFLIGHT_ITEM\t%s\t%s\trc=%d\tms=%ld\n",
-                           nodes[i].name, crc == 0 ? "PASS" : "FAIL", crc, sy_now_ms() - nt0);
+                    if (env_rc != 0) {
+                        int n = snprintf(obuf, 16384, "PREFLIGHT_ITEM\t%s\tFAIL\trc=2\tms=0\tdetail=UNISACC_PREFLIGHT_REV-%s-failed\n",
+                                         nodes[i].name, env_op);
+                        opos = n > 0 ? (size_t)n : 0;
+                        crc = 2;
+                    } else {
+                        long nt0 = sy_now_ms();
+                        char out[8192], subcmd[1280];
+                        out[0] = 0;
+                        if (!tx_eqz(repo, ".") && !cx_fmt(subcmd, sizeof subcmd, "cd '%s' && { %s\n} 2>&1", repo, nodes[i].cmd)) {
+                            crc = ckk_sh_t("CHAIN_PREFLIGHT", subcmd, out, sizeof out, nodes[i].timeout_s);
+                        } else if (!cx_fmt(subcmd, sizeof subcmd, "{ %s\n} 2>&1", nodes[i].cmd)) {
+                            crc = ckk_sh_t("CHAIN_PREFLIGHT", subcmd, out, sizeof out, nodes[i].timeout_s);
+                        } else {
+                            crc = ckk_sh_t("CHAIN_PREFLIGHT", nodes[i].cmd, out, sizeof out, nodes[i].timeout_s);
+                        }
+                        if (crc == 0) {
+                            int n = snprintf(obuf, 16384, "PREFLIGHT_ITEM\t%s\tPASS\trc=0\tms=%ld\n",
+                                             nodes[i].name, sy_now_ms() - nt0);
+                            opos = n > 0 ? (size_t)n : 0;
+                        } else {
+                            char detail[320];
+                            pf_extract_fail_detail(out, detail, sizeof detail, crc == 124);
+                            int n = snprintf(obuf, 16384, "PREFLIGHT_ITEM\t%s\tFAIL\trc=%d\tms=%ld\tdetail=%s\n",
+                                             nodes[i].name, crc, sy_now_ms() - nt0, detail);
+                            opos = n > 0 ? (size_t)n : 0;
+                            pf_append_child_out_lines(nodes[i].name, out, obuf, 16384, &opos);
+                        }
+                    }
                 }
-                if (!cx_fmt(opath, sizeof opath, "%s/pf-node-%d-%d.out", sy_tmpdir(), my_pid, i)) {
-                    sy_write_file(opath, line, (int64_t)strlen(line), 0600);
+                if (cx_fmt(opath, sizeof opath, "%s/pf-node-%d-%d.out", sy_tmpdir(), my_pid, i) ||
+                    sy_write_file(opath, obuf, (int64_t)opos, 0600) != 0) {
+                    mm_free(obuf);
+                    _exit(1);
                 }
+                mm_free(obuf);
                 _exit(crc == 0 ? 0 : 1);
             }
-            node_pids[i] = cpid;
+            if (cpid > 0) {
+                node_pids[i] = cpid;
+                node_forked[i] = 1;
+                node_heavy[i] = is_heavy;
+                active_total++;
+                if (is_heavy) active_heavy++;
+            } else {
+                node_rcs[i] = 1;
+                printf("PREFLIGHT_ITEM\t%s\tFAIL\trc=1\tms=0\tdetail=fork-failed\n", nodes[i].name);
+            }
         }
     }
 
     for (int i = 0; i < nnodes; i++) {
         if (!pf_node_in_shard(nodes[i].name, shard)) continue;
         if (node_pids[i] > 0) {
-            int ex = 0, code = 0, sig = 0;
-            sy_wait_status(node_pids[i], 0, &ex, &code, &sig);
-            node_rcs[i] = (ex && code == 0) ? 0 : 1;
+            int st = 0;
+            pid_t w = -1;
+            for (;;) {
+                w = waitpid((pid_t)node_pids[i], &st, 0);
+                if (w < 0 && errno == EINTR) continue;
+                break;
+            }
+            node_rcs[i] = (w == (pid_t)node_pids[i] && WIFEXITED(st) && WEXITSTATUS(st) == 0) ? 0 : 1;
+            node_pids[i] = 0;
+        }
+        if (node_forked[i]) {
             char opath[512];
             unsigned char *ob = 0;
             int64_t on = 0;
             if (!cx_fmt(opath, sizeof opath, "%s/pf-node-%d-%d.out", sy_tmpdir(), my_pid, i)) {
-                if (sy_read_file(opath, &ob, &on, 4096) == 0 && ob && on > 0) {
+                if (sy_read_file(opath, &ob, &on, 65536) == 0 && ob && on > 0) {
                     fwrite(ob, 1, (size_t)on, stdout);
                     mm_free(ob);
+                } else {
+                    if (ob) mm_free(ob);
+                    node_rcs[i] = 1;
+                    printf("PREFLIGHT_ITEM\t%s\tFAIL\trc=1\tms=0\tdetail=worker-missing-output\n", nodes[i].name);
                 }
                 sy_unlink(opath);
             }

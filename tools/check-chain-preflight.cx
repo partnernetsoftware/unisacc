@@ -10,6 +10,7 @@
 #pragma unisa use sys.env
 #pragma unisa use sys.time
 #pragma unisa use mem.bytes
+#pragma unisa use mem.heap
 #pragma unisa use text.text
 #pragma unisa use cxlib.ckrun
 
@@ -128,7 +129,7 @@ int main(void) {
         if (strlen(out) >= 40) { mm_copy(ok_sha, sizeof ok_sha, out, 40); ok_sha[40] = 0; }
     }
 
-    /* 1. Live tools/flows/chain-preflight.tsv structure check only (columns, unique names, timeout<=55, valid patterns, M2/M3/M4 node presence) */
+    /* 1. Live tools/flows/chain-preflight.tsv structure check only (columns, unique names, timeout<=55, valid patterns, M2/M3/M4/shard node presence) */
     ck(run_pf("--check-table --table tools/flows/chain-preflight.tsv", out, sizeof out) == 0 &&
        has(out, "PREFLIGHT_NODE\tname=root-types\t") &&
        has(out, "PREFLIGHT_NODE\tname=snap-cache-types\t") &&
@@ -136,10 +137,13 @@ int main(void) {
        has(out, "PREFLIGHT_NODE\tname=template-compile\t") &&
        has(out, "PREFLIGHT_NODE\tname=sys-six-target-0\t") &&
        has(out, "PREFLIGHT_NODE\tname=sys-six-target-1\t") &&
+       has(out, "PREFLIGHT_NODE\tname=sys-six-target-2\t") &&
+       has(out, "PREFLIGHT_NODE\tname=sys-six-target-3\t") &&
        has(out, "PREFLIGHT_NODE\tname=sixtarget-headers\t") &&
        has(out, "PREFLIGHT_NODE\tname=sourcepackage-pins\t") &&
        has(out, "PREFLIGHT_NODE\tname=chain-to-snap\t") &&
-       has(out, "PREFLIGHT_TABLE\tstatus=OK\trows=9"),
+       has(out, "PREFLIGHT_NODE\tname=sourcepackage-pins\tpatterns=*,tools/cxlib/kernelsha.cx,tools/cxlib/sourcepackage.cx,tools/source-package.cx,tools/source-package-pack.cx,tools/pins.tsv\ttimeout_s=15\n") &&
+       has(out, "PREFLIGHT_TABLE\tstatus=OK\trows=11"),
        "table-schema-live-ok", out);
 
     /* 2. Valid root, valid snap cache (plus ignored .partial.lock), unchanged parse2 on fixture table -> verdict=PASS in default strict mode */
@@ -418,22 +422,31 @@ int main(void) {
         ck(blocked == 7, "strict-mode-blocks-all-7-failure-shapes", out);
     }
 
-    /* 14. chain-to-snap: red with UNISACC_INTEGRATOR=1 naming UNISACC_INTEGRATOR, green in clean environment */
+    /* 14. chain-to-snap: unset UNISACC_IDENT_HELPER refused cleanly without dummy helper; UNISACC_INTEGRATOR=1 red; clean env green */
     {
         const char *snap_rev = "de7bd89ab5d19a68c22db78087ec6dabc79aa9f4";
-        char scmd[2600], sb[600];
+        char scmd[2600], sb[600], ih_fx[1200];
+        cx_fmt(ih_fx, sizeof ih_fx, "%s/ident-helper-fx", fx);
+        wr_file(fx, "ident-helper-fx", "#!/bin/sh\nexit 0\n");
+        sy_chmod(ih_fx, 0755);
         /* A private snap base: the machine-wide one may already hold this rev, and then this case would be
            testing that directory instead of the item's own work. */
         cx_fmt(sb, sizeof sb, "%s/snap-case14", fx);
         mk_dir(sb);
         if (ckk_sh("CHECK_CHAIN_PREFLIGHT", "git rev-parse --verify de7bd89ab5d19a68c22db78087ec6dabc79aa9f4^{commit}", out, sizeof out) == 0) {
-            cx_fmt(scmd, sizeof scmd, "UNISACC_INTEGRATOR=1 '%s' -- --item chain-to-snap --repo . --rev %s --snap-base %s", pf_bin, snap_rev, sb);
+            cx_fmt(scmd, sizeof scmd, "env -u UNISACC_IDENT_HELPER -u UNISACC_INTEGRATOR '%s' -- --item chain-to-snap --repo . --rev %s --snap-base %s", pf_bin, snap_rev, sb);
+            ck(ckk_sh("CHECK_CHAIN_PREFLIGHT", scmd, out, sizeof out) == 1 &&
+               has(out, "PREFLIGHT_ITEM\tchain-to-snap\tFAIL\t") &&
+               has(out, "UNISACC_IDENT_HELPER"),
+               "chain-to-snap-unset-ident-helper-refused", out);
+
+            cx_fmt(scmd, sizeof scmd, "UNISACC_IDENT_HELPER='%s' UNISACC_INTEGRATOR=1 '%s' -- --item chain-to-snap --repo . --rev %s --snap-base %s", ih_fx, pf_bin, snap_rev, sb);
             ck(ckk_sh("CHECK_CHAIN_PREFLIGHT", scmd, out, sizeof out) == 1 &&
                has(out, "PREFLIGHT_ITEM\tchain-to-snap\tFAIL\t") &&
                has(out, "REFUSE chain-env UNISACC_INTEGRATOR"),
                "chain-to-snap-integrator-env-red-names-var", out);
 
-            cx_fmt(scmd, sizeof scmd, "env -u UNISACC_INTEGRATOR '%s' -- --item chain-to-snap --repo . --rev %s --snap-base %s", pf_bin, snap_rev, sb);
+            cx_fmt(scmd, sizeof scmd, "env -u UNISACC_INTEGRATOR UNISACC_IDENT_HELPER='%s' '%s' -- --item chain-to-snap --repo . --rev %s --snap-base %s", ih_fx, pf_bin, snap_rev, sb);
             ck(ckk_sh("CHECK_CHAIN_PREFLIGHT", scmd, out, sizeof out) == 0 &&
                has(out, "PREFLIGHT_ITEM\tchain-to-snap\tPASS\t") &&
                has(out, "\tstatus=until-snap\t"),
@@ -608,13 +621,94 @@ int main(void) {
                 "git rev-parse HEAD", lrepo);
             ckk_sh("CHECK_CHAIN_PREFLIGHT", gcmd, out, sizeof out);
             if (strlen(out) >= 40) { mm_copy(lsha, sizeof lsha, out, 40); lsha[40] = 0; }
+            char ih_fx2[1200];
+            cx_fmt(ih_fx2, sizeof ih_fx2, "%s/ident-helper-fx", fx);
             cx_fmt(scmd, sizeof scmd,
-                "env -u UNISACC_INTEGRATOR HOME='%s' '%s' -- --item chain-to-snap --root '%s' --repo '%s' --rev '%s' --snap-base '%s' --cold",
-                lhome, pf_bin, lrepo, lrepo, lsha, lsb);
+                "env -u UNISACC_INTEGRATOR UNISACC_IDENT_HELPER='%s' HOME='%s' '%s' -- --item chain-to-snap --root '%s' --repo '%s' --rev '%s' --snap-base '%s' --cold",
+                ih_fx2, lhome, pf_bin, lrepo, lrepo, lsha, lsb);
             ck(ckk_sh("CHECK_CHAIN_PREFLIGHT", scmd, out, sizeof out) == 0 &&
                has(out, "PREFLIGHT_ITEM\tchain-to-snap\tPASS\t") &&
                has(out, "\tstatus=until-snap\t"),
                "chain-to-snap-large-stdout-over-8kb-passes", out);
+        }
+
+        /* 19. Child output preserved on external node failure + heavy concurrency capped at s9.heavy.width (<=2) */
+        {
+            char t_cap[1200], cdir[1200], tbl_cap[2400];
+            cx_fmt(t_cap, sizeof t_cap, "%s/tbl-cap.tsv", fx);
+            cx_fmt(cdir, sizeof cdir, "%s/cap-state", fx);
+            mk_dir(cdir);
+            snprintf(tbl_cap, sizeof tbl_cap,
+                "name\tpatterns\tcmd\ttimeout_s\n"
+                "root-types\t*\tsh ./unisacc.com tools/chain-preflight.cx -- --item root-types\t10\n"
+                "snap-cache-types\t*\tsh ./unisacc.com tools/chain-preflight.cx -- --item snap-cache-types\t10\n"
+                "parse2-bind\t*\tsh ./unisacc.com tools/chain-preflight.cx -- --item parse2-bind\t30\n"
+                "fail-echo\tcx/sys/\tsh -c 'echo CHILD_STDOUT_DIAG_LINE; echo error: CHILD_STDERR_DIAG_LINE >&2; exit 3'\t10\n"
+                "sys-six-target-0\tcx/sys/\tsh -c 'touch \"%s/a0\"; n=$(ls -1 \"%s\" | wc -l); echo \"$n\" >> \"%s/peaks\"; sleep 0.25; rm -f \"%s/a0\" # tools/sixtarget-precompile.cx'\t10\n"
+                "sys-six-target-1\tcx/sys/\tsh -c 'touch \"%s/a1\"; n=$(ls -1 \"%s\" | wc -l); echo \"$n\" >> \"%s/peaks\"; sleep 0.25; rm -f \"%s/a1\" # tools/sixtarget-precompile.cx'\t10\n"
+                "sys-six-target-2\tcx/sys/\tsh -c 'touch \"%s/a2\"; n=$(ls -1 \"%s\" | wc -l); echo \"$n\" >> \"%s/peaks\"; sleep 0.25; rm -f \"%s/a2\" # tools/sixtarget-precompile.cx'\t10\n"
+                "sys-six-target-3\tcx/sys/\tsh -c 'touch \"%s/a3\"; n=$(ls -1 \"%s\" | wc -l); echo \"$n\" >> \"%s/peaks\"; sleep 0.25; rm -f \"%s/a3\" # tools/sixtarget-precompile.cx'\t10\n",
+                cdir, cdir, fx, cdir,
+                cdir, cdir, fx, cdir,
+                cdir, cdir, fx, cdir,
+                cdir, cdir, fx, cdir);
+            wr_file(fx, "tbl-cap.tsv", tbl_cap);
+            cx_fmt(arg, sizeof arg, "--table %s --root %s --repo %s --snap-base %s --rev %s", t_cap, root_ok, p2repo, snap_base, ok_sha);
+            int rc_cap = run_pf(arg, out, sizeof out);
+            unsigned char *pkb = 0; int64_t pkn = 0; char pkpath[1200];
+            int peak = 0, lines_pk = 0;
+            cx_fmt(pkpath, sizeof pkpath, "%s/peaks", fx);
+            if (sy_read_file(pkpath, &pkb, &pkn, 4096) == 0 && pkb) {
+                for (int64_t pi = 0; pi < pkn; pi++) {
+                    if (pkb[pi] >= '0' && pkb[pi] <= '9') {
+                        int v = pkb[pi] - '0';
+                        if (v > peak) peak = v;
+                        lines_pk++;
+                    }
+                }
+                mm_free(pkb);
+            }
+            ck(rc_cap == 1 &&
+               has(out, "PREFLIGHT_ITEM\tfail-echo\tFAIL\t") &&
+               has(out, "detail=error: CHILD_STDERR_DIAG_LINE") &&
+               has(out, "PREFLIGHT_CHILD_OUT\tfail-echo\tCHILD_STDOUT_DIAG_LINE") &&
+               has(out, "PREFLIGHT_CHILD_OUT\tfail-echo\terror: CHILD_STDERR_DIAG_LINE"),
+               "child-failure-output-and-detail-preserved", out);
+            ck(lines_pk == 4 && peak >= 1 && peak <= 2,
+               "heavy-sixtarget-concurrency-capped-le-2", out);
+        }
+
+        /* 20. Inherited stale UNISACC_PREFLIGHT_REV must be cleared when --rev none/omitted and overridden when --rev HEAD */
+        {
+            char t_env[1200], tbl_env[1600], ecmd[2600];
+            cx_fmt(t_env, sizeof t_env, "%s/tbl-env.tsv", fx);
+            snprintf(tbl_env, sizeof tbl_env,
+                "name\tpatterns\tcmd\ttimeout_s\n"
+                "root-types\t*\tsh ./unisacc.com tools/chain-preflight.cx -- --item root-types\t10\n"
+                "snap-cache-types\t*\tsh ./unisacc.com tools/chain-preflight.cx -- --item snap-cache-types\t10\n"
+                "parse2-bind\t*\tsh ./unisacc.com tools/chain-preflight.cx -- --item parse2-bind\t30\n"
+                "probe-rev-env\t*\tsh -c 'echo INH_ENV=${UNISACC_PREFLIGHT_REV:-UNSET}; test -z \"$UNISACC_PREFLIGHT_REV\"'\t10\n");
+            wr_file(fx, "tbl-env.tsv", tbl_env);
+            cx_fmt(ecmd, sizeof ecmd,
+                "UNISACC_PREFLIGHT_REV=deadbeefdeadbeefdeadbeefdeadbeefdeadbeef '%s' -- --table %s --root %s --repo %s --snap-base %s --rev none",
+                pf_bin, t_env, root_ok, p2repo, snap_base);
+            ck(ckk_sh("CHECK_CHAIN_PREFLIGHT", ecmd, out, sizeof out) == 0 &&
+               has(out, "PREFLIGHT_ITEM\tprobe-rev-env\tPASS\t"),
+               "inherited-preflight-rev-cleared-for-rev-none", out);
+
+            snprintf(tbl_env, sizeof tbl_env,
+                "name\tpatterns\tcmd\ttimeout_s\n"
+                "root-types\t*\tsh ./unisacc.com tools/chain-preflight.cx -- --item root-types\t10\n"
+                "snap-cache-types\t*\tsh ./unisacc.com tools/chain-preflight.cx -- --item snap-cache-types\t10\n"
+                "parse2-bind\t*\tsh ./unisacc.com tools/chain-preflight.cx -- --item parse2-bind\t30\n"
+                "probe-rev-head\t*\tsh -c 'head=$(git rev-parse HEAD); test -n \"$head\" && test \"$UNISACC_PREFLIGHT_REV\" = \"$head\"'\t10\n");
+            wr_file(fx, "tbl-env.tsv", tbl_env);
+            cx_fmt(ecmd, sizeof ecmd,
+                "UNISACC_PREFLIGHT_REV=deadbeefdeadbeefdeadbeefdeadbeefdeadbeef '%s' -- --table %s --root %s --repo %s --snap-base %s --rev HEAD",
+                pf_bin, t_env, root_ok, p2repo, snap_base);
+            ck(ckk_sh("CHECK_CHAIN_PREFLIGHT", ecmd, out, sizeof out) == 0 &&
+               has(out, "PREFLIGHT_ITEM\tprobe-rev-head\tPASS\t"),
+               "inherited-preflight-rev-overridden-for-rev-head", out);
         }
     }
 

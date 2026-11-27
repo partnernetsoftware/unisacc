@@ -393,6 +393,29 @@ int main(int argc, char **argv) {
         return 1;
     }
     prewarm();
+    /* Gate 20 (UNISACC_IDENT_HELPER) must refuse at start BEFORE chain-preflight/snap runs */
+    {
+        char *uv[20], ucmd[3 * P];
+        int uk = 0;
+        mm_free(last); last = 0; lastn = 0;
+        if (cx_fmt(ucmd, sizeof ucmd,
+                   "env -u UNISACC_IDENT_HELPER '%s' start --rev '%s' --deadline-s 30 --slack-s 5 --chain '%s' --root '%s' --base '%s' -- --fixture-case ok",
+                   bin, REV_A, self, fxroot, b1)) return 2;
+        uv[uk++] = "sh"; uv[uk++] = "-c"; uv[uk++] = ucmd; uv[uk] = 0;
+        rc = cx_runv_timeout(uv, 20, &last, &lastn);
+        ck(rc == 1 && lines("BG_CANDIDATE\tREFUSE", "reason=chain-ready", 0, 0) == 1 &&
+           lines("BG_CANDIDATE\tREFUSE-ITEM\t20-ident-helper\tFAIL", 0, 0, 0) == 1 &&
+           !present(b1, REV_A), "start-refuses-unset-ident-helper-before-snap");
+    }
+    /* Provide a fixture executable helper for positive start/preflight scenarios */
+    {
+        char ih[P];
+        if (join(ih, work, "ident-helper") || put(work, "ident-helper", "#!/bin/sh\nexit 0\n") ||
+            chmod(ih, 0755) || sy_setenv("UNISACC_IDENT_HELPER", ih, 1)) {
+            sy_printf("FAIL\tbgc.ident-helper-fixture\n");
+            return 1;
+        }
+    }
     rc = start(b1, REV_D, "ok", "30", "5");
     ck(rc == 1 && lines("BG_CANDIDATE\tREFUSE-ITEM\t18-parse2-gen\tFAIL", 0, 0, 0) == 1 &&
        !present(b1, REV_D), "start-refuses-unverifiable-parse2-inputs");
@@ -550,6 +573,24 @@ int main(int argc, char **argv) {
             ck(rc == 1 && lines("BG_CANDIDATE\tREFUSE", "reason=chain-preflight", 0, 0) == 1 &&
                lines("BG_CANDIDATE\tREFUSE-ITEM\tPREFLIGHT_ITEM\tsys-six-target-0\tFAIL", 0, 0, 0) == 1 &&
                !present(bp, REV_A), "start-refuses-chain-preflight-failure");
+        }
+        {
+            char sft[P], smark[P], stbl[2048];
+            if (join(sft, work, "snap-fail-preflight.tsv") || join(smark, work, "sixtarget-ran.mark") ||
+                cx_fmt(stbl, sizeof stbl,
+                    "name\tpatterns\tcmd\ttimeout_s\n"
+                    "root-types\t*\tsh ./unisacc.com tools/chain-preflight.cx -- --item root-types\t10\n"
+                    "snap-cache-types\t*\tsh ./unisacc.com tools/chain-preflight.cx -- --item snap-cache-types\t10\n"
+                    "parse2-bind\t*\tsh ./unisacc.com tools/chain-preflight.cx -- --item parse2-bind\t30\n"
+                    "sys-six-target-0\tcx/sys/\tsh -c 'touch \"%s\"'\t10\n"
+                    "chain-to-snap\ttools/candidate-chain.cx\tfalse\t10\n", smark) ||
+                put(work, "snap-fail-preflight.tsv", stbl)) return 2;
+            (void)sy_unlink(smark);
+            rc = tool(bp, "start", "--rev", REV_A, "--preflight-table", sft, 0);
+            ck(rc == 1 && lines("BG_CANDIDATE\tREFUSE", "reason=chain-preflight", 0, 0) == 1 &&
+               lines("BG_CANDIDATE\tREFUSE-ITEM\tPREFLIGHT_ITEM\tchain-to-snap\tFAIL", 0, 0, 0) == 1 &&
+               sy_exists(smark) == 0 && !present(bp, REV_A),
+               "start-preflight-snap-shard-fails-before-sixtarget");
         }
         {
             char bfs[P], dfs[P];

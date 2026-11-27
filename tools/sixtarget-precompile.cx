@@ -22,6 +22,7 @@
  */
 #pragma unisa use cxlib.chainfacts
 #pragma unisa use cxlib.netpack
+#pragma unisa use cxlib.limits
 #pragma unisa use sys.fs
 #pragma unisa use sys.env
 #pragma unisa use sys.posix
@@ -206,32 +207,36 @@ static int compile_one(const char *compiler, const char *root, const char *workd
 static int collect_plan_units(const char *compiler, const char *root, char *const env[],
                               const char *target, const char *filter,
                               char *units_out, long deadline_ms) {
-    char roots[8][4400];
-    char *av[16];
+    enum { CU_CHUNK = 22 };
+    char *roots = (char *)mm_alloc((size_t)CU_CHUNK * 4400);
+    if (!roots) return -1;
+    char *av[CU_CHUNK + 8];
     int nr = cf_root_count();
-    if (nr <= 0 || nr > ST_MAX_UNITS) return -1;
+    if (nr <= 0 || nr > ST_MAX_UNITS) { mm_free(roots); return -1; }
     size_t rlen = strlen(root);
     size_t flen = (filter && filter[0]) ? strlen(filter) : 0;
     int count = 0;
-    for (int base = 0; base < nr; base += 8) {
+    for (int base = 0; base < nr; base += CU_CHUNK) {
         int chunk = nr - base;
-        if (chunk > 8) chunk = 8;
+        if (chunk > CU_CHUNK) chunk = CU_CHUNK;
         av[0] = "sh";
         av[1] = (char *)compiler;
         av[2] = "-b";
         av[3] = (char *)target;
         av[4] = "-cx-plan";
         for (int i = 0; i < chunk; i++) {
-            if (cx_fmt(roots[i], sizeof roots[i], "%s/%s", root, cf_root_source(base + i))) return -1;
-            av[5 + i] = roots[i];
+            char *rp = roots + (size_t)i * 4400;
+            if (cx_fmt(rp, 4400, "%s/%s", root, cf_root_source(base + i))) { mm_free(roots); return -1; }
+            av[5 + i] = rp;
         }
         av[5 + chunk] = 0;
         long left = (deadline_ms - sy_now_ms()) / 1000L;
-        if (left < 1) return -1;
+        if (left < 1) { mm_free(roots); return -1; }
         np_result r = {0};
         char why[256] = {0};
         if (np_run(av, root, env, left < 15 ? (int)left : 15, &r, why, sizeof why) || r.rc || r.residue || !r.outn) {
             np_free(&r);
+            mm_free(roots);
             return -1;
         }
         char *end = r.out + r.outn;
@@ -261,6 +266,7 @@ static int collect_plan_units(const char *compiler, const char *root, char *cons
         }
         np_free(&r);
     }
+    mm_free(roots);
     return count;
 }
 
@@ -492,7 +498,7 @@ static int compile_header_tu(const char *compiler, const char *root, const char 
     av[k] = 0;
 
     np_result r = {0};
-    int tr = np_run(av, root, env, left < 25 ? (int)left : 25, &r, why, sizeof why);
+    int tr = np_run(av, root, env, (int)left, &r, why, sizeof why);
     sy_stat_t st;
     int made = (sy_lstat(obj, &st) == 0);
     int undecl_hit = (r.err && r.errn > 0 &&
@@ -527,6 +533,154 @@ static int compile_header_tu(const char *compiler, const char *root, const char 
     np_free(&r);
     return ok;
 }
+
+static int st_reap_pid(int pid, int *st_out) {
+    int st = 0;
+    for (;;) {
+        pid_t w = waitpid((pid_t)pid, &st, 0);
+        if (w < 0 && errno == EINTR) continue;
+        if (w != (pid_t)pid) return -1;
+        if (st_out) *st_out = st;
+        return 0;
+    }
+}
+
+static int st_wait_window_slot(int *pids, int *wsts, int *has_st, int n, int *live) {
+    int st = 0;
+    for (;;) {
+        pid_t w = waitpid(-1, &st, 0);
+        if (w < 0 && errno == EINTR) continue;
+        if (w <= 0) return -1;
+        for (int j = 0; j < n; j++) {
+            if (pids[j] == (int)w) {
+                pids[j] = 0;
+                if (wsts) wsts[j] = st;
+                if (has_st) has_st[j] = 1;
+                if (*live > 0) (*live)--;
+                return 0;
+            }
+        }
+    }
+}
+
+/* ST_COLLECT_BEGIN */
+static void st_extract_kv(const char *line, size_t len, char *target_out, size_t tcap, char *unit_out, size_t ucap) {
+    if (tcap) target_out[0] = 0;
+    if (ucap) unit_out[0] = 0;
+    size_t p = 0;
+    while (p < len) {
+        size_t fs = p;
+        while (p < len && line[p] != '\t') p++;
+        size_t fl = p - fs;
+        if (p < len) p++;
+        if (fl > 7 && memcmp(line + fs, "target=", 7) == 0 && tcap > 0) {
+            size_t cp = (fl - 7 < tcap - 1) ? (fl - 7) : (tcap - 1);
+            mm_copy(target_out, tcap, line + fs + 7, cp);
+            target_out[cp] = 0;
+        } else if (fl > 5 && memcmp(line + fs, "unit=", 5) == 0 && ucap > 0) {
+            size_t cp = (fl - 5 < ucap - 1) ? (fl - 5) : (ucap - 1);
+            mm_copy(unit_out, ucap, line + fs + 5, cp);
+            unit_out[cp] = 0;
+        }
+    }
+}
+
+static void st_collect_worker_out(const char *opath, int fork_failed, int has_st, int wstatus,
+                                  const char *target, const char *const *expect_units, int expect_n,
+                                  int allow_header_unit, int *checked, int *failed) {
+    unsigned char seen[64];
+    int n_cap = (expect_n > 64) ? 64 : expect_n;
+    for (int i = 0; i < 64; i++) seen[i] = 0;
+
+    int any_seen = 0, saw_fail = 0;
+    unsigned char *ob = 0;
+    int64_t on = 0;
+    if (!fork_failed && opath && opath[0] &&
+        sy_read_file(opath, &ob, &on, 65536) == 0 && ob && on > 0) {
+        fwrite(ob, 1, (size_t)on, stdout);
+        int64_t p = 0;
+        while (p < on) {
+            int64_t ls = p;
+            while (p < on && ob[p] != '\n') p++;
+            int64_t le = p;
+            if (p < on) p++;
+            size_t llen = (size_t)(le - ls);
+            const char *line = (const char *)ob + ls;
+            int is_ok = (llen >= 13 && memcmp(line, "SIXTARGET_OK\t", 13) == 0);
+            int is_fail = (llen >= 15 && memcmp(line, "SIXTARGET_FAIL\t", 15) == 0);
+            if (!is_ok && !is_fail) continue;
+            any_seen++;
+            char tval[64], uval[512];
+            st_extract_kv(line, llen, tval, sizeof tval, uval, sizeof uval);
+            if (!tx_eqz(tval, target)) {
+                *checked += 1;
+                *failed += 1;
+                saw_fail = 1;
+                printf("SIXTARGET_FAIL\ttarget=%s\tunit=%s\trc=1\tdiag=worker-unexpected-target\n",
+                       target, uval[0] ? uval : "unknown");
+                continue;
+            }
+            int match = -1;
+            for (int m = 0; m < n_cap; m++) {
+                if (seen[m]) continue;
+                int umatch = 0;
+                if (allow_header_unit) {
+                    umatch = is_ok ? tx_eqz(uval, expect_units[m]) : (memcmp(uval, "include/", 8) == 0);
+                } else {
+                    umatch = tx_eqz(uval, expect_units[m]);
+                }
+                if (umatch) { match = m; break; }
+            }
+            if (match >= 0) {
+                seen[match] = is_ok ? 1 : 2;
+                *checked += 1;
+                if (is_fail) { *failed += 1; saw_fail = 1; }
+            } else {
+                *checked += 1;
+                *failed += 1;
+                saw_fail = 1;
+                printf("SIXTARGET_FAIL\ttarget=%s\tunit=%s\trc=1\tdiag=worker-unexpected-or-duplicate-unit\n",
+                       target, uval[0] ? uval : "unknown");
+            }
+        }
+        mm_free(ob);
+    } else if (ob) {
+        mm_free(ob);
+    }
+
+    int abnormal = fork_failed || !has_st || !WIFEXITED(wstatus) || WEXITSTATUS(wstatus) != 0;
+    int rc = 1;
+    const char *diag = "worker-missing-output";
+    if (fork_failed) {
+        diag = "fork-failed";
+    } else if (!has_st) {
+        diag = "worker-wait-failed";
+    } else if (WIFSIGNALED(wstatus)) {
+        rc = 128 + WTERMSIG(wstatus);
+        diag = "worker-signaled";
+    } else if (!WIFEXITED(wstatus)) {
+        diag = "worker-abnormal-exit";
+    } else if (WEXITSTATUS(wstatus) != 0) {
+        rc = WEXITSTATUS(wstatus);
+        diag = (any_seen == 0) ? "worker-missing-output" : "worker-exit-nonzero";
+    }
+
+    int missing_any = 0;
+    for (int m = 0; m < n_cap; m++) {
+        if (seen[m]) continue;
+        missing_any = 1;
+        *checked += 1;
+        *failed += 1;
+        printf("SIXTARGET_FAIL\ttarget=%s\tunit=%s\trc=%d\tdiag=%s\n",
+               target, expect_units[m], rc, any_seen > 0 ? "worker-missing-output" : diag);
+    }
+    if (!missing_any && abnormal && !saw_fail && n_cap > 0) {
+        *failed += 1;
+        printf("SIXTARGET_FAIL\ttarget=%s\tunit=%s\trc=%d\tdiag=%s\n",
+               target, expect_units[0], rc, diag);
+    }
+}
+/* ST_COLLECT_END */
 
 int main(int argc, char **argv) {
     const char *mode = 0, *root_arg = ".", *comp_arg = 0, *target_arg = "all", *filter_arg = 0, *rev_arg = 0;
@@ -623,6 +777,8 @@ int main(int argc, char **argv) {
         return 2;
     }
     char *child_env[] = { tmp_env, 0 };
+    int flow_par = (int)lm_get("s9.flow.par", 0);
+    if (flow_par < 1) flow_par = 4;
 
     if (require_d2 && !probe_d2(compiler, root, workdir, child_env, deadline_ms)) {
         printf("SIXTARGET_REFUSE\treason=compiler-lacks-d2\tcompiler=%s\n", compiler);
@@ -630,28 +786,34 @@ int main(int argc, char **argv) {
         return 2;
     }
 
+    const char *scan_root = root;
+    char rev_tree[320];
+    if (!rev_arg && !explicit_root) rev_arg = sy_env("UNISACC_PREFLIGHT_REV");
+    if (rev_arg && rev_arg[0] && !tx_eqz(rev_arg, "none") && !tx_eqz(rev_arg, "HEAD")) {
+        char awhy[256] = {0};
+        tx_snprintf(rev_tree, sizeof rev_tree, "%s/revtree", workdir);
+        sy_mkdir_all(rev_tree, 0700);
+        const char *arch_sh = tx_eqz(mode, "headers")
+            ? "git archive \"$1\" include | tar -x -C \"$2\""
+            : "git rev-parse --verify \"$1^{commit}\" >/dev/null 2>&1 || exit 2; "
+              "paths=''; for p in cx include ext src cxroot.tsv tools/templates tools/cxlib; do "
+              "if git cat-file -e \"$1:$p\" 2>/dev/null; then paths=\"$paths $p\"; fi; done; "
+              "test -n \"$paths\" && git archive \"$1\" $paths | tar -x -C \"$2\"";
+        char *aav[] = { "sh", "-c", (char *)arch_sh, "sixtarget-archive", (char *)rev_arg, rev_tree, 0 };
+        np_result ar = {0};
+        if (np_run(aav, root, child_env, 15, &ar, awhy, sizeof awhy) || ar.rc != 0) {
+            np_free(&ar);
+            fprintf(stderr, "sixtarget-precompile: cannot git archive %s\n", rev_arg);
+            rm_tree(workdir);
+            return 2;
+        }
+        np_free(&ar);
+        scan_root = rev_tree;
+    }
+
     int checked = 0, failed = 0;
 
     if (tx_eqz(mode, "headers")) {
-        const char *scan_root = root;
-        char rev_tree[320];
-        if (!rev_arg && !explicit_root) rev_arg = sy_env("UNISACC_PREFLIGHT_REV");
-        if (rev_arg && rev_arg[0] && !tx_eqz(rev_arg, "none") && !tx_eqz(rev_arg, "HEAD")) {
-            char acmd[1024], awhy[256] = {0};
-            tx_snprintf(rev_tree, sizeof rev_tree, "%s/revtree", workdir);
-            sy_mkdir_all(rev_tree, 0700);
-            tx_snprintf(acmd, sizeof acmd, "git archive '%s' include | tar -x -C '%s'", rev_arg, rev_tree);
-            char *aav[] = { "sh", "-c", acmd, 0 };
-            np_result ar = {0};
-            if (np_run(aav, root, child_env, 15, &ar, awhy, sizeof awhy) || ar.rc != 0) {
-                np_free(&ar);
-                fprintf(stderr, "sixtarget-precompile: cannot git archive %s include\n", rev_arg);
-                rm_tree(workdir);
-                return 2;
-            }
-            np_free(&ar);
-            scan_root = rev_tree;
-        }
         char cx_tu[4400], all_tu[4400];
         int nhdrs = 0;
         if (st_build_headers_tus(scan_root, workdir, cx_tu, all_tu, &nhdrs) != 0) {
@@ -659,21 +821,15 @@ int main(int argc, char **argv) {
             rm_tree(workdir);
             return 2;
         }
-        int pids[ST_MAX_TARGETS];
+        int pids[ST_MAX_TARGETS], wsts[ST_MAX_TARGETS], has_st[ST_MAX_TARGETS], fork_bad[ST_MAX_TARGETS];
         int width = (par > 0 && par < ntargets) ? par : ntargets;
-        int live = 0;
-        for (int i = 0; i < ST_MAX_TARGETS; i++) pids[i] = 0;
+        int live = 0, aborted = 0;
+        for (int i = 0; i < ST_MAX_TARGETS; i++) { pids[i] = 0; wsts[i] = 0; has_st[i] = 0; fork_bad[i] = 0; }
         for (int ti = 0; ti < ntargets; ti++) {
-            while (live >= width) {   /* --par: keep at most that many compilers in flight */
-                for (int j = 0; j < ti; j++) {
-                    if (pids[j] <= 0) continue;
-                    int st = 0;
-                    waitpid(pids[j], &st, 0);
-                    pids[j] = 0;
-                    live--;
-                    break;
-                }
+            while (!aborted && live >= width) {   /* --par: keep at most that many compilers in flight */
+                if (st_wait_window_slot(pids, wsts, has_st, ti, &live) != 0) aborted = 1;
             }
+            if (aborted) { fork_bad[ti] = 1; continue; }
             fflush(stdout);
             fflush(stderr);
             int pid = (int)fork();
@@ -683,44 +839,27 @@ int main(int argc, char **argv) {
                 obuf[0] = 0;
                 int ok = compile_header_tu(compiler, scan_root, workdir, child_env, targets[ti], ti,
                                            all_tu, "include/cx.h,include/*.h,include/sys/*.h", 1, deadline_ms, obuf, sizeof obuf, &opos);
-                if (!cx_fmt(opath, sizeof opath, "%s/hout-%d.txt", workdir, ti)) {
-                    sy_write_file(opath, obuf, (int64_t)opos, 0600);
-                }
+                if (cx_fmt(opath, sizeof opath, "%s/hout-%d.txt", workdir, ti) ||
+                    sy_write_file(opath, obuf, (int64_t)opos, 0600) != 0) _exit(1);
                 _exit(ok ? 0 : 1);
             }
-            pids[ti] = pid;
-            live++;
+            if (pid > 0) { pids[ti] = pid; live++; }
+            else { fork_bad[ti] = 1; }
         }
         for (int ti = 0; ti < ntargets; ti++) {
             if (pids[ti] > 0) {
-                int st = 0;
-                waitpid(pids[ti], &st, 0);
+                if (st_reap_pid(pids[ti], &wsts[ti]) == 0) has_st[ti] = 1;
+                pids[ti] = 0;
             }
-            char opath[4400];
-            unsigned char *ob = 0;
-            int64_t on = 0;
-            if (!cx_fmt(opath, sizeof opath, "%s/hout-%d.txt", workdir, ti) &&
-                sy_read_file(opath, &ob, &on, 65536) == 0 && ob && on > 0) {
-                fwrite(ob, 1, (size_t)on, stdout);
-                int64_t p = 0;
-                while (p < on) {
-                    int64_t ls = p;
-                    while (p < on && ob[p] != '\n') p++;
-                    int64_t le = p;
-                    if (p < on) p++;
-                    if (le - ls >= 13 && memcmp(ob + ls, "SIXTARGET_OK\t", 13) == 0) checked++;
-                    else if (le - ls >= 15 && memcmp(ob + ls, "SIXTARGET_FAIL\t", 15) == 0) { checked++; failed++; }
-                }
-                mm_free(ob);
-            } else {
-                checked += 1;
-                failed += 1;
-                printf("SIXTARGET_FAIL\ttarget=%s\tunit=include/*\trc=1\tdiag=worker-missing-output\n", targets[ti]);
-            }
+            char opath[4400] = {0};
+            if (cx_fmt(opath, sizeof opath, "%s/hout-%d.txt", workdir, ti)) opath[0] = 0;
+            const char *eu[1] = { "include/cx.h,include/*.h,include/sys/*.h" };
+            st_collect_worker_out(opath, fork_bad[ti], has_st[ti], wsts[ti],
+                                  targets[ti], eu, 1, 1, &checked, &failed);
         }
     } else if (tx_eqz(mode, "templates")) {
-        if (prepare_cx_links(root, workdir) != 0) {
-            fprintf(stderr, "sixtarget-precompile: cannot link cx modules from %s/cx\n", root);
+        if (prepare_cx_links(scan_root, workdir) != 0) {
+            fprintf(stderr, "sixtarget-precompile: cannot link cx modules from %s/cx\n", scan_root);
             rm_tree(workdir);
             return 2;
         }
@@ -732,7 +871,7 @@ int main(int argc, char **argv) {
         char wpaths[2][4400];
         for (int k = 0; k < 2; k++) {
             char sp[4400];
-            if (cx_fmt(sp, sizeof sp, "%s/%s", root, tpls[k]) ||
+            if (cx_fmt(sp, sizeof sp, "%s/%s", scan_root, tpls[k]) ||
                 cx_fmt(wpaths[k], sizeof wpaths[k], "%s/%s", workdir, dsts[k]) ||
                 copy_template_unit(sp, wpaths[k]) != 0) {
                 fprintf(stderr, "sixtarget-precompile: cannot instantiate %s\n", tpls[k]);
@@ -740,24 +879,16 @@ int main(int argc, char **argv) {
                 return 2;
             }
         }
-        int pids[ST_MAX_TARGETS * 2];
+        int pids[ST_MAX_TARGETS * 2], wsts[ST_MAX_TARGETS * 2], has_st[ST_MAX_TARGETS * 2], fork_bad[ST_MAX_TARGETS * 2];
         int nslots = ntargets * 2;
-        int width = (par > 0 && par < nslots) ? par : nslots;
-        int live = 0;
-        for (int i = 0; i < ST_MAX_TARGETS * 2; i++) pids[i] = 0;
+        int width = (par > 0 && par < nslots) ? par : (nslots < flow_par ? nslots : flow_par);
+        int live = 0, aborted = 0;
+        for (int i = 0; i < ST_MAX_TARGETS * 2; i++) { pids[i] = 0; wsts[i] = 0; has_st[i] = 0; fork_bad[i] = 0; }
         for (int slot = 0; slot < nslots; slot++) {
-            {   /* --par: keep at most that many compilers in flight */
-                while (live >= width) {
-                    for (int j = 0; j < slot; j++) {
-                        if (pids[j] <= 0) continue;
-                        int st = 0;
-                        waitpid(pids[j], &st, 0);
-                        pids[j] = 0;
-                        live--;
-                        break;
-                    }
-                }
+            while (!aborted && live >= width) {   /* --par: keep at most that many compilers in flight */
+                if (st_wait_window_slot(pids, wsts, has_st, slot, &live) != 0) aborted = 1;
             }
+            if (aborted) { fork_bad[slot] = 1; continue; }
             int ti = slot / 2, k = slot % 2;
             fflush(stdout);
             fflush(stderr);
@@ -766,35 +897,32 @@ int main(int argc, char **argv) {
                 char obuf[2048], opath[4400];
                 size_t opos = 0;
                 obuf[0] = 0;
-                int ok = compile_one_slot(compiler, root, workdir, child_env, targets[ti], slot, wpaths[k], tpls[k], deadline_ms, obuf, sizeof obuf, &opos);
-                if (!cx_fmt(opath, sizeof opath, "%s/hout-%d.txt", workdir, slot)) {
-                    sy_write_file(opath, obuf, (int64_t)opos, 0600);
-                }
+                int ok = compile_one_slot(compiler, scan_root, workdir, child_env, targets[ti], slot, wpaths[k], tpls[k], deadline_ms, obuf, sizeof obuf, &opos);
+                if (cx_fmt(opath, sizeof opath, "%s/hout-%d.txt", workdir, slot) ||
+                    sy_write_file(opath, obuf, (int64_t)opos, 0600) != 0) _exit(1);
                 _exit(ok ? 0 : 1);
             }
-            pids[slot] = pid;
-            live++;
+            if (pid > 0) { pids[slot] = pid; live++; }
+            else { fork_bad[slot] = 1; }
         }
-        for (int slot = 0; slot < ntargets * 2; slot++) {
-            if (pids[slot] > 0) { int st = 0; waitpid(pids[slot], &st, 0); }
-            char opath[4400]; unsigned char *ob = 0; int64_t on = 0;
-            if (!cx_fmt(opath, sizeof opath, "%s/hout-%d.txt", workdir, slot) && sy_read_file(opath, &ob, &on, 65536) == 0 && ob && on > 0) {
-                fwrite(ob, 1, (size_t)on, stdout);
-                int64_t p = 0;
-                while (p < on) {
-                    int64_t ls = p; while (p < on && ob[p] != '\n') p++; int64_t le = p; if (p < on) p++;
-                    if (le - ls >= 13 && memcmp(ob + ls, "SIXTARGET_OK\t", 13) == 0) checked++;
-                    else if (le - ls >= 15 && memcmp(ob + ls, "SIXTARGET_FAIL\t", 15) == 0) { checked++; failed++; }
-                }
-                mm_free(ob);
+        for (int slot = 0; slot < nslots; slot++) {
+            if (pids[slot] > 0) {
+                if (st_reap_pid(pids[slot], &wsts[slot]) == 0) has_st[slot] = 1;
+                pids[slot] = 0;
             }
+            int ti = slot / 2, k = slot % 2;
+            char opath[4400] = {0};
+            if (cx_fmt(opath, sizeof opath, "%s/hout-%d.txt", workdir, slot)) opath[0] = 0;
+            const char *eu[1] = { tpls[k] };
+            st_collect_worker_out(opath, fork_bad[slot], has_st[slot], wsts[slot],
+                                  targets[ti], eu, 1, 0, &checked, &failed);
         }
     } else if (tx_eqz(mode, "chain-units")) {
         char *ubuf = (char *)mm_alloc((size_t)ST_MAX_UNITS * 4400);
         if (!ubuf) { rm_tree(workdir); return 2; }
-        size_t rlen = strlen(root);
+        size_t rlen = strlen(scan_root);
         for (int ti = 0; ti < ntargets; ti++) {
-            int nu = collect_plan_units(compiler, root, child_env, targets[ti], filter_arg,
+            int nu = collect_plan_units(compiler, scan_root, child_env, targets[ti], filter_arg,
                                         ubuf, deadline_ms);
             if (nu <= 0) {
                 checked++;
@@ -809,97 +937,94 @@ int main(int argc, char **argv) {
                 if (shard_units && (u % total_parts != part)) continue;
                 sel_u[nsel++] = u;
             }
-            int unit_w = (par > 0) ? par : 4;   /* --par: in-flight compilers for this target */
-            for (int base = 0; base < nsel; base += unit_w) {
-                int w = (nsel - base) < unit_w ? (nsel - base) : unit_w;
-                int pids[16];
-                for (int j = 0; j < w; j++) {
-                    int u = sel_u[base + j];
-                    const char *up = ubuf + (size_t)u * 4400;
-                    const char *lbl = (strlen(up) > rlen + 1) ? up + rlen + 1 : up;
-                    int slot = ti * ST_MAX_UNITS + base + j;
-                    fflush(stdout);
-                    fflush(stderr);
-                    int pid = (int)fork();
-                    if (pid == 0) {
-                        char obuf[2048], opath[4400];
-                        size_t opos = 0;
-                        obuf[0] = 0;
-                        int ok = compile_one_slot(compiler, root, workdir, child_env, targets[ti], slot, up, lbl, deadline_ms, obuf, sizeof obuf, &opos);
-                        if (!cx_fmt(opath, sizeof opath, "%s/cuout-%d.txt", workdir, slot)) {
-                            sy_write_file(opath, obuf, (int64_t)opos, 0600);
-                        }
-                        _exit(ok ? 0 : 1);
-                    }
-                    pids[j] = pid;
+            int unit_w = (par > 0) ? par : flow_par;   /* --par: in-flight compilers bounded by s9.flow.par */
+            int pids[ST_MAX_UNITS], wsts[ST_MAX_UNITS], has_st[ST_MAX_UNITS], fork_bad[ST_MAX_UNITS];
+            int live = 0, aborted = 0;
+            for (int i = 0; i < nsel; i++) { pids[i] = 0; wsts[i] = 0; has_st[i] = 0; fork_bad[i] = 0; }
+            for (int k = 0; k < nsel; k++) {
+                while (!aborted && live >= unit_w) {
+                    if (st_wait_window_slot(pids, wsts, has_st, k, &live) != 0) aborted = 1;
                 }
-                for (int j = 0; j < w; j++) {
-                    if (pids[j] > 0) { int st = 0; waitpid(pids[j], &st, 0); }
-                    int slot = ti * ST_MAX_UNITS + base + j;
-                    char opath[4400]; unsigned char *ob = 0; int64_t on = 0;
-                    if (!cx_fmt(opath, sizeof opath, "%s/cuout-%d.txt", workdir, slot) && sy_read_file(opath, &ob, &on, 65536) == 0 && ob && on > 0) {
-                        fwrite(ob, 1, (size_t)on, stdout);
-                        int64_t p = 0;
-                        while (p < on) {
-                            int64_t ls = p; while (p < on && ob[p] != '\n') p++; int64_t le = p; if (p < on) p++;
-                            if (le - ls >= 13 && memcmp(ob + ls, "SIXTARGET_OK\t", 13) == 0) checked++;
-                            else if (le - ls >= 15 && memcmp(ob + ls, "SIXTARGET_FAIL\t", 15) == 0) { checked++; failed++; }
-                        }
-                        mm_free(ob);
-                    }
+                if (aborted) { fork_bad[k] = 1; continue; }
+                int u = sel_u[k];
+                const char *up = ubuf + (size_t)u * 4400;
+                const char *lbl = (strlen(up) > rlen + 1) ? up + rlen + 1 : up;
+                int slot = ti * ST_MAX_UNITS + k;
+                fflush(stdout);
+                fflush(stderr);
+                int pid = (int)fork();
+                if (pid == 0) {
+                    char obuf[2048], opath[4400];
+                    size_t opos = 0;
+                    obuf[0] = 0;
+                    int ok = compile_one_slot(compiler, scan_root, workdir, child_env, targets[ti], slot, up, lbl, deadline_ms, obuf, sizeof obuf, &opos);
+                    if (cx_fmt(opath, sizeof opath, "%s/cuout-%d.txt", workdir, slot) ||
+                        sy_write_file(opath, obuf, (int64_t)opos, 0600) != 0) _exit(1);
+                    _exit(ok ? 0 : 1);
                 }
+                if (pid > 0) { pids[k] = pid; live++; }
+                else { fork_bad[k] = 1; }
+            }
+            for (int k = 0; k < nsel; k++) {
+                if (pids[k] > 0) {
+                    if (st_reap_pid(pids[k], &wsts[k]) == 0) has_st[k] = 1;
+                    pids[k] = 0;
+                }
+                int u = sel_u[k];
+                const char *up = ubuf + (size_t)u * 4400;
+                const char *lbl = (strlen(up) > rlen + 1) ? up + rlen + 1 : up;
+                int slot = ti * ST_MAX_UNITS + k;
+                char opath[4400] = {0};
+                if (cx_fmt(opath, sizeof opath, "%s/cuout-%d.txt", workdir, slot)) opath[0] = 0;
+                const char *eu[1] = { lbl };
+                st_collect_worker_out(opath, fork_bad[k], has_st[k], wsts[k],
+                                      targets[ti], eu, 1, 0, &checked, &failed);
             }
         }
         mm_free(ubuf);
     } else {
-        int pids[ST_MAX_TARGETS];
+        int pids[ST_MAX_TARGETS], wsts[ST_MAX_TARGETS], has_st[ST_MAX_TARGETS], fork_bad[ST_MAX_TARGETS];
         int width = (par > 0 && par < ntargets) ? par : ntargets;
-        int live = 0;
-        for (int i = 0; i < ST_MAX_TARGETS; i++) pids[i] = 0;
+        int live = 0, aborted = 0;
+        for (int i = 0; i < ST_MAX_TARGETS; i++) { pids[i] = 0; wsts[i] = 0; has_st[i] = 0; fork_bad[i] = 0; }
         for (int ti = 0; ti < ntargets; ti++) {
-            while (live >= width) {   /* --par: keep at most that many compilers in flight */
-                for (int j = 0; j < ti; j++) {
-                    if (pids[j] <= 0) continue;
-                    int st = 0;
-                    waitpid(pids[j], &st, 0);
-                    pids[j] = 0;
-                    live--;
-                    break;
-                }
+            while (!aborted && live >= width) {   /* --par: keep at most that many compilers in flight */
+                if (st_wait_window_slot(pids, wsts, has_st, ti, &live) != 0) aborted = 1;
             }
+            if (aborted) { fork_bad[ti] = 1; continue; }
             fflush(stdout);
             fflush(stderr);
             int pid = (int)fork();
             if (pid == 0) {
-                char obuf[4096], opath[4400];
+                size_t ocap = 16384;
+                char *obuf = (char *)mm_alloc(ocap);
+                char opath[4400];
                 size_t opos = 0;
+                if (!obuf) _exit(1);
                 obuf[0] = 0;
                 int ok = 1;
                 for (int fi = 0; fi < nfiles; fi++) {
-                    if (!compile_one_slot(compiler, root, workdir, child_env, targets[ti], ti * ST_MAX_FILES + fi, files[fi], files[fi], deadline_ms, obuf, sizeof obuf, &opos))
+                    if (!compile_one_slot(compiler, scan_root, workdir, child_env, targets[ti], ti * ST_MAX_FILES + fi, files[fi], files[fi], deadline_ms, obuf, ocap, &opos))
                         ok = 0;
                 }
-                if (!cx_fmt(opath, sizeof opath, "%s/hout-%d.txt", workdir, ti)) {
-                    sy_write_file(opath, obuf, (int64_t)opos, 0600);
-                }
+                int badw = (cx_fmt(opath, sizeof opath, "%s/hout-%d.txt", workdir, ti) ||
+                            sy_write_file(opath, obuf, (int64_t)opos, 0600) != 0);
+                mm_free(obuf);
+                if (badw) _exit(1);
                 _exit(ok ? 0 : 1);
             }
-            pids[ti] = pid;
-            live++;
+            if (pid > 0) { pids[ti] = pid; live++; }
+            else { fork_bad[ti] = 1; }
         }
         for (int ti = 0; ti < ntargets; ti++) {
-            if (pids[ti] > 0) { int st = 0; waitpid(pids[ti], &st, 0); }
-            char opath[4400]; unsigned char *ob = 0; int64_t on = 0;
-            if (!cx_fmt(opath, sizeof opath, "%s/hout-%d.txt", workdir, ti) && sy_read_file(opath, &ob, &on, 65536) == 0 && ob && on > 0) {
-                fwrite(ob, 1, (size_t)on, stdout);
-                int64_t p = 0;
-                while (p < on) {
-                    int64_t ls = p; while (p < on && ob[p] != '\n') p++; int64_t le = p; if (p < on) p++;
-                    if (le - ls >= 13 && memcmp(ob + ls, "SIXTARGET_OK\t", 13) == 0) checked++;
-                    else if (le - ls >= 15 && memcmp(ob + ls, "SIXTARGET_FAIL\t", 15) == 0) { checked++; failed++; }
-                }
-                mm_free(ob);
+            if (pids[ti] > 0) {
+                if (st_reap_pid(pids[ti], &wsts[ti]) == 0) has_st[ti] = 1;
+                pids[ti] = 0;
             }
+            char opath[4400] = {0};
+            if (cx_fmt(opath, sizeof opath, "%s/hout-%d.txt", workdir, ti)) opath[0] = 0;
+            st_collect_worker_out(opath, fork_bad[ti], has_st[ti], wsts[ti],
+                                  targets[ti], files, nfiles, 0, &checked, &failed);
         }
     }
 
