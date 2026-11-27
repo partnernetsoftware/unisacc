@@ -467,12 +467,53 @@ int main(int argc, char **argv) {
         ck(wfile("tools/commit-own.cx", ghost_fake) == 0, "ghost-receipt-fixture-write");
         rc = dv("git", "commit", "-m", "GR", "--whole", "dvg-t.txt", 0, 0);
         ck(rc != 0 && has("reason=ref-mismatch") && last_line_starts("COMMIT_RESULT\tNOT_COMMITTED\treason=ref-mismatch\tjob=") &&
-           report_before_commit_result(), "nonexistent-receipt-sha-ref-mismatch");
+           report_before_commit_result() && !has_40hex(out), "nonexistent-receipt-sha-ref-mismatch");
         {   char gid[48] = ""; const char *gp = strstr(out, "JOB\t");
             if (gp && sscanf(gp, "JOB\t%47s", gid) == 1 && gid[0]) {
                 rc = dv("git", "commit", "--status", gid, 0, 0, 0, 0);
-                ck(rc == 0 && last_line_starts("COMMIT_RESULT\tNOT_COMMITTED\treason=ref-mismatch\tjob="), "status-nonexistent-receipt-sha-ref-mismatch");
+                ck(rc == 0 && last_line_starts("COMMIT_RESULT\tNOT_COMMITTED\treason=ref-mismatch\tjob=") && !has_40hex(out),
+                   "status-nonexistent-receipt-sha-ref-mismatch");
             } else ck(0, "status-nonexistent-receipt-sha-ref-mismatch");
+        }
+    }
+    /* (t4) 反例:失败作业 (rc=1) 打印现有 HEAD sha,禁止当作已提交或泄露任何 40 位 sha */
+    {   char hcur[64] = "";
+        ck(sh("git rev-parse HEAD", fx) == 0 && sscanf(out, "%63s", hcur) == 1 && strlen(hcur) == 40, "existing-head-for-negative");
+        F(c, sizeof c,
+          "int main(void) {\n"
+          "    printf(\"COMMIT_LANDED\\tfull=%s\\tbase=%s\\n\");\n"
+          "    return 1;\n"
+          "}\n", hcur, hcur);
+        ck(!ovf && wfile("tools/commit-own.cx", c) == 0, "failed-existing-sha-fixture-write");
+        rc = dv("git", "commit", "-m", "FAIL_EX", "--whole", "dvg-t.txt", 0, 0);
+        ck(rc != 0 && last_line_starts("COMMIT_RESULT\tNOT_COMMITTED\treason=blocked\tjob=") &&
+           report_before_commit_result() && !has_40hex(out), "failed-job-existing-sha-not-committed-no-sha");
+        {   char gid[48] = ""; const char *gp = strstr(out, "JOB\t");
+            if (gp && sscanf(gp, "JOB\t%47s", gid) == 1 && gid[0]) {
+                rc = dv("git", "commit", "--status", gid, 0, 0, 0, 0);
+                ck(rc == 0 && last_line_starts("COMMIT_RESULT\tNOT_COMMITTED\treason=blocked\tjob=") && !has_40hex(out),
+                   "status-failed-job-existing-sha-not-committed-no-sha");
+            } else ck(0, "status-failed-job-existing-sha-not-committed-no-sha");
+        }
+    }
+    /* (t5) 反例:rc=0 却复用现有 HEAD sha、未把 ref 从 ref_before 推进到该 sha -> 拒收 ref-mismatch 且不打印 sha */
+    {   char hcur[64] = "";
+        ck(sh("git rev-parse HEAD", fx) == 0 && sscanf(out, "%63s", hcur) == 1 && strlen(hcur) == 40, "existing-head-for-noop");
+        F(c, sizeof c,
+          "int main(void) {\n"
+          "    printf(\"COMMIT_LANDED\\tfull=%s\\tbase=%s\\n\");\n"
+          "    return 0;\n"
+          "}\n", hcur, hcur);
+        ck(!ovf && wfile("tools/commit-own.cx", c) == 0, "noop-existing-sha-fixture-write");
+        rc = dv("git", "commit", "-m", "NOOP_EX", "--whole", "dvg-t.txt", 0, 0);
+        ck(rc != 0 && has("reason=ref-mismatch") && last_line_starts("COMMIT_RESULT\tNOT_COMMITTED\treason=ref-mismatch\tjob=") &&
+           report_before_commit_result() && !has_40hex(out), "noop-existing-sha-ref-mismatch-no-sha");
+        {   char gid[48] = ""; const char *gp = strstr(out, "JOB\t");
+            if (gp && sscanf(gp, "JOB\t%47s", gid) == 1 && gid[0]) {
+                rc = dv("git", "commit", "--status", gid, 0, 0, 0, 0);
+                ck(rc == 0 && last_line_starts("COMMIT_RESULT\tNOT_COMMITTED\treason=ref-mismatch\tjob=") && !has_40hex(out),
+                   "status-noop-existing-sha-ref-mismatch-no-sha");
+            } else ck(0, "status-noop-existing-sha-ref-mismatch-no-sha");
         }
     }
     /* (t4) commit_follow WAIT_TIMEOUT 后再打一行 NOT_COMMITTED_YET,末行为 COMMIT_RESULT reason=timeout */
@@ -513,6 +554,29 @@ int main(int argc, char **argv) {
            "timeout-after-commit-landed-recovers-receipt-and-syncs-index");
     }
     ck(!ovf && sh("git checkout -q -- tools/commit-own.cx", fx) == 0, "timeout-fixture-restore");
+    /* (t6) 作业提交成功后分支继续前进或切去不含该提交的分支: --status 仍报告历史 COMMITTED 且区分 tip_contains=yes|no */
+    {   char gid[48] = "", sha1[64] = ""; const char *gp, *sp;
+        ck(wfile("dvg-t2.txt", "t2a\n") == 0, "hist-fixture-1");
+        rc = dv("git", "commit", "-m", "TH1", "--whole", "dvg-t2.txt", 0, 0);
+        ck(rc == 0 && last_line_starts("COMMIT_RESULT\tCOMMITTED\tsha="), "hist-commit-1-ok");
+        gp = strstr(out, "JOB\t");
+        sp = strstr(out, "COMMIT_RESULT\tCOMMITTED\tsha=");
+        if (gp && sp && sscanf(gp, "JOB\t%47s", gid) == 1 && sscanf(sp, "COMMIT_RESULT\tCOMMITTED\tsha=%40s", sha1) == 1 &&
+            strlen(sha1) == 40) {
+            ck(sh("printf 't2b\\n' > dvg-t2.txt && git add dvg-t2.txt && git commit -q -m TH2", fx) == 0, "hist-advance-main");
+            rc = dv("git", "commit", "--status", gid, 0, 0, 0, 0);
+            ck(rc == 0 && last_line_starts("COMMIT_RESULT\tCOMMITTED\t") && has(sha1) && has("\tref=main\t") &&
+               last_line_has("\ttip_contains=yes"), "status-after-ref-advance-committed-tip-contains-yes");
+            ck(sh("git checkout -q -b alt-br HEAD~2", fx) == 0, "hist-switch-branch");
+            rc = dv("git", "commit", "--status", gid, 0, 0, 0, 0);
+            ck(rc == 0 && last_line_starts("COMMIT_RESULT\tCOMMITTED\t") && has(sha1) && has("\tref=main\t") &&
+               last_line_has("\ttip_contains=no"), "status-after-branch-switch-committed-tip-contains-no");
+            ck(sh("git checkout -q main && git branch -q -D alt-br", fx) == 0, "hist-restore-main");
+        } else {
+            ck(0, "status-after-ref-advance-committed-tip-contains-yes");
+            ck(0, "status-after-branch-switch-committed-tip-contains-no");
+        }
+    }
     }
     if (B) {
     /* (c) 两个并发 commit 串行完成,无残留锁 */
@@ -653,6 +717,55 @@ int main(int argc, char **argv) {
     rc = dv("git", "status", 0, 0, 0, 0, 0, 0);
     {   char *p = strstr(out, "GIT_STATUS\tdirty="); int d = -1, o = -1;
         ck(rc == 0 && p && sscanf(p, "GIT_STATUS\tdirty=%d\torphan=%d", &d, &o) == 2 && d >= 0 && o >= 0 && o <= d, "status-last-line-format"); }
+
+    /* (e2) 所有 wrapper/parse-only/foreign-worktree/spawn-fail 负路径也必须以 COMMIT_RESULT 结尾 */
+    {   char *v[16]; int n; char *ep[4]; char for_dir[128], noj_dir[128], noj_env[160];
+        F(for_dir, sizeof for_dir, "/tmp/dvgit-for-%d", sy_pid());
+        F(noj_dir, sizeof noj_dir, "/tmp/dvgit-noj-%d", sy_pid());
+        F(noj_env, sizeof noj_env, "UNISACC_DEVSVC_DIR=%s", noj_dir);
+
+        ep[0] = envv[0]; ep[1] = "DEVSVC_GIT_PARSE_ONLY=1"; ep[2] = 0;
+        n = cli_args(v); v[n++] = "git"; v[n++] = "commit"; v[n++] = "-m"; v[n++] = "P"; v[n++] = "--whole"; v[n++] = "dvg-b1.txt"; v[n] = 0;
+        rc = run(v, fx, ep);
+        ck(rc == 0 && has("GIT_ARGS_OK") && stdout_last_line_starts("COMMIT_RESULT\tNOT_COMMITTED\treason=refused\tjob=-"),
+           "parse-only-valid-emits-commit-result");
+
+        n = cli_args(v); v[n++] = "git"; v[n++] = "commit"; v[n++] = "-m"; v[n++] = "P"; v[n++] = "--frob"; v[n] = 0;
+        rc = run(v, fx, ep);
+        ck(rc == 2 && stdout_last_line_starts("COMMIT_RESULT\tNOT_COMMITTED\treason=refused\tjob=-"),
+           "parse-only-bad-args-emits-commit-result");
+
+        ep[1] = "DEVSVC_REPO_TABLE=no-such-table.tsv";
+        n = cli_args(v); v[n++] = "git"; v[n++] = "commit"; v[n++] = "-m"; v[n++] = "W"; v[n++] = "--whole"; v[n++] = "dvg-b1.txt"; v[n] = 0;
+        rc = run(v, fx, ep);
+        ck(rc == 3 && stdout_last_line_starts("COMMIT_RESULT\tNOT_COMMITTED\treason=blocked\tjob=-"),
+           "wrapper-cfg-load-error-emits-commit-result");
+
+        rc = dv("git", "commit", "--status", "BADID", "extra", 0, 0, 0);
+        ck(rc == 2 && stdout_last_line_starts("COMMIT_RESULT\tNOT_COMMITTED\treason=refused\tjob=-"),
+           "status-extra-arg-emits-commit-result");
+
+        F(c, sizeof c, "rm -rf %s && mkdir -p %s && git -C %s init -q", for_dir, for_dir, for_dir);
+        ck(!ovf && sh(c, 0) == 0, "foreign-worktree-fixture");
+        rc = dv("git", "commit", "-m", "F", "--whole", "dvg-b1.txt", "--cwd", for_dir);
+        ck(rc == 2 && has("reason=foreign-worktree") && stdout_last_line_starts("COMMIT_RESULT\tNOT_COMMITTED\treason=refused\tjob=-"),
+           "foreign-worktree-emits-commit-result");
+        F(c, sizeof c, "rm -rf %s", for_dir); if (!ovf) (void)sh(c, 0);
+
+        F(c, sizeof c, "rm -rf %s && mkdir -p %s && : > %s/jobs", noj_dir, noj_dir, noj_dir);
+        ck(!ovf && sh(c, 0) == 0, "spawn-fail-jobs-file-fixture");
+        ep[0] = noj_env; ep[1] = 0;
+        n = cli_args(v); v[n++] = "git"; v[n++] = "commit"; v[n++] = "-m"; v[n++] = "SF"; v[n++] = "--whole"; v[n++] = "dvg-b1.txt"; v[n] = 0;
+        rc = run(v, fx, ep);
+        ck(rc == 3 && has("cannot create job directory") && stdout_last_line_starts("COMMIT_RESULT\tNOT_COMMITTED\treason=blocked\tjob=-"),
+           "fg-spawn-fail-emits-commit-result");
+
+        n = cli_args(v); v[n++] = "git"; v[n++] = "commit"; v[n++] = "--bg"; v[n++] = "-m"; v[n++] = "SB"; v[n++] = "--whole"; v[n++] = "dvg-b1.txt"; v[n] = 0;
+        rc = run(v, fx, ep);
+        ck(rc == 3 && has("cannot create job directory") && stdout_last_line_starts("COMMIT_RESULT\tNOT_COMMITTED\treason=blocked\tjob=-"),
+           "bg-spawn-fail-emits-commit-result");
+        F(c, sizeof c, "rm -rf %s", noj_dir); if (!ovf) (void)sh(c, 0);
+    }
 
     }
     if (C && !single_c2 && !single_c1b) {
