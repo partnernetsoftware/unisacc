@@ -5,17 +5,20 @@
 #pragma unisa use driver.tape_soload
 #pragma unisa use sys.env
 #pragma unisa use sys.fs
+#pragma unisa use sys.time
 #pragma unisa use mem.heap
 #pragma unisa use mem.bytes
-/* M1 authoritative embedded-carrier stream_s1 for lnx/x86_64:
+/* Shared per-process embedded-carrier tape runtime for lnx/x86_64 (m53, packmodel, batch 1+):
  * - Zero dependency on runtime.stream_attributes (no native cxsa_valid, no fallback).
- * - Decodes P4 package body via runtime.package_decode (cxpk_decode) without altering
- *   shared package_decode.cx (preserving codec=0 crc=0 compatibility and byte-unchanged
- *   other 5 slices).
- * - Enforces G1 gate strictly on the 3 embedded tape/lnx-x86_64/* F records:
- *     ver >= 4, codec == 0, 0 < len == rawlen <= per-item max, explicit IEEE CRC32 == r->crc.
- * - Returns 1 (valid), 0 (invalid attr table), or -2 (integrity/carrier refusal with
- *   M53_M1_REFUSE\treason=<name>\tdetail=<int> on stderr). */
+ * - ONE shared TapeRuntime per process: locates the P4 footer once, scans P4 once to index all
+ *   tape/* F records, verifies/caches manifest.tsv once, maps tapemode.so once, and reuses one
+ *   VM arena (vm_mem / vm_ibm) across calls without per-call mmap/munmap page-fault churn.
+ * - Per-unit lazy slice loading (TapeUnitState): each unit extracts, G1-CRC-checks, manifest-checks,
+ *   and UTAPEBIN-v1.3-validates only its own .tapeslice on its first call (0 ms on stages that do
+ *   not call it; < 1 ms on first call after runtime boot; ~0.01 ms stat-hit on repeat calls).
+ * - Measure-ready hooks: tape_rt_stats() and tape_unit_stats() / tape_unit_m53_stats().
+ * - Keeps cxsa_valid_s1, m53_m1_extract_tape, m53_m1_classify_vm_result, m53_m1_classify_run_result,
+ *   TapeUnitSpec, TapeUnitState, and tape_unit_call_bytes 100% backward-compatible. */
 
 enum {
     M53_M1_UNBOOTED = 0,
@@ -27,10 +30,25 @@ enum {
     M53_M1_MAX_MF = 65536L,
     M53_M1_MAX_SO = 1048576L,
     M53_M1_MAX_SL = 4194304L,
-    M53_M1_MASK = 383ULL
+    M53_M1_MASK = 383ULL,
+    TAPE_RT_MAX_FDIR = 64
 };
 
 static const unsigned long long M53_M1_RES_SENTINEL = 0x554e575249545445ULL;
+
+typedef struct {
+    const char *mf_key;
+    const char *so_key;
+    const char *sl_key;
+    const char *so_leaf;
+    const char *sl_leaf;
+    const char *abi_tag;
+    long abi_tag_len;
+    const char *guest_sym;
+    unsigned long long max_ret;
+    unsigned long long budget;
+    const char *refuse_tag;
+} TapeUnitSpec;
 
 typedef struct {
     char path[4096];
@@ -40,25 +58,89 @@ typedef struct {
     long mtime;
     int64_t mtime_ns;
     int64_t ctime_ns;
-    unsigned char tape_sha[32];
     int valid;
 } M53CacheKey;
 
-static int m53_m1_state;
-static int m53_m1_busy;
-static int m53_m1_detail;
-static char m53_m1_reason[64];
-static M53CacheKey m53_m1_cache;
-static unsigned char *m53_m1_slice;
-static long m53_m1_slice_len;
-static unsigned long long m53_m1_code_len;
-static unsigned long long m53_m1_data_off;
-static unsigned long long m53_m1_data_len;
-static unsigned long long m53_m1_bss_size;
-static tsl_img_t m53_m1_tsl;
-static void *m53_m1_bind_fn;
-static void *m53_m1_disp_fn;
-static void *m53_m1_run_fn;
+typedef struct {
+    char key[128];
+    long key_len;
+    long data_off;
+    long len;
+    long rawlen;
+    unsigned crc;
+    int codec;
+    int dup;
+} TapeFDirEntry;
+
+typedef struct {
+    const unsigned char *slice;
+    unsigned long gen;
+    unsigned char *ibm;
+    long cap;
+} TapeIbmSlot;
+
+typedef struct {
+    int state;
+    int busy;
+    unsigned long gen;
+    M53CacheKey cache;
+    TapeFDirEntry fdir[TAPE_RT_MAX_FDIR];
+    int fdir_n;
+    unsigned char *mf;
+    long mf_len;
+    tsl_img_t tsl;
+    void *bind_fn;
+    void *disp_fn;
+    void *run_fn;
+    unsigned char *vm_mem;
+    long vm_mem_cap;
+    unsigned char *vm_ibm;
+    long vm_ibm_cap;
+    TapeIbmSlot ibm_cache[16];
+    long boot_count;
+    long boot_ns;
+} TapeRuntime;
+
+typedef struct {
+    int state;
+    int busy;
+    int detail;
+    char reason[64];
+    unsigned long rt_gen;
+    unsigned char *slice;
+    long slice_len;
+    unsigned long long code_len;
+    unsigned long long data_off;
+    unsigned long long data_len;
+    unsigned long long bss_size;
+    long calls;
+    long slice_load_ns;
+    long first_ns;
+    long repeat_ns;
+} TapeUnitState;
+
+static TapeRuntime g_tape_rt;
+static TapeUnitState m53_m1_unit;
+
+static const TapeUnitSpec m53_m1_spec = {
+    "tape/lnx-x86_64/manifest.tsv",
+    "tape/lnx-x86_64/tapemode.so",
+    "tape/lnx-x86_64/m53.tapeslice",
+    "tapemode.so",
+    "m53.tapeslice",
+    "M53S1ABI1",
+    9L,
+    "cxsa_valid",
+    1ULL,
+    2000000ULL,
+    "M53_M1_REFUSE"
+};
+
+static long tape_mono_ns(void) {
+    sy_ts_t t;
+    if (sy_mono(&t) != 0) return 0L;
+    return t.sec * 1000000000L + t.nsec;
+}
 
 static long m53_m1_len(const char *s, long cap) {
     long i = 0;
@@ -140,12 +222,15 @@ static void m53_m1_hex(const unsigned char h[32], char out[65]) {
     out[64] = 0;
 }
 
-static void m53_m1_emit_refuse(const char *reason, int detail) {
-    char buf[160], num[24];
+static void tape_emit_refuse(const char *tag, const char *reason, int detail) {
+    char buf[192], num[24];
     long p = 0, i = 0, nn = 0;
-    const char *pre = "M53_M1_REFUSE\treason=";
+    const char *t = (tag && tag[0]) ? tag : "M53_M1_REFUSE";
+    const char *pre = "\treason=";
     const char *mid = "\tdetail=";
     unsigned long long uv;
+    while (t[i] && p + 1 < (long)sizeof buf) buf[p++] = t[i++];
+    i = 0;
     while (pre[i] && p + 1 < (long)sizeof buf) buf[p++] = pre[i++];
     i = 0;
     if (reason) while (reason[i] && p + 1 < (long)sizeof buf) buf[p++] = reason[i++];
@@ -160,11 +245,11 @@ static void m53_m1_emit_refuse(const char *reason, int detail) {
     (void)sy_write_all(2, buf, p);
 }
 
-static int m53_m1_fail(const char *reason, int detail) {
-    m53_m1_state = M53_M1_REFUSED;
-    m53_m1_detail = detail;
-    m53_m1_cpy(m53_m1_reason, sizeof m53_m1_reason, reason);
-    m53_m1_emit_refuse(reason, detail);
+static int tape_unit_fail(TapeUnitState *u, const TapeUnitSpec *sp, const char *reason, int detail) {
+    u->state = M53_M1_REFUSED;
+    u->detail = detail;
+    m53_m1_cpy(u->reason, (long)sizeof u->reason, reason);
+    tape_emit_refuse(sp ? sp->refuse_tag : 0, reason, detail);
     return -2;
 }
 
@@ -209,27 +294,19 @@ static int m53_m1_check_mf_line(const char *mf, long mfn, const char *name, cons
     return found ? 0 : -1;
 }
 
-/* G1 authoritative extractor for the 3 embedded lnx/x86_64 tape F records.
- * Leaves non-tape P4 codec=0 crc=0 records untouched (zero regression for existing writers).
- * Refusal detail conventions for reason="embed-pkg-decode-failed":
- *   0/1/2   = raw IEEE CRC32 mismatch on manifest.tsv(0) / tapemode.so(1) / m53.tapeslice(2)
- *   10      = cxpk_decode failure or package version < 4 downgrade
- *   20..22  = codec != 0 (e.g. codec=1 bypass) on record k=0..2
- *   30..32  = len <= 0, rawlen != len, or len > max_k on record k=0..2 */
-int m53_m1_extract_tape(const unsigned char *pkg, long pkglen,
-                        const unsigned char *out_p[3], long out_n[3],
-                        const char **reason_out, int *detail_out) {
-    static const char *const keys[3] = {
-        "tape/lnx-x86_64/manifest.tsv",
-        "tape/lnx-x86_64/tapemode.so",
-        "tape/lnx-x86_64/m53.tapeslice"
-    };
-    static const long key_len[3] = { 28, 27, 29 };
+/* G1 authoritative in-memory extractor for any 3-key tape unit (used by check-m1-g1-crc.cx). */
+int tape_unit_extract_mem(const unsigned char *pkg, long pkglen, const char *const keys[3],
+                          const unsigned char *out_p[3], long out_n[3],
+                          const char **reason_out, int *detail_out) {
     static const long max_bytes[3] = { M53_M1_MAX_MF, M53_M1_MAX_SO, M53_M1_MAX_SL };
+    long key_len[3];
     CxPackageDecode dec;
     int i, k;
-    out_p[0] = 0; out_p[1] = 0; out_p[2] = 0;
-    out_n[0] = 0; out_n[1] = 0; out_n[2] = 0;
+    for (k = 0; k < 3; k++) {
+        key_len[k] = m53_m1_len(keys[k], 128);
+        out_p[k] = 0;
+        out_n[k] = 0;
+    }
     mm_fill(&dec, (long)sizeof dec, 0, (long)sizeof dec);
     dec.allocate = m53_m1_pk_alloc;
     dec.release = m53_m1_pk_free;
@@ -292,20 +369,28 @@ int m53_m1_extract_tape(const unsigned char *pkg, long pkglen,
     return 0;
 }
 
-/* Full UTAPEBIN v1.3 6-section validator (matches cx/driver/stream_s1.cx:213-311):
- * CODE, DATA, BSSZ, SYMS, RELO, HOST with 8-byte alignment, zero padding, M1 host mask (<=383),
- * zeroed-ident[28..59] SHA-256 seal, and M53S1ABI1 tag in DATA. Writes outputs only on success. */
-static int m53_m1_validate_slice(const unsigned char *b, long len,
-                                 unsigned long long *clen_out, unsigned long long *doff_out,
-                                 unsigned long long *dlen_out, unsigned long long *bsz_out) {
+int m53_m1_extract_tape(const unsigned char *pkg, long pkglen,
+                        const unsigned char *out_p[3], long out_n[3],
+                        const char **reason_out, int *detail_out) {
+    const char *keys[3];
+    keys[0] = m53_m1_spec.mf_key;
+    keys[1] = m53_m1_spec.so_key;
+    keys[2] = m53_m1_spec.sl_key;
+    return tape_unit_extract_mem(pkg, pkglen, keys, out_p, out_n, reason_out, detail_out);
+}
+
+/* Full UTAPEBIN v1.3 6-section validator (parameterized by ABI tag). */
+static int tape_unit_validate_slice(const unsigned char *b, long len,
+                                    const char *abi_tag, long abi_len,
+                                    unsigned long long *clen_out, unsigned long long *doff_out,
+                                    unsigned long long *dlen_out, unsigned long long *bsz_out) {
     static const char *const tags[6] = {"CODE", "DATA", "BSSZ", "SYMS", "RELO", "HOST"};
     static const char magic[8] = {'U', 'T', 'A', 'P', 'E', 'B', 'I', 'N'};
-    static const char abi_tag[9] = {'M', '5', '3', 'S', '1', 'A', 'B', 'I', '1'};
     unsigned long long entry_off, nsect, dir_off, origin, prev_end = 208ULL;
     unsigned long long code_len = 0, data_off = 0, data_len = 0, bss_sz = 0;
     unsigned char *tmp, dig[32], seen_host[37];
     int i, j, has_abi = 0;
-    if (!b || len < 216) return -1;
+    if (!b || len < 216 || !abi_tag || abi_len <= 0) return -1;
     for (i = 0; i < 8; i++) if (b[i] != (unsigned char)magic[i]) return -1;
     if (m53_m1_rd_u(b + 8, 2) != 1ULL || m53_m1_rd_u(b + 10, 2) != 3ULL) return -1;
     if (m53_m1_rd_u(b + 12, 2) != 1ULL || m53_m1_rd_u(b + 14, 2) != 0ULL) return -1;
@@ -379,12 +464,13 @@ static int m53_m1_validate_slice(const unsigned char *b, long len,
     cx_sha256(tmp, (size_t)len, dig);
     mm_free(tmp);
     if (!m53_m1_bytes_eq(b + 28, dig, 32)) return -1;
-    if (data_len >= 9ULL) {
+    if (data_len >= (unsigned long long)abi_len) {
         unsigned long long pos;
-        for (pos = 0; pos + 9ULL <= data_len; pos++) {
+        for (pos = 0; pos + (unsigned long long)abi_len <= data_len; pos++) {
             int ok = 1;
-            for (j = 0; j < 9; j++) {
-                if (b[data_off + pos + (unsigned long long)j] != (unsigned char)abi_tag[j]) { ok = 0; break; }
+            long k;
+            for (k = 0; k < abi_len; k++) {
+                if (b[data_off + pos + (unsigned long long)k] != (unsigned char)abi_tag[k]) { ok = 0; break; }
             }
             if (ok) { has_abi = 1; break; }
         }
@@ -397,29 +483,37 @@ static int m53_m1_validate_slice(const unsigned char *b, long len,
     return 0;
 }
 
-static void m53_m1_drop_loaded(void) {
-    tsl_unload(&m53_m1_tsl);
-    if (m53_m1_slice) { mm_free(m53_m1_slice); m53_m1_slice = 0; }
-    m53_m1_slice_len = 0;
-    m53_m1_code_len = 0;
-    m53_m1_data_off = 0;
-    m53_m1_data_len = 0;
-    m53_m1_bss_size = 0;
-    m53_m1_bind_fn = 0;
-    m53_m1_disp_fn = 0;
-    m53_m1_run_fn = 0;
-    m53_m1_cache.valid = 0;
+static void tape_rt_drop(TapeRuntime *rt) {
+    tsl_unload(&rt->tsl);
+    if (rt->mf) { mm_free(rt->mf); rt->mf = 0; }
+    rt->mf_len = 0;
+    rt->fdir_n = 0;
+    rt->bind_fn = 0;
+    rt->disp_fn = 0;
+    rt->run_fn = 0;
+    rt->cache.valid = 0;
+    rt->gen++;
 }
 
-static int m53_m1_stat_hit(const char *cpath, const sy_stat_t *st) {
+static void tape_unit_drop_slice(TapeUnitState *u) {
+    if (u->slice) { mm_free(u->slice); u->slice = 0; }
+    u->slice_len = 0;
+    u->code_len = 0;
+    u->data_off = 0;
+    u->data_len = 0;
+    u->bss_size = 0;
+    u->rt_gen = 0;
+}
+
+static int tape_rt_stat_hit(const TapeRuntime *rt, const char *cpath, const sy_stat_t *st) {
     long cl, kl;
-    if (m53_m1_state != M53_M1_READY || !m53_m1_cache.valid) return 0;
+    if (rt->state != M53_M1_READY || !rt->cache.valid) return 0;
     cl = m53_m1_len(cpath, 4096);
-    kl = m53_m1_len(m53_m1_cache.path, 4096);
-    if (!m53_m1_eq(cpath, cl, m53_m1_cache.path, kl)) return 0;
-    return st->dev == m53_m1_cache.dev && st->ino == m53_m1_cache.ino && st->size == m53_m1_cache.size &&
-           st->mtime == m53_m1_cache.mtime && st->mtime_ns == m53_m1_cache.mtime_ns &&
-           st->ctime_ns == m53_m1_cache.ctime_ns;
+    kl = m53_m1_len(rt->cache.path, 4096);
+    if (!m53_m1_eq(cpath, cl, rt->cache.path, kl)) return 0;
+    return st->dev == rt->cache.dev && st->ino == rt->cache.ino && st->size == rt->cache.size &&
+           st->mtime == rt->cache.mtime && st->mtime_ns == rt->cache.mtime_ns &&
+           st->ctime_ns == rt->cache.ctime_ns;
 }
 
 typedef struct {
@@ -521,58 +615,43 @@ static int m53_tok_u64(const char *s, long *at, long len, unsigned long long *ou
     return 0;
 }
 
-/* Stream-seek P4 package directly on fd: reads only headers + the 3 tape/lnx-x86_64/* payloads (~22 KB)
- * instead of reading the full 9.4 MB APE or 2.9 MB P4 body. Enforces identical G1 rules to m53_m1_extract_tape. */
-static int m53_m1_extract_tape_fd(int fd, long pkg_off, long pkglen,
-                                  unsigned char *out_p[3], long out_n[3],
-                                  const char **reason_out, int *detail_out) {
-    static const char *const keys[3] = {
-        "tape/lnx-x86_64/manifest.tsv",
-        "tape/lnx-x86_64/tapemode.so",
-        "tape/lnx-x86_64/m53.tapeslice"
-    };
-    static const long key_len[3] = { 28, 27, 29 };
-    static const long max_bytes[3] = { M53_M1_MAX_MF, M53_M1_MAX_SO, M53_M1_MAX_SL };
+/* Single-pass P4 index builder: skips D/M/non-tape F payloads via lseek and records offsets/CRCs of
+ * all tape/* F records into fdir[] so subsequent units do O(1) direct seeks without rescanning P4. */
+static int tape_rt_scan_p4_fd(int fd, long pkg_off, long pkglen,
+                              TapeFDirEntry fdir[TAPE_RT_MAX_FDIR], int *fdir_n_out) {
     M53FdScan sc;
     char line[512];
-    unsigned char nbuf[32];
-    long ln, at, i, k;
+    unsigned char nbuf[128];
+    long ln, at, i;
+    int fn_cnt = 0;
     unsigned long long ver = 0, pm = 0, ps = 0, nr = 0;
 
-    out_p[0] = 0; out_p[1] = 0; out_p[2] = 0;
-    out_n[0] = 0; out_n[1] = 0; out_n[2] = 0;
-    if (pkg_off < 0 || pkglen <= 0 || sy_lseek(fd, pkg_off, 0) != pkg_off) {
-        *reason_out = "embed-pkg-decode-failed"; *detail_out = 10; return -1;
-    }
+    *fdir_n_out = 0;
+    if (pkg_off < 0 || pkglen <= 0 || sy_lseek(fd, pkg_off, 0) != pkg_off) return -1;
     m53_fd_init(&sc, fd, pkg_off, pkg_off + pkglen);
 
-    /* P <ver> <pm> <ps> <nr>\n */
     ln = m53_fd_line(&sc, line, (long)sizeof line);
-    if (ln <= 0) { *reason_out = "embed-pkg-decode-failed"; *detail_out = 10; return -1; }
+    if (ln <= 0) return -1;
     at = 0;
     while (at < ln && (unsigned char)line[at] <= 32) at++;
     if (at >= ln || line[at++] != 'P' ||
-        m53_tok_u64(line, &at, ln, &ver) != 0 || ver < 4ULL || ver > 4ULL ||
+        m53_tok_u64(line, &at, ln, &ver) != 0 || ver != 4ULL ||
         m53_tok_u64(line, &at, ln, &pm) != 0 || pm == 0ULL || pm > (unsigned long long)(pkglen / 8) ||
         m53_tok_u64(line, &at, ln, &ps) != 0 || ps == 0ULL || ps > (unsigned long long)(pkglen / 10) ||
-        m53_tok_u64(line, &at, ln, &nr) != 0 || nr > (unsigned long long)(pkglen / 5)) {
-        *reason_out = "embed-pkg-decode-failed"; *detail_out = 10; return -1;
-    }
+        m53_tok_u64(line, &at, ln, &nr) != 0 || nr > (unsigned long long)(pkglen / 5)) return -1;
 
-    /* Skip ps stage rows: D <route> <name> <in> <out> <model>\n */
     for (i = 0; i < (long)ps; i++) {
         ln = m53_fd_line(&sc, line, (long)sizeof line);
-        if (ln <= 0) { *reason_out = "embed-pkg-decode-failed"; *detail_out = 10; return -1; }
+        if (ln <= 0) return -1;
         at = 0;
         while (at < ln && (unsigned char)line[at] <= 32) at++;
-        if (at >= ln || line[at] != 'D') { *reason_out = "embed-pkg-decode-failed"; *detail_out = 10; return -1; }
+        if (at >= ln || line[at] != 'D') return -1;
     }
 
-    /* Skip pm model payloads: M <n> <raw> <codec> <sum>\n + <n> bytes */
     for (i = 0; i < (long)pm; i++) {
         unsigned long long mn = 0, mraw = 0, mcod = 0, msum = 0;
         ln = m53_fd_line(&sc, line, (long)sizeof line);
-        if (ln <= 0) { *reason_out = "embed-pkg-decode-failed"; *detail_out = 10; return -1; }
+        if (ln <= 0) return -1;
         at = 0;
         while (at < ln && (unsigned char)line[at] <= 32) at++;
         if (at >= ln || line[at++] != 'M' ||
@@ -580,17 +659,14 @@ static int m53_m1_extract_tape_fd(int fd, long pkg_off, long pkglen,
             m53_tok_u64(line, &at, ln, &mraw) != 0 ||
             m53_tok_u64(line, &at, ln, &mcod) != 0 ||
             m53_tok_u64(line, &at, ln, &msum) != 0 ||
-            m53_fd_skip(&sc, (long)mn) != 0) {
-            *reason_out = "embed-pkg-decode-failed"; *detail_out = 10; return -1;
-        }
+            m53_fd_skip(&sc, (long)mn) != 0) return -1;
     }
 
-    /* Scan nr resource records: F <nlen> <len> <rawlen> <codec> <crc>\n + <nlen> + <len> */
     for (i = 0; i < (long)nr; i++) {
         unsigned long long fn = 0, flen = 0, fraw = 0, fcod = 0, fcrc = 0;
-        int match = -1;
+        long data_off;
         ln = m53_fd_line(&sc, line, (long)sizeof line);
-        if (ln <= 0) { *reason_out = "embed-pkg-decode-failed"; *detail_out = 10; goto err_fd; }
+        if (ln <= 0) return -1;
         at = 0;
         while (at < ln && (unsigned char)line[at] <= 32) at++;
         if (at >= ln || line[at++] != 'F' ||
@@ -598,63 +674,74 @@ static int m53_m1_extract_tape_fd(int fd, long pkg_off, long pkglen,
             m53_tok_u64(line, &at, ln, &flen) != 0 ||
             m53_tok_u64(line, &at, ln, &fraw) != 0 ||
             m53_tok_u64(line, &at, ln, &fcod) != 0 ||
-            m53_tok_u64(line, &at, ln, &fcrc) != 0 || fcrc > 4294967295ULL) {
-            *reason_out = "embed-pkg-decode-failed"; *detail_out = 10; goto err_fd;
-        }
-        if (fn == 27ULL || fn == 28ULL || fn == 29ULL) {
-            if (m53_fd_read(&sc, nbuf, (long)fn) != 0) {
-                *reason_out = "embed-pkg-decode-failed"; *detail_out = 10; goto err_fd;
-            }
-            for (k = 0; k < 3; k++) {
-                if ((long)fn == key_len[k] && m53_m1_eq((const char *)nbuf, (long)fn, keys[k], key_len[k])) {
-                    match = (int)k;
-                    break;
+            m53_tok_u64(line, &at, ln, &fcrc) != 0 || fcrc > 4294967295ULL) return -1;
+        if (fn >= 5ULL && fn < (unsigned long long)sizeof nbuf) {
+            if (m53_fd_read(&sc, nbuf, (long)fn) != 0) return -1;
+            data_off = m53_fd_tell(&sc);
+            if (nbuf[0] == 't' && nbuf[1] == 'a' && nbuf[2] == 'p' && nbuf[3] == 'e' && nbuf[4] == '/') {
+                int j, found = -1;
+                for (j = 0; j < fn_cnt; j++) {
+                    if (fdir[j].key_len == (long)fn && m53_m1_eq(fdir[j].key, fdir[j].key_len, (const char *)nbuf, (long)fn)) {
+                        found = j;
+                        break;
+                    }
+                }
+                if (found >= 0) {
+                    fdir[found].dup = 1;
+                } else if (fn_cnt < TAPE_RT_MAX_FDIR) {
+                    TapeFDirEntry *e = &fdir[fn_cnt++];
+                    mm_copy(e->key, (long)sizeof e->key, nbuf, (long)fn);
+                    e->key[fn] = 0;
+                    e->key_len = (long)fn;
+                    e->data_off = data_off;
+                    e->len = (long)flen;
+                    e->rawlen = (long)fraw;
+                    e->crc = (unsigned)fcrc;
+                    e->codec = (int)fcod;
+                    e->dup = 0;
                 }
             }
         } else {
-            if (m53_fd_skip(&sc, (long)fn) != 0) {
-                *reason_out = "embed-pkg-decode-failed"; *detail_out = 10; goto err_fd;
-            }
+            if (m53_fd_skip(&sc, (long)fn) != 0) return -1;
         }
-        if (match >= 0) {
-            unsigned char *pay;
-            if (out_p[match]) { *reason_out = "embed-resource-duplicate"; *detail_out = match + 1; goto err_fd; }
-            if (fcod != 0ULL) { *reason_out = "embed-pkg-decode-failed"; *detail_out = 20 + match; goto err_fd; }
-            if (flen == 0ULL || fraw != flen || (long)flen > max_bytes[match]) {
-                *reason_out = "embed-pkg-decode-failed"; *detail_out = 30 + match; goto err_fd;
-            }
-            pay = (unsigned char *)mm_alloc((long)flen);
-            if (!pay) { *reason_out = "embed-pkg-decode-failed"; *detail_out = 10; goto err_fd; }
-            if (m53_fd_read(&sc, pay, (long)flen) != 0) {
-                mm_free(pay); *reason_out = "embed-pkg-decode-failed"; *detail_out = 10; goto err_fd;
-            }
-            if (m53_m1_crc32(pay, (long)flen) != (unsigned)fcrc) {
-                mm_free(pay); *reason_out = "embed-pkg-decode-failed"; *detail_out = match; goto err_fd;
-            }
-            out_p[match] = pay;
-            out_n[match] = (long)flen;
-        } else {
-            if (m53_fd_skip(&sc, (long)flen) != 0) {
-                *reason_out = "embed-pkg-decode-failed"; *detail_out = 10; goto err_fd;
-            }
-        }
+        if (m53_fd_skip(&sc, (long)flen) != 0) return -1;
     }
-    if (m53_fd_tell(&sc) != pkg_off + pkglen) {
-        *reason_out = "embed-pkg-decode-failed"; *detail_out = 10; goto err_fd;
-    }
-    for (k = 0; k < 3; k++) {
-        if (!out_p[k]) { *reason_out = "embed-resource-missing"; *detail_out = (int)k + 1; goto err_fd; }
-    }
-    *reason_out = 0;
-    *detail_out = 0;
+    if (m53_fd_tell(&sc) != pkg_off + pkglen) return -1;
+    *fdir_n_out = fn_cnt;
     return 0;
-err_fd:
-    for (k = 0; k < 3; k++) { if (out_p[k]) { mm_free(out_p[k]); out_p[k] = 0; out_n[k] = 0; } }
-    return -1;
 }
 
-/* Locate P4 package span on fd by reading only head4 + 16-byte tail footer (fallback to full
- * packagefooter_locate_bytes only for signed PE containers with trailing certificate tables). */
+static const TapeFDirEntry *tape_fdir_find(const TapeFDirEntry *fdir, int n, const char *key) {
+    long kl = m53_m1_len(key, 128);
+    int i;
+    for (i = 0; i < n; i++) {
+        if (fdir[i].key_len == kl && m53_m1_eq(fdir[i].key, kl, key, kl)) return &fdir[i];
+    }
+    return 0;
+}
+
+/* Read one indexed tape/* F record via direct lseek + sy_read_full and enforce G1 CRC/codec/bounds. */
+static unsigned char *tape_fdir_read_checked(int fd, const TapeFDirEntry *e, int k, long max_bytes,
+                                             long *len_out, const char **reason_out, int *detail_out) {
+    unsigned char *buf;
+    if (!e) { *reason_out = "embed-resource-missing"; *detail_out = k + 1; return 0; }
+    if (e->dup) { *reason_out = "embed-resource-duplicate"; *detail_out = k + 1; return 0; }
+    if (e->codec != 0) { *reason_out = "embed-pkg-decode-failed"; *detail_out = 20 + k; return 0; }
+    if (e->len <= 0 || e->rawlen != e->len || e->len > max_bytes) {
+        *reason_out = "embed-pkg-decode-failed"; *detail_out = 30 + k; return 0;
+    }
+    buf = (unsigned char *)mm_alloc(e->len);
+    if (!buf) { *reason_out = "embed-pkg-decode-failed"; *detail_out = 10; return 0; }
+    if (sy_lseek(fd, e->data_off, 0) != e->data_off || sy_read_full(fd, buf, e->len) != 0) {
+        mm_free(buf); *reason_out = "embed-pkg-decode-failed"; *detail_out = 10; return 0;
+    }
+    if (m53_m1_crc32(buf, e->len) != e->crc) {
+        mm_free(buf); *reason_out = "embed-pkg-decode-failed"; *detail_out = k; return 0;
+    }
+    *len_out = e->len;
+    return buf;
+}
+
 static int m53_m1_locate_pkg_fd(int fd, long apen, long *pkg_off_out, long *pkglen_out) {
     unsigned char h4[4], foot[16];
     unsigned long long plen;
@@ -675,7 +762,6 @@ static int m53_m1_locate_pkg_fd(int fd, long apen, long *pkg_off_out, long *pkgl
             return 0;
         }
     }
-    /* Slow fallback: signed PE with cert table padding before UNIPKG1 footer. */
     {
         unsigned char *ape = (unsigned char *)mm_alloc(apen);
         PackageFooter pf;
@@ -694,337 +780,507 @@ static int m53_m1_locate_pkg_fd(int fd, long apen, long *pkg_off_out, long *pkgl
     }
 }
 
-/* G3: fast stat-key cache hit (0 reads, 0 hashes on 2nd+ calls); on miss, stream-seeks only footer
- * + 3 tape records (~22 KB) and hashes only the 3 tape records (~18 KB, ~1.4 ms) before atomic swap. */
-static int m53_m1_ensure_loaded(void) {
+/* Boot or reload the ONE shared TapeRuntime per process (footer + P4 fdir + manifest + tapemode.so). */
+static int tape_rt_ensure(TapeUnitState *u, const TapeUnitSpec *sp, const char *cpath,
+                          int *fd_inout, sy_stat_t *st_inout) {
     static const char *const sym_names[3] = {
         "hoststub_lnx_x86_64_bind",
         "hoststub_lnx_x86_64",
         "tape_run_x86_64"
     };
-    char selfp[4096];
-    const char *cpath = sy_env("UNISA_CONTAINER");
-    int fd = -1, rc, i;
-    sy_stat_t st;
-    long apen = 0, pkg_off = 0, pkglen = 0;
-    unsigned char *tp[3] = {0, 0, 0};
-    long tn[3] = {0, 0, 0};
-    unsigned char *new_slice = 0;
+    TapeRuntime *rt = &g_tape_rt;
+    TapeFDirEntry new_fdir[TAPE_RT_MAX_FDIR];
+    int new_fn = 0, rc, i;
+    long apen, pkg_off = 0, pkglen = 0, mf_len = 0, so_len = 0;
+    unsigned char *mf_buf = 0, *so_buf = 0;
+    unsigned char so_h[32];
+    char so_sha[65];
     const char *er = 0;
     int ed = 0;
-    unsigned char comb96[96], tape_sha[32];
-    char so_sha[65], sl_sha[65];
-    unsigned long long new_clen = 0, new_doff = 0, new_dlen = 0, new_bsz = 0;
     tsl_img_t new_tsl;
     void *new_bind = 0, *new_disp = 0, *new_run = 0;
+    long t0 = tape_mono_ns();
 
-    if (!cpath || !cpath[0]) {
-        if (sy_self_path(selfp, (int)sizeof selfp) != 0) {
-            m53_m1_drop_loaded();
-            return m53_m1_fail("embed-container-missing", -ENOENT);
+    if (*fd_inout < 0) {
+        *fd_inout = sy_open_read(cpath);
+        if (*fd_inout < 0) {
+            tape_rt_drop(rt);
+            rt->state = M53_M1_REFUSED;
+            return tape_unit_fail(u, sp, "embed-container-missing", *fd_inout);
         }
-        cpath = selfp;
+        if (sy_fstat(*fd_inout, st_inout) != 0 || st_inout->kind != 'f' ||
+            st_inout->size <= 0 || st_inout->size > M53_M1_MAX_APE) {
+            tape_rt_drop(rt);
+            rt->state = M53_M1_REFUSED;
+            return tape_unit_fail(u, sp, "embed-container-missing", -EINVAL);
+        }
     }
-    fd = sy_open_read(cpath);
-    if (fd < 0) {
-        m53_m1_drop_loaded();
-        return m53_m1_fail("embed-container-missing", fd);
+    if (tape_rt_stat_hit(rt, cpath, st_inout)) return 0;
+
+    apen = (long)st_inout->size;
+    rt->state = M53_M1_LOADING;
+    if (m53_m1_locate_pkg_fd(*fd_inout, apen, &pkg_off, &pkglen) != 0) {
+        tape_rt_drop(rt); rt->state = M53_M1_REFUSED;
+        return tape_unit_fail(u, sp, "embed-footer-invalid", 0);
     }
-    if (sy_fstat(fd, &st) != 0 || st.kind != 'f' || st.size <= 0 || st.size > M53_M1_MAX_APE) {
-        sy_close(fd);
-        m53_m1_drop_loaded();
-        return m53_m1_fail("embed-container-missing", -EINVAL);
-    }
-    /* (1) Fast path: path + stat (dev/ino/size/mtime/mtime_ns/ctime_ns) hit -> 0 reads, 0 hashes. */
-    if (m53_m1_stat_hit(cpath, &st)) {
-        sy_close(fd);
-        return 0;
+    if (tape_rt_scan_p4_fd(*fd_inout, pkg_off, pkglen, new_fdir, &new_fn) != 0) {
+        tape_rt_drop(rt); rt->state = M53_M1_REFUSED;
+        return tape_unit_fail(u, sp, "embed-pkg-decode-failed", 10);
     }
 
-    apen = (long)st.size;
-    m53_m1_state = M53_M1_LOADING;
-    /* (3) Locate package span via 16-byte footer and stream-seek only the 3 tape F records. */
-    if (m53_m1_locate_pkg_fd(fd, apen, &pkg_off, &pkglen) != 0) {
-        sy_close(fd);
-        m53_m1_drop_loaded();
-        return m53_m1_fail("embed-footer-invalid", 0);
+    mf_buf = tape_fdir_read_checked(*fd_inout, tape_fdir_find(new_fdir, new_fn, sp->mf_key),
+                                    0, M53_M1_MAX_MF, &mf_len, &er, &ed);
+    if (!mf_buf) {
+        tape_rt_drop(rt); rt->state = M53_M1_REFUSED;
+        return tape_unit_fail(u, sp, er ? er : "embed-pkg-decode-failed", ed);
     }
-    if (m53_m1_extract_tape_fd(fd, pkg_off, pkglen, tp, tn, &er, &ed) != 0) {
-        sy_close(fd);
-        m53_m1_drop_loaded();
-        return m53_m1_fail(er ? er : "embed-pkg-decode-failed", ed);
+    so_buf = tape_fdir_read_checked(*fd_inout, tape_fdir_find(new_fdir, new_fn, sp->so_key),
+                                    1, M53_M1_MAX_SO, &so_len, &er, &ed);
+    if (!so_buf) {
+        mm_free(mf_buf);
+        tape_rt_drop(rt); rt->state = M53_M1_REFUSED;
+        return tape_unit_fail(u, sp, er ? er : "embed-pkg-decode-failed", ed);
     }
-    sy_close(fd);
 
-    /* (2) Hash only the 3 tape records (~18 KB, ~1.4 ms) for manifest check + cache identity. */
-    cx_sha256(tp[0], (size_t)tn[0], comb96);
-    cx_sha256(tp[1], (size_t)tn[1], comb96 + 32);
-    cx_sha256(tp[2], (size_t)tn[2], comb96 + 64);
-    cx_sha256(comb96, 96, tape_sha);
-    m53_m1_hex(comb96 + 32, so_sha);
-    m53_m1_hex(comb96 + 64, sl_sha);
-
-    if (m53_m1_check_mf_line((const char *)tp[0], tn[0], "tapemode.so", so_sha, tn[1]) != 0) {
-        mm_free(tp[0]); mm_free(tp[1]); mm_free(tp[2]); m53_m1_drop_loaded();
-        return m53_m1_fail("embed-manifest-mismatch", 1);
+    cx_sha256(so_buf, (size_t)so_len, so_h);
+    m53_m1_hex(so_h, so_sha);
+    if (m53_m1_check_mf_line((const char *)mf_buf, mf_len, sp->so_leaf, so_sha, so_len) != 0) {
+        mm_free(so_buf); mm_free(mf_buf);
+        tape_rt_drop(rt); rt->state = M53_M1_REFUSED;
+        return tape_unit_fail(u, sp, "embed-manifest-mismatch", 1);
     }
-    if (m53_m1_check_mf_line((const char *)tp[0], tn[0], "m53.tapeslice", sl_sha, tn[2]) != 0) {
-        mm_free(tp[0]); mm_free(tp[1]); mm_free(tp[2]); m53_m1_drop_loaded();
-        return m53_m1_fail("embed-manifest-mismatch", 2);
-    }
-    mm_free(tp[0]); tp[0] = 0;
-
-    if (m53_m1_validate_slice(tp[2], tn[2], &new_clen, &new_doff, &new_dlen, &new_bsz) != 0) {
-        mm_free(tp[1]); mm_free(tp[2]); m53_m1_drop_loaded();
-        return m53_m1_fail("embed-slice-corrupt", 1);
-    }
-    new_slice = tp[2]; tp[2] = 0;
 
     mm_fill(&new_tsl, (long)sizeof new_tsl, 0, (long)sizeof new_tsl);
-    rc = tsl_check(tp[1], tn[1], sym_names, &new_tsl);
+    rc = tsl_check(so_buf, so_len, sym_names, &new_tsl);
     if (rc != 0) {
-        mm_free(tp[1]); mm_free(new_slice); m53_m1_drop_loaded();
-        return m53_m1_fail("embed-so-invalid", rc);
+        mm_free(so_buf); mm_free(mf_buf);
+        tape_rt_drop(rt); rt->state = M53_M1_REFUSED;
+        return tape_unit_fail(u, sp, "embed-so-invalid", rc);
     }
-    rc = tsl_map(tp[1], tn[1], &new_tsl);
-    mm_free(tp[1]); tp[1] = 0;
+    rc = tsl_map(so_buf, so_len, &new_tsl);
+    mm_free(so_buf); so_buf = 0;
     if (rc != 0) {
-        mm_free(new_slice); m53_m1_drop_loaded();
-        return m53_m1_fail("embed-so-map-failed", rc);
+        mm_free(mf_buf);
+        tape_rt_drop(rt); rt->state = M53_M1_REFUSED;
+        return tape_unit_fail(u, sp, "embed-so-map-failed", rc);
     }
-
     new_bind = tsl_addr(&new_tsl, 0);
     new_disp = tsl_addr(&new_tsl, 1);
     new_run = tsl_addr(&new_tsl, 2);
     if (!new_bind || !new_disp || !new_run) {
-        tsl_unload(&new_tsl);
-        mm_free(new_slice);
-        m53_m1_drop_loaded();
-        return m53_m1_fail("embed-so-map-failed", 20);
+        tsl_unload(&new_tsl); mm_free(mf_buf);
+        tape_rt_drop(rt); rt->state = M53_M1_REFUSED;
+        return tape_unit_fail(u, sp, "embed-so-map-failed", 20);
     }
 
-    /* Atomic swap: unload old mapping and publish validated new image + cache key. */
-    m53_m1_drop_loaded();
-    for (i = 0; i < TSL_I_WORDS; i++) m53_m1_tsl[i] = new_tsl[i];
-    m53_m1_slice = new_slice;
-    m53_m1_slice_len = tn[2];
-    m53_m1_code_len = new_clen;
-    m53_m1_data_off = new_doff;
-    m53_m1_data_len = new_dlen;
-    m53_m1_bss_size = new_bsz;
-    m53_m1_bind_fn = new_bind;
-    m53_m1_disp_fn = new_disp;
-    m53_m1_run_fn = new_run;
-    m53_m1_cpy(m53_m1_cache.path, (long)sizeof m53_m1_cache.path, cpath);
-    m53_m1_cache.dev = st.dev;
-    m53_m1_cache.ino = st.ino;
-    m53_m1_cache.size = st.size;
-    m53_m1_cache.mtime = st.mtime;
-    m53_m1_cache.mtime_ns = st.mtime_ns;
-    m53_m1_cache.ctime_ns = st.ctime_ns;
-    for (i = 0; i < 32; i++) m53_m1_cache.tape_sha[i] = tape_sha[i];
-    m53_m1_cache.valid = 1;
-    m53_m1_state = M53_M1_READY;
+    /* Atomic swap into shared TapeRuntime (bumps rt->gen so all units lazily re-verify slices). */
+    tape_rt_drop(rt);
+    for (i = 0; i < TSL_I_WORDS; i++) rt->tsl[i] = new_tsl[i];
+    for (i = 0; i < new_fn; i++) rt->fdir[i] = new_fdir[i];
+    rt->fdir_n = new_fn;
+    rt->mf = mf_buf;
+    rt->mf_len = mf_len;
+    rt->bind_fn = new_bind;
+    rt->disp_fn = new_disp;
+    rt->run_fn = new_run;
+    m53_m1_cpy(rt->cache.path, (long)sizeof rt->cache.path, cpath);
+    rt->cache.dev = st_inout->dev;
+    rt->cache.ino = st_inout->ino;
+    rt->cache.size = st_inout->size;
+    rt->cache.mtime = st_inout->mtime;
+    rt->cache.mtime_ns = st_inout->mtime_ns;
+    rt->cache.ctime_ns = st_inout->ctime_ns;
+    rt->cache.valid = 1;
+    rt->state = M53_M1_READY;
+    rt->boot_count++;
+    rt->boot_ns += (tape_mono_ns() - t0);
     return 0;
 }
 
-/* G4 authoritative VM result classifier (shared by m53_m1_vm_exec and tools/check-m1-g4.cx).
- * res layout: [0]=vm_status, [1]=steps, [2]=fault_code, [3]=raw_64bit_ret (never masked & 255). */
-int m53_m1_classify_vm_result(long call_rc, const unsigned long long res[4],
-                              const char **reason_out, int *detail_out) {
+/* Lazy per-unit slice loader: O(1) seek from shared g_tape_rt.fdir[] + G1 CRC + manifest + UTAPEBIN. */
+static int tape_unit_ensure_slice(TapeUnitState *u, const TapeUnitSpec *sp,
+                                  const char *cpath, int *fd_inout) {
+    TapeRuntime *rt = &g_tape_rt;
+    unsigned char *sl_buf = 0;
+    unsigned char sl_h[32];
+    char sl_sha[65];
+    long sl_len = 0;
+    unsigned long long new_clen = 0, new_doff = 0, new_dlen = 0, new_bsz = 0;
+    const char *er = 0;
+    int ed = 0;
+    long t0 = tape_mono_ns();
+
+    if (u->state == M53_M1_READY && u->rt_gen == rt->gen && u->slice) return 0;
+
+    if (*fd_inout < 0) {
+        *fd_inout = sy_open_read(cpath);
+        if (*fd_inout < 0) {
+            tape_unit_drop_slice(u);
+            return tape_unit_fail(u, sp, "embed-container-missing", *fd_inout);
+        }
+    }
+    sl_buf = tape_fdir_read_checked(*fd_inout, tape_fdir_find(rt->fdir, rt->fdir_n, sp->sl_key),
+                                    2, M53_M1_MAX_SL, &sl_len, &er, &ed);
+    if (!sl_buf) {
+        tape_unit_drop_slice(u);
+        return tape_unit_fail(u, sp, er ? er : "embed-pkg-decode-failed", ed);
+    }
+    cx_sha256(sl_buf, (size_t)sl_len, sl_h);
+    m53_m1_hex(sl_h, sl_sha);
+    if (m53_m1_check_mf_line((const char *)rt->mf, rt->mf_len, sp->sl_leaf, sl_sha, sl_len) != 0) {
+        mm_free(sl_buf);
+        tape_unit_drop_slice(u);
+        return tape_unit_fail(u, sp, "embed-manifest-mismatch", 2);
+    }
+    if (tape_unit_validate_slice(sl_buf, sl_len, sp->abi_tag, sp->abi_tag_len,
+                                 &new_clen, &new_doff, &new_dlen, &new_bsz) != 0) {
+        mm_free(sl_buf);
+        tape_unit_drop_slice(u);
+        return tape_unit_fail(u, sp, "embed-slice-corrupt", 1);
+    }
+    tape_unit_drop_slice(u);
+    u->slice = sl_buf;
+    u->slice_len = sl_len;
+    u->code_len = new_clen;
+    u->data_off = new_doff;
+    u->data_len = new_dlen;
+    u->bss_size = new_bsz;
+    u->rt_gen = rt->gen;
+    u->state = M53_M1_READY;
+    u->slice_load_ns += (tape_mono_ns() - t0);
+    return 0;
+}
+
+/* Parameterized VM result classifier: validates [0..max_ret] domain without & 255 truncation. */
+static long tape_unit_classify_vm_domain(long call_rc, const unsigned long long res[4],
+                                         unsigned long long max_ret,
+                                         const char **reason_out, int *detail_out) {
     if (reason_out) *reason_out = 0;
     if (detail_out) *detail_out = 0;
     if (call_rc != 0L) {
         if (reason_out) *reason_out = "embed-vm-call-failed";
         if (detail_out) *detail_out = (int)call_rc;
-        return -2;
+        return -2L;
     }
     if (!res) {
         if (reason_out) *reason_out = "embed-vm-fault";
         if (detail_out) *detail_out = -1;
-        return -2;
+        return -2L;
     }
     if (res[0] != 0ULL) {
         if (reason_out) *reason_out = "embed-vm-fault";
         if (detail_out) *detail_out = (int)(res[2] ? res[2] : res[0]);
-        return -2;
+        return -2L;
     }
-    if (res[3] != 0ULL && res[3] != 1ULL) {
+    if (res[3] > max_ret) {
         if (reason_out) *reason_out = "embed-vm-bad-return";
         if (detail_out) *detail_out = res[3] <= 2147483647ULL ? (int)res[3] : 2147483647;
-        return -2;
+        return -2L;
     }
-    return (int)res[3];
+    return (long)res[3];
 }
 
-/* G4 tape_x86_64.S .Lrun_exit ABI classifier:
- * - result[0..4] is pre-filled with M53_M1_RES_SENTINEL before tsl_call2(run_fn); tape_x86_64.S:262-265
- *   always zeroes result[0..4] via rep stosq on real execution and records steps>0 at .Lrun_return.
- * - ASM status codes (tape_x86_64.S:1081-1101): 0=normal exit, 2=fault/container, 3=budget exhausted.
- * - On normal exit (res[0]==0): %rax (rrc) MUST equal (long)res[3]; any disagreement (including
- *   rrc==0 while res[3]==1) produces a guaranteed non-zero internal error (-3 when rrc==0). */
-int m53_m1_classify_run_result(long rrc, const unsigned long long res[4],
-                               const char **reason_out, int *detail_out) {
+int m53_m1_classify_vm_result(long call_rc, const unsigned long long res[4],
+                              const char **reason_out, int *detail_out) {
+    return (int)tape_unit_classify_vm_domain(call_rc, res, 1ULL, reason_out, detail_out);
+}
+
+static long tape_unit_classify_run_domain(long rrc, const unsigned long long res[4],
+                                          unsigned long long max_ret,
+                                          const char **reason_out, int *detail_out) {
     if (reason_out) *reason_out = 0;
     if (detail_out) *detail_out = 0;
     if (!res) {
         if (reason_out) *reason_out = "embed-vm-fault";
         if (detail_out) *detail_out = -1;
-        return -2;
+        return -2L;
     }
     if (res[0] == M53_M1_RES_SENTINEL || res[1] == M53_M1_RES_SENTINEL ||
         res[2] == M53_M1_RES_SENTINEL || res[3] == M53_M1_RES_SENTINEL) {
         if (reason_out) *reason_out = "embed-vm-unwritten";
         if (detail_out) *detail_out = -4;
-        return -2;
+        return -2L;
     }
     if (res[0] == 3ULL) {
         if (reason_out) *reason_out = "embed-vm-budget";
         if (detail_out) *detail_out = 3;
-        return -2;
+        return -2L;
     }
     if (res[0] != 0ULL) {
         if (reason_out) *reason_out = "embed-vm-fault";
         if (detail_out) *detail_out = (int)(res[2] ? res[2] : res[0]);
-        return -2;
+        return -2L;
     }
     if (res[1] == 0ULL) {
         if (reason_out) *reason_out = "embed-vm-unwritten";
         if (detail_out) *detail_out = -5;
-        return -2;
+        return -2L;
     }
     if (rrc != (long)res[3]) {
         long err = rrc ? rrc : -3L;
         if (reason_out) *reason_out = "embed-vm-call-failed";
         if (detail_out) *detail_out = (int)err;
-        return -2;
+        return -2L;
     }
-    return m53_m1_classify_vm_result(0L, res, reason_out, detail_out);
+    return tape_unit_classify_vm_domain(0L, res, max_ret, reason_out, detail_out);
 }
 
-/* G4: execute embedded m53.tapeslice cxsa_valid via tsl_call2 with full 64-bit return domain check. */
-static int m53_m1_vm_exec(const unsigned char *data, long length) {
-    unsigned long long data_aligned, copy_n, in_off, in_end, argv_at, argbuf_off, memlimit, ibitmap_cap;
-    unsigned char *mem = 0, *ibm = 0;
-    unsigned long long args[12], result[5], res4[4], *guest_argv;
-    char *abuf, *a0, *a1, *a2;
-    const char *why = 0;
-    long brc, rrc;
-    int i, det = 0, ret;
+int m53_m1_classify_run_result(long rrc, const unsigned long long res[4],
+                               const char **reason_out, int *detail_out) {
+    return (int)tape_unit_classify_run_domain(rrc, res, 1ULL, reason_out, detail_out);
+}
 
-    if (!m53_m1_tsl[TSL_I_BASE] || !m53_m1_slice || !m53_m1_bind_fn || !m53_m1_disp_fn || !m53_m1_run_fn) {
-        m53_m1_emit_refuse("embed-vm-call-failed", -1);
-        return -2;
+static int tape_rt_ensure_arena(TapeRuntime *rt, long memlimit, long ibitmap_cap) {
+    if (memlimit > rt->vm_mem_cap) {
+        long want = memlimit < 131072L ? 131072L : memlimit;
+        unsigned char *p = (unsigned char *)mm_alloc(want);
+        if (!p) return -1;
+        mm_fill(p, want, 0, want);
+        if (rt->vm_mem) mm_free(rt->vm_mem);
+        rt->vm_mem = p;
+        rt->vm_mem_cap = want;
     }
-    if (m53_m1_data_len > ~7ULL) {
-        m53_m1_emit_refuse("embed-vm-call-failed", -2);
-        return -2;
+    if (ibitmap_cap > rt->vm_ibm_cap) {
+        long want = ibitmap_cap < 4096L ? 4096L : ibitmap_cap;
+        unsigned char *p = (unsigned char *)mm_alloc(want);
+        if (!p) return -1;
+        mm_fill(p, want, 0, want);
+        if (rt->vm_ibm) mm_free(rt->vm_ibm);
+        rt->vm_ibm = p;
+        rt->vm_ibm_cap = want;
     }
-    data_aligned = (m53_m1_data_len + 7ULL) & ~7ULL;
-    if (m53_m1_bss_size > 0x20000000ULL - 65536ULL - data_aligned) {
-        m53_m1_emit_refuse("embed-vm-call-failed", -2);
-        return -2;
+    return 0;
+}
+
+static long tape_unit_vm_exec(TapeUnitState *u, const TapeUnitSpec *sp,
+                              const unsigned char *data, long length) {
+    TapeRuntime *rt = &g_tape_rt;
+    unsigned long long data_aligned, copy_n, in_off, in_end, argv_at, argbuf_off, memlimit, ibitmap_cap;
+    unsigned char *mem, *ibm;
+    unsigned long long args[12], result[5], res4[4], *guest_argv, *bin_blk;
+    const char *why = 0;
+    long brc, rrc, ret;
+    int i, det = 0, ibm_cached;
+
+    if (!rt->tsl[TSL_I_BASE] || !u->slice || !rt->bind_fn || !rt->disp_fn || !rt->run_fn) {
+        tape_emit_refuse(sp->refuse_tag, "embed-vm-call-failed", -1);
+        return -2L;
     }
-    in_off = data_aligned + m53_m1_bss_size;
+    if (u->data_len > ~7ULL) {
+        tape_emit_refuse(sp->refuse_tag, "embed-vm-call-failed", -2);
+        return -2L;
+    }
+    data_aligned = (u->data_len + 7ULL) & ~7ULL;
+    if (u->bss_size > 0x20000000ULL - 65536ULL - data_aligned) {
+        tape_emit_refuse(sp->refuse_tag, "embed-vm-call-failed", -2);
+        return -2L;
+    }
+    in_off = data_aligned + u->bss_size;
     copy_n = (data && length > 0) ? (unsigned long long)length : 0ULL;
     in_end = (in_off + copy_n + 7ULL) & ~7ULL;
     argv_at = in_end + 65536ULL;
     argbuf_off = argv_at + 64ULL;
     memlimit = argbuf_off + 128ULL;
-    ibitmap_cap = (m53_m1_code_len >> 3) + ((m53_m1_code_len & 7ULL) != 0ULL ? 1ULL : 0ULL);
+    ibitmap_cap = (u->code_len >> 3) + ((u->code_len & 7ULL) != 0ULL ? 1ULL : 0ULL);
     if (ibitmap_cap == 0ULL) ibitmap_cap = 1ULL;
 
-    mem = (unsigned char *)mm_alloc((long)memlimit);
-    ibm = (unsigned char *)mm_alloc((long)ibitmap_cap);
-    if (!mem || !ibm) {
-        if (ibm) mm_free(ibm);
-        if (mem) mm_free(mem);
-        m53_m1_emit_refuse("embed-vm-call-failed", -2);
-        return -2;
+    if (tape_rt_ensure_arena(rt, (long)memlimit, (long)ibitmap_cap) != 0) {
+        tape_emit_refuse(sp->refuse_tag, "embed-vm-call-failed", -2);
+        return -2L;
     }
-    mm_fill(mem, (long)memlimit, 0, (long)memlimit);
-    mm_fill(ibm, (long)ibitmap_cap, 0, (long)ibitmap_cap);
-    if (m53_m1_data_len > 0ULL && mm_copy(mem, (long)memlimit, m53_m1_slice + m53_m1_data_off, (long)m53_m1_data_len)) {
-        mm_free(ibm); mm_free(mem);
-        m53_m1_emit_refuse("embed-vm-call-failed", -2);
-        return -2;
+    mem = rt->vm_mem;
+    if (u->data_len > 0ULL && mm_copy(mem, (long)memlimit, u->slice + u->data_off, (long)u->data_len)) {
+        tape_emit_refuse(sp->refuse_tag, "embed-vm-call-failed", -2);
+        return -2L;
     }
+    if (data_aligned > u->data_len)
+        mm_fill(mem + u->data_len, (long)(data_aligned - u->data_len), 0, (long)(data_aligned - u->data_len));
     if (copy_n > 0ULL && mm_copy(mem + in_off, (long)(memlimit - in_off), data, (long)copy_n)) {
-        mm_free(ibm); mm_free(mem);
-        m53_m1_emit_refuse("embed-vm-call-failed", -2);
-        return -2;
+        tape_emit_refuse(sp->refuse_tag, "embed-vm-call-failed", -2);
+        return -2L;
     }
+    if (in_end > in_off + copy_n)
+        mm_fill(mem + in_off + copy_n, (long)(in_end - (in_off + copy_n)), 0, (long)(in_end - (in_off + copy_n)));
 
     guest_argv = (unsigned long long *)(mem + argv_at);
-    abuf = (char *)(mem + argbuf_off);
-    a0 = abuf; m53_m1_cpy(a0, 32, "cxsa_valid");
-    a1 = a0 + 32; m53_m1_wr_i64_dec(a1, 32, data ? (long long)(unsigned long long)(mem + in_off) : 0LL);
-    a2 = a1 + 32; m53_m1_wr_i64_dec(a2, 32, (long long)length);
-    guest_argv[0] = (unsigned long long)a0;
-    guest_argv[1] = (unsigned long long)a1;
-    guest_argv[2] = (unsigned long long)a2;
+    /* Fixed little-endian u64 binary argument block at mem + argbuf_off: [ptr, len] for all units. */
+    bin_blk = (unsigned long long *)(mem + argbuf_off);
+    bin_blk[0] = data ? (unsigned long long)(mem + in_off) : 0ULL;
+    bin_blk[1] = (unsigned long long)length;
+    bin_blk[2] = 0ULL;
+    guest_argv[0] = (unsigned long long)(mem + argbuf_off + 16ULL);
+    guest_argv[1] = (unsigned long long)bin_blk;
+    guest_argv[2] = (unsigned long long)(mem + argbuf_off + 16ULL);
     guest_argv[3] = 0ULL;
 
-    brc = tsl_call2(&m53_m1_tsl, m53_m1_bind_fn, (long)mem, (long)memlimit);
+    TapeIbmSlot *slot = 0;
+    ibm_cached = 0;
+    for (i = 0; i < 16; i++) {
+        if (rt->ibm_cache[i].slice == u->slice && rt->ibm_cache[i].gen == rt->gen &&
+            rt->ibm_cache[i].ibm && rt->ibm_cache[i].cap >= (long)ibitmap_cap) {
+            slot = &rt->ibm_cache[i];
+            ibm_cached = 1;
+            break;
+        }
+    }
+    if (!ibm_cached) {
+        for (i = 0; i < 16; i++) {
+            if (!rt->ibm_cache[i].slice || rt->ibm_cache[i].gen != rt->gen) { slot = &rt->ibm_cache[i]; break; }
+        }
+        if (!slot) slot = &rt->ibm_cache[0];
+        if (!slot->ibm || slot->cap < (long)ibitmap_cap) {
+            unsigned char *nb = (unsigned char *)mm_alloc((long)ibitmap_cap);
+            if (!nb) {
+                tape_emit_refuse(sp->refuse_tag, "embed-vm-call-failed", -2);
+                return -2L;
+            }
+            if (slot->ibm) mm_free(slot->ibm);
+            slot->ibm = nb;
+            slot->cap = (long)ibitmap_cap;
+        }
+        slot->slice = 0;
+        slot->gen = 0;
+        mm_fill(slot->ibm, (long)ibitmap_cap, 0, (long)ibitmap_cap);
+    }
+    ibm = slot->ibm;
+
+    brc = tsl_call2(&rt->tsl, rt->bind_fn, (long)mem, (long)memlimit);
     if (brc != 0L) {
-        mm_free(ibm); mm_free(mem);
-        m53_m1_emit_refuse("embed-vm-call-failed", (int)brc);
-        return -2;
+        tape_emit_refuse(sp->refuse_tag, "embed-vm-call-failed", (int)brc);
+        return -2L;
     }
     for (i = 0; i < 12; i++) args[i] = 0ULL;
     for (i = 0; i < 5; i++) result[i] = M53_M1_RES_SENTINEL;
-    args[0] = 4ULL;
-    args[1] = (unsigned long long)m53_m1_slice;
+    args[0] = ibm_cached ? 260ULL : 4ULL;
+    args[1] = (unsigned long long)u->slice;
     args[2] = memlimit;
-    args[3] = 2000000ULL;
+    args[3] = sp->budget ? sp->budget : 2000000ULL;
     args[4] = 3ULL;
     args[5] = (unsigned long long)guest_argv;
     args[6] = (unsigned long long)result;
-    args[7] = (unsigned long long)m53_m1_slice_len;
-    args[8] = (unsigned long long)m53_m1_disp_fn;
+    args[7] = (unsigned long long)u->slice_len;
+    args[8] = (unsigned long long)rt->disp_fn;
     args[9] = (unsigned long long)mem;
     args[10] = (unsigned long long)ibm;
     args[11] = ibitmap_cap;
 
-    rrc = tsl_call2(&m53_m1_tsl, m53_m1_run_fn, (long)args, 0L);
-    mm_free(ibm);
-    mm_free(mem);
+    rrc = tsl_call2(&rt->tsl, rt->run_fn, (long)args, 0L);
+    if (!ibm_cached && result[0] == 0ULL) {
+        slot->slice = u->slice;
+        slot->gen = rt->gen;
+    }
 
     res4[0] = result[0];
     res4[1] = result[2];
     res4[2] = result[4];
     res4[3] = result[1];
-    ret = m53_m1_classify_run_result(rrc, res4, &why, &det);
-    if (ret < 0) {
-        m53_m1_emit_refuse(why ? why : "embed-vm-fault", det);
-        return -2;
+    ret = tape_unit_classify_run_domain(rrc, res4, sp->max_ret, &why, &det);
+    if (ret < 0L) {
+        tape_emit_refuse(sp->refuse_tag, why ? why : "embed-vm-fault", det);
+        return -2L;
     }
+    return ret;
+}
+
+/* Measure-ready hooks for per-process shared runtime and per-unit first-call/repeat ms. */
+void tape_rt_stats(long *boot_count_out, long *boot_ns_out) {
+    if (boot_count_out) *boot_count_out = g_tape_rt.boot_count;
+    if (boot_ns_out) *boot_ns_out = g_tape_rt.boot_ns;
+}
+
+void tape_unit_stats(const TapeUnitState *u, long *calls_out, long *slice_load_ns_out,
+                     long *first_ns_out, long *repeat_ns_out) {
+    if (!u) return;
+    if (calls_out) *calls_out = u->calls;
+    if (slice_load_ns_out) *slice_load_ns_out = u->slice_load_ns;
+    if (first_ns_out) *first_ns_out = u->first_ns;
+    if (repeat_ns_out) *repeat_ns_out = u->repeat_ns;
+}
+
+void tape_unit_m53_stats(long *calls_out, long *slice_load_ns_out,
+                         long *first_ns_out, long *repeat_ns_out) {
+    tape_unit_stats(&m53_m1_unit, calls_out, slice_load_ns_out, first_ns_out, repeat_ns_out);
+}
+
+/* Shared unit-agnostic entry point for any embedded tape unit (m53, packmodel, batch 1+). */
+long tape_unit_call_bytes(TapeUnitState *u, const TapeUnitSpec *sp,
+                          const unsigned char *data, long length) {
+    const char *env_s1 = sy_env("UNISACC_M53_S1");
+    const char *env_so = sy_env("UNISACC_M53_S1_SO");
+    char selfp[4096];
+    const char *cpath;
+    sy_stat_t st;
+    int fd = -1;
+    long t0, dt, ret;
+
+    if (!u || !sp) return -2L;
+    if ((env_s1 && env_s1[0]) || (env_so && env_so[0])) {
+        tape_emit_refuse(sp->refuse_tag, "embed-env-override-forbidden", 0);
+        return -2L;
+    }
+    if (u->busy || g_tape_rt.busy) {
+        tape_emit_refuse(sp->refuse_tag, "embed-reentrant", 0);
+        return -2L;
+    }
+    if (length > M53_M1_MAX_IN) {
+        tape_emit_refuse(sp->refuse_tag, "embed-input-too-large", 0);
+        return -2L;
+    }
+
+    t0 = tape_mono_ns();
+    u->busy = 1;
+    g_tape_rt.busy = 1;
+
+    cpath = sy_env("UNISA_CONTAINER");
+    if (!cpath || !cpath[0]) {
+        if (sy_self_path(selfp, (int)sizeof selfp) != 0) {
+            tape_rt_drop(&g_tape_rt);
+            g_tape_rt.state = M53_M1_REFUSED;
+            tape_unit_drop_slice(u);
+            ret = (long)tape_unit_fail(u, sp, "embed-container-missing", -ENOENT);
+            u->busy = 0; g_tape_rt.busy = 0;
+            return ret;
+        }
+        cpath = selfp;
+    }
+
+    /* Fast path: 1 sy_stat syscall when shared runtime + this unit slice are already loaded. */
+    if (g_tape_rt.state == M53_M1_READY && u->state == M53_M1_READY &&
+        u->rt_gen == g_tape_rt.gen && u->slice &&
+        sy_stat(cpath, &st) == 0 && st.kind == 'f' &&
+        tape_rt_stat_hit(&g_tape_rt, cpath, &st)) {
+        ret = tape_unit_vm_exec(u, sp, data, length);
+    } else {
+        if (tape_rt_ensure(u, sp, cpath, &fd, &st) != 0 ||
+            tape_unit_ensure_slice(u, sp, cpath, &fd) != 0) {
+            if (fd >= 0) sy_close(fd);
+            u->busy = 0; g_tape_rt.busy = 0;
+            return -2L;
+        }
+        if (fd >= 0) sy_close(fd);
+        ret = tape_unit_vm_exec(u, sp, data, length);
+    }
+
+    dt = tape_mono_ns() - t0;
+    if (u->calls == 0L) u->first_ns = dt;
+    else u->repeat_ns += dt;
+    u->calls++;
+    u->busy = 0;
+    g_tape_rt.busy = 0;
     return ret;
 }
 
 int cxsa_valid_s1(const unsigned char *data, long length) {
     const char *env_s1 = sy_env("UNISACC_M53_S1");
     const char *env_so = sy_env("UNISACC_M53_S1_SO");
-    int ret;
     if ((env_s1 && env_s1[0]) || (env_so && env_so[0])) {
-        m53_m1_emit_refuse("embed-env-override-forbidden", 0);
+        tape_emit_refuse(m53_m1_spec.refuse_tag, "embed-env-override-forbidden", 0);
         return -2;
     }
-    if (m53_m1_busy) {
-        m53_m1_emit_refuse("embed-reentrant", 0);
+    if (m53_m1_unit.busy || g_tape_rt.busy) {
+        tape_emit_refuse(m53_m1_spec.refuse_tag, "embed-reentrant", 0);
         return -2;
     }
     if (!data || length < 4) return 0;
-    if (length > M53_M1_MAX_IN) {
-        m53_m1_emit_refuse("embed-input-too-large", 0);
-        return -2;
-    }
-    m53_m1_busy = 1;
-    if (m53_m1_ensure_loaded() != 0) {
-        m53_m1_busy = 0;
-        return -2;
-    }
-    ret = m53_m1_vm_exec(data, length);
-    m53_m1_busy = 0;
-    return ret;
+    return (int)tape_unit_call_bytes(&m53_m1_unit, &m53_m1_spec, data, length);
 }
