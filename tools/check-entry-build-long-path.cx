@@ -1,6 +1,9 @@
-/* tools/check-entry-build-long-path.cx -- verify entry-build cx-plan succeeds on
- * a real root path >= 200 chars (where merged -cx-plan exceeds 262144 bytes) and
- * emits a named stderr refusal when the plan buffer cap is hit.
+/* tools/check-entry-build-long-path.cx -- verify entry-build dynamic cx-plan buffer:
+ *  (1) >=200-char real root path passes cx-plan (--closure-list) + object compile;
+ *  (2) fixed short-root plan output and object set match base a30661822 byte-for-byte
+ *      (when base git history is present; deterministic parity in single-commit layout);
+ *  (3) UNISACC_EB_PLAN_MAX cap refusal emits named stderr refusal and leaves 0 leftover processes;
+ *  (4) >=576-byte plan path field emits named REFUSE cx-plan plan-path-too-long (never silent skip).
  * Marker: CHECK_ENTRY_BUILD_LONG_PATH. */
 #pragma unisa use sys.fs
 #pragma unisa use sys.io
@@ -8,6 +11,7 @@
 #pragma unisa use sys.posix
 #pragma unisa use text.text
 #pragma unisa use text.fmt
+#pragma unisa use mem.heap
 #pragma unisa use mem.bytes
 #pragma unisa use cxlib.netpack
 
@@ -36,61 +40,136 @@ static int run_cmd(const char *cwd, char **v, char *out, long cap, int secs) {
 }
 
 int main(void) {
-    char repo[512], base[512], long_root[640], real_root[640], eb_bin[640], outdir[640], p3[640], cmd[4096], out[32768];
+    char repo[512], base[512], long_root[640], real_root[640];
+    char eb_bin[640], base_cx[640], base_bin[640], ctor_cx[640], ctor_bin[640];
+    char outdir[640], outdir2[640], outdir_short[640], outdir_base[640];
+    char p3[640], p3_repo[640], cmd[4096], out[65536], out_base[65536];
     if (sy_realpath(".", repo, sizeof repo) < 0) return 2;
     if (sy_mkdtemp(sy_tmpdir(), "eb-lp-", base, sizeof base) != 0) return 2;
 
-    /* Construct a real directory path >= 220 chars (not a symlink to a short path) */
     if (cx_fmt(long_root, sizeof long_root,
                "%s/seg01_aaaaaaaaaaaaaaaaaaaaaaaaaaaa/seg02_bbbbbbbbbbbbbbbbbbbbbbbbbbbb/"
                "seg03_cccccccccccccccccccccccccccc/seg04_dddddddddddddddddddddddddddd/"
                "seg05_eeeeeeeeeeeeeeeeeeeeeeeeeeee/seg06_ffffffffffffffffffffffffffff/repo", base) ||
-        cx_fmt(eb_bin, sizeof eb_bin, "%s/entry_build", base) ||
+        cx_fmt(eb_bin, sizeof eb_bin, "%s/entry_build_new", base) ||
+        cx_fmt(base_cx, sizeof base_cx, "%s/entry_build_base.cx", base) ||
+        cx_fmt(base_bin, sizeof base_bin, "%s/entry_build_base", base) ||
+        cx_fmt(ctor_cx, sizeof ctor_cx, "%s/long_field_ctor.cx", base) ||
+        cx_fmt(ctor_bin, sizeof ctor_bin, "%s/long_field_ctor", base) ||
         cx_fmt(outdir, sizeof outdir, "%s/eb_out", base) ||
+        cx_fmt(outdir2, sizeof outdir2, "%s/eb_out2", base) ||
+        cx_fmt(outdir_short, sizeof outdir_short, "%s/eb_short", base) ||
+        cx_fmt(outdir_base, sizeof outdir_base, "%s/eb_base", base) ||
         cx_fmt(p3, sizeof p3, "%s/unisacc.com", long_root) ||
-        sy_mkdir_all(long_root, 0755) || sy_mkdir_all(outdir, 0755)) {
+        cx_fmt(p3_repo, sizeof p3_repo, "%s/unisacc.com", repo) ||
+        sy_mkdir_all(long_root, 0755) ||
+        sy_mkdir_all(outdir, 0755) || sy_mkdir_all(outdir2, 0755) ||
+        sy_mkdir_all(outdir_short, 0755) || sy_mkdir_all(outdir_base, 0755)) {
         (void)sy_remove_all(base);
         return 2;
     }
 
-    /* Stage real sealed trees + unisacc.com + tools/bound into long_root */
+    const char *ctor_src =
+        "#pragma unisa use sys.io\n"
+        "int main(void) {\n"
+        "    sy_printf(\"m\\t/\");\n"
+        "    for (int i = 0; i < 580; i++) sy_printf(\"a\");\n"
+        "    sy_printf(\".cx\\n\");\n"
+        "    return 0;\n"
+        "}\n";
+    if (cx_write(ctor_cx, ctor_src, (size_t)tx_len(ctor_src, 512))) {
+        (void)sy_remove_all(base);
+        return 2;
+    }
+
+    /* Stage sealed long_root + compile new entry-build, base a30661822 entry-build, and long_field_ctor in parallel */
     if (cx_fmt(cmd, sizeof cmd,
-               "L='%s'; R='%s'; mkdir -p \"$L/tools\" \"$L/build\" && "
-               "cp -a \"$R/include\" \"$R/src\" \"$R/cx\" \"$R/ext\" \"$R/cxroot.tsv\" \"$L/\" && "
-               "cp -a \"$R/build/chain-facts.tsv\" \"$L/build/\" && "
-               "cp -a \"$R/tools/bound\" \"$R/tools/bound.c\" \"$R/tools/entry-build.cx\" \"$L/tools/\" && "
-               "cp -L \"$R/unisacc.com\" \"$L/unisacc.com\"",
-               long_root, repo)) {
+               "R='%s'; B='%s'; L='%s'; "
+               "ln -sf \"$R/cxroot.tsv\" \"$R/tools\" \"$R/cx\" \"$R/include\" \"$R/ext\" \"$R/src\" \"$B/\" && "
+               "(mkdir -p \"$L/tools\" \"$L/build\" && "
+               " cp -a \"$R/include\" \"$R/src\" \"$R/cx\" \"$R/ext\" \"$R/cxroot.tsv\" \"$L/\" && "
+               " cp -a \"$R/build/chain-facts.tsv\" \"$L/build/\" && "
+               " cp -a \"$R/tools/bound\" \"$R/tools/bound.c\" \"$R/tools/entry-build.cx\" \"$L/tools/\" && "
+               " cp -L \"$R/unisacc.com\" \"$L/unisacc.com\") & p1=$!; "
+               "(sh ./unisacc.com tools/entry-build.cx -o '%s') & p2=$!; "
+               "(if git cat-file -e a30661822:tools/entry-build.cx 2>/dev/null; then "
+               "  git show a30661822:tools/entry-build.cx > '%s' && "
+               "  sh ./unisacc.com '%s' -o '%s'; fi) & p3=$!; "
+               "(sh ./unisacc.com '%s' -o '%s') & p4=$!; "
+               "wait $p1 && wait $p2 && wait $p3 && wait $p4",
+               repo, base, long_root, eb_bin, base_cx, base_cx, base_bin, ctor_cx, ctor_bin)) {
         (void)sy_remove_all(base);
         return 2;
     }
-    char *vstage[] = {"sh", "-c", cmd, 0};
-    char *vbuild[] = {"sh", "./unisacc.com", "tools/entry-build.cx", "-o", eb_bin, 0};
-    int rc_st = run_cmd(repo, vstage, out, sizeof out, 25);
-    int rc_eb = (rc_st == 0) ? run_cmd(repo, vbuild, out, sizeof out, 35) : -1;
-    if (rc_eb != 0) sy_eprintf("DIAG_BUILD\trc_st=%d\trc_eb=%d\tout=%.300s\n", rc_st, rc_eb, out);
-    long rlen = (rc_st == 0 && sy_realpath(long_root, real_root, sizeof real_root) >= 0) ? (long)tx_len(real_root, sizeof real_root) : 0;
-    sy_printf("LONG_ROOT\tlen=%ld\tpath=%s\n", rlen, rlen ? real_root : "");
-    ck(rc_st == 0 && rc_eb == 0 && rlen >= 200, "stage-real-root-ge-200-chars-and-build-entry-build");
+    char *vprep[] = {"sh", "-c", cmd, 0};
+    int rc_prep = run_cmd(repo, vprep, out, sizeof out, 40);
+    if (rc_prep != 0) sy_eprintf("DIAG_PREP\trc=%d\tout=%.300s\n", rc_prep, out);
+    long rlen = (rc_prep == 0 && sy_realpath(long_root, real_root, sizeof real_root) >= 0) ? (long)tx_len(real_root, sizeof real_root) : 0;
+    sy_printf("LONG_ROOT\tlen=%ld\n", rlen);
+    ck(rc_prep == 0 && rlen >= 200, "stage-real-roots-and-build-entry-build");
 
-    /* 1. cx-plan (--closure-list) must succeed on >= 200 char real root path */
-    if (rc_st == 0 && rc_eb == 0) {
+    if (rc_prep == 0) {
+        /* 1. >=200-char real root passes cx-plan (--closure-list) */
         char *vcl[] = {eb_bin, real_root, p3, outdir, "--closure-list", 0};
-        int rc_cl = run_cmd(real_root, vcl, out, sizeof out, 30);
+        int rc_cl = run_cmd(real_root, vcl, out, sizeof out, 25);
         int has_units = (rc_cl == 0 &&
                          strstr(out, "bind_m1_impl.cx") != 0 &&
                          strstr(out, "m25_m1_impl.cx") != 0 &&
                          strstr(out, real_root) != 0);
-        if (!has_units) sy_eprintf("DIAG_CL\trc=%d\tout=%.300s\n", rc_cl, out);
         ck(has_units, "cx-plan-passes-on-ge-200-char-root-path");
 
-        /* 2. Negative control: when plan cap is hit, refusal is named on stderr (never silent rc=2) */
+        /* 2. Fixed short-root parity vs base a30661822 (plan output + object set byte-for-byte) */
+        char *vshort[] = {eb_bin, repo, p3_repo, outdir_short, "--closure-list", 0};
+        int rc_s1 = run_cmd(repo, vshort, out, sizeof out, 25);
+        int parity_ok = 0;
+        sy_stat_t bst;
+        if (sy_lstat(base_bin, &bst) == 0 && bst.kind == 'f' && bst.size > 0) {
+            char *vb[] = {base_bin, repo, p3_repo, outdir_base, "--closure-list", 0};
+            int rc_b = run_cmd(repo, vb, out_base, sizeof out_base, 25);
+            int plan_eq = (rc_s1 == 0 && rc_b == 0 && tx_eqz(out, out_base));
+            char *vo1[] = {eb_bin, repo, p3_repo, outdir_short, "--only", "bind.o", 0};
+            char *vo2[] = {base_bin, repo, p3_repo, outdir_base, "--only", "bind.o", 0};
+            char dummy[4096];
+            int ro1 = plan_eq ? run_cmd(repo, vo1, dummy, sizeof dummy, 20) : -1;
+            int ro2 = (ro1 == 0) ? run_cmd(repo, vo2, dummy, sizeof dummy, 20) : -1;
+            char b1[700], b2[700];
+            size_t n1 = 0, n2 = 0;
+            char *d1 = 0, *d2 = 0;
+            if (ro1 == 0 && ro2 == 0 &&
+                !cx_fmt(b1, sizeof b1, "%s/bind.o", outdir_short) &&
+                !cx_fmt(b2, sizeof b2, "%s/bind.o", outdir_base)) {
+                d1 = cx_read(b1, &n1); d2 = cx_read(b2, &n2);
+            }
+            int obj_eq = (d1 && d2 && n1 > 0 && n1 == n2 && !memcmp(d1, d2, n1));
+            if (d1) mm_free(d1);
+            if (d2) mm_free(d2);
+            parity_ok = (plan_eq && obj_eq);
+            sy_printf("BASE_PARITY\tmode=git-a30661822\tplan_eq=%d\tobj_eq=%d\n", plan_eq, obj_eq);
+        } else {
+            /* Single-commit shallow layout (register.cx selftest): verify deterministic short-root plan */
+            int rc_s2 = run_cmd(repo, vshort, out_base, sizeof out_base, 25);
+            parity_ok = (rc_s1 == 0 && rc_s2 == 0 && tx_eqz(out, out_base) && strstr(out, "bind_m1_impl.cx") != 0);
+            sy_printf("BASE_PARITY\tmode=shallow-deterministic\tplan_eq=%d\n", parity_ok);
+        }
+        ck(parity_ok, "short-root-plan-and-object-parity");
+
+        /* 3. Cap-refusal case: named stderr refusal + 0 leftover processes (pgrep directly, no sh -c self-match) */
         (void)sy_setenv("UNISACC_EB_PLAN_MAX", "1024", 1);
-        int rc_neg = run_cmd(real_root, vcl, out, sizeof out, 30);
+        int rc_neg = run_cmd(real_root, vcl, out, sizeof out, 25);
         (void)sy_unsetenv("UNISACC_EB_PLAN_MAX");
-        int neg_ok = (rc_neg != 0 && strstr(out, "REFUSE cx-plan plan-buffer-limit") != 0);
-        if (!neg_ok) sy_eprintf("DIAG_NEG\trc=%d\tout=%.300s\n", rc_neg, out);
-        ck(neg_ok, "cx-plan-cap-overflow-emits-named-stderr-refusal");
+        char pg_out[1024];
+        char *vpg[] = {"pgrep", "-f", real_root, 0};
+        int pg_rc = run_cmd(repo, vpg, pg_out, sizeof pg_out, 5);
+        int cap_ok = (rc_neg == 2 && strstr(out, "REFUSE cx-plan plan-buffer-limit") != 0 && pg_rc == 1);
+        if (!cap_ok) sy_eprintf("DIAG_CAP\trc_neg=%d\tpg_rc=%d\tout=%.200s\n", rc_neg, pg_rc, out);
+        ck(cap_ok, "cx-plan-cap-overflow-named-refusal-and-zero-leftover-procs");
+
+        /* 4. Long-field (>=576 bytes) refusal: named REFUSE cx-plan plan-path-too-long, never silent skip */
+        char *vtl[] = {eb_bin, repo, p3_repo, outdir2, ctor_bin, "--closure-list", 0};
+        int rc_tl = run_cmd(repo, vtl, out, sizeof out, 25);
+        int tl_ok = (rc_tl == 2 && strstr(out, "REFUSE cx-plan plan-path-too-long") != 0);
+        if (!tl_ok) sy_eprintf("DIAG_TL\trc_tl=%d\tout=%.200s\n", rc_tl, out);
+        ck(tl_ok, "cx-plan-path-ge-576-emits-named-refusal");
     }
 
     (void)sy_remove_all(base);
