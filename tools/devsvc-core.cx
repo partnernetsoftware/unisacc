@@ -2650,19 +2650,56 @@ static int parse_pos_long(const char *s, size_t len, long *out) {
     if (out) *out = v;
     return 1;
 }
-/* 0: absent, or only comment/blank/whitespace-only rows; 1: at least one unexpired freeze row;
-   2: freeze rows exist and all are expired (an expired row is not a thaw: renew deadline_epoch_s or
-   delete the row; same rule as the pre-push gate tools/prepush.cx); -1: unreadable or malformed. */
-static int freeze_tsv_state(const char *root) {
+typedef struct {
+    int state;          /* 0=none, 1=active(single valid row), 2=expired-only, -1=unreadable/malformed/ambiguous */
+    char branch[64];    /* normalized frozen version branch (e.g. v0.1.8) */
+    char base[64];      /* base_commit hex (7..40) */
+    char owner[64];     /* normalized owner (e.g. cc) */
+} FreezeRow;
+
+static int freeze_parse_sid_branch(const char *sid, size_t sl, char *out, size_t cap) {
+    if (!sid || !sl || !out || cap < 4) return 0;
+    const char *v = sid;
+    size_t vl = sl;
+    if (sl > 7 && !memcmp(sid + sl - 7, "-FREEZE", 7)) vl = sl - 7;
+    else if (!(sl >= 2 && sid[0] == 'v' && sid[1] >= '0' && sid[1] <= '9')) return 0;
+    int has_v = (vl >= 2 && v[0] == 'v' && v[1] >= '0' && v[1] <= '9');
+    const char *d = has_v ? v + 1 : v;
+    size_t dl = has_v ? vl - 1 : vl;
+    if (dl == 0 || dl + 2 > cap || d[0] < '0' || d[0] > '9') return 0;
+    for (size_t i = 0; i < dl; i++) {
+        char c = d[i];
+        if (!((c >= '0' && c <= '9') || c == '.' || c == '-' || (c >= 'a' && c <= 'z'))) return 0;
+    }
+    out[0] = 'v';
+    mm_copy(out + 1, cap - 1, d, dl);
+    out[dl + 1] = 0;
+    return 1;
+}
+
+static int freeze_is_hex_oid(const char *s, size_t n) {
+    if (!s || n < 7 || n > 40) return 0;
+    for (size_t i = 0; i < n; i++) {
+        char c = s[i];
+        if (!((c >= '0' && c <= '9') || (c >= 'a' && c <= 'f') || (c >= 'A' && c <= 'F'))) return 0;
+    }
+    return 1;
+}
+
+/* Parse build/freeze.tsv under root into out:
+   0: absent or comments/blank only; 1: single valid unexpired row; 2: expired-only rows;
+   -1: unreadable, malformed, unparsable sid/base/owner, or ambiguous (>1 armed row). */
+static int freeze_parse_file(const char *root, FreezeRow *out) {
+    memset(out, 0, sizeof *out);
     char fzp[PW];
     if (!root || !root[0] || cx_fmt(fzp, sizeof fzp, "%s/build/freeze.tsv", root)) return 0;
     int fx = sy_exists(fzp);
     if (fx == 0) return 0;
-    if (fx < 0) return -1;
+    if (fx < 0) { out->state = -1; return -1; }
     unsigned char *b = 0; int64_t bn = 0;
-    if (sy_read_file(fzp, &b, &bn, 1 << 16) || !b) return -1;
+    if (sy_read_file(fzp, &b, &bn, 1 << 16) || !b) { out->state = -1; return -1; }
     long now = sy_wall_s();
-    int active = 0;
+    int active_n = 0, expired_n = 0;
     for (const char *p = (const char *)b, *end = (const char *)b + bn; p < end; ) {
         const char *nl = memchr(p, '\n', (size_t)(end - p));
         size_t ll = nl ? (size_t)(nl - p) : (size_t)(end - p);
@@ -2671,47 +2708,114 @@ static int freeze_tsv_state(const char *root) {
         while (nb < ll && (p[nb] == ' ' || p[nb] == '\t')) nb++;
         if (ll > 0 && p[0] != '#' && nb < ll) {
             /* columns: 0=sid, 1=base, 2=owner, 3=deadline_epoch_s, 4=paths */
+            const char *cs[5] = {0, 0, 0, 0, 0};
+            size_t cl[5] = {0, 0, 0, 0, 0};
             const char *q = p, *le = p + ll;
             int col = 0;
-            const char *ds = 0; size_t dl = 0;
-            while (q <= le) {
-                const char *tab = memchr(q, '\t', (size_t)(le - q));
+            while (q <= le && col < 5) {
+                const char *tab = (col < 4) ? memchr(q, '\t', (size_t)(le - q)) : 0;
                 const char *ce = tab ? tab : le;
-                if (col == 3) { ds = q; dl = (size_t)(ce - q); break; }
+                cs[col] = q; cl[col] = (size_t)(ce - q);
                 col++;
                 if (!tab) break;
                 q = tab + 1;
             }
             long dl_s = 0;
-            if (!ds || !parse_pos_long(ds, dl, &dl_s)) { free(b); return -1; }
-            if (dl_s > now) active = 1;
-            else if (!active) active = 2;
+            if (col < 5 || !cl[0] || !cl[1] || !cl[2] || !cl[3] || !cl[4] || !parse_pos_long(cs[3], cl[3], &dl_s)) {
+                free(b); out->state = -1; return -1;
+            }
+            if (dl_s <= now) {
+                expired_n++;
+            } else {
+                char br[64], raw_ow[64], norm_ow[64];
+                if (!freeze_parse_sid_branch(cs[0], cl[0], br, sizeof br) ||
+                    !freeze_is_hex_oid(cs[1], cl[1]) || cl[2] >= sizeof raw_ow) {
+                    free(b); out->state = -1; return -1;
+                }
+                mm_copy(raw_ow, sizeof raw_ow, cs[2], cl[2]);
+                raw_ow[cl[2]] = 0;
+                if (!norm_owner(raw_ow, norm_ow, sizeof norm_ow)) {
+                    free(b); out->state = -1; return -1;
+                }
+                if (active_n > 0) {
+                    /* Ambiguous: two armed rows -> fail closed. */
+                    free(b); out->state = -1; return -1;
+                }
+                { size_t bl = strlen(br), ol = strlen(norm_ow);
+                  mm_copy(out->branch, sizeof out->branch, br, bl + 1);
+                  mm_copy(out->base, sizeof out->base, cs[1], cl[1]);
+                  out->base[cl[1]] = 0;
+                  mm_copy(out->owner, sizeof out->owner, norm_ow, ol + 1); }
+                active_n++;
+            }
         }
         p = nl ? nl + 1 : end;
     }
     free(b);
-    return active;
+    if (active_n == 1) { out->state = 1; return 1; }
+    if (expired_n > 0) { out->state = 2; return 2; }
+    out->state = 0;
+    return 0;
 }
 
-static int freeze_outside_main(const char *root) {
+static int freeze_load_effective(const char *root, FreezeRow *out) {
+    FreezeRow r1, r2;
+    freeze_parse_file(root, &r1);
+    if (main_root[0] && strcmp(main_root, root)) {
+        freeze_parse_file(main_root, &r2);
+        if (r1.state == 2 || r2.state == 2) { memset(out, 0, sizeof *out); out->state = 2; return 2; }
+        if (r1.state < 0 || r2.state < 0) { memset(out, 0, sizeof *out); out->state = -1; return -1; }
+        if (r1.state == 1 && r2.state == 1) {
+            if (strcmp(r1.branch, r2.branch) || strcmp(r1.base, r2.base) || strcmp(r1.owner, r2.owner)) {
+                memset(out, 0, sizeof *out); out->state = -1; return -1;
+            }
+            *out = r1; return 1;
+        }
+        *out = (r1.state == 1) ? r1 : r2;
+        return out->state;
+    }
+    *out = r1;
+    return out->state;
+}
+
+static int freeze_outside_main(const char *root, const FreezeRow *fr) {
     char ref[PW];
     char *bv[] = {"git", "-C", (char *)root, "symbolic-ref", "--quiet", "HEAD", 0};
     if (runcap(bv, ref, sizeof ref) != 0) return 0;
     chomp(ref);
     if (strncmp(ref, "refs/heads/", 11) || !ref[11] || !strcmp(ref, "refs/heads/main")) return 0;
-    fprintf(stderr, "FREEZE_SCOPE skip=worktree branch=%s\n", ref + 11);
+    /* Unparsable/ambiguous/corrupt or expired freeze table fails closed on all branches. */
+    if (fr->state < 0 || fr->state == 2) return 0;
+    const char *br = ref + 11;
+    if (fr->state == 1) {
+        if (!strcmp(br, fr->branch)) return 0;
+        const char *slash = strrchr(root, '/');
+        const char *wt_base = slash ? slash + 1 : root;
+        if (!strcmp(wt_base, fr->branch)) return 0;
+        if (fr->base[0]) {
+            char dummy[32];
+            char *av[] = {"git", "-C", (char *)root, "merge-base", "--is-ancestor", (char *)fr->base, "HEAD", 0};
+            if (runcap(av, dummy, sizeof dummy) == 0) return 0;
+        }
+    }
+    fprintf(stderr, "FREEZE_SCOPE skip=worktree branch=%s\n", br);
     return 1;
 }
 
 static int freeze_check(const char *root, const char *owner, char *holder, size_t hcap) {   /* 1 表示 freeze 锁被他人持有或损坏/不可读闭锁; 0 放行 */
     if (holder && hcap > 0) holder[0] = 0;
-    if (freeze_outside_main(root)) return 0;
+    FreezeRow fr;
+    int fz_state = freeze_load_effective(root, &fr);
+    if (freeze_outside_main(root, &fr)) return 0;
     int rc; const char *s, *e; char nown[64], nhold[64], lp[PW];
     int has_own = norm_owner(owner, nown, sizeof nown);
-    int fz_state = freeze_tsv_state(root);
     if (fz_state == 2) {   /* expired-only rows freeze and nobody passes, owner included */
         if (holder && hcap > 0) snprintf(holder, hcap, "freeze-expired");
         fprintf(stderr, "FREEZE_EXPIRED build/freeze.tsv: an expired row is not a thaw. Renew deadline_epoch_s, or delete the row explicitly to thaw.\n");
+        return 1;
+    }
+    if (fz_state < 0) {    /* unreadable, malformed, unparsable sid, or ambiguous rows fail closed for everyone */
+        if (holder && hcap > 0) snprintf(holder, hcap, "freeze-tsv-corrupt");
         return 1;
     }
     char fhold[64]; int have_fhold = 0;
@@ -2800,6 +2904,10 @@ static int freeze_check(const char *root, const char *owner, char *holder, size_
                     if (holder && hcap > 0) snprintf(holder, hcap, "locks-mismatch");
                     return 1;
                 }
+                if (fz_state == 1 && strcmp(nhold, fr.owner)) {
+                    if (holder && hcap > 0) snprintf(holder, hcap, "freeze-owner-mismatch");
+                    return 1;
+                }
                 if (holder && hcap > 0) snprintf(holder, hcap, "%s", nhold);
                 if (has_own && !strcmp(nhold, nown)) return 0;
                 return 1;
@@ -2807,12 +2915,21 @@ static int freeze_check(const char *root, const char *owner, char *holder, size_
         }
     }
     if (have_fhold) {
+        if (fz_state == 1 && strcmp(fhold, fr.owner)) {
+            if (holder && hcap > 0) snprintf(holder, hcap, "freeze-owner-mismatch");
+            return 1;
+        }
         if (holder && hcap > 0) snprintf(holder, hcap, "%s", fhold);
         if (has_own && !strcmp(fhold, nown)) return 0;
         return 1;
     }
     if (rc != 0 && fz_state != 0) {
         if (holder && hcap > 0) snprintf(holder, hcap, "freeze-svc-unreachable");
+        return 1;
+    }
+    if (fz_state == 1) {   /* active freeze.tsv with healthy service but missing lock: enforce armed row owner */
+        if (holder && hcap > 0) snprintf(holder, hcap, "%s", fr.owner);
+        if (has_own && !strcmp(fr.owner, nown)) return 0;
         return 1;
     }
     return 0;

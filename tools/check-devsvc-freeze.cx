@@ -170,12 +170,14 @@ int main(int argc, char **argv) {
         printf("CHECK_DEVSVC_FREEZE\tpass=0\tfail=0\tunmeasured=1\n");
         return split ? 1 : 0;
     }
-    if (sy_mkdtemp("/tmp", "dvfreeze", tmp, sizeof tmp)) return 2;
+    { char wt_base[4300];
+      if (cx_fmt(wt_base, sizeof wt_base, "%s/.work/tmp", root) || sy_mkdir_all(wt_base, 0700) ||
+          sy_mkdtemp(wt_base, "dvf", tmp, sizeof tmp)) return 2; }
+    if (sy_mkdtemp("/tmp", "dvfs", inst, sizeof inst)) return 2;
     if (cx_fmt(prod, sizeof prod, "%s/unisacc.com", root) || /* lint:allow R1-product test harness invokes checkout product directly */
         cx_fmt(src_core, sizeof src_core, "%s/tools/devsvc-core.cx", root) ||
         cx_fmt(repo, sizeof repo, "%s/repo", tmp) ||
         cx_fmt(wt, sizeof wt, "%s/wt", tmp) ||
-        cx_fmt(inst, sizeof inst, "%s/inst", tmp) ||
         cx_fmt(f_new, sizeof f_new, "%s/new.txt", tmp) ||
         cx_fmt(f_old, sizeof f_old, "%s/old.txt", tmp) ||
         cx_fmt(f_rep, sizeof f_rep, "%s/rep.txt", tmp)) return 2;
@@ -422,6 +424,106 @@ scope:
       ck("freeze-scope-fixture-returns-to-main", linked_restored && (!side_ready ||
          sh_in(repo, "git restore --worktree src/a.txt && git switch -q main"))); }
 
+    /* (12b) Armed build/freeze.tsv (0.1.8-FREEZE owner=cc): guards main + frozen version branch v0.1.8 (and any
+       renamed branch descended from base_commit) only; pre-freeze ujs, w/*, and v0.1.9 pass; v0.1.8 passes for
+       DEVSVC_OWNER=cc; unparsable/ambiguous sid fails closed; missing lock with active table & owner mismatch refuse. */
+    { char wt_ujs[4400], wt_v18[4400], wt_ren[4400], wt_v19[4400], wt_win[4400], fz_row[768], head_oid[64];
+      int setup_ok = !cx_fmt(wt_ujs, sizeof wt_ujs, "%s/wt-ujs", tmp) &&
+                     !cx_fmt(wt_v18, sizeof wt_v18, "%s/wt-v018", tmp) &&
+                     !cx_fmt(wt_ren, sizeof wt_ren, "%s/wt-ren", tmp) &&
+                     !cx_fmt(wt_v19, sizeof wt_v19, "%s/wt-v019", tmp) &&
+                     !cx_fmt(wt_win, sizeof wt_win, "%s/wt-win", tmp) &&
+                     !cx_fmt(cmd, sizeof cmd,
+                             "git worktree add -q -b ujs '%s' && ln -s '%s/unisacc.com' '%s/unisacc.com' && "
+                             "git worktree add -q -b v0.1.9 '%s' && ln -s '%s/unisacc.com' '%s/unisacc.com' && "
+                             "git worktree add -q -b w/agyneon3 '%s' && ln -s '%s/unisacc.com' '%s/unisacc.com'",
+                             wt_ujs, root, wt_ujs, wt_v19, root, wt_v19, wt_win, root, wt_win) &&
+                     sh_in(repo, cmd) &&
+                     sh_in(repo, "printf 'c0a\\n' > docs/c0a.txt && git add docs/c0a.txt && git -c user.name=fx -c user.email=fx@localhost -c commit.gpgsign=false commit -qm c0a && git rev-parse HEAD");
+      head_oid[0] = 0;
+      if (setup_ok) {
+          long hl = (long)strlen(out);
+          while (hl > 0 && (out[hl - 1] == '\n' || out[hl - 1] == '\r')) hl--;
+          if (hl == 40) { mm_copy(head_oid, sizeof head_oid, out, 40); head_oid[40] = 0; }
+          else setup_ok = 0;
+      }
+      char *arel[] = {"lock", "release", "freeze", "--owner", "integ", 0};
+      char *aacq[] = {"lock", "acquire", "freeze", "--owner", "cc", "--ttl", "7200", 0};
+      setup_ok = setup_ok &&
+          run_dv(repo, "integ", arel, &rc) && rc == 0 &&
+          run_dv(repo, "cc", aacq, &rc) && rc == 0 &&
+          !cx_fmt(fz_row, sizeof fz_row,
+                  "# candidate_sid\tbase_commit\towner\tdeadline_epoch_s\tpaths\n"
+                  "0.1.8-FREEZE\t%s\tcc\t9999999999\tsrc/\n", head_oid) &&
+          !wr(repo, "build/freeze.tsv", fz_row) &&
+          !cx_fmt(cmd, sizeof cmd,
+                  "git worktree add -q -b v0.1.8 '%s' && ln -s '%s/unisacc.com' '%s/unisacc.com' && "
+                  "git worktree add -q -b sneaky-rename '%s' && ln -s '%s/unisacc.com' '%s/unisacc.com'",
+                  wt_v18, root, wt_v18, wt_ren, root, wt_ren) &&
+          sh_in(repo, cmd);
+      char *ac_ujs[] = {"git", "commit", "--cwd", wt_ujs, "-m", "ujs paper commit", "--whole", "src/a.txt", 0};
+      char *ac_main[] = {"git", "commit", "-m", "main non-owner commit", "--whole", "src/a.txt", 0};
+      char *ac_v18[] = {"git", "commit", "--cwd", wt_v18, "-m", "v0.1.8 frozen branch commit", "--whole", "src/a.txt", 0};
+      char *ac_ren[] = {"git", "commit", "--cwd", wt_ren, "-m", "renamed frozen branch commit", "--whole", "src/a.txt", 0};
+      char *ac_v19[] = {"git", "commit", "--cwd", wt_v19, "-m", "v0.1.9 later branch commit", "--whole", "src/a.txt", 0};
+      char *ac_win[] = {"git", "commit", "--cwd", wt_win, "-m", "window branch commit", "--whole", "src/a.txt", 0};
+      ck("armed-freeze-ujs-worktree-commit-accepted",
+         setup_ok && !wr(wt_ujs, "src/a.txt", "ujs edit\n") &&
+         run_dv(repo, "ccapi", ac_ujs, &rc) && rc == 0 && has(out, "FREEZE_SCOPE skip=worktree branch=ujs"));
+      ck("armed-freeze-main-commit-refused",
+         setup_ok && !wr(repo, "src/a.txt", "main edit\n") &&
+         run_dv(repo, "worker1", ac_main, &rc) && rc == 1 &&
+         has(out, "LOCK_HELD freeze owner=cc") && !has(out, "FREEZE_SCOPE skip="));
+      ck("armed-freeze-version-branch-non-owner-refused",
+         setup_ok && !wr(wt_v18, "src/a.txt", "v18 edit\n") &&
+         run_dv(repo, "worker1", ac_v18, &rc) && rc == 1 &&
+         has(out, "LOCK_HELD freeze owner=cc") && !has(out, "FREEZE_SCOPE skip="));
+      ck("armed-freeze-renamed-branch-base-commit-refused",
+         setup_ok && !wr(wt_ren, "src/a.txt", "ren edit\n") &&
+         run_dv(repo, "worker1", ac_ren, &rc) && rc == 1 &&
+         has(out, "LOCK_HELD freeze owner=cc") && !has(out, "FREEZE_SCOPE skip="));
+      ck("armed-freeze-version-branch-cc-owner-accepted",
+         setup_ok && !wr(wt_v18, "src/a.txt", "v18 cc edit\n") &&
+         run_dv(repo, "cc", ac_v18, &rc) && rc == 0 && !has(out, "LOCK_HELD freeze"));
+      ck("armed-freeze-later-version-branch-accepted",
+         setup_ok && !wr(wt_v19, "src/a.txt", "v19 edit\n") &&
+         run_dv(repo, "worker1", ac_v19, &rc) && rc == 0 && has(out, "FREEZE_SCOPE skip=worktree branch=v0.1.9"));
+      ck("armed-freeze-window-branch-accepted",
+         setup_ok && !wr(wt_win, "src/a.txt", "win edit\n") &&
+         run_dv(repo, "worker1", ac_win, &rc) && rc == 0 && has(out, "FREEZE_SCOPE skip=worktree branch=w/agyneon3"));
+      /* Unparsable sid fails closed (guards ujs too) */
+      { char bad_row[512];
+        int ok = setup_ok && !cx_fmt(bad_row, sizeof bad_row,
+            "# candidate_sid\tbase_commit\towner\tdeadline_epoch_s\tpaths\n"
+            "BAD-SID\t%s\tcc\t9999999999\tsrc/\n", head_oid) &&
+            !wr(repo, "build/freeze.tsv", bad_row) && !wr(wt_ujs, "src/a.txt", "ujs bad sid\n") &&
+            run_dv(repo, "ccapi", ac_ujs, &rc) && rc == 1 && !has(out, "FREEZE_SCOPE skip=");
+        ck("armed-freeze-unparsable-sid-fail-closed", ok); }
+      /* Ambiguous two armed rows fail closed (guards ujs too) */
+      { char dup_row[768];
+        int ok = setup_ok && !cx_fmt(dup_row, sizeof dup_row,
+            "# candidate_sid\tbase_commit\towner\tdeadline_epoch_s\tpaths\n"
+            "0.1.8-FREEZE\t%s\tcc\t9999999999\tsrc/\n"
+            "0.1.9-FREEZE\t%s\tcc\t9999999999\tsrc/\n", head_oid, head_oid) &&
+            !wr(repo, "build/freeze.tsv", dup_row) && !wr(wt_ujs, "src/a.txt", "ujs dup row\n") &&
+            run_dv(repo, "ccapi", ac_ujs, &rc) && rc == 1 && !has(out, "FREEZE_SCOPE skip=");
+        ck("armed-freeze-ambiguous-two-rows-fail-closed", ok); }
+      /* Active freeze.tsv (owner=cc) with healthy service but missing lock refuses non-owner */
+      { char *arel_cc[] = {"lock", "release", "freeze", "--owner", "cc", 0};
+        int ok = setup_ok && !wr(repo, "build/freeze.tsv", fz_row) &&
+            run_dv(repo, "cc", arel_cc, &rc) && rc == 0 &&
+            !wr(repo, "src/a.txt", "missing lock edit\n") &&
+            run_dv(repo, "worker1", ac_main, &rc) && rc == 1 && has(out, "LOCK_HELD freeze owner=cc");
+        ck("armed-freeze-missing-lock-refuses-non-owner", ok); }
+      /* Lock holder != armed freeze.tsv row owner refuses lock holder too */
+      { char *aacq_in[] = {"lock", "acquire", "freeze", "--owner", "integ", "--ttl", "7200", 0};
+        int ok = setup_ok && run_dv(repo, "integ", aacq_in, &rc) && rc == 0 &&
+            !wr(repo, "src/a.txt", "mismatch owner edit\n") &&
+            run_dv(repo, "integ", ac_main, &rc) && rc == 1 && has(out, "LOCK_HELD freeze");
+        ck("armed-freeze-lock-holder-row-owner-mismatch-refused", ok); }
+      (void)wr(repo, "build/freeze.tsv", "# empty\n");
+      (void)sh_in(repo, "git restore --worktree src/a.txt"); }
+
     if (scope_only) goto done;
 lifecycle:
     /* (13) non-owner cannot release freeze; holder release recovers worktree & main */
@@ -516,22 +618,24 @@ stopped:
 
     /* (21) Expired-only build/freeze.tsv + stopped daemon + no locks.tsv: an expired row is NOT a thaw
        (contract changed with the pre-push gate tools/prepush.cx): fail closed for everyone, the row's
-       owner included, with the renew/delete hint. Header-only and whitespace-only rows stay a thaw. */
+       owner included, with the renew/delete hint. Header-only and whitespace-only rows stay a thaw.
+       Run git add in linked worktree wt pointing at main (primary checkout refuses shared-index git add). */
     { char lkp[4400];
       char *aa[] = {"git", "add", "src/a.txt", 0};
-      int ok = !cx_fmt(lkp, sizeof lkp, "%s/locks.tsv", inst);
+      int wt_main = !cx_fmt(cmd, sizeof cmd, "git -C '%s' symbolic-ref HEAD refs/heads/main", wt) && sh_in(repo, cmd);
+      int ok = wt_main && !cx_fmt(lkp, sizeof lkp, "%s/locks.tsv", inst);
       if (ok) (void)sy_unlink(lkp);
       ok = ok && !wr(repo, "build/freeze.tsv",
                      "# candidate_sid\tbase_commit\towner\tdeadline_epoch_s\tpaths\n"
                      "L0-CORE-FREEZE-049\t7bf9cd5aad\tcc\t1000000000\tcx/sys cx/core\n");
       g_no_autostart = 1; g_use_self_bin = 0;
-      ok = ok && run_dv(repo, "worker1", aa, &rc) && rc == 1 &&
+      ok = ok && run_dv(wt, "worker1", aa, &rc) && rc == 1 &&
            has(out, "LOCK_HELD freeze owner=freeze-expired") && has(out, "FREEZE_EXPIRED") && has(out, "Renew deadline_epoch_s");
       ck("expired-freeze-tsv-refused", ok);
-      ok = run_dv(repo, "CC", aa, &rc) && rc == 1 && has(out, "LOCK_HELD freeze owner=freeze-expired");
+      ok = wt_main && run_dv(wt, "CC", aa, &rc) && rc == 1 && has(out, "LOCK_HELD freeze owner=freeze-expired");
       ck("expired-freeze-tsv-refuses-owner-too", ok);
-      ok = !wr(repo, "build/freeze.tsv", "# candidate_sid\tbase_commit\towner\tdeadline_epoch_s\tpaths\n\n   \n\t \n") &&
-           run_dv(repo, "worker1", aa, &rc) && rc == 0 && !has(out, "LOCK_HELD freeze");
+      ok = wt_main && !wr(repo, "build/freeze.tsv", "# candidate_sid\tbase_commit\towner\tdeadline_epoch_s\tpaths\n\n   \n\t \n") &&
+           run_dv(wt, "worker1", aa, &rc) && rc == 0 && !has(out, "LOCK_HELD freeze");
       g_no_autostart = 0;
       ck("header-and-whitespace-rows-freeze-tsv-allowed", ok); }
 
@@ -539,24 +643,27 @@ stopped:
     { char *aa[] = {"git", "add", "src/a.txt", 0};
       int ok = !wr(repo, "build/freeze.tsv",
                    "# candidate_sid\tbase_commit\towner\tdeadline_epoch_s\tpaths\n"
-                   "ACTIVE-FREEZE-094\t7bf9cd5aad\tcc\t9999999999\tsrc/\n");
+                   "0.1.8-FREEZE\t7bf9cd5aad\tcc\t9999999999\tsrc/\n");
       g_no_autostart = 1; g_use_self_bin = 0;
-      ok = ok && run_dv(repo, "worker1", aa, &rc) && rc == 1 &&
+      ok = ok && run_dv(wt, "worker1", aa, &rc) && rc == 1 &&
            has(out, "LOCK_HELD freeze owner=freeze-svc-unreachable") &&
            has(out, "tools/devsvc.cx -- start");
       g_no_autostart = 0;
       ck("active-freeze-tsv-autostart-fail-closed", ok); }
 
-    /* (23) Active build/freeze.tsv + stopped daemon + autostart allowed (DEVSVC_SELF_BIN): autostart recovers */
+    /* (23) Active build/freeze.tsv (owner=cc) + stopped daemon + autostart allowed (DEVSVC_SELF_BIN):
+       autostart recovers the service, still refuses non-owner by armed row owner, and allows row owner cc. */
     { char *aa[] = {"git", "add", "src/a.txt", 0};
       char *st[] = {"stop", 0};
       char pidf[4400], sockp[4400];
       g_no_autostart = 0; g_use_self_bin = 1;
-      int ok = run_dv(repo, "worker1", aa, &rc) && rc == 0 && !has(out, "LOCK_HELD freeze");
+      int ok = run_dv(wt, "worker1", aa, &rc) && rc == 1 && has(out, "LOCK_HELD freeze owner=cc") &&
+               run_dv(wt, "cc", aa, &rc) && rc == 0 && !has(out, "LOCK_HELD freeze");
       g_use_self_bin = 0;
       (void)run_dv(repo, "integ", st, &rc);
       if (!cx_fmt(pidf, sizeof pidf, "%s/serve.pid", tmp) && !cx_fmt(sockp, sizeof sockp, "%s/sock", inst))
           (void)wait_daemon_gone(pidf, sockp, 5000);
+      if (!cx_fmt(cmd, sizeof cmd, "git -C '%s' symbolic-ref HEAD refs/heads/wt-branch", wt)) (void)sh_in(repo, cmd);
       ck("active-freeze-tsv-autostart-recovers", ok); }
 
 done:
@@ -566,14 +673,17 @@ done:
           (void)sh_in(root, kcmd);
       if (!cx_fmt(pidf, sizeof pidf, "%s/serve.pid", tmp) && !cx_fmt(sockp, sizeof sockp, "%s/sock", inst))
           (void)wait_daemon_gone(pidf, sockp, 5000); }
-    { char *rm[] = {"rm", "-rf", tmp, 0}; (void)runv(rm, 0, 0, 30, &rc); }
+    { char *rm[] = {"rm", "-rf", tmp, inst, 0}; (void)runv(rm, 0, 0, 30, &rc); }
     if (sy_exists(tmp) != 0) (void)sy_remove_all(tmp);
-    ck("cleanup-tmp-and-pin-removed", sy_exists(tmp) == 0);
-    int expected = lifecycle_only ? 22 : owner_only ? 10 : scope_only ? 13 : 0;
+    if (sy_exists(inst) != 0) (void)sy_remove_all(inst);
+    ck("cleanup-tmp-and-pin-removed", sy_exists(tmp) == 0 && sy_exists(inst) == 0);
+    int expected = lifecycle_only ? 22 : owner_only ? 10 : scope_only ? 24 : 0;
     if (expected && passed + failed != expected) {
         fprintf(stderr, "DEVSVC_FREEZE_COUNT expected=%d actual=%d\n", expected, passed + failed);
         failed++;
     }
-    printf("CHECK_DEVSVC_FREEZE\tpass=%d\tfail=%d\n", passed, failed);
+    const char *rid = sy_env("DEVSVC_FREEZE_RUN_ID");
+    if (rid && rid[0]) printf("CHECK_DEVSVC_FREEZE\trun_id=%s\tpass=%d\tfail=%d\n", rid, passed, failed);
+    else printf("CHECK_DEVSVC_FREEZE\tpass=%d\tfail=%d\n", passed, failed);
     return failed ? 1 : 0;
 }
