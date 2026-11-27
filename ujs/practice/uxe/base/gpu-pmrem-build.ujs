@@ -84,13 +84,15 @@ native function pmrem_build_sigma(base:i64,band:i64) f64 {
   return sigmas[band-first];
 }
 
-native function pmrem_build_kernel_pass(scratch:i64,band:i64,base:i64,pass:i64) i64 {
-  let tile=pmrem_build_tile(base,band-1+pass);
-  let step=1.5707963267948966/(tile-1);
-  let previous=pmrem_build_sigma(base,band-1);
-  let current=pmrem_build_sigma(base,band);
-  let sigma=f64_sqrt(current*current-previous*previous);
+native function pmrem_build_weights(scratch:i64,step:f64,sigma:f64,initial:i64) i64 {
   let taps=1+f64_floor_i64(3.0*sigma/step);
+  let sineAt=160;
+  let cosineAt=224;
+  if(initial!=0) {
+    sineAt=256;
+    cosineAt=416;
+    if(taps>20) { taps=20; }
+  }
   let total=0.0;
   let at=0;
   while(at<taps) {
@@ -98,8 +100,8 @@ native function pmrem_build_kernel_pass(scratch:i64,band:i64,base:i64,pass:i64) 
     let normal=theta/sigma;
     let weight=ux_math_exp((0.0-0.5)*normal*normal);
     let w=ux_f64_put(scratch+96+at*8,weight);
-    let s=ux_f64_put(scratch+160+at*8,ux_math_sin(theta));
-    let c=ux_f64_put(scratch+224+at*8,ux_math_cos(theta));
+    let s=ux_f64_put(scratch+sineAt+at*8,ux_math_sin(theta));
+    let c=ux_f64_put(scratch+cosineAt+at*8,ux_math_cos(theta));
     total=total+weight;
     if(at!=0) { total=total+weight; }
     at=at+1;
@@ -111,6 +113,16 @@ native function pmrem_build_kernel_pass(scratch:i64,band:i64,base:i64,pass:i64) 
     at=at+1;
   }
   return taps;
+}
+
+
+native function pmrem_build_kernel_pass(scratch:i64,band:i64,base:i64,pass:i64) i64 {
+  let tile=pmrem_build_tile(base,band-1+pass);
+  let step=1.5707963267948966/(tile-1);
+  let previous=pmrem_build_sigma(base,band-1);
+  let current=pmrem_build_sigma(base,band);
+  let sigma=f64_sqrt(current*current-previous*previous);
+  return pmrem_build_weights(scratch,step,sigma,0);
 }
 
 native function pmrem_build_kernel(scratch:i64,band:i64,base:i64) i64 {
@@ -223,6 +235,7 @@ native function pmrem_build_base(atlas:i64,faces:i64,scratch:i64,full:i64,size:i
 
 native function pmrem_build_channel(image:i64,index:i64,channel:i64,pass:i64) f64 {
   if(pass==0) { return 0.0+ux_u8(image+index*4+channel); }
+  if(pass==2) { return ux_u16(image+index*6+channel*2)/256.0; }
   return ux_f32(image+index*16+channel*4);
 }
 
@@ -280,6 +293,15 @@ native function pmrem_build_blur(atlas:i64,scratch:i64,pass:i64,band:i64,taps:i6
   let area=size*size;
   let temp=scratch+320;
   if(band==1) { temp=scratch+256; }
+  let readMode=pass;
+  let sineAt=160;
+  let cosineAt=224;
+  if(band==0) {
+    temp=scratch+576;
+    sineAt=256;
+    cosineAt=416;
+    if(pass!=0) { readMode=2; }
+  }
   let sampled=atlas;
   if(pass!=0) { sampled=temp; }
   let i=0;
@@ -311,6 +333,7 @@ native function pmrem_build_blur(atlas:i64,scratch:i64,pass:i64,band:i64,taps:i6
     let ax=1.0;
     let ay=1.0;
     let az=1.0;
+    if(band==0) { ax=0.0; az=0.0; }
     if(band==2 || band==4) { ax=-1.0; }
     if(band==3 || band==4) { az=-1.0; }
     if(band==5 || band==6) { ax=0.0; ay=1.618033988749895; az=0.6180339887498948; }
@@ -340,9 +363,9 @@ native function pmrem_build_blur(atlas:i64,scratch:i64,pass:i64,band:i64,taps:i6
       let k=tap;
       if(k<0) { k=0-k; }
       let w=ux_f64(scratch+96+k*8);
-      let sine=ux_f64(scratch+160+k*8);
+      let sine=ux_f64(scratch+sineAt+k*8);
       if(tap<0) { sine=0.0-sine; }
-      let cosine=ux_f64(scratch+224+k*8);
+      let cosine=ux_f64(scratch+cosineAt+k*8);
       let axial=dot*(1.0-cosine);
       let dx=ux_f64_put(scratch,x*cosine+cross_x*sine+ax*axial);
       let dy=ux_f64_put(scratch+8,y*cosine+cross_y*sine+ay*axial);
@@ -364,14 +387,22 @@ native function pmrem_build_blur(atlas:i64,scratch:i64,pass:i64,band:i64,taps:i6
       let v=(ux_f64(plan+GpuPmremSample.y0)-16*(sourceFace/3)-1.0)/14.0;
       let sx=sourceX+(sourceFace%3)*sourceSize+1.0+(sourceSize-2)*u;
       let sy=sourceY+(sourceFace/3)*sourceSize+1.0+(sourceSize-2)*v;
-      red=red+w*pmrem_build_linear(sampled,sx,sy,0,pass,stride);
-      green=green+w*pmrem_build_linear(sampled,sx,sy,1,pass,stride);
-      blue=blue+w*pmrem_build_linear(sampled,sx,sy,2,pass,stride);
+      red=red+w*pmrem_build_linear(sampled,sx,sy,0,readMode,stride);
+      green=green+w*pmrem_build_linear(sampled,sx,sy,1,readMode,stride);
+      blue=blue+w*pmrem_build_linear(sampled,sx,sy,2,readMode,stride);
       tap=tap+1;
     }
     let row=face/3*size+py;
     let col=face%3*size+px;
-    if(pass==0) {
+    if(pass==0 && band==0) {
+      let at=temp+(row*3*size+col)*6;
+      let rr=pmrem_build_half(red);
+      let gg=pmrem_build_half(green);
+      let bb=pmrem_build_half(blue);
+      let r=ux_u16_put(at,f64_floor_i64(rr*256.0+0.5));
+      let g=ux_u16_put(at+2,f64_floor_i64(gg*256.0+0.5));
+      let b=ux_u16_put(at+4,f64_floor_i64(bb*256.0+0.5));
+    } else if(pass==0) {
       let at=temp+(row*3*size+col)*16;
       if(full!=0) {
         red=pmrem_build_half(red);
@@ -456,10 +487,17 @@ native function GpuPmremBuild_fromEquirect(state:i64,atlas:i64,capacity:i64,scra
 }
 
 // Capture supplies the first 768x512 pixels in CubeUV face order in-place.
-// The default scene path has a 256-pixel face and no initial sigma blur.
-native function GpuPmremBuild_sceneAtlas(state:i64,atlas:i64,capacity:i64,scratch:i64,work:i64) i64 {
+// An initial blur needs a full-size packed RGB intermediate.
+native function GpuPmremBuild_sceneWork(sigma:f64) i64 {
+  if(!(sigma>=0.0 && sigma<=1.0)) { return 0-1; }
+  if(sigma==0.0) { return GpuPmremBuild_workBytes(256); }
+  return 2359872;
+}
+
+native function GpuPmremBuild_sceneSigma(state:i64,atlas:i64,capacity:i64,scratch:i64,work:i64,sigma:f64) i64 {
   let bytes=GpuPmremBuild_atlasBytes(256);
-  let needed=GpuPmremBuild_workBytes(256);
+  let needed=GpuPmremBuild_sceneWork(sigma);
+  if(needed<0) { return 0-1; }
   if(capacity<bytes || work<needed || state%4!=0 || atlas%4!=0 || scratch%8!=0 ||
      !pmrem_build_range(state,GpuPmremBuild.size) || !pmrem_build_range(atlas,capacity) ||
      !pmrem_build_range(scratch,work) || ux_u32(state+GpuPmremBuild.live)!=0 ||
@@ -470,6 +508,11 @@ native function GpuPmremBuild_sceneAtlas(state:i64,atlas:i64,capacity:i64,scratc
   while(at<bytes) {
     let clear=ux_u32_put(atlas+at,0);
     at=at+4;
+  }
+  if(sigma>0.0) {
+    let initialTaps=pmrem_build_weights(scratch,1.5707963267948966/255.0,sigma,1);
+    let first=pmrem_build_blur(atlas,scratch,0,0,initialTaps,1,256);
+    let second=pmrem_build_blur(atlas,scratch,1,0,initialTaps,1,256);
   }
   let band=1;
   while(band<=10) {
@@ -486,6 +529,10 @@ native function GpuPmremBuild_sceneAtlas(state:i64,atlas:i64,capacity:i64,scratc
   let layers=ux_u32_put(state+GpuPmremBuild.layers,11);
   let open=ux_u32_put(state+GpuPmremBuild.live,1);
   return state;
+}
+
+native function GpuPmremBuild_sceneAtlas(state:i64,atlas:i64,capacity:i64,scratch:i64,work:i64) i64 {
+  return GpuPmremBuild_sceneSigma(state,atlas,capacity,scratch,work,0.0);
 }
 
 native function GpuPmremBuild_hasMip(state:i64,mip:i64) i64 {
