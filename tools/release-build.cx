@@ -315,14 +315,18 @@ static void rb_emit_packed(RbBuf *o, const unsigned char *name, long nlen, const
     if (comp) mm_free(comp);
 }
 
-/* G2 M1 bootstrap embed: inject the 3 tape/lnx-x86_64/* non-cache F records (codec=0, real IEEE CRC32)
+/* G2 M1 bootstrap embed: inject tape/lnx-x86_64/* non-cache F records (codec=0, real IEEE CRC32)
    inside p3 resources/assemble so Root produces the single sealed P4 package consumed by gen1/g2/g3
-   and release-run --pack (acyclic DAG, Q-07 PACK_APE SAME). */
+   and release-run --pack. Expected manifest set == {tapemode.so, m53.tapeslice} U {cf_tu(lnx/x86_64)}. */
+enum { RB_M1_MAX = 16 };
 typedef struct {
     int active;
-    char *data[3];
-    size_t len[3];
-    unsigned crc[3];
+    int n;
+    char keys[RB_M1_MAX][128];
+    char leaves[RB_M1_MAX][96];
+    char *data[RB_M1_MAX];
+    size_t len[RB_M1_MAX];
+    unsigned crc[RB_M1_MAX];
 } RbEmbedTape;
 
 static const char *const rb_m1_keys[3] = {
@@ -336,12 +340,55 @@ static const char *const rb_m1_leaves[3] = {
 static const size_t rb_m1_caps[3] = { 65536UL, 1048576UL, 4194304UL };
 
 static int rb_is_m1_tape_key(const unsigned char *name, int n) {
-    int k;
-    for (k = 0; k < 3; k++) {
-        long kl = tx_len(rb_m1_keys[k], 64);
-        if (n == (int)kl && tx_same((const char *)name, n, rb_m1_keys[k], kl)) return 1;
+    return n > 16 && tx_prefix((const char *)name, (long)n, "tape/lnx-x86_64/", 16);
+}
+
+/* Build authoritative expected tape set: manifest.tsv, tapemode.so, m53.tapeslice + all cf_tu(lnx/x86_64). */
+static int rb_expected_m1_set(char keys[RB_M1_MAX][128], char leaves[RB_M1_MAX][96]) {
+    int n = 3;
+    for (int k = 0; k < 3; k++) {
+        if (cx_fmt(keys[k], 128, "%s", rb_m1_keys[k]) ||
+            cx_fmt(leaves[k], 96, "%s", rb_m1_leaves[k])) return -1;
     }
-    return 0;
+    for (int ti = 0; ti < cf_tu_count(); ti++) {
+        const char *t = cf_tu_target(ti), *u = cf_tu_unit(ti);
+        char lf[96];
+        if (!t || !u || !tx_eqz(t, "lnx/x86_64")) continue;
+        if (cx_fmt(lf, sizeof lf, "%s.tapeslice", u)) return -1;
+        int dup = 0;
+        for (int j = 1; j < n; j++) if (tx_eqz(leaves[j], lf)) { dup = 1; break; }
+        if (dup) continue;
+        if (n >= RB_M1_MAX) return -1;
+        if (cx_fmt(leaves[n], 96, "%s", lf) ||
+            cx_fmt(keys[n], 128, "tape/lnx-x86_64/%s", lf)) return -1;
+        n++;
+    }
+    return n;
+}
+
+/* Strict 1:1 check: every non-comment manifest row must belong to expected leaves[1..n-1] (no extra/dup rows). */
+static int rb_verify_m1_manifest_exact_set(const char *mb, long mn, char leaves[RB_M1_MAX][96], int n) {
+    long at = 0;
+    int rows = 0, seen[RB_M1_MAX];
+    for (int k = 0; k < RB_M1_MAX; k++) seen[k] = 0;
+    while (at < mn) {
+        long e = at, ln, off = 0, flen = 0;
+        while (e < mn && mb[e] != '\n') e++;
+        ln = e - at;
+        if (ln > 0 && mb[at + ln - 1] == '\r') ln--;
+        if (ln > 0 && mb[at] != '#') {
+            if (tx_field(mb + at, ln, '\t', 0, &off, &flen) != 0) return -1;
+            int hit = -1;
+            for (int k = 1; k < n; k++) {
+                if (flen == tx_len(leaves[k], 96) && tx_same(mb + at + off, flen, leaves[k], flen)) { hit = k; break; }
+            }
+            if (hit < 0 || seen[hit]) return -1;
+            seen[hit] = 1;
+            rows++;
+        }
+        at = e + 1;
+    }
+    return rows == (n - 1) ? 0 : -1;
 }
 
 static int rb_verify_m1_manifest_entry(const char *mb, long mn, const char *leaf, const char sha[65], size_t bytes) {
@@ -375,10 +422,11 @@ static int rb_verify_m1_manifest_entry(const char *mb, long mn, const char *leaf
 
 static void rb_free_embed_tape(RbEmbedTape *et) {
     int k;
-    for (k = 0; k < 3; k++) {
+    for (k = 0; k < RB_M1_MAX; k++) {
         if (et->data[k]) { mm_free(et->data[k]); et->data[k] = 0; }
         et->len[k] = 0; et->crc[k] = 0;
     }
+    et->n = 0;
     et->active = 0;
 }
 
@@ -390,30 +438,40 @@ static int rb_root_requires_tape(const char *root) {
 }
 
 static int rb_verify_pkg_m1_tape(const unsigned char *buf, const CxPackage *c) {
-    int k, i, seen[3] = {0, 0, 0}, idx[3] = {-1, -1, -1};
+    char keys[RB_M1_MAX][128], leaves[RB_M1_MAX][96];
+    int n = rb_expected_m1_set(keys, leaves);
+    int k, i, seen[RB_M1_MAX], idx[RB_M1_MAX], any_tape = 0;
+    if (n < 3) return -1;
+    for (k = 0; k < n; k++) { seen[k] = 0; idx[k] = -1; }
     for (i = 0; i < c->nr; i++) {
         const CxPackageResource *r = &c->res[i];
-        for (k = 0; k < 3; k++) {
-            long kl = tx_len(rb_m1_keys[k], 64);
-            if (r->n == (int)kl && tx_same((const char *)(buf + r->name), r->n, rb_m1_keys[k], kl)) {
-                if (r->codec != 0 || r->len <= 0 || r->rawlen != r->len) return -1;
-                if ((unsigned)dz_crc32(0, buf + r->data, r->len) != r->crc) return -1;
-                seen[k]++;
-                idx[k] = i;
-            }
+        if (!rb_is_m1_tape_key(buf + r->name, r->n)) continue;
+        any_tape++;
+        int matched = -1;
+        for (k = 0; k < n; k++) {
+            long kl = tx_len(keys[k], 128);
+            if (r->n == (int)kl && tx_same((const char *)(buf + r->name), r->n, keys[k], kl)) { matched = k; break; }
+        }
+        if (matched < 0) return -1;
+        if (r->codec != 0 || r->len <= 0 || r->rawlen != r->len) return -1;
+        if ((unsigned)dz_crc32(0, buf + r->data, r->len) != r->crc) return -1;
+        seen[matched]++;
+        idx[matched] = i;
+    }
+    if (any_tape == 0) return 0;
+    for (k = 0; k < n; k++) if (seen[k] != 1) return -1;
+    {
+        const CxPackageResource *rm = &c->res[idx[0]];
+        if (rb_verify_m1_manifest_exact_set((const char *)(buf + rm->data), (long)rm->len, leaves, n) != 0) return -1;
+        for (k = 1; k < n; k++) {
+            char sha[65];
+            const CxPackageResource *rk = &c->res[idx[k]];
+            cx_sha256_hex((const char *)(buf + rk->data), (size_t)rk->len, sha);
+            if (rb_verify_m1_manifest_entry((const char *)(buf + rm->data), (long)rm->len,
+                                            leaves[k], sha, (size_t)rk->len) != 0) return -1;
         }
     }
-    if (seen[0] == 0 && seen[1] == 0 && seen[2] == 0) return 0;
-    if (seen[0] != 1 || seen[1] != 1 || seen[2] != 1) return -1;
-    for (k = 1; k < 3; k++) {
-        char sha[65];
-        const CxPackageResource *rm = &c->res[idx[0]];
-        const CxPackageResource *rk = &c->res[idx[k]];
-        cx_sha256_hex((const char *)(buf + rk->data), (size_t)rk->len, sha);
-        if (rb_verify_m1_manifest_entry((const char *)(buf + rm->data), (long)rm->len,
-                                        rb_m1_leaves[k], sha, (size_t)rk->len) != 0) return -1;
-    }
-    return 3;
+    return n;
 }
 
 static void rb_load_embed_tape(const char *root, const char *explicit_dir, const char *run_dir, RbEmbedTape *et) {
@@ -438,18 +496,24 @@ static void rb_load_embed_tape(const char *root, const char *explicit_dir, const
         return;
     }
     if (r != 0 || st.kind != 'd') rb_die("embed-tape dir missing or not dir");
-    for (k = 0; k < 3; k++) {
-        if (cx_fmt(p, sizeof p, "%s/%s", dir, rb_m1_leaves[k])) rb_die("embed-tape file path");
+    et->n = rb_expected_m1_set(et->keys, et->leaves);
+    if (et->n < 3) rb_die("embed-tape expected set invalid");
+    for (k = 0; k < et->n; k++) {
+        size_t cap = k < 3 ? rb_m1_caps[k] : 4194304UL;
+        if (cx_fmt(p, sizeof p, "%s/%s", dir, et->leaves[k])) rb_die("embed-tape file path");
         if (sy_lstat(p, &st) != 0 || st.kind != 'f') { rb_free_embed_tape(et); rb_die("embed-tape missing or non-regular file"); }
         et->data[k] = cx_read(p, &et->len[k]);
-        if (!et->data[k] || et->len[k] == 0 || et->len[k] > rb_m1_caps[k]) {
+        if (!et->data[k] || et->len[k] == 0 || et->len[k] > cap) {
             rb_free_embed_tape(et); rb_die("embed-tape empty or oversize file");
         }
         et->crc[k] = (unsigned)dz_crc32(0, (const unsigned char *)et->data[k], (long)et->len[k]);
     }
-    for (k = 1; k < 3; k++) {
+    if (rb_verify_m1_manifest_exact_set(et->data[0], (long)et->len[0], et->leaves, et->n) != 0) {
+        rb_free_embed_tape(et); rb_die("embed-tape manifest set mismatch (extra or missing slice)");
+    }
+    for (k = 1; k < et->n; k++) {
         cx_sha256_hex(et->data[k], et->len[k], sha);
-        if (rb_verify_m1_manifest_entry(et->data[0], (long)et->len[0], rb_m1_leaves[k], sha, et->len[k]) != 0) {
+        if (rb_verify_m1_manifest_entry(et->data[0], (long)et->len[0], et->leaves[k], sha, et->len[k]) != 0) {
             rb_free_embed_tape(et); rb_die("embed-tape manifest sha/size mismatch");
         }
     }
@@ -1000,7 +1064,7 @@ static int rb_p3(int argc, char **argv) {
     for (i = 0; i < pkg->nr; i++)
         if (!rb_hdr(body + pkg->res[i].name, pkg->res[i].n) &&
             (!et.active || !rb_is_m1_tape_key(body + pkg->res[i].name, pkg->res[i].n))) kept++;
-    nr = (int)kept + rb_nfiles + (et.active ? 3 : 0);
+    nr = (int)kept + rb_nfiles + (et.active ? et.n : 0);
     out_ver = compress ? 4 : pkg->ver;
     if (et.active && out_ver < 4) { rb_free_embed_tape(&et); rb_die("embed-tape requires P4"); }
     /* P4 means "supports the codec field", not "every row is compressed":
@@ -1076,9 +1140,9 @@ static int rb_p3(int argc, char **argv) {
     }
     if (et.active) {
         int ek;
-        for (ek = 0; ek < 3; ek++) {
-            long kl = tx_len(rb_m1_keys[ek], 64);
-            rb_emit_verbatim(&out, (const unsigned char *)rb_m1_keys[ek], kl,
+        for (ek = 0; ek < et.n; ek++) {
+            long kl = tx_len(et.keys[ek], 128);
+            rb_emit_verbatim(&out, (const unsigned char *)et.keys[ek], kl,
                              (const unsigned char *)et.data[ek], (long)et.len[ek], (long)et.len[ek], 0, et.crc[ek]);
         }
     }
