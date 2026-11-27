@@ -1,6 +1,6 @@
 # git gc 停用: 测量与计划
 
-测量日: 2026-11-27. 仓库: `/home/devali/repos/unisacc`. 只读测量, 未跑 `git prune` 或 `git gc`.
+测量日: 2026-11-27. 仓库: `~/repos/unisacc`. 只读测量, 未跑 `git prune` 或 `git gc`.
 
 自动 gc 停用的原因是 `.git/gc.log` (87 字节):
 
@@ -100,7 +100,7 @@ git gc --prune=30.days
 
 已执行安全的一半. 未跑 `git gc`, 未跑 `git prune`, 未删 `.git/gc.log`.
 
-路径: `/home/devali/.cache/unisacc/branch-archive/unreach-2026-11-27.bundle`
+路径: `~/.cache/unisacc/branch-archive/unreach-2026-11-27.bundle`
 
 sha256: `2cb385febedde528e582495c6005c35ff4f4ffff61ebedb62288dfce0e6196b2`
 

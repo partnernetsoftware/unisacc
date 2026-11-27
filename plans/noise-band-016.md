@@ -1,6 +1,6 @@
 # 0.1.6 本机根噪声带
 
-单作业, `nice -n 19`. 只跑已装根 `/home/devali/repos/unisacc/unisacc.com` (`unisacc 0.1.6`). 不跑私有 APE. 结果是 LOCAL 测量, 不是 PASS.
+单作业, `nice -n 19`. 只跑已装根 `~/repos/unisacc/unisacc.com` (`unisacc 0.1.6`). 不跑私有 APE. 结果是 LOCAL 测量, 不是 PASS.
 
 三条命令来自 w-agy-h `.work/m2-pm/m2_wall_bench.cx`, 不是 m1-ape 的表. m1-ape `wall-bench.tsv` 只有 stream 两行, 没有 `cli_compile_c1`. m2 三条都带 `--no-external-nn`, 并 `unsetenv UNISACC_NN_DIR`. stdin 仍用 m1-ape 的 `priv-c1-e3.out` 与 `priv-c1-e1.out`.
 
