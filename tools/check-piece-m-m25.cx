@@ -195,7 +195,11 @@ static int run_chain_ape_pregate(const char *ape, const char *rcpt,
     sy_sha256_hex((const char *)ab, (long)an, asha);
     mm_free(ab);
 
-    if (run_id && run_id[0]) {
+    if (!run_id || !run_id[0]) {
+        if (!quiet) sy_printf("REFUSE\tFORMAL_CHAIN_PREGATE\tmissing-run-id\n");
+        return 2;
+    }
+    {
         rc_expect_t exp;
         rc_verified_t got;
         mm_fill(&exp, (long)sizeof exp, 0, (long)sizeof exp);
@@ -217,19 +221,6 @@ static int run_chain_ape_pregate(const char *ape, const char *rcpt,
         int rrc = rc_verify_out(rcpt, &exp, &got);
         if (rrc != RC_OK || !tx_eqz(got.rev, rev) || !tx_eqz(got.candidate_sha, asha) || !tx_eqz(got.target, target)) {
             if (!quiet) sy_printf("FAIL\tFORMAL_CHAIN_PREGATE\treceipt-verify\tape_sha=%s\treason=%s:%s\n", asha, rc_code_name(rrc), rc_why());
-            return 2;
-        }
-    } else {
-        unsigned char *rb = 0; int64_t rn = 0;
-        if (sy_read_file(rcpt, &rb, &rn, 1L << 20) != 0 || !rb) {
-            mm_free(rb);
-            if (!quiet) sy_printf("REFUSE\tFORMAL_CHAIN_PREGATE\tunreadable-receipt\n");
-            return 2;
-        }
-        int match = (strstr((const char *)rb, asha) != 0);
-        mm_free(rb);
-        if (!match) {
-            if (!quiet) sy_printf("REFUSE\tFORMAL_CHAIN_PREGATE\tape-sha-mismatch\tape_sha=%s\n", asha);
             return 2;
         }
     }
@@ -275,7 +266,7 @@ static int run_chain_ape_pregate(const char *ape, const char *rcpt,
     return 0;
 }
 
-static int run_all_checks(int want_obj, int want_rt) {
+static int run_all_checks(int want_obj, int want_parity, int want_bounds) {
     char tmp[256], cmd[4096], out[16384], nat_out[8192], s3_out[8192];
     n_ok = 0; failed = 0;
     const char *td = sy_env("TMPDIR");
@@ -301,7 +292,7 @@ static int run_all_checks(int want_obj, int want_rt) {
         /* 2. Real entry-build --objects-only for lnx/x86_64 and lnx/arm64 */
         (void)check_entry_build_objects(tmp);
     }
-    if (!want_rt) goto done;
+    if (!want_parity && !want_bounds) goto done;
 
     /* 3. Build tapepack, p4emit, candidate-chain, and pack good.p4 / bad_crc_m25.p4 / dropped_m25.p4 */
     char tdir[320], tpk_bin[320], p4e_bin[320], cc_bin[320];
@@ -463,19 +454,25 @@ static int run_all_checks(int want_obj, int want_rt) {
         goto done;
     }
 
-    /* 5. Value parity: native_probe vs s3_probe */
-    cx_fmt(cmd, sizeof cmd, "'%s'", nat_bin);
-    int r_nat = run_sh(cmd, nat_out, sizeof nat_out);
-    cx_fmt(cmd, sizeof cmd, "UNISA_CONTAINER='%s' '%s' p", good_p4, s3_bin);
-    int r_s3 = run_sh(cmd, s3_out, sizeof s3_out);
-    ck_v(r_nat == 0 && r_s3 == 0 && nat_out[0] != 0 && strcmp(nat_out, s3_out) == 0,
-         "LOCAL", "native-vs-s3-value-parity", "local-good-p4", "byte-identical-rts-outputs");
+    if (want_parity) {
+        /* 5. Value parity: native_probe vs s3_probe */
+        cx_fmt(cmd, sizeof cmd, "'%s'", nat_bin);
+        int r_nat = run_sh(cmd, nat_out, sizeof nat_out);
+        cx_fmt(cmd, sizeof cmd, "UNISA_CONTAINER='%s' '%s' p", good_p4, s3_bin);
+        int r_s3 = run_sh(cmd, s3_out, sizeof s3_out);
+        ck_v(r_nat == 0 && r_s3 == 0 && nat_out[0] != 0 && strcmp(nat_out, s3_out) == 0,
+             "LOCAL", "native-vs-s3-value-parity", "local-good-p4", "byte-identical-rts-outputs");
+    }
 
-    /* 6. Exact boundaries: 256/257/65535/65536, idx 127/128/-128/-129 clamp, 255->-1, rts_used_name NULL */
-    cx_fmt(cmd, sizeof cmd, "UNISA_CONTAINER='%s' '%s' b", good_p4, s3_bin);
-    int r_bnd = run_sh(cmd, out, sizeof out);
-    ck_v(r_bnd == 0 && strstr(out, "BOUNDS 256=0 257=0 2000=0 4096=0 65535=0 65536=-2 idx=-1:-1:-1:-1 un=NULL") != 0,
-         "LOCAL", "m25-m1-exact-boundaries-and-257-heap", "local-good-p4", "u16-and-idx-clamp-and-255-to-m1");
+    if (want_bounds) {
+        /* 6. Exact boundaries: 256/257/2000/4096/65535/65536, idx 127/128/-128/-129 clamp, 255->-1, rts_used_name NULL */
+        cx_fmt(cmd, sizeof cmd, "UNISA_CONTAINER='%s' '%s' b", good_p4, s3_bin);
+        int r_bnd = run_sh(cmd, out, sizeof out);
+        ck_v(r_bnd == 0 && strstr(out, "BOUNDS 256=0 257=0 2000=0 4096=0 65535=0 65536=-2 idx=-1:-1:-1:-1 un=NULL") != 0,
+             "LOCAL", "m25-m1-exact-boundaries-and-257-heap", "local-good-p4", "u16-and-idx-clamp-and-255-to-m1");
+    }
+
+    if (!want_parity) goto done;
 
     /* 7. Refusal propagation on bad_crc_m25.p4, dropped_m25.p4, missing carrier, and UNISACC_M53_S1=1 */
     cx_fmt(cmd, sizeof cmd, "UNISA_CONTAINER='%s' '%s' r", bad_crc_p4, s3_bin);
@@ -512,7 +509,7 @@ static int run_all_checks(int want_obj, int want_rt) {
         cx_fmt(bad_rcpt, sizeof bad_rcpt, "%s/bad.rcpt", tmp);
         (void)sy_write_file(bad_rcpt, (const unsigned char *)fake, (long)strlen(fake), 0644);
         int saved_ok = n_ok, saved_fail = failed;
-        int mrc = run_chain_ape_pregate(good_p4, bad_rcpt, 0, 0, 0, 0, 0, 0, 0, 0, 0, 1);
+        int mrc = run_chain_ape_pregate(good_p4, bad_rcpt, "r1", "0000", "m25", "lnx/x86_64", "p", "purp", "0000", "out", 0, 1);
         n_ok = saved_ok; failed = saved_fail;
         ck_v(mrc != 0, "LOCAL", "chain-ape-receipt-sha-mismatch-refused", "local-bad-receipt", "ape-sha-mismatch-rejected");
     }
@@ -524,7 +521,7 @@ done:
 
 int main(int argc, char **argv) {
     if (argc == 4 && tx_eqz(argv[1], "--produce")) {
-        int rc = run_all_checks(1, 1);
+        int rc = run_all_checks(1, 1, 1);
         if (rc != 0) return 1;
         char buf[256];
         if (cx_fmt(buf, sizeof buf, "run_id=%s\nverdict=PASS\npassed=%d\nfailed=0\n", argv[2], n_ok)) return 2;
@@ -566,22 +563,34 @@ int main(int argc, char **argv) {
     }
     if ((argc == 3 && tx_eqz(argv[1], "--part") && tx_eqz(argv[2], "obj")) ||
         (argc == 2 && tx_eqz(argv[1], "--part=obj"))) {
-        int rc = run_all_checks(1, 0);
+        int rc = run_all_checks(1, 0, 0);
         sy_printf("CHECK_PIECE_M_M25\tscope=LOCAL\tpart=obj\tpassed=%d\tfailed=%d\n", n_ok, failed);
         return rc;
     }
     if ((argc == 3 && tx_eqz(argv[1], "--part") && tx_eqz(argv[2], "runtime")) ||
         (argc == 2 && tx_eqz(argv[1], "--part=runtime"))) {
-        int rc = run_all_checks(0, 1);
+        int rc = run_all_checks(0, 1, 1);
         sy_printf("CHECK_PIECE_M_M25\tscope=LOCAL\tpart=runtime\tpassed=%d\tfailed=%d\n", n_ok, failed);
         return rc;
     }
+    if ((argc == 3 && tx_eqz(argv[1], "--part") && tx_eqz(argv[2], "parity")) ||
+        (argc == 2 && tx_eqz(argv[1], "--part=parity"))) {
+        int rc = run_all_checks(0, 1, 0);
+        sy_printf("CHECK_PIECE_M_M25\tscope=LOCAL\tpart=parity\tpassed=%d\tfailed=%d\n", n_ok, failed);
+        return rc;
+    }
+    if ((argc == 3 && tx_eqz(argv[1], "--part") && tx_eqz(argv[2], "bounds")) ||
+        (argc == 2 && tx_eqz(argv[1], "--part=bounds"))) {
+        int rc = run_all_checks(0, 0, 1);
+        sy_printf("CHECK_PIECE_M_M25\tscope=LOCAL\tpart=bounds\tpassed=%d\tfailed=%d\n", n_ok, failed);
+        return rc;
+    }
     if (argc == 2 && tx_eqz(argv[1], "--all")) {
-        int rc = run_all_checks(1, 1);
+        int rc = run_all_checks(1, 1, 1);
         sy_printf("CHECK_PIECE_M_M25\tscope=LOCAL\tpassed=%d\tfailed=%d\n", n_ok, failed);
         return rc;
     }
-    int rc = run_all_checks(1, 0);
+    int rc = run_all_checks(1, 0, 0);
     sy_printf("CHECK_PIECE_M_M25\tscope=LOCAL\tpart=obj\tpassed=%d\tfailed=%d\n", n_ok, failed);
     return rc;
 }
