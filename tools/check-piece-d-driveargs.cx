@@ -745,49 +745,235 @@ static int judge_evidence(const char *run_id, const char *ev_path,
     return 0;
 }
 
-static int stage_full_link_build(const char *dir) {
-    char cmd[2048], out[16384], logp[640];
-    if (!dir || !dir[0]) return 2;
-    (void)sy_mkdir(dir, 0700);
-    cx_fmt(logp, sizeof logp, "%s/link.out", dir);
-    cx_fmt(cmd, sizeof cmd, "sh ./unisacc.com tools/entry-build.cx -- . ./unisacc.com '%s' --target lnx/x86_64", dir);
-    int rc = run_sh(cmd, out, sizeof out);
-    (void)sy_write_file(logp, (const unsigned char *)out, (long)strlen(out), 0644);
-    if (rc != 0) {
-        sy_printf("FAIL\tLOCAL\tstage-full-link-build\tvariant=entry-build-lnx-x86_64\treason=entry-build-rc-%d\n", rc);
-        return 1;
+static int stage_tree_identity(char tree_sha[65], char def_dir[512]) {
+    char cmd[2048], out[256];
+    cx_fmt(cmd, sizeof cmd,
+           "(sha256sum ./unisacc.com build/chain-facts.tsv tools/entry-build.cx; "
+           "LC_ALL=C find src cx/driver cx/runtime cx/compiler cx/core cx/sys cx/mem cx/text -maxdepth 3 -name '*.cx' -type f | LC_ALL=C sort | xargs sha256sum) | "
+           "sha256sum | awk '{print $1}'");
+    if (run_sh(cmd, out, sizeof out) != 0 || !is_hex64(out)) return 1;
+    mm_copy(tree_sha, 65, out, 64);
+    tree_sha[64] = 0;
+    if (def_dir) {
+        char id16[17];
+        mm_copy(id16, 17, tree_sha, 16);
+        id16[16] = 0;
+        cx_fmt(def_dir, 512, "%s/unisacc-lnx-x86_64-link-%s", sy_tmpdir(), id16);
     }
-    sy_printf("PASS\tLOCAL\tstage-full-link-build\tvariant=entry-build-lnx-x86_64\treason=ok\n");
     return 0;
 }
 
-static int stage_full_link_assert(const char *dir) {
-    char cmd[2048], out[16384], logp[640];
-    unsigned char *lb = 0; int64_t ln = 0;
-    n_ok = 0; failed = 0;
-    if (!dir || !dir[0]) return 2;
-    cx_fmt(logp, sizeof logp, "%s/link.out", dir);
-    int no_dup_txt = 0;
-    if (sy_read_file(logp, &lb, &ln, 1024 * 1024) == 0 && lb) {
-        no_dup_txt = (strstr((const char *)lb, "multiple definitions") == 0);
-        mm_free(lb);
+static int stage_verify_or_init_dir(const char *dir, const char *tree_sha, int allow_init, char root_out[512]) {
+    char idp[640], rp[640], got[65], cwd[512];
+    unsigned char *b = 0; int64_t n = 0;
+    if (!getcwd(cwd, sizeof cwd)) return 1;
+    cx_fmt(idp, sizeof idp, "%s/tree_id.sha", dir);
+    cx_fmt(rp, sizeof rp, "%s/root.path", dir);
+    if (sy_read_file(idp, &b, &n, 256) == 0 && b && n >= 64) {
+        mm_copy(got, 65, b, 64); got[64] = 0;
+        mm_free(b); b = 0;
+        if (tx_eqz(got, tree_sha)) {
+            if (root_out) {
+                if (sy_read_file(rp, &b, &n, 510) == 0 && b && n > 0) {
+                    long rl = (long)n;
+                    while (rl > 0 && (b[rl - 1] == '\n' || b[rl - 1] == '\r')) rl--;
+                    mm_copy(root_out, 512, b, rl); root_out[rl] = 0;
+                    mm_free(b);
+                } else {
+                    if (b) mm_free(b);
+                    cx_fmt(root_out, 512, "%s", cwd);
+                }
+            }
+            return 0;
+        }
+        if (!allow_init) return 1;
+        (void)sy_remove_all(dir);
+    } else {
+        if (b) mm_free(b);
+        if (!allow_init) return 1;
     }
+    (void)sy_mkdir(dir, 0700);
+    char line[80], rline[520];
+    cx_fmt(line, sizeof line, "%s\n", tree_sha);
+    cx_fmt(rline, sizeof rline, "%s\n", cwd);
+    if (root_out) cx_fmt(root_out, 512, "%s", cwd);
+    return (sy_write_file(idp, (const unsigned char *)line, (long)strlen(line), 0644) == 0 &&
+            sy_write_file(rp, (const unsigned char *)rline, (long)strlen(rline), 0644) == 0) ? 0 : 1;
+}
+
+static int stage_full_link_objs1(const char *dir_arg) {
+    char tree_sha[65], defd[512], root[512], eb[640], cmd[4096], out[16384];
+    long off = 0;
+    if (stage_tree_identity(tree_sha, defd) != 0) return 2;
+    const char *dir = (dir_arg && dir_arg[0]) ? dir_arg : defd;
+    if (stage_verify_or_init_dir(dir, tree_sha, 1, root) != 0) return 2;
+    cx_fmt(eb, sizeof eb, "%s/entry_build.bin", dir);
+    if (sy_exists(eb) != 1) {
+        cx_fmt(cmd, sizeof cmd, "sh '%s/unisacc.com' '%s/tools/entry-build.cx' -o '%s'", root, root, eb);
+        if (run_sh(cmd, out, sizeof out) != 0) {
+            sy_eprintf("%s\n", out);
+            sy_printf("FAIL\tLOCAL\tstage-full-link-objs1\tvariant=entry-build-lnx-x86_64\treason=compile-entry-build-failed\n");
+            sy_printf("CHECK_PIECE_D_DRIVEARGS\tmode=STAGE_LINK_OBJS1\tpassed=0\tfailed=1\n");
+            return 1;
+        }
+    }
+    cx_fmt(cmd, sizeof cmd, "'%s' '%s' '%s/unisacc.com' '%s' --target lnx/x86_64", eb, root, root, dir);
+    off = (long)strlen(cmd);
+    for (int i = 0; i < cf_root_count() / 2; i++) {
+        const char *k = cf_root_key(i);
+        if (k && off + 16 + (long)strlen(k) < (long)sizeof cmd) {
+            cx_fmt(cmd + off, sizeof cmd - (size_t)off, " --only '%s'", k);
+            off += (long)strlen(cmd + off);
+        }
+    }
+    int rc = run_sh(cmd, out, sizeof out);
+    if (rc != 0) {
+        sy_eprintf("%s\n", out);
+        sy_printf("FAIL\tLOCAL\tstage-full-link-objs1\tvariant=entry-build-lnx-x86_64\treason=entry-build-rc-%d\n", rc);
+        sy_printf("CHECK_PIECE_D_DRIVEARGS\tmode=STAGE_LINK_OBJS1\tpassed=0\tfailed=1\n");
+        return 1;
+    }
+    sy_printf("PASS\tLOCAL\tstage-full-link-objs1\tvariant=entry-build-lnx-x86_64\treason=ok\n");
+    sy_printf("STAGE_MATERIAL\tstage=objs1\tdir=%s\ttree_sha=%s\n", dir, tree_sha);
+    sy_printf("CHECK_PIECE_D_DRIVEARGS\tmode=STAGE_LINK_OBJS1\tpassed=1\tfailed=0\n");
+    return 0;
+}
+
+static int stage_full_link_objs2(const char *dir_arg) {
+    char tree_sha[65], defd[512], root[512], cmd[4096], out[16384];
+    long off = 0;
+    if (stage_tree_identity(tree_sha, defd) != 0) return 2;
+    const char *dir = (dir_arg && dir_arg[0]) ? dir_arg : defd;
+    if (stage_verify_or_init_dir(dir, tree_sha, 0, root) != 0) {
+        sy_printf("FAIL\tLOCAL\tstage-full-link-objs2\tvariant=entry-build-lnx-x86_64\treason=tree-id-missing-or-mismatch\n");
+        sy_printf("CHECK_PIECE_D_DRIVEARGS\tmode=STAGE_LINK_OBJS2\tpassed=0\tfailed=1\n");
+        return 1;
+    }
+    cx_fmt(cmd, sizeof cmd, "'%s/entry_build.bin' '%s' '%s/unisacc.com' '%s' --target lnx/x86_64", dir, root, root, dir);
+    off = (long)strlen(cmd);
+    for (int i = cf_root_count() / 2; i < cf_root_count(); i++) {
+        const char *k = cf_root_key(i);
+        if (k && off + 16 + (long)strlen(k) < (long)sizeof cmd) {
+            cx_fmt(cmd + off, sizeof cmd - (size_t)off, " --only '%s'", k);
+            off += (long)strlen(cmd + off);
+        }
+    }
+    int rc = run_sh(cmd, out, sizeof out);
+    if (rc != 0) {
+        sy_eprintf("%s\n", out);
+        sy_printf("FAIL\tLOCAL\tstage-full-link-objs2\tvariant=entry-build-lnx-x86_64\treason=entry-build-rc-%d\n", rc);
+        sy_printf("CHECK_PIECE_D_DRIVEARGS\tmode=STAGE_LINK_OBJS2\tpassed=0\tfailed=1\n");
+        return 1;
+    }
+    sy_printf("PASS\tLOCAL\tstage-full-link-objs2\tvariant=entry-build-lnx-x86_64\treason=ok\n");
+    sy_printf("STAGE_MATERIAL\tstage=objs2\tdir=%s\ttree_sha=%s\n", dir, tree_sha);
+    sy_printf("CHECK_PIECE_D_DRIVEARGS\tmode=STAGE_LINK_OBJS2\tpassed=1\tfailed=0\n");
+    return 0;
+}
+
+static int stage_full_link_closure(const char *dir_arg, int part) {
+    char tree_sha[65], defd[512], root[512], cmd[8192], out[16384];
+    if (stage_tree_identity(tree_sha, defd) != 0) return 2;
+    const char *dir = (dir_arg && dir_arg[0]) ? dir_arg : defd;
+    if (stage_verify_or_init_dir(dir, tree_sha, 0, root) != 0) {
+        sy_printf("FAIL\tLOCAL\tstage-full-link-closure%d\tvariant=entry-build-lnx-x86_64\treason=tree-id-missing-or-mismatch\n", part);
+        sy_printf("CHECK_PIECE_D_DRIVEARGS\tmode=STAGE_LINK_CLOSURE%d\tpassed=0\tfailed=1\n", part);
+        return 1;
+    }
+    cx_fmt(cmd, sizeof cmd,
+           "args=$('%s/entry_build.bin' '%s' '%s/unisacc.com' '%s' --target lnx/x86_64 --closure-list | "
+           "awk -F'\\t' -v p=%d '((p==1 && (NR %% 2 == 1 || $1 == \"m55.o\")) || (p==2 && (NR %% 2 == 0 && $1 != \"m55.o\"))) {printf \" --closure-only %%s\", $1}') && "
+           "'%s/entry_build.bin' '%s' '%s/unisacc.com' '%s' --target lnx/x86_64 $args",
+           dir, root, root, dir, part, dir, root, root, dir);
+    int rc = run_sh(cmd, out, sizeof out);
+    if (rc != 0) {
+        sy_eprintf("%s\n", out);
+        sy_printf("FAIL\tLOCAL\tstage-full-link-closure%d\tvariant=entry-build-lnx-x86_64\treason=entry-build-rc-%d\n", part, rc);
+        sy_printf("CHECK_PIECE_D_DRIVEARGS\tmode=STAGE_LINK_CLOSURE%d\tpassed=0\tfailed=1\n", part);
+        return 1;
+    }
+    sy_printf("PASS\tLOCAL\tstage-full-link-closure%d\tvariant=entry-build-lnx-x86_64\treason=ok\n", part);
+    sy_printf("STAGE_MATERIAL\tstage=closure%d\tdir=%s\ttree_sha=%s\n", part, dir, tree_sha);
+    sy_printf("CHECK_PIECE_D_DRIVEARGS\tmode=STAGE_LINK_CLOSURE%d\tpassed=1\tfailed=0\n", part);
+    return 0;
+}
+
+static int stage_full_link_link(const char *dir_arg) {
+    char tree_sha[65], defd[512], root[512], logp[640], candp[640], cand_sha[65], cshap[640], cmd[2048], out[16384];
+    n_ok = 0; failed = 0;
+    if (stage_tree_identity(tree_sha, defd) != 0) return 2;
+    const char *dir = (dir_arg && dir_arg[0]) ? dir_arg : defd;
+    if (stage_verify_or_init_dir(dir, tree_sha, 0, root) != 0) {
+        sy_printf("FAIL\tLOCAL\tstage-full-link-link\tvariant=entry-build-lnx-x86_64\treason=tree-id-missing-or-mismatch\n");
+        sy_printf("CHECK_PIECE_D_DRIVEARGS\tmode=STAGE_LINK_LINK\tpassed=0\tfailed=1\n");
+        return 1;
+    }
+    cx_fmt(logp, sizeof logp, "%s/link.out", dir);
+    cx_fmt(candp, sizeof candp, "%s/candidate", dir);
+    cx_fmt(cshap, sizeof cshap, "%s/candidate.sha", dir);
+    cx_fmt(cmd, sizeof cmd, "'%s/entry_build.bin' '%s' '%s/unisacc.com' '%s' --target lnx/x86_64 --link-only", dir, root, root, dir);
+    int rc = run_sh(cmd, out, sizeof out);
+    (void)sy_write_file(logp, (const unsigned char *)out, (long)strlen(out), 0644);
+    int no_dup_txt = (rc == 0 && strstr(out, "multiple definitions") == 0);
     cx_fmt(cmd, sizeof cmd,
            "test -x '%s/candidate' && "
            "nm -g --defined-only '%s'/*.o | grep -c ' T dv_word$' | grep -Fx '1' >/dev/null && "
            "nm '%s/driveargs.o' | grep -q 'da_m1_dv_word' && "
            "nm '%s/driveargs.o' | grep -q 'da_m1_parse_args'",
            dir, dir, dir, dir);
-    int nm_ok = (run_sh(cmd, out, sizeof out) == 0);
-    ck_v(no_dup_txt && nm_ok, "LOCAL", "stage-full-link-assert-dv-word-unique",
-         "entry-build-lnx-x86_64", "dv_word-defined-once-and-no-multiple-definitions");
-    sy_printf("CHECK_PIECE_D_DRIVEARGS\tmode=STAGE_LINK_ASSERT\tpassed=%d\tfailed=%d\n", n_ok, failed);
+    int nm_ok = no_dup_txt && (run_sh(cmd, out, sizeof out) == 0) && (file_sha256_hex(candp, cand_sha) == 0);
+    if (nm_ok) {
+        char line[80];
+        cx_fmt(line, sizeof line, "%s\n", cand_sha);
+        (void)sy_write_file(cshap, (const unsigned char *)line, (long)strlen(line), 0644);
+    }
+    ck_v(no_dup_txt && nm_ok, "LOCAL", "stage-full-link-and-dv-word-unique",
+         "entry-build-lnx-x86_64", "candidate-linked-dv_word-defined-once-and-no-multiple-definitions");
+    if (nm_ok) sy_printf("STAGE_MATERIAL\tstage=link\tdir=%s\ttree_sha=%s\tcandidate_sha=%s\n", dir, tree_sha, cand_sha);
+    sy_printf("CHECK_PIECE_D_DRIVEARGS\tmode=STAGE_LINK_LINK\tpassed=%d\tfailed=%d\n", n_ok, failed);
     return failed ? 1 : 0;
 }
 
+static int stage_full_link_verify(const char *dir_arg) {
+    char tree_sha[65], defd[512], candp[640], cshap[640], elfp[640], bindp[640], dap[640], rcptp[640];
+    char actual_cand[65], want_cand[65];
+    unsigned char *b = 0; int64_t n = 0;
+    if (stage_tree_identity(tree_sha, defd) != 0) return 2;
+    const char *dir = (dir_arg && dir_arg[0]) ? dir_arg : defd;
+    if (stage_verify_or_init_dir(dir, tree_sha, 0, 0) != 0) {
+        sy_printf("FAIL\tSTAGE_MATERIAL\tstage=verify\treason=tree-id-missing-or-stale\n");
+        return 2;
+    }
+    cx_fmt(candp, sizeof candp, "%s/candidate", dir);
+    cx_fmt(cshap, sizeof cshap, "%s/candidate.sha", dir);
+    cx_fmt(elfp, sizeof elfp, "%s/entry.elf", dir);
+    cx_fmt(bindp, sizeof bindp, "%s/bind.o", dir);
+    cx_fmt(dap, sizeof dap, "%s/driveargs.o", dir);
+    cx_fmt(rcptp, sizeof rcptp, "%s/receipt.txt", dir);
+    if (sy_exists(elfp) != 1 || sy_exists(bindp) != 1 || sy_exists(dap) != 1 || sy_exists(rcptp) != 1 ||
+        file_sha256_hex(candp, actual_cand) != 0 ||
+        sy_read_file(cshap, &b, &n, 256) != 0 || !b || n < 64) {
+        if (b) mm_free(b);
+        sy_printf("FAIL\tSTAGE_MATERIAL\tstage=verify\treason=material-artifact-missing\n");
+        return 2;
+    }
+    mm_copy(want_cand, 65, b, 64); want_cand[64] = 0;
+    mm_free(b);
+    if (!tx_eqz(actual_cand, want_cand)) {
+        sy_printf("FAIL\tSTAGE_MATERIAL\tstage=verify\treason=candidate-sha-mismatch\n");
+        return 2;
+    }
+    sy_printf("STAGE_MATERIAL\tstage=verify\tdir=%s\ttree_sha=%s\tcandidate_sha=%s\n", dir, tree_sha, actual_cand);
+    return 0;
+}
+
 int main(int argc, char **argv) {
-    if (argc == 3 && tx_eqz(argv[1], "--stage-link-build")) return stage_full_link_build(argv[2]);
-    if (argc == 3 && tx_eqz(argv[1], "--stage-link-assert")) return stage_full_link_assert(argv[2]);
+    if ((argc == 2 || argc == 3) && tx_eqz(argv[1], "--stage-link-objs1")) return stage_full_link_objs1(argc == 3 ? argv[2] : 0);
+    if ((argc == 2 || argc == 3) && tx_eqz(argv[1], "--stage-link-objs2")) return stage_full_link_objs2(argc == 3 ? argv[2] : 0);
+    if ((argc == 2 || argc == 3) && tx_eqz(argv[1], "--stage-link-closure1")) return stage_full_link_closure(argc == 3 ? argv[2] : 0, 1);
+    if ((argc == 2 || argc == 3) && tx_eqz(argv[1], "--stage-link-closure2")) return stage_full_link_closure(argc == 3 ? argv[2] : 0, 2);
+    if ((argc == 2 || argc == 3) && tx_eqz(argv[1], "--stage-link-link")) return stage_full_link_link(argc == 3 ? argv[2] : 0);
+    if ((argc == 2 || argc == 3) && tx_eqz(argv[1], "--stage-link-verify")) return stage_full_link_verify(argc == 3 ? argv[2] : 0);
     if (argc == 4 && tx_eqz(argv[1], "--produce")) {
         int rc = run_all_checks();
         if (rc != 0 || !is_hex64(g_last_bin_sha) || !is_hex64(g_last_carrier_sha)) return 1;
