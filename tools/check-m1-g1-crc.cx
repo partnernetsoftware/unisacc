@@ -246,6 +246,53 @@ int main(void) {
                 ck(rc == -2 && rwhy && tx_eqz(rwhy, "embed-fdir-overflow"), "fdir-overflow-65-tape-records-refused");
             }
 
+            /* (f) Signed PE32+ with WIN_CERTIFICATE tail containing a colliding physical-EOF UNIPKG1\n magic:
+             * must locate the real footer before the certificate boundary (offset 296, len raw_n), not physical EOF. */
+            {
+                raw_n = build_pkg(buf, 131072, 4, 1, -1, -1, -1, -1);
+                long pfx = 296;
+                long foot_end = pfx + raw_n + 16;
+                long pad = (8 - (foot_end % 8)) % 8;
+                long cert_off = foot_end + pad;
+                long cert_len = 24; /* 8B WIN_CERTIFICATE header + 16B colliding UNIPKG1\n fake footer at EOF */
+                long tot = cert_off + cert_len;
+                unsigned char *pe = (unsigned char *)mm_alloc((size_t)tot);
+                if (pe) {
+                    mm_fill(pe, tot, 0, tot);
+                    pe[0] = 'M'; pe[1] = 'Z';
+                    pe[60] = 64;
+                    pe[64] = 'P'; pe[65] = 'E';
+                    pe[70] = 1; pe[84] = 160;
+                    pe[88] = 11; pe[89] = 2;
+                    pe[148] = (unsigned char)(288 & 255); pe[149] = (unsigned char)((288 >> 8) & 255);
+                    pe[196] = 5;
+                    pe[232] = (unsigned char)(cert_off & 255); pe[233] = (unsigned char)((cert_off >> 8) & 255);
+                    pe[234] = (unsigned char)((cert_off >> 16) & 255); pe[235] = (unsigned char)((cert_off >> 24) & 255);
+                    pe[236] = (unsigned char)(cert_len & 255);
+                    pe[264] = 8;
+                    pe[268] = (unsigned char)(288 & 255); pe[269] = (unsigned char)((288 >> 8) & 255);
+                    mm_copy(pe + pfx, tot - pfx, buf, raw_n);
+                    mm_copy(pe + pfx + raw_n, 16, "UNIPKG1\n", 8);
+                    wr_u64_le(pe + pfx + raw_n + 8, (unsigned long long)raw_n);
+                    pe[cert_off] = (unsigned char)cert_len;
+                    pe[cert_off + 5] = 2; pe[cert_off + 6] = 2;
+                    /* Plant colliding UNIPKG1\n + plen=8 at physical EOF inside the certificate bytes */
+                    mm_copy(pe + cert_off + 8, 16, "UNIPKG1\n", 8);
+                    wr_u64_le(pe + cert_off + 16, 8ULL);
+
+                    rc = run_locate_scan_bytes(tmpd, "signed_pe_collision.exe", pe, tot, &off, &plen, &fn, &rwhy);
+                    ck(rc == 0 && off == pfx && plen == raw_n && fn == 3, "locate-f-signed-pe-with-cert-tail-collision");
+
+                    /* Bad certificate revision -> refused */
+                    pe[cert_off + 5] = 1;
+                    rc = run_locate_scan_bytes(tmpd, "signed_pe_bad_cert.exe", pe, tot, &off, &plen, &fn, &rwhy);
+                    ck(rc != 0 && rwhy && tx_eqz(rwhy, "embed-footer-invalid"), "locate-f2-signed-pe-bad-cert-refused");
+                    mm_free(pe);
+                } else {
+                    ck(0, "locate-f-alloc");
+                }
+            }
+
             (void)sy_remove_all(tmpd);
         }
     }
