@@ -1,0 +1,689 @@
+/* tools/check-piece-m-m25.cx -- lnx/x86_64 S3 gate for Batch A piece M (m25 / rtsharedname).
+ *
+ * Evidence split:
+ *   Default (LOCAL): runs LOCAL evidence against real tapemode.so x86_64 asm executor,
+ *     real product functions (st_rt_shared / dv_used / dv_note_shared / rts_* / m25_m1_*),
+ *     and real entry-build --objects-only ELF objects:
+ *     (1) Static routing & 45-root authority (build/chain-facts.tsv -> cxlib.chainfacts)
+ *     (2) Real entry-build --objects-only for lnx/x86_64 and lnx/arm64 + nm symbol check
+ *         (dedup itself is guarded by v0.1.9's check-entry-build-root-dedup)
+ *     (3) Real P4 packing (candidate-chain m53 + m25_guest), CRC tamper, and dropped-m25-guest
+ *     (4) Value parity: native_probe (cx/compiler/rtsharedname.cx) vs s3_probe (src/rtsharedname_m1.cx)
+ *     (5) Exact boundaries: name len 256/257/65535/65536, idx 127/128/-128/-129 clamp,
+ *         255->-1, rts_used_name refusal returns NULL + m25_m1_last_err()==-2
+ *     (6) Real st_rt_shared + dv_note_shared refusal propagation on bad_crc / dropped_m25 /
+ *         missing carrier / UNISACC_M53_S1=1 (deleting stages/drivelink propagation turns RED)
+ *     (7) --chain-ape PATH --chain-receipt PATH (FORMAL_CHAIN_PREGATE)
+ *     (8) --produce RUN_ID EVIDENCE_PATH and --judge RUN_ID EVIDENCE_PATH (mutation-gate)
+ *
+ * Marker: CHECK_PIECE_M_M25. */
+#pragma unisa use sys.fs
+#pragma unisa use sys.io
+#pragma unisa use sys.time
+#pragma unisa use sys.env
+#pragma unisa use sys.posix
+#pragma unisa use sys.sha
+#pragma unisa use cxlib.sessionroot
+#pragma unisa use text.text
+#pragma unisa use mem.heap
+#pragma unisa use mem.bytes
+#pragma unisa use cxlib.procrun
+#pragma unisa use cxlib.chainfacts
+#pragma unisa use cxlib.receipt
+#pragma unisa use cxlib.ckassert
+#pragma unisa use cxlib.genkit
+#pragma unisa use runtime.packagefooter
+
+static int n_ok, failed;
+#define ck ca_ck
+#define ck_v ca_ck_v
+#define parse_u64_sep gk_parse_u64_sep
+
+static int run_sh(const char *cmd, char *out, long cap) {
+    char *av[] = {"sh", "-c", (char *)cmd, 0};
+    pr_result r;
+    int t = pr_run("piece-m-m25", av, ".", 0, 55, &r);
+    long n = 0;
+    if (out && cap > 0) {
+        if (r.out && r.outn > 0) {
+            long m = (long)r.outn < cap - 1 ? (long)r.outn : cap - 1;
+            mm_copy(out, cap, r.out, m);
+            n += m;
+        }
+        if (r.err && r.errn > 0 && n < cap - 1) {
+            long m = (long)r.errn < cap - 1 - n ? (long)r.errn : cap - 1 - n;
+            mm_copy(out + n, cap - n, r.err, m);
+            n += m;
+        }
+        out[n] = 0;
+    }
+    int rc = t ? -1 : r.rc;
+    pr_free(&r);
+    return rc;
+}
+
+
+static int make_crc_tampered_p4_key(const char *src_p4, const char *dst_p4, const char *target_key) {
+    unsigned char *b = 0;
+    int64_t n = 0;
+    long pkg_off = 0, pkg_end = 0, pos = 0, nl_k = tx_len(target_key, 128);
+    unsigned long pm = 0, ps = 0, nr = 0;
+    int patched = 0;
+    if (sy_read_file(src_p4, &b, &n, 64L << 20) != 0 || !b || n < 10) { mm_free(b); return 1; }
+    {
+        PackageFooter pf;
+        if (n <= 2147483647L && packagefooter_locate_bytes(b, (long)n, &pf)) {
+            pkg_off = (long)pf.package_offset;
+            pkg_end = pkg_off + (long)pf.package_length;
+        } else if (n >= 16 && memcmp(b + n - 16, "UNIPKG1\n", 8) == 0) {
+            mm_free(b);
+            return 1;
+        } else if (memcmp(b, "P 4 ", 4) == 0) {
+            pkg_off = 0;
+            pkg_end = (long)n;
+        } else {
+            mm_free(b);
+            return 1;
+        }
+    }
+    if (pkg_off < 0 || pkg_end > (long)n || pkg_end - pkg_off < 10 || memcmp(b + pkg_off, "P 4 ", 4) != 0) {
+        mm_free(b);
+        return 1;
+    }
+    pos = pkg_off + 4;
+    if (parse_u64_sep(b, pkg_end, &pos, &pm, ' ') ||
+        parse_u64_sep(b, pkg_end, &pos, &ps, ' ') ||
+        parse_u64_sep(b, pkg_end, &pos, &nr, '\n')) { mm_free(b); return 1; }
+    for (unsigned long di = 0; di < ps; di++) {
+        if (pos + 2 > pkg_end || b[pos] != 'D' || b[pos + 1] != ' ') { mm_free(b); return 1; }
+        while (pos < pkg_end && b[pos] != '\n') pos++;
+        if (pos >= pkg_end) { mm_free(b); return 1; }
+        pos++;
+    }
+    for (unsigned long mi = 0; mi < pm; mi++) {
+        unsigned long mb = 0, mr = 0, mc = 0, mk = 0;
+        if (pos + 2 > pkg_end || b[pos] != 'M' || b[pos + 1] != ' ') { mm_free(b); return 1; }
+        pos += 2;
+        if (parse_u64_sep(b, pkg_end, &pos, &mb, ' ') || parse_u64_sep(b, pkg_end, &pos, &mr, ' ') ||
+            parse_u64_sep(b, pkg_end, &pos, &mc, ' ') || parse_u64_sep(b, pkg_end, &pos, &mk, '\n') ||
+            mb > (unsigned long)(pkg_end - pos)) { mm_free(b); return 1; }
+        pos += (long)mb;
+    }
+    for (unsigned long ri = 0; ri < nr; ri++) {
+        unsigned long kl = 0, dl = 0, rl = 0, co = 0, cr = 0;
+        if (pos + 2 > pkg_end || b[pos] != 'F' || b[pos + 1] != ' ') { mm_free(b); return 1; }
+        pos += 2;
+        if (parse_u64_sep(b, pkg_end, &pos, &kl, ' ') || parse_u64_sep(b, pkg_end, &pos, &dl, ' ') ||
+            parse_u64_sep(b, pkg_end, &pos, &rl, ' ') || parse_u64_sep(b, pkg_end, &pos, &co, ' ') ||
+            parse_u64_sep(b, pkg_end, &pos, &cr, '\n')) { mm_free(b); return 1; }
+        long crc_last = pos - 2;
+        if ((long)kl == nl_k && pos + (long)kl <= pkg_end && memcmp(b + pos, target_key, (size_t)nl_k) == 0) {
+            b[crc_last] = (b[crc_last] == '0') ? '1' : '0';
+            if (dl > 0 && pos + (long)(kl + dl) <= pkg_end) b[pos + (long)kl + (long)(dl / 2)] ^= 0x01;
+            patched = 1;
+            break;
+        }
+        if (kl + dl > (unsigned long)(pkg_end - pos)) { mm_free(b); return 1; }
+        pos += (long)(kl + dl);
+    }
+    int wrc = patched ? sy_write_file(dst_p4, b, (long)n, 0755) : 1;
+    mm_free(b);
+    return wrc == 0 ? 0 : 1;
+}
+
+static void check_product_routing(void) {
+    static const char *const other5[5] = {"lnx/arm64", "osx/x86_64", "osx/arm64", "win/x86_64", "win/arm64"};
+    int rts_idx = -1;
+    char miss[512];
+    for (int i = 0; i < cf_root_count(); i++) {
+        if (tx_eqz(cf_root_key(i), "rtsharedname.o")) { rts_idx = i; break; }
+    }
+    int ok = (cf_root_count() == 45 && rts_idx >= 0 &&
+              tx_eqz(cf_root_source_for(rts_idx, "lnx/x86_64"), "src/rtsharedname_m1.cx") &&
+              cf_tu_for("lnx/x86_64", "rtsharedname.o") != 0 &&
+              tx_eqz(cf_tu_for("lnx/x86_64", "rtsharedname.o"), "m25") &&
+              cf_check_routed_guests(".", miss, sizeof miss) >= 3);
+    for (int t = 0; ok && t < 5; t++) {
+        if (!tx_eqz(cf_root_source_for(rts_idx, other5[t]), "src/compiler/rtsharedname.cx")) ok = 0;
+        if (cf_tu_for(other5[t], "rtsharedname.o") != 0) ok = 0;
+    }
+    ck(ok, "product-routing-45-roots-and-m25-authority");
+}
+
+static int check_entry_build_objects(const char *tmp) {
+    char eb_bin[512], obj_x64[512], obj_arm[512], cmd[2048], out[16384];
+    cx_fmt(eb_bin, sizeof eb_bin, "%s/entry_build", tmp);
+    cx_fmt(obj_x64, sizeof obj_x64, "%s/eb_x64", tmp);
+    cx_fmt(obj_arm, sizeof obj_arm, "%s/eb_arm", tmp);
+    cx_fmt(cmd, sizeof cmd, "sh ./unisacc.com tools/entry-build.cx -o '%s'", eb_bin);
+    if (run_sh(cmd, out, sizeof out) != 0) {
+        ck(0, "entry-build-compile");
+        return 1;
+    }
+    cx_fmt(cmd, sizeof cmd, "'%s' . ./unisacc.com '%s' --target lnx/x86_64 --only rtsharedname.o", eb_bin, obj_x64);
+    int r1 = run_sh(cmd, out, sizeof out);
+    cx_fmt(cmd, sizeof cmd, "nm -g '%s/rtsharedname.o'", obj_x64);
+    int r1_nm = (r1 == 0 && run_sh(cmd, out, sizeof out) == 0);
+    int x64_ok = (r1_nm &&
+                  strstr(out, " T rts_count") != 0 &&
+                  strstr(out, " T rts_at") != 0 &&
+                  strstr(out, " T rts_symbol_count") != 0 &&
+                  strstr(out, " T rts_covers") != 0 &&
+                  strstr(out, " T rts_used_name") != 0 &&
+                  strstr(out, " T rts_used_count") != 0 &&
+                  strstr(out, " T rts_used") != 0 &&
+                  strstr(out, " U m25_m1_rts_count") != 0);
+    ck_v(x64_ok, "LOCAL", "entry-build-lnx-x86_64-rtsharedname-o-s3", "lnx/x86_64", "real-elf-m25_m1-syms");
+
+    cx_fmt(cmd, sizeof cmd, "'%s' . ./unisacc.com '%s' --target lnx/arm64 --only rtsharedname.o", eb_bin, obj_arm);
+    int r2 = run_sh(cmd, out, sizeof out);
+    cx_fmt(cmd, sizeof cmd, "nm -g '%s/rtsharedname.o'", obj_arm);
+    int r2_nm = (r2 == 0 && run_sh(cmd, out, sizeof out) == 0);
+    int arm_ok = (r2_nm &&
+                  strstr(out, " T rts_count") != 0 &&
+                  strstr(out, " T rts_at") != 0 &&
+                  strstr(out, " U m25_m1_rts_count") == 0);
+    ck_v(arm_ok, "LOCAL", "entry-build-lnx-arm64-rtsharedname-o-native", "lnx/arm64", "real-elf-native-syms");
+    return (x64_ok && arm_ok) ? 0 : 1;
+}
+
+static int run_chain_ape_pregate(const char *ape, const char *rcpt,
+                                 const char *run_id, const char *rev, const char *unit,
+                                 const char *target, const char *producer, const char *purpose,
+                                 const char *inputs_sha, const char *output_path, int64_t now_ts,
+                                 int quiet) {
+    if (!ape || !ape[0] || !rcpt || !rcpt[0]) {
+        if (!quiet) sy_printf("REFUSE\tFORMAL_CHAIN_PREGATE\tmissing-ape-or-receipt\n");
+        return 2;
+    }
+    unsigned char *ab = 0;
+    int64_t an = 0;
+    if (sy_read_file(ape, &ab, &an, 64L << 20) != 0 || !ab) {
+        mm_free(ab);
+        if (!quiet) sy_printf("REFUSE\tFORMAL_CHAIN_PREGATE\tunreadable-ape\n");
+        return 2;
+    }
+    char asha[65];
+    sy_sha256_hex((const char *)ab, (long)an, asha);
+    mm_free(ab);
+
+    if (!run_id || !run_id[0]) {
+        if (!quiet) sy_printf("REFUSE\tFORMAL_CHAIN_PREGATE\tmissing-run-id\n");
+        return 2;
+    }
+    {
+        rc_expect_t exp;
+        rc_verified_t got;
+        mm_fill(&exp, (long)sizeof exp, 0, (long)sizeof exp);
+        exp.run_id = run_id;
+        exp.rev = rev;
+        exp.unit = unit ? unit : "m25";
+        exp.target = target;
+        exp.producer = producer;
+        exp.purpose = purpose;
+        exp.candidate_sha = asha;
+        exp.inputs_sha = inputs_sha;
+        exp.output_path = output_path;
+        exp.expect_rc = 0;
+        exp.expect_verdict = "PASS";
+        exp.now_ts = now_ts;
+        exp.max_age_s = 86400;
+        exp.max_future_s = 60;
+        exp.allow_fail_verdict = 0;
+        int rrc = rc_verify_out(rcpt, &exp, &got);
+        if (rrc != RC_OK || !tx_eqz(got.rev, rev) || !tx_eqz(got.candidate_sha, asha) || !tx_eqz(got.target, target)) {
+            if (!quiet) sy_printf("FAIL\tFORMAL_CHAIN_PREGATE\treceipt-verify\tape_sha=%s\treason=%s:%s\n", asha, rc_code_name(rrc), rc_why());
+            return 2;
+        }
+    }
+    /* Must drive the formal APE itself through its product callers (intact + CRC tamper + G4 env override) */
+    char tmp[320], u1[512], u2[512], out_bin[512], bad_ape[512], cmd[2048], out[8192];
+    if (sr_scratch("piece-m-ape", tmp, (int)sizeof tmp) != 0) {
+        if (!quiet) sy_printf("REFUSE\tFORMAL_CHAIN_PREGATE\tsession-dir-create-failed\tape_sha=%s\n", asha);
+        return 2;
+    }
+    {
+        char cwd[512], l[600], t[600];
+        if (getcwd(cwd, sizeof cwd) != 0) {
+            cx_fmt(l, sizeof l, "%s/cxroot.tsv", tmp); cx_fmt(t, sizeof t, "%s/cxroot.tsv", cwd); (void)sy_symlink(t, l);
+            cx_fmt(l, sizeof l, "%s/cx", tmp); cx_fmt(t, sizeof t, "%s/cx", cwd); (void)sy_symlink(t, l);
+        }
+    }
+    cx_fmt(u1, sizeof u1, "%s/u1.cx", tmp);
+    cx_fmt(u2, sizeof u2, "%s/u2.cx", tmp);
+    cx_fmt(out_bin, sizeof out_bin, "%s/two_src_out", tmp);
+    cx_fmt(bad_ape, sizeof bad_ape, "%s/bad_crc_m25.com", tmp);
+    const char *u1_code = "#pragma unisa use sys.io\nint f(void) { sy_printf(\"u1\\n\"); return 7; }\n";
+    const char *u2_code = "#pragma unisa use sys.io\nint f(void); int main(void) { sy_printf(\"u2\\n\"); return f() == 7 ? 0 : 1; }\n";
+    if (sy_write_file(u1, (const unsigned char *)u1_code, (long)strlen(u1_code), 0644) != 0 ||
+        sy_write_file(u2, (const unsigned char *)u2_code, (long)strlen(u2_code), 0644) != 0) {
+        (void)sy_remove_all(tmp);
+        return 2;
+    }
+
+    char h_intact[512], h_crc[512], h_g4[512];
+    cx_fmt(h_intact, sizeof h_intact, "%s/home-intact", tmp);
+    cx_fmt(h_crc, sizeof h_crc, "%s/home-crc", tmp);
+    cx_fmt(h_g4, sizeof h_g4, "%s/home-g4", tmp);
+    (void)sy_mkdir(h_intact, 0700); (void)sy_mkdir(h_crc, 0700); (void)sy_mkdir(h_g4, 0700);
+
+    /* 1. Intact formal APE control: two-source compile reaching m25 */
+    cx_fmt(cmd, sizeof cmd, "HOME='%s' sh '%s' '%s' '%s' -o '%s'", h_intact, ape, u1, u2, out_bin);
+    int c_rc = run_sh(cmd, out, sizeof out);
+    int r_ok = (c_rc == 0 && sy_exists(out_bin) == 1);
+    if (!r_ok) {
+        (void)sy_remove_all(tmp);
+        if (!quiet) sy_printf("REFUSE\tFORMAL_CHAIN_PREGATE\tintact-two-source-compile-failed\tape_sha=%s\trc=%d\n", asha, c_rc);
+        return 2;
+    }
+    if (!quiet) {
+        sy_printf("PASS\tFORMAL_CHAIN_PREGATE\tintact-two-source-compile\tape_sha=%s\tvariant=intact\tvariant_sha=%s\treason=ok\n", asha, asha);
+    }
+
+    /* 2. CRC tamper negative on m25.tapeslice (or m25-slice-absent refusal) */
+    int t_rc = make_crc_tampered_p4_key(ape, bad_ape, "tape/lnx-x86_64/m25.tapeslice");
+    if (t_rc != 0) t_rc = make_crc_tampered_p4_key(ape, bad_ape, "m25.tapeslice");
+    if (t_rc != 0) {
+        (void)sy_remove_all(tmp);
+        if (!quiet) sy_printf("REFUSE\tFORMAL_CHAIN_PREGATE\tm25-slice-absent\tape_sha=%s\n", asha);
+        return 2;
+    }
+    char bad_sha[65];
+    unsigned char *bb = 0;
+    int64_t bn = 0;
+    if (sy_read_file(bad_ape, &bb, &bn, 64L << 20) == 0 && bb && bn > 0) {
+        sy_sha256_hex((const char *)bb, (long)bn, bad_sha);
+        mm_free(bb);
+    } else {
+        mm_free(bb);
+        cx_fmt(bad_sha, sizeof bad_sha, "unknown");
+    }
+    cx_fmt(cmd, sizeof cmd, "HOME='%s' sh '%s' '%s' '%s' -o '%s'", h_crc, bad_ape, u1, u2, out_bin);
+    int bad_rc = run_sh(cmd, out, sizeof out);
+    int r_crc = (bad_rc != 0 && (strstr(out, "M25_M1_REFUSE") != 0 || strstr(out, "rtsharedname tape refused") != 0));
+    if (!r_crc) {
+        (void)sy_remove_all(tmp);
+        if (!quiet) sy_printf("REFUSE\tFORMAL_CHAIN_PREGATE\tcrc-tamper-not-refused\tape_sha=%s\tvariant_sha=%s\trc=%d\n", asha, bad_sha, bad_rc);
+        return 2;
+    }
+    if (!quiet) {
+        sy_printf("PASS\tFORMAL_CHAIN_PREGATE\tcrc-tamper-m25-refused\tape_sha=%s\tvariant=bad-crc-m25\tvariant_sha=%s\treason=crc-tamper-refused\n", asha, bad_sha);
+    }
+
+    /* 3. G4 env-override negative */
+    cx_fmt(cmd, sizeof cmd, "HOME='%s' UNISACC_M53_S1=1 sh '%s' '%s' '%s' -o '%s'", h_g4, ape, u1, u2, out_bin);
+    int env_rc = run_sh(cmd, out, sizeof out);
+    int r_env = (env_rc != 0 && strstr(out, "embed-env-override-forbidden") != 0);
+    (void)sy_remove_all(tmp);
+    if (!r_env) {
+        if (!quiet) sy_printf("REFUSE\tFORMAL_CHAIN_PREGATE\tg4-env-override-not-refused\tape_sha=%s\trc=%d\n", asha, env_rc);
+        return 2;
+    }
+    if (!quiet) {
+        sy_printf("PASS\tFORMAL_CHAIN_PREGATE\tg4-env-override-refused\tape_sha=%s\tvariant=g4-env-override\tvariant_sha=%s\treason=embed-env-override-forbidden\n", asha, asha);
+    }
+    return 0;
+    if (!r_ok || !r_env) {
+        if (!quiet) sy_printf("REFUSE\tFORMAL_CHAIN_PREGATE\tm25-ape-content-check-failed\tape_sha=%s\n", asha);
+        return 2;
+    }
+    if (!quiet) sy_printf("CHECK_PIECE_M_M25\tscope=FORMAL\tape_sha=%s\tstatus=PASS\n", asha);
+    return 0;
+}
+
+static int run_all_checks(int want_obj, int want_parity, int want_bounds) {
+    char tmp[256], cmd[4096], out[16384], nat_out[8192], s3_out[8192];
+    n_ok = 0; failed = 0;
+    const char *td = sy_env("TMPDIR");
+    if (!td || !td[0]) td = "/tmp";
+    cx_fmt(tmp, sizeof tmp, "%s/piece-m-m25-%lld", td, sy_now_ms());
+    if (sy_mkdir(tmp, 0700) != 0) {
+        ck(0, "session-tmpdir");
+        return 1;
+    }
+    {
+        char cwd[512], l[600], t[600];
+        if (getcwd(cwd, sizeof cwd)) {
+            cx_fmt(l, sizeof l, "%s/cxroot.tsv", tmp); cx_fmt(t, sizeof t, "%s/cxroot.tsv", cwd); (void)sy_symlink(t, l);
+            cx_fmt(l, sizeof l, "%s/cx", tmp); cx_fmt(t, sizeof t, "%s/cx", cwd); (void)sy_symlink(t, l);
+            cx_fmt(l, sizeof l, "%s/src", tmp); cx_fmt(t, sizeof t, "%s/src", cwd); (void)sy_symlink(t, l);
+        }
+    }
+
+    if (want_obj) {
+        /* 1. Static routing & 45-root authority */
+        check_product_routing();
+
+        /* 2. Real entry-build --objects-only for lnx/x86_64 and lnx/arm64 */
+        (void)check_entry_build_objects(tmp);
+    }
+    if (!want_parity && !want_bounds) goto done;
+
+    /* 3. Build tapepack, p4emit, candidate-chain, and pack good.p4 / bad_crc_m25.p4 / dropped_m25.p4 */
+    char tdir[320], tpk_bin[320], p4e_bin[320], cc_bin[320];
+    char m53_sl[320], m25_sl[320], good_p4[320], bad_crc_p4[320], drop_p4[320];
+    cx_fmt(tdir, sizeof tdir, "%s/tape", tmp);
+    cx_fmt(tpk_bin, sizeof tpk_bin, "%s/tapepack", tmp);
+    cx_fmt(p4e_bin, sizeof p4e_bin, "%s/p4emit", tmp);
+    cx_fmt(cc_bin, sizeof cc_bin, "%s/candchain", tmp);
+    cx_fmt(m53_sl, sizeof m53_sl, "%s/m53.tapeslice", tmp);
+    cx_fmt(m25_sl, sizeof m25_sl, "%s/m25.tapeslice", tmp);
+    cx_fmt(good_p4, sizeof good_p4, "%s/good.p4", tmp);
+    cx_fmt(bad_crc_p4, sizeof bad_crc_p4, "%s/bad_crc_m25.p4", tmp);
+    cx_fmt(drop_p4, sizeof drop_p4, "%s/dropped_m25.p4", tmp);
+    (void)sy_mkdir(tdir, 0755);
+
+    char m53_cx[320];
+    cx_fmt(m53_cx, sizeof m53_cx, "%s/m53_guest.cx", tmp);
+    cx_fmt(cmd, sizeof cmd,
+           "sh ./unisacc.com tools/tape-sidecar-build.cx -- --target lnx/x86_64 . '%s' >/dev/null & p2=$!; "
+           "sh ./unisacc.com -S exec/tape/guests/m25_guest.cx -o '%s.s' & p3=$!; "
+           "(sh ./unisacc.com tools/candidate-chain.cx -- --emit-m53-guest . '%s' && "
+           "sh ./unisacc.com -S '%s' -o '%s.s') & p4=$!; "
+           "wait $p2 && wait $p3 && wait $p4 && "
+           "sh ./unisacc.com tools/tapepack.cx -- '%s.s' -o '%s' && "
+           "sh ./unisacc.com tools/tapepack.cx -- '%s.s' -o '%s' && "
+           "cp '%s' '%s/m53.tapeslice' && "
+           "sh ./unisacc.com tools/p4-embed.cx -- ./unisacc.com '%s/tapemode.so' '%s' '%s' --extra m25.tapeslice '%s' && "
+           "sh ./unisacc.com tools/p4-embed.cx -- ./unisacc.com '%s/tapemode.so' '%s' '%s'",
+           tdir, m25_sl, m53_cx, m53_cx, m53_sl,
+           m25_sl, m25_sl, m53_sl, m53_sl,
+           m53_sl, tdir,
+           tdir, m53_sl, good_p4, m25_sl,
+           tdir, m53_sl, drop_p4);
+    {
+        int p_ok = (run_sh(cmd, out, sizeof out) == 0 &&
+                    (make_crc_tampered_p4_key(good_p4, bad_crc_p4, "tape/lnx-x86_64/m25.tapeslice") == 0 ||
+                     make_crc_tampered_p4_key(good_p4, bad_crc_p4, "m25.tapeslice") == 0));
+        ck(p_ok, "pack-m53-m25-and-dropped-and-crc-tamper");
+        if (!p_ok) { sy_printf("%s\n", out); goto done; }
+    }
+
+    /* 4. Compile native_probe (cx/compiler/rtsharedname.cx) and s3_probe (src/rtsharedname_m1.cx + m25_m1_impl + real st_rt_shared/dv_note_shared) */
+    char nat_src[320], s3_src[320], nat_bin[320], s3_bin[320];
+    cx_fmt(nat_src, sizeof nat_src, "%s/nat_probe.cx", tmp);
+    cx_fmt(s3_src, sizeof s3_src, "%s/s3_probe.cx", tmp);
+    cx_fmt(nat_bin, sizeof nat_bin, "%s/nat_probe", tmp);
+    cx_fmt(s3_bin, sizeof s3_bin, "%s/s3_probe", tmp);
+
+    const char *nat_code =
+        "#pragma unisa use sys.io\n"
+        "#pragma unisa use compiler.rtsharedname\n"
+        "int main(void) {\n"
+        "  int c = rts_count();\n"
+        "  sy_printf(\"C=%d\\n\", c);\n"
+        "  for (int i = 0; i < c; i++) {\n"
+        "    const char *g = 0, *p = 0, *u = 0, *e = 0; int pv = -1;\n"
+        "    int rc = rts_at(i, &g, &p, &pv, &u, &e);\n"
+        "    sy_printf(\"AT=%d:%d:%s:%s:%d:%s:%s\\n\", i, rc, g?g:\"\", p?p:\"\", pv, u?u:\"\", e?e:\"\");\n"
+        "    sy_printf(\"SC=%d:%d\\n\", i, rts_symbol_count(i));\n"
+        "    sy_printf(\"UC=%d:%d\\n\", i, rts_used_count(i));\n"
+        "    const char *un0 = rts_used_name(i, 0);\n"
+        "    const char *un1 = rts_used_name(i, 1);\n"
+        "    sy_printf(\"UN=%d:%s:%s\\n\", i, un0?un0:\"NULL\", un1?un1:\"NULL\");\n"
+        "  }\n"
+        "  sy_printf(\"CV=%d:%d:%d\\n\", rts_covers(0, \"_u_st_fd\"), rts_covers(1, \"_unisa_envheap\"), rts_covers(0, \"_no_such\"));\n"
+        "  sy_printf(\"US=%d:%d:%d\\n\", rts_used(0, \"_u_st_wput\"), rts_used(1, \"_unisa_map\"), rts_used(0, \"_no_such\"));\n"
+        "  return 0;\n"
+        "}\n";
+
+    const char *s3_code =
+        "#pragma unisa use sys.io\n"
+        "#pragma unisa use mem.heap\n"
+        "#pragma unisa use mem.bytes\n"
+        "#pragma unisa use driver.m25_m1_impl\n"
+        "int rts_count(void);\n"
+        "int rts_at(int i, const char **group, const char **probe, int *provider, const char **unit_macro, const char **extern_macro);\n"
+        "int rts_symbol_count(int i);\n"
+        "int rts_covers(int i, const char *name);\n"
+        "const char *rts_used_name(int i, int m);\n"
+        "int rts_used_count(int i);\n"
+        "int rts_used(int i, const char *name);\n"
+        "static int st_key(const char *k, int kn, const unsigned char *b, int bl) { (void)k; (void)kn; (void)b; (void)bl; return 0; }\n"
+        "static int dv_private(const char *t, long tl, const char *p) { (void)t; (void)tl; (void)p; return 0; }\n"
+        "static int dv_line_has_call(const char *t, long at, long j, const char *s, int sn) { (void)t; (void)at; (void)j; (void)s; (void)sn; return 0; }\n"
+        "static int dv_shared_has, dv_shared_warned;\n"
+        "/* REAL st_rt_shared from src/stages.cx and dv_used/dv_note_shared from src/drivelink.cx appended at build time */\n"
+        "int main(int argc, char **argv) {\n"
+        "  if (argc >= 2 && argv[1][0] == 'p') {\n"
+        "    int c = rts_count();\n"
+        "    sy_printf(\"C=%d\\n\", c);\n"
+        "    for (int i = 0; i < c; i++) {\n"
+        "      const char *g = 0, *p = 0, *u = 0, *e = 0; int pv = -1;\n"
+        "      int rc = rts_at(i, &g, &p, &pv, &u, &e);\n"
+        "      sy_printf(\"AT=%d:%d:%s:%s:%d:%s:%s\\n\", i, rc, g?g:\"\", p?p:\"\", pv, u?u:\"\", e?e:\"\");\n"
+        "      sy_printf(\"SC=%d:%d\\n\", i, rts_symbol_count(i));\n"
+        "      sy_printf(\"UC=%d:%d\\n\", i, rts_used_count(i));\n"
+        "      const char *un0 = rts_used_name(i, 0);\n"
+        "      const char *un1 = rts_used_name(i, 1);\n"
+        "      sy_printf(\"UN=%d:%s:%s\\n\", i, un0?un0:\"NULL\", un1?un1:\"NULL\");\n"
+        "    }\n"
+        "    sy_printf(\"CV=%d:%d:%d\\n\", rts_covers(0, \"_u_st_fd\"), rts_covers(1, \"_unisa_envheap\"), rts_covers(0, \"_no_such\"));\n"
+        "    sy_printf(\"US=%d:%d:%d\\n\", rts_used(0, \"_u_st_wput\"), rts_used(1, \"_unisa_map\"), rts_used(0, \"_no_such\"));\n"
+        "    return 0;\n"
+        "  }\n"
+        "  if (argc >= 2 && argv[1][0] == 'b') {\n"
+        "    char *s256 = (char *)mm_alloc(257); char *s257 = (char *)mm_alloc(258);\n"
+        "    char *s2000 = (char *)mm_alloc(2001); char *s4096 = (char *)mm_alloc(4097);\n"
+        "    char *s65535 = (char *)mm_alloc(65536); char *s65536 = (char *)mm_alloc(65537);\n"
+        "    memset(s256, 'a', 256); s256[256] = 0;\n"
+        "    memset(s257, 'a', 257); s257[257] = 0;\n"
+        "    memset(s2000, 'a', 2000); s2000[2000] = 0;\n"
+        "    memset(s4096, 'a', 4096); s4096[4096] = 0;\n"
+        "    memset(s65535, 'a', 65535); s65535[65535] = 0;\n"
+        "    memset(s65536, 'a', 65536); s65536[65536] = 0;\n"
+        "    int r256 = m25_m1_rts_covers(0, s256);\n"
+        "    int r257 = m25_m1_rts_covers(0, s257);\n"
+        "    int r2000 = m25_m1_rts_covers(0, s2000);\n"
+        "    int r4096 = m25_m1_rts_covers(0, s4096);\n"
+        "    int r65535 = m25_m1_rts_covers(0, s65535);\n"
+        "    int r65536 = m25_m1_rts_covers(0, s65536);\n"
+        "    int sc_127 = m25_m1_rts_symbol_count(127);\n"
+        "    int sc_128 = m25_m1_rts_symbol_count(128);\n"
+        "    int sc_m128 = m25_m1_rts_symbol_count(-128);\n"
+        "    int sc_m129 = m25_m1_rts_symbol_count(-129);\n"
+        "    const char *un_bad = m25_m1_rts_used_name(99, 99);\n"
+        "    sy_printf(\"BOUNDS 256=%d 257=%d 2000=%d 4096=%d 65535=%d 65536=%d idx=%d:%d:%d:%d un=%s\\n\",\n"
+        "              r256, r257, r2000, r4096, r65535, r65536, sc_127, sc_128, sc_m128, sc_m129, un_bad ? un_bad : \"NULL\");\n"
+        "    return 0;\n"
+        "  }\n"
+        "  if (argc >= 2 && argv[1][0] == 'r') {\n"
+        "    int r1 = st_rt_shared(0, 2);\n"
+        "    int r2 = dv_note_shared(\"\", 0);\n"
+        "    const char *un = rts_used_name(0, 0);\n"
+        "    int err = m25_m1_last_err();\n"
+        "    sy_printf(\"PROP st=%d dv=%d un=%s err=%d\\n\", r1, r2, un ? un : \"NULL\", err);\n"
+        "    return (r1 != 0 && r2 != 0 && un == 0 && err == -2) ? 1 : 0;\n"
+        "  }\n"
+        "  return 2;\n"
+        "}\n";
+
+    if (sy_write_file(nat_src, (const unsigned char *)nat_code, (long)strlen(nat_code), 0644) != 0 ||
+        sy_write_file(s3_src, (const unsigned char *)s3_code, (long)strlen(s3_code), 0644) != 0) {
+        ck(0, "write-probe-sources");
+        goto done;
+    }
+
+    cx_fmt(cmd, sizeof cmd,
+           "sed -n '/^static int st_rt_shared(/,/^}/p' src/stages.cx > '%s/real_prop.inc' && "
+           "sed -n '/^static int dv_used(/,/^}/p' src/drivelink.cx >> '%s/real_prop.inc' && "
+           "sed -n '/^static int dv_note_shared(/,/^}/p' src/drivelink.cx >> '%s/real_prop.inc' && "
+           "sed -i '/\\/\\* REAL st_rt_shared/{r %s/real_prop.inc\nd}' '%s' && "
+           "sh ./unisacc.com '%s' '%s/cx/compiler/rtsharedname.cx' -o '%s' & c0=$!; "
+           "sh ./unisacc.com '%s' '%s/src/rtsharedname_m1.cx' '%s/cx/driver/m25_m1_impl.cx' '%s/cx/driver/stream_s1_m1.cx' -o '%s' & c1=$!; "
+           "wait $c0 && wait $c1",
+           tmp, tmp, tmp, tmp, s3_src, nat_src, tmp, nat_bin, s3_src, tmp, tmp, tmp, s3_bin);
+    if (run_sh(cmd, out, sizeof out) != 0) {
+        ck(0, "compile-native-and-s3-probes");
+        sy_printf("%s\n", out);
+        goto done;
+    }
+
+    if (want_parity) {
+    {
+        unsigned char *pb = 0; int64_t pn = 0;
+        int ape_wrap_ok = 0;
+        if (sy_read_file(good_p4, &pb, &pn, 64L << 20) == 0 && pb && pn > 10) {
+            char ape_w[320], ape_bad[320], ape_out[320];
+            cx_fmt(ape_w, sizeof ape_w, "%s/ape_wrap.com", tmp);
+            cx_fmt(ape_bad, sizeof ape_bad, "%s/ape_bad_footer.com", tmp);
+            cx_fmt(ape_out, sizeof ape_out, "%s/ape_wrap_tampered.com", tmp);
+            unsigned char *wb = mm_alloc(4 + (size_t)pn + 16);
+            if (wb) {
+                wb[0] = 0x7f; wb[1] = 'E'; wb[2] = 'L'; wb[3] = 'F';
+                for (int64_t j = 0; j < pn; j++) wb[4 + j] = pb[j];
+                memcpy(wb + 4 + (size_t)pn, "UNIPKG1\n", 8);
+                for (int j = 0; j < 8; j++) wb[4 + (size_t)pn + 8 + j] = (unsigned char)(((uint64_t)pn >> (8 * j)) & 255);
+                if (sy_write_file(ape_w, wb, 4 + (long)pn + 16, 0644) == 0) {
+                    int ok1 = (make_crc_tampered_p4_key(ape_w, ape_out, "tape/lnx-x86_64/m25.tapeslice") == 0);
+                    memset(wb + 4 + (size_t)pn + 8, 0, 8);
+                    int ok2 = (sy_write_file(ape_bad, wb, 4 + (long)pn + 16, 0644) == 0 &&
+                               make_crc_tampered_p4_key(ape_bad, ape_out, "tape/lnx-x86_64/m25.tapeslice") != 0);
+                    ape_wrap_ok = (ok1 && ok2);
+                }
+                mm_free(wb);
+            }
+            mm_free(pb);
+        }
+        ck_v(ape_wrap_ok, "LOCAL", "ape-p4-footer-crc-tamper", "local-ape-wrap", "footer-located-and-bad-footer-refused");
+    }
+        /* 5. Value parity: native_probe vs s3_probe */
+        cx_fmt(cmd, sizeof cmd, "'%s'", nat_bin);
+        int r_nat = run_sh(cmd, nat_out, sizeof nat_out);
+        cx_fmt(cmd, sizeof cmd, "UNISA_CONTAINER='%s' '%s' p", good_p4, s3_bin);
+        int r_s3 = run_sh(cmd, s3_out, sizeof s3_out);
+        ck_v(r_nat == 0 && r_s3 == 0 && nat_out[0] != 0 && strcmp(nat_out, s3_out) == 0,
+             "LOCAL", "native-vs-s3-value-parity", "local-good-p4", "byte-identical-rts-outputs");
+    }
+
+    if (want_bounds) {
+        /* 6. Exact boundaries: 256/257/2000/4096/65535/65536, idx 127/128/-128/-129 clamp, 255->-1, rts_used_name NULL */
+        cx_fmt(cmd, sizeof cmd, "UNISA_CONTAINER='%s' '%s' b", good_p4, s3_bin);
+        int r_bnd = run_sh(cmd, out, sizeof out);
+        ck_v(r_bnd == 0 && strstr(out, "BOUNDS 256=0 257=0 2000=0 4096=0 65535=0 65536=-2 idx=-1:-1:-1:-1 un=NULL") != 0,
+             "LOCAL", "m25-m1-exact-boundaries-and-257-heap", "local-good-p4", "u16-and-idx-clamp-and-255-to-m1");
+    }
+
+    if (!want_parity) goto done;
+
+    /* 7. Refusal propagation on bad_crc_m25.p4, dropped_m25.p4, missing carrier, and UNISACC_M53_S1=1 */
+    cx_fmt(cmd, sizeof cmd, "UNISA_CONTAINER='%s' '%s' r", bad_crc_p4, s3_bin);
+    ck_v(run_sh(cmd, out, sizeof out) == 1 &&
+         strstr(out, "M25_M1_REFUSE") != 0 &&
+         strstr(out, "rtsharedname tape refused") != 0 &&
+         strstr(out, "PROP st=1 dv=1 un=NULL err=-2") != 0,
+         "LOCAL", "crc-tamper-refusal-propagation", "local-bad-crc-m25-p4", "st-dv-refusal-propagated");
+
+    cx_fmt(cmd, sizeof cmd, "UNISA_CONTAINER='%s' '%s' r", drop_p4, s3_bin);
+    ck_v(run_sh(cmd, out, sizeof out) == 1 &&
+         strstr(out, "M25_M1_REFUSE") != 0 &&
+         strstr(out, "rtsharedname tape refused") != 0 &&
+         strstr(out, "PROP st=1 dv=1 un=NULL err=-2") != 0,
+         "LOCAL", "candidate-chain-dropped-m25-guest-refused", "local-dropped-m25-p4", "missing-m25-slice-refused");
+
+    cx_fmt(cmd, sizeof cmd, "UNISACC_M53_S1= UNISACC_M53_S1_SO= UNISA_CONTAINER='%s/no_such.p4' '%s' r", tmp, s3_bin);
+    ck_v(run_sh(cmd, out, sizeof out) == 1 &&
+         strstr(out, "M25_M1_REFUSE") != 0 &&
+         strstr(out, "PROP st=1 dv=1 un=NULL err=-2") != 0,
+         "LOCAL", "missing-carrier-refusal-propagation", "local-missing-carrier", "missing-carrier-refused");
+
+    cx_fmt(cmd, sizeof cmd, "UNISA_CONTAINER='%s' UNISACC_M53_S1=1 '%s' r", good_p4, s3_bin);
+    ck_v(run_sh(cmd, out, sizeof out) == 1 &&
+         strstr(out, "M25_M1_REFUSE") != 0 &&
+         strstr(out, "embed-env-override-forbidden") != 0 &&
+         strstr(out, "PROP st=1 dv=1 un=NULL err=-2") != 0,
+         "LOCAL", "g4-env-override-refusal-propagation", "local-g4-env-override", "embed-env-override-forbidden");
+
+    /* 8. Chain-APE receipt mismatch self-check */
+    {
+        char bad_rcpt[320];
+        const char *fake = "ape_sha=0000000000000000000000000000000000000000000000000000000000000000\n";
+        cx_fmt(bad_rcpt, sizeof bad_rcpt, "%s/bad.rcpt", tmp);
+        (void)sy_write_file(bad_rcpt, (const unsigned char *)fake, (long)strlen(fake), 0644);
+        int saved_ok = n_ok, saved_fail = failed;
+        int mrc = run_chain_ape_pregate(good_p4, bad_rcpt, "r1", "0000", "m25", "lnx/x86_64", "p", "purp", "0000", "out", 0, 1);
+        n_ok = saved_ok; failed = saved_fail;
+        ck_v(mrc != 0, "LOCAL", "chain-ape-receipt-sha-mismatch-refused", "local-bad-receipt", "ape-sha-mismatch-rejected");
+    }
+
+done:
+    (void)sy_remove_all(tmp);
+    return failed ? 1 : 0;
+}
+
+int main(int argc, char **argv) {
+    ca_bind(&n_ok, &failed);
+    if (argc == 4 && tx_eqz(argv[1], "--produce")) {
+        int rc = run_all_checks(1, 1, 1);
+        if (rc != 0) return 1;
+        char buf[256];
+        if (cx_fmt(buf, sizeof buf, "run_id=%s\nverdict=PASS\npassed=%d\nfailed=0\n", argv[2], n_ok)) return 2;
+        return sy_write_file(argv[3], (const unsigned char *)buf, (long)strlen(buf), 0644) == 0 ? 0 : 2;
+    }
+    if (argc == 4 && tx_eqz(argv[1], "--judge")) {
+        unsigned char *ev = 0; int64_t evn = 0;
+        char want[256];
+        if (sy_read_file(argv[3], &ev, &evn, 65536) != 0 || !ev) {
+            sy_printf("FAIL\tpiece_m_missing\n");
+            return 1;
+        }
+        cx_fmt(want, sizeof want, "run_id=%s\n", argv[2]);
+        int has_rid = (strstr((const char *)ev, want) != 0);
+        int has_pass = (strstr((const char *)ev, "verdict=PASS\n") != 0 && strstr((const char *)ev, "failed=0\n") != 0);
+        mm_free(ev);
+        if (!has_rid) { sy_printf("FAIL\tpiece_m_stale\n"); return 1; }
+        if (!has_pass) { sy_printf("FAIL\tpiece_m_exec\n"); return 1; }
+        sy_printf("PASS\tpiece_m_exec\n");
+        return 0;
+    }
+    if (argc >= 2 && (tx_eqz(argv[1], "--chain-ape") || tx_eqz(argv[1], "--chain-receipt"))) {
+        const char *ape = 0, *rcpt = 0, *rid = 0, *rev = 0, *unit = "m25", *tgt = 0, *prod = 0, *purp = 0, *in_sha = 0, *out_p = 0;
+        int64_t now_ts = 0;
+        for (int i = 1; i + 1 < argc; i += 2) {
+            if (tx_eqz(argv[i], "--chain-ape")) ape = argv[i + 1];
+            else if (tx_eqz(argv[i], "--chain-receipt")) rcpt = argv[i + 1];
+            else if (tx_eqz(argv[i], "--run-id")) rid = argv[i + 1];
+            else if (tx_eqz(argv[i], "--rev")) rev = argv[i + 1];
+            else if (tx_eqz(argv[i], "--unit")) unit = argv[i + 1];
+            else if (tx_eqz(argv[i], "--target")) tgt = argv[i + 1];
+            else if (tx_eqz(argv[i], "--producer")) prod = argv[i + 1];
+            else if (tx_eqz(argv[i], "--purpose")) purp = argv[i + 1];
+            else if (tx_eqz(argv[i], "--inputs-sha")) in_sha = argv[i + 1];
+            else if (tx_eqz(argv[i], "--output-path")) out_p = argv[i + 1];
+            else if (tx_eqz(argv[i], "--now-ts")) now_ts = (int64_t)strtoll(argv[i + 1], 0, 10);
+        }
+        return run_chain_ape_pregate(ape, rcpt, rid, rev, unit, tgt, prod, purp, in_sha, out_p, now_ts, 0);
+    }
+    if ((argc == 3 && tx_eqz(argv[1], "--part") && tx_eqz(argv[2], "obj")) ||
+        (argc == 2 && tx_eqz(argv[1], "--part=obj"))) {
+        int rc = run_all_checks(1, 0, 0);
+        sy_printf("CHECK_PIECE_M_M25\tscope=LOCAL\tpart=obj\tpassed=%d\tfailed=%d\n", n_ok, failed);
+        return rc;
+    }
+    if ((argc == 3 && tx_eqz(argv[1], "--part") && tx_eqz(argv[2], "runtime")) ||
+        (argc == 2 && tx_eqz(argv[1], "--part=runtime"))) {
+        int rc = run_all_checks(0, 1, 1);
+        sy_printf("CHECK_PIECE_M_M25\tscope=LOCAL\tpart=runtime\tpassed=%d\tfailed=%d\n", n_ok, failed);
+        return rc;
+    }
+    if ((argc == 3 && tx_eqz(argv[1], "--part") && tx_eqz(argv[2], "parity")) ||
+        (argc == 2 && tx_eqz(argv[1], "--part=parity"))) {
+        int rc = run_all_checks(0, 1, 0);
+        sy_printf("CHECK_PIECE_M_M25\tscope=LOCAL\tpart=parity\tpassed=%d\tfailed=%d\n", n_ok, failed);
+        return rc;
+    }
+    if ((argc == 3 && tx_eqz(argv[1], "--part") && tx_eqz(argv[2], "bounds")) ||
+        (argc == 2 && tx_eqz(argv[1], "--part=bounds"))) {
+        int rc = run_all_checks(0, 0, 1);
+        sy_printf("CHECK_PIECE_M_M25\tscope=LOCAL\tpart=bounds\tpassed=%d\tfailed=%d\n", n_ok, failed);
+        return rc;
+    }
+    if (argc == 2 && tx_eqz(argv[1], "--all")) {
+        int rc = run_all_checks(1, 1, 1);
+        sy_printf("CHECK_PIECE_M_M25\tscope=LOCAL\tpassed=%d\tfailed=%d\n", n_ok, failed);
+        return rc;
+    }
+    int rc = run_all_checks(1, 0, 0);
+    sy_printf("CHECK_PIECE_M_M25\tscope=LOCAL\tpart=obj\tpassed=%d\tfailed=%d\n", n_ok, failed);
+    return rc;
+}

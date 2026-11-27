@@ -1,0 +1,416 @@
+/* tools/check-lnx-arm64-batch-a-s1.cx -- lnx/arm64 Batch A units (m25, bind, driveargs) S1
+ * verification via portable cx/runtime/tape_exec.cx executed on lnx/arm64 under qemu-aarch64-static
+ * (runner=qemu native=0; NOT native CI).
+ *
+ * Verifies:
+ *   (1) Real product m25 (cx/compiler/rtsharedname.cx) on lnx/arm64 via tape_run_cx (disp_fn=0):
+ *       173/173 enum-full golden parity vs native lnx/arm64 oracle
+ *   (2) Real product bind (src/bind.cx -> bd_touch) on lnx/arm64 via tape_run_cx (disp_fn=0):
+ *       exact parity with native lnx/arm64 bd_touch()
+ *   (3) Real product driveargs (src/driveargs.cx -> dv_word) on lnx/arm64 via tape_run_cx with
+ *       explicit fixture-host dispatcher (host_mode=fixture-host, allowed slots={1:read,5:open,6:close},
+ *       NOT production host contract):
+ *       - 32 word/is_object vectors + 2 pinned real files (shebang "#!/usr/bin/env unisacc -run\n" -> 20
+ *         and replaced plain-content file "hello plain text\n" -> 0) matching native dv_word()
+ *       - Forbidden-slot counter-cases: fixture-host rejects slot 2 (write) with -38 (-ENOSYS);
+ *         VM rejects disallowed slot 7 with HOST fault (reason=6)
+ */
+#pragma unisa use sys.env
+#pragma unisa use sys.fs
+#pragma unisa use sys.io
+#pragma unisa use sys.posix
+#pragma unisa use sys.proc
+#pragma unisa use text.text
+#pragma unisa use cxlib.hostcheck
+#pragma unisa use mem.bytes
+#pragma unisa use mem.heap
+
+static int g_pass = 0;
+static int g_fail = 0;
+static int g_native = 0;
+static const char *g_unisacc = "./unisacc.com"; /* lint:allow R1-product default repo APE when --unisacc is not passed */
+static char g_tmp[512];
+static char g_qemu[512];
+
+static void ck(int ok, const char *name) {
+    if (ok) {
+        g_pass++;
+        sy_printf("PASS\tcheck-lnx-arm64-batch-a-s1.%s\n", name);
+    } else {
+        g_fail++;
+        sy_printf("FAIL\tcheck-lnx-arm64-batch-a-s1.%s\n", name);
+    }
+}
+
+static int locate_arm64_qemu(char *dst, size_t cap) {
+    const char *home = sy_env("HOME");
+    dst[0] = 0;
+    if (home && home[0] &&
+        cx_fmt(dst, cap, "%s/.local/bin/qemu-aarch64-static", home) == 0 &&
+        sy_exists(dst) == 1) {
+        return 1;
+    }
+    if (sy_exists("/usr/bin/qemu-aarch64-static") == 1) {
+        (void)tx_copy(dst, (long)cap, "/usr/bin/qemu-aarch64-static", 28);
+        return 1;
+    }
+    return 0;
+}
+
+static int build_unit_slice(const char *tag, const char *dir, const char *src, char *out_slice, long cap) {
+    char cx_p[600], tape_p[600];
+    char *co = 0; size_t cn = 0;
+    int rc1, rc2;
+    if (cx_fmt(cx_p, sizeof cx_p, "%s/%s.cx", dir, tag) != 0) return 1;
+    if (cx_fmt(tape_p, sizeof tape_p, "%s/%s.tape", g_tmp, tag) != 0) return 1;
+    if (cx_fmt(out_slice, (size_t)cap, "%s/%s.tapeslice", g_tmp, tag) != 0) return 1;
+    if (sy_write_file(cx_p, (const unsigned char *)src, tx_len(src, 16384), 0600) != 0) return 1;
+    {
+        char *av1[] = {"sh", (char *)g_unisacc, "--target", g_native ? "lnx/arm64" : "lnx/x86_64", "-S", cx_p, "-o", tape_p, 0}; /* lint:allow R1-product compiles real batch A unit slice */
+        rc1 = cx_runv_timeout(av1, 30, &co, &cn);
+        if (co) { mm_free(co); co = 0; }
+        if (rc1 != 0) return 1;
+    }
+    {
+        char *av2[] = {"sh", (char *)g_unisacc, "tools/tapepack.cx", "--", tape_p, "-o", out_slice, 0}; /* lint:allow R1-product packs real batch A unit slice */
+        rc2 = cx_runv_timeout(av2, 30, &co, &cn);
+        if (co) { mm_free(co); co = 0; }
+        if (rc2 != 0) return 1;
+    }
+    return 0;
+}
+
+static int pack_raw_tape(const char *tag, const char *tape_src, char *out_slice, long cap) {
+    char tape_p[600];
+    char *co = 0; size_t cn = 0;
+    int rc;
+    if (cx_fmt(tape_p, sizeof tape_p, "%s/%s.tape", g_tmp, tag) != 0) return 1;
+    if (cx_fmt(out_slice, (size_t)cap, "%s/%s.tapeslice", g_tmp, tag) != 0) return 1;
+    if (sy_write_file(tape_p, (const unsigned char *)tape_src, tx_len(tape_src, 4096), 0600) != 0) return 1;
+    {
+        char *av[] = {"sh", (char *)g_unisacc, "tools/tapepack.cx", "--", tape_p, "-o", out_slice, 0}; /* lint:allow R1-product packs forbidden-slot counter-case slice */
+        rc = cx_runv_timeout(av, 30, &co, &cn);
+        if (co) mm_free(co);
+        return rc;
+    }
+}
+
+int main(int argc, char **argv) {
+    const char *td = sy_tmpdir();
+    char sdir[600];
+    char sl_m25[600], sl_bind[600], sl_da[600], sl_forbid2[600];
+    char f_shebang[600], f_plain[600];
+    char drv_cx[600], drv_bin[600], host[64];
+    int has_q = 0;
+
+    for (int i = 1; i < argc; i++) {
+        if (tx_eqz(argv[i], "--native")) g_native = 1;
+        else if (tx_eqz(argv[i], "--unisacc") && i + 1 < argc) g_unisacc = argv[++i];
+        else { sy_eprintf("check-lnx-arm64-batch-a-s1: unknown arg %s\n", argv[i]); return 2; }
+    }
+    if (g_native) {
+        host[0] = 0;
+        hc_host(host, sizeof host);
+        if (!tx_eqz(host, "Linux/arm64")) {
+            sy_eprintf("check-lnx-arm64-batch-a-s1: REFUSE --native requires Linux/arm64 host (got=%s)\n", host[0] ? host : "unknown");
+            return 2;
+        }
+    }
+
+    if (cx_fmt(g_tmp, sizeof g_tmp, "%s/unisacc-arm64-batch-a-%d", td ? td : "/tmp", sy_pid()) != 0) {
+        if (g_native) sy_printf("CHECK_LNX_ARM64_BATCH_A_S1\tpassed=0\tfailed=1\trunner=native\tnative=1\thost_mode=fixture-host\tdriveargs_slots=1,5,6\n");
+        else sy_printf("CHECK_LNX_ARM64_BATCH_A_S1\tpassed=0\tfailed=1\trunner=qemu\tnative=0\thost_mode=fixture-host\tdriveargs_slots=1,5,6\n");
+        return 1;
+    }
+    (void)sy_mkdir(g_tmp, 0700);
+    cx_fmt(sdir, sizeof sdir, "%s/src", g_tmp);
+    (void)sy_mkdir(sdir, 0700);
+    {
+        char cwd[512], l[600], t[600];
+        if (getcwd(cwd, sizeof cwd)) {
+            cx_fmt(l, sizeof l, "%s/cx", g_tmp); cx_fmt(t, sizeof t, "%s/cx", cwd); (void)sy_symlink(t, l);
+            cx_fmt(l, sizeof l, "%s/cxroot.tsv", g_tmp); cx_fmt(t, sizeof t, "%s/cxroot.tsv", cwd); (void)sy_symlink(t, l);
+            cx_fmt(l, sizeof l, "%s/bind.cx", sdir); cx_fmt(t, sizeof t, "%s/src/bind.cx", cwd); (void)sy_symlink(t, l);
+            cx_fmt(l, sizeof l, "%s/driveargs.cx", sdir); cx_fmt(t, sizeof t, "%s/src/driveargs.cx", cwd); (void)sy_symlink(t, l);
+            cx_fmt(l, sizeof l, "%s/entrybind.cx", sdir); cx_fmt(t, sizeof t, "%s/src/entrybind.cx", cwd); (void)sy_symlink(t, l);
+            cx_fmt(l, sizeof l, "%s/driveutil.cx", sdir); cx_fmt(t, sizeof t, "%s/src/driveutil.cx", cwd); (void)sy_symlink(t, l);
+        }
+    }
+
+    /* Pinned real files for driveargs fixture-host positive + replaced-content counter-cases */
+    cx_fmt(f_shebang, sizeof f_shebang, "%s/script_probe", g_tmp);
+    cx_fmt(f_plain, sizeof f_plain, "%s/plain_probe", g_tmp);
+    (void)sy_write_file(f_shebang, (const unsigned char *)"#!/usr/bin/env unisacc -run\n", 28, 0600);
+    (void)sy_write_file(f_plain, (const unsigned char *)"hello plain text\n", 17, 0600);
+
+    if (g_native) {
+        ck(1, "host-is-lnx-arm64-native");
+    } else {
+        has_q = locate_arm64_qemu(g_qemu, sizeof g_qemu);
+        ck(has_q == 1, "qemu-aarch64-static-present");
+    }
+
+    /* 1. Build real m25, bind, driveargs slices + forbidden-slot counter-case slice (slot 2 write) */
+    {
+        const char *m25_src =
+            "#pragma unisa use compiler.rtsharedname\n"
+            "int main(int argc, char **argv) {\n"
+            "    const unsigned long long *ba;\n"
+            "    unsigned long long op;\n"
+            "    int idx;\n"
+            "    if (argc < 2) return 99;\n"
+            "    ba = (const unsigned long long *)argv[1];\n"
+            "    op = ba[0]; idx = (int)(long long)ba[1];\n"
+            "    if (op == 0ULL) return rts_count();\n"
+            "    if (op == 1ULL) {\n"
+            "        const char *g = 0, *p = 0, *um = 0, *em = 0; int prov = -1;\n"
+            "        return rts_at(idx, &g, &p, &prov, &um, &em);\n"
+            "    }\n"
+            "    if (op == 2ULL) return rts_symbol_count(idx);\n"
+            "    if (op == 3ULL) return rts_used_count(idx);\n"
+            "    if (op == 4ULL) return rts_used_name(idx, (int)(long long)ba[2]) != 0 ? 1 : 0;\n"
+            "    if (op == 5ULL) return rts_covers(idx, (const char *)ba[2]);\n"
+            "    if (op == 6ULL) return rts_used(idx, (const char *)ba[2]);\n"
+            "    return 98;\n"
+            "}\n";
+        const char *bind_src = "#pragma unisa use bind\nint main(void) { return bd_touch(); }\n";
+        const char *da_src =
+            "#pragma unisa use driveargs\n"
+            "#pragma unisa use driver.cli\n"
+            "#pragma unisa use driver.compat\n"
+            "int main(int argc, char **argv) {\n"
+            "    const unsigned long long *ba;\n"
+            "    if (argc < 2) return 99;\n"
+            "    ba = (const unsigned long long *)argv[1];\n"
+            "    return dv_word((const char *)ba[0], (int)(long long)ba[1]);\n"
+            "}\n";
+        const char *forbid2_tape =
+            "_start:\n"
+            "  imm r0, 1\n"
+            "  imm r1, 0\n"
+            "  imm r2, 0\n"
+            "  .sys write, r0, r1, r2\n"
+            "  .exit r0\n"
+            ".end\n";
+        ck(build_unit_slice("m25_wrap", g_tmp, m25_src, sl_m25, sizeof sl_m25) == 0, "build-m25-slice");
+        ck(build_unit_slice("bind_wrap", sdir, bind_src, sl_bind, sizeof sl_bind) == 0, "build-bind-slice");
+        ck(build_unit_slice("driveargs_wrap", sdir, da_src, sl_da, sizeof sl_da) == 0, "build-driveargs-slice");
+        ck(pack_raw_tape("forbid_slot2", forbid2_tape, sl_forbid2, sizeof sl_forbid2) == 0, "build-forbidden-slot2-slice");
+    }
+
+    /* 2. Cross-compile lnx/arm64 S1 verification binary */
+    {
+        const char *hsrc =
+            "#pragma unisa use runtime.tape_exec\n"
+            "#pragma unisa use compiler.rtsharedname\n"
+            "#pragma unisa use bind\n"
+            "#pragma unisa use driveargs\n"
+            "#pragma unisa use driver.cli\n"
+            "#pragma unisa use driver.compat\n"
+            "#pragma unisa use sys.fs\n"
+            "#pragma unisa use sys.io\n"
+            "#pragma unisa use text.text\n"
+            "#pragma unisa use mem.bytes\n"
+            "#pragma unisa use mem.heap\n"
+            "static unsigned long long g_mb, g_ml;\n"
+            "static int g_cnt_open, g_cnt_read, g_cnt_close, g_cnt_denied;\n"
+            "/* Fixture-host dispatcher for driveargs S1 only (allowed slots: 1=read, 5=open, 6=close). */\n"
+            "static long long fixture_fs_disp(unsigned long long slot,\n"
+            "                                 unsigned long long a0, unsigned long long a1,\n"
+            "                                 unsigned long long a2, unsigned long long a3,\n"
+            "                                 unsigned long long a4, unsigned long long a5) {\n"
+            "    (void)a3; (void)a4; (void)a5;\n"
+            "    if (slot == 5ULL) {\n"
+            "        unsigned long long rem, i;\n"
+            "        const char *p = (const char *)a0;\n"
+            "        g_cnt_open++;\n"
+            "        if (a0 < g_mb || a0 - g_mb >= g_ml) return -14LL;\n"
+            "        rem = g_ml - (a0 - g_mb);\n"
+            "        for (i = 0ULL; i < rem; i++) if (p[i] == 0) break;\n"
+            "        if (i >= rem) return -14LL;\n"
+            "        return (long long)sy_open_read(p);\n"
+            "    }\n"
+            "    if (slot == 1ULL) {\n"
+            "        g_cnt_read++;\n"
+            "        if (a1 < g_mb || a2 > g_ml || a1 - g_mb > g_ml - a2) return -14LL;\n"
+            "        return (long long)sy_read((int)a0, (unsigned char *)a1, (long)a2);\n"
+            "    }\n"
+            "    if (slot == 6ULL) { g_cnt_close++; return (long long)sy_close((int)a0); }\n"
+            "    g_cnt_denied++;\n"
+            "    return -38LL;\n"
+            "}\n"
+            "static unsigned long long rd_u(const unsigned char *p, int k) {\n"
+            "    unsigned long long v = 0ULL; int i = k - 1;\n"
+            "    while (i >= 0) { v = (v << 8) | (unsigned long long)p[i]; i--; }\n"
+            "    return v;\n"
+            "}\n"
+            "static int run_bin3(const unsigned char *sl, long slen, unsigned char *ibm, unsigned long long ibm_cap,\n"
+            "                    int cached, unsigned long long b0, unsigned long long b1, const char *str_arg,\n"
+            "                    unsigned long long raw_b2, int use_str, int use_disp,\n"
+            "                    long long *out_ret, unsigned long long *out_steps) {\n"
+            "    unsigned long long data_off = rd_u(sl + 64 + 24 + 4, 8);\n"
+            "    unsigned long long data_len = rd_u(sl + 64 + 24 + 12, 8);\n"
+            "    unsigned long long bssz_off = rd_u(sl + 64 + 48 + 4, 8);\n"
+            "    unsigned long long bss_size = rd_u(sl + bssz_off, 8);\n"
+            "    unsigned long long in_off = ((data_len + 7ULL) & ~7ULL) + bss_size;\n"
+            "    unsigned long long str_len = (use_str && str_arg) ? (unsigned long long)tx_len(str_arg, 512) + 1ULL : 0ULL;\n"
+            "    unsigned long long in_end = (in_off + str_len + 7ULL) & ~7ULL;\n"
+            "    unsigned long long argv_at = in_end + 65536ULL;\n"
+            "    unsigned long long argbuf_off = argv_at + 64ULL;\n"
+            "    unsigned long long memlimit = argbuf_off + 128ULL;\n"
+            "    unsigned char *mem = (unsigned char *)mm_alloc((size_t)memlimit);\n"
+            "    unsigned long long *ga, *ba, args[12], res[5];\n"
+            "    int i;\n"
+            "    if (!mem) return -1;\n"
+            "    mm_fill(mem, (long)memlimit, 0, (long)memlimit);\n"
+            "    if (data_len > 0ULL) mm_copy(mem, (long)memlimit, sl + data_off, (long)data_len);\n"
+            "    if (str_len > 0ULL) mm_copy(mem + in_off, (long)(memlimit - in_off), str_arg, (long)str_len);\n"
+            "    ga = (unsigned long long *)(mem + argv_at);\n"
+            "    ba = (unsigned long long *)(mem + argbuf_off);\n"
+            "    ba[0] = (use_str && b0 == ~0ULL) ? (str_arg ? (unsigned long long)(mem + in_off) : 0ULL) : b0;\n"
+            "    ba[1] = b1;\n"
+            "    ba[2] = (use_str && b0 != ~0ULL) ? (str_arg ? (unsigned long long)(mem + in_off) : 0ULL) : raw_b2;\n"
+            "    ba[3] = 0ULL;\n"
+            "    ga[0] = (unsigned long long)(mem + argbuf_off + 24ULL);\n"
+            "    ga[1] = (unsigned long long)ba;\n"
+            "    ga[2] = 0ULL;\n"
+            "    for (i = 0; i < 5; i++) res[i] = 0xdeadULL;\n"
+            "    g_mb = (unsigned long long)mem; g_ml = memlimit;\n"
+            "    args[0] = cached ? 260ULL : 4ULL; args[1] = (unsigned long long)sl; args[2] = memlimit;\n"
+            "    args[3] = 2000000ULL; args[4] = 2ULL; args[5] = (unsigned long long)ga;\n"
+            "    args[6] = (unsigned long long)res; args[7] = (unsigned long long)slen;\n"
+            "    args[8] = use_disp ? (unsigned long long)fixture_fs_disp : 0ULL;\n"
+            "    args[9] = (unsigned long long)mem; args[10] = (unsigned long long)ibm; args[11] = ibm_cap;\n"
+            "    (void)tape_run_cx(args);\n"
+            "    mm_free(mem);\n"
+            "    if (out_steps) *out_steps = res[2];\n"
+            "    if (res[0] != 0ULL) return -2;\n"
+            "    *out_ret = (long long)res[1];\n"
+            "    return 0;\n"
+            "}\n"
+            "int main(int argc, char **argv) {\n"
+            "    unsigned char *s1 = 0, *s2 = 0, *s3 = 0, *s4 = 0;\n"
+            "    int64_t n1 = 0, n2 = 0, n3 = 0, n4 = 0;\n"
+            "    unsigned char ibm[16384];\n"
+            "    if (argc < 7) return 2;\n"
+            "    if (sy_read_file(argv[1], &s1, &n1, 4 << 20) != 0) return 3;\n"
+            "    if (sy_read_file(argv[2], &s2, &n2, 4 << 20) != 0) return 4;\n"
+            "    if (sy_read_file(argv[3], &s3, &n3, 4 << 20) != 0) return 5;\n"
+            "    if (sy_read_file(argv[4], &s4, &n4, 4 << 20) != 0) return 6;\n"
+            "    /* (1) m25 enum-full parity (disp_fn=0) */\n"
+            "    {\n"
+            "        static const char *const cov[29] = {\n"
+            "            \"_unisa_atexit\",\"_unisa_natexit\",\"_u_st_fd\",\"_u_st_eof\",\"_u_st_err\",\n"
+            "            \"_u_st_serr\",\"_u_st_ung\",\"_u_st_buf\",\"_u_st_bpos\",\"_u_st_blen\",\n"
+            "            \"_u_st_wlen\",\"_u_st_ro\",\"_u_st_n\",\"errno\",\"_unisa_envheap\",\n"
+            "            \"_unisa_envcap\",\"_unisa_seed\",\"_unisa_tok\",\"_unisa_asc\",\"_unisa_tmbuf\",\n"
+            "            \"_unisa_tz\",\"_unisa_tzn\",\"_unisa_tzstate\",\"_u_po_fd\",\"_u_po_pid\",\"_u_po_n\",\n"
+            "            \"__not_covered_1\",\"__not_covered_2\",0};\n"
+            "        static const char *const usd[7] = {\n"
+            "            \"_u_st_wput\",\"_u_st_copy\",\"_unisa_envfind\",\"_unisa_map\",\"__nu1\",\"__nu2\",0};\n"
+            "        int tot = 0, ok = 0, first = 1;\n"
+            "        long long tr = 0; unsigned long long st = 0;\n"
+            "        tot++; if (run_bin3(s1,(long)n1,ibm,sizeof ibm,!first,0,0,0,0,0,0,&tr,&st)==0 && (int)tr==rts_count() && st>0) ok++; first=0;\n"
+            "        for (int i = -1; i <= 2; i++) {\n"
+            "            const char *g=0,*p=0,*um=0,*em=0; int prov=-1;\n"
+            "            tot++; if (run_bin3(s1,(long)n1,ibm,sizeof ibm,1,1,(unsigned long long)(long long)i,0,0,0,0,&tr,&st)==0 && (int)tr==rts_at(i,&g,&p,&prov,&um,&em) && st>0) ok++;\n"
+            "            tot++; if (run_bin3(s1,(long)n1,ibm,sizeof ibm,1,2,(unsigned long long)(long long)i,0,0,0,0,&tr,&st)==0 && (int)tr==rts_symbol_count(i) && st>0) ok++;\n"
+            "            tot++; if (run_bin3(s1,(long)n1,ibm,sizeof ibm,1,3,(unsigned long long)(long long)i,0,0,0,0,&tr,&st)==0 && (int)tr==rts_used_count(i) && st>0) ok++;\n"
+            "            for (int m = -1; m <= 2; m++) {\n"
+            "                int nat = rts_used_name(i, m) != 0 ? 1 : 0;\n"
+            "                tot++; if (run_bin3(s1,(long)n1,ibm,sizeof ibm,1,4,(unsigned long long)(long long)i,0,(unsigned long long)(long long)m,0,0,&tr,&st)==0 && (int)tr==nat && st>0) ok++;\n"
+            "            }\n"
+            "            for (int k = 0; k < 29; k++) {\n"
+            "                int nat = rts_covers(i, cov[k]);\n"
+            "                tot++; if (run_bin3(s1,(long)n1,ibm,sizeof ibm,1,5,(unsigned long long)(long long)i,cov[k],0,1,0,&tr,&st)==0 && (int)tr==nat && st>0) ok++;\n"
+            "            }\n"
+            "            for (int k = 0; k < 7; k++) {\n"
+            "                int nat = rts_used(i, usd[k]);\n"
+            "                tot++; if (run_bin3(s1,(long)n1,ibm,sizeof ibm,1,6,(unsigned long long)(long long)i,usd[k],0,1,0,&tr,&st)==0 && (int)tr==nat && st>0) ok++;\n"
+            "            }\n"
+            "        }\n"
+            "        sy_printf(\"M25_S1\\ttot=%d\\tok=%d\\n\", tot, ok);\n"
+            "        if (ok != tot) return 11;\n"
+            "    }\n"
+            "    /* (2) bind parity (disp_fn=0) */\n"
+            "    {\n"
+            "        long long tr = -1; unsigned long long st = 0;\n"
+            "        int rc = run_bin3(s2,(long)n2,ibm,sizeof ibm,0,0,0,0,0,0,0,&tr,&st);\n"
+            "        sy_printf(\"BIND_S1\\trc=%d\\tret=%lld\\tnat=%d\\tsteps=%llu\\n\", rc, tr, bd_touch(), st);\n"
+            "        if (rc != 0 || (int)tr != bd_touch() || st == 0ULL) return 12;\n"
+            "    }\n"
+            "    /* (3) driveargs dv_word parity + pinned shebang/plain file counter-cases (fixture-host slots=1,5,6) */\n"
+            "    {\n"
+            "        static const char *const words[16] = {\n"
+            "            0, \"\", \"stream\", \"build\", \"run\", \"--help\", \"--version\", \"--\",\n"
+            "            \"foo.c\", \"bar.cx\", \"baz.o\", \"lib.a\", \"-O2\", \"-lfoo\", \"unknown\", \"main.s\"};\n"
+            "        int tot = 0, ok = 0, first = 1;\n"
+            "        long long tr_sb = -1, tr_pl = -1;\n"
+            "        unsigned long long st_sb = 0, st_pl = 0;\n"
+            "        int nat_sb, nat_pl, rc_sb, rc_pl;\n"
+            "        for (int i = 0; i < 16; i++) {\n"
+            "            for (int obj = 0; obj <= 1; obj++) {\n"
+            "                long long tr = -1; unsigned long long st = 0;\n"
+            "                int nat = dv_word(words[i], obj);\n"
+            "                int rc = run_bin3(s3,(long)n3,ibm,sizeof ibm,!first,~0ULL,(unsigned long long)obj,words[i],0,1,1,&tr,&st);\n"
+            "                first = 0; tot++;\n"
+            "                if (rc == 0 && (int)tr == nat && st > 0ULL) ok++;\n"
+            "            }\n"
+            "        }\n"
+            "        nat_sb = dv_word(argv[5], 0);\n"
+            "        rc_sb = run_bin3(s3,(long)n3,ibm,sizeof ibm,1,~0ULL,0ULL,argv[5],0,1,1,&tr_sb,&st_sb);\n"
+            "        nat_pl = dv_word(argv[6], 0);\n"
+            "        rc_pl = run_bin3(s3,(long)n3,ibm,sizeof ibm,1,~0ULL,0ULL,argv[6],0,1,1,&tr_pl,&st_pl);\n"
+            "        sy_printf(\"DRIVEARGS_S1\\ttot=%d\\tok=%d\\tsb=(%lld,%d)\\tpl=(%lld,%d)\\tslots=(%d,%d,%d,%d)\\n\",\n"
+            "                  tot, ok, tr_sb, nat_sb, tr_pl, nat_pl, g_cnt_open, g_cnt_read, g_cnt_close, g_cnt_denied);\n"
+            "        if (ok != tot || rc_sb != 0 || tr_sb != 20LL || nat_sb != 20 ||\n"
+            "            rc_pl != 0 || tr_pl != 0LL || nat_pl != 0 ||\n"
+            "            g_cnt_open <= 0 || g_cnt_read <= 0 || g_cnt_close <= 0 || g_cnt_denied != 0) return 13;\n"
+            "    }\n"
+            "    /* (4) Forbidden-slot counter-case: slot 2 (write) rejected by fixture_fs_disp with -38 (-ENOSYS) */\n"
+            "    {\n"
+            "        long long tr = 0; unsigned long long st = 0;\n"
+            "        int rc = run_bin3(s4,(long)n4,ibm,sizeof ibm,0,0,0,0,0,0,1,&tr,&st);\n"
+            "        sy_printf(\"FORBID_SLOT2\\trc=%d\\tret=%lld\\tdenied=%d\\n\", rc, tr, g_cnt_denied);\n"
+            "        if (rc != 0 || tr != -38LL || g_cnt_denied != 1) return 14;\n"
+            "    }\n"
+            "    return 0;\n"
+            "}\n";
+        char *co = 0; size_t cn = 0; int rc;
+        cx_fmt(drv_cx, sizeof drv_cx, "%s/arm64_batch_a_drv.cx", sdir);
+        cx_fmt(drv_bin, sizeof drv_bin, "%s/arm64_batch_a_drv", g_tmp);
+        (void)sy_write_file(drv_cx, (const unsigned char *)hsrc, tx_len(hsrc, 16384), 0600);
+        {
+            char *av[] = {"sh", (char *)g_unisacc, "--target=lnx/arm64", drv_cx, "-o", drv_bin, 0}; /* lint:allow R1-product cross-compiles lnx/arm64 Batch A S1 harness */
+            rc = cx_runv_timeout(av, 30, &co, &cn);
+            if (co) mm_free(co);
+        }
+        ck(rc == 0 && sy_exists(drv_bin) == 1, "cross-compile-lnx-arm64-batch-a");
+    }
+
+    if ((g_native || has_q) && sy_exists(drv_bin) == 1) {
+        char *av[9];
+        int na = 0;
+        char *out = 0; size_t outn = 0; int rc;
+        if (!g_native) av[na++] = g_qemu;
+        av[na++] = drv_bin;
+        av[na++] = sl_m25; av[na++] = sl_bind; av[na++] = sl_da; av[na++] = sl_forbid2;
+        av[na++] = f_shebang; av[na++] = f_plain; av[na] = 0;
+        rc = cx_runv_timeout(av, 45, &out, &outn);
+        ck(rc == 0 && out && strstr(out, "M25_S1\ttot=173\tok=173") != 0, "arm64-m25-s1-173-parity");
+        ck(rc == 0 && out && strstr(out, "BIND_S1\trc=0\tret=0\tnat=0") != 0, "arm64-bind-s1-parity");
+        ck(rc == 0 && out && strstr(out, "DRIVEARGS_S1\ttot=32\tok=32\tsb=(20,20)\tpl=(0,0)") != 0, "arm64-driveargs-s1-fixture-host-and-pinned-files");
+        ck(rc == 0 && out && strstr(out, "FORBID_SLOT2\trc=0\tret=-38\tdenied=1") != 0, "arm64-fixture-host-forbidden-slot2-enosys");
+        if (out) mm_free(out);
+    } else {
+        ck(0, "arm64-m25-s1-173-parity");
+        ck(0, "arm64-bind-s1-parity");
+        ck(0, "arm64-driveargs-s1-fixture-host-and-pinned-files");
+        ck(0, "arm64-fixture-host-forbidden-slot2-enosys");
+    }
+
+    (void)sy_remove_all(g_tmp);
+    sy_printf("CHECK_LNX_ARM64_BATCH_A_S1\tpassed=%d\tfailed=%d\trunner=%s\tnative=%d\thost_mode=fixture-host\tdriveargs_slots=1,5,6\n",
+              g_pass, g_fail, g_native ? "native" : "qemu", g_native ? 1 : 0);
+    return g_fail ? 1 : 0;
+}

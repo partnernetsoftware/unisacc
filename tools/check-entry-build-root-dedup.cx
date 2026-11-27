@@ -1,0 +1,71 @@
+/* tools/check-entry-build-root-dedup.cx -- verify entry-build deduplicates untargeted
+ * root realpaths from the -cx-plan closure for all root_target overrides (no duplicate dv_word).
+ * Marker: CHECK_ENTRY_BUILD_ROOT_DEDUP. */
+#pragma unisa use sys.fs
+#pragma unisa use sys.io
+#pragma unisa use sys.posix
+#pragma unisa use sys.time
+#pragma unisa use text.text
+#pragma unisa use mem.bytes
+#pragma unisa use cxlib.procrun
+#pragma unisa use cxlib.ckassert
+
+static int g_pass, g_fail;
+
+static int run_sh(const char *cmd, char *out, long cap) {
+    char *av[] = {"sh", "-c", (char *)cmd, 0};
+    pr_result r;
+    int t = pr_run("eb-dedup", av, ".", 0, 55, &r);
+    long n = 0;
+    if (out && cap > 0) {
+        if (r.out && r.outn > 0) {
+            long m = (long)r.outn < cap - 1 ? (long)r.outn : cap - 1;
+            mm_copy(out, cap, r.out, m);
+            n += m;
+        }
+        if (r.err && r.errn > 0 && n < cap - 1) {
+            long m = (long)r.errn < cap - 1 - n ? (long)r.errn : cap - 1 - n;
+            mm_copy(out + n, cap - n, r.err, m);
+            n += m;
+        }
+        out[n] = 0;
+    }
+    int rc = t ? -1 : r.rc;
+    pr_free(&r);
+    return rc;
+}
+
+int main(void) {
+    char tmp[256], eb_bin[320], outdir[320], cmd[1024], out[16384];
+    ca_bind(&g_pass, &g_fail);
+    cx_fmt(tmp, sizeof tmp, "/tmp/eb-dedup-%lld", sy_now_ms());
+    if (sy_mkdir(tmp, 0700) != 0) {
+        ck(0, "session-tmpdir");
+        return 1;
+    }
+    cx_fmt(eb_bin, sizeof eb_bin, "%s/entry_build", tmp);
+    cx_fmt(outdir, sizeof outdir, "%s/eb_out", tmp);
+
+    cx_fmt(cmd, sizeof cmd, "sh ./unisacc.com tools/entry-build.cx -o '%s'", eb_bin);
+    if (run_sh(cmd, out, sizeof out) != 0) {
+        ck(0, "compile-entry-build");
+        goto done;
+    }
+
+    /* 1. Full lnx/x86_64 entry-build link must succeed without duplicate dv_word */
+    cx_fmt(cmd, sizeof cmd, "'%s' . ./unisacc.com '%s' --target lnx/x86_64", eb_bin, outdir);
+    int r_eb = run_sh(cmd, out, sizeof out);
+    ck(r_eb == 0 && strstr(out, "multiple definitions of dv_word") == 0,
+       "full-lnx-x86_64-entry-build-link-no-dup-dv_word");
+
+    /* 2. nm shows dv_word defined once across objects, from driveargs_m1 (da_m1_dv_word) */
+    cx_fmt(cmd, sizeof cmd, "nm -g '%s/driveargs.o'", outdir);
+    int r_nm = run_sh(cmd, out, sizeof out);
+    ck(r_nm == 0 && strstr(out, " T dv_word") != 0 && strstr(out, " U da_m1_dv_word") != 0,
+       "nm-dv_word-defined-once-from-driveargs_m1");
+
+done:
+    (void)sy_remove_all(tmp);
+    sy_printf("CHECK_ENTRY_BUILD_ROOT_DEDUP\tpassed=%d\tfailed=%d\n", g_pass, g_fail);
+    return g_fail ? 1 : 0;
+}

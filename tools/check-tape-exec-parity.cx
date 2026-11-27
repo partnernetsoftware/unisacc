@@ -1,0 +1,1018 @@
+/* tools/check-tape-exec-parity.cx -- Byte/RC/Step/Fault/Output parity gate:
+ * compares portable cx/runtime/tape_exec.cx (tape_decode_cx, tape_bitmap_cx, tape_run_cx)
+ * against reference tools/tape/asm/tape_x86_64.S on lnx/x86_64 across:
+ *   (1) Decoder parity (all 72 opcodes asserted valid + 1B truncation + canonical/non-canonical LEB)
+ *   (2) Bitmap parity (null/empty/cap/overlap/valid/malformed)
+ *   (3) All 6 contract tapes in tools/tape/*.tape (positive + negative argc arms, same-address full
+ *       arena byte parity + per-arm captured host stdout byte parity)
+ *   (4) Mandatory m53 corpus built from cx/runtime/stream_attributes.cx (zero SKIPs; positive valid
+ *       and negative reject vectors asserting both oracle value and full-arena asm/cx parity)
+ *   (5) Synthetic ALU/mem/branch/call/frame/fault/budget/container + >32-bit pos/neg 64-bit exit
+ *   (6) Platform-independent mock-dispatcher portable mmap-table full/rollback/unmap/reuse contract
+ */
+#pragma unisa use sys.env
+#pragma unisa use sys.fd
+#pragma unisa use sys.fs
+#pragma unisa use sys.io
+#pragma unisa use sys.posix
+#pragma unisa use sys.proc
+#pragma unisa use sys.ffi
+#pragma unisa use text.text
+#pragma unisa use mem.bytes
+#pragma unisa use mem.heap
+#pragma unisa use runtime.tape_exec
+#pragma unisa use tape.tapeslice_contract
+
+static int g_pass = 0;
+static int g_fail = 0;
+
+static void *g_asm_decode = 0;
+static void *g_asm_bitmap = 0;
+static void *g_asm_run = 0;
+static void *g_asm_bind = 0;
+static void *g_asm_disp = 0;
+
+static char g_tmp_dir[512];
+static char g_so_path[600];
+
+static void ck(int ok, const char *name) {
+    if (ok) {
+        g_pass++;
+        sy_printf("PASS\tcheck-tape-exec-parity.%s\n", name);
+    } else {
+        g_fail++;
+        sy_printf("FAIL\tcheck-tape-exec-parity.%s\n", name);
+    }
+}
+
+static unsigned long long call_asm_decode(const unsigned char *cur,
+                                          const unsigned char *end,
+                                          unsigned char *rec48) {
+    unsigned long a0 = (unsigned long)cur;
+    unsigned long a1 = (unsigned long)end;
+    unsigned long a2 = (unsigned long)rec48;
+    int k[3] = {SY_FFI_ULONG, SY_FFI_ULONG, SY_FFI_ULONG};
+    void *v[3] = {&a0, &a1, &a2};
+    unsigned long ret = 0;
+    if (sy_ffi_call(g_asm_decode, SY_FFI_ULONG, k, v, 3, 3, &ret) != 0) return ~0ULL;
+    return (unsigned long long)ret;
+}
+
+static int call_asm_bitmap(const unsigned char *code, unsigned long long len,
+                           unsigned char *bm, unsigned long long cap) {
+    unsigned long a0 = (unsigned long)code;
+    unsigned long a1 = (unsigned long)len;
+    unsigned long a2 = (unsigned long)bm;
+    unsigned long a3 = (unsigned long)cap;
+    int k[4] = {SY_FFI_ULONG, SY_FFI_ULONG, SY_FFI_ULONG, SY_FFI_ULONG};
+    void *v[4] = {&a0, &a1, &a2, &a3};
+    long ret = -1;
+    if (sy_ffi_call(g_asm_bitmap, SY_FFI_LONG, k, v, 4, 4, &ret) != 0) return -1;
+    return (int)ret;
+}
+
+static void call_asm_bind(unsigned char *mem, unsigned long long limit) {
+    unsigned long a0 = (unsigned long)mem;
+    unsigned long a1 = (unsigned long)limit;
+    int k[2] = {SY_FFI_ULONG, SY_FFI_ULONG};
+    void *v[2] = {&a0, &a1};
+    (void)sy_ffi_call(g_asm_bind, SY_FFI_VOID, k, v, 2, 2, 0);
+}
+
+static long long call_asm_run(const unsigned long long *args) {
+    unsigned long a0 = (unsigned long)args;
+    int k[1] = {SY_FFI_ULONG};
+    void *v[1] = {&a0};
+    long ret = -999;
+    if (sy_ffi_call(g_asm_run, SY_FFI_LONG, k, v, 1, 1, &ret) != 0) return -999LL;
+    return (long long)ret;
+}
+
+static long long cx_to_asm_disp(unsigned long long slot,
+                                unsigned long long a0, unsigned long long a1,
+                                unsigned long long a2, unsigned long long a3,
+                                unsigned long long a4, unsigned long long a5) {
+    unsigned long s = (unsigned long)slot;
+    unsigned long x0 = (unsigned long)a0, x1 = (unsigned long)a1, x2 = (unsigned long)a2;
+    unsigned long x3 = (unsigned long)a3, x4 = (unsigned long)a4, x5 = (unsigned long)a5;
+    int k[7] = {SY_FFI_ULONG, SY_FFI_ULONG, SY_FFI_ULONG, SY_FFI_ULONG,
+                SY_FFI_ULONG, SY_FFI_ULONG, SY_FFI_ULONG};
+    void *v[7] = {&s, &x0, &x1, &x2, &x3, &x4, &x5};
+    long ret = -38;
+    if (sy_ffi_call(g_asm_disp, SY_FFI_LONG, k, v, 7, 7, &ret) != 0) return -38LL;
+    return (long long)ret;
+}
+
+static int setup_asm_so(void) {
+    const char *td = sy_tmpdir();
+    if (cx_fmt(g_tmp_dir, sizeof g_tmp_dir, "%s/unisacc-tape-parity-%d",
+               td ? td : "/tmp", sy_pid())) {
+        return 1;
+    }
+    (void)sy_mkdir(g_tmp_dir, 0700);
+    if (cx_fmt(g_so_path, sizeof g_so_path, "%s/tapemode.so", g_tmp_dir)) return 1;
+    if (sy_exists("tools/tape/asm/tape_x86_64.S") != 1 ||
+        sy_exists("tools/tape/asm/hoststub_lnx_x86_64.S") != 1) {
+        sy_eprintf("check-tape-exec-parity: missing asm sources\n");
+        return 1;
+    }
+    {
+        char *av[] = {"cc", "-shared", "-fPIC", "-O2", "-o", g_so_path,
+                      "tools/tape/asm/tape_x86_64.S",
+                      "tools/tape/asm/hoststub_lnx_x86_64.S", 0};
+        char *co = 0;
+        size_t cn = 0;
+        int rc = cx_runv_timeout(av, 30, &co, &cn);
+        if (co) mm_free(co);
+        if (rc != 0) {
+            sy_eprintf("check-tape-exec-parity: cc tapemode.so failed rc=%d\n", rc);
+            return 1;
+        }
+    }
+    {
+        void *h = sy_ffi_dlopen(g_so_path, sy_ffi_now_global());
+        if (!h) {
+            sy_eprintf("check-tape-exec-parity: dlopen failed\n");
+            return 1;
+        }
+        g_asm_decode = sy_ffi_dlsym(h, "tape_decode_x86_64");
+        g_asm_bitmap = sy_ffi_dlsym(h, "tape_bitmap_x86_64");
+        g_asm_run    = sy_ffi_dlsym(h, "tape_run_x86_64");
+        g_asm_bind   = sy_ffi_dlsym(h, "hoststub_lnx_x86_64_bind");
+        g_asm_disp   = sy_ffi_dlsym(h, "hoststub_lnx_x86_64");
+        if (!g_asm_decode || !g_asm_bitmap || !g_asm_run || !g_asm_bind || !g_asm_disp) {
+            sy_eprintf("check-tape-exec-parity: dlsym failed\n");
+            return 1;
+        }
+    }
+    return 0;
+}
+
+static int bytes_eq(const unsigned char *a, const unsigned char *b, unsigned long long n) {
+    unsigned long long i;
+    for (i = 0ULL; i < n; i++) {
+        if (a[i] != b[i]) return 0;
+    }
+    return 1;
+}
+
+/* Capture fd 1 (host stdout) around a single VM run into a temp file. */
+static int cap_stdout_begin(const char *path, int *saved_fd) {
+    int fd = sy_open(path, O_RDWR | O_CREAT | O_TRUNC, 0600);
+    int sv;
+    if (fd < 0) return -1;
+    sv = sy_dup(1);
+    if (sv < 0) { sy_close(fd); return -1; }
+    if (sy_dup2(fd, 1) < 0) { sy_close(sv); sy_close(fd); return -1; }
+    sy_close(fd);
+    *saved_fd = sv;
+    return 0;
+}
+
+static void cap_stdout_end(int saved_fd) {
+    if (saved_fd >= 0) {
+        (void)sy_dup2(saved_fd, 1);
+        sy_close(saved_fd);
+    }
+}
+
+static int compare_decode_buf(const unsigned char *buf, long len, int expect_ok) {
+    unsigned char ra[48], rc[48];
+    const unsigned char *pc;
+    unsigned long long pa;
+    int i;
+    for (i = 0; i < 48; i++) { ra[i] = 0xaa; rc[i] = 0xaa; }
+    pa = call_asm_decode(buf, buf + len, ra);
+    pc = tape_decode_cx(buf, buf + len, rc);
+    if ((unsigned long long)pc != pa) return 0;
+    if (expect_ok) {
+        if (pa != (unsigned long long)(buf + len)) return 0;
+        if (ra[0] != rc[0] || ra[1] != rc[1] || ra[2] != rc[2] || ra[3] != rc[3]) return 0;
+        if (!bytes_eq(ra + 4, rc + 4, 4ULL)) return 0;
+        if (!bytes_eq(ra + 8, rc + 8, (unsigned long long)ra[2] * 8ULL)) return 0;
+    } else {
+        if (pa != 0ULL) return 0;
+    }
+    return 1;
+}
+
+static void test_decode_parity(void) {
+    int ok_all = 1;
+    int op;
+    static const unsigned char shapes[72] = {
+        0x11, 0x02,
+        0x03, 0x03, 0x03, 0x03, 0x03, 0x03, 0x03, 0x03, 0x03, 0x03,
+        0x03, 0x03, 0x03, 0x03, 0x03, 0x03, 0x03, 0x03, 0x03,
+        0x12, 0x12, 0x22, 0x22, 0x11, 0x21, 0x10, 0x11, 0x10, 0x01, 0x11,
+        0x02, 0x02, 0x51, 0x11, 0x11, 0x00, 0x10, 0x11, 0x01, 0x02, 0x01,
+        0x13, 0x16, 0x01, 0x02, 0x00,
+        0x03, 0x03, 0x03, 0x03, 0x03, 0x03, 0x03, 0x03, 0x03, 0x03,
+        0x03, 0x03, 0x03, 0x03,
+        0x02, 0x02, 0x02, 0x02, 0x02, 0x02, 0x02, 0x02, 0x02, 0x02
+    };
+    for (op = 0; op < 72; op++) {
+        unsigned char buf[64];
+        int n = 0, nreg = shapes[op] & 15, nimm = shapes[op] >> 4, rb = (nreg + 1) >> 1, i;
+        buf[n++] = (unsigned char)op;
+        for (i = 0; i < rb; i++) buf[n++] = 0x21;
+        if (nreg & 1) buf[n - 1] = 0xf3;
+        for (i = 0; i < nimm; i++) {
+            buf[n++] = (unsigned char)(i & 1);
+            buf[n++] = 0x2a;
+        }
+        if (!compare_decode_buf(buf, n, 1)) ok_all = 0;
+        if (n > 0 && !compare_decode_buf(buf, n - 1, 0)) ok_all = 0;
+    }
+    ck(ok_all, "decode-all-72-opcodes-pos-and-trunc");
+
+    {
+        unsigned char c1[] = {72, 0};
+        unsigned char c2[] = {0, 0x00, 0, 1};
+        unsigned char c3[] = {0, 0xf0, 2, 1};
+        unsigned char c4[] = {0, 0xf0, 1, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0x01};
+        unsigned char c5[] = {0, 0xf0, 1, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0x02};
+        unsigned char c6[] = {0, 0xf0, 1, 0x80, 0x00};
+        unsigned char c7[] = {0, 0xf0, 0, 0x80, 0x80, 0x80, 0x80, 0x80, 0x80, 0x80, 0x80, 0x80, 0x7f};
+        unsigned char c8[] = {0, 0xf0, 0, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0x00};
+        unsigned char c9[] = {0, 0xf0, 0, 0x80, 0x00};
+        unsigned char c10[] = {0, 0xf0, 0, 0xff, 0x7f};
+        unsigned char c11[] = {0, 0xf0, 0, 0x7f};
+        unsigned char c12[] = {0, 0xf0, 0, 0x80, 0x80, 0x80, 0x80, 0x80, 0x80, 0x80, 0x80, 0x80, 0x40};
+        int ok = compare_decode_buf(c1, sizeof c1, 0) &&
+                 compare_decode_buf(c2, sizeof c2, 0) &&
+                 compare_decode_buf(c3, sizeof c3, 0) &&
+                 compare_decode_buf(c4, sizeof c4, 1) &&
+                 compare_decode_buf(c5, sizeof c5, 0) &&
+                 compare_decode_buf(c6, sizeof c6, 0) &&
+                 compare_decode_buf(c7, sizeof c7, 1) &&
+                 compare_decode_buf(c8, sizeof c8, 1) &&
+                 compare_decode_buf(c9, sizeof c9, 0) &&
+                 compare_decode_buf(c10, sizeof c10, 0) &&
+                 compare_decode_buf(c11, sizeof c11, 1) &&
+                 compare_decode_buf(c12, sizeof c12, 0);
+        ck(ok, "decode-edge-and-leb-canonical");
+    }
+}
+
+static void test_bitmap_parity(void) {
+    unsigned char code[] = {0, 0xf0, 0, 42, 47, 42, 0xf0};
+    unsigned char bad_code[] = {0, 0xf0, 0, 42, 72};
+    unsigned char ba[8], bc[8];
+    int ok = 1;
+    int i;
+    for (i = 0; i < 8; i++) { ba[i] = 0x55; bc[i] = 0x55; }
+    if (call_asm_bitmap(code, sizeof code, ba, sizeof ba) != 0 ||
+        tape_bitmap_cx(code, sizeof code, bc, sizeof bc) != 0 || ba[0] != bc[0]) ok = 0;
+    if (call_asm_bitmap(bad_code, sizeof bad_code, ba, sizeof ba) != 2 ||
+        tape_bitmap_cx(bad_code, sizeof bad_code, bc, sizeof bc) != 2) ok = 0;
+    if (call_asm_bitmap(0, 4, ba, 8) != 2 || tape_bitmap_cx(0, 4, bc, 8) != 2) ok = 0;
+    if (call_asm_bitmap(code, 0, ba, 8) != 2 || tape_bitmap_cx(code, 0, bc, 8) != 2) ok = 0;
+    if (call_asm_bitmap(code, 10, ba, 1) != 2 || tape_bitmap_cx(code, 10, bc, 1) != 2) ok = 0;
+    if (call_asm_bitmap(code, sizeof code, code + 2, 4) != 2 ||
+        tape_bitmap_cx(code, sizeof code, code + 2, 4) != 2) ok = 0;
+    ck(ok, "bitmap-valid-and-error-parity");
+}
+
+static void init_arena(unsigned char *mem, unsigned long long mem_limit,
+                       const unsigned char *slice, unsigned long long data_off,
+                       unsigned long long data_len,
+                       unsigned long long mode_flags,
+                       const char **argv_strs, int n_argv,
+                       unsigned long long argv_at, unsigned long long str_at) {
+    int i;
+    mm_fill(mem, (long)mem_limit, 0, (long)mem_limit);
+    if (data_len > 0ULL) {
+        mm_copy(mem, (long)mem_limit, slice + data_off, (long)data_len);
+    }
+    if ((mode_flags & 0xffULL) == 4ULL && n_argv > 0) {
+        unsigned long long *av = (unsigned long long *)(mem + argv_at);
+        unsigned long long cur = str_at;
+        for (i = 0; i < n_argv; i++) {
+            long sl = tx_len(argv_strs[i], 4096);
+            mm_copy(mem + cur, (long)(mem_limit - cur), argv_strs[i], sl + 1);
+            av[i] = (unsigned long long)(mem + cur);
+            cur += (unsigned long long)sl + 1ULL;
+        }
+        av[n_argv] = 0ULL;
+    }
+}
+
+/* Same-address full-arena + per-arm host stdout parity runner. */
+static int compare_slice_run(const char *tag,
+                             const unsigned char *slice, long slen,
+                             unsigned long long mode_flags,
+                             unsigned long long entry_or_argc,
+                             const char **argv_strs, int n_argv,
+                             const unsigned long long *call_args6,
+                             unsigned long long budget,
+                             int use_disp,
+                             const char *expect_stdout, long expect_stdout_len,
+                             long long *out_rc,
+                             unsigned long long *out_status,
+                             unsigned long long *out_exit,
+                             unsigned long long *out_steps) {
+    unsigned long long code_off = ts_rd_u(slice + 64 + 4, 8);
+    unsigned long long code_len = ts_rd_u(slice + 64 + 12, 8);
+    unsigned long long data_off = ts_rd_u(slice + 64 + 24 + 4, 8);
+    unsigned long long data_len = ts_rd_u(slice + 64 + 24 + 12, 8);
+    unsigned long long bssz_off = ts_rd_u(slice + 64 + 48 + 4, 8);
+    unsigned long long bss_size = ts_rd_u(slice + bssz_off, 8);
+    unsigned long long data_aligned = (data_len + 7ULL) & ~7ULL;
+    unsigned long long static_end = data_aligned + bss_size;
+    unsigned long long str_bytes = 256ULL;
+    unsigned long long argv_at, str_at, mem_limit, ibm_cap;
+    unsigned char *mem, *snap, *ibm_a, *ibm_c;
+    unsigned long long args_a[12], args_c[12];
+    unsigned long long res_a[5], res_c[5];
+    char out_a_path[600], out_c_path[600];
+    unsigned char *oa = 0, *oc = 0;
+    int64_t oan = 0, ocn = 0;
+    long long rc_a, rc_c;
+    int saved_fd = -1;
+    int i, ok = 1;
+
+    for (i = 0; i < n_argv; i++) {
+        str_bytes += (unsigned long long)tx_len(argv_strs[i], 4096) + 8ULL;
+    }
+    argv_at = ((static_end + 65536ULL) + 7ULL) & ~7ULL;
+    str_at = argv_at + ((unsigned long long)(n_argv + 4) * 8ULL);
+    mem_limit = ((str_at + str_bytes) + 7ULL) & ~7ULL;
+    ibm_cap = (code_len + 7ULL) >> 3;
+    if (ibm_cap == 0ULL) ibm_cap = 1ULL;
+
+    mem = (unsigned char *)mm_alloc((size_t)mem_limit);
+    snap = (unsigned char *)mm_alloc((size_t)mem_limit);
+    ibm_a = (unsigned char *)mm_alloc((size_t)ibm_cap);
+    ibm_c = (unsigned char *)mm_alloc((size_t)ibm_cap);
+    if (!mem || !snap || !ibm_a || !ibm_c) {
+        if (mem) mm_free(mem);
+        if (snap) mm_free(snap);
+        if (ibm_a) mm_free(ibm_a);
+        if (ibm_c) mm_free(ibm_c);
+        return 0;
+    }
+    mm_fill(ibm_a, (long)ibm_cap, 0, (long)ibm_cap);
+    mm_fill(ibm_c, (long)ibm_cap, 0, (long)ibm_cap);
+
+    if ((mode_flags & 0x100ULL) != 0ULL) {
+        (void)call_asm_bitmap(slice + code_off, code_len, ibm_a, ibm_cap);
+        (void)tape_bitmap_cx(slice + code_off, code_len, ibm_c, ibm_cap);
+    }
+
+    for (i = 0; i < 5; i++) { res_a[i] = 0xdeadbeefULL; res_c[i] = 0xdeadbeefULL; }
+    cx_fmt(out_a_path, sizeof out_a_path, "%s/out_a.bin", g_tmp_dir);
+    cx_fmt(out_c_path, sizeof out_c_path, "%s/out_c.bin", g_tmp_dir);
+
+    /* Arm A (x86_64 asm) on mem */
+    init_arena(mem, mem_limit, slice, data_off, data_len, mode_flags, argv_strs, n_argv, argv_at, str_at);
+    args_a[0] = mode_flags;
+    args_a[1] = (unsigned long long)slice;
+    args_a[2] = mem_limit;
+    args_a[3] = budget;
+    args_a[4] = entry_or_argc;
+    args_a[5] = ((mode_flags & 0xffULL) == 5ULL) ? (unsigned long long)call_args6
+                : (n_argv > 0 ? (unsigned long long)(mem + argv_at) : 0ULL);
+    args_a[6] = (unsigned long long)res_a;
+    args_a[7] = (unsigned long long)slen;
+    args_a[8] = use_disp ? (unsigned long long)g_asm_disp : 0ULL;
+    args_a[9] = (unsigned long long)mem;
+    args_a[10] = (unsigned long long)ibm_a;
+    args_a[11] = ibm_cap;
+
+    call_asm_bind(mem, mem_limit);
+    if (cap_stdout_begin(out_a_path, &saved_fd) != 0) ok = 0;
+    rc_a = call_asm_run(args_a);
+    cap_stdout_end(saved_fd);
+    saved_fd = -1;
+    mm_copy(snap, (long)mem_limit, mem, (long)mem_limit);
+
+    /* Arm B (portable cx) on EXACT SAME mem address */
+    init_arena(mem, mem_limit, slice, data_off, data_len, mode_flags, argv_strs, n_argv, argv_at, str_at);
+    for (i = 0; i < 12; i++) args_c[i] = args_a[i];
+    args_c[6] = (unsigned long long)res_c;
+    args_c[8] = use_disp ? (unsigned long long)cx_to_asm_disp : 0ULL;
+    args_c[10] = (unsigned long long)ibm_c;
+
+    call_asm_bind(mem, mem_limit);
+    if (cap_stdout_begin(out_c_path, &saved_fd) != 0) ok = 0;
+    rc_c = tape_run_cx(args_c);
+    cap_stdout_end(saved_fd);
+    saved_fd = -1;
+
+    if (rc_a != rc_c) ok = 0;
+    for (i = 0; i < 5; i++) {
+        if (res_a[i] != res_c[i]) ok = 0;
+    }
+    if (!bytes_eq(ibm_a, ibm_c, ibm_cap)) ok = 0;
+    if (!bytes_eq(snap, mem, mem_limit)) ok = 0;
+
+    if (sy_read_file(out_a_path, &oa, &oan, 65536) != 0 ||
+        sy_read_file(out_c_path, &oc, &ocn, 65536) != 0) {
+        ok = 0;
+    } else {
+        if (oan != ocn || (oan > 0 && !bytes_eq(oa, oc, (unsigned long long)oan))) ok = 0;
+        if (expect_stdout &&
+            (oan != expect_stdout_len ||
+             (expect_stdout_len > 0 && !bytes_eq(oa, (const unsigned char *)expect_stdout, (unsigned long long)expect_stdout_len)))) {
+            ok = 0;
+        }
+    }
+    if (oa) mm_free(oa);
+    if (oc) mm_free(oc);
+
+    if (!ok) {
+        sy_eprintf("PARITY_DIFF\t%s\trc=(%lld,%lld)\tst=(%llu,%llu)\texit=(%llu,%llu)\tsteps=(%llu,%llu)\tfpc=(%llu,%llu)\tfwhy=(%llu,%llu)\tout=(%lld,%lld)\n",
+                   tag, rc_a, rc_c, res_a[0], res_c[0], res_a[1], res_c[1],
+                   res_a[2], res_c[2], res_a[3], res_c[3], res_a[4], res_c[4], oan, ocn);
+    }
+    if (out_rc) *out_rc = rc_c;
+    if (out_status) *out_status = res_c[0];
+    if (out_exit) *out_exit = res_c[1];
+    if (out_steps) *out_steps = res_c[2];
+
+    mm_free(mem);
+    mm_free(snap);
+    mm_free(ibm_a);
+    mm_free(ibm_c);
+    return ok;
+}
+
+static int pack_tape_file(const char *tape_path, const char *out_slice) {
+    char *av[] = {"sh", "./unisacc.com", "tools/tapepack.cx", "--", /* lint:allow R1-product packs contract tapes for parity gate */
+                  (char *)tape_path, "-o", (char *)out_slice, 0};
+    char *co = 0;
+    size_t cn = 0;
+    int rc = cx_runv_timeout(av, 30, &co, &cn);
+    if (co) mm_free(co);
+    return rc;
+}
+
+static void test_contract_tapes(void) {
+    char sl_path[600];
+    char fstat_sample[600];
+    unsigned char *buf = 0;
+    int64_t len = 0;
+    long long rcv = 0;
+    unsigned long long st = 0, ex = 0, steps = 0;
+
+    if (cx_fmt(fstat_sample, sizeof fstat_sample, "%s/sample3.txt", g_tmp_dir) == 0) {
+        (void)sy_write_file(fstat_sample, (const unsigned char *)"abc", 3, 0600);
+    }
+
+    cx_fmt(sl_path, sizeof sl_path, "%s/divide.tapeslice", g_tmp_dir);
+    if (pack_tape_file("tools/tape/divide-contract.tape", sl_path) == 0 &&
+        sy_read_file(sl_path, &buf, &len, 1 << 20) == 0 && buf) {
+        int ok = compare_slice_run("divide-contract", buf, (long)len, 4ULL, 0ULL, 0, 0, 0, 100000ULL, 1, "", 0, &rcv, &st, &ex, &steps);
+        ck(ok && st == 0ULL && ex == 0ULL, "contract-divide");
+        mm_free(buf); buf = 0;
+    } else ck(0, "contract-divide");
+
+    cx_fmt(sl_path, sizeof sl_path, "%s/callr.tapeslice", g_tmp_dir);
+    if (pack_tape_file("tools/tape/callr-contract.tape", sl_path) == 0 &&
+        sy_read_file(sl_path, &buf, &len, 1 << 20) == 0 && buf) {
+        const char *av1[1] = {"prog"};
+        const char *av2[2] = {"prog", "bad"};
+        int ok1 = compare_slice_run("callr-ok", buf, (long)len, 4ULL, 1ULL, av1, 1, 0, 100000ULL, 1, "", 0, &rcv, &st, &ex, &steps);
+        ck(ok1 && st == 0ULL && ex == 0ULL, "contract-callr-ok");
+        int ok2 = compare_slice_run("callr-fault", buf, (long)len, 4ULL, 2ULL, av2, 2, 0, 100000ULL, 1, "", 0, &rcv, &st, &ex, &steps);
+        ck(ok2 && st == 2ULL, "contract-callr-fault");
+        mm_free(buf); buf = 0;
+    } else { ck(0, "contract-callr-ok"); ck(0, "contract-callr-fault"); }
+
+    cx_fmt(sl_path, sizeof sl_path, "%s/callm.tapeslice", g_tmp_dir);
+    if (pack_tape_file("tools/tape/callm-contract.tape", sl_path) == 0 &&
+        sy_read_file(sl_path, &buf, &len, 1 << 20) == 0 && buf) {
+        const char *av1[1] = {"prog"};
+        const char *av2[2] = {"prog", "bad"};
+        int ok1 = compare_slice_run("callm-ok", buf, (long)len, 4ULL, 1ULL, av1, 1, 0, 100000ULL, 1, "", 0, &rcv, &st, &ex, &steps);
+        ck(ok1 && st == 0ULL && ex == 0ULL, "contract-callm-ok");
+        int ok2 = compare_slice_run("callm-fault", buf, (long)len, 4ULL, 2ULL, av2, 2, 0, 100000ULL, 1, "", 0, &rcv, &st, &ex, &steps);
+        ck(ok2 && st == 2ULL, "contract-callm-fault");
+        mm_free(buf); buf = 0;
+    } else { ck(0, "contract-callm-ok"); ck(0, "contract-callm-fault"); }
+
+    cx_fmt(sl_path, sizeof sl_path, "%s/fstat.tapeslice", g_tmp_dir);
+    if (pack_tape_file("tools/tape/fstat-contract.tape", sl_path) == 0 &&
+        sy_read_file(sl_path, &buf, &len, 1 << 20) == 0 && buf) {
+        const char *av2[2] = {"prog", fstat_sample};
+        int ok = compare_slice_run("fstat-contract", buf, (long)len, 4ULL, 2ULL, av2, 2, 0, 100000ULL, 1, "", 0, &rcv, &st, &ex, &steps);
+        ck(ok && st == 0ULL && ex == 0ULL, "contract-fstat");
+        mm_free(buf); buf = 0;
+    } else ck(0, "contract-fstat");
+
+    cx_fmt(sl_path, sizeof sl_path, "%s/mmap.tapeslice", g_tmp_dir);
+    if (pack_tape_file("tools/tape/mmap-contract.tape", sl_path) == 0 &&
+        sy_read_file(sl_path, &buf, &len, 1 << 20) == 0 && buf) {
+        int ok = compare_slice_run("mmap-contract", buf, (long)len, 4ULL, 0ULL, 0, 0, 0, 100000ULL, 1, "", 0, &rcv, &st, &ex, &steps);
+        ck(ok && st == 0ULL && ex == 0ULL, "contract-mmap");
+        mm_free(buf); buf = 0;
+    } else ck(0, "contract-mmap");
+
+    cx_fmt(sl_path, sizeof sl_path, "%s/mmap-access.tapeslice", g_tmp_dir);
+    if (pack_tape_file("tools/tape/mmap-access.tape", sl_path) == 0 &&
+        sy_read_file(sl_path, &buf, &len, 1 << 20) == 0 && buf) {
+        const char *av1[1] = {"prog"};
+        const char *av2[2] = {"prog", "ro"};
+        int ok1 = compare_slice_run("mmap-access-rw", buf, (long)len, 4ULL, 1ULL, av1, 1, 0, 100000ULL, 1, "A", 1, &rcv, &st, &ex, &steps);
+        ck(ok1 && st == 0ULL && ex == 0ULL, "contract-mmap-access-rw");
+        int ok2 = compare_slice_run("mmap-access-ro-fault", buf, (long)len, 4ULL, 2ULL, av2, 2, 0, 100000ULL, 1, "", 0, &rcv, &st, &ex, &steps);
+        ck(ok2 && st == 2ULL, "contract-mmap-access-ro-fault");
+        mm_free(buf); buf = 0;
+    } else { ck(0, "contract-mmap-access-rw"); ck(0, "contract-mmap-access-ro-fault"); }
+}
+
+static long build_synth_slice(unsigned char *b, long cap,
+                              const unsigned char *code, long code_len,
+                              const unsigned char *data, long data_len,
+                              unsigned long long bss_size) {
+    const char *tags[6] = {"CODE", "DATA", "BSSZ", "SYMS", "RELO", "HOST"};
+    unsigned long long c_al = ((unsigned long long)code_len + 7ULL) & ~7ULL;
+    unsigned long long d_al = ((unsigned long long)data_len + 7ULL) & ~7ULL;
+    unsigned long long offs[6], lens[6], cnts[6], total;
+    int i, j;
+    offs[0] = 208ULL;         lens[0] = (unsigned long long)code_len; cnts[0] = 1ULL;
+    offs[1] = 208ULL + c_al;  lens[1] = (unsigned long long)data_len; cnts[1] = 0ULL;
+    offs[2] = offs[1] + d_al; lens[2] = 8ULL;                         cnts[2] = 1ULL;
+    offs[3] = offs[2] + 8ULL; lens[3] = 0ULL;                         cnts[3] = 0ULL;
+    offs[4] = offs[3];        lens[4] = 0ULL;                         cnts[4] = 0ULL;
+    offs[5] = offs[4];        lens[5] = 0ULL;                         cnts[5] = 0ULL;
+    total = offs[5];
+    if ((long)total > cap) return -1;
+    mm_fill(b, (long)total, 0, (long)total);
+    mm_copy(b, 8, "UTAPEBIN", 8);
+    ts_wr_u(b + 8, 2, 1); ts_wr_u(b + 10, 2, 3); ts_wr_u(b + 12, 2, 1);
+    ts_wr_u(b + 14, 2, 0); ts_wr_u(b + 16, 4, 0); ts_wr_u(b + 20, 4, 6);
+    ts_wr_u(b + 24, 4, 64); ts_wr_u(b + 60, 4, 1);
+    for (i = 0; i < 6; i++) {
+        int d = 64 + 24 * i;
+        for (j = 0; j < 4; j++) b[d + j] = (unsigned char)tags[i][j];
+        ts_wr_u(b + d + 4, 8, offs[i]);
+        ts_wr_u(b + d + 12, 8, lens[i]);
+        ts_wr_u(b + d + 20, 4, cnts[i]);
+    }
+    if (code_len > 0) mm_copy(b + offs[0], code_len, code, code_len);
+    if (data_len > 0) mm_copy(b + offs[1], data_len, data, data_len);
+    ts_wr_u(b + offs[2], 8, bss_size);
+    ts_seal_ident(b, (long)total);
+    return (long)total;
+}
+
+static void test_synthetic_parity(void) {
+    unsigned char buf[1024];
+    long long rcv = 0;
+    unsigned long long st = 0, ex = 0, steps = 0;
+    long n;
+
+    {
+        char tp[600], sl[600];
+        const char *src =
+            ".bss scratch 64\n"
+            "_start:\n"
+            "  .frame 32\n"
+            "  imm r1, -7\n"
+            "  imm r2, 3\n"
+            "  add64 r3, r1, r2\n"
+            "  sub64 r4, r3, r2\n"
+            "  mul64 r5, r4, r2\n"
+            "  xor64 r6, r5, r1\n"
+            "  and64 r8, r6, r2\n"
+            "  or64 r9, r8, r5\n"
+            "  imm r10, 67\n"
+            "  shl64 r11, r9, r10\n"
+            "  shr64 r12, r11, r2\n"
+            "  lshr64 r13, r12, r2\n"
+            "  slt64 r14, r1, r2\n"
+            "  sle64 r15, r1, r1\n"
+            "  ult64 r1, r2, r1\n"
+            "  ule64 r2, r2, r2\n"
+            "  add64 r0, r13, r14\n"
+            "  add64 r0, r0, r15\n"
+            "  add64 r0, r0, r1\n"
+            "  add64 r0, r0, r2\n"
+            "  .lea r1, scratch\n"
+            "  .zero [r1+0], 16\n"
+            "  imm r2, -1\n"
+            "  .st [r1+0], r2, 1\n"
+            "  .ld r3, [r1+0], 1\n"
+            "  .st [r1+2], r2, 2\n"
+            "  .ld r4, [r1+2], 2\n"
+            "  .st [r1+4], r2, 4\n"
+            "  .ld r5, [r1+4], 4\n"
+            "  add64 r0, r0, r3\n"
+            "  add64 r0, r0, r4\n"
+            "  add64 r0, r0, r5\n"
+            "  call helper\n"
+            "  .frame -32\n"
+            "  nop\n"
+            "  .exit r0\n"
+            "helper:\n"
+            "  imm r1, 100\n"
+            "  add64 r0, r0, r1\n"
+            "  ret\n"
+            ".end\n";
+        unsigned char *sb = 0;
+        int64_t slen = 0;
+        cx_fmt(tp, sizeof tp, "%s/alu.tape", g_tmp_dir);
+        cx_fmt(sl, sizeof sl, "%s/alu.tapeslice", g_tmp_dir);
+        (void)sy_write_file(tp, (const unsigned char *)src, tx_len(src, 4096), 0600);
+        if (pack_tape_file(tp, sl) == 0 && sy_read_file(sl, &sb, &slen, 1 << 20) == 0 && sb) {
+            ck(compare_slice_run("synth-alu-mem-call", sb, (long)slen, 4ULL, 0ULL, 0, 0, 0, 100000ULL, 0, "", 0, &rcv, &st, &ex, &steps) &&
+               st == 0ULL && rcv == (long long)ex, "synth-alu-mem-call");
+            ck(compare_slice_run("synth-cached-ibm", sb, (long)slen, 260ULL, 0ULL, 0, 0, 0, 100000ULL, 0, "", 0, &rcv, &st, &ex, &steps) &&
+               st == 0ULL && rcv == (long long)ex, "synth-cached-ibm");
+            ck(compare_slice_run("synth-budget-exhaust", sb, (long)slen, 4ULL, 0ULL, 0, 0, 0, 5ULL, 0, "", 0, &rcv, &st, &ex, &steps) &&
+               st == 3ULL && steps == 5ULL, "synth-budget-exhaust");
+            mm_free(sb);
+        } else {
+            ck(0, "synth-alu-mem-call");
+            ck(0, "synth-cached-ibm");
+            ck(0, "synth-budget-exhaust");
+        }
+    }
+
+    /* Wide 64-bit positive & negative exit codes (exceeding 32-bit signed/unsigned range) */
+    {
+        unsigned char c_ret[] = {37};
+        unsigned long long ca_pos[6] = {0x123456789abcdef0ULL, 0, 0, 0, 0, 0};
+        unsigned long long ca_neg[6] = {0xfffffffedcba9877ULL, 0, 0, 0, 0, 0}; /* -0x123456789LL */
+        n = build_synth_slice(buf, sizeof buf, c_ret, sizeof c_ret, 0, 0, 64);
+        ck(n > 0 &&
+           compare_slice_run("wide64-pos-m5", buf, n, 5ULL, 0ULL, 0, 0, ca_pos, 1000ULL, 0, "", 0, &rcv, &st, &ex, &steps) &&
+           st == 0ULL && ex == 0x123456789abcdef0ULL && rcv == (long long)0x123456789abcdef0ULL &&
+           compare_slice_run("wide64-neg-m5", buf, n, 5ULL, 0ULL, 0, 0, ca_neg, 1000ULL, 0, "", 0, &rcv, &st, &ex, &steps) &&
+           st == 0ULL && ex == 0xfffffffedcba9877ULL && rcv == (long long)0xfffffffedcba9877ULL,
+           "wide64-exit-pos-and-neg-parity");
+    }
+
+    /* Fault parity */
+    {
+        unsigned char c_div0[] = {0, 0xf1, 0, 10, 0, 0xf2, 0, 0, 11, 0x10, 0xf2};
+        n = build_synth_slice(buf, sizeof buf, c_div0, sizeof c_div0, 0, 0, 64);
+        ck(n > 0 && compare_slice_run("fault-div0", buf, n, 4ULL, 0ULL, 0, 0, 0, 1000ULL, 0, "", 0, &rcv, &st, &ex, &steps) &&
+           st == 2ULL && steps == 3ULL, "fault-div0-opcode");
+
+        unsigned char c_ret[] = {37};
+        n = build_synth_slice(buf, sizeof buf, c_ret, sizeof c_ret, 0, 0, 64);
+        ck(n > 0 && compare_slice_run("fault-m4-ret", buf, n, 4ULL, 0ULL, 0, 0, 0, 1000ULL, 0, "", 0, &rcv, &st, &ex, &steps) &&
+           st == 2ULL && steps == 1ULL, "fault-mode4-ret-stack");
+
+        unsigned char c_host7[] = {43, 0x10, 0xf2, 1, 7};
+        n = build_synth_slice(buf, sizeof buf, c_host7, sizeof c_host7, 0, 0, 64);
+        ck(n > 0 && compare_slice_run("fault-host7", buf, n, 4ULL, 0ULL, 0, 0, 0, 1000ULL, 1, "", 0, &rcv, &st, &ex, &steps) &&
+           st == 2ULL && steps == 1ULL, "fault-host-slot7");
+
+        unsigned char c_op48[] = {48, 0x10, 0xf2};
+        n = build_synth_slice(buf, sizeof buf, c_op48, sizeof c_op48, 0, 0, 64);
+        ck(n > 0 && compare_slice_run("fault-op48", buf, n, 4ULL, 0ULL, 0, 0, 0, 1000ULL, 0, "", 0, &rcv, &st, &ex, &steps) &&
+           st == 2ULL && steps == 1ULL, "fault-op48-unimpl");
+
+        ck(n > 0 && compare_slice_run("fault-bad-mode", buf, n, 9ULL, 0ULL, 0, 0, 0, 1000ULL, 0, "", 0, &rcv, &st, &ex, &steps) &&
+           st == 2ULL && steps == 0ULL, "fault-container-bad-mode");
+
+        {
+            unsigned long long bad_args[12];
+            int k;
+            for (k = 0; k < 12; k++) bad_args[k] = 0ULL;
+            ck(call_asm_run(0) == tape_run_cx(0) &&
+               call_asm_run(bad_args) == tape_run_cx(bad_args),
+               "fault-null-args-result");
+        }
+    }
+}
+
+/* Platform-independent mock dispatcher verifying tape_run_cx's own 32-entry mmap-table
+ * full-table rollback (-ENOMEM + disp(4) unmap), unmap revocation, and slot reuse. */
+static unsigned char g_mock_pool[40][64];
+static int g_mock_inuse[40];
+static int g_mock_mmap_calls = 0;
+static int g_mock_munmap_calls = 0;
+static int g_mock_active = 0;
+static int g_mock_fail_unmap = 0;
+
+static long long mock_mmap_disp(unsigned long long slot,
+                                unsigned long long a0, unsigned long long a1,
+                                unsigned long long a2, unsigned long long a3,
+                                unsigned long long a4, unsigned long long a5) {
+    int i;
+    (void)a2; (void)a3; (void)a4; (void)a5;
+    if (slot == 3ULL) {
+        g_mock_mmap_calls++;
+        if (a1 == 0ULL || a1 > 64ULL) return -22LL;
+        for (i = 0; i < 40; i++) {
+            if (!g_mock_inuse[i]) {
+                g_mock_inuse[i] = 1;
+                g_mock_active++;
+                return (long long)(unsigned long long)g_mock_pool[i];
+            }
+        }
+        return -12LL;
+    }
+    if (slot == 4ULL) {
+        g_mock_munmap_calls++;
+        if (g_mock_fail_unmap) return -22LL;
+        for (i = 0; i < 40; i++) {
+            if (g_mock_inuse[i] && (unsigned long long)g_mock_pool[i] == a0 && a1 == 64ULL) {
+                g_mock_inuse[i] = 0;
+                g_mock_active--;
+                return 0LL;
+            }
+        }
+        return -22LL;
+    }
+    return -38LL;
+}
+
+static void test_portable_mmap_contract(void) {
+    char tp[600], sl[600];
+    /* Guest: map 32 x 64B spans (store addr[0] in r8), attempt 33rd -> must return -12 (-ENOMEM),
+     * unmap addr[0], re-map into freed slot -> must succeed & allow store/load, exit 0. */
+    const char *src =
+        "_start:\n"
+        "  imm r9, 0\n"
+        "  imm r10, 32\n"
+        "  imm r11, 1\n"
+        ".Lfill:\n"
+        "  eq r12, r9, r10\n"
+        "  jumpz r12, .Ldo_map\n"
+        "  jump .Lfull\n"
+        ".Ldo_map:\n"
+        "  imm r0, 0\n"
+        "  imm r1, 64\n"
+        "  imm r2, 3\n"
+        "  imm r3, 34\n"
+        "  imm r4, -1\n"
+        "  imm r5, 0\n"
+        "  .sys6 mmap, r0, r1, r2, r3, r4, r5\n"
+        "  imm r12, 0\n"
+        "  slt64 r12, r0, r12\n"
+        "  jumpz r12, .Lmap_ok\n"
+        "  imm r0, 11\n"
+        "  .exit r0\n"
+        ".Lmap_ok:\n"
+        "  jumpz r9, .Lsave0\n"
+        "  jump .Lnext\n"
+        ".Lsave0:\n"
+        "  mov r8, r0\n"
+        ".Lnext:\n"
+        "  add64 r9, r9, r11\n"
+        "  jump .Lfill\n"
+        ".Lfull:\n"
+        "  imm r0, 0\n"
+        "  imm r1, 64\n"
+        "  imm r2, 3\n"
+        "  imm r3, 34\n"
+        "  imm r4, -1\n"
+        "  imm r5, 0\n"
+        "  .sys6 mmap, r0, r1, r2, r3, r4, r5\n"
+        "  imm r12, -12\n"
+        "  eq r12, r0, r12\n"
+        "  jumpz r12, .Lbad_full\n"
+        "  mov r0, r8\n"
+        "  imm r1, 64\n"
+        "  imm r2, 0\n"
+        "  .sys munmap, r0, r1, r2\n"
+        "  jumpz r0, .Lre_map\n"
+        "  imm r0, 13\n"
+        "  .exit r0\n"
+        ".Lre_map:\n"
+        "  imm r0, 0\n"
+        "  imm r1, 64\n"
+        "  imm r2, 3\n"
+        "  imm r3, 34\n"
+        "  imm r4, -1\n"
+        "  imm r5, 0\n"
+        "  .sys6 mmap, r0, r1, r2, r3, r4, r5\n"
+        "  imm r12, 0\n"
+        "  slt64 r12, r0, r12\n"
+        "  jumpz r12, .Lrw_check\n"
+        "  imm r0, 14\n"
+        "  .exit r0\n"
+        ".Lrw_check:\n"
+        "  imm r1, 99\n"
+        "  store64 [r0+0], r1\n"
+        "  load64 r2, [r0+0]\n"
+        "  eq r2, r1, r2\n"
+        "  jumpz r2, .Lbad_rw\n"
+        "  imm r0, 0\n"
+        "  .exit r0\n"
+        ".Lbad_full:\n"
+        "  imm r0, 12\n"
+        "  .exit r0\n"
+        ".Lbad_rw:\n"
+        "  imm r0, 15\n"
+        "  .exit r0\n"
+        ".end\n";
+    unsigned char *sb = 0;
+    int64_t slen = 0;
+    int i, ok = 0, ok_fail = 0;
+    for (i = 0; i < 40; i++) g_mock_inuse[i] = 0;
+    g_mock_mmap_calls = 0;
+    g_mock_munmap_calls = 0;
+    g_mock_active = 0;
+    g_mock_fail_unmap = 0;
+
+    cx_fmt(tp, sizeof tp, "%s/mock_mmap.tape", g_tmp_dir);
+    cx_fmt(sl, sizeof sl, "%s/mock_mmap.tapeslice", g_tmp_dir);
+    (void)sy_write_file(tp, (const unsigned char *)src, tx_len(src, 4096), 0600);
+    if (pack_tape_file(tp, sl) == 0 && sy_read_file(sl, &sb, &slen, 1 << 20) == 0 && sb) {
+        unsigned char mem[66000];
+        unsigned char ibm[256];
+        unsigned long long args[12], res[5];
+        long long rc;
+        mm_fill(mem, (long)sizeof mem, 0, (long)sizeof mem);
+        mm_fill(ibm, (long)sizeof ibm, 0, (long)sizeof ibm);
+        for (i = 0; i < 5; i++) res[i] = 0xdeadULL;
+        args[0] = 4ULL; args[1] = (unsigned long long)sb; args[2] = (unsigned long long)sizeof mem;
+        args[3] = 100000ULL; args[4] = 0ULL; args[5] = 0ULL;
+        args[6] = (unsigned long long)res; args[7] = (unsigned long long)slen;
+        args[8] = (unsigned long long)mock_mmap_disp;
+        args[9] = (unsigned long long)mem; args[10] = (unsigned long long)ibm; args[11] = (unsigned long long)sizeof ibm;
+        rc = tape_run_cx(args);
+        /* Expected: 34 mmap calls (32 fill + 1 overflow rolled back + 1 reuse),
+         * 2 munmap calls (1 rollback + 1 explicit unmap), 32 active mappings, rc=0, status=0. */
+        ok = (rc == 0LL && res[0] == 0ULL && res[1] == 0ULL &&
+              g_mock_mmap_calls == 34 && g_mock_munmap_calls == 2 && g_mock_active == 32);
+
+        /* Negative control: rollback munmap fails -> VM must fail closed with HOST fault (reason=6). */
+        for (i = 0; i < 40; i++) g_mock_inuse[i] = 0;
+        g_mock_mmap_calls = 0;
+        g_mock_munmap_calls = 0;
+        g_mock_active = 0;
+        g_mock_fail_unmap = 1;
+        mm_fill(mem, (long)sizeof mem, 0, (long)sizeof mem);
+        mm_fill(ibm, (long)sizeof ibm, 0, (long)sizeof ibm);
+        for (i = 0; i < 5; i++) res[i] = 0xdeadULL;
+        rc = tape_run_cx(args);
+        ok_fail = (rc == 2LL && res[0] == 2ULL && res[4] == 6ULL &&
+                   g_mock_mmap_calls == 33 && g_mock_munmap_calls == 1);
+        g_mock_fail_unmap = 0;
+        mm_free(sb);
+    }
+    ck(ok, "portable-mmap-full-rollback-and-reuse");
+    ck(ok_fail, "portable-mmap-rollback-failure-host-fault");
+}
+
+/* Mandatory m53 corpus built from real product cx/runtime/stream_attributes.cx (cxsa_valid). */
+static void test_m53_mandatory_corpus(void) {
+    char wsrc_p[600], tape_s[600], sl_p[600];
+    const char *wsrc =
+        "#pragma unisa use runtime.stream_attributes\n"
+        "int main(int argc, char **argv) {\n"
+        "    const char *abi = \"M53S1BIN2\";\n"
+        "    const unsigned long long *ba;\n"
+        "    if (abi[0] != 'M' || argc < 2) return 2;\n"
+        "    ba = (const unsigned long long *)argv[1];\n"
+        "    return cxsa_valid((const unsigned char *)ba[0], (long)ba[1]);\n"
+        "}\n";
+    unsigned char *slice = 0;
+    int64_t slen = 0;
+    int built = 0;
+
+    /* Symlink cx and cxroot.tsv into g_tmp_dir so wrap resolves real runtime.stream_attributes */
+    {
+        char cwd[512], lc[600], lr[600], tc[600], tr[600];
+        if (getcwd(cwd, sizeof cwd)) {
+            cx_fmt(lc, sizeof lc, "%s/cx", g_tmp_dir); cx_fmt(tc, sizeof tc, "%s/cx", cwd);
+            cx_fmt(lr, sizeof lr, "%s/cxroot.tsv", g_tmp_dir); cx_fmt(tr, sizeof tr, "%s/cxroot.tsv", cwd);
+            (void)sy_symlink(tc, lc); (void)sy_symlink(tr, lr);
+        }
+    }
+
+    cx_fmt(wsrc_p, sizeof wsrc_p, "%s/m53_wrap.cx", g_tmp_dir);
+    cx_fmt(tape_s, sizeof tape_s, "%s/m53_wrap.tape", g_tmp_dir);
+    cx_fmt(sl_p, sizeof sl_p, "%s/m53_bin2.tapeslice", g_tmp_dir);
+    (void)sy_write_file(wsrc_p, (const unsigned char *)wsrc, tx_len(wsrc, 1024), 0600);
+    {
+        char *av_c[] = {"sh", "./unisacc.com", "--target", "lnx/x86_64", "-S", wsrc_p, "-o", tape_s, 0}; /* lint:allow R1-product compiles mandatory m53 corpus */
+        char *co = 0; size_t cn = 0;
+        int rc1 = cx_runv_timeout(av_c, 30, &co, &cn);
+        if (co) mm_free(co);
+        if (rc1 == 0 && pack_tape_file(tape_s, sl_p) == 0 &&
+            sy_read_file(sl_p, &slice, &slen, 4 << 20) == 0 && slice) {
+            built = 1;
+        }
+    }
+    ck(built, "m53-mandatory-corpus-build");
+    if (!built) {
+        ck(0, "m53-pos-and-neg-oracle-and-arena-parity");
+        return;
+    }
+
+    {
+        unsigned long long code_len = ts_rd_u(slice + 64 + 12, 8);
+        unsigned long long data_off = ts_rd_u(slice + 64 + 24 + 4, 8);
+        unsigned long long data_len = ts_rd_u(slice + 64 + 24 + 12, 8);
+        unsigned long long bssz_off = ts_rd_u(slice + 64 + 48 + 4, 8);
+        unsigned long long bss_size = ts_rd_u(slice + bssz_off, 8);
+        unsigned long long data_aligned = (data_len + 7ULL) & ~7ULL;
+        unsigned long long in_off = data_aligned + bss_size;
+        unsigned char v_c0[4] = {0, 0, 0, 0};
+        unsigned char v_c1_ok[13] = {1, 0, 0, 0, 1,2,3,4,5,6,7,8,9};
+        unsigned char v_c1_short[12] = {1, 0, 0, 0, 1,2,3,4,5,6,7,8};
+        unsigned char v_c1_long[14] = {1, 0, 0, 0, 1,2,3,4,5,6,7,8,9,0};
+        unsigned char v_over[13] = {0x41, 0x42, 0x0f, 0x00, 0,0,0,0,0,0,0,0,0};
+        unsigned char *v_1000 = (unsigned char *)mm_alloc(9004);
+        const unsigned char *ptrs[8];
+        long lens[8] = {4, 13, 9004, 4, 0, 12, 14, 13};
+        unsigned long long expect[8] = {1ULL, 1ULL, 1ULL, 0ULL, 0ULL, 0ULL, 0ULL, 0ULL};
+        int s, ok_all = 1, pos_seen = 0, neg_seen = 0;
+
+        for (s = 0; s < 9004; s++) v_1000[s] = (unsigned char)(s & 255);
+        v_1000[0] = 0xe8; v_1000[1] = 0x03; v_1000[2] = 0; v_1000[3] = 0;
+        ptrs[0] = v_c0; ptrs[1] = v_c1_ok; ptrs[2] = v_1000;
+        ptrs[3] = 0; ptrs[4] = v_c0; ptrs[5] = v_c1_short; ptrs[6] = v_c1_long; ptrs[7] = v_over;
+
+        for (s = 0; s < 8; s++) {
+            unsigned long long copy_n = (ptrs[s] && lens[s] > 0) ? (unsigned long long)lens[s] : 0ULL;
+            unsigned long long in_end = (in_off + copy_n + 7ULL) & ~7ULL;
+            unsigned long long argv_at = in_end + 65536ULL;
+            unsigned long long argbuf_off = argv_at + 64ULL;
+            unsigned long long memlimit = argbuf_off + 128ULL;
+            unsigned long long ibm_cap = (code_len + 7ULL) >> 3;
+            unsigned char *ma, *snap, *ia, *ic;
+            unsigned long long aa[12], ac[12], ra[5], rc[5], *ga, *ba;
+            long long rca, rcc;
+            int i;
+            if (ibm_cap == 0ULL) ibm_cap = 1ULL;
+            ma = (unsigned char *)mm_alloc((size_t)memlimit);
+            snap = (unsigned char *)mm_alloc((size_t)memlimit);
+            ia = (unsigned char *)mm_alloc((size_t)ibm_cap);
+            ic = (unsigned char *)mm_alloc((size_t)ibm_cap);
+            mm_fill(ia, (long)ibm_cap, 0, (long)ibm_cap);
+            mm_fill(ic, (long)ibm_cap, 0, (long)ibm_cap);
+
+            /* Arm A on ma */
+            mm_fill(ma, (long)memlimit, 0, (long)memlimit);
+            if (data_len > 0ULL) mm_copy(ma, (long)memlimit, slice + data_off, (long)data_len);
+            if (copy_n > 0ULL) mm_copy(ma + in_off, (long)(memlimit - in_off), ptrs[s], (long)copy_n);
+            ga = (unsigned long long *)(ma + argv_at);
+            ba = (unsigned long long *)(ma + argbuf_off);
+            ba[0] = ptrs[s] ? (unsigned long long)(ma + in_off) : 0ULL;
+            ba[1] = (unsigned long long)lens[s];
+            ba[2] = 0ULL;
+            ga[0] = (unsigned long long)(ma + argbuf_off + 16ULL);
+            ga[1] = (unsigned long long)ba;
+            ga[2] = 0ULL;
+
+            for (i = 0; i < 5; i++) { ra[i] = 0xdeadULL; rc[i] = 0xdeadULL; }
+            aa[0] = 4ULL; aa[1] = (unsigned long long)slice; aa[2] = memlimit;
+            aa[3] = 2000000ULL; aa[4] = 2ULL; aa[5] = (unsigned long long)ga;
+            aa[6] = (unsigned long long)ra; aa[7] = (unsigned long long)slen;
+            aa[8] = (unsigned long long)g_asm_disp; aa[9] = (unsigned long long)ma;
+            aa[10] = (unsigned long long)ia; aa[11] = ibm_cap;
+
+            call_asm_bind(ma, memlimit);
+            rca = call_asm_run(aa);
+            mm_copy(snap, (long)memlimit, ma, (long)memlimit);
+
+            /* Arm B on exact same ma */
+            mm_fill(ma, (long)memlimit, 0, (long)memlimit);
+            if (data_len > 0ULL) mm_copy(ma, (long)memlimit, slice + data_off, (long)data_len);
+            if (copy_n > 0ULL) mm_copy(ma + in_off, (long)(memlimit - in_off), ptrs[s], (long)copy_n);
+            ba[0] = ptrs[s] ? (unsigned long long)(ma + in_off) : 0ULL;
+            ba[1] = (unsigned long long)lens[s];
+            ba[2] = 0ULL;
+            ga[0] = (unsigned long long)(ma + argbuf_off + 16ULL);
+            ga[1] = (unsigned long long)ba;
+            ga[2] = 0ULL;
+
+            for (i = 0; i < 12; i++) ac[i] = aa[i];
+            ac[6] = (unsigned long long)rc;
+            ac[8] = (unsigned long long)cx_to_asm_disp;
+            ac[10] = (unsigned long long)ic;
+
+            call_asm_bind(ma, memlimit);
+            rcc = tape_run_cx(ac);
+
+            if (rca != rcc || ra[0] != 0ULL || rc[0] != 0ULL ||
+                ra[1] != expect[s] || rc[1] != expect[s] ||
+                ra[2] != rc[2] || ra[3] != rc[3] || ra[4] != rc[4] ||
+                !bytes_eq(ia, ic, ibm_cap) || !bytes_eq(snap, ma, memlimit)) {
+                ok_all = 0;
+                sy_eprintf("M53_DIFF\ts=%d\texp=%llu\trc=(%lld,%lld)\tst=(%llu,%llu)\texit=(%llu,%llu)\tsteps=(%llu,%llu)\n",
+                           s, expect[s], rca, rcc, ra[0], rc[0], ra[1], rc[1], ra[2], rc[2]);
+            } else {
+                if (expect[s] == 1ULL) pos_seen++; else neg_seen++;
+            }
+            mm_free(ma); mm_free(snap); mm_free(ia); mm_free(ic);
+        }
+        mm_free(v_1000);
+        ck(ok_all && pos_seen == 3 && neg_seen == 5, "m53-pos-and-neg-oracle-and-arena-parity");
+    }
+    mm_free(slice);
+}
+
+int main(void) {
+    if (setup_asm_so() != 0) {
+        sy_printf("CHECK_TAPE_EXEC_PARITY\tpassed=0\tfailed=1\n");
+        return 1;
+    }
+    test_decode_parity();
+    test_bitmap_parity();
+    test_contract_tapes();
+    test_synthetic_parity();
+    test_portable_mmap_contract();
+    test_m53_mandatory_corpus();
+    sy_printf("CHECK_TAPE_EXEC_PARITY\tpassed=%d\tfailed=%d\n", g_pass, g_fail);
+    return g_fail ? 1 : 0;
+}

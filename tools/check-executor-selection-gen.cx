@@ -1,0 +1,187 @@
+/* tools/check-executor-selection-gen.cx -- adversarial check for the executor selection table.
+ *
+ *   sh ./unisacc.com tools/check-executor-selection-gen.cx -- [--facts FILE] [--out FILE]
+ *
+ * Fails if the facts table is malformed, a target is duplicated, enums are outside the allowed set,
+ * or the generated C rows are missing/extra/out of order. Also requires the generated lookup to
+ * return 0 for an unknown target (callers turn that into a named rc 2 refusal).
+ * This check is independent of tools/executor-selection-gen.cx: it rebuilds every expected literal
+ * row from the facts and matches it against the generated file. */
+#pragma unisa use sys.fs
+#pragma unisa use sys.io
+#pragma unisa use sys.proc
+#pragma unisa use sys.sig
+#pragma unisa use sys.env
+#pragma unisa use text.text
+#pragma unisa use mem.heap
+#pragma unisa use cxlib.genkit
+#pragma unisa use cxlib.netpack
+#pragma unisa use driver.executor_selection_table
+
+#define CS_MAX 16
+#define CS_COLS 11
+#define CS_CAP (1 << 16)
+typedef struct { char c[CS_COLS][128]; } CsRow;
+static CsRow rows[CS_MAX];
+static int nrow;
+static char facts[4400], out[4400];
+
+static void die(const char *s) { sy_eprintf("check-executor-selection-gen: %s\n", s); sy_exit(2); }
+
+
+
+static int load(void) {
+    size_t n = 0; char *b = cx_read(facts, &n); long at = 0; int seen = 0;
+    const char *head = "target\texecutor\ttape_dir\tmanifest_key\ttapemode_key\tslice_prefix\thoststub_bind_sym\thoststub_sym\trun_sym\tabi_tag\tstatus\n";
+    if (!b) return -1;
+    while (at < (long)n) {
+        long e = at; while (e < (long)n && b[e] != '\n') e++; b[e] = 0;
+        if (e > at && b[at] != '#') {
+            const char *f[CS_COLS]; int fl[CS_COLS]; int i, j;
+            if (!seen) {
+                if ((e - at) != (long)tx_len(head, 4096) - 1 || !df_same(b + at, head, (size_t)(e - at))) { mm_free(b); return -1; }
+                seen = 1;
+            } else {
+                if (nrow >= CS_MAX || df_split(b + at, e - at, f, fl, CS_COLS)) { mm_free(b); return -1; }
+                for (i = 0; i < CS_COLS; i++) if (df_cpy(rows[nrow].c[i], 128, f[i], fl[i])) { mm_free(b); return -1; }
+                if (!tx_eqz(rows[nrow].c[1], "asm") && !tx_eqz(rows[nrow].c[1], "portable")) { mm_free(b); return -1; }
+                if (!tx_eqz(rows[nrow].c[10], "UNMEASURED") && !tx_eqz(rows[nrow].c[10], "PREPARED")) { mm_free(b); return -1; }
+                if (tx_eqz(rows[nrow].c[1], "asm")) {
+                    if (tx_eqz(rows[nrow].c[6], "-") || tx_eqz(rows[nrow].c[7], "-") || tx_eqz(rows[nrow].c[8], "tape_run_cx")) { mm_free(b); return -1; }
+                } else if (!tx_eqz(rows[nrow].c[6], "-") || !tx_eqz(rows[nrow].c[7], "-") || !tx_eqz(rows[nrow].c[8], "tape_run_cx")) { mm_free(b); return -1; }
+                for (j = 0; j < nrow; j++) if (tx_eqz(rows[j].c[0], rows[nrow].c[0])) { mm_free(b); return -1; }
+                nrow++;
+            }
+        }
+        at = e + 1;
+    }
+    mm_free(b);
+    if (nrow <= 0) return -1;
+    { int asm_n = 0, k; for (k = 0; k < nrow; k++) if (tx_eqz(rows[k].c[1], "asm")) asm_n++; if (asm_n != 1) return -1; }
+    return 0;
+}
+/* Expected generated row: exactly the literal line the generator emits. */
+static void expected(int r, char *d, int cap) {
+    int j, k = 0;
+    for (j = 0; j < CS_COLS; j++) {
+        const char *p = j ? ", " : "    {"; for (; *p && k + 1 < cap; p++) d[k++] = *p;
+        d[k++] = '"'; for (p = rows[r].c[j]; *p && k + 1 < cap; p++) d[k++] = *p; d[k++] = '"';
+    }
+    if (k + 3 < cap) { d[k++] = '}'; d[k++] = ','; d[k++] = '\n'; d[k] = 0; }
+}
+static int has_line(const char *b, size_t n, const char *line) {
+    size_t ll = tx_len(line, 4096), at = 0;
+    while (at + ll <= n) {
+        size_t e = at; while (e < n && b[e] != '\n') e++;
+        if (e + 1 - at == ll && df_same(b + at, line, ll)) return 1;
+        at = e + 1;
+    }
+    return 0;
+}
+static long next_literal(const char *b, size_t n, size_t from) {
+    size_t at = from;
+    while (at < n) {
+        size_t e = at; while (e < n && b[e] != '\n') e++;
+        if (e - at > 5 && df_same(b + at, "    {", 5)) return (long)at;
+        at = e + 1;
+    }
+    return -1;
+}
+static const char *const cs_targets[6] = {"lnx-x86_64", "lnx-arm64", "osx-x86_64", "osx-arm64", "win-x86_64", "win-arm64"};
+static const char *const cs_header = "target\texecutor\ttape_dir\tmanifest_key\ttapemode_key\tslice_prefix\thoststub_bind_sym\thoststub_sym\trun_sym\tabi_tag\tstatus\n";
+static int failed;
+static void ck(int ok, const char *name) { if (!ok) failed++; printf("%s\tcase=%s\n", ok ? "CASE_PASS" : "CASE_FAIL", name); }
+static void ap(char *b, long *n, const char *s) { while (s && *s && *n < 8191) b[(*n)++] = *s++; b[*n] = 0; }
+static int write_fixture(int kind, const char *path) {
+    char b[8192]; long n = 0; int i, j;
+    ap(b, &n, cs_header);
+    for (i = 0; i < nrow; i++) {
+        const char *f[CS_COLS];
+        for (j = 0; j < CS_COLS; j++) f[j] = rows[i].c[j];
+        if (kind == 1 && tx_eqz(f[0], "lnx-arm64")) continue;
+        if (kind == 2 && tx_eqz(f[0], "lnx-arm64")) f[0] = "lnx-riscv64";
+        if (kind == 3 && tx_eqz(f[0], "win-x86_64")) f[1] = "asm";
+        if (kind == 4 && tx_eqz(f[0], "lnx-arm64")) f[3] = "man\"ifest.tsv";
+        for (j = 0; j < CS_COLS; j++) {
+            if (j) ap(b, &n, "\t");
+            if (kind == 5 && tx_eqz(f[0], "lnx-arm64") && j == 3) { ap(b, &n, "man"); if (n < 8190) { b[n++] = 0; b[n] = 0; } ap(b, &n, "ifest.tsv"); }
+            else ap(b, &n, f[j]);
+        }
+        ap(b, &n, "\n");
+    }
+    return sy_write_file(path, b, (size_t)n, 0600);
+}
+static int gen_rc(const char *fp, const char *op, int check) {
+    np_result r = {0}; char why[128];
+    char *v[] = {"sh", "./unisacc.com", "tools/executor-selection-gen.cx", "--",
+                 check ? "--check" : "--write", "--facts", (char *)fp, "--out", (char *)op, 0};
+    int tr = np_run(v, 0, 0, 30, &r, why, sizeof why);
+    int rc = (tr || r.residue) ? -1 : r.rc;
+    np_free(&r);
+    return rc;
+}
+/* Execute the generated lookup, not just its text shape. */
+static int lookup_ok(void) {
+    int i;
+    for (i = 0; i < 6; i++) {
+        const ExecutorSel *e = executor_sel(cs_targets[i]);
+        if (!e || !tx_eqz(e->target, cs_targets[i])) return 0;
+        if (i == 0) { if (!tx_eqz(e->executor, "asm") || !tx_eqz(e->run_sym, "tape_run_x86_64")) return 0; }
+        else if (!tx_eqz(e->executor, "portable") || !tx_eqz(e->run_sym, "tape_run_cx") ||
+                 !tx_eqz(e->hoststub_bind_sym, "-") || !tx_eqz(e->hoststub_sym, "-")) return 0;
+    }
+    if (executor_sel("lnx-riscv64") != 0) return 0;
+    { const ExecutorSel *e = executor_sel_triple("win/arm64"); if (!e || !tx_eqz(e->target, "win-arm64")) return 0; }
+    return 1;
+}
+int main(int argc, char **argv) {
+    int i, rc; size_t n = 0; char *b; char line[2048]; int total = 0;
+    cx_fmt(facts, sizeof facts, "%s", "exec/facts/executor-selection.tsv");
+    cx_fmt(out, sizeof out, "%s", "cx/driver/executor_selection_table.cx");
+    for (i = 1; i < argc; i++) {
+        if (tx_eqz(argv[i], "--facts") && i + 1 < argc) cx_fmt(facts, sizeof facts, "%s", argv[++i]);
+        else if (tx_eqz(argv[i], "--out") && i + 1 < argc) cx_fmt(out, sizeof out, "%s", argv[++i]);
+        else die("usage: check-executor-selection-gen.cx [--facts FILE] [--out FILE]");
+    }
+    rc = load();
+    if (rc) { sy_printf("EXECUTOR_SELECTION_CHECK\tFAIL\tfacts\t%s\n", facts); return 1; }
+    b = cx_read(out, &n);
+    if (!b) { sy_printf("EXECUTOR_SELECTION_CHECK\tFAIL\tmissing\t%s\n", out); return 1; }
+    if (!has_line(b, n, "#pragma unisa module executor_selection_table\n") ||
+        !has_line(b, n, "#pragma unisa use text.text\n") ||
+        !has_line(b, n, "const ExecutorSel *executor_sel(const char *target) {\n") ||
+        !has_line(b, n, "const ExecutorSel *executor_sel_triple(const char *triple) {\n") ||
+        !has_line(b, n, "    return 0;\n")) { mm_free(b); sy_printf("EXECUTOR_SELECTION_CHECK\tFAIL\tshape\t%s\n", out); return 1; }
+    { size_t cursor = 0;
+      for (i = 0; i < nrow; i++) {
+          size_t ll; long pos;
+          expected(i, line, sizeof line);
+          ll = tx_len(line, 4096);
+          pos = next_literal(b, n, cursor);
+          if (pos < 0 || (size_t)pos + ll > n || !df_same(b + pos, line, ll)) { mm_free(b); sy_printf("EXECUTOR_SELECTION_CHECK\tFAIL\trow[%d] order/target=%s\n", i, rows[i].c[0]); return 1; }
+          cursor = (size_t)pos + ll; total++;
+      }
+      if (next_literal(b, n, cursor) >= 0) { mm_free(b); sy_printf("EXECUTOR_SELECTION_CHECK\tFAIL\textra-rows facts=%d\n", total); return 1; }
+    }
+    mm_free(b);
+    { char badf[512], badout[512], mut[512], mutb[1 << 14]; size_t mn = 0; char *mb;
+      cx_fmt(badf, sizeof badf, "%s/es-bad-%d.tsv", sy_tmpdir(), (int)sy_pid());
+      cx_fmt(badout, sizeof badout, "%s/es-bad-out-%d.cx", sy_tmpdir(), (int)sy_pid());
+      cx_fmt(mut, sizeof mut, "%s/es-mut-%d.cx", sy_tmpdir(), (int)sy_pid());
+      ck(lookup_ok(), "lookup-six-targets-and-unknown");
+      ck(write_fixture(1, badf) == 0 && gen_rc(badf, badout, 0) == 2, "red-missing-portable-row");
+      ck(write_fixture(2, badf) == 0 && gen_rc(badf, badout, 0) == 2, "red-unknown-target");
+      ck(write_fixture(3, badf) == 0 && gen_rc(badf, badout, 0) == 2, "red-asm-on-win");
+      ck(write_fixture(4, badf) == 0 && gen_rc(badf, badout, 0) == 2, "red-unsafe-quote-field");
+      ck(write_fixture(5, badf) == 0 && gen_rc(badf, badout, 0) == 2, "red-embedded-nul-field");
+      mb = cx_read(out, &mn);
+      if (mb && mn + 2 < sizeof mutb) { size_t j; for (j = 0; j < mn; j++) mutb[j] = mb[j]; mutb[mn] = 'x'; mutb[mn + 1] = '\n'; (void)sy_write_file(mut, mutb, mn + 2, 0600); }
+      else mn = 0;
+      if (mb) mm_free(mb);
+      ck(mn > 0 && gen_rc(facts, mut, 1) == 1, "red-hand-edited-generated-file");
+      sy_unlink(badf); sy_unlink(badout); sy_unlink(mut);
+    }
+    if (failed) { sy_printf("EXECUTOR_SELECTION_CHECK\tFAIL\tcases=%d\n", failed); return 1; }
+    sy_printf("EXECUTOR_SELECTION_CHECK\tPASS\ttargets=%d\n", nrow);
+    return 0;
+}

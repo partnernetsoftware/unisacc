@@ -1,0 +1,600 @@
+/* tests/win-m53-s1-parity.cx -- Cross-platform (win/x86_64, win/arm64, lnx/x86_64) m53 S1 dual-arm
+ * parity runner using shared cxlib.receipt v3 (rc_write3 / rc_verify with target + binding_sha).
+ *
+ * Both arms execute natively on the current runner arch (zero x86_64 asm dependency):
+ *   Arm A (portable): cx/runtime/tape_exec.cx (tape_run_cx) running a freshly compiled M53S1BIN2
+ *                     slice calling real product cx/runtime/stream_attributes.cx (cxsa_valid)
+ *                     packed via real product cx/driver/stream_s1.cx (m53_s1_pack_bin2)
+ *   Arm B (native):   cx/runtime/stream_attributes.cx (cxsa_valid)
+ *
+ * Host identity is derived from the running executable image header via sy_open + sy_read
+ * (NO whole-file size cap; supports PE32+ x86_64 0x8664 / arm64 0xAA64 and ELF64 LE).
+ * Candidate digest hashes a real candidate binary (--candidate-file, >= 4096 B, non-source).
+ * Inputs digest binds job.tsv + baseline (cx/runtime/stream_attributes.cx) + executed slice + vectors.
+ * --expect-target, --output, and --slice are mandatory.
+ */
+#pragma unisa use cxlib.receipt
+#pragma unisa use runtime.packagefooter
+#pragma unisa use runtime.tape_exec
+#pragma unisa use runtime.stream_attributes
+#pragma unisa use driver.stream_s1
+#pragma unisa use sys.fs
+#pragma unisa use sys.env
+#pragma unisa use sys.io
+#pragma unisa use sys.sha
+#pragma unisa use mem.heap
+#pragma unisa use mem.bytes
+#pragma unisa use text.text
+
+typedef char win_assert_ptr8[sizeof(void *) == 8 ? 1 : -1];
+typedef char win_assert_ll8[sizeof(long long) == 8 ? 1 : -1];
+typedef char win_assert_run_ret8[sizeof(tape_run_cx(0)) == 8 ? 1 : -1];
+
+static const char *JOB = "tests/fixtures/win-m53-s1/job.tsv";
+static const char *VECTORS = "tests/fixtures/win-m53-s1/vectors.tsv";
+static const char *BASELINE = "cx/runtime/stream_attributes.cx";
+static const char *DEF_PRODUCER = "win-m53-s1-parity";
+static const char *DEF_PURPOSE = "s1-parity";
+
+static unsigned long long rd_u(const unsigned char *p, int k) {
+    unsigned long long v = 0ULL;
+    int i = k - 1;
+    while (i >= 0) { v = (v << 8) | (unsigned long long)p[i]; i--; }
+    return v;
+}
+
+static void wr_u64le(unsigned char *dst, unsigned long long v) {
+    int i;
+    for (i = 0; i < 8; i++) dst[i] = (unsigned char)((v >> (i * 8)) & 0xffULL);
+}
+
+/* Read running image header via sy_open + sy_read (NO whole-file size cap).
+ * Supports PE32+ (win/x86_64 0x8664, win/arm64 0xAA64) and ELF64 LE (lnx/x86_64, lnx/arm64). */
+static int image_target(char *out, int cap) {
+    static char path[4096];
+    static unsigned char hdr[1024];
+    long got = -1;
+    int fd = sy_open("/proc/self/exe", 0, 0);
+    if (fd >= 0) {
+        got = sy_read(fd, hdr, (long)sizeof hdr);
+        sy_close(fd);
+    }
+    if (got < 64) {
+        int npath = sy_self_path(path, (int)sizeof path);
+        if (npath < 0) { sy_eprintf("FAIL\tself-path\t%d\n", npath); return 1; }
+        fd = sy_open(path, 0, 0);
+        if (fd < 0) { sy_eprintf("FAIL\timage-open\t%s\n", path); return 1; }
+        got = sy_read(fd, hdr, (long)sizeof hdr);
+        sy_close(fd);
+        if (got < 64) { sy_eprintf("FAIL\timage-read\t%ld\n", got); return 1; }
+    }
+    if (hdr[0] == 'M' && hdr[1] == 'Z') {
+        unsigned pe_off = (unsigned)rd_u(hdr + 60, 4);
+        if ((long)pe_off + 24 <= got &&
+            hdr[pe_off] == 'P' && hdr[pe_off + 1] == 'E' &&
+            hdr[pe_off + 2] == 0 && hdr[pe_off + 3] == 0) {
+            unsigned mach = (unsigned)rd_u(hdr + pe_off + 4, 2);
+            if (mach == 0x8664u) return cx_fmt(out, (size_t)cap, "win/x86_64");
+            if (mach == 0xAA64u) return cx_fmt(out, (size_t)cap, "win/arm64");
+            sy_eprintf("FAIL\tpe-machine\t0x%x\n", mach);
+            return 1;
+        }
+        sy_eprintf("FAIL\tpe-header\tpe_off=%u\tgot=%ld\n", pe_off, got);
+        return 1;
+    }
+    if (hdr[0] == 0x7f && hdr[1] == 'E' && hdr[2] == 'L' && hdr[3] == 'F' && hdr[4] == 2 && hdr[5] == 1) {
+        unsigned machine = (unsigned)hdr[18] | ((unsigned)hdr[19] << 8);
+        if (machine == 62u) return cx_fmt(out, (size_t)cap, "lnx/x86_64");
+        if (machine == 183u) return cx_fmt(out, (size_t)cap, "lnx/arm64");
+        sy_eprintf("FAIL\telf-machine\t%u\n", machine);
+        return 1;
+    }
+    sy_eprintf("FAIL\timage-magic\n");
+    return 1;
+}
+
+static const char *need_opt(int argc, char **argv, const char *key) {
+    for (int i = 1; i < argc; i++) {
+        if (!strcmp(argv[i], key) && i + 1 < argc) return argv[i + 1];
+    }
+    return 0;
+}
+
+static int has_flag(int argc, char **argv, const char *key) {
+    for (int i = 1; i < argc; i++) if (!strcmp(argv[i], key)) return 1;
+    return 0;
+}
+
+static int parse_pos_i64(const char *s, int64_t *out) {
+    long long v = 0;
+    int i;
+    if (!s || s[0] < '0' || s[0] > '9') return 1;
+    for (i = 0; s[i]; i++) {
+        if (s[i] < '0' || s[i] > '9') return 1;
+        v = v * 10LL + (long long)(s[i] - '0');
+    }
+    if (v <= 0LL) return 1;
+    *out = (int64_t)v;
+    return 0;
+}
+
+static int validate_candidate_binary(const char *path) {
+    unsigned char hdr[64];
+    sy_stat_t st;
+    long n = (long)strlen(path);
+    int fd;
+    long got;
+    if ((n >= 3 && !strcmp(path + n - 3, ".cx")) ||
+        (n >= 2 && !strcmp(path + n - 2, ".c")) ||
+        (n >= 2 && !strcmp(path + n - 2, ".h"))) {
+        sy_eprintf("FAIL\tcandidate-is-source\t%s\n", path);
+        return 2;
+    }
+    fd = sy_open_read(path);
+    if (fd < 0) { sy_eprintf("FAIL\tcandidate-open\t%s\n", path); return 2; }
+    if (sy_fstat(fd, &st) != 0 || st.kind != 'f' || st.size < 4096) {
+        sy_close(fd);
+        sy_eprintf("FAIL\tcandidate-not-binary\t%s\n", path);
+        return 2;
+    }
+    got = sy_read(fd, hdr, 64);
+    sy_close(fd);
+    if (got < 4) { sy_eprintf("FAIL\tcandidate-read\n"); return 2; }
+    if (!((hdr[0] == 'M' && hdr[1] == 'Z') ||
+          (hdr[0] == 'P' && hdr[1] == ' ' && hdr[2] == '4' && hdr[3] == ' ') ||
+          (hdr[0] == 0x7f && hdr[1] == 'E' && hdr[2] == 'L' && hdr[3] == 'F') ||
+          (hdr[0] == '#' && hdr[1] == '!'))) {
+        sy_eprintf("FAIL\tcandidate-bad-magic\t%s\n", path);
+        return 2;
+    }
+    return 0;
+}
+
+static unsigned crc32_ieee(const unsigned char *p, long n) {
+    unsigned c = 0xffffffffu;
+    for (long i = 0; i < n; i++) {
+        c ^= (unsigned)p[i];
+        for (int b = 0; b < 8; b++) c = (c & 1u) ? ((c >> 1) ^ 0xedb88320u) : (c >> 1);
+    }
+    return ~c;
+}
+
+static int parse_u64_sep(const unsigned char *p, long n, long *pos, unsigned long long *out, char sep) {
+    long i = *pos;
+    unsigned long long v = 0ULL;
+    if (i >= n || p[i] < '0' || p[i] > '9') return -1;
+    while (i < n && p[i] >= '0' && p[i] <= '9') { v = v * 10ULL + (unsigned long long)(p[i] - '0'); i++; }
+    if (i >= n || p[i] != (unsigned char)sep) return -1;
+    *pos = i + 1;
+    *out = v;
+    return 0;
+}
+
+/* Extract tape/lnx-x86_64/m53.tapeslice directly from delivered APE (or P4 container) and verify CRC32. */
+static int extract_m53_slice_from_ape(const char *ape_path, unsigned char **out_buf, int64_t *out_len) {
+    static const char *const KEY = "tape/lnx-x86_64/m53.tapeslice";
+    unsigned char *b = 0;
+    int64_t n = 0;
+    long pkg_off = 0, pkg_end = 0, pos = 0;
+    long kl_want = (long)strlen(KEY);
+    unsigned long long pm = 0, ps = 0, nr = 0;
+    int found = 0;
+    *out_buf = 0; *out_len = 0;
+    if (sy_read_file(ape_path, &b, &n, 256L << 20) != 0 || !b || n < 16) { mm_free(b); return 1; }
+    {
+        PackageFooter pf;
+        if (packagefooter_locate_bytes(b, (long)n, &pf) &&
+            pf.package_offset >= 0 && pf.package_length >= 10 &&
+            pf.package_offset + pf.package_length <= (long)n &&
+            memcmp(b + pf.package_offset, "P 4 ", 4) == 0) {
+            pkg_off = pf.package_offset;
+            pkg_end = pf.package_offset + pf.package_length;
+        } else if (n >= 16 && memcmp(b + n - 16, "UNIPKG1\n", 8) == 0) {
+            mm_free(b); return 1;
+        } else if (memcmp(b, "P 4 ", 4) == 0) {
+            pkg_off = 0; pkg_end = (long)n;
+        } else {
+            mm_free(b); return 1;
+        }
+    }
+    pos = pkg_off + 4;
+    if (parse_u64_sep(b, pkg_end, &pos, &pm, ' ') ||
+        parse_u64_sep(b, pkg_end, &pos, &ps, ' ') ||
+        parse_u64_sep(b, pkg_end, &pos, &nr, '\n')) { mm_free(b); return 1; }
+    for (unsigned long long di = 0; di < ps; di++) {
+        if (pos + 2 > pkg_end || b[pos] != 'D' || b[pos + 1] != ' ') { mm_free(b); return 1; }
+        while (pos < pkg_end && b[pos] != '\n') pos++;
+        if (pos >= pkg_end) { mm_free(b); return 1; }
+        pos++;
+    }
+    for (unsigned long long mi = 0; mi < pm; mi++) {
+        unsigned long long mb = 0, mr = 0, mc = 0, mk = 0;
+        if (pos + 2 > pkg_end || b[pos] != 'M' || b[pos + 1] != ' ') { mm_free(b); return 1; }
+        pos += 2;
+        if (parse_u64_sep(b, pkg_end, &pos, &mb, ' ') || parse_u64_sep(b, pkg_end, &pos, &mr, ' ') ||
+            parse_u64_sep(b, pkg_end, &pos, &mc, ' ') || parse_u64_sep(b, pkg_end, &pos, &mk, '\n') ||
+            mb > (unsigned long long)(pkg_end - pos)) { mm_free(b); return 1; }
+        pos += (long)mb;
+    }
+    for (unsigned long long ri = 0; ri < nr; ri++) {
+        unsigned long long kl = 0, dl = 0, rl = 0, co = 0, cr = 0;
+        if (pos + 2 > pkg_end || b[pos] != 'F' || b[pos + 1] != ' ') { mm_free(b); return 1; }
+        pos += 2;
+        if (parse_u64_sep(b, pkg_end, &pos, &kl, ' ') || parse_u64_sep(b, pkg_end, &pos, &dl, ' ') ||
+            parse_u64_sep(b, pkg_end, &pos, &rl, ' ') || parse_u64_sep(b, pkg_end, &pos, &co, ' ') ||
+            parse_u64_sep(b, pkg_end, &pos, &cr, '\n')) { mm_free(b); return 1; }
+        if (kl + dl > (unsigned long long)(pkg_end - pos)) { mm_free(b); return 1; }
+        if ((long)kl == kl_want && memcmp(b + pos, KEY, (size_t)kl_want) == 0) {
+            if (found || co != 0ULL || dl < 128ULL || rl != dl) { mm_free(*out_buf); *out_buf = 0; mm_free(b); return 1; }
+            const unsigned char *sptr = b + pos + (long)kl;
+            if (crc32_ieee(sptr, (long)dl) != (unsigned)cr) { mm_free(b); return 1; }
+            unsigned char *cp = (unsigned char *)mm_alloc((size_t)dl);
+            if (!cp) { mm_free(b); return 1; }
+            mm_copy(cp, (long)dl, sptr, (long)dl);
+            *out_buf = cp;
+            *out_len = (int64_t)dl;
+            found = 1;
+        }
+        pos += (long)(kl + dl);
+    }
+    mm_free(b);
+    return found ? 0 : 1;
+}
+
+static int file_sha256_hex(const char *path, char out[65], int64_t max_bytes) {
+    unsigned char *b = 0;
+    int64_t n = 0;
+    if (sy_read_file(path, &b, &n, max_bytes) != 0 || !b) {
+        if (b) mm_free(b);
+        return 1;
+    }
+    int hrc = sy_sha256_hex(b, n, out);
+    mm_free(b);
+    return (hrc == 0 && out[0]) ? 0 : 1;
+}
+
+/* Deterministic 12-vector suite shared by produce (execution) and judge (inputs_sha binding). */
+static void fill_vectors(unsigned char *v_1000, unsigned char v_c0[4], unsigned char v_c1[13],
+                         unsigned char v_sh[12], unsigned char v_lg[14], unsigned char v_ov[13],
+                         const unsigned char *ps[12], long ls[12]) {
+    int k;
+    v_c0[0] = 0; v_c0[1] = 0; v_c0[2] = 0; v_c0[3] = 0;
+    v_c1[0] = 1; v_c1[1] = 0; v_c1[2] = 0; v_c1[3] = 0;
+    for (k = 0; k < 9; k++) v_c1[4 + k] = (unsigned char)(k + 1);
+    v_sh[0] = 1; v_sh[1] = 0; v_sh[2] = 0; v_sh[3] = 0;
+    for (k = 0; k < 8; k++) v_sh[4 + k] = (unsigned char)(k + 1);
+    v_lg[0] = 1; v_lg[1] = 0; v_lg[2] = 0; v_lg[3] = 0;
+    for (k = 0; k < 9; k++) v_lg[4 + k] = (unsigned char)(k + 1);
+    v_lg[13] = 0;
+    v_ov[0] = 0x41; v_ov[1] = 0x42; v_ov[2] = 0x0f; v_ov[3] = 0x00;
+    for (k = 4; k < 13; k++) v_ov[k] = 0;
+    for (k = 0; k < 9004; k++) v_1000[k] = (unsigned char)(k & 255);
+    v_1000[0] = 0xe8; v_1000[1] = 0x03; v_1000[2] = 0; v_1000[3] = 0;
+    ps[0] = v_c0; ps[1] = v_c1; ps[2] = v_1000;
+    ps[3] = 0; ps[4] = v_c0; ps[5] = v_c0; ps[6] = v_c0;
+    ps[7] = v_sh; ps[8] = v_lg; ps[9] = v_ov; ps[10] = v_c0; ps[11] = v_c0;
+    ls[0] = 4; ls[1] = 13; ls[2] = 9004; ls[3] = 4; ls[4] = 0; ls[5] = 1;
+    ls[6] = 3; ls[7] = 12; ls[8] = 14; ls[9] = 13; ls[10] = -1; ls[11] = -1000;
+}
+
+static int compute_vectors_sha(char out[65]) {
+    return file_sha256_hex(VECTORS, out, 1 << 20);
+}
+
+/* Composite inputs_sha covering job.tsv + native baseline + exact slice bytes + vectors. */
+static int compute_inputs_bundle_sha_mem(const unsigned char *sl, int64_t slen,
+                                         char job_sha[65], char base_sha[65],
+                                         char slice_sha[65], char vec_sha[65],
+                                         char bundle_sha[65]) {
+    char manifest[512];
+    if (!sl || slen <= 0) return 1;
+    if (file_sha256_hex(JOB, job_sha, 1 << 20) != 0) return 1;
+    if (file_sha256_hex(BASELINE, base_sha, 4 << 20) != 0) return 1;
+    if (sy_sha256_hex(sl, slen, slice_sha) != 0 || !slice_sha[0]) return 1;
+    if (compute_vectors_sha(vec_sha) != 0) return 1;
+    if (cx_fmt(manifest, sizeof manifest,
+               "job\t%s\nbaseline\t%s\nslice\t%s\nvectors\t%s\n",
+               job_sha, base_sha, slice_sha, vec_sha) != 0) return 1;
+    if (sy_sha256_hex((const unsigned char *)manifest, (int64_t)strlen(manifest), bundle_sha) != 0) return 1;
+    return bundle_sha[0] ? 0 : 1;
+}
+
+static int compute_inputs_bundle_sha_file(const char *slice_path,
+                                          char job_sha[65], char base_sha[65],
+                                          char slice_sha[65], char vec_sha[65],
+                                          char bundle_sha[65]) {
+    unsigned char *sl = 0;
+    int64_t slen = 0;
+    int rc;
+    if (sy_read_file(slice_path, &sl, &slen, 8 << 20) != 0 || !sl) {
+        if (sl) mm_free(sl);
+        return 1;
+    }
+    rc = compute_inputs_bundle_sha_mem(sl, slen, job_sha, base_sha, slice_sha, vec_sha, bundle_sha);
+    mm_free(sl);
+    return rc;
+}
+
+static int job_row_ok(const char *target) {
+    unsigned char *b = 0;
+    int64_t n = 0;
+    char *p, *e, *nl;
+    int found = 0;
+    if (sy_read_file(JOB, &b, &n, 8192) != 0 || !b) return 1;
+    p = (char *)b; e = p + n;
+    while (p < e) {
+        for (nl = p; nl < e && *nl != '\n'; nl++) {}
+        *nl = 0;
+        if (strncmp(p, target, strlen(target)) == 0 && p[strlen(target)] == '\t' &&
+            strstr(p, "\ttape_run_cx\t") != 0) {
+            found = 1;
+            break;
+        }
+        p = nl < e ? nl + 1 : e;
+    }
+    mm_free(b);
+    return found ? 0 : 1;
+}
+
+static int run_portable_m53(const unsigned char *sl, long slen, unsigned char *ibm,
+                            unsigned long long ibm_cap, int cached,
+                            const unsigned char *data, long len,
+                            unsigned long long *out_steps, int *out_ret) {
+    unsigned long long data_off = rd_u(sl + 64 + 24 + 4, 8);
+    unsigned long long data_len = rd_u(sl + 64 + 24 + 12, 8);
+    unsigned long long bssz_off = rd_u(sl + 64 + 48 + 4, 8);
+    unsigned long long bss_size = rd_u(sl + bssz_off, 8);
+    unsigned long long in_off = ((data_len + 7ULL) & ~7ULL) + bss_size;
+    unsigned long long copy_n = (data && len > 0) ? (unsigned long long)len : 0ULL;
+    unsigned long long in_end = (in_off + copy_n + 7ULL) & ~7ULL;
+    unsigned long long argv_at = in_end + 65536ULL;
+    unsigned long long argbuf_off = argv_at + 64ULL;
+    unsigned long long memlimit = argbuf_off + 128ULL;
+    unsigned char *mem = (unsigned char *)mm_alloc((size_t)memlimit);
+    unsigned long long *ga, *ba, args[12], res[5];
+    int i;
+    if (!mem) return -1;
+    mm_fill(mem, (long)memlimit, 0, (long)memlimit);
+    if (data_len > 0ULL) mm_copy(mem, (long)memlimit, sl + data_off, (long)data_len);
+    if (copy_n > 0ULL) mm_copy(mem + in_off, (long)(memlimit - in_off), data, (long)copy_n);
+    ga = (unsigned long long *)(mem + argv_at);
+    ba = (unsigned long long *)(mem + argbuf_off);
+    m53_s1_pack_bin2(ba, data ? (unsigned long long)(mem + in_off) : 0ULL, len);
+    ga[0] = (unsigned long long)(mem + argbuf_off + 24ULL);
+    ga[1] = (unsigned long long)ba;
+    ga[2] = (unsigned long long)(mem + argbuf_off + 24ULL);
+    ga[3] = 0ULL;
+    for (i = 0; i < 5; i++) res[i] = 0xdeadULL;
+    args[0] = cached ? 260ULL : 4ULL; args[1] = (unsigned long long)sl; args[2] = memlimit;
+    args[3] = 2000000ULL; args[4] = 3ULL; args[5] = (unsigned long long)ga;
+    args[6] = (unsigned long long)res; args[7] = (unsigned long long)slen;
+    args[8] = 0ULL; args[9] = (unsigned long long)mem; args[10] = (unsigned long long)ibm; args[11] = ibm_cap;
+    (void)tape_run_cx(args);
+    mm_free(mem);
+    if (out_steps) *out_steps = res[2];
+    if (res[0] != 0ULL) return -2;
+    if (out_ret) *out_ret = (int)res[1];
+    return 0;
+}
+
+static int do_judge(const char *rcpt_p, const char *out_p, const char *slice_p,
+                    const char *run_id, const char *rev, const char *cand_file,
+                    const char *expect, const char *producer, const char *purpose,
+                    int64_t now_ts) {
+    char cand_sha[65], job_sha[65], base_sha[65], slice_sha[65], vec_sha[65], in_sha[65];
+    rc_expect_t exp;
+    int rrc;
+    if (validate_candidate_binary(cand_file) != 0) return 2;
+    if (file_sha256_hex(cand_file, cand_sha, 128 << 20) != 0) { sy_eprintf("FAIL\tcandidate-sha\n"); return 1; }
+    if (compute_inputs_bundle_sha_file(slice_p, job_sha, base_sha, slice_sha, vec_sha, in_sha) != 0) {
+        sy_eprintf("FAIL\tinputs-bundle-sha\n");
+        return 1;
+    }
+    mm_fill(&exp, (long)sizeof exp, 0, (long)sizeof exp);
+    exp.run_id = run_id;
+    exp.rev = rev;
+    exp.unit = "m53";
+    exp.target = expect;
+    exp.candidate_sha = cand_sha;
+    exp.inputs_sha = in_sha;
+    exp.output_path = out_p;
+    exp.producer = producer;
+    exp.purpose = purpose;
+    exp.expect_rc = 0;
+    exp.expect_verdict = "PASS";
+    exp.now_ts = now_ts;
+    exp.max_age_s = 86400;
+    exp.max_future_s = 60;
+    exp.allow_fail_verdict = 0;
+    rrc = rc_verify(rcpt_p, &exp);
+    if (rrc != RC_OK) {
+        sy_eprintf("FAIL\t%s\tcode=%d\twhy=%s\n", rc_code_name(rrc), rrc, rc_why());
+        return 1;
+    }
+    sy_printf("PASS\tm53-s1-parity\tjudge=ok\ttarget=%s\n", expect);
+    return 0;
+}
+
+int main(int argc, char **argv) {
+    const char *rcpt_p = need_opt(argc, argv, "--receipt");
+    const char *out_p = need_opt(argc, argv, "--output");
+    const char *slice_p = need_opt(argc, argv, "--slice");
+    const char *loc_p = need_opt(argc, argv, "--locators");
+    const char *cand_url = need_opt(argc, argv, "--candidate-url");
+    const char *run_id = need_opt(argc, argv, "--run-id");
+    const char *rev = need_opt(argc, argv, "--rev");
+    const char *cand_file = need_opt(argc, argv, "--candidate-file");
+    const char *expect = need_opt(argc, argv, "--expect-target");
+    const char *producer = need_opt(argc, argv, "--producer");
+    const char *purpose = need_opt(argc, argv, "--purpose");
+    const char *ts_s = has_flag(argc, argv, "--judge") ? need_opt(argc, argv, "--now-ts") : need_opt(argc, argv, "--ts");
+    int64_t ts = 0;
+    char host[64], cand_sha[65], job_sha[65], base_sha[65], slice_sha[65], vec_sha[65], in_sha[65], out_sha[65];
+
+    if (!producer) producer = DEF_PRODUCER;
+    if (!purpose) purpose = DEF_PURPOSE;
+    if (!cand_url) cand_url = "local-file";
+    if (!rcpt_p || !out_p || !slice_p || !run_id || !rev || !cand_file || !expect || parse_pos_i64(ts_s, &ts) != 0) {
+        sy_eprintf("FAIL\tusage\n");
+        return 2;
+    }
+    if (has_flag(argc, argv, "--judge")) {
+        return do_judge(rcpt_p, out_p, slice_p, run_id, rev, cand_file, expect, producer, purpose, ts);
+    }
+    if (validate_candidate_binary(cand_file) != 0) return 2;
+    if (image_target(host, (int)sizeof host) != 0) return 2;
+    if (strcmp(expect, host) != 0) {
+        sy_eprintf("FAIL\ttarget-mismatch\texpect=%s\timage=%s\n", expect, host);
+        return 1;
+    }
+    if (strncmp(host, "win/", 4) == 0 && sizeof(long) != 4) {
+        sy_eprintf("FAIL\tllp64-abi\tsizeof_long=%zu\n", sizeof(long));
+        return 1;
+    }
+    if (job_row_ok(host) != 0) {
+        sy_eprintf("FAIL\tjob-row\t%s\n", host);
+        return 1;
+    }
+    if (file_sha256_hex(cand_file, cand_sha, 128 << 20) != 0) {
+        sy_eprintf("FAIL\thash-candidate\n");
+        return 1;
+    }
+
+    /* Extract embedded tape/lnx-x86_64/m53.tapeslice directly from delivered candidate APE, persist to --slice, and run both arms. */
+    {
+        unsigned char *sl = 0;
+        int64_t slen = 0;
+        char *out_buf = (char *)mm_alloc(32768);
+        long out_pos = 0;
+        int all_ok = 1;
+        if (!out_buf) return 1;
+        if (extract_m53_slice_from_ape(cand_file, &sl, &slen) != 0 || !sl || slen < 128) {
+            if (sl) mm_free(sl);
+            mm_free(out_buf);
+            sy_eprintf("FAIL\textract-ape-m53-slice\t%s\n", cand_file);
+            return 1;
+        }
+        /* Hash the exact in-memory slice extracted from the delivered APE and persist it to slice_p. */
+        if (compute_inputs_bundle_sha_mem(sl, slen, job_sha, base_sha, slice_sha, vec_sha, in_sha) != 0 ||
+            sy_write_file(slice_p, sl, (long)slen, 0644) != 0) {
+            mm_free(sl);
+            mm_free(out_buf);
+            sy_eprintf("FAIL\thash-or-write-slice-snapshot\n");
+            return 1;
+        }
+
+        /* Execute BOTH arms natively on current runner arch (portable tape_run_cx vs native cxsa_valid) */
+        {
+            unsigned long long code_len = rd_u(sl + 64 + 12, 8);
+            unsigned long long ibm_cap = (code_len + 7ULL) >> 3;
+            unsigned char *ibm;
+            unsigned char v_c0[4], v_c1[13], v_sh[12], v_lg[14], v_ov[13];
+            unsigned char *v_1000 = (unsigned char *)mm_alloc(9004);
+            const unsigned char *ps[12];
+            long ls[12];
+            int k, pos_n = 0, neg_n = 0;
+            unsigned long long tot_steps = 0ULL;
+            if (ibm_cap == 0ULL) ibm_cap = 1ULL;
+            ibm = (unsigned char *)mm_alloc((size_t)ibm_cap);
+            if (!ibm || !v_1000) { mm_free(sl); mm_free(out_buf); return 1; }
+            mm_fill(ibm, (long)ibm_cap, 0, (long)ibm_cap);
+            fill_vectors(v_1000, v_c0, v_c1, v_sh, v_lg, v_ov, ps, ls);
+
+            for (k = 0; k < 12; k++) {
+                int nat = cxsa_valid(ps[k], ls[k]);
+                int s1_def = cxsa_valid_s1(ps[k], ls[k]);
+                int tr = -1;
+                unsigned long long st = 0ULL;
+                char vin_sha[65];
+                int prc = run_portable_m53(sl, (long)slen, ibm, ibm_cap, k > 0, ps[k], ls[k], &st, &tr);
+                char line[320];
+                if (sy_sha256_hex((ps[k] && ls[k] > 0) ? ps[k] : (const unsigned char *)"",
+                                  (ps[k] && ls[k] > 0) ? (int64_t)ls[k] : 0, vin_sha) != 0 || !vin_sha[0]) {
+                    all_ok = 0;
+                    cx_fmt(vin_sha, sizeof vin_sha, "hash-failed");
+                }
+                if (nat == 1) pos_n++; else neg_n++;
+                tot_steps += st;
+                if (prc != 0 || st == 0ULL || tr != nat || s1_def != nat) all_ok = 0;
+                if (cx_fmt(line, sizeof line, "VEC\t%d\tlen=%ld\tnative=%d\tportable=%d\ts1_def=%d\tsteps=%llu\tin_sha=%s\n",
+                           k, ls[k], nat, tr, s1_def, st, vin_sha) == 0) {
+                    long ln = (long)strlen(line);
+                    if (out_pos + ln < 32000) { mm_copy(out_buf + out_pos, 32768 - out_pos, line, ln); out_pos += ln; }
+                }
+            }
+            {
+                char tail[256];
+                if (cx_fmt(tail, sizeof tail, "SUMMARY\ttarget=%s\tvectors=12\tpos=%d\tneg=%d\ttotal_steps=%llu\tverdict=%s\n",
+                           host, pos_n, neg_n, tot_steps, all_ok ? "PASS" : "FAIL") == 0) {
+                    long ln = (long)strlen(tail);
+                    if (out_pos + ln < 32700) { mm_copy(out_buf + out_pos, 32768 - out_pos, tail, ln); out_pos += ln; }
+                }
+            }
+            mm_free(v_1000);
+            mm_free(ibm);
+        }
+        mm_free(sl);
+
+        if (sy_write_file(out_p, (const unsigned char *)out_buf, out_pos, 0644) != 0) {
+            mm_free(out_buf);
+            sy_eprintf("FAIL\twrite-output\n");
+            return 1;
+        }
+        if (sy_sha256_hex((const unsigned char *)out_buf, (int64_t)out_pos, out_sha) != 0 || !out_sha[0]) {
+            mm_free(out_buf);
+            sy_eprintf("FAIL\thash-output\n");
+            return 1;
+        }
+        mm_free(out_buf);
+
+        if (loc_p) {
+            static char loc_buf[2048];
+            if (cx_fmt(loc_buf, sizeof loc_buf,
+                       "source_commit\t%s\n"
+                       "target\t%s\n"
+                       "candidate_url\t%s\n"
+                       "candidate_file\t%s\n"
+                       "candidate_sha\t%s\n"
+                       "job_file\t%s\n"
+                       "job_sha\t%s\n"
+                       "baseline_file\t%s\n"
+                       "baseline_sha\t%s\n"
+                       "slice_file\t%s\n"
+                       "slice_source\tdelivered_ape:tape/lnx-x86_64/m53.tapeslice\n"
+                       "slice_sha\t%s\n"
+                       "vectors_sha\t%s\n"
+                       "inputs_sha\t%s\n"
+                       "output_file\t%s\n"
+                       "output_sha\t%s\n",
+                       rev, host, cand_url, cand_file, cand_sha,
+                       JOB, job_sha, BASELINE, base_sha, slice_p, slice_sha,
+                       vec_sha, in_sha, out_p, out_sha) != 0 ||
+                sy_write_file(loc_p, (const unsigned char *)loc_buf, (long)strlen(loc_buf), 0644) != 0) {
+                sy_eprintf("FAIL\twrite-locators\n");
+                return 1;
+            }
+        }
+
+        {
+            rc_v3_t rec;
+            rec.run_id = run_id;
+            rec.rev = rev;
+            rec.unit = "m53";
+            rec.target = host;
+            rec.producer = producer;
+            rec.purpose = purpose;
+            rec.candidate_sha = cand_sha;
+            rec.inputs_sha = in_sha;
+            rec.output_sha = out_sha;
+            rec.rc = all_ok ? 0 : 1;
+            rec.verdict = all_ok ? "PASS" : "FAIL";
+            rec.ts = ts;
+            if (rc_write3(rcpt_p, &rec) != 0) {
+                sy_eprintf("FAIL\trc-write3\t%s\n", rc_why());
+                return 1;
+            }
+        }
+        sy_printf("%s\tm53-s1-parity\ttarget=%s\n", all_ok ? "PASS" : "FAIL", host);
+        return all_ok ? 0 : 1;
+    }
+}

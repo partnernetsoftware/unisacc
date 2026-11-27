@@ -1,0 +1,657 @@
+/* tools/check-packing-authority.cx -- Piece P packing authority & mutation gate.
+ *
+ *   sh ./unisacc.com tools/check-packing-authority.cx --          (default: 12 checks, facts + embed + routed-extra p3/release-models)
+ *   sh ./unisacc.com tools/check-packing-authority.cx -- --chain  (3 checks: real candidate-chain --check-routed-guests drop/restore/mismatch)
+ *   sh ./unisacc.com tools/check-packing-authority.cx -- --all    (all 15 checks)
+ *
+ * Markers: CHECK_PACKING_AUTHORITY (default / --all), CHECK_PACKING_AUTHORITY_CHAIN (--chain). */
+#pragma unisa use runtime.packagefooter
+#pragma unisa use runtime.package_decode
+#pragma unisa use runtime.package_lifetime
+#pragma unisa use runtime.model_number
+#pragma unisa use compiler.bindstage
+#pragma unisa use compiler.streamname
+#pragma unisa use runtime.routestep
+#pragma unisa use text.deflate
+#pragma unisa use sys.fs
+#pragma unisa use sys.io
+#pragma unisa use sys.env
+#pragma unisa use sys.posix
+#pragma unisa use sys.sha
+#pragma unisa use text.text
+#pragma unisa use text.fmt
+#pragma unisa use mem.heap
+#pragma unisa use mem.bytes
+#pragma unisa use cxlib.netpack
+#pragma unisa use cxlib.chainfacts
+
+static int failed;
+static void ck(int ok, const char *name) {
+    if (!ok) { sy_eprintf("FAIL\tpacking-authority.%s\n", name); failed++; }
+    else sy_printf("PASS\tpacking-authority.%s\n", name);
+}
+static void *pa_alloc(void *prev, size_t n) { (void)prev; return mm_alloc((long)(n ? n : 1)); }
+static void pa_free(void *p) { if (p) mm_free(p); }
+static int run_in(const char *cwd, char **v, char *out, long cap, int secs) {
+    np_result r = {0}; char why[128] = {0};
+    int tr = np_run(v, cwd, 0, secs, &r, why, sizeof why);
+    long n = 0;
+    if (r.out && r.outn > 0) {
+        long m = (long)r.outn < cap - 1 ? (long)r.outn : cap - 1;
+        for (long i = 0; i < m; i++) out[n++] = r.out[i];
+    }
+    if (r.err && r.errn > 0 && n < cap - 1) {
+        long m = (long)r.errn < (cap - 1 - n) ? (long)r.errn : (cap - 1 - n);
+        for (long i = 0; i < m; i++) out[n++] = r.err[i];
+    }
+    out[n] = 0;
+    int rc = (tr || r.residue) ? -1 : r.rc;
+    np_free(&r);
+    return rc;
+}
+static int link_entry(const char *src_root, const char *dst_root, const char *name) {
+    char s[700], d[700];
+    if (cx_fmt(s, sizeof s, "%s/%s", src_root, name) ||
+        cx_fmt(d, sizeof d, "%s/%s", dst_root, name)) return -1;
+    return sy_symlink(s, d);
+}
+static int link_dir_except(const char *src_dir, const char *dst_dir, const char *skip) {
+    char src[700], dst[700];
+    sy_dir_t dir;
+    if (sy_dir_open(&dir, src_dir) != 0) return -1;
+    while (sy_dir_next(&dir) == 1) {
+        if (tx_eqz(dir.name, ".") || tx_eqz(dir.name, "..") || (skip && tx_eqz(dir.name, skip))) continue;
+        if (cx_fmt(src, sizeof src, "%s/%s", src_dir, dir.name) ||
+            cx_fmt(dst, sizeof dst, "%s/%s", dst_dir, dir.name) ||
+            sy_symlink(src, dst) != 0) {
+            sy_dir_close(&dir); return -1;
+        }
+    }
+    sy_dir_close(&dir);
+    return 0;
+}
+static int make_sandbox(const char *repo, const char *sb, const char *facts_body, size_t facts_len) {
+    char d[700], s[700], src[700], dst[700];
+    if (sy_mkdir_all(sb, 0755)) return -1;
+    if (cx_fmt(d, sizeof d, "%s/build", sb) || sy_mkdir_all(d, 0755)) return -1;
+    if (cx_fmt(s, sizeof s, "%s/build", repo) || link_dir_except(s, d, "chain-facts.tsv")) return -1;
+    if (cx_fmt(d, sizeof d, "%s/tools/cxlib", sb) || sy_mkdir_all(d, 0755)) return -1;
+    if (cx_fmt(s, sizeof s, "%s/tools/cxlib", repo) || link_dir_except(s, d, "chainfacts.cx")) return -1;
+    if (link_entry(repo, sb, "unisacc.com") ||
+        link_entry(repo, sb, "cxroot.tsv") ||
+        link_entry(repo, sb, "cx") ||
+        link_entry(repo, sb, "ext") ||
+        link_entry(repo, sb, "src") ||
+        link_entry(repo, sb, "exec")) return -1;
+    static const char *tfiles[4] = { "chain-facts-gen.cx", "candidate-chain.cx", "release-build.cx", "ape-pack.cx" };
+    for (int i = 0; i < 4; i++) {
+        if (cx_fmt(src, sizeof src, "%s/tools/%s", repo, tfiles[i]) ||
+            cx_fmt(dst, sizeof dst, "%s/tools/%s", sb, tfiles[i]) ||
+            sy_symlink(src, dst) != 0) return -1;
+    }
+    if (cx_fmt(dst, sizeof dst, "%s/build/chain-facts.tsv", sb) ||
+        cx_write(dst, facts_body, facts_len) != 0) return -1;
+    return 0;
+}
+static int append_str(const char *base, size_t blen, const char *extra, char **out_buf, size_t *out_len) {
+    size_t elen = (size_t)tx_len(extra, 4096);
+    char *b = (char *)mm_alloc((long)(blen + elen + 1));
+    if (!b) return -1;
+    if (mm_copy(b, (long)(blen + elen + 1), base, (long)blen) ||
+        mm_copy(b + blen, (long)(elen + 1), extra, (long)(elen + 1))) {
+        mm_free(b); return -1;
+    }
+    *out_buf = b; *out_len = blen + elen;
+    return 0;
+}
+/* Build a valid P4 package containing the 7 sn_at() lnx/x86_64/image/O1 UNINETB1N deflated models + 1 keep F record. */
+static int write_models_p4(const char *path) {
+    const char *raw_m = "UNINETB1N-pack-auth-model";
+    long raw_l = tx_len(raw_m, 64);
+    unsigned crc = (unsigned)dz_crc32(0, (const unsigned char *)raw_m, raw_l);
+    unsigned char comp[256];
+    long clen = dz_deflate((const unsigned char *)raw_m, raw_l, comp, (long)sizeof comp);
+    if (clen <= 0 || sn_count() != 7) return -1;
+    char buf[8192];
+    long pos = 0;
+    const char *hdr = "P 4 7 7 0\n";
+    long hl = tx_len(hdr, 32);
+    if (mm_copy(buf + pos, (long)sizeof buf - pos, hdr, hl)) return -1;
+    pos += hl;
+    for (int h = 0; h < 7; h++) {
+        const char *off_s = 0, *stg = 0;
+        char row[160];
+        if (sn_at(h, &off_s, &stg) || cx_fmt(row, sizeof row, "D lnx/x86_64/image/O1 %s f%d f%d %d\n", stg, h, h + 1, h)) return -1;
+        long rl = tx_len(row, sizeof row);
+        if (mm_copy(buf + pos, (long)sizeof buf - pos, row, rl)) return -1;
+        pos += rl;
+    }
+    for (int h = 0; h < 7; h++) {
+        char mh[96];
+        if (cx_fmt(mh, sizeof mh, "M %ld %ld 1 %u\n", clen, raw_l, crc)) return -1;
+        long ml = tx_len(mh, sizeof mh);
+        if (mm_copy(buf + pos, (long)sizeof buf - pos, mh, ml)) return -1;
+        pos += ml;
+        if (mm_copy(buf + pos, (long)sizeof buf - pos, comp, clen)) return -1;
+        pos += clen;
+    }
+    return cx_write(path, buf, (size_t)pos);
+}
+/* Decode P4 file (with footer) and verify exact count of tape/lnx-x86_64/* F records with codec=0, rawlen==len, CRC32. */
+static int verify_p4_tape_count(const char *path, int want_count, const char *must_have_key) {
+    size_t zn = 0; char *blob = cx_read(path, &zn);
+    PackageFooter pf; CxPackageDecode dec; int ok = 0;
+    if (blob && packagefooter_locate_bytes((const unsigned char *)blob, (long)zn, &pf)) {
+        mm_fill(&dec, (long)sizeof dec, 0, (long)sizeof dec);
+        dec.allocate = pa_alloc; dec.release = pa_free;
+        if (cxpk_decode(&dec, (const unsigned char *)blob + pf.package_offset, pf.package_length) == 0 &&
+            dec.package.ver == 4) {
+            const unsigned char *pb = (const unsigned char *)blob + pf.package_offset;
+            int tape_ns = 0, valid = 0, got_must = (must_have_key == 0);
+            long ml = must_have_key ? tx_len(must_have_key, 128) : 0;
+            for (int i = 0; i < dec.package.nr; i++) {
+                const CxPackageResource *r = &dec.package.res[i];
+                if (r->n > 16 && tx_prefix((const char *)(pb + r->name), r->n, "tape/lnx-x86_64/", 16)) {
+                    tape_ns++;
+                    unsigned want = (unsigned)dz_crc32(0, pb + r->data, r->len);
+                    if (r->codec == 0 && r->rawlen == r->len && r->len > 0 && r->crc == want) {
+                        valid++;
+                        if (must_have_key && r->n == (int)ml && tx_same((const char *)(pb + r->name), r->n, must_have_key, ml))
+                            got_must = 1;
+                    }
+                }
+            }
+            ok = (tape_ns == want_count && valid == want_count && got_must == 1);
+            cxpl_release(&dec.package, pa_free);
+        }
+    }
+    if (blob) mm_free(blob);
+    return ok;
+}
+
+int main(int argc, char **argv) {
+    int mode_chain = (argc >= 2 && tx_eqz(argv[1], "--chain"));
+    int mode_routed4 = (argc >= 2 && (tx_eqz(argv[1], "--routed4") || tx_eqz(argv[1], "--embed")));
+    int mode_all = (argc >= 2 && tx_eqz(argv[1], "--all"));
+    int run_default = (!mode_chain && !mode_routed4) || mode_all;
+    int run_routed4 = mode_routed4 || mode_all;
+    int run_chain = mode_chain || mode_all;
+    char repo[512], tmp[512], out[16384];
+    if (sy_realpath(".", repo, sizeof repo) < 0) return 2;
+    if (sy_mkdtemp(sy_tmpdir(), "pack-auth-", tmp, sizeof tmp) != 0) return 2;
+
+    size_t flen = 0;
+    char *fbase = cx_read("build/chain-facts.tsv", &flen);
+    if (!fbase || !flen) { sy_eprintf("read build/chain-facts.tsv failed\n"); return 2; }
+
+    if (run_default) {
+        /* (0) Current generated cf_tu_* and cf_snap_tape_state sanity */
+        {
+            int ok = (cf_tu_count() >= 1 &&
+                      cf_tu_for("lnx/x86_64", "drivestream.o") != 0 &&
+                      tx_eqz(cf_tu_for("lnx/x86_64", "drivestream.o"), "m53") &&
+                      cf_snap_tape_state(repo) == cf_tu_count());
+            ck(ok, "cf-tu-current-m53-and-snap-state");
+        }
+
+        /* Compile chain-facts-gen once and reuse across sandboxes. */
+        char cfg_bin[640];
+        if (cx_fmt(cfg_bin, sizeof cfg_bin, "%s/cfg_bin", tmp)) return 2;
+        {
+            char *vc[] = {"sh", "./unisacc.com", "tools/chain-facts-gen.cx", "-o", cfg_bin, 0};
+            if (run_in(repo, vc, out, sizeof out, 40) != 0) {
+                sy_eprintf("compile chain-facts-gen failed: %.240s\n", out);
+                mm_free(fbase); return 2;
+            }
+        }
+
+        /* (1a) Positive: entrybind root_target + tape_unit accepted on top of current facts */
+        {
+            char sb[640], *fb = 0; size_t fbn = 0;
+            const char *add =
+                "root_target\tlnx/x86_64:entrybind.o\tsrc/entrybind_m1.cx\n"
+                "tape_unit\tlnx/x86_64:entrybind.o\tentrybind\n";
+            int ok = 0;
+            if (!cx_fmt(sb, sizeof sb, "%s/sb-pos", tmp) &&
+                !append_str(fbase, flen, add, &fb, &fbn) &&
+                !make_sandbox(repo, sb, fb, fbn)) {
+                char *v[] = {cfg_bin, "--write", 0};
+                int rc = run_in(sb, v, out, sizeof out, 15);
+                char cf_path[700]; sy_stat_t st;
+                if (rc == 0 && strstr(out, "CHAIN_FACTS\tstatus=WRITE") &&
+                    !cx_fmt(cf_path, sizeof cf_path, "%s/tools/cxlib/chainfacts.cx", sb) &&
+                    sy_lstat(cf_path, &st) == 0 && st.kind == 'f' && st.size > 0) ok = 1;
+            }
+            if (fb) mm_free(fb);
+            ck(ok, "chain-facts-gen-positive-driveargs-bind");
+        }
+
+        /* (1b) Negative: lnx/x86_64 root_target without tape_unit refused */
+        {
+            char sb[640], *fb = 0; size_t fbn = 0;
+            const char *add = "root_target\tlnx/x86_64:entrybind.o\tsrc/entrybind_m1.cx\n";
+            int ok = 0;
+            if (!cx_fmt(sb, sizeof sb, "%s/sb-miss-tu", tmp) &&
+                !append_str(fbase, flen, add, &fb, &fbn) &&
+                !make_sandbox(repo, sb, fb, fbn)) {
+                char *v[] = {cfg_bin, "--write", 0};
+                int rc = run_in(sb, v, out, sizeof out, 15);
+                if (rc != 0 && strstr(out, "root_target missing tape_unit")) ok = 1;
+            }
+            if (fb) mm_free(fb);
+            ck(ok, "chain-facts-gen-refuse-missing-tape-unit");
+        }
+
+        /* (1c) Negative: dangling tape_unit without matching root_target refused */
+        {
+            char sb[640], *fb = 0; size_t fbn = 0;
+            const char *add = "tape_unit\tlnx/x86_64:entrybind.o\tentrybind\n";
+            int ok = 0;
+            if (!cx_fmt(sb, sizeof sb, "%s/sb-dangling-tu", tmp) &&
+                !append_str(fbase, flen, add, &fb, &fbn) &&
+                !make_sandbox(repo, sb, fb, fbn)) {
+                char *v[] = {cfg_bin, "--write", 0};
+                int rc = run_in(sb, v, out, sizeof out, 15);
+                if (rc != 0 && strstr(out, "tape_unit without root_target")) ok = 1;
+            }
+            if (fb) mm_free(fb);
+            ck(ok, "chain-facts-gen-refuse-dangling-tape-unit");
+        }
+
+        /* (1d) Negative: duplicate tape_unit refused */
+        {
+            char sb[640], *fb = 0; size_t fbn = 0;
+            const char *add = "tape_unit\tlnx/x86_64:drivestream.o\tm53dup\n";
+            int ok = 0;
+            if (!cx_fmt(sb, sizeof sb, "%s/sb-dup-tu", tmp) &&
+                !append_str(fbase, flen, add, &fb, &fbn) &&
+                !make_sandbox(repo, sb, fb, fbn)) {
+                char *v[] = {cfg_bin, "--write", 0};
+                int rc = run_in(sb, v, out, sizeof out, 15);
+                if (rc != 0 && strstr(out, "duplicate tape_unit")) ok = 1;
+            }
+            if (fb) mm_free(fb);
+            ck(ok, "chain-facts-gen-refuse-duplicate-tape-unit");
+        }
+
+        /* (1e) Negative: non-lnx/x86_64 tape_unit refused */
+        {
+            char sb[640], *fb = 0; size_t fbn = 0;
+            const char *add =
+                "root_target\tosx/x86_64:driveargs.o\tsrc/driveargs_m1.cx\n"
+                "tape_unit\tosx/x86_64:driveargs.o\tdriveargs\n";
+            int ok = 0;
+            if (!cx_fmt(sb, sizeof sb, "%s/sb-nonlnx-tu", tmp) &&
+                !append_str(fbase, flen, add, &fb, &fbn) &&
+                !make_sandbox(repo, sb, fb, fbn)) {
+                char *v[] = {cfg_bin, "--write", 0};
+                int rc = run_in(sb, v, out, sizeof out, 15);
+                if (rc != 0 && strstr(out, "tape_unit unsupported target")) ok = 1;
+            }
+            if (fb) mm_free(fb);
+            ck(ok, "chain-facts-gen-refuse-non-linux-tape-unit");
+        }
+
+        /* (2) Release-build embed controls in default registered batch */
+        {
+            char fxroot[640], inc[700], bdir0[700], fx_nocf[640], inc_nc[700], src_p3[640], out_ok[640], out_bad[640];
+            char t_ok[640], t_extra[640], t_dup[640], t_col[640], p[720], mf[1024];
+            char so_sha[65], sl_sha[65], rg_sha[65];
+            const char *so_b = "ELF-tapemode-pack-auth";
+            const char *sl_b = "UTAPEBIN-m53-pack-auth";
+            const char *rg_b = "UTAPEBIN-rogue-extra-slice";
+            const char *bare_p3 = "P 3 1 1 1\nD r s in out 0\nM 1 1 1 0\nAF 4 5\nkeephello";
+            if (cx_fmt(fxroot, sizeof fxroot, "%s/fxroot", tmp) ||
+                cx_fmt(inc, sizeof inc, "%s/include", fxroot) ||
+                cx_fmt(bdir0, sizeof bdir0, "%s/build", fxroot) ||
+                cx_fmt(fx_nocf, sizeof fx_nocf, "%s/fx-nocf", tmp) ||
+                cx_fmt(inc_nc, sizeof inc_nc, "%s/include", fx_nocf) ||
+                cx_fmt(src_p3, sizeof src_p3, "%s/src.p3", tmp) ||
+                cx_fmt(out_ok, sizeof out_ok, "%s/out.ok.p4", tmp) ||
+                cx_fmt(out_bad, sizeof out_bad, "%s/out.bad.p4", tmp) ||
+                cx_fmt(t_ok, sizeof t_ok, "%s/tape-ok", tmp) ||
+                cx_fmt(t_extra, sizeof t_extra, "%s/tape-extra", tmp) ||
+                cx_fmt(t_dup, sizeof t_dup, "%s/tape-dup", tmp) ||
+                cx_fmt(t_col, sizeof t_col, "%s/tape-col", tmp) ||
+                sy_mkdir_all(inc, 0755) || sy_mkdir_all(bdir0, 0755) || sy_mkdir_all(inc_nc, 0755) ||
+                sy_mkdir_all(t_ok, 0755) || sy_mkdir_all(t_extra, 0755) || sy_mkdir_all(t_dup, 0755) || sy_mkdir_all(t_col, 0755)) {
+                mm_free(fbase); return 2;
+            }
+            if (cx_fmt(p, sizeof p, "%s/cx-flat.h", inc) || cx_write(p, "/* flat */\n", 11)) return 2;
+            if (cx_fmt(p, sizeof p, "%s/cx-flat.h", inc_nc) || cx_write(p, "/* flat */\n", 11)) return 2;
+            if (cx_fmt(p, sizeof p, "%s/chain-facts.tsv", bdir0) || cx_write(p, fbase, flen)) return 2;
+            if (cx_write(src_p3, bare_p3, (size_t)tx_len(bare_p3, 256))) return 2;
+            (void)sy_sha256_hex(so_b, tx_len(so_b, 128), so_sha);
+            (void)sy_sha256_hex(sl_b, tx_len(sl_b, 128), sl_sha);
+            (void)sy_sha256_hex(rg_b, tx_len(rg_b, 128), rg_sha);
+
+            /* 2a: Exact set positive (2 + cf_tu_count() records) */
+            {
+                long mp = 0; char row[256];
+                if (cx_fmt(row, sizeof row, "tapemode.so\t%s\t%ld\n", so_sha, tx_len(so_b, 128))) return 2;
+                long rl = tx_len(row, sizeof row);
+                if (mm_copy(mf + mp, (long)sizeof mf - mp, row, rl)) return 2;
+                mp += rl;
+                for (int ti = 0; ti < cf_tu_count(); ti++) {
+                    const char *u = cf_tu_unit(ti);
+                    if (!u || cx_fmt(row, sizeof row, "%s.tapeslice\t%s\t%ld\n", u, sl_sha, tx_len(sl_b, 128))) return 2;
+                    rl = tx_len(row, sizeof row);
+                    if (mm_copy(mf + mp, (long)sizeof mf - mp, row, rl)) return 2;
+                    mp += rl;
+                    if (cx_fmt(p, sizeof p, "%s/%s.tapeslice", t_ok, u) || cx_write(p, sl_b, (size_t)tx_len(sl_b, 128)) ||
+                        cx_fmt(p, sizeof p, "%s/%s.tapeslice", t_extra, u) || cx_write(p, sl_b, (size_t)tx_len(sl_b, 128)) ||
+                        cx_fmt(p, sizeof p, "%s/%s.tapeslice", t_dup, u) || cx_write(p, sl_b, (size_t)tx_len(sl_b, 128)) ||
+                        cx_fmt(p, sizeof p, "%s/%s.tapeslice", t_col, u) || cx_write(p, sl_b, (size_t)tx_len(sl_b, 128))) return 2;
+                }
+                mf[mp] = 0;
+            }
+            if (cx_fmt(p, sizeof p, "%s/manifest.tsv", t_ok) || cx_write(p, mf, (size_t)tx_len(mf, sizeof mf)) ||
+                cx_fmt(p, sizeof p, "%s/tapemode.so", t_ok) || cx_write(p, so_b, (size_t)tx_len(so_b, 128))) return 2;
+            {
+                char *v[] = {"sh", "./unisacc.com", "tools/release-build.cx", "--",
+                             "p3", fxroot, src_p3, out_ok, "--embed-tape", t_ok, 0};
+                int rc = run_in(repo, v, out, sizeof out, 35);
+                ck(rc == 0 && verify_p4_tape_count(out_ok, 2 + cf_tu_count(), "tape/lnx-x86_64/m53.tapeslice"), "release-build-exact-set-positive");
+            }
+
+            /* 2b: Mutation extra slice -> RED */
+            {
+                char mf_ex[1536];
+                if (cx_fmt(mf_ex, sizeof mf_ex, "%srogue.tapeslice\t%s\t%ld\n", mf, rg_sha, tx_len(rg_b, 128)) ||
+                    cx_fmt(p, sizeof p, "%s/manifest.tsv", t_extra) || cx_write(p, mf_ex, (size_t)tx_len(mf_ex, sizeof mf_ex)) ||
+                    cx_fmt(p, sizeof p, "%s/tapemode.so", t_extra) || cx_write(p, so_b, (size_t)tx_len(so_b, 128)) ||
+                    cx_fmt(p, sizeof p, "%s/rogue.tapeslice", t_extra) || cx_write(p, rg_b, (size_t)tx_len(rg_b, 128))) return 2;
+            }
+            {
+                char *v[] = {"sh", "./unisacc.com", "tools/release-build.cx", "--",
+                             "p3", fxroot, src_p3, out_bad, "--embed-tape", t_extra, 0};
+                int rc = run_in(repo, v, out, sizeof out, 25);
+                ck(rc != 0 && strstr(out, "manifest set mismatch") != 0, "mutation-extra-slice-red");
+            }
+
+            /* 2c: Duplicate manifest row -> RED */
+            {
+                char mf_dp[1536];
+                if (cx_fmt(mf_dp, sizeof mf_dp, "m53.tapeslice\t%s\t%ld\nm53.tapeslice\t%s\t%ld\n",
+                           sl_sha, tx_len(sl_b, 128), sl_sha, tx_len(sl_b, 128)) ||
+                    cx_fmt(p, sizeof p, "%s/manifest.tsv", t_dup) || cx_write(p, mf_dp, (size_t)tx_len(mf_dp, sizeof mf_dp)) ||
+                    cx_fmt(p, sizeof p, "%s/tapemode.so", t_dup) || cx_write(p, so_b, (size_t)tx_len(so_b, 128))) return 2;
+            }
+            {
+                char *v[] = {"sh", "./unisacc.com", "tools/release-build.cx", "--",
+                             "p3", fxroot, src_p3, out_bad, "--embed-tape", t_dup, 0};
+                int rc = run_in(repo, v, out, sizeof out, 25);
+                ck(rc != 0 && strstr(out, "manifest set mismatch") != 0, "mutation-dup-manifest-row-red");
+            }
+
+            /* 2d: Extra 4th TSV column in manifest -> RED */
+            {
+                char mf_cl[1536];
+                if (cx_fmt(mf_cl, sizeof mf_cl, "tapemode.so\t%s\t%ld\textra\nm53.tapeslice\t%s\t%ld\n",
+                           so_sha, tx_len(so_b, 128), sl_sha, tx_len(sl_b, 128)) ||
+                    cx_fmt(p, sizeof p, "%s/manifest.tsv", t_col) || cx_write(p, mf_cl, (size_t)tx_len(mf_cl, sizeof mf_cl)) ||
+                    cx_fmt(p, sizeof p, "%s/tapemode.so", t_col) || cx_write(p, so_b, (size_t)tx_len(so_b, 128))) return 2;
+            }
+            {
+                char *v[] = {"sh", "./unisacc.com", "tools/release-build.cx", "--",
+                             "p3", fxroot, src_p3, out_bad, "--embed-tape", t_col, 0};
+                int rc = run_in(repo, v, out, sizeof out, 25);
+                ck(rc != 0 && strstr(out, "manifest set mismatch") != 0, "mutation-extra-tsv-col-red");
+            }
+
+            /* 2e: Snapshot missing build/chain-facts.tsv -> RED */
+            {
+                char *v[] = {"sh", "./unisacc.com", "tools/release-build.cx", "--",
+                             "p3", fx_nocf, src_p3, out_bad, "--embed-tape", t_ok, 0};
+                int rc = run_in(repo, v, out, sizeof out, 25);
+                ck(rc != 0 && strstr(out, "snapshot chain-facts") != 0, "mutation-missing-chain-facts-red");
+            }
+
+            /* 2f: Snapshot root_target without matching tape_unit -> RED */
+            {
+                char bf[720], *fb = 0; size_t fbn = 0;
+                const char *add = "root_target\tlnx/x86_64:entrybind.o\tsrc/entrybind_m1.cx\n";
+                int ok = 0;
+                if (!cx_fmt(bf, sizeof bf, "%s/chain-facts.tsv", bdir0) &&
+                    !append_str(fbase, flen, add, &fb, &fbn) &&
+                    !cx_write(bf, fb, fbn)) {
+                    char *v[] = {"sh", "./unisacc.com", "tools/release-build.cx", "--",
+                                 "p3", fxroot, src_p3, out_bad, "--embed-tape", t_ok, 0};
+                    int rc = run_in(repo, v, out, sizeof out, 25);
+                    if (rc != 0 && strstr(out, "snapshot chain-facts")) ok = 1;
+                }
+                if (fb) mm_free(fb);
+                ck(ok, "mutation-snap-unmatched-root-target-red");
+            }
+
+            /* 2g: Snapshot chain-facts mismatch vs compiled-in cf_tu -> RED */
+            {
+                char bf[720], *fb = 0; size_t fbn = 0;
+                const char *add =
+                    "root_target\tlnx/x86_64:entrybind.o\tsrc/entrybind_m1.cx\n"
+                    "tape_unit\tlnx/x86_64:entrybind.o\tentrybind\n";
+                int ok = 0;
+                if (!cx_fmt(bf, sizeof bf, "%s/chain-facts.tsv", bdir0) &&
+                    !append_str(fbase, flen, add, &fb, &fbn) &&
+                    !cx_write(bf, fb, fbn)) {
+                    char *v[] = {"sh", "./unisacc.com", "tools/release-build.cx", "--",
+                                 "p3", fxroot, src_p3, out_bad, "--embed-tape", t_ok, 0};
+                    int rc = run_in(repo, v, out, sizeof out, 25);
+                    if (rc != 0 && strstr(out, "snapshot chain-facts")) ok = 1;
+                }
+                if (fb) mm_free(fb);
+                ck(ok, "mutation-snap-chain-facts-mismatch-red");
+            }
+        }
+
+        /* (3) Routed-extra positive (m53 + driveargs = 4 tape records) through sandbox p3 + release-models */
+    }
+    if (run_routed4) {
+        {
+            char sb[640], fx2[640], inc2[700], bdir2[700], t4[640], mp4[640], p3o[640], rmo[640], p[720], mf[1024];
+            char so_sha[65], sl_sha[65], da_sha[65], bd_sha[65], *fb = 0; size_t fbn = 0;
+            const char *so_b = "ELF-tapemode-routed4";
+            const char *sl_b = "UTAPEBIN-m53-routed4";
+            const char *da_b = "UTAPEBIN-driveargs-routed4";
+            const char *bd_b = "UTAPEBIN-bind-routed4";
+            const char *add =
+                "root_target\tlnx/x86_64:entrybind.o\tsrc/entrybind_m1.cx\n"
+                "tape_unit\tlnx/x86_64:entrybind.o\tentrybind\n";
+            int want_n = cf_tu_count() + 3;
+            int ok = 0;
+            if (!cx_fmt(sb, sizeof sb, "%s/sb-routed4", tmp) &&
+                !cx_fmt(fx2, sizeof fx2, "%s/fx2", tmp) &&
+                !cx_fmt(inc2, sizeof inc2, "%s/include", fx2) &&
+                !cx_fmt(bdir2, sizeof bdir2, "%s/build", fx2) &&
+                !cx_fmt(t4, sizeof t4, "%s/tape4", tmp) &&
+                !cx_fmt(mp4, sizeof mp4, "%s/models.p4", tmp) &&
+                !cx_fmt(p3o, sizeof p3o, "%s/p3-4.p4", tmp) &&
+                !cx_fmt(rmo, sizeof rmo, "%s/rm-4.p4", tmp) &&
+                !sy_mkdir_all(inc2, 0755) && !sy_mkdir_all(bdir2, 0755) && !sy_mkdir_all(t4, 0755) &&
+                !append_str(fbase, flen, add, &fb, &fbn) &&
+                !make_sandbox(repo, sb, fb, fbn) &&
+                !cx_fmt(p, sizeof p, "%s/cx-flat.h", inc2) && !cx_write(p, "/* flat4 */\n", 12) &&
+                !cx_fmt(p, sizeof p, "%s/chain-facts.tsv", bdir2) && !cx_write(p, fb, fbn) &&
+                !write_models_p4(mp4)) {
+                (void)sy_sha256_hex(so_b, tx_len(so_b, 128), so_sha);
+                (void)sy_sha256_hex(sl_b, tx_len(sl_b, 128), sl_sha);
+                (void)sy_sha256_hex(da_b, tx_len(da_b, 128), da_sha);
+                long mp4_pos = 0; char r4_row[256];
+                int r4_prep = (!cx_fmt(r4_row, sizeof r4_row, "tapemode.so\t%s\t%ld\n", so_sha, tx_len(so_b, 128)) &&
+                               !mm_copy(mf + mp4_pos, (long)sizeof mf - mp4_pos, r4_row, tx_len(r4_row, sizeof r4_row)));
+                if (r4_prep) mp4_pos += tx_len(r4_row, sizeof r4_row);
+                for (int ti = 0; r4_prep && ti < cf_tu_count(); ti++) {
+                    const char *u = cf_tu_unit(ti);
+                    if (!u || cx_fmt(r4_row, sizeof r4_row, "%s.tapeslice\t%s\t%ld\n", u, sl_sha, tx_len(sl_b, 128)) ||
+                        mm_copy(mf + mp4_pos, (long)sizeof mf - mp4_pos, r4_row, tx_len(r4_row, sizeof r4_row)) ||
+                        cx_fmt(p, sizeof p, "%s/%s.tapeslice", t4, u) || cx_write(p, sl_b, (size_t)tx_len(sl_b, 128))) r4_prep = 0;
+                    else mp4_pos += tx_len(r4_row, sizeof r4_row);
+                }
+                if (r4_prep && !cx_fmt(r4_row, sizeof r4_row, "entrybind.tapeslice\t%s\t%ld\n", da_sha, tx_len(da_b, 128)) &&
+                    !mm_copy(mf + mp4_pos, (long)sizeof mf - mp4_pos, r4_row, tx_len(r4_row, sizeof r4_row) + 1) &&
+                    !cx_fmt(p, sizeof p, "%s/manifest.tsv", t4) && !cx_write(p, mf, (size_t)tx_len(mf, sizeof mf)) &&
+                    !cx_fmt(p, sizeof p, "%s/tapemode.so", t4) && !cx_write(p, so_b, (size_t)tx_len(so_b, 128)) &&
+                    !cx_fmt(p, sizeof p, "%s/entrybind.tapeslice", t4) && !cx_write(p, da_b, (size_t)tx_len(da_b, 128))) {
+                    char *vg[] = {"sh", "./unisacc.com", "tools/chain-facts-gen.cx", "--", "--write", 0};
+                    if (run_in(sb, vg, out, sizeof out, 40) == 0) {
+                        char *vp3[] = {"sh", "./unisacc.com", "tools/release-build.cx", "--",
+                                       "p3", fx2, mp4, p3o, "--embed-tape", t4, 0};
+                        if (run_in(sb, vp3, out, sizeof out, 45) == 0 &&
+                            verify_p4_tape_count(p3o, want_n, "tape/lnx-x86_64/entrybind.tapeslice")) {
+                            char *vrm[] = {"sh", "./unisacc.com", "tools/release-build.cx", "--",
+                                           "release-models", p3o, rmo, "--require-m1-tape", 0};
+                            if (run_in(sb, vrm, out, sizeof out, 30) == 0 &&
+                                verify_p4_tape_count(rmo, want_n, "tape/lnx-x86_64/entrybind.tapeslice")) {
+                                /* Carry past release-models through final ape-pack.cx and P4-decode the packed APE */
+                                size_t rmn = 0; char *rmb = cx_read(rmo, &rmn);
+                                char body_p[640], ape_p[640], s1[640], s2[640], s3[640], s4[640], s5[640];
+                                unsigned char pe[1024];
+                                mm_fill(pe, 1024, 0, 1024);
+                                pe[0] = 'M'; pe[1] = 'Z'; pe[0x3c] = 64;
+                                pe[64] = 'P'; pe[65] = 'E'; pe[64 + 6] = 1; pe[64 + 20] = 0xf0;
+                                pe[64 + 24] = 0x0b; pe[64 + 25] = 0x02; /* PE32+ magic */
+                                pe[64 + 24 + 61] = 4; /* SizeOfHeaders = 1024 */
+                                pe[64 + 24 + 108] = 16; /* NumberOfRvaAndSizes = 16 */
+                                if (rmb && rmn > 16 &&
+                                    !cx_fmt(body_p, sizeof body_p, "%s/p3-package.body", tmp) &&
+                                    !cx_fmt(ape_p, sizeof ape_p, "%s/unisacc-next.com", tmp) &&
+                                    !cx_fmt(s1, sizeof s1, "%s/win64.bin", tmp) &&
+                                    !cx_fmt(s2, sizeof s2, "%s/lnx64.bin", tmp) &&
+                                    !cx_fmt(s3, sizeof s3, "%s/lnxarm.bin", tmp) &&
+                                    !cx_fmt(s4, sizeof s4, "%s/osx64.bin", tmp) &&
+                                    !cx_fmt(s5, sizeof s5, "%s/osxarm.bin", tmp) &&
+                                    !cx_write(body_p, rmb, rmn - 16) &&
+                                    !cx_write(s1, (const char *)pe, 1024) && !cx_write(s2, "\x7f""ELF", 4) &&
+                                    !cx_write(s3, "\x7f""ELF", 4) && !cx_write(s4, "MACO", 4) && !cx_write(s5, "MACO", 4)) {
+                                    char *vap[] = {"sh", "./unisacc.com", "tools/ape-pack.cx", "--",
+                                                   "--payload", body_p, "--tool", "unisacc", "--need", "53248",
+                                                   "--deflate", ape_p, s1, s2, s3, s4, s5, 0};
+                                    if (run_in(repo, vap, out, sizeof out, 25) == 0 &&
+                                        verify_p4_tape_count(ape_p, want_n, "tape/lnx-x86_64/entrybind.tapeslice")) ok = 1;
+                                }
+                                if (rmb) mm_free(rmb);
+                            }
+                        }
+                    }
+                }
+            }
+            if (fb) mm_free(fb);
+            ck(ok, "routed-extra-positive-through-p3-and-release-models");
+        }
+    }
+
+    if (run_chain) {
+        /* (4) Real tools/candidate-chain.cx --check-routed-guests: drop-guest RED, restore GREEN, snap-mismatch RED.
+         * Optional argv[2] supplies prebuilt candidate-chain-tool binary (material separation in tests/batches.tsv). */
+        const char *cc_prebuilt = (mode_chain && argc >= 3 && argv[2] && argv[2][0]) ? argv[2] : 0;
+        char snap[640], bdir[700], bf[720], sm1d[700], sm1[720], gdir0[700], gp0[720];
+        int red_drop = 0, green_ok = 0, red_mis = 0;
+        if (!cx_fmt(snap, sizeof snap, "%s/snap-cc", tmp) &&
+            !cx_fmt(bdir, sizeof bdir, "%s/build", snap) &&
+            !cx_fmt(bf, sizeof bf, "%s/chain-facts.tsv", bdir) &&
+            !cx_fmt(sm1d, sizeof sm1d, "%s/cx/driver", snap) &&
+            !cx_fmt(sm1, sizeof sm1, "%s/stream_s1_m1.cx", sm1d) &&
+            !cx_fmt(gdir0, sizeof gdir0, "%s/exec/tape/guests", snap) &&
+            !sy_mkdir_all(bdir, 0755) && !sy_mkdir_all(sm1d, 0755) && !sy_mkdir_all(gdir0, 0755) &&
+            !cx_write(bf, fbase, flen)) {
+            for (int ti = 0; ti < cf_tu_count(); ti++) {
+                const char *u = cf_tu_unit(ti);
+                char gsrc[720]; size_t gn = 0; char *gb = 0;
+                if (u && !tx_eqz(u, "m53") &&
+                    !cx_fmt(gsrc, sizeof gsrc, "%s/exec/tape/guests/%s_guest.cx", repo, u) &&
+                    !cx_fmt(gp0, sizeof gp0, "%s/%s_guest.cx", gdir0, u)) {
+                    gb = cx_read(gsrc, &gn);
+                    if (gb && gn > 0) { (void)cx_write(gp0, gb, gn); mm_free(gb); }
+                }
+            }
+            char *v_bin[] = {(char *)cc_prebuilt, "--check-routed-guests", snap, 0};
+            char *v_sh[] = {"sh", "./unisacc.com", "tools/candidate-chain.cx", "--", "--check-routed-guests", snap, 0};
+            char **vc = cc_prebuilt ? v_bin : v_sh;
+            int rc1 = run_in(repo, vc, out, sizeof out, 45);
+            if (rc1 != 0 && strstr(out, "REFUSE routed guest missing")) red_drop = 1;
+            if (cx_write(sm1, "/* stream_s1_m1 fixture */\n", 27) == 0) {
+                char want_ok[64];
+                int rc2 = run_in(repo, vc, out, sizeof out, 25);
+                if (rc2 == 0 && !cx_fmt(want_ok, sizeof want_ok, "ROUTED_GUESTS\tok=%d", cf_tu_count()) &&
+                    strstr(out, want_ok)) green_ok = 1;
+            }
+            {
+                char *fb = 0; size_t fbn = 0;
+                const char *add =
+                    "root_target\tlnx/x86_64:entrybind.o\tsrc/entrybind_m1.cx\n"
+                    "tape_unit\tlnx/x86_64:entrybind.o\tentrybind\n";
+                if (!append_str(fbase, flen, add, &fb, &fbn) && !cx_write(bf, fb, fbn)) {
+                    int rc3 = run_in(repo, vc, out, sizeof out, 25);
+                    if (rc3 != 0 && strstr(out, "REFUSE snapshot chain-facts tape_unit mismatch")) red_mis = 1;
+                }
+                if (fb) mm_free(fb);
+            }
+            /* Missing chain-facts.tsv in snapshot -> RED */
+            (void)sy_unlink(bf);
+            int rc4 = run_in(repo, vc, out, sizeof out, 25);
+            ck(rc4 != 0 && strstr(out, "REFUSE snapshot chain-facts tape_unit mismatch") != 0,
+               "candidate-chain-missing-chain-facts-red");
+        }
+        ck(red_drop, "candidate-chain-drop-guest-red");
+        ck(green_ok, "candidate-chain-restore-guest-green");
+        ck(red_mis, "candidate-chain-snap-facts-mismatch-red");
+
+        /* Drop routed extra guest through REAL tools/candidate-chain.cx in sandbox */
+        {
+            char sb[640], snap_da[640], bdir_da[700], bf_da[720], sm1d_da[700], sm1_da[720], gdir_da[700], ebg[720];
+            char cc_da[640], *fb = 0; size_t fbn = 0;
+            const char *add =
+                "root_target\tlnx/x86_64:entrybind.o\tsrc/entrybind_m1.cx\n"
+                "tape_unit\tlnx/x86_64:entrybind.o\tentrybind\n";
+            int da_red = 0, da_green = 0;
+            if (!cx_fmt(sb, sizeof sb, "%s/sb-cc-da", tmp) &&
+                !cx_fmt(snap_da, sizeof snap_da, "%s/snap-da", tmp) &&
+                !cx_fmt(bdir_da, sizeof bdir_da, "%s/build", snap_da) &&
+                !cx_fmt(bf_da, sizeof bf_da, "%s/chain-facts.tsv", bdir_da) &&
+                !cx_fmt(sm1d_da, sizeof sm1d_da, "%s/cx/driver", snap_da) &&
+                !cx_fmt(sm1_da, sizeof sm1_da, "%s/stream_s1_m1.cx", sm1d_da) &&
+                !cx_fmt(gdir_da, sizeof gdir_da, "%s/exec/tape/guests", snap_da) &&
+                !cx_fmt(ebg, sizeof ebg, "%s/entrybind_guest.cx", gdir_da) &&
+                !cx_fmt(cc_da, sizeof cc_da, "%s/cc_da", sb) &&
+                !sy_mkdir_all(bdir_da, 0755) && !sy_mkdir_all(sm1d_da, 0755) && !sy_mkdir_all(gdir_da, 0755) &&
+                !append_str(fbase, flen, add, &fb, &fbn) &&
+                !make_sandbox(repo, sb, fb, fbn) &&
+                !cx_write(bf_da, fb, fbn) &&
+                !cx_write(sm1_da, "/* stream_s1_m1 fixture */\n", 27)) {
+                for (int ti = 0; ti < cf_tu_count(); ti++) {
+                    const char *u = cf_tu_unit(ti);
+                    char gsrc[720], gu[720]; size_t gn = 0; char *gb = 0;
+                    if (u && !tx_eqz(u, "m53") &&
+                        !cx_fmt(gsrc, sizeof gsrc, "%s/exec/tape/guests/%s_guest.cx", repo, u) &&
+                        !cx_fmt(gu, sizeof gu, "%s/%s_guest.cx", gdir_da, u)) {
+                        gb = cx_read(gsrc, &gn);
+                        if (gb && gn > 0) { (void)cx_write(gu, gb, gn); mm_free(gb); }
+                    }
+                }
+                char *vg[] = {"sh", "./unisacc.com", "tools/chain-facts-gen.cx", "--", "--write", 0};
+                if (run_in(sb, vg, out, sizeof out, 35) == 0) {
+                    char *vb[] = {"sh", "./unisacc.com", "tools/candidate-chain.cx", "-o", cc_da, 0};
+                    if (run_in(sb, vb, out, sizeof out, 50) == 0) {
+                        char *vr[] = {cc_da, "--check-routed-guests", snap_da, 0};
+                        int rc_r = run_in(sb, vr, out, sizeof out, 10);
+                        if (rc_r != 0 && strstr(out, "REFUSE routed guest missing")) da_red = 1;
+                        if (cx_write(ebg, "/* entrybind guest fixture */\n", 30) == 0) {
+                            char want_g[64];
+                            int rc_g = run_in(sb, vr, out, sizeof out, 10);
+                            if (rc_g == 0 && !cx_fmt(want_g, sizeof want_g, "ROUTED_GUESTS\tok=%d", cf_tu_count() + 1) &&
+                                strstr(out, want_g)) da_green = 1;
+                        }
+                    }
+                }
+            }
+            if (fb) mm_free(fb);
+            ck(da_red, "candidate-chain-routed-driveargs-drop-guest-red");
+            ck(da_green, "candidate-chain-routed-driveargs-restore-guest-green");
+        }
+    }
+
+    mm_free(fbase);
+    sy_printf("%s\tfailed=%d\n", mode_chain ? "CHECK_PACKING_AUTHORITY_CHAIN" :
+              (mode_routed4 ? "CHECK_PACKING_AUTHORITY_EMBED" : "CHECK_PACKING_AUTHORITY"), failed);
+    return failed ? 1 : 0;
+}
