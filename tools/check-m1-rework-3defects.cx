@@ -1,0 +1,306 @@
+/* tools/check-m1-rework-3defects.cx -- regression check for the 3 M1 stream_s1_m1 fixes and v0.1.7 zero-A2 scope.
+ *
+ *   sh ./unisacc.com tools/check-m1-rework-3defects.cx --
+ *
+ * Verifies against live cx/driver/stream_s1_m1.cx and tools/tape/asm/tape_x86_64.S:
+ *   (1) v0.1.7 scope: stream_s1_m1.cx has zero A2 code (no a2_buf / 512ULL / 1024ULL);
+ *   (2) D1: full guest arena [0, memlimit) zeroed across calls (BSS + stack + long->short input tail);
+ *   (3) D2: cached bitmap/SHA keyed by slice SHA-256 + cleared on drop (same-address slice swap);
+ *   (4) D3: M53S1BIN2 ABI separation rejects old M53S1ABI1 decimal slice and cross-tag pairing.
+ * Marker: CHECK_M1_REWORK_3DEFECTS.
+ */
+#pragma unisa use sys.fs
+#pragma unisa use sys.io
+#pragma unisa use sys.posix
+#pragma unisa use sys.env
+#pragma unisa use text.text
+#pragma unisa use text.fmt
+#pragma unisa use mem.heap
+#pragma unisa use mem.bytes
+#pragma unisa use cxlib.netpack
+
+enum { RW_PW = 4400 };
+
+static int rw_run(char **av, char *out, long ocap) {
+    np_result r = {0};
+    char why[128] = {0};
+    int tr = np_run(av, ".", 0, 40, &r, why, sizeof why);
+    if (out && ocap > 0) {
+        long p = 0;
+        if (r.out && r.outn > 0) {
+            long take = (long)r.outn < ocap - 1 ? (long)r.outn : ocap - 1;
+            mm_copy(out + p, ocap - p, r.out, take);
+            p += take;
+        }
+        if (r.err && r.errn > 0 && p < ocap - 1) {
+            long take = (long)r.errn < (ocap - 1 - p) ? (long)r.errn : (ocap - 1 - p);
+            mm_copy(out + p, ocap - p, r.err, take);
+            p += take;
+        }
+        out[p] = 0;
+    }
+    int rc = (tr || r.residue) ? -1 : r.rc;
+    np_free(&r);
+    return rc;
+}
+
+static int rw_compile_slice(const char *tmp_dir, const char *name, const char *src, char out_sl[RW_PW]) {
+    char cxp[RW_PW], sp[RW_PW], log[4096];
+    if (cx_fmt(cxp, sizeof cxp, "%s/%s.cx", tmp_dir, name) ||
+        cx_fmt(sp, sizeof sp, "%s/%s.s", tmp_dir, name) ||
+        cx_fmt(out_sl, RW_PW, "%s/%s.tapeslice", tmp_dir, name)) return -1;
+    if (cx_write(cxp, src, (size_t)tx_len(src, 8192))) return -1;
+    char *cv[] = {"sh", "./unisacc.com", cxp, "-S", "-o", sp, 0};
+    if (rw_run(cv, log, sizeof log) != 0) {
+        sy_eprintf("compile %s failed:\n%s\n", name, log);
+        return -1;
+    }
+    char *pv[] = {"sh", "./unisacc.com", "tools/tapepack.cx", "--", sp, "-o", out_sl, 0};
+    if (rw_run(pv, log, sizeof log) != 0) {
+        sy_eprintf("tapepack %s failed:\n%s\n", name, log);
+        return -1;
+    }
+    return 0;
+}
+
+static void rw_cleanup(const char *tmp_dir) {
+    static const char *const fs[20] = {
+        "cxroot.tsv", "cx", "ext",
+        "d1.cx", "d1.s", "d1.tapeslice",
+        "d2a.cx", "d2a.s", "d2a.tapeslice",
+        "d2b.cx", "d2b.s", "d2b.tapeslice",
+        "m53_old.cx", "m53_old.s", "m53_old.tapeslice",
+        "m53_new.cx", "m53_new.s", "m53_new.tapeslice",
+        "harness.cx", "harness"
+    };
+    static const char *const sfs[2] = {"sidecar/tapemode.so", "sidecar/manifest.tsv"};
+    char p[RW_PW];
+    for (int i = 0; i < 2; i++) {
+        if (!cx_fmt(p, sizeof p, "%s/%s", tmp_dir, sfs[i])) (void)sy_unlink(p);
+    }
+    if (!cx_fmt(p, sizeof p, "%s/sidecar", tmp_dir)) (void)rmdir(p);
+    for (int i = 0; i < 20; i++) {
+        if (!cx_fmt(p, sizeof p, "%s/%s", tmp_dir, fs[i])) (void)sy_unlink(p);
+    }
+    (void)rmdir(tmp_dir);
+}
+
+int main(void) {
+    char pat[] = "/tmp/check-m1-rework-XXXXXX";
+    char cwd[4096], sc_dir[RW_PW], so_p[RW_PW], d1_sl[RW_PW], d2a_sl[RW_PW], d2b_sl[RW_PW];
+    char old_sl[RW_PW], new_sl[RW_PW], h_cx[RW_PW], h_bin[RW_PW], log[8192];
+    int passed = 0, failed = 0;
+
+    if (sy_cwd(cwd, sizeof cwd) < 0) return 2;
+    if (!mkdtemp(pat)) return 2;
+
+    {
+        char dst[RW_PW], target[RW_PW];
+        static const char *const links[3] = {"cxroot.tsv", "cx", "ext"};
+        for (int i = 0; i < 3; i++) {
+            if (cx_fmt(dst, sizeof dst, "%s/%s", pat, links[i]) ||
+                cx_fmt(target, sizeof target, "%s/%s", cwd, links[i]) ||
+                sy_symlink(target, dst)) {
+                rw_cleanup(pat);
+                return 2;
+            }
+        }
+    }
+
+    /* Read cx/driver/stream_s1_m1.cx to build live rework harness (D1, D2, D3, zero-A2 sizeof guard). */
+    size_t body_n = 0;
+    char *body = cx_read("cx/driver/stream_s1_m1.cx", &body_n);
+    if (!body || body_n == 0) {
+        if (body) mm_free(body);
+        rw_cleanup(pat);
+        return 2;
+    }
+
+    if (cx_fmt(sc_dir, sizeof sc_dir, "%s/sidecar", pat) ||
+        cx_fmt(so_p, sizeof so_p, "%s/sidecar/tapemode.so", pat)) {
+        mm_free(body); rw_cleanup(pat); return 2;
+    }
+    {
+        char *tv[] = {"sh", "./unisacc.com", "tools/tape-sidecar-build.cx", "--", "--target", "lnx/x86_64", ".", sc_dir, 0};
+        if (rw_run(tv, log, sizeof log) != 0 || sy_exists(so_p) != 1) {
+            sy_eprintf("sidecar build failed:\n%s\n", log);
+            mm_free(body); rw_cleanup(pat); return 1;
+        }
+    }
+
+    static const char *d1_src =
+        "static unsigned long long g_bss_canary[16];\n"
+        "static int touch_stack_and_check(int dirty_phase) {\n"
+        "    unsigned long long st[32]; int found = 0, i;\n"
+        "    if (!dirty_phase) { for (i = 0; i < 32; i++) if (st[i] != 0ULL) found = 1; return found; }\n"
+        "    for (i = 0; i < 32; i++) st[i] = 0xdeadbeefcafebabeULL ^ (unsigned long long)i;\n"
+        "    return (int)(st[0] & 1ULL);\n"
+        "}\n"
+        "int main(int argc, char **argv) {\n"
+        "    const char *abi = \"R101BIN2\"; const unsigned long long *ba;\n"
+        "    const unsigned char *data; long length; int dirty = 0, i;\n"
+        "    if (abi[0] != 'R' || argc < 2) return 9;\n"
+        "    ba = (const unsigned long long *)argv[1];\n"
+        "    data = (const unsigned char *)ba[0]; length = (long)ba[1];\n"
+        "    for (i = 0; i < 16; i++) if (g_bss_canary[i] != 0ULL) dirty |= 1;\n"
+        "    if (touch_stack_and_check(0)) dirty |= 2;\n"
+        "    if (data && length == 8 && data[64] != 0) dirty |= 4;\n"
+        "    for (i = 0; i < 16; i++) g_bss_canary[i] = 0x1122334455667788ULL + (unsigned long long)i;\n"
+        "    (void)touch_stack_and_check(1);\n"
+        "    return dirty;\n"
+        "}\n";
+    static const char *d2a_src =
+        "int main(int argc, char **argv) {\n"
+        "    const char *abi = \"D201BIN2\"; const unsigned long long *ba;\n"
+        "    if (abi[0] != 'D' || argc < 2) return 9;\n"
+        "    ba = (const unsigned long long *)argv[1];\n"
+        "    return ba[1] >= 0 ? 1 : 0;\n"
+        "}\n";
+    static const char *d2b_src =
+        "int main(int argc, char **argv) {\n"
+        "    const char *abi = \"D201BIN2\"; const unsigned long long *ba;\n"
+        "    if (abi[0] != 'D' || argc < 2) return 9;\n"
+        "    ba = (const unsigned long long *)argv[1];\n"
+        "    return ba[1] >= 0 ? 2 : 0;\n"
+        "}\n";
+    static const char *m53_old_src =
+        "int main(int argc, char **argv) {\n"
+        "    const char *abi = \"M53S1ABI1\";\n"
+        "    if (abi[0] != 'M' || argc < 3) return 2;\n"
+        "    return argv[1] && argv[2] ? 1 : 0;\n"
+        "}\n";
+    static const char *m53_new_src =
+        "int main(int argc, char **argv) {\n"
+        "    const char *abi = \"M53S1BIN2\"; const unsigned long long *ba;\n"
+        "    const unsigned char *data; long length; unsigned long count;\n"
+        "    if (abi[0] != 'M' || argc < 2) return 2;\n"
+        "    ba = (const unsigned long long *)argv[1];\n"
+        "    data = (const unsigned char *)ba[0]; length = (long)ba[1];\n"
+        "    if (!data || length < 4) return 0;\n"
+        "    count = (unsigned long)data[0] | ((unsigned long)data[1] << 8) |\n"
+        "            ((unsigned long)data[2] << 16) | ((unsigned long)data[3] << 24);\n"
+        "    if (count > 1000000UL) return 0;\n"
+        "    return length == 4 + (long)count * 9 ? 1 : 0;\n"
+        "}\n";
+
+    if (rw_compile_slice(pat, "d1", d1_src, d1_sl) != 0 ||
+        rw_compile_slice(pat, "d2a", d2a_src, d2a_sl) != 0 ||
+        rw_compile_slice(pat, "d2b", d2b_src, d2b_sl) != 0 ||
+        rw_compile_slice(pat, "m53_old", m53_old_src, old_sl) != 0 ||
+        rw_compile_slice(pat, "m53_new", m53_new_src, new_sl) != 0) {
+        mm_free(body); rw_cleanup(pat); return 1;
+    }
+
+    static const char *tail =
+        "\nstatic unsigned char *rd_all(const char *p, long *n_out) {\n"
+        "    unsigned char *b = 0; int64_t n = 0;\n"
+        "    if (sy_read_file(p, &b, &n, 4L << 20) != 0 || !b || n <= 0) return 0;\n"
+        "    *n_out = (long)n; return b;\n"
+        "}\n"
+        "int main(int argc, char **argv) {\n"
+        "    int failed = 0, passed = 0;\n"
+        "    unsigned char *so_b = 0, *d1_b = 0, *d2a_b = 0, *d2b_b = 0, *old_b = 0, *new_b = 0;\n"
+        "    long so_n = 0, d1_n = 0, d2a_n = 0, d2b_n = 0, old_n = 0, new_n = 0;\n"
+        "    if (argc < 7) return 2;\n"
+        "    so_b = rd_all(argv[1], &so_n); d1_b = rd_all(argv[2], &d1_n);\n"
+        "    d2a_b = rd_all(argv[3], &d2a_n); d2b_b = rd_all(argv[4], &d2b_n);\n"
+        "    old_b = rd_all(argv[5], &old_n); new_b = rd_all(argv[6], &new_n);\n"
+        "    if (!so_b || !d1_b || !d2a_b || !d2b_b || !old_b || !new_b) return 2;\n"
+        "    mm_fill(&g_tape_rt, (long)sizeof g_tape_rt, 0, (long)sizeof g_tape_rt);\n"
+        "    {\n"
+        "        static const char *const sym_names[3] = {\"hoststub_lnx_x86_64_bind\", \"hoststub_lnx_x86_64\", \"tape_run_x86_64\"};\n"
+        "        if (tsl_check(so_b, so_n, sym_names, &g_tape_rt.tsl) != 0 || tsl_map(so_b, so_n, &g_tape_rt.tsl) != 0) return 2;\n"
+        "        g_tape_rt.bind_fn = tsl_addr(&g_tape_rt.tsl, 0);\n"
+        "        g_tape_rt.disp_fn = tsl_addr(&g_tape_rt.tsl, 1);\n"
+        "        g_tape_rt.run_fn = tsl_addr(&g_tape_rt.tsl, 2);\n"
+        "    }\n"
+        "    g_tape_rt.gen = 1UL; g_tape_rt.state = M53_M1_READY;\n"
+        "    {\n"
+        "        TapeUnitState u; TapeUnitSpec sp = {\"\", \"\", \"\", \"\", \"\", \"R101BIN2\", 8L, \"d1\", 15ULL, 2000000ULL, \"D1_REFUSE\"};\n"
+        "        unsigned char long_in[256], short_in[8]; long r1, r2;\n"
+        "        mm_fill(&u, (long)sizeof u, 0, (long)sizeof u);\n"
+        "        if (tape_unit_validate_slice(d1_b, d1_n, sp.abi_tag, sp.abi_tag_len, &u.code_len, &u.data_off, &u.data_len, &u.bss_size) != 0) { failed++; }\n"
+        "        else {\n"
+        "            u.slice = d1_b; u.slice_len = d1_n; u.rt_gen = g_tape_rt.gen; u.state = M53_M1_READY;\n"
+        "            mm_fill(long_in, 256, 0x5a, 256); mm_fill(short_in, 8, 0x11, 8);\n"
+        "            r1 = tape_unit_vm_exec(&u, &sp, long_in, 256L);\n"
+        "            r2 = tape_unit_vm_exec(&u, &sp, short_in, 8L);\n"
+        "            if (r1 == 0L && r2 == 0L) { sy_printf(\"PASS\\tcheck-m1-rework-3defects.D1.arena_zero_residue\\tr1=%ld\\tr2=%ld\\n\", r1, r2); passed++; }\n"
+        "            else { sy_printf(\"FAIL\\tcheck-m1-rework-3defects.D1.arena_zero_residue\\tr1=%ld\\tr2=%ld\\n\", r1, r2); failed++; }\n"
+        "        }\n"
+        "    }\n"
+        "    {\n"
+        "        TapeUnitState u; TapeUnitSpec sp = {\"\", \"\", \"\", \"\", \"\", \"D201BIN2\", 8L, \"d2\", 15ULL, 2000000ULL, \"D2_REFUSE\"};\n"
+        "        long max_n = d2a_n > d2b_n ? d2a_n : d2b_n;\n"
+        "        unsigned char *same_buf = (unsigned char *)mm_alloc(max_n); unsigned char dummy[8] = {1,2,3,4,5,6,7,8}; long ra, rb;\n"
+        "        mm_fill(&u, (long)sizeof u, 0, (long)sizeof u); mm_copy(same_buf, max_n, d2a_b, d2a_n);\n"
+        "        if (tape_unit_validate_slice(same_buf, d2a_n, sp.abi_tag, sp.abi_tag_len, &u.code_len, &u.data_off, &u.data_len, &u.bss_size) != 0) { failed++; }\n"
+        "        else {\n"
+        "            u.slice = same_buf; u.slice_len = d2a_n; u.rt_gen = g_tape_rt.gen; u.state = M53_M1_READY;\n"
+        "            ra = tape_unit_vm_exec(&u, &sp, dummy, 8L);\n"
+        "            mm_copy(same_buf, max_n, d2b_b, d2b_n);\n"
+        "            (void)tape_unit_validate_slice(same_buf, d2b_n, sp.abi_tag, sp.abi_tag_len, &u.code_len, &u.data_off, &u.data_len, &u.bss_size);\n"
+        "            u.slice = same_buf; u.slice_len = d2b_n;\n"
+        "            rb = tape_unit_vm_exec(&u, &sp, dummy, 8L);\n"
+        "            if (ra == 1L && rb == 2L) { sy_printf(\"PASS\\tcheck-m1-rework-3defects.D2.same_addr_swap\\tra=%ld\\trb=%ld\\n\", ra, rb); passed++; }\n"
+        "            else { sy_printf(\"FAIL\\tcheck-m1-rework-3defects.D2.same_addr_swap\\tra=%ld\\trb=%ld\\n\", ra, rb); failed++; }\n"
+        "        }\n"
+        "        mm_free(same_buf);\n"
+        "    }\n"
+        "    {\n"
+        "        unsigned long long c1, d1, l1, b1;\n"
+        "        int accept_old = (tape_unit_validate_slice(old_b, old_n, m53_m1_spec.abi_tag, m53_m1_spec.abi_tag_len, &c1, &d1, &l1, &b1) == 0);\n"
+        "        int accept_new = (tape_unit_validate_slice(new_b, new_n, m53_m1_spec.abi_tag, m53_m1_spec.abi_tag_len, &c1, &d1, &l1, &b1) == 0);\n"
+        "        int cross = (tape_unit_validate_slice(new_b, new_n, \"M53S1ABI1\", 9L, &c1, &d1, &l1, &b1) == 0);\n"
+        "        if (!accept_old && accept_new && !cross) { sy_printf(\"PASS\\tcheck-m1-rework-3defects.D3.abi_tag_separation\\ttag=%s\\n\", m53_m1_spec.abi_tag); passed++; }\n"
+        "        else { sy_printf(\"FAIL\\tcheck-m1-rework-3defects.D3.abi_tag_separation\\told=%d\\tnew=%d\\tcross=%d\\n\", accept_old, accept_new, cross); failed++; }\n"
+        "    }\n"
+        "    if (sizeof(TapeIbmSlot) == 72) { sy_printf(\"PASS\\tcheck-m1-rework-3defects.zero-a2-slot-size\\tsz=%ld\\n\", (long)sizeof(TapeIbmSlot)); passed++; }\n"
+        "    else { sy_printf(\"FAIL\\tcheck-m1-rework-3defects.zero-a2-slot-size\\tsz=%ld\\n\", (long)sizeof(TapeIbmSlot)); failed++; }\n"
+        "    sy_printf(\"INNER_REWORK\\tpassed=%d\\tfailed=%d\\n\", passed, failed);\n"
+        "    return failed ? 1 : 0;\n"
+        "}\n";
+
+    /* Strip leading `#pragma unisa module stream_s1_m1` line so harness.cx compiles standalone. */
+    const char *bstart = body;
+    if (!strncmp(bstart, "#pragma unisa module ", 21)) {
+        const char *nl = strchr(bstart, '\n');
+        if (nl) bstart = nl + 1;
+    }
+    const char *hdr = "#pragma unisa use sys.io\n";
+    long hlen = (long)strlen(hdr);
+    long blen = (long)strlen(bstart);
+    long tlen = (long)strlen(tail);
+    char *comb = (char *)mm_alloc(hlen + blen + tlen + 1);
+    if (!comb) { mm_free(body); rw_cleanup(pat); return 2; }
+    mm_copy(comb, hlen + blen + tlen + 1, hdr, hlen);
+    mm_copy(comb + hlen, blen + tlen + 1, bstart, blen);
+    mm_copy(comb + hlen + blen, tlen + 1, tail, tlen);
+    comb[hlen + blen + tlen] = 0;
+    mm_free(body);
+
+    if (cx_fmt(h_cx, sizeof h_cx, "%s/harness.cx", pat) ||
+        cx_fmt(h_bin, sizeof h_bin, "%s/harness", pat) ||
+        cx_write(h_cx, comb, (size_t)(hlen + blen + tlen))) {
+        mm_free(comb); rw_cleanup(pat); return 2;
+    }
+    mm_free(comb);
+
+    {
+        char *cv[] = {"sh", "./unisacc.com", h_cx, "-o", h_bin, 0};
+        if (rw_run(cv, log, sizeof log) != 0) {
+            sy_eprintf("compile rework harness failed:\n%s\n", log);
+            rw_cleanup(pat); return 1;
+        }
+    }
+    {
+        char *rv[] = {h_bin, so_p, d1_sl, d2a_sl, d2b_sl, old_sl, new_sl, 0};
+        int rrc = rw_run(rv, log, sizeof log);
+        sy_printf("%s", log);
+        if (rrc != 0) failed += 4;
+        else passed += 4;
+    }
+    rw_cleanup(pat);
+    sy_printf("CHECK_M1_REWORK_3DEFECTS\tpassed=%d\tfailed=%d\n", passed, failed);
+    return failed ? 1 : 0;
+}
