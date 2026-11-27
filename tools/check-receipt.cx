@@ -148,7 +148,7 @@ static void sha_str(const char *s, size_t n, char hex[65]) {
 static int test_tamper_v3(const char *src_path, const char *dst_path, const char *kind) {
     size_t n = 0;
     char *t = 0;
-    char run_id[160] = "", rev[80] = "", unit[160] = "", prod[160] = "", purp[160] = "";
+    char run_id[160] = "", rev[80] = "", unit[160] = "", target[64] = "", prod[160] = "", purp[160] = "";
     char cand[65] = "", inp[65] = "", outh[65] = "", verd[16] = "", bind_old[65] = "";
     int rc_v = 0;
     long long ts_v = 0;
@@ -172,6 +172,7 @@ static int test_tamper_v3(const char *src_path, const char *dst_path, const char
                 if (kl == 6 && !memcmp(kp, "run_id", 6) && vl < sizeof run_id) { mm_copy(run_id, (long)sizeof run_id, vp, (long)vl); run_id[vl] = 0; }
                 else if (kl == 3 && !memcmp(kp, "rev", 3) && vl < sizeof rev) { mm_copy(rev, (long)sizeof rev, vp, (long)vl); rev[vl] = 0; }
                 else if (kl == 4 && !memcmp(kp, "unit", 4) && vl < sizeof unit) { mm_copy(unit, (long)sizeof unit, vp, (long)vl); unit[vl] = 0; }
+                else if (kl == 6 && !memcmp(kp, "target", 6) && vl < sizeof target) { mm_copy(target, (long)sizeof target, vp, (long)vl); target[vl] = 0; }
                 else if (kl == 8 && !memcmp(kp, "producer", 8) && vl < sizeof prod) { mm_copy(prod, (long)sizeof prod, vp, (long)vl); prod[vl] = 0; }
                 else if (kl == 7 && !memcmp(kp, "purpose", 7) && vl < sizeof purp) { mm_copy(purp, (long)sizeof purp, vp, (long)vl); purp[vl] = 0; }
                 else if (kl == 13 && !memcmp(kp, "candidate_sha", 13) && vl == 64) { mm_copy(cand, 65, vp, 64); cand[64] = 0; }
@@ -193,15 +194,17 @@ static int test_tamper_v3(const char *src_path, const char *dst_path, const char
     else if (!strcmp(kind, "verdict-flip")) cx_fmt(verd, sizeof verd, "%s", !strcmp(verd, "PASS") ? "FAIL" : "PASS");
     else if (!strcmp(kind, "unit-mismatch")) { char u2[160]; cx_fmt(u2, sizeof u2, "%.140s-other", unit); cx_fmt(unit, sizeof unit, "%s", u2); }
     else if (!strcmp(kind, "candidate-swap")) cand[63] = (cand[63] == '0') ? '1' : '0';
+    else if (!strcmp(kind, "target-swap")) cx_fmt(target, sizeof target, "%s", !strcmp(target, "lnx/x86_64") ? "lnx/arm64" : "lnx/x86_64");
+    else if (!strcmp(kind, "raw-target-tamper")) { cx_fmt(target, sizeof target, "%s", !strcmp(target, "lnx/x86_64") ? "lnx/arm64" : "lnx/x86_64"); raw_keep = 1; }
     else if (!strcmp(kind, "raw-rc-tamper")) { rc_v = (rc_v == 0) ? 1 : 0; raw_keep = 1; }
     else if (!strcmp(kind, "raw-verdict-tamper")) { cx_fmt(verd, sizeof verd, "%s", !strcmp(verd, "PASS") ? "FAIL" : "PASS"); raw_keep = 1; }
     else if (!strcmp(kind, "raw-ts-tamper")) { ts_v = ts_v - 1LL; raw_keep = 1; }
     else return 1;
 
     if (cx_fmt(payload, sizeof payload,
-               "version\t3\nrun_id\t%s\nrev\t%s\nunit\t%s\nproducer\t%s\npurpose\t%s\n"
+               "version\t3\nrun_id\t%s\nrev\t%s\nunit\t%s\ntarget\t%s\nproducer\t%s\npurpose\t%s\n"
                "candidate_sha\t%s\ninputs_sha\t%s\noutput_sha\t%s\nrc\t%d\nverdict\t%s\nts\t%lld\n",
-               run_id, rev, unit, prod, purp, cand, inp, outh, rc_v, verd, ts_v)) return 1;
+               run_id, rev, unit, target, prod, purp, cand, inp, outh, rc_v, verd, ts_v)) return 1;
     if (raw_keep) mm_copy(bind_new, 65, bind_old, 65);
     else if (sy_sha256_hex(payload, (long)strlen(payload), bind_new)) return 1;
     if (cx_fmt(body, sizeof body, "%sbinding_sha\t%s\n", payload, bind_new)) return 1;
@@ -241,6 +244,7 @@ static void test_v3_all(const char *root_dir) {
     base.run_id = "run-v3-1001";
     base.rev = "f4163f7d3a01";
     base.unit = "check-v0111-exit";
+    base.target = "lnx/x86_64";
     base.producer = "tools/check-v0111-exit.cx";
     base.purpose = "exit-gate";
     base.candidate_sha = cand;
@@ -253,6 +257,7 @@ static void test_v3_all(const char *root_dir) {
     exp.run_id = "run-v3-1001";
     exp.rev = "f4163f7d3a01";
     exp.unit = "check-v0111-exit";
+    exp.target = "lnx/x86_64";
     exp.candidate_sha = cand;
     exp.inputs_sha = inp;
     exp.output_sha = outh;
@@ -266,10 +271,15 @@ static void test_v3_all(const char *root_dir) {
     exp.max_future_s = 300LL;
     exp.allow_fail_verdict = 0;
 
-    /* Write/read consistency: rc_write3 rejects empty producer/purpose, INT_MIN, contradictory rc/verdict */
+    /* Write/read consistency: rc_write3 rejects empty target/producer/purpose, INT_MIN, contradictory rc/verdict */
     {
         rc_v3_t badw = base;
-        badw.producer = ""; ok(rc_write3(rt, &badw) != 0, "v3: rc_write3 refuses empty producer");
+        char long_tgt[65]; memset(long_tgt, 't', 64); long_tgt[64] = 0;
+        badw.target = ""; ok(rc_write3(rt, &badw) != 0, "v3: rc_write3 refuses empty target");
+        badw = base; badw.target = 0; ok(rc_write3(rt, &badw) != 0, "v3: rc_write3 refuses null target");
+        badw = base; badw.target = "lnx x86_64"; ok(rc_write3(rt, &badw) != 0, "v3: rc_write3 refuses space in target");
+        badw = base; badw.target = long_tgt; ok(rc_write3(rt, &badw) != 0, "v3: rc_write3 refuses >=64B target");
+        badw = base; badw.producer = ""; ok(rc_write3(rt, &badw) != 0, "v3: rc_write3 refuses empty producer");
         badw = base; badw.purpose = 0; ok(rc_write3(rt, &badw) != 0, "v3: rc_write3 refuses null purpose");
         badw = base; badw.rc = 1; badw.verdict = "PASS"; ok(rc_write3(rt, &badw) != 0, "v3: rc_write3 refuses rc=1 PASS");
         badw = base; badw.rc = 0; badw.verdict = "FAIL"; ok(rc_write3(rt, &badw) != 0, "v3: rc_write3 refuses rc=0 FAIL");
@@ -280,7 +290,8 @@ static void test_v3_all(const char *root_dir) {
     ok(rc_write3(r3, &base) == 0, "v3: rc_write3 valid");
     e = exp; e.output_path = outp2;
     ok(rc_verify_out(r3, &e, &ver) == RC_OK && !strcmp(ver.run_id, base.run_id) &&
-       !strcmp(ver.rev, base.rev) && !strcmp(ver.producer, base.producer) && !strcmp(ver.purpose, base.purpose) &&
+       !strcmp(ver.rev, base.rev) && !strcmp(ver.target, base.target) &&
+       !strcmp(ver.producer, base.producer) && !strcmp(ver.purpose, base.purpose) &&
        ver.rc == 0 && ver.ts == base.ts && ver.output_bytes != 0 && ver.output_len == (long)bin_out_n &&
        mm_same(ver.output_bytes, bin_out, (long)bin_out_n),
        "v3: rc_verify_out positive control + pinned artifact bytes");
@@ -373,6 +384,21 @@ static void test_v3_all(const char *root_dir) {
             cx_fmt(dup, sizeof dup, "%srun_id\tother-id\n", sb);
             cx_write(rt, dup, strlen(dup));
             ok(rc_verify(rt, &exp) == RC_ERR_FORMAT, "v3: code 13 duplicate key");
+            cx_fmt(dup, sizeof dup, "%starget\tlnx/arm64\n", sb);
+            cx_write(rt, dup, strlen(dup));
+            ok(rc_verify(rt, &exp) == RC_ERR_FORMAT, "v3: code 13 duplicate target");
+        }
+        {
+            char notgt[2304], bind_s[65], full[2400];
+            cx_fmt(notgt, sizeof notgt,
+                   "version\t3\nrun_id\t%s\nrev\t%s\nunit\t%s\nproducer\t%s\npurpose\t%s\n"
+                   "candidate_sha\t%s\ninputs_sha\t%s\noutput_sha\t%s\nrc\t0\nverdict\tPASS\nts\t%lld\n",
+                   base.run_id, base.rev, base.unit, base.producer, base.purpose,
+                   cand, inp, outh, (long long)base.ts);
+            sha_str(notgt, strlen(notgt), bind_s);
+            cx_fmt(full, sizeof full, "%sbinding_sha\t%s\n", notgt, bind_s);
+            cx_write(rt, full, strlen(full));
+            ok(rc_verify(rt, &exp) == RC_ERR_FORMAT, "v3: code 13 missing target field");
         }
         {
             char unk[2400];
@@ -413,7 +439,9 @@ static void test_v3_all(const char *root_dir) {
         free(sb);
     }
 
-    /* Group (9) & Code 14 (RC_ERR_BINDING): raw tamper of rc, verdict, ts without updating binding_sha */
+    /* Group (9) & Code 14 (RC_ERR_BINDING): raw tamper of target, rc, verdict, ts without updating binding_sha */
+    ok(test_tamper_v3(r3, rt, "raw-target-tamper") == 0 && rc_verify(rt, &exp) == RC_ERR_BINDING,
+       "v3: code 14 raw target tamper breaks binding_sha");
     ok(test_tamper_v3(r3, rt, "raw-rc-tamper") == 0 && rc_verify(rt, &exp) == RC_ERR_BINDING,
        "v3: code 14 raw rc tamper breaks binding_sha");
     ok(test_tamper_v3(r3, rt, "raw-verdict-tamper") == 0 && rc_verify(rt, &exp) == RC_ERR_BINDING,
@@ -437,13 +465,16 @@ static void test_v3_all(const char *root_dir) {
         ok(rc_verify(rt, &e) == RC_ERR_RUN_ID, "v3: code 15 multi-stage mixed run_id rejected");
     }
 
-    /* Group (4) & Codes 16, 17, 18, 19: single-field identity mismatches with valid binding_sha */
+    /* Group (4) & Codes 16, 17, 18, 19, 25: single-field identity mismatches with valid binding_sha */
     ok(test_tamper_v3(r3, rt, "foreign-rev") == 0 && rc_verify(rt, &exp) == RC_ERR_REV,
        "v3: code 16 foreign rev with valid binding");
     ok(test_tamper_v3(r3, rt, "unit-mismatch") == 0 && rc_verify(rt, &exp) == RC_ERR_UNIT,
        "v3: code 17 unit mismatch with valid binding");
     ok(test_tamper_v3(r3, rt, "candidate-swap") == 0 && rc_verify(rt, &exp) == RC_ERR_CANDIDATE,
        "v3: code 18 candidate swap with valid binding");
+    ok(test_tamper_v3(r3, rt, "target-swap") == 0 && rc_verify(rt, &exp) == RC_ERR_TARGET &&
+       !strncmp(rc_why(), "target-mismatch", 15),
+       "v3: code 25 target swap with valid binding");
     {
         rc_v3_t in_mod = base;
         in_mod.inputs_sha = inp2;
@@ -505,17 +536,17 @@ static void test_v3_all(const char *root_dir) {
             tmpv.ts = 1764200000000LL;
             ok(rc_write3(rt, &tmpv) != 0, "v3: rc_write3 refuses ms-unit ts");
             cx_fmt(bad_ts, sizeof bad_ts,
-                   "version\t3\nrun_id\t%s\nrev\t%s\nunit\t%s\nproducer\t%s\npurpose\t%s\n"
+                   "version\t3\nrun_id\t%s\nrev\t%s\nunit\t%s\ntarget\t%s\nproducer\t%s\npurpose\t%s\n"
                    "candidate_sha\t%s\ninputs_sha\t%s\noutput_sha\t%s\nrc\t0\nverdict\tPASS\nts\t999999999999999999999999\n"
                    "binding_sha\t%s\n",
-                   base.run_id, base.rev, base.unit, base.producer, base.purpose,
+                   base.run_id, base.rev, base.unit, base.target, base.producer, base.purpose,
                    cand, inp, outh, cand2);
             cx_write(rt, bad_ts, strlen(bad_ts));
             ok(rc_verify(rt, &exp) == RC_ERR_TIMESTAMP, "v3: code 22 ts integer overflow rejected");
             cx_fmt(bad_ts, sizeof bad_ts,
-                   "version\t3\nrun_id\t%s\nrev\t%s\nunit\t%s\nproducer\t%s\npurpose\t%s\n"
+                   "version\t3\nrun_id\t%s\nrev\t%s\nunit\t%s\ntarget\t%s\nproducer\t%s\npurpose\t%s\n"
                    "candidate_sha\t%s\ninputs_sha\t%s\noutput_sha\t%s\nrc\t0\nverdict\tPASS\nts\t1764200000000\n",
-                   base.run_id, base.rev, base.unit, base.producer, base.purpose,
+                   base.run_id, base.rev, base.unit, base.target, base.producer, base.purpose,
                    cand, inp, outh);
             sha_str(bad_ts, strlen(bad_ts), bind_s);
             cx_fmt(full, sizeof full, "%sbinding_sha\t%s\n", bad_ts, bind_s);
@@ -534,9 +565,9 @@ static void test_v3_all(const char *root_dir) {
         {
             char forged[2304], bind_s[65], full[2400];
             cx_fmt(forged, sizeof forged,
-                   "version\t3\nrun_id\t%s\nrev\t%s\nunit\t%s\nproducer\t%s\npurpose\t%s\n"
+                   "version\t3\nrun_id\t%s\nrev\t%s\nunit\t%s\ntarget\t%s\nproducer\t%s\npurpose\t%s\n"
                    "candidate_sha\t%s\ninputs_sha\t%s\noutput_sha\t%s\nrc\t1\nverdict\tPASS\nts\t%lld\n",
-                   base.run_id, base.rev, base.unit, base.producer, base.purpose,
+                   base.run_id, base.rev, base.unit, base.target, base.producer, base.purpose,
                    zero64, zero64, zero64, (long long)base.ts);
             sha_str(forged, strlen(forged), bind_s);
             cx_fmt(full, sizeof full, "%sbinding_sha\t%s\n", forged, bind_s);
@@ -552,6 +583,8 @@ static void test_v3_all(const char *root_dir) {
     e = exp; e.run_id = 0; ok(rc_verify(r3, &e) == RC_ERR_EXPECT_UNBOUND, "v3: code 24 missing expect.run_id");
     e = exp; e.rev = ""; ok(rc_verify(r3, &e) == RC_ERR_EXPECT_UNBOUND, "v3: code 24 empty expect.rev");
     e = exp; e.unit = 0; ok(rc_verify(r3, &e) == RC_ERR_EXPECT_UNBOUND, "v3: code 24 missing expect.unit");
+    e = exp; e.target = 0; ok(rc_verify(r3, &e) == RC_ERR_EXPECT_UNBOUND, "v3: code 24 missing expect.target");
+    e = exp; e.target = ""; ok(rc_verify(r3, &e) == RC_ERR_EXPECT_UNBOUND, "v3: code 24 empty expect.target");
     e = exp; e.producer = ""; ok(rc_verify(r3, &e) == RC_ERR_EXPECT_UNBOUND, "v3: code 24 missing expect.producer");
     e = exp; e.purpose = 0; ok(rc_verify(r3, &e) == RC_ERR_EXPECT_UNBOUND, "v3: code 24 missing expect.purpose");
     e = exp; e.output_path = 0; ok(rc_verify(r3, &e) == RC_ERR_EXPECT_UNBOUND, "v3: code 24 missing expect.output_path");
@@ -563,16 +596,16 @@ static void test_v3_all(const char *root_dir) {
     e = exp; e.allow_fail_verdict = 1; e.expect_rc = 1; e.expect_verdict = "PASS";
     ok(rc_verify(r3, &e) == RC_ERR_EXPECT_UNBOUND, "v3: code 24 contradictory allow_fail rc=1 PASS");
 
-    /* Code names non-empty and distinct across 10..24 */
+    /* Code names non-empty and distinct across 10..25 */
     {
         int c1, c2, all_distinct = 1;
-        for (c1 = 10; c1 <= 24; c1++) {
+        for (c1 = 10; c1 <= 25; c1++) {
             const char *n1 = rc_code_name(c1);
             if (!n1 || !n1[0] || !strcmp(n1, "unknown")) all_distinct = 0;
-            for (c2 = c1 + 1; c2 <= 24; c2++) {
+            for (c2 = c1 + 1; c2 <= 25; c2++) {
                 if (!strcmp(n1, rc_code_name(c2))) all_distinct = 0;
             }
         }
-        ok(all_distinct, "v3: codes 10..24 have 15 distinct non-empty names");
+        ok(all_distinct, "v3: codes 10..25 have 16 distinct non-empty names");
     }
 }

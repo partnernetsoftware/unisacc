@@ -266,13 +266,15 @@ enum {
     RC_ERR_VERDICT = 21,
     RC_ERR_TIMESTAMP = 22,
     RC_ERR_PLACEHOLDER = 23,
-    RC_ERR_EXPECT_UNBOUND = 24
+    RC_ERR_EXPECT_UNBOUND = 24,
+    RC_ERR_TARGET = 25
 };
 
 typedef struct {
     const char *run_id;
     const char *rev;
     const char *unit;
+    const char *target;
     const char *producer;
     const char *purpose;
     const char *candidate_sha;
@@ -287,6 +289,7 @@ typedef struct {
     const char *run_id;
     const char *rev;
     const char *unit;
+    const char *target;
     const char *candidate_sha;
     const char *inputs_sha;
     const char *output_sha;
@@ -305,6 +308,7 @@ typedef struct {
     char run_id[160];
     char rev[80];
     char unit[160];
+    char target[64];
     char producer[160];
     char purpose[160];
     char candidate_sha[65];
@@ -341,6 +345,7 @@ const char *rc_code_name(int code) {
     if (code == RC_ERR_TIMESTAMP) return "ts-policy";
     if (code == RC_ERR_PLACEHOLDER) return "placeholder-sha";
     if (code == RC_ERR_EXPECT_UNBOUND) return "expect-unbound";
+    if (code == RC_ERR_TARGET) return "target-mismatch";
     return "unknown";
 }
 
@@ -392,9 +397,9 @@ static int rc_parse_i64(const char *s, int64_t *out) {
 static int rc_v3_binding(const rc_v3_t *r, char hex[65]) {
     char payload[2048];
     if (cx_fmt(payload, sizeof payload,
-               "version\t3\nrun_id\t%s\nrev\t%s\nunit\t%s\nproducer\t%s\npurpose\t%s\n"
+               "version\t3\nrun_id\t%s\nrev\t%s\nunit\t%s\ntarget\t%s\nproducer\t%s\npurpose\t%s\n"
                "candidate_sha\t%s\ninputs_sha\t%s\noutput_sha\t%s\nrc\t%d\nverdict\t%s\nts\t%lld\n",
-               r->run_id, r->rev, r->unit, r->producer, r->purpose,
+               r->run_id, r->rev, r->unit, r->target, r->producer, r->purpose,
                r->candidate_sha, r->inputs_sha, r->output_sha,
                r->rc, r->verdict, (long long)r->ts)) {
         return rc_fail("fmt", "v3-binding");
@@ -406,8 +411,9 @@ static int rc_v3_binding(const rc_v3_t *r, char hex[65]) {
 int rc_write3(const char *path, const rc_v3_t *rec) {
     char body[2304], bind_sha[65];
     if (!path || !path[0] || !rec) return rc_fail("arg", "rc_write3");
-    /* Producer and purpose are mandatory: never silently default empty authorization fields. */
+    /* Producer, purpose, and target are mandatory: never silently default empty authorization fields. */
     if (!rc_is_id(rec->run_id) || !rc_is_id(rec->rev) || !rc_is_id(rec->unit) ||
+        !rc_is_id(rec->target) || strlen(rec->target) >= 64 ||
         !rc_is_id(rec->producer) || !rc_is_id(rec->purpose)) return rc_fail("bad-id", path);
     if (!rc_is_hex64_lower(rec->candidate_sha) || !rc_is_hex64_lower(rec->inputs_sha) ||
         !rc_is_hex64_lower(rec->output_sha)) return rc_fail("bad-hex64", path);
@@ -423,10 +429,10 @@ int rc_write3(const char *path, const rc_v3_t *rec) {
     if (rec->ts <= 0 || rec->ts > 4102444800LL) return rc_fail("bad-ts", path);
     if (rc_v3_binding(rec, bind_sha)) return 1;
     if (cx_fmt(body, sizeof body,
-               "version\t3\nrun_id\t%s\nrev\t%s\nunit\t%s\nproducer\t%s\npurpose\t%s\n"
+               "version\t3\nrun_id\t%s\nrev\t%s\nunit\t%s\ntarget\t%s\nproducer\t%s\npurpose\t%s\n"
                "candidate_sha\t%s\ninputs_sha\t%s\noutput_sha\t%s\nrc\t%d\nverdict\t%s\nts\t%lld\n"
                "binding_sha\t%s\n",
-               rec->run_id, rec->rev, rec->unit, rec->producer, rec->purpose,
+               rec->run_id, rec->rev, rec->unit, rec->target, rec->producer, rec->purpose,
                rec->candidate_sha, rec->inputs_sha, rec->output_sha,
                rec->rc, rec->verdict, (long long)rec->ts, bind_sha)) {
         return rc_fail("fmt", path);
@@ -562,6 +568,10 @@ static int rc_parse_v3_snapshot(const unsigned char *buf, long n, rc_verified_t 
             if (mask & (1U << 12)) { rc_fail("dup-key", "binding_sha"); return RC_ERR_FORMAT; }
             if (rc_copy_field(vp, vl, got->binding_sha, sizeof got->binding_sha)) { rc_fail("len", "binding_sha"); return RC_ERR_FORMAT; }
             k = 12;
+        } else if (kl == 6 && !memcmp(kp, "target", 6)) {
+            if (mask & (1U << 13)) { rc_fail("dup-key", "target"); return RC_ERR_FORMAT; }
+            if (rc_copy_field(vp, vl, got->target, sizeof got->target)) { rc_fail("len", "target"); return RC_ERR_FORMAT; }
+            k = 13;
         } else if (kl == 12 && !memcmp(kp, "producer_sha", 12)) {
             if (saw_v2_prod) { rc_fail("dup-key", "producer_sha"); return RC_ERR_FORMAT; }
             saw_v2_prod = 1;
@@ -577,16 +587,16 @@ static int rc_parse_v3_snapshot(const unsigned char *buf, long n, rc_verified_t 
         return RC_ERR_V2_LEGACY;
     }
     if (!saw_version && !bad_unknown && (mask & (1U << 1)) && (mask & (1U << 12)) &&
-        (saw_v2_prod || !(mask & ((1U << 2) | (1U << 3) | (1U << 4) | (1U << 5) | (1U << 10) | (1U << 11))))) {
+        (saw_v2_prod || !(mask & ((1U << 2) | (1U << 3) | (1U << 4) | (1U << 5) | (1U << 10) | (1U << 11) | (1U << 13))))) {
         rc_fail("v2-legacy", "no-version-v2-shape");
         return RC_ERR_V2_LEGACY;
     }
     if (bad_unknown || saw_v2_prod) { rc_fail("unknown-key", "receipt"); return RC_ERR_FORMAT; }
     if (!saw_version) { rc_fail("missing-version", "receipt"); return RC_ERR_FORMAT; }
     if (strcmp(ver_s, "3") != 0) { rc_fail("bad-version", ver_s); return RC_ERR_FORMAT; }
-    if (mask != ((1U << 13) - 1U)) { rc_fail("missing-field", "receipt"); return RC_ERR_FORMAT; }
+    if (mask != ((1U << 14) - 1U)) { rc_fail("missing-field", "receipt"); return RC_ERR_FORMAT; }
     if (!rc_is_id(got->run_id) || !rc_is_id(got->rev) || !rc_is_id(got->unit) ||
-        !rc_is_id(got->producer) || !rc_is_id(got->purpose)) {
+        !rc_is_id(got->target) || !rc_is_id(got->producer) || !rc_is_id(got->purpose)) {
         rc_fail("bad-id", "receipt");
         return RC_ERR_FORMAT;
     }
@@ -629,6 +639,7 @@ int rc_verify_out(const char *path, const rc_expect_t *exp, rc_verified_t *out) 
     if (!rc_is_id(exp->run_id)) { rc_fail("expect-unbound", "run_id"); return RC_ERR_EXPECT_UNBOUND; }
     if (!rc_is_id(exp->rev)) { rc_fail("expect-unbound", "rev"); return RC_ERR_EXPECT_UNBOUND; }
     if (!rc_is_id(exp->unit)) { rc_fail("expect-unbound", "unit"); return RC_ERR_EXPECT_UNBOUND; }
+    if (!rc_is_id(exp->target) || strlen(exp->target) >= 64) { rc_fail("expect-unbound", "target"); return RC_ERR_EXPECT_UNBOUND; }
     if (!rc_is_id(exp->producer)) { rc_fail("expect-unbound", "producer"); return RC_ERR_EXPECT_UNBOUND; }
     if (!rc_is_id(exp->purpose)) { rc_fail("expect-unbound", "purpose"); return RC_ERR_EXPECT_UNBOUND; }
     if (!rc_is_hex64_lower(exp->candidate_sha)) { rc_fail("expect-unbound", "candidate_sha"); return RC_ERR_EXPECT_UNBOUND; }
@@ -685,8 +696,8 @@ int rc_verify_out(const char *path, const rc_expect_t *exp, rc_verified_t *out) 
         rc_fail("placeholder", path); return RC_ERR_PLACEHOLDER;
     }
 
-    /* 5. Verify full-field binding_sha (covers all 12 fields incl rc, verdict, ts). */
-    v3.run_id = got.run_id; v3.rev = got.rev; v3.unit = got.unit;
+    /* 5. Verify full-field binding_sha (covers all 13 fields incl target, rc, verdict, ts). */
+    v3.run_id = got.run_id; v3.rev = got.rev; v3.unit = got.unit; v3.target = got.target;
     v3.producer = got.producer; v3.purpose = got.purpose;
     v3.candidate_sha = got.candidate_sha; v3.inputs_sha = got.inputs_sha; v3.output_sha = got.output_sha;
     v3.rc = got.rc; v3.verdict = got.verdict; v3.ts = got.ts;
@@ -698,6 +709,7 @@ int rc_verify_out(const char *path, const rc_expect_t *exp, rc_verified_t *out) 
     if (strcmp(got.run_id, exp->run_id) != 0) { rc_fail("run-id-mismatch", got.run_id); return RC_ERR_RUN_ID; }
     if (strcmp(got.rev, exp->rev) != 0) { rc_fail("rev-mismatch", got.rev); return RC_ERR_REV; }
     if (strcmp(got.unit, exp->unit) != 0) { rc_fail("unit-mismatch", got.unit); return RC_ERR_UNIT; }
+    if (strcmp(got.target, exp->target) != 0) { rc_fail("target-mismatch", got.target); return RC_ERR_TARGET; }
     if (strcmp(got.producer, exp->producer) != 0) { rc_fail("producer-mismatch", got.producer); return RC_ERR_PRODUCER_PURPOSE; }
     if (strcmp(got.purpose, exp->purpose) != 0) { rc_fail("purpose-mismatch", got.purpose); return RC_ERR_PRODUCER_PURPOSE; }
     if (strcmp(got.candidate_sha, exp->candidate_sha) != 0) { rc_fail("candidate-mismatch", got.candidate_sha); return RC_ERR_CANDIDATE; }

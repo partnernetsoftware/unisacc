@@ -1024,7 +1024,7 @@ static int mg_path_inside(const char *dir, const char *p) {
 
 static int mg_tamper_receipt(const char *tmp_dir, const unsigned char *cur_buf, int64_t cur_n,
                              const char *dst_path, const char *kind) {
-    char run_id[160] = "", rev[80] = "", unit[160] = "", prod[160] = "", purp[160] = "";
+    char run_id[160] = "", rev[80] = "", unit[160] = "", target[64] = "", prod[160] = "", purp[160] = "";
     char cand[65] = "", inp[65] = "", outh[65] = "", verd[16] = "";
     int rc_v = 0;
     long long ts_v = 0;
@@ -1046,6 +1046,7 @@ static int mg_tamper_receipt(const char *tmp_dir, const unsigned char *cur_buf, 
             if (kl == 6 && !memcmp(kp, "run_id", 6) && vl < (long)sizeof run_id) { cp(run_id, (long)sizeof run_id, vp, vl); run_id[vl] = 0; }
             else if (kl == 3 && !memcmp(kp, "rev", 3) && vl < (long)sizeof rev) { cp(rev, (long)sizeof rev, vp, vl); rev[vl] = 0; }
             else if (kl == 4 && !memcmp(kp, "unit", 4) && vl < (long)sizeof unit) { cp(unit, (long)sizeof unit, vp, vl); unit[vl] = 0; }
+            else if (kl == 6 && !memcmp(kp, "target", 6) && vl < (long)sizeof target) { cp(target, (long)sizeof target, vp, vl); target[vl] = 0; }
             else if (kl == 8 && !memcmp(kp, "producer", 8) && vl < (long)sizeof prod) { cp(prod, (long)sizeof prod, vp, vl); prod[vl] = 0; }
             else if (kl == 7 && !memcmp(kp, "purpose", 7) && vl < (long)sizeof purp) { cp(purp, (long)sizeof purp, vp, vl); purp[vl] = 0; }
             else if (kl == 13 && !memcmp(kp, "candidate_sha", 13) && vl == 64) { cp(cand, 65, vp, 64); cand[64] = 0; }
@@ -1057,7 +1058,7 @@ static int mg_tamper_receipt(const char *tmp_dir, const unsigned char *cur_buf, 
         }
         i = e + 1;
     }
-    if (!run_id[0] || !rev[0] || !unit[0] || !prod[0] || !purp[0] ||
+    if (!run_id[0] || !rev[0] || !unit[0] || !target[0] || !prod[0] || !purp[0] ||
         !cand[0] || !inp[0] || !outh[0] || !verd[0] || ts_v <= 0) return 1;
 
     if (!strcmp(kind, "forged-run-id")) cx_fmt(run_id, sizeof run_id, "forged-run-id-9999");
@@ -1067,18 +1068,22 @@ static int mg_tamper_receipt(const char *tmp_dir, const unsigned char *cur_buf, 
     else if (!strcmp(kind, "verdict-flip")) cx_fmt(verd, sizeof verd, "%s", !strcmp(verd, "PASS") ? "FAIL" : "PASS");
     else if (!strcmp(kind, "unit-mismatch")) { char u2[160]; cx_fmt(u2, sizeof u2, "%.140s-other", unit); cx_fmt(unit, sizeof unit, "%s", u2); }
     else if (!strcmp(kind, "candidate-swap")) cand[63] = (cand[63] == '0') ? '1' : '0';
+    else if (!strcmp(kind, "target-swap")) {
+        if (!strcmp(target, "lnx/x86_64")) cx_fmt(target, sizeof target, "lnx/arm64");
+        else { char t2[64]; cx_fmt(t2, sizeof t2, "%.48s-other", target); cx_fmt(target, sizeof target, "%s", t2); }
+    }
     else return 1;
 
     if (cx_fmt(payload, sizeof payload,
-               "version\t3\nrun_id\t%s\nrev\t%s\nunit\t%s\nproducer\t%s\npurpose\t%s\n"
+               "version\t3\nrun_id\t%s\nrev\t%s\nunit\t%s\ntarget\t%s\nproducer\t%s\npurpose\t%s\n"
                "candidate_sha\t%s\ninputs_sha\t%s\noutput_sha\t%s\nrc\t%d\nverdict\t%s\nts\t%lld\n",
-               run_id, rev, unit, prod, purp, cand, inp, outh, rc_v, verd, ts_v)) return 1;
+               run_id, rev, unit, target, prod, purp, cand, inp, outh, rc_v, verd, ts_v)) return 1;
     if (sy_sha256_hex(payload, (long)strlen(payload), bind_new)) return 1;
     if (cx_fmt(body, sizeof body, "%sbinding_sha\t%s\n", payload, bind_new)) return 1;
     return sy_write_atomic(dst_path, body, (int64_t)strlen(body), 0600) ? 1 : 0;
 }
 
-/* Exact structured code:reason contract for each of the 8 fixed receipt tampers (no substring match). */
+/* Exact structured code:reason contract for each of the 9 fixed receipt tampers (no substring match). */
 static const char *execution_tamper_expected_fail(const char *tamper) {
     if (!tamper) return 0;
     if (!strcmp(tamper, "missing")) return "10:missing";
@@ -1089,6 +1094,7 @@ static const char *execution_tamper_expected_fail(const char *tamper) {
     if (!strcmp(tamper, "verdict-flip")) return "21:verdict-fail-on-rc0";
     if (!strcmp(tamper, "unit-mismatch")) return "17:unit-mismatch";
     if (!strcmp(tamper, "candidate-swap")) return "18:candidate-mismatch";
+    if (!strcmp(tamper, "target-swap")) return "25:target-mismatch";
     return 0;
 }
 
@@ -1196,20 +1202,21 @@ static int execution_check_unchanged(const char *path, const unsigned char *expe
 }
 
 static int execution_tamper_receipt(const char *produce, const char *judge, const char *assertion, int secs) {
-    static const char *tampers[8] = {
+    static const char *tampers[9] = {
         "missing", "forged-run-id", "foreign-rev", "stale-ts",
-        "rc-flip", "verdict-flip", "unit-mismatch", "candidate-swap"
+        "rc-flip", "verdict-flip", "unit-mismatch", "candidate-swap",
+        "target-swap"
     };
     char tmp[1024], path[1100], old_id[1100], current_id[1100];
     char old_rid[160], cur_rid[160];
     long old_rid_n = 0, cur_rid_n = 0;
-    char fail_names[8][160];
-    int verdicts[8];
+    char fail_names[9][160];
+    int verdicts[9];
     int64_t old_n = 0, cur_n = 0;
     unsigned char *old = 0, *cur = 0;
     int result = 2, i, j, all_killed = 1, any_unmeasured = 0;
 
-    for (i = 0; i < 8; i++) { verdicts[i] = 2; fail_names[i][0] = 0; }
+    for (i = 0; i < 9; i++) { verdicts[i] = 2; fail_names[i][0] = 0; }
     if (sr_scratch("mutation-gate-execution", tmp, sizeof tmp)) die2("execution scratch", "");
     if (cx_fmt(path, sizeof path, "%s/evidence", tmp) ||
         sy_mkdtemp(tmp, "id-", old_id, sizeof old_id) ||
@@ -1251,8 +1258,8 @@ static int execution_tamper_receipt(const char *produce, const char *judge, cons
         goto done;
     }
 
-    /* 3. Run all 8 fixed tampers from immutable in-memory `cur` buffer (no shared mutable source file). */
-    for (i = 0; i < 8; i++) {
+    /* 3. Run all 9 fixed tampers from immutable in-memory `cur` buffer (no shared mutable source file). */
+    for (i = 0; i < 9; i++) {
         unsigned char *tbytes = 0;
         int64_t tn = 0;
         if (mg_tamper_receipt(tmp, cur, cur_n, path, tampers[i]) != 0) {
@@ -1296,7 +1303,7 @@ static int execution_tamper_receipt(const char *produce, const char *judge, cons
     else result = all_killed ? 0 : 1;
 
 done:
-    for (i = 0; i < 8; i++) {
+    for (i = 0; i < 9; i++) {
         printf("MUTATION_EXECUTION\toperator=%s\tverdict=%s\tfail=%s\n",
                tampers[i],
                verdicts[i] == 2 ? "UNMEASURED" : (verdicts[i] == 1 ? "KILLED" : "SURVIVED"),
