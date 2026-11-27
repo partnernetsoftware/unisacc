@@ -60,6 +60,7 @@
 #pragma unisa use mem.heap
 #pragma unisa use cxlib.limits
 #pragma unisa use cxlib.sessionroot
+#pragma unisa use cxlib.procrun
 #pragma unisa use sysx.reaper
 
 #define BG_PATH 4400
@@ -558,6 +559,55 @@ static int start_chain_preflight(const char *rev) {
     if (run_chain_preflight_step(rev, "sixtarget", 0)) return 1;
     return 0;
 }
+static int bg_json_commit(const char *s, char out[41]) {
+    const char *p = strstr(s, "\"commit\"");
+    if (!p) return 1;
+    p += 8;
+    while (*p == ' ' || *p == '\t' || *p == ':' || *p == '"') p++;
+    for (int i = 0; i < 40; i++) {
+        char c = p[i];
+        if (!((c >= '0' && c <= '9') || (c >= 'a' && c <= 'f'))) return 1;
+        out[i] = c;
+    }
+    out[40] = 0;
+    return p[40] == '"' ? 0 : 1;
+}
+static int derive_bootstrap_from(const char *rev) {
+    char js[BG_PATH], snap_js[BG_PATH], snap_c[41];
+    size_t n = 0;
+    char *j;
+    const char *boot;
+    if (cx_fmt(snap_js, sizeof snap_js, "%s/%s/snap/unisacc.com.build.json", base, rev) == 0 &&
+        sy_exists(snap_js) == 1) {
+        cx_fmt(js, sizeof js, "%s", snap_js);
+    } else {
+        if (join(js, root, "unisacc.com.build.json")) return 1;
+        if (sy_exists(js) != 1) return 0;
+    }
+    j = cx_read(js, &n);
+    if (!j) return 0;
+    if (bg_json_commit(j, snap_c)) { mm_free(j); return 0; }
+    mm_free(j);
+    if (tx_eqz(snap_c, rev)) return 0;
+    boot = sy_env("BOOTSTRAP_FROM");
+    if (boot && boot[0] && !tx_eqz(boot, snap_c)) {
+        sy_printf("BG_CANDIDATE\tREFUSE\treason=bootstrap-from-mismatch\texplicit=%s\tsnap=%s\n", boot, snap_c);
+        return 1;
+    }
+    {
+        pr_result r;
+        char *av[] = {"git", "-C", root, "merge-base", "--is-ancestor", snap_c, (char *)rev, 0};
+        int rc = pr_run("bg-bf", av, ".", 0, 20, &r) ? -1 : r.rc;
+        pr_free(&r);
+        if (rc != 0) {
+            sy_printf("BG_CANDIDATE\tREFUSE\treason=bootstrap-from-not-ancestor\tsnap=%s\trev=%s\n", snap_c, rev);
+            return 1;
+        }
+    }
+    if (setenv("BOOTSTRAP_FROM", snap_c, 1)) return 1;
+    sy_printf("BG_BOOTSTRAP_FROM\tcommit=%s\tsource=build.json\n", snap_c);
+    return 0;
+}
 static int cmd_start(const char *rev, const char *chain, long deadline_s, long segment_s, long segments, char **extra, int nextra) {
     static char names[BG_MAXC][41];
     static Cand c;
@@ -566,6 +616,7 @@ static int cmd_start(const char *rev, const char *chain, long deadline_s, long s
     int k = 0, i, n, pfd[2], pid, got = 0, ids[3];
     if (!rev) die("start needs --rev HEX40", 0);
     if (chain && chain[0] != '/') die("--chain must be an absolute executable", chain);
+    if (derive_bootstrap_from(rev)) return 1;
     /* 16-disk-free joins the refusal set: it now reads the chain directory's filesystem with one statvfs
        and FAILs (not UNMEASURED) when neither sy_disk_avail_mb nor the bounded df answers, so a chain is
        not started on a disk nobody could measure. It runs before any chain directory is allocated, and
