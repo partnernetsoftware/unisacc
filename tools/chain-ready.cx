@@ -107,6 +107,7 @@
 #pragma unisa use cxlib.releaseseq
 #pragma unisa use cxlib.pik1
 #pragma unisa use sys.posix
+#pragma unisa use cxlib.receipt
 
 #define UC "./unisacc.com" /* lint:allow R1 tool runs sibling tools under the installed product, like tools/ratchets.cx */
 #define MAXJ 96
@@ -1631,7 +1632,9 @@ static int cr_collect_and_validate_only(int argc, char **argv, const char **only
         } else if ((tx_eqz(argv[a], "--repo") || tx_eqz(argv[a], "--helper-out") || tx_eqz(argv[a], "--since") ||
                     tx_eqz(argv[a], "--pgrep-pat") || tx_eqz(argv[a], "--version") || tx_eqz(argv[a], "--root") ||
                     tx_eqz(argv[a], "--rev") || tx_eqz(argv[a], "--preflight-table") || tx_eqz(argv[a], "--preflight-bound-s") ||
-                    tx_eqz(argv[a], "--chain-base") || tx_eqz(argv[a], "--disk-free-gb") || tx_eqz(argv[a], "--pik1-capture-cap")) && a + 1 < argc) {
+                    tx_eqz(argv[a], "--chain-base") || tx_eqz(argv[a], "--disk-free-gb") || tx_eqz(argv[a], "--pik1-capture-cap") ||
+                    tx_eqz(argv[a], "--stage") || tx_eqz(argv[a], "--run-id") || tx_eqz(argv[a], "--receipt-dir") ||
+                    tx_eqz(argv[a], "--prerun-plan") || tx_eqz(argv[a], "--ident-helper-sha256")) && a + 1 < argc) {
             a++;
         }
     }
@@ -1655,6 +1658,100 @@ static int cr_want_item(const char *only, const char *nm) {
 }
 static int cr_want_gid(const char *only, int gid) {
     return cr_want_item(only, cr_gname(gid));
+}
+
+#define CR_STAGE_COUNT 9
+typedef struct { const char *name; int first_gid, last_gid; } CrStageSpec;
+static const CrStageSpec cr_stage_specs[CR_STAGE_COUNT] = {
+    {"derive-a",      CR_G_1_REV,              CR_G_2A_DERIVE4},
+    {"derive-b",      CR_G_2A_DERIVE5,         CR_G_2A_DERIVE7},
+    {"ratchets",      CR_G_2B_RATCHETS,        CR_G_2B_RATCHETS},
+    {"tri-chain-a",   CR_G_3A_CXMOD_TRI,       CR_G_3A_CXMOD_TRI_EXPORTS},
+    {"tri-chain-b",   CR_G_3B_CX0_EXTRACT,     CR_G_4_P1},
+    {"tri-chain-c",   CR_G_5_CANDIDATE_CHAIN,  CR_G_5_CANDIDATE_CHAIN5},
+    {"env-root",      CR_G_6_AFFECTED,         CR_G_14_ROOT_RECORD},
+    {"gen-preflight", CR_G_15_GEN_ALL,         CR_G_21_VERSEQ_GEN},
+    {"union-shards",  CR_G_22_PREMERGE_UNION,  CR_G_25_TOOLS_COMPILE_SHARDS}
+};
+
+static int cr_only_has_exact(const char *csv, const char *gate) {
+    long cl, gl, at = 0;
+    if (!csv || !gate || !gate[0]) return 0;
+    cl = (long)tx_len(csv, CR_ONLY_BUF_CAP);
+    gl = (long)tx_len(gate, 128);
+    while (at <= cl) {
+        long c = tx_chr(csv + at, cl - at, ',');
+        long tl = c < 0 ? cl - at : c;
+        if (tl == gl && tx_same(csv + at, tl, gate, gl)) return 1;
+        if (c < 0) break;
+        at += tl + 1;
+    }
+    return 0;
+}
+
+static int cr_find_stage(const char *name) {
+    int si;
+    if (!name || !name[0]) return -1;
+    for (si = 0; si < CR_STAGE_COUNT; si++) {
+        if (tx_eqz(name, cr_stage_specs[si].name)) return si;
+    }
+    return -1;
+}
+
+static int cr_format_stage_gates(int si, char *out, size_t cap) {
+    size_t pos = 0;
+    if (si < 0 || si >= CR_STAGE_COUNT || !out || cap == 0) return -1;
+    out[0] = 0;
+    if (cr_stage_specs[si].first_gid < 0 || cr_stage_specs[si].last_gid >= CR_G_COUNT ||
+        cr_stage_specs[si].first_gid > cr_stage_specs[si].last_gid) return -1;
+    for (int g = cr_stage_specs[si].first_gid; g <= cr_stage_specs[si].last_gid; g++) {
+        const char *gn = cr_gname(g);
+        size_t gl = strlen(gn);
+        if (pos + (pos ? 1 : 0) + gl + 1 >= cap) return -1;
+        if (pos) out[pos++] = ',';
+        mm_copy(out + pos, cap - pos, gn, (long)gl);
+        pos += gl;
+        out[pos] = 0;
+    }
+    return 0;
+}
+
+static int cr_verify_stage_roster_and_sha(char out_sha[65]) {
+    int gi, si;
+    char roster_buf[4096], sg_buf[512];
+    size_t rpos = 0;
+    for (gi = 0; gi < CR_G_COUNT; gi++) {
+        int found = 0;
+        for (si = 0; si < CR_STAGE_COUNT; si++) {
+            if (gi >= cr_stage_specs[si].first_gid && gi <= cr_stage_specs[si].last_gid) found++;
+        }
+        if (found != 1) return -1;
+    }
+    for (si = 0; si < CR_STAGE_COUNT; si++) {
+        if (cr_format_stage_gates(si, sg_buf, sizeof sg_buf) != 0) return -1;
+        size_t sn = strlen(cr_stage_specs[si].name), gn = strlen(sg_buf);
+        if (rpos + sn + gn + 2 >= sizeof roster_buf) return -1;
+        mm_copy(roster_buf + rpos, sizeof roster_buf - rpos, cr_stage_specs[si].name, (long)sn); rpos += sn;
+        roster_buf[rpos++] = '\t';
+        mm_copy(roster_buf + rpos, sizeof roster_buf - rpos, sg_buf, (long)gn); rpos += gn;
+        roster_buf[rpos++] = '\n';
+    }
+    return sy_sha256_hex(roster_buf, (long)rpos, out_sha);
+}
+
+static void cr_stage_ensure_env(void) {
+    const char *hm = getenv("HOME");
+    const char *cp = getenv("PATH");
+    const char *ow = getenv("DEVSVC_OWNER");
+    char lbin[1200], np[4400];
+    if (ow && ow[0]) (void)setenv("DEVSVC_OWNER", ow, 1);
+    if (!hm || !hm[0]) hm = "/tmp";
+    if (cx_fmt(lbin, sizeof lbin, "%s/.local/bin", hm)) return;
+    if (!cp || !cp[0]) {
+        if (!cx_fmt(np, sizeof np, "/usr/bin:/bin:%s", lbin)) (void)setenv("PATH", np, 1);
+    } else if (tx_find(cp, (long)strlen(cp), lbin, (long)strlen(lbin)) < 0) {
+        if (!cx_fmt(np, sizeof np, "%s:%s", cp, lbin)) (void)setenv("PATH", np, 1);
+    }
 }
 static void root_items(const char *repo, const char *root, const char *revarg, const char *only) {
     static const char *names[2] = {"unisacc.com", "unisacc.com.build.json"};
@@ -1897,27 +1994,31 @@ static int check_version_scope(const char *repo, const char *revarg, const char 
 }
 
 /* chain-preflight.cx bounds each node to its table timeout_s (<=55s) via tools/bound; each shard invocation is also process-group bounded to bound_s (default 55s) */
-static int run_19_preflight(const char *repo, const char *root, const char *revarg, const char *since, const char *tver, const char *pftable, const char *shard, const char *bound_s, char *ev, int cap) {
-    char *v[24]; int k = 0, fd = -1, pid, ex = 0, code = 0, sig = 0, pass = 0, node_timeout_bounded = 1;
-    char *out = 0; long n = 0, at = 0;
+static void prep_19_preflight_job(Job *jb, char **v_storage, const char *repo, const char *root, const char *revarg, const char *pftable, const char *shard, const char *bound_s) {
+    int k = 0;
+    const char *eff_bound = (bound_s && bound_s[0]) ? bound_s : "55";
+    mm_fill(jb, sizeof *jb, 0, sizeof *jb);
+    v_storage[k++] = "./tools/bound"; v_storage[k++] = (char *)eff_bound;
+    v_storage[k++] = "sh"; v_storage[k++] = UC; v_storage[k++] = "tools/chain-preflight.cx"; v_storage[k++] = "--";
+    v_storage[k++] = "--strict"; v_storage[k++] = "--root"; v_storage[k++] = (char *)root; v_storage[k++] = "--repo"; v_storage[k++] = (char *)repo;
+    v_storage[k++] = "--rev"; v_storage[k++] = (char *)(revarg && revarg[0] ? revarg : "HEAD");
+    if (shard && shard[0]) { v_storage[k++] = "--shard"; v_storage[k++] = (char *)shard; }
+    if (pftable && pftable[0]) { v_storage[k++] = "--table"; v_storage[k++] = (char *)pftable; }
+    v_storage[k] = 0;
+    for (int i = 0; i <= k; i++) jb->argv[i] = v_storage[i];
+}
+
+static int judge_19_preflight_job(Job *jb, const char *repo, const char *revarg, const char *since, const char *tver, const char *shard, const char *bound_s, char *ev, int cap) {
+    long at = 0, n = jb->n;
+    const char *out = jb->out;
+    int pass = 0;
     char fail_item[240], sum_line[240], scope_ev[320];
     const char *eff_bound = (bound_s && bound_s[0]) ? bound_s : "55";
-    (void)node_timeout_bounded;
     fail_item[0] = 0; sum_line[0] = 0; scope_ev[0] = 0;
-    v[k++] = "./tools/bound"; v[k++] = (char *)eff_bound;
-    v[k++] = "sh"; v[k++] = UC; v[k++] = "tools/chain-preflight.cx"; v[k++] = "--";
-    v[k++] = "--strict"; v[k++] = "--root"; v[k++] = (char *)root; v[k++] = "--repo"; v[k++] = (char *)repo;
-    v[k++] = "--rev"; v[k++] = (char *)(revarg && revarg[0] ? revarg : "HEAD");
-    if (shard && shard[0]) { v[k++] = "--shard"; v[k++] = (char *)shard; }
-    if (pftable && pftable[0]) { v[k++] = "--table"; v[k++] = (char *)pftable; }
-    v[k] = 0;
-    pid = sy_spawn_pipe(v, 0, 0, &fd, 0);
-    if (pid <= 0 || fd < 0) {
+    if (jb->state == 3) {
         cx_fmt(ev, (size_t)cap, "READY=no chain-preflight-not-started");
         return 0;
     }
-    slurp(fd, &out, &n); sy_close(fd);
-    sy_wait_status(pid, 0, &ex, &code, &sig);
     while (out && at < n) {
         long e = tx_chr(out + at, n - at, '\n'), ln = e < 0 ? n - at : e;
         if (tx_prefix(out + at, ln, "CHAIN_PREFLIGHT\t", 16)) {
@@ -1929,10 +2030,9 @@ static int run_19_preflight(const char *repo, const char *root, const char *reva
         }
         at += (e < 0 ? n - at : e + 1);
     }
-    if (out) mm_free(out);
-    if (!pass || !ex || code != 0) {
+    if (!pass || jb->rc != 0) {
         cx_fmt(ev, (size_t)cap, "READY=no chain-preflight rc=%d shard=%s bound_s=%s %s%s%s",
-               ex ? code : -1, shard && shard[0] ? shard : "all", eff_bound,
+               jb->rc, shard && shard[0] ? shard : "all", eff_bound,
                sum_line[0] ? sum_line : "shard-timeout-or-no-summary",
                fail_item[0] ? "; first: " : "", fail_item);
         return 0;
@@ -1944,6 +2044,16 @@ static int run_19_preflight(const char *repo, const char *root, const char *reva
     cx_fmt(ev, (size_t)cap, "%s%s%s", sum_line[0] ? sum_line : "CHAIN_PREFLIGHT verdict=PASS",
            scope_ev[0] ? "; " : "", scope_ev);
     return 1;
+}
+
+static int run_19_preflight(const char *repo, const char *root, const char *revarg, const char *since, const char *tver, const char *pftable, const char *shard, const char *bound_s, char *ev, int cap) {
+    Job jb; char *v[24];
+    prep_19_preflight_job(&jb, v, repo, root, revarg, pftable, shard, bound_s);
+    start(&jb);
+    finish(&jb);
+    int ok = judge_19_preflight_job(&jb, repo, revarg, since, tver, shard, bound_s, ev, cap);
+    if (jb.out) mm_free(jb.out);
+    return ok;
 }
 
 /* ---- 23-freeze-armed: the freeze commit F is the chain start commit itself ----
@@ -2961,12 +3071,92 @@ static int resolve_premerge_branch(const char *repo, const char *explicit_tver, 
     return 0;
 }
 
+static int cr_resolve_stage_rev40(const char *repo, const char *revarg, char out40[48]) {
+    char spec[160], buf[128];
+    out40[0] = 0;
+    if (revarg && revarg[0]) {
+        long rl = (long)tx_len(revarg, 128);
+        if (fa_is_hex40(revarg, rl)) {
+            for (long i = 0; i < 40; i++) {
+                char c = revarg[i];
+                out40[i] = (c >= 'A' && c <= 'Z') ? (char)(c + 32) : c;
+            }
+            out40[40] = 0;
+            return 0;
+        }
+    }
+    if (cx_fmt(spec, sizeof spec, "%s^{commit}", (revarg && revarg[0]) ? revarg : "HEAD")) return -1;
+    char *gv[] = {"git", "rev-parse", "--verify", spec, 0};
+    if (fa_git(repo, gv, buf, sizeof buf) != 0) return -1;
+    if (!fa_is_hex40(buf, (long)tx_len(buf, sizeof buf))) return -1;
+    for (int i = 0; i < 40; i++) {
+        char c = buf[i];
+        out40[i] = (c >= 'A' && c <= 'Z') ? (char)(c + 32) : c;
+    }
+    out40[40] = 0;
+    return 0;
+}
+
+static int cr_write_stage_receipt(const char *receipt_dir, const char *stage_name, const char *rev40, const char *run_id_arg, const char *roster_sha, const char *verdict, long elapsed_ms, int exit_rc) {
+    char rcpt_path[4400], tmp_path[4440], eff_run_id[160], cand_sha[65], out_sha[65], out_str[320], extra[1024], full_buf[4096];
+    size_t base_n = 0;
+    char *base_b = 0;
+    long now_s = sy_wall_s();
+    if (!receipt_dir || !receipt_dir[0] || !stage_name || !stage_name[0] || !rev40 || !roster_sha || !verdict) return -1;
+    if (run_id_arg && run_id_arg[0]) {
+        if (cx_fmt(eff_run_id, sizeof eff_run_id, "%s", run_id_arg)) return -1;
+    } else {
+        const char *env_rid = getenv("UNISACC_RUN_ID");
+        if (env_rid && env_rid[0]) {
+            if (cx_fmt(eff_run_id, sizeof eff_run_id, "%s", env_rid)) return -1;
+        } else {
+            if (cx_fmt(eff_run_id, sizeof eff_run_id, "cr-%s-%ld-%d", stage_name, now_s, (int)sy_pid())) return -1;
+        }
+    }
+    if (cx_fmt(rcpt_path, sizeof rcpt_path, "%s/%s.rcpt", receipt_dir, stage_name) ||
+        cx_fmt(tmp_path, sizeof tmp_path, "%s/%s.rcpt.tmp.%d", receipt_dir, stage_name, (int)sy_pid()) ||
+        cx_fmt(out_str, sizeof out_str, "%s\t%s\t%s", rev40, stage_name, verdict)) return -1;
+    if (sy_sha256_hex(rev40, 40, cand_sha) ||
+        sy_sha256_hex(out_str, (long)strlen(out_str), out_sha)) return -1;
+    (void)sy_mkdir(receipt_dir, 0700);
+    if (rc_write2(rcpt_path, eff_run_id, cand_sha, roster_sha, out_sha, roster_sha, exit_rc) != 0) return -1;
+    base_b = cx_read(rcpt_path, &base_n);
+    if (!base_b || base_n == 0) { if (base_b) mm_free(base_b); return -1; }
+    int en = snprintf(extra, sizeof extra,
+        "rev\t%s\n"
+        "stage\t%s\n"
+        "verdict\t%s\n"
+        "elapsed_ms\t%ld\n"
+        "roster_sha\t%s\n"
+        "ts_epoch_s\t%ld\n",
+        rev40, stage_name, verdict, elapsed_ms >= 0 ? elapsed_ms : 0L, roster_sha, now_s);
+    if (en <= 0 || (size_t)en >= sizeof extra || base_n + (size_t)en >= sizeof full_buf) {
+        mm_free(base_b);
+        return -1;
+    }
+    mm_copy(full_buf, sizeof full_buf, base_b, (long)base_n);
+    mm_copy(full_buf + base_n, sizeof full_buf - base_n, extra, en);
+    mm_free(base_b);
+    if (cx_write(tmp_path, full_buf, base_n + (size_t)en) != 0) {
+        (void)sy_unlink(tmp_path);
+        return -1;
+    }
+    if (sy_rename(tmp_path, rcpt_path) != 0) {
+        (void)sy_unlink(tmp_path);
+        return -1;
+    }
+    return 0;
+}
+
 int main(int argc, char **argv) {
-    int fast = 0, a, do_prepare = 0, do_prepare_helper = 0, do_launch_env = 0, strict_helper = 0, require_persist = 0;
+    int fast = 0, a, do_prepare = 0, do_prepare_helper = 0, do_launch_env = 0, do_stage_list = 0, strict_helper = 0, require_persist = 0;
     const char *repo = ".", *since = 0, *pat = "candidate-chain", *only = 0, *tver = 0, *rootarg = 0, *revarg = 0, *pftable = 0, *pf_bound_s = "55", *helper_out = 0;
+    const char *stage_arg = 0, *run_id_arg = 0, *receipt_dir_arg = 0;
+    char roster_sha[65], stage_rev40[48];
     static char only_joined[CR_ONLY_BUF_CAP];
     long disk_override_gb = -1;
     long T0 = sy_now_ms();
+    roster_sha[0] = 0; stage_rev40[0] = 0;
     {
         int judge_only = 0; const char *jkind = 0, *jfile = 0, *jrcs = 0;
         for (a = 1; a < argc; a++) {
@@ -2981,6 +3171,10 @@ int main(int argc, char **argv) {
             else if (tx_eqz(argv[a], "--prepare")) do_prepare = 1;
             else if (tx_eqz(argv[a], "--prepare-helper")) do_prepare_helper = 1;
             else if (tx_eqz(argv[a], "--launch-env")) do_launch_env = 1;
+            else if (tx_eqz(argv[a], "--stage-list")) do_stage_list = 1;
+            else if (tx_eqz(argv[a], "--stage") && a + 1 < argc) stage_arg = argv[++a];
+            else if (tx_eqz(argv[a], "--run-id") && a + 1 < argc) run_id_arg = argv[++a];
+            else if (tx_eqz(argv[a], "--receipt-dir") && a + 1 < argc) receipt_dir_arg = argv[++a];
             else if (tx_eqz(argv[a], "--strict-helper")) strict_helper = 1;
             else if (tx_eqz(argv[a], "--require-persistent-helper")) require_persist = 1;
             else if (tx_eqz(argv[a], "--helper-out") && a + 1 < argc) helper_out = argv[++a];
@@ -3031,6 +3225,43 @@ int main(int argc, char **argv) {
         }
         if (!cr_collect_and_validate_only(argc, argv, &only, only_joined, sizeof only_joined)) {
             return 2;
+        }
+        if (do_stage_list) {
+            if (only || stage_arg || do_prepare || do_prepare_helper || do_launch_env || judge_only) {
+                printf("REFUSE\tCHAIN_READY_STAGE\treason=incompatible-mode\n");
+                return 2;
+            }
+            if (cr_verify_stage_roster_and_sha(roster_sha) != 0) {
+                printf("REFUSE\tCHAIN_READY_STAGE\treason=roster-drift\n");
+                return 2;
+            }
+            for (int si = 0; si < CR_STAGE_COUNT; si++) puts(cr_stage_specs[si].name);
+            return 0;
+        }
+        if (receipt_dir_arg && !stage_arg) {
+            printf("REFUSE\tCHAIN_READY_STAGE\treason=receipt-dir-requires-stage\n");
+            return 2;
+        }
+        if (stage_arg) {
+            if (only || do_prepare || do_prepare_helper || do_launch_env || judge_only) {
+                printf("REFUSE\tCHAIN_READY_STAGE\treason=incompatible-mode\tstage=%s\n", stage_arg);
+                return 2;
+            }
+            if (cr_verify_stage_roster_and_sha(roster_sha) != 0) {
+                printf("REFUSE\tCHAIN_READY_STAGE\treason=roster-drift\n");
+                return 2;
+            }
+            int sidx = cr_find_stage(stage_arg);
+            if (sidx < 0 || cr_format_stage_gates(sidx, only_joined, sizeof only_joined) != 0) {
+                printf("REFUSE\tCHAIN_READY_STAGE\treason=unknown-stage\tstage=%s\n", stage_arg);
+                return 2;
+            }
+            if (receipt_dir_arg && cr_resolve_stage_rev40(repo, revarg, stage_rev40) != 0) {
+                printf("REFUSE\tCHAIN_READY_STAGE\treason=bad-rev\trev=%s\n", revarg ? revarg : "HEAD");
+                return 2;
+            }
+            cr_stage_ensure_env();
+            only = only_joined;
         }
         if (only && (do_prepare || do_prepare_helper || do_launch_env || judge_only)) {
             printf("REFUSE\tCHAIN_READY_ONLY\treason=incompatible-mode\tonly=%s\n", only);
@@ -3161,10 +3392,16 @@ int main(int argc, char **argv) {
         row_g(CR_G_3A_CXMOD_TRI_EXPORTS, "FAIL", "no private material directory", 0);
     g_tri[2] = g_tri_exports[2] = tri_image; g_tri[4] = tri_extract;
     int ch_wanted = 0;
+    int explicit_der_sub = 0;
+    if (only != 0) {
+        for (int dg = CR_G_2A_DERIVE2; dg <= CR_G_2A_DERIVE7; dg++) {
+            if (cr_only_has_exact(only, cr_gname(dg))) { explicit_der_sub = 1; break; }
+        }
+    }
     for (k = 0; k < (int)(sizeof tab_specs / sizeof tab_specs[0]); k++) {
         int c, is_der = (k >= 2 && k <= 8), is_ch = (k >= 12 && k <= 16), is_pm = (k >= 21 && k <= 25);
         int wk = WANT_G(tab_specs[k].gid);
-        if (!wk && !(k == 1 && WANT_G(CR_G_1_REV)) && !(is_der && WANT_G(CR_G_2A_DERIVE)) && !(is_ch && WANT_G(CR_G_5_CANDIDATE_CHAIN)) && !(is_pm && WANT_G(CR_G_22_PREMERGE_UNION))) continue;
+        if (!wk && !(k == 1 && WANT_G(CR_G_1_REV)) && !(is_der && !explicit_der_sub && WANT_G(CR_G_2A_DERIVE)) && !(is_ch && WANT_G(CR_G_5_CANDIDATE_CHAIN)) && !(is_pm && WANT_G(CR_G_22_PREMERGE_UNION))) continue;
         if (is_ch) {
             ch_wanted = 1;
             if (!have_tmp) continue;
@@ -3267,6 +3504,9 @@ int main(int argc, char **argv) {
             if (tb[1]) free(tb[1]);
         }
     }
+    Job pf_async_a = {0}, pf_async_b = {0};
+    char *pf_av_a[24], *pf_av_b[24];
+    int pf_started_a = 0, pf_started_b = 0;
     /* run: concurrency scaled by CPU cores and degraded under high load; sy_poll event-driven completion */
     {   int done = 0, running = 0, running_der = 0, running_solo = 0, ncores = 0, load1 = 0;
         int max_running = calc_max_running(&ncores, &load1);
@@ -3332,6 +3572,22 @@ int main(int argc, char **argv) {
             finish(&pg[0]); finish(&pg[1]);
             if (pg[0].out) mm_free(pg[0].out);
             if (pg[1].out) mm_free(pg[1].out);
+        }
+        /* Under --stage (e.g. gen-preflight), overlap 19a-preflight-sixtarget and 19b-preflight-snap with 15-gen-all so the stage finishes <= 40 s. */
+        if (stage_arg) {
+            int p19_full = cr_only_has_exact(only, cr_gname(CR_G_19_CHAIN_PREFLIGHT));
+            int p19_a = cr_only_has_exact(only, cr_gname(CR_G_19A_PREFLIGHT_SIXTARGET));
+            int p19_b = cr_only_has_exact(only, cr_gname(CR_G_19B_PREFLIGHT_SNAP));
+            if (p19_full || p19_a) {
+                prep_19_preflight_job(&pf_async_a, pf_av_a, repo, rootarg ? rootarg : repo, revarg, pftable, "sixtarget", pf_bound_s);
+                start(&pf_async_a);
+                pf_started_a = 1;
+            }
+            if (p19_full || p19_b) {
+                prep_19_preflight_job(&pf_async_b, pf_av_b, repo, rootarg ? rootarg : repo, revarg, pftable, "snap", pf_bound_s);
+                start(&pf_async_b);
+                pf_started_b = 1;
+            }
         }
         while (done < nj) {
             for (i = 0; i < nj && running < max_running && !running_solo; i++) {
@@ -3594,14 +3850,28 @@ int main(int argc, char **argv) {
         long ms_a = 0, ms_b = 0;
         int ok_a = 1, ok_b = 1;
         if (need_a) {
-            long t0 = sy_now_ms();
-            ok_a = run_19_preflight(repo, rootarg ? rootarg : repo, revarg, since, tver, pftable, "sixtarget", pf_bound_s, ev_a, sizeof ev_a);
-            ms_a = sy_now_ms() - t0;
+            if (pf_started_a) {
+                finish(&pf_async_a);
+                ok_a = judge_19_preflight_job(&pf_async_a, repo, revarg, since, tver, "sixtarget", pf_bound_s, ev_a, sizeof ev_a);
+                ms_a = pf_async_a.ms;
+                if (pf_async_a.out) mm_free(pf_async_a.out);
+            } else {
+                long t0 = sy_now_ms();
+                ok_a = run_19_preflight(repo, rootarg ? rootarg : repo, revarg, since, tver, pftable, "sixtarget", pf_bound_s, ev_a, sizeof ev_a);
+                ms_a = sy_now_ms() - t0;
+            }
         }
         if (need_b) {
-            long t0 = sy_now_ms();
-            ok_b = run_19_preflight(repo, rootarg ? rootarg : repo, revarg, since, tver, pftable, "snap", pf_bound_s, ev_b, sizeof ev_b);
-            ms_b = sy_now_ms() - t0;
+            if (pf_started_b) {
+                finish(&pf_async_b);
+                ok_b = judge_19_preflight_job(&pf_async_b, repo, revarg, since, tver, "snap", pf_bound_s, ev_b, sizeof ev_b);
+                ms_b = pf_async_b.ms;
+                if (pf_async_b.out) mm_free(pf_async_b.out);
+            } else {
+                long t0 = sy_now_ms();
+                ok_b = run_19_preflight(repo, rootarg ? rootarg : repo, revarg, since, tver, pftable, "snap", pf_bound_s, ev_b, sizeof ev_b);
+                ms_b = sy_now_ms() - t0;
+            }
         }
         if (w19_a) row_judged_g(CR_G_19A_PREFLIGHT_SIXTARGET, ok_a, ev_a, ms_a);
         if (w19_b) row_judged_g(CR_G_19B_PREFLIGHT_SNAP, ok_b, ev_b, ms_b);
@@ -3708,7 +3978,18 @@ int main(int argc, char **argv) {
             return 2;
         }
     }
-    printf("READY\t%s\t%s%s\t%ld\n", nfail ? "no" : "yes", nfail ? "failed=" : "failed=none", failed_names, sy_now_ms() - T0);
+    {
+        long total_ms = sy_now_ms() - T0;
+        if (stage_arg && receipt_dir_arg) {
+            const char *verdict = nfail ? "FAIL" : "READY";
+            if (cr_write_stage_receipt(receipt_dir_arg, stage_arg, stage_rev40, run_id_arg, roster_sha, verdict, total_ms, nfail ? 1 : 0) != 0) {
+                printf("REFUSE\tCHAIN_READY_STAGE\treason=receipt-write-failed\tstage=%s\n", stage_arg);
+                if (have_tmp && sy_remove_all(tmpd)) fprintf(stderr, "chain-ready: scratch cleanup failed %s\n", tmpd);
+                return 2;
+            }
+        }
+        printf("READY\t%s\t%s%s\t%ld\n", nfail ? "no" : "yes", nfail ? "failed=" : "failed=none", failed_names, total_ms);
+    }
     if (have_tmp && sy_remove_all(tmpd)) fprintf(stderr, "chain-ready: scratch cleanup failed %s\n", tmpd);
     return nfail ? 1 : 0;
 }
