@@ -92,7 +92,7 @@ static int offending_span(const char *l, long n, long *ps, long *pe, int *softp)
     c = tx_chr(l, n, ':');
     if (c < 0 || c + 2 >= n || l[c + 1] != ' ') return 0;
     if (tx_find(l, n, "stale row", 9) >= 0) return 0;
-    if (softp) *softp = tx_prefix(l, n, "cxlibc:", 7) || tx_prefix(l, n, "cxraw:", 6);
+    if (softp) *softp = tx_prefix(l, n, "cxraw:", 6);
     s = c + 2;
     if (tx_prefix(l, n, "verwriter: ", 11) && (w = tx_find(l + s, n - s, " has writer ", 12)) >= 0) {
         s += w + 12;
@@ -236,7 +236,11 @@ static int rk_path_hits(const char *name, const char *p, long pl, int precommit_
                tx_prefix(p, pl, "exec/", 5) || tx_prefix(p, pl, "seed/", 5) || tx_prefix(p, pl, "include/", 8);
     if (tx_eqz(name, "outdep"))
         return tx_prefix(p, pl, "tools/", 6) || tx_prefix(p, pl, "tests/", 6) || tx_prefix(p, pl, "src/", 4);
-    if (precommit_soft && (tx_eqz(name, "cxlibc") || tx_eqz(name, "cxraw")))
+    if (tx_eqz(name, "cxlibc"))
+        return tx_prefix(p, pl, "src/", 4) || tx_prefix(p, pl, "cx/", 3) ||
+               (pl == 27 && tx_same(p, 27, "tools/check-stdio-copies.cx", 27)) ||
+               (!tx_prefix(p, pl, "tools/", 6) && !tx_prefix(p, pl, "tests/", 6));
+    if (precommit_soft && tx_eqz(name, "cxraw"))
         return !tx_prefix(p, pl, "tools/", 6) && !tx_prefix(p, pl, "tests/", 6);
     return 1;
 }
@@ -432,17 +436,21 @@ static int rk_precommit_match(const char *rows_file, const char *paths_file) {
                 continue;
             }
             if (cur_rk_fail && !cur_rk_gblk && !(tx_eqz(cur_rk_name, "dup-census") && cur_dup_has_fn) &&
-                (tx_find(b, bn, " total lines ", 13) >= 0 || tx_find(b, bn, "total debt ", 11) >= 0 || tx_find(b, bn, "expired exempt row", 18) >= 0) &&
+                (tx_find(b, bn, " total lines ", 13) >= 0 || tx_find(b, bn, "total debt ", 11) >= 0 ||
+                 tx_find(b, bn, "expired exempt row", 18) >= 0 || tx_find(b, bn, "check-stdio-copies failed", 25) >= 0) &&
                 rk_any_hit(cur_rk_name, names, sn)) {
                 printf("precommit: blocked: RATCHET %s FAIL (%s):%.*s\n", cur_rk_name, cur_rk_sum, (int)(l - 1), r + 1);
                 blocked++;
                 cur_rk_gblk = 1;
             }
             if (offending_span(b, bn, &ps, &pe, &soft) && ps >= 0 && pe > ps && pe <= bn) {
+                int is_cxlibc_prod = tx_eqz(cur_rk_name, "cxlibc") &&
+                                     (tx_prefix(b + ps, pe - ps, "src/", 4) || tx_prefix(b + ps, pe - ps, "cx/", 3));
                 for (a2 = 0; a2 < sn; ) {
                     long nl = tx_len(names + a2, sn - a2);
                     if (nl <= 0) break;
-                    if (tx_same(names + a2, nl, b + ps, pe - ps)) {
+                    if (tx_same(names + a2, nl, b + ps, pe - ps) ||
+                        (is_cxlibc_prod && rk_own_tool_or_table("cxlibc", names + a2, nl))) {
                         int toolish = tx_prefix(names + a2, nl, "tools/", 6) || tx_prefix(names + a2, nl, "tests/", 6);
                         if (!toolish || !soft) {
                             printf("precommit: blocked:%.*s\n", (int)(l - 1), r + 1);

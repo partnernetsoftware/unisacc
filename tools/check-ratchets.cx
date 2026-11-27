@@ -261,10 +261,12 @@ int main(int argc, char **argv) {
                         "EVT\t5\ttlibfrozen\tstart\t0\t0\texec\nEVT\t6\ttlibfrozen\tok\t5\t0\tout=1\n"
                         "EVT\t7\tfacts\tstart\t0\t0\texec\nEVT\t8\tfacts\tok\t5\t0\tout=1\n"
                         "EVT\t9\taffected-canary\tstart\t0\t0\texec\nEVT\t10\taffected-canary\tok\t5\t0\tout=1\n"
+                        "EVT\t11\tenv-semantics\tstart\t0\t0\texec\nEVT\t12\tenv-semantics\tok\t5\t0\tout=1\n"
                         "EVT\t99999\tratchets\tfail\t5\t1\tfrom-run\n";
                     const char *lint_ok = "CX_LINT\tfiles=2\tfindings=0\telapsed_ms=1\n";
                     const char *tlib_ok = "TLIB_FAST\tchecked=1\tmismatch=0\n";
                     const char *facts_ok = "OK\n";
+                    const char *envsem_ok = "CHECK_ENV_SEMANTICS\tassertions=1\tfailed=0\n";
                     cx_fmt(rout, sizeof rout, "%s/ratchets.out", od); cx_write(rout, o, tx_len(o, sizeof o));
                     cx_fmt(p, sizeof p, "%s/lint.out", od); cx_write(p, lint_ok, tx_len(lint_ok, 128));
                     cx_fmt(p, sizeof p, "%s/lintr1.out", od); cx_write(p, lint_ok, tx_len(lint_ok, 128));
@@ -272,6 +274,7 @@ int main(int argc, char **argv) {
                     cx_fmt(p, sizeof p, "%s/facts.out", od); cx_write(p, facts_ok, tx_len(facts_ok, 32));
                     cx_fmt(p, sizeof p, "%s/affected-canary.out", od);
                     cx_write(p, "AFFECTED_REGISTRY_CHECK\n", sizeof "AFFECTED_REGISTRY_CHECK\n" - 1);
+                    cx_fmt(p, sizeof p, "%s/env-semantics.out", od); cx_write(p, envsem_ok, tx_len(envsem_ok, 128));
                     cx_fmt(p, sizeof p, "%s/events.tsv", d); cx_write(p, ev_pc, tx_len(ev_pc, 1024));
                     cx_fmt(lintd, sizeof lintd, "%s/lintdir", d); sy_mkdir(lintd, 0700);
                     cx_fmt(lp1, sizeof lp1, "%s/cx", lintd); sy_mkdir(lp1, 0700);
@@ -531,6 +534,67 @@ int main(int argc, char **argv) {
                                         sy_unlink(f_ss_up); sy_unlink(f_tl_up); sy_unlink(f_dc_up);
                                         sy_unlink(f_ss_dn); sy_unlink(f_tl_dn);
                                     }
+                                    /* Test 29: cxlibc hard precommit gate for src/ and cx/:
+                                     * (1) staging a src/ or cx/ file that exceeds its tests/cxlibc.tsv row (e.g. src/driveroute.cx 27 > 26)
+                                     *     or has libc/host calls with no baseline row (e.g. cx/driver/new_mod.cx) is HARD BLOCKED;
+                                     * (2) raising src/driveroute.cx or adding a new src/ or cx/ allowance row in tests/cxlibc.tsv is
+                                     *     HARD BLOCKED by ratchet_baseline_gate, while lowering src/driveroute.cx passes. */
+                                    {
+                                        const char *ok_rat2 = "RATCHETS\tok=20\tfail=0\telapsed_ms=10\n";
+                                        const char *fail_libc =
+                                            "RATCHET\tcxlibc\tFAIL\tcxlibc: FAIL: 459 .cx files, 3601 calls (baseline 3599); 2 above baseline, 0 below\n"
+                                            "  cxlibc: src/driveroute.cx has 27 calls, baseline 26\n"
+                                            "  cxlibc: cx/driver/deps.cx has 10 calls, baseline 9\n"
+                                            "RATCHETS\tok=19\tfail=1\telapsed_ms=10\n";
+                                        char f_cl_up[4400], f_cl_dn[4400], s_cl_up[64], s_cl_dn[64], c_cl_up[200], c_cl_dn[200];
+                                        char l_dr[4400], l_dp[4400], l_cd[4400];
+                                        char *h_up[] = {"git", "hash-object", "-w", f_cl_up, 0};
+                                        char *h_dn[] = {"git", "hash-object", "-w", f_cl_dn, 0};
+                                        char *c_dr[] = {"git", "update-index", "--cacheinfo", "100644,e69de29bb2d1d6434b8b29ae775ad8c2e48c5391,src/driveroute.cx", 0};
+                                        char *c_dp[] = {"git", "update-index", "--cacheinfo", "100644,e69de29bb2d1d6434b8b29ae775ad8c2e48c5391,cx/driver/deps.cx", 0};
+                                        long sl2;
+                                        int rc_over, rc_tbl_up, rc_tbl_dn, ok_over, ok_tbl_up, ok_tbl_dn;
+                                        cx_fmt(l_cd, sizeof l_cd, "%s/cx/driver", lintd); sy_mkdir(l_cd, 0700);
+                                        cx_fmt(l_dr, sizeof l_dr, "%s/src/driveroute.cx", lintd); cx_write(l_dr, "/* dr */\n", 9);
+                                        cx_fmt(l_dp, sizeof l_dp, "%s/cx/driver/deps.cx", lintd); cx_write(l_dp, "/* dp */\n", 9);
+                                        cx_write(rout, fail_libc, tx_len(fail_libc, 1024));
+                                        (void)run_argv(rt, o, sizeof o);
+                                        (void)run_argv(c_dr, o, sizeof o);
+                                        (void)run_argv(c_dp, o, sizeof o);
+                                        rc_over = run_script("tools/precommit.cx", pc_fr, o, sizeof o);
+                                        ok_over = (rc_over == 1 &&
+                                                   has(o, "precommit: blocked: cxlibc: src/driveroute.cx has 27 calls, baseline 26") &&
+                                                   has(o, "precommit: blocked: cxlibc: cx/driver/deps.cx has 10 calls, baseline 9") &&
+                                                   has(o, "PRECOMMIT\tstaged_cx=2\tblocked=2"));
+                                        cx_fmt(f_cl_up, sizeof f_cl_up, "%s/cxlibc-up.tsv", d);
+                                        cx_fmt(f_cl_dn, sizeof f_cl_dn, "%s/cxlibc-dn.tsv", d);
+                                        cx_write(f_cl_up, "src/driveroute.cx\t28\nsrc/brand_new_libc.cx\t1\ncx/driver/brand_new_libc.cx\t2\n", 75);
+                                        cx_write(f_cl_dn, "src/driveroute.cx\t20\ncx/driver/deps.cx\t5\n", 41);
+                                        (void)run_argv(h_up, s_cl_up, sizeof s_cl_up); sl2 = tx_len(s_cl_up, 64); while (sl2 > 0 && (s_cl_up[sl2 - 1] == '\n' || s_cl_up[sl2 - 1] == '\r')) s_cl_up[--sl2] = 0;
+                                        (void)run_argv(h_dn, s_cl_dn, sizeof s_cl_dn); sl2 = tx_len(s_cl_dn, 64); while (sl2 > 0 && (s_cl_dn[sl2 - 1] == '\n' || s_cl_dn[sl2 - 1] == '\r')) s_cl_dn[--sl2] = 0;
+                                        cx_fmt(c_cl_up, sizeof c_cl_up, "100644,%s,tests/cxlibc.tsv", s_cl_up);
+                                        cx_fmt(c_cl_dn, sizeof c_cl_dn, "100644,%s,tests/cxlibc.tsv", s_cl_dn);
+                                        cx_write(rout, ok_rat2, tx_len(ok_rat2, 256));
+                                        {
+                                            char *u_cl_up[] = {"git", "update-index", "--cacheinfo", c_cl_up, 0};
+                                            char *u_cl_dn[] = {"git", "update-index", "--cacheinfo", c_cl_dn, 0};
+                                            (void)run_argv(rt, o, sizeof o);
+                                            (void)run_argv(u_cl_up, o, sizeof o);
+                                            rc_tbl_up = run_script("tools/precommit.cx", pc_fr, o, sizeof o);
+                                            ok_tbl_up = (rc_tbl_up == 1 &&
+                                                         has(o, "BLOCKED ratchet-baseline-raised table=tests/cxlibc.tsv key=src/driveroute.cx") &&
+                                                         has(o, "BLOCKED ratchet-baseline-raised table=tests/cxlibc.tsv key=src/brand_new_libc.cx col=1 head=0 staged=1") &&
+                                                         has(o, "BLOCKED ratchet-baseline-raised table=tests/cxlibc.tsv key=cx/driver/brand_new_libc.cx col=1 head=0 staged=2"));
+                                            (void)run_argv(rt, o, sizeof o);
+                                            (void)run_argv(u_cl_dn, o, sizeof o);
+                                            rc_tbl_dn = run_script("tools/precommit.cx", pc_fr, o, sizeof o);
+                                            ok_tbl_dn = (rc_tbl_dn == 0 && has(o, "blocked=0"));
+                                        }
+                                        ck(ok_over && ok_tbl_up && ok_tbl_dn,
+                                           "precommit-cxlibc-hard-gate-blocks-src-cx-over-and-new-or-raised-allowance-rows");
+                                        sy_unlink(f_cl_up); sy_unlink(f_cl_dn);
+                                        sy_unlink(l_dr); sy_unlink(l_dp); sy_rmdir(l_cd);
+                                    }
                                     sy_unsetenv("GIT_INDEX_FILE");
                                 }
                             }
@@ -547,6 +611,7 @@ int main(int argc, char **argv) {
                     cx_fmt(p, sizeof p, "%s/tlibfrozen.out", od); sy_unlink(p);
                     cx_fmt(p, sizeof p, "%s/facts.out", od); sy_unlink(p);
                     cx_fmt(p, sizeof p, "%s/affected-canary.out", od); sy_unlink(p);
+                    cx_fmt(p, sizeof p, "%s/env-semantics.out", od); sy_unlink(p);
                 }
             }
             for (k = 0; k < nfixtures; k++) { cx_fmt(p, sizeof p, "%s/rk-%s.out", od, nm[k]); sy_unlink(p); }
