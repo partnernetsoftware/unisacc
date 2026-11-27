@@ -1,16 +1,20 @@
 /* tools/check-osx-m53-s1.cx -- Cross-target Mach-O compile proof (osx/x86_64 + osx/arm64)
- * and host-side produce/judge/tamper verification for tests/osx-m53-s1-parity.cx.
+ * and host-side produce/judge/tamper verification for tests/osx-m53-s1-parity.cx (shared rc_write3/rc_verify).
  *
  * Verifies:
- *   (1) Cross-compile tests/osx-m53-s1-parity.cx for osx/x86_64 and osx/arm64 (with LP64
- *       compile-time asserts) + host lnx/x86_64
+ *   (1) Cross-compile tests/osx-m53-s1-parity.cx for host + osx/x86_64 + osx/arm64 in parallel
+ *       (with LP64 compile-time asserts)
  *   (2) Verify Mach-O 64-bit headers via sy_open + sy_read (no whole-file size cap):
  *       MH_MAGIC_64 (0xcffaedfe) + CPU_TYPE_X86_64 (0x01000007) / CPU_TYPE_ARM64 (0x0100000c)
- *   (3) Live dual-arm produce + --judge verification on host (portable tape_run_cx vs native
- *       cxsa_valid on real product stream_attributes.cx M53S1BIN2 slice, receipt + output bytes)
+ *   (3) Live dual-arm produce + --judge (rc_verify) on host: portable tape_run_cx vs native
+ *       cxsa_valid on real product stream_attributes.cx M53S1BIN2 slice, binding_sha + target +
+ *       composite inputs_sha (job + baseline + slice + vectors) + locators
  *   (4) Negative controls: missing --expect-target (rc=2), wrong --expect-target osx/arm64 (rc=1),
- *       source file as --candidate-file (rc=2), tampered output rejected by --judge (rc=1),
- *       tampered target in receipt rejected by --judge (rc=1)
+ *       source file as --candidate-file (rc=2), tampered output rejected by rc_verify (rc=1),
+ *       tampered target in receipt rejected by rc_verify (rc=1), tampered slice rejected by
+ *       rc_verify (inputs-mismatch, rc=1), wrong producer rejected by rc_verify (rc=1)
+ *   (5) Workflow contract: private-chain candidate_url + candidate_sha256, HEAD == source_commit,
+ *       no bootstrap-unisacc as candidate, real TAB grep via printf, uploads rcpt/out/slice/locators
  *
  * macOS native runtime stays UNMEASURED until macOS CI runs osx-m53-s1-parity.yml. */
 #pragma unisa use sys.fs
@@ -54,7 +58,8 @@ static int check_macho_cputype(const char *path, unsigned want_cpu) {
 }
 
 int main(void) {
-    char tmp[512], bin[600], osx_x64[600], osx_a64[600], rcpt[600], outf[600], bad_rcpt[600], bad_out[600];
+    char tmp[512], bin[600], osx_x64[600], osx_a64[600];
+    char rcpt[600], outf[600], slicef[600], locf[600], bad_rcpt[600], bad_out[600], bad_slice[600];
     char out[16384];
     const char *rev = "681bb667f0000000000000000000000000000000";
 
@@ -67,8 +72,11 @@ int main(void) {
     cx_fmt(osx_a64, sizeof osx_a64, "%s/parity_osx_arm64", tmp);
     cx_fmt(rcpt, sizeof rcpt, "%s/m53.rcpt", tmp);
     cx_fmt(outf, sizeof outf, "%s/m53.out", tmp);
+    cx_fmt(slicef, sizeof slicef, "%s/m53.tapeslice", tmp);
+    cx_fmt(locf, sizeof locf, "%s/locators.tsv", tmp);
     cx_fmt(bad_rcpt, sizeof bad_rcpt, "%s/m53_bad.rcpt", tmp);
     cx_fmt(bad_out, sizeof bad_out, "%s/m53_bad.out", tmp);
+    cx_fmt(bad_slice, sizeof bad_slice, "%s/m53_bad.tapeslice", tmp);
 
     /* 1. Cross-compile host + osx/x86_64 + osx/arm64 in parallel */
     {
@@ -77,9 +85,7 @@ int main(void) {
         char *av_a[] = {"sh", "./unisacc.com", "--target=osx/arm64", "tests/osx-m53-s1-parity.cx", "-o", osx_a64, 0}; /* lint:allow R1-product cross-compiles osx/arm64 parity binary */
         char **avs[3];
         sy_child_t ch[3];
-        int sp[3];
-        int rc[3];
-        int i;
+        int sp[3], rc[3], i;
         avs[0] = av_h; avs[1] = av_x; avs[2] = av_a;
         for (i = 0; i < 3; i++) {
             sy_spawn_t opt;
@@ -105,49 +111,69 @@ int main(void) {
     }
 
     if (sy_exists(bin) == 1) {
-        /* 2. Live dual-arm produce + --judge */
+        /* 2. Live dual-arm produce + --judge (via shared rc_write3 / rc_verify) */
         {
-            char *av_p[] = {bin, "--receipt", rcpt, "--output", outf, "--run-id", "r1",
-                            "--rev", (char *)rev, "--candidate-file", "./unisacc.com", /* lint:allow R1-product hashes candidate binary */
+            char *av_p[] = {bin, "--receipt", rcpt, "--output", outf, "--slice", slicef, "--locators", locf,
+                            "--run-id", "r1", "--rev", (char *)rev, "--candidate-file", "./unisacc.com", /* lint:allow R1-product hashes candidate binary */
                             "--expect-target", "lnx/x86_64", "--ts", "1764200000", 0};
-            char *av_j[] = {bin, "--judge", "--receipt", rcpt, "--output", outf, "--run-id", "r1",
-                            "--rev", (char *)rev, "--candidate-file", "./unisacc.com", /* lint:allow R1-product judges candidate binary */
-                            "--expect-target", "lnx/x86_64", "--now-ts", "1764200060", 0};
+            char *av_j[] = {bin, "--judge", "--receipt", rcpt, "--output", outf, "--slice", slicef,
+                            "--run-id", "r1", "--rev", (char *)rev, "--candidate-file", "./unisacc.com", /* lint:allow R1-product judges candidate binary */
+                            "--expect-target", "lnx/x86_64", "--producer", "osx-m53-s1-parity",
+                            "--purpose", "s1-parity", "--now-ts", "1764200060", 0};
             int r1 = run_av_merged(av_p, out, sizeof out);
-            int p_ok = (r1 == 0 && strstr(out, "PASS\tm53-s1-parity\ttarget=lnx/x86_64") != 0);
+            int p_ok = (r1 == 0 && strstr(out, "PASS\tm53-s1-parity\ttarget=lnx/x86_64") != 0 &&
+                        sy_exists(slicef) == 1 && sy_exists(locf) == 1);
             int r2 = p_ok ? run_av_merged(av_j, out, sizeof out) : 1;
-            ck(p_ok && r2 == 0 && strstr(out, "judge=ok") != 0, "live-dual-arm-produce-and-judge");
+            unsigned char *rb = 0; int64_t rn = 0;
+            int has_bind = 0;
+            if (p_ok && sy_read_file(rcpt, &rb, &rn, 65536) == 0 && rb) {
+                has_bind = (strstr((char *)rb, "binding_sha\t") != 0 && strstr((char *)rb, "version\t3\n") != 0);
+                mm_free(rb);
+            }
+            ck(p_ok && r2 == 0 && strstr(out, "judge=ok") != 0 && has_bind, "live-dual-arm-produce-and-rc-verify");
         }
 
         /* 3. Negative controls */
         {
-            char *av_m[] = {bin, "--receipt", rcpt, "--output", outf, "--run-id", "r2",
+            char *av_m[] = {bin, "--receipt", rcpt, "--output", outf, "--slice", slicef, "--run-id", "r2",
                             "--rev", (char *)rev, "--candidate-file", "./unisacc.com", /* lint:allow R1-product missing expect-target negative control */
                             "--ts", "1764200000", 0};
             ck(run_av_merged(av_m, out, sizeof out) == 2, "refuse-missing-expect-target");
         }
         {
-            char *av_w[] = {bin, "--receipt", rcpt, "--output", outf, "--run-id", "r2",
+            char *av_w[] = {bin, "--receipt", rcpt, "--output", outf, "--slice", slicef, "--run-id", "r2",
                             "--rev", (char *)rev, "--candidate-file", "./unisacc.com", /* lint:allow R1-product wrong expect-target negative control */
                             "--expect-target", "osx/arm64", "--ts", "1764200000", 0};
             ck(run_av_merged(av_w, out, sizeof out) == 1 && strstr(out, "target-mismatch") != 0, "refuse-wrong-expect-target");
         }
         {
-            char *av_s[] = {bin, "--receipt", rcpt, "--output", outf, "--run-id", "r2",
+            char *av_s[] = {bin, "--receipt", rcpt, "--output", outf, "--slice", slicef, "--run-id", "r2",
                             "--rev", (char *)rev, "--candidate-file", "cx/runtime/tape_exec.cx",
                             "--expect-target", "lnx/x86_64", "--ts", "1764200000", 0};
             ck(run_av_merged(av_s, out, sizeof out) == 2 && strstr(out, "candidate-is-source") != 0, "refuse-source-as-candidate");
         }
         {
-            /* Tamper output bytes -> --judge must reject with output-mismatch */
             (void)sy_write_file(bad_out, (const unsigned char *)"tampered\n", 9, 0600);
-            char *av_to[] = {bin, "--judge", "--receipt", rcpt, "--output", bad_out, "--run-id", "r1",
-                             "--rev", (char *)rev, "--candidate-file", "./unisacc.com", /* lint:allow R1-product tampered output negative control */
+            char *av_to[] = {bin, "--judge", "--receipt", rcpt, "--output", bad_out, "--slice", slicef,
+                             "--run-id", "r1", "--rev", (char *)rev, "--candidate-file", "./unisacc.com", /* lint:allow R1-product tampered output negative control */
                              "--expect-target", "lnx/x86_64", "--now-ts", "1764200060", 0};
-            ck(run_av_merged(av_to, out, sizeof out) == 1 && strstr(out, "output-mismatch") != 0, "judge-rejects-tampered-output");
+            ck(run_av_merged(av_to, out, sizeof out) == 1 && strstr(out, "output-mismatch") != 0, "rc-verify-rejects-tampered-output");
         }
         {
-            /* Tamper target in receipt -> --judge must reject with target-mismatch */
+            (void)sy_write_file(bad_slice, (const unsigned char *)"badslice", 8, 0600);
+            char *av_ts[] = {bin, "--judge", "--receipt", rcpt, "--output", outf, "--slice", bad_slice,
+                             "--run-id", "r1", "--rev", (char *)rev, "--candidate-file", "./unisacc.com", /* lint:allow R1-product tampered slice negative control */
+                             "--expect-target", "lnx/x86_64", "--now-ts", "1764200060", 0};
+            ck(run_av_merged(av_ts, out, sizeof out) == 1 && strstr(out, "inputs-mismatch") != 0, "rc-verify-rejects-tampered-slice");
+        }
+        {
+            char *av_tp[] = {bin, "--judge", "--receipt", rcpt, "--output", outf, "--slice", slicef,
+                             "--run-id", "r1", "--rev", (char *)rev, "--candidate-file", "./unisacc.com", /* lint:allow R1-product wrong producer negative control */
+                             "--expect-target", "lnx/x86_64", "--producer", "wrong-producer",
+                             "--purpose", "s1-parity", "--now-ts", "1764200060", 0};
+            ck(run_av_merged(av_tp, out, sizeof out) == 1 && strstr(out, "producer-or-purpose-mismatch") != 0, "rc-verify-rejects-wrong-producer");
+        }
+        {
             unsigned char *rb = 0; int64_t rn = 0;
             int tok = 0;
             if (sy_read_file(rcpt, &rb, &rn, 65536) == 0 && rb && rn > 0) {
@@ -155,15 +181,34 @@ int main(void) {
                 if (pos) {
                     mm_copy(pos, 17, "target\tosx/x86_64", 17);
                     (void)sy_write_file(bad_rcpt, rb, (long)rn, 0600);
-                    char *av_tt[] = {bin, "--judge", "--receipt", bad_rcpt, "--output", outf, "--run-id", "r1",
-                                     "--rev", (char *)rev, "--candidate-file", "./unisacc.com", /* lint:allow R1-product tampered target negative control */
+                    char *av_tt[] = {bin, "--judge", "--receipt", bad_rcpt, "--output", outf, "--slice", slicef,
+                                     "--run-id", "r1", "--rev", (char *)rev, "--candidate-file", "./unisacc.com", /* lint:allow R1-product tampered target negative control */
                                      "--expect-target", "lnx/x86_64", "--now-ts", "1764200060", 0};
-                    tok = (run_av_merged(av_tt, out, sizeof out) == 1 && strstr(out, "target-mismatch") != 0);
+                    tok = (run_av_merged(av_tt, out, sizeof out) == 1 &&
+                           (strstr(out, "bad-binding") != 0 || strstr(out, "target-mismatch") != 0));
                 }
                 mm_free(rb);
             }
-            ck(tok, "judge-rejects-tampered-target");
+            ck(tok, "rc-verify-rejects-tampered-target");
         }
+    }
+
+    /* 4. Workflow contract check */
+    {
+        unsigned char *wb = 0; int64_t wn = 0;
+        int wok = 0;
+        if (sy_read_file(".github/workflows/osx-m53-s1-parity.yml", &wb, &wn, 65536) == 0 && wb) {
+            const char *s = (const char *)wb;
+            wok = (strstr(s, "bootstrap-unisacc") == 0 &&
+                   strstr(s, "candidate_url:") != 0 &&
+                   strstr(s, "candidate_sha256:") != 0 &&
+                   strstr(s, "git rev-parse HEAD") != 0 &&
+                   strstr(s, "printf 'target\\t%s'") != 0 &&
+                   strstr(s, "locators.tsv") != 0 &&
+                   strstr(s, "m53_bin2.tapeslice") != 0);
+            mm_free(wb);
+        }
+        ck(wok, "workflow-private-candidate-and-tab-contract");
     }
 
     (void)sy_remove_all(tmp);
