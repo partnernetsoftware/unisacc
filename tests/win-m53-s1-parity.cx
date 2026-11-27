@@ -14,6 +14,7 @@
  * --expect-target, --output, and --slice are mandatory.
  */
 #pragma unisa use cxlib.receipt
+#pragma unisa use runtime.packagefooter
 #pragma unisa use runtime.tape_exec
 #pragma unisa use runtime.stream_attributes
 #pragma unisa use driver.stream_s1
@@ -139,12 +140,101 @@ static int validate_candidate_binary(const char *path) {
     sy_close(fd);
     if (got < 4) { sy_eprintf("FAIL\tcandidate-read\n"); return 2; }
     if (!((hdr[0] == 'M' && hdr[1] == 'Z') ||
+          (hdr[0] == 'P' && hdr[1] == ' ' && hdr[2] == '4' && hdr[3] == ' ') ||
           (hdr[0] == 0x7f && hdr[1] == 'E' && hdr[2] == 'L' && hdr[3] == 'F') ||
           (hdr[0] == '#' && hdr[1] == '!'))) {
         sy_eprintf("FAIL\tcandidate-bad-magic\t%s\n", path);
         return 2;
     }
     return 0;
+}
+
+static unsigned crc32_ieee(const unsigned char *p, long n) {
+    unsigned c = 0xffffffffu;
+    for (long i = 0; i < n; i++) {
+        c ^= (unsigned)p[i];
+        for (int b = 0; b < 8; b++) c = (c & 1u) ? ((c >> 1) ^ 0xedb88320u) : (c >> 1);
+    }
+    return ~c;
+}
+
+static int parse_u64_sep(const unsigned char *p, long n, long *pos, unsigned long long *out, char sep) {
+    long i = *pos;
+    unsigned long long v = 0ULL;
+    if (i >= n || p[i] < '0' || p[i] > '9') return -1;
+    while (i < n && p[i] >= '0' && p[i] <= '9') { v = v * 10ULL + (unsigned long long)(p[i] - '0'); i++; }
+    if (i >= n || p[i] != (unsigned char)sep) return -1;
+    *pos = i + 1;
+    *out = v;
+    return 0;
+}
+
+/* Extract tape/lnx-x86_64/m53.tapeslice directly from delivered APE (or P4 container) and verify CRC32. */
+static int extract_m53_slice_from_ape(const char *ape_path, unsigned char **out_buf, int64_t *out_len) {
+    static const char *const KEY = "tape/lnx-x86_64/m53.tapeslice";
+    unsigned char *b = 0;
+    int64_t n = 0;
+    long pkg_off = 0, pkg_end = 0, pos = 0;
+    long kl_want = (long)strlen(KEY);
+    unsigned long long pm = 0, ps = 0, nr = 0;
+    int found = 0;
+    *out_buf = 0; *out_len = 0;
+    if (sy_read_file(ape_path, &b, &n, 256L << 20) != 0 || !b || n < 16) { mm_free(b); return 1; }
+    if (memcmp(b, "P 4 ", 4) == 0) {
+        pkg_off = 0; pkg_end = (long)n;
+    } else {
+        PackageFooter pf;
+        if (!packagefooter_locate_bytes(b, (long)n, &pf) ||
+            pf.package_offset < 0 || pf.package_length < 10 ||
+            pf.package_offset + pf.package_length > (long)n ||
+            memcmp(b + pf.package_offset, "P 4 ", 4) != 0) {
+            mm_free(b); return 1;
+        }
+        pkg_off = pf.package_offset;
+        pkg_end = pf.package_offset + pf.package_length;
+    }
+    pos = pkg_off + 4;
+    if (parse_u64_sep(b, pkg_end, &pos, &pm, ' ') ||
+        parse_u64_sep(b, pkg_end, &pos, &ps, ' ') ||
+        parse_u64_sep(b, pkg_end, &pos, &nr, '\n')) { mm_free(b); return 1; }
+    for (unsigned long long di = 0; di < ps; di++) {
+        if (pos + 2 > pkg_end || b[pos] != 'D' || b[pos + 1] != ' ') { mm_free(b); return 1; }
+        while (pos < pkg_end && b[pos] != '\n') pos++;
+        if (pos >= pkg_end) { mm_free(b); return 1; }
+        pos++;
+    }
+    for (unsigned long long mi = 0; mi < pm; mi++) {
+        unsigned long long mb = 0, mr = 0, mc = 0, mk = 0;
+        if (pos + 2 > pkg_end || b[pos] != 'M' || b[pos + 1] != ' ') { mm_free(b); return 1; }
+        pos += 2;
+        if (parse_u64_sep(b, pkg_end, &pos, &mb, ' ') || parse_u64_sep(b, pkg_end, &pos, &mr, ' ') ||
+            parse_u64_sep(b, pkg_end, &pos, &mc, ' ') || parse_u64_sep(b, pkg_end, &pos, &mk, '\n') ||
+            mb > (unsigned long long)(pkg_end - pos)) { mm_free(b); return 1; }
+        pos += (long)mb;
+    }
+    for (unsigned long long ri = 0; ri < nr; ri++) {
+        unsigned long long kl = 0, dl = 0, rl = 0, co = 0, cr = 0;
+        if (pos + 2 > pkg_end || b[pos] != 'F' || b[pos + 1] != ' ') { mm_free(b); return 1; }
+        pos += 2;
+        if (parse_u64_sep(b, pkg_end, &pos, &kl, ' ') || parse_u64_sep(b, pkg_end, &pos, &dl, ' ') ||
+            parse_u64_sep(b, pkg_end, &pos, &rl, ' ') || parse_u64_sep(b, pkg_end, &pos, &co, ' ') ||
+            parse_u64_sep(b, pkg_end, &pos, &cr, '\n')) { mm_free(b); return 1; }
+        if (kl + dl > (unsigned long long)(pkg_end - pos)) { mm_free(b); return 1; }
+        if ((long)kl == kl_want && memcmp(b + pos, KEY, (size_t)kl_want) == 0) {
+            if (found || co != 0ULL || dl < 128ULL || rl != dl) { mm_free(*out_buf); *out_buf = 0; mm_free(b); return 1; }
+            const unsigned char *sptr = b + pos + (long)kl;
+            if (crc32_ieee(sptr, (long)dl) != (unsigned)cr) { mm_free(b); return 1; }
+            unsigned char *cp = (unsigned char *)mm_alloc((size_t)dl);
+            if (!cp) { mm_free(b); return 1; }
+            mm_copy(cp, (long)dl, sptr, (long)dl);
+            *out_buf = cp;
+            *out_len = (int64_t)dl;
+            found = 1;
+        }
+        pos += (long)(kl + dl);
+    }
+    mm_free(b);
+    return found ? 0 : 1;
 }
 
 static int file_sha256_hex(const char *path, char out[65], int64_t max_bytes) {
@@ -154,9 +244,9 @@ static int file_sha256_hex(const char *path, char out[65], int64_t max_bytes) {
         if (b) mm_free(b);
         return 1;
     }
-    sy_sha256_hex(b, n, out);
+    int hrc = sy_sha256_hex(b, n, out);
     mm_free(b);
-    return out[0] ? 0 : 1;
+    return (hrc == 0 && out[0]) ? 0 : 1;
 }
 
 /* Deterministic 12-vector suite shared by produce (execution) and judge (inputs_sha binding). */
@@ -201,10 +291,10 @@ static int compute_vectors_sha(char out[65]) {
             pos += ls[k];
         }
     }
-    sy_sha256_hex(buf, (int64_t)pos, out);
+    int hrc = sy_sha256_hex(buf, (int64_t)pos, out);
     mm_free(buf);
     mm_free(v_1000);
-    return out[0] ? 0 : 1;
+    return (hrc == 0 && out[0]) ? 0 : 1;
 }
 
 /* Composite inputs_sha covering job.tsv + native baseline + exact slice bytes + vectors. */
@@ -216,13 +306,12 @@ static int compute_inputs_bundle_sha_mem(const unsigned char *sl, int64_t slen,
     if (!sl || slen <= 0) return 1;
     if (file_sha256_hex(JOB, job_sha, 1 << 20) != 0) return 1;
     if (file_sha256_hex(BASELINE, base_sha, 4 << 20) != 0) return 1;
-    sy_sha256_hex(sl, slen, slice_sha);
-    if (!slice_sha[0]) return 1;
+    if (sy_sha256_hex(sl, slen, slice_sha) != 0 || !slice_sha[0]) return 1;
     if (compute_vectors_sha(vec_sha) != 0) return 1;
     if (cx_fmt(manifest, sizeof manifest,
                "job\t%s\nbaseline\t%s\nslice\t%s\nvectors\t%s\n",
                job_sha, base_sha, slice_sha, vec_sha) != 0) return 1;
-    sy_sha256_hex((const unsigned char *)manifest, (int64_t)strlen(manifest), bundle_sha);
+    if (sy_sha256_hex((const unsigned char *)manifest, (int64_t)strlen(manifest), bundle_sha) != 0) return 1;
     return bundle_sha[0] ? 0 : 1;
 }
 
@@ -387,7 +476,7 @@ int main(int argc, char **argv) {
         return 1;
     }
 
-    /* Read executed M53S1BIN2 slice into memory, hash the exact in-memory snapshot, and run both arms. */
+    /* Extract embedded tape/lnx-x86_64/m53.tapeslice directly from delivered candidate APE, persist to --slice, and run both arms. */
     {
         unsigned char *sl = 0;
         int64_t slen = 0;
@@ -395,17 +484,18 @@ int main(int argc, char **argv) {
         long out_pos = 0;
         int all_ok = 1;
         if (!out_buf) return 1;
-        if (sy_read_file(slice_p, &sl, &slen, 8 << 20) != 0 || !sl || slen < 128) {
+        if (extract_m53_slice_from_ape(cand_file, &sl, &slen) != 0 || !sl || slen < 128) {
             if (sl) mm_free(sl);
             mm_free(out_buf);
-            sy_eprintf("FAIL\tread-m53-slice\t%s\n", slice_p);
+            sy_eprintf("FAIL\textract-ape-m53-slice\t%s\n", cand_file);
             return 1;
         }
-        /* Hash the exact in-memory slice snapshot (sl/slen) that will be executed. */
-        if (compute_inputs_bundle_sha_mem(sl, slen, job_sha, base_sha, slice_sha, vec_sha, in_sha) != 0) {
+        /* Hash the exact in-memory slice extracted from the delivered APE and persist it to slice_p. */
+        if (compute_inputs_bundle_sha_mem(sl, slen, job_sha, base_sha, slice_sha, vec_sha, in_sha) != 0 ||
+            sy_write_file(slice_p, sl, (long)slen, 0644) != 0) {
             mm_free(sl);
             mm_free(out_buf);
-            sy_eprintf("FAIL\thash-slice-snapshot\n");
+            sy_eprintf("FAIL\thash-or-write-slice-snapshot\n");
             return 1;
         }
 
@@ -460,7 +550,11 @@ int main(int argc, char **argv) {
             sy_eprintf("FAIL\twrite-output\n");
             return 1;
         }
-        sy_sha256_hex((const unsigned char *)out_buf, (int64_t)out_pos, out_sha);
+        if (sy_sha256_hex((const unsigned char *)out_buf, (int64_t)out_pos, out_sha) != 0 || !out_sha[0]) {
+            mm_free(out_buf);
+            sy_eprintf("FAIL\thash-output\n");
+            return 1;
+        }
         mm_free(out_buf);
 
         if (loc_p) {
@@ -476,6 +570,7 @@ int main(int argc, char **argv) {
                        "baseline_file\t%s\n"
                        "baseline_sha\t%s\n"
                        "slice_file\t%s\n"
+                       "slice_source\tdelivered_ape:tape/lnx-x86_64/m53.tapeslice\n"
                        "slice_sha\t%s\n"
                        "vectors_sha\t%s\n"
                        "inputs_sha\t%s\n"
