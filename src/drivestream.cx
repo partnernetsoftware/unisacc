@@ -253,7 +253,7 @@ static int ds_tab_add(unsigned char **tab, long *tn, long *tc, unsigned char **b
     int k;
     len = ds_le32(*b + 8);
     if (len < 4 || len > *n - 12 || (len - 4) % 9) return 2;
-    { int vr = cxsa_valid_s1(*b + 12, len); if (vr < 0) return 2; if (!vr) return 2; }
+    { int vr = cxsa_valid_s1(*b + 12, len); if (vr < 0) return -2; if (!vr) return 2; }
     recs = (len - 4) / 9;
     old = *tn >= 4 ? ds_le32(*tab) : 0;
     if (*tn == 0 && fr_need(tab, tn, tc, 4)) return 6;
@@ -291,6 +291,7 @@ static int ds_frame(void) {
         if (ds_read(ds_in[j] + eq + 1, &cur, &curn)) return 1;
         if (curn >= 12 && mm_same(cur, "USLATTRT", 8)) ar = ds_tab_add(&tab, &tn, &tc, &cur, &curn);
         else ar = cxaf_strip(&tab, &tn, &tc, cur, &curn, (unsigned)j, ds_grow);
+        if (ar < 0) return 2;
         if ((ar != 0 && ar != 1) || fr_add(&frame, &fn, &fcap, ds_in[j], eq, cur, curn)) {
             sy_eprintf("unisacc: stream: frame: %s\n", ar != 0 && ar != 1 ? "attribute frame" : "framing");
             return 1;
@@ -313,7 +314,11 @@ static int ds_pass(xs_item *in, void *vout) {
 static int ds_strip(void *ctx, void *vin, void *vout, char *why, int cap) {
     xs_item *in = vin;
     (void)ctx; (void)why; (void)cap;
-    if (!ds_attr_in(&in->buf.data, &in->buf.len, ds_unit)) return ds_pass(in, vout);
+    {
+        int ar = ds_attr_in(&in->buf.data, &in->buf.len, ds_unit);
+        if (ar == 0) return ds_pass(in, vout);
+        if (ar == 2) return 2;
+    }
     sy_eprintf("unisacc: model driver: malformed USLATTR1 side-car\n");
     return 1;
 }

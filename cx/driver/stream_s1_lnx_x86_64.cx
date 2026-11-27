@@ -25,6 +25,7 @@ enum {
 };
 
 static int m53_m1_state;
+static int m53_m1_busy;
 static int m53_m1_detail;
 static char m53_m1_reason[64];
 static unsigned char *m53_m1_slice;
@@ -295,22 +296,34 @@ static int m53_m1_boot(void) {
 int cxsa_valid_s1(const unsigned char *data, long length) {
     unsigned long long res[4];
     long r;
-    if (length < 0 || length > M53_M1_MAX_IN) {
+    if (m53_m1_busy) {
+        m53_m1_emit_refuse("embed-reentrant", 0);
+        return -2;
+    }
+    if (length < 0 || (!data && length > 0)) return 0;
+    if (length > M53_M1_MAX_IN) {
         m53_m1_emit_refuse("embed-input-too-large", 0);
         return -2;
     }
+    m53_m1_busy = 1;
     if (m53_m1_state == M53_M1_UNBOOTED) {
-        if (m53_m1_boot() != 0) return -2;
+        if (m53_m1_boot() != 0) { m53_m1_busy = 0; return -2; }
     } else if (m53_m1_state != M53_M1_READY) {
         m53_m1_emit_refuse(m53_m1_reason, m53_m1_detail);
+        m53_m1_busy = 0;
         return -2;
     }
     res[0] = 0; res[1] = 0; res[2] = 0; res[3] = 0;
     r = tsl_call(&m53_m1_tsl, m53_m1_run_fn, (long)m53_m1_slice, (long)data, length);
     (void)r;
+    m53_m1_busy = 0;
     if (res[0] != 0ULL) {
         m53_m1_emit_refuse("embed-vm-fault", (int)res[0]);
         return -2;
     }
-    return res[3] ? 1 : 0;
+    if (res[3] != 0ULL && res[3] != 1ULL) {
+        m53_m1_emit_refuse("embed-vm-bad-result", (int)res[3]);
+        return -2;
+    }
+    return (int)res[3];
 }
