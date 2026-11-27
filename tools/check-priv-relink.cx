@@ -88,6 +88,23 @@ static int write_p4_body(const char *path, const char *k1, const char *v1, const
     return sy_write_atomic(path, buf, (size_t)n, 0644);
 }
 
+static int write_p4_body_nul_key(const char *path, const char *k1, const char *v1,
+                                 const char *nul_suffix, const char *v2) {
+    char buf[4096];
+    long k1l = (long)strlen(k1), v1l = (long)strlen(v1);
+    long k2l = 1 + (long)strlen(nul_suffix), v2l = (long)strlen(v2);
+    unsigned c1 = cpr_crc32((const unsigned char *)v1, v1l);
+    unsigned c2 = cpr_crc32((const unsigned char *)v2, v2l);
+    int n1 = snprintf(buf, sizeof buf,
+                      "P 4 1 1 2\nD r s in out 0\nM 1 1 1 0\nAF %ld %ld %ld 0 %u\n%s%sF %ld %ld %ld 0 %u\n",
+                      k1l, v1l, v1l, c1, k1, v1, k2l, v2l, v2l, c2);
+    if (n1 <= 0 || (size_t)(n1 + k2l + v2l) >= sizeof buf) return -1;
+    buf[n1] = 0;
+    mm_copy(buf + n1 + 1, (long)(sizeof buf - (size_t)(n1 + 1)), nul_suffix, k2l - 1);
+    mm_copy(buf + n1 + k2l, (long)(sizeof buf - (size_t)(n1 + k2l)), v2, v2l);
+    return sy_write_atomic(path, buf, (size_t)(n1 + k2l + v2l), 0644);
+}
+
 int main(void) {
     if (sy_realpath(".", g_root, sizeof g_root) < 0) return 2;
     int sc = 0;
@@ -158,6 +175,11 @@ int main(void) {
         "  fi\n"
         "  printf '.globl sym_routed_%%s\\nsym_routed_%%s:\\n  ret\\n' \"$BASE\" \"$BASE\" > \"$OUT.s\"\n"
         "  /usr/bin/as -o \"$OUT\" \"$OUT.s\" && rm -f \"$OUT.s\"\n"
+        "  exit 0\n"
+        "fi\n"
+        "if [ \"$1\" = \"-cx-plan\" ]; then\n"
+        "  [ -f \"$2\" ] || exit 1\n"
+        "  printf '0\\t%%s\\tcx.h\\n' \"$2\"\n"
         "  exit 0\n"
         "fi\n"
         "exit 1\n"
@@ -367,6 +389,107 @@ int main(void) {
     ck(r.rc == 2 &&
        cpr_has(&r, "REFUSE\tPRIV_RELINK\tunit-id-mismatch\trequested=m57.o(module=stream_s1) declared_module=cellname actual_unit=m60.o"),
        "mut-unit-id-mismatch-stale-mNN-refused-rc2", &r);
+    pr_free(&r);
+
+    /* 12. Mutant H (cdx): NUL-prefixed foreign F-record key (\0predefines/lnx/arm64) drift prints escaped key=\0predefines/lnx/arm64 */
+    {
+        char p4_nul_base[1024], p4_nul_mut[1024];
+        cx_fmt(p4_nul_base, sizeof p4_nul_base, "%s/p4-nul-base.body", fx);
+        cx_fmt(p4_nul_mut, sizeof p4_nul_mut, "%s/p4-nul-mut.body", fx);
+        write_p4_body_nul_key(p4_nul_base, "core/net.bin", "NETDATA123", "predefines/lnx/arm64", "PREDEF_ORIG");
+        write_p4_body_nul_key(p4_nul_mut, "core/net.bin", "NETDATA123", "predefines/lnx/arm64", "PREDEF_DIFF");
+        cx_fmt(cmd, sizeof cmd,
+            "cp '%s' '%s' && "
+            "sh '%s/unisacc.com' '%s/tools/priv-relink.cx' -- "
+            "--chain-dir '%s' --repo '%s' --baseline-layer-api '%s' "
+            "--p4-payload '%s' --out '%s/out-nul-fail.com'; "
+            "rc=$?; cp '%s/p4-restore.body' '%s' 2>/dev/null || true; exit $rc",
+            p4_nul_base, p4_base, g_root, g_root, chain, repo, base_api, p4_nul_mut, fx, fx, p4_base);
+        write_p4_body(p4_base, "core/net.bin", "NETDATA123", 0, 0);
+        cx_fmt(p4_nul_base, sizeof p4_nul_base, "%s/p4-restore.body", fx);
+        write_p4_body(p4_nul_base, "core/net.bin", "NETDATA123", 0, 0);
+        cx_fmt(p4_nul_base, sizeof p4_nul_base, "%s/p4-nul-base.body", fx);
+        write_p4_body_nul_key(p4_nul_base, "core/net.bin", "NETDATA123", "predefines/lnx/arm64", "PREDEF_ORIG");
+        cpr_sh(g_root, cmd, 45, &r);
+        ck(r.rc == 2 &&
+           cpr_has(&r, "REFUSE\tPRIV_RELINK\tforeign-f-record-drift") &&
+           cpr_has(&r, "key=\\0predefines/lnx/arm64"),
+           "mut-nul-prefixed-foreign-f-key-escaped-refused-rc2", &r);
+        pr_free(&r);
+    }
+
+    /* 13. Empty-change control in a minimal repo projection (no cxroot.tsv, symlinked unisacc.com + ape-pack.cx, relative --repo & --out) */
+    cx_fmt(cmd, sizeof cmd,
+        "set -e; mkdir -p '%s/min_proj/repo/build/layer-api' '%s/min_proj/repo/tools' '%s/min_proj/run_cwd'; "
+        "cp '%s/build/layer-api/core.tsv' '%s/min_proj/repo/build/layer-api/core.tsv'; "
+        "cp '%s/build/tlib-packages.tsv' '%s/min_proj/repo/build/tlib-packages.tsv'; "
+        "cp '%s/build/iface-hash.tsv' '%s/min_proj/repo/build/iface-hash.tsv'; "
+        "ln -sf '%s/unisacc.com' '%s/min_proj/repo/unisacc.com'; "
+        "ln -sf '%s/tools/ape-pack.cx' '%s/min_proj/repo/tools/ape-pack.cx'; "
+        "cd '%s/min_proj/run_cwd' && "
+        "sh '%s/unisacc.com' '%s/tools/priv-relink.cx' -- "
+        "--chain-dir '%s' --repo ../repo --baseline-layer-api '%s' --out control/unisacc.com && "
+        "cmp -s control/unisacc.com '%s/ape-final/unisacc-next.com' && echo MIN_PROJ_BYTE_EQUAL",
+        fx, fx, fx, repo, fx, repo, fx, repo, fx, repo, fx, repo, fx, fx, g_root, g_root, chain, base_api, chain);
+    cpr_sh(g_root, cmd, 45, &r);
+    ck(r.rc == 0 && cpr_has(&r, "MIN_PROJ_BYTE_EQUAL") && cpr_has(&r, "status=PREPARED\tscope=LOCAL"),
+       "empty-change-minimal-repo-projection-repack-byte-equal-pass", &r);
+    pr_free(&r);
+
+    /* 14. Mutant I: --replace with an object identical to baseline (changed=0 / no-op replacement) MUST REFUSE rc=2 replacement-not-applied */
+    cx_fmt(cmd, sizeof cmd,
+        "sh '%s/unisacc.com' '%s/tools/priv-relink.cx' -- "
+        "--chain-dir '%s' --repo '%s' --baseline-layer-api '%s' "
+        "--replace 'm60.o=%s/fixedpoint/g2/lnx-x86_64/m60.o' "
+        "--out '%s/out-noop-fail.com'",
+        g_root, g_root, chain, repo, base_api, chain, fx);
+    cpr_sh(g_root, cmd, 45, &r);
+    ck(r.rc == 2 && cpr_has(&r, "REFUSE\tPRIV_RELINK\treplacement-not-applied\tunit=m60.o changed=0"),
+       "mut-replacement-not-applied-refused-rc2", &r);
+    pr_free(&r);
+
+    /* 15. --show-route red-then-green: missing route row refused, non-existent file refused, valid module_target + root_target verified */
+    cx_fmt(cmd, sizeof cmd,
+        "set -e; mkdir -p '%s/plans' '%s/cx/compiler' '%s/src'; "
+        "printf '# key\\tsource\\tmodule\\tuses\\tlines\\theap\\trecursive\\toverride\\tnote\\n"
+        "m54.o\\tcx/compiler/cellname.cx\\tcellname\\t-\\t18\\t0\\t0\\t-\\t-\\n"
+        "driveargs.o\\tsrc/driveargs.cx\\tdriveargs\\t-\\t64\\t0\\t0\\t-\\t-\\n' > '%s/plans/slice-units.tsv'; "
+        "printf 'root\\tdriveargs.o\\tsrc/driveargs.cx\\n' > '%s/build/chain-facts.tsv'",
+        repo, repo, repo, repo, repo);
+    cpr_sh(g_root, cmd, 15, &r); pr_free(&r);
+
+    cx_fmt(cmd, sizeof cmd,
+        "sh '%s/unisacc.com' '%s/tools/priv-relink.cx' -- --repo '%s' --show-route m54",
+        g_root, g_root, repo);
+    cpr_sh(g_root, cmd, 30, &r);
+    ck(r.rc == 2 && cpr_has(&r, "REFUSE\tPRIV_RELINK\troute-row-missing\tquery=m54 target=lnx/x86_64"),
+       "mut-show-route-missing-row-refused-rc2", &r);
+    pr_free(&r);
+
+    cx_fmt(cmd, sizeof cmd,
+        "printf 'module_target\\tlnx/x86_64:compiler.cellname\\tcx/compiler/missing_tbl.cx\\n' >> '%s/build/chain-facts.tsv' && "
+        "sh '%s/unisacc.com' '%s/tools/priv-relink.cx' -- --repo '%s' --show-route m54",
+        repo, g_root, g_root, repo);
+    cpr_sh(g_root, cmd, 30, &r);
+    ck(r.rc == 2 && cpr_has(&r, "REFUSE\tPRIV_RELINK\troute-source-missing\tquery=m54 target=lnx/x86_64 kind=module_target"),
+       "mut-show-route-nonexistent-file-refused-rc2", &r);
+    pr_free(&r);
+
+    cx_fmt(cmd, sizeof cmd,
+        "printf '#pragma unisa module cellname\\nint cel_at(void){return 0;}\\n' > '%s/cx/compiler/cellname_tbl.cx' && "
+        "printf '#pragma unisa module driveargs\\nint da_run(void){return 0;}\\n' > '%s/src/driveargs_tbl.cx' && "
+        "printf 'root\\tdriveargs.o\\tsrc/driveargs.cx\\n"
+        "root_target\\tlnx/x86_64:driveargs.o\\tsrc/driveargs_tbl.cx\\n"
+        "module_target\\tlnx/x86_64:compiler.cellname\\tcx/compiler/cellname_tbl.cx\\n' > '%s/build/chain-facts.tsv' && "
+        "sh '%s/unisacc.com' '%s/tools/priv-relink.cx' -- --repo '%s' --show-route m54 && "
+        "sh '%s/unisacc.com' '%s/tools/priv-relink.cx' -- --repo '%s' --show-route driveargs",
+        repo, repo, repo, g_root, g_root, repo, g_root, g_root, repo);
+    cpr_sh(g_root, cmd, 45, &r);
+    ck(r.rc == 0 &&
+       cpr_has(&r, "PRIV_RELINK_ROUTE\tquery=m54\ttarget=lnx/x86_64\tkind=module_target\tunit=m54.o\tmodule=compiler.cellname\tsrc=cx/compiler/cellname_tbl.cx\tsha256=") &&
+       cpr_has(&r, "PRIV_RELINK_ROUTE\tquery=driveargs\ttarget=lnx/x86_64\tkind=root_target\tunit=driveargs.o\tmodule=driveargs\tsrc=src/driveargs_tbl.cx\tsha256=") &&
+       cpr_has(&r, "cx_plan=VERIFIED"),
+       "show-route-m54-and-driveargs-verified-pass", &r);
     pr_free(&r);
 
     fsx_scratch_drop(sc);
