@@ -66,9 +66,10 @@ static long run(char **v,const char *cwd,char *stdout_path){tick();char a[64],b[
  kill(-pid,SIGKILL);tick();if(!WIFEXITED(st)||WEXITSTATUS(st))die("child failed (see exclusive logs)");return sy_now_ms()-start;}
 static void sid(char h[65]){char log[4400];char *v[]={helper,root,0};run(v,root,log);size_t n;char *s=load(log,&n);if(n!=65||s[64]!='\n')die("native Fv2 identity wire");memcpy(h,s,64);h[64]=0;free(s);if(!hex(h))die("native Fv2 identity hex");}
 static void roots(void) {
+    const char *t=getenv("TARGET");
     np_buf b={0};
     for(int i=0;i<cf_root_count();i++) {
-        char absolute[4400]; path(absolute,root,cf_root_source_for(i, sy_env("TARGET") ? sy_env("TARGET") : "lnx/x86_64"));
+        char absolute[4400]; path(absolute,root,cf_root_source_for(i,(t&&*t)?t:0));
         np_puts(&b,absolute); np_puts(&b,"\n");
     }
     save("roots.txt",b.p,b.n); free(b.p);
@@ -99,6 +100,19 @@ static void match_hash(const char *file,const char *expected,np_buf *b,const cha
 static void dir_identity(const char *file,np_buf *b,const char *key){struct stat st;if(lstat(file,&st)||!S_ISDIR(st.st_mode))die("directory identity");char v[128];if(cx_fmt(v,sizeof v,"%lu:%lu",(unsigned long)st.st_dev,(unsigned long)st.st_ino))die("directory identity bound");add(b,key,v);}
 static char prepared[4400],part[4400],control[4400],worker_image[4400],tmpdir[4400];
 static char root_args[128][4400];
+static void check_root_arg(const char *s,int nr){
+ if(s[0]!='/'||strpbrk(s,"\t\r\n")||strlen(s)>=4400)die("absolute roots required");
+ char resolved[4400]; physical(s,resolved); size_t rz=strlen(root);
+ if(strncmp(s,root,rz)||strncmp(s+rz,"/src/",5)||strncmp(resolved,root,rz)||resolved[rz]!='/')die("root outside source tree");
+ for(int j=0;j<nr;j++)if(!strcmp(root_args[j],s))die("duplicate root");
+}
+static void target_roots(const char *target){
+ for(int i=0;i<cf_root_count();i++){
+  char s[4400]; path(s,root,cf_root_source_for(i,target));
+  check_root_arg(s,i);
+  if(tx_copy(root_args[i],sizeof root_args[i],s,(long)strlen(s)))die("text copy bound");
+ }
+}
 static void inputs(np_buf *b){
  if(epoch_active&&epoch_inputs.p){if(strcmp(prepared,epoch_prepared))die("epoch prepared identity");np_put(b,epoch_inputs.p,epoch_inputs.n);tick();return;}
  char p[4400],h[65];path(p,prepared,"receipt.txt");digest(p,h);add(b,"prepare_receipt_sha",h);read_fields(p,"whole-front-prepare-v1");
@@ -114,10 +128,8 @@ static void inputs(np_buf *b){
  path(worker_image,prepared,"worker");if(digest(worker_image,h)!=number(field("worker_bytes"))||access(worker_image,X_OK))die("worker image bytes/executable");match_hash(worker_image,field("worker_sha"),b,"worker_sha");
  path(p,prepared,"roots.txt");match_hash(p,field("roots_sha"),b,"roots_sha");size_t n;char *text=load(p,&n);if(memchr(text,0,n)||memchr(text,'\r',n))die("roots text");char *at=text,*s;int nr=0;
  while((s=line(&at))){
-     if(nr==cf_root_count()||s[0]!='/'||strpbrk(s,"\t\r\n")||strlen(s)>=4400)die("absolute roots required");
-     char resolved[4400]; physical(s,resolved); size_t rz=strlen(root);
-     if(strncmp(s,root,rz)||strncmp(s+rz,"/src/",5)||strncmp(resolved,root,rz)||resolved[rz]!='/')die("root outside source tree");
-     for(int j=0;j<nr;j++)if(!strcmp(root_args[j],s))die("duplicate root");
+     if(nr==cf_root_count())die("absolute roots required");
+     check_root_arg(s,nr);
      if(tx_copy(root_args[nr++],sizeof root_args[nr++],s,(long)strlen(s)))die("text copy bound");
  }
  free(text);if(nr!=cf_root_count())die("source root count");
@@ -129,6 +141,7 @@ static void inputs(np_buf *b){
  sid(h);if(strcmp(h,source_expected))die("source identity mismatch");add(b,"source_sid",h);match_hash(helper,helper_expected,b,"helper_after_sha");
  if(epoch_active){if(tx_copy(epoch_prepared,sizeof epoch_prepared,prepared,(long)strlen(prepared)))die("text copy bound");np_put(&epoch_inputs,b->p,b->n);}
 }
+static void inputs_for(np_buf *b,const char *target){inputs(b);target_roots(target);}
 static void part_result(np_buf *b,long first,long amount){
  char p[4400],h[65];path(p,part,"part.tsv");size_t n;char *text=load(p,&n);if(memchr(text,0,n)||memchr(text,'\r',n))die("part text");char *at=text,*s;const char *keys[]={"first","count","total"};long v[3];
  for(int i=0;i<3;i++){s=line(&at);char *t=s?strchr(s,'\t'):0;if(!t)die("part header");*t++=0;if(strcmp(s,keys[i]))die("part header order");v[i]=number(t);}if(v[0]!=first||v[1]!=amount||v[2]<cf_root_count()||v[2]>WF_MAX||first>v[2]||amount>v[2]-first)die("part range/total");
@@ -141,9 +154,9 @@ static int front(int argc,char **argv){
  char parent[4400],leaf[4400],raw[4400];if(strlen(argv[4])>=sizeof raw||strpbrk(argv[4],"\t\r\n"))die("part path");if(tx_copy(raw,sizeof raw,argv[4],(long)strlen(argv[4])))die("text copy bound");char *slash=strrchr(raw,'/');if(slash){if(tx_copy(leaf,sizeof leaf,slash+1,(long)strlen(slash+1)))die("text copy bound");if(slash==raw)slash[1]=0;else *slash=0;physical(raw,parent);}else{if(tx_copy(leaf,sizeof leaf,raw,(long)strlen(raw)))die("text copy bound");physical(".",parent);}if(!*leaf||!strcmp(leaf,".")||!strcmp(leaf,".."))die("part basename");path(part,parent,leaf);if(cx_fmt(control,sizeof control,"%s.control",part))die("control bound");
  struct stat st;if(resume){if(lstat(control,&st)||!S_ISDIR(st.st_mode))die("missing ready control");}else{if(!lstat(part,&st)||errno!=ENOENT||mkdir(control,0700))die("exclusive NEW_PART/control required");}
  char evidence[4400];path(evidence,control,"check-XXXXXX");if(!mkdtemp(evidence))die("exclusive evidence directory");if(tx_copy(out,sizeof out,evidence,(long)strlen(evidence)))die("text copy bound");
- np_buf before={0},after={0},ready={0};inputs(&before);
+ np_buf before={0},after={0},ready={0};inputs_for(&before,argv[3]);
  if(!resume){char *args[128+8];int k=0;args[k++]=worker_image;args[k++]="front";args[k++]=pkg;args[k++]=argv[3];args[k++]=part;args[k++]=argv[5];args[k++]=argv[6];for(int i=0;i<cf_root_count();i++)args[k++]=root_args[i];args[k]=0;char log[4400];run(args,root,log);}
- inputs(&after);if(before.n!=after.n||memcmp(before.p,after.p,before.n))die("front input identity changed");
+ inputs_for(&after,argv[3]);if(before.n!=after.n||memcmp(before.p,after.p,before.n))die("front input identity changed");
  np_puts(&ready,"whole-front-ready-v1\nstatus\tPREPARED\nscope\tdevelopment-materials-no-qualification\n");add(&ready,"prepared",prepared);add(&ready,"part",part);add(&ready,"target",argv[3]);addnum(&ready,"first",first);addnum(&ready,"count",amount);np_put(&ready,before.p,before.n);part_result(&ready,first,amount);
  if(resume){char p[4400];path(p,control,"ready.tsv");size_t n;char *old=load(p,&n);if(n!=ready.n||memcmp(old,ready.p,n))die("incomplete or changed ready part");free(old);}else{if(tx_copy(out,sizeof out,control,(long)strlen(control)))die("text copy bound");save("ready.tsv",ready.p,ready.n);}
  free(before.p);free(after.p);free(ready.p);printf("PREPARED\twhole-front\tpart=%s\tresume=%s/ready.tsv\tno-qualification\n",part,control);return 0;
@@ -159,6 +172,7 @@ static void phase_ready(np_buf *r,int resume,long long ns){
  char p[4400];path(p,control,"ready.tsv");if(resume){size_t n;char *s=load(p,&n);const char *key="elapsed_ns\t";size_t z=strlen(key);if(n<=r->n+z+1||memcmp(s,r->p,r->n)||memcmp(s+r->n,key,z))die("changed phase ready");char *v=s+r->n+z,*e=s+n-1;if(*e!='\n'||v==e)die("phase timing");for(;v<e;v++)if(*v<'0'||*v>'9')die("phase timing");free(s);}else{np_puts(r,"elapsed_ns\t");np_putll(r,ns);np_puts(r,"\n");if(tx_copy(out,sizeof out,control,(long)strlen(control)))die("text copy bound");save("ready.tsv",r->p,r->n);}
 }
 static void same_inputs(np_buf *before){if(epoch_active&&!resume_depth)epoch_clear();np_buf after={0};inputs(&after);if(before->n!=after.n||memcmp(before->p,after.p,before->n))die("phase input identity changed");free(after.p);}
+static void same_inputs_for(np_buf *before,const char *target){same_inputs(before);target_roots(target);}
 static int merge_phase(int argc,char **argv);
 static int stub_phase(int argc,char **argv);
 /* Resume traversals share the entry deadline, but never their mutable path state.
@@ -187,12 +201,12 @@ static void verified_part(const char *target,const char *dir,long first,long amo
 }
 static int merge_phase(int argc,char **argv){
  int resume=argc>1&&!strcmp(argv[argc-1],"--resume"),end=argc-resume,n=end-5;if(n<1||n>WF_MAX||!*argv[3]||strlen(argv[3])>64||strpbrk(argv[3],"\t\r\n"))die("usage: merge PREPARED_DIR TARGET NEW_PHASE PART... [--resume]");
- long long start=phase_now();physical(argv[2],prepared);char phase[4400];new_name(argv[4],phase);phase_control(phase,resume);np_buf before={0},r={0},parts={0};inputs(&before);
+ long long start=phase_now();physical(argv[2],prepared);char phase[4400];new_name(argv[4],phase);phase_control(phase,resume);np_buf before={0},r={0},parts={0};inputs_for(&before,argv[3]);
  char dirs[WF_MAX][4400],ready_hash[WF_MAX][65];const char *list[WF_MAX];long next=0,total=0;char *order=0;
  char payload_sha[WF_MAX][3][65];const char *payload_names[]={"part.tsv","frames.bin","attrs.bin"};for(int i=0;i<n;i++)for(int j=0;j<3;j++){char p[4400];path(p,argv[5+i],payload_names[j]);digest(p,payload_sha[i][j]);}add(&parts,"root",root);add(&parts,"pkg",pkg);add(&parts,"ctor",ctor);add(&parts,"worker",worker_image);
  for(int i=0;i<n;i++){physical(argv[5+i],dirs[i]);list[i]=dirs[i];char p[4400];path(p,dirs[i],"part.tsv");size_t z;char *text=load(p,&z);if(memchr(text,0,z)||memchr(text,'\r',z))die("merge manifest text");char *at=text;long values[3];const char *keys[]={"first","count","total"};for(int j=0;j<3;j++){char *s=line(&at),*t=s?strchr(s,'\t'):0;if(!t)die("merge header");*t++=0;if(strcmp(s,keys[j]))die("merge header order");values[j]=number(t);}if(values[0]!=next||!values[1]||values[2]>WF_MAX||values[0]>values[2]||values[1]>values[2]-values[0]||(i&&values[2]!=total))die("merge partition continuity");if(!i){total=values[2];order=malloc(strlen(at)+1);if(!order)die("merge order allocation");if(tx_copy(order,(long)strlen(at)+1,at,(long)strlen(at)))die("text copy bound");}else if(strcmp(order,at))die("merge global order");next+=values[1];verified_part(argv[3],dirs[i],values[0],values[1]);free(text);if(cx_fmt(p,sizeof p,"%s.control/ready.tsv",dirs[i]))die("part ready path");digest(p,ready_hash[i]);char key[64];if(cx_fmt(key,sizeof key,"part_%d",i))die("part key");add(&parts,key,dirs[i]);if(cx_fmt(key,sizeof key,"part_ready_sha_%d",i))die("part SHA key");add(&parts,key,ready_hash[i]);}
  free(order);if(next!=total)die("incomplete merge partition");if(!resume){char why[256];tick();if(wf_merge_parts(list,n,phase,why,sizeof why))die(why);tick();}
- same_inputs(&before);for(int i=0;i<n;i++){char p[4400],h[65];if(cx_fmt(p,sizeof p,"%s.control/ready.tsv",dirs[i]))die("part ready path");digest(p,h);if(strcmp(h,ready_hash[i]))die("part ready changed");}
+ same_inputs_for(&before,argv[3]);for(int i=0;i<n;i++){char p[4400],h[65];if(cx_fmt(p,sizeof p,"%s.control/ready.tsv",dirs[i]))die("part ready path");digest(p,h);if(strcmp(h,ready_hash[i]))die("part ready changed");}
  for(int i=0;i<n;i++)for(int j=0;j<3;j++){char p[4400],h[65];path(p,dirs[i],payload_names[j]);digest(p,h);if(strcmp(h,payload_sha[i][j]))die("part payload changed during merge");}
  char h[65];long bytes=digest(phase,h);np_puts(&r,"whole-front-merge-v1\nstatus\tPREPARED\nscope\tdevelopment-materials-no-qualification\n");add(&r,"prepared",prepared);add(&r,"target",argv[3]);add(&r,"phase",phase);np_put(&r,before.p,before.n);addnum(&r,"parts",n);np_put(&r,parts.p,parts.n);add(&r,"phase_sha",h);addnum(&r,"phase_bytes",bytes);dir_identity(control,&r,"control_dev_ino");phase_ready(&r,resume,phase_now()-start);free(before.p);free(parts.p);free(r.p);printf("PREPARED\twhole-front\tphase=%s\tresume=%s/ready.tsv\tno-qualification\n",phase,control);return 0;
 }
@@ -210,9 +224,9 @@ static void stub_result(const char *dest,np_buf *r){
  char actual[65],copy[65];digest(source,actual);path(p,dest,"stub.c");digest(p,copy);if(strcmp(actual,copy))die("real stub differs from copied stub");add(r,"real_stub_sha",actual);dir_identity(dest,r,"output_dev_ino");
 }
 static int stub_phase(int argc,char **argv){
- if((argc!=6&&argc!=7)||(argc==7&&strcmp(argv[6],"--resume"))||!*argv[3]||strlen(argv[3])>64||strpbrk(argv[3],"\t\r\n"))die("usage: stub PREPARED_DIR TARGET PHASE NEW_OUT [--resume]");int resume=argc==7;long long start=phase_now();physical(argv[2],prepared);char phase[4400],dest[4400];physical(argv[4],phase);new_name(argv[5],dest);phase_control(dest,resume);np_buf before={0},merge_before={0},merge_after={0},r={0};inputs(&before);verify_merge(argv[3],phase,&merge_before);char h[65];digest(phase,h);add(&merge_before,"phase_sha",h);
+ if((argc!=6&&argc!=7)||(argc==7&&strcmp(argv[6],"--resume"))||!*argv[3]||strlen(argv[3])>64||strpbrk(argv[3],"\t\r\n"))die("usage: stub PREPARED_DIR TARGET PHASE NEW_OUT [--resume]");int resume=argc==7;long long start=phase_now();physical(argv[2],prepared);char phase[4400],dest[4400];physical(argv[4],phase);new_name(argv[5],dest);phase_control(dest,resume);np_buf before={0},merge_before={0},merge_after={0},r={0};inputs_for(&before,argv[3]);verify_merge(argv[3],phase,&merge_before);char h[65];digest(phase,h);add(&merge_before,"phase_sha",h);
  if(!resume){char *v[128+7],log[4400];int k=0;v[k++]=worker_image;v[k++]="stub";v[k++]=pkg;v[k++]=argv[3];v[k++]=phase;v[k++]=dest;for(int i=0;i<cf_root_count();i++)v[k++]=root_args[i];v[k]=0;run(v,root,log);}else{char p[4400],h[65];path(p,dest,"stub.c");if(digest(p,h)<=0)die("resume without stub product identity");path(p,dest,"replay.phase");if(digest(p,h)<=0)die("resume without stub product identity");}
- same_inputs(&before);verify_merge(argv[3],phase,&merge_after);digest(phase,h);add(&merge_after,"phase_sha",h);if(merge_before.n!=merge_after.n||memcmp(merge_before.p,merge_after.p,merge_before.n))die("merge changed during stub");np_puts(&r,"whole-front-stub-v1\nstatus\tPREPARED\nscope\tdevelopment-materials-no-qualification\n");add(&r,"prepared",prepared);add(&r,"target",argv[3]);add(&r,"phase",phase);add(&r,"output",dest);np_put(&r,before.p,before.n);np_put(&r,merge_before.p,merge_before.n);stub_result(dest,&r);dir_identity(control,&r,"control_dev_ino");phase_ready(&r,resume,phase_now()-start);free(before.p);free(merge_before.p);free(merge_after.p);free(r.p);printf("PREPARED\twhole-front\tstub=%s\tresume=%s/ready.tsv\tno-qualification\n",dest,control);return 0;
+ same_inputs_for(&before,argv[3]);verify_merge(argv[3],phase,&merge_after);digest(phase,h);add(&merge_after,"phase_sha",h);if(merge_before.n!=merge_after.n||memcmp(merge_before.p,merge_after.p,merge_before.n))die("merge changed during stub");np_puts(&r,"whole-front-stub-v1\nstatus\tPREPARED\nscope\tdevelopment-materials-no-qualification\n");add(&r,"prepared",prepared);add(&r,"target",argv[3]);add(&r,"phase",phase);add(&r,"output",dest);np_put(&r,before.p,before.n);np_put(&r,merge_before.p,merge_before.n);stub_result(dest,&r);dir_identity(control,&r,"control_dev_ino");phase_ready(&r,resume,phase_now()-start);free(before.p);free(merge_before.p);free(merge_after.p);free(r.p);printf("PREPARED\twhole-front\tstub=%s\tresume=%s/ready.tsv\tno-qualification\n",dest,control);return 0;
 }
 /* Image materialization consumes the compiler's native B path, not a second emitter. */
 static void image_stub(const char *target,const char *phase,const char *stub,np_buf *id){
@@ -243,7 +257,7 @@ static int image_phase(int argc,char **argv){
  int verify=!strcmp(argv[1],"image-verify"),resume=argc==8;const char *targets[]={"osx/x86_64","osx/arm64","win/x86_64","win/arm64","lnx/x86_64","lnx/arm64"};int valid=0;for(int i=0;i<6;i++)if(!strcmp(argv[3],targets[i]))valid=1;if(!valid)die("image target");
  long long start=phase_now();physical(argv[2],prepared);char phase[4400],stub[4400],dest[4400];physical(argv[4],phase);physical(argv[5],stub);new_name(argv[6],dest);phase_control(dest,verify||resume);
  epoch_clear();epoch_active=1;
- np_buf before={0},upstream={0},again={0},manifest={0},r={0};inputs(&before);image_stub(argv[3],phase,stub,&upstream);
+ np_buf before={0},upstream={0},again={0},manifest={0},r={0};inputs_for(&before,argv[3]);image_stub(argv[3],phase,stub,&upstream);
  np_puts(&manifest,"whole-front-image-input-v1\n");add(&manifest,"prepared",prepared);add(&manifest,"target",argv[3]);add(&manifest,"phase",phase);add(&manifest,"stub",stub);add(&manifest,"root",root);add(&manifest,"ctor",ctor);add(&manifest,"pkg",pkg);np_put(&manifest,before.p,before.n);np_put(&manifest,upstream.p,upstream.n);
  char p[4400],image[4400],slice[128];if(cx_fmt(slice,sizeof slice,"slice-%s",argv[3]))die("slice name bound");for(char *s=slice;*s;s++)if(*s=='/')*s='-';path(image,dest,"image");
  if(verify||resume){path(p,dest,"INPUT");size_t n;char *s=load(p,&n);if(n!=manifest.n||memcmp(s,manifest.p,n))die("image INPUT changed");free(s);}else{
@@ -273,7 +287,7 @@ static int image_phase(int argc,char **argv){
   free(before.p);free(upstream.p);free(manifest.p);free(artifacts.p);free(r.p);printf("BUILT_UNVERIFIED\twhole-front\timage=%s\tno-qualification\n",image);return 0;
  }
  /* Fresh post traversal: no pre-traversal SHA or input facts survive. */
- epoch_clear();same_inputs(&before);image_stub(argv[3],phase,stub,&again);if(upstream.n!=again.n||memcmp(upstream.p,again.p,upstream.n))die("image upstream changed");
+ epoch_clear();same_inputs_for(&before,argv[3]);image_stub(argv[3],phase,stub,&again);if(upstream.n!=again.n||memcmp(upstream.p,again.p,upstream.n))die("image upstream changed");
  epoch_clear();epoch_active=0;np_buf after_artifacts={0};image_artifacts(dest,slice,&after_artifacts);if(artifacts.n!=after_artifacts.n||memcmp(artifacts.p,after_artifacts.p,artifacts.n))die("image artifacts changed");free(after_artifacts.p);
  np_puts(&r,"whole-front-image-v1\nstatus\tPREPARED\nscope\tdevelopment-materials-no-qualification\n");char *entries=strchr(manifest.p,'\n')+1;np_put(&r,entries,manifest.n-(size_t)(entries-manifest.p));add(&r,"output",dest);image_file(dest,"INPUT",&r);image_file(dest,"image",&r);image_file(dest,slice,&r);image_file(dest,"stdout",&r);image_file(dest,"stderr",&r);image_file(dest,"construct_ns",&r);dir_identity(dest,&r,"output_dev_ino");dir_identity(control,&r,"control_dev_ino");tick();long long elapsed=phase_now()-start;phase_ready(&r,resume,elapsed);tick();free(before.p);free(upstream.p);free(again.p);free(manifest.p);free(artifacts.p);free(r.p);printf("PREPARED\twhole-front\timage=%s\tresume=%s/ready.tsv\tverify_ns=%lld\tno-qualification\n",image,control,elapsed);return 0;
 }
