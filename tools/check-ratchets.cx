@@ -67,23 +67,29 @@ static long where(const char *out, long on, const char *s) {
 }
 static int has(const char *out, const char *s) { return where(out, tx_len(out, 1 << 16), s) >= 0; }
 
-/* Roster = the producer's own --list output; the count and names are never literals here. */
+/* Roster = the producer's own --list output; the count and names are never literals here.
+ * Refuse instead of truncating: more than max rows or a name that does not fit. */
 static int roster_names(char names[][64], int max) {
     char out[32768]; char *a[] = {"--list", 0}; long at = 0, on; int n = 0;
     if (run(a, out, sizeof out) != 0) return -1;
     on = tx_len(out, sizeof out);
-    while (at < on && n < max) {
+    while (at < on) {
         long e = at; while (e < on && out[e] != '\n') e++;
         if (e - at > 14 && tx_prefix(out + at, e - at, "RATCHETS_LIST\t", 14)) {
-            long s0 = at + 14, s1 = s0; int k = 0;
+            long s0 = at + 14, s1 = s0, l; int k = 0;
             while (s1 < e && out[s1] != '\t') s1++;
-            while (s0 < s1 && k + 1 < 64) names[n][k++] = out[s0++];
+            l = s1 - s0;
+            if (l <= 0 || l >= 64 || n >= max) return -1;
+            while (s0 < s1) names[n][k++] = out[s0++];
             names[n][k] = 0;
-            if (k > 0) n++;
+            n++;
         }
         at = e + 1;
     }
-    return n;
+    return n > 0 ? n : -1;
+}
+static int roster_index(char names[][64], int n, const char *name) {
+    int i; for (i = 0; i < n; i++) if (tx_eqz(names[i], name)) return i; return -1;
 }
 
 /* three review cases: move plus a non-canonical number, allow-list growth, stdio FAIL blocking */
@@ -264,6 +270,8 @@ int main(int argc, char **argv) {
         char d[4096], od[4200], p[4400], ev[1 << 12], line[256], *pl[] = {"--plan", 0}, *fr[] = {"--from-run", d, 0}; long en = 0; char exp_ok[64];
         cx_fmt(exp_ok, sizeof exp_ok, "RATCHETS\tok=%d\tfail=1\t", nfixtures - 1);
         for (k = 0; k < nfixtures; k++) nm[k] = names[k];
+        int icxraw = roster_index(names, nfixtures, "cxraw"), icxtrunc = roster_index(names, nfixtures, "cxtrunc"), icoreapi = roster_index(names, nfixtures, "coreapi");
+        if (icxraw < 0 || icxtrunc < 0 || icoreapi < 0) ck(0, "roster-names-present");
         rc = run(pl, o, sizeof o);
         ck(rc == 0 && lines(o) == nfixtures && has(o, "PLAN\trk-tsv-lint\t./tools/bound\t55\tsh\t./unisacc.com\ttools/tsv-lint.cx\t--\t--check\n") && has(o, "PLAN\trk-ref-job-paths\t./tools/bound\t55\tsh\t./unisacc.com\ttools/ref-job-paths.cx\t--\t--check\n") && has(o, "PLAN\trk-no-home-path\t./tools/bound\t55\tsh\t./unisacc.com\ttools/no-home-path.cx\t--\t--check\n") && has(o, "PLAN\trk-cxraw\t./tools/bound\t55\tsh\t./unisacc.com\ttests/cxraw.cx\t--\t--check\n") && has(o, "PLAN\trk-net-deps\t")
            && has(o, "PLAN\trk-notcovered\t./tools/bound\t55\tsh\t./unisacc.com\ttools/notcovered-census.cx\t--\t--check\n")
@@ -273,9 +281,9 @@ int main(int argc, char **argv) {
         if (cx_fmt(d, sizeof d, "%s/rk-fixture-%d", sy_tmpdir(), (int)sy_pid()) || cx_fmt(od, sizeof od, "%s/out", d) || sy_mkdir(d, 0700) < 0 || sy_mkdir(od, 0700) < 0) ck(0, "from-run-fixture-dir");
         else {
             for (k = 0; k < nfixtures; k++) {
-                const char *body = k == 0 ? "cxraw: apps/x.cx has 3 raw lines, baseline 1\ncxraw: FAIL: 1 file above baseline\n" : "r: ok: fine\n";
+                const char *body = k == icxraw ? "cxraw: apps/x.cx has 3 raw lines, baseline 1\ncxraw: FAIL: 1 file above baseline\n" : "r: ok: fine\n";
                 cx_fmt(p, sizeof p, "%s/rk-%s.out", od, nm[k]); cx_write(p, body, tx_len(body, 256));
-                cx_fmt(line, sizeof line, "EVT\t%d\trk-%s\tstart\t0\t0\texec\nEVT\t%d\trk-%s\t%s\t5\t%d\tout=1 err=0\n", 2 * k + 1, nm[k], 2 * k + 2, nm[k], k ? "ok" : "fail", k ? 0 : 1);
+                cx_fmt(line, sizeof line, "EVT\t%d\trk-%s\tstart\t0\t0\texec\nEVT\t%d\trk-%s\t%s\t5\t%d\tout=1 err=0\n", 2 * k + 1, nm[k], 2 * k + 2, nm[k], k == icxraw ? "fail" : "ok", k == icxraw ? 1 : 0);
                 if (en + tx_len(line, 256) < (long)sizeof ev) { long l = tx_len(line, 256); for (long j = 0; j < l; j++) ev[en + j] = line[j]; en += l; }
             }
             cx_fmt(p, sizeof p, "%s/events.tsv", d); cx_write(p, ev, en);
@@ -290,11 +298,11 @@ int main(int argc, char **argv) {
                 char *frh[] = {"--from-run", d, 0}; long en2 = 0; char ev2[1 << 12], line2[320]; int k2;
                 cx_write(fxp, fxbody, tx_len(fxbody, 128));
                 for (k2 = 0; k2 < nfixtures; k2++) {
-                    const char *body = k2 == 3
+                    const char *body = k2 == icxtrunc
                         ? "cxtrunc: tools/zz-ratchets-hint-fixture.cx has 1 calls and no baseline row (a new .cx must have 0)\ncxtrunc: FAIL: 1 above baseline\n"
                         : "r: ok: fine\n";
                     cx_fmt(p, sizeof p, "%s/rk-%s.out", od, names[k2]); cx_write(p, body, tx_len(body, 256));
-                    cx_fmt(line2, sizeof line2, "EVT\t%d\trk-%s\tstart\t0\t0\texec\nEVT\t%d\trk-%s\t%s\t5\t%d\tout=1 err=0\n", 2 * k2 + 1, names[k2], 2 * k2 + 2, names[k2], k2 == 3 ? "fail" : "ok", k2 == 3 ? 1 : 0);
+                    cx_fmt(line2, sizeof line2, "EVT\t%d\trk-%s\tstart\t0\t0\texec\nEVT\t%d\trk-%s\t%s\t5\t%d\tout=1 err=0\n", 2 * k2 + 1, names[k2], 2 * k2 + 2, names[k2], k2 == icxtrunc ? "fail" : "ok", k2 == icxtrunc ? 1 : 0);
                     if (en2 + tx_len(line2, 320) < (long)sizeof ev2) { long l = tx_len(line2, 320); for (long j = 0; j < l; j++) ev2[en2 + j] = line2[j]; en2 += l; }
                 }
                 cx_fmt(p, sizeof p, "%s/events.tsv", d); cx_write(p, ev2, en2);
@@ -387,8 +395,8 @@ int main(int argc, char **argv) {
                     "coreapi: FAIL: 37 modules, 256 exported symbols (baseline 251); new 5, missing 0, signature 0, alias callers 0 (--write ratchets down)\n";
                 en = 0;
                 for (k = 0; k < nfixtures; k++) {
-                    const char *body = (k == 7) ? z2_out : "r: ok: fine\n";
-                    int bad = (k == 7);
+                    const char *body = (k == icoreapi) ? z2_out : "r: ok: fine\n";
+                    int bad = (k == icoreapi);
                     cx_fmt(p, sizeof p, "%s/rk-%s.out", od, nm[k]); cx_write(p, body, tx_len(body, 1024));
                     cx_fmt(line, sizeof line, "EVT\t%d\trk-%s\tstart\t0\t0\texec\nEVT\t%d\trk-%s\t%s\t5\t%d\tout=1 err=0\n",
                            2 * k + 1, nm[k], 2 * k + 2, nm[k], bad ? "fail" : "ok", bad ? 1 : 0);
