@@ -115,3 +115,5 @@ sha256: `2cb385febedde528e582495c6005c35ff4f4ffff61ebedb62288dfce0e6196b2`
 账本: `plans/omp-grk-ledger.tsv` 行 `GIT-GC-BUNDLE`.
 
 gc 本身由 cc 排到正规链结束之后. 本回执不授权 `git gc --prune=30.days`.
+
+`870868908b` 仍不在任何分支上. 不把它接回 `w/omp-grk`. 它已在上面的 bundle 里 (`git bundle list-heads` 含 `870868908bcde667d4d5e1c9f9fddd40d39aaac0`). reflog 过期后以该 bundle 取回, 不靠分支保留.
