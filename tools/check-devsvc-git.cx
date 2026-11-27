@@ -21,6 +21,7 @@
 static int nfail, ovf; static long t_start;
 #define F(dst, cap, ...) do { int f_ = snprintf(dst, cap, __VA_ARGS__); if (f_ < 0 || f_ >= (int)(cap)) ovf++; } while (0)
 static char root[1024], fx[160], bare[160], pin[160], inst[160], out[1 << 15];
+static long out_stdout_n;
 static char *envv[4];
 static const char *fixture_cli;
 static void ck(int c, const char *name) {
@@ -33,11 +34,66 @@ static int run(char **v, const char *cwd, char *const *env) {
     memset(out, 0, sizeof out);
     if (np_run(v, cwd, env, 55, &r, why, sizeof why)) return -1;
     a = (long)r.outn; b = (long)r.errn; rc = r.rc;
+    out_stdout_n = a;
     if (a + b > (long)sizeof out - 1 || (a > 0 && mm_copy(out, sizeof out, r.out, a)) || (b > 0 && mm_copy(out + a, sizeof out - a, r.err, b))) rc = -1;
     np_free(&r);
     return rc;
 }
 static int has(const char *s) { return strstr(out, s) != 0; }
+static int line_bounds(const char *s, int last, const char **sp, long *lp) {
+    long n = (long)strlen(s), a = 0, b = n;
+    while (b > 0 && (s[b - 1] == '\n' || s[b - 1] == '\r')) b--;
+    if (b <= 0) return 0;
+    if (last) {
+        a = b;
+        while (a > 0 && s[a - 1] != '\n') a--;
+    } else {
+        long e = 0;
+        while (e < b && s[e] != '\n') e++;
+        b = e;
+    }
+    *sp = s + a; *lp = b - a;
+    return 1;
+}
+static int first_line_has(const char *sub) {
+    const char *p = 0; long n = 0, sl = (long)strlen(sub);
+    if (!line_bounds(out, 0, &p, &n) || n < sl) return 0;
+    for (long i = 0; i + sl <= n; i++) if (!memcmp(p + i, sub, (size_t)sl)) return 1;
+    return 0;
+}
+static int last_line_has(const char *sub) {
+    const char *p = 0; long n = 0, sl = (long)strlen(sub);
+    if (!line_bounds(out, 1, &p, &n) || n < sl) return 0;
+    for (long i = 0; i + sl <= n; i++) if (!memcmp(p + i, sub, (size_t)sl)) return 1;
+    return 0;
+}
+static int last_line_starts(const char *pre) {
+    const char *p = 0; long n = 0, pl = (long)strlen(pre);
+    return line_bounds(out, 1, &p, &n) && n >= pl && !memcmp(p, pre, (size_t)pl);
+}
+static int stdout_last_line_starts(const char *pre) {
+    long sn = out_stdout_n > 0 && out_stdout_n <= (long)sizeof out - 1 ? out_stdout_n : 0;
+    long pl = (long)strlen(pre), b = sn, a;
+    while (b > 0 && (out[b - 1] == '\n' || out[b - 1] == '\r')) b--;
+    if (b <= 0) return 0;
+    a = b;
+    while (a > 0 && out[a - 1] != '\n') a--;
+    return b - a >= pl && !memcmp(out + a, pre, (size_t)pl);
+}
+static int is_lhex(char c) { return (c >= '0' && c <= '9') || (c >= 'a' && c <= 'f'); }
+static int has_40hex(const char *s) {
+    long n = (long)strlen(s), run = 0;
+    for (long i = 0; i <= n; i++) {
+        if (i < n && is_lhex(s[i])) run++;
+        else { if (run == 40) return 1; run = 0; }
+    }
+    return 0;
+}
+static int report_before_commit_result(void) {
+    const char *rp = strstr(out, "REPORT\tcmd=git.commit\t");
+    const char *cr = strstr(out, "COMMIT_RESULT\t");
+    return rp && cr && rp < cr;
+}
 static int cli_args(char **v) {
     if (fixture_cli && *fixture_cli) { v[0] = (char *)fixture_cli; return 1; }
     v[0] = "sh"; v[1] = "./unisacc.com"; v[2] = "tools/devsvc.cx"; v[3] = "--";
@@ -104,7 +160,7 @@ static int run_flow_shards(const char *sel, long t0) {
     ensure_dvgit_exe(rdir);
     for (i = 0; sel[i] && nshards < 10; i++) {
         char g = sel[i];
-        if (g == 'a') shards[nshards++] = "a";
+        if (g == 'a') { shards[nshards++] = "a1"; shards[nshards++] = "a2"; shards[nshards++] = "a3"; }
         else if (g == 'b') shards[nshards++] = "b";
         else if (g == 'c') shards[nshards++] = "c";
         else if (g == 'd') shards[nshards++] = "d";
@@ -181,10 +237,13 @@ int main(int argc, char **argv) {
         return rc;
     }
     const char *sel = "abcdef";
-    int single_f1 = 0, single_f2 = 0, single_c1 = 0, single_c2 = 0;
+    int single_a1 = 0, single_a2 = 0, single_a3 = 0, single_f1 = 0, single_f2 = 0, single_c1 = 0, single_c2 = 0;
     int single_c1a = 0, single_c1b = 0;
     if (argc >= 3 && !strcmp(argv[1], "--cases")) {
         if (!strcmp(argv[2], "all")) sel = "abcdef";
+        else if (!strcmp(argv[2], "a1")) { sel = "a"; single_a1 = 1; }
+        else if (!strcmp(argv[2], "a2")) { sel = "a"; single_a2 = 1; }
+        else if (!strcmp(argv[2], "a3")) { sel = "a"; single_a3 = 1; }
         else if (!strcmp(argv[2], "c1")) { sel = "c"; single_c1 = 1; }
         else if (!strcmp(argv[2], "c1a")) { sel = "c"; single_c1 = single_c1a = 1; }
         else if (!strcmp(argv[2], "c1b")) { sel = "c"; single_c1 = single_c1b = 1; }
@@ -193,13 +252,17 @@ int main(int argc, char **argv) {
         else if (!strcmp(argv[2], "f2")) { sel = "f"; single_f2 = 1; }
         else sel = argv[2];
     }
-    else if (argc > 1) { fprintf(stderr, "usage: check-devsvc-git.cx [--cases a|b|c|c1|c1a|c1b|c2|d|e|f|f1|f2|ab|all]\n"); return 2; }
+    else if (argc > 1) { fprintf(stderr, "usage: check-devsvc-git.cx [--cases a|a1|a2|a3|b|c|c1|c1a|c1b|c2|d|e|f|f1|f2|ab|all]\n"); return 2; }
     {   const char *p;
-        if (!sel[0]) { fprintf(stderr, "usage: check-devsvc-git.cx [--cases a|b|c|c1|c1a|c1b|c2|d|e|f|f1|f2|ab|all]\n"); return 2; }
+        if (!sel[0]) { fprintf(stderr, "usage: check-devsvc-git.cx [--cases a|a1|a2|a3|b|c|c1|c1a|c1b|c2|d|e|f|f1|f2|ab|all]\n"); return 2; }
         for (p = sel; *p; p++)
-            if (*p < 'a' || *p > 'f') { fprintf(stderr, "usage: check-devsvc-git.cx [--cases a|b|c|c1|c1a|c1b|c2|d|e|f|f1|f2|ab|all]\n"); return 2; }
+            if (*p < 'a' || *p > 'f') { fprintf(stderr, "usage: check-devsvc-git.cx [--cases a|a1|a2|a3|b|c|c1|c1a|c1b|c2|d|e|f|f1|f2|ab|all]\n"); return 2; }
     }
     A = strchr(sel, 'a') != 0; B = strchr(sel, 'b') != 0; C = strchr(sel, 'c') != 0;
+    int any_a = single_a1 || single_a2 || single_a3;
+    int A1 = single_a1 || (!any_a && A);
+    int A2 = single_a2 || (!any_a && A);
+    int A3 = single_a3 || (!any_a && A);
     D = strchr(sel, 'd') != 0; E = strchr(sel, 'e') != 0;
     FF = single_f1 || (!single_f2 && strchr(sel, 'f') != 0);
     FF2 = single_f2 || (!single_f1 && strchr(sel, 'f') != 0);
@@ -213,10 +276,10 @@ int main(int argc, char **argv) {
                 nm[i] = 0; unsetenv(nm); e = environ;
             } else e++;
         } }
-    if (strlen(sel) > 1 || (!single_f1 && !single_f2 && !strcmp(sel, "f"))) return run_flow_shards(sel, t0);
+    if (strlen(sel) > 1 || (!any_a && !strcmp(sel, "a")) || (!single_f1 && !single_f2 && !strcmp(sel, "f"))) return run_flow_shards(sel, t0);
     ensure_dvgit_exe(0);
     {   /* 夹具路径按仓根哈希与组固定(不含 pid)并持 .lock 文件锁防并发互删,且共享真仓 $HOME 固定版本缓存目录 */
-        unsigned long long hh = 1469598103934665603ULL; long q; const char *tag = single_c1a ? "c1a" : single_c1b ? "c1b" : single_c1 ? "c1" : single_c2 ? "c2" : single_f2 ? "f2" : A && B ? "ab" : A ? "a" : B ? "b" : C ? "c" : D ? "d" : E ? "e" : "f"; char c0[700], lkp[200], gdir[1100], gh[65]; const char *home = getenv("HOME"); int lfd, li;
+        unsigned long long hh = 1469598103934665603ULL; long q; const char *tag = single_a1 ? "a1" : single_a2 ? "a2" : single_a3 ? "a3" : single_c1a ? "c1a" : single_c1b ? "c1b" : single_c1 ? "c1" : single_c2 ? "c2" : single_f2 ? "f2" : A && B ? "ab" : A ? "a" : B ? "b" : C ? "c" : D ? "d" : E ? "e" : "f"; char c0[700], lkp[200], gdir[1100], gh[65]; const char *home = getenv("HOME"); int lfd, li;
         for (q = 0; root[q]; q++) { hh ^= (unsigned char)root[q]; hh *= 1099511628211ULL; }
         F(fx, sizeof fx, "%s/dvgit-%08llx-%s", "/tmp", hh & 0xffffffffULL, tag); F(bare, sizeof bare, "%s-bare", fx);
         F(pin, sizeof pin, "%s-pin", fx);
@@ -294,11 +357,20 @@ int main(int argc, char **argv) {
         }
     }
 
-    if (A) {
+    if (A1) {
     /* (a) commit --whole --push */
     if (wfile("dvg-a.txt", "a\n")) { printf("FAIL\tdevsvc-git.fixture-write\n"); cleanup(); return 1; }
     rc = dv("git", "commit", "-m", "X", "--whole", "dvg-a.txt", "--push", 0);
-    ck(rc == 0 && has("GIT_COMMIT\trc=0"), "commit-push-rc0");
+    ck(rc == 0 && has("GIT_COMMIT\trc=0") && first_line_has("COMMIT_PENDING\tjob=") && first_line_has("NOT_COMMITTED_YET") &&
+       last_line_starts("COMMIT_RESULT\tCOMMITTED\tsha=") && last_line_has("\tref=main\tjob=") &&
+       report_before_commit_result(), "commit-push-rc0");
+    {   char vsha[64] = ""; const char *lp = 0; long ln = 0;
+        if (line_bounds(out, 1, &lp, &ln)) { const char *sp = strstr(lp, "sha="); if (sp) sscanf(sp + 4, "%40s", vsha); }
+        ck(strlen(vsha) == 40 && dv("git", "verify", vsha, 0, 0, 0, 0, 0) == 0 &&
+           has("VERIFIED\tsha=") && has(vsha) && has("\tref=main"), "git-verify-committed-sha");
+        ck(dv("git", "verify", "0000000000000000000000000000000000000000", 0, 0, 0, 0, 0) == 1 &&
+           last_line_starts("NOT_FOUND"), "git-verify-missing-sha-not-found");
+    }
     F(c, sizeof c, "[ \"$(git -C %s rev-parse main)\" = \"$(git rev-parse HEAD)\" ] && git -C %s log -1 --format=%%s main | grep -qx X", bare, bare);
     ck(sh(c, fx) == 0, "bare-origin-received-commit");
 
@@ -315,9 +387,14 @@ int main(int argc, char **argv) {
     ck(rc != 0 && has("GIT_COMMIT\trc="), "failed-commit-reports-nonzero");
     ck(rc != 0 && has("GIT_COMMIT_ERR\t"), "failed-commit-prints-err-tail");
     /* 未产生新提交时回执不再把旧 HEAD 写进 commit=:commit=none 加 reason=(timeout|refused|blocked) */
-    ck(rc != 0 && has("\tcommit=none\t") && (has("\treason=blocked") || has("\treason=refused") || has("\treason=timeout")), "failed-commit-says-none-with-reason");
+    ck(rc != 0 && has("\tcommit=none\t") && (has("\treason=blocked") || has("\treason=refused") || has("\treason=timeout")) &&
+       (last_line_starts("COMMIT_RESULT\tNOT_COMMITTED\treason=blocked\tjob=") ||
+        last_line_starts("COMMIT_RESULT\tNOT_COMMITTED\treason=refused\tjob=")) &&
+       !has_40hex(out) && report_before_commit_result(), "failed-commit-says-none-with-reason");
     rc = dv("lock", "list", 0, 0, 0, 0, 0, 0);
     ck(rc == 0 && !has("registry") && !has("auto-"), "failed-commit-leaves-no-lock");
+    }
+    if (A2) {
 
     /* (w) commit --cwd 版本工作树:夹具内 git worktree add .claude/worktrees/dvg-wt(分支 dvg-wt),提交落该分支、
        推 origin refs/heads/dvg-wt,夹具 main 的 HEAD 不变;--cwd 指向不存在目录 rc 2 不提交;验后 worktree remove */
@@ -338,28 +415,84 @@ int main(int argc, char **argv) {
             int n = cli_args(v);
             for (int i = 0; i < 10; i++) v[n++] = args[i];
             rc = run(v, fx, envv); }
-        ck(rc == 0 && has("pushed=1"), "wt-commit-push-rc0");
-        F(c, sizeof c, "git -C %s log -1 --format=%%s refs/heads/dvg-wt | grep -qx W2 && git -C %s log -1 --format=%%s main | grep -qx X", bare, bare);
+        ck(rc == 0 && has("pushed=1") && last_line_starts("COMMIT_RESULT\tCOMMITTED\tsha=") && last_line_has("\tref=dvg-wt\tjob="), "wt-commit-push-rc0");
+        F(c, sizeof c, "git -C %s log -1 --format=%%s refs/heads/dvg-wt | grep -qx W2 && [ \"$(git -C %s rev-parse main)\" = \"$(git rev-parse main)\" ]", bare, bare);
         ck(!ovf && sh(c, fx) == 0, "wt-commit-push-to-branch-not-main");
         rc = dv("git", "commit", "-m", "N", "--cwd", ".claude/worktrees/dvg-nope", "--whole", "dvg-w.txt");
         ck(rc == 2 && has("REFUSE git commit --cwd"), "wt-commit-missing-cwd-rc2");
         F(c, sizeof c, "git worktree remove --force .claude/worktrees/dvg-wt");
         ck(!ovf && sh(c, fx) == 0, "wt-fixture-remove");
     }
+    }
+    if (A3) {
+    /* --derive --cwd 首行 NOT_COMMITTED_YET,末行 COMMITTED + git verify --cwd */
+    {   F(c, sizeof c, "git worktree add -q -b dvg-wt3 .claude/worktrees/dvg-wt3 HEAD && ln -s %s/unisacc.com .claude/worktrees/dvg-wt3/unisacc.com && printf 'w3\\n' > .claude/worktrees/dvg-wt3/dvg-w3.txt", root);
+        ck(!ovf && sh(c, fx) == 0, "wt3-fixture-add");
+        {   char *v[20], *args[] = {"git", "commit", "-m", "W3", "--cwd", ".claude/worktrees/dvg-wt3", "--derive", "--whole", "dvg-w3.txt", 0};
+            int n = cli_args(v);
+            for (int i = 0; i < 10; i++) v[n++] = args[i];
+            rc = run(v, fx, envv); }
+        ck(rc == 0 && first_line_has("COMMIT_PENDING\tjob=") && first_line_has("NOT_COMMITTED_YET") &&
+           last_line_starts("COMMIT_RESULT\tCOMMITTED\tsha=") && last_line_has("\tref=dvg-wt3\tjob=") &&
+           report_before_commit_result(), "wt-derive-commit-first-pending-last-committed");
+        {   char wsha[64] = ""; const char *lp = 0; long ln = 0;
+            if (line_bounds(out, 1, &lp, &ln)) { const char *sp = strstr(lp, "sha="); if (sp) sscanf(sp + 4, "%40s", wsha); }
+            ck(strlen(wsha) == 40 && dv("git", "verify", wsha, "--cwd", ".claude/worktrees/dvg-wt3", 0, 0, 0) == 0 &&
+               has("VERIFIED\tsha=") && has(wsha) && has("\tref=dvg-wt3"), "git-verify-cwd-worktree");
+        }
+        F(c, sizeof c, "git worktree remove --force .claude/worktrees/dvg-wt3");
+        ck(!ovf && sh(c, fx) == 0, "wt3-fixture-remove");
+    }
 
     ck(wfile("dvg-derived.txt", "derived\n") == 0, "derive-phase-fixture");
     rc = dv("git", "commit", "-m", "Y", "--whole", "dvg-derived.txt", "--derive", 0);
     ck(rc == 0 && has("COMMIT_STAGE\tphase=derive\tjob=") && has("COMMIT_DERIVE_PREPARED\t") &&
        has("COMMIT_STAGE\tphase=commit\tderived=completed") && has("COMMIT_DERIVE_IDENTITY\t"), "derive-separated-job-identity-checked");
-    /* (t) 超时映射:夹具工作区里把 tools/commit-own.cx 换成立即以 124 退出的假工具(模拟 60 秒窗口超时,不真等),
-       回执须为 commit=none 与 reason=timeout;验后 git checkout 还原夹具里的真工具(夹具是本检查自己的克隆) */
     if (wfile("tools/commit-own.cx", "int main(void) { return 124; }\n")) { printf("FAIL\tdevsvc-git.fixture-write\n"); cleanup(); return 1; }
     if (wfile("dvg-t.txt", "t\n")) { printf("FAIL\tdevsvc-git.fixture-write\n"); cleanup(); return 1; }
     rc = dv("git", "commit", "-m", "T", "--whole", "dvg-t.txt", 0, 0);
-    ck(rc == 124 && has("\tcommit=none\t") && has("\treason=timeout"), "timeout-commit-says-none-reason-timeout");
+    ck(rc == 124 && has("\tcommit=none\t") && has("\treason=timeout") &&
+       last_line_starts("COMMIT_RESULT\tNOT_COMMITTED\treason=timeout\tjob=") && !has_40hex(out) &&
+       report_before_commit_result(), "timeout-commit-says-none-reason-timeout");
     rc = dv("git", "commit", "-m", "TD", "--whole", "dvg-t.txt", "--derive", 0);
-    ck(rc == 124 && has("COMMIT_STAGE_FAIL\tphase=derive\trc=124\tderived=incomplete") &&
-       !has("COMMIT_STAGE\tphase=commit\t"), "derive-timeout-incomplete-no-commit-next-command");
+    ck(rc == 124 && first_line_has("NOT_COMMITTED_YET") && has("COMMIT_STAGE_FAIL\tphase=derive\trc=124\tderived=incomplete") &&
+       !has("COMMIT_STAGE\tphase=commit\t") && last_line_starts("COMMIT_RESULT\tNOT_COMMITTED\treason=timeout\tjob=") &&
+       !has_40hex(out), "derive-timeout-incomplete-no-commit-next-command");
+    /* (t3) 变异:commit-own 打出不存在的 COMMIT_LANDED sha 却不更新分支,现场校验必须拒收 ref-mismatch */
+    {   const char *ghost_fake =
+            "int main(void) {\n"
+            "    printf(\"COMMIT_LANDED\\tfull=deadbeefdeadbeefdeadbeefdeadbeefdeadbeef\\tbase=deadbeefdeadbeefdeadbeefdeadbeefdeadbeef\\n\");\n"
+            "    return 0;\n"
+            "}\n";
+        ck(wfile("tools/commit-own.cx", ghost_fake) == 0, "ghost-receipt-fixture-write");
+        rc = dv("git", "commit", "-m", "GR", "--whole", "dvg-t.txt", 0, 0);
+        ck(rc != 0 && has("reason=ref-mismatch") && last_line_starts("COMMIT_RESULT\tNOT_COMMITTED\treason=ref-mismatch\tjob=") &&
+           report_before_commit_result(), "nonexistent-receipt-sha-ref-mismatch");
+        {   char gid[48] = ""; const char *gp = strstr(out, "JOB\t");
+            if (gp && sscanf(gp, "JOB\t%47s", gid) == 1 && gid[0]) {
+                rc = dv("git", "commit", "--status", gid, 0, 0, 0, 0);
+                ck(rc == 0 && last_line_starts("COMMIT_RESULT\tNOT_COMMITTED\treason=ref-mismatch\tjob="), "status-nonexistent-receipt-sha-ref-mismatch");
+            } else ck(0, "status-nonexistent-receipt-sha-ref-mismatch");
+        }
+    }
+    /* (t4) commit_follow WAIT_TIMEOUT 后再打一行 NOT_COMMITTED_YET,末行为 COMMIT_RESULT reason=timeout */
+    {   const char *slow_fake =
+            "#pragma unisa use sys.time\n"
+            "int main(void) { sy_sleep_ms(1200); return 0; }\n";
+        ck(wfile("tools/commit-own.cx", slow_fake) == 0, "follow-timeout-fixture-write");
+        envv[1] = "DEVSVC_COMMIT_FOLLOW_MS=250"; envv[2] = 0;
+        rc = dv("git", "commit", "-m", "FT", "--whole", "dvg-t.txt", 0, 0);
+        envv[1] = 0;
+        ck(rc == 124 && first_line_has("NOT_COMMITTED_YET") && has("WAIT_TIMEOUT\t") &&
+           has("COMMIT_PENDING\tjob=") &&
+           last_line_starts("COMMIT_RESULT\tNOT_COMMITTED\treason=timeout\tjob=") &&
+           !has_40hex(out), "commit-follow-timeout-pending-and-last-line");
+        {   const char *wt = strstr(out, "WAIT_TIMEOUT\t");
+            const char *p2 = wt ? strstr(wt, "NOT_COMMITTED_YET") : 0;
+            ck(wt && p2 && p2 > wt, "commit-follow-prints-not-committed-yet-after-wait-timeout");
+        }
+        (void)sh("sleep 1", fx);
+    }
     /* (t2) 超时但 COMMIT_LANDED 已落 HEAD:devsvc 自动跑 gitsync-run 对齐共享索引并恢复 GIT_COMMIT rc=0 回执 */
     if (!getenv("DVGIT_CORE_FROM")) {
         const char *landed_fake =
@@ -535,12 +668,28 @@ int main(int argc, char **argv) {
             ck(strcmp(old, hd) && dv("events", "--since", "0", 0, 0, 0, 0, 0) == 0 && has(range), "commit-event-head-range");
         }
         rc = dv("git", "commit", "--status", id, 0, 0, 0, 0);
-        {   char want[200]; F(want, sizeof want, "GIT_COMMIT\trc=0\tcommit=%s", hd);
-            ck(rc == 0 && id[0] && has("COMMIT_RECEIPT\t") && has("\tdone\trc=0\t") && has(want) && has("dvg-r.txt"), "receipt-status-returns-rc-and-commit"); }
+        {   char want[200], reswant[200];
+            F(want, sizeof want, "GIT_COMMIT\trc=0\tcommit=%s", hd);
+            F(reswant, sizeof reswant, "COMMIT_RESULT\tCOMMITTED\tsha=%s\tref=main\tjob=%s", hd, id);
+            ck(rc == 0 && id[0] && has("COMMIT_RECEIPT\t") && has("\tdone\trc=0\t") && has(want) && has("dvg-r.txt") &&
+               last_line_has(reswant), "receipt-status-returns-rc-and-commit"); }
         rc = dv("git", "commit", "--status", "123-456", 0, 0, 0, 0);
-        ck(rc == 2 && has("COMMIT_RECEIPTS\tn=0"), "receipt-status-unknown-job-rc2");
+        ck(rc == 2 && has("COMMIT_RECEIPTS\tn=0") && last_line_starts("COMMIT_RESULT\tNOT_COMMITTED\treason=refused\tjob=123-456"), "receipt-status-unknown-job-rc2");
         rc = dv("git", "commit", "--status", "bad-id", 0, 0, 0, 0);
-        ck(rc == 2 && has("bad job id"), "receipt-status-bad-id-rc2");
+        ck(rc == 2 && has("bad job id") && stdout_last_line_starts("COMMIT_RESULT\tNOT_COMMITTED\treason=refused\tjob=-"), "receipt-status-bad-id-rc2");
+        /* --bg 路径末行必须是 reason=running,wait 后 --status 为 COMMITTED */
+        ck(wfile("dvg-bg.txt", "bg\n") == 0, "receipt-bg-fixture");
+        {   char bgid[48] = ""; const char *bp = 0;
+            rc = dv("git", "commit", "-m", "BG", "--whole", "dvg-bg.txt", "--bg", 0);
+            ck(rc == 0 && (bp = strstr(out, "JOB\t")) && sscanf(bp, "JOB\t%47s", bgid) == 1 &&
+               has("NOT_COMMITTED_YET") && last_line_starts("COMMIT_RESULT\tNOT_COMMITTED\treason=running\tjob="), "commit-bg-last-line-running");
+            if (bgid[0]) {
+                rc = dv("wait", bgid, "--timeout-ms", "45000", 0, 0, 0, 0);
+                ck(rc == 0 && has("JOB_DONE\t"), "commit-bg-wait-done");
+                rc = dv("git", "commit", "--status", bgid, 0, 0, 0, 0);
+                ck(rc == 0 && last_line_starts("COMMIT_RESULT\tCOMMITTED\tsha=") && last_line_has("\tref=main\tjob="), "commit-bg-status-committed");
+            }
+        }
     }
     }
     if (C && !single_c2 && !single_c1a) {
