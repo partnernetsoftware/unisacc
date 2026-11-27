@@ -501,7 +501,7 @@ R75/R78/R69/R69.6/R79/R81 等仍跟踪项已归档全文于 archive/prd_mempalac
 
 ### 下一步
 
-- v0.1.7(计划 `plans/v0.1.7.md`)与 0.1.6 后续队列见 `plans/v0.1.6-v017-queue.tsv` 及 `plans/version-roadmap.md`;M1 五步与 module-evolution 逐单元循环优先。
+- v0.1.8(计划 `plans/v0.1.8.md`)与 0.1.6 后续队列见 `plans/v0.1.6-v017-queue.tsv` 及 `plans/version-roadmap.md`;M1 五步与 module-evolution 逐单元循环优先。
 
 ## 决定:迁移加速(2026-11-27,所有者指令 + fable 裁定)
 

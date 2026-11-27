@@ -8,12 +8,16 @@
  *     without the session prefix is refused. Prints PASS/FAIL and CHECK_RB_OPGUARD<TAB>failed=N. */
 #pragma unisa use cxlib.sessionroot
 #pragma unisa use sys.fs
+#pragma unisa use sys.posix
 #pragma unisa use sys.env
 #pragma unisa use sys.io
 #pragma unisa use sys.proc
 #pragma unisa use sys.time
 #pragma unisa use text.text
 #pragma unisa use mem.bytes
+#pragma unisa use mem.heap
+#pragma unisa use cxlib.chainfacts
+#pragma unisa use cxlib.procrun
 
 static int failed;
 /* First occurrence of the NUL-terminated P in S, or 0 (plain byte comparison). */
@@ -25,6 +29,143 @@ static const char *rb_find(const char *s, const char *p) {
 static void ck(int ok, const char *name) {
     if (!ok) failed++;
     sy_printf("%s\trb-opguard.%s\n", ok ? "PASS" : "FAIL", name);
+}
+
+static int rb_has_line(const char *s, const char *suf) {
+    if (!s || !suf) return 0;
+    long sl = (long)strlen(suf);
+    for (const char *p = s; *p;) {
+        const char *e = strchr(p, '\n');
+        long ln = e ? (long)(e - p) : (long)strlen(p);
+        if (ln >= sl && mm_same(p + ln - sl, suf, sl)) return 1;
+        if (!e) break;
+        p = e + 1;
+    }
+    return 0;
+}
+
+static void rb_whole_target_override_fixtures(const char *root) {
+    char tmp[4096], fx[4400], p[4600], q[4600], probe_src[4400], probe_bin[4400], rb_bin[4400];
+    char pkg[4400], out_osx[4400], out_win[4400], log_osx[4400], log_win[4400];
+    if (sy_mkdtemp(sy_tmpdir(), "rb-rt-", tmp, sizeof tmp) != 0) { ck(0, "whole-target-tmpdir"); return; }
+    if (cx_fmt(fx, sizeof fx, "%s/fx", tmp) ||
+        cx_fmt(probe_src, sizeof probe_src, "%s/probe.cx", fx) ||
+        cx_fmt(probe_bin, sizeof probe_bin, "%s/probe", tmp) ||
+        cx_fmt(rb_bin, sizeof rb_bin, "%s/rb-fx", tmp) ||
+        cx_fmt(pkg, sizeof pkg, "%s/fake.pkg", tmp) ||
+        cx_fmt(out_osx, sizeof out_osx, "%s/out-osx", tmp) ||
+        cx_fmt(out_win, sizeof out_win, "%s/out-win", tmp) ||
+        cx_fmt(log_osx, sizeof log_osx, "%s/log-osx.txt", tmp) ||
+        cx_fmt(log_win, sizeof log_win, "%s/log-win.txt", tmp)) { ck(0, "whole-target-paths"); goto out; }
+    if (cx_fmt(p, sizeof p, "%s/build", fx) || sy_mkdir_all(p, 0755) ||
+        cx_fmt(p, sizeof p, "%s/tools/cxlib", fx) || sy_mkdir_all(p, 0755) ||
+        cx_fmt(p, sizeof p, "%s/include", fx) || sy_mkdir_all(p, 0755)) { ck(0, "whole-target-mkdir"); goto out; }
+    {
+        const char *links[] = {"cx", "ext", "unisa", "unisacc.com"};
+        for (int i = 0; i < 4; i++) {
+            if (cx_fmt(p, sizeof p, "%s/%s", root, links[i]) ||
+                cx_fmt(q, sizeof q, "%s/%s", fx, links[i]) ||
+                sy_symlink(p, q)) { ck(0, "whole-target-symlink"); goto out; }
+        }
+    }
+    {
+        size_t zn = 0; char *b;
+        if (cx_fmt(p, sizeof p, "%s/cxroot.tsv", root) || !(b = cx_read(p, &zn)) || cx_fmt(q, sizeof q, "%s/cxroot.tsv", fx) || cx_write(q, b, zn)) { ck(0, "whole-target-cxroot"); goto out; }
+        mm_free(b);
+        if (cx_fmt(p, sizeof p, "%s/tools/release-build.cx", root) || !(b = cx_read(p, &zn)) || cx_fmt(q, sizeof q, "%s/tools/release-build.cx", fx) || cx_write(q, b, zn)) { ck(0, "whole-target-rb-copy"); goto out; }
+        mm_free(b);
+        if (cx_fmt(p, sizeof p, "%s/tools/cxlib/chainfacts.cx", root) || !(b = cx_read(p, &zn)) || cx_fmt(q, sizeof q, "%s/tools/cxlib/chainfacts.cx", fx) || cx_write(q, b, zn)) { ck(0, "whole-target-cf-copy"); goto out; }
+        mm_free(b);
+        if (cx_fmt(q, sizeof q, "%s/include/cx-flat.h", fx) || cx_write(q, "/* flat */\n", 11)) { ck(0, "whole-target-flat"); goto out; }
+        if (cx_fmt(p, sizeof p, "%s/build/chain-facts.tsv", root) || !(b = cx_read(p, &zn))) { ck(0, "whole-target-facts-read"); goto out; }
+        const char *add = "root_target\tosx/x86_64:driveargs.o\tsrc/driveargs_osx_synth.cx\n";
+        long an = tx_len(add, 256);
+        char *nb = mm_alloc((long)zn + an);
+        if (!nb) { mm_free(b); ck(0, "whole-target-oom"); goto out; }
+        mm_copy(nb, (long)zn, b, (long)zn);
+        mm_copy(nb + zn, an, add, an);
+        int wbad = cx_fmt(q, sizeof q, "%s/build/chain-facts.tsv", fx) || cx_write(q, nb, zn + (size_t)an);
+        mm_free(nb); mm_free(b);
+        if (wbad) { ck(0, "whole-target-facts-write"); goto out; }
+    }
+    {
+        if (cx_fmt(p, sizeof p, "%s/tools/cxlib", root)) { ck(0, "whole-target-cxlib"); goto out; }
+        DIR *d = opendir(p); struct dirent *e;
+        if (!d) { ck(0, "whole-target-cxlib-open"); goto out; }
+        while ((e = readdir(d))) {
+            size_t zn = strlen(e->d_name);
+            if (zn < 4 || !tx_eqz(e->d_name + zn - 3, ".cx") || tx_eqz(e->d_name, "chainfacts.cx")) continue;
+            if (cx_fmt(p, sizeof p, "%s/tools/cxlib/%s", root, e->d_name) ||
+                cx_fmt(q, sizeof q, "%s/tools/cxlib/%s", fx, e->d_name) ||
+                sy_symlink(p, q)) { closedir(d); ck(0, "whole-target-cxlib-link"); goto out; }
+        }
+        closedir(d);
+    }
+    if (cx_write(pkg, "PKG", 3)) { ck(0, "whole-target-pkg"); goto out; }
+    {
+        const char *ps =
+            "#pragma unisa use sys.fs\n#pragma unisa use sys.posix\n#pragma unisa use sys.env\n#pragma unisa use sys.io\n#pragma unisa use text.text\n"
+            "int main(int argc, char **argv) {\n"
+            "  const char *lp = sy_env(\"WF_PROBE_LOG\");\n"
+            "  if (lp && *lp) { int fd = sy_open(lp, O_WRONLY | O_CREAT | O_APPEND, 0644); if (fd >= 0) { for (int i = 0; i < argc; i++) { (void)sy_write_all(fd, argv[i], (long)strlen(argv[i])); (void)sy_write_all(fd, \"\\n\", 1); } (void)sy_close(fd); } }\n"
+            "  for (int i = 1; i + 1 < argc; i++) if (tx_eqz(argv[i], \"-o\")) return cx_write(argv[i + 1], \"IMG\", 3) ? 2 : 0;\n"
+            "  return 2;\n"
+            "}\n";
+        if (cx_write(probe_src, ps, (size_t)tx_len(ps, 4096))) { ck(0, "whole-target-probe-src"); goto out; }
+    }
+    {
+        char cft[4400], unisacc[4400], rbc[4400];
+        if (cx_fmt(cft, sizeof cft, "%s/tools/chain-facts-gen.cx", root) ||
+            cx_fmt(unisacc, sizeof unisacc, "%s/unisacc.com", root) ||
+            cx_fmt(rbc, sizeof rbc, "%s/tools/release-build.cx", fx)) { ck(0, "whole-target-cmds"); goto out; }
+        pr_result r = {0};
+        char *v_cf[] = {"sh", unisacc, cft, "--", "--write", 0};
+        int e1 = pr_run("chain-facts-gen", v_cf, fx, 0, 20, &r);
+        int ok1 = (!e1 && !r.residue && r.rc == 0);
+        pr_free(&r);
+        if (!ok1) { ck(0, "whole-target-chainfacts-gen"); goto out; }
+        char *v_pr[] = {"sh", unisacc, "-o", probe_bin, probe_src, 0};
+        int e2 = pr_run("probe-build", v_pr, fx, 0, 20, &r);
+        int ok2 = (!e2 && !r.residue && r.rc == 0);
+        pr_free(&r);
+        if (!ok2) { ck(0, "whole-target-probe-build"); goto out; }
+        char *v_rb[] = {"sh", unisacc, "-o", rb_bin, rbc, 0};
+        int e3 = pr_run("rb-build", v_rb, fx, 0, 35, &r);
+        int ok3 = (!e3 && !r.residue && r.rc == 0);
+        pr_free(&r);
+        ck(ok3, "whole-target-rb-compile");
+        if (!ok3) goto out;
+    }
+    {
+        pr_result r = {0};
+        char env_ctor[4500], env_log[4500];
+        if (cx_fmt(env_ctor, sizeof env_ctor, "UNISACC_CTOR=%s", probe_bin) ||
+            cx_fmt(env_log, sizeof env_log, "WF_PROBE_LOG=%s", log_osx)) goto out;
+        char *env[] = {env_ctor, env_log, 0};
+        char *v[] = {rb_bin, "slice", fx, pkg, out_osx, "--target", "osx/x86_64", 0};
+        int e = pr_run("rb-osx", v, root, env, 20, &r);
+        size_t zn = 0; char *lg = cx_read(log_osx, &zn);
+        ck(!e && !r.residue && r.rc == 0 && lg && rb_has_line(lg, "/src/driveargs_osx_synth.cx") && !rb_has_line(lg, "/src/drivestream_m1.cx"),
+           "whole-target-rb-osx-uses-override-without-lnx-leak");
+        if (lg) mm_free(lg);
+        pr_free(&r);
+    }
+    {
+        pr_result r = {0};
+        char env_ctor[4500], env_log[4500];
+        if (cx_fmt(env_ctor, sizeof env_ctor, "UNISACC_CTOR=%s", probe_bin) ||
+            cx_fmt(env_log, sizeof env_log, "WF_PROBE_LOG=%s", log_win)) goto out;
+        char *env[] = {env_ctor, env_log, 0};
+        char *v[] = {rb_bin, "slice", fx, pkg, out_win, "--target", "win/x86_64", 0};
+        int e = pr_run("rb-win", v, root, env, 20, &r);
+        size_t zn = 0; char *lg = cx_read(log_win, &zn);
+        ck(!e && !r.residue && r.rc == 0 && lg && rb_has_line(lg, "/src/driveargs.cx") && !rb_has_line(lg, "/src/driveargs_osx_synth.cx"),
+           "whole-target-rb-win-unaffected-by-osx-override");
+        if (lg) mm_free(lg);
+        pr_free(&r);
+    }
+out:
+    (void)sy_remove_all(tmp);
 }
 
 int main(int argc, char **argv) {
@@ -46,6 +187,7 @@ int main(int argc, char **argv) {
     }
     ck(sr_ok(root, good, why, sizeof why) == 0, "tmpdir-session-root-accepted");
     ck(sr_ok(root, bad, why, sizeof why) == 1, "non-session-tmp-path-refused");
+    rb_whole_target_override_fixtures(root);
     sy_printf("CHECK_RB_OPGUARD\tfailed=%d\n", failed);
     return failed ? 1 : 0;
 }

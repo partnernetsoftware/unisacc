@@ -1,8 +1,11 @@
-/* tools/check-slice-nn-m53-s1.cx -- S1 contract, 28-vector in-proc shadow parity, 3-mutant kill, failure contract & G5 sidecar discovery E2E for m53 (cxsa_valid_s1).
+/* tools/check-slice-nn-m53-s1.cx -- S1 contract, 288-vector in-proc/split-pipe shadow parity
+ * (byte-exact input immutability + boundary sweep), 14-mutant kill (12 semantic + 2 container),
+ * failure contract & G5 sidecar discovery E2E for m53 (cxsa_valid_s1).
  * Usage: sh ./unisacc.com tools/check-slice-nn-m53-s1.cx --
  *        sh ./unisacc.com tools/check-slice-nn-m53-s1.cx -- --g5-candidate PRIV_APE_PATH
  *        sh ./unisacc.com tools/check-slice-nn-m53-s1.cx -- child COUNT LEN PTR_OK S1 SO [APE_SELF]
- * Last line: CHECK_SLICE_NN_M53_S1\tPASS|FAIL\tvectors=28\tok=N\tfail=M\tmutations=3\tcandidate_ape_sha=...\ttape_container_sha=...
+ *        sh ./unisacc.com tools/check-slice-nn-m53-s1.cx -- child288 S1 SO
+ * Last line: CHECK_SLICE_NN_M53_S1\tPASS|FAIL\tvectors=288\tok=N\tfail=M\tmutations=14\tcandidate_ape_sha=...\ttape_container_sha=...
  *      (G5): CHECK_SLICE_NN_M53_S1_G5\tPASS|FAIL\tcases=4\tok=N\tfail=M\tcandidate_ape_sha=...\tsidecar_so_sha=...
  */
 #pragma unisa use sys.fs
@@ -106,43 +109,164 @@ static int m53_child(int argc, char **argv) {
     return 0;
 }
 
-static int m53_child28(int argc, char **argv) {
-    /* argv: child28 S1 SO */
-    static unsigned char vbuf[9000016];
-    static const unsigned long cnts[28] = {
-        0, 0, 0, 0, 0, 0, 1, 1, 1, 1,
-        2, 2, 3, 10, 10, 100, 100, 500, 1000, 1000,
-        10000, 50000, 1000000, 1000000, 1000000, 1000001, 0xffffffffUL, 1
+#define M53_NVECS 288
+#define M53_VBUF_CAP 9437200L
+
+static void m53_vec_at(int idx, unsigned long *cnt_out, long *len_out, int *ptr_ok_out, unsigned char *fill_out) {
+    static const long cat1_lens[24] = {
+        -1000, -1, 0, 1, 3, 4, 5, 13, 22, 9000004, 4, 13,
+        -9000004, -100, -9, -4, -1, 0, 1, 2, 3, 0, 3, -1
     };
-    static const long lens[28] = {
-        4, 0, 3, -1, 5, 4, 13, 12, 14, 0,
-        22, 21, 31, 94, 95, 904, 903, 4504, 9004, 9005,
-        90004, 450004, 9000004, 9000003, 9000005, 9000013, 4, 13
+    static const unsigned long cat1_cnts[24] = {
+        0, 0, 0, 0, 0, 0, 0, 1, 2, 1000000, 1000001, 0xffffffffUL,
+        0, 0, 1, 0, 0, 0, 0, 0, 0, 1, 1000000, 0xffffffffUL
     };
-    static const int ptr_ok[28] = {
-        1, 1, 1, 1, 1, 0, 1, 1, 1, 0,
-        1, 1, 1, 1, 1, 1, 1, 1, 1, 1,
-        1, 1, 1, 1, 1, 1, 1, 1
+    static const int cat1_ptrs[24] = {
+        0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0,
+        1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1
     };
-    const char *s1 = argc >= 3 ? argv[2] : "-";
-    const char *so = argc >= 4 ? argv[3] : "-";
+    static const unsigned long cat2_cnts[16] = {
+        0x00000001UL, 0x0000007fUL, 0x00000080UL, 0x000000ffUL,
+        0x00000100UL, 0x00000101UL, 0x00007fffUL, 0x00008000UL,
+        0x0000ffffUL, 0x00010000UL, 0x00010101UL, 0x0007ffffUL,
+        0x00080000UL, 0x000f423fUL, 0x000f4240UL, 0x000f4241UL
+    };
+    static const unsigned long cat3_cnts[8] = {
+        999997UL, 999998UL, 999999UL, 1000000UL,
+        1000001UL, 1000002UL, 1000009UL, 1048576UL
+    };
+    static const unsigned long cat5_cnts[8] = {
+        0UL, 1UL, 2UL, 7UL, 16UL, 64UL, 255UL, 1000UL
+    };
+    static const unsigned char cat5_fills[4] = {0x00, 0xff, 0x5a, 0xa5};
+    static const unsigned long cat6_cnts[8] = {
+        0x00100000UL, 0x00800000UL, 0x01000000UL, 0x10000000UL,
+        0x1c71c71cUL, 0x1c71c71dUL, 0x7fffffffUL, 0xffffffffUL
+    };
+    static const long cat6_lens[4] = {4L, 13L, 9000004L, 9000013L};
+    static const unsigned long cat7_cnts[16] = {
+        17UL, 31UL, 63UL, 64UL, 65UL, 127UL, 128UL, 255UL,
+        256UL, 511UL, 512UL, 1024UL, 4096UL, 16384UL, 65535UL, 262144UL
+    };
+    *ptr_ok_out = 1;
+    *fill_out = 0;
+    if (idx < 24) {
+        /* Cat 1 (24): NULL pointer & negative/short length boundaries */
+        *cnt_out = cat1_cnts[idx];
+        *len_out = cat1_lens[idx];
+        *ptr_ok_out = cat1_ptrs[idx];
+    } else if (idx < 72) {
+        /* Cat 2 (48): little-endian byte0..byte2 bit sensitivity (exact, -1, +1) */
+        int j = idx - 24;
+        unsigned long c = cat2_cnts[j / 3];
+        long base = 4L + (long)c * 9L;
+        int d = (j % 3 == 0) ? 0 : (j % 3 == 1 ? -1 : 1);
+        *cnt_out = c;
+        *len_out = base + d;
+    } else if (idx < 96) {
+        /* Cat 3 (24): upper cap 1,000,000 neighborhood sweep (exact, -1, +1) */
+        int j = idx - 72;
+        unsigned long c = cat3_cnts[j / 3];
+        long base = 4L + (long)c * 9L;
+        int d = (j % 3 == 0) ? 0 : (j % 3 == 1 ? -1 : 1);
+        *cnt_out = c;
+        *len_out = base + d;
+    } else if (idx < 144) {
+        /* Cat 4 (48): count 0..15 x (exact-1, exact, exact+1) stride-9 & header-4 checks */
+        int j = idx - 96;
+        unsigned long c = (unsigned long)(j / 3);
+        long base = 4L + (long)c * 9L;
+        int d = (j % 3 == 0) ? -1 : (j % 3 == 1 ? 0 : 1);
+        *cnt_out = c;
+        *len_out = base + d;
+    } else if (idx < 176) {
+        /* Cat 5 (32): payload tail-byte invariance & byte-exact immutability */
+        int j = idx - 144;
+        unsigned long c = cat5_cnts[j / 4];
+        *cnt_out = c;
+        *len_out = 4L + (long)c * 9L;
+        *fill_out = cat5_fills[j % 4];
+    } else if (idx < 208) {
+        /* Cat 6 (32): >1,000,000 high-byte & 32-bit wraparound rejection */
+        int j = idx - 176;
+        *cnt_out = cat6_cnts[j / 4];
+        *len_out = cat6_lens[j % 4];
+    } else if (idx < 256) {
+        /* Cat 7 (48): mid/large power-of-two & prime counts (exact, -1, +1) */
+        int j = idx - 208;
+        unsigned long c = cat7_cnts[j / 3];
+        long base = 4L + (long)c * 9L;
+        int d = (j % 3 == 0) ? 0 : (j % 3 == 1 ? -1 : 1);
+        *cnt_out = c;
+        *len_out = base + d;
+    } else {
+        /* Cat 8 (32): deterministic LCG boundary mix (seed 0x53a1c7e9) */
+        int j = idx - 256;
+        unsigned int s = 0x53a1c7e9u;
+        for (int t = 0; t <= j; t++) s = s * 1664525u + 1013904223u;
+        unsigned long c = (unsigned long)(s % 1000001u);
+        long base = 4L + (long)c * 9L;
+        int kind = (int)((s >> 24) & 3u);
+        long len = base;
+        if (kind == 1) len = base - 1L;
+        else if (kind == 2) len = base + 1L;
+        else if (kind == 3 && base + 9L <= M53_VBUF_CAP) len = base + 9L;
+        *cnt_out = c;
+        *len_out = len;
+        *fill_out = (unsigned char)((s >> 16) & 255u);
+    }
+}
+
+static int m53_run_288_parity(void) {
+    static unsigned char vbuf[M53_VBUF_CAP];
     int mismatches = 0, v;
     for (int i = 0; i < 64; i++) vbuf[i] = 0;
+    for (v = 0; v < M53_NVECS; v++) {
+        unsigned long cnt = 0;
+        long len = 0;
+        int ptr_ok = 1;
+        unsigned char fill = 0;
+        m53_vec_at(v, &cnt, &len, &ptr_ok, &fill);
+        unsigned char b0 = (unsigned char)(cnt & 255u);
+        unsigned char b1 = (unsigned char)((cnt >> 8) & 255u);
+        unsigned char b2 = (unsigned char)((cnt >> 16) & 255u);
+        unsigned char b3 = (unsigned char)((cnt >> 24) & 255u);
+        vbuf[0] = b0; vbuf[1] = b1; vbuf[2] = b2; vbuf[3] = b3;
+        long chk_n = (len > 4 && len <= 4096) ? len : 0;
+        if (chk_n > 4) {
+            for (long i = 4; i < chk_n; i++) vbuf[i] = (unsigned char)(fill ^ (unsigned char)(i & 255));
+        } else if (len > 4 && len <= M53_VBUF_CAP) {
+            vbuf[4] = fill;
+            vbuf[len - 1] = (unsigned char)(fill ^ 0x3cu);
+        }
+        const unsigned char *p = ptr_ok ? vbuf : 0;
+        int got = cxsa_valid_s1(p, len);
+        int exp = m53_oracle(p, len);
+        int dirty = 0;
+        if (vbuf[0] != b0 || vbuf[1] != b1 || vbuf[2] != b2 || vbuf[3] != b3) dirty = 1;
+        if (!dirty && chk_n > 4) {
+            for (long i = 4; i < chk_n; i++) {
+                if (vbuf[i] != (unsigned char)(fill ^ (unsigned char)(i & 255))) { dirty = 1; break; }
+            }
+        } else if (!dirty && len > 4 && len <= M53_VBUF_CAP) {
+            if (vbuf[4] != fill || vbuf[len - 1] != (unsigned char)(fill ^ 0x3cu)) dirty = 1;
+        }
+        if (got != exp || (got != 0 && got != 1) || dirty) mismatches++;
+    }
+    return mismatches;
+}
+
+static int m53_child288(int argc, char **argv) {
+    /* argv: child288|child28 S1 SO */
+    const char *s1 = argc >= 3 ? argv[2] : "-";
+    const char *so = argc >= 4 ? argv[3] : "-";
+    int mismatches;
     if (!tx_eqz(s1, "-")) sy_setenv("UNISACC_M53_S1", s1, 1); else sy_unsetenv("UNISACC_M53_S1");
     if (!tx_eqz(so, "-")) sy_setenv("UNISACC_M53_S1_SO", so, 1); else sy_unsetenv("UNISACC_M53_S1_SO");
-    for (v = 0; v < 28; v++) {
-        vbuf[0] = (unsigned char)(cnts[v] & 255u);
-        vbuf[1] = (unsigned char)((cnts[v] >> 8) & 255u);
-        vbuf[2] = (unsigned char)((cnts[v] >> 16) & 255u);
-        vbuf[3] = (unsigned char)((cnts[v] >> 24) & 255u);
-        const unsigned char *p = ptr_ok[v] ? vbuf : 0;
-        int got = cxsa_valid_s1(p, lens[v]);
-        int exp = m53_oracle(p, lens[v]);
-        if (got != exp) mismatches++;
-    }
+    mismatches = m53_run_288_parity();
     sy_unsetenv("UNISACC_M53_S1");
     sy_unsetenv("UNISACC_M53_S1_SO");
-    printf("M53_28\t%d\t%d\n", mismatches == 0 ? 1 : 0, mismatches);
+    printf("M53_288\t%d\t%d\n", mismatches == 0 ? 1 : 0, mismatches);
     return mismatches == 0 ? 0 : 1;
 }
 
@@ -172,34 +296,136 @@ static void m53_write_swap_container(const char *path) {
     (void)m53_write_bytes(path, buf, (long)sizeof buf, 0600);
 }
 
-static const char *m53_guest_src(void) {
-    return
-    "static unsigned long g_u64(const char *s) {\n"
-    "    unsigned long v = 0; int i = 0;\n"
-    "    while (s[i] >= '0' && s[i] <= '9') { v = v * 10UL + (unsigned long)(s[i] - '0'); i++; }\n"
-    "    return v;\n"
-    "}\n"
-    "static long g_i64(const char *s) {\n"
-    "    long v = 0; int i = 0, neg = 0;\n"
-    "    if (s[0] == '-') { neg = 1; i = 1; }\n"
-    "    while (s[i] >= '0' && s[i] <= '9') { v = v * 10L + (long)(s[i] - '0'); i++; }\n"
-    "    return neg ? -v : v;\n"
-    "}\n"
-    "int main(int argc, char **argv) {\n"
-    "    const char *abi = \"M53S1ABI1\";\n"
-    "    const unsigned char *data;\n"
-    "    long length;\n"
-    "    unsigned long count;\n"
-    "    if (abi[0] != 'M' || argc < 3) return 2;\n"
-    "    data = (const unsigned char *)g_u64(argv[1]);\n"
-    "    length = g_i64(argv[2]);\n"
-    "    if (!data || length < 4) return 0;\n"
-    "    count = (unsigned long)data[0] | ((unsigned long)data[1] << 8) |\n"
-    "            ((unsigned long)data[2] << 16) | ((unsigned long)data[3] << 24);\n"
-    "    if (count > 1000000UL) return 0;\n"
-    "    return length == 4 + (long)count * 9 ? 1 : 0;\n"
-    "}\n";
+static const char *m53_guest_src_for(int mut_id) {
+    /* mut_id == 0: clean m53 guest; 1..12: 12 semantic/boundary mutants for M1 diff gate. */
+    switch (mut_id) {
+    case 1: /* M01: cap 1000000 -> 5 */
+        return
+        "static unsigned long g_u64(const char *s){unsigned long v=0;int i=0;while(s[i]>='0'&&s[i]<='9'){v=v*10UL+(unsigned long)(s[i]-'0');i++;}return v;}\n"
+        "static long g_i64(const char *s){long v=0;int i=0,neg=0;if(s[0]=='-'){neg=1;i=1;}while(s[i]>='0'&&s[i]<='9'){v=v*10L+(long)(s[i]-'0');i++;}return neg?-v:v;}\n"
+        "int main(int argc,char **argv){const char *abi=\"M53S1ABI1\";const unsigned char *data;long length;unsigned long count;"
+        "if(abi[0]!='M'||argc<3)return 2;data=(const unsigned char *)g_u64(argv[1]);length=g_i64(argv[2]);if(!data||length<4)return 0;"
+        "count=(unsigned long)data[0]|((unsigned long)data[1]<<8)|((unsigned long)data[2]<<16)|((unsigned long)data[3]<<24);"
+        "if(count>5UL)return 0;return length==4+(long)count*9?1:0;}\n";
+    case 2: /* M02: cap off-by-one (> -> >=) */
+        return
+        "static unsigned long g_u64(const char *s){unsigned long v=0;int i=0;while(s[i]>='0'&&s[i]<='9'){v=v*10UL+(unsigned long)(s[i]-'0');i++;}return v;}\n"
+        "static long g_i64(const char *s){long v=0;int i=0,neg=0;if(s[0]=='-'){neg=1;i=1;}while(s[i]>='0'&&s[i]<='9'){v=v*10L+(long)(s[i]-'0');i++;}return neg?-v:v;}\n"
+        "int main(int argc,char **argv){const char *abi=\"M53S1ABI1\";const unsigned char *data;long length;unsigned long count;"
+        "if(abi[0]!='M'||argc<3)return 2;data=(const unsigned char *)g_u64(argv[1]);length=g_i64(argv[2]);if(!data||length<4)return 0;"
+        "count=(unsigned long)data[0]|((unsigned long)data[1]<<8)|((unsigned long)data[2]<<16)|((unsigned long)data[3]<<24);"
+        "if(count>=1000000UL)return 0;return length==4+(long)count*9?1:0;}\n";
+    case 3: /* M03: cap check removed */
+        return
+        "static unsigned long g_u64(const char *s){unsigned long v=0;int i=0;while(s[i]>='0'&&s[i]<='9'){v=v*10UL+(unsigned long)(s[i]-'0');i++;}return v;}\n"
+        "static long g_i64(const char *s){long v=0;int i=0,neg=0;if(s[0]=='-'){neg=1;i=1;}while(s[i]>='0'&&s[i]<='9'){v=v*10L+(long)(s[i]-'0');i++;}return neg?-v:v;}\n"
+        "int main(int argc,char **argv){const char *abi=\"M53S1ABI1\";const unsigned char *data;long length;unsigned long count;"
+        "if(abi[0]!='M'||argc<3)return 2;data=(const unsigned char *)g_u64(argv[1]);length=g_i64(argv[2]);if(!data||length<4)return 0;"
+        "count=(unsigned long)data[0]|((unsigned long)data[1]<<8)|((unsigned long)data[2]<<16)|((unsigned long)data[3]<<24);"
+        "return length==4+(long)count*9?1:0;}\n";
+    case 4: /* M04: stride 9 -> 8 */
+        return
+        "static unsigned long g_u64(const char *s){unsigned long v=0;int i=0;while(s[i]>='0'&&s[i]<='9'){v=v*10UL+(unsigned long)(s[i]-'0');i++;}return v;}\n"
+        "static long g_i64(const char *s){long v=0;int i=0,neg=0;if(s[0]=='-'){neg=1;i=1;}while(s[i]>='0'&&s[i]<='9'){v=v*10L+(long)(s[i]-'0');i++;}return neg?-v:v;}\n"
+        "int main(int argc,char **argv){const char *abi=\"M53S1ABI1\";const unsigned char *data;long length;unsigned long count;"
+        "if(abi[0]!='M'||argc<3)return 2;data=(const unsigned char *)g_u64(argv[1]);length=g_i64(argv[2]);if(!data||length<4)return 0;"
+        "count=(unsigned long)data[0]|((unsigned long)data[1]<<8)|((unsigned long)data[2]<<16)|((unsigned long)data[3]<<24);"
+        "if(count>1000000UL)return 0;return length==4+(long)count*8?1:0;}\n";
+    case 5: /* M05: stride 9 -> 10 */
+        return
+        "static unsigned long g_u64(const char *s){unsigned long v=0;int i=0;while(s[i]>='0'&&s[i]<='9'){v=v*10UL+(unsigned long)(s[i]-'0');i++;}return v;}\n"
+        "static long g_i64(const char *s){long v=0;int i=0,neg=0;if(s[0]=='-'){neg=1;i=1;}while(s[i]>='0'&&s[i]<='9'){v=v*10L+(long)(s[i]-'0');i++;}return neg?-v:v;}\n"
+        "int main(int argc,char **argv){const char *abi=\"M53S1ABI1\";const unsigned char *data;long length;unsigned long count;"
+        "if(abi[0]!='M'||argc<3)return 2;data=(const unsigned char *)g_u64(argv[1]);length=g_i64(argv[2]);if(!data||length<4)return 0;"
+        "count=(unsigned long)data[0]|((unsigned long)data[1]<<8)|((unsigned long)data[2]<<16)|((unsigned long)data[3]<<24);"
+        "if(count>1000000UL)return 0;return length==4+(long)count*10?1:0;}\n";
+    case 6: /* M06: header size 4 -> 5 */
+        return
+        "static unsigned long g_u64(const char *s){unsigned long v=0;int i=0;while(s[i]>='0'&&s[i]<='9'){v=v*10UL+(unsigned long)(s[i]-'0');i++;}return v;}\n"
+        "static long g_i64(const char *s){long v=0;int i=0,neg=0;if(s[0]=='-'){neg=1;i=1;}while(s[i]>='0'&&s[i]<='9'){v=v*10L+(long)(s[i]-'0');i++;}return neg?-v:v;}\n"
+        "int main(int argc,char **argv){const char *abi=\"M53S1ABI1\";const unsigned char *data;long length;unsigned long count;"
+        "if(abi[0]!='M'||argc<3)return 2;data=(const unsigned char *)g_u64(argv[1]);length=g_i64(argv[2]);if(!data||length<4)return 0;"
+        "count=(unsigned long)data[0]|((unsigned long)data[1]<<8)|((unsigned long)data[2]<<16)|((unsigned long)data[3]<<24);"
+        "if(count>1000000UL)return 0;return length==5+(long)count*9?1:0;}\n";
+    case 7: /* M07: length == -> length >= */
+        return
+        "static unsigned long g_u64(const char *s){unsigned long v=0;int i=0;while(s[i]>='0'&&s[i]<='9'){v=v*10UL+(unsigned long)(s[i]-'0');i++;}return v;}\n"
+        "static long g_i64(const char *s){long v=0;int i=0,neg=0;if(s[0]=='-'){neg=1;i=1;}while(s[i]>='0'&&s[i]<='9'){v=v*10L+(long)(s[i]-'0');i++;}return neg?-v:v;}\n"
+        "int main(int argc,char **argv){const char *abi=\"M53S1ABI1\";const unsigned char *data;long length;unsigned long count;"
+        "if(abi[0]!='M'||argc<3)return 2;data=(const unsigned char *)g_u64(argv[1]);length=g_i64(argv[2]);if(!data||length<4)return 0;"
+        "count=(unsigned long)data[0]|((unsigned long)data[1]<<8)|((unsigned long)data[2]<<16)|((unsigned long)data[3]<<24);"
+        "if(count>1000000UL)return 0;return length>=4+(long)count*9?1:0;}\n";
+    case 8: /* M08: min length < 4 -> <= 4 */
+        return
+        "static unsigned long g_u64(const char *s){unsigned long v=0;int i=0;while(s[i]>='0'&&s[i]<='9'){v=v*10UL+(unsigned long)(s[i]-'0');i++;}return v;}\n"
+        "static long g_i64(const char *s){long v=0;int i=0,neg=0;if(s[0]=='-'){neg=1;i=1;}while(s[i]>='0'&&s[i]<='9'){v=v*10L+(long)(s[i]-'0');i++;}return neg?-v:v;}\n"
+        "int main(int argc,char **argv){const char *abi=\"M53S1ABI1\";const unsigned char *data;long length;unsigned long count;"
+        "if(abi[0]!='M'||argc<3)return 2;data=(const unsigned char *)g_u64(argv[1]);length=g_i64(argv[2]);if(!data||length<=4)return 0;"
+        "count=(unsigned long)data[0]|((unsigned long)data[1]<<8)|((unsigned long)data[2]<<16)|((unsigned long)data[3]<<24);"
+        "if(count>1000000UL)return 0;return length==4+(long)count*9?1:0;}\n";
+    case 9: /* M09: drop byte 1 (<<8) */
+        return
+        "static unsigned long g_u64(const char *s){unsigned long v=0;int i=0;while(s[i]>='0'&&s[i]<='9'){v=v*10UL+(unsigned long)(s[i]-'0');i++;}return v;}\n"
+        "static long g_i64(const char *s){long v=0;int i=0,neg=0;if(s[0]=='-'){neg=1;i=1;}while(s[i]>='0'&&s[i]<='9'){v=v*10L+(long)(s[i]-'0');i++;}return neg?-v:v;}\n"
+        "int main(int argc,char **argv){const char *abi=\"M53S1ABI1\";const unsigned char *data;long length;unsigned long count;"
+        "if(abi[0]!='M'||argc<3)return 2;data=(const unsigned char *)g_u64(argv[1]);length=g_i64(argv[2]);if(!data||length<4)return 0;"
+        "count=(unsigned long)data[0]|((unsigned long)data[2]<<16)|((unsigned long)data[3]<<24);"
+        "if(count>1000000UL)return 0;return length==4+(long)count*9?1:0;}\n";
+    case 10: /* M10: drop byte 2 (<<16) */
+        return
+        "static unsigned long g_u64(const char *s){unsigned long v=0;int i=0;while(s[i]>='0'&&s[i]<='9'){v=v*10UL+(unsigned long)(s[i]-'0');i++;}return v;}\n"
+        "static long g_i64(const char *s){long v=0;int i=0,neg=0;if(s[0]=='-'){neg=1;i=1;}while(s[i]>='0'&&s[i]<='9'){v=v*10L+(long)(s[i]-'0');i++;}return neg?-v:v;}\n"
+        "int main(int argc,char **argv){const char *abi=\"M53S1ABI1\";const unsigned char *data;long length;unsigned long count;"
+        "if(abi[0]!='M'||argc<3)return 2;data=(const unsigned char *)g_u64(argv[1]);length=g_i64(argv[2]);if(!data||length<4)return 0;"
+        "count=(unsigned long)data[0]|((unsigned long)data[1]<<8)|((unsigned long)data[3]<<24);"
+        "if(count>1000000UL)return 0;return length==4+(long)count*9?1:0;}\n";
+    case 11: /* M11: drop byte 3 (<<24) */
+        return
+        "static unsigned long g_u64(const char *s){unsigned long v=0;int i=0;while(s[i]>='0'&&s[i]<='9'){v=v*10UL+(unsigned long)(s[i]-'0');i++;}return v;}\n"
+        "static long g_i64(const char *s){long v=0;int i=0,neg=0;if(s[0]=='-'){neg=1;i=1;}while(s[i]>='0'&&s[i]<='9'){v=v*10L+(long)(s[i]-'0');i++;}return neg?-v:v;}\n"
+        "int main(int argc,char **argv){const char *abi=\"M53S1ABI1\";const unsigned char *data;long length;unsigned long count;"
+        "if(abi[0]!='M'||argc<3)return 2;data=(const unsigned char *)g_u64(argv[1]);length=g_i64(argv[2]);if(!data||length<4)return 0;"
+        "count=(unsigned long)data[0]|((unsigned long)data[1]<<8)|((unsigned long)data[2]<<16);"
+        "if(count>1000000UL)return 0;return length==4+(long)count*9?1:0;}\n";
+    case 12: /* M12: omit !data null-pointer guard */
+        return
+        "static unsigned long g_u64(const char *s){unsigned long v=0;int i=0;while(s[i]>='0'&&s[i]<='9'){v=v*10UL+(unsigned long)(s[i]-'0');i++;}return v;}\n"
+        "static long g_i64(const char *s){long v=0;int i=0,neg=0;if(s[0]=='-'){neg=1;i=1;}while(s[i]>='0'&&s[i]<='9'){v=v*10L+(long)(s[i]-'0');i++;}return neg?-v:v;}\n"
+        "int main(int argc,char **argv){const char *abi=\"M53S1ABI1\";const unsigned char *data;long length;unsigned long count;"
+        "if(abi[0]!='M'||argc<3)return 2;data=(const unsigned char *)g_u64(argv[1]);length=g_i64(argv[2]);if(length<4)return 0;"
+        "count=(unsigned long)data[0]|((unsigned long)data[1]<<8)|((unsigned long)data[2]<<16)|((unsigned long)data[3]<<24);"
+        "if(count>1000000UL)return 0;return length==4+(long)count*9?1:0;}\n";
+    default:
+        return
+        "static unsigned long g_u64(const char *s) {\n"
+        "    unsigned long v = 0; int i = 0;\n"
+        "    while (s[i] >= '0' && s[i] <= '9') { v = v * 10UL + (unsigned long)(s[i] - '0'); i++; }\n"
+        "    return v;\n"
+        "}\n"
+        "static long g_i64(const char *s) {\n"
+        "    long v = 0; int i = 0, neg = 0;\n"
+        "    if (s[0] == '-') { neg = 1; i = 1; }\n"
+        "    while (s[i] >= '0' && s[i] <= '9') { v = v * 10L + (long)(s[i] - '0'); i++; }\n"
+        "    return neg ? -v : v;\n"
+        "}\n"
+        "int main(int argc, char **argv) {\n"
+        "    const char *abi = \"M53S1ABI1\";\n"
+        "    const unsigned char *data;\n"
+        "    long length;\n"
+        "    unsigned long count;\n"
+        "    if (abi[0] != 'M' || argc < 3) return 2;\n"
+        "    data = (const unsigned char *)g_u64(argv[1]);\n"
+        "    length = g_i64(argv[2]);\n"
+        "    if (!data || length < 4) return 0;\n"
+        "    count = (unsigned long)data[0] | ((unsigned long)data[1] << 8) |\n"
+        "            ((unsigned long)data[2] << 16) | ((unsigned long)data[3] << 24);\n"
+        "    if (count > 1000000UL) return 0;\n"
+        "    return length == 4 + (long)count * 9 ? 1 : 0;\n"
+        "}\n";
+    }
 }
+
+static const char *m53_guest_src(void) { return m53_guest_src_for(0); }
 
 static int m53_copy_file(const char *src, const char *dst, int mode) {
     unsigned char *buf = 0;
@@ -349,7 +575,7 @@ int main(int argc, char **argv) {
     const char *tmp = sy_env_or("TMPDIR", "/tmp");
     int rc;
     if (argc >= 2 && tx_eqz(argv[1], "child")) return m53_child(argc, argv);
-    if (argc >= 2 && tx_eqz(argv[1], "child28")) return m53_child28(argc, argv);
+    if (argc >= 2 && (tx_eqz(argv[1], "child28") || tx_eqz(argv[1], "child288"))) return m53_child288(argc, argv);
     if (argc >= 3 && tx_eqz(argv[1], "--g5-candidate")) return m53_run_g5_candidate(argv[2]);
     if (argc > 0 && argv[0] && argv[0][0]) g_m53_self = argv[0];
     if (sy_mkdtemp(tmp, "m53chk-", root, sizeof root) != 0) return 2;
@@ -415,46 +641,20 @@ int main(int argc, char **argv) {
            "A2-existing-stream-attributes-pass");
     }
 
-    /* A3: In-process 28 vectors against m53.tapeslice + native oracle */
+    /* A3: In-process 288 vectors against m53.tapeslice + native oracle (byte-exact input immutability) */
     {
-        static unsigned char vbuf[9000016];
-        unsigned long cnts[28] = {
-            0, 0, 0, 0, 0, 0, 1, 1, 1, 1,
-            2, 2, 3, 10, 10, 100, 100, 500, 1000, 1000,
-            10000, 50000, 1000000, 1000000, 1000000, 1000001, 0xffffffffUL, 1
-        };
-        long lens[28] = {
-            4, 0, 3, -1, 5, 4, 13, 12, 14, 0,
-            22, 21, 31, 94, 95, 904, 903, 4504, 9004, 9005,
-            90004, 450004, 9000004, 9000003, 9000005, 9000013, 4, 13
-        };
-        int ptr_ok[28] = {
-            1, 1, 1, 1, 1, 0, 1, 1, 1, 0,
-            1, 1, 1, 1, 1, 1, 1, 1, 1, 1,
-            1, 1, 1, 1, 1, 1, 1, 1
-        };
-        int all_ok = 1;
-        for (int i = 0; i < 64; i++) vbuf[i] = 0;
+        int mism;
         sy_setenv("UNISACC_M53_S1", p_slice, 1);
         sy_setenv("UNISACC_M53_S1_SO", p_so, 1);
-        for (int v = 0; v < 28; v++) {
-            vbuf[0] = (unsigned char)(cnts[v] & 255u);
-            vbuf[1] = (unsigned char)((cnts[v] >> 8) & 255u);
-            vbuf[2] = (unsigned char)((cnts[v] >> 16) & 255u);
-            vbuf[3] = (unsigned char)((cnts[v] >> 24) & 255u);
-            const unsigned char *p = ptr_ok[v] ? vbuf : 0;
-            int got = cxsa_valid_s1(p, lens[v]);
-            int exp = m53_oracle(p, lens[v]);
-            if (got != exp) { all_ok = 0; break; }
-        }
+        mism = m53_run_288_parity();
         sy_unsetenv("UNISACC_M53_S1");
         sy_unsetenv("UNISACC_M53_S1_SO");
-        ck(all_ok, "A3-inproc-28-vectors-parity");
-        /* Split-pipe zero-fallback proof across all 28 parity vectors (no silent -run fallback) */
+        ck(mism == 0, "A3-inproc-288-vectors-parity");
+        /* Split-pipe zero-fallback proof across all 288 parity vectors (no silent -run fallback) */
         {
-            char *av28[] = {"sh", (char *)u, "-run", (char *)g_m53_self, "--", "child28", p_slice, p_so, 0};
-            rc = m53_spawn_capture(av28, 0, 0, out, sizeof out, err, sizeof err);
-            ck(rc == 0 && tx_eqz(out, "M53_28\t1\t0\n") && !strstr(err, "M53_S1_FALLBACK"), "A3-28-vectors-zero-fallback");
+            char *av288[] = {"sh", (char *)u, "-run", (char *)g_m53_self, "--", "child288", p_slice, p_so, 0};
+            rc = m53_spawn_capture(av288, 0, 0, out, sizeof out, err, sizeof err);
+            ck(rc == 0 && tx_eqz(out, "M53_288\t1\t0\n") && !strstr(err, "M53_S1_FALLBACK"), "A3-288-vectors-zero-fallback");
         }
         /* Split-pipe zero-fallback proof on live m53 execution */
         {
@@ -464,34 +664,63 @@ int main(int argc, char **argv) {
         }
     }
 
-    /* A4: 3 Mutants (M1 boundary constant 1000000 -> 5 in m53_guest.s, M2 truncated container, M3 bad ident seal) */
+    /* A4: 14 Mutants (M01..M12 semantic/boundary guest mutants + M13 truncated container + M14 bad ident seal) */
     {
-        size_t sz = 0;
-        char *asm_s = cx_read(p_s, &sz);
-        int replaced = 0;
-        if (asm_s && sz > 7) {
-            const char *cstr = "1000000";
-            for (long k = 0; k + 7 <= (long)sz; k++) {
-                if (mm_same(asm_s + k, cstr, 7)) {
-                    asm_s[k] = ' '; asm_s[k+1] = ' '; asm_s[k+2] = ' ';
-                    asm_s[k+3] = ' '; asm_s[k+4] = ' '; asm_s[k+5] = ' '; asm_s[k+6] = '5';
-                    replaced = 1;
-                    break;
+        static const char *m_names[12] = {
+            "A4-M01-cap-1000000-to-5",
+            "A4-M02-cap-off-by-one-ge",
+            "A4-M03-cap-removed",
+            "A4-M04-stride-9-to-8",
+            "A4-M05-stride-9-to-10",
+            "A4-M06-header-4-to-5",
+            "A4-M07-len-ge-instead-of-eq",
+            "A4-M08-min-len-le-4",
+            "A4-M09-drop-byte1-shift",
+            "A4-M10-drop-byte2-shift",
+            "A4-M11-drop-byte3-shift",
+            "A4-M12-null-ptr-unchecked"
+        };
+        static const char *m_cnt[12] = {
+            "10", "1000000", "1000001", "1", "1", "0", "0", "0", "256", "65536", "16777216", "0"
+        };
+        static const char *m_len[12] = {
+            "94", "9000004", "9000013", "13", "13", "4", "5", "4", "2308", "589828", "4", "4"
+        };
+        static const char *m_ptr[12] = {
+            "1", "1", "1", "1", "1", "1", "1", "1", "1", "1", "1", "0"
+        };
+        static const char *m_exp_out[12] = {
+            "M53\t1\n", "M53\t1\n", "M53\t0\n", "M53\t1\n", "M53\t1\n", "M53\t1\n",
+            "M53\t0\n", "M53\t1\n", "M53\t1\n", "M53\t1\n", "M53\t0\n", "M53\t0\n"
+        };
+        for (int mi = 0; mi < 12; mi++) {
+            char p_mc[640], p_ms[640], p_msl[640];
+            const char *msrc = m53_guest_src_for(mi + 1);
+            int pack_ok = 0;
+            if (!cx_fmt(p_mc, sizeof p_mc, "%s/mut_%02d.cx", root, mi + 1) &&
+                !cx_fmt(p_ms, sizeof p_ms, "%s/mut_%02d.s", root, mi + 1) &&
+                !cx_fmt(p_msl, sizeof p_msl, "%s/mut_%02d.tapeslice", root, mi + 1) &&
+                m53_write_bytes(p_mc, (const unsigned char *)msrc, tx_len(msrc, 1 << 16), 0600) == 0) {
+                char *c_m[] = {"sh", (char *)u, p_mc, "-S", "-o", p_ms, 0}; /* lint:allow R1-product compiles m53 mutant */
+                if (m53_spawn_capture(c_m, 0, 0, out, sizeof out, err, sizeof err) == 0) {
+                    char *pk_m[] = {"sh", (char *)u, "tools/tapepack.cx", "--", p_ms, "-o", p_msl, 0};
+                    if (m53_spawn_capture(pk_m, 0, 0, out, sizeof out, err, sizeof err) == 0 && sy_exists(p_msl) == 1) {
+                        pack_ok = 1;
+                    }
                 }
             }
-            if (replaced && m53_write_bytes(p_mut_s, (unsigned char *)asm_s, (long)sz, 0600) == 0) {
-                char *pk_m[] = {"sh", (char *)u, "tools/tapepack.cx", "--", p_mut_s, "-o", p_mut_sl, 0};
-                rc = m53_spawn_capture(pk_m, 0, 0, out, sizeof out, err, sizeof err);
-            } else rc = -1;
-            free(asm_s);
-        } else rc = -1;
-        ck(replaced && rc == 0, "A4-M1-pack-cap-constant-mutant");
-        {
-            /* count=10, len=94 -> native returns 1, mutated container (>5) returns 0 -> caught as mismatch! */
-            char *av[] = {"sh", (char *)u, "-run", (char *)g_m53_self, "--", "child", "10", "94", "1", p_mut_sl, p_so, 0};
+            if (mi == 0 && pack_ok) (void)m53_copy_file(p_msl, p_mut_sl, 0600);
+            if (!pack_ok) {
+                ck(0, m_names[mi]);
+                continue;
+            }
+            char *av[] = {"sh", (char *)u, "-run", (char *)g_m53_self, "--", "child",
+                          (char *)m_cnt[mi], (char *)m_len[mi], (char *)m_ptr[mi], p_msl, p_so, 0};
             rc = m53_spawn_capture(av, 0, 0, out, sizeof out, err, sizeof err);
-            ck(rc == 0 && tx_eqz(out, "M53\t1\n") && strstr(err, "M53_S1_FALLBACK\treason=mismatch") != 0,
-               "A4-M1-cap-constant-caught-failopen");
+            int killed = (rc == 0 && tx_eqz(out, m_exp_out[mi]) &&
+                          (strstr(err, "M53_S1_FALLBACK\treason=mismatch") != 0 ||
+                           (mi == 11 && strstr(err, "M53_S1_FALLBACK\treason=vm-fail") != 0)));
+            ck(killed, m_names[mi]);
         }
         {
             unsigned char *sb = 0; int64_t sl = 0;
@@ -506,12 +735,12 @@ int main(int argc, char **argv) {
             char *av2[] = {"sh", (char *)u, "-run", (char *)g_m53_self, "--", "child", "1", "13", "1", p_trunc, p_so, 0};
             rc = m53_spawn_capture(av2, 0, 0, out, sizeof out, err, sizeof err);
             ck(rc == 0 && tx_eqz(out, "M53\t1\n") && strstr(err, "M53_S1_FALLBACK\treason=corrupt") != 0,
-               "A4-M2-truncated-container-failopen");
+               "A4-M13-truncated-container-failopen");
 
             char *av3[] = {"sh", (char *)u, "-run", (char *)g_m53_self, "--", "child", "1", "13", "1", p_badseal, p_so, 0};
             rc = m53_spawn_capture(av3, 0, 0, out, sizeof out, err, sizeof err);
             ck(rc == 0 && tx_eqz(out, "M53\t1\n") && strstr(err, "M53_S1_FALLBACK\treason=corrupt") != 0,
-               "A4-M3-bad-seal-failopen");
+               "A4-M14-bad-seal-failopen");
         }
     }
 
@@ -665,7 +894,7 @@ int main(int argc, char **argv) {
     }
 
     (void)sy_remove_all(root);
-    printf("CHECK_SLICE_NN_M53_S1\t%s\tvectors=28\tok=%d\tfail=%d\tmutations=3\tcandidate_ape_sha=%s\ttape_container_sha=%s\n",
-           failed ? "FAIL" : "PASS", n_ok, failed, ape_sha, slice_sha);
+    printf("CHECK_SLICE_NN_M53_S1\t%s\tvectors=%d\tok=%d\tfail=%d\tmutations=14\tcandidate_ape_sha=%s\ttape_container_sha=%s\n",
+           failed ? "FAIL" : "PASS", M53_NVECS, n_ok, failed, ape_sha, slice_sha);
     return failed ? 1 : 0;
 }

@@ -263,9 +263,11 @@ tape_run_x86_64:
     movq %r13,%rdi
     movl $5,%ecx
     rep stosq
-    cmpq $4,0(%r12)
+    movq 0(%r12),%rax
+    andq $0xfffffffffffffeff,%rax
+    cmpq $4,%rax
     je .Lrun_mode_ok
-    cmpq $5,0(%r12)
+    cmpq $5,%rax
     jne .Lrun_container
 .Lrun_mode_ok:
     movq 8(%r12),%r14
@@ -301,7 +303,9 @@ tape_run_x86_64:
     cmpq %rsi,%rdx
     jb .Lrun_container
     movl 16(%r14),%ebx
-    cmpq $5,0(%r12)
+    movq 0(%r12),%r8
+    andq $0xff,%r8
+    cmpq $5,%r8
     jne .Lrun_entry_ok
     movq 32(%r12),%rbx
 .Lrun_entry_ok:
@@ -309,12 +313,25 @@ tape_run_x86_64:
     jae .Lrun_container
     addq %rax,%r14
     leaq (%r14,%rsi),%r15
+    testq $0x100,0(%r12)
+    jnz .Lrun_bitmap_cached
     movq %r14,%rdi
     movq 80(%r12),%rdx
     movq 88(%r12),%rcx
     call tape_bitmap_x86_64
     testl %eax,%eax
     jnz .Lrun_container
+    jmp .Lrun_bitmap_ready
+.Lrun_bitmap_cached:
+    movq 80(%r12),%rdx
+    testq %rdx,%rdx
+    jz .Lrun_container
+    movq %rsi,%r8
+    addq $7,%r8
+    shrq $3,%r8
+    cmpq %r8,88(%r12)
+    jb .Lrun_container
+.Lrun_bitmap_ready:
     movq 80(%r12),%rax
     movq %rbx,%rdx
     shrq $3,%rdx
@@ -353,7 +370,9 @@ tape_run_x86_64:
     movq %rax,184(%rsp)
     addq %rdx,%rcx
     jc .Lrun_container
-    cmpq $5,0(%r12)
+    movq 0(%r12),%r8
+    andq $0xff,%r8
+    cmpq $5,%r8
     je .Lrun_call_args
     movq 32(%r12),%r8
     cmpq $4095,%r8
