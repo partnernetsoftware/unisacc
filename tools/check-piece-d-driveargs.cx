@@ -23,11 +23,31 @@
 #pragma unisa use mem.heap
 #pragma unisa use mem.bytes
 #pragma unisa use cxlib.procrun
+#pragma unisa use cxlib.chainfacts
 
 static int n_ok, failed;
 static void ck(int cond, const char *name) {
     if (cond) { n_ok++; sy_printf("PASS\t%s\n", name); }
     else { failed++; sy_printf("FAIL\t%s\n", name); }
+}
+
+static void check_product_routing(void) {
+    static const char *const other5[5] = {"lnx/arm64", "osx/x86_64", "osx/arm64", "win/x86_64", "win/arm64"};
+    int da_idx = -1;
+    char miss[512];
+    for (int i = 0; i < cf_root_count(); i++) {
+        if (tx_eqz(cf_root_key(i), "driveargs.o")) { da_idx = i; break; }
+    }
+    int ok = (da_idx >= 0 &&
+              tx_eqz(cf_root_source_for(da_idx, "lnx/x86_64"), "src/driveargs_m1.cx") &&
+              cf_tu_for("lnx/x86_64", "driveargs.o") != 0 &&
+              tx_eqz(cf_tu_for("lnx/x86_64", "driveargs.o"), "driveargs") &&
+              cf_check_routed_guests(".", miss, sizeof miss) >= 2);
+    for (int t = 0; ok && t < 5; t++) {
+        if (!tx_eqz(cf_root_source_for(da_idx, other5[t]), "src/driveargs.cx")) ok = 0;
+        if (cf_tu_for(other5[t], "driveargs.o") != 0) ok = 0;
+    }
+    ck(ok, "product-routing-and-tape-unit-authority");
 }
 
 static int run_sh(const char *cmd, char *out, long cap) {
@@ -183,6 +203,7 @@ int main(void) {
     char good_p4[640], inv_da_p4[640], bad_crc_da[640];
     char sbp[640], sbb[640], sbn[640];
 
+    check_product_routing();
     if (sy_mkdtemp(sy_tmpdir(), "piece-d-da-", tmp, sizeof tmp) != 0) return 2;
     cx_fmt(tpk_bin, sizeof tpk_bin, "%s/tapepack", tmp);
     cx_fmt(p4e_bin, sizeof p4e_bin, "%s/p4embed", tmp);
