@@ -1284,15 +1284,68 @@ static int run_limits_check(const char *repo) {
     return failed ? 1 : 0;
 }
 
+static int parse_stage_material_line(const char *buf, char *dir_out, size_t dir_cap,
+                                     char tree_sha[65], char cand_sha[65]) {
+    const char *p = buf;
+    dir_out[0] = 0; tree_sha[0] = 0; cand_sha[0] = 0;
+    while (p && *p) {
+        const char *eol = strchr(p, '\n');
+        long llen = eol ? (long)(eol - p) : (long)tx_len(p, 16384);
+        if (llen > 28 && tx_same(p, 28, "STAGE_MATERIAL\tstage=verify\t", 28)) {
+            const char *q = p + 28, *end = p + llen;
+            while (q < end) {
+                const char *tab = q;
+                while (tab < end && *tab != '\t' && *tab != '\r') tab++;
+                long fl = (long)(tab - q);
+                if (fl > 4 && tx_same(q, 4, "dir=", 4)) {
+                    long vl = fl - 4;
+                    if (vl > 0 && (size_t)vl < dir_cap && !mm_copy(dir_out, (long)dir_cap, q + 4, vl)) dir_out[vl] = 0;
+                } else if (fl == 73 && tx_same(q, 9, "tree_sha=", 9) && is_hex64(q + 9, 64)) {
+                    if (!mm_copy(tree_sha, 65, q + 9, 64)) tree_sha[64] = 0;
+                } else if (fl == 78 && tx_same(q, 14, "candidate_sha=", 14) && is_hex64(q + 14, 64)) {
+                    if (!mm_copy(cand_sha, 65, q + 14, 64)) cand_sha[64] = 0;
+                }
+                q = (tab < end) ? tab + 1 : end;
+            }
+            if (dir_out[0] && tree_sha[0] && cand_sha[0]) return 0;
+        }
+        p = eol ? eol + 1 : 0;
+    }
+    return 1;
+}
+
 static int run_local_ape_selfcontained(const char *repo) {
-    char fdir[512], eb_cache[640], eb_dir[640], pkg_p[640], tdir[640], m53_cx[640], out[16384], cmd[3072];
+    char fdir[512], shared_dir[640], eb_dir[640], cand_p[700], tdir[640], m53_cx[640], out[16384], cmd[3072];
+    char tree_sha[65], cand_sha[65], actual_cand[65];
+    const char *explicit_dir = sy_env("UNISACC_FULL_LINK_DIR");
+    if (explicit_dir && explicit_dir[0]) {
+        char *vv[] = {"sh", "./unisacc.com", "tools/check-piece-d-driveargs.cx", "--", "--stage-link-verify", (char *)explicit_dir, 0};
+        if (run_cmd(repo, vv, out, sizeof out, 25) != 0 ||
+            parse_stage_material_line(out, shared_dir, sizeof shared_dir, tree_sha, cand_sha) != 0) {
+            sy_eprintf("LOCAL_APE_REFUSE\treason=shared-full-link-material-missing-or-stale\tdetail=%.180s\n", out);
+            return 2;
+        }
+    } else {
+        char *vv[] = {"sh", "./unisacc.com", "tools/check-piece-d-driveargs.cx", "--", "--stage-link-verify", 0};
+        if (run_cmd(repo, vv, out, sizeof out, 25) != 0 ||
+            parse_stage_material_line(out, shared_dir, sizeof shared_dir, tree_sha, cand_sha) != 0) {
+            sy_eprintf("LOCAL_APE_REFUSE\treason=shared-full-link-material-missing-or-stale\tdetail=%.180s\n", out);
+            return 2;
+        }
+    }
+    if (cx_fmt(cand_p, sizeof cand_p, "%s/candidate", shared_dir) ||
+        file_sha256_and_size(cand_p, actual_cand, 0) != 0 ||
+        !tx_eqz(actual_cand, cand_sha)) {
+        sy_eprintf("LOCAL_APE_REFUSE\treason=shared-full-link-candidate-sha-mismatch\tdir=%s\n", shared_dir);
+        return 2;
+    }
+    sy_printf("LOCAL_APE_MATERIAL\tdir=%s\ttree_sha=%s\tcandidate_sha=%s\n", shared_dir, tree_sha, cand_sha);
+
     if (sy_mkdtemp(sy_tmpdir(), "bind-s3-lape-", fdir, sizeof fdir) != 0) return 2;
-    if (cx_fmt(eb_cache, sizeof eb_cache, "%s/unisacc-bind-s3-eb-cache", sy_tmpdir()) ||
-        cx_fmt(eb_dir, sizeof eb_dir, "%s/eb", fdir) ||
-        cx_fmt(pkg_p, sizeof pkg_p, "%s/unisacc.com", repo) ||
+    if (cx_fmt(eb_dir, sizeof eb_dir, "%s/eb", fdir) ||
         cx_fmt(tdir, sizeof tdir, "%s/tape", fdir) ||
         cx_fmt(m53_cx, sizeof m53_cx, "%s/m53_guest.cx", fdir) ||
-        sy_mkdir_all(eb_cache, 0755) || sy_mkdir_all(eb_dir, 0755) || sy_mkdir_all(tdir, 0755) ||
+        sy_mkdir_all(eb_dir, 0755) || sy_mkdir_all(tdir, 0755) ||
         link_repo_roots(repo, fdir) != 0) return 2;
     const char *m53_guest_src =
         "#pragma unisa use runtime.stream_attributes\n"
@@ -1304,23 +1357,43 @@ static int run_local_ape_selfcontained(const char *repo) {
         "    return cxsa_valid((const unsigned char *)ba[0], (long)ba[1]);\n"
         "}\n";
     if (cx_write(m53_cx, m53_guest_src, (size_t)tx_len(m53_guest_src, 1024))) return 2;
-    /* 4-way parallel build: entry-build || tape-sidecar-build || (tapepack + 3 guests) || ape-pack */
+    /* Build dynamic parallel guest compile+pack list for all cf_tu_unit entries (m53, m25, driveargs, bind, ...) */
+    char gcmds[2048], gwaits[256];
+    long gcp = 0, gwp = 0;
+    gcmds[0] = 0; gwaits[0] = 0;
+    int ntu = cf_tu_count();
+    for (int i = 0; i < ntu && i < 12; i++) {
+        const char *u = cf_tu_unit(i);
+        if (!u || !u[0]) continue;
+        char piece[512], wp[32];
+        if (tx_eqz(u, "m53")) {
+            if (cx_fmt(piece, sizeof piece,
+                       " (sh ./unisacc.com '%s' -S -o '%s/m53_guest.s' && '%s/tp_tool' '%s/m53_guest.s' -o '%s/m53.tapeslice') & g%d=$!;",
+                       m53_cx, fdir, fdir, fdir, tdir, i)) return 2;
+        } else {
+            if (cx_fmt(piece, sizeof piece,
+                       " (sh ./unisacc.com exec/tape/guests/%s_guest.cx -S -o '%s/%s_guest.s' && '%s/tp_tool' '%s/%s_guest.s' -o '%s/%s.tapeslice') & g%d=$!;",
+                       u, fdir, u, fdir, fdir, u, tdir, u, i)) return 2;
+        }
+        long pl = (long)tx_len(piece, sizeof piece);
+        if (gcp + pl >= (long)sizeof gcmds || mm_copy(gcmds + gcp, (long)sizeof gcmds - gcp, piece, pl)) return 2;
+        gcp += pl; gcmds[gcp] = 0;
+        if (cx_fmt(wp, sizeof wp, "%swait $g%d", gwp ? " && " : " ", i)) return 2;
+        long wl = (long)tx_len(wp, sizeof wp);
+        if (gwp + wl >= (long)sizeof gwaits || mm_copy(gwaits + gwp, (long)sizeof gwaits - gwp, wp, wl)) return 2;
+        gwp += wl; gwaits[gwp] = 0;
+    }
+    /* Copy verified shared entry-build artifacts + 3-way parallel build: sidecar || (tapepack + all routed guests) || ape-pack */
     if (cx_fmt(cmd, sizeof cmd,
-               "(sh ./unisacc.com tools/entry-build.cx -- '%s' '%s' '%s' && "
-               " cp '%s/bind.o' '%s/entry.elf' '%s/candidate' '%s/receipt.txt' '%s/') & p1=$!; "
-               "(sh ./unisacc.com tools/tape-sidecar-build.cx -- '%s' '%s') & p2=$!; "
-               "(sh ./unisacc.com tools/tapepack.cx -o '%s/tp_tool' || exit 1; "
-               " (sh ./unisacc.com '%s' -S -o '%s/m53_guest.s' && '%s/tp_tool' '%s/m53_guest.s' -o '%s/m53.tapeslice') & g1=$!; "
-               " (sh ./unisacc.com exec/tape/guests/driveargs_guest.cx -S -o '%s/driveargs_guest.s' && '%s/tp_tool' '%s/driveargs_guest.s' -o '%s/driveargs.tapeslice') & g2=$!; "
-               " (sh ./unisacc.com exec/tape/guests/bind_guest.cx -S -o '%s/bind_guest.s' && '%s/tp_tool' '%s/bind_guest.s' -o '%s/bind.tapeslice') & g3=$!; "
-               " wait $g1 && wait $g2 && wait $g3) & p3=$!; "
-               "(sh ./unisacc.com tools/ape-pack.cx -o '%s/ap_tool') & p4=$!; "
-               "wait $p1 && wait $p2 && wait $p3 && wait $p4",
-               repo, pkg_p, eb_cache, eb_cache, eb_cache, eb_cache, eb_cache, eb_dir,
-               repo, tdir, fdir, m53_cx, fdir, fdir, fdir, tdir,
-               fdir, fdir, fdir, tdir, fdir, fdir, fdir, tdir, fdir)) return 2;
+               "cp '%s/bind.o' '%s/entry.elf' '%s/candidate' '%s/receipt.txt' '%s/' && "
+               "(sh ./unisacc.com tools/tape-sidecar-build.cx -- '%s' '%s') & p1=$!; "
+               "(sh ./unisacc.com tools/tapepack.cx -o '%s/tp_tool' || exit 1;%s%s) & p2=$!; "
+               "(sh ./unisacc.com tools/ape-pack.cx -o '%s/ap_tool') & p3=$!; "
+               "wait $p1 && wait $p2 && wait $p3",
+               shared_dir, shared_dir, shared_dir, shared_dir, eb_dir,
+               repo, tdir, fdir, gcmds, gwaits, fdir)) return 2;
     char *v[] = {"sh", "-c", cmd, 0};
-    if (run_cmd(repo, v, out, sizeof out, 50) != 0) {
+    if (run_cmd(repo, v, out, sizeof out, 40) != 0) {
         sy_eprintf("LOCAL_APE_SELF\tbuild-failed\t%.240s\n", out);
         return 1;
     }
