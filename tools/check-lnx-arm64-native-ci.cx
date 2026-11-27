@@ -1,0 +1,543 @@
+/* tools/check-lnx-arm64-native-ci.cx -- Cross-target ELF64 arm64 compile proof,
+ * host-side produce/judge/chain/tamper tests, and LIVE execution of the real awk scripts
+ * extracted from .github/workflows/lnx-arm64-native.yml (incl. duplicate-count-padding & unbound-KV refusals).
+ *
+ * Ubuntu 24.04 arm64 native CI execution stays UNMEASURED until cc triggers lnx-arm64-native.yml. */
+#pragma unisa use sys.fs
+#pragma unisa use sys.env
+#pragma unisa use sys.io
+#pragma unisa use sys.posix
+#pragma unisa use sys.proc
+#pragma unisa use sys.sha
+#pragma unisa use sysx.run
+#pragma unisa use text.text
+#pragma unisa use mem.heap
+#pragma unisa use mem.bytes
+#pragma unisa use cxlib.procrun
+#pragma unisa use cxlib.receipt
+
+static int g_pass = 0;
+static int g_fail = 0;
+
+static void chk_lnxci_ck(int cond, const char *name) {
+    if (cond) { g_pass++; sy_printf("PASS\tcheck-lnx-arm64-native-ci.%s\n", name); }
+    else { g_fail++; sy_printf("FAIL\tcheck-lnx-arm64-native-ci.%s\n", name); }
+}
+
+static int chk_lnxci_run(char **av, int timeout_s, char *out, long cap) {
+    int cut = 0;
+    int rc = pr_run_merged(av, timeout_s, out, (int)cap, &cut);
+    return cut ? -1 : rc;
+}
+
+static int chk_lnxci_elf64_machine(const char *path, unsigned want_machine) {
+    unsigned char hdr[64];
+    int fd = sy_open_read(path);
+    long n;
+    unsigned machine;
+    if (fd < 0) return 0;
+    n = sy_read(fd, hdr, 64);
+    sy_close(fd);
+    if (n < 20) return 0;
+    if (hdr[0] != 0x7f || hdr[1] != 'E' || hdr[2] != 'L' || hdr[3] != 'F' || hdr[4] != 2 || hdr[5] != 1) return 0;
+    machine = (unsigned)hdr[18] | ((unsigned)hdr[19] << 8);
+    return machine == want_machine;
+}
+
+/* Write `[b, e)` span (or inner `'...'` single-quoted body when `unquote=1`) to `dst_path`. */
+static int chk_lnxci_write_span(const char *b, const char *e, const char *dst_path, int unquote) {
+    if (!b || !e || e <= b) return 1;
+    if (unquote) {
+        const char *q1 = strchr(b, '\''), *q2 = e;
+        if (!q1 || q1 >= e) return 1;
+        q1++;
+        while (q2 > q1 && *q2 != '\'') q2--;
+        if (q2 <= q1) return 1;
+        b = q1; e = q2;
+    }
+    return sy_write_file(dst_path, (const unsigned char *)b, (long)(e - b), 0600);
+}
+
+static int chk_lnxci_run_sh_env(const char *sh_path, const char *rev, const char *csha, const char *repo, const char *chain_file) {
+    px_opts o;
+    px_result r;
+    char e1[128], e2[128], e3[160], e4[700];
+    char *av[4] = {"sh", "-eu", (char *)sh_path, 0};
+    char *env[5];
+    int prc, rc;
+    cx_fmt(e1, sizeof e1, "SOURCE_COMMIT=%s", rev);
+    cx_fmt(e2, sizeof e2, "CANDIDATE_SHA256=%s", csha);
+    cx_fmt(e3, sizeof e3, "REPO=%s", repo);
+    cx_fmt(e4, sizeof e4, "CHAIN_FILE=%s", chain_file);
+    env[0] = e1; env[1] = e2; env[2] = e3; env[3] = e4; env[4] = 0;
+    px_opts_init(&o);
+    o.argv = av; o.env_add = env; o.deadline_ms = 15000; o.merge_err = 1; o.kill_tree = 1;
+    prc = px_run(&o, &r);
+    rc = (prc == 0) ? r.code : -1;
+    px_result_free(&r);
+    return rc;
+}
+
+int main(void) {
+    char tmp[512], bin[600], arm_bin[600];
+    char rcpt[600], outf[600], locf[600], bad_rcpt[600], bad_out[600], chf[600];
+    char awk_chain[600], awk_out[600], awk_rcpt[600], out[32768];
+    const char *rev = "dddc083530000000000000000000000000000000";
+    const char *cand_sha = "1111111111111111111111111111111111111111111111111111111111111111";
+    int have_live = 0;
+
+    if (sy_mkdtemp(sy_tmpdir(), "chk-lnx-arm64-ci-", tmp, sizeof tmp) != 0) {
+        sy_printf("CHECK_LNX_ARM64_NATIVE_CI\tpassed=0\tfailed=1\trunner=cross-build\tnative=0\tarm64_ci=UNMEASURED_CI_ONLY\n");
+        return 1;
+    }
+    cx_fmt(bin, sizeof bin, "%s/ci_host", tmp);
+    cx_fmt(arm_bin, sizeof arm_bin, "%s/ci_arm64", tmp);
+    cx_fmt(rcpt, sizeof rcpt, "%s/batch-a-s1.rcpt", tmp);
+    cx_fmt(outf, sizeof outf, "%s/batch-a-s1.out", tmp);
+    cx_fmt(locf, sizeof locf, "%s/batch-a-s1.locators.tsv", tmp);
+    cx_fmt(bad_rcpt, sizeof bad_rcpt, "%s/bad.rcpt", tmp);
+    cx_fmt(bad_out, sizeof bad_out, "%s/bad.out", tmp);
+    cx_fmt(chf, sizeof chf, "%s/chain.rcpt", tmp);
+    cx_fmt(awk_chain, sizeof awk_chain, "%s/wf_chain.awk", tmp);
+    cx_fmt(awk_out, sizeof awk_out, "%s/wf_out.awk", tmp);
+    cx_fmt(awk_rcpt, sizeof awk_rcpt, "%s/wf_rcpt.awk", tmp);
+
+    /* 1. Compile host + lnx/arm64 in parallel */
+    {
+        char *av_h[] = {"sh", "./unisacc.com", "tests/lnx-arm64-native-ci.cx", "-o", bin, 0}; /* lint:allow R1-product compiles host arm64-ci evidence binary */
+        char *av_a[] = {"sh", "./unisacc.com", "--target=lnx/arm64", "tests/lnx-arm64-native-ci.cx", "-o", arm_bin, 0}; /* lint:allow R1-product cross-compiles lnx/arm64 arm64-ci evidence binary */
+        char **avs[2];
+        sy_child_t ch[2];
+        int sp[2], rc[2], i;
+        avs[0] = av_h; avs[1] = av_a;
+        for (i = 0; i < 2; i++) {
+            sy_spawn_t opt;
+            sy_spawn_init(&opt);
+            opt.argv = avs[i];
+            opt.in_fd = SY_STDIO_NULL;
+            opt.out_fd = SY_STDIO_NULL;
+            opt.err_fd = SY_STDIO_NULL;
+            opt.pgroup = -1;
+            opt.deadline_ms = 45000;
+            sp[i] = sy_proc_spawn(&opt, &ch[i]);
+            rc[i] = -1;
+        }
+        for (i = 0; i < 2; i++) {
+            if (sp[i] == 0) {
+                sy_exit_t st;
+                if (sy_proc_wait(&ch[i], &st) == 0) rc[i] = sy_exit_code(&st);
+            }
+        }
+        chk_lnxci_ck(rc[0] == 0 && sy_exists(bin) == 1, "compile-host-ci-runner");
+        chk_lnxci_ck(rc[1] == 0 && chk_lnxci_elf64_machine(arm_bin, 183u), "lnx-arm64-lp64-and-elf-header");
+    }
+
+    if (sy_exists(bin) == 1) {
+        /* 2. Chain receipt verification positive & negative controls */
+        {
+            char body[1024];
+            char *av_cp[] = {bin, "--verify-chain", "--chain-receipt", chf, "--rev", (char *)rev,
+                             "--candidate-sha", (char *)cand_sha, "--repo", "partnernetsoftware/unisacc", 0};
+            cx_fmt(body, sizeof body,
+                   "PROMOTE_CHECK\tOK\trev=%s\tphases=4/4\nNEED\tape\tunisacc.com\tsha=%s\tbytes=100\n",
+                   rev, cand_sha);
+            (void)sy_write_file(chf, (const unsigned char *)body, (long)strlen(body), 0600);
+            chk_lnxci_ck(chk_lnxci_run(av_cp, 15, out, sizeof out) == 0 && strstr(out, "PASS\tchain-verify") != 0,
+                         "verify-chain-promote-check-accepts");
+
+            cx_fmt(body, sizeof body,
+                   "PROMOTE_CHECK\tOK\trev=%s\nPROMOTE_CHECK\tREFUSE\trev=%s\nNEED\tape\tu\tsha=%s\n",
+                   rev, rev, cand_sha);
+            (void)sy_write_file(chf, (const unsigned char *)body, (long)strlen(body), 0600);
+            chk_lnxci_ck(chk_lnxci_run(av_cp, 15, out, sizeof out) == 1,
+                         "verify-chain-rejects-refuse-or-duplicate");
+
+            cx_fmt(body, sizeof body, "rev\t%s\nape_sha\t%s\n", rev, cand_sha);
+            (void)sy_write_file(chf, (const unsigned char *)body, (long)strlen(body), 0600);
+            chk_lnxci_ck(chk_lnxci_run(av_cp, 15, out, sizeof out) == 1,
+                         "verify-chain-rejects-loose-unbound-kv");
+
+            cx_fmt(body, sizeof body,
+                   "repo\tcommit\tape_sha256\nother/repo\t%s\t%s\n", rev, cand_sha);
+            (void)sy_write_file(chf, (const unsigned char *)body, (long)strlen(body), 0600);
+            chk_lnxci_ck(chk_lnxci_run(av_cp, 15, out, sizeof out) == 1,
+                         "verify-chain-rejects-wrong-repo");
+
+            /* Partial 6-key rc_v3 without remaining 8 keys or binding_sha must be rejected */
+            cx_fmt(body, sizeof body,
+                   "version\t3\nrev\t%s\ncandidate_sha\t%s\nrc\t0\nverdict\tPASS\nbinding_sha\t%s\n",
+                   rev, cand_sha, cand_sha);
+            (void)sy_write_file(chf, (const unsigned char *)body, (long)strlen(body), 0600);
+            chk_lnxci_ck(chk_lnxci_run(av_cp, 15, out, sizeof out) == 1,
+                         "verify-chain-rejects-partial-rc-v3");
+        }
+
+        /* 3. Live produce + --judge on host (--mode qemu --unit batch-a-s1) */
+        {
+            char *av_p[] = {bin, "--unit", "batch-a-s1", "--mode", "qemu",
+                            "--receipt", rcpt, "--output", outf, "--locators", locf,
+                            "--run-id", "r1", "--rev", (char *)rev, "--candidate-file", "./unisacc.com", /* lint:allow R1-product hashes candidate binary */
+                            "--expect-target", "lnx/x86_64", "--ts", "1764200000", 0};
+            char *av_j[] = {bin, "--judge", "--unit", "batch-a-s1", "--mode", "qemu",
+                            "--receipt", rcpt, "--output", outf,
+                            "--run-id", "r1", "--rev", (char *)rev, "--candidate-file", "./unisacc.com", /* lint:allow R1-product judges candidate binary */
+                            "--expect-target", "lnx/x86_64", "--producer", "lnx-arm64-native-ci",
+                            "--purpose", "native-ci", "--now-ts", "1764200060", 0};
+            int r1 = chk_lnxci_run(av_p, 60, out, sizeof out);
+            int p_ok = (r1 == 0 && strstr(out, "PASS\tlnx-arm64-native-ci\tunit=batch-a-s1\ttarget=lnx/x86_64") != 0 &&
+                        sy_exists(rcpt) == 1 && sy_exists(outf) == 1 && sy_exists(locf) == 1);
+            int r2 = p_ok ? chk_lnxci_run(av_j, 30, out, sizeof out) : 1;
+            unsigned char *rb = 0, *lb = 0;
+            int64_t rn = 0, ln = 0;
+            int has_fields = 0, has_loc_sep = 0;
+            if (p_ok && sy_read_file(rcpt, &rb, &rn, 65536) == 0 && rb) {
+                has_fields = (strstr((char *)rb, "binding_sha\t") != 0 &&
+                              strstr((char *)rb, "version\t3\n") != 0 &&
+                              strstr((char *)rb, "target\tlnx/x86_64\n") != 0 &&
+                              strstr((char *)rb, "unit\tbatch-a-s1\n") != 0);
+                mm_free(rb);
+            }
+            if (p_ok && sy_read_file(locf, &lb, &ln, 65536) == 0 && lb) {
+                has_loc_sep = (strstr((char *)lb, "source_probe\tarm64_batch_a_drv\n") != 0 &&
+                               strstr((char *)lb, "delivered_ape_path\tn/a-unit-vm-s1\n") != 0);
+                mm_free(lb);
+            }
+            have_live = (p_ok && r2 == 0 && strstr(out, "judge=ok") != 0 && has_fields && has_loc_sep);
+            chk_lnxci_ck(have_live, "live-qemu-produce-and-rc-verify");
+        }
+
+        /* 4. Negative controls */
+        {
+            char *av_n[] = {bin, "--unit", "batch-a-s1", "--mode", "native",
+                            "--receipt", rcpt, "--output", outf, "--run-id", "r2",
+                            "--rev", (char *)rev, "--candidate-file", "./unisacc.com", /* lint:allow R1-product native-on-x86_64 negative control */
+                            "--expect-target", "lnx/x86_64", "--ts", "1764200000", 0};
+            chk_lnxci_ck(chk_lnxci_run(av_n, 20, out, sizeof out) == 1 && strstr(out, "native-requires-lnx-arm64") != 0,
+                         "refuse-native-mode-on-x86_64-host");
+        }
+        {
+            char *av_m[] = {bin, "--unit", "batch-a-s1", "--mode", "qemu",
+                            "--receipt", rcpt, "--output", outf, "--run-id", "r2",
+                            "--rev", (char *)rev, "--candidate-file", "./unisacc.com", /* lint:allow R1-product missing expect-target negative control */
+                            "--ts", "1764200000", 0};
+            chk_lnxci_ck(chk_lnxci_run(av_m, 20, out, sizeof out) == 2, "refuse-missing-expect-target");
+        }
+        {
+            char *av_w[] = {bin, "--unit", "batch-a-s1", "--mode", "qemu",
+                            "--receipt", rcpt, "--output", outf, "--run-id", "r2",
+                            "--rev", (char *)rev, "--candidate-file", "./unisacc.com", /* lint:allow R1-product wrong expect-target negative control */
+                            "--expect-target", "lnx/arm64", "--ts", "1764200000", 0};
+            chk_lnxci_ck(chk_lnxci_run(av_w, 20, out, sizeof out) == 1 && strstr(out, "target-mismatch") != 0,
+                         "refuse-wrong-expect-target");
+        }
+        {
+            char *av_s[] = {bin, "--unit", "batch-a-s1", "--mode", "qemu",
+                            "--receipt", rcpt, "--output", outf, "--run-id", "r2",
+                            "--rev", (char *)rev, "--candidate-file", "cx/runtime/tape_exec.cx",
+                            "--expect-target", "lnx/x86_64", "--ts", "1764200000", 0};
+            chk_lnxci_ck(chk_lnxci_run(av_s, 20, out, sizeof out) == 2 && strstr(out, "candidate-is-source") != 0,
+                         "refuse-source-as-candidate");
+        }
+        {
+            (void)sy_write_file(bad_out, (const unsigned char *)"tampered\n", 9, 0600);
+            char *av_to[] = {bin, "--judge", "--unit", "batch-a-s1", "--mode", "qemu",
+                             "--receipt", rcpt, "--output", bad_out,
+                             "--run-id", "r1", "--rev", (char *)rev, "--candidate-file", "./unisacc.com", /* lint:allow R1-product tampered output negative control */
+                             "--expect-target", "lnx/x86_64", "--now-ts", "1764200060", 0};
+            chk_lnxci_ck(chk_lnxci_run(av_to, 20, out, sizeof out) == 1 && strstr(out, "output-mismatch") != 0,
+                         "rc-verify-rejects-tampered-output");
+        }
+        {
+            unsigned char *rb = 0; int64_t rn = 0;
+            int tok = 0;
+            if (sy_read_file(rcpt, &rb, &rn, 65536) == 0 && rb && rn > 0) {
+                char *pos = strstr((char *)rb, "target\tlnx/x86_64");
+                if (pos) {
+                    mm_copy(pos, 17, "target\tlnx/arm64\n", 16);
+                    for (int64_t j = (int64_t)(pos - (char *)rb) + 17; j < rn; j++) rb[j - 1] = rb[j];
+                    (void)sy_write_file(bad_rcpt, rb, (long)(rn - 1), 0600);
+                    char *av_tt[] = {bin, "--judge", "--unit", "batch-a-s1", "--mode", "qemu",
+                                     "--receipt", bad_rcpt, "--output", outf,
+                                     "--run-id", "r1", "--rev", (char *)rev, "--candidate-file", "./unisacc.com", /* lint:allow R1-product tampered target negative control */
+                                     "--expect-target", "lnx/x86_64", "--now-ts", "1764200060", 0};
+                    tok = (chk_lnxci_run(av_tt, 20, out, sizeof out) == 1 &&
+                           (strstr(out, "bad-binding") != 0 || strstr(out, "target-mismatch") != 0));
+                }
+                mm_free(rb);
+            }
+            chk_lnxci_ck(tok, "rc-verify-rejects-tampered-target");
+        }
+        {
+            char *av_tu[] = {bin, "--judge", "--unit", "m53-s2", "--mode", "qemu",
+                             "--receipt", rcpt, "--output", outf,
+                             "--run-id", "r1", "--rev", (char *)rev, "--candidate-file", "./unisacc.com", /* lint:allow R1-product wrong unit negative control */
+                             "--expect-target", "lnx/x86_64", "--now-ts", "1764200060", 0};
+            chk_lnxci_ck(chk_lnxci_run(av_tu, 20, out, sizeof out) == 1 &&
+                         (strstr(out, "unit-mismatch") != 0 || strstr(out, "inputs-mismatch") != 0),
+                         "rc-verify-rejects-mismatched-unit-or-inputs");
+        }
+        {
+            char *av_tp[] = {bin, "--judge", "--unit", "batch-a-s1", "--mode", "qemu",
+                             "--receipt", rcpt, "--output", outf,
+                             "--run-id", "r1", "--rev", (char *)rev, "--candidate-file", "./unisacc.com", /* lint:allow R1-product wrong producer negative control */
+                             "--expect-target", "lnx/x86_64", "--producer", "wrong-producer",
+                             "--purpose", "native-ci", "--now-ts", "1764200060", 0};
+            chk_lnxci_ck(chk_lnxci_run(av_tp, 20, out, sizeof out) == 1 && strstr(out, "producer-or-purpose-mismatch") != 0,
+                         "rc-verify-rejects-wrong-producer");
+        }
+        {
+            /* Valid v3 binding + matching output_sha, but forged output with duplicate PASS count-padding */
+            const char *forged =
+                "PASS\tcheck-lnx-arm64-batch-a-s1.build-m25-slice\n"
+                "PASS\tcheck-lnx-arm64-batch-a-s1.build-m25-slice\n"
+                "PASS\tcheck-lnx-arm64-batch-a-s1.qemu-aarch64-static-present\n"
+                "PASS\tcheck-lnx-arm64-batch-a-s1.build-bind-slice\n"
+                "PASS\tcheck-lnx-arm64-batch-a-s1.build-driveargs-slice\n"
+                "PASS\tcheck-lnx-arm64-batch-a-s1.build-forbidden-slot2-slice\n"
+                "PASS\tcheck-lnx-arm64-batch-a-s1.cross-compile-lnx-arm64-batch-a\n"
+                "PASS\tcheck-lnx-arm64-batch-a-s1.arm64-m25-s1-173-parity\n"
+                "PASS\tcheck-lnx-arm64-batch-a-s1.arm64-driveargs-s1-fixture-host-and-pinned-files\n"
+                "PASS\tcheck-lnx-arm64-batch-a-s1.arm64-fixture-host-forbidden-slot2-enosys\n"
+                "CHECK_LNX_ARM64_BATCH_A_S1\tpassed=10\tfailed=0\trunner=qemu\tnative=0\thost_mode=fixture-host\tdriveargs_slots=1,5,6\n";
+            char forge_out_sha[65], c_sha[65], in_sha[65];
+            rc_v3_t fv3;
+            int f_ok = 0;
+            unsigned char *cb = 0, *rb = 0;
+            int64_t cn = 0, rn = 0;
+            in_sha[0] = 0;
+            (void)sy_write_file(bad_out, (const unsigned char *)forged, (long)strlen(forged), 0600);
+            if (sy_sha256_hex((const unsigned char *)forged, (int64_t)strlen(forged), forge_out_sha) == 0 &&
+                sy_read_file("./unisacc.com", &cb, &cn, 128 << 20) == 0 && cb) { /* lint:allow R1-product reads candidate sha for binding negative control */
+                if (sy_sha256_hex(cb, cn, c_sha) == 0 && sy_read_file(rcpt, &rb, &rn, 65536) == 0 && rb) {
+                    const char *p = strstr((char *)rb, "inputs_sha\t");
+                    if (p && strlen(p + 11) >= 64) {
+                        mm_copy(in_sha, sizeof in_sha, p + 11, 64);
+                        in_sha[64] = 0;
+                    }
+                    mm_free(rb);
+                }
+                mm_free(cb);
+            }
+            if (in_sha[0]) {
+                fv3.run_id = "r1";
+                fv3.rev = rev;
+                fv3.unit = "batch-a-s1";
+                fv3.target = "lnx/x86_64";
+                fv3.producer = "lnx-arm64-native-ci";
+                fv3.purpose = "native-ci";
+                fv3.candidate_sha = c_sha;
+                fv3.inputs_sha = in_sha;
+                fv3.output_sha = forge_out_sha;
+                fv3.rc = 0;
+                fv3.verdict = "PASS";
+                fv3.ts = 1764200000;
+                if (rc_write3(bad_rcpt, &fv3) == 0) {
+                    char *av_fo[] = {bin, "--judge", "--unit", "batch-a-s1", "--mode", "qemu",
+                                     "--receipt", bad_rcpt, "--output", bad_out,
+                                     "--run-id", "r1", "--rev", (char *)rev, "--candidate-file", "./unisacc.com", /* lint:allow R1-product duplicate-padding output negative control */
+                                     "--expect-target", "lnx/x86_64", "--producer", "lnx-arm64-native-ci",
+                                     "--purpose", "native-ci", "--now-ts", "1764200060", 0};
+                    f_ok = (chk_lnxci_run(av_fo, 20, out, sizeof out) == 1 &&
+                            strstr(out, "output-contract-mismatch") != 0);
+                }
+            }
+            chk_lnxci_ck(f_ok, "judge-rejects-duplicate-pass-count-padding");
+        }
+    } else {
+        chk_lnxci_ck(0, "verify-chain-promote-check-accepts");
+        chk_lnxci_ck(0, "verify-chain-rejects-refuse-or-duplicate");
+        chk_lnxci_ck(0, "verify-chain-rejects-loose-unbound-kv");
+        chk_lnxci_ck(0, "verify-chain-rejects-wrong-repo");
+        chk_lnxci_ck(0, "verify-chain-rejects-partial-rc-v3");
+        chk_lnxci_ck(0, "live-qemu-produce-and-rc-verify");
+        chk_lnxci_ck(0, "refuse-native-mode-on-x86_64-host");
+        chk_lnxci_ck(0, "refuse-missing-expect-target");
+        chk_lnxci_ck(0, "refuse-wrong-expect-target");
+        chk_lnxci_ck(0, "refuse-source-as-candidate");
+        chk_lnxci_ck(0, "rc-verify-rejects-tampered-output");
+        chk_lnxci_ck(0, "rc-verify-rejects-tampered-target");
+        chk_lnxci_ck(0, "rc-verify-rejects-mismatched-unit-or-inputs");
+        chk_lnxci_ck(0, "rc-verify-rejects-wrong-producer");
+        chk_lnxci_ck(0, "judge-rejects-duplicate-pass-count-padding");
+    }
+
+    /* 5. Extract real awk validators from .github/workflows/lnx-arm64-native.yml and run positive + negative controls */
+    {
+        unsigned char *wb = 0; int64_t wn = 0;
+        int wf_static = 0, wf_chain_awk = 0, wf_out_awk = 0, wf_rcpt_awk = 0;
+        if (sy_read_file(".github/workflows/lnx-arm64-native.yml", &wb, &wn, 65536) == 0 && wb) {
+            const char *s = (const char *)wb;
+            const char *p_fetch = strstr(s, "\n  fetch:\n");
+            const char *p_prod = strstr(s, "\n  produce:\n");
+            const char *p_judge = strstr(s, "\n  judge:\n");
+            int no_interval = (strstr(s, "{40}") == 0 && strstr(s, "{64}") == 0);
+            int no_generic_cdn = (strstr(s, "objects\\.githubusercontent") == 0 &&
+                                  strstr(s, "release-assets\\.githubusercontent") == 0);
+            wf_static = (strstr(s, "bootstrap-unisacc") == 0 &&
+                         p_fetch != 0 && p_prod != 0 && p_judge != 0 &&
+                         p_fetch < p_prod && p_prod < p_judge &&
+                         no_interval && no_generic_cdn &&
+                         strstr(s, "2>/dev/null || true") == 0 &&
+                         strstr(s, "EXP_CBIND=") != 0 &&
+                         strstr(s, "needs: [fetch, produce]") != 0 &&
+                         strstr(s, "gh release download ") != 0 &&
+                         strstr(s, "--max-redirs 0") != 0 &&
+                         strstr(s, "source_probe=arm64_s2_drv") != 0 &&
+                         strstr(s, "delivered_ape_path=stream_e2_cxsa_valid_s1") != 0);
+            {
+                const char *cb = strstr(s, "# BEGIN_CHAIN_AWK"), *ce = cb ? strstr(cb, "# END_CHAIN_AWK") : 0;
+                if (chk_lnxci_write_span(cb, ce, awk_chain, 1) == 0) {
+                    char body[1024];
+                    char *av_ok[] = {"awk", "-v", "want_rev=dddc083530000000000000000000000000000000",
+                                     "-v", "want_sha=1111111111111111111111111111111111111111111111111111111111111111",
+                                     "-v", "want_repo=partnernetsoftware/unisacc", "-f", awk_chain, chf, 0};
+                    int c1, c2, c3, c4;
+                    cx_fmt(body, sizeof body,
+                           "repo\tcommit\tape_sha256\npartnernetsoftware/unisacc\t%s\t%s\n", rev, cand_sha);
+                    (void)sy_write_file(chf, (const unsigned char *)body, (long)strlen(body), 0600);
+                    c1 = (chk_lnxci_run(av_ok, 15, out, sizeof out) == 0);
+                    cx_fmt(body, sizeof body, "rev\t%s\nape_sha\t%s\n", rev, cand_sha);
+                    (void)sy_write_file(chf, (const unsigned char *)body, (long)strlen(body), 0600);
+                    c2 = (chk_lnxci_run(av_ok, 15, out, sizeof out) != 0);
+                    cx_fmt(body, sizeof body,
+                           "repo\tcommit\tape_sha256\nattacker/fork\t%s\t%s\n", rev, cand_sha);
+                    (void)sy_write_file(chf, (const unsigned char *)body, (long)strlen(body), 0600);
+                    c3 = (chk_lnxci_run(av_ok, 15, out, sizeof out) != 0);
+                    cx_fmt(body, sizeof body,
+                           "version\t3\nrev\t%s\ncandidate_sha\t%s\nrc\t0\nverdict\tPASS\nbinding_sha\t%s\n",
+                           rev, cand_sha, cand_sha);
+                    (void)sy_write_file(chf, (const unsigned char *)body, (long)strlen(body), 0600);
+                    c4 = (chk_lnxci_run(av_ok, 15, out, sizeof out) != 0);
+                    wf_chain_awk = (c1 && c2 && c3 && c4);
+                }
+            }
+            {
+                const char *ob2 = strstr(s, "# BEGIN_OUT_AWK"), *oe2 = ob2 ? strstr(ob2, "# END_OUT_AWK") : 0;
+                if (have_live && chk_lnxci_write_span(ob2, oe2, awk_out, 1) == 0) {
+                const char *ba_allow =
+                    "qemu-aarch64-static-present build-m25-slice build-bind-slice "
+                    "build-driveargs-slice build-forbidden-slot2-slice cross-compile-lnx-arm64-batch-a "
+                    "arm64-m25-s1-173-parity arm64-bind-s1-parity "
+                    "arm64-driveargs-s1-fixture-host-and-pinned-files arm64-fixture-host-forbidden-slot2-enosys";
+                const char *want_s = "CHECK_LNX_ARM64_BATCH_A_S1\tpassed=10\tfailed=0\trunner=qemu\tnative=0\thost_mode=fixture-host\tdriveargs_slots=1,5,6";
+                char *av_op[] = {"awk", "-v", (char *)want_s, "-v", "pass_pfx=PASS\tcheck-lnx-arm64-batch-a-s1.",
+                                 "-v", "skip_pfx=SKIP\tcheck-lnx-arm64-batch-a-s1.",
+                                 "-v", (char *)ba_allow, "-v", "allow_skip=",
+                                 "-v", "want_p=10", "-v", "want_s=0", "-f", awk_out, outf, 0};
+                char *av_on[] = {"awk", "-v", (char *)want_s, "-v", "pass_pfx=PASS\tcheck-lnx-arm64-batch-a-s1.",
+                                 "-v", "skip_pfx=SKIP\tcheck-lnx-arm64-batch-a-s1.",
+                                 "-v", (char *)ba_allow, "-v", "allow_skip=",
+                                 "-v", "want_p=10", "-v", "want_s=0", "-f", awk_out, bad_out, 0};
+                char arg_ws[256], arg_ap[640];
+                cx_fmt(arg_ws, sizeof arg_ws, "want_sum=%s", want_s);
+                cx_fmt(arg_ap, sizeof arg_ap, "allow_pass=%s", ba_allow);
+                av_op[2] = arg_ws; av_op[8] = arg_ap;
+                av_on[2] = arg_ws; av_on[8] = arg_ap;
+                wf_out_awk = (chk_lnxci_run(av_op, 15, out, sizeof out) == 0 &&
+                              chk_lnxci_run(av_on, 15, out, sizeof out) != 0);
+                }
+            }
+            {
+                const char *rb2 = strstr(s, "# BEGIN_RCPT_AWK"), *re2 = rb2 ? strstr(rb2, "# END_RCPT_AWK") : 0;
+                if (have_live && chk_lnxci_write_span(rb2, re2, awk_rcpt, 1) == 0) {
+                unsigned char *cb = 0, *rb = 0, *ob = 0;
+                int64_t cn = 0, rn = 0, on = 0;
+                char c_sha[65], i_sha[65], o_sha[65];
+                char ac[128], ai[128], ao[128], ar[128];
+                c_sha[0] = 0; i_sha[0] = 0; o_sha[0] = 0;
+                if (sy_read_file("./unisacc.com", &cb, &cn, 128 << 20) == 0 && cb) { /* lint:allow R1-product hashes candidate for workflow rcpt awk check */
+                    (void)sy_sha256_hex(cb, cn, c_sha);
+                    mm_free(cb);
+                }
+                if (sy_read_file(outf, &ob, &on, 65536) == 0 && ob) {
+                    (void)sy_sha256_hex(ob, on, o_sha);
+                    mm_free(ob);
+                }
+                if (sy_read_file(rcpt, &rb, &rn, 65536) == 0 && rb) {
+                    const char *p = strstr((char *)rb, "inputs_sha\t");
+                    if (p && strlen(p + 11) >= 64) { mm_copy(i_sha, sizeof i_sha, p + 11, 64); i_sha[64] = 0; }
+                    mm_free(rb);
+                }
+                if (c_sha[0] && i_sha[0] && o_sha[0]) {
+                    cx_fmt(ac, sizeof ac, "csha=%s", c_sha);
+                    cx_fmt(ai, sizeof ai, "isha=%s", i_sha);
+                    cx_fmt(ao, sizeof ao, "osha=%s", o_sha);
+                    cx_fmt(ar, sizeof ar, "rev=%s", rev);
+                    char *av_rp[] = {"awk", "-v", "run_id=r1", "-v", ar, "-v", "unit=batch-a-s1",
+                                     "-v", "target=lnx/x86_64", "-v", "producer=lnx-arm64-native-ci",
+                                     "-v", "purpose=native-ci", "-v", ac, "-v", ai, "-v", ao,
+                                     "-v", "now_ts=1764200060", "-v", "min_ts=1764200000",
+                                     "-f", awk_rcpt, rcpt, 0};
+                    char *av_rn[] = {"awk", "-v", "run_id=r1", "-v", ar, "-v", "unit=batch-a-s1",
+                                     "-v", "target=lnx/x86_64", "-v", "producer=lnx-arm64-native-ci",
+                                     "-v", "purpose=native-ci", "-v", ac, "-v", ai, "-v", ao,
+                                     "-v", "now_ts=1764300000", "-v", "min_ts=1764200000",
+                                     "-f", awk_rcpt, rcpt, 0};
+                    wf_rcpt_awk = (chk_lnxci_run(av_rp, 15, out, sizeof out) == 0 &&
+                                   chk_lnxci_run(av_rn, 15, out, sizeof out) != 0);
+                }
+                }
+            }
+            if (have_live) {
+                char wf_sh[600], bad_bind_rcpt[600], crlf_rcpt[600];
+                const char *vb = strstr(s, "# BEGIN_CHAIN_VERIFY"), *ve = vb ? strstr(vb, "# END_CHAIN_VERIFY") : 0;
+                unsigned char *cb = 0, *rb = 0;
+                int64_t cn = 0, rn = 0;
+                char c_sha[65];
+                int cv_ok = 0;
+                c_sha[0] = 0;
+                cx_fmt(wf_sh, sizeof wf_sh, "%s/wf_chain_verify.sh", tmp);
+                cx_fmt(bad_bind_rcpt, sizeof bad_bind_rcpt, "%s/bad_cbind.rcpt", tmp);
+                cx_fmt(crlf_rcpt, sizeof crlf_rcpt, "%s/crlf.rcpt", tmp);
+                if (sy_read_file("./unisacc.com", &cb, &cn, 128 << 20) == 0 && cb) { /* lint:allow R1-product hashes candidate for workflow fetch shell check */
+                    (void)sy_sha256_hex(cb, cn, c_sha);
+                    mm_free(cb);
+                }
+                if (c_sha[0] && chk_lnxci_write_span(vb, ve, wf_sh, 0) == 0 &&
+                    sy_read_file(rcpt, &rb, &rn, 65536) == 0 && rb && rn > 0) {
+                    int s1 = (chk_lnxci_run_sh_env(wf_sh, rev, c_sha, "partnernetsoftware/unisacc", rcpt) == 0);
+                    int s2 = 0, s3 = 0;
+                    /* Mutate binding_sha (keep valid length/hex, wrong digest) */
+                    char *bp = strstr((char *)rb, "binding_sha\t");
+                    if (bp && strlen(bp + 12) >= 64) {
+                        char orig = bp[12];
+                        bp[12] = (orig == 'a' ? 'b' : 'a');
+                        (void)sy_write_file(bad_bind_rcpt, rb, (long)rn, 0600);
+                        s2 = (chk_lnxci_run_sh_env(wf_sh, rev, c_sha, "partnernetsoftware/unisacc", bad_bind_rcpt) != 0);
+                        bp[12] = orig;
+                    }
+                    /* Inject CRLF on every line (must be refused rather than skipping binding_sha check) */
+                    {
+                        char *cr = (char *)mm_alloc((size_t)rn * 2 + 4);
+                        if (cr) {
+                            long k = 0, p = 0;
+                            for (k = 0; k < rn; k++) {
+                                if (rb[k] == '\n') cr[p++] = '\r';
+                                cr[p++] = (char)rb[k];
+                            }
+                            (void)sy_write_file(crlf_rcpt, (const unsigned char *)cr, p, 0600);
+                            s3 = (chk_lnxci_run_sh_env(wf_sh, rev, c_sha, "partnernetsoftware/unisacc", crlf_rcpt) != 0);
+                            mm_free(cr);
+                        }
+                    }
+                    mm_free(rb);
+                    cv_ok = (s1 && s2 && s3);
+                } else if (rb) {
+                    mm_free(rb);
+                }
+                chk_lnxci_ck(cv_ok, "workflow-live-fetch-chain-verify-pos-bad-binding-and-crlf-neg");
+            } else {
+                chk_lnxci_ck(0, "workflow-live-fetch-chain-verify-pos-bad-binding-and-crlf-neg");
+            }
+            mm_free(wb);
+        }
+        chk_lnxci_ck(wf_static, "workflow-3job-isolation-repo-provenance-and-mawk-portable");
+        chk_lnxci_ck(wf_chain_awk, "workflow-live-chain-awk-pos-and-neg-controls");
+        chk_lnxci_ck(wf_out_awk, "workflow-live-out-awk-rejects-duplicate-count-padding");
+        chk_lnxci_ck(wf_rcpt_awk, "workflow-live-rcpt-awk-pos-and-stale-ts-neg-control");
+    }
+
+    (void)sy_remove_all(tmp);
+    sy_printf("CHECK_LNX_ARM64_NATIVE_CI\tpassed=%d\tfailed=%d\trunner=cross-build\tnative=0\tarm64_ci=UNMEASURED_CI_ONLY\n", g_pass, g_fail);
+    return g_fail ? 1 : 0;
+}

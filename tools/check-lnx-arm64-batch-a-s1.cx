@@ -21,11 +21,14 @@
 #pragma unisa use sys.posix
 #pragma unisa use sys.proc
 #pragma unisa use text.text
+#pragma unisa use cxlib.hostcheck
 #pragma unisa use mem.bytes
 #pragma unisa use mem.heap
 
 static int g_pass = 0;
 static int g_fail = 0;
+static int g_native = 0;
+static const char *g_unisacc = "./unisacc.com"; /* lint:allow R1-product default repo APE when --unisacc is not passed */
 static char g_tmp[512];
 static char g_qemu[512];
 
@@ -63,13 +66,13 @@ static int build_unit_slice(const char *tag, const char *dir, const char *src, c
     if (cx_fmt(out_slice, (size_t)cap, "%s/%s.tapeslice", g_tmp, tag) != 0) return 1;
     if (sy_write_file(cx_p, (const unsigned char *)src, tx_len(src, 16384), 0600) != 0) return 1;
     {
-        char *av1[] = {"sh", "./unisacc.com", "--target", "lnx/x86_64", "-S", cx_p, "-o", tape_p, 0}; /* lint:allow R1-product compiles real batch A unit slice */
+        char *av1[] = {"sh", (char *)g_unisacc, "--target", g_native ? "lnx/arm64" : "lnx/x86_64", "-S", cx_p, "-o", tape_p, 0}; /* lint:allow R1-product compiles real batch A unit slice */
         rc1 = cx_runv_timeout(av1, 30, &co, &cn);
         if (co) { mm_free(co); co = 0; }
         if (rc1 != 0) return 1;
     }
     {
-        char *av2[] = {"sh", "./unisacc.com", "tools/tapepack.cx", "--", tape_p, "-o", out_slice, 0}; /* lint:allow R1-product packs real batch A unit slice */
+        char *av2[] = {"sh", (char *)g_unisacc, "tools/tapepack.cx", "--", tape_p, "-o", out_slice, 0}; /* lint:allow R1-product packs real batch A unit slice */
         rc2 = cx_runv_timeout(av2, 30, &co, &cn);
         if (co) { mm_free(co); co = 0; }
         if (rc2 != 0) return 1;
@@ -85,23 +88,38 @@ static int pack_raw_tape(const char *tag, const char *tape_src, char *out_slice,
     if (cx_fmt(out_slice, (size_t)cap, "%s/%s.tapeslice", g_tmp, tag) != 0) return 1;
     if (sy_write_file(tape_p, (const unsigned char *)tape_src, tx_len(tape_src, 4096), 0600) != 0) return 1;
     {
-        char *av[] = {"sh", "./unisacc.com", "tools/tapepack.cx", "--", tape_p, "-o", out_slice, 0}; /* lint:allow R1-product packs forbidden-slot counter-case slice */
+        char *av[] = {"sh", (char *)g_unisacc, "tools/tapepack.cx", "--", tape_p, "-o", out_slice, 0}; /* lint:allow R1-product packs forbidden-slot counter-case slice */
         rc = cx_runv_timeout(av, 30, &co, &cn);
         if (co) mm_free(co);
         return rc;
     }
 }
 
-int main(void) {
+int main(int argc, char **argv) {
     const char *td = sy_tmpdir();
     char sdir[600];
     char sl_m25[600], sl_bind[600], sl_da[600], sl_forbid2[600];
     char f_shebang[600], f_plain[600];
-    char drv_cx[600], drv_bin[600];
-    int has_q;
+    char drv_cx[600], drv_bin[600], host[64];
+    int has_q = 0;
+
+    for (int i = 1; i < argc; i++) {
+        if (tx_eqz(argv[i], "--native")) g_native = 1;
+        else if (tx_eqz(argv[i], "--unisacc") && i + 1 < argc) g_unisacc = argv[++i];
+        else { sy_eprintf("check-lnx-arm64-batch-a-s1: unknown arg %s\n", argv[i]); return 2; }
+    }
+    if (g_native) {
+        host[0] = 0;
+        hc_host(host, sizeof host);
+        if (!tx_eqz(host, "Linux/arm64")) {
+            sy_eprintf("check-lnx-arm64-batch-a-s1: REFUSE --native requires Linux/arm64 host (got=%s)\n", host[0] ? host : "unknown");
+            return 2;
+        }
+    }
 
     if (cx_fmt(g_tmp, sizeof g_tmp, "%s/unisacc-arm64-batch-a-%d", td ? td : "/tmp", sy_pid()) != 0) {
-        sy_printf("CHECK_LNX_ARM64_BATCH_A_S1\tpassed=0\tfailed=1\trunner=qemu\tnative=0\thost_mode=fixture-host\tdriveargs_slots=1,5,6\n");
+        if (g_native) sy_printf("CHECK_LNX_ARM64_BATCH_A_S1\tpassed=0\tfailed=1\trunner=native\tnative=1\thost_mode=fixture-host\tdriveargs_slots=1,5,6\n");
+        else sy_printf("CHECK_LNX_ARM64_BATCH_A_S1\tpassed=0\tfailed=1\trunner=qemu\tnative=0\thost_mode=fixture-host\tdriveargs_slots=1,5,6\n");
         return 1;
     }
     (void)sy_mkdir(g_tmp, 0700);
@@ -125,8 +143,12 @@ int main(void) {
     (void)sy_write_file(f_shebang, (const unsigned char *)"#!/usr/bin/env unisacc -run\n", 28, 0600);
     (void)sy_write_file(f_plain, (const unsigned char *)"hello plain text\n", 17, 0600);
 
-    has_q = locate_arm64_qemu(g_qemu, sizeof g_qemu);
-    ck(has_q == 1, "qemu-aarch64-static-present");
+    if (g_native) {
+        ck(1, "host-is-lnx-arm64-native");
+    } else {
+        has_q = locate_arm64_qemu(g_qemu, sizeof g_qemu);
+        ck(has_q == 1, "qemu-aarch64-static-present");
+    }
 
     /* 1. Build real m25, bind, driveargs slices + forbidden-slot counter-case slice (slot 2 write) */
     {
@@ -359,19 +381,21 @@ int main(void) {
         cx_fmt(drv_bin, sizeof drv_bin, "%s/arm64_batch_a_drv", g_tmp);
         (void)sy_write_file(drv_cx, (const unsigned char *)hsrc, tx_len(hsrc, 16384), 0600);
         {
-            char *av[] = {"sh", "./unisacc.com", "--target=lnx/arm64", drv_cx, "-o", drv_bin, 0}; /* lint:allow R1-product cross-compiles lnx/arm64 Batch A S1 harness */
+            char *av[] = {"sh", (char *)g_unisacc, "--target=lnx/arm64", drv_cx, "-o", drv_bin, 0}; /* lint:allow R1-product cross-compiles lnx/arm64 Batch A S1 harness */
             rc = cx_runv_timeout(av, 30, &co, &cn);
             if (co) mm_free(co);
         }
         ck(rc == 0 && sy_exists(drv_bin) == 1, "cross-compile-lnx-arm64-batch-a");
     }
 
-    if (has_q && sy_exists(drv_bin) == 1) {
+    if ((g_native || has_q) && sy_exists(drv_bin) == 1) {
         char *av[9];
+        int na = 0;
         char *out = 0; size_t outn = 0; int rc;
-        av[0] = g_qemu; av[1] = drv_bin;
-        av[2] = sl_m25; av[3] = sl_bind; av[4] = sl_da; av[5] = sl_forbid2;
-        av[6] = f_shebang; av[7] = f_plain; av[8] = 0;
+        if (!g_native) av[na++] = g_qemu;
+        av[na++] = drv_bin;
+        av[na++] = sl_m25; av[na++] = sl_bind; av[na++] = sl_da; av[na++] = sl_forbid2;
+        av[na++] = f_shebang; av[na++] = f_plain; av[na] = 0;
         rc = cx_runv_timeout(av, 45, &out, &outn);
         ck(rc == 0 && out && strstr(out, "M25_S1\ttot=173\tok=173") != 0, "arm64-m25-s1-173-parity");
         ck(rc == 0 && out && strstr(out, "BIND_S1\trc=0\tret=0\tnat=0") != 0, "arm64-bind-s1-parity");
@@ -385,6 +409,8 @@ int main(void) {
         ck(0, "arm64-fixture-host-forbidden-slot2-enosys");
     }
 
-    sy_printf("CHECK_LNX_ARM64_BATCH_A_S1\tpassed=%d\tfailed=%d\trunner=qemu\tnative=0\thost_mode=fixture-host\tdriveargs_slots=1,5,6\n", g_pass, g_fail);
+    (void)sy_remove_all(g_tmp);
+    sy_printf("CHECK_LNX_ARM64_BATCH_A_S1\tpassed=%d\tfailed=%d\trunner=%s\tnative=%d\thost_mode=fixture-host\tdriveargs_slots=1,5,6\n",
+              g_pass, g_fail, g_native ? "native" : "qemu", g_native ? 1 : 0);
     return g_fail ? 1 : 0;
 }
