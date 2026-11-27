@@ -320,6 +320,255 @@ int main(void) {
            "headers-38feea2ad3-green-zero-undeclared");
     }
 
+    /* 10. Regression (F): UNISACC_PREFLIGHT_REV and --rev must compile the pinned <rev>, NOT dirty/broken HEAD checkout,
+     *     across BOTH templates and chain-units modes. */
+    {
+        char revfx[320], good_rev[64] = {0}, bad_tpl[512], bad_sig[512];
+        tx_snprintf(revfx, sizeof revfx, "%s/rev-fx", tmp);
+        sy_mkdir_all(revfx, 0700);
+        tx_snprintf(cmd, sizeof cmd,
+            "git archive HEAD cx include ext src cxroot.tsv tools/templates | tar -x -C '%s' && "
+            "cd '%s' && git init -q && git add --all && "
+            "git -c user.name=fx -c user.email=fx@local -c core.hooksPath=/dev/null -c commit.gpgsign=false commit -qm good && "
+            "git rev-parse HEAD", revfx, revfx);
+        int rc_mk = ckk_sh("CHECK_SIXTARGET", cmd, out, sizeof out);
+        size_t oln = strlen(out);
+        const char *sha_ln = out;
+        for (size_t k = oln; k > 0; k--) {
+            if (out[k - 1] == '\n' && k < oln) { sha_ln = out + k; break; }
+        }
+        /* Find 40-hex commit sha from last non-empty line */
+        for (size_t k = 0; k + 40 <= oln; k++) {
+            int hex = 1;
+            for (int j = 0; j < 40; j++) {
+                char ch = out[k + (size_t)j];
+                if (!((ch >= '0' && ch <= '9') || (ch >= 'a' && ch <= 'f'))) { hex = 0; break; }
+            }
+            if (hex && (k + 40 == oln || out[k + 40] == '\n' || out[k + 40] == '\r')) {
+                mm_copy(good_rev, sizeof good_rev, out + k, 40);
+                good_rev[40] = 0;
+            }
+        }
+        (void)sha_ln;
+        st_ck(rc_mk == 0 && strlen(good_rev) == 40, "rev-fixture-created");
+        if (strlen(good_rev) == 40) {
+            tx_snprintf(bad_tpl, sizeof bad_tpl, "%s/tools/templates/whole-front.cx.in", revfx);
+            tx_snprintf(bad_sig, sizeof bad_sig, "%s/cx/runtime/sys/sig.cx", revfx);
+            unsigned char *tb = 0, *sb = 0; int64_t tn = 0, sn = 0;
+            if (sy_read_file(bad_tpl, &tb, &tn, 1 << 20) == 0 && tb && tn > 0) {
+                const char *ap = "\nint _broken_head_tpl(void){return undeclared_bad_head_tpl_fn();}\n";
+                size_t al = strlen(ap);
+                char *nb = (char *)mm_alloc((size_t)tn + al + 1);
+                if (nb) {
+                    mm_copy(nb, (size_t)tn + al + 1, tb, (size_t)tn);
+                    mm_copy(nb + tn, al + 1, ap, al + 1);
+                    sy_write_file(bad_tpl, nb, tn + (int64_t)al, 0600);
+                    mm_free(nb);
+                }
+                mm_free(tb);
+            }
+            if (sy_read_file(bad_sig, &sb, &sn, 1 << 20) == 0 && sb && sn > 0) {
+                const char *ap = "\nint _broken_head_sig(void){return undeclared_bad_head_sig_fn();}\n";
+                size_t al = strlen(ap);
+                char *nb = (char *)mm_alloc((size_t)sn + al + 1);
+                if (nb) {
+                    mm_copy(nb, (size_t)sn + al + 1, sb, (size_t)sn);
+                    mm_copy(nb + sn, al + 1, ap, al + 1);
+                    sy_write_file(bad_sig, nb, sn + (int64_t)al, 0600);
+                    mm_free(nb);
+                }
+                mm_free(sb);
+            }
+            tx_snprintf(cmd, sizeof cmd,
+                "cd '%s' && git add tools/templates/whole-front.cx.in cx/runtime/sys/sig.cx && "
+                "git -c user.name=fx -c user.email=fx@local -c core.hooksPath=/dev/null -c commit.gpgsign=false commit -qm bad",
+                revfx);
+            ckk_sh("CHECK_SIXTARGET", cmd, out, sizeof out);
+
+            char tf1[340], tf2[340], tf3[340], cf1[340], cf2[340], cf3[340];
+            char to1[4096], to2[4096], to3[4096], co1[4096], co2[4096], co3[4096];
+            tx_snprintf(tf1, sizeof tf1, "%s/rt1.out", tmp);
+            tx_snprintf(tf2, sizeof tf2, "%s/rt2.out", tmp);
+            tx_snprintf(tf3, sizeof tf3, "%s/rt3.out", tmp);
+            tx_snprintf(cf1, sizeof cf1, "%s/rc1.out", tmp);
+            tx_snprintf(cf2, sizeof cf2, "%s/rc2.out", tmp);
+            tx_snprintf(cf3, sizeof cf3, "%s/rc3.out", tmp);
+            tx_snprintf(cmd, sizeof cmd,
+                "(cd '%s' && '%s' --mode templates --target win/x86_64 --compiler '%s/unisacc.com' >'%s' 2>&1; printf 'RC=%%d\\n' $? >>'%s') & "
+                "(cd '%s' && UNISACC_PREFLIGHT_REV='%s' '%s' --mode templates --target win/x86_64 --compiler '%s/unisacc.com' >'%s' 2>&1; printf 'RC=%%d\\n' $? >>'%s') & "
+                "('%s' --mode templates --root '%s' --rev '%s' --target win/x86_64 --compiler '%s/unisacc.com' >'%s' 2>&1; printf 'RC=%%d\\n' $? >>'%s') & "
+                "wait",
+                revfx, stbin, root, tf1, tf1,
+                revfx, good_rev, stbin, root, tf2, tf2,
+                stbin, revfx, good_rev, root, tf3, tf3);
+            ckk_sh("CHECK_SIXTARGET", cmd, out, sizeof out);
+            tx_snprintf(cmd, sizeof cmd,
+                "(cd '%s' && '%s' --mode chain-units --filter cx/runtime/sys/sig.cx --target win/x86_64 --compiler '%s/unisacc.com' >'%s' 2>&1; printf 'RC=%%d\\n' $? >>'%s') & "
+                "(cd '%s' && UNISACC_PREFLIGHT_REV='%s' '%s' --mode chain-units --filter cx/runtime/sys/sig.cx --target win/x86_64 --compiler '%s/unisacc.com' >'%s' 2>&1; printf 'RC=%%d\\n' $? >>'%s') & "
+                "('%s' --mode chain-units --root '%s' --rev '%s' --filter cx/runtime/sys/sig.cx --target win/x86_64 --compiler '%s/unisacc.com' >'%s' 2>&1; printf 'RC=%%d\\n' $? >>'%s') & "
+                "wait",
+                revfx, stbin, root, cf1, cf1,
+                revfx, good_rev, stbin, root, cf2, cf2,
+                stbin, revfx, good_rev, root, cf3, cf3);
+            ckk_sh("CHECK_SIXTARGET", cmd, out, sizeof out);
+
+            const char *fpaths[6] = { tf1, tf2, tf3, cf1, cf2, cf3 };
+            char *fbufs[6] = { to1, to2, to3, co1, co2, co3 };
+            for (int fi = 0; fi < 6; fi++) {
+                unsigned char *fb = 0; int64_t fn = 0;
+                memset(fbufs[fi], 0, 4096);
+                if (sy_read_file(fpaths[fi], &fb, &fn, 65536) == 0 && fb) {
+                    mm_copy(fbufs[fi], 4095, fb, (size_t)(fn < 4095 ? fn : 4095));
+                    mm_free(fb);
+                }
+            }
+
+            st_ck(ckk_has(to1, sizeof to1, "RC=1\n") &&
+                  ckk_has(to1, sizeof to1, "undeclared_bad_head_tpl_fn"),
+                  "templates-head-checkout-fails-without-rev");
+            st_ck(ckk_has(to2, sizeof to2, "RC=0\n") &&
+                  ckk_has(to2, sizeof to2, "SIXTARGET_SUMMARY\tmode=templates\ttargets=1\tchecked=2\tfailed=0\t") &&
+                  ckk_has(to2, sizeof to2, "\tverdict=PASS\n"),
+                  "templates-env-rev-compiles-rev-not-checkout");
+            st_ck(ckk_has(to3, sizeof to3, "RC=0\n") &&
+                  ckk_has(to3, sizeof to3, "\tverdict=PASS\n"),
+                  "templates-cli-rev-compiles-rev-not-checkout");
+            st_ck(ckk_has(co1, sizeof co1, "RC=1\n") &&
+                  ckk_has(co1, sizeof co1, "undeclared_bad_head_sig_fn"),
+                  "chain-units-head-checkout-fails-without-rev");
+            st_ck(ckk_has(co2, sizeof co2, "RC=0\n") &&
+                  ckk_has(co2, sizeof co2, "SIXTARGET_OK\ttarget=win/x86_64\tunit=cx/runtime/sys/sig.cx\t") &&
+                  ckk_has(co2, sizeof co2, "\tverdict=PASS\n"),
+                  "chain-units-env-rev-compiles-rev-not-checkout");
+            st_ck(ckk_has(co3, sizeof co3, "RC=0\n") &&
+                  ckk_has(co3, sizeof co3, "SIXTARGET_OK\ttarget=win/x86_64\tunit=cx/runtime/sys/sig.cx\t") &&
+                  ckk_has(co3, sizeof co3, "\tverdict=PASS\n"),
+                  "chain-units-cli-rev-compiles-rev-not-checkout");
+        }
+    }
+
+    /* 11. Worker killed / missing output must fail loudly and count toward checked and failed (never silent pass) */
+    {
+        char kill_wrap[320];
+        tx_snprintf(kill_wrap, sizeof kill_wrap, "%s/kill-worker-wrap.sh", tmp);
+        const char *kbody =
+            "#!/bin/sh\n"
+            "kill -9 $PPID 2>/dev/null || true\n"
+            "exit 1\n";
+        if (sy_write_file(kill_wrap, kbody, (int64_t)strlen(kbody), 0755) == 0) {
+            sy_chmod(kill_wrap, 0755);
+            tx_snprintf(cmd, sizeof cmd, "%s --mode files --file %s --target lnx/x86_64 --compiler %s", stbin, good_cx, kill_wrap);
+            st_ck(ckk_sh("CHECK_SIXTARGET", cmd, out, sizeof out) == 1 &&
+                  ckk_has(out, sizeof out, "SIXTARGET_FAIL\ttarget=lnx/x86_64\t") &&
+                  ckk_has(out, sizeof out, "diag=worker-signaled\n") &&
+                  ckk_has(out, sizeof out, "SIXTARGET_SUMMARY\tmode=files\ttargets=1\tchecked=1\tfailed=1\t") &&
+                  ckk_has(out, sizeof out, "\tverdict=FAIL\n"),
+                  "files-signaled-worker-counted-as-fail");
+
+            tx_snprintf(cmd, sizeof cmd, "%s --mode templates --target lnx/x86_64 --compiler %s", stbin, kill_wrap);
+            st_ck(ckk_sh("CHECK_SIXTARGET", cmd, out, sizeof out) == 1 &&
+                  ckk_has(out, sizeof out, "SIXTARGET_FAIL\ttarget=lnx/x86_64\tunit=tools/templates/") &&
+                  ckk_has(out, sizeof out, "diag=worker-signaled\n") &&
+                  ckk_has(out, sizeof out, "SIXTARGET_SUMMARY\tmode=templates\ttargets=1\tchecked=2\tfailed=2\t") &&
+                  ckk_has(out, sizeof out, "\tverdict=FAIL\n"),
+                  "templates-signaled-worker-counted-as-fail");
+        }
+    }
+
+    /* 12. 1-to-1 (target, unit) identity bijection: reject duplicate, unknown, wrong-target, or extra lines even when OK count == expect_n */
+    {
+        unsigned char *stsrc = 0;
+        int64_t stlen = 0;
+        if (sy_read_file("tools/sixtarget-precompile.cx", &stsrc, &stlen, 1 << 20) == 0 && stsrc && stlen > 0) {
+            long bpos = tx_find((const char *)stsrc, (long)stlen, "/* ST_COLLECT_BEGIN */", 22);
+            long epos = tx_find((const char *)stsrc, (long)stlen, "/* ST_COLLECT_END */", 20);
+            if (bpos >= 0 && epos > bpos) {
+                char hcx[320], hbin[320], hf1[320], hf2[320], hf3[320], hf4[320], hf5[320];
+                char lcx_s[2100], lcx_d[320], lcr_s[2100], lcr_d[320];
+                tx_snprintf(lcx_s, sizeof lcx_s, "%s/cx", root);
+                tx_snprintf(lcx_d, sizeof lcx_d, "%s/cx", tmp);
+                tx_snprintf(lcr_s, sizeof lcr_s, "%s/cxroot.tsv", root);
+                tx_snprintf(lcr_d, sizeof lcr_d, "%s/cxroot.tsv", tmp);
+                sy_symlink(lcx_s, lcx_d);
+                sy_symlink(lcr_s, lcr_d);
+                tx_snprintf(hcx, sizeof hcx, "%s/collect_harness.cx", tmp);
+                tx_snprintf(hbin, sizeof hbin, "%s/collect_harness.bin", tmp);
+                tx_snprintf(hf1, sizeof hf1, "%s/col1.txt", tmp);
+                tx_snprintf(hf2, sizeof hf2, "%s/col2.txt", tmp);
+                tx_snprintf(hf3, sizeof hf3, "%s/col3.txt", tmp);
+                tx_snprintf(hf4, sizeof hf4, "%s/col4.txt", tmp);
+                tx_snprintf(hf5, sizeof hf5, "%s/col5.txt", tmp);
+                const char *hdr =
+                    "#pragma unisa use sys.fs\n"
+                    "#pragma unisa use sys.posix\n"
+                    "#pragma unisa use mem.bytes\n"
+                    "#pragma unisa use mem.heap\n"
+                    "#pragma unisa use text.text\n";
+                const char *main_code =
+                    "\nint main(void) {\n"
+                    "    const char *exp[2] = { \"a.cx\", \"b.cx\" };\n"
+                    "    int c = 0, f = 0;\n"
+                    "    c = 0; f = 0; st_collect_worker_out(\"__HF1__\", 0, 1, 0, \"lnx/x86_64\", exp, 2, 0, &c, &f);\n"
+                    "    printf(\"CASE1 c=%d f=%d\\n\", c, f);\n"
+                    "    c = 0; f = 0; st_collect_worker_out(\"__HF2__\", 0, 1, 0, \"lnx/x86_64\", exp, 2, 0, &c, &f);\n"
+                    "    printf(\"CASE2 c=%d f=%d\\n\", c, f);\n"
+                    "    c = 0; f = 0; st_collect_worker_out(\"__HF3__\", 0, 1, 0, \"lnx/x86_64\", exp, 2, 0, &c, &f);\n"
+                    "    printf(\"CASE3 c=%d f=%d\\n\", c, f);\n"
+                    "    c = 0; f = 0; st_collect_worker_out(\"__HF4__\", 0, 1, 0, \"lnx/x86_64\", exp, 2, 0, &c, &f);\n"
+                    "    printf(\"CASE4 c=%d f=%d\\n\", c, f);\n"
+                    "    c = 0; f = 0; st_collect_worker_out(\"__HF5__\", 0, 1, 0, \"lnx/x86_64\", exp, 2, 0, &c, &f);\n"
+                    "    printf(\"CASE5 c=%d f=%d\\n\", c, f);\n"
+                    "    return 0;\n"
+                    "}\n";
+                size_t slen = (size_t)(epos - bpos);
+                size_t hcap = strlen(hdr) + slen + strlen(main_code) + 2048;
+                char *hbuf = (char *)mm_alloc(hcap);
+                if (hbuf) {
+                    /* Replace placeholders __HF1__..__HF5__ cleanly */
+                    size_t hp = 0;
+                    mm_copy(hbuf + hp, hcap - hp, hdr, strlen(hdr)); hp += strlen(hdr);
+                    mm_copy(hbuf + hp, hcap - hp, stsrc + bpos, slen); hp += slen;
+                    const char *mp = main_code;
+                    while (*mp && hp + 512 < hcap) {
+                        if (memcmp(mp, "__HF1__", 7) == 0) { size_t l = strlen(hf1); mm_copy(hbuf + hp, hcap - hp, hf1, l); hp += l; mp += 7; }
+                        else if (memcmp(mp, "__HF2__", 7) == 0) { size_t l = strlen(hf2); mm_copy(hbuf + hp, hcap - hp, hf2, l); hp += l; mp += 7; }
+                        else if (memcmp(mp, "__HF3__", 7) == 0) { size_t l = strlen(hf3); mm_copy(hbuf + hp, hcap - hp, hf3, l); hp += l; mp += 7; }
+                        else if (memcmp(mp, "__HF4__", 7) == 0) { size_t l = strlen(hf4); mm_copy(hbuf + hp, hcap - hp, hf4, l); hp += l; mp += 7; }
+                        else if (memcmp(mp, "__HF5__", 7) == 0) { size_t l = strlen(hf5); mm_copy(hbuf + hp, hcap - hp, hf5, l); hp += l; mp += 7; }
+                        else hbuf[hp++] = *mp++;
+                    }
+                    hbuf[hp] = 0;
+                    sy_write_file(hcx, hbuf, (int64_t)hp, 0600);
+                    mm_free(hbuf);
+
+                    const char *c1 = "SIXTARGET_OK\ttarget=lnx/x86_64\tunit=a.cx\tms=1\nSIXTARGET_OK\ttarget=lnx/x86_64\tunit=b.cx\tms=1\n";
+                    const char *c2 = "SIXTARGET_OK\ttarget=lnx/x86_64\tunit=a.cx\tms=1\nSIXTARGET_OK\ttarget=lnx/x86_64\tunit=a.cx\tms=1\n";
+                    const char *c3 = "SIXTARGET_OK\ttarget=lnx/x86_64\tunit=a.cx\tms=1\nSIXTARGET_OK\ttarget=lnx/x86_64\tunit=evil.cx\tms=1\n";
+                    const char *c4 = "SIXTARGET_OK\ttarget=lnx/x86_64\tunit=a.cx\tms=1\nSIXTARGET_OK\ttarget=osx/arm64\tunit=b.cx\tms=1\n";
+                    const char *c5 = "SIXTARGET_OK\ttarget=lnx/x86_64\tunit=a.cx\tms=1\nSIXTARGET_OK\ttarget=lnx/x86_64\tunit=b.cx\tms=1\nSIXTARGET_OK\ttarget=lnx/x86_64\tunit=b.cx\tms=1\n";
+                    sy_write_file(hf1, c1, (int64_t)strlen(c1), 0600);
+                    sy_write_file(hf2, c2, (int64_t)strlen(c2), 0600);
+                    sy_write_file(hf3, c3, (int64_t)strlen(c3), 0600);
+                    sy_write_file(hf4, c4, (int64_t)strlen(c4), 0600);
+                    sy_write_file(hf5, c5, (int64_t)strlen(c5), 0600);
+
+                    tx_snprintf(cmd, sizeof cmd, "sh ./unisacc.com -o '%s' '%s' && '%s'", hbin, hcx, hbin);
+                    int rc_bi = ckk_sh("CHECK_SIXTARGET", cmd, out, sizeof out);
+                    st_ck(rc_bi == 0 &&
+                          ckk_has(out, sizeof out, "CASE1 c=2 f=0\n") &&
+                          ckk_has(out, sizeof out, "CASE2 c=3 f=2\n") &&
+                          ckk_has(out, sizeof out, "CASE3 c=3 f=2\n") &&
+                          ckk_has(out, sizeof out, "CASE4 c=3 f=2\n") &&
+                          ckk_has(out, sizeof out, "CASE5 c=3 f=1\n") &&
+                          ckk_has(out, sizeof out, "diag=worker-unexpected-or-duplicate-unit\n") &&
+                          ckk_has(out, sizeof out, "diag=worker-unexpected-target\n"),
+                          "worker-bijection-rejects-dup-unknown-wrongtarget-extra");
+                }
+            }
+            mm_free(stsrc);
+        }
+    }
+
     /* Cleanup */
     tx_snprintf(cmd, sizeof cmd, "rm -rf %s", tmp);
     ckk_sh("CHECK_SIXTARGET", cmd, out, sizeof out);

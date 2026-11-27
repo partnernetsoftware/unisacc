@@ -506,33 +506,56 @@ static int start_preflight(const char *only, const char *rev) {
     }
     return 0;
 }
-/* chain-preflight.cx bounds each node to its table timeout_s (<=55s) via tools/bound; total gate <=180s */
-static int start_chain_preflight(const char *rev) {
+static int run_chain_preflight_step(const char *rev, const char *shard, int prepare_only) {
     char *v[16]; int k = 0, node_timeout_bounded = 1;
     (void)node_timeout_bounded;
-    v[k++] = "sh"; v[k++] = "./unisacc.com"; v[k++] = "tools/chain-preflight.cx"; v[k++] = "--";
-    v[k++] = "--strict"; v[k++] = "--root"; v[k++] = root; v[k++] = "--repo"; v[k++] = root;
-    v[k++] = "--rev"; v[k++] = (char *)rev;
-    if (preflight_table) { v[k++] = "--table"; v[k++] = (char *)preflight_table; }
+    v[k++] = "sh"; v[k++] = "./unisacc.com"; /* lint:allow R1-product preflight sub-shard runner from ROOT */
+    v[k++] = "tools/chain-preflight.cx"; v[k++] = "--";
+    if (prepare_only) {
+        v[k++] = "--prepare-snap-tools"; v[k++] = "--repo"; v[k++] = root;
+    } else {
+        v[k++] = "--strict"; v[k++] = "--root"; v[k++] = root; v[k++] = "--repo"; v[k++] = root;
+        v[k++] = "--rev"; v[k++] = (char *)rev;
+        if (shard && shard[0]) { v[k++] = "--shard"; v[k++] = (char *)shard; }
+        if (preflight_table) { v[k++] = "--table"; v[k++] = (char *)preflight_table; }
+    }
     v[k] = 0;
-    char out[16384]; long n = 0, r, at = 0; int fd = -1, pid, ex = 0, code = 0, sig = 0, pass = 0;
+    char out[32768]; long n = 0, r, at = 0; int fd = -1, pid, ex = 0, code = 0, sig = 0, pass = 0, prep_ok = 0;
     pid = sy_spawn_pipe(v, 0, 0, &fd, 0);
-    if (pid < 0 || fd < 0) { sy_printf("BG_CANDIDATE\tREFUSE\treason=chain-preflight-not-started\troot=%s\n", root); return 1; }
+    if (pid < 0 || fd < 0) {
+        if (!prepare_only) sy_printf("BG_CANDIDATE\tREFUSE\treason=chain-preflight-not-started\troot=%s\n", root);
+        return 1;
+    }
     while (n < (long)sizeof out - 1 && (r = sy_read(fd, out + n, sizeof out - 1 - (size_t)n)) > 0) n += r;
     out[n] = 0; sy_close(fd);
     sy_wait_status(pid, 0, &ex, &code, &sig);
     while (at < n) {
         long e = tx_chr(out + at, n - at, '\n'), ln = e < 0 ? n - at : e;
-        if (tx_prefix(out + at, ln, "CHAIN_PREFLIGHT\t", 16) && tx_find(out + at, ln, "\tverdict=PASS\t", 14) >= 0) pass = 1;
-        if (tx_prefix(out + at, ln, "PREFLIGHT_ITEM\t", 15) && tx_find(out + at, ln, "\tFAIL\t", 6) >= 0)
-            sy_printf("BG_CANDIDATE\tREFUSE-ITEM\t%.*s\n", (int)ln, out + at);
+        if (prepare_only) {
+            if (tx_prefix(out + at, ln, "PREFLIGHT_PREPARE\t", 18) && tx_find(out + at, ln, "\tstatus=PREPARED\t", 17) >= 0) prep_ok = 1;
+        } else {
+            if (tx_prefix(out + at, ln, "CHAIN_PREFLIGHT\t", 16) && tx_find(out + at, ln, "\tverdict=PASS\t", 14) >= 0) pass = 1;
+            if (tx_prefix(out + at, ln, "PREFLIGHT_ITEM\t", 15) && tx_find(out + at, ln, "\tFAIL\t", 6) >= 0)
+                sy_printf("BG_CANDIDATE\tREFUSE-ITEM\t%.*s\n", (int)ln, out + at);
+        }
         at += ln + 1;
     }
+    if (prepare_only) return (prep_ok && ex && code == 0) ? 0 : 1;
     if (!pass || !ex || code != 0) {
         sy_printf("BG_CANDIDATE\tREFUSE\treason=chain-preflight\troot=%s\trev=%s\trc=%d\tfix: sh ./unisacc.com tools/chain-preflight.cx -- --strict --root %s --rev %s\n",
                   root, rev, ex ? code : -1, root, rev);
         return 1;
     }
+    return 0;
+}
+/* chain-preflight.cx bounds each node to its table timeout_s (<=55s) and limits-table concurrency; run prepare-snap-tools first, then snap and sixtarget shards cleanly like chain-ready. */
+static int start_chain_preflight(const char *rev) {
+    char cc_path[BG_PATH];
+    if (!join(cc_path, root, "tools/candidate-chain.cx") && sy_exists(cc_path) == 1) {
+        (void)run_chain_preflight_step(rev, 0, 1);
+    }
+    if (run_chain_preflight_step(rev, "snap", 0)) return 1;
+    if (run_chain_preflight_step(rev, "sixtarget", 0)) return 1;
     return 0;
 }
 static int cmd_start(const char *rev, const char *chain, long deadline_s, long segment_s, long segments, char **extra, int nextra) {
@@ -547,8 +570,7 @@ static int cmd_start(const char *rev, const char *chain, long deadline_s, long s
        and FAILs (not UNMEASURED) when neither sy_disk_avail_mb nor the bounded df answers, so a chain is
        not started on a disk nobody could measure. It runs before any chain directory is allocated, and
        --only is a prefix match, so the item is named in full. */
-    if (start_preflight("12", 0) || start_preflight("11", 0) || start_preflight("18", rev)
-        || start_preflight("16-disk-free", rev)) return 1;
+    if (start_preflight("12", 0) || start_preflight("11,20-ident-helper,18,16-disk-free", rev)) return 1;
     if ((!chain || preflight_table) && start_chain_preflight(rev)) return 1;
     if (!chain) {
         char p[BG_PATH];
