@@ -19,9 +19,12 @@
  * --allow FILE is a unit list, one basename per line. Any unit outside the list
  * that carries a copy fails the ratchet (exit 1). Blank lines and # comments skip.
  *
- * No arguments: a fixture proves the delta and the allow refusal, then prints
- * STDIO_COPIES and two PASS lines. Exit 0 only when the fixture passes, or a scan
- * has no ratchet failure.
+ * No arguments: a fixture proves the delta, the allow refusal, and a red-first
+ * outsider (not-on-list.o against an allow list of m21.o only), then prints
+ * STDIO_COPIES. tests/cxlibc.cx --check already runs this no-arg entry.
+ * --check is the ratchets.cx entry and does not repeat that call: it scans
+ * chain 9e2ac4df6 (or UNISACC_STDIO_CHAIN) against build/stdio-copies-allow.tsv.
+ * A missing chain prints ok: skipped (no chain).
 
  */
 #pragma unisa use sys.fs
@@ -330,10 +333,16 @@ static int sc_self(void) {
     if (sc_parse(nm, (long)tx_len(nm, 400), 0x60) != -1) { fprintf(stderr, "stdio-copies: last\n"); return 1; }
     if (sc_add("lnx-x86_64", "extra.o", 16, 0)) return 1;
     if (sc_allowed("extra.o", 0, 0)) { fprintf(stderr, "stdio-copies: allow\n"); return 1; }
+    {   char *one[1];
+        one[0] = "m21.o";
+        if (sc_allowed("not-on-list.o", one, 1)) { fprintf(stderr, "stdio-copies: red-first\n"); return 1; }
+        if (!sc_allowed("m21.o", one, 1)) { fprintf(stderr, "stdio-copies: red-first listed\n"); return 1; }
+    }
     printf("PASS\tstdio-copies.delta\n");
     printf("PASS\tstdio-copies.alias\n");
     printf("PASS\tstdio-copies.last\n");
     printf("PASS\tstdio-copies.allow\n");
+    printf("PASS\tstdio-copies.red-first\n");
     printf("STDIO_COPIES\tfixture\n");
     return 0;
 }
@@ -378,6 +387,7 @@ int main(int argc, char **argv) {
     const char *opt_out = 0;
     char *allow[256];
     int nallow = -1;
+    int docheck = 0;
     int i, rc;
     for (i = 1; i < argc; i = i + 1) {
         if (tx_eq(argv[i], "--judge-receipt", 20) && i + 2 < argc) {
@@ -398,7 +408,31 @@ int main(int argc, char **argv) {
         if (tx_eq(argv[i], "--target", 16)) { only = argv[i + 1]; i = i + 1; continue; }
         if (tx_eq(argv[i], "--run-id", 16)) { sc_run_id = argv[i + 1]; i = i + 1; continue; }
         if (tx_eq(argv[i], "--out", 16)) { opt_out = argv[i + 1]; i = i + 1; continue; }
+        if (tx_eq(argv[i], "--check", 16)) { docheck = 1; continue; }
         if (argv[i][0] != '-') chain = argv[i];
+    }
+    if (docheck) {
+        const char *home;
+        char chainb[512];
+        allow_path = "build/stdio-copies-allow.tsv";
+        nallow = 0;
+        if (sc_load_allow(allow_path, allow, &nallow)) { fprintf(stderr, "stdio-copies: allow file\n"); return 2; }
+        chain = sy_env("UNISACC_STDIO_CHAIN");
+        if (!chain || !chain[0]) {
+            home = sy_env("HOME");
+            if (!home || cx_fmt(chainb, sizeof chainb, "%s/.cache/unisacc/chains/bg-b1/9e2ac4df65f92ef394d1a6f122730d3ed942b809", home)) {
+                printf("stdio-copies: ok: skipped (no chain)\n");
+                return 0;
+            }
+            chain = chainb;
+        }
+        if (sy_exists(chain) != 1) { printf("stdio-copies: ok: skipped (no chain)\n"); return 0; }
+        rc = sc_scan(chain, allow, nallow, 0);
+        if (rc) { printf("stdio-copies: FAIL: scan\n"); return rc; }
+        sc_report();
+        if (sc_fail) { printf("stdio-copies: FAIL: unit outside allow\n"); return 1; }
+        printf("stdio-copies: ok: allow\n");
+        return 0;
     }
     if (!chain && !objdir) return sc_self();
     if (allow_path) {
