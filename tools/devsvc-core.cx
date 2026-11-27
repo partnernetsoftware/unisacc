@@ -4273,6 +4273,262 @@ release:
 static int git_full_oid(const char *id) {
     return strlen(id) == 40 && strspn(id, "0123456789abcdef") == 40;
 }
+static int cv_ready, cv_committed, cv_commit_rc, cv_push_rc;
+static char cv_sha[64], cv_ref_hint[200], cv_ref[200], cv_work[PW], cv_ref_before[64], cv_ref_after[64], cv_base[64], cv_reason[32];
+static int cv_is_git_commit, cv_skip_verdict;
+static int bg_defer_job_line;
+static int git_branch_name(const char *work, char *br, size_t cap) {
+    char *bv[] = {"git", "-C", (char *)work, "symbolic-ref", "--short", "-q", "HEAD", 0};
+    if (!br || cap < 2) return -1;
+    br[0] = 0;
+    if (runcap(bv, br, cap) != 0) { br[0] = 0; return -1; }
+    chomp(br);
+    return br[0] ? 0 : -1;
+}
+static int git_cat_commit(const char *work, const char *sha) {
+    char tp[32];
+    if (!git_full_oid(sha)) return 0;
+    {   char *cv[] = {"git", "-C", (char *)work, "cat-file", "-t", (char *)sha, 0};
+        if (runcap(cv, tp, sizeof tp) != 0) return 0; }
+    chomp(tp);
+    return !strcmp(tp, "commit");
+}
+static int commit_parent_ok(const char *work, const char *sha, const char *ref_before, const char *landed_base) {
+    char p1[64], spec[80];
+    if (!work || !work[0] || !git_full_oid(sha) || !ref_before || !git_full_oid(ref_before)) return 0;
+    if (!strcmp(sha, ref_before)) return 0;
+    if (cx_fmt(spec, sizeof spec, "%s^1", sha)) return 0;
+    if (mg_rev(work, spec, p1, sizeof p1) != 0 || !git_full_oid(p1)) return 0;
+    if (!strcmp(p1, ref_before)) return 1;
+    if (landed_base && git_full_oid(landed_base) && !strcmp(p1, landed_base) && mg_anc(work, ref_before, landed_base)) return 1;
+    return 0;
+}
+/* Live bind check at commit completion: requires recorded branch_hint & ref_before,
+   refs/heads/<branch_hint> == sha, object is commit, and parent matches ref_before (or CAS base). */
+static int commit_bind_verify(const char *work, const char *branch_hint, const char *ref_before, const char *landed_base,
+                              const char *sha, char *out_ref, size_t cap, char *out_after, size_t acap,
+                              char *out_why, size_t wcap) {
+    char br[200], spec[240], got[64];
+    if (branch_hint && branch_hint[0]) {
+        if (cx_fmt(br, sizeof br, "%s", branch_hint)) {
+            if (out_why && wcap > 0) (void)cx_fmt(out_why, wcap, "unbound");
+            return 0;
+        }
+    } else {
+        br[0] = 0;
+    }
+    if (out_ref && cap > 0) out_ref[0] = 0;
+    if (out_after && acap > 0) out_after[0] = 0;
+    if (out_why && wcap > 0) out_why[0] = 0;
+    if (!work || !work[0] || !br[0] || !ref_before || !git_full_oid(ref_before)) {
+        if (out_why && wcap > 0) (void)cx_fmt(out_why, wcap, "unbound");
+        return 0;
+    }
+    if (!git_full_oid(sha)) {
+        if (out_why && wcap > 0) (void)cx_fmt(out_why, wcap, "ref-mismatch");
+        return 0;
+    }
+    if (cx_fmt(spec, sizeof spec, "refs/heads/%s", br) ||
+        mg_rev(work, spec, got, sizeof got) != 0 || !git_full_oid(got)) {
+        if (out_why && wcap > 0) (void)cx_fmt(out_why, wcap, "ref-mismatch");
+        return 0;
+    }
+    if (strcmp(got, sha) != 0 || !git_cat_commit(work, sha) || !strcmp(sha, ref_before)) {
+        if (out_why && wcap > 0) (void)cx_fmt(out_why, wcap, "ref-mismatch");
+        return 0;
+    }
+    if (!commit_parent_ok(work, sha, ref_before, landed_base)) {
+        if (out_why && wcap > 0) (void)cx_fmt(out_why, wcap, "unbound");
+        return 0;
+    }
+    if (out_after && acap > 0 && cx_fmt(out_after, acap, "%s", got)) out_after[0] = 0;
+    if (out_ref && cap > 0 && cx_fmt(out_ref, cap, "%s", br)) out_ref[0] = 0;
+    return 1;
+}
+static int commit_tip_contains(const char *work, const char *ref, const char *sha) {
+    char spec[240], tip[64];
+    if (!work || !work[0] || !ref || !ref[0] || !git_full_oid(sha)) return 0;
+    if (cx_fmt(spec, sizeof spec, "refs/heads/%s", ref)) return 0;
+    if (mg_rev(work, spec, tip, sizeof tip) != 0 || !git_full_oid(tip)) return 0;
+    if (!strcmp(tip, sha)) return 1;
+    return mg_anc(work, sha, tip);
+}
+static void commit_result_emit(const char *job_id, int rc) {
+    const char *jid = (job_id && job_id[0]) ? job_id : "-";
+    if (cv_ready && cv_committed) {
+        int tc = commit_tip_contains(cv_work, cv_ref, cv_sha);
+        printf("COMMIT_RESULT\tCOMMITTED\tsha=%s\tref=%s\tjob=%s\ttip_contains=%s\n", cv_sha, cv_ref, jid, tc ? "yes" : "no");
+    } else if (cv_ready) {
+        printf("COMMIT_RESULT\tNOT_COMMITTED\treason=%s\tjob=%s\n", cv_reason[0] ? cv_reason : "blocked", jid);
+    } else {
+        const char *why = rc == 124 ? "timeout" : rc == 2 ? "refused" : "blocked";
+        printf("COMMIT_RESULT\tNOT_COMMITTED\treason=%s\tjob=%s\n", why, jid);
+    }
+}
+static int commit_receipt_write(const char *jd, const char *job_id, int rc) {
+    char p[PW + 32], buf[4096];
+    const char *jid = (job_id && job_id[0]) ? job_id : "-";
+    const char *st = (cv_ready && cv_committed) ? "COMMITTED" : "NOT_COMMITTED";
+    const char *why = !strcmp(st, "COMMITTED") ? (cv_push_rc ? "push-failed" : "ok")
+                      : (cv_ready && cv_reason[0]) ? cv_reason : (rc == 124 ? "timeout" : rc == 2 ? "refused" : "blocked");
+    const char *rsha = !strcmp(st, "COMMITTED") ? cv_sha : "none";
+    int crc = !strcmp(st, "COMMITTED") ? 0 : (cv_commit_rc ? cv_commit_rc : (rc ? rc : 1));
+    if (!jd || !jd[0] || cx_fmt(p, sizeof p, "%s/commit-receipt.tsv", jd)) return -1;
+    if (cx_fmt(buf, sizeof buf, "state\t%s\nrc\t%d\ncommit_rc\t%d\npush_rc\t%d\nsha\t%s\nwork\t%s\nref\t%s\nref_before\t%s\nref_after\t%s\nbase\t%s\nreason\t%s\njob\t%s\n",
+               st, rc, crc, cv_push_rc, rsha, cv_work[0] ? cv_work : "-", !strcmp(st, "COMMITTED") && cv_ref[0] ? cv_ref : "-",
+               cv_ref_before[0] ? cv_ref_before : "-", !strcmp(st, "COMMITTED") && cv_ref_after[0] ? cv_ref_after : "-",
+               cv_base[0] ? cv_base : "-", why, jid)) return -1;
+    return sy_write_atomic(p, buf, strlen(buf), 0644) == 0 ? 0 : -1;
+}
+static void kv_read_buf(const char *buf, long n, const char *key, char *dst, size_t cap) {
+    long klen = (long)strlen(key), a, z;
+    if (!dst || cap < 1) return;
+    dst[0] = 0;
+    if (!buf || n <= 0) return;
+    for (a = 0; a < n; a = z + 1) {
+        z = a; while (z < n && buf[z] != '\n') z++;
+        if (z - a > klen + 1 && !memcmp(buf + a, key, (size_t)klen) && buf[a + klen] == '\t') {
+            long v = a + klen + 1, e = z;
+            while (e > v && buf[e - 1] == '\r') e--;
+            {   size_t cp = (size_t)(e - v); if (cp >= cap) cp = cap - 1;
+                if (cp > 0) mm_copy(dst, cap, buf + v, cp);
+                dst[cp] = 0; }
+            break;
+        }
+    }
+}
+static int strict_parse_int(const char *s, int *out) {
+    long v = 0; int neg = 0, i = 0, digs = 0;
+    if (!s || !s[0] || !out) return -1;
+    if (s[i] == '-') { neg = 1; i++; }
+    while (s[i] >= '0' && s[i] <= '9') {
+        digs++;
+        v = v * 10 + (s[i] - '0');
+        if (v > 2147483647L) return -1;
+        i++;
+    }
+    if (digs == 0) return -1;
+    if (s[i] && s[i] != '\t' && s[i] != '\r' && s[i] != '\n') return -1;
+    *out = (int)(neg ? -v : v);
+    return 0;
+}
+static int meta_cmd_is_git_commit(const char *meta) {
+    char cmdline[1024];
+    long n = meta ? (long)strlen(meta) : 0;
+    kv_read_buf(meta, n, "cmd", cmdline, sizeof cmdline);
+    if (!cmdline[0]) return 0;
+    const char *p = cmdline;
+    const char *t[4]; long tl[4]; int nt = 0;
+    while (*p && nt < 4) {
+        while (*p == ' ' || *p == '\t') p++;
+        if (!*p) break;
+        const char *s = p;
+        while (*p && *p != ' ' && *p != '\t') p++;
+        t[nt] = s; tl[nt] = (long)(p - s); nt++;
+    }
+    if (nt >= 2 && tl[0] == 3 && !memcmp(t[0], "git", 3) && tl[1] == 6 && !memcmp(t[1], "commit", 6)) return 1;
+    int idx = (nt >= 2 && tl[1] == 2 && !memcmp(t[1], "--", 2)) ? 2 : 1;
+    return (nt >= idx + 2 && tl[idx] == 3 && !memcmp(t[idx], "git", 3) &&
+            tl[idx + 1] == 6 && !memcmp(t[idx + 1], "commit", 6));
+}
+typedef struct {
+    int committed;
+    int verdict_rc;
+    char sha[64], ref[200], reason[32];
+    int tip_contains;
+} CommitVerdict;
+static int job_read(const char *jd, const char *name, char *out, long cap);
+static void commit_verdict_from_job(const char *root, const char *jd, const char *id, CommitVerdict *v) {
+    char p[PW + 32], rstate[32], rrc[32], rcrc[32], rsha[64], rwork[PW], rref[200], rbef[64], raft[64], rbase[64], rwhy[32], rjob[64], rt[64], meta[4096], mwork[PW], mref[200];
+    unsigned char *rbuf = 0; int64_t rlen = 0;
+    const char *w; int jrc = -1, prc = -1, crc = -1, rc_ok, meta_ok = 0, m_match = 0;
+    memset(v, 0, sizeof *v);
+    if (job_read(jd, "rc", rt, sizeof rt) != 0 || strict_parse_int(rt, &jrc) != 0) jrc = -1;
+    if (!cx_fmt(p, sizeof p, "%s/commit-receipt.tsv", jd) && !sy_read_file(p, &rbuf, &rlen, 65536) && rbuf) {
+        kv_read_buf((const char *)rbuf, (long)rlen, "state", rstate, sizeof rstate);
+        kv_read_buf((const char *)rbuf, (long)rlen, "rc", rrc, sizeof rrc);
+        kv_read_buf((const char *)rbuf, (long)rlen, "commit_rc", rcrc, sizeof rcrc);
+        kv_read_buf((const char *)rbuf, (long)rlen, "sha", rsha, sizeof rsha);
+        kv_read_buf((const char *)rbuf, (long)rlen, "work", rwork, sizeof rwork);
+        kv_read_buf((const char *)rbuf, (long)rlen, "ref", rref, sizeof rref);
+        kv_read_buf((const char *)rbuf, (long)rlen, "ref_before", rbef, sizeof rbef);
+        kv_read_buf((const char *)rbuf, (long)rlen, "ref_after", raft, sizeof raft);
+        kv_read_buf((const char *)rbuf, (long)rlen, "base", rbase, sizeof rbase);
+        kv_read_buf((const char *)rbuf, (long)rlen, "reason", rwhy, sizeof rwhy);
+        kv_read_buf((const char *)rbuf, (long)rlen, "job", rjob, sizeof rjob);
+        free(rbuf);
+    } else {
+        rstate[0] = rrc[0] = rcrc[0] = rsha[0] = rwork[0] = rref[0] = rbef[0] = raft[0] = rbase[0] = rwhy[0] = rjob[0] = 0;
+    }
+    if (job_read(jd, "meta", meta, sizeof meta) == 0 && meta_cmd_is_git_commit(meta)) {
+        meta_ok = 1;
+        kv_read_buf(meta, (long)strlen(meta), "work", mwork, sizeof mwork);
+        kv_read_buf(meta, (long)strlen(meta), "ref", mref, sizeof mref);
+    } else {
+        mwork[0] = mref[0] = 0;
+    }
+    rc_ok = (jrc >= 0 && strict_parse_int(rrc, &prc) == 0 && prc == jrc &&
+             strict_parse_int(rcrc, &crc) == 0 && crc == 0 && meta_ok);
+    m_match = (mwork[0] && strcmp(mwork, "-") && !strcmp(mwork, rwork) &&
+               mref[0] && strcmp(mref, "-") && !strcmp(mref, rref));
+    if (!strcmp(rstate, "COMMITTED") && rc_ok && m_match && !strcmp(rjob, id) &&
+        git_full_oid(rsha) && rref[0] && strcmp(rref, "-")) {
+        w = (rwork[0] && strcmp(rwork, "-")) ? rwork : root;
+        const char *rb = strcmp(rbef, "-") ? rbef : 0;
+        const char *rbs = strcmp(rbase, "-") ? rbase : 0;
+        if (!rb || !git_full_oid(rb)) {
+            (void)cx_fmt(v->reason, sizeof v->reason, "unbound");
+            v->verdict_rc = 1;
+            return;
+        }
+        if (git_full_oid(raft) && !strcmp(raft, rsha) && git_cat_commit(w, rsha) && commit_parent_ok(w, rsha, rb, rbs)) {
+            v->committed = 1;
+            v->verdict_rc = jrc;
+            (void)cx_fmt(v->sha, sizeof v->sha, "%s", rsha);
+            (void)cx_fmt(v->ref, sizeof v->ref, "%s", rref);
+            v->tip_contains = commit_tip_contains(w, rref, rsha);
+            return;
+        }
+        (void)cx_fmt(v->reason, sizeof v->reason, !strcmp(raft, rsha) && git_cat_commit(w, rsha) ? "unbound" : "ref-mismatch");
+        v->verdict_rc = 1;
+        return;
+    }
+    if (!strcmp(rwhy, "timeout") || !strcmp(rwhy, "refused") || !strcmp(rwhy, "blocked") ||
+        !strcmp(rwhy, "ref-mismatch") || !strcmp(rwhy, "unbound")) {
+        (void)cx_fmt(v->reason, sizeof v->reason, "%s", rwhy);
+    } else {
+        (void)cx_fmt(v->reason, sizeof v->reason, "%s", jrc == 124 ? "timeout" : jrc == 2 ? "refused" : "blocked");
+    }
+    v->verdict_rc = jrc >= 0 ? jrc : 1;
+    if (v->verdict_rc == 0) v->verdict_rc = 1;
+}
+static int is_hex_ch(char c) {
+    return (c >= '0' && c <= '9') || (c >= 'a' && c <= 'f') || (c >= 'A' && c <= 'F');
+}
+static void emit_git_line_sanitized(const char *line, long len, int redact_sha) {
+    if (!redact_sha) {
+        if (len > 0) fwrite(line, 1, (size_t)len, stdout);
+        putchar('\n');
+        return;
+    }
+    long i = 0;
+    while (i < len) {
+        if (is_hex_ch(line[i]) && (i == 0 || !is_hex_ch(line[i - 1]))) {
+            long e = i;
+            while (e < len && is_hex_ch(line[e])) e++;
+            if (e - i == 40) {
+                fwrite("none", 1, 4, stdout);
+                i = e;
+                continue;
+            }
+            fwrite(line + i, 1, (size_t)(e - i), stdout);
+            i = e;
+            continue;
+        }
+        putchar(line[i++]);
+    }
+    putchar('\n');
+}
 /* A --cwd worktree may share this Git common directory. An unrelated
    repository must launch through its own instance, before a job exists. */
 static int git_foreign_worktree(const char *root, const char *worktree) {
@@ -4627,7 +4883,69 @@ static int cmd_git(const char *root, int argc, char **argv) {
         }
         return git_push_owned_ex(root, cwd, count, commits, nranges, ranges, 0, 1);
     }
-    if (!strcmp(argv[0], "commit")) { int cr = git_commit_check(argc, argv); if (cr) { git_argerr = 1; return cr; } if (getenv("DEVSVC_GIT_PARSE_ONLY")) { printf("GIT_ARGS_OK\tstripped=%d\n", git_strip_n); return 0; } }
+    if (!strcmp(argv[0], "verify")) {
+        const char *sha_arg = 0, *cwd = 0, *work;
+        static char vcwd[PW];
+        char rbuf[PW], cur[200], got[64], spec[240], vref[200];
+        for (i = 1; i < argc; i++) {
+            const char *a = argv[i];
+            if (!strcmp(a, "--cwd")) {
+                if (cwd || i + 1 >= argc || !argv[i + 1][0]) { git_argerr = 1; return 2; }
+                const char *d = argv[++i];
+                if (d[0] == '/') F(vcwd, sizeof vcwd, "%s", d); else F(vcwd, sizeof vcwd, "%s/%s", root, d);
+                if (ovf || !realpath(vcwd, rbuf)) { fprintf(stderr, "devsvc: REFUSE git verify --cwd %s: no such directory\n", d); return 2; }
+                {   char *tv[] = {"git", "-C", rbuf, "rev-parse", "--show-toplevel", 0}; char top[PW];
+                    if (runcap(tv, top, sizeof top) != 0) { fprintf(stderr, "devsvc: REFUSE git verify --cwd %s: not a git work tree\n", d); return 2; } }
+                F(vcwd, sizeof vcwd, "%s", rbuf); cwd = vcwd;
+            } else if (!strcmp(a, "--owner") && i + 1 < argc) {
+                i++;
+            } else if (a[0] == '-') {
+                git_argerr = 1; return 2;
+            } else if (!sha_arg) {
+                sha_arg = a;
+            } else {
+                git_argerr = 1; return 2;
+            }
+        }
+        if (!sha_arg) { git_argerr = 1; return 2; }
+        work = cwd ? cwd : root;
+        if (!git_full_oid(sha_arg) || !git_cat_commit(work, sha_arg)) {
+            printf("NOT_FOUND\n");
+            return 1;
+        }
+        vref[0] = 0; cur[0] = 0;
+        if (git_branch_name(work, cur, sizeof cur) == 0 &&
+            cx_fmt(spec, sizeof spec, "refs/heads/%s", cur) == 0 &&
+            mg_rev(work, spec, got, sizeof got) == 0 && !strcmp(got, sha_arg)) {
+            (void)cx_fmt(vref, sizeof vref, "%s", cur);
+        } else {
+            char refs[4096];
+            char *pv[] = {"git", "-C", (char *)work, "for-each-ref", "--format=%(refname:short)", "--points-at", (char *)sha_arg, "refs/heads", 0};
+            if (runcap(pv, refs, sizeof refs) == 0) {
+                chomp(refs);
+                char *nl = strchr(refs, '\n'); if (nl) *nl = 0;
+                if (refs[0]) (void)cx_fmt(vref, sizeof vref, "%s", refs);
+            }
+            if (!vref[0] && cur[0] && mg_anc(work, sha_arg, cur)) {
+                (void)cx_fmt(vref, sizeof vref, "%s", cur);
+            }
+            if (!vref[0]) {
+                char *cv2[] = {"git", "-C", (char *)work, "for-each-ref", "--format=%(refname:short)", "--contains", (char *)sha_arg, "refs/heads", 0};
+                if (runcap(cv2, refs, sizeof refs) == 0) {
+                    chomp(refs);
+                    char *nl = strchr(refs, '\n'); if (nl) *nl = 0;
+                    if (refs[0]) (void)cx_fmt(vref, sizeof vref, "%s", refs);
+                }
+            }
+        }
+        if (vref[0]) {
+            printf("VERIFIED\tsha=%s\tref=%s\n", sha_arg, vref);
+            return 0;
+        }
+        printf("NOT_FOUND\n");
+        return 1;
+    }
+    if (!strcmp(argv[0], "commit")) { int cr = git_commit_check(argc, argv); if (cr) { git_argerr = 1; return cr; } if (getenv("DEVSVC_GIT_PARSE_ONLY")) { cv_ready = 1; cv_committed = 0; F(cv_reason, sizeof cv_reason, "refused"); printf("GIT_ARGS_OK\tstripped=%d\n", git_strip_n); return 0; } }
     if (strcmp(argv[0], "commit")) { fprintf(stderr, "devsvc: REFUSE git %s: only commit and read-only log|diff|show|status|blame|ls-files are provided (stash, reset, clean, checkout, restore are not offered; use git unstage PATH to unstage)\n", argv[0]); return 125; }
     /* --cwd D:在版本工作树 D(.claude/worktrees/v0.0.NN 等)里提交。commit-own 以 D 为 cwd 跑:基线是 D 的 HEAD、
      * 私有索引从 D 的 HEAD 建、同步 D 自己的索引,门在 D 的树上求值(读 D 的 tests/precommit-gates.tsv),
@@ -4703,7 +5021,21 @@ static int cmd_git(const char *root, int argc, char **argv) {
      * HEAD 被他人推进且本请求路径未变则整遍重放,变了则具名报冲突。路径不重叠的 commit 因此真并行;
      * 写域锁(need)照旧按路径取。提交后只把本请求路径同步进共享索引(撞 index.lock 重试 12 次)。push 在提交之后、不持任何提交锁。 */
     {   char *bv[] = {"git", "-C", (char *)(cwd ? cwd : root), "rev-parse", "HEAD", 0}; if (runcap(bv, sha0, sizeof sha0) == 0) chomp(sha0); else sha0[0] = 0; }
+    {   const char *work = cwd ? cwd : root;
+        (void)cx_fmt(cv_work, sizeof cv_work, "%s", work);
+        if (cwd && wbr[0]) (void)cx_fmt(cv_ref_hint, sizeof cv_ref_hint, "%s", wbr);
+        else if (git_branch_name(work, cv_ref_hint, sizeof cv_ref_hint) != 0) cv_ref_hint[0] = 0;
+        cv_ref[0] = 0; cv_ref_after[0] = 0; cv_ref_before[0] = 0; cv_push_rc = 0; cv_commit_rc = 0;
+        if (cv_ref_hint[0]) {
+            char bspec[240];
+            if (!cx_fmt(bspec, sizeof bspec, "refs/heads/%s", cv_ref_hint) &&
+                mg_rev(work, bspec, cv_ref_before, sizeof cv_ref_before) != 0)
+                cv_ref_before[0] = 0;
+        }
+    }
     char owned[64]="",published[64]="",landed_base[64]="";
+    int commit_stage_ok = 0, verify_mismatch = 0;
+    char bind_why[32] = "";
     {   x_last_err[0] = 0; x_last_out[0]=0;
         if(sha0[0])dt_identity(sha0);
         int derives=flag(n,v,"--derive"), derived_done=0;char dp[PW],did[65];
@@ -4737,20 +5069,35 @@ static int cmd_git(const char *root, int argc, char **argv) {
         if (rc != 0 && owned[0]) {
             int sy_cnt = 0, kp_cnt = 0;
             int is_to = commit_was_timeout(rc, x_last_err, x_last_out);
-            mg_root = root;
-            if (eff_base[0] && strcmp(eff_base, owned) != 0) {
-                const char *wd = cwd ? cwd : root;
-                (void)mg_sync(wd, eff_base, owned, "GIT_COMMIT_SYNC", &sy_cnt, &kp_cnt);
-                recover_landed_index(wd, eff_base, owned);
+            const char *wd = cwd ? cwd : root;
+            if (is_to && commit_bind_verify(wd, cv_ref_hint, cv_ref_before, landed_base, owned, cv_ref, sizeof cv_ref, cv_ref_after, sizeof cv_ref_after, 0, 0)) {
+                mg_root = root;
+                if (eff_base[0] && strcmp(eff_base, owned) != 0) {
+                    (void)mg_sync(wd, eff_base, owned, "GIT_COMMIT_SYNC", &sy_cnt, &kp_cnt);
+                    recover_landed_index(wd, eff_base, owned);
+                }
+                printf("GIT_COMMIT_RECOVERED\tcommit=%s\tfrom=%s\tsynced=%d\tkept=%d\n",
+                       owned, eff_base[0] ? eff_base : "-", sy_cnt, kp_cnt);
+                fflush(stdout);
+                rc = 0;
             }
-            printf("GIT_COMMIT_RECOVERED\tcommit=%s\tfrom=%s\tsynced=%d\tkept=%d\n",
-                   owned, eff_base[0] ? eff_base : "-", sy_cnt, kp_cnt);
-            fflush(stdout);
-            if (is_to) rc = 0;
+        }
+        commit_stage_ok = (rc == 0 && git_full_oid(owned)) ? 1 : 0;
+        if (rc == 0 && !git_full_oid(owned)) {
+            verify_mismatch = 1;
+            rc = 1;
+            F(bind_why, sizeof bind_why, "%s", (!cv_ref_hint[0] || !git_full_oid(cv_ref_before)) ? "unbound" : "ref-mismatch");
+        } else if (commit_stage_ok) {
+            const char *wd = cwd ? cwd : root;
+            if (!commit_bind_verify(wd, cv_ref_hint, cv_ref_before, landed_base, owned, cv_ref, sizeof cv_ref, cv_ref_after, sizeof cv_ref_after, bind_why, sizeof bind_why)) {
+                verify_mismatch = 1;
+                commit_stage_ok = 0;
+                rc = 1;
+            }
         }
         if (rc != 0) { err_tail(x_last_err, 20); commit_class_from(x_last_err); }   /* 失败原因:commit-own 作业 stderr 尾部最多 20 行;类别记进完成事件 */
         commit_stale_locks_emit(root, x_last_err, auto_owner(), commit_req_val(0));
-        long push_start=sy_now_ms();int pushing=rc==0 && push;
+        long push_start=sy_now_ms();int pushing=commit_stage_ok && push;
         if (pushing) {
             char *commits[]={owned};
             if(!owned[0]){fprintf(stderr,"GIT_PUSH_REFUSE\treason=missing-commit-receipt\n");rc=1;}
@@ -4760,20 +5107,35 @@ static int cmd_git(const char *root, int argc, char **argv) {
                 if(!pushed&&rc)pushed=git_landed_receipt(x_last_out,2,published);
                 if(!pushed&&!rc)rc=1;
             }
+            cv_push_rc = rc;
         }
         if(pushing)dt_push(push_start,rc); }
-    commit_range_note(cwd ? cwd : root, (owned[0] && landed_base[0]) ? landed_base : sha0, owned);
-    if (owned[0]) pin_prepare_kick(cwd ? cwd : root);
+    commit_range_note(cwd ? cwd : root, (commit_stage_ok && landed_base[0]) ? landed_base : sha0, commit_stage_ok ? owned : "");
+    if (commit_stage_ok) pin_prepare_kick(cwd ? cwd : root);
     F(sha,sizeof sha,"%s",published[0]?published:owned[0]?owned:"none");
     /* 本次没有提交收据时 commit=none。其他请求推进 HEAD 不属于本次。失败时在行尾加 reason=:
      * timeout(rc 124,60 秒窗口)、refused(rc 2,具名拒绝或参数错)、blocked(其它非 0,多为提交门拦下)。
-     * 旧 HEAD 不再写进 commit= 冒充新提交。提交已落地但推送失败时 commit= 仍是新 HEAD,reason=push-failed。 */
+     * 必须同时通过 commit-own rc==0 且现场绑定 refs/heads/<recorded_ref>==sha、parent==ref_before 与 cat-file -t commit;
+     * 未通过时不打印任何被拒收的 40 位 sha(commit=none)。提交成功但推送失败时保留本地已提交状态与 sha。 */
     {   const char *why = 0;
-        if (rc != 0 && !owned[0]) why = rc == 124 ? "timeout" : rc == 2 ? "refused" : "blocked";
+        cv_ready = 1; cv_committed = 0; cv_sha[0] = 0; cv_reason[0] = 0;
+        if (landed_base[0]) (void)cx_fmt(cv_base, sizeof cv_base, "%s", landed_base); else cv_base[0] = 0;
+        if (commit_stage_ok && !verify_mismatch && git_full_oid(sha)) {
+            cv_committed = 1;
+            cv_commit_rc = 0;
+            F(cv_sha, sizeof cv_sha, "%s", sha);
+        }
+        if (!cv_committed) {
+            F(cv_reason, sizeof cv_reason, "%s", verify_mismatch ? (bind_why[0] ? bind_why : "ref-mismatch") : (rc == 124 ? "timeout" : rc == 2 ? "refused" : "blocked"));
+            cv_commit_rc = rc ? rc : 1;
+        }
+        if (verify_mismatch) why = bind_why[0] ? bind_why : "ref-mismatch";
+        else if (rc != 0 && !commit_stage_ok) why = rc == 124 ? "timeout" : rc == 2 ? "refused" : "blocked";
         else if (rc != 0 && push) why = pushed ? "push-local-reconcile" : "push-failed";
         else if (rc != 0) why = "failed";
-        if (cwd) printf("GIT_COMMIT\trc=%d\tcommit=%s\tpushed=%d\tms=%ld\tbranch=%s\tcwd=%s", rc, sha, pushed, sy_now_ms() - t0, wbr, cwd);
-        else printf("GIT_COMMIT\trc=%d\tcommit=%s\tpushed=%d\tms=%ld", rc, sha, pushed, sy_now_ms() - t0);
+        const char *emit_sha = cv_committed ? sha : "none";
+        if (cwd) printf("GIT_COMMIT\trc=%d\tcommit=%s\tpushed=%d\tms=%ld\tbranch=%s\tcwd=%s", rc, emit_sha, pushed, sy_now_ms() - t0, wbr, cwd);
+        else printf("GIT_COMMIT\trc=%d\tcommit=%s\tpushed=%d\tms=%ld", rc, emit_sha, pushed, sy_now_ms() - t0);
         if (why) printf("\treason=%s", why);
         printf("\n"); }
     return rc;
@@ -4817,7 +5179,15 @@ static int bg_child(void *ud) {
     if (j->commit && j->id[0]) F(commit_req, sizeof commit_req, "%s", j->id);
     r = main2(j->argc, j->argv);
     timing_finish(r);
-    if(j->commit){report_window=FL_NODE_MS;report_end("git.commit",j->id);}
+    if(j->commit){
+        if (commit_receipt_write(j->jd, j->id, r) != 0) {
+            fprintf(stderr, "devsvc: cannot persist commit receipt %s/commit-receipt.tsv\n", j->jd);
+            cv_committed = 0;
+            (void)cx_fmt(cv_reason, sizeof cv_reason, "blocked");
+            if (r == 0) r = 1;
+        }
+        report_window=FL_NODE_MS;report_end("git.commit",j->id);commit_result_emit(j->id, r);
+    }
     else report_end(report_kind,j->id);
     fflush(stdout); fflush(stderr);
     if (j->commit && !cx_fmt(t, sizeof t, "emit\tgit.commit\towner=%s\tpid=%d\trc=%d\tms=%ld\tclass=%s\t%s\tgate=%s\treason=%s\treq=%s",
@@ -4851,13 +5221,27 @@ static int bg_launch(const char *root, const char *cmd, int oargc, char **oargv,
     }
     {   long k = 0; t[0] = 0; for (i = 0; i < n && k < (long)sizeof t - 80; i++) { int w = snprintf(t + k, sizeof t - k, "%s%s", i ? " " : "", nv[i]); if (w < 0 || w >= (int)(sizeof t - k)) break; k += w; }
         clean(t); }
-    {   char m[PW + 400]; F(m, sizeof m, "cmd\t%s\nowner\t%s\nstart\t%ld\n", t, j.owner, sy_now_ms()); F(p, sizeof p, "%s/meta", j.jd); sy_write_atomic(p, m, strlen(m), 0644); }
+    {   char m[PW * 2 + 640];
+        if (j.commit) {
+            const char *cw = opt(n, nv, "--cwd", 0);
+            char wbuf[PW], rbuf[PW], mref[200]; const char *mw = root;
+            if (cw && cw[0]) {
+                if (cw[0] == '/') (void)cx_fmt(wbuf, sizeof wbuf, "%s", cw);
+                else (void)cx_fmt(wbuf, sizeof wbuf, "%s/%s", root, cw);
+                if (realpath(wbuf, rbuf)) mw = rbuf; else mw = wbuf;
+            }
+            if (git_branch_name(mw, mref, sizeof mref) != 0) (void)cx_fmt(mref, sizeof mref, "-");
+            F(m, sizeof m, "cmd\t%s\nowner\t%s\nstart\t%ld\nwork\t%s\nref\t%s\n", t, j.owner, sy_now_ms(), mw, mref);
+        } else {
+            F(m, sizeof m, "cmd\t%s\nowner\t%s\nstart\t%ld\n", t, j.owner, sy_now_ms());
+        }
+        F(p, sizeof p, "%s/meta", j.jd); sy_write_atomic(p, m, strlen(m), 0644); }
     fflush(stdout); fflush(stderr);
     pid = sy_fork_session(bg_child, &j, fds);
     if (pid < 0) { fprintf(stderr, "devsvc: cannot start background job (%d)\n", pid); return 3; }
     sy_close(fds[0]); sy_close(fds[1]);
     F(t, sizeof t, "%d\n", pid); F(p, sizeof p, "%s/pid", j.jd); sy_write_atomic(p, t, strlen(t), 0644);
-    printf("JOB\t%s\trun=%s\n", j.id, j.jd);
+    if (!bg_defer_job_line) printf("JOB\t%s\trun=%s\n", j.id, j.jd);
     F(last_job, sizeof last_job, "%s", j.id);
     return 0;
 }
@@ -4962,47 +5346,126 @@ static int flowdir_gc(void) {
    前台跟随至作业结束(总 deadline COMMIT_FOLLOW_MS、轮询次数上限),回显作业输出,rc 即提交 rc;
    跟随超时 rc 124 并提示 git commit --status 取回执。 */
 #define COMMIT_FOLLOW_MS 600000L
-static int commit_follow(const char *id) {
-    char jd[PW], t[64]; long t0 = sy_now_ms(), n;
+static int commit_follow(const char *root, const char *id) {
+    char jd[PW], t[64]; long t0 = sy_now_ms(), n, follow_ms = COMMIT_FOLLOW_MS;
+    {   const char *fe = getenv("DEVSVC_COMMIT_FOLLOW_MS");
+        if (fe && atol(fe) >= 100 && atol(fe) <= COMMIT_FOLLOW_MS) follow_ms = atol(fe); }
     F(jd, sizeof jd, "%s/jobs/%s", dir, id);
-    for (n = 0; n < COMMIT_FOLLOW_MS / 100; n++) {
+    printf("COMMIT_PENDING\tjob=%s\tNOT_COMMITTED_YET\n", id);
+    printf("JOB\t%s\trun=%s\n", id, jd);
+    fflush(stdout);
+    for (n = 0; n < follow_ms / 100 + 2; n++) {
         if (!job_read(jd, "rc", t, sizeof t)) break;
-        if (!job_alive(jd) && job_read(jd, "rc", t, sizeof t)) { printf("JOB_LOST\t%s\n", id); return 125; }
-        if (sy_now_ms() - t0 >= COMMIT_FOLLOW_MS) break;
+        if (!job_alive(jd) && job_read(jd, "rc", t, sizeof t)) {
+            printf("JOB_LOST\t%s\n", id);
+            printf("COMMIT_RESULT\tNOT_COMMITTED\treason=blocked\tjob=%s\n", id);
+            return 125;
+        }
+        if (sy_now_ms() - t0 >= follow_ms) break;
         sy_sleep_ms(100);
     }
-    if (job_read(jd, "rc", t, sizeof t)) { printf("WAIT_TIMEOUT\t%s\tms=%ld\thint=devsvc git commit --status %s\n", id, sy_now_ms() - t0, id); return 124; }
-    {   char p[PW + 16]; unsigned char *b = 0; int64_t m = 0;
+    if (job_read(jd, "rc", t, sizeof t)) {
+        printf("WAIT_TIMEOUT\t%s\tms=%ld\thint=devsvc git commit --status %s\n", id, sy_now_ms() - t0, id);
+        printf("COMMIT_PENDING\tjob=%s\tNOT_COMMITTED_YET\n", id);
+        printf("COMMIT_RESULT\tNOT_COMMITTED\treason=timeout\tjob=%s\n", id);
+        return 124;
+    }
+    {   char p[PW + 16]; unsigned char *b = 0; int64_t m = 0; CommitVerdict cv;
         F(p, sizeof p, "%s/out", jd);
-        if (!sy_read_file(p, &b, &m, 1L << 26) && b) { fwrite(b, 1, (size_t)m, stdout); if (m > 0 && b[m - 1] != '\n') putchar('\n'); free(b); }
-        commit_class_from(p); }   /* 前台 commit 的完成事件 class= 取自作业输出 */
-    return atoi(t);
+        commit_verdict_from_job(root, jd, id, &cv);
+        if (!sy_read_file(p, &b, &m, 1L << 26) && b) {
+            long end = (long)m;
+            while (end > 0 && (b[end - 1] == '\n' || b[end - 1] == '\r')) end--;
+            long st = end;
+            while (st > 0 && b[st - 1] != '\n') st--;
+            if (end - st >= 14 && !memcmp(b + st, "COMMIT_RESULT\t", 14)) end = st;
+            if (end > 0) {
+                if (cv.committed) {
+                    fwrite(b, 1, (size_t)end, stdout);
+                    if (b[end - 1] != '\n') putchar('\n');
+                } else {
+                    long a, z;
+                    for (a = 0; a < end; a = z + 1) {
+                        z = a; while (z < end && b[z] != '\n') z++;
+                        long ln = z - a;
+                        if (ln > 0 && b[a + ln - 1] == '\r') ln--;
+                        emit_git_line_sanitized((const char *)b + a, ln, 1);
+                    }
+                }
+            }
+            free(b);
+        }
+        commit_class_from(p);   /* 前台 commit 的完成事件 class= 取自作业输出 */
+        if (cv.committed) {
+            printf("COMMIT_RESULT\tCOMMITTED\tsha=%s\tref=%s\tjob=%s\ttip_contains=%s\n",
+                   cv.sha, cv.ref, id, cv.tip_contains ? "yes" : "no");
+            return cv.verdict_rc;
+        }
+        printf("COMMIT_RESULT\tNOT_COMMITTED\treason=%s\tjob=%s\n", cv.reason[0] ? cv.reason : "blocked", id);
+        return cv.verdict_rc ? cv.verdict_rc : 1;
+    }
 }
 /* git commit --status [JOB]:列最近至多 5 个 commit 作业(或指定 JOB)的回执:
-   COMMIT_RECEIPT<TAB>JOB<TAB>done|running|lost<TAB>rc=N 后接作业输出里的 GIT_COMMIT 行(rc、commit 号、路径在其中与 meta cmd) */
-static int commit_status(const char *want) {
+   COMMIT_RECEIPT<TAB>JOB<TAB>done|running|lost<TAB>rc=N 后接作业输出里的 GIT_COMMIT 行(rc、commit 号、路径在其中与 meta cmd),
+   并统一用结构化作业收据 + 现场 ref 检查给出 COMMIT_RESULT;未提交时不回放任何 40 位 sha */
+static int commit_status(const char *root, const char *want) {
     char jd[PW], lst[1 << 15], *s, *e, t[64], m[4096]; int n = 0;
     char *v[] = {"ls", "-1t", jd, 0};
+    char f_id[48] = "", f_st[16] = "", f_jd[PW] = "";
+    CommitVerdict f_cv;
+    memset(&f_cv, 0, sizeof f_cv);
     F(jd, sizeof jd, "%s/jobs", dir);
-    if (want && !okjob(want)) { fprintf(stderr, "devsvc: git commit --status [JOB]: bad job id\n"); return 2; }
+    if (want && !okjob(want)) {
+        fprintf(stderr, "devsvc: git commit --status [JOB]: bad job id\n");
+        printf("COMMIT_RESULT\tNOT_COMMITTED\treason=refused\tjob=-\n");
+        return 2;
+    }
     if (sy_exists(jd) != 1 || runcap(v, lst, sizeof lst) < 0) lst[0] = 0;
     for (s = lst; *s && n < 5; s = e) {
         char d[PW], *c, *ce, p[PW + 16]; unsigned char *b = 0; int64_t bn = 0; const char *st; int rc = -1;
+        CommitVerdict jcv;
         e = strchr(s, '\n'); if (e) *e++ = 0; else e = s + strlen(s);
         if (!okjob(s) || (want && strcmp(s, want))) continue;
-        F(d, sizeof d, "%s/%s", jd, s); if (job_read(d, "meta", m, sizeof m)) continue;
+        F(d, sizeof d, "%s/%s", jd, s);
+        if (job_read(d, "meta", m, sizeof m) || !meta_cmd_is_git_commit(m)) continue;
         c = strstr(m, "cmd\t"); if (!c) continue;
         c += 4; ce = strchr(c, '\n'); if (ce) *ce = 0;
-        if (strncmp(c, "git commit ", 11) && !strstr(c, " git commit ")) continue;   /* meta cmd 首词是执行体全路径 */
-        if (!job_read(d, "rc", t, sizeof t)) { st = "done"; rc = atoi(t); } else st = job_alive(d) ? "running" : "lost";
+        if (!job_read(d, "rc", t, sizeof t) && strict_parse_int(t, &rc) == 0) { st = "done"; } else { rc = -1; st = job_alive(d) ? "running" : "lost"; }
+        memset(&jcv, 0, sizeof jcv);
+        if (!strcmp(st, "done")) commit_verdict_from_job(root, d, s, &jcv);
         printf("COMMIT_RECEIPT\t%s\t%s\trc=%d\tcmd=%.300s\n", s, st, rc, c);
+        if (n == 0) {
+            (void)cx_fmt(f_id, sizeof f_id, "%s", s);
+            (void)cx_fmt(f_st, sizeof f_st, "%s", st);
+            (void)cx_fmt(f_jd, sizeof f_jd, "%s", d);
+            f_cv = jcv;
+        }
         F(p, sizeof p, "%s/out", d);
         if (!sy_read_file(p, &b, &bn, 1L << 24) && b) {
-            long a, z; for (a = 0; a < bn; a = z + 1) { z = a; while (z < bn && b[z] != '\n') z++; if (z - a > 11 && !memcmp(b + a, "GIT_COMMIT\t", 11)) printf("%.*s\n", (int)(z - a), (char *)b + a); }
-            free(b); }
+            long a, z;
+            for (a = 0; a < bn; a = z + 1) {
+                z = a; while (z < bn && b[z] != '\n') z++;
+                if (z - a > 11 && !memcmp(b + a, "GIT_COMMIT\t", 11)) {
+                    emit_git_line_sanitized((const char *)b + a, z - a, strcmp(st, "done") || !jcv.committed);
+                }
+            }
+            free(b);
+        }
         n++;
     }
     printf("COMMIT_RECEIPTS\tn=%d\n", n);
+    if (n == 0) {
+        printf("COMMIT_RESULT\tNOT_COMMITTED\treason=refused\tjob=%s\n", (want && want[0]) ? want : "-");
+    } else if (!strcmp(f_st, "running")) {
+        printf("COMMIT_RESULT\tNOT_COMMITTED\treason=running\tjob=%s\n", f_id);
+    } else if (!strcmp(f_st, "lost")) {
+        printf("COMMIT_RESULT\tNOT_COMMITTED\treason=blocked\tjob=%s\n", f_id);
+    } else if (f_cv.committed) {
+        printf("COMMIT_RESULT\tCOMMITTED\tsha=%s\tref=%s\tjob=%s\ttip_contains=%s\n",
+               f_cv.sha, f_cv.ref, f_id, f_cv.tip_contains ? "yes" : "no");
+    } else {
+        printf("COMMIT_RESULT\tNOT_COMMITTED\treason=%s\tjob=%s\n", f_cv.reason[0] ? f_cv.reason : "blocked", f_id);
+    }
     return want && !n ? 2 : 0;
 }
 static int cmd_jobs(void) {
@@ -5144,6 +5607,8 @@ int main(int argc, char **argv) {
         }
     }
     if(!last_job[0])report_end(report_kind,"");
+    if (ovf && r == 0) r = 2;
+    if (!in_bg && !last_job[0] && cv_is_git_commit && !cv_skip_verdict) commit_result_emit("-", r);
     if (ovf) { fprintf(stderr, "devsvc: a path or argument did not fit its buffer (%d)\n", ovf); return 2; }
     return r;
 }
@@ -5152,6 +5617,8 @@ static int main2(int argc, char **argv) {
     if (argc > 1 && !strcmp(argv[1], "--")) a = 2;
     if (argc <= a) return usage();
     cmd = argv[a]; argc -= a + 1; argv += a + 1;
+    cv_is_git_commit = (!strcmp(cmd, "git") && argc >= 1 && !strcmp(argv[0], "commit")) ? 1 : 0;
+    cv_skip_verdict = 0;
     if (sy_cwd(root, sizeof root) < 0) return 3;
     {   int cr = cfg_load(root);
         if (cr) { fprintf(stderr, "devsvc: repo table %s %s\n", cfg.table, cr == -1 ? "unreadable" : "malformed (missing or duplicate key, or lib rows != 3)"); return 3; } }
@@ -5189,7 +5656,10 @@ static int main2(int argc, char **argv) {
         char *v[14]={"--quiet","tools/dvtiming.cx",(char*)dir};if(argc>10)return 2;
         for(int i=0;i<argc;i++)v[3+i]=argv[i];v[3+argc]=0;return cmd_run(root,3+argc,v);
     }
-    if (!strcmp(cmd, "git") && argc >= 2 && !strcmp(argv[0], "commit") && !strcmp(argv[1], "--status")) return argc <= 3 ? commit_status(argc == 3 ? argv[2] : 0) : 2;
+    if (!strcmp(cmd, "git") && argc >= 2 && !strcmp(argv[0], "commit") && !strcmp(argv[1], "--status")) {
+        if (argc <= 3) { cv_skip_verdict = 1; return commit_status(root, argc == 3 ? argv[2] : 0); }
+        return 2;
+    }
     if(!strcmp(cmd,"git") && argc && !strcmp(argv[0],"commit")){report_kind="git.commit";report_window=FL_NODE_MS;}
     if(!strcmp(cmd,"flow") || !strcmp(cmd,"x") || (!strcmp(cmd,"git") && argc && !strcmp(argv[0],"commit")))
         dt_command(!strcmp(cmd,"git")?"git.commit":cmd,root,argc,argv);
@@ -5224,10 +5694,21 @@ static int main2(int argc, char **argv) {
     if (!strcmp(cmd, "git") && argc >= 1 && !strcmp(argv[0], "commit") && !getenv("DEVSVC_GIT_PARSE_ONLY") &&
         shared_checkout_git_commit_gate(root, argc, argv)) return 1;
     if (!strcmp(cmd, "git") && argc >= 1 && !strcmp(argv[0], "commit") && !in_bg && !flag(argc, argv, "--bg") && !getenv("DEVSVC_GIT_PARSE_ONLY")) {
+        bg_defer_job_line = 1;
         int r = bg_launch(root, cmd, argc + a + 1, argv - (a + 1), 0);
-        return r ? r : commit_follow(last_job);
+        bg_defer_job_line = 0;
+        return r ? r : commit_follow(root, last_job);
     }
-    {   int bp; if (bg_strip(cmd, argc, argv, &bp)) return bg_launch(root, cmd, argc + a + 1, argv - (a + 1), argv + bp); }
+    {   int bp;
+        if (bg_strip(cmd, argc, argv, &bp)) {
+            int r = bg_launch(root, cmd, argc + a + 1, argv - (a + 1), argv + bp);
+            if (r == 0 && cv_is_git_commit) {
+                printf("COMMIT_PENDING\tjob=%s\tNOT_COMMITTED_YET\n", last_job);
+                printf("COMMIT_RESULT\tNOT_COMMITTED\treason=running\tjob=%s\n", last_job);
+            }
+            return r;
+        }
+    }
     if (!strcmp(cmd, "wait")) return cmd_wait(argc, argv);
     if (!strcmp(cmd, "jobs")) return cmd_jobs();
     if (!strcmp(cmd, "serve")) return serve(atol(opt(argc, argv, "--ttl", "1800")), atol(opt(argc, argv, "--idle", "300")));
