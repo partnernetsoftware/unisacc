@@ -193,6 +193,36 @@ static int candidate_lock(const char *base, const char *domain) {
     return fd;
 }
 static const char *step_out;
+static char g_tools_root[4400], g_tools_root_mode[32];
+static int g_pin_all_tools;
+static const char *cc_tools_root(const char *root) {
+    if (g_tools_root[0]) {
+        if (tx_eqz(g_tools_root_mode, "override")) return g_tools_root;
+        if (fsize(g_tools_root) >= 0) return g_tools_root;
+    }
+    return root;
+}
+static void cc_append_receipt_row(const char *outdir, const char *row) {
+    char p[4400];
+    if (!outdir || !outdir[0] || cx_fmt(p, sizeof p, "%s/chain-tools-receipt.tsv", outdir)) return;
+    int fd = sy_open(p, O_WRONLY | O_CREAT | O_APPEND, 0644);
+    if (fd >= 0) {
+        (void)sy_write_all(fd, row, (long)strlen(row));
+        (void)sy_close(fd);
+    }
+}
+static void cc_record_pinned_tool(const char *outdir, const char *tool, const char *rel,
+                                  const char *tr, const char *src_sha, const char *native_sha) {
+    char row[1400];
+    const char *mode = g_tools_root_mode[0] ? g_tools_root_mode : "snapshot";
+    const char *troot = (tr && tr[0]) ? tr : (g_tools_root[0] ? g_tools_root : "-");
+    if (!cx_fmt(row, sizeof row, "TOOL_PINNED\ttool=%s\tpath=%s\ttools_root=%s\tmode=%s\tsrc_sha=%s\tnative_sha=%s\n",
+                tool, rel, troot, mode, src_sha ? src_sha : "-", native_sha ? native_sha : "-")) {
+        cc_append_receipt_row(outdir, row);
+    }
+    sy_printf("CHAIN_TOOL_IDENTITY\ttool=%s\tpath=%s\ttools_root=%s\tmode=%s\tsrc_sha=%s\tnative_sha=%s\n",
+              tool, rel, troot, mode, src_sha ? src_sha : "-", native_sha ? native_sha : "-");
+}
 static const char *tool_pinned(const char *root, const char *tool, int secs, char *native, size_t cap);
 static int bound_sh_secs(const char *root, char **rest, int secs) {
     char com[4400], pnative[4400];
@@ -237,8 +267,9 @@ static void preflight(const char *root, const char *hook, const char *rev, const
     char tool[4400], rules[4400], a_root[4500], a_build[4500], a_snap[4500], a_rev[64], a_pkg[4500], a_hook[40];
     char *v[16];
     int n = 0;
-    if (cx_fmt(tool, sizeof tool, "%s/tools/preflight.cx", root) ||
-        cx_fmt(rules, sizeof rules, "%s/build/preflight-rules.tsv", root) ||
+    const char *tr = cc_tools_root(root);
+    if (cx_fmt(tool, sizeof tool, "%s/tools/preflight.cx", tr) ||
+        cx_fmt(rules, sizeof rules, "%s/build/preflight-rules.tsv", tr) ||
         cx_fmt(a_root, sizeof a_root, "ROOT=%s", root) ||
         cx_fmt(a_build, sizeof a_build, "BUILD=%s", build) ||
         cx_fmt(a_snap, sizeof a_snap, "SNAP=%s", snap) ||
@@ -317,11 +348,12 @@ static void step_hash(const char *path, char hash[65]) {
     free(b);
 }
 static void step_pin(const char *root, int secs) {
-    char pin[4400], tmp[4400], pintmp[4400], tool[4400], hash[65], text[4800];
+    char pin[4400], tmp[4400], pintmp[4400], tool[4400], hash[65], shash[65], text[4800];
+    const char *tr = cc_tools_root(root);
     if (step_native[0]) return;
     if (cx_fmt(step_native, sizeof step_native, "%s/chain-step.native", step_out) || cx_fmt(pin, sizeof pin, "%s/chain-step.pin", step_out) ||
         cx_fmt(tmp, sizeof tmp, "%s.new", step_native) || cx_fmt(pintmp, sizeof pintmp, "%s.new", pin) ||
-        cx_fmt(tool, sizeof tool, "%s/tools/chain-step.cx", root)) die("path", "chain-step pin");
+        cx_fmt(tool, sizeof tool, "%s/tools/chain-step.cx", tr)) die("path", "chain-step pin");
     int lock = candidate_lock(step_native, "pin");
     size_t n = 0; char *old = cx_read(pin, &n);
     if (old) {
@@ -334,10 +366,13 @@ static void step_pin(const char *root, int secs) {
         char *a[] = {tool, (char *)"-o", tmp, 0};
         if (bound_sh_secs(root, a, secs)) die("chain-step pin build", tool);
         step_hash(tmp, hash);
+        if (fsize(tool) >= 0) step_hash(tool, shash);
+        else cx_fmt(shash, sizeof shash, "%s", "-");
         if (cx_fmt(text, sizeof text, "chain-step-pin-v1\nnative_sha=%s\n", hash)) die("chain-step pin record", pin);
         if (sy_chmod(tmp, 0755) || sy_rename(tmp, step_native)) die("publish chain-step native", step_native);
         if (cx_write(pintmp, text, strlen(text)) || sy_rename(pintmp, pin)) die("publish chain-step pin", pin);
-        sy_printf("CHAIN_STEP_PIN\tbuilt=%s\tsha=%s\n", step_native, hash);
+        sy_printf("CHAIN_STEP_PIN\tbuilt=%s\tsha=%s\tsrc_sha=%s\n", step_native, hash, shash);
+        cc_record_pinned_tool(step_out, "chain-step", "tools/chain-step.cx", tr, shash, hash);
     }
     if (sy_close(lock)) die("candidate unlock", step_native);
 }
@@ -384,7 +419,12 @@ static const char *tool_pinned(const char *root, const char *tool, int secs, cha
         if (cx_fmt(text, sizeof text, "chain-tool-pin-v1\ntool=%s\nout=%s\nsrc_sha=%s\nnative_sha=%s\n", name, step_out, shash, hash)) die("chain-tool pin record", pin);
         if (sy_chmod(tmp, 0755) || sy_rename(tmp, native)) die("publish chain-tool native", native);
         if (cx_write(pintmp, text, strlen(text)) || sy_rename(pintmp, pin)) die("publish chain-tool pin", pin);
-        sy_printf("CHAIN_TOOL_PIN\ttool=%s\tbuilt=%s\tsha=%s\n", name, native, hash);
+        sy_printf("CHAIN_TOOL_PIN\ttool=%s\tbuilt=%s\tsha=%s\tsrc_sha=%s\n", name, native, hash, shash);
+        {
+            char relp[128];
+            if (!cx_fmt(relp, sizeof relp, "tools/%s.cx", name))
+                cc_record_pinned_tool(step_out, name, relp, cc_tools_root(root), shash, hash);
+        }
     }
     if (sy_close(lock)) die("candidate unlock", native);
     if (cx_fmt(done[k], sizeof done[k], "%s", native)) die("path", "tool pin");
@@ -506,22 +546,25 @@ static const char *src_pinned(const char *root, const char *outdir, const char *
         if (!files) die("REFUSE chain-tool pin mismatch", pin);
         free(old);
     } else {
-        char cr[4400]; size_t cn = 0, tn = 0, tcap = 200000;
+        const char *tr = cc_tools_root(root);
+        char cr[4400], cf_sha[65]; size_t cn = 0, tn = 0, tcap = 200000;
         char *text = malloc(tcap), line[700];
-        if (!text || cx_fmt(cr, sizeof cr, "%s/cxroot.tsv", root)) die("eb pin record", pin);
+        cf_sha[0] = 0;
+        if (!text || cx_fmt(cr, sizeof cr, "%s/cxroot.tsv", tr)) die("eb pin record", pin);
         char *croot = cx_read(cr, &cn);
         sp_n = 0; sp_add(rel0);
         if (croot) sp_add("cxroot.tsv");
         for (int i = 0; i < sp_n; i++) {
             char from[4400], rel[SP_W];
-            if (cx_fmt(rel, sizeof rel, "%s", sp_rel[i]) || cx_fmt(from, sizeof from, "%s/%s", root, rel) || cx_fmt(path, sizeof path, "%s/%s", tree, rel)) die("path", "eb pin");
+            if (cx_fmt(rel, sizeof rel, "%s", sp_rel[i]) || cx_fmt(from, sizeof from, "%s/%s", tr, rel) || cx_fmt(path, sizeof path, "%s/%s", tree, rel)) die("path", "eb pin");
             size_t sn = 0; char *sb = cx_read(from, &sn);
             if (!sb) die("eb pin source unreadable", from);
             sp_mkparents(path, strlen(tree) + 1);
             if (cx_write(path, sb, sn)) die("publish eb pin copy", path);
-            if (strcmp(rel, "cxroot.tsv")) sp_scan(root, rel, sb, sn, croot, cn);
+            if (strcmp(rel, "cxroot.tsv")) sp_scan(tr, rel, sb, sn, croot, cn);
             free(sb);
             step_hash(path, hash);
+            if (!strcmp(rel, "tools/cxlib/chainfacts.cx")) cx_fmt(cf_sha, sizeof cf_sha, "%s", hash);
             if (!i && cx_fmt(text, tcap, "chain-tool-pin-v1\ntool=%s\nout=%s\nsrc_sha=%s\nnative_sha=-\n", name, outdir, hash)) die("eb pin record", pin);
             if (!i) tn = strlen(text);
             if (cx_fmt(line, sizeof line, "file=%s\t%s\n", rel, hash) || tn + strlen(line) + 1 > tcap) die("eb pin record", pin);
@@ -532,27 +575,32 @@ static const char *src_pinned(const char *root, const char *outdir, const char *
         if (cx_write(pintmp, text, tn) || sy_rename(pintmp, pin)) die("publish eb pin", pin);
         step_hash(copy, hash);
         sy_printf("CHAIN_TOOL_PIN\ttool=%s\tbuilt=%s\tsha=%s\tfiles=%d\n", name, copy, hash, sp_n);
+        cc_record_pinned_tool(outdir, name, rel0, tr, hash, "-");
+        if (cf_sha[0]) cc_record_pinned_tool(outdir, "chainfacts", "tools/cxlib/chainfacts.cx", tr, cf_sha, "-");
         free(text);
     }
     if (sy_close(lock)) die("candidate unlock", copy);
     return copy;
 }
 static const char *eb_pinned(const char *root, const char *outdir, char *copy, size_t cap) {
-    return src_pinned(root, outdir, "entry-build", copy, cap);
+    return src_pinned(cc_tools_root(root), outdir, "entry-build", copy, cap);
 }
 /* DSG-DRV1 第 2 片: kernel-route 与 asm-source 同样钉源码副本,路径经环境变量交给 chain-step
    (chain-step 的两处 kernel-route 取用点与 kernel-route 取 asm-source 的取用点读这两个变量,未设置时退回快照)。 */
 static void kr_pin_env(const char *root, const char *outdir) {
-    char kr[4400], as[4400], probe[4400];
+    const char *tr = cc_tools_root(root);
+    char kr[4400], as[4400], probe[4400], ebp[4400], ebc[4400];
     /* 真实链下源副本缺失一律拒绝(rc 2,点名驱动);只有显式夹具开关 UNISACC_PIN_FIXTURE=1 才允许退回快照路径并打印 PIN_FALLBACK */
     static const char *drv[2] = {"kernel-route", "asm-source"};
     for (int k = 0; k < 2; k++) {
-        if (cx_fmt(probe, sizeof probe, "%s/tools/%s.cx", root, drv[k])) die("path", "kr pin");
+        if (cx_fmt(probe, sizeof probe, "%s/tools/%s.cx", tr, drv[k])) die("path", "kr pin");
         if (fsize(probe) >= 0) continue;
         if (sy_env("UNISACC_PIN_FIXTURE") && tx_eqz(sy_env("UNISACC_PIN_FIXTURE"), "1")) { sy_printf("PIN_FALLBACK\ttool=%s\treason=fixture-root-without-source\n", drv[k]); return; }
         die("REFUSE chain-tool pin source missing", drv[k]);
     }
-    if (!src_pinned(root, outdir, "kernel-route", kr, sizeof kr) || !src_pinned(root, outdir, "asm-source", as, sizeof as)) die("path", "kr pin");
+    if (!src_pinned(tr, outdir, "kernel-route", kr, sizeof kr) || !src_pinned(tr, outdir, "asm-source", as, sizeof as)) die("path", "kr pin");
+    if (!cx_fmt(ebp, sizeof ebp, "%s/tools/entry-build.cx", tr) && fsize(ebp) >= 0)
+        (void)eb_pinned(tr, outdir, ebc, sizeof ebc);
     if (sy_setenv("UNISACC_KERNEL_ROUTE_SRC", kr, 1) || sy_setenv("UNISACC_ASM_SOURCE_SRC", as, 1)) die("env", "kr pin");
 }
 /* Only the fixture entries (--g2g3-fixture and the like) have no output directory: they trace the
@@ -734,7 +782,7 @@ static int wf_fronts(const char *root, const char *outdir, const char *helper, i
     static char parts[128][4400]; /* physical WF_MAX capacity; logical slice count comes from chainfacts */
     char offset[32], amount[32];
     int i, slices = 1;
-    if (cx_fmt(wft, sizeof wft, "%s/tools/whole-front.cx", root)) die("path", "wf");
+    if (cx_fmt(wft, sizeof wft, "%s/tools/whole-front.cx", cc_tools_root(root))) die("path", "wf");
     {
         char gd[4400];
         check_gen(gen);
@@ -797,8 +845,8 @@ static int wf_span_prep(const char *root, const char *outdir, const char *helper
     if (cx_fmt(rec, sizeof rec, "%s/receipt.txt", nout)) die("path", "wsprec");
     if (ck_done(outdir, ptag) && fsize(rec) >= 0) { sy_printf("RESUME\t%s\n", ptag); return 0; }
     if (gen > 1) clean_phase_path(outdir, ptag, nout, rec);
-    if (cx_fmt(wft, sizeof wft, "%s/tools/whole-front.cx", root)) die("path", "wf");
-    if (cx_fmt(tmpl, sizeof tmpl, "%s/tools/templates/whole-win-span.cx.in", root)) die("path", "wtmpl");
+    if (cx_fmt(wft, sizeof wft, "%s/tools/whole-front.cx", cc_tools_root(root))) die("path", "wf");
+    if (cx_fmt(tmpl, sizeof tmpl, "%s/tools/templates/whole-win-span.cx.in", cc_tools_root(root))) die("path", "wtmpl");
     clean_stale_prep(outdir, ptag, nout, rec, snap, pkg, ctor, helper, tmpl, objs);
     if (sy_setenv("UNISACC_IDENTITY_HELPER", helper, 1)) die("env", "helper");
     if (fsize(rec) < 0) {
@@ -855,7 +903,7 @@ static int span_one_missing(const char *root, const char *outdir, const char *he
     if (cx_fmt(prod, sizeof prod, "%s/body.bin", dest)) die("path", dest);
     if (ck_complete(outdir, tag, prod)) { sy_printf("RESUME\t%s\n", tag); if (until_phase && !strcmp(until_phase, tag)) exit(0); return 0; }
     wf_scrub_dest(outdir, dest);
-    if (cx_fmt(wft, sizeof wft, "%s/tools/whole-front.cx", root)) die("path", "wf");
+    if (cx_fmt(wft, sizeof wft, "%s/tools/whole-front.cx", cc_tools_root(root))) die("path", "wf");
     if (sy_setenv("UNISACC_IDENTITY_HELPER", helper, 1)) die("env", "helper");
     v[n++] = wft; v[n++] = (char *)"--";
     v[n++] = (char *)"span"; v[n++] = (char *)prep; v[n++] = (char *)target;
@@ -920,7 +968,7 @@ static int span_one_fwd(const char *root, const char *outdir, const char *helper
     if (cx_fmt(prod, sizeof prod, "%s/body.bin", dest)) die("path", dest);
     if (ck_complete(outdir, tag, prod)) { sy_printf("RESUME\t%s\n", tag); if (until_phase && !strcmp(until_phase, tag)) exit(0); return 0; }
     wf_scrub_dest(outdir, dest);
-    if (cx_fmt(wft, sizeof wft, "%s/tools/whole-front.cx", root)) die("path", "wf");
+    if (cx_fmt(wft, sizeof wft, "%s/tools/whole-front.cx", cc_tools_root(root))) die("path", "wf");
     if (sy_setenv("UNISACC_IDENTITY_HELPER", helper, 1)) die("env", "helper");
     v[n++] = wft; v[n++] = (char *)"--";
     v[n++] = (char *)"span"; v[n++] = (char *)prep; v[n++] = (char *)target;
@@ -1478,8 +1526,8 @@ static int wf_prepare_gen(const char *root, const char *outdir, const char *help
     if (cx_fmt(rec, sizeof rec, "%s/receipt.txt", nout)) die("path", "wfgrec");
     if (ck_done(outdir, ptag) && fsize(rec) >= 0) { sy_printf("RESUME\t%s\n", ptag); return 0; }
     clean_phase_path(outdir, ptag, nout, rec);
-    if (cx_fmt(wft, sizeof wft, "%s/tools/whole-front.cx", root)) die("path", "wf");
-    if (cx_fmt(tmpl, sizeof tmpl, "%s/tools/templates/whole-front.cx.in", root)) die("path", "wtmpl");
+    if (cx_fmt(wft, sizeof wft, "%s/tools/whole-front.cx", cc_tools_root(root))) die("path", "wf");
+    if (cx_fmt(tmpl, sizeof tmpl, "%s/tools/templates/whole-front.cx.in", cc_tools_root(root))) die("path", "wtmpl");
     check_whole_front_template(tmpl);
     clean_stale_prep(outdir, ptag, nout, rec, snap, pkg, ctor, helper, tmpl, objs);
     if (sy_setenv("UNISACC_IDENTITY_HELPER", helper, 1)) die("env", "helper");
@@ -2013,7 +2061,7 @@ static void g2_closures(const char *root, const char *outdir, const char *rev, c
                         const char *gen1, const char *ctor, const char *dest, const char *fp, const char *helper,
                         const char *target, const char *slug, int gen, int resume) {
     char tool[4400], com[4400], manifest[4400], prepare[80], group[80];
-    if (!eb_pinned(root, outdir, tool, sizeof tool) || cx_fmt(com, sizeof com, "%s/unisacc.com", root) || cx_fmt(manifest, sizeof manifest, "%s/g%d/%s.closures.tsv", fp, gen, slug) || cx_fmt(prepare, sizeof prepare, "g%d-%s-closure-prepare", gen, slug) || cx_fmt(group, sizeof group, "g%d-%s-closure", gen, slug)) die("path", slug);
+    if (!eb_pinned(cc_tools_root(root), outdir, tool, sizeof tool) || cx_fmt(com, sizeof com, "%s/unisacc.com", root) || cx_fmt(manifest, sizeof manifest, "%s/g%d/%s.closures.tsv", fp, gen, slug) || cx_fmt(prepare, sizeof prepare, "g%d-%s-closure-prepare", gen, slug) || cx_fmt(group, sizeof group, "g%d-%s-closure", gen, slug)) die("path", slug);
     if (ec_setenv("UNISA_CONTAINER", pkg, 1)) die("env", "g2 package");
     char *list[] = {"sh", com, tool, "--", (char *)snap, (char *)pkg, (char *)dest, (char *)ctor, "--target", (char *)target, "--closure-list", 0};
     pr_result result; long began = sy_now_ms();
@@ -2228,7 +2276,7 @@ static int warmup_tools(const char *root) {
     for (i = 0; w[i]; i++) {
         char p[4400];
         char *a[3];
-        if (cx_fmt(p, sizeof p, "%s/%s", root, w[i])) die("path", w[i]);
+        if (cx_fmt(p, sizeof p, "%s/%s", cc_tools_root(root), w[i])) die("path", w[i]);
         a[0] = p; a[1] = (char *)"-c"; a[2] = 0;
         if (bound_sh_secs(root, a, cc_pb())) die("warmup", w[i]);
         sy_printf("WARMUP\t%s\n", w[i]);
@@ -2868,7 +2916,7 @@ static int run_lane(const char *root, const char *outdir, const char *rev,
             } else {
                 char nets[4400], rts[4400], srcpkg[4400], rbt[4400], run[4400], phaseout[4400], stage[40], ctor[4400], tdir[4400];
                 if (cx_fmt(nets, sizeof nets, "%s/ctx/jobs", outdir) || cx_fmt(rts, sizeof rts, "%s/routes/declaration/routes.tsv", outdir) ||
-                    cx_fmt(srcpkg, sizeof srcpkg, "%s/routes/compiler.pkg", outdir) || cx_fmt(rbt, sizeof rbt, "%s/tools/release-build.cx", root) ||
+                    cx_fmt(srcpkg, sizeof srcpkg, "%s/routes/compiler.pkg", outdir) || cx_fmt(rbt, sizeof rbt, "%s/tools/release-build.cx", cc_tools_root(root)) ||
                     cx_fmt(run, sizeof run, "%s/p3-run", outdir) || cx_fmt(phaseout, sizeof phaseout, "%s/compiler.p4.pkg", run) ||
                     cx_fmt(stage, sizeof stage, "guard-%d", slice_index) || cx_fmt(ctor, sizeof ctor, "%s/Root41-bootstrap.com", build)) die("slice lane path", lane_phase);
                 if (fsize(run) < 0) die("REFUSE slice lane missing p3 run", run);
@@ -2931,7 +2979,7 @@ static int run_lane(const char *root, const char *outdir, const char *rev,
     }
     if (gen == 1 && ti < 2) {
         char gout[4400], parent[4400], ctor[4400], ebt[4400];
-        if (cx_fmt(parent, sizeof parent, "%s/gen1", outdir) || cx_fmt(gout, sizeof gout, "%s/%s", parent, slugs[ti]) || cx_fmt(ctor, sizeof ctor, "%s/Root41-bootstrap.com", build) || !eb_pinned(root, outdir, ebt, sizeof ebt)) die("lane entry", lane_phase);
+        if (cx_fmt(parent, sizeof parent, "%s/gen1", outdir) || cx_fmt(gout, sizeof gout, "%s/%s", parent, slugs[ti]) || cx_fmt(ctor, sizeof ctor, "%s/Root41-bootstrap.com", build) || !eb_pinned(cc_tools_root(root), outdir, ebt, sizeof ebt)) die("lane entry", lane_phase);
         sy_mkdir(parent, 0755);
         if (sy_mkdir(gout, 0755) && fsize(gout) < 0) die("lane output", gout);
         if (sy_setenv("UNISACC_CTOR", ctor, 1) || ec_setenv("UNISA_CONTAINER", pkg, 1) || sy_chdir(snap)) die("lane entry environment", snap);
@@ -3096,7 +3144,7 @@ static void watch_start(const char *root,const char *dir,const char *baseline) {
     char selected[4400];if(!baseline)baseline=auto_baseline(dir,selected,sizeof selected);
     char pace[4400],source[4400],table[4400],pidfile[4400],pidtext[40];
     int p[2];const char *saved_out=step_out;
-    if(cx_fmt(source,sizeof source,"%s/tools/chain-pace.cx",root))die("watch source",root);
+    if(cx_fmt(source,sizeof source,"%s/tools/chain-pace.cx",cc_tools_root(root)))die("watch source",root);
     /* Reuse the chain's source-build pin contract, never runnerprep's tlib preparation path. */
     step_out=dir;
     pin_soft=1;
@@ -3510,6 +3558,16 @@ int main(int argc, char **argv) {
         if (tx_eqz(argv[i], "--cache-manager-osx") && i + 2 < argc) { cm64 = argv[++i]; cmarm = argv[++i]; continue; }
         if (tx_eqz(argv[i], "--bootstrap") && i + 1 < argc) { boot = argv[++i]; continue; }
         if (tx_eqz(argv[i], "--until") && i + 1 < argc) { until_phase = argv[++i]; continue; }
+        if (tx_eqz(argv[i], "--tools-root") && i + 1 < argc) {
+            const char *tr = argv[++i];
+            sy_stat_t tst;
+            if (!tr || tr[0] != '/' || sy_stat(tr, &tst) || tst.kind != 'd' ||
+                sy_realpath(tr, g_tools_root, sizeof g_tools_root) < 0)
+                die("REFUSE --tools-root missing or not an absolute directory", tr);
+            cx_fmt(g_tools_root_mode, sizeof g_tools_root_mode, "%s", "override");
+            continue;
+        }
+        if (tx_eqz(argv[i], "--pin-all-tools")) { g_pin_all_tools = 1; continue; }
         if (tx_eqz(argv[i], "--main-steps")) { main_steps_only = 1; continue; }
         if (tx_eqz(argv[i], "--parallel") && i + 1 < argc) {
             parallel = parse_par(argv[++i]);
@@ -3609,8 +3667,116 @@ int main(int argc, char **argv) {
     if (until_phase && !recheck_only) residue_before(outdir, until_phase);
     chain_memo(until_phase, outdir);
     if (!lane_phase && uc_guard(root, outdir)) die("REFUSE unit cache active inside the chain", "uc_guard");
-    if (!lane_phase) { hb(outdir, "chain", "start"); watch_start(root, outdir, watch_baseline); }
     chain_paths(root, rev, snap);
+    if (!g_tools_root[0]) {
+        cx_fmt(g_tools_root, sizeof g_tools_root, "%s", snap);
+        cx_fmt(g_tools_root_mode, sizeof g_tools_root_mode, "%s", "snapshot");
+    }
+    if (!lane_phase && !recheck_only) {
+        if (tx_eqz(g_tools_root_mode, "snapshot") && fsize(snap) < 0 && sy_exists(".git") != 0) {
+            char mark[4400], rec[4400], stage[4400], owner[4400], lock[4400];
+            char bjson[4400], lpath[4400], jhash[65], lhash[65], identity[9000], cmd[14000];
+            if (!cx_fmt(bjson, sizeof bjson, "%s/unisacc.com.build.json", root) &&
+                !cx_fmt(lpath, sizeof lpath, "%s/unisacc.com", root) &&
+                fsize(bjson) >= 0 && fsize(lpath) >= 0 &&
+                !cr_snap(root, rev, 1, snap, 4400) &&
+                !cx_fmt(mark, sizeof mark, "%s/.release-rev", snap) &&
+                !cx_fmt(rec, sizeof rec, "%s/.chain-snap", snap) &&
+                !cx_fmt(stage, sizeof stage, "%s.partial", snap) &&
+                !cx_fmt(owner, sizeof owner, "%s.owner", stage) &&
+                !cx_fmt(lock, sizeof lock, "%s.lock", stage)) {
+                step_hash(bjson, jhash);
+                step_hash(lpath, lhash);
+                if (!cx_fmt(identity, sizeof identity, "chain-snap-v1\nroot=%s\nrev=%s\nproduct=%s\n%s\n",
+                            root, rev, jhash, lhash)) {
+                    int lockfd = sy_open(lock, O_RDWR | O_CREAT, 0600);
+                    if (lockfd >= 0 && !sy_flock(lockfd, 2)) {
+                        if (fsize(mark) < 0 && sy_exists(snap) == 0 &&
+                            !cx_write(owner, identity, strlen(identity)) &&
+                            !cx_fmt(cmd, sizeof cmd,
+                                    "rm -rf '%s' '%s.archive' && mkdir -p '%s' && "
+                                    "git archive --format=tar -o '%s.archive' '%s' && "
+                                    "tar -xf '%s.archive' -C '%s' && rm -f '%s.archive' && "
+                                    "cp -a '%s/unisacc.com' '%s/unisacc.com.build.json' '%s/' && "
+                                    "if [ -e '%s/unisacc.com.dev' ]; then cp -a '%s/unisacc.com.dev' '%s/'; fi",
+                                    stage, stage, stage, stage, rev, stage, stage, stage,
+                                    root, root, stage, root, root, stage)) {
+                            char *shv[] = {(char *)"/bin/sh", (char *)"-c", cmd, 0};
+                            if (!runv_secs(shv, cc_pb())) {
+                                char smark[4400], srec[4400];
+                                if (!cx_fmt(smark, sizeof smark, "%s/.release-rev", stage) &&
+                                    !cx_fmt(srec, sizeof srec, "%s/.chain-snap", stage) &&
+                                    !cx_write(smark, rev, 40) &&
+                                    !cx_write(srec, identity, strlen(identity)))
+                                    (void)sy_rename(stage, snap);
+                            }
+                            (void)sy_unlink(owner);
+                        }
+                        sy_close(lockfd);
+                    } else if (lockfd >= 0) sy_close(lockfd);
+                }
+            }
+        }
+        {
+            char dpath[4400], dcmd[9000];
+            if (!cx_fmt(dpath, sizeof dpath, "%s/chain-driver-diff.patch", outdir) &&
+                fsize(dpath) < 0 && sy_exists(".git") != 0 &&
+                !cx_fmt(dcmd, sizeof dcmd,
+                        "base=origin/main; git rev-parse --verify -q \"$base\" >/dev/null 2>&1 || base=HEAD; "
+                        "if git rev-parse --verify -q \"$base\" >/dev/null 2>&1 && git rev-parse --verify -q '%s^{commit}' >/dev/null 2>&1; then "
+                        "git diff \"$base\" '%s' -- "
+                        "tools/bg-candidate.cx tools/chain-run.cx tools/chain-watch.cx tools/candidate-chain.cx "
+                        "tools/chain-step.cx tools/whole-front.cx tools/preflight.cx tools/release-build.cx "
+                        "tools/release-ape.cx tools/chain-pace.cx tools/entry-build.cx tools/kernel-route.cx "
+                        "tools/asm-source.cx tools/source-job-wave.cx tools/cxlib/chainfacts.cx "
+                        "build/preflight-rules.tsv build/chain-phases.tsv "
+                        "tools/templates/whole-front.cx.in tools/templates/whole-win-span.cx.in; "
+                        "fi", rev, rev)) {
+                char *shv[] = {(char *)"/bin/sh", (char *)"-c", dcmd, 0};
+                pr_result r;
+                if (!pr_run("chain-driver-diff", shv, root, 0, 30, &r) && r.rc == 0) {
+                    (void)cx_write(dpath, r.out ? r.out : "", r.outn);
+                    sy_printf("CHAIN_DRIVER_DIFF\tbase=origin/main\trev=%s\ttools_root=%s\tmode=%s\tdiff_bytes=%ld\n",
+                              rev, cc_tools_root(root), g_tools_root_mode, (long)r.outn);
+                    if (r.out && r.outn > 0) sy_write_all(1, r.out, (long)r.outn);
+                }
+                pr_free(&r);
+            }
+        }
+        {
+            static const char *const tnames[] = {
+                "candidate-chain", "chain-step", "whole-front", "preflight", "release-build",
+                "release-ape", "chain-pace", "entry-build", "chainfacts", "kernel-route",
+                "asm-source", "source-job-wave", "preflight-rules",
+                "whole-front-template", "whole-win-span-template", 0
+            };
+            static const char *const trels[] = {
+                "tools/candidate-chain.cx", "tools/chain-step.cx", "tools/whole-front.cx",
+                "tools/preflight.cx", "tools/release-build.cx", "tools/release-ape.cx",
+                "tools/chain-pace.cx", "tools/entry-build.cx", "tools/cxlib/chainfacts.cx",
+                "tools/kernel-route.cx", "tools/asm-source.cx", "tools/source-job-wave.cx",
+                "build/preflight-rules.tsv", "tools/templates/whole-front.cx.in",
+                "tools/templates/whole-win-span.cx.in", 0
+            };
+            const char *tr = cc_tools_root(root);
+            char row[1400], fp2[4400], sha[65];
+            if (!cx_fmt(row, sizeof row, "TOOLS_ROOT\trev=%s\tmode=%s\ttools_root=%s\troot=%s\n",
+                        rev, g_tools_root_mode, tr, root)) {
+                cc_append_receipt_row(outdir, row);
+                sy_printf("%s", row);
+            }
+            for (int ti = 0; tnames[ti]; ti++) {
+                if (!cx_fmt(fp2, sizeof fp2, "%s/%s", tr, trels[ti]) && fsize(fp2) >= 0) {
+                    step_hash(fp2, sha);
+                    if (!cx_fmt(row, sizeof row,
+                                "TOOL_BLOB\ttool=%s\tpath=%s\ttools_root=%s\tmode=%s\tsrc_sha=%s\tnative_sha=-\n",
+                                tnames[ti], trels[ti], tr, g_tools_root_mode, sha))
+                        cc_append_receipt_row(outdir, row);
+                }
+            }
+        }
+    }
+    if (!lane_phase) { hb(outdir, "chain", "start"); watch_start(root, outdir, watch_baseline); }
     if (cx_fmt(build, sizeof build, "%s/build", outdir)) die("path", "build");
     if (cx_fmt(ctx, sizeof ctx, "%s/ctx", outdir)) die("path", "ctx");
     if (cx_fmt(routes, sizeof routes, "%s/routes", outdir)) die("path", "routes");
@@ -3649,8 +3815,16 @@ int main(int argc, char **argv) {
                 if (cx_fmt(sp, sizeof sp, "%s/%s", snap, rf[ri]) || sy_stat(sp, &rst) || rst.kind != 'f')
                     die("REFUSE snap cache file not regular", sp);
             }
-            if (!cx_fmt(wtmpl, sizeof wtmpl, "%s/tools/templates/whole-front.cx.in", root) && fsize(wtmpl) >= 0)
+            if (!cx_fmt(wtmpl, sizeof wtmpl, "%s/tools/templates/whole-front.cx.in", cc_tools_root(root)) && fsize(wtmpl) >= 0)
                 check_whole_front_template(wtmpl);
+            if (g_pin_all_tools) {
+                static const char *const ptools[] = {"whole-front", "release-build", "release-ape", 0};
+                for (int pti = 0; ptools[pti]; pti++) {
+                    char ptpath[4400], ptnat[4400];
+                    if (!cx_fmt(ptpath, sizeof ptpath, "%s/tools/%s.cx", cc_tools_root(root), ptools[pti]) && fsize(ptpath) >= 0)
+                        (void)tool_pinned(root, ptpath, cc_pb(), ptnat, sizeof ptnat);
+                }
+            }
         }
         mark(outdir, "snap", sy_now_ms() - t0);
     } else sy_printf("RESUME\tsnap\n");
@@ -3811,7 +3985,7 @@ int main(int argc, char **argv) {
         if (cx_fmt(nets, sizeof nets, "%s/jobs", ctx)) die("path", "nets");
         if (cx_fmt(rts, sizeof rts, "%s/declaration/routes.tsv", routes)) die("path", "rts");
         if (cx_fmt(srcpkg, sizeof srcpkg, "%s/compiler.pkg", routes)) die("path", "srcpkg");
-        if (cx_fmt(rbt, sizeof rbt, "%s/tools/release-build.cx", root)) die("path", "rb");
+        if (cx_fmt(rbt, sizeof rbt, "%s/tools/release-build.cx", cc_tools_root(root))) die("path", "rb");
         {
             char ctor[4400], ch[65];
             size_t cn = 0; char *cb;
@@ -3861,7 +4035,7 @@ int main(int argc, char **argv) {
         if (cx_fmt(p, sizeof p, "%s/gen1", outdir)) die("path", "g1d");
         if (cx_fmt(gout, sizeof gout, "%s/gen1/%s", outdir, st->id + 5)) die("path", "g1");
         if (cx_fmt(ctor, sizeof ctor, "%s/Root41-bootstrap.com", build)) die("path", "ctor");
-        if (!eb_pinned(root, outdir, ebt, sizeof ebt)) die("path", "eb");
+        if (!eb_pinned(cc_tools_root(root), outdir, ebt, sizeof ebt)) die("path", "eb");
         sy_mkdir(p, 0755);
         if (sy_mkdir(gout, 0755) && fsize(gout) < 0) die("mkdir", gout);
         if (snap_ok(snap, rev, helper)) die("snap", snap);
@@ -3885,7 +4059,7 @@ int main(int argc, char **argv) {
         char wft[4400], objs[4400], nout[4400], ctor[4400], tmpl[4400];
         char *v[16];
         int n = 0;
-        if (cx_fmt(wft, sizeof wft, "%s/tools/whole-front.cx", root)) die("path", "wf");
+        if (cx_fmt(wft, sizeof wft, "%s/tools/whole-front.cx", cc_tools_root(root))) die("path", "wf");
         if (cx_fmt(objs, sizeof objs, "%s/gen1/lnx-x86_64", outdir)) die("path", "objs");
         if (cx_fmt(nout, sizeof nout, "%s/wf-prep", chain_work)) die("path", "wfp");
         {
@@ -3894,7 +4068,7 @@ int main(int argc, char **argv) {
             clean_phase_path(outdir, "wf-prepare", nout, wrc);
         }
         if (cx_fmt(ctor, sizeof ctor, "%s/gen1/lnx-x86_64/candidate", outdir)) die("path", "wctor");
-        if (cx_fmt(tmpl, sizeof tmpl, "%s/tools/templates/whole-front.cx.in", root)) die("path", "tmpl");
+        if (cx_fmt(tmpl, sizeof tmpl, "%s/tools/templates/whole-front.cx.in", cc_tools_root(root))) die("path", "tmpl");
         check_whole_front_template(tmpl);
         {
             char wrc[4400];
@@ -4014,10 +4188,10 @@ int main(int argc, char **argv) {
         char *v[24];
         int n = 0;
         if (!cm64 || !cmarm || fsize(cm64) <= 0 || fsize(cmarm) <= 0) die("REFUSE pack needs cache-manager X64 ARM64 (explicit --cache-manager-osx or in-chain cache-manager/x64 and arm64)", 0);
-        if (cx_fmt(ape_tool, sizeof ape_tool, "%s/tools/release-ape.cx", root)) die("path", "ape");
+        if (cx_fmt(ape_tool, sizeof ape_tool, "%s/tools/release-ape.cx", cc_tools_root(root))) die("path", "ape");
         if (cx_fmt(packed, sizeof packed, "%s/ape-final", outdir)) die("path", "packed");
         if (cx_fmt(release_pkg, sizeof release_pkg, "%s/compiler.p4.pkg", outdir) ||
-            cx_fmt(model_tool, sizeof model_tool, "%s/tools/release-build.cx", snap)) die("path", "release models");
+            cx_fmt(model_tool, sizeof model_tool, "%s/tools/release-build.cx", cc_tools_root(snap))) die("path", "release models");
         char *model_args[] = {model_tool, "--", "release-models", pkg, release_pkg, 0};
         if (bound_sh(root, model_args)) die("release models", release_pkg);
         cc_verify_pkg_tape(root, snap, outdir, release_pkg, "pack-release-models");
