@@ -760,7 +760,8 @@ static int stage_tree_identity(char tree_sha[65], char def_dir[512]) {
     char cmd[2048], out[256];
     cx_fmt(cmd, sizeof cmd,
            "({ for f in ./unisacc.com cxroot.tsv build/chain-facts.tsv tools/entry-build.cx "
-           "tools/cxlib/chainfacts.cx tools/bound tools/check-piece-d-driveargs.cx; do "
+           "tools/cxlib/chainfacts.cx tools/cxlib/procrun.cx tools/cxlib/receipt.cx "
+           "tools/bound tools/check-piece-d-driveargs.cx; do "
            "test -f \"$f\" && printf '%%s\\n' \"$f\"; done; "
            "for d in include src cx ext exec; do "
            "test -d \"$d\" && LC_ALL=C find \"$d\" -type f; done; } | "
@@ -973,16 +974,19 @@ static int stage_full_link_verify(const char *dir_arg) {
     }
     cx_fmt(cmd, sizeof cmd,
            "set -eu; D='%s'; MINO=%d; N=0; "
-           "for o in \"$D\"/*.o; do "
+           "LIST=$(awk '$1 ~ /\\.o$/ {s=\"\"; for(i=2;i<=NF;i++) if($i~/^sha=/){s=substr($i,5)} if(s==\"\") exit 21; print $1 \"\\t\" s}' \"$D/receipt.txt\"); "
+           "test -n \"$LIST\" || exit 11; "
+           "printf '%%s\\n' \"$LIST\" | while IFS=$(printf '\\t') read -r fn rsha; do "
+           "  o=\"$D/$fn\"; c=\"$o.cache\"; "
            "  test -f \"$o\" || exit 11; "
-           "  c=\"$o.cache\"; test -f \"$c\" || exit 12; "
+           "  test -f \"$c\" || exit 12; "
            "  wsha=$(awk -F= '$1==\"object\"{print $2}' \"$c\"); "
            "  wbyt=$(awk -F= '$1==\"bytes\"{print $2}' \"$c\"); "
            "  gsha=$(sha256sum \"$o\" | awk '{print $1}'); "
            "  gbyt=$(stat -c %%s \"$o\"); "
-           "  test -n \"$wsha\" && test \"$gsha\" = \"$wsha\" && test \"$gbyt\" = \"$wbyt\" || exit 13; "
-           "  N=$((N+1)); "
+           "  test -n \"$wsha\" && test \"$gsha\" = \"$rsha\" && test \"$gsha\" = \"$wsha\" && test \"$gbyt\" = \"$wbyt\" || exit 13; "
            "done; "
+           "N=$(printf '%%s\\n' \"$LIST\" | wc -l); "
            "test \"$N\" -ge \"$MINO\" || exit 14; "
            "for k in entry.elf candidate bind.o driveargs.o; do "
            "  rsha=$(awk -v k=\"$k\" '$1==k{for(i=2;i<=NF;i++) if($i~/^sha=/){s=substr($i,5)}} END{print s}' \"$D/receipt.txt\"); "
@@ -1000,67 +1004,77 @@ static int stage_full_link_verify(const char *dir_arg) {
     return 0;
 }
 
-/* Red-then-green self-check for --stage-link-verify:
- * (1) closure-source edit (cx/stream/item.cx) -> verify refuses (rc=2), restore -> rc=0;
- * (2) .o tamper (bind.o) -> verify refuses (rc=2), restore -> rc=0;
- * (3) root.path mismatch -> verify refuses (rc=2), restore -> rc=0;
+/* Red-then-green self-check for --stage-link-verify in a PRIVATE COPY only
+ * (never modifies cwd sources or the caller's material dir):
+ * (1) closure-source edit (private copy cx/stream/item.cx) -> verify refuses (rc=2), restore -> rc=0;
+ * (2) .o tamper (private copy bind.o) -> verify refuses (rc=2), restore -> rc=0;
+ * (3) root.path mismatch (private copy) -> verify refuses (rc=2), restore -> rc=0;
  * (4) unprefixed DIR protection -> init refuses without wiping sentinel. */
 static int stage_full_link_selfcheck(const char *dir_arg) {
-    char tree_sha[65], defd[512], bindp[640], rp[640], safe_d[600], sent[640], tidp[640];
-    unsigned char *orig = 0; int64_t n = 0;
+    char tree_sha[65], defd[512], cwd[512], tmp_root[512], tmp_dir[512], safe_d[600], sent[640], tidp[640];
+    char cmd[4096], out[4096];
     int ok1 = 0, ok2 = 0, ok3 = 0, ok4 = 0;
     n_ok = 0; failed = 0;
+    if (!getcwd(cwd, sizeof cwd)) return 2;
     if (stage_tree_identity(tree_sha, defd) != 0) return 2;
     const char *dir = (dir_arg && dir_arg[0]) ? dir_arg : defd;
     if (stage_full_link_verify(dir) != 0) return 2;
 
-    /* 1. closure-source edit -> verify refuses -> restore -> verify passes */
-    if (sy_read_file("cx/stream/item.cx", &orig, &n, 4 << 20) == 0 && orig && n > 0) {
-        unsigned char *mod = (unsigned char *)mm_alloc((size_t)(n + 1));
-        if (mod) {
-            mm_copy(mod, (long)n + 1, orig, (long)n);
-            mod[n] = '\n';
-            int w1 = sy_write_file("cx/stream/item.cx", mod, (long)n + 1, 0644);
-            int r_red = (w1 == 0) ? stage_full_link_verify(dir) : 0;
-            int w2 = sy_write_file("cx/stream/item.cx", orig, (long)n, 0644);
-            int r_grn = (w2 == 0) ? stage_full_link_verify(dir) : 2;
-            ok1 = (w1 == 0 && r_red == 2 && w2 == 0 && r_grn == 0);
-            mm_free(mod);
-        }
-        mm_free(orig); orig = 0;
+    if (sy_mkdtemp(sy_tmpdir(), "sc-root-", tmp_root, sizeof tmp_root) != 0) return 2;
+    if (sy_mkdtemp(sy_tmpdir(), "unisacc-lnx-x86_64-link-sc-", tmp_dir, sizeof tmp_dir) != 0) {
+        (void)sy_remove_all(tmp_root);
+        return 2;
     }
-    ck_v(ok1, "LOCAL", "stage-verify-closure-edit-red-green", "cx/stream/item.cx", "closure-edit-refused-and-restore-passes");
 
-    /* 2. .o tamper -> verify refuses -> restore -> verify passes */
-    cx_fmt(bindp, sizeof bindp, "%s/bind.o", dir);
-    if (sy_read_file(bindp, &orig, &n, 8 << 20) == 0 && orig && n > 0) {
-        unsigned char *mod = (unsigned char *)mm_alloc((size_t)n);
-        if (mod) {
-            mm_copy(mod, (long)n, orig, (long)n);
-            mod[n - 1] ^= 0x01;
-            int w1 = sy_write_file(bindp, mod, (long)n, 0644);
-            int r_red = (w1 == 0) ? stage_full_link_verify(dir) : 0;
-            int w2 = sy_write_file(bindp, orig, (long)n, 0644);
-            int r_grn = (w2 == 0) ? stage_full_link_verify(dir) : 2;
-            ok2 = (w1 == 0 && r_red == 2 && w2 == 0 && r_grn == 0);
-            mm_free(mod);
-        }
-        mm_free(orig); orig = 0;
-    }
-    ck_v(ok2, "LOCAL", "stage-verify-obj-tamper-red-green", "bind.o", "object-tamper-refused-and-restore-passes");
+    /* Populate private root + private material dir copy; cwd and caller dir stay strictly read-only. */
+    cx_fmt(cmd, sizeof cmd,
+           "set -eu; R='%s'; TR='%s'; D='%s'; TD='%s'; "
+           "ln -s \"$R/unisacc.com\" \"$TR/unisacc.com\"; "
+           "cp -a \"$R/cxroot.tsv\" \"$R/build\" \"$R/tools\" \"$R/include\" \"$R/src\" \"$R/cx\" \"$R/ext\" \"$R/exec\" \"$TR/\"; "
+           "cp -a \"$D/.\" \"$TD/\"; "
+           "printf '%%s\\n' \"$TR\" > \"$TD/root.path\"",
+           cwd, tmp_root, dir, tmp_dir);
+    if (run_sh(cmd, out, sizeof out) == 0) {
+        /* 1. closure-source edit in private copy -> verify refuses -> restore -> verify passes */
+        cx_fmt(cmd, sizeof cmd,
+               "set -eu; TR='%s'; TD='%s'; cd \"$TR\"; "
+               "sh ./unisacc.com tools/check-piece-d-driveargs.cx -- --stage-link-verify \"$TD\" >/dev/null; "
+               "cp cx/stream/item.cx \"$TR/.item.bak\"; printf '\\n' >> cx/stream/item.cx; "
+               "rc_red=0; sh ./unisacc.com tools/check-piece-d-driveargs.cx -- --stage-link-verify \"$TD\" >/dev/null || rc_red=$?; "
+               "mv \"$TR/.item.bak\" cx/stream/item.cx; "
+               "sh ./unisacc.com tools/check-piece-d-driveargs.cx -- --stage-link-verify \"$TD\" >/dev/null; "
+               "test \"$rc_red\" -eq 2",
+               tmp_root, tmp_dir);
+        ok1 = (run_sh(cmd, out, sizeof out) == 0);
 
-    /* 3. root.path mismatch -> verify refuses -> restore -> verify passes */
-    cx_fmt(rp, sizeof rp, "%s/root.path", dir);
-    if (sy_read_file(rp, &orig, &n, 1024) == 0 && orig && n > 0) {
-        const char *other = "/tmp/other-root-mismatch\n";
-        int w1 = sy_write_file(rp, (const unsigned char *)other, (long)strlen(other), 0644);
-        int r_red = (w1 == 0) ? stage_full_link_verify(dir) : 0;
-        int w2 = sy_write_file(rp, orig, (long)n, 0644);
-        int r_grn = (w2 == 0) ? stage_full_link_verify(dir) : 2;
-        ok3 = (w1 == 0 && r_red == 2 && w2 == 0 && r_grn == 0);
-        mm_free(orig); orig = 0;
+        /* 2. .o tamper in private copy -> verify refuses -> restore -> verify passes */
+        cx_fmt(cmd, sizeof cmd,
+               "set -eu; TR='%s'; TD='%s'; cd \"$TR\"; "
+               "cp \"$TD/bind.o\" \"$TR/.bind.bak\"; printf 'X' >> \"$TD/bind.o\"; "
+               "rc_red=0; sh ./unisacc.com tools/check-piece-d-driveargs.cx -- --stage-link-verify \"$TD\" >/dev/null || rc_red=$?; "
+               "mv \"$TR/.bind.bak\" \"$TD/bind.o\"; "
+               "sh ./unisacc.com tools/check-piece-d-driveargs.cx -- --stage-link-verify \"$TD\" >/dev/null; "
+               "test \"$rc_red\" -eq 2",
+               tmp_root, tmp_dir);
+        ok2 = (run_sh(cmd, out, sizeof out) == 0);
+
+        /* 3. root.path mismatch in private copy -> verify refuses -> restore -> verify passes */
+        cx_fmt(cmd, sizeof cmd,
+               "set -eu; TR='%s'; TD='%s'; cd \"$TR\"; "
+               "printf '/tmp/other-root-mismatch\\n' > \"$TD/root.path\"; "
+               "rc_red=0; sh ./unisacc.com tools/check-piece-d-driveargs.cx -- --stage-link-verify \"$TD\" >/dev/null || rc_red=$?; "
+               "printf '%%s\\n' \"$TR\" > \"$TD/root.path\"; "
+               "sh ./unisacc.com tools/check-piece-d-driveargs.cx -- --stage-link-verify \"$TD\" >/dev/null; "
+               "test \"$rc_red\" -eq 2",
+               tmp_root, tmp_dir);
+        ok3 = (run_sh(cmd, out, sizeof out) == 0);
     }
-    ck_v(ok3, "LOCAL", "stage-verify-root-path-red-green", "root.path", "root-mismatch-refused-and-restore-passes");
+    (void)sy_remove_all(tmp_root);
+    (void)sy_remove_all(tmp_dir);
+
+    ck_v(ok1, "LOCAL", "stage-verify-closure-edit-red-green", "cx/stream/item.cx", "private-copy-closure-edit-refused-and-restore-passes");
+    ck_v(ok2, "LOCAL", "stage-verify-obj-tamper-red-green", "bind.o", "private-copy-object-tamper-refused-and-restore-passes");
+    ck_v(ok3, "LOCAL", "stage-verify-root-path-red-green", "root.path", "private-copy-root-mismatch-refused-and-restore-passes");
 
     /* 4. unprefixed DIR protection */
     if (sy_mkdtemp(sy_tmpdir(), "nonprefixed-stage-", safe_d, sizeof safe_d) == 0) {
