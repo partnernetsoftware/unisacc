@@ -1314,61 +1314,11 @@ static int parse_stage_material_line(const char *buf, char *dir_out, size_t dir_
     return 1;
 }
 
-static int compute_shared_tree_identity(const char *repo, char tree_sha[65], char def_dir[640]) {
-    char out[256];
-    char *v[] = {
-        "sh", "-c",
-        "({ for f in ./unisacc.com cxroot.tsv build/chain-facts.tsv tools/entry-build.cx "
-        "tools/cxlib/chainfacts.cx tools/bound tools/check-piece-d-driveargs.cx; do "
-        "test -f \"$f\" && printf '%s\\n' \"$f\"; done; "
-        "for d in include src cx ext exec; do "
-        "test -d \"$d\" && LC_ALL=C find \"$d\" -type f; done; } | "
-        "LC_ALL=C sort -u | xargs sha256sum) | sha256sum | awk '{print $1}'",
-        0
-    };
-    if (run_cmd(repo, v, out, sizeof out, 20) != 0 || !is_hex64(out, 64)) return 1;
-    if (mm_copy(tree_sha, 65, out, 64)) return 1;
-    tree_sha[64] = 0;
-    if (def_dir) {
-        char id16[17];
-        if (mm_copy(id16, 17, tree_sha, 16)) return 1;
-        id16[16] = 0;
-        if (cx_fmt(def_dir, 640, "%s/unisacc-lnx-x86_64-link-%s", sy_tmpdir(), id16)) return 1;
-    }
-    return 0;
-}
-
 static int run_local_ape_selfcontained(const char *repo) {
     char fdir[512], shared_dir[640], eb_dir[640], cand_p[700], tdir[640], m53_cx[640], out[16384], cmd[3072];
-    char tree_sha[65], cand_sha[65], actual_cand[65], want_tree[65];
+    char tree_sha[65], cand_sha[65], actual_cand[65];
     const char *explicit_dir = sy_env("UNISACC_FULL_LINK_DIR");
-    int in_reg_layout = buf_contains_bytes(repo, (size_t)tx_len(repo, 512), "/unisacc-reg-layout-");
-    if (in_reg_layout) {
-        /* Inside register.cx shallow layout selftest (different cwd, identical tree content):
-         * verify tree_id.sha + candidate.sha directly by content hash (fail-closed rc=2 on any mismatch). */
-        char id_p[700], csha_p[700];
-        size_t idn = 0, csn = 0;
-        if (compute_shared_tree_identity(repo, want_tree, shared_dir) != 0) {
-            sy_eprintf("LOCAL_APE_REFUSE\treason=shared-full-link-tree-id-failed\n");
-            return 2;
-        }
-        if (explicit_dir && explicit_dir[0] && cx_fmt(shared_dir, sizeof shared_dir, "%s", explicit_dir)) return 2;
-        if (cx_fmt(id_p, sizeof id_p, "%s/tree_id.sha", shared_dir) ||
-            cx_fmt(csha_p, sizeof csha_p, "%s/candidate.sha", shared_dir)) return 2;
-        char *idb = cx_read(id_p, &idn);
-        char *csb = cx_read(csha_p, &csn);
-        int ok_id = (idb && idn >= 64 && tx_same(idb, 64, want_tree, 64) && csb && csn >= 64 && is_hex64(csb, 64));
-        if (ok_id) {
-            (void)mm_copy(tree_sha, 65, want_tree, 64); tree_sha[64] = 0;
-            (void)mm_copy(cand_sha, 65, csb, 64); cand_sha[64] = 0;
-        }
-        if (idb) mm_free(idb);
-        if (csb) mm_free(csb);
-        if (!ok_id) {
-            sy_eprintf("LOCAL_APE_REFUSE\treason=shared-full-link-material-missing-or-stale\tdir=%s\n", shared_dir);
-            return 2;
-        }
-    } else if (explicit_dir && explicit_dir[0]) {
+    if (explicit_dir && explicit_dir[0]) {
         char *vv[] = {"sh", "./unisacc.com", "tools/check-piece-d-driveargs.cx", "--", "--stage-link-verify", (char *)explicit_dir, 0};
         if (run_cmd(repo, vv, out, sizeof out, 25) != 0 ||
             parse_stage_material_line(out, shared_dir, sizeof shared_dir, tree_sha, cand_sha) != 0) {
