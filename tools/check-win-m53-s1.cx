@@ -9,6 +9,7 @@
 #pragma unisa use sys.io
 #pragma unisa use sys.posix
 #pragma unisa use sys.proc
+#pragma unisa use sys.sha
 #pragma unisa use text.text
 #pragma unisa use mem.bytes
 #pragma unisa use mem.heap
@@ -43,6 +44,52 @@ static unsigned int rd_u32(const unsigned char *p) {
 
 static unsigned long long rd_u64(const unsigned char *p) {
     return (unsigned long long)rd_u32(p) | ((unsigned long long)rd_u32(p + 4) << 32);
+}
+
+static void wr_u64(unsigned char *p, unsigned long long v) {
+    int i;
+    for (i = 0; i < 8; i++) p[i] = (unsigned char)((v >> (i * 8)) & 0xffULL);
+}
+
+/* Wrap a P4 container payload into a fixture APE with 4096B non-source header + UNIPKG1\n footer. */
+static int pack_fixture_ape(const unsigned char *p4, long p4_len, const char *ape_path, char sha_out[65]) {
+    long hdr_len = 4096L;
+    long tot = hdr_len + p4_len + 16L;
+    unsigned char *buf = (unsigned char *)mm_alloc((size_t)tot);
+    int rc;
+    if (!buf) return 1;
+    mm_fill(buf, tot, 0, hdr_len);
+    buf[0] = '\x7f'; buf[1] = 'E'; buf[2] = 'L'; buf[3] = 'F';
+    buf[4] = 2; buf[5] = 1; buf[6] = 1; buf[7] = 0;
+    if (p4_len > 0) mm_copy(buf + hdr_len, tot - hdr_len, p4, p4_len);
+    mm_copy(buf + hdr_len + p4_len, 16, "UNIPKG1\n", 8);
+    wr_u64(buf + hdr_len + p4_len + 8, (unsigned long long)p4_len);
+    rc = sy_write_file(ape_path, buf, tot, 0600);
+    if (rc == 0 && sha_out) {
+        if (sy_sha256_hex(buf, (int64_t)tot, sha_out) != 0 || !sha_out[0]) rc = 1;
+    }
+    mm_free(buf);
+    return rc;
+}
+
+static int run_judge_sh(const char *cand_ape, const char *cand_sha, const char *rev,
+                        const char *rcpt, const char *outf, const char *slicef, const char *locf,
+                        char *out, long cap) {
+    char e_ape[640], e_sha[96], e_rev[96], e_rcpt[640], e_out[640], e_sl[640], e_loc[640];
+    cx_fmt(e_ape, sizeof e_ape, "CAND_APE=%s", cand_ape);
+    cx_fmt(e_sha, sizeof e_sha, "CAND_SHA=%s", cand_sha);
+    cx_fmt(e_rev, sizeof e_rev, "SOURCE_COMMIT=%s", rev);
+    cx_fmt(e_rcpt, sizeof e_rcpt, "RCPT=%s", rcpt);
+    cx_fmt(e_out, sizeof e_out, "OUT=%s", outf);
+    cx_fmt(e_sl, sizeof e_sl, "SLICE=%s", slicef);
+    cx_fmt(e_loc, sizeof e_loc, "LOC=%s", locf);
+    char *av[] = {
+        "env", e_ape, e_sha, "DISP_TS=1764200000", "NOW_TS=1764200060", "RUN_ID=r1",
+        e_rev, "EXPECT_TARGET=lnx/x86_64", e_rcpt, e_out, e_sl, e_loc,
+        "VECTORS=tests/fixtures/win-m53-s1/vectors.tsv",
+        "sh", "tests/fixtures/win-m53-s1/judge.sh", 0
+    };
+    return run_av_merged(av, out, cap);
 }
 
 /* Read first 1024 bytes via sy_open + sy_read (no whole-file size cap). */
@@ -193,9 +240,11 @@ int main(void) {
     }
 
     if (sy_exists(bin) == 1) {
-        /* 2. Pack real P4 candidate embedding tape/lnx-x86_64/m53.tapeslice, then run live dual-arm APE readback + --judge (rc_write3 / rc_verify) */
-        char cand_p4[600];
+        /* 2. Pack real fixture APE embedding tape/lnx-x86_64/m53.tapeslice, then run live dual-arm APE readback + --judge (rc_write3 / rc_verify) */
+        char cand_p4[600], cand_ape[600], cand_ape_sha[65];
         cx_fmt(cand_p4, sizeof cand_p4, "%s/cand_m53.p4", g_tmp);
+        cx_fmt(cand_ape, sizeof cand_ape, "%s/cand_m53.ape", g_tmp);
+        cand_ape_sha[0] = 0;
         {
             char m53_cx[600], m53_tape[600], m53_src_sl[600], dummy_so[600];
             const char *msrc =
@@ -219,14 +268,22 @@ int main(void) {
             int rs1 = run_av_merged(av_s1, out, sizeof out);
             int rs2 = (rs1 == 0) ? run_av_merged(av_s2, out, sizeof out) : 1;
             int rs3 = (rs2 == 0) ? run_av_merged(av_s3, out, sizeof out) : 1;
+            int rs4 = 1;
+            if (rs3 == 0) {
+                unsigned char *p4b = 0; int64_t p4n = 0;
+                if (sy_read_file(cand_p4, &p4b, &p4n, 8 << 20) == 0 && p4b && p4n > 0) {
+                    rs4 = pack_fixture_ape(p4b, (long)p4n, cand_ape, cand_ape_sha);
+                    mm_free(p4b);
+                }
+            }
             char *av_p[] = {bin, "--receipt", rcpt, "--output", outf, "--slice", slicef, "--locators", locf,
-                            "--run-id", "r1", "--rev", (char *)rev, "--candidate-file", cand_p4,
+                            "--run-id", "r1", "--rev", (char *)rev, "--candidate-file", cand_ape,
                             "--expect-target", "lnx/x86_64", "--ts", "1764200000", 0};
             char *av_j[] = {bin, "--judge", "--receipt", rcpt, "--output", outf, "--slice", slicef,
-                            "--run-id", "r1", "--rev", (char *)rev, "--candidate-file", cand_p4,
+                            "--run-id", "r1", "--rev", (char *)rev, "--candidate-file", cand_ape,
                             "--expect-target", "lnx/x86_64", "--producer", "win-m53-s1-parity",
                             "--purpose", "s1-parity", "--now-ts", "1764200060", 0};
-            int r1 = (rs3 == 0) ? run_av_merged(av_p, out, sizeof out) : 1;
+            int r1 = (rs4 == 0) ? run_av_merged(av_p, out, sizeof out) : 1;
             int p_ok = (r1 == 0 && strstr(out, "PASS\tm53-s1-parity\ttarget=lnx/x86_64") != 0 &&
                         sy_exists(slicef) == 1 && sy_exists(locf) == 1);
             int r2 = p_ok ? run_av_merged(av_j, out, sizeof out) : 1;
@@ -265,13 +322,13 @@ int main(void) {
         /* 3. Negative controls + Linux O_NOFOLLOW/O_NONBLOCK receipt open semantics (regular PASS, symlink REFUSE, FIFO REFUSE) */
         {
             char *av_m[] = {bin, "--receipt", rcpt, "--output", outf, "--slice", slicef, "--run-id", "r2",
-                            "--rev", (char *)rev, "--candidate-file", cand_p4,
+                            "--rev", (char *)rev, "--candidate-file", cand_ape,
                             "--ts", "1764200000", 0};
             ck(run_av_merged(av_m, out, sizeof out) == 2, "refuse-missing-expect-target");
         }
         {
             char *av_w[] = {bin, "--receipt", rcpt, "--output", outf, "--slice", slicef, "--run-id", "r2",
-                            "--rev", (char *)rev, "--candidate-file", cand_p4,
+                            "--rev", (char *)rev, "--candidate-file", cand_ape,
                             "--expect-target", "win/arm64", "--ts", "1764200000", 0};
             ck(run_av_merged(av_w, out, sizeof out) == 1 && strstr(out, "target-mismatch") != 0, "refuse-wrong-expect-target");
         }
@@ -284,20 +341,20 @@ int main(void) {
         {
             (void)sy_write_file(bad_out, (const unsigned char *)"tampered\n", 9, 0600);
             char *av_to[] = {bin, "--judge", "--receipt", rcpt, "--output", bad_out, "--slice", slicef,
-                             "--run-id", "r1", "--rev", (char *)rev, "--candidate-file", cand_p4,
+                             "--run-id", "r1", "--rev", (char *)rev, "--candidate-file", cand_ape,
                              "--expect-target", "lnx/x86_64", "--now-ts", "1764200060", 0};
             ck(run_av_merged(av_to, out, sizeof out) == 1 && strstr(out, "output-mismatch") != 0, "rc-verify-rejects-tampered-output");
         }
         {
             (void)sy_write_file(bad_slice, (const unsigned char *)"badslice", 8, 0600);
             char *av_ts[] = {bin, "--judge", "--receipt", rcpt, "--output", outf, "--slice", bad_slice,
-                             "--run-id", "r1", "--rev", (char *)rev, "--candidate-file", cand_p4,
+                             "--run-id", "r1", "--rev", (char *)rev, "--candidate-file", cand_ape,
                              "--expect-target", "lnx/x86_64", "--now-ts", "1764200060", 0};
             ck(run_av_merged(av_ts, out, sizeof out) == 1 && strstr(out, "inputs-mismatch") != 0, "rc-verify-rejects-tampered-slice");
         }
         {
             char *av_tp[] = {bin, "--judge", "--receipt", rcpt, "--output", outf, "--slice", slicef,
-                             "--run-id", "r1", "--rev", (char *)rev, "--candidate-file", cand_p4,
+                             "--run-id", "r1", "--rev", (char *)rev, "--candidate-file", cand_ape,
                              "--expect-target", "lnx/x86_64", "--producer", "wrong-producer",
                              "--purpose", "s1-parity", "--now-ts", "1764200060", 0};
             ck(run_av_merged(av_tp, out, sizeof out) == 1 && strstr(out, "producer-or-purpose-mismatch") != 0, "rc-verify-rejects-wrong-producer");
@@ -311,7 +368,7 @@ int main(void) {
                     mm_copy(pos, 17, "target\twin/x86_64", 17);
                     (void)sy_write_file(bad_rcpt, rb, (long)rn, 0600);
                     char *av_tt[] = {bin, "--judge", "--receipt", bad_rcpt, "--output", outf, "--slice", slicef,
-                                     "--run-id", "r1", "--rev", (char *)rev, "--candidate-file", cand_p4,
+                                     "--run-id", "r1", "--rev", (char *)rev, "--candidate-file", cand_ape,
                                      "--expect-target", "lnx/x86_64", "--now-ts", "1764200060", 0};
                     tok = (run_av_merged(av_tt, out, sizeof out) == 1 &&
                            (strstr(out, "bad-binding") != 0 || strstr(out, "target-mismatch") != 0));
@@ -328,20 +385,95 @@ int main(void) {
             char *av_mkf[] = {"mkfifo", fifo_rcpt, 0};
             int fifo_ok = (run_av_merged(av_mkf, out, sizeof out) == 0);
             char *av_sym[] = {bin, "--judge", "--receipt", sym_rcpt, "--output", outf, "--slice", slicef,
-                              "--run-id", "r1", "--rev", (char *)rev, "--candidate-file", cand_p4,
+                              "--run-id", "r1", "--rev", (char *)rev, "--candidate-file", cand_ape,
                               "--expect-target", "lnx/x86_64", "--producer", "win-m53-s1-parity",
                               "--purpose", "s1-parity", "--now-ts", "1764200060", 0};
             char *av_fif[] = {bin, "--judge", "--receipt", fifo_rcpt, "--output", outf, "--slice", slicef,
-                              "--run-id", "r1", "--rev", (char *)rev, "--candidate-file", cand_p4,
+                              "--run-id", "r1", "--rev", (char *)rev, "--candidate-file", cand_ape,
                               "--expect-target", "lnx/x86_64", "--producer", "win-m53-s1-parity",
                               "--purpose", "s1-parity", "--now-ts", "1764200060", 0};
             int r_sym = sym_ok ? run_av_merged(av_sym, out, sizeof out) : 0;
             int r_fif = fifo_ok ? run_av_merged(av_fif, out, sizeof out) : 0;
             ck(sym_ok && r_sym == 1 && fifo_ok && r_fif == 1, "linux-receipt-nofollow-rejects-symlink-and-fifo");
         }
+
+        /* 3b. Executable tests for tests/fixtures/win-m53-s1/judge.sh: positive fixture APE + 4 negative controls */
+        {
+            int rj_pos = run_judge_sh(cand_ape, cand_ape_sha, rev, rcpt, outf, slicef, locf, out, sizeof out);
+            ck(rj_pos == 0 && strstr(out, "JUDGE_OK\ttarget=lnx/x86_64\t") != 0, "judge-sh-positive-fixture-ape");
+        }
+        {
+            int rj_sl = run_judge_sh(cand_ape, cand_ape_sha, rev, rcpt, outf, bad_slice, locf, out, sizeof out);
+            ck(rj_sl != 0 && strstr(out, "REFUSE slice-mismatch") != 0, "judge-sh-rejects-self-compare-slice");
+        }
+        {
+            char empty_ape[600], empty_sha[65];
+            const char *empty_p4 = "P 4 0 0 0\n";
+            cx_fmt(empty_ape, sizeof empty_ape, "%s/missing_key.ape", g_tmp);
+            empty_sha[0] = 0;
+            int mk_ok = (pack_fixture_ape((const unsigned char *)empty_p4, 10L, empty_ape, empty_sha) == 0);
+            int rj_mk = mk_ok ? run_judge_sh(empty_ape, empty_sha, rev, rcpt, outf, slicef, locf, out, sizeof out) : 0;
+            ck(mk_ok && rj_mk != 0 && strstr(out, "REFUSE missing-slice-key") != 0, "judge-sh-rejects-missing-key-ape");
+        }
+        {
+            char dup_out[600];
+            unsigned char *ob = 0; int64_t on = 0;
+            int dup_ok = 0;
+            cx_fmt(dup_out, sizeof dup_out, "%s/dup_id.out", g_tmp);
+            if (sy_read_file(outf, &ob, &on, 65536) == 0 && ob && on > 0) {
+                char *p1 = strstr((char *)ob, "\nVEC\t1\t");
+                if (p1) {
+                    p1[5] = '0';
+                    if (sy_write_file(dup_out, ob, (long)on, 0600) == 0) {
+                        int rj_dup = run_judge_sh(cand_ape, cand_ape_sha, rev, rcpt, dup_out, slicef, locf, out, sizeof out);
+                        dup_ok = (rj_dup != 0 && strstr(out, "REFUSE duplicate-vector") != 0);
+                    }
+                }
+                mm_free(ob);
+            }
+            ck(dup_ok, "judge-sh-rejects-duplicate-vector-id");
+        }
+        {
+            char bad_in_out[600], bad_loc[600];
+            unsigned char *ob = 0, *lb = 0; int64_t on = 0, ln = 0;
+            int in_ok = 0, vec_ok = 0;
+            cx_fmt(bad_in_out, sizeof bad_in_out, "%s/bad_in_sha.out", g_tmp);
+            cx_fmt(bad_loc, sizeof bad_loc, "%s/bad_vec_loc.tsv", g_tmp);
+            if (sy_read_file(outf, &ob, &on, 65536) == 0 && ob && on > 0) {
+                char *pi = strstr((char *)ob, "\tin_sha=");
+                if (pi && pi[8]) {
+                    pi[8] = (pi[8] == '0') ? '1' : '0';
+                    if (sy_write_file(bad_in_out, ob, (long)on, 0600) == 0) {
+                        int rj_in = run_judge_sh(cand_ape, cand_ape_sha, rev, rcpt, bad_in_out, slicef, locf, out, sizeof out);
+                        in_ok = (rj_in != 0 && strstr(out, "REFUSE bad-vector-in-sha") != 0);
+                    }
+                }
+                mm_free(ob);
+            }
+            if (sy_read_file(locf, &lb, &ln, 65536) == 0 && lb && ln > 0) {
+                char *pv = strstr((char *)lb, "vectors_sha\t");
+                if (pv && pv[12]) {
+                    pv[12] = (pv[12] == '0') ? '1' : '0';
+                    if (sy_write_file(bad_loc, lb, (long)ln, 0600) == 0) {
+                        int rj_v = run_judge_sh(cand_ape, cand_ape_sha, rev, rcpt, outf, slicef, bad_loc, out, sizeof out);
+                        vec_ok = (rj_v != 0 && strstr(out, "REFUSE bad-vectors-sha") != 0);
+                    }
+                }
+                mm_free(lb);
+            }
+            ck(in_ok && vec_ok, "judge-sh-rejects-bad-input-sha-and-vectors-sha");
+        }
+        {
+            char e_la[640], e_sha[96];
+            cx_fmt(e_la, sizeof e_la, "JUDGE_LAUNCHER=%s", cand_ape);
+            cx_fmt(e_sha, sizeof e_sha, "CAND_SHA=%s", cand_ape_sha);
+            char *av_ul[] = {"env", e_la, e_sha, "sh", "tests/fixtures/win-m53-s1/judge.sh", 0};
+            int rj_ul = run_av_merged(av_ul, out, sizeof out);
+            ck(rj_ul != 0 && strstr(out, "REFUSE untrusted-launcher-sha") != 0, "judge-sh-rejects-untrusted-launcher");
+        }
     }
 
-    /* 4. Workflow contract check (3-job repo-scoped provenance + delivered-APE readback + independent judge) */
+    /* 4. Workflow contract check (3-job repo-scoped provenance + delivered-APE readback + pinned trusted launcher) */
     {
         unsigned char *wb = 0; int64_t wn = 0;
         int wok = 0;
@@ -356,9 +488,10 @@ int main(void) {
                    strstr(s, "ubuntu-latest") != 0 &&
                    strstr(s, "download_repo_scoped") != 0 &&
                    strstr(s, "CHAIN_FORMAT=rc_v3") != 0 &&
-                   strstr(s, "TRUSTED_SLICE_SHA") != 0 &&
+                   strstr(s, "trusted-unisacc.com") != 0 &&
+                   strstr(s, "ed50199fd085be4da2fa692db8010057be6674f8bfc609b101e8d18daf23583f") != 0 &&
+                   strstr(s, "sh tests/fixtures/win-m53-s1/judge.sh") != 0 &&
                    strstr(s, "tests/fixtures/win-m53-s1/vectors.tsv") != 0 &&
-                   strstr(s, "delivered_ape:tape/lnx-x86_64/m53.tapeslice") != 0 &&
                    strstr(s, "candidate_url:") != 0 &&
                    strstr(s, "candidate_sha256:") != 0 &&
                    strstr(s, "candidate_receipt_url:") != 0 &&

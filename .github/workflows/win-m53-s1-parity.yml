@@ -208,9 +208,14 @@ jobs:
           esac
 
           download_repo_scoped "$CANDIDATE_URL" win-m53-baseline/candidate-unisacc.com "$CANDIDATE_SHA256" "0"
+          TRUSTED_LAUNCHER_URL="https://github.com/${REPO}/releases/download/v0.1.6/unisacc.com"
+          TRUSTED_LAUNCHER_SHA="ed50199fd085be4da2fa692db8010057be6674f8bfc609b101e8d18daf23583f"
+          download_repo_scoped "$TRUSTED_LAUNCHER_URL" win-m53-baseline/trusted-unisacc.com "$TRUSTED_LAUNCHER_SHA" "0"
+          chmod +x win-m53-baseline/trusted-unisacc.com
           rm -rf win-m53-baseline/dl
           GOT_SHA="$(sha256sum win-m53-baseline/candidate-unisacc.com | awk '{print $1}')"
           test "$GOT_SHA" = "$CANDIDATE_SHA256"
+          test "$GOT_SHA" != "$TRUSTED_LAUNCHER_SHA"
           printf '%s\n' "$CANDIDATE_SHA256" > win-m53-baseline/candidate.sha256
           date +%s > win-m53-baseline/dispatch_ts.txt
       - uses: actions/upload-artifact@v4
@@ -299,162 +304,24 @@ jobs:
         with:
           name: win-m53-produce-${{ matrix.os }}-${{ github.run_id }}
           path: win-m53-produce
-      - name: Independent judge (never executes candidate APE; extracts slice from trusted APE, binds vectors.tsv, verifies v3 receipt + binding_sha)
+      - name: Independent judge (never executes candidate APE; pinned v0.1.6 launcher runs tests/win-m53-s1-judge.cx)
         env:
           SOURCE_COMMIT: ${{ inputs.source_commit }}
           EXPECT_TARGET: ${{ matrix.target }}
         run: |
           set -eu
-          CAND_APE="win-m53-baseline/candidate-unisacc.com"
-          CAND_SHA="$(cat win-m53-baseline/candidate.sha256)"
-          DISP_TS="$(cat win-m53-baseline/dispatch_ts.txt)"
-          NOW_TS="$(date +%s)"
-          RUN_ID="ci-${GITHUB_RUN_ID}-${{ matrix.os }}"
-          RCPT="win-m53-produce/m53-s1.rcpt"
-          OUT="win-m53-produce/m53-s1.out"
-          SLICE="win-m53-produce/m53_bin2.tapeslice"
-          LOC="win-m53-produce/locators.tsv"
-          VECTORS="tests/fixtures/win-m53-s1/vectors.tsv"
-
-          test -s "$CAND_APE" && test -s "$RCPT" && test -s "$OUT" && test -s "$SLICE" && test -s "$LOC" && test -s "$VECTORS"
-          test "$(sha256sum "$CAND_APE" | awk '{print $1}')" = "$CAND_SHA"
-
-          # Independently extract tape/lnx-x86_64/m53.tapeslice from fetch's trusted APE (never trust produce's slice copy alone)
-          APE_SZ="$(stat -c %s "$CAND_APE")"
-          test "$APE_SZ" -gt 32
-          MAGIC="$(tail -c 16 "$CAND_APE" | head -c 8)"
-          test "$MAGIC" = "$(printf 'UNIPKG1\n')"
-          PKG_LEN="$(od -An -tu8 -N8 -j $((APE_SZ - 8)) "$CAND_APE" | tr -d ' \n')"
-          PKG_OFF=$((APE_SZ - 16 - PKG_LEN))
-          test "$PKG_LEN" -gt 10 && test "$PKG_OFF" -ge 0
-          dd if="$CAND_APE" of=win-m53-baseline/trusted.p4 bs=1 skip="$PKG_OFF" count="$PKG_LEN" status=none
-          # Binary-safe P4 F-record extraction using dd + head (handles arbitrary binary payloads with NUL/newlines)
-          P4_FILE="win-m53-baseline/trusted.p4"
-          read_line_at() {
-            tail -c +"$(($1 + 1))" "$P4_FILE" | head -n 1
-          }
-          POS=0
-          HDR="$(read_line_at "$POS")"
-          POS=$((POS + ${#HDR} + 1))
-          set -- $HDR
-          test "$1" = "P" && test "$2" = "4"
-          PM="$3"; PS="$4"; NR="$5"
-          I=0
-          while [ "$I" -lt "$PS" ]; do
-            L="$(read_line_at "$POS")"
-            POS=$((POS + ${#L} + 1))
-            I=$((I + 1))
-          done
-          I=0
-          while [ "$I" -lt "$PM" ]; do
-            L="$(read_line_at "$POS")"
-            POS=$((POS + ${#L} + 1))
-            set -- $L
-            POS=$((POS + $2))
-            I=$((I + 1))
-          done
-          FOUND_SL=0
-          I=0
-          while [ "$I" -lt "$NR" ]; do
-            L="$(read_line_at "$POS")"
-            POS=$((POS + ${#L} + 1))
-            set -- $L
-            test "$1" = "F"
-            KL="$2"; DL="$3"; RL="$4"; CO="$5"
-            KEY="$(dd if="$P4_FILE" bs=1 skip="$POS" count="$KL" status=none)"
-            if [ "$KEY" = "tape/lnx-x86_64/m53.tapeslice" ]; then
-              test "$FOUND_SL" -eq 0 && test "$CO" = "0" && test "$DL" = "$RL" && test "$DL" -ge 128
-              dd if="$P4_FILE" of=win-m53-baseline/trusted_m53.tapeslice bs=1 skip="$((POS + KL))" count="$DL" status=none
-              FOUND_SL=1
-            fi
-            POS=$((POS + KL + DL))
-            I=$((I + 1))
-          done
-          test "$FOUND_SL" -eq 1
-          TRUSTED_SLICE_SHA="$(sha256sum win-m53-baseline/trusted_m53.tapeslice | awk '{print $1}')"
-          SLICE_SHA="$(sha256sum "$SLICE" | awk '{print $1}')"
-          test "$SLICE_SHA" = "$TRUSTED_SLICE_SHA"
-
-          OUT_SHA="$(sha256sum "$OUT" | awk '{print $1}')"
-          JOB_SHA="$(sha256sum tests/fixtures/win-m53-s1/job.tsv | awk '{print $1}')"
-          BASE_SHA="$(sha256sum cx/runtime/stream_attributes.cx | awk '{print $1}')"
-          VEC_SHA="$(sha256sum "$VECTORS" | awk '{print $1}')"
-          IN_SHA="$(printf 'job\t%s\nbaseline\t%s\nslice\t%s\nvectors\t%s\n' "$JOB_SHA" "$BASE_SHA" "$TRUSTED_SLICE_SHA" "$VEC_SHA" | sha256sum | awk '{print $1}')"
-
-          grep -Fx "$(printf 'target\t%s' "$EXPECT_TARGET")" "$LOC" >/dev/null
-          grep -Fx "$(printf 'candidate_sha\t%s' "$CAND_SHA")" "$LOC" >/dev/null
-          grep -Fx "$(printf 'slice_sha\t%s' "$TRUSTED_SLICE_SHA")" "$LOC" >/dev/null
-          grep -Fx "$(printf 'vectors_sha\t%s' "$VEC_SHA")" "$LOC" >/dev/null
-          grep -Fx "$(printf 'slice_source\tdelivered_ape:tape/lnx-x86_64/m53.tapeslice')" "$LOC" >/dev/null
-
-          # Bind every vector ID, input len, and expected return value to repo tests/fixtures/win-m53-s1/vectors.tsv and reject duplicates
-          awk -v tgt="$EXPECT_TARGET" '
-          FNR == NR {
-            if (FNR == 1) next;
-            if (NF != 5) { bad = 1; exit 1 }
-            vid = $1;
-            if (vid in exp_len) { bad = 1; exit 1 }
-            exp_len[vid] = $2;
-            exp_ret[vid] = $5;
-            want_n++;
-            if ($5 == "1") want_pos++; else want_neg++;
-            next;
-          }
-          /\r$/ { bad = 1; exit 1 }
-          /^VEC\t/ {
-            n = split($0, f, "\t");
-            if (n != 7) { bad = 1; exit 1 }
-            vid = f[2];
-            if (!(vid in exp_len) || (vid in seen_v)) { bad = 1; exit 1 }
-            if (f[3] != ("len=" exp_len[vid])) { bad = 1; exit 1 }
-            if (f[4] != ("native=" exp_ret[vid])) { bad = 1; exit 1 }
-            if (f[5] != ("portable=" exp_ret[vid])) { bad = 1; exit 1 }
-            if (f[6] != ("s1_def=" exp_ret[vid])) { bad = 1; exit 1 }
-            st = substr(f[7], 7) + 0;
-            if (st <= 0) { bad = 1; exit 1 }
-            seen_v[vid] = 1;
-            vecs++;
-            next;
-          }
-          /^SUMMARY\t/ {
-            want_s = "\ttarget=" tgt "\tvectors=" want_n "\tpos=" want_pos "\tneg=" want_neg "\t";
-            if (index($0, want_s) == 0 || $0 !~ /\tverdict=PASS$/) { bad = 1; exit 1 }
-            sum++;
-            next;
-          }
-          { bad = 1; exit 1 }
-          END {
-            if (bad || want_n != 12 || vecs != want_n || sum != 1) exit 1;
-            for (vid in exp_len) if (!(vid in seen_v)) exit 1;
-          }' "$VECTORS" "$OUT"
-
-          awk -v run_id="$RUN_ID" -v rev="$SOURCE_COMMIT" -v target="$EXPECT_TARGET" \
-              -v csha="$CAND_SHA" -v isha="$IN_SHA" -v osha="$OUT_SHA" \
-              -v now_ts="$NOW_TS" -v min_ts="$DISP_TS" '
-          BEGIN { n = 0; bad = 0 }
-          function is_hex64_nz(s) { return length(s) == 64 && s ~ /^[0-9a-f]+$/ && s !~ /^0+$/; }
-          /\r$/ { bad = 1; exit 1 }
-          {
-            if (split($0, f, "\t") != 2) { bad = 1; exit 1 }
-            if (f[1] in seen) { bad = 1; exit 1 }
-            seen[f[1]] = f[2];
-            n++;
-          }
-          END {
-            if (bad || n != 14) exit 1;
-            if (seen["version"] != "3") exit 1;
-            if (seen["run_id"] != run_id || seen["rev"] != rev || seen["unit"] != "m53") exit 1;
-            if (seen["target"] != target || seen["producer"] != "win-m53-s1-parity" || seen["purpose"] != "s1-parity") exit 1;
-            if (seen["candidate_sha"] != csha || seen["inputs_sha"] != isha || seen["output_sha"] != osha) exit 1;
-            if (seen["rc"] != "0" || seen["verdict"] != "PASS") exit 1;
-            ts = seen["ts"] + 0;
-            if (ts <= 0 || ts < min_ts - 60 || ts < now_ts - 86400 || ts > now_ts + 60) exit 1;
-            if (!is_hex64_nz(seen["binding_sha"])) exit 1;
-          }' "$RCPT"
-
-          GOT_BIND="$(awk -F'\t' '$1=="binding_sha"{print $2}' "$RCPT")"
-          EXP_BIND="$(grep -v '^binding_sha	' "$RCPT" | sha256sum | awk '{print $1}')"
-          test "$GOT_BIND" = "$EXP_BIND"
+          export JUDGE_LAUNCHER="win-m53-baseline/trusted-unisacc.com"
+          export CAND_APE="win-m53-baseline/candidate-unisacc.com"
+          export CAND_SHA="$(cat win-m53-baseline/candidate.sha256)"
+          export DISP_TS="$(cat win-m53-baseline/dispatch_ts.txt)"
+          export NOW_TS="$(date +%s)"
+          export RUN_ID="ci-${GITHUB_RUN_ID}-${{ matrix.os }}"
+          export RCPT="win-m53-produce/m53-s1.rcpt"
+          export OUT="win-m53-produce/m53-s1.out"
+          export SLICE="win-m53-produce/m53_bin2.tapeslice"
+          export LOC="win-m53-produce/locators.tsv"
+          export VECTORS="tests/fixtures/win-m53-s1/vectors.tsv"
+          sh tests/fixtures/win-m53-s1/judge.sh
           mkdir -p win-m53-s1-evidence
           cp "$RCPT" "$OUT" "$SLICE" "$LOC" win-m53-baseline/candidate-chain.rcpt win-m53-s1-evidence/
       - uses: actions/upload-artifact@v4
