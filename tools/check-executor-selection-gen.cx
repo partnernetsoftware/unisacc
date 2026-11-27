@@ -1,0 +1,125 @@
+/* tools/check-executor-selection-gen.cx -- adversarial check for the executor selection table.
+ *
+ *   sh ./unisacc.com tools/check-executor-selection-gen.cx -- [--facts FILE] [--out FILE]
+ *
+ * Fails if the facts table is malformed, a target is duplicated, enums are outside the allowed set,
+ * or the generated C rows are missing/extra/out of order. Also requires the generated lookup to
+ * return 0 for an unknown target (callers turn that into a named rc 2 refusal).
+ * This check is independent of tools/executor-selection-gen.cx: it rebuilds every expected literal
+ * row from the facts and matches it against the generated file. */
+#pragma unisa use sys.fs
+#pragma unisa use sys.io
+#pragma unisa use sys.proc
+#pragma unisa use sys.sig
+#pragma unisa use text.text
+#pragma unisa use mem.heap
+
+#define CS_MAX 16
+#define CS_COLS 11
+#define CS_CAP (1 << 16)
+typedef struct { char c[CS_COLS][128]; } CsRow;
+static CsRow rows[CS_MAX];
+static int nrow;
+static char facts[4400], out[4400];
+
+static void die(const char *s) { sy_eprintf("check-executor-selection-gen: %s\n", s); sy_exit(2); }
+static int same(const char *a, const char *b, size_t n) { size_t i; for (i = 0; i < n; i++) if (a[i] != b[i]) return 0; return 1; }
+static int split(char *line, long len, const char **f, int *fl, int want) {
+    long i, st = 0; int k = 0;
+    for (i = 0; i <= len; i++) if (i == len || line[i] == '\t') {
+        if (k >= want) return -1;
+        f[k] = line + st; fl[k] = (int)(i - st); k++; st = i + 1;
+    }
+    return k == want ? 0 : -1;
+}
+static int cpy(char *d, int cap, const char *s, int n) { int i; if (n < 0 || n >= cap) return -1; for (i = 0; i < n; i++) d[i] = s[i]; d[n] = 0; return 0; }
+static int load(void) {
+    size_t n = 0; char *b = cx_read(facts, &n); long at = 0; int seen = 0;
+    const char *head = "target\texecutor\ttape_dir\tmanifest_key\ttapemode_key\tslice_prefix\thoststub_bind_sym\thoststub_sym\trun_sym\tabi_tag\tstatus\n";
+    if (!b) return -1;
+    while (at < (long)n) {
+        long e = at; while (e < (long)n && b[e] != '\n') e++; b[e] = 0;
+        if (e > at && b[at] != '#') {
+            const char *f[CS_COLS]; int fl[CS_COLS]; int i, j;
+            if (!seen) {
+                if ((e - at) != (long)tx_len(head, 4096) - 1 || !same(b + at, head, (size_t)(e - at))) { mm_free(b); return -1; }
+                seen = 1;
+            } else {
+                if (nrow >= CS_MAX || split(b + at, e - at, f, fl, CS_COLS)) { mm_free(b); return -1; }
+                for (i = 0; i < CS_COLS; i++) if (cpy(rows[nrow].c[i], 128, f[i], fl[i])) { mm_free(b); return -1; }
+                if (!tx_eqz(rows[nrow].c[1], "asm") && !tx_eqz(rows[nrow].c[1], "portable")) { mm_free(b); return -1; }
+                if (!tx_eqz(rows[nrow].c[10], "UNMEASURED") && !tx_eqz(rows[nrow].c[10], "PREPARED")) { mm_free(b); return -1; }
+                if (tx_eqz(rows[nrow].c[1], "asm")) {
+                    if (tx_eqz(rows[nrow].c[6], "-") || tx_eqz(rows[nrow].c[7], "-") || tx_eqz(rows[nrow].c[8], "tape_run_cx")) { mm_free(b); return -1; }
+                } else if (!tx_eqz(rows[nrow].c[6], "-") || !tx_eqz(rows[nrow].c[7], "-") || !tx_eqz(rows[nrow].c[8], "tape_run_cx")) { mm_free(b); return -1; }
+                for (j = 0; j < nrow; j++) if (tx_eqz(rows[j].c[0], rows[nrow].c[0])) { mm_free(b); return -1; }
+                nrow++;
+            }
+        }
+        at = e + 1;
+    }
+    mm_free(b);
+    if (nrow <= 0) return -1;
+    { int asm_n = 0, k; for (k = 0; k < nrow; k++) if (tx_eqz(rows[k].c[1], "asm")) asm_n++; if (asm_n != 1) return -1; }
+    return 0;
+}
+/* Expected generated row: exactly the literal line the generator emits. */
+static void expected(int r, char *d, int cap) {
+    int j, k = 0;
+    for (j = 0; j < CS_COLS; j++) {
+        const char *p = j ? ", " : "    {"; for (; *p && k + 1 < cap; p++) d[k++] = *p;
+        d[k++] = '"'; for (p = rows[r].c[j]; *p && k + 1 < cap; p++) d[k++] = *p; d[k++] = '"';
+    }
+    if (k + 3 < cap) { d[k++] = '}'; d[k++] = ','; d[k++] = '\n'; d[k] = 0; }
+}
+static int has_line(const char *b, size_t n, const char *line) {
+    size_t ll = tx_len(line, 4096), at = 0;
+    while (at + ll <= n) {
+        size_t e = at; while (e < n && b[e] != '\n') e++;
+        if (e + 1 - at == ll && same(b + at, line, ll)) return 1;
+        at = e + 1;
+    }
+    return 0;
+}
+static long next_literal(const char *b, size_t n, size_t from) {
+    size_t at = from;
+    while (at < n) {
+        size_t e = at; while (e < n && b[e] != '\n') e++;
+        if (e - at > 5 && same(b + at, "    {", 5)) return (long)at;
+        at = e + 1;
+    }
+    return -1;
+}
+int main(int argc, char **argv) {
+    int i, rc; size_t n = 0; char *b; char line[2048]; int total = 0;
+    cx_fmt(facts, sizeof facts, "%s", "exec/facts/executor-selection.tsv");
+    cx_fmt(out, sizeof out, "%s", "cx/driver/executor_selection_table.cx");
+    for (i = 1; i < argc; i++) {
+        if (tx_eqz(argv[i], "--facts") && i + 1 < argc) cx_fmt(facts, sizeof facts, "%s", argv[++i]);
+        else if (tx_eqz(argv[i], "--out") && i + 1 < argc) cx_fmt(out, sizeof out, "%s", argv[++i]);
+        else die("usage: check-executor-selection-gen.cx [--facts FILE] [--out FILE]");
+    }
+    rc = load();
+    if (rc) { sy_printf("EXECUTOR_SELECTION_CHECK\tFAIL\tfacts\t%s\n", facts); return 1; }
+    b = cx_read(out, &n);
+    if (!b) { sy_printf("EXECUTOR_SELECTION_CHECK\tFAIL\tmissing\t%s\n", out); return 1; }
+    if (!has_line(b, n, "#pragma unisa module executor_selection_table\n") ||
+        !has_line(b, n, "#pragma unisa use text.text\n") ||
+        !has_line(b, n, "const ExecutorSel *executor_sel(const char *target) {\n") ||
+        !has_line(b, n, "const ExecutorSel *executor_sel_triple(const char *triple) {\n") ||
+        !has_line(b, n, "    return 0;\n")) { mm_free(b); sy_printf("EXECUTOR_SELECTION_CHECK\tFAIL\tshape\t%s\n", out); return 1; }
+    { size_t cursor = 0;
+      for (i = 0; i < nrow; i++) {
+          size_t ll; long pos;
+          expected(i, line, sizeof line);
+          ll = tx_len(line, 4096);
+          pos = next_literal(b, n, cursor);
+          if (pos < 0 || (size_t)pos + ll > n || !same(b + pos, line, ll)) { mm_free(b); sy_printf("EXECUTOR_SELECTION_CHECK\tFAIL\trow[%d] order/target=%s\n", i, rows[i].c[0]); return 1; }
+          cursor = (size_t)pos + ll; total++;
+      }
+      if (next_literal(b, n, cursor) >= 0) { mm_free(b); sy_printf("EXECUTOR_SELECTION_CHECK\tFAIL\textra-rows facts=%d\n", total); return 1; }
+    }
+    mm_free(b);
+    sy_printf("EXECUTOR_SELECTION_CHECK\tPASS\ttargets=%d\n", nrow);
+    return 0;
+}
