@@ -35,6 +35,7 @@
 #pragma unisa use sys.fs
 #pragma unisa use sys.io
 #pragma unisa use sys.proc
+#pragma unisa use sys.posix
 #pragma unisa use sysx.poll
 #pragma unisa use sys.env
 #pragma unisa use mem.heap
@@ -185,36 +186,107 @@ static int eb_run(char **argv, const char *cwd, int secs, long long *dt, char *w
     return 0;
 }
 
+/* Plan buffer cap: dynamic allocation sized to actual plan output, with a
+   generous 32 MiB global ceiling (overridable downward via UNISACC_EB_PLAN_MAX
+   for refusal-path testing). Any overflow emits a named stderr refusal. */
+#define EB_PLAN_MAX (32L * 1024L * 1024L)
+#define EB_STDERR_MAX (256L * 1024L)
+static long eb_plan_limit(void) {
+    const char *e = sy_env("UNISACC_EB_PLAN_MAX");
+    long v = 0;
+    if (!e || !e[0]) return EB_PLAN_MAX;
+    for (int i = 0; e[i]; i++) {
+        if (e[i] < '0' || e[i] > '9') return EB_PLAN_MAX;
+        v = v * 10 + (e[i] - '0');
+        if (v > EB_PLAN_MAX) return EB_PLAN_MAX;
+    }
+    return v > 0 ? v : EB_PLAN_MAX;
+}
+static int eb_plan_append(char **buf, long *len, long *cap, long *global_used,
+                          const char *src, long k, long limit, char *why, int wl) {
+    long need;
+    if (k > limit - 1 - *global_used) {
+        long gneed = *global_used + k + 1;
+        fprintf(stderr, "entry-build: REFUSE cx-plan plan-buffer-limit need=%ld cap=%ld\n", gneed, limit);
+        if (why && wl > 0) snprintf(why, (size_t)wl, "plan-buffer-limit need=%ld cap=%ld", gneed, limit);
+        return 2;
+    }
+    need = *len + k + 1;
+    if (need > *cap) {
+        long nc = *cap ? *cap : 4096;
+        char *g;
+        while (nc < need) {
+            if (nc > limit / 2) { nc = limit; break; }
+            nc = nc * 2;
+        }
+        if (nc < need) nc = need;
+        g = mm_alloc(nc);
+        if (!g) {
+            fprintf(stderr, "entry-build: REFUSE cx-plan plan-buffer-oom need=%ld\n", nc);
+            if (why && wl > 0) snprintf(why, (size_t)wl, "plan-buffer-oom need=%ld", nc);
+            return -1;
+        }
+        if (*len) mm_copy(g, nc, *buf, *len);
+        mm_free(*buf);
+        *buf = g;
+        *cap = nc;
+    }
+    mm_copy(*buf + *len, *cap - *len, src, k);
+    *len = *len + k;
+    *global_used = *global_used + k;
+    return 0;
+}
+
+static void eb_print_head20(const char *tag, const char *buf, long len) {
+    long p = 0;
+    int lines = 0;
+    if (!buf || len <= 0) return;
+    while (p < len && lines < 20) {
+        long s = p;
+        while (p < len && buf[p] != '\n') p++;
+        fprintf(stderr, "entry-build: cx-plan %s[%d]: %.*s\n", tag, lines + 1, (int)(p - s), buf + s);
+        if (p < len && buf[p] == '\n') p++;
+        lines++;
+    }
+}
+
 /* One -cx-plan per root, run in parallel (EB_JOBS children), then merged in
-   root-index order. This keeps the closure discovery order identical to the
-   serial per-root loop, unlike one -cx-plan over all roots (whose output puts
-   every root first and reorders the closure). */
-static int eb_plan_parallel(const char *bound, const char *ctor, int via_sh, const char **srcs, int nsrc,
-                            const char *cwd, char *buf, int cap, char *why, int wl) {
+   root-index order into a heap buffer sized to the actual plan. A single global
+   byte budget is enforced while reading, and all error exits share one cleanup
+   path that kills, closes all pipes, reaps children, and frees all buffers. */
+static int eb_plan_parallel(const char *bound, const char *ctor, int via_sh, const char **srcs,
+                            const char **rrs, int nsrc, const char *cwd, char **out_buf,
+                            const char **fail_rr_out, char *why, int wl) {
     int pid[EB_JOBS_MAX];
     int fd[EB_JOBS_MAX];
     int efd[EB_JOBS_MAX];
     int slot_of[EB_JOBS_MAX];
     char *errb[EB_JOBS_MAX];
     long errn[EB_JOBS_MAX], errcap[EB_JOBS_MAX];
-    char **outs;
-    long *outn;
-    int running;
-    int next;
-    int done;
-    int i;
-    int j;
-    long total;
+    char **outs = 0;
+    long *outn = 0;
+    long *outcap = 0;
+    long limit = eb_plan_limit();
+    long global_used = 0;
+    int running = 0;
+    int next = 0;
+    int done = 0;
+    int i, j;
+    int ret = 0;
+    *out_buf = 0;
     if (nsrc < 0) return -1;
-    if (nsrc == 0) return 0;
+    if (nsrc == 0) {
+        *out_buf = mm_alloc(1);
+        if (!*out_buf) return -1;
+        (*out_buf)[0] = 0;
+        return 0;
+    }
+    for (i = 0; i < EB_JOBS_MAX; i++) { pid[i] = -1; fd[i] = -1; efd[i] = -1; errb[i] = 0; errn[i] = 0; errcap[i] = 0; }
     outs = mm_alloc((long)nsrc * (long)sizeof(char *));
     outn = mm_alloc((long)nsrc * (long)sizeof(long));
-    if (!outs || !outn) return -1;
-    for (i = 0; i < nsrc; i++) { outs[i] = 0; outn[i] = 0; }
-    for (i = 0; i < EB_JOBS_MAX; i++) { pid[i] = -1; fd[i] = -1; efd[i] = -1; errb[i] = 0; errn[i] = 0; errcap[i] = 0; }
-    running = 0;
-    next = 0;
-    done = 0;
+    outcap = mm_alloc((long)nsrc * (long)sizeof(long));
+    if (!outs || !outn || !outcap) { ret = -1; goto cleanup; }
+    for (i = 0; i < nsrc; i++) { outs[i] = 0; outn[i] = 0; outcap[i] = 0; }
     while (done < nsrc) {
         while (running < EB_JOBS && next < nsrc) {
             int s = -1;
@@ -233,11 +305,11 @@ static int eb_plan_parallel(const char *bound, const char *ctor, int via_sh, con
                 int ofd = -1;
                 int efdh = -1;
                 int pr = sy_spawn_pipe(v, cwd, SY_SPAWN_NO_PATH | SY_SPAWN_STDERR_SPLIT, &ofd, &efdh);
-                if (pr < 0) { why[0] = 0; return -1; }
+                if (pr < 0) { why[0] = 0; ret = -1; goto cleanup; }
                 pid[s] = pr;
                 fd[s] = ofd;
                 efd[s] = efdh;   /* keep stderr: drain it instead of closing (a closed pipe -> SIGPIPE rc141) */
-                if (sy_fd_nonblock(fd[s], 1) || sy_fd_nonblock(efd[s], 1)) return -1;
+                if (sy_fd_nonblock(fd[s], 1) || sy_fd_nonblock(efd[s], 1)) { why[0] = 0; ret = -1; goto cleanup; }
             }
             slot_of[s] = next;
             errn[s] = 0;
@@ -251,7 +323,7 @@ static int eb_plan_parallel(const char *bound, const char *ctor, int via_sh, con
             for (i = 0; i < EB_JOBS_MAX; i++) if (pid[i] >= 0) { pf[np].fd = fd[i]; pf[np].events = 1; pf[np].revents = 0; map[np] = i; np = np + 1; }
             {
                 int pr = sy_poll(pf, np, 100);
-                if (pr < 0) { for (i = 0; i < EB_JOBS_MAX; i++) if (pid[i] >= 0) sy_kill(pid[i]); return -1; }
+                if (pr < 0) { why[0] = 0; ret = -1; goto cleanup; }
             }
             for (j = 0; j < np; j++) {
                 int s = map[j];
@@ -262,17 +334,8 @@ static int eb_plan_parallel(const char *bound, const char *ctor, int via_sh, con
                         long k = sy_read(fd[s], tmp, 4096);
                         if (k <= 0) break;   /* EOF or EAGAIN: stop draining this round */
                         {
-                            long oc = outn[job];
-                            if (oc + k + 1 > 262144) { for (i = 0; i < EB_JOBS_MAX; i++) if (pid[i] >= 0) sy_kill(pid[i]); return 2; }
-                            {
-                                char *g = mm_alloc(oc + k + 1);
-                                if (!g) { for (i = 0; i < EB_JOBS_MAX; i++) if (pid[i] >= 0) sy_kill(pid[i]); return -1; }
-                                if (oc) mm_copy(g, oc + k + 1, outs[job], oc);
-                                mm_copy(g + oc, k + 1, tmp, k);
-                                mm_free(outs[job]);
-                                outs[job] = g;
-                                outn[job] = oc + k;
-                            }
+                            int arc = eb_plan_append(&outs[job], &outn[job], &outcap[job], &global_used, tmp, k, limit, why, wl);
+                            if (arc) { ret = arc; goto cleanup; }
                         }
                     }
                 }
@@ -284,41 +347,83 @@ static int eb_plan_parallel(const char *bound, const char *ctor, int via_sh, con
             ex = 0;
             if (sy_wait_status(pid[i], 1, &ex, &code, 0) < 0) continue;
             if (!ex) continue;
-            /* Drain stderr before closing: an early sy_close(efd) sends the child SIGPIPE (rc141)
-               and swallows its diagnostic. Read to EOF, then close. */
+            /* Child i is now reaped; mark pid[i] = -1 immediately so cleanup never double-waits it. */
+            pid[i] = -1;
+            /* Drain stderr before closing (bounded to EB_STDERR_MAX; extra bytes drained & discarded). */
             if (efd[i] >= 0) {
                 for (;;) {
                     char et[4096];
                     long k = sy_read(efd[i], et, 4096);
                     if (k <= 0) break;
-                    if (errn[i] + k + 1 > errcap[i]) {
-                        long nc = errcap[i] ? errcap[i] : 4096;
-                        char *g;
-                        while (nc < errn[i] + k + 1) nc = nc * 2;
-                        g = mm_alloc(nc);
-                        if (!g) break;
-                        if (errn[i]) mm_copy(g, nc, errb[i], errn[i]);
-                        mm_free(errb[i]);
-                        errb[i] = g;
-                        errcap[i] = nc;
+                    if (errn[i] < EB_STDERR_MAX) {
+                        long take = k;
+                        if (take > EB_STDERR_MAX - errn[i]) take = EB_STDERR_MAX - errn[i];
+                        if (errn[i] + take + 1 > errcap[i]) {
+                            long nc = errcap[i] ? errcap[i] : 4096;
+                            char *g;
+                            while (nc < errn[i] + take + 1) {
+                                if (nc > EB_STDERR_MAX / 2) { nc = EB_STDERR_MAX + 1; break; }
+                                nc = nc * 2;
+                            }
+                            if (nc < errn[i] + take + 1) nc = errn[i] + take + 1;
+                            g = mm_alloc(nc);
+                            if (g) {
+                                if (errn[i]) mm_copy(g, nc, errb[i], errn[i]);
+                                mm_free(errb[i]);
+                                errb[i] = g;
+                                errcap[i] = nc;
+                            }
+                        }
+                        if (errb[i] && errn[i] + take + 1 <= errcap[i]) {
+                            mm_copy(errb[i] + errn[i], errcap[i] - errn[i], et, take);
+                            errn[i] = errn[i] + take;
+                        }
                     }
-                    mm_copy(errb[i] + errn[i], errcap[i] - errn[i], et, k);
-                    errn[i] = errn[i] + k;
                 }
                 sy_close(efd[i]);
                 efd[i] = -1;
             }
             if (code) {
-                if (errb[i] && errn[i]) {
-                    long c;
-                    fwrite(errb[i], 1, (size_t)errn[i], stderr);
-                    c = errn[i] < (long)wl - 1 ? errn[i] : (long)wl - 1;
-                    while (c > 0 && (errb[i][c - 1] == '\n' || errb[i][c - 1] == '\r')) c = c - 1;
-                    if (c > 0) mm_copy(why, (long)wl, errb[i], c);
-                    why[c] = 0;
-                } else why[0] = 0;
-                for (j = 0; j < EB_JOBS_MAX; j++) if (pid[j] >= 0) sy_kill(pid[j]);
-                return code;
+                int job = slot_of[i];
+                const char *froot = (job >= 0 && job < nsrc && srcs[job]) ? srcs[job] : "-";
+                const char *frr = (rrs && job >= 0 && job < nsrc && rrs[job]) ? rrs[job] : "-";
+                /* Drain remaining stdout of the failed child so diagnostics written to stdout are captured too. */
+                if (fd[i] >= 0) {
+                    for (;;) {
+                        char tmp[4096];
+                        long k = sy_read(fd[i], tmp, 4096);
+                        if (k <= 0) break;
+                        if (outn[job] < EB_STDERR_MAX) {
+                            long take = k;
+                            if (take > EB_STDERR_MAX - outn[job]) take = EB_STDERR_MAX - outn[job];
+                            (void)eb_plan_append(&outs[job], &outn[job], &outcap[job], &global_used, tmp, take, limit, 0, 0);
+                        }
+                    }
+                }
+                if (frr[0] && frr[0] != '-') {
+                    FILE *rfp = fopen(frr, "wb");
+                    if (rfp) {
+                        fprintf(rfp, "cx-plan-failed\troot=%s\trc=%d\tstderr_bytes=%ld\tstdout_bytes=%ld\n",
+                                froot, code, errn[i], outn[job]);
+                        if (errb[i] && errn[i] > 0) fwrite(errb[i], 1, (size_t)errn[i], rfp);
+                        if (outs[job] && outn[job] > 0) {
+                            fputs("\n--- stdout ---\n", rfp);
+                            fwrite(outs[job], 1, (size_t)outn[job], rfp);
+                        }
+                        fclose(rfp);
+                    }
+                    if (fail_rr_out) *fail_rr_out = frr;
+                }
+                fprintf(stderr, "entry-build: REFUSE cx-plan child-failed root=%s rc=%d rr=%s stderr_bytes=%ld\n",
+                        froot, code, frr, errn[i]);
+                eb_print_head20("stderr", errb[i], errn[i]);
+                eb_print_head20("stdout", outs[job], outn[job]);
+                if (why && wl > 0) {
+                    snprintf(why, (size_t)wl, "child-failed root=%s rc=%d rr=%s stderr_bytes=%ld",
+                             froot, code, frr, errn[i]);
+                }
+                ret = code;
+                goto cleanup;
             }
             /* drain any last bytes the child wrote before it exited */
             {
@@ -328,17 +433,8 @@ static int eb_plan_parallel(const char *bound, const char *ctor, int via_sh, con
                     long k = sy_read(fd[i], tmp, 4096);
                     if (k <= 0) break;
                     {
-                        long oc = outn[job];
-                        if (oc + k + 1 > 262144) { for (j = 0; j < EB_JOBS_MAX; j++) if (pid[j] >= 0) sy_kill(pid[j]); return 2; }
-                        {
-                            char *g = mm_alloc(oc + k + 1);
-                            if (!g) { for (j = 0; j < EB_JOBS_MAX; j++) if (pid[j] >= 0) sy_kill(pid[j]); return -1; }
-                            if (oc) mm_copy(g, oc + k + 1, outs[job], oc);
-                            mm_copy(g + oc, k + 1, tmp, k);
-                            mm_free(outs[job]);
-                            outs[job] = g;
-                            outn[job] = oc + k;
-                        }
+                        int arc = eb_plan_append(&outs[job], &outn[job], &outcap[job], &global_used, tmp, k, limit, why, wl);
+                        if (arc) { ret = arc; goto cleanup; }
                     }
                 }
             }
@@ -348,26 +444,64 @@ static int eb_plan_parallel(const char *bound, const char *ctor, int via_sh, con
             errcap[i] = 0;
             sy_close(fd[i]);
             fd[i] = -1;
-            pid[i] = -1;
             running = running - 1;
             done = done + 1;
         }
     }
-    /* merge in root-index order */
-    total = 0;
-    for (i = 0; i < nsrc; i++) total = total + outn[i];
-    if (total >= cap) { for (i = 0; i < nsrc; i++) mm_free(outs[i]); mm_free(outs); mm_free(outn); return 2; }
+    /* merge in root-index order into an exact-sized heap buffer (global_used + 1 <= limit already enforced) */
     {
+        char *merged = mm_alloc(global_used + 1);
         long at = 0;
-        for (i = 0; i < nsrc; i++) {
-            if (outn[i]) { mm_copy(buf + at, cap - at, outs[i], outn[i]); at = at + outn[i]; }
-            mm_free(outs[i]);
+        if (!merged) {
+            fprintf(stderr, "entry-build: REFUSE cx-plan plan-buffer-oom need=%ld\n", global_used + 1);
+            if (why && wl > 0) snprintf(why, (size_t)wl, "plan-buffer-oom need=%ld", global_used + 1);
+            ret = -1;
+            goto cleanup;
         }
-        buf[at] = 0;
+        for (i = 0; i < nsrc; i++) {
+            if (outn[i]) { mm_copy(merged + at, global_used + 1 - at, outs[i], outn[i]); at = at + outn[i]; }
+        }
+        merged[at] = 0;
+        *out_buf = merged;
+        ret = 0;
     }
-    mm_free(outs);
+cleanup:
+    /* Send SIGTERM first so tools/bound reaps its entire grandchild tree; SIGKILL fallback after 1s. */
+    for (i = 0; i < EB_JOBS_MAX; i++) {
+        if (pid[i] >= 0) (void)sy_killpg(pid[i], 15);
+    }
+    for (i = 0; i < EB_JOBS_MAX; i++) {
+        if (fd[i] >= 0) { sy_close(fd[i]); fd[i] = -1; }
+        if (efd[i] >= 0) { sy_close(efd[i]); efd[i] = -1; }
+        if (errb[i]) { mm_free(errb[i]); errb[i] = 0; }
+    }
+    {
+        int left = 0;
+        for (i = 0; i < EB_JOBS_MAX; i++) if (pid[i] >= 0) left++;
+        for (int w = 0; left > 0 && w < 100; w++) {
+            for (i = 0; i < EB_JOBS_MAX; i++) {
+                int ex = 0, code = 0;
+                if (pid[i] < 0) continue;
+                if (sy_wait_status(pid[i], 1, &ex, &code, 0) >= 0 && ex) { pid[i] = -1; left--; }
+            }
+            if (left > 0) (void)sy_poll(0, 0, 10);
+        }
+        for (i = 0; i < EB_JOBS_MAX; i++) {
+            if (pid[i] >= 0) {
+                int ex = 0, code = 0;
+                sy_kill(pid[i]);
+                (void)sy_wait_status(pid[i], 0, &ex, &code, 0);
+                pid[i] = -1;
+            }
+        }
+    }
+    if (outs) {
+        for (i = 0; i < nsrc; i++) mm_free(outs[i]);
+        mm_free(outs);
+    }
     mm_free(outn);
-    return 0;
+    mm_free(outcap);
+    return ret;
 }
 
 /* Six drive units that run once per build are -O1. --o1-drivers selects
@@ -870,7 +1004,6 @@ static char eb_ckey[EB_MAXC][64];
 static char eb_csha[EB_MAXC][65];
 static char eb_creal[EB_MAXC][EB_REALW];
 static char eb_rootreal[128][EB_REALW];
-static char eb_pbuf[262144];
 static long long eb_cns[EB_MAXC];
 static long eb_cbytes[EB_MAXC];
 
@@ -937,30 +1070,44 @@ static int eb_plan_sealed(const char *root, const char *plan) {
     return 1;
 }
 #define EB_PM_MAGIC "eb-plan-memo-v1\t"
-static int eb_plan_load(const char *memo, const char *root, const char *key, char *buf, int cap) {
+static int eb_plan_load(const char *memo, const char *root, const char *key, char **out_buf) {
     struct stat st;
-    size_t n, ml = strlen(EB_PM_MAGIC), at;
-    long len = 0;
+    size_t n = 0, ml = strlen(EB_PM_MAGIC), at, max_file;
+    long len = 0, limit = eb_plan_limit();
     char sha[65];
-    char *t;
+    char *t = 0;
     int ok = 0;
-    if (stat(memo, &st)) return 0;
-    t = cx_read(memo, &n);
-    if (!t) return 0;
+    *out_buf = 0;
+    if (stat(memo, &st) || !S_ISREG(st.st_mode)) return 0;
+    max_file = (size_t)limit + ml + 256;
+    if (st.st_size <= 0 || (size_t)st.st_size > max_file) return 0;
+    {
+        FILE *f = fopen(memo, "rb");
+        if (!f) return 0;
+        t = mm_alloc((long)max_file + 1);
+        if (!t) { fclose(f); return 0; }
+        n = fread(t, 1, max_file + 1, f);
+        fclose(f);
+        if (n > max_file) { mm_free(t); return 0; }
+        t[n] = 0;
+    }
     at = ml + 64 + 1 + 64 + 1;
     if (n > at && !memcmp(t, EB_PM_MAGIC, ml) && !memcmp(t + ml, key, 64) && t[ml + 64] == '\t' && t[ml + 129] == '\t') {
         while (at < n && t[at] >= '0' && t[at] <= '9' && len < 100000000L) { len = len * 10 + (t[at] - '0'); at++; }
-        if (at < n && t[at] == '\n' && len > 0 && len < cap && (size_t)len == n - at - 1 && !memchr(t + at + 1, 0, (size_t)len)) {
+        if (at < n && t[at] == '\n' && len > 0 && len + 1 <= limit && (size_t)len == n - at - 1 && !memchr(t + at + 1, 0, (size_t)len)) {
             cx_sha256_hex(t + at + 1, (size_t)len, sha);
             if (!memcmp(sha, t + ml + 65, 64)) {
-                if (mm_copy(buf, cap, t + at + 1, len)) eb_die("plan memo copy");
+                char *buf = mm_alloc(len + 1);
+                if (!buf) eb_die("plan memo alloc");
+                if (mm_copy(buf, len + 1, t + at + 1, len)) eb_die("plan memo copy");
                 buf[len] = 0;
                 ok = eb_plan_sealed(root, buf);
-                if (!ok) buf[0] = 0;
+                if (ok) *out_buf = buf;
+                else mm_free(buf);
             }
         }
     }
-    free(t);
+    mm_free(t);
     return ok;
 }
 static void eb_plan_save(const char *memo, const char *key, const char *plan) {
@@ -985,9 +1132,9 @@ static void eb_plan_stat(const char *memo, const char *how) {
 }
 
 int main(int argc, char **argv) {
-    char root[512];
-    char p3[512];
-    char out[512];
+    char root[4096];
+    char p3[4096];
+    char out[4096];
     char ctor[576];
     char bound[576];
     char srcs_b[128][576];
@@ -1176,12 +1323,15 @@ int main(int argc, char **argv) {
     ncl = 0;
     {
         const char *roots[128];
+        const char *rr_ptrs[128];
         int ri;
         i = 0;
         while (i < EB_OBJ) { eb_real(srcs_b[i], eb_rootreal[i], EB_REALW); i = i + 1; }
-        for (ri = 0; ri < EB_OBJ; ri++) roots[ri] = srcs_b[ri];
+        for (ri = 0; ri < EB_OBJ; ri++) { roots[ri] = srcs_b[ri]; rr_ptrs[ri] = rrs_b[ri]; }
         {
-            int p;
+            long p;
+            char *eb_pbuf = 0;
+            const char *fail_rr = rrs_b[0];
             why[0] = 0;
             {
                 const char *memo = sy_env("UNISACC_EB_PLAN_MEMO");
@@ -1190,13 +1340,13 @@ int main(int argc, char **argv) {
                 if (memo && !memo[0]) memo = 0;
                 if (memo) {
                     eb_plan_key(root, ctor, p3, via_sh, roots, EB_OBJ, pkey);
-                    reused = eb_plan_load(memo, root, pkey, eb_pbuf, (int)sizeof eb_pbuf);
+                    reused = eb_plan_load(memo, root, pkey, &eb_pbuf);
                 }
                 if (!reused) {
-                    rc = eb_plan_parallel(bound, ctor, via_sh, roots, EB_OBJ, root, eb_pbuf, (int)sizeof eb_pbuf, why, (int)sizeof why);
+                    rc = eb_plan_parallel(bound, ctor, via_sh, roots, rr_ptrs, EB_OBJ, root, &eb_pbuf, &fail_rr, why, (int)sizeof why);
                     if (rc) {
-                        eb_fail_close(rf, "cx-plan", rrs_b[0], rc, 0, why);
-                        return 1;
+                        eb_fail_close(rf, "cx-plan", fail_rr ? fail_rr : rrs_b[0], rc, 0, why);
+                        return rc == 2 ? 2 : 1;
                     }
                     if (memo) {
                         if (eb_plan_sealed(root, eb_pbuf)) { eb_plan_save(memo, pkey, eb_pbuf); eb_plan_stat(memo, "spawned-stored"); }
@@ -1206,7 +1356,8 @@ int main(int argc, char **argv) {
             }
             p = 0;
             while (eb_pbuf[p]) {
-                int at, e, f2, g, len, k2, dup, rn2, z;
+                long at, e, f2, g, len;
+                int k2, dup, rn2, z;
                 char rel[576];
                 char full[576];
                 char rp[EB_REALW];
@@ -1221,13 +1372,30 @@ int main(int argc, char **argv) {
                 g = f2;
                 while (g < e && eb_pbuf[g] != '\t') g = g + 1;
                 len = g - f2;
-                if (len <= 0 || len >= 576) continue;
+                if (len <= 0) {
+                    fprintf(stderr, "entry-build: REFUSE cx-plan plan-path-empty\n");
+                    mm_free(eb_pbuf);
+                    if (rf) fclose(rf);
+                    return 2;
+                }
+                if (len >= (long)sizeof rel) {
+                    fprintf(stderr, "entry-build: REFUSE cx-plan plan-path-too-long len=%ld cap=%d\n", len, (int)sizeof rel);
+                    mm_free(eb_pbuf);
+                    if (rf) fclose(rf);
+                    return 2;
+                }
                 k2 = 0;
                 while (k2 < len) { rel[k2] = eb_pbuf[f2 + k2]; k2 = k2 + 1; }
                 rel[len] = 0;
                 if (rel[0] == '/') rn2 = cx_fmt(full, sizeof full, "%s", rel);
                 else rn2 = cx_fmt(full, sizeof full, "%s/%s", root, rel);
-                if (rn2 < 0 || rn2 >= (int)sizeof full) eb_die("plan-path");
+                if (rn2 != 0) {
+                    fprintf(stderr, "entry-build: REFUSE cx-plan plan-path-too-long len=%ld cap=%d\n",
+                            (long)(rel[0] == '/' ? len : (long)strlen(root) + 1 + len), (int)sizeof full);
+                    mm_free(eb_pbuf);
+                    if (rf) fclose(rf);
+                    return 2;
+                }
                 eb_real(full, rp, EB_REALW);
                 dup = 0;
                 k2 = 0;
@@ -1254,18 +1422,19 @@ int main(int argc, char **argv) {
                 if (z < 0 || z >= 576) eb_die("path");
                 ncl = ncl + 1;
             }
-        }
-        {
-            eb_buffer inputs = {0};
-            char sha[65]; long bytes;
-            np_puts(&inputs, eb_pbuf);
-            for (i = 0; i < EB_OBJ; i++) {
-                eb_sha(srcs_b[i], sha, &bytes); np_puts(&inputs, sha);
+            {
+                eb_buffer inputs = {0};
+                char sha[65]; long bytes;
+                np_puts(&inputs, eb_pbuf);
+                for (i = 0; i < EB_OBJ; i++) {
+                    eb_sha(srcs_b[i], sha, &bytes); np_puts(&inputs, sha);
+                }
+                for (i = 0; i < ncl; i++) {
+                    eb_sha(eb_csrc[i], sha, &bytes); np_puts(&inputs, sha);
+                }
+                cx_sha256_hex(inputs.p, inputs.n, eb_plan_identity); free(inputs.p);
             }
-            for (i = 0; i < ncl; i++) {
-                eb_sha(eb_csrc[i], sha, &bytes); np_puts(&inputs, sha);
-            }
-            cx_sha256_hex(inputs.p, inputs.n, eb_plan_identity); free(inputs.p);
+            mm_free(eb_pbuf);
         }
         eb_stable(ctor, "cx-plan");
         if (closure_list) {
