@@ -19,7 +19,7 @@ description: 对执行者交付做对抗复核并裁决能否落库时调用;覆
 - 至少 3 个变异,各自转红并贴检出原行。复核者再做至少 1 个与自报不同的变异。
 - 关键路径补丁跑 `sh ./unisacc.com tools/mutation-gate.cx`:
   - 口径 `min-score 0.6`;`uncovered>0` 默认失败。
-  - 若补丁触及产品路径(`src/`、`cx/`、`exec/`),须经 `devsvc x --bg --par 1 -- sh ./unisacc.com tools/mutation-gate.cx -- run --scope product --coverage-check --build 'CMD' --expect-fail NAME ...`(总超时 `--deadline-s` 默认 240s 含 `prep` 与 `worker`);贴 `MUTATION_DIFF`、`MD_SURVIVOR` 与 `MD_NOT_LIVE` 行,产品击杀须绑定命名断言且 `cov` 须独立探针实测触发,要求 `survived - adjudicated == 0`、`not_live == 0` 且 `cov_not_live == 0`。
+  - (实验口径,MUTATION_DIFF verdict 暂不作落库门,供复核参考)若补丁触及产品路径(`src/`、`cx/`、`exec/`),可经 `devsvc x --bg --par 1 -- sh ./unisacc.com tools/mutation-gate.cx -- run --scope product --coverage-check --build 'CMD' --expect-fail NAME ...`(总超时 `--deadline-s` 默认 240s 含 `prep` 与 `worker`);贴 `MUTATION_DIFF`、`MD_SURVIVOR` 与 `MD_NOT_LIVE` 行,产品击杀须绑定命名断言且 `cov` 须独立探针实测触发,要求 `survived - adjudicated == 0`、`not_live == 0` 且 `cov_not_live == 0`。
   - 确有不可覆盖项时用 `--allow-uncovered` 并配 `--adjudicated` 写明裁定理由。原因:豁免要留痕,不能静默。
   - 贴 `MUTATION_GATE` 与 `MUTATION_COVERAGE` 行。
 - 断言只迁移不删;无新开关时行为逐字节对拍;冷环境耗时测三次。
