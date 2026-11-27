@@ -226,6 +226,8 @@ static int tsb_read_reg(const char *path, char **buf_out, size_t *len_out, char 
     return 0;
 }
 
+static int tsb_require_m53 = 0;
+
 static int tsb_check_manifest(const char *out_dir, const char *s1, const char *s2) {
     char so_p[4400], mf_p[4400], so_sha[65], want_head[256], want_row[256];
     sy_stat_t st;
@@ -269,7 +271,25 @@ static int tsb_check_manifest(const char *out_dir, const char *s1, const char *s
     }
     {
         long hl = tx_len(want_head, sizeof want_head), rl = tx_len(want_row, sizeof want_row);
-        int ok = ((long)mn == hl + rl) && tx_same(mb, hl, want_head, hl) && tx_same(mb + hl, rl, want_row, rl);
+        int ok = ((long)mn >= hl + rl) && tx_same(mb, hl, want_head, hl) && tx_same(mb + hl, rl, want_row, rl);
+        if (ok && tsb_require_m53 && (long)mn == hl + rl) ok = 0;
+        if (ok && (long)mn > hl + rl) {
+            char m53_p[4400], m53_sha[65], want_m53[256];
+            char *m53_b = 0; size_t m53_n = 0; sy_stat_t mst;
+            if (cx_fmt(m53_p, sizeof m53_p, "%s/m53.tapeslice", out_dir) ||
+                sy_lstat(m53_p, &mst) != 0 || mst.kind != 'f' ||
+                tsb_read_reg(m53_p, &m53_b, &m53_n, m53_sha) != 0) {
+                ok = 0;
+            } else {
+                mm_free(m53_b);
+                if (cx_fmt(want_m53, sizeof want_m53, "m53.tapeslice\t%s\t%ld\n", m53_sha, (long)m53_n)) {
+                    ok = 0;
+                } else {
+                    long ml = tx_len(want_m53, sizeof want_m53);
+                    ok = ((long)mn == hl + rl + ml) && tx_same(mb + hl + rl, ml, want_m53, ml);
+                }
+            }
+        }
         mm_free(mb);
         if (!ok) {
             mm_free(so_b);
@@ -297,6 +317,7 @@ int main(int argc, char **argv) {
     for (i = 1; i < argc; i++) {
         if (tx_eqz(argv[i], "--")) continue;
         if (tx_eqz(argv[i], "--check")) { check_only = 1; continue; }
+        if (tx_eqz(argv[i], "--require-m53")) { tsb_require_m53 = 1; continue; }
         if (tx_eqz(argv[i], "--target") && i + 1 < argc) { target = argv[++i]; continue; }
         if (argv[i][0] == '-') {
             sy_eprintf("tape-sidecar-build: usage: [--target TARGET] [--check] ROOT OUT_DIR\n");

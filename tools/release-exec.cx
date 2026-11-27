@@ -1087,19 +1087,47 @@ static int evidence_readback_ok(const char *leaf, int need_public) {
     char p[4500]; long n; char *t; int ok;
     if (cx_fmt(p, sizeof p, "%s/%s", evdir, leaf) || !(t = slurp(p, &n))) return -1;
     if (need_public) {
-        char want[120]; cx_fmt(want, sizeof want, "READBACK_SHA %s %s", cand.name[0], cand.sha[0]);
+        char want[400]; cx_fmt(want, sizeof want, "READBACK_SHA %s %s", cand.name[0], cand.sha[0]);
         ok = has(t, n, "rc=0") && has(t, n, "\"isDraft\":false") && has(t, n, want) && !has(t, n, " FAIL");
+        for (int i = 0; ok && i < cand.extra_n; i++) {
+            cx_fmt(want, sizeof want, "READBACK_SHA %s %s", cand.extra_name[i], cand.extra_sha[i]);
+            if (!has(t, n, want)) ok = 0;
+        }
+        if (ok) {
+            cx_fmt(want, sizeof want, "CAND_SUMS_SHA=%s", cand.sha[6]);
+            if (!has(t, n, want)) ok = 0;
+            cx_fmt(want, sizeof want, "REMOTE_ASSET_COUNT=%d", rcand_upload_count(&cand));
+            if (ok && !has(t, n, want)) ok = 0;
+            cx_fmt(want, sizeof want, "C47_1_READBACK PASS expected_draft=false tag=%s version=%s commit=%s output=",
+                   cand.tag, cand.version, cand.commit);
+            if (ok && !has(t, n, want)) ok = 0;
+        }
     } else {
         int i, k = 0, want = rcand_sums_count(&cand);
         for (i = 0; i < 6; i++) {
-            char w[300]; if (rcand_skip(&cand, i)) continue;
-            cx_fmt(w, sizeof w, "%s: OK", cand.name[i]); if (has(t, n, w)) k++;
+            char w[400]; if (rcand_skip(&cand, i)) continue;
+            cx_fmt(w, sizeof w, "%s: OK", cand.name[i]);
+            if (has(t, n, w)) {
+                cx_fmt(w, sizeof w, "%s  %s", cand.sha[i], cand.name[i]);
+                if (has(t, n, w)) k++;
+            }
         }
         for (i = 0; i < cand.extra_n; i++) {
-            char w[300];
-            cx_fmt(w, sizeof w, "%s: OK", cand.extra_name[i]); if (has(t, n, w)) k++;
+            char w[400];
+            cx_fmt(w, sizeof w, "%s: OK", cand.extra_name[i]);
+            if (has(t, n, w)) {
+                cx_fmt(w, sizeof w, "%s  %s", cand.extra_sha[i], cand.extra_name[i]);
+                if (has(t, n, w)) k++;
+            }
         }
         ok = k == want && !has(t, n, "FAILED");
+        if (ok) {
+            char w[256];
+            cx_fmt(w, sizeof w, "CAND_SUMS_SHA=%s", cand.sha[6]);
+            if (!has(t, n, w)) ok = 0;
+            cx_fmt(w, sizeof w, "REMOTE_ASSET_COUNT=%d", rcand_upload_count(&cand));
+            if (ok && !has(t, n, w)) ok = 0;
+        }
     }
     free(t);
     return ok;
@@ -1116,7 +1144,7 @@ static void draft_readback(void) {
         else gate_pass("DRAFT_READBACK", "evidence draft-readback.txt (recorded)");
         return;
     }
-    sy_mkdir(tmp, 0755);
+    if (sy_mkdtemp(outdir, "draft-dl-", tmp, sizeof tmp)) die("draft download dir");
     if (act(v, 55, 0, 0)) refuse("DRAFT_READBACK", "gh release download failed");
     if (cx_fmt(p, sizeof p, "%s/SHA256SUMS", tmp) || !(s = slurp(p, &sn))) refuse("DRAFT_READBACK", "SHA256SUMS not downloaded");
     k = sums_check(tmp, s, sn, bad, sizeof bad);
@@ -1128,8 +1156,22 @@ static void draft_readback(void) {
         cx_fmt(msg, sizeof msg, "SHA256SUMS listed %d assets, expected %d", k, want);
         refuse("DRAFT_READBACK", msg);
     }
+    { char shex[65]; sha_file(p, shex);
+      if (!tx_eqz(shex, cand.sha[6])) { free(s); refuse("DRAFT_READBACK", "downloaded SHA256SUMS sha differs from candidate"); } }
+    { char why[512] = {0};
+      if (rcand_verify(&cand, tmp, 7, why, sizeof why)) { free(s); refuse("DRAFT_READBACK", why); } }
+    { sy_dir_t dd; int nfiles = 0, want_up = rcand_upload_count(&cand);
+      if (sy_dir_open(&dd, tmp) == 0) {
+          while (sy_dir_next(&dd) > 0) {
+              if (tx_eqz(dd.name, ".") || tx_eqz(dd.name, "..")) continue;
+              nfiles++;
+          }
+          (void)sy_dir_close(&dd);
+      }
+      if (nfiles != want_up) { char msg[128]; free(s); cx_fmt(msg, sizeof msg, "remote draft asset count %d differs from expected %d", nfiles, want_up); refuse("DRAFT_READBACK", msg); } }
     { np_buf b = {0}; now_text();
-      cx_fmt(line, sizeof line, "# draft %s download %s via gh release download (release-exec)\n", cand.tag, timebuf); np_puts(&b, line);
+      cx_fmt(line, sizeof line, "# draft %s download %s via gh release download (release-exec) CAND_SUMS_SHA=%s REMOTE_ASSET_COUNT=%d\n",
+             cand.tag, timebuf, cand.sha[6], rcand_upload_count(&cand)); np_puts(&b, line);
       for (i = 0; i < 6; i++) { if (rcand_skip(&cand, i)) continue; cx_fmt(line, sizeof line, "%s: OK\n", cand.name[i]); np_puts(&b, line); }
       for (i = 0; i < cand.extra_n; i++) { cx_fmt(line, sizeof line, "%s: OK\n", cand.extra_name[i]); np_puts(&b, line); }
       np_put(&b, s, (size_t)sn);
@@ -1548,7 +1590,8 @@ static void step_publish(void) {
 static void warm_note(void);
 static void step_readback(void) {
     char fresh[4500], p[4800], hex[65], o[400], nout[4500]; long sn; char *s; int rc = -1, attempt;
-    char *dl[] = {"gh", "-R", REPO, "release", "download", cand.tag, "-p", cand.name[0], "-p", cand.name[6], "-D", fresh, "--clobber", 0};
+    int ei;
+    char *dl[] = {"gh", "-R", REPO, "release", "download", cand.tag, "-D", fresh, "--clobber", 0};
     char *rb[] = {"sh", checkout_product, "release/tools/c47-1-readback.cx", "--", here, "release/candidate.tsv", nout, baseline, "false","--step",0,"--resume",0};
     cx_fmt(fresh, sizeof fresh, "%s/fresh", outdir);
     cx_fmt(nout, sizeof nout, "%s/readback", outdir);
@@ -1570,24 +1613,47 @@ static void step_readback(void) {
         return;
     }
     if (!readback_prewarmed) readback_prewarm();
-    sy_mkdir(fresh, 0755);
+    if (sy_mkdtemp(outdir, "fresh-", fresh, sizeof fresh)) die("fresh download dir");
     if (act(dl, 55, 0, 0)) refuse("PUBLIC_SHA", "public download failed");
     cx_fmt(p, sizeof p, "%s/%s", fresh, cand.name[0]); sha_file(p, hex);
     if (!tx_eqz(hex, cand.sha[0])) refuse("PUBLIC_SHA", "public APE sha256 differs from candidate");
     cx_fmt(p, sizeof p, "%s/%s", fresh, cand.name[6]);
+    { char shex[65]; sha_file(p, shex);
+      if (!tx_eqz(shex, cand.sha[6])) refuse("PUBLIC_SHA", "public SHA256SUMS sha256 differs from candidate"); }
+    { char why[512] = {0};
+      if (rcand_verify(&cand, fresh, 7, why, sizeof why)) refuse("PUBLIC_SHA", why); }
+    { sy_dir_t dd; int nfiles = 0, want_up = rcand_upload_count(&cand);
+      if (sy_dir_open(&dd, fresh) == 0) {
+          while (sy_dir_next(&dd) > 0) {
+              if (tx_eqz(dd.name, ".") || tx_eqz(dd.name, "..")) continue;
+              nfiles++;
+          }
+          (void)sy_dir_close(&dd);
+      }
+      if (nfiles != want_up) { char msg[128]; cx_fmt(msg, sizeof msg, "remote public asset count %d differs from expected %d", nfiles, want_up); refuse("PUBLIC_SHA", msg); } }
     if (!(s = slurp(p, &sn))) refuse("PUBLIC_SHA", "public SHA256SUMS missing");
     { long at = 0, ll; const char *ls; char want[400]; int seen = 0;
       cx_fmt(want, sizeof want, "%s  %s", cand.sha[0], cand.name[0]);
       while (line_next(s, sn, &at, &ls, &ll)) if (ll == tlen(want) && !memcmp(ls, want, (size_t)ll)) seen = 1;
-      free(s);
       if (!seen) refuse("PUBLIC_SHA", "public SHA256SUMS does not list the candidate APE sha"); }
+    for (ei = 0; ei < cand.extra_n; ei++) {
+        char ehex[65], want[400]; long at = 0, ll; const char *ls; int seen = 0;
+        if (cx_fmt(p, sizeof p, "%s/%s", fresh, cand.extra_name[ei])) die("path");
+        if (sy_exists(p) != 1) { free(s); refuse("PUBLIC_SHA", "public extra sidecar asset missing"); }
+        sha_file(p, ehex);
+        if (!tx_eqz(ehex, cand.extra_sha[ei])) { free(s); refuse("PUBLIC_SHA", "public extra sidecar sha256 differs from candidate"); }
+        cx_fmt(want, sizeof want, "%s  %s", cand.extra_sha[ei], cand.extra_name[ei]);
+        while (line_next(s, sn, &at, &ls, &ll)) if (ll == tlen(want) && !memcmp(ls, want, (size_t)ll)) seen = 1;
+        if (!seen) { free(s); refuse("PUBLIC_SHA", "public SHA256SUMS does not list extra sidecar sha"); }
+    }
+    free(s);
     gate_pass("PUBLIC_SHA", hex);
     warm_note();
     cx_fmt(p, sizeof p, "%s/public-readback.txt", evdir);
     char *list[]={rb[0],rb[1],rb[2],"--","--list-steps",0};
     char plan[400],pointer[4600],parent[4400];
     if(run(list,55,plan,sizeof plan) || !plan[0])refuse("READBACK","missing readback plan");
-    if(cx_fmt(pointer,sizeof pointer,"%s/readback-%s.active",outdir,hex))die("readback session path");
+    if(cx_fmt(pointer,sizeof pointer,"%s/readback-%s.active",outdir,cand.sha[6]))die("readback session path");
     for (attempt = 0; attempt < 2 && rc != 0; attempt++) {
         if(!attempt && from_step>=6 && sy_exists(pointer)==1){
             char *leaf=slurp(pointer,&sn);
@@ -1602,6 +1668,10 @@ static void step_readback(void) {
         }
         if(cx_fmt(nout,sizeof nout,"%s/result",parent))die("readback result path");
         np_buf transcript={0};long at=0,ll;const char *line;rc=0;
+        { char hdr[512];
+          if(!cx_fmt(hdr,sizeof hdr,"# public-readback tag=%s version=%s commit=%s CAND_SUMS_SHA=%s REMOTE_ASSET_COUNT=%d\n",
+                     cand.tag,cand.version,cand.commit,cand.sha[6],rcand_upload_count(&cand)))
+              np_puts(&transcript,hdr); }
         while(!rc && line_next(plan,tlen(plan),&at,&line,&ll)){
             char name[64],log[4600];
             if(ll<1 || ll>=sizeof name || cx_fmt(name,sizeof name,"%.*s",(int)ll,line) || strspn(name,"abcdefghijklmnopqrstuvwxyz-")!=(size_t)ll ||
@@ -1625,6 +1695,10 @@ static void step_readback(void) {
       cx_fmt(o, sizeof o, "# c47-1-readback (public) %s via release-exec; rc=%d\n", timebuf, rc);
       np_puts(&b, o); if (t) scrub_home_put(&b, t, n);
       cx_fmt(o, sizeof o, "READBACK_SHA %s %s\n", cand.name[0], hex); np_puts(&b, o);
+      for (ei = 0; ei < cand.extra_n; ei++) {
+          cx_fmt(o, sizeof o, "READBACK_SHA %s %s\n", cand.extra_name[ei], cand.extra_sha[ei]);
+          np_puts(&b, o);
+      }
       if (cx_write(p, b.p, b.n)) die("readback evidence write");
       free(b.p); free(t); }
     if (rc != 0) refuse("READBACK", "c47-1-readback rc != 0");

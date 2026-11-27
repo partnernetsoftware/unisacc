@@ -29,6 +29,7 @@
  *      cache recompiled, a compile that never caches refused without receipt
  * Marker: CHECK_RELEASE_EXEC. */
 #pragma unisa use sys.fs
+#pragma unisa use sys.posix
 #pragma unisa use sys.io
 #pragma unisa use sys.env
 #pragma unisa use sys.time
@@ -127,21 +128,34 @@ static int fake_gh(int argc, char **argv) {
     }
     if (argi(argc, argv, "create") > 0) return cx_write(p, "true", 4) ? 1 : 0;
     if (argi(argc, argv, "upload") > 0) {
-        for (int i = 0; i < argc; i++) if (strchr(argv[i], '/')) {
+        int u = argi(argc, argv, "upload");
+        for (int i = u + 2; i < argc; i++) if (strchr(argv[i], '/')) {
             const char *l = strrchr(argv[i], '/') + 1;
             cx_fmt(q, sizeof q, "%s/remote/%s", fdir, l); copy_file(argv[i], q, 0);
         }
         return 0;
     }
     if (argi(argc, argv, "download") > 0) {
-        int d = argi(argc, argv, "-D"); char flag[4400]; int corrupt;
+        int d = argi(argc, argv, "-D"); char flag[4400], rdir[4600]; int corrupt;
+        sy_dir_t dd;
         cx_fmt(flag, sizeof flag, "%s/corrupt-download", fdir); corrupt = sy_exists(flag) == 1;
         if(d<0){d=argi(argc,argv,"--dir");if(d<0 || d+1>=argc || sy_mkdir(argv[d+1],0700))return 1;}
-        for (int i = 0; i < 6; i++) {
-            char a[4800];
-            if (argi(argc, argv, "-p") > 0) { int want = 0; for (int k = 0; k < argc - 1; k++) if (tx_eqz(argv[k], "-p") && tx_eqz(argv[k + 1], leafs[i])) want = 1; if (!want) continue; }
-            cx_fmt(a, sizeof a, "%s/remote/%s", fdir, leafs[i]); cx_fmt(q, sizeof q, "%s/%s", argv[d + 1], leafs[i]);
-            copy_file(a, q, corrupt && i == 1);
+        cx_fmt(rdir, sizeof rdir, "%s/remote", fdir);
+        if (sy_dir_open(&dd, rdir) == 0) {
+            while (sy_dir_next(&dd) > 0) {
+                char a[4800];
+                if (tx_eqz(dd.name, ".") || tx_eqz(dd.name, "..")) continue;
+                if (argi(argc, argv, "-p") > 0) {
+                    int want = 0;
+                    for (int k = 0; k < argc - 1; k++)
+                        if (tx_eqz(argv[k], "-p") && tx_eqz(argv[k + 1], dd.name)) want = 1;
+                    if (!want) continue;
+                }
+                cx_fmt(a, sizeof a, "%s/%s", rdir, dd.name);
+                cx_fmt(q, sizeof q, "%s/%s", argv[d + 1], dd.name);
+                copy_file(a, q, corrupt && tx_eqz(dd.name, "pkg.bin"));
+            }
+            (void)sy_dir_close(&dd);
         }
         return 0;
     }
@@ -341,7 +355,7 @@ static void fixture(int fixture_patch, int strict_variant, int ratchet_fail, int
     cx_fmt(fx_head, sizeof fx_head, "%s", base_commit);
     set_fx_chain_rev(fx_head);
     cx_fmt(p, sizeof p, "%s/release/evidence/0.0.99", fx); { char *v[] = {"mkdir", "-p", p, 0}; sh(v, "/", 0, 0); }
-    cx_fmt(p, sizeof p, "%s/remote", td); { char *v[] = {"mkdir", "-p", p, 0}; sh(v, "/", 0, 0); }
+    cx_fmt(p, sizeof p, "%s/remote", td); rmrf(p); { char *v[] = {"mkdir", "-p", p, 0}; sh(v, "/", 0, 0); }
     cx_fmt(p,sizeof p,"%s/tools",fx);
     if(sy_mkdir(p,0755))die("fixture tools directory");
     cx_fmt(t,sizeof t,"product\t%s\tfixture checkout driver\n",leafs[0]);
@@ -832,7 +846,7 @@ static void part_b(void) {
     static const char *seq[] = {"unisacc tools/devsvc -- git commit -m v0.0.99 X: candidate table", "gh -R example/fixture release create v0.0.99 --draft",
         "gh -R example/fixture release upload v0.0.99", "gh -R example/fixture release download v0.0.99 -D", "gh -R example/fixture workflow run candidate-native.yml --ref v0.0.99 -f release_tag=v0.0.99",
         "gh -R example/fixture run view 777001 --json conclusion", "gh -R example/fixture run view 777001 --log", "unisacc tools/devsvc -- git commit -m v0.0.99 Y1",
-        "gh -R example/fixture release edit v0.0.99 --draft=false --latest", "gh -R example/fixture release download v0.0.99 -p unisacc.com -p SHA256SUMS",
+        "gh -R example/fixture release edit v0.0.99 --draft=false --latest", "gh -R example/fixture release download v0.0.99 -D ",
         "unisacc release/tools/c47-1-readback", "unisacc tools/devsvc -- git commit -m v0.0.99 Y2: public readback"};
     /* E1 full execute */
     char e1_head[64];
@@ -1112,6 +1126,142 @@ static void part_g(void) {
        has(ix, "exec-6-rollback\t") && has(ix, "\tPASS\trelease/rollback.txt\tdraft_rc=0 latest_rc=0"),
        "G.actual-rollback-result-indexed");
     free(ix);
+
+    /* G8 (v0.1.6): unconditional strict receipt binding + 27-col fake-gh 9-asset execute + stale/downgrade negatives */
+    /* G8a (red-first on d29bf33d7): old 6-asset receipts lacking CAND_SUMS_SHA= / REMOTE_ASSET_COUNT= MUST be refused */
+    fixture(99, 0, 0, 1);
+    rc = rx(0, 0, 0, 0);
+    ck(rc == 0 && has(out, "RELEASE_EXEC\tRESULT\tEXECUTED"), "G8a.baseline-6asset-exec-ok");
+    {
+        char old_pub[1024], old_drf[1024];
+        cx_fmt(old_pub, sizeof old_pub,
+            "# old public readback without CAND_SUMS_SHA\n"
+            "READBACK_SHA unisacc.com %s\n"
+            "{\"isDraft\":false}\n"
+            "rc=0\n", sha[0]);
+        put(fx, "release/evidence/0.0.99/public-readback.txt", old_pub);
+        rc = rx("--from-step", "7", 0, 0);
+        ck(rc != 0 && strstr(out, "RELEASE_EXEC_GATE_READBACK") != 0, "G8a.old-6asset-public-receipt-resume-refused");
+        rc = rx("--dry", 0, 0, 0);
+        ck(rc == 2 && has(out, "GATE\t6\tREADBACK\tFAIL"), "G8a.old-6asset-public-receipt-dry-refused");
+
+        cx_fmt(old_drf, sizeof old_drf,
+            "# old draft readback without CAND_SUMS_SHA\n"
+            "unisacc.com: OK\npkg.bin: OK\nslice-win-arm64: OK\nunisacc.com.build.json: OK\nbuild.json: OK\n");
+        put(fx, "release/evidence/0.0.99/draft-readback.txt", old_drf);
+        rc = rx("--dry", 0, 0, 0);
+        ck(rc == 2 && has(out, "GATE\t2\tDRAFT_READBACK\tFAIL"), "G8a.old-6asset-draft-receipt-dry-refused");
+    }
+
+    /* G8b + G8c: 27-col fake-gh 9-asset execute PASS, then stale 9-asset receipt negative control */
+    {
+        static const char *ex_names[3] = {"tapemode.so", "tape-manifest.tsv", "m53.tapeslice"};
+        static const char *ex_body[3] = {"ELF-tapemode-fixture\n", "manifest-fixture\n", "m53-tapeslice-fixture\n"};
+        char ex_sha[3][65], sums_sha[65], head27[128], cand27[8192], want_sums[128], want_rbs[256];
+        fixture(99, 0, 0, 1);
+        for (int i = 0; i < 3; i++) {
+            put(lay, ex_names[i], ex_body[i]);
+            cx_fmt(p, sizeof p, "%s/%s", lay, ex_names[i]);
+            sha_of(p, ex_sha[i]);
+        }
+        {
+            np_buf sb = {0}; char row[600];
+            int order[5] = {4, 1, 2, 0, 3};
+            for (int k = 0; k < 5; k++) { int i = order[k]; cx_fmt(row, sizeof row, "%s  %s\n", sha[i], leafs[i]); np_puts(&sb, row); }
+            for (int i = 0; i < 3; i++) { cx_fmt(row, sizeof row, "%s  %s\n", ex_sha[i], ex_names[i]); np_puts(&sb, row); }
+            cx_fmt(p, sizeof p, "%s/SHA256SUMS", lay);
+            cx_write(p, sb.p, sb.n); free(sb.p);
+            sha_of(p, sums_sha);
+        }
+        if (git("rev-parse", "HEAD", 0, 0, 0, head27, sizeof head27) || tlen(head27) != 40) die("g8b head");
+        cx_fmt(cand27, sizeof cand27,
+            "repo\ttag\tcommit\tversion\tworkflow\tworkflow_ref\tci_run_id\t"
+            "ape\tape_sha256\tpackage\tpackage_sha256\twin_arm64\twin_arm64_sha256\t"
+            "record\trecord_sha256\tbuild_alias\tbuild_alias_sha256\tzip\tzip_sha256\t"
+            "checksums\tchecksums_sha256\t"
+            "tape_so\ttape_so_sha256\ttape_manifest\ttape_manifest_sha256\ttape_m53\ttape_m53_sha256\n"
+            "example/fixture\tv0.0.99\t%s\t0.0.99\tcandidate-native.yml\tv0.0.99\t0\t"
+            "unisacc.com\t%s\tpkg.bin\t%s\tslice-win-arm64\t%s\t"
+            "unisacc.com.build.json\t%s\tbuild.json\t%s\t-\t-\t"
+            "SHA256SUMS\t%s\t"
+            "tapemode.so\t%s\ttape-manifest.tsv\t%s\tm53.tapeslice\t%s\n",
+            head27, sha[0], sha[1], sha[2], sha[3], sha[4], sums_sha, ex_sha[0], ex_sha[1], ex_sha[2]);
+        put(fx, "release/candidate.tsv", cand27);
+        if (git("add", "release/candidate.tsv", 0, 0, 0, 0, 0) ||
+            git("commit", "-qm", "27col candidate", 0, 0, 0, 0) ||
+            git("push", "-q", "origin", "HEAD:main", 0, 0, 0)) die("g8b commit");
+        if (git("rev-parse", "HEAD", 0, 0, 0, head27, sizeof head27) || tlen(head27) != 40) die("g8b head2");
+        cx_fmt(cand27, sizeof cand27,
+            "repo\ttag\tcommit\tversion\tworkflow\tworkflow_ref\tci_run_id\t"
+            "ape\tape_sha256\tpackage\tpackage_sha256\twin_arm64\twin_arm64_sha256\t"
+            "record\trecord_sha256\tbuild_alias\tbuild_alias_sha256\tzip\tzip_sha256\t"
+            "checksums\tchecksums_sha256\t"
+            "tape_so\ttape_so_sha256\ttape_manifest\ttape_manifest_sha256\ttape_m53\ttape_m53_sha256\n"
+            "example/fixture\tv0.0.99\t%s\t0.0.99\tcandidate-native.yml\tv0.0.99\t0\t"
+            "unisacc.com\t%s\tpkg.bin\t%s\tslice-win-arm64\t%s\t"
+            "unisacc.com.build.json\t%s\tbuild.json\t%s\t-\t-\t"
+            "SHA256SUMS\t%s\t"
+            "tapemode.so\t%s\ttape-manifest.tsv\t%s\tm53.tapeslice\t%s\n",
+            head27, sha[0], sha[1], sha[2], sha[3], sha[4], sums_sha, ex_sha[0], ex_sha[1], ex_sha[2]);
+        put(fx, "release/candidate.tsv", cand27);
+        set_fx_chain_rev(head27);
+        git("update-ref", "refs/heads/v0.0.99", head27, 0, 0, 0, 0);
+
+        rc = rx(0, 0, 0, 0);
+        ck(rc == 0 && has(out, "RELEASE_EXEC\tRESULT\tEXECUTED") &&
+           has(out, "GATE\t2\tDRAFT_READBACK\tPASS\t8 assets match downloaded SHA256SUMS"),
+           "G8b.v016-27col-fake-gh-exec-pass");
+        cx_fmt(want_sums, sizeof want_sums, "CAND_SUMS_SHA=%s", sums_sha);
+        cx_fmt(p, sizeof p, "%s/release/evidence/0.0.99/draft-readback.txt", fx);
+        { char *dr = catf(p);
+          ck(dr && strstr(dr, want_sums) && strstr(dr, "REMOTE_ASSET_COUNT=9") &&
+             strstr(dr, "m53.tapeslice: OK"), "G8b.v016-27col-draft-receipt-bound");
+          free(dr); }
+        cx_fmt(p, sizeof p, "%s/release/evidence/0.0.99/public-readback.txt", fx);
+        { char *pr = catf(p);
+          cx_fmt(want_rbs, sizeof want_rbs, "READBACK_SHA m53.tapeslice %s", ex_sha[2]);
+          ck(pr && strstr(pr, want_sums) && strstr(pr, "REMOTE_ASSET_COUNT=9") &&
+             strstr(pr, want_rbs), "G8b.v016-27col-public-receipt-bound");
+          free(pr); }
+        rc = rx("--from-step", "7", 0, 0);
+        ck(rc == 0 && has(out, "SKIP\t7\tY2 already recorded"), "G8b.v016-27col-resume-y2-pass");
+
+        /* G8c: stale 9-asset receipt (same APE + same 3 sidecars, different CAND_SUMS_SHA) MUST be refused */
+        cx_fmt(p, sizeof p, "%s/release/evidence/0.0.99/public-readback.txt", fx);
+        { char *pr = catf(p); char *hit = pr ? strstr(pr, "CAND_SUMS_SHA=") : 0;
+          if (!hit) die("g8c cand_sums_sha");
+          hit[14] = (hit[14] == '0') ? '1' : '0';
+          put(fx, "release/evidence/0.0.99/public-readback.txt", pr);
+          free(pr); }
+        rc = rx("--from-step", "7", 0, 0);
+        ck(rc != 0 && strstr(out, "RELEASE_EXEC_GATE_READBACK") != 0, "G8c.v016-stale-9asset-public-receipt-resume-refused");
+        rc = rx("--dry", 0, 0, 0);
+        ck(rc == 2 && has(out, "GATE\t6\tREADBACK\tFAIL"), "G8c.v016-stale-9asset-public-receipt-dry-refused");
+    }
+
+    /* G8d: 6-asset downgrade with leftover remote sidecars MUST be refused at DRAFT_READBACK and PUBLIC_SHA */
+    fixture(99, 0, 0, 1);
+    {
+        char rdir[4600];
+        cx_fmt(rdir, sizeof rdir, "%s/remote", td);
+        put(rdir, "tapemode.so", "stale-so\n");
+        put(rdir, "tape-manifest.tsv", "stale-mf\n");
+        put(rdir, "m53.tapeslice", "stale-m53\n");
+        rc = rx(0, 0, 0, 0);
+        ck(rc == 2 && has(out, "GATE\t2\tDRAFT_READBACK\tFAIL\tremote draft asset count 9 differs from expected 6"),
+           "G8d.v016-6asset-downgrade-leftover-remote-draft-refused");
+    }
+    fixture(99, 0, 0, 1);
+    rc = rx(0, 0, 0, 0);
+    ck(rc == 0, "G8d.baseline-6asset-before-leftover-public-ok");
+    {
+        char rdir[4600];
+        cx_fmt(rdir, sizeof rdir, "%s/remote", td);
+        put(rdir, "m53.tapeslice", "stale-m53\n");
+        rc = rx("--from-step", "6", 0, 0);
+        ck(rc == 2 && has(out, "GATE\t6\tPUBLIC_SHA\tFAIL\tremote public asset count 7 differs from expected 6"),
+           "G8d.v016-6asset-downgrade-leftover-remote-public-refused");
+    }
 }
 
 static void part_c(void) {
