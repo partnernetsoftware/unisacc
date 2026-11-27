@@ -237,12 +237,26 @@ static int eb_plan_append(char **buf, long *len, long *cap, long *global_used,
     return 0;
 }
 
+static void eb_print_head20(const char *tag, const char *buf, long len) {
+    long p = 0;
+    int lines = 0;
+    if (!buf || len <= 0) return;
+    while (p < len && lines < 20) {
+        long s = p;
+        while (p < len && buf[p] != '\n') p++;
+        fprintf(stderr, "entry-build: cx-plan %s[%d]: %.*s\n", tag, lines + 1, (int)(p - s), buf + s);
+        if (p < len && buf[p] == '\n') p++;
+        lines++;
+    }
+}
+
 /* One -cx-plan per root, run in parallel (EB_JOBS children), then merged in
    root-index order into a heap buffer sized to the actual plan. A single global
    byte budget is enforced while reading, and all error exits share one cleanup
    path that kills, closes all pipes, reaps children, and frees all buffers. */
-static int eb_plan_parallel(const char *bound, const char *ctor, int via_sh, const char **srcs, int nsrc,
-                            const char *cwd, char **out_buf, char *why, int wl) {
+static int eb_plan_parallel(const char *bound, const char *ctor, int via_sh, const char **srcs,
+                            const char **rrs, int nsrc, const char *cwd, char **out_buf,
+                            const char **fail_rr_out, char *why, int wl) {
     int pid[EB_JOBS_MAX];
     int fd[EB_JOBS_MAX];
     int efd[EB_JOBS_MAX];
@@ -370,14 +384,44 @@ static int eb_plan_parallel(const char *bound, const char *ctor, int via_sh, con
                 efd[i] = -1;
             }
             if (code) {
-                if (errb[i] && errn[i]) {
-                    long c;
-                    fwrite(errb[i], 1, (size_t)errn[i], stderr);
-                    c = errn[i] < (long)wl - 1 ? errn[i] : (long)wl - 1;
-                    while (c > 0 && (errb[i][c - 1] == '\n' || errb[i][c - 1] == '\r')) c = c - 1;
-                    if (c > 0) mm_copy(why, (long)wl, errb[i], c);
-                    why[c] = 0;
-                } else why[0] = 0;
+                int job = slot_of[i];
+                const char *froot = (job >= 0 && job < nsrc && srcs[job]) ? srcs[job] : "-";
+                const char *frr = (rrs && job >= 0 && job < nsrc && rrs[job]) ? rrs[job] : "-";
+                /* Drain remaining stdout of the failed child so diagnostics written to stdout are captured too. */
+                if (fd[i] >= 0) {
+                    for (;;) {
+                        char tmp[4096];
+                        long k = sy_read(fd[i], tmp, 4096);
+                        if (k <= 0) break;
+                        if (outn[job] < EB_STDERR_MAX) {
+                            long take = k;
+                            if (take > EB_STDERR_MAX - outn[job]) take = EB_STDERR_MAX - outn[job];
+                            (void)eb_plan_append(&outs[job], &outn[job], &outcap[job], &global_used, tmp, take, limit, 0, 0);
+                        }
+                    }
+                }
+                if (frr[0] && frr[0] != '-') {
+                    FILE *rfp = fopen(frr, "wb");
+                    if (rfp) {
+                        fprintf(rfp, "cx-plan-failed\troot=%s\trc=%d\tstderr_bytes=%ld\tstdout_bytes=%ld\n",
+                                froot, code, errn[i], outn[job]);
+                        if (errb[i] && errn[i] > 0) fwrite(errb[i], 1, (size_t)errn[i], rfp);
+                        if (outs[job] && outn[job] > 0) {
+                            fputs("\n--- stdout ---\n", rfp);
+                            fwrite(outs[job], 1, (size_t)outn[job], rfp);
+                        }
+                        fclose(rfp);
+                    }
+                    if (fail_rr_out) *fail_rr_out = frr;
+                }
+                fprintf(stderr, "entry-build: REFUSE cx-plan child-failed root=%s rc=%d rr=%s stderr_bytes=%ld\n",
+                        froot, code, frr, errn[i]);
+                eb_print_head20("stderr", errb[i], errn[i]);
+                eb_print_head20("stdout", outs[job], outn[job]);
+                if (why && wl > 0) {
+                    snprintf(why, (size_t)wl, "child-failed root=%s rc=%d rr=%s stderr_bytes=%ld",
+                             froot, code, frr, errn[i]);
+                }
                 ret = code;
                 goto cleanup;
             }
@@ -1279,6 +1323,7 @@ int main(int argc, char **argv) {
     ncl = 0;
     {
         const char *roots[128];
+        const char *rr_ptrs[128];
         char eb_origreal[128][EB_REALW];
         int ri;
         i = 0;
@@ -1289,10 +1334,11 @@ int main(int argc, char **argv) {
             else eb_origreal[i][0] = 0;
             i = i + 1;
         }
-        for (ri = 0; ri < EB_OBJ; ri++) roots[ri] = srcs_b[ri];
+        for (ri = 0; ri < EB_OBJ; ri++) { roots[ri] = srcs_b[ri]; rr_ptrs[ri] = rrs_b[ri]; }
         {
             long p;
             char *eb_pbuf = 0;
+            const char *fail_rr = rrs_b[0];
             why[0] = 0;
             {
                 const char *memo = sy_env("UNISACC_EB_PLAN_MEMO");
@@ -1304,9 +1350,9 @@ int main(int argc, char **argv) {
                     reused = eb_plan_load(memo, root, pkey, &eb_pbuf);
                 }
                 if (!reused) {
-                    rc = eb_plan_parallel(bound, ctor, via_sh, roots, EB_OBJ, root, &eb_pbuf, why, (int)sizeof why);
+                    rc = eb_plan_parallel(bound, ctor, via_sh, roots, rr_ptrs, EB_OBJ, root, &eb_pbuf, &fail_rr, why, (int)sizeof why);
                     if (rc) {
-                        eb_fail_close(rf, "cx-plan", rrs_b[0], rc, 0, why);
+                        eb_fail_close(rf, "cx-plan", fail_rr ? fail_rr : rrs_b[0], rc, 0, why);
                         return rc == 2 ? 2 : 1;
                     }
                     if (memo) {

@@ -41,8 +41,8 @@ static int run_cmd(const char *cwd, char **v, char *out, long cap, int secs) {
 
 int main(void) {
     char repo[512], base[512], long_root[640], real_root[640];
-    char eb_bin[640], base_cx[640], base_bin[640], ctor_cx[640], ctor_bin[640];
-    char outdir[640], outdir2[640], outdir_short[640], outdir_base[640];
+    char eb_bin[640], base_cx[640], base_bin[640], ctor_cx[640], ctor_bin[640], fail_cx[640], fail_bin[640];
+    char outdir[640], outdir2[640], outdir3[640], outdir_short[640], outdir_base[640];
     char p3[640], p3_repo[640], cmd[4096], out[65536], out_base[65536];
     if (sy_realpath(".", repo, sizeof repo) < 0) return 2;
     if (sy_mkdtemp(sy_tmpdir(), "eb-lp-", base, sizeof base) != 0) return 2;
@@ -56,14 +56,17 @@ int main(void) {
         cx_fmt(base_bin, sizeof base_bin, "%s/entry_build_base", base) ||
         cx_fmt(ctor_cx, sizeof ctor_cx, "%s/long_field_ctor.cx", base) ||
         cx_fmt(ctor_bin, sizeof ctor_bin, "%s/long_field_ctor", base) ||
+        cx_fmt(fail_cx, sizeof fail_cx, "%s/fail_rc2_ctor.cx", base) ||
+        cx_fmt(fail_bin, sizeof fail_bin, "%s/fail_rc2_ctor", base) ||
         cx_fmt(outdir, sizeof outdir, "%s/eb_out", base) ||
         cx_fmt(outdir2, sizeof outdir2, "%s/eb_out2", base) ||
+        cx_fmt(outdir3, sizeof outdir3, "%s/eb_out3", base) ||
         cx_fmt(outdir_short, sizeof outdir_short, "%s/eb_short", base) ||
         cx_fmt(outdir_base, sizeof outdir_base, "%s/eb_base", base) ||
         cx_fmt(p3, sizeof p3, "%s/unisacc.com", long_root) ||
         cx_fmt(p3_repo, sizeof p3_repo, "%s/unisacc.com", repo) ||
         sy_mkdir_all(long_root, 0755) ||
-        sy_mkdir_all(outdir, 0755) || sy_mkdir_all(outdir2, 0755) ||
+        sy_mkdir_all(outdir, 0755) || sy_mkdir_all(outdir2, 0755) || sy_mkdir_all(outdir3, 0755) ||
         sy_mkdir_all(outdir_short, 0755) || sy_mkdir_all(outdir_base, 0755)) {
         (void)sy_remove_all(base);
         return 2;
@@ -77,12 +80,19 @@ int main(void) {
         "    sy_printf(\".cx\\n\");\n"
         "    return 0;\n"
         "}\n";
-    if (cx_write(ctor_cx, ctor_src, (size_t)tx_len(ctor_src, 512))) {
+    const char *fail_src =
+        "#pragma unisa use sys.io\n"
+        "int main(void) {\n"
+        "    sy_printf(\"diag-stdout-line-1\\n\");\n"
+        "    return 2;\n"
+        "}\n";
+    if (cx_write(ctor_cx, ctor_src, (size_t)tx_len(ctor_src, 512)) ||
+        cx_write(fail_cx, fail_src, (size_t)tx_len(fail_src, 512))) {
         (void)sy_remove_all(base);
         return 2;
     }
 
-    /* Stage sealed long_root + compile new entry-build, base a30661822 entry-build, and long_field_ctor in parallel */
+    /* Stage sealed long_root + compile new entry-build, base a30661822 entry-build, and helper ctors in parallel */
     if (cx_fmt(cmd, sizeof cmd,
                "R='%s'; B='%s'; L='%s'; "
                "ln -sf \"$R/cxroot.tsv\" \"$R/tools\" \"$R/cx\" \"$R/include\" \"$R/ext\" \"$R/src\" \"$B/\" && "
@@ -95,9 +105,9 @@ int main(void) {
                "(if git cat-file -e a30661822:tools/entry-build.cx 2>/dev/null; then "
                "  git show a30661822:tools/entry-build.cx > '%s' && "
                "  sh ./unisacc.com '%s' -o '%s'; fi) & p3=$!; "
-               "(sh ./unisacc.com '%s' -o '%s') & p4=$!; "
+               "(sh ./unisacc.com '%s' -o '%s' && sh ./unisacc.com '%s' -o '%s') & p4=$!; "
                "wait $p1 && wait $p2 && wait $p3 && wait $p4",
-               repo, base, long_root, eb_bin, base_cx, base_cx, base_bin, ctor_cx, ctor_bin)) {
+               repo, base, long_root, eb_bin, base_cx, base_cx, base_bin, ctor_cx, ctor_bin, fail_cx, fail_bin)) {
         (void)sy_remove_all(base);
         return 2;
     }
@@ -170,6 +180,21 @@ int main(void) {
         int tl_ok = (rc_tl == 2 && strstr(out, "REFUSE cx-plan plan-path-too-long") != 0);
         if (!tl_ok) sy_eprintf("DIAG_TL\trc_tl=%d\tout=%.200s\n", rc_tl, out);
         ck(tl_ok, "cx-plan-path-ge-576-emits-named-refusal");
+
+        /* 5. Child non-zero (rc=2, empty stderr): emits named child-failed diagnostic + stdout head + keeps .rr */
+        char *vfail[] = {eb_bin, repo, p3_repo, outdir3, fail_bin, "--closure-list", 0};
+        int rc_fail = run_cmd(repo, vfail, out, sizeof out, 25);
+        char rr_chk[1024], rr_out[256];
+        int has_rr = (!cx_fmt(rr_chk, sizeof rr_chk, "ls '%s'/*.rr >/dev/null 2>&1", outdir3) &&
+                      run_cmd(repo, (char *[]){"sh", "-c", rr_chk, 0}, rr_out, sizeof rr_out, 5) == 0);
+        int fail_ok = (rc_fail == 2 &&
+                       strstr(out, "REFUSE cx-plan child-failed root=") != 0 &&
+                       strstr(out, " rc=2 rr=") != 0 &&
+                       strstr(out, " stderr_bytes=0") != 0 &&
+                       strstr(out, "diag-stdout-line-1") != 0 &&
+                       has_rr);
+        if (!fail_ok) sy_eprintf("DIAG_CHILD\trc=%d\thas_rr=%d\tout=%.300s\n", rc_fail, has_rr, out);
+        ck(fail_ok, "cx-plan-child-failed-emits-root-rc-rr-and-keeps-rr");
     }
 
     (void)sy_remove_all(base);
