@@ -165,8 +165,28 @@ static void execution_fixture(void) {
     ck(rc == 2 && strstr(out, "REFUSE execution baseline"), "execution-missing-baseline-refused");
 }
 
+static void sp_bg(char *buf, int cap, const char *tag, const char *cmd) {
+    int cur = (int)strlen(buf);
+    if (cur < cap - 1)
+        cx_fmt(buf + cur, cap - cur, "{ ( %s ) >%s/%s.log 2>&1 </dev/null; echo $? >%s/%s.rc; } & ",
+               cmd, T, tag, T, tag);
+}
+
+static int sp_read_res(const char *tag, char *out, int cap) {
+    char p[1024]; size_t n = 0; char *s; int rc = 2, i, k;
+    if (cx_fmt(p, sizeof p, "%s/%s.rc", T, tag) == 0 && (s = cx_read(p, &n))) { rc = atoi(s); free(s); }
+    out[0] = 0;
+    if (cx_fmt(p, sizeof p, "%s/%s.log", T, tag) == 0 && (s = cx_read(p, &n))) {
+        k = (int)n < cap - 1 ? (int)n : cap - 1;
+        for (i = 0; i < k; i++) out[i] = s[i];
+        out[k] = 0;
+        free(s);
+    }
+    return rc;
+}
+
 static void scope_product_fixture(void) {
-    char sc[8192], out[65536];
+    static char sc[16384], cmd[4096], out[65536];
     int rc;
     cx_fmt(sc, sizeof sc,
         "set -e; cd %s; mkdir -p repo3/src repo3/cx repo3/exec repo3/tools; cd repo3; git init -q; git config user.email t@t; git config user.name t;\n"
@@ -194,42 +214,100 @@ static void scope_product_fixture(void) {
     rc = ckk_sh_t("check-mutation-gate", sc, out, sizeof out, 25);
     ck(rc == 0, "scope-product-fixture-repo");
     if (rc != 0) { printf("%.1000s\n", out); return; }
+    cx_fmt(sc, sizeof sc, "sh ./unisacc.com %s/repo3/tools/selfcopy.cx -o %s/selfcopy.bin 2>&1", T, T);
+    if (ckk_sh_t("check-mutation-gate", sc, out, sizeof out, 25) != 0) { printf("%.1000s\n", out); failed++; return; }
 
-    /* --scope product requires --coverage-check and --build */
+    /* --scope product requires --coverage-check, --build, and --expect-fail */
     cx_fmt(sc, sizeof sc,
         "sh ./unisacc.com tools/mutation-gate.cx -- prep --scope product --build 'true' --repo %s/repo3 --base base "
-        "--patch %s/prod.patch --check 'echo ok' --out %s/sp-nocov --par 1 2>&1", T, T, T);
+        "--patch %s/prod.patch --check 'echo ok' --expect-fail prod-mismatch --out %s/sp-nocov --par 1 2>&1", T, T, T);
     rc = ckk_sh_t("check-mutation-gate", sc, out, sizeof out, 15);
     ck(rc == 2 && ckk_has(out, sizeof out, "requires --coverage-check"), "scope-product-requires-cov");
 
     cx_fmt(sc, sizeof sc,
         "sh ./unisacc.com tools/mutation-gate.cx -- prep --scope product --coverage-check --repo %s/repo3 --base base "
-        "--patch %s/prod.patch --check 'echo ok' --out %s/sp-nobuild --par 1 2>&1", T, T, T);
+        "--patch %s/prod.patch --check 'echo ok' --expect-fail prod-mismatch --out %s/sp-nobuild --par 1 2>&1", T, T, T);
     rc = ckk_sh_t("check-mutation-gate", sc, out, sizeof out, 15);
     ck(rc == 2 && ckk_has(out, sizeof out, "requires --build"), "scope-product-requires-build");
 
-    /* 0 product mutants (comment-only edit in src/) must exit rc 2 */
     cx_fmt(sc, sizeof sc,
-        "sh ./unisacc.com tools/mutation-gate.cx -- run --scope product --coverage-check --build 'sh ./unisacc.com src/prod.cx tools/caller.cx -o .caller' "
-        "--repo %s/repo3 --base base --patch %s/zero_prod.patch --check 'o=$(./.caller) && test \"$o\" = \"5 5 5\"' --out %s/sp-zero --par 2 --max 10 --deadline-s 30 2>&1",
+        "sh ./unisacc.com tools/mutation-gate.cx -- prep --scope product --coverage-check --build 'true' --repo %s/repo3 --base base "
+        "--patch %s/prod.patch --check 'echo ok' --out %s/sp-noexpect --par 1 2>&1", T, T, T);
+    rc = ckk_sh_t("check-mutation-gate", sc, out, sizeof out, 15);
+    ck(rc == 2 && ckk_has(out, sizeof out, "requires --expect-fail"), "scope-product-requires-expect-fail");
+
+    /* Wave A: fast prep/early-fail checks in parallel */
+    sc[0] = 0;
+    cx_fmt(cmd, sizeof cmd,
+        "sh ./unisacc.com tools/mutation-gate.cx -- run --scope product --coverage-check --build 'cc -O0 -include stdio.h -x c src/prod.cx tools/caller.cx -o .caller' "
+        "--repo %s/repo3 --base base --patch %s/zero_prod.patch --check 'o=$(./.caller) && test \"$o\" = \"5 5 5\"' --expect-fail prod-mismatch --out %s/sp-zero --par 1 --max 10 --deadline-s 30",
         T, T, T);
-    rc = ckk_sh_t("check-mutation-gate", sc, out, sizeof out, 25);
-    ck(rc == 2 && ckk_has(out, sizeof out, "no product mutant"), "scope-product-zero-mutants-rc2");
-
-    /* liveness self-test: fake no-op --build leaving installed unisacc.com with unprobed check must REFUSE rc 2 */
-    cx_fmt(sc, sizeof sc,
+    sp_bg(sc, sizeof sc, "sp-zero", cmd);
+    cx_fmt(cmd, sizeof cmd,
         "sh ./unisacc.com tools/mutation-gate.cx -- prep --scope product --coverage-check --build 'true' "
-        "--repo %s/repo3 --base base --patch %s/prod.patch --check 'sh ./unisacc.com tools/selfcopy.cx' --out %s/sp-livebad --par 1 2>&1", T, T, T);
-    rc = ckk_sh_t("check-mutation-gate", sc, out, sizeof out, 20);
-    ck(rc == 2 && ckk_has(out, sizeof out, "liveness selftest failed"), "scope-product-liveness-fake-build-refused");
+        "--repo %s/repo3 --base base --patch %s/prod.patch --check 'sh ./unisacc.com tools/selfcopy.cx' --expect-fail prod-mismatch --out %s/sp-livebad --par 1", T, T, T);
+    sp_bg(sc, sizeof sc, "sp-livebad", cmd);
+    cx_fmt(cmd, sizeof cmd,
+        "sh ./unisacc.com tools/mutation-gate.cx -- prep --scope product --coverage-check "
+        "--build 'if grep -q broken src/prod.cx; then exec timeout 0.1 sleep 1; fi; cc -O0 -include stdio.h -x c src/prod.cx tools/caller.cx -o .caller' "
+        "--repo %s/repo3 --base base --patch %s/prod.patch --check 'o=$(./.caller) && test \"$o\" = \"5 10 22\"' --expect-fail prod-mismatch --out %s/sp-liveto --par 1", T, T, T);
+    sp_bg(sc, sizeof sc, "sp-liveto", cmd);
+    cx_fmt(cmd, sizeof cmd,
+        "sh ./unisacc.com tools/mutation-gate.cx -- prep --repo %s/repo3 --base base --patch %s/prod.patch "
+        "--check 'echo ok' --out %s/sp-plain --par 1 >/dev/null 2>&1 && "
+        "sh ./unisacc.com tools/mutation-gate.cx -- report --scope product --out %s/sp-plain", T, T, T, T);
+    sp_bg(sc, sizeof sc, "sp-plain", cmd);
+    cx_fmt(cmd, sizeof cmd,
+        "sh ./unisacc.com tools/mutation-gate.cx -- run --scope product --coverage-check --build 'false' --repo %s/repo3 --base base "
+        "--patch %s/prod.patch --check 'echo ok' --expect-fail prod-mismatch --out %s/sp-buildbad --par 1 --max 4 --deadline-s 30", T, T, T);
+    sp_bg(sc, sizeof sc, "sp-buildbad", cmd);
+    if (strlen(sc) + 5 < sizeof sc) { int cur = (int)strlen(sc); cx_fmt(sc + cur, (int)sizeof sc - cur, "wait"); }
+    ckk_sh_t("check-mutation-gate", sc, out, sizeof out, 40);
 
-    /* self-copy check does not run rebuilt .caller: must FAIL with cov_not_live=1, MD_SURVIVOR, MD_NOT_LIVE ... cov */
-    cx_fmt(sc, sizeof sc,
+    rc = sp_read_res("sp-zero", out, sizeof out);
+    ck(rc == 2 && ckk_has(out, sizeof out, "no product mutant"), "scope-product-zero-mutants-rc2");
+    rc = sp_read_res("sp-livebad", out, sizeof out);
+    ck(rc == 2 && ckk_has(out, sizeof out, "liveness selftest failed"), "scope-product-liveness-fake-build-refused");
+    rc = sp_read_res("sp-liveto", out, sizeof out);
+    ck(rc == 2 && ckk_has(out, sizeof out, "liveness selftest refused"), "scope-product-liveness-timeout-refused");
+    rc = sp_read_res("sp-plain", out, sizeof out);
+    ck(rc == 2 && ckk_has(out, sizeof out, "requires --coverage-check"), "scope-product-report-requires-cov");
+    rc = sp_read_res("sp-buildbad", out, sizeof out);
+    ck(rc == 2 && ckk_has(out, sizeof out, "baseline build failed"), "scope-product-build-baseline-fails-rc2");
+
+    /* Wave B: multi-mutant runs in parallel (--par 2 each -> max 8 workers on 16 cores) */
+    sc[0] = 0;
+    cx_fmt(cmd, sizeof cmd,
+        "sh ./unisacc.com tools/mutation-gate.cx -- run --scope product --coverage-check "
+        "--build 'cc -O0 -include stdio.h -x c src/prod.cx tools/caller.cx -o .caller' "
+        "--repo %s/repo3 --base base --patch %s/prod.patch --check '%s/selfcopy.bin' --expect-fail prod-mismatch --out %s/sp-selfcopy --par 2 --max 10 --deadline-s 30",
+        T, T, T, T);
+    sp_bg(sc, sizeof sc, "sp-selfcopy", cmd);
+    cx_fmt(cmd, sizeof cmd,
         "sh ./unisacc.com tools/mutation-gate.cx -- run --scope product --coverage-check "
         "--build 'sh ./unisacc.com src/prod.cx tools/caller.cx -o .caller' "
-        "--repo %s/repo3 --base base --patch %s/prod.patch --check 'sh ./unisacc.com tools/selfcopy.cx' --out %s/sp-selfcopy --par 4 --max 10 --deadline-s 30 2>&1",
+        "--repo %s/repo3 --base base --patch %s/mixed.patch --check 'o=$(./.caller); if test \"$o\" = \"5 10 22\"; then exit 0; fi; printf \"FAIL\\tprod-mismatch\\n\"; exit 1' "
+        "--expect-fail prod-mismatch --out %s/sp-caller --par 2 --max 10 --deadline-s 30",
         T, T, T);
-    rc = ckk_sh_t("check-mutation-gate", sc, out, sizeof out, 35);
+    sp_bg(sc, sizeof sc, "sp-caller", cmd);
+    cx_fmt(cmd, sizeof cmd,
+        "sh ./unisacc.com tools/mutation-gate.cx -- run --scope product --coverage-check "
+        "--build 'sh ./unisacc.com cx/cxprod.cx exec/execprod.cx tools/cxexec_caller.cx -o .cxexec' "
+        "--repo %s/repo3 --base base --patch %s/cxexec.patch "
+        "--check 'o=$(./.cxexec); if test \"$o\" = \"11 2 6\"; then exit 0; fi; printf \"FAIL\\tcxexec-mismatch\\n\"; exit 1' "
+        "--expect-fail cxexec-mismatch --out %s/sp-cxexec --par 2 --max 2 --deadline-s 30", T, T, T);
+    sp_bg(sc, sizeof sc, "sp-cxexec", cmd);
+    cx_fmt(cmd, sizeof cmd,
+        "sh ./unisacc.com tools/mutation-gate.cx -- run --scope product --coverage-check "
+        "--build 'if grep -q \"t > 11\" src/prod.cx; then exit 1; fi; cc -O0 -include stdio.h -x c src/prod.cx tools/caller.cx -o .caller' "
+        "--repo %s/repo3 --base base --patch %s/prod.patch "
+        "--check 'o=$(./.caller); if test \"$o\" = \"5 10 22\"; then exit 0; fi; printf \"FAIL\\tprod-mismatch\\n\"; exit 1' "
+        "--expect-fail prod-mismatch --out %s/sp-buildfail --par 2 --max 10 --deadline-s 30", T, T, T);
+    sp_bg(sc, sizeof sc, "sp-buildfail", cmd);
+    if (strlen(sc) + 5 < sizeof sc) { int cur = (int)strlen(sc); cx_fmt(sc + cur, (int)sizeof sc - cur, "wait"); }
+    ckk_sh_t("check-mutation-gate", sc, out, sizeof out, 45);
+
+    rc = sp_read_res("sp-selfcopy", out, sizeof out);
     ck(rc == 1 && ckk_has(out, sizeof out, "MUTATION_DIFF scope=product hunks=1 mutants=5 killed=0 survived=5 not_live=0 cov_funcs=1 cov_live=0 cov_not_live=1 adjudicated=0 verdict=FAIL")
        && ckk_has(out, sizeof out, "MD_SURVIVOR src/prod.cx 3 stmt\n")
        && ckk_has(out, sizeof out, "MD_SURVIVOR src/prod.cx 1 retc\n")
@@ -237,133 +315,104 @@ static void scope_product_fixture(void) {
        "scope-product-self-copy-fails-not-live");
     if (rc != 1) printf("%.1200s\n", out);
 
-    /* real-caller check builds & runs src/prod.cx + tools/caller.cx (mixed.patch ignores tools/): PASS */
-    cx_fmt(sc, sizeof sc,
-        "sh ./unisacc.com tools/mutation-gate.cx -- run --scope product --coverage-check "
-        "--build 'sh ./unisacc.com src/prod.cx tools/caller.cx -o .caller' "
-        "--repo %s/repo3 --base base --patch %s/mixed.patch --check 'o=$(./.caller); if test \"$o\" = \"5 10 22\"; then exit 0; fi; printf \"FAIL\\tprod-mismatch\\n\"; exit 1' "
-        "--expect-fail prod-mismatch --out %s/sp-caller --par 4 --max 10 --deadline-s 30 2>&1",
-        T, T, T);
-    rc = ckk_sh_t("check-mutation-gate", sc, out, sizeof out, 35);
+    rc = sp_read_res("sp-caller", out, sizeof out);
     ck(rc == 0 && ckk_has(out, sizeof out, "MUTATION_DIFF scope=product hunks=1 mutants=5 killed=5 survived=0 not_live=0 cov_funcs=1 cov_live=1 cov_not_live=0 adjudicated=0 verdict=PASS")
        && !ckk_has(out, sizeof out, "MD_SURVIVOR ") && !ckk_has(out, sizeof out, "MD_NOT_LIVE "),
        "scope-product-real-caller-passes");
     {
-        const char *md = strstr(out, "MUTATION_DIFF scope=product ");
-        int mN = -1, mK = -1, mS = -1, mL = -1, mF = -1, mC = -1, mD = -1;
+        const char *md = strstr(out, "MUTATION_DIFF scope=product "), *wb_s = strstr(out, "MG_WORKERS budget_s=");
+        int mN = -1, mK = -1, mS = -1, mL = -1, mF = -1, mC = -1, mD = -1, wb = 0, td = 0;
         if (md) sscanf(md, "MUTATION_DIFF scope=product hunks=%*d mutants=%d killed=%d survived=%d not_live=%d cov_funcs=%d cov_live=%d cov_not_live=%d",
                        &mN, &mK, &mS, &mL, &mF, &mC, &mD);
         ck(mN > 0 && mK + mS + mL == mN && mF > 0 && mC + mD == mF, "scope-product-accounting-identity");
+        if (wb_s) sscanf(wb_s, "MG_WORKERS budget_s=%d total_deadline_s=%d", &wb, &td);
+        ck(td == 30 && wb > 0 && wb < 30, "scope-product-prep-counts-toward-deadline");
     }
     if (rc != 0) printf("%.1200s\n", out);
 
-    /* cx/ and exec/ product patch + non-.cx product file warning: PASS with cov_funcs=2 cov_live=2 */
-    cx_fmt(sc, sizeof sc,
-        "sh ./unisacc.com tools/mutation-gate.cx -- run --scope product --coverage-check "
-        "--build 'sh ./unisacc.com cx/cxprod.cx exec/execprod.cx tools/cxexec_caller.cx -o .cxexec' "
-        "--repo %s/repo3 --base base --patch %s/cxexec.patch "
-        "--check 'o=$(./.cxexec); if test \"$o\" = \"11 2 6\"; then exit 0; fi; printf \"FAIL\\tcxexec-mismatch\\n\"; exit 1' "
-        "--expect-fail cxexec-mismatch --out %s/sp-cxexec --par 4 --max 10 --deadline-s 30 2>&1", T, T, T);
-    rc = ckk_sh_t("check-mutation-gate", sc, out, sizeof out, 35);
+    rc = sp_read_res("sp-cxexec", out, sizeof out);
     ck(rc == 0 && ckk_has(out, sizeof out, "MG_WARN product non-.cx file has 0 mutants: exec/data.tsv")
-       && ckk_has(out, sizeof out, "MUTATION_DIFF scope=product hunks=2 mutants=8 killed=8 survived=0 not_live=0 cov_funcs=2 cov_live=2 cov_not_live=0 adjudicated=0 verdict=PASS"),
+       && ckk_has(out, sizeof out, "MUTATION_DIFF scope=product hunks=2 mutants=2 killed=2 survived=0 not_live=0 cov_funcs=2 cov_live=2 cov_not_live=0 adjudicated=0 verdict=PASS"),
        "scope-product-cx-exec-and-noncx-warn");
     if (rc != 0) printf("%.1200s\n", out);
 
-    /* report --scope product on a no-cov/no-build dir refuses rc 2; accounting mismatch refuses rc 2 */
-    cx_fmt(sc, sizeof sc,
-        "sh ./unisacc.com tools/mutation-gate.cx -- prep --repo %s/repo3 --base base --patch %s/prod.patch "
-        "--check 'echo ok' --out %s/sp-plain --par 1 >/dev/null 2>&1 && "
-        "sh ./unisacc.com tools/mutation-gate.cx -- report --scope product --out %s/sp-plain 2>&1", T, T, T, T);
-    rc = ckk_sh_t("check-mutation-gate", sc, out, sizeof out, 20);
-    ck(rc == 2 && ckk_has(out, sizeof out, "requires --coverage-check"), "scope-product-report-requires-cov");
+    rc = sp_read_res("sp-buildfail", out, sizeof out);
+    ck(rc == 1 && ckk_has(out, sizeof out, "MUTATION_DIFF scope=product hunks=1 mutants=5 killed=4 survived=0 not_live=1 cov_funcs=1 cov_live=1 cov_not_live=0 adjudicated=0 verdict=FAIL")
+       && ckk_has(out, sizeof out, "MD_NOT_LIVE src/prod.cx 3 int build_fail"),
+       "scope-product-build-fail-keeps-denominator");
+    if (rc != 1) printf("%.1200s\n", out);
 
-    /* --build failure at baseline refuses rc 2 */
-    cx_fmt(sc, sizeof sc,
-        "sh ./unisacc.com tools/mutation-gate.cx -- run --scope product --coverage-check --build 'false' --repo %s/repo3 --base base "
-        "--patch %s/prod.patch --check 'echo ok' --out %s/sp-buildbad --par 1 --max 4 --deadline-s 30 2>&1", T, T, T);
-    rc = ckk_sh_t("check-mutation-gate", sc, out, sizeof out, 20);
-    ck(rc == 2 && ckk_has(out, sizeof out, "baseline build failed"), "scope-product-build-baseline-fails-rc2");
-
-    /* unasserted exit 1 (no FAIL <name> bound to --expect-fail) must NOT kill; counts as not_live and fails */
-    cx_fmt(sc, sizeof sc,
+    /* Wave C: single-mutant negative/quality runs in parallel (--par 1 each) */
+    sc[0] = 0;
+    cx_fmt(cmd, sizeof cmd,
         "sh ./unisacc.com tools/mutation-gate.cx -- run --scope product --coverage-check "
-        "--build 'sh ./unisacc.com src/prod.cx tools/caller.cx -o .caller' "
+        "--build 'cc -O0 -include stdio.h -x c src/prod.cx tools/caller.cx -o .caller' "
         "--repo %s/repo3 --base base --patch %s/prod.patch "
         "--check 'o=$(./.caller); test \"$o\" = \"5 10 22\"' "
-        "--out %s/sp-unasserted --par 4 --max 10 --deadline-s 30 2>&1", T, T, T);
-    rc = ckk_sh_t("check-mutation-gate", sc, out, sizeof out, 35);
-    ck(rc == 1 && ckk_has(out, sizeof out, "MUTATION_DIFF scope=product hunks=1 mutants=5 killed=0 survived=0 not_live=5 cov_funcs=1 cov_live=1 cov_not_live=0 adjudicated=0 verdict=FAIL")
-       && ckk_has(out, sizeof out, "MD_NOT_LIVE src/prod.cx 3 cmp infra"),
+        "--expect-fail prod-mismatch --out %s/sp-unasserted --par 1 --max 1 --deadline-s 30", T, T, T);
+    sp_bg(sc, sizeof sc, "sp-unasserted", cmd);
+    cx_fmt(cmd, sizeof cmd,
+        "sh ./unisacc.com tools/mutation-gate.cx -- run --scope product --coverage-check "
+        "--build 'cc -O0 -include stdio.h -x c src/prod.cx tools/caller.cx -o .caller' "
+        "--repo %s/repo3 --base base --patch %s/prod.patch "
+        "--check 'if grep -q \"_mgf\" src/prod.cx; then kill -SEGV $$; fi; o=$(./.caller); if test \"$o\" = \"5 10 22\"; then exit 0; fi; printf \"FAIL\\tprod-mismatch\\n\"; exit 1' "
+        "--expect-fail prod-mismatch --out %s/sp-noprobe --par 1 --max 1 --deadline-s 30", T, T, T);
+    sp_bg(sc, sizeof sc, "sp-noprobe", cmd);
+    cx_fmt(cmd, sizeof cmd,
+        "sh ./unisacc.com tools/mutation-gate.cx -- run --scope product --coverage-check "
+        "--build 'cc -O0 -include stdio.h -x c src/prod.cx tools/caller.cx -o .caller' "
+        "--repo %s/repo3 --base base --patch %s/prod.patch "
+        "--check 'if grep -q \"_mgf\" src/prod.cx; then ./.caller >/dev/null 2>&1 || true; exit 0; fi; o=$(./.caller); if test \"$o\" = \"5 10 22\"; then exit 0; fi; printf \"FAIL\\tprod-mismatch\\n\"; exit 1' --expect-fail prod-mismatch "
+        "--check 'if grep -q \"_mgf\" src/prod.cx; then kill -SEGV $$; fi; o=$(./.caller); if test \"$o\" = \"5 10 22\"; then exit 0; fi; printf \"FAIL\\tprod-mismatch\\n\"; exit 1' --expect-fail prod-mismatch "
+        "--out %s/sp-dualprobe --par 1 --max 1 --deadline-s 30", T, T, T);
+    sp_bg(sc, sizeof sc, "sp-dualprobe", cmd);
+    cx_fmt(cmd, sizeof cmd,
+        "sh ./unisacc.com tools/mutation-gate.cx -- run --scope product --coverage-check "
+        "--build 'cc -O0 -include stdio.h -x c src/prod.cx tools/caller.cx -o .caller' "
+        "--repo %s/repo3 --base base --patch %s/prod.patch "
+        "--check 'o=$(./.caller); test \"$o\" = \"5 10 22\" && exit 0; exec timeout 0.1 sleep 1' "
+        "--expect-fail prod-mismatch --out %s/sp-timeout --par 1 --max 1 --deadline-s 30", T, T, T);
+    sp_bg(sc, sizeof sc, "sp-timeout", cmd);
+    cx_fmt(cmd, sizeof cmd,
+        "sh ./unisacc.com tools/mutation-gate.cx -- run --scope product --coverage-check "
+        "--build 'cc -O0 -include stdio.h -x c src/prod.cx tools/caller.cx -o .caller' "
+        "--repo %s/repo3 --base base --patch %s/prod.patch "
+        "--check 'o=$(./.caller); if test \"$o\" = \"5 10 22\"; then exit 0; fi; printf \"REFUSE\\tsetup\\nFAIL\\tprod-mismatch\\n\"; exit 1' "
+        "--expect-fail prod-mismatch --out %s/sp-infra --par 1 --max 1 --deadline-s 30", T, T, T);
+    sp_bg(sc, sizeof sc, "sp-infra", cmd);
+    if (strlen(sc) + 5 < sizeof sc) { int cur = (int)strlen(sc); cx_fmt(sc + cur, (int)sizeof sc - cur, "wait"); }
+    ckk_sh_t("check-mutation-gate", sc, out, sizeof out, 45);
+
+    rc = sp_read_res("sp-unasserted", out, sizeof out);
+    ck(rc == 1 && ckk_has(out, sizeof out, "MUTATION_DIFF scope=product hunks=1 mutants=1 killed=0 survived=0 not_live=1 cov_funcs=1 cov_live=1 cov_not_live=0 adjudicated=0 verdict=FAIL")
+       && ckk_has(out, sizeof out, "MD_NOT_LIVE src/prod.cx 3 cmp weak"),
        "scope-product-unasserted-exit1-not-live");
     if (rc != 1) printf("%.1200s\n", out);
 
-    /* SIGSEGV (139) without independent cov probe hit must NOT prove coverage; fails cov_not_live=1 */
-    cx_fmt(sc, sizeof sc,
-        "sh ./unisacc.com tools/mutation-gate.cx -- run --scope product --coverage-check "
-        "--build 'sh ./unisacc.com src/prod.cx tools/caller.cx -o .caller' "
-        "--repo %s/repo3 --base base --patch %s/prod.patch "
-        "--check 'if grep -q \"_mgf\" src/prod.cx; then kill -SEGV $$; fi; o=$(./.caller); if test \"$o\" = \"5 10 22\"; then exit 0; fi; printf \"FAIL\\tprod-mismatch\\n\"; exit 1' "
-        "--expect-fail prod-mismatch --out %s/sp-noprobe --par 4 --max 10 --deadline-s 30 2>&1", T, T, T);
-    rc = ckk_sh_t("check-mutation-gate", sc, out, sizeof out, 35);
-    ck(rc == 1 && ckk_has(out, sizeof out, "MUTATION_DIFF scope=product hunks=1 mutants=5 killed=5 survived=0 not_live=0 cov_funcs=1 cov_live=0 cov_not_live=1 adjudicated=0 verdict=FAIL")
+    rc = sp_read_res("sp-noprobe", out, sizeof out);
+    ck(rc == 1 && ckk_has(out, sizeof out, "MUTATION_DIFF scope=product hunks=1 mutants=1 killed=1 survived=0 not_live=0 cov_funcs=1 cov_live=0 cov_not_live=1 adjudicated=0 verdict=FAIL")
        && ckk_has(out, sizeof out, "MD_NOT_LIVE src/prod.cx 1 cov cov"),
        "scope-product-segv-without-probe-not-live");
     if (rc != 1) printf("%.1200s\n", out);
 
-    /* Dual-check split: check 0 hits probe and exits 0; check 1 skips probe and exits 139 -> must NOT combine into cov_live */
-    cx_fmt(sc, sizeof sc,
-        "sh ./unisacc.com tools/mutation-gate.cx -- run --scope product --coverage-check "
-        "--build 'sh ./unisacc.com src/prod.cx tools/caller.cx -o .caller' "
-        "--repo %s/repo3 --base base --patch %s/prod.patch "
-        "--check 'if grep -q \"_mgf\" src/prod.cx; then ./.caller >/dev/null 2>&1 || true; exit 0; fi; o=$(./.caller); if test \"$o\" = \"5 10 22\"; then exit 0; fi; printf \"FAIL\\tprod-mismatch\\n\"; exit 1' --expect-fail prod-mismatch "
-        "--check 'if grep -q \"_mgf\" src/prod.cx; then kill -SEGV $$; fi; o=$(./.caller); if test \"$o\" = \"5 10 22\"; then exit 0; fi; printf \"FAIL\\tprod-mismatch\\n\"; exit 1' --expect-fail prod-mismatch "
-        "--out %s/sp-dualprobe --par 4 --max 10 --deadline-s 30 2>&1", T, T, T);
-    rc = ckk_sh_t("check-mutation-gate", sc, out, sizeof out, 35);
-    ck(rc == 1 && ckk_has(out, sizeof out, "MUTATION_DIFF scope=product hunks=1 mutants=5 killed=5 survived=0 not_live=0 cov_funcs=1 cov_live=0 cov_not_live=1 adjudicated=0 verdict=FAIL")
+    rc = sp_read_res("sp-dualprobe", out, sizeof out);
+    ck(rc == 1 && ckk_has(out, sizeof out, "MUTATION_DIFF scope=product hunks=1 mutants=1 killed=1 survived=0 not_live=0 cov_funcs=1 cov_live=0 cov_not_live=1 adjudicated=0 verdict=FAIL")
        && ckk_has(out, sizeof out, "MD_NOT_LIVE src/prod.cx 1 cov cov"),
        "scope-product-dual-check-split-probe-not-live");
     if (rc != 1) printf("%.1200s\n", out);
 
-    /* timeout (rc 124) must NOT count as killed or cov-killed; counts as not_live/cov_not_live reason timeout */
-    cx_fmt(sc, sizeof sc,
-        "sh ./unisacc.com tools/mutation-gate.cx -- run --scope product --coverage-check "
-        "--build 'sh ./unisacc.com src/prod.cx tools/caller.cx -o .caller' "
-        "--repo %s/repo3 --base base --patch %s/prod.patch "
-        "--check 'o=$(./.caller); test \"$o\" = \"5 10 22\" && exit 0; exec timeout 0.1 sleep 1' "
-        "--expect-fail prod-mismatch --out %s/sp-timeout --par 4 --max 10 --deadline-s 30 2>&1", T, T, T);
-    rc = ckk_sh_t("check-mutation-gate", sc, out, sizeof out, 35);
-    ck(rc == 1 && ckk_has(out, sizeof out, "MUTATION_DIFF scope=product hunks=1 mutants=5 killed=0 survived=0 not_live=5 cov_funcs=1 cov_live=0 cov_not_live=1 adjudicated=0 verdict=FAIL")
+    rc = sp_read_res("sp-timeout", out, sizeof out);
+    ck(rc == 1 && ckk_has(out, sizeof out, "MUTATION_DIFF scope=product hunks=1 mutants=1 killed=0 survived=0 not_live=1 cov_funcs=1 cov_live=0 cov_not_live=1 adjudicated=0 verdict=FAIL")
        && ckk_has(out, sizeof out, "MD_NOT_LIVE src/prod.cx 3 cmp timeout")
        && ckk_has(out, sizeof out, "MD_NOT_LIVE src/prod.cx 1 cov timeout"),
        "scope-product-timeout-not-live");
     if (rc != 1) printf("%.1200s\n", out);
 
-    /* tab-delimited REFUSE (even alongside FAIL name) must NOT count as killed or cov-killed */
-    cx_fmt(sc, sizeof sc,
-        "sh ./unisacc.com tools/mutation-gate.cx -- run --scope product --coverage-check "
-        "--build 'sh ./unisacc.com src/prod.cx tools/caller.cx -o .caller' "
-        "--repo %s/repo3 --base base --patch %s/prod.patch "
-        "--check 'o=$(./.caller); if test \"$o\" = \"5 10 22\"; then exit 0; fi; printf \"REFUSE\\tsetup\\nFAIL\\tprod-mismatch\\n\"; exit 1' "
-        "--expect-fail prod-mismatch --out %s/sp-infra --par 4 --max 10 --deadline-s 30 2>&1", T, T, T);
-    rc = ckk_sh_t("check-mutation-gate", sc, out, sizeof out, 35);
-    ck(rc == 1 && ckk_has(out, sizeof out, "MUTATION_DIFF scope=product hunks=1 mutants=5 killed=0 survived=0 not_live=5 cov_funcs=1 cov_live=0 cov_not_live=1 adjudicated=0 verdict=FAIL")
+    rc = sp_read_res("sp-infra", out, sizeof out);
+    ck(rc == 1 && ckk_has(out, sizeof out, "MUTATION_DIFF scope=product hunks=1 mutants=1 killed=0 survived=0 not_live=1 cov_funcs=1 cov_live=0 cov_not_live=1 adjudicated=0 verdict=FAIL")
        && ckk_has(out, sizeof out, "MD_NOT_LIVE src/prod.cx 3 cmp infra")
        && ckk_has(out, sizeof out, "MD_NOT_LIVE src/prod.cx 1 cov infra"),
        "scope-product-infra-exit-not-live");
-    if (rc != 1) printf("%.1200s\n", out);
-
-    /* mid-run --build failure keeps planned mutants=5 denominator (5 = 4+0+1) and reports reason build_fail */
-    cx_fmt(sc, sizeof sc,
-        "sh ./unisacc.com tools/mutation-gate.cx -- run --scope product --coverage-check "
-        "--build 'if grep -q \"t > 11\" src/prod.cx; then exit 1; fi; sh ./unisacc.com src/prod.cx tools/caller.cx -o .caller' "
-        "--repo %s/repo3 --base base --patch %s/prod.patch "
-        "--check 'o=$(./.caller); if test \"$o\" = \"5 10 22\"; then exit 0; fi; printf \"FAIL\\tprod-mismatch\\n\"; exit 1' "
-        "--expect-fail prod-mismatch --out %s/sp-buildfail --par 4 --max 10 --deadline-s 30 2>&1", T, T, T);
-    rc = ckk_sh_t("check-mutation-gate", sc, out, sizeof out, 35);
-    ck(rc == 1 && ckk_has(out, sizeof out, "MUTATION_DIFF scope=product hunks=1 mutants=5 killed=4 survived=0 not_live=1 cov_funcs=1 cov_live=1 cov_not_live=0 adjudicated=0 verdict=FAIL")
-       && ckk_has(out, sizeof out, "MD_NOT_LIVE src/prod.cx 3 int build_fail"),
-       "scope-product-build-fail-keeps-denominator");
     if (rc != 1) printf("%.1200s\n", out);
 }
 

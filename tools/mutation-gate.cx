@@ -3,11 +3,11 @@
  * Usage (cwd = a repo checkout with ./unisacc.com; the gate never writes into it):
  *   mutation-gate.cx -- run  --patch P --base REV --check 'CMD' [--check 'CMD'...] --out DIR
  *                            [--repo R] [--max N] [--par N] [--min-score F] [--coverage-check]
- *                            [--mutate-checks] [--git] [--deadline-s S (30..3600, default 280)]
+ *                            [--mutate-checks] [--git] [--deadline-s S (30..3600, default 280; 240 for --scope product)]
  *       --git: the private tree becomes a git repo with the patch committed (for checks using git grep/diff).
- *       prep + workers + report in one call.  It may exceed 55 s: start it with
- *       `devsvc x --bg --par 1 -- sh ./unisacc.com tools/mutation-gate.cx -- run ...` and `devsvc wait`.
- *   mutation-gate.cx -- prep   (same options)  private tree + mutants + baseline check, bounded under 55 s
+ *       prep + workers + report in one call (shared --deadline-s for --scope product, default 240 s).
+ *       --scope product may exceed 55 s and must run via `devsvc x --bg --par 1 -- sh ./unisacc.com tools/mutation-gate.cx -- run --scope product ...`.
+ *   mutation-gate.cx -- prep   (same options)  private tree + mutants + baseline + liveness checks (each step <= 55 s; shares --deadline-s under --scope product)
  *   mutation-gate.cx -- worker --out DIR --slot K   runs mutants with id % par == K in DIR/slot-K
  *   mutation-gate.cx -- report --out DIR [--min-score F] [--allow-uncovered FILE] [--adjudicated FILE]
  *   mutation-gate.cx -- execution --produce 'CMD' --judge 'CMD' --assertion PASS_NAME
@@ -91,7 +91,8 @@ static const char *g_patch, *g_base, *g_out, *g_repo = 0, *g_chk[MG_MAXCHK];
 static int g_quality, g_expect_n;
 static int g_expect_check[64], g_expect_code[64];
 static const char *g_expect_name[64];
-static int g_nchk, g_max = 30, g_par = 0, g_cov, g_mutchecks, g_git, g_slot = -1, g_deadline = 280;
+static int g_nchk, g_max = 30, g_par = 0, g_cov, g_mutchecks, g_git, g_slot = -1, g_deadline = 280, g_deadline_set;
+static long g_run_end_ms;
 static int g_scope_product, g_prod_touched, g_hunks;
 static const char *g_build_cmd;
 static double g_min = 0.6;
@@ -665,12 +666,29 @@ static void gen_retc(int f, char **L, int *sts, int nlines, int ln, int *seen, i
 }
 
 /* ---------- prep ---------- */
+static int has_expect_fail(void) {
+    int cnt = 0;
+    for (int i = 0; i < g_expect_n; i++) {
+        if (g_expect_name[i] && g_expect_name[i][0]) cnt++;
+    }
+    return cnt;
+}
+
+static int step_budget(int cap_s) {
+    if (!g_run_end_ms) return cap_s;
+    long rem_ms = g_run_end_ms - sy_now_ms();
+    if (rem_ms < 1000) die2("deadline exhausted during prep", "");
+    int rem_s = (int)(rem_ms / 1000L);
+    return rem_s < cap_s ? rem_s : cap_s;
+}
+
 static void prep(void) {
     char cmd[16384], q1[2048], q2[2048], q3[2048], out[8192], p[1024]; int rc, i, f;
     long t0 = sy_now_ms();
     if (!g_patch || !g_base || !g_nchk) die2("usage", "need --patch --base --check (--out optional)");
     if (g_scope_product && !g_cov) die2("--scope product requires --coverage-check", "");
     if (g_scope_product && (!g_build_cmd || !g_build_cmd[0])) die2("--scope product requires --build", "");
+    if (g_scope_product && !has_expect_fail()) die2("--scope product requires --expect-fail", "");
     if (!g_repo) { const char *h = getenv("HOME"); static char rb[512]; cx_fmt(rb, sizeof rb, "%s/repos/unisacc", h ? h : "."); g_repo = rb; }
     if (g_par <= 0) { long nc = sy_ncpu(); g_par = nc > 1 ? (int)(nc / 2) : 1; }
     if (g_par > 16) g_par = 16;
@@ -715,12 +733,12 @@ static void prep(void) {
                    q3, q3, qr, q2, q3, q3, q3, q3, qp, qp);
         }
     }
-    rc = sh(cmd, out, sizeof out, 55);
+    rc = sh(cmd, out, sizeof out, step_budget(55));
     if (rc != 0) { fprintf(stderr, "%s", out); die2("archive or git apply failed rc", ""); }
     if (g_git) {   /* checks that need a work tree (git grep, git diff) get a private repo with the patch committed */
         cx_fmt(cmd, sizeof cmd, "set -e; cd %s/slot-0; git init -q; git -c user.email=mg@local -c user.name=mutation-gate add -A >/dev/null; "
                "git -c user.email=mg@local -c user.name=mutation-gate commit -q -m mutation-gate-base >/dev/null", q3);
-        rc = sh(cmd, out, sizeof out, 55);
+        rc = sh(cmd, out, sizeof out, step_budget(55));
         if (rc != 0) { fprintf(stderr, "%s", out); die2("git init of private tree failed", ""); }
     }
     parse_patch(g_patch);
@@ -795,7 +813,7 @@ static void prep(void) {
         char qb[4096], sc[8192];
         shq(qb, sizeof qb, g_build_cmd);
         cx_fmt(sc, sizeof sc, "cd %s/slot-0 && exec setsid -w sh -c %s 2>&1", q3, qb);
-        rc = sh(sc, out, sizeof out, 55);
+        rc = sh(sc, out, sizeof out, step_budget(55));
         printf("MG_BASELINE build rc=%d\n", rc);
         if (rc != 0) { fprintf(stderr, "%.2000s\n", out); die2("baseline build failed:", g_build_cmd); }
     }
@@ -803,7 +821,7 @@ static void prep(void) {
     for (i = 0; i < g_nchk; i++) {
         char sc[8192]; int failed;
         { char qc[4096]; shq(qc, sizeof qc, g_chk[i]); cx_fmt(sc, sizeof sc, "cd %s/slot-0 && exec setsid -w sh -c %s 2>&1", q3, qc); }
-        rc = sh(sc, out, sizeof out, 55);
+        rc = sh(sc, out, sizeof out, step_budget(55));
         { const char *fp = strstr(out, "failed="); failed = fp ? atoi(fp + 7) : 0; }
         printf("MG_BASELINE check=%d rc=%d failed=%d\n", i, rc, failed);
         if (rc != 0 || failed > 0) { fprintf(stderr, "%.2000s\n", out); die2("baseline check not green on patched tree:", g_chk[i]); }
@@ -817,7 +835,7 @@ static void prep(void) {
         { char *nb = mm_alloc((long)on + 64); cp(nb, (long)on + 64, orig, (long)on); cp(nb + on, 64, "\n@@ mutation-gate broken @@\n", 28); spit(fp, nb, on + 28); mm_free(nb); }
         shq(qf, sizeof qf, g_files[g_c[0].file]);
         cx_fmt(sc, sizeof sc, "cd %s/slot-0 && exec setsid -w sh ./unisacc.com -c -funit %s -o .mg-selftest.o >/dev/null 2>&1", q3, qf);
-        rc = sh(sc, out, sizeof out, 55);
+        rc = sh(sc, out, sizeof out, step_budget(55));
         spit(fp, orig, on); mm_free(orig);
         { char tp[1024]; cx_fmt(tp, sizeof tp, "%s/slot-0/.mg-selftest.o", g_out); sy_unlink(tp); }
         printf("MG_SELFTEST compile_gate_rejects_broken=%s\n", rc ? "yes" : "no");
@@ -830,19 +848,23 @@ static void prep(void) {
         { char *nb = mm_alloc((long)on + 64); cp(nb, (long)on + 64, orig, (long)on); cp(nb + on, 64, "\n@@ mutation-gate broken @@\n", 28); spit(fp, nb, on + 28); mm_free(nb); }
         shq(qb, sizeof qb, g_build_cmd);
         cx_fmt(sc, sizeof sc, "cd %s/slot-0 && exec setsid -w sh -c %s >/dev/null 2>&1", q3, qb);
-        rc = sh(sc, out, sizeof out, 55);
+        rc = sh(sc, out, sizeof out, step_budget(55));
         if (rc == 0) {
             shq(qc, sizeof qc, g_chk[0]);
             cx_fmt(sc, sizeof sc, "cd %s/slot-0 && exec setsid -w sh -c %s 2>&1", q3, qc);
-            rc = sh(sc, out, sizeof out, 55);
+            rc = sh(sc, out, sizeof out, step_budget(55));
             { const char *fp2 = strstr(out, "failed="); if (rc == 0 && fp2 && atoi(fp2 + 7) > 0) rc = 1; }
         }
         spit(fp, orig, on); mm_free(orig);
+        if (rc < 0 || rc == 124 || rc >= 125) {
+            printf("MG_LIVENESS build_or_check_rejects_broken=refused rc=%d\n", rc);
+            die2("liveness selftest refused:", "--build/--check timed out or aborted");
+        }
         printf("MG_LIVENESS build_or_check_rejects_broken=%s\n", rc ? "yes" : "no");
         if (rc == 0) die2("liveness selftest failed:", "--build/--check stayed green on broken product file");
     }
     /* slot copies */
-    for (i = 1; i < g_par; i++) { cx_fmt(cmd, sizeof cmd, "cp -a %s/slot-0 %s/slot-%d", q3, q3, i); if (sh(cmd, out, sizeof out, 55)) die2("copy slot", ""); }
+    for (i = 1; i < g_par; i++) { cx_fmt(cmd, sizeof cmd, "cp -a %s/slot-0 %s/slot-%d", q3, q3, i); if (sh(cmd, out, sizeof out, step_budget(55))) die2("copy slot", ""); }
     write_session("prepared");
     printf("MG_PREP_DONE ms=%ld out=%s\n", sy_now_ms() - t0, g_out);
 }
@@ -1185,6 +1207,7 @@ static int report(void) {
     load_conf();
     if (g_scope_product && !g_cov) die2("--scope product requires --coverage-check", "");
     if (g_scope_product && (!g_build_cmd || !g_build_cmd[0])) die2("--scope product requires --build", "");
+    if (g_scope_product && !has_expect_fail()) die2("--scope product requires --expect-fail", "");
     nau = load_list(g_allow_unc, &AU); naj = load_list(g_adjud, &AJ);
     unc[0] = 0;
     cx_fmt(p, sizeof p, "%s/mutants.tsv", g_out); tsv = slurp(p, &n); if (!tsv) die2("missing", p);
@@ -1235,6 +1258,7 @@ static int report(void) {
                         : !strncmp(r, "compile_fail", 12) ? "compile_fail"
                         : !strncmp(r, "build_fail", 10) ? "build_fail"
                         : (q == Q_UNKNOWN && qrc == 124) ? "timeout"
+                        : (!unexec && q == Q_WEAK) ? "weak"
                         : "infra";
                     md_L++;
                     if (!cx_fmt(linebuf, sizeof linebuf, "MD_NOT_LIVE %s %s %s %s\n", fl, ln, kd, why))
@@ -1341,20 +1365,32 @@ static int report(void) {
 
 /* ---------- run ---------- */
 static int run_all(const char *self) {
-    char cmd[16384], out[8192], q3[2048], qs[2048]; int i, rc; long t0 = sy_now_ms();
-    prep();
+    char cmd[16384], out[8192], q3[2048], qs[2048]; int i, rc, worker_budget; long t0 = sy_now_ms();
+    if (g_scope_product) {
+        g_run_end_ms = t0 + (long)g_deadline * 1000L;
+        prep();
+        long rem_ms = g_run_end_ms - sy_now_ms();
+        worker_budget = (int)(rem_ms / 1000L);
+        if (worker_budget < 5) die2("deadline exhausted during prep", "");
+        printf("MG_WORKERS budget_s=%d total_deadline_s=%d\n", worker_budget, g_deadline);
+    } else {
+        g_run_end_ms = 0;
+        prep();
+        worker_budget = g_deadline;
+    }
     shq(q3, sizeof q3, g_out); shq(qs, sizeof qs, self);
     for (i = 0; i < g_par; i++) {
-        cx_fmt(cmd, sizeof cmd, "setsid timeout -k 5 %d sh ./unisacc.com %s -- worker --out %s --slot %d > %s/worker-%d.log 2>&1 < /dev/null & echo $! > %s/worker-%d.pid", g_deadline, qs, q3, i, q3, i, q3, i);
+        cx_fmt(cmd, sizeof cmd, "setsid timeout -k 5 %d sh ./unisacc.com %s -- worker --out %s --slot %d > %s/worker-%d.log 2>&1 < /dev/null & echo $! > %s/worker-%d.pid", worker_budget, qs, q3, i, q3, i, q3, i);
         rc = sh(cmd, out, sizeof out, 30); if (rc) die2("spawn worker", "");
     }
-    /* bounded wait: total deadline g_deadline s; default mode keeps 2 s poll, product scope polls every 250 ms */
+    /* bounded wait: remaining budget when g_scope_product, else total deadline g_deadline s (default 2 s poll) */
     { int poll_ms = g_scope_product ? 250 : 2000;
-      int max_it = g_scope_product ? (g_deadline * 4 + 20) : (g_deadline / 2 + 10);
+      int max_it = g_scope_product ? (worker_budget * 4 + 20) : (g_deadline / 2 + 10);
       for (int it = 0; it < max_it; it++) {
         int done = 0; char p[1024];
         for (i = 0; i < g_par; i++) { cx_fmt(p, sizeof p, "%s/done-%d", g_out, i); if (sy_exists(p)) done++; }
         if (done == g_par) break;
+        if (g_scope_product && sy_now_ms() >= g_run_end_ms) break;
         /* a worker whose process group is gone without done marker counts as finished (missing rows reported) */
         { int alive = 0; for (i = 0; i < g_par; i++) { char sc[2048]; cx_fmt(sc, sizeof sc, "kill -0 \"$(cat %s/worker-%d.pid)\" 2>/dev/null", q3, i); if (sh(sc, 0, 0, 5) == 0) alive++; } if (alive == 0) break; }
         sy_sleep_ms(poll_ms);
@@ -1525,7 +1561,7 @@ int main(int argc, char **argv) {
         else if (!strcmp(a, "--allow-uncovered")) g_allow_unc = v;
         else if (!strcmp(a, "--adjudicated")) g_adjud = v;
         else if (!strcmp(a, "--slot")) g_slot = atoi(v);
-        else if (!strcmp(a, "--deadline-s")) { g_deadline = atoi(v); if (g_deadline < 30 || g_deadline > 3600) die2("--deadline-s outside 30..3600", v); }
+        else if (!strcmp(a, "--deadline-s")) { g_deadline = atoi(v); g_deadline_set = 1; if (g_deadline < 30 || g_deadline > 3600) die2("--deadline-s outside 30..3600", v); }
         else if (!strcmp(a, "--scope")) {
             if (!strcmp(v, "product")) g_scope_product = 1;
             else if (!strcmp(v, "all")) g_scope_product = 0;
@@ -1535,12 +1571,15 @@ int main(int argc, char **argv) {
         else die2("unknown option", a);
         i++;
     }
+    if (g_scope_product && !g_deadline_set) g_deadline = 240;
     derive_out();
     if (!g_out) die2("usage", "--out required");
     if (g_scope_product && !g_cov && (!strcmp(mode, "prep") || !strcmp(mode, "run")))
         die2("--scope product requires --coverage-check", "");
     if (g_scope_product && (!g_build_cmd || !g_build_cmd[0]) && (!strcmp(mode, "prep") || !strcmp(mode, "run")))
         die2("--scope product requires --build", "");
+    if (g_scope_product && !has_expect_fail() && (!strcmp(mode, "prep") || !strcmp(mode, "run")))
+        die2("--scope product requires --expect-fail", "");
     if (g_expect_n && (!(g_quality || g_scope_product) || (strcmp(mode, "run") && strcmp(mode, "prep"))))
         die2("usage", "check expectations require run or prep with --report");
     if (!strcmp(mode, "prep")) { prep(); return 0; }
