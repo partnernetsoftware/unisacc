@@ -38,8 +38,10 @@
 #pragma unisa use mem.bytes
 #pragma unisa use cxlib.procrun
 #pragma unisa use cxlib.chainfacts
+#pragma unisa use runtime.packagefooter
 
 static int n_ok, failed;
+static char g_last_bin_sha[65], g_last_carrier_sha[65];
 static void ck_v(int cond, const char *mode, const char *name, const char *variant, const char *reason) {
     if (cond) { n_ok++; sy_printf("PASS\t%s\t%s\tvariant=%s\treason=%s\n", mode, name, variant, reason); }
     else { failed++; sy_printf("FAIL\t%s\t%s\tvariant=%s\treason=%s\n", mode, name, variant, reason); }
@@ -101,48 +103,81 @@ static int parse_u64_sep(const unsigned char *p, long n, long *pos, unsigned lon
     return 0;
 }
 
-static int make_crc_tampered_p4_key(const char *src_p4, const char *dst_p4, const char *target_key) {
+static int locate_p4_span(const unsigned char *b, long n, long *out_off, long *out_end) {
+    if (n >= 10 && memcmp(b, "P 4 ", 4) == 0) {
+        *out_off = 0;
+        *out_end = n;
+        return 0;
+    }
+    PackageFooter pf;
+    if (!packagefooter_locate_bytes(b, n, &pf)) return 1;
+    if (pf.package_offset < 0 || pf.package_length < 10 ||
+        pf.package_offset + pf.package_length > n) return 1;
+    if (memcmp(b + pf.package_offset, "P 4 ", 4) != 0) return 1;
+    *out_off = pf.package_offset;
+    *out_end = pf.package_offset + pf.package_length;
+    return 0;
+}
+
+static int make_crc_tampered_p4_key(const char *src_p4, const char *dst_p4, const char *target_key, char sha_out[65]) {
     unsigned char *b = 0;
     int64_t n = 0;
-    long pos = 4, nl_k = tx_len(target_key, 128);
+    long pkg_off = 0, pkg_end = 0, pos = 0, nl_k = tx_len(target_key, 128);
     unsigned long pm = 0, ps = 0, nr = 0;
     int patched = 0;
-    if (sy_read_file(src_p4, &b, &n, 64L << 20) != 0 || !b || n < 10 || memcmp(b, "P 4 ", 4) != 0) { mm_free(b); return 1; }
-    if (parse_u64_sep(b, (long)n, &pos, &pm, ' ') ||
-        parse_u64_sep(b, (long)n, &pos, &ps, ' ') ||
-        parse_u64_sep(b, (long)n, &pos, &nr, '\n')) { mm_free(b); return 1; }
+    if (sha_out) sha_out[0] = 0;
+    if (sy_read_file(src_p4, &b, &n, 256L << 20) != 0 || !b || n < 10) { mm_free(b); return 1; }
+    if (locate_p4_span(b, (long)n, &pkg_off, &pkg_end) != 0) { mm_free(b); return 1; }
+    pos = pkg_off + 4;
+    if (parse_u64_sep(b, pkg_end, &pos, &pm, ' ') ||
+        parse_u64_sep(b, pkg_end, &pos, &ps, ' ') ||
+        parse_u64_sep(b, pkg_end, &pos, &nr, '\n')) { mm_free(b); return 1; }
     for (unsigned long di = 0; di < ps; di++) {
-        if (pos + 2 > (long)n || b[pos] != 'D' || b[pos + 1] != ' ') { mm_free(b); return 1; }
-        while (pos < (long)n && b[pos] != '\n') pos++;
-        if (pos >= (long)n) { mm_free(b); return 1; }
+        if (pos + 2 > pkg_end || b[pos] != 'D' || b[pos + 1] != ' ') { mm_free(b); return 1; }
+        while (pos < pkg_end && b[pos] != '\n') pos++;
+        if (pos >= pkg_end) { mm_free(b); return 1; }
         pos++;
     }
     for (unsigned long mi = 0; mi < pm; mi++) {
         unsigned long mb = 0, mr = 0, mc = 0, mk = 0;
-        if (pos + 2 > (long)n || b[pos] != 'M' || b[pos + 1] != ' ') { mm_free(b); return 1; }
+        if (pos + 2 > pkg_end || b[pos] != 'M' || b[pos + 1] != ' ') { mm_free(b); return 1; }
         pos += 2;
-        if (parse_u64_sep(b, (long)n, &pos, &mb, ' ') || parse_u64_sep(b, (long)n, &pos, &mr, ' ') ||
-            parse_u64_sep(b, (long)n, &pos, &mc, ' ') || parse_u64_sep(b, (long)n, &pos, &mk, '\n') ||
-            mb > (unsigned long)((long)n - pos)) { mm_free(b); return 1; }
+        if (parse_u64_sep(b, pkg_end, &pos, &mb, ' ') || parse_u64_sep(b, pkg_end, &pos, &mr, ' ') ||
+            parse_u64_sep(b, pkg_end, &pos, &mc, ' ') || parse_u64_sep(b, pkg_end, &pos, &mk, '\n') ||
+            mb > (unsigned long)(pkg_end - pos)) { mm_free(b); return 1; }
         pos += (long)mb;
     }
     for (unsigned long ri = 0; ri < nr; ri++) {
         unsigned long kl = 0, dl = 0, rl = 0, co = 0, cr = 0;
-        if (pos + 2 > (long)n || b[pos] != 'F' || b[pos + 1] != ' ') { mm_free(b); return 1; }
+        if (pos + 2 > pkg_end || b[pos] != 'F' || b[pos + 1] != ' ') { mm_free(b); return 1; }
         pos += 2;
-        if (parse_u64_sep(b, (long)n, &pos, &kl, ' ') || parse_u64_sep(b, (long)n, &pos, &dl, ' ') ||
-            parse_u64_sep(b, (long)n, &pos, &rl, ' ') || parse_u64_sep(b, (long)n, &pos, &co, ' ') ||
-            parse_u64_sep(b, (long)n, &pos, &cr, '\n')) { mm_free(b); return 1; }
+        if (parse_u64_sep(b, pkg_end, &pos, &kl, ' ') || parse_u64_sep(b, pkg_end, &pos, &dl, ' ') ||
+            parse_u64_sep(b, pkg_end, &pos, &rl, ' ') || parse_u64_sep(b, pkg_end, &pos, &co, ' ') ||
+            parse_u64_sep(b, pkg_end, &pos, &cr, '\n')) { mm_free(b); return 1; }
         long crc_last = pos - 2;
-        if ((long)kl == nl_k && pos + (long)kl <= (long)n && memcmp(b + pos, target_key, (size_t)nl_k) == 0) {
+        if ((long)kl == nl_k && pos + (long)kl <= pkg_end && memcmp(b + pos, target_key, (size_t)nl_k) == 0) {
             b[crc_last] = (b[crc_last] == '0') ? '1' : '0';
             patched = 1;
             break;
         }
-        if (kl + dl > (unsigned long)((long)n - pos)) { mm_free(b); return 1; }
+        if (kl + dl > (unsigned long)(pkg_end - pos)) { mm_free(b); return 1; }
         pos += (long)(kl + dl);
     }
-    int rc = patched ? sy_write_file(dst_p4, b, (long)n, 0644) : 1;
+    if (patched && sha_out) sy_sha256_hex(b, n, sha_out);
+    int rc = patched ? sy_write_file(dst_p4, b, (long)n, 0755) : 1;
+    mm_free(b);
+    return rc;
+}
+
+static int make_stripped_ape(const char *src_ape, const char *dst_ape, char sha_out[65]) {
+    unsigned char *b = 0;
+    int64_t n = 0;
+    long pkg_off = 0, pkg_end = 0;
+    if (sha_out) sha_out[0] = 0;
+    if (sy_read_file(src_ape, &b, &n, 256L << 20) != 0 || !b || n < 16) { mm_free(b); return 1; }
+    if (locate_p4_span(b, (long)n, &pkg_off, &pkg_end) != 0 || pkg_off <= 0) { mm_free(b); return 1; }
+    if (sha_out) sy_sha256_hex(b, (int64_t)pkg_off, sha_out);
+    int rc = sy_write_file(dst_ape, b, pkg_off, 0755);
     mm_free(b);
     return rc;
 }
@@ -296,55 +331,85 @@ static const char *const PROBE_SRC =
     "    return 0;\n"
     "}\n";
 
+static int is_hex64(const char *s) {
+    if (!s) return 0;
+    for (int k = 0; k < 64; k++) {
+        char c = s[k];
+        if (!((c >= '0' && c <= '9') || (c >= 'a' && c <= 'f'))) return 0;
+    }
+    return 1;
+}
+
+static int file_sha256_hex(const char *path, char out[65]) {
+    unsigned char *b = 0; int64_t n = 0;
+    out[0] = 0;
+    if (sy_read_file(path, &b, &n, 256L << 20) != 0 || !b || n <= 0) { mm_free(b); return 1; }
+    sy_sha256_hex(b, n, out);
+    mm_free(b);
+    return is_hex64(out) ? 0 : 1;
+}
+
+/* Strict receipt parser: accepts ONLY exact 'ape_sha=<64-hex>' or 'ape_sha\t<64-hex>' with
+ * zero trailing bytes, no aliases (no candidate_sha=), and exactly one occurrence in the file. */
 static int rcpt_extract_ape_sha(const char *rcpt_path, char out[65]) {
     unsigned char *b = 0; int64_t n = 0;
+    out[0] = 0;
     if (sy_read_file(rcpt_path, &b, &n, 4 * 1024 * 1024) != 0 || !b || n <= 0) return 1;
-    int found = 0;
+    int matches = 0, bad = 0;
     long pos = 0;
-    while (pos < (long)n && !found) {
+    while (pos < (long)n) {
         long nl = pos;
         while (nl < (long)n && b[nl] != '\n' && b[nl] != '\r') nl++;
         long llen = nl - pos;
         const char *line = (const char *)(b + pos);
-        const char *val = 0;
-        if (llen >= 8 + 64 && memcmp(line, "ape_sha=", 8) == 0) val = line + 8;
-        else if (llen >= 8 + 64 && memcmp(line, "ape_sha\t", 8) == 0) val = line + 8;
-        else if (llen >= 14 + 64 && memcmp(line, "candidate_sha=", 14) == 0) val = line + 14;
-        if (val) {
-            int ok = 1;
+        if (llen >= 8 && (memcmp(line, "ape_sha=", 8) == 0 || memcmp(line, "ape_sha\t", 8) == 0)) {
+            if (llen != 8 + 64) { bad = 1; break; }
+            const char *val = line + 8;
             for (int k = 0; k < 64; k++) {
                 char c = val[k];
-                if (!((c >= '0' && c <= '9') || (c >= 'a' && c <= 'f') || (c >= 'A' && c <= 'F'))) { ok = 0; break; }
+                if (!((c >= '0' && c <= '9') || (c >= 'a' && c <= 'f') || (c >= 'A' && c <= 'F'))) { bad = 1; break; }
             }
-            if (ok) {
+            if (bad) break;
+            matches++;
+            if (matches == 1) {
                 for (int k = 0; k < 64; k++) out[k] = (val[k] >= 'A' && val[k] <= 'F') ? (char)(val[k] + 32) : val[k];
                 out[64] = 0;
-                found = 1;
             }
         }
         pos = nl;
         while (pos < (long)n && (b[pos] == '\n' || b[pos] == '\r')) pos++;
     }
     mm_free(b);
-    return found ? 0 : 1;
+    if (bad || matches != 1) { out[0] = 0; return 1; }
+    return 0;
+}
+
+static void ck_chain(int cond, const char *name, const char *ape_sha, const char *variant, const char *var_sha, const char *reason) {
+    if (cond) {
+        n_ok++;
+        sy_printf("PASS\tFORMAL_CHAIN_PREGATE\t%s\tape_sha=%s\tvariant=%s\tvariant_sha=%s\treason=%s\n",
+                  name, ape_sha, variant, var_sha, reason);
+    } else {
+        failed++;
+        sy_printf("FAIL\tFORMAL_CHAIN_PREGATE\t%s\tape_sha=%s\tvariant=%s\tvariant_sha=%s\treason=%s\n",
+                  name, ape_sha, variant, var_sha, reason);
+    }
 }
 
 static int run_chain_ape_pregate(const char *ape_path, const char *rcpt_path, int quiet) {
-    unsigned char *ab = 0; int64_t an = 0;
-    char actual_sha[65], rcpt_sha[65], tmp[512], bad_crc[640], cmd[4096], out[16384];
+    char actual_sha[65], rcpt_sha[65], crc_sha[65], nop4_sha[65];
+    char tmp[512], bad_crc[640], no_p4[640], cmd[4096], out[16384];
     n_ok = 0; failed = 0;
     if (!ape_path || !ape_path[0] || !rcpt_path || !rcpt_path[0]) {
         if (!quiet) sy_printf("FAIL\tFORMAL_CHAIN_PREGATE\targs\tvariant=chain-ape\treason=missing-chain-ape-or-receipt-arg\n");
         return 2;
     }
-    if (sy_read_file(ape_path, &ab, &an, 256 * 1024 * 1024) != 0 || !ab || an <= 0) {
+    if (file_sha256_hex(ape_path, actual_sha) != 0) {
         if (!quiet) sy_printf("FAIL\tFORMAL_CHAIN_PREGATE\tape-read\tvariant=chain-ape\treason=cannot-read-chain-ape\n");
         return 1;
     }
-    sy_sha256_hex(ab, an, actual_sha);
-    mm_free(ab);
     if (rcpt_extract_ape_sha(rcpt_path, rcpt_sha) != 0) {
-        if (!quiet) sy_printf("FAIL\tFORMAL_CHAIN_PREGATE\treceipt-parse\tape_sha=%s\tvariant=chain-receipt\treason=missing-ape-sha-in-receipt\n", actual_sha);
+        if (!quiet) sy_printf("FAIL\tFORMAL_CHAIN_PREGATE\treceipt-parse\tape_sha=%s\tvariant=chain-receipt\treason=strict-ape-sha-parse-failed\n", actual_sha);
         return 1;
     }
     if (!tx_eqz(actual_sha, rcpt_sha)) {
@@ -353,29 +418,40 @@ static int run_chain_ape_pregate(const char *ape_path, const char *rcpt_path, in
     }
     if (sy_mkdtemp(sy_tmpdir(), "piece-d-chain-", tmp, sizeof tmp) != 0) return 2;
     cx_fmt(bad_crc, sizeof bad_crc, "%s/chain_bad_crc.ape", tmp);
-    int tok = (make_crc_tampered_p4_key(ape_path, bad_crc, "tape/lnx-x86_64/driveargs.tapeslice") == 0);
+    cx_fmt(no_p4, sizeof no_p4, "%s/chain_no_p4.ape", tmp);
+    int crc_ok = (make_crc_tampered_p4_key(ape_path, bad_crc, "tape/lnx-x86_64/driveargs.tapeslice", crc_sha) == 0);
+    int nop4_ok = (make_stripped_ape(ape_path, no_p4, nop4_sha) == 0);
     if (!quiet) {
-        char var_tag[160];
-        cx_fmt(var_tag, sizeof var_tag, "chain-ape:%s:crc-tamper", actual_sha);
-        cx_fmt(cmd, sizeof cmd, "UNISA_CONTAINER='%s' '%s' ar", bad_crc, ape_path);
-        ck_v(tok && run_sh(cmd, out, sizeof out) == 1 &&
-             strstr(out, "DRIVEARGS_M1_REFUSE") != 0 &&
-             strstr(out, "driveargs tape refused") != 0,
-             "FORMAL_CHAIN_PREGATE", "chain-ape-crc-tamper-exit-1", var_tag, "crc-tamper-drive-cx-474-exit-1");
+        /* (1) Intact-APE positive control (proves intact chain APE executes without refusal) */
+        cx_fmt(cmd, sizeof cmd, "sh '%s' --version", ape_path);
+        ck_chain(run_sh(cmd, out, sizeof out) == 0 && strstr(out, "DRIVEARGS_M1_REFUSE") == 0,
+                 "chain-ape-intact-control", actual_sha, "chain-ape-intact", actual_sha, "intact-ape-version-ok");
 
-        cx_fmt(var_tag, sizeof var_tag, "chain-ape:%s:missing-carrier", actual_sha);
-        cx_fmt(cmd, sizeof cmd, "UNISACC_M53_S1= UNISACC_M53_S1_SO= UNISA_CONTAINER='%s/no_such.p4' '%s' ar", tmp, ape_path);
-        ck_v(run_sh(cmd, out, sizeof out) == 1 &&
-             strstr(out, "DRIVEARGS_M1_REFUSE") != 0 &&
-             strstr(out, "embed-env-override-forbidden") == 0,
-             "FORMAL_CHAIN_PREGATE", "chain-ape-missing-carrier-only-refused", var_tag, "missing-carrier-no-env-override");
+        /* (2) Tampered APE copy with corrupted driveargs.tapeslice CRC (no UNISA_CONTAINER override) */
+        cx_fmt(cmd, sizeof cmd, "sh '%s' ar", bad_crc);
+        ck_chain(crc_ok && is_hex64(crc_sha) && !tx_eqz(crc_sha, actual_sha) &&
+                 run_sh(cmd, out, sizeof out) == 1 &&
+                 strstr(out, "DRIVEARGS_M1_REFUSE") != 0 &&
+                 strstr(out, "driveargs tape refused") != 0,
+                 "chain-ape-crc-tamper-exit-1", actual_sha, "chain-ape-crc-tamper",
+                 crc_ok ? crc_sha : "build-failed", "crc-tamper-drive-cx-474-exit-1");
 
-        cx_fmt(var_tag, sizeof var_tag, "chain-ape:%s:g4-env-override", actual_sha);
-        cx_fmt(cmd, sizeof cmd, "UNISACC_M53_S1=1 '%s' ar", ape_path);
-        ck_v(run_sh(cmd, out, sizeof out) == 1 &&
-             strstr(out, "DRIVEARGS_M1_REFUSE") != 0 &&
-             strstr(out, "embed-env-override-forbidden") != 0,
-             "FORMAL_CHAIN_PREGATE", "chain-ape-g4-env-override-only-refused", var_tag, "embed-env-override-forbidden");
+        /* (3) Stripped-P4 APE copy (missing carrier without UNISA_CONTAINER or UNISACC_M53_S1) */
+        cx_fmt(cmd, sizeof cmd, "UNISACC_M53_S1= UNISACC_M53_S1_SO= sh '%s' ar", no_p4);
+        ck_chain(nop4_ok && is_hex64(nop4_sha) && !tx_eqz(nop4_sha, actual_sha) &&
+                 run_sh(cmd, out, sizeof out) == 1 &&
+                 strstr(out, "DRIVEARGS_M1_REFUSE") != 0 &&
+                 strstr(out, "embed-env-override-forbidden") == 0,
+                 "chain-ape-missing-carrier-only-refused", actual_sha, "chain-ape-missing-carrier",
+                 nop4_ok ? nop4_sha : "build-failed", "missing-carrier-no-env-override");
+
+        /* (4) G4 env-override on intact APE */
+        cx_fmt(cmd, sizeof cmd, "UNISACC_M53_S1=1 sh '%s' ar", ape_path);
+        ck_chain(run_sh(cmd, out, sizeof out) == 1 &&
+                 strstr(out, "DRIVEARGS_M1_REFUSE") != 0 &&
+                 strstr(out, "embed-env-override-forbidden") != 0,
+                 "chain-ape-g4-env-override-only-refused", actual_sha, "chain-ape-g4-env-override",
+                 actual_sha, "embed-env-override-forbidden");
     }
     (void)sy_remove_all(tmp);
     if (!quiet) sy_printf("CHECK_PIECE_D_DRIVEARGS\tmode=FORMAL_CHAIN_PREGATE\tape_sha=%s\tpassed=%d\tfailed=%d\n", actual_sha, n_ok, failed);
@@ -500,8 +576,12 @@ static int run_all_checks(void) {
            p4e_bin, tdir, m53_sl, good_p4, da_sl,
            p4e_bin, tdir, m53_sl, inv_da_p4, inv_da_sl);
     {
+        char crc_sha[65];
         int p_ok = (run_sh(cmd, out, sizeof out) == 0 &&
-                    make_crc_tampered_p4_key(good_p4, bad_crc_da, "tape/lnx-x86_64/driveargs.tapeslice") == 0);
+                    make_crc_tampered_p4_key(good_p4, bad_crc_da, "tape/lnx-x86_64/driveargs.tapeslice", crc_sha) == 0 &&
+                    file_sha256_hex(drv_bin, g_last_bin_sha) == 0 &&
+                    file_sha256_hex(good_p4, g_last_carrier_sha) == 0 &&
+                    !tx_eqz(crc_sha, g_last_carrier_sha));
         ck(p_ok, "pack-slices-and-structural-crc-tamper");
         if (!p_ok) { sy_printf("%s\n", out); goto done; }
     }
@@ -562,16 +642,32 @@ static int run_all_checks(void) {
          strstr(out, "FELL_THROUGH_PAST_474") == 0,
          "LOCAL", "g4-env-override-only-refused", "local-g4-env-override", "embed-env-override-forbidden");
 
-    /* 10. Chain-APE receipt sha mismatch refusal self-check */
+    /* 10. Strict chain-APE receipt parser & APE P4 footer locator self-checks */
     {
-        char bad_rcpt[640];
-        const char *fake = "rev=0000000000000000000000000000000000000000\nape_sha=0000000000000000000000000000000000000000000000000000000000000000\n";
-        cx_fmt(bad_rcpt, sizeof bad_rcpt, "%s/bad_chain.rcpt", tmp);
-        (void)sy_write_file(bad_rcpt, (const unsigned char *)fake, (long)strlen(fake), 0644);
+        char r_mis[640], r_dup[640], r_trl[640], r_ali[640], r_buf[512], ape_strip[640], s_sha[65];
+        cx_fmt(r_mis, sizeof r_mis, "%s/r_mis.rcpt", tmp);
+        cx_fmt(r_dup, sizeof r_dup, "%s/r_dup.rcpt", tmp);
+        cx_fmt(r_trl, sizeof r_trl, "%s/r_trl.rcpt", tmp);
+        cx_fmt(r_ali, sizeof r_ali, "%s/r_ali.rcpt", tmp);
+        cx_fmt(ape_strip, sizeof ape_strip, "%s/unisacc_stripped.ape", tmp);
+        cx_fmt(r_buf, sizeof r_buf, "ape_sha=0000000000000000000000000000000000000000000000000000000000000000\n");
+        (void)sy_write_file(r_mis, (const unsigned char *)r_buf, (long)strlen(r_buf), 0644);
+        cx_fmt(r_buf, sizeof r_buf, "ape_sha=%s\nape_sha=%s\n", g_last_carrier_sha, g_last_carrier_sha);
+        (void)sy_write_file(r_dup, (const unsigned char *)r_buf, (long)strlen(r_buf), 0644);
+        cx_fmt(r_buf, sizeof r_buf, "ape_sha=%s extra\n", g_last_carrier_sha);
+        (void)sy_write_file(r_trl, (const unsigned char *)r_buf, (long)strlen(r_buf), 0644);
+        cx_fmt(r_buf, sizeof r_buf, "candidate_sha=%s\n", g_last_carrier_sha);
+        (void)sy_write_file(r_ali, (const unsigned char *)r_buf, (long)strlen(r_buf), 0644);
         int saved_ok = n_ok, saved_fail = failed;
-        int mrc = run_chain_ape_pregate(good_p4, bad_rcpt, 1);
+        int m_mis = run_chain_ape_pregate(good_p4, r_mis, 1);
+        int m_dup = run_chain_ape_pregate(good_p4, r_dup, 1);
+        int m_trl = run_chain_ape_pregate(good_p4, r_trl, 1);
+        int m_ali = run_chain_ape_pregate(good_p4, r_ali, 1);
+        int pf_ok = (make_stripped_ape("./unisacc.com", ape_strip, s_sha) == 0 && is_hex64(s_sha));
         n_ok = saved_ok; failed = saved_fail;
-        ck_v(mrc != 0, "LOCAL", "chain-ape-receipt-sha-mismatch-refused", "local-bad-receipt", "ape-sha-mismatch-rejected");
+        ck_v(m_mis != 0 && m_dup != 0 && m_trl != 0 && m_ali != 0 && pf_ok,
+             "LOCAL", "chain-ape-strict-receipt-and-pf-locate", "local-bad-receipts+ape-footer",
+             "mismatch-dup-trailing-alias-rejected-and-ape-p4-located");
     }
 
 done:
@@ -582,9 +678,11 @@ done:
 int main(int argc, char **argv) {
     if (argc == 4 && tx_eqz(argv[1], "--produce")) {
         int rc = run_all_checks();
-        if (rc != 0) return 1;
-        char buf[256];
-        if (cx_fmt(buf, sizeof buf, "run_id=%s\nverdict=PASS\npassed=%d\nfailed=0\n", argv[2], n_ok)) return 2;
+        if (rc != 0 || !is_hex64(g_last_bin_sha) || !is_hex64(g_last_carrier_sha)) return 1;
+        char buf[512];
+        if (cx_fmt(buf, sizeof buf,
+                   "run_id=%s\nmode=LOCAL\nverdict=PASS\npassed=%d\nfailed=0\nbinary_sha=%s\ncarrier_sha=%s\n",
+                   argv[2], n_ok, g_last_bin_sha, g_last_carrier_sha)) return 2;
         return sy_write_file(argv[3], (const unsigned char *)buf, (long)strlen(buf), 0644) == 0 ? 0 : 2;
     }
     if (argc == 4 && tx_eqz(argv[1], "--judge")) {
@@ -596,7 +694,11 @@ int main(int argc, char **argv) {
         }
         cx_fmt(want, sizeof want, "run_id=%s\n", argv[2]);
         int has_rid = (strstr((const char *)ev, want) != 0);
-        int has_pass = (strstr((const char *)ev, "verdict=PASS\n") != 0 && strstr((const char *)ev, "failed=0\n") != 0);
+        const char *bs = strstr((const char *)ev, "binary_sha=");
+        const char *cs = strstr((const char *)ev, "carrier_sha=");
+        int has_pass = (strstr((const char *)ev, "mode=LOCAL\nverdict=PASS\npassed=13\nfailed=0\n") != 0 &&
+                        bs != 0 && is_hex64(bs + 11) && bs[11 + 64] == '\n' &&
+                        cs != 0 && is_hex64(cs + 12) && cs[12 + 64] == '\n');
         mm_free(ev);
         if (!has_rid) { sy_printf("FAIL\tpiece_d_stale\n"); return 1; }
         if (!has_pass) { sy_printf("FAIL\tpiece_d_exec\n"); return 1; }
