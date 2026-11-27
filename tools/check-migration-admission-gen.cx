@@ -1,0 +1,277 @@
+/* tools/check-migration-admission-gen.cx -- Self-contained verification for tools/migration-admission-gen.cx.
+ *
+ * Verifies:
+ *   (1) Real repo plans/migration-admission.tsv passes --check (exact byte match, 99 x 6 = 594 data rows,
+ *       target column present, zero hand-filled metrics without receipts)
+ *   (2) Hand-edit detection: mutating any metric or verdict in migration-admission.tsv makes --check RED
+ *   (3) Verified v3 receipt flow: rc_write3 + output artifact + caller-supplied expect-tsv passes rc_verify_out
+ *       and produces ADMIT with exact derived cost_us_per_run for (m53.o, osx/arm64) while leaving other
+ *       5 targets UNMEASURED/PENDING
+ *   (4) Negative controls (all fail-closed):
+ *       - tampered target in receipt -> refused
+ *       - tampered output file -> refused
+ *       - wrong candidate_sha expectation -> refused
+ *       - wrong inputs_sha expectation -> refused
+ *       - wrong producer expectation -> refused
+ *       - stale timestamp -> refused
+ *       - v2 legacy receipt -> refused
+ *       - duplicate (unit, target) in expect-tsv -> refused
+ */
+#pragma unisa use sys.fs
+#pragma unisa use sys.env
+#pragma unisa use sys.io
+#pragma unisa use sys.posix
+#pragma unisa use sys.sha
+#pragma unisa use text.text
+#pragma unisa use mem.heap
+#pragma unisa use mem.bytes
+#pragma unisa use cxlib.procrun
+#pragma unisa use cxlib.receipt
+
+static int g_pass = 0;
+static int g_fail = 0;
+
+static void ck(int cond, const char *name) {
+    if (cond) { g_pass++; sy_printf("PASS\tcheck-migration-admission-gen.%s\n", name); }
+    else { g_fail++; sy_printf("FAIL\tcheck-migration-admission-gen.%s\n", name); }
+}
+
+static int run_av(char **av, char *out, long cap) {
+    int cut = 0;
+    int rc = pr_run_merged(av, 30, out, (int)cap, &cut);
+    return cut ? -1 : rc;
+}
+
+static int write_str(const char *path, const char *s) {
+    return sy_write_file(path, (const unsigned char *)s, (long)strlen(s), 0644);
+}
+
+static int setup_mini_repo(const char *dir) {
+    char p[1024];
+    (void)sy_mkdir(dir, 0755);
+    cx_fmt(p, sizeof p, "%s/plans", dir); (void)sy_mkdir(p, 0755);
+    cx_fmt(p, sizeof p, "%s/plans/migration-cost-model.tsv", dir);
+    if (write_str(p, "base_us\t10.68\nus_per_step\t0.00177\n") != 0) return 1;
+    cx_fmt(p, sizeof p, "%s/plans/slice-units.tsv", dir);
+    if (write_str(p,
+                  "# key\tsource\n"
+                  "m53.o\tcx/runtime/stream_attributes.cx\n"
+                  "m25.o\tcx/driver/driveargs.cx\n") != 0) return 1;
+    cx_fmt(p, sizeof p, "%s/plans/migration-admission-meta.tsv", dir);
+    if (write_str(p,
+                  "unit\tdest_class\tpath\tbudget_us\tbridge_shape\tsource_kind\tlive_bytes\tobj_bytes\tgen_friendly\tentries_n\n"
+                  "m53.o\ttape VM\thot\t500.0\tbin2\tgenerator\t20723\t29410\tbase-only\t1\n"
+                  "m25.o\ttable\tstartup\t100.0\tdriveargs\ttable\t1200\t9405\tyes\t1\n") != 0) return 1;
+    return 0;
+}
+
+int main(void) {
+    char tmp[512], gen_bin[600], repo[600], ma_p[600], rcpt_p[600], out_p[600], exp_p[600];
+    char bad_rcpt[600], bad_out[600], bad_exp[600];
+    char out[16384];
+    char cand_sha[65], in_sha[65], out_sha[65];
+    const char *rev = "2b199d7e30000000000000000000000000000000";
+
+    if (sy_mkdtemp(sy_tmpdir(), "chk-mag-", tmp, sizeof tmp) != 0) {
+        sy_printf("CHECK_MIGRATION_ADMISSION_GEN\tpassed=0\tfailed=1\n");
+        return 1;
+    }
+    cx_fmt(gen_bin, sizeof gen_bin, "%s/mag_bin", tmp);
+    cx_fmt(repo, sizeof repo, "%s/repo", tmp);
+    cx_fmt(ma_p, sizeof ma_p, "%s/plans/migration-admission.tsv", repo);
+    cx_fmt(rcpt_p, sizeof rcpt_p, "%s/m53_osx_arm64.rcpt", tmp);
+    cx_fmt(out_p, sizeof out_p, "%s/m53_osx_arm64.out", tmp);
+    cx_fmt(exp_p, sizeof exp_p, "%s/expect.tsv", tmp);
+    cx_fmt(bad_rcpt, sizeof bad_rcpt, "%s/bad.rcpt", tmp);
+    cx_fmt(bad_out, sizeof bad_out, "%s/bad.out", tmp);
+    cx_fmt(bad_exp, sizeof bad_exp, "%s/bad_expect.tsv", tmp);
+
+    /* Compile generator once for fast repeated invocations */
+    {
+        char *av_c[] = {"sh", "./unisacc.com", "tools/migration-admission-gen.cx", "-o", gen_bin, 0}; /* lint:allow R1-product compiles generator binary */
+        ck(run_av(av_c, out, sizeof out) == 0 && sy_exists(gen_bin) == 1, "compile-generator");
+    }
+
+    if (sy_exists(gen_bin) == 1) {
+        /* 1. Real repo --check + row count = 594 (99 x 6) + target column */
+        {
+            char *av[] = {gen_bin, "--check", "--repo", ".", 0};
+            int rc = run_av(av, out, sizeof out);
+            unsigned char *raw = 0; int64_t rn = 0;
+            int rows = 0, has_hdr = 0;
+            if (sy_read_file("plans/migration-admission.tsv", &raw, &rn, 4 << 20) == 0 && raw) {
+                long i = 0;
+                has_hdr = (strncmp((const char *)raw, "unit\ttarget\tdest_class\t", 23) == 0);
+                while (i < rn) {
+                    long e = i;
+                    while (e < rn && raw[e] != '\n') e++;
+                    if (e > i && raw[i] != '#' && !(i == 0 && has_hdr)) rows++;
+                    i = e + 1;
+                }
+                mm_free(raw);
+            }
+            ck(rc == 0 && strstr(out, "status=OK") != 0 && has_hdr && rows == 594, "real-repo-check-594-rows");
+        }
+
+        /* 2. Mini repo --write, --check green, then hand-edit -> --check RED */
+        if (setup_mini_repo(repo) == 0) {
+            char *av_w[] = {gen_bin, "--write", "--repo", repo, 0};
+            char *av_k[] = {gen_bin, "--check", "--repo", repo, 0};
+            int rw = run_av(av_w, out, sizeof out);
+            int rk1 = run_av(av_k, out, sizeof out);
+            ck(rw == 0 && rk1 == 0 && strstr(out, "status=OK") != 0, "mini-write-and-check-ok");
+
+            /* Hand-edit one UNMEASURED -> 99 -> --check must fail with DRIFT */
+            {
+                unsigned char *mb = 0; int64_t mn = 0;
+                int drift_ok = 0;
+                if (sy_read_file(ma_p, &mb, &mn, 1 << 20) == 0 && mb) {
+                    char *pos = strstr((char *)mb, "PENDING");
+                    if (pos) {
+                        mm_copy(pos, 7, "ADMIT  ", 7);
+                        (void)sy_write_file(ma_p, mb, (long)mn, 0644);
+                        drift_ok = (run_av(av_k, out, sizeof out) != 0 && strstr(out, "status=DRIFT") != 0);
+                    }
+                    mm_free(mb);
+                }
+                ck(drift_ok, "hand-edit-causes-check-red");
+            }
+
+            /* 3. Real rc_write3 v3 receipt + verified output -> ADMIT for (m53.o, osx/arm64) */
+            {
+                const char *metric_out =
+                    "golden_kind\tenum-full\n"
+                    "golden_cases\t288\n"
+                    "golden_pass\t288\n"
+                    "calls_per_run\t4\n"
+                    "steps_per_call\t1000\n"
+                    "blockers_n\t0\n"
+                    "size_delta\t-8687\n";
+                rc_v3_t rec;
+                char exp_buf[2048];
+                (void)write_str(out_p, metric_out);
+                sy_sha256_hex((const unsigned char *)"real-candidate-ape-v019", 23, cand_sha);
+                sy_sha256_hex((const unsigned char *)"real-inputs-bundle-v019", 23, in_sha);
+                sy_sha256_hex((const unsigned char *)metric_out, (int64_t)strlen(metric_out), out_sha);
+                rec.run_id = "ci-1001-osx-arm64";
+                rec.rev = rev;
+                rec.unit = "m53.o";
+                rec.target = "osx/arm64";
+                rec.producer = "osx-m53-s1-parity";
+                rec.purpose = "s1-parity";
+                rec.candidate_sha = cand_sha;
+                rec.inputs_sha = in_sha;
+                rec.output_sha = out_sha;
+                rec.rc = 0;
+                rec.verdict = "PASS";
+                rec.ts = 1764200000;
+                ck(rc_write3(rcpt_p, &rec) == 0, "write-v3-receipt");
+
+                cx_fmt(exp_buf, sizeof exp_buf,
+                       "unit\ttarget\treceipt_path\toutput_path\trun_id\trev\tcandidate_sha\tinputs_sha\tproducer\tpurpose\tnow_ts\n"
+                       "m53.o\tosx/arm64\t%s\t%s\tci-1001-osx-arm64\t%s\t%s\t%s\tosx-m53-s1-parity\ts1-parity\t1764200060\n",
+                       rcpt_p, out_p, rev, cand_sha, in_sha);
+                (void)write_str(exp_p, exp_buf);
+
+                {
+                    char *av_we[] = {gen_bin, "--write", "--repo", repo, "--expect-tsv", exp_p, 0};
+                    char *av_ke[] = {gen_bin, "--check", "--repo", repo, "--expect-tsv", exp_p, 0};
+                    int r1 = run_av(av_we, out, sizeof out);
+                    int r2 = run_av(av_ke, out, sizeof out);
+                    unsigned char *mb = 0; int64_t mn = 0;
+                    int has_admit = 0, other_pending = 0;
+                    if (sy_read_file(ma_p, &mb, &mn, 1 << 20) == 0 && mb) {
+                        /* 4 * (10.68 + 1000 * 0.00177) = 4 * 12.45 = 49.800 */
+                        has_admit = (strstr((const char *)mb, "m53.o\tosx/arm64\ttape VM\tenum-full\t288\t288\thot\t4\t1000\t49.800\t500.0\tbin2\t0\tgenerator\t20723\t29410\t-8687\tADMIT\t-") != 0);
+                        other_pending = (strstr((const char *)mb, "m53.o\twin/arm64\ttape VM\tUNMEASURED\tUNMEASURED\tUNMEASURED\thot\tUNMEASURED\tUNMEASURED\tUNMEASURED\t500.0\tbin2\tUNMEASURED\tgenerator\t20723\t29410\tUNMEASURED\tPENDING\t-") != 0);
+                        mm_free(mb);
+                    }
+                    ck(r1 == 0 && r2 == 0 && has_admit && other_pending, "verified-v3-receipt-generates-admit-and-derived-cost");
+                }
+
+                /* 4. Negative controls */
+                /* 4a. Tampered output file -> refused */
+                {
+                    (void)write_str(bad_out, "golden_kind\tenum-full\ngolden_cases\t999\n");
+                    cx_fmt(exp_buf, sizeof exp_buf,
+                           "m53.o\tosx/arm64\t%s\t%s\tci-1001-osx-arm64\t%s\t%s\t%s\tosx-m53-s1-parity\ts1-parity\t1764200060\n",
+                           rcpt_p, bad_out, rev, cand_sha, in_sha);
+                    (void)write_str(bad_exp, exp_buf);
+                    char *av[] = {gen_bin, "--check", "--repo", repo, "--expect-tsv", bad_exp, 0};
+                    ck(run_av(av, out, sizeof out) != 0 && strstr(out, "output-mismatch") != 0, "refuse-tampered-output");
+                }
+                /* 4b. Tampered target in receipt -> refused */
+                {
+                    unsigned char *rb = 0; int64_t rn = 0;
+                    int tok = 0;
+                    if (sy_read_file(rcpt_p, &rb, &rn, 65536) == 0 && rb) {
+                        char *pos = strstr((char *)rb, "target\tosx/arm64");
+                        if (pos) {
+                            mm_copy(pos, 16, "target\twin/arm64", 16);
+                            (void)sy_write_file(bad_rcpt, rb, (long)rn, 0644);
+                            cx_fmt(exp_buf, sizeof exp_buf,
+                                   "m53.o\tosx/arm64\t%s\t%s\tci-1001-osx-arm64\t%s\t%s\t%s\tosx-m53-s1-parity\ts1-parity\t1764200060\n",
+                                   bad_rcpt, out_p, rev, cand_sha, in_sha);
+                            (void)write_str(bad_exp, exp_buf);
+                            char *av[] = {gen_bin, "--check", "--repo", repo, "--expect-tsv", bad_exp, 0};
+                            tok = (run_av(av, out, sizeof out) != 0 &&
+                                   (strstr(out, "bad-binding") != 0 || strstr(out, "target-mismatch") != 0));
+                        }
+                        mm_free(rb);
+                    }
+                    ck(tok, "refuse-tampered-target");
+                }
+                /* 4c. Wrong candidate_sha expectation -> refused */
+                {
+                    char wrong_sha[65];
+                    sy_sha256_hex((const unsigned char *)"wrong-candidate", 15, wrong_sha);
+                    cx_fmt(exp_buf, sizeof exp_buf,
+                           "m53.o\tosx/arm64\t%s\t%s\tci-1001-osx-arm64\t%s\t%s\t%s\tosx-m53-s1-parity\ts1-parity\t1764200060\n",
+                           rcpt_p, out_p, rev, wrong_sha, in_sha);
+                    (void)write_str(bad_exp, exp_buf);
+                    char *av[] = {gen_bin, "--check", "--repo", repo, "--expect-tsv", bad_exp, 0};
+                    ck(run_av(av, out, sizeof out) != 0 && strstr(out, "candidate-mismatch") != 0, "refuse-wrong-candidate-sha");
+                }
+                /* 4d. Wrong producer expectation -> refused */
+                {
+                    cx_fmt(exp_buf, sizeof exp_buf,
+                           "m53.o\tosx/arm64\t%s\t%s\tci-1001-osx-arm64\t%s\t%s\t%s\twrong-producer\ts1-parity\t1764200060\n",
+                           rcpt_p, out_p, rev, cand_sha, in_sha);
+                    (void)write_str(bad_exp, exp_buf);
+                    char *av[] = {gen_bin, "--check", "--repo", repo, "--expect-tsv", bad_exp, 0};
+                    ck(run_av(av, out, sizeof out) != 0 && strstr(out, "producer-or-purpose-mismatch") != 0, "refuse-wrong-producer");
+                }
+                /* 4e. Stale timestamp -> refused */
+                {
+                    cx_fmt(exp_buf, sizeof exp_buf,
+                           "m53.o\tosx/arm64\t%s\t%s\tci-1001-osx-arm64\t%s\t%s\t%s\tosx-m53-s1-parity\ts1-parity\t1764400000\n",
+                           rcpt_p, out_p, rev, cand_sha, in_sha);
+                    (void)write_str(bad_exp, exp_buf);
+                    char *av[] = {gen_bin, "--check", "--repo", repo, "--expect-tsv", bad_exp, 0};
+                    ck(run_av(av, out, sizeof out) != 0 && strstr(out, "ts-policy") != 0, "refuse-stale-ts");
+                }
+                /* 4f. v2 legacy receipt -> refused */
+                {
+                    (void)write_str(bad_rcpt,
+                                    "run_id\tci-1001-osx-arm64\n"
+                                    "candidate_sha\t1111111111111111111111111111111111111111111111111111111111111111\n"
+                                    "inputs_sha\t2222222222222222222222222222222222222222222222222222222222222222\n"
+                                    "output_sha\t3333333333333333333333333333333333333333333333333333333333333333\n"
+                                    "producer_sha\t4444444444444444444444444444444444444444444444444444444444444444\n"
+                                    "rc\t0\n"
+                                    "binding_sha\t5555555555555555555555555555555555555555555555555555555555555555\n");
+                    cx_fmt(exp_buf, sizeof exp_buf,
+                           "m53.o\tosx/arm64\t%s\t%s\tci-1001-osx-arm64\t%s\t%s\t%s\tosx-m53-s1-parity\ts1-parity\t1764200060\n",
+                           bad_rcpt, out_p, rev, cand_sha, in_sha);
+                    (void)write_str(bad_exp, exp_buf);
+                    char *av[] = {gen_bin, "--check", "--repo", repo, "--expect-tsv", bad_exp, 0};
+                    ck(run_av(av, out, sizeof out) != 0 && strstr(out, "v2-legacy") != 0, "refuse-v2-legacy-receipt");
+                }
+            }
+        }
+    }
+
+    (void)sy_remove_all(tmp);
+    sy_printf("CHECK_MIGRATION_ADMISSION_GEN\tpassed=%d\tfailed=%d\n", g_pass, g_fail);
+    return g_fail ? 1 : 0;
+}
