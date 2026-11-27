@@ -1,6 +1,6 @@
 # unisacc 0.1.6 发布说明（冻结前草稿）
 
-状态：冻结前草稿，整体裁决 `NOT_QUALIFIED`。冻结、链、预跑、CI、公开读回分别在对应回执就绪后回填，其余 `UNMEASURED`。主题为 tape 载体公开分发；项 1 已由独立复核关闭，九资产 sidecar 为选定方案，六资产为私下稿读回失败两次时的回退块。
+状态:已公开(2026-11-27,tag v0.1.6 指向 c9275e7756,APE ed50199f,九资产)。CI 门六目标全部成功(CI 门判定 QUALIFIED);整体裁决仍为 `NOT_QUALIFIED`,因为全套 s9 本版未跑(见 release/decision.txt)。严格证据 593/593 PASS,其中 5 批为补跑。主题为 tape 载体公开分发;项 1 已由独立复核关闭。
 
 ## 真实身份
 
@@ -54,7 +54,7 @@ DERIVE_SUMMARY	UNMEASURED
 
 ## 已知缺口与未验证范围
 
-(1) CI、公开读回、九资产上传与安装状态在发布执行时回填;整体裁决 `NOT_QUALIFIED`。
+(1) 发布执行 7 步全部完成:CI run 45938522235 六目标成功,私有草稿读回 8 件与 SHA256SUMS 一致,公开读回通过,共享根已升级为 0.1.6 并通过 root-current 与 --controller-canary;全套 s9 未跑,整体裁决 `NOT_QUALIFIED`。
 (1a) 冻结两次:首次冻结 acad02543 的预跑在 W0080 红停(check-gen-all-check:GV.compat 补丁 a1f3b8d00 手改生成表 exec/facts/k2-gen2.tsv,facts-gen --check 报 DIFF);修复 84737d935 改生成器并重生 37 张表(仅表头输入行),重冻结 C0a c35123e67、C0b c9275e775,整链重跑,APE 字节与首链相同。
 (1b) 打包首跑被 release-run 拒绝(tape-sidecar-receipt-or-manifest-mismatch):打包检查与 release-ape 收据行格式不一致,九资产路径此前未端到端实跑;已在 tools/release-run.cx 修检查一侧,回归用例待登记。
 (2) 九资产 sidecar 仅计划 `lnx/x86_64`；八条清单与顶层文件名须以正式资产单回读为准。六资产只是失败两次后的回退块。
