@@ -70,10 +70,10 @@ static void check_product_routing(void) {
     ck(ok, "product-routing-and-tape-unit-authority");
 }
 
-static int run_sh(const char *cmd, char *out, long cap) {
+static int run_sh_t(const char *cmd, int timeout_s, char *out, long cap) {
     char *av[] = {"sh", "-c", (char *)cmd, 0};
     pr_result r;
-    int t = pr_run("piece-d-da", av, ".", 0, 55, &r);
+    int t = pr_run("piece-d-da", av, ".", 0, timeout_s, &r);
     long n = 0;
     if (out && cap > 0) {
         if (r.out && r.outn > 0) {
@@ -91,6 +91,10 @@ static int run_sh(const char *cmd, char *out, long cap) {
     int rc = t ? -1 : r.rc;
     pr_free(&r);
     return rc;
+}
+
+static int run_sh(const char *cmd, char *out, long cap) {
+    return run_sh_t(cmd, 55, out, cap);
 }
 
 static int parse_u64_sep(const unsigned char *p, long n, long *pos, unsigned long *out, char sep) {
@@ -563,19 +567,22 @@ static int run_all_checks(void) {
         if (b_rc != 0) { sy_printf("%s\n", out); goto done; }
     }
 
-    /* 2. Run compiled real entry-build --only driveargs.o for lnx/x86_64 and lnx/arm64 in parallel + verify real ELF objects */
+    /* 2. Run compiled real FULL entry-build link for lnx/x86_64 (proves zero duplicate dv_word across
+     *    full closure) in parallel with lnx/arm64 --only driveargs.o + verify real ELF objects & candidate */
     {
         cx_fmt(cmd, sizeof cmd,
-               "'%s' . ./unisacc.com '%s' --target lnx/x86_64 --only driveargs.o & q0=$!; "
+               "'%s' . ./unisacc.com '%s' --target lnx/x86_64 & q0=$!; "
                "'%s' . ./unisacc.com '%s' --target lnx/arm64 --only driveargs.o & q1=$!; "
                "wait $q0 && wait $q1 && "
-               "test -s '%s/driveargs.o' && test -s '%s/driveargs.o' && "
+               "test -x '%s/candidate' && test -s '%s/driveargs.o' && test -s '%s/driveargs.o' && "
                "nm '%s/driveargs.o' | grep -q 'da_m1_dv_word' && "
                "nm '%s/driveargs.o' | grep -q 'da_m1_parse_args' && "
                "! nm '%s/driveargs.o' | grep -q 'da_m1_dv_word' && "
                "nm '%s/driveargs.o' | grep -q 'dv_word'",
-               eb_bin, eb_lnx, eb_bin, eb_arm, eb_lnx, eb_arm, eb_lnx, eb_lnx, eb_arm, eb_arm);
-        ck(run_sh(cmd, out, sizeof out) == 0, "formal-entry-build-real-elf-objects-m1-lnx-only");
+               eb_bin, eb_lnx, eb_bin, eb_arm, eb_lnx, eb_lnx, eb_arm, eb_lnx, eb_lnx, eb_arm, eb_arm);
+        ck_v(run_sh_t(cmd, 120, out, sizeof out) == 0, "LOCAL",
+             "formal-entry-build-full-link-and-m1-lnx-only", "local-entry-build-full-link",
+             "full-lnx-x86_64-candidate-linked-no-dup-dv-word");
     }
 
     /* 3. Pack & verify all 3 tapeslices + P4 containers + structural CRC tamper */
