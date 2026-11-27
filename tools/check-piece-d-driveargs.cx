@@ -1,0 +1,298 @@
+/* tools/check-piece-d-driveargs.cx -- End-to-end lnx/x86_64 S3 authoritative gate for Batch A piece D (driveargs).
+ *
+ * Verifies against real tapemode.so x86_64 asm executor:
+ *   (1) Real product-entry dual link: compiles the exact same probe_main.cx twice:
+ *         native_probe: links real src/driveargs.cx
+ *         s3_probe:     links real src/driveargs_m1.cx (+ cx/driver/driveargs_m1_impl.cx)
+ *       and byte-compares their full outputs across 28 core words (is_object=0/1),
+ *       650B long paths (no truncation), real disk shebangs (plain + UTF-8 BOM + non-shebang),
+ *       reserved-word no-shebang-side-effect check, and dv_parse_args state machine (5 vectors);
+ *   (2) Real m53_bin2 guest co-exists in the same P4 container and passes cxsa_valid_s1 vectors;
+ *   (3) Inverted driveargs slice divergence proof via s3_probe (proves zero native fallback);
+ *   (4) Structural P4 F-record CRC tamper refusal for tape/lnx-x86_64/driveargs.tapeslice
+ *       (DRIVEARGS_M1_REFUSE, dv_word == -2, dv_parse_args propagates fail("driveargs tape refused"));
+ *   (5) Over-limit word (>= 65536 B) refused with -2; missing carrier refused with -2;
+ *   (6) G4 env-override refusal when UNISACC_M53_S1=1 with bad carrier.
+ *
+ * Marker: CHECK_PIECE_D_DRIVEARGS. */
+#pragma unisa use sys.fs
+#pragma unisa use sys.io
+#pragma unisa use sys.env
+#pragma unisa use sys.posix
+#pragma unisa use text.text
+#pragma unisa use mem.heap
+#pragma unisa use mem.bytes
+#pragma unisa use cxlib.procrun
+
+static int n_ok, failed;
+static void ck(int cond, const char *name) {
+    if (cond) { n_ok++; sy_printf("PASS\t%s\n", name); }
+    else { failed++; sy_printf("FAIL\t%s\n", name); }
+}
+
+static int run_sh(const char *cmd, char *out, long cap) {
+    char *av[] = {"sh", "-c", (char *)cmd, 0};
+    pr_result r;
+    int t = pr_run("piece-d-da", av, ".", 0, 50, &r);
+    long n = 0;
+    if (out && cap > 0) {
+        if (r.out && r.outn > 0) {
+            long m = (long)r.outn < cap - 1 ? (long)r.outn : cap - 1;
+            mm_copy(out, cap, r.out, m);
+            n += m;
+        }
+        if (r.err && r.errn > 0 && n < cap - 1) {
+            long m = (long)r.errn < cap - 1 - n ? (long)r.errn : cap - 1 - n;
+            mm_copy(out + n, cap - n, r.err, m);
+            n += m;
+        }
+        out[n] = 0;
+    }
+    int rc = t ? -1 : r.rc;
+    pr_free(&r);
+    return rc;
+}
+
+static int parse_u64_sep(const unsigned char *p, long n, long *pos, unsigned long *out, char sep) {
+    long i = *pos;
+    unsigned long v = 0;
+    if (i >= n || p[i] < '0' || p[i] > '9') return -1;
+    while (i < n && p[i] >= '0' && p[i] <= '9') { v = v * 10UL + (unsigned long)(p[i] - '0'); i++; }
+    if (i >= n || p[i] != (unsigned char)sep) return -1;
+    *pos = i + 1;
+    *out = v;
+    return 0;
+}
+
+/* Structurally parse P4 header + D/M/F record boundaries to flip the CRC field of `target_key`. */
+static int make_crc_tampered_p4_key(const char *src_p4, const char *dst_p4, const char *target_key) {
+    unsigned char *b = 0;
+    int64_t n = 0;
+    long pos = 4, nl_k = tx_len(target_key, 128);
+    unsigned long pm = 0, ps = 0, nr = 0;
+    int patched = 0;
+    if (sy_read_file(src_p4, &b, &n, 64L << 20) != 0 || !b || n < 10 || memcmp(b, "P 4 ", 4) != 0) { mm_free(b); return 1; }
+    if (parse_u64_sep(b, (long)n, &pos, &pm, ' ') ||
+        parse_u64_sep(b, (long)n, &pos, &ps, ' ') ||
+        parse_u64_sep(b, (long)n, &pos, &nr, '\n')) { mm_free(b); return 1; }
+    for (unsigned long di = 0; di < ps; di++) {
+        if (pos + 2 > (long)n || b[pos] != 'D' || b[pos + 1] != ' ') { mm_free(b); return 1; }
+        while (pos < (long)n && b[pos] != '\n') pos++;
+        if (pos >= (long)n) { mm_free(b); return 1; }
+        pos++;
+    }
+    for (unsigned long mi = 0; mi < pm; mi++) {
+        unsigned long mb = 0, mr = 0, mc = 0, mk = 0;
+        if (pos + 2 > (long)n || b[pos] != 'M' || b[pos + 1] != ' ') { mm_free(b); return 1; }
+        pos += 2;
+        if (parse_u64_sep(b, (long)n, &pos, &mb, ' ') || parse_u64_sep(b, (long)n, &pos, &mr, ' ') ||
+            parse_u64_sep(b, (long)n, &pos, &mc, ' ') || parse_u64_sep(b, (long)n, &pos, &mk, '\n') ||
+            mb > (unsigned long)((long)n - pos)) { mm_free(b); return 1; }
+        pos += (long)mb;
+    }
+    for (unsigned long ri = 0; ri < nr; ri++) {
+        unsigned long kl = 0, dl = 0, rl = 0, co = 0, cr = 0;
+        if (pos + 2 > (long)n || b[pos] != 'F' || b[pos + 1] != ' ') { mm_free(b); return 1; }
+        pos += 2;
+        if (parse_u64_sep(b, (long)n, &pos, &kl, ' ') || parse_u64_sep(b, (long)n, &pos, &dl, ' ') ||
+            parse_u64_sep(b, (long)n, &pos, &rl, ' ') || parse_u64_sep(b, (long)n, &pos, &co, ' ') ||
+            parse_u64_sep(b, (long)n, &pos, &cr, '\n')) { mm_free(b); return 1; }
+        long crc_last = pos - 2;
+        if ((long)kl == nl_k && pos + (long)kl <= (long)n && memcmp(b + pos, target_key, (size_t)nl_k) == 0) {
+            b[crc_last] = (b[crc_last] == '0') ? '1' : '0';
+            patched = 1;
+            break;
+        }
+        if (kl + dl > (unsigned long)((long)n - pos)) { mm_free(b); return 1; }
+        pos += (long)(kl + dl);
+    }
+    int rc = patched ? sy_write_file(dst_p4, b, (long)n, 0644) : 1;
+    mm_free(b);
+    return rc;
+}
+
+static const char *const PROBE_SRC =
+    "#pragma unisa use sys.fs\n"
+    "#pragma unisa use sys.env\n"
+    "#pragma unisa use sys.io\n"
+    "#pragma unisa use mem.heap\n"
+    "#pragma unisa use mem.bytes\n"
+    "#pragma unisa use text.text\n"
+    "#pragma unisa use driver.stream_s1_m1\n"
+    "extern int dv_word(const char *, int);\n"
+    "extern int dv_parse_args(void *, void *, char **, int *, const char **, int *, char *, int, char **, int *, int *, int (*)(const char *));\n"
+    "static int g_fh; static char g_fm[128];\n"
+    "static int sfail(const char *m) { g_fh++; cx_fmt(g_fm, sizeof g_fm, \"%s\", m ? m : \"\"); return 99; }\n"
+    "int cxc_step(void *o, char **av, int ac, int *nx, char *w, long c) { (void)o;(void)w;(void)c; if (*nx < ac && tx_eqz(av[*nx], \"-O2\")) { (*nx)++; return 0; } return 1; }\n"
+    "int cxp_step(void *o, char **av, int ac, int *nx, char *w, long c) { (void)o;(void)w;(void)c; if (*nx < ac && tx_prefix(av[*nx], tx_len(av[*nx], 64), \"-l\", 2)) { (*nx)++; return 0; } return 1; }\n"
+    "int main(int argc, char **argv) {\n"
+    "    const char *mode = argc >= 2 ? argv[1] : \"all\";\n"
+    "    const char *td = argc >= 3 ? argv[2] : \"/tmp\";\n"
+    "    if (tx_eqz(mode, \"m53\")) {\n"
+    "        unsigned char ok0[4] = {0,0,0,0}, ok1[13] = {1,0,0,0,0,0,0,0,0,0,0,0,0}, bl[12] = {1,0,0,0,0,0,0,0,0,0,0,0}, bc[4] = {0x41,0x42,0x0f,0};\n"
+    "        sy_printf(\"M53 %d %d %d %d %d\\n\", cxsa_valid_s1(ok0,4), cxsa_valid_s1(ok1,13), cxsa_valid_s1(bl,12), cxsa_valid_s1(bc,4), cxsa_valid_s1(0,4));\n"
+    "        return 0;\n"
+    "    }\n"
+    "    if (tx_eqz(mode, \"inv-da\")) { sy_printf(\"INV_DA %d\\n\", dv_word(\"ar\", 0)); return 0; }\n"
+    "    if (tx_eqz(mode, \"g1-da\")) {\n"
+    "        char *av[] = {\"unisacc\", \"a.c\", 0}; char *sv[4]; const char *s=0; int n=0,as=-1,r=1,d=1; char w[128]=\"\";\n"
+    "        g_fh=0; g_fm[0]=0;\n"
+    "        int wr = dv_word(\"ar\", 0);\n"
+    "        int rc = dv_parse_args(0,0,sv,&n,&s,&as,w,2,av,&r,&d,sfail);\n"
+    "        sy_printf(\"G1_DA wr=%d rc=%d fh=%d msg=%s\\n\", wr, rc, g_fh, g_fm);\n"
+    "        return 0;\n"
+    "    }\n"
+    "    if (tx_eqz(mode, \"over-limit\")) {\n"
+    "        char *big = (char *)mm_alloc(66000);\n"
+    "        if (!big) return 2;\n"
+    "        mm_fill(big, 66000, 'a', 65540);\n"
+    "        big[65540] = 0;\n"
+    "        sy_printf(\"OVER %d\\n\", dv_word(big, 0));\n"
+    "        mm_free(big);\n"
+    "        return 0;\n"
+    "    }\n"
+    "    if (tx_eqz(mode, \"g4-env\")) {\n"
+    "        sy_setenv(\"UNISACC_M53_S1\", \"1\", 1);\n"
+    "        sy_printf(\"G4 %d\\n\", dv_word(\"ar\", 0));\n"
+    "        sy_unsetenv(\"UNISACC_M53_S1\");\n"
+    "        return 0;\n"
+    "    }\n"
+    "    {\n"
+    "        static const char *const sw[28] = {0,\"\",\"ar\",\"as\",\"nm\",\"objdump\",\"stream\",\"--version\",\"-version\",\"--help\",\"--\",\"a.c\",\"foo/bar.c\",\"a.cx\",\"tools/test.cx\",\"a.h\",\"a.s\",\"a.S\",\"a.o\",\"libx.a\",\"-O2\",\"-o\",\"-lfoo\",\"-L/tmp\",\"-xc\",\"script_noext\",\"ar2\",\"--helpx\"};\n"
+    "        char lc[660], lcx[660], lo[660], lt[660], sbp[640], sbb[640], sbn[640];\n"
+    "        for (int i=0;i<646;i++) { lc[i]=lcx[i]=lo[i]=lt[i]='a'; }\n"
+    "        cx_fmt(lc+646,14,\".c\"); cx_fmt(lcx+646,14,\".cx\"); cx_fmt(lo+646,14,\".o\"); cx_fmt(lt+646,14,\".txt\");\n"
+    "        cx_fmt(sbp,sizeof sbp,\"%s/sb_p\",td); cx_fmt(sbb,sizeof sbb,\"%s/sb_b\",td); cx_fmt(sbn,sizeof sbn,\"%s/sb_n\",td);\n"
+    "        sy_printf(\"DAW\"); for (int i=0;i<28;i++) sy_printf(\" %d,%d\", dv_word(sw[i],0), dv_word(sw[i],1)); sy_printf(\"\\n\");\n"
+    "        { const char *ex[7] = {lc,lcx,lo,lt,sbp,sbb,sbn}; sy_printf(\"DAE\"); for (int i=0;i<7;i++) sy_printf(\" %d,%d\", dv_word(ex[i],0), dv_word(ex[i],1)); sy_printf(\"\\n\"); }\n"
+    "        { char *av1[]={\"u\",\"--version\",0}, *av2[]={\"u\",\"--help\",0}, *av3[]={\"u\",\"-O2\",lc,\"-lfoo\",\"--\",\"-a\",0}, *av4[]={\"u\",sbp,\"parg\",0}, *av5[]={\"u\",\"--unk\",0};\n"
+    "          char **vs[5]={av1,av2,av3,av4,av5}; int acs[5]={2,2,6,3,2};\n"
+    "          for (int v=0;v<5;v++) {\n"
+    "              char *sv[16]; const char *s=0; int n=0,as=-1,r=1,d=1; char w[128]=\"\"; g_fh=0;\n"
+    "              int rc=dv_parse_args(0,0,sv,&n,&s,&as,w,acs[v],vs[v],&r,&d,sfail);\n"
+    "              sy_printf(\"DAP %d rc=%d fh=%d n=%d as=%d s=%s\\n\", v, rc, g_fh, n, as, s?s:\"-\");\n"
+    "          } }\n"
+    "    }\n"
+    "    return 0;\n"
+    "}\n";
+
+int main(void) {
+    char tmp[512], tpk_bin[600], p4e_bin[600], nat_bin[600], s3_bin[600], probe_cx[640], tdir[600];
+    char cmd[8192], out[16384], nat_out[16384], s3_out[16384];
+    char m53_cx[640], m53_sl[640], da_sl[640], inv_da_cx[640], inv_da_sl[640];
+    char good_p4[640], inv_da_p4[640], bad_crc_da[640];
+    char sbp[640], sbb[640], sbn[640];
+
+    if (sy_mkdtemp(sy_tmpdir(), "piece-d-da-", tmp, sizeof tmp) != 0) return 2;
+    cx_fmt(tpk_bin, sizeof tpk_bin, "%s/tapepack", tmp);
+    cx_fmt(p4e_bin, sizeof p4e_bin, "%s/p4embed", tmp);
+    cx_fmt(nat_bin, sizeof nat_bin, "%s/native_probe", tmp);
+    cx_fmt(s3_bin, sizeof s3_bin, "%s/s3_probe", tmp);
+    cx_fmt(probe_cx, sizeof probe_cx, "%s/probe_main.cx", tmp);
+    cx_fmt(tdir, sizeof tdir, "%s/tape", tmp);
+    cx_fmt(m53_cx, sizeof m53_cx, "%s/m53_guest.cx", tmp);
+    cx_fmt(m53_sl, sizeof m53_sl, "%s/m53.tapeslice", tmp);
+    cx_fmt(da_sl, sizeof da_sl, "%s/driveargs.tapeslice", tmp);
+    cx_fmt(inv_da_cx, sizeof inv_da_cx, "%s/inv_da.cx", tmp);
+    cx_fmt(inv_da_sl, sizeof inv_da_sl, "%s/inv_da.tapeslice", tmp);
+    cx_fmt(good_p4, sizeof good_p4, "%s/good.p4", tmp);
+    cx_fmt(inv_da_p4, sizeof inv_da_p4, "%s/inv_da.p4", tmp);
+    cx_fmt(bad_crc_da, sizeof bad_crc_da, "%s/bad_crc_da.p4", tmp);
+    cx_fmt(sbp, sizeof sbp, "%s/sb_p", tmp);
+    cx_fmt(sbb, sizeof sbb, "%s/sb_b", tmp);
+    cx_fmt(sbn, sizeof sbn, "%s/sb_n", tmp);
+    (void)sy_mkdir(tdir, 0755);
+
+    (void)sy_write_file(sbp, (const unsigned char *)"#!/usr/bin/env unisacc -run\nint main(void){return 0;}\n", 54, 0644);
+    { unsigned char bom[18] = {0xef,0xbb,0xbf,'#','!','/','b','i','n','/','s','h',' ','-','r','u','n','\n'}; (void)sy_write_file(sbb, bom, 18, 0644); }
+    (void)sy_write_file(sbn, (const unsigned char *)"plain text without shebang\n", 27, 0644);
+    (void)sy_write_file(probe_cx, (const unsigned char *)PROBE_SRC, (long)strlen(PROBE_SRC), 0644);
+    {
+        const char *m53_s =
+            "int main(int argc, char **argv) {\n"
+            "    const char *abi = \"M53S1BIN2\";\n"
+            "    const unsigned long long *ba;\n"
+            "    const unsigned char *data;\n"
+            "    long length;\n"
+            "    unsigned long count;\n"
+            "    if (abi[0] != 'M' || argc < 2) return 2;\n"
+            "    ba = (const unsigned long long *)argv[1];\n"
+            "    data = (const unsigned char *)ba[0];\n"
+            "    length = (long)ba[1];\n"
+            "    if (!data || length < 4) return 0;\n"
+            "    count = (unsigned long)data[0] | ((unsigned long)data[1] << 8) |\n"
+            "            ((unsigned long)data[2] << 16) | ((unsigned long)data[3] << 24);\n"
+            "    if (count > 1000000UL) return 0;\n"
+            "    return length == 4 + (long)count * 9 ? 1 : 0;\n"
+            "}\n";
+        const char *id_s = "int main(int argc, char **argv) { const char *abi = \"DVARGM1B1\"; return abi[0] == 'D' && argc >= 2 ? 20 : 21; }\n";
+        (void)sy_write_file(m53_cx, (const unsigned char *)m53_s, (long)strlen(m53_s), 0644);
+        (void)sy_write_file(inv_da_cx, (const unsigned char *)id_s, (long)strlen(id_s), 0644);
+    }
+
+    /* 1. Parallel wave: tapemode.so, tapepack, p4-embed, native_probe, s3_probe, and 3 guest .s */
+    cx_fmt(cmd, sizeof cmd,
+           "ln -sf \"$(pwd)/cxroot.tsv\" '%s/cxroot.tsv' && ln -sf \"$(pwd)/cx\" '%s/cx' && ln -sf \"$(pwd)/src\" '%s/src' && "
+           "sh ./unisacc.com tools/tape-sidecar-build.cx -- --target lnx/x86_64 . '%s' & p0=$!; "
+           "sh ./unisacc.com tools/tapepack.cx -o '%s' & p1=$!; "
+           "sh ./unisacc.com tools/p4-embed.cx -o '%s' & p2=$!; "
+           "sh ./unisacc.com '%s' src/driveargs.cx src/driveutil.cx src/entrybind.cx -o '%s' & p3=$!; "
+           "sh ./unisacc.com '%s' src/driveargs_m1.cx src/driveutil.cx src/entrybind.cx -o '%s' & p4=$!; "
+           "sh ./unisacc.com -S '%s' -o '%s.s' & p5=$!; "
+           "sh ./unisacc.com -S exec/tape/guests/driveargs_guest.cx -o '%s.s' & p6=$!; "
+           "sh ./unisacc.com -S '%s' -o '%s.s' & p7=$!; "
+           "wait $p0 && wait $p1 && wait $p2 && wait $p3 && wait $p4 && wait $p5 && wait $p6 && wait $p7",
+           tmp, tmp, tmp, tdir, tpk_bin, p4e_bin,
+           probe_cx, nat_bin, probe_cx, s3_bin,
+           m53_cx, m53_sl, da_sl, inv_da_cx, inv_da_sl);
+    ck(run_sh(cmd, out, sizeof out) == 0, "build-tapemode-dual-probes-and-guests");
+    if (failed) { sy_printf("%s\n", out); goto done; }
+
+    /* 2. Pack & verify all 3 tapeslices + P4 containers + structural CRC tamper */
+    cx_fmt(cmd, sizeof cmd,
+           "for f in '%s' '%s' '%s'; do '%s' \"$f.s\" -o \"$f\" && '%s' --check \"$f.s\" \"$f\" || exit 1; done && "
+           "'%s' ./unisacc.com '%s/tapemode.so' '%s' '%s' --extra driveargs.tapeslice '%s' && "
+           "'%s' ./unisacc.com '%s/tapemode.so' '%s' '%s' --extra driveargs.tapeslice '%s'",
+           m53_sl, da_sl, inv_da_sl, tpk_bin, tpk_bin,
+           p4e_bin, tdir, m53_sl, good_p4, da_sl,
+           p4e_bin, tdir, m53_sl, inv_da_p4, inv_da_sl);
+    ck(run_sh(cmd, out, sizeof out) == 0 &&
+       make_crc_tampered_p4_key(good_p4, bad_crc_da, "tape/lnx-x86_64/driveargs.tapeslice") == 0,
+       "pack-slices-and-structural-crc-tamper");
+    if (failed) { sy_printf("%s\n", out); goto done; }
+
+    /* 3. Exact byte-for-byte parity: native_probe vs s3_probe */
+    cx_fmt(cmd, sizeof cmd, "'%s' all '%s'", nat_bin, tmp);
+    int r_nat = run_sh(cmd, nat_out, sizeof nat_out);
+    cx_fmt(cmd, sizeof cmd, "UNISA_CONTAINER='%s' '%s' all '%s'", good_p4, s3_bin, tmp);
+    int r_s3 = run_sh(cmd, s3_out, sizeof s3_out);
+    ck(r_nat == 0 && r_s3 == 0 && nat_out[0] != 0 && strcmp(nat_out, s3_out) == 0, "native-vs-s3-byte-parity");
+
+    /* 4. Real m53 coexist in same P4 container */
+    cx_fmt(cmd, sizeof cmd, "UNISA_CONTAINER='%s' '%s' m53 '%s'", good_p4, s3_bin, tmp);
+    ck(run_sh(cmd, out, sizeof out) == 0 && strstr(out, "M53 1 1 0 0 0") != 0, "m53-coexist-in-p4");
+
+    /* 5. Inverted driveargs slice divergence proof (proves zero native fallback) */
+    cx_fmt(cmd, sizeof cmd, "UNISA_CONTAINER='%s' '%s' inv-da '%s'", inv_da_p4, s3_bin, tmp);
+    ck(run_sh(cmd, out, sizeof out) == 0 && strstr(out, "INV_DA 20") != 0, "inverted-slice-divergence");
+
+    /* 6. Structural CRC tamper refusal + dv_parse_args refusal propagation */
+    cx_fmt(cmd, sizeof cmd, "UNISA_CONTAINER='%s' '%s' g1-da '%s'", bad_crc_da, s3_bin, tmp);
+    ck(run_sh(cmd, out, sizeof out) == 0 &&
+       strstr(out, "DRIVEARGS_M1_REFUSE") != 0 &&
+       strstr(out, "G1_DA wr=-2 rc=99 fh=1 msg=driveargs tape refused") != 0,
+       "crc-tamper-refuse-and-parse-args-propagation");
+
+    /* 7. Over-limit word (>= 65536 B) refused with -2 */
+    cx_fmt(cmd, sizeof cmd, "UNISA_CONTAINER='%s' '%s' over-limit '%s'", good_p4, s3_bin, tmp);
+    ck(run_sh(cmd, out, sizeof out) == 0 && strstr(out, "OVER -2") != 0, "over-limit-65536-refused");
+
+    /* 8. Missing carrier refused with -2 + G4 env-override refusal */
+    cx_fmt(cmd, sizeof cmd, "UNISA_CONTAINER='%s/no_such.p4' '%s' g4-env '%s'", tmp, s3_bin, tmp);
+    ck(run_sh(cmd, out, sizeof out) == 0 && strstr(out, "G4 -2") != 0, "missing-carrier-and-g4-env-refused");
+
+done:
+    (void)sy_remove_all(tmp);
+    sy_printf("CHECK_PIECE_D_DRIVEARGS\tpassed=%d\tfailed=%d\n", n_ok, failed);
+    return failed ? 1 : 0;
+}
