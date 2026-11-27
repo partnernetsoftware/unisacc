@@ -15,6 +15,7 @@
 #pragma unisa use sys.fs
 #pragma unisa use sys.io
 #pragma unisa use sys.posix
+#pragma unisa use sys.proc
 #pragma unisa use sys.sha
 #pragma unisa use sys.time
 #pragma unisa use text.text
@@ -72,20 +73,20 @@ static int gm53_run_stream
         cx_fmt(f3, sizeof f3, "%s/%s.e3", tmp, tag) ||
         gm53_write_file(c1, src_code, strlen(src_code)) != 0) return -1;
 
-    if (cx_fmt(shcmd, sizeof shcmd, "\"%s\" stream e2 --level 2 --source \"%s\" --no-external-nn < \"%s\" > \"%s\"", ape, c1, c1, f2)) return -1;
-    char *v2[] = {"sh", "-c", shcmd, 0};
+    if (cx_fmt(shcmd, sizeof shcmd, "\"$1\" stream e2 --level 2 --source \"$2\" --no-external-nn < \"$2\" > \"$3\"")) return -1;
+    char *v2[] = {"sh", "-c", shcmd, "m53", (char *)ape, c1, f2, 0};
     mm_fill(&r, sizeof r, 0, sizeof r);
     if (pr_run("m53-e2", v2, ".", 0, 20, &r) != 0 || r.rc != 0) { pr_free(&r); return -1; }
     pr_free(&r);
 
-    if (cx_fmt(shcmd, sizeof shcmd, "\"%s\" stream e1 --level 2 --source \"%s\" --no-external-nn < \"%s\" > \"%s\"", ape, c1, f2, f1)) return -1;
-    char *v1[] = {"sh", "-c", shcmd, 0};
+    if (cx_fmt(shcmd, sizeof shcmd, "\"$1\" stream e1 --level 2 --source \"$2\" --no-external-nn < \"$3\" > \"$4\"")) return -1;
+    char *v1[] = {"sh", "-c", shcmd, "m53", (char *)ape, c1, f2, f1, 0};
     mm_fill(&r, sizeof r, 0, sizeof r);
     if (pr_run("m53-e1", v1, ".", 0, 20, &r) != 0 || r.rc != 0) { pr_free(&r); return -1; }
     pr_free(&r);
 
-    if (cx_fmt(shcmd, sizeof shcmd, "\"%s\" stream e3 --level 2 --source \"%s\" --no-external-nn < \"%s\" > \"%s\"", ape, c1, f1, f3)) return -1;
-    char *v3[] = {"sh", "-c", shcmd, 0};
+    if (cx_fmt(shcmd, sizeof shcmd, "\"$1\" stream e3 --level 2 --source \"$2\" --no-external-nn < \"$3\" > \"$4\"")) return -1;
+    char *v3[] = {"sh", "-c", shcmd, "m53", (char *)ape, c1, f1, f3, 0};
     mm_fill(&r, sizeof r, 0, sizeof r);
     if (pr_run("m53-e3", v3, ".", 0, 20, &r) != 0 || r.rc != 0 ||
         gm53_has_refuse(r.out, (long)r.outn) || gm53_has_refuse(r.err, (long)r.errn)) { pr_free(&r); return -1; }
@@ -100,7 +101,10 @@ static int gm53_run_stream
     return 0;
 }
 
+typedef struct { int pass, prod_nat, prod_mig; char buffers_sha[65]; long elapsed_ms; } gm53_metrics;
+static gm53_metrics g_gm53_m;
 static const char *const gm53_cases[6] = {
+
     "int main(void){return 0;}\n",
     "int add(int a,int b){return a+b;}\nint main(void){return add(2,3);}\n",
     "int fib(int n){return n<2?n:fib(n-1)+fib(n-2);}\nint main(void){return fib(5);}\n",
@@ -150,9 +154,12 @@ static int compare_m53(const char *ape_path, const char *rcpt_path, int verbose)
     if (fsx_scratch(&sc, "gm53-") != 0) return 2;
     const char *tmp = fsx_scratch_dir(sc);
     long t0 = sy_now_ms();
-    int prod_nat = 0, prod_mig = 0, pass = 0;
+    int prod_nat = 0, prod_mig = 0, pass = 0, i, j;
+    size_t acap = 6 * (65536 + 8), off = 0;
+    unsigned char *acc = (unsigned char *)mm_alloc((long)acap);
     static char nat_buf[65536], mig_buf[65536];
-    for (int i = 0; i < 6; i++) {
+    if (!acc) { fsx_scratch_drop(sc); return 2; }
+    for (i = 0; i < 6; i++) {
         size_t nlen = 0, mlen = 0;
         char tnat[32], tmig[32], c1[640];
         cx_fmt(tnat, sizeof tnat, "nat%d", i);
@@ -161,10 +168,20 @@ static int compare_m53(const char *ape_path, const char *rcpt_path, int verbose)
         int ok_n = (gm53_run_stream("./unisacc.com", tmp, tnat, c1, gm53_cases[i], nat_buf, &nlen, sizeof nat_buf) == 0);
         int ok_m = (gm53_run_stream(ape_path, tmp, tmig, c1, gm53_cases[i], mig_buf, &mlen, sizeof mig_buf) == 0);
         if (ok_n) prod_nat++;
-        if (ok_m) prod_mig++;
+        if (ok_m) {
+            prod_mig++;
+            if (off + 8 + mlen > acap) { mm_free(acc); fsx_scratch_drop(sc); return 2; }
+            for (j = 0; j < 8; j++) acc[off++] = (unsigned char)((mlen >> (8 * j)) & 0xffU);
+            mm_copy(acc + off, (long)(acap - off), mig_buf, (long)mlen);
+            off += mlen;
+        }
         if (ok_n && ok_m && nlen == mlen && memcmp(nat_buf, mig_buf, nlen) == 0) pass++;
     }
     long elapsed_ms = sy_now_ms() - t0;
+    if (off > 0) sy_sha256_hex((const char *)acc, (long)off, g_gm53_m.buffers_sha);
+    else g_gm53_m.buffers_sha[0] = 0;
+    mm_free(acc);
+    g_gm53_m.pass = pass; g_gm53_m.prod_nat = prod_nat; g_gm53_m.prod_mig = prod_mig; g_gm53_m.elapsed_ms = elapsed_ms;
     fsx_scratch_drop(sc);
 
     int ok = (prod_nat == 6 && prod_mig == 6 && pass == 6);
@@ -240,66 +257,32 @@ static int gm53_out_path(char *dst, size_t cap, const char *rcpt, const gm53_opt
     return cx_fmt(dst, cap, "%s.out", rcpt);
 }
 /* Hash the six raw migrated e3 buffers exactly as (u64 little-endian len, bytes). */
-static int gm53_collect_buffers(const char *ape, char *buf_sha, long *elapsed_ms) {
-    int sc = 0, i;
-    size_t cap = 6 * (65536 + 8), off = 0;
-    unsigned char *acc;
-    char *tmp;
-    static char mig[65536];
-    long t0;
-    if (fsx_scratch(&sc, "gm53-metrics-") != 0) return -1;
-    tmp = (char *)fsx_scratch_dir(sc);
-    acc = (unsigned char *)mm_alloc((long)cap);
-    if (!acc) { fsx_scratch_drop(sc); return -1; }
-    t0 = sy_now_ms();
-    for (i = 0; i < 6; i++) {
-        size_t mlen = 0;
-        char tmig[32], c1[640];
-        int j;
-        if (cx_fmt(tmig, sizeof tmig, "mig%d", i) || cx_fmt(c1, sizeof c1, "%s/case%d.c", tmp, i) ||
-            gm53_run_stream(ape, tmp, tmig, c1, gm53_cases[i], mig, &mlen, sizeof mig) != 0 ||
-            off + 8 + mlen > cap) { mm_free(acc); fsx_scratch_drop(sc); return -1; }
-        for (j = 0; j < 8; j++) acc[off++] = (unsigned char)((mlen >> (8 * j)) & 0xffU);
-        mm_copy(acc + off, (long)(cap - off), mig, (long)mlen);
-        off += mlen;
-    }
-    if (sy_sha256_hex((const char *)acc, (long)off, buf_sha)) { mm_free(acc); fsx_scratch_drop(sc); return -1; }
-    if (elapsed_ms) *elapsed_ms = sy_now_ms() - t0;
-    mm_free(acc);
-    fsx_scratch_drop(sc);
-    return 0;
-}
-static int gm53_write_metrics(const char *ape, const char *out_path, char out_sha[65], char buf_sha[65]) {
+static int gm53_write_metrics(const char *out_path, char out_sha[65]) {
     char body[512];
-    long elapsed = 0;
     int n;
-    if (gm53_collect_buffers(ape, buf_sha, &elapsed) != 0) return -1;
     n = snprintf(body, sizeof body,
-                 "golden_kind\tbyte-diff\ngolden_cases\t6\ngolden_pass\t6\n"
-                 "calls_per_run\t1\nsteps_per_call\t1000\nblockers_n\t0\n"
-                 "buffers_sha\t%s\nelapsed_ms\t%ld\n", buf_sha, elapsed);
+                 "golden_kind\tbyte-diff\ngolden_cases\t6\ngolden_pass\t%d\n"
+                 "calls_per_run\tUNMEASURED\nsteps_per_call\tUNMEASURED\nblockers_n\tUNMEASURED\n"
+                 "buffers_sha\t%s\nelapsed_ms\t%ld\n", g_gm53_m.pass, g_gm53_m.buffers_sha, g_gm53_m.elapsed_ms);
     if (n <= 0 || n >= (int)sizeof body || gm53_write_file(out_path, body, (size_t)n) != 0) return -1;
     return sy_sha256_hex(body, (long)n, out_sha);
 }
 static int gm53_produce(const char *id, const char *rcpt, const char *ape, gm53_opt *o) {
-    char out_path[1200], out_sha[65], buf_sha[65], cand[65];
+    char out_path[1200], out_sha[65], cand[65];
     char *mb; size_t ml = 0;
     rc_v3_t r;
     if (!id || !rcpt || !ape || !o->rev || !o->target || !o->inputs) return 2;
-    if (!o->fixture && compare_m53(ape, 0, 0) != 0) return 1;
+    if (compare_m53(ape, 0, 0) != 0) return 1;
     if (gm53_out_path(out_path, sizeof out_path, rcpt, o) != 0) return 2;
-    if (gm53_write_metrics(o->fixture ? "./unisacc.com" : ape, out_path, out_sha, buf_sha) != 0) return 2;
-    if (o->cand && o->cand[0]) {
-        if (cx_fmt(cand, sizeof cand, "%s", o->cand)) return 2;
-    } else {
-        mb = gm53_read_file(ape, &ml);
-        if (!mb) return 2;
-        if (sy_sha256_hex(mb, (long)ml, cand)) { mm_free(mb); return 2; }
-        mm_free(mb);
-    }
+    if (gm53_write_metrics(out_path, out_sha) != 0) return 2;
+    mb = gm53_read_file(ape, &ml);
+    if (!mb) return 2;
+    if (sy_sha256_hex(mb, (long)ml, cand)) { mm_free(mb); return 2; }
+    mm_free(mb);
     mm_fill(&r, (long)sizeof r, 0, (long)sizeof r);
     r.run_id = id; r.rev = o->rev; r.unit = o->unit; r.target = o->target;
-    r.producer = o->producer; r.purpose = o->purpose;
+    r.producer = "check-golden-m53";
+    r.purpose = o->fixture ? "admission-fixture" : "admission";
     r.candidate_sha = cand; r.inputs_sha = o->inputs; r.output_sha = out_sha;
     r.rc = 0; r.verdict = "PASS";
     r.ts = o->now_ts > 0 ? o->now_ts : (int64_t)sy_wall_s();
@@ -330,9 +313,47 @@ static int gm53_judge(const char *id, const char *rcpt, gm53_opt *o) {
     return 0;
 }
 
+static int run_receipt_selftest(int verbose) {
+    char ape[256], rcpt[256], out[256], id[128], in_sha[65], rev[41], cand[65];
+    char *b; size_t n = 0;
+    gm53_opt o;
+    int rc = 1;
+    cx_fmt(ape, sizeof ape, "/tmp/gm53-fixture-%d.com", (int)sy_pid());
+    cx_fmt(rcpt, sizeof rcpt, "/tmp/gm53-fixture-%d.rcpt", (int)sy_pid());
+    cx_fmt(out, sizeof out, "/tmp/gm53-fixture-%d.out", (int)sy_pid());
+    cx_fmt(id, sizeof id, "gm53-receipt-%d", (int)sy_pid());
+    cx_fmt(rev, sizeof rev, "0000000000000000000000000000000000000000");
+    b = gm53_read_file("./unisacc.com", &n);
+    if (!b || n < 16) { if (b) mm_free(b); if (verbose) printf("FAIL\treceipt-v3-fixture\n"); return 1; }
+    b[9] = 1;   /* ELF ident padding: functional copy with a distinct candidate sha */
+    if (sy_sha256_hex(b, (long)n, cand)) { mm_free(b); if (verbose) printf("FAIL\\treceipt-v3-fixture\\n"); return 1; }
+    if (gm53_write_file(ape, b, n) != 0 || sy_chmod(ape, 0755) != 0) { mm_free(b); if (verbose) printf("FAIL\treceipt-v3-fixture\n"); return 1; }
+    mm_free(b);
+    if (sy_sha256_hex("gm53-receipt-inputs", 19, in_sha) != 0) goto done;
+    gm53_opt_init(&o);
+    o.rev = rev; o.target = "lnx/x86_64"; o.cand = cand; o.inputs = in_sha; o.out = out; o.fixture = 1;
+    o.now_ts = 1764200000LL;
+    if (gm53_produce(id, rcpt, ape, &o) != 0) { if (verbose) printf("FAIL\treceipt-v3-produce\n"); goto done; }
+    if (gm53_judge(id, rcpt, &o) != 0) { if (verbose) printf("FAIL\treceipt-v3-judge\n"); goto done; }
+    if (verbose) printf("PASS\treceipt-v3-roundtrip\n");
+    rc = 0;
+done:
+    sy_unlink(ape); sy_unlink(rcpt); sy_unlink(out);
+    return rc;
+}
+
+
 int main(int argc, char **argv) {
     gm53_opt o;
-    if (argc >= 2 && strcmp(argv[1], "--selftest") == 0) return run_selftest(1);
+    if (argc >= 2 && strcmp(argv[1], "--selftest") == 0) {
+        int r = run_selftest(1);
+        if (argc >= 3 && strcmp(argv[2], "--receipt") == 0) {
+            int q = run_receipt_selftest(1);
+            if (q) r = q;
+        }
+        return r;
+    }
+
     gm53_opt_init(&o);
     if (argc >= 4 && strcmp(argv[1], "--produce") == 0) {
         if (gm53_parse_opt(&o, argc, argv, 4) != 0) return 2;
