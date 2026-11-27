@@ -165,6 +165,134 @@ static void execution_fixture(void) {
     ck(rc == 2 && strstr(out, "REFUSE execution baseline"), "execution-missing-baseline-refused");
 }
 
+static void scope_product_fixture(void) {
+    char sc[8192], out[65536];
+    int rc;
+    cx_fmt(sc, sizeof sc,
+        "set -e; cd %s; mkdir -p repo3/src repo3/tools; cd repo3; git init -q; git config user.email t@t; git config user.name t;\n"
+        "printf '%%s\\n' 'int prod_add_scaled(int x, int y) {' '    int t = x + y;' '    return t;' '}' > src/prod.cx\n"
+        "printf '%%s\\n' 'int main(void) { printf(\"SELFCOPY ok=1 failed=0\\n\"); return 0; }' > tools/selfcopy.cx\n"
+        "printf '%%s\\n' 'extern int prod_add_scaled(int x, int y);' 'int main(void) {' '    printf(\"%%d %%d %%d\\n\", prod_add_scaled(2, 3), prod_add_scaled(5, 5), prod_add_scaled(5, 6));' '    return 0;' '}' > tools/caller.cx\n"
+        "git add src/prod.cx tools/selfcopy.cx tools/caller.cx; git commit -q -m base; git tag base\n"
+        "printf '%%s\\n' 'int prod_add_scaled(int x, int y) {' '    int t = x + y;' '    if (t > 10) t = t * 2;' '    return t;' '}' > src/prod.cx\n"
+        "printf '%%s\\n' 'extern int prod_add_scaled(int x, int y);' 'int main(void) {' '    int dummy = 42;' '    if (dummy == 42) printf(\"%%d %%d %%d\\n\", prod_add_scaled(2, 3), prod_add_scaled(5, 5), prod_add_scaled(5, 6));' '    return 0;' '}' > tools/caller.cx\n"
+        "git diff -- src/prod.cx > ../prod.patch\n"
+        "git diff -- src/prod.cx tools/caller.cx > ../mixed.patch\n"
+        "git checkout -q src/prod.cx tools/caller.cx\n"
+        "printf '%%s\\n' 'int prod_add_scaled(int x, int y) {' '    int t = x + y;' '    /* comment only change */' '    return t;' '}' > src/prod.cx\n"
+        "git diff -- src/prod.cx > ../zero_prod.patch\n"
+        "git checkout -q src/prod.cx", T);
+    rc = ckk_sh_t("check-mutation-gate", sc, out, sizeof out, 20);
+    ck(rc == 0, "scope-product-fixture-repo");
+    if (rc != 0) { printf("%.1000s\n", out); return; }
+
+    /* --scope product requires --coverage-check */
+    cx_fmt(sc, sizeof sc,
+        "sh ./unisacc.com tools/mutation-gate.cx -- prep --scope product --repo %s/repo3 --base base "
+        "--patch %s/prod.patch --check 'echo ok' --out %s/sp-nocov --par 1 2>&1", T, T, T);
+    rc = ckk_sh_t("check-mutation-gate", sc, out, sizeof out, 15);
+    ck(rc == 2 && ckk_has(out, sizeof out, "requires --coverage-check"), "scope-product-requires-cov");
+
+    /* 0 product mutants (comment-only edit in src/) must exit rc 2 */
+    cx_fmt(sc, sizeof sc,
+        "sh ./unisacc.com tools/mutation-gate.cx -- run --scope product --coverage-check --repo %s/repo3 --base base "
+        "--patch %s/zero_prod.patch --check 'sh ./unisacc.com tools/selfcopy.cx' --out %s/sp-zero --par 2 --max 10 --deadline-s 30 2>&1",
+        T, T, T);
+    rc = ckk_sh_t("check-mutation-gate", sc, out, sizeof out, 25);
+    ck(rc == 2 && ckk_has(out, sizeof out, "no product mutant"), "scope-product-zero-mutants-rc2");
+
+    /* self-copy check does not compile/run src/prod.cx: must FAIL with not_live>=1, MD_SURVIVOR, stmt, retc */
+    cx_fmt(sc, sizeof sc,
+        "sh ./unisacc.com tools/mutation-gate.cx -- run --scope product --coverage-check --repo %s/repo3 --base base "
+        "--patch %s/prod.patch --check 'sh ./unisacc.com tools/selfcopy.cx' --out %s/sp-selfcopy --par 4 --max 10 --deadline-s 30 2>&1",
+        T, T, T);
+    rc = ckk_sh_t("check-mutation-gate", sc, out, sizeof out, 35);
+    ck(rc == 1 && ckk_has(out, sizeof out, "MUTATION_DIFF scope=product ")
+       && !ckk_has(out, sizeof out, " not_live=0 ")
+       && ckk_has(out, sizeof out, " verdict=FAIL")
+       && ckk_has(out, sizeof out, "MD_SURVIVOR src/prod.cx ")
+       && ckk_has(out, sizeof out, " stmt\n")
+       && ckk_has(out, sizeof out, " retc\n"),
+       "scope-product-self-copy-fails-not-live");
+    if (rc != 1) printf("%.1200s\n", out);
+
+    /* real-caller check compiles & runs src/prod.cx + tools/caller.cx (mixed.patch ignores tools/): PASS survived=0 not_live=0 */
+    cx_fmt(sc, sizeof sc,
+        "sh ./unisacc.com tools/mutation-gate.cx -- run --scope product --coverage-check --repo %s/repo3 --base base "
+        "--patch %s/mixed.patch --check 'sh ./unisacc.com src/prod.cx tools/caller.cx -o .caller && o=$(./.caller) && rm -f .caller && test \"$o\" = \"5 10 22\"' "
+        "--out %s/sp-caller --par 4 --max 10 --deadline-s 30 2>&1",
+        T, T, T);
+    rc = ckk_sh_t("check-mutation-gate", sc, out, sizeof out, 35);
+    ck(rc == 0 && ckk_has(out, sizeof out, "MUTATION_DIFF scope=product ")
+       && ckk_has(out, sizeof out, " survived=0 not_live=0 ")
+       && ckk_has(out, sizeof out, " verdict=PASS")
+       && !ckk_has(out, sizeof out, "MD_SURVIVOR "),
+       "scope-product-real-caller-passes");
+    if (rc != 0) printf("%.1200s\n", out);
+
+    /* report --scope product on a no-cov prepared dir must also refuse rc 2 */
+    cx_fmt(sc, sizeof sc,
+        "sh ./unisacc.com tools/mutation-gate.cx -- prep --repo %s/repo3 --base base --patch %s/prod.patch "
+        "--check 'echo ok' --out %s/sp-plain --par 1 >/dev/null 2>&1 && "
+        "sh ./unisacc.com tools/mutation-gate.cx -- report --scope product --out %s/sp-plain 2>&1", T, T, T, T);
+    rc = ckk_sh_t("check-mutation-gate", sc, out, sizeof out, 20);
+    ck(rc == 2 && ckk_has(out, sizeof out, "requires --coverage-check"), "scope-product-report-requires-cov");
+
+    /* --build failure at baseline refuses rc 2; valid --build rebuilds per slot and passes */
+    cx_fmt(sc, sizeof sc,
+        "sh ./unisacc.com tools/mutation-gate.cx -- run --scope product --coverage-check --build 'false' --repo %s/repo3 --base base "
+        "--patch %s/prod.patch --check 'echo ok' --out %s/sp-buildbad --par 1 --max 4 --deadline-s 30 2>&1", T, T, T);
+    rc = ckk_sh_t("check-mutation-gate", sc, out, sizeof out, 20);
+    ck(rc == 2 && ckk_has(out, sizeof out, "baseline build failed"), "scope-product-build-baseline-fails-rc2");
+
+    cx_fmt(sc, sizeof sc,
+        "sh ./unisacc.com tools/mutation-gate.cx -- run --scope product --coverage-check "
+        "--build 'sh ./unisacc.com src/prod.cx tools/caller.cx -o .caller' "
+        "--repo %s/repo3 --base base --patch %s/prod.patch "
+        "--check 'o=$(./.caller) && test \"$o\" = \"5 10 22\"' "
+        "--out %s/sp-buildok --par 4 --max 10 --deadline-s 30 2>&1", T, T, T);
+    rc = ckk_sh_t("check-mutation-gate", sc, out, sizeof out, 35);
+    ck(rc == 0 && ckk_has(out, sizeof out, "MUTATION_DIFF scope=product hunks=1 mutants=5 killed=5 survived=0 not_live=0 adjudicated=0 verdict=PASS"),
+       "scope-product-build-passes");
+    if (rc != 0) printf("%.1200s\n", out);
+
+    /* timeout (rc 124) must NOT count as killed or cov-killed; counts as not_live and fails */
+    cx_fmt(sc, sizeof sc,
+        "sh ./unisacc.com tools/mutation-gate.cx -- run --scope product --coverage-check "
+        "--build 'sh ./unisacc.com src/prod.cx tools/caller.cx -o .caller' "
+        "--repo %s/repo3 --base base --patch %s/prod.patch "
+        "--check 'o=$(./.caller); test \"$o\" = \"5 10 22\" && exit 0; exec timeout 0.1 sleep 1' "
+        "--out %s/sp-timeout --par 4 --max 10 --deadline-s 30 2>&1", T, T, T);
+    rc = ckk_sh_t("check-mutation-gate", sc, out, sizeof out, 35);
+    ck(rc == 1 && ckk_has(out, sizeof out, "MUTATION_DIFF scope=product hunks=1 mutants=5 killed=0 survived=0 not_live=6 adjudicated=0 verdict=FAIL"),
+       "scope-product-timeout-not-live");
+    if (rc != 1) printf("%.1200s\n", out);
+
+    /* REFUSE / exit 2 must NOT count as killed or cov-killed; counts as not_live and fails */
+    cx_fmt(sc, sizeof sc,
+        "sh ./unisacc.com tools/mutation-gate.cx -- run --scope product --coverage-check "
+        "--build 'sh ./unisacc.com src/prod.cx tools/caller.cx -o .caller' "
+        "--repo %s/repo3 --base base --patch %s/prod.patch "
+        "--check 'o=$(./.caller); if test \"$o\" = \"5 10 22\"; then exit 0; fi; printf \"REFUSE setup\\n\"; exit 2' "
+        "--out %s/sp-infra --par 4 --max 10 --deadline-s 30 2>&1", T, T, T);
+    rc = ckk_sh_t("check-mutation-gate", sc, out, sizeof out, 35);
+    ck(rc == 1 && ckk_has(out, sizeof out, "MUTATION_DIFF scope=product hunks=1 mutants=5 killed=0 survived=0 not_live=6 adjudicated=0 verdict=FAIL"),
+       "scope-product-infra-exit-not-live");
+    if (rc != 1) printf("%.1200s\n", out);
+
+    /* mid-run --build failure keeps planned mutants=5 denominator and reports not_live=1 FAIL */
+    cx_fmt(sc, sizeof sc,
+        "sh ./unisacc.com tools/mutation-gate.cx -- run --scope product --coverage-check "
+        "--build 'if grep -q \"11\" src/prod.cx; then exit 1; fi; sh ./unisacc.com src/prod.cx tools/caller.cx -o .caller' "
+        "--repo %s/repo3 --base base --patch %s/prod.patch "
+        "--check 'o=$(./.caller) && test \"$o\" = \"5 10 22\"' "
+        "--out %s/sp-buildfail --par 4 --max 10 --deadline-s 30 2>&1", T, T, T);
+    rc = ckk_sh_t("check-mutation-gate", sc, out, sizeof out, 35);
+    ck(rc == 1 && ckk_has(out, sizeof out, "MUTATION_DIFF scope=product hunks=1 mutants=5 killed=4 survived=0 not_live=1 adjudicated=0 verdict=FAIL"),
+       "scope-product-build-fail-keeps-denominator");
+    if (rc != 1) printf("%.1200s\n", out);
+}
+
 int main(int argc, char **argv) {
     static char out[65536], sc[8192]; int rc;
     if (argc == 2 && !strcmp(argv[1], "--execution-fixture")) {
@@ -481,6 +609,7 @@ int main(int argc, char **argv) {
 
     ck(quality_fixture(0) == 0, "quality-fixture-ready");
     execution_fixture();
+    scope_product_fixture();
     cx_fmt(sc, sizeof sc, "rm -rf -- '%s'", T); ckk_sh_t("check-mutation-gate", sc, 0, 0, 20);
     printf("CHECK_MUTATION_GATE\tok=%d\tfailed=%d\n", ok, failed);
     return failed ? 1 : 0;
