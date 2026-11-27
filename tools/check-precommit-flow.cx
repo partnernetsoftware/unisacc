@@ -63,6 +63,26 @@ static void pcline(const char *o, char *dst, int cap) {   /* the PRECOMMIT line,
     dst[n] = 0;
 }
 
+static void norm_pc_msg(const char *src, long slen, char *dst, size_t cap) {
+    long i = 0; size_t w = 0;
+    if (!dst || cap < 1) return;
+    while (i < slen && w + 1 < cap) {
+        if (i + 3 < slen && !memcmp(src + i, "ms=", 3) &&
+            (i == 0 || src[i - 1] == ' ' || src[i - 1] == '\t' || src[i - 1] == '_' || src[i - 1] == '\n') &&
+            src[i + 3] >= '0' && src[i + 3] <= '9') {
+            long j = i + 3;
+            while (j < slen && src[j] >= '0' && src[j] <= '9') j++;
+            if (j == slen || src[j] == ' ' || src[j] == '\t' || src[j] == '\r' || src[j] == '\n') {
+                if (w + 4 < cap) { memcpy(dst + w, "ms=0", 4); w += 4; }
+                i = j;
+                continue;
+            }
+        }
+        dst[w++] = src[i++];
+    }
+    dst[w] = 0;
+}
+
 static int one(const char *s, const char *tag) {
     static char o1[1 << 15]; char c[3000], l1[200], l2[200]; const char *add; int r1, r2, missing = 0, exp_b, exp_rc, reg = 0;
     if (!strcmp(s, "pass")) { add = "/* zz */"; exp_b = 0; }
@@ -115,11 +135,16 @@ static int one(const char *s, const char *tag) {
         ck(r2 == r1 && !strcmp(l1, l2) && l2[0], s, "flow-same-line-and-rc");
         if (reg) ck(strstr(out, "FLOWPC\tnodes=") != 0 && !strstr(out, "flow path unusable") && !strstr(o1, "FLOWPC"), s, "hook-call-took-flow-serial-did-not");
         if (reg) ck(strstr(out, "FLOWPC_NODES\ttop=") != 0 && strstr(out, "\tsum_ms=") != 0 && strstr(out, "\tpacked_ms=") != 0, s, "flow-reports-slowest-nodes"); }
-    {   char *p = o1;   /* every precommit: line of the original appears in the flow output */
+    {   char *p = o1; static char nout[1 << 15];
+        norm_pc_msg(out, (long)strlen(out), nout, sizeof nout);
+        /* every precommit: line of the original (normalising ms=/prewarm_ms= and skipping serial-only PREWARM) appears in flow output */
         while ((p = strstr(p, "precommit: "))) {
-            char ln[1200]; int n = 0;
+            char ln[1200], nln[1200]; int n = 0;
             while (p[n] && p[n] != '\n' && n < (int)sizeof ln - 1) { ln[n] = p[n]; n++; }
-            ln[n] = 0; if (!strstr(out, ln)) missing++;
+            ln[n] = 0;
+            if (!strncmp(ln, "precommit: AFFECTED_CANARY_PREWARM ", 35)) { p += n; continue; }
+            norm_pc_msg(ln, n, nln, sizeof nln);
+            if (!strstr(nout, nln)) missing++;
             p += n;
         }
         ck(missing == 0, s, "flow-same-messages"); }
