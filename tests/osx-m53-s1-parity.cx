@@ -213,21 +213,39 @@ static int compute_vectors_sha(char out[65]) {
     return out[0] ? 0 : 1;
 }
 
-/* Composite inputs_sha covering job.tsv + native baseline + executed slice + vectors. */
-static int compute_inputs_bundle_sha(const char *slice_path,
-                                     char job_sha[65], char base_sha[65],
-                                     char slice_sha[65], char vec_sha[65],
-                                     char bundle_sha[65]) {
+/* Composite inputs_sha covering job.tsv + native baseline + exact slice bytes + vectors. */
+static int compute_inputs_bundle_sha_mem(const unsigned char *sl, int64_t slen,
+                                         char job_sha[65], char base_sha[65],
+                                         char slice_sha[65], char vec_sha[65],
+                                         char bundle_sha[65]) {
     char manifest[512];
+    if (!sl || slen <= 0) return 1;
     if (file_sha256_hex(JOB, job_sha, 1 << 20) != 0) return 1;
     if (file_sha256_hex(BASELINE, base_sha, 4 << 20) != 0) return 1;
-    if (file_sha256_hex(slice_path, slice_sha, 8 << 20) != 0) return 1;
+    sy_sha256_hex(sl, slen, slice_sha);
+    if (!slice_sha[0]) return 1;
     if (compute_vectors_sha(vec_sha) != 0) return 1;
     if (cx_fmt(manifest, sizeof manifest,
                "job\t%s\nbaseline\t%s\nslice\t%s\nvectors\t%s\n",
                job_sha, base_sha, slice_sha, vec_sha) != 0) return 1;
     sy_sha256_hex((const unsigned char *)manifest, (int64_t)strlen(manifest), bundle_sha);
     return bundle_sha[0] ? 0 : 1;
+}
+
+static int compute_inputs_bundle_sha_file(const char *slice_path,
+                                          char job_sha[65], char base_sha[65],
+                                          char slice_sha[65], char vec_sha[65],
+                                          char bundle_sha[65]) {
+    unsigned char *sl = 0;
+    int64_t slen = 0;
+    int rc;
+    if (sy_read_file(slice_path, &sl, &slen, 8 << 20) != 0 || !sl) {
+        if (sl) mm_free(sl);
+        return 1;
+    }
+    rc = compute_inputs_bundle_sha_mem(sl, slen, job_sha, base_sha, slice_sha, vec_sha, bundle_sha);
+    mm_free(sl);
+    return rc;
 }
 
 static int job_row_ok(const char *target) {
@@ -303,7 +321,7 @@ static int do_judge(const char *rcpt_p, const char *out_p, const char *slice_p,
     int rrc;
     if (validate_candidate_binary(cand_file) != 0) return 2;
     if (file_sha256_hex(cand_file, cand_sha, 128 << 20) != 0) { sy_eprintf("FAIL\tcandidate-sha\n"); return 1; }
-    if (compute_inputs_bundle_sha(slice_p, job_sha, base_sha, slice_sha, vec_sha, in_sha) != 0) {
+    if (compute_inputs_bundle_sha_file(slice_p, job_sha, base_sha, slice_sha, vec_sha, in_sha) != 0) {
         sy_eprintf("FAIL\tinputs-bundle-sha\n");
         return 1;
     }
@@ -375,7 +393,7 @@ int main(int argc, char **argv) {
 
     /* Compile real product cx/runtime/stream_attributes.cx (cxsa_valid) into M53S1BIN2 slice using cand_file */
     {
-        char tmp[512], wcx[600], wtape[600];
+        char tmp[512], wcx[600], wtape[600], wsl[600];
         const char *wsrc =
             "#pragma unisa use runtime.stream_attributes\n"
             "int main(int argc, char **argv) {\n"
@@ -401,10 +419,11 @@ int main(int argc, char **argv) {
         }
         cx_fmt(wcx, sizeof wcx, "%s/m53_wrap.cx", tmp);
         cx_fmt(wtape, sizeof wtape, "%s/m53_wrap.tape", tmp);
+        cx_fmt(wsl, sizeof wsl, "%s/m53_bin2.tapeslice", tmp);
         (void)sy_write_file(wcx, (const unsigned char *)wsrc, (long)strlen(wsrc), 0600);
         {
             char *av1[] = {"sh", (char *)cand_file, "--target", "lnx/x86_64", "-S", wcx, "-o", wtape, 0};
-            char *av2[] = {"sh", (char *)cand_file, "tools/tapepack.cx", "--", wtape, "-o", (char *)slice_p, 0};
+            char *av2[] = {"sh", (char *)cand_file, "tools/tapepack.cx", "--", wtape, "-o", wsl, 0};
             pr_result r1, r2;
             int t1 = pr_run("emit-m53", av1, ".", 0, 40, &r1);
             int rc1 = t1 ? -1 : r1.rc;
@@ -415,18 +434,20 @@ int main(int argc, char **argv) {
                 rc2 = t2 ? -1 : r2.rc;
                 pr_free(&r2);
             }
-            if (rc1 != 0 || rc2 != 0 || sy_read_file(slice_p, &sl, &slen, 8 << 20) != 0 || !sl) {
+            if (rc1 != 0 || rc2 != 0 || sy_read_file(wsl, &sl, &slen, 8 << 20) != 0 || !sl) {
                 (void)sy_remove_all(tmp);
                 mm_free(out_buf);
                 sy_eprintf("FAIL\tbuild-m53-slice\n");
                 return 1;
             }
         }
-        if (compute_inputs_bundle_sha(slice_p, job_sha, base_sha, slice_sha, vec_sha, in_sha) != 0) {
+        /* Hash the exact in-memory slice snapshot (sl/slen) that will be executed and persist it to slice_p. */
+        if (compute_inputs_bundle_sha_mem(sl, slen, job_sha, base_sha, slice_sha, vec_sha, in_sha) != 0 ||
+            sy_write_file(slice_p, sl, (long)slen, 0644) != 0) {
             mm_free(sl);
             (void)sy_remove_all(tmp);
             mm_free(out_buf);
-            sy_eprintf("FAIL\thash-inputs-bundle\n");
+            sy_eprintf("FAIL\thash-or-write-slice-snapshot\n");
             return 1;
         }
 

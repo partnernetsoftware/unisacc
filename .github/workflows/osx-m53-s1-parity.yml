@@ -7,11 +7,15 @@ on:
         required: true
         type: string
       candidate_url:
-        description: Download URL of the v0.1.9 private-chain unisacc.com candidate APE
+        description: HTTPS download URL of the v0.1.9 private-chain unisacc.com candidate APE
         required: true
         type: string
       candidate_sha256:
         description: Expected 64-hex lowercase sha256 of the v0.1.9 private-chain candidate APE
+        required: true
+        type: string
+      candidate_receipt_url:
+        description: HTTPS URL of the trusted chain candidate receipt (PROMOTE_CHECK / candidate.tsv with rev and ape_sha)
         required: true
         type: string
 permissions:
@@ -32,19 +36,25 @@ jobs:
       - uses: actions/checkout@v4
         with:
           ref: ${{ inputs.source_commit }}
-      - name: Verify HEAD commit and download + hash private-chain candidate APE
+      - name: Verify HEAD commit, trusted chain candidate receipt, and download + hash private-chain candidate APE
         env:
           SOURCE_COMMIT: ${{ inputs.source_commit }}
           CANDIDATE_URL: ${{ inputs.candidate_url }}
           CANDIDATE_SHA256: ${{ inputs.candidate_sha256 }}
+          CANDIDATE_RECEIPT_URL: ${{ inputs.candidate_receipt_url }}
         run: |
           set -eu
+          mkdir -p osx-m53-s1-evidence
           printf '%s' "$SOURCE_COMMIT" | grep -Eq '^[0-9a-f]{40}$'
           printf '%s' "$CANDIDATE_SHA256" | grep -Eq '^[0-9a-f]{64}$'
-          test -n "$CANDIDATE_URL"
+          printf '%s' "$CANDIDATE_URL" | grep -Eq '^https://'
+          printf '%s' "$CANDIDATE_RECEIPT_URL" | grep -Eq '^https://'
           HEAD_SHA="$(git rev-parse HEAD)"
           test "$HEAD_SHA" = "$SOURCE_COMMIT"
-          curl -fsSL "$CANDIDATE_URL" -o ./candidate-unisacc.com
+          curl -fsSL -o osx-m53-s1-evidence/candidate-chain.rcpt -- "$CANDIDATE_RECEIPT_URL"
+          grep -Eq "(^|[[:space:]])rev[=[:space:]]+${SOURCE_COMMIT}([[:space:]]|$)" osx-m53-s1-evidence/candidate-chain.rcpt
+          grep -Eq "(^|[[:space:]])ape_sha[=[:space:]]+${CANDIDATE_SHA256}([[:space:]]|$)" osx-m53-s1-evidence/candidate-chain.rcpt
+          curl -fsSL -o ./candidate-unisacc.com -- "$CANDIDATE_URL"
           chmod +x ./candidate-unisacc.com
           GOT_SHA="$(shasum -a 256 ./candidate-unisacc.com | awk '{print $1}')"
           test "$GOT_SHA" = "$CANDIDATE_SHA256"
@@ -91,4 +101,5 @@ jobs:
             osx-m53-s1-evidence/m53-s1.out
             osx-m53-s1-evidence/m53_bin2.tapeslice
             osx-m53-s1-evidence/locators.tsv
+            osx-m53-s1-evidence/candidate-chain.rcpt
           if-no-files-found: error
