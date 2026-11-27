@@ -1,0 +1,494 @@
+/* tools/tapelink-proto.cx -- Static linker prototype for N UTAPEBIN v1.3 slices -> 1 standard v1.3 image.
+ *
+ *   sh ./unisacc.com tools/tapelink-proto.cx -- -o OUT.tapeslice SLICE1.tapeslice SLICE2.tapeslice [...]
+ *   sh ./unisacc.com tools/tapelink-proto.cx -- --check
+ *
+ * Merges CODE, DATA (8B-aligned), BSSZ, SYMS, RELO, and HOST (dedup ascending 0..36) into a single
+ * standard UTAPEBIN v1.3 container executable by unmodified tools/tape/asm/tape_x86_64.S:
+ *   - Resolves cross-slice imports (SYMS kind==3, name format "sym@abihash" or bare "sym") by exact
+ *     symbol name + ABI hash against exported SYMS (kind==1|2) across all input slices;
+ *   - Lowers cross-slice RELO kind==4 (addend = importing slice's SYMS row index) in place into
+ *     fixed-width LEB128 final CODE offsets and emits standard RELO kind==0 (compatible with
+ *     tape_x86_64.S:691 callr verification);
+ *   - --check runs 1 positive + 3 red-first refusal cases (forged import name, ABI hash mismatch,
+ *     missing slice) in $TMPDIR; runtime on tapemode-run stays UNMEASURED until a machine slot.
+ * Exit: 0 ok, 1 refused, 2 usage/io. */
+#pragma unisa use sys.fs
+#pragma unisa use sys.io
+#pragma unisa use sys.env
+#pragma unisa use sys.posix
+#pragma unisa use sys.sha
+#pragma unisa use text.text
+#pragma unisa use text.fmt
+#pragma unisa use mem.heap
+#pragma unisa use mem.bytes
+
+#define TL_MAX_SLICES 16
+#define TL_MAX_EXPORTS 512
+#define TL_HOST_SLOTS 37
+#define TL_HDR_TOTAL 208
+
+typedef struct {
+    unsigned char *buf;
+    long len, cap;
+} TlBuf;
+
+typedef struct {
+    unsigned char *raw;
+    long raw_len;
+    unsigned int entry_off, origin;
+    unsigned long long off[6], len[6], cnt[6]; /* 0=CODE 1=DATA 2=BSSZ 3=SYMS 4=RELO 5=HOST */
+    unsigned long long bss_size;
+    unsigned long long code_base, data_base, bss_base;
+} TlSlice;
+
+typedef struct {
+    char name[128];
+    char abi[64];
+    int slice_idx;
+    unsigned long long final_code_off;
+} TlExport;
+
+static const char *const TL_TAGS[6] = {"CODE", "DATA", "BSSZ", "SYMS", "RELO", "HOST"};
+static char tl_last_reason[64];
+static char tl_last_detail[256];
+
+static unsigned long long tl_rd_u(const unsigned char *p, int k) {
+    unsigned long long v = 0;
+    for (int i = k - 1; i >= 0; i--) v = (v << 8) | (unsigned long long)p[i];
+    return v;
+}
+static int tl_rd_i32(const unsigned char *p) {
+    unsigned int u = (unsigned int)tl_rd_u(p, 4);
+    return (int)u;
+}
+static void tl_wr_u(unsigned char *p, int k, unsigned long long v) {
+    for (int i = 0; i < k; i++) p[i] = (unsigned char)((v >> (8 * i)) & 255ULL);
+}
+static void tl_buf_init(TlBuf *b, long cap) {
+    b->cap = cap < 256 ? 256 : cap;
+    b->buf = (unsigned char *)mm_alloc(b->cap);
+    b->len = 0;
+}
+static void tl_buf_free(TlBuf *b) {
+    if (b->buf) { mm_free(b->buf); b->buf = 0; }
+    b->len = 0; b->cap = 0;
+}
+static int tl_buf_need(TlBuf *b, long add) {
+    if (b->len + add <= b->cap) return 0;
+    long ncap = b->cap * 2;
+    while (ncap < b->len + add) ncap *= 2;
+    unsigned char *nb = (unsigned char *)mm_alloc(ncap);
+    if (!nb) return -1;
+    if (b->len > 0) mm_copy(nb, ncap, b->buf, b->len);
+    mm_free(b->buf);
+    b->buf = nb; b->cap = ncap;
+    return 0;
+}
+static int tl_buf_push(TlBuf *b, const void *src, long n) {
+    if (n <= 0) return 0;
+    if (tl_buf_need(b, n)) return -1;
+    mm_copy(b->buf + b->len, b->cap - b->len, src, n);
+    b->len += n;
+    return 0;
+}
+static int tl_buf_push_u(TlBuf *b, int k, unsigned long long v) {
+    unsigned char t[8];
+    tl_wr_u(t, k, v);
+    return tl_buf_push(b, t, k);
+}
+static int tl_buf_align8(TlBuf *b) {
+    long pad = (8 - (b->len & 7)) & 7;
+    unsigned char z[8] = {0, 0, 0, 0, 0, 0, 0, 0};
+    return pad ? tl_buf_push(b, z, pad) : 0;
+}
+static int tl_refuse(const char *reason, const char *detail) {
+    (void)cx_fmt(tl_last_reason, sizeof tl_last_reason, "%s", reason ? reason : "error");
+    (void)cx_fmt(tl_last_detail, sizeof tl_last_detail, "%s", detail ? detail : "-");
+    sy_eprintf("TAPELINK_REFUSE\treason=%s\tdetail=%s\n", tl_last_reason, tl_last_detail);
+    return 1;
+}
+static int tl_sha_ident(const unsigned char *buf, long len, unsigned char dig[32]) {
+    unsigned char *tmp = (unsigned char *)mm_alloc(len);
+    if (!tmp) return -1;
+    mm_copy(tmp, len, buf, len);
+    for (int i = 0; i < 32; i++) tmp[28 + i] = 0;
+    cx_sha256(tmp, (size_t)len, dig);
+    mm_free(tmp);
+    return 0;
+}
+/* Split "sym@abihash" into name and abi (empty abi when no '@'). */
+static void tl_split_sym(const char *full, char *name, long ncap, char *abi, long acap) {
+    long len = tx_len(full, 190), at = -1;
+    for (long i = 0; i < len; i++) if (full[i] == '@') { at = i; break; }
+    if (at < 0) {
+        (void)tx_copy(name, ncap, full, len);
+        abi[0] = 0;
+    } else {
+        (void)tx_copy(name, ncap, full, at);
+        (void)tx_copy(abi, acap, full + at + 1, len - at - 1);
+    }
+}
+/* Encode unsigned value into exact WIDTH bytes of ULEB128 (preserves CODE offsets & ibitmap). */
+static int tl_patch_uleb_fixed(unsigned char *dst, int width, unsigned long long val) {
+    if (width < 1 || width > 10) return -1;
+    for (int i = 0; i < width; i++) {
+        unsigned char byte = (unsigned char)(val & 127ULL);
+        val >>= 7;
+        if (i + 1 < width) byte |= 128U;
+        dst[i] = byte;
+    }
+    return val == 0ULL ? 0 : -1;
+}
+/* Validate & parse one UTAPEBIN v1.3 slice (matching tools/tapepack.cx & stream_s1.cx:213-305). */
+static int tl_parse_slice(const char *path, TlSlice *sl) {
+    size_t n = 0;
+    unsigned char dig[32];
+    unsigned long long prev_end = TL_HDR_TOTAL;
+    mm_fill(sl, (long)sizeof *sl, 0, (long)sizeof *sl);
+    if (sy_exists(path) != 1) return tl_refuse("missing-slice", path);
+    sl->raw = (unsigned char *)cx_read(path, &n);
+    if (!sl->raw || (long)n < 216) return tl_refuse("slice-unreadable-or-short", path);
+    sl->raw_len = (long)n;
+    if (!tx_same((const char *)sl->raw, 8, "UTAPEBIN", 8)) return tl_refuse("bad-magic", path);
+    if (tl_rd_u(sl->raw + 8, 2) != 1 || tl_rd_u(sl->raw + 10, 2) != 3 ||
+        tl_rd_u(sl->raw + 12, 2) != 1 || tl_rd_u(sl->raw + 14, 2) != 0) return tl_refuse("bad-version", path);
+    sl->entry_off = (unsigned int)tl_rd_u(sl->raw + 16, 4);
+    if (tl_rd_u(sl->raw + 20, 4) != 6 || tl_rd_u(sl->raw + 24, 4) != 64) return tl_refuse("bad-dir", path);
+    sl->origin = (unsigned int)tl_rd_u(sl->raw + 60, 4);
+    if (sl->origin > 6) return tl_refuse("bad-origin", path);
+    for (int i = 0; i < 6; i++) {
+        int d = 64 + 24 * i;
+        if (!tx_same((const char *)(sl->raw + d), 4, TL_TAGS[i], 4)) return tl_refuse("bad-sect-tag", path);
+        sl->off[i] = tl_rd_u(sl->raw + d + 4, 8);
+        sl->len[i] = tl_rd_u(sl->raw + d + 12, 8);
+        sl->cnt[i] = tl_rd_u(sl->raw + d + 20, 4);
+        unsigned long long aligned = prev_end + ((8ULL - (prev_end & 7ULL)) & 7ULL);
+        if (sl->off[i] != aligned || sl->off[i] > (unsigned long long)sl->raw_len ||
+            sl->len[i] > (unsigned long long)sl->raw_len - sl->off[i]) return tl_refuse("bad-sect-bounds", path);
+        while (prev_end < sl->off[i]) { if (sl->raw[prev_end++] != 0) return tl_refuse("nonzero-align-pad", path); }
+        prev_end = sl->off[i] + sl->len[i];
+    }
+    if (prev_end != (unsigned long long)sl->raw_len) return tl_refuse("trailing-bytes", path);
+    if (sl->len[2] != 8 || sl->cnt[2] != 1) return tl_refuse("bad-bssz", path);
+    sl->bss_size = tl_rd_u(sl->raw + sl->off[2], 8);
+    if ((sl->len[3] & 15ULL) != 0 || sl->cnt[3] != (sl->len[3] >> 4)) return tl_refuse("bad-syms", path);
+    if ((sl->len[4] & 15ULL) != 0 || sl->cnt[4] != (sl->len[4] >> 4)) return tl_refuse("bad-relo", path);
+    if (tl_sha_ident(sl->raw, sl->raw_len, dig)) return tl_refuse("oom", path);
+    for (int i = 0; i < 32; i++) if (dig[i] != sl->raw[28 + i]) return tl_refuse("ident-sha-mismatch", path);
+    return 0;
+}
+
+static int tl_link(int nslices, const char **paths, const char *out_path) {
+    static TlSlice sl[TL_MAX_SLICES];
+    static TlExport exps[TL_MAX_EXPORTS];
+    static unsigned char host_seen[TL_HOST_SLOTS];
+    static char host_names[TL_HOST_SLOTS][40];
+    int nexp = 0, rc = 0;
+    unsigned long long cur_code = 0, cur_data = 0, cur_bss = 0;
+    TlBuf code, data, syms, relo, host, out;
+    if (nslices < 1 || nslices > TL_MAX_SLICES) return tl_refuse("slice-count", out_path);
+    mm_fill(sl, (long)sizeof sl, 0, (long)sizeof sl);
+    mm_fill(host_seen, (long)sizeof host_seen, 0, (long)sizeof host_seen);
+    tl_buf_init(&code, 1024); tl_buf_init(&data, 1024); tl_buf_init(&syms, 512);
+    tl_buf_init(&relo, 512); tl_buf_init(&host, 256); tl_buf_init(&out, 4096);
+
+    /* 1. Parse all slices & assign merged CODE / DATA / BSS bases. */
+    for (int s = 0; s < nslices; s++) {
+        if (tl_parse_slice(paths[s], &sl[s]) != 0) { rc = 1; goto cleanup; }
+        sl[s].code_base = cur_code;
+        cur_code += sl[s].len[0];
+        cur_data = (cur_data + 7ULL) & ~7ULL;
+        sl[s].data_base = cur_data;
+        cur_data += sl[s].len[1];
+        cur_bss = (cur_bss + 7ULL) & ~7ULL;
+        sl[s].bss_base = cur_bss;
+        cur_bss += sl[s].bss_size;
+    }
+
+    /* 2. Collect exported SYMS (kind==1 or 2) and merge HOST slots. */
+    for (int s = 0; s < nslices; s++) {
+        unsigned long long scnt = sl[s].cnt[3];
+        for (unsigned long long r = 0; r < scnt; r++) {
+            const unsigned char *row = sl[s].raw + sl[s].off[3] + (r << 4);
+            unsigned long long noff = tl_rd_u(row, 4);
+            unsigned char sect = row[4], kind = row[5];
+            unsigned long long val = tl_rd_u(row + 8, 8);
+            if (noff >= sl[s].len[1]) { rc = tl_refuse("bad-sym-name-off", paths[s]); goto cleanup; }
+            const char *full = (const char *)(sl[s].raw + sl[s].off[1] + noff);
+            if (kind == 1 || kind == 2) {
+                char nm[128], ab[64];
+                tl_split_sym(full, nm, sizeof nm, ab, sizeof ab);
+                if (sect == 0 && !tx_eqz(nm, "_start") && !tx_eqz(nm, "main")) {
+                    for (int e = 0; e < nexp; e++) {
+                        if (tx_eqz(exps[e].name, nm)) { rc = tl_refuse("dup-export", nm); goto cleanup; }
+                    }
+                    if (nexp >= TL_MAX_EXPORTS) { rc = tl_refuse("export-cap", nm); goto cleanup; }
+                    (void)tx_copy(exps[nexp].name, sizeof exps[nexp].name, nm, tx_len(nm, 127));
+                    (void)tx_copy(exps[nexp].abi, sizeof exps[nexp].abi, ab, tx_len(ab, 63));
+                    exps[nexp].slice_idx = s;
+                    exps[nexp].final_code_off = sl[s].code_base + val;
+                    nexp++;
+                }
+            }
+        }
+        /* Merge HOST slots */
+        unsigned long long hpos = 0;
+        for (unsigned long long r = 0; r < sl[s].cnt[5]; r++) {
+            const unsigned char *hp = sl[s].raw + sl[s].off[5] + hpos;
+            if (sl[s].len[5] - hpos < 4) { rc = tl_refuse("bad-host", paths[s]); goto cleanup; }
+            unsigned long long slot = tl_rd_u(hp, 2), nlen = tl_rd_u(hp + 2, 2);
+            hpos += 4;
+            if (slot >= TL_HOST_SLOTS || nlen > sl[s].len[5] - hpos || nlen >= 40) { rc = tl_refuse("bad-host-slot", paths[s]); goto cleanup; }
+            if (!host_seen[slot]) {
+                host_seen[slot] = 1;
+                mm_copy(host_names[slot], 40, sl[s].raw + sl[s].off[5] + hpos, (long)nlen);
+                host_names[slot][nlen] = 0;
+            }
+            hpos += nlen;
+        }
+    }
+
+    /* 3. Concatenate CODE, DATA, SYMS (exported/defined only). */
+    for (int s = 0; s < nslices; s++) {
+        if (tl_buf_push(&code, sl[s].raw + sl[s].off[0], (long)sl[s].len[0])) { rc = tl_refuse("oom", "code"); goto cleanup; }
+        if (tl_buf_align8(&data) || tl_buf_push(&data, sl[s].raw + sl[s].off[1], (long)sl[s].len[1])) { rc = tl_refuse("oom", "data"); goto cleanup; }
+        for (unsigned long long r = 0; r < sl[s].cnt[3]; r++) {
+            const unsigned char *row = sl[s].raw + sl[s].off[3] + (r << 4);
+            unsigned long long noff = tl_rd_u(row, 4);
+            unsigned char sect = row[4], kind = row[5];
+            unsigned long long val = tl_rd_u(row + 8, 8);
+            if (kind == 3) continue; /* resolved imports dropped from output SYMS */
+            unsigned long long nval = (sect == 0) ? (sl[s].code_base + val) : (sect == 1 ? sl[s].data_base + val : sl[s].bss_base + val);
+            if (tl_buf_push_u(&syms, 4, sl[s].data_base + noff) || tl_buf_push_u(&syms, 1, sect) ||
+                tl_buf_push_u(&syms, 1, kind) || tl_buf_push_u(&syms, 2, 0) || tl_buf_push_u(&syms, 8, nval)) {
+                rc = tl_refuse("oom", "syms"); goto cleanup;
+            }
+        }
+    }
+
+    /* 4. Apply relocations & lower cross-slice RELO kind 4 -> final CODE offset + kind 0. */
+    for (int s = 0; s < nslices; s++) {
+        for (unsigned long long r = 0; r < sl[s].cnt[4]; r++) {
+            const unsigned char *row = sl[s].raw + sl[s].off[4] + (r << 4);
+            unsigned long long rpos = tl_rd_u(row, 8);
+            unsigned char rkind = row[8], rwid = row[9];
+            int radd = tl_rd_i32(row + 12);
+            unsigned long long gpos = sl[s].code_base + rpos;
+            if (rwid < 1 || rwid > 10 || gpos + (unsigned long long)rwid > (unsigned long long)code.len) {
+                rc = tl_refuse("bad-relo-bounds", paths[s]); goto cleanup;
+            }
+            unsigned char out_kind = rkind;
+            int out_add = radd;
+            if (rkind == 0) {
+                unsigned long long nv = sl[s].code_base + (unsigned long long)(long long)radd;
+                if (tl_patch_uleb_fixed(code.buf + gpos, (int)rwid, nv)) { rc = tl_refuse("relo-width-overflow", "code"); goto cleanup; }
+                out_add = (int)nv;
+            } else if (rkind == 1) {
+                unsigned long long nv = sl[s].data_base + (unsigned long long)(long long)radd;
+                if (tl_patch_uleb_fixed(code.buf + gpos, (int)rwid, nv)) { rc = tl_refuse("relo-width-overflow", "data"); goto cleanup; }
+                out_add = (int)nv;
+            } else if (rkind == 2) {
+                unsigned long long nv = sl[s].bss_base + (unsigned long long)(long long)radd;
+                if (tl_patch_uleb_fixed(code.buf + gpos, (int)rwid, nv)) { rc = tl_refuse("relo-width-overflow", "bss"); goto cleanup; }
+                out_add = (int)nv;
+            } else if (rkind == 4) {
+                /* Cross-slice import: radd is importing slice's SYMS row index (kind==3). */
+                if (radd < 0 || (unsigned long long)radd >= sl[s].cnt[3]) { rc = tl_refuse("bad-import-sym-idx", paths[s]); goto cleanup; }
+                const unsigned char *srow = sl[s].raw + sl[s].off[3] + ((unsigned long long)radd << 4);
+                unsigned long long noff = tl_rd_u(srow, 4);
+                if (srow[5] != 3 || noff >= sl[s].len[1]) { rc = tl_refuse("bad-import-sym-row", paths[s]); goto cleanup; }
+                const char *full = (const char *)(sl[s].raw + sl[s].off[1] + noff);
+                char nm[128], ab[64];
+                tl_split_sym(full, nm, sizeof nm, ab, sizeof ab);
+                int hit = -1;
+                for (int e = 0; e < nexp; e++) {
+                    if (tx_eqz(exps[e].name, nm)) { hit = e; break; }
+                }
+                if (hit < 0) { rc = tl_refuse("unresolved-import", nm); goto cleanup; }
+                if (!tx_eqz(exps[hit].abi, ab)) { rc = tl_refuse("abi-hash-mismatch", nm); goto cleanup; }
+                unsigned long long nv = exps[hit].final_code_off;
+                if (tl_patch_uleb_fixed(code.buf + gpos, (int)rwid, nv)) { rc = tl_refuse("relo-width-overflow", nm); goto cleanup; }
+                out_kind = 0; /* lowered to standard CODE relo for tape_x86_64.S:691 */
+                out_add = (int)nv;
+            } else if (rkind != 3) {
+                rc = tl_refuse("unknown-relo-kind", paths[s]); goto cleanup;
+            }
+            if (tl_buf_push_u(&relo, 8, gpos) || tl_buf_push_u(&relo, 1, out_kind) ||
+                tl_buf_push_u(&relo, 1, rwid) || tl_buf_push_u(&relo, 2, 0) ||
+                tl_buf_push_u(&relo, 4, (unsigned long long)(unsigned int)out_add)) {
+                rc = tl_refuse("oom", "relo"); goto cleanup;
+            }
+        }
+    }
+
+    /* 5. Build canonical ascending HOST section & assemble final UTAPEBIN v1.3. */
+    unsigned long long hcnt = 0;
+    for (int i = 0; i < TL_HOST_SLOTS; i++) {
+        if (!host_seen[i]) continue;
+        long nl = tx_len(host_names[i], 39);
+        if (tl_buf_push_u(&host, 2, (unsigned long long)i) || tl_buf_push_u(&host, 2, (unsigned long long)nl) ||
+            tl_buf_push(&host, host_names[i], nl)) { rc = tl_refuse("oom", "host"); goto cleanup; }
+        hcnt++;
+    }
+    unsigned char hdrz[TL_HDR_TOTAL];
+    mm_fill(hdrz, TL_HDR_TOTAL, 0, TL_HDR_TOTAL);
+    if (tl_buf_push(&out, hdrz, TL_HDR_TOTAL)) { rc = tl_refuse("oom", "hdr"); goto cleanup; }
+    unsigned long long offs[6], lens[6], cnts[6];
+    tl_buf_align8(&out); offs[0] = (unsigned long long)out.len; lens[0] = (unsigned long long)code.len; cnts[0] = 0;
+    for (int s = 0; s < nslices; s++) cnts[0] += sl[s].cnt[0];
+    tl_buf_push(&out, code.buf, code.len);
+    tl_buf_align8(&out); offs[1] = (unsigned long long)out.len; lens[1] = (unsigned long long)data.len; cnts[1] = 0;
+    for (int s = 0; s < nslices; s++) cnts[1] += sl[s].cnt[1];
+    tl_buf_push(&out, data.buf, data.len);
+    tl_buf_align8(&out); offs[2] = (unsigned long long)out.len; lens[2] = 8; cnts[2] = 1;
+    tl_buf_push_u(&out, 8, cur_bss);
+    tl_buf_align8(&out); offs[3] = (unsigned long long)out.len; lens[3] = (unsigned long long)syms.len; cnts[3] = (unsigned long long)(syms.len / 16);
+    tl_buf_push(&out, syms.buf, syms.len);
+    tl_buf_align8(&out); offs[4] = (unsigned long long)out.len; lens[4] = (unsigned long long)relo.len; cnts[4] = (unsigned long long)(relo.len / 16);
+    tl_buf_push(&out, relo.buf, relo.len);
+    tl_buf_align8(&out); offs[5] = (unsigned long long)out.len; lens[5] = (unsigned long long)host.len; cnts[5] = hcnt;
+    tl_buf_push(&out, host.buf, host.len);
+
+    mm_copy(out.buf, 8, "UTAPEBIN", 8);
+    tl_wr_u(out.buf + 8, 2, 1); tl_wr_u(out.buf + 10, 2, 3);
+    tl_wr_u(out.buf + 12, 2, 1); tl_wr_u(out.buf + 14, 2, 0);
+    tl_wr_u(out.buf + 16, 4, (unsigned long long)sl[0].entry_off);
+    tl_wr_u(out.buf + 20, 4, 6); tl_wr_u(out.buf + 24, 4, 64);
+    tl_wr_u(out.buf + 60, 4, (unsigned long long)sl[0].origin);
+    for (int i = 0; i < 6; i++) {
+        int d = 64 + 24 * i;
+        mm_copy(out.buf + d, 4, TL_TAGS[i], 4);
+        tl_wr_u(out.buf + d + 4, 8, offs[i]);
+        tl_wr_u(out.buf + d + 12, 8, lens[i]);
+        tl_wr_u(out.buf + d + 20, 4, cnts[i]);
+    }
+    unsigned char dig[32];
+    if (tl_sha_ident(out.buf, out.len, dig)) { rc = tl_refuse("oom", "sha"); goto cleanup; }
+    mm_copy(out.buf + 28, 32, dig, 32);
+    if (cx_write(out_path, (const char *)out.buf, (size_t)out.len)) { rc = tl_refuse("write-failed", out_path); goto cleanup; }
+    sy_printf("TAPELINK_OK\tslices=%d\tbytes=%ld\tcode=%ld\tdata=%ld\tbss=%llu\tsyms=%llu\trelo=%llu\thost=%llu\n",
+              nslices, out.len, code.len, data.len, cur_bss, cnts[3], cnts[4], hcnt);
+cleanup:
+    for (int s = 0; s < nslices; s++) if (sl[s].raw) mm_free(sl[s].raw);
+    tl_buf_free(&code); tl_buf_free(&data); tl_buf_free(&syms);
+    tl_buf_free(&relo); tl_buf_free(&host); tl_buf_free(&out);
+    return rc;
+}
+
+/* Build a minimal valid UTAPEBIN v1.3 fixture slice for --check red-first cases. */
+static int tl_write_fixture(const char *path, const char *sym_name, int is_import, unsigned long long sym_val) {
+    TlBuf code, data, syms, relo, host, out;
+    tl_buf_init(&code, 64); tl_buf_init(&data, 128); tl_buf_init(&syms, 64);
+    tl_buf_init(&relo, 64); tl_buf_init(&host, 32); tl_buf_init(&out, 512);
+    /* 4-byte placeholder CODE (e.g. call with 2-byte fixed ULEB operand at pos=2) */
+    unsigned char c4[4] = { 29, 1, 0x80, 0x00 };
+    tl_buf_push(&code, c4, 4);
+    long nl = tx_len(sym_name, 127) + 1;
+    tl_buf_push(&data, sym_name, nl);
+    tl_buf_push_u(&syms, 4, 0);
+    tl_buf_push_u(&syms, 1, 0);
+    tl_buf_push_u(&syms, 1, is_import ? 3 : 1);
+    tl_buf_push_u(&syms, 2, 0);
+    tl_buf_push_u(&syms, 8, sym_val);
+    if (is_import) {
+        /* RELO kind=4 at pos=2, width=2, addend=0 (SYMS row 0) */
+        tl_buf_push_u(&relo, 8, 2);
+        tl_buf_push_u(&relo, 1, 4);
+        tl_buf_push_u(&relo, 1, 2);
+        tl_buf_push_u(&relo, 2, 0);
+        tl_buf_push_u(&relo, 4, 0);
+    }
+    tl_buf_push_u(&host, 2, 0); tl_buf_push_u(&host, 2, 4); tl_buf_push(&host, "exit", 4);
+    unsigned char hdrz[TL_HDR_TOTAL]; mm_fill(hdrz, TL_HDR_TOTAL, 0, TL_HDR_TOTAL);
+    tl_buf_push(&out, hdrz, TL_HDR_TOTAL);
+    unsigned long long offs[6], lens[6], cnts[6];
+    tl_buf_align8(&out); offs[0] = (unsigned long long)out.len; lens[0] = (unsigned long long)code.len; cnts[0] = 1; tl_buf_push(&out, code.buf, code.len);
+    tl_buf_align8(&out); offs[1] = (unsigned long long)out.len; lens[1] = (unsigned long long)data.len; cnts[1] = 1; tl_buf_push(&out, data.buf, data.len);
+    tl_buf_align8(&out); offs[2] = (unsigned long long)out.len; lens[2] = 8; cnts[2] = 1; tl_buf_push_u(&out, 8, 8);
+    tl_buf_align8(&out); offs[3] = (unsigned long long)out.len; lens[3] = (unsigned long long)syms.len; cnts[3] = 1; tl_buf_push(&out, syms.buf, syms.len);
+    tl_buf_align8(&out); offs[4] = (unsigned long long)out.len; lens[4] = (unsigned long long)relo.len; cnts[4] = (unsigned long long)(relo.len / 16); tl_buf_push(&out, relo.buf, relo.len);
+    tl_buf_align8(&out); offs[5] = (unsigned long long)out.len; lens[5] = (unsigned long long)host.len; cnts[5] = 1; tl_buf_push(&out, host.buf, host.len);
+    mm_copy(out.buf, 8, "UTAPEBIN", 8);
+    tl_wr_u(out.buf + 8, 2, 1); tl_wr_u(out.buf + 10, 2, 3); tl_wr_u(out.buf + 12, 2, 1); tl_wr_u(out.buf + 14, 2, 0);
+    tl_wr_u(out.buf + 16, 4, 0); tl_wr_u(out.buf + 20, 4, 6); tl_wr_u(out.buf + 24, 4, 64); tl_wr_u(out.buf + 60, 4, 1);
+    for (int i = 0; i < 6; i++) {
+        int d = 64 + 24 * i;
+        mm_copy(out.buf + d, 4, TL_TAGS[i], 4);
+        tl_wr_u(out.buf + d + 4, 8, offs[i]); tl_wr_u(out.buf + d + 12, 8, lens[i]); tl_wr_u(out.buf + d + 20, 4, cnts[i]);
+    }
+    unsigned char dig[32]; tl_sha_ident(out.buf, out.len, dig); mm_copy(out.buf + 28, 32, dig, 32);
+    int wrc = cx_write(path, (const char *)out.buf, (size_t)out.len);
+    tl_buf_free(&code); tl_buf_free(&data); tl_buf_free(&syms); tl_buf_free(&relo); tl_buf_free(&host); tl_buf_free(&out);
+    return wrc;
+}
+
+static int tl_selfcheck(void) {
+    char tmp[512], a[600], b[600], af[600], am[600], miss[600], outp[600];
+    int passed = 0, failed = 0;
+    if (sy_mkdtemp(sy_tmpdir(), "tlp-", tmp, sizeof tmp) != 0) return 2;
+    (void)cx_fmt(a, sizeof a, "%s/a.tapeslice", tmp);
+    (void)cx_fmt(b, sizeof b, "%s/b.tapeslice", tmp);
+    (void)cx_fmt(af, sizeof af, "%s/a-forged.tapeslice", tmp);
+    (void)cx_fmt(am, sizeof am, "%s/a-badabi.tapeslice", tmp);
+    (void)cx_fmt(miss, sizeof miss, "%s/no-such.tapeslice", tmp);
+    (void)cx_fmt(outp, sizeof outp, "%s/linked.tapeslice", tmp);
+    if (tl_write_fixture(a, "helper@a1b2c3d4", 1, 0) ||
+        tl_write_fixture(b, "helper@a1b2c3d4", 0, 2) ||
+        tl_write_fixture(af, "forged_fn@a1b2c3d4", 1, 0) ||
+        tl_write_fixture(am, "helper@deadbeef", 1, 0)) return 2;
+
+    /* Positive: static link A + B -> valid UTAPEBIN v1.3 with RELO kind 4 lowered to kind 0 at offset 4+2=6 */
+    {
+        const char *ins[2] = {a, b};
+        TlSlice chk;
+        int ok = (tl_link(2, ins, outp) == 0 && tl_parse_slice(outp, &chk) == 0 &&
+                  chk.len[0] == 8 && chk.cnt[4] == 1 && chk.raw[chk.off[4] + 8] == 0 &&
+                  tl_rd_i32(chk.raw + chk.off[4] + 12) == 6 && chk.raw[chk.off[0] + 2] == (6 | 0x80) &&
+                  chk.raw[chk.off[0] + 3] == 0);
+        if (chk.raw) mm_free(chk.raw);
+        if (ok) { passed++; sy_printf("PASS\ttapelink-proto.link-ok-relo4-to-kind0\n"); }
+        else { failed++; sy_eprintf("FAIL\ttapelink-proto.link-ok-relo4-to-kind0\n"); }
+    }
+    /* Red-first 1: forged import name refused */
+    {
+        const char *ins[2] = {af, b};
+        int rc = tl_link(2, ins, outp);
+        if (rc == 1 && tx_eqz(tl_last_reason, "unresolved-import")) { passed++; sy_printf("PASS\ttapelink-proto.refuse-forged-import\n"); }
+        else { failed++; sy_eprintf("FAIL\ttapelink-proto.refuse-forged-import\n"); }
+    }
+    /* Red-first 2: ABI hash mismatch refused */
+    {
+        const char *ins[2] = {am, b};
+        int rc = tl_link(2, ins, outp);
+        if (rc == 1 && tx_eqz(tl_last_reason, "abi-hash-mismatch")) { passed++; sy_printf("PASS\ttapelink-proto.refuse-abi-mismatch\n"); }
+        else { failed++; sy_eprintf("FAIL\ttapelink-proto.refuse-abi-mismatch\n"); }
+    }
+    /* Red-first 3: missing slice refused */
+    {
+        const char *ins[2] = {a, miss};
+        int rc = tl_link(2, ins, outp);
+        if (rc == 1 && tx_eqz(tl_last_reason, "missing-slice")) { passed++; sy_printf("PASS\ttapelink-proto.refuse-missing-slice\n"); }
+        else { failed++; sy_eprintf("FAIL\ttapelink-proto.refuse-missing-slice\n"); }
+    }
+    (void)sy_remove_all(tmp);
+    sy_printf("TAPELINK_PROTO_CHECK\tpassed=%d\tfailed=%d\ttapemode_run=UNMEASURED\n", passed, failed);
+    return failed ? 1 : 0;
+}
+
+int main(int argc, char **argv) {
+    const char *out_path = 0, *ins[TL_MAX_SLICES];
+    int nin = 0;
+    if (argc == 2 && tx_eqz(argv[1], "--check")) return tl_selfcheck();
+    for (int i = 1; i < argc; i++) {
+        if (tx_eqz(argv[i], "-o") && i + 1 < argc) { out_path = argv[++i]; continue; }
+        if (argv[i][0] != '-' && nin < TL_MAX_SLICES) { ins[nin++] = argv[i]; continue; }
+        sy_eprintf("usage: tapelink-proto.cx -- -o OUT SLICE1 SLICE2 [...] | --check\n");
+        return 2;
+    }
+    if (!out_path || nin < 1) {
+        sy_eprintf("usage: tapelink-proto.cx -- -o OUT SLICE1 SLICE2 [...] | --check\n");
+        return 2;
+    }
+    return tl_link(nin, ins, out_path);
+}

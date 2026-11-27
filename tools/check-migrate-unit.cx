@@ -1,0 +1,131 @@
+/* tools/check-migrate-unit.cx -- self-check + refusal gate for tools/migrate-unit.cx.
+ *
+ *   sh ./unisacc.com tools/check-migrate-unit.cx --
+ *
+ * Verifies:
+ *   (1) Migratable unit m53.o generates all 5 artifacts (slice-build.sh, chain-facts-route.tsv,
+ *       p4-embed-list.tsv, check-migrate-m53.cx, ledger-row.tsv) with exact expected keys/symbols;
+ *   (2) Migratable unit by source path (cx/compiler/rtsharedname.cx -> m25.o) succeeds;
+ *   (3) Non-migratable thin-layer units (host.o, m1.o, executor.o) are refused rc=1 with
+ *       reason=not-migratable-thin-layer and write nothing;
+ *   (4) Unknown unit is refused rc=1 with reason=unknown-unit; missing arg exits rc=2.
+ * Marker: CHECK_MIGRATE_UNIT. */
+#pragma unisa use sys.fs
+#pragma unisa use sys.io
+#pragma unisa use sys.env
+#pragma unisa use sys.posix
+#pragma unisa use sys.proc
+#pragma unisa use text.text
+#pragma unisa use text.fmt
+#pragma unisa use mem.heap
+#pragma unisa use cxlib.netpack
+
+static int failed;
+static void ck(int ok, const char *name) {
+    if (!ok) { sy_eprintf("FAIL\tmigrate-unit.%s\n", name); failed++; }
+    else sy_printf("PASS\tmigrate-unit.%s\n", name);
+}
+static int run_mu(char **v, char *out, long cap) {
+    np_result r = {0}; char why[128] = {0};
+    int tr = np_run(v, 0, 0, 30, &r, why, sizeof why);
+    long n = 0;
+    if (r.out && r.outn > 0) {
+        long m = (long)r.outn < cap - 1 ? (long)r.outn : cap - 1;
+        for (long i = 0; i < m; i++) out[n++] = r.out[i];
+    }
+    if (r.err && r.errn > 0 && n < cap - 1) {
+        long m = (long)r.errn < (cap - 1 - n) ? (long)r.errn : (cap - 1 - n);
+        for (long i = 0; i < m; i++) out[n++] = r.err[i];
+    }
+    out[n] = 0;
+    int rc = (tr || r.residue) ? -1 : r.rc;
+    np_free(&r);
+    return rc;
+}
+static int file_has(const char *dir, const char *leaf, const char *needle) {
+    char p[700]; unsigned char *b = 0; int64_t n = 0; int ok = 0;
+    long nl = tx_len(needle, 1024);
+    if (nl <= 0 || cx_fmt(p, sizeof p, "%s/%s", dir, leaf)) return 0;
+    if (sy_read_file(p, &b, &n, 1 << 20) != 0 || !b) { if (b) mm_free(b); return 0; }
+    for (int64_t i = 0; i + nl <= n; i++) {
+        long j = 0;
+        while (j < nl && b[i + j] == (unsigned char)needle[j]) j++;
+        if (j == nl) { ok = 1; break; }
+    }
+    mm_free(b);
+    return ok;
+}
+
+int main(void) {
+    char tmp[512], d53[600], d25[600], dno[600], out[16384];
+    if (sy_mkdtemp(sy_tmpdir(), "chk-mu-", tmp, sizeof tmp) != 0) return 2;
+    if (cx_fmt(d53, sizeof d53, "%s/m53", tmp) ||
+        cx_fmt(d25, sizeof d25, "%s/m25", tmp) ||
+        cx_fmt(dno, sizeof dno, "%s/thin", tmp)) return 2;
+
+    /* (1) m53.o generates all 7 M2 TapeUnitSpec artifacts */
+    {
+        char *v[] = {"sh", "./unisacc.com", "tools/migrate-unit.cx", "--", "m53.o", "--out", d53, 0};
+        int rc = run_mu(v, out, sizeof out);
+        ck(rc == 0 && strstr(out, "MIGRATE_UNIT\tOK\tunit=m53.o\t") != 0 && strstr(out, "\tfiles=7\n") != 0,
+           "m53-generates-ok");
+        ck(file_has(d53, "m53_guest.cx", "M53ABI1") &&
+           !file_has(d53, "m53_guest.cx", "#pragma unisa use") &&
+           file_has(d53, "m53_m1_impl.cx", "TapeUnitSpec") &&
+           file_has(d53, "m53_m1_impl.cx", "tape_unit_call_bytes") &&
+           file_has(d53, "slice-build.sh", "--export cxsa_valid") &&
+           file_has(d53, "slice-build.sh", "p4-embed.cx") &&
+           file_has(d53, "chain-facts-route.tsv", "module_target\tlnx/x86_64:runtime.stream_attributes\tcx/driver/m53_m1_impl.cx") &&
+           file_has(d53, "p4-embed-list.tsv", "tape/lnx-x86_64/m53.tapeslice\t") &&
+           file_has(d53, "p4-embed-list.tsv", "--extra m53.tapeslice") &&
+           file_has(d53, "check-migrate-m53.cx", "CHECK_MIGRATE_M53") &&
+           file_has(d53, "check-migrate-m53.cx", "inverted-slice-refuse") &&
+           file_has(d53, "ledger-row.tsv", "m53.o\tcx/runtime/stream_attributes.cx\tcxsa_valid\t"),
+           "m53-7-m2-artifacts-content");
+    }
+
+    /* (2) Table class: m25.o (--class table / auto) emits 5 table artifacts, NO tapepack / P4 F; --class tape refused */
+    {
+        char *v[] = {"sh", "./unisacc.com", "tools/migrate-unit.cx", "--", "cx/compiler/rtsharedname.cx", "--class", "table", "--out", d25, 0};
+        int rc = run_mu(v, out, sizeof out);
+        ck(rc == 0 && strstr(out, "MIGRATE_UNIT\tOK\tunit=m25.o\t") != 0 && strstr(out, "\tclass=table\t") != 0,
+           "m25-table-class-ok");
+        ck(file_has(d25, "table-facts.tsv", "class=table") &&
+           file_has(d25, "table-gen-m25.cx", "TABLE_GEN_M25") &&
+           file_has(d25, "table-build.sh", "table-gen-m25.cx") &&
+           file_has(d25, "check-table-m25.cx", "CHECK_TABLE_M25") &&
+           file_has(d25, "ledger-row.tsv", "\ttable\ttable\t") &&
+           !file_has(d25, "table-build.sh", "tapepack") &&
+           !file_has(d25, "p4-embed-list.tsv", "tape/"),
+           "m25-table-5-artifacts-no-tape");
+        char *vm[] = {"sh", "./unisacc.com", "tools/migrate-unit.cx", "--", "m25.o", "--class", "tape", "--out", dno, 0};
+        int rcm = run_mu(vm, out, sizeof out);
+        ck(rcm == 1 && strstr(out, "reason=class-mismatch") != 0 && sy_exists(dno) == 0, "m25-refuse-tape-class-mismatch");
+    }
+
+    /* (3) Non-migratable thin-layer units refused rc=1 and write nothing */
+    {
+        static const char *thin[3] = {"host.o", "m1.o", "executor.o"};
+        for (int i = 0; i < 3; i++) {
+            char *v[] = {"sh", "./unisacc.com", "tools/migrate-unit.cx", "--", (char *)thin[i], "--out", dno, 0};
+            int rc = run_mu(v, out, sizeof out);
+            ck(rc == 1 && strstr(out, "MIGRATE_UNIT\tREFUSE\t") != 0 &&
+               strstr(out, "reason=not-migratable-thin-layer") != 0 && sy_exists(dno) == 0,
+               thin[i]);
+        }
+    }
+
+    /* (4) Unknown unit rc=1; missing arg rc=2 */
+    {
+        char *v1[] = {"sh", "./unisacc.com", "tools/migrate-unit.cx", "--", "no_such_unit.o", 0};
+        int rc1 = run_mu(v1, out, sizeof out);
+        ck(rc1 == 1 && strstr(out, "reason=unknown-unit") != 0, "unknown-unit-refused");
+        char *v2[] = {"sh", "./unisacc.com", "tools/migrate-unit.cx", "--", 0};
+        int rc2 = run_mu(v2, out, sizeof out);
+        ck(rc2 == 2, "missing-arg-rc2");
+    }
+
+    (void)sy_remove_all(tmp);
+    sy_printf("CHECK_MIGRATE_UNIT\tfailed=%d\n", failed);
+    return failed ? 1 : 0;
+}
