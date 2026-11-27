@@ -5,6 +5,7 @@
 #pragma unisa use sys.io
 #pragma unisa use sys.proc
 #pragma unisa use text.text
+#pragma unisa use mem.heap
 #pragma unisa use cxlib.netpack
 
 static char prod[4096], tdir[4096];
@@ -51,6 +52,38 @@ static void check_case(const char *id, const char *src, int expect_rc0, const ch
               id, ok ? "PASS" : "FAIL", expect_rc0, rc, fl);
 }
 
+static int has_bytes(const char *buf, size_t n, const char *needle) {
+    size_t nl = strlen(needle);
+    if (!buf || nl == 0 || n < nl) return 0;
+    for (size_t i = 0; i + nl <= n; i++) if (memcmp(buf + i, needle, nl) == 0) return 1;
+    return 0;
+}
+
+static void check_multi3(const char *id, const char *s1, const char *s2, const char *s3,
+                         int expect_rc0, const char *want_err, const char *m1, const char *m2, const char *m3) {
+    char p1[4200], p2[4200], p3[4200], op[4200], buf[4096], fl[180];
+    cx_fmt(p1, sizeof p1, "%s/%s_1.c", tdir, id);
+    cx_fmt(p2, sizeof p2, "%s/%s_2.c", tdir, id);
+    cx_fmt(p3, sizeof p3, "%s/%s_3.c", tdir, id);
+    cx_fmt(op, sizeof op, "%s/%s.o", tdir, id);
+    sy_unlink(op);
+    cx_write(p1, s1, strlen(s1)); cx_write(p2, s2, strlen(s2)); cx_write(p3, s3, strlen(s3));
+    char *v_sh[] = {"sh", prod, "-c", p1, p2, p3, "-o", op, 0};
+    char *v_bin[] = {prod, "-c", p1, p2, p3, "-o", op, 0};
+    int rc = gr_exec(use_sh ? v_sh : v_bin, buf, sizeof buf);
+    gr_head(buf, fl, sizeof fl);
+    int ok = expect_rc0 ? (rc == 0) : (rc != 0 && (!want_err || strstr(buf, want_err) != 0));
+    if (ok && expect_rc0) {
+        size_t on = 0; char *ob = cx_read(op, &on);
+        if (!ob || on < 64 || (m1 && !has_bytes(ob, on, m1)) ||
+            (m2 && !has_bytes(ob, on, m2)) || (m3 && !has_bytes(ob, on, m3))) ok = 0;
+        if (ob) mm_free(ob);
+    }
+    if (ok) passed++; else failed++;
+    sy_printf("GREDECL_CASE\t%s\t%s\twant_rc0=%d\tgot_rc=%d\terr=%s\n",
+              id, ok ? "PASS" : "FAIL", expect_rc0, rc, fl);
+}
+
 int main(int argc, char **argv) {
     const char *p = (argc >= 2) ? argv[1] : "./unisacc.com";
     if (sy_realpath(p, prod, sizeof prod) < 0) return 2;
@@ -68,6 +101,12 @@ int main(int argc, char **argv) {
     check_case("P6-ext-same-ptr", "extern int *p;\nint *p;\n", 1, 0);
     check_case("P7-tentative-arr", "int a[3];\nint a[3];\n", 1, 0);
     check_case("P8-typedef-arr-same", "typedef int A3[3];\nextern A3 a;\nint a[3];\n", 1, 0);
+    check_case("P9-fp-arr-redecl-same", "extern void (*fp[32])(void);\nvoid (*fp[32])(void);\n", 1, 0);
+    check_multi3("P10-fp-arr-3tu-same",
+                 "void (*_unisa_atexit[32])(void);\nint u1_tag(void){return 1;}\n",
+                 "extern void (*_unisa_atexit[32])(void);\nint u2_tag(void){return 2;}\n",
+                 "extern void (*_unisa_atexit[32])(void);\nint u3_tag(void){return 3;}\n",
+                 1, 0, "u1_tag", "u2_tag", "u3_tag");
 
     /* Conflicting redeclarations: RED on 0.0.91 (rc=0) -> GREEN after G-redecl fix (rc=1) */
     check_case("C1-ext-arr-size", "extern int a[3];\nint a[4];\n", 0, "conflicting types");
@@ -80,6 +119,25 @@ int main(int argc, char **argv) {
     check_case("C8-fn-obj-same-name", "int f(void);\nint f;\n", 0, "redeclared as different kind");
     check_case("C9-typedef-arr-conflict", "typedef int A3[3];\nextern A3 a;\nint a[4];\n", 0, "conflicting types");
     check_case("C10-obj-then-fn", "int g;\nint g(void);\n", 0, "redeclared as different kind");
+    check_case("C11-fp-sig-conflict", "extern void (*fp)(int);\nvoid (*fp)(double);\n", 0, "conflicting types");
+    check_case("C12-struct-same-layout-diff-tag",
+               "struct S1 { int x; };\nstruct S2 { int x; };\nextern struct S1 gs;\nstruct S2 gs;\n",
+               0, "conflicting types");
+    check_multi3("C13-fp-arr-3tu-sig-conflict",
+                 "void (*_unisa_atexit[32])(void);\nint u1_s(void){return 1;}\n",
+                 "extern void (*_unisa_atexit[32])(void);\nint u2_s(void){return 2;}\n",
+                 "extern void (*_unisa_atexit[32])(int);\nint u3_s(void){return 3;}\n",
+                 0, "conflicting types", 0, 0, 0);
+    check_multi3("C14-fp-arr-3tu-len-conflict",
+                 "void (*_unisa_atexit[32])(void);\nint u1_l(void){return 1;}\n",
+                 "extern void (*_unisa_atexit[32])(void);\nint u2_l(void){return 2;}\n",
+                 "extern void (*_unisa_atexit[16])(void);\nint u3_l(void){return 3;}\n",
+                 0, "conflicting types", 0, 0, 0);
+    check_multi3("C15-fp-arr-3tu-ptr-conflict",
+                 "void (*_unisa_atexit[32])(void);\nint u1_p(void){return 1;}\n",
+                 "extern void (*_unisa_atexit[32])(void);\nint u2_p(void){return 2;}\n",
+                 "extern void (**_unisa_atexit[32])(void);\nint u3_p(void){return 3;}\n",
+                 0, "conflicting types", 0, 0, 0);
 
     sy_printf("GREDECL_SUMMARY\tpassed=%d\tfailed=%d\ttotal=%d\n", passed, failed, passed + failed);
     return failed ? 1 : 0;
