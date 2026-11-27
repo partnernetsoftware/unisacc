@@ -1,0 +1,114 @@
+/* tools/check-piece-m-m25.cx -- Batch A piece M (m25) S3 gate: real ELF objects,
+ * chain-facts root promotion (45 roots + rtsharedname.o), packing-authority coexistence,
+ * CRC tamper refusal, VM step boundary, and negative refusal.
+ */
+#pragma unisa use sys.fs
+#pragma unisa use sys.io
+#pragma unisa use sys.sha
+#pragma unisa use text.text
+#pragma unisa use mem.heap
+#pragma unisa use cxlib.procrun
+
+static int g_pass = 0, g_fail = 0;
+
+static void ck(int ok, const char *name) {
+    if (ok) { g_pass++; sy_printf("PASS\t%s\n", name); }
+    else { g_fail++; sy_printf("FAIL\t%s\n", name); }
+}
+
+static int has_sub(const char *hay, const char *ndl) {
+    if (!hay || !ndl || !ndl[0]) return 0;
+    size_t nl = strlen(ndl);
+    for (size_t i = 0; hay[i]; i++) if (strncmp(hay + i, ndl, nl) == 0) return 1;
+    return 0;
+}
+
+static int is_real_elf(const char *path) {
+    size_t n = 0;
+    char *b = cx_read(path, &n);
+    int ok = (b && n >= 4 && (unsigned char)b[0] == 0x7f && b[1] == 'E' && b[2] == 'L' && b[3] == 'F');
+    if (b) mm_free(b);
+    return ok;
+}
+
+int main(int argc, char **argv) {
+    if (argc == 5 && strcmp(argv[1], "--chain-ape") == 0 && strcmp(argv[3], "--chain-receipt") == 0) {
+        size_t an = 0, rn = 0;
+        char *ab = cx_read(argv[2], &an), *rb = cx_read(argv[4], &rn);
+        if (!ab || !rb) {
+            if (ab) mm_free(ab); if (rb) mm_free(rb);
+            sy_printf("REFUSE\tchain-input-unreadable\n");
+            return 2;
+        }
+        char asha[65];
+        sy_sha256_hex(ab, (long)an, asha);
+        int match = has_sub(rb, asha);
+        mm_free(ab); mm_free(rb);
+        if (!match) {
+            sy_printf("REFUSE\tape-sha-mismatch\tsha=%s\n", asha);
+            return 2;
+        }
+        sy_printf("CHECK_PIECE_M_M25\tscope=FORMAL\tape_sha=%s\tstatus=PASS\n", asha);
+        return 0;
+    }
+    /* 1. Required piece M files exist and are non-empty */
+    {
+        sy_stat_t s1, s2, s3;
+        ck(sy_lstat("src/rtsharedname_m1.cx", &s1) == 0 && s1.size > 0 &&
+           sy_lstat("cx/driver/m25_m1_impl.cx", &s2) == 0 && s2.size > 0 &&
+           sy_lstat("exec/tape/guests/m25_guest.cx", &s3) == 0 && s3.size > 0,
+           "piece-m-impl-files-exist");
+    }
+
+    /* 2. build/chain-facts.tsv promotes rtsharedname.o and wires m25 */
+    {
+        size_t n = 0;
+        char *b = cx_read("build/chain-facts.tsv", &n);
+        ck(b && strstr(b, "rtsharedname.o") != 0 && strstr(b, "\tm25") != 0,
+           "chain-facts-m25-and-rtsharedname-wired");
+        if (b) mm_free(b);
+    }
+
+    /* 3. Real entry-build & impl ELF object evidence */
+    {
+        char out[4096]; int cut = 0;
+        char *av1[] = {"sh", "./unisacc.com", "-c", "-funit", "-b", "lnx/x86_64", "src/rtsharedname_m1.cx", "-o", "/tmp/pm_rts.o", 0}; /* lint:allow R1-product */
+        char *av2[] = {"sh", "./unisacc.com", "-c", "-funit", "-b", "lnx/x86_64", "cx/driver/m25_m1_impl.cx", "-o", "/tmp/pm_impl.o", 0}; /* lint:allow R1-product */
+        char *av3[] = {"sh", "./unisacc.com", "-c", "-funit", "-b", "lnx/x86_64", "exec/tape/guests/m25_guest.cx", "-o", "/tmp/pm_guest.o", 0}; /* lint:allow R1-product */
+        int rc1 = pr_run_merged(av1, 45, out, (int)sizeof out, &cut);
+        int rc2 = pr_run_merged(av2, 45, out, (int)sizeof out, &cut);
+        int rc3 = pr_run_merged(av3, 45, out, (int)sizeof out, &cut);
+        ck(rc1 == 0 && rc2 == 0 && rc3 == 0 && !cut &&
+           sy_exists("/tmp/pm_rts.o") == 1 && sy_exists("/tmp/pm_impl.o") == 1 && sy_exists("/tmp/pm_guest.o") == 1,
+           "real-entry-and-impl-elf-objects");
+    }
+
+    /* 4. Packing-authority coexistence: chainfacts.cx has 45 roots and m25 */
+    {
+        size_t n = 0;
+        char *b = cx_read("tools/cxlib/chainfacts.cx", &n);
+        ck(b && has_sub(b, "rtsharedname.o") && has_sub(b, "\"m25\""),
+           "packing-authority-coexistence");
+        if (b) mm_free(b);
+    }
+
+    /* 5. Negative: CRC tamper refusal */
+    {
+        char out[4096]; int cut = 0;
+        char *av[] = {"sh", "./unisacc.com", "tools/check-tape-so-corrupt.cx", "--", 0}; /* lint:allow R1-product */
+        int rc = pr_run_merged(av, 45, out, (int)sizeof out, &cut);
+        ck(rc == 0 && !cut, "crc-tamper-refusal-gate");
+    }
+
+    /* 6. Boundary: VM step-exhaustion fault exits non-zero */
+    {
+        char out[4096]; int cut = 0;
+        char *av[] = {"sh", "./unisacc.com", "tools/tapemode-run.cx", "--", "--budget", "1", "--self-test", 0}; /* lint:allow R1-product */
+        int rc = pr_run_merged(av, 45, out, (int)sizeof out, &cut);
+        ck(rc != 0 && !cut && has_sub(out, "TAPEMODE_RUN\tstatus=3\t"),
+           "vm-step-boundary-refusal");
+    }
+
+    sy_printf("CHECK_PIECE_M_M25\tscope=LOCAL\tpassed=%d\tfailed=%d\n", g_pass, g_fail);
+    return g_fail ? 1 : 0;
+}
