@@ -83,7 +83,7 @@ LOCAL 原型证据(均不支持“按大小迁移”):
 
 ### 逐单元宿主开销(证伪结果)
 
-- agyneon2 `96633e74`:m25 叠在 v0.1.7 链上使 PT_LOAD R E `+3,315`B;tl_dce 后活代码仅约 `2.5KB`,而每单元 string bridge+cache+拒绝约 `5.8KB`,宿主开销真实。
+- agyneon2 `b0447c7b3`(w/agyneon2-m25;原稿误写 96633e74,非 git 对象):m25 叠在 v0.1.7 链上使 PT_LOAD R E `+3,315`B;tl_dce 后活代码仅约 `2.5KB`,而每单元 string bridge+cache+拒绝约 `5.8KB`,宿主开销真实。
 - 决定:(1) TapeRuntime 通用共享 bridge(字符串取值+值调用),把每单元宿主成本降到几百字节(agyneon3);(2) 迁移顺序按 tl_dce 后链接入口里的活代码字节排序,不按对象 `.text`(omp-grk);(3) 表批(新 v0.1.9)在宿主开销实测变小前不开。
 
 ### 编译器尺寸候选(记录)
