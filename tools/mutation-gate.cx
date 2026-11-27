@@ -342,7 +342,7 @@ static int splice(char *d, int cap, const char *l, int a, int b, const char *ins
 static int has_code(const char *l, int st) {
     char m[MG_LINE]; int i;
     code_mask(l, m, st);
-    for (i = 0; l[i]; i++) if (m[i] && l[i] != ' ' && l[i] != '\t' && l[i] != '\r') return 1;
+    for (i = 0; l[i]; i++) if (m[i] && (!g_scope_product || (l[i] != ' ' && l[i] != '\t' && l[i] != '\r'))) return 1;
     return 0;
 }
 /* A preprocessor line is a directive, not C code: mutating `#define K 4096` to 4097 or a `#include` path only ever
@@ -373,6 +373,18 @@ static int has_cand_text(int f, int ln, const char *text) {
     return 0;
 }
 
+static int is_local_decl(const char *t) {
+    const char *p = t;
+    if (!isid((unsigned char)*p) || isdig((unsigned char)*p)) return 0;
+    size_t n1 = 0;
+    while (isid((unsigned char)p[n1])) n1++;
+    if ((n1 == 6 && !strncmp(p, "return", 6)) || (n1 == 4 && !strncmp(p, "goto", 4)) ||
+        (n1 == 4 && !strncmp(p, "else", 4)) || (n1 == 6 && !strncmp(p, "sizeof", 6))) return 0;
+    p += n1;
+    while (*p == ' ' || *p == '\t' || *p == '*') p++;
+    return isid((unsigned char)*p) && !isdig((unsigned char)*p);
+}
+
 static void gen_stmt(int f, int ln, const char *l, const char *m) {
     const char *t = l;
     int bal_b = 0, bal_p = 0, last_nb = -1;
@@ -387,6 +399,7 @@ static void gen_stmt(int f, int ln, const char *l, const char *m) {
         (!strncmp(t, "enum", 4) && !isid((unsigned char)t[4])) ||
         (!strncmp(t, "union", 5) && !isid((unsigned char)t[5]))) return;
     if (!strncmp(t, "for", 3) && !isid((unsigned char)t[3])) return;
+    if (is_local_decl(t)) return;
     for (int k = 0; l[k]; k++) {
         if (!m[k]) continue;
         if (l[k] == '{') bal_b++;
@@ -500,6 +513,7 @@ static void gen_line(int f, int ln, const char *l, int st) {
 /* ---------- patch parsing ---------- */
 typedef struct { int file, line; } Add;
 static Add *g_add; static int g_nadd, g_cadd;
+static char *g_noncx_prod[256]; static int g_n_noncx_prod;
 
 static int is_product_path(const char *p) {
     return !strncmp(p, "src/", 4) || !strncmp(p, "cx/", 3) || !strncmp(p, "exec/", 5);
@@ -528,6 +542,10 @@ static void parse_patch(const char *patch) {
             cur = -1;
             if (g_scope_product && is_product_path(p)) g_prod_touched = 1;
             if (want_file(p) && g_nf < 512) { g_files[g_nf] = mm_strdup(p); cur = g_nf++; }
+            else if (g_scope_product && is_product_path(p) && strcmp(p, "/dev/null") && g_n_noncx_prod < 256) {
+                const char *bname = strrchr(p, '/'); bname = bname ? bname + 1 : p;
+                if (g_mutchecks || strncmp(bname, "check-", 6)) g_noncx_prod[g_n_noncx_prod++] = mm_strdup(p);
+            }
             continue;
         }
         if (e - s >= 4 && !strncmp(s, "--- ", 4)) continue;
@@ -592,11 +610,30 @@ static int seen_line_add(int *seen, int cap, int ln) {
 }
 
 static void gen_cov(int f, char **L, int *sts, int nlines, int ln, int *seen, int nseen_cap) {
+    if (!g_scope_product) {
+        int j, k; char d[MG_LINE + 64], desc[96];
+        for (j = ln - 1; j >= 1; j--) {
+            const char *l = L[j - 1];
+            if (l[0] == '}') return;
+            if (l[0] && l[0] != ' ' && l[0] != '\t' && l[0] != '/' && l[0] != '*' && !is_preproc(l) && strchr(l, '(') && strchr(l, '{')) {
+                for (k = 0; k < nseen_cap && seen[k]; k++) if (seen[k] == j) return;
+                if (k < nseen_cap) seen[k] = j;
+                const char *br = strchr(l, '{');
+                int o = (int)(br - l);
+                if (splice(d, sizeof d, l, o + 1, o + 1, " *(volatile int *)0 = 0; ")) return;
+                cx_fmt(desc, sizeof desc, "abort at entry of %.60s", l);
+                add(f, j, NK - 1, d, desc);
+                return;
+            }
+        }
+        return;
+    }
     int hj = 0, bj = 0, o = -1;
-    char d[MG_LINE + 64], desc[96];
-    if (!find_func_open(L, sts, nlines, ln, g_scope_product, &hj, &bj, &o)) return;
+    char d[MG_LINE + 256], desc[96];
+    const char *ins = " { FILE *_mgf = fopen(\"__MG_PROBE__\", \"w\"); if (_mgf) { fputs(\"__MG_TOKEN__\\n\", _mgf); fclose(_mgf); } *(volatile int *)0 = 0; } ";
+    if (!find_func_open(L, sts, nlines, ln, 1, &hj, &bj, &o)) return;
     if (!seen_line_add(seen, nseen_cap, bj)) return;
-    if (splice(d, sizeof d, L[bj - 1], o + 1, o + 1, " *(volatile int *)0 = 0; ")) return;
+    if (splice(d, sizeof d, L[bj - 1], o + 1, o + 1, ins)) return;
     cx_fmt(desc, sizeof desc, "abort at entry of %.60s", L[hj - 1]);
     add(f, bj, NK - 1, d, desc);
 }
@@ -633,6 +670,7 @@ static void prep(void) {
     long t0 = sy_now_ms();
     if (!g_patch || !g_base || !g_nchk) die2("usage", "need --patch --base --check (--out optional)");
     if (g_scope_product && !g_cov) die2("--scope product requires --coverage-check", "");
+    if (g_scope_product && (!g_build_cmd || !g_build_cmd[0])) die2("--scope product requires --build", "");
     if (!g_repo) { const char *h = getenv("HOME"); static char rb[512]; cx_fmt(rb, sizeof rb, "%s/repos/unisacc", h ? h : "."); g_repo = rb; }
     if (g_par <= 0) { long nc = sy_ncpu(); g_par = nc > 1 ? (int)(nc / 2) : 1; }
     if (g_par > 16) g_par = 16;
@@ -750,6 +788,9 @@ static void prep(void) {
         }
     }
     save_conf();
+    for (i = 0; i < g_n_noncx_prod; i++) {
+        fprintf(stderr, "MG_WARN product non-.cx file has 0 mutants: %s\n", g_noncx_prod[i]);
+    }
     if (g_build_cmd && g_build_cmd[0]) {
         char qb[4096], sc[8192];
         shq(qb, sizeof qb, g_build_cmd);
@@ -782,6 +823,24 @@ static void prep(void) {
         printf("MG_SELFTEST compile_gate_rejects_broken=%s\n", rc ? "yes" : "no");
         if (rc == 0) die2("compile gate inert:", "a deliberately broken file compiled");
     }
+    if (g_scope_product) {
+        char fp[2048], sc[8192], qb[4096], qc[4096]; size_t on; char *orig;
+        cx_fmt(fp, sizeof fp, "%s/slot-0/%s", g_out, g_files[g_c[0].file]);
+        orig = slurp(fp, &on); if (!orig) die2("read", fp);
+        { char *nb = mm_alloc((long)on + 64); cp(nb, (long)on + 64, orig, (long)on); cp(nb + on, 64, "\n@@ mutation-gate broken @@\n", 28); spit(fp, nb, on + 28); mm_free(nb); }
+        shq(qb, sizeof qb, g_build_cmd);
+        cx_fmt(sc, sizeof sc, "cd %s/slot-0 && exec setsid -w sh -c %s >/dev/null 2>&1", q3, qb);
+        rc = sh(sc, out, sizeof out, 55);
+        if (rc == 0) {
+            shq(qc, sizeof qc, g_chk[0]);
+            cx_fmt(sc, sizeof sc, "cd %s/slot-0 && exec setsid -w sh -c %s 2>&1", q3, qc);
+            rc = sh(sc, out, sizeof out, 55);
+            { const char *fp2 = strstr(out, "failed="); if (rc == 0 && fp2 && atoi(fp2 + 7) > 0) rc = 1; }
+        }
+        spit(fp, orig, on); mm_free(orig);
+        printf("MG_LIVENESS build_or_check_rejects_broken=%s\n", rc ? "yes" : "no");
+        if (rc == 0) die2("liveness selftest failed:", "--build/--check stayed green on broken product file");
+    }
     /* slot copies */
     for (i = 1; i < g_par; i++) { cx_fmt(cmd, sizeof cmd, "cp -a %s/slot-0 %s/slot-%d", q3, q3, i); if (sh(cmd, out, sizeof out, 55)) die2("copy slot", ""); }
     write_session("prepared");
@@ -799,6 +858,22 @@ static int killed_by(const char *out, int rc) {
 enum Quality { Q_SURVIVED, Q_WEAK, Q_UNKNOWN, Q_NAMED, Q_INVALID };
 static const char *quality_labels[] = {"SURVIVED", "KILL-weak", "UNKNOWN", "KILL-named", "INVALID"};
 
+static int is_infra_line(const char *s, size_t n) {
+    static const char *const tags[] = {"REFUSE", "ERR", 0};
+    for (int t = 0; tags[t]; t++) {
+        size_t tl = strlen(tags[t]);
+        if (n == tl && !strncmp(s, tags[t], tl)) return 1;
+        if (n > tl && !strncmp(s, tags[t], tl) && (s[tl] == ' ' || s[tl] == '\t' || s[tl] == ':')) return 1;
+        for (size_t i = 0; i + tl < n; i++) {
+            if ((s[i] == ' ' || s[i] == '\t') && !strncmp(s + i + 1, tags[t], tl)) {
+                size_t a = i + 1 + tl;
+                if (a == n || s[a] == ' ' || s[a] == '\t' || s[a] == ':') return 1;
+            }
+        }
+    }
+    return 0;
+}
+
 static int quality_check(const char *out, int rc, int check) {
     if (rc < 0 || rc >= 124) return Q_UNKNOWN;
     int named = 0, infrastructure = 0;
@@ -807,7 +882,7 @@ static int quality_check(const char *out, int rc, int check) {
         if (!e) e = s + strlen(s);
         size_t n = (size_t)(e - s);
         if (n && s[n - 1] == '\r') n--;
-        if (!strncmp(s, "REFUSE ", 7) || !strncmp(s, "ERR ", 4)) infrastructure = 1;
+        if (is_infra_line(s, n)) infrastructure = 1;
         if (*e && (!strncmp(s, "FAIL ", 5) || !strncmp(s, "FAIL\t", 5))) {
             for (int i = 0; i < g_expect_n; i++) {
                 const char *name = g_expect_name[i];
@@ -825,36 +900,74 @@ static int quality_check(const char *out, int rc, int check) {
     return killed_by(out, rc) ? Q_WEAK : Q_SURVIVED;
 }
 
+static void cstr_esc(char *dst, int cap, const char *src) {
+    int k = 0;
+    for (; *src && k < cap - 3; src++) {
+        if (*src == '\\' || *src == '"') dst[k++] = '\\';
+        dst[k++] = *src;
+    }
+    dst[k] = 0;
+}
+
+static size_t subst_probe(char *dst, size_t cap, const char *src, size_t sn, const char *probe, const char *tok) {
+    size_t k = 0;
+    for (size_t i = 0; i < sn; ) {
+        if (i + 12 <= sn && !memcmp(src + i, "__MG_PROBE__", 12)) {
+            size_t pl = strlen(probe);
+            if (k + pl >= cap) return 0;
+            cp(dst + k, (long)(cap - k), probe, (long)pl); k += pl; i += 12;
+        } else if (i + 12 <= sn && !memcmp(src + i, "__MG_TOKEN__", 12)) {
+            size_t tl = strlen(tok);
+            if (k + tl >= cap) return 0;
+            cp(dst + k, (long)(cap - k), tok, (long)tl); k += tl; i += 12;
+        } else {
+            if (k + 1 >= cap) return 0;
+            dst[k++] = src[i++];
+        }
+    }
+    return k;
+}
+
 static void worker(void) {
-    char p[1024], q3[2048], sd[1024], res[1024]; size_t n; char *tsv, *s, *e; int fd_rows = 0;
+    char p[1024], out_abs[1024], q3[2048], sd[1024], res[1024]; size_t n; char *tsv, *s, *e; int fd_rows = 0;
     load_conf();
+    if (!realpath(g_out, out_abs)) cx_fmt(out_abs, sizeof out_abs, "%s", g_out);
     cx_fmt(sd, sizeof sd, "%s/slot-%d", g_out, g_slot); shq(q3, sizeof q3, sd);
     cx_fmt(p, sizeof p, "%s/mutants.tsv", g_out); tsv = slurp(p, &n); if (!tsv) die2("missing", p);
     cx_fmt(res, sizeof res, "%s/res-%d.tsv", g_out, g_slot);
     { char acc[1 << 15]; int ak = 0;
     for (s = tsv; s < tsv + n; s = e + 1) {
-        char row[2048], file[1024], fp[2048], mp[1024], out[65536], cmd[8192];
-        int id, line, L, rc = 0, first_kill_rc = 0, i, verdict = 0;
+        char row[2048], file[1024], fp[2048], mp[1024], probe_path[1200], probed_marker[1200], probe_esc[2200], token[96], expect_tok[100], out[65536], cmd[8192];
+        int id, line, L, rc = 0, first_kill_rc = 0, i, verdict = 0, is_cov_row = 0, cov_probed = 0;
         int quality = Q_SURVIVED, quality_rc = 0, check_id = -1;
         long t0 = sy_now_ms();
         e = s; while (e < tsv + n && *e != '\n') e++;
         L = (int)(e - s); if (L <= 0 || L >= (int)sizeof row) continue;
         cp(row, (long)sizeof row, s, L); row[L] = 0;
         id = atoi(row); if (id % g_par != g_slot) continue;
-        { char *t1 = strchr(row, '\t'), *t2 = t1 ? strchr(t1 + 1, '\t') : 0; if (!t2) continue; cp(file, (long)sizeof file - 1, t1 + 1, (long)(t2 - t1 - 1)); file[t2 - t1 - 1] = 0; line = atoi(t2 + 1); }
+        { char *t1 = strchr(row, '\t'), *t2 = t1 ? strchr(t1 + 1, '\t') : 0, *t3 = t2 ? strchr(t2 + 1, '\t') : 0; if (!t2) continue; cp(file, (long)sizeof file - 1, t1 + 1, (long)(t2 - t1 - 1)); file[t2 - t1 - 1] = 0; line = atoi(t2 + 1); if (t3 && !strncmp(t3 + 1, "cov\t", 4)) is_cov_row = 1; }
         cx_fmt(fp, sizeof fp, "%s/%s", sd, file); cx_fmt(mp, sizeof mp, "%s/m/%d.line", g_out, id);
+        cx_fmt(probe_path, sizeof probe_path, "%s/m/%d.probe", out_abs, id);
+        cx_fmt(probed_marker, sizeof probed_marker, "%s/m/%d.probed", out_abs, id);
+        sy_unlink(probe_path); sy_unlink(probed_marker);
+        cstr_esc(probe_esc, sizeof probe_esc, probe_path);
+        cx_fmt(token, sizeof token, "%d-%d-%ld", id, (int)getpid(), t0);
+        cx_fmt(expect_tok, sizeof expect_tok, "%s\n", token);
         size_t on, mn; char *orig = slurp(fp, &on), *ml = slurp(mp, &mn);
         if (!orig || !ml) { if (orig) mm_free(orig); if (ml) mm_free(ml); continue; }
         /* build mutated file */
-        { char *nb = mm_alloc((long)(on + mn + 8)); size_t k = 0, ls = 0; int cur = 1, replaced = 0; size_t i2;
+        { size_t rcap = mn + 2400; char *rep = mm_alloc((long)rcap);
+          size_t rlen = subst_probe(rep, rcap, ml, mn, probe_esc, token);
+          char *nb = mm_alloc((long)(on + rlen + 8)); size_t k = 0, ls = 0; int cur = 1, replaced = 0; size_t i2;
           for (i2 = 0; i2 <= on; i2++) {
               if (i2 == on && ls == on) break;
               if (i2 == on || orig[i2] == '\n') {
-                  if (cur == line) { cp(nb + k, (long)(on + mn + 8 - k), ml, (long)mn); k += mn; replaced++; } else { cp(nb + k, (long)(on + mn + 8 - k), orig + ls, (long)(i2 - ls)); k += i2 - ls; }
+                  if (cur == line) { cp(nb + k, (long)(on + rlen + 8 - k), rep, (long)rlen); k += rlen; replaced++; } else { cp(nb + k, (long)(on + rlen + 8 - k), orig + ls, (long)(i2 - ls)); k += i2 - ls; }
                   if (i2 < on) nb[k++] = '\n';
                   ls = i2 + 1; cur++;
               }
           }
+          mm_free(rep);
           if (replaced != 1 || (k == on && !memcmp(nb, orig, on))) {
               quality = Q_INVALID;
               mm_free(nb);
@@ -879,7 +992,17 @@ static void worker(void) {
             for (i = 0; i < g_nchk; i++) {
                 char qc[4096]; shq(qc, sizeof qc, g_chk[i]);
                 cx_fmt(cmd, sizeof cmd, "cd %s && exec setsid -w sh -c %s 2>&1", q3, qc);
+                if (is_cov_row && g_scope_product) sy_unlink(probe_path);
                 out[0] = 0; rc = sh(cmd, out, sizeof out, 55);
+                if (is_cov_row && g_scope_product) {
+                    size_t pn = 0; char *pb = slurp(probe_path, &pn);
+                    if (pb && pn == strlen(expect_tok) && !memcmp(pb, expect_tok, pn)) {
+                        cov_probed = 1;
+                        spit(probed_marker, "1\n", 2);
+                    }
+                    if (pb) mm_free(pb);
+                    sy_unlink(probe_path);
+                }
                 if (g_quality || g_scope_product) {
                     int observation = quality_check(out, rc, i);
                     if (observation != Q_SURVIVED) {
@@ -889,7 +1012,7 @@ static void worker(void) {
                     if (observation > quality) { quality = observation; quality_rc = rc; check_id = i; }
                 }
                 if (!verdict && killed_by(out, rc)) { verdict = 1; first_kill_rc = rc; }
-                if (verdict && ((!(g_quality || g_scope_product)) || quality == Q_NAMED)) break;
+                if (verdict && ((!(g_quality || g_scope_product)) || (quality == Q_NAMED && (!is_cov_row || cov_probed)))) break;
             }
         }
         spit(fp, orig, on);
@@ -984,22 +1107,65 @@ static int check_log_has_infra(int id, int check_idx) {
         const char *e = memchr(s, '\n', (size_t)(b + n - s));
         if (!e) e = b + n;
         size_t len = (size_t)(e - s);
-        if ((len >= 7 && !strncmp(s, "REFUSE ", 7)) || (len >= 4 && !strncmp(s, "ERR ", 4))) { hit = 1; break; }
+        if (len && s[len - 1] == '\r') len--;
+        if (is_infra_line(s, len)) { hit = 1; break; }
         s = e < b + n ? e + 1 : e;
     }
     mm_free(b);
     return hit;
 }
 
+static int check_log_has_named_assert(int id, int check_idx) {
+    char p[1024];
+    size_t n = 0;
+    char *b;
+    if (check_idx < 0) return 0;
+    if (cx_fmt(p, sizeof p, "%s/m/%d.check-%d.log", g_out, id, check_idx)) return 0;
+    b = slurp(p, &n);
+    if (!b) return 0;
+    int hit = 0, infra = 0;
+    for (const char *s = b; s < b + n;) {
+        const char *e = memchr(s, '\n', (size_t)(b + n - s));
+        size_t len = (size_t)(e ? e - s : (b + n - s));
+        if (len && s[len - 1] == '\r') len--;
+        if (is_infra_line(s, len)) { infra = 1; break; }
+        if (e && (!strncmp(s, "FAIL ", 5) || !strncmp(s, "FAIL\t", 5))) {
+            for (int j = 0; j < g_expect_n; j++) {
+                const char *name = g_expect_name[j];
+                if (g_expect_check[j] == check_idx && name && strlen(name) + 5 == len && !memcmp(s + 5, name, len - 5)) hit = 1;
+            }
+        }
+        s = e ? e + 1 : b + n;
+    }
+    mm_free(b);
+    return hit && !infra;
+}
+
+typedef struct { char *b; size_t len, cap; } DynBuf;
+static void dyn_app(DynBuf *d, const char *s, size_t n) {
+    if (!n) return;
+    if (d->len + n + 1 > d->cap) {
+        size_t nc = d->cap ? d->cap : 4096;
+        while (nc < d->len + n + 1) nc *= 2;
+        d->b = mm_grow(d->b, (long)nc);
+        d->cap = nc;
+    }
+    cp(d->b + d->len, (long)(d->cap - d->len), s, (long)n);
+    d->len += n;
+    d->b[d->len] = 0;
+}
+
 static int report(void) {
-    char p[1024], sum[32768], sv[1 << 16], unc[8192], md_surv[16384]; size_t n; char *tsv, *s, *e; int N = 0, K = 0, S = 0, C = 0, CN = 0, CK = 0, CS = 0, sk = 0, missing = 0, verdict;
-    int A = 0, CW = 0, uk = 0, md_N = 0, md_K = 0, md_S = 0, md_L = 0, md_A = 0, mdk = 0; char **AU, **AJ; int nau, naj;
+    char p[1024], sv[1 << 16], unc[8192]; size_t n; char *tsv, *s, *e; int N = 0, K = 0, S = 0, C = 0, CN = 0, CK = 0, CS = 0, sk = 0, missing = 0, verdict;
+    int A = 0, CW = 0, uk = 0, md_N = 0, md_K = 0, md_S = 0, md_L = 0, md_A = 0, md_F = 0, md_C = 0, md_D = 0; char **AU, **AJ; int nau, naj;
+    DynBuf sum_buf = {0}, md_buf = {0};
     FILE *quality_file = 0;
     int qualities[Q_INVALID + 1] = {0}, qa = 0;
     load_conf();
     if (g_scope_product && !g_cov) die2("--scope product requires --coverage-check", "");
+    if (g_scope_product && (!g_build_cmd || !g_build_cmd[0])) die2("--scope product requires --build", "");
     nau = load_list(g_allow_unc, &AU); naj = load_list(g_adjud, &AJ);
-    unc[0] = 0; md_surv[0] = 0;
+    unc[0] = 0;
     cx_fmt(p, sizeof p, "%s/mutants.tsv", g_out); tsv = slurp(p, &n); if (!tsv) die2("missing", p);
     if (g_quality) {
         cx_fmt(p, sizeof p, "%s/mutation-quality.tsv", g_out);
@@ -1026,25 +1192,48 @@ static int report(void) {
         int qrc = (r && field(r, 4, qrc_s, sizeof qrc_s) && strcmp(qrc_s, "-")) ? atoi(qrc_s) : 0;
         int qchk = (r && field(r, 5, qchk_s, sizeof qchk_s) && strcmp(qchk_s, "-")) ? atoi(qchk_s) : -1;
         int unexec = !r || q == Q_INVALID || !strncmp(r, "compile_fail", 12) || !strncmp(r, "build_fail", 10);
-        int cov_live_kill = iscov && !unexec && (q == Q_NAMED || q == Q_WEAK || (q == Q_UNKNOWN && qrc == 139 && !check_log_has_infra(id, qchk)));
+        char pm_path[1024];
+        cx_fmt(pm_path, sizeof pm_path, "%s/m/%d.probed", g_out, id);
+        int probed = g_scope_product && iscov && sy_exists(pm_path) == 1;
+        int cov_live_kill = iscov && !unexec && probed && !check_log_has_infra(id, qchk) && (q == Q_NAMED || q == Q_WEAK || (q == Q_UNKNOWN && (qrc == 139 || qrc == 134 || qrc == 135)));
+        int prod_named_kill = g_scope_product && !iscov && !unexec && q == Q_NAMED && check_log_has_named_assert(id, qchk);
         if (g_scope_product) {
+            char linebuf[2048];
             if (!iscov) {
                 md_N++;
-                if (unexec || (q != Q_NAMED && q != Q_WEAK && q != Q_SURVIVED)) {
-                    md_L++;
-                    if (mdk < (int)sizeof md_surv - 1200)
-                        mdk += snprintf(md_surv + mdk, sizeof md_surv - mdk, "MD_SURVIVOR %s %s %s\n", fl, ln, kd);
-                } else if (q == Q_NAMED || q == Q_WEAK) {
+                if (prod_named_kill) {
                     md_K++;
-                } else {
+                } else if (!unexec && q == Q_SURVIVED) {
                     md_S++; md_A += is_adj;
-                    if (!is_adj && mdk < (int)sizeof md_surv - 1200)
-                        mdk += snprintf(md_surv + mdk, sizeof md_surv - mdk, "MD_SURVIVOR %s %s %s\n", fl, ln, kd);
+                    if (!is_adj) {
+                        if (!cx_fmt(linebuf, sizeof linebuf, "MD_SURVIVOR %s %s %s\n", fl, ln, kd))
+                            dyn_app(&md_buf, linebuf, strlen(linebuf));
+                    }
+                } else {
+                    const char *why = (!r || q == Q_INVALID) ? "missing"
+                        : !strncmp(r, "compile_fail", 12) ? "compile_fail"
+                        : !strncmp(r, "build_fail", 10) ? "build_fail"
+                        : (q == Q_UNKNOWN && qrc == 124) ? "timeout"
+                        : "infra";
+                    md_L++;
+                    if (!cx_fmt(linebuf, sizeof linebuf, "MD_NOT_LIVE %s %s %s %s\n", fl, ln, kd, why))
+                        dyn_app(&md_buf, linebuf, strlen(linebuf));
                 }
-            } else if (!cov_live_kill) {
-                md_L++;
-                if (mdk < (int)sizeof md_surv - 1200)
-                    mdk += snprintf(md_surv + mdk, sizeof md_surv - mdk, "MD_SURVIVOR %s %s cov\n", fl, ln);
+            } else {
+                md_F++;
+                if (cov_live_kill) {
+                    md_C++;
+                } else {
+                    const char *why = (!r || q == Q_INVALID) ? "missing"
+                        : !strncmp(r, "compile_fail", 12) ? "compile_fail"
+                        : !strncmp(r, "build_fail", 10) ? "build_fail"
+                        : (q == Q_UNKNOWN && qrc == 124) ? "timeout"
+                        : (check_log_has_infra(id, qchk) || (qrc >= 125 && qrc <= 127) || qrc == 137 || qrc == 143) ? "infra"
+                        : "cov";
+                    md_D++;
+                    if (!cx_fmt(linebuf, sizeof linebuf, "MD_NOT_LIVE %s %s cov %s\n", fl, ln, why))
+                        dyn_app(&md_buf, linebuf, strlen(linebuf));
+                }
             }
         }
         if (quality_file) {
@@ -1102,15 +1291,26 @@ static int report(void) {
     int NA = N - A; double sa = NA > 0 ? (double)K / NA : (N > 0 ? 1.0 : 0.0);
     /* uncovered > 0 fails unless every uncovered function is allowed by the reviewer list */
     verdict = (N > 0 && sa + 1e-9 >= g_min && CS == CW && missing == 0) ? 0 : 1;
-    int k2 = snprintf(sum, sizeof sum, "MUTATION_GATE mutants=%d killed=%d survived=%d compile_fail=%d missing=%d score=%d/%d(=%.2f) adjudicated=%d score_adj=%d/%d(=%.2f) min=%.2f verdict=%s\n", N, K, S, C, missing, K, N, sc, A, K, NA, sa, g_min, verdict ? "FAIL" : "PASS");
-    if (g_cov && k2 < (int)sizeof sum - 1) k2 += snprintf(sum + k2, sizeof sum - k2, "MUTATION_COVERAGE funcs=%d covered=%d uncovered=%d allowed=%d\n%s", CN, CK, CS, CW, unc);
-    int md_verdict = (md_N > 0 && (md_S - md_A) == 0 && md_L == 0) ? 0 : 1;
-    if (g_scope_product && k2 < (int)sizeof sum - 1) {
-        k2 += snprintf(sum + k2, sizeof sum - k2, "MUTATION_DIFF scope=product hunks=%d mutants=%d killed=%d survived=%d not_live=%d adjudicated=%d verdict=%s\n%s",
-                       g_hunks, md_N, md_K, md_S, md_L, md_A, md_verdict ? "FAIL" : "PASS", md_surv);
+    if (g_scope_product && (md_K + md_S + md_L != md_N || md_C + md_D != md_F))
+        die2("MUTATION_DIFF accounting mismatch", "");
+    { char head[16384];
+      int hk = snprintf(head, sizeof head, "MUTATION_GATE mutants=%d killed=%d survived=%d compile_fail=%d missing=%d score=%d/%d(=%.2f) adjudicated=%d score_adj=%d/%d(=%.2f) min=%.2f verdict=%s\n", N, K, S, C, missing, K, N, sc, A, K, NA, sa, g_min, verdict ? "FAIL" : "PASS");
+      if (hk > 0) dyn_app(&sum_buf, head, (size_t)hk < sizeof head ? (size_t)hk : sizeof head - 1);
+      if (g_cov && !cx_fmt(head, sizeof head, "MUTATION_COVERAGE funcs=%d covered=%d uncovered=%d allowed=%d\n%s", CN, CK, CS, CW, unc))
+          dyn_app(&sum_buf, head, strlen(head));
     }
-    cx_fmt(p, sizeof p, "%s/SUMMARY", g_out); spit(p, sum, (size_t)k2);
-    fputs(sum, stdout);
+    int md_verdict = (md_N > 0 && (md_S - md_A) == 0 && md_L == 0 && md_D == 0) ? 0 : 1;
+    if (g_scope_product) {
+        char mdline[512];
+        if (!cx_fmt(mdline, sizeof mdline, "MUTATION_DIFF scope=product hunks=%d mutants=%d killed=%d survived=%d not_live=%d cov_funcs=%d cov_live=%d cov_not_live=%d adjudicated=%d verdict=%s\n",
+                    g_hunks, md_N, md_K, md_S, md_L, md_F, md_C, md_D, md_A, md_verdict ? "FAIL" : "PASS"))
+            dyn_app(&sum_buf, mdline, strlen(mdline));
+        if (md_buf.len) dyn_app(&sum_buf, md_buf.b, md_buf.len);
+    }
+    cx_fmt(p, sizeof p, "%s/SUMMARY", g_out); spit(p, sum_buf.b ? sum_buf.b : "", sum_buf.len);
+    if (sum_buf.b) fputs(sum_buf.b, stdout);
+    if (md_buf.b) mm_free(md_buf.b);
+    if (sum_buf.b) mm_free(sum_buf.b);
     printf("MG_SURVIVORS %s/survivors.tsv\n", g_out);
     write_session((g_scope_product ? md_N : N) ? "done" : "done-empty");
     if (g_scope_product) return md_N == 0 ? 2 : md_verdict;
@@ -1127,14 +1327,17 @@ static int run_all(const char *self) {
         cx_fmt(cmd, sizeof cmd, "setsid timeout -k 5 %d sh ./unisacc.com %s -- worker --out %s --slot %d > %s/worker-%d.log 2>&1 < /dev/null & echo $! > %s/worker-%d.pid", g_deadline, qs, q3, i, q3, i, q3, i);
         rc = sh(cmd, out, sizeof out, 30); if (rc) die2("spawn worker", "");
     }
-    /* bounded wait: total deadline g_deadline s, poll every 250 ms */
-    for (int it = 0; it < g_deadline * 4 + 20; it++) {
+    /* bounded wait: total deadline g_deadline s; default mode keeps 2 s poll, product scope polls every 250 ms */
+    { int poll_ms = g_scope_product ? 250 : 2000;
+      int max_it = g_scope_product ? (g_deadline * 4 + 20) : (g_deadline / 2 + 10);
+      for (int it = 0; it < max_it; it++) {
         int done = 0; char p[1024];
         for (i = 0; i < g_par; i++) { cx_fmt(p, sizeof p, "%s/done-%d", g_out, i); if (sy_exists(p)) done++; }
         if (done == g_par) break;
         /* a worker whose process group is gone without done marker counts as finished (missing rows reported) */
         { int alive = 0; for (i = 0; i < g_par; i++) { char sc[2048]; cx_fmt(sc, sizeof sc, "kill -0 \"$(cat %s/worker-%d.pid)\" 2>/dev/null", q3, i); if (sh(sc, 0, 0, 5) == 0) alive++; } if (alive == 0) break; }
-        sy_sleep_ms(250);
+        sy_sleep_ms(poll_ms);
+      }
     }
     /* clean leftovers by real PGID (setsid: pgid == pid) */
     for (i = 0; i < g_par; i++) { cx_fmt(cmd, sizeof cmd, "p=$(cat %s/worker-%d.pid 2>/dev/null) && kill -0 \"$p\" 2>/dev/null && kill -TERM -- -\"$p\" 2>/dev/null; true", q3, i); sh(cmd, 0, 0, 5); }
@@ -1315,7 +1518,9 @@ int main(int argc, char **argv) {
     if (!g_out) die2("usage", "--out required");
     if (g_scope_product && !g_cov && (!strcmp(mode, "prep") || !strcmp(mode, "run")))
         die2("--scope product requires --coverage-check", "");
-    if (g_expect_n && (!g_quality || (strcmp(mode, "run") && strcmp(mode, "prep"))))
+    if (g_scope_product && (!g_build_cmd || !g_build_cmd[0]) && (!strcmp(mode, "prep") || !strcmp(mode, "run")))
+        die2("--scope product requires --build", "");
+    if (g_expect_n && (!(g_quality || g_scope_product) || (strcmp(mode, "run") && strcmp(mode, "prep"))))
         die2("usage", "check expectations require run or prep with --report");
     if (!strcmp(mode, "prep")) { prep(); return 0; }
     if (!strcmp(mode, "worker")) { if (g_slot < 0) die2("usage", "--slot"); worker(); return 0; }
