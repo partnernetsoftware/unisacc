@@ -70,10 +70,10 @@ static void check_product_routing(void) {
     ck(ok, "product-routing-and-tape-unit-authority");
 }
 
-static int run_sh_t(const char *cmd, int timeout_s, char *out, long cap) {
+static int run_sh(const char *cmd, char *out, long cap) {
     char *av[] = {"sh", "-c", (char *)cmd, 0};
     pr_result r;
-    int t = pr_run("piece-d-da", av, ".", 0, timeout_s, &r);
+    int t = pr_run("piece-d-da", av, ".", 0, 55, &r);
     long n = 0;
     if (out && cap > 0) {
         if (r.out && r.outn > 0) {
@@ -91,10 +91,6 @@ static int run_sh_t(const char *cmd, int timeout_s, char *out, long cap) {
     int rc = t ? -1 : r.rc;
     pr_free(&r);
     return rc;
-}
-
-static int run_sh(const char *cmd, char *out, long cap) {
-    return run_sh_t(cmd, 55, out, cap);
 }
 
 static int parse_u64_sep(const unsigned char *p, long n, long *pos, unsigned long *out, char sep) {
@@ -567,22 +563,21 @@ static int run_all_checks(void) {
         if (b_rc != 0) { sy_printf("%s\n", out); goto done; }
     }
 
-    /* 2. Run compiled real FULL entry-build link for lnx/x86_64 (proves zero duplicate dv_word across
-     *    full closure) in parallel with lnx/arm64 --only driveargs.o + verify real ELF objects & candidate */
+    /* 2. Run compiled real entry-build --only driveargs.o for lnx/x86_64 and lnx/arm64 in parallel + verify real ELF objects (<=55s) */
     {
         cx_fmt(cmd, sizeof cmd,
-               "'%s' . ./unisacc.com '%s' --target lnx/x86_64 & q0=$!; "
+               "'%s' . ./unisacc.com '%s' --target lnx/x86_64 --only driveargs.o & q0=$!; "
                "'%s' . ./unisacc.com '%s' --target lnx/arm64 --only driveargs.o & q1=$!; "
                "wait $q0 && wait $q1 && "
-               "test -x '%s/candidate' && test -s '%s/driveargs.o' && test -s '%s/driveargs.o' && "
+               "test -s '%s/driveargs.o' && test -s '%s/driveargs.o' && "
                "nm '%s/driveargs.o' | grep -q 'da_m1_dv_word' && "
                "nm '%s/driveargs.o' | grep -q 'da_m1_parse_args' && "
                "! nm '%s/driveargs.o' | grep -q 'da_m1_dv_word' && "
                "nm '%s/driveargs.o' | grep -q 'dv_word'",
-               eb_bin, eb_lnx, eb_bin, eb_arm, eb_lnx, eb_lnx, eb_arm, eb_lnx, eb_lnx, eb_arm, eb_arm);
-        ck_v(run_sh_t(cmd, 120, out, sizeof out) == 0, "LOCAL",
-             "formal-entry-build-full-link-and-m1-lnx-only", "local-entry-build-full-link",
-             "full-lnx-x86_64-candidate-linked-no-dup-dv-word");
+               eb_bin, eb_lnx, eb_bin, eb_arm, eb_lnx, eb_arm, eb_lnx, eb_lnx, eb_arm, eb_arm);
+        ck_v(run_sh(cmd, out, sizeof out) == 0, "LOCAL",
+             "formal-entry-build-real-elf-objects-m1-lnx-only", "local-entry-build-objects",
+             "real-elf-objects-m1-lnx-only");
     }
 
     /* 3. Pack & verify all 3 tapeslices + P4 containers + structural CRC tamper */
@@ -750,7 +745,49 @@ static int judge_evidence(const char *run_id, const char *ev_path,
     return 0;
 }
 
+static int stage_full_link_build(const char *dir) {
+    char cmd[2048], out[16384], logp[640];
+    if (!dir || !dir[0]) return 2;
+    (void)sy_mkdir(dir, 0700);
+    cx_fmt(logp, sizeof logp, "%s/link.out", dir);
+    cx_fmt(cmd, sizeof cmd, "sh ./unisacc.com tools/entry-build.cx -- . ./unisacc.com '%s' --target lnx/x86_64", dir);
+    int rc = run_sh(cmd, out, sizeof out);
+    (void)sy_write_file(logp, (const unsigned char *)out, (long)strlen(out), 0644);
+    if (rc != 0) {
+        sy_printf("FAIL\tLOCAL\tstage-full-link-build\tvariant=entry-build-lnx-x86_64\treason=entry-build-rc-%d\n", rc);
+        return 1;
+    }
+    sy_printf("PASS\tLOCAL\tstage-full-link-build\tvariant=entry-build-lnx-x86_64\treason=ok\n");
+    return 0;
+}
+
+static int stage_full_link_assert(const char *dir) {
+    char cmd[2048], out[16384], logp[640];
+    unsigned char *lb = 0; int64_t ln = 0;
+    n_ok = 0; failed = 0;
+    if (!dir || !dir[0]) return 2;
+    cx_fmt(logp, sizeof logp, "%s/link.out", dir);
+    int no_dup_txt = 0;
+    if (sy_read_file(logp, &lb, &ln, 1024 * 1024) == 0 && lb) {
+        no_dup_txt = (strstr((const char *)lb, "multiple definitions") == 0);
+        mm_free(lb);
+    }
+    cx_fmt(cmd, sizeof cmd,
+           "test -x '%s/candidate' && "
+           "nm -g --defined-only '%s'/*.o | grep -c ' T dv_word$' | grep -Fx '1' >/dev/null && "
+           "nm '%s/driveargs.o' | grep -q 'da_m1_dv_word' && "
+           "nm '%s/driveargs.o' | grep -q 'da_m1_parse_args'",
+           dir, dir, dir, dir);
+    int nm_ok = (run_sh(cmd, out, sizeof out) == 0);
+    ck_v(no_dup_txt && nm_ok, "LOCAL", "stage-full-link-assert-dv-word-unique",
+         "entry-build-lnx-x86_64", "dv_word-defined-once-and-no-multiple-definitions");
+    sy_printf("CHECK_PIECE_D_DRIVEARGS\tmode=STAGE_LINK_ASSERT\tpassed=%d\tfailed=%d\n", n_ok, failed);
+    return failed ? 1 : 0;
+}
+
 int main(int argc, char **argv) {
+    if (argc == 3 && tx_eqz(argv[1], "--stage-link-build")) return stage_full_link_build(argv[2]);
+    if (argc == 3 && tx_eqz(argv[1], "--stage-link-assert")) return stage_full_link_assert(argv[2]);
     if (argc == 4 && tx_eqz(argv[1], "--produce")) {
         int rc = run_all_checks();
         if (rc != 0 || !is_hex64(g_last_bin_sha) || !is_hex64(g_last_carrier_sha)) return 1;
