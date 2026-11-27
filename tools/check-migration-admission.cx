@@ -1,8 +1,9 @@
 /* tools/check-migration-admission.cx -- migration admission gate (owner directive + fable ruling).
- * Checks plans/migration-admission.tsv against plans/slice-units.tsv and prd_mempalace.md.
+ * Checks plans/migration-admission.tsv against plans/slice-units.tsv, prd_mempalace.md,
+ * and bound level=product receipts under build/admission-receipts/<unit>.rcpt.
  * Modes:
  *   default / --repo DIR   validate repository migration admission state
- *   --selftest             run 8 self-tests (valid + 7 refusal mutations)
+ *   --selftest             run 12 self-tests (valid-with-receipt + 11 refusal mutations)
  *   --produce ID PATH      run selftest and write run-id bound evidence
  *   --judge ID PATH        verify run-id bound evidence for mutation-gate execution
  */
@@ -50,11 +51,25 @@ static int cma_parse_i64(const char *s, int64_t *out) {
 
 static int cma_parse_double(const char *s, double *out) {
     if (!s || !s[0]) return -1;
+    if (s[0] == '-' || s[0] == 'n' || s[0] == 'N' || s[0] == 'i' || s[0] == 'I') return -1;
     char *end = 0;
     double v = strtod(s, &end);
     if (!end || *end != 0) return -1;
+    if (!(v == v) || v < 0.0 || v > 1e15) return -1;
     *out = v;
     return 0;
+}
+
+static int cma_rcpt_has(const char *buf, size_t len, const char *key, const char *val) {
+    char pat[512];
+    if (cx_fmt(pat, sizeof pat, "%s\t%s\n", key, val)) return 0;
+    return tx_find(buf, (long)len, pat, (long)strlen(pat)) >= 0;
+}
+
+static int cma_rcpt_has_prefix(const char *buf, size_t len, const char *key) {
+    char pat[128];
+    if (cx_fmt(pat, sizeof pat, "%s\t", key)) return 0;
+    return tx_find(buf, (long)len, pat, (long)strlen(pat)) >= 0;
 }
 
 static int cma_count_data_lines(const char *buf, size_t len) {
@@ -149,8 +164,8 @@ static int check_repo(const char *repo_dir, int verbose, int *out_pass, int *out
                 if (!line) { failed++; break; }
                 mm_copy(line, l + 1, ma + i, l);
                 line[l] = 0;
-                char *cols[20];
-                int nc = cma_split_tabs(line, cols, 20);
+                char *cols[22];
+                int nc = cma_split_tabs(line, cols, 22);
                 rows++;
                 if (nc < 18) {
                     failed++;
@@ -169,6 +184,7 @@ static int check_repo(const char *repo_dir, int verbose, int *out_pass, int *out
                     const char *source_kind = cols[12];
                     const char *verdict = cols[16];
                     const char *veto_reason = cols[17];
+
                     if (nc >= 20) {
                         const char *gen_friendly = cols[18];
                         const char *entries_n_s = cols[19];
@@ -196,6 +212,21 @@ static int check_repo(const char *repo_dir, int verbose, int *out_pass, int *out
                                strcmp(veto_reason, "blocked") != 0) {
                         failed++;
                         if (verbose) printf("FAIL\tveto-reason-invalid\tunit=%s\treason=%s\n", unit, veto_reason);
+                    }
+
+                    if (strcmp(verdict, "ADMIT") != 0 && strcmp(verdict, "VETO") != 0 && strcmp(verdict, "PENDING") != 0) {
+                        failed++;
+                        if (verbose) printf("FAIL\tbad-verdict\tunit=%s\tverdict=%s\n", unit, verdict);
+                    } else if (strcmp(verdict, "ADMIT") == 0 && veto_reason[0] != 0 && strcmp(veto_reason, "-") != 0) {
+                        failed++;
+                        if (verbose) printf("FAIL\tadmit-has-veto-reason\tunit=%s\treason=%s\n", unit, veto_reason);
+                    } else if (strcmp(verdict, "VETO") == 0 &&
+                               strcmp(veto_reason, "correctness") != 0 &&
+                               strcmp(veto_reason, "speed") != 0 &&
+                               strcmp(veto_reason, "maintain") != 0 &&
+                               strcmp(veto_reason, "blocked") != 0) {
+                        failed++;
+                        if (verbose) printf("FAIL\tveto-missing-or-bad-reason\tunit=%s\treason=%s\n", unit, veto_reason);
                     }
 
                     if (strcmp(calls_s, "UNMEASURED") != 0) measured_calls_n++;
@@ -250,6 +281,34 @@ static int check_repo(const char *repo_dir, int verbose, int *out_pass, int *out
                             row_ok = 0;
                             if (verbose) printf("FAIL\tadmit-bad-source-kind\tunit=%s\tsource=%s\n", unit, source_kind);
                         }
+
+                        /* Require bound level=product receipt matching typed values */
+                        char rp[4400];
+                        if (cx_fmt(rp, sizeof rp, "%s/build/admission-receipts/%s.rcpt", repo_dir, unit)) {
+                            row_ok = 0;
+                        } else {
+                            size_t rn = 0;
+                            char *rb = cma_read_file(rp, &rn);
+                            if (!rb) {
+                                row_ok = 0;
+                                if (verbose) printf("FAIL\tadmit-missing-receipt\tunit=%s\n", unit);
+                            } else {
+                                if (!cma_rcpt_has_prefix(rb, rn, "run_id") ||
+                                    !cma_rcpt_has_prefix(rb, rn, "candidate_sha") ||
+                                    !cma_rcpt_has(rb, rn, "level", "product")) {
+                                    row_ok = 0;
+                                    if (verbose) printf("FAIL\tadmit-level-not-product\tunit=%s\n", unit);
+                                } else if (!cma_rcpt_has(rb, rn, "golden_pass", golden_pass_s) ||
+                                           !cma_rcpt_has(rb, rn, "calls_per_run", calls_s) ||
+                                           !cma_rcpt_has(rb, rn, "steps_per_call", steps_s) ||
+                                           !cma_rcpt_has(rb, rn, "blockers_n", blockers_s)) {
+                                    row_ok = 0;
+                                    if (verbose) printf("FAIL\tadmit-receipt-mismatch\tunit=%s\n", unit);
+                                }
+                                mm_free(rb);
+                            }
+                        }
+
                         if (!row_ok) failed++;
                     }
                 }
@@ -284,11 +343,12 @@ static int check_repo(const char *repo_dir, int verbose, int *out_pass, int *out
     return failed ? 1 : 0;
 }
 
-static int setup_mock_repo(const char *dir, const char *ma_row, const char *mp_text) {
+static int setup_mock_repo(const char *dir, const char *ma_row, const char *mp_text, const char *rcpt_text) {
     char p[4400], cmd[4600];
-    if (cx_fmt(cmd, sizeof cmd, "%s/plans", dir)) return -1;
     sy_mkdir(dir, 0755);
-    sy_mkdir(cmd, 0755);
+    cx_fmt(cmd, sizeof cmd, "%s/plans", dir); sy_mkdir(cmd, 0755);
+    cx_fmt(cmd, sizeof cmd, "%s/build", dir); sy_mkdir(cmd, 0755);
+    cx_fmt(cmd, sizeof cmd, "%s/build/admission-receipts", dir); sy_mkdir(cmd, 0755);
     if (cx_fmt(p, sizeof p, "%s/plans/slice-units.tsv", dir)) return -1;
     const char *su_line = "m25.o\tcx/m25.cx\tm25\t-\t100\t0\t0\t-\tok\n";
     if (cma_write_file(p, su_line, strlen(su_line)) != 0) return -1;
@@ -297,6 +357,10 @@ static int setup_mock_repo(const char *dir, const char *ma_row, const char *mp_t
     if (ma_row) {
         if (cx_fmt(p, sizeof p, "%s/plans/migration-admission.tsv", dir)) return -1;
         if (cma_write_file(p, ma_row, strlen(ma_row)) != 0) return -1;
+    }
+    if (rcpt_text) {
+        if (cx_fmt(p, sizeof p, "%s/build/admission-receipts/m25.o.rcpt", dir)) return -1;
+        if (cma_write_file(p, rcpt_text, strlen(rcpt_text)) != 0) return -1;
     }
     return 0;
 }
@@ -307,54 +371,80 @@ static int run_selftest(int verbose) {
     const char *base = fsx_scratch_dir(sc);
     char d[4400];
     const char *ok_row = "m25.o\ttable\tenum-full\t10\t10\tstartup\t2\t100\t22.36\t100.0\tdriveargs\t0\ttable\t1200\t9405\t-8205\tADMIT\t-\n";
+    const char *ok_rcpt = "run_id\trid1\ncandidate_sha\tabc123\nlevel\tproduct\ngolden_pass\t10\ncalls_per_run\t2\nsteps_per_call\t100\nblockers_n\t0\n";
+    const char *tbl_rcpt = "run_id\trid1\ncandidate_sha\tabc123\nlevel\ttable\ngolden_pass\t10\ncalls_per_run\t2\nsteps_per_call\t100\nblockers_n\t0\n";
 
-    /* 1. valid-admit-pass */
+    /* 1. valid-admit-with-receipt-pass */
     cx_fmt(d, sizeof d, "%s/t1", base);
-    setup_mock_repo(d, ok_row, "# clean\n");
-    if (check_repo(d, 0, 0, 0) == 0) { passed++; if (verbose) printf("PASS\tvalid-admit-pass\n"); }
-    else { failed++; if (verbose) printf("FAIL\tvalid-admit-pass\n"); }
+    setup_mock_repo(d, ok_row, "# clean\n", ok_rcpt);
+    if (check_repo(d, 0, 0, 0) == 0) { passed++; if (verbose) printf("PASS\tvalid-admit-with-receipt-pass\n"); }
+    else { failed++; if (verbose) printf("FAIL\tvalid-admit-with-receipt-pass\n"); }
 
-    /* 2. mut-missing-table-refused */
+    /* 2. mut-admit-no-receipt-refused */
     cx_fmt(d, sizeof d, "%s/t2", base);
-    setup_mock_repo(d, 0, "# clean\n");
+    setup_mock_repo(d, ok_row, "# clean\n", 0);
+    if (check_repo(d, 0, 0, 0) != 0) { passed++; if (verbose) printf("PASS\tmut-admit-no-receipt-refused\n"); }
+    else { failed++; if (verbose) printf("FAIL\tmut-admit-no-receipt-refused\n"); }
+
+    /* 3. mut-admit-level-table-only-refused */
+    cx_fmt(d, sizeof d, "%s/t3", base);
+    setup_mock_repo(d, ok_row, "# clean\n", tbl_rcpt);
+    if (check_repo(d, 0, 0, 0) != 0) { passed++; if (verbose) printf("PASS\tmut-admit-level-table-only-refused\n"); }
+    else { failed++; if (verbose) printf("FAIL\tmut-admit-level-table-only-refused\n"); }
+
+    /* 4. mut-cost-nan-refused */
+    cx_fmt(d, sizeof d, "%s/t4", base);
+    setup_mock_repo(d, "m25.o\ttable\tenum-full\t10\t10\tstartup\t2\t100\tNaN\t100.0\tdriveargs\t0\ttable\t1200\t9405\t-8205\tADMIT\t-\n", "# clean\n", ok_rcpt);
+    if (check_repo(d, 0, 0, 0) != 0) { passed++; if (verbose) printf("PASS\tmut-cost-nan-refused\n"); }
+    else { failed++; if (verbose) printf("FAIL\tmut-cost-nan-refused\n"); }
+
+    /* 5. mut-cost-neg-refused */
+    cx_fmt(d, sizeof d, "%s/t5", base);
+    setup_mock_repo(d, "m25.o\ttable\tenum-full\t10\t10\tstartup\t2\t100\t-1.0\t100.0\tdriveargs\t0\ttable\t1200\t9405\t-8205\tADMIT\t-\n", "# clean\n", ok_rcpt);
+    if (check_repo(d, 0, 0, 0) != 0) { passed++; if (verbose) printf("PASS\tmut-cost-neg-refused\n"); }
+    else { failed++; if (verbose) printf("FAIL\tmut-cost-neg-refused\n"); }
+
+    /* 6. mut-admit-with-veto-reason-refused */
+    cx_fmt(d, sizeof d, "%s/t6", base);
+    setup_mock_repo(d, "m25.o\ttable\tenum-full\t10\t10\tstartup\t2\t100\t22.36\t100.0\tdriveargs\t0\ttable\t1200\t9405\t-8205\tADMIT\tspeed\n", "# clean\n", ok_rcpt);
+    if (check_repo(d, 0, 0, 0) != 0) { passed++; if (verbose) printf("PASS\tmut-admit-with-veto-reason-refused\n"); }
+    else { failed++; if (verbose) printf("FAIL\tmut-admit-with-veto-reason-refused\n"); }
+
+    /* 7. mut-veto-empty-reason-refused */
+    cx_fmt(d, sizeof d, "%s/t7", base);
+    setup_mock_repo(d, "m25.o\ttable\tenum-full\t10\t10\tstartup\t2\t100\t22.36\t100.0\tdriveargs\t0\ttable\t1200\t9405\t-8205\tVETO\t-\n", "# clean\n", ok_rcpt);
+    if (check_repo(d, 0, 0, 0) != 0) { passed++; if (verbose) printf("PASS\tmut-veto-empty-reason-refused\n"); }
+    else { failed++; if (verbose) printf("FAIL\tmut-veto-empty-reason-refused\n"); }
+
+    /* 8. mut-missing-table-refused */
+    cx_fmt(d, sizeof d, "%s/t8", base);
+    setup_mock_repo(d, 0, "# clean\n", 0);
     if (check_repo(d, 0, 0, 0) != 0) { passed++; if (verbose) printf("PASS\tmut-missing-table-refused\n"); }
     else { failed++; if (verbose) printf("FAIL\tmut-missing-table-refused\n"); }
 
-    /* 3. mut-withdrawn-size-veto-text-refused */
-    cx_fmt(d, sizeof d, "%s/t3", base);
-    setup_mock_repo(d, ok_row, "\xe5\x8d\x95\xe5\x8d\x95\xe5\x85\x83\xe5\x87\x80\xe9\x99\x8d\xe4\xb8\x8d\xe8\xb6\xb3 2,000 B \xe5\x9b\x9e\xe9\x80\x80\xe5\x8e\x9f\xe7\x94\x9f\n");
+    /* 9. mut-withdrawn-size-veto-text-refused */
+    cx_fmt(d, sizeof d, "%s/t9", base);
+    setup_mock_repo(d, ok_row, "\xe5\x8d\x95\xe5\x8d\x95\xe5\x85\x83\xe5\x87\x80\xe9\x99\x8d\xe4\xb8\x8d\xe8\xb6\xb3 2,000 B \xe5\x9b\x9e\xe9\x80\x80\xe5\x8e\x9f\xe7\x94\x9f\n", ok_rcpt);
     if (check_repo(d, 0, 0, 0) != 0) { passed++; if (verbose) printf("PASS\tmut-withdrawn-size-veto-text-refused\n"); }
     else { failed++; if (verbose) printf("FAIL\tmut-withdrawn-size-veto-text-refused\n"); }
 
-    /* 4. mut-veto-reason-size-refused */
-    cx_fmt(d, sizeof d, "%s/t4", base);
-    setup_mock_repo(d, "m25.o\ttable\tenum-full\t10\t10\tstartup\t2\t100\t22.36\t100.0\tdriveargs\t0\ttable\t1200\t9405\t-8205\tVETO\tsize\n", "# clean\n");
+    /* 10. mut-veto-reason-size-refused */
+    cx_fmt(d, sizeof d, "%s/t10", base);
+    setup_mock_repo(d, "m25.o\ttable\tenum-full\t10\t10\tstartup\t2\t100\t22.36\t100.0\tdriveargs\t0\ttable\t1200\t9405\t-8205\tVETO\tsize\n", "# clean\n", ok_rcpt);
     if (check_repo(d, 0, 0, 0) != 0) { passed++; if (verbose) printf("PASS\tmut-veto-reason-size-refused\n"); }
     else { failed++; if (verbose) printf("FAIL\tmut-veto-reason-size-refused\n"); }
 
-    /* 5. mut-admit-calls-unmeasured-refused */
-    cx_fmt(d, sizeof d, "%s/t5", base);
-    setup_mock_repo(d, "m25.o\ttable\tenum-full\t10\t10\tstartup\tUNMEASURED\t100\t22.36\t100.0\tdriveargs\t0\ttable\t1200\t9405\t-8205\tADMIT\t-\n", "# clean\n");
+    /* 11. mut-admit-calls-unmeasured-refused */
+    cx_fmt(d, sizeof d, "%s/t11", base);
+    setup_mock_repo(d, "m25.o\ttable\tenum-full\t10\t10\tstartup\tUNMEASURED\t100\t22.36\t100.0\tdriveargs\t0\ttable\t1200\t9405\t-8205\tADMIT\t-\n", "# clean\n", ok_rcpt);
     if (check_repo(d, 0, 0, 0) != 0) { passed++; if (verbose) printf("PASS\tmut-admit-calls-unmeasured-refused\n"); }
     else { failed++; if (verbose) printf("FAIL\tmut-admit-calls-unmeasured-refused\n"); }
 
-    /* 6. mut-golden-pass-lt-cases-refused */
-    cx_fmt(d, sizeof d, "%s/t6", base);
-    setup_mock_repo(d, "m25.o\ttable\tenum-full\t10\t9\tstartup\t2\t100\t22.36\t100.0\tdriveargs\t0\ttable\t1200\t9405\t-8205\tADMIT\t-\n", "# clean\n");
+    /* 12. mut-golden-pass-lt-cases-refused */
+    cx_fmt(d, sizeof d, "%s/t12", base);
+    setup_mock_repo(d, "m25.o\ttable\tenum-full\t10\t9\tstartup\t2\t100\t22.36\t100.0\tdriveargs\t0\ttable\t1200\t9405\t-8205\tADMIT\t-\n", "# clean\n", ok_rcpt);
     if (check_repo(d, 0, 0, 0) != 0) { passed++; if (verbose) printf("PASS\tmut-golden-pass-lt-cases-refused\n"); }
     else { failed++; if (verbose) printf("FAIL\tmut-golden-pass-lt-cases-refused\n"); }
-
-    /* 7. mut-hand-source-admit-refused */
-    cx_fmt(d, sizeof d, "%s/t7", base);
-    setup_mock_repo(d, "m25.o\ttable\tenum-full\t10\t10\tstartup\t2\t100\t22.36\t100.0\tdriveargs\t0\thand\t1200\t9405\t-8205\tADMIT\t-\n", "# clean\n");
-    if (check_repo(d, 0, 0, 0) != 0) { passed++; if (verbose) printf("PASS\tmut-hand-source-admit-refused\n"); }
-    else { failed++; if (verbose) printf("FAIL\tmut-hand-source-admit-refused\n"); }
-
-    /* 8. mut-blockers-nonzero-admit-refused */
-    cx_fmt(d, sizeof d, "%s/t8", base);
-    setup_mock_repo(d, "m25.o\ttable\tenum-full\t10\t10\tstartup\t2\t100\t22.36\t100.0\tdriveargs\t1\ttable\t1200\t9405\t-8205\tADMIT\t-\n", "# clean\n");
-    if (check_repo(d, 0, 0, 0) != 0) { passed++; if (verbose) printf("PASS\tmut-blockers-nonzero-admit-refused\n"); }
-    else { failed++; if (verbose) printf("FAIL\tmut-blockers-nonzero-admit-refused\n"); }
 
     fsx_scratch_drop(sc);
     if (verbose) printf("CHECK_MIGRATION_ADMISSION_SELFTEST\tpassed=%d\tfailed=%d\n", passed, failed);
