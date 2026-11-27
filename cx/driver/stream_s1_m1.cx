@@ -3,6 +3,8 @@
 #pragma unisa use runtime.package_decode
 #pragma unisa use runtime.package_lifetime
 #pragma unisa use driver.tape_soload
+#pragma unisa use driver.executor_selection_table
+#pragma unisa use sys.hostid
 #pragma unisa use sys.env
 #pragma unisa use sys.fs
 #pragma unisa use sys.time
@@ -134,19 +136,37 @@ typedef struct {
 static TapeRuntime g_tape_rt;
 static TapeUnitState m53_m1_unit;
 
-static const TapeUnitSpec m53_m1_spec = {
-    "tape/lnx-x86_64/manifest.tsv",
-    "tape/lnx-x86_64/tapemode.so",
-    "tape/lnx-x86_64/m53.tapeslice",
-    "tapemode.so",
-    "m53.tapeslice",
-    "M53S1BIN2",
-    9L,
-    "cxsa_valid",
-    1ULL,
-    2000000ULL,
-    "M53_M1_REFUSE"
-};
+static int m53_m1_eq(const char *a, long al, const char *b, long bl);
+static const ExecutorSel *g_m53_sel;
+static char m53_mf_key[512], m53_so_key[512], m53_sl_key[512], m53_sl_leaf[128];
+static TapeUnitSpec m53_m1_spec;
+static int m53_spec_init(void) {
+    const ExecutorSel *e;
+    long al = 0;
+    if (g_m53_sel) return 0;
+    e = executor_sel_triple(tn_self());
+    if (!e) return -1;
+    if (!m53_m1_eq(e->executor, 3L, "asm", 3L)) return -2;   /* portable producer is not wired here */
+    if (cx_fmt(m53_mf_key, sizeof m53_mf_key, "%s/%s", e->tape_dir, e->manifest_key) ||
+        cx_fmt(m53_so_key, sizeof m53_so_key, "%s/%s", e->tape_dir, e->tapemode_key) ||
+        cx_fmt(m53_sl_key, sizeof m53_sl_key, "%s/%s.tapeslice", e->tape_dir, e->slice_prefix) ||
+        cx_fmt(m53_sl_leaf, sizeof m53_sl_leaf, "%s.tapeslice", e->slice_prefix)) return -1;
+    while (e->abi_tag[al] && al < 128) al++;
+    m53_m1_spec.mf_key = m53_mf_key;
+    m53_m1_spec.so_key = m53_so_key;
+    m53_m1_spec.sl_key = m53_sl_key;
+    m53_m1_spec.so_leaf = e->tapemode_key;
+    m53_m1_spec.sl_leaf = m53_sl_leaf;
+    m53_m1_spec.abi_tag = e->abi_tag;
+    m53_m1_spec.abi_tag_len = al;
+    m53_m1_spec.guest_sym = "cxsa_valid";
+    m53_m1_spec.max_ret = 9L;
+    m53_m1_spec.budget = 2000000ULL;
+    m53_m1_spec.refuse_tag = "M53_M1_REFUSE";
+    g_m53_sel = e;
+    return 0;
+}
+
 
 static long tape_mono_ns(void) {
     sy_ts_t t;
@@ -385,6 +405,11 @@ int m53_m1_extract_tape(const unsigned char *pkg, long pkglen,
                         const unsigned char *out_p[3], long out_n[3],
                         const char **reason_out, int *detail_out) {
     const char *keys[3];
+    if (m53_spec_init() != 0) {
+        *reason_out = "embed-spec-init-failed";
+        *detail_out = 10;
+        return -1;
+    }
     keys[0] = m53_m1_spec.mf_key;
     keys[1] = m53_m1_spec.so_key;
     keys[2] = m53_m1_spec.sl_key;
@@ -802,6 +827,8 @@ static int tape_rt_scan_p4_fd(int fd, long pkg_off, long pkglen,
                     e->crc = (unsigned)fcrc;
                     e->codec = (int)fcod;
                     e->dup = 0;
+                } else {
+                    return -2;
                 }
             }
         } else {
@@ -845,53 +872,170 @@ static unsigned char *tape_fdir_read_checked(int fd, const TapeFDirEntry *e, int
     return buf;
 }
 
+static int m53_fd_pread(int fd, long size, long off, unsigned char *b, long n) {
+    if (off < 0 || n < 0 || off > size || n > size - off) return 0;
+    if (n == 0) return 1;
+    return (sy_lseek(fd, off, 0) == off && sy_read_full(fd, b, n) == 0) ? 1 : 0;
+}
+
+static int m53_pf_num(const unsigned char *b, int n, long limit, long *out) {
+    long v = 0;
+    int i = n - 1;
+    while (i >= 0) {
+        if (v > limit / 256) return 0;
+        v = v * 256;
+        if ((long)b[i] > limit - v) return 0;
+        v = v + (long)b[i];
+        i = i - 1;
+    }
+    *out = v;
+    return 1;
+}
+
+static int m53_fd_zero(int fd, long size, long off, long n) {
+    unsigned char b[8];
+    long i;
+    if (n == 0) return 1;
+    if (n < 0 || n > 7 || !m53_fd_pread(fd, size, off, b, n)) return 0;
+    for (i = 0; i < n; i++) if (b[i]) return 0;
+    return 1;
+}
+
+/* Bounded streaming container locator (O(1) stack memory, zero whole-file alloc).
+ * Matches runtime/packagefooter.cx layout rules:
+ * (1) If MZ/PE, validate PE headers and WIN_CERTIFICATE tail to determine logical end = cert (or apen).
+ * (2) Search UNIPKG1\n footer at end - pad - 16 (pad in 0..7 when signed, else 0); invalid footer fails closed.
+ * (3) Only when not MZ and no UNIPKG1\n footer is present, fall back to raw standalone P4 starting with "P ". */
 static int m53_m1_locate_pkg_fd(int fd, long apen, long *pkg_off_out, long *pkglen_out) {
-    unsigned char h4[4], foot[16];
-    unsigned long long plen;
+    unsigned char b[64], foot[16];
+    long minoff = 0, cert = 0, certlen = 0, end, pos, len, padded;
+    long footer = 0, packlen = 0;
+    int is_mz = 0, pad, found = 0;
+
     if (apen < 4) return -1;
-    if (sy_lseek(fd, 0, 0) != 0 || sy_read_full(fd, h4, 4) != 0) return -1;
-    if (h4[0] == 'P' && h4[1] == ' ') {
+    if (!m53_fd_pread(fd, apen, 0, b, 2)) return -1;
+
+    if (b[0] == 77 && b[1] == 90) {
+        long pe = 0, opt, optsize = 0, dirs = 0, count = 0, sec, sects = 0, raw = 0, rawlen = 0, headers;
+        is_mz = 1;
+        if (apen < 64 || !m53_fd_pread(fd, apen, 0, b, 64)) return -1;
+        if (!m53_pf_num(b + 60, 4, apen, &pe) || pe < 64) return -1;
+        if (!m53_fd_pread(fd, apen, pe, b, 24)) return -1;
+        if (b[0] != 80 || b[1] != 69 || b[2] || b[3]) return -1;
+        if (!m53_pf_num(b + 6, 2, apen, &sects) || !sects) return -1;
+        if (!m53_pf_num(b + 20, 2, apen - pe - 24, &optsize)) return -1;
+        opt = pe + 24;
+        if (optsize < 2 || !m53_fd_pread(fd, apen, opt, b, 2)) return -1;
+        if (b[0] == 11 && b[1] == 1) dirs = 96;
+        if (b[0] == 11 && b[1] == 2) dirs = 112;
+        if (!dirs || optsize < dirs) return -1;
+        if (!m53_fd_pread(fd, apen, opt + dirs - 4, b, 4)) return -1;
+        if (!m53_pf_num(b, 4, (optsize - dirs) / 8, &count) || count < 5) return -1;
+        if (!m53_fd_pread(fd, apen, opt + dirs + 32, b, 8)) return -1;
+        if (!m53_pf_num(b, 4, apen, &cert) || !m53_pf_num(b + 4, 4, apen, &certlen)) return -1;
+        if ((!cert && certlen) || (cert && !certlen)) return -1;
+        if (cert) { if (cert % 8 || certlen < 8 || certlen != apen - cert) return -1; }
+        sec = opt + optsize;
+        if (sects > (apen - sec) / 40) return -1;
+        minoff = sec + sects * 40;
+        if (!m53_fd_pread(fd, apen, opt + 60, b, 4)) return -1;
+        if (!m53_pf_num(b, 4, apen, &raw) || raw < minoff) return -1;
+        minoff = raw;
+        headers = raw;
+        while (sects > 0) {
+            if (!m53_fd_pread(fd, apen, sec, b, 40)) return -1;
+            if (!m53_pf_num(b + 16, 4, apen, &rawlen) || !m53_pf_num(b + 20, 4, apen, &raw)) return -1;
+            if (rawlen) {
+                if (raw < headers || rawlen > apen - raw) return -1;
+                if (raw + rawlen > minoff) minoff = raw + rawlen;
+            }
+            sec = sec + 40;
+            sects = sects - 1;
+        }
+        if (cert && cert < minoff) return -1;
+    }
+
+    if (cert) {
+        pos = cert;
+        while (pos < apen) {
+            if (!m53_fd_pread(fd, apen, pos, b, 8)) return -1;
+            if (!m53_pf_num(b, 4, apen - pos, &len) || len < 8) return -1;
+            if (b[4] != 0 || b[5] != 2 || b[6] != 2 || b[7] != 0) return -1;
+            padded = (8 - len % 8) % 8;
+            if (padded > apen - pos - len || !m53_fd_zero(fd, apen, pos + len, padded)) return -1;
+            pos = pos + len + padded;
+        }
+        if (pos != apen) return -1;
+        end = cert;
+    } else {
+        end = apen;
+    }
+
+    if (end >= 16) {
+        pad = 0;
+        while (pad <= (cert ? 7 : 0)) {
+            pos = end - pad - 16;
+            if (pos >= minoff && m53_fd_zero(fd, apen, end - pad, pad) && m53_fd_pread(fd, apen, pos, foot, 16)) {
+                if (foot[0] == 85 && foot[1] == 78 && foot[2] == 73 && foot[3] == 80 &&
+                    foot[4] == 75 && foot[5] == 71 && foot[6] == 49 && foot[7] == 10) {
+                    if (!m53_pf_num(foot + 8, 8, pos - minoff, &len) || len <= 0) return -1;
+                    found = found + 1;
+                    footer = pos;
+                    packlen = len;
+                }
+            }
+            pad = pad + 1;
+        }
+    }
+
+    if (found == 1) {
+        *pkg_off_out = footer - packlen;
+        *pkglen_out = packlen;
+        return 0;
+    }
+    if (found > 1 || is_mz) return -1;
+
+    /* No UNIPKG1 footer and not MZ: accept raw standalone P4 starting with "P ". */
+    if (b[0] == 'P' && b[1] == ' ') {
         *pkg_off_out = 0;
         *pkglen_out = apen;
         return 0;
     }
-    if (apen >= 16 && sy_lseek(fd, apen - 16, 0) == apen - 16 && sy_read_full(fd, foot, 16) == 0 &&
-        foot[0] == 85 && foot[1] == 78 && foot[2] == 73 && foot[3] == 80 &&
-        foot[4] == 75 && foot[5] == 71 && foot[6] == 49 && foot[7] == 10) {
-        plen = m53_m1_rd_u(foot + 8, 8);
-        if (plen > 0ULL && plen <= (unsigned long long)(apen - 16)) {
-            *pkg_off_out = apen - 16 - (long)plen;
-            *pkglen_out = (long)plen;
-            return 0;
-        }
+    return -1;
+}
+
+/* Direct check entry exercising m53_m1_locate_pkg_fd + tape_rt_scan_p4_fd on an open fd. */
+int m53_m1_locate_and_scan_fd(int fd, long apen, long *pkg_off_out, long *pkglen_out,
+                              int *fdir_n_out, const char **reason_out) {
+    TapeFDirEntry fdir[TAPE_RT_MAX_FDIR];
+    long off = 0, len = 0;
+    int fn = 0, src;
+    if (m53_m1_locate_pkg_fd(fd, apen, &off, &len) != 0) {
+        if (reason_out) *reason_out = "embed-footer-invalid";
+        return -1;
     }
-    {
-        unsigned char *ape = (unsigned char *)mm_alloc(apen);
-        PackageFooter pf;
-        int ok = 0;
-        if (!ape) return -1;
-        if (sy_lseek(fd, 0, 0) == 0 && sy_read_full(fd, ape, apen) == 0 &&
-            packagefooter_locate_bytes(ape, apen, &pf) &&
-            pf.package_offset >= 0 && pf.package_length > 0 &&
-            pf.package_offset + pf.package_length <= apen) {
-            *pkg_off_out = pf.package_offset;
-            *pkglen_out = pf.package_length;
-            ok = 1;
-        }
-        mm_free(ape);
-        return ok ? 0 : -1;
+    src = tape_rt_scan_p4_fd(fd, off, len, fdir, &fn);
+    if (src != 0) {
+        if (reason_out) *reason_out = (src == -2) ? "embed-fdir-overflow" : "embed-pkg-decode-failed";
+        return src;
     }
+    if (pkg_off_out) *pkg_off_out = off;
+    if (pkglen_out) *pkglen_out = len;
+    if (fdir_n_out) *fdir_n_out = fn;
+    if (reason_out) *reason_out = "ok";
+    return 0;
 }
 
 /* Boot or reload the ONE shared TapeRuntime per process (footer + P4 fdir + manifest + tapemode.so). */
 static int tape_rt_ensure(TapeUnitState *u, const TapeUnitSpec *sp, const char *cpath,
                           int *fd_inout, sy_stat_t *st_inout) {
-    static const char *const sym_names[3] = {
-        "hoststub_lnx_x86_64_bind",
-        "hoststub_lnx_x86_64",
-        "tape_run_x86_64"
-    };
+    const char *sym_names[3];
     TapeRuntime *rt = &g_tape_rt;
+    { int sr = m53_spec_init();
+      if (sr != 0 || !g_m53_sel) return tape_unit_fail(u, sp, sr == -2 ? "executor-selection-portable-uncovered" : "executor-selection-unknown", sr); }
+    sym_names[0] = g_m53_sel->hoststub_bind_sym;
+    sym_names[1] = g_m53_sel->hoststub_sym;
+    sym_names[2] = g_m53_sel->run_sym;
     TapeFDirEntry new_fdir[TAPE_RT_MAX_FDIR];
     int new_fn = 0, rc, i;
     long apen, pkg_off = 0, pkglen = 0, mf_len = 0, so_len = 0;
@@ -926,9 +1070,12 @@ static int tape_rt_ensure(TapeUnitState *u, const TapeUnitSpec *sp, const char *
         tape_rt_drop(rt); rt->state = M53_M1_REFUSED;
         return tape_unit_fail(u, sp, "embed-footer-invalid", 0);
     }
-    if (tape_rt_scan_p4_fd(*fd_inout, pkg_off, pkglen, new_fdir, &new_fn) != 0) {
-        tape_rt_drop(rt); rt->state = M53_M1_REFUSED;
-        return tape_unit_fail(u, sp, "embed-pkg-decode-failed", 10);
+    {
+        int scan_rc = tape_rt_scan_p4_fd(*fd_inout, pkg_off, pkglen, new_fdir, &new_fn);
+        if (scan_rc != 0) {
+            tape_rt_drop(rt); rt->state = M53_M1_REFUSED;
+            return tape_unit_fail(u, sp, scan_rc == -2 ? "embed-fdir-overflow" : "embed-pkg-decode-failed", 10);
+        }
     }
 
     mf_buf = tape_fdir_read_checked(*fd_inout, tape_fdir_find(new_fdir, new_fn, sp->mf_key),
@@ -1384,7 +1531,10 @@ long tape_unit_call_bytes(TapeUnitState *u, const TapeUnitSpec *sp,
 }
 
 int cxsa_valid_s1(const unsigned char *data, long length) {
-    const char *env_s1 = sy_env("UNISACC_M53_S1");
+    const char *env_s1;
+    { int sr = m53_spec_init();
+      if (sr != 0) { tape_emit_refuse("M53_M1_REFUSE", sr == -2 ? "executor-selection-portable-uncovered" : "executor-selection-unknown", sr); return -2; } }
+    env_s1 = sy_env("UNISACC_M53_S1");
     const char *env_so = sy_env("UNISACC_M53_S1_SO");
     if ((env_s1 && env_s1[0]) || (env_so && env_so[0])) {
         tape_emit_refuse(m53_m1_spec.refuse_tag, "embed-env-override-forbidden", 0);

@@ -1,0 +1,1562 @@
+/* tools/check-v019-formal-negatives.cx -- Release pre-gate for v0.1.9 formal negative controls.
+ *
+ * Usage:
+ *   sh ./unisacc.com tools/check-v019-formal-negatives.cx -- [--self-test]
+ *   sh ./unisacc.com tools/check-v019-formal-negatives.cx -- \
+ *     --chain-ape APE_PATH --chain-receipt V3_RCPT_PATH \
+ *     [--chain-dir CHAIN_DIR] [--rev HEX40] [--run-id RUN_ID] \
+ *     [--inputs-sha HEX64] [--output-path OUT_PATH] \
+ *     [--expect-bin-sha HEX64] [--expect-carrier-sha HEX64] \
+ *     [--pieces m53,D,B,M] [--dry-run]
+ *
+ * Contract:
+ *   (1) Independent chain identity & v3 receipt verification:
+ *       Every piece's --chain-ape mode consumes the chain's v3 receipt (candidate-chain.rcpt,
+ *       written by rc_write3 and verified by rc_verify_out with target), never the raw 4-column
+ *       ape-final/ape-receipt.txt. This pre-gate independently derives/verifies rev, run_id,
+ *       inputs_sha (pack-inputs.tsv), output_path (ape-final/ape-receipt.txt), clock (now_ts),
+ *       and expected binary (g2/lnx-x86_64/entry.elf) & carrier (p3-package.body / embedded P4)
+ *       SHAs from the chain artifacts, verifies candidate-chain.rcpt via rc_verify_out, and
+ *       supplies those independent identities to each piece check.
+ *   (2) m53 6-copy tamper gate + intact positive control + G4 env override on the chain APE:
+ *       Derives 6 single-difference same-host tampered APE copies (no-p4, bad-f-crc,
+ *       bad-manifest-sha, bad-slice-seal, bad-so-elf, missing-f-record) plus intact control
+ *       and G4 env override, verifying distinct 64-hex variant_sha and exact M53_M1_REFUSE
+ *       reason strings on stream e2 -> e1 -> e3.
+ *   (3) Piece D (driveargs), Piece B (bind), Piece M (m25) --chain-ape delegation:
+ *       Passes the verified v3 receipt and independent identity flags, requiring rc==0,
+ *       per-case named refusals, and distinct variant_sha records.
+ *   (4) Bounded execution: each child call <= 55 s.
+ *
+ * Marker: CHECK_V019_FORMAL_NEGATIVES.
+ */
+#pragma unisa use sys.fs
+#pragma unisa use sys.io
+#pragma unisa use sys.env
+#pragma unisa use sys.posix
+#pragma unisa use sys.sha
+#pragma unisa use sys.time
+#pragma unisa use mem.heap
+#pragma unisa use mem.bytes
+#pragma unisa use text.text
+#pragma unisa use text.fmt
+#pragma unisa use cxlib.procrun
+#pragma unisa use cxlib.sessionroot
+#pragma unisa use cxlib.receipt
+#pragma unisa use runtime.packagefooter
+
+enum {
+    FN_PW = 4400,
+    FN_MAX_F = 256
+};
+
+typedef struct {
+    char key[128];
+    long klen;
+    unsigned char *data;
+    long len;
+    unsigned long rawlen;
+    unsigned long codec;
+    unsigned long crc;
+} fn_frec_t;
+
+static int g_pass = 0;
+static int g_fail = 0;
+
+static void fn_rec(int ok, const char *mode, const char *name, const char *ape_sha,
+                   const char *variant, const char *var_sha, const char *reason) {
+    sy_printf("%s\t%s\t%s\tape_sha=%s\tvariant=%s\tvariant_sha=%s\treason=%s\n",
+              ok ? "PASS" : "FAIL",
+              mode ? mode : "FORMAL_NEGATIVES",
+              name ? name : "-",
+              (ape_sha && ape_sha[0]) ? ape_sha : "-",
+              (variant && variant[0]) ? variant : "-",
+              (var_sha && var_sha[0]) ? var_sha : "-",
+              (reason && reason[0]) ? reason : "-");
+    if (ok) g_pass++;
+    else g_fail++;
+}
+
+static int fn_is_hex_lower(const char *s, int n) {
+    if (!s) return 0;
+    for (int i = 0; i < n; i++) {
+        char c = s[i];
+        if (!((c >= '0' && c <= '9') || (c >= 'a' && c <= 'f'))) return 0;
+    }
+    return s[n] == 0;
+}
+
+static int fn_has_hex64_at(const char *s) {
+    if (!s) return 0;
+    for (int i = 0; i < 64; i++) {
+        char c = s[i];
+        if (!((c >= '0' && c <= '9') || (c >= 'a' && c <= 'f'))) return 0;
+    }
+    return 1;
+}
+
+static int fn_parse_i64_pos(const char *s, int64_t *out) {
+    int64_t v = 0;
+    if (!s || s[0] < '0' || s[0] > '9') return 1;
+    for (int i = 0; s[i]; i++) {
+        if (s[i] < '0' || s[i] > '9') return 1;
+        v = v * 10 + (int64_t)(s[i] - '0');
+    }
+    if (v <= 0) return 1;
+    *out = v;
+    return 0;
+}
+
+static unsigned fn_crc32(const unsigned char *p, long n) {
+    unsigned c = 0xffffffffU;
+    for (long i = 0; i < n; i++) {
+        c ^= (unsigned)p[i];
+        for (int b = 0; b < 8; b++) c = (c & 1U) ? ((c >> 1) ^ 0xedb88320U) : (c >> 1);
+    }
+    return c ^ 0xffffffffU;
+}
+
+static int fn_sha256_file(const char *path, char hex[65], long *len_out) {
+    size_t n = 0;
+    char *b = cx_read(path, &n);
+    hex[0] = 0;
+    if (!b) return 1;
+    if (len_out) *len_out = (long)n;
+    int rc = sy_sha256_any_hex(b, (long)n, hex);
+    mm_free(b);
+    return (rc == 0 && fn_is_hex_lower(hex, 64)) ? 0 : 1;
+}
+
+static int fn_run_sh(const char *cwd, const char *cmd, int timeout_s, char *out, long cap) {
+    char *av[] = {"sh", "-c", (char *)cmd, 0};
+    pr_result r;
+    int t = pr_run("v019-formal-neg", av, cwd, 0, timeout_s, &r);
+    long n = 0;
+    if (out && cap > 0) {
+        if (r.out && r.outn > 0) {
+            long m = (long)r.outn < cap - 1 ? (long)r.outn : cap - 1;
+            mm_copy(out, cap, r.out, m);
+            n += m;
+        }
+        if (r.err && r.errn > 0 && n < cap - 1) {
+            long m = (long)r.errn < cap - 1 - n ? (long)r.errn : cap - 1 - n;
+            mm_copy(out + n, cap - n, r.err, m);
+            n += m;
+        }
+        out[n] = 0;
+    }
+    int rc = (t || r.residue) ? (r.timed_out && !r.residue ? 124 : -1) : r.rc;
+    pr_free(&r);
+    return rc;
+}
+
+static int fn_parse_u64_sep(const unsigned char *p, long n, long *pos, unsigned long *out, char sep) {
+    long i = *pos;
+    unsigned long v = 0;
+    if (i >= n || p[i] < '0' || p[i] > '9') return -1;
+    while (i < n && p[i] >= '0' && p[i] <= '9') {
+        v = v * 10UL + (unsigned long)(p[i] - '0');
+        i++;
+    }
+    if (i >= n || p[i] != (unsigned char)sep) return -1;
+    *pos = i + 1;
+    *out = v;
+    return 0;
+}
+
+static int fn_locate_p4(const unsigned char *b, long n, long *off_out, long *len_out) {
+    PackageFooter pf;
+    if (!b || n < 26) return 1;
+    if (!packagefooter_locate_bytes(b, n, &pf)) return 1;
+    if (pf.package_offset < 0 || pf.package_length < 10 ||
+        pf.package_offset + pf.package_length + 16 > n) return 1;
+    if (memcmp(b + pf.package_offset, "P 4 ", 4) != 0) return 1;
+    *off_out = pf.package_offset;
+    *len_out = pf.package_length;
+    return 0;
+}
+
+/* Parse ape-receipt.txt row: "<key>\t<path>\tsha=<64hex>\tbytes=<N>" */
+static int fn_parse_ape_receipt_row(const char *ape_rcpt, const char *key, char sha_out[65], char path_out[FN_PW]) {
+    size_t n = 0, kl = strlen(key);
+    char *b = cx_read(ape_rcpt, &n);
+    sha_out[0] = 0;
+    if (path_out) path_out[0] = 0;
+    if (!b) return 1;
+    for (size_t i = 0; i < n;) {
+        size_t e = i;
+        while (e < n && b[e] != '\n') e++;
+        if (e - i > kl + 1 && !memcmp(b + i, key, kl) && b[i + kl] == '\t') {
+            size_t pstart = i + kl + 1;
+            size_t pend = pstart;
+            while (pend < e && b[pend] != '\t') pend++;
+            if (path_out && pend > pstart && pend - pstart < FN_PW) {
+                mm_copy(path_out, FN_PW, b + pstart, (long)(pend - pstart));
+                path_out[pend - pstart] = 0;
+            }
+            for (size_t j = pend; j + 69 <= e; j++) {
+                if (!memcmp(b + j, "\tsha=", 5) && fn_has_hex64_at(b + j + 5)) {
+                    mm_copy(sha_out, 65, b + j + 5, 64);
+                    sha_out[64] = 0;
+                    break;
+                }
+            }
+            break;
+        }
+        i = e + 1;
+    }
+    mm_free(b);
+    return fn_is_hex_lower(sha_out, 64) ? 0 : 1;
+}
+
+static const char *fn_find_sub(const char *hay, const char *needle) {
+    if (!hay || !needle) return 0;
+    long hl = tx_len(hay, 1048576L), nl = tx_len(needle, 4096L);
+    if (hl < 0 || nl < 0 || nl > hl) return 0;
+    if (nl == 0) return hay;
+    for (long i = 0; i + nl <= hl; i++) {
+        long j = 0;
+        while (j < nl && hay[i + j] == needle[j]) j++;
+        if (j == nl) return hay + i;
+    }
+    return 0;
+}
+
+/* Infer <chain_dir> when path ends with "/ape-final/<leaf>". */
+static void fn_infer_chain_dir(const char *path, char dir_out[FN_PW]) {
+    dir_out[0] = 0;
+    if (!path || !path[0]) return;
+    const char *p = fn_find_sub(path, "/ape-final/");
+    if (!p || p == path) return;
+    long dlen = (long)(p - path);
+    if (dlen <= 0 || dlen >= FN_PW) return;
+    mm_copy(dir_out, FN_PW, path, dlen);
+    dir_out[dlen] = 0;
+}
+
+/* Extract rev=<40hex> from <chain_dir>/chain-run.identity or <chain_dir>/.release-rev */
+static int fn_read_chain_rev(const char *chain_dir, char rev_out[41]) {
+    char p[FN_PW];
+    size_t n = 0;
+    rev_out[0] = 0;
+    if (!chain_dir || !chain_dir[0]) return 1;
+    if (!cx_fmt(p, sizeof p, "%s/chain-run.identity", chain_dir)) {
+        char *b = cx_read(p, &n);
+        if (b) {
+            if (n >= 44 && !memcmp(b, "rev=", 4)) {
+                mm_copy(rev_out, 41, b + 4, 40);
+                rev_out[40] = 0;
+            }
+            mm_free(b);
+            if (fn_is_hex_lower(rev_out, 40)) return 0;
+            rev_out[0] = 0;
+        }
+    }
+    return 1;
+}
+
+/* Parse P4 package inside APE into prefix (D+M sections) and F records array. */
+static int fn_parse_ape_p4(const unsigned char *b, long n,
+                           long *pkg_off_out, long *dm_end_out,
+                           unsigned long *pm_out, unsigned long *ps_out,
+                           fn_frec_t *frecs, int *nf_out) {
+    long pkg_off = 0, pkg_len = 0, pkg_end = 0, pos = 0;
+    unsigned long pm = 0, ps = 0, nr = 0;
+    *nf_out = 0;
+    if (fn_locate_p4(b, n, &pkg_off, &pkg_len) != 0) return 1;
+    pkg_end = pkg_off + pkg_len;
+    pos = pkg_off + 4;
+    if (fn_parse_u64_sep(b, pkg_end, &pos, &pm, ' ') ||
+        fn_parse_u64_sep(b, pkg_end, &pos, &ps, ' ') ||
+        fn_parse_u64_sep(b, pkg_end, &pos, &nr, '\n')) return 1;
+    if (nr > FN_MAX_F) return 1;
+    for (unsigned long di = 0; di < ps; di++) {
+        if (pos + 2 > pkg_end || b[pos] != 'D' || b[pos + 1] != ' ') return 1;
+        while (pos < pkg_end && b[pos] != '\n') pos++;
+        if (pos >= pkg_end) return 1;
+        pos++;
+    }
+    for (unsigned long mi = 0; mi < pm; mi++) {
+        unsigned long mb = 0, mr = 0, mc = 0, mk = 0;
+        if (pos + 2 > pkg_end || b[pos] != 'M' || b[pos + 1] != ' ') return 1;
+        pos += 2;
+        if (fn_parse_u64_sep(b, pkg_end, &pos, &mb, ' ') ||
+            fn_parse_u64_sep(b, pkg_end, &pos, &mr, ' ') ||
+            fn_parse_u64_sep(b, pkg_end, &pos, &mc, ' ') ||
+            fn_parse_u64_sep(b, pkg_end, &pos, &mk, '\n') ||
+            mb > (unsigned long)(pkg_end - pos)) return 1;
+        pos += (long)mb;
+    }
+    *pkg_off_out = pkg_off;
+    *dm_end_out = pos;
+    *pm_out = pm;
+    *ps_out = ps;
+    for (unsigned long ri = 0; ri < nr; ri++) {
+        unsigned long kl = 0, dl = 0, rl = 0, co = 0, cr = 0;
+        if (pos + 2 > pkg_end || b[pos] != 'F' || b[pos + 1] != ' ') return 1;
+        pos += 2;
+        if (fn_parse_u64_sep(b, pkg_end, &pos, &kl, ' ') ||
+            fn_parse_u64_sep(b, pkg_end, &pos, &dl, ' ') ||
+            fn_parse_u64_sep(b, pkg_end, &pos, &rl, ' ') ||
+            fn_parse_u64_sep(b, pkg_end, &pos, &co, ' ') ||
+            fn_parse_u64_sep(b, pkg_end, &pos, &cr, '\n')) return 1;
+        if (kl == 0 || kl >= sizeof frecs[0].key || kl + dl > (unsigned long)(pkg_end - pos)) return 1;
+        fn_frec_t *f = &frecs[ri];
+        mm_copy(f->key, (long)sizeof f->key, (const char *)(b + pos), (long)kl);
+        f->key[kl] = 0;
+        f->klen = (long)kl;
+        f->len = (long)dl;
+        f->rawlen = rl;
+        f->codec = co;
+        f->crc = cr;
+        f->data = (unsigned char *)mm_alloc((long)dl + 1);
+        if (!f->data) return 1;
+        if (dl > 0) mm_copy(f->data, (long)dl + 1, b + pos + (long)kl, (long)dl);
+        f->data[dl] = 0;
+        pos += (long)kl + (long)dl;
+        (*nf_out)++;
+    }
+    return pos == pkg_end ? 0 : 1;
+}
+
+static void fn_free_frecs(fn_frec_t *frecs, int nf) {
+    for (int i = 0; i < nf; i++) {
+        if (frecs[i].data) mm_free(frecs[i].data);
+        frecs[i].data = 0;
+    }
+}
+
+/* Write a derived same-host APE with the given F records and UNIPKG1 footer. */
+static int fn_write_ape_with_frecs(const unsigned char *orig_b, long pkg_off, long dm_end,
+                                   unsigned long pm, unsigned long ps,
+                                   const fn_frec_t *frecs, int nf,
+                                   const char *dst_path, char sha_out[65]) {
+    char p4_hdr[128];
+    if (cx_fmt(p4_hdr, sizeof p4_hdr, "P 4 %lu %lu %d\n", pm, ps, nf)) return 1;
+    long h0 = pkg_off + 4;
+    while (h0 < dm_end && orig_b[h0 - 1] != '\n') h0++;
+    if (h0 > dm_end) return 1;
+    long dm_len = dm_end - h0;
+    long f_total = 0;
+    for (int i = 0; i < nf; i++) {
+        long kl = frecs[i].klen > 0 ? frecs[i].klen : (long)strlen(frecs[i].key);
+        f_total += 128 + kl + frecs[i].len;
+    }
+    long p4_hl = (long)strlen(p4_hdr);
+    long cap = pkg_off + p4_hl + dm_len + f_total + 32;
+    unsigned char *out = (unsigned char *)mm_alloc(cap);
+    if (!out) return 1;
+    long pos = 0;
+    if (pkg_off > 0 && mm_copy(out, cap, orig_b, pkg_off)) { mm_free(out); return 1; }
+    pos = pkg_off;
+    long p4_start = pos;
+    if (mm_copy(out + pos, cap - pos, p4_hdr, p4_hl)) { mm_free(out); return 1; }
+    pos += p4_hl;
+    if (dm_len > 0 && mm_copy(out + pos, cap - pos, orig_b + h0, dm_len)) { mm_free(out); return 1; }
+    pos += dm_len;
+    for (int i = 0; i < nf; i++) {
+        char fhdr[160];
+        long kl = frecs[i].klen > 0 ? frecs[i].klen : (long)strlen(frecs[i].key);
+        if (cx_fmt(fhdr, sizeof fhdr, "F %ld %ld %lu %lu %lu\n",
+                   kl, frecs[i].len, frecs[i].rawlen, frecs[i].codec, frecs[i].crc)) {
+            mm_free(out);
+            return 1;
+        }
+        long fl = (long)strlen(fhdr);
+        if (mm_copy(out + pos, cap - pos, fhdr, fl) ||
+            mm_copy(out + pos + fl, cap - pos - fl, frecs[i].key, kl) ||
+            (frecs[i].len > 0 && mm_copy(out + pos + fl + kl, cap - pos - fl - kl, frecs[i].data, frecs[i].len))) {
+            mm_free(out);
+            return 1;
+        }
+        pos += fl + kl + frecs[i].len;
+    }
+    unsigned long long plen = (unsigned long long)(pos - p4_start);
+    if (mm_copy(out + pos, cap - pos, "UNIPKG1\n", 8)) { mm_free(out); return 1; }
+    pos += 8;
+    for (int k = 0; k < 8; k++) out[pos++] = (unsigned char)((plen >> (8 * k)) & 0xffULL);
+    sha_out[0] = 0;
+    (void)sy_sha256_any_hex((const char *)out, pos, sha_out);
+    int wrc = sy_write_file(dst_path, out, pos, 0755);
+    mm_free(out);
+    return (wrc == 0 && fn_is_hex_lower(sha_out, 64)) ? 0 : 1;
+}
+
+/* Rebuild manifest.tsv buffer replacing the sha256 and bytes for leaf_name ("m53.tapeslice" or "tapemode.so"). */
+static int fn_update_manifest_row(const char *old_mf, long old_len, const char *leaf_name,
+                                  const char *new_sha, long new_bytes,
+                                  unsigned char **new_buf_out, long *new_len_out) {
+    long cap = old_len + 256, pos = 0, out_pos = 0, ll = (long)strlen(leaf_name);
+    unsigned char *nb = (unsigned char *)mm_alloc(cap);
+    int replaced = 0;
+    if (!nb) return 1;
+    while (pos < old_len) {
+        long s = pos;
+        while (pos < old_len && old_mf[pos] != '\n') pos++;
+        long e = (pos < old_len) ? pos + 1 : pos;
+        pos = e;
+        if (e - s > ll + 1 && !memcmp(old_mf + s, leaf_name, (size_t)ll) && old_mf[s + ll] == '\t') {
+            char row[256];
+            if (cx_fmt(row, sizeof row, "%s\t%s\t%ld\n", leaf_name, new_sha, new_bytes)) { mm_free(nb); return 1; }
+            long rl = (long)strlen(row);
+            if (mm_copy(nb + out_pos, cap - out_pos, row, rl)) { mm_free(nb); return 1; }
+            out_pos += rl;
+            replaced = 1;
+        } else {
+            if (mm_copy(nb + out_pos, cap - out_pos, old_mf + s, e - s)) { mm_free(nb); return 1; }
+            out_pos += (e - s);
+        }
+    }
+    if (!replaced) { mm_free(nb); return 1; }
+    nb[out_pos] = 0;
+    *new_buf_out = nb;
+    *new_len_out = out_pos;
+    return 0;
+}
+
+#define FN_M53_CLEAN_ENV "UNISACC_M53_S1= UNISACC_M53_S1_SO= UNISA_CONTAINER= UNISACC_APE_SELF="
+
+static const char *const g_m1_refuse_tags[5] = {
+    "M53_M1_REFUSE", "DRIVEARGS_M1_REFUSE", "BIND_M1_REFUSE", "M25_M1_REFUSE", "DRIVESTREAM_M1_REFUSE"
+};
+static const char *const g_m1_refuse_units[5] = {
+    "m53", "driveargs", "bind", "m25", "drivestream"
+};
+
+/* Parse output line by line for '<UNIT>_M1_REFUSE\treason=<want_reason>(\t|$)'.
+ * Unit marker and exact reason must appear on the same line, and reason must end at
+ * a tab delimiter or end of line (rejects cross-line splits and reason suffixes).
+ * When allow_any_m1 is 0 (slice-tamper copy2/3/4/6), only M53_M1_REFUSE is accepted.
+ * When allow_any_m1 is 1 (whole-container copy1/5/G4), any M1 unit is accepted. */
+static int fn_match_m1_refuse_line(const char *out, const char *want_reason, int allow_any_m1, char reason_out[96]) {
+    int max_u = allow_any_m1 ? 5 : 1;
+    long rlen = want_reason ? (long)strlen(want_reason) : 0;
+    const char *p = out;
+    reason_out[0] = 0;
+    if (!out || !want_reason || rlen <= 0) return 0;
+    while (*p) {
+        const char *le = p;
+        while (*le && *le != '\n' && *le != '\r') le++;
+        long llen = (long)(le - p);
+        for (int i = 0; i < max_u; i++) {
+            long tlen = (long)strlen(g_m1_refuse_tags[i]);
+            long need = tlen + 8 + rlen;
+            if (llen >= need &&
+                memcmp(p, g_m1_refuse_tags[i], (size_t)tlen) == 0 &&
+                memcmp(p + tlen, "\treason=", 8) == 0 &&
+                memcmp(p + tlen + 8, want_reason, (size_t)rlen) == 0 &&
+                (llen == need || p[need] == '\t')) {
+                if (cx_fmt(reason_out, 96, "%s:%s", g_m1_refuse_units[i], want_reason)) return 0;
+                return 1;
+            }
+        }
+        p = le;
+        while (*p == '\n' || *p == '\r') p++;
+    }
+    return 0;
+}
+
+static int fn_has_any_m1_refuse_line(const char *out) {
+    const char *p = out;
+    if (!out) return 0;
+    while (*p) {
+        const char *le = p;
+        while (*le && *le != '\n' && *le != '\r') le++;
+        long llen = (long)(le - p);
+        for (int i = 0; i < 5; i++) {
+            long tlen = (long)strlen(g_m1_refuse_tags[i]);
+            if (llen > tlen &&
+                memcmp(p, g_m1_refuse_tags[i], (size_t)tlen) == 0 &&
+                p[tlen] == '\t') {
+                return 1;
+            }
+        }
+        p = le;
+        while (*p == '\n' || *p == '\r') p++;
+    }
+    return 0;
+}
+
+/* Run m53 stream e3 against cand_ape (using e1_in prepared from intact APE) in a cleaned environment.
+ * Every case clears UNISACC_M53_S1, UNISACC_M53_S1_SO, UNISA_CONTAINER, and UNISACC_APE_SELF;
+ * G4 (g4_set_s1 == 1) sets only UNISACC_M53_S1=1 on top of that cleaned environment. */
+static int fn_run_m53_stream_e3(const char *cwd, const char *cand_ape, const char *c_src,
+                                const char *e1_in, int g4_set_s1,
+                                char *out, long ocap, int *e3_nonempty_out) {
+    char e3_out[FN_PW], cmd[4096];
+    sy_stat_t st;
+    if (e3_nonempty_out) *e3_nonempty_out = 0;
+    if (cx_fmt(e3_out, sizeof e3_out, "%s.e3.out", cand_ape)) return -1;
+    (void)sy_unlink(e3_out);
+    if (cx_fmt(cmd, sizeof cmd,
+               "%s%s sh '%s' stream e3 --level 2 --source '%s' --no-external-nn < '%s' > '%s'",
+               FN_M53_CLEAN_ENV,
+               g4_set_s1 ? " UNISACC_M53_S1=1" : "",
+               cand_ape, c_src, e1_in, e3_out)) return -1;
+    int rc = fn_run_sh(cwd, cmd, 50, out, ocap);
+    if (sy_stat(e3_out, &st) == 0 && st.size > 0 && e3_nonempty_out) *e3_nonempty_out = 1;
+    (void)sy_unlink(e3_out);
+    return rc;
+}
+
+/* Run the 6-copy m53 tamper gate + intact positive control + G4 env override on ape_path.
+ * On a multi-piece APE (e.g. driveargs + m53), whole-container tampering (copy1 no P4 footer,
+ * copy5 corrupted tapemode.so ELF magic, or Case 7 UNISACC_M53_S1 env override) is refused by
+ * the first M1 unit on the execution path (driveargs) before m53 is reached; accept any M1 unit's
+ * named refusal with the exact reason and print '<unit>:<reason>'. Slice-specific tampering
+ * (copy2/3/4/6) must still require M53_M1_REFUSE directly. */
+static int fn_run_m53_tamper_gate(const char *cwd, const char *tmp, const char *ape_path, const char *ape_sha) {
+    size_t an = 0;
+    unsigned char *ab = (unsigned char *)cx_read(ape_path, &an);
+    fn_frec_t frecs[FN_MAX_F];
+    int nf = 0;
+    long pkg_off = 0, dm_end = 0;
+    unsigned long pm = 0, ps = 0;
+    for (int i = 0; i < FN_MAX_F; i++) frecs[i].data = 0;
+    if (!ab || an < 32 || fn_parse_ape_p4(ab, (long)an, &pkg_off, &dm_end, &pm, &ps, frecs, &nf) != 0) {
+        if (ab) mm_free(ab);
+        fn_free_frecs(frecs, nf);
+        fn_rec(0, "FORMAL_NEGATIVES", "m53-parse-ape-p4", ape_sha, "m53-p4", "-", "cannot-parse-ape-p4");
+        return 1;
+    }
+    int idx_mf = -1, idx_so = -1, idx_m53 = -1;
+    for (int i = 0; i < nf; i++) {
+        if (frecs[i].klen == 28 && !memcmp(frecs[i].key, "tape/lnx-x86_64/manifest.tsv", 28)) idx_mf = i;
+        else if (frecs[i].klen == 27 && !memcmp(frecs[i].key, "tape/lnx-x86_64/tapemode.so", 27)) idx_so = i;
+        else if (frecs[i].klen == 29 && !memcmp(frecs[i].key, "tape/lnx-x86_64/m53.tapeslice", 29)) idx_m53 = i;
+    }
+    if (idx_mf < 0 || idx_so < 0 || idx_m53 < 0) {
+        mm_free(ab);
+        fn_free_frecs(frecs, nf);
+        fn_rec(0, "FORMAL_NEGATIVES", "m53-required-tape-records", ape_sha, "m53-p4", "-", "missing-m53-tape-records");
+        return 1;
+    }
+
+    char c_src[FN_PW], e2_out[FN_PW], e1_out[FN_PW], cmd[4096], out[16384];
+    sy_stat_t s2, s1;
+    if (cx_fmt(c_src, sizeof c_src, "%s/m53_in.c", tmp) ||
+        cx_fmt(e2_out, sizeof e2_out, "%s/m53_e2.out", tmp) ||
+        cx_fmt(e1_out, sizeof e1_out, "%s/m53_e1.out", tmp) ||
+        cx_write(c_src, "int main(void){return 0;}\n", 26)) {
+        mm_free(ab);
+        fn_free_frecs(frecs, nf);
+        return 2;
+    }
+
+    /* (0) Intact positive control: e2 -> e1 -> e3 */
+    int prep_ok = 0, e3_nonempty = 0;
+    if (!cx_fmt(cmd, sizeof cmd,
+                "%s sh '%s' stream e2 --level 2 --source '%s' --no-external-nn < '%s' > '%s' && "
+                "%s sh '%s' stream e1 --level 2 --source '%s' --no-external-nn < '%s' > '%s'",
+                FN_M53_CLEAN_ENV, ape_path, c_src, c_src, e2_out,
+                FN_M53_CLEAN_ENV, ape_path, c_src, e2_out, e1_out)) {
+        int prc = fn_run_sh(cwd, cmd, 50, out, sizeof out);
+        prep_ok = (prc == 0 && sy_stat(e2_out, &s2) == 0 && s2.size > 0 && sy_stat(e1_out, &s1) == 0 && s1.size > 0);
+    }
+    int rc_intact = prep_ok ? fn_run_m53_stream_e3(cwd, ape_path, c_src, e1_out, 0, out, sizeof out, &e3_nonempty) : -1;
+    fn_rec(prep_ok && rc_intact == 0 && e3_nonempty && !fn_has_any_m1_refuse_line(out),
+           "FORMAL_NEGATIVES", "m53-intact-stream-e3-control", ape_sha,
+           "m53-intact", ape_sha, "intact-stream-e3-ok");
+
+    /* Copy 1: Stripped P4 carrier (no-p4) -> embed-footer-invalid (whole-container: any m1 unit on path) */
+    {
+        char p_nop4[FN_PW], vsha[65], rwhy[96];
+        vsha[0] = 0;
+        int b_ok = (!cx_fmt(p_nop4, sizeof p_nop4, "%s/m53_copy1_nop4.com", tmp) &&
+                    pkg_off > 0 && sy_write_file(p_nop4, ab, pkg_off, 0755) == 0 &&
+                    sy_sha256_any_hex((const char *)ab, pkg_off, vsha) == 0 &&
+                    !tx_eqz(vsha, ape_sha));
+        int rc = b_ok ? fn_run_m53_stream_e3(cwd, p_nop4, c_src, e1_out, 0, out, sizeof out, 0) : 0;
+        int ok1 = (b_ok && (rc == 1 || rc == 2) && fn_match_m1_refuse_line(out, "embed-footer-invalid", 1, rwhy));
+        fn_rec(ok1, "FORMAL_NEGATIVES", "m53-copy1-stripped-p4-refused", ape_sha,
+               "m53-no-p4", b_ok ? vsha : "build-failed", ok1 ? rwhy : "embed-footer-invalid");
+        (void)sy_unlink(p_nop4);
+    }
+
+    /* Copy 2: Corrupted F record CRC32 on m53.tapeslice -> embed-pkg-decode-failed (slice-tamper: requires M53_M1_REFUSE) */
+    {
+        char p_crc[FN_PW], vsha[65], rwhy[96];
+        unsigned long orig_crc = frecs[idx_m53].crc;
+        frecs[idx_m53].crc = orig_crc ^ 1UL;
+        int b_ok = (!cx_fmt(p_crc, sizeof p_crc, "%s/m53_copy2_bad_fcrc.com", tmp) &&
+                    fn_write_ape_with_frecs(ab, pkg_off, dm_end, pm, ps, frecs, nf, p_crc, vsha) == 0 &&
+                    !tx_eqz(vsha, ape_sha));
+        frecs[idx_m53].crc = orig_crc;
+        int rc = b_ok ? fn_run_m53_stream_e3(cwd, p_crc, c_src, e1_out, 0, out, sizeof out, 0) : 0;
+        int ok2 = (b_ok && (rc == 1 || rc == 2) && fn_match_m1_refuse_line(out, "embed-pkg-decode-failed", 0, rwhy));
+        fn_rec(ok2, "FORMAL_NEGATIVES", "m53-copy2-bad-f-crc-refused", ape_sha,
+               "m53-bad-f-crc", b_ok ? vsha : "build-failed", ok2 ? rwhy : "m53:embed-pkg-decode-failed");
+        (void)sy_unlink(p_crc);
+    }
+
+    /* Copy 3: Manifest SHA mismatch for m53.tapeslice (valid F record CRC32) -> embed-manifest-mismatch (slice-tamper: requires M53_M1_REFUSE) */
+    {
+        char p_mf[FN_PW], vsha[65], bad_sha[65], rwhy[96];
+        unsigned char *new_mf = 0;
+        long new_mf_len = 0;
+        (void)sy_sha256_any_hex((const char *)frecs[idx_m53].data, frecs[idx_m53].len, bad_sha);
+        bad_sha[0] = (bad_sha[0] == 'a') ? 'b' : 'a';
+        unsigned char *orig_mf_d = frecs[idx_mf].data;
+        long orig_mf_l = frecs[idx_mf].len;
+        unsigned long orig_mf_r = frecs[idx_mf].rawlen, orig_mf_c = frecs[idx_mf].crc;
+        int b_ok = 0;
+        if (fn_update_manifest_row((const char *)orig_mf_d, orig_mf_l, "m53.tapeslice",
+                                   bad_sha, frecs[idx_m53].len, &new_mf, &new_mf_len) == 0) {
+            frecs[idx_mf].data = new_mf;
+            frecs[idx_mf].len = new_mf_len;
+            frecs[idx_mf].rawlen = (unsigned long)new_mf_len;
+            frecs[idx_mf].crc = (unsigned long)fn_crc32(new_mf, new_mf_len);
+            b_ok = (!cx_fmt(p_mf, sizeof p_mf, "%s/m53_copy3_bad_mf.com", tmp) &&
+                    fn_write_ape_with_frecs(ab, pkg_off, dm_end, pm, ps, frecs, nf, p_mf, vsha) == 0 &&
+                    !tx_eqz(vsha, ape_sha));
+            frecs[idx_mf].data = orig_mf_d;
+            frecs[idx_mf].len = orig_mf_l;
+            frecs[idx_mf].rawlen = orig_mf_r;
+            frecs[idx_mf].crc = orig_mf_c;
+            mm_free(new_mf);
+        }
+        int rc = b_ok ? fn_run_m53_stream_e3(cwd, p_mf, c_src, e1_out, 0, out, sizeof out, 0) : 0;
+        int ok3 = (b_ok && (rc == 1 || rc == 2) && fn_match_m1_refuse_line(out, "embed-manifest-mismatch", 0, rwhy));
+        fn_rec(ok3, "FORMAL_NEGATIVES", "m53-copy3-bad-manifest-sha-refused", ape_sha,
+               "m53-bad-manifest-sha", b_ok ? vsha : "build-failed", ok3 ? rwhy : "m53:embed-manifest-mismatch");
+        (void)sy_unlink(p_mf);
+    }
+
+    /* Copy 4: Tampered m53.tapeslice seal byte (with matching manifest SHA + F CRC32) -> embed-slice-corrupt (slice-tamper: requires M53_M1_REFUSE) */
+    {
+        char p_sl[FN_PW], vsha[65], sl_sha[65], rwhy[96];
+        unsigned char *new_mf = 0;
+        long new_mf_len = 0;
+        unsigned long orig_sl_c = frecs[idx_m53].crc;
+        unsigned char *orig_mf_d = frecs[idx_mf].data;
+        long orig_mf_l = frecs[idx_mf].len;
+        unsigned long orig_mf_r = frecs[idx_mf].rawlen, orig_mf_c = frecs[idx_mf].crc;
+        int b_ok = 0;
+        if (frecs[idx_m53].len > 32) {
+            frecs[idx_m53].data[28] ^= 0x01;
+            frecs[idx_m53].crc = (unsigned long)fn_crc32(frecs[idx_m53].data, frecs[idx_m53].len);
+            (void)sy_sha256_any_hex((const char *)frecs[idx_m53].data, frecs[idx_m53].len, sl_sha);
+            if (fn_update_manifest_row((const char *)orig_mf_d, orig_mf_l, "m53.tapeslice",
+                                       sl_sha, frecs[idx_m53].len, &new_mf, &new_mf_len) == 0) {
+                frecs[idx_mf].data = new_mf;
+                frecs[idx_mf].len = new_mf_len;
+                frecs[idx_mf].rawlen = (unsigned long)new_mf_len;
+                frecs[idx_mf].crc = (unsigned long)fn_crc32(new_mf, new_mf_len);
+                b_ok = (!cx_fmt(p_sl, sizeof p_sl, "%s/m53_copy4_bad_seal.com", tmp) &&
+                        fn_write_ape_with_frecs(ab, pkg_off, dm_end, pm, ps, frecs, nf, p_sl, vsha) == 0 &&
+                        !tx_eqz(vsha, ape_sha));
+                frecs[idx_mf].data = orig_mf_d;
+                frecs[idx_mf].len = orig_mf_l;
+                frecs[idx_mf].rawlen = orig_mf_r;
+                frecs[idx_mf].crc = orig_mf_c;
+                mm_free(new_mf);
+            }
+            frecs[idx_m53].data[28] ^= 0x01;
+            frecs[idx_m53].crc = orig_sl_c;
+        }
+        int rc = b_ok ? fn_run_m53_stream_e3(cwd, p_sl, c_src, e1_out, 0, out, sizeof out, 0) : 0;
+        int ok4 = (b_ok && (rc == 1 || rc == 2) && fn_match_m1_refuse_line(out, "embed-slice-corrupt", 0, rwhy));
+        fn_rec(ok4, "FORMAL_NEGATIVES", "m53-copy4-bad-slice-seal-refused", ape_sha,
+               "m53-bad-slice-seal", b_ok ? vsha : "build-failed", ok4 ? rwhy : "m53:embed-slice-corrupt");
+        (void)sy_unlink(p_sl);
+    }
+
+    /* Copy 5: Tampered tapemode.so ELF magic (with matching manifest SHA + F CRC32) -> embed-so-invalid (whole-container: any m1 unit on path) */
+    {
+        char p_so[FN_PW], vsha[65], so_sha[65], rwhy[96];
+        unsigned char *new_mf = 0;
+        long new_mf_len = 0;
+        unsigned long orig_so_c = frecs[idx_so].crc;
+        unsigned char *orig_mf_d = frecs[idx_mf].data;
+        long orig_mf_l = frecs[idx_mf].len;
+        unsigned long orig_mf_r = frecs[idx_mf].rawlen, orig_mf_c = frecs[idx_mf].crc;
+        int b_ok = 0;
+        if (frecs[idx_so].len > 16) {
+            frecs[idx_so].data[1] ^= 0x01;
+            frecs[idx_so].crc = (unsigned long)fn_crc32(frecs[idx_so].data, frecs[idx_so].len);
+            (void)sy_sha256_any_hex((const char *)frecs[idx_so].data, frecs[idx_so].len, so_sha);
+            if (fn_update_manifest_row((const char *)orig_mf_d, orig_mf_l, "tapemode.so",
+                                       so_sha, frecs[idx_so].len, &new_mf, &new_mf_len) == 0) {
+                frecs[idx_mf].data = new_mf;
+                frecs[idx_mf].len = new_mf_len;
+                frecs[idx_mf].rawlen = (unsigned long)new_mf_len;
+                frecs[idx_mf].crc = (unsigned long)fn_crc32(new_mf, new_mf_len);
+                b_ok = (!cx_fmt(p_so, sizeof p_so, "%s/m53_copy5_bad_so.com", tmp) &&
+                        fn_write_ape_with_frecs(ab, pkg_off, dm_end, pm, ps, frecs, nf, p_so, vsha) == 0 &&
+                        !tx_eqz(vsha, ape_sha));
+                frecs[idx_mf].data = orig_mf_d;
+                frecs[idx_mf].len = orig_mf_l;
+                frecs[idx_mf].rawlen = orig_mf_r;
+                frecs[idx_mf].crc = orig_mf_c;
+                mm_free(new_mf);
+            }
+            frecs[idx_so].data[1] ^= 0x01;
+            frecs[idx_so].crc = orig_so_c;
+        }
+        int rc = b_ok ? fn_run_m53_stream_e3(cwd, p_so, c_src, e1_out, 0, out, sizeof out, 0) : 0;
+        int ok5 = (b_ok && (rc == 1 || rc == 2) && fn_match_m1_refuse_line(out, "embed-so-invalid", 1, rwhy));
+        fn_rec(ok5, "FORMAL_NEGATIVES", "m53-copy5-bad-so-elf-refused", ape_sha,
+               "m53-bad-so-elf", b_ok ? vsha : "build-failed", ok5 ? rwhy : "embed-so-invalid");
+        (void)sy_unlink(p_so);
+    }
+
+    /* Copy 6: Missing m53.tapeslice F record (omitted from P4 F directory) -> embed-resource-missing (slice-tamper: requires M53_M1_REFUSE) */
+    {
+        char p_nof[FN_PW], vsha[65], rwhy[96];
+        fn_frec_t sub[FN_MAX_F];
+        int nsub = 0;
+        for (int i = 0; i < nf; i++) {
+            if (i == idx_m53) continue;
+            sub[nsub++] = frecs[i];
+        }
+        int b_ok = (!cx_fmt(p_nof, sizeof p_nof, "%s/m53_copy6_no_frec.com", tmp) &&
+                    fn_write_ape_with_frecs(ab, pkg_off, dm_end, pm, ps, sub, nsub, p_nof, vsha) == 0 &&
+                    !tx_eqz(vsha, ape_sha));
+        int rc = b_ok ? fn_run_m53_stream_e3(cwd, p_nof, c_src, e1_out, 0, out, sizeof out, 0) : 0;
+        int ok6 = (b_ok && (rc == 1 || rc == 2) && fn_match_m1_refuse_line(out, "embed-resource-missing", 0, rwhy));
+        fn_rec(ok6, "FORMAL_NEGATIVES", "m53-copy6-missing-f-record-refused", ape_sha,
+               "m53-missing-f-record", b_ok ? vsha : "build-failed", ok6 ? rwhy : "m53:embed-resource-missing");
+        (void)sy_unlink(p_nof);
+    }
+
+    /* Case 7: G4 env override on intact APE (UNISACC_M53_S1=1 in cleaned env) -> embed-env-override-forbidden (whole-container: any m1 unit on path) */
+    {
+        char rwhy[96];
+        int rc = fn_run_m53_stream_e3(cwd, ape_path, c_src, e1_out, 1, out, sizeof out, 0);
+        int ok7 = ((rc == 1 || rc == 2) && fn_match_m1_refuse_line(out, "embed-env-override-forbidden", 1, rwhy));
+        fn_rec(ok7, "FORMAL_NEGATIVES", "m53-g4-env-override-refused", ape_sha,
+               "m53-g4-env-override", ape_sha, ok7 ? rwhy : "embed-env-override-forbidden");
+    }
+
+    (void)sy_unlink(c_src);
+    (void)sy_unlink(e2_out);
+    (void)sy_unlink(e1_out);
+    mm_free(ab);
+    fn_free_frecs(frecs, nf);
+    return 0;
+}
+
+static int fn_validate_pieces(const char *csv, int *has_m53, int *has_d, int *has_b, int *has_m, char canon_out[64]) {
+    *has_m53 = 0; *has_d = 0; *has_b = 0; *has_m = 0;
+    canon_out[0] = 0;
+    if (!csv || !csv[0]) return 1;
+    long cl = (long)strlen(csv), pos = 0;
+    while (pos < cl) {
+        long s = pos;
+        while (pos < cl && csv[pos] != ',') pos++;
+        long tl = pos - s;
+        if (tl <= 0) return 1;
+        if (tl == 3 && !memcmp(csv + s, "m53", 3)) { if (*has_m53) return 1; *has_m53 = 1; }
+        else if (tl == 1 && csv[s] == 'D') { if (*has_d) return 1; *has_d = 1; }
+        else if (tl == 1 && csv[s] == 'B') { if (*has_b) return 1; *has_b = 1; }
+        else if (tl == 1 && csv[s] == 'M') { if (*has_m) return 1; *has_m = 1; }
+        else return 1;
+        if (pos < cl) {
+            if (csv[pos] != ',' || pos + 1 >= cl) return 1;
+            pos++;
+        }
+    }
+    if (!*has_m53 && !*has_d && !*has_b && !*has_m) return 1;
+    int u = 0;
+    if (*has_m53) u += snprintf(canon_out + u, 64 - (size_t)u, "%sm53", u ? "," : "");
+    if (*has_d)   u += snprintf(canon_out + u, 64 - (size_t)u, "%sD",   u ? "," : "");
+    if (*has_b)   u += snprintf(canon_out + u, 64 - (size_t)u, "%sB",   u ? "," : "");
+    if (*has_m)   u += snprintf(canon_out + u, 64 - (size_t)u, "%sM",   u ? "," : "");
+    return 0;
+}
+
+/* Extract variant_sha=<64hex> after a marker substring in output text. */
+static int fn_extract_variant_sha(const char *out, const char *marker, char vsha_out[65]) {
+    vsha_out[0] = 0;
+    if (!out || !marker) return 1;
+    const char *p = fn_find_sub(out, marker);
+    if (!p) return 1;
+    const char *eol = strchr(p, '\n');
+    const char *vs = fn_find_sub(p, "variant_sha=");
+    if (!vs || (eol && vs > eol) || !fn_has_hex64_at(vs + 12)) return 1;
+    mm_copy(vsha_out, 65, vs + 12, 64);
+    vsha_out[64] = 0;
+    return 0;
+}
+
+static const char *const FN_CONST_UNIT = "candidate-ape";
+static const char *const FN_CONST_TARGET = "lnx/x86_64";
+static const char *const FN_CONST_PRODUCER = "candidate-chain";
+static const char *const FN_CONST_PURPOSE = "chain-ape";
+
+static int g_last_d_rc_verified = 0, g_last_d_missing_piece = 0;
+static int g_last_b_rc_verified = 0, g_last_b_missing_piece = 0;
+static int g_last_m_rc_verified = 0, g_last_m_missing_piece = 0;
+
+/* Resolve this file's own repo root via sy_realpath (never from a caller argument or cwd fallback). */
+static int fn_resolve_own_repo(const char *argv0, char repo_out[FN_PW]) {
+    char cand[FN_PW], probe[FN_PW];
+    const char *suf = "/tools/check-v019-formal-negatives.cx";
+    size_t sufl = strlen(suf);
+    repo_out[0] = 0;
+    if (argv0 && argv0[0] && sy_realpath(argv0, cand, sizeof cand) >= 0) {
+        size_t cl = strlen(cand);
+        if (cl > sufl && strcmp(cand + cl - sufl, suf) == 0) {
+            cand[cl - sufl] = 0;
+            cx_fmt(repo_out, FN_PW, "%s", cand);
+        }
+    }
+    if (!repo_out[0] && sy_realpath(__FILE__, cand, sizeof cand) >= 0) {
+        size_t cl = strlen(cand);
+        if (cl > sufl && strcmp(cand + cl - sufl, suf) == 0) {
+            cand[cl - sufl] = 0;
+            cx_fmt(repo_out, FN_PW, "%s", cand);
+        }
+    }
+    if (!repo_out[0]) return 1;
+    if (cx_fmt(probe, sizeof probe, "%s/tools/check-v019-formal-negatives.cx", repo_out) ||
+        sy_exists(probe) != 1) return 1;
+    return 0;
+}
+
+/* Delegate to a pinned piece check's --chain-ape mode with full independent identity from the formal chain receipt. */
+static void fn_run_piece_pregate(const char *cwd, const char *repo, const char *piece_id,
+                                 const char *tool_path, const char *ape_path, const char *rcpt_path,
+                                 const char *run_id, const char *rev,
+                                 const char *inputs_sha, const char *output_path, int64_t now_ts,
+                                 const char *expect_bin_sha, const char *expect_carrier_sha,
+                                 const char *ape_sha) {
+    char cmd[8192], out[32768], vsha[65];
+    const char *unit = FN_CONST_UNIT;
+    const char *target = FN_CONST_TARGET;
+    const char *producer = FN_CONST_PRODUCER;
+    const char *purpose = FN_CONST_PURPOSE;
+    if (sy_exists(tool_path) != 1) {
+        fn_rec(0, "FORMAL_NEGATIVES", piece_id, ape_sha, piece_id, "-", "missing-piece-check-tool");
+        return;
+    }
+    if (cx_fmt(cmd, sizeof cmd,
+               "cd '%s' && sh ./unisacc.com '%s' -- "
+               "--chain-ape '%s' --chain-receipt '%s' "
+               "--run-id '%s' --rev '%s' --unit '%s' --target '%s' "
+               "--producer '%s' --purpose '%s' "
+               "--inputs-sha '%s' --output-path '%s' --now-ts '%lld' "
+               "--expect-bin-sha '%s' --expect-carrier-sha '%s'",
+               repo, tool_path, ape_path, rcpt_path,
+               run_id, rev, unit, target, producer, purpose,
+               inputs_sha, output_path, (long long)now_ts,
+               expect_bin_sha, expect_carrier_sha)) {
+        fn_rec(0, "FORMAL_NEGATIVES", piece_id, ape_sha, piece_id, "-", "cmd-format-overflow");
+        return;
+    }
+    int rc = fn_run_sh(cwd, cmd, 55, out, sizeof out);
+    int no_fail_lines = (strstr(out, "\nFAIL\t") == 0 && strncmp(out, "FAIL\t", 5) != 0 &&
+                         strstr(out, "CHAIN_APE_REFUSE") == 0 && strstr(out, "REFUSE\tFORMAL_CHAIN_PREGATE") == 0);
+
+    if (tx_eqz(piece_id, "piece-D-driveargs")) {
+        char s1[65], s2[65], s3[65], s4[65], want_sum[256], sum_pref[160];
+        cx_fmt(sum_pref, sizeof sum_pref,
+               "CHECK_PIECE_D_DRIVEARGS\tmode=FORMAL_CHAIN_PREGATE\tape_sha=%s\trev=%s\ttarget=%s\t",
+               ape_sha, rev, target);
+        g_last_d_rc_verified = (rc != 124 && rc != 127 &&
+                                strstr(out, "FAIL\tFORMAL_CHAIN_PREGATE\targs\t") == 0 &&
+                                strstr(out, "FAIL\tFORMAL_CHAIN_PREGATE\treceipt-verify\t") == 0 &&
+                                strstr(out, sum_pref) != 0);
+        g_last_d_missing_piece = (g_last_d_rc_verified && rc == 1 &&
+                                  strstr(out, "FAIL\tFORMAL_CHAIN_PREGATE\tchain-ape-intact-ar-control\t") != 0 &&
+                                  strstr(out, "FAIL\tFORMAL_CHAIN_PREGATE\tchain-ape-crc-tamper-exit-1\t") != 0 &&
+                                  strstr(out, "reason=embed-pkg-decode-failed") != 0 &&
+                                  strstr(out, "FAIL\tFORMAL_CHAIN_PREGATE\tchain-ape-missing-carrier-only-refused\t") != 0 &&
+                                  strstr(out, "reason=embed-footer-invalid") != 0 &&
+                                  strstr(out, "FAIL\tFORMAL_CHAIN_PREGATE\tchain-ape-g4-env-override-only-refused\t") != 0 &&
+                                  strstr(out, "reason=embed-env-override-forbidden") != 0);
+        int ok1 = (fn_extract_variant_sha(out, "PASS\tFORMAL_CHAIN_PREGATE\tchain-ape-intact-ar-control\t", s1) == 0 &&
+                   tx_eqz(s1, ape_sha) && strstr(out, "reason=intact-ape-ar-usage-rc2") != 0);
+        int ok2 = (fn_extract_variant_sha(out, "PASS\tFORMAL_CHAIN_PREGATE\tchain-ape-crc-tamper-exit-1\t", s2) == 0 &&
+                   !tx_eqz(s2, ape_sha) && strstr(out, "reason=embed-pkg-decode-failed") != 0);
+        int ok3 = (fn_extract_variant_sha(out, "PASS\tFORMAL_CHAIN_PREGATE\tchain-ape-missing-carrier-only-refused\t", s3) == 0 &&
+                   !tx_eqz(s3, ape_sha) && strstr(out, "reason=embed-footer-invalid") != 0);
+        int ok4 = (fn_extract_variant_sha(out, "PASS\tFORMAL_CHAIN_PREGATE\tchain-ape-g4-env-override-only-refused\t", s4) == 0 &&
+                   tx_eqz(s4, ape_sha) && strstr(out, "reason=embed-env-override-forbidden") != 0);
+        cx_fmt(want_sum, sizeof want_sum,
+               "CHECK_PIECE_D_DRIVEARGS\tmode=FORMAL_CHAIN_PREGATE\tape_sha=%s\trev=%s\ttarget=%s\tpassed=4\tfailed=0",
+               ape_sha, rev, target);
+        int sum_ok = (rc == 0 && no_fail_lines && strstr(out, want_sum) != 0);
+        fn_rec(ok1 && sum_ok, "FORMAL_NEGATIVES", "piece-D-intact-ar-control", ape_sha, "D-chain-ape-intact", ok1 ? s1 : "-",
+               (ok1 && sum_ok) ? "intact-ape-ar-usage-rc2" : "piece-D-refused-or-missing-driveargs-in-ape");
+        fn_rec(ok2 && sum_ok, "FORMAL_NEGATIVES", "piece-D-crc-tamper-refused", ape_sha, "D-chain-ape-crc-tamper", ok2 ? s2 : "-",
+               (ok2 && sum_ok) ? "embed-pkg-decode-failed" : "piece-D-refused-or-missing-driveargs-in-ape");
+        fn_rec(ok3 && sum_ok, "FORMAL_NEGATIVES", "piece-D-missing-carrier-refused", ape_sha, "D-chain-ape-missing-carrier", ok3 ? s3 : "-",
+               (ok3 && sum_ok) ? "embed-footer-invalid" : "piece-D-refused-or-missing-driveargs-in-ape");
+        fn_rec(ok4 && sum_ok, "FORMAL_NEGATIVES", "piece-D-g4-env-override-refused", ape_sha, "D-chain-ape-g4-env-override", ok4 ? s4 : "-",
+               (ok4 && sum_ok) ? "embed-env-override-forbidden" : "piece-D-refused-or-missing-driveargs-in-ape");
+    } else if (tx_eqz(piece_id, "piece-B-bind")) {
+        static const char *b_vars[4] = {"bare", "tamp", "nomf", "nof"};
+        static const char *b_names[4] = {
+            "piece-B-missing-carrier-refused",
+            "piece-B-tampered-bind-slice-refused",
+            "piece-B-missing-bind-manifest-refused",
+            "piece-B-missing-bind-f-record-refused"
+        };
+        static const char *b_reasons[4] = {
+            "embed-resource-missing:detail=1",
+            "embed-manifest-mismatch:detail=2",
+            "embed-manifest-mismatch:detail=2",
+            "embed-resource-missing:detail=3"
+        };
+        g_last_b_rc_verified = (rc != 124 && rc != 127 &&
+                                strstr(out, "CHAIN_APE_REFUSE\treason=missing-chain-pregate-args") == 0 &&
+                                strstr(out, "CHAIN_APE_REFUSE\treason=cannot-read-chain-ape") == 0 &&
+                                strstr(out, "CHAIN_APE_REFUSE\treason=receipt-verify:") == 0 &&
+                                (strstr(out, "CHAIN_APE_REFUSE\treason=chain-ape-tape-authority-mismatch\t") != 0 ||
+                                 strstr(out, "CHECK_BIND_S3_CHAIN_APE\t") != 0));
+        g_last_b_missing_piece = (g_last_b_rc_verified && rc == 2 &&
+                                  strstr(out, "CHAIN_APE_REFUSE\treason=chain-ape-tape-authority-mismatch\twant_tape=") != 0 &&
+                                  strstr(out, ape_sha) != 0);
+        int sum_ok = (rc == 0 && no_fail_lines && strstr(out, "CHECK_BIND_S3_CHAIN_APE\tfailed=0") != 0);
+        int ctrl_ok = (sum_ok && strstr(out, "variant=ok\trc=0\toutput_present=1") != 0 &&
+                       strstr(out, "PASS\tbind-s3.chain-ape-ok-control-rc0-and-output") != 0);
+        const char *b_ref_why = (strstr(out, "chain-ape-tape-authority-mismatch") != 0)
+            ? "chain-ape-tape-authority-mismatch" : "piece-B-refused-or-missing-bind-in-ape";
+        fn_rec(ctrl_ok, "FORMAL_NEGATIVES", "piece-B-intact-control", ape_sha, "B-chain-ape-ok", ape_sha,
+               ctrl_ok ? "intact-compile-rc0" : b_ref_why);
+        for (int i = 0; i < 4; i++) {
+            char pat[128], vs[65];
+            cx_fmt(pat, sizeof pat, "CHAIN_APE_RUN\tchain_ape_sha=%s\tvariant=%s\t", ape_sha, b_vars[i]);
+            int vok = (sum_ok && fn_extract_variant_sha(out, pat, vs) == 0 && !tx_eqz(vs, ape_sha));
+            const char *p = strstr(out, pat);
+            if (p) {
+                const char *eol = strchr(p, '\n');
+                const char *r1 = strstr(p, "\trc=1\texact_reason=1\tno_output=1");
+                if (!r1 || (eol && r1 > eol)) vok = 0;
+            } else vok = 0;
+            char vtag[64];
+            cx_fmt(vtag, sizeof vtag, "B-chain-ape-%s", b_vars[i]);
+            fn_rec(vok, "FORMAL_NEGATIVES", b_names[i], ape_sha, vtag, vok ? vs : "-", vok ? b_reasons[i] : b_ref_why);
+        }
+    } else if (tx_eqz(piece_id, "piece-M-m25")) {
+        g_last_m_rc_verified = (rc != 124 && rc != 127 &&
+                                strstr(out, "REFUSE\tFORMAL_CHAIN_PREGATE\tmissing-") == 0 &&
+                                strstr(out, "REFUSE\tFORMAL_CHAIN_PREGATE\tunreadable-ape") == 0 &&
+                                strstr(out, "FAIL\tFORMAL_CHAIN_PREGATE\treceipt-verify\t") == 0 &&
+                                (strstr(out, "REFUSE\tFORMAL_CHAIN_PREGATE\tm25-slice-absent\tape_sha=") != 0 ||
+                                 strstr(out, "REFUSE\tFORMAL_CHAIN_PREGATE\tm25-ape-content-check-failed\tape_sha=") != 0 ||
+                                 strstr(out, "REFUSE\tFORMAL_CHAIN_PREGATE\tape-probe-compile-failed\tape_sha=") != 0 ||
+                                 strstr(out, "PASS\tFORMAL_CHAIN_PREGATE\tintact-two-source-compile\t") != 0 ||
+                                 strstr(out, "CHECK_PIECE_M_M25\t") != 0));
+        g_last_m_missing_piece = (g_last_m_rc_verified && rc != 0 &&
+                                  (strstr(out, "REFUSE\tFORMAL_CHAIN_PREGATE\tm25-slice-absent\tape_sha=") != 0 ||
+                                   strstr(out, "REFUSE\tFORMAL_CHAIN_PREGATE\tm25-ape-content-check-failed\tape_sha=") != 0 ||
+                                   strstr(out, "REFUSE\tFORMAL_CHAIN_PREGATE\tape-probe-compile-failed\tape_sha=") != 0) &&
+                                  strstr(out, ape_sha) != 0);
+        int sum_ok = (rc == 0 && no_fail_lines &&
+                      ((strstr(out, "PASS\tFORMAL_CHAIN_PREGATE\tintact-two-source-compile\t") != 0 &&
+                        strstr(out, "PASS\tFORMAL_CHAIN_PREGATE\tcrc-tamper-m25-refused\t") != 0 &&
+                        strstr(out, "PASS\tFORMAL_CHAIN_PREGATE\tg4-env-override-refused\t") != 0) ||
+                       ((strstr(out, "CHECK_PIECE_M_M25\tscope=FORMAL\t") != 0 ||
+                         strstr(out, "CHECK_PIECE_M_M25\tmode=FORMAL_CHAIN_PREGATE\t") != 0) &&
+                        (strstr(out, "\tstatus=PASS") != 0 || strstr(out, "\tfailed=0") != 0))));
+        if (fn_extract_variant_sha(out, "variant=bad-crc-m25\t", vsha) != 0 &&
+            fn_extract_variant_sha(out, "variant=chain-ape-crc-tamper\t", vsha) != 0)
+            cx_fmt(vsha, sizeof vsha, "%s", ape_sha);
+        const char *m_ref_why = "m25-chain-ape-failed-or-refused";
+        if (strstr(out, "m25-slice-absent") != 0) m_ref_why = "m25-slice-absent";
+        else if (strstr(out, "m25-ape-content-check-failed") != 0) m_ref_why = "m25-ape-content-check-failed";
+        else if (strstr(out, "ape-probe-compile-failed") != 0) m_ref_why = "ape-probe-compile-failed";
+        fn_rec(sum_ok, "FORMAL_NEGATIVES", "piece-M-m25-formal-chain-ape", ape_sha, "M-chain-ape", sum_ok ? vsha : "-",
+               sum_ok ? "m25-chain-ape-verified" : m_ref_why);
+    }
+}
+
+static int fn_run_formal_pregate(const char *cwd, const char *repo,
+                                 const char *ape_path, const char *rcpt_path, const char *chain_dir_arg,
+                                 const char *rev_arg, const char *run_id_arg,
+                                 const char *in_sha_arg, const char *out_path_arg,
+                                 const char *bin_sha_arg, const char *car_sha_arg,
+                                 const char *pieces, int dry_run, int quiet_summary) {
+    if (!ape_path || !ape_path[0] || !rcpt_path || !rcpt_path[0]) {
+        if (!quiet_summary) sy_printf("FAIL\tFORMAL_NEGATIVES\targs\tape_sha=-\tvariant=args\tvariant_sha=-\treason=missing-chain-ape-or-chain-receipt\n");
+        return 2;
+    }
+
+    int has_m53 = 0, has_d = 0, has_b = 0, has_m = 0;
+    char canon_pieces[64];
+    if (fn_validate_pieces(pieces, &has_m53, &has_d, &has_b, &has_m, canon_pieces) != 0) {
+        if (!quiet_summary) sy_printf("FAIL\tFORMAL_NEGATIVES\tpieces-arg\tape_sha=-\tvariant=pieces\tvariant_sha=-\treason=empty-or-unknown-pieces\n");
+        return 2;
+    }
+    if (!dry_run && (!has_m53 || !has_d || !has_b || !has_m)) {
+        if (!quiet_summary)
+            sy_printf("FAIL\tFORMAL_NEGATIVES\tpieces-subset\tape_sha=-\tvariant=pieces\tvariant_sha=-\treason=formal-mode-requires-full-m53-D-B-M-unless-dry-run\n");
+        return 2;
+    }
+
+    char actual_ape_sha[65], actual_carrier_sha[65];
+    long ape_bytes = 0;
+    if (fn_sha256_file(ape_path, actual_ape_sha, &ape_bytes) != 0 || ape_bytes < 4096) {
+        if (!quiet_summary) sy_printf("FAIL\tFORMAL_NEGATIVES\tape-read\tape_sha=-\tvariant=chain-ape\tvariant_sha=-\treason=cannot-read-or-too-small-chain-ape\n");
+        return 2;
+    }
+
+    /* Extract embedded P4 carrier SHA directly from the APE binary via packagefooter_locate_bytes */
+    {
+        size_t an = 0;
+        char *ab = cx_read(ape_path, &an);
+        long poff = 0, plen = 0;
+        if (!ab || fn_locate_p4((const unsigned char *)ab, (long)an, &poff, &plen) != 0 ||
+            sy_sha256_any_hex(ab + poff, plen, actual_carrier_sha) != 0) {
+            if (ab) mm_free(ab);
+            if (!quiet_summary)
+                sy_printf("FAIL\tFORMAL_NEGATIVES\tape-p4-footer\tape_sha=%s\tvariant=chain-ape\tvariant_sha=-\treason=missing-or-invalid-p4-footer\n",
+                          actual_ape_sha);
+            return 2;
+        }
+        mm_free(ab);
+    }
+
+    char chain_dir[FN_PW];
+    chain_dir[0] = 0;
+    if (chain_dir_arg && chain_dir_arg[0]) cx_fmt(chain_dir, sizeof chain_dir, "%s", chain_dir_arg);
+    else {
+        fn_infer_chain_dir(ape_path, chain_dir);
+        if (!chain_dir[0]) fn_infer_chain_dir(rcpt_path, chain_dir);
+    }
+    if (!chain_dir[0]) {
+        if (!quiet_summary)
+            sy_printf("FAIL\tFORMAL_NEGATIVES\tchain-dir-missing\tape_sha=%s\tvariant=chain-dir\tvariant_sha=-\treason=cannot-derive-chain-dir\n",
+                      actual_ape_sha);
+        return 2;
+    }
+
+    /* Strictly derive rev, run_id, inputs_sha, output_path, bin_sha, carrier_sha ONLY from the chain
+     * (never backfilled or overridden by caller flags; caller flags are cross-checked and refuse on mismatch). */
+    char indep_rev[64], disk_rev[41];
+    indep_rev[0] = 0; disk_rev[0] = 0;
+    if (fn_read_chain_rev(chain_dir, disk_rev) != 0) {
+        if (!quiet_summary)
+            sy_printf("FAIL\tFORMAL_NEGATIVES\trev-missing\tape_sha=%s\tvariant=chain-identity\tvariant_sha=-\treason=missing-chain-run-identity-rev\n",
+                      actual_ape_sha);
+        return 2;
+    }
+    if (rev_arg && rev_arg[0] && !tx_eqz(rev_arg, disk_rev)) {
+        if (!quiet_summary)
+            sy_printf("FAIL\tFORMAL_NEGATIVES\trev-cross-check\tape_sha=%s\tvariant=chain-identity\tvariant_sha=-\treason=caller-rev-mismatches-chain-run-identity\n",
+                      actual_ape_sha);
+        return 2;
+    }
+    cx_fmt(indep_rev, sizeof indep_rev, "%s", disk_rev);
+
+    char indep_run_id[160];
+    cx_fmt(indep_run_id, sizeof indep_run_id, "chain-%s", indep_rev);
+    if (run_id_arg && run_id_arg[0] && !tx_eqz(run_id_arg, indep_run_id)) {
+        if (!quiet_summary)
+            sy_printf("FAIL\tFORMAL_NEGATIVES\trun-id-cross-check\tape_sha=%s\tvariant=run-id\tvariant_sha=-\treason=caller-run-id-mismatches-chain-derived-run-id\n",
+                      actual_ape_sha);
+        return 2;
+    }
+
+    char indep_inputs_sha[65], disk_in_sha[65], pin_path[FN_PW];
+    indep_inputs_sha[0] = 0; disk_in_sha[0] = 0;
+    if (cx_fmt(pin_path, sizeof pin_path, "%s/pack-inputs.tsv", chain_dir) ||
+        fn_sha256_file(pin_path, disk_in_sha, 0) != 0) {
+        if (!quiet_summary)
+            sy_printf("FAIL\tFORMAL_NEGATIVES\tinputs-sha-missing\tape_sha=%s\tvariant=pack-inputs\tvariant_sha=-\treason=missing-chain-pack-inputs-tsv\n",
+                      actual_ape_sha);
+        return 2;
+    }
+    if (in_sha_arg && in_sha_arg[0] && !tx_eqz(in_sha_arg, disk_in_sha)) {
+        if (!quiet_summary)
+            sy_printf("FAIL\tFORMAL_NEGATIVES\tinputs-sha-cross-check\tape_sha=%s\tvariant=pack-inputs\tvariant_sha=%s\treason=caller-inputs-sha-mismatches-pack-inputs-tsv\n",
+                      actual_ape_sha, disk_in_sha);
+        return 2;
+    }
+    cx_fmt(indep_inputs_sha, sizeof indep_inputs_sha, "%s", disk_in_sha);
+
+    char indep_output_path[FN_PW];
+    if (cx_fmt(indep_output_path, sizeof indep_output_path, "%s/ape-final/ape-receipt.txt", chain_dir) ||
+        sy_exists(indep_output_path) != 1) {
+        if (!quiet_summary)
+            sy_printf("FAIL\tFORMAL_NEGATIVES\toutput-path-missing\tape_sha=%s\tvariant=output-path\tvariant_sha=-\treason=missing-chain-ape-receipt-txt\n",
+                      actual_ape_sha);
+        return 2;
+    }
+    if (out_path_arg && out_path_arg[0] && !tx_eqz(out_path_arg, indep_output_path)) {
+        if (!quiet_summary)
+            sy_printf("FAIL\tFORMAL_NEGATIVES\toutput-path-cross-check\tape_sha=%s\tvariant=output-path\tvariant_sha=-\treason=caller-output-path-mismatches-chain-ape-receipt-txt\n",
+                      actual_ape_sha);
+        return 2;
+    }
+
+    /* Cross-check ape-receipt.txt rows against actual_ape_sha, actual_carrier_sha, and entry.elf on disk */
+    char indep_bin_sha[65], ar_ape_sha[65], ar_car_sha[65], ar_bin_sha[65], ar_bin_path[FN_PW], disk_bin_sha[65];
+    indep_bin_sha[0] = 0;
+    if (fn_parse_ape_receipt_row(indep_output_path, "unisacc-next.com", ar_ape_sha, 0) != 0 ||
+        !tx_eqz(ar_ape_sha, actual_ape_sha)) {
+        if (!quiet_summary)
+            sy_printf("FAIL\tFORMAL_NEGATIVES\tape-receipt-cross-check\tape_sha=%s\tvariant=ape-receipt\tvariant_sha=%s\treason=ape-sha-mismatches-ape-receipt-txt\n",
+                      actual_ape_sha, ar_ape_sha[0] ? ar_ape_sha : "-");
+        return 2;
+    }
+    if (fn_parse_ape_receipt_row(indep_output_path, "p3-package.body", ar_car_sha, 0) != 0 ||
+        !tx_eqz(ar_car_sha, actual_carrier_sha)) {
+        if (!quiet_summary)
+            sy_printf("FAIL\tFORMAL_NEGATIVES\tcarrier-cross-check\tape_sha=%s\tvariant=p3-package-body\tvariant_sha=%s\treason=embedded-p4-mismatches-p3-package-body\n",
+                      actual_ape_sha, ar_car_sha[0] ? ar_car_sha : "-");
+        return 2;
+    }
+    if (car_sha_arg && car_sha_arg[0] && !tx_eqz(car_sha_arg, actual_carrier_sha)) {
+        if (!quiet_summary)
+            sy_printf("FAIL\tFORMAL_NEGATIVES\tcarrier-arg-cross-check\tape_sha=%s\tvariant=p3-package-body\tvariant_sha=%s\treason=caller-expect-carrier-sha-mismatch\n",
+                      actual_ape_sha, actual_carrier_sha);
+        return 2;
+    }
+    if (fn_parse_ape_receipt_row(indep_output_path, "lnx/x86_64", ar_bin_sha, ar_bin_path) != 0 ||
+        !ar_bin_path[0] || fn_sha256_file(ar_bin_path, disk_bin_sha, 0) != 0 ||
+        !tx_eqz(disk_bin_sha, ar_bin_sha)) {
+        if (!quiet_summary)
+            sy_printf("FAIL\tFORMAL_NEGATIVES\tbin-sha-cross-check\tape_sha=%s\tvariant=entry-elf\tvariant_sha=%s\treason=missing-or-mismatched-g2-entry-elf\n",
+                      actual_ape_sha, ar_bin_sha[0] ? ar_bin_sha : "-");
+        return 2;
+    }
+    if (bin_sha_arg && bin_sha_arg[0] && !tx_eqz(bin_sha_arg, ar_bin_sha)) {
+        if (!quiet_summary)
+            sy_printf("FAIL\tFORMAL_NEGATIVES\tbin-arg-cross-check\tape_sha=%s\tvariant=entry-elf\tvariant_sha=%s\treason=caller-expect-bin-sha-mismatch\n",
+                      actual_ape_sha, ar_bin_sha);
+        return 2;
+    }
+    cx_fmt(indep_bin_sha, sizeof indep_bin_sha, "%s", ar_bin_sha);
+
+    int64_t now_ts = (int64_t)sy_wall_s();
+    if (now_ts <= 0) return 2;
+
+    /* (1) Verify v3 candidate-chain.rcpt via rc_verify_out with fixed formal constants */
+    rc_expect_t exp;
+    rc_verified_t got;
+    mm_fill(&exp, (long)sizeof exp, 0, (long)sizeof exp);
+    exp.run_id = indep_run_id;
+    exp.rev = indep_rev;
+    exp.unit = FN_CONST_UNIT;
+    exp.target = FN_CONST_TARGET;
+    exp.producer = FN_CONST_PRODUCER;
+    exp.purpose = FN_CONST_PURPOSE;
+    exp.candidate_sha = actual_ape_sha;
+    exp.inputs_sha = indep_inputs_sha;
+    exp.output_path = indep_output_path;
+    exp.expect_rc = 0;
+    exp.expect_verdict = "PASS";
+    exp.now_ts = now_ts;
+    exp.max_age_s = 86400;
+    exp.max_future_s = 60;
+    exp.allow_fail_verdict = 0;
+    int rrc = rc_verify_out(rcpt_path, &exp, &got);
+    if (rrc != RC_OK) {
+        if (!quiet_summary) {
+            char why_buf[240];
+            cx_fmt(why_buf, sizeof why_buf, "%s:%s", rc_code_name(rrc), rc_why());
+            fn_rec(0, "FORMAL_NEGATIVES", "receipt-verify", actual_ape_sha, "chain-receipt", "-", why_buf);
+        }
+        rc_verified_free(&got);
+        return 2;
+    }
+    fn_rec(1, "FORMAL_NEGATIVES", "receipt-verify", actual_ape_sha, "chain-receipt", got.binding_sha, "rc-v3-verified");
+    if (!quiet_summary) {
+        sy_printf("FORMAL_NEGATIVES_IDENTITY\trev=%s\trun_id=%s\tape_sha=%s\tbin_sha=%s\tcarrier_sha=%s\tinputs_sha=%s\toutput_sha=%s\tbinding_sha=%s\tts=%lld\n",
+                  indep_rev, indep_run_id, actual_ape_sha, indep_bin_sha, actual_carrier_sha,
+                  indep_inputs_sha, got.output_sha, got.binding_sha, (long long)got.ts);
+    }
+    rc_verified_free(&got);
+
+    char tmp[FN_PW];
+    if (sr_scratch("check-v019-formal-neg", tmp, (int)sizeof tmp) != 0) return 2;
+
+    /* (2) m53 6-copy tamper gate + intact positive control + G4 env override */
+    if (has_m53) {
+        if (fn_run_m53_tamper_gate(cwd, tmp, ape_path, actual_ape_sha) == 2) {
+            (void)sy_remove_all(tmp);
+            return 2;
+        }
+    }
+
+    /* (3) Pinned Piece D (driveargs), Piece B (bind), Piece M (m25) --chain-ape delegation */
+    char pd_path[FN_PW], pb_path[FN_PW], pm_path[FN_PW];
+    cx_fmt(pd_path, sizeof pd_path, "%s/tools/check-piece-d-driveargs.cx", repo);
+    cx_fmt(pb_path, sizeof pb_path, "%s/tools/check-bind-s3.cx", repo);
+    cx_fmt(pm_path, sizeof pm_path, "%s/tools/check-piece-m-m25.cx", repo);
+    if (has_d && sy_exists(pd_path) != 1) {
+        (void)sy_remove_all(tmp);
+        sy_printf("REFUSE\tFORMAL_NEGATIVES\tmissing-piece-check-tool\ttool=tools/check-piece-d-driveargs.cx\tpath=%s\n", pd_path);
+        return 2;
+    }
+    if (has_b && sy_exists(pb_path) != 1) {
+        (void)sy_remove_all(tmp);
+        sy_printf("REFUSE\tFORMAL_NEGATIVES\tmissing-piece-check-tool\ttool=tools/check-bind-s3.cx\tpath=%s\n", pb_path);
+        return 2;
+    }
+    if (has_m && sy_exists(pm_path) != 1) {
+        (void)sy_remove_all(tmp);
+        sy_printf("REFUSE\tFORMAL_NEGATIVES\tmissing-piece-check-tool\ttool=tools/check-piece-m-m25.cx\tpath=%s\n", pm_path);
+        return 2;
+    }
+
+    if (has_d) {
+        fn_run_piece_pregate(cwd, repo, "piece-D-driveargs", pd_path, ape_path, rcpt_path,
+                             indep_run_id, indep_rev,
+                             indep_inputs_sha, indep_output_path, now_ts,
+                             indep_bin_sha, actual_carrier_sha, actual_ape_sha);
+    }
+    if (has_b) {
+        fn_run_piece_pregate(cwd, repo, "piece-B-bind", pb_path, ape_path, rcpt_path,
+                             indep_run_id, indep_rev,
+                             indep_inputs_sha, indep_output_path, now_ts,
+                             indep_bin_sha, actual_carrier_sha, actual_ape_sha);
+    }
+    if (has_m) {
+        fn_run_piece_pregate(cwd, repo, "piece-M-m25", pm_path, ape_path, rcpt_path,
+                             indep_run_id, indep_rev,
+                             indep_inputs_sha, indep_output_path, now_ts,
+                             indep_bin_sha, actual_carrier_sha, actual_ape_sha);
+    }
+
+    (void)sy_remove_all(tmp);
+    if (!quiet_summary) {
+        sy_printf("CHECK_V019_FORMAL_NEGATIVES\tmode=%s\tverdict=%s\tpieces=%s\tape_sha=%s\trev=%s\ttarget=%s\tpassed=%d\tfailed=%d\n",
+                  dry_run ? "DRY_RUN" : "FORMAL_CHAIN_PREGATE",
+                  g_fail == 0 ? "PASS" : "FAIL", canon_pieces, actual_ape_sha, indep_rev, FN_CONST_TARGET, g_pass, g_fail);
+    }
+    return g_fail ? 1 : 0;
+}
+
+/* Self-test mode: tests v3 candidate-chain.rcpt verification, raw 4-col rejection,
+ * strict chain-only identity derivation (no backfill/override), --pieces validation & subset refusal,
+ * m53 6-copy tamper gate, and real pinned D/B/M checks refusing on an APE lacking D/B/M. */
+static int fn_self_test(const char *cwd, const char *repo) {
+    char tmp[FN_PW], afdir[FN_PW], fape[FN_PW], arcpt[FN_PW], pinp[FN_PW], v3p[FN_PW], elfp[FN_PW], bodyp[FN_PW];
+    const char *rev = "4b254badf6f8607b7925e048d8017ea8b5f42a9a";
+    const char *run_id = "chain-4b254badf6f8607b7925e048d8017ea8b5f42a9a";
+    int64_t ts = (int64_t)sy_wall_s();
+    if (ts <= 0) return 2;
+    {
+        static const char *const req_tools[3] = {
+            "tools/check-piece-d-driveargs.cx",
+            "tools/check-bind-s3.cx",
+            "tools/check-piece-m-m25.cx"
+        };
+        for (int ti = 0; ti < 3; ti++) {
+            char tp[FN_PW];
+            if (cx_fmt(tp, sizeof tp, "%s/%s", repo, req_tools[ti]) || sy_exists(tp) != 1) {
+                sy_printf("REFUSE\tFORMAL_NEGATIVES\tmissing-piece-check-tool\ttool=%s\tpath=%s\n", req_tools[ti], tp);
+                return 2;
+            }
+        }
+    }
+
+    if (sr_scratch("check-v019-formal-neg-selftest", tmp, (int)sizeof tmp) != 0) return 2;
+    if (cx_fmt(afdir, sizeof afdir, "%s/ape-final", tmp) ||
+        cx_fmt(fape, sizeof fape, "%s/unisacc-next.com", afdir) ||
+        cx_fmt(arcpt, sizeof arcpt, "%s/ape-receipt.txt", afdir) ||
+        cx_fmt(pinp, sizeof pinp, "%s/pack-inputs.tsv", tmp) ||
+        cx_fmt(v3p, sizeof v3p, "%s/candidate-chain.rcpt", afdir) ||
+        cx_fmt(elfp, sizeof elfp, "%s/entry.elf", tmp) ||
+        cx_fmt(bodyp, sizeof bodyp, "%s/p3-package.body", afdir)) return 2;
+    (void)sy_mkdir(afdir, 0755);
+    {
+        char l1[FN_PW], l2[FN_PW], t1[FN_PW], t2[FN_PW];
+        cx_fmt(l1, sizeof l1, "%s/cxroot.tsv", tmp); cx_fmt(t1, sizeof t1, "%s/cxroot.tsv", cwd); (void)sy_symlink(t1, l1);
+        cx_fmt(l2, sizeof l2, "%s/cx", tmp); cx_fmt(t2, sizeof t2, "%s/cx", cwd); (void)sy_symlink(t2, l2);
+    }
+
+    unsigned char fake_so[64], fake_m53[64];
+    mm_fill(fake_so, 64, 'S', 64);
+    fake_so[0] = 0x7f; fake_so[1] = 'E'; fake_so[2] = 'L'; fake_so[3] = 'F';
+    mm_fill(fake_m53, 64, 'M', 64);
+    mm_copy(fake_m53, 8, "UTAPEBIN", 8);
+
+    char so_sha[65], m53_sha[65], mf_txt[512];
+    (void)sy_sha256_any_hex((const char *)fake_so, 64, so_sha);
+    (void)sy_sha256_any_hex((const char *)fake_m53, 64, m53_sha);
+    cx_fmt(mf_txt, sizeof mf_txt, "tapemode.so\t%s\t64\nm53.tapeslice\t%s\t64\n", so_sha, m53_sha);
+
+    fn_frec_t frecs[3];
+    mm_fill(frecs, (long)sizeof frecs, 0, (long)sizeof frecs);
+    cx_fmt(frecs[0].key, sizeof frecs[0].key, "tape/lnx-x86_64/manifest.tsv");
+    frecs[0].klen = (long)strlen(frecs[0].key);
+    frecs[0].data = (unsigned char *)mf_txt;
+    frecs[0].len = (long)strlen(mf_txt);
+    frecs[0].rawlen = (unsigned long)frecs[0].len;
+    frecs[0].codec = 0;
+    frecs[0].crc = (unsigned long)fn_crc32(frecs[0].data, frecs[0].len);
+
+    cx_fmt(frecs[1].key, sizeof frecs[1].key, "tape/lnx-x86_64/tapemode.so");
+    frecs[1].klen = (long)strlen(frecs[1].key);
+    frecs[1].data = fake_so;
+    frecs[1].len = 64;
+    frecs[1].rawlen = 64;
+    frecs[1].codec = 0;
+    frecs[1].crc = (unsigned long)fn_crc32(fake_so, 64);
+
+    cx_fmt(frecs[2].key, sizeof frecs[2].key, "tape/lnx-x86_64/m53.tapeslice");
+    frecs[2].klen = (long)strlen(frecs[2].key);
+    frecs[2].data = fake_m53;
+    frecs[2].len = 64;
+    frecs[2].rawlen = 64;
+    frecs[2].codec = 0;
+    frecs[2].crc = (unsigned long)fn_crc32(fake_m53, 64);
+
+    /* Build a synthetic executable m53-only APE with a real P4 container + UNIPKG1 footer that checks
+     * its own P4 F records, CRC, manifest.tsv SHA, UTAPEBIN seal, and tapemode.so ELF magic (lacks D/B/M slices).
+     * copy1 (stripped P4 footer) emits DRIVEARGS_M1_REFUSE to exercise cross-unit whole-container acceptance,
+     * and inherited UNISACC_M53_S1_SO / UNISA_CONTAINER / UNISACC_APE_SELF are checked to verify cleaned env. */
+    char host_sh[1800], pad_host[4600];
+    cx_fmt(host_sh, sizeof host_sh,
+           "#!/bin/sh\n"
+           "if [ \"$3\" = \"-o\" ] && [ -n \"$4\" ]; then printf 'ok\\n' > \"$4\"; exit 0; fi\n"
+           "if [ \"$1\" = \"stream\" ] && ( [ \"$2\" = \"e2\" ] || [ \"$2\" = \"e1\" ] ); then printf 'tok\\n'; exit 0; fi\n"
+           "if [ \"$1\" != \"stream\" ] || [ \"$2\" != \"e3\" ]; then exit 2; fi\n"
+           "if [ -n \"$UNISACC_M53_S1_SO\" ] || [ -n \"$UNISA_CONTAINER\" ] || [ -n \"$UNISACC_APE_SELF\" ]; then printf 'DRIVEARGS_M1_REFUSE\\treason=embed-inherited-env-leaked\\tdetail=0\\n' >&2; exit 1; fi\n"
+           "if [ -n \"$UNISACC_M53_S1\" ]; then printf 'M53_M1_REFUSE\\treason=embed-env-override-forbidden\\tdetail=0\\n' >&2; exit 1; fi\n"
+           "tail -c 16 \"$0\" | grep -a -q '^UNIPKG1' || { printf 'DRIVEARGS_M1_REFUSE\\treason=embed-footer-invalid\\tdetail=-2\\n' >&2; exit 1; }\n"
+           "tail -c +4202 \"$0\" | grep -a -q 'tape/lnx-x86_64/m53.tapeslice' || { printf 'M53_M1_REFUSE\\treason=embed-resource-missing\\tdetail=-2\\n' >&2; exit 2; }\n"
+           "tail -c +4202 \"$0\" | grep -a -q 'LMMM' && { printf 'M53_M1_REFUSE\\treason=embed-slice-corrupt\\tdetail=-2\\n' >&2; exit 2; }\n"
+           "tail -c +4202 \"$0\" | grep -a -q 'ELFSSSS' || { printf 'M53_M1_REFUSE\\treason=embed-so-invalid\\tdetail=-2\\n' >&2; exit 1; }\n"
+           "tail -c +4202 \"$0\" | grep -a -q 'm53.tapeslice\t%s\t64' || { printf 'M53_M1_REFUSE\\treason=embed-manifest-mismatch\\tdetail=-2\\n' >&2; exit 2; }\n"
+           "tail -c +4202 \"$0\" | grep -a -q 'F 29 64 64 0 %lu' || { printf 'M53_M1_REFUSE\\treason=embed-pkg-decode-failed\\tdetail=-2\\n' >&2; exit 2; }\n"
+           "printf 'stream-e3-ok\\n'\nexit 0\n"
+           "# PADDING_TO_4096_BYTES_",
+           m53_sha, frecs[2].crc);
+    long hlen = (long)strlen(host_sh);
+    mm_copy(pad_host, sizeof pad_host, host_sh, hlen);
+    while (hlen < 4200) pad_host[hlen++] = 'P';
+    pad_host[hlen++] = '\n';
+
+    const char *dm_sec = "P 4 1 1 3\nD r s in out 0\nM 1 1 0 3554254475\nA";
+    long dm_l = (long)strlen(dm_sec);
+    mm_copy(pad_host + hlen, sizeof pad_host - hlen, dm_sec, dm_l);
+    char ape_sha[65], elf_sha[65], carrier_sha[65], in_sha[65], out_sha[65];
+    if (fn_write_ape_with_frecs((const unsigned char *)pad_host, hlen, hlen + dm_l, 1, 1, frecs, 3, fape, ape_sha) != 0)
+        return 2;
+
+    /* Extract embedded P4 payload from fape into bodyp so carrier_sha matches embedded P4 */
+    {
+        size_t fn = 0;
+        char *fb = cx_read(fape, &fn);
+        long poff = 0, plen = 0;
+        if (!fb || fn_locate_p4((const unsigned char *)fb, (long)fn, &poff, &plen) != 0) return 2;
+        (void)sy_write_file(bodyp, (const unsigned char *)(fb + poff), plen, 0644);
+        (void)sy_sha256_any_hex(fb + poff, plen, carrier_sha);
+        mm_free(fb);
+    }
+    (void)cx_write(elfp, "\177ELFsynthetic-lnx-x86_64-entry-elf\n", 35);
+    (void)fn_sha256_file(elfp, elf_sha, 0);
+
+    char pin_txt[512], ar_txt[1024], id_txt[256], idp[FN_PW];
+    cx_fmt(id_txt, sizeof id_txt, "rev=%s\nmode=full\n", rev);
+    cx_fmt(idp, sizeof idp, "%s/chain-run.identity", tmp);
+    (void)cx_write(idp, id_txt, strlen(id_txt));
+    cx_fmt(pin_txt, sizeof pin_txt, "lnx/x86_64\t%s\t%s\t35\n", elfp, elf_sha);
+    (void)cx_write(pinp, pin_txt, strlen(pin_txt));
+    (void)fn_sha256_file(pinp, in_sha, 0);
+
+    long ape_len = 0, body_len = 0;
+    (void)fn_sha256_file(fape, ape_sha, &ape_len);
+    (void)fn_sha256_file(bodyp, carrier_sha, &body_len);
+    cx_fmt(ar_txt, sizeof ar_txt,
+           "lnx/x86_64\t%s\tsha=%s\tbytes=35\n"
+           "p3-package.body\t%s\tsha=%s\tbytes=%ld\n"
+           "unisacc-next.com\t%s\tsha=%s\tbytes=%ld\n",
+           elfp, elf_sha, bodyp, carrier_sha, body_len, fape, ape_sha, ape_len);
+    (void)cx_write(arcpt, ar_txt, strlen(ar_txt));
+    (void)fn_sha256_file(arcpt, out_sha, 0);
+
+    rc_v3_t v3;
+    mm_fill(&v3, (long)sizeof v3, 0, (long)sizeof v3);
+    v3.run_id = run_id;
+    v3.rev = rev;
+    v3.unit = "candidate-ape";
+    v3.target = "lnx/x86_64";
+    v3.producer = "candidate-chain";
+    v3.purpose = "chain-ape";
+    v3.candidate_sha = ape_sha;
+    v3.inputs_sha = in_sha;
+    v3.output_sha = out_sha;
+    v3.rc = 0;
+    v3.verdict = "PASS";
+    v3.ts = ts;
+    int sv_pass = g_pass, sv_fail = g_fail;
+    int w_ok = (rc_write3(v3p, &v3) == 0);
+    fn_rec(w_ok, "SELFTEST", "write-v3-candidate-chain-rcpt", ape_sha, "v3-rcpt", out_sha, "rc-write3-ok");
+
+    /* Negative control 1: Passing raw 4-col ape-receipt.txt as --chain-receipt MUST REFUSE (rc=2) */
+    sv_pass = g_pass; sv_fail = g_fail;
+    int rc_raw = fn_run_formal_pregate(cwd, repo, fape, arcpt, tmp, 0, 0, 0, 0, 0, 0,
+                                       "m53,D,B,M", 0, 1);
+    g_pass = sv_pass; g_fail = sv_fail;
+    fn_rec(rc_raw == 2 && strstr(rc_why(), "extra-col:receipt") != 0,
+           "SELFTEST", "refuse-raw-4col-ape-receipt-txt", ape_sha, "raw-4col-receipt", "-", "bad-format:extra-col:receipt");
+
+    /* Negative control 2: Wrong --rev, missing chain-run.identity (backfill attempt), or overridden --run-id/--output-path MUST REFUSE (rc=2) */
+    char bad_rev[41], bad_car[65];
+    cx_fmt(bad_rev, sizeof bad_rev, "%s", rev);
+    bad_rev[0] = (bad_rev[0] == 'a') ? 'b' : 'a';
+    sv_pass = g_pass; sv_fail = g_fail;
+    int rc_badrev = fn_run_formal_pregate(cwd, repo, fape, v3p, tmp, bad_rev, 0, 0, 0, 0, 0,
+                                          "m53,D,B,M", 0, 1);
+    (void)sy_unlink(idp);
+    int rc_backfill = fn_run_formal_pregate(cwd, repo, fape, v3p, tmp, rev, 0, 0, 0, 0, 0,
+                                            "m53,D,B,M", 0, 1);
+    (void)cx_write(idp, id_txt, strlen(id_txt));
+    int rc_ov_rid = fn_run_formal_pregate(cwd, repo, fape, v3p, tmp, 0, "override-run-id", 0, 0, 0, 0,
+                                          "m53,D,B,M", 0, 1);
+    int rc_ov_out = fn_run_formal_pregate(cwd, repo, fape, v3p, tmp, 0, 0, 0, "/tmp/other-receipt.txt", 0, 0,
+                                          "m53,D,B,M", 0, 1);
+    g_pass = sv_pass; g_fail = sv_fail;
+    fn_rec(rc_badrev == 2 && rc_backfill == 2 && rc_ov_rid == 2 && rc_ov_out == 2,
+           "SELFTEST", "refuse-mismatched-rev-backfill-and-run-id-override", ape_sha, "bad-rev-or-override", "-", "chain-only-derivation-enforced");
+
+    /* Negative control 3: Wrong --expect-carrier-sha vs embedded P4 payload MUST REFUSE (rc=2) */
+    cx_fmt(bad_car, sizeof bad_car, "%s", carrier_sha);
+    bad_car[0] = (bad_car[0] == 'a') ? 'b' : 'a';
+    sv_pass = g_pass; sv_fail = g_fail;
+    int rc_badcar = fn_run_formal_pregate(cwd, repo, fape, v3p, tmp, 0, 0, 0, 0, 0, bad_car,
+                                          "m53,D,B,M", 0, 1);
+    g_pass = sv_pass; g_fail = sv_fail;
+    fn_rec(rc_badcar == 2,
+           "SELFTEST", "refuse-mismatched-carrier-sha", ape_sha, "bad-carrier-sha", "-", "carrier-sha-mismatch-refused");
+
+    /* Negative control 4: Empty, unknown, subset --pieces without --dry-run, or missing piece tool MUST REFUSE (rc=2) */
+    sv_pass = g_pass; sv_fail = g_fail;
+    int rc_p_empty = fn_run_formal_pregate(cwd, repo, fape, v3p, tmp, 0, 0, 0, 0, 0, 0,
+                                           "", 0, 1);
+    int rc_p_unk = fn_run_formal_pregate(cwd, repo, fape, v3p, tmp, 0, 0, 0, 0, 0, 0,
+                                         "m53,unknown", 0, 1);
+    int rc_p_sub1 = fn_run_formal_pregate(cwd, repo, fape, v3p, tmp, 0, 0, 0, 0, 0, 0,
+                                          "m53", 0, 1);
+    int rc_p_sub2 = fn_run_formal_pregate(cwd, repo, fape, v3p, tmp, 0, 0, 0, 0, 0, 0,
+                                          "D,B,M", 0, 1);
+    int rc_p_notool = fn_run_formal_pregate(cwd, tmp, fape, v3p, tmp, 0, 0, 0, 0, 0, 0,
+                                            "D", 1, 1);
+    g_pass = sv_pass; g_fail = sv_fail;
+    fn_rec(rc_p_empty == 2 && rc_p_unk == 2 && rc_p_sub1 == 2 && rc_p_sub2 == 2 && rc_p_notool == 2,
+           "SELFTEST", "refuse-empty-unknown-or-subset-pieces-in-formal-mode", ape_sha, "bad-pieces", "-", "empty-unknown-or-subset-pieces-refused");
+
+    /* Positive control (--dry-run subset): m53 6-copy tamper gate + v3 receipt verification on m53 APE -> PASS (9 checks, 0 failed) */
+    sv_pass = g_pass; sv_fail = g_fail;
+    g_pass = 0; g_fail = 0;
+    int rc_m53 = fn_run_formal_pregate(cwd, repo, fape, v3p, tmp, 0, 0, 0, 0, 0, 0,
+                                       "m53", 1, 1);
+    int m53_p = g_pass, m53_f = g_fail;
+    g_pass = sv_pass; g_fail = sv_fail;
+    fn_rec(rc_m53 == 0 && m53_p == 9 && m53_f == 0,
+           "SELFTEST", "formal-pregate-m53-6copy-tamper-and-v3-receipt", ape_sha, "m53-6copy-pregate", carrier_sha, "m53-9-checks-verified");
+
+    /* Negative control 5: Cross-line split, reason with suffix, and cross-unit refusal on slice-tamper (copy2) MUST FAIL */
+    {
+        char rw[96], neg_sh[1800], neg_pad[4600], neg_ape[FN_PW], neg_sha[65];
+        int p_pos_drv = (fn_match_m1_refuse_line("DRIVEARGS_M1_REFUSE\treason=embed-footer-invalid\tdetail=-2\n",
+                                                 "embed-footer-invalid", 1, rw) == 1 &&
+                         tx_eqz(rw, "driveargs:embed-footer-invalid"));
+        int p_neg_split = (fn_match_m1_refuse_line("DRIVEARGS_M1_REFUSE\treason=other-reason\tdetail=-2\n"
+                                                   "NOTE\treason=embed-footer-invalid\n",
+                                                   "embed-footer-invalid", 1, rw) == 0 &&
+                           fn_match_m1_refuse_line("M53_M1_REFUSE\treason=other-reason\n"
+                                                   "reason=embed-pkg-decode-failed\n",
+                                                   "embed-pkg-decode-failed", 0, rw) == 0);
+        int p_neg_suf = (fn_match_m1_refuse_line("DRIVEARGS_M1_REFUSE\treason=embed-footer-invalid-extra\tdetail=-2\n",
+                                                 "embed-footer-invalid", 1, rw) == 0 &&
+                         fn_match_m1_refuse_line("M53_M1_REFUSE\treason=embed-pkg-decode-failed2\n",
+                                                 "embed-pkg-decode-failed", 0, rw) == 0);
+        int p_neg_unit = (fn_match_m1_refuse_line("DRIVEARGS_M1_REFUSE\treason=embed-pkg-decode-failed\tdetail=-2\n",
+                                                  "embed-pkg-decode-failed", 0, rw) == 0);
+        cx_fmt(neg_ape, sizeof neg_ape, "%s/neg_m53_ape.com", tmp);
+        cx_fmt(neg_sh, sizeof neg_sh,
+               "#!/bin/sh\n"
+               "if [ \"$1\" = \"stream\" ] && ( [ \"$2\" = \"e2\" ] || [ \"$2\" = \"e1\" ] ); then printf 'tok\\n'; exit 0; fi\n"
+               "if [ \"$1\" != \"stream\" ] || [ \"$2\" != \"e3\" ]; then exit 2; fi\n"
+               "if [ -n \"$UNISACC_M53_S1\" ]; then printf 'M53_M1_REFUSE\\treason=embed-env-override-forbidden\\tdetail=0\\n' >&2; exit 1; fi\n"
+               "tail -c 16 \"$0\" | grep -a -q '^UNIPKG1' || { printf 'DRIVEARGS_M1_REFUSE\\treason=other\\nNOTE\\treason=embed-footer-invalid\\n' >&2; exit 1; }\n"
+               "tail -c +4202 \"$0\" | grep -a -q 'tape/lnx-x86_64/m53.tapeslice' || { printf 'M53_M1_REFUSE\\treason=embed-resource-missing\\tdetail=-2\\n' >&2; exit 2; }\n"
+               "tail -c +4202 \"$0\" | grep -a -q 'LMMM' && { printf 'M53_M1_REFUSE\\treason=embed-slice-corrupt\\tdetail=-2\\n' >&2; exit 2; }\n"
+               "tail -c +4202 \"$0\" | grep -a -q 'ELFSSSS' || { printf 'DRIVEARGS_M1_REFUSE\\treason=embed-so-invalid-suffix\\tdetail=-2\\n' >&2; exit 1; }\n"
+               "tail -c +4202 \"$0\" | grep -a -q 'm53.tapeslice\t%s\t64' || { printf 'M53_M1_REFUSE\\treason=embed-manifest-mismatch\\tdetail=-2\\n' >&2; exit 2; }\n"
+               "tail -c +4202 \"$0\" | grep -a -q 'F 29 64 64 0 %lu' || { printf 'DRIVEARGS_M1_REFUSE\\treason=embed-pkg-decode-failed\\tdetail=-2\\n' >&2; exit 1; }\n"
+               "printf 'stream-e3-ok\\n'\nexit 0\n"
+               "# PADDING_TO_4096_BYTES_",
+               m53_sha, frecs[2].crc);
+        long nlen = (long)strlen(neg_sh);
+        mm_copy(neg_pad, sizeof neg_pad, neg_sh, nlen);
+        while (nlen < 4200) neg_pad[nlen++] = 'P';
+        neg_pad[nlen++] = '\n';
+        mm_copy(neg_pad + nlen, sizeof neg_pad - nlen, dm_sec, dm_l);
+        int neg_built = (fn_write_ape_with_frecs((const unsigned char *)neg_pad, nlen, nlen + dm_l, 1, 1, frecs, 3, neg_ape, neg_sha) == 0);
+        sv_pass = g_pass; sv_fail = g_fail;
+        g_pass = 0; g_fail = 0;
+        if (neg_built) (void)fn_run_m53_tamper_gate(cwd, tmp, neg_ape, neg_sha);
+        int neg_p = g_pass, neg_f = g_fail;
+        g_pass = sv_pass; g_fail = sv_fail;
+        (void)sy_unlink(neg_ape);
+        fn_rec(p_pos_drv && p_neg_split && p_neg_suf && p_neg_unit && neg_built && neg_p == 5 && neg_f == 3,
+               "SELFTEST", "refuse-m53-cross-line-split-reason-suffix-and-slice-cross-unit",
+               ape_sha, "m53-line-parse-negatives", "-", "cross-line+suffix+slice-wrong-unit-rejected");
+    }
+
+    /* Real pinned D/B/M checks on the m53-only APE (which lacks D/B/M slices):
+     * Per piece assert that rc_verify passed inside the piece tool AND the named missing-piece
+     * reason appeared (a tool that failed to start or refused its args/receipt does not count). */
+    g_last_d_rc_verified = 0; g_last_d_missing_piece = 0;
+    g_last_b_rc_verified = 0; g_last_b_missing_piece = 0;
+    g_last_m_rc_verified = 0; g_last_m_missing_piece = 0;
+    sv_pass = g_pass; sv_fail = g_fail;
+    g_pass = 0; g_fail = 0;
+    int rc_dbm = fn_run_formal_pregate(cwd, repo, fape, v3p, tmp, 0, 0, 0, 0, 0, 0,
+                                       "D,B,M", 1, 1);
+    int dbm_p = g_pass, dbm_f = g_fail;
+    g_pass = sv_pass; g_fail = sv_fail;
+    fn_rec(rc_dbm == 1 && dbm_p == 1 && dbm_f == 10 && g_last_d_rc_verified && g_last_d_missing_piece,
+           "SELFTEST", "real-piece-D-rc-verify-pass-and-missing-driveargs-refused", ape_sha, "D-chain-ape-on-m53-only", "-",
+           "rc-verify-ok+missing-driveargs-refused");
+    fn_rec(rc_dbm == 1 && dbm_p == 1 && dbm_f == 10 && g_last_b_rc_verified && g_last_b_missing_piece,
+           "SELFTEST", "real-piece-B-rc-verify-pass-and-missing-bind-refused", ape_sha, "B-chain-ape-on-m53-only", "-",
+           "rc-verify-ok+chain-ape-tape-authority-mismatch");
+    fn_rec(rc_dbm == 1 && dbm_p == 1 && dbm_f == 10 && g_last_m_rc_verified && g_last_m_missing_piece,
+           "SELFTEST", "real-piece-M-rc-verify-pass-and-missing-m25-refused", ape_sha, "M-chain-ape-on-m53-only", "-",
+           "rc-verify-ok+m25-refused");
+
+    (void)sy_remove_all(tmp);
+    sy_printf("CHECK_V019_FORMAL_NEGATIVES\tmode=SELFTEST\tverdict=%s\tpassed=%d\tfailed=%d\n",
+              g_fail == 0 ? "PASS" : "FAIL", g_pass, g_fail);
+    return g_fail ? 1 : 0;
+}
+
+int main(int argc, char **argv) {
+    int self_test = 0, dry_run = 0;
+    const char *ape_path = 0, *rcpt_path = 0, *chain_dir_arg = 0;
+    const char *rev_arg = 0, *run_id_arg = 0, *in_sha_arg = 0, *out_path_arg = 0;
+    const char *bin_sha_arg = 0, *car_sha_arg = 0;
+    const char *pieces = "m53,D,B,M";
+
+    for (int i = 1; i < argc; i++) {
+        if (tx_eqz(argv[i], "--")) continue;
+        else if (tx_eqz(argv[i], "--self-test")) self_test = 1;
+        else if (tx_eqz(argv[i], "--dry-run")) dry_run = 1;
+        else if (tx_eqz(argv[i], "--chain-ape") && i + 1 < argc) ape_path = argv[++i];
+        else if (tx_eqz(argv[i], "--chain-receipt") && i + 1 < argc) rcpt_path = argv[++i];
+        else if (tx_eqz(argv[i], "--chain-dir") && i + 1 < argc) chain_dir_arg = argv[++i];
+        else if (tx_eqz(argv[i], "--rev") && i + 1 < argc) rev_arg = argv[++i];
+        else if (tx_eqz(argv[i], "--run-id") && i + 1 < argc) run_id_arg = argv[++i];
+        else if (tx_eqz(argv[i], "--inputs-sha") && i + 1 < argc) in_sha_arg = argv[++i];
+        else if (tx_eqz(argv[i], "--output-path") && i + 1 < argc) out_path_arg = argv[++i];
+        else if (tx_eqz(argv[i], "--expect-bin-sha") && i + 1 < argc) bin_sha_arg = argv[++i];
+        else if (tx_eqz(argv[i], "--expect-carrier-sha") && i + 1 < argc) car_sha_arg = argv[++i];
+        else if (tx_eqz(argv[i], "--pieces") && i + 1 < argc) pieces = argv[++i];
+        else {
+            sy_eprintf("check-v019-formal-negatives: unknown option %s\n", argv[i]);
+            return 2;
+        }
+    }
+
+    char cwd[FN_PW], repo[FN_PW];
+    if (sy_cwd(cwd, (int)sizeof cwd) != 0) return 2;
+    if (fn_resolve_own_repo(argc > 0 ? argv[0] : 0, repo) != 0) {
+        sy_eprintf("check-v019-formal-negatives: cannot resolve own repo root\n");
+        return 2;
+    }
+    if (self_test || (!ape_path && !rcpt_path)) return fn_self_test(cwd, repo);
+
+    return fn_run_formal_pregate(cwd, repo, ape_path, rcpt_path, chain_dir_arg,
+                                 rev_arg, run_id_arg, in_sha_arg, out_path_arg,
+                                 bin_sha_arg, car_sha_arg, pieces, dry_run, 0);
+}

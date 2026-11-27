@@ -1,0 +1,731 @@
+/* tests/lnx-arm64-native-ci.cx -- Native lnx/arm64 CI runner, chain receipt parser,
+ * and v3 receipt verifier for tools/check-lnx-arm64-m53-s2.cx and tools/check-lnx-arm64-batch-a-s1.cx
+ * using shared cxlib.receipt v3 (rc_write3 / rc_verify with host-derived target + binding_sha).
+ *
+ * Security & attribution boundaries:
+ *   - Host identity is read from /proc/self/exe (fallback ts_self_path) ELF64 header so qemu or
+ *     mismatched hosts cannot spoof a native lnx/arm64 receipt.
+ *   - --verify-chain enforces strict single-record provenance binding source commit and candidate SHA256.
+ *   - Candidate digest hashes the real candidate binary (--candidate-file, >= 4096 B, non-source).
+ *   - Output verification enforces a single exact unit summary line, matching PASS/SKIP counts,
+ *     zero FAIL lines, and distinct source_probe vs delivered_ape_path attribution.
+ *   - Workflow independent verification step re-computes inputs_sha, output_sha, binding_sha, and
+ *     output line counts directly on ubuntu-24.04-arm POSIX tools without running candidate bytes.
+ */
+#pragma unisa use cxlib.toolselfpath
+#pragma unisa use cxlib.procrun
+#pragma unisa use cxlib.receipt
+#pragma unisa use sys.fs
+#pragma unisa use sys.env
+#pragma unisa use sys.io
+#pragma unisa use sys.posix
+#pragma unisa use sys.sha
+#pragma unisa use mem.heap
+#pragma unisa use mem.bytes
+#pragma unisa use text.text
+
+typedef char lnx_arm64_assert_ptr8[sizeof(void *) == 8 ? 1 : -1];
+typedef char lnx_arm64_assert_long8[sizeof(long) == 8 ? 1 : -1];
+typedef char lnx_arm64_assert_ll8[sizeof(long long) == 8 ? 1 : -1];
+
+static const char *DEF_PRODUCER = "lnx-arm64-native-ci";
+static const char *DEF_PURPOSE = "native-ci";
+
+static int lnxci_image_target(char *out, int cap) {
+    char path[4096];
+    unsigned char hdr[64];
+    long got = -1;
+    int fd = sy_open("/proc/self/exe", 0, 0);
+    if (fd >= 0) {
+        got = sy_read(fd, hdr, 64);
+        sy_close(fd);
+    }
+    if (got < 20) {
+        int npath = ts_self_path(path, (int)sizeof path);
+        if (npath < 0) { sy_eprintf("FAIL\tself-path\t%d\n", npath); return 1; }
+        fd = sy_open(path, 0, 0);
+        if (fd < 0) { sy_eprintf("FAIL\timage-open\t%s\n", path); return 1; }
+        got = sy_read(fd, hdr, 64);
+        sy_close(fd);
+        if (got < 20) { sy_eprintf("FAIL\timage-read\t%ld\n", got); return 1; }
+    }
+    if (hdr[0] == 0x7f && hdr[1] == 'E' && hdr[2] == 'L' && hdr[3] == 'F' && hdr[4] == 2 && hdr[5] == 1) {
+        unsigned machine = (unsigned)hdr[18] | ((unsigned)hdr[19] << 8);
+        if (machine == 62u) return cx_fmt(out, (size_t)cap, "lnx/x86_64");
+        if (machine == 183u) return cx_fmt(out, (size_t)cap, "lnx/arm64");
+        sy_eprintf("FAIL\telf-machine\t%u\n", machine);
+        return 1;
+    }
+    sy_eprintf("FAIL\timage-magic\n");
+    return 1;
+}
+
+static const char *lnxci_need_opt(int argc, char **argv, const char *key) {
+    for (int i = 1; i < argc; i++) {
+        if (!strcmp(argv[i], key) && i + 1 < argc) return argv[i + 1];
+    }
+    return 0;
+}
+
+static int lnxci_has_flag(int argc, char **argv, const char *key) {
+    for (int i = 1; i < argc; i++) if (!strcmp(argv[i], key)) return 1;
+    return 0;
+}
+
+static int lnxci_is_hex_lower(const char *s, int len) {
+    int i, all_zero = 1;
+    if (!s) return 0;
+    for (i = 0; i < len; i++) {
+        char c = s[i];
+        if (!((c >= '0' && c <= '9') || (c >= 'a' && c <= 'f'))) return 0;
+        if (c != '0') all_zero = 0;
+    }
+    return s[len] == 0 && !all_zero;
+}
+
+static int lnxci_parse_pos_i64(const char *s, int64_t *out) {
+    int64_t v = 0;
+    size_t i = 0;
+    if (!s || !s[0]) return 1;
+    for (; s[i]; i++) {
+        if (s[i] < '0' || s[i] > '9') return 1;
+        if (v > (0x7fffffffffffffffLL - 9LL) / 10LL) return 1;
+        v = v * 10LL + (int64_t)(s[i] - '0');
+    }
+    if (v <= 0) return 1;
+    *out = v;
+    return 0;
+}
+
+static int lnxci_sha256_buf(const unsigned char *buf, int64_t n, char out[65]) {
+    out[0] = 0;
+    if (sy_sha256_hex(buf, n, out) != 0) return 1;
+    return lnxci_is_hex_lower(out, 64) ? 0 : 1;
+}
+
+static int lnxci_file_sha256(const char *path, char out[65], int64_t max_bytes) {
+    unsigned char *b = 0;
+    int64_t n = 0;
+    int rc;
+    if (sy_read_file(path, &b, &n, max_bytes) != 0 || !b) {
+        if (b) mm_free(b);
+        return 1;
+    }
+    rc = lnxci_sha256_buf(b, n, out);
+    mm_free(b);
+    return rc;
+}
+
+static int lnxci_validate_candidate_binary(const char *path) {
+    long pn = path ? (long)strlen(path) : 0;
+    sy_stat_t st;
+    int fd;
+    unsigned char hdr[64];
+    long got;
+    if (!path || !path[0]) { sy_eprintf("FAIL\tcandidate-empty\n"); return 2; }
+    if ((pn >= 3 && strcmp(path + pn - 3, ".cx") == 0) ||
+        (pn >= 2 && strcmp(path + pn - 2, ".c") == 0) ||
+        (pn >= 2 && strcmp(path + pn - 2, ".h") == 0)) {
+        sy_eprintf("FAIL\tcandidate-is-source\t%s\n", path);
+        return 2;
+    }
+    if (sy_stat(path, &st) != 0 || st.kind != 'f' || st.size < 4096) {
+        sy_eprintf("FAIL\tcandidate-size-or-kind\t%s\n", path);
+        return 2;
+    }
+    fd = sy_open_read(path);
+    if (fd < 0) { sy_eprintf("FAIL\tcandidate-open\t%s\n", path); return 2; }
+    got = sy_read(fd, hdr, 64);
+    sy_close(fd);
+    if (got < 4) { sy_eprintf("FAIL\tcandidate-read\n"); return 2; }
+    if (!((hdr[0] == 'M' && hdr[1] == 'Z') ||
+          (hdr[0] == 0x7f && hdr[1] == 'E' && hdr[2] == 'L' && hdr[3] == 'F') ||
+          (hdr[0] == '#' && hdr[1] == '!'))) {
+        sy_eprintf("FAIL\tcandidate-bad-magic\t%s\n", path);
+        return 2;
+    }
+    return 0;
+}
+
+static const char *lnxci_unit_check_tool(const char *unit) {
+    if (strcmp(unit, "m53-s2") == 0) return "tools/check-lnx-arm64-m53-s2.cx";
+    if (strcmp(unit, "batch-a-s1") == 0) return "tools/check-lnx-arm64-batch-a-s1.cx";
+    return 0;
+}
+
+static const char *lnxci_unit_marker(const char *unit) {
+    if (strcmp(unit, "m53-s2") == 0) return "CHECK_LNX_ARM64_M53_S2\t";
+    if (strcmp(unit, "batch-a-s1") == 0) return "CHECK_LNX_ARM64_BATCH_A_S1\t";
+    return 0;
+}
+
+static const char *lnxci_unit_pass_prefix(const char *unit) {
+    if (strcmp(unit, "m53-s2") == 0) return "PASS\tcheck-lnx-arm64-m53-s2.";
+    if (strcmp(unit, "batch-a-s1") == 0) return "PASS\tcheck-lnx-arm64-batch-a-s1.";
+    return 0;
+}
+
+static const char *lnxci_unit_skip_prefix(const char *unit) {
+    if (strcmp(unit, "m53-s2") == 0) return "SKIP\tcheck-lnx-arm64-m53-s2.";
+    if (strcmp(unit, "batch-a-s1") == 0) return "SKIP\tcheck-lnx-arm64-batch-a-s1.";
+    return 0;
+}
+
+static const char *lnxci_expected_summary(const char *unit, const char *mode, int *want_pass, int *want_skip) {
+    if (strcmp(unit, "m53-s2") == 0) {
+        if (strcmp(mode, "native") == 0) {
+            *want_pass = 19; *want_skip = 4;
+            return "CHECK_LNX_ARM64_M53_S2\tpassed=19\tfailed=0\tskipped=4\trunner=native\tnative=1\tsource_probe=arm64_s2_drv\tdelivered_ape_path=stream_e2_cxsa_valid_s1";
+        }
+        *want_pass = 21; *want_skip = 0;
+        return "CHECK_LNX_ARM64_M53_S2\tpassed=21\tfailed=0\trunner=qemu\tnative=0\tsource_probe=arm64_s2_drv\tdelivered_ape_path=stream_e2_cxsa_valid_s1";
+    }
+    if (strcmp(unit, "batch-a-s1") == 0) {
+        *want_pass = 10; *want_skip = 0;
+        if (strcmp(mode, "native") == 0) {
+            return "CHECK_LNX_ARM64_BATCH_A_S1\tpassed=10\tfailed=0\trunner=native\tnative=1\thost_mode=fixture-host\tdriveargs_slots=1,5,6";
+        }
+        return "CHECK_LNX_ARM64_BATCH_A_S1\tpassed=10\tfailed=0\trunner=qemu\tnative=0\thost_mode=fixture-host\tdriveargs_slots=1,5,6";
+    }
+    return 0;
+}
+
+static int lnxci_mark_unique(const char *name, size_t nlen, const char *const *tbl, int n_tbl, unsigned int *mask) {
+    int k;
+    for (k = 0; k < n_tbl; k++) {
+        size_t tl = strlen(tbl[k]);
+        if (nlen == tl && memcmp(name, tbl[k], tl) == 0) {
+            unsigned int bit = 1U << k;
+            if (*mask & bit) return 1;
+            *mask |= bit;
+            return 0;
+        }
+    }
+    return 1;
+}
+
+static int lnxci_verify_unit_output(const char *unit, const char *mode, const char *buf, long len) {
+    static const char *const m53_nat_p[19] = {
+        "host-is-lnx-arm64-native", "build-real-m53-bin2-slice", "build-real-m53-abi1-slice",
+        "build-corrupt-slice", "build-swap-slice", "build-mutant-slice",
+        "cross-compile-lnx-arm64-stream-s1", "arm64-default-off-clean",
+        "arm64-portable-override-master-off-native-only", "arm64-s2-288-product-oracle-and-both-arms",
+        "arm64-s2-corrupt-fallback-native", "arm64-s2-swap-fallback-native",
+        "arm64-s2-mutant-mismatch-adopts-native",
+        "delivered-ape-stream-e2-default-off-and-bad-table",
+        "delivered-ape-stream-e2-disabled-master-off",
+        "delivered-ape-stream-e2-disabled-exec-absent",
+        "delivered-ape-stream-e2-corrupt-fallback",
+        "delivered-ape-stream-e2-portable-clean",
+        "delivered-ape-stream-e2-mutant-vm-pos-neg-parity"
+    };
+    static const char *const m53_nat_s[4] = {
+        "compile-lnx-x86_64-stream-s1", "build-x86_64-tapemode-so",
+        "x86_64-abi1-so-regression-clean", "x86_64-portable-switch-refused"
+    };
+    static const char *const m53_qem_p[21] = {
+        "qemu-aarch64-static-present", "build-real-m53-bin2-slice", "build-real-m53-abi1-slice",
+        "build-corrupt-slice", "build-swap-slice", "build-mutant-slice",
+        "cross-compile-lnx-arm64-stream-s1", "compile-lnx-x86_64-stream-s1", "build-x86_64-tapemode-so",
+        "arm64-default-off-clean", "arm64-portable-override-master-off-native-only",
+        "arm64-s2-288-product-oracle-and-both-arms", "arm64-s2-corrupt-fallback-native",
+        "arm64-s2-swap-fallback-native", "arm64-s2-mutant-mismatch-adopts-native",
+        "x86_64-abi1-so-regression-clean", "x86_64-portable-switch-refused",
+        "delivered-ape-stream-e2-default-off-and-bad-table",
+        "delivered-ape-stream-e2-disabled-master-off",
+        "delivered-ape-stream-e2-disabled-exec-absent",
+        "delivered-ape-stream-e2-corrupt-fallback"
+    };
+    static const char *const ba_nat_p[10] = {
+        "host-is-lnx-arm64-native", "build-m25-slice", "build-bind-slice",
+        "build-driveargs-slice", "build-forbidden-slot2-slice", "cross-compile-lnx-arm64-batch-a",
+        "arm64-m25-s1-173-parity", "arm64-bind-s1-parity",
+        "arm64-driveargs-s1-fixture-host-and-pinned-files", "arm64-fixture-host-forbidden-slot2-enosys"
+    };
+    static const char *const ba_qem_p[10] = {
+        "qemu-aarch64-static-present", "build-m25-slice", "build-bind-slice",
+        "build-driveargs-slice", "build-forbidden-slot2-slice", "cross-compile-lnx-arm64-batch-a",
+        "arm64-m25-s1-173-parity", "arm64-bind-s1-parity",
+        "arm64-driveargs-s1-fixture-host-and-pinned-files", "arm64-fixture-host-forbidden-slot2-enosys"
+    };
+    const char *marker = lnxci_unit_marker(unit);
+    const char *pass_pfx = lnxci_unit_pass_prefix(unit);
+    const char *skip_pfx = lnxci_unit_skip_prefix(unit);
+    int want_pass = 0, want_skip = 0, is_nat = (strcmp(mode, "native") == 0);
+    const char *want_sum = lnxci_expected_summary(unit, mode, &want_pass, &want_skip);
+    const char *const *exp_p = 0;
+    const char *const *exp_s = 0;
+    size_t ml, pl, sl, wl;
+    long i = 0;
+    unsigned int pmask = 0U, smask = 0U, need_pmask = 0U, need_smask = 0U;
+    int pass_cnt = 0, skip_cnt = 0, sum_hits = 0;
+
+    if (!marker || !pass_pfx || !skip_pfx || !want_sum || !buf || len <= 0) return 1;
+    if (buf[len - 1] != '\n') return 1;
+    if (strcmp(unit, "m53-s2") == 0) {
+        exp_p = is_nat ? m53_nat_p : m53_qem_p;
+        exp_s = is_nat ? m53_nat_s : 0;
+    } else {
+        exp_p = is_nat ? ba_nat_p : ba_qem_p;
+    }
+    need_pmask = (1U << want_pass) - 1U;
+    need_smask = want_skip > 0 ? ((1U << want_skip) - 1U) : 0U;
+    ml = strlen(marker); pl = strlen(pass_pfx); sl = strlen(skip_pfx); wl = strlen(want_sum);
+
+    while (i < len) {
+        long e = i;
+        size_t ll;
+        while (e < len && buf[e] != '\n') {
+            if (buf[e] == 0) return 1;
+            e++;
+        }
+        ll = (size_t)(e - i);
+        while (ll > 0 && buf[i + (long)ll - 1] == '\r') ll--;
+        if (ll >= 5 && memcmp(buf + i, "FAIL\t", 5) == 0) return 1;
+        if (ll >= pl && memcmp(buf + i, pass_pfx, pl) == 0) {
+            if (lnxci_mark_unique(buf + i + (long)pl, ll - pl, exp_p, want_pass, &pmask) != 0) return 1;
+            pass_cnt++;
+        } else if (ll >= sl && memcmp(buf + i, skip_pfx, sl) == 0) {
+            const char *nm = buf + i + (long)sl;
+            size_t nlen = ll - sl, k = 0;
+            while (k < nlen && nm[k] != '\t') k++;
+            if (!exp_s || lnxci_mark_unique(nm, k, exp_s, want_skip, &smask) != 0) return 1;
+            skip_cnt++;
+        } else if (ll >= ml && memcmp(buf + i, marker, ml) == 0) {
+            if (ll != wl || memcmp(buf + i, want_sum, wl) != 0) return 1;
+            sum_hits++;
+        }
+        i = e + 1;
+    }
+
+    if (sum_hits != 1 || pass_cnt != want_pass || skip_cnt != want_skip) return 1;
+    if (pmask != need_pmask || smask != need_smask) return 1;
+    return 0;
+}
+
+static int lnxci_kv_extract(const char *line, size_t ll, const char *key_eq, char *out, size_t cap) {
+    size_t kl = strlen(key_eq);
+    size_t j = 0;
+    int hits = 0;
+    while (j < ll) {
+        size_t s = j;
+        while (j < ll && line[j] != '\t' && line[j] != ' ') j++;
+        if ((size_t)(j - s) > kl && memcmp(line + s, key_eq, kl) == 0) {
+            size_t vl = (size_t)(j - s) - kl;
+            if (vl == 0 || vl >= cap) return -1;
+            if (hits == 0) {
+                mm_copy(out, cap, line + s + kl, vl);
+                out[vl] = 0;
+            }
+            hits++;
+        }
+        while (j < ll && (line[j] == '\t' || line[j] == ' ')) j++;
+    }
+    return hits;
+}
+
+static int lnxci_is_id_str(const char *s) {
+    size_t i;
+    if (!s || !s[0]) return 0;
+    for (i = 0; s[i]; i++) {
+        if (s[i] == '\n' || s[i] == '\r' || s[i] == '\t' || s[i] == ' ') return 0;
+    }
+    return 1;
+}
+
+static int lnxci_verify_chain_receipt(const char *path, const char *want_rev, const char *want_sha, const char *want_repo) {
+    static const char *const rc_keys[14] = {
+        "version", "run_id", "rev", "unit", "target", "producer", "purpose",
+        "candidate_sha", "inputs_sha", "output_sha", "rc", "verdict", "ts", "binding_sha"
+    };
+    unsigned char *b = 0;
+    int64_t n = 0, i = 0;
+    int promote_ok = 0, promote_refuse = 0, need_ape = 0;
+    int tsv_hdr = 0, col_repo = -1, col_commit = -1, col_sha = -1, tsv_rows = 0, tsv_hits = 0;
+    unsigned int rc_mask = 0U;
+    char rc_vals[14][160];
+    int other_lines = 0;
+    int bad = 0;
+
+    if (!lnxci_is_hex_lower(want_rev, 40) || !lnxci_is_hex_lower(want_sha, 64) || !want_repo || !want_repo[0]) {
+        sy_eprintf("FAIL\tchain-bad-expect\n");
+        return 2;
+    }
+    if (sy_read_file(path, &b, &n, 1 << 20) != 0 || !b || n <= 0) {
+        if (b) mm_free(b);
+        sy_eprintf("FAIL\tchain-read\n");
+        return 1;
+    }
+    for (i = 0; i < n; i++) if (b[i] == 0) { mm_free(b); sy_eprintf("FAIL\tchain-nul\n"); return 1; }
+    for (i = 0; i < 14; i++) rc_vals[i][0] = 0;
+
+    i = 0;
+    while (i < n && !bad) {
+        int64_t e = i;
+        const char *ls;
+        size_t ll;
+        while (e < n && b[e] != '\n') e++;
+        ls = (const char *)(b + i);
+        ll = (size_t)(e - i);
+        if (ll > 0 && ls[ll - 1] == '\r') { bad = 1; break; }
+        i = e + 1;
+        if (ll == 0 || ls[0] == '#') continue;
+
+        if (ll >= 14 && memcmp(ls, "PROMOTE_CHECK\t", 14) == 0) {
+            if (ll >= 20 && memcmp(ls, "PROMOTE_CHECK\tREFUSE", 20) == 0) { promote_refuse++; bad = 1; break; }
+            if (ll >= 17 && memcmp(ls, "PROMOTE_CHECK\tOK\t", 17) == 0) {
+                char rbuf[64];
+                int h = lnxci_kv_extract(ls, ll, "rev=", rbuf, sizeof rbuf);
+                if (h != 1 || strcmp(rbuf, want_rev) != 0) { bad = 1; break; }
+                promote_ok++;
+            } else {
+                bad = 1; break;
+            }
+        } else if (ll >= 9 && memcmp(ls, "NEED\tape\t", 9) == 0) {
+            char sbuf[80];
+            int h = lnxci_kv_extract(ls, ll, "sha=", sbuf, sizeof sbuf);
+            if (h != 1 || strcmp(sbuf, want_sha) != 0) { bad = 1; break; }
+            need_ape++;
+        } else if (ll >= 5 && memcmp(ls, "NEED\t", 5) == 0) {
+            continue;
+        } else if (!tsv_hdr && !promote_ok && !rc_mask && strchr(ls, '\t') != 0 &&
+                   (memcmp(ls, "repo\t", 5) == 0 || strstr(ls, "\tape_sha256") != 0)) {
+            size_t cstart = 0, k = 0;
+            int col = 0;
+            while (k <= ll) {
+                if (k == ll || ls[k] == '\t') {
+                    size_t cl = k - cstart;
+                    if (cl == 4 && memcmp(ls + cstart, "repo", 4) == 0) col_repo = col;
+                    if (cl == 6 && memcmp(ls + cstart, "commit", 6) == 0) col_commit = col;
+                    if (cl == 10 && memcmp(ls + cstart, "ape_sha256", 10) == 0) col_sha = col;
+                    col++;
+                    cstart = k + 1;
+                }
+                k++;
+            }
+            if (col_repo < 0 || col_commit < 0 || col_sha < 0) { bad = 1; break; }
+            tsv_hdr = 1;
+        } else if (tsv_hdr) {
+            size_t cstart = 0, k = 0;
+            int col = 0;
+            char f_repo[128], f_commit[64], f_sha[80];
+            f_repo[0] = 0; f_commit[0] = 0; f_sha[0] = 0;
+            while (k <= ll) {
+                if (k == ll || ls[k] == '\t') {
+                    size_t cl = k - cstart;
+                    if (col == col_repo && cl < sizeof f_repo) { mm_copy(f_repo, sizeof f_repo, ls + cstart, cl); f_repo[cl] = 0; }
+                    if (col == col_commit && cl < sizeof f_commit) { mm_copy(f_commit, sizeof f_commit, ls + cstart, cl); f_commit[cl] = 0; }
+                    if (col == col_sha && cl < sizeof f_sha) { mm_copy(f_sha, sizeof f_sha, ls + cstart, cl); f_sha[cl] = 0; }
+                    col++;
+                    cstart = k + 1;
+                }
+                k++;
+            }
+            tsv_rows++;
+            if (strcmp(f_commit, want_rev) == 0) {
+                if (strcmp(f_repo, want_repo) != 0) { bad = 1; break; }
+                if (strcmp(f_sha, want_sha) != 0) { bad = 1; break; }
+                tsv_hits++;
+            }
+        } else {
+            const char *tab = 0;
+            size_t t;
+            int matched = -1;
+            for (t = 0; t < ll; t++) if (ls[t] == '\t') { tab = ls + t; break; }
+            if (tab) {
+                size_t kl = (size_t)(tab - ls), vl = ll - kl - 1;
+                int rk;
+                for (rk = 0; rk < 14; rk++) {
+                    if (strlen(rc_keys[rk]) == kl && memcmp(ls, rc_keys[rk], kl) == 0) {
+                        matched = rk;
+                        break;
+                    }
+                }
+                if (matched >= 0) {
+                    if ((rc_mask & (1U << matched)) || vl == 0 || vl >= sizeof rc_vals[0]) { bad = 1; break; }
+                    mm_copy(rc_vals[matched], sizeof rc_vals[0], tab + 1, vl);
+                    rc_vals[matched][vl] = 0;
+                    rc_mask |= (1U << matched);
+                    continue;
+                }
+            }
+            other_lines++;
+        }
+    }
+    mm_free(b);
+
+    if (bad || promote_refuse > 0) { sy_eprintf("FAIL\tchain-bad-or-refused\n"); return 1; }
+    if (tsv_hdr) {
+        if (tsv_hits == 1 && other_lines == 0) {
+            sy_printf("PASS\tchain-verify\tformat=candidate-tsv\trows=%d\trev=%s\tape_sha=%s\n", tsv_rows, want_rev, want_sha);
+            return 0;
+        }
+        sy_eprintf("FAIL\tchain-tsv-unique\thits=%d\n", tsv_hits);
+        return 1;
+    }
+    if (promote_ok > 0 || need_ape > 0) {
+        if (promote_ok == 1 && need_ape == 1 && other_lines == 0) {
+            sy_printf("PASS\tchain-verify\tformat=promote-check\trev=%s\tape_sha=%s\n", want_rev, want_sha);
+            return 0;
+        }
+        sy_eprintf("FAIL\tchain-promote-unique\tok=%d\tape=%d\n", promote_ok, need_ape);
+        return 1;
+    }
+    if (rc_mask == ((1U << 14) - 1U) && other_lines == 0) {
+        int64_t ts_v = 0;
+        char payload[2048], exp_bind[65];
+        if (strcmp(rc_vals[0], "3") != 0 ||
+            !lnxci_is_id_str(rc_vals[1]) ||
+            !lnxci_is_hex_lower(rc_vals[2], 40) || strcmp(rc_vals[2], want_rev) != 0 ||
+            !lnxci_is_id_str(rc_vals[3]) || !lnxci_is_id_str(rc_vals[4]) ||
+            !lnxci_is_id_str(rc_vals[5]) || !lnxci_is_id_str(rc_vals[6]) ||
+            !lnxci_is_hex_lower(rc_vals[7], 64) || strcmp(rc_vals[7], want_sha) != 0 ||
+            !lnxci_is_hex_lower(rc_vals[8], 64) || !lnxci_is_hex_lower(rc_vals[9], 64) ||
+            strcmp(rc_vals[10], "0") != 0 || strcmp(rc_vals[11], "PASS") != 0 ||
+            lnxci_parse_pos_i64(rc_vals[12], &ts_v) != 0 ||
+            !lnxci_is_hex_lower(rc_vals[13], 64)) {
+            sy_eprintf("FAIL\tchain-rc-v3-fields\n");
+            return 1;
+        }
+        if (cx_fmt(payload, sizeof payload,
+                   "version\t3\nrun_id\t%s\nrev\t%s\nunit\t%s\ntarget\t%s\nproducer\t%s\npurpose\t%s\n"
+                   "candidate_sha\t%s\ninputs_sha\t%s\noutput_sha\t%s\nrc\t%s\nverdict\t%s\nts\t%s\n",
+                   rc_vals[1], rc_vals[2], rc_vals[3], rc_vals[4], rc_vals[5], rc_vals[6],
+                   rc_vals[7], rc_vals[8], rc_vals[9], rc_vals[10], rc_vals[11], rc_vals[12]) != 0 ||
+            lnxci_sha256_buf((const unsigned char *)payload, (int64_t)strlen(payload), exp_bind) != 0 ||
+            strcmp(exp_bind, rc_vals[13]) != 0) {
+            sy_eprintf("FAIL\tchain-rc-v3-binding\n");
+            return 1;
+        }
+        sy_printf("PASS\tchain-verify\tformat=rc-v3\trev=%s\tape_sha=%s\n", want_rev, want_sha);
+        return 0;
+    }
+    sy_eprintf("FAIL\tchain-unbound\n");
+    return 1;
+}
+
+static int lnxci_compute_unit_inputs_sha(const char *unit, const char *mode, char out[65]) {
+    static const char *const m53_files[6] = {
+        "tools/check-lnx-arm64-m53-s2.cx",
+        "cx/driver/stream_s1.cx",
+        "cx/runtime/tape_exec.cx",
+        "cx/runtime/stream_attributes.cx",
+        "src/drivestream.cx",
+        0
+    };
+    static const char *const batch_a_files[8] = {
+        "tools/check-lnx-arm64-batch-a-s1.cx",
+        "cx/runtime/tape_exec.cx",
+        "cx/compiler/rtsharedname.cx",
+        "src/bind.cx",
+        "src/driveargs.cx",
+        "src/entrybind.cx",
+        "src/driveutil.cx",
+        0
+    };
+    const char *const *files = strcmp(unit, "m53-s2") == 0 ? m53_files : batch_a_files;
+    char manifest[2048];
+    int pos = 0, i;
+    if (cx_fmt(manifest, sizeof manifest, "unit\t%s\nmode\t%s\n", unit, mode) != 0) return 1;
+    pos = (int)strlen(manifest);
+    for (i = 0; files[i]; i++) {
+        char fsha[65], row[256];
+        int rl;
+        if (lnxci_file_sha256(files[i], fsha, 4 << 20) != 0) return 1;
+        if (cx_fmt(row, sizeof row, "%s\t%s\n", files[i], fsha) != 0) return 1;
+        rl = (int)strlen(row);
+        if (pos + rl >= (int)sizeof manifest) return 1;
+        mm_copy(manifest + pos, (long)(sizeof manifest - pos), row, rl);
+        pos += rl;
+        manifest[pos] = 0;
+    }
+    return lnxci_sha256_buf((const unsigned char *)manifest, (int64_t)pos, out);
+}
+
+static int lnxci_do_judge(const char *rcpt_p, const char *out_p, const char *unit, const char *mode,
+                          const char *run_id, const char *rev, const char *cand_file,
+                          const char *expect, const char *producer, const char *purpose,
+                          int64_t now_ts) {
+    char cand_sha[65], in_sha[65];
+    rc_expect_t exp;
+    unsigned char *ob = 0;
+    int64_t on = 0;
+    int rrc;
+    if (lnxci_validate_candidate_binary(cand_file) != 0) return 2;
+    if (lnxci_file_sha256(cand_file, cand_sha, 128 << 20) != 0) { sy_eprintf("FAIL\tcandidate-sha\n"); return 1; }
+    if (lnxci_compute_unit_inputs_sha(unit, mode, in_sha) != 0) { sy_eprintf("FAIL\tinputs-sha\n"); return 1; }
+    mm_fill(&exp, (long)sizeof exp, 0, (long)sizeof exp);
+    exp.run_id = run_id;
+    exp.rev = rev;
+    exp.unit = unit;
+    exp.target = expect;
+    exp.candidate_sha = cand_sha;
+    exp.inputs_sha = in_sha;
+    exp.output_path = out_p;
+    exp.producer = producer;
+    exp.purpose = purpose;
+    exp.expect_rc = 0;
+    exp.expect_verdict = "PASS";
+    exp.now_ts = now_ts;
+    exp.max_age_s = 86400;
+    exp.max_future_s = 60;
+    exp.allow_fail_verdict = 0;
+    rrc = rc_verify(rcpt_p, &exp);
+    if (rrc != RC_OK) {
+        sy_eprintf("FAIL\t%s\tcode=%d\twhy=%s\n", rc_code_name(rrc), rrc, rc_why());
+        return 1;
+    }
+    if (sy_read_file(out_p, &ob, &on, 1 << 20) != 0 || !ob) {
+        if (ob) mm_free(ob);
+        sy_eprintf("FAIL\tjudge-read-output\n");
+        return 1;
+    }
+    if (lnxci_verify_unit_output(unit, mode, (const char *)ob, (long)on) != 0) {
+        mm_free(ob);
+        sy_eprintf("FAIL\toutput-contract-mismatch\n");
+        return 1;
+    }
+    mm_free(ob);
+    sy_printf("PASS\tlnx-arm64-native-ci\tunit=%s\tjudge=ok\ttarget=%s\n", unit, expect);
+    return 0;
+}
+
+int main(int argc, char **argv) {
+    if (lnxci_has_flag(argc, argv, "--verify-chain")) {
+        const char *cp = lnxci_need_opt(argc, argv, "--chain-receipt");
+        const char *rev = lnxci_need_opt(argc, argv, "--rev");
+        const char *csha = lnxci_need_opt(argc, argv, "--candidate-sha");
+        const char *repo = lnxci_need_opt(argc, argv, "--repo");
+        if (!cp || !rev || !csha) { sy_eprintf("FAIL\tchain-usage\n"); return 2; }
+        return lnxci_verify_chain_receipt(cp, rev, csha, repo);
+    }
+
+    {
+        const char *unit = lnxci_need_opt(argc, argv, "--unit");
+        const char *mode = lnxci_need_opt(argc, argv, "--mode");
+        const char *rcpt_p = lnxci_need_opt(argc, argv, "--receipt");
+        const char *out_p = lnxci_need_opt(argc, argv, "--output");
+        const char *loc_p = lnxci_need_opt(argc, argv, "--locators");
+        const char *cand_url = lnxci_need_opt(argc, argv, "--candidate-url");
+        const char *run_id = lnxci_need_opt(argc, argv, "--run-id");
+        const char *rev = lnxci_need_opt(argc, argv, "--rev");
+        const char *cand_file = lnxci_need_opt(argc, argv, "--candidate-file");
+        const char *expect = lnxci_need_opt(argc, argv, "--expect-target");
+        const char *producer = lnxci_need_opt(argc, argv, "--producer");
+        const char *purpose = lnxci_need_opt(argc, argv, "--purpose");
+        const char *ts_s = lnxci_has_flag(argc, argv, "--judge") ? lnxci_need_opt(argc, argv, "--now-ts") : lnxci_need_opt(argc, argv, "--ts");
+        const char *check_tool, *marker;
+        int64_t ts = 0;
+        char host[64], cand_sha[65], in_sha[65], out_sha[65];
+        char *out_buf;
+        int cut = 0, run_rc = 1, all_ok = 0;
+        long out_len = 0;
+
+        if (!mode) mode = "native";
+        if (!producer) producer = DEF_PRODUCER;
+        if (!purpose) purpose = DEF_PURPOSE;
+        if (!cand_url) cand_url = "local-file";
+        check_tool = unit ? lnxci_unit_check_tool(unit) : 0;
+        marker = unit ? lnxci_unit_marker(unit) : 0;
+        if (!unit || !check_tool || !marker ||
+            (strcmp(mode, "native") != 0 && strcmp(mode, "qemu") != 0) ||
+            !rcpt_p || !out_p || !run_id || !rev || !cand_file || !expect || lnxci_parse_pos_i64(ts_s, &ts) != 0) {
+            sy_eprintf("FAIL\tusage\n");
+            return 2;
+        }
+        if (lnxci_has_flag(argc, argv, "--judge")) {
+            return lnxci_do_judge(rcpt_p, out_p, unit, mode, run_id, rev, cand_file, expect, producer, purpose, ts);
+        }
+        if (lnxci_validate_candidate_binary(cand_file) != 0) return 2;
+        if (lnxci_image_target(host, (int)sizeof host) != 0) return 2;
+        if (strcmp(expect, host) != 0) {
+            sy_eprintf("FAIL\ttarget-mismatch\texpect=%s\timage=%s\n", expect, host);
+            return 1;
+        }
+        if (strcmp(mode, "native") == 0 && strcmp(host, "lnx/arm64") != 0) {
+            sy_eprintf("FAIL\tnative-requires-lnx-arm64\timage=%s\n", host);
+            return 1;
+        }
+        if (strcmp(mode, "qemu") == 0 && strcmp(host, "lnx/x86_64") != 0) {
+            sy_eprintf("FAIL\tqemu-requires-lnx-x86_64\timage=%s\n", host);
+            return 1;
+        }
+        if (lnxci_file_sha256(cand_file, cand_sha, 128 << 20) != 0) { sy_eprintf("FAIL\thash-candidate\n"); return 1; }
+        if (lnxci_compute_unit_inputs_sha(unit, mode, in_sha) != 0) { sy_eprintf("FAIL\thash-inputs\n"); return 1; }
+
+        out_buf = (char *)mm_alloc(65536);
+        if (!out_buf) return 1;
+        out_buf[0] = 0;
+
+        if (strcmp(mode, "native") == 0) {
+            char *av[] = {"sh", (char *)cand_file, (char *)check_tool, "--", "--native", "--unisacc", (char *)cand_file, 0};
+            run_rc = pr_run_merged(av, 90, out_buf, 65536, &cut);
+        } else {
+            char *av[] = {"sh", (char *)cand_file, (char *)check_tool, "--", "--unisacc", (char *)cand_file, 0};
+            run_rc = pr_run_merged(av, 90, out_buf, 65536, &cut);
+        }
+
+        out_len = tx_len(out_buf, 65536);
+        all_ok = (!cut && run_rc == 0 && lnxci_verify_unit_output(unit, mode, out_buf, out_len) == 0);
+
+        if (sy_write_file(out_p, (const unsigned char *)out_buf, out_len, 0644) != 0) {
+            mm_free(out_buf);
+            sy_eprintf("FAIL\twrite-output\n");
+            return 1;
+        }
+        if (lnxci_sha256_buf((const unsigned char *)out_buf, (int64_t)out_len, out_sha) != 0) {
+            mm_free(out_buf);
+            sy_eprintf("FAIL\thash-output\n");
+            return 1;
+        }
+        mm_free(out_buf);
+
+        if (loc_p) {
+            char loc_buf[2048];
+            const char *src_probe = strcmp(unit, "m53-s2") == 0 ? "arm64_s2_drv" : "arm64_batch_a_drv";
+            const char *ape_path = strcmp(unit, "m53-s2") == 0 ? "stream_e2_cxsa_valid_s1" : "n/a-unit-vm-s1";
+            if (cx_fmt(loc_buf, sizeof loc_buf,
+                       "source_commit\t%s\n"
+                       "target\t%s\n"
+                       "unit\t%s\n"
+                       "mode\t%s\n"
+                       "check_tool\t%s\n"
+                       "source_probe\t%s\n"
+                       "delivered_ape_path\t%s\n"
+                       "candidate_url\t%s\n"
+                       "candidate_file\t%s\n"
+                       "candidate_sha\t%s\n"
+                       "inputs_sha\t%s\n"
+                       "output_file\t%s\n"
+                       "output_sha\t%s\n",
+                       rev, host, unit, mode, check_tool, src_probe, ape_path, cand_url, cand_file,
+                       cand_sha, in_sha, out_p, out_sha) != 0 ||
+                sy_write_file(loc_p, (const unsigned char *)loc_buf, (long)strlen(loc_buf), 0644) != 0) {
+                sy_eprintf("FAIL\twrite-locators\n");
+                return 1;
+            }
+        }
+
+        {
+            rc_v3_t rec;
+            rec.run_id = run_id;
+            rec.rev = rev;
+            rec.unit = unit;
+            rec.target = host;
+            rec.producer = producer;
+            rec.purpose = purpose;
+            rec.candidate_sha = cand_sha;
+            rec.inputs_sha = in_sha;
+            rec.output_sha = out_sha;
+            rec.rc = all_ok ? 0 : 1;
+            rec.verdict = all_ok ? "PASS" : "FAIL";
+            rec.ts = ts;
+            if (rc_write3(rcpt_p, &rec) != 0) {
+                sy_eprintf("FAIL\trc-write3\t%s\n", rc_why());
+                return 1;
+            }
+        }
+        sy_printf("%s\tlnx-arm64-native-ci\tunit=%s\ttarget=%s\tmode=%s\n", all_ok ? "PASS" : "FAIL", unit, host, mode);
+        return all_ok ? 0 : 1;
+    }
+}

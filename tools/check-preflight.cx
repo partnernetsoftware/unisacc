@@ -20,6 +20,7 @@
 #pragma unisa use text.deflate
 #pragma unisa use sys.env
 #pragma unisa use cxlib.netpack
+#pragma unisa use cxlib.chainfacts
 #pragma unisa use mem.bytes
 #pragma unisa use mem.heap
 
@@ -288,46 +289,73 @@ int main(void) {
         ck(rc == 1 && row_is(10, "FAIL") && strstr(out, "missing tape/lnx-x86_64/manifest.tsv") != 0, "hook.post-p3.substring-only-fake-p4.FAIL");
 
         const char *so_v = "ELF-tapemode-so-payload";
-        const char *sl_v = "UTAPEBIN-m53-tapeslice-payload";
-        char so_sha[65], sl_sha[65], mf_v[512];
+        char so_sha[65], mf_v[2048];
+        char tu_keys[16][128], tu_vals[16][128], tu_sha[65];
+        const char *t_keys[20], *t_vals[20], *bad_vals[20];
+        unsigned bad_crc[20];
+        int ntu = 0;
         if (sy_sha256_hex(so_v, (long)strlen(so_v), so_sha) ||
-            sy_sha256_hex(sl_v, (long)strlen(sl_v), sl_sha) ||
-            cx_fmt(mf_v, sizeof mf_v, "tapemode.so\t%s\t%lu\nm53.tapeslice\t%s\t%lu\n",
-                   so_sha, (unsigned long)strlen(so_v), sl_sha, (unsigned long)strlen(sl_v))) die("mf fmt");
-        const char *t_keys[5] = {
-            "hdr/cx.h", "hdr/cx-flat.h",
-            "tape/lnx-x86_64/manifest.tsv", "tape/lnx-x86_64/tapemode.so", "tape/lnx-x86_64/m53.tapeslice"
-        };
-        const char *t_vals[5] = {"/* cx.h */\n", "/* cx-flat.h */\n", mf_v, so_v, sl_v};
+            cx_fmt(mf_v, sizeof mf_v, "tapemode.so\t%s\t%lu\n", so_sha, (unsigned long)strlen(so_v))) die("mf fmt");
+        t_keys[0] = "hdr/cx.h";
+        t_keys[1] = "hdr/cx-flat.h";
+        t_keys[2] = "tape/lnx-x86_64/manifest.tsv";
+        t_keys[3] = "tape/lnx-x86_64/tapemode.so";
+        t_vals[0] = "/* cx.h */\n";
+        t_vals[1] = "/* cx-flat.h */\n";
+        t_vals[2] = mf_v;
+        t_vals[3] = so_v;
+        bad_vals[0] = t_vals[0];
+        bad_vals[1] = t_vals[1];
+        bad_vals[2] = "tapemode.so\t0000\t23\nm53.tapeslice\t1111\t30\n";
+        bad_vals[3] = so_v;
+        for (int k = 0; k < 20; k++) bad_crc[k] = 0U;
+        bad_crc[3] = 1U;
+        for (int ti = 0; ti < cf_tu_count(); ti++) {
+            const char *tgt = cf_tu_target(ti), *u = cf_tu_unit(ti);
+            if (!tgt || !u || strcmp(tgt, "lnx/x86_64") != 0) continue;
+            if (ntu >= 16) die("too many cf_tu units");
+            char row[256];
+            if (cx_fmt(tu_keys[ntu], sizeof tu_keys[ntu], "tape/lnx-x86_64/%s.tapeslice", u) ||
+                cx_fmt(tu_vals[ntu], sizeof tu_vals[ntu], "UTAPEBIN-%s-tapeslice-payload", u) ||
+                sy_sha256_hex(tu_vals[ntu], (long)strlen(tu_vals[ntu]), tu_sha) ||
+                cx_fmt(row, sizeof row, "%s.tapeslice\t%s\t%lu\n", u, tu_sha, (unsigned long)strlen(tu_vals[ntu])))
+                die("tu fmt");
+            size_t ml = strlen(mf_v), rl = strlen(row);
+            if (ml + rl + 1 > sizeof mf_v) die("mf overflow");
+            if (mm_copy(mf_v + ml, (long)(sizeof mf_v - ml), row, (long)(rl + 1))) die("mf copy");
+            t_keys[4 + ntu] = tu_keys[ntu];
+            t_vals[4 + ntu] = tu_vals[ntu];
+            bad_vals[4 + ntu] = tu_vals[ntu];
+            ntu++;
+        }
+        int nrec = 4 + ntu;
 
         /* Bad CRC on tapemode.so F record -> FAIL */
-        unsigned bad_crc[5] = {0, 0, 0, 1U, 0};
-        write_p4_records("proot/compiler.p4.pkg", 5, t_keys, t_vals, 0, bad_crc, 0);
+        write_p4_records("proot/compiler.p4.pkg", nrec, t_keys, t_vals, 0, bad_crc, 0);
         rc = run(0, 0, d1, d2, d3, head, 1, "PHASE=post-p3", "--strict");
         ck(rc == 1 && row_is(10, "FAIL") && strstr(out, "invalid F record tape/lnx-x86_64/tapemode.so") != 0, "hook.post-p3.bad-crc-tape-record.FAIL");
 
         /* Manifest SHA mismatch -> FAIL */
-        const char *bad_vals[5] = {"/* cx.h */\n", "/* cx-flat.h */\n", "tapemode.so\t0000\t23\nm53.tapeslice\t1111\t30\n", so_v, sl_v};
-        write_p4_records("proot/compiler.p4.pkg", 5, t_keys, bad_vals, 0, 0, 0);
+        write_p4_records("proot/compiler.p4.pkg", nrec, t_keys, bad_vals, 0, 0, 0);
         rc = run(0, 0, d1, d2, d3, head, 1, "PHASE=post-p3", "--strict");
         ck(rc == 1 && row_is(10, "FAIL") && strstr(out, "tape manifest SHA mismatch") != 0, "hook.post-p3.manifest-sha-mismatch.FAIL");
 
         /* Plain hdr/ keys without leading NUL -> FAIL (production requires exact \0hdr/cx.h and \0hdr/cx-flat.h) */
         g_plain_hdr_key = 1;
-        write_p4_records("proot/compiler.p4.pkg", 5, t_keys, t_vals, 0, 0, 0);
+        write_p4_records("proot/compiler.p4.pkg", nrec, t_keys, t_vals, 0, 0, 0);
         g_plain_hdr_key = 0;
         rc = run(0, 0, d1, d2, d3, head, 1, "PHASE=post-p3", "--strict");
         ck(rc == 1 && row_is(10, "FAIL") && strstr(out, "missing hdr/cx.h") != 0, "hook.post-p3.plain-hdr-key-without-leading-nul.FAIL");
 
         /* Corrupt deflated hdr/ record (codec=1 payload cannot inflate) -> FAIL */
         g_corrupt_hdr_deflate = 1;
-        write_p4_records("proot/compiler.p4.pkg", 5, t_keys, t_vals, 0, 0, 0);
+        write_p4_records("proot/compiler.p4.pkg", nrec, t_keys, t_vals, 0, 0, 0);
         g_corrupt_hdr_deflate = 0;
         rc = run(0, 0, d1, d2, d3, head, 1, "PHASE=post-p3", "--strict");
         ck(rc == 1 && row_is(10, "FAIL") && strstr(out, "missing hdr/cx.h") != 0, "hook.post-p3.corrupt-deflated-hdr.FAIL");
 
-        /* Valid 3 tape F records -> PASS */
-        write_p4_records("proot/compiler.p4.pkg", 5, t_keys, t_vals, 0, 0, 0);
+        /* Valid tape F records (derived from chain facts) -> PASS */
+        write_p4_records("proot/compiler.p4.pkg", nrec, t_keys, t_vals, 0, 0, 0);
         rc = run(0, 0, d1, d2, d3, head, 1, "PHASE=post-p3", "--strict");
         ck(rc == 0 && row_is(10, "PASS") && row_is(12, "PASS"), "hook.post-p3.with-tape-records.PASS");
 
@@ -335,6 +363,30 @@ int main(void) {
         mk("psnap/tools/tape"); mk("psnap/tools/tape/asm");
         put("psnap/tools/tape/asm/tape_x86_64.S", "/* tape_x86_64.S */\n", 0644);
         put("psnap/tools/tape/asm/hoststub_lnx_x86_64.S", "/* hoststub_lnx_x86_64.S */\n", 0644);
+        mk("psnap/build");
+        {
+            char cf_src[4400], cf_dst[4400];
+            size_t cf_n = 0;
+            if (cx_fmt(cf_src, sizeof cf_src, "%s/build/chain-facts.tsv", root)) die("cf src path");
+            p(cf_dst, "psnap/build/chain-facts.tsv");
+            char *cf_b = cx_read(cf_src, &cf_n);
+            if (!cf_b || !cf_n || cx_write(cf_dst, cf_b, cf_n) || sy_chmod(cf_dst, 0644)) {
+                free(cf_b);
+                die("copy chain-facts.tsv");
+            }
+            free(cf_b);
+        }
+        mk("psnap/cx"); mk("psnap/cx/driver");
+        put("psnap/cx/driver/stream_s1_m1.cx", "/* stream_s1_m1.cx */\n", 0644);
+        mk("psnap/exec"); mk("psnap/exec/tape"); mk("psnap/exec/tape/guests");
+        for (int ti = 0; ti < cf_tu_count(); ti++) {
+            const char *tgt = cf_tu_target(ti), *u = cf_tu_unit(ti);
+            if (!tgt || !u || strcmp(tgt, "lnx/x86_64") != 0 || strcmp(u, "m53") == 0) continue;
+            char gp[256], gb[128];
+            if (cx_fmt(gp, sizeof gp, "psnap/exec/tape/guests/%s_guest.cx", u) ||
+                cx_fmt(gb, sizeof gb, "/* %s_guest.cx */\n", u)) die("guest fmt");
+            put(gp, gb, 0644);
+        }
         /* Mock proot/unisacc.com that handles tape-sidecar-build.cx, -S guest compile, and tapepack.cx */
         put("proot/unisacc.com",
             "#!/bin/sh\n"
@@ -346,11 +398,12 @@ int main(void) {
             "    LEN=$(wc -c < \"$TDIR/tapemode.so\" | tr -d ' ')\n"
             "    printf 'tapemode.so\\t%s\\t%s\\n' \"$SHA\" \"$LEN\" > \"$TDIR/manifest.tsv\"\n"
             "    exit 0 ;;\n"
-            "  *.m53_guest.cx)\n"
+            "  *_guest.cx)\n"
             "    printf '.text\\n' > \"$4\"\n"
             "    exit 0 ;;\n"
             "  *tapepack.cx)\n"
-            "    printf '%s' 'UTAPEBIN-m53-tapeslice-payload' > \"$5\"\n"
+            "    U=$(basename \"$5\" .tapeslice)\n"
+            "    printf 'UTAPEBIN-%s-tapeslice-payload' \"$U\" > \"$5\"\n"
             "    exit 0 ;;\n"
             "esac\n"
             "exit 0\n", 0755);
@@ -359,7 +412,13 @@ int main(void) {
         p(cout, "chain-dir");
         mk("chain-dir"); mk("chain-dir/p3-run"); mk("chain-dir/p3-run/tape"); mk("chain-dir/p3-run/tape/lnx-x86_64");
         put("chain-dir/p3-run/tape/lnx-x86_64/tapemode.so", so_v, 0644);
-        put("chain-dir/p3-run/tape/lnx-x86_64/m53.tapeslice", sl_v, 0644);
+        for (int ti = 0, ui = 0; ti < cf_tu_count(); ti++) {
+            const char *tgt = cf_tu_target(ti), *u = cf_tu_unit(ti);
+            if (!tgt || !u || strcmp(tgt, "lnx/x86_64") != 0) continue;
+            char sp[256];
+            if (cx_fmt(sp, sizeof sp, "chain-dir/p3-run/tape/lnx-x86_64/%s.tapeslice", u)) die("tapeslice fmt");
+            put(sp, tu_vals[ui++], 0644);
+        }
         put("chain-dir/p3-run/tape/lnx-x86_64/manifest.tsv", mf_v, 0644);
         {
             np_result rr = {0}; char why[256] = {0};
@@ -396,8 +455,8 @@ int main(void) {
         mk("chain-dir/ape-final");
         /* Red 1: compiler.p4.pkg has only substring keys -> --pack-verify-fixture MUST refuse */
         write_p4_records("chain-dir/compiler.p4.pkg", 3, sub_keys, sub_vals, 0, 0, 0);
-        write_p4_records("chain-dir/ape-final/p3-package.body", 5, t_keys, t_vals, 0, 0, 0);
-        write_p4_records("chain-dir/ape-final/unisacc-next.com", 5, t_keys, t_vals, 0, 0,
+        write_p4_records("chain-dir/ape-final/p3-package.body", nrec, t_keys, t_vals, 0, 0, 0);
+        write_p4_records("chain-dir/ape-final/unisacc-next.com", nrec, t_keys, t_vals, 0, 0,
                          "#!/bin/sh\nprintf 'ok\\n'\nexit 0\n");
         {
             np_result rr = {0}; char why[256] = {0};
@@ -407,8 +466,8 @@ int main(void) {
             np_free(&rr);
         }
         /* Red 2: valid P4 packages in all 3 files, but final APE stream e3 outputs M53_M1_REFUSE -> MUST refuse */
-        write_p4_records("chain-dir/compiler.p4.pkg", 5, t_keys, t_vals, 0, 0, 0);
-        write_p4_records("chain-dir/ape-final/unisacc-next.com", 5, t_keys, t_vals, 0, 0,
+        write_p4_records("chain-dir/compiler.p4.pkg", nrec, t_keys, t_vals, 0, 0, 0);
+        write_p4_records("chain-dir/ape-final/unisacc-next.com", nrec, t_keys, t_vals, 0, 0,
                          "#!/bin/sh\nif [ \"$2\" = \"e3\" ]; then echo M53_M1_REFUSE >&2; exit 2; fi\nprintf 'tok\\n'\nexit 0\n");
         {
             np_result rr = {0}; char why[256] = {0};
@@ -418,7 +477,7 @@ int main(void) {
             np_free(&rr);
         }
         /* Green: all 3 packages valid and all 3 stream stages (e2, e1, e3) produce output with rc=0 */
-        write_p4_records("chain-dir/ape-final/unisacc-next.com", 5, t_keys, t_vals, 0, 0,
+        write_p4_records("chain-dir/ape-final/unisacc-next.com", nrec, t_keys, t_vals, 0, 0,
                          "#!/bin/sh\nprintf 'stage-%s-ok\\n' \"$2\"\nexit 0\n");
         {
             np_result rr = {0}; char why[256] = {0};
@@ -427,11 +486,11 @@ int main(void) {
             ck(rrc == 0 && rr.out && strstr(rr.out, "POST_PACK_TAPE_VERIFY\t") != 0, "cc.pack-verify.full-post-pack.PASS");
             np_free(&rr);
         }
-        /* Bootstrap package verification (codec=1 \0hdr/* records with dlen != rawlen before 3 codec=0 tape records) */
+        /* Bootstrap package verification (codec=1 \0hdr/* records with dlen != rawlen before codec=0 tape records) */
         {
             char bpkg[4400];
             p(bpkg, "chain-dir/compiler.bootstrap.pkg");
-            write_p4_records("chain-dir/compiler.bootstrap.pkg", 5, t_keys, t_vals, 0, 0, 0);
+            write_p4_records("chain-dir/compiler.bootstrap.pkg", nrec, t_keys, t_vals, 0, 0, 0);
             np_result rr = {0}; char why[256] = {0};
             char *av[] = {"sh", "./unisacc.com", "tools/candidate-chain.cx", "--", "--pkg-tape-verify-fixture", d1, d3, cout, bpkg, 0}; /* lint:allow R1-product invokes checkout product to test candidate-chain.cx fixture */
             int rrc = (np_run(av, root, 0, 30, &rr, why, sizeof why) == 0) ? rr.rc : -1;

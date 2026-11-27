@@ -1,0 +1,54 @@
+/* Pure zero-syscall tape guest for driveargs.o (src/driveargs.cx dv_word).
+ * Zero unisa-use imports (host mask <= 383). ABI tag in DATA: "DVARGM1B1".
+ * Binary argument block at argv[1]: [data_ptr, length].
+ * Request format:
+ *   data[0] = has_word (0 -> NULL -> returns 4; 1 -> non-NULL)
+ *   data[1] = is_object (0 or 1)
+ *   data[2] = dv_cx_shebang_hint (0 or 1; host passes dv_cx result for non-extension words)
+ *   data[3..len-1] = word bytes
+ * Return domain: {0, 1, 2, 3, 4, 5, 11, 12, 13, 20} (max_ret = 20). */
+static int da_eq(const unsigned char *s, long sl, const char *lit) {
+    long k = 0;
+    while (k < sl && lit[k]) {
+        if ((char)s[k] != lit[k]) return 0;
+        k = k + 1;
+    }
+    return k == sl && lit[k] == 0;
+}
+
+int main(int argc, char **argv) {
+    const char *abi = "DVARGM1B1";
+    const unsigned long long *ba;
+    const unsigned char *data;
+    long length, wl;
+    const unsigned char *w;
+    int has_word, is_obj, cx_hint;
+    if (abi[0] != 'D' || argc < 2) return 21;
+    ba = (const unsigned long long *)argv[1];
+    data = (const unsigned char *)ba[0];
+    length = (long)ba[1];
+    if (!data || length < 3) return 21;
+    has_word = (int)data[0];
+    is_obj = (int)data[1];
+    cx_hint = (int)data[2];
+    if (!has_word) return 4;
+    w = data + 3;
+    wl = length - 3;
+    /* bx_tool */
+    if (da_eq(w, wl, "ar")) return 1;
+    if (da_eq(w, wl, "as")) return 2;
+    if (da_eq(w, wl, "nm") || da_eq(w, wl, "objdump")) return 3;
+    if (da_eq(w, wl, "stream")) return 5;
+    /* bx_cli_word */
+    if (da_eq(w, wl, "--version") || da_eq(w, wl, "-version")) return 11;
+    if (da_eq(w, wl, "--help")) return 12;
+    if (da_eq(w, wl, "--")) return 13;
+    /* bx_more_src */
+    if (wl >= 2 && w[wl - 2] == '.' && w[wl - 1] == 'c') return 20;
+    if (is_obj) return 20;
+    if (wl >= 3 && w[wl - 3] == '.' && w[wl - 2] == 'c' && w[wl - 1] == 'x') return 20;
+    if (wl >= 2 && w[wl - 2] == '.' &&
+        (w[wl - 1] == 'h' || w[wl - 1] == 's' || w[wl - 1] == 'S' || w[wl - 1] == 'o' || w[wl - 1] == 'a')) return 0;
+    if (cx_hint) return 20;
+    return 0;
+}
