@@ -9,9 +9,9 @@
 | v0.1.6 | tape 载体公开分发 | 公开资产包含旁置 `tapemode.so`,用户可选择启用影子对拍 | 9 件公开资产;六目标 CI 成功;`facts-gen --check` 无 DIFF | 任何权威翻转 | 今天 |
 | v0.1.7 | M1 权威嵌入(未发布,内容移入新 v0.1.8) | 同旧 v0.1.7 | 作废:尺寸判据漏算 loader 固定成本,按铁律“放宽即换版本号”不发布;测量入口 `check-v017-exit 9e2ac4df6` 对 `c9275e775` | 同旧 | 不发布 |
 | v0.1.8 | M1 权威嵌入(仅 lnx/x86_64) | 不依赖旁置文件,stream 的 `cxsa_valid` 由嵌入 tape 权威执行 | 三条尺寸判据:原生单元移出 `>= 3,770`B;native `.text` 净增 `<= 26,000`B;PT_LOAD R E 净增 `<= 25,000`B(只可收紧,不要求净减);其余判据同旧 v0.1.7(`cxsa_valid` 0/`cxsa_valid_s1` 已定义、其余五切片 0B 差、stream `<=2x`、G1..G6 先红后绿、G7 `UNCOVERED`);发布说明须写二进制增大(`+25,267`B `.text`、`+24,527`B PT_LOAD R E)、回本未证、v0.1.7 因判据错误未发布、仅 lnx/x86_64 | 批 1;其他五目标;默认路径 | 3-5 天;注:尺寸变化不归因 tape,driveargs -13,641B 归因未证,tapegate loader 可能自带 stdio 副本 |
-| v0.1.9 | 上层产品单元去掉每单元静态 libc 副本 | 产品上层单元的 printf 家族改为 L0 `sy_*`/`mm_*`/`tx_*`,不再各自静态链入 libc | PT_LOAD R E 净减 `>= 40,000`B(对新 v0.1.8);首证 LOCAL:driveroute+tapegate+drivelink 合计 `-99,193`B、诊断字节相同(agyneon2 `6d6bc885b`);字节棘轮 `check-stdio-copies` 锁 `_u_vfmt` 等为零;tape 迁移改按 `tl_dce` 后活逻辑字节加 golden 判,尺寸只报告不参与判定;v0.1.8 的 6 单元表迁移验收同改此口径 | VM 单元大小判据;六目标 | 5-7 天 |
-| v0.1.10 | tape 速度门(收窄) | 全部 102 个单元在 tape 下运行 | 102 档 cmp EQUAL;16 档倍率 `<= 15x`;64/102 档 VM 单元经证伪判 stay-native(14.58% < 25%,预先定义的 fallback) | 迁移任何新单元;64/102 档 15x | 7-10 天,最不确定 |
-| v0.1.11 | 版本槽保留给下一迁移类(占位) | 按“一版一类”从队列取下一个独立迁移类;若无可独立成类者,按类规则并入相邻版本 | 进入时按边界规则写判据并登记红检查;不承接 64/102 档 15x(该目标已被 stay-native 判定取代) | 无独立类时不成版 | 未估计 |
+| v0.1.9 | 纯静态 libc 副本去除类 | 20 个上层产品单元去掉各自静态 libc 副本,printf 家族走 L0 `sy_*`/`mm_*`/`tx_*` | PT_LOAD R E 净减 `>=40,000`B;LOCAL 20 单元实测 `-441,128`B(agyneon2 `a95f0fc86..bc2177979`);字节棘轮 `check-stdio-copies` 锁 `_u_vfmt` 等为零;本版不含 tape 迁移与大小归因 | tape 迁移;VM 单元;六目标 | 5-7 天 |
+| v0.1.10 | tape 运行时范围 + 速度门(收窄) | tape 运行时(bridge、call_out、touched-span clear、guest-slim、A2、pack;w/agyneon3 13 提交加 self-audit 修复)与全部 102 单元在 tape 下运行 | 102 档 cmp EQUAL;16 档 `<=15x`,判据按身份指明**单一** fixture(2x2 测量进行中;当前 speed-gate 集 `14.58x`,check-v0110-exit 内置 fixture `15.65x-17.18x`);64/102 档 VM 单元按预设 fallback 判 stay-native(`14.58%<25%`);原生基线按候选身份冻结 | 迁移任何新单元;64/102 档 15x | 7-10 天,最不确定 |
+| v0.1.11 | 下一静态重复类 | 把重复静态实现收成一份: SHA-256 收为单个 L0 副本(`sy_sha256_bytes`,约 `55KB`),`cx_read`/`cx_write` 的 heap 与 `FILE*`(约 `45KB`),deps/driveplan,heap 批;RT_EXTERN 函数共享作为判后 side item(活代码仅 `63.7KB`) | 进入时按边界规则写判据并登记红检查;只可收紧;不承接 64/102 档 15x | 无独立类时不成版 | 未估计 |
 | v0.1.12 | 先拆后迁批 2 | 批 2 的 16 个单元进入迁移 | 进入时按 v0.1.11 测量重新设定 | 批 3、批 4 | 未估计 |
 | v0.1.13 | 剩余批并冻结 stay-native | 剩余迁移批 | 进入时按测量设定;冻结 `plans/stay-native.tsv` | 六目标 | 未估计 |
 | v0.1.14 | 六目标一致 + 出口门 | 7 个已迁单元在六目标权威 | 每目标 `cxsa_valid` 0、移出字节相等、fork 根回 1;`check-v01x-exit` 全绿 | v0.2.x | 7-14 天 |
@@ -90,3 +90,10 @@ v0.1.9 = 全部 6 个 `FINITE`、`dest==1` 的表迁移单元,合计 `48,602`B:`
 - tape 迁移不再按大小判定:改按 `tl_dce` 后活逻辑字节加 golden 全枚举;尺寸只报告,不参与判定。v0.1.8 的 6 单元表迁移验收同改此口径。
 - v0.1.8 说明须保留:尺寸变化不归因 tape;driveargs `-13,641`B 归因未证;tapegate loader 可能自带 stdio 副本。
 - 后续版本(v0.1.10 起)不因本裁定改号或改序。
+
+## 追加裁定(2026-11-27 末段:v0.1.9 纯 libc、v0.1.10 运行时、v0.1.11 静态重复)
+
+- v0.1.9 为**纯** libc 副本去除类:20 个上层单元,`a95f0fc86..bc2177979` 范围,LOCAL 实测 PT_LOAD R E `-441,128`B;原 6 单元表迁移不并入本版,按类规则另行排槽,后续版本号不改。
+- v0.1.10 = tape 运行时范围(bridge、call_out、touched-span clear、guest-slim、A2、pack;w/agyneon3 13 提交加 self-audit 修复)加收窄速度门。tier 16 `<=15x` 的判据必须写明**一个** fixture 身份,不能拿不同 fixture 的数字互比;2x2 测量进行中,现有 speed-gate 集 `14.58x`、check-v0110-exit 内置 fixture `15.65x-17.18x` 只作背景。102 档 cmp EQUAL;64/102 档 VM 单元仍按预设 fallback 判 stay-native。
+- v0.1.11 = 下一静态重复类:SHA-256 收为单个 L0 `sy_sha256_bytes`(约 `55KB`),`cx_read`/`cx_write` 的 heap 与 `FILE*`(约 `45KB`),deps/driveplan,heap 批;RT_EXTERN 函数共享只作判后 side item(活代码 `63.7KB`)。
+- 退出判据只可收紧,不可放宽;v0.1.12 及以后保持原样。
