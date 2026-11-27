@@ -414,9 +414,74 @@ static int fn_update_manifest_row(const char *old_mf, long old_len, const char *
     return 0;
 }
 
-/* Run m53 stream e2 -> e1 -> e3 against cand_ape (using e1_in prepared from intact APE). */
+#define FN_M53_CLEAN_ENV "UNISACC_M53_S1= UNISACC_M53_S1_SO= UNISA_CONTAINER= UNISACC_APE_SELF="
+
+static const char *const g_m1_refuse_tags[5] = {
+    "M53_M1_REFUSE", "DRIVEARGS_M1_REFUSE", "BIND_M1_REFUSE", "M25_M1_REFUSE", "DRIVESTREAM_M1_REFUSE"
+};
+static const char *const g_m1_refuse_units[5] = {
+    "m53", "driveargs", "bind", "m25", "drivestream"
+};
+
+/* Parse output line by line for '<UNIT>_M1_REFUSE\treason=<want_reason>(\t|$)'.
+ * Unit marker and exact reason must appear on the same line, and reason must end at
+ * a tab delimiter or end of line (rejects cross-line splits and reason suffixes).
+ * When allow_any_m1 is 0 (slice-tamper copy2/3/4/6), only M53_M1_REFUSE is accepted.
+ * When allow_any_m1 is 1 (whole-container copy1/5/G4), any M1 unit is accepted. */
+static int fn_match_m1_refuse_line(const char *out, const char *want_reason, int allow_any_m1, char reason_out[96]) {
+    int max_u = allow_any_m1 ? 5 : 1;
+    long rlen = want_reason ? (long)strlen(want_reason) : 0;
+    const char *p = out;
+    reason_out[0] = 0;
+    if (!out || !want_reason || rlen <= 0) return 0;
+    while (*p) {
+        const char *le = p;
+        while (*le && *le != '\n' && *le != '\r') le++;
+        long llen = (long)(le - p);
+        for (int i = 0; i < max_u; i++) {
+            long tlen = (long)strlen(g_m1_refuse_tags[i]);
+            long need = tlen + 8 + rlen;
+            if (llen >= need &&
+                memcmp(p, g_m1_refuse_tags[i], (size_t)tlen) == 0 &&
+                memcmp(p + tlen, "\treason=", 8) == 0 &&
+                memcmp(p + tlen + 8, want_reason, (size_t)rlen) == 0 &&
+                (llen == need || p[need] == '\t')) {
+                if (cx_fmt(reason_out, 96, "%s:%s", g_m1_refuse_units[i], want_reason)) return 0;
+                return 1;
+            }
+        }
+        p = le;
+        while (*p == '\n' || *p == '\r') p++;
+    }
+    return 0;
+}
+
+static int fn_has_any_m1_refuse_line(const char *out) {
+    const char *p = out;
+    if (!out) return 0;
+    while (*p) {
+        const char *le = p;
+        while (*le && *le != '\n' && *le != '\r') le++;
+        long llen = (long)(le - p);
+        for (int i = 0; i < 5; i++) {
+            long tlen = (long)strlen(g_m1_refuse_tags[i]);
+            if (llen > tlen &&
+                memcmp(p, g_m1_refuse_tags[i], (size_t)tlen) == 0 &&
+                p[tlen] == '\t') {
+                return 1;
+            }
+        }
+        p = le;
+        while (*p == '\n' || *p == '\r') p++;
+    }
+    return 0;
+}
+
+/* Run m53 stream e3 against cand_ape (using e1_in prepared from intact APE) in a cleaned environment.
+ * Every case clears UNISACC_M53_S1, UNISACC_M53_S1_SO, UNISA_CONTAINER, and UNISACC_APE_SELF;
+ * G4 (g4_set_s1 == 1) sets only UNISACC_M53_S1=1 on top of that cleaned environment. */
 static int fn_run_m53_stream_e3(const char *cwd, const char *cand_ape, const char *c_src,
-                                const char *e1_in, const char *env_prefix,
+                                const char *e1_in, int g4_set_s1,
                                 char *out, long ocap, int *e3_nonempty_out) {
     char e3_out[FN_PW], cmd[4096];
     sy_stat_t st;
@@ -424,8 +489,9 @@ static int fn_run_m53_stream_e3(const char *cwd, const char *cand_ape, const cha
     if (cx_fmt(e3_out, sizeof e3_out, "%s.e3.out", cand_ape)) return -1;
     (void)sy_unlink(e3_out);
     if (cx_fmt(cmd, sizeof cmd,
-               "%s sh '%s' stream e3 --level 2 --source '%s' --no-external-nn < '%s' > '%s'",
-               (env_prefix && env_prefix[0]) ? env_prefix : "UNISACC_M53_S1= UNISACC_M53_S1_SO= UNISA_CONTAINER=",
+               "%s%s sh '%s' stream e3 --level 2 --source '%s' --no-external-nn < '%s' > '%s'",
+               FN_M53_CLEAN_ENV,
+               g4_set_s1 ? " UNISACC_M53_S1=1" : "",
                cand_ape, c_src, e1_in, e3_out)) return -1;
     int rc = fn_run_sh(cwd, cmd, 50, out, ocap);
     if (sy_stat(e3_out, &st) == 0 && st.size > 0 && e3_nonempty_out) *e3_nonempty_out = 1;
@@ -433,7 +499,12 @@ static int fn_run_m53_stream_e3(const char *cwd, const char *cand_ape, const cha
     return rc;
 }
 
-/* Run the 6-copy m53 tamper gate + intact positive control + G4 env override on ape_path. */
+/* Run the 6-copy m53 tamper gate + intact positive control + G4 env override on ape_path.
+ * On a multi-piece APE (e.g. driveargs + m53), whole-container tampering (copy1 no P4 footer,
+ * copy5 corrupted tapemode.so ELF magic, or Case 7 UNISACC_M53_S1 env override) is refused by
+ * the first M1 unit on the execution path (driveargs) before m53 is reached; accept any M1 unit's
+ * named refusal with the exact reason and print '<unit>:<reason>'. Slice-specific tampering
+ * (copy2/3/4/6) must still require M53_M1_REFUSE directly. */
 static int fn_run_m53_tamper_gate(const char *cwd, const char *tmp, const char *ape_path, const char *ape_sha) {
     size_t an = 0;
     unsigned char *ab = (unsigned char *)cx_read(ape_path, &an);
@@ -475,35 +546,36 @@ static int fn_run_m53_tamper_gate(const char *cwd, const char *tmp, const char *
     /* (0) Intact positive control: e2 -> e1 -> e3 */
     int prep_ok = 0, e3_nonempty = 0;
     if (!cx_fmt(cmd, sizeof cmd,
-                "UNISACC_M53_S1= UNISACC_M53_S1_SO= UNISA_CONTAINER= sh '%s' stream e2 --level 2 --source '%s' --no-external-nn < '%s' > '%s' && "
-                "UNISACC_M53_S1= UNISACC_M53_S1_SO= UNISA_CONTAINER= sh '%s' stream e1 --level 2 --source '%s' --no-external-nn < '%s' > '%s'",
-                ape_path, c_src, c_src, e2_out, ape_path, c_src, e2_out, e1_out)) {
+                "%s sh '%s' stream e2 --level 2 --source '%s' --no-external-nn < '%s' > '%s' && "
+                "%s sh '%s' stream e1 --level 2 --source '%s' --no-external-nn < '%s' > '%s'",
+                FN_M53_CLEAN_ENV, ape_path, c_src, c_src, e2_out,
+                FN_M53_CLEAN_ENV, ape_path, c_src, e2_out, e1_out)) {
         int prc = fn_run_sh(cwd, cmd, 50, out, sizeof out);
         prep_ok = (prc == 0 && sy_stat(e2_out, &s2) == 0 && s2.size > 0 && sy_stat(e1_out, &s1) == 0 && s1.size > 0);
     }
     int rc_intact = prep_ok ? fn_run_m53_stream_e3(cwd, ape_path, c_src, e1_out, 0, out, sizeof out, &e3_nonempty) : -1;
-    fn_rec(prep_ok && rc_intact == 0 && e3_nonempty && strstr(out, "M53_M1_REFUSE") == 0,
+    fn_rec(prep_ok && rc_intact == 0 && e3_nonempty && !fn_has_any_m1_refuse_line(out),
            "FORMAL_NEGATIVES", "m53-intact-stream-e3-control", ape_sha,
            "m53-intact", ape_sha, "intact-stream-e3-ok");
 
-    /* Copy 1: Stripped P4 carrier (no-p4) -> embed-footer-invalid */
+    /* Copy 1: Stripped P4 carrier (no-p4) -> embed-footer-invalid (whole-container: any m1 unit on path) */
     {
-        char p_nop4[FN_PW], vsha[65];
+        char p_nop4[FN_PW], vsha[65], rwhy[96];
         vsha[0] = 0;
         int b_ok = (!cx_fmt(p_nop4, sizeof p_nop4, "%s/m53_copy1_nop4.com", tmp) &&
                     pkg_off > 0 && sy_write_file(p_nop4, ab, pkg_off, 0755) == 0 &&
                     sy_sha256_any_hex((const char *)ab, pkg_off, vsha) == 0 &&
                     !tx_eqz(vsha, ape_sha));
         int rc = b_ok ? fn_run_m53_stream_e3(cwd, p_nop4, c_src, e1_out, 0, out, sizeof out, 0) : 0;
-        fn_rec(b_ok && rc != 0 && strstr(out, "M53_M1_REFUSE") != 0 && strstr(out, "reason=embed-footer-invalid") != 0,
-               "FORMAL_NEGATIVES", "m53-copy1-stripped-p4-refused", ape_sha,
-               "m53-no-p4", b_ok ? vsha : "build-failed", "embed-footer-invalid");
+        int ok1 = (b_ok && (rc == 1 || rc == 2) && fn_match_m1_refuse_line(out, "embed-footer-invalid", 1, rwhy));
+        fn_rec(ok1, "FORMAL_NEGATIVES", "m53-copy1-stripped-p4-refused", ape_sha,
+               "m53-no-p4", b_ok ? vsha : "build-failed", ok1 ? rwhy : "embed-footer-invalid");
         (void)sy_unlink(p_nop4);
     }
 
-    /* Copy 2: Corrupted F record CRC32 on m53.tapeslice -> embed-pkg-decode-failed */
+    /* Copy 2: Corrupted F record CRC32 on m53.tapeslice -> embed-pkg-decode-failed (slice-tamper: requires M53_M1_REFUSE) */
     {
-        char p_crc[FN_PW], vsha[65];
+        char p_crc[FN_PW], vsha[65], rwhy[96];
         unsigned long orig_crc = frecs[idx_m53].crc;
         frecs[idx_m53].crc = orig_crc ^ 1UL;
         int b_ok = (!cx_fmt(p_crc, sizeof p_crc, "%s/m53_copy2_bad_fcrc.com", tmp) &&
@@ -511,15 +583,15 @@ static int fn_run_m53_tamper_gate(const char *cwd, const char *tmp, const char *
                     !tx_eqz(vsha, ape_sha));
         frecs[idx_m53].crc = orig_crc;
         int rc = b_ok ? fn_run_m53_stream_e3(cwd, p_crc, c_src, e1_out, 0, out, sizeof out, 0) : 0;
-        fn_rec(b_ok && rc != 0 && strstr(out, "M53_M1_REFUSE") != 0 && strstr(out, "reason=embed-pkg-decode-failed") != 0,
-               "FORMAL_NEGATIVES", "m53-copy2-bad-f-crc-refused", ape_sha,
-               "m53-bad-f-crc", b_ok ? vsha : "build-failed", "embed-pkg-decode-failed");
+        int ok2 = (b_ok && (rc == 1 || rc == 2) && fn_match_m1_refuse_line(out, "embed-pkg-decode-failed", 0, rwhy));
+        fn_rec(ok2, "FORMAL_NEGATIVES", "m53-copy2-bad-f-crc-refused", ape_sha,
+               "m53-bad-f-crc", b_ok ? vsha : "build-failed", ok2 ? rwhy : "m53:embed-pkg-decode-failed");
         (void)sy_unlink(p_crc);
     }
 
-    /* Copy 3: Manifest SHA mismatch for m53.tapeslice (valid F record CRC32) -> embed-manifest-mismatch */
+    /* Copy 3: Manifest SHA mismatch for m53.tapeslice (valid F record CRC32) -> embed-manifest-mismatch (slice-tamper: requires M53_M1_REFUSE) */
     {
-        char p_mf[FN_PW], vsha[65], bad_sha[65];
+        char p_mf[FN_PW], vsha[65], bad_sha[65], rwhy[96];
         unsigned char *new_mf = 0;
         long new_mf_len = 0;
         (void)sy_sha256_any_hex((const char *)frecs[idx_m53].data, frecs[idx_m53].len, bad_sha);
@@ -544,15 +616,15 @@ static int fn_run_m53_tamper_gate(const char *cwd, const char *tmp, const char *
             mm_free(new_mf);
         }
         int rc = b_ok ? fn_run_m53_stream_e3(cwd, p_mf, c_src, e1_out, 0, out, sizeof out, 0) : 0;
-        fn_rec(b_ok && rc != 0 && strstr(out, "M53_M1_REFUSE") != 0 && strstr(out, "reason=embed-manifest-mismatch") != 0,
-               "FORMAL_NEGATIVES", "m53-copy3-bad-manifest-sha-refused", ape_sha,
-               "m53-bad-manifest-sha", b_ok ? vsha : "build-failed", "embed-manifest-mismatch");
+        int ok3 = (b_ok && (rc == 1 || rc == 2) && fn_match_m1_refuse_line(out, "embed-manifest-mismatch", 0, rwhy));
+        fn_rec(ok3, "FORMAL_NEGATIVES", "m53-copy3-bad-manifest-sha-refused", ape_sha,
+               "m53-bad-manifest-sha", b_ok ? vsha : "build-failed", ok3 ? rwhy : "m53:embed-manifest-mismatch");
         (void)sy_unlink(p_mf);
     }
 
-    /* Copy 4: Tampered m53.tapeslice seal byte (with matching manifest SHA + F CRC32) -> embed-container-invalid */
+    /* Copy 4: Tampered m53.tapeslice seal byte (with matching manifest SHA + F CRC32) -> embed-slice-corrupt (slice-tamper: requires M53_M1_REFUSE) */
     {
-        char p_sl[FN_PW], vsha[65], sl_sha[65];
+        char p_sl[FN_PW], vsha[65], sl_sha[65], rwhy[96];
         unsigned char *new_mf = 0;
         long new_mf_len = 0;
         unsigned long orig_sl_c = frecs[idx_m53].crc;
@@ -583,15 +655,15 @@ static int fn_run_m53_tamper_gate(const char *cwd, const char *tmp, const char *
             frecs[idx_m53].crc = orig_sl_c;
         }
         int rc = b_ok ? fn_run_m53_stream_e3(cwd, p_sl, c_src, e1_out, 0, out, sizeof out, 0) : 0;
-        fn_rec(b_ok && rc != 0 && strstr(out, "M53_M1_REFUSE") != 0 && strstr(out, "reason=embed-slice-corrupt") != 0,
-               "FORMAL_NEGATIVES", "m53-copy4-bad-slice-seal-refused", ape_sha,
-               "m53-bad-slice-seal", b_ok ? vsha : "build-failed", "embed-slice-corrupt");
+        int ok4 = (b_ok && (rc == 1 || rc == 2) && fn_match_m1_refuse_line(out, "embed-slice-corrupt", 0, rwhy));
+        fn_rec(ok4, "FORMAL_NEGATIVES", "m53-copy4-bad-slice-seal-refused", ape_sha,
+               "m53-bad-slice-seal", b_ok ? vsha : "build-failed", ok4 ? rwhy : "m53:embed-slice-corrupt");
         (void)sy_unlink(p_sl);
     }
 
-    /* Copy 5: Tampered tapemode.so ELF magic (with matching manifest SHA + F CRC32) -> embed-so-invalid */
+    /* Copy 5: Tampered tapemode.so ELF magic (with matching manifest SHA + F CRC32) -> embed-so-invalid (whole-container: any m1 unit on path) */
     {
-        char p_so[FN_PW], vsha[65], so_sha[65];
+        char p_so[FN_PW], vsha[65], so_sha[65], rwhy[96];
         unsigned char *new_mf = 0;
         long new_mf_len = 0;
         unsigned long orig_so_c = frecs[idx_so].crc;
@@ -622,15 +694,15 @@ static int fn_run_m53_tamper_gate(const char *cwd, const char *tmp, const char *
             frecs[idx_so].crc = orig_so_c;
         }
         int rc = b_ok ? fn_run_m53_stream_e3(cwd, p_so, c_src, e1_out, 0, out, sizeof out, 0) : 0;
-        fn_rec(b_ok && rc != 0 && strstr(out, "M53_M1_REFUSE") != 0 && strstr(out, "reason=embed-so-invalid") != 0,
-               "FORMAL_NEGATIVES", "m53-copy5-bad-so-elf-refused", ape_sha,
-               "m53-bad-so-elf", b_ok ? vsha : "build-failed", "embed-so-invalid");
+        int ok5 = (b_ok && (rc == 1 || rc == 2) && fn_match_m1_refuse_line(out, "embed-so-invalid", 1, rwhy));
+        fn_rec(ok5, "FORMAL_NEGATIVES", "m53-copy5-bad-so-elf-refused", ape_sha,
+               "m53-bad-so-elf", b_ok ? vsha : "build-failed", ok5 ? rwhy : "embed-so-invalid");
         (void)sy_unlink(p_so);
     }
 
-    /* Copy 6: Missing m53.tapeslice F record (omitted from P4 F directory) -> embed-resource-missing */
+    /* Copy 6: Missing m53.tapeslice F record (omitted from P4 F directory) -> embed-resource-missing (slice-tamper: requires M53_M1_REFUSE) */
     {
-        char p_nof[FN_PW], vsha[65];
+        char p_nof[FN_PW], vsha[65], rwhy[96];
         fn_frec_t sub[FN_MAX_F];
         int nsub = 0;
         for (int i = 0; i < nf; i++) {
@@ -641,18 +713,19 @@ static int fn_run_m53_tamper_gate(const char *cwd, const char *tmp, const char *
                     fn_write_ape_with_frecs(ab, pkg_off, dm_end, pm, ps, sub, nsub, p_nof, vsha) == 0 &&
                     !tx_eqz(vsha, ape_sha));
         int rc = b_ok ? fn_run_m53_stream_e3(cwd, p_nof, c_src, e1_out, 0, out, sizeof out, 0) : 0;
-        fn_rec(b_ok && rc != 0 && strstr(out, "M53_M1_REFUSE") != 0 && strstr(out, "reason=embed-resource-missing") != 0,
-               "FORMAL_NEGATIVES", "m53-copy6-missing-f-record-refused", ape_sha,
-               "m53-missing-f-record", b_ok ? vsha : "build-failed", "embed-resource-missing");
+        int ok6 = (b_ok && (rc == 1 || rc == 2) && fn_match_m1_refuse_line(out, "embed-resource-missing", 0, rwhy));
+        fn_rec(ok6, "FORMAL_NEGATIVES", "m53-copy6-missing-f-record-refused", ape_sha,
+               "m53-missing-f-record", b_ok ? vsha : "build-failed", ok6 ? rwhy : "m53:embed-resource-missing");
         (void)sy_unlink(p_nof);
     }
 
-    /* Case 7: G4 env override on intact APE (UNISACC_M53_S1=1) -> embed-env-override-forbidden */
+    /* Case 7: G4 env override on intact APE (UNISACC_M53_S1=1 in cleaned env) -> embed-env-override-forbidden (whole-container: any m1 unit on path) */
     {
-        int rc = fn_run_m53_stream_e3(cwd, ape_path, c_src, e1_out, "UNISACC_M53_S1=1", out, sizeof out, 0);
-        fn_rec(rc != 0 && strstr(out, "M53_M1_REFUSE") != 0 && strstr(out, "reason=embed-env-override-forbidden") != 0,
-               "FORMAL_NEGATIVES", "m53-g4-env-override-refused", ape_sha,
-               "m53-g4-env-override", ape_sha, "embed-env-override-forbidden");
+        char rwhy[96];
+        int rc = fn_run_m53_stream_e3(cwd, ape_path, c_src, e1_out, 1, out, sizeof out, 0);
+        int ok7 = ((rc == 1 || rc == 2) && fn_match_m1_refuse_line(out, "embed-env-override-forbidden", 1, rwhy));
+        fn_rec(ok7, "FORMAL_NEGATIVES", "m53-g4-env-override-refused", ape_sha,
+               "m53-g4-env-override", ape_sha, ok7 ? rwhy : "embed-env-override-forbidden");
     }
 
     (void)sy_unlink(c_src);
@@ -1225,20 +1298,23 @@ static int fn_self_test(const char *cwd, const char *repo) {
     frecs[2].crc = (unsigned long)fn_crc32(fake_m53, 64);
 
     /* Build a synthetic executable m53-only APE with a real P4 container + UNIPKG1 footer that checks
-     * its own P4 F records, CRC, manifest.tsv SHA, UTAPEBIN seal, and tapemode.so ELF magic (lacks D/B/M slices). */
-    char host_sh[1600], pad_host[4600];
+     * its own P4 F records, CRC, manifest.tsv SHA, UTAPEBIN seal, and tapemode.so ELF magic (lacks D/B/M slices).
+     * copy1 (stripped P4 footer) emits DRIVEARGS_M1_REFUSE to exercise cross-unit whole-container acceptance,
+     * and inherited UNISACC_M53_S1_SO / UNISA_CONTAINER / UNISACC_APE_SELF are checked to verify cleaned env. */
+    char host_sh[1800], pad_host[4600];
     cx_fmt(host_sh, sizeof host_sh,
            "#!/bin/sh\n"
            "if [ \"$3\" = \"-o\" ] && [ -n \"$4\" ]; then printf 'ok\\n' > \"$4\"; exit 0; fi\n"
            "if [ \"$1\" = \"stream\" ] && ( [ \"$2\" = \"e2\" ] || [ \"$2\" = \"e1\" ] ); then printf 'tok\\n'; exit 0; fi\n"
            "if [ \"$1\" != \"stream\" ] || [ \"$2\" != \"e3\" ]; then exit 2; fi\n"
-           "if [ -n \"$UNISACC_M53_S1\" ]; then echo 'M53_M1_REFUSE\treason=embed-env-override-forbidden' >&2; exit 2; fi\n"
-           "tail -c 16 \"$0\" | grep -a -q '^UNIPKG1' || { echo 'M53_M1_REFUSE\treason=embed-footer-invalid' >&2; exit 2; }\n"
-           "tail -c +4202 \"$0\" | grep -a -q 'tape/lnx-x86_64/m53.tapeslice' || { echo 'M53_M1_REFUSE\treason=embed-resource-missing' >&2; exit 2; }\n"
-           "tail -c +4202 \"$0\" | grep -a -q 'LMMM' && { echo 'M53_M1_REFUSE\treason=embed-slice-corrupt' >&2; exit 2; }\n"
-           "tail -c +4202 \"$0\" | grep -a -q 'ELFSSSS' || { echo 'M53_M1_REFUSE\treason=embed-so-invalid' >&2; exit 2; }\n"
-           "tail -c +4202 \"$0\" | grep -a -q 'm53.tapeslice\t%s\t64' || { echo 'M53_M1_REFUSE\treason=embed-manifest-mismatch' >&2; exit 2; }\n"
-           "tail -c +4202 \"$0\" | grep -a -q 'F 29 64 64 0 %lu' || { echo 'M53_M1_REFUSE\treason=embed-pkg-decode-failed' >&2; exit 2; }\n"
+           "if [ -n \"$UNISACC_M53_S1_SO\" ] || [ -n \"$UNISA_CONTAINER\" ] || [ -n \"$UNISACC_APE_SELF\" ]; then printf 'DRIVEARGS_M1_REFUSE\\treason=embed-inherited-env-leaked\\tdetail=0\\n' >&2; exit 1; fi\n"
+           "if [ -n \"$UNISACC_M53_S1\" ]; then printf 'M53_M1_REFUSE\\treason=embed-env-override-forbidden\\tdetail=0\\n' >&2; exit 1; fi\n"
+           "tail -c 16 \"$0\" | grep -a -q '^UNIPKG1' || { printf 'DRIVEARGS_M1_REFUSE\\treason=embed-footer-invalid\\tdetail=-2\\n' >&2; exit 1; }\n"
+           "tail -c +4202 \"$0\" | grep -a -q 'tape/lnx-x86_64/m53.tapeslice' || { printf 'M53_M1_REFUSE\\treason=embed-resource-missing\\tdetail=-2\\n' >&2; exit 2; }\n"
+           "tail -c +4202 \"$0\" | grep -a -q 'LMMM' && { printf 'M53_M1_REFUSE\\treason=embed-slice-corrupt\\tdetail=-2\\n' >&2; exit 2; }\n"
+           "tail -c +4202 \"$0\" | grep -a -q 'ELFSSSS' || { printf 'M53_M1_REFUSE\\treason=embed-so-invalid\\tdetail=-2\\n' >&2; exit 1; }\n"
+           "tail -c +4202 \"$0\" | grep -a -q 'm53.tapeslice\t%s\t64' || { printf 'M53_M1_REFUSE\\treason=embed-manifest-mismatch\\tdetail=-2\\n' >&2; exit 2; }\n"
+           "tail -c +4202 \"$0\" | grep -a -q 'F 29 64 64 0 %lu' || { printf 'M53_M1_REFUSE\\treason=embed-pkg-decode-failed\\tdetail=-2\\n' >&2; exit 2; }\n"
            "printf 'stream-e3-ok\\n'\nexit 0\n"
            "# PADDING_TO_4096_BYTES_",
            m53_sha, frecs[2].crc);
@@ -1366,6 +1442,56 @@ static int fn_self_test(const char *cwd, const char *repo) {
     g_pass = sv_pass; g_fail = sv_fail;
     fn_rec(rc_m53 == 0 && m53_p == 9 && m53_f == 0,
            "SELFTEST", "formal-pregate-m53-6copy-tamper-and-v3-receipt", ape_sha, "m53-6copy-pregate", carrier_sha, "m53-9-checks-verified");
+
+    /* Negative control 5: Cross-line split, reason with suffix, and cross-unit refusal on slice-tamper (copy2) MUST FAIL */
+    {
+        char rw[96], neg_sh[1800], neg_pad[4600], neg_ape[FN_PW], neg_sha[65];
+        int p_pos_drv = (fn_match_m1_refuse_line("DRIVEARGS_M1_REFUSE\treason=embed-footer-invalid\tdetail=-2\n",
+                                                 "embed-footer-invalid", 1, rw) == 1 &&
+                         tx_eqz(rw, "driveargs:embed-footer-invalid"));
+        int p_neg_split = (fn_match_m1_refuse_line("DRIVEARGS_M1_REFUSE\treason=other-reason\tdetail=-2\n"
+                                                   "NOTE\treason=embed-footer-invalid\n",
+                                                   "embed-footer-invalid", 1, rw) == 0 &&
+                           fn_match_m1_refuse_line("M53_M1_REFUSE\treason=other-reason\n"
+                                                   "reason=embed-pkg-decode-failed\n",
+                                                   "embed-pkg-decode-failed", 0, rw) == 0);
+        int p_neg_suf = (fn_match_m1_refuse_line("DRIVEARGS_M1_REFUSE\treason=embed-footer-invalid-extra\tdetail=-2\n",
+                                                 "embed-footer-invalid", 1, rw) == 0 &&
+                         fn_match_m1_refuse_line("M53_M1_REFUSE\treason=embed-pkg-decode-failed2\n",
+                                                 "embed-pkg-decode-failed", 0, rw) == 0);
+        int p_neg_unit = (fn_match_m1_refuse_line("DRIVEARGS_M1_REFUSE\treason=embed-pkg-decode-failed\tdetail=-2\n",
+                                                  "embed-pkg-decode-failed", 0, rw) == 0);
+        cx_fmt(neg_ape, sizeof neg_ape, "%s/neg_m53_ape.com", tmp);
+        cx_fmt(neg_sh, sizeof neg_sh,
+               "#!/bin/sh\n"
+               "if [ \"$1\" = \"stream\" ] && ( [ \"$2\" = \"e2\" ] || [ \"$2\" = \"e1\" ] ); then printf 'tok\\n'; exit 0; fi\n"
+               "if [ \"$1\" != \"stream\" ] || [ \"$2\" != \"e3\" ]; then exit 2; fi\n"
+               "if [ -n \"$UNISACC_M53_S1\" ]; then printf 'M53_M1_REFUSE\\treason=embed-env-override-forbidden\\tdetail=0\\n' >&2; exit 1; fi\n"
+               "tail -c 16 \"$0\" | grep -a -q '^UNIPKG1' || { printf 'DRIVEARGS_M1_REFUSE\\treason=other\\nNOTE\\treason=embed-footer-invalid\\n' >&2; exit 1; }\n"
+               "tail -c +4202 \"$0\" | grep -a -q 'tape/lnx-x86_64/m53.tapeslice' || { printf 'M53_M1_REFUSE\\treason=embed-resource-missing\\tdetail=-2\\n' >&2; exit 2; }\n"
+               "tail -c +4202 \"$0\" | grep -a -q 'LMMM' && { printf 'M53_M1_REFUSE\\treason=embed-slice-corrupt\\tdetail=-2\\n' >&2; exit 2; }\n"
+               "tail -c +4202 \"$0\" | grep -a -q 'ELFSSSS' || { printf 'DRIVEARGS_M1_REFUSE\\treason=embed-so-invalid-suffix\\tdetail=-2\\n' >&2; exit 1; }\n"
+               "tail -c +4202 \"$0\" | grep -a -q 'm53.tapeslice\t%s\t64' || { printf 'M53_M1_REFUSE\\treason=embed-manifest-mismatch\\tdetail=-2\\n' >&2; exit 2; }\n"
+               "tail -c +4202 \"$0\" | grep -a -q 'F 29 64 64 0 %lu' || { printf 'DRIVEARGS_M1_REFUSE\\treason=embed-pkg-decode-failed\\tdetail=-2\\n' >&2; exit 1; }\n"
+               "printf 'stream-e3-ok\\n'\nexit 0\n"
+               "# PADDING_TO_4096_BYTES_",
+               m53_sha, frecs[2].crc);
+        long nlen = (long)strlen(neg_sh);
+        mm_copy(neg_pad, sizeof neg_pad, neg_sh, nlen);
+        while (nlen < 4200) neg_pad[nlen++] = 'P';
+        neg_pad[nlen++] = '\n';
+        mm_copy(neg_pad + nlen, sizeof neg_pad - nlen, dm_sec, dm_l);
+        int neg_built = (fn_write_ape_with_frecs((const unsigned char *)neg_pad, nlen, nlen + dm_l, 1, 1, frecs, 3, neg_ape, neg_sha) == 0);
+        sv_pass = g_pass; sv_fail = g_fail;
+        g_pass = 0; g_fail = 0;
+        if (neg_built) (void)fn_run_m53_tamper_gate(cwd, tmp, neg_ape, neg_sha);
+        int neg_p = g_pass, neg_f = g_fail;
+        g_pass = sv_pass; g_fail = sv_fail;
+        (void)sy_unlink(neg_ape);
+        fn_rec(p_pos_drv && p_neg_split && p_neg_suf && p_neg_unit && neg_built && neg_p == 5 && neg_f == 3,
+               "SELFTEST", "refuse-m53-cross-line-split-reason-suffix-and-slice-cross-unit",
+               ape_sha, "m53-line-parse-negatives", "-", "cross-line+suffix+slice-wrong-unit-rejected");
+    }
 
     /* Real pinned D/B/M checks on the m53-only APE (which lacks D/B/M slices):
      * Per piece assert that rc_verify passed inside the piece tool AND the named missing-piece
