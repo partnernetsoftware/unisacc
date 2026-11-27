@@ -131,6 +131,7 @@ static int make_crc_tampered_p4_key(const char *src_p4, const char *dst_p4, cons
         long crc_last = pos - 2;
         if ((long)kl == nl_k && pos + (long)kl <= pkg_end && memcmp(b + pos, target_key, (size_t)nl_k) == 0) {
             b[crc_last] = (b[crc_last] == '0') ? '1' : '0';
+            if (dl > 0 && pos + (long)(kl + dl) <= pkg_end) b[pos + (long)kl + (long)(dl / 2)] ^= 0x01;
             patched = 1;
             break;
         }
@@ -272,8 +273,14 @@ static int run_chain_ape_pregate(const char *ape, const char *rcpt,
         return 2;
     }
 
+    char h_intact[512], h_crc[512], h_g4[512];
+    cx_fmt(h_intact, sizeof h_intact, "%s/home-intact", tmp);
+    cx_fmt(h_crc, sizeof h_crc, "%s/home-crc", tmp);
+    cx_fmt(h_g4, sizeof h_g4, "%s/home-g4", tmp);
+    (void)sy_mkdir(h_intact, 0700); (void)sy_mkdir(h_crc, 0700); (void)sy_mkdir(h_g4, 0700);
+
     /* 1. Intact formal APE control: two-source compile reaching m25 */
-    cx_fmt(cmd, sizeof cmd, "sh '%s' '%s' '%s' -o '%s'", ape, u1, u2, out_bin);
+    cx_fmt(cmd, sizeof cmd, "HOME='%s' sh '%s' '%s' '%s' -o '%s'", h_intact, ape, u1, u2, out_bin);
     int c_rc = run_sh(cmd, out, sizeof out);
     int r_ok = (c_rc == 0 && sy_exists(out_bin) == 1);
     if (!r_ok) {
@@ -303,7 +310,7 @@ static int run_chain_ape_pregate(const char *ape, const char *rcpt,
         mm_free(bb);
         cx_fmt(bad_sha, sizeof bad_sha, "unknown");
     }
-    cx_fmt(cmd, sizeof cmd, "sh '%s' '%s' '%s' -o '%s'", bad_ape, u1, u2, out_bin);
+    cx_fmt(cmd, sizeof cmd, "HOME='%s' sh '%s' '%s' '%s' -o '%s'", h_crc, bad_ape, u1, u2, out_bin);
     int bad_rc = run_sh(cmd, out, sizeof out);
     int r_crc = (bad_rc != 0 && (strstr(out, "M25_M1_REFUSE") != 0 || strstr(out, "rtsharedname tape refused") != 0));
     if (!r_crc) {
@@ -316,7 +323,7 @@ static int run_chain_ape_pregate(const char *ape, const char *rcpt,
     }
 
     /* 3. G4 env-override negative */
-    cx_fmt(cmd, sizeof cmd, "UNISACC_M53_S1=1 sh '%s' '%s' '%s' -o '%s'", ape, u1, u2, out_bin);
+    cx_fmt(cmd, sizeof cmd, "HOME='%s' UNISACC_M53_S1=1 sh '%s' '%s' '%s' -o '%s'", h_g4, ape, u1, u2, out_bin);
     int env_rc = run_sh(cmd, out, sizeof out);
     int r_env = (env_rc != 0 && strstr(out, "embed-env-override-forbidden") != 0);
     (void)sy_remove_all(tmp);
