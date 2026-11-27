@@ -132,6 +132,20 @@ static int run_dv(const char *cwd, const char *owner, char **args, int *rc) {
     return run_dv_ex(cwd, owner, 0, args, rc);
 }
 
+static int patch_bin_copy(const char *src_bin, const char *dst_bin, const char *from13, const char *to13) {
+    unsigned char *b = 0; int64_t n = 0; int hits = 0;
+    if (sy_read_file(src_bin, &b, &n, 16 << 20) || !b || n < 16) { mm_free(b); return 0; }
+    for (int64_t i = 0; i + 14 <= n; i++) {
+        if (b[i] == 'r' && mm_same(b + i, from13, 14)) {
+            mm_copy(b + i, 14, to13, 14);
+            hits++;
+        }
+    }
+    int ok = (hits > 0 && sy_write_file(dst_bin, b, n, 0755) == 0);
+    mm_free(b);
+    return ok;
+}
+
 static int wr(const char *dir, const char *rel, const char *txt) {
     char p[4500];
     if (cx_fmt(p, sizeof p, "%s/%s", dir, rel)) return 1;
@@ -492,26 +506,42 @@ scope:
          setup_ok && !wr(wt_win, "src/a.txt", "win edit\n") &&
          run_dv(repo, "worker1", ac_win, &rc) && rc == 0 && has(out, "FREEZE_SCOPE skip=worktree branch=w/agyneon3"));
       /* Post-freeze main descendant branch (branched from C0b after C0a base_commit) and its 2nd commit pass;
-         renamed branch at advanced release tip and missing refs/heads/<branch> fail closed. */
-      { char wt_post[4400], wt_rtip[4400];
+         renamed branch at advanced release tip and missing refs/heads/<branch> fail closed;
+         two-way mutation self-proof (over-freeze old-behavior mutant and under-freeze release-line mutant). */
+      { char wt_post[4400], wt_rtip[4400], bin_over[4400], bin_under[4400], saved_bin[4200];
         int p_ok = setup_ok &&
                    !cx_fmt(wt_post, sizeof wt_post, "%s/wt-post", tmp) &&
                    !cx_fmt(wt_rtip, sizeof wt_rtip, "%s/wt-rtip", tmp) &&
-                   sh_in(repo, "printf 'c0b\\n' > docs/c0b.txt && git add docs/c0b.txt && git -c user.name=fx -c user.email=fx@localhost -c commit.gpgsign=false commit -qm c0b") &&
+                   !cx_fmt(bin_over, sizeof bin_over, "%s/dvcore-mut-over", tmp) &&
+                   !cx_fmt(bin_under, sizeof bin_under, "%s/dvcore-mut-under", tmp) &&
+                   sh_in(repo, "git branch -f u0 HEAD~1 && printf 'c0b\\n' > docs/c0b.txt && git add docs/c0b.txt && git -c user.name=fx -c user.email=fx@localhost -c commit.gpgsign=false commit -qm c0b") &&
                    !cx_fmt(cmd, sizeof cmd,
                            "git worktree add -q -b w/v019-post '%s' main && ln -s '%s/unisacc.com' '%s/unisacc.com' && "
                            "git worktree add -q -b sneaky-tip '%s' refs/heads/v0.1.8 && ln -s '%s/unisacc.com' '%s/unisacc.com'",
                            wt_post, root, wt_post, wt_rtip, root, wt_rtip) &&
-                   sh_in(repo, cmd);
+                   sh_in(repo, cmd) &&
+                   patch_bin_copy(bin, bin_over, "refs/heads/%s", "refs/heads/x0") &&
+                   patch_bin_copy(bin, bin_under, "refs/heads/%s", "refs/heads/u0");
+        char *af_probe[] = {"f", "write", "src/a.txt", "--from", f_new, 0};
         char *ac_post1[] = {"git", "commit", "--cwd", wt_post, "-m", "post-freeze descendant commit 1", "--whole", "src/a.txt", 0};
         char *ac_post2[] = {"git", "commit", "--cwd", wt_post, "-m", "post-freeze descendant commit 2", "--whole", "src/a.txt", 0};
         char *ac_rtip[] = {"git", "commit", "--cwd", wt_rtip, "-m", "renamed branch at advanced release tip", "--whole", "src/a.txt", 0};
         char *ac_post_miss[] = {"git", "commit", "--cwd", wt_post, "-m", "post-freeze with release ref missing", "--whole", "src/a.txt", 0};
+        /* Direction 1 self-proof: old-behavior mutant (rc_b==0 always freezes) is RED on wt_post, real bin is GREEN */
+        mm_copy(saved_bin, sizeof saved_bin, bin, strlen(bin) + 1);
+        mm_copy(bin, sizeof bin, bin_over, strlen(bin_over) + 1);
+        int over_red = p_ok && run_dv(wt_post, "worker1", af_probe, &rc) && rc == 1 && has(out, "LOCK_HELD freeze owner=cc");
+        mm_copy(bin, sizeof bin, saved_bin, strlen(saved_bin) + 1);
         ck("armed-freeze-post-freeze-main-descendant-branch-accepted",
-           p_ok && !wr(wt_post, "src/a.txt", "post c0b edit 1\n") &&
+           over_red && !wr(wt_post, "src/a.txt", "post c0b edit 1\n") &&
            run_dv(repo, "worker1", ac_post1, &rc) && rc == 0 && has(out, "FREEZE_SCOPE skip=worktree branch=w/v019-post"));
+        /* Direction 2 self-proof: under-freeze mutant (rc_t fails to guard release line) is RED on wt_ren and wt_rtip, real bin is GREEN */
+        mm_copy(bin, sizeof bin, bin_under, strlen(bin_under) + 1);
+        int under_red_base = p_ok && run_dv(wt_ren, "worker1", af_probe, &rc) && rc == 0 && has(out, "FREEZE_SCOPE skip=worktree branch=sneaky-rename");
+        int under_red_tip = p_ok && run_dv(wt_rtip, "worker1", af_probe, &rc) && rc == 0 && has(out, "FREEZE_SCOPE skip=worktree branch=sneaky-tip");
+        mm_copy(bin, sizeof bin, saved_bin, strlen(saved_bin) + 1);
         ck("armed-freeze-renamed-branch-at-advanced-release-tip-refused",
-           p_ok && !wr(wt_rtip, "src/a.txt", "rtip edit\n") &&
+           under_red_base && under_red_tip && !wr(wt_rtip, "src/a.txt", "rtip edit\n") &&
            run_dv(repo, "worker1", ac_rtip, &rc) && rc == 1 &&
            has(out, "LOCK_HELD freeze owner=cc") && !has(out, "FREEZE_SCOPE skip="));
         int del_ok = p_ok && !cx_fmt(cmd, sizeof cmd,
