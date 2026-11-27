@@ -1366,9 +1366,13 @@ static int prep_plan(const char *name, int kind, char *why, int cap) {
         cx_sha256_hex(both,(size_t)tx_len(both,sizeof both),P->closure);
     }
     if(P->kind==PK_MDIR&&tx_eqz(P->name,"entry-link")){
-        char eb_sha[65],both[140];
-        if(closure_sha("tools/entry-build.cx",eb_sha)||cx_fmt(both,sizeof both,"%s%s",P->closure,eb_sha)){cx_fmt(why,cap,"closure-unreadable=tools/entry-build.cx");return -1;}
-        cx_sha256_hex(both,(size_t)tx_len(both,sizeof both),P->closure);
+        char eb_sha[65],product[4400],tool[4400],bound[4400],comb[220];Buf fp={0,0,0};
+        if(closure_sha("tools/entry-build.cx",eb_sha)||root_candidate(product,sizeof product)||cx_fmt(tool,sizeof tool,"%s/%s",root,P->src)||cx_fmt(bound,sizeof bound,"%s/tools/bound",root)){cx_fmt(why,cap,"closure-unreadable=tools/entry-build.cx");return -1;}
+        char *fv[]={bound,"20","sh",product,tool,"--","--fingerprint",root,0};
+        if(read_all(fv,&fp)||fp.n!=65||fp.p[64]!='\n'){cx_fmt(why,cap,"entry-link-fingerprint-refused");return -1;}
+        for(int i=0;i<64;i++)if(!((fp.p[i]>='0'&&fp.p[i]<='9')||(fp.p[i]>='a'&&fp.p[i]<='f'))){cx_fmt(why,cap,"entry-link-fingerprint-shape");return -1;}
+        if(cx_fmt(comb,sizeof comb,"%s%s%.64s",P->closure,eb_sha,fp.p))return -1;
+        cx_sha256_hex(comb,(size_t)tx_len(comb,sizeof comb),P->closure);
     }
     /* the checkout root is part of the identity: builders such as tools/source-package.cx embed
        the real path of their source file, so one closure built under two roots yields different bytes and must not share a cache name */
@@ -1442,6 +1446,7 @@ static void prep_done(PJob *J, int ok) {
         if(assembler&&prep_asm_sha(J->tmp,expected))ok=0;
         if(ok&&P->kind==PK_HOSTC){char from[4600],to[4600];if(cx_fmt(from,sizeof from,"%s.material.tsv",J->tmp)||cx_fmt(to,sizeof to,"%s.material.tsv",P->path)||sy_rename(from,to))ok=0;}
         if(ok)(void)sy_rename(J->tmp, P->path);   /* a concurrent run may have placed the same identity first: verified below */
+        if(ok && P->kind==PK_MDIR && tx_eqz(P->name,"entry-link") && sy_exists(J->tmp)==1)(void)sy_remove_all(J->tmp);
         if (prep_art_sha(P, P->sha)) ok = 0;
         if(assembler&&ok&&strcmp(expected,P->sha)){ok=0;cx_fmt(P->why,sizeof P->why,"assembler-publish-content-mismatch");}
         if (ok && !cx_fmt(rc, sizeof rc, "closure=%s\tproduct=%s\tartifact=%s\n", P->closure, prod_sha, P->sha) && cx_write(P->rcpt, rc, (size_t)tx_len(rc, sizeof rc)) == 0 && (P->kind!=PK_HOSTC || prep_verify(P))) { P->state = PS_READY; return; }

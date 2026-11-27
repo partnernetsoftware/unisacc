@@ -162,11 +162,12 @@ static int rg_root_missing(void) {
 /* Check the generated fourteen-column row before append: expect is rc0:MARKER,
    followed by the headers contract and commit (or platform release) tier. */
 static int rg_row_ok(const char *row, const char *marker) {
-    int fields = 0; size_t ml = tx_len(marker, 512); const char *at = row, *expect = 0, *headers = 0, *tier = 0;
-    for (; *at; at++) if (*at == '\t') { fields++; if(fields==11)expect=at+1;if(fields==12)headers=at+1;if(fields==13)tier=at+1; }
-    if(fields!=13||!expect||!headers||!tier||strncmp(expect,"rc0:",4)||(size_t)(headers-expect)!=ml+5||memcmp(expect+4,marker,ml))return 0;
+    int fields = 0; size_t ml = tx_len(marker, 512); const char *at = row, *mats = 0, *mats_end = 0, *expect = 0, *headers = 0, *tier = 0;
+    for (; *at; at++) if (*at == '\t') { fields++; if(fields==7)mats=at+1;if(fields==8)mats_end=at;if(fields==11)expect=at+1;if(fields==12)headers=at+1;if(fields==13)tier=at+1; }
+    if(fields!=13||!mats||!mats_end||!expect||!headers||!tier||strncmp(expect,"rc0:",4)||(size_t)(headers-expect)!=ml+5||memcmp(expect+4,marker,ml))return 0;
     if(!((tier-headers==8&&!memcmp(headers,"product\t",8))||(tier-headers==5&&!memcmp(headers,"tree\t",5))))return 0;
-    return tx_eqz(tier,"commit\n")||tx_eqz(tier,"daily\n")||tx_eqz(tier,"release\n");
+    { int has_mat = !(mats_end - mats == 1 && mats[0] == '-');
+      return tx_eqz(tier,"commit\n")||tx_eqz(tier,"release\n")||(has_mat && tx_eqz(tier,"daily\n")); }
 }
 
 static int clean(const char *s) { for (; *s; s++) if (*s == '\t' || *s == '\n' || *s == '\r') return 0; return 1; }
@@ -908,10 +909,13 @@ static int rg_run_affected_materials(const char *run_dir, const char *id,
     if (cx_fmt(want_pass, sizeof want_pass, "BATCH_RUN\tid=%s\tstatus=PASS\t", id) ||
         cx_fmt(want_def, sizeof want_def, "DEFERRED\t%s\t", id)) return 1;
     for (round = 0; round < 6; round++) {
-        char *av[32]; int n = 0; int rc;
+        char *av[32]; char bound_s[16]; int n = 0; int rc;
         long elapsed = sy_now_ms() - t0;
-        if (elapsed >= 280000L) break;
-        av[n++] = "./tools/bound"; av[n++] = "58"; av[n++] = "env"; av[n++] = "-C"; av[n++] = (char *)run_dir;
+        long rem_s = (280000L - elapsed) / 1000L;
+        if (rem_s < 10L) break;
+        if (rem_s > 58L) rem_s = 58L;
+        if (cx_fmt(bound_s, sizeof bound_s, "%ld", rem_s)) return 1;
+        av[n++] = "./tools/bound"; av[n++] = bound_s; av[n++] = "env"; av[n++] = "-C"; av[n++] = (char *)run_dir;
         av[n++] = "-u"; av[n++] = "GIT_DIR"; av[n++] = "-u"; av[n++] = "GIT_WORK_TREE"; av[n++] = "-u"; av[n++] = "GIT_INDEX_FILE";
         av[n++] = "-u"; av[n++] = "CLAUDE_JOB_DIR"; av[n++] = "-u"; av[n++] = "UNISACC_TABLES";
         if (envcache && envcache[0]) av[n++] = (char *)envcache;
@@ -943,7 +947,11 @@ static int rg_run_affected_materials(const char *run_dir, const char *id,
             if (steps_out) *steps_out = total_steps;
             return 0;
         }
-        if (strstr(buf, want_def) || (rc == 142 && strstr(buf, "PREPARED\ttlib-kit"))) continue;
+        if (strstr(buf, want_def) &&
+            (strstr(buf, "prepare-failed=stepwise-more-steps=") || strstr(buf, "prepare-failed=prebuild-budget="))) {
+            continue;
+        }
+        if (round == 0 && rc == 142 && strstr(buf, "PREPARED\ttlib-kit")) continue;
         if (steps_out) *steps_out = total_steps;
         return rc ? rc : 1;
     }
@@ -1053,7 +1061,7 @@ static int rg_qualify_layout_selftest(const char *root,const char *id,const char
             if (no_prod[0]) {
                 printf("REGISTER_LAYOUT_SELFTEST\tid=%s\tstatus=REFUSE\treason=material-no-producer=%s\trc=%d\tms=%ld\n", id, no_prod, rc, elapsed);
             } else {
-                const char *why = rc == 124 ? "timeout-280s-material" : "layout-selftest-failed";
+                const char *why = rc == 124 ? "timeout-280s-material" : (strstr(buf, "build-failed=") ? "material-build-failed" : "layout-selftest-failed");
                 printf("REGISTER_LAYOUT_SELFTEST\tid=%s\tstatus=REFUSE\treason=%s\trc=%d\tms=%ld\n", id, why, rc, elapsed);
             }
             fputs(buf, stderr);

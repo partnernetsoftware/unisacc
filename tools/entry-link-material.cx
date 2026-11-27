@@ -328,8 +328,14 @@ int main(int argc, char **argv) {
     int mode_step = 0, mode_verify = 0;
     long t0;
 
+    if (argc == 3 && tx_eqz(argv[1], "--fingerprint")) {
+        if (argv[2][0] != '/' || sy_realpath(argv[2], root, sizeof root) < 0) return 2;
+        if (compute_tree_sha(root, tree_sha) != 0) return 2;
+        sy_printf("%s\n", tree_sha);
+        return 0;
+    }
     if (argc != 4) {
-        sy_eprintf("entry-link-material: usage: ROOT OUTDIR --step|--verify\n");
+        sy_eprintf("entry-link-material: usage: ROOT OUTDIR --step|--verify | --fingerprint ROOT\n");
         return 2;
     }
     if (tx_eqz(argv[3], "--step")) mode_step = 1;
@@ -361,6 +367,19 @@ int main(int argc, char **argv) {
     }
 
     (void)mode_step;
+    (void)sy_mkdir(dir, 0700);
+    {
+        char lkp[4400];
+        int lkfd;
+        cx_fmt(lkp, sizeof lkp, "%s/.step.lock", dir);
+        lkfd = open(lkp, O_RDWR | O_CREAT | O_NOFOLLOW | O_CLOEXEC, 0600);
+        if (lkfd < 0) return 2;
+        if (sy_flock(lkfd, 6) != 0) { /* LOCK_EX | LOCK_NB: concurrent caller owns step */
+            sy_close(lkfd);
+            return 3;
+        }
+        /* Lock held for process lifetime; kernel releases on exit. */
+    }
     if (verify_identity_dir(root, dir, tree_sha, 1) != 0) {
         sy_printf("FAIL\tENTRY_LINK_MATERIAL\treason=tree-id-or-root-mismatch\n");
         return 2;
