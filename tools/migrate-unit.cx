@@ -1,0 +1,488 @@
+/* tools/migrate-unit.cx -- Migration Factory: generate all per-unit M1-style migration artifacts
+ * from plans/slice-units.tsv + plans/unit-text.tsv in one command.
+ *
+ *   sh ./unisacc.com tools/migrate-unit.cx -- UNIT [--class auto|tape|table] [--out DIR] [--target lnx/x86_64] [--symbol SYM] [--check]
+ *
+ * UNIT may be a unit key (e.g. m53.o, m25.o, route.o) or source path (e.g. cx/runtime/stream_attributes.cx).
+ * Refuses (rc=1, MIGRATE_UNIT REFUSE) any thin-layer / non-migratable unit (dest == 留切片), class mismatch, or unknown unit.
+ * --class auto selects: dest==1 (迁表) -> table; dest==2 (迁VM字节码) -> tape; dest==3 -> tape (or explicit table).
+ * Generates artifacts into DIR (default: $TMPDIR/migrate-<stem>, never repo out/):
+ *   tape mode (M2 TapeUnitSpec pattern, 7 files):
+ *     <stem>_guest.cx, <stem>_m1_impl.cx, slice-build.sh, chain-facts-route.tsv,
+ *     p4-embed-list.tsv, check-migrate-<stem>.cx, ledger-row.tsv
+ *   table mode (v0.1.8, 5 files):
+ *     table-facts.tsv, table-gen-<stem>.cx, table-build.sh, check-table-<stem>.cx, ledger-row.tsv (no tapepack/P4 F)
+ * Exit: 0 ok, 1 refused, 2 usage/io. Check: tools/check-migrate-unit.cx. */
+#pragma unisa use sys.fs
+#pragma unisa use sys.io
+#pragma unisa use sys.env
+#pragma unisa use text.text
+#pragma unisa use text.fmt
+#pragma unisa use mem.heap
+#pragma unisa use mem.bytes
+
+#define MU_UNIT_TSV "plans/unit-text.tsv"
+#define MU_FACT_TSV "plans/slice-units.tsv"
+#define MU_MAXU 256
+#define MU_STR 128
+#define MU_USES 384
+
+typedef struct {
+    char key[MU_STR], kind[MU_STR], path[MU_STR], mig[MU_STR], sym[MU_STR];
+    long text, obj;
+    char src[MU_STR], mod[MU_STR], uses[MU_USES], over[MU_STR], note[MU_STR];
+    int lines, heap, rec;
+    int thin, dest, batch; /* dest: 0=留切片 1=迁表 2=迁VM字节码 3=先拆分后迁 */
+} MuUnit;
+
+static MuUnit mu_u[MU_MAXU];
+static int mu_nu;
+static const char *const MU_DEST[4] = {"留切片", "迁表", "迁VM字节码", "先拆分后迁"};
+static const char *const MU_DEST_ASCII[4] = {"thin-layer", "table", "tape-vm", "split-then-migrate"};
+
+static int mu_starts(const char *s, const char *p) {
+    int i = 0;
+    while (p[i]) { if (s[i] != p[i]) return 0; i++; }
+    return 1;
+}
+static int mu_cpy(char *d, int cap, const char *s, int n) {
+    int i;
+    if (n < 0 || n >= cap) return -1;
+    for (i = 0; i < n; i++) d[i] = s[i];
+    d[n] = 0;
+    return 0;
+}
+static long mu_num(const char *s, int n) {
+    long v = 0; int i;
+    for (i = 0; i < n; i++) {
+        if (s[i] < '0' || s[i] > '9') return -1;
+        v = v * 10 + (s[i] - '0');
+    }
+    return n ? v : -1;
+}
+static int mu_split(char *line, int n, const char **f, int *len, int want) {
+    int i, k = 0, st = 0;
+    for (i = 0; i <= n; i++) {
+        if (i == n || line[i] == '\t') {
+            if (k >= want) return -1;
+            f[k] = line + st; len[k] = i - st; k++; st = i + 1;
+        }
+    }
+    return k == want ? 0 : -1;
+}
+static int mu_find_key(const char *key) {
+    for (int i = 0; i < mu_nu; i++) if (tx_eqz(mu_u[i].key, key)) return i;
+    return -1;
+}
+static int mu_find_unit(const char *arg) {
+    for (int i = 0; i < mu_nu; i++) {
+        if (tx_eqz(mu_u[i].key, arg) || tx_eqz(mu_u[i].src, arg)) return i;
+    }
+    return -1;
+}
+static int mu_load(const char *path, int want, int (*cb)(const char **, int *)) {
+    size_t n = 0, i = 0;
+    char *b = cx_read(path, &n);
+    const char *f[12]; int len[12];
+    if (!b) { sy_eprintf("migrate-unit: cannot read %s\n", path); return -1; }
+    while (i < n) {
+        size_t e = i;
+        while (e < n && b[e] != '\n') e++;
+        b[e] = 0;
+        if (e > i && b[i] != '#') {
+            if (mu_split(b + i, (int)(e - i), f, len, want) || cb(f, len)) { mm_free(b); return -1; }
+        }
+        i = e + 1;
+    }
+    mm_free(b);
+    return 0;
+}
+static int mu_unit_row(const char **f, int *len) {
+    if (mu_nu >= MU_MAXU) return -1;
+    MuUnit *x = &mu_u[mu_nu];
+    mm_fill(x, (long)sizeof *x, 0, (long)sizeof *x);
+    if (mu_cpy(x->key, MU_STR, f[0], len[0]) || mu_cpy(x->kind, MU_STR, f[3], len[3]) ||
+        mu_cpy(x->path, MU_STR, f[4], len[4]) || mu_cpy(x->mig, MU_STR, f[5], len[5]) ||
+        mu_cpy(x->sym, MU_STR, f[6], len[6])) return -1;
+    x->text = mu_num(f[1], len[1]); x->obj = mu_num(f[2], len[2]);
+    if (x->text < 0 || x->obj < 0) return -1;
+    mu_nu++;
+    return 0;
+}
+static int mu_fact_row(const char **f, int *len) {
+    char key[MU_STR];
+    if (mu_cpy(key, MU_STR, f[0], len[0])) return -1;
+    int i = mu_find_key(key);
+    if (i < 0) return -1;
+    MuUnit *x = &mu_u[i];
+    if (mu_cpy(x->src, MU_STR, f[1], len[1]) || mu_cpy(x->mod, MU_STR, f[2], len[2]) ||
+        mu_cpy(x->uses, MU_USES, f[3], len[3]) || mu_cpy(x->over, MU_STR, f[7], len[7]) ||
+        mu_cpy(x->note, MU_STR, f[8], len[8])) return -1;
+    x->lines = (int)mu_num(f[4], len[4]);
+    x->heap = (int)mu_num(f[5], len[5]);
+    x->rec = (int)mu_num(f[6], len[6]);
+    return (x->lines < 0 || x->heap < 0 || x->rec < 0) ? -1 : 0;
+}
+/* Exact same classification rules as tools/slice-migration-gen.cx:95-115. */
+static void mu_classify(MuUnit *x) {
+    int i, has_sys = tx_find(x->uses, tx_len(x->uses, MU_USES), "sys.", 4) >= 0;
+    x->thin = tx_eqz(x->kind, "host") || mu_starts(x->src, "cx/sys/") || mu_starts(x->src, "cx/mem/") ||
+              mu_starts(x->src, "cx/text/") || tx_eqz(x->src, "cx/driver/input.cx") ||
+              tx_eqz(x->src, "cx/driver/output.cx");
+    if (tx_eqz(x->mig, "UNBOUNDED")) x->dest = 2;
+    else if (tx_eqz(x->mig, "FINITE") || tx_eqz(x->mig, "TRANSFORM")) x->dest = 1;
+    else x->dest = 3;
+    if (x->thin) x->dest = 0;
+    for (i = 0; i < 4; i++) if (tx_eqz(x->over, MU_DEST[i])) x->dest = i;
+    x->thin = (x->dest == 0);
+    x->batch = 0;
+    if (x->dest == 1) x->batch = (x->text <= 10000 && !has_sys) ? 1 : 2;
+    else if (x->dest == 3) x->batch = (x->text < 10000 && !has_sys && x->heap == 0) ? 2 : 3;
+    else if (x->dest == 2) x->batch = 4;
+}
+static void mu_stem(const char *key, char *out, long cap) {
+    long n = tx_len(key, cap - 1);
+    if (n > 2 && key[n - 2] == '.' && key[n - 1] == 'o') n -= 2;
+    if (n < 0) n = 0;
+    for (long i = 0; i < n; i++) out[i] = key[i];
+    out[n] = 0;
+}
+static void mu_upper(const char *s, char *out, long cap) {
+    long i = 0;
+    while (s[i] && i + 1 < cap) {
+        char c = s[i];
+        out[i] = (c >= 'a' && c <= 'z') ? (char)(c - 'a' + 'A') : (c == '-' || c == '.' ? '_' : c);
+        i++;
+    }
+    out[i] = 0;
+}
+static void mu_slug(const char *tgt, char *out, long cap) {
+    long i = 0;
+    while (tgt[i] && i + 1 < cap) {
+        out[i] = (tgt[i] == '/') ? '-' : tgt[i];
+        i++;
+    }
+    out[i] = 0;
+}
+/* Derive #pragma unisa use module path from source path (cx/X/Y.cx -> X.Y; src/Y.cx -> Y). */
+static void mu_use_name(const MuUnit *x, char *out, long cap) {
+    const char *p = x->src;
+    long n, i, k = 0;
+    if (mu_starts(p, "cx/")) p += 3;
+    else if (mu_starts(p, "src/")) p += 4;
+    n = tx_len(p, cap - 1);
+    if (n > 3 && p[n - 3] == '.' && p[n - 2] == 'c' && p[n - 1] == 'x') n -= 3;
+    for (i = 0; i < n && k + 1 < cap; i++) out[k++] = (p[i] == '/') ? '.' : p[i];
+    out[k] = 0;
+}
+static int mu_write_file(const char *dir, const char *leaf, const char *body) {
+    char p[4400];
+    if (cx_fmt(p, sizeof p, "%s/%s", dir, leaf)) return -1;
+    return cx_write(p, body, (size_t)tx_len(body, 1 << 20));
+}
+
+int main(int argc, char **argv) {
+    const char *unit_arg = 0, *out_arg = 0, *target = "lnx/x86_64", *sym_arg = 0, *class_arg = "auto";
+    int check_only = 0, is_table = 0;
+    for (int i = 1; i < argc; i++) {
+        if (tx_eqz(argv[i], "--check")) { check_only = 1; continue; }
+        if (tx_eqz(argv[i], "--out") && i + 1 < argc) { out_arg = argv[++i]; continue; }
+        if (tx_eqz(argv[i], "--target") && i + 1 < argc) { target = argv[++i]; continue; }
+        if (tx_eqz(argv[i], "--symbol") && i + 1 < argc) { sym_arg = argv[++i]; continue; }
+        if (tx_eqz(argv[i], "--class") && i + 1 < argc) { class_arg = argv[++i]; continue; }
+        if (argv[i][0] != '-' && !unit_arg) { unit_arg = argv[i]; continue; }
+        sy_eprintf("usage: migrate-unit.cx -- UNIT [--class auto|tape|table] [--out DIR] [--target lnx/x86_64] [--symbol SYM] [--check]\n");
+        return 2;
+    }
+    if (!unit_arg || (!tx_eqz(class_arg, "auto") && !tx_eqz(class_arg, "tape") && !tx_eqz(class_arg, "table"))) {
+        sy_eprintf("usage: migrate-unit.cx -- UNIT [--class auto|tape|table] [--out DIR] [--target lnx/x86_64] [--symbol SYM] [--check]\n");
+        return 2;
+    }
+    if (mu_load(MU_UNIT_TSV, 7, mu_unit_row) || mu_load(MU_FACT_TSV, 9, mu_fact_row)) return 2;
+    int idx = mu_find_unit(unit_arg);
+    if (idx < 0) {
+        sy_printf("MIGRATE_UNIT\tREFUSE\tunit=%s\treason=unknown-unit\n", unit_arg);
+        return 1;
+    }
+    MuUnit *x = &mu_u[idx];
+    mu_classify(x);
+    if (x->dest == 0) {
+        sy_printf("MIGRATE_UNIT\tREFUSE\tunit=%s\treason=not-migratable-thin-layer\tdest=%s\tsrc=%s\n",
+                  x->key, MU_DEST_ASCII[x->dest], x->src);
+        return 1;
+    }
+    if (tx_eqz(class_arg, "auto")) {
+        is_table = (x->dest == 1);
+    } else if (tx_eqz(class_arg, "table")) {
+        if (x->dest == 2) {
+            sy_printf("MIGRATE_UNIT\tREFUSE\tunit=%s\treason=class-mismatch\tdest=%s\twant=table\n", x->key, MU_DEST_ASCII[x->dest]);
+            return 1;
+        }
+        is_table = 1;
+    } else {
+        if (x->dest == 1) {
+            sy_printf("MIGRATE_UNIT\tREFUSE\tunit=%s\treason=class-mismatch\tdest=%s\twant=tape\n", x->key, MU_DEST_ASCII[x->dest]);
+            return 1;
+        }
+        is_table = 0;
+    }
+    if (sy_exists(x->src) != 1) {
+        sy_printf("MIGRATE_UNIT\tREFUSE\tunit=%s\treason=source-missing\tsrc=%s\n", x->key, x->src);
+        return 1;
+    }
+    const char *sym = (sym_arg && sym_arg[0]) ? sym_arg : x->sym;
+    if (!sym || !sym[0] || tx_eqz(sym, "-")) {
+        sy_printf("MIGRATE_UNIT\tREFUSE\tunit=%s\treason=no-export-symbol\n", x->key);
+        return 1;
+    }
+    const char *cls = is_table ? "table" : "tape";
+    char stem[64], up[64], slug[64], usename[128], outdir[4200], buf[16384], chkname[128], genname[128];
+    mu_stem(x->key, stem, sizeof stem);
+    mu_upper(stem, up, sizeof up);
+    mu_slug(target, slug, sizeof slug);
+    mu_use_name(x, usename, sizeof usename);
+    if (check_only) {
+        sy_printf("MIGRATE_UNIT\tCHECK_OK\tunit=%s\tsource=%s\tsym=%s\tdest=%s\tclass=%s\tbatch=%d\ttext=%ld\tobj=%ld\n",
+                  x->key, x->src, sym, MU_DEST_ASCII[x->dest], cls, x->batch, x->text, x->obj);
+        return 0;
+    }
+    if (out_arg) {
+        if (cx_fmt(outdir, sizeof outdir, "%s", out_arg)) return 2;
+    } else {
+        if (cx_fmt(outdir, sizeof outdir, "%s/migrate-%s", sy_tmpdir(), stem)) return 2;
+    }
+    if (sy_mkdir_all(outdir, 0755) && sy_exists(outdir) != 1) {
+        sy_eprintf("migrate-unit: cannot mkdir %s\n", outdir);
+        return 2;
+    }
+
+    if (is_table) {
+        /* --class table: finite fact table -> generator (--write/--check) -> table/net + golden full-enumeration cmp (NO tapepack, NO P4 F). */
+        if (cx_fmt(genname, sizeof genname, "table-gen-%s.cx", stem)) return 2;
+        if (cx_fmt(chkname, sizeof chkname, "check-table-%s.cx", stem)) return 2;
+        /* (1) table-facts.tsv */
+        if (cx_fmt(buf, sizeof buf,
+            "# Finite-domain fact table for %s (%s, sym=%s, class=table)\n"
+            "# Populate exact key domain and expected output columns; generator %s builds the table/one-hot net.\n"
+            "# key\tinput\texpected_out\n",
+            x->key, x->src, sym, genname) ||
+            mu_write_file(outdir, "table-facts.tsv", buf)) return 2;
+        /* (2) table-gen-<stem>.cx */
+        if (cx_fmt(buf, sizeof buf,
+            "/* %s -- Fact-table -> table/net generator for %s (%s, class=table).\n"
+            " *   sh ./unisacc.com %s -- --write|--check\n"
+            " * Reads table-facts.tsv; hand-editing the derived table/net is refused by --check.\n"
+            " * Marker: TABLE_GEN_%s. */\n"
+            "#pragma unisa use sys.fs\n"
+            "#pragma unisa use sys.io\n"
+            "#pragma unisa use text.text\n"
+            "int main(int argc, char **argv) {\n"
+            "    if (argc != 2 || (!tx_eqz(argv[1], \"--write\") && !tx_eqz(argv[1], \"--check\"))) {\n"
+            "        sy_eprintf(\"usage: %s -- --write|--check\\n\");\n"
+            "        return 2;\n"
+            "    }\n"
+            "    /* TODO: parse table-facts.tsv and emit deterministic table/one-hot threshold net */\n"
+            "    sy_eprintf(\"TABLE_GEN_%s\\tREFUSE\\treason=skeleton-unfilled\\n\");\n"
+            "    return 1;\n"
+            "}\n",
+            genname, x->key, x->src, genname, up, genname, up) ||
+            mu_write_file(outdir, genname, buf)) return 2;
+        /* (3) table-build.sh */
+        if (cx_fmt(buf, sizeof buf,
+            "#!/bin/sh\n"
+            "# Auto-generated by tools/migrate-unit.cx --class table for %s (%s)\n"
+            "set -eu\n"
+            "DIR=\"$(cd \"$(dirname \"$0\")\" && pwd)\"\n"
+            "sh ./unisacc.com \"$DIR/%s\" -- --write\n"
+            "sh ./unisacc.com \"$DIR/%s\" -- --check\n"
+            "sh ./unisacc.com \"$DIR/%s\" --\n",
+            x->key, x->src, genname, genname, chkname) ||
+            mu_write_file(outdir, "table-build.sh", buf)) return 2;
+        /* (4) check-table-<stem>.cx */
+        if (cx_fmt(buf, sizeof buf,
+            "/* %s -- Golden full-enumeration field-by-field cmp gate for %s (%s, sym=%s, class=table).\n"
+            " * Enumerates every legal key in table-facts.tsv plus out-of-range and NULL inputs,\n"
+            " * comparing generated table/net outputs field-by-field against native %s.\n"
+            " * Marker: CHECK_TABLE_%s. */\n"
+            "#pragma unisa use sys.io\n"
+            "#pragma unisa use %s\n"
+            "static int failed;\n"
+            "static void ck(int ok, const char *name) {\n"
+            "    if (!ok) { sy_eprintf(\"FAIL\\t%s.%%s\\n\", name); failed++; }\n"
+            "    else sy_printf(\"PASS\\t%s.%%s\\n\", name);\n"
+            "}\n"
+            "int main(void) {\n"
+            "    /* TODO: enumerate full key domain of %s and field-by-field cmp generated table/net vs native %s */\n"
+            "    ck(0, \"skeleton-unfilled-golden-enumeration\");\n"
+            "    sy_printf(\"CHECK_TABLE_%s\\tfailed=%%d\\tdomain=0\\n\", failed);\n"
+            "    return failed ? 1 : 0;\n"
+            "}\n",
+            chkname, x->key, x->src, sym, sym, up, usename, stem, stem, x->key, sym, up) ||
+            mu_write_file(outdir, chkname, buf)) return 2;
+        /* (5) ledger-row.tsv */
+        if (cx_fmt(buf, sizeof buf,
+            "# unit\tsource\tsym\tdest\tclass\tbatch\told_text_b\told_obj_b\traw_slice_delta\tcomp_slice_delta\tpkg_delta\tape_delta\twall_ratio\tstatus\n"
+            "%s\t%s\t%s\t%s\ttable\t%d\t%ld\t%ld\tUNMEASURED\tUNMEASURED\tUNMEASURED\tUNMEASURED\tUNMEASURED\tGENERATED\n",
+            x->key, x->src, sym, MU_DEST_ASCII[x->dest], x->batch, x->text, x->obj) ||
+            mu_write_file(outdir, "ledger-row.tsv", buf)) return 2;
+        sy_printf("MIGRATE_UNIT\tOK\tunit=%s\tsource=%s\tsym=%s\tdest=%s\tclass=table\tbatch=%d\ttext=%ld\tout=%s\tfiles=5\n",
+                  x->key, x->src, sym, MU_DEST_ASCII[x->dest], x->batch, x->text, outdir);
+        return 0;
+    }
+
+    /* --class tape (M2 TapeUnitSpec pattern, aligned with 9b27b561c): 7 artifacts */
+    char guestname[128], wrapname[128], abitag[80];
+    int is_root = mu_starts(x->src, "src/");
+    if (cx_fmt(guestname, sizeof guestname, "%s_guest.cx", stem)) return 2;
+    if (cx_fmt(wrapname, sizeof wrapname, "%s_m1_impl.cx", stem)) return 2;
+    if (cx_fmt(abitag, sizeof abitag, "%sABI1", up)) return 2;
+
+    /* (1) <stem>_guest.cx (pure zero-syscall guest slice with ABI tag in DATA) */
+    if (cx_fmt(buf, sizeof buf,
+        "#pragma unisa module %s_guest\n"
+        "/* Pure zero-syscall guest slice for %s (%s, export=%s).\n"
+        " * Zero unisa-use imports (host mask <= 383). ABI tag in DATA: \"%s\".\n"
+        " * Input: flat little-endian u32 header + payload bytes. Return domain: [0, 0x7fffffff]. */\n"
+        "static const char %s_guest_abi_tag[%ld] = \"%s\";\n"
+        "enum { %s_BAD_ARG = 2147483646 };\n"
+        "static unsigned %s_g_u32(const unsigned char *p) {\n"
+        "    return (unsigned)p[0] | ((unsigned)p[1] << 8) | ((unsigned)p[2] << 16) | ((unsigned)p[3] << 24);\n"
+        "}\n"
+        "int %s(const unsigned char *buf, long len) {\n"
+        "    if (!buf || len < 4) return %s_BAD_ARG;\n"
+        "    /* Retain ABI tag in DATA against DCE (verified by TapeUnitSpec.abi_tag). */\n"
+        "    if (%s_guest_abi_tag[0] != '%c') return %s_BAD_ARG;\n"
+        "    /* TODO: port pure logic of %s here using only buf[0..len-1] */\n"
+        "    return (int)(%s_g_u32(buf) & 0x7fffffffU);\n"
+        "}\n",
+        stem, x->key, x->src, sym, abitag,
+        stem, tx_len(abitag, sizeof abitag) + 1, abitag,
+        up, stem, sym, up, stem, abitag[0], up, sym, stem) ||
+        mu_write_file(outdir, guestname, buf)) return 2;
+
+    /* (2) <stem>_m1_impl.cx (host wrapper calling tape_unit_call_bytes with TapeUnitSpec) */
+    if (cx_fmt(buf, sizeof buf,
+        "#pragma unisa module %s_m1_impl\n"
+        "#pragma unisa use driver.stream_s1_m1\n"
+        "/* Authoritative embedded-tape host wrapper for %s (%s).\n"
+        " * Zero native fallback: carrier or VM failure refuses -2 with %s_M1_REFUSE. */\n"
+        "static TapeUnitState %s_m1_unit;\n"
+        "static const TapeUnitSpec *%s_m1_get_spec(void) {\n"
+        "    static const TapeUnitSpec sp = {\n"
+        "        \"tape/%s/manifest.tsv\",\n"
+        "        \"tape/%s/tapemode.so\",\n"
+        "        \"tape/%s/%s.tapeslice\",\n"
+        "        \"tapemode.so\",\n"
+        "        \"%s.tapeslice\",\n"
+        "        \"%s\",\n"
+        "        %ldL,\n"
+        "        \"%s\",\n"
+        "        2147483647ULL,\n"
+        "        2000000ULL,\n"
+        "        \"%s_M1_REFUSE\"\n"
+        "    };\n"
+        "    return &sp;\n"
+        "}\n"
+        "long %s_m1_call(const unsigned char *buf, long len) {\n"
+        "    return tape_unit_call_bytes(&%s_m1_unit, %s_m1_get_spec(), buf, len);\n"
+        "}\n",
+        stem, x->key, x->src, up, stem, stem,
+        slug, slug, slug, stem, stem, abitag, tx_len(abitag, sizeof abitag), sym, up,
+        stem, stem, stem) ||
+        mu_write_file(outdir, wrapname, buf)) return 2;
+
+    /* (3) slice-build.sh (builds guest slice, verifies ABI tag + export, shows p4-embed --extra command) */
+    if (cx_fmt(buf, sizeof buf,
+        "#!/bin/sh\n"
+        "# Auto-generated by tools/migrate-unit.cx --class tape (M2 pattern) for %s (%s, export=%s)\n"
+        "set -eu\n"
+        "DIR=\"$(cd \"$(dirname \"$0\")\" && pwd)\"\n"
+        "OUT_DIR=\"${1:-${TMPDIR:-/tmp}/slice-%s}\"\n"
+        "mkdir -p \"$OUT_DIR\"\n"
+        "sh ./unisacc.com -O2 -S -b %s \"$DIR/%s\" -o \"$OUT_DIR/%s.tape.s\"\n"
+        "grep -q \"%s\" \"$OUT_DIR/%s.tape.s\"\n"
+        "grep -q \"%s:\" \"$OUT_DIR/%s.tape.s\"\n"
+        "sh ./unisacc.com tools/tapepack.cx -- --export %s \"$OUT_DIR/%s.tape.s\" -o \"$OUT_DIR/%s.tapeslice\"\n"
+        "sh ./unisacc.com tools/tapepack.cx -- --export %s --check \"$OUT_DIR/%s.tape.s\" \"$OUT_DIR/%s.tapeslice\"\n"
+        "# Inject into P4 package via tools/p4-embed.cx:\n"
+        "#   sh ./unisacc.com tools/p4-embed.cx -- <in.p4|ape> <tapemode.so> <m53.tapeslice> <out.p4> --extra %s.tapeslice \"$OUT_DIR/%s.tapeslice\"\n",
+        x->key, x->src, sym, stem,
+        target, guestname, stem, abitag, stem, sym, stem,
+        sym, stem, stem, sym, stem, stem, stem, stem) ||
+        mu_write_file(outdir, "slice-build.sh", buf)) return 2;
+
+    /* (4) chain-facts-route.tsv (root_target for src/* or module_target for cx/*) */
+    if (is_root) {
+        if (cx_fmt(buf, sizeof buf,
+            "# Append to build/chain-facts.tsv after p3 rows, then run:\n"
+            "#   sh ./unisacc.com tools/chain-facts-gen.cx -- --write\n"
+            "# unit=%s source=%s module=%s dest=%s\n"
+            "root_target\t%s:%s\tsrc/%s_m1.cx\n",
+            x->key, x->src, x->mod, MU_DEST_ASCII[x->dest], target, x->key, stem) ||
+            mu_write_file(outdir, "chain-facts-route.tsv", buf)) return 2;
+    } else {
+        if (cx_fmt(buf, sizeof buf,
+            "# Append to build/chain-facts.tsv after root_target rows, then run:\n"
+            "#   sh ./unisacc.com tools/chain-facts-gen.cx -- --write\n"
+            "# unit=%s source=%s module=%s dest=%s\n"
+            "module_target\t%s:%s\tcx/driver/%s_m1_impl.cx\n",
+            x->key, x->src, x->mod, MU_DEST_ASCII[x->dest], target, usename, stem) ||
+            mu_write_file(outdir, "chain-facts-route.tsv", buf)) return 2;
+    }
+
+    /* (5) p4-embed-list.tsv (keys + --extra flag for tools/p4-embed.cx & release-build --embed-tape) */
+    if (cx_fmt(buf, sizeof buf,
+        "# key\tleaf\tmax_bytes\tcodec\tcrc_mode\tp4_embed_flag\n"
+        "tape/%s/manifest.tsv\tmanifest.tsv\t65536\t0\tieee-crc32\tbuiltin\n"
+        "tape/%s/tapemode.so\ttapemode.so\t1048576\t0\tieee-crc32\tbuiltin\n"
+        "tape/%s/%s.tapeslice\t%s.tapeslice\t4194304\t0\tieee-crc32\t--extra %s.tapeslice\n",
+        slug, slug, slug, stem, stem, stem) ||
+        mu_write_file(outdir, "p4-embed-list.tsv", buf)) return 2;
+
+    /* (6) check-migrate-<stem>.cx (differential check + inverted-slice refusal case + G1/G4) */
+    if (cx_fmt(chkname, sizeof chkname, "check-migrate-%s.cx", stem)) return 2;
+    if (cx_fmt(buf, sizeof buf,
+        "/* %s -- Differential & inverted-slice refusal gate for %s (%s, export=%s).\n"
+        " * Generated by tools/migrate-unit.cx --class tape (M2 TapeUnitSpec pattern).\n"
+        " * Required red-first gates:\n"
+        " *   - Parity: >=256 differential vectors comparing %s_m1_call (tape VM) vs native %s\n"
+        " *   - Inverted-slice refusal: replace tape/%s/%s.tapeslice with an inverted-return slice\n"
+        " *     via tools/p4-embed.cx; verify %s_m1_call returns the inverted result (proving no silent native fallback)\n"
+        " *     and differential gate REFUSES (rc=1, reason=inverted-slice-refuse)\n"
+        " *   - G1: CRC-only tamper (crc^1) on tape/%s/%s.tapeslice refused rc=-2 (%s_M1_REFUSE)\n"
+        " *   - G4: raw VM return > max_ret refused embed-vm-bad-return; UNISACC_M53_S1=1 refused\n"
+        " * Marker: CHECK_MIGRATE_%s. */\n"
+        "#pragma unisa use sys.io\n"
+        "#pragma unisa use %s\n"
+        "\n"
+        "static int failed;\n"
+        "static void ck(int ok, const char *name) {\n"
+        "    if (!ok) { sy_eprintf(\"FAIL\\t%s.%%s\\n\", name); failed++; }\n"
+        "    else sy_printf(\"PASS\\t%s.%%s\\n\", name);\n"
+        "}\n"
+        "static void check_inverted_slice_refuse(void) {\n"
+        "    /* TODO: run against temp P4 with inverted %s.tapeslice; must diverge from native and refuse */\n"
+        "    ck(0, \"inverted-slice-refuse-skeleton\");\n"
+        "}\n"
+        "int main(void) {\n"
+        "    /* TODO(1): add >=256 differential vectors comparing %s_m1_call vs native %s */\n"
+        "    /* TODO(2): add G1 CRC-only tamper + G4 bad-return + env-override refusal cases */\n"
+        "    ck(0, \"differential-vectors-skeleton\");\n"
+        "    check_inverted_slice_refuse();\n"
+        "    sy_printf(\"CHECK_MIGRATE_%s\\tfailed=%%d\\tvectors=0\\tinverted_slice=0\\n\", failed);\n"
+        "    return failed ? 1 : 0;\n"
+        "}\n",
+        chkname, x->key, x->src, sym, stem, sym, slug, stem, stem, slug, stem, up, up, usename, stem, stem, stem, stem, sym, up) ||
+        mu_write_file(outdir, chkname, buf)) return 2;
+
+    /* (7) ledger-row.tsv (5-item size + wall-time ledger row, all unrun values UNMEASURED) */
+    if (cx_fmt(buf, sizeof buf,
+        "# unit\tsource\tsym\tdest\tclass\tbatch\told_text_b\told_obj_b\traw_slice_delta\tcomp_slice_delta\tpkg_delta\tape_delta\twall_ratio\tstatus\n"
+        "%s\t%s\t%s\t%s\ttape\t%d\t%ld\t%ld\tUNMEASURED\tUNMEASURED\tUNMEASURED\tUNMEASURED\tUNMEASURED\tGENERATED\n",
+        x->key, x->src, sym, MU_DEST_ASCII[x->dest], x->batch, x->text, x->obj) ||
+        mu_write_file(outdir, "ledger-row.tsv", buf)) return 2;
+
+    sy_printf("MIGRATE_UNIT\tOK\tunit=%s\tsource=%s\tsym=%s\tdest=%s\tclass=tape\tbatch=%d\ttext=%ld\tout=%s\tfiles=7\n",
+              x->key, x->src, sym, MU_DEST_ASCII[x->dest], x->batch, x->text, outdir);
+    return 0;
+}
