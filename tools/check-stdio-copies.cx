@@ -1,0 +1,290 @@
+/* tools/check-stdio-copies.cx -- byte ratchet for inlined stdio copies in a chain.
+ *
+ *   sh ./unisacc.com tools/check-stdio-copies.cx -- CHAIN [--allow FILE]
+ *
+ * CHAIN is a chain directory. For each fixedpoint/g2/<target>/*.o, nm -n sizes the
+ * non-label t/T symbols _u_vfmt _u_ffmt _u_dexp fprintf vfprintf printf snprintf
+ * vsnprintf fputs. A symbol's bytes are the address delta to the next t/T symbol
+ * that is not an __unisacc_ label. Prints UNIT <target> <unit> <bytes> for each
+ * object that carries a copy, then one SUMMARY line per target and one chain
+ * SUMMARY. The chain SUMMARY is the lnx-x86_64 target when that target has copies,
+ * otherwise the first target that does. On the 9e2ac4df6 chain that line is
+ * SUMMARY units=21 bytes=322888.
+ *
+ * --allow FILE is a unit list, one basename per line. Any unit outside the list
+ * that carries a copy fails the ratchet (exit 1). Blank lines and # comments skip.
+ *
+ * No arguments: a fixture proves the delta and the allow refusal, then prints
+ * rc0:STDIO_COPIES. Exit 0 only when the fixture passes, or a chain scan has no
+ * ratchet failure.
+ */
+#pragma unisa use sys.fs
+#pragma unisa use sys.posix
+#pragma unisa use sys.proc
+#pragma unisa use sys.env
+#pragma unisa use sys.io
+#pragma unisa use text.text
+#pragma unisa use mem.heap
+#pragma unisa use mem.bytes
+
+#define SC_MAX 4000
+#define SC_LINE 256
+static char sc_name[SC_MAX][64];
+static char sc_tgt[SC_MAX][32];
+static long sc_bytes[SC_MAX];
+static int sc_n;
+static int sc_fail;
+
+static int sc_want(const char *n) {
+    return tx_eq(n, "_u_vfmt", 16) || tx_eq(n, "_u_ffmt", 16) || tx_eq(n, "_u_dexp", 16)
+        || tx_eq(n, "fprintf", 16) || tx_eq(n, "vfprintf", 16) || tx_eq(n, "printf", 16)
+        || tx_eq(n, "snprintf", 16) || tx_eq(n, "vsnprintf", 16) || tx_eq(n, "fputs", 16);
+}
+
+static int sc_label(const char *n) {
+    return tx_prefixz(n, "__unisacc_", 10);
+}
+
+static int sc_hex(const char *s, unsigned long long *o) {
+    unsigned long long v = 0;
+    int i = 0;
+    if (!s || !s[0]) return 1;
+    while (s[i]) {
+        int c = s[i];
+        int d;
+        if (c >= '0' && c <= '9') d = c - '0';
+        else if (c >= 'a' && c <= 'f') d = c - 'a' + 10;
+        else if (c >= 'A' && c <= 'F') d = c - 'A' + 10;
+        else return 1;
+        v = (v << 4) + (unsigned long long)d;
+        i = i + 1;
+        if (i > 16) return 1;
+    }
+    *o = v;
+    return 0;
+}
+
+static int sc_add(const char *tgt, const char *unit, long bytes) {
+    int i;
+    if (bytes <= 0) return 0;
+    if (sc_n >= SC_MAX) return 1;
+    i = sc_n;
+    if (tx_copy(sc_tgt[i], 32, tgt, (long)tx_len(tgt, 31))) return 1;
+    if (tx_copy(sc_name[i], 64, unit, (long)tx_len(unit, 63))) return 1;
+    sc_bytes[i] = bytes;
+    sc_n = sc_n + 1;
+    return 0;
+}
+
+/* Parse one nm -n dump. Returns the copy bytes in this object. */
+static long sc_parse(const char *text, long n) {
+    unsigned long long addr[8000];
+    char sym[8000][64];
+    int ns = 0;
+    long at = 0;
+    long sum = 0;
+    int i;
+    while (at < n) {
+        char line[SC_LINE];
+        char a[32], typ[8], name[64];
+        long e = at;
+        int f;
+        unsigned long long av;
+        while (e < n && text[e] != '\n') e = e + 1;
+        if (e - at < SC_LINE && e > at) {
+            if (tx_copy(line, SC_LINE, text + at, e - at)) return -1;
+            f = 0;
+            a[0] = typ[0] = name[0] = 0;
+            {
+                long p = 0, q;
+                char *dst;
+                int cap;
+                while (p < e - at) {
+                    while (p < e - at && (line[p] == ' ' || line[p] == '\t')) p = p + 1;
+                    q = p;
+                    while (q < e - at && line[q] != ' ' && line[q] != '\t') q = q + 1;
+                    dst = f == 0 ? a : f == 1 ? typ : name;
+                    cap = f == 0 ? 32 : f == 1 ? 8 : 64;
+                    if (f < 3 && tx_copy(dst, cap, line + p, q - p)) { f = 9; break; }
+                    f = f + 1;
+                    p = q;
+                }
+            }
+            if (f >= 3 && (typ[0] == 't' || typ[0] == 'T') && typ[1] == 0 && !sc_label(name) && name[63] == 0 && !sc_hex(a, &av)) {
+                if (ns < 8000) {
+                    addr[ns] = av;
+                    if (tx_copy(sym[ns], 64, name, (long)tx_len(name, 63))) return -1;
+                    ns = ns + 1;
+                }
+            }
+        }
+        at = e + 1;
+    }
+    for (i = 0; i < ns; i = i + 1) {
+        unsigned long long nxt;
+        if (!sc_want(sym[i])) continue;
+        nxt = (i + 1 < ns) ? addr[i + 1] : addr[i];
+        if (nxt >= addr[i]) sum = sum + (long)(nxt - addr[i]);
+    }
+    return sum;
+}
+
+static int sc_nm(const char *path, const char *outp) {
+    char *av[4];
+    sy_spawn_t o;
+    sy_exit_t st;
+    int fd = sy_open(outp, O_WRONLY | O_CREAT | O_TRUNC, 0600);
+    if (fd < 0) return 1;
+    av[0] = "nm"; av[1] = "-n"; av[2] = (char *)path; av[3] = 0;
+    sy_spawn_init(&o);
+    o.argv = av; o.pgroup = -1; o.deadline_ms = 20000; o.out_fd = fd; o.err_fd = SY_STDIO_NULL;
+    if (sy_proc_run(&o, &st) || st.timed_out || sy_exit_code(&st) != 0) { sy_close(fd); return 1; }
+    sy_close(fd);
+    return 0;
+}
+
+static int sc_allowed(const char *unit, char **allow, int nallow) {
+    int i;
+    if (nallow < 0) return 1;
+    for (i = 0; i < nallow; i = i + 1) if (tx_eq(unit, allow[i], 64)) return 1;
+    return 0;
+}
+
+static int sc_load_allow(const char *path, char **allow, int *nallow) {
+    unsigned char *b = 0;
+    int64_t n = 0;
+    long at = 0;
+    *nallow = 0;
+    if (sy_read_file(path, &b, &n, 1L << 20) || !b) return 1;
+    while (at < (long)n && *nallow < 256) {
+        long e = at;
+        char *row;
+        while (e < (long)n && b[e] != '\n') e = e + 1;
+        if (e > at && b[at] != '#') {
+            row = (char *)mm_alloc(e - at + 1);
+            if (!row) { mm_free(b); return 1; }
+            if (tx_copy(row, e - at + 1, (char *)b + at, e - at)) { mm_free(row); mm_free(b); return 1; }
+            allow[*nallow] = row;
+            *nallow = *nallow + 1;
+        }
+        at = e + 1;
+    }
+    mm_free(b);
+    return 0;
+}
+
+static int sc_scan(const char *chain, char **allow, int nallow) {
+    char g2[1024], tp[1100], op[1200], dump[256];
+    sy_dir_t td, od;
+    int tr, orc;
+    long pid = (long)sy_pid();
+    if (cx_fmt(g2, sizeof g2, "%s/fixedpoint/g2", chain)) return 2;
+    if (cx_fmt(dump, sizeof dump, "/tmp/stdio-copies-%ld.nm", pid)) return 2;
+    if (sy_dir_open(&td, g2)) { fprintf(stderr, "stdio-copies: no %s\n", g2); return 2; }
+    while ((tr = sy_dir_next(&td)) == 1) {
+        if (td.kind != 'd') continue;
+        if (cx_fmt(tp, sizeof tp, "%s/%s", g2, td.name)) return 2;
+        if (sy_dir_open(&od, tp)) continue;
+        while ((orc = sy_dir_next(&od)) == 1) {
+            long bn;
+            unsigned char *b = 0;
+            int64_t n = 0;
+            int k;
+            if (od.kind != 'f') continue;
+            k = (int)od.name_n;
+            if (k < 3 || od.name[k - 2] != '.' || od.name[k - 1] != 'o') continue;
+            if (cx_fmt(op, sizeof op, "%s/%s", tp, od.name)) return 2;
+            if (sc_nm(op, dump)) continue;
+            if (sy_read_file(dump, &b, &n, 8L << 20) || !b) continue;
+            bn = sc_parse((char *)b, (long)n);
+            mm_free(b);
+            if (bn < 0) return 2;
+            if (sc_add(td.name, od.name, bn)) return 2;
+            if (bn > 0 && !sc_allowed(od.name, allow, nallow)) {
+                fprintf(stderr, "STDIO_COPIES FAIL unit=%s target=%s bytes=%ld\n", od.name, td.name, bn);
+                sc_fail = 1;
+            }
+        }
+        sy_dir_close(&od);
+    }
+    sy_dir_close(&td);
+    sy_unlink(dump);
+    return tr < 0 ? 2 : 0;
+}
+
+static void sc_report(void) {
+    int i, u, seen;
+    char tgts[16][32];
+    int nt = 0;
+    int pick = -1;
+    long pb = 0;
+    int pu = 0;
+    for (i = 0; i < sc_n; i = i + 1)
+        printf("UNIT %s %s %ld\n", sc_tgt[i], sc_name[i], sc_bytes[i]);
+    for (i = 0; i < sc_n; i = i + 1) {
+        int j, found = 0;
+        for (j = 0; j < nt; j = j + 1) if (tx_eq(tgts[j], sc_tgt[i], 32)) found = 1;
+        if (!found && nt < 16) {
+            if (tx_copy(tgts[nt], 32, sc_tgt[i], (long)tx_len(sc_tgt[i], 31))) return;
+            nt = nt + 1;
+        }
+    }
+    for (i = 0; i < nt; i = i + 1) {
+        long b = 0;
+        int n = 0, k;
+        for (k = 0; k < sc_n; k = k + 1) if (tx_eq(tgts[i], sc_tgt[k], 32)) { b = b + sc_bytes[k]; n = n + 1; }
+        printf("SUMMARY %s units=%d bytes=%ld\n", tgts[i], n, b);
+        if (tx_eq(tgts[i], "lnx-x86_64", 16)) { pick = i; pb = b; pu = n; }
+        if (pick < 0) { pick = i; pb = b; pu = n; }
+    }
+    seen = 0;
+    for (i = 0; i < sc_n; i = i + 1) {
+        int j, hit = 0;
+        for (j = 0; j < i; j = j + 1) if (tx_eq(sc_name[i], sc_name[j], 64)) hit = 1;
+        if (!hit) seen = seen + 1;
+    }
+    u = pu ? pu : seen;
+    printf("SUMMARY units=%d bytes=%ld\n", u, pb);
+    printf("STDIO_COPIES units=%d bytes=%ld\n", u, pb);
+    (void)seen;
+}
+
+static int sc_self(void) {
+    const char *nm =
+        "00000010 t __unisacc_Lfoo.1\n"
+        "00000020 T _u_vfmt\n"
+        "00000030 t other\n"
+        "00000040 T fprintf\n"
+        "00000050 t _u_ffmt\n"
+        "00000060 T tail\n";
+    long b = sc_parse(nm, (long)tx_len(nm, 400));
+    /* _u_vfmt 0x10, fprintf 0x10, _u_ffmt 0x10 */
+    if (b != 48) { fprintf(stderr, "stdio-copies: fixture %ld\n", b); return 1; }
+    if (sc_add("lnx-x86_64", "extra.o", 16)) return 1;
+    if (sc_allowed("extra.o", 0, 0)) { fprintf(stderr, "stdio-copies: allow\n"); return 1; }
+    printf("PASS\tstdio-copies.delta\n");
+    printf("PASS\tstdio-copies.allow\n");
+    printf("STDIO_COPIES\tfixture\n");
+    return 0;
+}
+
+int main(int argc, char **argv) {
+    const char *chain = 0;
+    const char *allow_path = 0;
+    char *allow[256];
+    int nallow = -1;
+    int i, rc;
+    for (i = 1; i < argc; i = i + 1) {
+        if (tx_eq(argv[i], "--allow", 16) && i + 1 < argc) { allow_path = argv[i + 1]; i = i + 1; continue; }
+        if (argv[i][0] != '-') chain = argv[i];
+    }
+    if (!chain) return sc_self();
+    if (allow_path) {
+        nallow = 0;
+        if (sc_load_allow(allow_path, allow, &nallow)) { fprintf(stderr, "stdio-copies: allow file\n"); return 2; }
+    }
+    rc = sc_scan(chain, allow, nallow);
+    if (rc) return rc;
+    sc_report();
+    return sc_fail ? 1 : 0;
+}
