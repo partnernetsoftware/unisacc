@@ -6,6 +6,9 @@
 #pragma unisa use sys.fs
 #pragma unisa use sys.env
 #pragma unisa use sys.sha
+#pragma unisa use sys.time
+#pragma unisa use mem.heap
+#pragma unisa use mem.bytes
 #pragma unisa use cxlib.receipt
 static int bad, total;
 static void ok(int cond, const char *what) {
@@ -18,46 +21,7 @@ static void put(const char *rel, const char *s) {
     if (cx_write(p, s, strlen(s))) { fprintf(stderr, "check-receipt: cannot write %s\n", p); exit(2); }
 }
 static int hash(const char *ph, char h[65]) { return rc_hash_inputs(root, rd, tb, ph, h); }
-static void test_v3_writer(const char *root_dir) {
-    char cand[65], inp[65], outh[65], zero64[65], rep64[65], r3[600], bind_exp[65];
-    char payload[2048], want[2304];
-    rc_v3_t base, badw;
-    size_t gotn = 0; char *got = 0;
-    sy_sha256_hex("candidate-v0111-real", 20L, cand);
-    sy_sha256_hex("inputs-contract-v3", 18L, inp);
-    sy_sha256_hex("output-bytes-real", 17L, outh);
-    memset(zero64, '0', 64); zero64[64] = 0;
-    memcpy(rep64, "deadbeefdeadbeefdeadbeefdeadbeefdeadbeefdeadbeefdeadbeefdeadbeef", 65);
-    cx_fmt(r3, sizeof r3, "%s/rec/v3-write.receipt", root_dir);
-
-    base.run_id = "run-v3-1001"; base.rev = "42c8c297b5"; base.unit = "check-v0111-exit";
-    base.producer = "tools/check-v0111-exit.cx"; base.purpose = "exit-gate";
-    base.candidate_sha = cand; base.inputs_sha = inp; base.output_sha = outh;
-    base.rc = 0; base.verdict = "PASS"; base.ts = 1764200000LL;
-
-    ok(rc_write3(r3, &base) == 0, "v3-writer: valid PASS receipt written");
-    cx_fmt(payload, sizeof payload,
-           "version\t3\nrun_id\t%s\nrev\t%s\nunit\t%s\nproducer\t%s\npurpose\t%s\n"
-           "candidate_sha\t%s\ninputs_sha\t%s\noutput_sha\t%s\nrc\t0\nverdict\tPASS\nts\t1764200000\n",
-           base.run_id, base.rev, base.unit, base.producer, base.purpose, cand, inp, outh);
-    sy_sha256_hex(payload, (long)strlen(payload), bind_exp);
-    cx_fmt(want, sizeof want, "%sbinding_sha\t%s\n", payload, bind_exp);
-    got = cx_read(r3, &gotn);
-    ok(got && gotn == strlen(want) && !memcmp(got, want, gotn), "v3-writer: exact 13-key wire format + full-field binding_sha");
-    free(got);
-
-    badw = base; badw.rc = 1; badw.verdict = "FAIL";
-    ok(rc_write3(r3, &badw) == 0, "v3-writer: consistent rc=1 FAIL written");
-    badw = base; badw.producer = ""; ok(rc_write3(r3, &badw) != 0, "v3-writer: refuses empty producer");
-    badw = base; badw.purpose = 0; ok(rc_write3(r3, &badw) != 0, "v3-writer: refuses null purpose");
-    badw = base; badw.candidate_sha = zero64; ok(rc_write3(r3, &badw) != 0, "v3-writer: refuses all-zero placeholder");
-    badw = base; badw.inputs_sha = rep64; ok(rc_write3(r3, &badw) != 0, "v3-writer: refuses deadbeef placeholder");
-    badw = base; badw.rc = 1; badw.verdict = "PASS"; ok(rc_write3(r3, &badw) != 0, "v3-writer: refuses rc=1 PASS");
-    badw = base; badw.rc = 0; badw.verdict = "FAIL"; ok(rc_write3(r3, &badw) != 0, "v3-writer: refuses rc=0 FAIL");
-    badw = base; badw.rc = (-2147483647 - 1); badw.verdict = "FAIL"; ok(rc_write3(r3, &badw) != 0, "v3-writer: refuses INT_MIN");
-    badw = base; badw.ts = -5LL; ok(rc_write3(r3, &badw) != 0, "v3-writer: refuses negative ts");
-    badw = base; badw.ts = 1764200000000LL; ok(rc_write3(r3, &badw) != 0, "v3-writer: refuses ms-unit ts");
-}
+static void test_v3_all(const char *root_dir);
 int main(int argc, char **argv) {
     const char *opt_run_id = 0, *opt_out = 0;
     for (int ai = 1; ai < argc; ai++) {
@@ -166,7 +130,7 @@ int main(int argc, char **argv) {
             }
         }
     }
-    test_v3_writer(root);
+    test_v3_all(root);
     if (opt_run_id && opt_out) {
         char c64[65]; memset(c64, 'e', 64); c64[64] = 0;
         (void)rc_write2(opt_out, opt_run_id, c64, h0, up, c64, bad ? 1 : 0);
@@ -174,4 +138,441 @@ int main(int argc, char **argv) {
     cx_rmtree(d);
     printf("CHECK_RECEIPT\ttotal=%d\tfailed=%d\n", total, bad);
     return bad ? 1 : 0;
+}
+
+static void sha_str(const char *s, size_t n, char hex[65]) {
+    if (sy_sha256_hex(s, (long)n, hex)) { fprintf(stderr, "check-receipt: sha failed\n"); exit(2); }
+}
+
+/* Test-only tamper helper (private to check-receipt, restricted to its mkdtemp root). */
+static int test_tamper_v3(const char *src_path, const char *dst_path, const char *kind) {
+    size_t n = 0;
+    char *t = 0;
+    char run_id[160] = "", rev[80] = "", unit[160] = "", prod[160] = "", purp[160] = "";
+    char cand[65] = "", inp[65] = "", outh[65] = "", verd[16] = "", bind_old[65] = "";
+    int rc_v = 0;
+    long long ts_v = 0;
+    int raw_keep = 0;
+    char payload[2048], bind_new[65], body[2304];
+
+    if (!strcmp(kind, "missing")) {
+        int urc = sy_unlink(dst_path);
+        return (urc == 0 || urc == -ENOENT) ? 0 : 1;
+    }
+    t = cx_read(src_path, &n);
+    if (!t || !n) { free(t); return 1; }
+    {
+        size_t i = 0;
+        while (i < n) {
+            size_t e = i, tab = 0;
+            while (e < n && t[e] != '\n') { if (!tab && t[e] == '\t') tab = e; e++; }
+            if (tab > i && tab + 1 < e) {
+                size_t kl = tab - i, vl = e - (tab + 1);
+                const char *kp = t + i, *vp = t + tab + 1;
+                if (kl == 6 && !memcmp(kp, "run_id", 6) && vl < sizeof run_id) { mm_copy(run_id, (long)sizeof run_id, vp, (long)vl); run_id[vl] = 0; }
+                else if (kl == 3 && !memcmp(kp, "rev", 3) && vl < sizeof rev) { mm_copy(rev, (long)sizeof rev, vp, (long)vl); rev[vl] = 0; }
+                else if (kl == 4 && !memcmp(kp, "unit", 4) && vl < sizeof unit) { mm_copy(unit, (long)sizeof unit, vp, (long)vl); unit[vl] = 0; }
+                else if (kl == 8 && !memcmp(kp, "producer", 8) && vl < sizeof prod) { mm_copy(prod, (long)sizeof prod, vp, (long)vl); prod[vl] = 0; }
+                else if (kl == 7 && !memcmp(kp, "purpose", 7) && vl < sizeof purp) { mm_copy(purp, (long)sizeof purp, vp, (long)vl); purp[vl] = 0; }
+                else if (kl == 13 && !memcmp(kp, "candidate_sha", 13) && vl == 64) { mm_copy(cand, 65, vp, 64); cand[64] = 0; }
+                else if (kl == 10 && !memcmp(kp, "inputs_sha", 10) && vl == 64) { mm_copy(inp, 65, vp, 64); inp[64] = 0; }
+                else if (kl == 10 && !memcmp(kp, "output_sha", 10) && vl == 64) { mm_copy(outh, 65, vp, 64); outh[64] = 0; }
+                else if (kl == 2 && !memcmp(kp, "rc", 2)) { rc_v = atoi(vp); }
+                else if (kl == 7 && !memcmp(kp, "verdict", 7) && vl < sizeof verd) { mm_copy(verd, (long)sizeof verd, vp, (long)vl); verd[vl] = 0; }
+                else if (kl == 2 && !memcmp(kp, "ts", 2)) { ts_v = strtoll(vp, 0, 10); }
+                else if (kl == 11 && !memcmp(kp, "binding_sha", 11) && vl == 64) { mm_copy(bind_old, 65, vp, 64); bind_old[64] = 0; }
+            }
+            i = e + 1;
+        }
+    }
+    free(t);
+    if (!strcmp(kind, "forged-run-id")) cx_fmt(run_id, sizeof run_id, "forged-run-id-9999");
+    else if (!strcmp(kind, "foreign-rev")) { size_t rl = strlen(rev); if (rl) rev[rl - 1] = rev[rl - 1] == 'a' ? 'b' : 'a'; }
+    else if (!strcmp(kind, "stale-ts")) ts_v = (ts_v > 200000LL) ? (ts_v - 200000LL) : 1LL;
+    else if (!strcmp(kind, "rc-flip")) rc_v = (rc_v == 0) ? 1 : 0;
+    else if (!strcmp(kind, "verdict-flip")) cx_fmt(verd, sizeof verd, "%s", !strcmp(verd, "PASS") ? "FAIL" : "PASS");
+    else if (!strcmp(kind, "unit-mismatch")) { char u2[160]; cx_fmt(u2, sizeof u2, "%.140s-other", unit); cx_fmt(unit, sizeof unit, "%s", u2); }
+    else if (!strcmp(kind, "candidate-swap")) cand[63] = (cand[63] == '0') ? '1' : '0';
+    else if (!strcmp(kind, "raw-rc-tamper")) { rc_v = (rc_v == 0) ? 1 : 0; raw_keep = 1; }
+    else if (!strcmp(kind, "raw-verdict-tamper")) { cx_fmt(verd, sizeof verd, "%s", !strcmp(verd, "PASS") ? "FAIL" : "PASS"); raw_keep = 1; }
+    else if (!strcmp(kind, "raw-ts-tamper")) { ts_v = ts_v - 1LL; raw_keep = 1; }
+    else return 1;
+
+    if (cx_fmt(payload, sizeof payload,
+               "version\t3\nrun_id\t%s\nrev\t%s\nunit\t%s\nproducer\t%s\npurpose\t%s\n"
+               "candidate_sha\t%s\ninputs_sha\t%s\noutput_sha\t%s\nrc\t%d\nverdict\t%s\nts\t%lld\n",
+               run_id, rev, unit, prod, purp, cand, inp, outh, rc_v, verd, ts_v)) return 1;
+    if (raw_keep) mm_copy(bind_new, 65, bind_old, 65);
+    else if (sy_sha256_hex(payload, (long)strlen(payload), bind_new)) return 1;
+    if (cx_fmt(body, sizeof body, "%sbinding_sha\t%s\n", payload, bind_new)) return 1;
+    return sy_write_atomic(dst_path, body, (int64_t)strlen(body), 0600) ? 1 : 0;
+}
+
+static void test_v3_all(const char *root_dir) {
+    char cand[65], cand2[65], inp[65], inp2[65], outh[65], outh2[65], zero64[65], rep64[65];
+    char r3[600], rt[600], outp[600], outp2[600], dirp[600], symp[600];
+    const char *bin_out = "hello\0after-nul-bytes!\n";
+    size_t bin_out_n = 23;
+    int64_t t_now = 1764200000LL;
+    rc_v3_t base;
+    rc_expect_t exp, e;
+    rc_verified_t ver;
+    int code;
+
+    sha_str("candidate-v0111-real", 20, cand);
+    sha_str("candidate-v0112-other", 21, cand2);
+    sha_str("inputs-contract-v3", 18, inp);
+    sha_str("inputs-contract-mut", 19, inp2);
+    sha_str(bin_out, bin_out_n, outh);
+    sha_str("different-output", 16, outh2);
+    memset(zero64, '0', 64); zero64[64] = 0;
+    memcpy(rep64, "deadbeefdeadbeefdeadbeefdeadbeefdeadbeefdeadbeefdeadbeefdeadbeef", 65);
+
+    cx_fmt(r3, sizeof r3, "%s/rec/v3.receipt", root_dir);
+    cx_fmt(rt, sizeof rt, "%s/rec/v3-tamper.receipt", root_dir);
+    cx_fmt(outp, sizeof outp, "%s/rec/output.bin", root_dir);
+    cx_fmt(outp2, sizeof outp2, "%s/rec/output-ephemeral.bin", root_dir);
+    cx_fmt(dirp, sizeof dirp, "%s/rec/adir", root_dir);
+    cx_fmt(symp, sizeof symp, "%s/rec/asym.receipt", root_dir);
+    if (cx_write(outp, bin_out, bin_out_n)) exit(2);
+    if (cx_write(outp2, bin_out, bin_out_n)) exit(2);
+    sy_mkdir(dirp, 0755);
+
+    base.run_id = "run-v3-1001";
+    base.rev = "f4163f7d3a01";
+    base.unit = "check-v0111-exit";
+    base.producer = "tools/check-v0111-exit.cx";
+    base.purpose = "exit-gate";
+    base.candidate_sha = cand;
+    base.inputs_sha = inp;
+    base.output_sha = outh;
+    base.rc = 0;
+    base.verdict = "PASS";
+    base.ts = t_now - 60LL;
+
+    exp.run_id = "run-v3-1001";
+    exp.rev = "f4163f7d3a01";
+    exp.unit = "check-v0111-exit";
+    exp.candidate_sha = cand;
+    exp.inputs_sha = inp;
+    exp.output_sha = outh;
+    exp.output_path = outp;
+    exp.producer = "tools/check-v0111-exit.cx";
+    exp.purpose = "exit-gate";
+    exp.expect_rc = 0;
+    exp.expect_verdict = "PASS";
+    exp.now_ts = t_now;
+    exp.max_age_s = 3600LL;
+    exp.max_future_s = 300LL;
+    exp.allow_fail_verdict = 0;
+
+    /* Write/read consistency: rc_write3 rejects empty producer/purpose, INT_MIN, contradictory rc/verdict */
+    {
+        rc_v3_t badw = base;
+        badw.producer = ""; ok(rc_write3(rt, &badw) != 0, "v3: rc_write3 refuses empty producer");
+        badw = base; badw.purpose = 0; ok(rc_write3(rt, &badw) != 0, "v3: rc_write3 refuses null purpose");
+        badw = base; badw.rc = 1; badw.verdict = "PASS"; ok(rc_write3(rt, &badw) != 0, "v3: rc_write3 refuses rc=1 PASS");
+        badw = base; badw.rc = 0; badw.verdict = "FAIL"; ok(rc_write3(rt, &badw) != 0, "v3: rc_write3 refuses rc=0 FAIL");
+        badw = base; badw.rc = (-2147483647 - 1); badw.verdict = "FAIL"; ok(rc_write3(rt, &badw) != 0, "v3: rc_write3 refuses INT_MIN");
+    }
+
+    /* Positive control + verified representation + artifact snapshot pinned across unlink */
+    ok(rc_write3(r3, &base) == 0, "v3: rc_write3 valid");
+    e = exp; e.output_path = outp2;
+    ok(rc_verify_out(r3, &e, &ver) == RC_OK && !strcmp(ver.run_id, base.run_id) &&
+       !strcmp(ver.rev, base.rev) && !strcmp(ver.producer, base.producer) && !strcmp(ver.purpose, base.purpose) &&
+       ver.rc == 0 && ver.ts == base.ts && ver.output_bytes != 0 && ver.output_len == (long)bin_out_n &&
+       mm_same(ver.output_bytes, bin_out, (long)bin_out_n),
+       "v3: rc_verify_out positive control + pinned artifact bytes");
+    /* Removing or replacing file on disk with a symlink after verify does not affect verified snapshot */
+    (void)sy_unlink(outp2);
+    (void)sy_symlink(r3, outp2);
+    ok(ver.output_bytes != 0 && mm_same(ver.output_bytes, bin_out, (long)bin_out_n),
+       "v3: verified snapshot remains intact after disk replacement with symlink");
+    /* And verifying directly against a symlink output_path is rejected atomically by O_NOFOLLOW (code 20) */
+    ok(rc_verify(r3, &e) == RC_ERR_OUTPUT, "v3: code 20 symlink output_path rejected atomically");
+    (void)sy_unlink(outp2);
+    rc_verified_free(&ver);
+    ok(ver.output_bytes == 0 && ver.run_id[0] == 0, "v3: rc_verified_free clears struct");
+
+    /* Fixed reference clock is mandatory: now_ts=0 or negative must refuse with code 24 (no silent fallback) */
+    e = exp; e.now_ts = 0;
+    ok(rc_verify(r3, &e) == RC_ERR_EXPECT_UNBOUND, "v3: code 24 omitted now_ts=0 refused");
+    e = exp; e.now_ts = -1;
+    ok(rc_verify(r3, &e) == RC_ERR_EXPECT_UNBOUND, "v3: code 24 negative now_ts refused");
+
+    /* Failure clears out struct so caller cannot consume unverified state */
+    {
+        rc_verified_t dirty;
+        mm_fill(&dirty, (long)sizeof dirty, 'Z', (long)sizeof dirty);
+        dirty.output_bytes = 0;
+        e = exp; e.run_id = "wrong-id";
+        ok(rc_verify_out(r3, &e, &dirty) == RC_ERR_RUN_ID && dirty.run_id[0] == 0 && dirty.output_len == 0,
+           "v3: rc_verify_out clears output struct on failure");
+    }
+
+    /* Group (1) & Code 10 (RC_ERR_MISSING): missing file, directory, symlink, and writerless FIFO (no hang) */
+    ok(test_tamper_v3(r3, rt, "missing") == 0, "v3: tamper missing");
+    ok(rc_verify(rt, &exp) == RC_ERR_MISSING, "v3: code 10 missing file");
+    ok(rc_verify(dirp, &exp) == RC_ERR_MISSING, "v3: code 10 directory path rejected");
+    (void)sy_unlink(symp);
+    if (sy_symlink(r3, symp) == 0) {
+        ok(rc_verify(symp, &exp) == RC_ERR_MISSING, "v3: code 10 symlink path rejected");
+        (void)sy_unlink(symp);
+    }
+    {
+        char fifop[600];
+        cx_fmt(fifop, sizeof fifop, "%s/rec/no-writer.fifo", root_dir);
+        (void)sy_unlink(fifop);
+        if (sy_mkfifo(fifop, 0600) == 0) {
+            ok(rc_verify(fifop, &exp) == RC_ERR_MISSING, "v3: code 10 writerless FIFO receipt returns immediately");
+            e = exp; e.output_path = fifop;
+            ok(rc_verify(r3, &e) == RC_ERR_OUTPUT, "v3: code 20 writerless FIFO output_path returns immediately");
+            (void)sy_unlink(fifop);
+        } else {
+            ok(0, "v3: sy_mkfifo setup");
+        }
+    }
+
+    /* Group (3) & Code 11 (RC_ERR_V2_LEGACY): valid v2 receipt must return exactly 11, never downgrade */
+    {
+        char rv2[600];
+        cx_fmt(rv2, sizeof rv2, "%s/rec/legacy-v2.receipt", root_dir);
+        ok(rc_write2(rv2, base.run_id, cand, inp, outh, cand2, 0) == 0, "v3: write valid v2");
+        ok(rc_verify(rv2, &exp) == RC_ERR_V2_LEGACY, "v3: code 11 valid v2 receipt returns 11");
+        cx_write(rt, "version\t2\nrun_id\ta\n", 19);
+        ok(rc_verify(rt, &exp) == RC_ERR_V2_LEGACY, "v3: code 11 explicit version=2 returns 11");
+    }
+
+    /* Group (7) & Code 12 (RC_ERR_PRODUCER_PURPOSE): valid binding, wrong producer or purpose */
+    {
+        rc_v3_t p2 = base;
+        p2.producer = "tools/other-producer.cx";
+        ok(rc_write3(rt, &p2) == 0 && rc_verify(rt, &exp) == RC_ERR_PRODUCER_PURPOSE,
+           "v3: code 12 wrong producer with valid binding");
+        p2 = base;
+        p2.purpose = "smoke-only";
+        ok(rc_write3(rt, &p2) == 0 && rc_verify(rt, &exp) == RC_ERR_PRODUCER_PURPOSE,
+           "v3: code 12 wrong purpose with valid binding");
+    }
+
+    /* Group (3) unknown version & Group (10) strict parse -> Code 13 (RC_ERR_FORMAT) */
+    {
+        char nulb[64];
+        size_t sn = 0; char *sb = cx_read(r3, &sn);
+        ok(sb && sn > 20, "v3: read baseline snapshot");
+        {
+            char v4[2304];
+            cx_fmt(v4, sizeof v4, "version\t4\n%s", sb + 10);
+            cx_write(rt, v4, strlen(v4));
+            ok(rc_verify(rt, &exp) == RC_ERR_FORMAT, "v3: code 13 unknown version=4");
+            ok(rc_verify(rt, &exp) == RC_ERR_FORMAT, "v3: code 13 deterministic repeat");
+        }
+        {
+            char dup[2400];
+            cx_fmt(dup, sizeof dup, "%srun_id\tother-id\n", sb);
+            cx_write(rt, dup, strlen(dup));
+            ok(rc_verify(rt, &exp) == RC_ERR_FORMAT, "v3: code 13 duplicate key");
+        }
+        {
+            char unk[2400];
+            cx_fmt(unk, sizeof unk, "%sextra_field\t1\n", sb);
+            cx_write(rt, unk, strlen(unk));
+            ok(rc_verify(rt, &exp) == RC_ERR_FORMAT, "v3: code 13 unknown key");
+        }
+        cx_write(rt, sb + 10, sn - 10);
+        ok(rc_verify(rt, &exp) == RC_ERR_FORMAT, "v3: code 13 missing version/field");
+        cx_write(rt, sb, sn - 1);
+        ok(rc_verify(rt, &exp) == RC_ERR_FORMAT, "v3: code 13 truncated no newline");
+        {
+            char xcol[2400];
+            cx_fmt(xcol, sizeof xcol, "version\t3\textra\n%s", sb + 10);
+            cx_write(rt, xcol, strlen(xcol));
+            ok(rc_verify(rt, &exp) == RC_ERR_FORMAT, "v3: code 13 extra column");
+        }
+        {
+            char trl[2400];
+            cx_fmt(trl, sizeof trl, "%strailing\n", sb);
+            cx_write(rt, trl, strlen(trl));
+            ok(rc_verify(rt, &exp) == RC_ERR_FORMAT, "v3: code 13 trailing garbage");
+        }
+        memcpy(nulb, "version\t3\0\n", 11);
+        cx_write(rt, nulb, 11);
+        ok(rc_verify(rt, &exp) == RC_ERR_FORMAT, "v3: code 13 embedded NUL");
+        cx_write(rt, "", 0);
+        ok(rc_verify(rt, &exp) == RC_ERR_FORMAT, "v3: code 13 empty file");
+        {
+            char *big = malloc(70000);
+            if (big) {
+                memset(big, 'a', 69999); big[69999] = '\n';
+                cx_write(rt, big, 70000);
+                ok(rc_verify(rt, &exp) == RC_ERR_FORMAT, "v3: code 13 oversized >64KB");
+                free(big);
+            }
+        }
+        free(sb);
+    }
+
+    /* Group (9) & Code 14 (RC_ERR_BINDING): raw tamper of rc, verdict, ts without updating binding_sha */
+    ok(test_tamper_v3(r3, rt, "raw-rc-tamper") == 0 && rc_verify(rt, &exp) == RC_ERR_BINDING,
+       "v3: code 14 raw rc tamper breaks binding_sha");
+    ok(test_tamper_v3(r3, rt, "raw-verdict-tamper") == 0 && rc_verify(rt, &exp) == RC_ERR_BINDING,
+       "v3: code 14 raw verdict tamper breaks binding_sha");
+    ok(test_tamper_v3(r3, rt, "raw-ts-tamper") == 0 && rc_verify(rt, &exp) == RC_ERR_BINDING,
+       "v3: code 14 raw ts tamper breaks binding_sha");
+
+    /* Group (2), Group (12) & Code 15 (RC_ERR_RUN_ID): replay old run_id, forged run_id, mixed multi-stage */
+    ok(test_tamper_v3(r3, rt, "forged-run-id") == 0 && rc_verify(rt, &exp) == RC_ERR_RUN_ID,
+       "v3: code 15 forged run_id with valid binding");
+    e = exp; e.run_id = "run-v3-1002";
+    code = rc_verify(r3, &e);
+    ok(code == RC_ERR_RUN_ID && code != RC_ERR_MISSING,
+       "v3: code 15 replay old output distinct from missing");
+    {
+        rc_v3_t st_b = base;
+        st_b.unit = "stage-B";
+        st_b.run_id = "run-v3-9999";
+        ok(rc_write3(rt, &st_b) == 0, "v3: write foreign stage-B receipt");
+        e = exp; e.unit = "stage-B"; e.run_id = "run-v3-1001";
+        ok(rc_verify(rt, &e) == RC_ERR_RUN_ID, "v3: code 15 multi-stage mixed run_id rejected");
+    }
+
+    /* Group (4) & Codes 16, 17, 18, 19: single-field identity mismatches with valid binding_sha */
+    ok(test_tamper_v3(r3, rt, "foreign-rev") == 0 && rc_verify(rt, &exp) == RC_ERR_REV,
+       "v3: code 16 foreign rev with valid binding");
+    ok(test_tamper_v3(r3, rt, "unit-mismatch") == 0 && rc_verify(rt, &exp) == RC_ERR_UNIT,
+       "v3: code 17 unit mismatch with valid binding");
+    ok(test_tamper_v3(r3, rt, "candidate-swap") == 0 && rc_verify(rt, &exp) == RC_ERR_CANDIDATE,
+       "v3: code 18 candidate swap with valid binding");
+    {
+        rc_v3_t in_mod = base;
+        in_mod.inputs_sha = inp2;
+        ok(rc_write3(rt, &in_mod) == 0 && rc_verify(rt, &exp) == RC_ERR_INPUTS,
+           "v3: code 19 inputs_sha mismatch with valid binding");
+    }
+
+    /* Group (7) & Code 20 (RC_ERR_OUTPUT): output_sha mismatch, missing/empty/appended output file incl after NUL */
+    {
+        char bad_out[600], mut_bin[32];
+        cx_fmt(bad_out, sizeof bad_out, "%s/rec/bad-out.bin", root_dir);
+        mm_copy(mut_bin, (long)sizeof mut_bin, bin_out, (long)bin_out_n);
+        mut_bin[bin_out_n - 2] = '?';
+        cx_write(bad_out, mut_bin, bin_out_n);
+        e = exp; e.output_path = bad_out;
+        ok(rc_verify(r3, &e) == RC_ERR_OUTPUT, "v3: code 20 output byte after NUL mismatch");
+        cx_write(bad_out, "", 0);
+        ok(rc_verify(r3, &e) == RC_ERR_OUTPUT, "v3: code 20 empty output file");
+        (void)sy_unlink(bad_out);
+        ok(rc_verify(r3, &e) == RC_ERR_OUTPUT, "v3: code 20 missing output file");
+        e = exp; e.output_sha = outh2;
+        ok(rc_verify(r3, &e) == RC_ERR_OUTPUT, "v3: code 20 output_sha mismatch");
+    }
+
+    /* Group (6) & Code 21 (RC_ERR_VERDICT): rc!=0 + PASS, rc==0 + FAIL, rc!=0 + FAIL when PASS required */
+    ok(test_tamper_v3(r3, rt, "rc-flip") == 0 && rc_verify(rt, &exp) == RC_ERR_VERDICT &&
+       !strncmp(rc_why(), "rc-nonzero-on-pass", 18),
+       "v3: code 21 rc=1 verdict=PASS rejected");
+    ok(test_tamper_v3(r3, rt, "verdict-flip") == 0 && rc_verify(rt, &exp) == RC_ERR_VERDICT &&
+       !strncmp(rc_why(), "verdict-fail-on-rc0", 19),
+       "v3: code 21 rc=0 verdict=FAIL rejected");
+    {
+        rc_v3_t f2 = base; f2.rc = 1; f2.verdict = "FAIL";
+        ok(rc_write3(rt, &f2) == 0 && rc_verify(rt, &exp) == RC_ERR_VERDICT,
+           "v3: code 21 consistent rc=1 FAIL rejected when PASS required");
+        e = exp; e.allow_fail_verdict = 1; e.expect_rc = 1; e.expect_verdict = "FAIL";
+        ok(rc_verify(rt, &e) == RC_OK, "v3: allow_fail_verdict explicit match ok");
+    }
+
+    /* Group (8) & Code 22 (RC_ERR_TIMESTAMP): fixed-clock boundaries, stale, future, rollback, negative, ms-unit, overflow */
+    {
+        rc_v3_t ts_c = base;
+        ts_c.ts = t_now - 3600LL;
+        ok(rc_write3(rt, &ts_c) == 0 && rc_verify(rt, &exp) == RC_OK, "v3: ts exact max_age boundary ok");
+        ts_c.ts = t_now - 3601LL;
+        ok(rc_write3(rt, &ts_c) == 0 && rc_verify(rt, &exp) == RC_ERR_TIMESTAMP, "v3: code 22 ts stale by 1s");
+        ts_c.ts = t_now + 300LL;
+        ok(rc_write3(rt, &ts_c) == 0 && rc_verify(rt, &exp) == RC_OK, "v3: ts exact max_future boundary ok");
+        ts_c.ts = t_now + 301LL;
+        ok(rc_write3(rt, &ts_c) == 0 && rc_verify(rt, &exp) == RC_ERR_TIMESTAMP, "v3: code 22 ts future by 1s");
+        e = exp; e.now_ts = base.ts - 400LL;
+        ok(rc_verify(r3, &e) == RC_ERR_TIMESTAMP, "v3: code 22 wall-clock rollback rejected");
+        ok(test_tamper_v3(r3, rt, "stale-ts") == 0 && rc_verify(rt, &exp) == RC_ERR_TIMESTAMP, "v3: code 22 tamper stale-ts");
+        {
+            char bad_ts[2304], bind_s[65], full[2400];
+            rc_v3_t tmpv = base;
+            tmpv.ts = -5LL;
+            ok(rc_write3(rt, &tmpv) != 0, "v3: rc_write3 refuses negative ts");
+            tmpv.ts = 1764200000000LL;
+            ok(rc_write3(rt, &tmpv) != 0, "v3: rc_write3 refuses ms-unit ts");
+            cx_fmt(bad_ts, sizeof bad_ts,
+                   "version\t3\nrun_id\t%s\nrev\t%s\nunit\t%s\nproducer\t%s\npurpose\t%s\n"
+                   "candidate_sha\t%s\ninputs_sha\t%s\noutput_sha\t%s\nrc\t0\nverdict\tPASS\nts\t999999999999999999999999\n"
+                   "binding_sha\t%s\n",
+                   base.run_id, base.rev, base.unit, base.producer, base.purpose,
+                   cand, inp, outh, cand2);
+            cx_write(rt, bad_ts, strlen(bad_ts));
+            ok(rc_verify(rt, &exp) == RC_ERR_TIMESTAMP, "v3: code 22 ts integer overflow rejected");
+            cx_fmt(bad_ts, sizeof bad_ts,
+                   "version\t3\nrun_id\t%s\nrev\t%s\nunit\t%s\nproducer\t%s\npurpose\t%s\n"
+                   "candidate_sha\t%s\ninputs_sha\t%s\noutput_sha\t%s\nrc\t0\nverdict\tPASS\nts\t1764200000000\n",
+                   base.run_id, base.rev, base.unit, base.producer, base.purpose,
+                   cand, inp, outh);
+            sha_str(bad_ts, strlen(bad_ts), bind_s);
+            cx_fmt(full, sizeof full, "%sbinding_sha\t%s\n", bad_ts, bind_s);
+            cx_write(rt, full, strlen(full));
+            ok(rc_verify(rt, &exp) == RC_ERR_TIMESTAMP, "v3: code 22 ms-unit ts rejected");
+        }
+    }
+
+    /* Group (5) & Code 23 (RC_ERR_PLACEHOLDER): all-zero sha & repeated-pattern sha + forged-receipt regression */
+    {
+        rc_v3_t ph = base;
+        ph.candidate_sha = zero64;
+        ok(rc_write3(rt, &ph) != 0, "v3: rc_write3 refuses all-zero placeholder");
+        ph.candidate_sha = rep64;
+        ok(rc_write3(rt, &ph) != 0, "v3: rc_write3 refuses deadbeef placeholder");
+        {
+            char forged[2304], bind_s[65], full[2400];
+            cx_fmt(forged, sizeof forged,
+                   "version\t3\nrun_id\t%s\nrev\t%s\nunit\t%s\nproducer\t%s\npurpose\t%s\n"
+                   "candidate_sha\t%s\ninputs_sha\t%s\noutput_sha\t%s\nrc\t1\nverdict\tPASS\nts\t%lld\n",
+                   base.run_id, base.rev, base.unit, base.producer, base.purpose,
+                   zero64, zero64, zero64, (long long)base.ts);
+            sha_str(forged, strlen(forged), bind_s);
+            cx_fmt(full, sizeof full, "%sbinding_sha\t%s\n", forged, bind_s);
+            cx_write(rt, full, strlen(full));
+            ok(rc_verify(rt, &exp) == RC_ERR_PLACEHOLDER, "v3: code 23 hand-forged all-zero rc=1 receipt rejected");
+        }
+        e = exp; e.candidate_sha = zero64;
+        ok(rc_verify(r3, &e) == RC_ERR_PLACEHOLDER, "v3: code 23 placeholder in expect rejected");
+    }
+
+    /* Group (5) & Code 24 (RC_ERR_EXPECT_UNBOUND): NULL, missing mandatory fields, contradictory policy, bad time policy */
+    ok(rc_verify(r3, 0) == RC_ERR_EXPECT_UNBOUND, "v3: code 24 NULL expect");
+    e = exp; e.run_id = 0; ok(rc_verify(r3, &e) == RC_ERR_EXPECT_UNBOUND, "v3: code 24 missing expect.run_id");
+    e = exp; e.rev = ""; ok(rc_verify(r3, &e) == RC_ERR_EXPECT_UNBOUND, "v3: code 24 empty expect.rev");
+    e = exp; e.unit = 0; ok(rc_verify(r3, &e) == RC_ERR_EXPECT_UNBOUND, "v3: code 24 missing expect.unit");
+    e = exp; e.producer = ""; ok(rc_verify(r3, &e) == RC_ERR_EXPECT_UNBOUND, "v3: code 24 missing expect.producer");
+    e = exp; e.purpose = 0; ok(rc_verify(r3, &e) == RC_ERR_EXPECT_UNBOUND, "v3: code 24 missing expect.purpose");
+    e = exp; e.output_path = 0; ok(rc_verify(r3, &e) == RC_ERR_EXPECT_UNBOUND, "v3: code 24 missing expect.output_path");
+    e = exp; e.candidate_sha = "short"; ok(rc_verify(r3, &e) == RC_ERR_EXPECT_UNBOUND, "v3: code 24 malformed expect.candidate_sha");
+    e = exp; e.inputs_sha = 0; ok(rc_verify(r3, &e) == RC_ERR_EXPECT_UNBOUND, "v3: code 24 missing expect.inputs_sha");
+    e = exp; e.max_age_s = 0; ok(rc_verify(r3, &e) == RC_ERR_EXPECT_UNBOUND, "v3: code 24 missing expect.max_age_s");
+    e = exp; e.max_future_s = -1; ok(rc_verify(r3, &e) == RC_ERR_EXPECT_UNBOUND, "v3: code 24 negative expect.max_future_s");
+    e = exp; e.expect_rc = 1; ok(rc_verify(r3, &e) == RC_ERR_EXPECT_UNBOUND, "v3: code 24 contradictory pass-only expect_rc=1");
+    e = exp; e.allow_fail_verdict = 1; e.expect_rc = 1; e.expect_verdict = "PASS";
+    ok(rc_verify(r3, &e) == RC_ERR_EXPECT_UNBOUND, "v3: code 24 contradictory allow_fail rc=1 PASS");
+
+    /* Code names non-empty and distinct across 10..24 */
+    {
+        int c1, c2, all_distinct = 1;
+        for (c1 = 10; c1 <= 24; c1++) {
+            const char *n1 = rc_code_name(c1);
+            if (!n1 || !n1[0] || !strcmp(n1, "unknown")) all_distinct = 0;
+            for (c2 = c1 + 1; c2 <= 24; c2++) {
+                if (!strcmp(n1, rc_code_name(c2))) all_distinct = 0;
+            }
+        }
+        ok(all_distinct, "v3: codes 10..24 have 15 distinct non-empty names");
+    }
 }
