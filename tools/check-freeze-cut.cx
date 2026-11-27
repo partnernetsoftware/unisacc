@@ -118,6 +118,16 @@ static int fc_write_file(const char *path, const char *buf, size_t len) {
     return nw == len ? 0 : -1;
 }
 
+static long fc_span_find(const char *hay, long hn, const char *needle, long nn) {
+    if (!hay || !needle || nn <= 0 || hn < nn) return -1;
+    for (long i = 0; i <= hn - nn; i++) {
+        long j = 0;
+        while (j < nn && hay[i + j] == needle[j]) j++;
+        if (j == nn) return i;
+    }
+    return -1;
+}
+
 /* Compute CR_GATE_ROSTER - union(stage_gates[5]); returns missing count (0 = complete). */
 static int check_staged_roster_coverage(const char *root, const char *drop_gate) {
     char cr_path[4400], fc_path[4400];
@@ -128,14 +138,14 @@ static int check_staged_roster_coverage(const char *root, const char *drop_gate)
     char *fc = fc_read_file(fc_path, &fc_len);
     if (!cr || !fc) { mm_free(cr); mm_free(fc); return -1; }
 
-    long cr_at = tx_find(cr, (long)cr_len, "#define CR_GATE_ROSTER(X)", 25);
-    long fc_at = tx_find(fc, (long)fc_len, "stage_gates[9]", 14);
+    long cr_at = fc_span_find(cr, (long)cr_len, "#define CR_GATE_ROSTER(X)", 25);
+    long fc_at = fc_span_find(fc, (long)fc_len, "stage_gates[9]", 14);
     if (cr_at < 0 || fc_at < 0) { mm_free(cr); mm_free(fc); return -1; }
 
     char union_gates[128][64];
     int n_union = 0;
     long p = fc_at;
-    long fc_end = tx_find(fc + p, (long)fc_len - p, "};", 2);
+    long fc_end = fc_span_find(fc + p, (long)fc_len - p, "};", 2);
     if (fc_end < 0) { mm_free(cr); mm_free(fc); return -1; }
     fc_end += p;
     while (p < fc_end) {
@@ -165,7 +175,7 @@ static int check_staged_roster_coverage(const char *root, const char *drop_gate)
 
     int missing = 0;
     p = cr_at;
-    long cr_end = tx_find(cr + p, (long)cr_len - p, "CR_GATE_ENUM", 12);
+    long cr_end = fc_span_find(cr + p, (long)cr_len - p, "CR_GATE_ENUM", 12);
     if (cr_end < 0) { mm_free(cr); mm_free(fc); return -1; }
     cr_end += p;
     while (p < cr_end) {
@@ -220,9 +230,9 @@ int main(int argc, char **argv) {
         }
         char want[256];
         cx_fmt(want, sizeof want, "run_id=%s\n", run_id);
-        int has_rid = (tx_find(ev, (long)evn, want, (long)strlen(want)) >= 0);
-        int has_pass = (tx_find(ev, (long)evn, "verdict=PASS\n", 13) >= 0 &&
-                        tx_find(ev, (long)evn, "failed=0\n", 9) >= 0);
+        int has_rid = (fc_span_find(ev, (long)evn, want, (long)strlen(want)) >= 0);
+        int has_pass = (fc_span_find(ev, (long)evn, "verdict=PASS\n", 13) >= 0 &&
+                        fc_span_find(ev, (long)evn, "failed=0\n", 9) >= 0);
         mm_free(ev);
         if (!has_rid) {
             printf("FAIL\tfreeze_cut_evidence_stale\n");
@@ -812,19 +822,25 @@ int main(int argc, char **argv) {
             cx_fmt(args_rcpt, sizeof args_rcpt, "%s --stage-receipts '%s'", args, rdir);
 
             const char *z64 = "0000000000000000000000000000000000000000000000000000000000000000";
-            char bind_in[256], bind_sha[65], rcpt_path[1400], rcpt_body[1024];
-            cx_fmt(bind_in, sizeof bind_in, "rid1\t%s\t%s", z64, z64);
-            sy_sha256_hex(bind_in, (long)strlen(bind_in), bind_sha);
+            char bind_in[256], bind_sha[65], out_str[256], out_sha[65], rcpt_path[1400], rcpt_body[1024];
             long now_s = sy_wall_s();
 
             for (int si = 0; si < 8; si++) {
+                cx_fmt(out_str, sizeof out_str, "%s\t%s\tREADY", head_rev, snames[si]);
+                sy_sha256_hex(out_str, (long)strlen(out_str), out_sha);
+                cx_fmt(bind_in, sizeof bind_in, "rid1\t%s\t%s", out_sha, rsha);
+                sy_sha256_hex(bind_in, (long)strlen(bind_in), bind_sha);
                 cx_fmt(rcpt_path, sizeof rcpt_path, "%s/%s.rcpt", rdir, snames[si]);
                 cx_fmt(rcpt_body, sizeof rcpt_body,
-                       "run_id\trid1\ninputs_sha\t%s\noutput_sha\t%s\nbinding_sha\t%s\n"
+                       "run_id\trid1\ninputs_sha\t%s\noutput_sha\t%s\nrc\t0\nbinding_sha\t%s\n"
                        "rev\t%s\nstage\t%s\nverdict\tREADY\nroster_sha\t%s\nelapsed_ms\t10\nts_epoch_s\t%ld\n",
-                       z64, z64, bind_sha, head_rev, snames[si], rsha, now_s);
+                       rsha, out_sha, bind_sha, head_rev, snames[si], rsha, now_s);
                 fc_write_file(rcpt_path, rcpt_body, strlen(rcpt_body));
             }
+            cx_fmt(out_str, sizeof out_str, "%s\tunion-shards\tREADY", head_rev);
+            sy_sha256_hex(out_str, (long)strlen(out_str), out_sha);
+            cx_fmt(bind_in, sizeof bind_in, "rid1\t%s\t%s", out_sha, rsha);
+            sy_sha256_hex(bind_in, (long)strlen(bind_in), bind_sha);
             /* 1. Missing 9th receipt -> chain-ready-receipts-missing:union-shards */
             run_fc(env_g4, args_rcpt, &r);
             ck(r.rc == 2 && fc_has(&r, "REFUSE\tFREEZE_CUT\tchain-ready-receipts-missing:union-shards"),
@@ -834,9 +850,9 @@ int main(int argc, char **argv) {
             /* 2. Stale 9th receipt -> chain-ready-receipt-stale:union-shards */
             cx_fmt(rcpt_path, sizeof rcpt_path, "%s/union-shards.rcpt", rdir);
             cx_fmt(rcpt_body, sizeof rcpt_body,
-                   "run_id\trid1\ninputs_sha\t%s\noutput_sha\t%s\nbinding_sha\t%s\n"
+                   "run_id\trid1\ninputs_sha\t%s\noutput_sha\t%s\nrc\t0\nbinding_sha\t%s\n"
                    "rev\t%s\nstage\tunion-shards\nverdict\tREADY\nroster_sha\t%s\nelapsed_ms\t10\nts_epoch_s\t%ld\n",
-                   z64, z64, bind_sha, head_rev, rsha, now_s - 3600);
+                   rsha, out_sha, bind_sha, head_rev, rsha, now_s - 3600);
             fc_write_file(rcpt_path, rcpt_body, strlen(rcpt_body));
             run_fc(env_g4, args_rcpt, &r);
             ck(r.rc == 2 && fc_has(&r, "REFUSE\tFREEZE_CUT\tchain-ready-receipt-stale:union-shards"),
@@ -845,9 +861,9 @@ int main(int argc, char **argv) {
 
             /* 3. Wrong rev -> chain-ready-receipt-rev-mismatch:union-shards */
             cx_fmt(rcpt_body, sizeof rcpt_body,
-                   "run_id\trid1\ninputs_sha\t%s\noutput_sha\t%s\nbinding_sha\t%s\n"
+                   "run_id\trid1\ninputs_sha\t%s\noutput_sha\t%s\nrc\t0\nbinding_sha\t%s\n"
                    "rev\t1111111111111111111111111111111111111111\nstage\tunion-shards\nverdict\tREADY\nroster_sha\t%s\nelapsed_ms\t10\nts_epoch_s\t%ld\n",
-                   z64, z64, bind_sha, rsha, now_s);
+                   rsha, out_sha, bind_sha, rsha, now_s);
             fc_write_file(rcpt_path, rcpt_body, strlen(rcpt_body));
             run_fc(env_g4, args_rcpt, &r);
             ck(r.rc == 2 && fc_has(&r, "REFUSE\tFREEZE_CUT\tchain-ready-receipt-rev-mismatch:union-shards"),
@@ -856,9 +872,9 @@ int main(int argc, char **argv) {
 
             /* 4. Tampered roster_sha -> chain-ready-receipt-roster-mismatch:union-shards */
             cx_fmt(rcpt_body, sizeof rcpt_body,
-                   "run_id\trid1\ninputs_sha\t%s\noutput_sha\t%s\nbinding_sha\t%s\n"
+                   "run_id\trid1\ninputs_sha\t%s\noutput_sha\t%s\nrc\t0\nbinding_sha\t%s\n"
                    "rev\t%s\nstage\tunion-shards\nverdict\tREADY\nroster_sha\t%s\nelapsed_ms\t10\nts_epoch_s\t%ld\n",
-                   z64, z64, bind_sha, head_rev, z64, now_s);
+                   rsha, out_sha, bind_sha, head_rev, z64, now_s);
             fc_write_file(rcpt_path, rcpt_body, strlen(rcpt_body));
             run_fc(env_g4, args_rcpt, &r);
             ck(r.rc == 2 && fc_has(&r, "REFUSE\tFREEZE_CUT\tchain-ready-receipt-roster-mismatch:union-shards"),
@@ -867,20 +883,65 @@ int main(int argc, char **argv) {
 
             /* 5. Non-READY verdict -> chain-ready-receipt-not-ready:union-shards */
             cx_fmt(rcpt_body, sizeof rcpt_body,
-                   "run_id\trid1\ninputs_sha\t%s\noutput_sha\t%s\nbinding_sha\t%s\n"
+                   "run_id\trid1\ninputs_sha\t%s\noutput_sha\t%s\nrc\t0\nbinding_sha\t%s\n"
                    "rev\t%s\nstage\tunion-shards\nverdict\tNOT_READY\nroster_sha\t%s\nelapsed_ms\t10\nts_epoch_s\t%ld\n",
-                   z64, z64, bind_sha, head_rev, rsha, now_s);
+                   rsha, out_sha, bind_sha, head_rev, rsha, now_s);
             fc_write_file(rcpt_path, rcpt_body, strlen(rcpt_body));
             run_fc(env_g4, args_rcpt, &r);
             ck(r.rc == 2 && fc_has(&r, "REFUSE\tFREEZE_CUT\tchain-ready-receipt-not-ready:union-shards"),
                "mut-receipts-not-ready-refused", &r);
             pr_free(&r);
 
+            /* 5b. Non-zero rc in receipt with verdict=READY -> chain-ready-receipt-not-ready:union-shards */
+            cx_fmt(rcpt_body, sizeof rcpt_body,
+                   "run_id\trid1\ninputs_sha\t%s\noutput_sha\t%s\nrc\t1\nbinding_sha\t%s\n"
+                   "rev\t%s\nstage\tunion-shards\nverdict\tREADY\nroster_sha\t%s\nelapsed_ms\t10\nts_epoch_s\t%ld\n",
+                   rsha, out_sha, bind_sha, head_rev, rsha, now_s);
+            fc_write_file(rcpt_path, rcpt_body, strlen(rcpt_body));
+            run_fc(env_g4, args_rcpt, &r);
+            ck(r.rc == 2 && fc_has(&r, "REFUSE\tFREEZE_CUT\tchain-ready-receipt-not-ready:union-shards"),
+               "mut-receipts-nonzero-rc-refused", &r);
+            pr_free(&r);
+
+            /* 5c. Verdict flip (output_sha computed for FAIL, verdict line flipped to READY) -> chain-ready-receipt-output-sha-mismatch:union-shards */
+            {
+                char fail_out[256], fail_sha[65], fail_bind_in[256], fail_bind[65];
+                cx_fmt(fail_out, sizeof fail_out, "%s\tunion-shards\tFAIL", head_rev);
+                sy_sha256_hex(fail_out, (long)strlen(fail_out), fail_sha);
+                cx_fmt(fail_bind_in, sizeof fail_bind_in, "rid1\t%s\t%s", fail_sha, rsha);
+                sy_sha256_hex(fail_bind_in, (long)strlen(fail_bind_in), fail_bind);
+                cx_fmt(rcpt_body, sizeof rcpt_body,
+                       "run_id\trid1\ninputs_sha\t%s\noutput_sha\t%s\nrc\t0\nbinding_sha\t%s\n"
+                       "rev\t%s\nstage\tunion-shards\nverdict\tREADY\nroster_sha\t%s\nelapsed_ms\t10\nts_epoch_s\t%ld\n",
+                       rsha, fail_sha, fail_bind, head_rev, rsha, now_s);
+                fc_write_file(rcpt_path, rcpt_body, strlen(rcpt_body));
+                run_fc(env_g4, args_rcpt, &r);
+                ck(r.rc == 2 && fc_has(&r, "REFUSE\tFREEZE_CUT\tchain-ready-receipt-output-sha-mismatch:union-shards"),
+                   "mut-receipts-verdict-flip-output-sha-refused", &r);
+                pr_free(&r);
+            }
+
+            /* 5d. Forged run_id (run_id differs from cohort run_id rid1 even if re-bound) -> chain-ready-receipt-binding-invalid:union-shards */
+            {
+                char fr_bind_in[256], fr_bind[65];
+                cx_fmt(fr_bind_in, sizeof fr_bind_in, "rid-forged\t%s\t%s", out_sha, rsha);
+                sy_sha256_hex(fr_bind_in, (long)strlen(fr_bind_in), fr_bind);
+                cx_fmt(rcpt_body, sizeof rcpt_body,
+                       "run_id\trid-forged\ninputs_sha\t%s\noutput_sha\t%s\nrc\t0\nbinding_sha\t%s\n"
+                       "rev\t%s\nstage\tunion-shards\nverdict\tREADY\nroster_sha\t%s\nelapsed_ms\t10\nts_epoch_s\t%ld\n",
+                       rsha, out_sha, fr_bind, head_rev, rsha, now_s);
+                fc_write_file(rcpt_path, rcpt_body, strlen(rcpt_body));
+                run_fc(env_g4, args_rcpt, &r);
+                ck(r.rc == 2 && fc_has(&r, "REFUSE\tFREEZE_CUT\tchain-ready-receipt-binding-invalid:union-shards"),
+                   "mut-receipts-forged-run-id-refused", &r);
+                pr_free(&r);
+            }
+
             /* 6. All 9 valid -> CHECK_PASS + CHAIN_READY_RECEIPTS */
             cx_fmt(rcpt_body, sizeof rcpt_body,
-                   "run_id\trid1\ninputs_sha\t%s\noutput_sha\t%s\nbinding_sha\t%s\n"
+                   "run_id\trid1\ninputs_sha\t%s\noutput_sha\t%s\nrc\t0\nbinding_sha\t%s\n"
                    "rev\t%s\nstage\tunion-shards\nverdict\tREADY\nroster_sha\t%s\nelapsed_ms\t10\nts_epoch_s\t%ld\n",
-                   z64, z64, bind_sha, head_rev, rsha, now_s);
+                   rsha, out_sha, bind_sha, head_rev, rsha, now_s);
             fc_write_file(rcpt_path, rcpt_body, strlen(rcpt_body));
             run_fc(env_g4, args_rcpt, &r);
             ck(r.rc == 0 && fc_has(&r, "FREEZE_CUT\tCHECK_PASS") && fc_has(&r, "CHAIN_READY_RECEIPTS\tverdict=READY\tstages=9/9"),

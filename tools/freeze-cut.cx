@@ -725,20 +725,29 @@ static int fc_check_chain_ready(const char *repo, long t0_ms, long budget_ms, ch
         }
 
         long now_s = sy_wall_s();
+        char cohort_run_id[160];
+        cohort_run_id[0] = 0;
         for (si = 0; si < 9; si++) {
-            char rp[4400], r_run_id[160], r_rev[160], r_stage[160], r_verdict[160], r_roster[160], r_ts[160];
+            char rp[4400], r_run_id[160], r_rev[160], r_stage[160], r_verdict[160], r_roster[160], r_ts[160], r_rc[64], r_out_sha[128], r_in_sha[128];
+            char exp_out_str[320], exp_out_sha[65];
             if (cx_fmt(rp, sizeof rp, "%s/%s.rcpt", g_stage_receipts_dir, stage_names[si])) return -1;
             if (fc_rcpt_get(rp, "run_id", r_run_id, sizeof r_run_id) ||
                 fc_rcpt_get(rp, "rev", r_rev, sizeof r_rev) ||
                 fc_rcpt_get(rp, "stage", r_stage, sizeof r_stage) ||
                 fc_rcpt_get(rp, "verdict", r_verdict, sizeof r_verdict) ||
                 fc_rcpt_get(rp, "roster_sha", r_roster, sizeof r_roster) ||
-                fc_rcpt_get(rp, "ts_epoch_s", r_ts, sizeof r_ts)) {
+                fc_rcpt_get(rp, "ts_epoch_s", r_ts, sizeof r_ts) ||
+                fc_rcpt_get(rp, "rc", r_rc, sizeof r_rc) ||
+                fc_rcpt_get(rp, "output_sha", r_out_sha, sizeof r_out_sha) ||
+                fc_rcpt_get(rp, "inputs_sha", r_in_sha, sizeof r_in_sha)) {
                 cx_fmt(why_tag, 64, "chain-ready-receipt-malformed:%s", stage_names[si]);
                 cx_fmt(detail, cap, "rcpt=%s", rp);
                 return -1;
             }
-            if (rc_fresh(rp, r_run_id) != 0) {
+            if (si == 0) {
+                if (cx_fmt(cohort_run_id, sizeof cohort_run_id, "%s", r_run_id)) return -1;
+            }
+            if (rc_fresh(rp, cohort_run_id) != 0) {
                 cx_fmt(why_tag, 64, "chain-ready-receipt-binding-invalid:%s", stage_names[si]);
                 cx_fmt(detail, cap, "why=%s", rc_why());
                 return -1;
@@ -753,20 +762,27 @@ static int fc_check_chain_ready(const char *repo, long t0_ms, long budget_ms, ch
                 cx_fmt(detail, cap, "got=%s head=%s", r_rev, head_rev);
                 return -1;
             }
-            if (strcmp(r_roster, expected_roster_sha) != 0) {
+            if (strcmp(r_roster, expected_roster_sha) != 0 || strcmp(r_in_sha, expected_roster_sha) != 0) {
                 cx_fmt(why_tag, 64, "chain-ready-receipt-roster-mismatch:%s", stage_names[si]);
                 cx_fmt(detail, cap, "got=%s exp=%s", r_roster, expected_roster_sha);
                 return -1;
             }
-            if (strcmp(r_verdict, "READY") != 0) {
+            if (strcmp(r_verdict, "READY") != 0 || strcmp(r_rc, "0") != 0) {
                 cx_fmt(why_tag, 64, "chain-ready-receipt-not-ready:%s", stage_names[si]);
-                cx_fmt(detail, cap, "verdict=%s", r_verdict);
+                cx_fmt(detail, cap, "verdict=%s rc=%s", r_verdict, r_rc);
                 return -1;
             }
             int64_t ts_s = 0;
             if (tx_to_i64(r_ts, (long)strlen(r_ts), 10, &ts_s) || ts_s <= 0 || now_s - ts_s > 1800 || ts_s - now_s > 60) {
                 cx_fmt(why_tag, 64, "chain-ready-receipt-stale:%s", stage_names[si]);
                 cx_fmt(detail, cap, "ts=%s now=%ld", r_ts, now_s);
+                return -1;
+            }
+            if (cx_fmt(exp_out_str, sizeof exp_out_str, "%s\t%s\t%s", head_rev, stage_names[si], r_verdict) ||
+                sy_sha256_hex(exp_out_str, (long)strlen(exp_out_str), exp_out_sha) ||
+                strcmp(r_out_sha, exp_out_sha) != 0) {
+                cx_fmt(why_tag, 64, "chain-ready-receipt-output-sha-mismatch:%s", stage_names[si]);
+                cx_fmt(detail, cap, "got=%s exp=%s", r_out_sha, exp_out_sha);
                 return -1;
             }
         }

@@ -230,14 +230,19 @@ static int run_cr_in(const char *tdir, const char *subcmd, char *out, int ocap) 
 }
 
 int main(int argc, char **argv) {
-    int run_core = 1, run_launch = 1, run_ident = 1, run_stage = 1; const char *part_name = "all";
+    int run_core = 1, run_launch = 1, run_ident = 1, run_stage = 1, run_stage_cases = 1, run_stage_mut1 = 1, run_stage_mut2 = 1;
+    const char *part_name = "all";
     for (int a = 1; a < argc; a++) {
         if (tx_eqz(argv[a], "--part") && a + 1 < argc) {
             part_name = argv[++a];
             if (tx_eqz(part_name, "core")) { run_core = 1; run_launch = 0; run_ident = 0; run_stage = 0; }
             else if (tx_eqz(part_name, "launch")) { run_core = 0; run_launch = 1; run_ident = 0; run_stage = 0; }
             else if (tx_eqz(part_name, "ident")) { run_core = 0; run_launch = 0; run_ident = 1; run_stage = 0; }
-            else if (tx_eqz(part_name, "stage")) { run_core = 0; run_launch = 0; run_ident = 0; run_stage = 1; }
+            else if (tx_eqz(part_name, "stage")) { run_core = 0; run_launch = 0; run_ident = 0; run_stage = 1; run_stage_cases = 1; run_stage_mut1 = 1; run_stage_mut2 = 1; }
+            else if (tx_eqz(part_name, "stage-cases")) { run_core = 0; run_launch = 0; run_ident = 0; run_stage = 1; run_stage_cases = 1; run_stage_mut1 = 0; run_stage_mut2 = 0; }
+            else if (tx_eqz(part_name, "stage-mut1")) { run_core = 0; run_launch = 0; run_ident = 0; run_stage = 1; run_stage_cases = 0; run_stage_mut1 = 1; run_stage_mut2 = 0; }
+            else if (tx_eqz(part_name, "stage-mut2")) { run_core = 0; run_launch = 0; run_ident = 0; run_stage = 1; run_stage_cases = 0; run_stage_mut1 = 0; run_stage_mut2 = 1; }
+            else if (tx_eqz(part_name, "stage-mut")) { run_core = 0; run_launch = 0; run_ident = 0; run_stage = 1; run_stage_cases = 0; run_stage_mut1 = 1; run_stage_mut2 = 1; }
             else { printf("FAIL\tbad-part\t%s\n", part_name); return 2; }
         } else if (tx_eqz(argv[a], "--merge-shards") && a + 1 < argc) {
             return merge_cr_shards(argc - (a + 1), argv + a + 1);
@@ -2026,8 +2031,8 @@ int main(int argc, char **argv) {
         }
     }
     if (run_stage) {
-        char srepo[400], rdir[400], rcpt[480], cmd[4096], sub[2048], cwd[400];
-        char v_run_id[160], v_rev[160], v_stage[160], v_verdict[160], v_elapsed[160], v_roster[160], v_ts[160], exp_roster[65];
+        char srepo[400], rdir[400], rdir_f[400], rcpt[480], head40[64], cmd[4096], cwd[400];
+        char v_run_id[160], v_rev[160], v_stage[160], v_verdict[160], v_elapsed[160], v_roster[160], v_ts[160], v_rc[64], v_out_sha[128], exp_roster[65];
         static const char *const exp_names[9] = {
             "derive-a", "derive-b", "ratchets", "tri-chain-a", "tri-chain-b", "tri-chain-c", "env-root", "gen-preflight", "union-shards"
         };
@@ -2056,7 +2061,9 @@ int main(int argc, char **argv) {
         if (sy_cwd(cwd, sizeof cwd) != 0) cwd[0] = 0;
         cx_fmt(srepo, sizeof srepo, "%s/srepo", tmpd);
         cx_fmt(rdir, sizeof rdir, "%s/stage-rcpts", tmpd);
+        cx_fmt(rdir_f, sizeof rdir_f, "%s/stage-rcpts-foreign", tmpd);
         (void)sy_mkdir(rdir, 0700);
+        (void)sy_mkdir(rdir_f, 0700);
         cx_fmt(cmd, sizeof cmd,
             "mkdir -p '%s/tools' '%s/build' && "
             "printf '#define NRK 3\\n' > '%s/tools/ratchets.cx' && "
@@ -2084,126 +2091,238 @@ int main(int argc, char **argv) {
             "chmod +x '%s/unisacc.com' && "
             "git -C '%s' init -q -b main && "
             "git -C '%s' -c user.name=t -c user.email=t@t -c commit.gpgsign=false add -A && "
-            "git -C '%s' -c user.name=t -c user.email=t@t -c commit.gpgsign=false commit -qm init",
-            srepo, srepo, srepo, srepo, srepo, srepo, srepo, srepo, srepo, srepo, srepo);
-        { char *sv[] = {"./tools/bound", "30", "sh", "-c", cmd, 0}; rc = run(sv, out, sizeof out); ck(rc == 0, "stage-fixture-setup"); }
+            "git -C '%s' -c user.name=t -c user.email=t@t -c commit.gpgsign=false commit -qm init && "
+            "git -C '%s' rev-parse HEAD",
+            srepo, srepo, srepo, srepo, srepo, srepo, srepo, srepo, srepo, srepo, srepo, srepo);
+        {
+            char *sv[] = {"./tools/bound", "30", "sh", "-c", cmd, 0};
+            rc = run(sv, out, sizeof out);
+            head40[0] = 0;
+            if (rc == 0 && tx_len(out, sizeof out) >= 40) {
+                mm_copy(head40, sizeof head40, out, 40);
+                head40[40] = 0;
+            }
+            ck(rc == 0 && tx_len(head40, sizeof head40) == 40, "stage-fixture-setup");
+        }
 
-        /* 1. --stage-list outputs the 9 roster-derived stages in order */
-        {
-            char *av[] = {"./tools/bound", "40", "sh", UC, "tools/chain-ready.cx", "--", "--stage-list", 0};
-            rc = run(av, out, sizeof out);
-            ck(rc == 0 && tx_eqz(out, "derive-a\nderive-b\nratchets\ntri-chain-a\ntri-chain-b\ntri-chain-c\nenv-root\ngen-preflight\nunion-shards\n"),
-               "stage-list-prints-9-stages");
-        }
-        /* 2. Unknown stage name is refused with rc=2 */
-        {
-            char *av[] = {"./tools/bound", "40", "sh", UC, "tools/chain-ready.cx", "--", "--stage", "bogus-stage", 0};
-            rc = run(av, out, sizeof out);
-            ck(rc == 2 && has(out, "REFUSE\tCHAIN_READY_STAGE\treason=unknown-stage\tstage=bogus-stage"),
-               "stage-unknown-refused-rc2");
-        }
-        /* 3. --stage combined with --only is refused with rc=2 */
-        {
-            char *av[] = {"./tools/bound", "40", "sh", UC, "tools/chain-ready.cx", "--", "--stage", "ratchets", "--only", "2b-ratchets", 0};
-            rc = run(av, out, sizeof out);
-            ck(rc == 2 && has(out, "REFUSE\tCHAIN_READY_STAGE\treason=incompatible-mode"),
-               "stage-plus-only-refused-rc2");
-        }
-        /* 4. --stage ratchets --rev <40hex> --run-id rid-rat-1 --receipt-dir DIR writes valid v2 receipt */
-        {
-            const char *rev40 = "0123456789abcdef0123456789abcdef01234567";
-            cx_fmt(cmd, sizeof cmd,
-                "cd '%s' && DEVSVC_OWNER=cc sh '%s/unisacc.com' '%s/tools/chain-ready.cx' -- "
-                "--repo '%s' --stage ratchets --rev '%s' --run-id rid-rat-1 --receipt-dir '%s'",
-                srepo, cwd, cwd, srepo, rev40, rdir);
-            char *av[] = {"./tools/bound", "40", "sh", "-c", cmd, 0};
-            rc = run(av, out, sizeof out);
-            cx_fmt(rcpt, sizeof rcpt, "%s/ratchets.rcpt", rdir);
-            int g_ok = (cr_rcpt_get(rcpt, "run_id", v_run_id, sizeof v_run_id) == 0 &&
-                        cr_rcpt_get(rcpt, "rev", v_rev, sizeof v_rev) == 0 &&
-                        cr_rcpt_get(rcpt, "stage", v_stage, sizeof v_stage) == 0 &&
-                        cr_rcpt_get(rcpt, "verdict", v_verdict, sizeof v_verdict) == 0 &&
-                        cr_rcpt_get(rcpt, "elapsed_ms", v_elapsed, sizeof v_elapsed) == 0 &&
-                        cr_rcpt_get(rcpt, "roster_sha", v_roster, sizeof v_roster) == 0 &&
-                        cr_rcpt_get(rcpt, "ts_epoch_s", v_ts, sizeof v_ts) == 0);
-            int f_ok = (rc_fresh(rcpt, "rid-rat-1") == 0);
-            ck(rc == 0 && has(out, "2b-ratchets\tPASS") && has(out, "READY\tyes") &&
-               g_ok && f_ok &&
-               tx_eqz(v_run_id, "rid-rat-1") && tx_eqz(v_rev, rev40) &&
-               tx_eqz(v_stage, "ratchets") && tx_eqz(v_verdict, "READY") &&
-               tx_eqz(v_roster, exp_roster),
-               "stage-ratchets-writes-valid-v2-receipt-ready");
-        }
-        /* 5. Failing stage writes verdict=FAIL receipt and exits 1 */
-        {
-            const char *rev40 = "0123456789abcdef0123456789abcdef01234567";
-            cx_fmt(cmd, sizeof cmd,
-                "cd '%s' && STAGE_FAIL_RATCHETS=1 DEVSVC_OWNER=cc sh '%s/unisacc.com' '%s/tools/chain-ready.cx' -- "
-                "--repo '%s' --stage ratchets --rev '%s' --run-id rid-rat-fail --receipt-dir '%s'",
-                srepo, cwd, cwd, srepo, rev40, rdir);
-            char *av[] = {"./tools/bound", "40", "sh", "-c", cmd, 0};
-            rc = run(av, out, sizeof out);
-            cx_fmt(rcpt, sizeof rcpt, "%s/ratchets.rcpt", rdir);
-            int g_ok = (cr_rcpt_get(rcpt, "verdict", v_verdict, sizeof v_verdict) == 0 &&
-                        cr_rcpt_get(rcpt, "run_id", v_run_id, sizeof v_run_id) == 0);
-            int f_ok = (rc_fresh(rcpt, "rid-rat-fail") == 0);
-            ck(rc == 1 && has(out, "2b-ratchets\tFAIL") && has(out, "READY\tno") &&
-               g_ok && f_ok && tx_eqz(v_verdict, "FAIL"),
-               "stage-ratchets-fail-writes-fail-receipt-rc1");
-        }
-        /* 6. --stage derive-b runs only shards 5..7 (does not run shards 1..4) and writes derive-b.rcpt */
-        {
-            char dcalls[480]; size_t dcn = 0; char *dcb = 0;
-            cx_fmt(dcalls, sizeof dcalls, "%s/derive.calls", srepo);
-            (void)sy_unlink(dcalls);
-            cx_fmt(cmd, sizeof cmd,
-                "cd '%s' && DEVSVC_OWNER=cc sh '%s/unisacc.com' '%s/tools/chain-ready.cx' -- "
-                "--repo '%s' --stage derive-b --run-id rid-der-b --receipt-dir '%s'",
-                srepo, cwd, cwd, srepo, rdir);
-            char *av[] = {"./tools/bound", "40", "sh", "-c", cmd, 0};
-            rc = run(av, out, sizeof out);
-            cx_fmt(rcpt, sizeof rcpt, "%s/derive-b.rcpt", rdir);
-            dcb = cx_read(dcalls, &dcn);
-            int only_567 = (dcb && has(dcb, "DERIVE_CALL\tproduct-map\n") &&
-                            has(dcb, "DERIVE_CALL\tdoc-links,tool-index\n") &&
-                            has(dcb, "DERIVE_CALL\ttable-index\n") &&
-                            !has(dcb, "tables-gen") && !has(dcb, "chain-phases"));
-            if (dcb) mm_free(dcb);
-            ck(rc == 0 && only_567 && rc_fresh(rcpt, "rid-der-b") == 0 &&
-               cr_rcpt_get(rcpt, "stage", v_stage, sizeof v_stage) == 0 && tx_eqz(v_stage, "derive-b") &&
-               cr_rcpt_get(rcpt, "verdict", v_verdict, sizeof v_verdict) == 0 && tx_eqz(v_verdict, "READY") &&
-               cr_rcpt_get(rcpt, "rev", v_rev, sizeof v_rev) == 0 && tx_len(v_rev, sizeof v_rev) == 40,
-               "stage-derive-b-runs-only-shards-5-6-7-and-resolves-head-rev");
-        }
-        /* 7. Two execution mutations KILLED (red-then-green) */
-        {
-            char mdir[1200];
-            const char *rev40 = "0123456789abcdef0123456789abcdef01234567";
-            if (prepare_alt_cr_tree(cwd, "stage-mut1",
-                    "const char *verdict = nfail ? \"FAIL\" : \"READY\";",
-                    "const char *verdict = \"READY\";", mdir, sizeof mdir) == 0) {
+        if (run_stage_cases) {
+            /* 1. --stage-list outputs the 9 roster-derived stages in order */
+            {
+                char *av[] = {"./tools/bound", "40", "sh", UC, "tools/chain-ready.cx", "--", "--stage-list", 0};
+                rc = run(av, out, sizeof out);
+                ck(rc == 0 && tx_eqz(out, "derive-a\nderive-b\nratchets\ntri-chain-a\ntri-chain-b\ntri-chain-c\nenv-root\ngen-preflight\nunion-shards\n"),
+                   "stage-list-prints-9-stages");
+            }
+            /* 2. Unknown stage name is refused with rc=2 */
+            {
+                char *av[] = {"./tools/bound", "40", "sh", UC, "tools/chain-ready.cx", "--", "--stage", "bogus-stage", 0};
+                rc = run(av, out, sizeof out);
+                ck(rc == 2 && has(out, "REFUSE\tCHAIN_READY_STAGE\treason=unknown-stage\tstage=bogus-stage"),
+                   "stage-unknown-refused-rc2");
+            }
+            /* 3. --stage combined with --only is refused with rc=2 */
+            {
+                char *av[] = {"./tools/bound", "40", "sh", UC, "tools/chain-ready.cx", "--", "--stage", "ratchets", "--only", "2b-ratchets", 0};
+                rc = run(av, out, sizeof out);
+                ck(rc == 2 && has(out, "REFUSE\tCHAIN_READY_STAGE\treason=incompatible-mode"),
+                   "stage-plus-only-refused-rc2");
+            }
+            /* 4. --stage ratchets --rev <HEAD> --run-id rid-rat-1 --receipt-dir DIR writes valid v2 receipt */
+            {
+                char exp_out_str[256], exp_out_sha[65];
+                cx_fmt(exp_out_str, sizeof exp_out_str, "%s\tratchets\tREADY", head40);
+                sy_sha256_hex(exp_out_str, (long)tx_len(exp_out_str, sizeof exp_out_str), exp_out_sha);
                 cx_fmt(cmd, sizeof cmd,
-                    "cd '%s' && STAGE_FAIL_RATCHETS=1 DEVSVC_OWNER=cc sh '%s/unisacc.com' '%s/tools/chain-ready.cx' -- "
-                    "--repo '%s' --stage ratchets --rev '%s' --run-id rid-mut1 --receipt-dir '%s'",
-                    srepo, mdir, mdir, srepo, rev40, rdir);
-                (void)run((char *[]){"./tools/bound", "45", "sh", "-c", cmd, 0}, out, sizeof out);
+                    "cd '%s' && DEVSVC_OWNER=agy-flow sh '%s/unisacc.com' '%s/tools/chain-ready.cx' -- "
+                    "--repo '%s' --stage ratchets --rev '%s' --run-id rid-rat-1 --receipt-dir '%s'",
+                    srepo, cwd, cwd, srepo, head40, rdir);
+                char *av[] = {"./tools/bound", "40", "sh", "-c", cmd, 0};
+                rc = run(av, out, sizeof out);
                 cx_fmt(rcpt, sizeof rcpt, "%s/ratchets.rcpt", rdir);
-                int m1_ok = (cr_rcpt_get(rcpt, "verdict", v_verdict, sizeof v_verdict) == 0 && tx_eqz(v_verdict, "FAIL"));
-                ck(m1_ok == 0, "stage-mut1-verdict-always-ready-killed");
-            } else ck(0, "stage-mut1-verdict-always-ready-killed");
+                int g_ok = (cr_rcpt_get(rcpt, "run_id", v_run_id, sizeof v_run_id) == 0 &&
+                            cr_rcpt_get(rcpt, "rev", v_rev, sizeof v_rev) == 0 &&
+                            cr_rcpt_get(rcpt, "stage", v_stage, sizeof v_stage) == 0 &&
+                            cr_rcpt_get(rcpt, "verdict", v_verdict, sizeof v_verdict) == 0 &&
+                            cr_rcpt_get(rcpt, "rc", v_rc, sizeof v_rc) == 0 &&
+                            cr_rcpt_get(rcpt, "output_sha", v_out_sha, sizeof v_out_sha) == 0 &&
+                            cr_rcpt_get(rcpt, "elapsed_ms", v_elapsed, sizeof v_elapsed) == 0 &&
+                            cr_rcpt_get(rcpt, "roster_sha", v_roster, sizeof v_roster) == 0 &&
+                            cr_rcpt_get(rcpt, "ts_epoch_s", v_ts, sizeof v_ts) == 0);
+                int f_ok = (rc_fresh(rcpt, "rid-rat-1") == 0);
+                ck(rc == 0 && has(out, "2b-ratchets\tPASS") && has(out, "READY\tyes") &&
+                   g_ok && f_ok &&
+                   tx_eqz(v_run_id, "rid-rat-1") && tx_eqz(v_rev, head40) &&
+                   tx_eqz(v_stage, "ratchets") && tx_eqz(v_verdict, "READY") &&
+                   tx_eqz(v_rc, "0") && tx_eqz(v_out_sha, exp_out_sha) &&
+                   tx_eqz(v_roster, exp_roster),
+                   "stage-ratchets-writes-valid-v2-receipt-ready");
+            }
+            /* 5. Failing stage writes verdict=FAIL receipt (rc=1) and exits 1 */
+            {
+                cx_fmt(cmd, sizeof cmd,
+                    "cd '%s' && STAGE_FAIL_RATCHETS=1 DEVSVC_OWNER=agy-flow sh '%s/unisacc.com' '%s/tools/chain-ready.cx' -- "
+                    "--repo '%s' --stage ratchets --rev '%s' --run-id rid-rat-fail --receipt-dir '%s'",
+                    srepo, cwd, cwd, srepo, head40, rdir);
+                char *av[] = {"./tools/bound", "40", "sh", "-c", cmd, 0};
+                rc = run(av, out, sizeof out);
+                cx_fmt(rcpt, sizeof rcpt, "%s/ratchets.rcpt", rdir);
+                int g_ok = (cr_rcpt_get(rcpt, "verdict", v_verdict, sizeof v_verdict) == 0 &&
+                            cr_rcpt_get(rcpt, "rc", v_rc, sizeof v_rc) == 0 &&
+                            cr_rcpt_get(rcpt, "run_id", v_run_id, sizeof v_run_id) == 0);
+                int f_ok = (rc_fresh(rcpt, "rid-rat-fail") == 0);
+                ck(rc == 1 && has(out, "2b-ratchets\tFAIL") && has(out, "READY\tno") &&
+                   g_ok && f_ok && tx_eqz(v_verdict, "FAIL") && tx_eqz(v_rc, "1"),
+                   "stage-ratchets-fail-writes-fail-receipt-rc1");
+            }
+            /* 6. --stage derive-b runs only shards 5..7 (does not run shards 1..4) and writes derive-b.rcpt */
+            {
+                char dcalls[480]; size_t dcn = 0; char *dcb = 0;
+                cx_fmt(dcalls, sizeof dcalls, "%s/derive.calls", srepo);
+                (void)sy_unlink(dcalls);
+                cx_fmt(cmd, sizeof cmd,
+                    "cd '%s' && DEVSVC_OWNER=agy-flow sh '%s/unisacc.com' '%s/tools/chain-ready.cx' -- "
+                    "--repo '%s' --stage derive-b --run-id rid-der-b --receipt-dir '%s'",
+                    srepo, cwd, cwd, srepo, rdir);
+                char *av[] = {"./tools/bound", "40", "sh", "-c", cmd, 0};
+                rc = run(av, out, sizeof out);
+                cx_fmt(rcpt, sizeof rcpt, "%s/derive-b.rcpt", rdir);
+                dcb = cx_read(dcalls, &dcn);
+                int only_567 = (dcb && has(dcb, "DERIVE_CALL\tproduct-map\n") &&
+                                has(dcb, "DERIVE_CALL\tdoc-links,tool-index\n") &&
+                                has(dcb, "DERIVE_CALL\ttable-index\n") &&
+                                !has(dcb, "tables-gen") && !has(dcb, "chain-phases"));
+                if (dcb) mm_free(dcb);
+                ck(rc == 0 && only_567 && rc_fresh(rcpt, "rid-der-b") == 0 &&
+                   cr_rcpt_get(rcpt, "stage", v_stage, sizeof v_stage) == 0 && tx_eqz(v_stage, "derive-b") &&
+                   cr_rcpt_get(rcpt, "verdict", v_verdict, sizeof v_verdict) == 0 && tx_eqz(v_verdict, "READY") &&
+                   cr_rcpt_get(rcpt, "rev", v_rev, sizeof v_rev) == 0 && tx_eqz(v_rev, head40),
+                   "stage-derive-b-runs-only-shards-5-6-7-and-resolves-head-rev");
+            }
+        }
 
-            if (prepare_alt_cr_tree(cwd, "stage-mut2",
-                    "return sy_sha256_hex(roster_buf, (long)rpos, out_sha);",
-                    "return sy_sha256_hex(roster_buf, (long)rpos - 1, out_sha);", mdir, sizeof mdir) == 0) {
+        /* 7. Four execution mutations (forged run_id, foreign rev, stale ts, verdict flip), each KILLED with rc and receipt asserted */
+        if (run_stage_mut1) {
+            /* Produce a clean fresh READY receipt for ratchets first */
+            cx_fmt(cmd, sizeof cmd,
+                "cd '%s' && DEVSVC_OWNER=agy-flow sh '%s/unisacc.com' '%s/tools/chain-ready.cx' -- "
+                "--repo '%s' --stage ratchets --rev '%s' --run-id rid-clean-m1 --receipt-dir '%s'",
+                srepo, cwd, cwd, srepo, head40, rdir);
+            int p_rc = run((char *[]){"./tools/bound", "40", "sh", "-c", cmd, 0}, out, sizeof out);
+            cx_fmt(rcpt, sizeof rcpt, "%s/ratchets.rcpt", rdir);
+            int pre_fresh = (rc_fresh(rcpt, "rid-clean-m1") == 0);
+
+            /* Execution Mutation 1 (forged run_id): replace run_id in receipt with rid-forged-m1 -> breaks rc_fresh binding (both old and forged run_id return non-zero) */
+            {
+                size_t rn = 0; char *rb = cx_read(rcpt, &rn);
+                long pos = rb ? cr_span_find(rb, (long)rn, "run_id\trid-clean-m1\n", 20) : -1;
+                if (rb && pos >= 0) {
+                    char *nb = mm_alloc((long)rn + 32);
+                    const char *rep = "run_id\trid-forged-m1\n";
+                    long rl = (long)tx_len(rep, 64);
+                    mm_copy(nb, (long)rn + 32, rb, pos);
+                    mm_copy(nb + pos, (long)rn + 32 - pos, rep, rl);
+                    mm_copy(nb + pos + rl, (long)rn + 32 - pos - rl, rb + pos + 20, (long)rn - pos - 20);
+                    cx_write(rcpt, nb, rn - 20 + (size_t)rl);
+                    mm_free(nb);
+                }
+                if (rb) mm_free(rb);
+                int got_forged = (cr_rcpt_get(rcpt, "run_id", v_run_id, sizeof v_run_id) == 0 && tx_eqz(v_run_id, "rid-forged-m1"));
+                int fresh_orig = (rc_fresh(rcpt, "rid-clean-m1") == 0);
+                int fresh_forged = (rc_fresh(rcpt, "rid-forged-m1") == 0);
+                ck(p_rc == 0 && pre_fresh && got_forged && !fresh_orig && !fresh_forged,
+                   "stage-exec-mut1-forged-run-id-killed");
+            }
+
+            /* Execution Mutation 2 (foreign rev): producer refuses --rev <foreign_40hex != HEAD> with rc=2 (rev-not-head) and writes no receipt */
+            {
+                const char *foreign_rev = "0123456789abcdef0123456789abcdef01234567";
+                char f_rcpt[480];
+                cx_fmt(f_rcpt, sizeof f_rcpt, "%s/ratchets.rcpt", rdir_f);
+                (void)sy_unlink(f_rcpt);
                 cx_fmt(cmd, sizeof cmd,
-                    "cd '%s' && DEVSVC_OWNER=cc sh '%s/unisacc.com' '%s/tools/chain-ready.cx' -- "
-                    "--repo '%s' --stage ratchets --rev '%s' --run-id rid-mut2 --receipt-dir '%s'",
-                    srepo, mdir, mdir, srepo, rev40, rdir);
-                (void)run((char *[]){"./tools/bound", "45", "sh", "-c", cmd, 0}, out, sizeof out);
+                    "cd '%s' && DEVSVC_OWNER=agy-flow sh '%s/unisacc.com' '%s/tools/chain-ready.cx' -- "
+                    "--repo '%s' --stage ratchets --rev '%s' --run-id rid-foreign-1 --receipt-dir '%s'",
+                    srepo, cwd, cwd, srepo, foreign_rev, rdir_f);
+                int prod_rc = run((char *[]){"./tools/bound", "40", "sh", "-c", cmd, 0}, out, sizeof out);
+                ck(prod_rc == 2 && has(out, "REFUSE\tCHAIN_READY_STAGE\treason=rev-not-head") && sy_exists(f_rcpt) == 0,
+                   "stage-exec-mut2-foreign-rev-killed");
+            }
+        }
+
+        if (run_stage_mut2) {
+            /* Execution Mutation 3 (stale ts): produce a real fresh receipt (rc=0, rc_fresh==0, ts within 1800s), then age ts_epoch_s past 1800s -> killed by age window check */
+            {
+                cx_fmt(cmd, sizeof cmd,
+                    "cd '%s' && DEVSVC_OWNER=agy-flow sh '%s/unisacc.com' '%s/tools/chain-ready.cx' -- "
+                    "--repo '%s' --stage ratchets --rev '%s' --run-id rid-stale-1 --receipt-dir '%s'",
+                    srepo, cwd, cwd, srepo, head40, rdir);
+                int s_rc = run((char *[]){"./tools/bound", "40", "sh", "-c", cmd, 0}, out, sizeof out);
                 cx_fmt(rcpt, sizeof rcpt, "%s/ratchets.rcpt", rdir);
-                int m2_ok = (cr_rcpt_get(rcpt, "roster_sha", v_roster, sizeof v_roster) == 0 && tx_eqz(v_roster, exp_roster));
-                ck(m2_ok == 0, "stage-mut2-corrupt-roster-sha-killed");
-            } else ck(0, "stage-mut2-corrupt-roster-sha-killed");
+                int s_fresh_before = (rc_fresh(rcpt, "rid-stale-1") == 0);
+                int64_t ts_before = 0, ts_after = 0;
+                long now_s = (long)sy_wall_s();
+                if (cr_rcpt_get(rcpt, "ts_epoch_s", v_ts, sizeof v_ts) == 0) {
+                    (void)tx_to_i64(v_ts, (long)tx_len(v_ts, sizeof v_ts), 10, &ts_before);
+                }
+                int fresh_window_before = (ts_before > 0 && now_s - (long)ts_before <= 1800);
+                /* Mutate ts_epoch_s line in receipt to now_s - 3600 */
+                size_t sn = 0; char *sb = cx_read(rcpt, &sn);
+                long p_ts = sb ? cr_span_find(sb, (long)sn, "ts_epoch_s\t", 11) : -1;
+                if (sb && p_ts >= 0) {
+                    char *nb = mm_alloc((long)sn + 64);
+                    char ts_line[64];
+                    cx_fmt(ts_line, sizeof ts_line, "ts_epoch_s\t%ld\n", now_s - 3600L);
+                    long tl = (long)tx_len(ts_line, sizeof ts_line);
+                    mm_copy(nb, (long)sn + 64, sb, p_ts);
+                    mm_copy(nb + p_ts, (long)sn + 64 - p_ts, ts_line, tl);
+                    cx_write(rcpt, nb, (size_t)(p_ts + tl));
+                    mm_free(nb);
+                }
+                if (sb) mm_free(sb);
+                if (cr_rcpt_get(rcpt, "ts_epoch_s", v_ts, sizeof v_ts) == 0) {
+                    (void)tx_to_i64(v_ts, (long)tx_len(v_ts, sizeof v_ts), 10, &ts_after);
+                }
+                int fresh_window_after = (ts_after > 0 && now_s - (long)ts_after <= 1800);
+                ck(s_rc == 0 && s_fresh_before && fresh_window_before && !fresh_window_after,
+                   "stage-exec-mut3-stale-ts-killed");
+            }
+
+            /* Execution Mutation 4 (verdict flip): produce a real FAIL receipt (rc=1, verdict=FAIL, output_sha bound to FAIL), flip verdict\tFAIL -> verdict\tREADY and rc\t1 -> rc\t0 in place -> killed by output_sha cross-check */
+            {
+                char ready_out_str[256], ready_out_sha[65], fail_out_str[256], fail_out_sha[65];
+                cx_fmt(ready_out_str, sizeof ready_out_str, "%s\tratchets\tREADY", head40);
+                sy_sha256_hex(ready_out_str, (long)tx_len(ready_out_str, sizeof ready_out_str), ready_out_sha);
+                cx_fmt(fail_out_str, sizeof fail_out_str, "%s\tratchets\tFAIL", head40);
+                sy_sha256_hex(fail_out_str, (long)tx_len(fail_out_str, sizeof fail_out_str), fail_out_sha);
+                cx_fmt(cmd, sizeof cmd,
+                    "cd '%s' && STAGE_FAIL_RATCHETS=1 DEVSVC_OWNER=agy-flow sh '%s/unisacc.com' '%s/tools/chain-ready.cx' -- "
+                    "--repo '%s' --stage ratchets --rev '%s' --run-id rid-flip-1 --receipt-dir '%s'",
+                    srepo, cwd, cwd, srepo, head40, rdir);
+                int fail_rc = run((char *[]){"./tools/bound", "40", "sh", "-c", cmd, 0}, out, sizeof out);
+                cx_fmt(rcpt, sizeof rcpt, "%s/ratchets.rcpt", rdir);
+                size_t fn = 0; char *fb = cx_read(rcpt, &fn);
+                if (fb) {
+                    long p_rc1 = cr_span_find(fb, (long)fn, "rc\t1\n", 5);
+                    if (p_rc1 >= 0) fb[p_rc1 + 3] = '0';
+                    long p_vf = cr_span_find(fb, (long)fn, "verdict\tFAIL\n", 13);
+                    if (p_vf >= 0) {
+                        char *nb = mm_alloc((long)fn + 16);
+                        const char *vrep = "verdict\tREADY\n";
+                        mm_copy(nb, (long)fn + 16, fb, p_vf);
+                        mm_copy(nb + p_vf, (long)fn + 16 - p_vf, vrep, 14);
+                        mm_copy(nb + p_vf + 14, (long)fn + 16 - p_vf - 14, fb + p_vf + 13, (long)fn - p_vf - 13);
+                        cx_write(rcpt, nb, fn + 1);
+                        mm_free(nb);
+                    }
+                    mm_free(fb);
+                }
+                int flip_fresh = (rc_fresh(rcpt, "rid-flip-1") == 0);
+                int flip_verd = (cr_rcpt_get(rcpt, "verdict", v_verdict, sizeof v_verdict) == 0 && tx_eqz(v_verdict, "READY"));
+                int got_osha = (cr_rcpt_get(rcpt, "output_sha", v_out_sha, sizeof v_out_sha) == 0);
+                ck(fail_rc == 1 && flip_fresh && flip_verd && got_osha &&
+                   tx_eqz(v_out_sha, fail_out_sha) && !tx_eqz(v_out_sha, ready_out_sha),
+                   "stage-exec-mut4-verdict-flip-killed");
+            }
         }
     }
     printf("SHARD_RESULT\tpart=%s\tpassed=%d\tfailed=%d\trc=%d\n", part_name, passed, failed, failed ? 1 : 0);
