@@ -16,14 +16,14 @@ const cases = [
 ];
 const width = 336, height = 64, bytes = width * height * 4;
 
-function facePixels(face) {
-  const pixels = new Uint8Array(16 * 16 * 4);
-  for (let y=0; y<16; y++) for (let x=0; x<16; x++) {
-    const u=(x+.5)/8-1, v=(y+.5)/8-1;
+function facePixels(face,size=16) {
+  const pixels = new Uint8Array(size * size * 4);
+  for (let y=0; y<size; y++) for (let x=0; x<size; x++) {
+    const u=2*(x+.5)/size-1, v=2*(y+.5)/size-1;
     const directions=[[1,-v,-u],[-1,-v,u],[u,1,v],[u,-1,-v],[u,-v,1],[-u,-v,-1]];
     const direction=directions[face], length=Math.hypot(...direction);
-    const rgb=query.has("textured")?direction.map(component=>Math.round(128+95*component/length)):colors[face];
-    pixels.set([...rgb,255],(y*16+x)*4);
+    const rgb=(query.has("textured")||query.has("wide"))?direction.map(component=>Math.round(128+95*component/length)):colors[face];
+    pixels.set([...rgb,255],(y*size+x)*4);
   }
   return pixels;
 }
@@ -168,12 +168,66 @@ async function testFull(renderer, reference) {
   return [...maximum,repeatDelta,precisionDelta,stageMax,stageAt,stageOver];
 }
 
+async function testWide(renderer) {
+  const binary=await (await fetch("file://"+query.get("dir")+"/probe.wasm")).arrayBuffer();
+  const result=[];
+  for(const size of [32,64]) {
+    const {instance}=await WebAssembly.instantiate(binary);
+    const wasm=instance.exports;
+    const call=(op,a=0,b=0)=>Number(wasm.uxe_pmrem_build(BigInt(op),BigInt(a),BigInt(b)));
+    const memory=new Uint8Array(wasm.memory.buffer,call(12),700000);
+    const faces=colors.map((_,face)=>{
+      const rgba=facePixels(face,size);
+      memory.set(rgba,4096+face*rgba.length);
+      return new DataTexture(rgba,size,size);
+    });
+    const cube=new CubeTexture(faces);
+    cube.minFilter=cube.magFilter=LinearFilter;
+    cube.generateMipmaps=false;
+    cube.needsUpdate=true;
+    const gen=new PMREMGenerator(renderer);
+    const target=gen.fromCubemap(cube);
+    try {
+      const limit=4*size*width*4;
+      if(call(4)!==128 || call(13,size,limit-1)!==-1 || call(13,size,limit)!==128 ||
+         call(3,Math.log2(size))!==1 || call(3,-2)!==1) throw Error("wide layout");
+      const reference=new Uint16Array(limit);
+      renderer.readRenderTargetPixels(target,0,0,width,4*size,reference);
+      let pixels=0, maximum=0, over=0;
+      for(let band=0, tile=size;band<=6+Math.log2(size/16);band++,tile=Math.max(16,tile/2)) {
+        const row=4*(size-tile), col=48*Math.max(0,band-Math.log2(size/16));
+        const selected=query.has("mutate")&&band===6?col-48:col;
+        for(let y=0;y<2*tile;y++) for(let x=0;x<3*tile;x++) {
+          pixels++;
+          for(let channel=0;channel<4;channel++) {
+            const a=((row+y)*width+x+col)*4+channel;
+            const b=((row+y)*width+x+selected)*4+channel;
+            const bits=reference[a], exp=(bits>>10)&31, fraction=bits&1023;
+            const expected=Math.round(255*(exp===0?fraction*2**-24:(1+fraction/1024)*2**(exp-15)));
+            const difference=Math.abs(memory[110000+b]-expected);
+            maximum=Math.max(maximum,difference);
+            if(difference>3) over++;
+          }
+        }
+      }
+      result.push(pixels,maximum,over);
+    } finally {
+      target.dispose(); gen.dispose(); cube.dispose(); faces.forEach(face=>face.dispose());
+    }
+  }
+  return result;
+}
+
 async function test() {
   if (REVISION !== "160") throw Error("three.js revision mismatch");
   const canvas = document.createElement("canvas");
   const context = canvas.getContext("webgl2", {antialias: false});
   if (!context) throw Error("WebGL2 unavailable");
   const renderer = new WebGLRenderer({canvas, context});
+  if(query.has("wide")) {
+    try { return await testWide(renderer); }
+    finally { renderer.dispose(); }
+  }
   const ref = r160Atlas(renderer);
   if(query.has("full")) {
     try { return await testFull(renderer,ref.target); }
