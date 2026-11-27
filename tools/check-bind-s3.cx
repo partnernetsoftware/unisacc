@@ -4,8 +4,8 @@
  *   sh ./unisacc.com tools/check-bind-s3.cx -- --plan
  *   sh ./unisacc.com tools/check-bind-s3.cx -- --limits
  *   sh ./unisacc.com tools/check-bind-s3.cx -- --pack-local-ape <LOCAL_DIR>
- *   sh ./unisacc.com tools/check-bind-s3.cx -- --local-ape <LOCAL_DIR>
- *   sh ./unisacc.com tools/check-bind-s3.cx -- --chain-ape <APE_PATH> --chain-receipt <RECEIPT_PATH>
+ *   sh ./unisacc.com tools/check-bind-s3.cx -- --local-ape [<LOCAL_DIR>]
+ *   sh ./unisacc.com tools/check-bind-s3.cx -- --chain-ape <APE_PATH> --chain-receipt <V3_RCPT> --run-id <ID> --rev <REV> [--unit bind] [--target lnx/x86_64] [--producer candidate-chain] [--purpose chain-ape] --inputs-sha <SHA> --output-path <PATH> --now-ts <TS>
  *   sh ./unisacc.com tools/check-bind-s3.cx -- --emit-evidence <RUN_ID> <EVIDENCE_PATH>
  *   sh ./unisacc.com tools/check-bind-s3.cx -- --judge-evidence <RUN_ID> <EVIDENCE_PATH> [--expect-exec SHA] [--expect-carrier SHA]
  *
@@ -29,6 +29,7 @@
 #pragma unisa use mem.bytes
 #pragma unisa use cxlib.netpack
 #pragma unisa use cxlib.chainfacts
+#pragma unisa use cxlib.receipt
 
 static int failed;
 static void ck(int ok, const char *name) {
@@ -439,13 +440,13 @@ static int pack_local_apes(const char *repo, const char *fdir) {
     char *vmp[] = {"sh", "./unisacc.com", "tools/tapepack.cx", "--", m53_s, "-o", m53_p, 0};
     char *vbg[] = {"sh", "./unisacc.com", "exec/tape/guests/bind_guest.cx", "-S", "-o", bind_s, 0};
     char *vpk[] = {"sh", "./unisacc.com", "tools/tapepack.cx", "--", bind_s, "-o", bind_sl, 0};
-    sy_stat_t so_st;
+    sy_stat_t so_st, m53_st, bd_st;
     int rc_sb = (sy_lstat(so_p, &so_st) == 0 && so_st.kind == 'f' && so_st.size > 0) ? 0 : run_cmd(repo, vsb, out, sizeof out, 35);
-    if (rc_sb != 0 ||
-        run_cmd(repo, vmg, out, sizeof out, 20) != 0 ||
-        run_cmd(repo, vmp, out, sizeof out, 20) != 0 ||
-        run_cmd(repo, vbg, out, sizeof out, 20) != 0 ||
-        run_cmd(repo, vpk, out, sizeof out, 20) != 0) {
+    int rc_m53 = (sy_lstat(m53_p, &m53_st) == 0 && m53_st.kind == 'f' && m53_st.size > 0) ? 0 :
+                 ((rc_sb == 0 && run_cmd(repo, vmg, out, sizeof out, 20) == 0 && run_cmd(repo, vmp, out, sizeof out, 20) == 0) ? 0 : -1);
+    int rc_bd = (sy_lstat(bind_sl, &bd_st) == 0 && bd_st.kind == 'f' && bd_st.size > 0) ? 0 :
+                ((rc_m53 == 0 && run_cmd(repo, vbg, out, sizeof out, 20) == 0 && run_cmd(repo, vpk, out, sizeof out, 20) == 0) ? 0 : -1);
+    if (rc_sb != 0 || rc_m53 != 0 || rc_bd != 0) {
         sy_eprintf("PACK_LOCAL_APE\tbuild-tape-failed\t%.200s\n", out);
         return 1;
     }
@@ -471,13 +472,15 @@ static int pack_local_apes(const char *repo, const char *fdir) {
     if (!bd_bad || mm_copy(bd_bad, (long)bd_n, bd_b, (long)bd_n)) return 2;
     bd_bad[bd_n - 1] ^= 0x55;
 
-    /* Build dynamic authoritative tape set (tapemode.so + all cf_tu units, e.g. m53 + driveargs + bind) */
+    /* Build dynamic authoritative tape set (tapemode.so + all cf_tu units, compiling each real exec/tape/guests/<u>_guest.cx) */
     char tkeys[16][96]; const char *v_ok[16], *v_tamp[16], *v_nomf[16], *k_nof[16], *v_nof[16];
+    char *u_bufs[16];
     size_t l_ok[16], l_nm[16], l_nof[16];
     const char *k_all[16];
     char mf_full[2048], mf_nobind[2048], row[256];
     long mfp = 0, mnp = 0;
     int nt = 0, n_nof = 0;
+    for (int i = 0; i < 16; i++) u_bufs[i] = 0;
     if (cx_fmt(row, sizeof row, "tapemode.so\t%s\t%ld\n", so_sha, (long)so_n) ||
         mm_copy(mf_full + mfp, (long)sizeof mf_full - mfp, row, tx_len(row, sizeof row)) ||
         mm_copy(mf_nobind + mnp, (long)sizeof mf_nobind - mnp, row, tx_len(row, sizeof row))) return 2;
@@ -496,12 +499,31 @@ static int pack_local_apes(const char *repo, const char *fdir) {
                 mm_copy(mf_full + mfp, (long)sizeof mf_full - mfp, row, tx_len(row, sizeof row))) return 2;
             mfp += tx_len(row, sizeof row);
             v_ok[nt] = bd_b; v_tamp[nt] = bd_bad; v_nomf[nt] = bd_b; l_ok[nt] = bd_n; l_nm[nt] = bd_n;
-        } else {
-            if (cx_fmt(row, sizeof row, "%s.tapeslice\t%s\t%ld\n", u, m53_sha, (long)m53_n) ||
+        } else if (tx_eqz(u, "m53")) {
+            if (cx_fmt(row, sizeof row, "m53.tapeslice\t%s\t%ld\n", m53_sha, (long)m53_n) ||
                 mm_copy(mf_full + mfp, (long)sizeof mf_full - mfp, row, tx_len(row, sizeof row)) ||
                 mm_copy(mf_nobind + mnp, (long)sizeof mf_nobind - mnp, row, tx_len(row, sizeof row))) return 2;
             mfp += tx_len(row, sizeof row); mnp += tx_len(row, sizeof row);
             v_ok[nt] = m53_b; v_tamp[nt] = m53_b; v_nomf[nt] = m53_b; l_ok[nt] = m53_n; l_nm[nt] = m53_n;
+        } else {
+            char ug_cx[700], ug_s[700], ug_sl[700], u_sha[65];
+            size_t un = 0; sy_stat_t ust;
+            if (cx_fmt(ug_cx, sizeof ug_cx, "exec/tape/guests/%s_guest.cx", u) ||
+                cx_fmt(ug_s, sizeof ug_s, "%s/%s_guest.s", fdir, u) ||
+                cx_fmt(ug_sl, sizeof ug_sl, "%s/%s.tapeslice", tdir, u)) return 2;
+            if (sy_lstat(ug_sl, &ust) != 0 || ust.kind != 'f' || ust.size <= 0) {
+                char *vuc[] = {"sh", "./unisacc.com", ug_cx, "-S", "-o", ug_s, 0};
+                char *vup[] = {"sh", "./unisacc.com", "tools/tapepack.cx", "--", ug_s, "-o", ug_sl, 0};
+                if (run_cmd(repo, vuc, out, sizeof out, 20) != 0 || run_cmd(repo, vup, out, sizeof out, 20) != 0) return 2;
+            }
+            u_bufs[nt] = cx_read(ug_sl, &un);
+            if (!u_bufs[nt] || !un) return 2;
+            (void)sy_sha256_hex(u_bufs[nt], (long)un, u_sha);
+            if (cx_fmt(row, sizeof row, "%s.tapeslice\t%s\t%ld\n", u, u_sha, (long)un) ||
+                mm_copy(mf_full + mfp, (long)sizeof mf_full - mfp, row, tx_len(row, sizeof row)) ||
+                mm_copy(mf_nobind + mnp, (long)sizeof mf_nobind - mnp, row, tx_len(row, sizeof row))) return 2;
+            mfp += tx_len(row, sizeof row); mnp += tx_len(row, sizeof row);
+            v_ok[nt] = u_bufs[nt]; v_tamp[nt] = u_bufs[nt]; v_nomf[nt] = u_bufs[nt]; l_ok[nt] = un; l_nm[nt] = un;
         }
         nt++;
     }
@@ -555,10 +577,14 @@ static int pack_local_apes(const char *repo, const char *fdir) {
             if (bb) mm_free(bb);
         }
         if (i == 0) {
-            char *vap[] = {"sh", "./unisacc.com", "tools/ape-pack.cx", "--",
-                           "--payload", body_p, "--tool", "unisacc", "--need", "53248",
-                           "--deflate", ape_p, s1, eb_elf, s3, s4, s5, 0};
-            if (run_cmd(repo, vap, out, sizeof out, 25) != 0) {
+            char ap_bin[700]; sy_stat_t ap_st;
+            int has_ap = (!cx_fmt(ap_bin, sizeof ap_bin, "%s/ap_tool", fdir) && sy_lstat(ap_bin, &ap_st) == 0 && ap_st.kind == 'f' && ap_st.size > 0);
+            char *vap_b[] = {ap_bin, "--payload", body_p, "--tool", "unisacc", "--need", "53248",
+                             ape_p, s1, eb_elf, s3, s4, s5, 0};
+            char *vap_s[] = {"sh", "./unisacc.com", "tools/ape-pack.cx", "--",
+                             "--payload", body_p, "--tool", "unisacc", "--need", "53248",
+                             ape_p, s1, eb_elf, s3, s4, s5, 0};
+            if (run_cmd(repo, has_ap ? vap_b : vap_s, out, sizeof out, 25) != 0) {
                 sy_eprintf("PACK_LOCAL_APE\tape-pack-failed\t%s\t%.200s\n", names[i], out);
                 return 1;
             }
@@ -609,6 +635,7 @@ static int pack_local_apes(const char *repo, const char *fdir) {
                var_shas[0], var_shas[1], var_shas[2], var_shas[3], var_shas[4]) ||
         cx_write(lm_p, lm, (size_t)tx_len(lm, sizeof lm))) return 2;
 
+    for (int i = 0; i < 16; i++) if (u_bufs[i]) mm_free(u_bufs[i]);
     mm_free(bd_bad); mm_free(so_b); mm_free(m53_b); mm_free(bd_b);
     return 0;
 }
@@ -754,6 +781,11 @@ static int run_local_ape(const char *repo, const char *fdir) {
             char *v[] = {"sh", apes[i + 1], "-S", hello_cx, "-o", out_f, 0};
             int rc = run_with_container(repo, 0, v, out, sizeof out, 25);
             int exact_ref = (strstr(out, want_reasons[i]) != 0 && strstr(out, "unisacc: model driver: bind") != 0);
+            if (!exact_ref && i == 0) {
+                /* When driveargs_m1 is also linked in the full binary, bare carrier is refused first at drive.cx:473 */
+                exact_ref = (strstr(out, "DRIVEARGS_M1_REFUSE\treason=embed-resource-missing\tdetail=1") != 0 &&
+                             strstr(out, "unisacc: model driver: driveargs tape refused") != 0);
+            }
             int no_out = file_absent(out_f);
             sy_printf("LOCAL_APE_RUN\tscope=LOCAL\tvariant=%s\tsha256=%s\trc=%d\texact_reason=%d\tno_output=%d\n",
                       vnames[i + 1], var_shas[i + 1], rc, exact_ref, no_out);
@@ -776,14 +808,20 @@ static int run_local_ape(const char *repo, const char *fdir) {
         ck(ok0, "local-elf-intact-carrier-control-rc0");
 
         int rc1 = run_with_container(repo, noex_p, v1, out, sizeof out, 25);
-        int ok1 = (rc1 == 1 && strstr(out, "BIND_M1_REFUSE\treason=embed-container-missing\tdetail=-2") != 0 &&
-                   strstr(out, "unisacc: model driver: bind") != 0 && file_absent(out_e1));
+        int ok1 = (rc1 == 1 && file_absent(out_e1) &&
+                   ((strstr(out, "BIND_M1_REFUSE\treason=embed-container-missing\tdetail=-2") != 0 &&
+                     strstr(out, "unisacc: model driver: bind") != 0) ||
+                    (strstr(out, "DRIVEARGS_M1_REFUSE\treason=embed-container-missing\tdetail=-2") != 0 &&
+                     strstr(out, "unisacc: model driver: driveargs tape refused") != 0)));
         sy_printf("LOCAL_APE_RUN\tscope=LOCAL\tvariant=env-nonexistent\tsha256=%s\trc=%d\texact_reason=%d\n", a_elf_ok, rc1, ok1);
         ck(ok1, "local-ape-refuse-bad-env-nonexistent-on-good-carrier");
 
         int rc2 = run_with_container(repo, junk_p, v2, out, sizeof out, 25);
-        int ok2 = (rc2 == 1 && strstr(out, "BIND_M1_REFUSE\treason=embed-footer-invalid\tdetail=0") != 0 &&
-                   strstr(out, "unisacc: model driver: bind") != 0 && file_absent(out_e2));
+        int ok2 = (rc2 == 1 && file_absent(out_e2) &&
+                   ((strstr(out, "BIND_M1_REFUSE\treason=embed-footer-invalid\tdetail=0") != 0 &&
+                     strstr(out, "unisacc: model driver: bind") != 0) ||
+                    (strstr(out, "DRIVEARGS_M1_REFUSE\treason=embed-footer-invalid\tdetail=0") != 0 &&
+                     strstr(out, "unisacc: model driver: driveargs tape refused") != 0)));
         sy_printf("LOCAL_APE_RUN\tscope=LOCAL\tvariant=env-non-p4\tsha256=%s\trc=%d\texact_reason=%d\n", a_elf_ok, rc2, ok2);
         ck(ok2, "local-ape-refuse-bad-env-non-p4-on-good-carrier");
     }
@@ -792,22 +830,75 @@ static int run_local_ape(const char *repo, const char *fdir) {
     return failed ? 1 : 0;
 }
 
-/* Release pre-gate mode: --chain-ape <APE_PATH> --chain-receipt <RECEIPT_PATH>
- * Refuses (rc=2) if APE SHA-256 does not match an exact digest field in the receipt,
- * dynamically adapts to the authoritative tape record count (2 + cf_tu_count()),
- * preserves all non-bind routed tape slices verbatim, and verifies full-byte non-tape invariance. */
-static int run_chain_ape(const char *repo, const char *ape_path, const char *rcpt_path) {
-    char ape_sha[65], tmp[512], out[16384], hello_cx[700];
-    size_t rn = 0; char *rb = cx_read(rcpt_path, &rn);
-    if (!rb || rn == 0 || file_sha256_and_size(ape_path, ape_sha, 0) != 0) {
-        if (rb) mm_free(rb);
-        sy_eprintf("CHAIN_APE_REFUSE\treason=missing-ape-or-receipt\n");
+static int parse_i64_pos(const char *s, int64_t *out) {
+    int64_t v = 0;
+    if (!s || !s[0]) return 1;
+    for (int i = 0; s[i]; i++) {
+        if (s[i] < '0' || s[i] > '9') return 1;
+        v = v * 10 + (s[i] - '0');
+    }
+    *out = v;
+    return v > 0 ? 0 : 1;
+}
+
+static int verify_chain_receipt(const char *ape_path, const char *rcpt_path,
+                                const char *run_id, const char *rev, const char *unit,
+                                const char *target, const char *producer, const char *purpose,
+                                const char *inputs_sha, const char *output_path, int64_t now_ts,
+                                char actual_sha[65], int quiet) {
+    rc_expect_t exp;
+    rc_verified_t got;
+    int rrc;
+    if (file_sha256_and_size(ape_path, actual_sha, 0) != 0) {
+        if (!quiet) sy_eprintf("CHAIN_APE_REFUSE\treason=cannot-read-chain-ape\tape=%s\n", ape_path ? ape_path : "");
         return 2;
     }
-    int sha_bound = receipt_has_exact_digest(rb, rn, ape_sha);
-    mm_free(rb);
-    if (!sha_bound) {
-        sy_eprintf("CHAIN_APE_REFUSE\treason=ape-receipt-sha-mismatch\tape_sha=%s\treceipt=%s\n", ape_sha, rcpt_path);
+    mm_fill(&exp, (long)sizeof exp, 0, (long)sizeof exp);
+    exp.run_id = run_id;
+    exp.rev = rev;
+    exp.unit = unit;
+    exp.target = target;
+    exp.producer = producer;
+    exp.purpose = purpose;
+    exp.candidate_sha = actual_sha;
+    exp.inputs_sha = inputs_sha;
+    exp.output_path = output_path;
+    exp.expect_rc = 0;
+    exp.expect_verdict = "PASS";
+    exp.now_ts = now_ts;
+    exp.max_age_s = 86400;
+    exp.max_future_s = 60;
+    exp.allow_fail_verdict = 0;
+    rrc = rc_verify_out(rcpt_path, &exp, &got);
+    if (rrc != RC_OK || !tx_eqz(got.rev, rev) || !tx_eqz(got.candidate_sha, actual_sha) || !tx_eqz(got.target, target)) {
+        if (!quiet) {
+            sy_eprintf("CHAIN_APE_REFUSE\treason=receipt-verify:%s:%s\tape_sha=%s\treceipt=%s\n",
+                       rc_code_name(rrc), rc_why(), actual_sha, rcpt_path ? rcpt_path : "");
+        }
+        return 2;
+    }
+    return 0;
+}
+
+/* Release pre-gate mode: --chain-ape <APE_PATH> --chain-receipt <V3_RECEIPT_PATH> ...
+ * Verifies the v3 chain receipt via rc_verify_out (binding rev, target, candidate_sha, run_id,
+ * unit, producer, purpose, inputs_sha, output_path, now_ts), dynamically adapts to the
+ * authoritative tape record count (2 + cf_tu_count()), preserves all non-bind routed tape slices
+ * verbatim, and verifies full-byte non-tape invariance. */
+static int run_chain_ape(const char *repo, const char *ape_path, const char *rcpt_path,
+                         const char *run_id, const char *rev, const char *unit,
+                         const char *target, const char *producer, const char *purpose,
+                         const char *inputs_sha, const char *output_path, int64_t now_ts) {
+    char ape_sha[65], tmp[512], out[16384], hello_cx[700];
+    if (!ape_path || !ape_path[0] || !rcpt_path || !rcpt_path[0] ||
+        !run_id || !run_id[0] || !rev || !rev[0] || !unit || !unit[0] ||
+        !target || !target[0] || !producer || !producer[0] || !purpose || !purpose[0] ||
+        !inputs_sha || !inputs_sha[0] || !output_path || !output_path[0] || now_ts <= 0) {
+        sy_eprintf("CHAIN_APE_REFUSE\treason=missing-chain-pregate-args\n");
+        return 2;
+    }
+    if (verify_chain_receipt(ape_path, rcpt_path, run_id, rev, unit, target, producer, purpose,
+                             inputs_sha, output_path, now_ts, ape_sha, 0) != 0) {
         return 2;
     }
     int want_tape = 2 + cf_tu_count();
@@ -924,6 +1015,10 @@ static int run_chain_ape(const char *repo, const char *ape_path, const char *rcp
                 char *v[] = {"sh", var_ape, "-S", hello_cx, "-o", out_f, 0};
                 int rc = run_with_container(repo, 0, v, out, sizeof out, 25);
                 int exact_ref = (strstr(out, want_reasons[i]) != 0 && strstr(out, "unisacc: model driver: bind") != 0);
+                if (!exact_ref && i == 0) {
+                    exact_ref = (strstr(out, "DRIVEARGS_M1_REFUSE\treason=embed-resource-missing\tdetail=1") != 0 &&
+                                 strstr(out, "unisacc: model driver: driveargs tape refused") != 0);
+                }
                 int no_out = file_absent(out_f);
                 sy_printf("CHAIN_APE_RUN\tchain_ape_sha=%s\tvariant=%s\tvariant_sha=%s\trc=%d\texact_reason=%d\tno_output=%d\n",
                           ape_sha, vnames[i], var_sha, rc, exact_ref, no_out);
@@ -1190,21 +1285,42 @@ static int run_limits_check(const char *repo) {
 }
 
 static int run_local_ape_selfcontained(const char *repo) {
-    char fdir[512], eb_dir[640], pkg_p[640], tdir[640], out[16384], cmd[2048];
+    char fdir[512], eb_cache[640], eb_dir[640], pkg_p[640], tdir[640], m53_cx[640], out[16384], cmd[3072];
     if (sy_mkdtemp(sy_tmpdir(), "bind-s3-lape-", fdir, sizeof fdir) != 0) return 2;
-    if (cx_fmt(eb_dir, sizeof eb_dir, "%s/eb", fdir) ||
+    if (cx_fmt(eb_cache, sizeof eb_cache, "%s/unisacc-bind-s3-eb-cache", sy_tmpdir()) ||
+        cx_fmt(eb_dir, sizeof eb_dir, "%s/eb", fdir) ||
         cx_fmt(pkg_p, sizeof pkg_p, "%s/unisacc.com", repo) ||
         cx_fmt(tdir, sizeof tdir, "%s/tape", fdir) ||
-        sy_mkdir_all(eb_dir, 0755) || sy_mkdir_all(tdir, 0755) ||
+        cx_fmt(m53_cx, sizeof m53_cx, "%s/m53_guest.cx", fdir) ||
+        sy_mkdir_all(eb_cache, 0755) || sy_mkdir_all(eb_dir, 0755) || sy_mkdir_all(tdir, 0755) ||
         link_repo_roots(repo, fdir) != 0) return 2;
-    /* Run entry-build (8 jobs) in parallel with tape-sidecar-build (1 job) to stay well under 50s */
+    const char *m53_guest_src =
+        "#pragma unisa use runtime.stream_attributes\n"
+        "int main(int argc, char **argv) {\n"
+        "    const char *abi = \"M53S1BIN2\";\n"
+        "    const unsigned long long *ba;\n"
+        "    if (abi[0] != 'M' || argc < 2) return 2;\n"
+        "    ba = (const unsigned long long *)argv[1];\n"
+        "    return cxsa_valid((const unsigned char *)ba[0], (long)ba[1]);\n"
+        "}\n";
+    if (cx_write(m53_cx, m53_guest_src, (size_t)tx_len(m53_guest_src, 1024))) return 2;
+    /* 4-way parallel build: entry-build || tape-sidecar-build || (tapepack + 3 guests) || ape-pack */
     if (cx_fmt(cmd, sizeof cmd,
-               "sh ./unisacc.com tools/entry-build.cx -- '%s' '%s' '%s' & p1=$!; "
-               "sh ./unisacc.com tools/tape-sidecar-build.cx -- '%s' '%s' & p2=$!; "
-               "wait $p1 && wait $p2",
-               repo, pkg_p, eb_dir, repo, tdir)) return 2;
+               "(sh ./unisacc.com tools/entry-build.cx -- '%s' '%s' '%s' && "
+               " cp '%s/bind.o' '%s/entry.elf' '%s/candidate' '%s/receipt.txt' '%s/') & p1=$!; "
+               "(sh ./unisacc.com tools/tape-sidecar-build.cx -- '%s' '%s') & p2=$!; "
+               "(sh ./unisacc.com tools/tapepack.cx -o '%s/tp_tool' || exit 1; "
+               " (sh ./unisacc.com '%s' -S -o '%s/m53_guest.s' && '%s/tp_tool' '%s/m53_guest.s' -o '%s/m53.tapeslice') & g1=$!; "
+               " (sh ./unisacc.com exec/tape/guests/driveargs_guest.cx -S -o '%s/driveargs_guest.s' && '%s/tp_tool' '%s/driveargs_guest.s' -o '%s/driveargs.tapeslice') & g2=$!; "
+               " (sh ./unisacc.com exec/tape/guests/bind_guest.cx -S -o '%s/bind_guest.s' && '%s/tp_tool' '%s/bind_guest.s' -o '%s/bind.tapeslice') & g3=$!; "
+               " wait $g1 && wait $g2 && wait $g3) & p3=$!; "
+               "(sh ./unisacc.com tools/ape-pack.cx -o '%s/ap_tool') & p4=$!; "
+               "wait $p1 && wait $p2 && wait $p3 && wait $p4",
+               repo, pkg_p, eb_cache, eb_cache, eb_cache, eb_cache, eb_cache, eb_dir,
+               repo, tdir, fdir, m53_cx, fdir, fdir, fdir, tdir,
+               fdir, fdir, fdir, tdir, fdir, fdir, fdir, tdir, fdir)) return 2;
     char *v[] = {"sh", "-c", cmd, 0};
-    if (run_cmd(repo, v, out, sizeof out, 48) != 0) {
+    if (run_cmd(repo, v, out, sizeof out, 50) != 0) {
         sy_eprintf("LOCAL_APE_SELF\tbuild-failed\t%.240s\n", out);
         return 1;
     }
@@ -1221,8 +1337,26 @@ int main(int argc, char **argv) {
     if (argc >= 3 && tx_eqz(argv[1], "--pack-local-ape")) return pack_local_apes(repo, argv[2]);
     if (argc == 2 && tx_eqz(argv[1], "--local-ape")) return run_local_ape_selfcontained(repo);
     if (argc >= 3 && tx_eqz(argv[1], "--local-ape")) return run_local_ape(repo, argv[2]);
-    if (argc >= 5 && tx_eqz(argv[1], "--chain-ape") && tx_eqz(argv[3], "--chain-receipt"))
-        return run_chain_ape(repo, argv[2], argv[4]);
+    if (argc >= 2 && (tx_eqz(argv[1], "--chain-ape") || tx_eqz(argv[1], "--chain-receipt"))) {
+        const char *ape = 0, *rcpt = 0, *rid = 0, *rev = 0, *unit = "bind";
+        const char *tgt = "lnx/x86_64", *prod = "candidate-chain", *purp = "chain-ape";
+        const char *in_sha = 0, *out_p = 0;
+        int64_t now_ts = 0;
+        for (int i = 1; i + 1 < argc; i += 2) {
+            if (tx_eqz(argv[i], "--chain-ape")) ape = argv[i + 1];
+            else if (tx_eqz(argv[i], "--chain-receipt")) rcpt = argv[i + 1];
+            else if (tx_eqz(argv[i], "--run-id")) rid = argv[i + 1];
+            else if (tx_eqz(argv[i], "--rev")) rev = argv[i + 1];
+            else if (tx_eqz(argv[i], "--unit")) unit = argv[i + 1];
+            else if (tx_eqz(argv[i], "--target")) tgt = argv[i + 1];
+            else if (tx_eqz(argv[i], "--producer")) prod = argv[i + 1];
+            else if (tx_eqz(argv[i], "--purpose")) purp = argv[i + 1];
+            else if (tx_eqz(argv[i], "--inputs-sha")) in_sha = argv[i + 1];
+            else if (tx_eqz(argv[i], "--output-path")) out_p = argv[i + 1];
+            else if (tx_eqz(argv[i], "--now-ts")) (void)parse_i64_pos(argv[i + 1], &now_ts);
+        }
+        return run_chain_ape(repo, ape, rcpt, rid, rev, unit, tgt, prod, purp, in_sha, out_p, now_ts);
+    }
     if (argc >= 4 && tx_eqz(argv[1], "--judge-evidence")) {
         const char *exp_e = 0, *exp_c = 0;
         for (int i = 4; i + 1 < argc; i++) {
@@ -1527,6 +1661,34 @@ int main(int argc, char **argv) {
         ck(rc_nf == 1 && strstr(out, "LOCAL_REFUSE\tr=-2") != 0 &&
            strstr(out, "BIND_M1_REFUSE\treason=embed-resource-missing\tdetail=3") != 0,
            "local-refuse-missing-bind-f-record");
+
+        /* (6) v3 chain-receipt rc_verify_out self-check: valid ok; bad ape sha, bad rev, bad target all refused */
+        char r_ok[640], r_out[640], out_sha[65], chk_sha[65];
+        const char *o_txt = "chain_ok=1\n";
+        const char *test_rev = "aa838d59e0000000000000000000000000000000";
+        const char *bad_rev  = "1111111111111111111111111111111111111111";
+        rc_v3_t rec;
+        int rc_v3_ok = 0;
+        if (!cx_fmt(r_ok, sizeof r_ok, "%s/chain_v3.rcpt", tmp) &&
+            !cx_fmt(r_out, sizeof r_out, "%s/chain_v3.out", tmp) &&
+            sy_write_file(r_out, (const unsigned char *)o_txt, 11L, 0644) == 0 &&
+            sy_sha256_hex((const unsigned char *)o_txt, 11L, out_sha) == 0) {
+            rec.run_id = "chain-bind-r1"; rec.rev = test_rev; rec.unit = "bind"; rec.target = "lnx/x86_64";
+            rec.producer = "candidate-chain"; rec.purpose = "chain-ape";
+            rec.candidate_sha = p4_sha; rec.inputs_sha = drv_sha; rec.output_sha = out_sha;
+            rec.rc = 0; rec.verdict = "PASS"; rec.ts = 1764200000;
+            int w_ok = (rc_write3(r_ok, &rec) == 0);
+            int v_ok = w_ok && (verify_chain_receipt(p4_body, r_ok, "chain-bind-r1", test_rev, "bind", "lnx/x86_64",
+                                                     "candidate-chain", "chain-ape", drv_sha, r_out, 1764200060, chk_sha, 1) == 0);
+            int v_bad_sha = (verify_chain_receipt(p4_tamp, r_ok, "chain-bind-r1", test_rev, "bind", "lnx/x86_64",
+                                                  "candidate-chain", "chain-ape", drv_sha, r_out, 1764200060, chk_sha, 1) != 0);
+            int v_bad_rev = (verify_chain_receipt(p4_body, r_ok, "chain-bind-r1", bad_rev, "bind", "lnx/x86_64",
+                                                  "candidate-chain", "chain-ape", drv_sha, r_out, 1764200060, chk_sha, 1) != 0);
+            int v_bad_tgt = (verify_chain_receipt(p4_body, r_ok, "chain-bind-r1", test_rev, "bind", "lnx/arm64",
+                                                  "candidate-chain", "chain-ape", drv_sha, r_out, 1764200060, chk_sha, 1) != 0);
+            rc_v3_ok = (v_ok && v_bad_sha && v_bad_rev && v_bad_tgt);
+        }
+        ck(rc_v3_ok, "chain-ape-v3-receipt-rc-verify");
     }
 
     mm_free(so_b); mm_free(m53_b); mm_free(bd_b);
