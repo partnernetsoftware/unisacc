@@ -149,6 +149,17 @@ int main(void) {
         "  cat \"$@\" > \"$OUT\"\n"
         "  exit 0\n"
         "fi\n"
+        "if [ \"$2\" = \"-c\" ]; then\n"
+        "  OUT=\"$7\"; SRC=\"$8\"\n"
+        "  MOD=$(awk '/^#pragma[ \\t]+unisa[ \\t]+module[ \\t]+/ {print $4}' \"$SRC\")\n"
+        "  BASE=$(basename \"$SRC\" .cx)\n"
+        "  if [ -n \"$MOD\" ] && [ \"$MOD\" != \"$BASE\" ]; then\n"
+        "    echo \"module $MOD does not match file $BASE\" >&2; exit 1\n"
+        "  fi\n"
+        "  printf '.globl sym_routed_%s\\nsym_routed_%s:\\n  ret\\n' \"$BASE\" \"$BASE\" > \"$OUT.s\"\n"
+        "  /usr/bin/as -o \"$OUT\" \"$OUT.s\" && rm -f \"$OUT.s\"\n"
+        "  exit 0\n"
+        "fi\n"
         "exit 1\n"
         "EOFUC\n"
         "chmod +x '%s/unisacc.com'",
@@ -193,8 +204,10 @@ int main(void) {
         "mkobj '%s/drivestream_m1.o' sym_drivestream_m1; "
         "mkobj '%s/m57_m1.o' cxsa_valid_s1; "
         "mkobj '%s/drivestream_m1_impl.o' sym_m1_impl; "
-        "mkobj '%s/colliding_drivestream.o' sym_m60",
-        chain, p4_base, chain, fx, fx, fx, fx);
+        "mkobj '%s/colliding_drivestream.o' sym_m60; "
+        "printf 'm1.o\\t/snap/src/text/text.cx\\nm57.o\\t/snap/src/driver/stream_s1.cx\\nm59.o\\t/snap/cx/runtime/stream_attributes.cx\\nm60.o\\t/snap/src/compiler/cellname.cx\\n' > '%s/fixedpoint/g2/lnx-x86_64.closures.tsv'; "
+        "printf '#pragma unisa module cellname\\nint cel_at(void) { return 0; }\\n' > '%s/cellname_tbl.cx'",
+        chain, p4_base, chain, fx, fx, fx, fx, chain, fx);
     cpr_sh(g_root, cmd, 20, &r); pr_free(&r);
 
     /* 1. Empty-change relink+repack must be byte-equal to baseline APE */
@@ -315,6 +328,45 @@ int main(void) {
     cpr_sh(g_root, cmd, 45, &r);
     ck(r.rc == 2 && cpr_has(&r, "REFUSE\tPRIV_RELINK\tforbidden-symbol-present\tsym=cxsa_valid present-in=m59.o"),
        "mut-forbidden-symbol-cxsa-valid-refused-rc2", &r);
+    pr_free(&r);
+
+    /* 9. Unit resolver by module name and by symbol name (--resolve-unit / --unit-by-symbol) */
+    cx_fmt(cmd, sizeof cmd,
+        "sh '%s/unisacc.com' '%s/tools/priv-relink.cx' -- --chain-dir '%s' --repo '%s' --resolve-unit cellname && "
+        "sh '%s/unisacc.com' '%s/tools/priv-relink.cx' -- --chain-dir '%s' --repo '%s' --unit-by-symbol sym_s1_v0",
+        g_root, g_root, chain, repo, g_root, g_root, chain, repo);
+    cpr_sh(g_root, cmd, 45, &r);
+    ck(r.rc == 0 &&
+       cpr_has(&r, "PRIV_RELINK_UNIT\tquery=cellname\tunit=m60.o\tmodule=cellname") &&
+       cpr_has(&r, "PRIV_RELINK_UNIT\tquery=sym_s1_v0\tunit=m57.o\tmodule=stream_s1"),
+       "resolve-unit-by-module-and-symbol-pass", &r);
+    pr_free(&r);
+
+    /* 10. Routed module compile (--compile cellname=cellname_tbl.cx stages as cellname.cx and maps to m60.o) */
+    cx_fmt(cmd, sizeof cmd,
+        "sh '%s/unisacc.com' '%s/tools/priv-relink.cx' -- "
+        "--chain-dir '%s' --repo '%s' --baseline-layer-api '%s' "
+        "--compile 'cellname=%s/cellname_tbl.cx' "
+        "--out '%s/out-routed.com'",
+        g_root, g_root, chain, repo, base_api, fx, fx);
+    cpr_sh(g_root, cmd, 45, &r);
+    ck(r.rc == 0 &&
+       cpr_has(&r, "PRIV_RELINK_OBJECTS\tbaseline=6\tlinked=6\tequal=5\tchanged=1\tadded=0\tremoved=0\tnet_untouched=5") &&
+       cpr_has(&r, "status=PREPARED\tscope=LOCAL"),
+       "routed-module-compile-stages-declared-module-stem-pass", &r);
+    pr_free(&r);
+
+    /* 11. Mutant G: Stale mNN.o disagreeing with declared module (--compile m57.o=cellname_tbl.cx) MUST REFUSE rc=2 */
+    cx_fmt(cmd, sizeof cmd,
+        "sh '%s/unisacc.com' '%s/tools/priv-relink.cx' -- "
+        "--chain-dir '%s' --repo '%s' --baseline-layer-api '%s' "
+        "--compile 'm57.o=%s/cellname_tbl.cx' "
+        "--out '%s/out-mismatch-fail.com'",
+        g_root, g_root, chain, repo, base_api, fx, fx);
+    cpr_sh(g_root, cmd, 45, &r);
+    ck(r.rc == 2 &&
+       cpr_has(&r, "REFUSE\tPRIV_RELINK\tunit-id-mismatch\trequested=m57.o(module=stream_s1) declared_module=cellname actual_unit=m60.o"),
+       "mut-unit-id-mismatch-stale-mNN-refused-rc2", &r);
     pr_free(&r);
 
     fsx_scratch_drop(sc);
