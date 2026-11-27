@@ -1,18 +1,27 @@
 /* tools/check-piece-d-driveargs.cx -- End-to-end lnx/x86_64 S3 authoritative gate for Batch A piece D (driveargs).
  *
  * Verifies against real tapemode.so x86_64 asm executor:
- *   (1) Real product-entry dual link: compiles the exact same probe_main.cx twice:
+ *   (1) Static routing & guest authority (build/chain-facts.tsv -> cxlib.chainfacts)
+ *   (2) Formal release-build whole-o plan/source-selection evidence (real tools/release-build.cx
+ *       via UNISACC_CTOR recorder proves lnx/x86_64 selects src/driveargs_m1.cx while osx/x86_64
+ *       keeps native src/driveargs.cx)
+ *   (3) Real product-entry dual link using REAL product callbacks (driver.cli cxc_step/cxc_default_run
+ *       and driver.compat cxp_step, formal dv_fail returning exit code 1):
  *         native_probe: links real src/driveargs.cx
  *         s3_probe:     links real src/driveargs_m1.cx (+ cx/driver/driveargs_m1_impl.cx)
- *       and byte-compares their full outputs across 28 core words (is_object=0/1),
- *       650B long paths (no truncation), real disk shebangs (plain + UTF-8 BOM + non-shebang),
- *       reserved-word no-shebang-side-effect check, and dv_parse_args state machine (5 vectors);
- *   (2) Real m53_bin2 guest co-exists in the same P4 container and passes cxsa_valid_s1 vectors;
- *   (3) Inverted driveargs slice divergence proof via s3_probe (proves zero native fallback);
- *   (4) Structural P4 F-record CRC tamper refusal for tape/lnx-x86_64/driveargs.tapeslice
- *       (DRIVEARGS_M1_REFUSE, dv_word == -2, dv_parse_args propagates fail("driveargs tape refused"));
- *   (5) Over-limit word (>= 65536 B) refused with -2; missing carrier refused with -2;
- *   (6) G4 env-override refusal when UNISACC_M53_S1=1 with bad carrier.
+ *       and byte-compares FULL dv_word + dv_parse_args output states (rc, fail_hits, fail_msg, why,
+ *       nsrc, srcv[], src, argstart, opts.mode/level/out/target/runit/defrun/sawc/sawS, compat libs[])
+ *       across 28 words, 650B paths, real disk shebangs, and 5 dv_parse_args vectors;
+ *   (4) Real product m53 slice (compiled from real cx/runtime/stream_attributes.cx cxsa_valid) co-exists
+ *       in the same P4 container and passes cxsa_valid_s1 vectors;
+ *   (5) Inverted driveargs slice divergence proof via s3_probe (proves zero native fallback);
+ *   (6) Structural P4 F-record CRC tamper refusal: both first-word drive.cx:473 path (process exit rc=1)
+ *       and dv_parse_args path (process exit rc=1, msg="driveargs tape refused", DRIVEARGS_M1_REFUSE);
+ *   (7) Exact boundary: 65535 B word passes (matches native == 20) and 65536 B word refuses (-2);
+ *   (8) Separated negative controls (never masking each other):
+ *       - missing-carrier-refused: nonexistent UNISA_CONTAINER with NO UNISACC_M53_S1 -> rc=1, not G4;
+ *       - g4-env-override-refused: valid good.p4 UNISA_CONTAINER WITH UNISACC_M53_S1=1 -> rc=1,
+ *         embed-env-override-forbidden.
  *
  * Marker: CHECK_PIECE_D_DRIVEARGS. */
 #pragma unisa use sys.fs
@@ -138,13 +147,14 @@ static const char *const PROBE_SRC =
     "#pragma unisa use mem.heap\n"
     "#pragma unisa use mem.bytes\n"
     "#pragma unisa use text.text\n"
+    "#pragma unisa use driver.cli\n"
+    "#pragma unisa use driver.compat\n"
     "#pragma unisa use driver.stream_s1_m1\n"
     "extern int dv_word(const char *, int);\n"
     "extern int dv_parse_args(void *, void *, char **, int *, const char **, int *, char *, int, char **, int *, int *, int (*)(const char *));\n"
     "static int g_fh; static char g_fm[128];\n"
-    "static int sfail(const char *m) { g_fh++; cx_fmt(g_fm, sizeof g_fm, \"%s\", m ? m : \"\"); return 99; }\n"
-    "int cxc_step(void *o, char **av, int ac, int *nx, char *w, long c) { (void)o;(void)w;(void)c; if (*nx < ac && tx_eqz(av[*nx], \"-O2\")) { (*nx)++; return 0; } return 1; }\n"
-    "int cxp_step(void *o, char **av, int ac, int *nx, char *w, long c) { (void)o;(void)w;(void)c; if (*nx < ac && tx_prefix(av[*nx], tx_len(av[*nx], 64), \"-l\", 2)) { (*nx)++; return 0; } return 1; }\n"
+    "/* Matches formal product dv_fail (src/drive.cx): writes reason and returns exit code 1. */\n"
+    "static int dv_fail_formal(const char *m) { g_fh++; cx_fmt(g_fm, sizeof g_fm, \"%s\", m ? m : \"\"); sy_eprintf(\"unisacc: %s\\n\", g_fm); return 1; }\n"
     "int main(int argc, char **argv) {\n"
     "    const char *mode = argc >= 2 ? argv[1] : \"all\";\n"
     "    const char *td = argc >= 3 ? argv[2] : \"/tmp\";\n"
@@ -154,27 +164,40 @@ static const char *const PROBE_SRC =
     "        return 0;\n"
     "    }\n"
     "    if (tx_eqz(mode, \"inv-da\")) { sy_printf(\"INV_DA %d\\n\", dv_word(\"ar\", 0)); return 0; }\n"
-    "    if (tx_eqz(mode, \"g1-da\")) {\n"
-    "        char *av[] = {\"unisacc\", \"a.c\", 0}; char *sv[4]; const char *s=0; int n=0,as=-1,r=1,d=1; char w[128]=\"\";\n"
-    "        g_fh=0; g_fm[0]=0;\n"
-    "        int wr = dv_word(\"ar\", 0);\n"
-    "        int rc = dv_parse_args(0,0,sv,&n,&s,&as,w,2,av,&r,&d,sfail);\n"
-    "        sy_printf(\"G1_DA wr=%d rc=%d fh=%d msg=%s\\n\", wr, rc, g_fh, g_fm);\n"
+    "    /* Exercises exact src/drive.cx:473-474 first-word refusal path -> formal exit code 1 */\n"
+    "    if (tx_eqz(mode, \"first-word\")) {\n"
+    "        int kind = dv_word(\"ar\", 0);\n"
+    "        if (kind == -2) return dv_fail_formal(\"driveargs tape refused\");\n"
+    "        sy_printf(\"FIRST_WORD_OK %d\\n\", kind);\n"
     "        return 0;\n"
     "    }\n"
-    "    if (tx_eqz(mode, \"over-limit\")) {\n"
-    "        char *big = (char *)mm_alloc(66000);\n"
-    "        if (!big) return 2;\n"
-    "        mm_fill(big, 66000, 'a', 65540);\n"
-    "        big[65540] = 0;\n"
-    "        sy_printf(\"OVER %d\\n\", dv_word(big, 0));\n"
-    "        mm_free(big);\n"
+    "    /* Exercises dv_parse_args refusal propagation with formal dv_fail returning exit code 1 */\n"
+    "    if (tx_eqz(mode, \"g1-parse\")) {\n"
+    "        char *av[] = {\"unisacc\", \"a.c\", 0}; char *sv[4]; char *libs[16]; int nlibs = 0;\n"
+    "        const char *s = 0; int n = 0, as = 2; char w[128]; CxcState opts; CxpState compat;\n"
+    "        mm_fill(&opts, (long)sizeof opts, 0, (long)sizeof opts); mm_fill(w, 128, 0, 128);\n"
+    "        compat.libs = libs; compat.n = &nlibs; compat.cap = 16;\n"
+    "        (void)cxc_default_run(&opts, av, 2, w, 128);\n"
+    "        g_fh = 0; g_fm[0] = 0;\n"
+    "        int rc = dv_parse_args(&opts, &compat, sv, &n, &s, &as, w, 2, av, &opts.runit, &opts.defrun, dv_fail_formal);\n"
+    "        sy_printf(\"G1_PARSE rc=%d fh=%d msg=%s\\n\", rc, g_fh, g_fm);\n"
+    "        return rc;\n"
+    "    }\n"
+    "    if (tx_eqz(mode, \"exact-bounds\")) {\n"
+    "        char *w65535 = (char *)mm_alloc(65536);\n"
+    "        char *w65536 = (char *)mm_alloc(65537);\n"
+    "        if (!w65535 || !w65536) return 2;\n"
+    "        mm_fill(w65535, 65536, 'a', 65532); w65535[65532] = '.'; w65535[65533] = 'c'; w65535[65534] = 'x'; w65535[65535] = 0;\n"
+    "        mm_fill(w65536, 65537, 'a', 65533); w65536[65533] = '.'; w65536[65534] = 'c'; w65536[65535] = 'x'; w65536[65536] = 0;\n"
+    "        sy_printf(\"BOUNDS 65535=%d 65536=%d\\n\", dv_word(w65535, 0), dv_word(w65536, 0));\n"
+    "        mm_free(w65535); mm_free(w65536);\n"
     "        return 0;\n"
     "    }\n"
     "    if (tx_eqz(mode, \"g4-env\")) {\n"
     "        sy_setenv(\"UNISACC_M53_S1\", \"1\", 1);\n"
-    "        sy_printf(\"G4 %d\\n\", dv_word(\"ar\", 0));\n"
+    "        int kind = dv_word(\"ar\", 0);\n"
     "        sy_unsetenv(\"UNISACC_M53_S1\");\n"
+    "        if (kind == -2) return dv_fail_formal(\"driveargs tape refused\");\n"
     "        return 0;\n"
     "    }\n"
     "    {\n"
@@ -185,19 +208,36 @@ static const char *const PROBE_SRC =
     "        cx_fmt(sbp,sizeof sbp,\"%s/sb_p\",td); cx_fmt(sbb,sizeof sbb,\"%s/sb_b\",td); cx_fmt(sbn,sizeof sbn,\"%s/sb_n\",td);\n"
     "        sy_printf(\"DAW\"); for (int i=0;i<28;i++) sy_printf(\" %d,%d\", dv_word(sw[i],0), dv_word(sw[i],1)); sy_printf(\"\\n\");\n"
     "        { const char *ex[7] = {lc,lcx,lo,lt,sbp,sbb,sbn}; sy_printf(\"DAE\"); for (int i=0;i<7;i++) sy_printf(\" %d,%d\", dv_word(ex[i],0), dv_word(ex[i],1)); sy_printf(\"\\n\"); }\n"
-    "        { char *av1[]={\"u\",\"--version\",0}, *av2[]={\"u\",\"--help\",0}, *av3[]={\"u\",\"-O2\",lc,\"-lfoo\",\"--\",\"-a\",0}, *av4[]={\"u\",sbp,\"parg\",0}, *av5[]={\"u\",\"--unk\",0};\n"
-    "          char **vs[5]={av1,av2,av3,av4,av5}; int acs[5]={2,2,6,3,2};\n"
+    "        /* Full dv_parse_args parity with REAL driver.cli cxc_step/cxc_default_run + driver.compat cxp_step + full state dump */\n"
+    "        { char *av1[]={\"u\",\"--version\",0};\n"
+    "          char *av2[]={\"u\",\"--help\",0};\n"
+    "          char *av3[]={\"u\",\"-O2\",\"-o\",\"out.bin\",lc,\"-lfoo\",\"--\",\"-a\",0};\n"
+    "          char *av4[]={\"u\",sbp,\"parg\",0};\n"
+    "          char *av5[]={\"u\",\"--unk\",0};\n"
+    "          char **vs[5]={av1,av2,av3,av4,av5}; int acs[5]={2,2,8,3,2};\n"
     "          for (int v=0;v<5;v++) {\n"
-    "              char *sv[16]; const char *s=0; int n=0,as=-1,r=1,d=1; char w[128]=\"\"; g_fh=0;\n"
-    "              int rc=dv_parse_args(0,0,sv,&n,&s,&as,w,acs[v],vs[v],&r,&d,sfail);\n"
-    "              sy_printf(\"DAP %d rc=%d fh=%d n=%d as=%d s=%s\\n\", v, rc, g_fh, n, as, s?s:\"-\");\n"
+    "              char *sv[16]; char *libs[16]; int nlibs=0; const char *s=0; int n=0,as=acs[v];\n"
+    "              char w[128]; CxcState opts; CxpState compat;\n"
+    "              mm_fill(&opts, (long)sizeof opts, 0, (long)sizeof opts); mm_fill(w, 128, 0, 128);\n"
+    "              compat.libs = libs; compat.n = &nlibs; compat.cap = 16;\n"
+    "              (void)cxc_default_run(&opts, vs[v], acs[v], w, 128);\n"
+    "              g_fh=0; g_fm[0]=0;\n"
+    "              int rc=dv_parse_args(&opts,&compat,sv,&n,&s,&as,w,acs[v],vs[v],&opts.runit,&opts.defrun,dv_fail_formal);\n"
+    "              sy_printf(\"DAP %d rc=%d fh=%d fm=%s why=%s n=%d as=%d s=%s mode=%d lvl=%d out=%s tgt=%s r=%d d=%d c=%d S=%d nlib=%d\",\n"
+    "                        v, rc, g_fh, g_fm[0]?g_fm:\"-\", w[0]?w:\"-\", n, as, s?s:\"-\",\n"
+    "                        opts.mode, opts.level, opts.out?opts.out:\"-\", opts.target?opts.target:\"-\",\n"
+    "                        opts.runit, opts.defrun, opts.sawc, opts.sawS, nlibs);\n"
+    "              for (int j=0;j<n;j++) sy_printf(\" sv[%d]=%s\", j, sv[j]);\n"
+    "              for (int j=0;j<nlibs;j++) sy_printf(\" lib[%d]=%s\", j, libs[j]);\n"
+    "              sy_printf(\"\\n\");\n"
     "          } }\n"
     "    }\n"
     "    return 0;\n"
     "}\n";
 
 int main(void) {
-    char tmp[512], tpk_bin[600], p4e_bin[600], nat_bin[600], s3_bin[600], probe_cx[640], tdir[600];
+    char tmp[512], tpk_bin[600], p4e_bin[600], eb_bin[600], rec_cx[600], rec_bin[600], nat_bin[600], s3_bin[600], probe_cx[640], tdir[600];
+    char rec_lnx[640], rec_arm[640], rec_out_l[640], rec_out_a[640];
     char cmd[8192], out[16384], nat_out[16384], s3_out[16384];
     char m53_cx[640], m53_sl[640], da_sl[640], inv_da_cx[640], inv_da_sl[640];
     char good_p4[640], inv_da_p4[640], bad_crc_da[640];
@@ -207,10 +247,17 @@ int main(void) {
     if (sy_mkdtemp(sy_tmpdir(), "piece-d-da-", tmp, sizeof tmp) != 0) return 2;
     cx_fmt(tpk_bin, sizeof tpk_bin, "%s/tapepack", tmp);
     cx_fmt(p4e_bin, sizeof p4e_bin, "%s/p4embed", tmp);
+    cx_fmt(eb_bin, sizeof eb_bin, "%s/entry_build", tmp);
+    cx_fmt(rec_cx, sizeof rec_cx, "%s/rec_ctor.cx", tmp);
+    cx_fmt(rec_bin, sizeof rec_bin, "%s/rec_ctor", tmp);
     cx_fmt(nat_bin, sizeof nat_bin, "%s/native_probe", tmp);
     cx_fmt(s3_bin, sizeof s3_bin, "%s/s3_probe", tmp);
     cx_fmt(probe_cx, sizeof probe_cx, "%s/probe_main.cx", tmp);
     cx_fmt(tdir, sizeof tdir, "%s/tape", tmp);
+    cx_fmt(rec_lnx, sizeof rec_lnx, "%s/plan_lnx.txt", tmp);
+    cx_fmt(rec_arm, sizeof rec_arm, "%s/plan_arm.txt", tmp);
+    cx_fmt(rec_out_l, sizeof rec_out_l, "%s/eb_lnx", tmp);
+    cx_fmt(rec_out_a, sizeof rec_out_a, "%s/eb_arm", tmp);
     cx_fmt(m53_cx, sizeof m53_cx, "%s/m53_guest.cx", tmp);
     cx_fmt(m53_sl, sizeof m53_sl, "%s/m53.tapeslice", tmp);
     cx_fmt(da_sl, sizeof da_sl, "%s/driveargs.tapeslice", tmp);
@@ -229,45 +276,94 @@ int main(void) {
     (void)sy_write_file(sbn, (const unsigned char *)"plain text without shebang\n", 27, 0644);
     (void)sy_write_file(probe_cx, (const unsigned char *)PROBE_SRC, (long)strlen(PROBE_SRC), 0644);
     {
+        /* Real product m53 slice calling cx/runtime/stream_attributes.cx (cxsa_valid) */
         const char *m53_s =
+            "#pragma unisa use runtime.stream_attributes\n"
             "int main(int argc, char **argv) {\n"
             "    const char *abi = \"M53S1BIN2\";\n"
             "    const unsigned long long *ba;\n"
-            "    const unsigned char *data;\n"
-            "    long length;\n"
-            "    unsigned long count;\n"
             "    if (abi[0] != 'M' || argc < 2) return 2;\n"
             "    ba = (const unsigned long long *)argv[1];\n"
-            "    data = (const unsigned char *)ba[0];\n"
-            "    length = (long)ba[1];\n"
-            "    if (!data || length < 4) return 0;\n"
-            "    count = (unsigned long)data[0] | ((unsigned long)data[1] << 8) |\n"
-            "            ((unsigned long)data[2] << 16) | ((unsigned long)data[3] << 24);\n"
-            "    if (count > 1000000UL) return 0;\n"
-            "    return length == 4 + (long)count * 9 ? 1 : 0;\n"
+            "    return cxsa_valid((const unsigned char *)ba[0], (long)ba[1]);\n"
             "}\n";
         const char *id_s = "int main(int argc, char **argv) { const char *abi = \"DVARGM1B1\"; return abi[0] == 'D' && argc >= 2 ? 20 : 21; }\n";
         (void)sy_write_file(m53_cx, (const unsigned char *)m53_s, (long)strlen(m53_s), 0644);
         (void)sy_write_file(inv_da_cx, (const unsigned char *)id_s, (long)strlen(id_s), 0644);
     }
 
-    /* 1. Parallel wave: tapemode.so, tapepack, p4-embed, native_probe, s3_probe, and 3 guest .s */
+    {
+        const char *rec_s =
+            "#pragma unisa use sys.fs\n"
+            "#pragma unisa use sys.env\n"
+            "#pragma unisa use sys.posix\n"
+            "#pragma unisa use text.text\n"
+            "int main(int argc, char **argv) {\n"
+            "    const char *logp = sy_env(\"REC_LOG\");\n"
+            "    const char *outp = 0;\n"
+            "    if (logp && logp[0]) {\n"
+            "        int fd = sy_open(logp, O_WRONLY | O_CREAT | O_APPEND, 0644);\n"
+            "        if (fd >= 0) {\n"
+            "            for (int i = 1; i < argc; i++) {\n"
+            "                (void)sy_write_all(fd, argv[i], (long)strlen(argv[i]));\n"
+            "                (void)sy_write_all(fd, i + 1 < argc ? \" \" : \"\\n\", 1);\n"
+            "            }\n"
+            "            sy_close(fd);\n"
+            "        }\n"
+            "    }\n"
+            "    for (int i = 1; i + 1 < argc; i++) {\n"
+            "        if (tx_eqz(argv[i], \"-o\")) outp = argv[i + 1];\n"
+            "    }\n"
+            "    if (outp) (void)sy_write_file(outp, (const unsigned char *)\"\\x7fELFstub\", 8, 0755);\n"
+            "    return 0;\n"
+            "}\n";
+        (void)sy_write_file(rec_cx, (const unsigned char *)rec_s, (long)strlen(rec_s), 0644);
+    }
+
+    /* 1. Parallel wave: tapemode.so, tapepack, p4-embed, entry-build, rec_ctor, native_probe, s3_probe, and 3 guest .s */
     cx_fmt(cmd, sizeof cmd,
            "ln -sf \"$(pwd)/cxroot.tsv\" '%s/cxroot.tsv' && ln -sf \"$(pwd)/cx\" '%s/cx' && ln -sf \"$(pwd)/src\" '%s/src' && "
            "sh ./unisacc.com tools/tape-sidecar-build.cx -- --target lnx/x86_64 . '%s' & p0=$!; "
            "sh ./unisacc.com tools/tapepack.cx -o '%s' & p1=$!; "
            "sh ./unisacc.com tools/p4-embed.cx -o '%s' & p2=$!; "
+           "sh ./unisacc.com tools/entry-build.cx -o '%s' & p8=$!; "
+           "sh ./unisacc.com '%s' -o '%s' & p9=$!; "
            "sh ./unisacc.com '%s' src/driveargs.cx src/driveutil.cx src/entrybind.cx -o '%s' & p3=$!; "
            "sh ./unisacc.com '%s' src/driveargs_m1.cx src/driveutil.cx src/entrybind.cx -o '%s' & p4=$!; "
            "sh ./unisacc.com -S '%s' -o '%s.s' & p5=$!; "
            "sh ./unisacc.com -S exec/tape/guests/driveargs_guest.cx -o '%s.s' & p6=$!; "
            "sh ./unisacc.com -S '%s' -o '%s.s' & p7=$!; "
-           "wait $p0 && wait $p1 && wait $p2 && wait $p3 && wait $p4 && wait $p5 && wait $p6 && wait $p7",
-           tmp, tmp, tmp, tdir, tpk_bin, p4e_bin,
+           "wait $p0 && wait $p1 && wait $p2 && wait $p3 && wait $p4 && wait $p5 && wait $p6 && wait $p7 && wait $p8 && wait $p9",
+           tmp, tmp, tmp, tdir, tpk_bin, p4e_bin, eb_bin, rec_cx, rec_bin,
            probe_cx, nat_bin, probe_cx, s3_bin,
            m53_cx, m53_sl, da_sl, inv_da_cx, inv_da_sl);
-    ck(run_sh(cmd, out, sizeof out) == 0, "build-tapemode-dual-probes-and-guests");
-    if (failed) { sy_printf("%s\n", out); goto done; }
+    {
+        int b_rc = run_sh(cmd, out, sizeof out);
+        ck(b_rc == 0, "build-tapemode-dual-probes-and-real-guests");
+        if (b_rc != 0) { sy_printf("%s\n", out); goto done; }
+    }
+
+    /* (2) Formal entry-build --only driveargs.o source-selection evidence (lnx/x86_64 -> driveargs_m1.cx, lnx/arm64 -> driveargs.cx) */
+    {
+        cx_fmt(cmd, sizeof cmd,
+               "REC_LOG='%s' '%s' . ./unisacc.com '%s' '%s' --target lnx/x86_64 --only driveargs.o >/dev/null 2>&1; "
+               "REC_LOG='%s' '%s' . ./unisacc.com '%s' '%s' --target lnx/arm64 --only driveargs.o >/dev/null 2>&1",
+               rec_lnx, eb_bin, rec_out_l, rec_bin,
+               rec_arm, eb_bin, rec_out_a, rec_bin);
+        (void)run_sh(cmd, out, sizeof out);
+        unsigned char *bl = 0, *ba = 0; int64_t nl = 0, na = 0;
+        int plan_ok = 0;
+        if (sy_read_file(rec_lnx, &bl, &nl, 65536) == 0 && bl &&
+            sy_read_file(rec_arm, &ba, &na, 65536) == 0 && ba) {
+            plan_ok = (strstr((const char *)bl, "src/driveargs_m1.cx") != 0 &&
+                       strstr((const char *)bl, "driveargs.o") != 0 &&
+                       strstr((const char *)bl, "src/driveargs.cx") == 0 &&
+                       strstr((const char *)ba, "src/driveargs.cx") != 0 &&
+                       strstr((const char *)ba, "driveargs.o") != 0 &&
+                       strstr((const char *)ba, "src/driveargs_m1.cx") == 0);
+        }
+        mm_free(bl); mm_free(ba);
+        ck(plan_ok, "formal-entry-build-selects-driveargs-m1-lnx-only");
+    }
 
     /* 2. Pack & verify all 3 tapeslices + P4 containers + structural CRC tamper */
     cx_fmt(cmd, sizeof cmd,
@@ -277,40 +373,60 @@ int main(void) {
            m53_sl, da_sl, inv_da_sl, tpk_bin, tpk_bin,
            p4e_bin, tdir, m53_sl, good_p4, da_sl,
            p4e_bin, tdir, m53_sl, inv_da_p4, inv_da_sl);
-    ck(run_sh(cmd, out, sizeof out) == 0 &&
-       make_crc_tampered_p4_key(good_p4, bad_crc_da, "tape/lnx-x86_64/driveargs.tapeslice") == 0,
-       "pack-slices-and-structural-crc-tamper");
-    if (failed) { sy_printf("%s\n", out); goto done; }
+    {
+        int p_ok = (run_sh(cmd, out, sizeof out) == 0 &&
+                    make_crc_tampered_p4_key(good_p4, bad_crc_da, "tape/lnx-x86_64/driveargs.tapeslice") == 0);
+        ck(p_ok, "pack-slices-and-structural-crc-tamper");
+        if (!p_ok) { sy_printf("%s\n", out); goto done; }
+    }
 
-    /* 3. Exact byte-for-byte parity: native_probe vs s3_probe */
+    /* 3. Exact byte-for-byte parity: native_probe vs s3_probe (real cxc_step/cxp_step + full state dump) */
     cx_fmt(cmd, sizeof cmd, "'%s' all '%s'", nat_bin, tmp);
     int r_nat = run_sh(cmd, nat_out, sizeof nat_out);
     cx_fmt(cmd, sizeof cmd, "UNISA_CONTAINER='%s' '%s' all '%s'", good_p4, s3_bin, tmp);
     int r_s3 = run_sh(cmd, s3_out, sizeof s3_out);
-    ck(r_nat == 0 && r_s3 == 0 && nat_out[0] != 0 && strcmp(nat_out, s3_out) == 0, "native-vs-s3-byte-parity");
+    ck(r_nat == 0 && r_s3 == 0 && nat_out[0] != 0 && strcmp(nat_out, s3_out) == 0, "native-vs-s3-full-state-byte-parity");
 
-    /* 4. Real m53 coexist in same P4 container */
+    /* 4. Real product m53 slice (cx/runtime/stream_attributes.cx) coexist in same P4 container */
     cx_fmt(cmd, sizeof cmd, "UNISA_CONTAINER='%s' '%s' m53 '%s'", good_p4, s3_bin, tmp);
-    ck(run_sh(cmd, out, sizeof out) == 0 && strstr(out, "M53 1 1 0 0 0") != 0, "m53-coexist-in-p4");
+    ck(run_sh(cmd, out, sizeof out) == 0 && strstr(out, "M53 1 1 0 0 0") != 0, "real-product-m53-coexist-in-p4");
 
     /* 5. Inverted driveargs slice divergence proof (proves zero native fallback) */
     cx_fmt(cmd, sizeof cmd, "UNISA_CONTAINER='%s' '%s' inv-da '%s'", inv_da_p4, s3_bin, tmp);
     ck(run_sh(cmd, out, sizeof out) == 0 && strstr(out, "INV_DA 20") != 0, "inverted-slice-divergence");
 
-    /* 6. Structural CRC tamper refusal + dv_parse_args refusal propagation */
-    cx_fmt(cmd, sizeof cmd, "UNISA_CONTAINER='%s' '%s' g1-da '%s'", bad_crc_da, s3_bin, tmp);
-    ck(run_sh(cmd, out, sizeof out) == 0 &&
+    /* 6a. Structural CRC tamper refusal on first-word drive.cx:473 path -> formal exit code 1 */
+    cx_fmt(cmd, sizeof cmd, "UNISA_CONTAINER='%s' '%s' first-word '%s'", bad_crc_da, s3_bin, tmp);
+    ck(run_sh(cmd, out, sizeof out) == 1 &&
        strstr(out, "DRIVEARGS_M1_REFUSE") != 0 &&
-       strstr(out, "G1_DA wr=-2 rc=99 fh=1 msg=driveargs tape refused") != 0,
-       "crc-tamper-refuse-and-parse-args-propagation");
+       strstr(out, "unisacc: driveargs tape refused") != 0,
+       "crc-tamper-first-word-formal-exit-1");
 
-    /* 7. Over-limit word (>= 65536 B) refused with -2 */
-    cx_fmt(cmd, sizeof cmd, "UNISA_CONTAINER='%s' '%s' over-limit '%s'", good_p4, s3_bin, tmp);
-    ck(run_sh(cmd, out, sizeof out) == 0 && strstr(out, "OVER -2") != 0, "over-limit-65536-refused");
+    /* 6b. Structural CRC tamper refusal on dv_parse_args path -> formal exit code 1 */
+    cx_fmt(cmd, sizeof cmd, "UNISA_CONTAINER='%s' '%s' g1-parse '%s'", bad_crc_da, s3_bin, tmp);
+    ck(run_sh(cmd, out, sizeof out) == 1 &&
+       strstr(out, "DRIVEARGS_M1_REFUSE") != 0 &&
+       strstr(out, "G1_PARSE rc=1 fh=1 msg=driveargs tape refused") != 0,
+       "crc-tamper-parse-args-formal-exit-1");
 
-    /* 8. Missing carrier refused with -2 + G4 env-override refusal */
-    cx_fmt(cmd, sizeof cmd, "UNISA_CONTAINER='%s/no_such.p4' '%s' g4-env '%s'", tmp, s3_bin, tmp);
-    ck(run_sh(cmd, out, sizeof out) == 0 && strstr(out, "G4 -2") != 0, "missing-carrier-and-g4-env-refused");
+    /* 7. Exact boundary: 65535 passes (== 20) and 65536 refuses (== -2) */
+    cx_fmt(cmd, sizeof cmd, "UNISA_CONTAINER='%s' '%s' exact-bounds '%s'", good_p4, s3_bin, tmp);
+    ck(run_sh(cmd, out, sizeof out) == 0 && strstr(out, "BOUNDS 65535=20 65536=-2") != 0,
+       "exact-65535-pass-and-65536-refuse");
+
+    /* 8a. Separated missing-carrier negative control (NO UNISACC_M53_S1 set) -> formal exit code 1 */
+    cx_fmt(cmd, sizeof cmd, "UNISACC_M53_S1= UNISACC_M53_S1_SO= UNISA_CONTAINER='%s/no_such.p4' '%s' first-word '%s'", tmp, s3_bin, tmp);
+    ck(run_sh(cmd, out, sizeof out) == 1 &&
+       strstr(out, "DRIVEARGS_M1_REFUSE") != 0 &&
+       strstr(out, "embed-env-override-forbidden") == 0,
+       "missing-carrier-only-refused");
+
+    /* 8b. Separated G4 env-override negative control (VALID good_p4 carrier + UNISACC_M53_S1=1) -> formal exit code 1 */
+    cx_fmt(cmd, sizeof cmd, "UNISA_CONTAINER='%s' '%s' g4-env '%s'", good_p4, s3_bin, tmp);
+    ck(run_sh(cmd, out, sizeof out) == 1 &&
+       strstr(out, "DRIVEARGS_M1_REFUSE") != 0 &&
+       strstr(out, "embed-env-override-forbidden") != 0,
+       "g4-env-override-only-refused");
 
 done:
     (void)sy_remove_all(tmp);
