@@ -800,11 +800,16 @@ int main(int argc, char **argv) {
             char *sv[] = {"sh", "-c", gsh, 0};
             mm_free(last); last = 0; lastn = 0;
             rc = cx_runv_timeout(sv, 20, &last, &lastn);
-            ck(rc == 0 && lines("BG_BOOTSTRAP_FROM", c1, 0, 0) == 1,
+            ck(rc == 0 && last && memcmp(last, "BG_BOOTSTRAP_FROM\tcommit=", 25) == 0 && memcmp(last + 25, c1, 40) == 0,
                "bootstrap-from-ancestor-derived");
             if (join(logp, gbase, c2) == 0 && join(logp, logp, "bg.log") == 0) {
-                usleep(200000);
-                char *lg = cx_read(logp, &outn);
+                char *lg = 0;
+                for (int wi = 0; wi < 20; wi++) {
+                    usleep(100000);
+                    lg = cx_read(logp, &outn);
+                    if (lg && outn >= 55) break;
+                    mm_free(lg); lg = 0;
+                }
                 ck(lg && outn >= 55 && memcmp(lg + 15, c1, 40) == 0, "bootstrap-from-exported-to-chain");
                 mm_free(lg);
             }
@@ -834,18 +839,19 @@ int main(int argc, char **argv) {
         }
         /* 5d: existing snap/unisacc.com.build.json differs from root's -> snap wins */
         {
-            char sdir[P], snapd[P], bjc[256];
-            if (join(sdir, gbase, c2) == 0 && join(snapd, sdir, "snap") == 0) {
+            char gbase2[P], sdir[P], snapd[P], bjc[256];
+            if (join(gbase2, work, "bf_base2") == 0 && sy_mkdir(gbase2, 0755) == 0 &&
+                join(sdir, gbase2, c2) == 0 && join(snapd, sdir, "snap") == 0) {
                 (void)sy_mkdir(sdir, 0755);
                 (void)sy_mkdir(snapd, 0755);
                 cx_fmt(bjc, sizeof bjc, "{\"commit\":\"%s\"}\n", c1);
                 (void)put(snapd, "unisacc.com.build.json", bjc);
                 cx_fmt(gsh, sizeof gsh, "env -u BOOTSTRAP_FROM '%s' start --root '%s' --base '%s' --rev '%s' --chain '%s' --deadline-s 10",
-                       bin, grepo, gbase, c2, gchain);
+                       bin, grepo, gbase2, c2, gchain);
                 char *sv[] = {"sh", "-c", gsh, 0};
                 mm_free(last); last = 0; lastn = 0;
                 rc = cx_runv_timeout(sv, 20, &last, &lastn);
-                ck(rc == 0 && lines("BG_BOOTSTRAP_FROM", c1, 0, 0) == 1,
+                ck(rc == 0 && last && memcmp(last, "BG_BOOTSTRAP_FROM\tcommit=", 25) == 0 && memcmp(last + 25, c1, 40) == 0,
                    "bootstrap-from-existing-snap-overrides-root");
             } else {
                 ck(0, "bootstrap-from-existing-snap-overrides-root");
