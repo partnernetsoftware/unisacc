@@ -62,14 +62,16 @@ int main(int argc, char **argv) {
     CxPackageDecode d = {0}; d.allocate = al; d.release = fr;
     char root[4096], work[4096], pkgroot[4096];
     np_subreaper();
+    int full = 0;
+    if (argc >= 2 && !strcmp(argv[argc - 1], "--full")) { full = 1; argc--; }
     if (argc == 3) { cx_fmt(root, sizeof root, "%s", argv[1]); cx_fmt(work, sizeof work, "%s", argv[2]); }
     else if (argc == 1) {
         if (!getcwd(root, sizeof root)) die("getcwd");
         cx_fmt(work, sizeof work, "%s/streampack-%d", sy_tmpdir(), (int)getpid());
-    } else die("usage ROOT OUTDIR");
+    } else die("usage ROOT OUTDIR [--full]");
     if (mkdir(work, 0700)) die("work directory must be new");
     { size_t n; char *b = slurp("/bin/true", &n); (void)b; bn = n; free(b); }
-    for (int pass = 3; pass <= 4; pass += 1) {
+    for (int pass = 3; full && pass <= 4; pass += 1) {
         char outdir[4096], pkgpath[4096], comfile[4096]; char *pkg; size_t at = 0;
         srcn = build(src, sizeof src, pass, NULL, model_at, &res_at);
         cx_fmt(pkgpath, sizeof pkgpath, "%s/source-p%d.pkg", work, pass); 
@@ -79,7 +81,7 @@ int main(int argc, char **argv) {
         close(fd);
         cx_fmt(outdir, sizeof outdir, "%s/out-p%d", work, pass);
         { np_result r; char why[512];
-          char *av[] = {"./tools/bound", "30", "sh", "./unisacc.com", "tools/stream-pack.cx",
+          char *av[] = {"./tools/bound", "30", "sh", "./unisacc.com", "tools/stream-pack.cx","--", "--",
                         "/bin/true", pkgpath, outdir, "lnx/x86_64", "O2", 0};
           if (np_run(av, root, 0, 40, &r, why, sizeof why)) die(why);
           cx_fmt(t, sizeof t, "p%d.writer-rc", pass);
@@ -116,11 +118,11 @@ int main(int argc, char **argv) {
     const char *records[] = {"M 1 1 0 3554254475\nA", "M 1 1 0 3554254475\nB", "M 1 2 0 3554254475\nA", "M 1 1 0 3554254475\nA", "M 1 1 2 3554254475\nA"};
     const char *labels[] = {"p4.raw-copied", "p4.raw-crc", "p4.raw-length", "p3.raw-forbidden", "p4.unknown-codec"};
     const char *errors[] = {"", "raw model CRC", "model length/codec", "model length/codec", "model length/codec"};
-    for (int k = 0; k < 5; k++) {
+    for (int k = 0; full && k < 5; k++) {
         char out[4096], file[4096], why[512]; np_result r = {0};
         srcn = build(src, sizeof src, k == 3 ? 3 : 4, records[k], model_at, &res_at);
         if (cx_fmt(p,sizeof p,"%s/raw.pkg",work) || cx_fmt(out,sizeof out,"%s/raw-out",work) || cx_write(p,src,srcn)) die("raw fixture");
-        char *av[] = {"sh","./unisacc.com","tools/stream-pack.cx","/bin/true",p,out,0};
+        char *av[] = {"sh","./unisacc.com","tools/stream-pack.cx","--", "--","/bin/true",p,out,0};
         if (np_run(av,root,0,30,&r,why,sizeof why)) die(why);
         if (k) ck(r.rc == 2 && r.err && strstr(r.err,errors[k]) && access(out,F_OK) != 0, labels[k]);
         else {
@@ -140,9 +142,62 @@ int main(int argc, char **argv) {
         np_free(&r);
         if (sy_unlink(p)) die("raw fixture cleanup");
     }
+    /* Footer-first P4 locate: standalone P4 + UNIPKG1 footer must strip 16B footer; bad footer on 'P '-prefixed file must fail closed. */
+    {
+        char fpkg[4096], fout[4096], bpkg[4096], bout[4096], why[512];
+        unsigned char tail[16];
+        size_t j;
+        unsigned long long ext;
+        srcn = build(src, sizeof src, 4, NULL, model_at, &res_at);
+        memcpy(tail, "UNIPKG1\n", 8);
+        ext = (unsigned long long)srcn;
+        for (j = 0; j < 8; j++) { tail[8 + j] = (unsigned char)(ext & 255); ext >>= 8; }
+        if (cx_fmt(fpkg, sizeof fpkg, "%s/footer-p4.pkg", work) || cx_fmt(fout, sizeof fout, "%s/footer-p4-out", work) ||
+            cx_fmt(bpkg, sizeof bpkg, "%s/bad-footer-p4.pkg", work) || cx_fmt(bout, sizeof bout, "%s/bad-footer-p4-out", work)) die("footer path");
+        {
+            char *buf = malloc(srcn + 16);
+            if (!buf) die("alloc");
+            for (j = 0; j < srcn; j++) buf[j] = src[j];
+            memcpy(buf + srcn, tail, 16);
+            if (cx_write(fpkg, buf, srcn + 16)) die("footer write");
+            memset(tail + 8, 0, 8);
+            memcpy(buf + srcn, tail, 16);
+            if (cx_write(bpkg, buf, srcn + 16)) die("bad footer write");
+            free(buf);
+        }
+        {
+            np_result r = {0};
+            char *av[] = {"./tools/bound", "30", "sh", "./unisacc.com", "tools/stream-pack.cx","--", "--", "/bin/true", fpkg, fout, "lnx/x86_64", "O2", 0};
+            if (np_run(av, root, 0, 40, &r, why, sizeof why)) die(why);
+            ck(r.rc == 0 && r.residue == 0, "p4.standalone-with-footer");
+            np_free(&r);
+        }
+        if (full) {
+            np_result r = {0};
+            char *av[] = {"./tools/bound", "30", "sh", "./unisacc.com", "tools/stream-model-identity.cx", "--", fout, fpkg, "all", 0};
+            if (np_run(av, root, 0, 40, &r, why, sizeof why)) die(why);
+            ck(r.rc == 0 && r.residue == 0, "p4.identity-standalone-with-footer");
+            np_free(&r);
+        }
+        {
+            np_result r = {0};
+            char *av[] = {"./tools/bound", "30", "sh", "./unisacc.com", "tools/stream-pack.cx","--", "--", "/bin/true", bpkg, bout, "lnx/x86_64", "O2", 0};
+            if (np_run(av, root, 0, 40, &r, why, sizeof why)) die(why);
+            ck(r.rc == 2 && r.err && strstr(r.err, "product package footer extent") && access(bout, F_OK) != 0, "p4.standalone-bad-footer-refused");
+            np_free(&r);
+        }
+        if (full) {
+            np_result r = {0};
+            char *av[] = {"./tools/bound", "30", "sh", "./unisacc.com", "tools/stream-model-identity.cx", "--", fout, bpkg, "all", 0};
+            if (np_run(av, root, 0, 40, &r, why, sizeof why)) die(why);
+            ck(r.rc == 2 && r.err && strstr(r.err, "footer extent"), "p4.identity-bad-footer-refused");
+            np_free(&r);
+        }
+        if (sy_unlink(fpkg) || sy_unlink(bpkg) || cx_rmtree(fout)) die("footer out cleanup");
+    }
     /* Leave nothing behind: the writer's own outputs and source packages. */
     { int left = 0, pass, i; char p[8192], q[8192];
-      for (pass = 3; pass <= 4; pass++) {
+      for (pass = 3; full && pass <= 4; pass++) {
           if (!cx_fmt(p, sizeof p, "%s/source-p%d.pkg", work, pass)) left += sy_unlink(p) != 0;
           if (!cx_fmt(p, sizeof p, "%s/out-p%d", work, pass)) {
               if (!cx_fmt(q, sizeof q, "%s/streams.json", p)) left += sy_unlink(q) != 0;
