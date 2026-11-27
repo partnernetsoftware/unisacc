@@ -3,7 +3,10 @@
  */
 #pragma unisa use cxlib.wholefrontmerge
 #pragma unisa use cxlib.pytempfile
+#pragma unisa use cxlib.chainfacts
 #pragma unisa use sys.fs
+#pragma unisa use sys.sha
+#pragma unisa use mem.bytes
 static int failed,owned;
 static char base[8192],part[2][8192];
 static const unsigned char frame0[]={15,0,0,0,2,0,0,0,'/','a','U','N','I','T','O','K','1',0,'X'};
@@ -56,11 +59,122 @@ static void deadline_fixtures(void){
  probe("UNISACC_WF_TEST_SKEW_MS=45000","deadline-absent-45s-dies","phase deadline (45 seconds)");
  const char *bad[]={"0","91","x","5"};for(int i=0;i<4;i++){char e[200],nm[64];if(cx_fmt(e,sizeof e,"UNISACC_CHAIN_PHASE_BOUND_S=%s UNISACC_WF_TEST_SKEW_MS=45000",bad[i])||cx_fmt(nm,sizeof nm,"deadline-invalid-%s-falls-back-45",bad[i])){ck(0,"deadline-format");continue;}probe(e,nm,"invalid UNISACC_CHAIN_PHASE_BOUND_S, using 45 s deadline");}
 }
+ /* Check exact line suffix ending with newline in emitted roots/probe output. */
+static int wf_has_line(const char *s,const char *suf){
+ if(!s||!suf)return 0;size_t sl=strlen(suf);
+ for(const char *p=s;*p;){const char *e=strchr(p,'\n');size_t ln=e?(size_t)(e-p):strlen(p);
+  if(ln>=sl&&!memcmp(p+ln-sl,suf,sl))return 1;if(!e)break;p=e+1;}
+ return 0;
+}
+ /* Check cf_root_source_for on non-lnx targets using a synthetic root_target override in an isolated fixture. */
+static void wf_target_override_fixtures(void){
+ char cwd[4096],root[4096],fx[4400],p[4600],q[4600],probe_src[4400],probe_bin[4400],wf_bin[4400];
+ char pkg[4400],objs[4400],driveo[4400],prep_osx[4400],prep_def[4400],part_osx[4400],part_win[4400];
+ char log_osx[4400],log_win[4400],cmd[10000];
+ if(!getcwd(cwd,sizeof cwd)||sy_realpath(cwd,root,sizeof root)<0){ck(0,"synth-root");return;}
+ if(cx_fmt(fx,sizeof fx,"%s/fx",base)||cx_fmt(probe_src,sizeof probe_src,"%s/probe.cx",fx)||
+    cx_fmt(probe_bin,sizeof probe_bin,"%s/probe",base)||cx_fmt(wf_bin,sizeof wf_bin,"%s/wf-fx",base)||
+    cx_fmt(pkg,sizeof pkg,"%s/fake.pkg",base)||cx_fmt(objs,sizeof objs,"%s/objects",base)||
+    cx_fmt(driveo,sizeof driveo,"%s/drive.o",objs)||cx_fmt(prep_osx,sizeof prep_osx,"%s/prep-osx",base)||
+    cx_fmt(prep_def,sizeof prep_def,"%s/prep-def",base)||cx_fmt(part_osx,sizeof part_osx,"%s/part-osx",base)||
+    cx_fmt(part_win,sizeof part_win,"%s/part-win",base)||cx_fmt(log_osx,sizeof log_osx,"%s/log-osx.txt",base)||
+    cx_fmt(log_win,sizeof log_win,"%s/log-win.txt",base)){ck(0,"synth-paths");return;}
+ if(cx_fmt(p,sizeof p,"%s/build",fx)||sy_mkdir_all(p,0755)||
+    cx_fmt(p,sizeof p,"%s/tools/cxlib",fx)||sy_mkdir_all(p,0755)||
+    cx_fmt(p,sizeof p,"%s/tools/templates",fx)||sy_mkdir_all(p,0755)||
+    cx_fmt(p,sizeof p,"%s/src/driver",fx)||sy_mkdir_all(p,0755)||
+    cx_fmt(p,sizeof p,"%s/src/runtime/compiler",fx)||sy_mkdir_all(p,0755)||
+    cx_fmt(p,sizeof p,"%s/src/core",fx)||sy_mkdir_all(p,0755)||
+    cx_fmt(p,sizeof p,"%s/src/compiler",fx)||sy_mkdir_all(p,0755)||
+    sy_mkdir_all(objs,0755)){ck(0,"synth-mkdirs");return;}
+ {
+  const char *links[]={"cx","ext","unisa","include","unisacc.com"};
+  for(int i=0;i<5;i++){if(cx_fmt(p,sizeof p,"%s/%s",root,links[i])||cx_fmt(q,sizeof q,"%s/%s",fx,links[i])||sy_symlink(p,q)){ck(0,"synth-symlink");return;}}
+ }
+ {
+  size_t zn=0;char *b;
+  if(cx_fmt(p,sizeof p,"%s/cxroot.tsv",root)||!(b=cx_read(p,&zn))||cx_fmt(q,sizeof q,"%s/cxroot.tsv",fx)||cx_write(q,b,zn)){ck(0,"synth-cxroot");return;}free(b);
+  if(cx_fmt(p,sizeof p,"%s/tools/whole-front.cx",root)||!(b=cx_read(p,&zn))||cx_fmt(q,sizeof q,"%s/tools/whole-front.cx",fx)||cx_write(q,b,zn)){ck(0,"synth-wf-copy");return;}free(b);
+  if(cx_fmt(p,sizeof p,"%s/tools/cxlib/chainfacts.cx",root)||!(b=cx_read(p,&zn))||cx_fmt(q,sizeof q,"%s/tools/cxlib/chainfacts.cx",fx)||cx_write(q,b,zn)){ck(0,"synth-cf-copy");return;}free(b);
+  if(cx_fmt(q,sizeof q,"%s/tools/templates/whole-front.cx.in",fx)||cx_write(q,"int main(void){return 0;}\n",25)){ck(0,"synth-tmpl");return;}
+  if(cx_fmt(p,sizeof p,"%s/build/chain-facts.tsv",root)||!(b=cx_read(p,&zn))){ck(0,"synth-facts-read");return;}
+  {const char *add="root_target\tosx/x86_64:driveargs.o\tsrc/driveargs_osx_synth.cx\n";
+   size_t an=strlen(add);char *nb=malloc(zn+an);if(!nb||mm_copy(nb,(long)zn,b,(long)zn)||mm_copy(nb+zn,(long)an,add,(long)an)){free(nb);free(b);ck(0,"synth-oom");return;}
+   int bad=cx_fmt(q,sizeof q,"%s/build/chain-facts.tsv",fx)||cx_write(q,nb,zn+an);free(nb);free(b);if(bad){ck(0,"synth-facts-write");return;}}
+ }
+ {
+  if(cx_fmt(p,sizeof p,"%s/tools/cxlib",root)){ck(0,"synth-cxlib-dir");return;}
+  DIR *d=opendir(p);struct dirent *e;if(!d){ck(0,"synth-cxlib-open");return;}
+  while((e=readdir(d))){size_t zn=strlen(e->d_name);if(zn<4||strcmp(e->d_name+zn-3,".cx")||!strcmp(e->d_name,"chainfacts.cx"))continue;
+   if(cx_fmt(p,sizeof p,"%s/tools/cxlib/%s",root,e->d_name)||cx_fmt(q,sizeof q,"%s/tools/cxlib/%s",fx,e->d_name)||sy_symlink(p,q)){closedir(d);ck(0,"synth-cxlib-link");return;}}
+  closedir(d);
+ }
+ for(int i=0;i<cf_root_count();i++){if(cx_fmt(q,sizeof q,"%s/%s",fx,cf_root_source(i))||cx_write(q,"int r0(void){return 0;}\n",24)){ck(0,"synth-root-stubs");return;}}
+ if(cx_fmt(q,sizeof q,"%s/src/driveargs_osx_synth.cx",fx)||cx_write(q,"int rs(void){return 1;}\n",24)){ck(0,"synth-override-file");return;}
+ if(cx_fmt(q,sizeof q,"%s/src/drivestream_m1.cx",fx)||cx_write(q,"int rm(void){return 2;}\n",24)){ck(0,"synth-m1-file");return;}
+ {
+  const char *ps=
+   "#pragma unisa use sys.fs\n#pragma unisa use sys.posix\n#pragma unisa use sys.env\n#pragma unisa use sys.io\n#pragma unisa use text.text\n#pragma unisa use mem.heap\n"
+   "int main(int argc,char **argv){\n"
+   " const char *lp=sy_env(\"WF_PROBE_LOG\");\n"
+   " if(lp&&*lp){int fd=sy_open(lp,O_WRONLY|O_CREAT|O_APPEND,0644);if(fd>=0){for(int i=0;i<argc;i++){(void)sy_write_all(fd,argv[i],(long)strlen(argv[i]));(void)sy_write_all(fd,\"\\n\",1);}(void)sy_close(fd);}}\n"
+   " if(argc==2&&argv[1][0]=='/'){sy_printf(\"aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa\\n\");return 0;}\n"
+   " if(argc>=7&&tx_eqz(argv[1],\"front\")){char f[4400],l[4600];int t=argc-7,fd;(void)sy_mkdir_all(argv[4],0755);"
+   "  if(cx_fmt(f,sizeof f,\"%s/frames.bin\",argv[4])||cx_write(f,\"FR\",2)||cx_fmt(f,sizeof f,\"%s/attrs.bin\",argv[4])||cx_write(f,\"AT\",2)||cx_fmt(f,sizeof f,\"%s/part.tsv\",argv[4]))return 2;"
+   "  fd=sy_open(f,O_WRONLY|O_CREAT|O_TRUNC,0644);if(fd<0)return 2;"
+   "  if(cx_fmt(l,sizeof l,\"first\\t%s\\ncount\\t%d\\ntotal\\t%d\\n\",argv[5],t,t)||sy_write_all(fd,l,(long)strlen(l)))return 2;"
+   "  for(int i=0;i<t;i++)if(cx_fmt(l,sizeof l,\"%d\\t%s\\n\",i,argv[7+i])||sy_write_all(fd,l,(long)strlen(l)))return 2;"
+   "  if(sy_close(fd))return 2;return 0;}\n"
+   " for(int i=1;i+1<argc;i++)if(tx_eqz(argv[i],\"-o\")){if(argc>=4&&tx_eqz(argv[1],\"-o\")&&!tx_eqz(argv[3],\"-b\")){size_t zn=0;char *s=cx_read(argv[0],&zn);if(!s||!zn||cx_write(argv[i+1],s,zn)||chmod(argv[i+1],0755))return 2;mm_free(s);}else if(cx_write(argv[i+1],\"OK\",2))return 2;return 0;}\n"
+   " return 0;}\n";
+  if(cx_write(probe_src,ps,strlen(ps))){ck(0,"synth-probe-write");return;}
+ }
+ {
+  char psha[65],dsha[65],rf[4400],rec[2048];
+  if(cx_write(pkg,"PKG",3)||cx_write(driveo,"DRV",3)){ck(0,"synth-pkg-obj");return;}
+  if(sy_sha256_hex("PKG",3,psha)||sy_sha256_hex("DRV",3,dsha)||cx_fmt(rf,sizeof rf,"%s/receipt.txt",objs)){ck(0,"synth-sha");return;}
+  if(cx_fmt(rec,sizeof rec,"root\t%s\np3\t%s\np3_sha\t%s\ndrive.o\tsha=%s\tbytes=3\n",fx,pkg,psha,dsha)||cx_write(rf,rec,strlen(rec))){ck(0,"synth-obj-receipt");return;}
+ }
+ if(cx_fmt(cmd,sizeof cmd,"cd \"%s\" && sh \"%s/unisacc.com\" \"%s/tools/chain-facts-gen.cx\" -- --write >/dev/null 2>&1",fx,root,root)||system(cmd)){ck(0,"synth-chainfacts-gen");return;}
+ if(cx_fmt(cmd,sizeof cmd,"cd \"%s\" && sh \"%s/unisacc.com\" -o \"%s\" \"%s\" >/dev/null 2>&1",fx,root,probe_bin,probe_src)||system(cmd)){ck(0,"synth-probe-build");return;}
+ {
+  int compiled=(!cx_fmt(cmd,sizeof cmd,"cd \"%s\" && sh \"%s/unisacc.com\" -o \"%s\" \"%s/tools/whole-front.cx\" >/dev/null 2>&1",fx,root,wf_bin,fx)&&system(cmd)==0);
+  ck(compiled,"synth-wf-compile");
+  if(!compiled)return;
+ }
+ {
+  int rc1=(!cx_fmt(cmd,sizeof cmd,"env UNISACC_IDENTITY_HELPER=\"%s\" TARGET=osx/x86_64 \"%s\" prepare \"%s\" \"%s\" \"%s\" \"%s\" \"%s\" >/dev/null 2>&1",probe_bin,wf_bin,fx,pkg,probe_bin,objs,prep_osx)&&system(cmd)==0);
+  size_t zn=0;char *rt=0;
+  if(rc1&&!cx_fmt(p,sizeof p,"%s/roots.txt",prep_osx))rt=cx_read(p,&zn);
+  ck(rc1&&rt&&wf_has_line(rt,"/src/driveargs_osx_synth.cx")&&!wf_has_line(rt,"/src/drivestream_m1.cx"),"synth-prepare-osx-override-without-lnx-leak");
+  free(rt);
+ }
+ {
+  int rc2=(!cx_fmt(cmd,sizeof cmd,"env -u TARGET UNISACC_IDENTITY_HELPER=\"%s\" \"%s\" prepare \"%s\" \"%s\" \"%s\" \"%s\" \"%s\" >/dev/null 2>&1",probe_bin,wf_bin,fx,pkg,probe_bin,objs,prep_def)&&system(cmd)==0);
+  size_t zn=0;char *rt=0;
+  if(rc2&&!cx_fmt(p,sizeof p,"%s/roots.txt",prep_def))rt=cx_read(p,&zn);
+  ck(rc2&&rt&&wf_has_line(rt,"/src/driveargs.cx")&&wf_has_line(rt,"/src/drivestream.cx")&&!wf_has_line(rt,"/src/drivestream_m1.cx"),"synth-prepare-unset-target-is-neutral");
+  free(rt);
+ }
+ {
+  int rc3=(!cx_fmt(cmd,sizeof cmd,"env -u TARGET UNISACC_IDENTITY_HELPER=\"%s\" WF_PROBE_LOG=\"%s\" \"%s\" front \"%s\" osx/x86_64 \"%s\" 0 44 >/dev/null 2>&1",probe_bin,log_osx,wf_bin,prep_def,part_osx)&&system(cmd)==0);
+  size_t zn=0;char *lg=cx_read(log_osx,&zn);
+  ck(rc3&&lg&&wf_has_line(lg,"/src/driveargs_osx_synth.cx")&&!wf_has_line(lg,"/src/drivestream_m1.cx"),"synth-front-osx-uses-override-from-neutral-prep");
+  free(lg);
+ }
+ {
+  int rc4=(!cx_fmt(cmd,sizeof cmd,"env -u TARGET UNISACC_IDENTITY_HELPER=\"%s\" WF_PROBE_LOG=\"%s\" \"%s\" front \"%s\" win/x86_64 \"%s\" 0 44 >/dev/null 2>&1",probe_bin,log_win,wf_bin,prep_def,part_win)&&system(cmd)==0);
+  size_t zn=0;char *lg=cx_read(log_win,&zn);
+  ck(rc4&&lg&&wf_has_line(lg,"/src/driveargs.cx")&&!wf_has_line(lg,"/src/driveargs_osx_synth.cx"),"synth-front-win-unaffected-by-osx-override");
+  free(lg);
+ }
+}
 int main(void){deadline_fixtures();
  if(!ptf_mkdtemp(0,"whole-front-check-",base,sizeof base))owned=1;
  if(!owned||cx_fmt(part[0],sizeof part[0],"%s/part0",base)||cx_fmt(part[1],sizeof part[1],"%s/part1",base)||sy_mkdir(part[0],0700)||sy_mkdir(part[1],0700)){
   ck(0,"exclusive-fixture");
  }else{
+  wf_target_override_fixtures();
   one(0,"two-parts-independent-phase-bytes");
   one(1,"missing-part-no-output");
   one(2,"out-of-order-no-output");
