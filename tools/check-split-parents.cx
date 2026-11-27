@@ -1,6 +1,8 @@
 /* tools/check-split-parents.cx -- 校验 tests/split-parents.tsv 旁表、dvqualify 防绕过与 G1 门合同 (r4).
  *   sh ./unisacc.com tools/check-split-parents.cx
- * Builds private mini repos under $TMPDIR (with real tools/check-slow-split.cx & tests/batches.tsv) and verifies 16 contracts:
+ *   sh ./unisacc.com tools/check-split-parents.cx -- --part table|g1a|g1b|g1c
+ * Shards keep every one of the 19 assertions; default runs all. Each registered shard stays under 35 s.
+ * Builds private mini repos under $TMPDIR (with real tools/check-slow-split.cx & tests/batches.tsv) and verifies 19 contracts in four registered shards:
  *   1. no-table-byte-identical              without split-parents.tsv, dvqualify --list keeps 15 batches & omits split_parents_excluded=
  *   2. default-excludes-parents             with 5-col split-parents.tsv, default --list excludes 3 parents & prints split_parents_excluded=3
  *   3. include-flag-restores-parents        --include-split-parents restores all 15 batches
@@ -63,8 +65,18 @@ static void csp_wire_checker(const char *cwd, const char *dst_repo) {
     if (ckk_sh("check-split-parents", cmd, out, sizeof out) != 0) csp_abort("wire-run");
 }
 
-int main(void) {
+int main(int argc, char **argv) {
     long t0 = sy_now_ms();
+    int part = 15;
+    if (argc == 3 && !strcmp(argv[1], "--part")) {
+        if (!strcmp(argv[2], "table")) part = 1;
+        else if (!strcmp(argv[2], "g1a")) part = 2;
+        else if (!strcmp(argv[2], "g1b")) part = 4;
+        else if (!strcmp(argv[2], "g1c")) part = 8;
+        else if (!strcmp(argv[2], "g1")) part = 14;
+        else csp_abort("bad-part");
+    } else if (argc != 1) csp_abort("usage: [--part table|g1a|g1b]");
+
     char out[CSP_OUT], cwd[CSP_PW], work[CSP_PW], repo[CSP_PW], dvqbin[CSP_PW], p[CSP_PW], cmd[8192];
     const char *td = sy_tmpdir();
     const char *base_td = (td && td[0] == '/') ? td : "/tmp";
@@ -73,8 +85,11 @@ int main(void) {
     if (cx_fmt(work, sizeof work, "%s/check-split-parents-%d", base_td, (int)getpid())) csp_abort("work");
     csp_mk(work);
     if (cx_fmt(dvqbin, sizeof dvqbin, "%s/dvqualify.bin", work)) csp_abort("dvqbin");
-    if (cx_fmt(cmd, sizeof cmd, "sh '%s/unisacc.com' '%s/tools/dvqualify.cx' -o '%s'", cwd, cwd, dvqbin)) csp_abort("build-dvq");
-    if (ckk_sh("check-split-parents", cmd, out, sizeof out) != 0) csp_abort("compile-dvq");
+    if (part & 1) {
+        if (cx_fmt(cmd, sizeof cmd, "sh '%s/unisacc.com' -O0 '%s/tools/dvqualify.cx' -o '%s'", cwd, cwd, dvqbin)) csp_abort("build-dvq");
+        if (ckk_sh("check-split-parents", cmd, out, sizeof out) != 0) csp_abort("compile-dvq");
+    }
+
     if (cx_fmt(repo, sizeof repo, "%s/repo", work)) csp_abort("repo");
     csp_mk(repo);
     if (cx_fmt(p, sizeof p, "%s/tests", repo)) csp_abort("p1"); csp_mk(p);
@@ -119,6 +134,12 @@ int main(void) {
     csp_w(repo, "tests/batch-domain-index.tsv", idx);
     csp_w(repo, "tests/batches.tsv", batches_tsv);
 
+    const char *spt =
+        "# parent\tshards\tcheck\tsince\treason\n"
+        "signal-targets\tsignal-targets-gen,signal-targets-posix,signal-targets-win\tslow-split\t0.0.82\tsplit\n"
+        "win-argv\twin-argv-facts,win-argv-x86_64,win-argv-arm64\tslow-split\t0.0.82\tsplit\n"
+        "snapshots-cx\tsnapshots-cx-core,snapshots-cx-alloc\tslow-split\t0.0.82\tsplit\n";
+    if (!(part & 1)) goto skip_table;
     /* 1. Without tests/split-parents.tsv */
     if (cx_fmt(cmd, sizeof cmd,
         "'%s' '%s' --set product-qualification --list", dvqbin, repo)) csp_abort("c1");
@@ -130,11 +151,7 @@ int main(void) {
            "no-table-byte-identical: without split-parents.tsv keeps 15 batches and omits excluded field");
     }
 
-    const char *spt =
-        "# parent\tshards\tcheck\tsince\treason\n"
-        "signal-targets\tsignal-targets-gen,signal-targets-posix,signal-targets-win\tslow-split\t0.0.82\tsplit\n"
-        "win-argv\twin-argv-facts,win-argv-x86_64,win-argv-arm64\tslow-split\t0.0.82\tsplit\n"
-        "snapshots-cx\tsnapshots-cx-core,snapshots-cx-alloc\tslow-split\t0.0.82\tsplit\n";
+
     csp_w(repo, "tests/split-parents.tsv", spt);
 
     /* 2. Default --list excludes 3 parents */
@@ -208,6 +225,8 @@ int main(void) {
            "dvqualify-rejects-unproven-parent: c-negative with fake shards refused rc=2");
     }
 
+skip_table:
+    if (!(part & 14)) goto skip_g1;
     /* 7-16. Real release-exec.cx --dry G1 tests (10 scenarios with real check-slow-split.cx) */
     {
         char g1[CSP_PW], lay[CSP_PW], evdir[CSP_PW], rxbin[CSP_PW], sha_ape[65], sha_f[65], cand[2048], ev[16384];
@@ -218,7 +237,7 @@ int main(void) {
         csp_sha(blob, sha_f);
 
         if (cx_fmt(rxbin, sizeof rxbin, "%s/release-exec.bin", work)) csp_abort("rxbin");
-        if (cx_fmt(cmd, sizeof cmd, "sh '%s/unisacc.com' '%s/tools/release-exec.cx' -o '%s'", cwd, cwd, rxbin)) csp_abort("build-rx");
+        if (cx_fmt(cmd, sizeof cmd, "sh '%s/unisacc.com' -O0 '%s/tools/release-exec.cx' -o '%s'", cwd, cwd, rxbin)) csp_abort("build-rx");
         if (ckk_sh("check-split-parents", cmd, out, sizeof out) != 0) csp_abort("compile-rx");
 
         if (cx_fmt(g1, sizeof g1, "%s/g1repo", work)) csp_abort("g1"); csp_mk(g1);
@@ -270,6 +289,7 @@ int main(void) {
             "RAW\tBATCH_RUN\tid=win-argv\tstatus=PASS\trc=0\tcandidate=%s\n",
             sha_ape, sha_ape, sha_ape, sha_ape);
 
+        if (!(part & 2)) goto skip_g1a;
         /* 7. Missing 1 shard -> REFUSE STRICT_SPLIT_INCOMPLETE */
         cx_fmt(ev, sizeof ev,
             "batch\tdomain\tstatus\trc\tcandidate\tms\tload1\tretries\tnote\n%s"
@@ -343,6 +363,8 @@ int main(void) {
         if (cx_fmt(p, sizeof p, "%s/release/evidence/0.0.82/expected-fail.tsv", g1)) csp_abort("rm-ef");
         (void)unlink(p);
 
+skip_g1a:
+        if (!(part & 4)) goto skip_g1b;
         /* 11. Shard UNKNOWN + RAW receipt + expected-unmeasured.tsv, parent absent -> REFUSE STRICT_SPLIT_INCOMPLETE */
         csp_w(g1, "release/evidence/0.0.82/alloc-deferred.tsv",
             "DEFERRED\tsnapshots-cx-alloc\tprepare-failed=no-producer=fixture-mat\n");
@@ -407,6 +429,22 @@ int main(void) {
             (void)rc;
         }
 
+skip_g1b:
+        if (!(part & 8)) goto skip_g1c;
+        /* G1c starts here: give the gate a valid candidate/evidence baseline independent of contracts 7-13. */
+        cx_fmt(ev, sizeof ev,
+            "batch\tdomain\tstatus\trc\tcandidate\tms\tload1\tretries\tnote\n"
+            "signal-targets\tproduct-qualification\tPASS\t0\t%s\t10\t0.5\t0\tcount=10/0\n"
+            "RAW\tBATCH_RUN\tid=signal-targets\tstatus=PASS\trc=0\tcandidate=%s\n"
+            "win-argv\tproduct-qualification\tPASS\t0\t%s\t10\t0.5\t0\tcount=10/0\n"
+            "RAW\tBATCH_RUN\tid=win-argv\tstatus=PASS\trc=0\tcandidate=%s\n"
+            "snapshots-cx\tproduct-qualification\tPASS\t0\t%s\t10\t0.5\t0\tcount=265/0\n"
+            "RAW\tBATCH_RUN\tid=snapshots-cx\tstatus=PASS\trc=0\tcandidate=%s\n"
+            "c99-whitespace\tproduct-qualification\tPASS\t0\t%s\t10\t0.5\t0\tcount=12/0\n"
+            "RAW\tBATCH_RUN\tid=c99-whitespace\tstatus=PASS\trc=0\tcandidate=%s\n"
+            "SUMMARY\tbatches=4\tPASS=4\tFAIL=0\tUNKNOWN=0\tINVALID=0\ttotal_ms=40\tape_sha256=%s\tversion=unisacc 0.0.82\tsplit_parents_excluded=3\n",
+            sha_ape, sha_ape, sha_ape, sha_ape, sha_ape, sha_ape, sha_ape, sha_ape, sha_ape);
+        csp_w(g1, "release/evidence/v0.0.82-strict-2026-01-01.tsv", ev);
         /* 14. split-parents.tsv mismatch with check-slow-split.cx -> REFUSE STRICT_SPLIT_TABLE_MISMATCH */
         csp_w(g1, "tests/split-parents.tsv",
             "# parent\tshards\tcheck\tsince\treason\n"
@@ -507,6 +545,8 @@ int main(void) {
         }
     }
 
+skip_g1c:
+skip_g1:
     {
         char *rmv[] = {"rm", "-rf", work, 0};
         (void)ck_run(rmv, out, sizeof out);
