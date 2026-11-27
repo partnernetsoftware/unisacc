@@ -9,8 +9,8 @@
 | v0.1.6 | tape 载体公开分发 | 公开资产包含旁置 `tapemode.so`,用户可选择启用影子对拍 | 9 件公开资产;六目标 CI 成功;`facts-gen --check` 无 DIFF | 任何权威翻转 | 今天 |
 | v0.1.7 | M1 权威嵌入(未发布,内容移入新 v0.1.8) | 同旧 v0.1.7 | 作废:尺寸判据漏算 loader 固定成本,按铁律“放宽即换版本号”不发布;测量入口 `check-v017-exit 9e2ac4df6` 对 `c9275e775` | 同旧 | 不发布 |
 | v0.1.8 | M1 权威嵌入(仅 lnx/x86_64) | 不依赖旁置文件,stream 的 `cxsa_valid` 由嵌入 tape 权威执行 | 三条尺寸判据:原生单元移出 `>= 3,770`B;native `.text` 净增 `<= 26,000`B;PT_LOAD R E 净增 `<= 25,000`B(只可收紧,不要求净减);其余判据同旧 v0.1.7(`cxsa_valid` 0/`cxsa_valid_s1` 已定义、其余五切片 0B 差、stream `<=2x`、G1..G6 先红后绿、G7 `UNCOVERED`);发布说明须写二进制增大(`+25,267`B `.text`、`+24,527`B PT_LOAD R E)、回本未证、v0.1.7 因判据错误未发布、仅 lnx/x86_64 | 批 1;其他五目标;默认路径 | 3-5 天;注:尺寸变化不归因 tape,driveargs -13,641B 归因未证,tapegate loader 可能自带 stdio 副本 |
-| v0.1.9 | 纯静态 libc 副本去除类 | 20 个上层产品单元去掉各自静态 libc 副本,printf 家族走 L0 `sy_*`/`mm_*`/`tx_*` | PT_LOAD R E 净减 `>=40,000`B;LOCAL 20 单元实测 `-441,128`B(agyneon2 `a95f0fc86..bc2177979`);字节棘轮 `check-stdio-copies` 锁 `_u_vfmt` 等为零;本版不含 tape 迁移与大小归因 | tape 迁移;VM 单元;六目标 | 5-7 天 |
-| v0.1.10 | tape 运行时范围 + 速度门(收窄) | tape 运行时(bridge、call_out、touched-span clear、guest-slim、A2、pack;w/agyneon3 13 提交加 self-audit 修复)与全部 102 单元在 tape 下运行 | 102 档 cmp EQUAL;16 档 `<=15x`,判据按身份指明**单一** fixture(2x2 测量进行中;当前 speed-gate 集 `14.58x`,check-v0110-exit 内置 fixture `15.65x-17.18x`);64/102 档 VM 单元按预设 fallback 判 stay-native(`14.58%<25%`);原生基线按候选身份冻结 | 迁移任何新单元;64/102 档 15x | 7-10 天,最不确定 |
+| v0.1.9 | 纯静态 libc 副本去除类 | 20 个上层产品单元去掉各自静态 libc 副本,printf 家族走 L0 `sy_*`/`mm_*`/`tx_*` | PT_LOAD R E 净减 `>=40,000`B;LOCAL 20 单元(按链回执的每单元 `-O` 级别,m0.o `-O2`)实测 PT_LOAD R E `0x187d1b`=`1,604,891`B,净减 `-444,835`B(`-21.70%`);entry.elf `78d933cc...`,APE `9,308,637`B/`67e52510...`;ccapi 独立重放 MATCH;recipe `tools/build-objs-from-tree.cx` main `3dfe1e7fd`,exit `check-v019-exit` main `7f399bbad`;旧 `-441,128`B/`0x188b96`/APE `1619e9a4` 已作废(m0 在 `-O1`);`check-stdio-copies` 锁 `_u_vfmt` 等为零;本版不含 tape 迁移与大小归因 | tape 迁移;VM 单元;六目标 | 5-7 天 |
+| v0.1.10 | tape 运行时范围 + 速度门(收窄) | tape 运行时(bridge、call_out、touched-span clear、guest-slim、A2、pack;w/agyneon3 13 提交加 self-audit 修复)与全部 102 单元在 tape 下运行 | 102 档 cmp EQUAL;16 档 `<=15x` 按身份指定单一 fixture;判据运行 GREEN LOCAL:`w/agyneon3-v0110-main c6890eb23`,tier 16 `14.113x`(FixA),c2/c3 `106/106`,身份元组(已装 0.1.6 根、FixA、harness `307a43835`);64/102 档 VM 单元按预设 fallback 判 stay-native(`14.58%<25%`);原生基线按候选身份冻结 | 迁移任何新单元;64/102 档 15x | 7-10 天,最不确定 |
 | v0.1.11 | 下一静态重复类 | 把重复静态实现收成一份: SHA-256 收为单个 L0 副本(`sy_sha256_bytes`,约 `55KB`),`cx_read`/`cx_write` 的 heap 与 `FILE*`(约 `45KB`),deps/driveplan,heap 批;RT_EXTERN 函数共享作为判后 side item(活代码仅 `63.7KB`) | 进入时按边界规则写判据并登记红检查;只可收紧;不承接 64/102 档 15x | 无独立类时不成版 | 未估计 |
 | v0.1.12 | 先拆后迁批 2 | 批 2 的 16 个单元进入迁移 | 进入时按 v0.1.11 测量重新设定 | 批 3、批 4 | 未估计 |
 | v0.1.13 | 剩余批并冻结 stay-native | 剩余迁移批 | 进入时按测量设定;冻结 `plans/stay-native.tsv` | 六目标 | 未估计 |
@@ -46,7 +46,7 @@ LOCAL 原型证据(均不支持“按大小迁移”):
 ## v0.1.x 收尾与 v0.2.x 循环(fable 采纳,2026-11-27,所有者方向:v0.2.x = 持续自优化,asm 切片做到极限加 nn 迭代)
 
 - **v0.1.x 出口门**(一个检查 `check-v01x-exit`,开版即红):`plans/slice-units.tsv` 每个单元要么“留原生”要么“已迁且权威”;六目标各自 `cxsa_valid 0`、移出字节相等、fork 根回到 1;tape 16 档 `<=15x`,64/102 档 15x 项由预先定义的 stay-native 判定取代——证据:`agyneon` 真实 tier 64 `416.2M` 步、load1 2.43,全部 `[r6-OFF]` frame-slot ld/st `14.58%`(r6_64 `6.95%` + r6_n `7.62%`),加 `[r7+OFF]` 后 `24.3% < 25%`,故判 stay-native;这是应用预设 fallback,不是放宽;热启动 `<=1.10x` 新 v0.1.8。
-- **v0.1.x 尾段**:v0.1.6 载体;v0.1.7 作废(内容移入 v0.1.8);v0.1.8 M1 嵌入 lnx;v0.1.9 纯 libc 副本去除类(20 单元,LOCAL -441,128B);六单元表批**未排槽**;v0.1.10 tape 运行时范围加收窄速度门(102 cmp EQUAL、16 档 15x,64/102 VM 判 stay-native);v0.1.11 下一静态重复类;v0.1.12 先拆后迁批 2;v0.1.13 剩余批并冻结留原生清单;v0.1.14 六目标一致加出口门(六目标一致从 v0.2.0 移到这里)。
+- **v0.1.x 尾段**:v0.1.6 载体;v0.1.7 作废(内容移入 v0.1.8);v0.1.8 M1 嵌入 lnx;v0.1.9 纯 libc 副本去除类(20 单元,LOCAL -444,835B / -21.70%,APE 9,308,637B sha 67e52510);六单元表批**未排槽**;v0.1.10 tape 运行时范围加收窄速度门(102 cmp EQUAL、16 档 15x,64/102 VM 判 stay-native);v0.1.11 下一静态重复类;v0.1.12 先拆后迁批 2;v0.1.13 剩余批并冻结留原生清单;v0.1.14 六目标一致加出口门(六目标一致从 v0.2.0 移到这里)。
 - **v0.2.x 循环**:账本 `build/opt-ledger.tsv` 绑定候选身份(每切片每目标 `.text` 字节;每基准指令数与中位墙钟,load1>2 记 NOISY;nn 权重字节与节点;tape 步数/原生指令)。基准集 `tests/bench/` 加 `build/bench-set.tsv`,v0.1.x 末冻结 12 项,只追加。候选:A=对性能最热的“留原生”函数做 asm 重写;B=从 gold 构造的 nn 结构/权重改动(不训练)。验证:A 以旧实现为 oracle,全枚举或 golden 字节 cmp,变异先红;B 逐项评估相等;两者都过字节等价回归。仅当目标指标超过噪声带 `>=3%`、其他回退 `<=1%`、六目标验证全绿才保留,否则当天回退并记 REJECTED。每个 v0.2.N = 一个改进类加一个目标增量。
 - **前三个**(阈值提议,v0.1.14 重新基线):v0.2.0 nn 体积与步率(暂定先做:权重 `-15%`,tape 倍率 `15x -> 10x`,评估相等);v0.2.1 lnx/x86_64 asm 热类 1(前 5 函数,基准指令中位 `-10%`,`.text` 不增,其他目标保持参考实现);v0.2.2 arm64 asm 加第二批热点(每架构 `-8%`,其他地方零回退)。
 - **v0.1.x 期间并行建设**(工具进 main):agy-flow 基准 harness、opt-ledger 与 devsvc 保留/回退门;agyneon 每函数指令画像(扩展 perf-hot);agyneon2 asm 切片构建路径(参考实现与 asm 双轨加字节比较器);agyneon3 nn 重建路径(gold 到权重到逐项评估,一条命令);agy-h 六目标 asm 验证矩阵与 CI 成本;cdx 对保留/回退门做对抗复核;ccogweco 出口门检查加留原生冻结清单生成器;omp-grk 基准噪声带(9 次重复)。
@@ -83,7 +83,7 @@ LOCAL 原型证据(均不支持“按大小迁移”):
 
 ### 逐单元宿主开销(证伪结果)
 
-- agyneon2 `b0447c7b3`(w/agyneon2-m25;原稿误写 96633e74,非 git 对象):m25 叠在 v0.1.7 链上使 PT_LOAD R E `+3,315`B;tl_dce 后活代码仅约 `2.5KB`,而每单元 string bridge+cache+拒绝约 `5.8KB`,宿主开销真实。
+- agyneon2 `96633e74`:m25 叠在 v0.1.7 链上使 PT_LOAD R E `+3,315`B;tl_dce 后活代码仅约 `2.5KB`,而每单元 string bridge+cache+拒绝约 `5.8KB`,宿主开销真实。
 - 决定:(1) TapeRuntime 通用共享 bridge(字符串取值+值调用),把每单元宿主成本降到几百字节(agyneon3);(2) 迁移顺序按 tl_dce 后链接入口里的活代码字节排序,不按对象 `.text`(omp-grk);(3) 表批(新 v0.1.9)在宿主开销实测变小前不开。
 
 ### 编译器尺寸候选(记录)
@@ -101,7 +101,7 @@ LOCAL 原型证据(均不支持“按大小迁移”):
 
 ## 追加裁定(2026-11-27 末段:v0.1.9 纯 libc、v0.1.10 运行时、v0.1.11 静态重复)
 
-- v0.1.9 为**纯** libc 副本去除类:20 个上层单元,`a95f0fc86..bc2177979` 范围,LOCAL 实测 PT_LOAD R E `-441,128`B;原 6 单元表迁移不并入本版,按类规则另行排槽,后续版本号不改。
-- v0.1.10 = tape 运行时范围(bridge、call_out、touched-span clear、guest-slim、A2、pack;w/agyneon3 13 提交加 self-audit 修复)加收窄速度门。tier 16 `<=15x` 的判据必须写明**一个** fixture 身份,不能拿不同 fixture 的数字互比;2x2 测量进行中,现有 speed-gate 集 `14.58x`、check-v0110-exit 内置 fixture `15.65x-17.18x` 只作背景。102 档 cmp EQUAL;64/102 档 VM 单元仍按预设 fallback 判 stay-native。
+- v0.1.9 为**纯** libc 副本去除类:20 个上层单元,`a95f0fc86..bc2177979`;按链回执的每单元 `-O` 级别(m0.o `-O2`)重算后 LOCAL PT_LOAD R E=`0x187d1b`=`1,604,891`B,净减 `-444,835`B(`-21.70%`),entry.elf `78d933cc...`,APE `9,308,637`B/`67e52510...`,ccapi 独立重放 MATCH;recipe `tools/build-objs-from-tree.cx` main `3dfe1e7fd`,exit `check-v019-exit` main `7f399bbad`;旧 `-441,128`B/`0x188b96`/APE `1619e9a4` 作废(m0 在 `-O1`)。原 6 单元表迁移不并入本版,按类规则另行排槽,后续版本号不改。
+- v0.1.10 = tape 运行时范围(bridge、call_out、touched-span clear、guest-slim、A2、pack;w/agyneon3 13 提交加 self-audit 修复)加收窄速度门。tier 16 `<=15x` 的判据必须写明**一个** fixture 身份,不能拿不同 fixture 的数字互比。判据运行已在 `w/agyneon3-v0110-main c6890eb23` 得 GREEN LOCAL:tier 16 `14.113x`(FixA),c2/c3 `106/106`;身份元组 = 已装 0.1.6 根、FixA、harness `307a43835`。speed-gate 集 `14.58x` 与内置 fixture `15.65x-17.18x` 只作背景。102 档 cmp EQUAL;64/102 档 VM 单元仍按预设 fallback 判 stay-native。
 - v0.1.11 = 下一静态重复类:SHA-256 收为单个 L0 `sy_sha256_bytes`(约 `55KB`),`cx_read`/`cx_write` 的 heap 与 `FILE*`(约 `45KB`),deps/driveplan,heap 批;RT_EXTERN 函数共享只作判后 side item(活代码 `63.7KB`)。
 - 退出判据只可收紧,不可放宽;v0.1.12 及以后保持原样。
