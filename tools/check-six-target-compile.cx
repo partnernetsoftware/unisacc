@@ -15,6 +15,10 @@ static const char *TGTS[6] = {
     "lnx/x86_64", "lnx/arm64", "osx/x86_64", "osx/arm64", "win/x86_64", "win/arm64"
 };
 
+static int is_host_tool(const char *p) {
+    return (strncmp(p, "tools/", 6) == 0 || strncmp(p, "tests/", 6) == 0);
+}
+
 static int compile_one(const char *prod, const char *cwd, const char *file, const char *tgt, const char *out_o) {
     char *av[] = {"sh", (char *)prod, "-O2", "-c", "-b", (char *)tgt, "-funit", (char *)file, "-o", (char *)out_o, 0};
     np_result r; mm_fill(&r, (long)sizeof r, 0, (long)sizeof r);
@@ -55,8 +59,11 @@ int main(int argc, char **argv) {
         if (sy_write_file(red_cx, red_src, (long)strlen(red_src), 0644) != 0) return 2;
         int red_rc = compile_one(prod, cwd, red_cx, "win/x86_64", red_o);
         (void)sy_unlink(red_cx);
-        sy_printf("SELF_TEST\tbytes_6target=%d/6\tred_win_fork_rc=%d\n", ok6, red_rc);
-        return (ok6 == 6 && fail6 == 0 && red_rc != 0) ? 0 : 1;
+        int host_cls_ok = (is_host_tool("tools/build-objs-from-tree.cx") == 1 &&
+                           is_host_tool("tests/check-stages.cx") == 1 &&
+                           is_host_tool("cx/core/bytes.cx") == 0);
+        sy_printf("SELF_TEST\tbytes_6target=%d/6\tred_win_fork_rc=%d\thost_cls=%d\n", ok6, red_rc, host_cls_ok);
+        return (ok6 == 6 && fail6 == 0 && red_rc != 0 && host_cls_ok) ? 0 : 1;
     }
 
     char *range_buf = 0;
@@ -78,8 +85,10 @@ int main(int argc, char **argv) {
     sy_printf("file\tlnx/x86_64\tlnx/arm64\tosx/x86_64\tosx/arm64\twin/x86_64\twin/arm64\n");
     int tot_ok = 0, tot_fail = 0;
     for (int f = 0; f < nfiles; f++) {
+        int host_only = is_host_tool(files[f]);
         sy_printf("SIX_TARGET\t%s", files[f]);
         for (int t = 0; t < 6; t++) {
+            if (host_only && t > 0) { sy_printf("\tSKIP(host-tool)"); continue; }
             char oo[4200]; cx_fmt(oo, sizeof oo, "%s/u%d_%d.o", tmp, f, t);
             int rc = compile_one(prod, cwd, files[f], TGTS[t], oo);
             if (rc == 0) { sy_printf("\tOK"); tot_ok++; }
