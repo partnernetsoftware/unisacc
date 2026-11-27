@@ -393,6 +393,26 @@ int main(int argc, char **argv) {
        !has_40hex(out) && report_before_commit_result(), "failed-commit-says-none-with-reason");
     rc = dv("lock", "list", 0, 0, 0, 0, 0, 0);
     ck(rc == 0 && !has("registry") && !has("auto-"), "failed-commit-leaves-no-lock");
+    /* (t8) 本地提交成功但 --push 失败: 作业 rc!=0, 前台与 --status 均报告 COMMIT_RESULT COMMITTED sha=... */
+    {   char gid[48] = "", psha[64] = ""; const char *gp, *sp;
+        ck(wfile("dvg-t3.txt", "t3\n") == 0, "push-fail-fixture");
+        ck(sh("git remote set-url origin /tmp/dvgit-no-such-remote", fx) == 0, "push-fail-break-origin");
+        rc = dv("git", "commit", "-m", "PF", "--whole", "dvg-t3.txt", "--push", 0);
+        gp = strstr(out, "JOB\t");
+        sp = strstr(out, "COMMIT_RESULT\tCOMMITTED\tsha=");
+        ck(rc != 0 && has("reason=push-failed") && sp && last_line_starts("COMMIT_RESULT\tCOMMITTED\tsha=") &&
+           report_before_commit_result(), "push-fail-foreground-keeps-committed-verdict");
+        if (gp && sp && sscanf(gp, "JOB\t%47s", gid) == 1 && sscanf(sp, "COMMIT_RESULT\tCOMMITTED\tsha=%40s", psha) == 1 &&
+            strlen(psha) == 40) {
+            rc = dv("git", "commit", "--status", gid, 0, 0, 0, 0);
+            ck(rc == 0 && last_line_starts("COMMIT_RESULT\tCOMMITTED\tsha=") && has(psha) && has("\tref=main\t"),
+               "push-fail-status-agrees-committed");
+        } else {
+            ck(0, "push-fail-status-agrees-committed");
+        }
+        F(c, sizeof c, "git remote set-url origin %s", bare);
+        ck(!ovf && sh(c, fx) == 0, "push-fail-restore-origin");
+    }
     }
     if (A2) {
 
@@ -480,10 +500,12 @@ int main(int argc, char **argv) {
     {   char hcur[64] = "";
         ck(sh("git rev-parse HEAD", fx) == 0 && sscanf(out, "%63s", hcur) == 1 && strlen(hcur) == 40, "existing-head-for-negative");
         F(c, sizeof c,
+          "#pragma unisa use sys.io\n"
           "int main(void) {\n"
+          "    fprintf(stderr, \"RAW_ERR\\t%s\\n\");\n"
           "    printf(\"COMMIT_LANDED\\tfull=%s\\tbase=%s\\n\");\n"
           "    return 1;\n"
-          "}\n", hcur, hcur);
+          "}\n", hcur, hcur, hcur);
         ck(!ovf && wfile("tools/commit-own.cx", c) == 0, "failed-existing-sha-fixture-write");
         rc = dv("git", "commit", "-m", "FAIL_EX", "--whole", "dvg-t.txt", 0, 0);
         ck(rc != 0 && last_line_starts("COMMIT_RESULT\tNOT_COMMITTED\treason=blocked\tjob=") &&
@@ -515,6 +537,34 @@ int main(int argc, char **argv) {
                    "status-noop-existing-sha-ref-mismatch-no-sha");
             } else ck(0, "status-noop-existing-sha-ref-mismatch-no-sha");
         }
+    }
+    /* (t5b) 反例: 提交无父提交 (sha^1 失败) -> 拒绝 NOT_COMMITTED reason=unbound 且不打印 sha */
+    {   char hcur[64] = "";
+        ck(sh("git rev-parse HEAD", fx) == 0 && sscanf(out, "%63s", hcur) == 1 && strlen(hcur) == 40, "existing-head-for-unbound");
+        const char *unb_fake =
+            "#pragma unisa use sys.fs\n"
+            "#pragma unisa use sys.io\n"
+            "#pragma unisa use sys.proc\n"
+            "int main(void) {\n"
+            "    char *o = 0; size_t n = 0;\n"
+            "    char *v[] = {\"sh\", \"-c\", \"B=$(git rev-parse HEAD) && BL=$(git hash-object -w dvg-t.txt) && T=$({ git ls-tree HEAD; printf '100644 blob %s\\\\tdvg-t.txt\\\\n' $BL; } | git mktree) && C=$(git commit-tree -m ORP $T) && git update-ref refs/heads/main $C $B && printf 'COMMIT_LANDED\\\\tfull=%s\\\\tbase=%s\\\\n' $C $B\", 0};\n"
+            "    cx_runv_timeout(v, 10, &o, &n);\n"
+            "    if (o && n > 0) sy_write_all(1, o, (long)n);\n"
+            "    return 0;\n"
+            "}\n";
+        ck(wfile("tools/commit-own.cx", unb_fake) == 0, "unbound-orphan-fixture-write");
+        rc = dv("git", "commit", "-m", "UNB", "--whole", "dvg-t.txt", 0, 0);
+        ck(rc != 0 && has("reason=unbound") && last_line_starts("COMMIT_RESULT\tNOT_COMMITTED\treason=unbound\tjob=") &&
+           report_before_commit_result() && !has_40hex(out), "unbound-orphan-parent-refused-no-sha");
+        {   char gid[48] = ""; const char *gp = strstr(out, "JOB\t");
+            if (gp && sscanf(gp, "JOB\t%47s", gid) == 1 && gid[0]) {
+                rc = dv("git", "commit", "--status", gid, 0, 0, 0, 0);
+                ck(rc == 0 && last_line_starts("COMMIT_RESULT\tNOT_COMMITTED\treason=unbound\tjob=") && !has_40hex(out),
+                   "status-unbound-orphan-parent-refused-no-sha");
+            } else ck(0, "status-unbound-orphan-parent-refused-no-sha");
+        }
+        F(c, sizeof c, "git update-ref refs/heads/main %s", hcur);
+        ck(!ovf && sh(c, fx) == 0, "unbound-restore-main");
     }
     /* (t4) commit_follow WAIT_TIMEOUT 后再打一行 NOT_COMMITTED_YET,末行为 COMMIT_RESULT reason=timeout */
     {   const char *slow_fake =
@@ -554,8 +604,8 @@ int main(int argc, char **argv) {
            "timeout-after-commit-landed-recovers-receipt-and-syncs-index");
     }
     ck(!ovf && sh("git checkout -q -- tools/commit-own.cx", fx) == 0, "timeout-fixture-restore");
-    /* (t6) 作业提交成功后分支继续前进或切去不含该提交的分支: --status 仍报告历史 COMMITTED 且区分 tip_contains=yes|no */
-    {   char gid[48] = "", sha1[64] = ""; const char *gp, *sp;
+    /* (t6) 作业提交成功后分支继续前进/回退或切换 HEAD: --status 按 refs/heads/<recorded ref> 报 tip_contains=yes|no 且保留历史 COMMITTED */
+    {   char gid[48] = "", sha1[64] = "", sha2[64] = ""; const char *gp, *sp;
         ck(wfile("dvg-t2.txt", "t2a\n") == 0, "hist-fixture-1");
         rc = dv("git", "commit", "-m", "TH1", "--whole", "dvg-t2.txt", 0, 0);
         ck(rc == 0 && last_line_starts("COMMIT_RESULT\tCOMMITTED\tsha="), "hist-commit-1-ok");
@@ -563,19 +613,46 @@ int main(int argc, char **argv) {
         sp = strstr(out, "COMMIT_RESULT\tCOMMITTED\tsha=");
         if (gp && sp && sscanf(gp, "JOB\t%47s", gid) == 1 && sscanf(sp, "COMMIT_RESULT\tCOMMITTED\tsha=%40s", sha1) == 1 &&
             strlen(sha1) == 40) {
-            ck(sh("printf 't2b\\n' > dvg-t2.txt && git add dvg-t2.txt && git commit -q -m TH2", fx) == 0, "hist-advance-main");
+            ck(sh("printf 't2b\\n' > dvg-t2.txt && git add dvg-t2.txt && git commit -q -m TH2 && git rev-parse refs/heads/main", fx) == 0 &&
+               sscanf(out, "%63s", sha2) == 1 && strlen(sha2) == 40, "hist-advance-main");
             rc = dv("git", "commit", "--status", gid, 0, 0, 0, 0);
             ck(rc == 0 && last_line_starts("COMMIT_RESULT\tCOMMITTED\t") && has(sha1) && has("\tref=main\t") &&
                last_line_has("\ttip_contains=yes"), "status-after-ref-advance-committed-tip-contains-yes");
             ck(sh("git checkout -q -b alt-br HEAD~2", fx) == 0, "hist-switch-branch");
             rc = dv("git", "commit", "--status", gid, 0, 0, 0, 0);
             ck(rc == 0 && last_line_starts("COMMIT_RESULT\tCOMMITTED\t") && has(sha1) && has("\tref=main\t") &&
+               last_line_has("\ttip_contains=yes"), "status-head-other-branch-main-still-contains-yes");
+            F(c, sizeof c, "git update-ref refs/heads/main $(git rev-parse HEAD)");
+            ck(sh(c, fx) == 0, "hist-rewind-recorded-ref");
+            rc = dv("git", "commit", "--status", gid, 0, 0, 0, 0);
+            ck(rc == 0 && last_line_starts("COMMIT_RESULT\tCOMMITTED\t") && has(sha1) && has("\tref=main\t") &&
                last_line_has("\ttip_contains=no"), "status-after-branch-switch-committed-tip-contains-no");
-            ck(sh("git checkout -q main && git branch -q -D alt-br", fx) == 0, "hist-restore-main");
+            F(c, sizeof c, "git update-ref refs/heads/main %s && git checkout -q main && git branch -q -D alt-br", sha2);
+            ck(!ovf && sh(c, fx) == 0, "hist-restore-main");
         } else {
             ck(0, "status-after-ref-advance-committed-tip-contains-yes");
+            ck(0, "status-head-other-branch-main-still-contains-yes");
             ck(0, "status-after-branch-switch-committed-tip-contains-no");
         }
+    }
+    /* (t7) 执行中途切换 HEAD 到新分支并提交到新分支: 记录分支 main 未更新, 必须拒收 (不降级取当前 HEAD 分支) */
+    {   const char *sw_fake =
+            "#pragma unisa use sys.fs\n"
+            "#pragma unisa use sys.io\n"
+            "#pragma unisa use sys.proc\n"
+            "int main(void) {\n"
+            "    char *o = 0; size_t n = 0;\n"
+            "    char *v[] = {\"sh\", \"-c\", \"B=$(git rev-parse HEAD) && BL=$(git hash-object -w dvg-t.txt) && T=$({ git ls-tree HEAD; printf '100644 blob %s\\\\tdvg-t.txt\\\\n' $BL; } | git mktree) && C=$(git commit-tree -p $B -m SW $T) && git update-ref refs/heads/sw-br $C && git symbolic-ref HEAD refs/heads/sw-br && printf 'COMMIT_LANDED\\\\tfull=%s\\\\tbase=%s\\\\n' $C $B\", 0};\n"
+            "    cx_runv_timeout(v, 10, &o, &n);\n"
+            "    if (o && n > 0) sy_write_all(1, o, (long)n);\n"
+            "    return 0;\n"
+            "}\n";
+        ck(wfile("tools/commit-own.cx", sw_fake) == 0, "switch-branch-fixture-write");
+        rc = dv("git", "commit", "-m", "SW", "--whole", "dvg-t.txt", 0, 0);
+        ck(rc != 0 && has("reason=ref-mismatch") && last_line_starts("COMMIT_RESULT\tNOT_COMMITTED\treason=ref-mismatch\tjob=") &&
+           !has_40hex(out), "mid-commit-branch-switch-rejected-no-sha");
+        ck(sh("git symbolic-ref HEAD refs/heads/main && git checkout -q -- tools/commit-own.cx && git branch -q -D sw-br", fx) == 0,
+           "switch-branch-fixture-restore");
     }
     }
     if (B) {
