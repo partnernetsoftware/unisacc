@@ -29,6 +29,7 @@
 #pragma unisa use mem.heap
 #pragma unisa use mem.bytes
 #pragma unisa use cxlib.netpack
+#pragma unisa use cxlib.chainfacts
 
 static int failed;
 static void ck(int ok, const char *name) {
@@ -97,13 +98,31 @@ int main(int argc, char **argv) {
 
     (void)sy_sha256_hex(so_body, tx_len(so_body, 128), so_sha);
     (void)sy_sha256_hex(sl_body, tx_len(sl_body, 128), sl_sha);
-    if (cx_fmt(mf, sizeof mf, "tapemode.so\t%s\t%ld\nm53.tapeslice\t%s\t%ld\n",
-               so_sha, tx_len(so_body, 128), sl_sha, tx_len(sl_body, 128))) return 2;
+    {
+        long mpos = 0;
+        char row[256];
+        if (cx_fmt(row, sizeof row, "tapemode.so\t%s\t%ld\n", so_sha, tx_len(so_body, 128))) return 2;
+        long rl = tx_len(row, sizeof row);
+        if (mm_copy(mf + mpos, (long)sizeof mf - mpos, row, rl)) return 2;
+        mpos += rl;
+        for (int ti = 0; ti < cf_tu_count(); ti++) {
+            const char *u = cf_tu_unit(ti);
+            if (!u) return 2;
+            if (cx_fmt(row, sizeof row, "%s.tapeslice\t%s\t%ld\n", u, sl_sha, tx_len(sl_body, 128))) return 2;
+            rl = tx_len(row, sizeof row);
+            if (mm_copy(mf + mpos, (long)sizeof mf - mpos, row, rl)) return 2;
+            mpos += rl;
+            if (cx_fmt(p, sizeof p, "%s/%s.tapeslice", tdir, u) || cx_write(p, sl_body, (size_t)tx_len(sl_body, 128))) return 2;
+            if (!tx_eqz(u, "m53")) {
+                if (cx_fmt(p, sizeof p, "%s/%s.tapeslice", tbad, u) || cx_write(p, sl_body, (size_t)tx_len(sl_body, 128))) return 2;
+            }
+        }
+        mf[mpos] = 0;
+    }
     if (cx_fmt(p, sizeof p, "%s/manifest.tsv", tdir) || cx_write(p, mf, (size_t)tx_len(mf, sizeof mf))) return 2;
     if (cx_fmt(p, sizeof p, "%s/tapemode.so", tdir) || cx_write(p, so_body, (size_t)tx_len(so_body, 128))) return 2;
-    if (cx_fmt(p, sizeof p, "%s/m53.tapeslice", tdir) || cx_write(p, sl_body, (size_t)tx_len(sl_body, 128))) return 2;
 
-    /* (1) Positive: release-build p3 --embed-tape injects all 3 records with codec=0 and real IEEE CRC32 */
+    /* (1) Positive: release-build p3 --embed-tape injects all authoritative records with codec=0 and real IEEE CRC32 */
     {
         char *v[] = {"sh", "./unisacc.com", "tools/release-build.cx", "--",
                      "p3", fxroot, src_p3, out_p4, "--embed-tape", tdir, 0};
@@ -115,25 +134,17 @@ int main(int argc, char **argv) {
             dec.allocate = pk_alloc; dec.release = pk_free;
             if (cxpk_decode(&dec, (const unsigned char *)blob + pf.package_offset, pf.package_length) == 0 &&
                 dec.package.ver == 4) {
-                static const char *keys[3] = {
-                    "tape/lnx-x86_64/manifest.tsv",
-                    "tape/lnx-x86_64/tapemode.so",
-                    "tape/lnx-x86_64/m53.tapeslice"
-                };
-                int hits = 0, keep_ok = 0;
+                int hits = 0, keep_ok = 0, want_n = 2 + cf_tu_count();
                 const unsigned char *pb = (const unsigned char *)blob + pf.package_offset;
                 for (int i = 0; i < dec.package.nr; i++) {
                     const CxPackageResource *r = &dec.package.res[i];
                     if (r->n == 4 && tx_same((const char *)(pb + r->name), 4, "keep", 4)) keep_ok = 1;
-                    for (int k = 0; k < 3; k++) {
-                        long kl = tx_len(keys[k], 64);
-                        if (r->n == (int)kl && tx_same((const char *)(pb + r->name), r->n, keys[k], kl)) {
-                            unsigned want = crc32_of((const char *)(pb + r->data), r->len);
-                            if (r->codec == 0 && r->rawlen == r->len && r->len > 0 && r->crc == want) hits++;
-                        }
+                    if (r->n > 16 && tx_prefix((const char *)(pb + r->name), r->n, "tape/lnx-x86_64/", 16)) {
+                        unsigned want = crc32_of((const char *)(pb + r->data), r->len);
+                        if (r->codec == 0 && r->rawlen == r->len && r->len > 0 && r->crc == want) hits++;
                     }
                 }
-                ok = (hits == 3 && keep_ok == 1);
+                ok = (hits == want_n && keep_ok == 1);
                 cxpl_release(&dec.package, pk_free);
             }
         }
