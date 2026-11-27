@@ -1,7 +1,8 @@
-/* tools/p4-embed.cx -- inject 3 lnx/x86_64 tape P4 F records (manifest.tsv, tapemode.so, m53.tapeslice)
- * with IEEE CRC32 into a P4 package body (or APE container's P4 body) for M1 0-6 h private testing.
+/* tools/p4-embed.cx -- inject lnx/x86_64 tape P4 F records (manifest.tsv, tapemode.so, m53.tapeslice,
+ * plus optional repeatable --extra <leaf> <path> slices) with IEEE CRC32 into a P4 package body
+ * (or APE container's P4 body) for private S1/S3 testing.
  *
- *   sh ./unisacc.com tools/p4-embed.cx -- <in-p4-or-ape> <tapemode.so> <m53.tapeslice> <out-p4>
+ *   sh ./unisacc.com tools/p4-embed.cx -- <in-p4-or-ape> <tapemode.so> <m53.tapeslice> <out-p4> [--extra LEAF PATH]...
  */
 #pragma unisa use sys.fs
 #pragma unisa use sys.io
@@ -42,39 +43,124 @@ static int pe_die(const char *msg) {
     return 2;
 }
 
+static int pe_valid_leaf(const char *s) {
+    long i = 0;
+    if (!s || !s[0] || strstr(s, "..")) return 0;
+    for (; s[i]; i++) {
+        char c = s[i];
+        int ok = (c >= 'a' && c <= 'z') || (c >= 'A' && c <= 'Z') ||
+                 (c >= '0' && c <= '9') || c == '.' || c == '_' || c == '-';
+        if (!ok || i >= 96) return 0;
+    }
+    if (strcmp(s, "manifest.tsv") == 0 || strcmp(s, "tapemode.so") == 0 || strcmp(s, "m53.tapeslice") == 0)
+        return 0;
+    return 1;
+}
+
+static int pe_verify_manifest_1to1(const char *mf, long mfn, const char **leaves, const char **shas,
+                                   const long *lens, int nitems) {
+    int seen[18];
+    int total_rows = 0;
+    long pos = 0;
+    if (nitems <= 0 || nitems > 18) return 1;
+    for (int i = 0; i < nitems; i++) seen[i] = 0;
+    while (pos < mfn) {
+        long s = pos;
+        while (pos < mfn && mf[pos] != '\n') pos++;
+        long e = pos;
+        if (pos < mfn && mf[pos] == '\n') pos++;
+        if (s >= e || mf[s] == '#') continue;
+        long t1 = -1, t2 = -1;
+        for (long k = s; k < e; k++) {
+            if (mf[k] == '\t') { if (t1 < 0) t1 = k; else if (t2 < 0) t2 = k; else return 1; }
+        }
+        if (t1 <= s || t2 <= t1 + 1 || t2 + 1 >= e) return 1;
+        long ll = t1 - s, sl = t2 - (t1 + 1), bl = e - (t2 + 1);
+        if (sl != 64) return 1;
+        int matched = -1;
+        for (int i = 0; i < nitems; i++) {
+            if ((long)strlen(leaves[i]) == ll && memcmp(mf + s, leaves[i], (size_t)ll) == 0) {
+                if (seen[i]) return 1;
+                if (memcmp(mf + t1 + 1, shas[i], 64) != 0) return 1;
+                char nb[32];
+                if (cx_fmt(nb, sizeof nb, "%ld", lens[i]) || (long)strlen(nb) != bl ||
+                    memcmp(mf + t2 + 1, nb, (size_t)bl) != 0) return 1;
+                seen[i] = 1;
+                matched = i;
+                break;
+            }
+        }
+        if (matched < 0) return 1;
+        total_rows++;
+    }
+    if (total_rows != nitems) return 1;
+    for (int i = 0; i < nitems; i++) if (!seen[i]) return 1;
+    return 0;
+}
+
 int main(int argc, char **argv) {
     const char *in_p = 0, *so_p = 0, *sl_p = 0, *out_p = 0;
+    const char *ex_leaf[16], *ex_path[16];
+    unsigned char *ex_b[16];
+    int64_t ex_n[16];
+    char ex_sha[16][65], ex_key[16][128];
+    int nex = 0;
     unsigned char *in_b = 0, *so_b = 0, *sl_b = 0;
     int64_t in_n = 0, so_n = 0, sl_n = 0;
     const unsigned char *pkg = 0;
     long pkglen = 0, nl = 0;
     PackageFooter pf;
     CxPackageDecode dec;
-    char so_sha[65], sl_sha[65], mf_b[512], hdr[128], rec[256];
+    char so_sha[65], sl_sha[65], mf_b[4096], hdr[128], rec[256];
     long mf_n = 0;
     np_buf out = {0};
-    static const char *const keys[3] = {
-        "tape/lnx-x86_64/manifest.tsv",
-        "tape/lnx-x86_64/tapemode.so",
-        "tape/lnx-x86_64/m53.tapeslice"
-    };
-    const unsigned char *vals[3];
-    long vlens[3];
+    const char *keys[19];
+    const unsigned char *vals[19];
+    long vlens[19];
+    int nrec = 0;
 
+    for (int i = 0; i < 16; i++) { ex_leaf[i] = 0; ex_path[i] = 0; ex_b[i] = 0; ex_n[i] = 0; }
     for (int i = 1; i < argc; i++) {
         if (strcmp(argv[i], "--") == 0) continue;
+        if (strcmp(argv[i], "--extra") == 0) {
+            if (i + 2 >= argc || nex >= 16) return pe_die("bad --extra");
+            if (!pe_valid_leaf(argv[i + 1])) return pe_die("bad --extra leaf");
+            for (int j = 0; j < nex; j++) {
+                if (strcmp(ex_leaf[j], argv[i + 1]) == 0) return pe_die("duplicate --extra leaf");
+            }
+            ex_leaf[nex] = argv[i + 1];
+            ex_path[nex] = argv[i + 2];
+            nex++;
+            i += 2;
+            continue;
+        }
         if (!in_p) in_p = argv[i];
         else if (!so_p) so_p = argv[i];
         else if (!sl_p) sl_p = argv[i];
         else if (!out_p) out_p = argv[i];
-        else return pe_die("usage: <in-p4-or-ape> <tapemode.so> <m53.tapeslice> <out-p4>");
+        else return pe_die("usage: <in-p4-or-ape> <tapemode.so> <m53.tapeslice> <out-p4> [--extra LEAF PATH]...");
     }
     if (!in_p || !so_p || !sl_p || !out_p) {
-        return pe_die("usage: <in-p4-or-ape> <tapemode.so> <m53.tapeslice> <out-p4>");
+        return pe_die("usage: <in-p4-or-ape> <tapemode.so> <m53.tapeslice> <out-p4> [--extra LEAF PATH]...");
     }
     if (sy_read_file(in_p, &in_b, &in_n, 64L << 20) != 0 || !in_b || in_n <= 0) return pe_die("read-in");
     if (sy_read_file(so_p, &so_b, &so_n, 4L << 20) != 0 || !so_b || so_n <= 0) { mm_free(in_b); return pe_die("read-so"); }
     if (sy_read_file(sl_p, &sl_b, &sl_n, 4L << 20) != 0 || !sl_b || sl_n <= 0) { mm_free(in_b); mm_free(so_b); return pe_die("read-slice"); }
+    for (int e = 0; e < nex; e++) {
+        if (sy_read_file(ex_path[e], &ex_b[e], &ex_n[e], 4L << 20) != 0 || !ex_b[e] || ex_n[e] <= 0 ||
+            sy_sha256_any_hex(ex_b[e], (long)ex_n[e], ex_sha[e]) != 0 ||
+            cx_fmt(ex_key[e], sizeof ex_key[e], "tape/lnx-x86_64/%s", ex_leaf[e])) {
+            for (int j = 0; j <= e; j++) mm_free(ex_b[j]);
+            mm_free(in_b); mm_free(so_b); mm_free(sl_b);
+            return pe_die("read-extra-slice");
+        }
+    }
+
+    keys[0] = "tape/lnx-x86_64/manifest.tsv";
+    keys[1] = "tape/lnx-x86_64/tapemode.so";
+    keys[2] = "tape/lnx-x86_64/m53.tapeslice";
+    nrec = 3;
+    for (int e = 0; e < nex; e++) keys[nrec++] = ex_key[e];
 
     if (packagefooter_locate_bytes(in_b, (long)in_n, &pf) &&
         pf.package_offset >= 0 && pf.package_length > 0 &&
@@ -90,15 +176,17 @@ int main(int argc, char **argv) {
     dec.allocate = pe_alloc;
     dec.release = pe_free;
     if (cxpk_decode(&dec, pkg, pkglen) != 0 || dec.package.ver < 4) {
+        for (int e = 0; e < nex; e++) mm_free(ex_b[e]);
         mm_free(in_b); mm_free(so_b); mm_free(sl_b);
         return pe_die("invalid-p4-input");
     }
     for (int i = 0; i < dec.package.nr; i++) {
         const CxPackageResource *r = &dec.package.res[i];
-        for (int k = 0; k < 3; k++) {
+        for (int k = 0; k < nrec; k++) {
             long kl = (long)strlen(keys[k]);
             if ((long)r->n == kl && memcmp(pkg + r->name, keys[k], (size_t)kl) == 0) {
                 cxpl_release(&dec.package, pe_free);
+                for (int e = 0; e < nex; e++) mm_free(ex_b[e]);
                 mm_free(in_b); mm_free(so_b); mm_free(sl_b);
                 return pe_die("duplicate-tape-resource");
             }
@@ -110,20 +198,38 @@ int main(int argc, char **argv) {
 
     if (sy_sha256_any_hex(so_b, (long)so_n, so_sha) != 0 ||
         sy_sha256_any_hex(sl_b, (long)sl_n, sl_sha) != 0) {
+        for (int e = 0; e < nex; e++) mm_free(ex_b[e]);
         mm_free(in_b); mm_free(so_b); mm_free(sl_b);
         return pe_die("sha-failed");
     }
     if (cx_fmt(mf_b, sizeof mf_b,
                "# tape-sidecar-manifest-v1\ntapemode.so\t%s\t%ld\nm53.tapeslice\t%s\t%ld\n",
                so_sha, (long)so_n, sl_sha, (long)sl_n)) {
+        for (int e = 0; e < nex; e++) mm_free(ex_b[e]);
         mm_free(in_b); mm_free(so_b); mm_free(sl_b);
         return pe_die("manifest-fmt");
     }
     mf_n = (long)strlen(mf_b);
+    for (int e = 0; e < nex; e++) {
+        char row[256];
+        if (cx_fmt(row, sizeof row, "%s\t%s\t%ld\n", ex_leaf[e], ex_sha[e], (long)ex_n[e]) ||
+            mf_n + (long)strlen(row) + 1 >= (long)sizeof mf_b) {
+            for (int j = 0; j < nex; j++) mm_free(ex_b[j]);
+            mm_free(in_b); mm_free(so_b); mm_free(sl_b);
+            return pe_die("manifest-extra-fmt");
+        }
+        mm_copy(mf_b + mf_n, (long)sizeof mf_b - mf_n, row, (long)strlen(row) + 1);
+        mf_n += (long)strlen(row);
+    }
 
     while (nl < pkglen && pkg[nl] != '\n') nl++;
-    if (nl >= pkglen) { mm_free(in_b); mm_free(so_b); mm_free(sl_b); return pe_die("bad-p4-header"); }
-    if (cx_fmt(hdr, sizeof hdr, "P %d %d %d %d\n", ver, pm, ps, in_nr + 3)) {
+    if (nl >= pkglen) {
+        for (int e = 0; e < nex; e++) mm_free(ex_b[e]);
+        mm_free(in_b); mm_free(so_b); mm_free(sl_b);
+        return pe_die("bad-p4-header");
+    }
+    if (cx_fmt(hdr, sizeof hdr, "P %d %d %d %d\n", ver, pm, ps, in_nr + nrec)) {
+        for (int e = 0; e < nex; e++) mm_free(ex_b[e]);
         mm_free(in_b); mm_free(so_b); mm_free(sl_b);
         return pe_die("hdr-fmt");
     }
@@ -133,11 +239,13 @@ int main(int argc, char **argv) {
     vals[0] = (const unsigned char *)mf_b; vlens[0] = mf_n;
     vals[1] = so_b; vlens[1] = (long)so_n;
     vals[2] = sl_b; vlens[2] = (long)sl_n;
-    for (int k = 0; k < 3; k++) {
+    for (int e = 0; e < nex; e++) { vals[3 + e] = ex_b[e]; vlens[3 + e] = (long)ex_n[e]; }
+    for (int k = 0; k < nrec; k++) {
         long kl = (long)strlen(keys[k]);
         unsigned crc = pe_crc32(vals[k], vlens[k]);
         if (cx_fmt(rec, sizeof rec, "F %ld %ld %ld 0 %u\n", kl, vlens[k], vlens[k], crc)) {
-            free(out.p); mm_free(in_b); mm_free(so_b); mm_free(sl_b);
+            free(out.p); for (int e = 0; e < nex; e++) mm_free(ex_b[e]);
+            mm_free(in_b); mm_free(so_b); mm_free(sl_b);
             return pe_die("rec-fmt");
         }
         np_puts(&out, rec);
@@ -149,17 +257,55 @@ int main(int argc, char **argv) {
     dec.allocate = pe_alloc;
     dec.release = pe_free;
     if (cxpk_decode(&dec, (const unsigned char *)out.p, (long)out.n) != 0) {
-        free(out.p); mm_free(in_b); mm_free(so_b); mm_free(sl_b);
+        free(out.p); for (int e = 0; e < nex; e++) mm_free(ex_b[e]);
+        mm_free(in_b); mm_free(so_b); mm_free(sl_b);
         return pe_die("self-decode-failed");
+    }
+    {
+        const char *m_leaves[18], *m_shas[18];
+        long m_lens[18];
+        int mf_hits = 0, item_hits[19];
+        const char *dec_mf = 0;
+        long dec_mfn = 0;
+        for (int k = 0; k < nrec; k++) item_hits[k] = 0;
+        m_leaves[0] = "tapemode.so"; m_shas[0] = so_sha; m_lens[0] = (long)so_n;
+        m_leaves[1] = "m53.tapeslice"; m_shas[1] = sl_sha; m_lens[1] = (long)sl_n;
+        for (int e = 0; e < nex; e++) { m_leaves[2 + e] = ex_leaf[e]; m_shas[2 + e] = ex_sha[e]; m_lens[2 + e] = (long)ex_n[e]; }
+        for (int i = 0; i < dec.package.nr; i++) {
+            const CxPackageResource *r = &dec.package.res[i];
+            for (int k = 0; k < nrec; k++) {
+                long kl = (long)strlen(keys[k]);
+                if ((long)r->n == kl && memcmp(out.p + r->name, keys[k], (size_t)kl) == 0) {
+                    item_hits[k]++;
+                    if (k == 0) { dec_mf = out.p + r->data; dec_mfn = (long)r->len; mf_hits++; }
+                    else if ((long)r->len != vlens[k] || r->crc != pe_crc32(vals[k], vlens[k])) {
+                        cxpl_release(&dec.package, pe_free);
+                        free(out.p); for (int e = 0; e < nex; e++) mm_free(ex_b[e]);
+                        mm_free(in_b); mm_free(so_b); mm_free(sl_b);
+                        return pe_die("self-verify-record-mismatch");
+                    }
+                }
+            }
+        }
+        int uniq_ok = (mf_hits == 1 && dec_mf && dec_mfn > 0);
+        for (int k = 0; k < nrec; k++) if (item_hits[k] != 1) uniq_ok = 0;
+        if (!uniq_ok || pe_verify_manifest_1to1(dec_mf, dec_mfn, m_leaves, m_shas, m_lens, 2 + nex) != 0) {
+            cxpl_release(&dec.package, pe_free);
+            free(out.p); for (int e = 0; e < nex; e++) mm_free(ex_b[e]);
+            mm_free(in_b); mm_free(so_b); mm_free(sl_b);
+            return pe_die("self-verify-manifest-1to1-failed");
+        }
     }
     cxpl_release(&dec.package, pe_free);
 
-    if (sy_write_file(out_p, out.p, (int64_t)out.n, 0644) != 0) {
-        free(out.p); mm_free(in_b); mm_free(so_b); mm_free(sl_b);
+    if (sy_write_atomic(out_p, out.p, (int64_t)out.n, 0644) != 0) {
+        free(out.p); for (int e = 0; e < nex; e++) mm_free(ex_b[e]);
+        mm_free(in_b); mm_free(so_b); mm_free(sl_b);
         return pe_die("write-out");
     }
-    sy_printf("P4_EMBED\tOK\tin_nr=%d\tout_nr=%d\tbytes=%ld\tso_sha=%.12s\tsl_sha=%.12s\n",
-              in_nr, in_nr + 3, (long)out.n, so_sha, sl_sha);
-    free(out.p); mm_free(in_b); mm_free(so_b); mm_free(sl_b);
+    sy_printf("P4_EMBED\tOK\tin_nr=%d\tout_nr=%d\textra=%d\tbytes=%ld\tso_sha=%.12s\tsl_sha=%.12s\n",
+              in_nr, in_nr + nrec, nex, (long)out.n, so_sha, sl_sha);
+    free(out.p); for (int e = 0; e < nex; e++) mm_free(ex_b[e]);
+    mm_free(in_b); mm_free(so_b); mm_free(sl_b);
     return 0;
 }
