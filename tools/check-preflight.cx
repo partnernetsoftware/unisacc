@@ -44,16 +44,27 @@ static void write_p4_records(const char *rel, int nr, const char **keys, const c
     long pos = (long)strlen(hdr);
     if (mm_copy(body, (long)sizeof body, hdr, pos)) die("p4 header copy");
     for (int i = 0; i < nr; i++) {
-        long kl = (long)strlen(keys[i]), vl = (long)strlen(vals[i]);
-        int cd = codecs ? codecs[i] : 0;
+        int is_hdr = !strncmp(keys[i], "hdr/", 4);
+        long kl = (long)strlen(keys[i]) + (is_hdr ? 1L : 0L);
+        long vl = (long)strlen(vals[i]);
+        int cd = codecs ? codecs[i] : (is_hdr ? 1 : 0);
+        long rawl = (cd == 1) ? (vl + 37L) : vl;
         unsigned crc = cp_crc32(vals[i], vl) ^ (crc_xor ? crc_xor[i] : 0U);
-        if (cx_fmt(rhdr, sizeof rhdr, "F %ld %ld %ld %d %u\n", kl, vl, vl, cd, crc)) die("p4 rec");
+        if (cx_fmt(rhdr, sizeof rhdr, "F %ld %ld %ld %d %u\n", kl, vl, rawl, cd, crc)) die("p4 rec");
         long rl = (long)strlen(rhdr);
         if (pos + rl + kl + vl >= (long)sizeof body) die("p4 rec bound");
-        if (mm_copy(body + pos, (long)sizeof body - pos, rhdr, rl) ||
-            mm_copy(body + pos + rl, (long)sizeof body - pos - rl, keys[i], kl) ||
-            mm_copy(body + pos + rl + kl, (long)sizeof body - pos - rl - kl, vals[i], vl)) die("p4 rec copy");
-        pos += rl + kl + vl;
+        if (mm_copy(body + pos, (long)sizeof body - pos, rhdr, rl)) die("p4 rec hdr copy");
+        pos += rl;
+        if (is_hdr) {
+            body[pos++] = 0;
+            if (mm_copy(body + pos, (long)sizeof body - pos, keys[i], kl - 1)) die("p4 rec key0 copy");
+            pos += kl - 1;
+        } else {
+            if (mm_copy(body + pos, (long)sizeof body - pos, keys[i], kl)) die("p4 rec key copy");
+            pos += kl;
+        }
+        if (mm_copy(body + pos, (long)sizeof body - pos, vals[i], vl)) die("p4 rec val copy");
+        pos += vl;
     }
     if (prefix_sh && prefix_sh[0]) {
         long sl = (long)strlen(prefix_sh);
@@ -310,11 +321,11 @@ int main(void) {
             "exit 0\n", 0755);
 
         char cout[4400];
-        p(cout, "chain-out");
-        mk("chain-out"); mk("chain-out/p3-run"); mk("chain-out/p3-run/tape"); mk("chain-out/p3-run/tape/lnx-x86_64");
-        put("chain-out/p3-run/tape/lnx-x86_64/tapemode.so", so_v, 0644);
-        put("chain-out/p3-run/tape/lnx-x86_64/m53.tapeslice", sl_v, 0644);
-        put("chain-out/p3-run/tape/lnx-x86_64/manifest.tsv", mf_v, 0644);
+        p(cout, "chain-dir");
+        mk("chain-dir"); mk("chain-dir/p3-run"); mk("chain-dir/p3-run/tape"); mk("chain-dir/p3-run/tape/lnx-x86_64");
+        put("chain-dir/p3-run/tape/lnx-x86_64/tapemode.so", so_v, 0644);
+        put("chain-dir/p3-run/tape/lnx-x86_64/m53.tapeslice", sl_v, 0644);
+        put("chain-dir/p3-run/tape/lnx-x86_64/manifest.tsv", mf_v, 0644);
         {
             np_result rr = {0}; char why[256] = {0};
             char *av[] = {"sh", "./unisacc.com", "tools/candidate-chain.cx", "--", "--p3-tape-fixture", d1, d3, cout, 0}; /* lint:allow R1-product invokes checkout product to test candidate-chain.cx fixture */
@@ -325,7 +336,7 @@ int main(void) {
         /* Remove unreceipted dir, let cc_ensure_p3_tape build and write receipt.tsv, then verify reuse */
         {
             char tdir_rm[4400];
-            p(tdir_rm, "chain-out/p3-run/tape/lnx-x86_64");
+            p(tdir_rm, "chain-dir/p3-run/tape/lnx-x86_64");
             if (cx_rmtree(tdir_rm)) die("rmtree unreceipted");
             np_result rr1 = {0}, rr2 = {0}; char why[256] = {0};
             char *av[] = {"sh", "./unisacc.com", "tools/candidate-chain.cx", "--", "--p3-tape-fixture", d1, d3, cout, 0}; /* lint:allow R1-product invokes checkout product to test candidate-chain.cx fixture */
@@ -347,11 +358,11 @@ int main(void) {
         }
         /* Restore snapshot asm source and test post-pack final APE verification */
         put("psnap/tools/tape/asm/tape_x86_64.S", "/* tape_x86_64.S */\n", 0644);
-        mk("chain-out/ape-final");
+        mk("chain-dir/ape-final");
         /* Red 1: compiler.p4.pkg has only substring keys -> --pack-verify-fixture MUST refuse */
-        write_p4_records("chain-out/compiler.p4.pkg", 3, sub_keys, sub_vals, 0, 0, 0);
-        write_p4_records("chain-out/ape-final/p3-package.body", 5, t_keys, t_vals, 0, 0, 0);
-        write_p4_records("chain-out/ape-final/unisacc-next.com", 5, t_keys, t_vals, 0, 0,
+        write_p4_records("chain-dir/compiler.p4.pkg", 3, sub_keys, sub_vals, 0, 0, 0);
+        write_p4_records("chain-dir/ape-final/p3-package.body", 5, t_keys, t_vals, 0, 0, 0);
+        write_p4_records("chain-dir/ape-final/unisacc-next.com", 5, t_keys, t_vals, 0, 0,
                          "#!/bin/sh\nprintf 'ok\\n'\nexit 0\n");
         {
             np_result rr = {0}; char why[256] = {0};
@@ -361,8 +372,8 @@ int main(void) {
             np_free(&rr);
         }
         /* Red 2: valid P4 packages in all 3 files, but final APE stream e3 outputs M53_M1_REFUSE -> MUST refuse */
-        write_p4_records("chain-out/compiler.p4.pkg", 5, t_keys, t_vals, 0, 0, 0);
-        write_p4_records("chain-out/ape-final/unisacc-next.com", 5, t_keys, t_vals, 0, 0,
+        write_p4_records("chain-dir/compiler.p4.pkg", 5, t_keys, t_vals, 0, 0, 0);
+        write_p4_records("chain-dir/ape-final/unisacc-next.com", 5, t_keys, t_vals, 0, 0,
                          "#!/bin/sh\nif [ \"$2\" = \"e3\" ]; then echo M53_M1_REFUSE >&2; exit 2; fi\nprintf 'tok\\n'\nexit 0\n");
         {
             np_result rr = {0}; char why[256] = {0};
@@ -372,7 +383,7 @@ int main(void) {
             np_free(&rr);
         }
         /* Green: all 3 packages valid and all 3 stream stages (e2, e1, e3) produce output with rc=0 */
-        write_p4_records("chain-out/ape-final/unisacc-next.com", 5, t_keys, t_vals, 0, 0,
+        write_p4_records("chain-dir/ape-final/unisacc-next.com", 5, t_keys, t_vals, 0, 0,
                          "#!/bin/sh\nprintf 'stage-%s-ok\\n' \"$2\"\nexit 0\n");
         {
             np_result rr = {0}; char why[256] = {0};
@@ -380,6 +391,33 @@ int main(void) {
             int rrc = (np_run(av, root, 0, 30, &rr, why, sizeof why) == 0) ? rr.rc : -1;
             ck(rrc == 0 && rr.out && strstr(rr.out, "POST_PACK_TAPE_VERIFY\t") != 0, "cc.pack-verify.full-post-pack.PASS");
             np_free(&rr);
+        }
+        /* Bootstrap package verification (codec=1 \0hdr/* records with dlen != rawlen before 3 codec=0 tape records) */
+        {
+            char bpkg[4400];
+            p(bpkg, "chain-dir/compiler.bootstrap.pkg");
+            write_p4_records("chain-dir/compiler.bootstrap.pkg", 5, t_keys, t_vals, 0, 0, 0);
+            np_result rr = {0}; char why[256] = {0};
+            char *av[] = {"sh", "./unisacc.com", "tools/candidate-chain.cx", "--", "--pkg-tape-verify-fixture", d1, d3, cout, bpkg, 0}; /* lint:allow R1-product invokes checkout product to test candidate-chain.cx fixture */
+            int rrc = (np_run(av, root, 0, 30, &rr, why, sizeof why) == 0) ? rr.rc : -1;
+            ck(rrc == 0 && rr.out && strstr(rr.out, "PKG_TAPE_VERIFY\t") != 0, "cc.p3-bootstrap-pkg.codec1-hdr-plus-tape.PASS");
+            np_free(&rr);
+        }
+        /* Live 8773b0e06 compiler.bootstrap.pkg reproduction when present on host */
+        {
+            const char *home = sy_env("HOME");
+            char live_out[4400], live_snap[4400], live_pkg[4400];
+            if (home && home[0] &&
+                !cx_fmt(live_out, sizeof live_out, "%s/.cache/unisacc/chains/bg-b1/8773b0e0618d51764ec2d452f5862993fb625616", home) &&
+                !cx_fmt(live_snap, sizeof live_snap, "%s/.cache/unisacc/chains/snap/8773b0e061-045c5a38", home) &&
+                !cx_fmt(live_pkg, sizeof live_pkg, "%s/compiler.bootstrap.pkg", live_out) &&
+                sy_exists(live_pkg) == 1 && sy_exists(live_snap) == 1) {
+                np_result rr = {0}; char why[256] = {0};
+                char *av[] = {"sh", "./unisacc.com", "tools/candidate-chain.cx", "--", "--pkg-tape-verify-fixture", live_snap, live_snap, live_out, live_pkg, 0}; /* lint:allow R1-product invokes checkout product to test candidate-chain.cx fixture */
+                int rrc = (np_run(av, root, 0, 30, &rr, why, sizeof why) == 0) ? rr.rc : -1;
+                ck(rrc == 0 && rr.out && strstr(rr.out, "PKG_TAPE_VERIFY\t") != 0, "cc.p3-bootstrap-pkg.live-8773b0e06.PASS");
+                np_free(&rr);
+            }
         }
     }
 
