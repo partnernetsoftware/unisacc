@@ -107,10 +107,10 @@ static int gate_review_cases(char *out, long cap, int *move_ok, int *allow_ok, i
             !cx_write(fx, body, (size_t)tx_len(body, sizeof body)) && !gate_hash(fx, sha, sizeof sha) &&
             !cx_fmt(spec, sizeof spec, "100644,%s,tests/cxlibc.tsv", sha)) {
             char *up[] = {"git", "update-index", "--cacheinfo", spec, 0};
-            if (!run_argv(up, out, cap) && !run_script("tools/precommit.cx", mv, out, cap) && !has(out, "move add exceeds")) *move_ok = 1;
+            if (!run_argv(up, out, cap) && run_script("tools/precommit.cx", mv, out, cap) == 1 && has(out, "canonical decimal")) *move_ok = 1;
         }
         if (!cx_fmt(fx, sizeof fx, "%s/move.tsv", dir) &&
-            !cx_fmt(body, sizeof body, "%s\t+%s\nmove\t%s\tcx/new-via-move.cx\t%s\ncx/new-via-move.cx\t+%s\n", path, num, path, num, num) &&
+            !cx_fmt(body, sizeof body, "%s\t%s\nmove\t%s\tcx/new-via-move.cx\t%s\ncx/new-via-move.cx\t%s\n", path, num, path, num, num) &&
             !cx_write(fx, body, (size_t)tx_len(body, sizeof body)) && !gate_hash(fx, sha, sizeof sha) &&
             !cx_fmt(spec, sizeof spec, "100644,%s,tests/cxlibc.tsv", sha)) {
             char *up[] = {"git", "update-index", "--cacheinfo", spec, 0};
@@ -152,6 +152,34 @@ static int gate_review_cases(char *out, long cap, int *move_ok, int *allow_ok, i
     return (*move_ok && *allow_ok && *fail_ok) ? 0 : 1;
 }
 
+static int gate_bypass_cases(char *out, long cap, int *canon_ok, int *once_ok) {
+    char dir[512], idx[540], fx[540], spec[640], sha[80];
+    char *rt[] = {"git", "read-tree", "HEAD", 0};
+    char *mv[] = {"--ratchet-baseline-selftest", 0};
+    const char *old = sy_env("GIT_INDEX_FILE");
+    const char *space = "src/drive.cx\t 74\n";
+    const char *pad = "src/drive.cx\t0000000000000000074\n";
+    const char *two = "src/drive.cx\t63\nmove\tsrc/drive.cx\tcx/a-bypass.cx\t10\nmove\tsrc/drive.cx\tcx/b-bypass.cx\t10\ncx/a-bypass.cx\t10\ncx/b-bypass.cx\t10\n";
+    *canon_ok = *once_ok = 0;
+    if (cx_fmt(dir, sizeof dir, "%s/gate-bypass-%d", sy_tmpdir(), sy_pid())) return 1;
+    sy_mkdir(dir, 0700);
+    if (cx_fmt(idx, sizeof idx, "%s/index", dir)) return 1;
+    sy_setenv("GIT_INDEX_FILE", idx, 1);
+    if (run_argv(rt, out, cap)) { if (old) sy_setenv("GIT_INDEX_FILE", old, 1); else sy_unsetenv("GIT_INDEX_FILE"); return 1; }
+    if (!cx_fmt(fx, sizeof fx, "%s/space.tsv", dir) && !cx_write(fx, space, tx_len(space, 80)) && !gate_hash(fx, sha, sizeof sha) &&
+        !cx_fmt(spec, sizeof spec, "100644,%s,tests/cxlibc.tsv", sha)) {
+        char *up[] = {"git", "update-index", "--cacheinfo", spec, 0};
+        if (!run_argv(up, out, cap) && run_script("tools/precommit.cx", mv, out, cap) == 1 && has(out, "canonical decimal")) *canon_ok = 1;
+    }
+    if (!cx_fmt(fx, sizeof fx, "%s/two.tsv", dir) && !cx_write(fx, two, tx_len(two, 200)) && !gate_hash(fx, sha, sizeof sha) &&
+        !cx_fmt(spec, sizeof spec, "100644,%s,tests/cxlibc.tsv", sha)) {
+        char *up[] = {"git", "update-index", "--cacheinfo", spec, 0};
+        if (!run_argv(up, out, cap) && run_script("tools/precommit.cx", mv, out, cap) == 1 && has(out, "cx/b-bypass.cx") && has(out, "move add exceeds")) *once_ok = 1;
+    }
+    if (old) sy_setenv("GIT_INDEX_FILE", old, 1); else sy_unsetenv("GIT_INDEX_FILE");
+    return (*canon_ok && *once_ok) ? 0 : 1;
+}
+
 int main(int argc, char **argv) {
     static char o[1 << 16];
     char *all[] = {"--rows", "tools/ratchets/sample.txt", 0};
@@ -166,8 +194,8 @@ int main(int argc, char **argv) {
     argc = w;
     if (argc == 2 && tx_eqz(argv[1], "--full")) goto full_run;
     if (argc == 4 && tx_eqz(argv[1], "--gate-produce")) {
-        int mv = 0, al = 0, fl = 0; char rec[160];
-        if (gate_review_cases(o, sizeof o, &mv, &al, &fl)) { printf("FAIL\tgate-review\n"); return 1; }
+        int mv = 0, al = 0, fl = 0, cn = 0, on = 0; char rec[160];
+        if (gate_review_cases(o, sizeof o, &mv, &al, &fl) || gate_bypass_cases(o, sizeof o, &cn, &on)) { printf("FAIL\tgate-review\n"); return 1; }
         if (cx_fmt(rec, sizeof rec, "run-id\t%s\n", argv[2]) || cx_write(argv[3], rec, (size_t)tx_len(rec, sizeof rec))) { printf("FAIL\tgate-review\n"); return 1; }
         printf("PASS\tgate-review\n");
         return 0;
@@ -722,7 +750,10 @@ int main(int argc, char **argv) {
     { int mv = 0, al = 0, fl = 0; (void)gate_review_cases(o, sizeof o, &mv, &al, &fl);
       ck(mv, "gate-move-plus-blocks-uncovered-transfer");
       ck(al, "gate-allow-list-growth-blocked");
-      ck(fl, "gate-stdio-fail-blocks-precommit"); }
+      ck(fl, "gate-stdio-fail-blocks-precommit");
+      { int cn = 0, on = 0; (void)gate_bypass_cases(o, sizeof o, &cn, &on);
+        ck(cn, "gate-noncanonical-allowance-refused");
+        ck(on, "gate-deduction-consumed-once"); } }
     if (argc == 2) { printf("CHECK_RATCHETS\tfailed=%d\n", failed); return failed ? 1 : 0; }
 full_run:
     rc = run(full, o, sizeof o);
