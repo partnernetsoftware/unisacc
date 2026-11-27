@@ -40,7 +40,7 @@ typedef struct {
     long mtime;
     int64_t mtime_ns;
     int64_t ctime_ns;
-    unsigned char pkg_sha[32];
+    unsigned char tape_sha[32];
     int valid;
 } M53CacheKey;
 
@@ -411,20 +411,291 @@ static void m53_m1_drop_loaded(void) {
     m53_m1_cache.valid = 0;
 }
 
-static int m53_m1_cache_hit(const char *cpath, const sy_stat_t *st, const unsigned char pkg_sha[32]) {
+static int m53_m1_stat_hit(const char *cpath, const sy_stat_t *st) {
     long cl, kl;
     if (m53_m1_state != M53_M1_READY || !m53_m1_cache.valid) return 0;
     cl = m53_m1_len(cpath, 4096);
     kl = m53_m1_len(m53_m1_cache.path, 4096);
     if (!m53_m1_eq(cpath, cl, m53_m1_cache.path, kl)) return 0;
-    if (st->dev != m53_m1_cache.dev || st->ino != m53_m1_cache.ino || st->size != m53_m1_cache.size ||
-        st->mtime != m53_m1_cache.mtime || st->mtime_ns != m53_m1_cache.mtime_ns ||
-        st->ctime_ns != m53_m1_cache.ctime_ns) return 0;
-    return m53_m1_bytes_eq(pkg_sha, m53_m1_cache.pkg_sha, 32);
+    return st->dev == m53_m1_cache.dev && st->ino == m53_m1_cache.ino && st->size == m53_m1_cache.size &&
+           st->mtime == m53_m1_cache.mtime && st->mtime_ns == m53_m1_cache.mtime_ns &&
+           st->ctime_ns == m53_m1_cache.ctime_ns;
 }
 
-/* G3: verify container key (path + stat + full pkg SHA-256); on miss or REFUSED, atomically load
- * new image into locals before swapping/unloading old mapping. Never called when m53_m1_busy==0. */
+typedef struct {
+    int fd;
+    long pos;
+    long end;
+    long bpos;
+    long blen;
+    unsigned char buf[4096];
+} M53FdScan;
+
+static void m53_fd_init(M53FdScan *sc, int fd, long start, long end) {
+    sc->fd = fd;
+    sc->pos = start;
+    sc->end = end;
+    sc->bpos = 0;
+    sc->blen = 0;
+}
+
+static long m53_fd_tell(const M53FdScan *sc) {
+    return sc->pos - (sc->blen - sc->bpos);
+}
+
+static int m53_fd_getc(M53FdScan *sc) {
+    if (sc->bpos >= sc->blen) {
+        long rem = sc->end - sc->pos;
+        long want = rem > (long)sizeof sc->buf ? (long)sizeof sc->buf : rem;
+        long got;
+        if (want <= 0) return -1;
+        got = sy_read(sc->fd, sc->buf, want);
+        if (got <= 0) return -1;
+        sc->pos += got;
+        sc->bpos = 0;
+        sc->blen = got;
+    }
+    return (int)sc->buf[sc->bpos++];
+}
+
+static int m53_fd_skip(M53FdScan *sc, long n) {
+    long avail;
+    if (n < 0) return -1;
+    if (n == 0) return 0;
+    avail = sc->blen - sc->bpos;
+    if (n <= avail) { sc->bpos += n; return 0; }
+    n -= avail;
+    sc->bpos = 0;
+    sc->blen = 0;
+    if (n > sc->end - sc->pos) return -1;
+    sc->pos += n;
+    return sy_lseek(sc->fd, sc->pos, 0) == sc->pos ? 0 : -1;
+}
+
+static int m53_fd_read(M53FdScan *sc, unsigned char *dst, long n) {
+    long avail, take;
+    if (n < 0) return -1;
+    if (n == 0) return 0;
+    avail = sc->blen - sc->bpos;
+    if (avail > 0) {
+        take = n < avail ? n : avail;
+        if (mm_copy(dst, n, sc->buf + sc->bpos, take)) return -1;
+        sc->bpos += take;
+        dst += take;
+        n -= take;
+    }
+    if (n == 0) return 0;
+    if (n > sc->end - sc->pos) return -1;
+    if (sy_read_full(sc->fd, dst, n) != 0) return -1;
+    sc->pos += n;
+    return 0;
+}
+
+static long m53_fd_line(M53FdScan *sc, char *line, long cap) {
+    long n = 0;
+    int c;
+    for (;;) {
+        c = m53_fd_getc(sc);
+        if (c < 0) return -1;
+        if (c == '\n') { line[n] = 0; return n; }
+        if (n + 1 >= cap) return -1;
+        line[n++] = (char)c;
+    }
+}
+
+static int m53_tok_u64(const char *s, long *at, long len, unsigned long long *out) {
+    unsigned long long v = 0;
+    long i = *at;
+    int any = 0;
+    while (i < len && (s[i] == ' ' || s[i] == '\t' || s[i] == '\r')) i++;
+    while (i < len && s[i] >= '0' && s[i] <= '9') {
+        unsigned long long d = (unsigned long long)(s[i] - '0');
+        if (v > (18446744073709551615ULL - d) / 10ULL) return -1;
+        v = v * 10ULL + d;
+        any = 1;
+        i++;
+    }
+    if (!any) return -1;
+    *at = i;
+    *out = v;
+    return 0;
+}
+
+/* Stream-seek P4 package directly on fd: reads only headers + the 3 tape/lnx-x86_64/* payloads (~22 KB)
+ * instead of reading the full 9.4 MB APE or 2.9 MB P4 body. Enforces identical G1 rules to m53_m1_extract_tape. */
+static int m53_m1_extract_tape_fd(int fd, long pkg_off, long pkglen,
+                                  unsigned char *out_p[3], long out_n[3],
+                                  const char **reason_out, int *detail_out) {
+    static const char *const keys[3] = {
+        "tape/lnx-x86_64/manifest.tsv",
+        "tape/lnx-x86_64/tapemode.so",
+        "tape/lnx-x86_64/m53.tapeslice"
+    };
+    static const long key_len[3] = { 28, 27, 29 };
+    static const long max_bytes[3] = { M53_M1_MAX_MF, M53_M1_MAX_SO, M53_M1_MAX_SL };
+    M53FdScan sc;
+    char line[512];
+    unsigned char nbuf[32];
+    long ln, at, i, k;
+    unsigned long long ver = 0, pm = 0, ps = 0, nr = 0;
+
+    out_p[0] = 0; out_p[1] = 0; out_p[2] = 0;
+    out_n[0] = 0; out_n[1] = 0; out_n[2] = 0;
+    if (pkg_off < 0 || pkglen <= 0 || sy_lseek(fd, pkg_off, 0) != pkg_off) {
+        *reason_out = "embed-pkg-decode-failed"; *detail_out = 10; return -1;
+    }
+    m53_fd_init(&sc, fd, pkg_off, pkg_off + pkglen);
+
+    /* P <ver> <pm> <ps> <nr>\n */
+    ln = m53_fd_line(&sc, line, (long)sizeof line);
+    if (ln <= 0) { *reason_out = "embed-pkg-decode-failed"; *detail_out = 10; return -1; }
+    at = 0;
+    while (at < ln && (unsigned char)line[at] <= 32) at++;
+    if (at >= ln || line[at++] != 'P' ||
+        m53_tok_u64(line, &at, ln, &ver) != 0 || ver < 4ULL || ver > 4ULL ||
+        m53_tok_u64(line, &at, ln, &pm) != 0 || pm == 0ULL || pm > (unsigned long long)(pkglen / 8) ||
+        m53_tok_u64(line, &at, ln, &ps) != 0 || ps == 0ULL || ps > (unsigned long long)(pkglen / 10) ||
+        m53_tok_u64(line, &at, ln, &nr) != 0 || nr > (unsigned long long)(pkglen / 5)) {
+        *reason_out = "embed-pkg-decode-failed"; *detail_out = 10; return -1;
+    }
+
+    /* Skip ps stage rows: D <route> <name> <in> <out> <model>\n */
+    for (i = 0; i < (long)ps; i++) {
+        ln = m53_fd_line(&sc, line, (long)sizeof line);
+        if (ln <= 0) { *reason_out = "embed-pkg-decode-failed"; *detail_out = 10; return -1; }
+        at = 0;
+        while (at < ln && (unsigned char)line[at] <= 32) at++;
+        if (at >= ln || line[at] != 'D') { *reason_out = "embed-pkg-decode-failed"; *detail_out = 10; return -1; }
+    }
+
+    /* Skip pm model payloads: M <n> <raw> <codec> <sum>\n + <n> bytes */
+    for (i = 0; i < (long)pm; i++) {
+        unsigned long long mn = 0, mraw = 0, mcod = 0, msum = 0;
+        ln = m53_fd_line(&sc, line, (long)sizeof line);
+        if (ln <= 0) { *reason_out = "embed-pkg-decode-failed"; *detail_out = 10; return -1; }
+        at = 0;
+        while (at < ln && (unsigned char)line[at] <= 32) at++;
+        if (at >= ln || line[at++] != 'M' ||
+            m53_tok_u64(line, &at, ln, &mn) != 0 || mn == 0ULL ||
+            m53_tok_u64(line, &at, ln, &mraw) != 0 ||
+            m53_tok_u64(line, &at, ln, &mcod) != 0 ||
+            m53_tok_u64(line, &at, ln, &msum) != 0 ||
+            m53_fd_skip(&sc, (long)mn) != 0) {
+            *reason_out = "embed-pkg-decode-failed"; *detail_out = 10; return -1;
+        }
+    }
+
+    /* Scan nr resource records: F <nlen> <len> <rawlen> <codec> <crc>\n + <nlen> + <len> */
+    for (i = 0; i < (long)nr; i++) {
+        unsigned long long fn = 0, flen = 0, fraw = 0, fcod = 0, fcrc = 0;
+        int match = -1;
+        ln = m53_fd_line(&sc, line, (long)sizeof line);
+        if (ln <= 0) { *reason_out = "embed-pkg-decode-failed"; *detail_out = 10; goto err_fd; }
+        at = 0;
+        while (at < ln && (unsigned char)line[at] <= 32) at++;
+        if (at >= ln || line[at++] != 'F' ||
+            m53_tok_u64(line, &at, ln, &fn) != 0 || fn == 0ULL ||
+            m53_tok_u64(line, &at, ln, &flen) != 0 ||
+            m53_tok_u64(line, &at, ln, &fraw) != 0 ||
+            m53_tok_u64(line, &at, ln, &fcod) != 0 ||
+            m53_tok_u64(line, &at, ln, &fcrc) != 0 || fcrc > 4294967295ULL) {
+            *reason_out = "embed-pkg-decode-failed"; *detail_out = 10; goto err_fd;
+        }
+        if (fn == 27ULL || fn == 28ULL || fn == 29ULL) {
+            if (m53_fd_read(&sc, nbuf, (long)fn) != 0) {
+                *reason_out = "embed-pkg-decode-failed"; *detail_out = 10; goto err_fd;
+            }
+            for (k = 0; k < 3; k++) {
+                if ((long)fn == key_len[k] && m53_m1_eq((const char *)nbuf, (long)fn, keys[k], key_len[k])) {
+                    match = (int)k;
+                    break;
+                }
+            }
+        } else {
+            if (m53_fd_skip(&sc, (long)fn) != 0) {
+                *reason_out = "embed-pkg-decode-failed"; *detail_out = 10; goto err_fd;
+            }
+        }
+        if (match >= 0) {
+            unsigned char *pay;
+            if (out_p[match]) { *reason_out = "embed-resource-duplicate"; *detail_out = match + 1; goto err_fd; }
+            if (fcod != 0ULL) { *reason_out = "embed-pkg-decode-failed"; *detail_out = 20 + match; goto err_fd; }
+            if (flen == 0ULL || fraw != flen || (long)flen > max_bytes[match]) {
+                *reason_out = "embed-pkg-decode-failed"; *detail_out = 30 + match; goto err_fd;
+            }
+            pay = (unsigned char *)mm_alloc((long)flen);
+            if (!pay) { *reason_out = "embed-pkg-decode-failed"; *detail_out = 10; goto err_fd; }
+            if (m53_fd_read(&sc, pay, (long)flen) != 0) {
+                mm_free(pay); *reason_out = "embed-pkg-decode-failed"; *detail_out = 10; goto err_fd;
+            }
+            if (m53_m1_crc32(pay, (long)flen) != (unsigned)fcrc) {
+                mm_free(pay); *reason_out = "embed-pkg-decode-failed"; *detail_out = match; goto err_fd;
+            }
+            out_p[match] = pay;
+            out_n[match] = (long)flen;
+        } else {
+            if (m53_fd_skip(&sc, (long)flen) != 0) {
+                *reason_out = "embed-pkg-decode-failed"; *detail_out = 10; goto err_fd;
+            }
+        }
+    }
+    if (m53_fd_tell(&sc) != pkg_off + pkglen) {
+        *reason_out = "embed-pkg-decode-failed"; *detail_out = 10; goto err_fd;
+    }
+    for (k = 0; k < 3; k++) {
+        if (!out_p[k]) { *reason_out = "embed-resource-missing"; *detail_out = (int)k + 1; goto err_fd; }
+    }
+    *reason_out = 0;
+    *detail_out = 0;
+    return 0;
+err_fd:
+    for (k = 0; k < 3; k++) { if (out_p[k]) { mm_free(out_p[k]); out_p[k] = 0; out_n[k] = 0; } }
+    return -1;
+}
+
+/* Locate P4 package span on fd by reading only head4 + 16-byte tail footer (fallback to full
+ * packagefooter_locate_bytes only for signed PE containers with trailing certificate tables). */
+static int m53_m1_locate_pkg_fd(int fd, long apen, long *pkg_off_out, long *pkglen_out) {
+    unsigned char h4[4], foot[16];
+    unsigned long long plen;
+    if (apen < 4) return -1;
+    if (sy_lseek(fd, 0, 0) != 0 || sy_read_full(fd, h4, 4) != 0) return -1;
+    if (h4[0] == 'P' && h4[1] == ' ') {
+        *pkg_off_out = 0;
+        *pkglen_out = apen;
+        return 0;
+    }
+    if (apen >= 16 && sy_lseek(fd, apen - 16, 0) == apen - 16 && sy_read_full(fd, foot, 16) == 0 &&
+        foot[0] == 85 && foot[1] == 78 && foot[2] == 73 && foot[3] == 80 &&
+        foot[4] == 75 && foot[5] == 71 && foot[6] == 49 && foot[7] == 10) {
+        plen = m53_m1_rd_u(foot + 8, 8);
+        if (plen > 0ULL && plen <= (unsigned long long)(apen - 16)) {
+            *pkg_off_out = apen - 16 - (long)plen;
+            *pkglen_out = (long)plen;
+            return 0;
+        }
+    }
+    /* Slow fallback: signed PE with cert table padding before UNIPKG1 footer. */
+    {
+        unsigned char *ape = (unsigned char *)mm_alloc(apen);
+        PackageFooter pf;
+        int ok = 0;
+        if (!ape) return -1;
+        if (sy_lseek(fd, 0, 0) == 0 && sy_read_full(fd, ape, apen) == 0 &&
+            packagefooter_locate_bytes(ape, apen, &pf) &&
+            pf.package_offset >= 0 && pf.package_length > 0 &&
+            pf.package_offset + pf.package_length <= apen) {
+            *pkg_off_out = pf.package_offset;
+            *pkglen_out = pf.package_length;
+            ok = 1;
+        }
+        mm_free(ape);
+        return ok ? 0 : -1;
+    }
+}
+
+/* G3: fast stat-key cache hit (0 reads, 0 hashes on 2nd+ calls); on miss, stream-seeks only footer
+ * + 3 tape records (~22 KB) and hashes only the 3 tape records (~18 KB, ~1.4 ms) before atomic swap. */
 static int m53_m1_ensure_loaded(void) {
     static const char *const sym_names[3] = {
         "hoststub_lnx_x86_64_bind",
@@ -435,16 +706,13 @@ static int m53_m1_ensure_loaded(void) {
     const char *cpath = sy_env("UNISA_CONTAINER");
     int fd = -1, rc, i;
     sy_stat_t st;
-    unsigned char *ape = 0, *new_slice = 0;
-    long apen = 0;
-    PackageFooter pf;
-    const unsigned char *pkg;
-    long pkglen;
-    unsigned char pkg_sha[32], h[32];
-    const unsigned char *tp[3];
-    long tn[3];
+    long apen = 0, pkg_off = 0, pkglen = 0;
+    unsigned char *tp[3] = {0, 0, 0};
+    long tn[3] = {0, 0, 0};
+    unsigned char *new_slice = 0;
     const char *er = 0;
     int ed = 0;
+    unsigned char comb96[96], tape_sha[32];
     char so_sha[65], sl_sha[65];
     unsigned long long new_clen = 0, new_doff = 0, new_dlen = 0, new_bsz = 0;
     tsl_img_t new_tsl;
@@ -467,80 +735,59 @@ static int m53_m1_ensure_loaded(void) {
         m53_m1_drop_loaded();
         return m53_m1_fail("embed-container-missing", -EINVAL);
     }
-    apen = (long)st.size;
-    ape = (unsigned char *)mm_alloc(apen);
-    if (!ape) {
+    /* (1) Fast path: path + stat (dev/ino/size/mtime/mtime_ns/ctime_ns) hit -> 0 reads, 0 hashes. */
+    if (m53_m1_stat_hit(cpath, &st)) {
         sy_close(fd);
-        m53_m1_drop_loaded();
-        return m53_m1_fail("embed-container-missing", -ENOMEM);
-    }
-    if (sy_read_full(fd, ape, apen) != 0) {
-        mm_free(ape); sy_close(fd);
-        m53_m1_drop_loaded();
-        return m53_m1_fail("embed-container-missing", -EIO);
-    }
-    sy_close(fd);
-
-    if (packagefooter_locate_bytes(ape, apen, &pf) &&
-        pf.package_offset >= 0 && pf.package_length > 0 &&
-        pf.package_offset + pf.package_length <= apen) {
-        pkg = ape + pf.package_offset;
-        pkglen = pf.package_length;
-    } else if (apen >= 4 && ape[0] == 'P' && ape[1] == ' ') {
-        pkg = ape;
-        pkglen = apen;
-    } else {
-        mm_free(ape);
-        m53_m1_drop_loaded();
-        return m53_m1_fail("embed-footer-invalid", 0);
-    }
-
-    cx_sha256(pkg, (size_t)pkglen, pkg_sha);
-    if (m53_m1_cache_hit(cpath, &st, pkg_sha)) {
-        mm_free(ape);
         return 0;
     }
 
+    apen = (long)st.size;
     m53_m1_state = M53_M1_LOADING;
-    if (m53_m1_extract_tape(pkg, pkglen, tp, tn, &er, &ed) != 0) {
-        mm_free(ape);
+    /* (3) Locate package span via 16-byte footer and stream-seek only the 3 tape F records. */
+    if (m53_m1_locate_pkg_fd(fd, apen, &pkg_off, &pkglen) != 0) {
+        sy_close(fd);
+        m53_m1_drop_loaded();
+        return m53_m1_fail("embed-footer-invalid", 0);
+    }
+    if (m53_m1_extract_tape_fd(fd, pkg_off, pkglen, tp, tn, &er, &ed) != 0) {
+        sy_close(fd);
         m53_m1_drop_loaded();
         return m53_m1_fail(er ? er : "embed-pkg-decode-failed", ed);
     }
+    sy_close(fd);
 
-    cx_sha256(tp[1], (size_t)tn[1], h); m53_m1_hex(h, so_sha);
-    cx_sha256(tp[2], (size_t)tn[2], h); m53_m1_hex(h, sl_sha);
+    /* (2) Hash only the 3 tape records (~18 KB, ~1.4 ms) for manifest check + cache identity. */
+    cx_sha256(tp[0], (size_t)tn[0], comb96);
+    cx_sha256(tp[1], (size_t)tn[1], comb96 + 32);
+    cx_sha256(tp[2], (size_t)tn[2], comb96 + 64);
+    cx_sha256(comb96, 96, tape_sha);
+    m53_m1_hex(comb96 + 32, so_sha);
+    m53_m1_hex(comb96 + 64, sl_sha);
+
     if (m53_m1_check_mf_line((const char *)tp[0], tn[0], "tapemode.so", so_sha, tn[1]) != 0) {
-        mm_free(ape); m53_m1_drop_loaded();
+        mm_free(tp[0]); mm_free(tp[1]); mm_free(tp[2]); m53_m1_drop_loaded();
         return m53_m1_fail("embed-manifest-mismatch", 1);
     }
     if (m53_m1_check_mf_line((const char *)tp[0], tn[0], "m53.tapeslice", sl_sha, tn[2]) != 0) {
-        mm_free(ape); m53_m1_drop_loaded();
+        mm_free(tp[0]); mm_free(tp[1]); mm_free(tp[2]); m53_m1_drop_loaded();
         return m53_m1_fail("embed-manifest-mismatch", 2);
     }
+    mm_free(tp[0]); tp[0] = 0;
 
     if (m53_m1_validate_slice(tp[2], tn[2], &new_clen, &new_doff, &new_dlen, &new_bsz) != 0) {
-        mm_free(ape); m53_m1_drop_loaded();
+        mm_free(tp[1]); mm_free(tp[2]); m53_m1_drop_loaded();
         return m53_m1_fail("embed-slice-corrupt", 1);
     }
-    new_slice = (unsigned char *)mm_alloc(tn[2]);
-    if (!new_slice) {
-        mm_free(ape); m53_m1_drop_loaded();
-        return m53_m1_fail("embed-slice-corrupt", 1);
-    }
-    if (mm_copy(new_slice, tn[2], tp[2], tn[2])) {
-        mm_free(new_slice); mm_free(ape); m53_m1_drop_loaded();
-        return m53_m1_fail("embed-slice-corrupt", 1);
-    }
+    new_slice = tp[2]; tp[2] = 0;
 
     mm_fill(&new_tsl, (long)sizeof new_tsl, 0, (long)sizeof new_tsl);
     rc = tsl_check(tp[1], tn[1], sym_names, &new_tsl);
     if (rc != 0) {
-        mm_free(new_slice); mm_free(ape); m53_m1_drop_loaded();
+        mm_free(tp[1]); mm_free(new_slice); m53_m1_drop_loaded();
         return m53_m1_fail("embed-so-invalid", rc);
     }
     rc = tsl_map(tp[1], tn[1], &new_tsl);
-    mm_free(ape);
+    mm_free(tp[1]); tp[1] = 0;
     if (rc != 0) {
         mm_free(new_slice); m53_m1_drop_loaded();
         return m53_m1_fail("embed-so-map-failed", rc);
@@ -575,7 +822,7 @@ static int m53_m1_ensure_loaded(void) {
     m53_m1_cache.mtime = st.mtime;
     m53_m1_cache.mtime_ns = st.mtime_ns;
     m53_m1_cache.ctime_ns = st.ctime_ns;
-    for (i = 0; i < 32; i++) m53_m1_cache.pkg_sha[i] = pkg_sha[i];
+    for (i = 0; i < 32; i++) m53_m1_cache.tape_sha[i] = tape_sha[i];
     m53_m1_cache.valid = 1;
     m53_m1_state = M53_M1_READY;
     return 0;
