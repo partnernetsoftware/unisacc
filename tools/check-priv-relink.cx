@@ -182,6 +182,13 @@ int main(void) {
         "  printf '0\\t%%s\\tcx.h\\n' \"$2\"\n"
         "  exit 0\n"
         "fi\n"
+        "case \"$1\" in\n"
+        "  *entry-build.cx)\n"
+        "    EB=\"$1\"; shift 2\n"
+        "    sh \"$EB\" \"$@\"\n"
+        "    exit $?\n"
+        "    ;;\n"
+        "esac\n"
         "exit 1\n"
         "EOFUC\n"
         "chmod +x '%s/unisacc.com'",
@@ -449,14 +456,17 @@ int main(void) {
     pr_free(&r);
 
     /* 15. --show-route red-then-green: missing route row refused, non-existent file refused,
-     *     valid module_target + root_target verified AND agrees with --resolve-unit on chain closures (m60.o, never stale m54.o) */
+     *     entry-build ignoring route row refused (red-first for whole-target entry-build plan selection),
+     *     valid module_target + root_target verified with quoted plan_line AND agrees with --resolve-unit (m60.o, never stale m54.o) */
     cx_fmt(cmd, sizeof cmd,
-        "set -e; mkdir -p '%s/plans' '%s/cx/compiler' '%s/src'; "
+        "set -e; mkdir -p '%s/plans' '%s/cx/compiler' '%s/src' '%s/tools'; "
         "printf '# key\\tsource\\tmodule\\tuses\\tlines\\theap\\trecursive\\toverride\\tnote\\n"
         "m54.o\\tcx/compiler/cellname.cx\\tcellname\\t-\\t18\\t0\\t0\\t-\\t-\\n"
         "driveargs.o\\tsrc/driveargs.cx\\tdriveargs\\t-\\t64\\t0\\t0\\t-\\t-\\n' > '%s/plans/slice-units.tsv'; "
+        "printf '#pragma unisa module cellname\\nint cel_at(void){return 0;}\\n' > '%s/cx/compiler/cellname.cx'; "
+        "printf '#pragma unisa module driveargs\\nint da_run(void){return 0;}\\n' > '%s/src/driveargs.cx'; "
         "printf 'root\\tdriveargs.o\\tsrc/driveargs.cx\\n' > '%s/build/chain-facts.tsv'",
-        repo, repo, repo, repo, repo);
+        repo, repo, repo, repo, repo, repo, repo, repo);
     cpr_sh(g_root, cmd, 15, &r); pr_free(&r);
 
     cx_fmt(cmd, sizeof cmd,
@@ -476,12 +486,48 @@ int main(void) {
        "mut-show-route-nonexistent-file-refused-rc2", &r);
     pr_free(&r);
 
+    /* Red-first: chain-facts has both route rows and files exist, but entry-build ignores them and selects unrouted defaults */
     cx_fmt(cmd, sizeof cmd,
-        "printf '#pragma unisa module cellname\\nint cel_at(void){return 0;}\\n' > '%s/cx/compiler/cellname_tbl.cx' && "
-        "printf '#pragma unisa module driveargs\\nint da_run(void){return 0;}\\n' > '%s/src/driveargs_tbl.cx' && "
+        "set -e; "
+        "printf '#pragma unisa module cellname\\nint cel_at(void){return 0;}\\n' > '%s/cx/compiler/cellname_tbl.cx'; "
+        "printf '#pragma unisa module driveargs\\nint da_run(void){return 0;}\\n' > '%s/src/driveargs_tbl.cx'; "
         "printf 'root\\tdriveargs.o\\tsrc/driveargs.cx\\n"
         "root_target\\tlnx/x86_64:driveargs.o\\tsrc/driveargs_tbl.cx\\n"
-        "module_target\\tlnx/x86_64:compiler.cellname\\tcx/compiler/cellname_tbl.cx\\n' > '%s/build/chain-facts.tsv' && "
+        "module_target\\tlnx/x86_64:compiler.cellname\\tcx/compiler/cellname_tbl.cx\\n' > '%s/build/chain-facts.tsv'; "
+        "cat << 'EOF' > '%s/tools/entry-build.cx'\n"
+        "ROOT=\"$1\"\n"
+        "if [ -n \"$UNISACC_EB_PLAN_MEMO\" ]; then\n"
+        "  printf 'eb-plan-memo-v1\\t0\\t0\\t64\\n0\\t%%s/src/driveargs.cx\\tdriveargs\\n' \"$ROOT\" > \"$UNISACC_EB_PLAN_MEMO\"\n"
+        "fi\n"
+        "printf 'm60.o\\t%%s/cx/compiler/cellname.cx\\n' \"$ROOT\"\n"
+        "EOF\n"
+        "sh '%s/unisacc.com' '%s/tools/priv-relink.cx' -- --chain-dir '%s' --repo '%s' --show-route compiler.cellname",
+        repo, repo, repo, repo, g_root, g_root, chain, repo);
+    cpr_sh(g_root, cmd, 30, &r);
+    ck(r.rc == 2 &&
+       cpr_has(&r, "REFUSE\tPRIV_RELINK\tentry-build-ignored-route\tquery=compiler.cellname target=lnx/x86_64 expected=cx/compiler/cellname_tbl.cx plan_line=m60.o:"),
+       "mut-show-route-entry-build-ignores-module-route-refused-rc2", &r);
+    pr_free(&r);
+
+    cx_fmt(cmd, sizeof cmd,
+        "sh '%s/unisacc.com' '%s/tools/priv-relink.cx' -- --chain-dir '%s' --repo '%s' --show-route driveargs",
+        g_root, g_root, chain, repo);
+    cpr_sh(g_root, cmd, 30, &r);
+    ck(r.rc == 2 &&
+       cpr_has(&r, "REFUSE\tPRIV_RELINK\tentry-build-ignored-route\tquery=driveargs target=lnx/x86_64 expected=src/driveargs_tbl.cx plan_line=0:"),
+       "mut-show-route-entry-build-ignores-root-route-refused-rc2", &r);
+    pr_free(&r);
+
+    /* Green: entry-build honors the routed files in whole-target plan and closure list */
+    cx_fmt(cmd, sizeof cmd,
+        "set -e; "
+        "cat << 'EOF' > '%s/tools/entry-build.cx'\n"
+        "ROOT=\"$1\"\n"
+        "if [ -n \"$UNISACC_EB_PLAN_MEMO\" ]; then\n"
+        "  printf 'eb-plan-memo-v1\\t0\\t0\\t64\\n0\\t%%s/src/driveargs_tbl.cx\\tdriveargs\\n' \"$ROOT\" > \"$UNISACC_EB_PLAN_MEMO\"\n"
+        "fi\n"
+        "printf 'm60.o\\t%%s/cx/compiler/cellname_tbl.cx\\n' \"$ROOT\"\n"
+        "EOF\n"
         "R1=$(sh '%s/unisacc.com' '%s/tools/priv-relink.cx' -- --chain-dir '%s' --repo '%s' --show-route compiler.cellname) && "
         "R2=$(sh '%s/unisacc.com' '%s/tools/priv-relink.cx' -- --chain-dir '%s' --repo '%s' --resolve-unit cellname) && "
         "R3=$(sh '%s/unisacc.com' '%s/tools/priv-relink.cx' -- --chain-dir '%s' --repo '%s' --show-route driveargs) && "
@@ -489,11 +535,13 @@ int main(void) {
         "U1=$(printf '%%s\\n' \"$R1\" | awk -F'\\t' '{print $5}') && "
         "U2=$(printf '%%s\\n' \"$R2\" | awk -F'\\t' '{print $3}') && "
         "[ \"$U1\" = \"unit=m60.o\" ] && [ \"$U1\" = \"$U2\" ] && echo SHOW_ROUTE_RESOLVE_UNIT_AGREE",
-        repo, repo, repo, g_root, g_root, chain, repo, g_root, g_root, chain, repo, g_root, g_root, chain, repo);
+        repo, g_root, g_root, chain, repo, g_root, g_root, chain, repo, g_root, g_root, chain, repo);
     cpr_sh(g_root, cmd, 45, &r);
     ck(r.rc == 0 &&
        cpr_has(&r, "PRIV_RELINK_ROUTE\tquery=compiler.cellname\ttarget=lnx/x86_64\tkind=module_target\tunit=m60.o\tmodule=compiler.cellname\tsrc=cx/compiler/cellname_tbl.cx\tsha256=") &&
+       cpr_has(&r, "plan_line=m60.o:") &&
        cpr_has(&r, "PRIV_RELINK_ROUTE\tquery=driveargs\ttarget=lnx/x86_64\tkind=root_target\tunit=driveargs.o\tmodule=driveargs\tsrc=src/driveargs_tbl.cx\tsha256=") &&
+       cpr_has(&r, "plan_line=0:") &&
        cpr_has(&r, "SHOW_ROUTE_RESOLVE_UNIT_AGREE") &&
        cpr_has(&r, "cx_plan=VERIFIED"),
        "show-route-and-resolve-unit-agree-on-chain-closures-pass", &r);
