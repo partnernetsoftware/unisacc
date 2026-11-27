@@ -23,6 +23,7 @@
 #pragma unisa use sys.env
 #pragma unisa use sys.posix
 #pragma unisa use sys.sha
+#pragma unisa use cxlib.sessionroot
 #pragma unisa use text.text
 #pragma unisa use mem.heap
 #pragma unisa use mem.bytes
@@ -224,40 +225,79 @@ static int run_chain_ape_pregate(const char *ape, const char *rcpt,
             return 2;
         }
     }
-    /* Must actually exercise m25 content from the chain APE before printing FORMAL PASS */
-    char tmp[256], s3_src[512], s3_bin[512], cmd[2048], out[8192];
-    const char *td = sy_env("TMPDIR");
-    if (!td || !td[0]) td = "/tmp";
-    cx_fmt(tmp, sizeof tmp, "%s/piece-m-ape-%lld", td, sy_now_ms());
+    /* Must drive the formal APE itself through its product callers (intact + CRC tamper + G4 env override) */
+    char base[256], tmp[320], u1[512], u2[512], out_bin[512], bad_ape[512], cmd[2048], out[8192];
+    if (sr_default("piece-m-ape", base, sizeof base) != 0) return 2;
+    cx_fmt(tmp, sizeof tmp, "%s/r-%lld", base, sy_now_ms());
     if (sy_mkdir(tmp, 0700) != 0) return 2;
-    cx_fmt(s3_src, sizeof s3_src, "%s/ape_probe.cx", tmp);
-    cx_fmt(s3_bin, sizeof s3_bin, "%s/ape_probe", tmp);
-    const char *probe_code =
-        "#pragma unisa use sys.io\n"
-        "#pragma unisa use driver.m25_m1_impl\n"
-        "int main(void) {\n"
-        "  int c = m25_m1_rts_count();\n"
-        "  int sc = m25_m1_rts_symbol_count(0);\n"
-        "  int cv = m25_m1_rts_covers(0, \"_u_st_fd\");\n"
-        "  sy_printf(\"APE_M25 c=%d sc=%d cv=%d err=%d\\n\", c, sc, cv, m25_m1_last_err());\n"
-        "  return (c == 2 && sc > 0 && cv == 1 && m25_m1_last_err() == 0) ? 0 : 1;\n"
-        "}\n";
-    if (sy_write_file(s3_src, (const unsigned char *)probe_code, (long)strlen(probe_code), 0644) != 0) {
+    cx_fmt(u1, sizeof u1, "%s/u1.cx", tmp);
+    cx_fmt(u2, sizeof u2, "%s/u2.cx", tmp);
+    cx_fmt(out_bin, sizeof out_bin, "%s/two_src_out", tmp);
+    cx_fmt(bad_ape, sizeof bad_ape, "%s/bad_crc_m25.com", tmp);
+    const char *u1_code = "int f(void) { return 7; }\n";
+    const char *u2_code = "int f(void); int main(void) { return f() == 7 ? 0 : 1; }\n";
+    if (sy_write_file(u1, (const unsigned char *)u1_code, (long)strlen(u1_code), 0644) != 0 ||
+        sy_write_file(u2, (const unsigned char *)u2_code, (long)strlen(u2_code), 0644) != 0) {
         (void)sy_remove_all(tmp);
         return 2;
     }
-    cx_fmt(cmd, sizeof cmd, "sh ./unisacc.com '%s' cx/driver/m25_m1_impl.cx cx/driver/stream_s1_m1.cx -o '%s'", s3_src, s3_bin);
+
+    /* 1. Intact formal APE control: two-source compile reaching m25 */
+    cx_fmt(cmd, sizeof cmd, "sh '%s' '%s' '%s' -o '%s'", ape, u1, u2, out_bin);
     int c_rc = run_sh(cmd, out, sizeof out);
-    if (c_rc != 0) {
+    int r_ok = (c_rc == 0 && sy_exists(out_bin) == 1);
+    if (!r_ok) {
         (void)sy_remove_all(tmp);
-        if (!quiet) sy_printf("REFUSE\tFORMAL_CHAIN_PREGATE\tape-probe-compile-failed\tape_sha=%s\n", asha);
+        if (!quiet) sy_printf("REFUSE\tFORMAL_CHAIN_PREGATE\tintact-two-source-compile-failed\tape_sha=%s\trc=%d\n", asha, c_rc);
         return 2;
     }
-    cx_fmt(cmd, sizeof cmd, "UNISA_CONTAINER='%s' '%s'", ape, s3_bin);
-    int r_ok = (run_sh(cmd, out, sizeof out) == 0 && strstr(out, "APE_M25 c=2 ") != 0);
-    cx_fmt(cmd, sizeof cmd, "UNISA_CONTAINER='%s' UNISACC_M53_S1=1 '%s'", ape, s3_bin);
-    int r_env = (run_sh(cmd, out, sizeof out) != 0 && strstr(out, "M25_M1_REFUSE") != 0);
+    if (!quiet) {
+        sy_printf("PASS\tFORMAL_CHAIN_PREGATE\tintact-two-source-compile\tape_sha=%s\tvariant=intact\tvariant_sha=%s\treason=ok\n", asha, asha);
+    }
+
+    /* 2. CRC tamper negative on m25.tapeslice (or m25-slice-absent refusal) */
+    int t_rc = make_crc_tampered_p4_key(ape, bad_ape, "tape/lnx-x86_64/m25.tapeslice");
+    if (t_rc != 0) t_rc = make_crc_tampered_p4_key(ape, bad_ape, "m25.tapeslice");
+    if (t_rc != 0) {
+        (void)sy_remove_all(tmp);
+        if (!quiet) sy_printf("REFUSE\tFORMAL_CHAIN_PREGATE\tm25-slice-absent\tape_sha=%s\n", asha);
+        return 2;
+    }
+    char bad_sha[65];
+    unsigned char *bb = 0;
+    int64_t bn = 0;
+    if (sy_read_file(bad_ape, &bb, &bn, 64L << 20) == 0 && bb && bn > 0) {
+        sy_sha256_hex((const char *)bb, (long)bn, bad_sha);
+        mm_free(bb);
+    } else {
+        mm_free(bb);
+        cx_fmt(bad_sha, sizeof bad_sha, "unknown");
+    }
+    cx_fmt(cmd, sizeof cmd, "sh '%s' '%s' '%s' -o '%s'", bad_ape, u1, u2, out_bin);
+    int bad_rc = run_sh(cmd, out, sizeof out);
+    int r_crc = (bad_rc != 0 && (strstr(out, "M25_M1_REFUSE") != 0 || strstr(out, "rtsharedname tape refused") != 0));
+    if (!r_crc) {
+        (void)sy_remove_all(tmp);
+        if (!quiet) sy_printf("REFUSE\tFORMAL_CHAIN_PREGATE\tcrc-tamper-not-refused\tape_sha=%s\tvariant_sha=%s\trc=%d\n", asha, bad_sha, bad_rc);
+        return 2;
+    }
+    if (!quiet) {
+        sy_printf("PASS\tFORMAL_CHAIN_PREGATE\tcrc-tamper-m25-refused\tape_sha=%s\tvariant=bad-crc-m25\tvariant_sha=%s\treason=crc-tamper-refused\n", asha, bad_sha);
+    }
+
+    /* 3. G4 env-override negative */
+    cx_fmt(cmd, sizeof cmd, "UNISACC_M53_S1=1 sh '%s' '%s' '%s' -o '%s'", ape, u1, u2, out_bin);
+    int env_rc = run_sh(cmd, out, sizeof out);
+    int r_env = (env_rc != 0 && strstr(out, "embed-env-override-forbidden") != 0);
     (void)sy_remove_all(tmp);
+    if (!r_env) {
+        if (!quiet) sy_printf("REFUSE\tFORMAL_CHAIN_PREGATE\tg4-env-override-not-refused\tape_sha=%s\trc=%d\n", asha, env_rc);
+        return 2;
+    }
+    if (!quiet) {
+        sy_printf("PASS\tFORMAL_CHAIN_PREGATE\tg4-env-override-refused\tape_sha=%s\tvariant=g4-env-override\tvariant_sha=%s\treason=embed-env-override-forbidden\n", asha, asha);
+    }
+    return 0;
     if (!r_ok || !r_env) {
         if (!quiet) sy_printf("REFUSE\tFORMAL_CHAIN_PREGATE\tm25-ape-content-check-failed\tape_sha=%s\n", asha);
         return 2;
