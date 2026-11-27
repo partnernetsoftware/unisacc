@@ -61,6 +61,36 @@ int main(void) {
     put("rec/old.receipt", "phase\told\n");
     { char o[600]; cx_fmt(o, sizeof o, "%s/rec/old.receipt", root);
       ok(rc_adopt_ok(o, "old", h0) == 1 && !strncmp(rc_why(), "no-inputs_sha", 13), "legacy receipt without inputs_sha STALE"); }
+    /* v2 receipt: rc_write2, rc_need, rc_fresh */
+    {
+        char rec2[600], rec2n[600], cand[65], prod[65];
+        cx_fmt(rec2, sizeof rec2, "%s/rec/v2.receipt", root);
+        cx_fmt(rec2n, sizeof rec2n, "%s.new", rec2);
+        memset(cand, 'a', 64); cand[64] = 0;
+        memset(prod, 'b', 64); prod[64] = 0;
+        ok(rc_write2(rec2, "", cand, h0, up, prod, 0) != 0, "rc_write2 rejects empty run_id");
+        ok(rc_write2(rec2, "run-1", "short", h0, up, prod, 0) != 0, "rc_write2 rejects bad hex64");
+        ok(!rc_write2(rec2, "run-1", cand, h0, up, prod, 0), "rc_write2 writes valid v2 receipt");
+        ok(sy_exists(rec2n) != 1, "rc_write2 atomic write leaves no .new");
+        ok(rc_need(rec2, "run_id", "id") == 0, "rc_need run_id id ok");
+        ok(rc_need(rec2, "candidate_sha", "hex64") == 0, "rc_need candidate_sha hex64 ok");
+        ok(rc_need(rec2, "inputs_sha", "hex64") == 0, "rc_need inputs_sha hex64 ok");
+        ok(rc_need(rec2, "output_sha", "hex64") == 0, "rc_need output_sha hex64 ok");
+        ok(rc_need(rec2, "producer_sha", "hex64") == 0, "rc_need producer_sha hex64 ok");
+        ok(rc_need(rec2, "rc", "int") == 0, "rc_need rc int ok");
+        ok(rc_need(rec2, "missing_key", "id") == 2, "rc_need missing key refuses rc=2");
+        ok(rc_need(rec2, "rc", "hex64") == 2, "rc_need malformed hex64 refuses rc=2");
+        ok(rc_need(rec2, "run_id", "int") == 2, "rc_need malformed int refuses rc=2");
+        ok(rc_need(rec2, "run_id", "unknown") == 2, "rc_need unknown kind refuses rc=2");
+        ok(rc_fresh(rec2, "run-1") == 0, "rc_fresh matching run_id ok");
+        ok(rc_fresh(rec2, "run-0") == 2, "rc_fresh feed-previous-output refuses rc=2");
+        {
+            char rec_del[600];
+            cx_fmt(rec_del, sizeof rec_del, "%s/rec/deleted.receipt", root);
+            ok(rc_need(rec_del, "run_id", "id") == 2, "rc_need delete-run-step missing file refuses rc=2");
+            ok(rc_fresh(rec_del, "run-1") == 2, "rc_fresh delete-run-step missing file refuses rc=2");
+        }
+    }
     cx_rmtree(d);
     printf("CHECK_RECEIPT\ttotal=%d\tfailed=%d\n", total, bad);
     return bad ? 1 : 0;

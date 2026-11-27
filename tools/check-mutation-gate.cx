@@ -124,8 +124,42 @@ static int gate(const char *name, const char *check, const char *extra, char *ou
     return ckk_sh_t("check-mutation-gate", sc, out, cap, 55);
 }
 
+static int execution_case(const char *produce, const char *judge, char *out, int cap) {
+    char p[1024], j[1024], cmd[2500];
+    if (ckk_shq(p, sizeof p, produce) || ckk_shq(j, sizeof j, judge) ||
+        cx_fmt(cmd, sizeof cmd, "sh ./unisacc.com tools/mutation-gate.cx -- execution "
+               "--produce %s --judge %s --assertion fresh --timeout-s 3 2>&1", p, j)) return 2;
+    int rc = ckk_sh_t("check-mutation-gate", cmd, out, cap, 22);
+    fputs(out, stdout);
+    return rc;
+}
+
+static void execution_fixture(void) {
+    char out[4096];
+    const char *produce = "printf '%s\\n' \"$1\" > \"$2\"";
+    const char *strict = "if test -f \"$2\" && IFS= read -r id < \"$2\" && test \"$id\" = \"$1\"; "
+                         "then printf 'PASS\\tfresh\\n'; else printf 'FAIL\\tfresh\\n'; exit 1; fi";
+    const char *weak = "if test -s \"$2\"; then printf 'PASS\\tfresh\\n'; else printf 'FAIL\\tfresh\\n'; exit 1; fi";
+    const char *broken = "if test -s \"$2\"; then printf 'PASS\\tfresh\\n'; else printf 'FAIL\\twrong\\n'; exit 1; fi";
+    int rc = execution_case(produce, strict, out, sizeof out);
+    ck(rc == 0 && strstr(out, "operator=delete-run-step\tverdict=KILLED\n") &&
+       strstr(out, "operator=feed-previous-output\tverdict=KILLED\n"), "execution-kills-both");
+    rc = execution_case(produce, weak, out, sizeof out);
+    ck(rc == 1 && strstr(out, "operator=delete-run-step\tverdict=KILLED\n") &&
+       strstr(out, "operator=feed-previous-output\tverdict=SURVIVED\n"), "execution-stale-output-survives-weak-judge");
+    rc = execution_case(produce, broken, out, sizeof out);
+    ck(rc == 2 && strstr(out, "operator=delete-run-step\tverdict=UNMEASURED\n"), "execution-wrong-assertion-refused");
+    rc = execution_case(":", strict, out, sizeof out);
+    ck(rc == 2 && strstr(out, "REFUSE execution baseline"), "execution-missing-baseline-refused");
+}
+
 int main(int argc, char **argv) {
     static char out[65536], sc[8192]; int rc;
+    if (argc == 2 && !strcmp(argv[1], "--execution-fixture")) {
+        execution_fixture();
+        printf("CHECK_MUTATION_GATE_EXECUTION\tok=%d\tfailed=%d\n", ok, failed);
+        return failed != 0;
+    }
     if (argc >= 2 && (strcmp(argv[1], "--quality-fixture") || argc > 3)) return 2;
     rc = ckk_sh_t("check-mutation-gate", "mktemp -d \"${TMPDIR:-/tmp}/mg-check.XXXXXX\"", T, sizeof T, 10);
     { int n = (int)tx_len(T, sizeof T); while (n > 0 && (T[n - 1] == '\n' || T[n - 1] == ' ')) T[--n] = 0; }
@@ -397,6 +431,7 @@ int main(int argc, char **argv) {
     ck(rc == 2 && ckk_has(out, sizeof out, "baseline check not green"), "red-baseline");
 
     ck(quality_fixture(0) == 0, "quality-fixture-ready");
+    execution_fixture();
     cx_fmt(sc, sizeof sc, "rm -rf -- '%s'", T); ckk_sh_t("check-mutation-gate", sc, 0, 0, 20);
     printf("CHECK_MUTATION_GATE\tok=%d\tfailed=%d\n", ok, failed);
     return failed ? 1 : 0;
