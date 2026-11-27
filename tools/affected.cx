@@ -899,7 +899,7 @@ static int prep_kind_of(const char *name, int kind) {
     }
     if (tx_eqz(name, "unitcache-product") || tx_eqz(name, "e2model")) return PK_PROD;
     if (tx_eqz(name, "hostcc") || tx_eqz(name, "hostld") || tx_eqz(name, "hostar") || tx_eqz(name, "hosttcc")) return PK_HOST;
-    if (tx_eqz(name, "nets") || tx_eqz(name, "pp-gold") || tx_eqz(name, "objects") || tx_eqz(name,"assembler") || tx_eqz(name,"kernels") || tx_eqz(name,"isolated-streams")) return PK_MDIR;
+    if (tx_eqz(name, "nets") || tx_eqz(name, "pp-gold") || tx_eqz(name, "objects") || tx_eqz(name,"assembler") || tx_eqz(name,"kernels") || tx_eqz(name,"isolated-streams") || tx_eqz(name,"entry-link")) return PK_MDIR;
     if (tx_eqz(name, "libneed-native")) return PK_HOSTC;
     if (tx_eqz(name, "ref")) return PK_CLASSIC_REF;
     if (tx_eqz(name, "booter-raw-elf")) return PK_BOOTER_RAW;
@@ -959,6 +959,7 @@ static int prep_source(const char *name, int kind, char *src, long cap, char *wh
     if (pk == PK_HOST) { cx_fmt(src, cap, "/usr/bin/%s", name + 4); return 0; }
     if (pk == PK_MDIR && tx_eqz(name,"kernels")) { cx_fmt(src,cap,"tools/kernel-build.cx"); return 0; }
     if (pk == PK_MDIR && tx_eqz(name,"isolated-streams")) { if(cx_fmt(src,cap,"tools/isolated-streams-material.cx"))return -1;return 0; }
+    if (pk == PK_MDIR && tx_eqz(name,"entry-link")) { if(cx_fmt(src,cap,"tools/entry-link-material.cx"))return -1;return 0; }
     if (pk == PK_MDIR) { if (cx_fmt(src, cap, "tools/%s-material.cx", tx_eqz(name,"assembler") ? "asm" : tx_eqz(name, "nets") ? "net" : tx_eqz(name, "objects") ? "object" : "pp-gold")) return -1; }
     else
     if (kind == 2) { cx_fmt(why, whycap, "unpreparable=sha256-value:%s", name); return -1; }
@@ -1364,6 +1365,15 @@ static int prep_plan(const char *name, int kind, char *why, int cap) {
         if(closure_sha("tools/isolated-stream.cx",runner_sha)||cx_fmt(both,sizeof both,"%s%s",P->closure,runner_sha)){cx_fmt(why,cap,"closure-unreadable=tools/isolated-stream.cx");return -1;}
         cx_sha256_hex(both,(size_t)tx_len(both,sizeof both),P->closure);
     }
+    if(P->kind==PK_MDIR&&tx_eqz(P->name,"entry-link")){
+        char eb_sha[65],product[4400],tool[4400],bound[4400],comb[220];Buf fp={0,0,0};
+        if(closure_sha("tools/entry-build.cx",eb_sha)||root_candidate(product,sizeof product)||cx_fmt(tool,sizeof tool,"%s/%s",root,P->src)||cx_fmt(bound,sizeof bound,"%s/tools/bound",root)){cx_fmt(why,cap,"closure-unreadable=tools/entry-build.cx");return -1;}
+        char *fv[]={bound,"20","sh",product,tool,"--","--fingerprint",root,0};
+        if(read_all(fv,&fp)||fp.n!=65||fp.p[64]!='\n'){cx_fmt(why,cap,"entry-link-fingerprint-refused");return -1;}
+        for(int i=0;i<64;i++)if(!((fp.p[i]>='0'&&fp.p[i]<='9')||(fp.p[i]>='a'&&fp.p[i]<='f'))){cx_fmt(why,cap,"entry-link-fingerprint-shape");return -1;}
+        if(cx_fmt(comb,sizeof comb,"%s%s%.64s",P->closure,eb_sha,fp.p))return -1;
+        cx_sha256_hex(comb,(size_t)tx_len(comb,sizeof comb),P->closure);
+    }
     /* the checkout root is part of the identity: builders such as tools/source-package.cx embed
        the real path of their source file, so one closure built under two roots yields different bytes and must not share a cache name */
     {   char idb[4400]; if (cx_fmt(idb, sizeof idb, "%s%s\troot=%s", P->closure, prod_sha, root)) { cx_fmt(why, cap, "identity=%s", name); return -1; }
@@ -1382,15 +1392,19 @@ static int prep_start(PJob *J, int k) {
         || tp_kit_dir(root, kitdir, sizeof kitdir) || cx_fmt(image, sizeof image, "%s/tlib-prep", kitdir)
         || cx_fmt(srcabs, sizeof srcabs, "%s/%s", root, P->src)
         || cx_fmt(pid_s, sizeof pid_s, "%d", sy_pid())
-        || cx_fmt(J->tmp, sizeof J->tmp, "%s/%s-%s.%s.tmp", cachedir, P->name, P->id, pid_s)) return -1;
+        || (P->kind == PK_MDIR && tx_eqz(P->name, "entry-link")
+            ? cx_fmt(J->tmp, sizeof J->tmp, "%s/%s-%s.work", cachedir, P->name, P->id)
+            : cx_fmt(J->tmp, sizeof J->tmp, "%s/%s-%s.%s.tmp", cachedir, P->name, P->id, pid_s))) return -1;
     {
         static char s_all[16], s_kit[16];
         static const char *script = "[ -x \"$2\" ] && \"$1\" \"$8\" \"$2\" prep \"$3\" -o \"$4\" --root \"$5\" && exit 0; exec \"$1\" \"$7\" sh \"$6\" \"$3\" -o \"$4\"";
         static const char *sscript = "exec \"$1\" \"$7\" sh \"$6\" \"$3\" -- \"$5\" \"$4\" >/dev/null";   /* streams-material.cx ROOT NEW_OUTDIR (absent) */
         static const char *cscript = "exec \"$1\" \"$7\" sh \"$6\" \"$3\" -- \"$5\" \"$4\" \"$6\" >/dev/null";   /* isolated-streams: explicit candidate compiler */
+        static const char *elscript = "exec \"$1\" \"$7\" sh \"$6\" \"$3\" -- \"$5\" \"$4\" --step";   /* entry-link-material.cx ROOT WORKDIR --step */
         static const char *iscript = "exec \"$1\" \"$8\" cc -std=c99 -D_POSIX_C_SOURCE=200809L -O2 -w \"$3\" -o \"$4\"";   /* same flags as chain-step seed-helper */
         long left = (hard_deadline - (sy_now_ms() - t_main)) / 1000 - 2;   /* a build never outlives the run's own kill deadline */
         J->secs = left < PREP_SECS ? (int)left : PREP_SECS;
+        if (P->kind == PK_MDIR && tx_eqz(P->name, "entry-link") && J->secs > 55) J->secs = 55;
         if (J->secs < 6) return -2;
         if (cx_fmt(s_all, sizeof s_all, "%d", J->secs) || cx_fmt(s_kit, sizeof s_kit, "%d", J->secs < 20 ? J->secs : 20)) return -1;
         static const char *pscript = "exec \"$1\" \"$7\" sh \"$6\" \"$3\" -- prepare \"$5\" \"$4\" >/dev/null";   /* pp-gold/object-material prepare ROOT NEW_ABS_MATERIAL */
@@ -1406,7 +1420,7 @@ static int prep_start(PJob *J, int k) {
             for (int i = 0; module_units_inputs[i]; i++) av[n++] = (char *)module_units_inputs[i];
             av[n++] = "-o"; av[n++] = J->tmp;
         } else {
-            av[n++] = "sh"; av[n++] = "-c"; av[n++] = (char *)(tx_eqz(P->name,"isolated-streams")?cscript:P->kind == PK_STREAMS || is_net ? sscript : P->kind == PK_MDIR || P->kind == PK_HOSTC ? pscript : P->kind == PK_IDENT ? iscript : script); av[n++] = "sh"; av[n++] = bound; av[n++] = image; av[n++] = srcabs; av[n++] = J->tmp; av[n++] = root; av[n++] = product; av[n++] = s_all; av[n++] = s_kit;
+            av[n++] = "sh"; av[n++] = "-c"; av[n++] = (char *)(tx_eqz(P->name,"entry-link")?elscript:tx_eqz(P->name,"isolated-streams")?cscript:P->kind == PK_STREAMS || is_net ? sscript : P->kind == PK_MDIR || P->kind == PK_HOSTC ? pscript : P->kind == PK_IDENT ? iscript : script); av[n++] = "sh"; av[n++] = bound; av[n++] = image; av[n++] = srcabs; av[n++] = J->tmp; av[n++] = root; av[n++] = product; av[n++] = s_all; av[n++] = s_kit;
         }
     }
     av[n] = 0;
@@ -1432,6 +1446,7 @@ static void prep_done(PJob *J, int ok) {
         if(assembler&&prep_asm_sha(J->tmp,expected))ok=0;
         if(ok&&P->kind==PK_HOSTC){char from[4600],to[4600];if(cx_fmt(from,sizeof from,"%s.material.tsv",J->tmp)||cx_fmt(to,sizeof to,"%s.material.tsv",P->path)||sy_rename(from,to))ok=0;}
         if(ok)(void)sy_rename(J->tmp, P->path);   /* a concurrent run may have placed the same identity first: verified below */
+        if(ok && P->kind==PK_MDIR && tx_eqz(P->name,"entry-link") && sy_exists(J->tmp)==1)(void)sy_remove_all(J->tmp);
         if (prep_art_sha(P, P->sha)) ok = 0;
         if(assembler&&ok&&strcmp(expected,P->sha)){ok=0;cx_fmt(P->why,sizeof P->why,"assembler-publish-content-mismatch");}
         if (ok && !cx_fmt(rc, sizeof rc, "closure=%s\tproduct=%s\tartifact=%s\n", P->closure, prod_sha, P->sha) && cx_write(P->rcpt, rc, (size_t)tx_len(rc, sizeof rc)) == 0 && (P->kind!=PK_HOSTC || prep_verify(P))) { P->state = PS_READY; return; }
@@ -1594,6 +1609,25 @@ static void prebuild(const int *sel, int nsel) {
             }
             if (job[k].ofd >= 0 || job[k].efd >= 0) continue;
             if (sy_wait_status(job[k].pid, 0, &ex, &code, &sig) < 0) { ex = 1; code = 255; }
+            if (prep[job[k].job].kind == PK_MDIR && tx_eqz(prep[job[k].job].name, "entry-link") && job[k].out.n > 0) {
+                long li = 0, le;
+                for (li = 0; li < job[k].out.n; li = le + 1) {
+                    le = li; while (le < job[k].out.n && job[k].out.p[le] != '\n') le++;
+                    if (tx_prefix(job[k].out.p + li, le - li, "ENTRY_LINK_STEP\t", 16))
+                        prep_print("%.*s\n", (int)(le - li), job[k].out.p + li);
+                }
+            }
+            if (ex && code == 3 && prep[job[k].job].kind == PK_MDIR && tx_eqz(prep[job[k].job].name, "entry-link")) {
+                prep[job[k].job].ms += sy_now_ms() - job[k].t0;
+                if (sy_now_ms() - t_main < PREP_BUDGET_MS && ntodo < PREP_MAX) {
+                    todo[ntodo++] = job[k].job;
+                } else {
+                    prep[job[k].job].state = PS_FAILED;
+                    cx_fmt(prep[job[k].job].why, sizeof prep[0].why, "stepwise-more-steps=%s", prep[job[k].job].name);
+                    deferred++;
+                }
+                job[k] = job[nact - 1]; nact--; k--; continue;
+            }
             if (ex && code == 0) prep_done(&job[k], 1);
             else { cx_fmt(prep[job[k].job].why, sizeof prep[0].why, "build-failed=%s:rc=%d", prep[job[k].job].name, ex ? code : 128 + sig); prep_done(&job[k], 0); }
             if (prep[job[k].job].state == PS_READY) built++; else { failed++; if (job[k].err.n) fprintf(stderr, "%.*s", (int)(job[k].err.n > 2000 ? 2000 : job[k].err.n), job[k].err.p); }

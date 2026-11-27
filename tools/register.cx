@@ -162,11 +162,12 @@ static int rg_root_missing(void) {
 /* Check the generated fourteen-column row before append: expect is rc0:MARKER,
    followed by the headers contract and commit (or platform release) tier. */
 static int rg_row_ok(const char *row, const char *marker) {
-    int fields = 0; size_t ml = tx_len(marker, 512); const char *at = row, *expect = 0, *headers = 0, *tier = 0;
-    for (; *at; at++) if (*at == '\t') { fields++; if(fields==11)expect=at+1;if(fields==12)headers=at+1;if(fields==13)tier=at+1; }
-    if(fields!=13||!expect||!headers||!tier||strncmp(expect,"rc0:",4)||(size_t)(headers-expect)!=ml+5||memcmp(expect+4,marker,ml))return 0;
+    int fields = 0; size_t ml = tx_len(marker, 512); const char *at = row, *mats = 0, *mats_end = 0, *expect = 0, *headers = 0, *tier = 0;
+    for (; *at; at++) if (*at == '\t') { fields++; if(fields==7)mats=at+1;if(fields==8)mats_end=at;if(fields==11)expect=at+1;if(fields==12)headers=at+1;if(fields==13)tier=at+1; }
+    if(fields!=13||!mats||!mats_end||!expect||!headers||!tier||strncmp(expect,"rc0:",4)||(size_t)(headers-expect)!=ml+5||memcmp(expect+4,marker,ml))return 0;
     if(!((tier-headers==8&&!memcmp(headers,"product\t",8))||(tier-headers==5&&!memcmp(headers,"tree\t",5))))return 0;
-    return tx_eqz(tier,"commit\n")||tx_eqz(tier,"release\n");
+    { int has_mat = !(mats_end - mats == 1 && mats[0] == '-');
+      return tx_eqz(tier,"commit\n")||tx_eqz(tier,"release\n")||(has_mat && tx_eqz(tier,"daily\n")); }
 }
 
 static int clean(const char *s) { for (; *s; s++) if (*s == '\t' || *s == '\n' || *s == '\r') return 0; return 1; }
@@ -865,6 +866,99 @@ static void rg_mkdirs(const char *dir){
     for(size_t i=1;i<n;i++)if(tmp[i]=='/'){tmp[i]=0;sy_mkdir(tmp,0700);tmp[i]='/';}
     sy_mkdir(tmp,0700);
 }
+static int rg_batch_materials(const char *tab_path, const char *id, char *out, size_t cap) {
+    size_t n = 0, il = strlen(id), at = 0;
+    char *b = cx_read(tab_path, &n);
+    out[0] = 0;
+    if (!b) return 0;
+    while (at < n) {
+        size_t e = at;
+        while (e < n && b[e] != '\n') e++;
+        if (e - at > il && !memcmp(b + at, id, il) && b[at + il] == '\t') {
+            int col = 0;
+            size_t p = at;
+            while (p < e && col < 7) {
+                if (b[p] == '\t') col++;
+                p++;
+            }
+            if (col == 7) {
+                size_t me = p;
+                while (me < e && b[me] != '\t') me++;
+                if (me > p && me - p < cap && mm_copy(out, (long)cap, b + p, (long)(me - p)) == 0) {
+                    out[me - p] = 0;
+                }
+            }
+            break;
+        }
+        at = e + 1;
+    }
+    free(b);
+    return (out[0] && !tx_eqz(out, "-")) ? 1 : 0;
+}
+
+static int rg_run_affected_materials(const char *run_dir, const char *id,
+                                     const char *envcache, const char *envprep,
+                                     int use_dev, const char *devdir,
+                                     char *buf, size_t cap,
+                                     int *steps_out, char *no_prod_out, size_t npcap) {
+    char want_pass[256], want_def[256];
+    long t0 = sy_now_ms();
+    int round, total_steps = 0;
+    if (steps_out) *steps_out = 0;
+    if (no_prod_out && npcap) no_prod_out[0] = 0;
+    if (cx_fmt(want_pass, sizeof want_pass, "BATCH_RUN\tid=%s\tstatus=PASS\t", id) ||
+        cx_fmt(want_def, sizeof want_def, "DEFERRED\t%s\t", id)) return 1;
+    for (round = 0; round < 6; round++) {
+        char *av[32]; char bound_s[16]; int n = 0; int rc;
+        long elapsed = sy_now_ms() - t0;
+        long rem_s = (280000L - elapsed) / 1000L;
+        if (rem_s < 10L) break;
+        if (rem_s > 58L) rem_s = 58L;
+        if (cx_fmt(bound_s, sizeof bound_s, "%ld", rem_s)) return 1;
+        av[n++] = "./tools/bound"; av[n++] = bound_s; av[n++] = "env"; av[n++] = "-C"; av[n++] = (char *)run_dir;
+        av[n++] = "-u"; av[n++] = "GIT_DIR"; av[n++] = "-u"; av[n++] = "GIT_WORK_TREE"; av[n++] = "-u"; av[n++] = "GIT_INDEX_FILE";
+        av[n++] = "-u"; av[n++] = "CLAUDE_JOB_DIR"; av[n++] = "-u"; av[n++] = "UNISACC_TABLES";
+        if (envcache && envcache[0]) av[n++] = (char *)envcache;
+        if (envprep && envprep[0]) av[n++] = (char *)envprep;
+        av[n++] = "UNISACC_BATCH_TIMES=off";
+        av[n++] = "sh"; av[n++] = "./unisacc.com"; av[n++] = "tools/affected.cx"; av[n++] = "--"; /* lint:allow R1-product runs affected.cx in private layout */
+        av[n++] = "--ids"; av[n++] = (char *)id; av[n++] = "--prepare-materials"; av[n++] = "--run"; av[n++] = "-j"; av[n++] = "1";
+        if (use_dev) { av[n++] = "--candidate"; av[n++] = (char *)devdir; }
+        av[n] = 0;
+        rc = run(av, buf, cap);
+        {
+            const char *p = buf;
+            while ((p = strstr(p, "ENTRY_LINK_STEP\t")) != 0) { total_steps++; p += 16; }
+        }
+        {
+            const char *np = strstr(buf, "no-producer=");
+            if (np) {
+                np += 12;
+                size_t k = 0;
+                while (np[k] && np[k] != '\n' && np[k] != '\r' && np[k] != '\t' && np[k] != ' ' && k + 1 < npcap) {
+                    no_prod_out[k] = np[k]; k++;
+                }
+                if (npcap) no_prod_out[k] = 0;
+                if (steps_out) *steps_out = total_steps;
+                return 2;
+            }
+        }
+        if (rc == 0 && strstr(buf, want_pass)) {
+            if (steps_out) *steps_out = total_steps;
+            return 0;
+        }
+        if (strstr(buf, want_def) &&
+            (strstr(buf, "prepare-failed=stepwise-more-steps=") || strstr(buf, "prepare-failed=prebuild-budget="))) {
+            continue;
+        }
+        if (round == 0 && rc == 142 && strstr(buf, "PREPARED\ttlib-kit")) continue;
+        if (steps_out) *steps_out = total_steps;
+        return rc ? rc : 1;
+    }
+    if (steps_out) *steps_out = total_steps;
+    return 124;
+}
+
 /* NEW-BATCH-QUALIFY-LAYOUT-SELFTEST-GATE: run a newly registered batch inside a single-commit
    shallow tree (no git history, no CLAUDE_JOB_DIR, cold run/unit/prep caches) before accepting
    registration. Any failure rolls back the appended rows and emits a named REFUSE reason. */
@@ -942,6 +1036,37 @@ static int rg_qualify_layout_selftest(const char *root,const char *id,const char
        cx_fmt(envtmp,sizeof envtmp,"TMPDIR=%s",privtmp)||cx_fmt(envcache,sizeof envcache,"UNISACC_CACHE_DIR=%s",coldcache)||
        cx_fmt(envprep,sizeof envprep,"UNISACC_PREP_CACHE=%s",coldprep)||cx_fmt(want,sizeof want,"BATCH_RUN\tid=%s\tstatus=PASS\t",id)){
         sy_unlink(gitlink);rg_clean_layout(stage);return 2;
+    }
+    {
+        char lay_b[4600], mats[512];
+        if (cx_fmt(lay_b, sizeof lay_b, "%s/tests/batches.tsv", lay) == 0 &&
+            rg_batch_materials(lay_b, id, mats, sizeof mats)) {
+            char no_prod[128], mat_name[128];
+            int steps = 0;
+            size_t mn = 0;
+            while (mats[mn] && mats[mn] != ':' && mats[mn] != ';' && mats[mn] != ',' && mn + 1 < sizeof mat_name) {
+                mat_name[mn] = mats[mn]; mn++;
+            }
+            mat_name[mn] = 0;
+            long start = sy_now_ms();
+            int rc = rg_run_affected_materials(lay, id, 0, envprep, use_dev, devdir, buf, sizeof buf, &steps, no_prod, sizeof no_prod);
+            long elapsed = sy_now_ms() - start;
+            sy_unlink(gitlink);
+            rg_clean_layout(stage);
+            if (rc == 0) {
+                printf("REGISTER_LAYOUT_MATERIAL\tname=%s\tstate=PREPARED\tsteps=%d\n", mat_name[0] ? mat_name : mats, steps > 0 ? steps : 1);
+                printf("REGISTER_LAYOUT_SELFTEST\tid=%s\tstatus=PASS\tms=%ld\n", id, elapsed);
+                return 0;
+            }
+            if (no_prod[0]) {
+                printf("REGISTER_LAYOUT_SELFTEST\tid=%s\tstatus=REFUSE\treason=material-no-producer=%s\trc=%d\tms=%ld\n", id, no_prod, rc, elapsed);
+            } else {
+                const char *why = rc == 124 ? "timeout-280s-material" : (strstr(buf, "build-failed=") ? "material-build-failed" : "layout-selftest-failed");
+                printf("REGISTER_LAYOUT_SELFTEST\tid=%s\tstatus=REFUSE\treason=%s\trc=%d\tms=%ld\n", id, why, rc, elapsed);
+            }
+            fputs(buf, stderr);
+            return 1;
+        }
     }
     char *trial[32]; int n=0;
     trial[n++]="./tools/bound"; trial[n++]="55"; trial[n++]="env"; trial[n++]="-C"; trial[n++]=lay;
@@ -1475,6 +1600,7 @@ int main(int argc, char **argv) {
     static char brow[8192], crow[8192], cid[512], root[4096], parent[4400], buf[1 << 16];
     const char *id, *check, *marker, *text, *files, *layer, *headers;
     const char *arguments="-";
+    const char *materials="-";
     static char normargs[8192];
     int norun = 0, planned = 0, force_layout = 0;
     const char *promote_id = 0;
@@ -1482,6 +1608,7 @@ int main(int argc, char **argv) {
     {   int w = 1, r;   /* --no-run / --planned may stand anywhere: strip them and keep the rest in order */
         for (r = 1; r < argc; r++) {
             if(tx_eqz(argv[r],"--args") && r+1<argc){argv[w++]=argv[r];argv[w++]=argv[++r];}
+            else if(tx_eqz(argv[r],"--materials") && r+1<argc){materials=argv[++r];if(!*materials||!clean(materials))rg_die("empty or bad --materials",0);}
             else if(tx_eqz(argv[r],"--runner")){
                 if(use_dev || r+1==argc || argv[r+1][0]!='/')rg_die("--runner requires an absolute dev-product directory",0);
                 sy_stat_t st;
@@ -1535,7 +1662,7 @@ int main(int argc, char **argv) {
     char expcol[128];
     if (planned) cx_fmt(expcol, sizeof expcol, "NOT_READY");
     else if (cx_fmt(expcol, sizeof expcol, "rc0:%s", marker)) rg_die("marker too long", id);
-    if (tx_snprintf(brow, sizeof brow, "%s\t%s\t%s\t%s\tSOURCE\tlnx/x86_64\t55\t-\t%s\t%s\t%s\t%s\t%s\t%s\n", id, planned ? "PLANNED" : "IMPLEMENTED", layer, check, check, arguments, cid, expcol, headers, planned ? "release" : (tx_eqz(layer,"platform")?"release":"commit")) >= (int)sizeof brow
+    if (tx_snprintf(brow, sizeof brow, "%s\t%s\t%s\t%s\tSOURCE\tlnx/x86_64\t55\t%s\t%s\t%s\t%s\t%s\t%s\t%s\n", id, planned ? "PLANNED" : "IMPLEMENTED", layer, check, materials, check, arguments, cid, expcol, headers, planned ? "release" : (tx_eqz(layer,"platform")?"release":(!tx_eqz(materials,"-")?"daily":"commit"))) >= (int)sizeof brow
         || tx_snprintf(crow, sizeof crow, "%s\t%s\t%s\t%s\t%s\n", cid, layer, planned ? "PLANNED" : "IMPLEMENTED_SEPARATE_BATCH", text, files) >= (int)sizeof crow) rg_die("row too long", id);
     if (!planned && !rg_row_ok(brow, marker)) rg_die("row would fail the tp_expect check", id);
     {   /* a require placeholder ({candidate}, {hostcc}, ...) needs an id row in batch-product-inputs.tsv first,
@@ -1575,7 +1702,32 @@ int main(int argc, char **argv) {
         char tmpc[4096];
         if (sy_realpath(".", root, sizeof root) < 0 || sy_realpath(sy_tmpdir(), tmpc, sizeof tmpc) < 0 || tx_snprintf(parent, sizeof parent, "%s/unisacc-affected-register-%s-%d", tmpc, id, sy_pid()) >= (int)sizeof parent
             || sy_mkdir(parent, 0700) != 0) { okrun = 0; fprintf(stderr, "register: cannot create the trial run directory register-%s-%d under %s (is the temp directory writable?)\n", id, sy_pid(), sy_tmpdir()); parent[0] = 0; }
-        else {
+        else if (!tx_eqz(materials, "-")) {
+            if (getenv("UNISACC_TABLES") && *getenv("UNISACC_TABLES")) {
+                okrun = (rg_qualify_layout_selftest(root, id, check, files, batchbin, use_dev, devdir, 0) == 0);
+            } else {
+                char tprep[4400], envp[4500], no_prod[128];
+                int steps = 0;
+                if (cx_fmt(tprep, sizeof tprep, "%s/cold-prep", parent) || sy_mkdir(tprep, 0700) ||
+                    cx_fmt(envp, sizeof envp, "UNISACC_PREP_CACHE=%s", tprep)) {
+                    okrun = 0;
+                } else {
+                    rc = rg_run_affected_materials(root, id, 0, envp, use_dev, devdir, buf, sizeof buf, &steps, no_prod, sizeof no_prod);
+                    (void)rg_clean_layout(tprep);
+                    at = tx_find(buf, tx_len(buf, sizeof buf), "BATCH_RUN\t", 10);
+                    if (at >= 0) { long e = tx_chr(buf + at, tx_len(buf + at, sizeof buf), '\n'); printf("%.*s\n", (int)(e < 0 ? tx_len(buf + at, sizeof buf) : e), buf + at); }
+                    if (no_prod[0]) {
+                        printf("REGISTER_TRIAL\tid=%s\tstatus=REFUSE\treason=material-no-producer=%s\n", id, no_prod);
+                        okrun = 0;
+                    } else {
+                        okrun = rc == 0 && at >= 0 && tx_find(buf + at, tx_len(buf + at, sizeof buf), "status=PASS", 11) >= 0;
+                    }
+                    if (!okrun) fputs(buf, stderr);
+                    if (okrun) bpok = !rn_prepare(root, "tools/batch-packages-gen.cx", cache, bpbin, sizeof bpbin, &reused, why, sizeof why);
+                    if (okrun && rg_qualify_layout_selftest(root, id, check, files, batchbin, use_dev, devdir, 0) != 0) okrun = 0;
+                }
+            }
+        } else {
             char *v[9]={"./tools/bound","58",batchbin};int argc_run=3;
             if(use_dev){v[argc_run++]="--candidate";v[argc_run++]=devdir;}
             v[argc_run++]=root;v[argc_run++]=parent;v[argc_run++]=(char*)id;v[argc_run]=0;

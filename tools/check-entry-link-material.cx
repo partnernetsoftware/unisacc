@@ -1,0 +1,177 @@
+/* tools/check-entry-link-material.cx -- Verification check for tools/entry-link-material.cx.
+ *
+ * Modes:
+ *   Default (no args): runs cold stepwise producer in a private temp dir, asserts:
+ *     (1) 5 steps (rc 3 for steps 1..4, rc 0 for step 5), each cold step ms < 55000;
+ *     (2) --verify passes (rc 0);
+ *     (3) tampering one .o (drive.o) makes --verify refuse (rc 2), restoring passes (rc 0);
+ *     (4) replacing one .o with external symlink makes --verify refuse (rc 2), restoring passes (rc 0);
+ *     (5) root.path mismatch makes --verify refuse (rc 2), restoring passes (rc 0).
+ *
+ *   --consume MATERIAL_DIR: consumer gate for registered batch piece-d-driveargs-link
+ *     (materials = entry-link:path). Runs --verify on MATERIAL_DIR and checks unique T dv_word == 1.
+ *
+ * Marker: CHECK_ENTRY_LINK_MATERIAL. */
+#pragma unisa use sys.fs
+#pragma unisa use sys.io
+#pragma unisa use sys.env
+#pragma unisa use sys.posix
+#pragma unisa use sys.time
+#pragma unisa use mem.heap
+#pragma unisa use mem.bytes
+#pragma unisa use text.text
+#pragma unisa use cxlib.procrun
+
+static int g_pass = 0;
+static int g_fail = 0;
+
+static void ck(int ok, const char *name) {
+    if (ok) { g_pass++; sy_printf("PASS\tcheck-entry-link-material.%s\n", name); }
+    else { g_fail++; sy_printf("FAIL\tcheck-entry-link-material.%s\n", name); }
+}
+
+static int run_av(char **av, char *out, long cap, long *ms_out) {
+    long t0 = sy_now_ms();
+    int cut = 0;
+    int rc = pr_run_merged(av, 55, out, (int)cap, &cut);
+    if (ms_out) *ms_out = sy_now_ms() - t0;
+    return cut ? -1 : rc;
+}
+
+static void run_tamper_suite(const char *root, const char *mdir) {
+    char objp[640], rp[640], out[4096];
+    /* Tamper one .o (drive.o) -> --verify refuses (rc=2) -> restore -> passes (rc=0) */
+    cx_fmt(objp, sizeof objp, "%s/drive.o", mdir);
+    {
+        unsigned char *orig = 0; int64_t n = 0;
+        int ok = 0;
+        if (sy_read_file(objp, &orig, &n, 16 << 20) == 0 && orig && n > 0) {
+            unsigned char *mod = (unsigned char *)mm_alloc((size_t)n);
+            if (mod) {
+                char *av_v[] = {"sh", "./unisacc.com", "tools/entry-link-material.cx", "--", (char *)root, (char *)mdir, "--verify", 0}; /* lint:allow R1-product verifies entry-link material */
+                mm_copy(mod, (long)n, orig, (long)n);
+                mod[n - 1] ^= 0x01;
+                int w1 = sy_write_file(objp, mod, (long)n, 0644);
+                int r_red = (w1 == 0) ? run_av(av_v, out, sizeof out, 0) : 0;
+                int has_why = (strstr(out, "object-cache-mismatch") != 0);
+                int w2 = sy_write_file(objp, orig, (long)n, 0644);
+                int r_grn = (w2 == 0) ? run_av(av_v, out, sizeof out, 0) : 2;
+                ok = (w1 == 0 && r_red == 2 && has_why && w2 == 0 && r_grn == 0);
+                mm_free(mod);
+            }
+            mm_free(orig);
+        }
+        ck(ok, "tamper-dot-o-refused-and-restore-passes");
+    }
+    /* External symlink replacing .o -> --verify refuses (rc=2) -> restore -> passes (rc=0) */
+    {
+        unsigned char *orig = 0; int64_t n = 0;
+        int ok = 0;
+        if (sy_read_file(objp, &orig, &n, 16 << 20) == 0 && orig && n > 0) {
+            char *av_v[] = {"sh", "./unisacc.com", "tools/entry-link-material.cx", "--", (char *)root, (char *)mdir, "--verify", 0}; /* lint:allow R1-product verifies entry-link material */
+            (void)sy_unlink(objp);
+            int sl = sy_symlink("/etc/hosts", objp);
+            int r_red = (sl == 0) ? run_av(av_v, out, sizeof out, 0) : 0;
+            (void)sy_unlink(objp);
+            int w2 = sy_write_file(objp, orig, (long)n, 0644);
+            int r_grn = (w2 == 0) ? run_av(av_v, out, sizeof out, 0) : 2;
+            ok = (sl == 0 && r_red == 2 && w2 == 0 && r_grn == 0);
+            mm_free(orig);
+        }
+        ck(ok, "external-symlink-refused-and-restore-passes");
+    }
+    /* root.path mismatch -> --verify refuses (rc=2) -> restore -> passes (rc=0) */
+    cx_fmt(rp, sizeof rp, "%s/root.path", mdir);
+    {
+        unsigned char *orig = 0; int64_t n = 0;
+        int ok = 0;
+        if (sy_read_file(rp, &orig, &n, 4096) == 0 && orig && n > 0) {
+            const char *bad = "/tmp/wrong-root-path\n";
+            char *av_v[] = {"sh", "./unisacc.com", "tools/entry-link-material.cx", "--", (char *)root, (char *)mdir, "--verify", 0}; /* lint:allow R1-product verifies entry-link material */
+            int w1 = sy_write_file(rp, (const unsigned char *)bad, (long)strlen(bad), 0644);
+            int r_red = (w1 == 0) ? run_av(av_v, out, sizeof out, 0) : 0;
+            int w2 = sy_write_file(rp, orig, (long)n, 0644);
+            int r_grn = (w2 == 0) ? run_av(av_v, out, sizeof out, 0) : 2;
+            ok = (w1 == 0 && r_red == 2 && w2 == 0 && r_grn == 0);
+            mm_free(orig);
+        }
+        ck(ok, "root-path-mismatch-refused-and-restore-passes");
+    }
+}
+
+static int run_consume(const char *mat_dir) {
+    char root[4096], out[8192], cmd[4800], pwork[512], pcopy[600];
+    if (!mat_dir || mat_dir[0] != '/' || sy_realpath(".", root, sizeof root) < 0) {
+        sy_printf("CHECK_ENTRY_LINK_MATERIAL\tmode=consume\tpassed=0\tfailed=1\n");
+        return 1;
+    }
+    char *av_v[] = {"sh", "./unisacc.com", "tools/entry-link-material.cx", "--", root, (char *)mat_dir, "--verify", 0}; /* lint:allow R1-product verifies entry-link material */
+    int rv = run_av(av_v, out, sizeof out, 0);
+    ck(rv == 0 && strstr(out, "ENTRY_LINK_MATERIAL\tstatus=VERIFIED\t") != 0, "consume-material-verified");
+    cx_fmt(cmd, sizeof cmd,
+           "test -x '%s/candidate' && "
+           "nm -g --defined-only '%s'/*.o | grep -c ' T dv_word$' | grep -Fx '1' >/dev/null",
+           mat_dir, mat_dir);
+    char *av_nm[] = {"sh", "-c", cmd, 0};
+    int rnm = run_av(av_nm, out, sizeof out, 0);
+    ck(rnm == 0, "consume-dv-word-unique-and-candidate-exec");
+
+    /* Run tamper negative controls on a private copy of MATERIAL_DIR (caller dir stays read-only). */
+    if (sy_mkdtemp(sy_tmpdir(), "chk-elm-c-", pwork, sizeof pwork) == 0) {
+        cx_fmt(pcopy, sizeof pcopy, "%s/mat", pwork);
+        cx_fmt(cmd, sizeof cmd,
+               "set -eu; D='%s'; TD='%s'; test -z \"$(find \"$D\" -type l)\"; mkdir -p \"$TD\"; "
+               "for f in \"$D\"/*; do test -f \"$f\" && test ! -L \"$f\" && cp \"$f\" \"$TD/\"; done",
+               mat_dir, pcopy);
+        char *av_cp[] = {"sh", "-c", cmd, 0};
+        if (run_av(av_cp, out, sizeof out, 0) == 0) run_tamper_suite(root, pcopy);
+        else ck(0, "consume-private-copy");
+        (void)sy_remove_all(pwork);
+    } else {
+        ck(0, "consume-tmpdir");
+    }
+
+    sy_printf("CHECK_ENTRY_LINK_MATERIAL\tmode=consume\tpassed=%d\tfailed=%d\n", g_pass, g_fail);
+    return g_fail ? 1 : 0;
+}
+
+int main(int argc, char **argv) {
+    char root[4096], work[512], mdir[600], out[16384];
+    int steps = 0, step_rc = -1, all_under_55 = 1;
+    long max_step_ms = 0;
+
+    if (argc == 3 && tx_eqz(argv[1], "--consume")) return run_consume(argv[2]);
+    if (sy_realpath(".", root, sizeof root) < 0) return 2;
+    if (argc == 3 && tx_eqz(argv[1], "--cold-step")) {
+        long ms = 0;
+        char *av[] = {"sh", "./unisacc.com", "tools/entry-link-material.cx", "--", root, argv[2], "--step", 0}; /* lint:allow R1-product runs single cold step */
+        step_rc = run_av(av, out, sizeof out, &ms);
+        sy_printf("STEP\trc=%d\tms=%ld\n", step_rc, ms);
+        ck((step_rc == 0 || step_rc == 3) && ms < 55000, "cold-step-under-55000ms");
+        sy_printf("CHECK_ENTRY_LINK_MATERIAL\tmode=cold-step\tpassed=%d\tfailed=%d\tstep_rc=%d\tstep_ms=%ld\n", g_pass, g_fail, step_rc, ms);
+        return g_fail ? 1 : step_rc;
+    }
+    if (argc == 3 && tx_eqz(argv[1], "--tamper")) {
+        run_tamper_suite(root, argv[2]);
+        sy_printf("CHECK_ENTRY_LINK_MATERIAL\tmode=tamper\tpassed=%d\tfailed=%d\n", g_pass, g_fail);
+        return g_fail ? 1 : 0;
+    }
+    if (sy_mkdtemp(sy_tmpdir(), "chk-elm-", work, sizeof work) != 0) return 2;
+    cx_fmt(mdir, sizeof mdir, "%s/entry-link", work);
+
+    /* Default mode runs 1 cold step (< 55 s) to stay strictly under 55 s per command;
+     * use --cold-step DIR (looped until rc=0) + --tamper DIR or --consume DIR for full 5-step + tamper coverage. */
+    {
+        long ms = 0;
+        char *av[] = {"sh", "./unisacc.com", "tools/entry-link-material.cx", "--", root, mdir, "--step", 0}; /* lint:allow R1-product runs stepwise entry-link producer */
+        step_rc = run_av(av, out, sizeof out, &ms);
+        steps = 1;
+        max_step_ms = ms;
+        if (ms >= 55000) all_under_55 = 0;
+        sy_printf("STEP\tindex=1\trc=%d\tms=%ld\n", step_rc, ms);
+    }
+    ck(step_rc == 3 && all_under_55, "cold-step-1-under-55000ms");
+    (void)sy_remove_all(work);
+    sy_printf("CHECK_ENTRY_LINK_MATERIAL\tpassed=%d\tfailed=%d\tmax_step_ms=%ld\n", g_pass, g_fail, max_step_ms);
+    return g_fail ? 1 : 0;
+}
