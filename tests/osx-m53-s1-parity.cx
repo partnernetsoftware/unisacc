@@ -160,9 +160,9 @@ static int file_sha256_hex(const char *path, char out[65], int64_t max_bytes) {
         if (b) mm_free(b);
         return 1;
     }
-    sy_sha256_hex(b, n, out);
+    int hrc = sy_sha256_hex(b, n, out);
     mm_free(b);
-    return out[0] ? 0 : 1;
+    return (hrc == 0 && out[0]) ? 0 : 1;
 }
 
 /* Deterministic 12-vector suite shared by produce (execution) and judge (inputs_sha binding). */
@@ -207,10 +207,10 @@ static int compute_vectors_sha(char out[65]) {
             pos += ls[k];
         }
     }
-    sy_sha256_hex(buf, (int64_t)pos, out);
+    int hrc = sy_sha256_hex(buf, (int64_t)pos, out);
     mm_free(buf);
     mm_free(v_1000);
-    return out[0] ? 0 : 1;
+    return (hrc == 0 && out[0]) ? 0 : 1;
 }
 
 /* Composite inputs_sha covering job.tsv + native baseline + exact slice bytes + vectors. */
@@ -222,13 +222,12 @@ static int compute_inputs_bundle_sha_mem(const unsigned char *sl, int64_t slen,
     if (!sl || slen <= 0) return 1;
     if (file_sha256_hex(JOB, job_sha, 1 << 20) != 0) return 1;
     if (file_sha256_hex(BASELINE, base_sha, 4 << 20) != 0) return 1;
-    sy_sha256_hex(sl, slen, slice_sha);
-    if (!slice_sha[0]) return 1;
+    if (sy_sha256_hex(sl, slen, slice_sha) != 0 || !slice_sha[0]) return 1;
     if (compute_vectors_sha(vec_sha) != 0) return 1;
     if (cx_fmt(manifest, sizeof manifest,
                "job\t%s\nbaseline\t%s\nslice\t%s\nvectors\t%s\n",
                job_sha, base_sha, slice_sha, vec_sha) != 0) return 1;
-    sy_sha256_hex((const unsigned char *)manifest, (int64_t)strlen(manifest), bundle_sha);
+    if (sy_sha256_hex((const unsigned char *)manifest, (int64_t)strlen(manifest), bundle_sha) != 0) return 1;
     return bundle_sha[0] ? 0 : 1;
 }
 
@@ -503,7 +502,11 @@ int main(int argc, char **argv) {
             sy_eprintf("FAIL\twrite-output\n");
             return 1;
         }
-        sy_sha256_hex((const unsigned char *)out_buf, (int64_t)out_pos, out_sha);
+        if (sy_sha256_hex((const unsigned char *)out_buf, (int64_t)out_pos, out_sha) != 0 || !out_sha[0]) {
+            mm_free(out_buf);
+            sy_eprintf("FAIL\thash-output\n");
+            return 1;
+        }
         mm_free(out_buf);
 
         if (loc_p) {
