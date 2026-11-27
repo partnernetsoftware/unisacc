@@ -529,7 +529,7 @@ static int j_derive(const char *o, long n, int rc, char *ev, int cap) {
     return j_derive_shard(o, n, rc, 0, ev, cap);
 }
 static int is_solo_job(const char *item) {
-    return tx_eqz(item, "derive:batch-packages-gen");
+    return tx_eqz(item, "derive:batch-packages-gen") || tx_eqz(item, "derive:product-map");
 }
 static int parse_ratchet_below(const char *o, long n, const char *tag) {
     char l[240]; const char *p;
@@ -1686,18 +1686,20 @@ static int cr_want_gid(const char *only, int gid) {
     return cr_want_item(only, cr_gname(gid));
 }
 
-#define CR_STAGE_COUNT 9
+#define CR_STAGE_COUNT 11
 typedef struct { const char *name; int first_gid, last_gid; } CrStageSpec;
 static const CrStageSpec cr_stage_specs[CR_STAGE_COUNT] = {
-    {"derive-a",      CR_G_1_REV,              CR_G_2A_DERIVE4},
-    {"derive-b",      CR_G_2A_DERIVE5,         CR_G_2A_DERIVE7},
+    {"derive-a",      CR_G_1_REV,              CR_G_2A_DERIVE},
+    {"derive-b",      CR_G_2A_DERIVE2,         CR_G_2A_DERIVE4},
+    {"derive-c",      CR_G_2A_DERIVE5,         CR_G_2A_DERIVE7},
     {"ratchets",      CR_G_2B_RATCHETS,        CR_G_2B_RATCHETS},
     {"tri-chain-a",   CR_G_3A_CXMOD_TRI,       CR_G_3A_CXMOD_TRI_EXPORTS},
     {"tri-chain-b",   CR_G_3B_CX0_EXTRACT,     CR_G_4_P1},
     {"tri-chain-c",   CR_G_5_CANDIDATE_CHAIN,  CR_G_5_CANDIDATE_CHAIN5},
     {"env-root",      CR_G_6_AFFECTED,         CR_G_14_ROOT_RECORD},
     {"gen-preflight", CR_G_15_GEN_ALL,         CR_G_21_VERSEQ_GEN},
-    {"union-shards",  CR_G_22_PREMERGE_UNION,  CR_G_25_TOOLS_COMPILE_SHARDS}
+    {"union-a",       CR_G_22_PREMERGE_UNION,  CR_G_22_PREMERGE_UNION5},
+    {"union-b",       CR_G_23_FREEZE_ARMED,    CR_G_25_TOOLS_COMPILE_SHARDS}
 };
 
 static int cr_only_has_exact(const char *csv, const char *gate) {
@@ -3097,29 +3099,34 @@ static int resolve_premerge_branch(const char *repo, const char *explicit_tver, 
     return 0;
 }
 
+/* Resolve checked-out HEAD of REPO to 40 lowercase hex chars; if REVARG is given, resolve REVARG^{commit}
+ * and refuse (-2) unless it equals HEAD (a check of the current checkout cannot be stamped with a foreign rev). */
 static int cr_resolve_stage_rev40(const char *repo, const char *revarg, char out40[48]) {
-    char spec[160], buf[128];
+    char spec[160], head_buf[128], req_buf[128];
+    char *hv[] = {"git", "rev-parse", "--verify", "HEAD^{commit}", 0};
     out40[0] = 0;
-    if (revarg && revarg[0]) {
-        long rl = (long)tx_len(revarg, 128);
-        if (fa_is_hex40(revarg, rl)) {
-            for (long i = 0; i < 40; i++) {
-                char c = revarg[i];
-                out40[i] = (c >= 'A' && c <= 'Z') ? (char)(c + 32) : c;
-            }
-            out40[40] = 0;
-            return 0;
-        }
-    }
-    if (cx_fmt(spec, sizeof spec, "%s^{commit}", (revarg && revarg[0]) ? revarg : "HEAD")) return -1;
-    char *gv[] = {"git", "rev-parse", "--verify", spec, 0};
-    if (fa_git(repo, gv, buf, sizeof buf) != 0) return -1;
-    if (!fa_is_hex40(buf, (long)tx_len(buf, sizeof buf))) return -1;
+    if (fa_git(repo, hv, head_buf, sizeof head_buf) != 0) return -1;
+    if (!fa_is_hex40(head_buf, (long)tx_len(head_buf, sizeof head_buf))) return -1;
     for (int i = 0; i < 40; i++) {
-        char c = buf[i];
+        char c = head_buf[i];
         out40[i] = (c >= 'A' && c <= 'Z') ? (char)(c + 32) : c;
     }
     out40[40] = 0;
+    if (revarg && revarg[0]) {
+        if (cx_fmt(spec, sizeof spec, "%s^{commit}", revarg)) return -1;
+        char *gv[] = {"git", "rev-parse", "--verify", spec, 0};
+        if (fa_git(repo, gv, req_buf, sizeof req_buf) != 0) {
+            if (fa_is_hex40(revarg, (long)tx_len(revarg, 128))) return -2;
+            return -1;
+        }
+        if (!fa_is_hex40(req_buf, (long)tx_len(req_buf, sizeof req_buf))) return -1;
+        for (int i = 0; i < 40; i++) {
+            char c = req_buf[i];
+            req_buf[i] = (c >= 'A' && c <= 'Z') ? (char)(c + 32) : c;
+        }
+        req_buf[40] = 0;
+        if (!tx_eqz(req_buf, out40)) return -2;
+    }
     return 0;
 }
 
@@ -3282,9 +3289,16 @@ int main(int argc, char **argv) {
                 printf("REFUSE\tCHAIN_READY_STAGE\treason=unknown-stage\tstage=%s\n", stage_arg);
                 return 2;
             }
-            if (receipt_dir_arg && cr_resolve_stage_rev40(repo, revarg, stage_rev40) != 0) {
-                printf("REFUSE\tCHAIN_READY_STAGE\treason=bad-rev\trev=%s\n", revarg ? revarg : "HEAD");
-                return 2;
+            if (receipt_dir_arg || (revarg && revarg[0])) {
+                int rrc = cr_resolve_stage_rev40(repo, revarg, stage_rev40);
+                if (rrc == -2) {
+                    printf("REFUSE\tCHAIN_READY_STAGE\treason=rev-not-head\trev=%s\thead=%s\n", revarg ? revarg : "", stage_rev40);
+                    return 2;
+                }
+                if (rrc != 0) {
+                    printf("REFUSE\tCHAIN_READY_STAGE\treason=bad-rev\trev=%s\n", revarg ? revarg : "HEAD");
+                    return 2;
+                }
             }
             cr_stage_ensure_env();
             only = only_joined;
@@ -3418,8 +3432,8 @@ int main(int argc, char **argv) {
         row_g(CR_G_3A_CXMOD_TRI_EXPORTS, "FAIL", "no private material directory", 0);
     g_tri[2] = g_tri_exports[2] = tri_image; g_tri[4] = tri_extract;
     int ch_wanted = 0;
-    int explicit_der_sub = 0;
-    if (only != 0) {
+    int explicit_der_sub = (stage_arg != 0);
+    if (!explicit_der_sub && only != 0) {
         for (int dg = CR_G_2A_DERIVE2; dg <= CR_G_2A_DERIVE7; dg++) {
             if (cr_only_has_exact(only, cr_gname(dg))) { explicit_der_sub = 1; break; }
         }
@@ -4007,7 +4021,13 @@ int main(int argc, char **argv) {
     {
         long total_ms = sy_now_ms() - T0;
         if (stage_arg && receipt_dir_arg) {
+            char post_rev40[48];
             const char *verdict = nfail ? "FAIL" : "READY";
+            if (cr_resolve_stage_rev40(repo, revarg, post_rev40) != 0 || !tx_eqz(post_rev40, stage_rev40)) {
+                printf("REFUSE\tCHAIN_READY_STAGE\treason=head-moved-during-stage\tstage=%s\n", stage_arg);
+                if (have_tmp && sy_remove_all(tmpd)) fprintf(stderr, "chain-ready: scratch cleanup failed %s\n", tmpd);
+                return 2;
+            }
             if (cr_write_stage_receipt(receipt_dir_arg, stage_arg, stage_rev40, run_id_arg, roster_sha, verdict, total_ms, nfail ? 1 : 0) != 0) {
                 printf("REFUSE\tCHAIN_READY_STAGE\treason=receipt-write-failed\tstage=%s\n", stage_arg);
                 if (have_tmp && sy_remove_all(tmpd)) fprintf(stderr, "chain-ready: scratch cleanup failed %s\n", tmpd);

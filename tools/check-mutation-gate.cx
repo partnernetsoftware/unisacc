@@ -42,17 +42,6 @@ static int ok, failed;
 static void ck(int c, const char *n) { if (c) ok++; else { failed++; printf("FAIL %s\n", n); } }
 
 static char T[512];
-static char G_MG[640];
-static const char *mg_entry(void) { return G_MG[0] ? G_MG : "sh ./unisacc.com tools/mutation-gate.cx --"; }
-static int mg_ensure_built(const char *dir) {
-    char cmd[1024], out[1024];
-    if (G_MG[0]) return 0;
-    if (cx_fmt(G_MG, sizeof G_MG, "%s/mg", dir)) return 1;
-    cx_fmt(cmd, sizeof cmd, "sh ./unisacc.com tools/mutation-gate.cx -o '%s' 2>&1", G_MG);
-    if (ckk_sh_t("check-mutation-gate", cmd, out, sizeof out, 55) != 0) { G_MG[0] = 0; return 1; }
-    setenv("MG_BIN", G_MG, 1);
-    return 0;
-}
 
 static void quality_file(const char *relative, const char *body) {
     char path[1024];
@@ -130,16 +119,16 @@ static int quality_fixture(const char *native) {
 
 static int gate(const char *name, const char *check, const char *extra, char *out, int cap) {
     char sc[4096];
-    cx_fmt(sc, sizeof sc, "%s run --repo %s/repo --base base --patch %s/fx.patch "
-           "--check '%s' --out %s/%s --par 4 --max 12 --deadline-s 45 %s 2>&1", mg_entry(), T, T, check, T, name, extra);
+    cx_fmt(sc, sizeof sc, "sh ./unisacc.com tools/mutation-gate.cx -- run --repo %s/repo --base base --patch %s/fx.patch "
+           "--check '%s' --out %s/%s --par 4 --max 12 --deadline-s 45 %s 2>&1", T, T, check, T, name, extra);
     return ckk_sh_t("check-mutation-gate", sc, out, cap, 55);
 }
 
 static int execution_case(const char *produce, const char *judge, char *out, int cap) {
     char p[1024], j[1024], cmd[2500];
     if (ckk_shq(p, sizeof p, produce) || ckk_shq(j, sizeof j, judge) ||
-        cx_fmt(cmd, sizeof cmd, "%s execution "
-               "--produce %s --judge %s --assertion fresh --expect-missing missing --expect-stale stale --timeout-s 3 2>&1", mg_entry(), p, j)) return 2;
+        cx_fmt(cmd, sizeof cmd, "sh ./unisacc.com tools/mutation-gate.cx -- execution "
+               "--produce %s --judge %s --assertion fresh --expect-missing missing --expect-stale stale --timeout-s 3 2>&1", p, j)) return 2;
     int rc = ckk_sh_t("check-mutation-gate", cmd, out, cap, 22);
     fputs(out, stdout);
     return rc;
@@ -174,216 +163,12 @@ static void execution_fixture(void) {
        strstr(out, "operator=feed-previous-output\tverdict=UNMEASURED\n"), "execution-judge-cannot-remove-replay-input");
     rc = execution_case(":", strict, out, sizeof out);
     ck(rc == 2 && strstr(out, "REFUSE execution baseline"), "execution-missing-baseline-refused");
-
-    /* --tamper-set receipt: 9 fixed tampers against strict rc_verify judge, shape-only judge,
-     * duplicate-fail-name judge, wrong-reason judge, malformed-output judges (extra PASS / empty FAIL /
-     * unterminated tail), destructive baseline & tamper judges, unbound static-run-id producer (with loose
-     * judge so the gate itself rejects run_id mismatch), and hand-forged all-zero rc=1 regression.
-     * Single compiled helper binary + single pre-compiled mutation-gate binary keeps cold runs well under 60 s. */
-    {
-        char tdir[512], h_cx[640], h_bin[640], mg_bin[640], out_art[640], prod_cmd[1024], j_cmd[1024], cmd[4096];
-        char tout[16384];
-        if (ckk_sh_t("check-mutation-gate", "mktemp -d \"${TMPDIR:-/tmp}/mg-rcpt.XXXXXX\"", tdir, sizeof tdir, 10) != 0) {
-            ck(0, "tamper-receipt-tmpdir");
-            return;
-        }
-        { int n = (int)tx_len(tdir, sizeof tdir); while (n > 0 && (tdir[n - 1] == '\n' || tdir[n - 1] == ' ')) tdir[--n] = 0; }
-        cx_fmt(h_cx, sizeof h_cx, "%s/rcpt_helper.cx", tdir);
-        cx_fmt(h_bin, sizeof h_bin, "%s/rcpt_helper", tdir);
-        cx_fmt(mg_bin, sizeof mg_bin, "%s/mg", tdir);
-        cx_fmt(out_art, sizeof out_art, "%s/artifact.bin", tdir);
-        cx_write(out_art, "real-artifact-bytes\n", 20);
-
-        {
-            const char *h_src =
-                "#pragma unisa use sys.fs\n"
-                "#pragma unisa use sys.sha\n"
-                "#pragma unisa use cxlib.receipt\n"
-                "static void sh(const char *s, char h[65]) { sy_sha256_hex(s, (long)strlen(s), h); }\n"
-                "int main(int argc, char **argv) {\n"
-                "    char c[65], in[65], o[65]; const char *mode, *art, *id, *rp;\n"
-                "    if (argc < 5) return 2;\n"
-                "    mode = argv[1]; art = argv[2]; id = argv[3]; rp = argv[4];\n"
-                "    sh(\"cand-v0111\", c); sh(\"in-v0111\", in); sh(\"real-artifact-bytes\\n\", o);\n"
-                "    if (!strcmp(mode, \"prod\")) {\n"
-                "        rc_v3_t r;\n"
-                "        r.run_id = id; r.rev = \"f4163f7d3a01\"; r.unit = \"v0111-exit\"; r.target = \"lnx/x86_64\";\n"
-                "        r.producer = \"prod\"; r.purpose = \"exit-gate\";\n"
-                "        r.candidate_sha = c; r.inputs_sha = in; r.output_sha = o;\n"
-                "        r.rc = 0; r.verdict = \"PASS\"; r.ts = 1764200000LL;\n"
-                "        return rc_write3(rp, &r) ? 1 : 0;\n"
-                "    }\n"
-                "    if (!strcmp(mode, \"shape\")) {\n"
-                "        if (sy_exists(rp) != 1) { printf(\"FAIL\\t10:missing\\n\"); return 1; }\n"
-                "        if (rc_need(rp, \"run_id\", \"id\") == 0 && rc_need(rp, \"rc\", \"int\") == 0) { printf(\"PASS\\tv0111-exit\\n\"); return 0; }\n"
-                "        printf(\"FAIL\\tbad-shape\\n\"); return 1;\n"
-                "    }\n"
-                "    if (!strcmp(mode, \"loose\")) {\n"
-                "        if (sy_exists(rp) != 1) { printf(\"FAIL\\tmissing\\n\"); return 1; }\n"
-                "        printf(\"PASS\\tv0111-exit\\n\"); return 0;\n"
-                "    }\n"
-                "    {\n"
-                "        rc_expect_t e; int code;\n"
-                "        e.run_id = id; e.rev = \"f4163f7d3a01\"; e.unit = \"v0111-exit\"; e.target = \"lnx/x86_64\";\n"
-                "        e.candidate_sha = c; e.inputs_sha = in; e.output_sha = o; e.output_path = art;\n"
-                "        e.producer = \"prod\"; e.purpose = \"exit-gate\";\n"
-                "        e.expect_rc = 0; e.expect_verdict = \"PASS\";\n"
-                "        e.now_ts = 1764200060LL; e.max_age_s = 3600LL; e.max_future_s = 300LL; e.allow_fail_verdict = 0;\n"
-                "        code = rc_verify(rp, &e);\n"
-                "        if (!strcmp(mode, \"destruct-base\") && code == 0) { cx_write(rp, \"corrupted\\n\", 10); printf(\"PASS\\tv0111-exit\\n\"); return 0; }\n"
-                "        if (code == 0) { printf(\"PASS\\tv0111-exit\\n\"); return 0; }\n"
-                "        if (!strcmp(mode, \"destruct-tamper\") && code != RC_ERR_MISSING) { cx_write(rp, \"corrupted\\n\", 10); }\n"
-                "        { char rsn[80]; const char *w = rc_why(); int k = 0; while (w[k] && w[k] != ':' && k < 79) { rsn[k] = w[k]; k++; } rsn[k] = 0;\n"
-                "          if (!strcmp(mode, \"dup\")) { printf(\"FAIL\\t10:missing\\n\"); return 1; }\n"
-                "          if (!strcmp(mode, \"wrong-reason\")) { printf(\"FAIL\\t%s\\n\", code == RC_ERR_CANDIDATE ? \"16:rev-mismatch\" : \"10:missing\"); return 1; }\n"
-                "          if (!strcmp(mode, \"wrong-code\")) { printf(\"FAIL\\t%d:%s\\n\", code == RC_ERR_CANDIDATE ? 16 : code, rsn); return 1; }\n"
-                "          if (!strcmp(mode, \"substr-only\")) { printf(\"FAIL\\t%s\\n\", rsn); return 1; }\n"
-                "          if (!strcmp(mode, \"extra-pass\")) { printf(\"PASS\\tother\\nFAIL\\t%d:%s\\n\", code, rsn); return 1; }\n"
-                "          if (!strcmp(mode, \"empty-fail\")) { printf(\"FAIL\\t\\nFAIL\\t%d:%s\\n\", code, rsn); return 1; }\n"
-                "          if (!strcmp(mode, \"no-nl\")) { printf(\"FAIL\\t%d:%s\", code, rsn); return 1; }\n"
-                "          if (!strcmp(mode, \"nul-out\")) { char nb[256]; long nl; cx_fmt(nb, sizeof nb, \"FAIL\\t%d:%s\", code, rsn); nl = (long)strlen(nb); nb[nl] = 0; nb[nl + 1] = 'x'; nb[nl + 2] = '\\n'; (void)sy_write_all(1, nb, nl + 3); return 1; }\n"
-                "          printf(\"FAIL\\t%d:%s\\n\", code, rsn);\n"
-                "          return 1; }\n"
-                "    }\n"
-                "}\n";
-            cx_write(h_cx, h_src, strlen(h_src));
-        }
-
-        cx_fmt(cmd, sizeof cmd,
-               "ln -sf \"$(pwd)/cxroot.tsv\" '%s/cxroot.tsv' && ln -sf \"$(pwd)/cx\" '%s/cx' && ln -sf \"$(pwd)/tools\" '%s/tools' && "
-               "sh ./unisacc.com '%s' -o '%s'",
-               tdir, tdir, tdir, h_cx, h_bin);
-        ck(ckk_sh_t("check-mutation-gate", cmd, tout, sizeof tout, 55) == 0 && mg_ensure_built(tdir) == 0, "tamper-receipt-compile-fixtures");
-        cx_fmt(mg_bin, sizeof mg_bin, "%s", mg_entry());
-
-        cx_fmt(prod_cmd, sizeof prod_cmd, "'%s' prod '%s' \"$1\" \"$2\"", h_bin, out_art);
-
-        /* 1. Strict rc_verify judge kills all 9 fixed tampers with distinct expected FAIL names -> rc=0 */
-        cx_fmt(j_cmd, sizeof j_cmd, "'%s' strict '%s' \"$1\" \"$2\"", h_bin, out_art);
-        cx_fmt(cmd, sizeof cmd, "'%s' execution --tamper-set receipt --produce '%s' --judge '%s' --assertion v0111-exit 2>&1", mg_bin, prod_cmd, j_cmd);
-        rc = ckk_sh_t("check-mutation-gate", cmd, tout, sizeof tout, 55);
-        ck(rc == 0 && strstr(tout, "operator=missing\tverdict=KILLED") &&
-           strstr(tout, "operator=forged-run-id\tverdict=KILLED") &&
-           strstr(tout, "operator=foreign-rev\tverdict=KILLED") &&
-           strstr(tout, "operator=stale-ts\tverdict=KILLED") &&
-           strstr(tout, "operator=rc-flip\tverdict=KILLED") &&
-           strstr(tout, "operator=verdict-flip\tverdict=KILLED") &&
-           strstr(tout, "operator=unit-mismatch\tverdict=KILLED") &&
-           strstr(tout, "operator=candidate-swap\tverdict=KILLED") &&
-           strstr(tout, "operator=target-swap\tverdict=KILLED\tfail=25:target-mismatch"),
-           "tamper-receipt-strict-kills-all-9");
-
-        /* 2. Shape-only judge is caught by tamper set (SURVIVED -> rc=1) */
-        cx_fmt(j_cmd, sizeof j_cmd, "'%s' shape '%s' \"$1\" \"$2\"", h_bin, out_art);
-        cx_fmt(cmd, sizeof cmd, "'%s' execution --tamper-set receipt --produce '%s' --judge '%s' --assertion v0111-exit 2>&1", mg_bin, prod_cmd, j_cmd);
-        rc = ckk_sh_t("check-mutation-gate", cmd, tout, sizeof tout, 55);
-        ck(rc == 1 && strstr(tout, "operator=foreign-rev\tverdict=SURVIVED") &&
-           strstr(tout, "operator=candidate-swap\tverdict=SURVIVED") &&
-           strstr(tout, "operator=target-swap\tverdict=SURVIVED") &&
-           strstr(tout, "operator=rc-flip\tverdict=SURVIVED"),
-           "tamper-receipt-shape-only-judge-caught");
-
-        /* 3. Duplicate FAIL name refused -> rc=2 */
-        cx_fmt(j_cmd, sizeof j_cmd, "'%s' dup '%s' \"$1\" \"$2\"", h_bin, out_art);
-        cx_fmt(cmd, sizeof cmd, "'%s' execution --tamper-set receipt --produce '%s' --judge '%s' --assertion v0111-exit 2>&1", mg_bin, prod_cmd, j_cmd);
-        rc = ckk_sh_t("check-mutation-gate", cmd, tout, sizeof tout, 55);
-        ck(rc == 2 && strstr(tout, "REFUSE"), "tamper-receipt-dup-fail-name-refused");
-
-        /* 4. Wrong FAIL reason, wrong code with right reason, and bare substring without code refused -> rc=2 */
-        cx_fmt(j_cmd, sizeof j_cmd, "'%s' wrong-reason '%s' \"$1\" \"$2\"", h_bin, out_art);
-        cx_fmt(cmd, sizeof cmd, "'%s' execution --tamper-set receipt --produce '%s' --judge '%s' --assertion v0111-exit 2>&1", mg_bin, prod_cmd, j_cmd);
-        rc = ckk_sh_t("check-mutation-gate", cmd, tout, sizeof tout, 55);
-        ck(rc == 2 && strstr(tout, "REFUSE wrong FAIL reason"), "tamper-receipt-wrong-reason-refused");
-
-        cx_fmt(j_cmd, sizeof j_cmd, "'%s' wrong-code '%s' \"$1\" \"$2\"", h_bin, out_art);
-        cx_fmt(cmd, sizeof cmd, "'%s' execution --tamper-set receipt --produce '%s' --judge '%s' --assertion v0111-exit 2>&1", mg_bin, prod_cmd, j_cmd);
-        rc = ckk_sh_t("check-mutation-gate", cmd, tout, sizeof tout, 55);
-        ck(rc == 2 && strstr(tout, "REFUSE wrong FAIL reason"), "tamper-receipt-wrong-code-refused");
-
-        cx_fmt(j_cmd, sizeof j_cmd, "'%s' substr-only '%s' \"$1\" \"$2\"", h_bin, out_art);
-        cx_fmt(cmd, sizeof cmd, "'%s' execution --tamper-set receipt --produce '%s' --judge '%s' --assertion v0111-exit 2>&1", mg_bin, prod_cmd, j_cmd);
-        rc = ckk_sh_t("check-mutation-gate", cmd, tout, sizeof tout, 55);
-        ck(rc == 2 && strstr(tout, "REFUSE wrong FAIL reason"), "tamper-receipt-substr-only-refused");
-
-        /* 5. Malformed judge outputs (unexpected PASS, empty FAIL, unterminated tail, embedded NUL) refused -> rc=2 */
-        cx_fmt(j_cmd, sizeof j_cmd, "'%s' extra-pass '%s' \"$1\" \"$2\"", h_bin, out_art);
-        cx_fmt(cmd, sizeof cmd, "'%s' execution --tamper-set receipt --produce '%s' --judge '%s' --assertion v0111-exit 2>&1", mg_bin, prod_cmd, j_cmd);
-        ck(ckk_sh_t("check-mutation-gate", cmd, tout, sizeof tout, 55) == 2, "tamper-receipt-extra-pass-refused");
-
-        cx_fmt(j_cmd, sizeof j_cmd, "'%s' empty-fail '%s' \"$1\" \"$2\"", h_bin, out_art);
-        cx_fmt(cmd, sizeof cmd, "'%s' execution --tamper-set receipt --produce '%s' --judge '%s' --assertion v0111-exit 2>&1", mg_bin, prod_cmd, j_cmd);
-        ck(ckk_sh_t("check-mutation-gate", cmd, tout, sizeof tout, 55) == 2, "tamper-receipt-empty-fail-refused");
-
-        cx_fmt(j_cmd, sizeof j_cmd, "'%s' no-nl '%s' \"$1\" \"$2\"", h_bin, out_art);
-        cx_fmt(cmd, sizeof cmd, "'%s' execution --tamper-set receipt --produce '%s' --judge '%s' --assertion v0111-exit 2>&1", mg_bin, prod_cmd, j_cmd);
-        ck(ckk_sh_t("check-mutation-gate", cmd, tout, sizeof tout, 55) == 2, "tamper-receipt-unterminated-refused");
-
-        cx_fmt(j_cmd, sizeof j_cmd, "'%s' nul-out '%s' \"$1\" \"$2\"", h_bin, out_art);
-        cx_fmt(cmd, sizeof cmd, "'%s' execution --tamper-set receipt --produce '%s' --judge '%s' --assertion v0111-exit 2>&1", mg_bin, prod_cmd, j_cmd);
-        ck(ckk_sh_t("check-mutation-gate", cmd, tout, sizeof tout, 55) == 2, "tamper-receipt-embedded-nul-stdout-refused");
-
-        /* 5b. Empty duplicate run_id line and embedded NUL in produced receipt rejected by gate -> rc=2 */
-        cx_fmt(j_cmd, sizeof j_cmd, "'%s' loose '%s' \"$1\" \"$2\"", h_bin, out_art);
-        cx_fmt(cmd, sizeof cmd,
-               "'%s' execution --tamper-set receipt --produce \"'%s' prod '%s' \\\"\\$1\\\" \\\"\\$2\\\" && printf 'run_id\\t\\n' >> \\\"\\$2\\\"\" --judge '%s' --assertion v0111-exit 2>&1",
-               mg_bin, h_bin, out_art, j_cmd);
-        ck(ckk_sh_t("check-mutation-gate", cmd, tout, sizeof tout, 55) == 2 &&
-           strstr(tout, "REFUSE produce old run_id not bound to dispatched id"), "tamper-receipt-empty-dup-run-id-refused");
-
-        cx_fmt(cmd, sizeof cmd,
-               "'%s' execution --tamper-set receipt --produce \"'%s' prod '%s' \\\"\\$1\\\" \\\"\\$2\\\" && printf '\\0' >> \\\"\\$2\\\"\" --judge '%s' --assertion v0111-exit 2>&1",
-               mg_bin, h_bin, out_art, j_cmd);
-        ck(ckk_sh_t("check-mutation-gate", cmd, tout, sizeof tout, 55) == 2 &&
-           strstr(tout, "REFUSE produce old run_id not bound to dispatched id"), "tamper-receipt-embedded-nul-receipt-refused");
-
-        /* 6. Destructive judges (mutating baseline or tamper target) refused -> rc=2 */
-        cx_fmt(j_cmd, sizeof j_cmd, "'%s' destruct-base '%s' \"$1\" \"$2\"", h_bin, out_art);
-        cx_fmt(cmd, sizeof cmd, "'%s' execution --tamper-set receipt --produce '%s' --judge '%s' --assertion v0111-exit 2>&1", mg_bin, prod_cmd, j_cmd);
-        rc = ckk_sh_t("check-mutation-gate", cmd, tout, sizeof tout, 55);
-        ck(rc == 2 && strstr(tout, "REFUSE execution tamper old baseline judge"), "tamper-receipt-destructive-baseline-refused");
-
-        cx_fmt(j_cmd, sizeof j_cmd, "'%s' destruct-tamper '%s' \"$1\" \"$2\"", h_bin, out_art);
-        cx_fmt(cmd, sizeof cmd, "'%s' execution --tamper-set receipt --produce '%s' --judge '%s' --assertion v0111-exit 2>&1", mg_bin, prod_cmd, j_cmd);
-        rc = ckk_sh_t("check-mutation-gate", cmd, tout, sizeof tout, 55);
-        ck(rc == 2 && strstr(tout, "REFUSE judge modified tamper evidence"), "tamper-receipt-destructive-tamper-refused");
-
-        /* 7. Producer that ignores dispatched run_id (with loose judge so gate itself catches run_id mismatch) -> rc=2 */
-        cx_fmt(j_cmd, sizeof j_cmd, "'%s' loose '%s' \"$1\" \"$2\"", h_bin, out_art);
-        cx_fmt(cmd, sizeof cmd,
-               "'%s' execution --tamper-set receipt --produce \"'%s' prod '%s' static-id \\\"\\$2\\\"\" --judge '%s' --assertion v0111-exit 2>&1",
-               mg_bin, h_bin, out_art, j_cmd);
-        rc = ckk_sh_t("check-mutation-gate", cmd, tout, sizeof tout, 55);
-        ck(rc == 2 && strstr(tout, "REFUSE produce old run_id not bound to dispatched id"), "tamper-receipt-unbound-run-id-refused");
-
-        /* 8. Hand-forged receipt regression (all-zero sha, rc=1): strict judge FAIL rc=1 */
-        cx_fmt(cmd, sizeof cmd,
-               "printf 'version\\t3\\nrun_id\\tr1\\nrev\\tf4163f7d3a01\\nunit\\tv0111-exit\\ntarget\\tlnx/x86_64\\nproducer\\tprod\\npurpose\\texit-gate\\n"
-               "candidate_sha\\t0000000000000000000000000000000000000000000000000000000000000000\\n"
-               "inputs_sha\\t0000000000000000000000000000000000000000000000000000000000000000\\n"
-               "output_sha\\t0000000000000000000000000000000000000000000000000000000000000000\\n"
-               "rc\\t1\\nverdict\\tPASS\\nts\\t1764200000\\n"
-               "binding_sha\\t0000000000000000000000000000000000000000000000000000000000000000\\n' > '%s/forged.rcpt' && "
-               "'%s' strict '%s' r1 '%s/forged.rcpt' 2>&1", tdir, h_bin, out_art, tdir);
-        rc = ckk_sh_t("check-mutation-gate", cmd, tout, sizeof tout, 20);
-        ck(rc == 1 && strstr(tout, "FAIL\t23:placeholder"), "tamper-receipt-forged-regression-fail-rc1");
-
-        cx_fmt(cmd, sizeof cmd, "rm -rf -- '%s'", tdir);
-        ckk_sh_t("check-mutation-gate", cmd, 0, 0, 20);
-    }
 }
 
 int main(int argc, char **argv) {
     static char out[65536], sc[8192]; int rc;
     if (argc == 2 && !strcmp(argv[1], "--execution-fixture")) {
-        char et[512];
-        if (ckk_sh_t("check-mutation-gate", "mktemp -d \"${TMPDIR:-/tmp}/mg-ex.XXXXXX\"", et, sizeof et, 10) == 0) {
-            int n = (int)tx_len(et, sizeof et); while (n > 0 && (et[n - 1] == '\n' || et[n - 1] == ' ')) et[--n] = 0;
-            (void)mg_ensure_built(et);
-            execution_fixture();
-            cx_fmt(sc, sizeof sc, "rm -rf -- '%s'", et); ckk_sh_t("check-mutation-gate", sc, 0, 0, 20);
-        } else {
-            execution_fixture();
-        }
+        execution_fixture();
         printf("CHECK_MUTATION_GATE_EXECUTION\tok=%d\tfailed=%d\n", ok, failed);
         return failed != 0;
     }
@@ -398,7 +183,6 @@ int main(int argc, char **argv) {
         printf("CHECK_MUTATION_GATE_QUALITY\tok=%d\tfailed=%d\n", ok, failed);
         return rc ? rc : failed != 0;
     }
-    ck(mg_ensure_built(T) == 0, "precompile-mutation-gate");
     cx_fmt(sc, sizeof sc,
         "set -e; cd %s; mkdir -p repo/tools; cd repo; git init -q; git config user.email t@t; git config user.name t;\n"
         "printf '%%s\\n' 'int main(void) {' '    printf(\"start\\n\");' '    return 0;' '}' > tools/fx.cx\n"
@@ -429,7 +213,7 @@ int main(int argc, char **argv) {
         "printf '%%s\\n' 'int main(void) {' '    return 0;' '}' 'static int addone(int v) {' '    /* adds one and 7001 is an example,' '       so 4096 and 8192 and a < b are prose, never a mutant' '       ends at 7003 */ int u = 60;' '    // note 5005 /* and 6006 too' '#define K 4096' '    return v + 1 + u;' '}' > tools2.cx; git diff > ../fx2.patch; git checkout -q tools2.cx", T);
     rc = ckk_sh_t("check-mutation-gate", sc, out, sizeof out, 30);
     ck(rc == 0, "block-comment-fixture-repo");
-    cx_fmt(sc, sizeof sc, "$MG_BIN prep --repo %s/repo2 --base base --patch %s/fx2.patch "
+    cx_fmt(sc, sizeof sc, "sh ./unisacc.com tools/mutation-gate.cx -- prep --repo %s/repo2 --base base --patch %s/fx2.patch "
            "--check 'echo CHECK ok=1 failed=0' --out %s/bc --par 1 --max 60 2>&1", T, T, T);
     rc = ckk_sh_t("check-mutation-gate", sc, out, sizeof out, 55);
     ck(rc == 0 && ckk_has(out, sizeof out, "MG_PREP_DONE"), "block-comment-prep");
@@ -461,47 +245,47 @@ int main(int argc, char **argv) {
 
     /* default threshold is 0.6; an explicit --min-score overrides the value saved by prep */
     ck(ckk_has(out, sizeof out, " min=0.60 "), "default-min-0.6");
-    cx_fmt(sc, sizeof sc, "$MG_BIN report --out %s/weak --min-score 0.7 2>&1", T);
+    cx_fmt(sc, sizeof sc, "sh ./unisacc.com tools/mutation-gate.cx -- report --out %s/weak --min-score 0.7 2>&1", T);
     ckk_sh_t("check-mutation-gate", sc, out, sizeof out, 30);
     ck(ckk_has(out, sizeof out, " min=0.70 "), "explicit-min-overrides");
 
     /* uncovered > 0 fails by default even when the score gate is open; the reviewer list releases it */
-    cx_fmt(sc, sizeof sc, "$MG_BIN report --out %s/weak --min-score 0 2>&1", T);
+    cx_fmt(sc, sizeof sc, "sh ./unisacc.com tools/mutation-gate.cx -- report --out %s/weak --min-score 0 2>&1", T);
     rc = ckk_sh_t("check-mutation-gate", sc, out, sizeof out, 30);
     ck(rc == 1 && ckk_has(out, sizeof out, "verdict=FAIL") && ckk_has(out, sizeof out, "MG_UNCOVERED tools/fx.cx clampadd blocking"), "uncovered-default-fail");
     if (rc != 1) printf("%.1500s\n", out);
     cx_fmt(sc, sizeof sc, "printf 'tools/fx.cx\\tclampadd\\tfixture\\ntools/fx.cx\\tmain\\tfixture\\n' > %s/allow.tsv && "
-           "$MG_BIN report --out %s/weak --min-score 0 --allow-uncovered %s/allow.tsv 2>&1", T, T, T);
+           "sh ./unisacc.com tools/mutation-gate.cx -- report --out %s/weak --min-score 0 --allow-uncovered %s/allow.tsv 2>&1", T, T, T);
     rc = ckk_sh_t("check-mutation-gate", sc, out, sizeof out, 30);
     ck(rc == 0 && ckk_has(out, sizeof out, "verdict=PASS") && ckk_has(out, sizeof out, "MG_UNCOVERED tools/fx.cx clampadd allowed") && !ckk_has(out, sizeof out, " blocking "), "allow-uncovered-pass");
     if (rc != 0) printf("%.1500s\n", out);
 
     /* adjudicated survivors leave the denominator: raw and adjudicated scores both shown */
-    cx_fmt(sc, sizeof sc, "$MG_BIN report --out %s/weak 2>&1", T);
+    cx_fmt(sc, sizeof sc, "sh ./unisacc.com tools/mutation-gate.cx -- report --out %s/weak 2>&1", T);
     ckk_sh_t("check-mutation-gate", sc, out, sizeof out, 30);
     ck(ckk_has(out, sizeof out, " adjudicated=0 ") && ckk_has(out, sizeof out, " score_adj=0/"), "adjudicated-none");
     cx_fmt(sc, sizeof sc, "head -n 2 %s/weak/survivors.tsv | tail -n 1 | cut -f2,3,4 | tr -d '\\n' > %s/adj.tsv && printf '\\tequivalent\\tfixture\\n' >> %s/adj.tsv && "
-           "$MG_BIN report --out %s/weak --adjudicated %s/adj.tsv 2>&1", T, T, T, T, T);
+           "sh ./unisacc.com tools/mutation-gate.cx -- report --out %s/weak --adjudicated %s/adj.tsv 2>&1", T, T, T, T, T);
     ckk_sh_t("check-mutation-gate", sc, out, sizeof out, 30);
     ck(!ckk_has(out, sizeof out, " adjudicated=0 ") && ckk_has(out, sizeof out, " adjudicated="), "adjudicated-changes-score");
     cx_fmt(sc, sizeof sc, "printf 'tools/fx.cx\\t3\\tcmp\\tmaybe\\twhy\\n' > %s/adjbad.tsv && "
-           "$MG_BIN report --out %s/weak --adjudicated %s/adjbad.tsv 2>&1", T, T, T);
+           "sh ./unisacc.com tools/mutation-gate.cx -- report --out %s/weak --adjudicated %s/adjbad.tsv 2>&1", T, T, T);
     rc = ckk_sh_t("check-mutation-gate", sc, out, sizeof out, 30);
     ck(rc == 2 && ckk_has(out, sizeof out, "equivalent or out-of-scope"), "adjudicated-bad-verdict-refused");
 
     /* --- slot reclaim: only after a verdict, and a re-entry names the paths to delete --- */
     cx_fmt(sc, sizeof sc, "test ! -d %s/strong/slot-0 && test -s %s/strong/SUMMARY && grep -q '^state\tdone$' %s/strong/session.tsv", T, T, T);
     ck(ckk_sh_t("check-mutation-gate", sc, 0, 0, 10) == 0, "reclaim-after-verdict");
-    cx_fmt(sc, sizeof sc, "$MG_BIN prep --repo %s/repo --base base --patch %s/fx.patch "
+    cx_fmt(sc, sizeof sc, "sh ./unisacc.com tools/mutation-gate.cx -- prep --repo %s/repo --base base --patch %s/fx.patch "
            "--check 'echo CHECK ok=1 failed=0' --out %s/orphan --par 2 2>&1", T, T, T);
     ck(ckk_sh_t("check-mutation-gate", sc, out, sizeof out, 55) == 0 && ckk_has(out, sizeof out, "MG_PREP_DONE"), "prep-orphan");
     if (!ckk_has(out, sizeof out, "MG_PREP_DONE")) printf("%.800s\n", out);
-    cx_fmt(sc, sizeof sc, "$MG_BIN reclaim --out %s/orphan 2>&1", T);
+    cx_fmt(sc, sizeof sc, "sh ./unisacc.com tools/mutation-gate.cx -- reclaim --out %s/orphan 2>&1", T);
     rc = ckk_sh_t("check-mutation-gate", sc, out, sizeof out, 20);
     cx_fmt(sc, sizeof sc, "test -d %s/orphan/slot-0 && test -d %s/orphan/slot-1", T, T);
     ck(rc == 0 && ckk_has(out, sizeof out, "MG_SLOTS_KEPT reason=no-summary")
        && ckk_sh_t("check-mutation-gate", sc, 0, 0, 10) == 0, "keep-slots-without-verdict");
-    cx_fmt(sc, sizeof sc, "$MG_BIN prep --repo %s/repo --base base --patch %s/fx.patch "
+    cx_fmt(sc, sizeof sc, "sh ./unisacc.com tools/mutation-gate.cx -- prep --repo %s/repo --base base --patch %s/fx.patch "
            "--check 'echo CHECK ok=1 failed=0' --out %s/orphan --par 2 2>&1", T, T, T);
     rc = ckk_sh_t("check-mutation-gate", sc, out, sizeof out, 30);
     ck(rc == 2 && ckk_has(out, sizeof out, "out dir already prepared")
@@ -514,7 +298,7 @@ int main(int argc, char **argv) {
        operator: reclaim reports no-summary and the dir stays refused. */
     ck(!ckk_has(out, sizeof out, "reclaim with:"), "reentry-does-not-promise-reclaim");
     cx_fmt(sc, sizeof sc, "printf 'MUTATION_GATE mutants=1 killed=1 verdict=PASS\\n' > %s/orphan/SUMMARY && "
-           "$MG_BIN reclaim --out %s/orphan 2>&1", T, T);
+           "sh ./unisacc.com tools/mutation-gate.cx -- reclaim --out %s/orphan 2>&1", T, T);
     rc = ckk_sh_t("check-mutation-gate", sc, out, sizeof out, 20);
     cx_fmt(sc, sizeof sc, "test ! -d %s/orphan/slot-0 && test ! -d %s/orphan/slot-1 && test -s %s/orphan/SUMMARY", T, T, T);
     ck(rc == 0 && ckk_has(out, sizeof out, "MG_SLOTS_RECLAIMED")
@@ -523,7 +307,7 @@ int main(int argc, char **argv) {
     /* empty SUMMARY is not a verdict: the slots stay, and the branch says which reason it took */
     cx_fmt(sc, sizeof sc, "mkdir -p %s/empty-sum/slot-0 %s/empty-sum/slot-1 && cp %s/orphan/conf.tsv %s/empty-sum/ && "
            "cp %s/orphan/session.tsv %s/empty-sum/ && : > %s/empty-sum/SUMMARY && "
-           "$MG_BIN reclaim --out %s/empty-sum 2>&1",
+           "sh ./unisacc.com tools/mutation-gate.cx -- reclaim --out %s/empty-sum 2>&1",
            T, T, T, T, T, T, T, T);
     rc = ckk_sh_t("check-mutation-gate", sc, out, sizeof out, 20);
     cx_fmt(sc, sizeof sc, "test -d %s/empty-sum/slot-0 && test -d %s/empty-sum/slot-1", T, T);
@@ -534,14 +318,14 @@ int main(int argc, char **argv) {
        Deleting these would destroy another window's run, so the gate names the reason and touches nothing. */
     cx_fmt(sc, sizeof sc, "mkdir -p %s/foreign/slot-3 %s/foreign/slot-63 && "
            "printf 'MUTATION_GATE mutants=1 killed=1 verdict=PASS\\n' > %s/foreign/SUMMARY && "
-           "$MG_BIN reclaim --out %s/foreign 2>&1", T, T, T, T);
+           "sh ./unisacc.com tools/mutation-gate.cx -- reclaim --out %s/foreign 2>&1", T, T, T, T);
     rc = ckk_sh_t("check-mutation-gate", sc, out, sizeof out, 20);
     cx_fmt(sc, sizeof sc, "test -d %s/foreign/slot-3 && test -d %s/foreign/slot-63 && test -s %s/foreign/SUMMARY", T, T, T);
     ck(rc == 0 && ckk_has(out, sizeof out, "MG_SLOTS_KEPT reason=not-mine") && !ckk_has(out, sizeof out, "MG_SLOTS_RECLAIMED")
        && ckk_sh_t("check-mutation-gate", sc, 0, 0, 10) == 0, "foreign-dir-not-mine");
     cx_fmt(sc, sizeof sc, "mkdir -p %s/half/slot-0 && cp %s/orphan/conf.tsv %s/half/ && "
            "printf 'MUTATION_GATE mutants=1 killed=1 verdict=PASS\\n' > %s/half/SUMMARY && "
-           "$MG_BIN reclaim --out %s/half 2>&1", T, T, T, T, T);
+           "sh ./unisacc.com tools/mutation-gate.cx -- reclaim --out %s/half 2>&1", T, T, T, T, T);
     rc = ckk_sh_t("check-mutation-gate", sc, out, sizeof out, 20);
     cx_fmt(sc, sizeof sc, "test -d %s/half/slot-0", T);
     ck(rc == 0 && ckk_has(out, sizeof out, "MG_SLOTS_KEPT reason=not-mine")
@@ -552,7 +336,7 @@ int main(int argc, char **argv) {
        this dir was the one that stayed green. */
     cx_fmt(sc, sizeof sc, "mkdir -p %s/noconf/slot-0 %s/noconf/slot-1 && cp %s/orphan/session.tsv %s/noconf/ && "
            "printf 'MUTATION_GATE mutants=1 killed=1 verdict=PASS\\n' > %s/noconf/SUMMARY && "
-           "$MG_BIN reclaim --out %s/noconf 2>&1", T, T, T, T, T, T);
+           "sh ./unisacc.com tools/mutation-gate.cx -- reclaim --out %s/noconf 2>&1", T, T, T, T, T, T);
     rc = ckk_sh_t("check-mutation-gate", sc, out, sizeof out, 20);
     cx_fmt(sc, sizeof sc, "test -d %s/noconf/slot-0 && test -d %s/noconf/slot-1", T, T);
     ck(rc == 0 && ckk_has(out, sizeof out, "MG_SLOTS_KEPT reason=not-mine")
@@ -563,7 +347,7 @@ int main(int argc, char **argv) {
        must not authorise deletion -- that pair is something any caller can create by touching two files. */
     cx_fmt(sc, sizeof sc, "mkdir -p %s/emptyreg/slot-0 && : > %s/emptyreg/conf.tsv && : > %s/emptyreg/session.tsv && "
            "printf 'MUTATION_GATE mutants=1 killed=1 verdict=PASS\\n' > %s/emptyreg/SUMMARY && "
-           "$MG_BIN reclaim --out %s/emptyreg 2>&1", T, T, T, T, T);
+           "sh ./unisacc.com tools/mutation-gate.cx -- reclaim --out %s/emptyreg 2>&1", T, T, T, T, T);
     rc = ckk_sh_t("check-mutation-gate", sc, out, sizeof out, 20);
     cx_fmt(sc, sizeof sc, "test -d %s/emptyreg/slot-0", T);
     ck(rc == 0 && ckk_has(out, sizeof out, "MG_SLOTS_KEPT reason=not-mine")
@@ -572,7 +356,7 @@ int main(int argc, char **argv) {
     cx_fmt(sc, sizeof sc, "mkdir -p %s/nostate/slot-0 && cp %s/orphan/conf.tsv %s/nostate/ && "
            "printf 'pid\\t1\\n' > %s/nostate/session.tsv && "
            "printf 'MUTATION_GATE mutants=1 killed=1 verdict=PASS\\n' > %s/nostate/SUMMARY && "
-           "$MG_BIN reclaim --out %s/nostate 2>&1", T, T, T, T, T, T);
+           "sh ./unisacc.com tools/mutation-gate.cx -- reclaim --out %s/nostate 2>&1", T, T, T, T, T, T);
     rc = ckk_sh_t("check-mutation-gate", sc, out, sizeof out, 20);
     cx_fmt(sc, sizeof sc, "test -d %s/nostate/slot-0", T);
     ck(rc == 0 && ckk_has(out, sizeof out, "MG_SLOTS_KEPT reason=not-mine")
@@ -582,7 +366,7 @@ int main(int argc, char **argv) {
     cx_fmt(sc, sizeof sc, "mkdir -p %s/midstate/slot-0 && cp %s/orphan/conf.tsv %s/midstate/ && "
            "printf 'pid\\t1\\nnote\\tstate\\tprepared\\n' > %s/midstate/session.tsv && "
            "printf 'MUTATION_GATE mutants=1 killed=1 verdict=PASS\\n' > %s/midstate/SUMMARY && "
-           "$MG_BIN reclaim --out %s/midstate 2>&1", T, T, T, T, T, T);
+           "sh ./unisacc.com tools/mutation-gate.cx -- reclaim --out %s/midstate 2>&1", T, T, T, T, T, T);
     rc = ckk_sh_t("check-mutation-gate", sc, out, sizeof out, 20);
     cx_fmt(sc, sizeof sc, "test -d %s/midstate/slot-0", T);
     ck(rc == 0 && ckk_has(out, sizeof out, "MG_SLOTS_KEPT reason=not-mine")
@@ -591,7 +375,7 @@ int main(int argc, char **argv) {
     cx_fmt(sc, sizeof sc, "mkdir -p %s/emptystate/slot-0 && cp %s/orphan/conf.tsv %s/emptystate/ && "
            "printf 'pid\\t1\\nstate\\t\\n' > %s/emptystate/session.tsv && "
            "printf 'MUTATION_GATE mutants=1 killed=1 verdict=PASS\\n' > %s/emptystate/SUMMARY && "
-           "$MG_BIN reclaim --out %s/emptystate 2>&1", T, T, T, T, T, T);
+           "sh ./unisacc.com tools/mutation-gate.cx -- reclaim --out %s/emptystate 2>&1", T, T, T, T, T, T);
     rc = ckk_sh_t("check-mutation-gate", sc, out, sizeof out, 20);
     cx_fmt(sc, sizeof sc, "test -d %s/emptystate/slot-0", T);
     ck(rc == 0 && ckk_has(out, sizeof out, "MG_SLOTS_KEPT reason=not-mine")
@@ -601,7 +385,7 @@ int main(int argc, char **argv) {
     cx_fmt(sc, sizeof sc, "mkdir -p %s/firststate/slot-0 && cp %s/orphan/conf.tsv %s/firststate/ && "
            "printf 'state\\tprepared\\n' > %s/firststate/session.tsv && "
            "printf 'MUTATION_GATE mutants=1 killed=1 verdict=PASS\\n' > %s/firststate/SUMMARY && "
-           "$MG_BIN reclaim --out %s/firststate 2>&1", T, T, T, T, T, T);
+           "sh ./unisacc.com tools/mutation-gate.cx -- reclaim --out %s/firststate 2>&1", T, T, T, T, T, T);
     rc = ckk_sh_t("check-mutation-gate", sc, out, sizeof out, 20);
     cx_fmt(sc, sizeof sc, "test ! -d %s/firststate/slot-0 && test -s %s/firststate/SUMMARY", T, T);
     ck(rc == 0 && ckk_has(out, sizeof out, "MG_SLOTS_RECLAIMED")
@@ -617,7 +401,7 @@ int main(int argc, char **argv) {
            "cp %s/fx.patch %s/sameB/fx.patch && printf '\\n' >> %s/sameB/fx.patch",
            T, T, T, T, T, T, T, T, T, T, T, T, T, T, T);
     ckk_sh_t("check-mutation-gate", sc, 0, 0, 10);
-    cx_fmt(sc, sizeof sc, "TMPDIR=%s/tmp-one $MG_BIN prep --repo %s/repo --base base "
+    cx_fmt(sc, sizeof sc, "TMPDIR=%s/tmp-one sh ./unisacc.com tools/mutation-gate.cx -- prep --repo %s/repo --base base "
            "--patch %s/one.patch --check 'echo CHECK ok=1 failed=0' --par 2 2>&1", T, T, T);
     ck(ckk_sh_t("check-mutation-gate", sc, out, sizeof out, 55) == 0 && ckk_has(out, sizeof out, "MG_PREP_DONE"), "derive-out-prep");
     { const char *o = ckk_has(out, sizeof out, "out=") ? strstr(out, "out=") + 4 : 0;
@@ -629,7 +413,7 @@ int main(int argc, char **argv) {
          && ckk_sh_t("check-mutation-gate", sc, 0, 0, 10) == 0, "derive-out-registered");
       cx_fmt(sc, sizeof sc, "rm -rf -- '%s'", a); ckk_sh_t("check-mutation-gate", sc, 0, 0, 20);
     }
-    cx_fmt(sc, sizeof sc, "TMPDIR=%s/tmp-two $MG_BIN prep --repo %s/repo --base base "
+    cx_fmt(sc, sizeof sc, "TMPDIR=%s/tmp-two sh ./unisacc.com tools/mutation-gate.cx -- prep --repo %s/repo --base base "
            "--patch %s/two.patch --check 'echo CHECK ok=1 failed=0' --par 2 2>&1", T, T, T);
     ckk_sh_t("check-mutation-gate", sc, out, sizeof out, 55);
     { const char *o = strstr(out, "out=");
@@ -638,12 +422,12 @@ int main(int argc, char **argv) {
         cx_fmt(sc, sizeof sc, "rm -rf -- '%s'", a); ckk_sh_t("check-mutation-gate", sc, 0, 0, 20); }
     }
     /* same base name, different bytes: the content hash, not the stem, is what separates the dirs */
-    cx_fmt(sc, sizeof sc, "TMPDIR=%s/tmp-same $MG_BIN prep --repo %s/repo --base base "
+    cx_fmt(sc, sizeof sc, "TMPDIR=%s/tmp-same sh ./unisacc.com tools/mutation-gate.cx -- prep --repo %s/repo --base base "
            "--patch %s/sameA/fx.patch --check 'echo CHECK ok=1 failed=0' --par 1 2>&1", T, T, T);
     ckk_sh_t("check-mutation-gate", sc, out, sizeof out, 55);
     { char first[1024] = ""; const char *o = strstr(out, "out=");
       if (o) for (int z = 4; o[z] && o[z] != '\n' && z - 4 < (int)sizeof first - 1; z++) first[z - 4] = o[z];
-      cx_fmt(sc, sizeof sc, "TMPDIR=%s/tmp-same $MG_BIN prep --repo %s/repo --base base "
+      cx_fmt(sc, sizeof sc, "TMPDIR=%s/tmp-same sh ./unisacc.com tools/mutation-gate.cx -- prep --repo %s/repo --base base "
              "--patch %s/sameB/fx.patch --check 'echo CHECK ok=1 failed=0' --par 1 2>&1", T, T, T);
       int r2 = ckk_sh_t("check-mutation-gate", sc, out, sizeof out, 55);
       const char *o2 = strstr(out, "out=");
@@ -658,7 +442,44 @@ int main(int argc, char **argv) {
     rc = gate("red", "echo CHECK ok=0 failed=1", "", out, sizeof out);
     ck(rc == 2 && ckk_has(out, sizeof out, "baseline check not green"), "red-baseline");
 
-    ck(quality_fixture(G_MG[0] ? G_MG : 0) == 0, "quality-fixture-ready");
+    /* Enclosing-repo regression: when --out / TMPDIR sits inside a git worktree, git apply must
+     * still patch slot-0 instead of walking up to the enclosing .git and silently skipping hunks. */
+    cx_fmt(sc, sizeof sc,
+           "mkdir -p %s/repo2/subtmp && TMPDIR=%s/repo2/subtmp sh ./unisacc.com tools/mutation-gate.cx -- prep "
+           "--repo %s/repo2 --base base --patch %s/fx2.patch --check 'echo CHECK ok=1 failed=0' "
+           "--out %s/repo2/subtmp/bc --par 1 --max 60 2>&1", T, T, T, T, T);
+    rc = ckk_sh_t("check-mutation-gate", sc, out, sizeof out, 55);
+    cx_fmt(sc, sizeof sc, "grep -q 'addone' %s/repo2/subtmp/bc/slot-0/tools2.cx", T);
+    ck(rc == 0 && ckk_has(out, sizeof out, "MG_PREP_DONE") &&
+       ckk_sh_t("check-mutation-gate", sc, 0, 0, 10) == 0, "prep-inside-enclosing-git-repo");
+
+    /* --repo pointing at a non-toplevel subdirectory must refuse instead of walking up. */
+    cx_fmt(sc, sizeof sc,
+           "mkdir -p %s/repo2/sub && sh ./unisacc.com tools/mutation-gate.cx -- prep "
+           "--repo %s/repo2/sub --base base --patch %s/fx2.patch --check 'echo CHECK ok=1 failed=0' "
+           "--out %s/bad-repo-sub --par 1 2>&1", T, T, T, T);
+    rc = ckk_sh_t("check-mutation-gate", sc, out, sizeof out, 30);
+    ck(rc == 2 && ckk_has(out, sizeof out, "--repo is not a git toplevel"), "prep-repo-subdir-refused");
+
+    /* If cd into slot-0 fails AFTER tar+ln succeed, prep must exit instead of falling through to
+     * git apply --3way in the caller's git repo cwd. A tiny ln wrapper runs real ln then removes
+     * +x on slot-0 so archive+ln succeed and cd itself fails. */
+    cx_fmt(sc, sizeof sc,
+           "W=$(pwd) && mkdir -p %s/cd-bin %s/cd-cwd && real_ln=$(command -v ln) && "
+           "printf '#!/bin/sh\\n%%s \"$@\"\\nchmod 0600 %s/cd-fail/slot-0\\n' \"$real_ln\" > %s/cd-bin/ln && "
+           "chmod +x %s/cd-bin/ln && "
+           "(cd %s/cd-cwd && git init -q && git config user.email t@t && git config user.name t && "
+           "cp %s/repo2/tools2.cx tools2.cx && git add tools2.cx && git commit -q -m base && "
+           "PATH=\"%s/cd-bin:$PATH\" sh \"$W/unisacc.com\" \"$W/tools/mutation-gate.cx\" -- prep "
+           "--repo %s/repo2 --base base --patch %s/fx2.patch --check 'echo CHECK ok=1 failed=0' "
+           "--out %s/cd-fail --par 1 2>&1); r=$?; chmod 0700 %s/cd-fail/slot-0 2>/dev/null || true; exit $r",
+           T, T, T, T, T, T, T, T, T, T, T, T);
+    rc = ckk_sh_t("check-mutation-gate", sc, out, sizeof out, 30);
+    cx_fmt(sc, sizeof sc, "cmp -s %s/repo2/tools2.cx %s/cd-cwd/tools2.cx && test -z \"$(git -C %s/cd-cwd status --porcelain)\"", T, T, T);
+    ck(rc == 2 && ckk_has(out, sizeof out, "archive or git apply failed rc") &&
+       ckk_sh_t("check-mutation-gate", sc, 0, 0, 10) == 0, "prep-cd-fail-does-not-patch-caller-cwd");
+
+    ck(quality_fixture(0) == 0, "quality-fixture-ready");
     execution_fixture();
     cx_fmt(sc, sizeof sc, "rm -rf -- '%s'", T); ckk_sh_t("check-mutation-gate", sc, 0, 0, 20);
     printf("CHECK_MUTATION_GATE\tok=%d\tfailed=%d\n", ok, failed);

@@ -558,7 +558,7 @@ static void prep(void) {
         if (strcmp(top, rab) != 0) die2("--repo is not a git toplevel", g_repo);
         cx_fmt(cmd, sizeof cmd, "set -e; mkdir -p %s/slot-0 %s/m; git -C %s archive %s | tar -x -C %s/slot-0; ln -sfn \"$(pwd)/unisacc.com\" %s/slot-0/unisacc.com 2>/dev/null || true; "
                "if [ -L unisacc.com ]; then ln -sfn \"$(readlink -f unisacc.com)\" %s/slot-0/unisacc.com; fi; cd %s/slot-0 || exit 3; "
-               "git apply --whitespace=nowarn %s 2>&1 || git apply --3way %s 2>&1 || exit 3",
+               "GIT_CEILING_DIRECTORIES=\"$(dirname \"$PWD\")\" git apply --whitespace=nowarn %s 2>&1 || GIT_CEILING_DIRECTORIES=\"$(dirname \"$PWD\")\" git apply --3way %s 2>&1 || exit 3",
                q3, q3, qr, q2, q3, q3, q3, q3, qp, qp);
     }
     rc = sh(cmd, out, sizeof out, 55);
@@ -933,16 +933,10 @@ static int report(void) {
 /* ---------- run ---------- */
 static int run_all(const char *self) {
     char cmd[16384], out[8192], q3[2048], qs[2048]; int i, rc; long t0 = sy_now_ms();
-    int is_cx = 0;
-    size_t sl = self ? strlen(self) : 0;
-    if (sl >= 3 && !strcmp(self + sl - 3, ".cx")) is_cx = 1;
     prep();
-    shq(q3, sizeof q3, g_out); shq(qs, sizeof qs, is_cx ? self : self);
+    shq(q3, sizeof q3, g_out); shq(qs, sizeof qs, self);
     for (i = 0; i < g_par; i++) {
-        if (is_cx)
-            cx_fmt(cmd, sizeof cmd, "setsid timeout -k 5 %d sh ./unisacc.com %s -- worker --out %s --slot %d > %s/worker-%d.log 2>&1 < /dev/null & echo $! > %s/worker-%d.pid", g_deadline, qs, q3, i, q3, i, q3, i);
-        else
-            cx_fmt(cmd, sizeof cmd, "setsid timeout -k 5 %d %s worker --out %s --slot %d > %s/worker-%d.log 2>&1 < /dev/null & echo $! > %s/worker-%d.pid", g_deadline, qs, q3, i, q3, i, q3, i);
+        cx_fmt(cmd, sizeof cmd, "setsid timeout -k 5 %d sh ./unisacc.com %s -- worker --out %s --slot %d > %s/worker-%d.log 2>&1 < /dev/null & echo $! > %s/worker-%d.pid", g_deadline, qs, q3, i, q3, i, q3, i);
         rc = sh(cmd, out, sizeof out, 30); if (rc) die2("spawn worker", "");
     }
     /* bounded wait: total deadline g_deadline s, poll every 2 s */
@@ -1016,308 +1010,9 @@ static int execution_name_ok(const char *name) {
     return name && *name && !strpbrk(name, "\r\n\t");
 }
 
-/* Private receipt tamper helper (restricted to mutation-gate's own scratch tmp_dir). */
-static int mg_path_inside(const char *dir, const char *p) {
-    size_t dl = strlen(dir);
-    return dir && p && dl > 0 && !strncmp(p, dir, dl) && p[dl] == '/' && !strstr(p + dl, "/..");
-}
-
-static int mg_tamper_receipt(const char *tmp_dir, const unsigned char *cur_buf, int64_t cur_n,
-                             const char *dst_path, const char *kind) {
-    char run_id[160] = "", rev[80] = "", unit[160] = "", target[64] = "", prod[160] = "", purp[160] = "";
-    char cand[65] = "", inp[65] = "", outh[65] = "", verd[16] = "";
-    int rc_v = 0;
-    long long ts_v = 0;
-    char payload[2048], bind_new[65], body[2304];
-    long i = 0;
-
-    if (!mg_path_inside(tmp_dir, dst_path)) return 1;
-    if (!strcmp(kind, "missing")) {
-        int urc = sy_unlink(dst_path);
-        return (urc == 0 || urc == -ENOENT) ? 0 : 1;
-    }
-    if (!cur_buf || cur_n <= 0 || cur_n > 65536) return 1;
-    while (i < (long)cur_n) {
-        long e = i, tab = -1;
-        while (e < (long)cur_n && cur_buf[e] != '\n') { if (tab < 0 && cur_buf[e] == '\t') tab = e; e++; }
-        if (tab > i && tab + 1 < e) {
-            long kl = tab - i, vl = e - (tab + 1);
-            const char *kp = (const char *)(cur_buf + i), *vp = (const char *)(cur_buf + tab + 1);
-            if (kl == 6 && !memcmp(kp, "run_id", 6) && vl < (long)sizeof run_id) { cp(run_id, (long)sizeof run_id, vp, vl); run_id[vl] = 0; }
-            else if (kl == 3 && !memcmp(kp, "rev", 3) && vl < (long)sizeof rev) { cp(rev, (long)sizeof rev, vp, vl); rev[vl] = 0; }
-            else if (kl == 4 && !memcmp(kp, "unit", 4) && vl < (long)sizeof unit) { cp(unit, (long)sizeof unit, vp, vl); unit[vl] = 0; }
-            else if (kl == 6 && !memcmp(kp, "target", 6) && vl < (long)sizeof target) { cp(target, (long)sizeof target, vp, vl); target[vl] = 0; }
-            else if (kl == 8 && !memcmp(kp, "producer", 8) && vl < (long)sizeof prod) { cp(prod, (long)sizeof prod, vp, vl); prod[vl] = 0; }
-            else if (kl == 7 && !memcmp(kp, "purpose", 7) && vl < (long)sizeof purp) { cp(purp, (long)sizeof purp, vp, vl); purp[vl] = 0; }
-            else if (kl == 13 && !memcmp(kp, "candidate_sha", 13) && vl == 64) { cp(cand, 65, vp, 64); cand[64] = 0; }
-            else if (kl == 10 && !memcmp(kp, "inputs_sha", 10) && vl == 64) { cp(inp, 65, vp, 64); inp[64] = 0; }
-            else if (kl == 10 && !memcmp(kp, "output_sha", 10) && vl == 64) { cp(outh, 65, vp, 64); outh[64] = 0; }
-            else if (kl == 2 && !memcmp(kp, "rc", 2)) { rc_v = atoi(vp); }
-            else if (kl == 7 && !memcmp(kp, "verdict", 7) && vl < (long)sizeof verd) { cp(verd, (long)sizeof verd, vp, vl); verd[vl] = 0; }
-            else if (kl == 2 && !memcmp(kp, "ts", 2)) { ts_v = strtoll(vp, 0, 10); }
-        }
-        i = e + 1;
-    }
-    if (!run_id[0] || !rev[0] || !unit[0] || !target[0] || !prod[0] || !purp[0] ||
-        !cand[0] || !inp[0] || !outh[0] || !verd[0] || ts_v <= 0) return 1;
-
-    if (!strcmp(kind, "forged-run-id")) cx_fmt(run_id, sizeof run_id, "forged-run-id-9999");
-    else if (!strcmp(kind, "foreign-rev")) { size_t rl = strlen(rev); if (rl) rev[rl - 1] = rev[rl - 1] == 'a' ? 'b' : 'a'; }
-    else if (!strcmp(kind, "stale-ts")) ts_v = (ts_v > 200000LL) ? (ts_v - 200000LL) : 1LL;
-    else if (!strcmp(kind, "rc-flip")) rc_v = (rc_v == 0) ? 1 : 0;
-    else if (!strcmp(kind, "verdict-flip")) cx_fmt(verd, sizeof verd, "%s", !strcmp(verd, "PASS") ? "FAIL" : "PASS");
-    else if (!strcmp(kind, "unit-mismatch")) { char u2[160]; cx_fmt(u2, sizeof u2, "%.140s-other", unit); cx_fmt(unit, sizeof unit, "%s", u2); }
-    else if (!strcmp(kind, "candidate-swap")) cand[63] = (cand[63] == '0') ? '1' : '0';
-    else if (!strcmp(kind, "target-swap")) {
-        if (!strcmp(target, "lnx/x86_64")) cx_fmt(target, sizeof target, "lnx/arm64");
-        else { char t2[64]; cx_fmt(t2, sizeof t2, "%.48s-other", target); cx_fmt(target, sizeof target, "%s", t2); }
-    }
-    else return 1;
-
-    if (cx_fmt(payload, sizeof payload,
-               "version\t3\nrun_id\t%s\nrev\t%s\nunit\t%s\ntarget\t%s\nproducer\t%s\npurpose\t%s\n"
-               "candidate_sha\t%s\ninputs_sha\t%s\noutput_sha\t%s\nrc\t%d\nverdict\t%s\nts\t%lld\n",
-               run_id, rev, unit, target, prod, purp, cand, inp, outh, rc_v, verd, ts_v)) return 1;
-    if (sy_sha256_hex(payload, (long)strlen(payload), bind_new)) return 1;
-    if (cx_fmt(body, sizeof body, "%sbinding_sha\t%s\n", payload, bind_new)) return 1;
-    return sy_write_atomic(dst_path, body, (int64_t)strlen(body), 0600) ? 1 : 0;
-}
-
-/* Exact structured code:reason contract for each of the 9 fixed receipt tampers (no substring match). */
-static const char *execution_tamper_expected_fail(const char *tamper) {
-    if (!tamper) return 0;
-    if (!strcmp(tamper, "missing")) return "10:missing";
-    if (!strcmp(tamper, "forged-run-id")) return "15:run-id-mismatch";
-    if (!strcmp(tamper, "foreign-rev")) return "16:rev-mismatch";
-    if (!strcmp(tamper, "stale-ts")) return "22:ts-stale";
-    if (!strcmp(tamper, "rc-flip")) return "21:rc-nonzero-on-pass";
-    if (!strcmp(tamper, "verdict-flip")) return "21:verdict-fail-on-rc0";
-    if (!strcmp(tamper, "unit-mismatch")) return "17:unit-mismatch";
-    if (!strcmp(tamper, "candidate-swap")) return "18:candidate-mismatch";
-    if (!strcmp(tamper, "target-swap")) return "25:target-mismatch";
-    return 0;
-}
-
-static int execution_tamper_reason_ok(const char *tamper, const char *fail_name) {
-    const char *want = execution_tamper_expected_fail(tamper);
-    return want && fail_name && strcmp(want, fail_name) == 0;
-}
-
-static int execution_tamper_cmd(const char *cmd, const char *id, const char *path, int secs,
-                                const char *pass_name, const char *tamper_kind,
-                                char *fail_out, size_t fail_cap) {
-    char *argv[] = {"sh", "-c", (char *)cmd, "mutation-gate", (char *)id, (char *)path, 0};
-    np_result res = {0};
-    char why[256] = {0};
-    int rc = np_run(argv, 0, 0, secs, &res, why, sizeof why);
-    int result = 2;
-    if (fail_out && fail_cap > 0) fail_out[0] = 0;
-    if (!rc && !res.residue && !res.timed_out && (res.rc == 0 || res.rc == 1)) {
-        if (res.out && res.outn > 0 && res.out[res.outn - 1] == '\n') {
-            long pass_len = (long)strlen(pass_name);
-            int pass_exact = 0, pass_any = 0, fail_hits = 0, bad_line = 0;
-            for (long z = 0; z < (long)res.outn; z++) {
-                if (res.out[z] == '\0') { bad_line = 1; break; }
-            }
-            for (long at = 0; !bad_line && at < (long)res.outn;) {
-                long end = at;
-                while (end < (long)res.outn && res.out[end] != '\n') end++;
-                const char *line = res.out + at;
-                long len = end - at;
-                if (len >= 4 && !memcmp(line, "PASS", 4) && (len == 4 || line[4] == '\t' || line[4] == ' ')) {
-                    pass_any++;
-                    if (len == pass_len + 5 && line[4] == '\t' && !memcmp(line + 5, pass_name, (size_t)pass_len))
-                        pass_exact++;
-                    else bad_line = 1;
-                } else if (len >= 4 && !memcmp(line, "FAIL", 4) && (len == 4 || line[4] == '\t' || line[4] == ' ')) {
-                    if (len <= 5 || line[4] != '\t') {
-                        bad_line = 1;
-                    } else {
-                        long fn = len - 5, k;
-                        int has_bad = 0;
-                        for (k = 0; k < fn; k++) if (line[5 + k] == '\t' || line[5 + k] == '\r') has_bad = 1;
-                        if (has_bad || (size_t)fn >= fail_cap) {
-                            bad_line = 1;
-                        } else {
-                            fail_hits++;
-                            if (fail_hits == 1 && fail_out) {
-                                cp(fail_out, (long)fail_cap, line + 5, fn);
-                                fail_out[fn] = 0;
-                            }
-                        }
-                    }
-                }
-                at = end + 1;
-            }
-            if (!bad_line) {
-                if (res.rc == 0 && pass_any == 1 && pass_exact == 1 && fail_hits == 0) result = 0;
-                else if (res.rc == 1 && pass_any == 0 && fail_hits == 1 && fail_out && fail_out[0]) {
-                    if (!tamper_kind || execution_tamper_reason_ok(tamper_kind, fail_out)) result = 1;
-                    else fprintf(stderr, "mutation-gate: REFUSE wrong FAIL reason %s for tamper %s\n", fail_out, tamper_kind);
-                }
-            }
-        }
-    }
-    if (res.outn) (void)sy_write_all(1, res.out, (long)res.outn);
-    if (res.errn) (void)sy_write_all(2, res.err, (long)res.errn);
-    if (result == 2) fprintf(stderr, "mutation-gate: execution tamper result unverified rc=%d %s\n", res.rc, why);
-    np_free(&res);
-    return result;
-}
-
-/* Extract the unique run_id line from a receipt buffer; reject embedded NUL, unterminated tail,
- * empty value, or duplicate run_id lines (including empty duplicates). */
-static int execution_extract_run_id(const unsigned char *buf, int64_t n, char *out, size_t cap, long *len_out) {
-    long i = 0;
-    int hits = 0;
-    out[0] = 0;
-    if (len_out) *len_out = 0;
-    if (!buf || n <= 0 || buf[n - 1] != '\n') return 1;
-    for (i = 0; i < (long)n; i++) if (buf[i] == 0) return 1;
-    i = 0;
-    while (i < (long)n) {
-        long e = i;
-        while (e < (long)n && buf[e] != '\n') e++;
-        if (e - i >= 7 && !memcmp(buf + i, "run_id\t", 7)) {
-            long vn = e - (i + 7);
-            if (vn <= 0 || (size_t)vn >= cap) return 1;
-            if (hits == 0) {
-                cp(out, (long)cap, buf + i + 7, vn);
-                out[vn] = 0;
-                if (len_out) *len_out = vn;
-            }
-            hits++;
-        }
-        i = e + 1;
-    }
-    return hits == 1 ? 0 : 1;
-}
-
-static int execution_check_unchanged(const char *path, const unsigned char *expect, int64_t expect_n) {
-    int64_t an = 0;
-    unsigned char *after = execution_evidence(path, &an);
-    int same = after && an == expect_n && mm_same(after, expect, (long)expect_n);
-    mm_free(after);
-    return same ? 0 : 1;
-}
-
-static int execution_tamper_receipt(const char *produce, const char *judge, const char *assertion, int secs) {
-    static const char *tampers[9] = {
-        "missing", "forged-run-id", "foreign-rev", "stale-ts",
-        "rc-flip", "verdict-flip", "unit-mismatch", "candidate-swap",
-        "target-swap"
-    };
-    char tmp[1024], path[1100], old_id[1100], current_id[1100];
-    char old_rid[160], cur_rid[160];
-    long old_rid_n = 0, cur_rid_n = 0;
-    char fail_names[9][160];
-    int verdicts[9];
-    int64_t old_n = 0, cur_n = 0;
-    unsigned char *old = 0, *cur = 0;
-    int result = 2, i, j, all_killed = 1, any_unmeasured = 0;
-
-    for (i = 0; i < 9; i++) { verdicts[i] = 2; fail_names[i][0] = 0; }
-    if (sr_scratch("mutation-gate-execution", tmp, sizeof tmp)) die2("execution scratch", "");
-    if (cx_fmt(path, sizeof path, "%s/evidence", tmp) ||
-        sy_mkdtemp(tmp, "id-", old_id, sizeof old_id) ||
-        sy_mkdtemp(tmp, "id-", current_id, sizeof current_id)) {
-        (void)sy_remove_all(tmp);
-        die2("execution scratch", "");
-    }
-
-    /* 1. Produce old baseline, bind run_id == old_id (length+bytes), verify judge passes without mutating evidence. */
-    if (execution_command(produce, old_id, path, secs, 0, 0) || !(old = execution_evidence(path, &old_n))) {
-        fprintf(stderr, "mutation-gate: REFUSE execution tamper old baseline produce\n");
-        goto done;
-    }
-    if (execution_extract_run_id(old, old_n, old_rid, sizeof old_rid, &old_rid_n) != 0 ||
-        old_rid_n != (long)strlen(old_id) || !mm_same(old_rid, old_id, old_rid_n)) {
-        fprintf(stderr, "mutation-gate: REFUSE produce old run_id not bound to dispatched id\n");
-        goto done;
-    }
-    if (execution_command(judge, old_id, path, secs, assertion, 0) != 0 ||
-        execution_check_unchanged(path, old, old_n) != 0 || sy_unlink(path) != 0) {
-        fprintf(stderr, "mutation-gate: REFUSE execution tamper old baseline judge\n");
-        goto done;
-    }
-
-    /* 2. Produce current baseline, bind run_id == current_id (!= old_id, length+bytes), protect baseline bytes. */
-    if (execution_command(produce, current_id, path, secs, 0, 0) || !(cur = execution_evidence(path, &cur_n))) {
-        fprintf(stderr, "mutation-gate: REFUSE execution tamper current baseline produce\n");
-        goto done;
-    }
-    if (execution_extract_run_id(cur, cur_n, cur_rid, sizeof cur_rid, &cur_rid_n) != 0 ||
-        cur_rid_n != (long)strlen(current_id) || !mm_same(cur_rid, current_id, cur_rid_n) ||
-        (old_rid_n == cur_rid_n && mm_same(old_rid, cur_rid, cur_rid_n))) {
-        fprintf(stderr, "mutation-gate: REFUSE produce current run_id not bound to fresh dispatched id\n");
-        goto done;
-    }
-    if (execution_command(judge, current_id, path, secs, assertion, 0) != 0 ||
-        execution_check_unchanged(path, cur, cur_n) != 0) {
-        fprintf(stderr, "mutation-gate: REFUSE execution tamper current baseline judge\n");
-        goto done;
-    }
-
-    /* 3. Run all 9 fixed tampers from immutable in-memory `cur` buffer (no shared mutable source file). */
-    for (i = 0; i < 9; i++) {
-        unsigned char *tbytes = 0;
-        int64_t tn = 0;
-        if (mg_tamper_receipt(tmp, cur, cur_n, path, tampers[i]) != 0) {
-            fprintf(stderr, "mutation-gate: REFUSE mg_tamper_receipt %s\n", tampers[i]);
-            verdicts[i] = 2; any_unmeasured = 1; continue;
-        }
-        if (strcmp(tampers[i], "missing") != 0) {
-            tbytes = execution_evidence(path, &tn);
-            if (!tbytes) { verdicts[i] = 2; any_unmeasured = 1; continue; }
-        }
-        verdicts[i] = execution_tamper_cmd(judge, current_id, path, secs, assertion, tampers[i],
-                                           fail_names[i], sizeof fail_names[i]);
-        if (strcmp(tampers[i], "missing") == 0) {
-            sy_stat_t st;
-            if (sy_lstat(path, &st) != -ENOENT) {
-                fprintf(stderr, "mutation-gate: REFUSE judge created missing evidence\n");
-                verdicts[i] = 2;
-            }
-        } else {
-            if (execution_check_unchanged(path, tbytes, tn) != 0) {
-                fprintf(stderr, "mutation-gate: REFUSE judge modified tamper evidence %s\n", tampers[i]);
-                verdicts[i] = 2;
-            }
-            mm_free(tbytes);
-        }
-        if (verdicts[i] == 1) {
-            for (j = 0; j < i; j++) {
-                if (verdicts[j] == 1 && !strcmp(fail_names[i], fail_names[j])) {
-                    fprintf(stderr, "mutation-gate: REFUSE duplicate FAIL name %s for %s and %s\n",
-                            fail_names[i], tampers[j], tampers[i]);
-                    verdicts[i] = 2;
-                    break;
-                }
-            }
-        }
-        if (verdicts[i] == 2) any_unmeasured = 1;
-        if (verdicts[i] != 1) all_killed = 0;
-    }
-
-    if (any_unmeasured) result = 2;
-    else result = all_killed ? 0 : 1;
-
-done:
-    for (i = 0; i < 9; i++) {
-        printf("MUTATION_EXECUTION\toperator=%s\tverdict=%s\tfail=%s\n",
-               tampers[i],
-               verdicts[i] == 2 ? "UNMEASURED" : (verdicts[i] == 1 ? "KILLED" : "SURVIVED"),
-               fail_names[i][0] ? fail_names[i] : "-");
-    }
-    mm_free(old);
-    mm_free(cur);
-    if (sy_remove_all(tmp) != 0) return 2;
-    return result;
-}
-
 static int execution_gate(int argc, char **argv) {
     const char *produce = 0, *judge = 0, *assertion = 0;
-    const char *missing = 0, *stale = 0, *tamper_set = 0;
+    const char *missing = 0, *stale = 0;
     int secs = 55;
     for (int i = 2; i < argc; i += 2) {
         if (i + 1 == argc) die2("missing value for", argv[i]);
@@ -1327,19 +1022,12 @@ static int execution_gate(int argc, char **argv) {
         else if (!strcmp(argv[i], "--assertion")) assertion = v;
         else if (!strcmp(argv[i], "--expect-missing")) missing = v;
         else if (!strcmp(argv[i], "--expect-stale")) stale = v;
-        else if (!strcmp(argv[i], "--tamper-set")) tamper_set = v;
         else if (!strcmp(argv[i], "--timeout-s")) {
             char *end;
             long parsed = strtol(v, &end, 10);
             if (!*v || *end || parsed < 1 || parsed > 55) die2("bad --timeout-s", v);
             secs = (int)parsed;
         } else die2("unknown execution option", argv[i]);
-    }
-    if (tamper_set) {
-        if (strcmp(tamper_set, "receipt") != 0) die2("unknown --tamper-set", tamper_set);
-        if (!produce || !*produce || !judge || !*judge || !execution_name_ok(assertion))
-            die2("usage", "execution --tamper-set receipt --produce CMD --judge CMD --assertion NAME");
-        return execution_tamper_receipt(produce, judge, assertion, secs);
     }
     if (!produce || !*produce || !judge || !*judge || !execution_name_ok(assertion) ||
         !execution_name_ok(missing) || !execution_name_ok(stale) || !strcmp(missing, stale))
@@ -1437,10 +1125,7 @@ int main(int argc, char **argv) {
     if (!strcmp(mode, "worker")) { if (g_slot < 0) die2("usage", "--slot"); worker(); return 0; }
     if (!strcmp(mode, "report")) return report();
     if (!strcmp(mode, "reclaim")) { drop_slots_mode(); return 0; }
-    if (!strcmp(mode, "run")) {
-        const char *self = (argc > 0 && argv[0] && argv[0][0] == '/' && sy_exists(argv[0]) == 1) ? argv[0] : "tools/mutation-gate.cx";
-        return run_all(self);
-    }
+    if (!strcmp(mode, "run")) return run_all("tools/mutation-gate.cx");
     die2("unknown mode", mode);
     return 2;
 }
