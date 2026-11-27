@@ -1,5 +1,7 @@
 #pragma unisa module receipt
 #pragma unisa use sys.fs
+#pragma unisa use sys.io
+#pragma unisa use sys.posix
 #pragma unisa use sys.sha
 #pragma unisa use sys.time
 #pragma unisa use mem.heap
@@ -452,7 +454,7 @@ static int rc_read_reg_snapshot(const char *path, long max_bytes, unsigned char 
     long r;
     *buf_out = 0; *len_out = 0L;
     if (!path || !path[0]) return 1;
-    fd = sy_open(path, O_RDONLY | O_NONBLOCK | O_NOFOLLOW | O_CLOEXEC, 0);
+    fd = sy_openat_read_nofollow(sy_at_fdcwd(), path);
     if (fd < 0) return 1;
     if (sy_fstat(fd, &fst) != 0 || fst.kind != 'f') { (void)sy_close(fd); return 1; }
     if (sy_lstat(path, &lst) != 0 || lst.kind != 'f' || lst.dev != fst.dev || lst.ino != fst.ino) {
@@ -460,8 +462,8 @@ static int rc_read_reg_snapshot(const char *path, long max_bytes, unsigned char 
         return 1;
     }
     {
-        int fl = fcntl(fd, F_GETFL, 0);
-        if (fl < 0 || fcntl(fd, F_SETFL, fl & ~O_NONBLOCK) != 0) { (void)sy_close(fd); return 1; }
+        int nb = sy_fd_nonblock(fd, 0);
+        if (nb != 0 && nb != -ENOSYS) { (void)sy_close(fd); return 1; }
     }
     if (fst.size <= 0 || fst.size > max_bytes) { (void)sy_close(fd); return 2; }
     b = (unsigned char *)mm_alloc((long)fst.size);

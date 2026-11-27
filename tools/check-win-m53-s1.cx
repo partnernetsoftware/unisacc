@@ -1,17 +1,9 @@
 /* tools/check-win-m53-s1.cx -- win/x86_64 and win/arm64 LLP64 size/ABI assertions,
- * real product m53_s1_pack_bin2 negative-length readback, and portable tape_run_cx PE build gate.
+ * real product m53_s1_pack_bin2 negative-length readback, cross-target PE32+ compile proof
+ * for tests/win-m53-s1-parity.cx, host produce/judge/tamper verification (rc_write3/rc_verify),
+ * and Windows CI workflow contract gate.
  *
- * Verifies:
- *   (1) Cross-compile win/x86_64 PE (Machine 0x8664) and win/arm64 PE (Machine 0xAA64) importing
- *       runtime.tape_exec + runtime.stream_attributes + driver.stream_s1 with LLP64 compile-time
- *       asserts (sizeof(void*)==8, sizeof(long)==4, sizeof(long long)==8, sizeof(tape_run_cx(0))==8)
- *       and runtime readback of real product m53_s1_pack_bin2() + direct tape_run_cx() execution
- *       (ready for Windows CI with argv[1]=m53.tapeslice)
- *   (2) Host-side execution of the exact same product m53_s1_pack_bin2() + portable tape_run_cx()
- *       against real cx/runtime/stream_attributes.cx (cxsa_valid) on positive, invalid, NULL, and
- *       negative-length (-1L, -1000L) inputs, asserting portable arm actually ran (status=0, steps>0)
- *   (3) Explicitly reports win_runtime=UNMEASURED_CI_ONLY until executed on Windows CI
- */
+ * Windows native runtime stays UNMEASURED until Windows CI runs win-m53-s1-parity.yml. */
 #pragma unisa use sys.env
 #pragma unisa use sys.fs
 #pragma unisa use sys.io
@@ -20,6 +12,7 @@
 #pragma unisa use text.text
 #pragma unisa use mem.bytes
 #pragma unisa use mem.heap
+#pragma unisa use cxlib.procrun
 #pragma unisa use runtime.tape_exec
 #pragma unisa use runtime.stream_attributes
 #pragma unisa use driver.stream_s1
@@ -29,13 +22,14 @@ static int g_fail = 0;
 static char g_tmp[512];
 
 static void ck(int ok, const char *name) {
-    if (ok) {
-        g_pass++;
-        sy_printf("PASS\tcheck-win-m53-s1.%s\n", name);
-    } else {
-        g_fail++;
-        sy_printf("FAIL\tcheck-win-m53-s1.%s\n", name);
-    }
+    if (ok) { g_pass++; sy_printf("PASS\tcheck-win-m53-s1.%s\n", name); }
+    else { g_fail++; sy_printf("FAIL\tcheck-win-m53-s1.%s\n", name); }
+}
+
+static int run_av_merged(char **av, char *out, long cap) {
+    int cut = 0;
+    int rc = pr_run_merged(av, 45, out, (int)cap, &cut);
+    return cut ? -1 : rc;
 }
 
 static unsigned int rd_u16(const unsigned char *p) {
@@ -51,23 +45,21 @@ static unsigned long long rd_u64(const unsigned char *p) {
     return (unsigned long long)rd_u32(p) | ((unsigned long long)rd_u32(p + 4) << 32);
 }
 
+/* Read first 1024 bytes via sy_open + sy_read (no whole-file size cap). */
 static int verify_pe_machine(const char *path, unsigned int want_machine) {
-    unsigned char *b = 0;
-    int64_t n = 0;
+    unsigned char hdr[1024];
+    int fd = sy_open_read(path);
+    long n;
     unsigned int pe_off, mach;
-    if (sy_read_file(path, &b, &n, 16 << 20) != 0 || !b || n < 128) {
-        if (b) mm_free(b);
-        return 0;
-    }
-    if (b[0] != 'M' || b[1] != 'Z') { mm_free(b); return 0; }
-    pe_off = rd_u32(b + 60);
-    if ((int64_t)pe_off + 24 > n) { mm_free(b); return 0; }
-    if (b[pe_off] != 'P' || b[pe_off + 1] != 'E' || b[pe_off + 2] != 0 || b[pe_off + 3] != 0) {
-        mm_free(b);
-        return 0;
-    }
-    mach = rd_u16(b + pe_off + 4);
-    mm_free(b);
+    if (fd < 0) return 0;
+    n = sy_read(fd, hdr, (long)sizeof hdr);
+    sy_close(fd);
+    if (n < 128) return 0;
+    if (hdr[0] != 'M' || hdr[1] != 'Z') return 0;
+    pe_off = rd_u32(hdr + 60);
+    if ((long)pe_off + 24 > n) return 0;
+    if (hdr[pe_off] != 'P' || hdr[pe_off + 1] != 'E' || hdr[pe_off + 2] != 0 || hdr[pe_off + 3] != 0) return 0;
+    mach = rd_u16(hdr + pe_off + 4);
     return mach == want_machine ? 1 : 0;
 }
 
@@ -101,7 +93,6 @@ static int run_portable_bin2_case(const unsigned char *sl, long slen,
     if (copy_n > 0ULL) mm_copy(mem + in_off, (long)(memlimit - in_off), data, (long)copy_n);
     ga = (unsigned long long *)(mem + argv_at);
     ba = (unsigned long long *)(mem + argbuf_off);
-    /* Call real product BIN2 packer from cx/driver/stream_s1.cx */
     m53_s1_pack_bin2(ba, data ? (unsigned long long)(mem + in_off) : 0ULL, len);
     if (out_bin1) *out_bin1 = ba[1];
     ga[0] = (unsigned long long)(mem + argbuf_off + 24ULL);
@@ -123,14 +114,29 @@ static int run_portable_bin2_case(const unsigned char *sl, long slen,
 }
 
 int main(void) {
-    const char *td = sy_tmpdir();
-    char win_cx[600], pe_x64[600], pe_a64[600], m53_cx[600], m53_tape[600], m53_sl[600];
+    char bin[600], pe_x64[600], pe_a64[600], llp_cx[600], llp_x64[600], llp_a64[600];
+    char rcpt[600], outf[600], slicef[600], locf[600], bad_rcpt[600], bad_out[600], bad_slice[600];
+    char out[16384];
+    const char *rev = "e39edffdd0000000000000000000000000000000";
 
-    if (cx_fmt(g_tmp, sizeof g_tmp, "%s/unisacc-win-m53-s1-%d", td ? td : "/tmp", sy_pid()) != 0) {
+    if (sy_mkdtemp(sy_tmpdir(), "chk-win-m53-", g_tmp, sizeof g_tmp) != 0) {
         sy_printf("CHECK_WIN_M53_S1\tpassed=0\tfailed=1\trunner=cross-build\tnative=0\twin_runtime=UNMEASURED_CI_ONLY\n");
         return 1;
     }
-    (void)sy_mkdir(g_tmp, 0700);
+    cx_fmt(bin, sizeof bin, "%s/parity_host", g_tmp);
+    cx_fmt(pe_x64, sizeof pe_x64, "%s/parity_win_x64.exe", g_tmp);
+    cx_fmt(pe_a64, sizeof pe_a64, "%s/parity_win_arm64.exe", g_tmp);
+    cx_fmt(llp_cx, sizeof llp_cx, "%s/llp64_probe.cx", g_tmp);
+    cx_fmt(llp_x64, sizeof llp_x64, "%s/llp64_x64.exe", g_tmp);
+    cx_fmt(llp_a64, sizeof llp_a64, "%s/llp64_arm64.exe", g_tmp);
+    cx_fmt(rcpt, sizeof rcpt, "%s/m53.rcpt", g_tmp);
+    cx_fmt(outf, sizeof outf, "%s/m53.out", g_tmp);
+    cx_fmt(slicef, sizeof slicef, "%s/m53.tapeslice", g_tmp);
+    cx_fmt(locf, sizeof locf, "%s/locators.tsv", g_tmp);
+    cx_fmt(bad_rcpt, sizeof bad_rcpt, "%s/m53_bad.rcpt", g_tmp);
+    cx_fmt(bad_out, sizeof bad_out, "%s/m53_bad.out", g_tmp);
+    cx_fmt(bad_slice, sizeof bad_slice, "%s/m53_bad.tapeslice", g_tmp);
+
     {
         char cwd[512], l[600], t[600];
         if (getcwd(cwd, sizeof cwd)) {
@@ -138,130 +144,106 @@ int main(void) {
             cx_fmt(l, sizeof l, "%s/cxroot.tsv", g_tmp); cx_fmt(t, sizeof t, "%s/cxroot.tsv", cwd); (void)sy_symlink(t, l);
         }
     }
-
-    /* Windows CI-ready m53 S1 driver: LLP64 compile-time asserts + real product m53_s1_pack_bin2()
-     * readback + direct portable tape_run_cx() execution when argv[1]=m53.tapeslice is supplied on CI. */
     {
-        const char *wsrc =
+        const char *lsrc =
             "#pragma unisa use runtime.tape_exec\n"
-            "#pragma unisa use runtime.stream_attributes\n"
             "#pragma unisa use driver.stream_s1\n"
-            "#pragma unisa use sys.fs\n"
-            "#pragma unisa use sys.io\n"
-            "#pragma unisa use mem.bytes\n"
-            "#pragma unisa use mem.heap\n"
-            "typedef char win_assert_ptr8[sizeof(void *) == 8 ? 1 : -1];\n"
-            "typedef char win_assert_long4[sizeof(long) == 4 ? 1 : -1];\n"
-            "typedef char win_assert_ulong4[sizeof(unsigned long) == 4 ? 1 : -1];\n"
-            "typedef char win_assert_ll8[sizeof(long long) == 8 ? 1 : -1];\n"
-            "typedef char win_assert_ull8[sizeof(unsigned long long) == 8 ? 1 : -1];\n"
-            "typedef char win_assert_run_ret8[sizeof(tape_run_cx(0)) == 8 ? 1 : -1];\n"
-            "static unsigned long long rd_u(const unsigned char *p, int k) {\n"
-            "    unsigned long long v = 0ULL; int i = k - 1;\n"
-            "    while (i >= 0) { v = (v << 8) | (unsigned long long)p[i]; i--; }\n"
-            "    return v;\n"
-            "}\n"
-            "static int run_one(const unsigned char *sl, long slen, const unsigned char *d, long n,\n"
-            "                   unsigned long long *b1_out, unsigned long long *st_out, int *ret_out) {\n"
-            "    unsigned long long cl = rd_u(sl + 64 + 12, 8), dof = rd_u(sl + 64 + 24 + 4, 8), dln = rd_u(sl + 64 + 24 + 12, 8);\n"
-            "    unsigned long long bsz = rd_u(sl + rd_u(sl + 64 + 48 + 4, 8), 8);\n"
-            "    unsigned long long ino = ((dln + 7ULL) & ~7ULL) + bsz, cn = (d && n > 0) ? (unsigned long long)n : 0ULL;\n"
-            "    unsigned long long ine = (ino + cn + 7ULL) & ~7ULL, av = ine + 65536ULL, ab = av + 64ULL, ml = ab + 128ULL;\n"
-            "    unsigned long long ic = (cl + 7ULL) >> 3; if (ic == 0ULL) ic = 1ULL;\n"
-            "    unsigned char *m = (unsigned char *)mm_alloc((size_t)ml), *bm = (unsigned char *)mm_alloc((size_t)ic);\n"
-            "    unsigned long long *ga, *ba, args[12], res[5]; int i;\n"
-            "    if (!m || !bm) return -1;\n"
-            "    mm_fill(m, (long)ml, 0, (long)ml); mm_fill(bm, (long)ic, 0, (long)ic);\n"
-            "    if (dln > 0ULL) mm_copy(m, (long)ml, sl + dof, (long)dln);\n"
-            "    if (cn > 0ULL) mm_copy(m + ino, (long)(ml - ino), d, (long)cn);\n"
-            "    ga = (unsigned long long *)(m + av); ba = (unsigned long long *)(m + ab);\n"
-            "    m53_s1_pack_bin2(ba, d ? (unsigned long long)(m + ino) : 0ULL, n);\n"
-            "    *b1_out = ba[1];\n"
-            "    ga[0] = (unsigned long long)(m + ab + 24ULL); ga[1] = (unsigned long long)ba;\n"
-            "    ga[2] = (unsigned long long)(m + ab + 24ULL); ga[3] = 0ULL;\n"
-            "    for (i = 0; i < 5; i++) res[i] = 0xdeadULL;\n"
-            "    args[0] = 4ULL; args[1] = (unsigned long long)sl; args[2] = ml; args[3] = 2000000ULL;\n"
-            "    args[4] = 3ULL; args[5] = (unsigned long long)ga; args[6] = (unsigned long long)res;\n"
-            "    args[7] = (unsigned long long)slen; args[8] = 0ULL; args[9] = (unsigned long long)m;\n"
-            "    args[10] = (unsigned long long)bm; args[11] = ic;\n"
-            "    (void)tape_run_cx(args); mm_free(bm); mm_free(m);\n"
-            "    *st_out = res[2]; *ret_out = (int)res[1];\n"
-            "    return res[0] == 0ULL ? 0 : -2;\n"
-            "}\n"
-            "int main(int argc, char **argv) {\n"
-            "    unsigned long long blk[3];\n"
-            "    unsigned char v0[4] = {0, 0, 0, 0}, v1[13] = {1,0,0,0,1,2,3,4,5,6,7,8,9}, vb[12] = {1,0,0,0,1,2,3,4,5,6,7,8};\n"
-            "    m53_s1_pack_bin2(blk, 0x1000ULL, -1L);\n"
-            "    if (blk[1] != 0xffffffffffffffffULL) return 2;\n"
-            "    m53_s1_pack_bin2(blk, 0x1000ULL, -1000L);\n"
-            "    if (blk[1] != 0xfffffffffffffc18ULL) return 3;\n"
-            "    if (argc > 1 && argv[1][0]) {\n"
-            "        unsigned char *sl = 0; int64_t slen = 0;\n"
-            "        const unsigned char *ps[6] = {v0, v1, vb, 0, v0, v0};\n"
-            "        long ls[6] = {4L, 13L, 12L, 4L, -1L, -1000L};\n"
-            "        int k;\n"
-            "        if (sy_read_file(argv[1], &sl, &slen, 4 << 20) != 0 || !sl) return 4;\n"
-            "        for (k = 0; k < 6; k++) {\n"
-            "            unsigned long long b1 = 0, st = 0; int tr = -1, nat = cxsa_valid(ps[k], ls[k]);\n"
-            "            if (run_one(sl, (long)slen, ps[k], ls[k], &b1, &st, &tr) != 0 || st == 0ULL || tr != nat) return 10 + k;\n"
-            "            if (ls[k] == -1L && b1 != 0xffffffffffffffffULL) return 20;\n"
-            "            if (ls[k] == -1000L && b1 != 0xfffffffffffffc18ULL) return 21;\n"
-            "        }\n"
-            "        mm_free(sl);\n"
-            "    }\n"
-            "    sy_printf(\"WIN_M53_S1_DONE\\tok=1\\n\");\n"
-            "    return 0;\n"
-            "}\n";
-        cx_fmt(win_cx, sizeof win_cx, "%s/win_m53_s1_drv.cx", g_tmp);
-        cx_fmt(pe_x64, sizeof pe_x64, "%s/win_m53_s1_x86_64.exe", g_tmp);
-        cx_fmt(pe_a64, sizeof pe_a64, "%s/win_m53_s1_arm64.exe", g_tmp);
-        (void)sy_write_file(win_cx, (const unsigned char *)wsrc, tx_len(wsrc, 16384), 0600);
+            "typedef char llp64_ptr8[sizeof(void *) == 8 ? 1 : -1];\n"
+            "typedef char llp64_long4[sizeof(long) == 4 ? 1 : -1];\n"
+            "typedef char llp64_ll8[sizeof(long long) == 8 ? 1 : -1];\n"
+            "typedef char llp64_run_ret8[sizeof(tape_run_cx(0)) == 8 ? 1 : -1];\n"
+            "int main(void) { unsigned long long b[3]; m53_s1_pack_bin2(b, 0x1000ULL, -1L); return b[1] == 0xffffffffffffffffULL ? 0 : 1; }\n";
+        (void)sy_write_file(llp_cx, (const unsigned char *)lsrc, tx_len(lsrc, 4096), 0600);
     }
 
-    /* 1. Cross-compile win/x86_64 and win/arm64 PE executables with LLP64 + m53_s1_pack_bin2 + tape_run_cx */
+    /* 1. Cross-compile host + win/x86_64 + win/arm64 parity binaries + LLP64 probes in parallel */
     {
-        char *av[] = {"sh", "./unisacc.com", "--target=win/x86_64", win_cx, "-o", pe_x64, 0}; /* lint:allow R1-product cross-compiles win/x86_64 m53 S1 PE */
-        char *co = 0; size_t cn = 0;
-        int rc = cx_runv_timeout(av, 30, &co, &cn);
-        if (co) mm_free(co);
-        ck(rc == 0 && sy_exists(pe_x64) == 1, "win-x86_64-llp64-asserts-and-build");
-        ck(verify_pe_machine(pe_x64, 0x8664U) == 1, "win-x86_64-pe-header-amd64");
-    }
-    {
-        char *av[] = {"sh", "./unisacc.com", "--target=win/arm64", win_cx, "-o", pe_a64, 0}; /* lint:allow R1-product cross-compiles win/arm64 m53 S1 PE */
-        char *co = 0; size_t cn = 0;
-        int rc = cx_runv_timeout(av, 30, &co, &cn);
-        if (co) mm_free(co);
-        ck(rc == 0 && sy_exists(pe_a64) == 1, "win-arm64-llp64-asserts-and-build");
-        ck(verify_pe_machine(pe_a64, 0xaa64U) == 1, "win-arm64-pe-header-arm64");
+        char *av_h[] = {"sh", "./unisacc.com", "tests/win-m53-s1-parity.cx", "-o", bin, 0}; /* lint:allow R1-product compiles host win parity binary */
+        char *av_x[] = {"sh", "./unisacc.com", "--target=win/x86_64", "tests/win-m53-s1-parity.cx", "-o", pe_x64, 0}; /* lint:allow R1-product cross-compiles win/x86_64 parity binary */
+        char *av_a[] = {"sh", "./unisacc.com", "--target=win/arm64", "tests/win-m53-s1-parity.cx", "-o", pe_a64, 0}; /* lint:allow R1-product cross-compiles win/arm64 parity binary */
+        char *av_lx[] = {"sh", "./unisacc.com", "--target=win/x86_64", llp_cx, "-o", llp_x64, 0}; /* lint:allow R1-product cross-compiles win/x86_64 LLP64 probe */
+        char *av_la[] = {"sh", "./unisacc.com", "--target=win/arm64", llp_cx, "-o", llp_a64, 0}; /* lint:allow R1-product cross-compiles win/arm64 LLP64 probe */
+        char **avs[5];
+        sy_child_t ch[5];
+        int sp[5], rc[5], i;
+        avs[0] = av_h; avs[1] = av_x; avs[2] = av_a; avs[3] = av_lx; avs[4] = av_la;
+        for (i = 0; i < 5; i++) {
+            sy_spawn_t opt;
+            sy_spawn_init(&opt);
+            opt.argv = avs[i];
+            opt.in_fd = SY_STDIO_NULL;
+            opt.out_fd = SY_STDIO_NULL;
+            opt.err_fd = SY_STDIO_NULL;
+            opt.pgroup = -1;
+            opt.deadline_ms = 45000;
+            sp[i] = sy_proc_spawn(&opt, &ch[i]);
+            rc[i] = -1;
+        }
+        for (i = 0; i < 5; i++) {
+            if (sp[i] == 0) {
+                sy_exit_t st;
+                if (sy_proc_wait(&ch[i], &st) == 0) rc[i] = sy_exit_code(&st);
+            }
+        }
+        ck(rc[0] == 0 && sy_exists(bin) == 1, "compile-host-parity-bin");
+        ck(rc[1] == 0 && verify_pe_machine(pe_x64, 0x8664U) == 1 &&
+           rc[3] == 0 && verify_pe_machine(llp_x64, 0x8664U) == 1, "win-x86_64-llp64-and-pe-header-amd64");
+        ck(rc[2] == 0 && verify_pe_machine(pe_a64, 0xaa64U) == 1 &&
+           rc[4] == 0 && verify_pe_machine(llp_a64, 0xaa64U) == 1, "win-arm64-llp64-and-pe-header-arm64");
     }
 
-    /* 2. Host-side readback of real product m53_s1_pack_bin2() + portable tape_run_cx() on real cxsa_valid slice */
-    {
-        const char *msrc =
-            "#pragma unisa use runtime.stream_attributes\n"
-            "int main(int argc, char **argv) {\n"
-            "    const char *abi = \"M53S1BIN2\";\n"
-            "    const unsigned long long *ba;\n"
-            "    if (abi[0] != 'M' || argc < 2) return 2;\n"
-            "    ba = (const unsigned long long *)argv[1];\n"
-            "    return cxsa_valid((const unsigned char *)ba[0], (long)ba[1]);\n"
-            "}\n";
-        unsigned char *sl = 0; int64_t slen = 0;
-        int ok = 0;
-        cx_fmt(m53_cx, sizeof m53_cx, "%s/m53_bin2.cx", g_tmp);
-        cx_fmt(m53_tape, sizeof m53_tape, "%s/m53_bin2.tape", g_tmp);
-        cx_fmt(m53_sl, sizeof m53_sl, "%s/m53_bin2.tapeslice", g_tmp);
-        (void)sy_write_file(m53_cx, (const unsigned char *)msrc, tx_len(msrc, 4096), 0600);
+    if (sy_exists(bin) == 1) {
+        /* 2. Pack real P4 candidate embedding tape/lnx-x86_64/m53.tapeslice, then run live dual-arm APE readback + --judge (rc_write3 / rc_verify) */
+        char cand_p4[600];
+        cx_fmt(cand_p4, sizeof cand_p4, "%s/cand_m53.p4", g_tmp);
         {
-            char *av1[] = {"sh", "./unisacc.com", "--target", "lnx/x86_64", "-S", m53_cx, "-o", m53_tape, 0}; /* lint:allow R1-product compiles real m53 slice */
-            char *av2[] = {"sh", "./unisacc.com", "tools/tapepack.cx", "--", m53_tape, "-o", m53_sl, 0}; /* lint:allow R1-product packs real m53 slice */
-            char *co = 0; size_t cn = 0;
-            int r1 = cx_runv_timeout(av1, 30, &co, &cn);
-            if (co) { mm_free(co); co = 0; }
-            int r2 = (r1 == 0) ? cx_runv_timeout(av2, 30, &co, &cn) : 1;
-            if (co) { mm_free(co); co = 0; }
-            if (r2 == 0 && sy_read_file(m53_sl, &sl, &slen, 4 << 20) == 0 && sl) {
+            char m53_cx[600], m53_tape[600], m53_src_sl[600], dummy_so[600];
+            const char *msrc =
+                "#pragma unisa use runtime.stream_attributes\n"
+                "int main(int argc, char **argv) {\n"
+                "    const char *abi = \"M53S1BIN2\";\n"
+                "    const unsigned long long *ba;\n"
+                "    if (abi[0] != 'M' || argc < 2) return 2;\n"
+                "    ba = (const unsigned long long *)argv[1];\n"
+                "    return cxsa_valid((const unsigned char *)ba[0], (long)ba[1]);\n"
+                "}\n";
+            cx_fmt(m53_cx, sizeof m53_cx, "%s/m53_wrap.cx", g_tmp);
+            cx_fmt(m53_tape, sizeof m53_tape, "%s/m53_wrap.tape", g_tmp);
+            cx_fmt(m53_src_sl, sizeof m53_src_sl, "%s/m53_src.tapeslice", g_tmp);
+            cx_fmt(dummy_so, sizeof dummy_so, "%s/dummy_tapemode.so", g_tmp);
+            (void)sy_write_file(m53_cx, (const unsigned char *)msrc, tx_len(msrc, 4096), 0600);
+            (void)sy_write_file(dummy_so, (const unsigned char *)"\x7f" "ELF_DUMMY_SO_0123", 17, 0600);
+            char *av_s1[] = {"sh", "./unisacc.com", "--target", "lnx/x86_64", "-S", m53_cx, "-o", m53_tape, 0}; /* lint:allow R1-product compiles real m53 slice */
+            char *av_s2[] = {"sh", "./unisacc.com", "tools/tapepack.cx", "--", m53_tape, "-o", m53_src_sl, 0}; /* lint:allow R1-product packs real m53 slice */
+            char *av_s3[] = {"sh", "./unisacc.com", "tools/p4-embed.cx", "--", "./unisacc.com", dummy_so, m53_src_sl, cand_p4, 0}; /* lint:allow R1-product embeds m53 slice into P4 carrier */
+            int rs1 = run_av_merged(av_s1, out, sizeof out);
+            int rs2 = (rs1 == 0) ? run_av_merged(av_s2, out, sizeof out) : 1;
+            int rs3 = (rs2 == 0) ? run_av_merged(av_s3, out, sizeof out) : 1;
+            char *av_p[] = {bin, "--receipt", rcpt, "--output", outf, "--slice", slicef, "--locators", locf,
+                            "--run-id", "r1", "--rev", (char *)rev, "--candidate-file", cand_p4,
+                            "--expect-target", "lnx/x86_64", "--ts", "1764200000", 0};
+            char *av_j[] = {bin, "--judge", "--receipt", rcpt, "--output", outf, "--slice", slicef,
+                            "--run-id", "r1", "--rev", (char *)rev, "--candidate-file", cand_p4,
+                            "--expect-target", "lnx/x86_64", "--producer", "win-m53-s1-parity",
+                            "--purpose", "s1-parity", "--now-ts", "1764200060", 0};
+            int r1 = (rs3 == 0) ? run_av_merged(av_p, out, sizeof out) : 1;
+            int p_ok = (r1 == 0 && strstr(out, "PASS\tm53-s1-parity\ttarget=lnx/x86_64") != 0 &&
+                        sy_exists(slicef) == 1 && sy_exists(locf) == 1);
+            int r2 = p_ok ? run_av_merged(av_j, out, sizeof out) : 1;
+            unsigned char *rb = 0; int64_t rn = 0;
+            int has_bind = 0;
+            if (p_ok && sy_read_file(rcpt, &rb, &rn, 65536) == 0 && rb) {
+                has_bind = (strstr((char *)rb, "binding_sha\t") != 0 && strstr((char *)rb, "version\t3\n") != 0);
+                mm_free(rb);
+            }
+            ck(p_ok && r2 == 0 && strstr(out, "judge=ok") != 0 && has_bind, "live-dual-arm-ape-readback-and-rc-verify");
+        }
+
+        /* 2b. Direct product m53_s1_pack_bin2 negative-length readback on the extracted APE slice */
+        {
+            unsigned char *sl = 0; int64_t slen = 0;
+            int ok = 0;
+            if (sy_read_file(slicef, &sl, &slen, 4 << 20) == 0 && sl) {
                 unsigned char v0[4] = {0,0,0,0}, v1[13] = {1,0,0,0,1,2,3,4,5,6,7,8,9}, vb[12] = {1,0,0,0,1,2,3,4,5,6,7,8};
                 const unsigned char *ps[6] = {v0, v1, vb, 0, v0, v0};
                 long ls[6] = {4L, 13L, 12L, 4L, -1L, -1000L};
@@ -271,18 +253,124 @@ int main(void) {
                     unsigned long long b1 = 0ULL, st = 0ULL;
                     int tr = -1, nat = cxsa_valid(ps[k], ls[k]);
                     if (run_portable_bin2_case(sl, (long)slen, ps[k], ls[k], &b1, &st, &tr) != 0 ||
-                        st == 0ULL || tr != nat) {
-                        ok = 0;
-                    }
+                        st == 0ULL || tr != nat) ok = 0;
                     if (ls[k] == -1L && b1 != 0xffffffffffffffffULL) ok = 0;
                     if (ls[k] == -1000L && b1 != 0xfffffffffffffc18ULL) ok = 0;
                 }
                 mm_free(sl);
             }
+            ck(ok, "product-bin2-pack-and-portable-arm-readback");
         }
-        ck(ok, "product-bin2-pack-and-portable-arm-readback");
+
+        /* 3. Negative controls + Linux O_NOFOLLOW/O_NONBLOCK receipt open semantics (regular PASS, symlink REFUSE, FIFO REFUSE) */
+        {
+            char *av_m[] = {bin, "--receipt", rcpt, "--output", outf, "--slice", slicef, "--run-id", "r2",
+                            "--rev", (char *)rev, "--candidate-file", cand_p4,
+                            "--ts", "1764200000", 0};
+            ck(run_av_merged(av_m, out, sizeof out) == 2, "refuse-missing-expect-target");
+        }
+        {
+            char *av_w[] = {bin, "--receipt", rcpt, "--output", outf, "--slice", slicef, "--run-id", "r2",
+                            "--rev", (char *)rev, "--candidate-file", cand_p4,
+                            "--expect-target", "win/arm64", "--ts", "1764200000", 0};
+            ck(run_av_merged(av_w, out, sizeof out) == 1 && strstr(out, "target-mismatch") != 0, "refuse-wrong-expect-target");
+        }
+        {
+            char *av_s[] = {bin, "--receipt", rcpt, "--output", outf, "--slice", slicef, "--run-id", "r2",
+                            "--rev", (char *)rev, "--candidate-file", "cx/runtime/tape_exec.cx",
+                            "--expect-target", "lnx/x86_64", "--ts", "1764200000", 0};
+            ck(run_av_merged(av_s, out, sizeof out) == 2 && strstr(out, "candidate-is-source") != 0, "refuse-source-as-candidate");
+        }
+        {
+            (void)sy_write_file(bad_out, (const unsigned char *)"tampered\n", 9, 0600);
+            char *av_to[] = {bin, "--judge", "--receipt", rcpt, "--output", bad_out, "--slice", slicef,
+                             "--run-id", "r1", "--rev", (char *)rev, "--candidate-file", cand_p4,
+                             "--expect-target", "lnx/x86_64", "--now-ts", "1764200060", 0};
+            ck(run_av_merged(av_to, out, sizeof out) == 1 && strstr(out, "output-mismatch") != 0, "rc-verify-rejects-tampered-output");
+        }
+        {
+            (void)sy_write_file(bad_slice, (const unsigned char *)"badslice", 8, 0600);
+            char *av_ts[] = {bin, "--judge", "--receipt", rcpt, "--output", outf, "--slice", bad_slice,
+                             "--run-id", "r1", "--rev", (char *)rev, "--candidate-file", cand_p4,
+                             "--expect-target", "lnx/x86_64", "--now-ts", "1764200060", 0};
+            ck(run_av_merged(av_ts, out, sizeof out) == 1 && strstr(out, "inputs-mismatch") != 0, "rc-verify-rejects-tampered-slice");
+        }
+        {
+            char *av_tp[] = {bin, "--judge", "--receipt", rcpt, "--output", outf, "--slice", slicef,
+                             "--run-id", "r1", "--rev", (char *)rev, "--candidate-file", cand_p4,
+                             "--expect-target", "lnx/x86_64", "--producer", "wrong-producer",
+                             "--purpose", "s1-parity", "--now-ts", "1764200060", 0};
+            ck(run_av_merged(av_tp, out, sizeof out) == 1 && strstr(out, "producer-or-purpose-mismatch") != 0, "rc-verify-rejects-wrong-producer");
+        }
+        {
+            unsigned char *rb = 0; int64_t rn = 0;
+            int tok = 0;
+            if (sy_read_file(rcpt, &rb, &rn, 65536) == 0 && rb && rn > 0) {
+                char *pos = strstr((char *)rb, "target\tlnx/x86_64");
+                if (pos) {
+                    mm_copy(pos, 17, "target\twin/x86_64", 17);
+                    (void)sy_write_file(bad_rcpt, rb, (long)rn, 0600);
+                    char *av_tt[] = {bin, "--judge", "--receipt", bad_rcpt, "--output", outf, "--slice", slicef,
+                                     "--run-id", "r1", "--rev", (char *)rev, "--candidate-file", cand_p4,
+                                     "--expect-target", "lnx/x86_64", "--now-ts", "1764200060", 0};
+                    tok = (run_av_merged(av_tt, out, sizeof out) == 1 &&
+                           (strstr(out, "bad-binding") != 0 || strstr(out, "target-mismatch") != 0));
+                }
+                mm_free(rb);
+            }
+            ck(tok, "rc-verify-rejects-tampered-target");
+        }
+        {
+            char sym_rcpt[600], fifo_rcpt[600];
+            cx_fmt(sym_rcpt, sizeof sym_rcpt, "%s/sym.rcpt", g_tmp);
+            cx_fmt(fifo_rcpt, sizeof fifo_rcpt, "%s/fifo.rcpt", g_tmp);
+            int sym_ok = (sy_symlink(rcpt, sym_rcpt) == 0);
+            char *av_mkf[] = {"mkfifo", fifo_rcpt, 0};
+            int fifo_ok = (run_av_merged(av_mkf, out, sizeof out) == 0);
+            char *av_sym[] = {bin, "--judge", "--receipt", sym_rcpt, "--output", outf, "--slice", slicef,
+                              "--run-id", "r1", "--rev", (char *)rev, "--candidate-file", cand_p4,
+                              "--expect-target", "lnx/x86_64", "--producer", "win-m53-s1-parity",
+                              "--purpose", "s1-parity", "--now-ts", "1764200060", 0};
+            char *av_fif[] = {bin, "--judge", "--receipt", fifo_rcpt, "--output", outf, "--slice", slicef,
+                              "--run-id", "r1", "--rev", (char *)rev, "--candidate-file", cand_p4,
+                              "--expect-target", "lnx/x86_64", "--producer", "win-m53-s1-parity",
+                              "--purpose", "s1-parity", "--now-ts", "1764200060", 0};
+            int r_sym = sym_ok ? run_av_merged(av_sym, out, sizeof out) : 0;
+            int r_fif = fifo_ok ? run_av_merged(av_fif, out, sizeof out) : 0;
+            ck(sym_ok && r_sym == 1 && fifo_ok && r_fif == 1, "linux-receipt-nofollow-rejects-symlink-and-fifo");
+        }
     }
 
+    /* 4. Workflow contract check (3-job repo-scoped provenance + delivered-APE readback + independent judge) */
+    {
+        unsigned char *wb = 0; int64_t wn = 0;
+        int wok = 0;
+        if (sy_read_file(".github/workflows/win-m53-s1-parity.yml", &wb, &wn, 65536) == 0 && wb) {
+            const char *s = (const char *)wb;
+            wok = (strstr(s, "bootstrap-unisacc") == 0 &&
+                   strstr(s, "fetch:") != 0 &&
+                   strstr(s, "produce:") != 0 &&
+                   strstr(s, "judge:") != 0 &&
+                   strstr(s, "windows-2025") != 0 &&
+                   strstr(s, "windows-11-arm") != 0 &&
+                   strstr(s, "ubuntu-latest") != 0 &&
+                   strstr(s, "download_repo_scoped") != 0 &&
+                   strstr(s, "CHAIN_FORMAT=rc_v3") != 0 &&
+                   strstr(s, "TRUSTED_SLICE_SHA") != 0 &&
+                   strstr(s, "tests/fixtures/win-m53-s1/vectors.tsv") != 0 &&
+                   strstr(s, "delivered_ape:tape/lnx-x86_64/m53.tapeslice") != 0 &&
+                   strstr(s, "candidate_url:") != 0 &&
+                   strstr(s, "candidate_sha256:") != 0 &&
+                   strstr(s, "candidate_receipt_url:") != 0 &&
+                   strstr(s, "locators.tsv") != 0 &&
+                   strstr(s, "m53_bin2.tapeslice") != 0 &&
+                   strstr(s, "candidate-chain.rcpt") != 0);
+            mm_free(wb);
+        }
+        ck(wok, "workflow-repo-provenance-ape-readback-and-independent-judge");
+    }
+
+    (void)sy_remove_all(g_tmp);
     sy_printf("CHECK_WIN_M53_S1\tpassed=%d\tfailed=%d\trunner=cross-build\tnative=0\twin_runtime=UNMEASURED_CI_ONLY\n", g_pass, g_fail);
     return g_fail ? 1 : 0;
 }
