@@ -752,6 +752,114 @@ int main(int argc, char **argv) {
            "default-base-accepted-by-sessionroot-sr-ok");
     }
 
+    /* (5) BOOTSTRAP_FROM derivation from unisacc.com.build.json */
+    {
+        char grepo[P], gbase[P], gchain[P], gsh[P * 3], c1[64], c2[64], c3[64], bj[P], logp[P];
+        char *outp = 0; size_t outn = 0;
+        if (join(grepo, work, "bf_repo") || join(gbase, work, "bf_base") ||
+            join(gchain, work, "bf_chain.sh") || join(bj, grepo, "unisacc.com.build.json")) return 2;
+        rc = sy_mkdir(grepo, 0755) || sy_mkdir(gbase, 0755);
+        if (!rc) {
+            char fch[P + 64];
+            cx_fmt(fch, sizeof fch, "#!/bin/sh\nprintf '%%s' \"$BOOTSTRAP_FROM\" > '%s/bf_seen.txt'\nsleep 1\nexit 0\n", work);
+            rc = put(work, "bf_chain.sh", fch) || sy_chmod(gchain, 0755);
+        }
+        if (!rc) {
+            cx_fmt(gsh, sizeof gsh,
+                   "git -C '%s' init -q && git -C '%s' config user.email t@t && git -C '%s' config user.name t && "
+                   "echo a > '%s/f' && git -C '%s' add f && git -C '%s' commit -q -m c1 && git -C '%s' rev-parse HEAD && "
+                   "echo b > '%s/f' && git -C '%s' add f && git -C '%s' commit -q -m c2 && git -C '%s' rev-parse HEAD && "
+                   "git -C '%s' checkout -q -b other HEAD~1 && echo c > '%s/f' && git -C '%s' add f && git -C '%s' commit -q -m c3 && git -C '%s' rev-parse HEAD",
+                   grepo, grepo, grepo, grepo, grepo, grepo, grepo, grepo, grepo, grepo, grepo, grepo, grepo, grepo, grepo, grepo);
+            char *gv[] = {"sh", "-c", gsh, 0};
+            rc = cx_runv_timeout(gv, 20, &outp, &outn);
+            if (rc == 0 && outp && outn >= 120) {
+                char *p = outp;
+                memcpy(c1, p, 40); c1[40] = 0; p += 41;
+                memcpy(c2, p, 40); c2[40] = 0; p += 41;
+                memcpy(c3, p, 40); c3[40] = 0;
+            } else rc = 1;
+            mm_free(outp);
+        }
+        if (!rc) {
+            char bbuild[P], brel[P];
+            rc = join(bbuild, grepo, "build") || sy_mkdir(bbuild, 0755) ||
+                 join(brel, grepo, "release") || sy_mkdir(brel, 0755) ||
+                 put(bbuild, "chain-phases.tsv", "phase\tname\n1\tprep\n") ||
+                 put(brel, "candidate.tsv", "tag\tversion\nv0.0.1\t0.0.1\n") ||
+                 put(grepo, "unisacc.com", "#!/bin/sh\nexit 0\n");
+        }
+        if (!rc) {
+            char bjc[256];
+            cx_fmt(bjc, sizeof bjc, "{\"commit\":\"%s\"}\n", c1);
+            rc = put(grepo, "unisacc.com.build.json", bjc);
+        }
+        /* 5a: ancestor -> derived */
+        if (!rc) {
+            cx_fmt(gsh, sizeof gsh, "env -u BOOTSTRAP_FROM '%s' start --root '%s' --base '%s' --rev '%s' --chain '%s' --deadline-s 10",
+                   bin, grepo, gbase, c2, gchain);
+            char *sv[] = {"sh", "-c", gsh, 0};
+            mm_free(last); last = 0; lastn = 0;
+            rc = cx_runv_timeout(sv, 20, &last, &lastn);
+            ck(rc == 0 && last && memcmp(last, "BG_BOOTSTRAP_FROM\tcommit=", 25) == 0 && memcmp(last + 25, c1, 40) == 0,
+               "bootstrap-from-ancestor-derived");
+            if (join(logp, work, "bf_seen.txt") == 0) {
+                char *lg = 0;
+                for (int wi = 0; wi < 20; wi++) {
+                    usleep(100000);
+                    lg = cx_read(logp, &outn);
+                    if (lg && outn >= 40) break;
+                    mm_free(lg); lg = 0;
+                }
+                ck(lg && outn >= 40 && memcmp(lg, c1, 40) == 0, "bootstrap-from-exported-to-chain");
+                mm_free(lg);
+            }
+        }
+        /* 5b: explicit mismatch -> refuse */
+        {
+            cx_fmt(gsh, sizeof gsh, "BOOTSTRAP_FROM='%s' '%s' start --root '%s' --base '%s' --rev '%s' --chain '%s' --deadline-s 10",
+                   c3, bin, grepo, gbase, c2, gchain);
+            char *sv[] = {"sh", "-c", gsh, 0};
+            mm_free(last); last = 0; lastn = 0;
+            rc = cx_runv_timeout(sv, 20, &last, &lastn);
+            ck(rc != 0 && last && strstr(last, "reason=bootstrap-from-mismatch") != 0,
+               "bootstrap-from-explicit-mismatch-refused");
+        }
+        /* 5c: non-ancestor -> refuse */
+        {
+            char bjc[256];
+            cx_fmt(bjc, sizeof bjc, "{\"commit\":\"%s\"}\n", c3);
+            (void)put(grepo, "unisacc.com.build.json", bjc);
+            cx_fmt(gsh, sizeof gsh, "env -u BOOTSTRAP_FROM '%s' start --root '%s' --base '%s' --rev '%s' --chain '%s' --deadline-s 10",
+                   bin, grepo, gbase, c2, gchain);
+            char *sv[] = {"sh", "-c", gsh, 0};
+            mm_free(last); last = 0; lastn = 0;
+            rc = cx_runv_timeout(sv, 20, &last, &lastn);
+            ck(rc != 0 && last && strstr(last, "reason=bootstrap-from-not-ancestor") != 0,
+               "bootstrap-from-non-ancestor-refused");
+        }
+        /* 5d: existing snap/unisacc.com.build.json differs from root's -> snap wins */
+        {
+            char gbase2[P], sdir[P], snapd[P], bjc[256];
+            if (join(gbase2, work, "bf_base2") == 0 && sy_mkdir(gbase2, 0755) == 0 &&
+                join(sdir, gbase2, c2) == 0 && join(snapd, sdir, "snap") == 0) {
+                (void)sy_mkdir(sdir, 0755);
+                (void)sy_mkdir(snapd, 0755);
+                cx_fmt(bjc, sizeof bjc, "{\"commit\":\"%s\"}\n", c1);
+                (void)put(snapd, "unisacc.com.build.json", bjc);
+                cx_fmt(gsh, sizeof gsh, "env -u BOOTSTRAP_FROM '%s' start --root '%s' --base '%s' --rev '%s' --chain '%s' --deadline-s 10",
+                       bin, grepo, gbase2, c2, gchain);
+                char *sv[] = {"sh", "-c", gsh, 0};
+                mm_free(last); last = 0; lastn = 0;
+                rc = cx_runv_timeout(sv, 20, &last, &lastn);
+                ck(rc == 0 && last && memcmp(last, "BG_BOOTSTRAP_FROM\tcommit=", 25) == 0 && memcmp(last + 25, c1, 40) == 0,
+                   "bootstrap-from-existing-snap-overrides-root");
+            } else {
+                ck(0, "bootstrap-from-existing-snap-overrides-root");
+            }
+        }
+    }
+
     mm_free(last);
     last = 0;
     sy_printf("CHECK_BG_CANDIDATE\tfailed=%d\twork=%s\n", failed, work);
