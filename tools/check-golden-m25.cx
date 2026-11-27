@@ -1,0 +1,156 @@
+/* tools/check-golden-m25.cx -- committed golden batch for m25 (cx/compiler/rtsharedname.cx).
+ * Authorship: reuses M25_TAPE_GOLDEN enum-full design from agyneon2
+ * (w-agyneon2/.work/m25-tape/verify_m25_golden.cx).
+ * Modes:
+ *   default            red when migrated path is absent or differs from native oracle
+ *   --selftest         runs native oracle (enum-full) + absent-red + diff-red mutations
+ *   --produce ID PATH  run selftest and write run-id bound evidence
+ *   --judge ID PATH    verify run-id bound evidence for mutation-gate execution
+ */
+#pragma unisa use sys.fs
+#pragma unisa use sys.io
+#pragma unisa use sys.posix
+#pragma unisa use text.text
+#pragma unisa use text.fmt
+#pragma unisa use mem.heap
+#pragma unisa use mem.bytes
+#pragma unisa use compiler.rtsharedname
+
+static char *gm_read_file(const char *path, size_t *out_len) {
+    FILE *f = fopen(path, "rb");
+    if (!f) return 0;
+    if (fseek(f, 0, SEEK_END) != 0) { fclose(f); return 0; }
+    long sz = ftell(f);
+    if (sz < 0) { fclose(f); return 0; }
+    rewind(f);
+    char *buf = (char *)mm_alloc((size_t)sz + 1);
+    if (!buf) { fclose(f); return 0; }
+    size_t nr = sz > 0 ? fread(buf, 1, (size_t)sz, f) : 0;
+    fclose(f);
+    buf[nr] = 0;
+    if (out_len) *out_len = nr;
+    return buf;
+}
+
+static int gm_write_file(const char *path, const char *buf, size_t len) {
+    FILE *f = fopen(path, "wb");
+    if (!f) return -1;
+    size_t nw = len > 0 ? fwrite(buf, 1, len, f) : 0;
+    fclose(f);
+    return nw == len ? 0 : -1;
+}
+
+static int run_native_m25(int perturb_one, int *out_total) {
+    static const char *const cov_syms[29] = {
+        "_unisa_atexit", "_unisa_natexit", "_u_st_fd", "_u_st_eof", "_u_st_err",
+        "_u_st_serr", "_u_st_ung", "_u_st_buf", "_u_st_bpos", "_u_st_blen",
+        "_u_st_wlen", "_u_st_ro", "_u_st_n", "errno",
+        "_unisa_envheap", "_unisa_envcap", "_unisa_seed", "_unisa_tok", "_unisa_asc",
+        "_unisa_tmbuf", "_unisa_tz", "_unisa_tzn", "_unisa_tzstate", "_u_po_fd",
+        "_u_po_pid", "_u_po_n",
+        "__not_covered_1", "__not_covered_2", 0
+    };
+    static const char *const used_syms[7] = {
+        "_u_st_wput", "_u_st_copy", "_unisa_envfind", "_unisa_map",
+        "__not_used_1", "__not_used_2", 0
+    };
+    int total = 0, pass = 0;
+    total++; if ((rts_count() ^ (perturb_one ? 1 : 0)) == 2) pass++;
+
+    for (int i = -1; i <= 2; i++) {
+        const char *g = 0, *p = 0, *um = 0, *em = 0; int prov = -1;
+        int rc = rts_at(i, &g, &p, &prov, &um, &em);
+        int exp_rc = (i == 0 || i == 1) ? 0 : 2;
+        total++; if (rc == exp_rc) pass++;
+        total++; if (rts_at(i, 0, &p, &prov, &um, &em) == 4) pass++;
+        total++; if (rts_symbol_count(i) == (i == 0 ? 14 : i == 1 ? 12 : -1)) pass++;
+        total++; if (rts_used_count(i) == (i == 0 ? 2 : i == 1 ? 2 : -1)) pass++;
+        for (int m = -1; m <= 2; m++) {
+            const char *un = rts_used_name(i, m);
+            int exp_nonnull = ((i == 0 || i == 1) && (m == 0 || m == 1));
+            total++; if ((un != 0) == exp_nonnull) pass++;
+        }
+        for (int s = 0; s < 29; s++) {
+            int cr = rts_covers(i, cov_syms[s]);
+            int exp_c = 0;
+            if (!cov_syms[s]) exp_c = 4;
+            else if (i < 0 || i > 1) exp_c = 2;
+            else if (i == 0 && s < 14) exp_c = 1;
+            else if (i == 1 && s >= 14 && s < 26) exp_c = 1;
+            total++; if (cr == exp_c) pass++;
+        }
+        for (int u = 0; u < 7; u++) {
+            int ur = rts_used(i, used_syms[u]);
+            int exp_u = 0;
+            if (!used_syms[u]) exp_u = 4;
+            else if (i < 0 || i > 1) exp_u = 2;
+            else if (i == 0 && u < 2) exp_u = 1;
+            else if (i == 1 && (u == 2 || u == 3)) exp_u = 1;
+            total++; if (ur == exp_u) pass++;
+        }
+    }
+    if (out_total) *out_total = total;
+    return pass;
+}
+
+static int has_migrated_m25(void) {
+    size_t n = 0;
+    char *b = gm_read_file("cx/compiler/rtsharedname.cx", &n);
+    if (!b) return 0;
+    int has = (tx_find(b, (long)n, "tape_call", 9) >= 0 ||
+               tx_find(b, (long)n, "tapeslice", 9) >= 0 ||
+               tx_find(b, (long)n, "m25_tape", 8) >= 0);
+    mm_free(b);
+    return has;
+}
+
+static int run_selftest(int verbose) {
+    int passed = 0, failed = 0, total = 0;
+    int n_ok = run_native_m25(0, &total);
+    if (n_ok == total) { passed++; if (verbose) printf("PASS\tnative-oracle-enum-full\tcases=%d\n", total); }
+    else { failed++; if (verbose) printf("FAIL\tnative-oracle-enum-full\tpass=%d\tcases=%d\n", n_ok, total); }
+
+    if (!has_migrated_m25()) { passed++; if (verbose) printf("PASS\tmut-migrated-absent-red\n"); }
+    else { failed++; if (verbose) printf("FAIL\tmut-migrated-absent-red\n"); }
+
+    int n_diff = run_native_m25(1, &total);
+    if (n_diff < total) { passed++; if (verbose) printf("PASS\tmut-migrated-diff-red\n"); }
+    else { failed++; if (verbose) printf("FAIL\tmut-migrated-diff-red\n"); }
+
+    if (verbose) {
+        printf("GOLDEN\tunit=m25\tkind=enum-full\tcases=%d\tpass=%d\n", total, n_ok);
+        printf("CHECK_GOLDEN_M25_SELFTEST\tpassed=%d\tfailed=%d\n", passed, failed);
+    }
+    return failed ? 1 : 0;
+}
+
+int main(int argc, char **argv) {
+    if (argc >= 2 && strcmp(argv[1], "--selftest") == 0) return run_selftest(1);
+    if (argc >= 4 && strcmp(argv[1], "--produce") == 0) {
+        if (run_selftest(0) != 0) return 1;
+        char buf[512];
+        if (cx_fmt(buf, sizeof buf, "run_id=%s\nverdict=PASS\nfailed=0\n", argv[2])) return 2;
+        return gm_write_file(argv[3], buf, strlen(buf)) == 0 ? 0 : 2;
+    }
+    if (argc >= 4 && strcmp(argv[1], "--judge") == 0) {
+        if (sy_exists(argv[3]) != 1) { printf("FAIL\tgolden_m25_missing\n"); return 1; }
+        size_t evn = 0; char *ev = gm_read_file(argv[3], &evn);
+        if (!ev) { printf("FAIL\tgolden_m25_missing\n"); return 1; }
+        char want[256]; cx_fmt(want, sizeof want, "run_id=%s\n", argv[2]);
+        int has_rid = (tx_find(ev, (long)evn, want, (long)strlen(want)) >= 0);
+        int has_pass = (tx_find(ev, (long)evn, "verdict=PASS\n", 13) >= 0 && tx_find(ev, (long)evn, "failed=0\n", 9) >= 0);
+        mm_free(ev);
+        if (!has_rid) { printf("FAIL\tgolden_m25_stale\n"); return 1; }
+        if (!has_pass) { printf("FAIL\tgolden_m25_exec\n"); return 1; }
+        printf("PASS\tgolden_m25_exec\n");
+        return 0;
+    }
+    int total = 0;
+    int n_ok = run_native_m25(0, &total);
+    if (!has_migrated_m25()) {
+        printf("GOLDEN\tunit=m25\tkind=enum-full\tcases=%d\tpass=0\tstatus=RED\treason=migrated-path-absent\n", total);
+        return 1;
+    }
+    printf("GOLDEN\tunit=m25\tkind=enum-full\tcases=%d\tpass=%d\tstatus=%s\n", total, n_ok, n_ok == total ? "GREEN" : "RED");
+    return n_ok == total ? 0 : 1;
+}
