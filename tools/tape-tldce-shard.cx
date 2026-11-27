@@ -1,0 +1,1012 @@
+/* tools/tape-tldce-shard.cx -- Sharded TLDCE runner under tape VM (each shard < 60s, cmp EQUAL vs native).
+ *
+ * Splits a full TLDCE link (e.g. tier 102/106) into bounded tape VM shards:
+ *   (1) Unit shards (default 4): each processes a slice of objects via tl_unit + tl_note_links,
+ *       passing linker tables via a binary checkpoint + atomic handoff identity meta;
+ *   (2) DCE root-scan shards (default 2): split lines evenly via part/total;
+ *   (3) DCE BFS worklist shards (auto-looped until rem==0, bounded by --bfs-pops per shard);
+ *   (4) DCE compact + tl_check_undef + tl_finish final shard;
+ *   (5) Byte-for-byte cmp + SHA-256 + dce_cut verification against single-process native reference.
+ *
+ * Security & reproducibility invariants:
+ *   - Every shard handoff state is bound by an atomic .meta file (run_id, candidate APE sha,
+ *     manifest sha, stage, seq, state sha, output sha) verified before the next shard runs;
+ *   - --reuse-dir is pinned to reuse_identity.tsv (cand_sha, tapelink_sha, artifact shas);
+ *     mismatched or unpinned reuse artifacts are refused;
+ *   - Subprocess timeout/failure surfaces np_run why/residue and unlinks partial outputs;
+ *   - Missing dce_cut=, incomplete TAPEMODE_RUN frames, empty outputs, and init failures refuse.
+ *
+ * Usage:
+ *   sh ./unisacc.com tools/tape-tldce-shard.cx -- --manifest FILE --obj-dir DIR
+ *     [--product PATH] [--so PATH] [--run-bin PATH] [--reuse-dir DIR] [--out PATH]
+ *     [--unit-shards N] [--dce-root-shards R] [--bfs-pops P]
+ *     [--budget B] [--mem-extra M] [--shard-timeout S]
+ */
+#pragma unisa use cxlib.netpack
+#pragma unisa use cxlib.sessionroot
+#pragma unisa use sys.fs
+#pragma unisa use sys.posix
+#pragma unisa use sys.io
+#pragma unisa use sys.env
+#pragma unisa use sys.time
+#pragma unisa use sys.sha
+#pragma unisa use text.text
+#pragma unisa use mem.bytes
+#pragma unisa use mem.heap
+
+#define SH_MAX_OBJS 256
+#define SH_MAX_BFS_ROUNDS 24
+
+/* Self-contained shard state + DCE split extension (works on both main and v0.1.10 tapelink.cx). */
+static const char *TL_SHARD_EXT_SRC =
+"static int *tls_ls; static int *tls_le; static int tls_ln; static int tls_lcap;\n"
+"static int tls_index_lines(char *s, long n) {\n"
+"    void *mm_alloc(long); void mm_free(void *); int mm_copy(void *, long, const void *, long);\n"
+"    long i = 0, e; int k = 0;\n"
+"    if (!s || n < 0 || n > 1073741824L) return -1;\n"
+"    { int est = (int)(n / 12L) + 4096; if (est > tls_lcap) { int *ns = (int *)mm_alloc((long)est * 4L); int *ne = (int *)mm_alloc((long)est * 4L); if (ns && ne) { mm_free(tls_ls); mm_free(tls_le); tls_ls = ns; tls_le = ne; tls_lcap = est; } else { mm_free(ns); mm_free(ne); } } }\n"
+"    while (i < n) {\n"
+"        if (k >= tls_lcap) {\n"
+"            int nc = tls_lcap > 0 ? tls_lcap : 4096; int *ns, *ne;\n"
+"            if (nc > 134217728) return -1; nc = nc * 2;\n"
+"            ns = (int *)mm_alloc((long)nc * 4L); ne = (int *)mm_alloc((long)nc * 4L);\n"
+"            if (!ns || !ne) { mm_free(ns); mm_free(ne); return -1; }\n"
+"            if (tls_ls && k > 0) { (void)mm_copy(ns, (long)nc * 4L, tls_ls, (long)k * 4L); (void)mm_copy(ne, (long)nc * 4L, tls_le, (long)k * 4L); }\n"
+"            mm_free(tls_ls); mm_free(tls_le); tls_ls = ns; tls_le = ne; tls_lcap = nc;\n"
+"        }\n"
+"        e = i; while (e < n && s[e] != 10) e = e + 1;\n"
+"        tls_ls[k] = (int)i; tls_le[k] = (int)e; k = k + 1; i = e + 1;\n"
+"    }\n"
+"    tls_ln = k; return 0;\n"
+"}\n"
+"typedef struct {\n"
+"    int magic; int source_next; int ng; int gend; int nend; int ndef;\n"
+"    int next; int ngdef; int has_entry; int inits; int nfw; int loose;\n"
+"    char first[32];\n"
+"} TlShardHdr;\n"
+"int tl_state_save(const char *path) {\n"
+"    int sy_open(const char *, int, int); int sy_close(int); int sy_write_all(int, const void *, long);\n"
+"    TlShardHdr h; int fd;\n"
+"    h.magic = 0x544C5331; h.source_next = tl_source_next; h.ng = tl_ng;\n"
+"    h.gend = tl_gend; h.nend = tl_nend; h.ndef = tl_ndef; h.next = tl_next;\n"
+"    h.ngdef = tl_ngdef; h.has_entry = tl_has_entry; h.inits = tl_inits;\n"
+"    h.nfw = tl_nfw; h.loose = tl_loose;\n"
+"    for (int i = 0; i < 32; i++) h.first[i] = tl_first[i];\n"
+"    fd = sy_open(path, 1, 0);\n"
+"    if (fd < 0) return 1;\n"
+"    if (sy_write_all(fd, &h, (long)sizeof h) != 0) { sy_close(fd); return 1; }\n"
+"    if (h.gend > 0 && sy_write_all(fd, tl_gpool, (long)h.gend) != 0) { sy_close(fd); return 1; }\n"
+"    if (h.ng > 0 && (sy_write_all(fd, tl_gat, (long)h.ng * 4L) != 0 || sy_write_all(fd, tl_glen, (long)h.ng * 4L) != 0)) { sy_close(fd); return 1; }\n"
+"    if (h.nend > 0 && sy_write_all(fd, tl_npool, (long)h.nend) != 0) { sy_close(fd); return 1; }\n"
+"    if (h.ngdef > 0 && (sy_write_all(fd, tl_gdef_at, (long)h.ngdef * 4L) != 0 || sy_write_all(fd, tl_gdef_len, (long)h.ngdef * 4L) != 0)) { sy_close(fd); return 1; }\n"
+"    if (h.ndef > 0 && (sy_write_all(fd, tl_def_at, (long)h.ndef * 4L) != 0 || sy_write_all(fd, tl_def_len, (long)h.ndef * 4L) != 0)) { sy_close(fd); return 1; }\n"
+"    if (h.next > 0 && (sy_write_all(fd, tl_ext_at, (long)h.next * 4L) != 0 || sy_write_all(fd, tl_ext_len, (long)h.next * 4L) != 0)) { sy_close(fd); return 1; }\n"
+"    if (h.nfw > 0 && (sy_write_all(fd, tl_fw_at, (long)h.nfw * 4L) != 0 || sy_write_all(fd, tl_fw_len, (long)h.nfw * 4L) != 0)) { sy_close(fd); return 1; }\n"
+"    sy_close(fd); return 0;\n"
+"}\n"
+"int tl_state_load(const char *path) {\n"
+"    int sy_open(const char *, int, int); int sy_close(int); int sy_read_full(int, void *, long);\n"
+"    TlShardHdr h; int fd;\n"
+"    if (tl_begin() != 0) return 1;\n"
+"    fd = sy_open(path, 0, 0);\n"
+"    if (fd < 0) return 1;\n"
+"    if (sy_read_full(fd, &h, (long)sizeof h) != 0 || h.magic != 0x544C5331) { sy_close(fd); return 1; }\n"
+"    if (h.gend < 0 || h.gend > TL_GP || h.nend < 0 || h.nend > TL_NP || h.ng < 0 || h.ng > TL_MAXG ||\n"
+"        h.ngdef < 0 || h.ngdef > TL_MAXG || h.ndef < 0 || h.ndef > TL_MAXG || h.next < 0 || h.next > TL_MAXG || h.nfw < 0 || h.nfw > TL_MAXG) { sy_close(fd); return 1; }\n"
+"    tl_source_next = h.source_next; tl_ng = h.ng; tl_gend = h.gend; tl_nend = h.nend;\n"
+"    tl_ndef = h.ndef; tl_next = h.next; tl_ngdef = h.ngdef; tl_has_entry = h.has_entry;\n"
+"    tl_inits = h.inits; tl_nfw = h.nfw; tl_loose = h.loose;\n"
+"    for (int i = 0; i < 32; i++) tl_first[i] = h.first[i];\n"
+"    if (h.gend > 0 && sy_read_full(fd, tl_gpool, (long)h.gend) != 0) { sy_close(fd); return 1; }\n"
+"    if (h.ng > 0 && (sy_read_full(fd, tl_gat, (long)h.ng * 4L) != 0 || sy_read_full(fd, tl_glen, (long)h.ng * 4L) != 0)) { sy_close(fd); return 1; }\n"
+"    if (h.nend > 0 && sy_read_full(fd, tl_npool, (long)h.nend) != 0) { sy_close(fd); return 1; }\n"
+"    if (h.ngdef > 0 && (sy_read_full(fd, tl_gdef_at, (long)h.ngdef * 4L) != 0 || sy_read_full(fd, tl_gdef_len, (long)h.ngdef * 4L) != 0)) { sy_close(fd); return 1; }\n"
+"    if (h.ndef > 0 && (sy_read_full(fd, tl_def_at, (long)h.ndef * 4L) != 0 || sy_read_full(fd, tl_def_len, (long)h.ndef * 4L) != 0)) { sy_close(fd); return 1; }\n"
+"    if (h.next > 0 && (sy_read_full(fd, tl_ext_at, (long)h.next * 4L) != 0 || sy_read_full(fd, tl_ext_len, (long)h.next * 4L) != 0)) { sy_close(fd); return 1; }\n"
+"    if (h.nfw > 0 && (sy_read_full(fd, tl_fw_at, (long)h.nfw * 4L) != 0 || sy_read_full(fd, tl_fw_len, (long)h.nfw * 4L) != 0)) { sy_close(fd); return 1; }\n"
+"    sy_close(fd); return 0;\n"
+"}\n"
+"typedef struct { int magic; int ng; int tl_dnu; int tl_dsp; } TlDceHdr;\n"
+"static int tl_dce_setup(char *b, long n, int *ng_out, int **dgl_out) {\n"
+"    void *mm_zalloc(long);\n"
+"    long i, e, j, q; int k, g, ng, nl, t, c, bad, hsz, li; int *tl_dgl = 0;\n"
+"    tl_dn = 0; tl_dcut = 0;\n"
+"    if (!b || n <= 0 || n > 1073741824 || tl_loose) return 1;\n"
+"    tl_dnu = 0; k = 0; while (k < tl_next) { if (tl_miss(k)) tl_dnu = tl_dnu + 1; k = k + 1; }\n"
+"    if (!tl_dnu) return 2;\n"
+"    if (tls_index_lines(b, n) != 0) return 1;\n"
+"    nl = 0; ng = 0;\n"
+"    for (li = 0; li < tls_ln; li++) {\n"
+"        i = (long)tls_ls[li]; e = (long)tls_le[li];\n"
+"        if (e > i && b[i] != 32 && b[i] != 9 && b[i] != 46 && b[e - 1] == 58) { nl = nl + 1; if (!tl_loc(b + i, (int)(e - 1 - i))) ng = ng + 1; }\n"
+"    }\n"
+"    hsz = 1024; while (hsz < 2 * (nl + tl_dnu) + 2 && hsz < 67108864) hsz = hsz * 2;\n"
+"    if (hsz < 2 * (nl + tl_dnu) + 2) return 1;\n"
+"    tl_dh = mm_zalloc((long)hsz * 4L); tl_dg = mm_zalloc((long)hsz * 4L);\n"
+"    tl_dat = mm_zalloc((long)(ng + 2) * 4L); tl_dst = mm_zalloc((long)ng + 2);\n"
+"    tl_dstk = mm_zalloc((long)(ng + 2) * 4L); tl_dum = mm_zalloc((long)tl_dnu * 4L); tl_dus = mm_zalloc((long)tl_dnu);\n"
+"    tl_dgl = mm_zalloc((long)(ng + 2) * 4L);\n"
+"    if (!tl_dh || !tl_dg || !tl_dat || !tl_dst || !tl_dstk || !tl_dum || !tl_dus || !tl_dgl) return 1;\n"
+"    c = 0; k = 0; while (k < tl_next) { if (tl_miss(k)) { tl_dum[c] = k; c = c + 1; } k = k + 1; }\n"
+"    tl_db = b; tl_dmask = hsz - 1; tl_dsp = 0; bad = 0;\n"
+"    g = 0; t = 2; tl_dat[0] = 0; tl_dgl[0] = 0; tl_dlive(0);\n"
+"    for (li = 0; li < tls_ln && !bad; li++) {\n"
+"        i = (long)tls_ls[li]; e = (long)tls_le[li];\n"
+"        if (e > i && (b[i] == 32 || b[i] == 9)) {\n"
+"            j = i; while (j < e && (b[j] == 32 || b[j] == 9)) j = j + 1;\n"
+"            q = j; while (q < e && b[q] != 32 && b[q] != 9) q = q + 1;\n"
+"            c = (int)(q - j);\n"
+"            t = (tl_same(b + j, c, \"ret\", 3) || tl_same(b + j, c, \"jump\", 4) || tl_same(b + j, c, \".exit\", 5)) ? 2 : 1;\n"
+"        } else if (e > i && b[i] != 46 && b[e - 1] == 58) {\n"
+"            c = (int)(e - 1 - i);\n"
+"            if (c <= 0 || b[i] == 36 || (b[i] >= 48 && b[i] <= 57) || tl_word(b, (int)i, (int)(e - 1)) != (int)(e - 1)) bad = 1;\n"
+"            else {\n"
+"                if (!tl_loc(b + i, c)) { if (t == 1) tl_dst[g] = tl_dst[g] | 2; g = g + 1; tl_dat[g] = (int)i; tl_dgl[g] = li; t = 1; }\n"
+"                k = tl_dslot(b + i, c); if (tl_dh[k]) bad = 1; else { tl_dh[k] = (int)i + 1; tl_dg[k] = g; }\n"
+"                if (tl_is(b + i, c, \"_start\") || (c >= 8 && tl_same(b + i, 8, \"__init_u\", 8))) tl_dlive(g);\n"
+"            }\n"
+"        }\n"
+"    }\n"
+"    if (bad) return 1;\n"
+"    tl_dat[g + 1] = (int)n; tl_dgl[g + 1] = tls_ln;\n"
+"    k = 0; while (k < tl_dnu) { int idx = tl_dum[k]; int hs = tl_dslot(tl_npool + tl_ext_at[idx], tl_ext_len[idx]); if (tl_dh[hs] == 0) tl_dh[hs] = -(k + 1); k = k + 1; }\n"
+"    *ng_out = ng; *dgl_out = tl_dgl; return 0;\n"
+"}\n"
+"static int tl_dce_save(const char *path, int ng) {\n"
+"    int sy_open(const char *, int, int); int sy_close(int); int sy_write_all(int, const void *, long);\n"
+"    TlDceHdr h; int fd;\n"
+"    h.magic = 0x544C4431; h.ng = ng; h.tl_dnu = tl_dnu; h.tl_dsp = tl_dsp;\n"
+"    fd = sy_open(path, 1, 0); if (fd < 0) return 1;\n"
+"    if (sy_write_all(fd, &h, (long)sizeof h) != 0 || sy_write_all(fd, tl_dst, (long)ng + 2L) != 0) { sy_close(fd); return 1; }\n"
+"    if (tl_dsp > 0 && sy_write_all(fd, tl_dstk, (long)tl_dsp * 4L) != 0) { sy_close(fd); return 1; }\n"
+"    if (tl_dnu > 0 && sy_write_all(fd, tl_dus, (long)tl_dnu) != 0) { sy_close(fd); return 1; }\n"
+"    sy_close(fd); return 0;\n"
+"}\n"
+"static int tl_dce_load(const char *path, int ng) {\n"
+"    int sy_open(const char *, int, int); int sy_close(int); int sy_read_full(int, void *, long);\n"
+"    TlDceHdr h; int fd = sy_open(path, 0, 0); if (fd < 0) return 1;\n"
+"    if (sy_read_full(fd, &h, (long)sizeof h) != 0 || h.magic != 0x544C4431 || h.ng != ng || h.tl_dnu != tl_dnu || h.tl_dsp < 0 || h.tl_dsp > ng + 2) { sy_close(fd); return 1; }\n"
+"    tl_dsp = h.tl_dsp;\n"
+"    if (sy_read_full(fd, tl_dst, (long)ng + 2L) != 0) { sy_close(fd); return 1; }\n"
+"    if (tl_dsp > 0 && sy_read_full(fd, tl_dstk, (long)tl_dsp * 4L) != 0) { sy_close(fd); return 1; }\n"
+"    if (tl_dnu > 0 && sy_read_full(fd, tl_dus, (long)tl_dnu) != 0) { sy_close(fd); return 1; }\n"
+"    sy_close(fd); return 0;\n"
+"}\n"
+"static void tl_dce_cleanup(int *tl_dgl) {\n"
+"    void mm_free(void *); tls_ln = 0; mm_free(tl_dgl);\n"
+"    mm_free(tl_dh); mm_free(tl_dg); mm_free(tl_dat); mm_free(tl_dst); mm_free(tl_dstk); mm_free(tl_dum); mm_free(tl_dus);\n"
+"    tl_dh = 0; tl_dg = 0; tl_dat = 0; tl_dst = 0; tl_dstk = 0; tl_dum = 0; tl_dus = 0;\n"
+"}\n"
+"int tl_dce_root_part(char *b, long n, const char *dce_in, const char *dce_out, int part, int total, int *lo_out, int *hi_out) {\n"
+"    int ng = 0, li, lo, hi, sr; int *tl_dgl = 0;\n"
+"    sr = tl_dce_setup(b, n, &ng, &tl_dgl);\n"
+"    if (sr == 2) { *lo_out = 0; *hi_out = 0; return 2; }\n"
+"    if (sr != 0) return 1;\n"
+"    if (dce_in && !(dce_in[0] == '-' && dce_in[1] == 0)) { if (tl_dce_load(dce_in, ng) != 0) { tl_dce_cleanup(tl_dgl); return 1; } }\n"
+"    if (total < 1) total = 1; if (part < 0) part = 0;\n"
+"    lo = (int)(((long)tls_ln * (long)part) / (long)total);\n"
+"    hi = (part + 1 >= total) ? tls_ln : (int)(((long)tls_ln * (long)(part + 1)) / (long)total);\n"
+"    for (li = lo; li < hi; li++) {\n"
+"        long i = (long)tls_ls[li], e = (long)tls_le[li];\n"
+"        if (e > i && b[i] != 32 && b[i] != 9 && (b[i] == 46 || b[e - 1] != 58)) tl_dscan(i, e, 0);\n"
+"        if (e > i && (b[i] == 32 || b[i] == 9)) tl_dscan(i, e, 1);\n"
+"    }\n"
+"    *lo_out = lo; *hi_out = hi;\n"
+"    if (tl_dce_save(dce_out, ng) != 0) { tl_dce_cleanup(tl_dgl); return 1; }\n"
+"    tl_dce_cleanup(tl_dgl); return 0;\n"
+"}\n"
+"int tl_dce_bfs_part(char *b, long n, const char *dce_in, const char *dce_out, int max_pops, int *pops_out, int *rem_out) {\n"
+"    int ng = 0, pops = 0, sr; int *tl_dgl = 0;\n"
+"    sr = tl_dce_setup(b, n, &ng, &tl_dgl);\n"
+"    if (sr != 0) return 1;\n"
+"    if (tl_dce_load(dce_in, ng) != 0) { tl_dce_cleanup(tl_dgl); return 1; }\n"
+"    while (tl_dsp > 0 && pops < max_pops) {\n"
+"        int g, li, li_end; tl_dsp = tl_dsp - 1; g = tl_dstk[tl_dsp]; pops++;\n"
+"        if ((tl_dst[g] & 2) && g < ng) tl_dlive(g + 1);\n"
+"        if (g > 0 && (tl_dst[g - 1] & 2)) tl_dlive(g - 1);\n"
+"        li_end = tl_dgl[g + 1];\n"
+"        for (li = tl_dgl[g]; li < li_end; li++) { long i = (long)tls_ls[li], e = (long)tls_le[li]; if (e > i && (b[i] == 32 || b[i] == 9)) tl_dscan(i, e, 0); }\n"
+"    }\n"
+"    *pops_out = pops; *rem_out = tl_dsp;\n"
+"    if (tl_dce_save(dce_out, ng) != 0) { tl_dce_cleanup(tl_dgl); return 1; }\n"
+"    tl_dce_cleanup(tl_dgl); return 0;\n"
+"}\n"
+"long tl_dce_compact_part(char *b, long n, const char *dce_in) {\n"
+"    int mm_copy(void *, long, const void *, long);\n"
+"    int ng = 0, c = 0, k, g, li, sr; int *tl_dgl = 0; long w = n;\n"
+"    sr = tl_dce_setup(b, n, &ng, &tl_dgl);\n"
+"    if (sr == 2) return n;\n"
+"    if (sr != 0) return -1L;\n"
+"    if (tl_dce_load(dce_in, ng) != 0 || tl_dsp != 0) { tl_dce_cleanup(tl_dgl); return -1L; }\n"
+"    k = 0; while (k < tl_dnu) { if (tl_dus[k]) c = 1; else tl_ext_len[tl_dum[k]] = -1; k = k + 1; }\n"
+"    if (c) { tl_dce_cleanup(tl_dgl); return n; }\n"
+"    w = 0; g = 0;\n"
+"    for (li = 0; li < tls_ln; li++) {\n"
+"        long i = (long)tls_ls[li], e = (long)tls_le[li];\n"
+"        while (g < ng && i >= tl_dat[g + 1]) g = g + 1;\n"
+"        if ((tl_dst[g] & 1) || e == i || (b[i] != 32 && b[i] != 9 && (b[i] == 46 || b[e - 1] != 58))) {\n"
+"            if (e > i) { if (w != i) (void)mm_copy(b + w, n - w, b + i, e - i); w = w + (e - i); }\n"
+"            if (e < n) { b[w] = 10; w = w + 1; }\n"
+"        } else if (b[i] != 32 && b[i] != 9 && !tl_loc(b + i, (int)(e - 1 - i))) {\n"
+"            k = 0; while (k < tl_ndef) { if (tl_same(tl_npool + tl_def_at[k], tl_def_len[k], b + i, (int)(e - 1 - i))) tl_def_len[k] = -1; k = k + 1; }\n"
+"            k = 0; while (k < tl_next) { if (tl_same(tl_npool + tl_ext_at[k], tl_ext_len[k], b + i, (int)(e - 1 - i))) tl_ext_len[k] = -1; k = k + 1; }\n"
+"        }\n"
+"    }\n"
+"    tl_dn = ng; k = 1; while (k <= ng) { if (!(tl_dst[k] & 1)) tl_dcut = tl_dcut + 1; k = k + 1; }\n"
+"    tl_dce_cleanup(tl_dgl); return w;\n"
+"}\n";
+
+static const char *TL_SHARD_DRIVER_SRC =
+"long sy_rlimit_as(void) { return -1; }\n"
+"static unsigned char *g_ob = 0; static long g_on = 0; static long g_ocap = 0;\n"
+"static int d_emit_span(const char *s, int n) {\n"
+"    if (n <= 0) return 0;\n"
+"    if (!s || (long)n > 0x3fffffffL - g_on) return 1;\n"
+"    if (g_on + (long)n > g_ocap) {\n"
+"        long need = g_on + (long)n, nc = g_ocap > 0 ? g_ocap : 1048576L;\n"
+"        while (nc < need) { if (nc > 0x3fffffffL / 2L) { nc = 0x3fffffffL; break; } nc *= 2L; }\n"
+"        if (nc < need) return 1;\n"
+"        unsigned char *nb = (unsigned char *)mm_alloc(nc); if (!nb) return 1;\n"
+"        if (g_ob && g_on > 0 && mm_copy(nb, nc, g_ob, g_on) != 0) { mm_free(nb); return 1; }\n"
+"        if (g_ob) mm_free(g_ob);\n"
+"        g_ob = nb; g_ocap = nc;\n"
+"    }\n"
+"    if (mm_copy(g_ob + g_on, g_ocap - g_on, s, (long)n) != 0) return 1;\n"
+"    g_on += (long)n; return 0;\n"
+"}\n"
+"static int d_emit_byte(int c) { char b = (char)(c & 255); return d_emit_span(&b, 1); }\n"
+"static int d_die(char *m) { if (m) { long l = 0; while (m[l]) l++; if (l > 0) (void)sy_write_all(2, m, l); } return 1; }\n"
+"static void put_u64(char *dst, int *pos, unsigned long long v) {\n"
+"    char d[24]; int n = 0; if (v == 0) { dst[(*pos)++] = '0'; return; }\n"
+"    while (v > 0) { d[n++] = (char)('0' + (v % 10ull)); v /= 10ull; }\n"
+"    while (n > 0) dst[(*pos)++] = d[--n];\n"
+"}\n"
+"static void put_s(char *dst, int *pos, const char *s) { while (*s) dst[(*pos)++] = *s++; }\n"
+"static int parse_int(const char *s) { int v = 0; while (*s >= '0' && *s <= '9') { v = v * 10 + (*s - '0'); s++; } return v; }\n"
+"static int read_file_all(const char *path, unsigned char **out_b, long *out_n) {\n"
+"    int fd = sy_open(path, O_RDONLY, 0); if (fd < 0) return -1;\n"
+"    sy_stat_t st; if (sy_fstat(fd, &st) != 0 || st.size < 0 || st.size > 67108864L) { sy_close(fd); return -1; }\n"
+"    unsigned char *b = (unsigned char *)mm_alloc((long)st.size + 1); if (!b) { sy_close(fd); return -1; }\n"
+"    if (st.size > 0 && sy_read_full(fd, b, (long)st.size) != 0) { mm_free(b); sy_close(fd); return -1; }\n"
+"    sy_close(fd); b[st.size] = 0; *out_b = b; *out_n = (long)st.size; return 0;\n"
+"}\n"
+"static int load_concat_tapes(int start_arg, int argc, char **argv) {\n"
+"    long total = 0;\n"
+"    for (int i = start_arg; i < argc; i++) {\n"
+"        int fd = sy_open(argv[i], O_RDONLY, 0); if (fd < 0) return 4;\n"
+"        sy_stat_t st; if (sy_fstat(fd, &st) != 0 || st.size < 0 || st.size > 67108864L) { sy_close(fd); return 4; }\n"
+"        sy_close(fd); total += (long)st.size;\n"
+"    }\n"
+"    if (total <= 0) return 4;\n"
+"    g_ob = (unsigned char *)mm_alloc(total + 1048576L); if (!g_ob) return 16;\n"
+"    g_ocap = total + 1048576L; g_on = 0;\n"
+"    for (int i = start_arg; i < argc; i++) {\n"
+"        int fd = sy_open(argv[i], O_RDONLY, 0); if (fd < 0) return 4;\n"
+"        sy_stat_t st; if (sy_fstat(fd, &st) != 0 || st.size < 0 || g_on + (long)st.size > total) { sy_close(fd); return 4; }\n"
+"        if (st.size > 0 && sy_read_full(fd, g_ob + g_on, (long)st.size) != 0) { sy_close(fd); return 4; }\n"
+"        sy_close(fd); g_on += (long)st.size;\n"
+"    }\n"
+"    g_ob[g_on] = 0; return 0;\n"
+"}\n"
+"int main(int argc, char **argv) {\n"
+"    if (argc < 4) return 2;\n"
+"    if (tl_bind(d_emit_byte, d_die)) return 3;\n"
+"    if (argv[1][0] == 's') {\n"
+"        const char *out_path = argv[2]; int u = 0;\n"
+"        if (tl_begin() != 0) return 3;\n"
+"        for (int i = 3; i < argc; i++) {\n"
+"            unsigned char *b = 0; long bn = 0, tl = 0;\n"
+"            if (read_file_all(argv[i], &b, &bn) != 0) return 4;\n"
+"            char *t = tl_tape((char *)b, bn, &tl); if (!t || tl <= 0) { mm_free(b); return 5; }\n"
+"            if (u == 0) tl_adopt_first(); else if (tl_target_differs()) { mm_free(b); return 12; }\n"
+"            if (tl_unitver(t, (int)tl) != 0 || tl_unit(t, (int)tl, u) != 0 || tl_note_links(t, tl) != 0) { mm_free(b); return 6; }\n"
+"            u++; mm_free(b);\n"
+"        }\n"
+"        g_on = tl_dce((char *)g_ob, g_on);\n"
+"        if (tl_check_undef() != 0) return 7;\n"
+"        if (tl_entry_missing() != 0) return 8;\n"
+"        if (tl_finish(u) != 0) return 13;\n"
+"        int fd = sy_open(out_path, O_WRONLY, 0); if (fd < 0) return 9;\n"
+"        if (g_on > 0 && sy_write_all(fd, g_ob, g_on) != 0) { sy_close(fd); return 10; }\n"
+"        sy_close(fd);\n"
+"        char msg[160]; int mp = 0;\n"
+"        put_s(msg, &mp, \"SHARD_NATIVE\\tunits=\"); put_u64(msg, &mp, (unsigned long long)u);\n"
+"        put_s(msg, &mp, \"\\tbytes=\"); put_u64(msg, &mp, (unsigned long long)g_on);\n"
+"        put_s(msg, &mp, \"\\tdce_cut=\"); put_u64(msg, &mp, (unsigned long long)tl_dce_cut());\n"
+"        msg[mp++] = '\\n'; (void)sy_write_all(1, msg, mp); mm_free(g_ob); return 0;\n"
+"    } else if (argv[1][0] == 'u') {\n"
+"        if (argc < 7) return 2;\n"
+"        const char *out_path = argv[2], *st_in = argv[3], *st_out = argv[4]; int u = parse_int(argv[5]), n_done = 0;\n"
+"        if (st_in[0] == '-' && st_in[1] == 0) { if (tl_begin() != 0) return 3; } else { if (tl_state_load(st_in) != 0) return 14; }\n"
+"        for (int i = 6; i < argc; i++) {\n"
+"            unsigned char *b = 0; long bn = 0, tl = 0;\n"
+"            if (read_file_all(argv[i], &b, &bn) != 0) return 4;\n"
+"            char *t = tl_tape((char *)b, bn, &tl); if (!t || tl <= 0) { mm_free(b); return 5; }\n"
+"            if (u == 0) tl_adopt_first(); else if (tl_target_differs()) { mm_free(b); return 12; }\n"
+"            if (tl_unitver(t, (int)tl) != 0 || tl_unit(t, (int)tl, u) != 0 || tl_note_links(t, tl) != 0) { mm_free(b); return 6; }\n"
+"            u++; n_done++; mm_free(b);\n"
+"        }\n"
+"        if (tl_state_save(st_out) != 0) return 15;\n"
+"        int fd = sy_open(out_path, O_WRONLY, 0); if (fd < 0) return 9;\n"
+"        if (g_on > 0 && sy_write_all(fd, g_ob, g_on) != 0) { sy_close(fd); return 10; }\n"
+"        sy_close(fd);\n"
+"        char msg[160]; int mp = 0;\n"
+"        put_s(msg, &mp, \"SHARD_UNIT\\tunits=\"); put_u64(msg, &mp, (unsigned long long)n_done);\n"
+"        put_s(msg, &mp, \"\\tu_end=\"); put_u64(msg, &mp, (unsigned long long)u);\n"
+"        put_s(msg, &mp, \"\\tbytes=\"); put_u64(msg, &mp, (unsigned long long)g_on);\n"
+"        msg[mp++] = '\\n'; (void)sy_write_all(1, msg, mp); mm_free(g_ob); return 0;\n"
+"    } else if (argv[1][0] == 'r') {\n"
+"        if (argc < 8) return 2;\n"
+"        if (tl_state_load(argv[2]) != 0) return 14;\n"
+"        int rc = load_concat_tapes(7, argc, argv); if (rc != 0) return rc;\n"
+"        int part = parse_int(argv[5]), total = parse_int(argv[6]), lo = 0, hi = 0;\n"
+"        int rr = tl_dce_root_part((char *)g_ob, g_on, argv[3], argv[4], part, total, &lo, &hi);\n"
+"        if (rr != 0 && rr != 2) return 17;\n"
+"        char msg[160]; int mp = 0;\n"
+"        put_s(msg, &mp, \"SHARD_ROOT\\tlo=\"); put_u64(msg, &mp, (unsigned long long)lo);\n"
+"        put_s(msg, &mp, \"\\thi=\"); put_u64(msg, &mp, (unsigned long long)hi);\n"
+"        put_s(msg, &mp, \"\\tskip=\"); put_u64(msg, &mp, (unsigned long long)(rr == 2 ? 1 : 0));\n"
+"        msg[mp++] = '\\n'; (void)sy_write_all(1, msg, mp); mm_free(g_ob); return 0;\n"
+"    } else if (argv[1][0] == 'w') {\n"
+"        if (argc < 7) return 2;\n"
+"        if (tl_state_load(argv[2]) != 0) return 14;\n"
+"        int rc = load_concat_tapes(6, argc, argv); if (rc != 0) return rc;\n"
+"        int max_pops = parse_int(argv[5]), pops = 0, rem = 0;\n"
+"        if (tl_dce_bfs_part((char *)g_ob, g_on, argv[3], argv[4], max_pops, &pops, &rem) != 0) return 18;\n"
+"        char msg[160]; int mp = 0;\n"
+"        put_s(msg, &mp, \"SHARD_BFS\\tpops=\"); put_u64(msg, &mp, (unsigned long long)pops);\n"
+"        put_s(msg, &mp, \"\\trem=\"); put_u64(msg, &mp, (unsigned long long)rem);\n"
+"        msg[mp++] = '\\n'; (void)sy_write_all(1, msg, mp); mm_free(g_ob); return 0;\n"
+"    } else if (argv[1][0] == 'c') {\n"
+"        if (argc < 7) return 2;\n"
+"        if (tl_state_load(argv[3]) != 0) return 14;\n"
+"        int total_u = parse_int(argv[5]);\n"
+"        int rc = load_concat_tapes(6, argc, argv); if (rc != 0) return rc;\n"
+"        g_on = tl_dce_compact_part((char *)g_ob, g_on, argv[4]);\n"
+"        if (g_on < 0) return 19;\n"
+"        if (tl_check_undef() != 0) return 7;\n"
+"        if (tl_entry_missing() != 0) return 8;\n"
+"        if (tl_finish(total_u) != 0) return 13;\n"
+"        int fd = sy_open(argv[2], O_WRONLY, 0); if (fd < 0) return 9;\n"
+"        if (g_on > 0 && sy_write_all(fd, g_ob, g_on) != 0) { sy_close(fd); return 10; }\n"
+"        sy_close(fd);\n"
+"        char msg[160]; int mp = 0;\n"
+"        put_s(msg, &mp, \"SHARD_COMPACT\\tunits=\"); put_u64(msg, &mp, (unsigned long long)total_u);\n"
+"        put_s(msg, &mp, \"\\tbytes=\"); put_u64(msg, &mp, (unsigned long long)g_on);\n"
+"        put_s(msg, &mp, \"\\tdce_cut=\"); put_u64(msg, &mp, (unsigned long long)tl_dce_cut());\n"
+"        msg[mp++] = '\\n'; (void)sy_write_all(1, msg, mp); mm_free(g_ob); return 0;\n"
+"    }\n"
+"    return 2;\n"
+"}\n";
+
+static int sha_file_hex(const char *path, char hex[65]) {
+    unsigned char *buf = 0; int64_t n = 0;
+    if (sy_read_file(path, &buf, &n, 64L * 1024L * 1024L) != 0 || !buf) return -1;
+    cx_sha256_hex(buf, (size_t)n, hex);
+    mm_free(buf);
+    return 0;
+}
+
+static unsigned long long rd_le(const unsigned char *p, int w) {
+    unsigned long long v = 0;
+    for (int i = w - 1; i >= 0; i--) v = (v << 8) | (unsigned long long)p[i];
+    return v;
+}
+
+static int inspect_slice_mask(const char *slice_path, unsigned long long *mask_out, int *hcnt_out, long *bytes_out) {
+    unsigned char *b = 0; int64_t n = 0;
+    if (sy_read_file(slice_path, &b, &n, 16L * 1024L * 1024L) != 0 || !b || n < 208) { if (b) mm_free(b); return -1; }
+    unsigned long long h_off = rd_le(b + 188, 8), h_len = rd_le(b + 196, 8);
+    unsigned int hcnt = (unsigned int)rd_le(b + 204, 4);
+    if (h_off + h_len > (unsigned long long)n) { mm_free(b); return -1; }
+    unsigned long long pos = 0, mask = 0;
+    for (unsigned int i = 0; i < hcnt && pos + 4ull <= h_len; i++) {
+        unsigned int sid = (unsigned int)rd_le(b + h_off + pos, 2);
+        unsigned int nlen = (unsigned int)rd_le(b + h_off + pos + 2, 2);
+        if (sid < 64) mask |= (1ull << sid);
+        pos += 4ull + (unsigned long long)nlen;
+    }
+    *mask_out = mask; *hcnt_out = (int)hcnt; *bytes_out = (long)n;
+    mm_free(b); return 0;
+}
+
+static int is_hex64(const char *s, int n) {
+    if (n != 64) return 0;
+    for (int i = 0; i < 64; i++) {
+        char c = s[i];
+        if (!((c >= '0' && c <= '9') || (c >= 'a' && c <= 'f') || (c >= 'A' && c <= 'F'))) return 0;
+    }
+    return 1;
+}
+
+static int load_manifest(const char *mpath, const char *obj_dir, char objs[SH_MAX_OBJS][512], int *bad_out) {
+    unsigned char *mb = 0; int64_t mn = 0;
+    *bad_out = 0;
+    if (sy_read_file(mpath, &mb, &mn, 4L * 1024L * 1024L) != 0 || !mb || mn <= 0) { if (mb) mm_free(mb); return -1; }
+    int count = 0; int64_t i = 0;
+    while (i < mn) {
+        int64_t e = i; while (e < mn && mb[e] != '\n') e++;
+        int64_t s = i; while (s < e && (mb[s] == ' ' || mb[s] == '\t' || mb[s] == '\r')) s++;
+        int64_t t = e; while (t > s && (mb[t - 1] == ' ' || mb[t - 1] == '\t' || mb[t - 1] == '\r')) t--;
+        if (t > s && mb[s] != '#') {
+            if (count >= SH_MAX_OBJS) {
+                sy_eprintf("tape-tldce-shard: REFUSE manifest-too-many-objects (max=%d)\n", SH_MAX_OBJS);
+                *bad_out = 1; break;
+            }
+            char line[1024]; int ln = (int)(t - s);
+            if (ln >= (int)sizeof line) { *bad_out = 1; break; }
+            mm_copy(line, (long)sizeof line, mb + s, (long)ln); line[ln] = 0;
+            int sp = 0; while (sp < ln && line[sp] != ' ' && line[sp] != '\t') sp++;
+            int p2 = sp; while (p2 < ln && (line[p2] == ' ' || line[p2] == '\t')) p2++;
+            if (sp == 0 || p2 >= ln) { *bad_out = 1; break; }
+            char exp_sha[65], rel[512];
+            if (is_hex64(line, sp)) {
+                mm_copy(exp_sha, (long)sizeof exp_sha, line, 64); exp_sha[64] = 0;
+                cx_fmt(rel, sizeof rel, "%s", line + p2);
+            } else if (is_hex64(line + p2, ln - p2)) {
+                mm_copy(exp_sha, (long)sizeof exp_sha, line + p2, 64); exp_sha[64] = 0;
+                if (sp >= (int)sizeof rel) { *bad_out = 1; break; }
+                mm_copy(rel, (long)sizeof rel, line, sp); rel[sp] = 0;
+            } else { *bad_out = 1; break; }
+            if (rel[0] == '/' || strstr(rel, "..")) { *bad_out = 1; break; }
+            char full[512], got_sha[65];
+            cx_fmt(full, sizeof full, "%s/%s", obj_dir, rel);
+            if (sha_file_hex(full, got_sha) != 0 || strcmp(got_sha, exp_sha) != 0) {
+                sy_eprintf("tape-tldce-shard: manifest-mismatch entry=%s\n", rel);
+                *bad_out = 1; break;
+            }
+            cx_fmt(objs[count], 512, "%s", full);
+            count++;
+        }
+        i = e + 1;
+    }
+    mm_free(mb);
+    return *bad_out ? -1 : count;
+}
+
+static int run_cmd(char **av, const char *cwd, int timeout_s, int *rc_out, long *ms_out,
+                   char *out_buf, size_t out_cap, char *why_out, size_t why_cap) {
+    np_result r; mm_fill(&r, (long)sizeof r, 0, (long)sizeof r);
+    char why[192]; why[0] = 0;
+    long t0 = sy_mono_ns();
+    int tr = np_run(av, cwd, 0, timeout_s, &r, why, sizeof why);
+    long t1 = sy_mono_ns();
+    if (ms_out) *ms_out = (t1 - t0) / 1000000L;
+    if (rc_out) *rc_out = tr ? 124 : r.rc;
+    if (why_out && why_cap > 0) cx_fmt(why_out, why_cap, "%s", why);
+    if (out_buf && out_cap > 0) {
+        size_t n = r.out ? strlen(r.out) : 0;
+        if (n >= out_cap) n = out_cap - 1;
+        if (n > 0) mm_copy(out_buf, (long)out_cap, r.out, (long)n);
+        out_buf[n] = 0;
+    }
+    if (tr != 0) sy_eprintf("tape-tldce-shard: child-failed tr=%d why=%s\n", tr, why[0] ? why : "unknown");
+    np_free(&r);
+    return tr;
+}
+
+static int parse_u64_field(const char *s, const char *key, unsigned long long *out) {
+    const char *p = strstr(s, key);
+    if (!p) return -1;
+    p += strlen(key);
+    unsigned long long v = 0; int any = 0;
+    while (*p >= '0' && *p <= '9') { v = v * 10ull + (unsigned long long)(*p - '0'); p++; any = 1; }
+    if (!any) return -1;
+    *out = v; return 0;
+}
+
+static int parse_kv_line(const char *buf, const char *key, char *val, size_t cap) {
+    size_t kl = strlen(key);
+    const char *p = buf;
+    while (*p) {
+        const char *e = p;
+        while (*e && *e != '\n') e++;
+        if ((size_t)(e - p) > kl && memcmp(p, key, kl) == 0 && p[kl] == '=') {
+            size_t vl = (size_t)(e - (p + kl + 1));
+            if (vl >= cap) return -1;
+            mm_copy(val, (long)cap, p + kl + 1, (long)vl);
+            val[vl] = 0;
+            return 0;
+        }
+        p = (*e == '\n') ? (e + 1) : e;
+    }
+    return -1;
+}
+
+static int write_handoff_meta(const char *meta_path, const char *run_id, const char *cand_sha,
+                              const char *mf_sha, const char *stage, int seq,
+                              const char *st_path, const char *out_path) {
+    char st_sha[65], out_sha[65], txt[1024];
+    if (sha_file_hex(st_path, st_sha) != 0) return -1;
+    if (out_path && !(out_path[0] == '-' && out_path[1] == 0)) {
+        if (sha_file_hex(out_path, out_sha) != 0) return -1;
+    } else {
+        cx_fmt(out_sha, sizeof out_sha, "-");
+    }
+    if (cx_fmt(txt, sizeof txt,
+               "run_id=%s\ncand_sha=%s\nmf_sha=%s\nstage=%s\nseq=%d\nstate_sha=%s\nout_sha=%s\n",
+               run_id, cand_sha, mf_sha, stage, seq, st_sha, out_sha) != 0) return -1;
+    return sy_write_atomic(meta_path, txt, (long)strlen(txt), 0644);
+}
+
+static int verify_handoff_meta(const char *meta_path, const char *st_path, const char *out_path,
+                               const char *exp_run, const char *exp_cand, const char *exp_mf,
+                               const char *exp_stage, int exp_seq) {
+    unsigned char *mb = 0; int64_t mn = 0;
+    if (sy_read_file(meta_path, &mb, &mn, 65536) != 0 || !mb || mn <= 0) {
+        if (mb) mm_free(mb);
+        sy_eprintf("tape-tldce-shard: REFUSE handoff-identity-mismatch missing meta %s\n", meta_path);
+        return -1;
+    }
+    char *txt = (char *)mm_alloc((long)mn + 1L);
+    if (!txt) { mm_free(mb); return -1; }
+    mm_copy(txt, (long)mn + 1L, mb, (long)mn); txt[mn] = 0;
+    mm_free(mb);
+    char r_id[128], c_sha[128], m_sha[128], stg[64], sq[32], s_sha[128], o_sha[128], exp_sq[32];
+    char cur_st[65], cur_out[65];
+    cx_fmt(exp_sq, sizeof exp_sq, "%d", exp_seq);
+    int ok = (parse_kv_line(txt, "run_id", r_id, sizeof r_id) == 0 && strcmp(r_id, exp_run) == 0 &&
+              parse_kv_line(txt, "cand_sha", c_sha, sizeof c_sha) == 0 && strcmp(c_sha, exp_cand) == 0 &&
+              parse_kv_line(txt, "mf_sha", m_sha, sizeof m_sha) == 0 && strcmp(m_sha, exp_mf) == 0 &&
+              parse_kv_line(txt, "stage", stg, sizeof stg) == 0 && strcmp(stg, exp_stage) == 0 &&
+              parse_kv_line(txt, "seq", sq, sizeof sq) == 0 && strcmp(sq, exp_sq) == 0 &&
+              parse_kv_line(txt, "state_sha", s_sha, sizeof s_sha) == 0 &&
+              parse_kv_line(txt, "out_sha", o_sha, sizeof o_sha) == 0 &&
+              sha_file_hex(st_path, cur_st) == 0 && strcmp(cur_st, s_sha) == 0);
+    if (ok && out_path && !(out_path[0] == '-' && out_path[1] == 0)) {
+        ok = (sha_file_hex(out_path, cur_out) == 0 && strcmp(cur_out, o_sha) == 0);
+    }
+    mm_free(txt);
+    if (!ok) {
+        sy_eprintf("tape-tldce-shard: REFUSE handoff-identity-mismatch stage=%s seq=%d\n", exp_stage, exp_seq);
+        return -1;
+    }
+    return 0;
+}
+
+static int verify_reuse_identity(const char *id_path, const char *cand_sha, const char *tl_sha,
+                                 const char *drv_nat, const char *drv_slice,
+                                 const char *so_path, const char *run_bin) {
+    unsigned char *mb = 0; int64_t mn = 0;
+    if (sy_read_file(id_path, &mb, &mn, 65536) != 0 || !mb || mn <= 0) { if (mb) mm_free(mb); return -1; }
+    char *txt = (char *)mm_alloc((long)mn + 1L);
+    if (!txt) { mm_free(mb); return -1; }
+    mm_copy(txt, (long)mn + 1L, mb, (long)mn); txt[mn] = 0;
+    mm_free(mb);
+    char c_sha[128], t_sha[128], n_sha[128], sl_sha[128], s_sha[128], r_sha[128];
+    char gn[65], gsl[65], gs[65], gr[65];
+    int ok = (parse_kv_line(txt, "cand_sha", c_sha, sizeof c_sha) == 0 && strcmp(c_sha, cand_sha) == 0 &&
+              parse_kv_line(txt, "tl_sha", t_sha, sizeof t_sha) == 0 && strcmp(t_sha, tl_sha) == 0 &&
+              parse_kv_line(txt, "drv_nat_sha", n_sha, sizeof n_sha) == 0 &&
+              parse_kv_line(txt, "drv_slice_sha", sl_sha, sizeof sl_sha) == 0 &&
+              parse_kv_line(txt, "so_sha", s_sha, sizeof s_sha) == 0 &&
+              parse_kv_line(txt, "run_bin_sha", r_sha, sizeof r_sha) == 0 &&
+              sha_file_hex(drv_nat, gn) == 0 && strcmp(gn, n_sha) == 0 &&
+              sha_file_hex(drv_slice, gsl) == 0 && strcmp(gsl, sl_sha) == 0 &&
+              sha_file_hex(so_path, gs) == 0 && strcmp(gs, s_sha) == 0 &&
+              sha_file_hex(run_bin, gr) == 0 && strcmp(gr, r_sha) == 0);
+    mm_free(txt);
+    return ok ? 0 : -1;
+}
+
+static int write_reuse_identity(const char *id_path, const char *cand_sha, const char *tl_sha,
+                                const char *drv_nat, const char *drv_slice,
+                                const char *so_path, const char *run_bin) {
+    char gn[65], gsl[65], gs[65], gr[65], txt[1024];
+    if (sha_file_hex(drv_nat, gn) != 0 || sha_file_hex(drv_slice, gsl) != 0 ||
+        sha_file_hex(so_path, gs) != 0 || sha_file_hex(run_bin, gr) != 0) return -1;
+    if (cx_fmt(txt, sizeof txt,
+               "cand_sha=%s\ntl_sha=%s\ndrv_nat_sha=%s\ndrv_slice_sha=%s\nso_sha=%s\nrun_bin_sha=%s\n",
+               cand_sha, tl_sha, gn, gsl, gs, gr) != 0) return -1;
+    return sy_write_atomic(id_path, txt, (long)strlen(txt), 0644);
+}
+
+static int touch_empty(const char *path) {
+    return sy_write_file(path, "", 0, 0644);
+}
+
+static int build_shard_cx(const char *root, const char *out_cx) {
+    char tl_path[4200];
+    cx_fmt(tl_path, sizeof tl_path, "%s/cx/compiler/tapelink.cx", root);
+    unsigned char *tlb = 0; int64_t tln = 0;
+    if (sy_read_file(tl_path, &tlb, &tln, 4L * 1024L * 1024L) != 0 || !tlb || tln <= 0) return -1;
+    int64_t nl = 0; while (nl < tln && tlb[nl] != '\n') nl++;
+    if (nl < tln) nl++;
+    const char *hdr =
+        "#pragma unisa module tldce_shard\n"
+        "#pragma unisa use sys.fs\n"
+        "#pragma unisa use mem.heap\n"
+        "#pragma unisa use mem.bytes\n";
+    long hlen = (long)strlen(hdr), elen = (long)strlen(TL_SHARD_EXT_SRC), dlen = (long)strlen(TL_SHARD_DRIVER_SRC);
+    long body_len = (long)(tln - nl);
+    long total = hlen + body_len + 2L + elen + 2L + dlen;
+    unsigned char *all = (unsigned char *)mm_alloc(total + 1L);
+    if (!all) { mm_free(tlb); return -1; }
+    long p = 0;
+    mm_copy(all + p, total - p, hdr, hlen); p += hlen;
+    mm_copy(all + p, total - p, tlb + nl, body_len); p += body_len;
+    all[p++] = '\n';
+    mm_copy(all + p, total - p, TL_SHARD_EXT_SRC, elen); p += elen;
+    all[p++] = '\n';
+    mm_copy(all + p, total - p, TL_SHARD_DRIVER_SRC, dlen); p += dlen;
+    int rc = sy_write_atomic(out_cx, all, p, 0644);
+    mm_free(all); mm_free(tlb);
+    return rc;
+}
+
+static int files_equal_nonempty(const char *a, const char *b, long *bytes_out, char sha_out[65]) {
+    unsigned char *ba = 0, *bb = 0; int64_t na = 0, nb = 0;
+    if (sy_read_file(a, &ba, &na, 64L * 1024L * 1024L) != 0 || !ba) return 0;
+    if (sy_read_file(b, &bb, &nb, 64L * 1024L * 1024L) != 0 || !bb) { mm_free(ba); return 0; }
+    int eq = (na > 0 && na == nb && memcmp(ba, bb, (size_t)na) == 0);
+    if (bytes_out) *bytes_out = (long)na;
+    if (sha_out) cx_sha256_hex(bb, (size_t)nb, sha_out);
+    mm_free(ba); mm_free(bb);
+    return eq;
+}
+
+int main(int argc, char **argv) {
+    if (argc == 10 && !strcmp(argv[1], "--verify-handoff")) {
+        return verify_handoff_meta(argv[2], argv[3], argv[4], argv[5], argv[6], argv[7], argv[8], atoi(argv[9])) == 0 ? 0 : 1;
+    }
+
+    char manifest[4096] = "", obj_dir[4096] = "", prod[4096] = "", so_arg[4096] = "", run_arg[4096] = "";
+    char reuse_dir[4096] = "", out_copy[4096] = "";
+    int unit_shards = 4, dce_root_shards = 2, bfs_pops = 1400, shard_timeout = 55;
+    unsigned long long budget = 20000000000ull, mem_extra = 268435456ull;
+
+    for (int i = 1; i < argc; i++) {
+        if (!strcmp(argv[i], "--manifest") && i + 1 < argc) cx_fmt(manifest, sizeof manifest, "%s", argv[++i]);
+        else if (!strcmp(argv[i], "--obj-dir") && i + 1 < argc) cx_fmt(obj_dir, sizeof obj_dir, "%s", argv[++i]);
+        else if (!strcmp(argv[i], "--product") && i + 1 < argc) cx_fmt(prod, sizeof prod, "%s", argv[++i]);
+        else if (!strcmp(argv[i], "--so") && i + 1 < argc) cx_fmt(so_arg, sizeof so_arg, "%s", argv[++i]);
+        else if (!strcmp(argv[i], "--run-bin") && i + 1 < argc) cx_fmt(run_arg, sizeof run_arg, "%s", argv[++i]);
+        else if (!strcmp(argv[i], "--reuse-dir") && i + 1 < argc) cx_fmt(reuse_dir, sizeof reuse_dir, "%s", argv[++i]);
+        else if (!strcmp(argv[i], "--out") && i + 1 < argc) cx_fmt(out_copy, sizeof out_copy, "%s", argv[++i]);
+        else if (!strcmp(argv[i], "--unit-shards") && i + 1 < argc) unit_shards = atoi(argv[++i]);
+        else if (!strcmp(argv[i], "--dce-root-shards") && i + 1 < argc) dce_root_shards = atoi(argv[++i]);
+        else if (!strcmp(argv[i], "--bfs-pops") && i + 1 < argc) bfs_pops = atoi(argv[++i]);
+        else if (!strcmp(argv[i], "--budget") && i + 1 < argc) budget = (unsigned long long)strtoull(argv[++i], 0, 10);
+        else if (!strcmp(argv[i], "--mem-extra") && i + 1 < argc) mem_extra = (unsigned long long)strtoull(argv[++i], 0, 10);
+        else if (!strcmp(argv[i], "--shard-timeout") && i + 1 < argc) shard_timeout = atoi(argv[++i]);
+        else {
+            sy_eprintf("tape-tldce-shard: REFUSE unknown arg %s\n", argv[i]);
+            return 2;
+        }
+    }
+    if (!manifest[0] || !obj_dir[0]) {
+        sy_eprintf("tape-tldce-shard: REFUSE --manifest and --obj-dir are required\n");
+        return 2;
+    }
+    if (unit_shards < 1 || unit_shards > 32 || dce_root_shards < 1 || dce_root_shards > 16 ||
+        bfs_pops < 1 || shard_timeout < 1 || shard_timeout > 60) {
+        sy_eprintf("tape-tldce-shard: REFUSE invalid shard parameters (timeout must be 1..60)\n");
+        return 2;
+    }
+
+    char root[4096];
+    if (!getcwd(root, sizeof root)) return 2;
+    if (!prod[0]) cx_fmt(prod, sizeof prod, "%s/unisacc.com", root);
+
+    char cand_sha[65], mf_sha[65], tl_sha[65], tl_src[4200];
+    cx_fmt(tl_src, sizeof tl_src, "%s/cx/compiler/tapelink.cx", root);
+    if (sha_file_hex(prod, cand_sha) != 0 || sha_file_hex(manifest, mf_sha) != 0 || sha_file_hex(tl_src, tl_sha) != 0) {
+        sy_eprintf("tape-tldce-shard: REFUSE cannot hash candidate/manifest/tapelink\n");
+        return 2;
+    }
+
+    static char objs[SH_MAX_OBJS][512];
+    int bad = 0;
+    int n_objs = load_manifest(manifest, obj_dir, objs, &bad);
+    if (n_objs <= 0 || bad) {
+        sy_eprintf("tape-tldce-shard: REFUSE manifest verification failed\n");
+        return 2;
+    }
+    if (unit_shards > n_objs) unit_shards = n_objs;
+
+    char tmp[4096], run_id[64], run_dir[4200];
+    cx_fmt(run_id, sizeof run_id, "%d-%lld", (int)getpid(), (long long)sy_mono_ns());
+    if (reuse_dir[0]) {
+        cx_fmt(tmp, sizeof tmp, "%s", reuse_dir);
+        (void)sy_mkdir(tmp, 0755);
+    } else {
+        if (sr_scratch("tape-tldce-shard", tmp, (int)sizeof tmp) != 0) {
+            cx_fmt(tmp, sizeof tmp, "/tmp/tape-tldce-shard-%s", run_id);
+            if (sy_mkdir(tmp, 0755) != 0) return 2;
+        }
+    }
+    cx_fmt(run_dir, sizeof run_dir, "%s/run-%s", tmp, run_id);
+    if (sy_mkdir(run_dir, 0700) != 0) {
+        sy_eprintf("tape-tldce-shard: REFUSE cannot create run_dir %s\n", run_dir);
+        return 1;
+    }
+
+    char link_cx[4200], tgt_cx[4200], link_tsv[4200], tgt_tsv[4200];
+    cx_fmt(link_cx, sizeof link_cx, "%s/cx", tmp); cx_fmt(tgt_cx, sizeof tgt_cx, "%s/cx", root);
+    cx_fmt(link_tsv, sizeof link_tsv, "%s/cxroot.tsv", tmp); cx_fmt(tgt_tsv, sizeof tgt_tsv, "%s/cxroot.tsv", root);
+    (void)sy_unlink(link_cx); (void)sy_symlink(tgt_cx, link_cx);
+    (void)sy_unlink(link_tsv); (void)sy_symlink(tgt_tsv, link_tsv);
+
+    char drv_cx[4200], drv_nat[4200], drv_tape[4200], drv_slice[4200], so_path[4200], run_bin[4200], id_path[4200];
+    cx_fmt(drv_cx, sizeof drv_cx, "%s/tldce_shard.cx", tmp);
+    cx_fmt(drv_nat, sizeof drv_nat, "%s/tldce_shard_native", tmp);
+    cx_fmt(drv_tape, sizeof drv_tape, "%s/tldce_shard.tape", tmp);
+    cx_fmt(drv_slice, sizeof drv_slice, "%s/tldce_shard.tapeslice", tmp);
+    cx_fmt(id_path, sizeof id_path, "%s/reuse_identity.tsv", tmp);
+    if (so_arg[0]) cx_fmt(so_path, sizeof so_path, "%s", so_arg);
+    else cx_fmt(so_path, sizeof so_path, "%s/tapemode.so", tmp);
+    if (run_arg[0]) cx_fmt(run_bin, sizeof run_bin, "%s", run_arg);
+    else cx_fmt(run_bin, sizeof run_bin, "%s/tapemode_run", tmp);
+
+    static char obuf[65536];
+    char why[192];
+    int rc = 0; long ms = 0;
+    int reuse_hit = 0;
+
+    if (reuse_dir[0]) {
+        int any_existing = (sy_exists(drv_nat) == 1 || sy_exists(drv_slice) == 1 ||
+                            sy_exists(id_path) == 1);
+        if (any_existing) {
+            const char *chk_so = so_arg[0] ? so_path : so_path;
+            const char *chk_rb = run_arg[0] ? run_bin : run_bin;
+            char def_so[4200], def_rb[4200];
+            cx_fmt(def_so, sizeof def_so, "%s/tapemode.so", tmp);
+            cx_fmt(def_rb, sizeof def_rb, "%s/tapemode_run", tmp);
+            (void)chk_so; (void)chk_rb;
+            if (verify_reuse_identity(id_path, cand_sha, tl_sha, drv_nat, drv_slice, def_so, def_rb) != 0) {
+                sy_eprintf("tape-tldce-shard: REFUSE reuse-identity-mismatch dir=%s\n", reuse_dir);
+                return 2;
+            }
+            reuse_hit = 1;
+        }
+    }
+
+    if (!reuse_hit) {
+        if (build_shard_cx(root, drv_cx) != 0) { sy_eprintf("tape-tldce-shard: failed to assemble driver\n"); return 1; }
+        char *av_nat[] = {"sh", prod, drv_cx, "-o", drv_nat, 0};
+        if (run_cmd(av_nat, root, 55, &rc, &ms, obuf, sizeof obuf, why, sizeof why) != 0 || rc != 0) {
+            sy_eprintf("tape-tldce-shard: native driver build failed rc=%d\n", rc); return 1;
+        }
+        char *av_tp[] = {"sh", prod, "--target", "lnx/x86_64", "-S", drv_cx, "-o", drv_tape, 0};
+        if (run_cmd(av_tp, root, 55, &rc, &ms, obuf, sizeof obuf, why, sizeof why) != 0 || rc != 0) {
+            sy_eprintf("tape-tldce-shard: tape emit failed rc=%d\n", rc); return 1;
+        }
+        char *av_pk[] = {"sh", prod, "tools/tapepack.cx", "--", drv_tape, "-o", drv_slice, 0};
+        if (run_cmd(av_pk, root, 55, &rc, &ms, obuf, sizeof obuf, why, sizeof why) != 0 || rc != 0) {
+            sy_eprintf("tape-tldce-shard: tapepack failed rc=%d\n", rc); return 1;
+        }
+        if (!so_arg[0]) {
+            char *av_so[] = {"sh", prod, "tools/tape-sidecar-build.cx", "--", root, tmp, 0};
+            if (run_cmd(av_so, root, 55, &rc, &ms, obuf, sizeof obuf, why, sizeof why) != 0 || rc != 0) {
+                sy_eprintf("tape-tldce-shard: sidecar build failed rc=%d\n", rc); return 1;
+            }
+        }
+        if (!run_arg[0]) {
+            char *av_rb[] = {"sh", prod, "tools/tapemode-run.cx", "-o", run_bin, 0};
+            if (run_cmd(av_rb, root, 55, &rc, &ms, obuf, sizeof obuf, why, sizeof why) != 0 || rc != 0) {
+                sy_eprintf("tape-tldce-shard: tapemode-run build failed rc=%d\n", rc); return 1;
+            }
+        }
+        if (!so_arg[0] && !run_arg[0]) {
+            if (write_reuse_identity(id_path, cand_sha, tl_sha, drv_nat, drv_slice, so_path, run_bin) != 0) {
+                sy_eprintf("tape-tldce-shard: failed to write reuse_identity.tsv\n"); return 1;
+            }
+        }
+    }
+
+    unsigned long long hmask = 0; int hcnt = 0; long sbytes = 0;
+    if (inspect_slice_mask(drv_slice, &hmask, &hcnt, &sbytes) != 0 || (hmask & ~383ull) != 0) {
+        sy_eprintf("tape-tldce-shard: REFUSE slice host mask %llu exceeds M1 frozen 383\n", hmask);
+        return 1;
+    }
+    sy_printf("SHARD_SLICE\tbytes=%ld\thost_slots=%d\tmask=%llu\tsubset_m1_383=1\n", sbytes, hcnt, hmask);
+
+    /* Step 1: Single-process native reference */
+    char nat_out[4200];
+    cx_fmt(nat_out, sizeof nat_out, "%s/native_ref.tape", run_dir);
+    if (touch_empty(nat_out) != 0) { sy_eprintf("tape-tldce-shard: REFUSE output-init-failed nat_out\n"); return 1; }
+    char *av_ref[SH_MAX_OBJS + 8]; int ap = 0;
+    av_ref[ap++] = drv_nat; av_ref[ap++] = "s"; av_ref[ap++] = nat_out;
+    for (int i = 0; i < n_objs; i++) av_ref[ap++] = objs[i];
+    av_ref[ap] = 0;
+    long nat_ms = 0;
+    if (run_cmd(av_ref, root, 55, &rc, &nat_ms, obuf, sizeof obuf, why, sizeof why) != 0 || rc != 0) {
+        (void)sy_unlink(nat_out);
+        sy_eprintf("tape-tldce-shard: native reference failed rc=%d\n", rc); return 1;
+    }
+    unsigned long long nat_dce_cut = 0;
+    if (strstr(obuf, "SHARD_NATIVE\t") == 0 || parse_u64_field(obuf, "dce_cut=", &nat_dce_cut) != 0) {
+        (void)sy_unlink(nat_out);
+        sy_eprintf("tape-tldce-shard: REFUSE missing-native-dce-cut\n"); return 1;
+    }
+    sy_printf("NATIVE_REF\tunits=%d\tms=%ld\tdce_cut=%llu\n", n_objs, nat_ms, nat_dce_cut);
+
+    char b_str[32], m_str[32];
+    cx_fmt(b_str, sizeof b_str, "%llu", budget);
+    cx_fmt(m_str, sizeof m_str, "%llu", mem_extra);
+
+    int total_shards = 0;
+    long total_ms = 0, max_shard_ms = 0;
+    unsigned long long total_steps = 0;
+
+    /* Step 2: Unit shards under tape */
+    char u_tapes[32][4200], u_states[32][4200], u_metas[32][4200];
+    int u_pos = 0;
+    for (int s = 0; s < unit_shards; s++) {
+        if (s > 0 && verify_handoff_meta(u_metas[s - 1], u_states[s - 1], u_tapes[s - 1],
+                                         run_id, cand_sha, mf_sha, "unit", s - 1) != 0) return 1;
+        int rem_u = n_objs - u_pos;
+        int rem_s = unit_shards - s;
+        int take = (rem_u + rem_s - 1) / rem_s;
+        cx_fmt(u_tapes[s], sizeof u_tapes[s], "%s/t_u%d.tape", run_dir, s);
+        cx_fmt(u_states[s], sizeof u_states[s], "%s/t_u%d.st", run_dir, s);
+        cx_fmt(u_metas[s], sizeof u_metas[s], "%s/t_u%d.st.meta", run_dir, s);
+        if (touch_empty(u_tapes[s]) != 0 || touch_empty(u_states[s]) != 0) {
+            sy_eprintf("tape-tldce-shard: REFUSE output-init-failed unit %d\n", s); return 1;
+        }
+        char u_str[16]; cx_fmt(u_str, sizeof u_str, "%d", u_pos);
+        char *av[SH_MAX_OBJS + 16]; int k = 0;
+        av[k++] = run_bin; av[k++] = "--so"; av[k++] = so_path;
+        av[k++] = "--budget"; av[k++] = b_str; av[k++] = "--mem-extra"; av[k++] = m_str;
+        av[k++] = drv_slice; av[k++] = "u"; av[k++] = u_tapes[s];
+        av[k++] = (s == 0) ? "-" : u_states[s - 1];
+        av[k++] = u_states[s]; av[k++] = u_str;
+        for (int j = 0; j < take; j++) av[k++] = objs[u_pos + j];
+        av[k] = 0;
+        if (run_cmd(av, root, shard_timeout, &rc, &ms, obuf, sizeof obuf, why, sizeof why) != 0 || rc != 0) {
+            (void)sy_unlink(u_tapes[s]); (void)sy_unlink(u_states[s]);
+            sy_eprintf("tape-tldce-shard: unit shard %d failed rc=%d ms=%ld why=%s\n", s, rc, ms, why); return 1;
+        }
+        unsigned long long stp = 0;
+        if (strstr(obuf, "TAPEMODE_RUN\tstatus=0\texit_code=0\t") == 0 ||
+            strstr(obuf, "SHARD_UNIT\t") == 0 || parse_u64_field(obuf, "steps=", &stp) != 0) {
+            (void)sy_unlink(u_tapes[s]); (void)sy_unlink(u_states[s]);
+            sy_eprintf("tape-tldce-shard: REFUSE incomplete-tape-frame unit=%d\n", s); return 1;
+        }
+        if (write_handoff_meta(u_metas[s], run_id, cand_sha, mf_sha, "unit", s, u_states[s], u_tapes[s]) != 0) {
+            sy_eprintf("tape-tldce-shard: REFUSE handoff-meta-write unit=%d\n", s); return 1;
+        }
+        sy_printf("SHARD_RUN\tname=u%d\tkind=unit\tunits=%d\trc=%d\tms=%ld\tsteps=%llu\n", s, take, rc, ms, stp);
+        total_shards++; total_ms += ms; if (ms > max_shard_ms) max_shard_ms = ms; total_steps += stp;
+        u_pos += take;
+    }
+
+    if (verify_handoff_meta(u_metas[unit_shards - 1], u_states[unit_shards - 1], u_tapes[unit_shards - 1],
+                            run_id, cand_sha, mf_sha, "unit", unit_shards - 1) != 0) return 1;
+
+    /* Step 3: DCE root-scan shards under tape */
+    char dce_st[64][4200], dce_meta[64][4200]; int dce_idx = 0; int dce_skipped = 0;
+    for (int r = 0; r < dce_root_shards; r++) {
+        if (dce_idx > 0 && verify_handoff_meta(dce_meta[dce_idx - 1], dce_st[dce_idx - 1], "-",
+                                               run_id, cand_sha, mf_sha, "dce_root", dce_idx - 1) != 0) return 1;
+        cx_fmt(dce_st[dce_idx], sizeof dce_st[dce_idx], "%s/t_dce_%d.st", run_dir, dce_idx);
+        cx_fmt(dce_meta[dce_idx], sizeof dce_meta[dce_idx], "%s/t_dce_%d.st.meta", run_dir, dce_idx);
+        if (touch_empty(dce_st[dce_idx]) != 0) {
+            sy_eprintf("tape-tldce-shard: REFUSE output-init-failed dce_root %d\n", r); return 1;
+        }
+        char p_str[16], tot_str[16];
+        cx_fmt(p_str, sizeof p_str, "%d", r); cx_fmt(tot_str, sizeof tot_str, "%d", dce_root_shards);
+        char *av[64]; int k = 0;
+        av[k++] = run_bin; av[k++] = "--so"; av[k++] = so_path;
+        av[k++] = "--budget"; av[k++] = b_str; av[k++] = "--mem-extra"; av[k++] = m_str;
+        av[k++] = drv_slice; av[k++] = "r"; av[k++] = u_states[unit_shards - 1];
+        av[k++] = (dce_idx == 0) ? "-" : dce_st[dce_idx - 1];
+        av[k++] = dce_st[dce_idx]; av[k++] = p_str; av[k++] = tot_str;
+        for (int s = 0; s < unit_shards; s++) av[k++] = u_tapes[s];
+        av[k] = 0;
+        if (run_cmd(av, root, shard_timeout, &rc, &ms, obuf, sizeof obuf, why, sizeof why) != 0 || rc != 0) {
+            (void)sy_unlink(dce_st[dce_idx]);
+            sy_eprintf("tape-tldce-shard: dce root shard %d failed rc=%d ms=%ld why=%s\n", r, rc, ms, why); return 1;
+        }
+        unsigned long long stp = 0, sk = 0;
+        if (strstr(obuf, "TAPEMODE_RUN\tstatus=0\texit_code=0\t") == 0 ||
+            strstr(obuf, "SHARD_ROOT\t") == 0 ||
+            parse_u64_field(obuf, "steps=", &stp) != 0 ||
+            parse_u64_field(obuf, "skip=", &sk) != 0) {
+            (void)sy_unlink(dce_st[dce_idx]);
+            sy_eprintf("tape-tldce-shard: REFUSE incomplete-tape-frame dce_root=%d\n", r); return 1;
+        }
+        if (write_handoff_meta(dce_meta[dce_idx], run_id, cand_sha, mf_sha, "dce_root", dce_idx,
+                               dce_st[dce_idx], "-") != 0) return 1;
+        sy_printf("SHARD_RUN\tname=r%d\tkind=dce_root\trc=%d\tms=%ld\tsteps=%llu\tskip=%llu\n", r, rc, ms, stp, sk);
+        total_shards++; total_ms += ms; if (ms > max_shard_ms) max_shard_ms = ms; total_steps += stp;
+        dce_idx++;
+        if (sk == 1ull) { dce_skipped = 1; break; }
+    }
+
+    /* Step 4: DCE BFS worklist shards under tape (loop until rem==0) */
+    const char *last_dce_stage = "dce_root";
+    if (!dce_skipped) {
+        int bfs_round = 0;
+        unsigned long long rem = 1ull;
+        char pops_str[16]; cx_fmt(pops_str, sizeof pops_str, "%d", bfs_pops);
+        while (rem > 0ull) {
+            if (bfs_round >= SH_MAX_BFS_ROUNDS || dce_idx >= 60) {
+                sy_eprintf("tape-tldce-shard: BFS exceeded max rounds\n"); return 1;
+            }
+            if (verify_handoff_meta(dce_meta[dce_idx - 1], dce_st[dce_idx - 1], "-",
+                                    run_id, cand_sha, mf_sha, last_dce_stage, dce_idx - 1) != 0) return 1;
+            cx_fmt(dce_st[dce_idx], sizeof dce_st[dce_idx], "%s/t_dce_%d.st", run_dir, dce_idx);
+            cx_fmt(dce_meta[dce_idx], sizeof dce_meta[dce_idx], "%s/t_dce_%d.st.meta", run_dir, dce_idx);
+            if (touch_empty(dce_st[dce_idx]) != 0) {
+                sy_eprintf("tape-tldce-shard: REFUSE output-init-failed dce_bfs %d\n", bfs_round); return 1;
+            }
+            char *av[64]; int k = 0;
+            av[k++] = run_bin; av[k++] = "--so"; av[k++] = so_path;
+            av[k++] = "--budget"; av[k++] = b_str; av[k++] = "--mem-extra"; av[k++] = m_str;
+            av[k++] = drv_slice; av[k++] = "w"; av[k++] = u_states[unit_shards - 1];
+            av[k++] = dce_st[dce_idx - 1]; av[k++] = dce_st[dce_idx]; av[k++] = pops_str;
+            for (int s = 0; s < unit_shards; s++) av[k++] = u_tapes[s];
+            av[k] = 0;
+            if (run_cmd(av, root, shard_timeout, &rc, &ms, obuf, sizeof obuf, why, sizeof why) != 0 || rc != 0) {
+                (void)sy_unlink(dce_st[dce_idx]);
+                sy_eprintf("tape-tldce-shard: dce bfs shard %d failed rc=%d ms=%ld why=%s\n", bfs_round, rc, ms, why); return 1;
+            }
+            unsigned long long stp = 0, pops = 0;
+            if (strstr(obuf, "TAPEMODE_RUN\tstatus=0\texit_code=0\t") == 0 ||
+                strstr(obuf, "SHARD_BFS\t") == 0 ||
+                parse_u64_field(obuf, "steps=", &stp) != 0 ||
+                parse_u64_field(obuf, "pops=", &pops) != 0 ||
+                parse_u64_field(obuf, "rem=", &rem) != 0) {
+                (void)sy_unlink(dce_st[dce_idx]);
+                sy_eprintf("tape-tldce-shard: REFUSE incomplete-tape-frame dce_bfs=%d\n", bfs_round); return 1;
+            }
+            if (write_handoff_meta(dce_meta[dce_idx], run_id, cand_sha, mf_sha, "dce_bfs", dce_idx,
+                                   dce_st[dce_idx], "-") != 0) return 1;
+            last_dce_stage = "dce_bfs";
+            sy_printf("SHARD_RUN\tname=w%d\tkind=dce_bfs\tpops=%llu\trem=%llu\trc=%d\tms=%ld\tsteps=%llu\n",
+                      bfs_round, pops, rem, rc, ms, stp);
+            total_shards++; total_ms += ms; if (ms > max_shard_ms) max_shard_ms = ms; total_steps += stp;
+            dce_idx++; bfs_round++;
+        }
+    }
+
+    /* Step 5: DCE compact + check_undef + finish shard under tape */
+    if (verify_handoff_meta(dce_meta[dce_idx - 1], dce_st[dce_idx - 1], "-",
+                            run_id, cand_sha, mf_sha, last_dce_stage, dce_idx - 1) != 0) return 1;
+    char tape_out[4200];
+    cx_fmt(tape_out, sizeof tape_out, "%s/tape_final.tape", run_dir);
+    if (touch_empty(tape_out) != 0) { sy_eprintf("tape-tldce-shard: REFUSE output-init-failed tape_out\n"); return 1; }
+    char n_str[16]; cx_fmt(n_str, sizeof n_str, "%d", n_objs);
+    {
+        char *av[64]; int k = 0;
+        av[k++] = run_bin; av[k++] = "--so"; av[k++] = so_path;
+        av[k++] = "--budget"; av[k++] = b_str; av[k++] = "--mem-extra"; av[k++] = m_str;
+        av[k++] = drv_slice; av[k++] = "c"; av[k++] = tape_out;
+        av[k++] = u_states[unit_shards - 1]; av[k++] = dce_st[dce_idx - 1]; av[k++] = n_str;
+        for (int s = 0; s < unit_shards; s++) av[k++] = u_tapes[s];
+        av[k] = 0;
+        if (run_cmd(av, root, shard_timeout, &rc, &ms, obuf, sizeof obuf, why, sizeof why) != 0 || rc != 0) {
+            (void)sy_unlink(tape_out);
+            sy_eprintf("tape-tldce-shard: dce compact shard failed rc=%d ms=%ld why=%s\n", rc, ms, why); return 1;
+        }
+        unsigned long long stp = 0, cut = 0;
+        if (strstr(obuf, "TAPEMODE_RUN\tstatus=0\texit_code=0\t") == 0 ||
+            strstr(obuf, "SHARD_COMPACT\t") == 0 ||
+            parse_u64_field(obuf, "steps=", &stp) != 0 ||
+            parse_u64_field(obuf, "dce_cut=", &cut) != 0) {
+            (void)sy_unlink(tape_out);
+            sy_eprintf("tape-tldce-shard: REFUSE missing-dce-cut or incomplete-tape-frame\n"); return 1;
+        }
+        sy_printf("SHARD_RUN\tname=c0\tkind=dce_compact\tdce_cut=%llu\trc=%d\tms=%ld\tsteps=%llu\n", cut, rc, ms, stp);
+        total_shards++; total_ms += ms; if (ms > max_shard_ms) max_shard_ms = ms; total_steps += stp;
+
+        long out_bytes = 0; char sha[65]; sha[0] = 0;
+        int eq = files_equal_nonempty(nat_out, tape_out, &out_bytes, sha);
+        int pass = (eq && cut == nat_dce_cut);
+        if (pass && out_copy[0]) {
+            unsigned char *fb = 0; int64_t fn = 0;
+            if (sy_read_file(tape_out, &fb, &fn, 64L * 1024L * 1024L) != 0 || !fb || fn <= 0 ||
+                sy_write_atomic(out_copy, fb, fn, 0644) != 0) {
+                if (fb) mm_free(fb);
+                sy_eprintf("tape-tldce-shard: REFUSE publish-out-failed path=%s\n", out_copy);
+                return 1;
+            }
+            mm_free(fb);
+        }
+        sy_printf("TAPE_TLDCE_SHARD_SUMMARY\tunits=%d\tshards=%d\ttotal_ms=%ld\tmax_shard_ms=%ld\ttotal_steps=%llu\tbytes=%ld\tdce_cut=%llu\tcmp=%s\tsha256=%s\n",
+                  n_objs, total_shards, total_ms, max_shard_ms, total_steps, out_bytes, cut,
+                  pass ? "EQUAL" : "DIFF", sha);
+        return pass ? 0 : 1;
+    }
+}

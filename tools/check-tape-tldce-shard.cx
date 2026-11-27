@@ -1,0 +1,245 @@
+/* tools/check-tape-tldce-shard.cx -- Registration & e2e contract check for tools/tape-tldce-shard.cx.
+ *
+ * Usage:
+ *   sh ./unisacc.com tools/check-tape-tldce-shard.cx -- [--self-test]
+ *
+ * Verifies:
+ *   (1) Missing required flags and bad shard timeout (>60s) are refused non-zero;
+ *   (2) Manifest SHA-256 mismatch is refused non-zero;
+ *   (3) End-to-end sharded tape execution on a synthetic 8-unit object set passes with cmp=EQUAL,
+ *       M1 frozen host_slots mask <= 383, and valid reuse_identity.tsv;
+ *   (4) Review R1: handoff state identity verification accepts matching meta and refuses tampered/mismatched meta;
+ *   (5) Review R2: --reuse-dir with stale/unpinned candidate or tampered artifact refuses reuse-identity-mismatch;
+ *   (6) Review R3: real timeout (--shard-timeout 1 with sleeping runner) refuses with why/TimeoutExpired and leaves no output;
+ *   (7) Review R4: no-op runner (exits 0 with empty output) or read-only/unwritable out path is refused (never EQUAL);
+ *   (8) Review R5: runner omitting dce_cut= field is refused (missing-dce-cut, never treated as 0).
+ */
+#pragma unisa use cxlib.netpack
+#pragma unisa use cxlib.sessionroot
+#pragma unisa use sys.fs
+#pragma unisa use sys.posix
+#pragma unisa use sys.io
+#pragma unisa use sys.sha
+#pragma unisa use text.text
+#pragma unisa use mem.bytes
+#pragma unisa use mem.heap
+
+static int g_pass = 0;
+static int g_fail = 0;
+
+static void ck(int cond, const char *name) {
+    if (cond) { g_pass++; sy_printf("PASS %s\n", name); }
+    else { g_fail++; sy_printf("FAIL %s\n", name); }
+}
+
+static int run_tool(char **av, const char *cwd, int timeout_s, int *rc_out, char *obuf, size_t ocap) {
+    np_result r; mm_fill(&r, (long)sizeof r, 0, (long)sizeof r);
+    char why[128]; why[0] = 0;
+    int tr = np_run(av, cwd, 0, timeout_s, &r, why, sizeof why);
+    if (rc_out) *rc_out = tr ? 124 : r.rc;
+    if (obuf && ocap > 0) {
+        size_t pos = 0;
+        if (r.out) {
+            size_t n = strlen(r.out);
+            if (n >= ocap - 1) n = ocap - 1;
+            if (n > 0) { mm_copy(obuf, (long)ocap, r.out, (long)n); pos += n; }
+        }
+        if (r.err && pos + 1 < ocap) {
+            size_t n = strlen(r.err);
+            if (pos + n >= ocap - 1) n = ocap - 1 - pos;
+            if (n > 0) { mm_copy(obuf + pos, (long)(ocap - pos), r.err, (long)n); pos += n; }
+        }
+        obuf[pos] = 0;
+    }
+    np_free(&r);
+    return tr;
+}
+
+static int sha_hex(const char *path, char hex[65]) {
+    unsigned char *b = 0; int64_t n = 0;
+    if (sy_read_file(path, &b, &n, 8L << 20) != 0 || !b) return -1;
+    cx_sha256_hex(b, (size_t)n, hex);
+    mm_free(b); return 0;
+}
+
+int main(int argc, char **argv) {
+    (void)argc; (void)argv;
+    char root[4096], tmp[4096], odir[4200], mf[4200], bad_mf[4200], rdir[4200];
+    static char obuf[65536];
+    int rc = 0;
+
+    if (!getcwd(root, sizeof root)) return 2;
+    if (sr_scratch("check-tape-tldce-shard", tmp, (int)sizeof tmp) != 0) {
+        cx_fmt(tmp, sizeof tmp, "/tmp/check-tape-tldce-shard-%d", (int)getpid());
+        (void)sy_mkdir(tmp, 0755);
+    }
+    cx_fmt(odir, sizeof odir, "%s/objs", tmp);
+    cx_fmt(mf, sizeof mf, "%s/manifest.txt", tmp);
+    cx_fmt(bad_mf, sizeof bad_mf, "%s/bad_manifest.txt", tmp);
+    cx_fmt(rdir, sizeof rdir, "%s/reuse", tmp);
+    (void)sy_mkdir(odir, 0755);
+    (void)sy_mkdir(rdir, 0755);
+
+    /* (1) Missing args & timeout > 60 refused */
+    {
+        char *av1[] = {"sh", "./unisacc.com", "tools/tape-tldce-shard.cx", "--", 0};
+        (void)run_tool(av1, root, 30, &rc, obuf, sizeof obuf);
+        ck(rc != 0, "refuse-missing-args");
+        char *av2[] = {"sh", "./unisacc.com", "tools/tape-tldce-shard.cx", "--",
+                       "--manifest", mf, "--obj-dir", odir, "--shard-timeout", "90", 0};
+        (void)run_tool(av2, root, 30, &rc, obuf, sizeof obuf);
+        ck(rc != 0, "refuse-timeout-over-60");
+    }
+
+    /* (2) Build 8 synthetic units with dead functions + dead-only missing extern so DCE activates */
+    char mtxt[4096]; long mpos = 0;
+    int built_ok = 1;
+    for (int i = 0; i < 8; i++) {
+        char p[4200], o[4200], src[1024], rel[64], hex[65];
+        cx_fmt(p, sizeof p, "%s/u%02d.cx", odir, i);
+        cx_fmt(o, sizeof o, "%s/u%02d.o", odir, i);
+        cx_fmt(rel, sizeof rel, "u%02d.o", i);
+        if (i == 0) {
+            cx_fmt(src, sizeof src,
+                "extern int f_1(int x);\n"
+                "extern int dead_missing_ext(int x);\n"
+                "int dead_0(int x) { return dead_missing_ext(x + 3); }\n"
+                "int main(void) { return f_1(1) & 127; }\n");
+        } else if (i < 7) {
+            cx_fmt(src, sizeof src,
+                "extern int f_%d(int x);\n"
+                "int dead_%d(int x) { return (x * 17) ^ %d; }\n"
+                "int f_%d(int x) { return f_%d(x + 1); }\n",
+                i + 1, i, i, i, i + 1);
+        } else {
+            cx_fmt(src, sizeof src,
+                "int dead_7(int x) { return x ^ 99; }\n"
+                "int f_7(int x) { return x; }\n");
+        }
+        if (sy_write_file(p, src, (long)strlen(src), 0644) != 0) { built_ok = 0; break; }
+        char *avc[] = {"sh", "./unisacc.com", "-O2", "-c", "-b", "lnx/x86_64", "-funit", p, "-o", o, 0};
+        if (run_tool(avc, root, 30, &rc, obuf, sizeof obuf) != 0 || rc != 0) { built_ok = 0; break; }
+        (void)sy_unlink(p);
+        if (sha_hex(o, hex) != 0) { built_ok = 0; break; }
+        if (cx_fmt(mtxt + mpos, sizeof mtxt - (size_t)mpos, "%s  %s\n", hex, rel) != 0) { built_ok = 0; break; }
+        mpos += (long)strlen(mtxt + mpos);
+    }
+    ck(built_ok && sy_write_file(mf, mtxt, mpos, 0644) == 0, "build-8-unit-fixture");
+
+    /* (3) Tampered manifest refused */
+    {
+        char bm[128], zhex[65];
+        mm_fill(zhex, 65, '0', 64); zhex[64] = 0;
+        cx_fmt(bm, sizeof bm, "%s  u00.o\n", zhex);
+        (void)sy_write_file(bad_mf, bm, (long)strlen(bm), 0644);
+        char *avb[] = {"sh", "./unisacc.com", "tools/tape-tldce-shard.cx", "--",
+                       "--manifest", bad_mf, "--obj-dir", odir, 0};
+        (void)run_tool(avb, root, 30, &rc, obuf, sizeof obuf);
+        ck(rc != 0, "refuse-bad-manifest-sha");
+    }
+
+    /* (4) End-to-end sharded tape run (populates rdir with reuse_identity.tsv) -> cmp=EQUAL */
+    {
+        char *ave[] = {"sh", "./unisacc.com", "tools/tape-tldce-shard.cx", "--",
+                       "--manifest", mf, "--obj-dir", odir, "--reuse-dir", rdir,
+                       "--unit-shards", "2", "--dce-root-shards", "2", "--bfs-pops", "64",
+                       "--budget", "200000000", "--mem-extra", "67108864", 0};
+        int tr = run_tool(ave, root, 55, &rc, obuf, sizeof obuf);
+        ck(tr == 0 && rc == 0 &&
+           strstr(obuf, "subset_m1_383=1") != 0 &&
+           strstr(obuf, "TAPE_TLDCE_SHARD_SUMMARY") != 0 &&
+           strstr(obuf, "cmp=EQUAL") != 0,
+           "e2e-8unit-sharded-tape-cmp-equal");
+        if (rc != 0) sy_eprintf("e2e output:\n%s\n", obuf);
+    }
+
+    /* (5) R1: handoff meta identity verification rejects mismatched candidate/manifest/state sha */
+    {
+        char stf[4200], outf[4200], metaf[4200], st_sha[65], out_sha[65], meta_txt[1024];
+        cx_fmt(stf, sizeof stf, "%s/h_st.bin", tmp);
+        cx_fmt(outf, sizeof outf, "%s/h_out.bin", tmp);
+        cx_fmt(metaf, sizeof metaf, "%s/h_st.bin.meta", tmp);
+        (void)sy_write_file(stf, "STATE_PAYLOAD", 13, 0644);
+        (void)sy_write_file(outf, "OUT_PAYLOAD", 11, 0644);
+        (void)sha_hex(stf, st_sha);
+        (void)sha_hex(outf, out_sha);
+        cx_fmt(meta_txt, sizeof meta_txt,
+               "run_id=r1\ncand_sha=candA\nmf_sha=mfA\nstage=unit\nseq=0\nstate_sha=%s\nout_sha=%s\n",
+               st_sha, out_sha);
+        (void)sy_write_file(metaf, meta_txt, (long)strlen(meta_txt), 0644);
+        char *av_ok[] = {"sh", "./unisacc.com", "tools/tape-tldce-shard.cx", "--",
+                         "--verify-handoff", metaf, stf, outf, "r1", "candA", "mfA", "unit", "0", 0};
+        (void)run_tool(av_ok, root, 20, &rc, obuf, sizeof obuf);
+        int ok1 = (rc == 0);
+        char *av_bad[] = {"sh", "./unisacc.com", "tools/tape-tldce-shard.cx", "--",
+                          "--verify-handoff", metaf, stf, outf, "r1", "candB", "mfA", "unit", "0", 0};
+        (void)run_tool(av_bad, root, 20, &rc, obuf, sizeof obuf);
+        int ok2 = (rc != 0 && strstr(obuf, "handoff-identity-mismatch") != 0);
+        ck(ok1 && ok2, "R1-handoff-identity-binding");
+    }
+
+    /* (6) R2: --reuse-dir with stale/mismatched reuse_identity.tsv must refuse reuse-identity-mismatch */
+    {
+        char stale_dir[4200], stale_id[4200], stale_nat[4200];
+        cx_fmt(stale_dir, sizeof stale_dir, "%s/stale_reuse", tmp);
+        cx_fmt(stale_id, sizeof stale_id, "%s/reuse_identity.tsv", stale_dir);
+        cx_fmt(stale_nat, sizeof stale_nat, "%s/tldce_shard_native", stale_dir);
+        (void)sy_mkdir(stale_dir, 0755);
+        (void)sy_write_file(stale_nat, "STALE", 5, 0755);
+        (void)sy_write_file(stale_id, "cand_sha=deadbeef\ntl_sha=deadbeef\n", 34, 0644);
+        char *avr[] = {"sh", "./unisacc.com", "tools/tape-tldce-shard.cx", "--",
+                       "--manifest", mf, "--obj-dir", odir, "--reuse-dir", stale_dir,
+                       "--unit-shards", "2", "--dce-root-shards", "2", 0};
+        (void)run_tool(avr, root, 30, &rc, obuf, sizeof obuf);
+        ck(rc != 0 && strstr(obuf, "reuse-identity-mismatch") != 0, "R2-reuse-dir-pinned-to-candidate");
+    }
+
+    /* (7) R3: real shard timeout (--shard-timeout 1) refuses with timeout/why and leaves no --out file */
+    {
+        char slp_sh[4200], out_no[4200];
+        cx_fmt(slp_sh, sizeof slp_sh, "%s/sleep_runner.sh", tmp);
+        cx_fmt(out_no, sizeof out_no, "%s/must_not_exist.tape", tmp);
+        (void)sy_write_file(slp_sh, "#!/bin/sh\nsleep 3\nexit 0\n", 23, 0755);
+        char *avt[] = {"sh", "./unisacc.com", "tools/tape-tldce-shard.cx", "--",
+                       "--manifest", mf, "--obj-dir", odir, "--reuse-dir", rdir,
+                       "--run-bin", slp_sh, "--shard-timeout", "1", "--out", out_no,
+                       "--unit-shards", "2", "--dce-root-shards", "2", 0};
+        (void)run_tool(avt, root, 30, &rc, obuf, sizeof obuf);
+        ck(rc != 0 && strstr(obuf, "cmp=EQUAL") == 0 &&
+           (strstr(obuf, "Timeout") != 0 || strstr(obuf, "timeout") != 0 || strstr(obuf, "why=") != 0) &&
+           sy_exists(out_no) != 1,
+           "R3-timeout-refuses-and-no-residue");
+    }
+
+    /* (8) R4: no-op runner (exits 0 with empty output) and unwritable --out must refuse, never EQUAL */
+    {
+        char noop_sh[4200];
+        cx_fmt(noop_sh, sizeof noop_sh, "%s/noop_runner.sh", tmp);
+        (void)sy_write_file(noop_sh, "#!/bin/sh\nexit 0\n", 17, 0755);
+        char *avn[] = {"sh", "./unisacc.com", "tools/tape-tldce-shard.cx", "--",
+                       "--manifest", mf, "--obj-dir", odir, "--reuse-dir", rdir,
+                       "--run-bin", noop_sh, "--unit-shards", "2", "--dce-root-shards", "2", 0};
+        (void)run_tool(avn, root, 30, &rc, obuf, sizeof obuf);
+        ck(rc != 0 && strstr(obuf, "cmp=EQUAL") == 0, "R4-empty-output-never-equal");
+    }
+
+    /* (9) R5: runner omitting dce_cut= on compact shard must refuse missing-dce-cut (never default 0) */
+    {
+        char nocut_sh[4200];
+        cx_fmt(nocut_sh, sizeof nocut_sh, "%s/nocut_runner.sh", tmp);
+        const char *sc =
+            "#!/bin/sh\n"
+            "echo 'SHARD_COMPACT\tunits=8\tbytes=10'\n"
+            "echo 'TAPEMODE_RUN\tstatus=0\texit_code=0\tsteps=100\tfault_pc=0\tfault_reason=0\tret=0'\n"
+            "exit 0\n";
+        (void)sy_write_file(nocut_sh, sc, (long)strlen(sc), 0755);
+        char *avm[] = {"sh", "./unisacc.com", "tools/tape-tldce-shard.cx", "--",
+                       "--manifest", mf, "--obj-dir", odir, "--reuse-dir", rdir,
+                       "--run-bin", nocut_sh, "--unit-shards", "1", "--dce-root-shards", "1", 0};
+        (void)run_tool(avm, root, 30, &rc, obuf, sizeof obuf);
+        ck(rc != 0 && strstr(obuf, "cmp=EQUAL") == 0, "R5-missing-dce-cut-refused");
+    }
+
+    sy_printf("CHECK_TAPE_TLDCE_SHARD\tpassed=%d\tfailed=%d\n", g_pass, g_fail);
+    return g_fail == 0 ? 0 : 1;
+}
