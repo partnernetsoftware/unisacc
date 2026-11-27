@@ -896,13 +896,15 @@ static int rg_batch_materials(const char *tab_path, const char *id, char *out, s
     return (out[0] && !tx_eqz(out, "-")) ? 1 : 0;
 }
 
+static long rg_mat_deadline_ms = 0;
+
 static int rg_run_affected_materials(const char *run_dir, const char *id,
                                      const char *envcache, const char *envprep,
                                      int use_dev, const char *devdir,
                                      char *buf, size_t cap,
                                      int *steps_out, char *no_prod_out, size_t npcap) {
     char want_pass[256], want_def[256];
-    long t0 = sy_now_ms();
+    long deadline = rg_mat_deadline_ms > 0 ? rg_mat_deadline_ms : (sy_now_ms() + 280000L);
     int round, total_steps = 0;
     if (steps_out) *steps_out = 0;
     if (no_prod_out && npcap) no_prod_out[0] = 0;
@@ -910,8 +912,7 @@ static int rg_run_affected_materials(const char *run_dir, const char *id,
         cx_fmt(want_def, sizeof want_def, "DEFERRED\t%s\t", id)) return 1;
     for (round = 0; round < 6; round++) {
         char *av[32]; char bound_s[16]; int n = 0; int rc;
-        long elapsed = sy_now_ms() - t0;
-        long rem_s = (280000L - elapsed) / 1000L;
+        long rem_s = (deadline - sy_now_ms()) / 1000L;
         if (rem_s < 10L) break;
         if (rem_s > 58L) rem_s = 58L;
         if (cx_fmt(bound_s, sizeof bound_s, "%ld", rem_s)) return 1;
@@ -948,7 +949,10 @@ static int rg_run_affected_materials(const char *run_dir, const char *id,
             return 0;
         }
         if (strstr(buf, want_def) &&
-            (strstr(buf, "prepare-failed=stepwise-more-steps=") || strstr(buf, "prepare-failed=prebuild-budget="))) {
+            (strstr(buf, "prepare-failed=stepwise-more-steps=") ||
+             strstr(buf, "prepare-failed=prebuild-budget=") ||
+             strstr(buf, "prepare-failed=prebuild-deadline=") ||
+             (strstr(buf, "killed-at-deadline") && strstr(buf, "PREPARED\tentry-link")))) {
             continue;
         }
         if (round == 0 && rc == 142 && strstr(buf, "PREPARED\ttlib-kit")) continue;
@@ -1712,6 +1716,7 @@ int main(int argc, char **argv) {
                     cx_fmt(envp, sizeof envp, "UNISACC_PREP_CACHE=%s", tprep)) {
                     okrun = 0;
                 } else {
+                    rg_mat_deadline_ms = sy_now_ms() + 280000L;
                     rc = rg_run_affected_materials(root, id, 0, envp, use_dev, devdir, buf, sizeof buf, &steps, no_prod, sizeof no_prod);
                     (void)rg_clean_layout(tprep);
                     at = tx_find(buf, tx_len(buf, sizeof buf), "BATCH_RUN\t", 10);
@@ -1725,6 +1730,7 @@ int main(int argc, char **argv) {
                     if (!okrun) fputs(buf, stderr);
                     if (okrun) bpok = !rn_prepare(root, "tools/batch-packages-gen.cx", cache, bpbin, sizeof bpbin, &reused, why, sizeof why);
                     if (okrun && rg_qualify_layout_selftest(root, id, check, files, batchbin, use_dev, devdir, 0) != 0) okrun = 0;
+                    rg_mat_deadline_ms = 0;
                 }
             }
         } else {
