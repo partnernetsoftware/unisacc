@@ -161,3 +161,57 @@ int rc_adopt_ok(const char *receipt, const char *phase, const char *cur_inputs_s
     if (strlen(cur_inputs_sha) != 64 || strcmp(got, cur_inputs_sha)) return rc_fail("mismatch", phase);
     return 0;
 }
+static int rc_is_hex64(const char *s) {
+    size_t i;
+    if (!s || strlen(s) != 64) return 0;
+    for (i = 0; i < 64; i++) {
+        char c = s[i];
+        if (!((c >= '0' && c <= '9') || (c >= 'a' && c <= 'f') || (c >= 'A' && c <= 'F'))) return 0;
+    }
+    return 1;
+}
+static int rc_is_id(const char *s) {
+    size_t i;
+    if (!s || !s[0]) return 0;
+    for (i = 0; s[i]; i++) {
+        if (s[i] == '\n' || s[i] == '\r' || s[i] == '\t' || s[i] == ' ') return 0;
+    }
+    return 1;
+}
+static int rc_is_int(const char *s) {
+    size_t i = 0;
+    if (!s || !s[0]) return 0;
+    if (s[0] == '-') i = 1;
+    if (!s[i]) return 0;
+    for (; s[i]; i++) if (s[i] < '0' || s[i] > '9') return 0;
+    return 1;
+}
+int rc_write2(const char *receipt, const char *run_id, const char *candidate_sha, const char *inputs_sha, const char *output_sha, const char *producer_sha, int rc) {
+    char tmp[1100], body[640];
+    if (!rc_is_id(run_id)) return rc_fail("run_id", receipt);
+    if (!rc_is_hex64(candidate_sha) || !rc_is_hex64(inputs_sha) || !rc_is_hex64(output_sha) || !rc_is_hex64(producer_sha)) return rc_fail("hex", run_id);
+    if (cx_fmt(tmp, sizeof tmp, "%s.new", receipt)) return rc_fail("path", receipt);
+    if (cx_fmt(body, sizeof body, "run_id\t%s\ncandidate_sha\t%s\ninputs_sha\t%s\noutput_sha\t%s\nproducer_sha\t%s\nrc\t%d\n",
+               run_id, candidate_sha, inputs_sha, output_sha, producer_sha, rc)) return rc_fail("fmt", run_id);
+    if (cx_write(tmp, body, strlen(body)) || sy_rename(tmp, receipt)) return rc_fail("write", receipt);
+    return 0;
+}
+int rc_need(const char *rec, const char *key, const char *kind) {
+    char val[160];
+    if (!rec || !key || !kind) { rc_fail("arg", key); return 2; }
+    if (sy_exists(rec) != 1) { rc_fail("missing", rec); return 2; }
+    if (rc_get(rec, key, val, sizeof val)) { rc_fail("missing-field", key); return 2; }
+    if (!strcmp(kind, "hex64")) { if (!rc_is_hex64(val)) { rc_fail("bad-hex64", key); return 2; } }
+    else if (!strcmp(kind, "id")) { if (!rc_is_id(val)) { rc_fail("bad-id", key); return 2; } }
+    else if (!strcmp(kind, "int")) { if (!rc_is_int(val)) { rc_fail("bad-int", key); return 2; } }
+    else { rc_fail("bad-kind", kind); return 2; }
+    return 0;
+}
+int rc_fresh(const char *rec, const char *run_id) {
+    char got[160];
+    if (!rc_is_id(run_id)) { rc_fail("bad-run_id", rec); return 2; }
+    if (sy_exists(rec) != 1) { rc_fail("missing", rec); return 2; }
+    if (rc_get(rec, "run_id", got, sizeof got)) { rc_fail("missing-run_id", rec); return 2; }
+    if (strcmp(got, run_id)) { rc_fail("stale-run_id", run_id); return 2; }
+    return 0;
+}
