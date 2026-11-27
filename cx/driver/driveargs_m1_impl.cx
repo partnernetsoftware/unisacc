@@ -1,0 +1,125 @@
+#pragma unisa module driveargs_m1_impl
+#pragma unisa use driver.stream_s1_m1
+#pragma unisa use mem.heap
+#pragma unisa use mem.bytes
+#pragma unisa use text.text
+/* Authoritative S3 embedded-tape host wrapper for driveargs.o (src/driveargs.cx dv_word).
+ * Zero native fallback: carrier or VM failure refuses -2 with DRIVEARGS_M1_REFUSE.
+ * Never truncates long arguments: words > 512 B are passed in full via heap buffer (up to 65535 B, else refuse -2). */
+static TapeUnitState da_m1_unit;
+
+static const TapeUnitSpec *da_m1_spec(void) {
+    static const TapeUnitSpec sp = {
+        "tape/lnx-x86_64/manifest.tsv",
+        "tape/lnx-x86_64/tapemode.so",
+        "tape/lnx-x86_64/driveargs.tapeslice",
+        "tapemode.so",
+        "driveargs.tapeslice",
+        "DVARGM1B1",
+        9L,
+        "main",
+        20ULL,
+        2000000ULL,
+        "DRIVEARGS_M1_REFUSE"
+    };
+    return &sp;
+}
+
+int da_m1_word(const char *word, int is_object, int cx_shebang_hint) {
+    unsigned char sbuf[515];
+    unsigned char *req = sbuf;
+    long wl = 0L;
+    long r;
+    if (word) {
+        wl = tx_len(word, 65536L);
+        if (wl < 0L || wl >= 65536L) return -2;
+        if (wl > 512L) {
+            req = (unsigned char *)mm_alloc(3L + wl);
+            if (!req) return -2;
+        }
+        if (wl > 0L) mm_copy(req + 3, wl, word, wl);
+    }
+    req[0] = word ? 1u : 0u;
+    req[1] = is_object ? 1u : 0u;
+    req[2] = cx_shebang_hint ? 1u : 0u;
+    r = tape_unit_call_bytes(&da_m1_unit, da_m1_spec(), req, 3L + wl);
+    if (req != sbuf) mm_free(req);
+    return r < 0L ? -2 : (int)r;
+}
+
+void da_m1_stats(long *calls_out, long *slice_load_ns_out,
+                 long *first_ns_out, long *repeat_ns_out) {
+    tape_unit_stats(&da_m1_unit, calls_out, slice_load_ns_out, first_ns_out, repeat_ns_out);
+}
+
+typedef struct {
+    int maxu;
+    int (*dv_cx_fn)(const char *);
+    int (*cxm_flag_fn)(const char *);
+    int (*bx_opt_dash_fn)(const char *);
+    const char *(*bx_opt_why_fn)(int, const char *);
+    const char *(*bx_compat_why_fn)(int, int, const char *);
+} DaM1Ops;
+
+static int da_m1_is_reserved_word(const char *w) {
+    return tx_eqz(w, "ar") || tx_eqz(w, "as") || tx_eqz(w, "nm") ||
+           tx_eqz(w, "objdump") || tx_eqz(w, "stream") ||
+           tx_eqz(w, "--version") || tx_eqz(w, "-version") ||
+           tx_eqz(w, "--help") || tx_eqz(w, "--");
+}
+
+static int da_m1_needs_shebang(const char *w, int (*dv_cx_fn)(const char *)) {
+    long n;
+    if (!w || !dv_cx_fn) return 0;
+    if (da_m1_is_reserved_word(w)) return 0;
+    n = tx_len(w, 65536L);
+    if (n < 0L || n >= 65536L) return 0;
+    if (n >= 3L && w[n - 3] == '.' && w[n - 2] == 'c' && w[n - 1] == 'x') return 0;
+    if (n >= 2L && w[n - 2] == '.' &&
+        (w[n - 1] == 'c' || w[n - 1] == 'h' || w[n - 1] == 's' || w[n - 1] == 'S' || w[n - 1] == 'o' || w[n - 1] == 'a')) return 0;
+    return dv_cx_fn(w) ? 1 : 0;
+}
+
+int da_m1_dv_word(const char *word, int is_object, int (*dv_cx_fn)(const char *)) {
+    int hint = (!word || is_object) ? 0 : da_m1_needs_shebang(word, dv_cx_fn);
+    return da_m1_word(word, is_object, hint);
+}
+
+static int da_m1_compat_word(const char *a) { return a && a[0] == '-' && (a[1] == 'l' || a[1] == 'L' || a[1] == 'x'); }
+
+int da_m1_parse_args(const DaM1Ops *ops, void *opts, void *compat, char **srcv, int *nsrc, const char **src,
+                     int *argstart, char *why, int argc, char **argv,
+                     int *runit, int *defrun, int (*fail)(const char *)) {
+    int cxc_step(void *, char **, int, int *, char *, long);
+    int cxp_step(void *, char **, int, int *, char *, long);
+    int i = 1, next, parsed, kind;
+    while (i < argc) {
+        next = i;
+        parsed = cxc_step(opts, argv, argc, &next, why, 128);
+        if (parsed == 0) { i = next; continue; }
+        if (parsed == 5 || parsed == 7 || parsed != 1) return fail(why);
+        kind = da_m1_dv_word(argv[i], 0, ops->dv_cx_fn);
+        if (kind == -2) return fail("driveargs tape refused");
+        if (kind == 11) return 11;
+        if (kind == 12) return 12;
+        if (kind == 13) { if (*runit) *argstart = i + 1; break; }
+        if (*runit && *src && kind != 20 && !da_m1_compat_word(argv[i])) { *argstart = i; break; }
+        if (da_m1_compat_word(argv[i])) {
+            const char *cwhy;
+            next = i;
+            parsed = cxp_step(compat, argv, argc, &next, why, 128);
+            cwhy = ops->bx_compat_why_fn(parsed, *defrun, *src);
+            if (cwhy) return fail(cwhy);
+            if (parsed == 0) { i = next; continue; }
+            if (parsed != 1) return fail(why);
+        }
+        if (ops->cxm_flag_fn(argv[i])) { i = i + 1; continue; }
+        if (ops->bx_opt_dash_fn(argv[i]) == 1) return fail(ops->bx_opt_why_fn(*defrun, *src));
+        if (*nsrc >= ops->maxu) { char lim[80]; lim[0] = 0; (void)cx_fmt(lim, sizeof lim, "too many sources (limit %d)", ops->maxu); return fail(lim[0] ? lim : "too many sources"); }
+        srcv[*nsrc] = argv[i];
+        if (!*src) *src = argv[i];
+        *nsrc = *nsrc + 1;
+        i = i + 1;
+    }
+    return 0;
+}
