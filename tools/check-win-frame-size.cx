@@ -1,16 +1,19 @@
-/* tools/check-win-frame-size.cx -- Verify Windows x86_64 PE stack frame bounds and tape_run_cx reentrancy guard.
+/* tools/check-win-frame-size.cx -- Regression check for Windows PE stack frame bounds and tape_run_cx reentrancy.
  *
  *   sh ./unisacc.com tools/check-win-frame-size.cx --
  *
- * Checks:
- *   1. Cross-compiles tests/win-m53-s1-parity.cx for win/x86_64 and scans the PE32+ .text section
- *      for 'sub $imm32, %rsp' (48 81 ec imm32) prologues:
- *        - frames >= 4096 bytes must stay <= baseline (7)
- *        - frames >= 65536 bytes must be 0 (guards against Windows 4 KiB stack guard-page violation)
- *   2. Exercises tape_run_cx() nested reentrant invocation via a host dispatcher callback:
- *        - nested call must refuse with fail_host (rc == 2, result[0] == 2, result[4] == 6) without crashing
- *        - outer call must complete normally (rc == 0, result[0] == 0)
- *        - subsequent top-level call must succeed (te_busy cleared on exit)
+ * Scope & limitations:
+ *   - This is a regression check for this backend's prologue encodings:
+ *       * win/x86_64: 'sub $imm32, %rsp' (48 81 ec <imm32>) in PE32+ executable sections
+ *       * win/arm64:  'sub sp, sp, #imm12[, lsl #12]' ((insn & 0xff8003ff) == 0xd10003ff)
+ *                     in PE32+ executable sections (register-based 'sub sp, sp, xN' is UNMEASURED)
+ *   - Truncated section tables or PE images with zero executable sections MUST fail (never pass as 0/0).
+ *   - Also checks:
+ *       1. Product callers of tape_run_cx() under cx/ and src/ are restricted to the single-threaded
+ *          cx/driver/stream_s1.cx path guarded by m53_s1_busy (no L0 atomic CAS exists).
+ *       2. Nested reentrant call into tape_run_cx() during an active CALL/RET frame refuses with
+ *          fail_host (rc == 2, result[0] == 2, result[4] == 6), preserves the outer CALL/RET stack
+ *          and exact return value (52), and clears te_busy on exit for subsequent calls.
  */
 #pragma unisa use runtime.tape_exec
 #pragma unisa use sys.fs
@@ -54,8 +57,8 @@ static void cwfs_wr64(unsigned char *p, unsigned long long v) {
     cwfs_wr32(p + 4, (unsigned int)(v >> 32));
 }
 
-/* Reentrancy test state */
-static unsigned char g_slice[224];
+/* Reentrancy test state (CALL -> sys(nested) -> RET -> add 10 -> exit 52) */
+static unsigned char g_slice[240];
 static unsigned char g_mem[4096];
 static unsigned char g_ibm[16];
 static unsigned long long g_nested_res[5];
@@ -82,7 +85,7 @@ static long long nested_disp(unsigned long long slot_id,
     nargs[10] = (unsigned long long)g_ibm;
     nargs[11] = (unsigned long long)sizeof g_ibm;
     g_nested_rc = tape_run_cx(nargs);
-    return 0LL;
+    return 42LL;
 }
 
 static long long noop_disp(unsigned long long slot_id,
@@ -90,41 +93,56 @@ static long long noop_disp(unsigned long long slot_id,
                            unsigned long long a2, unsigned long long a3,
                            unsigned long long a4, unsigned long long a5) {
     (void)slot_id; (void)a0; (void)a1; (void)a2; (void)a3; (void)a4; (void)a5;
-    return 0LL;
+    return 42LL;
 }
 
-static void build_min_sys_slice(unsigned char out[224]) {
-    mm_fill(out, 224, 0, 224);
+/* Build minimal 240-byte UTAPEBIN v1.3 slice exercising CALL/RET across a nested sys callback:
+ *   0..2:   call 12       (pushes te_ret_pc[0]=3, te_ret_sp[0]=sp-8)
+ *   3..6:   imm r1, 10
+ *   7..9:   add r0, r0, r1
+ *   10..11: exit r0       (expected 42 + 10 = 52)
+ *   12..16: sys slot=1    (returns 42 into r0 after refused nested tape_run_cx)
+ *   17:     ret           (restores pc=3, checks te_ret_sp[0]) */
+static void build_call_ret_sys_slice(unsigned char out[240]) {
+    mm_fill(out, 240, 0, 240);
     cwfs_wr64(out + 0, 0x4e49424550415455ULL);  /* "UTAPEBIN" */
     cwfs_wr32(out + 8, 0x00030001U);            /* v1.3 */
     cwfs_wr32(out + 12, 1U);                    /* flags */
     cwfs_wr32(out + 16, 0U);                    /* entry_off */
     cwfs_wr32(out + 20, 6U);                    /* nsec */
     cwfs_wr32(out + 24, 64U);                   /* sec_off */
-    /* CODE section */
+    /* CODE section (offset 208, len 18) */
     cwfs_wr32(out + 64, 0x45444f43U);           /* "CODE" */
-    cwfs_wr64(out + 68, 208ULL);                /* off */
-    cwfs_wr64(out + 76, 7ULL);                  /* len */
-    /* DATA section */
+    cwfs_wr64(out + 68, 208ULL);
+    cwfs_wr64(out + 76, 18ULL);
+    /* DATA section (offset 232, len 0) */
     cwfs_wr32(out + 88, 0x41544144U);           /* "DATA" */
-    cwfs_wr64(out + 92, 216ULL);                /* off */
-    cwfs_wr64(out + 100, 0ULL);                 /* len */
-    /* BSSZ section */
+    cwfs_wr64(out + 92, 232ULL);
+    cwfs_wr64(out + 100, 0ULL);
+    /* BSSZ section (offset 232, len 8, value 0) */
     cwfs_wr32(out + 112, 0x5a535342U);          /* "BSSZ" */
-    cwfs_wr64(out + 116, 216ULL);               /* off */
-    cwfs_wr64(out + 124, 8ULL);                 /* len */
-    /* Code at offset 208: sys slot=1 (r0=0,r1=0,r2=0), then exit r0 */
-    out[208] = 43U; out[209] = 0x00U; out[210] = 0xf0U; out[211] = 0x01U; out[212] = 0x01U;
-    out[213] = 42U; out[214] = 0xf0U;
+    cwfs_wr64(out + 116, 232ULL);
+    cwfs_wr64(out + 124, 8ULL);
+    /* Code at offset 208 (18 bytes) */
+    out[208] = 29U; out[209] = 1U; out[210] = 12U;                    /* call 12 */
+    out[211] = 0U;  out[212] = 0xf1U; out[213] = 1U; out[214] = 10U;  /* imm r1, 10 */
+    out[215] = 2U;  out[216] = 0x00U; out[217] = 0xf1U;               /* add r0, r0, r1 */
+    out[218] = 42U; out[219] = 0xf0U;                                 /* exit r0 */
+    out[220] = 43U; out[221] = 0x00U; out[222] = 0xf0U; out[223] = 1U; out[224] = 1U; /* sys slot=1 */
+    out[225] = 37U;                                                   /* ret */
 }
 
-static int scan_pe_frames(const char *exe_path, int *ge4k_out, int *ge64k_out, unsigned int *max_out) {
+/* Scan PE32+ executable sections for backend prologue stack-frame allocations.
+ * want_mach: 0x8664 (win/x86_64) or 0xAA64 (win/arm64).
+ * Refuses (returns 1) on invalid header, wrong machine, truncated section table, or zero valid executable sections. */
+static int scan_pe_frames(const char *exe_path, unsigned int want_mach,
+                          int *ge4k_out, int *ge64k_out, unsigned int *max_out) {
     unsigned char *buf = 0;
     int64_t len = 0;
     unsigned int pe_off, mach, nsec, opt_sz, sec_off, s;
-    int ge4k = 0, ge64k = 0;
+    int ge4k = 0, ge64k = 0, exec_secs = 0;
     unsigned int max_f = 0U;
-    if (sy_read_file(exe_path, &buf, &len, 32 << 20) != 0 || !buf || len < 256) {
+    if (sy_read_file(exe_path, &buf, &len, 32 << 20) != 0 || !buf || len < 64) {
         if (buf) mm_free(buf);
         return 1;
     }
@@ -136,77 +154,194 @@ static int scan_pe_frames(const char *exe_path, int *ge4k_out, int *ge64k_out, u
         return 1;
     }
     mach = (unsigned int)buf[pe_off + 4] | ((unsigned int)buf[pe_off + 5] << 8);
-    if (mach != 0x8664U) { mm_free(buf); return 1; }
+    if (mach != want_mach) { mm_free(buf); return 1; }
     nsec = (unsigned int)buf[pe_off + 6] | ((unsigned int)buf[pe_off + 7] << 8);
     opt_sz = (unsigned int)buf[pe_off + 20] | ((unsigned int)buf[pe_off + 21] << 8);
     sec_off = pe_off + 24U + opt_sz;
+    if (nsec == 0U || (int64_t)sec_off + (int64_t)nsec * 40 > len) {
+        mm_free(buf);
+        return 1;
+    }
     for (s = 0U; s < nsec; s++) {
         unsigned int sh = sec_off + s * 40U;
         unsigned int raw_sz, raw_ptr, chars, i;
-        if ((int64_t)sh + 40 > len) break;
         chars = cwfs_u32(buf + sh + 36);
         if ((chars & 0x20000000U) == 0U) continue; /* IMAGE_SCN_MEM_EXECUTE */
         raw_sz = cwfs_u32(buf + sh + 16);
         raw_ptr = cwfs_u32(buf + sh + 20);
-        if ((int64_t)raw_ptr + (int64_t)raw_sz > len || raw_sz < 7U) continue;
-        for (i = 0U; i + 7U <= raw_sz; i++) {
-            const unsigned char *p = buf + raw_ptr + i;
-            if (p[0] == 0x48U && p[1] == 0x81U && p[2] == 0xecU) {
-                unsigned int imm = cwfs_u32(p + 3);
-                if (imm >= 4096U && imm < 0x10000000U) {
-                    ge4k++;
-                    if (imm > max_f) max_f = imm;
-                    if (imm >= 65536U) ge64k++;
+        if (raw_sz == 0U || (int64_t)raw_ptr + (int64_t)raw_sz > len) {
+            mm_free(buf);
+            return 1;
+        }
+        exec_secs++;
+        if (want_mach == 0x8664U) {
+            for (i = 0U; i + 7U <= raw_sz; i++) {
+                const unsigned char *p = buf + raw_ptr + i;
+                if (p[0] == 0x48U && p[1] == 0x81U && p[2] == 0xecU) {
+                    unsigned int imm = cwfs_u32(p + 3);
+                    if (imm >= 4096U && imm < 0x10000000U) {
+                        ge4k++;
+                        if (imm > max_f) max_f = imm;
+                        if (imm >= 65536U) ge64k++;
+                    }
+                }
+            }
+        } else if (want_mach == 0xAA64U) {
+            for (i = 0U; i + 4U <= raw_sz; i += 4U) {
+                unsigned int insn = cwfs_u32(buf + raw_ptr + i);
+                if ((insn & 0xff8003ffU) == 0xd10003ffU) {
+                    unsigned int imm12 = (insn >> 10) & 0xfffU;
+                    unsigned int shl = (insn >> 22) & 1U;
+                    unsigned int imm = shl ? (imm12 << 12) : imm12;
+                    if (imm >= 4096U) {
+                        ge4k++;
+                        if (imm > max_f) max_f = imm;
+                        if (imm >= 65536U) ge64k++;
+                    }
                 }
             }
         }
     }
     mm_free(buf);
+    if (exec_secs == 0) return 1;
     *ge4k_out = ge4k;
     *ge64k_out = ge64k;
     *max_out = max_f;
     return 0;
 }
 
-int main(void) {
-    static char dir[4096], exe[4400];
-    int ge4k = -1, ge64k = -1;
-    unsigned int max_f = 0U;
+/* Verify that in cx/ and src/, tape_run_cx( is only called from cx/driver/stream_s1.cx
+ * (which serializes under m53_s1_busy) and defined in cx/runtime/tape_exec.cx. */
+static int check_single_threaded_callers(void) {
+    char *av[] = {"git", "grep", "-n", "tape_run_cx(", "--", "cx/", "src/", 0};
+    pr_result r;
+    int rc = pr_run("check-tape-callers", av, 0, 0, 15, &r);
+    int ok_callers = 0;
+    if (rc == 0 && r.rc == 0 && r.out && r.outn > 0) {
+        int s1_hits = 0, bad_hits = 0;
+        const char *p = r.out;
+        const char *end = r.out + r.outn;
+        while (p < end) {
+            const char *nl = p;
+            size_t ln;
+            while (nl < end && *nl != '\n') nl++;
+            ln = (size_t)(nl - p);
+            if (ln > 0) {
+                if (ln >= 22 && !memcmp(p, "cx/driver/stream_s1.cx:", 23)) {
+                    s1_hits++;
+                } else if (ln >= 23 && !memcmp(p, "cx/runtime/tape_exec.cx:", 24)) {
+                    /* declaration/definition in runtime */
+                } else {
+                    bad_hits++;
+                }
+            }
+            p = nl < end ? nl + 1 : end;
+        }
+        ok_callers = (s1_hits == 1 && bad_hits == 0);
+    }
+    pr_free(&r);
+    if (!ok_callers) return 0;
+    /* Also verify cx/driver/stream_s1.cx carries the m53_s1_busy guard */
+    {
+        unsigned char *sb = 0;
+        int64_t sn = 0;
+        int has_busy = 0;
+        if (sy_read_file("cx/driver/stream_s1.cx", &sb, &sn, 1 << 20) == 0 && sb && sn > 0) {
+            if (tx_find((const char *)sb, (long)sn, "m53_s1_busy", 11) >= 0) has_busy = 1;
+            mm_free(sb);
+        }
+        return has_busy;
+    }
+}
 
-    /* 1. Cross-compile tests/win-m53-s1-parity.cx for win/x86_64 and scan stack frames */
+int main(void) {
+    static char dir[4096], exe64[4400], exea64[4400], badpe[4400];
+    int ge4k = -1, ge64k = -1;
+    int a64_ge4k = -1, a64_ge64k = -1;
+    unsigned int max_f = 0U, a64_max_f = 0U;
+
     if (sy_mkdtemp(sy_tmpdir(), "unisacc-win-frame-", dir, sizeof dir) != 0 ||
-        cx_fmt(exe, sizeof exe, "%s/win-m53-parity.exe", dir) != 0) {
+        cx_fmt(exe64, sizeof exe64, "%s/win-m53-parity-x64.exe", dir) != 0 ||
+        cx_fmt(exea64, sizeof exea64, "%s/win-m53-parity-arm64.exe", dir) != 0 ||
+        cx_fmt(badpe, sizeof badpe, "%s/bad.exe", dir) != 0) {
         sy_eprintf("check-win-frame-size: mkdtemp failed\n");
         return 2;
     }
+
+    /* 1. win/x86_64 PE32+ stack-frame scan */
     {
         char *av[] = {
             "sh", "./unisacc.com", "--target", "win/x86_64", /* lint:allow R1-product cross-compiles win/x86_64 PE for stack-frame audit */
-            "tests/win-m53-s1-parity.cx", "-o", exe, 0
+            "tests/win-m53-s1-parity.cx", "-o", exe64, 0
         };
         pr_result r;
-        int rc = pr_run("win-frame-compile", av, 0, 0, 55, &r);
+        int rc = pr_run("win-frame-compile-x64", av, 0, 0, 55, &r);
         int ok_build = (rc == 0 && r.rc == 0);
-        if (!ok_build) {
-            if (r.err && r.errn) sy_eprintf("%.*s\n", (int)r.errn, r.err);
-        }
+        if (!ok_build && r.err && r.errn) sy_eprintf("%.*s\n", (int)r.errn, r.err);
         pr_free(&r);
         cwfs_ok(ok_build, "check-win-frame-size.cross-compile-win-x86_64");
         if (ok_build) {
-            int src = scan_pe_frames(exe, &ge4k, &ge64k, &max_f);
-            sy_printf("WIN_FRAME_SCAN\tge4k=%d\tge64k=%d\tmax_frame=%u\n", ge4k, ge64k, max_f);
+            int src = scan_pe_frames(exe64, 0x8664U, &ge4k, &ge64k, &max_f);
+            sy_printf("WIN_FRAME_SCAN\ttarget=win/x86_64\tge4k=%d\tge64k=%d\tmax_frame=%u\n", ge4k, ge64k, max_f);
             cwfs_ok(src == 0 && ge4k >= 0 && ge4k <= 7, "check-win-frame-size.frames-ge-4096-within-baseline-7");
             cwfs_ok(src == 0 && ge64k == 0, "check-win-frame-size.frames-ge-65536-zero");
         } else {
             cwfs_ok(0, "check-win-frame-size.frames-ge-4096-within-baseline-7");
             cwfs_ok(0, "check-win-frame-size.frames-ge-65536-zero");
         }
-        sy_unlink(exe);
-        sy_rmdir(dir);
+        sy_unlink(exe64);
     }
 
-    /* 2. Nested reentrant call into tape_run_cx must refuse with fail_host and recover */
-    build_min_sys_slice(g_slice);
+    /* 2. win/arm64 PE32+ sub-immediate stack-frame scan (register-based sub sp, sp, xN is UNMEASURED) */
+    {
+        char *av[] = {
+            "sh", "./unisacc.com", "--target", "win/arm64", /* lint:allow R1-product cross-compiles win/arm64 PE for stack-frame audit */
+            "tests/win-m53-s1-parity.cx", "-o", exea64, 0
+        };
+        pr_result r;
+        int rc = pr_run("win-frame-compile-arm64", av, 0, 0, 55, &r);
+        int ok_build = (rc == 0 && r.rc == 0);
+        if (!ok_build && r.err && r.errn) sy_eprintf("%.*s\n", (int)r.errn, r.err);
+        pr_free(&r);
+        if (ok_build) {
+            int src = scan_pe_frames(exea64, 0xAA64U, &a64_ge4k, &a64_ge64k, &a64_max_f);
+            sy_printf("WIN_FRAME_SCAN\ttarget=win/arm64\tsub_imm_ge4k=%d\tsub_imm_ge64k=%d\tmax_sub_imm=%u\treg_sp_sub=UNMEASURED\n",
+                      a64_ge4k, a64_ge64k, a64_max_f);
+            cwfs_ok(src == 0 && a64_ge64k == 0, "check-win-frame-size.win-arm64-sub-imm-ge-65536-zero");
+        } else {
+            cwfs_ok(0, "check-win-frame-size.win-arm64-sub-imm-ge-65536-zero");
+        }
+        sy_unlink(exea64);
+    }
+
+    /* 3. Negative scanner cases: zero executable sections and truncated section table must refuse */
+    {
+        unsigned char zpe[128];
+        int d1 = 0, d2 = 0;
+        unsigned int d3 = 0U;
+        int r_zero, r_trunc;
+        mm_fill(zpe, (long)sizeof zpe, 0, (long)sizeof zpe);
+        zpe[0] = 'M'; zpe[1] = 'Z';
+        cwfs_wr32(zpe + 60, 64U);
+        zpe[64] = 'P'; zpe[65] = 'E'; zpe[66] = 0; zpe[67] = 0;
+        zpe[68] = 0x64U; zpe[69] = 0x86U; /* 0x8664 */
+        /* nsec = 0 -> zero executable sections */
+        sy_write_file(badpe, zpe, (long)sizeof zpe, 0644);
+        r_zero = scan_pe_frames(badpe, 0x8664U, &d1, &d2, &d3);
+        /* nsec = 2, opt_sz = 0 -> section table ends at 64 + 24 + 80 = 168 > 128 (truncated) */
+        zpe[70] = 2U; zpe[71] = 0U;
+        sy_write_file(badpe, zpe, (long)sizeof zpe, 0644);
+        r_trunc = scan_pe_frames(badpe, 0x8664U, &d1, &d2, &d3);
+        sy_unlink(badpe);
+        cwfs_ok(r_zero != 0 && r_trunc != 0, "check-win-frame-size.refuses-zero-exec-or-truncated-pe");
+    }
+    sy_rmdir(dir);
+
+    /* 4. Single-threaded product caller check (only cx/driver/stream_s1.cx under m53_s1_busy) */
+    cwfs_ok(check_single_threaded_callers(), "check-win-frame-size.product-callers-single-threaded-stream-s1");
+
+    /* 5. Nested reentrant call across active CALL/RET frame: refuses fail_host, preserves outer CALL/RET state, clears te_busy */
+    build_call_ret_sys_slice(g_slice);
     mm_fill(g_mem, (long)sizeof g_mem, 0, (long)sizeof g_mem);
     mm_fill(g_ibm, (long)sizeof g_ibm, 0, (long)sizeof g_ibm);
     {
@@ -230,17 +365,17 @@ int main(void) {
         rc1 = tape_run_cx(args);
         cwfs_ok(g_disp_calls == 1 && g_nested_rc == 2LL && g_nested_res[0] == 2ULL && g_nested_res[4] == 6ULL,
                 "check-win-frame-size.nested-reentrant-refuses-fail-host");
-        cwfs_ok(rc1 == 0LL && res[0] == 0ULL,
-                "check-win-frame-size.outer-completes-after-nested-refusal");
+        cwfs_ok(rc1 == 52LL && res[0] == 0ULL && res[1] == 52ULL,
+                "check-win-frame-size.outer-call-ret-state-preserved-across-nested-refusal");
 
         args[6] = (unsigned long long)res2;
         args[8] = (unsigned long long)noop_disp;
         rc2 = tape_run_cx(args);
-        cwfs_ok(rc2 == 0LL && res2[0] == 0ULL,
+        cwfs_ok(rc2 == 52LL && res2[0] == 0ULL && res2[1] == 52ULL,
                 "check-win-frame-size.busy-cleared-for-subsequent-call");
     }
 
-    sy_printf("CHECK_WIN_FRAME_SIZE\tpassed=%d\tfailed=%d\tge4k=%d\tge64k=%d\n",
-              cwfs_passed, cwfs_failed, ge4k, ge64k);
+    sy_printf("CHECK_WIN_FRAME_SIZE\tpassed=%d\tfailed=%d\tge4k=%d\tge64k=%d\tarm64_sub_imm_ge64k=%d\tarm64_reg_sp_sub=UNMEASURED\n",
+              cwfs_passed, cwfs_failed, ge4k, ge64k, a64_ge64k);
     return cwfs_failed ? 1 : 0;
 }
