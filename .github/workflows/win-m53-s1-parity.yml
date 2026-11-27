@@ -1,0 +1,470 @@
+name: win-m53-s1-parity
+on:
+  workflow_dispatch:
+    inputs:
+      source_commit:
+        description: 40-hex v0.1.9 source commit
+        required: true
+        type: string
+      candidate_url:
+        description: Repo-scoped GitHub release/asset URL of the v0.1.9 candidate APE
+        required: true
+        type: string
+      candidate_sha256:
+        description: Expected 64-hex lowercase sha256 of the v0.1.9 private-chain candidate APE
+        required: true
+        type: string
+      candidate_receipt_url:
+        description: Repo-scoped GitHub release/asset or commit-pinned raw URL of the chain candidate receipt
+        required: true
+        type: string
+      candidate_receipt_sha256:
+        description: Optional 64-hex lowercase sha256 pin for the chain candidate receipt asset
+        required: false
+        default: ''
+        type: string
+permissions:
+  contents: read
+jobs:
+  fetch:
+    runs-on: ubuntu-latest
+    timeout-minutes: 8
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ inputs.source_commit }}
+      - name: Verify repo-scoped publisher provenance, parse authoritative chain receipt, and pin candidate APE
+        env:
+          SOURCE_COMMIT: ${{ inputs.source_commit }}
+          CANDIDATE_URL: ${{ inputs.candidate_url }}
+          CANDIDATE_SHA256: ${{ inputs.candidate_sha256 }}
+          CANDIDATE_RECEIPT_URL: ${{ inputs.candidate_receipt_url }}
+          CANDIDATE_RECEIPT_SHA256: ${{ inputs.candidate_receipt_sha256 }}
+          REPO: ${{ github.repository }}
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -eu
+          mkdir -p win-m53-baseline/dl
+          printf '%s' "$SOURCE_COMMIT" | grep -Eq '^[0-9a-f]+$'
+          test "${#SOURCE_COMMIT}" -eq 40
+          printf '%s' "$CANDIDATE_SHA256" | grep -Eq '^[0-9a-f]+$'
+          test "${#CANDIDATE_SHA256}" -eq 64
+          test "$CANDIDATE_SHA256" != "0000000000000000000000000000000000000000000000000000000000000000"
+          if [ -n "$CANDIDATE_RECEIPT_SHA256" ]; then
+            printf '%s' "$CANDIDATE_RECEIPT_SHA256" | grep -Eq '^[0-9a-f]+$'
+            test "${#CANDIDATE_RECEIPT_SHA256}" -eq 64
+            test "$CANDIDATE_RECEIPT_SHA256" != "0000000000000000000000000000000000000000000000000000000000000000"
+          fi
+          HEAD_SHA="$(git rev-parse HEAD)"
+          test "$HEAD_SHA" = "$SOURCE_COMMIT"
+
+          REPO_ESC="$(printf '%s' "$REPO" | sed 's/[.[\*^$+?(){}|\\]/\\&/g')"
+          REL_RE="^https://github\\.com/${REPO_ESC}/releases/download/[^/]+/[^/]+$"
+          API_RE="^https://api\\.github\\.com/repos/${REPO_ESC}/releases/assets/[0-9]+$"
+          RAW_RE="^https://raw\\.githubusercontent\\.com/${REPO_ESC}/${SOURCE_COMMIT}/[^/].*$"
+
+          download_repo_scoped() {
+            url="$1"
+            out_file="$2"
+            want_sha="$3"
+            allow_raw="$4"
+            if printf '%s' "$url" | grep -Eq "$REL_RE"; then
+              rest="${url#https://github.com/${REPO}/releases/download/}"
+              tag="${rest%%/*}"
+              asset="${rest#*/}"
+              api_dig="$(gh api "repos/${REPO}/releases/tags/${tag}" --jq ".assets[] | select(.name == \"${asset}\") | .digest")"
+              printf '%s' "$api_dig" | grep -Eq '^sha256:[0-9a-f]+$'
+              test "${#api_dig}" -eq 71
+              if [ -n "$want_sha" ]; then
+                test "$api_dig" = "sha256:${want_sha}"
+              fi
+              gh release download "$tag" -R "$REPO" -p "$asset" -D win-m53-baseline/dl --clobber
+              mv "win-m53-baseline/dl/$asset" "$out_file"
+              got_dl="$(sha256sum "$out_file" | awk '{print $1}')"
+              test "sha256:${got_dl}" = "$api_dig"
+            elif printf '%s' "$url" | grep -Eq "$API_RE"; then
+              aid="${url##*/}"
+              api_dig="$(gh api "repos/${REPO}/releases/assets/${aid}" --jq ".digest")"
+              printf '%s' "$api_dig" | grep -Eq '^sha256:[0-9a-f]+$'
+              test "${#api_dig}" -eq 71
+              if [ -n "$want_sha" ]; then
+                test "$api_dig" = "sha256:${want_sha}"
+              fi
+              gh api -H "Accept: application/octet-stream" "repos/${REPO}/releases/assets/${aid}" > "$out_file"
+              got_dl="$(sha256sum "$out_file" | awk '{print $1}')"
+              test "sha256:${got_dl}" = "$api_dig"
+            elif [ "$allow_raw" = "1" ] && printf '%s' "$url" | grep -Eq "$RAW_RE"; then
+              rel_path="${url#https://raw.githubusercontent.com/${REPO}/${SOURCE_COMMIT}/}"
+              test -f "$rel_path"
+              curl --proto '=https' --max-redirs 0 -fsS -o "$out_file" -- "$url"
+              got_dl="$(sha256sum "$out_file" | awk '{print $1}')"
+              test "$got_dl" = "$(sha256sum "$rel_path" | awk '{print $1}')"
+              if [ -n "$want_sha" ]; then
+                test "$got_dl" = "$want_sha"
+              fi
+            else
+              echo "REFUSE untrusted URL outside repo provenance: $url" >&2
+              return 1
+            fi
+          }
+
+          download_repo_scoped "$CANDIDATE_RECEIPT_URL" win-m53-baseline/candidate-chain.rcpt "$CANDIDATE_RECEIPT_SHA256" "1"
+
+          CHAIN_FILE="win-m53-baseline/candidate-chain.rcpt"
+          CHAIN_FMT="$(awk -v want_rev="$SOURCE_COMMIT" -v want_sha="$CANDIDATE_SHA256" -v want_repo="$REPO" '
+          BEGIN {
+            bad = 0; promote_ok = 0; promote_refuse = 0; need_ape = 0;
+            tsv_hdr = 0; c_repo = 0; c_commit = 0; c_sha = 0; tsv_hits = 0;
+            rc_n = 0; other_lines = 0;
+          }
+          function is_hex_nz(s, n) {
+            if (length(s) != n || s !~ /^[0-9a-f]+$/ || s ~ /^0+$/) return 0;
+            return 1;
+          }
+          function is_id(s) {
+            return length(s) > 0 && s !~ /[\t \r\n]/;
+          }
+          /\r$/ { bad = 1; exit 1 }
+          {
+            if ($0 == "" || $0 ~ /^#/) next;
+            if ($0 ~ /^PROMOTE_CHECK\t/) {
+              if ($0 ~ /^PROMOTE_CHECK\tREFUSE(\t|$)/ || $0 !~ /^PROMOTE_CHECK\tOK\t/) { bad = 1; exit 1 }
+              rev_hit = 0; rval = "";
+              n = split($0, f, /[\t ]+/);
+              for (i = 1; i <= n; i++) if (f[i] ~ /^rev=/) { rev_hit++; rval = substr(f[i], 5) }
+              if (rev_hit != 1 || !is_hex_nz(rval, 40) || rval != want_rev) { bad = 1; exit 1 }
+              promote_ok++;
+              next;
+            }
+            if ($0 ~ /^NEED\tape\t/) {
+              sha_hit = 0; sval = "";
+              n = split($0, f, /[\t ]+/);
+              for (i = 1; i <= n; i++) if (f[i] ~ /^sha=/) { sha_hit++; sval = substr(f[i], 5) }
+              if (sha_hit != 1 || !is_hex_nz(sval, 64) || sval != want_sha) { bad = 1; exit 1 }
+              need_ape++;
+              next;
+            }
+            if ($0 ~ /^NEED\t/) { next }
+            if (!tsv_hdr && !promote_ok && !("version" in rc_seen) && index($0, "\t") > 0 && ($0 ~ /^repo\t/ || index($0, "\tape_sha256") > 0)) {
+              n = split($0, f, "\t");
+              for (i = 1; i <= n; i++) {
+                if (f[i] == "repo") c_repo = i;
+                if (f[i] == "commit") c_commit = i;
+                if (f[i] == "ape_sha256") c_sha = i;
+              }
+              if (c_repo == 0 || c_commit == 0 || c_sha == 0) { bad = 1; exit 1 }
+              tsv_hdr = 1;
+              next;
+            }
+            if (tsv_hdr) {
+              n = split($0, f, "\t");
+              if (f[c_commit] == want_rev) {
+                if (f[c_repo] != want_repo || !is_hex_nz(f[c_sha], 64) || f[c_sha] != want_sha) { bad = 1; exit 1 }
+                tsv_hits++;
+              }
+              next;
+            }
+            if (split($0, f, "\t") == 2) {
+              k = f[1]; v = f[2];
+              if (k == "version" || k == "run_id" || k == "rev" || k == "unit" || k == "target" ||
+                  k == "producer" || k == "purpose" || k == "candidate_sha" || k == "inputs_sha" ||
+                  k == "output_sha" || k == "rc" || k == "verdict" || k == "ts" || k == "binding_sha") {
+                if (k in rc_seen) { bad = 1; exit 1 }
+                rc_seen[k] = v;
+                rc_n++;
+                next;
+              }
+            }
+            other_lines++;
+          }
+          END {
+            if (bad || promote_refuse > 0) exit 1;
+            if (tsv_hdr) { if (tsv_hits == 1 && other_lines == 0) { print "CHAIN_FORMAT=candidate_tsv"; exit 0 } exit 1; }
+            if (promote_ok > 0 || need_ape > 0) { if (promote_ok == 1 && need_ape == 1 && other_lines == 0) { print "CHAIN_FORMAT=promote_check"; exit 0 } exit 1; }
+            if (rc_n == 14 && other_lines == 0 && rc_seen["version"] == "3" &&
+                is_id(rc_seen["run_id"]) && is_hex_nz(rc_seen["rev"], 40) && rc_seen["rev"] == want_rev &&
+                is_id(rc_seen["unit"]) && is_id(rc_seen["target"]) && is_id(rc_seen["producer"]) && is_id(rc_seen["purpose"]) &&
+                is_hex_nz(rc_seen["candidate_sha"], 64) && rc_seen["candidate_sha"] == want_sha &&
+                is_hex_nz(rc_seen["inputs_sha"], 64) && is_hex_nz(rc_seen["output_sha"], 64) &&
+                rc_seen["rc"] == "0" && rc_seen["verdict"] == "PASS" &&
+                (rc_seen["ts"] + 0) > 0 && is_hex_nz(rc_seen["binding_sha"], 64)) {
+              print "CHAIN_FORMAT=rc_v3";
+              exit 0;
+            }
+            exit 1;
+          }' "$CHAIN_FILE")"
+          case "$CHAIN_FMT" in
+            CHAIN_FORMAT=rc_v3)
+              GOT_CBIND="$(awk -F'\t' '$1=="binding_sha"{print $2}' "$CHAIN_FILE")"
+              EXP_CBIND="$(awk -F'\t' '{m[$1]=$2} END{printf "version\t3\nrun_id\t%s\nrev\t%s\nunit\t%s\ntarget\t%s\nproducer\t%s\npurpose\t%s\ncandidate_sha\t%s\ninputs_sha\t%s\noutput_sha\t%s\nrc\t%s\nverdict\t%s\nts\t%s\n", m["run_id"], m["rev"], m["unit"], m["target"], m["producer"], m["purpose"], m["candidate_sha"], m["inputs_sha"], m["output_sha"], m["rc"], m["verdict"], m["ts"]}' "$CHAIN_FILE" | sha256sum | awk '{print $1}')"
+              test "$GOT_CBIND" = "$EXP_CBIND"
+              ;;
+            CHAIN_FORMAT=candidate_tsv|CHAIN_FORMAT=promote_check)
+              ;;
+            *)
+              echo "REFUSE unrecognized chain format: $CHAIN_FMT" >&2
+              exit 1
+              ;;
+          esac
+
+          download_repo_scoped "$CANDIDATE_URL" win-m53-baseline/candidate-unisacc.com "$CANDIDATE_SHA256" "0"
+          rm -rf win-m53-baseline/dl
+          GOT_SHA="$(sha256sum win-m53-baseline/candidate-unisacc.com | awk '{print $1}')"
+          test "$GOT_SHA" = "$CANDIDATE_SHA256"
+          printf '%s\n' "$CANDIDATE_SHA256" > win-m53-baseline/candidate.sha256
+          date +%s > win-m53-baseline/dispatch_ts.txt
+      - uses: actions/upload-artifact@v4
+        with:
+          name: win-m53-trusted-baseline-${{ github.run_id }}
+          path: win-m53-baseline/
+          if-no-files-found: error
+          retention-days: 1
+
+  produce:
+    needs: fetch
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - os: windows-2025
+            target: win/x86_64
+          - os: windows-11-arm
+            target: win/arm64
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: 15
+    defaults:
+      run:
+        shell: bash
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ inputs.source_commit }}
+      - uses: actions/download-artifact@v4
+        with:
+          name: win-m53-trusted-baseline-${{ github.run_id }}
+          path: win-m53-baseline
+      - name: Read back embedded m53.tapeslice from delivered APE and execute both arms
+        env:
+          SOURCE_COMMIT: ${{ inputs.source_commit }}
+          CANDIDATE_URL: ${{ inputs.candidate_url }}
+          EXPECT_TARGET: ${{ matrix.target }}
+        run: |
+          set -eu
+          WANT_SHA="$(cat win-m53-baseline/candidate.sha256)"
+          GOT_SHA="$(sha256sum win-m53-baseline/candidate-unisacc.com | awk '{print $1}')"
+          test "$GOT_SHA" = "$WANT_SHA"
+          NOW_TS="$(date +%s)"
+          RUN_ID="ci-${GITHUB_RUN_ID}-${{ matrix.os }}"
+          mkdir -p win-m53-produce
+          ./win-m53-baseline/candidate-unisacc.com tests/win-m53-s1-parity.cx -- \
+            --receipt win-m53-produce/m53-s1.rcpt \
+            --output win-m53-produce/m53-s1.out \
+            --slice win-m53-produce/m53_bin2.tapeslice \
+            --locators win-m53-produce/locators.tsv \
+            --candidate-url "$CANDIDATE_URL" \
+            --run-id "$RUN_ID" \
+            --rev "$SOURCE_COMMIT" \
+            --candidate-file win-m53-baseline/candidate-unisacc.com \
+            --expect-target "$EXPECT_TARGET" \
+            --ts "$NOW_TS"
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: win-m53-produce-${{ matrix.os }}-${{ github.run_id }}
+          path: win-m53-produce/
+          if-no-files-found: error
+          retention-days: 1
+
+  judge:
+    needs: [fetch, produce]
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - os: windows-2025
+            target: win/x86_64
+          - os: windows-11-arm
+            target: win/arm64
+    runs-on: ubuntu-latest
+    timeout-minutes: 8
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ inputs.source_commit }}
+      - uses: actions/download-artifact@v4
+        with:
+          name: win-m53-trusted-baseline-${{ github.run_id }}
+          path: win-m53-baseline
+      - uses: actions/download-artifact@v4
+        with:
+          name: win-m53-produce-${{ matrix.os }}-${{ github.run_id }}
+          path: win-m53-produce
+      - name: Independent judge (never executes candidate APE; extracts slice from trusted APE, binds vectors.tsv, verifies v3 receipt + binding_sha)
+        env:
+          SOURCE_COMMIT: ${{ inputs.source_commit }}
+          EXPECT_TARGET: ${{ matrix.target }}
+        run: |
+          set -eu
+          CAND_APE="win-m53-baseline/candidate-unisacc.com"
+          CAND_SHA="$(cat win-m53-baseline/candidate.sha256)"
+          DISP_TS="$(cat win-m53-baseline/dispatch_ts.txt)"
+          NOW_TS="$(date +%s)"
+          RUN_ID="ci-${GITHUB_RUN_ID}-${{ matrix.os }}"
+          RCPT="win-m53-produce/m53-s1.rcpt"
+          OUT="win-m53-produce/m53-s1.out"
+          SLICE="win-m53-produce/m53_bin2.tapeslice"
+          LOC="win-m53-produce/locators.tsv"
+          VECTORS="tests/fixtures/win-m53-s1/vectors.tsv"
+
+          test -s "$CAND_APE" && test -s "$RCPT" && test -s "$OUT" && test -s "$SLICE" && test -s "$LOC" && test -s "$VECTORS"
+          test "$(sha256sum "$CAND_APE" | awk '{print $1}')" = "$CAND_SHA"
+
+          # Independently extract tape/lnx-x86_64/m53.tapeslice from fetch's trusted APE (never trust produce's slice copy alone)
+          APE_SZ="$(stat -c %s "$CAND_APE")"
+          test "$APE_SZ" -gt 32
+          MAGIC="$(tail -c 16 "$CAND_APE" | head -c 8)"
+          test "$MAGIC" = "$(printf 'UNIPKG1\n')"
+          PKG_LEN="$(od -An -tu8 -N8 -j $((APE_SZ - 8)) "$CAND_APE" | tr -d ' \n')"
+          PKG_OFF=$((APE_SZ - 16 - PKG_LEN))
+          test "$PKG_LEN" -gt 10 && test "$PKG_OFF" -ge 0
+          dd if="$CAND_APE" of=win-m53-baseline/trusted.p4 bs=1 skip="$PKG_OFF" count="$PKG_LEN" status=none
+          # Binary-safe P4 F-record extraction using dd + head (handles arbitrary binary payloads with NUL/newlines)
+          P4_FILE="win-m53-baseline/trusted.p4"
+          read_line_at() {
+            tail -c +"$(($1 + 1))" "$P4_FILE" | head -n 1
+          }
+          POS=0
+          HDR="$(read_line_at "$POS")"
+          POS=$((POS + ${#HDR} + 1))
+          set -- $HDR
+          test "$1" = "P" && test "$2" = "4"
+          PM="$3"; PS="$4"; NR="$5"
+          I=0
+          while [ "$I" -lt "$PS" ]; do
+            L="$(read_line_at "$POS")"
+            POS=$((POS + ${#L} + 1))
+            I=$((I + 1))
+          done
+          I=0
+          while [ "$I" -lt "$PM" ]; do
+            L="$(read_line_at "$POS")"
+            POS=$((POS + ${#L} + 1))
+            set -- $L
+            POS=$((POS + $2))
+            I=$((I + 1))
+          done
+          FOUND_SL=0
+          I=0
+          while [ "$I" -lt "$NR" ]; do
+            L="$(read_line_at "$POS")"
+            POS=$((POS + ${#L} + 1))
+            set -- $L
+            test "$1" = "F"
+            KL="$2"; DL="$3"; RL="$4"; CO="$5"
+            KEY="$(dd if="$P4_FILE" bs=1 skip="$POS" count="$KL" status=none)"
+            if [ "$KEY" = "tape/lnx-x86_64/m53.tapeslice" ]; then
+              test "$FOUND_SL" -eq 0 && test "$CO" = "0" && test "$DL" = "$RL" && test "$DL" -ge 128
+              dd if="$P4_FILE" of=win-m53-baseline/trusted_m53.tapeslice bs=1 skip="$((POS + KL))" count="$DL" status=none
+              FOUND_SL=1
+            fi
+            POS=$((POS + KL + DL))
+            I=$((I + 1))
+          done
+          test "$FOUND_SL" -eq 1
+          TRUSTED_SLICE_SHA="$(sha256sum win-m53-baseline/trusted_m53.tapeslice | awk '{print $1}')"
+          SLICE_SHA="$(sha256sum "$SLICE" | awk '{print $1}')"
+          test "$SLICE_SHA" = "$TRUSTED_SLICE_SHA"
+
+          OUT_SHA="$(sha256sum "$OUT" | awk '{print $1}')"
+          JOB_SHA="$(sha256sum tests/fixtures/win-m53-s1/job.tsv | awk '{print $1}')"
+          BASE_SHA="$(sha256sum cx/runtime/stream_attributes.cx | awk '{print $1}')"
+          VEC_SHA="$(sha256sum "$VECTORS" | awk '{print $1}')"
+          IN_SHA="$(printf 'job\t%s\nbaseline\t%s\nslice\t%s\nvectors\t%s\n' "$JOB_SHA" "$BASE_SHA" "$TRUSTED_SLICE_SHA" "$VEC_SHA" | sha256sum | awk '{print $1}')"
+
+          grep -Fx "$(printf 'target\t%s' "$EXPECT_TARGET")" "$LOC" >/dev/null
+          grep -Fx "$(printf 'candidate_sha\t%s' "$CAND_SHA")" "$LOC" >/dev/null
+          grep -Fx "$(printf 'slice_sha\t%s' "$TRUSTED_SLICE_SHA")" "$LOC" >/dev/null
+          grep -Fx "$(printf 'vectors_sha\t%s' "$VEC_SHA")" "$LOC" >/dev/null
+          grep -Fx "$(printf 'slice_source\tdelivered_ape:tape/lnx-x86_64/m53.tapeslice')" "$LOC" >/dev/null
+
+          # Bind every vector ID, input len, and expected return value to repo tests/fixtures/win-m53-s1/vectors.tsv and reject duplicates
+          awk -v tgt="$EXPECT_TARGET" '
+          FNR == NR {
+            if (FNR == 1) next;
+            if (NF != 5) { bad = 1; exit 1 }
+            vid = $1;
+            if (vid in exp_len) { bad = 1; exit 1 }
+            exp_len[vid] = $2;
+            exp_ret[vid] = $5;
+            want_n++;
+            if ($5 == "1") want_pos++; else want_neg++;
+            next;
+          }
+          /\r$/ { bad = 1; exit 1 }
+          /^VEC\t/ {
+            n = split($0, f, "\t");
+            if (n != 7) { bad = 1; exit 1 }
+            vid = f[2];
+            if (!(vid in exp_len) || (vid in seen_v)) { bad = 1; exit 1 }
+            if (f[3] != ("len=" exp_len[vid])) { bad = 1; exit 1 }
+            if (f[4] != ("native=" exp_ret[vid])) { bad = 1; exit 1 }
+            if (f[5] != ("portable=" exp_ret[vid])) { bad = 1; exit 1 }
+            if (f[6] != ("s1_def=" exp_ret[vid])) { bad = 1; exit 1 }
+            st = substr(f[7], 7) + 0;
+            if (st <= 0) { bad = 1; exit 1 }
+            seen_v[vid] = 1;
+            vecs++;
+            next;
+          }
+          /^SUMMARY\t/ {
+            want_s = "\ttarget=" tgt "\tvectors=" want_n "\tpos=" want_pos "\tneg=" want_neg "\t";
+            if (index($0, want_s) == 0 || $0 !~ /\tverdict=PASS$/) { bad = 1; exit 1 }
+            sum++;
+            next;
+          }
+          { bad = 1; exit 1 }
+          END {
+            if (bad || want_n != 12 || vecs != want_n || sum != 1) exit 1;
+            for (vid in exp_len) if (!(vid in seen_v)) exit 1;
+          }' "$VECTORS" "$OUT"
+
+          awk -v run_id="$RUN_ID" -v rev="$SOURCE_COMMIT" -v target="$EXPECT_TARGET" \
+              -v csha="$CAND_SHA" -v isha="$IN_SHA" -v osha="$OUT_SHA" \
+              -v now_ts="$NOW_TS" -v min_ts="$DISP_TS" '
+          BEGIN { n = 0; bad = 0 }
+          function is_hex64_nz(s) { return length(s) == 64 && s ~ /^[0-9a-f]+$/ && s !~ /^0+$/; }
+          /\r$/ { bad = 1; exit 1 }
+          {
+            if (split($0, f, "\t") != 2) { bad = 1; exit 1 }
+            if (f[1] in seen) { bad = 1; exit 1 }
+            seen[f[1]] = f[2];
+            n++;
+          }
+          END {
+            if (bad || n != 14) exit 1;
+            if (seen["version"] != "3") exit 1;
+            if (seen["run_id"] != run_id || seen["rev"] != rev || seen["unit"] != "m53") exit 1;
+            if (seen["target"] != target || seen["producer"] != "win-m53-s1-parity" || seen["purpose"] != "s1-parity") exit 1;
+            if (seen["candidate_sha"] != csha || seen["inputs_sha"] != isha || seen["output_sha"] != osha) exit 1;
+            if (seen["rc"] != "0" || seen["verdict"] != "PASS") exit 1;
+            ts = seen["ts"] + 0;
+            if (ts <= 0 || ts < min_ts - 60 || ts < now_ts - 86400 || ts > now_ts + 60) exit 1;
+            if (!is_hex64_nz(seen["binding_sha"])) exit 1;
+          }' "$RCPT"
+
+          GOT_BIND="$(awk -F'\t' '$1=="binding_sha"{print $2}' "$RCPT")"
+          EXP_BIND="$(grep -v '^binding_sha	' "$RCPT" | sha256sum | awk '{print $1}')"
+          test "$GOT_BIND" = "$EXP_BIND"
+          mkdir -p win-m53-s1-evidence
+          cp "$RCPT" "$OUT" "$SLICE" "$LOC" win-m53-baseline/candidate-chain.rcpt win-m53-s1-evidence/
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: m53-s1-evidence-${{ matrix.os }}-${{ github.run_id }}
+          path: |
+            win-m53-s1-evidence/m53-s1.rcpt
+            win-m53-s1-evidence/m53-s1.out
+            win-m53-s1-evidence/m53_bin2.tapeslice
+            win-m53-s1-evidence/locators.tsv
+            win-m53-s1-evidence/candidate-chain.rcpt
+          if-no-files-found: error
