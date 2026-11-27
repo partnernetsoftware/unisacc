@@ -3,7 +3,7 @@
  *   sh ./unisacc.com tools/check-devsvc-git.cx        (在仓根跑)
  *
  * 夹具:`git clone --local` 本仓到 /tmp/dvgit-<pid>,另建裸仓 /tmp/dvgit-<pid>-bare 作 origin,夹具内放入工作副本的 devsvc 三件并提交;
- *   不设 DV_PIN_DIR(与真仓同键共用 $HOME 固定版本缓存,冷构造约 55 s 仅首次);UNISACC_DEVSVC_DIR 指向 /tmp/dvgit-<pid>-* 临时目录,经固定版本启动器跑夹具 HEAD(冷构造一次后命中缓存)。每次命令 55 秒上限,结束清理夹具。
+ *   不设 DV_PIN_DIR(与真仓同键共用 $HOME 固定版本缓存,冷构造约 55 s 仅首次);UNISACC_DEVSVC_DIR 指向 /tmp/dvgit-inst-* 短目录(mkdtemp,/tmp 基,路径长度断言),经固定版本启动器跑夹具 HEAD(冷构造一次后命中缓存)。每次命令 55 秒上限,结束清理夹具。
  * 断言:(a) commit --whole F --push 成功、裸仓收到提交、末行 GIT_COMMIT rc=0;(b) commit 失败后 lock list 无残留;
  *   (c) 两个并发 commit 都完成且无残留锁;(d) x -- git stash list、git -C . stash list、git push --force 均 rc 125 且 stderr 含 REFUSE;
  *   (e) git status 末行 GIT_STATUS 格式;(w) commit --cwd 夹具内版本工作树:落该工作树分支、推 refs/heads/该分支、main HEAD 不变,--cwd 不存在 rc 2。末行 CHECK_DEVSVC_GIT<TAB>failed=N;有 FAIL 则 rc 1。 */
@@ -217,8 +217,10 @@ int main(int argc, char **argv) {
     {   /* 夹具路径按仓根哈希与组固定(不含 pid)并持 .lock 文件锁防并发互删,且共享真仓 $HOME 固定版本缓存目录 */
         unsigned long long hh = 1469598103934665603ULL; long q; const char *tag = single_c1a ? "c1a" : single_c1b ? "c1b" : single_c1 ? "c1" : single_c2 ? "c2" : single_f2 ? "f2" : A && B ? "ab" : A ? "a" : B ? "b" : C ? "c" : D ? "d" : E ? "e" : "f"; char c0[700], lkp[200], gdir[1100], gh[65]; const char *home = getenv("HOME"); int lfd, li;
         for (q = 0; root[q]; q++) { hh ^= (unsigned char)root[q]; hh *= 1099511628211ULL; }
-        F(fx, sizeof fx, "%s/dvgit-%08llx-%s", C ? sy_tmpdir() : "/tmp", hh & 0xffffffffULL, tag); F(bare, sizeof bare, "%s-bare", fx);
-        F(pin, sizeof pin, "%s-pin", fx); F(inst, sizeof inst, "%s-inst", fx);
+        F(fx, sizeof fx, "%s/dvgit-%08llx-%s", "/tmp", hh & 0xffffffffULL, tag); F(bare, sizeof bare, "%s-bare", fx);
+        F(pin, sizeof pin, "%s-pin", fx);
+        if (sy_mkdtemp("/tmp", "dvgit-inst", inst, sizeof inst) != 0) { printf("FAIL\tdevsvc-git.instance-dir\n"); return 2; }
+        if (strlen(inst) + 5 >= 100) { printf("FAIL\tdevsvc-git.instance-path-too-long\tlen=%d\n", (int)strlen(inst) + 5); cleanup(); return 2; }
         F(lkp, sizeof lkp, "%s.lock", fx);
         lfd = sy_open(lkp, 2 | 64, 0600);
         if (lfd >= 0) {
@@ -261,7 +263,7 @@ int main(int argc, char **argv) {
             b = 0; F(src, sizeof src, "%s/tools/gitsync-run.cx", root); F(dst, sizeof dst, "%s/tools/gitsync-run.cx", fx);   /* git merge/pull 的同步子进程 */
             if (!ovf && sy_exists(src) == 1 && !sy_read_file(src, &b, &n, 1 << 22) && b) { (void)sy_write_atomic(dst, (char *)b, (size_t)n, 0644); free(b); } } }
     F(c, sizeof c, "git clone -q --bare --local %s %s && git config user.name dvcheck && git config user.email dvcheck@example.invalid && git remote set-url origin %s"
-                   " && git add tools/devsvc.cx tools/devsvc-core.cx tools/devsvc-repo.tsv tools/commit-own.cx tools/cxlib/flowexec.cx tools/push-replay.cx && { ! test -e tools/cxlib/flowadmit.cx || git add tools/cxlib/flowadmit.cx; } && { ! test -e tools/gitsync-run.cx || git add tools/gitsync-run.cx; } && { git commit -q -m fixture || git diff --cached --quiet; } && git push -q origin HEAD:main && ln -s %s/unisacc.com unisacc.com", root, bare, bare, root);
+                   " && git add tools/devsvc.cx tools/devsvc-core.cx tools/devsvc-repo.tsv tools/commit-own.cx tools/cxlib/flowexec.cx tools/push-replay.cx && { ! test -e tools/cxlib/flowadmit.cx || git add tools/cxlib/flowadmit.cx; } && { ! test -e tools/gitsync-run.cx || git add tools/gitsync-run.cx; } && { git commit -q -m fixture || git diff --cached --quiet; } && git push -q -f origin HEAD:main && ln -s %s/unisacc.com unisacc.com", root, bare, bare, root);
     if (ovf || sh(c, fx) != 0) { printf("FAIL\tdevsvc-git.fixture-setup\n"); printf("NOTE\tlast-output\t%.500s\n", out); cleanup(); return 1; }
 
     if (single_c1a) {

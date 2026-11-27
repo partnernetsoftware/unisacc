@@ -3,7 +3,7 @@
    baseline (cxraw, cxinclude "module PATH", cxtrunc) or a whole-tree total above its baseline (srcshape
    "src/ total lines"), and drops the stale-row note, the FAIL summary and the boundary note; --only src/
    keeps only the cxinclude and the srcshape total row, --only apps/ only the cxraw row.  A full run prints
-   seventeen RATCHET lines including net-deps (gate 14), notcovered, dup-census, no-home-path and ref-job-paths, excluding retired toolsloc, and a RATCHETS line whose ok+fail is 17, with
+   one RATCHET line per name from tools/ratchets.cx --list, excluding retired toolsloc; the roster count comes from that output, with
    exit 0 exactly when fail is 0.
    --only-paths aliases --only. When --from-run fails only on untracked
    no-baseline .cx, expects RATCHET_HINT foreign-untracked (no move tip).
@@ -66,6 +66,25 @@ static long where(const char *out, long on, const char *s) {
     return -1;
 }
 static int has(const char *out, const char *s) { return where(out, tx_len(out, 1 << 16), s) >= 0; }
+
+/* Roster = the producer's own --list output; the count and names are never literals here. */
+static int roster_names(char names[][64], int max) {
+    char out[32768]; char *a[] = {"--list", 0}; long at = 0, on; int n = 0;
+    if (run(a, out, sizeof out) != 0) return -1;
+    on = tx_len(out, sizeof out);
+    while (at < on && n < max) {
+        long e = at; while (e < on && out[e] != '\n') e++;
+        if (e - at > 14 && tx_prefix(out + at, e - at, "RATCHETS_LIST\t", 14)) {
+            long s0 = at + 14, s1 = s0; int k = 0;
+            while (s1 < e && out[s1] != '\t') s1++;
+            while (s0 < s1 && k + 1 < 64) names[n][k++] = out[s0++];
+            names[n][k] = 0;
+            if (k > 0) n++;
+        }
+        at = e + 1;
+    }
+    return n;
+}
 
 /* three review cases: move plus a non-canonical number, allow-list growth, stdio FAIL blocking */
 static int gate_hash(const char *file, char *sha, long cap) {
@@ -241,15 +260,16 @@ int main(int argc, char **argv) {
         }
     }
     {   /* --plan lists each gate; --from-run judges a synthetic flow run with one gate above baseline */
-        static const char *nm[] = {"cxraw", "cxinclude", "cxapis", "cxtrunc", "cxlibc", "cxplatform", "srcshape", "coreapi", "verwriter", "aluiwidth", "outdep", "check-literal", "net-deps", "notcovered", "dup-census", "no-home-path", "ref-job-paths", "tsv-lint", "reserved-names", "host-surface"};
-        enum { nfixtures = sizeof nm / sizeof nm[0] };
-        char d[4096], od[4200], p[4400], ev[1 << 12], line[256], *pl[] = {"--plan", 0}, *fr[] = {"--from-run", d, 0}; long en = 0; int k;
+        char names[32][64]; int nfixtures = roster_names(names, 32), k; const char *nm[32];
+        char d[4096], od[4200], p[4400], ev[1 << 12], line[256], *pl[] = {"--plan", 0}, *fr[] = {"--from-run", d, 0}; long en = 0; char exp_ok[64];
+        cx_fmt(exp_ok, sizeof exp_ok, "RATCHETS\tok=%d\tfail=1\t", nfixtures - 1);
+        for (k = 0; k < nfixtures; k++) nm[k] = names[k];
         rc = run(pl, o, sizeof o);
         ck(rc == 0 && lines(o) == nfixtures && has(o, "PLAN\trk-tsv-lint\t./tools/bound\t55\tsh\t./unisacc.com\ttools/tsv-lint.cx\t--\t--check\n") && has(o, "PLAN\trk-ref-job-paths\t./tools/bound\t55\tsh\t./unisacc.com\ttools/ref-job-paths.cx\t--\t--check\n") && has(o, "PLAN\trk-no-home-path\t./tools/bound\t55\tsh\t./unisacc.com\ttools/no-home-path.cx\t--\t--check\n") && has(o, "PLAN\trk-cxraw\t./tools/bound\t55\tsh\t./unisacc.com\ttests/cxraw.cx\t--\t--check\n") && has(o, "PLAN\trk-net-deps\t")
            && has(o, "PLAN\trk-notcovered\t./tools/bound\t55\tsh\t./unisacc.com\ttools/notcovered-census.cx\t--\t--check\n")
            && has(o, "PLAN\trk-reserved-names\t")
            && has(o, "PLAN\trk-host-surface\t./tools/bound\t55\tsh\t./unisacc.com\ttools/check-host-surface.cx\t--\t--check\n")
-           && has(o, "PLAN\trk-dup-census\t./tools/bound\t55\tsh\t./unisacc.com\ttools/dup-census.cx\t--\t--check\n"), "plan-twenty-nodes");
+           && has(o, "PLAN\trk-dup-census\t./tools/bound\t55\tsh\t./unisacc.com\ttools/dup-census.cx\t--\t--check\n"), "plan-roster-nodes");
         if (cx_fmt(d, sizeof d, "%s/rk-fixture-%d", sy_tmpdir(), (int)sy_pid()) || cx_fmt(od, sizeof od, "%s/out", d) || sy_mkdir(d, 0700) < 0 || sy_mkdir(od, 0700) < 0) ck(0, "from-run-fixture-dir");
         else {
             for (k = 0; k < nfixtures; k++) {
@@ -261,7 +281,7 @@ int main(int argc, char **argv) {
             cx_fmt(p, sizeof p, "%s/events.tsv", d); cx_write(p, ev, en);
             rc = run(fr, o, sizeof o);
             ck(rc == 1 && has(o, "RATCHET\tcxraw\tFAIL\tcxraw: FAIL: 1 file above baseline\n") && has(o, "  cxraw: apps/x.cx has 3 raw lines, baseline 1\n")
-               && has(o, "RATCHET\tnet-deps\tok\tr: ok: fine\n") && has(o, "RATCHET\tnotcovered\tok\tr: ok: fine\n") && has(o, "RATCHET\tdup-census\tok\tr: ok: fine\n") && has(o, "RATCHET\tno-home-path\tok\tr: ok: fine\n") && has(o, "RATCHET\tref-job-paths\tok\tr: ok: fine\n") && has(o, "RATCHET\ttsv-lint\tok\tr: ok: fine\n") && has(o, "RATCHET\treserved-names\tok\tr: ok: fine\n") && has(o, "RATCHET\thost-surface\tok\tr: ok: fine\n") && has(o, "RATCHETS\tok=19\tfail=1\t") && lines(o) == 22 && !has(o, "RATCHET_HINT"), "from-run-over-baseline-fixture");
+               && has(o, "RATCHET\tnet-deps\tok\tr: ok: fine\n") && has(o, "RATCHET\tnotcovered\tok\tr: ok: fine\n") && has(o, "RATCHET\tdup-census\tok\tr: ok: fine\n") && has(o, "RATCHET\tno-home-path\tok\tr: ok: fine\n") && has(o, "RATCHET\tref-job-paths\tok\tr: ok: fine\n") && has(o, "RATCHET\ttsv-lint\tok\tr: ok: fine\n") && has(o, "RATCHET\treserved-names\tok\tr: ok: fine\n") && has(o, "RATCHET\thost-surface\tok\tr: ok: fine\n") && has(o, exp_ok) && lines(o) == nfixtures + 2 && !has(o, "RATCHET_HINT"), "from-run-over-baseline-fixture");
             /* foreign-untracked tip: only cxtrunc no-baseline on our own untracked fixture path */
             {
                 const char *fxp = "tools/zz-ratchets-hint-fixture.cx";
@@ -273,13 +293,13 @@ int main(int argc, char **argv) {
                     const char *body = k2 == 3
                         ? "cxtrunc: tools/zz-ratchets-hint-fixture.cx has 1 calls and no baseline row (a new .cx must have 0)\ncxtrunc: FAIL: 1 above baseline\n"
                         : "r: ok: fine\n";
-                    cx_fmt(p, sizeof p, "%s/rk-%s.out", od, nm[k2]); cx_write(p, body, tx_len(body, 256));
-                    cx_fmt(line2, sizeof line2, "EVT\t%d\trk-%s\tstart\t0\t0\texec\nEVT\t%d\trk-%s\t%s\t5\t%d\tout=1 err=0\n", 2 * k2 + 1, nm[k2], 2 * k2 + 2, nm[k2], k2 == 3 ? "fail" : "ok", k2 == 3 ? 1 : 0);
+                    cx_fmt(p, sizeof p, "%s/rk-%s.out", od, names[k2]); cx_write(p, body, tx_len(body, 256));
+                    cx_fmt(line2, sizeof line2, "EVT\t%d\trk-%s\tstart\t0\t0\texec\nEVT\t%d\trk-%s\t%s\t5\t%d\tout=1 err=0\n", 2 * k2 + 1, names[k2], 2 * k2 + 2, names[k2], k2 == 3 ? "fail" : "ok", k2 == 3 ? 1 : 0);
                     if (en2 + tx_len(line2, 320) < (long)sizeof ev2) { long l = tx_len(line2, 320); for (long j = 0; j < l; j++) ev2[en2 + j] = line2[j]; en2 += l; }
                 }
                 cx_fmt(p, sizeof p, "%s/events.tsv", d); cx_write(p, ev2, en2);
                 rc = run(frh, o, sizeof o);
-                ck(rc == 1 && has(o, tip) && has(o, "RATCHET\treserved-names\tok\tr: ok: fine\n") && has(o, "RATCHET\thost-surface\tok\tr: ok: fine\n") && has(o, "RATCHETS\tok=19\tfail=1\t") && !has(o, "mv ") && !has(o, "暂移"), "from-run-foreign-untracked-hint");
+                ck(rc == 1 && has(o, tip) && has(o, "RATCHET\treserved-names\tok\tr: ok: fine\n") && has(o, "RATCHET\thost-surface\tok\tr: ok: fine\n") && has(o, exp_ok) && !has(o, "mv ") && !has(o, "暂移"), "from-run-foreign-untracked-hint");
                 sy_unlink(fxp);
             }
             /* Z2 coreapi 5-symbol replay: ratchets --rows, ratchets --from-run, and precommit --from-run must block all 5 CORE-NEW rows */
@@ -379,7 +399,7 @@ int main(int argc, char **argv) {
                 ck(rc == 1 && has(o, "RATCHET\tcoreapi\tFAIL\tcoreapi: FAIL: 37 modules, 256 exported symbols")
                    && has(o, "  CORE-NEW cx/sys/posix.cx\tsy_fchmod\tint (int fd,int mode)\n")
                    && has(o, "  CORE-NEW cx/sys/proc.cx\tsy_pipe2\tint (int fds[2],int flags)\n")
-                   && lines(o) == 26, "coreapi-z2-from-run-emits-5-indented-offenders");
+                   && lines(o) == nfixtures + 6, "coreapi-z2-from-run-emits-5-indented-offenders");
                 /* Save ratchets output as DIR/out/ratchets.out and judge via precommit.cx -- --from-run DIR with staged posix.cx & proc.cx */
                 cx_fmt(p, sizeof p, "%s/rk-ratchets-save.out", od);
                 {
@@ -757,20 +777,30 @@ int main(int argc, char **argv) {
     if (argc == 2) { printf("CHECK_RATCHETS\tfailed=%d\n", failed); return failed ? 1 : 0; }
 full_run:
     rc = run(full, o, sizeof o);
-    {   int okn = -1, failn = -1; long at = where(o, tx_len(o, sizeof o), "RATCHETS\tok=");
+    {   char names[32][64]; int okn = -1, failn = -1, nn = roster_names(names, 32), i, all = 1; long at = where(o, tx_len(o, sizeof o), "RATCHETS\tok=");
         if (at >= 0) sscanf(o + at, "RATCHETS\tok=%d\tfail=%d", &okn, &failn);
-        ck(has(o, "RATCHET\tcxraw\t") && has(o, "RATCHET\tcxinclude\t") && has(o, "RATCHET\tcxapis\t") && has(o, "RATCHET\tcxtrunc\t")
-           && has(o, "RATCHET\tcxlibc\t") && has(o, "RATCHET\tcxplatform\t") && has(o, "RATCHET\tsrcshape\t") && has(o, "RATCHET\tcoreapi\t") && !has(o, "RATCHET\ttoolsloc\t")
-           && has(o, "RATCHET\tverwriter\t") && has(o, "RATCHET\taluiwidth\t") && has(o, "RATCHET\toutdep\t") && has(o, "RATCHET\tcheck-literal\t") && has(o, "RATCHET\tnet-deps\t") && has(o, "RATCHET\tnotcovered\t") && has(o, "RATCHET\tdup-census\t") && has(o, "RATCHET\tno-home-path\t") && has(o, "RATCHET\tref-job-paths\t") && has(o, "RATCHET\ttsv-lint\t") && has(o, "RATCHET\treserved-names\t") && has(o, "RATCHET\thost-surface\t") && okn + failn == 20 && (rc == 0) == (failn == 0), "full-run-twenty-without-toolsloc-and-exit");
+        if (nn < 1) all = 0;
+        for (i = 0; i < nn; i++) { char want[96]; cx_fmt(want, sizeof want, "RATCHET\t%s\t", names[i]); if (!has(o, want)) all = 0; }
+        ck(all && !has(o, "RATCHET\ttoolsloc\t") && okn + failn == nn && (rc == 0) == (failn == 0), "full-run-roster-without-toolsloc-and-exit");
     }
     {   /* --shard K/N: ratchet i runs when i % N == K-1, the others are counted skipped; bad specs are refused */
-        char *s1[] = {"--shard", "1/20", 0}, *s2[] = {"--shard", "2/20", 0}, *s0[] = {"--shard", "0/3", 0}, *s4[] = {"--shard", "4/3", 0}, *sx[] = {"--shard", "1/21", 0};
-        char sb[1 << 14];
-        rc = run(s1, sb, sizeof sb);
-        ck(rc == 0 && has(sb, "RATCHETS\tok=1\tfail=0\tskipped=19") && has(sb, "RATCHET\tcxraw\tok\tcxraw: ok: 1") && has(sb, "cxinclude: ok: skipped (not in shard 1/20)"), "shard-1-of-20-runs-only-the-first-ratchet");
-        rc = run(s2, sb, sizeof sb);
-        ck(rc == 0 && has(sb, "RATCHETS\tok=1\tfail=0\tskipped=19") && has(sb, "cxraw: ok: skipped (not in shard 2/20)") && has(sb, "RATCHET\tcxinclude\tok\tcxinclude: ok: 3"), "shard-2-of-20-runs-only-the-second-ratchet");
-        ck(run(s0, sb, sizeof sb) == 2 && run(s4, sb, sizeof sb) == 2 && run(sx, sb, sizeof sb) == 2, "bad-shard-specs-are-refused-rc2");
+        char names[32][64]; char s1[16], s2[16], sbad[16], sb[1 << 14], skip[64], first[96], sk1[160], sk2[160];
+        int nn = roster_names(names, 32);
+        char *a1[] = {"--shard", s1, 0}, *a2[] = {"--shard", s2, 0}, *a0[] = {"--shard", "0/3", 0}, *a4[] = {"--shard", "4/3", 0}, *ax[] = {"--shard", sbad, 0};
+        if (nn < 2) { ck(0, "shard-1-of-roster-runs-only-the-first-ratchet"); ck(0, "shard-2-of-roster-runs-only-the-second-ratchet"); ck(0, "bad-shard-specs-are-refused-rc2"); }
+        else {
+            cx_fmt(s1, sizeof s1, "1/%d", nn); cx_fmt(s2, sizeof s2, "2/%d", nn); cx_fmt(sbad, sizeof sbad, "1/%d", nn + 1);
+            cx_fmt(skip, sizeof skip, "RATCHETS\tok=1\tfail=0\tskipped=%d", nn - 1);
+            cx_fmt(first, sizeof first, "RATCHET\t%s\tok\t", names[0]);
+            cx_fmt(sk1, sizeof sk1, "%s: ok: skipped (not in shard 1/%d)", names[1], nn);
+            rc = run(a1, sb, sizeof sb);
+            ck(rc == 0 && has(sb, skip) && has(sb, first) && has(sb, sk1), "shard-1-of-roster-runs-only-the-first-ratchet");
+            cx_fmt(first, sizeof first, "RATCHET\t%s\tok\t", names[1]);
+            cx_fmt(sk2, sizeof sk2, "%s: ok: skipped (not in shard 2/%d)", names[0], nn);
+            rc = run(a2, sb, sizeof sb);
+            ck(rc == 0 && has(sb, skip) && has(sb, sk2) && has(sb, first), "shard-2-of-roster-runs-only-the-second-ratchet");
+            ck(run(a0, sb, sizeof sb) == 2 && run(a4, sb, sizeof sb) == 2 && run(ax, sb, sizeof sb) == 2, "bad-shard-specs-are-refused-rc2");
+        }
     }
     printf("CHECK_RATCHETS\tfailed=%d\n", failed);
     return failed ? 1 : 0;
