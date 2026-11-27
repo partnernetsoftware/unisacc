@@ -1,15 +1,16 @@
-/* tools/check-win-m53-s1.cx -- win/x86_64 and win/arm64 LLP64 size/ABI assertions and
- * Windows m53 S1 default-OFF + portable tape_run_cx PE build verification.
+/* tools/check-win-m53-s1.cx -- win/x86_64 and win/arm64 LLP64 size/ABI assertions,
+ * real product m53_s1_pack_bin2 negative-length readback, and portable tape_run_cx PE build gate.
  *
  * Verifies:
- *   (1) Cross-compile win/x86_64 PE executable importing runtime.tape_exec + driver.stream_s1
- *       with compile-time LLP64 assertions: sizeof(void*)==8, sizeof(long)==4,
- *       sizeof(unsigned long)==4, sizeof(long long)==8, sizeof(unsigned long long)==8,
- *       sizeof(tape_run_cx(0))==8 (no 32-bit return truncation on Windows LLP64)
- *   (2) Cross-compile win/arm64 PE executable with identical LLP64 assertions
- *   (3) Verify PE/COFF headers: MZ magic, PE\0\0 signature, Machine 0x8664 (AMD64) and 0xAA64 (ARM64)
- *   (4) Verify real product m53 M53S1BIN2 slice builds cleanly and passes host-side portable
- *       stream_s1.cx smoke (Windows native execution stays UNMEASURED until Windows CI)
+ *   (1) Cross-compile win/x86_64 PE (Machine 0x8664) and win/arm64 PE (Machine 0xAA64) importing
+ *       runtime.tape_exec + runtime.stream_attributes + driver.stream_s1 with LLP64 compile-time
+ *       asserts (sizeof(void*)==8, sizeof(long)==4, sizeof(long long)==8, sizeof(tape_run_cx(0))==8)
+ *       and runtime readback of real product m53_s1_pack_bin2() + direct tape_run_cx() execution
+ *       (ready for Windows CI with argv[1]=m53.tapeslice)
+ *   (2) Host-side execution of the exact same product m53_s1_pack_bin2() + portable tape_run_cx()
+ *       against real cx/runtime/stream_attributes.cx (cxsa_valid) on positive, invalid, NULL, and
+ *       negative-length (-1L, -1000L) inputs, asserting portable arm actually ran (status=0, steps>0)
+ *   (3) Explicitly reports win_runtime=UNMEASURED_CI_ONLY until executed on Windows CI
  */
 #pragma unisa use sys.env
 #pragma unisa use sys.fs
@@ -19,6 +20,9 @@
 #pragma unisa use text.text
 #pragma unisa use mem.bytes
 #pragma unisa use mem.heap
+#pragma unisa use runtime.tape_exec
+#pragma unisa use runtime.stream_attributes
+#pragma unisa use driver.stream_s1
 
 static int g_pass = 0;
 static int g_fail = 0;
@@ -43,6 +47,10 @@ static unsigned int rd_u32(const unsigned char *p) {
            ((unsigned int)p[2] << 16) | ((unsigned int)p[3] << 24);
 }
 
+static unsigned long long rd_u64(const unsigned char *p) {
+    return (unsigned long long)rd_u32(p) | ((unsigned long long)rd_u32(p + 4) << 32);
+}
+
 static int verify_pe_machine(const char *path, unsigned int want_machine) {
     unsigned char *b = 0;
     int64_t n = 0;
@@ -63,12 +71,63 @@ static int verify_pe_machine(const char *path, unsigned int want_machine) {
     return mach == want_machine ? 1 : 0;
 }
 
+static int run_portable_bin2_case(const unsigned char *sl, long slen,
+                                  const unsigned char *data, long len,
+                                  unsigned long long *out_bin1,
+                                  unsigned long long *out_steps,
+                                  int *out_ret) {
+    unsigned long long code_len = rd_u64(sl + 64 + 12);
+    unsigned long long data_off = rd_u64(sl + 64 + 24 + 4);
+    unsigned long long data_len = rd_u64(sl + 64 + 24 + 12);
+    unsigned long long bssz_off = rd_u64(sl + 64 + 48 + 4);
+    unsigned long long bss_size = rd_u64(sl + bssz_off);
+    unsigned long long in_off = ((data_len + 7ULL) & ~7ULL) + bss_size;
+    unsigned long long copy_n = (data && len > 0) ? (unsigned long long)len : 0ULL;
+    unsigned long long in_end = (in_off + copy_n + 7ULL) & ~7ULL;
+    unsigned long long argv_at = in_end + 65536ULL;
+    unsigned long long argbuf_off = argv_at + 64ULL;
+    unsigned long long memlimit = argbuf_off + 128ULL;
+    unsigned long long ibm_cap = (code_len + 7ULL) >> 3;
+    unsigned char *mem, *ibm;
+    unsigned long long *ga, *ba, args[12], res[5];
+    int i;
+    if (ibm_cap == 0ULL) ibm_cap = 1ULL;
+    mem = (unsigned char *)mm_alloc((size_t)memlimit);
+    ibm = (unsigned char *)mm_alloc((size_t)ibm_cap);
+    if (!mem || !ibm) { if (mem) mm_free(mem); if (ibm) mm_free(ibm); return -1; }
+    mm_fill(mem, (long)memlimit, 0, (long)memlimit);
+    mm_fill(ibm, (long)ibm_cap, 0, (long)ibm_cap);
+    if (data_len > 0ULL) mm_copy(mem, (long)memlimit, sl + data_off, (long)data_len);
+    if (copy_n > 0ULL) mm_copy(mem + in_off, (long)(memlimit - in_off), data, (long)copy_n);
+    ga = (unsigned long long *)(mem + argv_at);
+    ba = (unsigned long long *)(mem + argbuf_off);
+    /* Call real product BIN2 packer from cx/driver/stream_s1.cx */
+    m53_s1_pack_bin2(ba, data ? (unsigned long long)(mem + in_off) : 0ULL, len);
+    if (out_bin1) *out_bin1 = ba[1];
+    ga[0] = (unsigned long long)(mem + argbuf_off + 24ULL);
+    ga[1] = (unsigned long long)ba;
+    ga[2] = (unsigned long long)(mem + argbuf_off + 24ULL);
+    ga[3] = 0ULL;
+    for (i = 0; i < 5; i++) res[i] = 0xdeadULL;
+    args[0] = 4ULL; args[1] = (unsigned long long)sl; args[2] = memlimit;
+    args[3] = 2000000ULL; args[4] = 3ULL; args[5] = (unsigned long long)ga;
+    args[6] = (unsigned long long)res; args[7] = (unsigned long long)slen;
+    args[8] = 0ULL; args[9] = (unsigned long long)mem; args[10] = (unsigned long long)ibm; args[11] = ibm_cap;
+    (void)tape_run_cx(args);
+    mm_free(ibm);
+    mm_free(mem);
+    if (out_steps) *out_steps = res[2];
+    if (res[0] != 0ULL) return -2;
+    if (out_ret) *out_ret = (int)res[1];
+    return 0;
+}
+
 int main(void) {
     const char *td = sy_tmpdir();
-    char win_cx[600], pe_x64[600], pe_a64[600];
+    char win_cx[600], pe_x64[600], pe_a64[600], m53_cx[600], m53_tape[600], m53_sl[600];
 
     if (cx_fmt(g_tmp, sizeof g_tmp, "%s/unisacc-win-m53-s1-%d", td ? td : "/tmp", sy_pid()) != 0) {
-        sy_printf("CHECK_WIN_M53_S1\tpassed=0\tfailed=1\n");
+        sy_printf("CHECK_WIN_M53_S1\tpassed=0\tfailed=1\trunner=cross-build\tnative=0\twin_runtime=UNMEASURED_CI_ONLY\n");
         return 1;
     }
     (void)sy_mkdir(g_tmp, 0700);
@@ -80,41 +139,86 @@ int main(void) {
         }
     }
 
-    /* Windows CI-ready m53 S1 driver with strict compile-time LLP64 size/ABI assertions */
+    /* Windows CI-ready m53 S1 driver: LLP64 compile-time asserts + real product m53_s1_pack_bin2()
+     * readback + direct portable tape_run_cx() execution when argv[1]=m53.tapeslice is supplied on CI. */
     {
         const char *wsrc =
             "#pragma unisa use runtime.tape_exec\n"
             "#pragma unisa use runtime.stream_attributes\n"
             "#pragma unisa use driver.stream_s1\n"
+            "#pragma unisa use sys.fs\n"
             "#pragma unisa use sys.io\n"
+            "#pragma unisa use mem.bytes\n"
+            "#pragma unisa use mem.heap\n"
             "typedef char win_assert_ptr8[sizeof(void *) == 8 ? 1 : -1];\n"
             "typedef char win_assert_long4[sizeof(long) == 4 ? 1 : -1];\n"
             "typedef char win_assert_ulong4[sizeof(unsigned long) == 4 ? 1 : -1];\n"
             "typedef char win_assert_ll8[sizeof(long long) == 8 ? 1 : -1];\n"
             "typedef char win_assert_ull8[sizeof(unsigned long long) == 8 ? 1 : -1];\n"
             "typedef char win_assert_run_ret8[sizeof(tape_run_cx(0)) == 8 ? 1 : -1];\n"
-            "typedef char win_assert_neg1_sext[((unsigned long long)(long long)((long)-1L) == 0xffffffffffffffffULL) ? 1 : -1];\n"
-            "typedef char win_assert_neg1000_sext[((unsigned long long)(long long)((long)-1000L) == 0xfffffffffffffc18ULL) ? 1 : -1];\n"
-            "int main(void) {\n"
-            "    unsigned char v0[4] = {0, 0, 0, 0};\n"
-            "    unsigned char v1[13] = {1, 0, 0, 0, 1,2,3,4,5,6,7,8,9};\n"
-            "    unsigned char vbad[12] = {1, 0, 0, 0, 1,2,3,4,5,6,7,8};\n"
-            "    int r0 = cxsa_valid_s1(v0, 4), n0 = cxsa_valid(v0, 4);\n"
-            "    int r1 = cxsa_valid_s1(v1, 13), n1 = cxsa_valid(v1, 13);\n"
-            "    int r2 = cxsa_valid_s1(vbad, 12), n2 = cxsa_valid(vbad, 12);\n"
-            "    int r3 = cxsa_valid_s1(0, 4), n3 = cxsa_valid(0, 4);\n"
-            "    int r4 = cxsa_valid_s1(v0, -1L), n4 = cxsa_valid(v0, -1L);\n"
-            "    int r5 = cxsa_valid_s1(v0, -1000L), n5 = cxsa_valid(v0, -1000L);\n"
-            "    sy_printf(\"WIN_M53_S1_DONE\\tr0=%d\\tr1=%d\\tr2=%d\\tr3=%d\\tr4=%d\\tr5=%d\\n\", r0, r1, r2, r3, r4, r5);\n"
-            "    return (r0 == n0 && r1 == n1 && r2 == n2 && r3 == n3 && r4 == n4 && r5 == n5 && r4 == 0 && r5 == 0) ? 0 : 1;\n"
+            "static unsigned long long rd_u(const unsigned char *p, int k) {\n"
+            "    unsigned long long v = 0ULL; int i = k - 1;\n"
+            "    while (i >= 0) { v = (v << 8) | (unsigned long long)p[i]; i--; }\n"
+            "    return v;\n"
+            "}\n"
+            "static int run_one(const unsigned char *sl, long slen, const unsigned char *d, long n,\n"
+            "                   unsigned long long *b1_out, unsigned long long *st_out, int *ret_out) {\n"
+            "    unsigned long long cl = rd_u(sl + 64 + 12, 8), dof = rd_u(sl + 64 + 24 + 4, 8), dln = rd_u(sl + 64 + 24 + 12, 8);\n"
+            "    unsigned long long bsz = rd_u(sl + rd_u(sl + 64 + 48 + 4, 8), 8);\n"
+            "    unsigned long long ino = ((dln + 7ULL) & ~7ULL) + bsz, cn = (d && n > 0) ? (unsigned long long)n : 0ULL;\n"
+            "    unsigned long long ine = (ino + cn + 7ULL) & ~7ULL, av = ine + 65536ULL, ab = av + 64ULL, ml = ab + 128ULL;\n"
+            "    unsigned long long ic = (cl + 7ULL) >> 3; if (ic == 0ULL) ic = 1ULL;\n"
+            "    unsigned char *m = (unsigned char *)mm_alloc((size_t)ml), *bm = (unsigned char *)mm_alloc((size_t)ic);\n"
+            "    unsigned long long *ga, *ba, args[12], res[5]; int i;\n"
+            "    if (!m || !bm) return -1;\n"
+            "    mm_fill(m, (long)ml, 0, (long)ml); mm_fill(bm, (long)ic, 0, (long)ic);\n"
+            "    if (dln > 0ULL) mm_copy(m, (long)ml, sl + dof, (long)dln);\n"
+            "    if (cn > 0ULL) mm_copy(m + ino, (long)(ml - ino), d, (long)cn);\n"
+            "    ga = (unsigned long long *)(m + av); ba = (unsigned long long *)(m + ab);\n"
+            "    m53_s1_pack_bin2(ba, d ? (unsigned long long)(m + ino) : 0ULL, n);\n"
+            "    *b1_out = ba[1];\n"
+            "    ga[0] = (unsigned long long)(m + ab + 24ULL); ga[1] = (unsigned long long)ba;\n"
+            "    ga[2] = (unsigned long long)(m + ab + 24ULL); ga[3] = 0ULL;\n"
+            "    for (i = 0; i < 5; i++) res[i] = 0xdeadULL;\n"
+            "    args[0] = 4ULL; args[1] = (unsigned long long)sl; args[2] = ml; args[3] = 2000000ULL;\n"
+            "    args[4] = 3ULL; args[5] = (unsigned long long)ga; args[6] = (unsigned long long)res;\n"
+            "    args[7] = (unsigned long long)slen; args[8] = 0ULL; args[9] = (unsigned long long)m;\n"
+            "    args[10] = (unsigned long long)bm; args[11] = ic;\n"
+            "    (void)tape_run_cx(args); mm_free(bm); mm_free(m);\n"
+            "    *st_out = res[2]; *ret_out = (int)res[1];\n"
+            "    return res[0] == 0ULL ? 0 : -2;\n"
+            "}\n"
+            "int main(int argc, char **argv) {\n"
+            "    unsigned long long blk[3];\n"
+            "    unsigned char v0[4] = {0, 0, 0, 0}, v1[13] = {1,0,0,0,1,2,3,4,5,6,7,8,9}, vb[12] = {1,0,0,0,1,2,3,4,5,6,7,8};\n"
+            "    m53_s1_pack_bin2(blk, 0x1000ULL, -1L);\n"
+            "    if (blk[1] != 0xffffffffffffffffULL) return 2;\n"
+            "    m53_s1_pack_bin2(blk, 0x1000ULL, -1000L);\n"
+            "    if (blk[1] != 0xfffffffffffffc18ULL) return 3;\n"
+            "    if (argc > 1 && argv[1][0]) {\n"
+            "        unsigned char *sl = 0; int64_t slen = 0;\n"
+            "        const unsigned char *ps[6] = {v0, v1, vb, 0, v0, v0};\n"
+            "        long ls[6] = {4L, 13L, 12L, 4L, -1L, -1000L};\n"
+            "        int k;\n"
+            "        if (sy_read_file(argv[1], &sl, &slen, 4 << 20) != 0 || !sl) return 4;\n"
+            "        for (k = 0; k < 6; k++) {\n"
+            "            unsigned long long b1 = 0, st = 0; int tr = -1, nat = cxsa_valid(ps[k], ls[k]);\n"
+            "            if (run_one(sl, (long)slen, ps[k], ls[k], &b1, &st, &tr) != 0 || st == 0ULL || tr != nat) return 10 + k;\n"
+            "            if (ls[k] == -1L && b1 != 0xffffffffffffffffULL) return 20;\n"
+            "            if (ls[k] == -1000L && b1 != 0xfffffffffffffc18ULL) return 21;\n"
+            "        }\n"
+            "        mm_free(sl);\n"
+            "    }\n"
+            "    sy_printf(\"WIN_M53_S1_DONE\\tok=1\\n\");\n"
+            "    return 0;\n"
             "}\n";
         cx_fmt(win_cx, sizeof win_cx, "%s/win_m53_s1_drv.cx", g_tmp);
         cx_fmt(pe_x64, sizeof pe_x64, "%s/win_m53_s1_x86_64.exe", g_tmp);
         cx_fmt(pe_a64, sizeof pe_a64, "%s/win_m53_s1_arm64.exe", g_tmp);
-        (void)sy_write_file(win_cx, (const unsigned char *)wsrc, tx_len(wsrc, 8192), 0600);
+        (void)sy_write_file(win_cx, (const unsigned char *)wsrc, tx_len(wsrc, 16384), 0600);
     }
 
-    /* 1. Cross-compile win/x86_64 PE with LLP64 compile-time asserts */
+    /* 1. Cross-compile win/x86_64 and win/arm64 PE executables with LLP64 + m53_s1_pack_bin2 + tape_run_cx */
     {
         char *av[] = {"sh", "./unisacc.com", "--target=win/x86_64", win_cx, "-o", pe_x64, 0}; /* lint:allow R1-product cross-compiles win/x86_64 m53 S1 PE */
         char *co = 0; size_t cn = 0;
@@ -123,8 +227,6 @@ int main(void) {
         ck(rc == 0 && sy_exists(pe_x64) == 1, "win-x86_64-llp64-asserts-and-build");
         ck(verify_pe_machine(pe_x64, 0x8664U) == 1, "win-x86_64-pe-header-amd64");
     }
-
-    /* 2. Cross-compile win/arm64 PE with LLP64 compile-time asserts */
     {
         char *av[] = {"sh", "./unisacc.com", "--target=win/arm64", win_cx, "-o", pe_a64, 0}; /* lint:allow R1-product cross-compiles win/arm64 m53 S1 PE */
         char *co = 0; size_t cn = 0;
@@ -132,6 +234,53 @@ int main(void) {
         if (co) mm_free(co);
         ck(rc == 0 && sy_exists(pe_a64) == 1, "win-arm64-llp64-asserts-and-build");
         ck(verify_pe_machine(pe_a64, 0xaa64U) == 1, "win-arm64-pe-header-arm64");
+    }
+
+    /* 2. Host-side readback of real product m53_s1_pack_bin2() + portable tape_run_cx() on real cxsa_valid slice */
+    {
+        const char *msrc =
+            "#pragma unisa use runtime.stream_attributes\n"
+            "int main(int argc, char **argv) {\n"
+            "    const char *abi = \"M53S1BIN2\";\n"
+            "    const unsigned long long *ba;\n"
+            "    if (abi[0] != 'M' || argc < 2) return 2;\n"
+            "    ba = (const unsigned long long *)argv[1];\n"
+            "    return cxsa_valid((const unsigned char *)ba[0], (long)ba[1]);\n"
+            "}\n";
+        unsigned char *sl = 0; int64_t slen = 0;
+        int ok = 0;
+        cx_fmt(m53_cx, sizeof m53_cx, "%s/m53_bin2.cx", g_tmp);
+        cx_fmt(m53_tape, sizeof m53_tape, "%s/m53_bin2.tape", g_tmp);
+        cx_fmt(m53_sl, sizeof m53_sl, "%s/m53_bin2.tapeslice", g_tmp);
+        (void)sy_write_file(m53_cx, (const unsigned char *)msrc, tx_len(msrc, 4096), 0600);
+        {
+            char *av1[] = {"sh", "./unisacc.com", "--target", "lnx/x86_64", "-S", m53_cx, "-o", m53_tape, 0}; /* lint:allow R1-product compiles real m53 slice */
+            char *av2[] = {"sh", "./unisacc.com", "tools/tapepack.cx", "--", m53_tape, "-o", m53_sl, 0}; /* lint:allow R1-product packs real m53 slice */
+            char *co = 0; size_t cn = 0;
+            int r1 = cx_runv_timeout(av1, 30, &co, &cn);
+            if (co) { mm_free(co); co = 0; }
+            int r2 = (r1 == 0) ? cx_runv_timeout(av2, 30, &co, &cn) : 1;
+            if (co) { mm_free(co); co = 0; }
+            if (r2 == 0 && sy_read_file(m53_sl, &sl, &slen, 4 << 20) == 0 && sl) {
+                unsigned char v0[4] = {0,0,0,0}, v1[13] = {1,0,0,0,1,2,3,4,5,6,7,8,9}, vb[12] = {1,0,0,0,1,2,3,4,5,6,7,8};
+                const unsigned char *ps[6] = {v0, v1, vb, 0, v0, v0};
+                long ls[6] = {4L, 13L, 12L, 4L, -1L, -1000L};
+                int k;
+                ok = 1;
+                for (k = 0; k < 6; k++) {
+                    unsigned long long b1 = 0ULL, st = 0ULL;
+                    int tr = -1, nat = cxsa_valid(ps[k], ls[k]);
+                    if (run_portable_bin2_case(sl, (long)slen, ps[k], ls[k], &b1, &st, &tr) != 0 ||
+                        st == 0ULL || tr != nat) {
+                        ok = 0;
+                    }
+                    if (ls[k] == -1L && b1 != 0xffffffffffffffffULL) ok = 0;
+                    if (ls[k] == -1000L && b1 != 0xfffffffffffffc18ULL) ok = 0;
+                }
+                mm_free(sl);
+            }
+        }
+        ck(ok, "product-bin2-pack-and-portable-arm-readback");
     }
 
     sy_printf("CHECK_WIN_M53_S1\tpassed=%d\tfailed=%d\trunner=cross-build\tnative=0\twin_runtime=UNMEASURED_CI_ONLY\n", g_pass, g_fail);
