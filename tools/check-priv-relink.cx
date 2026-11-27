@@ -547,6 +547,32 @@ int main(void) {
        "show-route-and-resolve-unit-agree-on-chain-closures-pass", &r);
     pr_free(&r);
 
+    /* 16. --kept-bytes: dead unreferenced functions dropped by real compiler.tapelink tl_dce (kept_bytes < obj_text) */
+    cx_fmt(cmd, sizeof cmd,
+        "set -e; mkdir -p '%s/kb_chain/fixedpoint/g2/lnx-x86_64'; "
+        "printf 'int live_fn(void); int main(void){ return live_fn(); }\\n' > '%s/kb_main.c'; "
+        "printf 'int live_fn(void){ return 42; }\\n"
+        "int dead_fn_a(int x){ int s=0; for(int i=0;i<16;i++) s += (x+i)*3; return s; }\\n"
+        "int dead_fn_b(int x){ int s=1; for(int i=0;i<16;i++) s ^= (x*7+i); return s; }\\n' > '%s/kb_m27.c'; "
+        "sh '%s/unisacc.com' -O2 -c -b lnx/x86_64 -funit -DRT_UNIT -o '%s/kb_chain/fixedpoint/g2/lnx-x86_64/drive.o' '%s/kb_main.c'; "
+        "sh '%s/unisacc.com' -O2 -c -b lnx/x86_64 -funit -DRT_EXTERN -o '%s/kb_chain/fixedpoint/g2/lnx-x86_64/m27.o' '%s/kb_m27.c'; "
+        "S1=$(sha256sum '%s/kb_chain/fixedpoint/g2/lnx-x86_64/drive.o' | awk '{print $1}'); B1=$(stat -c %%s '%s/kb_chain/fixedpoint/g2/lnx-x86_64/drive.o'); "
+        "S2=$(sha256sum '%s/kb_chain/fixedpoint/g2/lnx-x86_64/m27.o' | awk '{print $1}'); B2=$(stat -c %%s '%s/kb_chain/fixedpoint/g2/lnx-x86_64/m27.o'); "
+        "printf 'drive.o\\tsha=%%s\\tbytes=%%s\\n' \"$S1\" \"$B1\" > '%s/kb_chain/fixedpoint/g2/lnx-x86_64/receipt.txt'; "
+        "printf 'm27.o\\tsha=%%s\\tbytes=%%s\\n' \"$S2\" \"$B2\" >> '%s/kb_chain/fixedpoint/g2/lnx-x86_64/receipt.txt'; "
+        "OUT=$(sh '%s/unisacc.com' '%s/tools/priv-relink.cx' -- --chain-dir '%s/kb_chain' --repo '%s' --kept-bytes); "
+        "printf '%%s\\n' \"$OUT\"; "
+        "LINE=$(printf '%%s\\n' \"$OUT\" | grep '^PRIV_RELINK_KEPT\tunit=m27.o\t'); "
+        "OT=$(printf '%%s\\n' \"$LINE\" | sed -n 's/.*obj_text=\\([0-9]*\\).*/\\1/p'); "
+        "KB=$(printf '%%s\\n' \"$LINE\" | sed -n 's/.*kept_bytes=\\([0-9]*\\).*/\\1/p'); "
+        "DB=$(printf '%%s\\n' \"$LINE\" | sed -n 's/.*dropped_bytes=\\([0-9]*\\).*/\\1/p'); "
+        "[ \"$OT\" -gt 0 ] && [ \"$KB\" -gt 0 ] && [ \"$DB\" -gt 0 ] && [ \"$KB\" -lt \"$OT\" ] && echo KEPT_BYTES_DCE_OK",
+        fx, fx, fx, g_root, fx, fx, g_root, fx, fx, fx, fx, fx, fx, fx, fx, g_root, g_root, fx, repo);
+    cpr_sh(g_root, cmd, 45, &r);
+    ck(r.rc == 0 && cpr_has(&r, "KEPT_BYTES_DCE_OK") && cpr_has(&r, "PRIV_RELINK_KEPT_SUMMARY\tunits=2\t"),
+       "kept-bytes-tl-dce-drops-dead-funcs-pass", &r);
+    pr_free(&r);
+
     fsx_scratch_drop(sc);
     sy_printf("CHECK_PRIV_RELINK\tpassed=%d\tfailed=%d\n", g_pass, g_fail);
     return g_fail ? 1 : 0;

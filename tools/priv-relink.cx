@@ -54,6 +54,7 @@
 #pragma unisa use runtime.package_lifetime
 #pragma unisa use runtime.model_number
 #pragma unisa use compiler.bindstage
+#pragma unisa use compiler.tapelink
 #pragma unisa use runtime.routestep
 #pragma unisa use cxlib.netpack
 #pragma unisa use cxlib.releaseversion
@@ -1232,11 +1233,274 @@ static int pr_show_route(const char *abs_repo, const char *caller_cwd,
     return 0;
 }
 
+/* ---- --kept-bytes: exact per-unit surviving function bytes after real compiler.tapelink tl_dce ---- */
+static char *kb_buf;
+static long kb_len;
+static long kb_cap;
+static int kb_err;
+
+static int kb_emit_span(const char *s, int n) {
+    if (kb_err || n < 0) return 1;
+    if (n == 0) return 0;
+    if (kb_len + n + 1 > kb_cap) {
+        long nc = kb_cap ? kb_cap * 2 : 65536L;
+        while (nc < kb_len + n + 1) nc *= 2;
+        char *nb = (char *)mm_alloc(nc);
+        if (!nb) { kb_err = 1; return 1; }
+        if (kb_buf && kb_len > 0) mm_copy(nb, nc, kb_buf, kb_len);
+        if (kb_buf) mm_free(kb_buf);
+        kb_buf = nb;
+        kb_cap = nc;
+    }
+    mm_copy(kb_buf + kb_len, kb_cap - kb_len, s, n);
+    kb_len += n;
+    kb_buf[kb_len] = 0;
+    return 0;
+}
+
+static int kb_emit_ch(int c) {
+    char ch = (char)(c & 255);
+    return kb_emit_span(&ch, 1);
+}
+
+static int kb_die_cb(char *msg) {
+    (void)msg;
+    kb_err = 1;
+    return 1;
+}
+
+static unsigned long long kb_rdu(const unsigned char *p, int k) {
+    unsigned long long v = 0;
+    for (int i = k - 1; i >= 0; i--) v = (v << 8) | (unsigned long long)p[i];
+    return v;
+}
+
+static int kb_is_local_label(const char *s, int n) {
+    int k = 0;
+    if (n > 4 && s[0] == '_' && s[1] == '_' && s[2] == 'u' && s[3] >= '0' && s[3] <= '9') {
+        k = 3;
+        while (k < n && s[k] >= '0' && s[k] <= '9') k++;
+        if (k >= n || s[k] != '_') return 0;
+        k++;
+    }
+    if (n - k < 12) return 0;
+    if (!tx_same(s + k, 10, "__unisacc_", 10)) return 0;
+    if (s[k + 10] != 'L' && s[k + 10] != 'R') return 0;
+    return 1;
+}
+
+typedef struct {
+    char name[128];
+    unsigned long long val;
+    long bytes;
+    int is_global;
+} KbFn;
+
+static int kb_extract_obj_funcs(const unsigned char *b, long bn, KbFn *fns, int cap, int *nf_out, long *text_sz_out) {
+    *nf_out = 0;
+    *text_sz_out = 0;
+    if (!b || bn < 64 || b[0] != 0x7f || b[1] != 'E' || b[2] != 'L' || b[3] != 'F' || b[4] != 2) return -1;
+    unsigned long long shoff = kb_rdu(b + 40, 8);
+    int shent = (int)kb_rdu(b + 58, 2);
+    int shnum = (int)kb_rdu(b + 60, 2);
+    int shstr = (int)kb_rdu(b + 62, 2);
+    if (shent < 64 || shnum <= 0 || shstr < 0 || shstr >= shnum) return -1;
+    if (shoff + (unsigned long long)shent * (unsigned long long)shnum > (unsigned long long)bn) return -1;
+    const unsigned char *sh_str_hdr = b + shoff + (unsigned long long)shstr * (unsigned long long)shent;
+    unsigned long long shstr_off = kb_rdu(sh_str_hdr + 24, 8);
+    unsigned long long shstr_sz = kb_rdu(sh_str_hdr + 32, 8);
+    if (shstr_off + shstr_sz > (unsigned long long)bn) return -1;
+    int text_idx = -1, sym_idx = -1, str_idx = -1;
+    unsigned long long text_sz = 0, sym_off = 0, sym_sz = 0, sym_ent = 0, str_off = 0, str_sz = 0;
+    for (int i = 0; i < shnum; i++) {
+        const unsigned char *sh = b + shoff + (unsigned long long)i * (unsigned long long)shent;
+        unsigned long long nm_off = kb_rdu(sh + 0, 4);
+        unsigned long long sh_type = kb_rdu(sh + 4, 4);
+        if (nm_off < shstr_sz) {
+            const char *sn = (const char *)(b + shstr_off + nm_off);
+            if (tx_eqz(sn, ".text")) { text_idx = i; text_sz = kb_rdu(sh + 32, 8); }
+        }
+        if (sh_type == 2ULL) {
+            sym_idx = i;
+            sym_off = kb_rdu(sh + 24, 8);
+            sym_sz = kb_rdu(sh + 32, 8);
+            str_idx = (int)kb_rdu(sh + 40, 4);
+            sym_ent = kb_rdu(sh + 56, 8);
+        }
+    }
+    *text_sz_out = (long)text_sz;
+    if (text_idx < 0 || text_sz == 0ULL || sym_idx < 0 || str_idx < 0 || str_idx >= shnum || sym_ent < 24ULL) return 0;
+    const unsigned char *str_sh = b + shoff + (unsigned long long)str_idx * (unsigned long long)shent;
+    str_off = kb_rdu(str_sh + 24, 8);
+    str_sz = kb_rdu(str_sh + 32, 8);
+    if (sym_off + sym_sz > (unsigned long long)bn || str_off + str_sz > (unsigned long long)bn) return -1;
+    int nf = 0;
+    long nsyms = (long)(sym_sz / sym_ent);
+    for (long i = 0; i < nsyms; i++) {
+        const unsigned char *sy = b + sym_off + (unsigned long long)i * sym_ent;
+        unsigned long long noff = kb_rdu(sy + 0, 4);
+        unsigned char info = sy[4];
+        int bind = (info >> 4) & 15;
+        int stype = info & 15;
+        int shndx = (int)kb_rdu(sy + 6, 2);
+        unsigned long long sval = kb_rdu(sy + 8, 8);
+        if (shndx != text_idx || stype == 3) continue;
+        if (noff == 0ULL || noff >= str_sz) continue;
+        const char *nm = (const char *)(b + str_off + noff);
+        long nl = tx_len(nm, 127);
+        if (nl <= 0 || kb_is_local_label(nm, (int)nl)) continue;
+        if (sval > text_sz) continue;
+        int dup = 0;
+        for (int j = 0; j < nf; j++) {
+            if (fns[j].val == sval) {
+                if (bind != 0 && !fns[j].is_global) {
+                    cx_fmt(fns[j].name, sizeof fns[j].name, "%s", nm);
+                    fns[j].is_global = 1;
+                }
+                dup = 1;
+                break;
+            }
+        }
+        if (dup || nf >= cap) continue;
+        cx_fmt(fns[nf].name, sizeof fns[nf].name, "%s", nm);
+        fns[nf].val = sval;
+        fns[nf].bytes = 0;
+        fns[nf].is_global = (bind != 0) ? 1 : 0;
+        nf++;
+    }
+    for (int i = 1; i < nf; i++) {
+        KbFn tmp = fns[i];
+        int j = i - 1;
+        while (j >= 0 && fns[j].val > tmp.val) { fns[j + 1] = fns[j]; j--; }
+        fns[j + 1] = tmp;
+    }
+    for (int i = 0; i < nf; i++) {
+        unsigned long long endv = (i + 1 < nf) ? fns[i + 1].val : text_sz;
+        fns[i].bytes = (endv >= fns[i].val) ? (long)(endv - fns[i].val) : 0L;
+    }
+    *nf_out = nf;
+    return 0;
+}
+
+static unsigned long kb_hash_str(const char *s, long n) {
+    unsigned long h = 5381UL;
+    for (long i = 0; i < n; i++) h = ((h * 33UL) + (unsigned long)(unsigned char)s[i]) & 0xffffffffUL;
+    return h;
+}
+
+static int pr_kept_bytes(const char *objs_dir, const PrBaseObj *objs, int n_objs) {
+    static KbFn unit_fns[PR_MAX_OBJS][512];
+    static int unit_nf[PR_MAX_OBJS];
+    static long unit_text[PR_MAX_OBJS];
+    kb_buf = 0; kb_len = 0; kb_cap = 0; kb_err = 0;
+    if (tl_bind(kb_emit_ch, kb_die_cb) || tl_bind_span(kb_emit_span, kb_die_cb) || tl_begin()) {
+        return pr_refuse("kept-bytes-init-failed", "tapelink");
+    }
+    for (int u = 0; u < n_objs; u++) {
+        char op[PR_PW];
+        size_t bn = 0;
+        if (cx_fmt(op, sizeof op, "%s/%s", objs_dir, objs[u].key)) return pr_refuse("path-bound", objs[u].key);
+        char *b = cx_read(op, &bn);
+        if (!b || bn == 0) { if (b) mm_free(b); return pr_refuse("kept-bytes-read-failed", op); }
+        kb_extract_obj_funcs((const unsigned char *)b, (long)bn, unit_fns[u], 512, &unit_nf[u], &unit_text[u]);
+        long tl = 0;
+        char *t = tl_tape(b, (long)bn, &tl);
+        if (t && tl > 0) {
+            if (u == 0) tl_adopt_first();
+            tl_unitver(t, (int)tl);
+            tl_unit(t, (int)tl, u);
+            tl_note_links(t, tl);
+        }
+        mm_free(b);
+        if (kb_err) { if (kb_buf) mm_free(kb_buf); return pr_refuse("kept-bytes-link-failed", objs[u].key); }
+    }
+    long before_len = kb_len;
+    long kept_len = tl_dce(kb_buf, kb_len);
+    int dce_natural = (kept_len < before_len || tl_dce_cut() > 0) ? 1 : 0;
+    if (!dce_natural) {
+        static const char probe[] = ".extern __pr_kept_dce_probe\n";
+        tl_note_links((char *)probe, (long)(sizeof probe - 1));
+        kept_len = tl_dce(kb_buf, kb_len);
+    }
+    int dce_cut = tl_dce_cut();
+
+    /* Index all surviving column-0 non-local labels in kb_buf[0 .. kept_len]. */
+    long hsz = 16384L;
+    while (hsz < 131072L && hsz < kept_len / 16L) hsz *= 2L;
+    long *ht_off = (long *)mm_alloc(hsz * (long)sizeof(long));
+    int *ht_len = (int *)mm_alloc(hsz * (long)sizeof(int));
+    if (!ht_off || !ht_len) {
+        if (ht_off) mm_free(ht_off);
+        if (ht_len) mm_free(ht_len);
+        if (kb_buf) mm_free(kb_buf);
+        return pr_refuse("kept-bytes-oom", "hash");
+    }
+    mm_fill(ht_off, hsz * (long)sizeof(long), 0, hsz * (long)sizeof(long));
+    mm_fill(ht_len, hsz * (long)sizeof(int), 0, hsz * (long)sizeof(int));
+    long mask = hsz - 1L;
+    long i = 0;
+    while (i < kept_len) {
+        long e = i;
+        while (e < kept_len && kb_buf[e] != '\n') e++;
+        if (e > i && kb_buf[i] != ' ' && kb_buf[i] != '\t' && kb_buf[i] != '.' && kb_buf[e - 1] == ':') {
+            long ln = e - 1 - i;
+            if (ln > 0 && !kb_is_local_label(kb_buf + i, (int)ln)) {
+                long slot = (long)(kb_hash_str(kb_buf + i, ln) & (unsigned long)mask);
+                while (ht_len[slot] > 0) {
+                    if (ht_len[slot] == (int)ln && tx_same(kb_buf + ht_off[slot], ln, kb_buf + i, ln)) break;
+                    slot = (slot + 1L) & mask;
+                }
+                if (ht_len[slot] == 0) { ht_off[slot] = i; ht_len[slot] = (int)ln; }
+            }
+        }
+        i = e + 1;
+    }
+
+    long sum_obj = 0, sum_kept = 0, sum_drop = 0;
+    for (int u = 0; u < n_objs; u++) {
+        long kept = 0, drop = 0;
+        int fk = 0;
+        for (int f = 0; f < unit_nf[u]; f++) {
+            char key[160];
+            long kl = 0;
+            if (unit_fns[u][f].is_global) {
+                cx_fmt(key, sizeof key, "%s", unit_fns[u][f].name);
+            } else {
+                cx_fmt(key, sizeof key, "__u%d_%s", u, unit_fns[u][f].name);
+            }
+            kl = tx_len(key, 159);
+            int live = 0;
+            if (kl > 0) {
+                long slot = (long)(kb_hash_str(key, kl) & (unsigned long)mask);
+                while (ht_len[slot] > 0) {
+                    if (ht_len[slot] == (int)kl && tx_same(kb_buf + ht_off[slot], kl, key, kl)) { live = 1; break; }
+                    slot = (slot + 1L) & mask;
+                }
+            }
+            if (live) { kept += unit_fns[u][f].bytes; fk++; }
+            else { drop += unit_fns[u][f].bytes; }
+        }
+        sum_obj += unit_text[u];
+        sum_kept += kept;
+        sum_drop += drop;
+        sy_printf("PRIV_RELINK_KEPT\tunit=%s\tmodule=%s\tobj_text=%ld\tkept_bytes=%ld\tdropped_bytes=%ld\tfuncs_total=%d\tfuncs_kept=%d\n",
+                  objs[u].key, objs[u].mod[0] ? objs[u].mod : "-", unit_text[u], kept, drop, unit_nf[u], fk);
+    }
+    sy_printf("PRIV_RELINK_KEPT_SUMMARY\tunits=%d\tobj_text_sum=%ld\tkept_bytes_sum=%ld\tdropped_bytes_sum=%ld\ttl_dce_natural=%d\ttl_dce_cut=%d\n",
+              n_objs, sum_obj, sum_kept, sum_drop, dce_natural, dce_cut);
+    mm_free(ht_off);
+    mm_free(ht_len);
+    if (kb_buf) mm_free(kb_buf);
+    kb_buf = 0; kb_len = 0; kb_cap = 0;
+    return 0;
+}
+
 int main(int argc, char **argv) {
     long t0_ms = sy_now_ms();
     const char *chain_dir = 0, *out_ape = 0, *repo = ".", *work_dir = 0, *objs_dir_in = 0;
     const char *p4_payload_in = 0, *base_layer_api = 0, *allow_hub = 0, *link_order = "auto";
     const char *ver_in = 0, *receipt_out = 0, *query_unit = 0, *query_sym = 0, *show_route = 0, *target_in = "lnx/x86_64";
+    int kept_bytes_mode = 0;
     long budget_ms = 60000;
     char caller_cwd[PR_PW];
     if (sy_cwd(caller_cwd, sizeof caller_cwd) != 0) caller_cwd[0] = 0;
@@ -1294,6 +1558,8 @@ int main(int argc, char **argv) {
             show_route = argv[++i];
         } else if (tx_eqz(argv[i], "--target") && i + 1 < argc) {
             target_in = argv[++i];
+        } else if (tx_eqz(argv[i], "--kept-bytes")) {
+            kept_bytes_mode = 1;
         } else if (tx_eqz(argv[i], "--add") && i + 1 < argc) {
             if (n_add >= PR_MAX_DECL || pr_parse_kv(argv[++i], add_objs[n_add].key, 64, add_objs[n_add].path, PR_PW) != 0)
                 return pr_refuse("bad-add-arg", argv[i]);
@@ -1343,6 +1609,7 @@ int main(int argc, char **argv) {
                       "  --unit-by-symbol SYM       resolve global defined symbol SYM to its current chain .o owner and exit\n"
                       "  --show-route MODULE        verify build/chain-facts.tsv route + -cx-plan and print selected source path & sha256\n"
                       "  --target TARGET            target triple for --show-route (default: lnx/x86_64)\n"
+                      "  --kept-bytes               report per-unit surviving function .text bytes after real compiler.tapelink tl_dce\n"
                       "  --add KEY.o=PATH           add a new unit object\n"
                       "  --compile-add KEY.o=SRC.cx compile and add a new unit object\n"
                       "  --remove KEY.o             remove a baseline object (e.g. m59.o)\n"
@@ -1371,7 +1638,7 @@ int main(int argc, char **argv) {
     if (show_route && show_route[0] && (!chain_dir || sy_realpath(chain_dir, abs_chain, sizeof abs_chain) < 0)) {
         return pr_show_route(abs_repo, caller_cwd, show_route, target_in, 0, 0);
     }
-    if (!chain_dir || (!out_ape && !query_unit && !query_sym && !show_route)) {
+    if (!chain_dir || (!out_ape && !query_unit && !query_sym && !show_route && !kept_bytes_mode)) {
         return pr_refuse("usage", "need --chain-dir DIR --out OUT_APE (run with --help for defaults)");
     }
     if (!tx_eqz(link_order, "auto") && !tx_eqz(link_order, "receipt") && !tx_eqz(link_order, "glob")) {
@@ -1454,6 +1721,10 @@ int main(int argc, char **argv) {
 
     if (show_route && show_route[0]) {
         return pr_show_route(abs_repo, caller_cwd, show_route, target_in, base_objs, n_base);
+    }
+
+    if (kept_bytes_mode && !out_ape) {
+        return pr_kept_bytes(base_g2_lnx, base_objs, n_base);
     }
 
     if (query_unit || query_sym) {
