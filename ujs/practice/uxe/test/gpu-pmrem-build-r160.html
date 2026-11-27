@@ -3,7 +3,7 @@
 <pre id="r160">pending</pre>
 <script type="module">
 import { BufferAttribute, BufferGeometry, Camera, CubeTexture, DataTexture, LinearFilter, Mesh,
-  Color, DoubleSide, MeshBasicMaterial, PlaneGeometry, PMREMGenerator, RawShaderMaterial, REVISION, Scene, Vector3, WebGLRenderer,
+  Color, DataUtils, HalfFloatType, RGBAFormat, DoubleSide, MeshBasicMaterial, PlaneGeometry, PMREMGenerator, RawShaderMaterial, REVISION, Scene, Vector3, WebGLRenderer,
   WebGLRenderTarget } from "../../web/game/three.module.js";
 
 const output = document.querySelector("#r160");
@@ -308,12 +308,68 @@ async function testScene(renderer) {
   }
 }
 
+async function testHdr(renderer) {
+  const source = new Uint16Array(64*32*4);
+  for(let y=0;y<32;y++) for(let x=0;x<64;x++) {
+    const phi=(x+.5)/64*2*Math.PI, theta=(y+.5)/32*Math.PI;
+    const energy=[2+.8*Math.cos(phi)*Math.sin(theta),1.5+.4*Math.sin(phi)*Math.sin(theta),.75+.35*Math.cos(theta),1];
+    source.set(energy.map(value=>DataUtils.toHalfFloat(value)),4*(y*64+x));
+  }
+  const texture=new DataTexture(source,64,32,RGBAFormat,HalfFloatType);
+  texture.minFilter=texture.magFilter=LinearFilter;
+  texture.needsUpdate=true;
+  const gen=new PMREMGenerator(renderer);
+  const target=gen.fromEquirectangular(texture);
+  try {
+    const binary=await (await fetch("file://"+query.get("dir")+"/probe.wasm")).arrayBuffer();
+    const {instance}=await WebAssembly.instantiate(binary);
+    const wasm=instance.exports;
+    const call=(op,a=0,b=0)=>Number(wasm.uxe_pmrem_build(BigInt(op),BigInt(a),BigInt(b)));
+    const mem=new Uint16Array(wasm.memory.buffer,call(19),150000);
+    mem.set(source,2048);
+    const count=width*height*4, bytes=count*2;
+    mem[32768]=0xdead;
+    mem[2048]=0x7c00;
+    if(call(4)!==128 || call(20,0,bytes)!==-2 || mem[32768]!==0xdead) throw Error("nonfinite HDR input refusal");
+    mem[2048]=source[0];
+    if(query.has("mutate")) for(let i=0;i<source.length;i++) {
+      if(mem[2048+i]>0x3c00) mem[2048+i]=0x3c00;
+    }
+    if(call(20,0,bytes-1)!==-1 || call(20,0,bytes)!==128) throw Error("HDR bake");
+    const reference=new Uint16Array(count);
+    renderer.readRenderTargetPixels(target,0,0,width,height,reference);
+    let pixels=0,max=0,over=0,hdr=0;
+    for(let y=0;y<32;y++) for(let x=0;x<336;x++) {
+      pixels++;
+      for(let c=0;c<4;c++) {
+        const at=(y*width+x)*4+c;
+        const actual=DataUtils.fromHalfFloat(mem[32768+at]);
+        const want=DataUtils.fromHalfFloat(reference[at]);
+        const diff=Math.round(Math.abs(actual-want)*255);
+        if(!Number.isFinite(diff)) throw Error("nonfinite HDR output");
+        max=Math.max(diff,max);
+        if(diff>3) over++;
+        if(actual>1) hdr++;
+      }
+    }
+    return [pixels,max,over,hdr];
+  } finally {
+    target.dispose();
+    gen.dispose();
+    texture.dispose();
+  }
+}
+
 async function test() {
   if (REVISION !== "160") throw Error("three.js revision mismatch");
   const canvas = document.createElement("canvas");
   const context = canvas.getContext("webgl2", {antialias: false});
   if (!context) throw Error("WebGL2 unavailable");
   const renderer = new WebGLRenderer({canvas, context});
+  if(query.has("hdr")) {
+    try { return await testHdr(renderer); }
+    finally { renderer.dispose(); }
+  }
   if(query.has("scene")) {
     try { return await testScene(renderer); }
     finally { renderer.dispose(); }

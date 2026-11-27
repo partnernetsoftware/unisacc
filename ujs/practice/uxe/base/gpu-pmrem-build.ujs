@@ -236,6 +236,7 @@ native function pmrem_build_base(atlas:i64,faces:i64,scratch:i64,full:i64,size:i
 native function pmrem_build_channel(image:i64,index:i64,channel:i64,pass:i64) f64 {
   if(pass==0) { return 0.0+ux_u8(image+index*4+channel); }
   if(pass==2) { return ux_u16(image+index*6+channel*2)/256.0; }
+  if(pass==3) { return DataUtils_fromHalfFloat(ux_u16(image+index*8+channel*2)); }
   return ux_f32(image+index*16+channel*4);
 }
 
@@ -246,9 +247,13 @@ native function pmrem_build_linear(image:i64,x:f64,y:f64,channel:i64,pass:i64,wi
   let fy=y-0.5-iy;
   let index=iy*width+ix;
   let p=pmrem_build_channel(image,index,channel,pass);
-  let q=pmrem_build_channel(image,index+1,channel,pass);
-  let r=pmrem_build_channel(image,index+width,channel,pass);
-  let s=pmrem_build_channel(image,index+width+1,channel,pass);
+  let strideX=1;
+  let strideY=width;
+  if(pass==3 && width==64 && ix==63) { strideX=0; }
+  if(pass==3 && width==64 && iy==31) { strideY=0; }
+  let q=pmrem_build_channel(image,index+strideX,channel,pass);
+  let r=pmrem_build_channel(image,index+strideY,channel,pass);
+  let s=pmrem_build_channel(image,index+strideY+strideX,channel,pass);
   return (p+(q-p)*fx)*(1.0-fy)+(r+(s-r)*fx)*fy;
 }
 
@@ -294,6 +299,7 @@ native function pmrem_build_blur(atlas:i64,scratch:i64,pass:i64,band:i64,taps:i6
   let temp=scratch+320;
   if(band==1) { temp=scratch+256; }
   let readMode=pass;
+  if(full==2 && pass==0) { readMode=3; }
   let sineAt=160;
   let cosineAt=224;
   if(band==0) {
@@ -404,7 +410,7 @@ native function pmrem_build_blur(atlas:i64,scratch:i64,pass:i64,band:i64,taps:i6
       let b=ux_u16_put(at+4,f64_floor_i64(bb*256.0+0.5));
     } else if(pass==0) {
       let at=temp+(row*3*size+col)*16;
-      if(full!=0) {
+      if(full==1) {
         red=pmrem_build_half(red);
         green=pmrem_build_half(green);
         blue=pmrem_build_half(blue);
@@ -414,11 +420,20 @@ native function pmrem_build_blur(atlas:i64,scratch:i64,pass:i64,band:i64,taps:i6
       let b=ux_f32_put(at+8,blue);
       let alpha=ux_f32_put(at+12,255.0);
     } else {
-      let at=atlas+((row+targetY)*atlasWidth+col+targetX)*4;
-      let r=ux_u8_put(at,f64_floor_i64(red+0.5));
-      let g=ux_u8_put(at+1,f64_floor_i64(green+0.5));
-      let b=ux_u8_put(at+2,f64_floor_i64(blue+0.5));
-      let alpha=ux_u8_put(at+3,255);
+      let index=(row+targetY)*atlasWidth+col+targetX;
+      if(full==2) {
+        let at=atlas+index*8;
+        let r=ux_u16_put(at,DataUtils_toHalfFloat(red,scratch+24));
+        let g=ux_u16_put(at+2,DataUtils_toHalfFloat(green,scratch+24));
+        let b=ux_u16_put(at+4,DataUtils_toHalfFloat(blue,scratch+24));
+        let a=ux_u16_put(at+6,15360);
+      } else {
+        let at=atlas+index*4;
+        let r=ux_u8_put(at,f64_floor_i64(red+0.5));
+        let g=ux_u8_put(at+1,f64_floor_i64(green+0.5));
+        let b=ux_u8_put(at+2,f64_floor_i64(blue+0.5));
+        let alpha=ux_u8_put(at+3,255);
+      }
     }
     i=i+1;
   }
@@ -533,6 +548,77 @@ native function GpuPmremBuild_sceneSigma(state:i64,atlas:i64,capacity:i64,scratc
 
 native function GpuPmremBuild_sceneAtlas(state:i64,atlas:i64,capacity:i64,scratch:i64,work:i64) i64 {
   return GpuPmremBuild_sceneSigma(state,atlas,capacity,scratch,work,0.0);
+}
+
+native function pmrem_build_hdr_base(atlas:i64,source:i64,scratch:i64) i64 {
+  let i=0;
+  while(i<1536) {
+    let face=i/256;
+    let px=i%16;
+    let py=i%256/16;
+    let direction=pmrem_build_direction(scratch,face,px,py,16);
+    let x=ux_f64(direction);
+    let y=ux_f64(direction+8);
+    let z=ux_f64(direction+16);
+    let length=f64_sqrt(x*x+y*y+z*z);
+    let longitude=ux_math_atan2(z,x);
+    let latitude=ux_math_asin(y/length);
+    let u=32.0+longitude*10.185916357881302;
+    let v=16.0+latitude*10.185916357881302;
+    if(u<0.5) { u=0.5; }
+    if(u>63.5) { u=63.5; }
+    if(v<0.5) { v=0.5; }
+    if(v>31.5) { v=31.5; }
+    let at=atlas+8*((face/3*16+py)*336+face%3*16+px);
+    let channel=0;
+    while(channel<3) {
+      let rgb=pmrem_build_linear(source,u,v,channel,3,64);
+      let bits=DataUtils_toHalfFloat(rgb,scratch+24);
+      let stored=ux_u16_put(at+channel*2,bits);
+      channel=channel+1;
+    }
+    let alpha=ux_u16_put(at+6,15360);
+    i=i+1;
+  }
+  return atlas;
+}
+
+// Packed 64x32 RGBA16F panorama.
+// Reject non-finite input prior to touching the atlas and keep HDR channels.
+native function GpuPmremBuild_equirectHDR(state:i64,atlas:i64,capacity:i64,scratch:i64,work:i64,source:i64) i64 {
+  let bytes=172032;
+  let sourceLen=16384;
+  let need=24896;
+  if(capacity<bytes || work<need || state%4!=0 || atlas%4!=0 || scratch%8!=0 || source%2!=0 ||
+     !pmrem_build_range(state,GpuPmremBuild.size) || !pmrem_build_range(atlas,capacity) ||
+     !pmrem_build_range(scratch,work) || !pmrem_build_range(source,sourceLen) ||
+     ux_u32(state+GpuPmremBuild.live)!=0 || pmrem_build_overlap(state,GpuPmremBuild.size,atlas,bytes) ||
+     pmrem_build_overlap(state,GpuPmremBuild.size,scratch,need) || pmrem_build_overlap(state,GpuPmremBuild.size,source,sourceLen) ||
+     pmrem_build_overlap(atlas,bytes,scratch,need) || pmrem_build_overlap(atlas,bytes,source,sourceLen) ||
+     pmrem_build_overlap(scratch,need,source,sourceLen)) { return 0-1; }
+  let at=0;
+  while(at<sourceLen) {
+    let bits=ux_u16(source+at);
+    if(bits/1024%32==31) { return 0-2; }
+    at=at+2;
+  }
+  at=0;
+  while(at<bytes) { let clear=ux_u32_put(atlas+at,0); at=at+4; }
+  let base=pmrem_build_hdr_base(atlas,source,scratch);
+  let band=1;
+  while(band<=6) {
+    let taps=pmrem_build_kernel(scratch,band,16);
+    let first=pmrem_build_blur(atlas,scratch,0,band,taps,2,16);
+    let second=pmrem_build_blur(atlas,scratch,1,band,taps,2,16);
+    band=band+1;
+  }
+  let data=ux_u32_put(state+GpuPmremBuild.pixels,atlas);
+  let width=ux_u32_put(state+GpuPmremBuild.width,336);
+  let height=ux_u32_put(state+GpuPmremBuild.height,64);
+  let length=ux_u32_put(state+GpuPmremBuild.bytes,bytes);
+  let layers=ux_u32_put(state+GpuPmremBuild.layers,7);
+  let open=ux_u32_put(state+GpuPmremBuild.live,1);
+  return state;
 }
 
 native function GpuPmremBuild_hasMip(state:i64,mip:i64) i64 {

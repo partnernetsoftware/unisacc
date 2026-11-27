@@ -31,11 +31,13 @@ static int pmrem_build_compile(const char *dir) {
         "if(op==16){let taps=pmrem_build_kernel(3158016,1,256);return pmrem_build_blur(4096,3158016,0,1,taps,1,256);}\n"
         "if(op==17){return ux_span(0,5600000);}\n"
         "if(op==18){return GpuPmremBuild_sceneSigma(128,4096,b,3158016,2359872,0.0045);}\n"
+        "if(op==19){return ux_span(0,300000);}\n"
+        "if(op==20){return GpuPmremBuild_equirectHDR(128,65536,b,240000,24896,4096);}\n"
         "return 0-1;\n";
     if(sy_write_file(layout,abi,sizeof abi-1,0600) || sy_write_file(driver,source,sizeof source-1,0600)) return 1;
     char *args[]={"./ujs/ujs2wasm.com",layout,"ujs/practice/uxe/base/f64-math.ujs",
         "ujs/practice/uxe/base/gpu-pmrem-generated.ujs","ujs/practice/uxe/base/gpu-pmrem.ujs",
-        "ujs/practice/uxe/base/gpu-pmrem-build.ujs",driver,"-o",wasm,0};
+        "ujs/practice/uxe/base/datautils.ujs","ujs/practice/uxe/base/gpu-pmrem-build.ujs",driver,"-o",wasm,0};
     char *out=0;
     size_t bytes=0;
     int rc=cx_runv_timeout(args,8,&out,&bytes);
@@ -53,11 +55,12 @@ int main(int argc,char **argv) {
     const int wide=argc==2 && (tx_eqz(argv[1],"--wide") || tx_eqz(argv[1],"--mutate-wide"));
     const int sigma=argc==2 && (tx_eqz(argv[1],"--sigma") || tx_eqz(argv[1],"--mutate-sigma"));
     const int scene=sigma || (argc==2 && (tx_eqz(argv[1],"--scene") || tx_eqz(argv[1],"--mutate-scene")));
-    if(argc!=1 && !mutate && !full && !wide && !scene) return 2;
+    const int hdr=argc==2 && (tx_eqz(argv[1],"--hdr") || tx_eqz(argv[1],"--mutate-hdr"));
+    if(argc!=1 && !mutate && !full && !wide && !scene && !hdr) return 2;
     char dir[256],cwd[460],url[840];
     if(sy_cwd(cwd,sizeof cwd) || sy_mkdtemp("/tmp","ujs-pmrem-build-",dir,sizeof dir)) return 2;
-    int n=tx_snprintf(url,sizeof url,"file://%s/ujs/practice/uxe/test/gpu-pmrem-build-r160.html?dir=%s%s%s%s%s%s",
-        cwd,dir,sigma?"&scene=1&sigma=1":scene?"&scene=1":"",wide?"&wide=1":"",pano?"&equirect=1":textured?"&textured=1":"",full?"&full=1":"",(mutate || mutateFull || (wide && tx_eqz(argv[1],"--mutate-wide")) || (scene && (tx_eqz(argv[1],"--mutate-scene") || tx_eqz(argv[1],"--mutate-sigma"))))?"&mutate=1":"");
+    int n=tx_snprintf(url,sizeof url,"file://%s/ujs/practice/uxe/test/gpu-pmrem-build-r160.html?dir=%s%s%s%s%s%s%s",
+        cwd,dir,hdr?"&hdr=1":"",sigma?"&scene=1&sigma=1":scene?"&scene=1":"",wide?"&wide=1":"",pano?"&equirect=1":textured?"&textured=1":"",full?"&full=1":"",(mutate || mutateFull || (hdr && tx_eqz(argv[1],"--mutate-hdr")) || (wide && tx_eqz(argv[1],"--mutate-wide")) || (scene && (tx_eqz(argv[1],"--mutate-scene") || tx_eqz(argv[1],"--mutate-sigma"))))?"&mutate=1":"");
     const double gold[]={1,0,0,255,255,255,0,0,255,0,255,0,255,
         0,0,255,255,255,0,0,255,0,255,0,255,
         1,1,1,1,1,1,1,1, 1,1, 1,1,1,1};
@@ -65,7 +68,11 @@ int main(int argc,char **argv) {
     enum { bands=7, fields=5, fullCount=bands*fields+5 };
     double values[fullCount]={0};
     int failed=n<0 || n>=sizeof url || pmrem_build_compile(dir) ||
-        r160_wait_read(url,"#r160",values,scene?16:wide?6:full?fullCount:count,dir);
+        r160_wait_read(url,"#r160",values,hdr?4:scene?16:wide?6:full?fullCount:count,dir);
+    if(hdr && !failed) {
+        printf("PMREM_HDR pixels=%.0f max_delta=%.0f over_limit=%.0f hdr_channels=%.0f\n",values[0],values[1],values[2],values[3]);
+        if(values[0]!=10752 || values[1]<0 || values[1]>3 || values[2]!=0 || values[3]<2000) failed=1;
+    }
     if(scene && !failed) {
         printf("PMREM_SCENE pixels=%.0f max_delta=%.0f over_limit=%.0f\n",values[0],values[1],values[2]);
         for(int i=0;i<11;i++) printf("PMREM_SCENE band=%d max_delta=%.0f\n",i,values[3+i]);
@@ -91,12 +98,13 @@ int main(int argc,char **argv) {
             values[fullCount-3],values[fullCount-2],values[fullCount-1]);
         if(values[fullCount-5]!=0 || values[fullCount-3]>3 || values[fullCount-1]!=0) failed=1;
     }
-    for(int i=0;!scene && !wide && !full && !failed && i<count;i++) if(values[i]!=gold[i]) {
+    for(int i=0;!hdr && !scene && !wide && !full && !failed && i<count;i++) if(values[i]!=gold[i]) {
         printf("PMREM_BUILD case=%d actual=%.17g gold=%.17g\n",i,values[i],gold[i]);
         failed=1;
     }
     if(sy_remove_all(dir)) failed=1;
-    if(scene) printf("G_PIXEL PMREM scene failed=%d\n",failed);
+    if(hdr) printf("G_PIXEL PMREM HDR failed=%d\n",failed);
+    else if(scene) printf("G_PIXEL PMREM scene failed=%d\n",failed);
     else if(wide) printf("G_PIXEL PMREM cubeUV sizes=2 pixels=58368 failed=%d\n",failed);
     else if(full) printf("G_PIXEL PMREM cubeUV bands=%d pixels=%d failed=%d\n",bands,bands*48*32,failed);
     else printf("G_PIXEL PMREM fromCubemap first blur cases=%d failed=%d\n",count,failed);
