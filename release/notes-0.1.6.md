@@ -1,6 +1,6 @@
 # unisacc 0.1.6 发布说明（冻结前草稿）
 
-状态：冻结前草稿，整体裁决 `NOT_QUALIFIED`。冻结、链、预跑、CI、公开读回分别在对应回执就绪后回填，其余 `UNMEASURED`。主题为 tape 载体公开分发；项 1 已由独立复核关闭，九资产 sidecar 为选定方案，六资产为私下稿读回失败两次时的回退块。
+状态:已公开(2026-11-27,tag v0.1.6 指向 c9275e7756,APE ed50199f,九资产)。CI 门六目标全部成功(CI 门判定 QUALIFIED);整体裁决仍为 `NOT_QUALIFIED`,因为全套 s9 本版未跑(见 release/decision.txt)。严格证据 593/593 PASS,其中 5 批为补跑。主题为 tape 载体公开分发;项 1 已由独立复核关闭。
 
 ## 真实身份
 
@@ -40,20 +40,23 @@
 
 ## 严格证据
 
-发布后按阶段回填，占位不是通过：
+预跑与合并实测(候选 c9275e7756,APE ed50199f;首次正式预跑在 acad02543 上于 W0080 红停,原因与修复见下节):
 
 ```
-PRERUN_MERGE	windows=<N>	batches=<N>	PASS=<N>	FAIL=<N>	UNKNOWN=<N>	SUPERSEDED=<N>	out=<strict-final.tsv>
-SUMMARY	batches=<N>	PASS=<N>	FAIL=<N>	UNKNOWN=<N>	INVALID=<N>
-RATCHETS	ok=<N>	fail=<N>
-DERIVE_SUMMARY	ok=<N>	drift=<N>	refused=<N>	skipped=<N>
+PRERUN_RUN	status=DONE	ran=294	skipped=0	window_wall_ms=7135164	sum_batch_ms=9678769
+PRERUN_MERGE	windows=309	batches=593	PASS=593	FAIL=0	UNKNOWN=0	SUPERSEDED=4	out=strict-final.tsv
+SUMMARY	batches=593	PASS=593	FAIL=0	UNKNOWN=0	INVALID=0
+RATCHETS	ok=20	fail=0
+DERIVE_SUMMARY	UNMEASURED
 ```
 
-正式 strict 路径计划为 `release/evidence/v0.1.6-strict-<YYYYMMDD>.tsv`；严格证据以外批次 `UNMEASURED`；全套 s9 本版未跑。
+首轮非 PASS 共 5 批,全部单独补跑为 PASS,原证据保留,补跑写入新文件 strict-X9001..X9006 并按文件名后者胜出合并:chain-ready-launch、chain-ready-launch-b、freeze-cut(首轮 FAIL:预跑环境继承 UNISACC_BOOTER_CHAIN_OUT,未在 build/chain-env.tsv 登记);slow-split、tsv-lint-root(首轮 UNKNOWN 与补跑前两次:55 秒窗口超时,运行缓存键含根身份 rcident.cx:608,共享根换为候选后工具全部冷编译;预热后 35.3 秒与 11.4 秒 PASS)。正式 strict 路径 `release/evidence/v0.1.6-strict-20261127.tsv`;严格证据以外批次 `UNMEASURED`;全套 s9 本版未跑。
 
 ## 已知缺口与未验证范围
 
-(1) 链、预跑、CI、公开读回、九资产上传与安装状态未完成，整体 `NOT_QUALIFIED`。
+(1) 发布执行 7 步全部完成:CI run 45938522235 六目标成功,私有草稿读回 8 件与 SHA256SUMS 一致,公开读回通过,共享根已升级为 0.1.6 并通过 root-current 与 --controller-canary;全套 s9 未跑,整体裁决 `NOT_QUALIFIED`。
+(1a) 冻结两次:首次冻结 acad02543 的预跑在 W0080 红停(check-gen-all-check:GV.compat 补丁 a1f3b8d00 手改生成表 exec/facts/k2-gen2.tsv,facts-gen --check 报 DIFF);修复 84737d935 改生成器并重生 37 张表(仅表头输入行),重冻结 C0a c35123e67、C0b c9275e775,整链重跑,APE 字节与首链相同。
+(1b) 打包首跑被 release-run 拒绝(tape-sidecar-receipt-or-manifest-mismatch):打包检查与 release-ape 收据行格式不一致,九资产路径此前未端到端实跑;已在 tools/release-run.cx 修检查一侧,回归用例待登记。
 (2) 九资产 sidecar 仅计划 `lnx/x86_64`；八条清单与顶层文件名须以正式资产单回读为准。六资产只是失败两次后的回退块。
 (3) GV.compat 修在分支，公开 0.1.5 根 canary 为 RED；正式候选过门与 phase 4a 之外用例 `UNMEASURED`。
 (4) A1 数字只在私有微基准成立；slot-12、门 19 剩余项、ident-helper、卫生门的正式运行项 `UNMEASURED`。

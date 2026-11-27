@@ -1,0 +1,265 @@
+/* tools/check-m1-g4-vm.cx -- Real VM-path negative controls for M1 stream_s1_m1 (G4 + G3 in-proc).
+ *
+ *   sh ./unisacc.com tools/check-m1-g4-vm.cx -- /path/to/tapemode.so
+ *
+ * Drives the real production path cxsa_valid_s1 -> m53_m1_ensure_loaded -> m53_m1_vm_exec ->
+ * tsl_call2(bind_fn/run_fn) -> tape_run_x86_64 using real valid UTAPEBIN v1.3 slices packed
+ * into a P4 container with real IEEE CRC32 + manifest.tsv + tapemode.so:
+ *   (1) slice returning 1        -> cxsa_valid_s1 == 1  (positive control)
+ *   (2) slice returning 2        -> cxsa_valid_s1 == -2 (embed-vm-bad-return detail=2)
+ *   (3) slice returning 256      -> cxsa_valid_s1 == -2 (embed-vm-bad-return detail=256)
+ *   (4) slice infinite self-jump -> cxsa_valid_s1 == -2 (embed-vm-budget detail=3)
+ *   (5) slice illegal opcode 32  -> cxsa_valid_s1 == -2 (embed-vm-fault detail=1)
+ *   (6) same-path swap back to 1 -> cxsa_valid_s1 == 1  (G3 in-proc byte-swap + REFUSED recovery)
+ */
+#pragma unisa use runtime.model_number
+#pragma unisa use compiler.bindstage
+#pragma unisa use runtime.routestep
+#pragma unisa use driver.stream_s1_m1
+#pragma unisa use sys.fs
+#pragma unisa use sys.posix
+#pragma unisa use sys.env
+#pragma unisa use sys.io
+#pragma unisa use mem.heap
+#pragma unisa use mem.bytes
+#pragma unisa use text.fmt
+#pragma unisa use cxlib.netpack
+
+static int vm_pass = 0;
+static int vm_fail = 0;
+
+static void vm_ck(int ok, const char *name, int rc) {
+    if (ok) {
+        vm_pass++;
+        sy_printf("PASS\tcheck-m1-g4-vm.%s\trc=%d\n", name, rc);
+    } else {
+        vm_fail++;
+        sy_printf("FAIL\tcheck-m1-g4-vm.%s\trc=%d\n", name, rc);
+    }
+}
+
+static void put_u16(unsigned char *p, unsigned v) {
+    p[0] = (unsigned char)(v & 255U);
+    p[1] = (unsigned char)((v >> 8) & 255U);
+}
+
+static void put_u32(unsigned char *p, unsigned v) {
+    p[0] = (unsigned char)(v & 255U);
+    p[1] = (unsigned char)((v >> 8) & 255U);
+    p[2] = (unsigned char)((v >> 16) & 255U);
+    p[3] = (unsigned char)((v >> 24) & 255U);
+}
+
+static void put_u64(unsigned char *p, unsigned long long v) {
+    int i;
+    for (i = 0; i < 8; i++) p[i] = (unsigned char)((v >> (i * 8)) & 255ULL);
+}
+
+static unsigned vm_crc32(const unsigned char *p, long n) {
+    unsigned c = 4294967295U;
+    long i;
+    int j;
+    for (i = 0; i < n; i++) {
+        c ^= (unsigned)p[i];
+        for (j = 0; j < 8; j++) c = (c & 1U) ? ((c >> 1) ^ 3988292384U) : (c >> 1);
+    }
+    return c ^ 4294967295U;
+}
+
+static long build_utapebin(unsigned char *out, long cap, const unsigned char *code, long code_len) {
+    static const char *const tags[6] = {"CODE", "DATA", "BSSZ", "SYMS", "RELO", "HOST"};
+    static const char magic[8] = {'U', 'T', 'A', 'P', 'E', 'B', 'I', 'N'};
+    static const char abi[10] = {'M', '5', '3', 'S', '1', 'A', 'B', 'I', '1', 0};
+    unsigned long long code_off = 208ULL;
+    unsigned long long data_off = (code_off + (unsigned long long)code_len + 7ULL) & ~7ULL;
+    unsigned long long bssz_off = (data_off + 10ULL + 7ULL) & ~7ULL;
+    unsigned long long end_off = bssz_off + 8ULL;
+    unsigned long long offs[6], lens[6];
+    unsigned cnts[6];
+    unsigned char dig[32];
+    int i, j;
+
+    if ((long)end_off > cap) return -1;
+    mm_fill(out, (long)end_off, 0, (long)end_off);
+    for (i = 0; i < 8; i++) out[i] = (unsigned char)magic[i];
+    put_u16(out + 8, 1U);
+    put_u16(out + 10, 3U);
+    put_u16(out + 12, 1U);
+    put_u16(out + 14, 0U);
+    put_u32(out + 16, 0U);
+    put_u32(out + 20, 6U);
+    put_u32(out + 24, 64U);
+    put_u32(out + 60, 0U);
+
+    offs[0] = code_off; lens[0] = (unsigned long long)code_len; cnts[0] = 0U;
+    offs[1] = data_off; lens[1] = 10ULL; cnts[1] = 0U;
+    offs[2] = bssz_off; lens[2] = 8ULL; cnts[2] = 1U;
+    offs[3] = end_off;  lens[3] = 0ULL; cnts[3] = 0U;
+    offs[4] = end_off;  lens[4] = 0ULL; cnts[4] = 0U;
+    offs[5] = end_off;  lens[5] = 0ULL; cnts[5] = 0U;
+
+    for (i = 0; i < 6; i++) {
+        int d = 64 + 24 * i;
+        for (j = 0; j < 4; j++) out[d + j] = (unsigned char)tags[i][j];
+        put_u64(out + d + 4, offs[i]);
+        put_u64(out + d + 12, lens[i]);
+        put_u32(out + d + 20, cnts[i]);
+    }
+    if (code_len > 0 && mm_copy(out + code_off, cap - (long)code_off, code, code_len)) return -1;
+    if (mm_copy(out + data_off, cap - (long)data_off, abi, 10)) return -1;
+    put_u64(out + bssz_off, 0ULL);
+    cx_sha256(out, (size_t)end_off, dig);
+    if (mm_copy(out + 28, 32, dig, 32)) return -1;
+    return (long)end_off;
+}
+
+static int write_p4_pkg(const char *path, const unsigned char *so, long so_n,
+                        const unsigned char *sl, long sl_n) {
+    char so_hex[65], sl_hex[65], mf[512], hdr[512];
+    long mf_n, need, pos = 0, hl;
+    unsigned char *buf;
+    unsigned c0, c1, c2;
+
+    cx_sha256_hex(so, (size_t)so_n, so_hex);
+    cx_sha256_hex(sl, (size_t)sl_n, sl_hex);
+    if (cx_fmt(mf, sizeof mf, "tapemode.so\t%s\t%ld\nm53.tapeslice\t%s\t%ld\n",
+               so_hex, so_n, sl_hex, sl_n)) return -1;
+    mf_n = (long)strlen(mf);
+    c0 = vm_crc32((const unsigned char *)mf, mf_n);
+    c1 = vm_crc32(so, so_n);
+    c2 = vm_crc32(sl, sl_n);
+
+    need = 1024 + mf_n + so_n + sl_n;
+    buf = (unsigned char *)mm_alloc(need);
+    if (!buf) return -1;
+
+    if (cx_fmt(hdr, sizeof hdr, "P 4 1 1 3\nD r s in out 0\nM 1 1 1 0\nAF 28 %ld %ld 0 %u\ntape/lnx-x86_64/manifest.tsv",
+               mf_n, mf_n, c0)) { mm_free(buf); return -1; }
+    hl = (long)strlen(hdr);
+    if (mm_copy(buf + pos, need - pos, hdr, hl)) { mm_free(buf); return -1; }
+    pos += hl;
+    if (mm_copy(buf + pos, need - pos, mf, mf_n)) { mm_free(buf); return -1; }
+    pos += mf_n;
+
+    if (cx_fmt(hdr, sizeof hdr, "F 27 %ld %ld 0 %u\ntape/lnx-x86_64/tapemode.so", so_n, so_n, c1)) { mm_free(buf); return -1; }
+    hl = (long)strlen(hdr);
+    if (mm_copy(buf + pos, need - pos, hdr, hl)) { mm_free(buf); return -1; }
+    pos += hl;
+    if (mm_copy(buf + pos, need - pos, so, so_n)) { mm_free(buf); return -1; }
+    pos += so_n;
+
+    if (cx_fmt(hdr, sizeof hdr, "F 29 %ld %ld 0 %u\ntape/lnx-x86_64/m53.tapeslice", sl_n, sl_n, c2)) { mm_free(buf); return -1; }
+    hl = (long)strlen(hdr);
+    if (mm_copy(buf + pos, need - pos, hdr, hl)) { mm_free(buf); return -1; }
+    pos += hl;
+    if (mm_copy(buf + pos, need - pos, sl, sl_n)) { mm_free(buf); return -1; }
+    pos += sl_n;
+
+    if (sy_write_atomic(path, buf, pos, 0600) != 0) { mm_free(buf); return -1; }
+    mm_free(buf);
+    return 0;
+}
+
+int main(int argc, char **argv) {
+    const char *so_path = (argc >= 2 && argv[1] && argv[1][0]) ? argv[1] : 0;
+    unsigned char *so = 0;
+    int64_t so_n = 0;
+    char tdir[512], pkgp[600], built_so[600], built_mf[600];
+    unsigned char sl[512];
+    const unsigned char dummy_in[4] = {'T', 'E', 'S', 'T'};
+    /* Real tape_x86_64 bytecode programs:
+     * (1) ret=1:   imm r0, 1; exit r0
+     * (2) ret=2:   imm r0, 2; exit r0
+     * (3) ret=256: imm r0, 256 (SLEB 0x80,0x02); exit r0
+     * (4) budget:  jump 0 (2,000,000 steps -> .Lrun_budget status=3)
+     * (5) fault:   op32 r0, r0 (passes bitmap, hits .Lrun_opcode -> .Lrun_fault status=2 fault=1) */
+    static const unsigned char c_ret1[6]   = {0x00, 0xf0, 0x00, 0x01, 0x2a, 0xf0};
+    static const unsigned char c_ret2[6]   = {0x00, 0xf0, 0x00, 0x02, 0x2a, 0xf0};
+    static const unsigned char c_ret256[7] = {0x00, 0xf0, 0x00, 0x80, 0x02, 0x2a, 0xf0};
+    static const unsigned char c_budget[3] = {0x1b, 0x01, 0x00};
+    static const unsigned char c_fault[2]  = {0x20, 0x00};
+    long sl_n;
+    int rc;
+
+    if (sy_mkdtemp("/tmp", "m1-g4-vm-", tdir, sizeof tdir) != 0 ||
+        cx_fmt(pkgp, sizeof pkgp, "%s/pkg.p4", tdir) ||
+        cx_fmt(built_so, sizeof built_so, "%s/tapemode.so", tdir) ||
+        cx_fmt(built_mf, sizeof built_mf, "%s/manifest.tsv", tdir)) {
+        return 2;
+    }
+    if (!so_path) {
+        char *bv[] = {"sh", "./unisacc.com", "tools/tape-sidecar-build.cx", "--",
+                      "--target", "lnx/x86_64", ".", tdir, 0};
+        np_result br = {0};
+        char why[128] = {0};
+        int tr = np_run(bv, 0, 0, 40, &br, why, sizeof why);
+        int brc = (tr || br.residue) ? -1 : br.rc;
+        np_free(&br);
+        if (brc != 0) {
+            sy_eprintf("check-m1-g4-vm: tape-sidecar-build failed rc=%d (%s)\n", brc, why);
+            (void)sy_remove_all(tdir);
+            return 2;
+        }
+        so_path = built_so;
+    }
+    if (sy_read_file(so_path, &so, &so_n, 1048576) != 0 || !so || so_n <= 0) {
+        sy_eprintf("check-m1-g4-vm: cannot read tapemode.so at %s\n", so_path);
+        (void)sy_unlink(built_so);
+        (void)sy_unlink(built_mf);
+        (void)sy_remove_all(tdir);
+        return 2;
+    }
+    (void)sy_unsetenv("UNISACC_M53_S1");
+    (void)sy_unsetenv("UNISACC_M53_S1_SO");
+    if (sy_setenv("UNISA_CONTAINER", pkgp, 1) != 0) { mm_free(so); return 2; }
+
+    /* (1) Positive control: real VM returns 1 */
+    sl_n = build_utapebin(sl, (long)sizeof sl, c_ret1, 6);
+    if (sl_n > 0 && write_p4_pkg(pkgp, so, (long)so_n, sl, sl_n) == 0) {
+        rc = cxsa_valid_s1(dummy_in, 4);
+        vm_ck(rc == 1, "vm-ret-1-positive", rc);
+    } else vm_ck(0, "vm-ret-1-positive", -99);
+
+    /* (2) Real VM returns 2 -> -2 + M53_M1_REFUSE reason=embed-vm-bad-return detail=2 */
+    sl_n = build_utapebin(sl, (long)sizeof sl, c_ret2, 6);
+    if (sl_n > 0 && write_p4_pkg(pkgp, so, (long)so_n, sl, sl_n) == 0) {
+        rc = cxsa_valid_s1(dummy_in, 4);
+        vm_ck(rc == -2, "vm-ret-2-refused", rc);
+    } else vm_ck(0, "vm-ret-2-refused", -99);
+
+    /* (3) Real VM returns 256 -> -2 + M53_M1_REFUSE reason=embed-vm-bad-return detail=256 */
+    sl_n = build_utapebin(sl, (long)sizeof sl, c_ret256, 7);
+    if (sl_n > 0 && write_p4_pkg(pkgp, so, (long)so_n, sl, sl_n) == 0) {
+        rc = cxsa_valid_s1(dummy_in, 4);
+        vm_ck(rc == -2, "vm-ret-256-refused", rc);
+    } else vm_ck(0, "vm-ret-256-refused", -99);
+
+    /* (4) Real VM exhausts 2,000,000-step budget -> -2 + M53_M1_REFUSE reason=embed-vm-budget detail=3 */
+    sl_n = build_utapebin(sl, (long)sizeof sl, c_budget, 3);
+    if (sl_n > 0 && write_p4_pkg(pkgp, so, (long)so_n, sl, sl_n) == 0) {
+        rc = cxsa_valid_s1(dummy_in, 4);
+        vm_ck(rc == -2, "vm-budget-exhausted-refused", rc);
+    } else vm_ck(0, "vm-budget-exhausted-refused", -99);
+
+    /* (5) Real VM hits illegal opcode 32 -> -2 + M53_M1_REFUSE reason=embed-vm-fault detail=1 */
+    sl_n = build_utapebin(sl, (long)sizeof sl, c_fault, 2);
+    if (sl_n > 0 && write_p4_pkg(pkgp, so, (long)so_n, sl, sl_n) == 0) {
+        rc = cxsa_valid_s1(dummy_in, 4);
+        vm_ck(rc == -2, "vm-illegal-op-fault-refused", rc);
+    } else vm_ck(0, "vm-illegal-op-fault-refused", -99);
+
+    /* (6) G3 in-proc same-path byte-swap + REFUSED recovery back to ret=1 */
+    sl_n = build_utapebin(sl, (long)sizeof sl, c_ret1, 6);
+    if (sl_n > 0 && write_p4_pkg(pkgp, so, (long)so_n, sl, sl_n) == 0) {
+        rc = cxsa_valid_s1(dummy_in, 4);
+        vm_ck(rc == 1, "g3-same-path-recovery-ret-1", rc);
+    } else vm_ck(0, "g3-same-path-recovery-ret-1", -99);
+
+    (void)sy_unlink(pkgp);
+    (void)sy_unlink(built_so);
+    (void)sy_unlink(built_mf);
+    (void)sy_remove_all(tdir);
+    mm_free(so);
+    sy_printf("CHECK_M1_G4_VM\tpassed=%d\tfailed=%d\n", vm_pass, vm_fail);
+    return vm_fail ? 1 : 0;
+}

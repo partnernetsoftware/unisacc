@@ -1,0 +1,1556 @@
+/* tools/priv-relink.cx -- module-level per-unit private APE relink + repack with 5-way untouched proof.
+ *
+ * Usage:
+ *   sh ./unisacc.com tools/priv-relink.cx -- \
+ *     --chain-dir CHAIN_DIR --out OUT_APE \
+ *     [--repo REPO_DIR] [--work-dir WORK_DIR] [--objs-dir OBJS_DIR] \
+ *     [--replace KEY.o=OBJ_PATH]... [--compile KEY.o=SRC_PATH]... \
+ *     [--add KEY.o=OBJ_PATH]...     [--compile-add KEY.o=SRC_PATH]... \
+ *     [--remove KEY.o]... \
+ *     [--allow-obj KEY.o]... [--allow-add KEY.o]... [--allow-remove KEY.o]... \
+ *     [--p4-payload BODY_PATH] [--allow-f-key KEY]... [--allow-m1-tape-keys] \
+ *     [--forbid-sym SYM]... [--baseline-layer-api DIR] [--allow-hub REASON] \
+ *     [--link-order auto|receipt|glob] [--version VER] [--budget-ms MS]
+ *
+ * Guarantees (fail-closed, rc=2 on any violation):
+ *   1. Hub gate: 11 lnx-x86_64 hubs with fan-in >= 8 (sysnums/m43.o, io/m19.o, time/m18.o,
+ *      bytes/m10.o, heap/m2.o, frameparts/m33.o, holdframe/m5.o, env/m4.o, driveutil.o,
+ *      unitcache/m16.o, text/m1.o) refuse unless --allow-hub REASON.
+ *   2. Object receipt proof: every baseline .o in CHAIN_DIR/fixedpoint/g2/lnx-x86_64/receipt.txt
+ *      outside declared --replace/--compile/--allow-obj/--remove/--allow-remove must have the
+ *      exact SHA-256 and byte length of receipt.txt; any undeclared changed, added, or removed
+ *      .o refuses (REFUSE PRIV_RELINK unexpected-changed-object / unexpected-added-object /
+ *      unexpected-removed-object).
+ *   3. sig_sha / layer-api proof: build/layer-api/*.tsv, build/tlib-packages.tsv, and
+ *      build/iface-hash.tsv must have zero drift against --baseline-layer-api DIR and git HEAD/rev
+ *      (REFUSE PRIV_RELINK sig-sha-drift).
+ *   4. P4 F-record proof: every F record in the P4 package carries a valid IEEE CRC32, and every
+ *      F record outside declared --allow-f-key / --allow-m1-tape-keys is byte-for-byte identical
+ *      to the baseline P4 package; any undeclared modified, added, or deleted F record refuses
+ *      (REFUSE PRIV_RELINK foreign-f-record-drift).
+ *   5. Symbol isolation proof: defined global symbols of changed/added .o units must not redefine
+ *      any symbol exported by untouched baseline .o units (REFUSE PRIV_RELINK symbol-diff-outside-unit),
+ *      and any --forbid-sym SYM must be absent from all linked .o units.
+ *   6. Empty-change invariance: when 0 objects and 0 F records change, the relinked entry.elf and
+ *      repacked OUT_APE are verified byte-for-byte equal to the baseline chain's entry.elf and APE.
+ *   7. Private APEs are marked status=PREPARED scope=LOCAL only (never PASS, never QUALIFIED).
+ *
+ * Check: tools/check-priv-relink.cx (batch priv-relink).
+ */
+#pragma unisa use sys.fs
+#pragma unisa use sys.io
+#pragma unisa use sys.env
+#pragma unisa use sys.proc
+#pragma unisa use sys.time
+#pragma unisa use sys.posix
+#pragma unisa use sys.sha
+#pragma unisa use text.text
+#pragma unisa use text.fmt
+#pragma unisa use text.conv
+#pragma unisa use mem.heap
+#pragma unisa use mem.bytes
+#pragma unisa use runtime.packagefooter
+#pragma unisa use runtime.package_decode
+#pragma unisa use runtime.package_lifetime
+#pragma unisa use runtime.model_number
+#pragma unisa use compiler.bindstage
+#pragma unisa use runtime.routestep
+#pragma unisa use cxlib.netpack
+#pragma unisa use cxlib.releaseversion
+
+#define PR_MAX_OBJS 256
+#define PR_MAX_DECL 64
+#define PR_MAX_FKEYS 64
+#define PR_MAX_SYMS 4096
+#define PR_PW 4400
+
+typedef struct {
+    char key[64];
+    char sha[65];
+    long bytes;
+    char mod[64];
+    char src[256];
+} PrBaseObj;
+
+typedef struct {
+    char key[64];
+    char path[PR_PW];
+} PrKeyPath;
+
+static int pr_refuse(const char *reason, const char *detail) {
+    sy_printf("REFUSE\tPRIV_RELINK\t%s\t%s\n", reason, (detail && detail[0]) ? detail : "-");
+    sy_eprintf("priv-relink: REFUSE %s %s\n", reason, (detail && detail[0]) ? detail : "-");
+    return 2;
+}
+
+static void *pr_pk_alloc(void *prev, size_t n) {
+    (void)prev;
+    return mm_alloc((long)(n ? n : 1));
+}
+
+static void pr_pk_free(void *p) {
+    if (p) mm_free(p);
+}
+
+static unsigned pr_crc32(const unsigned char *p, long n) {
+    unsigned c = 4294967295U;
+    for (long i = 0; i < n; i++) {
+        c ^= (unsigned)p[i];
+        for (int j = 0; j < 8; j++) c = (c & 1U) ? ((c >> 1) ^ 3988292384U) : (c >> 1);
+    }
+    return c ^ 4294967295U;
+}
+
+static int pr_is_hex64(const char *s) {
+    if (!s) return 0;
+    for (int i = 0; i < 64; i++) {
+        char c = s[i];
+        if (!((c >= '0' && c <= '9') || (c >= 'a' && c <= 'f'))) return 0;
+    }
+    return s[64] == 0;
+}
+
+static int pr_file_sha_bytes(const char *path, char sha_out[65], long *bytes_out) {
+    size_t n = 0;
+    char *b = cx_read(path, &n);
+    if (!b) return -1;
+    cx_sha256_hex(b, n, sha_out);
+    if (bytes_out) *bytes_out = (long)n;
+    mm_free(b);
+    return 0;
+}
+
+static int pr_copy_file(const char *src, const char *dst, int mode) {
+    size_t n = 0;
+    char *b = cx_read(src, &n);
+    if (!b) return -1;
+    int rc = sy_write_atomic(dst, b, n, mode);
+    mm_free(b);
+    return rc;
+}
+
+static const char *pr_hub_module(const char *key) {
+    static const char *const hub_keys[11] = {
+        "m43.o", "m19.o", "m18.o", "m10.o", "m2.o",
+        "m33.o", "m5.o", "m4.o", "driveutil.o", "m16.o", "m1.o"
+    };
+    static const char *const hub_mods[11] = {
+        "sysnums", "io", "time", "bytes", "heap",
+        "frameparts", "holdframe", "env", "driveutil", "unitcache", "text"
+    };
+    for (int i = 0; i < 11; i++) {
+        if (tx_eqz(key, hub_keys[i]) || tx_eqz(key, hub_mods[i])) return hub_mods[i];
+    }
+    return 0;
+}
+
+static const char *pr_opt_for(const char *key) {
+    if (tx_eqz(key, "drive.o") || tx_eqz(key, "host.o") || tx_eqz(key, "driveface.o") ||
+        tx_eqz(key, "driveroute.o") || tx_eqz(key, "cxmod.o") || tx_eqz(key, "tapegate.o"))
+        return "-O1";
+    return "-O2";
+}
+
+static const char *pr_rt_for(const char *key) {
+    return tx_eqz(key, "drive.o") ? "-DRT_UNIT" : "-DRT_EXTERN";
+}
+
+static int pr_in_list(char list[][64], int n, const char *key) {
+    for (int i = 0; i < n; i++) {
+        if (tx_eqz(list[i], key)) return 1;
+    }
+    return 0;
+}
+
+static void pr_add_unique(char list[][64], int *n, int cap, const char *key) {
+    if (pr_in_list(list, *n, key)) return;
+    if (*n < cap) cx_fmt(list[(*n)++], 64, "%s", key);
+}
+
+static int pr_parse_kv(const char *arg, char *k_out, size_t kcap, char *v_out, size_t vcap) {
+    const char *eq = strchr(arg, '=');
+    if (!eq || eq == arg || !eq[1]) return -1;
+    size_t kl = (size_t)(eq - arg);
+    if (kl >= kcap || strlen(eq + 1) >= vcap) return -1;
+    mm_copy(k_out, (long)kcap, arg, (long)kl);
+    k_out[kl] = 0;
+    cx_fmt(v_out, vcap, "%s", eq + 1);
+    return 0;
+}
+
+static int pr_load_receipt_objs(const char *rcpt_path, PrBaseObj *objs, int cap, int *n_out,
+                                char *elf_sha_out, long *elf_bytes_out, char *rev_out, size_t rcap) {
+    size_t n = 0;
+    char *b = cx_read(rcpt_path, &n);
+    if (!b || n == 0) { if (b) mm_free(b); return -1; }
+    *n_out = 0;
+    elf_sha_out[0] = 0;
+    *elf_bytes_out = 0;
+    if (rev_out && rcap > 0) rev_out[0] = 0;
+    long at = 0;
+    while (at < (long)n) {
+        long e = at;
+        while (e < (long)n && b[e] != '\n' && b[e] != '\r') e++;
+        long ln = e - at;
+        const char *l = b + at;
+        at = e + 1;
+        if (ln <= 0) continue;
+        if (rev_out && !rev_out[0] && ln == 44 && !memcmp(l, "rev\t", 4)) {
+            mm_copy(rev_out, (long)rcap, l + 4, 40);
+            rev_out[40] = 0;
+            continue;
+        }
+        long t1 = tx_chr(l, ln, '\t');
+        if (t1 <= 0 || t1 >= 63) continue;
+        char kbuf[64];
+        mm_copy(kbuf, sizeof kbuf, l, t1);
+        kbuf[t1] = 0;
+        int is_obj = (t1 > 2 && !memcmp(kbuf + t1 - 2, ".o", 2));
+        int is_elf = tx_eqz(kbuf, "entry.elf");
+        if (!is_obj && !is_elf) continue;
+        long s_at = tx_find(l, ln, "\tsha=", 5);
+        long b_at = tx_find(l, ln, "\tbytes=", 7);
+        if (s_at < 0 || b_at < 0 || s_at + 5 + 64 > ln) continue;
+        char sbuf[65];
+        mm_copy(sbuf, sizeof sbuf, l + s_at + 5, 64);
+        sbuf[64] = 0;
+        if (!pr_is_hex64(sbuf)) continue;
+        long b_end = b_at + 7;
+        while (b_end < ln && l[b_end] >= '0' && l[b_end] <= '9') b_end++;
+        int64_t bval = 0;
+        if (b_end <= b_at + 7 || tx_to_i64(l + b_at + 7, b_end - (b_at + 7), 10, &bval) != 0) continue;
+        if (is_elf) {
+            cx_fmt(elf_sha_out, 65, "%s", sbuf);
+            *elf_bytes_out = (long)bval;
+        } else if (is_obj) {
+            int idx = -1;
+            for (int i = 0; i < *n_out; i++) {
+                if (tx_eqz(objs[i].key, kbuf)) { idx = i; break; }
+            }
+            if (idx < 0) {
+                if (*n_out >= cap) { mm_free(b); return -1; }
+                idx = (*n_out)++;
+                mm_fill(&objs[idx], (long)sizeof objs[idx], 0, (long)sizeof objs[idx]);
+                cx_fmt(objs[idx].key, sizeof objs[idx].key, "%s", kbuf);
+                long kl = (long)strlen(kbuf);
+                long sl = (kl > 2 && !memcmp(kbuf + kl - 2, ".o", 2)) ? (kl - 2) : kl;
+                if (sl > 63) sl = 63;
+                mm_copy(objs[idx].mod, sizeof objs[idx].mod, kbuf, sl);
+                objs[idx].mod[sl] = 0;
+            }
+            cx_fmt(objs[idx].sha, sizeof objs[idx].sha, "%s", sbuf);
+            objs[idx].bytes = (long)bval;
+        }
+    }
+    mm_free(b);
+    return (*n_out > 0) ? 0 : -1;
+}
+
+static void pr_load_closures(const char *abs_chain, PrBaseObj *objs, int n_objs) {
+    char cp[PR_PW];
+    if (cx_fmt(cp, sizeof cp, "%s/fixedpoint/g2/lnx-x86_64.closures.tsv", abs_chain)) return;
+    size_t n = 0;
+    char *b = cx_read(cp, &n);
+    if (!b) return;
+    long at = 0;
+    while (at < (long)n) {
+        long e = at;
+        while (e < (long)n && b[e] != '\n' && b[e] != '\r') e++;
+        long ln = e - at;
+        const char *l = b + at;
+        at = e + 1;
+        if (ln <= 0 || l[0] == '#') continue;
+        long t1 = tx_chr(l, ln, '\t');
+        if (t1 <= 0 || t1 >= 63) continue;
+        char kbuf[64], sbuf[256];
+        mm_copy(kbuf, sizeof kbuf, l, t1); kbuf[t1] = 0;
+        long sl = ln - (t1 + 1);
+        if (sl <= 0) continue;
+        if (sl >= 255) sl = 255;
+        mm_copy(sbuf, sizeof sbuf, l + t1 + 1, sl); sbuf[sl] = 0;
+        const char *base = strrchr(sbuf, '/');
+        base = base ? (base + 1) : sbuf;
+        long bl = (long)strlen(base);
+        long ml = (bl > 3 && !memcmp(base + bl - 3, ".cx", 3)) ? (bl - 3) : bl;
+        if (ml > 63) ml = 63;
+        for (int i = 0; i < n_objs; i++) {
+            if (tx_eqz(objs[i].key, kbuf)) {
+                cx_fmt(objs[i].src, sizeof objs[i].src, "%s", sbuf);
+                mm_copy(objs[i].mod, sizeof objs[i].mod, base, ml);
+                objs[i].mod[ml] = 0;
+                break;
+            }
+        }
+    }
+    mm_free(b);
+}
+
+static int pr_same_no_us(const char *a, const char *b) {
+    long ia = 0, ib = 0;
+    if (!a || !b) return 0;
+    for (;;) {
+        while (a[ia] == '_') ia++;
+        while (b[ib] == '_') ib++;
+        if (a[ia] != b[ib]) return 0;
+        if (a[ia] == 0) return 1;
+        ia++; ib++;
+    }
+}
+
+static int pr_extract_declared_module(const char *src_path, char *mod_out, size_t cap) {
+    size_t n = 0;
+    mod_out[0] = 0;
+    char *b = cx_read(src_path, &n);
+    if (!b) return -1;
+    long at = 0;
+    while (at < (long)n) {
+        long e = at;
+        while (e < (long)n && b[e] != '\n' && b[e] != '\r') e++;
+        long ln = e - at;
+        const char *l = b + at;
+        at = e + 1;
+        long p = 0;
+        while (p < ln && (l[p] == ' ' || l[p] == '\t')) p++;
+        if (p + 7 <= ln && !memcmp(l + p, "#pragma", 7)) {
+            p += 7;
+            while (p < ln && (l[p] == ' ' || l[p] == '\t')) p++;
+            if (p + 5 <= ln && !memcmp(l + p, "unisa", 5)) {
+                p += 5;
+                while (p < ln && (l[p] == ' ' || l[p] == '\t')) p++;
+                if (p + 6 <= ln && !memcmp(l + p, "module", 6) &&
+                    (p + 6 == ln || l[p + 6] == ' ' || l[p + 6] == '\t')) {
+                    p += 6;
+                    while (p < ln && (l[p] == ' ' || l[p] == '\t')) p++;
+                    long ms = p;
+                    while (p < ln && ((l[p] >= 'a' && l[p] <= 'z') || (l[p] >= 'A' && l[p] <= 'Z') ||
+                                      (l[p] >= '0' && l[p] <= '9') || l[p] == '_')) p++;
+                    long ml = p - ms;
+                    if (ml > 0 && (size_t)ml < cap) {
+                        mm_copy(mod_out, (long)cap, l + ms, ml);
+                        mod_out[ml] = 0;
+                        mm_free(b);
+                        return 0;
+                    }
+                }
+            }
+        }
+    }
+    mm_free(b);
+    return -1;
+}
+
+static int pr_find_unit_by_sym(const char *sym, const char *base_g2_lnx,
+                               const PrBaseObj *objs, int n_objs) {
+    if (!sym || !sym[0]) return -1;
+    for (int i = 0; i < n_objs; i++) {
+        char op[PR_PW];
+        if (cx_fmt(op, sizeof op, "%s/%s", base_g2_lnx, objs[i].key)) continue;
+        if (sy_exists(op) != 1) {
+            if (cx_fmt(op, sizeof op, "%s/candidate/%s", base_g2_lnx, objs[i].key) || sy_exists(op) != 1)
+                continue;
+        }
+        char *av[] = {"/usr/bin/nm", "-g", "--defined-only", "-P", op, 0};
+        np_result r = {0}; char why[128];
+        if (np_run(av, ".", 0, 10, &r, why, sizeof why) == 0 && r.rc == 0 && r.out) {
+            long at = 0;
+            while (at < (long)r.outn) {
+                long e = at;
+                while (e < (long)r.outn && r.out[e] != '\n' && r.out[e] != '\r') e++;
+                long ln = e - at;
+                const char *l = r.out + at;
+                at = e + 1;
+                long sp = 0;
+                while (sp < ln && l[sp] != ' ' && l[sp] != '\t') sp++;
+                long tp = sp;
+                while (tp < ln && (l[tp] == ' ' || l[tp] == '\t')) tp++;
+                if (tp < ln && (l[tp] == 'C' || l[tp] == 'c')) continue;
+                if (sp == (long)strlen(sym) && !memcmp(l, sym, (size_t)sp)) {
+                    np_free(&r);
+                    return i;
+                }
+            }
+        }
+        np_free(&r);
+    }
+    return -1;
+}
+
+static int pr_find_unit_by_mod(const char *stem, const PrBaseObj *objs, int n_objs) {
+    if (!stem || !stem[0]) return -1;
+    for (int i = 0; i < n_objs; i++) {
+        if (tx_eqz(objs[i].mod, stem)) return i;
+    }
+    for (int i = 0; i < n_objs; i++) {
+        if (pr_same_no_us(objs[i].mod, stem)) return i;
+    }
+    return -1;
+}
+
+static int pr_resolve_unit_spec(const char *spec, const char *src_path, const char *base_g2_lnx,
+                                const PrBaseObj *objs, int n_objs,
+                                char *key_out, size_t kcap, int *idx_out,
+                                char *detail, size_t dcap) {
+    int idx = -1;
+    char decl_mod[64];
+    decl_mod[0] = 0;
+    if (src_path && src_path[0]) (void)pr_extract_declared_module(src_path, decl_mod, sizeof decl_mod);
+
+    if (!spec || !spec[0]) {
+        if (decl_mod[0]) {
+            idx = pr_find_unit_by_mod(decl_mod, objs, n_objs);
+            if (idx < 0) {
+                cx_fmt(detail, dcap, "module-not-in-baseline module=%s src=%s", decl_mod, src_path);
+                return -1;
+            }
+        } else {
+            cx_fmt(detail, dcap, "empty-unit-spec");
+            return -1;
+        }
+    } else if (!strncmp(spec, "sym:", 4)) {
+        idx = pr_find_unit_by_sym(spec + 4, base_g2_lnx, objs, n_objs);
+        if (idx < 0) {
+            cx_fmt(detail, dcap, "symbol-not-found sym=%s", spec + 4);
+            return -1;
+        }
+    } else {
+        long sl = (long)strlen(spec);
+        if (sl > 2 && !memcmp(spec + sl - 2, ".o", 2)) {
+            for (int i = 0; i < n_objs; i++) {
+                if (tx_eqz(objs[i].key, spec)) { idx = i; break; }
+            }
+            if (idx < 0) {
+                cx_fmt(detail, dcap, "unknown-unit-id unit=%s", spec);
+                return -1;
+            }
+        } else {
+            const char *base = strrchr(spec, '/');
+            base = base ? (base + 1) : spec;
+            long bl = (long)strlen(base);
+            long ml = (bl > 3 && !memcmp(base + bl - 3, ".cx", 3)) ? (bl - 3) : bl;
+            char stem[64];
+            if (ml > 63) ml = 63;
+            mm_copy(stem, sizeof stem, base, ml); stem[ml] = 0;
+            idx = pr_find_unit_by_mod(stem, objs, n_objs);
+            if (idx < 0) idx = pr_find_unit_by_sym(spec, base_g2_lnx, objs, n_objs);
+            if (idx < 0) {
+                cx_fmt(detail, dcap, "cannot-resolve-unit spec=%s", spec);
+                return -1;
+            }
+        }
+    }
+
+    if (decl_mod[0]) {
+        int mod_idx = pr_find_unit_by_mod(decl_mod, objs, n_objs);
+        if (mod_idx >= 0 && mod_idx != idx) {
+            cx_fmt(detail, dcap, "requested=%s(module=%s) declared_module=%s actual_unit=%s",
+                   objs[idx].key, objs[idx].mod, decl_mod, objs[mod_idx].key);
+            return -2;
+        }
+    }
+    cx_fmt(key_out, kcap, "%s", objs[idx].key);
+    if (idx_out) *idx_out = idx;
+    return 0;
+}
+
+static int pr_stage_routed_source(const char *src_path, const char *wdir, int seq,
+                                  char *staged_out, size_t scap) {
+    char decl_mod[64];
+    if (pr_extract_declared_module(src_path, decl_mod, sizeof decl_mod) != 0 || !decl_mod[0]) {
+        cx_fmt(staged_out, scap, "%s", src_path);
+        return 0;
+    }
+    const char *base = strrchr(src_path, '/');
+    base = base ? (base + 1) : src_path;
+    char want_base[72];
+    cx_fmt(want_base, sizeof want_base, "%s.cx", decl_mod);
+    if (tx_eqz(base, want_base)) {
+        cx_fmt(staged_out, scap, "%s", src_path);
+        return 0;
+    }
+    char rdir[PR_PW], abs_src[PR_PW], src_dir[PR_PW];
+    if (sy_realpath(src_path, abs_src, sizeof abs_src) < 0) {
+        cx_fmt(abs_src, sizeof abs_src, "%s", src_path);
+    }
+    cx_fmt(src_dir, sizeof src_dir, "%s", abs_src);
+    char *sl = strrchr(src_dir, '/');
+    if (sl) *sl = 0; else cx_fmt(src_dir, sizeof src_dir, ".");
+    if (cx_fmt(rdir, sizeof rdir, "%s/routed_src_%d", wdir, seq) ||
+        sy_mkdir_all(rdir, 0755) != 0 ||
+        cx_fmt(staged_out, scap, "%s/%s.cx", rdir, decl_mod) ||
+        pr_copy_file(src_path, staged_out, 0644) != 0) {
+        return -1;
+    }
+    sy_dir_t d;
+    if (sy_dir_open(&d, src_dir) == 0) {
+        while (sy_dir_next(&d) == 1) {
+            if (d.name[0] == '.' || tx_eqz(d.name, want_base)) continue;
+            char sp[PR_PW], dp[PR_PW];
+            if (!cx_fmt(sp, sizeof sp, "%s/%s", src_dir, d.name) &&
+                !cx_fmt(dp, sizeof dp, "%s/%s", rdir, d.name)) {
+                (void)sy_symlink(sp, dp);
+            }
+        }
+        sy_dir_close(&d);
+    }
+    return 0;
+}
+
+static int pr_check_layer_api(const char *repo, const char *base_dir, const char *chain_rev,
+                              int allow_hub, char *detail, size_t cap) {
+    if (allow_hub) return 0;
+    if (base_dir && base_dir[0]) {
+        sy_dir_t d;
+        char ldir[PR_PW];
+        if (cx_fmt(ldir, sizeof ldir, "%s/build/layer-api", repo)) return -1;
+        const char *b_ldir = base_dir;
+        char b_sub[PR_PW];
+        if ( !cx_fmt(b_sub, sizeof b_sub, "%s/layer-api", base_dir) && sy_exists(b_sub) == 1) b_ldir = b_sub;
+        else if (!cx_fmt(b_sub, sizeof b_sub, "%s/build/layer-api", base_dir) && sy_exists(b_sub) == 1) b_ldir = b_sub;
+        if (sy_dir_open(&d, b_ldir) != 0) {
+            cx_fmt(detail, cap, "cannot-open-baseline-layer-api=%s", b_ldir);
+            return -1;
+        }
+        while (sy_dir_next(&d) == 1) {
+            if (d.name[0] == '.') continue;
+            char p1[PR_PW], p2[PR_PW], s1[65], s2[65];
+            long b1 = 0, b2 = 0;
+            if (cx_fmt(p1, sizeof p1, "%s/%s", b_ldir, d.name) ||
+                cx_fmt(p2, sizeof p2, "%s/%s", ldir, d.name)) {
+                sy_dir_close(&d); return -1;
+            }
+            if (pr_file_sha_bytes(p1, s1, &b1) != 0 || pr_file_sha_bytes(p2, s2, &b2) != 0 ||
+                b1 != b2 || !tx_eqz(s1, s2)) {
+                sy_dir_close(&d);
+                cx_fmt(detail, cap, "layer-api-file=%s baseline_sha=%.12s repo_sha=%.12s", d.name, s1, s2);
+                return -1;
+            }
+        }
+        sy_dir_close(&d);
+        /* Also check reversely for extra files in repo/build/layer-api */
+        if (sy_dir_open(&d, ldir) == 0) {
+            while (sy_dir_next(&d) == 1) {
+                if (d.name[0] == '.') continue;
+                char p1[PR_PW];
+                if (cx_fmt(p1, sizeof p1, "%s/%s", b_ldir, d.name) || sy_exists(p1) != 1) {
+                    sy_dir_close(&d);
+                    cx_fmt(detail, cap, "extra-layer-api-file=%s", d.name);
+                    return -1;
+                }
+            }
+            sy_dir_close(&d);
+        }
+        static const char *const top_files[2] = {"tlib-packages.tsv", "iface-hash.tsv"};
+        for (int i = 0; i < 2; i++) {
+            char bp[PR_PW], rp[PR_PW], s1[65], s2[65];
+            long b1 = 0, b2 = 0;
+            if (!cx_fmt(bp, sizeof bp, "%s/%s", base_dir, top_files[i]) && sy_exists(bp) == 1) {
+            } else if (!cx_fmt(bp, sizeof bp, "%s/build/%s", base_dir, top_files[i]) && sy_exists(bp) == 1) {
+            } else continue;
+            if (cx_fmt(rp, sizeof rp, "%s/build/%s", repo, top_files[i])) return -1;
+            if (pr_file_sha_bytes(bp, s1, &b1) != 0 || pr_file_sha_bytes(rp, s2, &b2) != 0 ||
+                b1 != b2 || !tx_eqz(s1, s2)) {
+                cx_fmt(detail, cap, "file=build/%s baseline_sha=%.12s repo_sha=%.12s", top_files[i], s1, s2);
+                return -1;
+            }
+        }
+    }
+    /* Also check git status / git diff against chain_rev on build/layer-api, build/tlib-packages.tsv, build/iface-hash.tsv */
+    char gitp[PR_PW];
+    if (!cx_fmt(gitp, sizeof gitp, "%s/.git", repo) && sy_exists(gitp) == 1) {
+        char *sv[] = {"git", "-C", (char *)repo, "status", "--porcelain", "--",
+                      "build/layer-api", "build/tlib-packages.tsv", "build/iface-hash.tsv", 0};
+        np_result sr = {0}; char why[128];
+        if (np_run(sv, repo, 0, 15, &sr, why, sizeof why) == 0 && sr.rc == 0 && sr.out && sr.outn > 0) {
+            long ln = 0;
+            while (ln < (long)sr.outn && sr.out[ln] != '\n' && sr.out[ln] != '\r') ln++;
+            if (ln > 0) {
+                cx_fmt(detail, cap, "dirty-layer-api=%.*s", (int)(ln < 120 ? ln : 120), sr.out);
+                np_free(&sr);
+                return -1;
+            }
+        }
+        np_free(&sr);
+        if (chain_rev && strlen(chain_rev) == 40) {
+            char *rv[] = {"git", "-C", (char *)repo, "cat-file", "-e", (char *)chain_rev, 0};
+            np_result rr = {0};
+            if (np_run(rv, repo, 0, 10, &rr, why, sizeof why) == 0 && rr.rc == 0) {
+                np_free(&rr);
+                char *dv[] = {"git", "-C", (char *)repo, "diff", "--name-only", (char *)chain_rev, "--",
+                              "build/layer-api", "build/tlib-packages.tsv", "build/iface-hash.tsv", 0};
+                np_result dr = {0};
+                if (np_run(dv, repo, 0, 15, &dr, why, sizeof why) == 0 && dr.rc == 0 && dr.out && dr.outn > 0) {
+                    long ln = 0;
+                    while (ln < (long)dr.outn && dr.out[ln] != '\n' && dr.out[ln] != '\r') ln++;
+                    if (ln > 0) {
+                        cx_fmt(detail, cap, "diff-vs-chain-rev=%.*s", (int)(ln < 120 ? ln : 120), dr.out);
+                        np_free(&dr);
+                        return -1;
+                    }
+                }
+                np_free(&dr);
+            } else {
+                np_free(&rr);
+            }
+        }
+    }
+    return 0;
+}
+
+static int pr_extract_p4_slice(const unsigned char *buf, long n, const unsigned char **pkg_out, long *len_out) {
+    PackageFooter pf;
+    if (packagefooter_locate_bytes(buf, n, &pf) &&
+        pf.package_offset >= 0 && pf.package_length > 0 &&
+        pf.package_offset + pf.package_length <= n) {
+        *pkg_out = buf + pf.package_offset;
+        *len_out = pf.package_length;
+        return 0;
+    }
+    if (n > 2 && buf[0] == 'P' && buf[1] == ' ') {
+        *pkg_out = buf;
+        *len_out = n;
+        return 0;
+    }
+    return -1;
+}
+
+static int pr_verify_p4_f_records(const char *base_p4_path, const char *cand_p4_path,
+                                  char allow_f_keys[][128], int n_allow_f,
+                                  char *detail, size_t cap) {
+    unsigned char *bb = 0, *cb = 0;
+    int64_t bn = 0, cn = 0;
+    if (sy_read_file(base_p4_path, &bb, &bn, 64L << 20) != 0 || !bb || bn <= 0) {
+        cx_fmt(detail, cap, "unreadable-base-p4=%s", base_p4_path);
+        return -1;
+    }
+    if (sy_read_file(cand_p4_path, &cb, &cn, 64L << 20) != 0 || !cb || cn <= 0) {
+        mm_free(bb);
+        cx_fmt(detail, cap, "unreadable-cand-p4=%s", cand_p4_path);
+        return -1;
+    }
+    const unsigned char *bpkg = 0, *cpkg = 0;
+    long blen = 0, clen = 0;
+    if (pr_extract_p4_slice(bb, (long)bn, &bpkg, &blen) != 0) {
+        mm_free(bb); mm_free(cb);
+        cx_fmt(detail, cap, "invalid-base-p4-slice=%s", base_p4_path);
+        return -1;
+    }
+    if (pr_extract_p4_slice(cb, (long)cn, &cpkg, &clen) != 0) {
+        mm_free(bb); mm_free(cb);
+        cx_fmt(detail, cap, "invalid-cand-p4-slice=%s", cand_p4_path);
+        return -1;
+    }
+    CxPackageDecode bdec, cdec;
+    mm_fill(&bdec, (long)sizeof bdec, 0, (long)sizeof bdec);
+    mm_fill(&cdec, (long)sizeof cdec, 0, (long)sizeof cdec);
+    bdec.allocate = pr_pk_alloc; bdec.release = pr_pk_free;
+    cdec.allocate = pr_pk_alloc; cdec.release = pr_pk_free;
+    if (cxpk_decode(&bdec, bpkg, blen) != 0 || bdec.package.ver < 4) {
+        mm_free(bb); mm_free(cb);
+        cx_fmt(detail, cap, "decode-base-p4-failed");
+        return -1;
+    }
+    if (cxpk_decode(&cdec, cpkg, clen) != 0 || cdec.package.ver < 4) {
+        cxpl_release(&bdec.package, pr_pk_free);
+        mm_free(bb); mm_free(cb);
+        cx_fmt(detail, cap, "decode-cand-p4-failed");
+        return -1;
+    }
+    if (bdec.package.ver != cdec.package.ver || bdec.package.m != cdec.package.m || bdec.package.s != cdec.package.s) {
+        cx_fmt(detail, cap, "p4-header-mismatch base=%d/%d/%d cand=%d/%d/%d",
+               bdec.package.ver, bdec.package.m, bdec.package.s,
+               cdec.package.ver, cdec.package.m, cdec.package.s);
+        cxpl_release(&bdec.package, pr_pk_free);
+        cxpl_release(&cdec.package, pr_pk_free);
+        mm_free(bb); mm_free(cb);
+        return -1;
+    }
+    /* Verify CRC32 of every F record in candidate P4 that carries a non-zero CRC */
+    for (int j = 0; j < cdec.package.nr; j++) {
+        const CxPackageResource *cr = &cdec.package.res[j];
+        if (cr->codec == 0 && cr->crc != 0) {
+            unsigned got_crc = pr_crc32(cpkg + cr->data, (long)cr->len);
+            if (got_crc != (unsigned)cr->crc) {
+                char kname[128];
+                long kl = (long)cr->n < 127 ? (long)cr->n : 127;
+                mm_copy(kname, sizeof kname, (const char *)(cpkg + cr->name), kl); kname[kl] = 0;
+                cx_fmt(detail, cap, "crc-mismatch key=%s want=%u got=%u", kname, (unsigned)cr->crc, got_crc);
+                cxpl_release(&bdec.package, pr_pk_free);
+                cxpl_release(&cdec.package, pr_pk_free);
+                mm_free(bb); mm_free(cb);
+                return -1;
+            }
+        }
+    }
+    /* Every baseline F record not in allow_f_keys must exist in candidate P4 with identical bytes */
+    for (int i = 0; i < bdec.package.nr; i++) {
+        const CxPackageResource *br = &bdec.package.res[i];
+        char kname[128];
+        long kl = (long)br->n < 127 ? (long)br->n : 127;
+        mm_copy(kname, sizeof kname, (const char *)(bpkg + br->name), kl); kname[kl] = 0;
+        int allowed = 0;
+        for (int a = 0; a < n_allow_f; a++) {
+            if (tx_eqz(allow_f_keys[a], kname)) { allowed = 1; break; }
+        }
+        int found = -1;
+        for (int j = 0; j < cdec.package.nr; j++) {
+            const CxPackageResource *cr = &cdec.package.res[j];
+            if (cr->n == br->n && memcmp(cpkg + cr->name, bpkg + br->name, br->n) == 0) {
+                found = j;
+                break;
+            }
+        }
+        if (found < 0) {
+            if (!allowed) {
+                cx_fmt(detail, cap, "missing-baseline-f-record key=%s", kname);
+                cxpl_release(&bdec.package, pr_pk_free);
+                cxpl_release(&cdec.package, pr_pk_free);
+                mm_free(bb); mm_free(cb);
+                return -1;
+            }
+            continue;
+        }
+        const CxPackageResource *cr = &cdec.package.res[found];
+        int same = (cr->len == br->len && cr->rawlen == br->rawlen && cr->codec == br->codec &&
+                    cr->crc == br->crc && memcmp(cpkg + cr->data, bpkg + br->data, br->len) == 0);
+        if (!same && !allowed) {
+            cx_fmt(detail, cap, "modified-foreign-f-record key=%s base_len=%ld cand_len=%ld",
+                   kname, (long)br->len, (long)cr->len);
+            cxpl_release(&bdec.package, pr_pk_free);
+            cxpl_release(&cdec.package, pr_pk_free);
+            mm_free(bb); mm_free(cb);
+            return -1;
+        }
+    }
+    /* Every candidate F record not in baseline must be in allow_f_keys */
+    for (int j = 0; j < cdec.package.nr; j++) {
+        const CxPackageResource *cr = &cdec.package.res[j];
+        int in_base = 0;
+        for (int i = 0; i < bdec.package.nr; i++) {
+            const CxPackageResource *br = &bdec.package.res[i];
+            if (cr->n == br->n && memcmp(cpkg + cr->name, bpkg + br->name, br->n) == 0) {
+                in_base = 1;
+                break;
+            }
+        }
+        if (!in_base) {
+            char kname[128];
+            long kl = (long)cr->n < 127 ? (long)cr->n : 127;
+            mm_copy(kname, sizeof kname, (const char *)(cpkg + cr->name), kl); kname[kl] = 0;
+            int allowed = 0;
+            for (int a = 0; a < n_allow_f; a++) {
+                if (tx_eqz(allow_f_keys[a], kname)) { allowed = 1; break; }
+            }
+            if (!allowed) {
+                cx_fmt(detail, cap, "added-foreign-f-record key=%s", kname);
+                cxpl_release(&bdec.package, pr_pk_free);
+                cxpl_release(&cdec.package, pr_pk_free);
+                mm_free(bb); mm_free(cb);
+                return -1;
+            }
+        }
+    }
+    cxpl_release(&bdec.package, pr_pk_free);
+    cxpl_release(&cdec.package, pr_pk_free);
+    mm_free(bb);
+    mm_free(cb);
+    return 0;
+}
+
+typedef struct {
+    char sym[96];
+    char owner[64];
+} PrSymOwner;
+
+static int pr_collect_defined_syms(const char *obj_path, const char *owner_key,
+                                   PrSymOwner *syms, int *nsyms, int max_syms,
+                                   int check_collision, const PrSymOwner *untouched, int n_untouched,
+                                   char *detail, size_t cap) {
+    char *av[] = {"/usr/bin/nm", "-g", "--defined-only", "-P", (char *)obj_path, 0};
+    np_result r = {0}; char why[128];
+    if (np_run(av, ".", 0, 15, &r, why, sizeof why) != 0 || r.rc != 0) {
+        np_free(&r);
+        cx_fmt(detail, cap, "nm-failed obj=%s", obj_path);
+        return -1;
+    }
+    long at = 0;
+    while (r.out && at < (long)r.outn) {
+        long e = at;
+        while (e < (long)r.outn && r.out[e] != '\n' && r.out[e] != '\r') e++;
+        long ln = e - at;
+        const char *l = r.out + at;
+        at = e + 1;
+        if (ln <= 0) continue;
+        long sp = 0;
+        while (sp < ln && l[sp] != ' ' && l[sp] != '\t') sp++;
+        if (sp <= 0 || sp >= 95) continue;
+        long tp = sp;
+        while (tp < ln && (l[tp] == ' ' || l[tp] == '\t')) tp++;
+        if (tp < ln && (l[tp] == 'C' || l[tp] == 'c')) continue; /* COMMON symbol shared across units */
+        char sname[96];
+        mm_copy(sname, sizeof sname, l, sp);
+        sname[sp] = 0;
+        if (check_collision) {
+            for (int u = 0; u < n_untouched; u++) {
+                if (tx_eqz(untouched[u].sym, sname)) {
+                    cx_fmt(detail, cap, "sym=%s redefined-by=%s untouched-owner=%s",
+                           sname, owner_key, untouched[u].owner);
+                    np_free(&r);
+                    return -1;
+                }
+            }
+        }
+        if (syms && nsyms && *nsyms < max_syms) {
+            cx_fmt(syms[*nsyms].sym, sizeof syms[*nsyms].sym, "%s", sname);
+            cx_fmt(syms[*nsyms].owner, sizeof syms[*nsyms].owner, "%s", owner_key);
+            (*nsyms)++;
+        }
+    }
+    np_free(&r);
+    return 0;
+}
+
+static int pr_check_forbid_syms(const char *objs_dir, char obj_names[][64], int n_objs,
+                                char forbid_syms[][64], int n_forbid, char *detail, size_t cap) {
+    if (n_forbid <= 0) return 0;
+    for (int i = 0; i < n_objs; i++) {
+        char op[PR_PW];
+        if (cx_fmt(op, sizeof op, "%s/%s", objs_dir, obj_names[i])) return -1;
+        char *av[] = {"/usr/bin/nm", "-P", op, 0};
+        np_result r = {0}; char why[128];
+        if (np_run(av, ".", 0, 15, &r, why, sizeof why) != 0 || r.rc != 0) {
+            np_free(&r);
+            cx_fmt(detail, cap, "nm-failed obj=%s", obj_names[i]);
+            return -1;
+        }
+        long at = 0;
+        while (r.out && at < (long)r.outn) {
+            long e = at;
+            while (e < (long)r.outn && r.out[e] != '\n' && r.out[e] != '\r') e++;
+            long ln = e - at;
+            const char *l = r.out + at;
+            at = e + 1;
+            if (ln <= 0) continue;
+            long sp = 0;
+            while (sp < ln && l[sp] != ' ' && l[sp] != '\t') sp++;
+            if (sp <= 0) continue;
+            for (int f = 0; f < n_forbid; f++) {
+                long fl = (long)strlen(forbid_syms[f]);
+                if (sp == fl && !memcmp(l, forbid_syms[f], (size_t)fl)) {
+                    cx_fmt(detail, cap, "sym=%s present-in=%s", forbid_syms[f], obj_names[i]);
+                    np_free(&r);
+                    return -1;
+                }
+            }
+        }
+        np_free(&r);
+    }
+    return 0;
+}
+
+int main(int argc, char **argv) {
+    long t0_ms = sy_now_ms();
+    const char *chain_dir = 0, *out_ape = 0, *repo = ".", *work_dir = 0, *objs_dir_in = 0;
+    const char *p4_payload_in = 0, *base_layer_api = 0, *allow_hub = 0, *link_order = "auto";
+    const char *ver_in = 0, *receipt_out = 0, *query_unit = 0, *query_sym = 0;
+    long budget_ms = 60000;
+
+    static PrKeyPath rep_objs[PR_MAX_DECL], cmp_objs[PR_MAX_DECL], add_objs[PR_MAX_DECL], cmp_adds[PR_MAX_DECL];
+    int n_rep = 0, n_cmp = 0, n_add = 0, n_cmp_add = 0;
+    static char allow_change[PR_MAX_DECL][64], allow_add[PR_MAX_DECL][64], allow_remove[PR_MAX_DECL][64];
+    int n_allow_chg = 0, n_allow_add = 0, n_allow_rem = 0;
+    static char do_remove[PR_MAX_DECL][64];
+    int n_do_rem = 0;
+    static char allow_f_keys[PR_MAX_FKEYS][128];
+    int n_allow_f = 0;
+    static char forbid_syms[PR_MAX_DECL][64];
+    int n_forbid = 0;
+
+    for (int i = 1; i < argc; i++) {
+        if (tx_eqz(argv[i], "--")) continue;
+        else if (tx_eqz(argv[i], "--chain-dir") && i + 1 < argc) chain_dir = argv[++i];
+        else if (tx_eqz(argv[i], "--out") && i + 1 < argc) out_ape = argv[++i];
+        else if (tx_eqz(argv[i], "--repo") && i + 1 < argc) repo = argv[++i];
+        else if (tx_eqz(argv[i], "--work-dir") && i + 1 < argc) work_dir = argv[++i];
+        else if (tx_eqz(argv[i], "--objs-dir") && i + 1 < argc) objs_dir_in = argv[++i];
+        else if (tx_eqz(argv[i], "--p4-payload") && i + 1 < argc) p4_payload_in = argv[++i];
+        else if (tx_eqz(argv[i], "--baseline-layer-api") && i + 1 < argc) base_layer_api = argv[++i];
+        else if (tx_eqz(argv[i], "--allow-hub") && i + 1 < argc) allow_hub = argv[++i];
+        else if (tx_eqz(argv[i], "--link-order") && i + 1 < argc) link_order = argv[++i];
+        else if (tx_eqz(argv[i], "--version") && i + 1 < argc) ver_in = argv[++i];
+        else if (tx_eqz(argv[i], "--receipt-out") && i + 1 < argc) receipt_out = argv[++i];
+        else if (tx_eqz(argv[i], "--budget-ms") && i + 1 < argc) {
+            int64_t bv = 0;
+            const char *bs = argv[++i];
+            if (tx_to_i64(bs, (long)strlen(bs), 10, &bv) || bv <= 0 || bv > 60000)
+                return pr_refuse("bad-budget-ms", bs);
+            budget_ms = (long)bv;
+        } else if (tx_eqz(argv[i], "--replace") && i + 1 < argc) {
+            if (n_rep >= PR_MAX_DECL || pr_parse_kv(argv[++i], rep_objs[n_rep].key, 64, rep_objs[n_rep].path, PR_PW) != 0)
+                return pr_refuse("bad-replace-arg", argv[i]);
+            n_rep++;
+        } else if (tx_eqz(argv[i], "--compile") && i + 1 < argc) {
+            const char *carg = argv[++i];
+            if (n_cmp >= PR_MAX_DECL) return pr_refuse("bad-compile-arg", carg);
+            if (strchr(carg, '=')) {
+                if (pr_parse_kv(carg, cmp_objs[n_cmp].key, 64, cmp_objs[n_cmp].path, PR_PW) != 0)
+                    return pr_refuse("bad-compile-arg", carg);
+            } else {
+                cmp_objs[n_cmp].key[0] = 0;
+                cx_fmt(cmp_objs[n_cmp].path, PR_PW, "%s", carg);
+            }
+            n_cmp++;
+        } else if (tx_eqz(argv[i], "--resolve-unit") && i + 1 < argc) {
+            query_unit = argv[++i];
+        } else if (tx_eqz(argv[i], "--unit-by-symbol") && i + 1 < argc) {
+            query_sym = argv[++i];
+        } else if (tx_eqz(argv[i], "--add") && i + 1 < argc) {
+            if (n_add >= PR_MAX_DECL || pr_parse_kv(argv[++i], add_objs[n_add].key, 64, add_objs[n_add].path, PR_PW) != 0)
+                return pr_refuse("bad-add-arg", argv[i]);
+            pr_add_unique(allow_add, &n_allow_add, PR_MAX_DECL, add_objs[n_add].key);
+            n_add++;
+        } else if (tx_eqz(argv[i], "--compile-add") && i + 1 < argc) {
+            if (n_cmp_add >= PR_MAX_DECL || pr_parse_kv(argv[++i], cmp_adds[n_cmp_add].key, 64, cmp_adds[n_cmp_add].path, PR_PW) != 0)
+                return pr_refuse("bad-compile-add-arg", argv[i]);
+            pr_add_unique(allow_add, &n_allow_add, PR_MAX_DECL, cmp_adds[n_cmp_add].key);
+            n_cmp_add++;
+        } else if (tx_eqz(argv[i], "--remove") && i + 1 < argc) {
+            const char *rk = argv[++i];
+            pr_add_unique(do_remove, &n_do_rem, PR_MAX_DECL, rk);
+            pr_add_unique(allow_remove, &n_allow_rem, PR_MAX_DECL, rk);
+        } else if (tx_eqz(argv[i], "--allow-obj") && i + 1 < argc) {
+            pr_add_unique(allow_change, &n_allow_chg, PR_MAX_DECL, argv[++i]);
+        } else if (tx_eqz(argv[i], "--allow-add") && i + 1 < argc) {
+            pr_add_unique(allow_add, &n_allow_add, PR_MAX_DECL, argv[++i]);
+        } else if (tx_eqz(argv[i], "--allow-remove") && i + 1 < argc) {
+            pr_add_unique(allow_remove, &n_allow_rem, PR_MAX_DECL, argv[++i]);
+        } else if (tx_eqz(argv[i], "--allow-f-key") && i + 1 < argc) {
+            if (n_allow_f >= PR_MAX_FKEYS) return pr_refuse("too-many-f-keys", argv[i + 1]);
+            cx_fmt(allow_f_keys[n_allow_f++], 128, "%s", argv[++i]);
+        } else if (tx_eqz(argv[i], "--allow-m1-tape-keys")) {
+            static const char *const m1k[3] = {
+                "tape/lnx-x86_64/manifest.tsv",
+                "tape/lnx-x86_64/tapemode.so",
+                "tape/lnx-x86_64/m53.tapeslice"
+            };
+            for (int k = 0; k < 3 && n_allow_f < PR_MAX_FKEYS; k++)
+                cx_fmt(allow_f_keys[n_allow_f++], 128, "%s", m1k[k]);
+        } else if (tx_eqz(argv[i], "--forbid-sym") && i + 1 < argc) {
+            pr_add_unique(forbid_syms, &n_forbid, PR_MAX_DECL, argv[++i]);
+        } else if (tx_eqz(argv[i], "--help") || tx_eqz(argv[i], "-h")) {
+            sy_printf("usage: sh ./unisacc.com tools/priv-relink.cx -- [--chain-dir DIR] --out OUT_APE [options]\n"
+                      "  --chain-dir DIR            sealed baseline chain dir (default: ~/.cache/unisacc/chains/bg-b1/c9275e7756acad801ff2f206b3aa6a891e8115a2)\n"
+                      "    auto-derived baseline paths under CHAIN_DIR:\n"
+                      "      objects dir:           CHAIN_DIR/fixedpoint/g2/lnx-x86_64 (105 .o: drive.o..drivestream.o, m0.o..m60.o)\n"
+                      "      receipt path:          CHAIN_DIR/fixedpoint/g2/lnx-x86_64/receipt.txt\n"
+                      "      P4 package body:       CHAIN_DIR/ape-final/p3-package.body\n"
+                      "      baseline APE:          CHAIN_DIR/ape-final/unisacc-next.com\n"
+                      "      sig_sha baseline:      REPO/build/layer-api/*.tsv + build/tlib-packages.tsv + build/iface-hash.tsv\n"
+                      "  --out OUT_APE              output private APE path (marked status=PREPARED scope=LOCAL)\n"
+                      "  --replace UNIT=PATH        replace one unit (.o id, module name, or sym:SYMBOL) with precompiled PATH\n"
+                      "  --compile [UNIT=]SRC.cx    compile one unit source (auto-stages routed module <stem>.cx) with nice -n 19\n"
+                      "  --resolve-unit SPEC        resolve module name, .o id, or sym:SYMBOL to current chain .o and exit\n"
+                      "  --unit-by-symbol SYM       resolve global defined symbol SYM to its current chain .o owner and exit\n"
+                      "  --add KEY.o=PATH           add a new unit object\n"
+                      "  --compile-add KEY.o=SRC.cx compile and add a new unit object\n"
+                      "  --remove KEY.o             remove a baseline object (e.g. m59.o)\n"
+                      "  --objs-dir DIR             use pre-staged object directory (requires --allow-obj/--allow-add/--allow-remove)\n"
+                      "  --p4-payload PATH          override P4 package body (requires --allow-f-key KEY or --allow-m1-tape-keys)\n"
+                      "  --forbid-sym SYM           refuse if any linked object defines or references SYM (e.g. cxsa_valid)\n"
+                      "  --receipt-out FILE         write LINK_IDENTITY, LINKER_ARGV, and OBJECT sha256 table to FILE\n");
+            return 0;
+        } else {
+            return pr_refuse("usage", argv[i]);
+        }
+    }
+
+    char def_chain[PR_PW];
+    if (!chain_dir) {
+        const char *hm = sy_env("HOME");
+        if (hm && hm[0] == '/' &&
+            !cx_fmt(def_chain, sizeof def_chain, "%s/.cache/unisacc/chains/bg-b1/c9275e7756acad801ff2f206b3aa6a891e8115a2", hm) &&
+            sy_exists(def_chain) == 1) {
+            chain_dir = def_chain;
+        }
+    }
+    if (!chain_dir || (!out_ape && !query_unit && !query_sym)) {
+        return pr_refuse("usage", "need --chain-dir DIR --out OUT_APE (run with --help for defaults)");
+    }
+    if (!tx_eqz(link_order, "auto") && !tx_eqz(link_order, "receipt") && !tx_eqz(link_order, "glob")) {
+        return pr_refuse("bad-link-order", link_order);
+    }
+
+    char abs_repo[PR_PW], abs_chain[PR_PW], detail[512];
+    if (sy_realpath(repo, abs_repo, sizeof abs_repo) < 0) return pr_refuse("bad-repo", repo);
+    if (sy_realpath(chain_dir, abs_chain, sizeof abs_chain) < 0) return pr_refuse("bad-chain-dir", chain_dir);
+
+    /* 1. Load baseline receipt.txt + lnx-x86_64.closures.tsv */
+    char base_g2_lnx[PR_PW], rcpt_p[PR_PW], base_elf_p[PR_PW], base_p4_p[PR_PW], base_ape_p[PR_PW];
+    if (cx_fmt(base_g2_lnx, sizeof base_g2_lnx, "%s/fixedpoint/g2/lnx-x86_64", abs_chain) ||
+        cx_fmt(rcpt_p, sizeof rcpt_p, "%s/receipt.txt", base_g2_lnx) ||
+        cx_fmt(base_elf_p, sizeof base_elf_p, "%s/entry.elf", base_g2_lnx) ||
+        cx_fmt(base_p4_p, sizeof base_p4_p, "%s/ape-final/p3-package.body", abs_chain) ||
+        cx_fmt(base_ape_p, sizeof base_ape_p, "%s/ape-final/unisacc-next.com", abs_chain)) {
+        return pr_refuse("path-bound", abs_chain);
+    }
+    if (sy_exists(base_p4_p) != 1) {
+        if (cx_fmt(base_p4_p, sizeof base_p4_p, "%s/compiler.p4.pkg", abs_chain))
+            return pr_refuse("path-bound", abs_chain);
+    }
+    static PrBaseObj base_objs[PR_MAX_OBJS];
+    int n_base = 0;
+    char base_elf_sha[65], chain_rev[64];
+    long base_elf_bytes = 0;
+    if (pr_load_receipt_objs(rcpt_p, base_objs, PR_MAX_OBJS, &n_base, base_elf_sha, &base_elf_bytes,
+                             chain_rev, sizeof chain_rev) != 0) {
+        return pr_refuse("invalid-receipt", rcpt_p);
+    }
+    pr_load_closures(abs_chain, base_objs, n_base);
+
+    if (query_unit || query_sym) {
+        char qspec[128], rkey[64];
+        int ridx = -1;
+        if (query_sym) cx_fmt(qspec, sizeof qspec, "sym:%s", query_sym);
+        else cx_fmt(qspec, sizeof qspec, "%s", query_unit);
+        int qrc = pr_resolve_unit_spec(qspec, 0, base_g2_lnx, base_objs, n_base,
+                                       rkey, sizeof rkey, &ridx, detail, sizeof detail);
+        if (qrc != 0 || ridx < 0) return pr_refuse(qrc == -2 ? "unit-id-mismatch" : "resolve-unit-failed", detail);
+        sy_printf("PRIV_RELINK_UNIT\tquery=%s\tunit=%s\tmodule=%s\tsrc=%s\n",
+                  query_sym ? query_sym : query_unit,
+                  base_objs[ridx].key, base_objs[ridx].mod,
+                  base_objs[ridx].src[0] ? base_objs[ridx].src : "-");
+        return 0;
+    }
+
+    /* Resolve module/symbol unit specs in --replace, --compile, --remove, --allow-obj, --allow-remove */
+    for (int i = 0; i < n_rep; i++) {
+        char rkey[64];
+        int rrc = pr_resolve_unit_spec(rep_objs[i].key, 0, base_g2_lnx, base_objs, n_base,
+                                       rkey, sizeof rkey, 0, detail, sizeof detail);
+        if (rrc != 0) return pr_refuse(rrc == -2 ? "unit-id-mismatch" : "resolve-unit-failed", detail);
+        cx_fmt(rep_objs[i].key, sizeof rep_objs[i].key, "%s", rkey);
+        pr_add_unique(allow_change, &n_allow_chg, PR_MAX_DECL, rkey);
+    }
+    for (int i = 0; i < n_cmp; i++) {
+        char rkey[64];
+        int rrc = pr_resolve_unit_spec(cmp_objs[i].key, cmp_objs[i].path, base_g2_lnx, base_objs, n_base,
+                                       rkey, sizeof rkey, 0, detail, sizeof detail);
+        if (rrc != 0) return pr_refuse(rrc == -2 ? "unit-id-mismatch" : "resolve-unit-failed", detail);
+        cx_fmt(cmp_objs[i].key, sizeof cmp_objs[i].key, "%s", rkey);
+        pr_add_unique(allow_change, &n_allow_chg, PR_MAX_DECL, rkey);
+    }
+    for (int i = 0; i < n_do_rem; i++) {
+        char rkey[64];
+        int rrc = pr_resolve_unit_spec(do_remove[i], 0, base_g2_lnx, base_objs, n_base,
+                                       rkey, sizeof rkey, 0, detail, sizeof detail);
+        if (rrc != 0) return pr_refuse("resolve-unit-failed", detail);
+        cx_fmt(do_remove[i], sizeof do_remove[i], "%s", rkey);
+    }
+    for (int i = 0; i < n_allow_rem; i++) {
+        char rkey[64];
+        int rrc = pr_resolve_unit_spec(allow_remove[i], 0, base_g2_lnx, base_objs, n_base,
+                                       rkey, sizeof rkey, 0, detail, sizeof detail);
+        if (rrc != 0) return pr_refuse("resolve-unit-failed", detail);
+        cx_fmt(allow_remove[i], sizeof allow_remove[i], "%s", rkey);
+    }
+    for (int i = 0; i < n_allow_chg; i++) {
+        char rkey[64];
+        int rrc = pr_resolve_unit_spec(allow_change[i], 0, base_g2_lnx, base_objs, n_base,
+                                       rkey, sizeof rkey, 0, detail, sizeof detail);
+        if (rrc != 0) return pr_refuse("resolve-unit-failed", detail);
+        cx_fmt(allow_change[i], sizeof allow_change[i], "%s", rkey);
+    }
+
+    /* 2. Hub protection check (checks both .o key and resolved module name from closures.tsv) */
+    if (!allow_hub || !allow_hub[0]) {
+        for (int i = 0; i < n_allow_chg; i++) {
+            const char *hm = pr_hub_module(allow_change[i]);
+            if (!hm) {
+                for (int b = 0; b < n_base; b++) {
+                    if (tx_eqz(base_objs[b].key, allow_change[i])) {
+                        hm = pr_hub_module(base_objs[b].mod);
+                        break;
+                    }
+                }
+            }
+            if (hm) {
+                cx_fmt(detail, sizeof detail, "obj=%s hub=%s", allow_change[i], hm);
+                return pr_refuse("hub-unit-requires-full-chain", detail);
+            }
+        }
+        for (int i = 0; i < n_allow_rem; i++) {
+            const char *hm = pr_hub_module(allow_remove[i]);
+            if (!hm) {
+                for (int b = 0; b < n_base; b++) {
+                    if (tx_eqz(base_objs[b].key, allow_remove[i])) {
+                        hm = pr_hub_module(base_objs[b].mod);
+                        break;
+                    }
+                }
+            }
+            if (hm) {
+                cx_fmt(detail, sizeof detail, "obj=%s hub=%s", allow_remove[i], hm);
+                return pr_refuse("hub-unit-requires-full-chain", detail);
+            }
+        }
+    }
+
+    /* 3. Proof 2: sig_sha / layer-api invariance check */
+    if (pr_check_layer_api(abs_repo, base_layer_api, chain_rev, (allow_hub && allow_hub[0]) ? 1 : 0,
+                           detail, sizeof detail) != 0) {
+        return pr_refuse("sig-sha-drift", detail);
+    }
+
+    /* 4. Prepare working directory & stage objects */
+    char auto_work[PR_PW];
+    const char *wdir = work_dir;
+    int clean_wdir = 0;
+    if (!wdir || !wdir[0]) {
+        const char *td = sy_env("TMPDIR");
+        if (!td || !td[0]) td = "/tmp";
+        if (cx_fmt(auto_work, sizeof auto_work, "%s/priv-relink-%d-%ld", td, (int)sy_pid(), sy_now_ms()))
+            return pr_refuse("path-bound", td);
+        wdir = auto_work;
+        clean_wdir = 1;
+    }
+    char objs_stage[PR_PW];
+    if (cx_fmt(objs_stage, sizeof objs_stage, "%s/objs", wdir)) return pr_refuse("path-bound", wdir);
+    (void)sy_remove_all(objs_stage);
+    if (sy_mkdir_all(objs_stage, 0755) != 0) return pr_refuse("mkdir-failed", objs_stage);
+
+    if (objs_dir_in && objs_dir_in[0]) {
+        sy_dir_t d;
+        if (sy_dir_open(&d, objs_dir_in) != 0) return pr_refuse("open-objs-dir-failed", objs_dir_in);
+        while (sy_dir_next(&d) == 1) {
+            if (d.name[0] == '.') continue;
+            long nl = (long)strlen(d.name);
+            if (nl <= 2 || memcmp(d.name + nl - 2, ".o", 2) != 0) continue;
+            char sp[PR_PW], dp[PR_PW];
+            if (cx_fmt(sp, sizeof sp, "%s/%s", objs_dir_in, d.name) ||
+                cx_fmt(dp, sizeof dp, "%s/%s", objs_stage, d.name) ||
+                pr_copy_file(sp, dp, 0644) != 0) {
+                sy_dir_close(&d);
+                return pr_refuse("copy-obj-failed", d.name);
+            }
+        }
+        sy_dir_close(&d);
+    } else {
+        for (int i = 0; i < n_base; i++) {
+            char sp[PR_PW], dp[PR_PW];
+            if (cx_fmt(sp, sizeof sp, "%s/%s", base_g2_lnx, base_objs[i].key) ||
+                cx_fmt(dp, sizeof dp, "%s/%s", objs_stage, base_objs[i].key)) {
+                return pr_refuse("path-bound", base_objs[i].key);
+            }
+            if (sy_exists(sp) != 1) {
+                if (cx_fmt(sp, sizeof sp, "%s/candidate/%s", base_g2_lnx, base_objs[i].key))
+                    return pr_refuse("path-bound", base_objs[i].key);
+            }
+            if (pr_copy_file(sp, dp, 0644) != 0) {
+                return pr_refuse("missing-baseline-obj", base_objs[i].key);
+            }
+        }
+    }
+
+    for (int i = 0; i < n_do_rem; i++) {
+        char dp[PR_PW];
+        if (!cx_fmt(dp, sizeof dp, "%s/%s", objs_stage, do_remove[i])) (void)sy_unlink(dp);
+    }
+    for (int i = 0; i < n_rep; i++) {
+        char dp[PR_PW];
+        if (cx_fmt(dp, sizeof dp, "%s/%s", objs_stage, rep_objs[i].key) ||
+            pr_copy_file(rep_objs[i].path, dp, 0644) != 0)
+            return pr_refuse("replace-obj-failed", rep_objs[i].key);
+    }
+    for (int i = 0; i < n_add; i++) {
+        char dp[PR_PW];
+        if (cx_fmt(dp, sizeof dp, "%s/%s", objs_stage, add_objs[i].key) ||
+            pr_copy_file(add_objs[i].path, dp, 0644) != 0)
+            return pr_refuse("add-obj-failed", add_objs[i].key);
+    }
+
+    char uc[PR_PW];
+    if (cx_fmt(uc, sizeof uc, "%s/unisacc.com", abs_repo)) return pr_refuse("path-bound", abs_repo); /* lint:allow R1-product priv-relink invokes checkout product for per-unit compile and relink */
+
+    for (int i = 0; i < n_cmp; i++) {
+        char dp[PR_PW], staged_src[PR_PW], why[128];
+        if (cx_fmt(dp, sizeof dp, "%s/%s", objs_stage, cmp_objs[i].key) ||
+            pr_stage_routed_source(cmp_objs[i].path, wdir, i, staged_src, sizeof staged_src) != 0)
+            return pr_refuse("path-bound", cmp_objs[i].key);
+        char *av[] = {
+            "nice", "-n", "19", "sh", uc,
+            (char *)pr_opt_for(cmp_objs[i].key), "-c", "-b", "lnx/x86_64", "-funit",
+            (char *)pr_rt_for(cmp_objs[i].key), "-o", dp, staged_src, 0
+        }; /* lint:allow R1-product priv-relink invokes checkout product for per-unit compile */
+        np_result r = {0};
+        if (np_run(av, abs_repo, 0, 20, &r, why, sizeof why) != 0 || r.rc != 0) {
+            np_free(&r);
+            return pr_refuse("unit-compile-failed", cmp_objs[i].key);
+        }
+        np_free(&r);
+    }
+    for (int i = 0; i < n_cmp_add; i++) {
+        char dp[PR_PW], staged_src[PR_PW], why[128];
+        if (cx_fmt(dp, sizeof dp, "%s/%s", objs_stage, cmp_adds[i].key) ||
+            pr_stage_routed_source(cmp_adds[i].path, wdir, 100 + i, staged_src, sizeof staged_src) != 0)
+            return pr_refuse("path-bound", cmp_adds[i].key);
+        char *av[] = {
+            "nice", "-n", "19", "sh", uc,
+            (char *)pr_opt_for(cmp_adds[i].key), "-c", "-b", "lnx/x86_64", "-funit",
+            (char *)pr_rt_for(cmp_adds[i].key), "-o", dp, staged_src, 0
+        }; /* lint:allow R1-product priv-relink invokes checkout product for per-unit compile */
+        np_result r = {0};
+        if (np_run(av, abs_repo, 0, 20, &r, why, sizeof why) != 0 || r.rc != 0) {
+            np_free(&r);
+            return pr_refuse("unit-compile-add-failed", cmp_adds[i].key);
+        }
+        np_free(&r);
+    }
+
+    /* 5. Proof 1: Object receipt & untouched .o SHA-256 verification */
+    int n_equal = 0, n_changed = 0, n_added = 0, n_removed = 0;
+    static char changed_keys[PR_MAX_DECL][64], untouched_keys[PR_MAX_OBJS][64];
+    int n_chg_keys = 0, n_unt_keys = 0;
+
+    for (int i = 0; i < n_base; i++) {
+        char dp[PR_PW], got_sha[65];
+        long got_bytes = 0;
+        if (cx_fmt(dp, sizeof dp, "%s/%s", objs_stage, base_objs[i].key)) return pr_refuse("path-bound", base_objs[i].key);
+        int ex = sy_exists(dp);
+        if (ex != 1) {
+            if (!pr_in_list(allow_remove, n_allow_rem, base_objs[i].key)) {
+                cx_fmt(detail, sizeof detail, "obj=%s", base_objs[i].key);
+                return pr_refuse("unexpected-removed-object", detail);
+            }
+            n_removed++;
+            continue;
+        }
+        if (pr_in_list(allow_remove, n_allow_rem, base_objs[i].key)) {
+            cx_fmt(detail, sizeof detail, "obj=%s", base_objs[i].key);
+            return pr_refuse("removed-object-still-present", detail);
+        }
+        if (pr_file_sha_bytes(dp, got_sha, &got_bytes) != 0) {
+            return pr_refuse("read-staged-obj-failed", base_objs[i].key);
+        }
+        if (got_bytes == base_objs[i].bytes && tx_eqz(got_sha, base_objs[i].sha)) {
+            n_equal++;
+            cx_fmt(untouched_keys[n_unt_keys++], 64, "%s", base_objs[i].key);
+        } else {
+            if (!pr_in_list(allow_change, n_allow_chg, base_objs[i].key)) {
+                cx_fmt(detail, sizeof detail, "obj=%s expected_sha=%.12s got_sha=%.12s",
+                       base_objs[i].key, base_objs[i].sha, got_sha);
+                return pr_refuse("unexpected-changed-object", detail);
+            }
+            n_changed++;
+            cx_fmt(changed_keys[n_chg_keys++], 64, "%s", base_objs[i].key);
+        }
+    }
+
+    static char all_staged_objs[PR_MAX_OBJS][64];
+    int n_staged = 0;
+    {
+        sy_dir_t d;
+        if (sy_dir_open(&d, objs_stage) != 0) return pr_refuse("open-stage-failed", objs_stage);
+        while (sy_dir_next(&d) == 1) {
+            if (d.name[0] == '.') continue;
+            long nl = (long)strlen(d.name);
+            if (nl <= 2 || memcmp(d.name + nl - 2, ".o", 2) != 0) {
+                sy_dir_close(&d);
+                return pr_refuse("non-object-in-stage", d.name);
+            }
+            if (n_staged >= PR_MAX_OBJS) { sy_dir_close(&d); return pr_refuse("too-many-staged-objs", d.name); }
+            cx_fmt(all_staged_objs[n_staged++], 64, "%s", d.name);
+            int in_base = 0;
+            for (int i = 0; i < n_base; i++) {
+                if (tx_eqz(base_objs[i].key, d.name)) { in_base = 1; break; }
+            }
+            if (!in_base) {
+                if (!pr_in_list(allow_add, n_allow_add, d.name)) {
+                    sy_dir_close(&d);
+                    cx_fmt(detail, sizeof detail, "obj=%s", d.name);
+                    return pr_refuse("unexpected-added-object", detail);
+                }
+                n_added++;
+                cx_fmt(changed_keys[n_chg_keys++], 64, "%s", d.name);
+            }
+        }
+        sy_dir_close(&d);
+    }
+
+    /* Sort all_staged_objs in ASCII glob order */
+    for (int i = 1; i < n_staged; i++) {
+        char tmp[64];
+        cx_fmt(tmp, sizeof tmp, "%s", all_staged_objs[i]);
+        int j = i - 1;
+        while (j >= 0 && strcmp(all_staged_objs[j], tmp) > 0) {
+            cx_fmt(all_staged_objs[j + 1], sizeof all_staged_objs[j + 1], "%s", all_staged_objs[j]);
+            j--;
+        }
+        cx_fmt(all_staged_objs[j + 1], sizeof all_staged_objs[j + 1], "%s", tmp);
+    }
+
+    /* 6. Proof 4: Symbol isolation proof + --forbid-sym check */
+    if (n_chg_keys > 0) {
+        static PrSymOwner unt_syms[PR_MAX_SYMS];
+        int n_unt_syms = 0;
+        for (int i = 0; i < n_unt_keys; i++) {
+            char op[PR_PW];
+            if (cx_fmt(op, sizeof op, "%s/%s", objs_stage, untouched_keys[i])) return -1;
+            if (pr_collect_defined_syms(op, untouched_keys[i], unt_syms, &n_unt_syms, PR_MAX_SYMS,
+                                        0, 0, 0, detail, sizeof detail) != 0) {
+                return pr_refuse("symbol-scan-failed", detail);
+            }
+        }
+        for (int i = 0; i < n_chg_keys; i++) {
+            char op[PR_PW];
+            if (cx_fmt(op, sizeof op, "%s/%s", objs_stage, changed_keys[i])) return -1;
+            if (pr_collect_defined_syms(op, changed_keys[i], 0, 0, 0,
+                                        1, unt_syms, n_unt_syms, detail, sizeof detail) != 0) {
+                return pr_refuse("symbol-diff-outside-unit", detail);
+            }
+        }
+    }
+    if (pr_check_forbid_syms(objs_stage, all_staged_objs, n_staged, forbid_syms, n_forbid,
+                             detail, sizeof detail) != 0) {
+        return pr_refuse("forbidden-symbol-present", detail);
+    }
+
+    /* 7. Proof 3: P4 package F-record verification */
+    const char *use_p4 = (p4_payload_in && p4_payload_in[0]) ? p4_payload_in : base_p4_p;
+    if (pr_verify_p4_f_records(base_p4_p, use_p4, allow_f_keys, n_allow_f, detail, sizeof detail) != 0) {
+        return pr_refuse("foreign-f-record-drift", detail);
+    }
+
+    /* Ensure raw P4 body file (without 16-byte footer) is written for ape-pack --payload */
+    char p4_body_stage[PR_PW];
+    if (cx_fmt(p4_body_stage, sizeof p4_body_stage, "%s/p4-payload.body", wdir))
+        return pr_refuse("path-bound", wdir);
+    {
+        unsigned char *pb = 0;
+        int64_t pn = 0;
+        const unsigned char *pslice = 0;
+        long plen = 0;
+        if (sy_read_file(use_p4, &pb, &pn, 64L << 20) != 0 || !pb ||
+            pr_extract_p4_slice(pb, (long)pn, &pslice, &plen) != 0 ||
+            sy_write_atomic(p4_body_stage, (const char *)pslice, (size_t)plen, 0644) != 0) {
+            if (pb) mm_free(pb);
+            return pr_refuse("prepare-p4-body-failed", use_p4);
+        }
+        mm_free(pb);
+    }
+
+    /* 8. Relink entry.elf */
+    long t_link0 = sy_now_ms();
+    char elf_stage[PR_PW];
+    if (cx_fmt(elf_stage, sizeof elf_stage, "%s/entry.elf", wdir)) return pr_refuse("path-bound", wdir);
+    int use_glob_order = tx_eqz(link_order, "glob") ||
+                         (tx_eqz(link_order, "auto") && (n_added > 0 || n_removed > 0));
+    static char obj_arg_paths[PR_MAX_OBJS][PR_PW];
+    char *link_av[PR_MAX_OBJS + 16];
+    int lak = 0;
+    link_av[lak++] = "sh";
+    link_av[lak++] = uc; /* lint:allow R1-product priv-relink invokes checkout product for entry.elf link */
+    link_av[lak++] = "-b";
+    link_av[lak++] = "lnx/x86_64";
+    link_av[lak++] = "-o";
+    link_av[lak++] = elf_stage;
+    if (use_glob_order) {
+        for (int i = 0; i < n_staged; i++) {
+            if (cx_fmt(obj_arg_paths[i], PR_PW, "%s/%s", objs_stage, all_staged_objs[i]))
+                return pr_refuse("path-bound", all_staged_objs[i]);
+            link_av[lak++] = obj_arg_paths[i];
+        }
+    } else {
+        int idx = 0;
+        for (int i = 0; i < n_base; i++) {
+            if (pr_in_list(allow_remove, n_allow_rem, base_objs[i].key)) continue;
+            if (cx_fmt(obj_arg_paths[idx], PR_PW, "%s/%s", objs_stage, base_objs[i].key))
+                return pr_refuse("path-bound", base_objs[i].key);
+            link_av[lak++] = obj_arg_paths[idx++];
+        }
+    }
+    link_av[lak] = 0;
+    {
+        np_result lr = {0}; char why[128];
+        if (np_run(link_av, abs_repo, 0, 35, &lr, why, sizeof why) != 0 || lr.rc != 0 || sy_exists(elf_stage) != 1) {
+            np_free(&lr);
+            return pr_refuse("relink-failed", elf_stage);
+        }
+        np_free(&lr);
+    }
+    long relink_ms = sy_now_ms() - t_link0;
+    char elf_sha[65];
+    long elf_bytes = 0;
+    if (pr_file_sha_bytes(elf_stage, elf_sha, &elf_bytes) != 0) return pr_refuse("hash-elf-failed", elf_stage);
+
+    int is_empty_change = (n_changed == 0 && n_added == 0 && n_removed == 0 && !p4_payload_in && !use_glob_order);
+    if (is_empty_change && base_elf_sha[0]) {
+        if (elf_bytes != base_elf_bytes || !tx_eqz(elf_sha, base_elf_sha)) {
+            cx_fmt(detail, sizeof detail, "base_elf=%s(%ld) got_elf=%s(%ld)",
+                   base_elf_sha, base_elf_bytes, elf_sha, elf_bytes);
+            return pr_refuse("empty-change-elf-not-byte-equal", detail);
+        }
+    }
+
+    /* 9. Repack APE */
+    long t_pack0 = sy_now_ms();
+    char ver_buf[32], cand_tsv[PR_PW];
+    if (ver_in && ver_in[0]) {
+        cx_fmt(ver_buf, sizeof ver_buf, "%s", ver_in);
+    } else if (!cx_fmt(cand_tsv, sizeof cand_tsv, "%s/release/candidate.tsv", abs_repo) &&
+               rv_load(cand_tsv, ver_buf) == 0) {
+    } else {
+        cx_fmt(ver_buf, sizeof ver_buf, "0.1.6");
+    }
+
+    char cm_x64[PR_PW], cm_arm64[PR_PW], sl_win64[PR_PW], sl_lnxa64[PR_PW], sl_osxx64[PR_PW], sl_osxa64[PR_PW], sl_wina64[PR_PW], ape_pack_tool[PR_PW];
+    if (cx_fmt(cm_x64, sizeof cm_x64, "%s/cache-manager/x64", abs_chain) ||
+        cx_fmt(cm_arm64, sizeof cm_arm64, "%s/cache-manager/arm64", abs_chain) ||
+        cx_fmt(sl_win64, sizeof sl_win64, "%s/fixedpoint/g2/win-x86_64/slice-win-x86_64", abs_chain) ||
+        cx_fmt(sl_lnxa64, sizeof sl_lnxa64, "%s/fixedpoint/g2/lnx-arm64/entry.elf", abs_chain) ||
+        cx_fmt(sl_osxx64, sizeof sl_osxx64, "%s/fixedpoint/g2/osx-x86_64/slice-osx-x86_64", abs_chain) ||
+        cx_fmt(sl_osxa64, sizeof sl_osxa64, "%s/fixedpoint/g2/osx-arm64/slice-osx-arm64", abs_chain) ||
+        cx_fmt(sl_wina64, sizeof sl_wina64, "%s/fixedpoint/g2/win-arm64/slice-win-arm64", abs_chain) ||
+        cx_fmt(ape_pack_tool, sizeof ape_pack_tool, "%s/tools/ape-pack.cx", abs_repo)) {
+        return pr_refuse("path-bound", abs_chain);
+    }
+    char *pack_av[] = {
+        "sh", uc, "-run", ape_pack_tool, "--",
+        "--cache-manager-osx", cm_x64, cm_arm64,
+        "--payload", p4_body_stage,
+        "--tool", "unisacc", "--need", "53248", "--deflate",
+        "--product", "unisacc", ver_buf,
+        (char *)out_ape,
+        sl_win64, elf_stage, sl_lnxa64, sl_osxx64, sl_osxa64, sl_wina64, 0
+    }; /* lint:allow R1-product priv-relink invokes checkout product for ape-pack */
+    {
+        np_result pr = {0}; char why[128];
+        if (np_run(pack_av, abs_repo, 0, 25, &pr, why, sizeof why) != 0 || pr.rc != 0 || sy_exists(out_ape) != 1) {
+            np_free(&pr);
+            return pr_refuse("repack-failed", out_ape);
+        }
+        np_free(&pr);
+    }
+    (void)sy_chmod(out_ape, 0755);
+    long pack_ms = sy_now_ms() - t_pack0;
+    long total_ms = sy_now_ms() - t0_ms;
+
+    char out_sha[65];
+    long out_bytes = 0;
+    if (pr_file_sha_bytes(out_ape, out_sha, &out_bytes) != 0) return pr_refuse("hash-ape-failed", out_ape);
+
+    if (is_empty_change && sy_exists(base_ape_p) == 1) {
+        char base_ape_sha[65];
+        long base_ape_bytes = 0;
+        if (pr_file_sha_bytes(base_ape_p, base_ape_sha, &base_ape_bytes) != 0 ||
+            out_bytes != base_ape_bytes || !tx_eqz(out_sha, base_ape_sha)) {
+            cx_fmt(detail, sizeof detail, "base_ape=%s(%ld) got_ape=%s(%ld)",
+                   base_ape_sha, base_ape_bytes, out_sha, out_bytes);
+            return pr_refuse("empty-change-ape-not-byte-equal", detail);
+        }
+    }
+
+    /* Extract packed Linuxx86_64 slice from APE to record pre_pack_entry_sha vs packed_entry_sha (31 B version slot) */
+    char packed_elf_sha[65];
+    long packed_elf_bytes = 0, ape_slice_o = 0, ape_slice_n = 0, diff_cnt = 0, first_diff = -1, last_diff = -1;
+    packed_elf_sha[0] = 0;
+    {
+        unsigned char *ab = 0; int64_t an = 0;
+        if (sy_read_file(out_ape, &ab, &an, 64L << 20) == 0 && ab && an >= 4096) {
+            const char *needle = "Linuxx86_64) o=";
+            const char *hit = 0;
+            long slim = an < 8192 ? (long)an : 8192;
+            for (long i = 0; i + 40 < slim; i++) {
+                if (memcmp(ab + i, needle, 15) == 0) { hit = (const char *)(ab + i + 15); break; }
+            }
+            if (hit) {
+                long so = 0, sn = 0;
+                int k = 0;
+                while (hit[k] >= '0' && hit[k] <= '9') { so = so * 10 + (hit[k] - '0'); k++; }
+                const char *np = strstr(hit, "n=");
+                if (np) {
+                    int m = 2;
+                    while (np[m] >= '0' && np[m] <= '9') { sn = sn * 10 + (np[m] - '0'); m++; }
+                }
+                if (so > 0 && sn > 0 && so - 1 + sn <= (long)an) {
+                    char gz_p[PR_PW], unp_p[PR_PW], ucmd[PR_PW * 2 + 64];
+                    if (!cx_fmt(gz_p, sizeof gz_p, "%s/packed-slice.gz", wdir) &&
+                        !cx_fmt(unp_p, sizeof unp_p, "%s/packed-entry.elf", wdir) &&
+                        sy_write_atomic(gz_p, (const char *)(ab + (so - 1)), (size_t)sn, 0644) == 0 &&
+                        !cx_fmt(ucmd, sizeof ucmd, "gzip -dc '%s' > '%s'", gz_p, unp_p)) {
+                        char *gav[] = {"sh", "-c", ucmd, 0};
+                        np_result gr = {0}; char why[128];
+                        if (np_run(gav, ".", 0, 10, &gr, why, sizeof why) == 0 && gr.rc == 0 &&
+                            pr_file_sha_bytes(unp_p, packed_elf_sha, &packed_elf_bytes) == 0) {
+                            ape_slice_o = so; ape_slice_n = sn;
+                            unsigned char *eb = 0, *pb = 0; int64_t en = 0, pn = 0;
+                            if (sy_read_file(elf_stage, &eb, &en, 64L << 20) == 0 &&
+                                sy_read_file(unp_p, &pb, &pn, 64L << 20) == 0 && en == pn) {
+                                for (long bi = 0; bi < (long)en; bi++) {
+                                    if (eb[bi] != pb[bi]) {
+                                        if (first_diff < 0) first_diff = bi;
+                                        last_diff = bi;
+                                        diff_cnt++;
+                                    }
+                                }
+                            }
+                            if (eb) mm_free(eb);
+                            if (pb) mm_free(pb);
+                        }
+                        np_free(&gr);
+                    }
+                }
+            }
+        }
+        if (ab) mm_free(ab);
+    }
+
+    if (receipt_out && receipt_out[0]) {
+        np_buf rbuf = {0};
+        char lline[512];
+        cx_fmt(lline, sizeof lline,
+               "LINK_IDENTITY\tpre_pack_entry_sha=%s\tpre_pack_bytes=%ld\tpacked_entry_sha=%s\tpacked_bytes=%ld\tape_o=%ld\tape_n=%ld\tdiff_vs_prepack_bytes=%ld\tdiff_range=%ld..%ld\n",
+               elf_sha, elf_bytes, packed_elf_sha[0] ? packed_elf_sha : "-", packed_elf_bytes,
+               ape_slice_o, ape_slice_n, diff_cnt, first_diff, last_diff);
+        np_puts(&rbuf, lline);
+        np_puts(&rbuf, "LINKER_ARGV\t");
+        for (int a = 0; link_av[a]; a++) {
+            if (a > 0) np_puts(&rbuf, " ");
+            np_puts(&rbuf, link_av[a]);
+        }
+        np_puts(&rbuf, "\n");
+        for (int i = 0; i < n_staged; i++) {
+            char op[PR_PW], osha[65], oline[256];
+            long obytes = 0;
+            if (!cx_fmt(op, sizeof op, "%s/%s", objs_stage, all_staged_objs[i]) &&
+                pr_file_sha_bytes(op, osha, &obytes) == 0) {
+                cx_fmt(oline, sizeof oline, "OBJECT\t%s\tbytes=%ld\tsha256=%s\n",
+                       all_staged_objs[i], obytes, osha);
+                np_puts(&rbuf, oline);
+            }
+        }
+        if (rbuf.p && sy_write_atomic(receipt_out, rbuf.p, rbuf.n, 0644) != 0) {
+            free(rbuf.p);
+            return pr_refuse("write-receipt-failed", receipt_out);
+        }
+        if (rbuf.p) free(rbuf.p);
+    }
+
+    if (clean_wdir) (void)sy_remove_all(wdir);
+
+    if (total_ms > budget_ms) {
+        cx_fmt(detail, sizeof detail, "total_ms=%ld budget_ms=%ld", total_ms, budget_ms);
+        return pr_refuse("budget-exceeded", detail);
+    }
+
+    int net_untouched = n_base - n_removed - (n_changed + n_added);
+    sy_printf("LINK_IDENTITY\tpre_pack_entry_sha=%s\tpre_pack_bytes=%ld\tpacked_entry_sha=%s\tpacked_bytes=%ld\tape_o=%ld\tape_n=%ld\tdiff_vs_prepack_bytes=%ld\tdiff_range=%ld..%ld\n",
+              elf_sha, elf_bytes, packed_elf_sha[0] ? packed_elf_sha : "-", packed_elf_bytes,
+              ape_slice_o, ape_slice_n, diff_cnt, first_diff, last_diff);
+    sy_printf("PRIV_RELINK_OBJECTS\tbaseline=%d\tlinked=%d\tequal=%d\tchanged=%d\tadded=%d\tremoved=%d\tnet_untouched=%d\n",
+              n_base, n_staged, n_equal, n_changed, n_added, n_removed, net_untouched);
+    sy_printf("PRIV_RELINK_EQUAL\t%d objects EQUAL (net_untouched=%d objects EQUAL)\n",
+              n_equal, net_untouched);
+    sy_printf("PRIV_RELINK_PROOF\treceipt_objs=OK\tsig_sha=OK\tf_records=OK\telf_syms=OK\n");
+    sy_printf("PRIV_RELINK\tstatus=PREPARED\tscope=LOCAL\tout=%s\tape_bytes=%ld\tape_sha256=%s\telf_bytes=%ld\telf_sha256=%s\tpacked_elf_sha256=%s\trelink_ms=%ld\tpack_ms=%ld\ttotal_ms=%ld\n",
+              out_ape, out_bytes, out_sha, elf_bytes, elf_sha, packed_elf_sha[0] ? packed_elf_sha : "-", relink_ms, pack_ms, total_ms);
+    return 0;
+}

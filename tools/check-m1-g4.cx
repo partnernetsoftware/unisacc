@@ -1,0 +1,143 @@
+/* tools/check-m1-g4.cx -- G4 VM result domain & call-status negative controls for M1 stream_s1_m1.
+ *
+ *   sh ./unisacc.com tools/check-m1-g4.cx --
+ */
+#pragma unisa use runtime.model_number
+#pragma unisa use compiler.bindstage
+#pragma unisa use runtime.routestep
+#pragma unisa use driver.stream_s1_m1
+#pragma unisa use sys.io
+#pragma unisa use text.text
+
+static int g4_pass = 0;
+static int g4_fail = 0;
+
+static void g4_ck(int ok, const char *name) {
+    if (ok) {
+        g4_pass++;
+        sy_printf("PASS\tcheck-m1-g4.%s\n", name);
+    } else {
+        g4_fail++;
+        sy_printf("FAIL\tcheck-m1-g4.%s\n", name);
+    }
+}
+
+static int g4_eq(const char *a, const char *b) {
+    return a && b && tx_eqz(a, b);
+}
+
+/* Mutant A: masks VM return with & 255 (misses 256 -> 0 and 257 -> 1) */
+static int g4_mutant_mask255(long call_rc, const unsigned long long res[4]) {
+    if (call_rc != 0 || !res || res[0] != 0ULL) return -2;
+    unsigned long long v = res[3] & 255ULL;
+    if (v != 0ULL && v != 1ULL) return -2;
+    return (int)v;
+}
+
+/* Mutant B: ignores non-zero tsl_call2 call_rc */
+static int g4_mutant_ignore_callrc(long call_rc, const unsigned long long res[4]) {
+    (void)call_rc;
+    if (!res || res[0] != 0ULL) return -2;
+    if (res[3] != 0ULL && res[3] != 1ULL) return -2;
+    return (int)res[3];
+}
+
+int main(void) {
+    const char *why = 0;
+    int det = 0, r;
+
+    /* 1. Valid 0 and 1 */
+    {
+        unsigned long long r0[4] = {0ULL, 10ULL, 0ULL, 0ULL};
+        unsigned long long r1[4] = {0ULL, 10ULL, 0ULL, 1ULL};
+        g4_ck(m53_m1_classify_vm_result(0, r0, &why, &det) == 0 && why == 0, "valid-0");
+        g4_ck(m53_m1_classify_vm_result(0, r1, &why, &det) == 1 && why == 0, "valid-1");
+    }
+
+    /* 2. Bad VM return values: 2, 256, 257, UINT64_MAX -> -2 + embed-vm-bad-return */
+    {
+        unsigned long long r2[4]   = {0ULL, 5ULL, 0ULL, 2ULL};
+        unsigned long long r256[4] = {0ULL, 5ULL, 0ULL, 256ULL};
+        unsigned long long r257[4] = {0ULL, 5ULL, 0ULL, 257ULL};
+        unsigned long long rmax[4] = {0ULL, 5ULL, 0ULL, 0xffffffffffffffffULL};
+        r = m53_m1_classify_vm_result(0, r2, &why, &det);
+        g4_ck(r == -2 && g4_eq(why, "embed-vm-bad-return") && det == 2, "bad-ret-2");
+        r = m53_m1_classify_vm_result(0, r256, &why, &det);
+        g4_ck(r == -2 && g4_eq(why, "embed-vm-bad-return") && det == 256, "bad-ret-256");
+        r = m53_m1_classify_vm_result(0, r257, &why, &det);
+        g4_ck(r == -2 && g4_eq(why, "embed-vm-bad-return") && det == 257, "bad-ret-257");
+        r = m53_m1_classify_vm_result(0, rmax, &why, &det);
+        g4_ck(r == -2 && g4_eq(why, "embed-vm-bad-return"), "bad-ret-u64max");
+
+        /* Red-first: Mutant A (&255) leaks 256 -> 0 and 257 -> 1 */
+        g4_ck(g4_mutant_mask255(0, r256) != -2 && g4_mutant_mask255(0, r257) != -2, "mutant-mask255-killed");
+    }
+
+    /* 3. Non-zero tsl_call2 status -> -2 + embed-vm-call-failed */
+    {
+        unsigned long long rok[4] = {0ULL, 1ULL, 0ULL, 1ULL};
+        r = m53_m1_classify_vm_result(-1, rok, &why, &det);
+        g4_ck(r == -2 && g4_eq(why, "embed-vm-call-failed") && det == -1, "call-rc-neg1");
+        r = m53_m1_classify_vm_result(3, rok, &why, &det);
+        g4_ck(r == -2 && g4_eq(why, "embed-vm-call-failed") && det == 3, "call-rc-3");
+
+        /* Red-first: Mutant B (ignores call_rc) leaks 1 */
+        g4_ck(g4_mutant_ignore_callrc(-1, rok) != -2, "mutant-ignore-callrc-killed");
+    }
+
+    /* 4. Budget exhausted & VM fault statuses -> -2 + embed-vm-fault */
+    {
+        unsigned long long rbud[4] = {2ULL, 2000000ULL, 0ULL, 1ULL};
+        unsigned long long rflt[4] = {1ULL, 42ULL, 7ULL, 1ULL};
+        r = m53_m1_classify_vm_result(0, rbud, &why, &det);
+        g4_ck(r == -2 && g4_eq(why, "embed-vm-fault") && det == 2, "budget-exhausted");
+        r = m53_m1_classify_vm_result(0, rflt, &why, &det);
+        g4_ck(r == -2 && g4_eq(why, "embed-vm-fault") && det == 7, "vm-fault");
+    }
+
+    /* 5. tape_x86_64.S .Lrun_exit ABI + sentinel unwritten result + RAX=0/ret=1 cross-check + ASM status 2/3. */
+    {
+        unsigned long long sent = 0x554e575249545445ULL;
+        unsigned long long r1[4]    = {0ULL, 10ULL, 0ULL, 1ULL};
+        unsigned long long r0[4]    = {0ULL, 10ULL, 0ULL, 0ULL};
+        unsigned long long r256[4]  = {0ULL, 5ULL, 0ULL, 256ULL};
+        unsigned long long rsent[4] = {sent, sent, sent, sent};
+        unsigned long long rzero[4] = {0ULL, 0ULL, 0ULL, 0ULL};
+        unsigned long long rbud3[4] = {3ULL, 2000000ULL, 0ULL, 0ULL};
+        unsigned long long rflt2[4] = {2ULL, 42ULL, 7ULL, 0ULL};
+        r = m53_m1_classify_run_result(1L, r1, &why, &det);
+        g4_ck(r == 1 && why == 0, "run-exit-rax-equals-ret1");
+        r = m53_m1_classify_run_result(0L, r0, &why, &det);
+        g4_ck(r == 0 && why == 0, "run-exit-rax-equals-ret0");
+        /* Red-first A: pre-fix logic passing rrc==1 directly as call_rc failed with -2 / embed-vm-call-failed detail=1 */
+        r = m53_m1_classify_vm_result((r1[0] == 0ULL) ? 1L : 0L, r1, &why, &det);
+        g4_ck(r == -2 && g4_eq(why, "embed-vm-call-failed") && det == 1, "prefix-rax-bug-was-red");
+        /* Red-first B (cdx item 1): RAX=0 while res[3]=1 MUST fail closed with non-zero detail (-3).
+         * Pre-fix ternary ((rrc == (long)res[3]) ? 0L : rrc) passed 0L and falsely returned 1! */
+        r = m53_m1_classify_run_result(0L, r1, &why, &det);
+        g4_ck(r == -2 && g4_eq(why, "embed-vm-call-failed") && det == -3, "rax0-ret1-mismatch-refused");
+        g4_ck(m53_m1_classify_vm_result((0L == (long)r1[3]) ? 0L : 0L, r1, &why, &det) == 1, "mutant-rax0-ret1-was-false-green");
+        /* Red-first C (cdx item 1): sentinel-untouched result block MUST fail closed as embed-vm-unwritten even if RAX=0 */
+        r = m53_m1_classify_run_result(0L, rsent, &why, &det);
+        g4_ck(r == -2 && g4_eq(why, "embed-vm-unwritten") && det == -4, "sentinel-unwritten-result-refused");
+        /* Red-first D (cdx item 1): all-zero result (0 steps executed) MUST fail closed as embed-vm-unwritten,
+         * whereas pre-fix zero-init classifier without step check falsely returned 0 */
+        r = m53_m1_classify_run_result(0L, rzero, &why, &det);
+        g4_ck(r == -2 && g4_eq(why, "embed-vm-unwritten") && det == -5, "zero-steps-unwritten-refused");
+        g4_ck(m53_m1_classify_vm_result(0L, rzero, &why, &det) == 0, "mutant-allzero-unwritten-was-false-green");
+        /* ASM status codes: 3=budget (embed-vm-budget), 2=fault (embed-vm-fault) */
+        r = m53_m1_classify_run_result(3L, rbud3, &why, &det);
+        g4_ck(r == -2 && g4_eq(why, "embed-vm-budget") && det == 3, "asm-status3-budget-refused");
+        r = m53_m1_classify_run_result(2L, rflt2, &why, &det);
+        g4_ck(r == -2 && g4_eq(why, "embed-vm-fault") && det == 7, "asm-status2-fault-refused");
+        /* True call-layer mismatch (rrc=-1 != res[3]=1) still refused */
+        r = m53_m1_classify_run_result(-1L, r1, &why, &det);
+        g4_ck(r == -2 && g4_eq(why, "embed-vm-call-failed") && det == -1, "run-exit-rax-mismatch-refused");
+        /* Bad return domain (256) still refused as embed-vm-bad-return even when rrc == res[3] */
+        r = m53_m1_classify_run_result(256L, r256, &why, &det);
+        g4_ck(r == -2 && g4_eq(why, "embed-vm-bad-return") && det == 256, "run-exit-rax-bad-ret-256-refused");
+    }
+
+    sy_printf("CHECK_M1_G4\tpassed=%d\tfailed=%d\n", g4_pass, g4_fail);
+    return g4_fail ? 1 : 0;
+}
