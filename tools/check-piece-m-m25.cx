@@ -5,9 +5,8 @@
  *     real product functions (st_rt_shared / dv_used / dv_note_shared / rts_* / m25_m1_*),
  *     and real entry-build --objects-only ELF objects:
  *     (1) Static routing & 45-root authority (build/chain-facts.tsv -> cxlib.chainfacts)
- *     (2) Real entry-build --objects-only for lnx/x86_64 and lnx/arm64 + nm symbol check:
- *         - lnx/x86_64 defines each of 7 rts_* once and references m25_m1_* (dedup drops native)
- *         - lnx/arm64 defines native rts_* and has NO m25_m1_*
+ *     (2) Real entry-build --objects-only for lnx/x86_64 and lnx/arm64 + nm symbol check
+ *         (dedup itself is guarded by v0.1.9's check-entry-build-root-dedup)
  *     (3) Real P4 packing (candidate-chain m53 + m25_guest), CRC tamper, and dropped-m25-guest
  *     (4) Value parity: native_probe (cx/compiler/rtsharedname.cx) vs s3_probe (src/rtsharedname_m1.cx)
  *     (5) Exact boundaries: name len 256/257/65535/65536, idx 127/128/-128/-129 clamp,
@@ -199,7 +198,9 @@ static int run_chain_ape_pregate(const char *ape, const char *rcpt, int quiet) {
     }
     /* Must actually exercise m25 content from the chain APE before printing FORMAL PASS */
     char tmp[256], s3_src[512], s3_bin[512], cmd[2048], out[8192];
-    cx_fmt(tmp, sizeof tmp, "/tmp/piece-m-ape-%lld", sy_now_ms());
+    const char *td = sy_env("TMPDIR");
+    if (!td || !td[0]) td = "/tmp";
+    cx_fmt(tmp, sizeof tmp, "%s/piece-m-ape-%lld", td, sy_now_ms());
     if (sy_mkdir(tmp, 0700) != 0) return 2;
     cx_fmt(s3_src, sizeof s3_src, "%s/ape_probe.cx", tmp);
     cx_fmt(s3_bin, sizeof s3_bin, "%s/ape_probe", tmp);
@@ -237,10 +238,12 @@ static int run_chain_ape_pregate(const char *ape, const char *rcpt, int quiet) {
     return 0;
 }
 
-static int run_all_checks(void) {
+static int run_all_checks(int want_obj, int want_rt) {
     char tmp[256], cmd[4096], out[16384], nat_out[8192], s3_out[8192];
     n_ok = 0; failed = 0;
-    cx_fmt(tmp, sizeof tmp, "/tmp/piece-m-m25-%lld", sy_now_ms());
+    const char *td = sy_env("TMPDIR");
+    if (!td || !td[0]) td = "/tmp";
+    cx_fmt(tmp, sizeof tmp, "%s/piece-m-m25-%lld", td, sy_now_ms());
     if (sy_mkdir(tmp, 0700) != 0) {
         ck(0, "session-tmpdir");
         return 1;
@@ -254,11 +257,14 @@ static int run_all_checks(void) {
         }
     }
 
-    /* 1. Static routing & 45-root authority */
-    check_product_routing();
+    if (want_obj) {
+        /* 1. Static routing & 45-root authority */
+        check_product_routing();
 
-    /* 2. Real entry-build --objects-only for lnx/x86_64 and lnx/arm64 */
-    (void)check_entry_build_objects(tmp);
+        /* 2. Real entry-build --objects-only for lnx/x86_64 and lnx/arm64 */
+        (void)check_entry_build_objects(tmp);
+    }
+    if (!want_rt) goto done;
 
     /* 3. Build tapepack, p4emit, candidate-chain, and pack good.p4 / bad_crc_m25.p4 / dropped_m25.p4 */
     char tdir[320], tpk_bin[320], p4e_bin[320], cc_bin[320];
@@ -366,13 +372,18 @@ static int run_all_checks(void) {
         "  }\n"
         "  if (argc >= 2 && argv[1][0] == 'b') {\n"
         "    char *s256 = (char *)mm_alloc(257); char *s257 = (char *)mm_alloc(258);\n"
+        "    char *s2000 = (char *)mm_alloc(2001); char *s4096 = (char *)mm_alloc(4097);\n"
         "    char *s65535 = (char *)mm_alloc(65536); char *s65536 = (char *)mm_alloc(65537);\n"
         "    memset(s256, 'a', 256); s256[256] = 0;\n"
         "    memset(s257, 'a', 257); s257[257] = 0;\n"
+        "    memset(s2000, 'a', 2000); s2000[2000] = 0;\n"
+        "    memset(s4096, 'a', 4096); s4096[4096] = 0;\n"
         "    memset(s65535, 'a', 65535); s65535[65535] = 0;\n"
         "    memset(s65536, 'a', 65536); s65536[65536] = 0;\n"
         "    int r256 = m25_m1_rts_covers(0, s256);\n"
         "    int r257 = m25_m1_rts_covers(0, s257);\n"
+        "    int r2000 = m25_m1_rts_covers(0, s2000);\n"
+        "    int r4096 = m25_m1_rts_covers(0, s4096);\n"
         "    int r65535 = m25_m1_rts_covers(0, s65535);\n"
         "    int r65536 = m25_m1_rts_covers(0, s65536);\n"
         "    int sc_127 = m25_m1_rts_symbol_count(127);\n"
@@ -380,8 +391,8 @@ static int run_all_checks(void) {
         "    int sc_m128 = m25_m1_rts_symbol_count(-128);\n"
         "    int sc_m129 = m25_m1_rts_symbol_count(-129);\n"
         "    const char *un_bad = m25_m1_rts_used_name(99, 99);\n"
-        "    sy_printf(\"BOUNDS 256=%d 257=%d 65535=%d 65536=%d idx=%d:%d:%d:%d un=%s\\n\",\n"
-        "              r256, r257, r65535, r65536, sc_127, sc_128, sc_m128, sc_m129, un_bad ? un_bad : \"NULL\");\n"
+        "    sy_printf(\"BOUNDS 256=%d 257=%d 2000=%d 4096=%d 65535=%d 65536=%d idx=%d:%d:%d:%d un=%s\\n\",\n"
+        "              r256, r257, r2000, r4096, r65535, r65536, sc_127, sc_128, sc_m128, sc_m129, un_bad ? un_bad : \"NULL\");\n"
         "    return 0;\n"
         "  }\n"
         "  if (argc >= 2 && argv[1][0] == 'r') {\n"
@@ -427,7 +438,7 @@ static int run_all_checks(void) {
     /* 6. Exact boundaries: 256/257/65535/65536, idx 127/128/-128/-129 clamp, 255->-1, rts_used_name NULL */
     cx_fmt(cmd, sizeof cmd, "UNISA_CONTAINER='%s' '%s' b", good_p4, s3_bin);
     int r_bnd = run_sh(cmd, out, sizeof out);
-    ck_v(r_bnd == 0 && strstr(out, "BOUNDS 256=0 257=0 65535=0 65536=-2 idx=-1:-1:-1:-1 un=NULL") != 0,
+    ck_v(r_bnd == 0 && strstr(out, "BOUNDS 256=0 257=0 2000=0 4096=0 65535=0 65536=-2 idx=-1:-1:-1:-1 un=NULL") != 0,
          "LOCAL", "m25-m1-exact-boundaries-and-257-heap", "local-good-p4", "u16-and-idx-clamp-and-255-to-m1");
 
     /* 7. Refusal propagation on bad_crc_m25.p4, dropped_m25.p4, missing carrier, and UNISACC_M53_S1=1 */
@@ -477,7 +488,7 @@ done:
 
 int main(int argc, char **argv) {
     if (argc == 4 && tx_eqz(argv[1], "--produce")) {
-        int rc = run_all_checks();
+        int rc = run_all_checks(1, 1);
         if (rc != 0) return 1;
         char buf[256];
         if (cx_fmt(buf, sizeof buf, "run_id=%s\nverdict=PASS\npassed=%d\nfailed=0\n", argv[2], n_ok)) return 2;
@@ -507,7 +518,24 @@ int main(int argc, char **argv) {
         }
         return run_chain_ape_pregate(ape, rcpt, 0);
     }
-    int rc = run_all_checks();
-    sy_printf("CHECK_PIECE_M_M25\tscope=LOCAL\tpassed=%d\tfailed=%d\n", n_ok, failed);
+    if ((argc == 3 && tx_eqz(argv[1], "--part") && tx_eqz(argv[2], "obj")) ||
+        (argc == 2 && tx_eqz(argv[1], "--part=obj"))) {
+        int rc = run_all_checks(1, 0);
+        sy_printf("CHECK_PIECE_M_M25\tscope=LOCAL\tpart=obj\tpassed=%d\tfailed=%d\n", n_ok, failed);
+        return rc;
+    }
+    if ((argc == 3 && tx_eqz(argv[1], "--part") && tx_eqz(argv[2], "runtime")) ||
+        (argc == 2 && tx_eqz(argv[1], "--part=runtime"))) {
+        int rc = run_all_checks(0, 1);
+        sy_printf("CHECK_PIECE_M_M25\tscope=LOCAL\tpart=runtime\tpassed=%d\tfailed=%d\n", n_ok, failed);
+        return rc;
+    }
+    if (argc == 2 && tx_eqz(argv[1], "--all")) {
+        int rc = run_all_checks(1, 1);
+        sy_printf("CHECK_PIECE_M_M25\tscope=LOCAL\tpassed=%d\tfailed=%d\n", n_ok, failed);
+        return rc;
+    }
+    int rc = run_all_checks(1, 0);
+    sy_printf("CHECK_PIECE_M_M25\tscope=LOCAL\tpart=obj\tpassed=%d\tfailed=%d\n", n_ok, failed);
     return rc;
 }
