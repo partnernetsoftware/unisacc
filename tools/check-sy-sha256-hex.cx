@@ -2,9 +2,10 @@
  *   1. Compiles cx/sys/sha.cx across all 6 targets (lnx/osx/win x x86_64/arm64).
  *   2. On lnx/x86_64, compares sy_sha256_hex (AF_ALG) vs cx_sha256_hex (software)
  *      on fixed vectors: empty, 1 byte, 64 bytes, 65 bytes, 1 MiB.
- *   3. Forced-fallback probe (sy_sha256_af disabled via #if 0): verifies NIST vectors
- *      (empty, "abc"), NULL+0, 64/65/1MiB, and invalid args (n<0, NULL+n>0, hex==NULL -> rc 1).
- *   4. Fallback mutation gate: corrupting cx_sha256_hex output in fallback MUST FAIL.
+ *   3. Forced-fallback probe: copies cx/sys/sha.cx into a session dir with
+ *      `sfd = socket(38, 5, 0);` replaced by `sfd = -1;` so sy_sha256_af fails,
+ *      compiles a probe against it, and verifies NIST empty, NULL+0, "abc",
+ *      and invalid args (n<0, NULL with n>0, hex==NULL -> rc 1).
  * Marker: CHECK_SY_SHA256_HEX. */
 #pragma unisa use sys.fs
 #pragma unisa use sys.env
@@ -97,14 +98,13 @@ int main(void) {
         }
     }
 
-    /* Forced-fallback probe: override socket() in test binary so sy_sha256_af fails and exercises cx_sha256_hex */
+    /* Forced-fallback probe: temp copy of cx/sys/sha.cx with sfd = -1 so sy_sha256_af fails */
     {
-        char probe_cx[320], bin_ok[320];
+        char probe_cx[320], bin_ok[320], cwd[512];
         cx_fmt(probe_cx, sizeof probe_cx, "%s/fb_probe.cx", tmp);
         cx_fmt(bin_ok, sizeof bin_ok, "%s/fb_ok", tmp);
         const char *pcode =
             "#pragma unisa use sys.sha\n"
-            "int socket(int a, int b, int c) { (void)a; (void)b; (void)c; return -1; }\n"
             "static int eq64(const char *a, const char *b) {\n"
             "  for (int i = 0; i < 64; i++) if (a[i] != b[i]) return 0;\n"
             "  return a[64] == 0;\n"
@@ -120,14 +120,15 @@ int main(void) {
             "  return 0;\n"
             "}\n";
         (void)sy_write_file(probe_cx, (const unsigned char *)pcode, (long)strlen(pcode), 0644);
-        {
-            char cwd[512], l[600], t[600];
-            if (getcwd(cwd, sizeof cwd)) {
-                cx_fmt(l, sizeof l, "%s/cxroot.tsv", tmp); cx_fmt(t, sizeof t, "%s/cxroot.tsv", cwd); (void)sy_symlink(t, l);
-                cx_fmt(l, sizeof l, "%s/cx", tmp); cx_fmt(t, sizeof t, "%s/cx", cwd); (void)sy_symlink(t, l);
-            }
-        }
-        cx_fmt(cmd, sizeof cmd, "sh ./unisacc.com '%s' -o '%s'", probe_cx, bin_ok);
+        if (!getcwd(cwd, sizeof cwd)) cwd[0] = 0;
+        cx_fmt(cmd, sizeof cmd,
+               "ln -s '%s/cxroot.tsv' '%s/cxroot.tsv' && "
+               "mkdir -p '%s/cx/sys' && "
+               "for d in '%s'/cx/*; do b=$(basename \"$d\"); [ \"$b\" != sys ] && ln -s \"$d\" '%s/cx/'\"$b\"; done && "
+               "for f in '%s'/cx/sys/*; do b=$(basename \"$f\"); [ \"$b\" != sha.cx ] && ln -s \"$f\" '%s/cx/sys/'\"$b\"; done && "
+               "sed 's/sfd = socket(38, 5, 0);/sfd = -1;/' cx/sys/sha.cx > '%s/cx/sys/sha.cx' && "
+               "sh ./unisacc.com '%s' -o '%s'",
+               cwd, tmp, tmp, cwd, tmp, cwd, tmp, tmp, probe_cx, bin_ok);
         int b_rc = run_sh(cmd, out, sizeof out);
         int r_ok = (b_rc == 0 && run_sh(bin_ok, out, sizeof out) == 0);
         ck(r_ok, "forced-fallback-nist-null0-and-invalid-args");
