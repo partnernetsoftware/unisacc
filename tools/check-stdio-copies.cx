@@ -5,12 +5,12 @@
  *
  * CHAIN is a chain directory. For each fixedpoint/g2/<target>/*.o, nm -n sizes the
  * non-label t/T symbols _u_vfmt _u_ffmt _u_dexp fprintf vfprintf printf snprintf
- * vsnprintf fputs. A symbol's bytes are the address delta to the next t/T symbol
- * that is not an __unisacc_ label. Prints UNIT <target> <unit> <bytes> for each
- * object that carries a copy, then one SUMMARY line per target and one chain
- * SUMMARY. The chain SUMMARY is the lnx-x86_64 target when that target has copies,
- * otherwise the first target that does. On the 9e2ac4df6 chain that line is
- * SUMMARY units=21 bytes=322888.
+ * vsnprintf fputs. A symbol's bytes are the address delta to the next different
+ * address, or the .text section end for the last symbol. Same-address aliases count
+ * once. __unisacc_L labels are skipped; __unisacc_R rewrites of those names count.
+ * Prints UNIT lines for copies, then one SUMMARY per target that had objects.
+ * A target with no .o is skipped. --target T scans only that target. The run
+ * refuses only when no selected target has any objects.
  *
  * --obj-dir DIR scans a flat directory of .o (a priv-relink output, not a chain).
  * Every object is printed, including 0 B, so a unit that dropped its copy is visible.
@@ -42,6 +42,8 @@ static long sc_bytes[SC_MAX];
 static int sc_n;
 static int sc_fail;
 static const char *sc_run_id;
+static char sc_scanned[16][32];
+static int sc_scanned_n;
 
 static int sc_bare(const char *n) {
     return tx_eq(n, "_u_vfmt", 16) || tx_eq(n, "_u_ffmt", 16) || tx_eq(n, "_u_dexp", 16)
@@ -257,7 +259,7 @@ static int sc_load_allow(const char *path, char **allow, int *nallow) {
     return 0;
 }
 
-static int sc_scan(const char *chain, char **allow, int nallow) {
+static int sc_scan(const char *chain, char **allow, int nallow, const char *only) {
     char g2[1024], tp[1100], op[1200], dump[256];
     sy_dir_t td, od;
     int tr, orc;
@@ -269,6 +271,7 @@ static int sc_scan(const char *chain, char **allow, int nallow) {
         if (td.kind != 'd') continue;
         if (cx_fmt(tp, sizeof tp, "%s/%s", g2, td.name)) return 2;
         int nobj = 0;
+        if (only && !tx_eq(td.name, only, 32)) continue;
         if (sy_dir_open(&od, tp)) { fprintf(stderr, "stdio-copies: no %s\n", tp); return 2; }
         while ((orc = sy_dir_next(&od)) == 1) {
             long bn;
@@ -287,50 +290,30 @@ static int sc_scan(const char *chain, char **allow, int nallow) {
             }
         }
         if (orc < 0) { sy_dir_close(&od); return 2; }
-        if (nobj == 0) { fprintf(stderr, "stdio-copies: zero objects %s\n", tp); sy_dir_close(&od); return 2; }
         sy_dir_close(&od);
+        if (nobj == 0) continue;
+        if (sc_scanned_n >= 16) return 2;
+        if (tx_copy(sc_scanned[sc_scanned_n], 32, td.name, (long)tx_len(td.name, 31))) return 2;
+        sc_scanned_n = sc_scanned_n + 1;
     }
     sy_dir_close(&td);
     sy_unlink(dump);
+    if (sc_scanned_n == 0) { fprintf(stderr, "stdio-copies: no target has objects\n"); return 2; }
     return tr < 0 ? 2 : 0;
 }
 
 static void sc_report(void) {
-    int i, u, seen;
-    char tgts[16][32];
-    int nt = 0;
-    int pick = -1;
-    long pb = 0;
-    int pu = 0;
+    int i;
     for (i = 0; i < sc_n; i = i + 1)
         printf("UNIT %s %s %ld\n", sc_tgt[i], sc_name[i], sc_bytes[i]);
-    for (i = 0; i < sc_n; i = i + 1) {
-        int j, found = 0;
-        for (j = 0; j < nt; j = j + 1) if (tx_eq(tgts[j], sc_tgt[i], 32)) found = 1;
-        if (!found && nt < 16) {
-            if (tx_copy(tgts[nt], 32, sc_tgt[i], (long)tx_len(sc_tgt[i], 31))) return;
-            nt = nt + 1;
-        }
-    }
-    for (i = 0; i < nt; i = i + 1) {
+    for (i = 0; i < sc_scanned_n; i = i + 1) {
         long b = 0;
         int n = 0, k;
-        for (k = 0; k < sc_n; k = k + 1) if (tx_eq(tgts[i], sc_tgt[k], 32)) { b = b + sc_bytes[k]; n = n + 1; }
-        printf("SUMMARY %s units=%d bytes=%ld\n", tgts[i], n, b);
-        if (tx_eq(tgts[i], "lnx-x86_64", 16)) { pick = i; pb = b; pu = n; }
-        if (pick < 0) { pick = i; pb = b; pu = n; }
+        for (k = 0; k < sc_n; k = k + 1) if (tx_eq(sc_scanned[i], sc_tgt[k], 32)) { b = b + sc_bytes[k]; n = n + 1; }
+        printf("SUMMARY %s units=%d bytes=%ld\n", sc_scanned[i], n, b);
     }
-    seen = 0;
-    for (i = 0; i < sc_n; i = i + 1) {
-        int j, hit = 0;
-        for (j = 0; j < i; j = j + 1) if (tx_eq(sc_name[i], sc_name[j], 64)) hit = 1;
-        if (!hit) seen = seen + 1;
-    }
-    u = pu ? pu : seen;
-    printf("SUMMARY units=%d bytes=%ld\n", u, pb);
-    if (sc_run_id) printf("STDIO_COPIES units=%d bytes=%ld run-id=%s\n", u, pb, sc_run_id);
-    else printf("STDIO_COPIES units=%d bytes=%ld\n", u, pb);
-    (void)seen;
+    if (sc_run_id) printf("STDIO_COPIES targets=%d run-id=%s\n", sc_scanned_n, sc_run_id);
+    else printf("STDIO_COPIES targets=%d\n", sc_scanned_n);
 }
 
 static int sc_self(void) {
@@ -381,12 +364,15 @@ static int sc_scan_dir(const char *dir, char **allow, int nallow) {
     sy_unlink(dump);
     if (orc < 0) return 2;
     if (nobj == 0) { fprintf(stderr, "stdio-copies: zero objects %s\n", dir); return 2; }
+    if (tx_copy(sc_scanned[0], 32, "obj-dir", 7)) return 2;
+    sc_scanned_n = 1;
     return 0;
 }
 
 
 int main(int argc, char **argv) {
     const char *chain = 0;
+    const char *only = 0;
     const char *objdir = 0;
     const char *allow_path = 0;
     const char *opt_out = 0;
@@ -403,12 +389,13 @@ int main(int argc, char **argv) {
             printf("FAIL\treceipt-stale\n");
             return 1;
         }
-        if ((tx_eq(argv[i], "--allow", 16) || tx_eq(argv[i], "--obj-dir", 16) || tx_eq(argv[i], "--run-id", 16) || tx_eq(argv[i], "--out", 16) || tx_eq(argv[i], "--judge-receipt", 20)) && i + 1 >= argc) {
+        if ((tx_eq(argv[i], "--allow", 16) || tx_eq(argv[i], "--obj-dir", 16) || tx_eq(argv[i], "--target", 16) || tx_eq(argv[i], "--run-id", 16) || tx_eq(argv[i], "--out", 16) || tx_eq(argv[i], "--judge-receipt", 20)) && i + 1 >= argc) {
             fprintf(stderr, "stdio-copies: missing value %s\n", argv[i]);
             return 2;
         }
         if (tx_eq(argv[i], "--allow", 16)) { allow_path = argv[i + 1]; i = i + 1; continue; }
         if (tx_eq(argv[i], "--obj-dir", 16)) { objdir = argv[i + 1]; i = i + 1; continue; }
+        if (tx_eq(argv[i], "--target", 16)) { only = argv[i + 1]; i = i + 1; continue; }
         if (tx_eq(argv[i], "--run-id", 16)) { sc_run_id = argv[i + 1]; i = i + 1; continue; }
         if (tx_eq(argv[i], "--out", 16)) { opt_out = argv[i + 1]; i = i + 1; continue; }
         if (argv[i][0] != '-') chain = argv[i];
@@ -419,7 +406,7 @@ int main(int argc, char **argv) {
         if (sc_load_allow(allow_path, allow, &nallow)) { fprintf(stderr, "stdio-copies: allow file\n"); return 2; }
     }
     if (objdir) rc = sc_scan_dir(objdir, allow, nallow);
-    else rc = sc_scan(chain, allow, nallow);
+    else rc = sc_scan(chain, allow, nallow, only);
     if (rc) return rc;
     sc_report();
     if (sc_run_id && opt_out) {
