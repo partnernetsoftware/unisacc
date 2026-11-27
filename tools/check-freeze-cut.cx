@@ -127,7 +127,7 @@ static int check_staged_roster_coverage(const char *root, const char *drop_gate)
     if (!cr || !fc) { mm_free(cr); mm_free(fc); return -1; }
 
     long cr_at = tx_find(cr, (long)cr_len, "#define CR_GATE_ROSTER(X)", 25);
-    long fc_at = tx_find(fc, (long)fc_len, "stage_gates[5]", 14);
+    long fc_at = tx_find(fc, (long)fc_len, "stage_gates[7]", 14);
     if (cr_at < 0 || fc_at < 0) { mm_free(cr); mm_free(fc); return -1; }
 
     char union_gates[128][64];
@@ -683,6 +683,9 @@ int main(int argc, char **argv) {
             "      printf '19-chain-preflight\\tFAIL\\tpreflight-red\\nREADY=no\\n'; exit 1\n"
             "    fi\n"
             "    if [ -f .git/slow_chain_ready ]; then sleep 57; fi\n"
+            "    if [ -f .git/need_strace_path ]; then\n"
+            "      case \":$PATH:\" in *\":$HOME/.local/bin:\"*) ;; *) printf '2a-derive\\tFAIL\\treadset-needs-strace\\nREADY=no\\n'; exit 1 ;; esac\n"
+            "    fi\n"
             "    printf '10-envhygiene\\tPASS\\tclean\\n20-ident-helper\\tPASS\\tok\\nREADY=yes\\n'\n"
             "    exit 0 ;;\n"
             "esac\n"
@@ -754,11 +757,21 @@ int main(int argc, char **argv) {
                    "-u UNISACC_BOUND_DEADLINE_MONO -u UNISACC_BOOTER_CHAIN_OUT %s sh '%s/unisacc.com' '%s/tools/freeze-cut.cx' -- %s",
                    env_g4, g_root, g_root, args);
             fc_sh(g_root, cmd_slow, 70, &r);
-            ck(r.rc == 2 && fc_has(&r, "REFUSE\tFREEZE_CUT\tchain-ready-stage-timeout:derive"),
+            ck(r.rc == 2 && fc_has(&r, "REFUSE\tFREEZE_CUT\tchain-ready-stage-timeout:derive-a"),
                "mut-gate-b-chain-ready-stage-timeout-refused", &r);
             pr_free(&r);
         }
         cx_fmt(shcmd, sizeof shcmd, "rm -f '%s/.git/slow_chain_ready'", repo_g4);
+        fc_sh(g_root, shcmd, 10, &r); pr_free(&r);
+
+        /* 14b3: Gate (b) staged chain-ready inherits caller PATH + $HOME/.local/bin (for strace) */
+        cx_fmt(shcmd, sizeof shcmd, "touch '%s/.git/need_strace_path'", repo_g4);
+        fc_sh(g_root, shcmd, 10, &r); pr_free(&r);
+        run_fc(env_g4, args, &r);
+        ck(r.rc == 0 && fc_has(&r, "FREEZE_CUT\tCHECK_PASS"),
+           "gate-b-chain-ready-inherits-local-bin-path", &r);
+        pr_free(&r);
+        cx_fmt(shcmd, sizeof shcmd, "rm -f '%s/.git/need_strace_path'", repo_g4);
         fc_sh(g_root, shcmd, 10, &r); pr_free(&r);
 
         /* 14c: Gate (c) shard registry mismatch (missing shard row in tests/batches.tsv or tool failure) refused */
