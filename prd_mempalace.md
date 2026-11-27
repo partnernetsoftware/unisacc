@@ -23,6 +23,7 @@
 
 ### v0.1.9 编排决定(2026-11-28,cc 执行,依据 fable 裁定)
 
+- 决定(环境变量弃用顺延,第 6 次):UNISA_MAXSTEPS、UNISA_JOBS、UNISA_FFI_BRIDGE、UNISA_KERNEL、UNISA_KERNEL_SHA、UNISA_NOSTDINC、UNISA_CONTAINER、UNISA_FWD_REPLAY 的到期版本由 0.1.9 改为 0.1.10(tests/env-semantics.tsv 第 8 列;顺延链 0.0.110 -> 0.1.4 -> 0.1.6 -> 0.1.7 -> 0.1.8 -> 0.1.9 -> 0.1.10);依据:改名是产品输入变更,冻结中不可并入,UNISA_CONTAINER 在整链、m1 运行时与 CI 中在用;证据:check-env-semantics failed 8 -> 0;承诺:v0.1.10 必须携带改名(产品读点双读 UNISACC_ 优先,工具经 envcompat/envtwin,CI 两处同步,UNISA_NOSTDINC 先核后删),不得再顺延,届时门应拒绝第 7 次;回滚:git revert 该提交,门恢复为红。
 - 决定(证据分层):LOCAL 证据留在各 piece 批次,formal negatives 只在发布前置门对正式链 APE 与 v3 回执执行,两层不得互相冒充;回滚:撤本条,恢复按 piece 各自 `--chain-ape` 结论拼接,formal negatives 记 UNMEASURED,不据此发布。
 - 决定(单一 v3 链回执):所有 `--chain-ape` 消费方统一使用 `candidate-chain.rcpt` 的 v3 契约,经 `rc_verify_out` 绑定 rev、target、candidate_sha、inputs_sha 与 output_path,不再读四列 `ape-receipt.txt`;回滚:撤本条,回退 `check-v019-formal-negatives` 与各消费方到旧回执,发布前置门保持阻塞。
 - 决定(freezescope 顺延):freezescope 登记与材料列缺口顺延 v0.1.10,v0.1.9 不宣称 freeze-scope 已闭;回滚:恢复三行材料列登记并重跑 33 秒批次,未过前仍不宣称已闭。
