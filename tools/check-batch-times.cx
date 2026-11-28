@@ -1,0 +1,346 @@
+/* tools/check-batch-times.cx -- verification suite for tools/batch-times.cx and prerun-drive --near-bound-file.
+ *
+ *   sh ./unisacc.com tools/check-batch-times.cx
+ *
+ * Checks:
+ *   (1) repo build/batch-times.tsv matches tools/batch-times.cx --check (rc 0) and uses max_ms/median_ms/timeouts/fails
+ *   (2) k=21 fixture (min=1000 != median=11000 != p95=20000 != max=45000, budget=25s -> 80% near-bound)
+ *       kills p95-as-max and median-as-min mutations; 70.0% boundary is ok
+ *   (3) TIMEOUT vs FAIL separation: timeout-only triggers near-bound + split ticket; fail-only stays ok with fails>0
+ *   (4) >1024 samples refuses (too-many-samples, rc 2) and >1024 files refuses (too-many-files, rc 2)
+ *   (5) 4/5-level depth boundary: depth-4 subdir strict file is scanned, depth-5 subdir strict file is ignored
+ *   (6) source mutation of threshold_pct (70 -> 85 in copied batch-times.cx) turns --check red (rc 1 + DIFF)
+ *   (7) prerun-drive --near-bound-file preserves real-commit two-phase (prebuild-self + near-bound-warm)
+ *       and exercises all 6 warmup near_bound filter branches (warmup=1 x3 + warmup=2 x3)
+ */
+#pragma unisa use sys.io
+#pragma unisa use sys.env
+#pragma unisa use sys.fs
+#pragma unisa use sys.proc
+#pragma unisa use sys.posix
+#pragma unisa use text.text
+#pragma unisa use text.fmt
+#pragma unisa use mem.bytes
+#pragma unisa use mem.heap
+#pragma unisa use cxlib.outfmt
+
+static int failed, nok;
+static char dir[320];
+
+static void ck(int ok, const char *name) {
+    if (ok) { nok++; sy_printf("PASS\tcheck-batch-times.%s\n", name); }
+    else { failed++; sy_printf("FAIL\tcheck-batch-times.%s\n", name); }
+}
+
+static int hasl(const char *h, const char *lit) {
+    if (!h || !lit) return 0;
+    long hn = tx_len(h, 400000), ln = tx_len(lit, 4096);
+    if (hn < 0) hn = 400000;
+    for (long i = 0; i + ln <= hn; i++) {
+        if (h[i] == lit[0] && mm_same(h + i, lit, ln)) return 1;
+    }
+    return 0;
+}
+
+static int run_cmd(const char *cmd, char *out, long cap) {
+    char *o = 0;
+    size_t n = 0;
+    char *v[] = {"sh", "-c", (char *)cmd, 0};
+    int rc = cx_runv_timeout(v, 45, &o, &n);
+    out[0] = 0;
+    if (o) {
+        long cp = (long)n < cap - 1 ? (long)n : cap - 1;
+        if (cp > 0) mm_copy(out, cap, o, (size_t)cp);
+        out[cp] = 0;
+        free(o);
+    }
+    return rc;
+}
+
+static void put_rel(const char *rel, const char *body) {
+    char p[512];
+    cx_fmt(p, sizeof p, "%s/%s", dir, rel);
+    cx_write(p, body, tx_len(body, 400000));
+}
+
+static char *rd_rel(const char *rel, size_t *n) {
+    char p[512];
+    cx_fmt(p, sizeof p, "%s/%s", dir, rel);
+    return cx_read(p, n);
+}
+
+static void ck_warmup_case(const char *name, const char *ids, const char *nb, const char *times, const char *prio, int warmup, const char *nb_id) {
+    char sub[512], cmd[1600], out[8192];
+    cx_fmt(sub, sizeof sub, "%s/wp-%s", dir, name);
+    sy_mkdir(sub, 0700);
+    char p_ids[512], p_nb[512], p_tm[512], p_pr[512];
+    cx_fmt(p_ids, sizeof p_ids, "%s/ids.txt", sub);
+    cx_write(p_ids, ids, tx_len(ids, 10000));
+    cx_fmt(p_nb, sizeof p_nb, "%s/nb.txt", sub);
+    cx_write(p_nb, nb, tx_len(nb, 10000));
+    if (times) {
+        cx_fmt(p_tm, sizeof p_tm, "%s/times.tsv", sub);
+        cx_write(p_tm, times, tx_len(times, 10000));
+    }
+    if (prio) {
+        cx_fmt(p_pr, sizeof p_pr, "%s/prio.tsv", sub);
+        cx_write(p_pr, prio, tx_len(prio, 10000));
+    }
+    if (times && prio) {
+        cx_fmt(cmd, sizeof cmd, "sh ./unisacc.com tools/prerun-drive.cx -- plan --ids-file %s --near-bound-file %s --times-file %s --priority-file %s --out %s --warmup %d",
+               p_ids, p_nb, p_tm, p_pr, sub, warmup);
+    } else if (times) {
+        cx_fmt(cmd, sizeof cmd, "sh ./unisacc.com tools/prerun-drive.cx -- plan --ids-file %s --near-bound-file %s --times-file %s --out %s --warmup %d",
+               p_ids, p_nb, p_tm, sub, warmup);
+    } else if (prio) {
+        cx_fmt(cmd, sizeof cmd, "sh ./unisacc.com tools/prerun-drive.cx -- plan --ids-file %s --near-bound-file %s --priority-file %s --out %s --warmup %d",
+               p_ids, p_nb, p_pr, sub, warmup);
+    } else {
+        cx_fmt(cmd, sizeof cmd, "sh ./unisacc.com tools/prerun-drive.cx -- plan --ids-file %s --near-bound-file %s --out %s --warmup %d",
+               p_ids, p_nb, sub, warmup);
+    }
+    int rc = run_cmd(cmd, out, sizeof out);
+    char wp[512];
+    cx_fmt(wp, sizeof wp, "%s/windows.tsv", sub);
+    size_t wn = 0;
+    char *wb = cx_read(wp, &wn);
+    int ok = (rc == 0 && wb != 0);
+    if (ok) {
+        char want_nb[160];
+        cx_fmt(want_nb, sizeof want_nb, "\t1\tnear-bound-warm\t1\t%s\n", nb_id);
+        if (!hasl(wb, want_nb)) ok = 0;
+        long pos = 0;
+        while (pos < (long)wn) {
+            long ls = pos;
+            while (pos < (long)wn && wb[pos] != '\n') pos++;
+            long le = pos;
+            if (pos < (long)wn) pos++;
+            if (le - ls > 6 && mm_same(wb + ls, "W0000\t", 6)) {
+                char wline[512];
+                long cp = le - ls < 511 ? le - ls : 511;
+                mm_copy(wline, sizeof wline, wb + ls, (size_t)cp);
+                wline[cp] = 0;
+                if (hasl(wline, "\twarmup\t") && hasl(wline, nb_id)) ok = 0;
+            }
+        }
+    }
+    if (wb) free(wb);
+    ck(ok, name);
+}
+
+int main(void) {
+    char out[16384], cmd[1600], sub[512];
+    int rc;
+
+    if (cx_fmt(dir, sizeof dir, "%s/batch-times-check-XXXXXX", sy_tmpdir()) || !mkdtemp(dir)) {
+        ck(0, "tmpdir");
+        return 1;
+    }
+    cx_fmt(sub, sizeof sub, "%s/tests", dir); sy_mkdir(sub, 0700);
+    cx_fmt(sub, sizeof sub, "%s/release", dir); sy_mkdir(sub, 0700);
+    cx_fmt(sub, sizeof sub, "%s/release/evidence", dir); sy_mkdir(sub, 0700);
+    cx_fmt(sub, sizeof sub, "%s/release/evidence/0.1.9", dir); sy_mkdir(sub, 0700);
+    cx_fmt(sub, sizeof sub, "%s/build", dir); sy_mkdir(sub, 0700);
+    cx_fmt(sub, sizeof sub, "%s/plan-out", dir); sy_mkdir(sub, 0700);
+
+    /* (1) Repo check */
+    rc = run_cmd("sh ./unisacc.com tools/batch-times.cx -- --check", out, sizeof out);
+    ck(rc == 0 && hasl(out, "BATCH_TIMES\tok\t"), "repo-check-ok");
+    {
+        size_t rn = 0;
+        char *rb = cx_read("build/batch-times.tsv", &rn);
+        ck(rb != 0 && rn > 0 && hasl(rb, "batch\tmax_ms\tmedian_ms\tp95_ms\tbudget_ms\theadroom_ms\tsamples\ttimeouts\tfails\tstatus\tsplit_ticket\n"), "repo-table-header");
+        if (rb) free(rb);
+    }
+
+    /* (2) k=21 fixture + 70% boundary + timeout-only + fail-only (must NOT trigger near-bound) */
+    put_rel("tests/batches.tsv",
+        "id\timplementation\tlayer\tsource\tmode\tplatform\tbudget_seconds\tmaterials\tentry\targs\tcoverage\texpect\theaders\ttier\n"
+        "fast-b\tIMPLEMENTED\tinterfaces\ttools/a.cx\tSOURCE\tlnx/x86_64\t50\t-\ttools/a.cx\t-\tinterfaces.fast\trc0:FAST\tproduct\tdaily\n"
+        "edge-b\tIMPLEMENTED\tinterfaces\ttools/b.cx\tSOURCE\tlnx/x86_64\t50\t-\ttools/b.cx\t-\tinterfaces.edge\trc0:EDGE\tproduct\tdaily\n"
+        "slow-b\tIMPLEMENTED\tinterfaces\ttools/c.cx\tSOURCE\tlnx/x86_64\t25\t-\ttools/c.cx\t-\tinterfaces.slow\trc0:SLOW\tproduct\tdaily\n"
+        "to-only-b\tIMPLEMENTED\tinterfaces\ttools/d.cx\tSOURCE\tlnx/x86_64\t55\t-\ttools/d.cx\t-\tinterfaces.to\trc0:TO\tproduct\tdaily\n"
+        "fail-only-b\tIMPLEMENTED\tinterfaces\ttools/e.cx\tSOURCE\tlnx/x86_64\t55\t-\ttools/e.cx\t-\tinterfaces.fail\trc0:FL\tproduct\tdaily\n"
+        "depth4-b\tIMPLEMENTED\tinterfaces\ttools/f.cx\tSOURCE\tlnx/x86_64\t50\t-\ttools/f.cx\t-\tinterfaces.d4\trc0:D4\tproduct\tdaily\n"
+        "depth5-b\tIMPLEMENTED\tinterfaces\ttools/g.cx\tSOURCE\tlnx/x86_64\t50\t-\ttools/g.cx\t-\tinterfaces.d5\trc0:D5\tproduct\tdaily\n");
+
+    {
+        char *sb = (char *)mm_alloc(65536);
+        long sp = 0;
+        const char *hdr = "# fixture k=21\nbatch\tdomain\tstatus\trc\tcandidate\tms\tload1\tretries\tnote\n";
+        mm_copy(sb, 65536, hdr, strlen(hdr)); sp += (long)strlen(hdr);
+        for (int k = 1; k <= 20; k++) {
+            char row[256];
+            cx_fmt(row, sizeof row, "slow-b\ttool-selfcheck\tPASS\t0\tdeadbeef\t%d\t1.00\t0\t-\n", k * 1000);
+            mm_copy(sb + sp, 65536 - sp, row, strlen(row)); sp += (long)strlen(row);
+        }
+        const char *tail =
+            "fast-b\ttool-selfcheck\tPASS\t0\tdeadbeef\t1000\t1.00\t0\t-\n"
+            "fast-b\ttool-selfcheck\tFAIL\t1\tdeadbeef\t1500\t1.00\t0\t-\n"
+            "edge-b\ttool-selfcheck\tPASS\t0\tdeadbeef\t35000\t1.00\t0\t-\n"
+            "to-only-b\ttool-selfcheck\tTIMEOUT\t124\tdeadbeef\t55000\t1.00\t0\t-\n"
+            "fail-only-b\ttool-selfcheck\tFAIL\t1\tdeadbeef\t49000\t1.00\t0\t-\n";
+        mm_copy(sb + sp, 65536 - sp, tail, strlen(tail)); sp += (long)strlen(tail);
+        sb[sp] = 0;
+        put_rel("release/evidence/strict-W0001.tsv", sb);
+        mm_free(sb);
+    }
+
+    {
+        char sub[1024];
+        if (cx_fmt(sub, sizeof sub,
+            "# fixture subdir\n%s\n"
+            "fast-b\ttool-selfcheck\tPASS\t0\tdeadbeef\t1200\t1.00\t0\t-\n"
+            "edge-b\ttool-selfcheck\tPASS\t0\tdeadbeef\t35000\t1.00\t0\t-\n"
+            "slow-b\ttool-selfcheck\tPASS\t0\tdeadbeef\t45000\t1.00\t0\t-\n"
+            "to-only-b\ttool-selfcheck\tTIMEOUT\t142\tdeadbeef\t55000\t1.00\t0\t-\n", of_strict_header())) return 2;
+        put_rel("release/evidence/0.1.9/strict-W0002.tsv", sub);
+    }
+
+    /* (5) 4/5-level depth boundary: depth-4 scanned, depth-5 ignored */
+    cx_fmt(sub, sizeof sub, "%s/release/evidence/a/b/c/d/e", dir);
+    sy_mkdir_all(sub, 0700);
+    put_rel("release/evidence/a/b/c/d/strict-l4.tsv", "depth4-b\t2000\n");
+    put_rel("release/evidence/a/b/c/d/e/strict-l5.tsv", "depth5-b\t2000\n");
+
+    cx_fmt(cmd, sizeof cmd, "sh ./unisacc.com tools/batch-times.cx -- --write --root %s", dir);
+    rc = run_cmd(cmd, out, sizeof out);
+    ck(rc == 0 && hasl(out, "BATCH_TIMES\twrote\tmeasured=4\tnear_bound=2\tthreshold_pct=70"), "fixture-write-ok");
+
+    {
+        size_t fn = 0;
+        char *fb = rd_rel("build/batch-times.tsv", &fn);
+        /* fast-b has 1 FAIL row: fails=1, timeouts=0, status=ok (FAIL never triggers near-bound) */
+        ck(fb != 0 && hasl(fb, "fast-b\t1200\t1000\t1200\t50000\t48800\t2\t0\t1\tok\t-\n"), "fixture-fast-ok-with-fail-col");
+        ck(fb != 0 && hasl(fb, "edge-b\t35000\t35000\t35000\t50000\t15000\t2\t0\t0\tok\t-\n"), "fixture-edge-70pct-ok");
+        ck(fb != 0 && hasl(fb, "slow-b\t45000\t11000\t20000\t25000\t5000\t21\t0\t0\tnear-bound\tSPLIT_TICKET:slow-b:p95=20000ms>70%of25000ms,timeouts=0\n"), "fixture-k21-p95-vs-max-median-vs-min");
+        ck(fb != 0 && hasl(fb, "to-only-b\tUNMEASURED\tUNMEASURED\tUNMEASURED\t55000\tUNMEASURED\t0\t2\t0\tnear-bound\tSPLIT_TICKET:to-only-b:timeouts=2,budget=55000ms\n"), "fixture-timeout-only-alarm");
+        ck(fb != 0 && hasl(fb, "fail-only-b\tUNMEASURED\tUNMEASURED\tUNMEASURED\t55000\tUNMEASURED\t0\t0\t1\tok\t-\n"), "fixture-fail-only-not-near-bound");
+        ck(fb != 0 && hasl(fb, "depth4-b\t2000\t2000\t2000\t50000\t48000\t1\t0\t0\tok\t-\n") && !hasl(fb, "depth5-b\t"), "fixture-depth-4-5-boundary");
+        ck(fb != 0 && hasl(fb, "# SPLIT_TICKET\tslow-b\tp95_ms=20000\t") && hasl(fb, "# SPLIT_TICKET\tto-only-b\tp95_ms=UNMEASURED\t"), "fixture-split-ticket-lines");
+        if (fb) free(fb);
+    }
+
+    cx_fmt(cmd, sizeof cmd, "sh ./unisacc.com tools/batch-times.cx -- --check --root %s", dir);
+    rc = run_cmd(cmd, out, sizeof out);
+    ck(rc == 0 && hasl(out, "BATCH_TIMES\tok\tmeasured=4\tnear_bound=2\tthreshold_pct=70"), "fixture-check-ok");
+
+    /* (4a) >1024 samples refuses instead of truncating */
+    {
+        char *ov = (char *)mm_alloc(128000);
+        long op = 0;
+        for (int k = 0; k < 1030; k++) {
+            const char *r = "fast-b\t1000\n";
+            mm_copy(ov + op, 128000 - op, r, strlen(r));
+            op += (long)strlen(r);
+        }
+        ov[op] = 0;
+        put_rel("overflow-strict.tsv", ov);
+        mm_free(ov);
+        cx_fmt(cmd, sizeof cmd, "sh ./unisacc.com tools/batch-times.cx -- --check --root %s --strict %s/overflow-strict.tsv", dir, dir);
+        rc = run_cmd(cmd, out, sizeof out);
+        ck(rc == 2 && hasl(out, "REFUSE\tbatch-times\ttoo-many-samples"), "overflow-samples-refused");
+    }
+
+    /* (4b) >1024 strict files refuses instead of silently truncating */
+    {
+        char mdir[512], mf[600];
+        cx_fmt(mdir, sizeof mdir, "%s/many-files", dir);
+        sy_mkdir(mdir, 0700);
+        for (int k = 0; k < 1025; k++) {
+            cx_fmt(mf, sizeof mf, "%s/strict-%04d.tsv", mdir, k);
+            cx_write(mf, "fast-b\t1000\n", 12);
+        }
+        cx_fmt(cmd, sizeof cmd, "sh ./unisacc.com tools/batch-times.cx -- --check --root %s --strict-dir %s", dir, mdir);
+        rc = run_cmd(cmd, out, sizeof out);
+        ck(rc == 2 && hasl(out, "REFUSE\tbatch-times\ttoo-many-files"), "overflow-files-refused");
+    }
+
+    /* (6) Source mutation: mutate default threshold_pct = 70 -> 85 in copied tools/batch-times.cx */
+    {
+        size_t sn = 0;
+        char *src = cx_read("tools/batch-times.cx", &sn);
+        int mut_ok = 0;
+        if (src && sn > 0) {
+            const char *needle = "int threshold_pct = 70;";
+            long nl = (long)strlen(needle);
+            long at = -1;
+            for (long i = 0; i + nl <= (long)sn; i++) {
+                if (src[i] == needle[0] && mm_same(src + i, needle, nl)) { at = i; break; }
+            }
+            if (at >= 0) {
+                char repo[4096], lsrc[4400], ldst[512];
+                if (sy_realpath(".", repo, sizeof repo) >= 0) {
+                    cx_fmt(lsrc, sizeof lsrc, "%s/cxroot.tsv", repo);
+                    cx_fmt(ldst, sizeof ldst, "%s/cxroot.tsv", dir);
+                    symlink(lsrc, ldst);
+                    cx_fmt(lsrc, sizeof lsrc, "%s/cx", repo);
+                    cx_fmt(ldst, sizeof ldst, "%s/cx", dir);
+                    symlink(lsrc, ldst);
+                }
+                char *msrc = (char *)mm_alloc(sn + 1);
+                mm_copy(msrc, (long)sn + 1, src, (long)sn);
+                mm_copy(msrc + at, nl, "int threshold_pct = 85;", nl);
+                msrc[sn] = 0;
+                char mp[512];
+                cx_fmt(mp, sizeof mp, "%s/batch-times-mut.cx", dir);
+                cx_write(mp, msrc, (long)sn);
+                mm_free(msrc);
+                cx_fmt(cmd, sizeof cmd, "sh ./unisacc.com %s -- --check --root %s", mp, dir);
+                rc = run_cmd(cmd, out, sizeof out);
+                mut_ok = (rc == 1 && hasl(out, "DIFF\t") && hasl(out, "BATCH_TIMES\tdrift\t"));
+            }
+            free(src);
+        }
+        ck(mut_ok, "source-threshold-mutation-red");
+    }
+
+    /* Tampering output turns --check red */
+    put_rel("build/batch-times.tsv", "tampered\n");
+    cx_fmt(cmd, sizeof cmd, "sh ./unisacc.com tools/batch-times.cx -- --check --root %s", dir);
+    rc = run_cmd(cmd, out, sizeof out);
+    ck(rc == 1 && hasl(out, "DIFF\t"), "tamper-detected-red");
+
+    /* Restore clean fixture output for prerun-drive tests */
+    cx_fmt(cmd, sizeof cmd, "sh ./unisacc.com tools/batch-times.cx -- --write --root %s", dir);
+    rc = run_cmd(cmd, out, sizeof out);
+    ck(rc == 0, "fixture-restore-ok");
+
+    /* Invalid threshold refused */
+    cx_fmt(cmd, sizeof cmd, "sh ./unisacc.com tools/batch-times.cx -- --check --root %s --threshold-pct 0", dir);
+    rc = run_cmd(cmd, out, sizeof out);
+    ck(rc == 2 && hasl(out, "REFUSE\tbatch-times\tthreshold-pct-out-of-range"), "invalid-threshold-refused");
+
+    /* (7a) prerun-drive --near-bound-file: real-commit near-bound preserves two-phase prebuild-self + near-bound-warm */
+    put_rel("ids-rc.txt", "fast-b\nreal-commit\nslow-b\n");
+    put_rel("nb-rc.txt", "real-commit\nslow-b\n");
+    cx_fmt(cmd, sizeof cmd,
+           "sh ./unisacc.com tools/prerun-drive.cx -- plan --ids-file %s/ids-rc.txt --near-bound-file %s/nb-rc.txt --out %s/plan-out --warmup 1",
+           dir, dir, dir);
+    rc = run_cmd(cmd, out, sizeof out);
+    {
+        size_t wn = 0;
+        char *wb = rd_rel("plan-out/windows.tsv", &wn);
+        ck(rc == 0 && wb != 0 &&
+           hasl(wb, "\t1\tprebuild-self\t1\treal-commit\n") &&
+           hasl(wb, "\t1\tnear-bound-warm\t1\treal-commit\n") &&
+           hasl(wb, "\t1\tnear-bound-warm\t1\tslow-b\n"),
+           "prerun-real-commit-two-phase-near-bound");
+        if (wb) free(wb);
+    }
+
+    /* (7b) Exercise all 6 warmup near_bound filter branches (warmup=1 x3 + warmup=2 x3) */
+    ck_warmup_case("w1-p1", "nb-fast\nok-b\n", "nb-fast\n", "nb-fast\t500\nok-b\t2000\n", 0, 1, "nb-fast");
+    ck_warmup_case("w1-p2", "nb-fast\nri-image-x\n", "nb-fast\n", "nb-fast\t500\nri-image-x\t2000\n", 0, 1, "nb-fast");
+    ck_warmup_case("w1-p3", "unit-frontcache-nb\nunit-frontcache-ok\n", "unit-frontcache-nb\n", "unit-frontcache-nb\t500\nunit-frontcache-ok\t2000\n", 0, 1, "unit-frontcache-nb");
+    ck_warmup_case("w2-p1", "nb-a\nok-a\nok-b\n", "nb-a\n", 0, 0, 2, "nb-a");
+    ck_warmup_case("w2-p2", "nb-a\nok-a\n", "nb-a\n", 0, "nb-a\t2\nok-a\t2\n", 2, "nb-a");
+    ck_warmup_case("w2-p3", "unit-frontcache-nb\nunit-frontcache-ok\n", "unit-frontcache-nb\n", 0, 0, 2, "unit-frontcache-nb");
+
+    {
+        char *v[] = {"rm", "-rf", dir, 0};
+        cx_runv_timeout(v, 20, 0, 0);
+    }
+    sy_printf("CHECK_BATCH_TIMES\tok=%d\tfailed=%d\n", nok, failed);
+    return failed ? 1 : 0;
+}

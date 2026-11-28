@@ -1,7 +1,7 @@
 /* tools/prerun-drive.cx -- bounded window-granularity qualification prerun driver and offline replay verifier.
  * Subcommands:
  *   plan   --ids-file FILE --out DIR [--win-size 8..12] [--heavy-file FILE] [--warmup N]
- *          [--times-file FILE --normal-jobs 1..16] [--priority-file FILE] [--window-lanes 1..8]
+ *          [--times-file FILE --normal-jobs 1..16] [--priority-file FILE] [--near-bound-file FILE] [--window-lanes 1..8]
  *   run    --root DIR --candidate APE --out DIR [--resume] [--max-jobs N] [--max-retries 2]
  *          [--window-lanes 1..8] (defaults to the new plan's width, 1 on legacy plans)
  *          (--load-cap N is still accepted but ignored with a PRERUN_DEPRECATED line: load gates retired 2026-11-20)
@@ -47,6 +47,7 @@
 typedef struct {
     char id[128];
     int heavy;
+    int near_bound;
     int priority;
     int nonpass;
     int measured;
@@ -221,6 +222,7 @@ static int pd_load_ids(const char *path) {
         if (dup) continue;
         cx_fmt(pd_ids[pd_nids].id, sizeof pd_ids[pd_nids].id, "%s", id);
         pd_ids[pd_nids].heavy = pd_is_heavy_id(id);
+        pd_ids[pd_nids].near_bound = 0;
         pd_ids[pd_nids].priority = 0;
         pd_ids[pd_nids].nonpass = 0;
         pd_ids[pd_nids].measured = 0;
@@ -521,6 +523,47 @@ static int pd_load_priority_file(const char *path) {
     return 0;
 }
 
+static int pd_load_near_bound_file(const char *path) {
+    unsigned char *b = 0; int64_t n = 0;
+    if (sy_read_file(path, &b, &n, 8 << 20)) return -1;
+    int64_t pos = 0;
+    while (pos < n) {
+        int64_t ls = pos;
+        while (pos < n && b[pos] != '\n') pos++;
+        int64_t le = pos;
+        if (pos < n) pos++;
+        while (le > ls && (b[le - 1] == '\r' || b[le - 1] == ' ' || b[le - 1] == '\t')) le--;
+        while (ls < le && (b[ls] == ' ' || b[ls] == '\t')) ls++;
+        if (le <= ls || b[ls] == '#') continue;
+        const char *cols[12]; int64_t clens[12]; int nc = 0; int64_t p = ls;
+        while (nc < 12) {
+            int64_t cs = p;
+            while (p < le && b[p] != '\t') p++;
+            cols[nc] = (const char *)b + cs; clens[nc] = p - cs; nc++;
+            if (p >= le) break;
+            p++;
+        }
+        if (clens[0] == 5 && memcmp(cols[0], "batch", 5) == 0) continue;
+        if (clens[0] == 2 && memcmp(cols[0], "id", 2) == 0) continue;
+        int mark = 0;
+        if (nc >= 10 && clens[9] == 10 && memcmp(cols[9], "near-bound", 10) == 0) {
+            mark = 1;
+        } else if (nc >= 9 && clens[8] == 10 && memcmp(cols[8], "near-bound", 10) == 0) {
+            mark = 1;
+        } else if (nc == 8 || (nc >= 8 && clens[7] == 10 && memcmp(cols[7], "near-bound", 10) == 0)) {
+            if (clens[7] == 10 && memcmp(cols[7], "near-bound", 10) == 0) mark = 1;
+        } else if (nc == 1) {
+            mark = 1;
+        }
+        if (mark) {
+            int idx = pd_find_id(cols[0], (size_t)clens[0]);
+            if (idx >= 0) pd_ids[idx].near_bound = 1;
+        }
+    }
+    mm_free(b);
+    return 0;
+}
+
 static void pd_pack_normal_group(int *rem, int nrem, int win_size, int *w_normal) {
     if (nrem <= 0) return;
     if (!pd_has_times) {
@@ -619,7 +662,7 @@ static int pd_warmup_fits(int i, long cost) {
 
 static int pd_build_plan(int win_size, int warmup_n, const char *out_dir) {
     int used[PD_MAX_IDS];
-    int i, w_warmup = 0, w_heavy = 0, w_normal = 0, has_rc = -1;
+    int i, w_warmup = 0, w_heavy = 0, w_normal = 0, w_near_bound = 0, has_rc = -1;
     if (win_size < 8 || win_size > 12) return pd_refuse("win-size-must-be-8-to-12");
     if (pd_normal_jobs < 1 || pd_normal_jobs > 16) return pd_refuse("normal-jobs-must-be-1-to-16");
     if (pd_max_wins < 1 || pd_max_wins > PD_MAX_WINS) return pd_refuse("invalid-max-wins");
@@ -659,21 +702,21 @@ static int pd_build_plan(int win_size, int warmup_n, const char *out_dir) {
         if (pd_has_times && warmup_n == 1) {
             int best = -1;
             for (i = 0; i < pd_nids; i++) {
-                if (!pd_ids[i].heavy && !pd_ids[i].nonpass && !pd_is_early_canary_id(pd_ids[i].id) &&
+                if (!pd_ids[i].heavy && !pd_ids[i].near_bound && !pd_ids[i].nonpass && !pd_is_early_canary_id(pd_ids[i].id) &&
                     !pd_is_warmup_excluded_id(pd_ids[i].id) && pd_warmup_fits(i, 0)) {
                     if (best < 0 || pd_ids[i].time_ms < pd_ids[best].time_ms) best = i;
                 }
             }
             if (best < 0) {
                 for (i = 0; i < pd_nids; i++) {
-                    if (!pd_ids[i].heavy && !pd_is_warmup_excluded_id(pd_ids[i].id) && pd_warmup_fits(i, 0)) {
+                    if (!pd_ids[i].heavy && !pd_ids[i].near_bound && !pd_is_warmup_excluded_id(pd_ids[i].id) && pd_warmup_fits(i, 0)) {
                         if (best < 0 || pd_ids[i].time_ms < pd_ids[best].time_ms) best = i;
                     }
                 }
             }
             if (best < 0) {
                 for (i = 0; i < pd_nids; i++) {
-                    if (!pd_ids[i].heavy && pd_warmup_fits(i, 0)) {
+                    if (!pd_ids[i].heavy && !pd_ids[i].near_bound && pd_warmup_fits(i, 0)) {
                         if (best < 0 || pd_ids[i].time_ms < pd_ids[best].time_ms) best = i;
                     }
                 }
@@ -685,7 +728,7 @@ static int pd_build_plan(int win_size, int warmup_n, const char *out_dir) {
             }
         } else {
             for (i = 0; i < pd_nids && w->count < warmup_n && w->count < win_size; i++) {
-                if (!pd_ids[i].heavy && !pd_ids[i].priority && !pd_is_early_canary_id(pd_ids[i].id) &&
+                if (!pd_ids[i].heavy && !pd_ids[i].near_bound && !pd_ids[i].priority && !pd_is_early_canary_id(pd_ids[i].id) &&
                     !pd_is_warmup_excluded_id(pd_ids[i].id) && pd_warmup_fits(i, cost)) {
                     w->idxs[w->count++] = i;
                     used[i] = 1;
@@ -693,14 +736,14 @@ static int pd_build_plan(int win_size, int warmup_n, const char *out_dir) {
                 }
             }
             for (i = 0; i < pd_nids && w->count < warmup_n && w->count < win_size; i++) {
-                if (!used[i] && !pd_ids[i].heavy && !pd_is_warmup_excluded_id(pd_ids[i].id) && pd_warmup_fits(i, cost)) {
+                if (!used[i] && !pd_ids[i].heavy && !pd_ids[i].near_bound && !pd_is_warmup_excluded_id(pd_ids[i].id) && pd_warmup_fits(i, cost)) {
                     w->idxs[w->count++] = i;
                     used[i] = 1;
                     cost += pd_ids[i].time_ms;
                 }
             }
             for (i = 0; i < pd_nids && w->count < warmup_n && w->count < win_size; i++) {
-                if (!used[i] && !pd_ids[i].heavy && pd_warmup_fits(i, cost)) {
+                if (!used[i] && !pd_ids[i].heavy && !pd_ids[i].near_bound && pd_warmup_fits(i, cost)) {
                     w->idxs[w->count++] = i;
                     used[i] = 1;
                     cost += pd_ids[i].time_ms;
@@ -717,7 +760,7 @@ static int pd_build_plan(int win_size, int warmup_n, const char *out_dir) {
         static int can_rem[PD_MAX_IDS];
         int ncan = 0;
         for (i = 0; i < pd_nids; i++) {
-            if (!used[i] && !pd_ids[i].heavy && pd_is_early_canary_id(pd_ids[i].id)) {
+            if (!used[i] && !pd_ids[i].heavy && !pd_ids[i].near_bound && pd_is_early_canary_id(pd_ids[i].id)) {
                 can_rem[ncan++] = i;
                 used[i] = 1;
             }
@@ -732,13 +775,13 @@ static int pd_build_plan(int win_size, int warmup_n, const char *out_dir) {
             static int pri_rem[PD_MAX_IDS];
             int npri = 0;
             for (i = 0; i < pd_nids; i++) {
-                if (!used[i] && !pd_ids[i].heavy && pd_ids[i].priority == prio) {
+                if (!used[i] && !pd_ids[i].heavy && !pd_ids[i].near_bound && pd_ids[i].priority == prio) {
                     pri_rem[npri++] = i;
                     used[i] = 1;
                 }
             }
             pd_pack_normal_group(pri_rem, npri, win_size, &w_normal);
-            if (has_rc >= 0 && !used[has_rc] && pd_ids[has_rc].priority == prio && pd_nwins + 2 <= pd_max_wins) {
+            if (has_rc >= 0 && !used[has_rc] && !pd_ids[has_rc].near_bound && pd_ids[has_rc].priority == prio && pd_nwins + 2 <= pd_max_wins) {
                 PdWin *wp = &pd_wins[pd_nwins++];
                 cx_fmt(wp->wid, sizeof wp->wid, "W%04d", pd_nwins - 1);
                 wp->jobs = 1;
@@ -756,7 +799,7 @@ static int pd_build_plan(int win_size, int warmup_n, const char *out_dir) {
                 w_heavy++;
             }
             for (i = 0; i < pd_nids; i++) {
-                if (!used[i] && pd_ids[i].heavy && pd_ids[i].priority == prio && pd_nwins < pd_max_wins) {
+                if (!used[i] && pd_ids[i].heavy && !pd_ids[i].near_bound && pd_ids[i].priority == prio && pd_nwins < pd_max_wins) {
                     PdWin *w = &pd_wins[pd_nwins];
                     cx_fmt(w->wid, sizeof w->wid, "W%04d", pd_nwins);
                     w->jobs = 1;
@@ -772,7 +815,7 @@ static int pd_build_plan(int win_size, int warmup_n, const char *out_dir) {
     }
 
     /* 3. Two-phase real-commit: prebuild-self followed by single-batch jobs=1 window */
-    if (has_rc >= 0 && !used[has_rc] && pd_nwins + 2 <= pd_max_wins) {
+    if (has_rc >= 0 && !used[has_rc] && !pd_ids[has_rc].near_bound && pd_nwins + 2 <= pd_max_wins) {
         PdWin *wp = &pd_wins[pd_nwins++];
         cx_fmt(wp->wid, sizeof wp->wid, "W%04d", pd_nwins - 1);
         wp->jobs = 1;
@@ -792,7 +835,7 @@ static int pd_build_plan(int win_size, int warmup_n, const char *out_dir) {
 
     /* 4. Other heavy batches: each in its own jobs=1 window */
     for (i = 0; i < pd_nids; i++) {
-        if (!used[i] && pd_ids[i].heavy && pd_nwins < pd_max_wins) {
+        if (!used[i] && pd_ids[i].heavy && !pd_ids[i].near_bound && pd_nwins < pd_max_wins) {
             PdWin *w = &pd_wins[pd_nwins];
             cx_fmt(w->wid, sizeof w->wid, "W%04d", pd_nwins);
             w->jobs = 1;
@@ -809,8 +852,35 @@ static int pd_build_plan(int win_size, int warmup_n, const char *out_dir) {
     {
         static int rem[PD_MAX_IDS];
         int nrem = 0;
-        for (i = 0; i < pd_nids; i++) if (!used[i]) { rem[nrem++] = i; used[i] = 1; }
+        for (i = 0; i < pd_nids; i++) if (!used[i] && !pd_ids[i].near_bound) { rem[nrem++] = i; used[i] = 1; }
         pd_pack_normal_group(rem, nrem, win_size, &w_normal);
+    }
+
+    /* 6. Final near-bound -j 1 warm windows (exclusive, after cache warmup and normal/heavy work).
+     *    Preserve two-phase prebuild-self for real-commit when real-commit itself is near-bound. */
+    for (i = 0; i < pd_nids; i++) {
+        if (!used[i] && pd_ids[i].near_bound) {
+            if (i == has_rc) {
+                if (pd_nwins + 2 > pd_max_wins) continue;
+                PdWin *wp = &pd_wins[pd_nwins++];
+                cx_fmt(wp->wid, sizeof wp->wid, "W%04d", pd_nwins - 1);
+                wp->jobs = 1;
+                cx_fmt(wp->phase, sizeof wp->phase, "prebuild-self");
+                wp->count = 1;
+                wp->idxs[0] = i;
+            }
+            if (pd_nwins < pd_max_wins) {
+                PdWin *w = &pd_wins[pd_nwins];
+                cx_fmt(w->wid, sizeof w->wid, "W%04d", pd_nwins);
+                w->jobs = 1;
+                cx_fmt(w->phase, sizeof w->phase, "near-bound-warm");
+                w->count = 1;
+                w->idxs[0] = i;
+                used[i] = 1;
+                pd_nwins++;
+                w_near_bound++;
+            }
+        }
     }
 
     int planned = 0;
@@ -884,6 +954,8 @@ static int pd_build_plan(int win_size, int warmup_n, const char *out_dir) {
     if (wrc) return pd_refuse("write-windows");
     printf("PRERUN_PLAN\ttotal=%d\twindows=%d\twarmup=%d\theavy=%d\tnormal=%d\tout=%s\n",
            pd_nids, pd_nwins, w_warmup, w_heavy, w_normal, wpath);
+    if (w_near_bound > 0)
+        printf("PRERUN_NEAR_BOUND\twindows=%d\tphase=near-bound-warm\tjobs=1\n", w_near_bound);
     if (pd_has_times) {
         printf("PRERUN_LANE_ESTIMATE\twindow_lanes=%d\tnormal_jobs=%d\tgroups=%d\twall_ms=%ld\tserial_ms=%ld\tscope=batch-timing-only-no-contention\n",
                pd_plan_lanes,pd_normal_jobs,lane_groups,lane_wall,estimated);
@@ -3478,7 +3550,7 @@ int main(int argc, char **argv) {
         return pd_cmd_prepare(chain_d, root_d, ver, out_d, ids_f, times_f, prio_f, heavy_f, win_sz, warmup);
     }
     if (tx_eqz(sub, "plan")) {
-        const char *ids_f = 0, *out_d = 0, *heavy_f = 0, *times_f = 0, *prio_f = 0;
+        const char *ids_f = 0, *out_d = 0, *heavy_f = 0, *times_f = 0, *prio_f = 0, *nb_f = 0;
         int win_sz = 10, warmup = -1;
         for (int i = 2; i < argc; i++) {
             if (tx_eqz(argv[i], "--ids-file") && i + 1 < argc) ids_f = argv[++i];
@@ -3486,6 +3558,7 @@ int main(int argc, char **argv) {
             else if (tx_eqz(argv[i], "--heavy-file") && i + 1 < argc) heavy_f = argv[++i];
             else if (tx_eqz(argv[i], "--times-file") && i + 1 < argc) times_f = argv[++i];
             else if (tx_eqz(argv[i], "--priority-file") && i + 1 < argc) prio_f = argv[++i];
+            else if (tx_eqz(argv[i], "--near-bound-file") && i + 1 < argc) nb_f = argv[++i];
             else if (tx_eqz(argv[i], "--normal-jobs") && i + 1 < argc) { pd_normal_jobs = atoi(argv[++i]); if (pd_normal_jobs < 1) pd_normal_jobs = 2; }
             else if (tx_eqz(argv[i], "--window-lanes") && i + 1 < argc) {
                 pd_plan_lanes = pd_width(argv[++i], PD_MAX_LANES);
@@ -3503,6 +3576,7 @@ int main(int argc, char **argv) {
         if (pd_load_ids(ids_f)) return pd_refuse("read-ids-file");
         if (times_f && pd_load_times_file(times_f)) return pd_refuse("read-times-file");
         if (prio_f && pd_load_priority_file(prio_f)) return pd_refuse("read-priority-file");
+        if (nb_f && pd_load_near_bound_file(nb_f)) return pd_refuse("read-near-bound-file");
         if (warmup < 0) warmup = pd_has_times ? 1 : 4;
         return pd_build_plan(win_sz, warmup, out_d);
     }
