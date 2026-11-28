@@ -1,0 +1,110 @@
+/* tools/check-packing-authority-split.cx -- multiset-equality guard for packing-authority split.
+ * Verifies:
+ *   (1) tests/split-parents.tsv excludes parent packing-authority with shards
+ *       packing-authority-facts,packing-authority-mutations and check split-packing-authority.
+ *   (2) Union of --list-assertions --part facts + --part mutations equals the unsharded
+ *       --list-assertions multiset (13 == 6 + 7, zero missing, zero duplicate, zero extra).
+ *   (3) Every listed assertion matches an actual ck(...) call in tools/check-packing-authority.cx.
+ *
+ * Marker: CHECK_PACKING_AUTHORITY_SPLIT
+ */
+#pragma unisa use sys.fs
+#pragma unisa use sys.posix
+#pragma unisa use sys.io
+#pragma unisa use mem.heap
+#pragma unisa use mem.bytes
+#pragma unisa use text.text
+#pragma unisa use text.fmt
+#pragma unisa use cxlib.procrun
+
+#define MAX_A 64
+
+static int cmp_str(const void *a, const void *b) {
+    return strcmp((const char *)a, (const char *)b);
+}
+
+static int collect_assertions(const char *root, const char *part, char out[MAX_A][96], int *cnt) {
+    char prod[4096], tool[4096];
+    if (cx_fmt(prod, sizeof prod, "%s/unisacc.com", root) ||
+        cx_fmt(tool, sizeof tool, "%s/tools/check-packing-authority.cx", root)) return -1;
+    char *av_all[]  = { "sh", prod, tool, "--", "--list-assertions", 0 }; /* lint:allow R1-product lists assertions */
+    char *av_part[] = { "sh", prod, tool, "--", "--list-assertions", "--part", (char *)part, 0 }; /* lint:allow R1-product lists shard assertions */
+    pr_result r;
+    int rc = pr_run("pa-list", part ? av_part : av_all, root, 0, 25, &r);
+    if (rc != 0 || r.rc != 0 || !r.out || r.outn <= 0) { pr_free(&r); return -1; }
+    long at = 0;
+    while (at < (long)r.outn) {
+        long e = at;
+        while (e < (long)r.outn && r.out[e] != '\n') e++;
+        long len = e - at;
+        if (len > 7 && tx_prefix(r.out + at, len, "ASSERT\t", 7)) {
+            if (*cnt >= MAX_A || len - 7 >= 96) { pr_free(&r); return -1; }
+            mm_copy(out[*cnt], 96, r.out + at + 7, len - 7);
+            out[*cnt][len - 7] = 0;
+            (*cnt)++;
+        }
+        at = e + 1;
+    }
+    pr_free(&r);
+    return 0;
+}
+
+int main(int argc, char **argv) {
+    const char *root = (argc > 1 && argv[1][0]) ? argv[1] : ".";
+    char sp_path[4096], src_path[4096];
+    int ok = 1;
+    if (cx_fmt(sp_path, sizeof sp_path, "%s/tests/split-parents.tsv", root) ||
+        cx_fmt(src_path, sizeof src_path, "%s/tools/check-packing-authority.cx", root)) return 2;
+
+    unsigned char *sp = 0, *src = 0; int64_t spn = 0, srcn = 0;
+    if (sy_read_file(sp_path, &sp, &spn, 1 << 20) != 0 || !sp ||
+        tx_find((const char *)sp, (long)spn,
+                "packing-authority\tpacking-authority-facts,packing-authority-mutations\tsplit-packing-authority\t", 94) < 0) {
+        sy_eprintf("FAIL split-parents-row-missing\n");
+        ok = 0;
+    }
+    if (sp) mm_free(sp);
+
+    char orig[MAX_A][96], sh[MAX_A][96];
+    int no = 0, ns = 0;
+    if (collect_assertions(root, 0, orig, &no) != 0 ||
+        collect_assertions(root, "facts", sh, &ns) != 0 ||
+        collect_assertions(root, "mutations", sh, &ns) != 0) {
+        sy_eprintf("FAIL collect-assertions\n");
+        ok = 0;
+    }
+    if (no != 13 || ns != 13) {
+        sy_eprintf("FAIL count-mismatch orig=%d shards=%d\n", no, ns);
+        ok = 0;
+    } else {
+        qsort(orig, (size_t)no, 96, cmp_str);
+        qsort(sh, (size_t)ns, 96, cmp_str);
+        for (int i = 0; i < no; i++) {
+            if (!tx_eqz(orig[i], sh[i])) {
+                sy_eprintf("FAIL multiset-diff idx=%d orig=%s shard=%s\n", i, orig[i], sh[i]);
+                ok = 0;
+            }
+            if (i > 0 && tx_eqz(sh[i], sh[i - 1])) {
+                sy_eprintf("FAIL duplicate-assertion name=%s\n", sh[i]);
+                ok = 0;
+            }
+        }
+    }
+
+    if (sy_read_file(src_path, &src, &srcn, 2 << 20) == 0 && src) {
+        for (int i = 0; i < no; i++) {
+            char pat[128];
+            if (cx_fmt(pat, sizeof pat, "\"%s\")", orig[i]) ||
+                tx_find((const char *)src, (long)srcn, pat, (long)strlen(pat)) < 0) {
+                sy_eprintf("FAIL source-ck-missing name=%s\n", orig[i]);
+                ok = 0;
+            }
+        }
+        mm_free(src);
+    } else {
+        ok = 0;
+    }
+
+    sy_printf("CHECK_PACKING_AUTHORITY_SPLIT\tstatus=%s\torig=%d\tshards=%d\n", ok ? "PASS" : "FAIL", no, ns);
+    return ok ? 0 : 1;
+}

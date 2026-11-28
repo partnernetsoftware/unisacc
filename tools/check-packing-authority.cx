@@ -169,11 +169,52 @@ static int verify_p4_tape_count(const char *path, int want_count, const char *mu
     return ok;
 }
 
+static const char *const pa_facts_names[] = {
+    "cf-tu-current-m53-and-snap-state",
+    "chain-facts-gen-positive-driveargs-bind",
+    "chain-facts-gen-refuse-missing-tape-unit",
+    "chain-facts-gen-refuse-dangling-tape-unit",
+    "chain-facts-gen-refuse-duplicate-tape-unit",
+    "chain-facts-gen-refuse-non-linux-tape-unit",
+    0
+};
+static const char *const pa_muts_names[] = {
+    "release-build-exact-set-positive",
+    "mutation-extra-slice-red",
+    "mutation-dup-manifest-row-red",
+    "mutation-extra-tsv-col-red",
+    "mutation-missing-chain-facts-red",
+    "mutation-snap-unmatched-root-target-red",
+    "mutation-snap-chain-facts-mismatch-red",
+    0
+};
+
 int main(int argc, char **argv) {
-    int mode_chain = (argc >= 2 && tx_eqz(argv[1], "--chain"));
-    int mode_routed4 = (argc >= 2 && (tx_eqz(argv[1], "--routed4") || tx_eqz(argv[1], "--embed")));
-    int mode_all = (argc >= 2 && tx_eqz(argv[1], "--all"));
+    int mode_chain = 0, mode_routed4 = 0, mode_all = 0, list_only = 0;
+    const char *part = 0;
+    for (int ai = 1; ai < argc; ai++) {
+        if (tx_eqz(argv[ai], "--chain")) mode_chain = 1;
+        else if (tx_eqz(argv[ai], "--routed4") || tx_eqz(argv[ai], "--embed")) mode_routed4 = 1;
+        else if (tx_eqz(argv[ai], "--all")) mode_all = 1;
+        else if (tx_eqz(argv[ai], "--list-assertions")) list_only = 1;
+        else if (tx_eqz(argv[ai], "--part") && ai + 1 < argc) part = argv[++ai];
+    }
+    if (part && !tx_eqz(part, "facts") && !tx_eqz(part, "mutations")) {
+        sy_eprintf("check-packing-authority: unknown --part %s\n", part);
+        return 2;
+    }
+    if (list_only) {
+        if (!part || tx_eqz(part, "facts")) {
+            for (int i = 0; pa_facts_names[i]; i++) sy_printf("ASSERT\t%s\n", pa_facts_names[i]);
+        }
+        if (!part || tx_eqz(part, "mutations")) {
+            for (int i = 0; pa_muts_names[i]; i++) sy_printf("ASSERT\t%s\n", pa_muts_names[i]);
+        }
+        return 0;
+    }
     int run_default = (!mode_chain && !mode_routed4) || mode_all;
+    int run_facts = run_default && (!part || tx_eqz(part, "facts"));
+    int run_muts = run_default && (!part || tx_eqz(part, "mutations"));
     int run_routed4 = mode_routed4 || mode_all;
     int run_chain = mode_chain || mode_all;
     char repo[512], tmp[512], out[16384];
@@ -184,7 +225,7 @@ int main(int argc, char **argv) {
     char *fbase = cx_read("build/chain-facts.tsv", &flen);
     if (!fbase || !flen) { sy_eprintf("read build/chain-facts.tsv failed\n"); return 2; }
 
-    if (run_default) {
+    if (run_facts) {
         /* (0) Current generated cf_tu_* and cf_snap_tape_state sanity */
         {
             int ok = (cf_tu_count() >= 1 &&
@@ -291,7 +332,19 @@ int main(int argc, char **argv) {
             if (fb) mm_free(fb);
             ck(ok, "chain-facts-gen-refuse-non-linux-tape-unit");
         }
+    }
 
+    if (run_muts) {
+        /* Compile release-build once and reuse across all 7 embed-tape control checks. */
+        char rb_bin[640];
+        if (cx_fmt(rb_bin, sizeof rb_bin, "%s/rb_bin", tmp)) { mm_free(fbase); return 2; }
+        {
+            char *vr[] = {"sh", "./unisacc.com", "tools/release-build.cx", "-o", rb_bin, 0};
+            if (run_in(repo, vr, out, sizeof out, 45) != 0) {
+                sy_eprintf("compile release-build failed: %.240s\n", out);
+                mm_free(fbase); return 2;
+            }
+        }
         /* (2) Release-build embed controls in default registered batch */
         {
             char fxroot[640], inc[700], bdir0[700], fx_nocf[640], inc_nc[700], src_p3[640], out_ok[640], out_bad[640];
@@ -348,9 +401,8 @@ int main(int argc, char **argv) {
             if (cx_fmt(p, sizeof p, "%s/manifest.tsv", t_ok) || cx_write(p, mf, (size_t)tx_len(mf, sizeof mf)) ||
                 cx_fmt(p, sizeof p, "%s/tapemode.so", t_ok) || cx_write(p, so_b, (size_t)tx_len(so_b, 128))) return 2;
             {
-                char *v[] = {"sh", "./unisacc.com", "tools/release-build.cx", "--",
-                             "p3", fxroot, src_p3, out_ok, "--embed-tape", t_ok, 0};
-                int rc = run_in(repo, v, out, sizeof out, 35);
+                char *v[] = {rb_bin, "p3", fxroot, src_p3, out_ok, "--embed-tape", t_ok, 0};
+                int rc = run_in(repo, v, out, sizeof out, 25);
                 ck(rc == 0 && verify_p4_tape_count(out_ok, 2 + cf_tu_count(), "tape/lnx-x86_64/m53.tapeslice"), "release-build-exact-set-positive");
             }
 
@@ -363,8 +415,7 @@ int main(int argc, char **argv) {
                     cx_fmt(p, sizeof p, "%s/rogue.tapeslice", t_extra) || cx_write(p, rg_b, (size_t)tx_len(rg_b, 128))) return 2;
             }
             {
-                char *v[] = {"sh", "./unisacc.com", "tools/release-build.cx", "--",
-                             "p3", fxroot, src_p3, out_bad, "--embed-tape", t_extra, 0};
+                char *v[] = {rb_bin, "p3", fxroot, src_p3, out_bad, "--embed-tape", t_extra, 0};
                 int rc = run_in(repo, v, out, sizeof out, 25);
                 ck(rc != 0 && strstr(out, "manifest set mismatch") != 0, "mutation-extra-slice-red");
             }
@@ -378,8 +429,7 @@ int main(int argc, char **argv) {
                     cx_fmt(p, sizeof p, "%s/tapemode.so", t_dup) || cx_write(p, so_b, (size_t)tx_len(so_b, 128))) return 2;
             }
             {
-                char *v[] = {"sh", "./unisacc.com", "tools/release-build.cx", "--",
-                             "p3", fxroot, src_p3, out_bad, "--embed-tape", t_dup, 0};
+                char *v[] = {rb_bin, "p3", fxroot, src_p3, out_bad, "--embed-tape", t_dup, 0};
                 int rc = run_in(repo, v, out, sizeof out, 25);
                 ck(rc != 0 && strstr(out, "manifest set mismatch") != 0, "mutation-dup-manifest-row-red");
             }
@@ -393,16 +443,14 @@ int main(int argc, char **argv) {
                     cx_fmt(p, sizeof p, "%s/tapemode.so", t_col) || cx_write(p, so_b, (size_t)tx_len(so_b, 128))) return 2;
             }
             {
-                char *v[] = {"sh", "./unisacc.com", "tools/release-build.cx", "--",
-                             "p3", fxroot, src_p3, out_bad, "--embed-tape", t_col, 0};
+                char *v[] = {rb_bin, "p3", fxroot, src_p3, out_bad, "--embed-tape", t_col, 0};
                 int rc = run_in(repo, v, out, sizeof out, 25);
                 ck(rc != 0 && strstr(out, "manifest set mismatch") != 0, "mutation-extra-tsv-col-red");
             }
 
             /* 2e: Snapshot missing build/chain-facts.tsv -> RED */
             {
-                char *v[] = {"sh", "./unisacc.com", "tools/release-build.cx", "--",
-                             "p3", fx_nocf, src_p3, out_bad, "--embed-tape", t_ok, 0};
+                char *v[] = {rb_bin, "p3", fx_nocf, src_p3, out_bad, "--embed-tape", t_ok, 0};
                 int rc = run_in(repo, v, out, sizeof out, 25);
                 ck(rc != 0 && strstr(out, "snapshot chain-facts") != 0, "mutation-missing-chain-facts-red");
             }
@@ -415,8 +463,7 @@ int main(int argc, char **argv) {
                 if (!cx_fmt(bf, sizeof bf, "%s/chain-facts.tsv", bdir0) &&
                     !append_str(fbase, flen, add, &fb, &fbn) &&
                     !cx_write(bf, fb, fbn)) {
-                    char *v[] = {"sh", "./unisacc.com", "tools/release-build.cx", "--",
-                                 "p3", fxroot, src_p3, out_bad, "--embed-tape", t_ok, 0};
+                    char *v[] = {rb_bin, "p3", fxroot, src_p3, out_bad, "--embed-tape", t_ok, 0};
                     int rc = run_in(repo, v, out, sizeof out, 25);
                     if (rc != 0 && strstr(out, "snapshot chain-facts")) ok = 1;
                 }
@@ -434,8 +481,7 @@ int main(int argc, char **argv) {
                 if (!cx_fmt(bf, sizeof bf, "%s/chain-facts.tsv", bdir0) &&
                     !append_str(fbase, flen, add, &fb, &fbn) &&
                     !cx_write(bf, fb, fbn)) {
-                    char *v[] = {"sh", "./unisacc.com", "tools/release-build.cx", "--",
-                                 "p3", fxroot, src_p3, out_bad, "--embed-tape", t_ok, 0};
+                    char *v[] = {rb_bin, "p3", fxroot, src_p3, out_bad, "--embed-tape", t_ok, 0};
                     int rc = run_in(repo, v, out, sizeof out, 25);
                     if (rc != 0 && strstr(out, "snapshot chain-facts")) ok = 1;
                 }
