@@ -2875,11 +2875,31 @@ static void pd_add_batch_meta(const char *id, long idn, int planned, int foreign
     m->foreign = foreign;
 }
 
-static int pd_load_repo_batch_meta(const char *root) {
+static int pd_git_show_rev(const char *root, const char *rev, const char *rel, unsigned char **out_b, int64_t *out_n) {
+    char spec[512], why[256];
+    *out_b = 0; *out_n = 0;
+    if (!rev || !rev[0] || cx_fmt(spec, sizeof spec, "%s:%s", rev, rel)) return 1;
+    char *av[] = {"git", "-C", (char *)root, "show", spec, 0};
+    np_result r = {0};
+    if (np_run(av, 0, 0, 15, &r, why, sizeof why) || r.rc != 0 || !r.out) {
+        np_free(&r);
+        return 1;
+    }
+    unsigned char *cp = (unsigned char *)mm_alloc((size_t)r.outn + 1);
+    if (!cp) { np_free(&r); return 1; }
+    if (r.outn > 0) mm_copy(cp, (size_t)r.outn + 1, r.out, (size_t)r.outn);
+    cp[r.outn] = 0;
+    *out_b = cp;
+    *out_n = (int64_t)r.outn;
+    np_free(&r);
+    return 0;
+}
+
+static int pd_load_repo_batch_meta(const char *root, const char *rev) {
     char p[PD_PW];
     unsigned char *b = 0; int64_t n = 0;
     pd_nbmeta = 0; pd_npq = 0; pd_nsplit_p = 0;
-    if (!cx_fmt(p, sizeof p, "%s/tests/split-parents.tsv", root) && !sy_read_file(p, &b, &n, 1 << 20)) {
+    if (!pd_git_show_rev(root, rev, "tests/split-parents.tsv", &b, &n)) {
         int64_t pos = 0;
         while (pos < n && pd_nsplit_p < 64) {
             int64_t ls = pos;
@@ -2898,28 +2918,42 @@ static int pd_load_repo_batch_meta(const char *root) {
         }
         mm_free(b); b = 0; n = 0;
     }
-    if (!cx_fmt(p, sizeof p, "%s/tests/batches.tsv", root) && !sy_read_file(p, &b, &n, 8 << 20)) {
+    if (pd_git_show_rev(root, rev, "tests/batches.tsv", &b, &n)) {
+        return pd_refuse("read-freeze-rev-batches");
+    }
+    {
         int rc = tp_visit_prepare_meta((const char *)b, n, pd_add_batch_meta);
         mm_free(b); b = 0; n = 0;
         if (rc) return pd_refuse("prepare-batch-meta-limit");
     }
-    if (cx_fmt(p, sizeof p, "%s/tests/batch-domain-index.tsv", root) || sy_read_file(p, &b, &n, 8 << 20)) {
-        char qp[PD_PW], qc[PD_PW], why[256];
-        if (sy_realpath("./unisacc.com", qp, sizeof qp) > 0 &&
-            !cx_fmt(qc, sizeof qc, "%s/tools/derived-query.cx", root) &&
-            sy_exists(qp) == 1 && sy_exists(qc) == 1) {
-            char *qv[] = {"sh", qp, qc, "--", "batch-domains", "--root", (char *)root, "--path", 0};
-            np_result qr = {0};
-            if (!np_run(qv, root, 0, 30, &qr, why, sizeof why) && qr.rc == 0 && qr.out && qr.outn > 0) {
-                size_t ql = (size_t)qr.outn;
-                while (ql > 0 && (qr.out[ql - 1] == '\n' || qr.out[ql - 1] == '\r')) ql--;
-                if (ql > 0 && ql < sizeof p) {
-                    mm_copy(p, sizeof p, qr.out, ql);
-                    p[ql] = 0;
-                    sy_read_file(p, &b, &n, 8 << 20);
+    if (pd_git_show_rev(root, rev, "tests/batch-domain-index.tsv", &b, &n)) {
+        /* Compute batch-domain-index from an exclusive mkdtemp git-archive snapshot of rev (never mutable worktree). */
+        char snap[PD_PW], cmd[4096], qp[PD_PW], qc[PD_PW], why[256];
+        const char *td = sy_tmpdir();
+        const char *btd = (td && td[0] == '/') ? td : "/tmp";
+        if (sy_mkdtemp(btd, "pd-rev-snap-", snap, sizeof snap) == 0 &&
+            !cx_fmt(cmd, sizeof cmd, "git -C '%s' archive '%s' -- tests tools cx cxroot.tsv | tar -x -C '%s'", root, rev, snap)) {
+            char *av[] = {"sh", "-c", cmd, 0};
+            np_result ar = {0};
+            if (!np_run(av, 0, 0, 20, &ar, why, sizeof why) && ar.rc == 0 &&
+                sy_realpath("./unisacc.com", qp, sizeof qp) > 0 &&
+                !cx_fmt(qc, sizeof qc, "%s/tools/derived-query.cx", snap) &&
+                sy_exists(qp) == 1 && sy_exists(qc) == 1) {
+                char *qv[] = {"sh", qp, qc, "--", "batch-domains", "--root", snap, "--path", 0};
+                np_result qr = {0};
+                if (!np_run(qv, snap, 0, 30, &qr, why, sizeof why) && qr.rc == 0 && qr.out && qr.outn > 0) {
+                    size_t ql = (size_t)qr.outn;
+                    while (ql > 0 && (qr.out[ql - 1] == '\n' || qr.out[ql - 1] == '\r')) ql--;
+                    if (ql > 0 && ql < sizeof p) {
+                        mm_copy(p, sizeof p, qr.out, ql);
+                        p[ql] = 0;
+                        sy_read_file(p, &b, &n, 8 << 20);
+                    }
                 }
+                np_free(&qr);
             }
-            np_free(&qr);
+            np_free(&ar);
+            (void)sy_remove_all(snap);
         }
     }
     if (b && n > 0) {
@@ -2989,7 +3023,6 @@ static int pd_cmd_prepare(const char *from_chain_dir, const char *root_arg, cons
     } else {
         if (sy_realpath(".", root, sizeof root) < 0) cx_fmt(root, sizeof root, ".");
     }
-    if (pd_load_repo_batch_meta(root)) return 2;
     {
         char *gv[] = {"git", "-C", root, "rev-parse", "HEAD", 0};
         np_result gr = {0};
@@ -3043,6 +3076,7 @@ static int pd_cmd_prepare(const char *from_chain_dir, const char *root_arg, cons
     }
     if (strlen(chain_rev) != 40) return pd_refuse("invalid-chain-rev");
     if (strcmp(chain_rev, head_rev) != 0) return pd_refuse("candidate-rev-mismatch");
+    if (pd_load_repo_batch_meta(root, chain_rev)) return 2;
     if (cx_fmt(ape_path, sizeof ape_path, "%s/ape-final/unisacc-next.com", cdir) || sy_exists(ape_path) != 1)
         return pd_refuse("missing-candidate-ape");
     {
@@ -3085,48 +3119,69 @@ static int pd_cmd_prepare(const char *from_chain_dir, const char *root_arg, cons
     if (!latest_strict[0]) pd_find_latest_strict(root, "", latest_strict, sizeof latest_strict);
 
     if (heavy_f && pd_load_heavy_file(heavy_f)) return pd_refuse("read-heavy-file");
+    /* Independent runnable count derived directly from freeze rev's tests/batches.tsv (separate from writer loop). */
+    int expected_runnable = 0;
+    {
+        unsigned char *fb = 0; int64_t fn = 0;
+        if (pd_git_show_rev(root, chain_rev, "tests/batches.tsv", &fb, &fn))
+            return pd_refuse("read-freeze-rev-batches-for-count");
+        int64_t pos = 0;
+        while (pos < fn) {
+            int64_t ls = pos;
+            while (pos < fn && fb[pos] != '\n') pos++;
+            int64_t le = pos;
+            if (pos < fn) pos++;
+            if (le > ls && fb[le - 1] == '\r') le--;
+            if (le <= ls || fb[ls] == '#') continue;
+            long o0 = 0, l0 = 0, o1 = 0, l1 = 0, o5 = 0, l5 = 0;
+            if (!tx_field((const char *)fb + ls, (long)(le - ls), '\t', 0, &o0, &l0) && l0 > 0 && l0 < 95 &&
+                !tx_field((const char *)fb + ls, (long)(le - ls), '\t', 1, &o1, &l1) && l1 == 11 &&
+                tx_same((const char *)fb + ls + o1, l1, "IMPLEMENTED", 11) &&
+                !tx_field((const char *)fb + ls, (long)(le - ls), '\t', 5, &o5, &l5)) {
+                char bid[96];
+                mm_copy(bid, sizeof bid, (const char *)fb + ls + o0, (size_t)l0);
+                bid[l0] = 0;
+                int is_foreign = (l5 > 0 && !(l5 == 10 && tx_same((const char *)fb + ls + o5, l5, "lnx/x86_64", 10)) &&
+                                  !(l5 == 3 && tx_same((const char *)fb + ls + o5, l5, "all", 3)) &&
+                                  !(l5 == 1 && fb[ls + o5] == '-'));
+                if (!is_foreign && !pd_is_split_p(bid, (size_t)l0) && pd_in_pq(bid)) expected_runnable++;
+            }
+        }
+        mm_free(fb);
+    }
+    if (expected_runnable <= 0) return pd_refuse("empty-expected-runnable");
     if (ids_arg && ids_arg[0]) {
         cx_fmt(ids_path, sizeof ids_path, "%s", ids_arg);
         if (pd_load_ids(ids_path)) return pd_refuse("read-ids-file");
+        if (pd_nids != expected_runnable) return pd_refuse("explicit-ids-mismatch-freeze-rev");
+        for (int i = 0; i < pd_nids; i++) {
+            if (!pd_in_pq(pd_ids[i].id)) return pd_refuse("explicit-ids-mismatch-freeze-rev");
+        }
     } else {
         if (cx_fmt(ids_path, sizeof ids_path, "%s/ids.txt", out_dir)) return pd_refuse("ids-path-bound");
-        if (latest_strict[0] && pd_load_ids(latest_strict) == 0 && pd_nids > 0) {
-            size_t cap = 65536, bp = 0;
-            char *ibuf = (char *)mm_alloc(cap);
-            if (!ibuf) return pd_refuse("oom");
-            for (int i = 0; i < pd_nids; i++) {
-                const char *id = pd_ids[i].id;
-                size_t l = strlen(id);
-                if (pd_is_split_p(id, l)) continue;
-                PdBMeta *m = pd_find_bmeta(id, l);
-                if (m && (m->planned || m->foreign)) continue;
-                if (bp + l + 2 < cap) {
-                    mm_copy(ibuf + bp, cap - bp, id, l);
-                    bp += l;
-                    ibuf[bp++] = '\n';
-                }
-            }
-            sy_write_file(ids_path, ibuf, (int64_t)bp, 0644);
-            mm_free(ibuf);
-        } else {
-            size_t cap = 65536, bp = 0;
-            char *ibuf = (char *)mm_alloc(cap);
-            if (!ibuf) return pd_refuse("oom");
-            for (int i = 0; i < pd_npq; i++) {
-                const char *id = pd_pq_ids[i];
-                size_t l = strlen(id);
-                PdBMeta *m = pd_find_bmeta(id, l);
-                if (m && (m->planned || m->foreign)) continue;
-                if (bp + l + 2 < cap) {
-                    mm_copy(ibuf + bp, cap - bp, id, l);
-                    bp += l;
-                    ibuf[bp++] = '\n';
-                }
-            }
-            sy_write_file(ids_path, ibuf, (int64_t)bp, 0644);
-            mm_free(ibuf);
+        /* Always compute runnable ids fresh from the freeze rev's registered batches (no reuse of old ids.txt). */
+        size_t cap = 65536, bp = 0;
+        char *ibuf = (char *)mm_alloc(cap);
+        if (!ibuf) return pd_refuse("oom");
+        for (int i = 0; i < pd_npq; i++) {
+            const char *id = pd_pq_ids[i];
+            size_t l = strlen(id);
+            if (pd_is_split_p(id, l)) continue;
+            PdBMeta *m = pd_find_bmeta(id, l);
+            if (m && (m->planned || m->foreign)) continue;
+            if (bp + l + 2 >= cap) { mm_free(ibuf); return pd_refuse("ids-buffer-bound"); }
+            mm_copy(ibuf + bp, cap - bp, id, l);
+            bp += l;
+            ibuf[bp++] = '\n';
         }
+        if (sy_write_file(ids_path, ibuf, (int64_t)bp, 0644) != 0) {
+            mm_free(ibuf);
+            return pd_refuse("write-ids-failed");
+        }
+        mm_free(ibuf);
         if (pd_load_ids(ids_path) || pd_nids <= 0) return pd_refuse("empty-prepared-ids");
+        if (pd_nids != expected_runnable) return pd_refuse("ids-count-mismatch");
+        printf("PRERUN_IDS_COMPUTED\trev=%s\tcount=%d\texpected=%d\n", chain_rev, pd_nids, expected_runnable);
     }
 
     int bad_planned = 0, bad_foreign = 0;
