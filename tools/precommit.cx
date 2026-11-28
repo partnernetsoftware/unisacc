@@ -335,6 +335,45 @@ static int new_tool_compile_ok(const char *p) {
     return 1;
 }
 
+static int registered_in_staged_manifests(const char *p) {
+    char *mv[] = {"git", "diff", "--cached", "--name-only", "-z", "--", "tests/manifests", 0};
+    long mn = 0, at = 0, pl = tx_len(p, 4600);
+    char *mnames = slurp(mv, &mn);
+    if (!mnames) return 0;
+    int found = 0;
+    while (at < mn && !found) {
+        const char *mp = mnames + at;
+        long ml = tx_len(mp, mn - at);
+        at += ml + 1;
+        if (ml <= 4 || !tx_suffix(mp, ml, ".tsv", 4)) continue;
+        char spec[4600];
+        if (cx_fmt(spec, sizeof spec, ":%s", mp)) continue;
+        char *sv[] = {"git", "show", spec, 0};
+        long sn = 0;
+        char *sb = slurp(sv, &sn);
+        if (sb && sn > 0) {
+            long la = 0;
+            while (la < sn && !found) {
+                long e = tx_chr(sb + la, sn - la, '\n');
+                long l = (e < 0) ? (sn - la) : e;
+                long o0, l0, o2, l2, o4, l4, o9, l9;
+                if (l > 0 && sb[la] != '#' &&
+                    !tx_field(sb + la, l, '\t', 0, &o0, &l0) && l0 == 5 && tx_same(sb + la + o0, l0, "batch", 5) &&
+                    !tx_field(sb + la, l, '\t', 2, &o2, &l2) && l2 == 11 && tx_same(sb + la + o2, l2, "IMPLEMENTED", 11)) {
+                    if ((!tx_field(sb + la, l, '\t', 4, &o4, &l4) && l4 == pl && tx_same(sb + la + o4, l4, p, pl)) ||
+                        (!tx_field(sb + la, l, '\t', 9, &o9, &l9) && l9 == pl && tx_same(sb + la + o9, l9, p, pl))) {
+                        found = 1;
+                    }
+                }
+                la += l + 1;
+            }
+        }
+        if (sb) mm_free(sb);
+    }
+    mm_free(mnames);
+    return found;
+}
+
 /* Gate actual support for newly indexed tools. Check tools are leaves;
  * modules can use a root tools/check-NAME.cx or adjacent check. */
 static int new_tools(void) {
@@ -350,7 +389,7 @@ static int new_tools(void) {
         if (!tx_suffix(p, l, ".cx", 3)) continue;
         for (j = 0; j < l; j++) if (p[j] == '/') slash = j + 1;
         if (tx_prefix(p + slash, l - slash, "check-", 6)) {
-            if (!registered(batches, bn, p)) {
+            if (!registered(batches, bn, p) && !registered_in_staged_manifests(p)) {
                 sy_eprintf("precommit: new check missing batch registration: %s (use: sh ./unisacc.com tools/devsvc.cx -- git commit -m MSG --new-tool %s --batch ID)\n", p, p);
                 blocked++;
             } else if (!new_tool_compile_ok(p)) {
@@ -359,7 +398,7 @@ static int new_tools(void) {
             continue;
         }
         { char *lv[] = {"git", "ls-files", "-s", "--", (char *)p, 0}; long ln; char *ls = slurp(lv, &ln);
-          if (ls && tx_prefix(ls, ln, "120000", 6)) { if(!registered(batches,bn,p)){sy_eprintf("precommit: new symlink alias requires batch registration: %s\n",p);blocked++;} mm_free(ls); continue; } mm_free(ls); }
+          if (ls && tx_prefix(ls, ln, "120000", 6)) { if(!registered(batches,bn,p)&&!registered_in_staged_manifests(p)){sy_eprintf("precommit: new symlink alias requires batch registration: %s\n",p);blocked++;} mm_free(ls); continue; } mm_free(ls); }
         if (cx_fmt(check, sizeof check, "tools/check-%s", p + slash) || cx_fmt(spec, sizeof spec, ":%s", check)) return 1;
         blob = slurp(v, &cn);
         if (!blob || cn == 0) {
@@ -368,7 +407,7 @@ static int new_tools(void) {
             blob = slurp(v, &cn);
         }
         if (!blob || cn == 0) { sy_eprintf("precommit: new tool %s missing check-*.cx\n", p); blocked++; }
-        else if (!registered(batches, bn, check)) {
+        else if (!registered(batches, bn, check) && !registered_in_staged_manifests(check)) {
             sy_eprintf("precommit: new tool %s check missing batch registration: %s (use: sh ./unisacc.com tools/devsvc.cx -- git commit -m MSG --new-tool %s --batch ID --whole %s)\n", p, check, check, p); blocked++;
         } else if (!new_tool_compile_ok(p)) {
             blocked++;
@@ -2431,14 +2470,129 @@ static int dg_genall_gate(const char *wt, const char *allz, long alln, const cha
     return blocked;
 }
 
+static int dg_is_version_branch(const char *br) {
+    if (!br || br[0] != 'v') return 0;
+    int parts = 0, dig = 0;
+    for (long i = 1; ; i++) {
+        char c = br[i];
+        if (c >= '0' && c <= '9') { dig++; if (dig > 6) return 0; }
+        else if ((c == '.' || c == 0) && dig > 0) { parts++; dig = 0; if (c == 0) break; }
+        else return 0;
+    }
+    return parts == 3;
+}
+
+/* Fail-closed branch identity: only exact "main" or "vX.Y.Z" is an integrator context. */
+static int dg_is_window_branch(char *br, size_t cap) {
+    char *av[] = {"git", "symbolic-ref", "--quiet", "--short", "HEAD", 0};
+    long n = 0;
+    char *o = slurp_run(av, &n);
+    br[0] = 0;
+    if (!o) {
+        tx_copy(br, cap, "DETACHED-OR-UNKNOWN", 19);
+        return 1;
+    }
+    while (n > 0 && (o[n - 1] == '\n' || o[n - 1] == '\r')) n--;
+    if (n <= 0 || (size_t)n >= cap) {
+        mm_free(o);
+        tx_copy(br, cap, "DETACHED-OR-UNKNOWN", 19);
+        return 1;
+    }
+    mm_copy(br, cap, o, (size_t)n);
+    br[n] = 0;
+    mm_free(o);
+    if (tx_eqz(br, "main") || dg_is_version_branch(br)) return 0;
+    return 1;
+}
+
+static int dg_owner_is_integrator(const char *s, long l) {
+    return (l == 10 && tx_same(s, l, "integrator", 10)) ||
+           (l == 16 && tx_same(s, l, "owner=integrator", 16));
+}
+
+/* Anchor derive ownership policy strictly to merge-base(HEAD, origin/main) -> merge-base(HEAD, main).
+ * NEVER falls back to HEAD: if neither trusted anchor is reachable, window commits fail closed. */
+static char *dg_read_anchor_derive(long *out_n) {
+    static const char *const bases[] = {"origin/main", "main", 0};
+    for (int i = 0; bases[i]; i++) {
+        char *mbv[] = {"git", "merge-base", "HEAD", (char *)bases[i], 0};
+        long mn = 0;
+        char *mb = slurp_run(mbv, &mn);
+        if (mb && mn >= 40) {
+            char spec[128];
+            if (!cx_fmt(spec, sizeof spec, "%.40s:exec/facts/derive.tsv", mb)) {
+                char *sv[] = {"git", "show", spec, 0};
+                long sn = 0;
+                char *sb = slurp_run(sv, &sn);
+                if (sb && sn > 0) {
+                    mm_free(mb);
+                    *out_n = sn;
+                    return sb;
+                }
+                if (sb) mm_free(sb);
+            }
+        }
+        if (mb) mm_free(mb);
+    }
+    *out_n = 0;
+    return 0;
+}
+
+/* Refuse any window change to exec/facts/derive.tsv that deletes an anchor row, weakens owner, or shrinks outputs. */
+static int dg_check_window_derive_tamper(const char *cur_branch, const char *anc, long ancn) {
+    char *sv[] = {"git", "show", ":exec/facts/derive.tsv", 0};
+    long sn = 0;
+    char *sb = slurp_run(sv, &sn);
+    if (!sb || sn <= 0) {
+        if (sb) mm_free(sb);
+        sy_eprintf("precommit: BLOCKED derived-policy-tamper branch=%s (cannot read staged exec/facts/derive.tsv)\n", cur_branch);
+        return 1;
+    }
+    int blocked = 0;
+    long at = 0;
+    while (at < ancn) {
+        long e = tx_chr(anc + at, ancn - at, '\n'), l = e < 0 ? ancn - at : e;
+        long o0, l0, o4, l4, o8, l8;
+        if (l > 0 && anc[at] != '#' &&
+            !tx_field(anc + at, l, '\t', 0, &o0, &l0) && l0 > 0 && l0 < 64 &&
+            !tx_field(anc + at, l, '\t', 4, &o4, &l4) && l4 > 0 &&
+            !tx_field(anc + at, l, '\t', 8, &o8, &l8) && dg_owner_is_integrator(anc + at + o8, l8)) {
+            int found = 0, ok_row = 0;
+            long sat = 0;
+            while (sat < sn) {
+                long se = tx_chr(sb + sat, sn - sat, '\n'), sl = se < 0 ? sn - sat : se;
+                long so0, sl0, so4, sl4, so8, sl8;
+                if (sl > 0 && sb[sat] != '#' &&
+                    !tx_field(sb + sat, sl, '\t', 0, &so0, &sl0) && sl0 == l0 && tx_same(sb + sat + so0, sl0, anc + at + o0, l0)) {
+                    found = 1;
+                    if (!tx_field(sb + sat, sl, '\t', 4, &so4, &sl4) && sl4 == l4 && tx_same(sb + sat + so4, sl4, anc + at + o4, l4) &&
+                        !tx_field(sb + sat, sl, '\t', 8, &so8, &sl8) && dg_owner_is_integrator(sb + sat + so8, sl8)) {
+                        ok_row = 1;
+                    }
+                    break;
+                }
+                sat += sl + 1;
+            }
+            if (!found || !ok_row) {
+                sy_eprintf("precommit: BLOCKED derived-policy-tamper branch=%s derive=%.*s (window branch cannot delete derive.tsv row, change outputs, or weaken owner=integrator)\n",
+                           cur_branch, (int)l0, anc + at + o0);
+                blocked++;
+            }
+        }
+        at += l + 1;
+    }
+    mm_free(sb);
+    return blocked;
+}
+
 static int derive_gate(void) {
     const char *wt = sy_env("GIT_WORK_TREE");
-    char dp[1200], tp[1200];
+    char dp[1200], tp[1200], cur_branch[160];
     size_t dn = 0;
     char *db = 0, *allz = 0, *adz = 0, *dout = 0;
     long alln = 0, adn = 0, don = 0, at = 0;
     char names[16][64], outs[16][512], only[1024];
-    int nsel = 0, blocked = 0;
+    int nsel = 0, blocked = 0, is_w_branch = 0;
 
     if (pc_core_file_deleted("exec/facts/derive.tsv")) {
         sy_eprintf("precommit: BLOCKED derive-gate-deleted path=exec/facts/derive.tsv (core derive table cannot be deleted)\n");
@@ -2511,6 +2665,60 @@ static int derive_gate(void) {
             mm_free(allz);
             return blocked;
         }
+    }
+
+    is_w_branch = dg_is_window_branch(cur_branch, sizeof cur_branch);
+    if (is_w_branch) {
+        long ancn = 0;
+        char *anc = dg_read_anchor_derive(&ancn);
+        if (!anc || ancn <= 0) {
+            sy_eprintf("precommit: BLOCKED derive-policy-unreadable branch=%s (cannot read anchor exec/facts/derive.tsv)\n", cur_branch);
+            if (anc) mm_free(anc);
+            if (adz) mm_free(adz);
+            mm_free(allz);
+            return 1;
+        }
+        if (dg_path_in_z(allz, alln, "exec/facts/derive.tsv", 21)) {
+            blocked += dg_check_window_derive_tamper(cur_branch, anc, ancn);
+        }
+        long wat = 0;
+        while (wat < ancn) {
+            long e = tx_chr(anc + wat, ancn - wat, '\n'), l = e < 0 ? ancn - wat : e;
+            long o0, l0, o3, l3, o4, l4, o8, l8;
+            if (l > 0 && anc[wat] != '#' &&
+                !tx_field(anc + wat, l, '\t', 0, &o0, &l0) && l0 > 0 && l0 < 64 &&
+                !tx_field(anc + wat, l, '\t', 3, &o3, &l3) &&
+                !tx_field(anc + wat, l, '\t', 4, &o4, &l4) && l4 > 0 && l4 < 512 &&
+                !tx_field(anc + wat, l, '\t', 8, &o8, &l8) &&
+                dg_owner_is_integrator(anc + wat + o8, l8)) {
+                int no_writer = (l3 == 1 && anc[wat + o3] == '-');
+                if (!no_writer) {
+                    char nm[64], outl[512];
+                    long pa = 0;
+                    mm_copy(nm, sizeof nm, anc + wat + o0, (size_t)l0); nm[l0] = 0;
+                    mm_copy(outl, sizeof outl, anc + wat + o4, (size_t)l4); outl[l4] = 0;
+                    /* Decide ownership by outputs ONLY (never exempting paths that also match inputs_glob). */
+                    while (allz && pa < alln) {
+                        long pl = tx_len(allz + pa, alln - pa);
+                        if (pl <= 0) break;
+                        if (dg_in_list(outl, allz + pa, pl)) {
+                            sy_eprintf("precommit: BLOCKED derived-owner-refused branch=%s path=%.*s derive=%s owner=integrator (derived tables are generated by integrator only; run local read-only: sh ./unisacc.com tools/derive.cx -- --check)\n",
+                                       cur_branch, (int)pl, allz + pa, nm);
+                            blocked++;
+                        }
+                        pa += pl + 1;
+                    }
+                }
+            }
+            wat += l + 1;
+        }
+        mm_free(anc);
+        if (blocked > 0) {
+            if (adz) mm_free(adz);
+            mm_free(allz);
+            return blocked;
+        }
+        /* Do NOT return early: fall through to derive --check and dg_genall_gate so drift is never skipped. */
     }
 
     db = (char *)cx_read(dp, &dn);
@@ -2885,9 +3093,9 @@ static void pc_emit_gate_fail(void) {
         if (tx_eqz(g, "lint"))
             sy_eprintf("PRECOMMIT_HINT\tgate=lint\treason=%s\tnext=sh ./unisacc.com tools/cx-lint.cx -- <staged.cx>\n", r);
     } else if (tx_eqz(g, "tlib-frozen")) {
-        sy_eprintf("PRECOMMIT_HINT\tgate=tlib-frozen\treason=%s\tnext=sh ./unisacc.com tools/layer-api.cx -- --bump <pkg> && sh ./unisacc.com tools/derive.cx -- --write --only layer-api,iface-hash (or commit with --derive)\n", r);
+        sy_eprintf("PRECOMMIT_HINT\tgate=tlib-frozen\treason=%s\tnext=sh ./unisacc.com tools/layer-api.cx -- --bump <pkg> && sh ./unisacc.com tools/derive.cx -- --check (integrator regenerates derived tables on merge)\n", r);
     } else if (tx_eqz(g, "derive")) {
-        sy_eprintf("PRECOMMIT_HINT\tgate=derive\treason=%s\tnext=pass --derive to devsvc git commit, or run: sh ./unisacc.com tools/derive.cx -- --write --changed <paths>\n", r);
+        sy_eprintf("PRECOMMIT_HINT\tgate=derive\treason=%s\tnext=local read-only check: sh ./unisacc.com tools/derive.cx -- --check (integrator regenerates derived tables on merge)\n", r);
     } else if (tx_eqz(g, "new-tools") || tx_eqz(g, "toolsreg")) {
         sy_eprintf("PRECOMMIT_HINT\tgate=%s\treason=%s\tnext=sh ./unisacc.com tools/devsvc.cx -- git commit -m MSG --new-tool tools/NAME.cx --batch <batch-id>\n", g, r);
     } else if (tx_eqz(g, "manifest") || tx_eqz(g, "tables")) {
