@@ -14,6 +14,7 @@
  *       on lnx/x86_64 is refused with reason=exec-target-disallowed
  */
 #pragma unisa use sys.env
+#pragma unisa use sys.fd
 #pragma unisa use sys.fs
 #pragma unisa use sys.io
 #pragma unisa use sys.posix
@@ -21,6 +22,7 @@
 #pragma unisa use sysx.run
 #pragma unisa use cxlib.procrun
 #pragma unisa use cxlib.hostcheck
+#pragma unisa use driver.stream_s1_m1
 #pragma unisa use text.text
 #pragma unisa use mem.bytes
 #pragma unisa use mem.heap
@@ -61,6 +63,37 @@ static int find_qemu(void) {
 
 static int run_cmd(char **av, int timeout_s, char **out_buf, size_t *out_len) {
     return cx_runv_timeout(av, timeout_s, out_buf, out_len);
+}
+
+/* Detect whether the launcher APE actually embeds driveargs M1 for the current target
+ * by locating and scanning its P4 package manifest via m53_m1_locate_and_scan_fd. */
+static int launcher_embeds_driveargs_m1(const char *ape_path) {
+    sy_stat_t st;
+    long pkg_off = 0, pkglen = 0;
+    int fd, fdir_n = 0, found = 0;
+    const char *why = 0;
+    const char *want_mf = g_native ? "tape/lnx-arm64/manifest.tsv" : "tape/lnx-x86_64/manifest.tsv";
+    const char *want_sl = g_native ? "tape/lnx-arm64/driveargs.tapeslice" : "tape/lnx-x86_64/driveargs.tapeslice";
+    unsigned char *buf = 0;
+    if (!ape_path || !ape_path[0] || sy_stat(ape_path, &st) != 0 || st.size <= 0) return 0;
+    fd = sy_open(ape_path, O_RDONLY, 0);
+    if (fd < 0) return 0;
+    if (m53_m1_locate_and_scan_fd(fd, (long)st.size, &pkg_off, &pkglen, &fdir_n, &why) == 0 &&
+        fdir_n > 0 && pkglen > 0 && pkglen <= (16L << 20)) {
+        buf = (unsigned char *)mm_alloc((size_t)pkglen);
+        if (buf && sy_lseek(fd, pkg_off, 0) == pkg_off) {
+            long got = 0, rd;
+            while (got < pkglen && (rd = sy_read(fd, buf + got, pkglen - got)) > 0) got += rd;
+            if (got == pkglen &&
+                tx_find((const char *)buf, pkglen, want_mf, tx_len(want_mf, 128)) >= 0 &&
+                tx_find((const char *)buf, pkglen, want_sl, tx_len(want_sl, 128)) >= 0) {
+                found = 1;
+            }
+        }
+        if (buf) mm_free(buf);
+    }
+    sy_close(fd);
+    return found;
 }
 
 static int run_delivered_ape_stream_e2(const char *in_file, int want_rc, const char *s1_val, const char *so_val,
@@ -523,77 +556,82 @@ int main(int argc, char **argv) {
                    run_delivered_ape_stream_e2(usl_good, 0, 0, 0, 0, 1, 0, 0, &ref_out, &ref_len) &&
                    run_delivered_ape_stream_e2(usl_bad, 1, 0, 0, "malformed USLATTR1 side-car", 1, 0, 0, 0, 0));
         ck(base_ok, "delivered-ape-stream-e2-default-off-and-bad-table");
-        /* Split by target and package mode (v0.1.9 G4 contract):
-         * (a) On lnx/x86_64 (!g_native), driveargs/drivestream M1 is embedded in the packed APE
-         *     (build/chain-facts.tsv:99-105), so env overrides MUST be refused with rc=1 and
-         *     DRIVEARGS_M1_REFUSE reason=embed-env-override-forbidden; the original shadow-fallback
-         *     contracts are exercised directly on the non-packed source probes below so zero
-         *     coverage is lost.
-         * (b) On native lnx/arm64 (g_native), M1 driveargs is not embedded, so all five delivered
-         *     APE shadow-fallback / portable / two-way mutant assertions stay intact as before. */
-        if (g_native) {
-            ck(base_ok && run_delivered_ape_stream_e2(usl_good, 0, "0", absent_so, 0, 1, ref_out, ref_len, 0, 0),
-               "delivered-ape-stream-e2-disabled-master-off");
-            ck(wr_ok && run_delivered_ape_stream_e2(usl_good, 0, sl_real, absent_so,
-                                                    "M53_S1_FALLBACK\treason=exec-absent", 0, 0, 0, 0, 0),
-               "delivered-ape-stream-e2-disabled-exec-absent");
-            ck(wr_ok && run_delivered_ape_stream_e2(usl_good, 0, sl_corrupt, "portable",
-                                                    "M53_S1_FALLBACK\treason=corrupt", 0, 0, 0, 0, 0),
-               "delivered-ape-stream-e2-corrupt-fallback");
-            ck(base_ok &&
-               run_delivered_ape_stream_e2(usl_good, 0, sl_real, "portable", 0, 1, ref_out, ref_len, 0, 0) &&
-               run_delivered_ape_stream_e2(usl_bad, 1, sl_real, "portable", "malformed USLATTR1 side-car", 1, 0, 0, 0, 0),
-               "delivered-ape-stream-e2-portable-clean");
-            ck(wr_ok &&
-               run_delivered_ape_stream_e2(usl_good, 0, sl_mut, "portable",
-                                           "M53_S1_FALLBACK\treason=mismatch\tnative=1\ttape=0", 0, 0, 0, 0, 0) &&
-               run_delivered_ape_stream_e2(usl_bad, 1, sl_mut, "portable",
-                                           "M53_S1_FALLBACK\treason=mismatch\tnative=0\ttape=1", 0, 0, 0, 0, 0),
-               "delivered-ape-stream-e2-mutant-vm-pos-neg-parity");
-        } else {
-            const char *env_refuse = "DRIVEARGS_M1_REFUSE\treason=embed-env-override-forbidden\tdetail=0";
-            /* (a) Packed x86_64 delivered APE: G4 refusal on env overrides */
-            ck(base_ok && run_delivered_ape_stream_e2(usl_good, 1, "0", absent_so, env_refuse, 1, 0, 0, 0, 0),
-               "delivered-ape-stream-e2-disabled-master-off");
-            ck(wr_ok && run_delivered_ape_stream_e2(usl_good, 1, sl_abi1, absent_so,
-                                                    env_refuse, 1, 0, 0, 0, 0),
-               "delivered-ape-stream-e2-disabled-exec-absent");
-            ck(wr_ok && run_delivered_ape_stream_e2(usl_good, 1, sl_corrupt, "portable",
-                                                    env_refuse, 1, 0, 0, 0, 0),
-               "delivered-ape-stream-e2-corrupt-fallback");
-
-            /* (b) Non-packed dev/source-probe path honoring the shadow-fallback contracts */
-            if (sy_exists(drv_x86) == 1 && sy_exists(so_x86) == 1) {
-                char *out = 0; size_t outn = 0; int rc;
-                rc = run_prog_merged(0, drv_x86, "1", "-", "0", absent_so, &out, &outn);
-                ck(rc == 0 && out && strstr(out, "ARM64_S2_DONE\tn=4\tok=4") != 0 &&
-                   strstr(out, "M53_S1_FALLBACK") == 0, "dev-probe-x86-master-off-zero");
-                if (out) { mm_free(out); out = 0; }
-
-                rc = run_prog_merged(0, drv_x86, "1", "-", sl_abi1, absent_so, &out, &outn);
-                ck(rc == 0 && out && strstr(out, "ARM64_S2_DONE\tn=4\tok=4") != 0 &&
-                   strstr(out, "M53_S1_FALLBACK\treason=exec-absent") != 0, "dev-probe-x86-exec-absent-fallback");
-                if (out) { mm_free(out); out = 0; }
-
-                rc = run_prog_merged(0, drv_x86, "1", "-", sl_corrupt, so_x86, &out, &outn);
-                ck(rc == 0 && out && strstr(out, "ARM64_S2_DONE\tn=4\tok=4") != 0 &&
-                   strstr(out, "M53_S1_FALLBACK\treason=corrupt") != 0, "dev-probe-x86-corrupt-fallback");
-                if (out) { mm_free(out); out = 0; }
+        /* Split by actual launcher P4 package manifest (U10-7) rather than g_native alone:
+         * (a) When the launcher actually embeds driveargs M1 for this target, env overrides MUST
+         *     be refused with rc=1 and DRIVEARGS_M1_REFUSE reason=embed-env-override-forbidden;
+         *     the original shadow-fallback contracts are exercised directly on the non-packed
+         *     source probes below so zero coverage is lost.
+         * (b) When the launcher does NOT embed driveargs M1 (e.g. older installed x86_64 product
+         *     or lnx/arm64), keep all original delivered-entry shadow-fallback / portable /
+         *     two-way mutant assertions intact. */
+        {
+            int has_m1 = launcher_embeds_driveargs_m1(g_unisacc);
+            if (!has_m1) {
+                ck(base_ok && run_delivered_ape_stream_e2(usl_good, 0, "0", absent_so, 0, 1, ref_out, ref_len, 0, 0),
+                   "delivered-ape-stream-e2-disabled-master-off");
+                ck(wr_ok && run_delivered_ape_stream_e2(usl_good, 0, g_native ? sl_real : sl_abi1, absent_so,
+                                                        "M53_S1_FALLBACK\treason=exec-absent", 0, 0, 0, 0, 0),
+                   "delivered-ape-stream-e2-disabled-exec-absent");
+                ck(wr_ok && run_delivered_ape_stream_e2(usl_good, 0, sl_corrupt, "portable",
+                                                        "M53_S1_FALLBACK\treason=corrupt", 0, 0, 0, 0, 0),
+                   "delivered-ape-stream-e2-corrupt-fallback");
+                if (g_native) {
+                    ck(base_ok &&
+                       run_delivered_ape_stream_e2(usl_good, 0, sl_real, "portable", 0, 1, ref_out, ref_len, 0, 0) &&
+                       run_delivered_ape_stream_e2(usl_bad, 1, sl_real, "portable", "malformed USLATTR1 side-car", 1, 0, 0, 0, 0),
+                       "delivered-ape-stream-e2-portable-clean");
+                    ck(wr_ok &&
+                       run_delivered_ape_stream_e2(usl_good, 0, sl_mut, "portable",
+                                                   "M53_S1_FALLBACK\treason=mismatch\tnative=1\ttape=0", 0, 0, 0, 0, 0) &&
+                       run_delivered_ape_stream_e2(usl_bad, 1, sl_mut, "portable",
+                                                   "M53_S1_FALLBACK\treason=mismatch\tnative=0\ttape=1", 0, 0, 0, 0, 0),
+                       "delivered-ape-stream-e2-mutant-vm-pos-neg-parity");
+                }
             } else {
-                ck(0, "dev-probe-x86-master-off-zero");
-                ck(0, "dev-probe-x86-exec-absent-fallback");
-                ck(0, "dev-probe-x86-corrupt-fallback");
-            }
-            if (has_q && sy_exists(drv_arm64) == 1) {
-                char *out = 0; size_t outn = 0; int rc;
-                rc = run_prog_merged(g_qemu, drv_arm64, "1", "-", sl_mut, "portable", &out, &outn);
-                ck(rc == 0 && out && strstr(out, "ARM64_S2_DONE\tn=4\tok=4") != 0 &&
-                   strstr(out, "M53_S1_FALLBACK\treason=mismatch\tnative=1\ttape=0") != 0 &&
-                   strstr(out, "M53_S1_FALLBACK\treason=mismatch\tnative=0\ttape=1") != 0,
-                   "dev-probe-arm64-mutant-two-way-parity");
-                if (out) { mm_free(out); out = 0; }
-            } else {
-                ck(0, "dev-probe-arm64-mutant-two-way-parity");
+                const char *env_refuse = "DRIVEARGS_M1_REFUSE\treason=embed-env-override-forbidden\tdetail=0";
+                /* (a) Packed delivered APE with driveargs M1 embedded: G4 refusal on env overrides */
+                ck(base_ok && run_delivered_ape_stream_e2(usl_good, 1, "0", absent_so, env_refuse, 1, 0, 0, 0, 0),
+                   "delivered-ape-stream-e2-disabled-master-off");
+                ck(wr_ok && run_delivered_ape_stream_e2(usl_good, 1, g_native ? sl_real : sl_abi1, absent_so,
+                                                        env_refuse, 1, 0, 0, 0, 0),
+                   "delivered-ape-stream-e2-disabled-exec-absent");
+                ck(wr_ok && run_delivered_ape_stream_e2(usl_good, 1, sl_corrupt, "portable",
+                                                        env_refuse, 1, 0, 0, 0, 0),
+                   "delivered-ape-stream-e2-corrupt-fallback");
+
+                /* (b) Non-packed dev/source-probe path honoring the shadow-fallback contracts */
+                if (!g_native && sy_exists(drv_x86) == 1 && sy_exists(so_x86) == 1) {
+                    char *out = 0; size_t outn = 0; int rc;
+                    rc = run_prog_merged(0, drv_x86, "1", "-", "0", absent_so, &out, &outn);
+                    ck(rc == 0 && out && strstr(out, "ARM64_S2_DONE\tn=4\tok=4") != 0 &&
+                       strstr(out, "M53_S1_FALLBACK") == 0, "dev-probe-x86-master-off-zero");
+                    if (out) { mm_free(out); out = 0; }
+
+                    rc = run_prog_merged(0, drv_x86, "1", "-", sl_abi1, absent_so, &out, &outn);
+                    ck(rc == 0 && out && strstr(out, "ARM64_S2_DONE\tn=4\tok=4") != 0 &&
+                       strstr(out, "M53_S1_FALLBACK\treason=exec-absent") != 0, "dev-probe-x86-exec-absent-fallback");
+                    if (out) { mm_free(out); out = 0; }
+
+                    rc = run_prog_merged(0, drv_x86, "1", "-", sl_corrupt, so_x86, &out, &outn);
+                    ck(rc == 0 && out && strstr(out, "ARM64_S2_DONE\tn=4\tok=4") != 0 &&
+                       strstr(out, "M53_S1_FALLBACK\treason=corrupt") != 0, "dev-probe-x86-corrupt-fallback");
+                    if (out) { mm_free(out); out = 0; }
+                } else if (!g_native) {
+                    ck(0, "dev-probe-x86-master-off-zero");
+                    ck(0, "dev-probe-x86-exec-absent-fallback");
+                    ck(0, "dev-probe-x86-corrupt-fallback");
+                }
+                if (has_q && sy_exists(drv_arm64) == 1) {
+                    char *out = 0; size_t outn = 0; int rc;
+                    rc = run_prog_merged(g_qemu, drv_arm64, "1", "-", sl_mut, "portable", &out, &outn);
+                    ck(rc == 0 && out && strstr(out, "ARM64_S2_DONE\tn=4\tok=4") != 0 &&
+                       strstr(out, "M53_S1_FALLBACK\treason=mismatch\tnative=1\ttape=0") != 0 &&
+                       strstr(out, "M53_S1_FALLBACK\treason=mismatch\tnative=0\ttape=1") != 0,
+                       "dev-probe-arm64-mutant-two-way-parity");
+                    if (out) { mm_free(out); out = 0; }
+                } else if (!g_native) {
+                    ck(0, "dev-probe-arm64-mutant-two-way-parity");
+                }
             }
         }
         if (ref_out) mm_free(ref_out);
