@@ -2020,6 +2020,89 @@ int main(int argc, char **argv) {
            "slow-split-and-unit-frontcache-equiv-isolated-parallel-lanes: isolates slow-split and unit-frontcache-equiv0..4 into 1-batch long windows running on 4 parallel window lanes");
     }
 
+    /* (18) pd_prepare_entry_link: bounded multi-step (up to 6 passes, rc=3 stepwise) + resume-safe + named refusal */
+    {
+        char f18[CPD_PW], ids18[CPD_PW], tf18[CPD_PW], o18a[CPD_PW], o18b[CPD_PW], m18a[CPD_PW], m18b[CPD_PW], cnt18[CPD_PW];
+        const char *pd_src = getenv("CHECK_PRERUN_DRIVE_SRC");
+        char pd_path[CPD_PW];
+        if (pd_src && pd_src[0]) cx_fmt(pd_path, sizeof pd_path, "%s", pd_src);
+        else cx_fmt(pd_path, sizeof pd_path, "%s/tools/prerun-drive.cx", cwd);
+        if (cx_fmt(f18, sizeof f18, "%s/f18", work) || sy_mkdir_all(f18, 0700) ||
+            cx_fmt(ids18, sizeof ids18, "%s/ids.txt", f18) ||
+            cx_fmt(tf18, sizeof tf18, "%s/times.tsv", f18) ||
+            cx_fmt(o18a, sizeof o18a, "%s/out_ok", f18) ||
+            cx_fmt(o18b, sizeof o18b, "%s/out_fail", f18) ||
+            cx_fmt(m18a, sizeof m18a, "%s/mock_ok.sh", f18) ||
+            cx_fmt(m18b, sizeof m18b, "%s/mock_fail.sh", f18) ||
+            cx_fmt(cnt18, sizeof cnt18, "%s/prep_count.txt", f18)) return 2;
+        const char *s_ids18 = "piece-d-driveargs-link\n";
+        const char *s_tf18 = "piece-d-driveargs-link\t2000\n";
+        char s_m18a[2048];
+        if (cx_fmt(s_m18a, sizeof s_m18a,
+            "#!/bin/sh\n"
+            "mode=$1\n"
+            "if [ \"$mode\" = prepare-entry-link ]; then\n"
+            "  echo x >> '%s'\n"
+            "  n=$(wc -l < '%s')\n"
+            "  if [ \"$n\" -lt 3 ]; then exit 3; fi\n"
+            "  echo ENTRY_LINK_PREPARED > \"$3\"; exit 0\n"
+            "fi\n"
+            "ids=$4; out=$5\n"
+            "printf '# devsvc qualify\\nbatch\\tdomain\\tstatus\\trc\\tcandidate\\tms\\tload1\\tretries\\tnote\\n' > \"$out\"\n"
+            "printf '%%s\\tproduct-qualification\\tPASS\\t0\\taaa\\t50\\t1.0\\t0\\t-\\n' \"$ids\" >> \"$out\"\n"
+            "exit 0\n", cnt18, cnt18)) return 2;
+        const char *s_m18b =
+            "#!/bin/sh\n"
+            "mode=$1\n"
+            "if [ \"$mode\" = prepare-entry-link ]; then exit 3; fi\n"
+            "ids=$4; out=$5\n"
+            "printf '# devsvc qualify\\nbatch\\tdomain\\tstatus\\trc\\tcandidate\\tms\\tload1\\tretries\\tnote\\n' > \"$out\"\n"
+            "printf '%s\\tproduct-qualification\\tPASS\\t0\\taaa\\t50\\t1.0\\t0\\t-\\n' \"$ids\" >> \"$out\"\n"
+            "exit 0\n";
+        if (cx_write(ids18, s_ids18, strlen(s_ids18)) ||
+            cx_write(tf18, s_tf18, strlen(s_tf18)) ||
+            cx_write(m18a, s_m18a, strlen(s_m18a)) ||
+            cx_write(m18b, s_m18b, strlen(s_m18b))) return 2;
+
+        /* 18a: rc=3 twice then rc=0 -> done.prepare-entry-link written, windows run, --resume skips re-prepare */
+        if (cx_fmt(cmd, sizeof cmd,
+            "set -e; "
+            "sh '%s/unisacc.com' '%s' -- plan --ids-file '%s' --times-file '%s' --out '%s' --normal-jobs 1 --warmup 1 && "
+            "sh '%s/unisacc.com' '%s' -- run --root '%s' --out '%s' --mock-runner '%s' --max-retries 1 && "
+            "[ -f '%s/done.prepare-entry-link' ] && "
+            "sh '%s/unisacc.com' '%s' -- run --root '%s' --out '%s' --mock-runner '%s' --resume --max-retries 1 && "
+            "[ \"$(wc -l < '%s')\" -eq 3 ] && echo ENTRY_LINK_OK",
+            cwd, pd_path, ids18, tf18, o18a,
+            cwd, pd_path, work, o18a, m18a,
+            o18a,
+            cwd, pd_path, work, o18a, m18a,
+            cnt18)) return 2;
+        int rc18a = ckk_sh("check-prerun-drive", cmd, out, sizeof out);
+        ck(rc18a == 0 &&
+           ckk_has(out, CPD_OUT, "PRERUN_PREPARE_MATERIAL\tmaterial=entry-link\tpass=1\trc=3\t") &&
+           ckk_has(out, CPD_OUT, "PRERUN_PREPARE_MATERIAL\tmaterial=entry-link\tpass=2\trc=3\t") &&
+           ckk_has(out, CPD_OUT, "PRERUN_PREPARE_MATERIAL\tmaterial=entry-link\tpass=3\trc=0\t") &&
+           ckk_has(out, CPD_OUT, "PRERUN_RUN\tstatus=DONE") &&
+           ckk_has(out, CPD_OUT, "ENTRY_LINK_OK"),
+           "entry-link-prepare-stepwise-and-resume: rc=3 twice then rc=0 prepares done.prepare-entry-link and --resume skips re-prepare");
+
+        /* 18b: 6x rc=3 -> named refusal prepare-entry-link-incomplete, no done marker, zero windows started */
+        if (cx_fmt(cmd, sizeof cmd,
+            "sh '%s/unisacc.com' '%s' -- plan --ids-file '%s' --times-file '%s' --out '%s' --normal-jobs 1 --warmup 1 && "
+            "sh '%s/unisacc.com' '%s' -- run --root '%s' --out '%s' --mock-runner '%s' --max-retries 1",
+            cwd, pd_path, ids18, tf18, o18b,
+            cwd, pd_path, work, o18b, m18b)) return 2;
+        int rc18b = ckk_sh("check-prerun-drive", cmd, out, sizeof out);
+        char done18b[CPD_PW];
+        (void)cx_fmt(done18b, sizeof done18b, "%s/done.prepare-entry-link", o18b);
+        ck(rc18b != 0 &&
+           ckk_has(out, CPD_OUT, "PRERUN_PREPARE_MATERIAL\tmaterial=entry-link\tpass=6\trc=3\t") &&
+           ckk_has(out, CPD_OUT, "PRERUN_DRIVE\tREFUSE\treason=prepare-entry-link-incomplete") &&
+           !ckk_has(out, CPD_OUT, "PRERUN_WINDOW\t") &&
+           sy_exists(done18b) == 0,
+           "entry-link-prepare-6x-rc3-refuses: 6x rc=3 refuses with prepare-entry-link-incomplete before starting any window");
+    }
+
     { char *rmv[] = {"rm", "-rf", work, 0}; (void)ck_run(rmv, out, sizeof out); }
     printf("CHECK_PRERUN_DRIVE\tok=%d\tfailed=%d\tms=%ld\n", ck_assertions() - ck_failures(), ck_failures(), sy_now_ms() - t0);
     return ck_failures() ? 1 : 0;
