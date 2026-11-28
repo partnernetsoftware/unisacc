@@ -164,6 +164,8 @@ typedef struct {
     char target_state[64];
     char target_class[512];
     char prev_ver[32];
+    char pending_ver[32];
+    char pending_detail[160];
     int has_non_public_prev;
     char non_public_detail[160];
 } SeqInfo;
@@ -172,6 +174,7 @@ static int fc_inspect_seq(const char *repo, const char *ver, SeqInfo *out) {
     char p[4400]; size_t n = 0; char *b; long at = 0;
     static const char pub[] = "\xe5\xb7\xb2\xe5\x85\xac\xe5\xbc\x80"; /* 已公开 */
     static const char act[] = "\xe8\xbf\x9b\xe8\xa1\x8c\xe4\xb8\xad"; /* 进行中 */
+    static const char rel[] = "\xe5\x8f\x91\xe5\xb8\x83\xe4\xb8\xad"; /* 发布中 */
     mm_fill(out, sizeof *out, 0, sizeof *out);
     if (cx_fmt(p, sizeof p, "%s/build/version-seq.tsv", repo)) return -1;
     b = cx_read(p, &n);
@@ -202,7 +205,13 @@ static int fc_inspect_seq(const char *repo, const char *ver, SeqInfo *out) {
             } else {
                 int is_pub = (fl[3] == (long)(sizeof pub - 1) && !memcmp(f[3], pub, sizeof pub - 1));
                 int is_act = (fl[3] == (long)(sizeof act - 1) && !memcmp(f[3], act, sizeof act - 1));
+                int is_rel = (fl[3] == (long)(sizeof rel - 1) && !memcmp(f[3], rel, sizeof rel - 1));
                 if (is_pub && rv_valid(vbuf)) cx_fmt(out->prev_ver, sizeof out->prev_ver, "%s", vbuf);
+                if (is_rel && rv_valid(vbuf)) {
+                    cx_fmt(out->pending_ver, sizeof out->pending_ver, "%s", vbuf);
+                    cx_fmt(out->pending_detail, sizeof out->pending_detail, "slot=%lld version=%s state=%.*s",
+                           (long long)slot, vbuf, (int)(fl[3] < 40 ? fl[3] : 40), f[3]);
+                }
                 if (is_act) {
                     out->has_non_public_prev = 1;
                     cx_fmt(out->non_public_detail, sizeof out->non_public_detail, "slot=%lld version=%s state=%.*s",
@@ -1339,6 +1348,13 @@ static int fc_do_cut(const char *repo, const char *ver, const char *topic, const
     SeqInfo seq;
     if (fc_inspect_seq(repo, ver, &seq)) return refuse("version-seq-unreadable", repo);
     if (seq.has_non_public_prev) return refuse("prev-version-not-public", seq.non_public_detail);
+    if (seq.pending_ver[0]) {
+        char br[128];
+        char *bv[] = {"git", "rev-parse", "--abbrev-ref", "HEAD", 0};
+        if (fc_git(repo, bv, br, sizeof br) == 0 && tx_eqz(br, "main")) {
+            return refuse("prev-in-release-on-main", seq.pending_detail);
+        }
+    }
     if (seq.found_target) return refuse("version-already-in-seq", ver);
 
     FreezeInfo frz;
@@ -1372,7 +1388,7 @@ static int fc_do_cut(const char *repo, const char *ver, const char *topic, const
     RcCandidate pre_rc;
     if (rcand_load(txn.cand_p, &pre_rc, rwhy, sizeof rwhy) != 0) return refuse("candidate-tsv-malformed", rwhy);
     long next_slot = seq.max_slot + 1;
-    const char *prev_show = seq.prev_ver[0] ? seq.prev_ver : pre_rc.version;
+    const char *prev_show = seq.pending_ver[0] ? seq.pending_ver : (seq.prev_ver[0] ? seq.prev_ver : pre_rc.version);
     const char *eff_ac = (a_class && a_class[0]) ? a_class : topic;
 
     /* Snapshot HEAD + pre-cut files before first write for commit reset & transactional rollback */
