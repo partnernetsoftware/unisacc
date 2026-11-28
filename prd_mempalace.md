@@ -23,6 +23,7 @@
 
 ### v0.1.10 冻结债与编排决定(2026-11-28,依据 fable 14:25 裁定)
 
+- 决定(v0.1.9 不单独公开,内容并入 v0.1.10,2026-11-28,cc 执行,依据 fable 裁定):build/version-seq.tsv 第 72 行(0.1.9)状态改为未公开,不再单独公开 v0.1.9,约束:严禁创建 v0.1.9 tag;0.1.9 的全部内容(六切片逻辑迁移、M1 权威嵌入、PE32+ 栈提交等)随 v0.1.10 一起冻结发布,v0.1.10 前置公开版为 0.1.6。依据:所有者 15:00 令、v0.1.9 预跑暴露的 check-slow-split 确定性缺陷(1f0a500c0 新增 packing-authority 未同步 check-slow-split.cx)、以及 0.1.7/0.1.8 折入后版先例。历史证据目录(仅作历史,不迁移到 v0.1.10):formal-v019/cd70ba6f1 整链、19/0 负例、3 次 CI 与 ~/.cache/unisacc/prerun/v0.1.9-cd70ba6f13。回滚:将 build/version-seq.tsv 第 72 行改回发布中,在 main 合入 check-slow-split 修复并切 v0.1.9 第 5 个冻结修订。
 - 决定(v0.1.10 探针立即数基线抬高与偿还债,cc 批准,expires=0.1.11):为保留 b2b456c00 的已验探针证据,经 build/approvals.tsv 同提交审批行(kind=ratchet-raise,approver=cc,expires=0.1.11)抬高五项基线:tests/aluiwidth.tsv armbase 3->6、armint 7->14;tests/literal.tsv armbase 34->66、armint 54->134、x86-emit 46->60。债项:v0.1.11 将探针立即数迁入 exec/facts 编码表为命名常量,把 check-literal 压回接近 34/54/46;新增的 10 行 aluiwidth 为 32 位指令字域位移(与整型 EMIT.16 同形),不承诺下降。另记工具债:本机缺 stdio-copies 链路径 9e2ac4df...,当前由 chain-ready j_ratchets 白名单具名放行 skipped=1 named=stdio-copies:no-chain,后续补 UNISACC_STDIO_CHAIN。回滚:git revert 该审批与基线提交。
 
 ### v0.1.9 编排决定(2026-11-28,cc 执行,依据 fable 裁定)
