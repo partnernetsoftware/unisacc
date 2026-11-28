@@ -16,6 +16,7 @@
 #pragma unisa use sys.posix
 #pragma unisa use sys.env
 #pragma unisa use mem.heap
+#pragma unisa use cxlib.outfmt
 
 static int failed;
 static const char *ratchets_bin;
@@ -91,52 +92,21 @@ static int roster_names(char names[][64], int max) {
 static int roster_index(char names[][64], int n, const char *name) {
     int i; for (i = 0; i < n; i++) if (tx_eqz(names[i], name)) return i; return -1;
 }
-/* strict unsigned decimal integer: 1..9 ASCII digits, no sign, no whitespace or trailing junk. */
-static int rk_parse_nonneg(const char *s, long n, int *out) {
-    long i; int v = 0;
-    if (n <= 0 || n > 9) return 0;
-    for (i = 0; i < n; i++) {
-        if (s[i] < '0' || s[i] > '9') return 0;
-        v = v * 10 + (s[i] - '0');
-    }
-    *out = v;
-    return 1;
-}
-/* strict summary line: exactly one line starting with "RATCHETS\t", fields ok=<digits>,
-   fail=<digits>, optional skipped=<digits> and elapsed_ms=<digits>; no sign, no junk. */
+/* strict summary line via tools/cxlib/outfmt.cx */
 static int rk_sum_counts(const char *o, int *okn, int *failn, int *skipn) {
     long n = tx_len(o, 1 << 16), at = 0;
     int seen = 0, a = -1, b = -1, c = 0;
     while (at < n) {
         long e = at, ln;
+        OfRatchetsSum s; char why[64];
+        int pr;
         while (e < n && o[e] != '\n') e++;
         ln = e - at;
-        if (ln > 0 && o[at + ln - 1] == '\r') ln--;
-        if (ln >= 9 && tx_prefix(o + at, ln, "RATCHETS\t", 9)) {
-            long pos = 9; int fi = 1, has_skip = 0, has_ms = 0, tmp = 0;
+        pr = of_parse_ratchets_sum(o + at, ln, &s, why, sizeof why);
+        if (pr < 0) return 0;
+        if (pr == 1) {
             if (++seen > 1) return 0;
-            while (pos <= ln) {
-                long fe = pos;
-                while (fe < ln && o[at + fe] != '\t') fe++;
-                {
-                    const char *f = o + at + pos; long fl = fe - pos;
-                    if (fi == 1) {
-                        if (fl <= 3 || !tx_prefix(f, fl, "ok=", 3) || !rk_parse_nonneg(f + 3, fl - 3, &a)) return 0;
-                    } else if (fi == 2) {
-                        if (fl <= 5 || !tx_prefix(f, fl, "fail=", 5) || !rk_parse_nonneg(f + 5, fl - 5, &b)) return 0;
-                    } else if (fl >= 8 && tx_prefix(f, fl, "skipped=", 8)) {
-                        if (has_skip || !rk_parse_nonneg(f + 8, fl - 8, &c)) return 0;
-                        has_skip = 1;
-                    } else if (fl >= 11 && tx_prefix(f, fl, "elapsed_ms=", 11)) {
-                        if (has_ms || !rk_parse_nonneg(f + 11, fl - 11, &tmp)) return 0;
-                        has_ms = 1;
-                    } else return 0;
-                }
-                fi++;
-                if (fe == ln) break;
-                pos = fe + 1;
-            }
-            if (fi < 3) return 0;
+            a = s.ok; b = s.fail; c = s.has_skipped ? s.skipped : 0;
         }
         at = e + 1;
     }
@@ -144,22 +114,8 @@ static int rk_sum_counts(const char *o, int *okn, int *failn, int *skipn) {
     *okn = a; *failn = b; *skipn = c;
     return 1;
 }
-/* skipped summary on a RATCHET line: must start with "<name>: ok: skipped (" and end with ')'
-   enclosing at least one non-whitespace character. */
-static int rk_skip_reason_ok(const char *name, const char *msg, long mn) {
-    char pre[96]; long pl, z; int non = 0;
-    if (cx_fmt(pre, sizeof pre, "%s: ok: skipped (", name)) return 0;
-    pl = tx_len(pre, sizeof pre);
-    if (mn <= pl + 1 || !tx_prefix(msg, mn, pre, pl) || msg[mn - 1] != ')') return 0;
-    for (z = pl; z < mn - 1; z++) {
-        if (msg[z] != ' ' && msg[z] != '\t') non = 1;
-    }
-    return non;
-}
-/* Full-run judgement: per tools/ratchets.cx:594-600, every roster ratchet appears on exactly one
-   RATCHET\t<name>\t<ok|FAIL|ERROR>\t<summary> line (no duplicates, no unknown names), every
-   skipped ratchet binds its own non-empty "<name>: ok: skipped (<reason>)" on that same line,
-   and the RATCHETS summary counts strictly match the per-line tally. */
+/* Full-run judgement via tools/cxlib/outfmt.cx: every roster ratchet appears on exactly one
+   RATCHET row, every skipped ratchet binds a non-empty reason, and RATCHETS counts match. */
 static int rk_full_ok(const char *o, int nn) {
     char names[32][64]; int seen[32];
     int i, okn = -1, failn = -1, skipn = -1, tok = 0, tfail = 0, tskip = 0;
@@ -170,36 +126,22 @@ static int rk_full_ok(const char *o, int nn) {
     for (i = 0; i < nn; i++) seen[i] = 0;
     while (at < n) {
         long e = at, ln;
+        OfRatchetRow row; char why[64];
+        int pr;
         while (e < n && o[e] != '\n') e++;
         ln = e - at;
-        if (ln > 0 && o[at + ln - 1] == '\r') ln--;
-        if (ln >= 8 && tx_prefix(o + at, ln, "RATCHET\t", 8)) {
-            const char *line = o + at;
-            long t1 = 7, t2, t3, nl, sl, ml;
-            char nm[64]; int idx;
-            t2 = t1 + 1; while (t2 < ln && line[t2] != '\t') t2++;
-            if (t2 >= ln) return 0;
-            t3 = t2 + 1; while (t3 < ln && line[t3] != '\t') t3++;
-            if (t3 >= ln) return 0;
-            nl = t2 - (t1 + 1); sl = t3 - (t2 + 1); ml = ln - (t3 + 1);
-            if (nl <= 0 || nl >= (long)sizeof nm) return 0;
-            tx_copy(nm, sizeof nm, line + t1 + 1, nl); nm[nl] = 0;
-            idx = roster_index(names, nn, nm);
+        pr = of_parse_ratchet_row(o + at, ln, &row, why, sizeof why);
+        if (pr < 0) return 0;
+        if (pr == 1) {
+            int idx = roster_index(names, nn, row.name);
             if (idx < 0 || seen[idx]) return 0;
             seen[idx] = 1;
-            if (sl == 2 && tx_same(line + t2 + 1, 2, "ok", 2)) {
-                const char *msg = line + t3 + 1;
-                if (tx_find(msg, ml, ": ok: skipped", 13) >= 0) {
-                    if (!rk_skip_reason_ok(names[idx], msg, ml)) return 0;
-                    tskip++;
-                } else {
-                    if (ml <= 0) return 0;
-                    tok++;
-                }
-            } else if ((sl == 4 && tx_same(line + t2 + 1, 4, "FAIL", 4)) ||
-                       (sl == 5 && tx_same(line + t2 + 1, 5, "ERROR", 5))) {
+            if (tx_eqz(row.status, "ok")) {
+                if (row.is_skipped) tskip++;
+                else tok++;
+            } else {
                 tfail++;
-            } else return 0;
+            }
         }
         at = e + 1;
     }
@@ -972,6 +914,61 @@ int main(int argc, char **argv) {
             ck(!rk_full_ok(syn5, nn), "full-run-negative-skipped-refused");
             ck(!rk_full_ok(syn6, nn), "full-run-skip-reason-different-line-refused");
             ck(!rk_full_ok(syn7, nn) && !rk_full_ok(syn7b, nn), "full-run-empty-skip-reason-refused");
+        }
+    }
+    {   /* malformed RATCHET row in --precommit must reset state and emit explicit block (no misattribution) */
+        char d[256], rf[300], pf[300], bo[4096];
+        if (!cx_fmt(d, sizeof d, "%s/ckrk-mal-%d", sy_tmpdir(), sy_pid())) {
+            sy_mkdir(d, 0700);
+            if (!cx_fmt(rf, sizeof rf, "%s/rows", d) && !cx_fmt(pf, sizeof pf, "%s/paths", d)) {
+                const char *rows =
+                    "RATCHET\tsrcshape\tFAIL\tsrcshape: FAIL: 1 over baseline\n"
+                    "RATCHET\tdup-census\tok\tdup-census: ok: skipped ()\n"
+                    "  src/ total lines 100 > 90\n";
+                const char *paths = "src/other.cx";
+                if (!cx_write(rf, rows, (size_t)tx_len(rows, 512)) && !cx_write(pf, paths, (size_t)tx_len(paths, 64) + 1)) {
+                    char *a[] = {"--precommit", rf, pf, 0};
+                    int rcm = run(a, bo, sizeof bo);
+                    ck(rcm == 0 && has(bo, "precommit: blocked: RATCHET malformed (skipped-without-reason)") &&
+                       !has(bo, "RATCHET srcshape FAIL") &&
+                       has(bo, "RATCHETS_PRECOMMIT\tblocked=1"), "precommit-malformed-ratchet-resets-and-blocks");
+                } else ck(0, "precommit-malformed-ratchet-resets-and-blocks");
+            }
+        }
+    }
+    {   /* malformed summary in judge() (leading-space summary) must emit RATCHET<TAB>name<TAB>ERROR<TAB>
+           so subsequent detail lines never attach to the previous ratchet */
+        char d[256], od[300], evf[300], f1[320], f2[320], jo[16384], pf[300], bo[4096];
+        if (!cx_fmt(d, sizeof d, "%s/ckrk-jerr-%d", sy_tmpdir(), sy_pid())) {
+            sy_mkdir(d, 0700);
+            if (!cx_fmt(od, sizeof od, "%s/out", d) && !cx_fmt(evf, sizeof evf, "%s/events.tsv", d) &&
+                !cx_fmt(f1, sizeof f1, "%s/rk-cxraw.out", od) && !cx_fmt(f2, sizeof f2, "%s/rk-cxinclude.out", od) &&
+                !cx_fmt(pf, sizeof pf, "%s/paths", d)) {
+                const char *ev =
+                    "0\t0\trk-cxraw\tfail\t0\t1\n"
+                    "0\t0\trk-cxinclude\tfail\t0\t1\n";
+                const char *o1 = "cxraw: src/a.cx has 2 > 1\ncxraw: FAIL: 1 above\n";
+                const char *o2 = "cxinclude: src/other.cx has 2 > 1\n cxinclude: FAIL: leading space\n";
+                const char *paths = "src/other.cx";
+                sy_mkdir(od, 0700);
+                if (!cx_write(evf, ev, (size_t)tx_len(ev, 512)) &&
+                    !cx_write(f1, o1, (size_t)tx_len(o1, 256)) &&
+                    !cx_write(f2, o2, (size_t)tx_len(o2, 256)) &&
+                    !cx_write(pf, paths, (size_t)tx_len(paths, 64) + 1)) {
+                    char *fa[] = {"--from-run", d, 0};
+                    char rf[300], exp_err[64];
+                    int rj = run(fa, jo, sizeof jo);
+                    int has_err_row;
+                    cx_fmt(exp_err, sizeof exp_err, "%s\tcxinclude\tERROR\t\n", "RATCHET");
+                    has_err_row = has(jo, exp_err);
+                    int ok_pc = 0;
+                    if (!cx_fmt(rf, sizeof rf, "%s/judged.out", d) && !cx_write(rf, jo, (size_t)tx_len(jo, sizeof jo))) {
+                        char *pa[] = {"--precommit", rf, pf, 0};
+                        if (run(pa, bo, sizeof bo) == 0 && !has(bo, "RATCHET cxraw FAIL")) ok_pc = 1;
+                    }
+                    ck(rj == 1 && has_err_row && ok_pc, "judge-malformed-summary-emits-error-row");
+                } else ck(0, "judge-malformed-summary-emits-error-row");
+            }
         }
     }
     if (argc == 2) { printf("CHECK_RATCHETS\tfailed=%d\n", failed); return failed ? 1 : 0; }
