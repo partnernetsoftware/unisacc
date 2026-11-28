@@ -16,7 +16,7 @@
 #pragma unisa use mem.heap
 #pragma unisa use mem.bytes
 typedef struct {char name[128],path[4096],given[4096],sha[65];int supplied,kind,linked;} Material;
-typedef struct {char id[128],implementation[32],source[1024],mode[32],platform[32],budget[16],materials[4608],entry[2048],args[4096],expect[128],headers[16];int found,source_present;} Selected;
+typedef struct {char id[128],implementation[32],source[1024],mode[32],platform[32],budget[16],materials[4608],entry[2048],args[4096],expect[128],headers[16],max_procs[16];int found,source_present;} Selected;
 static Selected selected;
 static Material material[32];static int nmaterial;
 static char root[4096],parent[4096],work[4400],candidate[4400];
@@ -34,7 +34,7 @@ static void table_path(char *out,size_t cap,const char *name){
 }
 static int within(const char *p,const char *base){size_t n=strlen(base);return !strncmp(p,base,n)&&(!p[n]||p[n]=='/');}
 static void batch(const tp_batch_view *v,void *opaque){(void)opaque;if(!tx_eqz(v->id, selected.id))return;if(selected.found++)die("duplicate selected batch");
- copy(selected.implementation,sizeof selected.implementation,v->implementation);copy(selected.source,sizeof selected.source,v->source);copy(selected.mode,sizeof selected.mode,v->mode);copy(selected.platform,sizeof selected.platform,v->platform);copy(selected.budget,sizeof selected.budget,v->budget);copy(selected.materials,sizeof selected.materials,v->materials);copy(selected.entry,sizeof selected.entry,v->entry);copy(selected.args,sizeof selected.args,v->args);copy(selected.expect,sizeof selected.expect,v->expect);copy(selected.headers,sizeof selected.headers,v->headers);selected.source_present=v->source_present;}
+ copy(selected.implementation,sizeof selected.implementation,v->implementation);copy(selected.source,sizeof selected.source,v->source);copy(selected.mode,sizeof selected.mode,v->mode);copy(selected.platform,sizeof selected.platform,v->platform);copy(selected.budget,sizeof selected.budget,v->budget);copy(selected.materials,sizeof selected.materials,v->materials);copy(selected.entry,sizeof selected.entry,v->entry);copy(selected.args,sizeof selected.args,v->args);copy(selected.expect,sizeof selected.expect,v->expect);copy(selected.headers,sizeof selected.headers,v->headers);copy(selected.max_procs,sizeof selected.max_procs,(v->max_procs&&v->max_procs[0])?v->max_procs:"-");selected.source_present=v->source_present;}
 static void coverage(const tp_coverage_view *v,void *opaque){(void)v;(void)opaque;}
 static char *read_regular(const char *p,size_t *n){struct stat st;errno=0;if(lstat(p,&st)||!S_ISREG(st.st_mode)||st.st_size<0||st.st_size>268435456)die("regular input required");char *s=cx_read(p,n);if(!s||*n!=(size_t)st.st_size)die("input read extent");return s;}
 /* The candidate is ~5 MB and every batch digests it twice; the software
@@ -261,9 +261,15 @@ int main(int argc,char **argv){
   else if(source_receipt(before,entry_sha,attempt,receipt_dir,receipt_file))receipt_skip="receipt-session-setup";
   else {args[na++]="--ck-receipt-v1";args[na++]=receipt_file;args[na++]=attempt;args[na]=0;}
  }
- t_link=sy_now_ms();int transport=np_run(run_args,root,0,seconds>3?seconds-2:seconds,&result,reason,sizeof reason);
+ t_link=sy_now_ms();
+ /* Apply polling-observation process cap ONLY when a row explicitly sets max_procs (no default cap);
+  * hard kernel enforcement is provided by S1b (pids cgroup). */
+ int max_procs = (!selected.max_procs[0] || tx_eqz(selected.max_procs, "-")) ? 0 : atoi(selected.max_procs);
+ if (max_procs < 0 || max_procs > 256) max_procs = 0;
+ int transport=np_run_capped(run_args,root,0,seconds>3?seconds-2:seconds,max_procs,&result,reason,sizeof reason);
  t_run=sy_now_ms();
  if(via_tlib){(void)sy_unlink(timg);fprintf(stderr,"run-batch: entry linked from the tlib kit\nrun-batch: tlib=linked\n");}
+ if(transport&&!strncmp(reason,"process-cap-exceeded:",21)){printf("BATCH_PROC_CAP\tid=%s\tmode=polling-observation\tcap=%d\tresidue=%d\treason=%s\n",selected.id,max_procs,result.residue,reason);}
  /* a killed tree's orphans are our children once np_subreaper ran; np_run does not reap them (that would steal a
     caller's children), and a zombie here would be skipped by the residue scan, so reap before judging */
  if(transport){int st;while(waitpid(-1,&st,WNOHANG)>0);}

@@ -249,3 +249,54 @@ int rp_kill_tree(int root, int deadline_ms, const int *keep, int nkeep, char *re
 int rp_subreaper(void) {
     return sy_child_subreaper() == 0 ? 0 : -ENOSYS; /* ENOSYS: refuse, subreaper unavailable */
 }
+
+/* Count live (non-Z/X) processes in root's process group or descendant tree via /proc.
+ * Returns >=0 count, or -ENOSYS when /proc is absent. */
+int rp_count_tree(int root) {
+    int pids[SY_KT_MAX];
+    int n = 0;
+    if (root <= 0) return 0;
+    {
+        sy_dir_t probe;
+        if (sy_dir_open(&probe, "/proc") != 0) return -ENOSYS;
+        sy_dir_close(&probe);
+    }
+    {
+        int pp = 0, pg = 0;
+        long long st = 0;
+        char stt = 0;
+        if (kt_stat(root, &pp, &pg, &st, &stt) == 0 && stt != 'Z' && stt != 'X') {
+            pids[n++] = root;
+        }
+    }
+    for (int round = 0; round < 8; round++) {
+        int added = 0;
+        sy_dir_t d;
+        if (sy_dir_open(&d, "/proc") != 0) break;
+        while (sy_dir_next(&d) == 1) {
+            int pp = 0, pg = 0;
+            int64_t entry_pid = 0;
+            long long st = 0;
+            char stt = 0;
+            if (tx_to_i64(d.name, d.name_n, 10, &entry_pid) != 0 || entry_pid <= 1 || entry_pid > INT_MAX) continue;
+            int pid = (int)entry_pid;
+            if (pid == sy_pid()) continue;
+            int seen = 0;
+            for (int i = 0; i < n; i++) if (pids[i] == pid) { seen = 1; break; }
+            if (seen) continue;
+            if (kt_stat(pid, &pp, &pg, &st, &stt) != 0) continue;
+            if (stt == 'Z' || stt == 'X') continue;
+            int match = (pg == root);
+            if (!match) {
+                for (int i = 0; i < n; i++) if (pids[i] == pp) { match = 1; break; }
+            }
+            if (match && n < SY_KT_MAX) {
+                pids[n++] = pid;
+                added++;
+            }
+        }
+        sy_dir_close(&d);
+        if (!added) break;
+    }
+    return n;
+}

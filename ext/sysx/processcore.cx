@@ -63,15 +63,16 @@ static int np_reap_killed(pid_t pid, int *st) {
     }
     return -1;
 }
-int pc_run(char *const argv[], const char *cwd, char *const envadd[], int secs, np_result *res, char *why, size_t wl, int tool_fault) {
+int pc_run_capped(char *const argv[], const char *cwd, char *const envadd[], int secs, int max_procs, np_result *res, char *why, size_t wl, int tool_fault) {
     int po[2], pe[2], pf[2], err[2] = { 0, 0 }, st = 0, open_o = 1, open_e = 1, open_f = 1, reaped = 0;
     size_t errn = 0;
-    pid_t pid; ssize_t k; long now = sy_now_ms(), deadline; np_buf o = { 0, 0, 0 }, e = { 0, 0, 0 }; char t[65536];
+    pid_t pid; ssize_t k; long now = sy_now_ms(), deadline, next_cap_check = 0; np_buf o = { 0, 0, 0 }, e = { 0, 0, 0 }; char t[65536];
     int fault=tool_fault?np_fault():0;
     res->rc = 0; res->out = res->err = 0; res->outn = res->errn = 0; res->residue = 0; res->timed_out = 0;
     if (fault<0) { snprintf(why,wl,"ValueError: UNISACC_NP_FAULT=%s refused (only residue)",getenv("UNISACC_NP_FAULT")); return -1; }
     if (now < 0) { snprintf(why, wl, "OSError: cannot read monotonic clock"); return -1; }
     deadline = now + (long)secs * 1000;
+    next_cap_check = now + 20;
     if (pipe(po) || pipe(pe) || pipe(pf)) { snprintf(why, wl, "OSError: cannot create pipes"); return -1; }
     fcntl(pf[1], F_SETFD, FD_CLOEXEC);
     pid = fork();
@@ -130,6 +131,27 @@ int pc_run(char *const argv[], const char *cwd, char *const envadd[], int secs, 
         /* EOF never changes the waiting path: process exit and pipe draining
            share the same monotonic deadline, including the exec handshake. */
         now = sy_now_ms();
+        if (max_procs > 0 && now >= next_cap_check && !reaped) {
+            next_cap_check = now + 20;
+            int nproc = rp_count_tree((int)pid);
+            if (nproc > max_procs) {
+                char rep[256];
+                rep[0] = 0;
+                int sv = rp_kill_tree((int)pid, 2000, 0, 0, rep, sizeof rep);
+                if (sv < 0) { kill(-pid, SIGKILL); kill(pid, SIGKILL); sv = 0; }
+                res->residue = sv;
+                if (!reaped && np_reap_killed(pid, &st) < 0 && res->residue <= 0) {
+                    res->residue = 1;
+                    sv = 1;
+                }
+                if (open_o) close(po[0]);
+                if (open_e) close(pe[0]);
+                if (open_f) close(pf[0]);
+                free(o.p); free(e.p);
+                snprintf(why, wl, "process-cap-exceeded: cap=%d observed=%d residue=%d", max_procs, nproc, res->residue);
+                return -1;
+            }
+        }
         if (now < 0 || now >= deadline) {
             size_t i; char rep[256];
             int sv = rp_kill_tree(pid, 2000, 0, 0, rep, sizeof rep);   /* freeze, kill, re-check; -ENOSYS off /proc */
@@ -169,5 +191,8 @@ int pc_run(char *const argv[], const char *cwd, char *const envadd[], int secs, 
     res->rc = WIFSIGNALED(st) ? -WTERMSIG(st) : WEXITSTATUS(st);
     res->out = o.p; res->outn = o.n; res->err = e.p; res->errn = e.n;
     return 0;
+}
+int pc_run(char *const argv[], const char *cwd, char *const envadd[], int secs, np_result *res, char *why, size_t wl, int tool_fault) {
+    return pc_run_capped(argv, cwd, envadd, secs, 0, res, why, wl, tool_fault);
 }
 
