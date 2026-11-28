@@ -197,102 +197,108 @@ static int css_compare(const char *group, CssJob *jobs, int nj, long group_ms) {
 
 #define CSS_MAX_ENTRIES 32
 #define CSS_MAX_SHARDS 7
+#define CSS_MAX_ARGV 24
 
 typedef struct {
     char parent[96];
+    char orig_entry[192];
+    char orig_args[256];
+    char check[96];
+    char check_entry[192];
+    char check_args[256];
     char shards[CSS_MAX_SHARDS][96];
-    char parts[CSS_MAX_SHARDS][64];
+    char shard_entry[CSS_MAX_SHARDS][192];
+    char shard_args[CSS_MAX_SHARDS][256];
     int nshards;
 } CssEntry;
 
-static int css_parent_tool(const char *parent, const char **orig_cx, const char **part_cx, int *needs_workdir) {
-    if (tx_eqz(parent, "signal-targets")) {
-        *orig_cx = "tools/check-signal-targets.cx";
-        *part_cx = "tools/check-signal-targets-part.cx";
-        *needs_workdir = 0;
-        return 1;
-    }
-    if (tx_eqz(parent, "win-argv")) {
-        *orig_cx = "tools/check-win-argv.cx";
-        *part_cx = "tools/check-win-argv-part.cx";
-        *needs_workdir = 0;
-        return 1;
-    }
-    if (tx_eqz(parent, "premerge-selfcheck")) {
-        *orig_cx = "tools/check-premerge-selfcheck.cx";
-        *part_cx = "tools/check-premerge-selfcheck.cx";
-        *needs_workdir = 0;
-        return 1;
-    }
-    if (tx_eqz(parent, "snapshots-cx")) {
-        *orig_cx = "tests/snapshots-cx.cx";
-        *part_cx = "tools/check-snapshots-cx-part.cx";
-        *needs_workdir = 1;
-        return 1;
+static int css_lookup_batch(const char *bt, long bn, const char *id,
+                            char *entry_out, size_t entry_cap,
+                            char *args_out, size_t args_cap) {
+    long at = 0, idl = tx_len(id, 128);
+    if (entry_out && entry_cap) entry_out[0] = 0;
+    if (args_out && args_cap) args_out[0] = 0;
+    while (at < bn) {
+        long e = tx_chr(bt + at, bn - at, '\n'), l = e < 0 ? bn - at : e;
+        long o0, l0, o1, l1, o8, l8, o9, l9;
+        if (l > 0 && bt[at] != '#' &&
+            !tx_field(bt + at, l, '\t', 0, &o0, &l0) && l0 == idl && tx_same(bt + at + o0, l0, id, idl) &&
+            !tx_field(bt + at, l, '\t', 1, &o1, &l1) && l1 == 11 && tx_same(bt + at + o1, l1, "IMPLEMENTED", 11) &&
+            !tx_field(bt + at, l, '\t', 8, &o8, &l8) && l8 > 0 &&
+            !tx_field(bt + at, l, '\t', 9, &o9, &l9) && l9 > 0) {
+            if (entry_out && entry_cap) {
+                long cp = (l8 < (long)entry_cap - 1) ? l8 : (long)entry_cap - 1;
+                mm_copy(entry_out, entry_cap, bt + at + o8, (size_t)cp);
+                entry_out[cp] = 0;
+            }
+            if (args_out && args_cap) {
+                long cp = (l9 < (long)args_cap - 1) ? l9 : (long)args_cap - 1;
+                mm_copy(args_out, args_cap, bt + at + o9, (size_t)cp);
+                args_out[cp] = 0;
+            }
+            return 1;
+        }
+        at += l + 1;
     }
     return 0;
 }
 
-static int css_part_supported(const char *parent, const char *part) {
-    if (tx_eqz(parent, "signal-targets")) return tx_eqz(part, "gen") || tx_eqz(part, "posix") || tx_eqz(part, "win");
-    if (tx_eqz(parent, "win-argv")) return tx_eqz(part, "facts") || tx_eqz(part, "x86_64") || tx_eqz(part, "arm64");
-    if (tx_eqz(parent, "snapshots-cx")) return tx_eqz(part, "core") || tx_eqz(part, "alloc");
-    if (tx_eqz(parent, "premerge-selfcheck")) return tx_eqz(part, "main") || tx_eqz(part, "rd");
-    return 0;
-}
-
-static const char *css_chk_for_parent(const char *parent) {
-    if (tx_eqz(parent, "signal-targets")) return "slow-split";
-    if (tx_eqz(parent, "win-argv")) return "slow-split-win-argv";
-    if (tx_eqz(parent, "snapshots-cx")) return "slow-split-snapshots";
-    if (tx_eqz(parent, "premerge-selfcheck")) return "slow-split-premerge";
-    return 0;
+static int css_build_argv(const char *entry, const char *args, const char *workdir,
+                          char **argv_out, char tok_buf[CSS_MAX_ARGV][256]) {
+    int c = 0;
+    argv_out[c++] = "sh";
+    argv_out[c++] = "./unisacc.com"; /* lint:allow R1-product runs registered split parent/shard check via installed product */
+    argv_out[c++] = (char *)entry;
+    argv_out[c++] = "--";
+    if (args && args[0] && !tx_eqz(args, "-")) {
+        long al = tx_len(args, 256), p = 0;
+        while (p < al && c < CSS_MAX_ARGV - 1) {
+            long e = p;
+            while (e < al && args[e] != ';') e++;
+            long tl = e - p;
+            if (tl > 0) {
+                if (tl == 6 && tx_same(args + p, 6, "{root}", 6)) {
+                    tx_copy(tok_buf[c], 256, ".", 1);
+                    tok_buf[c][1] = 0;
+                } else if (tl == 5 && tx_same(args + p, 5, "{out}", 5)) {
+                    long wl = tx_len(workdir, 255);
+                    mm_copy(tok_buf[c], 256, workdir, (size_t)wl);
+                    tok_buf[c][wl] = 0;
+                } else {
+                    if (tl >= 256) tl = 255;
+                    mm_copy(tok_buf[c], 256, args + p, (size_t)tl);
+                    tok_buf[c][tl] = 0;
+                }
+                argv_out[c] = tok_buf[c];
+                c++;
+            }
+            p = e + 1;
+        }
+    }
+    argv_out[c] = 0;
+    return c;
 }
 
 static int css_run_entry(const CssEntry *en, const char *work) {
     long t0 = sy_now_ms();
-    const char *orig_cx = 0, *part_cx = 0;
-    int needs_wd = 0;
-    if (!css_parent_tool(en->parent, &orig_cx, &part_cx, &needs_wd)) return 1;
-    if (en->nshards < 2 || en->nshards >= CSS_MAX_JOBS) return 1;
+    if (!en->orig_entry[0] || en->nshards < 2 || en->nshards >= CSS_MAX_JOBS) return 1;
 
     CssJob jobs[CSS_MAX_JOBS];
-    char dirs[CSS_MAX_JOBS][4096];
+    char dirs[CSS_MAX_JOBS][256];
+    char *av[CSS_MAX_ARGV];
+    char toks[CSS_MAX_ARGV][256];
     int nj = 1 + en->nshards;
 
-    if (needs_wd) {
-        if (cx_fmt(dirs[0], sizeof dirs[0], "%s/%s-orig", work, en->parent)) return 1;
-        char *v0[] = {"sh", "./unisacc.com", (char *)orig_cx, "--", ".", dirs[0], 0};
-        css_start(&jobs[0], "orig", v0);
-        for (int i = 0; i < en->nshards; i++) {
-            if (cx_fmt(dirs[i + 1], sizeof dirs[i + 1], "%s/%s-%s", work, en->parent, en->parts[i])) return 1;
-            char *vi[] = {"sh", "./unisacc.com", (char *)part_cx, "--", "--part", (char *)en->parts[i], ".", dirs[i + 1], 0};
-            css_start(&jobs[i + 1], en->parts[i], vi);
-        }
-    } else {
-        char *v0[] = {"sh", "./unisacc.com", (char *)orig_cx, "--", ".", 0};
-        css_start(&jobs[0], "orig", v0);
-        for (int i = 0; i < en->nshards; i++) {
-            char *vi[] = {"sh", "./unisacc.com", (char *)part_cx, "--", "--part", (char *)en->parts[i], ".", 0};
-            css_start(&jobs[i + 1], en->parts[i], vi);
-        }
+    if (cx_fmt(dirs[0], sizeof dirs[0], "%s/%s-orig", work, en->parent)) return 1;
+    css_build_argv(en->orig_entry, en->orig_args, dirs[0], av, toks);
+    css_start(&jobs[0], "orig", av);
+    for (int i = 0; i < en->nshards; i++) {
+        if (cx_fmt(dirs[i + 1], sizeof dirs[i + 1], "%s/%s", work, en->shards[i])) return 1;
+        css_build_argv(en->shard_entry[i], en->shard_args[i], dirs[i + 1], av, toks);
+        css_start(&jobs[i + 1], en->shards[i], av);
     }
     css_wait_all(jobs, nj, 55000);
     return css_compare(en->parent, jobs, nj, sy_now_ms() - t0);
-}
-
-static int css_batch_implemented(const char *bt, long bn, const char *id) {
-    long at = 0, idl = tx_len(id, 128);
-    while (at < bn) {
-        long e = tx_chr(bt + at, bn - at, '\n'), l = e < 0 ? bn - at : e;
-        long o0, l0, o1, l1;
-        if (l > 0 && bt[at] != '#' &&
-            !tx_field(bt + at, l, '\t', 0, &o0, &l0) && l0 == idl && tx_same(bt + at + o0, l0, id, idl) &&
-            !tx_field(bt + at, l, '\t', 1, &o1, &l1) && l1 == 11 && tx_same(bt + at + o1, l1, "IMPLEMENTED", 11))
-            return 1;
-        at += l + 1;
-    }
-    return 0;
 }
 
 static int css_valid_ver3(const char *s, long n) {
@@ -306,37 +312,9 @@ static int css_valid_ver3(const char *s, long n) {
     return parts == 3;
 }
 
-/* Verify every IMPLEMENTED "<parent>-*" batch in tests/batches.tsv is listed in en->shards. */
-static int css_check_all_registered_shards(const char *bt, long bn, const CssEntry *en) {
-    char pref[128];
-    if (cx_fmt(pref, sizeof pref, "%s-", en->parent)) return 1;
-    long pl = tx_len(pref, 128);
-    long at = 0;
-    int missing = 0;
-    while (at < bn) {
-        long e = tx_chr(bt + at, bn - at, '\n'), l = e < 0 ? bn - at : e;
-        long o0, l0, o1, l1;
-        if (l > 0 && bt[at] != '#' &&
-            !tx_field(bt + at, l, '\t', 0, &o0, &l0) && l0 > pl && tx_same(bt + at + o0, pl, pref, pl) &&
-            !tx_field(bt + at, l, '\t', 1, &o1, &l1) && l1 == 11 && tx_same(bt + at + o1, l1, "IMPLEMENTED", 11)) {
-            char bid[128];
-            if (l0 < 128) {
-                mm_copy(bid, 128, bt + at + o0, (size_t)l0);
-                bid[l0] = 0;
-                int found = 0;
-                for (int k = 0; k < en->nshards; k++) if (tx_eqz(en->shards[k], bid)) found = 1;
-                if (!found) {
-                    sy_eprintf("check-slow-split: parent %s omits registered shard %s\n", en->parent, bid);
-                    missing++;
-                }
-            }
-        }
-        at += l + 1;
-    }
-    return missing;
-}
-
-/* Single-source loader: parses and validates tests/split-parents.tsv against tests/batches.tsv and available runners. */
+/* Single-source loader: parses and validates tests/split-parents.tsv against tests/batches.tsv.
+ * Reads exact shard ids and verifier batch from the table (no hard-coded parent/shard/check literals
+ * and no prefix scan over unrelated batches). */
 static int css_load_split_table(const char *path, CssEntry *entries, int maxe, int *out_n) {
     int bad = 0, ne = 0;
     size_t pn = 0, bn = 0;
@@ -372,46 +350,58 @@ static int css_load_split_table(const char *path, CssEntry *entries, int maxe, i
                 if (l1 >= 512) l1 = 511; mm_copy(shs, 512, pb + at + o1, (size_t)l1); shs[l1] = 0;
                 if (l2 >= 96) l2 = 95; mm_copy(chk, 96, pb + at + o2, (size_t)l2); chk[l2] = 0;
                 if (!tx_eqz(par, "parent")) {
-                    const char *ocx = 0, *pcx = 0, *want_chk = css_chk_for_parent(par); int nwd = 0;
+                    char orig_e[192], orig_a[256], chk_e[192], chk_a[256];
                     if (!css_valid_ver3(pb + at + o3, l3)) { sy_eprintf("check-slow-split: invalid since version in %s\n", path); bad++; }
-                    if (!tx_eqz(chk, "slow-split") && (!want_chk || !tx_eqz(chk, want_chk))) { sy_eprintf("check-slow-split: check batch mismatch for %s (got=%s)\n", par, chk); bad++; }
-                    if (!css_parent_tool(par, &ocx, &pcx, &nwd)) { sy_eprintf("check-slow-split: no multiset verifier for parent %s\n", par); bad++; }
                     for (int k = 0; k < ne; k++) if (tx_eqz(entries[k].parent, par)) { sy_eprintf("check-slow-split: duplicate parent %s\n", par); bad++; }
-                    if (!css_batch_implemented(bt, (long)bn, par)) { sy_eprintf("check-slow-split: parent %s not IMPLEMENTED\n", par); bad++; }
-                    if (!css_batch_implemented(bt, (long)bn, chk)) { sy_eprintf("check-slow-split: check %s not IMPLEMENTED\n", chk); bad++; }
+                    if (!css_lookup_batch(bt, (long)bn, par, orig_e, sizeof orig_e, orig_a, sizeof orig_a) || sy_exists(orig_e) != 1) {
+                        sy_eprintf("check-slow-split: parent %s not IMPLEMENTED or entry missing\n", par);
+                        bad++;
+                    }
+                    if (!css_lookup_batch(bt, (long)bn, chk, chk_e, sizeof chk_e, chk_a, sizeof chk_a) || sy_exists(chk_e) != 1) {
+                        sy_eprintf("check-slow-split: check %s not IMPLEMENTED or entry missing\n", chk);
+                        bad++;
+                    } else if (tx_eqz(chk_e, "tools/check-slow-split.cx")) {
+                        char want_arg[128];
+                        if (cx_fmt(want_arg, sizeof want_arg, "--group;%s", par) ||
+                            tx_find(chk_a, tx_len(chk_a, 256), want_arg, tx_len(want_arg, 128)) < 0) {
+                            sy_eprintf("check-slow-split: check batch %s args=%s does not target --group;%s\n", chk, chk_a, par);
+                            bad++;
+                        }
+                    }
 
                     if (ne >= maxe) { sy_eprintf("check-slow-split: exceeds max parents %d\n", maxe); bad++; }
                     else {
                         CssEntry *en = &entries[ne];
                         mm_fill(en, sizeof *en, 0, sizeof *en);
                         tx_copy(en->parent, sizeof en->parent, par, tx_len(par, 95));
-                        char pref[128];
-                        (void)cx_fmt(pref, sizeof pref, "%s-", par);
-                        long pl = tx_len(pref, 128);
+                        tx_copy(en->orig_entry, sizeof en->orig_entry, orig_e, tx_len(orig_e, 191));
+                        tx_copy(en->orig_args, sizeof en->orig_args, orig_a, tx_len(orig_a, 255));
+                        tx_copy(en->check, sizeof en->check, chk, tx_len(chk, 95));
+                        tx_copy(en->check_entry, sizeof en->check_entry, chk_e, tx_len(chk_e, 191));
+                        tx_copy(en->check_args, sizeof en->check_args, chk_a, tx_len(chk_a, 255));
                         long sp = 0, sl = tx_len(shs, 512);
                         while (sp < sl) {
                             long se = sp;
                             while (se < sl && shs[se] != ',') se++;
                             long ol = se - sp;
                             if (ol > 0 && ol < 96 && en->nshards < CSS_MAX_SHARDS) {
-                                char one[96];
+                                char one[96], se_buf[192], sa_buf[256];
                                 mm_copy(one, 96, shs + sp, (size_t)ol); one[ol] = 0;
                                 if (tx_eqz(one, par)) { sy_eprintf("check-slow-split: parent %s listed as own shard\n", par); bad++; }
                                 for (int k = 0; k < en->nshards; k++) if (tx_eqz(en->shards[k], one)) { sy_eprintf("check-slow-split: duplicate shard %s\n", one); bad++; }
-                                if (!css_batch_implemented(bt, (long)bn, one)) { sy_eprintf("check-slow-split: shard %s not IMPLEMENTED\n", one); bad++; }
-                                if (ol <= pl || !tx_same(one, pl, pref, pl) || !css_part_supported(par, one + pl)) {
-                                    sy_eprintf("check-slow-split: unsupported shard %s for parent %s\n", one, par);
+                                if (!css_lookup_batch(bt, (long)bn, one, se_buf, sizeof se_buf, sa_buf, sizeof sa_buf) || sy_exists(se_buf) != 1) {
+                                    sy_eprintf("check-slow-split: shard %s not IMPLEMENTED or entry missing\n", one);
                                     bad++;
                                 } else {
                                     tx_copy(en->shards[en->nshards], 96, one, ol);
-                                    tx_copy(en->parts[en->nshards], 64, one + pl, ol - pl);
+                                    tx_copy(en->shard_entry[en->nshards], 192, se_buf, tx_len(se_buf, 191));
+                                    tx_copy(en->shard_args[en->nshards], 256, sa_buf, tx_len(sa_buf, 255));
                                     en->nshards++;
                                 }
                             } else bad++;
                             sp = se + 1;
                         }
                         if (en->nshards < 2) { sy_eprintf("check-slow-split: parent %s needs >=2 shards\n", par); bad++; }
-                        bad += css_check_all_registered_shards(bt, (long)bn, en);
                         ne++;
                     }
                 }
