@@ -1,0 +1,643 @@
+/* tools/cx-doc.cx -- module and package introspection for cx units (T4).
+ *
+ * Usage:
+ *   sh ./unisacc.com tools/cx-doc.cx -- [--root DIR] [--tsv] --list
+ *   sh ./unisacc.com tools/cx-doc.cx -- [--root DIR] [--tsv] --search PATTERN
+ *   sh ./unisacc.com tools/cx-doc.cx -- [--root DIR] [--tsv] <MODULE | PACKAGE | PATH>
+ *
+ * Resolution contract (difference from compiler cxmod.cx documented explicitly):
+ *   - Package names match build/tlib-packages.tsv (e.g. cx.mem).
+ *   - Module names resolve via longest-prefix match against <root>/cxroot.tsv only
+ *     (unlike compiler cxmod.cx, CLI introspection has no caller-unit directory context
+ *     and does not walk ancestor directories for an alternative cxroot.tsv).
+ *   - Direct paths must resolve via realpath() strictly inside realpath(--root).
+ *   - Public API listings come ONLY from build/layer-api/<PKG>.tsv (never hand-parsed C).
+ *     Files with no layer-api row report API: UNVERIFIED (no layer-api row).
+ *
+ * Fail-closed (rc=2 with REFUSE<TAB>CX_DOC<TAB><reason>):
+ *   - Missing or malformed cxroot.tsv, duplicate/ambiguous cxroot prefixes
+ *   - Missing build/tlib-packages.tsv, unknown target, symlink/path escaping --root
+ *   - Malformed arguments or table capacity overflow
+ *
+ * Check: tools/check-cx-doc.cx (batch cx-doc)
+ */
+#pragma unisa use sys.fs
+#pragma unisa use sys.io
+#pragma unisa use sys.posix
+#pragma unisa use mem.heap
+#pragma unisa use mem.bytes
+#pragma unisa use text.text
+#pragma unisa use text.fmt
+
+#define CD_MAX_RULES 64
+#define CD_MAX_PKGS  64
+#define CD_MAX_USES  64
+#define CD_MAX_APIS  512
+#define CD_PW        4400
+
+typedef struct {
+    char prefix[64];
+    char dir[128];
+} CdRule;
+
+typedef struct {
+    char pkg[64];
+    char ver[32];
+    char api_sha[80];
+    char roots[512];
+    char deps[256];
+    char note[512];
+} CdPkg;
+
+typedef struct {
+    char pkg[64];
+    char file[160];
+    char name[96];
+    char sig[320];
+    char sig_sha[32];
+    char doc[512];
+} CdApi;
+
+static CdRule g_rules[CD_MAX_RULES];
+static int g_nrules = 0;
+
+static CdPkg g_pkgs[CD_MAX_PKGS];
+static int g_npkgs = 0;
+
+static CdApi g_apis[CD_MAX_APIS];
+static int g_napis = 0;
+
+static char g_abs_root[CD_PW];
+
+static int cd_refuse(const char *reason, const char *detail) {
+    printf("REFUSE\tCX_DOC\t%s\t%s\n", reason, (detail && detail[0]) ? detail : "-");
+    return 2;
+}
+
+static void cd_trim_copy(char *dst, size_t cap, const char *s, long n) {
+    long a = 0, b = n;
+    while (a < b && (s[a] == ' ' || s[a] == '\t' || s[a] == '\r' || s[a] == '\n')) a++;
+    while (b > a && (s[b - 1] == ' ' || s[b - 1] == '\t' || s[b - 1] == '\r' || s[b - 1] == '\n')) b--;
+    long ln = b - a;
+    if (ln < 0) ln = 0;
+    if ((size_t)ln >= cap) ln = (long)cap - 1;
+    if (ln > 0) mm_copy(dst, cap, s + a, (size_t)ln);
+    dst[ln] = 0;
+}
+
+/* Strip only leading comment-margin '*' at line starts; preserve in-text '*' (e.g. 'bavail * frsize').
+ * Never truncate silently: if content exceeds cap, append explicit " [TRUNCATED]" marker. */
+static void cd_clean_comment(char *dst, size_t cap, const char *s, long n) {
+    const char *tmark = " [TRUNCATED]";
+    size_t tlen = strlen(tmark);
+    size_t limit = (cap > tlen + 1) ? (cap - tlen - 1) : (cap > 0 ? cap - 1 : 0);
+    size_t p = 0;
+    int truncated = 0;
+    long at = 0;
+    if (cap == 0) return;
+    while (at < n) {
+        long e = tx_chr(s + at, n - at, '\n');
+        long ln = (e < 0) ? (n - at) : e;
+        long a = 0, b = ln;
+        while (a < b && (s[at + a] == ' ' || s[at + a] == '\t' || s[at + a] == '\r')) a++;
+        if (a < b && s[at + a] == '*') {
+            a++;
+            if (a < b && (s[at + a] == ' ' || s[at + a] == '\t')) a++;
+        }
+        while (b > a && (s[at + b - 1] == ' ' || s[at + b - 1] == '\t' || s[at + b - 1] == '\r')) b--;
+        if (b > a) {
+            if (p > 0) {
+                if (p < limit) dst[p++] = ' ';
+                else { truncated = 1; break; }
+            }
+            int prev_sp = 0;
+            for (long i = a; i < b; i++) {
+                char c = s[at + i];
+                if (c == '\t') c = ' ';
+                if (c == ' ') {
+                    if (prev_sp) continue;
+                    prev_sp = 1;
+                } else {
+                    prev_sp = 0;
+                }
+                if (p < limit) dst[p++] = c;
+                else { truncated = 1; break; }
+            }
+            if (truncated) break;
+        }
+        at += ln + 1;
+    }
+    while (p > 0 && dst[p - 1] == ' ') p--;
+    if (truncated && cap > tlen + 1) {
+        mm_copy(dst + p, cap - p, tmark, tlen);
+        p += tlen;
+    }
+    dst[p] = 0;
+}
+
+static int cd_path_inside_root(const char *path, char *real_out, size_t rcap) {
+    char rp[CD_PW];
+    if (sy_realpath(path, rp, (int)sizeof rp) < 0 || !rp[0]) return -1;
+    size_t rl = strlen(g_abs_root);
+    if (rl == 0) return -1;
+    if (strncmp(rp, g_abs_root, rl) != 0) return -2;
+    if (rp[rl] != '/' && rp[rl] != 0) return -2;
+    if (real_out && rcap > 0) {
+        if (cx_fmt(real_out, rcap, "%s", rp)) return -1;
+    }
+    return 0;
+}
+
+/* Exact mirror of cx/compiler/cxmod.cx:366-377 (cxm_goodname) and :461-468 (DIR segment validation). */
+static int cd_goodname(const char *w, long n) {
+    if (n <= 0 || n >= 64) return 0;
+    int st = 1;
+    for (long i = 0; i < n; i++) {
+        char c = w[i];
+        if (c == '.') { if (st) return 0; st = 1; continue; }
+        if (st) {
+            if (!((c >= 'a' && c <= 'z') || c == '_')) return 0;
+            st = 0;
+        } else {
+            if (!((c >= 'a' && c <= 'z') || (c >= '0' && c <= '9') || c == '_')) return 0;
+        }
+    }
+    return st == 0;
+}
+
+static int cd_gooddir(const char *s, long n) {
+    if (n <= 0 || n >= 128 || s[0] == '/' || s[n - 1] == '/') return 0;
+    long k = 0;
+    while (k < n) {
+        long p = k;
+        while (p < n && s[p] != '/') {
+            unsigned char uc = (unsigned char)s[p];
+            if (uc == '\t' || uc < 32) return 0;
+            p++;
+        }
+        if (p == k || (p - k == 1 && s[k] == '.') || (p - k == 2 && s[k] == '.' && s[k + 1] == '.')) return 0;
+        k = p + 1;
+    }
+    return 1;
+}
+
+static int cd_load_cxroot(const char *root) {
+    char p[CD_PW];
+    if (cx_fmt(p, sizeof p, "%s/cxroot.tsv", root)) return cd_refuse("path-overflow", root);
+    size_t n = 0;
+    char *b = cx_read(p, &n);
+    if (!b || !n) { free(b); return cd_refuse("missing-table", p); }
+    if (n < 8 || memcmp(b, "CXROOT1\n", 8) != 0) {
+        free(b);
+        return cd_refuse("malformed-cxroot", "first-line-not-CXROOT1");
+    }
+    long at = 8;
+    int line_no = 1;
+    g_nrules = 0;
+    while (at < (long)n) {
+        long e = tx_chr(b + at, (long)n - at, '\n');
+        if (e < 0) {
+            free(b);
+            return cd_refuse("malformed-cxroot", "last-row-no-newline");
+        }
+        long ln = e;
+        if (ln > 0 && b[at + ln - 1] == '\r') ln--;
+        line_no++;
+        if (ln > 0 && b[at] != '#') {
+            long o0, l0, o1, l1, o2, l2, o3, l3;
+            if (tx_field(b + at, ln, '\t', 0, &o0, &l0) || l0 != 1 || b[at + o0] != 'R' ||
+                tx_field(b + at, ln, '\t', 1, &o1, &l1) || l1 <= 0 ||
+                tx_field(b + at, ln, '\t', 2, &o2, &l2) || l2 <= 0 ||
+                tx_field(b + at, ln, '\t', 3, &o3, &l3) == 0) {
+                char det[64];
+                cx_fmt(det, sizeof det, "line=%d", line_no);
+                free(b);
+                return cd_refuse("malformed-cxroot", det);
+            }
+            if (!cd_goodname(b + at + o1, l1)) {
+                char det[96];
+                cx_fmt(det, sizeof det, "bad-prefix line=%d", line_no);
+                free(b);
+                return cd_refuse("malformed-cxroot", det);
+            }
+            if (!cd_gooddir(b + at + o2, l2)) {
+                char det[96];
+                cx_fmt(det, sizeof det, "bad-dir line=%d", line_no);
+                free(b);
+                return cd_refuse("malformed-cxroot", det);
+            }
+            if (g_nrules >= CD_MAX_RULES) { free(b); return cd_refuse("capacity-overflow", "cxroot.tsv>64"); }
+            char pfx[64], dir[128];
+            mm_copy(pfx, sizeof pfx, b + at + o1, (size_t)l1); pfx[l1] = 0;
+            mm_copy(dir, sizeof dir, b + at + o2, (size_t)l2); dir[l2] = 0;
+            for (int k = 0; k < g_nrules; k++) {
+                if (tx_eqz(g_rules[k].prefix, pfx)) {
+                    free(b);
+                    return cd_refuse("ambiguous-cxroot-prefix", pfx);
+                }
+            }
+            cx_fmt(g_rules[g_nrules].prefix, sizeof g_rules[g_nrules].prefix, "%s", pfx);
+            cx_fmt(g_rules[g_nrules].dir, sizeof g_rules[g_nrules].dir, "%s", dir);
+            g_nrules++;
+        }
+        at += e + 1;
+    }
+    free(b);
+    return 0;
+}
+
+static int cd_load_pkgs(const char *root) {
+    char p[CD_PW];
+    if (cx_fmt(p, sizeof p, "%s/build/tlib-packages.tsv", root)) return cd_refuse("path-overflow", root);
+    size_t n = 0;
+    char *b = cx_read(p, &n);
+    if (!b || !n) { free(b); return cd_refuse("missing-table", p); }
+    long at = 0;
+    g_npkgs = 0;
+    while (at < (long)n) {
+        long e = tx_chr(b + at, (long)n - at, '\n');
+        long ln = (e < 0) ? ((long)n - at) : e;
+        if (ln > 0 && b[at] != '#') {
+            long o0, l0, o1, l1, o2, l2, o3, l3, o5, l5, o6, l6;
+            if (!tx_field(b + at, ln, '\t', 0, &o0, &l0) &&
+                !tx_field(b + at, ln, '\t', 1, &o1, &l1) &&
+                !tx_field(b + at, ln, '\t', 2, &o2, &l2) &&
+                !tx_field(b + at, ln, '\t', 3, &o3, &l3)) {
+                if (g_npkgs >= CD_MAX_PKGS) { free(b); return cd_refuse("capacity-overflow", "tlib-packages.tsv>64"); }
+                CdPkg *pk = &g_pkgs[g_npkgs];
+                mm_fill(pk, sizeof *pk, 0, sizeof *pk);
+                cd_trim_copy(pk->pkg, sizeof pk->pkg, b + at + o0, l0);
+                cd_trim_copy(pk->ver, sizeof pk->ver, b + at + o1, l1);
+                cd_trim_copy(pk->api_sha, sizeof pk->api_sha, b + at + o2, l2);
+                cd_trim_copy(pk->roots, sizeof pk->roots, b + at + o3, l3);
+                if (!tx_field(b + at, ln, '\t', 5, &o5, &l5)) cd_trim_copy(pk->deps, sizeof pk->deps, b + at + o5, l5);
+                if (!tx_field(b + at, ln, '\t', 6, &o6, &l6)) cd_trim_copy(pk->note, sizeof pk->note, b + at + o6, l6);
+                g_npkgs++;
+            }
+        }
+        at += ln + 1;
+    }
+    free(b);
+    return 0;
+}
+
+static int cd_find_pkg_by_name(const char *name) {
+    for (int i = 0; i < g_npkgs; i++) {
+        if (tx_eqz(g_pkgs[i].pkg, name)) return i;
+    }
+    return -1;
+}
+
+static int cd_pkg_for_file(const char *rel) {
+    long rl = (long)strlen(rel);
+    for (int i = 0; i < g_npkgs; i++) {
+        const char *rs = g_pkgs[i].roots;
+        long rsl = (long)strlen(rs);
+        long at = 0;
+        while (at < rsl) {
+            long sc = tx_chr(rs + at, rsl - at, ';');
+            long tl = (sc < 0) ? (rsl - at) : sc;
+            if (tl > 0) {
+                if (tl == rl && tx_same(rs + at, tl, rel, rl)) return i;
+                if (rl > tl && tx_same(rs + at, tl, rel, tl) && rel[tl] == '/') return i;
+            }
+            at += tl + 1;
+        }
+    }
+    return -1;
+}
+
+static int cd_resolve_module(const char *root, const char *mod, char *rel_out, size_t rel_cap) {
+    long ml = (long)strlen(mod);
+    int best = -1;
+    long best_pl = -1;
+    for (int i = 0; i < g_nrules; i++) {
+        long pl = (long)strlen(g_rules[i].prefix);
+        if (pl <= 0 || pl > ml) continue;
+        if (tx_same(mod, pl, g_rules[i].prefix, pl) && (ml == pl || mod[pl] == '.')) {
+            if (pl > best_pl) { best_pl = pl; best = i; }
+        }
+    }
+    if (best < 0) return -1;
+    char rest[256];
+    size_t rp = 0;
+    if (ml > best_pl) {
+        for (long i = best_pl + 1; i < ml && rp + 1 < sizeof rest; i++) {
+            rest[rp++] = (mod[i] == '.') ? '/' : mod[i];
+        }
+    }
+    rest[rp] = 0;
+    char cand[512], full[CD_PW];
+    if (rest[0]) {
+        if (cx_fmt(cand, sizeof cand, "%s/%s.cx", g_rules[best].dir, rest)) return -1;
+    } else {
+        if (cx_fmt(cand, sizeof cand, "%s.cx", g_rules[best].dir)) return -1;
+    }
+    if (cx_fmt(full, sizeof full, "%s/%s", root, cand)) return -1;
+    if (sy_exists(full) != 1) return -1;
+    if (cx_fmt(rel_out, rel_cap, "%s", cand)) return -1;
+    return 0;
+}
+
+/* Extract the preceding block comment immediately above a verified layer-api symbol declaration. */
+static void cd_extract_sym_doc(const char *src, long slen, const char *name, char *doc_out, size_t cap) {
+    doc_out[0] = 0;
+    if (!src || slen <= 0 || !name || !name[0]) return;
+    long nl = (long)strlen(name);
+    long pos = 0;
+    while (pos < slen) {
+        long h = tx_find(src + pos, slen - pos, name, nl);
+        if (h < 0) break;
+        long abs_h = pos + h;
+        long ls = abs_h;
+        while (ls > 0 && src[ls - 1] != '\n') ls--;
+        int indent = 0;
+        while (ls + indent < abs_h && (src[ls + indent] == ' ' || src[ls + indent] == '\t')) indent++;
+        int after_ok = (abs_h + nl < slen && (src[abs_h + nl] == '(' || src[abs_h + nl] == ';' ||
+                        src[abs_h + nl] == ' ' || src[abs_h + nl] == '{'));
+        if (indent == 0 && after_ok && !tx_prefix(src + ls, slen - ls, "static", 6) &&
+            !tx_prefix(src + ls, slen - ls, "//", 2) && !tx_prefix(src + ls, slen - ls, "/*", 2)) {
+            if (src[ls] == '}') {
+                long q = ls;
+                int depth = 0;
+                while (q > 0) {
+                    if (src[q] == '}') depth++;
+                    else if (src[q] == '{') { depth--; if (depth == 0) break; }
+                    q--;
+                }
+                while (q > 0 && src[q - 1] != '\n') q--;
+                ls = q;
+            }
+            long p = ls;
+            while (p > 0 && (src[p - 1] == '\n' || src[p - 1] == '\r' || src[p - 1] == ' ' || src[p - 1] == '\t')) p--;
+            if (p >= 2 && src[p - 2] == '*' && src[p - 1] == '/') {
+                long cs = p - 2;
+                while (cs >= 2 && !(src[cs - 2] == '/' && src[cs - 1] == '*')) cs--;
+                if (cs >= 2) {
+                    cd_clean_comment(doc_out, cap, src + cs, (p - 2) - cs);
+                    return;
+                }
+            }
+            return;
+        }
+        pos = abs_h + nl;
+    }
+}
+
+static int cd_load_layer_api(const char *root, const char *pkg, const char *file_filter, const char *search_pat) {
+    char p[CD_PW];
+    if (cx_fmt(p, sizeof p, "%s/build/layer-api/%s.tsv", root, pkg)) return -1;
+    if (sy_exists(p) != 1) return 0;
+    size_t n = 0;
+    char *b = cx_read(p, &n);
+    if (!b || !n) { free(b); return 0; }
+    long at = 0;
+    long fl = file_filter ? (long)strlen(file_filter) : 0;
+    long sl = search_pat ? (long)strlen(search_pat) : 0;
+    while (at < (long)n) {
+        long e = tx_chr(b + at, (long)n - at, '\n');
+        long ln = (e < 0) ? ((long)n - at) : e;
+        if (ln > 0 && b[at] != '#') {
+            long o0, l0, o1, l1, o2, l2, o3, l3;
+            if (!tx_field(b + at, ln, '\t', 0, &o0, &l0) &&
+                !tx_field(b + at, ln, '\t', 1, &o1, &l1) &&
+                !tx_field(b + at, ln, '\t', 2, &o2, &l2) &&
+                !tx_field(b + at, ln, '\t', 3, &o3, &l3)) {
+                int keep = 1;
+                if (file_filter && (l3 != fl || !tx_same(b + at + o3, l3, file_filter, fl))) keep = 0;
+                if (keep && search_pat) {
+                    if (tx_find(b + at + o0, l0, search_pat, sl) < 0 &&
+                        tx_find(b + at + o1, l1, search_pat, sl) < 0) keep = 0;
+                }
+                if (keep) {
+                    if (g_napis >= CD_MAX_APIS) { free(b); return -2; }
+                    CdApi *a = &g_apis[g_napis++];
+                    mm_fill(a, sizeof *a, 0, sizeof *a);
+                    cx_fmt(a->pkg, sizeof a->pkg, "%s", pkg);
+                    cd_trim_copy(a->name, sizeof a->name, b + at + o0, l0);
+                    cd_trim_copy(a->sig, sizeof a->sig, b + at + o1, l1);
+                    cd_trim_copy(a->sig_sha, sizeof a->sig_sha, b + at + o2, l2);
+                    cd_trim_copy(a->file, sizeof a->file, b + at + o3, l3);
+                }
+            }
+        }
+        at += ln + 1;
+    }
+    free(b);
+    return 0;
+}
+
+static int cd_cmd_list(const char *root, int tsv) {
+    if (!tsv) printf("PACKAGES (%d):\n", g_npkgs);
+    for (int i = 0; i < g_npkgs; i++) {
+        g_napis = 0;
+        int rc = cd_load_layer_api(root, g_pkgs[i].pkg, 0, 0);
+        int cnt = (rc == 0) ? g_napis : -1;
+        if (tsv) {
+            printf("PKG\t%s\t%s\t%d\t%s\t%s\n", g_pkgs[i].pkg, g_pkgs[i].ver, cnt, g_pkgs[i].deps, g_pkgs[i].note);
+        } else {
+            printf("  %-14s %-8s apis=%-4d %s\n", g_pkgs[i].pkg, g_pkgs[i].ver, cnt, g_pkgs[i].note);
+        }
+    }
+    if (!tsv) printf("PREFIXES (%d):\n", g_nrules);
+    for (int i = 0; i < g_nrules; i++) {
+        if (tsv) printf("PREFIX\t%s\t%s\n", g_rules[i].prefix, g_rules[i].dir);
+        else printf("  %-14s -> %s\n", g_rules[i].prefix, g_rules[i].dir);
+    }
+    printf("CX_DOC_LIST\tpkgs=%d\tprefixes=%d\n", g_npkgs, g_nrules);
+    return 0;
+}
+
+static int cd_cmd_search(const char *root, const char *pat, int tsv) {
+    g_napis = 0;
+    for (int i = 0; i < g_npkgs; i++) {
+        int rc = cd_load_layer_api(root, g_pkgs[i].pkg, 0, pat);
+        if (rc == -2) return cd_refuse("capacity-overflow", "search-hits>512");
+    }
+    for (int i = 0; i < g_napis; i++) {
+        if (tsv) {
+            printf("HIT\t%s\t%s\t%s\t%s\t%s\n", g_apis[i].pkg, g_apis[i].file, g_apis[i].name, g_apis[i].sig, g_apis[i].sig_sha);
+        } else {
+            printf("%s\t%s\t%s\t%s\n", g_apis[i].pkg, g_apis[i].file, g_apis[i].name, g_apis[i].sig);
+        }
+    }
+    printf("CX_DOC_SEARCH\tpattern=%s\thits=%d\n", pat, g_napis);
+    return g_napis > 0 ? 0 : 1;
+}
+
+static int cd_cmd_pkg(const char *root, int pidx, int tsv) {
+    CdPkg *pk = &g_pkgs[pidx];
+    g_napis = 0;
+    int rc = cd_load_layer_api(root, pk->pkg, 0, 0);
+    if (rc == -2) return cd_refuse("capacity-overflow", "pkg-apis>512");
+    if (tsv) {
+        printf("PACKAGE\t%s\t%s\t%s\t%s\t%s\n", pk->pkg, pk->ver, pk->api_sha, pk->deps, pk->note);
+        for (int i = 0; i < g_napis; i++) {
+            printf("API\t%s\t%s\t%s\t%s\n", g_apis[i].file, g_apis[i].name, g_apis[i].sig, g_apis[i].sig_sha);
+        }
+    } else {
+        printf("PACKAGE %s (%s)\n", pk->pkg, pk->ver);
+        printf("  deps: %s\n", pk->deps);
+        printf("  note: %s\n", pk->note);
+        printf("  apis: %d\n", g_napis);
+        for (int i = 0; i < g_napis; i++) {
+            printf("  [%s] %s\n", g_apis[i].file, g_apis[i].sig);
+        }
+    }
+    printf("CX_DOC_PKG\tpkg=%s\tapis=%d\n", pk->pkg, g_napis);
+    return 0;
+}
+
+static int cd_cmd_file(const char *root, const char *rel, int tsv) {
+    char full[CD_PW], real_full[CD_PW];
+    if (cx_fmt(full, sizeof full, "%s/%s", root, rel)) return cd_refuse("path-overflow", rel);
+    int in_root = cd_path_inside_root(full, real_full, sizeof real_full);
+    if (in_root == -2) return cd_refuse("symlink-outside-root", rel);
+    if (in_root != 0) return cd_refuse("unreadable-file", rel);
+
+    size_t n = 0;
+    char *src = cx_read(real_full, &n);
+    if (!src) return cd_refuse("unreadable-file", rel);
+
+    char mod_name[96]; mod_name[0] = 0;
+    int is_dock = 0;
+    char uses[CD_MAX_USES][96];
+    int nuses = 0;
+    char mod_doc[1024]; mod_doc[0] = 0;
+
+    long at = 0;
+    int saw_code = 0;
+    while (at < (long)n) {
+        long e = tx_chr(src + at, (long)n - at, '\n');
+        long ln = (e < 0) ? ((long)n - at) : e;
+        const char *line = src + at;
+        if (tx_prefix(line, ln, "#pragma unisa module ", 21)) {
+            cd_trim_copy(mod_name, sizeof mod_name, line + 21, ln - 21);
+        } else if (tx_prefix(line, ln, "#pragma unisa dock", 18)) {
+            is_dock = 1;
+        } else if (tx_prefix(line, ln, "#pragma unisa use ", 18)) {
+            if (nuses >= CD_MAX_USES) { free(src); return cd_refuse("capacity-overflow", "uses>64"); }
+            cd_trim_copy(uses[nuses], sizeof uses[nuses], line + 18, ln - 18);
+            nuses++;
+        } else if (!mod_doc[0] && !saw_code && tx_prefix(line, ln, "/*", 2)) {
+            long ce = tx_find(src + at + 2, (long)n - (at + 2), "*/", 2);
+            if (ce >= 0) {
+                cd_clean_comment(mod_doc, sizeof mod_doc, src + at + 2, ce);
+                at = at + 2 + ce + 2;
+                while (at < (long)n && src[at] != '\n') at++;
+                if (at < (long)n) at++;
+                continue;
+            }
+        } else if (ln > 0 && line[0] != '#' && line[0] != '/' && line[0] != ' ' && line[0] != '\t') {
+            saw_code = 1;
+        }
+        at += ln + 1;
+    }
+
+    int pidx = cd_pkg_for_file(rel);
+    const char *pkg_name = (pidx >= 0) ? g_pkgs[pidx].pkg : "-";
+    const char *api_source = "UNVERIFIED";
+    g_napis = 0;
+    if (pidx >= 0) {
+        int rc = cd_load_layer_api(root, g_pkgs[pidx].pkg, rel, 0);
+        if (rc == -2) { free(src); return cd_refuse("capacity-overflow", "file-apis>512"); }
+        if (g_napis > 0) {
+            api_source = "layer-api";
+            for (int i = 0; i < g_napis; i++) {
+                cd_extract_sym_doc(src, (long)n, g_apis[i].name, g_apis[i].doc, sizeof g_apis[i].doc);
+            }
+        }
+    }
+    free(src);
+
+    if (tsv) {
+        printf("MODULE\t%s\t%s\t%s\tdock=%s\tsource=%s\n",
+               mod_name[0] ? mod_name : "-", rel, pkg_name, is_dock ? "yes" : "no", api_source);
+        if (mod_doc[0]) printf("DOC\t%s\n", mod_doc);
+        for (int i = 0; i < nuses; i++) printf("USE\t%s\n", uses[i]);
+        if (g_napis == 0) {
+            printf("API_STATUS\tUNVERIFIED\tno-layer-api-row\n");
+        } else {
+            for (int i = 0; i < g_napis; i++) {
+                printf("API\t%s\t%s\t%s\t%s\n", g_apis[i].name, g_apis[i].sig, g_apis[i].sig_sha,
+                       g_apis[i].doc[0] ? g_apis[i].doc : "-");
+            }
+        }
+    } else {
+        printf("MODULE %s  file=%s  package=%s  dock=%s  source=%s\n",
+               mod_name[0] ? mod_name : "-", rel, pkg_name, is_dock ? "yes" : "no", api_source);
+        if (mod_doc[0]) printf("DOC: %s\n", mod_doc);
+        if (nuses > 0) {
+            printf("USES (%d):", nuses);
+            for (int i = 0; i < nuses; i++) printf(" %s", uses[i]);
+            printf("\n");
+        }
+        if (g_napis == 0) {
+            printf("API: UNVERIFIED (no layer-api row)\n");
+        } else {
+            printf("API (%d):\n", g_napis);
+            for (int i = 0; i < g_napis; i++) {
+                printf("  %s\n", g_apis[i].sig);
+                if (g_apis[i].doc[0]) printf("    // %s\n", g_apis[i].doc);
+            }
+        }
+    }
+    printf("CX_DOC_MOD\tmodule=%s\tfile=%s\tuses=%d\tapis=%d\tsource=%s\n",
+           mod_name[0] ? mod_name : "-", rel, nuses, g_napis, api_source);
+    return 0;
+}
+
+int main(int argc, char **argv) {
+    const char *root = ".";
+    const char *target = 0;
+    const char *search_pat = 0;
+    int do_list = 0, tsv = 0;
+
+    for (int i = 1; i < argc; i++) {
+        if (tx_eqz(argv[i], "--")) continue;
+        else if (tx_eqz(argv[i], "--root") && i + 1 < argc) root = argv[++i];
+        else if (tx_eqz(argv[i], "--tsv")) tsv = 1;
+        else if (tx_eqz(argv[i], "--list")) do_list = 1;
+        else if (tx_eqz(argv[i], "--search") && i + 1 < argc) search_pat = argv[++i];
+        else if (argv[i][0] == '-') return cd_refuse("bad-arg", argv[i]);
+        else if (!target) target = argv[i];
+        else return cd_refuse("extra-arg", argv[i]);
+    }
+    int modes = do_list + (search_pat ? 1 : 0) + (target ? 1 : 0);
+    if (modes != 1) return cd_refuse("usage", "pass one of --list, --search PAT, or TARGET");
+
+    if (sy_realpath(root, g_abs_root, (int)sizeof g_abs_root) < 0 || !g_abs_root[0]) {
+        return cd_refuse("bad-root", root);
+    }
+    if (cd_load_cxroot(g_abs_root) != 0) return 2;
+    if (cd_load_pkgs(g_abs_root) != 0) return 2;
+
+    if (do_list) return cd_cmd_list(g_abs_root, tsv);
+    if (search_pat) {
+        if (!search_pat[0]) return cd_refuse("bad-arg", "empty-search");
+        return cd_cmd_search(g_abs_root, search_pat, tsv);
+    }
+
+    if (target[0] == '/') return cd_refuse("bad-target", target);
+
+    /* 1. Exact package name */
+    int pidx = cd_find_pkg_by_name(target);
+    if (pidx >= 0) return cd_cmd_pkg(g_abs_root, pidx, tsv);
+
+    /* 2. Module name via cxroot.tsv */
+    char rel[512];
+    if (cd_resolve_module(g_abs_root, target, rel, sizeof rel) == 0) {
+        return cd_cmd_file(g_abs_root, rel, tsv);
+    }
+
+    /* 3. Direct repo-relative .cx file path (realpath-bounded inside --root) */
+    char full[CD_PW];
+    if (!cx_fmt(full, sizeof full, "%s/%s", g_abs_root, target)) {
+        sy_stat_t st;
+        if (sy_lstat(full, &st) == 0) {
+            return cd_cmd_file(g_abs_root, target, tsv);
+        }
+    }
+
+    return cd_refuse("unknown-target", target);
+}

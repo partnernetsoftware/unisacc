@@ -1,0 +1,209 @@
+/* tools/check-cx-doc.cx -- contract check for tools/cx-doc.cx (T4 module introspection, round 2).
+ * Final line: CHECK_CX_DOC<TAB>passed=N<TAB>failed=M
+ */
+#pragma unisa use sys.fs
+#pragma unisa use sys.io
+#pragma unisa use sys.posix
+#pragma unisa use mem.heap
+#pragma unisa use mem.bytes
+#pragma unisa use text.text
+#pragma unisa use text.fmt
+#pragma unisa use cxlib.netpack
+#pragma unisa use cxlib.sessionroot
+
+static int g_pass = 0;
+static int g_fail = 0;
+static char g_root[4096];
+
+static void ck(int ok, const char *name, const np_result *r) {
+    if (ok) {
+        g_pass++;
+        printf("PASS\t%s\n", name);
+    } else {
+        g_fail++;
+        printf("FAIL\t%s\trc=%d\tout=%.200s\terr=%.200s\n",
+               name, r ? r->rc : -1,
+               (r && r->out) ? r->out : "",
+               (r && r->err) ? r->err : "");
+    }
+}
+
+static int has_tok(const np_result *r, const char *lit) {
+    long ll = (long)strlen(lit);
+    if (!r || ll <= 0) return 0;
+    if (r->out && r->outn > 0 && tx_find(r->out, (long)r->outn, lit, ll) >= 0) return 1;
+    if (r->err && r->errn > 0 && tx_find(r->err, (long)r->errn, lit, ll) >= 0) return 1;
+    return 0;
+}
+
+static int run_doc(const char *args, np_result *r) {
+    char cmd[8192], why[128];
+    if (cx_fmt(cmd, sizeof cmd, "sh '%s/unisacc.com' '%s/tools/cx-doc.cx' -- %s", g_root, g_root, args)) return -1;
+    char *av[] = {"sh", "-c", cmd, 0};
+    mm_fill(r, sizeof *r, 0, sizeof *r);
+    return np_run(av, g_root, 0, 30, r, why, sizeof why);
+}
+
+int main(void) {
+    if (sy_realpath(".", g_root, sizeof g_root) < 0) return 2;
+    np_result r;
+
+    /* 1. --list on real repo */
+    run_doc("--list --tsv", &r);
+    ck(r.rc == 0 && has_tok(&r, "PKG\tcx.sys\t") && has_tok(&r, "PKG\tcx.mem\t") &&
+       has_tok(&r, "PKG\ttools.cxlib\t") && has_tok(&r, "PREFIX\tsys\tcx/sys") &&
+       has_tok(&r, "CX_DOC_LIST\t"),
+       "list-real-repo-tsv", &r);
+    np_free(&r);
+
+    /* 2. Module introspection by module name: sys.fs (preserves in-text '*' in 'bavail * frsize') */
+    run_doc("--tsv sys.fs", &r);
+    ck(r.rc == 0 && has_tok(&r, "MODULE\tfs\tcx/sys/fs.cx\tcx.os\tdock=yes\tsource=layer-api") &&
+       has_tok(&r, "USE\tmem.heap") && has_tok(&r, "API\tsy_stat\t") && has_tok(&r, "API\tsy_lstat\t") &&
+       has_tok(&r, "API\tsy_statvfs_t\t") && has_tok(&r, "bavail * frsize") &&
+       has_tok(&r, "DOC\tL0 sys/fs:") && has_tok(&r, "CX_DOC_MOD\tmodule=fs\t"),
+       "module-introspect-sys-fs-preserves-star", &r);
+    np_free(&r);
+
+    /* 3. Package introspection: cx.mem */
+    run_doc("--tsv cx.mem", &r);
+    ck(r.rc == 0 && has_tok(&r, "PACKAGE\tcx.mem\t") &&
+       has_tok(&r, "API\tcx/mem/heap.cx\tmm_alloc\t") &&
+       has_tok(&r, "CX_DOC_PKG\tpkg=cx.mem\t"),
+       "package-introspect-cx-mem", &r);
+    np_free(&r);
+
+    /* 4. Direct path introspection: cx/text/text.cx (in layer-api) */
+    run_doc("cx/text/text.cx", &r);
+    ck(r.rc == 0 && has_tok(&r, "file=cx/text/text.cx") && has_tok(&r, "package=cx.text") &&
+       has_tok(&r, "source=layer-api") && has_tok(&r, "tx_len"),
+       "path-introspect-text", &r);
+    np_free(&r);
+
+    /* 5. Real non-layer-api file: src/driveargs_m1.cx MUST report UNVERIFIED, never hand-parse C */
+    run_doc("src/driveargs_m1.cx", &r);
+    ck(r.rc == 0 && has_tok(&r, "source=UNVERIFIED") &&
+       has_tok(&r, "API: UNVERIFIED (no layer-api row)") &&
+       has_tok(&r, "CX_DOC_MOD\t") && has_tok(&r, "\tapis=0\tsource=UNVERIFIED"),
+       "real-non-layer-api-unverified-no-hand-parse", &r);
+    np_free(&r);
+
+    /* 6. Search existing and missing symbols */
+    run_doc("--tsv --search sy_sha256", &r);
+    ck(r.rc == 0 && has_tok(&r, "HIT\tcx.sys\tcx/sys/sha.cx\tsy_sha256") &&
+       has_tok(&r, "CX_DOC_SEARCH\tpattern=sy_sha256\thits="),
+       "search-existing-symbol", &r);
+    np_free(&r);
+
+    run_doc("--search __no_such_symbol_t4_xyz__", &r);
+    ck(r.rc == 1 && has_tok(&r, "CX_DOC_SEARCH\tpattern=__no_such_symbol_t4_xyz__\thits=0"),
+       "search-missing-symbol-rc1", &r);
+    np_free(&r);
+
+    /* 7. Refusal controls: unknown target, '..' escape, absolute path, missing args */
+    run_doc("no.such.module", &r);
+    ck(r.rc == 2 && has_tok(&r, "REFUSE\tCX_DOC\tunknown-target\tno.such.module"),
+       "mut-unknown-target-refused", &r);
+    np_free(&r);
+
+    run_doc("../etc/passwd", &r);
+    ck(r.rc == 2 && (has_tok(&r, "REFUSE\tCX_DOC\tsymlink-outside-root\t") ||
+                     has_tok(&r, "REFUSE\tCX_DOC\tunknown-target\t")),
+       "mut-dotdot-traversal-refused", &r);
+    np_free(&r);
+
+    run_doc("/etc/passwd", &r);
+    ck(r.rc == 2 && has_tok(&r, "REFUSE\tCX_DOC\tbad-target\t/etc/passwd"),
+       "mut-absolute-path-refused", &r);
+    np_free(&r);
+
+    run_doc("", &r);
+    ck(r.rc == 2 && has_tok(&r, "REFUSE\tCX_DOC\tusage\t"),
+       "mut-empty-args-refused", &r);
+    np_free(&r);
+
+    /* 8. Fixtures: missing cxroot.tsv, symlink escaping --root, malformed/ambiguous cxroot.tsv, explicit [TRUNCATED] doc */
+    char tmp[1024];
+    if (sr_scratch("check-cx-doc-", tmp, sizeof tmp) != 0) return 2;
+    {
+        char args[2048], fp[1400], outside[1400], bd[1200], sd[1200];
+        cx_fmt(args, sizeof args, "--root '%s' --list", tmp);
+        run_doc(args, &r);
+        ck(r.rc == 2 && has_tok(&r, "REFUSE\tCX_DOC\tmissing-table\t"),
+           "mut-missing-cxroot-refused", &r);
+        np_free(&r);
+
+        cx_fmt(bd, sizeof bd, "%s/build", tmp);
+        cx_fmt(sd, sizeof sd, "%s/sample", tmp);
+        sy_mkdir(bd, 0755);
+        sy_mkdir(sd, 0755);
+        cx_fmt(fp, sizeof fp, "%s/build/tlib-packages.tsv", tmp);
+        cx_write(fp, "# pkg\tver\tsha\troots\texc\tdeps\tnote\n", 36);
+
+        /* 8a. Malformed cxroot.tsv rows refused (missing tabs, bad..prefix, bad DIR segment) */
+        cx_fmt(fp, sizeof fp, "%s/cxroot.tsv", tmp);
+        cx_write(fp, "CXROOT1\nBAD_ROW_NO_TABS\n", 24);
+        cx_fmt(args, sizeof args, "--root '%s' --list", tmp);
+        run_doc(args, &r);
+        ck(r.rc == 2 && has_tok(&r, "REFUSE\tCX_DOC\tmalformed-cxroot\t"),
+           "mut-malformed-cxroot-refused", &r);
+        np_free(&r);
+
+        cx_write(fp, "CXROOT1\nR\tbad..prefix\tcx/sys\n", 29);
+        run_doc(args, &r);
+        ck(r.rc == 2 && has_tok(&r, "REFUSE\tCX_DOC\tmalformed-cxroot\tbad-prefix"),
+           "mut-bad-dotdot-prefix-refused", &r);
+        np_free(&r);
+
+        cx_write(fp, "CXROOT1\nR\tsample\t../outside\n", 28);
+        run_doc(args, &r);
+        ck(r.rc == 2 && has_tok(&r, "REFUSE\tCX_DOC\tmalformed-cxroot\tbad-dir"),
+           "mut-bad-dotdot-dir-refused", &r);
+        np_free(&r);
+
+        /* 8b. Ambiguous/duplicate cxroot.tsv prefix refused */
+        cx_fmt(fp, sizeof fp, "%s/cxroot.tsv", tmp);
+        cx_write(fp, "CXROOT1\nR\tsample\tsample\nR\tsample\tother\n", 39);
+        run_doc(args, &r);
+        ck(r.rc == 2 && has_tok(&r, "REFUSE\tCX_DOC\tambiguous-cxroot-prefix\tsample"),
+           "mut-ambiguous-cxroot-prefix-refused", &r);
+        np_free(&r);
+
+        /* Valid cxroot.tsv for remaining fixture checks */
+        cx_fmt(fp, sizeof fp, "%s/cxroot.tsv", tmp);
+        cx_write(fp, "CXROOT1\nR\tsample\tsample\n", 24);
+
+        /* 8c. Symlink pointing outside --root refused via realpath boundary */
+        cx_fmt(outside, sizeof outside, "%s-outside-secret.cx", tmp);
+        cx_write(outside, "/* outside secret */\n", 21);
+        cx_fmt(fp, sizeof fp, "%s/sample/escape.cx", tmp);
+        symlink(outside, fp);
+        cx_fmt(args, sizeof args, "--root '%s' sample.escape", tmp);
+        run_doc(args, &r);
+        ck(r.rc == 2 && has_tok(&r, "REFUSE\tCX_DOC\tsymlink-outside-root\t"),
+           "mut-symlink-outside-root-refused", &r);
+        np_free(&r);
+        sy_unlink(outside);
+
+        /* 8d. Long module doc comment marks [TRUNCATED] explicitly instead of silent truncation */
+        {
+            char longbuf[1600];
+            size_t lp = 0;
+            const char *hdr = "#pragma unisa module bigdoc\n/* ";
+            mm_copy(longbuf, sizeof longbuf, hdr, strlen(hdr)); lp += strlen(hdr);
+            for (int k = 0; k < 1200; k++) longbuf[lp++] = 'a';
+            const char *ftr = " */\n";
+            mm_copy(longbuf + lp, sizeof longbuf - lp, ftr, strlen(ftr)); lp += strlen(ftr);
+            cx_fmt(fp, sizeof fp, "%s/sample/bigdoc.cx", tmp);
+            cx_write(fp, longbuf, (long)lp);
+            cx_fmt(args, sizeof args, "--root '%s' --tsv sample.bigdoc", tmp);
+            run_doc(args, &r);
+            ck(r.rc == 0 && has_tok(&r, "[TRUNCATED]") && has_tok(&r, "API_STATUS\tUNVERIFIED\tno-layer-api-row"),
+               "fixture-long-doc-explicit-truncated-and-unverified", &r);
+            np_free(&r);
+        }
+    }
+
+    printf("CHECK_CX_DOC\tpassed=%d\tfailed=%d\n", g_pass, g_fail);
+    return g_fail ? 1 : 0;
+}
