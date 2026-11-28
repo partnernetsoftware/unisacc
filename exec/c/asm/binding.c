@@ -40,7 +40,7 @@ static void kernel_load(void) {
     int n; unsigned char *bytes=0;
     int owner=core_host_fetch((const unsigned char *)key,keyn,&bytes,&n);
     if (!owner) {
-        const char *path=getenv("UNISA_KERNEL");
+        const char *path=getenv("UNISACC_KERNEL");
         if (!path || !*path) die("assembly kernel not specified");
         bytes=readfile(path,&n,0);owner=2;
     }

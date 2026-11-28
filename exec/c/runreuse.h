@@ -137,9 +137,9 @@ static int rr_hash_file(const char *path, char hex[65]) {
 
 static int rr_write_atomic(const char *final_path, const unsigned char *data, size_t n);
 
-/* Prefer APE container path (UNISA_CONTAINER) over extracted argv0. */
+/* Prefer APE container path (UNISACC_CONTAINER) over extracted argv0. */
 static const char *rr_product_path(const char *argv0) {
-    const char *c = getenv("UNISA_CONTAINER");
+    const char *c = getenv("UNISACC_CONTAINER");
     if (c && c[0]) return c;
     return argv0;
 }
