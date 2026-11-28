@@ -1645,15 +1645,116 @@ static void pd_prepare_opt_frame4(const char *eff_root, const char *cand, const 
     if (rc == 0)
         (void)sy_write_file(donep, "OPT_FRAME4_MATERIAL\tREADY\n", 26, 0644);
 }
+static int pd_parse_entry_link_row(const char *out, long outn,
+                                   char *path_out, size_t path_cap,
+                                   char *refuse_out, size_t refuse_cap) {
+    /* Exact record contract from tools/affected.cx:2235-2237:
+     *   MATERIAL<TAB>piece-d-driveargs-link<TAB>entry-link<TAB><artifact_path>
+     *   MATERIAL<TAB>piece-d-driveargs-link<TAB>entry-link<TAB>-<TAB>REFUSED=<reason>
+     * Returns: 0=READY (path_out filled), 3=retryable deadline deferral, -1=missing/malformed, -2=hard refusal. */
+    static const char pfx[] = "MATERIAL\tpiece-d-driveargs-link\tentry-link\t";
+    const long pfxn = (long)(sizeof pfx - 1);
+    long at = 0;
+    path_out[0] = 0;
+    refuse_out[0] = 0;
+    if (!out || outn <= 0) return -1;
+    while (at < outn) {
+        long nl = at;
+        while (nl < outn && out[nl] != '\n') nl++;
+        long ln = nl - at;
+        if (ln > 0 && out[at + ln - 1] == '\r') ln--;
+        if (ln > pfxn && tx_same(out + at, pfxn, pfx, pfxn)) {
+            const char *rest = out + at + pfxn;
+            long rlen = ln - pfxn;
+            long tab = 0;
+            while (tab < rlen && rest[tab] != '\t') tab++;
+            if (tab == 1 && rest[0] == '-') {
+                const char *r5 = (tab + 1 < rlen) ? (rest + tab + 1) : 0;
+                long r5n = r5 ? (rlen - tab - 1) : 0;
+                if (r5 && r5n > 8 && tx_same(r5, 8, "REFUSED=", 8)) {
+                    long why_n = r5n - 8;
+                    if (why_n >= (long)refuse_cap) why_n = (long)refuse_cap - 1;
+                    mm_copy(refuse_out, refuse_cap, r5 + 8, (size_t)why_n);
+                    refuse_out[why_n] = 0;
+                    if ((why_n >= 20 && tx_same(refuse_out, 20, "stepwise-more-steps=", 20)) ||
+                        (why_n >= 18 && tx_same(refuse_out, 18, "prebuild-deadline=", 18))) {
+                        return 3;
+                    }
+                    return -2;
+                }
+                return -1;
+            }
+            if (tab > 0 && tab == rlen && tab < (long)path_cap) {
+                mm_copy(path_out, path_cap, rest, (size_t)tab);
+                path_out[tab] = 0;
+                return 0;
+            }
+            return -1;
+        }
+        at = nl + 1;
+    }
+    return -1;
+}
+
+static void pd_entry_link_run_id(const char *eff_root, const char *cand, char out65[65]) {
+    char buf[4096];
+    const char *c = (cand && cand[0]) ? cand : "-";
+    if (cx_fmt(buf, sizeof buf, "ENTRY_LINK_V1\nroot=%s\ncand=%s\n", eff_root ? eff_root : "", c)) {
+        out65[0] = 0;
+        return;
+    }
+    cx_sha256_hex(buf, (size_t)tx_len(buf, (long)sizeof buf), out65);
+}
+
+static int pd_verify_entry_link_done(const char *donep, const char *want_run_id) {
+    unsigned char *b = 0;
+    int64_t n = 0;
+    char rec_id[128], rec_path[PD_PW];
+    static const char pfx[] = "ENTRY_LINK_MATERIAL\tREADY\tid=";
+    const long pfxn = (long)(sizeof pfx - 1);
+    long at, nl, ptab;
+    if (!donep || !want_run_id || !want_run_id[0]) return 0;
+    if (sy_read_file(donep, &b, &n, 8192) != 0 || !b || n <= pfxn) {
+        if (b) mm_free(b);
+        return 0;
+    }
+    nl = 0;
+    while (nl < (long)n && b[nl] != '\n' && b[nl] != '\r') nl++;
+    if (nl <= pfxn || !tx_same((const char *)b, pfxn, pfx, pfxn)) { mm_free(b); return 0; }
+    at = pfxn;
+    ptab = at;
+    while (ptab < nl && b[ptab] != '\t') ptab++;
+    if (ptab - at <= 0 || ptab - at >= (long)sizeof rec_id) { mm_free(b); return 0; }
+    mm_copy(rec_id, sizeof rec_id, (const char *)b + at, (size_t)(ptab - at));
+    rec_id[ptab - at] = 0;
+    if (!tx_eqz(rec_id, want_run_id)) { mm_free(b); return 0; }
+    if (ptab + 6 >= nl || !tx_same((const char *)b + ptab, 6, "\tpath=", 6)) { mm_free(b); return 0; }
+    {
+        long plen = nl - (ptab + 6);
+        if (plen <= 0 || plen >= (long)sizeof rec_path) { mm_free(b); return 0; }
+        mm_copy(rec_path, sizeof rec_path, (const char *)b + ptab + 6, (size_t)plen);
+        rec_path[plen] = 0;
+    }
+    mm_free(b);
+    if (tx_eqz(rec_path, "-") || sy_exists(rec_path) != 1) return 0;
+    return 1;
+}
+
 static int pd_prepare_entry_link(const char *eff_root, const char *cand, const char *out_dir,
                                  const char *mock_runner, int resume, const unsigned char *wb, int64_t wn) {
     char donep[PD_PW], outp[PD_PW], cmd[8192], why[256], lay_dir[PD_PW];
+    char run_id[65], art_path[PD_PW], ref_why[256], done_line[PD_PW + 160];
     const int max_passes = 6;
     const int pass_timeout_s = 55;
     if (!wb || wn <= 0 || tx_find((const char *)wb, (long)wn, "piece-d-driveargs-link", 22) < 0) return 0;
     if (cx_fmt(donep, sizeof donep, "%s/done.prepare-entry-link", out_dir) ||
         cx_fmt(outp, sizeof outp, "%s/prepare-entry-link.tsv", out_dir)) return -1;
-    if (resume && sy_exists(donep) == 1) return 0;
+    pd_entry_link_run_id(eff_root, cand, run_id);
+    if (resume && sy_exists(donep) == 1) {
+        if (pd_verify_entry_link_done(donep, run_id)) return 0;
+        printf("PRERUN_PREPARE_MATERIAL\tmaterial=entry-link\tresume=invalidated\n");
+        fflush(stdout);
+    }
     for (int pass = 1; pass <= max_passes; pass++) {
         const char *run_cwd = eff_root;
         long started = sy_now_ms();
@@ -1670,17 +1771,27 @@ static int pd_prepare_entry_link(const char *eff_root, const char *cand, const c
         np_result r = {0};
         int tr = np_run(av, run_cwd, 0, pass_timeout_s, &r, why, sizeof why);
         int rc = tr ? 124 : r.rc;
-        if (rc == 0 && !mock_runner && r.out && r.outn > 0 && tx_find(r.out, (long)r.outn, "REFUSED=", 8) >= 0)
-            rc = 1;
-        np_free(&r);
-        printf("PRERUN_PREPARE_MATERIAL\tmaterial=entry-link\tpass=%d\trc=%d\twall_ms=%ld\n",
-               pass, rc, sy_now_ms() - started);
-        fflush(stdout);
+        int parsed = -1;
+        art_path[0] = 0;
+        ref_why[0] = 0;
         if (rc == 0) {
-            if (sy_write_file(donep, "ENTRY_LINK_MATERIAL\tREADY\n", 26, 0644) != 0) return -1;
+            parsed = pd_parse_entry_link_row(r.out, (long)r.outn, art_path, sizeof art_path, ref_why, sizeof ref_why);
+        }
+        np_free(&r);
+        printf("PRERUN_PREPARE_MATERIAL\tmaterial=entry-link\tpass=%d\trc=%d\tstate=%s\tdetail=%s\twall_ms=%ld\n",
+               pass, rc,
+               parsed == 0 ? "READY" : (parsed == 3 ? "DEFERRED" : "REFUSED"),
+               parsed == 0 ? art_path : (ref_why[0] ? ref_why : "missing-material-row"),
+               sy_now_ms() - started);
+        fflush(stdout);
+        if (rc == 0 && parsed == 0) {
+            if (sy_exists(art_path) != 1) return -1;
+            if (cx_fmt(done_line, sizeof done_line, "ENTRY_LINK_MATERIAL\tREADY\tid=%s\tpath=%s\n", run_id, art_path)) return -1;
+            if (sy_write_file(donep, done_line, tx_len(done_line, (long)sizeof done_line), 0644) != 0) return -1;
             return 0;
         }
-        if (rc != 3) break;
+        if (rc == 0 && parsed == 3) continue; /* named deadline deferral: stepwise-more-steps / prebuild-deadline */
+        break; /* non-zero rc, empty output, or hard refusal: do not retry */
     }
     return -1;
 }
