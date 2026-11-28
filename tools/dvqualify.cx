@@ -118,9 +118,14 @@ static long gate_time(long now) { return now*3000L; }
 #define gate_load() tool_load1()
 #define gate_time(now) (now)
 #endif
+static int dv_s1_max_procs(void) {
+    const char *e = getenv("UNISACC_S1_MAX_PROCS");
+    int v = (e && e[0]) ? atoi(e) : 0;
+    return (v >= 1 && v <= 256) ? v : 0;
+}
 static int run(char **v, const char *cwd, int secs, char *out, int cap) {
     np_result r = {0}; char why[300];
-    if (np_run(v, cwd, 0, secs, &r, why, sizeof why)) { fprintf(stderr, "QUALIFY_EXEC\t%s\t%s\n", v[0], why); return -1; }
+    if (np_run_capped(v, cwd, 0, secs, dv_s1_max_procs(), &r, why, sizeof why)) { fprintf(stderr, "QUALIFY_EXEC\t%s\t%s\n", v[0], why); return -1; }
     if (out && cap > 0) { long k = (long)r.outn < cap - 1 ? (long)r.outn : cap - 1; if (k > 0) mm_copy(out, cap, r.out, k); out[k > 0 ? k : 0] = 0; }
     if (r.rc) fprintf(stderr, "QUALIFY_STEP\t%s rc=%d\t%.*s\n", v[0], r.rc, (int)(r.errn > 300 ? 300 : r.errn), r.err ? r.err : "");
     int rc = r.rc; np_free(&r); return rc;
@@ -573,7 +578,7 @@ static int prepare_kit(void) {
     np_result r={0};long start=sy_now_ms();
     int remaining=(int)((limit-start)/1000);
     if(remaining<1){sy_close(fd);return 1;}
-    int transport=np_run(v,lay,0,remaining,&r,why,sizeof why);
+    int transport=np_run_capped(v,lay,0,remaining,dv_s1_max_procs(),&r,why,sizeof why);
     sy_close(fd);
     int tampered=r.err && strstr(r.err,"tlib: TAMPERED\t");
     int prepared=!transport && !r.rc && !tampered && r.out && strstr(r.out,"PREPARED\ttlib-kit\t");

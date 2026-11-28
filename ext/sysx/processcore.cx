@@ -9,6 +9,7 @@
 #pragma unisa use sys.time
 #pragma unisa use sys.proc
 #pragma unisa use sys.posix
+#pragma unisa use text.fmt
 typedef struct np_buf { char *p; size_t n, cap; } np_buf;
 typedef struct np_result { int rc; char *out; size_t outn; char *err; size_t errn; int residue; int timed_out; } np_result;
 
@@ -63,20 +64,172 @@ static int np_reap_killed(pid_t pid, int *st) {
     }
     return -1;
 }
+static int pc_cgroup_dir_for_pid(pid_t pid, char *out, size_t cap) {
+    char cp[64], buf[512];
+    if (cx_fmt(cp, sizeof cp, "/proc/%d/cgroup", (int)pid)) return -1;
+    int fd = open(cp, O_RDONLY);
+    if (fd < 0) return -1;
+    ssize_t n = read(fd, buf, sizeof buf - 1);
+    close(fd);
+    if (n <= 0) return -1;
+    buf[n] = 0;
+    const char *p = strstr(buf, "0::");
+    if (!p) return -1;
+    p += 3;
+    const char *e = p;
+    while (*e && *e != '\n' && *e != '\r') e++;
+    if (e <= p) return -1;
+    return cx_fmt(out, cap, "/sys/fs/cgroup%.*s", (int)(e - p), p) == 0 ? 0 : -1;
+}
+
+static long pc_read_pids_events_fd(int fd) {
+    char buf[512];
+    if (fd < 0) return -1;
+    if (lseek(fd, 0, SEEK_SET) < 0) return -1;
+    ssize_t n = read(fd, buf, sizeof buf - 1);
+    if (n <= 0) return -1;
+    buf[n] = 0;
+    const char *p = strstr(buf, "max ");
+    if (!p) return -1;
+    p += 4;
+    long v = 0;
+    int any = 0;
+    while (*p >= '0' && *p <= '9') { v = v * 10 + (*p - '0'); p++; any = 1; }
+    return any ? v : -1;
+}
+
+static long pc_read_pids_events_max(const char *ev_path) {
+    int fd = open(ev_path, O_RDONLY);
+    if (fd < 0) return -1;
+    long v = pc_read_pids_events_fd(fd);
+    close(fd);
+    return v;
+}
+
+/* Returns >=0 count of live pids in cgroup.procs (0 if ENOENT = scope already gone),
+ * or -1 on any read/open error other than ENOENT (never silently treated as 0). */
+static int pc_cgroup_procs_count(const char *procs_path) {
+    char buf[4096];
+    errno = 0;
+    int fd = open(procs_path, O_RDONLY);
+    if (fd < 0) return (errno == ENOENT) ? 0 : -1;
+    ssize_t n = read(fd, buf, sizeof buf - 1);
+    int rerr = errno;
+    close(fd);
+    if (n < 0) return (rerr == ENOENT) ? 0 : -1;
+    if (n == 0) return 0;
+    int cnt = 0;
+    for (ssize_t i = 0; i < n; i++) if (buf[i] == '\n') cnt++;
+    return cnt;
+}
+
+static const char *pc_find_bin(const char *a, const char *b) {
+    if (access(a, X_OK) == 0) return a;
+    if (access(b, X_OK) == 0) return b;
+    return 0;
+}
+
+/* Kill transient scope using absolute systemctl path; returns 0 on helper rc==0, -1 otherwise.
+ * Always reaps helper (SIGKILL on timeout so helper never leaks). */
+static int pc_kill_scope(const char *unit) {
+    if (!unit || !unit[0]) return -1;
+    const char *sc = pc_find_bin("/usr/bin/systemctl", "/bin/systemctl");
+    if (!sc) return -1;
+    pid_t kp = fork();
+    if (kp < 0) return -1;
+    if (kp == 0) {
+        int dn = open("/dev/null", O_WRONLY);
+        if (dn >= 0) { dup2(dn, 1); dup2(dn, 2); close(dn); }
+        execl(sc, "systemctl", "--user", "kill", "-s", "KILL", unit, (char *)0);
+        _exit(127);
+    }
+    int st = 0, reaped = 0;
+    for (int i = 0; i < 100; i++) {
+        if (waitpid(kp, &st, WNOHANG) == kp) { reaped = 1; break; }
+        usleep(10000);
+    }
+    if (!reaped) {
+        kill(kp, SIGKILL);
+        for (int i = 0; i < 50; i++) {
+            if (waitpid(kp, &st, WNOHANG) == kp) { reaped = 1; break; }
+            usleep(10000);
+        }
+        return -1;
+    }
+    return (WIFEXITED(st) && WEXITSTATUS(st) == 0) ? 0 : -1;
+}
+
+static int pc_rand_hex16(char out[17]) {
+    unsigned char raw[8];
+    int fd = open("/dev/urandom", O_RDONLY);
+    if (fd < 0) return -1;
+    ssize_t n = read(fd, raw, sizeof raw);
+    close(fd);
+    if (n != (ssize_t)sizeof raw) return -1;
+    static const char hx[] = "0123456789abcdef";
+    for (int i = 0; i < 8; i++) {
+        out[i * 2] = hx[(raw[i] >> 4) & 0xf];
+        out[i * 2 + 1] = hx[raw[i] & 0xf];
+    }
+    out[16] = 0;
+    return 0;
+}
+
+static const char *pc_systemd_run_path(void) {
+    const char *sr = pc_find_bin("/usr/bin/systemd-run", "/bin/systemd-run");
+    if (!sr) return 0;
+    char bus[128];
+    if (cx_fmt(bus, sizeof bus, "/run/user/%u/bus", (unsigned)getuid())) return 0;
+    return access(bus, F_OK) == 0 ? sr : 0;
+}
+
 int pc_run_capped(char *const argv[], const char *cwd, char *const envadd[], int secs, int max_procs, np_result *res, char *why, size_t wl, int tool_fault) {
-    int po[2], pe[2], pf[2], err[2] = { 0, 0 }, st = 0, open_o = 1, open_e = 1, open_f = 1, reaped = 0;
+    int po[2], pe[2], pf[2], p_up[2] = { -1, -1 }, p_go[2] = { -1, -1 }, err[2] = { 0, 0 }, st = 0, open_o = 1, open_e = 1, open_f = 1, reaped = 0;
     size_t errn = 0;
     pid_t pid; ssize_t k; long now = sy_now_ms(), deadline, next_cap_check = 0; np_buf o = { 0, 0, 0 }, e = { 0, 0, 0 }; char t[65536];
     int fault=tool_fault?np_fault():0;
+    int use_cgroup = 0, scope_observed = 0, ev_fd = -1;
+    const char *sr_bin = 0;
+    char unit[96], tmax[32], ev_path[256], procs_path[256], rtok[17], cg_buf[320];
+    size_t cg_len = 0;
+    long seen_events_max = -1;
+    unit[0] = 0; tmax[0] = 0; ev_path[0] = 0; procs_path[0] = 0; rtok[0] = 0; cg_buf[0] = 0;
     res->rc = 0; res->out = res->err = 0; res->outn = res->errn = 0; res->residue = 0; res->timed_out = 0;
     if (fault<0) { snprintf(why,wl,"ValueError: UNISACC_NP_FAULT=%s refused (only residue)",getenv("UNISACC_NP_FAULT")); return -1; }
     if (now < 0) { snprintf(why, wl, "OSError: cannot read monotonic clock"); return -1; }
+    if (max_procs > 0 && (sr_bin = pc_systemd_run_path()) != 0) {
+        if (pc_rand_hex16(rtok) != 0) {
+            (void)cx_fmt(why, wl, "cgroup-scope-start-failed: urandom unavailable");
+            return -1;
+        }
+        unsigned uid = (unsigned)getuid();
+        if (!cx_fmt(unit, sizeof unit, "unisacc-s1b-%d-%s.scope", (int)getpid(), rtok) &&
+            !cx_fmt(tmax, sizeof tmax, "TasksMax=%d", max_procs) &&
+            !cx_fmt(ev_path, sizeof ev_path, "/sys/fs/cgroup/user.slice/user-%u.slice/user@%u.service/app.slice/%s/pids.events", uid, uid, unit) &&
+            !cx_fmt(procs_path, sizeof procs_path, "/sys/fs/cgroup/user.slice/user-%u.slice/user@%u.service/app.slice/%s/cgroup.procs", uid, uid, unit)) {
+            use_cgroup = 1;
+        } else {
+            (void)cx_fmt(why, wl, "cgroup-scope-start-failed: path format overflow");
+            return -1;
+        }
+    }
     deadline = now + (long)secs * 1000;
     next_cap_check = now + 20;
     if (pipe(po) || pipe(pe) || pipe(pf)) { snprintf(why, wl, "OSError: cannot create pipes"); return -1; }
+    if (use_cgroup && (pipe(p_up) || pipe(p_go))) {
+        close(po[0]); close(po[1]); close(pe[0]); close(pe[1]); close(pf[0]); close(pf[1]);
+        if (p_up[0] >= 0) { close(p_up[0]); close(p_up[1]); }
+        snprintf(why, wl, "OSError: cannot create cgroup handshake pipes");
+        return -1;
+    }
     fcntl(pf[1], F_SETFD, FD_CLOEXEC);
     pid = fork();
-    if (pid < 0) { snprintf(why, wl, "OSError: fork failed"); return -1; }
+    if (pid < 0) {
+        close(po[0]); close(po[1]); close(pe[0]); close(pe[1]); close(pf[0]); close(pf[1]);
+        if (use_cgroup) { close(p_up[0]); close(p_up[1]); close(p_go[0]); close(p_go[1]); }
+        snprintf(why, wl, "OSError: fork failed");
+        return -1;
+    }
     if (pid == 0) {
         sy_setpgid(0, 0);   /* own process group: a timeout kills every descendant */
         close(po[0]); close(pe[0]); close(pf[0]);
@@ -103,12 +256,75 @@ int pc_run_capped(char *const argv[], const char *cwd, char *const envadd[], int
         /* Bounded regression seam: only the child waits, with the exec pipe open. */
         { const char *delay = getenv("UNISACC_NP_TEST_PREEXEC_MS"); if (delay) { int ms = atoi(delay); if (ms > 0 && ms <= 5000) usleep((unsigned)ms * 1000); } }
         if (cwd && chdir(cwd) != 0) { err[0] = 1; err[1] = errno; k = write(pf[1], err, sizeof err); _exit(255); }
+        if (use_cgroup) {
+            /* Preserve exact ENOENT/EACCES target semantics before entering systemd-run. */
+            if (argv[0] && strchr(argv[0], '/')) {
+                if (access(argv[0], X_OK) != 0) {
+                    err[0] = 2; err[1] = errno; k = write(pf[1], err, sizeof err); (void)k;
+                    _exit(255);
+                }
+            }
+            /* Map handshake pipes to fixed fd 3 (child->parent cgroup path) and fd 4 (parent->child go).
+             * Move pf[1] out of 3/4 first if needed, keeping FD_CLOEXEC on pf[1]. */
+            close(p_up[0]); close(p_go[1]);
+            if (pf[1] == 3 || pf[1] == 4) {
+                int npf = fcntl(pf[1], F_DUPFD, 5);
+                if (npf < 0) _exit(255);
+                fcntl(npf, F_SETFD, FD_CLOEXEC);
+                close(pf[1]); pf[1] = npf;
+            }
+            if (p_go[0] == 3) {
+                int ngo = fcntl(p_go[0], F_DUPFD, 5);
+                if (ngo < 0) { err[0] = 3; err[1] = errno; k = write(pf[1], err, sizeof err); (void)k; _exit(255); }
+                close(p_go[0]); p_go[0] = ngo;
+            }
+            if (p_up[1] != 3) {
+                if (dup2(p_up[1], 3) < 0) { err[0] = 3; err[1] = errno; k = write(pf[1], err, sizeof err); (void)k; _exit(255); }
+                close(p_up[1]);
+            }
+            if (p_go[0] != 4) {
+                if (dup2(p_go[0], 4) < 0) { err[0] = 3; err[1] = errno; k = write(pf[1], err, sizeof err); (void)k; _exit(255); }
+                close(p_go[0]);
+            }
+            fcntl(3, F_SETFD, 0);
+            fcntl(4, F_SETFD, 0);
+            size_t argc_in = 0;
+            while (argv[argc_in]) argc_in++;
+            char **sv = malloc((argc_in + 16) * sizeof *sv);
+            char uflag[112];
+            if (!sv || cx_fmt(uflag, sizeof uflag, "--unit=%s", unit) != 0) {
+                err[0] = 3; err[1] = ENOMEM; k = write(pf[1], err, sizeof err); (void)k;
+                _exit(255);
+            }
+            size_t si = 0;
+            sv[si++] = (char *)sr_bin;
+            sv[si++] = "--user";
+            sv[si++] = "--scope";
+            sv[si++] = "--quiet";
+            sv[si++] = uflag;
+            sv[si++] = "-p";
+            sv[si++] = tmax;
+            sv[si++] = "-p";
+            sv[si++] = "CollectMode=inactive-or-failed";
+            sv[si++] = "--";
+            sv[si++] = "/bin/sh";
+            sv[si++] = "-c";
+            sv[si++] = "IFS=: read _ _ cg < /proc/self/cgroup && printf '%s\\n' \"$cg\" >&3 && exec 3>&- && read _ <&4 && exec 4<&- && exec \"$@\"";
+            sv[si++] = "s1b-wrap";
+            for (size_t j = 0; j < argc_in; j++) sv[si++] = argv[j];
+            sv[si] = 0;
+            /* Use absolute sr_bin (never PATH-dependent) and NEVER fall back to bare execvp on failure. */
+            execv(sr_bin, sv);
+            err[0] = 3; err[1] = errno; k = write(pf[1], err, sizeof err); (void)k;
+            _exit(255);
+        }
         execvp(argv[0], argv);
         err[0] = 2; err[1] = errno; k = write(pf[1], err, sizeof err); (void)k;
         _exit(255);
     }
     sy_setpgid(pid, pid);   /* also from the parent, so the group exists before any kill */
     close(po[1]); close(pe[1]); close(pf[1]);
+    if (use_cgroup) { close(p_up[1]); close(p_go[0]); fcntl(p_up[0], F_SETFL, O_NONBLOCK); }
     fcntl(pf[0], F_SETFL, O_NONBLOCK);
     fcntl(po[0], F_SETFL, O_NONBLOCK); fcntl(pe[0], F_SETFL, O_NONBLOCK);
     np_put(&o, "", 0); np_put(&e, "", 0);
@@ -123,6 +339,37 @@ int pc_run_capped(char *const argv[], const char *cwd, char *const envadd[], int
         int got = 0;
         if (open_o) { k = read(po[0], t, sizeof t); if (k > 0) { np_put(&o, t, (size_t)k); got = 1; } else if (k == 0 || (errno != EAGAIN && errno != EINTR)) { open_o = 0; close(po[0]); } }
         if (open_e) { k = read(pe[0], t, sizeof t); if (k > 0) { np_put(&e, t, (size_t)k); got = 1; } else if (k == 0 || (errno != EAGAIN && errno != EINTR)) { open_e = 0; close(pe[0]); } }
+        if (use_cgroup && p_up[0] >= 0) {
+            ssize_t gk = read(p_up[0], cg_buf + cg_len, sizeof cg_buf - 1 - cg_len);
+            if (gk > 0) {
+                cg_len += (size_t)gk;
+                cg_buf[cg_len] = 0;
+                char *nl = strchr(cg_buf, '\n');
+                if (nl) {
+                    *nl = 0;
+                    if (nl > cg_buf && nl[-1] == '\r') nl[-1] = 0;
+                    if (cg_buf[0] == '/' && strstr(cg_buf, unit) &&
+                        !cx_fmt(ev_path, sizeof ev_path, "/sys/fs/cgroup%s/pids.events", cg_buf) &&
+                        !cx_fmt(procs_path, sizeof procs_path, "/sys/fs/cgroup%s/cgroup.procs", cg_buf)) {
+                        ev_fd = open(ev_path, O_RDONLY);
+                        if (ev_fd >= 0) {
+                            scope_observed = 1;
+                            if (p_go[1] >= 0) {
+                                ssize_t wk = write(p_go[1], "G\n", 2);
+                                (void)wk;
+                                close(p_go[1]); p_go[1] = -1;
+                            }
+                        }
+                    }
+                    close(p_up[0]); p_up[0] = -1;
+                    if (!scope_observed && p_go[1] >= 0) { close(p_go[1]); p_go[1] = -1; }
+                }
+                got = 1;
+            } else if (gk == 0 || (errno != EAGAIN && errno != EINTR)) {
+                close(p_up[0]); p_up[0] = -1;
+                if (p_go[1] >= 0) { close(p_go[1]); p_go[1] = -1; }
+            }
+        }
         if (!reaped) {
             int w = waitpid(pid, &st, WNOHANG);
             if (w == pid) reaped = 1;
@@ -131,31 +378,74 @@ int pc_run_capped(char *const argv[], const char *cwd, char *const envadd[], int
         /* EOF never changes the waiting path: process exit and pipe draining
            share the same monotonic deadline, including the exec handshake. */
         now = sy_now_ms();
-        if (max_procs > 0 && now >= next_cap_check && !reaped) {
-            next_cap_check = now + 20;
-            int nproc = rp_count_tree((int)pid);
-            if (nproc > max_procs) {
+        if (max_procs > 0 && !reaped) {
+            if (use_cgroup) {
+                char cgdir[256];
+                if (!scope_observed && pc_cgroup_dir_for_pid(pid, cgdir, sizeof cgdir) == 0 && strstr(cgdir, unit)) {
+                    scope_observed = 1;
+                    (void)cx_fmt(ev_path, sizeof ev_path, "%s/pids.events", cgdir);
+                    (void)cx_fmt(procs_path, sizeof procs_path, "%s/cgroup.procs", cgdir);
+                    if (ev_fd < 0) ev_fd = open(ev_path, O_RDONLY);
+                }
+            }
+            long evm = -1;
+            if (use_cgroup && scope_observed) {
+                evm = (ev_fd >= 0) ? pc_read_pids_events_fd(ev_fd) : pc_read_pids_events_max(ev_path);
+                if (evm > seen_events_max) seen_events_max = evm;
+            }
+            int nproc = (!use_cgroup && now >= next_cap_check) ? (next_cap_check = now + 10, rp_count_tree((int)pid)) : 0;
+            if ((use_cgroup && evm > 0) || (!use_cgroup && nproc > max_procs)) {
                 char rep[256];
                 rep[0] = 0;
+                int krc = 0;
+                if (use_cgroup && scope_observed) krc = pc_kill_scope(unit);
                 int sv = rp_kill_tree((int)pid, 2000, 0, 0, rep, sizeof rep);
                 if (sv < 0) { kill(-pid, SIGKILL); kill(pid, SIGKILL); sv = 0; }
+                if (use_cgroup && scope_observed) {
+                    int cg_left = pc_cgroup_procs_count(procs_path);
+                    if (cg_left != 0) {
+                        (void)pc_kill_scope(unit);
+                        usleep(50000);
+                        cg_left = pc_cgroup_procs_count(procs_path);
+                    }
+                    if (cg_left < 0) sv = (sv > 0) ? sv : 1;
+                    else if (cg_left > sv) sv = cg_left;
+                    (void)krc;
+                }
                 res->residue = sv;
                 if (!reaped && np_reap_killed(pid, &st) < 0 && res->residue <= 0) {
                     res->residue = 1;
                     sv = 1;
                 }
+                if (ev_fd >= 0) { close(ev_fd); ev_fd = -1; }
+                if (p_up[0] >= 0) { close(p_up[0]); p_up[0] = -1; }
+                if (p_go[1] >= 0) { close(p_go[1]); p_go[1] = -1; }
                 if (open_o) close(po[0]);
                 if (open_e) close(pe[0]);
                 if (open_f) close(pf[0]);
                 free(o.p); free(e.p);
-                snprintf(why, wl, "process-cap-exceeded: cap=%d observed=%d residue=%d", max_procs, nproc, res->residue);
+                if (use_cgroup)
+                    (void)cx_fmt(why, wl, "process-cap-exceeded: mode=cgroup-pids-hard cap=%d events_max=%ld residue=%d", max_procs, evm, res->residue);
+                else
+                    (void)cx_fmt(why, wl, "process-cap-exceeded: mode=polling-observation cap=%d observed=%d residue=%d", max_procs, nproc, res->residue);
                 return -1;
             }
         }
         if (now < 0 || now >= deadline) {
             size_t i; char rep[256];
+            if (use_cgroup && scope_observed) (void)pc_kill_scope(unit);
             int sv = rp_kill_tree(pid, 2000, 0, 0, rep, sizeof rep);   /* freeze, kill, re-check; -ENOSYS off /proc */
             if (sv < 0) { kill(-pid, SIGKILL); kill(pid, SIGKILL); }   /* no /proc: the pre-reaper group kill */
+            if (use_cgroup && scope_observed) {
+                int cg_left = pc_cgroup_procs_count(procs_path);
+                if (cg_left != 0) {
+                    (void)pc_kill_scope(unit);
+                    usleep(50000);
+                    cg_left = pc_cgroup_procs_count(procs_path);
+                }
+                if (cg_left < 0) sv = (sv > 0) ? sv : 1;
+                else if (cg_left > sv) sv = cg_left;
+            }
             res->residue = sv;
             res->timed_out = now >= deadline;
             if (fault==1) { res->residue=1; fputs("FAULT_INJECTED\tresidue\n",stderr); }
@@ -163,6 +453,9 @@ int pc_run_capped(char *const argv[], const char *cwd, char *const envadd[], int
                 res->residue=1; sv=1;
                 int rendered=snprintf(rep,sizeof rep,"direct child not reaped"); (void)rendered;
             }
+            if (ev_fd >= 0) { close(ev_fd); ev_fd = -1; }
+            if (p_up[0] >= 0) { close(p_up[0]); p_up[0] = -1; }
+            if (p_go[1] >= 0) { close(p_go[1]); p_go[1] = -1; }
             if (open_o) close(po[0]);
             if (open_e) close(pe[0]);
             if (open_f) close(pf[0]);
@@ -183,10 +476,52 @@ int pc_run_capped(char *const argv[], const char *cwd, char *const envadd[], int
             usleep((unsigned int)(left < 2 ? left : 2) * 1000);
         }
     }
+    if (p_up[0] >= 0) { close(p_up[0]); p_up[0] = -1; }
+    if (p_go[1] >= 0) { close(p_go[1]); p_go[1] = -1; }
     if (errn == sizeof err) {
+        if (ev_fd >= 0) { close(ev_fd); ev_fd = -1; }
         free(o.p); free(e.p);
-        np_oserror(err[1], err[0] == 1 ? cwd : argv[0], why, wl);
+        if (err[0] == 3) {
+            (void)cx_fmt(why, wl, "cgroup-scope-start-failed: errno=%d", err[1]);
+        } else {
+            np_oserror(err[1], err[0] == 1 ? cwd : argv[0], why, wl);
+        }
         return -1;
+    }
+    if (use_cgroup) {
+        if (!scope_observed || ev_fd < 0) {
+            if (ev_fd >= 0) { close(ev_fd); ev_fd = -1; }
+            free(o.p); free(e.p);
+            (void)cx_fmt(why, wl, "cgroup-scope-unobserved: scope=%d ev_fd=%d", scope_observed, ev_fd >= 0 ? 1 : 0);
+            return -1;
+        }
+        long evm = pc_read_pids_events_fd(ev_fd);
+        if (evm > seen_events_max) seen_events_max = evm;
+        close(ev_fd); ev_fd = -1;
+        int cg_left = pc_cgroup_procs_count(procs_path);
+        if (cg_left != 0) {
+            (void)pc_kill_scope(unit);
+            usleep(50000);
+            cg_left = pc_cgroup_procs_count(procs_path);
+        }
+        if (seen_events_max > 0) {
+            res->residue = (cg_left < 0) ? 1 : cg_left;
+            free(o.p); free(e.p);
+            (void)cx_fmt(why, wl, "process-cap-exceeded: mode=cgroup-pids-hard cap=%d events_max=%ld residue=%d", max_procs, seen_events_max, res->residue);
+            return -1;
+        }
+        if (seen_events_max < 0) {
+            res->residue = (cg_left < 0) ? 1 : cg_left;
+            free(o.p); free(e.p);
+            (void)cx_fmt(why, wl, "cgroup-events-unreadable: cap=%d residue=%d", max_procs, res->residue);
+            return -1;
+        }
+        if (cg_left != 0) {
+            res->residue = (cg_left < 0) ? 1 : cg_left;
+            free(o.p); free(e.p);
+            (void)cx_fmt(why, wl, "cgroup-residue-after-exit: residue=%d", res->residue);
+            return -1;
+        }
     }
     res->rc = WIFSIGNALED(st) ? -WTERMSIG(st) : WEXITSTATUS(st);
     res->out = o.p; res->outn = o.n; res->err = e.p; res->errn = e.n;
