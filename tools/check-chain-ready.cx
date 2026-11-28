@@ -71,6 +71,16 @@ static int run(char **argv, char *out, int cap) {
     out[n] = 0; sy_close(fd);
     return sy_wait_status(pid, 0, &ex, &code, &sig) == pid && ex ? code : -1;
 }
+static int install_launch_fixture(char *command, char *repo, char *out, int cap) {
+    char gitdir[440];
+    if (!command[0] || cx_fmt(gitdir, sizeof gitdir, "%s/.git", repo)) return 2;
+    char *setup[] = {"./tools/bound", "20", "sh", "-c", command, "fixture", repo, 0};
+    int rc = run(setup, out, cap);
+    if (rc) return rc;
+    char *head[] = {"./tools/bound", "10", "git", "--git-dir", gitdir, "rev-parse", "--verify", "HEAD^{commit}", 0};
+    return run(head, out, cap);
+}
+
 /* the judge on TEXT with exit code RC; optional --repo DIR so NRK is read from that tree */
 static int judge_at(const char *repo, const char *kind, const char *text, const char *rc, char *out, int cap) {
     char f[400]; char *w[16]; int n = 0;
@@ -1511,17 +1521,16 @@ int main(int argc, char **argv) {
     /* New fixtures for self-built helper, --prepare, --launch-env, build/chain-env.tsv authority, non-UNISACC identity vars, quoting, and passthrough. */
     {   char ih[360], prepo[360], cwd[400], cmd[4096];
         if (sy_cwd(cwd, sizeof cwd) != 0) cwd[0] = 0;
-        cx_fmt(ih, sizeof ih, "%s/ident-built", tmpd);
-        cx_fmt(prepo, sizeof prepo, "%s/prep-repo", tmpd);
-        cx_fmt(cmd, sizeof cmd,
-            "mkdir -p '%s/seed' '%s/tools' '%s/build' '%s/exec/facts' && "
-            "cp build/chain-env.tsv '%s/build/chain-env.tsv' && "
-            "printf 'int sha_dummy = 1;\\n' > '%s/seed/sha256.h' && "
-            "printf '#include \"sha256.h\"\\nint main(void) { return sha_dummy - 1; }\\n' > '%s/seed/ident.c' && "
-            "printf 'stub\\n' > '%s/unisacc.com.build.json' && "
-            "touch '%s/build/.table_drift' && "
-            "printf '#!/bin/sh\\nshift\\nexec \"$@\"\\n' > '%s/tools/bound' && chmod +x '%s/tools/bound' && "
-            "cat > '%s/unisacc.com' << 'EOFMK'\n"
+        if (cx_fmt(ih, sizeof ih, "%s/ident-built", tmpd) ||
+            cx_fmt(prepo, sizeof prepo, "%s/prep-repo", tmpd)) return 2;
+        if (cx_fmt(cmd, sizeof cmd,
+            "mkdir -p \"$1/build\" && cp build/chain-env.tsv \"$1/build/chain-env.tsv\" && cd \"$1\" && "
+            "mkdir -p seed tools exec/facts && "
+            "printf 'int sha_dummy = 1;\\n' > seed/sha256.h && "
+            "printf '#include \"sha256.h\"\\nint main(void) { return sha_dummy - 1; }\\n' > seed/ident.c && "
+            "printf 'stub\\n' > unisacc.com.build.json && touch build/.table_drift && "
+            "printf '#!/bin/sh\\nshift\\nexec \"$@\"\\n' > tools/bound && chmod +x tools/bound && "
+            "cat > unisacc.com << 'EOFMK'\n"
             "#!/bin/sh\n"
             "tool=\"$1\"; shift; [ \"$1\" = \"--\" ] && shift\n"
             "case \"$tool\" in\n"
@@ -1569,14 +1578,19 @@ int main(int argc, char **argv) {
             "    printf 'OK\\t%%s\\n' \"$tool\"; exit 0;;\n"
             "esac\n"
             "EOFMK\n"
-            "chmod +x '%s/unisacc.com' && "
-            "cd '%s' && git init -q -b main && git -c user.name=t -c user.email=t@t -c commit.gpgsign=false add -A && "
-            "git -c user.name=t -c user.email=t@t -c commit.gpgsign=false commit -qm prep",
-            prepo, prepo, prepo, prepo, prepo, prepo, prepo, prepo, prepo, prepo, prepo, prepo, prepo, prepo);
-        { char *sv[] = {"./tools/bound", "20", "sh", "-c", cmd, 0}; rc = run(sv, out, sizeof out);
-          if (l_in_range(0)) ck(rc == 0, "prep-fixture-setup");
-          else if (rc != 0) { ck(0, "prep-fixture-setup"); return 2; }
+            "chmod +x unisacc.com && git init -q -b main && "
+            "git -c user.name=t -c user.email=t@t -c commit.gpgsign=false add -A && "
+            "git -c user.name=t -c user.email=t@t -c commit.gpgsign=false commit -qm prep")) {
+            ck(0, "prep-fixture-command-overflow");
+            return 2;
         }
+        if (l_in_range(0)) {
+            ck(install_launch_fixture("", prepo, out, sizeof out) != 0, "prep-fixture-empty-command-refused");
+            ck(install_launch_fixture(":", prepo, out, sizeof out) != 0, "prep-fixture-missing-head-refused");
+        }
+        rc = install_launch_fixture(cmd, prepo, out, sizeof out);
+        if (l_in_range(0) || rc) ck(rc == 0, "prep-fixture-setup");
+        if (rc) return 2;
         /* Ensure helper/prepare baseline exists when a shard starts mid-launch without case 6 or case 24 */
         if (!l_in_range(6) && (l_in_range(7) || l_in_range(8) || l_in_range(10) || l_in_range(11) || l_in_range(12) || l_in_range(13))) {
             cx_fmt(cmd, sizeof cmd,
