@@ -1,0 +1,82 @@
+/* Check the five distinct routed object measurements and the missing-object verdict. */
+#pragma unisa use sys.fs
+#pragma unisa use sys.env
+#pragma unisa use sys.posix
+#pragma unisa use sys.io
+#pragma unisa use text.text
+#pragma unisa use text.fmt
+#pragma unisa use cxlib.procrun
+
+static int has(pr_result *r, const char *s) {
+    return r->out && tx_find(r->out, (long)r->outn, s, tx_len(s, 1024)) >= 0;
+}
+
+int main(void) {
+    const char *units[] = {"shared_rt", "m53_wrap", "m25_wrap", "driveargs_wrap", "bind_wrap"};
+    const char *keys[] = {"", "drivestream.o", "rtsharedname.o", "driveargs.o", "bind.o"};
+    const char *src[] = {"cx/driver/stream_s1_m1.cx", "src/drivestream_m1.cx",
+                        "src/rtsharedname_m1.cx", "src/driveargs_m1.cx", "src/bind_m1.cx"};
+    char *git[] = {"git", "rev-parse", "--verify", "HEAD", 0};
+    char *sha[] = {"sha256sum", "./unisacc.com", 0};
+    char *facts[] = {"git", "show", "HEAD:build/chain-facts.tsv", 0};
+    char *measure[] = {"sh", "./unisacc.com", "tools/measure-u14-host-cost.cx", "--", 0}; /* lint:allow R1-product acceptance runs measurement */
+    pr_result rev, compiler, routes, run;
+    char field[160], tmp[4096], fixture[4192], env[4256];
+    int ok;
+    int a = pr_run("u14-revision", git, 0, 0, 4, &rev);
+    int b = pr_run("u14-compiler-sha", sha, 0, 0, 4, &compiler);
+    int c = pr_run("u14-routes", facts, 0, 0, 4, &routes);
+    ok = a == 0 && b == 0 && c == 0 && rev.rc == 0 && compiler.rc == 0 && routes.rc == 0 &&
+         rev.out && rev.outn == 41 && compiler.out && compiler.outn > 64;
+    if (ok) {
+        int rc = pr_run("u14-measure", measure, 0, 0, 20, &run);
+        ok = rc == 0 && run.rc == 0 && run.out;
+        for (int i = 0; ok && i < 5; i++) {
+            int hits = 0;
+            if (i && (cx_fmt(field, sizeof field, "root_target\tlnx/x86_64:%s\t%s\n", keys[i], src[i]) ||
+                      !has(&routes, field))) { ok = 0; break; }
+            if (cx_fmt(field, sizeof field, "U14_HOST_COST\tunit=%s\t", units[i])) { ok = 0; break; }
+            for (long at = 0; at < (long)run.outn;) {
+                long e = at;
+                while (e < (long)run.outn && run.out[e] != '\n') e++;
+                if (tx_prefix(run.out + at, e - at, field, tx_len(field, sizeof field))) {
+                    char want[512];
+                    if (cx_fmt(want, sizeof want, "src=%s\t", src[i]) ||
+                        tx_find(run.out + at, e - at, want, tx_len(want, sizeof want)) < 0 ||
+                        cx_fmt(want, sizeof want, "\trev=%.40s\ttarget=lnx/x86_64\tcompiler_sha256=%.64s\tflags=-c",
+                               rev.out, compiler.out) ||
+                        !tx_suffix(run.out + at, e - at, want, tx_len(want, sizeof want))) ok = 0;
+                    hits++;
+                }
+                at = e + 1;
+            }
+            if (hits != 1) ok = 0;
+        }
+        pr_free(&run);
+    }
+    pr_free(&rev); pr_free(&compiler); pr_free(&routes);
+    if (!ok) sy_eprintf("FAIL u14-unique-routed-bound-rows\n");
+    if (sy_mkdtemp(sy_tmpdir(), "check-u14-", tmp, sizeof tmp) != 0) return 2;
+    if (cx_fmt(fixture, sizeof fixture, "%s/fixture.com", tmp) ||
+        cx_fmt(env, sizeof env, "UNISACC_U14_COMPILER=%s", fixture)) {
+        sy_remove_all(tmp);
+        return 2;
+    }
+    char *build[] = {"sh", "./unisacc.com", "tests/fixtures/u14-missing-bind.cx", "-o", fixture, 0}; /* lint:allow R1-product compiles fixture */
+    /* Cold fixture builds took 10.38 and 10.60 seconds. */
+    int rc = pr_run("u14-fixture", build, 0, 0, 15, &run);
+    int missing_ok = rc == 0 && run.rc == 0;
+    pr_free(&run);
+    if (missing_ok) {
+        char *neg[] = {"env", env, "sh", "./unisacc.com", "tools/measure-u14-host-cost.cx", "--", 0}; /* lint:allow R1-product runs negative fixture */
+        rc = pr_run("u14-missing-bind", neg, 0, 0, 20, &run);
+        missing_ok = rc == 0 && run.rc == 1 &&
+            has(&run, "U14_HOST_COST\tunit=bind_wrap\tsrc=src/bind_m1.cx\ttext_bytes=-1\t") &&
+            has(&run, "U14_MEASURE_SUMMARY\tstatus=FAIL\tunits=5");
+        pr_free(&run);
+    }
+    sy_remove_all(tmp);
+    if (!missing_ok) sy_eprintf("FAIL u14-compiler-success-missing-bind\n");
+    sy_printf("CHECK_U14_HOST_COST_ACCEPTANCE failed=%d\n", !ok + !missing_ok);
+    return ok && missing_ok ? 0 : 1;
+}

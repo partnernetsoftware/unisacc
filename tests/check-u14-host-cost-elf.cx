@@ -1,0 +1,69 @@
+/* U14-3: independent ELF section-size fixture, with no compiler object oracle. */
+#pragma unisa use sys.fs
+#pragma unisa use sys.env
+#pragma unisa use sys.posix
+#pragma unisa use sys.io
+#pragma unisa use text.text
+#pragma unisa use text.fmt
+#pragma unisa use cxlib.procrun
+
+static int check(char *path, unsigned char *bytes, int n, int text_bytes, const char *name) {
+    char want[96];
+    pr_result r;
+    char *av[] = {"sh", "./unisacc.com", "tools/measure-u14-host-cost.cx", "--",
+                  "--measure-object", path, "--target", "lnx/x86_64", 0}; /* lint:allow R1-product runs ELF inspection */
+    if (sy_write_file(path, bytes, n, 0600) != 0) return 0;
+    int rc = pr_run("u14-elf-fixture", av, 0, 0, 6, &r);
+    int ok = 0;
+    if (rc == 0 && text_bytes < 0) {
+        ok = r.rc == 1 && r.err && tx_find(r.err, (long)r.errn, "REFUSE invalid-elf-object", 25) >= 0;
+    } else if (rc == 0 && r.rc == 0 && r.out &&
+               cx_fmt(want, sizeof want, "U14_ELF_TEXT\ttext_bytes=%d\tobj_bytes=%d\n", text_bytes, n) == 0) {
+        ok = tx_eqz(r.out, want);
+    }
+    pr_free(&r);
+    sy_printf("%s %s\n", ok ? "PASS" : "FAIL", name);
+    return ok;
+}
+
+int main(void) {
+    unsigned char bytes[640] = {0};
+    char tmp[4096], path[4192];
+    int pass = 0;
+    if (sy_mkdtemp(sy_tmpdir(), "check-u14-elf-", tmp, sizeof tmp) != 0) return 2;
+    if (cx_fmt(path, sizeof path, "%s/sample.o", tmp)) { sy_remove_all(tmp); return 2; }
+
+    bytes[0] = 0x7f; bytes[1] = 'E'; bytes[2] = 'L'; bytes[3] = 'F';
+    bytes[4] = 2; bytes[5] = 1; bytes[6] = 1;
+    bytes[16] = 1; bytes[18] = 62; bytes[20] = 1;
+    bytes[40] = 64; bytes[52] = 64; bytes[58] = 64; bytes[60] = 4; bytes[62] = 2;
+    /* Section 1 at 128: executable PROGBITS at 320; section 2 is its string table. */
+    bytes[128] = 1; bytes[132] = 1; bytes[136] = 6;
+    bytes[152] = 64; bytes[153] = 1; bytes[160] = 17; bytes[176] = 1;
+    bytes[192] = 7; bytes[196] = 3; bytes[216] = 82; bytes[217] = 1; bytes[224] = 23; bytes[240] = 1;
+    /* Section 3 has name index 17 and 257 bytes of non-code data starting at 361. */
+    bytes[256] = 17; bytes[260] = 1; bytes[264] = 2;
+    bytes[280] = 105; bytes[281] = 1; bytes[288] = 1; bytes[289] = 1; bytes[304] = 1;
+    const char names[] = "\0.text\0.shstrtab\0.data";
+    for (int i = 0; i < (int)sizeof names; i++) bytes[338 + i] = (unsigned char)names[i];
+    for (int i = 320; i < 338; i++) bytes[i] = 0x90;
+    pass += check(path, bytes, 618, 17, "section-17");
+    /* 63 extra bytes are outside every declared section. */
+    unsigned char extended[681] = {0};
+    for (int i = 0; i < 618; i++) extended[i] = bytes[i];
+    pass += check(path, extended, 681, 17, "unrelated-tail-63");
+    bytes[160] = 18;
+    pass += check(path, bytes, 618, 18, "section-18");
+    bytes[18] = 183;
+    pass += check(path, bytes, 618, -1, "wrong-machine");
+    bytes[18] = 62;
+    for (int i = 40; i < 48; i++) bytes[i] = 255;
+    pass += check(path, bytes, 618, -1, "section-table-offset-wrap");
+    bytes[40] = 64;
+    for (int i = 41; i < 48; i++) bytes[i] = 0;
+    bytes[152] = 255; bytes[153] = 255;
+    pass += check(path, bytes, 618, -1, "section-payload-outside-file");
+    sy_remove_all(tmp);
+    sy_printf("CHECK_U14_HOST_COST_ELF passed=%d failed=%d\n", pass, 6 - pass);
+    return pass == 6 ? 0 : 1;
+}

@@ -1,0 +1,202 @@
+/* tools/check-measure-u14-host-cost.cx -- check for U14-3 + U14-3b host cost measurement tool.
+ * Covers:
+ *   (1) Default -c measurement of all 5 routed units (U14_MEASURE_SUMMARY status=OK).
+ *   (2) --linked-marginal-objects with real compiled fixtures of distinct known code sizes:
+ *       verifies kind=real-object-closure, manifest_diff=exact_ordered_snapshot,
+ *       with_pfx - without_pfx consistency, and delta_large > delta_small > 0.
+ *   (3) Reorder mutation negative: base (A,B) vs with (B,T,A) -> rc=1 and
+ *       REFUSE link-manifest-order-mismatch.
+ *   (4) Closure mutation negative: extra object in --with-obj arm -> rc=1 and
+ *       REFUSE link-manifest-order-mismatch.
+ *   (5) Post-hash byte-swap (TOCTOU) isolation: a wrapper compiler overwrites original
+ *       small.o with garbage bytes during arm0 link and asserts every object passed to
+ *       link is in the private snapshot dir; result matches clean delta byte-for-byte.
+ *
+ *   sh ./unisacc.com tools/check-measure-u14-host-cost.cx --
+ */
+#pragma unisa use sys.fs
+#pragma unisa use sys.posix
+#pragma unisa use sys.env
+#pragma unisa use sys.io
+#pragma unisa use text.text
+#pragma unisa use text.fmt
+#pragma unisa use cxlib.procrun
+
+static int parse_kv_long(const char *s, long n, const char *key, long *out) {
+    long klen = tx_len(key, 128);
+    long idx = -1;
+    if (klen <= 0 || klen > n) return -1;
+    for (long i = 0; i <= n - klen; i++) {
+        long j = 0;
+        while (j < klen && s[i + j] == key[j]) j++;
+        if (j == klen) { idx = i; break; }
+    }
+    if (idx < 0) return -1;
+    long p = idx + klen;
+    long neg = 0, v = 0, digits = 0;
+    if (p < n && s[p] == '-') { neg = 1; p++; }
+    while (p < n && s[p] >= '0' && s[p] <= '9') {
+        v = v * 10L + (long)(s[p] - '0');
+        digits++;
+        p++;
+    }
+    if (!digits) return -1;
+    *out = neg ? -v : v;
+    return 0;
+}
+
+static int compile_obj(const char *src, const char *obj) {
+    char *av[] = { "sh", "./unisacc.com", "-c", (char *)src, "-o", (char *)obj, 0 }; /* lint:allow R1-product compiles fixture object */
+    pr_result r;
+    int rc = pr_run("chk-u14-cc", av, 0, 0, 20, &r);
+    int ok = (rc == 0 && r.rc == 0);
+    pr_free(&r);
+    return ok;
+}
+
+int main(void) {
+    int ok = 1;
+
+    /* (1) Default 5-unit -c measurement */
+    {
+        char *av[] = {"sh", "./unisacc.com", "tools/measure-u14-host-cost.cx", "--", 0}; /* lint:allow R1-product runs U14-3 host cost measurement */
+        pr_result r;
+        int rc = pr_run("chk-u14", av, 0, 0, 50, &r);
+        int def_ok = (rc == 0 && r.rc == 0 && r.out &&
+                      tx_find(r.out, (long)r.outn, "U14_HOST_COST\tunit=shared_rt\t", 29) >= 0 &&
+                      tx_find(r.out, (long)r.outn, "U14_HOST_COST\tunit=bind_wrap\t", 29) >= 0 &&
+                      tx_find(r.out, (long)r.outn, "U14_MEASURE_SUMMARY\tstatus=OK\tunits=5", 37) >= 0);
+        if (r.out && r.outn) sy_printf("%.*s", (int)r.outn, r.out);
+        pr_free(&r);
+        if (!def_ok) { sy_eprintf("FAIL default-5unit\n"); ok = 0; }
+    }
+
+    /* (2)-(5) U14-3b private snapshot, strict order, reorder negative, extra-obj negative, TOCTOU swap */
+    {
+        char tmp[4096], b_cx[4400], h_cx[4400], s_cx[4400], l_cx[4400];
+        char b_o[4400], h_o[4400], s_o[4400], l_o[4400], wrap_sh[4400], env_cc[4500];
+        if (sy_mkdtemp(sy_tmpdir(), "chk-u14-3b-", tmp, sizeof tmp) != 0) return 2;
+        if (cx_fmt(b_cx, sizeof b_cx, "%s/base.cx", tmp) ||
+            cx_fmt(h_cx, sizeof h_cx, "%s/helper.cx", tmp) ||
+            cx_fmt(s_cx, sizeof s_cx, "%s/small.cx", tmp) ||
+            cx_fmt(l_cx, sizeof l_cx, "%s/large.cx", tmp) ||
+            cx_fmt(b_o, sizeof b_o, "%s/base.o", tmp) ||
+            cx_fmt(h_o, sizeof h_o, "%s/helper.o", tmp) ||
+            cx_fmt(s_o, sizeof s_o, "%s/small.o", tmp) ||
+            cx_fmt(l_o, sizeof l_o, "%s/large.o", tmp) ||
+            cx_fmt(wrap_sh, sizeof wrap_sh, "%s/toctou_cc.sh", tmp) ||
+            cx_fmt(env_cc, sizeof env_cc, "UNISACC_U14_COMPILER=%s", wrap_sh)) { sy_remove_all(tmp); return 2; }
+
+        const char *b_src = "int main(void){return 0;}\n";
+        const char *h_src = "int u14_fx_helper(int x){return x+2;}\n";
+        const char *s_src = "int u14_fx_small(int x){return x+1;}\n";
+        const char *l_src =
+            "int u14_fx_l0(int x){int a=x*3+7;int b=a^0x5a;return a+b+(a>>2);}\n"
+            "int u14_fx_l1(int x){int r=0;for(int i=0;i<16;i++)r+=u14_fx_l0(x+i);return r;}\n"
+            "int u14_fx_l2(int x){int r=u14_fx_l1(x);for(int i=0;i<16;i++)r^=u14_fx_l0(r+i);return r;}\n"
+            "int u14_fx_l3(int x){int r=u14_fx_l2(x);for(int i=0;i<16;i++)r+=u14_fx_l1(x+i);return r;}\n";
+
+        int fx_ok = (sy_write_file(b_cx, b_src, tx_len(b_src, 256), 0600) == 0 &&
+                     sy_write_file(h_cx, h_src, tx_len(h_src, 256), 0600) == 0 &&
+                     sy_write_file(s_cx, s_src, tx_len(s_src, 256), 0600) == 0 &&
+                     sy_write_file(l_cx, l_src, tx_len(l_src, 1024), 0600) == 0 &&
+                     compile_obj(b_cx, b_o) && compile_obj(h_cx, h_o) &&
+                     compile_obj(s_cx, s_o) && compile_obj(l_cx, l_o));
+
+        long ds = -1, dl = -1, ws = -1, bs = -1, wl = -1, bl = -1;
+        if (fx_ok) {
+            /* (2) Ordered snapshot positive: small vs large */
+            char *av_s[] = {"sh", "./unisacc.com", "tools/measure-u14-host-cost.cx", "--",
+                            "--linked-marginal-objects", "--without-obj", b_o, "--without-obj", h_o,
+                            "--with-obj", b_o, "--with-obj", h_o, "--with-obj", s_o, "--target-obj", s_o, 0}; /* lint:allow R1-product measures small fixture */
+            char *av_l[] = {"sh", "./unisacc.com", "tools/measure-u14-host-cost.cx", "--",
+                            "--linked-marginal-objects", "--without-obj", b_o, "--without-obj", h_o,
+                            "--with-obj", b_o, "--with-obj", h_o, "--with-obj", l_o, "--target-obj", l_o, 0}; /* lint:allow R1-product measures large fixture */
+            pr_result rs, rl;
+            int rcs = pr_run("chk-u14-lms", av_s, 0, 0, 20, &rs);
+            int rcl = pr_run("chk-u14-lml", av_l, 0, 0, 20, &rl);
+            int pos_ok = (rcs == 0 && rs.rc == 0 && rs.out &&
+                          rcl == 0 && rl.rc == 0 && rl.out &&
+                          tx_find(rs.out, (long)rs.outn, "kind=real-object-closure\t", 25) >= 0 &&
+                          tx_find(rs.out, (long)rs.outn, "manifest_diff=exact_ordered_snapshot\t", 37) >= 0 &&
+                          parse_kv_long(rs.out, (long)rs.outn, "linked_marginal_pfx_bytes=", &ds) == 0 &&
+                          parse_kv_long(rs.out, (long)rs.outn, "with_pfx_bytes=", &ws) == 0 &&
+                          parse_kv_long(rs.out, (long)rs.outn, "without_pfx_bytes=", &bs) == 0 &&
+                          parse_kv_long(rl.out, (long)rl.outn, "linked_marginal_pfx_bytes=", &dl) == 0 &&
+                          parse_kv_long(rl.out, (long)rl.outn, "with_pfx_bytes=", &wl) == 0 &&
+                          parse_kv_long(rl.out, (long)rl.outn, "without_pfx_bytes=", &bl) == 0 &&
+                          ds == ws - bs && dl == wl - bl && ds > 0 && dl > ds);
+            if (!pos_ok) { sy_eprintf("FAIL linked-marginal-known-delta ds=%ld dl=%ld\n", ds, dl); ok = 0; }
+            else sy_printf("PASS\tlinked-marginal-known-delta\tsmall=%ld\tlarge=%ld\n", ds, dl);
+            pr_free(&rs);
+            pr_free(&rl);
+
+            /* (3) Reorder mutation: base (b_o, h_o) vs with (h_o, s_o, b_o) -> MUST refuse */
+            char *av_re[] = {"sh", "./unisacc.com", "tools/measure-u14-host-cost.cx", "--",
+                             "--linked-marginal-objects", "--without-obj", b_o, "--without-obj", h_o,
+                             "--with-obj", h_o, "--with-obj", s_o, "--with-obj", b_o,
+                             "--target-obj", s_o, 0}; /* lint:allow R1-product tests reorder refusal */
+            pr_result rre;
+            int rcre = pr_run("chk-u14-re", av_re, 0, 0, 15, &rre);
+            int re_ok = (rcre == 0 && rre.rc == 1 && rre.err &&
+                         tx_find(rre.err, (long)rre.errn, "REFUSE link-manifest-order-mismatch", 35) >= 0);
+            if (!re_ok) { sy_eprintf("FAIL reorder-mutation rc=%d\n", rre.rc); ok = 0; }
+            else sy_printf("PASS\tlinked-marginal-reorder-refused\n");
+            pr_free(&rre);
+
+            /* (4) Closure mutation: extra object in with-arm -> MUST refuse */
+            char *av_m[] = {"sh", "./unisacc.com", "tools/measure-u14-host-cost.cx", "--",
+                            "--linked-marginal-objects", "--without-obj", b_o, "--without-obj", h_o,
+                            "--with-obj", b_o, "--with-obj", h_o, "--with-obj", s_o, "--with-obj", l_o,
+                            "--target-obj", s_o, 0}; /* lint:allow R1-product tests extra-object refusal */
+            pr_result rm;
+            int rcm = pr_run("chk-u14-lmm", av_m, 0, 0, 15, &rm);
+            int mut_ok = (rcm == 0 && rm.rc == 1 && rm.err &&
+                          tx_find(rm.err, (long)rm.errn, "REFUSE link-manifest-order-mismatch", 35) >= 0);
+            if (!mut_ok) { sy_eprintf("FAIL closure-mutation rc=%d\n", rm.rc); ok = 0; }
+            else sy_printf("PASS\tlinked-marginal-closure-mutation-refused\n");
+            pr_free(&rm);
+
+            /* (5) Post-hash byte-swap (TOCTOU) isolation: wrapper overwrites original s_o with
+             *     garbage during arm0 link and rejects any arg matching original s_o path. */
+            char wbody[1024];
+            if (cx_fmt(wbody, sizeof wbody,
+                       "#!/bin/sh\n"
+                       "for a in \"$@\"; do\n"
+                       "  if [ \"$a\" = \"%s\" ]; then echo 'TOCTOU_LEAK_ORIG_PATH' >&2; exit 9; fi\n"
+                       "done\n"
+                       "printf 'CORRUPTED_BY_TOCTOU_SWAP' > \"%s\"\n"
+                       "exec sh ./unisacc.com \"$@\"\n", s_o, s_o) == 0 &&
+                sy_write_file(wrap_sh, wbody, tx_len(wbody, 1024), 0700) == 0) {
+                char *av_tc[] = {"env", env_cc, "sh", "./unisacc.com", "tools/measure-u14-host-cost.cx", "--",
+                                 "--linked-marginal-objects", "--without-obj", b_o, "--without-obj", h_o,
+                                 "--with-obj", b_o, "--with-obj", h_o, "--with-obj", s_o,
+                                 "--target-obj", s_o, 0}; /* lint:allow R1-product tests TOCTOU snapshot isolation */
+                pr_result rtc;
+                long ds_tc = -1;
+                int rctc = pr_run("chk-u14-tc", av_tc, 0, 0, 20, &rtc);
+                int tc_ok = (rctc == 0 && rtc.rc == 0 && rtc.out &&
+                             parse_kv_long(rtc.out, (long)rtc.outn, "linked_marginal_pfx_bytes=", &ds_tc) == 0 &&
+                             ds_tc == ds);
+                if (!tc_ok) {
+                    sy_eprintf("FAIL toctou-swap-isolated rc=%d ds_tc=%ld want=%ld\n", rtc.rc, ds_tc, ds);
+                    if (rtc.err && rtc.errn) sy_eprintf("TC_ERR: %.*s\n", (int)rtc.errn, rtc.err);
+                    ok = 0;
+                } else {
+                    sy_printf("PASS\tlinked-marginal-post-hash-swap-isolated\tdelta=%ld\n", ds_tc);
+                }
+                pr_free(&rtc);
+            } else {
+                sy_eprintf("FAIL write-toctou-wrapper\n");
+                ok = 0;
+            }
+        } else {
+            sy_eprintf("FAIL compile-linked-fixtures\n");
+            ok = 0;
+        }
+        sy_remove_all(tmp);
+    }
+
+    sy_printf("CHECK_MEASURE_U14_HOST_COST\tstatus=%s\n", ok ? "PASS" : "FAIL");
+    return ok ? 0 : 1;
+}

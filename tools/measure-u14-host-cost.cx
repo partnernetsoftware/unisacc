@@ -1,0 +1,562 @@
+/* tools/measure-u14-host-cost.cx -- U14-3 measurement tool: per-unit host .text cost
+ * with build identity binding (rev, target, compiler_sha256, flags), strict ELF64
+ * section parser (--measure-object FILE --target TARGET), explicit two-arm object-list
+ * linked-image PT_LOAD PF_X marginal measurement (--linked-marginal-objects),
+ * fixture-backed --linked-marginal, and missing-object refusal.
+ *
+ *   sh ./unisacc.com tools/measure-u14-host-cost.cx -- [--target lnx/x86_64]
+ *   sh ./unisacc.com tools/measure-u14-host-cost.cx -- --linked-marginal [--unit NAME] [--target lnx/x86_64]
+ *   sh ./unisacc.com tools/measure-u14-host-cost.cx -- --linked-marginal-objects --without-obj A.o ... --with-obj A.o --with-obj T.o --target-obj T.o [--target lnx/x86_64]
+ *   sh ./unisacc.com tools/measure-u14-host-cost.cx -- --measure-object FILE --target lnx/x86_64
+ */
+#pragma unisa use sys.fs
+#pragma unisa use sys.posix
+#pragma unisa use sys.env
+#pragma unisa use sys.io
+#pragma unisa use sys.sha
+#pragma unisa use mem.heap
+#pragma unisa use mem.bytes
+#pragma unisa use text.text
+#pragma unisa use text.fmt
+#pragma unisa use cxlib.procrun
+
+static unsigned short u14_u16(const unsigned char *p) {
+    return (unsigned short)((unsigned int)p[0] | ((unsigned int)p[1] << 8));
+}
+
+static unsigned int u14_u32(const unsigned char *p) {
+    return (unsigned int)p[0] | ((unsigned int)p[1] << 8) |
+           ((unsigned int)p[2] << 16) | ((unsigned int)p[3] << 24);
+}
+
+static unsigned long long u14_u64(const unsigned char *p) {
+    return (unsigned long long)u14_u32(p) | ((unsigned long long)u14_u32(p + 4) << 32);
+}
+
+static unsigned short u14_expected_machine(const char *target) {
+    if (tx_eqz(target, "lnx/x86_64")) return 62;
+    if (tx_eqz(target, "lnx/arm64"))  return 183;
+    return 0;
+}
+
+/* Strict ELF64 .text section size parser shared by both live measurement and --measure-object.
+ * Validates ELF64 header, e_machine against target, overflow-safe section table bounds,
+ * shstrtab bounds, and .text payload bounds within file length. */
+static long u14_elf64_text_bytes(const unsigned char *b, long len, const char *target) {
+    unsigned short want_em = u14_expected_machine(target);
+    if (!b || len < 64L || want_em == 0) return -1;
+    if (b[0] != 0x7f || b[1] != 'E' || b[2] != 'L' || b[3] != 'F') return -1;
+    if (b[4] != 2 || b[5] != 1 || b[6] != 1) return -1; /* ELF64, little-endian, EV_CURRENT */
+    unsigned short em = u14_u16(b + 18);
+    if (em != want_em) return -1;
+
+    unsigned long long ulen = (unsigned long long)len;
+    unsigned long long shoff = u14_u64(b + 40);
+    unsigned short shentsize = u14_u16(b + 58);
+    unsigned short shnum = u14_u16(b + 60);
+    unsigned short shstrndx = u14_u16(b + 62);
+    if (shentsize < 64 || shnum == 0 || shstrndx >= shnum) return -1;
+    unsigned long long shtab_sz = (unsigned long long)shnum * (unsigned long long)shentsize;
+    if (shoff > ulen || shtab_sz > ulen - shoff) return -1;
+
+    const unsigned char *shs = b + shoff + (unsigned long long)shstrndx * (unsigned long long)shentsize;
+    unsigned long long str_off = u14_u64(shs + 24);
+    unsigned long long str_sz  = u14_u64(shs + 32);
+    if (str_off > ulen || str_sz > ulen - str_off) return -1;
+
+    for (unsigned short i = 0; i < shnum; i++) {
+        const unsigned char *sh = b + shoff + (unsigned long long)i * (unsigned long long)shentsize;
+        unsigned int noff = u14_u32(sh);
+        unsigned int sh_type = u14_u32(sh + 4);
+        unsigned long long sh_off = u14_u64(sh + 24);
+        unsigned long long sh_sz  = u14_u64(sh + 32);
+        if ((unsigned long long)noff + 6ULL <= str_sz &&
+            tx_same((const char *)(b + str_off + noff), 6L, ".text", 6L)) {
+            if (sh_type != 8) { /* not SHT_NOBITS: payload must lie within file */
+                if (sh_off > ulen || sh_sz > ulen - sh_off) return -1;
+            }
+            if (sh_sz > 0x7fffffffULL) return -1;
+            return (long)sh_sz;
+        }
+    }
+    return -1;
+}
+
+/* Strict ELF64 PT_LOAD PF_X segment p_filesz parser for linked -o executables
+ * (unisacc.com -o images carry no section headers, only program headers). */
+static long u14_elf64_pfx_filesz(const unsigned char *b, long len, const char *target) {
+    unsigned short want_em = u14_expected_machine(target);
+    if (!b || len < 64L || want_em == 0) return -1;
+    if (b[0] != 0x7f || b[1] != 'E' || b[2] != 'L' || b[3] != 'F') return -1;
+    if (b[4] != 2 || b[5] != 1 || b[6] != 1) return -1;
+    unsigned short em = u14_u16(b + 18);
+    if (em != want_em) return -1;
+
+    unsigned long long ulen = (unsigned long long)len;
+    unsigned long long phoff = u14_u64(b + 32);
+    unsigned short phentsize = u14_u16(b + 54);
+    unsigned short phnum = u14_u16(b + 56);
+    if (phentsize < 56 || phnum == 0) return -1;
+    unsigned long long phtab_sz = (unsigned long long)phnum * (unsigned long long)phentsize;
+    if (phoff > ulen || phtab_sz > ulen - phoff) return -1;
+
+    unsigned long long total = 0;
+    int found = 0;
+    for (unsigned short i = 0; i < phnum; i++) {
+        const unsigned char *ph = b + phoff + (unsigned long long)i * (unsigned long long)phentsize;
+        unsigned int p_type = u14_u32(ph);
+        unsigned int p_flags = u14_u32(ph + 4);
+        unsigned long long p_off = u14_u64(ph + 8);
+        unsigned long long p_filesz = u14_u64(ph + 32);
+        if (p_type == 1U && (p_flags & 1U) != 0U) { /* PT_LOAD && PF_X */
+            if (p_off > ulen || p_filesz > ulen - p_off) return -1;
+            if (p_filesz > 0x7fffffffULL - total) return -1;
+            total += p_filesz;
+            found = 1;
+        }
+    }
+    return found ? (long)total : -1;
+}
+
+static int u14_prepare_sandbox(const char *tmp) {
+    char repo[4096], s[4400], d[4400], sdir[4400], ddir[4400];
+    if (!getcwd(repo, sizeof repo)) return -1;
+    static const char *top[4] = { "cxroot.tsv", "cx", "ext", "exec" };
+    for (int i = 0; i < 4; i++) {
+        if (cx_fmt(s, sizeof s, "%s/%s", repo, top[i]) ||
+            cx_fmt(d, sizeof d, "%s/%s", tmp, top[i]) ||
+            sy_symlink(s, d) != 0) return -1;
+    }
+    if (cx_fmt(sdir, sizeof sdir, "%s/src", repo) ||
+        cx_fmt(ddir, sizeof ddir, "%s/src", tmp) ||
+        sy_mkdir_all(ddir, 0755) != 0) return -1;
+    sy_dir_t dir;
+    if (sy_dir_open(&dir, sdir) != 0) return -1;
+    while (sy_dir_next(&dir) == 1) {
+        if (tx_eqz(dir.name, ".") || tx_eqz(dir.name, "..")) continue;
+        if (cx_fmt(s, sizeof s, "%s/%s", sdir, dir.name) ||
+            cx_fmt(d, sizeof d, "%s/%s", ddir, dir.name) ||
+            sy_symlink(s, d) != 0) {
+            sy_dir_close(&dir);
+            return -1;
+        }
+    }
+    sy_dir_close(&dir);
+    return 0;
+}
+
+static int u14_prepare_m53_stubs(const char *tmp) {
+    char p[4400];
+    const char *st =
+        "#pragma unisa module stages\n"
+        "int st_touch(void){return 0;}\n"
+        "int st_attr_reset(void){return 0;}\n"
+        "int st_extra_reset(void){return 0;}\n"
+        "int st_dirs(const unsigned char *a,int b,const unsigned char *c,int d,const unsigned char *e,int f){(void)a;(void)b;(void)c;(void)d;(void)e;(void)f;return 0;}\n"
+        "int st_extra_put(const char *a,int b,const unsigned char *c,int d){(void)a;(void)b;(void)c;(void)d;return 0;}\n"
+        "int st_attr_exchange(unsigned char **a,long *b,long *c){(void)a;(void)b;(void)c;return 0;}\n"
+        "int st_span(const char *a,const char *b,const char *c,int d,unsigned e,const char *f,const char *g,unsigned char *h,long i,unsigned char **j,long *k,char *l,int m){(void)a;(void)b;(void)c;(void)d;(void)e;(void)f;(void)g;(void)h;(void)i;(void)j;(void)k;(void)l;(void)m;return 0;}\n";
+    const char *du =
+        "#pragma unisa module driveutil\n"
+        "int dv_cx(const char *a){(void)a;return 0;}\n";
+    const char *hs =
+        "#pragma unisa module host\n"
+        "int hs_container(char *a,int b,const char *c,char *d,int e){(void)a;(void)b;(void)c;(void)d;(void)e;return 0;}\n"
+        "int hs_read(const char *a,unsigned char **b,long *c,char *d,int e){(void)a;(void)b;(void)c;(void)d;(void)e;return 0;}\n";
+    if (cx_fmt(p, sizeof p, "%s/src/stages.cx", tmp) || (sy_unlink(p), sy_write_file(p, st, tx_len(st, 2048), 0600) != 0)) return -1;
+    if (cx_fmt(p, sizeof p, "%s/src/driveutil.cx", tmp) || (sy_unlink(p), sy_write_file(p, du, tx_len(du, 512), 0600) != 0)) return -1;
+    if (cx_fmt(p, sizeof p, "%s/src/host.cx", tmp) || (sy_unlink(p), sy_write_file(p, hs, tx_len(hs, 512), 0600) != 0)) return -1;
+    return 0;
+}
+
+static int u14_write_unit_base(const char *src, const char *out_cx, int add_pm_stubs) {
+    unsigned char *b = 0;
+    int64_t n = 0;
+    if (sy_read_file(src, &b, &n, 4 << 20) != 0 || !b || n <= 0) return -1;
+    char buf[16384];
+    long pos = 0;
+    long at = 0;
+    while (at < (long)n) {
+        long e = at;
+        while (e < (long)n && b[e] != '\n') e++;
+        long len = e - at;
+        if (len > 18 && tx_prefix((const char *)(b + at), len, "#pragma unisa use ", 18)) {
+            if (pos + len + 1 >= (long)sizeof buf) { mm_free(b); return -1; }
+            mm_copy(buf + pos, (long)sizeof buf - pos, b + at, len);
+            pos += len;
+            buf[pos++] = '\n';
+        }
+        at = e + 1;
+    }
+    mm_free(b);
+    const char *stubs = add_pm_stubs
+        ? "int pm_open(const unsigned char *p, long n, char *e, int c){(void)p;(void)n;(void)e;(void)c;return 0;}\n"
+          "int pm_close(void){return 0;}\n"
+          "int ex_ri_arm(const char *a, int b, const unsigned char *c, long d){(void)a;(void)b;(void)c;(void)d;return 0;}\n"
+          "int ex_touch(void){return 0;}\n"
+          "int bd_touch(void){return 0;}\n"
+          "int main(void){return 0;}\n"
+        : "int main(void){return 0;}\n";
+    long slen = tx_len(stubs, 1024);
+    if (pos + slen >= (long)sizeof buf) return -1;
+    mm_copy(buf + pos, (long)sizeof buf - pos, stubs, slen);
+    pos += slen;
+    return sy_write_file(out_cx, buf, pos, 0600) == 0 ? 0 : -1;
+}
+
+static long u14_link_pfx(const char *compiler, int use_sh, const char *target,
+                         const char *base_cx, const char *unit_src, const char *out_elf) {
+    pr_result r;
+    unsigned char *b = 0;
+    int64_t n = 0;
+    long pfx = -1;
+    sy_unlink(out_elf);
+    int rc, crc;
+    if (unit_src) {
+        char *av_sh[]  = { "sh", (char *)compiler, (char *)base_cx, (char *)unit_src, "-o", (char *)out_elf, 0 };
+        char *av_bin[] = { (char *)compiler, (char *)base_cx, (char *)unit_src, "-o", (char *)out_elf, 0 };
+        rc = pr_run("u14-link-with", use_sh ? av_sh : av_bin, 0, 0, 45, &r);
+    } else {
+        char *av_sh[]  = { "sh", (char *)compiler, (char *)base_cx, "-o", (char *)out_elf, 0 };
+        char *av_bin[] = { (char *)compiler, (char *)base_cx, "-o", (char *)out_elf, 0 };
+        rc = pr_run("u14-link-base", use_sh ? av_sh : av_bin, 0, 0, 45, &r);
+    }
+    crc = r.rc;
+    pr_free(&r);
+    if (rc != 0 || crc != 0) { sy_unlink(out_elf); return -1; }
+    if (sy_read_file(out_elf, &b, &n, 64 << 20) == 0 && b && n > 0) {
+        pfx = u14_elf64_pfx_filesz(b, (long)n, target);
+        mm_free(b);
+    }
+    sy_unlink(out_elf);
+    return pfx;
+}
+
+#define U14_MAX_OBJS 64
+
+static int u14_file_sha256(const char *path, char hex[65]);
+
+/* Strict ordered single-slot verification: arm1 must keep every shared object of arm0
+ * in the EXACT same relative order, inserting target_obj at a single position (insert_pos_out).
+ * Reorders (e.g. A,B vs B,T,A) and extra/missing objects are refused. */
+static int u14_verify_ordered_manifests(const char **arm0, int n0,
+                                        const char **arm1, int n1,
+                                        const char *target_obj, int *insert_pos_out) {
+    if (!target_obj || !target_obj[0] || n0 <= 0 || n1 != n0 + 1) return -1;
+    int ins = -1, i = 0, j = 0;
+    while (j < n1) {
+        if (ins < 0 && tx_eqz(arm1[j], target_obj)) {
+            ins = j;
+            j++;
+            continue;
+        }
+        if (i >= n0 || tx_eqz(arm0[i], target_obj) || !tx_eqz(arm0[i], arm1[j])) return -1;
+        i++;
+        j++;
+    }
+    if (ins < 0 || i != n0) return -1;
+    *insert_pos_out = ins;
+    return 0;
+}
+
+/* Copy src_path once into dst_path (private snapshot), returning its SHA-256 hex digest
+ * and optionally its ELF64 .text size from the same in-memory buffer (zero TOCTOU reopen). */
+static int u14_snapshot_obj(const char *src_path, const char *dst_path,
+                            const char *target, char hex[65], long *text_bytes_out) {
+    unsigned char *b = 0;
+    int64_t n = 0;
+    if (!src_path || !src_path[0] || sy_read_file(src_path, &b, &n, 64 << 20) != 0 || !b || n <= 0) return -1;
+    if (sy_sha256_hex(b, (long)n, hex) != 0 || sy_write_file(dst_path, b, n, 0600) != 0) {
+        mm_free(b);
+        return -1;
+    }
+    if (text_bytes_out) *text_bytes_out = u14_elf64_text_bytes(b, (long)n, target);
+    mm_free(b);
+    return 0;
+}
+
+static int u14_hash_ordered_shas(char shas[U14_MAX_OBJS][65], int n, char manifest_sha[65]) {
+    char buf[8192];
+    long pos = 0;
+    if (n <= 0 || n > U14_MAX_OBJS) return -1;
+    for (int i = 0; i < n; i++) {
+        if (pos + 65 >= (long)sizeof buf) return -1;
+        mm_copy(buf + pos, (long)sizeof buf - pos, shas[i], 64);
+        pos += 64;
+        buf[pos++] = '\n';
+    }
+    return sy_sha256_hex((const unsigned char *)buf, pos, manifest_sha) == 0 ? 0 : -1;
+}
+
+static long u14_link_obj_list_pfx(const char *compiler, int use_sh, const char *target,
+                                  const char **objs, int n, const char *out_elf) {
+    char *av[U14_MAX_OBJS + 8];
+    int k = 0;
+    pr_result r;
+    unsigned char *b = 0;
+    int64_t sz = 0;
+    long pfx = -1;
+    if (n <= 0 || n > U14_MAX_OBJS) return -1;
+    sy_unlink(out_elf);
+    if (use_sh) av[k++] = "sh";
+    av[k++] = (char *)compiler;
+    for (int i = 0; i < n; i++) av[k++] = (char *)objs[i];
+    av[k++] = "-o";
+    av[k++] = (char *)out_elf;
+    av[k] = 0;
+    int rc = pr_run("u14-link-objs", av, 0, 0, 45, &r);
+    int crc = r.rc;
+    pr_free(&r);
+    if (rc != 0 || crc != 0) { sy_unlink(out_elf); return -1; }
+    if (sy_read_file(out_elf, &b, &sz, 64 << 20) == 0 && b && sz > 0) {
+        pfx = u14_elf64_pfx_filesz(b, (long)sz, target);
+        mm_free(b);
+    }
+    sy_unlink(out_elf);
+    return pfx;
+}
+
+static int u14_file_sha256(const char *path, char hex[65]) {
+    unsigned char *b = 0;
+    int64_t n = 0;
+    if (sy_read_file(path, &b, &n, 64 << 20) != 0 || !b || n <= 0) return -1;
+    int rc = sy_sha256_hex(b, (long)n, hex);
+    mm_free(b);
+    return rc ? -1 : 0;
+}
+
+static int u14_git_head(char rev[41]) {
+    char *av[] = { "git", "rev-parse", "--verify", "HEAD", 0 };
+    pr_result r;
+    int rc = pr_run("u14-git-head", av, 0, 0, 10, &r);
+    int ok = (rc == 0 && r.rc == 0 && r.out && r.outn >= 40);
+    if (ok) {
+        for (int i = 0; i < 40; i++) {
+            char c = r.out[i];
+            if (!((c >= '0' && c <= '9') || (c >= 'a' && c <= 'f'))) { ok = 0; break; }
+            rev[i] = c;
+        }
+        rev[40] = 0;
+    }
+    pr_free(&r);
+    return ok ? 0 : -1;
+}
+
+static long u14_measure_obj(const char *tmp, const char *compiler, int use_sh,
+                            const char *target, const char *name, const char *src,
+                            long *file_bytes_out) {
+    char obj[4400];
+    pr_result r;
+    unsigned char *b = 0;
+    int64_t n = 0;
+    long tsz = -1;
+    if (file_bytes_out) *file_bytes_out = 0;
+    if (cx_fmt(obj, sizeof obj, "%s/%s.o", tmp, name) != 0) return -1;
+    sy_unlink(obj);
+    {
+        char *av_sh[]  = { "sh", (char *)compiler, "-c", (char *)src, "-o", obj, 0 };
+        char *av_bin[] = { (char *)compiler, "-c", (char *)src, "-o", obj, 0 };
+        int rc = pr_run("u14-cc", use_sh ? av_sh : av_bin, 0, 0, 45, &r);
+        int crc = r.rc;
+        pr_free(&r);
+        if (rc != 0 || crc != 0) { sy_unlink(obj); return -1; }
+    }
+    if (sy_read_file(obj, &b, &n, 16 << 20) == 0 && b && n > 0) {
+        if (file_bytes_out) *file_bytes_out = (long)n;
+        tsz = u14_elf64_text_bytes(b, (long)n, target);
+        mm_free(b);
+    }
+    sy_unlink(obj);
+    return tsz;
+}
+
+int main(int argc, char **argv) {
+    const char *measure_obj = 0;
+    const char *target = "lnx/x86_64";
+    const char *only_unit = 0;
+    const char *target_obj = 0;
+    const char *arm0_objs[U14_MAX_OBJS];
+    const char *arm1_objs[U14_MAX_OBJS];
+    int n_arm0 = 0, n_arm1 = 0;
+    int linked_marginal = 0;
+    int linked_objs_mode = 0;
+
+    for (int i = 1; i < argc; i++) {
+        if (tx_eqz(argv[i], "--measure-object") && i + 1 < argc) {
+            measure_obj = argv[++i];
+        } else if (tx_eqz(argv[i], "--target") && i + 1 < argc) {
+            target = argv[++i];
+        } else if (tx_eqz(argv[i], "--unit") && i + 1 < argc) {
+            only_unit = argv[++i];
+        } else if (tx_eqz(argv[i], "--linked-marginal")) {
+            linked_marginal = 1;
+        } else if (tx_eqz(argv[i], "--linked-marginal-objects")) {
+            linked_objs_mode = 1;
+        } else if (tx_eqz(argv[i], "--without-obj") && i + 1 < argc) {
+            if (n_arm0 >= U14_MAX_OBJS) { sy_eprintf("REFUSE too-many-objects\n"); return 2; }
+            arm0_objs[n_arm0++] = argv[++i];
+        } else if (tx_eqz(argv[i], "--with-obj") && i + 1 < argc) {
+            if (n_arm1 >= U14_MAX_OBJS) { sy_eprintf("REFUSE too-many-objects\n"); return 2; }
+            arm1_objs[n_arm1++] = argv[++i];
+        } else if (tx_eqz(argv[i], "--target-obj") && i + 1 < argc) {
+            target_obj = argv[++i];
+        } else {
+            sy_eprintf("REFUSE invalid-args\n");
+            return 2;
+        }
+    }
+
+    if (measure_obj) {
+        unsigned char *b = 0;
+        int64_t n = 0;
+        if (sy_read_file(measure_obj, &b, &n, 64 << 20) != 0 || !b || n <= 0) {
+            sy_eprintf("REFUSE invalid-elf-object\n");
+            return 1;
+        }
+        long tsz = u14_elf64_text_bytes(b, (long)n, target);
+        mm_free(b);
+        if (tsz < 0) {
+            sy_eprintf("REFUSE invalid-elf-object\n");
+            return 1;
+        }
+        sy_printf("U14_ELF_TEXT\ttext_bytes=%ld\tobj_bytes=%ld\n", tsz, (long)n);
+        return 0;
+    }
+
+    static const char *names[5] = { "shared_rt", "m53_wrap", "m25_wrap", "driveargs_wrap", "bind_wrap" };
+    static const char *srcs[5] = {
+        "cx/driver/stream_s1_m1.cx",
+        "src/drivestream_m1.cx",
+        "src/rtsharedname_m1.cx",
+        "src/driveargs_m1.cx",
+        "src/bind_m1.cx"
+    };
+
+    const char *env_cc = sy_env("UNISACC_U14_COMPILER");
+    const char *compiler = (env_cc && env_cc[0]) ? env_cc : "./unisacc.com"; /* lint:allow R1-product default compiler for U14-3 measurement */
+    int use_sh = !(env_cc && env_cc[0]);
+
+    char rev[41], csha[65];
+    if (u14_git_head(rev) != 0) {
+        sy_eprintf("REFUSE git-head-unavailable\n");
+        return 2;
+    }
+    if (u14_file_sha256(compiler, csha) != 0) {
+        sy_eprintf("REFUSE compiler-unreadable\n");
+        return 2;
+    }
+
+    char tmp[4096];
+    int ok = 1;
+    if (sy_mkdtemp(sy_tmpdir(), "unisacc-u14-", tmp, sizeof tmp) != 0) return 2;
+    if (linked_objs_mode) {
+        int ins_pos = -1;
+        if (u14_verify_ordered_manifests(arm0_objs, n_arm0, arm1_objs, n_arm1, target_obj, &ins_pos) != 0) {
+            sy_remove_all(tmp);
+            sy_eprintf("REFUSE link-manifest-order-mismatch\n");
+            return 1;
+        }
+        char snap_dir[4400], tgt_snap[4400], elf0[4400], elf1[4400];
+        static char shared_snaps[U14_MAX_OBJS][4400];
+        static char sha0[U14_MAX_OBJS][65], sha1[U14_MAX_OBJS][65];
+        char sha_t[65], msha0[65], msha1[65];
+        const char *snap_arm0[U14_MAX_OBJS], *snap_arm1[U14_MAX_OBJS];
+        long tsz = -1;
+        if (cx_fmt(snap_dir, sizeof snap_dir, "%s/snap", tmp) != 0 ||
+            sy_mkdir_all(snap_dir, 0700) != 0 ||
+            cx_fmt(tgt_snap, sizeof tgt_snap, "%s/target.o", snap_dir) != 0 ||
+            u14_snapshot_obj(target_obj, tgt_snap, target, sha_t, &tsz) != 0 || tsz < 0) {
+            sy_remove_all(tmp);
+            sy_eprintf("REFUSE snapshot-target-failed\n");
+            return 1;
+        }
+        for (int i = 0; i < n_arm0; i++) {
+            if (cx_fmt(shared_snaps[i], 4400, "%s/shared_%d.o", snap_dir, i) != 0 ||
+                u14_snapshot_obj(arm0_objs[i], shared_snaps[i], target, sha0[i], 0) != 0) {
+                sy_remove_all(tmp);
+                sy_eprintf("REFUSE snapshot-shared-failed\n");
+                return 1;
+            }
+            snap_arm0[i] = shared_snaps[i];
+        }
+        /* Build arm1 from the EXACT same ordered snapshot list with target.o inserted at ins_pos. */
+        int k1 = 0;
+        for (int i = 0; i <= n_arm0; i++) {
+            if (i == ins_pos) {
+                snap_arm1[k1] = tgt_snap;
+                mm_copy(sha1[k1], 65, sha_t, 65);
+                k1++;
+            }
+            if (i < n_arm0) {
+                snap_arm1[k1] = shared_snaps[i];
+                mm_copy(sha1[k1], 65, sha0[i], 65);
+                k1++;
+            }
+        }
+        if (u14_hash_ordered_shas(sha0, n_arm0, msha0) != 0 ||
+            u14_hash_ordered_shas(sha1, n_arm1, msha1) != 0) {
+            sy_remove_all(tmp);
+            sy_eprintf("REFUSE manifest-hash-failed\n");
+            return 1;
+        }
+        long pfx0 = -1, pfx1 = -1;
+        if (cx_fmt(elf0, sizeof elf0, "%s/arm0.elf", tmp) == 0 &&
+            cx_fmt(elf1, sizeof elf1, "%s/arm1.elf", tmp) == 0) {
+            pfx0 = u14_link_obj_list_pfx(compiler, use_sh, target, snap_arm0, n_arm0, elf0);
+            pfx1 = u14_link_obj_list_pfx(compiler, use_sh, target, snap_arm1, n_arm1, elf1);
+        }
+        sy_remove_all(tmp);
+        if (pfx0 < 0 || pfx1 < 0) {
+            sy_eprintf("REFUSE linked-objects-measure-failed\n");
+            return 1;
+        }
+        sy_printf("U14_LINKED_MARGINAL\tkind=real-object-closure\ttarget_obj=%s\tlinked_marginal_pfx_bytes=%ld\twith_pfx_bytes=%ld\twithout_pfx_bytes=%ld\ttext_bytes=%ld\tarm0_objs=%d\tarm1_objs=%d\tinsert_pos=%d\tmanifest_diff=exact_ordered_snapshot\tarm0_manifest_sha256=%s\tarm1_manifest_sha256=%s\tmetric=pt_load_pfx_filesz\trev=%s\ttarget=%s\tcompiler_sha256=%s\tflags=-o\n",
+                  target_obj, pfx1 - pfx0, pfx1, pfx0, tsz, n_arm0, n_arm1, ins_pos, msha0, msha1, rev, target, csha);
+        return 0;
+    }
+    if (linked_marginal) {
+        if (u14_prepare_sandbox(tmp) != 0 || u14_prepare_m53_stubs(tmp) != 0) {
+            sy_remove_all(tmp);
+            sy_eprintf("REFUSE sandbox-init-failed\n");
+            return 2;
+        }
+        int measured = 0;
+        for (int i = 0; i < 5; i++) {
+            if (only_unit && !tx_eqz(names[i], only_unit)) continue;
+            measured++;
+            char base_cx[4400], base_elf[4400], with_elf[4400], unit_arg[4400];
+            long fsz = 0;
+            long tsz = u14_measure_obj(tmp, compiler, use_sh, target, names[i], srcs[i], &fsz);
+            long base_pfx = -1, with_pfx = -1, delta = -1;
+            int add_pm = tx_eqz(names[i], "m53_wrap") ? 1 : 0;
+            const char *u_src = srcs[i];
+            if (add_pm && cx_fmt(unit_arg, sizeof unit_arg, "%s/src/drivestream_m1.cx", tmp) == 0) u_src = unit_arg;
+            if (cx_fmt(base_cx, sizeof base_cx, "%s/src/__u14_%s_base.cx", tmp, names[i]) == 0 &&
+                cx_fmt(base_elf, sizeof base_elf, "%s/%s_base.elf", tmp, names[i]) == 0 &&
+                cx_fmt(with_elf, sizeof with_elf, "%s/%s_with.elf", tmp, names[i]) == 0 &&
+                u14_write_unit_base(srcs[i], base_cx, add_pm) == 0) {
+                base_pfx = u14_link_pfx(compiler, use_sh, target, base_cx, 0, base_elf);
+                with_pfx = u14_link_pfx(compiler, use_sh, target, base_cx, u_src, with_elf);
+                if (base_pfx >= 0 && with_pfx >= 0) delta = with_pfx - base_pfx;
+            }
+            sy_unlink(base_cx);
+            if (tsz < 0 || base_pfx < 0 || with_pfx < 0) ok = 0;
+            sy_printf("U14_LINKED_MARGINAL\tkind=fixture-measurement\tunit=%s\tsrc=%s\tlinked_marginal_pfx_bytes=%ld\twith_pfx_bytes=%ld\twithout_pfx_bytes=%ld\ttext_bytes=%ld\tobj_bytes=%ld\tmetric=pt_load_pfx_filesz\trev=%s\ttarget=%s\tcompiler_sha256=%s\tflags=-o\n",
+                      names[i], srcs[i], delta, with_pfx, base_pfx, tsz, fsz, rev, target, csha);
+        }
+        sy_remove_all(tmp);
+        if (measured == 0) { sy_eprintf("REFUSE unknown-unit\n"); return 2; }
+        sy_printf("U14_LINKED_MARGINAL_SUMMARY\tstatus=%s\tunits=%d\n", ok ? "OK" : "FAIL", measured);
+        return ok ? 0 : 1;
+    }
+    for (int i = 0; i < 5; i++) {
+        long fsz = 0;
+        long tsz = u14_measure_obj(tmp, compiler, use_sh, target, names[i], srcs[i], &fsz);
+        if (tsz < 0) ok = 0;
+        sy_printf("U14_HOST_COST\tunit=%s\tsrc=%s\ttext_bytes=%ld\tobj_bytes=%ld\trev=%s\ttarget=%s\tcompiler_sha256=%s\tflags=-c\n",
+                  names[i], srcs[i], tsz, fsz, rev, target, csha);
+    }
+    sy_remove_all(tmp);
+    sy_printf("U14_MEASURE_SUMMARY\tstatus=%s\tunits=5\n", ok ? "OK" : "FAIL");
+    return ok ? 0 : 1;
+}
