@@ -140,6 +140,7 @@ static int rr_write_atomic(const char *final_path, const unsigned char *data, si
 /* Prefer APE container path (UNISACC_CONTAINER) over extracted argv0. */
 static const char *rr_product_path(const char *argv0) {
     const char *c = getenv("UNISACC_CONTAINER");
+    if (!c) c = getenv("UNISA_CONTAINER");
     if (c && c[0]) return c;
     return argv0;
 }
