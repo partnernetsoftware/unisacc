@@ -831,51 +831,162 @@ static int fc_check_chain_ready(const char *repo, long t0_ms, long budget_ms, ch
         "22-premerge-union\tPASS\t",
         "25-tools-compile-shards\tPASS\t"
     };
+    /* Schedule the 11 read-only chain-ready stages 3-wide (derive-a first, then LPT) so all 11 finish
+       well inside the 180 s budget without raising any bound. */
+    static const int sched_order[11] = { 0, 9, 8, 10, 5, 1, 4, 2, 6, 3, 7 };
+    const int max_par = 3;
+    pid_t wpids[11];
+    char wres[11][512];
+    int wdone[11];
+    long welapsed[11];
+    int next_k = 0, active = 0, completed = 0, failed_si = -1;
+    char fail_tag[64] = {0}, fail_det[1024] = {0};
     int si;
-    for (si = 0; si < 11; si++) {
-        int bound_s = fc_budget_remaining_s(t0_ms, budget_ms, 55, detail, cap);
-        if (bound_s < 0) { cx_fmt(why_tag, 64, "check-budget-exceeded"); return -1; }
-        long st0 = sy_now_ms();
-        char *av[16];
-        int ac = 0;
-        av[ac++] = "env"; av[ac++] = "-i";
-        av[ac++] = env_path; av[ac++] = env_home; av[ac++] = env_tmp; av[ac++] = env_ih;
-        if (env_owner[0]) av[ac++] = env_owner;
-        av[ac++] = "sh"; av[ac++] = uc; av[ac++] = "tools/chain-ready.cx"; av[ac++] = "--";
-        av[ac++] = "--repo"; av[ac++] = abs_repo; av[ac++] = "--stage"; av[ac++] = (char *)stage_names[si];
-        av[ac] = 0; /* lint:allow R1-product runs target repo chain-ready under clean env -i */
-        np_result r = {0}; char why[200];
-        if (np_run(av, abs_repo, 0, bound_s, &r, why, sizeof why)) {
-            if (strstr(why, "TimeoutExpired") != 0)
-                cx_fmt(why_tag, 64, "chain-ready-stage-timeout:%s", stage_names[si]);
-            else
-                cx_fmt(why_tag, 64, "chain-ready-failed");
-            cx_fmt(detail, cap, "stage=%s transport=%s", stage_names[si], why);
-            np_free(&r);
-            return -1;
+    for (si = 0; si < 11; si++) { wpids[si] = 0; wres[si][0] = 0; wdone[si] = 0; welapsed[si] = 0; }
+    while (completed < 11 && failed_si < 0) {
+        while (active < max_par && next_k < 11) {
+            int idx = sched_order[next_k++];
+            int bound_s = fc_budget_remaining_s(t0_ms, budget_ms, 55, detail, cap);
+            if (bound_s < 0) {
+                cx_fmt(fail_tag, sizeof fail_tag, "check-budget-exceeded");
+                cx_fmt(fail_det, sizeof fail_det, "%s", detail);
+                failed_si = idx;
+                break;
+            }
+            if (cx_fmt(wres[idx], sizeof wres[idx], "%s/fc-st-%d-%d.res", real_tmp, (int)getpid(), idx)) {
+                cx_fmt(fail_tag, sizeof fail_tag, "chain-ready-failed");
+                cx_fmt(fail_det, sizeof fail_det, "stage=%s path-bound", stage_names[idx]);
+                failed_si = idx;
+                break;
+            }
+            pid_t cp = fork();
+            if (cp < 0) {
+                cx_fmt(fail_tag, sizeof fail_tag, "chain-ready-failed");
+                cx_fmt(fail_det, sizeof fail_det, "stage=%s fork-failed", stage_names[idx]);
+                failed_si = idx;
+                break;
+            }
+            if (cp == 0) {
+                sy_setpgid(0, 0);
+                long st0 = sy_now_ms();
+                char *av[16];
+                int ac = 0;
+                av[ac++] = "env"; av[ac++] = "-i";
+                av[ac++] = env_path; av[ac++] = env_home; av[ac++] = env_tmp; av[ac++] = env_ih;
+                if (env_owner[0]) av[ac++] = env_owner;
+                av[ac++] = "sh"; av[ac++] = uc; av[ac++] = "tools/chain-ready.cx"; av[ac++] = "--";
+                av[ac++] = "--repo"; av[ac++] = abs_repo; av[ac++] = "--stage"; av[ac++] = (char *)stage_names[idx];
+                av[ac] = 0; /* lint:allow R1-product runs target repo chain-ready under clean env -i */
+                np_result r = {0}; char why[200];
+                char out_buf[1400];
+                if (np_run(av, abs_repo, 0, bound_s, &r, why, sizeof why)) {
+                    char wt[64];
+                    if (strstr(why, "TimeoutExpired") != 0) cx_fmt(wt, sizeof wt, "chain-ready-stage-timeout:%s", stage_names[idx]);
+                    else cx_fmt(wt, sizeof wt, "chain-ready-failed");
+                    cx_fmt(out_buf, sizeof out_buf, "FAIL\t%ld\t%s\tstage=%s transport=%s\n",
+                           sy_now_ms() - st0, wt, stage_names[idx], why);
+                    (void)cx_write(wres[idx], out_buf, strlen(out_buf));
+                    np_free(&r);
+                    _exit(1);
+                }
+                int ready_yes = (r.out && r.outn > 0 &&
+                                 (tx_find(r.out, (long)r.outn, "READY=yes", 9) >= 0 ||
+                                  tx_find(r.out, (long)r.outn, "READY\tyes", 9) >= 0));
+                int has_fail = (r.out && r.outn > 0 &&
+                                (tx_find(r.out, (long)r.outn, "\tFAIL\t", 6) >= 0 ||
+                                 tx_find(r.out, (long)r.outn, "READY=no", 8) >= 0 ||
+                                 tx_find(r.out, (long)r.outn, "READY\tno", 8) >= 0));
+                int has_exp_row = (r.out && r.outn > 0 &&
+                                   tx_find(r.out, (long)r.outn, stage_expect_row[idx], (long)strlen(stage_expect_row[idx])) >= 0);
+                if (r.rc != 0 || !ready_yes || has_fail || !has_exp_row) {
+                    char mline[256];
+                    fc_first_match_line(r.out, r.outn, "\tFAIL\t", "REFUSE", mline, sizeof mline);
+                    if (!mline[0] && r.err && r.errn > 0) fc_first_match_line(r.err, r.errn, "REFUSE", "FAIL", mline, sizeof mline);
+                    cx_fmt(out_buf, sizeof out_buf, "FAIL\t%ld\tchain-ready-failed\tstage=%s rc=%d ready=%d exp_row=%d detail=%s\n",
+                           sy_now_ms() - st0, stage_names[idx], r.rc, ready_yes, has_exp_row, mline[0] ? mline : "-");
+                    (void)cx_write(wres[idx], out_buf, strlen(out_buf));
+                    np_free(&r);
+                    _exit(1);
+                }
+                cx_fmt(out_buf, sizeof out_buf, "OK\t%ld\n", sy_now_ms() - st0);
+                (void)cx_write(wres[idx], out_buf, strlen(out_buf));
+                np_free(&r);
+                _exit(0);
+            }
+            sy_setpgid(cp, cp);
+            wpids[idx] = cp;
+            active++;
         }
-        int ready_yes = (r.out && r.outn > 0 &&
-                         (tx_find(r.out, (long)r.outn, "READY=yes", 9) >= 0 ||
-                          tx_find(r.out, (long)r.outn, "READY\tyes", 9) >= 0));
-        int has_fail = (r.out && r.outn > 0 &&
-                        (tx_find(r.out, (long)r.outn, "\tFAIL\t", 6) >= 0 ||
-                         tx_find(r.out, (long)r.outn, "READY=no", 8) >= 0 ||
-                         tx_find(r.out, (long)r.outn, "READY\tno", 8) >= 0));
-        int has_exp_row = (r.out && r.outn > 0 &&
-                           tx_find(r.out, (long)r.outn, stage_expect_row[si], (long)strlen(stage_expect_row[si])) >= 0);
-        if (r.rc != 0 || !ready_yes || has_fail || !has_exp_row) {
-            char mline[256];
-            fc_first_match_line(r.out, r.outn, "\tFAIL\t", "REFUSE", mline, sizeof mline);
-            if (!mline[0] && r.err && r.errn > 0) fc_first_match_line(r.err, r.errn, "REFUSE", "FAIL", mline, sizeof mline);
-            cx_fmt(why_tag, 64, "chain-ready-failed");
-            cx_fmt(detail, cap, "stage=%s rc=%d ready=%d exp_row=%d detail=%s",
-                   stage_names[si], r.rc, ready_yes, has_exp_row, mline[0] ? mline : "-");
-            np_free(&r);
-            return -1;
+        if (failed_si >= 0) break;
+        int wst = 0;
+        pid_t got = waitpid(-1, &wst, 0);
+        if (got <= 0) {
+            if (errno == EINTR) continue;
+            cx_fmt(fail_tag, sizeof fail_tag, "chain-ready-failed");
+            cx_fmt(fail_det, sizeof fail_det, "waitpid-failed errno=%d", errno);
+            failed_si = 0;
+            break;
         }
-        np_free(&r);
-        printf("CHAIN_READY_STAGE\tstage=%s\tverdict=READY\telapsed_ms=%ld\n",
-               stage_names[si], sy_now_ms() - st0);
+        int hit = -1;
+        for (si = 0; si < 11; si++) if (wpids[si] == got) { hit = si; break; }
+        if (hit < 0) continue;
+        wpids[hit] = 0;
+        active--;
+        completed++;
+        wdone[hit] = 1;
+        size_t rn = 0;
+        char *rb = cx_read(wres[hit], &rn);
+        (void)sy_unlink(wres[hit]);
+        wres[hit][0] = 0;
+        if (WIFEXITED(wst) && WEXITSTATUS(wst) == 0 && rb && rn >= 3 && !memcmp(rb, "OK\t", 3)) {
+            int64_t ems = 0;
+            long ln = (long)rn;
+            while (ln > 0 && (rb[ln - 1] == '\n' || rb[ln - 1] == '\r')) ln--;
+            (void)tx_to_i64(rb + 3, ln - 3, 10, &ems);
+            welapsed[hit] = (long)ems;
+            printf("CHAIN_READY_STAGE\tstage=%s\tverdict=READY\trc=0\telapsed_ms=%ld\n",
+                   stage_names[hit], welapsed[hit]);
+            fflush(stdout);
+        } else {
+            failed_si = hit;
+            if (rb && rn > 5 && !memcmp(rb, "FAIL\t", 5)) {
+                long ln = (long)rn;
+                while (ln > 0 && (rb[ln - 1] == '\n' || rb[ln - 1] == '\r')) ln--;
+                long o1 = 0, l1 = 0, o2 = 0, l2 = 0, o3 = 0, l3 = 0;
+                int64_t ems = 0;
+                if (!tx_field(rb, ln, '\t', 1, &o1, &l1) && l1 > 0) (void)tx_to_i64(rb + o1, l1, 10, &ems);
+                if (!tx_field(rb, ln, '\t', 2, &o2, &l2) && l2 > 0) {
+                    if (l2 >= (long)sizeof fail_tag) l2 = (long)sizeof fail_tag - 1;
+                    mm_copy(fail_tag, sizeof fail_tag, rb + o2, (size_t)l2); fail_tag[l2] = 0;
+                } else cx_fmt(fail_tag, sizeof fail_tag, "chain-ready-failed");
+                if (!tx_field(rb, ln, '\t', 3, &o3, &l3) && l3 > 0) {
+                    long rem = ln - o3;
+                    if (rem >= (long)sizeof fail_det) rem = (long)sizeof fail_det - 1;
+                    mm_copy(fail_det, sizeof fail_det, rb + o3, (size_t)rem); fail_det[rem] = 0;
+                } else cx_fmt(fail_det, sizeof fail_det, "stage=%s failed", stage_names[hit]);
+                printf("CHAIN_READY_STAGE\tstage=%s\tverdict=FAIL\trc=1\telapsed_ms=%ld\n",
+                       stage_names[hit], (long)ems);
+                fflush(stdout);
+            } else {
+                cx_fmt(fail_tag, sizeof fail_tag, "chain-ready-failed");
+                cx_fmt(fail_det, sizeof fail_det, "stage=%s worker-exit=%d", stage_names[hit], wst);
+            }
+        }
+        if (rb) free(rb);
+    }
+    if (failed_si >= 0) {
+        for (si = 0; si < 11; si++) {
+            if (wpids[si] > 0) {
+                (void)kill(-wpids[si], SIGKILL);
+                (void)kill(wpids[si], SIGKILL);
+                (void)waitpid(wpids[si], 0, 0);
+                wpids[si] = 0;
+            }
+            if (wres[si][0]) { (void)sy_unlink(wres[si]); wres[si][0] = 0; }
+        }
+        cx_fmt(why_tag, 64, "%s", fail_tag[0] ? fail_tag : "chain-ready-failed");
+        cx_fmt(detail, cap, "%s", fail_det[0] ? fail_det : "-");
+        return -1;
     }
     char rev[128];
     cx_fmt(rev, sizeof rev, "unknown");
