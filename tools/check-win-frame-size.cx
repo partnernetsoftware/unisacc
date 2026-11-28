@@ -5,19 +5,27 @@
  * Scope & limitations:
  *   - This is a regression check for this backend's prologue encodings:
  *       * win/x86_64: 'sub $0x1000, %rsp; orq $0, (%rsp)' (48 81 ec 00 10 00 00 48 83 0c 24 00)
- *                     counted as probed; unprobed 'sub $imm32, %rsp' (imm >= 4096) counted as ge4k.
- *       * win/arm64:  'sub x7, x7, #0x1000; str xzr, [x7]' (0xd14004e7, 0xf90000ff)
- *                     counted as probed; unprobed 'sub x7, x7, x16' (0xcb1000e7), unprobed
- *                     'sub x7, x7, #0x1000', or 'sub sp, sp, #imm >= 4096' counted as ge4k.
+ *                     counted as probed; unprobed 'sub $imm32, %rsp' (imm >= 4096), unprobed residue
+ *                     after 4 KiB steps, or unprobed dynamic 'sub %reg, %rsp' counted as failures.
+ *       * win/arm64:  decodes ANY immediate 'sub x7, x7, #imm12[, lsl #12]' ((insn & 0xff8003ff) == 0xd10000e7),
+ *                     register 'sub x7, x7, Xm' ((insn & 0xffe0ffff) == 0xcb0000e7), and 'sub sp, sp, #imm'.
+ *                     For .bss-bounded PE binaries, requires 'cmp x7, x16/x17; b.hs +8; brk #0x5753'
+ *                     BEFORE 'str xzr, [x7]' after EVERY positive x7 allocation site (bound_checks == pos_allocs).
+ *   - Reproducible probe fixtures: tests/fixtures/win-probe-x64.s and tests/fixtures/win-probe-arm64.s.
+ *     Note: default batch mode compiles against the currently installed host product and only covers
+ *     the new encoder end-to-end after candidate installation (use --candidate PATH or --probe-pe before install).
  *   - Reads back PE32+ optional header offsets 72 (SizeOfStackReserve) and 80 (SizeOfStackCommit) per arch.
  *     * Under --candidate PATH or --check-stack-commit: requires reserve == 0x100000, commit == 0x1000,
- *       and zero unprobed frames >= 4096 on both win/x86_64 and win/arm64.
+ *       zero unprobed frames >= 4096, and (on win/arm64) bound_checks == pos_allocs.
  *     * Under --probe-pe ARCH PATH: verifies a single PE image satisfies reserve == 0x100000,
- *       commit == 0x1000, unprobed ge4k == 0, and probed > 0 (used for red-then-green prototype checks).
+ *       commit == 0x1000, unprobed ge4k == 0, probed > 0, unprobed_dyn == 0, dyn_probed > 0,
+ *       and (on win/arm64) bound_checks == pos_allocs (used for red-then-green prototype checks).
  *     * Default (installed host product): checks exec/facts/enc-pe.tsv and exec/facts/enc-pe-forward.tsv
  *       have field 31 == 1048576 and field 32 == 4096 for both arches, and verifies PE optional header
  *       readback is valid (reserve == 0x100000).
  *   - Known UNCOVERED gaps (explicit, do not claim ABI completeness):
+ *       * x64 R11/flags dynamic liveness across VLA sites: UNCOVERED (check-win-frame-size.r11-reserved-scratch
+ *         checks facts/table text only, not full CFG liveness).
  *       * Win64 .pdata unwind metadata: UNCOVERED (pre-existing gap, exec/facts/enc-pe.tsv exception
  *         directory is zero for all functions; not a v0.1.10 exit criterion).
  *       * win/arm64 thread stacks: UNCOVERED (process entry x7 uses static .bss WIN_STACK_END=196880
@@ -186,15 +194,38 @@ static int cwfs_is_x64_dyn_loop(const unsigned char *buf, unsigned int raw_ptr, 
     return !memcmp(buf + raw_ptr + off - 30U, pat, 30);
 }
 
+/* Match ARM64 lower-bound check starting at byte offset `off`:
+ * optional [adrp x16, ...; add x16, x16, #imm] followed by
+ *   cmp x7, x16/x17 (0xeb1000ff or 0xeb1100ff); b.hs +8 (0x54000042); brk #0x5753 (0xd42aea60).
+ * Returns byte offset immediately after brk #0x5753 on match, else 0. */
+static unsigned int cwfs_match_a64_bchk(const unsigned char *buf, unsigned int raw_ptr, unsigned int raw_sz, unsigned int off) {
+    unsigned int p = off;
+    if (p + 8U <= raw_sz) {
+        unsigned int w0 = cwfs_u32(buf + raw_ptr + p);
+        unsigned int w1 = cwfs_u32(buf + raw_ptr + p + 4U);
+        if ((w0 & 0x9f00001fU) == 0x90000010U && (w1 & 0xff8003ffU) == 0x91000210U) p += 8U;
+    }
+    if (p + 12U > raw_sz) return 0U;
+    {
+        unsigned int c0 = cwfs_u32(buf + raw_ptr + p);
+        unsigned int c1 = cwfs_u32(buf + raw_ptr + p + 4U);
+        unsigned int c2 = cwfs_u32(buf + raw_ptr + p + 8U);
+        if ((c0 == 0xeb1000ffU || c0 == 0xeb1100ffU) && c1 == 0x54000042U && c2 == 0xd42aea60U) {
+            return p + 12U;
+        }
+    }
+    return 0U;
+}
+
 static int scan_pe_frames(const char *exe_path, unsigned int want_mach,
                           int *ge4k_out, int *ge64k_out, unsigned int *max_out,
                           unsigned long long *stk_res_out, unsigned long long *stk_com_out,
                           int *probed_out, int *unprobed_dyn_out, int *dyn_probed_out,
-                          int *bound_checks_out) {
+                          int *bound_checks_out, int *pos_allocs_out) {
     unsigned char *buf = 0;
     int64_t len = 0;
     unsigned int pe_off, mach, nsec, opt_sz, opt_off, sec_off, s;
-    int ge4k = 0, ge64k = 0, probed = 0, unprobed_dyn = 0, dyn_probed = 0, bound_checks = 0, exec_secs = 0;
+    int ge4k = 0, ge64k = 0, probed = 0, unprobed_dyn = 0, dyn_probed = 0, bound_checks = 0, pos_allocs = 0, exec_secs = 0;
     unsigned int max_f = 0U;
     unsigned long long stk_res = 0ULL, stk_com = 0ULL;
     if (sy_read_file(exe_path, &buf, &len, 32 << 20) != 0 || !buf || len < 64) {
@@ -300,54 +331,71 @@ static int scan_pe_frames(const char *exe_path, unsigned int want_mach,
             int in_probe_chain = 0;
             for (i = 0U; i + 4U <= raw_sz; i += 4U) {
                 unsigned int insn = cwfs_u32(buf + raw_ptr + i);
-                if (insn == 0xeb1000ffU && i + 12U <= raw_sz &&
-                    cwfs_u32(buf + raw_ptr + i + 4U) == 0x54000042U &&
-                    cwfs_u32(buf + raw_ptr + i + 8U) == 0xd42aea60U) {
-                    /* cmp x7, x16; b.hs +8; brk #0x5753 (WIN_STACK_BASE lower-bound check) */
-                    bound_checks++;
-                    in_probe_chain = 0;
-                    i += 8U;
-                } else if ((insn & 0xff8003ffU) == 0xd10000e7U) {
+                if ((insn & 0xff8003ffU) == 0xd10000e7U) {
                     /* Any immediate sub x7, x7, #imm12[, lsl #12] */
                     unsigned int imm12 = (insn >> 10) & 0xfffU;
                     unsigned int shl = (insn >> 22) & 1U;
                     unsigned int imm = shl ? (imm12 << 12) : imm12;
+                    unsigned int after_bchk = cwfs_match_a64_bchk(buf, raw_ptr, raw_sz, i + 4U);
+                    unsigned int touch_off = after_bchk ? after_bchk : (i + 4U);
+                    int has_touch = (touch_off + 4U <= raw_sz && cwfs_u32(buf + raw_ptr + touch_off) == 0xf90000ffU);
+                    if (imm > 0U) {
+                        pos_allocs++;
+                        if (after_bchk) bound_checks++;
+                    }
                     if (imm >= 4096U) {
-                        if (imm == 4096U && i + 8U <= raw_sz && cwfs_u32(buf + raw_ptr + i + 4U) == 0xf90000ffU) {
+                        if (imm == 4096U && has_touch) {
                             probed++;
                             in_probe_chain = 1;
-                            i += 4U;
+                            i = touch_off;
                         } else {
                             ge4k++;
                             in_probe_chain = 0;
                             if (imm > max_f) max_f = imm;
                             if (imm >= 65536U) ge64k++;
+                            if (after_bchk) i = after_bchk - 4U;
                         }
                     } else if (in_probe_chain && imm > 0U) {
                         /* Residue sub x7, x7, #imm12 after 4 KiB steps must touch final x7 page */
-                        if (i + 8U <= raw_sz && cwfs_u32(buf + raw_ptr + i + 4U) == 0xf90000ffU) {
-                            i += 4U;
+                        if (has_touch) {
+                            i = touch_off;
                         } else {
                             ge4k++;
                             if (imm > max_f) max_f = imm;
+                            if (after_bchk) i = after_bchk - 4U;
                         }
                         in_probe_chain = 0;
                     } else {
+                        if (after_bchk) i = after_bchk - 4U;
                         in_probe_chain = 0;
                     }
                 } else if ((insn & 0xffe0ffffU) == 0xcb0000e7U) {
                     /* Dynamic or large-frame register sub: sub x7, x7, Xm */
-                    int is_dyn_loop = (insn == 0xcb1000e7U && i >= 24U && i + 8U <= raw_sz &&
+                    unsigned int after_bchk = cwfs_match_a64_bchk(buf, raw_ptr, raw_sz, i + 4U);
+                    unsigned int touch_off = after_bchk ? after_bchk : (i + 4U);
+                    int has_touch = (touch_off + 4U <= raw_sz && cwfs_u32(buf + raw_ptr + touch_off) == 0xf90000ffU);
+                    int is_unb_loop = (insn == 0xcb1000e7U && i >= 24U && has_touch &&
                         cwfs_u32(buf + raw_ptr + i - 24U) == 0xf140061fU &&
                         cwfs_u32(buf + raw_ptr + i - 20U) == 0x540000a3U &&
                         cwfs_u32(buf + raw_ptr + i - 16U) == 0xd14004e7U &&
                         cwfs_u32(buf + raw_ptr + i - 12U) == 0xf90000ffU &&
                         cwfs_u32(buf + raw_ptr + i - 8U) == 0xd1400610U &&
-                        cwfs_u32(buf + raw_ptr + i - 4U) == 0x17fffffbU &&
-                        cwfs_u32(buf + raw_ptr + i + 4U) == 0xf90000ffU);
-                    if (is_dyn_loop) {
+                        cwfs_u32(buf + raw_ptr + i - 4U) == 0x17fffffbU);
+                    int is_bnd_loop = (insn == 0xcb1000e7U && i >= 36U && after_bchk && has_touch &&
+                        cwfs_u32(buf + raw_ptr + i - 36U) == 0xf140061fU &&
+                        cwfs_u32(buf + raw_ptr + i - 32U) == 0x54000103U &&
+                        cwfs_u32(buf + raw_ptr + i - 28U) == 0xd14004e7U &&
+                        cwfs_u32(buf + raw_ptr + i - 24U) == 0xeb1100ffU &&
+                        cwfs_u32(buf + raw_ptr + i - 20U) == 0x54000042U &&
+                        cwfs_u32(buf + raw_ptr + i - 16U) == 0xd42aea60U &&
+                        cwfs_u32(buf + raw_ptr + i - 12U) == 0xf90000ffU &&
+                        cwfs_u32(buf + raw_ptr + i - 8U) == 0xd1400610U &&
+                        cwfs_u32(buf + raw_ptr + i - 4U) == 0x17fffff8U);
+                    pos_allocs++;
+                    if (after_bchk) bound_checks++;
+                    if (is_bnd_loop || is_unb_loop) {
                         dyn_probed++;
-                        i += 4U;
+                        i = touch_off;
                     } else if (insn == 0xcb1000e7U) {
                         ge4k++;
                         if (4096U > max_f) max_f = 4096U;
@@ -382,6 +430,7 @@ static int scan_pe_frames(const char *exe_path, unsigned int want_mach,
     if (unprobed_dyn_out) *unprobed_dyn_out = unprobed_dyn;
     if (dyn_probed_out) *dyn_probed_out = dyn_probed;
     if (bound_checks_out) *bound_checks_out = bound_checks;
+    if (pos_allocs_out) *pos_allocs_out = pos_allocs;
     return 0;
 }
 
@@ -567,7 +616,7 @@ int main(int argc, char **argv) {
 
     if (probe_pe) {
         unsigned int want_mach = 0U;
-        int p_ge4k = -1, p_ge64k = -1, p_probed = 0, p_udyn = 0, p_pdyn = 0, p_bchk = 0, src;
+        int p_ge4k = -1, p_ge64k = -1, p_probed = 0, p_udyn = 0, p_pdyn = 0, p_bchk = 0, p_pos = 0, src;
         unsigned int p_max = 0U;
         unsigned long long p_res = 0ULL, p_com = 0ULL;
         if (tx_eqz(probe_arch, "win/x86_64")) want_mach = 0x8664U;
@@ -576,17 +625,17 @@ int main(int argc, char **argv) {
             sy_eprintf("check-win-frame-size: --probe-pe arch must be win/x86_64 or win/arm64\n");
             return 2;
         }
-        src = scan_pe_frames(probe_pe, want_mach, &p_ge4k, &p_ge64k, &p_max, &p_res, &p_com, &p_probed, &p_udyn, &p_pdyn, &p_bchk);
-        sy_printf("WIN_PROBE_SCAN\ttarget=%s\tunprobed_ge4k=%d\tprobed_4k_steps=%d\tunprobed_dyn=%d\tdyn_probed=%d\tbound_checks=%d\tmax_unprobed=%u\tstack_reserve=0x%llx\tstack_commit=0x%llx\n",
-                  probe_arch, p_ge4k, p_probed, p_udyn, p_pdyn, p_bchk, p_max, p_res, p_com);
+        src = scan_pe_frames(probe_pe, want_mach, &p_ge4k, &p_ge64k, &p_max, &p_res, &p_com, &p_probed, &p_udyn, &p_pdyn, &p_bchk, &p_pos);
+        sy_printf("WIN_PROBE_SCAN\ttarget=%s\tunprobed_ge4k=%d\tprobed_4k_steps=%d\tunprobed_dyn=%d\tdyn_probed=%d\tbound_checks=%d\tpos_allocs=%d\tmax_unprobed=%u\tstack_reserve=0x%llx\tstack_commit=0x%llx\n",
+                  probe_arch, p_ge4k, p_probed, p_udyn, p_pdyn, p_bchk, p_pos, p_max, p_res, p_com);
         cwfs_ok(src == 0 && p_ge4k == 0 && p_probed > 0, "check-win-frame-size.probe-pe-all-ge4k-and-residue-probed");
         cwfs_ok(src == 0 && p_udyn == 0 && p_pdyn > 0, "check-win-frame-size.probe-pe-all-dynamic-alloc-probed");
         cwfs_ok(src == 0 && p_res == 0x100000ULL && p_com == 0x1000ULL, "check-win-frame-size.probe-pe-stack-commit-4k");
         if (want_mach == 0xAA64U) {
-            cwfs_ok(src == 0 && p_bchk > 0, "check-win-frame-size.probe-pe-arm64-x7-lower-bound-check");
+            cwfs_ok(src == 0 && p_pos > 0 && p_bchk == p_pos, "check-win-frame-size.probe-pe-arm64-x7-lower-bound-every-alloc");
         }
-        sy_printf("CHECK_WIN_FRAME_SIZE\tpassed=%d\tfailed=%d\tunprobed_ge4k=%d\tprobed=%d\tunprobed_dyn=%d\tdyn_probed=%d\tbound_checks=%d\n",
-                  cwfs_passed, cwfs_failed, p_ge4k, p_probed, p_udyn, p_pdyn, p_bchk);
+        sy_printf("CHECK_WIN_FRAME_SIZE\tpassed=%d\tfailed=%d\tunprobed_ge4k=%d\tprobed=%d\tunprobed_dyn=%d\tdyn_probed=%d\tbound_checks=%d\tpos_allocs=%d\n",
+                  cwfs_passed, cwfs_failed, p_ge4k, p_probed, p_udyn, p_pdyn, p_bchk, p_pos);
         return cwfs_failed ? 1 : 0;
     }
 
@@ -618,8 +667,8 @@ int main(int argc, char **argv) {
         pr_free(&r);
         cwfs_ok(ok_build, "check-win-frame-size.cross-compile-win-x86_64");
         if (ok_build) {
-            int x64_udyn = 0, x64_pdyn = 0, x64_bchk = 0;
-            int src = scan_pe_frames(exe64, 0x8664U, &ge4k, &ge64k, &max_f, &x64_res, &x64_com, &x64_probed, &x64_udyn, &x64_pdyn, &x64_bchk);
+            int x64_udyn = 0, x64_pdyn = 0, x64_bchk = 0, x64_pos = 0;
+            int src = scan_pe_frames(exe64, 0x8664U, &ge4k, &ge64k, &max_f, &x64_res, &x64_com, &x64_probed, &x64_udyn, &x64_pdyn, &x64_bchk, &x64_pos);
             sy_printf("WIN_FRAME_SCAN\ttarget=win/x86_64\tge4k=%d\tprobed=%d\tunprobed_dyn=%d\tdyn_probed=%d\tge64k=%d\tmax_frame=%u\tstack_reserve=0x%llx\tstack_commit=0x%llx\n",
                       ge4k, x64_probed, x64_udyn, x64_pdyn, ge64k, max_f, x64_res, x64_com);
             if (strict_commit) {
@@ -662,13 +711,14 @@ int main(int argc, char **argv) {
         if (!ok_build && r.err && r.errn) sy_eprintf("%.*s\n", (int)r.errn, r.err);
         pr_free(&r);
         if (ok_build) {
-            int a64_udyn = 0, a64_pdyn = 0, a64_bchk = 0;
-            int src = scan_pe_frames(exea64, 0xAA64U, &a64_ge4k, &a64_ge64k, &a64_max_f, &a64_res, &a64_com, &a64_probed, &a64_udyn, &a64_pdyn, &a64_bchk);
-            sy_printf("WIN_FRAME_SCAN\ttarget=win/arm64\tsub_imm_ge4k=%d\tprobed=%d\tunprobed_dyn=%d\tdyn_probed=%d\tbound_checks=%d\tsub_imm_ge64k=%d\tmax_sub_imm=%u\tstack_reserve=0x%llx\tstack_commit=0x%llx\n",
-                      a64_ge4k, a64_probed, a64_udyn, a64_pdyn, a64_bchk, a64_ge64k, a64_max_f, a64_res, a64_com);
+            int a64_udyn = 0, a64_pdyn = 0, a64_bchk = 0, a64_pos = 0;
+            int src = scan_pe_frames(exea64, 0xAA64U, &a64_ge4k, &a64_ge64k, &a64_max_f, &a64_res, &a64_com, &a64_probed, &a64_udyn, &a64_pdyn, &a64_bchk, &a64_pos);
+            sy_printf("WIN_FRAME_SCAN\ttarget=win/arm64\tsub_imm_ge4k=%d\tprobed=%d\tunprobed_dyn=%d\tdyn_probed=%d\tbound_checks=%d\tpos_allocs=%d\tsub_imm_ge64k=%d\tmax_sub_imm=%u\tstack_reserve=0x%llx\tstack_commit=0x%llx\n",
+                      a64_ge4k, a64_probed, a64_udyn, a64_pdyn, a64_bchk, a64_pos, a64_ge64k, a64_max_f, a64_res, a64_com);
             cwfs_ok(src == 0 && a64_ge64k == 0, "check-win-frame-size.win-arm64-sub-imm-ge-65536-zero");
             if (strict_commit) {
-                cwfs_ok(src == 0 && a64_ge4k == 0 && a64_probed > 0 && a64_udyn == 0 && a64_bchk > 0 &&
+                cwfs_ok(src == 0 && a64_ge4k == 0 && a64_probed > 0 && a64_udyn == 0 &&
+                        a64_pos > 0 && a64_bchk == a64_pos &&
                         a64_res == 0x100000ULL && a64_com == 0x1000ULL,
                         "check-win-frame-size.win-arm64-all-ge4k-and-dyn-probed-and-commit-4k");
             } else {
@@ -685,13 +735,13 @@ int main(int argc, char **argv) {
 
     /* 3. Fact-table contract: exec/facts/enc-pe.tsv + enc-pe-forward.tsv stack commit == 0x1000, reserve == 0x100000 */
     cwfs_ok(check_enc_pe_facts_stack(), "check-win-frame-size.enc-pe-facts-stack-commit-4k");
-    cwfs_ok(check_x64_vla_r11_scratch_and_flags(), "check-win-frame-size.x64-vla-r11-scratch-and-dead-flags");
+    cwfs_ok(check_x64_vla_r11_scratch_and_flags(), "check-win-frame-size.r11-reserved-scratch");
     cwfs_ok(check_non_pe_elf_invariance(dir), "check-win-frame-size.non-pe-elf-encoder-byte-invariance");
 
     /* 4. Negative scanner cases: zero executable sections and truncated section table must refuse */
     {
         unsigned char zpe[256];
-        int d1 = 0, d2 = 0, dp = 0, du = 0, ddp = 0, db = 0;
+        int d1 = 0, d2 = 0, dp = 0, du = 0, ddp = 0, db = 0, dpos = 0;
         unsigned int d3 = 0U;
         unsigned long long dr = 0ULL, dc = 0ULL;
         int r_zero, r_trunc;
@@ -704,11 +754,11 @@ int main(int argc, char **argv) {
         zpe[88] = 0x0BU; zpe[89] = 0x02U; /* PE32+ magic 0x20B */
         /* nsec = 0 -> zero executable sections */
         sy_write_file(badpe, zpe, (long)sizeof zpe, 0644);
-        r_zero = scan_pe_frames(badpe, 0x8664U, &d1, &d2, &d3, &dr, &dc, &dp, &du, &ddp, &db);
+        r_zero = scan_pe_frames(badpe, 0x8664U, &d1, &d2, &d3, &dr, &dc, &dp, &du, &ddp, &db, &dpos);
         /* nsec = 4 -> section table ends at 64 + 24 + 88 + 160 = 336 > 256 (truncated) */
         zpe[70] = 4U; zpe[71] = 0U;
         sy_write_file(badpe, zpe, (long)sizeof zpe, 0644);
-        r_trunc = scan_pe_frames(badpe, 0x8664U, &d1, &d2, &d3, &dr, &dc, &dp, &du, &ddp, &db);
+        r_trunc = scan_pe_frames(badpe, 0x8664U, &d1, &d2, &d3, &dr, &dc, &dp, &du, &ddp, &db, &dpos);
         sy_unlink(badpe);
         cwfs_ok(r_zero != 0 && r_trunc != 0, "check-win-frame-size.refuses-zero-exec-or-truncated-pe");
     }
