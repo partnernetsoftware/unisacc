@@ -91,70 +91,120 @@ static int roster_names(char names[][64], int max) {
 static int roster_index(char names[][64], int n, const char *name) {
     int i; for (i = 0; i < n; i++) if (tx_eqz(names[i], name)) return i; return -1;
 }
-/* strict summary counts: ok=<digits>, fail=<digits>, optional skipped=<digits>; no sign, no junk.
-   0 = malformed line or no counts, 1 = parsed. */
-static int rk_sum_counts(const char *o, int *okn, int *failn, int *skipn) {
-    long at = where(o, tx_len(o, 1 << 16), "RATCHETS\tok="), e, p; int a = -1, b = -1, c = -1, r; int has_skip = 0;
-    if (at < 0) return 0;
-    e = at; while (o[e] && o[e] != '\n') e++;
-    for (p = at; p + 8 < e; p++) if (!memcmp(o + p, "skipped=", 8)) { has_skip = 1; break; }
-    for (p = at; p < e; p++) if (o[p] == '-') return 0;            /* signed count refused */
-    r = sscanf(o + at, "RATCHETS\tok=%d\tfail=%d\tskipped=%d", &a, &b, &c);
-    if (r < 2 || a < 0 || b < 0) return 0;
-    if (has_skip && r < 3) return 0;                              /* a malformed skipped= is refused, not read as 0 */
-    if (r == 3 && c < 0) return 0;
-    *okn = a; *failn = b; *skipn = r == 3 ? c : 0;
+/* strict unsigned decimal integer: 1..9 ASCII digits, no sign, no whitespace or trailing junk. */
+static int rk_parse_nonneg(const char *s, long n, int *out) {
+    long i; int v = 0;
+    if (n <= 0 || n > 9) return 0;
+    for (i = 0; i < n; i++) {
+        if (s[i] < '0' || s[i] > '9') return 0;
+        v = v * 10 + (s[i] - '0');
+    }
+    *out = v;
     return 1;
 }
-/* one roster name's own RATCHET line: exactly one, status ok/fail/skipped, and a skipped line must
-   carry a non-empty reason between '(' and ')' on that same line.  1 = ok, 0 = bad. */
-static int rk_name_line(const char *o, const char *name, int *okp, int *failp, int *skipp) {
-    char pre[96]; long pl, n = tx_len(o, 1 << 16), at = 0; int seen = 0, good = 1;
-    if (cx_fmt(pre, sizeof pre, "RATCHET\t%s\t", name)) return 0;
-    pl = (long)strlen(pre);
+/* strict summary line: exactly one line starting with "RATCHETS\t", fields ok=<digits>,
+   fail=<digits>, optional skipped=<digits> and elapsed_ms=<digits>; no sign, no junk. */
+static int rk_sum_counts(const char *o, int *okn, int *failn, int *skipn) {
+    long n = tx_len(o, 1 << 16), at = 0;
+    int seen = 0, a = -1, b = -1, c = 0;
     while (at < n) {
-        long e = at; while (e < n && o[e] != '\n') e++;
-        if (e - at > pl && (at == 0 || o[at - 1] == '\n') && !memcmp(o + at, pre, (size_t)pl)) {
-            long s = at + pl; int st_ok = 0, st_fail = 0, st_skip = 0;
-            seen++;
-            if (e - s >= 2 && !memcmp(o + s, "ok", 2)) st_ok = 1;
-            else if (e - s >= 4 && !memcmp(o + s, "fail", 4)) st_fail = 1;
-            else if (e - s >= 7 && !memcmp(o + s, "skipped", 7)) st_skip = 1;
-            if (st_ok) {
-                /* an ok line whose own summary says "ok: skipped (...)" is a skipped ratchet (ratchets.cx
-                   prints the skip on the summary line with an ok status) */
-                long q = s, open = -1, close = -1;
-                while (q < e) { if (o[q] == '(') open = q; if (o[q] == ')') close = q; q++; }
-                if (open >= 14 && e - open >= 15 && !memcmp(o + open - 14, ": ok: skipped (", 15)) {
-                    long z = open + 1, non = 0;
-                    if (close <= open + 1) good = 0;
-                    while (z < close) { if (o[z] != ' ') non = 1; z++; }
-                    if (!non) good = 0;
-                    (*skipp)++;
-                } else (*okp)++;
+        long e = at, ln;
+        while (e < n && o[e] != '\n') e++;
+        ln = e - at;
+        if (ln > 0 && o[at + ln - 1] == '\r') ln--;
+        if (ln >= 9 && tx_prefix(o + at, ln, "RATCHETS\t", 9)) {
+            long pos = 9; int fi = 1, has_skip = 0, has_ms = 0, tmp = 0;
+            if (++seen > 1) return 0;
+            while (pos <= ln) {
+                long fe = pos;
+                while (fe < ln && o[at + fe] != '\t') fe++;
+                {
+                    const char *f = o + at + pos; long fl = fe - pos;
+                    if (fi == 1) {
+                        if (fl <= 3 || !tx_prefix(f, fl, "ok=", 3) || !rk_parse_nonneg(f + 3, fl - 3, &a)) return 0;
+                    } else if (fi == 2) {
+                        if (fl <= 5 || !tx_prefix(f, fl, "fail=", 5) || !rk_parse_nonneg(f + 5, fl - 5, &b)) return 0;
+                    } else if (fl >= 8 && tx_prefix(f, fl, "skipped=", 8)) {
+                        if (has_skip || !rk_parse_nonneg(f + 8, fl - 8, &c)) return 0;
+                        has_skip = 1;
+                    } else if (fl >= 11 && tx_prefix(f, fl, "elapsed_ms=", 11)) {
+                        if (has_ms || !rk_parse_nonneg(f + 11, fl - 11, &tmp)) return 0;
+                        has_ms = 1;
+                    } else return 0;
+                }
+                fi++;
+                if (fe == ln) break;
+                pos = fe + 1;
             }
-            else if (st_fail) (*failp)++;
-            else if (st_skip) {
-                long q = s, open = -1, close = -1;
-                while (q < e) { if (o[q] == '(') open = q; if (o[q] == ')') close = q; q++; }
-                if (open < 0 || close <= open + 1 || !(e - open >= 15 && !memcmp(o + open - 14, ": ok: skipped (", 15))) good = 0;
-                else { long z = open + 1, non = 0; while (z < close) { if (o[z] != ' ') non = 1; z++; } if (!non) good = 0; }
-                (*skipp)++;
-            } else good = 0;
+            if (fi < 3) return 0;
         }
         at = e + 1;
     }
-    if (seen != 1) good = 0;
-    return good;
+    if (seen != 1 || a < 0 || b < 0 || c < 0) return 0;
+    *okn = a; *failn = b; *skipn = c;
+    return 1;
 }
+/* skipped summary on a RATCHET line: must start with "<name>: ok: skipped (" and end with ')'
+   enclosing at least one non-whitespace character. */
+static int rk_skip_reason_ok(const char *name, const char *msg, long mn) {
+    char pre[96]; long pl, z; int non = 0;
+    if (cx_fmt(pre, sizeof pre, "%s: ok: skipped (", name)) return 0;
+    pl = tx_len(pre, sizeof pre);
+    if (mn <= pl + 1 || !tx_prefix(msg, mn, pre, pl) || msg[mn - 1] != ')') return 0;
+    for (z = pl; z < mn - 1; z++) {
+        if (msg[z] != ' ' && msg[z] != '\t') non = 1;
+    }
+    return non;
+}
+/* Full-run judgement: per tools/ratchets.cx:594-600, every roster ratchet appears on exactly one
+   RATCHET\t<name>\t<ok|FAIL|ERROR>\t<summary> line (no duplicates, no unknown names), every
+   skipped ratchet binds its own non-empty "<name>: ok: skipped (<reason>)" on that same line,
+   and the RATCHETS summary counts strictly match the per-line tally. */
 static int rk_full_ok(const char *o, int nn) {
-    char names[32][64]; int i, okn = -1, failn = -1, skipn = -1, tok = 0, tfail = 0, tskip = 0;
-    if (nn < 1) return 0;
+    char names[32][64]; int seen[32];
+    int i, okn = -1, failn = -1, skipn = -1, tok = 0, tfail = 0, tskip = 0;
+    long n = tx_len(o, 1 << 16), at = 0;
+    if (nn < 1 || nn > 32) return 0;
     if (roster_names(names, 32) != nn) return 0;
     if (!rk_sum_counts(o, &okn, &failn, &skipn)) return 0;
-    if (okn < 0 || failn < 0 || skipn < 0) return 0;
-    for (i = 0; i < nn; i++) if (!rk_name_line(o, names[i], &tok, &tfail, &tskip)) return 0;
-    if (tok != okn || tfail != failn || tskip != skipn) return 0;   /* summary must equal the per-line tally */
+    for (i = 0; i < nn; i++) seen[i] = 0;
+    while (at < n) {
+        long e = at, ln;
+        while (e < n && o[e] != '\n') e++;
+        ln = e - at;
+        if (ln > 0 && o[at + ln - 1] == '\r') ln--;
+        if (ln >= 8 && tx_prefix(o + at, ln, "RATCHET\t", 8)) {
+            const char *line = o + at;
+            long t1 = 7, t2, t3, nl, sl, ml;
+            char nm[64]; int idx;
+            t2 = t1 + 1; while (t2 < ln && line[t2] != '\t') t2++;
+            if (t2 >= ln) return 0;
+            t3 = t2 + 1; while (t3 < ln && line[t3] != '\t') t3++;
+            if (t3 >= ln) return 0;
+            nl = t2 - (t1 + 1); sl = t3 - (t2 + 1); ml = ln - (t3 + 1);
+            if (nl <= 0 || nl >= (long)sizeof nm) return 0;
+            tx_copy(nm, sizeof nm, line + t1 + 1, nl); nm[nl] = 0;
+            idx = roster_index(names, nn, nm);
+            if (idx < 0 || seen[idx]) return 0;
+            seen[idx] = 1;
+            if (sl == 2 && tx_same(line + t2 + 1, 2, "ok", 2)) {
+                const char *msg = line + t3 + 1;
+                if (tx_find(msg, ml, ": ok: skipped", 13) >= 0) {
+                    if (!rk_skip_reason_ok(names[idx], msg, ml)) return 0;
+                    tskip++;
+                } else {
+                    if (ml <= 0) return 0;
+                    tok++;
+                }
+            } else if ((sl == 4 && tx_same(line + t2 + 1, 4, "FAIL", 4)) ||
+                       (sl == 5 && tx_same(line + t2 + 1, 5, "ERROR", 5))) {
+                tfail++;
+            } else return 0;
+        }
+        at = e + 1;
+    }
+    for (i = 0; i < nn; i++) if (!seen[i]) return 0;
+    if (tok != okn || tfail != failn || tskip != skipn) return 0;
     if (okn + failn + skipn != nn) return 0;
     return 1;
 }
@@ -849,49 +899,86 @@ int main(int argc, char **argv) {
       { int cn = 0, on = 0; (void)gate_bypass_cases(o, sizeof o, &cn, &on);
         ck(cn, "gate-noncanonical-allowance-refused");
         ck(on, "gate-deduction-consumed-once"); } }
-    {   /* one skipped ratchet: counts cover the roster and the skip is named; silent skip and a wrong count are refused */
-        char names[32][64], syn[8192], syn2[8192], syn3[8192], syn4[8192], syn5[8192], syn6[8192], syn7[8192];
-        int nn = roster_names(names, 32), i, o1, o2, o3, o4, o5, o6, o7;
-        if (nn < 2) { ck(0, "full-run-one-skipped-with-reason"); ck(0, "full-run-silent-skip-refused"); ck(0, "full-run-skip-count-mismatch-refused"); }
-        else {
-            o1 = snprintf(syn, sizeof syn, "RATCHETS\tok=%d\tfail=0\tskipped=1\n", nn - 1);
-            o2 = snprintf(syn2, sizeof syn2, "RATCHETS\tok=%d\tfail=0\tskipped=1\n", nn - 1);
-            o3 = snprintf(syn3, sizeof syn3, "RATCHETS\tok=%d\tfail=0\tskipped=1\n", nn);
+    {   /* one skipped ratchet: counts cover the roster and the skip is named on that RATCHET line;
+           silent skip, wrong count, malformed/negative skipped=, off-line reason and empty reason are refused */
+        char names[32][64], syn[8192], syn2[8192], syn3[8192], syn4[8192], syn4b[8192], syn5[8192], syn6[8192], syn7[8192], syn7b[8192];
+        int nn = roster_names(names, 32), i;
+        long p1 = 0, p2 = 0, p3 = 0, p4 = 0, p4b = 0, p5 = 0, p6 = 0, p7 = 0, p7b = 0;
+        if (nn < 2) {
+            ck(0, "full-run-one-skipped-with-reason");
+            ck(0, "full-run-silent-skip-refused");
+            ck(0, "full-run-skip-count-mismatch-refused");
+            ck(0, "full-run-malformed-skipped-refused");
+            ck(0, "full-run-negative-skipped-refused");
+            ck(0, "full-run-skip-reason-different-line-refused");
+            ck(0, "full-run-empty-skip-reason-refused");
+        } else {
             for (i = 0; i < nn; i++) {
-                o1 += snprintf(syn + o1, sizeof syn - (size_t)o1, "RATCHET\t%s\t%s\n", names[i], i == 0 ? "ok\tX: ok: skipped (unaffected by staged paths)" : "ok: PASS");
-                o2 += snprintf(syn2 + o2, sizeof syn2 - (size_t)o2, "RATCHET\t%s\t%s\n", names[i], i == 0 ? "ok: skipped" : "ok: PASS");
-                o3 += snprintf(syn3 + o3, sizeof syn3 - (size_t)o3, "RATCHET\t%s\t%s\n", names[i], i == 0 ? "ok\tX: ok: skipped (unaffected by staged paths)" : "ok: PASS");
+                char row[256]; long rl;
+                if (i == 0) cx_fmt(row, sizeof row, "RATCHET\t%s\tok\t%s: ok: skipped (no chain)\n", names[i], names[i]);
+                else cx_fmt(row, sizeof row, "RATCHET\t%s\tok\t%s: ok: fine\n", names[i], names[i]);
+                rl = tx_len(row, sizeof row); tx_copy(syn + p1, (long)sizeof syn - p1, row, rl); p1 += rl;
+                tx_copy(syn3 + p3, (long)sizeof syn3 - p3, row, rl); p3 += rl;
+
+                cx_fmt(row, sizeof row, "RATCHET\t%s\tok\t%s: ok: fine\n", names[i], names[i]);
+                rl = tx_len(row, sizeof row);
+                tx_copy(syn2 + p2, (long)sizeof syn2 - p2, row, rl); p2 += rl;
+                tx_copy(syn4 + p4, (long)sizeof syn4 - p4, row, rl); p4 += rl;
+                tx_copy(syn4b + p4b, (long)sizeof syn4b - p4b, row, rl); p4b += rl;
+                tx_copy(syn5 + p5, (long)sizeof syn5 - p5, row, rl); p5 += rl;
+                tx_copy(syn6 + p6, (long)sizeof syn6 - p6, row, rl); p6 += rl;
+
+                if (i == 0) cx_fmt(row, sizeof row, "RATCHET\t%s\tok\t%s: ok: skipped ()\n", names[i], names[i]);
+                else cx_fmt(row, sizeof row, "RATCHET\t%s\tok\t%s: ok: fine\n", names[i], names[i]);
+                rl = tx_len(row, sizeof row); tx_copy(syn7 + p7, (long)sizeof syn7 - p7, row, rl); p7 += rl;
+
+                if (i == 0) cx_fmt(row, sizeof row, "RATCHET\t%s\tok\t%s: ok: skipped (   )\n", names[i], names[i]);
+                else cx_fmt(row, sizeof row, "RATCHET\t%s\tok\t%s: ok: fine\n", names[i], names[i]);
+                rl = tx_len(row, sizeof row); tx_copy(syn7b + p7b, (long)sizeof syn7b - p7b, row, rl); p7b += rl;
             }
-            o1 += snprintf(syn + o1, sizeof syn - (size_t)o1, "%s: ok: skipped (unaffected by staged paths)\n", names[0]);
-            o3 += snprintf(syn3 + o3, sizeof syn3 - (size_t)o3, "%s: ok: skipped (unaffected by staged paths)\n", names[0]);
+            {
+                char tail[256]; long tl;
+                cx_fmt(tail, sizeof tail, "RATCHETS\tok=%d\tfail=0\tskipped=1\telapsed_ms=1\n", nn - 1);
+                tl = tx_len(tail, sizeof tail);
+                tx_copy(syn + p1, (long)sizeof syn - p1, tail, tl); p1 += tl; syn[p1] = 0;
+                tx_copy(syn2 + p2, (long)sizeof syn2 - p2, tail, tl); p2 += tl; syn2[p2] = 0;
+                tx_copy(syn7 + p7, (long)sizeof syn7 - p7, tail, tl); p7 += tl; syn7[p7] = 0;
+                tx_copy(syn7b + p7b, (long)sizeof syn7b - p7b, tail, tl); p7b += tl; syn7b[p7b] = 0;
+
+                cx_fmt(tail, sizeof tail, "%s: ok: skipped (unaffected by staged paths)\nRATCHETS\tok=%d\tfail=0\tskipped=1\telapsed_ms=1\n", names[0], nn - 1);
+                tl = tx_len(tail, sizeof tail);
+                tx_copy(syn6 + p6, (long)sizeof syn6 - p6, tail, tl); p6 += tl; syn6[p6] = 0;
+
+                cx_fmt(tail, sizeof tail, "RATCHETS\tok=%d\tfail=0\tskipped=1\telapsed_ms=1\n", nn);
+                tl = tx_len(tail, sizeof tail);
+                tx_copy(syn3 + p3, (long)sizeof syn3 - p3, tail, tl); p3 += tl; syn3[p3] = 0;
+
+                cx_fmt(tail, sizeof tail, "RATCHETS\tok=%d\tfail=0\tskipped=x\telapsed_ms=1\n", nn);
+                tl = tx_len(tail, sizeof tail);
+                tx_copy(syn4 + p4, (long)sizeof syn4 - p4, tail, tl); p4 += tl; syn4[p4] = 0;
+
+                cx_fmt(tail, sizeof tail, "RATCHETS\tok=%d\tfail=0\tskipped=\telapsed_ms=1\n", nn);
+                tl = tx_len(tail, sizeof tail);
+                tx_copy(syn4b + p4b, (long)sizeof syn4b - p4b, tail, tl); p4b += tl; syn4b[p4b] = 0;
+
+                cx_fmt(tail, sizeof tail, "RATCHETS\tok=%d\tfail=0\tskipped=-1\telapsed_ms=1\n", nn + 1);
+                tl = tx_len(tail, sizeof tail);
+                tx_copy(syn5 + p5, (long)sizeof syn5 - p5, tail, tl); p5 += tl; syn5[p5] = 0;
+            }
             ck(rk_full_ok(syn, nn), "full-run-one-skipped-with-reason");
             ck(!rk_full_ok(syn2, nn), "full-run-silent-skip-refused");
             ck(!rk_full_ok(syn3, nn), "full-run-skip-count-mismatch-refused");
-            /* malformed and negative counts, a reason on another line, and an empty reason are all refused */
-            o4 = snprintf(syn4, sizeof syn4, "RATCHETS\tok=%d\tfail=0\tskipped=x\n", nn - 1);
-            o5 = snprintf(syn5, sizeof syn5, "RATCHETS\tok=%d\tfail=0\tskipped=-1\n", nn - 1);
-            o6 = snprintf(syn6, sizeof syn6, "RATCHETS\tok=%d\tfail=0\tskipped=1\n", nn - 1);
-            o7 = snprintf(syn7, sizeof syn7, "RATCHETS\tok=%d\tfail=0\tskipped=1\n", nn - 1);
-            for (i = 0; i < nn; i++) {
-                o4 += snprintf(syn4 + o4, sizeof syn4 - (size_t)o4, "RATCHET\t%s\tok\n", names[i]);
-                o5 += snprintf(syn5 + o5, sizeof syn5 - (size_t)o5, "RATCHET\t%s\tok\n", names[i]);
-                o6 += snprintf(syn6 + o6, sizeof syn6 - (size_t)o6, "RATCHET\t%s\t%s\n", names[i], i == 0 ? "skipped" : "ok");
-                o7 += snprintf(syn7 + o7, sizeof syn7 - (size_t)o7, "RATCHET\t%s\t%s\n", names[i],
-                               i == 0 ? "skipped\tX: ok: skipped (  )" : "ok");
-            }
-            o6 += snprintf(syn6 + o6, sizeof syn6 - (size_t)o6, "%s: ok: skipped (unaffected by staged paths)\n", names[0]);
-            ck(!rk_full_ok(syn4, nn), "full-run-malformed-skipped-refused");
+            ck(!rk_full_ok(syn4, nn) && !rk_full_ok(syn4b, nn), "full-run-malformed-skipped-refused");
             ck(!rk_full_ok(syn5, nn), "full-run-negative-skipped-refused");
             ck(!rk_full_ok(syn6, nn), "full-run-skip-reason-different-line-refused");
-            ck(!rk_full_ok(syn7, nn), "full-run-empty-skip-reason-refused");
+            ck(!rk_full_ok(syn7, nn) && !rk_full_ok(syn7b, nn), "full-run-empty-skip-reason-refused");
         }
     }
     if (argc == 2) { printf("CHECK_RATCHETS\tfailed=%d\n", failed); return failed ? 1 : 0; }
 full_run:
     rc = run(full, o, sizeof o);
-    {   char names[32][64]; int nn = roster_names(names, 32), failn = 0; long at;
-        at = where(o, tx_len(o, sizeof o), "RATCHETS\tok=");
-        if (at >= 0) { int okn = -1, sk = -1; if (sscanf(o + at, "RATCHETS\tok=%d\tfail=%d\tskipped=%d", &okn, &failn, &sk) < 2) failn = -1; }
+    {   char names[32][64]; int nn = roster_names(names, 32), okn = -1, failn = -1, sk = -1;
+        if (!rk_sum_counts(o, &okn, &failn, &sk)) failn = -1;
         ck(rk_full_ok(o, nn) && !has(o, "RATCHET\ttoolsloc\t") && (rc == 0) == (failn == 0), "full-run-roster-without-toolsloc-and-exit");
     }
     {   /* --shard K/N: ratchet i runs when i % N == K-1, the others are counted skipped; bad specs are refused */
