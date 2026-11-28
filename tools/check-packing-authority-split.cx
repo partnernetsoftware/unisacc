@@ -1,15 +1,24 @@
-/* tools/check-packing-authority-split.cx -- multiset-equality guard for packing-authority split.
+/* tools/check-packing-authority-split.cx -- U10-9 strengthened multiset-equality guard.
  * Verifies:
  *   (1) tests/split-parents.tsv excludes parent packing-authority with shards
  *       packing-authority-facts,packing-authority-mutations and check split-packing-authority.
- *   (2) Union of --list-assertions --part facts + --part mutations equals the unsharded
- *       --list-assertions multiset (13 == 6 + 7, zero missing, zero duplicate, zero extra).
- *   (3) Every listed assertion matches an actual ck(...) call in tools/check-packing-authority.cx.
+ *   (2) Loads the independent frozen 13-assertion baseline table from
+ *       tests/packing-authority-baseline.tsv (frozen from parent commit 7645c4c78).
+ *   (3) Executes BOTH real shards (--part facts and --part mutations) in parallel under
+ *       one shared absolute deadline (52 s inside the 55 s batch bound) and parses actual
+ *       emitted PASS/FAIL lines. Any named FAIL is refused outright even if child rc == 0.
+ *       Proves emitted PASS multiset == frozen baseline (13 == 6 + 7, zero missing/dup/extra).
+ *   (4) Runs 5 controls through the same parser + verifier using one compiled probe under
+ *       the same shared deadline: ok (PASS), deleted, same-name comment, dead-branch if (0),
+ *       and fail-with-rc0 (all 4 negatives MUST be refused).
  *
  * Marker: CHECK_PACKING_AUTHORITY_SPLIT
  */
 #pragma unisa use sys.fs
 #pragma unisa use sys.posix
+#pragma unisa use sys.proc
+#pragma unisa use sys.time
+#pragma unisa use sys.env
 #pragma unisa use sys.io
 #pragma unisa use mem.heap
 #pragma unisa use mem.bytes
@@ -19,44 +28,272 @@
 
 #define MAX_A 64
 
+static long mono_ms(void) {
+    sy_ts_t t;
+    if (sy_mono(&t) != 0) return 0L;
+    return (long)t.sec * 1000L + (long)(t.nsec / 1000000L);
+}
+
 static int cmp_str(const void *a, const void *b) {
     return strcmp((const char *)a, (const char *)b);
 }
 
-static int collect_assertions(const char *root, const char *part, char out[MAX_A][96], int *cnt) {
-    char prod[4096], tool[4096];
-    if (cx_fmt(prod, sizeof prod, "%s/unisacc.com", root) ||
-        cx_fmt(tool, sizeof tool, "%s/tools/check-packing-authority.cx", root)) return -1;
-    char *av_all[]  = { "sh", prod, tool, "--", "--list-assertions", 0 }; /* lint:allow R1-product lists assertions */
-    char *av_part[] = { "sh", prod, tool, "--", "--list-assertions", "--part", (char *)part, 0 }; /* lint:allow R1-product lists shard assertions */
-    pr_result r;
-    int rc = pr_run("pa-list", part ? av_part : av_all, root, 0, 25, &r);
-    if (rc != 0 || r.rc != 0 || !r.out || r.outn <= 0) { pr_free(&r); return -1; }
+static int load_baseline(const char *path, char out[MAX_A][96], int *cnt) {
+    unsigned char *b = 0;
+    int64_t n = 0;
+    *cnt = 0;
+    if (sy_read_file(path, &b, &n, 1 << 20) != 0 || !b || n <= 0) return -1;
     long at = 0;
-    while (at < (long)r.outn) {
+    int header_seen = 0;
+    while (at < (long)n) {
         long e = at;
-        while (e < (long)r.outn && r.out[e] != '\n') e++;
+        while (e < (long)n && b[e] != '\n') e++;
         long len = e - at;
-        if (len > 7 && tx_prefix(r.out + at, len, "ASSERT\t", 7)) {
-            if (*cnt >= MAX_A || len - 7 >= 96) { pr_free(&r); return -1; }
-            mm_copy(out[*cnt], 96, r.out + at + 7, len - 7);
-            out[*cnt][len - 7] = 0;
+        if (len > 0 && b[at] != '#') {
+            if (!header_seen) {
+                header_seen = 1;
+            } else {
+                long tab = at;
+                while (tab < e && b[tab] != '\t') tab++;
+                long nlen = tab - at;
+                if (nlen <= 0 || nlen >= 96 || *cnt >= MAX_A) { mm_free(b); return -1; }
+                mm_copy(out[*cnt], 96, b + at, nlen);
+                out[*cnt][nlen] = 0;
+                (*cnt)++;
+            }
+        }
+        at = e + 1;
+    }
+    mm_free(b);
+    return *cnt > 0 ? 0 : -1;
+}
+
+/* Extracts ONLY PASS records into out[]; any named FAIL increments *fail_cnt and is NEVER
+ * treated as a passed assertion (even if the child exited 0). */
+static int parse_emitted_records(const char *buf, long len, char out[MAX_A][96], int *cnt, int *fail_cnt) {
+    static const char p_pass[] = "PASS\tpacking-authority.";
+    static const char p_fail[] = "FAIL\tpacking-authority.";
+    long at = 0;
+    if (!buf || len <= 0) return 0;
+    while (at < len) {
+        long e = at;
+        while (e < len && buf[e] != '\n') e++;
+        long llen = e - at;
+        const char *line = buf + at;
+        if (llen > 23 && tx_prefix(line, llen, p_fail, 23)) {
+            (*fail_cnt)++;
+        } else if (llen > 23 && tx_prefix(line, llen, p_pass, 23)) {
+            long nend = 23;
+            while (nend < llen && line[nend] != '\t' && line[nend] != '\r') nend++;
+            long nlen = nend - 23;
+            if (nlen <= 0 || nlen >= 96 || *cnt >= MAX_A) return -1;
+            mm_copy(out[*cnt], 96, line + 23, nlen);
+            out[*cnt][nlen] = 0;
             (*cnt)++;
         }
         at = e + 1;
     }
-    pr_free(&r);
     return 0;
 }
 
+static int verify_multiset_eq(char base[MAX_A][96], int nb, char got[MAX_A][96], int ng, int fail_cnt, int quiet) {
+    if (fail_cnt > 0) {
+        if (!quiet) sy_eprintf("FAIL named-failure-emitted count=%d\n", fail_cnt);
+        return 0;
+    }
+    if (nb != ng) {
+        if (!quiet) sy_eprintf("FAIL count-mismatch baseline=%d emitted=%d\n", nb, ng);
+        return 0;
+    }
+    char sb[MAX_A][96], sg[MAX_A][96];
+    for (int i = 0; i < nb; i++) {
+        mm_copy(sb[i], 96, base[i], 96);
+        mm_copy(sg[i], 96, got[i], 96);
+    }
+    qsort(sb, (size_t)nb, 96, cmp_str);
+    qsort(sg, (size_t)ng, 96, cmp_str);
+    for (int i = 0; i < nb; i++) {
+        if (!tx_eqz(sb[i], sg[i])) {
+            if (!quiet) sy_eprintf("FAIL multiset-diff idx=%d baseline=%s emitted=%s\n", i, sb[i], sg[i]);
+            return 0;
+        }
+        if (i > 0 && tx_eqz(sg[i], sg[i - 1])) {
+            if (!quiet) sy_eprintf("FAIL duplicate-assertion name=%s\n", sg[i]);
+            return 0;
+        }
+    }
+    return 1;
+}
+
+static int run_shards_parallel(const char *root, const char *tmp, long deadline_ms,
+                               char emitted[MAX_A][96], int *n_out, int *fail_cnt) {
+    char prod[4096], tool[4096];
+    char out_f[4400], err_f[4400], out_m[4400], err_m[4400];
+    *n_out = 0;
+    *fail_cnt = 0;
+    if (cx_fmt(prod, sizeof prod, "%s/unisacc.com", root) ||
+        cx_fmt(tool, sizeof tool, "%s/tools/check-packing-authority.cx", root) ||
+        cx_fmt(out_f, sizeof out_f, "%s/facts.out", tmp) ||
+        cx_fmt(err_f, sizeof err_f, "%s/facts.err", tmp) ||
+        cx_fmt(out_m, sizeof out_m, "%s/muts.out", tmp) ||
+        cx_fmt(err_m, sizeof err_m, "%s/muts.err", tmp)) return -1;
+
+    int fd_of = sy_open_new(out_f, 0600);
+    int fd_ef = sy_open_new(err_f, 0600);
+    int fd_om = sy_open_new(out_m, 0600);
+    int fd_em = sy_open_new(err_m, 0600);
+    if (fd_of < 0 || fd_ef < 0 || fd_om < 0 || fd_em < 0) return -1;
+
+    char *av_f[] = { "sh", prod, tool, "--", "--part", "facts", 0 }; /* lint:allow R1-product runs facts shard */
+    char *av_m[] = { "sh", prod, tool, "--", "--part", "mutations", 0 }; /* lint:allow R1-product runs mutations shard */
+    sy_spawn_t sf, sm;
+    sy_child_t cf, cm;
+    sy_spawn_init(&sf);
+    sy_spawn_init(&sm);
+    sf.argv = av_f; sf.cwd = root; sf.pgroup = -1; sf.in_fd = SY_STDIO_NULL; sf.out_fd = fd_of; sf.err_fd = fd_ef;
+    sm.argv = av_m; sm.cwd = root; sm.pgroup = -1; sm.in_fd = SY_STDIO_NULL; sm.out_fd = fd_om; sm.err_fd = fd_em;
+
+    int spf = sy_proc_spawn(&sf, &cf);
+    int spm = sy_proc_spawn(&sm, &cm);
+    sy_close(fd_of); sy_close(fd_ef); sy_close(fd_om); sy_close(fd_em);
+    if (spf < 0 || spm < 0) {
+        if (spf >= 0) { sy_killpg(cf.pid, 9); (void)sy_wait(cf.pid, 0); sy_proc_close(&cf); }
+        if (spm >= 0) { sy_killpg(cm.pid, 9); (void)sy_wait(cm.pid, 0); sy_proc_close(&cm); }
+        return -1;
+    }
+
+    int done_f = 0, done_m = 0, st_f = -1, st_m = -1;
+    while ((!done_f || !done_m) && mono_ms() < deadline_ms) {
+        int exited = 0, code = -1, sig = 0;
+        if (!done_f) {
+            int r = sy_wait_status(cf.pid, 1, &exited, &code, &sig);
+            if (r > 0) { done_f = 1; st_f = exited ? code : -1; }
+            else if (r < 0) { done_f = 1; st_f = -1; }
+        }
+        if (!done_m) {
+            int r = sy_wait_status(cm.pid, 1, &exited, &code, &sig);
+            if (r > 0) { done_m = 1; st_m = exited ? code : -1; }
+            else if (r < 0) { done_m = 1; st_m = -1; }
+        }
+        if (!done_f || !done_m) sy_sleep_ms(25);
+    }
+    if (!done_f) { sy_killpg(cf.pid, 9); (void)sy_wait(cf.pid, 0); }
+    if (!done_m) { sy_killpg(cm.pid, 9); (void)sy_wait(cm.pid, 0); }
+    sy_proc_close(&cf);
+    sy_proc_close(&cm);
+
+    unsigned char *b = 0; int64_t n = 0;
+    const char *files[4] = { out_f, err_f, out_m, err_m };
+    for (int i = 0; i < 4; i++) {
+        b = 0; n = 0;
+        if (sy_read_file(files[i], &b, &n, 4 << 20) == 0 && b) {
+            if (parse_emitted_records((const char *)b, (long)n, emitted, n_out, fail_cnt) != 0) {
+                mm_free(b); return -1;
+            }
+            mm_free(b);
+        }
+    }
+    return (done_f && done_m && st_f == 0 && st_m == 0) ? 0 : -1;
+}
+
+static int run_negative_controls(const char *root, const char *tmp, long deadline_ms,
+                                 char base[MAX_A][96], int nb) {
+    char prod[4096], probe[4400], probe_bin[4400], abs_root[4096], s[4400], d[4400];
+    if (tx_eqz(root, ".")) {
+        if (!getcwd(abs_root, sizeof abs_root)) return 0;
+    } else {
+        if (cx_fmt(abs_root, sizeof abs_root, "%s", root)) return 0;
+    }
+    if (cx_fmt(s, sizeof s, "%s/cxroot.tsv", abs_root) || cx_fmt(d, sizeof d, "%s/cxroot.tsv", tmp) || sy_symlink(s, d) != 0) return 0;
+    if (cx_fmt(s, sizeof s, "%s/cx", abs_root) || cx_fmt(d, sizeof d, "%s/cx", tmp) || sy_symlink(s, d) != 0) return 0;
+    if (cx_fmt(prod, sizeof prod, "%s/unisacc.com", abs_root) ||
+        cx_fmt(probe, sizeof probe, "%s/neg_probe.cx", tmp) ||
+        cx_fmt(probe_bin, sizeof probe_bin, "%s/neg_probe.elf", tmp)) return 0;
+
+    char src[8192];
+    long pos = 0;
+    const char *hdr =
+        "#pragma unisa use sys.io\n"
+        "#pragma unisa use text.text\n"
+        "static void ck(int ok, const char *name) {\n"
+        "    if (ok) sy_printf(\"PASS\\tpacking-authority.%s\\n\", name);\n"
+        "    else sy_eprintf(\"FAIL\\tpacking-authority.%s\\n\", name);\n"
+        "}\n"
+        "int main(int argc, char **argv) {\n"
+        "    const char *m = (argc > 1) ? argv[1] : \"ok\";\n";
+    long hlen = tx_len(hdr, 2048);
+    mm_copy(src + pos, (long)sizeof src - pos, hdr, hlen); pos += hlen;
+    for (int i = 0; i < nb - 1; i++) {
+        char line[192];
+        if (cx_fmt(line, sizeof line, "    ck(1, \"%s\");\n", base[i])) return 0;
+        long ll = tx_len(line, 192);
+        if (pos + ll >= (long)sizeof src) return 0;
+        mm_copy(src + pos, (long)sizeof src - pos, line, ll); pos += ll;
+    }
+    {
+        char tail[1280];
+        const char *last = base[nb - 1];
+        if (cx_fmt(tail, sizeof tail,
+                   "    if (tx_eqz(m, \"ok\")) ck(1, \"%s\");\n"
+                   "    else if (tx_eqz(m, \"comment\")) { /* ck(1, \"%s\"); */ }\n"
+                   "    else if (tx_eqz(m, \"deadbranch\")) { if (0) { ck(1, \"%s\"); } }\n"
+                   "    else if (tx_eqz(m, \"fail-rc0\")) ck(0, \"%s\");\n"
+                   "    return 0;\n"
+                   "}\n", last, last, last, last)) return 0;
+        long tl = tx_len(tail, 1280);
+        if (pos + tl >= (long)sizeof src) return 0;
+        mm_copy(src + pos, (long)sizeof src - pos, tail, tl); pos += tl;
+    }
+    if (sy_write_file(probe, src, pos, 0600) != 0) return 0;
+
+    /* Compile the probe ONCE under the remaining shared deadline, then exec the binary 5 times (<10ms total). */
+    long rem_s = (deadline_ms - mono_ms()) / 1000L;
+    if (rem_s < 2L) { sy_eprintf("FAIL deadline-exhausted-before-probe\n"); return 0; }
+    {
+        char *av_cc[] = { "sh", prod, probe, "-o", probe_bin, 0 }; /* lint:allow R1-product compiles single negative probe */
+        pr_result rc_cc;
+        int c = pr_run("pa-split-neg-cc", av_cc, root, 0, (int)rem_s, &rc_cc);
+        int cok = (c == 0 && rc_cc.rc == 0);
+        pr_free(&rc_cc);
+        if (!cok) { sy_eprintf("FAIL compile-neg-probe\n"); return 0; }
+    }
+
+    static const char *modes[5] = { "ok", "deleted", "comment", "deadbranch", "fail-rc0" };
+    static const int want_pass[5] = { 1, 0, 0, 0, 0 };
+    int all_ok = 1;
+    for (int i = 0; i < 5; i++) {
+        rem_s = (deadline_ms - mono_ms()) / 1000L;
+        if (rem_s < 1L) { sy_eprintf("FAIL deadline-exhausted-in-neg mode=%s\n", modes[i]); return 0; }
+        char *av[] = { probe_bin, (char *)modes[i], 0 };
+        pr_result r;
+        int rc = pr_run("pa-split-neg", av, root, 0, (int)rem_s, &r);
+        char got[MAX_A][96];
+        int ng = 0, nf = 0, matched = 0;
+        if (rc == 0 && r.rc == 0) {
+            if (r.out && r.outn > 0) parse_emitted_records(r.out, (long)r.outn, got, &ng, &nf);
+            if (r.err && r.errn > 0) parse_emitted_records(r.err, (long)r.errn, got, &ng, &nf);
+            matched = verify_multiset_eq(base, nb, got, ng, nf, 1);
+        }
+        pr_free(&r);
+        if (matched != want_pass[i]) {
+            sy_eprintf("FAIL neg-control mode=%s matched=%d want=%d\n", modes[i], matched, want_pass[i]);
+            all_ok = 0;
+        } else {
+            sy_printf("PASS\tcheck-packing-authority-split.neg-%s\n", modes[i]);
+        }
+    }
+    return all_ok;
+}
+
 int main(int argc, char **argv) {
+    long deadline_ms = mono_ms() + 52000L; /* shared absolute deadline inside the 55s batch bound */
     const char *root = (argc > 1 && argv[1][0]) ? argv[1] : ".";
-    char sp_path[4096], src_path[4096];
+    char sp_path[4096], bl_path[4096], tmp[4096];
     int ok = 1;
     if (cx_fmt(sp_path, sizeof sp_path, "%s/tests/split-parents.tsv", root) ||
-        cx_fmt(src_path, sizeof src_path, "%s/tools/check-packing-authority.cx", root)) return 2;
+        cx_fmt(bl_path, sizeof bl_path, "%s/tests/packing-authority-baseline.tsv", root)) return 2;
 
-    unsigned char *sp = 0, *src = 0; int64_t spn = 0, srcn = 0;
+    unsigned char *sp = 0; int64_t spn = 0;
     if (sy_read_file(sp_path, &sp, &spn, 1 << 20) != 0 || !sp ||
         tx_find((const char *)sp, (long)spn,
                 "packing-authority\tpacking-authority-facts,packing-authority-mutations\tsplit-packing-authority\t", 94) < 0) {
@@ -65,46 +302,26 @@ int main(int argc, char **argv) {
     }
     if (sp) mm_free(sp);
 
-    char orig[MAX_A][96], sh[MAX_A][96];
-    int no = 0, ns = 0;
-    if (collect_assertions(root, 0, orig, &no) != 0 ||
-        collect_assertions(root, "facts", sh, &ns) != 0 ||
-        collect_assertions(root, "mutations", sh, &ns) != 0) {
-        sy_eprintf("FAIL collect-assertions\n");
-        ok = 0;
-    }
-    if (no != 13 || ns != 13) {
-        sy_eprintf("FAIL count-mismatch orig=%d shards=%d\n", no, ns);
-        ok = 0;
-    } else {
-        qsort(orig, (size_t)no, 96, cmp_str);
-        qsort(sh, (size_t)ns, 96, cmp_str);
-        for (int i = 0; i < no; i++) {
-            if (!tx_eqz(orig[i], sh[i])) {
-                sy_eprintf("FAIL multiset-diff idx=%d orig=%s shard=%s\n", i, orig[i], sh[i]);
-                ok = 0;
-            }
-            if (i > 0 && tx_eqz(sh[i], sh[i - 1])) {
-                sy_eprintf("FAIL duplicate-assertion name=%s\n", sh[i]);
-                ok = 0;
-            }
-        }
-    }
-
-    if (sy_read_file(src_path, &src, &srcn, 2 << 20) == 0 && src) {
-        for (int i = 0; i < no; i++) {
-            char pat[128];
-            if (cx_fmt(pat, sizeof pat, "\"%s\")", orig[i]) ||
-                tx_find((const char *)src, (long)srcn, pat, (long)strlen(pat)) < 0) {
-                sy_eprintf("FAIL source-ck-missing name=%s\n", orig[i]);
-                ok = 0;
-            }
-        }
-        mm_free(src);
-    } else {
+    char base[MAX_A][96], emitted[MAX_A][96];
+    int nb = 0, ne = 0, nf = 0;
+    if (load_baseline(bl_path, base, &nb) != 0 || nb != 13) {
+        sy_eprintf("FAIL load-frozen-baseline count=%d\n", nb);
         ok = 0;
     }
 
-    sy_printf("CHECK_PACKING_AUTHORITY_SPLIT\tstatus=%s\torig=%d\tshards=%d\n", ok ? "PASS" : "FAIL", no, ns);
+    if (sy_mkdtemp(sy_tmpdir(), "pa-split-guard-", tmp, sizeof tmp) != 0) return 2;
+    if (ok) {
+        if (run_shards_parallel(root, tmp, deadline_ms, emitted, &ne, &nf) != 0) {
+            sy_eprintf("FAIL shards-exec emitted=%d named_fail=%d\n", ne, nf);
+            ok = 0;
+        } else if (!verify_multiset_eq(base, nb, emitted, ne, nf, 0)) {
+            ok = 0;
+        }
+        if (!run_negative_controls(root, tmp, deadline_ms, base, nb)) ok = 0;
+    }
+    sy_remove_all(tmp);
+
+    sy_printf("CHECK_PACKING_AUTHORITY_SPLIT\tstatus=%s\tbaseline=%d\temitted=%d\tnamed_fail=%d\tneg=5\n",
+              ok ? "PASS" : "FAIL", nb, ne, nf);
     return ok ? 0 : 1;
 }
