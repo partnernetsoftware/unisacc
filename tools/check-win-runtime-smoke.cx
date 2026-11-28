@@ -1,0 +1,1291 @@
+/* tools/check-win-runtime-smoke.cx -- Portable Windows runtime resident gate.
+ *
+ * Modes:
+ *   --verify-pe PATH --expect-target win/x86_64|win/arm64
+ *   --extract-ape-pkg --ape PATH --out-pkg PATH
+ *   --make-neg-pe --src-pe PATH --out-pe PATH --expect-target win/x86_64
+ *   --check-host-arch win/x86_64|win/arm64|lnx/x86_64
+ *   --seal   --receipt RCPT --output OUT --locators LOC --run-id ID --rev SHA40
+ *            --expect-target TGT --candidate-file PATH --ts SEC
+ *            [--mode positive|negative] [--candidate-pe PATH] [--pos-pe PATH]
+ *            [--exec-rc STR] [--write-neg-output]
+ *            [--slice-file PATH] [--pkg-file PATH] [--release-version VER]
+ *   --judge  --receipt RCPT --output OUT --locators LOC --run-id ID --rev SHA40
+ *            --expect-target TGT --candidate-sha SHA64 --now-ts SEC
+ *            [--mode positive|negative] [--candidate-pe PATH] [--pos-pe PATH]
+ *            [--slice-sha SHA64] [--pkg-sha SHA64] [--release-version VER]
+ *            [--disp-ts SEC] [--max-age-s N] [--max-future-s N]
+ *            [--producer P] [--purpose P]
+ *   --self-check (or no arguments)
+ *
+ * Scope & limitation:
+ *   - Aligns with v0.1.10 (831bbddd4): accepts SizeOfStackReserve >= 0x100000 and
+ *     SizeOfStackCommit >= 0x1000 when large frames use 4 KiB stack probes
+ *     (probed >= 0 and zero unprobed >= 4096 frames), and rejects unprobed
+ *     frames exceeding commit+guard reach (e.g. 8248B at 0x1000 commit -> 0xC0000005).
+ *   - Executable-section scanning is a fixture-contract check on prologue byte
+ *     patterns, not a general compiler codegen proof (covered by tools/check-win-frame-size.cx).
+ *   - Binds outputs with shared cxlib.receipt v3 (rc_write3 / rc_verify_out).
+ *   - Release verdict consumers: tools/ci-verdict.cx (--workflow win-runtime-smoke.yml)
+ *     and tools/release-decide.cx (STEP 7 ci-qualified).
+ */
+#pragma unisa use cxlib.receipt
+#pragma unisa use cxlib.releaseversion
+#pragma unisa use sys.fs
+#pragma unisa use sys.io
+#pragma unisa use sys.sha
+#pragma unisa use mem.bytes
+#pragma unisa use mem.heap
+#pragma unisa use text.fmt
+#pragma unisa use text.text
+
+static const char *WRS_PRODUCER = "win-runtime-smoke";
+static const char *WRS_PURPOSE_POS = "runtime-gate";
+static const char *WRS_PURPOSE_NEG = "runtime-gate-neg";
+static const char *WRS_UNIT = "win-runtime";
+static const char *WRS_SUITE = "win-runtime-smoke-v1";
+
+typedef struct {
+    unsigned int machine;
+    int exec_secs;
+    int probed;
+    int dyn_probed;
+    int ge4k;
+    int ge8k;
+    unsigned int max_frame;
+    unsigned long long stack_reserve;
+    unsigned long long stack_commit;
+} wrs_pe_info_t;
+
+static unsigned int wrs_u16(const unsigned char *p) {
+    return (unsigned int)p[0] | ((unsigned int)p[1] << 8);
+}
+
+static unsigned int wrs_u32(const unsigned char *p) {
+    return (unsigned int)p[0] |
+           ((unsigned int)p[1] << 8) |
+           ((unsigned int)p[2] << 16) |
+           ((unsigned int)p[3] << 24);
+}
+
+static unsigned long long wrs_u64(const unsigned char *p) {
+    return (unsigned long long)wrs_u32(p) |
+           ((unsigned long long)wrs_u32(p + 4) << 32);
+}
+
+static void wrs_wr32(unsigned char *p, unsigned int v) {
+    p[0] = (unsigned char)(v & 0xffU);
+    p[1] = (unsigned char)((v >> 8) & 0xffU);
+    p[2] = (unsigned char)((v >> 16) & 0xffU);
+    p[3] = (unsigned char)((v >> 24) & 0xffU);
+}
+
+static void wrs_wr64(unsigned char *p, unsigned long long v) {
+    int i;
+    for (i = 0; i < 8; i++) p[i] = (unsigned char)((v >> (i * 8)) & 0xffULL);
+}
+
+static int wrs_is_hex_lower(const char *s, int n) {
+    int i;
+    if (!s) return 0;
+    for (i = 0; i < n; i++) {
+        char c = s[i];
+        if (!((c >= '0' && c <= '9') || (c >= 'a' && c <= 'f'))) return 0;
+    }
+    return s[n] == 0;
+}
+
+static int wrs_parse_i64(const char *s, int64_t *out) {
+    long long v = 0;
+    int neg = 0, i = 0;
+    if (!s || !s[0] || !out) return 1;
+    if (s[0] == '-') { neg = 1; i = 1; }
+    if (!s[i]) return 1;
+    for (; s[i]; i++) {
+        if (s[i] < '0' || s[i] > '9') return 1;
+        v = v * 10LL + (long long)(s[i] - '0');
+    }
+    *out = neg ? (int64_t)(-v) : (int64_t)v;
+    return 0;
+}
+
+static const char *wrs_opt(int argc, char **argv, const char *k) {
+    int i;
+    for (i = 1; i < argc; i++) {
+        if (!strcmp(argv[i], k) && i + 1 < argc) return argv[i + 1];
+    }
+    return 0;
+}
+
+static int wrs_has_flag(int argc, char **argv, const char *k) {
+    int i;
+    for (i = 1; i < argc; i++) if (!strcmp(argv[i], k)) return 1;
+    return 0;
+}
+
+static int wrs_want_pe_mach(const char *tgt, unsigned int *mach_out) {
+    if (!tgt) return 1;
+    if (!strcmp(tgt, "win/x86_64")) { *mach_out = 0x8664U; return 0; }
+    if (!strcmp(tgt, "win/arm64")) { *mach_out = 0xAA64U; return 0; }
+    return 1;
+}
+
+static const char *wrs_proc_os(void) {
+#if defined(_WIN32)
+    return "win";
+#elif defined(__APPLE__)
+    return "osx";
+#elif defined(__linux__)
+    return "lnx";
+#else
+    return "UNKNOWN";
+#endif
+}
+
+static const char *wrs_proc_arch(void) {
+#if defined(__aarch64__) || defined(_M_ARM64)
+    return "arm64";
+#elif defined(__x86_64__) || defined(_M_X64)
+    return "x86_64";
+#else
+    return "UNKNOWN";
+#endif
+}
+
+static int wrs_is_x64_probe(const unsigned char *buf, unsigned int raw_ptr, unsigned int raw_sz, unsigned int off) {
+    if (off + 5U > raw_sz) return 0;
+    return buf[raw_ptr + off + 0U] == 0x48U &&
+           buf[raw_ptr + off + 1U] == 0x83U &&
+           buf[raw_ptr + off + 2U] == 0x0cU &&
+           buf[raw_ptr + off + 3U] == 0x24U &&
+           buf[raw_ptr + off + 4U] == 0x00U;
+}
+
+static int wrs_is_x64_dyn_loop(const unsigned char *buf, unsigned int raw_ptr, unsigned int raw_sz, unsigned int off) {
+    static const unsigned char pat[30] = {
+        0x49U, 0x81U, 0xfbU, 0x00U, 0x10U, 0x00U, 0x00U,
+        0x72U, 0x15U,
+        0x48U, 0x81U, 0xecU, 0x00U, 0x10U, 0x00U, 0x00U,
+        0x48U, 0x83U, 0x0cU, 0x24U, 0x00U,
+        0x49U, 0x81U, 0xebU, 0x00U, 0x10U, 0x00U, 0x00U,
+        0xebU, 0xe2U
+    };
+    if (off < 30U || off > raw_sz) return 0;
+    return !memcmp(buf + raw_ptr + off - 30U, pat, 30);
+}
+
+/* Fixture-contract PE32+ scanner: reads reserve/commit and recognizes v0.1.10 4 KiB
+ * probe chains vs unprobed fixture prologue frames >= 4096 B. */
+static int wrs_scan_pe(const char *path, unsigned int want_mach, wrs_pe_info_t *info, char *err, size_t ecap) {
+    unsigned char *buf = 0;
+    int64_t len = 0;
+    unsigned int pe_off, mach, nsec, opt_sz, opt_off, sec_off, s;
+    mm_fill(info, (long)sizeof *info, 0, (long)sizeof *info);
+    if (!path || !path[0]) {
+        (void)cx_fmt(err, ecap, "empty-pe-path");
+        return 1;
+    }
+    if (sy_read_file(path, &buf, &len, 64 << 20) != 0 || !buf || len < 128) {
+        if (buf) mm_free(buf);
+        (void)cx_fmt(err, ecap, "pe-unreadable");
+        return 1;
+    }
+    if (buf[0] != 'M' || buf[1] != 'Z') {
+        mm_free(buf);
+        (void)cx_fmt(err, ecap, "bad-mz-magic");
+        return 1;
+    }
+    pe_off = wrs_u32(buf + 60);
+    if ((int64_t)pe_off + 24 > len || buf[pe_off] != 'P' || buf[pe_off + 1] != 'E' ||
+        buf[pe_off + 2] != 0 || buf[pe_off + 3] != 0) {
+        mm_free(buf);
+        (void)cx_fmt(err, ecap, "bad-pe-signature");
+        return 1;
+    }
+    mach = wrs_u16(buf + pe_off + 4);
+    if (want_mach && mach != want_mach) {
+        mm_free(buf);
+        (void)cx_fmt(err, ecap, "pe-machine-mismatch-got-0x%x-want-0x%x", mach, want_mach);
+        return 1;
+    }
+    nsec = wrs_u16(buf + pe_off + 6);
+    opt_sz = wrs_u16(buf + pe_off + 20);
+    opt_off = pe_off + 24U;
+    sec_off = opt_off + opt_sz;
+    if (opt_sz < 88U || nsec == 0U || (int64_t)sec_off + (int64_t)nsec * 40 > len) {
+        mm_free(buf);
+        (void)cx_fmt(err, ecap, "truncated-pe-headers");
+        return 1;
+    }
+    if (wrs_u16(buf + opt_off) != 0x20BU) {
+        mm_free(buf);
+        (void)cx_fmt(err, ecap, "not-pe32-plus");
+        return 1;
+    }
+    info->machine = mach;
+    info->stack_reserve = wrs_u64(buf + opt_off + 72U);
+    info->stack_commit = wrs_u64(buf + opt_off + 80U);
+    for (s = 0U; s < nsec; s++) {
+        unsigned int sh = sec_off + s * 40U;
+        unsigned int raw_sz = wrs_u32(buf + sh + 16U);
+        unsigned int raw_ptr = wrs_u32(buf + sh + 20U);
+        unsigned int chars = wrs_u32(buf + sh + 36U);
+        unsigned int i;
+        if ((chars & 0x20000000U) == 0U) continue;
+        if (raw_sz == 0U || (int64_t)raw_ptr + (int64_t)raw_sz > len) {
+            mm_free(buf);
+            (void)cx_fmt(err, ecap, "truncated-exec-section");
+            return 1;
+        }
+        info->exec_secs++;
+        if (mach == 0x8664U) {
+            int in_probe_chain = 0;
+            for (i = 0U; i + 3U <= raw_sz; i++) {
+                const unsigned char *p = buf + raw_ptr + i;
+                if (i + 7U <= raw_sz && p[0] == 0x48U && p[1] == 0x81U && p[2] == 0xecU) {
+                    unsigned int imm = wrs_u32(p + 3U);
+                    if (imm >= 4096U && imm < 0x10000000U) {
+                        if (imm == 4096U && wrs_is_x64_probe(buf, raw_ptr, raw_sz, i + 7U)) {
+                            info->probed++;
+                            in_probe_chain = 1;
+                            i += 11U;
+                        } else {
+                            info->ge4k++;
+                            in_probe_chain = 0;
+                            if (imm >= 8192U) info->ge8k++;
+                            if (imm > info->max_frame) info->max_frame = imm;
+                        }
+                    } else if (in_probe_chain && imm > 0U && imm < 4096U) {
+                        if (!wrs_is_x64_probe(buf, raw_ptr, raw_sz, i + 7U)) {
+                            info->ge4k++;
+                            if (imm > info->max_frame) info->max_frame = imm;
+                        } else {
+                            i += 11U;
+                        }
+                        in_probe_chain = 0;
+                    } else {
+                        in_probe_chain = 0;
+                    }
+                    continue;
+                }
+                if (in_probe_chain && i + 4U <= raw_sz && p[0] == 0x48U && p[1] == 0x83U && p[2] == 0xecU) {
+                    unsigned int imm8 = (unsigned int)p[3];
+                    if (imm8 > 0U && imm8 < 128U) {
+                        if (!wrs_is_x64_probe(buf, raw_ptr, raw_sz, i + 4U)) {
+                            info->ge4k++;
+                            if (imm8 > info->max_frame) info->max_frame = imm8;
+                        } else {
+                            i += 8U;
+                        }
+                    }
+                    in_probe_chain = 0;
+                    continue;
+                }
+                if (p[0] == 0x4cU && p[1] == 0x29U && p[2] == 0xdcU &&
+                    wrs_is_x64_dyn_loop(buf, raw_ptr, raw_sz, i) &&
+                    wrs_is_x64_probe(buf, raw_ptr, raw_sz, i + 3U)) {
+                    info->dyn_probed++;
+                    in_probe_chain = 0;
+                    i += 7U;
+                    continue;
+                }
+                in_probe_chain = 0;
+            }
+        } else if (mach == 0xAA64U) {
+            int in_probe_chain = 0;
+            for (i = 0U; i + 4U <= raw_sz; i += 4U) {
+                unsigned int insn = wrs_u32(buf + raw_ptr + i);
+                if (insn == 0xd14004e7U) {
+                    if (i + 8U <= raw_sz && wrs_u32(buf + raw_ptr + i + 4U) == 0xf90000ffU) {
+                        info->probed++;
+                        in_probe_chain = 1;
+                        i += 4U;
+                    } else {
+                        info->ge4k++;
+                        in_probe_chain = 0;
+                        if (4096U > info->max_frame) info->max_frame = 4096U;
+                    }
+                } else if (in_probe_chain && (insn & 0xffc003ffU) == 0xd10000e7U) {
+                    unsigned int imm12 = (insn >> 10) & 0xfffU;
+                    if (imm12 > 0U) {
+                        if (i + 8U <= raw_sz && wrs_u32(buf + raw_ptr + i + 4U) == 0xf90000ffU) {
+                            i += 4U;
+                        } else {
+                            info->ge4k++;
+                            if (imm12 > info->max_frame) info->max_frame = imm12;
+                        }
+                    }
+                    in_probe_chain = 0;
+                } else if (insn == 0xcb1000e7U && i >= 24U && i + 8U <= raw_sz &&
+                           wrs_u32(buf + raw_ptr + i - 24U) == 0xf140061fU &&
+                           wrs_u32(buf + raw_ptr + i - 20U) == 0x540000a3U &&
+                           wrs_u32(buf + raw_ptr + i - 16U) == 0xd14004e7U &&
+                           wrs_u32(buf + raw_ptr + i - 12U) == 0xf90000ffU &&
+                           wrs_u32(buf + raw_ptr + i - 8U) == 0xd1400610U &&
+                           wrs_u32(buf + raw_ptr + i - 4U) == 0x17fffffbU &&
+                           wrs_u32(buf + raw_ptr + i + 4U) == 0xf90000ffU) {
+                    info->dyn_probed++;
+                    in_probe_chain = 0;
+                    i += 4U;
+                } else if ((insn & 0xff8003ffU) == 0xd10003ffU) {
+                    unsigned int imm12 = (insn >> 10) & 0xfffU;
+                    unsigned int shl = (insn >> 22) & 1U;
+                    unsigned int imm = shl ? (imm12 << 12) : imm12;
+                    in_probe_chain = 0;
+                    if (imm >= 4096U) {
+                        info->ge4k++;
+                        if (imm >= 8192U) info->ge8k++;
+                        if (imm > info->max_frame) info->max_frame = imm;
+                    }
+                } else {
+                    in_probe_chain = 0;
+                }
+            }
+        }
+    }
+    mm_free(buf);
+    if (info->exec_secs == 0) {
+        (void)cx_fmt(err, ecap, "zero-exec-sections");
+        return 1;
+    }
+    return 0;
+}
+
+/* Accept 0x1000+ commit when no unprobed frame reaches SizeOfStackCommit; block any
+ * unprobed frame surpassing commit + 4KiB guard page (0xC0000005). */
+static int wrs_pe_stack_safe(const wrs_pe_info_t *info, int *av_risk_out, char *why, size_t wcap) {
+    if (av_risk_out) *av_risk_out = 0;
+    if (info->stack_reserve < 0x100000ULL) {
+        (void)cx_fmt(why, wcap, "insufficient-stack-reserve-0x%llx", info->stack_reserve);
+        return 1;
+    }
+    if (info->stack_commit < 0x1000ULL) {
+        (void)cx_fmt(why, wcap, "insufficient-stack-commit-0x%llx", info->stack_commit);
+        return 1;
+    }
+    if ((unsigned long long)info->max_frame > info->stack_commit + 4096ULL) {
+        if (av_risk_out) *av_risk_out = 1;
+        (void)cx_fmt(why, wcap, "unprobed-frame-%u-at-0x%llx-commit-0xC0000005",
+                     info->max_frame, info->stack_commit);
+        return 1;
+    }
+    if ((unsigned long long)info->max_frame >= info->stack_commit && info->max_frame >= 4096U) {
+        (void)cx_fmt(why, wcap, "unprobed-frame-%u-reaches-commit-0x%llx-0xC00000FD",
+                     info->max_frame, info->stack_commit);
+        return 1;
+    }
+    (void)cx_fmt(why, wcap, "ok");
+    return 0;
+}
+
+/* Derive an unprobed 8248B+ stack-frame PE at 0x1000 SizeOfStackCommit from the SAME
+ * compiled fixture PE (supports both v0.1.10 probed chains and unprobed fixtures). */
+static int wrs_make_unprobed_neg_pe(const char *src_pe, const char *dst_pe, unsigned int *max_frame_out) {
+    unsigned char *buf = 0;
+    int64_t len = 0;
+    unsigned int pe_off, mach, nsec, opt_sz, opt_off, sec_off, s, best_frame = 0U;
+    int mutated = 0;
+    if (sy_read_file(src_pe, &buf, &len, 32 << 20) != 0 || !buf || len < 256) {
+        if (buf) mm_free(buf);
+        return 1;
+    }
+    if (buf[0] != 'M' || buf[1] != 'Z') { mm_free(buf); return 1; }
+    pe_off = wrs_u32(buf + 60);
+    if ((int64_t)pe_off + 24 > len || buf[pe_off] != 'P' || buf[pe_off + 1] != 'E') { mm_free(buf); return 1; }
+    mach = wrs_u16(buf + pe_off + 4);
+    nsec = wrs_u16(buf + pe_off + 6);
+    opt_sz = wrs_u16(buf + pe_off + 20);
+    opt_off = pe_off + 24U;
+    sec_off = opt_off + opt_sz;
+    if (mach != 0x8664U || opt_sz < 88U || nsec == 0U || (int64_t)sec_off + (int64_t)nsec * 40 > len) {
+        mm_free(buf);
+        return 1;
+    }
+    for (s = 0U; s < nsec; s++) {
+        unsigned int sh = sec_off + s * 40U;
+        unsigned int raw_sz = wrs_u32(buf + sh + 16U);
+        unsigned int raw_ptr = wrs_u32(buf + sh + 20U);
+        unsigned int chars = wrs_u32(buf + sh + 36U);
+        unsigned int i = 0U;
+        if ((chars & 0x20000000U) == 0U || (int64_t)raw_ptr + (int64_t)raw_sz > len) continue;
+        while (i + 7U <= raw_sz) {
+            const unsigned char *p = buf + raw_ptr + i;
+            if (p[0] == 0x48U && p[1] == 0x81U && p[2] == 0xecU) {
+                unsigned int imm = wrs_u32(p + 3U);
+                if (imm == 4096U && wrs_is_x64_probe(buf, raw_ptr, raw_sz, i + 7U)) {
+                    unsigned int start = i, end = i + 12U, steps = 1U, total = 4096U;
+                    while (end + 12U <= raw_sz &&
+                           buf[raw_ptr + end] == 0x48U && buf[raw_ptr + end + 1U] == 0x81U &&
+                           buf[raw_ptr + end + 2U] == 0xecU && wrs_u32(buf + raw_ptr + end + 3U) == 4096U &&
+                           wrs_is_x64_probe(buf, raw_ptr, raw_sz, end + 7U)) {
+                        steps++;
+                        total += 4096U;
+                        end += 12U;
+                    }
+                    if (end + 12U <= raw_sz &&
+                        buf[raw_ptr + end] == 0x48U && buf[raw_ptr + end + 1U] == 0x81U &&
+                        buf[raw_ptr + end + 2U] == 0xecU && wrs_u32(buf + raw_ptr + end + 3U) > 0U &&
+                        wrs_u32(buf + raw_ptr + end + 3U) < 4096U &&
+                        wrs_is_x64_probe(buf, raw_ptr, raw_sz, end + 7U)) {
+                        total += wrs_u32(buf + raw_ptr + end + 3U);
+                        end += 12U;
+                    } else if (end + 9U <= raw_sz &&
+                               buf[raw_ptr + end] == 0x48U && buf[raw_ptr + end + 1U] == 0x83U &&
+                               buf[raw_ptr + end + 2U] == 0xecU && buf[raw_ptr + end + 3U] < 128U &&
+                               wrs_is_x64_probe(buf, raw_ptr, raw_sz, end + 4U)) {
+                        total += (unsigned int)buf[raw_ptr + end + 3U];
+                        end += 9U;
+                    }
+                    if (steps >= 2U && total >= 8192U && end - start >= 7U) {
+                        unsigned int j;
+                        buf[raw_ptr + start + 0U] = 0x48U;
+                        buf[raw_ptr + start + 1U] = 0x81U;
+                        buf[raw_ptr + start + 2U] = 0xecU;
+                        wrs_wr32(buf + raw_ptr + start + 3U, total);
+                        for (j = start + 7U; j < end; j++) buf[raw_ptr + j] = 0x90U;
+                        mutated = 1;
+                        if (total > best_frame) best_frame = total;
+                        i = end;
+                        continue;
+                    }
+                } else if (imm >= 8192U && imm < 0x10000000U) {
+                    if (imm > best_frame) best_frame = imm;
+                }
+            }
+            i++;
+        }
+    }
+    wrs_wr64(buf + opt_off + 80U, 0x1000ULL);
+    if (max_frame_out) *max_frame_out = best_frame;
+    if (best_frame < 8192U) {
+        (void)mutated;
+        mm_free(buf);
+        return 1;
+    }
+    {
+        int wrc = sy_write_atomic(dst_pe, buf, (long)len, 0755);
+        mm_free(buf);
+        return wrc != 0 ? 1 : 0;
+    }
+}
+
+/* Extract embedded UNIPKG1 package (with 16-byte footer) from a verified APE image. */
+static int wrs_extract_ape_pkg(const char *ape_path, const char *out_pkg_path) {
+    unsigned char *buf = 0;
+    int64_t len = 0;
+    unsigned int pe_off, opt_sz, opt_off, magic, dirs, count, cert = 0U, certlen = 0U, end, pad;
+    int found = 0;
+    unsigned long long pkg_len = 0ULL;
+    long long ft = 0;
+    char pkg_sha[65];
+    if (sy_read_file(ape_path, &buf, &len, 64 << 20) != 0 || !buf || len < 128) {
+        if (buf) mm_free(buf);
+        sy_eprintf("REFUSE extract-ape-pkg-unreadable\n");
+        return 1;
+    }
+    if (buf[0] != 'M' || buf[1] != 'Z') { mm_free(buf); sy_eprintf("REFUSE bad-ape-mz\n"); return 1; }
+    pe_off = wrs_u32(buf + 60);
+    if ((int64_t)pe_off + 24 > len || buf[pe_off] != 'P' || buf[pe_off + 1] != 'E' || buf[pe_off + 2] != 0 || buf[pe_off + 3] != 0) {
+        mm_free(buf); sy_eprintf("REFUSE bad-ape-pe\n"); return 1;
+    }
+    opt_sz = wrs_u16(buf + pe_off + 20);
+    opt_off = pe_off + 24U;
+    if (opt_sz < 100U || (int64_t)opt_off + (int64_t)opt_sz > len) {
+        mm_free(buf); sy_eprintf("REFUSE bad-ape-opt\n"); return 1;
+    }
+    magic = wrs_u16(buf + opt_off);
+    dirs = (magic == 0x10BU) ? 96U : (magic == 0x20BU) ? 112U : 0U;
+    if (!dirs || opt_sz < dirs) { mm_free(buf); sy_eprintf("REFUSE bad-ape-magic\n"); return 1; }
+    count = wrs_u32(buf + opt_off + dirs - 4U);
+    if (count < 5U || count > (opt_sz - dirs) / 8U) { mm_free(buf); sy_eprintf("REFUSE bad-ape-dirs\n"); return 1; }
+    cert = wrs_u32(buf + opt_off + dirs + 32U);
+    certlen = wrs_u32(buf + opt_off + dirs + 36U);
+    if ((cert != 0U) != (certlen != 0U) || (cert && (cert % 8U != 0U || certlen < 8U || (int64_t)cert + (int64_t)certlen != len))) {
+        mm_free(buf); sy_eprintf("REFUSE bad-ape-cert\n"); return 1;
+    }
+    end = cert ? cert : (unsigned int)len;
+    for (pad = 0U; pad < (cert ? 8U : 1U); pad++) {
+        long long cand_ft = (long long)end - (long long)pad - 16LL;
+        if (cand_ft < 4) break;
+        if (memcmp(buf + cand_ft, "UNIPKG1\n", 8) == 0) {
+            pkg_len = wrs_u64(buf + cand_ft + 8);
+            ft = cand_ft;
+            found = 1;
+            break;
+        }
+    }
+    if (!found || pkg_len < 4ULL || pkg_len > (unsigned long long)ft) {
+        mm_free(buf);
+        sy_eprintf("REFUSE ape-missing-unipkg1-footer\n");
+        return 1;
+    }
+    {
+        long long pkg_off = ft - (long long)pkg_len;
+        long out_n = (long)(pkg_len + 16ULL);
+        const unsigned char *p = buf + pkg_off;
+        if (memcmp(p, "P 1 ", 4) != 0 && memcmp(p, "P 2 ", 4) != 0 &&
+            memcmp(p, "P 3 ", 4) != 0 && memcmp(p, "P 4 ", 4) != 0) {
+            mm_free(buf);
+            sy_eprintf("REFUSE ape-payload-not-package\n");
+            return 1;
+        }
+        if (sy_sha256_hex(p, (int64_t)out_n, pkg_sha) != 0 ||
+            sy_write_atomic(out_pkg_path, p, out_n, 0644) != 0) {
+            mm_free(buf);
+            sy_eprintf("REFUSE write-extracted-pkg-failed\n");
+            return 1;
+        }
+        sy_printf("EXTRACT_APE_PKG\tpkg_sha=%s\tbytes=%ld\n", pkg_sha, out_n);
+    }
+    mm_free(buf);
+    return 0;
+}
+
+static int wrs_validate_cand(const char *path, const char *expect_target, char *detail, size_t dcap) {
+    unsigned char hdr[64];
+    sy_stat_t st;
+    long n = (long)strlen(path);
+    int fd;
+    long got;
+    if ((n >= 3 && !strcmp(path + n - 3, ".cx")) ||
+        (n >= 2 && !strcmp(path + n - 2, ".c")) ||
+        (n >= 2 && !strcmp(path + n - 2, ".h"))) {
+        (void)cx_fmt(detail, dcap, "candidate-is-source");
+        return 2;
+    }
+    fd = sy_open_read(path);
+    if (fd < 0) { (void)cx_fmt(detail, dcap, "candidate-open-failed"); return 2; }
+    if (sy_fstat(fd, &st) != 0 || st.kind != 'f' || st.size < 4096) {
+        sy_close(fd);
+        (void)cx_fmt(detail, dcap, "candidate-not-regular-binary");
+        return 2;
+    }
+    got = sy_read(fd, hdr, 64);
+    sy_close(fd);
+    if (got < 64) { (void)cx_fmt(detail, dcap, "candidate-short-read"); return 2; }
+    if (!strcmp(expect_target, "win/x86_64") || !strcmp(expect_target, "win/arm64")) {
+        if (hdr[0] != 'M' || hdr[1] != 'Z') {
+            (void)cx_fmt(detail, dcap, "candidate-not-pe-mz");
+            return 1;
+        }
+        (void)cx_fmt(detail, dcap, "size=%lld", (long long)st.size);
+        return 0;
+    }
+    if (!strcmp(expect_target, "lnx/x86_64") || !strcmp(expect_target, "lnx/arm64")) {
+        int is_elf = (hdr[0] == 0x7f && hdr[1] == 'E' && hdr[2] == 'L' && hdr[3] == 'F' && hdr[4] == 2 && hdr[5] == 1);
+        int is_ape = (hdr[0] == 'M' && hdr[1] == 'Z');
+        if (!is_elf && !is_ape) {
+            (void)cx_fmt(detail, dcap, "candidate-not-elf-or-ape");
+            return 1;
+        }
+        (void)cx_fmt(detail, dcap, "size=%lld;kind=%s", (long long)st.size, is_ape ? "ape" : "elf64");
+        return 0;
+    }
+    (void)cx_fmt(detail, dcap, "unsupported-target");
+    return 2;
+}
+
+static int wrs_write_locators(const char *path, const char *target, const char *rev,
+                              const char *cand_sha, const char *slice_sha, const char *pkg_sha,
+                              const char *rel_ver, const char *mode,
+                              const char *pos_pe_sha, const char *neg_pe_sha,
+                              char in_sha_out[65]) {
+    char buf[1536];
+    if (cx_fmt(buf, sizeof buf,
+               "target\t%s\nrev\t%s\ncandidate_sha\t%s\nslice_sha\t%s\npkg_sha\t%s\n"
+               "release_version\t%s\nsmoke_suite\t%s\nmode\t%s\npos_pe_sha\t%s\nneg_pe_sha\t%s\n",
+               target, rev, cand_sha, slice_sha, pkg_sha, rel_ver, WRS_SUITE,
+               mode, pos_pe_sha, neg_pe_sha) != 0) {
+        return 1;
+    }
+    if (sy_sha256_hex(buf, (int64_t)strlen(buf), in_sha_out) != 0 || !wrs_is_hex_lower(in_sha_out, 64)) {
+        return 1;
+    }
+    return sy_write_atomic(path, buf, (long)strlen(buf), 0644) != 0 ? 1 : 0;
+}
+
+static int wrs_split_tabs(char *line, char **cols, int max_cols) {
+    int n = 0;
+    char *p = line;
+    for (;;) {
+        if (n >= max_cols) return -1;
+        cols[n++] = p;
+        while (*p && *p != '\t') p++;
+        if (*p == 0) break;
+        *p++ = 0;
+    }
+    return n;
+}
+
+static int wrs_has_kv_exact(const char *det, const char *key_eq, const char *val) {
+    size_t kl = strlen(key_eq), vl = strlen(val);
+    const char *p = det;
+    while (p && *p) {
+        if ((p == det || p[-1] == ';' || p[-1] == ' ') &&
+            strncmp(p, key_eq, kl) == 0 && strncmp(p + kl, val, vl) == 0 &&
+            (p[kl + vl] == 0 || p[kl + vl] == ';')) {
+            return 1;
+        }
+        p++;
+    }
+    return 0;
+}
+
+static int wrs_verify_output_rows(const unsigned char *buf, long len, const char *tgt,
+                                  const char *cand_sha, const char *rev,
+                                  const char *slice_sha, const char *pkg_sha,
+                                  int require_all_pass) {
+    static const char *names[7] = {"identity", "pe-meta", "version", "hello", "m25-single", "m25-separate", "stream-e3"};
+    int seen[7];
+    long pos = 0;
+    int i, is_arm64 = !strcmp(tgt, "win/arm64"), failed = 0;
+    for (i = 0; i < 7; i++) seen[i] = 0;
+    if (!buf || len <= 0) {
+        if (require_all_pass) sy_eprintf("REFUSE empty-output\n");
+        return 1;
+    }
+    while (pos < len) {
+        long e = pos;
+        char line[1024];
+        char *cols[10];
+        int nc, idx = -1;
+        while (e < len && buf[e] != '\n') e++;
+        if (e > pos && buf[e - 1] == '\r') {
+            if (require_all_pass) sy_eprintf("REFUSE cr-in-output\n");
+            return 1;
+        }
+        if (e - pos >= (long)sizeof line) {
+            if (require_all_pass) sy_eprintf("REFUSE line-too-long\n");
+            return 1;
+        }
+        mm_copy(line, (long)sizeof line, buf + pos, e - pos);
+        line[e - pos] = 0;
+        pos = (e < len) ? (e + 1) : len;
+        if (!line[0]) continue;
+        nc = wrs_split_tabs(line, cols, 10);
+        if (nc != 8) {
+            if (require_all_pass) sy_eprintf("REFUSE bad-output-columns\n");
+            return 1;
+        }
+        if (strcmp(cols[0], tgt) != 0) {
+            if (require_all_pass) sy_eprintf("REFUSE output-target-mismatch\n");
+            return 1;
+        }
+        for (i = 0; i < 7; i++) if (!strcmp(cols[1], names[i])) { idx = i; break; }
+        if (idx < 0) {
+            if (require_all_pass) sy_eprintf("REFUSE unknown-check\t%s\n", cols[1]);
+            return 1;
+        }
+        if (seen[idx]) {
+            if (require_all_pass) sy_eprintf("REFUSE duplicate-check\t%s\n", cols[1]);
+            return 1;
+        }
+        if (strcmp(cols[5], cand_sha) != 0 || strcmp(cols[6], rev) != 0) {
+            if (require_all_pass) sy_eprintf("REFUSE row-identity-mismatch\t%s\n", cols[1]);
+            return 1;
+        }
+        if (strcmp(cols[2], "PASS") != 0 || strcmp(cols[3], "0") != 0 ||
+            strstr(cols[7], "0xC0000005") != 0 || strstr(cols[7], "0xC00000FD") != 0) {
+            failed++;
+            if (require_all_pass) {
+                sy_eprintf("REFUSE check-failed\t%s\tstatus=%s\trc=%s\t%s\n",
+                           cols[1], cols[2], cols[3], cols[7]);
+                return 1;
+            }
+        }
+        if (idx == 1 && is_arm64 && strcmp(cols[2], "PASS") == 0) {
+            if (!wrs_has_kv_exact(cols[7], "slice_machine=", "0xaa64") ||
+                !wrs_has_kv_exact(cols[7], "slice_sha=", slice_sha) ||
+                !wrs_has_kv_exact(cols[7], "container=", pkg_sha)) {
+                failed++;
+                if (require_all_pass) {
+                    sy_eprintf("REFUSE arm64-pe-meta-digest-mismatch\n");
+                    return 1;
+                }
+            }
+        }
+        seen[idx] = 1;
+    }
+    for (i = 0; i < 7; i++) {
+        if (!seen[i]) {
+            if (require_all_pass) sy_eprintf("REFUSE missing-check\t%s\n", names[i]);
+            return 1;
+        }
+    }
+    return failed ? 1 : 0;
+}
+
+static int wrs_verify_neg_rows(const unsigned char *buf, long len, const char *tgt,
+                               const char *cand_sha, const char *rev,
+                               const char *pos_pe_sha, const char *neg_pe_sha,
+                               unsigned int want_max_frame, const char *want_reason) {
+    static const char *names[3] = {"neg-pos-8248", "neg-0x1000-exec", "neg-0x1000-gate"};
+    int seen[3] = {0, 0, 0};
+    long pos = 0;
+    char mf_str[32];
+    (void)cx_fmt(mf_str, sizeof mf_str, "%u", want_max_frame);
+    if (!buf || len <= 0) { sy_eprintf("REFUSE empty-neg-output\n"); return 1; }
+    while (pos < len) {
+        long e = pos;
+        char line[1024];
+        char *cols[10];
+        int nc, idx = -1, i;
+        while (e < len && buf[e] != '\n') e++;
+        if ((e > pos && buf[e - 1] == '\r') || e - pos >= (long)sizeof line) {
+            sy_eprintf("REFUSE bad-neg-line\n");
+            return 1;
+        }
+        mm_copy(line, (long)sizeof line, buf + pos, e - pos);
+        line[e - pos] = 0;
+        pos = (e < len) ? (e + 1) : len;
+        if (!line[0]) continue;
+        nc = wrs_split_tabs(line, cols, 10);
+        if (nc != 8 || strcmp(cols[0], tgt) != 0 ||
+            strcmp(cols[5], cand_sha) != 0 || strcmp(cols[6], rev) != 0) {
+            sy_eprintf("REFUSE neg-row-identity-mismatch\n");
+            return 1;
+        }
+        for (i = 0; i < 3; i++) if (!strcmp(cols[1], names[i])) { idx = i; break; }
+        if (idx < 0 || seen[idx]) { sy_eprintf("REFUSE neg-row-unknown-or-dup\n"); return 1; }
+        if (idx == 0) {
+            if (strcmp(cols[2], "PASS") != 0 || strcmp(cols[3], "0") != 0 ||
+                !wrs_has_kv_exact(cols[7], "max_frame=", mf_str) ||
+                !wrs_has_kv_exact(cols[7], "pe_sha=", pos_pe_sha)) {
+                sy_eprintf("REFUSE neg-pos-row-invalid\n");
+                return 1;
+            }
+        } else if (idx == 1) {
+            if (strcmp(cols[2], "FAIL") != 0 || strcmp(cols[3], "0xC0000005") != 0 ||
+                !wrs_has_kv_exact(cols[7], "pe_sha=", neg_pe_sha)) {
+                sy_eprintf("REFUSE neg-exec-row-not-0xC0000005\n");
+                return 1;
+            }
+        } else {
+            if (strcmp(cols[2], "FAIL") != 0 || strcmp(cols[3], "0xC0000005") != 0 ||
+                !wrs_has_kv_exact(cols[7], "max_frame=", mf_str) ||
+                !wrs_has_kv_exact(cols[7], "reason=", want_reason) ||
+                !wrs_has_kv_exact(cols[7], "pe_sha=", neg_pe_sha)) {
+                sy_eprintf("REFUSE neg-gate-row-mismatch\n");
+                return 1;
+            }
+        }
+        seen[idx] = 1;
+    }
+    if (!seen[0] || !seen[1] || !seen[2]) {
+        sy_eprintf("REFUSE missing-neg-rows\n");
+        return 1;
+    }
+    return 0;
+}
+
+static int cmd_verify_pe(int argc, char **argv) {
+    const char *pe_path = wrs_opt(argc, argv, "--verify-pe");
+    const char *tgt = wrs_opt(argc, argv, "--expect-target");
+    unsigned int want_mach = 0U;
+    wrs_pe_info_t info;
+    char err[160], why[160];
+    int av_risk = 0, unsafe;
+    if (!pe_path || !tgt || wrs_want_pe_mach(tgt, &want_mach) != 0) {
+        sy_eprintf("REFUSE bad-verify-pe-args\n");
+        return 2;
+    }
+    if (wrs_scan_pe(pe_path, want_mach, &info, err, sizeof err) != 0) {
+        sy_eprintf("GATE_BLOCK\treason=%s\tpe=%s\ttarget=%s\n", err, pe_path, tgt);
+        return 1;
+    }
+    unsafe = wrs_pe_stack_safe(&info, &av_risk, why, sizeof why);
+    sy_printf("PE_VERIFY\ttarget=%s\tmachine=0x%x\tstack_reserve=0x%llx\tstack_commit=0x%llx\tmax_frame=%u\tprobed=%d\tdyn_probed=%d\tge4k=%d\tge8k=%d\tverdict=%s\treason=%s\n",
+              tgt, info.machine, info.stack_reserve, info.stack_commit, info.max_frame,
+              info.probed, info.dyn_probed, info.ge4k, info.ge8k, unsafe ? "BLOCKED" : "PASS", why);
+    if (unsafe) {
+        sy_eprintf("GATE_BLOCK\treason=%s\tpe=%s\tfault=%s\n",
+                   why, pe_path, av_risk ? "0xC0000005" : "0xC00000FD");
+        return 1;
+    }
+    return 0;
+}
+
+static int cmd_make_neg_pe(int argc, char **argv) {
+    const char *src_pe = wrs_opt(argc, argv, "--src-pe");
+    const char *out_pe = wrs_opt(argc, argv, "--out-pe");
+    const char *tgt = wrs_opt(argc, argv, "--expect-target");
+    unsigned int max_f = 0U;
+    char sha[65];
+    if (!src_pe || !out_pe || !tgt || strcmp(tgt, "win/x86_64") != 0) {
+        sy_eprintf("REFUSE bad-make-neg-pe-args\n");
+        return 2;
+    }
+    if (wrs_make_unprobed_neg_pe(src_pe, out_pe, &max_f) != 0 ||
+        rc_regular_sha256_size(out_pe, sha, 0, 32 << 20) != 0) {
+        sy_eprintf("REFUSE make-neg-pe-failed\n");
+        return 1;
+    }
+    sy_printf("MAKE_NEG_PE\ttarget=%s\tmax_frame=%u\tstack_commit=0x1000\tpe_sha=%s\n", tgt, max_f, sha);
+    return 0;
+}
+
+static int cmd_check_host_arch(int argc, char **argv) {
+    const char *want = wrs_opt(argc, argv, "--check-host-arch");
+    char got[32];
+    if (!want || !want[0]) { sy_eprintf("REFUSE bad-host-arch-arg\n"); return 2; }
+    (void)cx_fmt(got, sizeof got, "%s/%s", wrs_proc_os(), wrs_proc_arch());
+    if (strcmp(got, want) != 0) {
+        sy_eprintf("REFUSE host-arch-mismatch\tgot=%s\twant=%s\n", got, want);
+        return 1;
+    }
+    sy_printf("HOST_ARCH\tactual=%s\twant=%s\n", got, want);
+    return 0;
+}
+
+/* Seal positive smoke output OR measured 8248B negative control output with rc_v3. */
+static int cmd_seal(int argc, char **argv) {
+    const char *rcpt = wrs_opt(argc, argv, "--receipt");
+    const char *outf = wrs_opt(argc, argv, "--output");
+    const char *locf = wrs_opt(argc, argv, "--locators");
+    const char *run_id = wrs_opt(argc, argv, "--run-id");
+    const char *rev = wrs_opt(argc, argv, "--rev");
+    const char *tgt = wrs_opt(argc, argv, "--expect-target");
+    const char *cand_file = wrs_opt(argc, argv, "--candidate-file");
+    const char *cand_pe = wrs_opt(argc, argv, "--candidate-pe");
+    const char *pos_pe = wrs_opt(argc, argv, "--pos-pe");
+    const char *slice_file = wrs_opt(argc, argv, "--slice-file");
+    const char *pkg_file = wrs_opt(argc, argv, "--pkg-file");
+    const char *rel_ver_arg = wrs_opt(argc, argv, "--release-version");
+    const char *ts_s = wrs_opt(argc, argv, "--ts");
+    const char *mode = wrs_opt(argc, argv, "--mode");
+    const char *exec_rc = wrs_opt(argc, argv, "--exec-rc");
+    int write_neg_out = wrs_has_flag(argc, argv, "--write-neg-output");
+    char rel_ver[32], cand_sha[65], slice_sha[65], pkg_sha[65], in_sha[65], out_sha[65], det[256];
+    char pos_pe_sha[65] = "-", neg_pe_sha[65] = "-", pe_sha[65] = "";
+    int64_t ts_v = 0, cand_sz = 0, sl_sz = 0, pkg_sz = 0, out_sz = 0;
+    unsigned char *ob = 0;
+    int64_t on = 0;
+    int rows_ok = 0, pe_ok = 1, all_ok = 0, is_win = 0, is_arm64 = 0, is_neg = 0;
+    wrs_pe_info_t neg_info, pos_info;
+    char neg_err[160], neg_why[160], pos_err[160], pos_why[160];
+    int neg_av = 0, pos_av = 0;
+
+    if (!mode || !mode[0]) mode = "positive";
+    is_neg = (strcmp(mode, "negative") == 0);
+    if (!is_neg && strcmp(mode, "positive") != 0) {
+        sy_eprintf("REFUSE bad-seal-mode\n");
+        return 2;
+    }
+
+    if (!rcpt || !outf || !locf || !run_id || !rev || !tgt || !cand_file || !ts_s ||
+        !wrs_is_hex_lower(rev, 40) || wrs_parse_i64(ts_s, &ts_v) != 0 || ts_v <= 0) {
+        sy_eprintf("REFUSE bad-seal-args\n");
+        return 2;
+    }
+    if (strcmp(tgt, "win/x86_64") != 0 && strcmp(tgt, "win/arm64") != 0 && strcmp(tgt, "lnx/x86_64") != 0) {
+        sy_eprintf("REFUSE unsupported-target\t%s\n", tgt);
+        return 2;
+    }
+    is_win = (strncmp(tgt, "win/", 4) == 0);
+    is_arm64 = (!strcmp(tgt, "win/arm64"));
+    if (is_win && (!cand_pe || !cand_pe[0])) {
+        sy_eprintf("REFUSE missing-candidate-pe\n");
+        return 2;
+    }
+    if (is_neg && (strcmp(tgt, "win/x86_64") != 0 || !pos_pe || !pos_pe[0] || !exec_rc || !exec_rc[0])) {
+        sy_eprintf("REFUSE bad-seal-negative-args\n");
+        return 2;
+    }
+
+    if (rel_ver_arg && rel_ver_arg[0]) {
+        if (!rv_valid(rel_ver_arg) || cx_fmt(rel_ver, sizeof rel_ver, "%s", rel_ver_arg) != 0) {
+            sy_eprintf("REFUSE invalid-release-version\n");
+            return 2;
+        }
+    } else if (rv_load("release/candidate.tsv", rel_ver) != 0) {
+        sy_eprintf("REFUSE cannot-load-release-version\n");
+        return 2;
+    }
+
+    if (wrs_validate_cand(cand_file, tgt, det, sizeof det) != 0 ||
+        rc_regular_sha256_size(cand_file, cand_sha, &cand_sz, 64 << 20) != 0) {
+        sy_eprintf("REFUSE invalid-candidate\t%s\n", det[0] ? det : cand_file);
+        return 2;
+    }
+    if (is_arm64) {
+        if (!slice_file || !slice_file[0] || !pkg_file || !pkg_file[0] ||
+            rc_regular_sha256_size(slice_file, slice_sha, &sl_sz, 64 << 20) != 0 ||
+            rc_regular_sha256_size(pkg_file, pkg_sha, &pkg_sz, 128 << 20) != 0) {
+            sy_eprintf("REFUSE missing-win-arm64-slice-or-pkg\n");
+            return 2;
+        }
+    } else {
+        (void)cx_fmt(slice_sha, sizeof slice_sha, "-");
+        (void)cx_fmt(pkg_sha, sizeof pkg_sha, "-");
+    }
+
+    if (is_neg) {
+        int pos_scan_rc, pos_safe_rc, neg_scan_rc, neg_safe_rc, neg_contract_ok;
+        if (rc_regular_sha256_size(pos_pe, pos_pe_sha, 0, 32 << 20) != 0 ||
+            rc_regular_sha256_size(cand_pe, neg_pe_sha, 0, 32 << 20) != 0 ||
+            strcmp(pos_pe_sha, neg_pe_sha) == 0) {
+            sy_eprintf("REFUSE neg-pe-files-invalid\n");
+            return 2;
+        }
+        pos_scan_rc = wrs_scan_pe(pos_pe, 0x8664U, &pos_info, pos_err, sizeof pos_err);
+        pos_safe_rc = (pos_scan_rc == 0) ? wrs_pe_stack_safe(&pos_info, &pos_av, pos_why, sizeof pos_why) : 1;
+        neg_scan_rc = wrs_scan_pe(cand_pe, 0x8664U, &neg_info, neg_err, sizeof neg_err);
+        neg_safe_rc = (neg_scan_rc == 0) ? wrs_pe_stack_safe(&neg_info, &neg_av, neg_why, sizeof neg_why) : 1;
+        if (neg_scan_rc == 0 && neg_safe_rc != 0) {
+            sy_eprintf("GATE_BLOCK\treason=%s\tpe=%s\tfault=%s\n",
+                       neg_why, cand_pe, neg_av ? "0xC0000005" : "0xC00000FD");
+        }
+        if (write_neg_out) {
+            char nb[4096];
+            int nw = snprintf(nb, sizeof nb,
+                              "%s\tneg-pos-8248\t%s\t0\t1\t%s\t%s\tmax_frame=8248;stack_commit=0x%llx;pe_sha=%s\n"
+                              "%s\tneg-0x1000-exec\t%s\t%s\t1\t%s\t%s\tpe_sha=%s\n"
+                              "%s\tneg-0x1000-gate\t%s\t%s\t1\t%s\t%s\tmax_frame=%u;reason=%s;pe_sha=%s\n",
+                              tgt, (pos_safe_rc == 0) ? "PASS" : "FAIL", cand_sha, rev,
+                              pos_info.stack_commit, pos_pe_sha,
+                              tgt, strcmp(exec_rc, "0xC0000005") == 0 ? "FAIL" : "PASS", exec_rc,
+                              cand_sha, rev, neg_pe_sha,
+                              tgt, (neg_safe_rc != 0 && neg_av) ? "FAIL" : "PASS",
+                              (neg_safe_rc != 0 && neg_av) ? "0xC0000005" : "0",
+                              cand_sha, rev, neg_info.max_frame,
+                              (neg_scan_rc == 0) ? neg_why : neg_err, neg_pe_sha);
+            if (nw <= 0 || sy_write_atomic(outf, nb, nw, 0644) != 0) {
+                sy_eprintf("REFUSE write-neg-output-failed\n");
+                return 1;
+            }
+        }
+        if (sy_read_file(outf, &ob, &on, 16 << 20) != 0 || !ob || on <= 0 ||
+            rc_regular_sha256_size(outf, out_sha, &out_sz, 16 << 20) != 0) {
+            if (ob) mm_free(ob);
+            sy_eprintf("REFUSE missing-or-unreadable-neg-output\n");
+            return 2;
+        }
+        neg_contract_ok = (pos_scan_rc == 0 && pos_safe_rc == 0 &&
+                           neg_scan_rc == 0 && neg_safe_rc != 0 && neg_av == 1 &&
+                           neg_info.max_frame >= 8192U &&
+                           strcmp(exec_rc, "0xC0000005") == 0 &&
+                           wrs_verify_neg_rows(ob, (long)on, tgt, cand_sha, rev,
+                                               pos_pe_sha, neg_pe_sha, neg_info.max_frame, neg_why) == 0);
+        mm_free(ob);
+        if (wrs_write_locators(locf, tgt, rev, cand_sha, slice_sha, pkg_sha, rel_ver,
+                               mode, pos_pe_sha, neg_pe_sha, in_sha) != 0) {
+            sy_eprintf("REFUSE write-locators-failed\n");
+            return 1;
+        }
+        {
+            rc_v3_t v3;
+            v3.run_id = run_id;
+            v3.rev = rev;
+            v3.unit = WRS_UNIT;
+            v3.target = tgt;
+            v3.producer = WRS_PRODUCER;
+            v3.purpose = WRS_PURPOSE_NEG;
+            v3.candidate_sha = cand_sha;
+            v3.inputs_sha = in_sha;
+            v3.output_sha = out_sha;
+            v3.rc = 1;
+            v3.verdict = "FAIL";
+            v3.ts = ts_v;
+            if (rc_write3(rcpt, &v3) != 0) {
+                sy_eprintf("REFUSE write-v3-receipt\t%s\n", rc_why());
+                return 1;
+            }
+        }
+        sy_printf("WIN_RUNTIME_SMOKE\tverdict=FAIL\tmode=negative\tmax_frame=%u\treason=%s\tinputs_sha=%s\toutput_sha=%s\n",
+                  neg_info.max_frame, neg_why, in_sha, out_sha);
+        return neg_contract_ok ? 1 : 2;
+    }
+
+    if (sy_read_file(outf, &ob, &on, 16 << 20) != 0 || !ob || on <= 0 ||
+        rc_regular_sha256_size(outf, out_sha, &out_sz, 16 << 20) != 0) {
+        if (ob) mm_free(ob);
+        sy_eprintf("REFUSE missing-or-unreadable-output\n");
+        return 2;
+    }
+    rows_ok = (wrs_verify_output_rows(ob, (long)on, tgt, cand_sha, rev, slice_sha, pkg_sha, 0) == 0);
+    mm_free(ob);
+
+    if (is_win) {
+        unsigned int wm = is_arm64 ? 0xAA64U : 0x8664U;
+        wrs_pe_info_t pe;
+        char pe_err[160], safe_why[160];
+        int av_risk = 0;
+        if (rc_regular_sha256_size(cand_pe, pe_sha, 0, 64 << 20) != 0 ||
+            strcmp(pe_sha, is_arm64 ? slice_sha : cand_sha) != 0) {
+            pe_ok = 0;
+            sy_eprintf("GATE_BLOCK\treason=candidate-pe-sha-mismatch\tpe=%s\n", cand_pe);
+        } else if (wrs_scan_pe(cand_pe, wm, &pe, pe_err, sizeof pe_err) != 0) {
+            pe_ok = 0;
+            sy_eprintf("GATE_BLOCK\treason=%s\tpe=%s\n", pe_err, cand_pe);
+        } else if (wrs_pe_stack_safe(&pe, &av_risk, safe_why, sizeof safe_why) != 0) {
+            pe_ok = 0;
+            sy_eprintf("GATE_BLOCK\treason=%s\tfault=%s\n", safe_why, av_risk ? "0xC0000005" : "0xC00000FD");
+        }
+    }
+
+    if (wrs_write_locators(locf, tgt, rev, cand_sha, slice_sha, pkg_sha, rel_ver,
+                           mode, pos_pe_sha, neg_pe_sha, in_sha) != 0) {
+        sy_eprintf("REFUSE write-locators-failed\n");
+        return 1;
+    }
+
+    all_ok = (rows_ok && pe_ok);
+    {
+        rc_v3_t v3;
+        v3.run_id = run_id;
+        v3.rev = rev;
+        v3.unit = WRS_UNIT;
+        v3.target = tgt;
+        v3.producer = WRS_PRODUCER;
+        v3.purpose = WRS_PURPOSE_POS;
+        v3.candidate_sha = cand_sha;
+        v3.inputs_sha = in_sha;
+        v3.output_sha = out_sha;
+        v3.rc = all_ok ? 0 : 1;
+        v3.verdict = all_ok ? "PASS" : "FAIL";
+        v3.ts = ts_v;
+        if (rc_write3(rcpt, &v3) != 0) {
+            sy_eprintf("REFUSE write-v3-receipt\t%s\n", rc_why());
+            return 1;
+        }
+    }
+
+    sy_printf("WIN_RUNTIME_SMOKE\tverdict=%s\ttarget=%s\tinputs_sha=%s\toutput_sha=%s\n",
+              all_ok ? "PASS" : "FAIL", tgt, in_sha, out_sha);
+    return all_ok ? 0 : 1;
+}
+
+static int cmd_judge(int argc, char **argv) {
+    const char *rcpt = wrs_opt(argc, argv, "--receipt");
+    const char *outf = wrs_opt(argc, argv, "--output");
+    const char *locf = wrs_opt(argc, argv, "--locators");
+    const char *run_id = wrs_opt(argc, argv, "--run-id");
+    const char *rev = wrs_opt(argc, argv, "--rev");
+    const char *tgt = wrs_opt(argc, argv, "--expect-target");
+    const char *cand_sha = wrs_opt(argc, argv, "--candidate-sha");
+    const char *cand_pe = wrs_opt(argc, argv, "--candidate-pe");
+    const char *pos_pe = wrs_opt(argc, argv, "--pos-pe");
+    const char *slice_sha = wrs_opt(argc, argv, "--slice-sha");
+    const char *pkg_sha = wrs_opt(argc, argv, "--pkg-sha");
+    const char *rel_ver_arg = wrs_opt(argc, argv, "--release-version");
+    const char *now_s = wrs_opt(argc, argv, "--now-ts");
+    const char *disp_s = wrs_opt(argc, argv, "--disp-ts");
+    const char *max_age_s = wrs_opt(argc, argv, "--max-age-s");
+    const char *max_fut_s = wrs_opt(argc, argv, "--max-future-s");
+    const char *producer = wrs_opt(argc, argv, "--producer");
+    const char *purpose = wrs_opt(argc, argv, "--purpose");
+    const char *mode = wrs_opt(argc, argv, "--mode");
+    char rel_ver[32], exp_loc[1536], exp_in_sha[65], got_loc_sha[65], pe_sha[65];
+    char pos_pe_sha[65] = "-", neg_pe_sha[65] = "-";
+    int64_t now_ts = 0, disp_ts = 0, max_age = 86400, max_fut = 60, loc_sz = 0;
+    int is_win = 0, is_arm64 = 0, is_neg = 0;
+    rc_expect_t exp;
+    rc_verified_t ver;
+
+    if (!mode || !mode[0]) mode = "positive";
+    is_neg = (strcmp(mode, "negative") == 0);
+    if (!is_neg && strcmp(mode, "positive") != 0) { sy_eprintf("REFUSE bad-judge-mode\n"); return 2; }
+    if (!producer || !producer[0]) producer = WRS_PRODUCER;
+    if (!purpose || !purpose[0]) purpose = is_neg ? WRS_PURPOSE_NEG : WRS_PURPOSE_POS;
+    if (!slice_sha || !slice_sha[0]) slice_sha = "-";
+    if (!pkg_sha || !pkg_sha[0]) pkg_sha = "-";
+
+    if (!rcpt || !outf || !locf || !run_id || !rev || !tgt || !cand_sha || !now_s ||
+        !wrs_is_hex_lower(rev, 40) || !wrs_is_hex_lower(cand_sha, 64) ||
+        wrs_parse_i64(now_s, &now_ts) != 0 || now_ts <= 0) {
+        sy_eprintf("REFUSE bad-judge-args\n");
+        return 2;
+    }
+    if (disp_s && wrs_parse_i64(disp_s, &disp_ts) != 0) { sy_eprintf("REFUSE bad-disp-ts\n"); return 2; }
+    if (max_age_s && wrs_parse_i64(max_age_s, &max_age) != 0) { sy_eprintf("REFUSE bad-max-age\n"); return 2; }
+    if (max_fut_s && wrs_parse_i64(max_fut_s, &max_fut) != 0) { sy_eprintf("REFUSE bad-max-future\n"); return 2; }
+    is_win = (strncmp(tgt, "win/", 4) == 0);
+    is_arm64 = (!strcmp(tgt, "win/arm64"));
+    if (is_arm64 && (!wrs_is_hex_lower(slice_sha, 64) || !wrs_is_hex_lower(pkg_sha, 64))) {
+        sy_eprintf("REFUSE missing-arm64-pins\n");
+        return 2;
+    }
+    if (is_win && (!cand_pe || !cand_pe[0])) {
+        sy_eprintf("REFUSE missing-mandatory-candidate-pe\n");
+        return 2;
+    }
+    if (is_neg) {
+        if (strcmp(tgt, "win/x86_64") != 0 || !pos_pe || !pos_pe[0] ||
+            rc_regular_sha256_size(pos_pe, pos_pe_sha, 0, 32 << 20) != 0 ||
+            rc_regular_sha256_size(cand_pe, neg_pe_sha, 0, 32 << 20) != 0 ||
+            strcmp(pos_pe_sha, neg_pe_sha) == 0) {
+            sy_eprintf("REFUSE bad-judge-negative-pe-args\n");
+            return 2;
+        }
+    }
+    if (rel_ver_arg && rel_ver_arg[0]) {
+        if (!rv_valid(rel_ver_arg) || cx_fmt(rel_ver, sizeof rel_ver, "%s", rel_ver_arg) != 0) return 2;
+    } else if (rv_load("release/candidate.tsv", rel_ver) != 0) {
+        return 2;
+    }
+
+    if (cx_fmt(exp_loc, sizeof exp_loc,
+               "target\t%s\nrev\t%s\ncandidate_sha\t%s\nslice_sha\t%s\npkg_sha\t%s\n"
+               "release_version\t%s\nsmoke_suite\t%s\nmode\t%s\npos_pe_sha\t%s\nneg_pe_sha\t%s\n",
+               tgt, rev, cand_sha, slice_sha, pkg_sha, rel_ver, WRS_SUITE,
+               mode, pos_pe_sha, neg_pe_sha) != 0 ||
+        sy_sha256_hex(exp_loc, (int64_t)strlen(exp_loc), exp_in_sha) != 0) {
+        return 2;
+    }
+
+    if (rc_regular_sha256_size(locf, got_loc_sha, &loc_sz, 65536) != 0 ||
+        strcmp(got_loc_sha, exp_in_sha) != 0) {
+        sy_eprintf("REFUSE locators-mismatch\n");
+        return 1;
+    }
+
+    mm_fill(&exp, (long)sizeof exp, 0, (long)sizeof exp);
+    exp.run_id = run_id;
+    exp.rev = rev;
+    exp.unit = WRS_UNIT;
+    exp.target = tgt;
+    exp.candidate_sha = cand_sha;
+    exp.inputs_sha = exp_in_sha;
+    exp.output_path = outf;
+    exp.producer = producer;
+    exp.purpose = purpose;
+    exp.expect_rc = is_neg ? 1 : 0;
+    exp.expect_verdict = is_neg ? "FAIL" : "PASS";
+    exp.now_ts = now_ts;
+    exp.max_age_s = max_age;
+    exp.max_future_s = max_fut;
+    exp.allow_fail_verdict = is_neg ? 1 : 0;
+
+    {
+        int vrc = rc_verify_out(rcpt, &exp, &ver);
+        if (vrc != RC_OK) {
+            sy_eprintf("REFUSE receipt-verify\tcode=%d\tname=%s\tdetail=%s\n",
+                       vrc, rc_code_name(vrc), rc_why());
+            return 1;
+        }
+    }
+    if (disp_ts > 0 && ver.ts < disp_ts - 60LL) {
+        rc_verified_free(&ver);
+        sy_eprintf("REFUSE receipt-predates-dispatch\n");
+        return 1;
+    }
+
+    if (is_neg) {
+        wrs_pe_info_t pos_info, neg_info;
+        char pe_err[160], safe_why[160];
+        int av_risk = 0, pos_av = 0;
+        if (wrs_scan_pe(pos_pe, 0x8664U, &pos_info, pe_err, sizeof pe_err) != 0 ||
+            wrs_pe_stack_safe(&pos_info, &pos_av, safe_why, sizeof safe_why) != 0) {
+            rc_verified_free(&ver);
+            sy_eprintf("REFUSE neg-pos-pe-not-safe\n");
+            return 1;
+        }
+        if (wrs_scan_pe(cand_pe, 0x8664U, &neg_info, pe_err, sizeof pe_err) != 0 ||
+            wrs_pe_stack_safe(&neg_info, &av_risk, safe_why, sizeof safe_why) == 0 ||
+            av_risk != 1 || neg_info.max_frame < 8192U) {
+            rc_verified_free(&ver);
+            sy_eprintf("REFUSE neg-pe-did-not-trigger-0xC0000005-gate\n");
+            return 1;
+        }
+        if (wrs_verify_neg_rows(ver.output_bytes, ver.output_len, tgt, cand_sha, rev,
+                                pos_pe_sha, neg_pe_sha, neg_info.max_frame, safe_why) != 0) {
+            rc_verified_free(&ver);
+            return 1;
+        }
+        sy_printf("JUDGE_NEG_OK\ttarget=%s\tcandidate_sha=%s\tmax_frame=%u\tneg_pe_sha=%s\treason=%s\n",
+                  tgt, cand_sha, neg_info.max_frame, neg_pe_sha, safe_why);
+        rc_verified_free(&ver);
+        return 0;
+    }
+
+    if (wrs_verify_output_rows(ver.output_bytes, ver.output_len, tgt, cand_sha, rev,
+                               slice_sha, pkg_sha, 1) != 0) {
+        rc_verified_free(&ver);
+        return 1;
+    }
+
+    if (is_win) {
+        unsigned int wm = 0U;
+        wrs_pe_info_t pe;
+        char pe_err[160], safe_why[160];
+        int av_risk = 0;
+        const char *want_pe_sha = is_arm64 ? slice_sha : cand_sha;
+        if (rc_regular_sha256_size(cand_pe, pe_sha, 0, 64 << 20) != 0 ||
+            strcmp(pe_sha, want_pe_sha) != 0) {
+            rc_verified_free(&ver);
+            sy_eprintf("REFUSE candidate-pe-sha-mismatch\tgot=%s\twant=%s\n", pe_sha, want_pe_sha);
+            return 1;
+        }
+        if (wrs_want_pe_mach(tgt, &wm) != 0 ||
+            wrs_scan_pe(cand_pe, wm, &pe, pe_err, sizeof pe_err) != 0) {
+            rc_verified_free(&ver);
+            sy_eprintf("REFUSE candidate-pe-invalid\t%s\n", pe_err);
+            return 1;
+        }
+        if (wrs_pe_stack_safe(&pe, &av_risk, safe_why, sizeof safe_why) != 0) {
+            rc_verified_free(&ver);
+            sy_eprintf("GATE_BLOCK\treason=%s\tfault=%s\n",
+                       safe_why, av_risk ? "0xC0000005" : "0xC00000FD");
+            return 1;
+        }
+    }
+
+    sy_printf("JUDGE_OK\ttarget=%s\tcandidate_sha=%s\tinputs_sha=%s\toutput_sha=%s\n",
+              tgt, cand_sha, ver.inputs_sha, ver.output_sha);
+    rc_verified_free(&ver);
+    return 0;
+}
+
+static int cmd_self_check(void) {
+    wrs_pe_info_t pe;
+    int av_risk = 0, bad = 0;
+    char why[160];
+    unsigned int m = 0U;
+
+    mm_fill(&pe, (long)sizeof pe, 0, (long)sizeof pe);
+    pe.machine = 0x8664U;
+    pe.exec_secs = 1;
+    pe.max_frame = 8248U;
+    pe.stack_reserve = 0x100000ULL;
+    pe.stack_commit = 0x1000ULL;
+    if (wrs_pe_stack_safe(&pe, &av_risk, why, sizeof why) == 0 || av_risk != 1 ||
+        strstr(why, "0xC0000005") == 0) bad++;
+
+    /* v0.1.10 contract: 0x1000 commit with 4KiB probes (unprobed max_frame=0) PASSES */
+    pe.probed = 2;
+    pe.max_frame = 0U;
+    if (wrs_pe_stack_safe(&pe, &av_risk, why, sizeof why) != 0 || av_risk != 0 ||
+        strcmp(why, "ok") != 0) bad++;
+
+    pe.probed = 0;
+    pe.max_frame = 4096U;
+    pe.stack_commit = 0x1000ULL;
+    if (wrs_pe_stack_safe(&pe, &av_risk, why, sizeof why) == 0 || av_risk != 0 ||
+        strstr(why, "0xC00000FD") == 0) bad++;
+
+    if (wrs_want_pe_mach("win/x86_64", &m) != 0 || m != 0x8664U ||
+        wrs_want_pe_mach("win/arm64", &m) != 0 || m != 0xAA64U ||
+        wrs_want_pe_mach("lnx/x86_64", &m) == 0) bad++;
+
+    sy_printf("CHECK_WIN_RUNTIME_SMOKE\tpassed=%d\tfailed=%d\n", 4 - bad, bad);
+    return bad ? 1 : 0;
+}
+
+int main(int argc, char **argv) {
+    if (wrs_has_flag(argc, argv, "--verify-pe")) return cmd_verify_pe(argc, argv);
+    if (wrs_has_flag(argc, argv, "--extract-ape-pkg")) {
+        const char *ape = wrs_opt(argc, argv, "--ape");
+        const char *out_pkg = wrs_opt(argc, argv, "--out-pkg");
+        if (!ape || !out_pkg) { sy_eprintf("REFUSE bad-extract-ape-pkg-args\n"); return 2; }
+        return wrs_extract_ape_pkg(ape, out_pkg);
+    }
+    if (wrs_has_flag(argc, argv, "--make-neg-pe")) return cmd_make_neg_pe(argc, argv);
+    if (wrs_has_flag(argc, argv, "--check-host-arch")) return cmd_check_host_arch(argc, argv);
+    if (wrs_has_flag(argc, argv, "--seal")) return cmd_seal(argc, argv);
+    if (wrs_has_flag(argc, argv, "--judge")) return cmd_judge(argc, argv);
+    if (argc == 1 || (argc == 2 && !strcmp(argv[1], "--")) || wrs_has_flag(argc, argv, "--self-check")) {
+        return cmd_self_check();
+    }
+    sy_eprintf("usage: check-win-runtime-smoke.cx (--verify-pe | --extract-ape-pkg | --make-neg-pe | --check-host-arch | --seal | --judge | --self-check) [options]\n");
+    return 2;
+}
