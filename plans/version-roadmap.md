@@ -116,3 +116,54 @@ LOCAL 原型证据(均不支持“按大小迁移”):
 - 宿主开销三层:共享 TapeRuntime(M1 已付)、薄宿主调用表(TapeUnitSpec ~32B + 16-24B stub)、按签名 shape 复用宿主桩;每单元从 5.8-9KB 降到 200-600B(估计)。
 - 版本:v0.1.8 M1、v0.1.9 libc、v0.1.10 tape 运行时、v0.1.11 静态重复、新 v0.1.12 薄宿主表+批 A、v0.1.13 批 B+拆分 2、v0.1.14 冷 VM+剩余拆分(wall-clock share 新判据在此进入,不追溯;stay-native 行须写 re-entry 条件与复测日期)、v0.1.15 有状态 guest、v0.1.16 六目标+出口门(最早)。
 - falsifiers:批 A 任一单元 calls_per_run `>200`;shape 扫描 `>16` 或 top 8 `<80%`;第三单元边际宿主成本 `>600B`;v0.1.11 私有候选热启动 `>1.10x` 则不进入 v0.1.12。
+
+## 追加裁定(2026-11-28:v0.1.10 起重排、v0.1 终点、agy-cage 复盘跟进)
+
+- 重排(fable 2026-11-28 09:50,cc 采纳):v0.1.10 = Windows codegen 栈探测(SizeOfStackCommit 回 0x1000)随车 8 个 UNISA_* 改名;v0.1.11 = 六切片推进一阶(osx/win S2,lnx/arm64 S3,driveutil/path S2),不加新单元,任一片红不冻结;v0.1.12 = 去静态 libc 副本 19 单元(原 v0.1.9 判据);砍 B 档降级线、对调条件、modelnumber 批量入口。本节之前各行的 v0.1.11 及以后版本号整体顺延两位。
+- v0.1 终点:以 `check-v01x-exit` 全绿为完成,不以版本号;按顺延估计在 v0.1.18 前后(v0.1.13 静态重复合并、v0.1.14 薄宿主表加批 A、v0.1.15 批 B 加拆分 2、v0.1.16 冷 VM 加剩余拆分、v0.1.17 有状态 guest、v0.1.18 六目标收口加出口门);v0.1.14 重新基线时复核。之后 v0.2.x 按本文件 48-57 行循环(asm 打磨切片、nn 结构与权重)。
+- agy-cage 复盘(moltbaby docs/cx-migration-retro-20261127.md)跟进,归属与状态:
+  - (1) prd_cx_spec.md 速查、报错对照、两个服务端范例:补丁 moltbaby docs/prd_cx_spec-additions.patch(sha256 8a942a61...),v0.1.9 公开后 cc 通读后落 main。
+  - (2) 冷启动:不立项;实测带 `--` 热启动约 10 ms,慢在改后首次冷编译;spec 写明调用必须带 `--`。
+  - (3) strcasecmp/strncasecmp 暴露:v0.1.12 去 libc,与 tx_ 同类函数一起出。
+  - (4) 报错行号落 stdio.h:1:1,保留 `#line` 映射:编译器一类大改,v0.1.12 之后单独成版,排槽时先写可证伪第一步。
+  - (5) `cx doc <模块>` 自省:main 工具线,公开后派窗口,带 check 与批次。
+  - (6) 胶水包 sysx.capture、text.sb、net.httpmini 与库包准入契约(返回值惯例、公开与私有、版本声明):库包线,与 v0.1.12 的 L0 接口同批定。
+  - (7) P-384、SHA-384/512:复盘称已排 v0.1.4,实未排(ext/crypto/tls13.cx:175 仍 -ENOSYS);进 ext 加密线,公开后派窗口。
+- 增量化(fable 2026-11-28):证据按(候选二进制哈希,批次输入闭包哈希)记账加版本分支头持续资格化,冻结即晋升;其中"同一份字节的实跑证据不因提交号变化而作废"待所有者裁定,未批前一律整跑。工作单元:(a) agy-flow 证据行加闭包哈希列(待裁定);(b) agyneon3 闭包精度测量;(c) agyneon2 持续资格器(设计页 w-agyneon2/.work/version-branch-qualifier.md)。
+
+## v0.1.10 至 v0.1.18 全并行工作单元(fable 2026-11-28 11:35,cc 采纳;所有者令:一次规划全并行,滚动叠栈集成)
+
+接口先冻(截止 12:30):I1 tape-units.tsv 列与阶段词表(agyneon3);I2 slice-units.tsv 追加去向/版本槽/状态/re-entry 列(ccogweco 起草);I3 宿主调用表格式,shape 上限 16(agyneon2);I4 纯 guest 合同:入口、max_ret、budget、refuse_tag、BSS 窗比较、ZCAP+1 变异、本地 oracle 断言(agyneon3,以 path/driveutil 为范本);I5 L0 新名:sy_sha256_bytes、tx_ 大小写比较、库包准入契约(agyneon);I6 共享表协议:w/ 分支不提交派生表,只带自己的 manifest 与登记行,派生表由集成者叠栈时 derive --write(cc);I7 出口门判据与输出格式,版本门按内容命名 check-exit-<类> 加版本映射表(ccogweco);I8 executor-selection.tsv status 词表与口径(agyneon3)。
+
+| id | 版 | 目标 | 窗口 | 现在可开 |
+|---|---|---|---|---|
+| U10-1 | 10 | win 栈探测复核落 v0.1.10 | agyneon2 | 是 |
+| U10-2 | 10 | win 运行时常驻门,Windows CI 实跑 | agy-h | 是 |
+| U10-3 | 10 | seq_next_version 修复 | agyneon | 是 |
+| U10-4 | 10 | 合栈、冻结、整链 | agy-flow | v0.1.9 公开后 |
+| U11-1 | 11 | 单元表管线、lnx S3、osx/win S2,变基到 v0.1.10 头 | agyneon3 | 是 |
+| U11-2 | 11 | lnx/arm64 S3 接线(b0dcda7ea 已做) | agyneon3 | 是 |
+| U11-3/4 | 11 | path、driveutil S2 落库 | ccogweco | 是 |
+| U12-1 | 12 | 去 libc 三提交(w/agyneon2-v019 a95f0fc86、42d5ae407、bc2177979)预变基到 v0.1.10 头 | agyneon2 | 是 |
+| U12-2 | 12 | tx_ 大小写比较(strcasecmp 类) | agyneon | I5 后 |
+| U13-1 | 13 | L0 单一 sy_sha256_bytes 加先红检查 check-exit-dedup | agyneon | 是 |
+| U13-2 | 13 | 消费方切换(SHA 11、heap 17-18、cx_read/cx_write) | agyneon | U12-1 落栈后 |
+| U14-1 | 14 | 薄宿主调用表事实表、生成器、shape 扫描 | agyneon2 | I3 后 |
+| U14-2 | 14 | 批 A 纯 guest:route、modelnumber | ccogweco | I4 后 |
+| U14-3 | 14 | calls_per_run 与边际宿主成本测量 | agyneon3 | U11-1 后 |
+| U15-1 | 15 | 批 B 纯 guest:m20、m54 | ccogweco | I4 后 |
+| U15-2 | 15 | 先拆后迁批 2 拆分计划表 plans/split-plan.tsv | agy-h | 是 |
+| U15-3 | 15 | 按表拆分改源 | 待定 | U13-2 后 |
+| U16-1 | 16 | 每函数画像与 wall-clock share | agyneon | 是(重跑排队) |
+| U16-2 | 16 | sha 迁 VM 字节码、冷单元 | 待定 | U13-1、U16-1 后 |
+| U17-1 | 17 | 有状态 guest ABI 探针 | agyneon2 | U14-1 后 |
+| U18-1 | 18 | check-v01x-exit 开红加留原生清单生成器 | ccogweco | I2 后 |
+| U18-2 | 18 | 六目标执行器实测 | agy-h | U11-2 后 |
+| T1 | 线 | 预跑清单派生、写死计数改派生 | agy-flow | v0.1.9 公开后 |
+| T2 | 线 | 持续资格器 | agyneon2 | U12-1 后 |
+| T3 | 线 | 提交门成本 | agy-h、ccogweco | 是 |
+| T4 | 线 | cx doc | agyneon | 排后 |
+| T5 | 线 | P-384、SHA-384/512 | agy-h | 是 |
+| T6 | 线 | 胶水包 | ccogweco | I5 后 |
+
+集成:版本分支逐级叠(v0.1.11 基于 v0.1.10,依此类推),单元复核通过即并入,集成者重算派生表;栈顶前进跑受影响批加集成冒烟;发布仍一版一候选从最低未发版逐个冻结;晚发现缺陷修在含它的最低版本分支再逐级上合;同类缺陷第二次出现停该类后续单元先补检查。风险封顶:v0.1.10 冻结到公开仍超 2 小时则暂停 v0.1.14 以后新开发转产线;v0.1.14 以后现在只开纯 guest、测量与计划表;复核每窗口在途不超 1 件。
