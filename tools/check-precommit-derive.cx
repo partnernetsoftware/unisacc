@@ -64,7 +64,135 @@ static void cpd_sh(const char *cmd, char *out) {
     }
 }
 
-int main(void) {
+static int cpd_r1b_prep(const char *cwd, const char *rep, char *out) {
+    char cmd[2048];
+    if (cx_fmt(cmd, sizeof cmd,
+        "git init -q -b main && git config user.email t@t && git config user.name t && "
+        "mkdir -p exec/facts build tools && "
+        "cp '%s/exec/facts/derive.tsv' exec/facts/derive.tsv && "
+        "cp '%s/cxroot.tsv' cxroot.tsv && "
+        "cp '%s/tools/derive.cx' tools/derive.cx && "
+        "cp '%s/tools/precommit.cx' tools/precommit.cx && "
+        "printf 'stub\\n' > tools/gen-all-check.cx && "
+        "printf 'row0\\n' > build/links.tsv && "
+        "printf 'pkg0\\n' > build/tlib-packages.tsv && "
+        "printf 'sig0\\n' > exec/facts/signal-targets.tsv && "
+        "ln -s '%s/cx' cx && ln -s '%s/unisacc.com' unisacc.com && "
+        "git add exec/facts build tools cxroot.tsv && git commit -qm base",
+        cwd, cwd, cwd, cwd, cwd, cwd)) return 0;
+    char wcmd[2400];
+    if (cx_fmt(wcmd, sizeof wcmd, "cd '%s' && %s", rep, cmd)) return 0;
+    return ckk_sh("check-precommit-derive", wcmd, out, CPD_OUT) == 0;
+}
+
+static int cpd_run_r1b(void) {
+    long t0 = sy_now_ms();
+    char out[CPD_OUT], cwd[CPD_PW], tmp[CPD_PW], r1[CPD_PW], r2[CPD_PW], r3[CPD_PW], r4[CPD_PW], cmd[4096];
+    const char *td = sy_tmpdir();
+    const char *base_td = (td && td[0] == '/') ? td : "/tmp";
+    if (!getcwd(cwd, sizeof cwd)) cpd_abort("cwd");
+    if (sy_mkdtemp(base_td, "chk-r1b-", tmp, sizeof tmp) != 0) cpd_abort("r1b-tmp");
+    if (cx_fmt(r1, sizeof r1, "%s/r1", tmp) || cx_fmt(r2, sizeof r2, "%s/r2", tmp) ||
+        cx_fmt(r3, sizeof r3, "%s/r3", tmp) || cx_fmt(r4, sizeof r4, "%s/r4", tmp) ||
+        sy_mkdir_all(r1, 0700) || sy_mkdir_all(r2, 0700) || sy_mkdir_all(r3, 0700) || sy_mkdir_all(r4, 0700))
+        cpd_abort("r1b-dirs");
+
+    /* (1) w/ branch staging build/links.tsv -> derived-owner-refused */
+    {
+        int ok = 0;
+        if (cpd_r1b_prep(cwd, r1, out) &&
+            !cx_fmt(cmd, sizeof cmd,
+                "cd '%s' && git checkout -qb w/alice-t1 && printf 'row1\\n' >> build/links.tsv && git add build/links.tsv && "
+                "unset UNISA_CONTAINER UNISACC_CONTAINER && UNISACC_PRECOMMIT_SERIAL=1 sh ./unisacc.com '%s/tools/precommit.cx'", r1, cwd)) {
+            int rc = ckk_sh("check-precommit-derive", cmd, out, CPD_OUT);
+            ok = (rc != 0 && ckk_has(out, CPD_OUT, "derived-owner-refused") && ckk_has(out, CPD_OUT, "path=build/links.tsv"));
+        }
+        ck(ok, "r1b.w-branch-staging-build-links-refused");
+    }
+
+    /* (2) Two-commit bypass blocked at commit 1 (derived-policy-tamper) AND commit 2 (merge-base anchor) */
+    {
+        int ok1 = 0, ok2 = 0;
+        if (cpd_r1b_prep(cwd, r2, out)) {
+            if (!cx_fmt(cmd, sizeof cmd,
+                "cd '%s' && git checkout -qb w/alice-bypass && "
+                "sed -i 's/\\tintegrator$/\\twindow/g' exec/facts/derive.tsv && git add exec/facts/derive.tsv && "
+                "unset UNISA_CONTAINER UNISACC_CONTAINER && UNISACC_PRECOMMIT_SERIAL=1 sh ./unisacc.com '%s/tools/precommit.cx'", r2, cwd)) {
+                int rc = ckk_sh("check-precommit-derive", cmd, out, CPD_OUT);
+                ok1 = (rc != 0 && ckk_has(out, CPD_OUT, "derived-policy-tamper"));
+            }
+            if (!cx_fmt(cmd, sizeof cmd,
+                "cd '%s' && git commit -qm bypass1 --no-verify && "
+                "printf 'row2\\n' >> build/links.tsv && git add build/links.tsv && "
+                "unset UNISA_CONTAINER UNISACC_CONTAINER && UNISACC_PRECOMMIT_SERIAL=1 sh ./unisacc.com '%s/tools/precommit.cx'", r2, cwd)) {
+                int rc = ckk_sh("check-precommit-derive", cmd, out, CPD_OUT);
+                ok2 = (rc != 0 && ckk_has(out, CPD_OUT, "derived-owner-refused") && ckk_has(out, CPD_OUT, "path=build/links.tsv"));
+            }
+        }
+        ck(ok1 && ok2, "r1b.two-commit-bypass-blocked-at-both-commits");
+    }
+
+    /* (3) Output matching inputs_glob (build/tlib-packages.tsv) still refused */
+    {
+        int ok = 0;
+        if (cpd_r1b_prep(cwd, r3, out) &&
+            !cx_fmt(cmd, sizeof cmd,
+                "cd '%s' && git checkout -qb w/alice-glob && printf 'pkg1\\n' >> build/tlib-packages.tsv && git add build/tlib-packages.tsv && "
+                "unset UNISA_CONTAINER UNISACC_CONTAINER && UNISACC_PRECOMMIT_SERIAL=1 sh ./unisacc.com '%s/tools/precommit.cx'", r3, cwd)) {
+            int rc = ckk_sh("check-precommit-derive", cmd, out, CPD_OUT);
+            ok = (rc != 0 && ckk_has(out, CPD_OUT, "derived-owner-refused") && ckk_has(out, CPD_OUT, "path=build/tlib-packages.tsv"));
+        }
+        ck(ok, "r1b.output-matching-inputs-glob-still-refused");
+    }
+
+    /* (4) Window branch never skips generator drift check */
+    {
+        int ok = 0;
+        if (cpd_r1b_prep(cwd, r4, out) &&
+            !cx_fmt(cmd, sizeof cmd,
+                "cd '%s' && git checkout -qb w/alice-drift && "
+                "printf '#pragma unisa use sys.io\\nint main(void){sy_printf(\"DERIVE\\\\tsignal-targets\\\\tDRIFT\\\\t5\\\\nDERIVE_SUMMARY\\\\tok=0\\\\tdrift=1\\\\trefused=0\\\\tskipped=0\\\\telapsed_ms=5\\\\n\");return 1;}\\n' > tools/derive.cx && "
+                "printf 'sig1\\n' >> exec/facts/signal-targets.tsv && git add exec/facts/signal-targets.tsv && "
+                "unset UNISA_CONTAINER UNISACC_CONTAINER && UNISACC_PRECOMMIT_SERIAL=1 sh ./unisacc.com '%s/tools/precommit.cx'", r4, cwd)) {
+            int rc = ckk_sh("check-precommit-derive", cmd, out, CPD_OUT);
+            ok = (rc != 0 && ckk_has(out, CPD_OUT, "derived-table-drift"));
+        }
+        ck(ok, "r1b.window-branch-never-skips-generator-drift-check");
+    }
+
+    /* (5) Detached HEAD + worktree derive.tsv tamper fails closed */
+    {
+        int ok = 0;
+        if (!cx_fmt(cmd, sizeof cmd,
+            "cd '%s' && git checkout -q --detach HEAD && "
+            "sed -i 's/\\tintegrator$/\\twindow/g' exec/facts/derive.tsv && "
+            "printf 'row3\\n' >> build/links.tsv && git add build/links.tsv && "
+            "unset UNISA_CONTAINER UNISACC_CONTAINER && UNISACC_PRECOMMIT_SERIAL=1 sh ./unisacc.com '%s/tools/precommit.cx'", r1, cwd)) {
+            int rc = ckk_sh("check-precommit-derive", cmd, out, CPD_OUT);
+            ok = (rc != 0 && ckk_has(out, CPD_OUT, "derived-owner-refused"));
+        }
+        ck(ok, "r1b.detached-head-and-worktree-tamper-fail-closed");
+    }
+
+    /* (6) Independent generator discovery in chain-ready --judge genall catches drifted total=99 */
+    {
+        char df[CPD_PW]; int ok = 0;
+        const char *bad_cnt = "GEN_ALL_SUMMARY\ttotal=99\tpass=99\tdiff=0\terror=0\tuncovered=2\tms=10\n";
+        if (!cx_fmt(df, sizeof df, "%s/fake-genall.tsv", tmp) && !cx_write(df, bad_cnt, strlen(bad_cnt)) &&
+            !cx_fmt(cmd, sizeof cmd, "cd '%s' && sh ./unisacc.com tools/chain-ready.cx -- --judge genall '%s' 0", cwd, df)) {
+            int rc = ckk_sh("check-precommit-derive", cmd, out, CPD_OUT);
+            ok = (rc == 0 && ckk_has(out, CPD_OUT, "cgac-generator-count-drift"));
+        }
+        ck(ok, "r1b.chain-ready-independent-generator-discovery-catches-drift");
+    }
+
+    { char *rmv[] = {"rm", "-rf", tmp, 0}; (void)ck_run(rmv, out, CPD_OUT); }
+    printf("CHECK_R1_DERIVED_GATE\tok=%d\tfailed=%d\tms=%ld\n", ck_assertions() - ck_failures(), ck_failures(), sy_now_ms() - t0);
+    return ck_failures() ? 1 : 0;
+}
+
+int main(int argc, char **argv) {
+    if (argc > 1 && tx_eqz(argv[1], "--r1b")) return cpd_run_r1b();
     long t0 = sy_now_ms();
     char out[CPD_OUT], cwd[CPD_PW], work[CPD_PW], repo[CPD_PW], repo2[CPD_PW], cmd[8192], p[CPD_PW];
     const char *td = sy_tmpdir();
