@@ -1737,24 +1737,76 @@ static int pd_material_content_sha(const char *art_path, char out65[65]) {
     return -1;
 }
 
-static void pd_source_tree_id(const char *eff_root, char out65[65]) {
-    char why[128];
-    char *av[] = {"git", "-C", (char *)(eff_root ? eff_root : "."), "rev-parse", "--verify", "HEAD^{tree}", 0};
-    np_result r = {0};
-    int tr = np_run(av, 0, 0, 10, &r, why, sizeof why);
-    if (!tr && r.rc == 0 && r.out && r.outn >= 40) {
-        long n = 0;
-        while (n < (long)r.outn && n < 64 && r.out[n] != '\n' && r.out[n] != '\r') n++;
-        mm_copy(out65, 65, r.out, (size_t)n);
-        out65[n] = 0;
-        np_free(&r);
-        return;
+static void pd_source_tree_id(const char *eff_root, const char *out_dir, char out65[65]) {
+    char why[128], revf[PD_PW];
+    /* 1. Frozen prerun archive carries out_dir/frozen-source.rev (plain tree without .git) */
+    if (out_dir && out_dir[0] && !cx_fmt(revf, sizeof revf, "%s/frozen-source.rev", out_dir)) {
+        unsigned char *rb = 0;
+        int64_t rn = 0;
+        if (sy_read_file(revf, &rb, &rn, 256) == 0 && rb && rn >= 7) {
+            long n = 0;
+            while (n < (long)rn && n < 64 && rb[n] != '\n' && rb[n] != '\r') n++;
+            if (n >= 7) {
+                mm_copy(out65, 65, (const char *)rb, (size_t)n);
+                out65[n] = 0;
+                mm_free(rb);
+                return;
+            }
+        }
+        if (rb) mm_free(rb);
     }
-    np_free(&r);
+    /* 2. Git checkout root */
+    {
+        char *av[] = {"git", "-C", (char *)(eff_root ? eff_root : "."), "rev-parse", "--verify", "HEAD^{tree}", 0};
+        np_result r = {0};
+        int tr = np_run(av, 0, 0, 10, &r, why, sizeof why);
+        if (!tr && r.rc == 0 && r.out && r.outn >= 40) {
+            long n = 0;
+            while (n < (long)r.outn && n < 64 && r.out[n] != '\n' && r.out[n] != '\r') n++;
+            mm_copy(out65, 65, r.out, (size_t)n);
+            out65[n] = 0;
+            np_free(&r);
+            return;
+        }
+        np_free(&r);
+    }
+    /* 3. Plain tree without .git or frozen-source.rev: hash actual key source file contents */
+    {
+        static const char *kfiles[5] = {
+            "tools/affected.cx",
+            "src/driveargs_m1.cx",
+            "cx/driver/driveargs_m1_impl.cx",
+            "cx/driver/stream_s1_m1.cx",
+            "build/chain-facts.tsv"
+        };
+        char acc[1024], fp[PD_PW], fsha[65];
+        long at = 0;
+        int i, any = 0;
+        acc[0] = 0;
+        for (i = 0; i < 5; i++) {
+            if (eff_root && !cx_fmt(fp, sizeof fp, "%s/%s", eff_root, kfiles[i]) &&
+                pd_file_sha256_hex(fp, fsha) == 0) {
+                char row[96];
+                if (!cx_fmt(row, sizeof row, "%d:%s\n", i, fsha)) {
+                    long rn = tx_len(row, (long)sizeof row);
+                    if (at + rn < (long)sizeof acc) {
+                        mm_copy(acc + at, (size_t)((long)sizeof acc - at), row, (size_t)rn);
+                        at += rn;
+                        acc[at] = 0;
+                        any = 1;
+                    }
+                }
+            }
+        }
+        if (any) {
+            cx_sha256_hex(acc, (size_t)at, out65);
+            return;
+        }
+    }
     cx_sha256_hex(eff_root ? eff_root : "", (size_t)tx_len(eff_root ? eff_root : "", 4096), out65);
 }
 
-static int pd_entry_link_identity(const char *eff_root, const char *cand, const char *art_path, char out65[65]) {
+static int pd_entry_link_identity(const char *eff_root, const char *out_dir, const char *cand, const char *art_path, char out65[65]) {
     char cand_sha[65], tree_id[65], mat_sha[65], buf[512];
     if (pd_material_content_sha(art_path, mat_sha) != 0) return -1;
     if (cand && cand[0] && !tx_eqz(cand, "-") && sy_exists(cand) == 1) {
@@ -1762,13 +1814,13 @@ static int pd_entry_link_identity(const char *eff_root, const char *cand, const 
     } else {
         (void)cx_fmt(cand_sha, sizeof cand_sha, "none");
     }
-    pd_source_tree_id(eff_root, tree_id);
+    pd_source_tree_id(eff_root, out_dir, tree_id);
     if (cx_fmt(buf, sizeof buf, "ENTRY_LINK_V2\ncand=%s\ntree=%s\nmat=%s\n", cand_sha, tree_id, mat_sha)) return -1;
     cx_sha256_hex(buf, (size_t)tx_len(buf, (long)sizeof buf), out65);
     return 0;
 }
 
-static int pd_verify_entry_link_done(const char *donep, const char *eff_root, const char *cand) {
+static int pd_verify_entry_link_done(const char *donep, const char *eff_root, const char *out_dir, const char *cand) {
     unsigned char *b = 0;
     int64_t n = 0;
     char rec_id[128], rec_path[PD_PW], cur_id[65];
@@ -1797,7 +1849,7 @@ static int pd_verify_entry_link_done(const char *donep, const char *eff_root, co
         rec_path[plen] = 0;
     }
     mm_free(b);
-    if (pd_entry_link_identity(eff_root, cand, rec_path, cur_id) != 0) return 0;
+    if (pd_entry_link_identity(eff_root, out_dir, cand, rec_path, cur_id) != 0) return 0;
     return tx_eqz(rec_id, cur_id) ? 1 : 0;
 }
 
@@ -1811,7 +1863,7 @@ static int pd_prepare_entry_link(const char *eff_root, const char *cand, const c
     if (cx_fmt(donep, sizeof donep, "%s/done.prepare-entry-link", out_dir) ||
         cx_fmt(outp, sizeof outp, "%s/prepare-entry-link.tsv", out_dir)) return -1;
     if (resume && sy_exists(donep) == 1) {
-        if (pd_verify_entry_link_done(donep, eff_root, cand)) return 0;
+        if (pd_verify_entry_link_done(donep, eff_root, out_dir, cand)) return 0;
         printf("PRERUN_PREPARE_MATERIAL\tmaterial=entry-link\tresume=invalidated\n");
         fflush(stdout);
     }
@@ -1845,7 +1897,7 @@ static int pd_prepare_entry_link(const char *eff_root, const char *cand, const c
                sy_now_ms() - started);
         fflush(stdout);
         if (rc == 0 && parsed == 0) {
-            if (pd_entry_link_identity(eff_root, cand, art_path, full_id) != 0) return -1;
+            if (pd_entry_link_identity(eff_root, out_dir, cand, art_path, full_id) != 0) return -1;
             if (cx_fmt(done_line, sizeof done_line, "ENTRY_LINK_MATERIAL\tREADY\tid=%s\tpath=%s\n", full_id, art_path)) return -1;
             if (sy_write_file(donep, done_line, tx_len(done_line, (long)sizeof done_line), 0644) != 0) return -1;
             return 0;
