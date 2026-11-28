@@ -203,43 +203,115 @@ static int exists_tool(const char *nm) {
     return 0;
 }
 
-/* batches.tsv:id=col0,source=col3,entry=col8 */
+/* batches.tsv:id=col0,source=col3,entry=col8 -- single-pass hash index preserving exact batches.tsv row order */
 static char *bt; static long btn;
-static void batch_ids(const char *p1, const char *p2, char *out, long cap) {
-    long ls = 0, o = 0;
-    out[0] = 0;
+#define BI_SLOTS 4096
+typedef struct {
+    long path_off, path_len;
+    long id_off, id_len;
+    int row_idx;
+    int next;
+} BiEnt;
+static int bi_head[BI_SLOTS];
+static BiEnt *bi_ents;
+static int bi_nent, bi_cap;
+
+static unsigned long long bi_hash(const char *p, long n) {
+    unsigned long long h = 1469598103934665603ULL;
+    for (long i = 0; i < n; i++) { h ^= (unsigned char)p[i]; h *= 1099598103ULL; }
+    return h;
+}
+
+static void bi_add(long poff, long plen, long ioff, long ilen, int ridx) {
+    if (plen <= 0 || ilen <= 0) return;
+    if (bi_nent >= bi_cap) {
+        int ncap = bi_cap ? bi_cap * 2 : 16384;
+        BiEnt *nb = (BiEnt *)mm_alloc((size_t)ncap * sizeof(BiEnt));
+        if (!nb) { fprintf(stderr, "tool-index: REFUSE oom\n"); exit(2); }
+        if (bi_ents && bi_nent > 0) mm_copy(nb, (long)((size_t)ncap * sizeof(BiEnt)), bi_ents, (long)((size_t)bi_nent * sizeof(BiEnt)));
+        if (bi_ents) mm_free(bi_ents);
+        bi_ents = nb;
+        bi_cap = ncap;
+    }
+    unsigned long long h = bi_hash(bt + poff, plen) % BI_SLOTS;
+    BiEnt *e = &bi_ents[bi_nent];
+    e->path_off = poff; e->path_len = plen;
+    e->id_off = ioff; e->id_len = ilen;
+    e->row_idx = ridx;
+    e->next = bi_head[h];
+    bi_head[h] = bi_nent++;
+}
+
+static void bi_build(void) {
+    long ls = 0;
+    int ridx = 0;
+    for (int i = 0; i < BI_SLOTS; i++) bi_head[i] = -1;
+    bi_nent = 0;
     while (ls < btn) {
         long le = ls, c = 0, cs[16], k;
         while (le < btn && bt[le] != '\n') le++;
         cs[0] = ls;
         for (k = ls; k < le && c < 14; k++) if (bt[k] == '\t') cs[++c] = k + 1;
         if (c >= 8 && ls > 0) {
-            long s_e = cs[4] - 1, e_s = cs[8], e_e = le;
-            long a = cs[3];
-            int hit = 0; long q;
-            for (q = 0; q < 2; q++) {
-                const char *p = q ? p2 : p1; long pn = tx_len(p, 400);
-                if (!pn) continue;
-                if (s_e - a == pn && mm_same(bt + a, p, pn)) hit = 1;
-                if (e_e - e_s == pn && mm_same(bt + e_s, p, pn)) hit = 1;
+            long s_s = cs[3], s_e = cs[4] - 1;
+            long e_s = cs[8], e_e = (c >= 9) ? (cs[9] - 1) : le;
+            long idn = cs[1] - 1 - cs[0];
+            bi_add(s_s, s_e - s_s, ls, idn, ridx);
+            if (e_e - e_s != s_e - s_s || !mm_same(bt + e_s, bt + s_s, e_e - e_s)) {
+                bi_add(e_s, e_e - e_s, ls, idn, ridx);
             }
-            if (hit) {
-                long idn = cs[1] - 1 - cs[0], ex = 0;
-                /* 去重:已出现的 id 跳过 */
-                long z = 0;
-                while (z < o) {
-                    long ze = z; while (ze < o && out[ze] != ',') ze++;
-                    if (ze - z == idn && mm_same(out + z, bt + ls, idn)) ex = 1;
-                    z = ze + 1;
-                }
-                if (!ex && o + idn + 2 < cap) {
-                    if (o) out[o++] = ',';
-                    mm_copy(out + o, cap - o, bt + ls, idn); o += idn; out[o] = 0;
-                }
-            }
+            ridx++;
         }
         ls = le + 1;
     }
+}
+
+static void batch_ids(const char *p1, const char *p2, char *out, long cap) {
+    int hcap = 256, nh = 0;
+    int *hits = (int *)mm_alloc((size_t)hcap * sizeof(int));
+    if (!hits) { fprintf(stderr, "tool-index: REFUSE oom\n"); exit(2); }
+    out[0] = 0;
+    for (int q = 0; q < 2; q++) {
+        const char *p = q ? p2 : p1;
+        long pn = tx_len(p, 400);
+        if (!pn) continue;
+        unsigned long long h = bi_hash(p, pn) % BI_SLOTS;
+        for (int e = bi_head[h]; e >= 0; e = bi_ents[e].next) {
+            if (bi_ents[e].path_len == pn && mm_same(bt + bi_ents[e].path_off, p, pn)) {
+                if (nh >= hcap) {
+                    int ncap = hcap * 2;
+                    int *nhits = (int *)mm_alloc((size_t)ncap * sizeof(int));
+                    if (!nhits) { fprintf(stderr, "tool-index: REFUSE oom\n"); exit(2); }
+                    mm_copy(nhits, (long)((size_t)ncap * sizeof(int)), hits, (long)((size_t)nh * sizeof(int)));
+                    mm_free(hits);
+                    hits = nhits;
+                    hcap = ncap;
+                }
+                hits[nh++] = e;
+            }
+        }
+    }
+    /* Sort hits by row_idx ascending to match exact original linear scan order */
+    for (int i = 1; i < nh; i++) {
+        int v = hits[i], rv = bi_ents[v].row_idx, j = i - 1;
+        while (j >= 0 && bi_ents[hits[j]].row_idx > rv) { hits[j + 1] = hits[j]; j--; }
+        hits[j + 1] = v;
+    }
+    long o = 0;
+    for (int i = 0; i < nh; i++) {
+        BiEnt *e = &bi_ents[hits[i]];
+        long idn = e->id_len, ex = 0, z = 0;
+        while (z < o) {
+            long ze = z; while (ze < o && out[ze] != ',') ze++;
+            if (ze - z == idn && mm_same(out + z, bt + e->id_off, idn)) ex = 1;
+            z = ze + 1;
+        }
+        if (!ex && o + idn + 2 < cap) {
+            if (o) out[o++] = ',';
+            mm_copy(out + o, cap - o, bt + e->id_off, idn); o += idn; out[o] = 0;
+        }
+    }
+    mm_free(hits);
 }
 
 static char *build_tools(long *outn) {
@@ -251,6 +323,7 @@ static char *build_tools(long *outn) {
     bt = 0; btn = 0;
     if (!cx_fmt(path, sizeof path, "%s/tests/batches.tsv", root)) bt = slurp(path, &btn);
     if (!bt) { bt = mm_alloc(1); bt[0] = 0; btn = 0; }
+    bi_build();
     for (ii = 0; ii < nf; ii++) {
         int f = order[ii]; long k, lines = 0;
         char sum[1200], usage[600], chk[300], p1[300], p2[300], ids[1200], num[24];

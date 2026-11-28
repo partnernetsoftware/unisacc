@@ -163,6 +163,32 @@ int main(int argc, char **argv) {
     ck(rc == 2, "usage-rc2");
     rc = gen("--check", 0, 0);
     ck(rc == 0 && last && lastn > 10 && tx_prefix(last, (long)lastn, "IFACE_HASH\tok", 13), "checked-in-table-current");
+    {
+        /* full vs incremental byte-identical on repo and after single-input fixture change */
+        char tf[4400], ti[4400];
+        cx_fmt(tf, sizeof tf, "%s/repo-full.out", work);
+        cx_fmt(ti, sizeof ti, "%s/repo-inc.out", work);
+        char *vf[] = {"sh", prod, "tools/iface-hash.cx", "--", "--full", "--write", "--table", tf, 0};
+        char *vi[] = {"sh", prod, "tools/iface-hash.cx", "--", "--write", "--table", ti, 0};
+        int r1 = cx_runv_timeout(vf, 45, 0, 0);
+        int r2 = cx_runv_timeout(vi, 45, 0, 0);
+        size_t n1 = 0, n2 = 0;
+        char *b1 = cx_read(tf, &n1), *b2 = cx_read(ti, &n2);
+        ck(r1 == 0 && r2 == 0 && b1 && b2 && n1 == n2 && mm_same(b1, b2, (long)n1), "repo-full-eq-incremental");
+        mm_free(b1); mm_free(b2);
+
+        put(dir("incfx"), "a.tsv", "g\tint g(void);\t1\tx.cx\n");
+        put(dir("incfx"), "b.tsv", "f\tint f(int a);\t1\ty.cx\n");
+        rc = gen("--write", dir("incfx"), ti);
+        put(dir("incfx"), "b.tsv", "f\tint f(long a);\t1\ty.cx\n");
+        char *vf2[] = {"sh", prod, "tools/iface-hash.cx", "--", "--full", "--write", "--api", dir("incfx"), "--table", tf, 0};
+        char *vi2[] = {"sh", prod, "tools/iface-hash.cx", "--", "--write", "--api", dir("incfx"), "--table", ti, 0};
+        r1 = cx_runv_timeout(vf2, 45, 0, 0);
+        r2 = cx_runv_timeout(vi2, 45, 0, 0);
+        b1 = cx_read(tf, &n1); b2 = cx_read(ti, &n2);
+        ck(rc == 0 && r1 == 0 && r2 == 0 && b1 && b2 && n1 == n2 && mm_same(b1, b2, (long)n1), "fixture-single-input-change-full-eq-incremental");
+        mm_free(b1); mm_free(b2);
+    }
 
     sy_printf("IFACE_HASH_CHECK\tok=%d\tfailed=%d\n", nok, nfail);
     return nfail ? 1 : 0;

@@ -17,36 +17,81 @@
 #pragma unisa use mem.bytes
 #pragma unisa use cxlib.netpack
 #pragma unisa use sys.sha
-#pragma unisa use runtime.codec
-#pragma unisa use runtime.model_number
-#pragma unisa use runtime.model_decode
-#pragma unisa use runtime.package_decode
-#pragma unisa use runtime.package_lifetime
-#pragma unisa use compiler.bindstage
 
 static char root[4096], why[512], census_compiler[4400];
-static void *pm_alloc(void *p, size_t n) { return realloc(p, n ? n : 1); }
+static int pm_full = 0;
 static void die(const char *s) { fprintf(stderr, "product-map: REFUSE %s\n", s); exit(2); }
 static void join(char *p, size_t c, const char *a, const char *b) {
     if (cx_fmt(p, c, "%s/%s", a, b)) die("path");
 }
 
-static long dir_bytes(const char *rel) {
-    char *v[] = {"git", "ls-files", "-z", "--", (char *)rel, 0};
+/* Single git ls-files snapshot for all tracked paths product-map inspects. */
+typedef struct {
+    char *path;
+    long size;
+    int is_reg;
+    int hashed;
+    char sha[65];
+} PmTracked;
+static PmTracked *pm_tr = 0;
+static int pm_ntr = 0;
+static char *pm_tr_buf = 0;
+
+static void pm_load_tracked(void) {
+    char *v[] = {
+        "git", "ls-files", "-z", "--",
+        "cx/sys", "cx/mem", "cx/text",
+        "cx/core", "cx/driver", "cx/runtime", "cx/compiler",
+        "src/host.cx", "src/packmodel.cx", "src/executor.cx", "src/stages.cx", "src/drive.cx", "src/bind.cx",
+        "exec/pipeline/image-stages.tsv", "weights/gold", "tools/source-package.cx",
+        0
+    };
     np_result r = {0};
-    long sum = 0;
     if (np_run(v, root, 0, 20, &r, why, sizeof why) || r.rc) { np_free(&r); die("git-ls-files"); }
+    int cnt = 0;
+    for (size_t at = 0; at < r.outn;) {
+        size_t z = strlen(r.out + at);
+        cnt++;
+        at += z + 1;
+    }
+    pm_tr_buf = r.out;
+    r.out = 0;
+    np_free(&r);
+    pm_tr = (PmTracked *)calloc((size_t)(cnt + 1), sizeof(PmTracked));
+    if (!pm_tr) die("tracked-oom");
+    pm_ntr = 0;
     size_t at = 0;
-    while (at < r.outn) {
-        const char *s = r.out + at;
+    for (int i = 0; i < cnt; i++) {
+        char *s = pm_tr_buf + at;
         size_t z = strlen(s);
         char full[4400];
         struct stat st;
         join(full, sizeof full, root, s);
-        if (!lstat(full, &st) && S_ISREG(st.st_mode)) sum += (long)st.st_size;
+        pm_tr[pm_ntr].path = s;
+        if (!lstat(full, &st) && S_ISREG(st.st_mode)) {
+            pm_tr[pm_ntr].is_reg = 1;
+            pm_tr[pm_ntr].size = (long)st.st_size;
+        } else {
+            pm_tr[pm_ntr].is_reg = 0;
+            pm_tr[pm_ntr].size = 0;
+        }
+        pm_tr[pm_ntr].hashed = 0;
+        pm_ntr++;
         at += z + 1;
     }
-    np_free(&r);
+}
+
+static int pm_match_prefix(const char *s, const char *p) {
+    if (!p) return 0;
+    size_t pl = strlen(p);
+    return !strncmp(s, p, pl) && (s[pl] == 0 || s[pl] == '/');
+}
+
+static long dir_bytes(const char *rel) {
+    long sum = 0;
+    for (int i = 0; i < pm_ntr; i++) {
+        if (pm_tr[i].is_reg && pm_match_prefix(pm_tr[i].path, rel)) sum += pm_tr[i].size;
+    }
     return sum;
 }
 
@@ -118,11 +163,58 @@ static void parse_ape(const char *text) {
     }
 }
 
+static int pm_under(const char *p, const char *base) {
+    size_t bn = strlen(base);
+    return bn > 0 && !strncmp(p, base, bn) && (p[bn] == '/' || p[bn] == 0);
+}
+
+static int pm_ape_cache_key(const char *ape, const char *tool, char key[65]) {
+    char cwd[4400], tmp[4400], as[65], ts[65], gs[65], cs[65], blk[320];
+    if (pm_full) return 1;
+    if (sy_realpath(".", cwd, sizeof cwd) < 0 || sy_realpath(sy_tmpdir(), tmp, sizeof tmp) < 0) return 1;
+    if (pm_under(tmp, root) || pm_under(tmp, cwd)) return 1;
+    size_t an = 0, tn = 0, gn = 0, cn = 0;
+    char *ab = cx_read(ape, &an);
+    char *tb = cx_read(tool, &tn);
+    char *gb = cx_read("tools/product-map.cx", &gn);
+    char *cb = cx_read(census_compiler, &cn);
+    int bad = (!ab || !tb || !gb || !cb ||
+               sy_sha256_hex(ab, (long)an, as) ||
+               sy_sha256_hex(tb, (long)tn, ts) ||
+               sy_sha256_hex(gb, (long)gn, gs) ||
+               sy_sha256_hex(cb, (long)cn, cs));
+    if (ab) free(ab);
+    if (tb) free(tb);
+    if (gb) free(gb);
+    if (cb) free(cb);
+    if (bad) return 1;
+    if (cx_fmt(blk, sizeof blk, "pm-ape-v2\n%s\n%s\n%s\n%s\n", as, ts, gs, cs)) return 1;
+    return sy_sha256_hex(blk, (long)strlen(blk), key);
+}
+
 static void ape_census(void) {
-    char ape[4400], tool[4400];
+    char ape[4400], tool[4400], cdir[4400], cfile[4400], ckey[65];
     { char entry[4400];join(entry,sizeof entry,root,"unisacc.com");
       if(sy_realpath(entry,ape,sizeof ape)<0)die("product-path"); }
     join(tool, sizeof tool, root, "tools/logic-distribution.cx");
+    ckey[0] = 0;
+    if (!pm_full && !pm_ape_cache_key(ape, tool, ckey)) {
+        if (!cx_fmt(cdir, sizeof cdir, "%s/unisacc-pm-inc", sy_tmpdir()) &&
+            !cx_fmt(cfile, sizeof cfile, "%s/ape-%s.txt", cdir, ckey)) {
+            size_t cn = 0;
+            char *cb = cx_read(cfile, &cn);
+            if (cb && cn > 0) {
+                parse_ape(cb);
+                free(cb);
+                int all = 1;
+                for (int i = 0; i < 6; i++) if (!slices[i].seen) all = 0;
+                if (all) return;
+                slice_init();
+            } else if (cb) {
+                free(cb);
+            }
+        }
+    }
     {
         char *v[] = {"sh", census_compiler, tool, "--", "--ape", ape, 0};
         np_result r = {0};
@@ -132,6 +224,13 @@ static void ape_census(void) {
             die("ape-census");
         }
         parse_ape(r.out ? r.out : "");
+        if (!pm_full && ckey[0] && r.out && r.outn > 0) {
+            if (!cx_fmt(cdir, sizeof cdir, "%s/unisacc-pm-inc", sy_tmpdir()) &&
+                !sy_mkdir_all(cdir, 0700) &&
+                !cx_fmt(cfile, sizeof cfile, "%s/ape-%s.txt", cdir, ckey)) {
+                (void)sy_write_atomic(cfile, r.out, (int64_t)r.outn, 0600);
+            }
+        }
         np_free(&r);
     }
 }
@@ -142,42 +241,35 @@ static void ape_census(void) {
  * will contain the table itself, which made every product-path commit need a second one). Unrelated commits
  * do not change it; any byte change in a tracked input does, including a same-size one. */
 static void content_id(char id[65], const char *p1, const char *p2, const char *p3, const char *p4) {
-    char *v[12] = {"git", "ls-files", "-z", "--", 0};
-    int k = 4, files = 0;
-    np_result r = {0};
-    size_t at = 0;
+    int files = 0;
     char acc[65];
-    if (p1) v[k++] = (char *)p1;
-    if (p2) v[k++] = (char *)p2;
-    if (p3) v[k++] = (char *)p3;
-    if (p4) v[k++] = (char *)p4;
-    v[k] = 0;
-    if (np_run(v, root, 0, 20, &r, why, sizeof why) || r.rc) { np_free(&r); die("id-ls-files"); }
     if (sy_sha256_hex("", 0, acc)) die("id-sha");
-    while (at < r.outn) {
-        const char *s = r.out + at;
-        size_t z = strlen(s), n = 0, bn;
-        char full[4400], fh[65], blk[4700];
-        struct stat st;
-        join(full, sizeof full, root, s);
-        if (lstat(full, &st) || !S_ISREG(st.st_mode)) {
-            /* tracked but absent or not a regular file: a fixed marker, so the change is still visible */
-            if (cx_fmt(fh, sizeof fh, "%s", "NOT-A-REGULAR-FILE")) die("id-mark");
-        } else if (st.st_size == 0) {
-            if (sy_sha256_hex("", 0, fh)) die("id-sha");
-        } else {
-            char *c = cx_read(full, &n);
-            if (!c) die("id-read");
-            if (sy_sha256_hex(c, n, fh)) die("id-sha");
-            free(c);
+    for (int i = 0; i < pm_ntr; i++) {
+        const char *s = pm_tr[i].path;
+        if (!pm_match_prefix(s, p1) && !pm_match_prefix(s, p2) &&
+            !pm_match_prefix(s, p3) && !pm_match_prefix(s, p4)) continue;
+        if (!pm_tr[i].hashed) {
+            if (!pm_tr[i].is_reg) {
+                if (cx_fmt(pm_tr[i].sha, sizeof pm_tr[i].sha, "%s", "NOT-A-REGULAR-FILE")) die("id-mark");
+            } else if (pm_tr[i].size == 0) {
+                if (sy_sha256_hex("", 0, pm_tr[i].sha)) die("id-sha");
+            } else {
+                char full[4400];
+                size_t n = 0;
+                join(full, sizeof full, root, s);
+                char *c = cx_read(full, &n);
+                if (!c) die("id-read");
+                if (sy_sha256_hex(c, n, pm_tr[i].sha)) die("id-sha");
+                free(c);
+            }
+            pm_tr[i].hashed = 1;
         }
-        if (cx_fmt(blk, sizeof blk, "%s\n%s\n%s\n", acc, s, fh)) die("id-blk");
-        bn = strlen(blk);
+        char blk[4700];
+        if (cx_fmt(blk, sizeof blk, "%s\n%s\n%s\n", acc, s, pm_tr[i].sha)) die("id-blk");
+        size_t bn = strlen(blk);
         if (sy_sha256_hex(blk, bn, acc)) die("id-sha");
         files++;
-        at += z + 1;
     }
-    np_free(&r);
     if (!files) die("id-no-tracked-input");
     if (mm_copy(id, 65, acc, 65)) die("id");
 }
@@ -345,34 +437,24 @@ static int gidx(const char *n) {
 }
 
 static void load_gold(void) {
-    char *v[] = {"git", "ls-files", "-z", "--", "weights/gold", 0};
-    np_result r = {0};
-    size_t at = 0;
-    if (np_run(v, root, 0, 20, &r, why, sizeof why) || r.rc) { np_free(&r); die("gold-ls"); }
     ng = 0;
     gold_total = 0;
-    while (at < r.outn) {
-        const char *s = r.out + at;
-        size_t z = strlen(s);
+    for (int i = 0; i < pm_ntr; i++) {
+        const char *s = pm_tr[i].path;
+        if (!pm_match_prefix(s, "weights/gold")) continue;
         const char *b = strrchr(s, '/');
-        size_t bl;
-        char full[4400];
-        struct stat st;
         b = b ? b + 1 : s;
-        bl = strlen(b);
+        size_t bl = strlen(b);
         if (bl > 4 && !strcmp(b + bl - 4, ".tsv")) {
             if (ng >= MAXG || bl - 4 >= sizeof gname[0]) die("gold-many");
             if (mm_copy(gname[ng], (long)sizeof gname[ng], b, (long)(bl - 4))) die("gold-name");
             gname[ng][bl - 4] = 0;
-            join(full, sizeof full, root, s);
-            if (lstat(full, &st) || !S_ISREG(st.st_mode)) die("gold-stat");
-            gsize[ng] = (long)st.st_size;
+            if (!pm_tr[i].is_reg) die("gold-stat");
+            gsize[ng] = pm_tr[i].size;
             gold_total += gsize[ng];
             ng++;
         }
-        at += z + 1;
     }
-    np_free(&r);
 }
 
 static int count_rows(const char *rel) {
@@ -498,38 +580,18 @@ static const char *fl[7] = {"e2", "e1", "e3", "e4", "prune", "lower", "elf"};
 static void census_package(void) {
     unsigned char *s;
     size_t n;
-    CxPackageDecode d = {0};
-    char ape[4400], tool[4400];
+    char tool[4400];
     int i, k;
     np_result r = {0};
     const char *p;
     s = (unsigned char *)cx_read(pkgpath, &n);
     if (!s) die("package-read");
     if (sy_sha256_hex(s, n, pkg_sha)) die("package-sha");
-    d.allocate = pm_alloc;
-    d.release = free;
-    if (cxpk_decode(&d, s, (long)n)) die("package-decode(bare package expected)");
-    for (i = 0; i < 7; i++) stage_nm[i] = 0;
-    for (i = 0; i < d.package.s; i++) {
-        for (k = 0; k < 7; k++) {
-            if (!strcmp(d.package.stages[i].name, fl[k])) {
-                int j, dup = 0, m = d.package.stages[i].model;
-                for (j = 0; j < stage_nm[k]; j++) if (stage_models[k][j] == m) dup = 1;
-                if (!dup) {
-                    if (stage_nm[k] >= MAXM) die("stage-models");
-                    stage_models[k][stage_nm[k]++] = m;
-                }
-            }
-        }
-    }
-    d.package.file = 0;
-    cxpl_release(&d.package, free);
     free(s);
-    { char entry[4400];join(entry,sizeof entry,root,"unisacc.com");
-      if(sy_realpath(entry,ape,sizeof ape)<0)die("product-path"); }
+    for (i = 0; i < 7; i++) stage_nm[i] = 0;
     join(tool, sizeof tool, root, "tools/model-program-census.cx");
     {
-        char *v[] = {"sh", census_compiler, tool, "--", "--package", pkgpath, 0};
+        char *v[] = {"sh", census_compiler, tool, "--", "--with-stages", "--package", pkgpath, 0};
         if (np_run(v, root, 0, 50, &r, why, sizeof why) || r.rc) { np_free(&r); die("package-census"); }
     }
     nmod = 0;
@@ -540,7 +602,22 @@ static void census_package(void) {
         if (z >= sizeof line) z = sizeof line - 1;
         if (mm_copy(line, sizeof line, p, (long)z)) die("line");
         line[z] = 0;
-        if (!strncmp(line, "MODEL\t", 6)) {
+        if (!strncmp(line, "STAGE\t", 6)) {
+            char sname[32];
+            int m = 0;
+            if (sscanf(line, "STAGE\t%31[^\t]\t%d", sname, &m) == 2) {
+                for (k = 0; k < 7; k++) {
+                    if (!strcmp(sname, fl[k])) {
+                        int j, dup = 0;
+                        for (j = 0; j < stage_nm[k]; j++) if (stage_models[k][j] == m) dup = 1;
+                        if (!dup) {
+                            if (stage_nm[k] >= MAXM) die("stage-models");
+                            stage_models[k][stage_nm[k]++] = m;
+                        }
+                    }
+                }
+            }
+        } else if (!strncmp(line, "MODEL\t", 6)) {
             long ix = 0, raw = 0, hd = 0, cn = 0, pr = 0, sl = 0, stored = 0;
             char kd = 0;
             if (sscanf(line, "MODEL\t%ld\tkind=%c\tstored=%ld\traw=%ld\traw_header=%ld\traw_constants=%ld\traw_action_program=%ld\traw_selector_bytes=%ld",
@@ -621,32 +698,36 @@ static void emit_stage_rows(char *buf, size_t cap, size_t *at) {
         }
     }
     content_id(rev, "exec/pipeline/image-stages.tsv", "weights/gold", 0, 0);
-    for (j = 0; j < 7; j++) {
-        char in[40] = "", out2[40] = "", mf[40] = "", nm[16];
+    {
         char *t = 0;
         size_t m2;
         join(ip, sizeof ip, root, "exec/pipeline/image-stages.tsv");
         t = cx_read(ip, &m2);
         if (!t) die("stages");
-        {
+        for (j = 0; j < 7; j++) {
+            char in[40] = "", out2[40] = "", mf[40] = "", nm[16];
             char *q = t;
             while (q && *q) {
                 char *nl = strchr(q, '\n');
                 size_t kl = strlen(fl[j]);
                 if (!strncmp(q, fl[j], kl) && q[kl] == '\t') {
-                    if (nl) *nl = 0;
-                    if (sscanf(q, "%15s\t%39s\t%39s\t%39s", nm, in, out2, mf) != 4) die("stages-parse");
+                    size_t ln = nl ? (size_t)(nl - q) : strlen(q);
+                    char rowb[256];
+                    if (ln >= sizeof rowb) ln = sizeof rowb - 1;
+                    mm_copy(rowb, sizeof rowb, q, (long)ln);
+                    rowb[ln] = 0;
+                    if (sscanf(rowb, "%15s\t%39s\t%39s\t%39s", nm, in, out2, mf) != 4) die("stages-parse");
                     break;
                 }
                 q = nl ? nl + 1 : 0;
             }
+            if (!in[0]) die("stage-missing");
+            if (cx_fmt(line, sizeof line,
+                       "flow\t%s\t-\t%s\t%ld\tgold-table-bytes\t-\tin=%s;out=%s;model_file=%s;gold_files=%ld;gold=%s\tcat exec/pipeline/image-stages.tsv && stat weights/gold/*.tsv\t%s\tUNMEASURED\tUNMEASURED\tUNMEASURED\n",
+                       fl[j], flow_fn(fl[j]), gfl[j], in, out2, mf, gcount[j], gl[j][0] ? gl[j] : "-", rev)) die("row");
+            app(buf, cap, at, line);
         }
         free(t);
-        if (!in[0]) die("stage-missing");
-        if (cx_fmt(line, sizeof line,
-                   "flow\t%s\t-\t%s\t%ld\tgold-table-bytes\t-\tin=%s;out=%s;model_file=%s;gold_files=%ld;gold=%s\tcat exec/pipeline/image-stages.tsv && stat weights/gold/*.tsv\t%s\tUNMEASURED\tUNMEASURED\tUNMEASURED\n",
-                   fl[j], flow_fn(fl[j]), gfl[j], in, out2, mf, gcount[j], gl[j][0] ? gl[j] : "-", rev)) die("row");
-        app(buf, cap, at, line);
     }
     /* unassigned gold rows */
     for (i = 0; i < ng; i++) {
@@ -723,6 +804,7 @@ static void gloss(char *out, size_t cap, size_t *at) {
 static void build(char **tsv_out, size_t *tn, char **prd_out, size_t *pn) {
     long l0, l1, a, b, c, d, e, f;
     static char tsv[64000], prd[72000];
+    pm_load_tracked();
     slice_init();
     ape_census();
     l0 = dir_bytes("cx/sys") + dir_bytes("cx/mem") + dir_bytes("cx/text");
@@ -811,6 +893,7 @@ int main(int argc, char **argv) {
         if (!strcmp(argv[i], "--emit-tsv") && i + 1 < argc) emit_to = argv[++i];
         else if (!strcmp(argv[i], "--write")) writef = 1;
         else if (!strcmp(argv[i], "--check")) check = 1;
+        else if (!strcmp(argv[i], "--full")) pm_full = 1;
         else if (!strcmp(argv[i], "--daily")) daily = 1;
         else if (!strcmp(argv[i], "--package") && i + 1 < argc) {
             if (sy_realpath(argv[++i], pkgpath, sizeof pkgpath) < 0) die("package-path");
@@ -820,6 +903,7 @@ int main(int argc, char **argv) {
         } else die("usage --write|--check [--daily] [--package BARE_PKG] [--root DIR]");
     }
     if ((!emit_to && writef == check) || (emit_to && (writef || check || daily || have_pkg)) || (daily && !check) || (daily && !have_pkg)) die("usage --write|--check [--daily --package BARE_PKG]");
+    if (check) pm_full = 1; /* --check never reads any cache */
     build(&tsv, &tn, &prd, &pn);
     if (emit_to) {
         if(cx_write(emit_to,tsv,tn))die("emit-tsv-write");
