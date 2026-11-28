@@ -89,6 +89,9 @@ static int pd_mut_times_use_nonpass = 0;
 static int pd_normal_jobs = PD_DEFAULT_NORMAL_JOBS;
 static int pd_plan_lanes = PD_DEFAULT_LANES;
 static int pd_keep_going = 1;
+static int pd_scout;
+static char *pd_expected_rows;
+static char pd_candidate_sha[65];
 static int pd_max_wins = PD_MAX_WINS;
 static long pd_unmeasured_ms = 0;
 static int pd_has_overhead = 0;
@@ -1264,6 +1267,39 @@ static int pd_window_attempt(const char *root, const char *cand, const char *moc
     return rc;
 }
 
+/* Expected failures retain their raw FAIL row. Match the candidate column and
+ * the complete old->new image fingerprint, never just the batch name. */
+static int pd_expected_red(const PdState *s) {
+    if (!pd_expected_rows || !pd_candidate_sha[0] || strlen(s->note) != 136 ||
+        strncmp(s->note, "image=", 6) || strncmp(s->note + 70, "->", 2)) return 0;
+    for (int i = 6; i < 136; i++) {
+        if (i != 70 && i != 71 && !strchr("0123456789abcdef", s->note[i])) return 0;
+    }
+    const char *candidate = s->raw_line;
+    for (int i = 0; i < 4; i++) {
+        candidate = strchr(candidate, '\t');
+        if (!candidate) return 0;
+        candidate++;
+    }
+    if (strncmp(candidate, pd_candidate_sha, 64) || candidate[64] != '\t') return 0;
+    char key[400];
+    if (cx_fmt(key, sizeof key, "%s\t%s\t", s->id, s->note)) return 0;
+    const char *row = pd_expected_rows;
+    while (*row) {
+        if (!strncmp(row, key, strlen(key))) return 1;
+        row = strchr(row, '\n');
+        if (!row) break;
+        row++;
+    }
+    return 0;
+}
+
+static int pd_scout_state(const char *dir) {
+    char p[PD_PW];
+    if (cx_fmt(p, sizeof p, "%s/SCOUT_ONLY", dir)) return -1;
+    return sy_exists(p);
+}
+
 static int pd_batch_receipt(const char *path, const char *id, int rc) {
     unsigned char *buf = 0;
     int64_t n = 0;
@@ -1299,6 +1335,14 @@ static int pd_recover_serial(const char *root, const char *cand, const char *out
             if (matched == 1) break;
         }
         if (matched == 2 && tx_eqz(pd_states[0].domain, "product-qualification") && tx_eqz(pd_states[0].status, "FAIL")) {
+            int expected = pd_expected_red(&pd_states[0]);
+            if (expected || pd_scout) {
+                const char *label = expected ? "PRERUN_EXPECTED_RED" : "PRERUN_SCOUT_RED";
+                printf("%s\tbatch=%s\twindow=%s\traw=%s\n", label, ids[i], part, pd_states[0].raw_line);
+                const char *receipt = pd_scout ? "SCOUT_ONLY\n" : "EXPECTED_FAIL\n";
+                if (sy_write_atomic(done, receipt, strlen(receipt), 0644)) return -1;
+                continue;
+            }
             printf("PRERUN_PRODUCT_RED_STOP\tbatch=%s\tdomain=product-qualification\tstatus=FAIL\trc=%d\tretries=%d\twindow=%s\ttriage=inspect-strict-%s.tsv\traw=%s\n",
                    ids[i], pd_states[0].rc, tries, part, part, pd_states[0].raw_line);
             printf("PRERUN_STOP\tbatch=%s\tretries=%d\twindow=%s\traw=%s\n",
@@ -2112,6 +2156,33 @@ static int pd_cmd_run(const char *root, const char *cand, const char *out_dir, i
         mm_free(wb); return pd_refuse("run-output-directory");
     }
     out_dir = canonical_dir;
+    int marker = pd_scout_state(out_dir);
+    if (marker < 0 || (marker && !pd_scout)) { mm_free(wb); return pd_refuse("scout-directory"); }
+    if (pd_scout && !marker) {
+        sy_dir_t d;
+        if (sy_dir_open(&d, out_dir)) { mm_free(wb); return pd_refuse("scout-dir-read"); }
+        int next;
+        while ((next = sy_dir_next(&d)) == 1) {
+            if (!strncmp(d.name, "strict-", 7) || !strncmp(d.name, "done.", 5) || !strcmp(d.name, "run.done")) break;
+        }
+        sy_dir_close(&d);
+        if (next != 0) { mm_free(wb); return pd_refuse("scout-requires-unused-directory"); }
+        char p[PD_PW];
+        if (cx_fmt(p, sizeof p, "%s/SCOUT_ONLY", out_dir) || sy_write_atomic(p, "SCOUT_ONLY\n", 11, 0644)) {
+            mm_free(wb); return pd_refuse("scout-marker-write");
+        }
+    }
+    char ef[PD_PW];
+    if (cx_fmt(ef, sizeof ef, "%s/expected-fail.tsv", out_dir)) { mm_free(wb); return pd_refuse("expected-fail-path"); }
+    int exists = sy_exists(ef);
+    if (exists < 0) { mm_free(wb); return pd_refuse("expected-fail-read"); }
+    if (exists) {
+        size_t size = 0;
+        pd_expected_rows = cx_read(ef, &size);
+        if (!pd_expected_rows || pd_file_sha256_hex(cand, pd_candidate_sha)) {
+            mm_free(wb); return pd_refuse("expected-fail-input");
+        }
+    }
     const char *eff_root = root;
     frozen_root[0] = 0;
     frozen_rev[0] = 0;
@@ -2451,6 +2522,25 @@ static int pd_cmd_run(const char *root, const char *cand, const char *out_dir, i
             int cnt = (ridx >= 0) ? retry_counts[ridx] : attempt;
             if (cnt >= max_retries) {
                 if (bad_prod_fail) {
+                    int all_accounted = 1, unexpected = 0;
+                    for (int j = 0; j < nwin; j++) {
+                        int k = pd_state_find(win_ids[j]);
+                        if (k < 0 || !pd_states[k].seen) { all_accounted = 0; continue; }
+                        PdState *s = &pd_states[k];
+                        if (tx_eqz(s->status, "PASS")) continue;
+                        if (tx_eqz(s->status, "FAIL") && tx_eqz(s->domain, "product-qualification") && pd_expected_red(s))
+                            printf("PRERUN_EXPECTED_RED\tbatch=%s\twindow=%s\traw=%s\n", s->id, wid, s->raw_line);
+                        else {
+                            unexpected++;
+                            if (pd_scout) printf("PRERUN_SCOUT_RED\tbatch=%s\twindow=%s\traw=%s\n", s->id, wid, s->raw_line);
+                        }
+                    }
+                    if (pd_scout || (all_accounted && !unexpected)) {
+                        const char *receipt = pd_scout ? "SCOUT_ONLY\n" : "EXPECTED_FAIL\n";
+                        if (sy_write_atomic(donep, receipt, strlen(receipt), 0644)) { mm_free(wb); return pd_refuse("red-receipt-write"); }
+                        ran++;
+                        break;
+                    }
                     printf("PRERUN_PRODUCT_RED_STOP\tbatch=%s\tdomain=product-qualification\tstatus=FAIL\trc=%d\tretries=%d\twindow=%s\ttriage=inspect-strict-%s.tsv\traw=%s\n",
                            bad_id, bad_rc, cnt, wid, wid, bad_raw);
                     printf("PRERUN_STOP\tbatch=%s\tretries=%d\twindow=%s\traw=%s\n", bad_id, cnt, wid, bad_raw);
@@ -2498,6 +2588,10 @@ static int pd_cmd_run(const char *root, const char *cand, const char *out_dir, i
         }
     }
     mm_free(wb);
+    if (pd_scout) {
+        printf("PRERUN_RUN\tstatus=SCOUT_ONLY\tran=%d\tskipped=%d\tincomplete=%d\n", ran, skipped, incomplete);
+        return 1;
+    }
     if (incomplete) {
         printf("PRERUN_RUN\tstatus=INCOMPLETE\tran=%d\tskipped=%d\tmissing_windows=%d\tout=%s\n",
                ran, skipped, incomplete, out_dir);
@@ -2538,6 +2632,7 @@ static int pd_archive_version(const char *ver) {
 }
 
 static int pd_cmd_archive(const char *in, const char *repo, const char *ver) {
+    if (pd_scout_state(in) != 0) return pd_refuse("scout-only-not-evidence");
     char dir[PD_PW], src[PD_PW], dest[2][PD_PW];
     const char *names[] = {"windows.tsv", "supervise.log"};
     unsigned char *bytes[2] = {0};
@@ -2613,6 +2708,7 @@ static int pd_cmd_archive(const char *in, const char *repo, const char *ver) {
 }
 
 static int pd_cmd_merge(const char *in_dir, const char *out_dir, const char *ver) {
+    if (pd_scout_state(in_dir) != 0) return pd_refuse("scout-only-not-evidence");
     sy_dir_t d;
     static char files[PD_MAX_FILES][256];
     int nf = 0;
@@ -3613,6 +3709,7 @@ int main(int argc, char **argv) {
                     else pd_mock_avail_mb = (long)mv;
                 }
             }
+            else if (tx_eqz(argv[i], "--scout")) pd_scout = 1;
             else if (tx_eqz(argv[i], "--keep-going")) { pd_keep_going = 2; has_kg = 1; }
             else if (tx_eqz(argv[i], "--no-keep-going") || tx_eqz(argv[i], "--fail-fast-unknown")) { pd_keep_going = 0; has_kg = 1; }
             else if (tx_eqz(argv[i], "--mock-runner") && i + 1 < argc) mock_r = argv[++i];
