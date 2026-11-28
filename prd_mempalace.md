@@ -21,6 +21,10 @@
 
 ## 决定(别人必须遵守)
 
+### v0.1.10 冻结债与编排决定(2026-11-28,依据 fable 14:25 裁定)
+
+- 决定(v0.1.10 探针立即数基线抬高与偿还债,cc 批准,expires=0.1.11):为保留 b2b456c00 的已验探针证据,经 build/approvals.tsv 同提交审批行(kind=ratchet-raise,approver=cc,expires=0.1.11)抬高五项基线:tests/aluiwidth.tsv armbase 3->6、armint 7->14;tests/literal.tsv armbase 34->66、armint 54->134、x86-emit 46->60。债项:v0.1.11 将探针立即数迁入 exec/facts 编码表为命名常量,把 check-literal 压回接近 34/54/46;新增的 10 行 aluiwidth 为 32 位指令字域位移(与整型 EMIT.16 同形),不承诺下降。另记工具债:本机缺 stdio-copies 链路径 9e2ac4df...,当前由 chain-ready j_ratchets 白名单具名放行 skipped=1 named=stdio-copies:no-chain,后续补 UNISACC_STDIO_CHAIN。回滚:git revert 该审批与基线提交。
+
 ### v0.1.9 编排决定(2026-11-28,cc 执行,依据 fable 裁定)
 
 - 决定(第四个冻结 REV,cc,2026-11-28 13:40,依据 fable 13:00 裁定"等 scout 收齐后一次冻结"):7645c4c78 的预跑转 scout(W0117 起 done 标 SCOUT_ONLY)收齐红项,修复全部合入本提交:(1) 产品缺陷 cx/driver/stream_s1_m1.cx:163 m53_m1_spec.max_ret 由 59ef771b0 误写为 9L(抄自 abi_tag_len),改回 1ULL(f4f4c9cac,check-m1-g4-vm 捕获;cxsa_valid 只返回 0/1);(2) 过期检查 check-lnx-arm64-m53-s2 按启动器实际是否内嵌 driveargs M1 分流(76532b05f);(3) check-piece-d-driveargs、check-piece-m-m25、check-win-m53-s1 改用无 tape 资源的干净基底 P4(435ac6fee,p4-embed 重复拒绝未动);(4) check-ratchets 逐行绑定名称、状态与非空跳过理由(bdf35227d);(5) prerun-drive 在窗口前准备 entry-link 材料并按内容身份续跑(106c3d808);(6) packing-authority 拆两片加多重集守卫(1f0a500c0,守卫加固记 U10-9);(7) check-m1-rework-3defects 先调 m53_spec_init(eda86b365)。因含产品源改动,新整链产出新 APE(不再是 3576874d...),win netregen 差异须在新镜像上重核,仍仅限偏移 170/171 两字节才按 08:45 授权放行;负载超时类(real-commit、prebuild-self、check-register-layout-clean、devsvc-git-c-*、chain-ready-freeze-m3/launch-b/launch-c、chain-tool-identity、entry-build-root-dedup、precommit-gates-canary-cxlib、tsv-lint-root、priv-relink)在新预跑排低负载 -j 1 暖态重跑窗,暖态仍红即按真缺陷修;旧目录 /tmp/unisacc-session-v0.1.9-prerun-7645c4c789 只作 scout 证据;回滚:git revert 本提交及七个合并。
