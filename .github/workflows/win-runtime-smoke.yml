@@ -134,6 +134,12 @@ jobs:
       - uses: actions/checkout@v4
         with:
           ref: ${{ inputs.source_commit || (github.event_name == 'push' && env.DEFAULT_SOURCE_COMMIT || '') }}
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ github.sha }}
+          path: _wf_gate
+          sparse-checkout: tools/check-win-runtime-smoke.cx
+          persist-credentials: false
       - name: Pin candidate provenance, parse rc_v3 chain receipt, extract APE pkg.bin, and bind arm64 manifest
         env:
           SOURCE_COMMIT: ${{ inputs.source_commit || (github.event_name == 'push' && env.DEFAULT_SOURCE_COMMIT || '') }}
@@ -160,6 +166,14 @@ jobs:
             test "$h" != "0000000000000000000000000000000000000000000000000000000000000000"
           done
           test "$(git rev-parse HEAD)" = "$SOURCE_COMMIT"
+          if [ -f tools/check-win-runtime-smoke.cx ]; then
+            cp tools/check-win-runtime-smoke.cx win-runtime-baseline/check-win-runtime-smoke.cx
+          else
+            cp _wf_gate/tools/check-win-runtime-smoke.cx win-runtime-baseline/check-win-runtime-smoke.cx
+            mkdir -p tools
+            cp win-runtime-baseline/check-win-runtime-smoke.cx tools/check-win-runtime-smoke.cx
+          fi
+          rm -rf _wf_gate
 
           file_sha256() {
             set -- $(sha256sum "$1")
@@ -315,6 +329,10 @@ jobs:
           RUN_OS: ${{ matrix.os }}
         run: |
           $ErrorActionPreference = 'Stop'
+          if (-not (Test-Path -LiteralPath 'tools/check-win-runtime-smoke.cx')) {
+            New-Item -ItemType Directory -Force -Path 'tools' | Out-Null
+            Copy-Item -LiteralPath 'win-runtime-baseline/check-win-runtime-smoke.cx' -Destination 'tools/check-win-runtime-smoke.cx' -Force
+          }
           $candPath = Join-Path $PWD 'win-runtime-baseline/candidate-unisacc.com'
           $wantSha = (Get-Content -LiteralPath 'win-runtime-baseline/candidate.sha256' -Raw).Trim()
           $gotSha = (Get-FileHash -LiteralPath $candPath -Algorithm SHA256).Hash.ToLowerInvariant()
@@ -567,6 +585,10 @@ jobs:
           EXPECT_TARGET: ${{ matrix.target }}
         run: |
           set -eu
+          if [ ! -f tools/check-win-runtime-smoke.cx ]; then
+            mkdir -p tools
+            cp win-runtime-baseline/check-win-runtime-smoke.cx tools/check-win-runtime-smoke.cx
+          fi
           TRUSTED_LAUNCHER_SHA="ed50199fd085be4da2fa692db8010057be6674f8bfc609b101e8d18daf23583f"
           set -- $(sha256sum win-runtime-baseline/trusted-unisacc.com)
           GOT_LSHA="$1"
@@ -647,6 +669,10 @@ jobs:
           SOURCE_COMMIT: ${{ inputs.source_commit || (github.event_name == 'push' && env.DEFAULT_SOURCE_COMMIT || '') }}
         run: |
           set -eu
+          if [ ! -f tools/check-win-runtime-smoke.cx ]; then
+            mkdir -p tools
+            cp win-runtime-baseline/check-win-runtime-smoke.cx tools/check-win-runtime-smoke.cx
+          fi
           TRUSTED_LAUNCHER_SHA="ed50199fd085be4da2fa692db8010057be6674f8bfc609b101e8d18daf23583f"
           set -- $(sha256sum win-runtime-baseline/trusted-unisacc.com)
           test "$1" = "$TRUSTED_LAUNCHER_SHA"
