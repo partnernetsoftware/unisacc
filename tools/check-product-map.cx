@@ -88,6 +88,39 @@ int main(void) {
         free(s);
         prd_gloss();
     }
+    {
+        /* Poisoned cache entry + nonexistent cache dir: --check must branch before cache init,
+         * never read or write the persistent cache, and report the true result. */
+        char pdir[4400], psub[4400], pfile[4400], ndir[4400];
+        if (!cx_fmt(pdir, sizeof pdir, "%s/pm-poison-XXXXXX", sy_tmpdir()) && mkdtemp(pdir)) {
+            cx_fmt(psub, sizeof psub, "%s/product-map", pdir);
+            sy_mkdir(psub, 0700);
+            cx_fmt(pfile, sizeof pfile, "%s/poison.tsv", psub);
+            cx_write(pfile, "POISONED\n", 9);
+            size_t cn = 0; char *co = 0;
+            char *vc[] = {"sh", product, tsv, "--", "--cache", pdir, "--check", 0};
+            int crc = cx_runv_timeout(vc, 55, &co, &cn);
+            size_t pn = 0; char *pb = cx_read(pfile, &pn);
+            ck(crc == 0 && co && strstr(co, "PRODUCT_MAP_QUERY_CHECK OK sha=") &&
+               pb && pn == 9 && !memcmp(pb, "POISONED\n", 9),
+               "poisoned-cache-check-ignores-cache");
+            if (co) free(co);
+            if (pb) free(pb);
+            cx_fmt(ndir, sizeof ndir, "%s/never-created", pdir);
+            co = 0; cn = 0;
+            char *vn[] = {"sh", product, tsv, "--", "--cache", ndir, "--check", 0};
+            crc = cx_runv_timeout(vn, 55, &co, &cn);
+            sy_stat_t nst;
+            ck(crc == 0 && co && strstr(co, "PRODUCT_MAP_QUERY_CHECK OK sha=") &&
+               sy_lstat(ndir, &nst) == -ENOENT,
+               "check-never-initializes-cache-dir");
+            if (co) free(co);
+            char *rmv[] = {"rm", "-rf", pdir, 0};
+            cx_runv_timeout(rmv, 20, 0, 0);
+        } else {
+            ck(0, "poisoned-cache-check-ignores-cache");
+        }
+    }
     printf("CHECK_PRODUCT_MAP\tfailed=%d\n", failed);
     return failed ? 1 : 0;
 }
