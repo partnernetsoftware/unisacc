@@ -9,6 +9,7 @@
 #pragma unisa use sys.time
 #pragma unisa use sys.proc
 #pragma unisa use sys.posix
+#pragma unisa use text.fmt
 typedef struct np_buf { char *p; size_t n, cap; } np_buf;
 typedef struct np_result { int rc; char *out; size_t outn; char *err; size_t errn; int residue; int timed_out; } np_result;
 
@@ -63,14 +64,100 @@ static int np_reap_killed(pid_t pid, int *st) {
     }
     return -1;
 }
+static int pc_cgroup_dir_for_pid(pid_t pid, char *out, size_t cap) {
+    char cp[64], buf[512];
+    if (cx_fmt(cp, sizeof cp, "/proc/%d/cgroup", (int)pid)) return -1;
+    int fd = open(cp, O_RDONLY);
+    if (fd < 0) return -1;
+    ssize_t n = read(fd, buf, sizeof buf - 1);
+    close(fd);
+    if (n <= 0) return -1;
+    buf[n] = 0;
+    const char *p = strstr(buf, "0::");
+    if (!p) return -1;
+    p += 3;
+    const char *e = p;
+    while (*e && *e != '\n' && *e != '\r') e++;
+    if (e <= p) return -1;
+    return cx_fmt(out, cap, "/sys/fs/cgroup%.*s", (int)(e - p), p) == 0 ? 0 : -1;
+}
+
+static long pc_read_pids_events_max(const char *ev_path) {
+    char buf[512];
+    int fd = open(ev_path, O_RDONLY);
+    if (fd < 0) return -1;
+    ssize_t n = read(fd, buf, sizeof buf - 1);
+    close(fd);
+    if (n <= 0) return -1;
+    buf[n] = 0;
+    const char *p = strstr(buf, "max ");
+    if (!p) return 0;
+    p += 4;
+    long v = 0;
+    while (*p >= '0' && *p <= '9') { v = v * 10 + (*p - '0'); p++; }
+    return v;
+}
+
+static int pc_cgroup_procs_count(const char *procs_path) {
+    char buf[4096];
+    int fd = open(procs_path, O_RDONLY);
+    if (fd < 0) return 0;
+    ssize_t n = read(fd, buf, sizeof buf - 1);
+    close(fd);
+    if (n <= 0) return 0;
+    int cnt = 0;
+    for (ssize_t i = 0; i < n; i++) if (buf[i] == '\n') cnt++;
+    return cnt;
+}
+
+static void pc_kill_scope(const char *unit) {
+    if (!unit || !unit[0]) return;
+    pid_t kp = fork();
+    if (kp == 0) {
+        int dn = open("/dev/null", O_WRONLY);
+        if (dn >= 0) { dup2(dn, 1); dup2(dn, 2); close(dn); }
+        execlp("systemctl", "systemctl", "--user", "kill", "-s", "KILL", unit, (char *)0);
+        _exit(127);
+    }
+    if (kp > 0) {
+        int st = 0;
+        for (int i = 0; i < 100; i++) {
+            if (waitpid(kp, &st, WNOHANG) == kp) break;
+            usleep(10000);
+        }
+    }
+}
+
+static int pc_systemd_scope_available(void) {
+    if (access("/usr/bin/systemd-run", X_OK) != 0 && access("/bin/systemd-run", X_OK) != 0) return 0;
+    char bus[128];
+    if (cx_fmt(bus, sizeof bus, "/run/user/%u/bus", (unsigned)getuid())) return 0;
+    return access(bus, F_OK) == 0 ? 1 : 0;
+}
+
 int pc_run_capped(char *const argv[], const char *cwd, char *const envadd[], int secs, int max_procs, np_result *res, char *why, size_t wl, int tool_fault) {
     int po[2], pe[2], pf[2], err[2] = { 0, 0 }, st = 0, open_o = 1, open_e = 1, open_f = 1, reaped = 0;
     size_t errn = 0;
     pid_t pid; ssize_t k; long now = sy_now_ms(), deadline, next_cap_check = 0; np_buf o = { 0, 0, 0 }, e = { 0, 0, 0 }; char t[65536];
     int fault=tool_fault?np_fault():0;
+    int use_cgroup = 0;
+    char unit[96], tmax[32], ev_path[256], procs_path[256];
+    long seen_events_max = 0;
+    unit[0] = 0; tmax[0] = 0; ev_path[0] = 0; procs_path[0] = 0;
     res->rc = 0; res->out = res->err = 0; res->outn = res->errn = 0; res->residue = 0; res->timed_out = 0;
     if (fault<0) { snprintf(why,wl,"ValueError: UNISACC_NP_FAULT=%s refused (only residue)",getenv("UNISACC_NP_FAULT")); return -1; }
     if (now < 0) { snprintf(why, wl, "OSError: cannot read monotonic clock"); return -1; }
+    if (max_procs > 0 && pc_systemd_scope_available()) {
+        static unsigned s_seq;
+        s_seq++;
+        unsigned uid = (unsigned)getuid();
+        if (!cx_fmt(unit, sizeof unit, "unisacc-s1b-%d-%u.scope", (int)getpid(), s_seq) &&
+            !cx_fmt(tmax, sizeof tmax, "TasksMax=%d", max_procs) &&
+            !cx_fmt(ev_path, sizeof ev_path, "/sys/fs/cgroup/user.slice/user-%u.slice/user@%u.service/app.slice/%s/pids.events", uid, uid, unit) &&
+            !cx_fmt(procs_path, sizeof procs_path, "/sys/fs/cgroup/user.slice/user-%u.slice/user@%u.service/app.slice/%s/cgroup.procs", uid, uid, unit)) {
+            use_cgroup = 1;
+        }
+    }
     deadline = now + (long)secs * 1000;
     next_cap_check = now + 20;
     if (pipe(po) || pipe(pe) || pipe(pf)) { snprintf(why, wl, "OSError: cannot create pipes"); return -1; }
@@ -103,6 +190,30 @@ int pc_run_capped(char *const argv[], const char *cwd, char *const envadd[], int
         /* Bounded regression seam: only the child waits, with the exec pipe open. */
         { const char *delay = getenv("UNISACC_NP_TEST_PREEXEC_MS"); if (delay) { int ms = atoi(delay); if (ms > 0 && ms <= 5000) usleep((unsigned)ms * 1000); } }
         if (cwd && chdir(cwd) != 0) { err[0] = 1; err[1] = errno; k = write(pf[1], err, sizeof err); _exit(255); }
+        if (use_cgroup) {
+            size_t argc_in = 0;
+            while (argv[argc_in]) argc_in++;
+            char **sv = malloc((argc_in + 12) * sizeof *sv);
+            if (sv) {
+                char uflag[112];
+                if (!cx_fmt(uflag, sizeof uflag, "--unit=%s", unit)) {
+                    size_t si = 0;
+                    sv[si++] = "systemd-run";
+                    sv[si++] = "--user";
+                    sv[si++] = "--scope";
+                    sv[si++] = "--quiet";
+                    sv[si++] = uflag;
+                    sv[si++] = "-p";
+                    sv[si++] = tmax;
+                    sv[si++] = "-p";
+                    sv[si++] = "CollectMode=inactive-or-failed";
+                    sv[si++] = "--";
+                    for (size_t j = 0; j < argc_in; j++) sv[si++] = argv[j];
+                    sv[si] = 0;
+                    execvp(sv[0], sv);
+                }
+            }
+        }
         execvp(argv[0], argv);
         err[0] = 2; err[1] = errno; k = write(pf[1], err, sizeof err); (void)k;
         _exit(255);
@@ -131,14 +242,32 @@ int pc_run_capped(char *const argv[], const char *cwd, char *const envadd[], int
         /* EOF never changes the waiting path: process exit and pipe draining
            share the same monotonic deadline, including the exec handshake. */
         now = sy_now_ms();
-        if (max_procs > 0 && now >= next_cap_check && !reaped) {
-            next_cap_check = now + 20;
-            int nproc = rp_count_tree((int)pid);
-            if (nproc > max_procs) {
+        if (max_procs > 0 && !reaped) {
+            if (use_cgroup) {
+                char cgdir[256];
+                if (pc_cgroup_dir_for_pid(pid, cgdir, sizeof cgdir) == 0 && strstr(cgdir, unit)) {
+                    (void)cx_fmt(ev_path, sizeof ev_path, "%s/pids.events", cgdir);
+                    (void)cx_fmt(procs_path, sizeof procs_path, "%s/cgroup.procs", cgdir);
+                }
+            }
+            long evm = use_cgroup ? pc_read_pids_events_max(ev_path) : -1;
+            if (evm > seen_events_max) seen_events_max = evm;
+            int nproc = (!use_cgroup && now >= next_cap_check) ? (next_cap_check = now + 10, rp_count_tree((int)pid)) : 0;
+            if ((use_cgroup && evm > 0) || (!use_cgroup && nproc > max_procs)) {
                 char rep[256];
                 rep[0] = 0;
+                if (use_cgroup) pc_kill_scope(unit);
                 int sv = rp_kill_tree((int)pid, 2000, 0, 0, rep, sizeof rep);
                 if (sv < 0) { kill(-pid, SIGKILL); kill(pid, SIGKILL); sv = 0; }
+                if (use_cgroup) {
+                    int cg_left = pc_cgroup_procs_count(procs_path);
+                    if (cg_left > 0) {
+                        pc_kill_scope(unit);
+                        usleep(50000);
+                        cg_left = pc_cgroup_procs_count(procs_path);
+                    }
+                    if (cg_left > sv) sv = cg_left;
+                }
                 res->residue = sv;
                 if (!reaped && np_reap_killed(pid, &st) < 0 && res->residue <= 0) {
                     res->residue = 1;
@@ -148,12 +277,16 @@ int pc_run_capped(char *const argv[], const char *cwd, char *const envadd[], int
                 if (open_e) close(pe[0]);
                 if (open_f) close(pf[0]);
                 free(o.p); free(e.p);
-                snprintf(why, wl, "process-cap-exceeded: cap=%d observed=%d residue=%d", max_procs, nproc, res->residue);
+                if (use_cgroup)
+                    (void)cx_fmt(why, wl, "process-cap-exceeded: mode=cgroup-pids-hard cap=%d events_max=%ld residue=%d", max_procs, evm, res->residue);
+                else
+                    (void)cx_fmt(why, wl, "process-cap-exceeded: mode=polling-observation cap=%d observed=%d residue=%d", max_procs, nproc, res->residue);
                 return -1;
             }
         }
         if (now < 0 || now >= deadline) {
             size_t i; char rep[256];
+            if (use_cgroup) pc_kill_scope(unit);
             int sv = rp_kill_tree(pid, 2000, 0, 0, rep, sizeof rep);   /* freeze, kill, re-check; -ENOSYS off /proc */
             if (sv < 0) { kill(-pid, SIGKILL); kill(pid, SIGKILL); }   /* no /proc: the pre-reaper group kill */
             res->residue = sv;
@@ -187,6 +320,22 @@ int pc_run_capped(char *const argv[], const char *cwd, char *const envadd[], int
         free(o.p); free(e.p);
         np_oserror(err[1], err[0] == 1 ? cwd : argv[0], why, wl);
         return -1;
+    }
+    if (use_cgroup) {
+        long evm = pc_read_pids_events_max(ev_path);
+        if (evm > seen_events_max) seen_events_max = evm;
+        int cg_left = pc_cgroup_procs_count(procs_path);
+        if (cg_left > 0) {
+            pc_kill_scope(unit);
+            usleep(50000);
+            cg_left = pc_cgroup_procs_count(procs_path);
+        }
+        if (seen_events_max > 0) {
+            res->residue = cg_left;
+            free(o.p); free(e.p);
+            (void)cx_fmt(why, wl, "process-cap-exceeded: mode=cgroup-pids-hard cap=%d events_max=%ld residue=%d", max_procs, seen_events_max, cg_left);
+            return -1;
+        }
     }
     res->rc = WIFSIGNALED(st) ? -WTERMSIG(st) : WEXITSTATUS(st);
     res->out = o.p; res->outn = o.n; res->err = e.p; res->errn = e.n;

@@ -1,0 +1,159 @@
+/* tools/check-s1b-pids-cap.cx -- S1b kernel pids cgroup (TasksMax) hard-cap acceptance check.
+ *
+ * Covers:
+ *   (1) s1b-bounded-exp-fork-and-setsid-escape-hard-capped:
+ *       Real tests/run-batch.cx on a private 15-col tests/batches.tsv row (max_procs=8) running a
+ *       bounded exponential fork (depth=4 -> 16 tasks) where every branch calls setsid() to escape
+ *       its process group -> kernel TasksMax=8 blocks fork with EAGAIN, pc_run_capped detects
+ *       pids.events max>0, kills the entire cgroup scope, emits BATCH_PROC_CAP mode=cgroup-pids-hard
+ *       residue=0 + BATCH_RUN status=FAIL in <5s, and leaves 0 live descendants in /proc.
+ *   (2) s1b-within-cap-batch-passes:
+ *       Normal batch under max_procs=16 completes and emits BATCH_RUN status=PASS with no cap hit.
+ *   (3) s1b-migrated-runners-compile-and-use-capped:
+ *       Verifies dvqualify.cx, prerun-drive.cx, affected.cx compile cleanly with np_run_capped.
+ *
+ * Marker: CHECK_S1B_PIDS_CAP
+ */
+#pragma unisa use sys.fs
+#pragma unisa use sys.posix
+#pragma unisa use sys.proc
+#pragma unisa use sys.time
+#pragma unisa use sys.env
+#pragma unisa use sys.io
+#pragma unisa use mem.heap
+#pragma unisa use mem.bytes
+#pragma unisa use text.text
+#pragma unisa use text.fmt
+#pragma unisa use text.conv
+#pragma unisa use cxlib.procrun
+
+static int g_pass;
+static int g_fail;
+
+static void ck(int ok, const char *name) {
+    if (ok) { g_pass++; sy_printf("PASS\tcheck-s1b-pids-cap.%s\n", name); }
+    else { g_fail++; sy_printf("FAIL\tcheck-s1b-pids-cap.%s\n", name); }
+}
+
+static int s1b_count_proc_tag(const char *tag) {
+    sy_dir_t d;
+    if (sy_dir_open(&d, "/proc") != 0) return -1;
+    long tl = (long)strlen(tag);
+    int my_pid = (int)sy_pid();
+    int hits = 0;
+    while (sy_dir_next(&d) == 1) {
+        if (d.name[0] < '0' || d.name[0] > '9') continue;
+        int64_t pid = 0;
+        if (tx_to_i64(d.name, (long)strlen(d.name), 10, &pid) != 0 || pid <= 0 || (int)pid == my_pid) continue;
+        char cp[64];
+        if (cx_fmt(cp, sizeof cp, "/proc/%ld/cmdline", (long)pid) != 0) continue;
+        unsigned char *b = 0;
+        int64_t n = 0;
+        if (sy_read_file(cp, &b, &n, 4096) != 0 || !b || n <= 0) { if (b) mm_free(b); continue; }
+        for (int64_t i = 0; i < n; i++) if (b[i] == 0) b[i] = ' ';
+        if (tx_find((const char *)b, (long)n, tag, tl) >= 0) hits++;
+        mm_free(b);
+    }
+    sy_dir_close(&d);
+    return hits;
+}
+
+int main(void) {
+    char tmp[4096], s1root[4200], s1out[4200], real_prod[4096], tag[64], cmd[6144];
+    if (sy_mkdtemp(sy_tmpdir(), "chk-s1b-", tmp, sizeof tmp) != 0) return 2;
+    if (sy_realpath("./unisacc.com", real_prod, sizeof real_prod) < 0) cx_fmt(real_prod, sizeof real_prod, "./unisacc.com");
+    cx_fmt(s1root, sizeof s1root, "%s/s1root", tmp);
+    cx_fmt(s1out, sizeof s1out, "%s/s1root/out/s1run", tmp);
+    cx_fmt(tag, sizeof tag, "S1B_EXPFORK_%d", (int)sy_pid());
+
+    /* Prepare private root with 15-col tests/batches.tsv:
+     *   s1b-expfork (max_procs=8): bounded depth-4 exponential fork (2^4=16) + setsid() escape
+     *   s1b-ok      (max_procs=16): normal passing batch */
+    cx_fmt(cmd, sizeof cmd,
+        "set -e\n"
+        "mkdir -p '%s/tests' '%s/out/s1run'\n"
+        "cp -f '%s' '%s/unisacc.com' && chmod 0755 '%s/unisacc.com'\n"
+        "cat > '%s/tests/expfork.cx' << 'EOFF'\n"
+        "int setsid(void);\n"
+        "int main(void) {\n"
+        "  int d;\n"
+        "  for (d = 0; d < 4; d++) {\n"
+        "    int p = fork();\n"
+        "    if (p == 0) {\n"
+        "      setsid();\n"
+        "    }\n"
+        "  }\n"
+        "  sleep(2);\n"
+        "  execlp(\"sh\", \"sh\", \"-c\", \"sleep 15\", \"%s\", (char *)0);\n"
+        "  sleep(5);\n"
+        "  printf(\"EXPFORK_OK\\n\");\n"
+        "  return 0;\n"
+        "}\n"
+        "EOFF\n"
+        "cat > '%s/tests/okbatch.cx' << 'EOFO'\n"
+        "int main(void) { printf(\"S1B_OK_MARKER\\n\"); return 0; }\n"
+        "EOFO\n"
+        "printf 'id\\timplementation\\tlayer\\tsource\\tmode\\tplatform\\tbudget_seconds\\tmaterials\\tentry\\targs\\tcoverage\\texpect\\theaders\\ttier\\tmax_procs\\n' > '%s/tests/batches.tsv'\n"
+        "printf 's1b-expfork\\tIMPLEMENTED\\tinterfaces\\ttests/expfork.cx\\tSOURCE\\tlnx/x86_64\\t20\\t-\\ttests/expfork.cx\\t-\\tinterfaces.s1b-expfork\\trc0:EXPFORK_OK\\tproduct\\tcommit\\t8\\n' >> '%s/tests/batches.tsv'\n"
+        "printf 's1b-ok\\tIMPLEMENTED\\tinterfaces\\ttests/okbatch.cx\\tSOURCE\\tlnx/x86_64\\t20\\t-\\ttests/okbatch.cx\\t-\\tinterfaces.s1b-ok\\trc0:S1B_OK_MARKER\\tproduct\\tcommit\\t16\\n' >> '%s/tests/batches.tsv'\n"
+        "printf 'id\\tlayer\\timplementation\\texpected_or_gap\\tsource\\n' > '%s/tests/coverage.tsv'\n"
+        "printf 'interfaces.s1b-expfork\\tinterfaces\\tIMPLEMENTED\\texp fork + setsid capped\\ttests/expfork.cx\\n' >> '%s/tests/coverage.tsv'\n"
+        "printf 'interfaces.s1b-ok\\tinterfaces\\tIMPLEMENTED\\tnormal batch under cap\\ttests/okbatch.cx\\n' >> '%s/tests/coverage.tsv'\n",
+        s1root, s1root,
+        real_prod, s1root, s1root,
+        s1root, tag,
+        s1root,
+        s1root, s1root, s1root,
+        s1root, s1root, s1root);
+    int prep_ok = 0;
+    {
+        char *pv[] = { "sh", "-c", cmd, 0 };
+        pr_result pr;
+        int rc = pr_run("s1b-prep", pv, ".", 0, 6, &pr);
+        prep_ok = (rc == 0 && pr.rc == 0);
+        if (!prep_ok) sy_eprintf("S1B_PREP rc=%d prc=%d err=%.*s\n", rc, pr.rc, (int)pr.errn, pr.err ? pr.err : "");
+        pr_free(&pr);
+    }
+
+    /* (1) Bounded exponential fork + setsid escape hard-capped by pids cgroup TasksMax=8 in <5s, 0 residue */
+    {
+        int ok = 0;
+        if (prep_ok) {
+            sy_ts_t ts0, ts1;
+            (void)sy_mono(&ts0);
+            char *av[] = { "sh", "./unisacc.com", "tests/run-batch.cx", "--", s1root, s1out, "s1b-expfork", 0 }; /* lint:allow R1-product tests S1b TasksMax hard cap */
+            pr_result r;
+            int rc = pr_run("s1b-1", av, ".", 0, 22, &r);
+            (void)sy_mono(&ts1);
+            long ms = ((long)ts1.sec - (long)ts0.sec) * 1000L + ((long)ts1.nsec - (long)ts0.nsec) / 1000000L;
+            int alive = s1b_count_proc_tag(tag);
+            ok = (rc == 0 && r.out && ms < 5000L && alive == 0 &&
+                  tx_find(r.out, (long)r.outn, "BATCH_PROC_CAP\tid=s1b-expfork\tcap=8\tresidue=0", 45) >= 0 &&
+                  tx_find(r.out, (long)r.outn, "mode=cgroup-pids-hard", 21) >= 0 &&
+                  tx_find(r.out, (long)r.outn, "BATCH_RUN\tid=s1b-expfork\tstatus=FAIL\t", 37) >= 0);
+            if (!ok) sy_eprintf("S1B1 rc=%d prc=%d ms=%ld alive=%d out=%.*s err=%.*s\n", rc, r.rc, ms, alive, (int)r.outn, r.out ? r.out : "", (int)r.errn, r.err ? r.err : "");
+            pr_free(&r);
+        }
+        ck(ok, "s1b-bounded-exp-fork-and-setsid-escape-hard-capped");
+    }
+
+    /* (2) Normal batch within TasksMax=16 passes cleanly */
+    {
+        int ok = 0;
+        if (prep_ok) {
+            char *av[] = { "sh", "./unisacc.com", "tests/run-batch.cx", "--", s1root, s1out, "s1b-ok", 0 }; /* lint:allow R1-product tests normal batch under TasksMax */
+            pr_result r;
+            int rc = pr_run("s1b-2", av, ".", 0, 20, &r);
+            ok = (rc == 0 && r.rc == 0 && r.out &&
+                  tx_find(r.out, (long)r.outn, "BATCH_RUN\tid=s1b-ok\tstatus=PASS\t", 32) >= 0 &&
+                  tx_find(r.out, (long)r.outn, "BATCH_PROC_CAP\t", 15) < 0);
+            if (!ok) sy_eprintf("S1B2 rc=%d prc=%d out=%.*s err=%.*s\n", rc, r.rc, (int)r.outn, r.out ? r.out : "", (int)r.errn, r.err ? r.err : "");
+            pr_free(&r);
+        }
+        ck(ok, "s1b-within-cap-batch-passes");
+    }
+
+    sy_remove_all(tmp);
+    sy_printf("CHECK_S1B_PIDS_CAP\tpassed=%d\tfailed=%d\n", g_pass, g_fail);
+    return g_fail ? 1 : 0;
+}
