@@ -1,0 +1,873 @@
+/* tools/devsvc-train.cx -- T-train-3: trial-merge integration train (dispatched by `devsvc train`).
+ *
+ * Shared-repo write disclosure:
+ *   This tool is NOT strictly read-only: creating and removing throwaway worktrees registers/unregisters
+ *   entries under the shared repo's .git/worktrees metadata. All merge object writes are isolated to a
+ *   private temporary GIT_OBJECT_DIRECTORY (with GIT_ALTERNATE_OBJECT_DIRECTORIES pointing at the shared
+ *   objects dir), and hooks/rerere are disabled (-c core.hooksPath=/dev/null -c rerere.enabled=false).
+ *
+ * Guarantees:
+ *   - Resolves every target and branch ref to immutable 40-hex commit SHAs once at startup, and uses
+ *     those SHAs for policy (`git show <target_sha>:exec/facts/derive.tsv`), diffs, and trial merges.
+ *   - Throwaway worktree names include pid + monotonic random hex token + seq, with a `.train-lease`
+ *     marker (pid + /proc/<pid>/stat start_ticks); startup recovers dead tmp-train-* worktrees only.
+ *   - Never runs global `git worktree prune`; worktree add failure never blindly rm -rf's an existing path;
+ *     worktree remove failure marks the pair UNDECIDED and reports TRAIN_ERROR.
+ *   - Reads unmerged conflict paths NUL-separated (`git diff --name-only -z --diff-filter=U`) into
+ *     dynamically allocated strings (no 255-byte path truncation, no 256-path cap, no 128-branch cap).
+ *   - Honours `inputs_glob` patterns (including `*`) from derive.tsv so source inputs stay `kind=source`.
+ *   - `land` is deferred to step 2 (refused here).
+ *
+ *   sh ./unisacc.com tools/devsvc-train.cx -- [--root DIR] [--target REF] [--branch REF] [--shard K/N] [--deadline-ms N] [--no-events]
+ *
+ * Check: tools/check-devsvc-train.cx.
+ */
+#pragma unisa use sys.fs
+#pragma unisa use sys.posix
+#pragma unisa use sys.proc
+#pragma unisa use sys.time
+#pragma unisa use sys.env
+#pragma unisa use sys.io
+#pragma unisa use mem.heap
+#pragma unisa use mem.bytes
+#pragma unisa use text.text
+#pragma unisa use text.fmt
+#pragma unisa use text.conv
+#pragma unisa use cxlib.procrun
+
+#define DT_MAX_TGT 32
+#define DT_MAX_DER 256
+
+typedef struct {
+    char *name;
+    char owner[64];
+    char sha[41];
+    int nfiles;
+    int diff_failed;
+    int src_conf;
+    int der_conf;
+} TrainBranch;
+
+typedef struct {
+    char *target;
+    char *a;
+    char owner_a[64];
+    char *b;
+    char owner_b[64];
+    char *path;
+    int is_derived;
+} TrainConflict;
+
+static char g_derived[DT_MAX_DER][256];
+static int g_nderived;
+static char g_inputs[DT_MAX_DER][256];
+static int g_ninputs;
+
+static TrainBranch *g_br;
+static int g_nbr;
+static int g_br_cap;
+
+static TrainConflict *g_conf;
+static int g_nconf;
+static int g_conf_cap;
+
+static int g_wt_seq;
+
+static char *dt_strdup(const char *s, long n) {
+    char *p = (char *)mm_alloc((size_t)n + 1);
+    if (!p) return 0;
+    if (n > 0) mm_copy(p, (size_t)n + 1, s, (size_t)n);
+    p[n] = 0;
+    return p;
+}
+
+static long dt_mono_ms(void) {
+    sy_ts_t t;
+    if (sy_mono(&t) != 0) return 0L;
+    return (long)t.sec * 1000L + (long)(t.nsec / 1000000L);
+}
+
+static uint64_t dt_rand_token(void) {
+    sy_ts_t t;
+    uint64_t v = (uint64_t)sy_pid() * 0x9e3779b97f4a7c15ULL;
+    if (sy_mono(&t) == 0) {
+        v ^= ((uint64_t)t.sec << 32) ^ (uint64_t)t.nsec;
+    }
+    v ^= (uint64_t)(++g_wt_seq) * 0xbf58476d1ce4e5b9ULL;
+    v ^= v >> 30;
+    v *= 0xbf58476d1ce4e5b9ULL;
+    v ^= v >> 27;
+    return v;
+}
+
+/* Read field 22 (starttime ticks) from /proc/<pid>/stat; returns 0 on success, -1 if process not alive. */
+static int dt_proc_start_ticks(int pid, char out[32]) {
+    char p[64];
+    out[0] = 0;
+    if (pid <= 0 || cx_fmt(p, sizeof p, "/proc/%d/stat", pid)) return -1;
+    size_t n = 0;
+    char *b = (char *)cx_read(p, &n);
+    if (!b || n == 0) { if (b) free(b); return -1; }
+    long rp = -1;
+    for (long i = (long)n - 1; i >= 0; i--) {
+        if (b[i] == ')') { rp = i; break; }
+    }
+    if (rp < 0 || rp + 2 >= (long)n) { free(b); return -1; }
+    /* After ") ", fields start at field 3 (state). Field 22 is index 19 (0-based) after ") ". */
+    long pos = rp + 2;
+    int field = 3;
+    while (pos < (long)n && field < 22) {
+        while (pos < (long)n && b[pos] != ' ') pos++;
+        while (pos < (long)n && b[pos] == ' ') pos++;
+        field++;
+    }
+    long e = pos;
+    while (e < (long)n && b[e] != ' ' && b[e] != '\n') e++;
+    long l = e - pos;
+    if (field != 22 || l <= 0 || l >= 32) { free(b); return -1; }
+    mm_copy(out, 32, b + pos, (size_t)l);
+    out[l] = 0;
+    free(b);
+    return 0;
+}
+
+/* Simple glob matcher where `*` matches any sequence of characters (including `/`). */
+static int dt_glob_match(const char *pat, long pn, const char *str, long sn) {
+    long pi = 0, si = 0, star = -1, match = 0;
+    while (si < sn) {
+        if (pi < pn && pat[pi] == str[si]) { pi++; si++; }
+        else if (pi < pn && pat[pi] == '*') { star = pi++; match = si; }
+        else if (star >= 0) { pi = star + 1; si = ++match; }
+        else return 0;
+    }
+    while (pi < pn && pat[pi] == '*') pi++;
+    return pi == pn;
+}
+
+static int dt_git_out(const char *root, char **av, char **out_buf, long *out_len, int secs) {
+    pr_result r;
+    int rc = pr_run("dt-git", av, root, 0, secs, &r);
+    if (rc != 0 || r.rc != 0 || !r.out) {
+        pr_free(&r);
+        return -1;
+    }
+    char *copy = (char *)mm_alloc((long)r.outn + 1);
+    if (!copy) { pr_free(&r); return -1; }
+    if (r.outn > 0) mm_copy(copy, (long)r.outn + 1, r.out, (long)r.outn);
+    copy[r.outn] = 0;
+    *out_buf = copy;
+    *out_len = (long)r.outn;
+    pr_free(&r);
+    return 0;
+}
+
+static int dt_resolve_sha(const char *root, const char *ref, char sha[41]) {
+    char spec[512];
+    if (cx_fmt(spec, sizeof spec, "%s^{commit}", ref)) return -1;
+    char *av[] = { "git", "rev-parse", "--verify", "--quiet", spec, 0 };
+    char *o = 0; long n = 0;
+    if (dt_git_out(root, av, &o, &n, 5) != 0 || n < 40) {
+        if (o) mm_free(o);
+        return -1;
+    }
+    mm_copy(sha, 41, o, 40);
+    sha[40] = 0;
+    mm_free(o);
+    return 0;
+}
+
+static int dt_br_push(const char *name, long namelen, const char *owner, const char *sha) {
+    if (g_nbr >= g_br_cap) {
+        int nc = g_br_cap ? g_br_cap * 2 : 32;
+        TrainBranch *nb = (TrainBranch *)mm_alloc((size_t)nc * sizeof(TrainBranch));
+        if (!nb) return -1;
+        if (g_br && g_nbr > 0) mm_copy(nb, (size_t)nc * sizeof(TrainBranch), g_br, (size_t)g_nbr * sizeof(TrainBranch));
+        if (g_br) mm_free(g_br);
+        g_br = nb;
+        g_br_cap = nc;
+    }
+    char *dup = dt_strdup(name, namelen);
+    if (!dup) return -1;
+    TrainBranch *b = &g_br[g_nbr++];
+    mm_fill(b, sizeof *b, 0, sizeof *b);
+    b->name = dup;
+    cx_fmt(b->owner, sizeof b->owner, "%s", owner);
+    if (sha && sha[0]) cx_fmt(b->sha, sizeof b->sha, "%s", sha);
+    return 0;
+}
+
+static void dt_free_branches(void) {
+    for (int i = 0; i < g_nbr; i++) if (g_br[i].name) mm_free(g_br[i].name);
+    g_nbr = 0;
+}
+
+/* Recover dead tmp-train-* worktrees left behind by a killed run.
+ * ONLY touches entries whose external sibling `<wt_dir>.lease` exists, names `tool=devsvc-train`,
+ * and whose pid+start_ticks is confirmed dead. Missing/unreadable/invalid lease is left untouched and reported. */
+static void dt_recover_dead_worktrees(const char *root) {
+    char wt_parent[4200];
+    if (cx_fmt(wt_parent, sizeof wt_parent, "%s/.claude/worktrees", root)) return;
+    sy_dir_t d;
+    if (sy_dir_open(&d, wt_parent) != 0) return;
+    while (sy_dir_next(&d) == 1) {
+        long nl = (long)strlen(d.name);
+        if (!tx_prefix(d.name, nl, "tmp-train-", 10)) continue;
+        if (nl > 6 && tx_same(d.name + nl - 6, 6, ".lease", 6)) continue;
+        if (nl > 10 && tx_same(d.name + nl - 10, 10, ".lease.tmp", 10)) continue;
+        char wt_dir[4400], lease_p[4500];
+        if (cx_fmt(wt_dir, sizeof wt_dir, "%s/%s", wt_parent, d.name) ||
+            cx_fmt(lease_p, sizeof lease_p, "%s.lease", wt_dir)) continue;
+        size_t ln = 0;
+        char *lb = (char *)cx_read(lease_p, &ln);
+        if (!lb || ln == 0) {
+            if (lb) free(lb);
+            sy_eprintf("TRAIN_WARN\trecovery-skipped-no-lease\tpath=%s\n", wt_dir);
+            continue;
+        }
+        long e = tx_chr(lb, (long)ln, '\n');
+        long ll = (e < 0) ? (long)ln : e;
+        long o0 = 0, l0 = 0, o1 = 0, l1 = 0, o2 = 0, l2 = 0;
+        int64_t pid64 = 0;
+        int valid = (!tx_field(lb, ll, '\t', 0, &o0, &l0) && l0 == 17 && tx_same(lb + o0, l0, "tool=devsvc-train", 17) &&
+                     !tx_field(lb, ll, '\t', 1, &o1, &l1) && l1 > 4 && tx_prefix(lb + o1, l1, "pid=", 4) &&
+                     !tx_to_i64(lb + o1 + 4, l1 - 4, 10, &pid64) && pid64 > 0 &&
+                     !tx_field(lb, ll, '\t', 2, &o2, &l2) && l2 > 12 && tx_prefix(lb + o2, l2, "start_ticks=", 12));
+        if (!valid) {
+            free(lb);
+            sy_eprintf("TRAIN_WARN\trecovery-skipped-invalid-lease\tpath=%s\n", wt_dir);
+            continue;
+        }
+        char cur_ticks[32];
+        int alive = (dt_proc_start_ticks((int)pid64, cur_ticks) == 0 &&
+                     (long)strlen(cur_ticks) == l2 - 12 &&
+                     tx_same(cur_ticks, l2 - 12, lb + o2 + 12, l2 - 12));
+        free(lb);
+        if (alive) continue;
+        /* Confirmed dead lease: remove worktree first, then unlink lease only after removal is confirmed. */
+        char *rmv[] = { "git", "worktree", "remove", "--force", wt_dir, 0 };
+        pr_result rmr;
+        int rc = pr_run("dt-rec-rm", rmv, root, 0, 10, &rmr);
+        int ok = (rc == 0 && rmr.rc == 0);
+        pr_free(&rmr);
+        if (!ok && sy_exists(wt_dir) == 1) {
+            ok = (sy_remove_all(wt_dir) == 0);
+        }
+        if (ok && sy_exists(wt_dir) == 0) {
+            (void)sy_unlink(lease_p);
+        }
+    }
+    sy_dir_close(&d);
+}
+
+static int dt_load_derived_at_sha(const char *root, const char *target_sha) {
+    char spec[128];
+    char *b = 0;
+    long n = 0;
+    g_nderived = 0;
+    g_ninputs = 0;
+    if (cx_fmt(spec, sizeof spec, "%s:exec/facts/derive.tsv", target_sha)) return -1;
+    char *av[] = { "git", "show", spec, 0 };
+    if (dt_git_out(root, av, &b, &n, 8) != 0 || !b) return -1;
+    long at = 0;
+    while (at < n) {
+        long e = at;
+        while (e < n && b[e] != '\n') e++;
+        long len = e - at;
+        if (len > 0 && b[at] != '#') {
+            long o3 = 0, l3 = 0, o4 = 0, l4 = 0, o5 = 0, l5 = 0;
+            /* Collect ALL inputs_glob tokens (including globs with `*`) so source inputs stay kind=source. */
+            if (!tx_field(b + at, len, '\t', 5, &o5, &l5) && l5 > 0) {
+                const char *ins = b + at + o5;
+                long p0 = 0;
+                while (p0 < l5 && g_ninputs < DT_MAX_DER) {
+                    while (p0 < l5 && ins[p0] == ' ') p0++;
+                    long p1 = p0;
+                    while (p1 < l5 && ins[p1] != ' ' && ins[p1] != '\r') p1++;
+                    if (p1 > p0 && p1 - p0 < 256 && !(p1 - p0 == 1 && ins[p0] == '-')) {
+                        mm_copy(g_inputs[g_ninputs], 256, ins + p0, p1 - p0);
+                        g_inputs[g_ninputs][p1 - p0] = 0;
+                        g_ninputs++;
+                    }
+                    p0 = p1 + 1;
+                }
+            }
+            if (!tx_field(b + at, len, '\t', 3, &o3, &l3) && l3 > 0 &&
+                !(l3 == 1 && b[at + o3] == '-') &&
+                !tx_field(b + at, len, '\t', 4, &o4, &l4) && l4 > 0) {
+                const char *outs = b + at + o4;
+                long p0 = 0;
+                while (p0 < l4 && g_nderived < DT_MAX_DER) {
+                    while (p0 < l4 && outs[p0] == ' ') p0++;
+                    long p1 = p0;
+                    while (p1 < l4 && outs[p1] != ' ' && outs[p1] != '\r') p1++;
+                    if (p1 > p0 && p1 - p0 < 256) {
+                        mm_copy(g_derived[g_nderived], 256, outs + p0, p1 - p0);
+                        g_derived[g_nderived][p1 - p0] = 0;
+                        g_nderived++;
+                    }
+                    p0 = p1 + 1;
+                }
+            }
+        }
+        at = e + 1;
+    }
+    mm_free(b);
+    return 0;
+}
+
+static int dt_is_derived_path(const char *path) {
+    long pl = (long)strlen(path);
+    for (int i = 0; i < g_ninputs; i++) {
+        long il = (long)strlen(g_inputs[i]);
+        if (il > 0 && dt_glob_match(g_inputs[i], il, path, pl)) return 0;
+    }
+    for (int i = 0; i < g_nderived; i++) {
+        long dl = (long)strlen(g_derived[i]);
+        if (dl <= 0) continue;
+        if (g_derived[i][dl - 1] == '/') {
+            if (pl >= dl && tx_prefix(path, pl, g_derived[i], dl)) return 1;
+        } else {
+            if (pl == dl && tx_same(path, pl, g_derived[i], dl)) return 1;
+        }
+    }
+    return 0;
+}
+
+static void dt_owner_from_branch(const char *br, char out[64]) {
+    if (!tx_prefix(br, (long)strlen(br), "w/", 2)) {
+        cx_fmt(out, 64, "integrator");
+        return;
+    }
+    const char *s = br + 2;
+    long n = 0;
+    while (s[n] && s[n] != '-' && s[n] != '/' && n < 63) {
+        out[n] = s[n];
+        n++;
+    }
+    out[n] = 0;
+    if (n == 0) cx_fmt(out, 64, "unknown");
+}
+
+/* Stream NUL-separated changed-file count between immutable SHAs (no path cap). */
+static int dt_count_branch_files(const char *root, const char *target_sha, TrainBranch *tb) {
+    char range[128];
+    tb->nfiles = 0;
+    tb->diff_failed = 0;
+    if (!tb->sha[0] || cx_fmt(range, sizeof range, "%s...%s", target_sha, tb->sha)) { tb->diff_failed = 1; return -1; }
+    char *av[] = { "git", "diff", "--name-only", "-z", range, 0 };
+    char *o = 0; long n = 0;
+    if (dt_git_out(root, av, &o, &n, 10) != 0) { tb->diff_failed = 1; return -1; }
+    long at = 0;
+    while (at < n) {
+        long e = at;
+        while (e < n && o[e] != 0) e++;
+        if (e > at) tb->nfiles++;
+        at = e + 1;
+    }
+    mm_free(o);
+    return 0;
+}
+
+static void dt_add_conflict(const char *target, const char *a, const char *oa,
+                            const char *b, const char *ob, const char *path) {
+    for (int i = 0; i < g_nconf; i++) {
+        if (tx_eqz(g_conf[i].target, target) && tx_eqz(g_conf[i].a, a) &&
+            tx_eqz(g_conf[i].b, b) && tx_eqz(g_conf[i].path, path)) return;
+    }
+    if (g_nconf >= g_conf_cap) {
+        int nc = g_conf_cap ? g_conf_cap * 2 : 64;
+        TrainConflict *nb = (TrainConflict *)mm_alloc((size_t)nc * sizeof(TrainConflict));
+        if (!nb) return;
+        if (g_conf && g_nconf > 0) mm_copy(nb, (size_t)nc * sizeof(TrainConflict), g_conf, (size_t)g_nconf * sizeof(TrainConflict));
+        if (g_conf) mm_free(g_conf);
+        g_conf = nb;
+        g_conf_cap = nc;
+    }
+    TrainConflict *c = &g_conf[g_nconf++];
+    mm_fill(c, sizeof *c, 0, sizeof *c);
+    c->target = dt_strdup(target, (long)strlen(target));
+    c->a = dt_strdup(a, (long)strlen(a));
+    cx_fmt(c->owner_a, sizeof c->owner_a, "%s", oa);
+    c->b = dt_strdup(b, (long)strlen(b));
+    cx_fmt(c->owner_b, sizeof c->owner_b, "%s", ob);
+    c->path = dt_strdup(path, (long)strlen(path));
+    c->is_derived = dt_is_derived_path(path);
+}
+
+/* Trial merge in a throwaway worktree with isolated GIT_OBJECT_DIRECTORY, disabled hooks & rerere,
+ * random non-colliding worktree name, lease marker, NUL-separated conflict paths, and strict cleanup. */
+static int dt_check_pair_trial_merge(const char *root, const char *shared_obj_dir, const char *self_ticks,
+                                     const char *target_name,
+                                     const char *a_name, const char *a_sha, const char *oa,
+                                     const char *b_name, const char *b_sha, const char *ob,
+                                     int *src_hits, int *der_hits) {
+    char wt_parent[4200], wt_dir[4400], lease_p[4500], lease_tmp[4520], tmp_obj[4200];
+    uint64_t tok = dt_rand_token();
+    if (cx_fmt(wt_parent, sizeof wt_parent, "%s/.claude/worktrees", root) ||
+        sy_mkdir_all(wt_parent, 0700) != 0 ||
+        cx_fmt(wt_dir, sizeof wt_dir, "%s/tmp-train-%d-%016llx-%d",
+               wt_parent, (int)sy_pid(), (unsigned long long)tok, g_wt_seq) ||
+        cx_fmt(lease_p, sizeof lease_p, "%s.lease", wt_dir) ||
+        cx_fmt(lease_tmp, sizeof lease_tmp, "%s.lease.tmp", wt_dir)) {
+        return -1;
+    }
+    if (sy_exists(wt_dir) == 1 || sy_exists(lease_p) == 1) return -1; /* Never overwrite or rm an already-existing path. */
+    /* Publish external lease atomically (write-temp + rename) BEFORE creating the worktree. */
+    {
+        char lbuf[160];
+        if (cx_fmt(lbuf, sizeof lbuf, "tool=devsvc-train\tpid=%d\tstart_ticks=%s\n", (int)sy_pid(), self_ticks) ||
+            cx_write(lease_tmp, lbuf, strlen(lbuf)) != 0 ||
+            sy_rename(lease_tmp, lease_p) != 0) {
+            (void)sy_unlink(lease_tmp);
+            return -1;
+        }
+    }
+    if (sy_mkdtemp(sy_tmpdir(), "dt-obj-", tmp_obj, sizeof tmp_obj) != 0) {
+        (void)sy_unlink(lease_p);
+        return -1;
+    }
+
+    {
+        char *addv[] = { "git", "worktree", "add", "--detach", "-q", wt_dir, (char *)a_sha, 0 };
+        pr_result ar;
+        int rc = pr_run("dt-wt-add", addv, root, 0, 15, &ar);
+        int ok = (rc == 0 && ar.rc == 0);
+        pr_free(&ar);
+        if (!ok) {
+            (void)sy_remove_all(tmp_obj);
+            if (sy_exists(wt_dir) == 0) (void)sy_unlink(lease_p);
+            return -1; /* Do not blindly rm wt_dir on add failure. */
+        }
+    }
+
+    int status = 0;
+    {
+        char env_obj[4400], env_alt[4400];
+        if (cx_fmt(env_obj, sizeof env_obj, "GIT_OBJECT_DIRECTORY=%s", tmp_obj) ||
+            cx_fmt(env_alt, sizeof env_alt, "GIT_ALTERNATE_OBJECT_DIRECTORIES=%s", shared_obj_dir)) {
+            status = -1;
+        } else {
+            char *mv[] = { "env", env_obj, env_alt,
+                           "git", "-c", "user.name=train", "-c", "user.email=train@local",
+                           "-c", "core.hooksPath=/dev/null", "-c", "rerere.enabled=false",
+                           "merge", "--no-commit", "--no-ff", "-q", (char *)b_sha, 0 };
+            pr_result mr;
+            int rc = pr_run("dt-merge", mv, wt_dir, 0, 15, &mr);
+            int mrc = (rc == 0) ? mr.rc : -1;
+            pr_free(&mr);
+            if (mrc < 0) {
+                status = -1;
+            } else if (mrc != 0) {
+                char *uv[] = { "env", env_obj, env_alt, "git", "diff", "--name-only", "-z", "--diff-filter=U", 0 };
+                char *uo = 0; long un = 0;
+                if (dt_git_out(wt_dir, uv, &uo, &un, 10) != 0) {
+                    status = -1;
+                } else {
+                    int found = 0;
+                    long at = 0;
+                    while (at < un) {
+                        long e = at;
+                        while (e < un && uo[e] != 0) e++;
+                        long l = e - at;
+                        if (l > 0) {
+                            char *pbuf = dt_strdup(uo + at, l);
+                            if (pbuf) {
+                                int is_d = dt_is_derived_path(pbuf);
+                                dt_add_conflict(target_name, a_name, oa, b_name, ob, pbuf);
+                                if (is_d) (*der_hits)++; else (*src_hits)++;
+                                mm_free(pbuf);
+                                found++;
+                            } else {
+                                status = -1;
+                            }
+                        }
+                        at = e + 1;
+                    }
+                    mm_free(uo);
+                    if (found == 0) status = -1;
+                }
+            }
+        }
+    }
+
+    /* Cleanup: abort merge, remove throwaway worktree (never global prune; keep lease until removal is confirmed). */
+    {
+        char *abv[] = { "git", "merge", "--abort", 0 };
+        pr_result abr;
+        (void)pr_run("dt-abort", abv, wt_dir, 0, 8, &abr);
+        pr_free(&abr);
+    }
+    {
+        char *rmv[] = { "git", "worktree", "remove", "--force", wt_dir, 0 };
+        pr_result rmr;
+        int rc = pr_run("dt-wt-rm", rmv, root, 0, 10, &rmr);
+        int ok = (rc == 0 && rmr.rc == 0);
+        pr_free(&rmr);
+        if (!ok || sy_exists(wt_dir) != 0) {
+            sy_eprintf("TRAIN_ERROR\tworktree-remove-failed\tpath=%s\n", wt_dir);
+            status = -1;
+        } else {
+            (void)sy_unlink(lease_p);
+        }
+    }
+    (void)sy_remove_all(tmp_obj);
+    return status;
+}
+
+int main(int argc, char **argv) {
+    long t0 = dt_mono_ms();
+    long budget_ms = 42000L;
+    const char *root = ".";
+    const char *only_target = 0;
+    const char *only_branch = 0;
+    int emit_events = 1;
+    int shard_idx = 0, shard_cnt = 1;
+
+    for (int i = 1; i < argc; i++) {
+        if (tx_eqz(argv[i], "land")) {
+            sy_eprintf("TRAIN_REFUSE\tland-deferred-to-step2\tuse matrix only in step 1\n");
+            return 2;
+        } else if (tx_eqz(argv[i], "--root") && i + 1 < argc) {
+            root = argv[++i];
+        } else if (tx_eqz(argv[i], "--target") && i + 1 < argc) {
+            only_target = argv[++i];
+        } else if (tx_eqz(argv[i], "--branch") && i + 1 < argc) {
+            only_branch = argv[++i];
+        } else if (tx_eqz(argv[i], "--no-events")) {
+            emit_events = 0;
+        } else if (tx_eqz(argv[i], "--deadline-ms") && i + 1 < argc) {
+            int64_t v = 0;
+            const char *s = argv[++i];
+            if (!tx_to_i64(s, tx_len(s, 32), 10, &v) && v >= 500 && v <= 54000) budget_ms = (long)v;
+        } else if (tx_eqz(argv[i], "--shard") && i + 1 < argc) {
+            const char *s = argv[++i];
+            long sl = tx_len(s, 32), slash = tx_chr(s, sl, '/');
+            int64_t k = 0, n = 0;
+            if (slash <= 0 || slash + 1 >= sl ||
+                tx_to_i64(s, slash, 10, &k) || tx_to_i64(s + slash + 1, sl - slash - 1, 10, &n) ||
+                n < 1 || k < 0 || k >= n) {
+                sy_eprintf("TRAIN_REFUSE\tbad-shard\t%s\n", s);
+                return 2;
+            }
+            shard_idx = (int)k;
+            shard_cnt = (int)n;
+        } else if (tx_eqz(argv[i], "--help") || tx_eqz(argv[i], "-h")) {
+            sy_printf("usage: devsvc-train.cx -- [--root DIR] [--target REF] [--branch REF] [--shard K/N] [--deadline-ms N] [--no-events]\n");
+            return 0;
+        } else {
+            sy_eprintf("TRAIN_REFUSE\tunknown-arg\t%s\n", argv[i]);
+            return 2;
+        }
+    }
+
+    long deadline_ms = t0 + budget_ms;
+    char self_ticks[32];
+    if (dt_proc_start_ticks((int)sy_pid(), self_ticks) != 0) cx_fmt(self_ticks, sizeof self_ticks, "0");
+
+    /* Recover any dead tmp-train-* worktrees from prior killed runs. */
+    dt_recover_dead_worktrees(root);
+
+    /* Resolve shared git objects directory once for GIT_ALTERNATE_OBJECT_DIRECTORIES. */
+    char shared_obj_dir[4400];
+    {
+        char *gv[] = { "git", "rev-parse", "--path-format=absolute", "--git-common-dir", 0 };
+        char *go = 0; long gn = 0;
+        if (dt_git_out(root, gv, &go, &gn, 5) != 0 || gn <= 0) {
+            sy_eprintf("TRAIN_ERROR\tgit-common-dir-failed\n");
+            sy_printf("TRAIN_SUMMARY\tstatus=ERROR\ttargets=0\tbranches=0\tsource_conflicts=0\tderived_conflicts=0\terrors=1\tundecided=0\tsharded_out=0\tms=%ld\n",
+                      dt_mono_ms() - t0);
+            return 1;
+        }
+        while (gn > 0 && (go[gn - 1] == '\n' || go[gn - 1] == '\r')) gn--;
+        go[gn] = 0;
+        int bad = cx_fmt(shared_obj_dir, sizeof shared_obj_dir, "%s/objects", go);
+        mm_free(go);
+        if (bad) return 1;
+    }
+
+    char targets[DT_MAX_TGT][256];
+    char target_shas[DT_MAX_TGT][41];
+    int ntgt = 0;
+    if (only_target && only_target[0]) {
+        cx_fmt(targets[ntgt++], 256, "%s", only_target);
+    } else {
+        char *av[] = { "git", "for-each-ref", "--format=%(refname:short)", "refs/heads/v*", 0 };
+        char *o = 0; long n = 0;
+        if (dt_git_out(root, av, &o, &n, 5) != 0) {
+            sy_eprintf("TRAIN_ERROR\tgit-for-each-ref-targets-failed\n");
+            sy_printf("TRAIN_SUMMARY\tstatus=ERROR\ttargets=0\tbranches=0\tsource_conflicts=0\tderived_conflicts=0\terrors=1\tundecided=0\tsharded_out=0\tms=%ld\n",
+                      dt_mono_ms() - t0);
+            return 1;
+        }
+        long at = 0;
+        while (at < n && ntgt < DT_MAX_TGT) {
+            long e = at;
+            while (e < n && o[e] != '\n') e++;
+            long l = e - at;
+            if (l > 0 && l < 256) {
+                mm_copy(targets[ntgt], 256, o + at, l);
+                targets[ntgt][l] = 0;
+                ntgt++;
+            }
+            at = e + 1;
+        }
+        mm_free(o);
+        if (ntgt == 0) cx_fmt(targets[ntgt++], 256, "main");
+    }
+
+    int total_br = 0, total_src = 0, total_der = 0, total_err = 0, total_undec = 0, total_sharded = 0;
+    g_nconf = 0;
+
+    /* Resolve every target to an immutable commit SHA once upfront. */
+    for (int t = 0; t < ntgt; t++) {
+        target_shas[t][0] = 0;
+        if (dt_resolve_sha(root, targets[t], target_shas[t]) != 0) {
+            total_err++;
+            sy_eprintf("TRAIN_ERROR\ttarget-rev-parse-failed\ttarget=%s\n", targets[t]);
+        }
+    }
+
+    for (int t = 0; t < ntgt; t++) {
+        if (!target_shas[t][0]) continue;
+        if (dt_mono_ms() >= deadline_ms) {
+            total_undec++;
+            sy_printf("TRAIN_PAIR\ttarget=%s\ta=-\tb=-\tstatus=UNDECIDED\treason=deadline\n", targets[t]);
+            continue;
+        }
+        if (dt_load_derived_at_sha(root, target_shas[t]) != 0) {
+            total_err++;
+            sy_eprintf("TRAIN_ERROR\tderive-table-at-target-unreadable\ttarget=%s\tsha=%s\n", targets[t], target_shas[t]);
+            continue;
+        }
+
+        dt_free_branches();
+        if (only_branch && only_branch[0]) {
+            char owner[64], bsha[41];
+            dt_owner_from_branch(only_branch, owner);
+            bsha[0] = 0;
+            if (dt_resolve_sha(root, only_branch, bsha) != 0) {
+                if (dt_br_push(only_branch, (long)strlen(only_branch), owner, "") != 0) { total_err++; continue; }
+                g_br[g_nbr - 1].diff_failed = 1;
+                total_err++;
+                sy_eprintf("TRAIN_ERROR\tbranch-rev-parse-failed\ttarget=%s\tbranch=%s\n", targets[t], only_branch);
+            } else {
+                if (dt_br_push(only_branch, (long)strlen(only_branch), owner, bsha) != 0) { total_err++; continue; }
+            }
+        } else {
+            char *av[] = { "git", "for-each-ref", "--no-merged", target_shas[t],
+                           "--format=%(refname:short)\t%(objectname)", "refs/heads/w/*", 0 };
+            char *o = 0; long n = 0;
+            if (dt_git_out(root, av, &o, &n, 5) != 0) {
+                total_err++;
+                sy_eprintf("TRAIN_ERROR\tgit-for-each-ref-branches-failed\ttarget=%s\n", targets[t]);
+                continue;
+            }
+            long at = 0;
+            while (at < n) {
+                long e = at;
+                while (e < n && o[e] != '\n') e++;
+                long l = e - at;
+                long o0 = 0, l0 = 0, o1 = 0, l1 = 0;
+                if (l > 0 && !tx_field(o + at, l, '\t', 0, &o0, &l0) && l0 > 0) {
+                    char ow[64], sh[41];
+                    sh[0] = 0;
+                    char *bn_tmp = dt_strdup(o + at + o0, l0);
+                    if (!bn_tmp) { total_err++; break; }
+                    dt_owner_from_branch(bn_tmp, ow);
+                    if (!tx_field(o + at, l, '\t', 1, &o1, &l1) && l1 == 40) {
+                        mm_copy(sh, sizeof sh, o + at + o1, 40); sh[40] = 0;
+                    }
+                    int prc = dt_br_push(bn_tmp, l0, ow, sh);
+                    mm_free(bn_tmp);
+                    if (prc != 0) { total_err++; break; }
+                }
+                at = e + 1;
+            }
+            mm_free(o);
+        }
+        total_br += g_nbr;
+
+        int tgt_src = 0, tgt_der = 0, tgt_err = 0, tgt_undec = 0, tgt_sharded = 0;
+        for (int i = 0; i < g_nbr; i++) {
+            g_br[i].src_conf = 0;
+            g_br[i].der_conf = 0;
+            if (g_br[i].diff_failed) continue;
+            if (dt_mono_ms() >= deadline_ms) {
+                g_br[i].diff_failed = 1;
+                tgt_undec++;
+                sy_printf("TRAIN_PAIR\ttarget=%s\ta=%s\tb=%s\tstatus=UNDECIDED\treason=deadline\n",
+                          targets[t], targets[t], g_br[i].name);
+                continue;
+            }
+            if (dt_count_branch_files(root, target_shas[t], &g_br[i]) != 0) {
+                tgt_err++;
+                sy_eprintf("TRAIN_ERROR\tgit-diff-failed\ttarget=%s\tbranch=%s\n", targets[t], g_br[i].name);
+            }
+        }
+
+        /* 1. Check each w/ branch vs target via isolated trial merge using immutable SHAs */
+        for (int i = 0; i < g_nbr; i++) {
+            if (shard_cnt > 1 && (i % shard_cnt) != shard_idx) {
+                tgt_sharded++;
+                sy_printf("TRAIN_PAIR\ttarget=%s\ta=%s\tb=%s\tstatus=SHARDED_OUT\tshard=%d/%d\n",
+                          targets[t], targets[t], g_br[i].name, shard_idx, shard_cnt);
+                continue;
+            }
+            if (dt_mono_ms() >= deadline_ms) {
+                tgt_undec++;
+                sy_printf("TRAIN_PAIR\ttarget=%s\ta=%s\tb=%s\tstatus=UNDECIDED\treason=deadline\n",
+                          targets[t], targets[t], g_br[i].name);
+                continue;
+            }
+            if (g_br[i].diff_failed || !g_br[i].sha[0]) {
+                tgt_undec++;
+                sy_printf("TRAIN_PAIR\ttarget=%s\ta=%s\tb=%s\tstatus=UNDECIDED\treason=diff-failed\n",
+                          targets[t], targets[t], g_br[i].name);
+                continue;
+            }
+            int sc = 0, dc = 0;
+            if (dt_check_pair_trial_merge(root, shared_obj_dir, self_ticks, targets[t],
+                                          targets[t], target_shas[t], "integrator",
+                                          g_br[i].name, g_br[i].sha, g_br[i].owner, &sc, &dc) != 0) {
+                tgt_err++;
+                tgt_undec++;
+                sy_eprintf("TRAIN_ERROR\ttrial-merge-failed\ttarget=%s\ta=%s\tb=%s\n",
+                           targets[t], targets[t], g_br[i].name);
+                sy_printf("TRAIN_PAIR\ttarget=%s\ta=%s\tb=%s\tstatus=UNDECIDED\treason=trial-merge-failed\n",
+                          targets[t], targets[t], g_br[i].name);
+            } else {
+                g_br[i].src_conf += sc;
+                g_br[i].der_conf += dc;
+                tgt_src += sc;
+                tgt_der += dc;
+                sy_printf("TRAIN_PAIR\ttarget=%s\ta=%s\tb=%s\tstatus=COMPLETE\tsource_conflicts=%d\tderived_conflicts=%d\n",
+                          targets[t], targets[t], g_br[i].name, sc, dc);
+            }
+        }
+
+        /* 2. Check pairwise w/ branches via isolated trial merge using immutable SHAs */
+        for (int i = 0; i < g_nbr; i++) {
+            for (int j = i + 1; j < g_nbr; j++) {
+                if (shard_cnt > 1 && (i % shard_cnt) != shard_idx) {
+                    tgt_sharded++;
+                    sy_printf("TRAIN_PAIR\ttarget=%s\ta=%s\tb=%s\tstatus=SHARDED_OUT\tshard=%d/%d\n",
+                              targets[t], g_br[i].name, g_br[j].name, shard_idx, shard_cnt);
+                    continue;
+                }
+                if (dt_mono_ms() >= deadline_ms) {
+                    tgt_undec++;
+                    sy_printf("TRAIN_PAIR\ttarget=%s\ta=%s\tb=%s\tstatus=UNDECIDED\treason=deadline\n",
+                              targets[t], g_br[i].name, g_br[j].name);
+                    continue;
+                }
+                if (g_br[i].diff_failed || g_br[j].diff_failed || !g_br[i].sha[0] || !g_br[j].sha[0]) {
+                    tgt_undec++;
+                    sy_printf("TRAIN_PAIR\ttarget=%s\ta=%s\tb=%s\tstatus=UNDECIDED\treason=diff-failed\n",
+                              targets[t], g_br[i].name, g_br[j].name);
+                    continue;
+                }
+                int sc = 0, dc = 0;
+                if (dt_check_pair_trial_merge(root, shared_obj_dir, self_ticks, targets[t],
+                                              g_br[i].name, g_br[i].sha, g_br[i].owner,
+                                              g_br[j].name, g_br[j].sha, g_br[j].owner, &sc, &dc) != 0) {
+                    tgt_err++;
+                    tgt_undec++;
+                    sy_eprintf("TRAIN_ERROR\ttrial-merge-failed\ttarget=%s\ta=%s\tb=%s\n",
+                               targets[t], g_br[i].name, g_br[j].name);
+                    sy_printf("TRAIN_PAIR\ttarget=%s\ta=%s\tb=%s\tstatus=UNDECIDED\treason=trial-merge-failed\n",
+                              targets[t], g_br[i].name, g_br[j].name);
+                } else {
+                    g_br[i].src_conf += sc;
+                    g_br[j].src_conf += sc;
+                    g_br[i].der_conf += dc;
+                    g_br[j].der_conf += dc;
+                    tgt_src += sc;
+                    tgt_der += dc;
+                    sy_printf("TRAIN_PAIR\ttarget=%s\ta=%s\tb=%s\tstatus=COMPLETE\tsource_conflicts=%d\tderived_conflicts=%d\n",
+                              targets[t], g_br[i].name, g_br[j].name, sc, dc);
+                }
+            }
+        }
+
+        for (int pass = 0; pass < 2; pass++) {
+            for (int k = 0; k < g_nconf; k++) {
+                if (!tx_eqz(g_conf[k].target, targets[t])) continue;
+                if (pass == 0 && g_conf[k].is_derived) continue;
+                if (pass == 1 && !g_conf[k].is_derived) continue;
+                if (g_conf[k].is_derived) {
+                    sy_printf("TRAIN_CONFLICT\ttarget=%s\ta=%s\towner_a=%s\tb=%s\towner_b=%s\tpath=%s\tkind=derived\taction=auto-regenerate\n",
+                              g_conf[k].target, g_conf[k].a, g_conf[k].owner_a, g_conf[k].b, g_conf[k].owner_b, g_conf[k].path);
+                } else {
+                    sy_printf("TRAIN_CONFLICT\ttarget=%s\ta=%s\towner_a=%s\tb=%s\towner_b=%s\tpath=%s\tkind=source\n",
+                              g_conf[k].target, g_conf[k].a, g_conf[k].owner_a, g_conf[k].b, g_conf[k].owner_b, g_conf[k].path);
+                }
+            }
+        }
+
+        int *ord = (g_nbr > 0) ? (int *)mm_alloc((size_t)g_nbr * sizeof(int)) : 0;
+        for (int i = 0; i < g_nbr; i++) ord[i] = i;
+        for (int i = 0; i < g_nbr; i++) {
+            for (int j = i + 1; j < g_nbr; j++) {
+                TrainBranch *bi = &g_br[ord[i]], *bj = &g_br[ord[j]];
+                int swap = 0;
+                if ((bi->src_conf > 0) != (bj->src_conf > 0)) swap = (bi->src_conf > 0);
+                else if (bi->src_conf != bj->src_conf) swap = (bi->src_conf > bj->src_conf);
+                else if (bi->nfiles != bj->nfiles) swap = (bi->nfiles > bj->nfiles);
+                if (swap) { int tmp_i = ord[i]; ord[i] = ord[j]; ord[j] = tmp_i; }
+            }
+        }
+        int scope_complete = (tgt_err == 0 && tgt_undec == 0 && tgt_sharded == 0);
+        for (int i = 0; i < g_nbr; i++) {
+            TrainBranch *b = &g_br[ord[i]];
+            const char *bst = !scope_complete ? "undecided" : (b->src_conf == 0 ? "ready" : "conflict");
+            sy_printf("TRAIN_ORDER\ttarget=%s\tidx=%d\tbranch=%s\towner=%s\tstatus=%s\torder_basis=sorted-by-conflict-count\tsource_conflicts=%d\tderived_conflicts=%d\tchanged_files=%d\n",
+                      targets[t], i + 1, b->name, b->owner, bst, b->src_conf, b->der_conf, b->nfiles);
+        }
+        if (ord) mm_free(ord);
+
+        const char *ev_kind = (tgt_err > 0) ? "train.error"
+                            : (!scope_complete) ? "train.undecided"
+                            : (tgt_src > 0) ? "train.conflict"
+                            : "train.ready";
+        int emitted = 0;
+        if (emit_events && (tx_eqz(ev_kind, "train.conflict") || tx_eqz(ev_kind, "train.ready"))) {
+            char prod[4400], dv[4400], txt[256];
+            if (!cx_fmt(prod, sizeof prod, "%s/unisacc.com", root) &&
+                !cx_fmt(dv, sizeof dv, "%s/tools/devsvc.cx", root) &&
+                !cx_fmt(txt, sizeof txt, "target=%s branches=%d source_conflicts=%d derived_conflicts=%d",
+                        targets[t], g_nbr, tgt_src, tgt_der) &&
+                sy_exists(prod) == 1 && sy_exists(dv) == 1) {
+                char *ev[] = { "sh", prod, dv, "--", "events", "emit", (char *)ev_kind, txt, 0 }; /* lint:allow R1-product emits train event via devsvc */
+                pr_result er;
+                int erc = pr_run("dt-ev", ev, root, 0, 5, &er);
+                if (erc == 0 && er.rc == 0) emitted = 1;
+                pr_free(&er);
+            }
+        }
+        sy_printf("TRAIN_EVENT\tkind=%s\ttarget=%s\tbranches=%d\tsource_conflicts=%d\tderived_conflicts=%d\terrors=%d\tundecided=%d\tsharded_out=%d\temitted=%d\n",
+                  ev_kind, targets[t], g_nbr, tgt_src, tgt_der, tgt_err, tgt_undec, tgt_sharded, emitted);
+        total_src += tgt_src;
+        total_der += tgt_der;
+        total_err += tgt_err;
+        total_undec += tgt_undec;
+        total_sharded += tgt_sharded;
+    }
+
+    const char *sum_st = (total_err > 0) ? "ERROR"
+                       : (total_undec > 0 || total_sharded > 0) ? "UNDECIDED"
+                       : (total_src > 0) ? "CONFLICT"
+                       : "READY";
+    long elapsed = dt_mono_ms() - t0;
+    sy_printf("TRAIN_SUMMARY\tstatus=%s\ttargets=%d\tbranches=%d\tsource_conflicts=%d\tderived_conflicts=%d\terrors=%d\tundecided=%d\tsharded_out=%d\tms=%ld\n",
+              sum_st, ntgt, total_br, total_src, total_der, total_err, total_undec, total_sharded, elapsed);
+    dt_free_branches();
+    if (g_br) mm_free(g_br);
+    for (int k = 0; k < g_nconf; k++) {
+        if (g_conf[k].target) mm_free(g_conf[k].target);
+        if (g_conf[k].a) mm_free(g_conf[k].a);
+        if (g_conf[k].b) mm_free(g_conf[k].b);
+        if (g_conf[k].path) mm_free(g_conf[k].path);
+    }
+    if (g_conf) mm_free(g_conf);
+    return total_err > 0 ? 1 : 0;
+}
