@@ -2665,7 +2665,7 @@ static int has_window_worktrees(const char *wt_base) {
     return 0;
 }
 static int shared_checkout_write_gate(const char *root, int use_flow_root, const char *tag, const char *op, const char *path, int argc, char **argv) {
-    char wt_base[PW + 64], norm_t[PW * 2], rreal[PW], env_ow[64], arg_ow[64], own_wt[PW + 128], hint_wt[PW + 128];
+    char wt_base[PW + 64], norm_t[PW * 2], rreal[PW], env_ow[64], arg_ow[64], own_wt[PW + 128], hint_wt[PW + 128], cwd_vwt[PW + 128];
     const char *fr = use_flow_root ? getenv("UNISACC_FLOW_ROOT") : 0, *raw_env = getenv("DEVSVC_OWNER"), *raw_arg = 0;
     const char *base = (path && path[0] == '/') ? "" : (fr && *fr ? fr : root);
     env_ow[0] = 0; arg_ow[0] = 0;
@@ -2703,7 +2703,7 @@ static int shared_checkout_write_gate(const char *root, int use_flow_root, const
     int hwt = has_window_worktrees(wt_base);
     if (hwt == 0) return 0;
     if (is_cc) return 0;
-    own_wt[0] = 0; hint_wt[0] = 0;
+    own_wt[0] = 0; hint_wt[0] = 0; cwd_vwt[0] = 0;
     {
         const char *ow = env_ow[0] ? env_ow : arg_ow;
         const char *s = strchr(ow, ':'); s = (s && s[1]) ? s + 1 : ow;
@@ -2716,7 +2716,7 @@ static int shared_checkout_write_gate(const char *root, int use_flow_root, const
             }
         }
     }
-    if (!own_wt[0] && root && root[0]) {
+    if (root && root[0]) {
         if (sy_realpath(root, rreal, sizeof rreal) < 0 && cx_fmt(rreal, sizeof rreal, "%s", root)) rreal[0] = 0;
         size_t wbl = strlen(wt_base);
         if (rreal[0] && !strncmp(rreal, wt_base, wbl) && rreal[wbl] == '/') {
@@ -2726,7 +2726,10 @@ static int shared_checkout_write_gate(const char *root, int use_flow_root, const
             if (le > ls && (size_t)(le - ls) < sizeof leaf) {
                 mm_copy(leaf, sizeof leaf, ls, (size_t)(le - ls));
                 leaf[le - ls] = 0;
-                if (shared_wleaf_ok(leaf)) {
+                if (shared_wleaf_ok(leaf) && own_wt[0]) {
+                    /* the caller runs inside a version-branch worktree: that tree is a work area for every owner, besides its own w-<owner> */
+                    if (leaf[0] == 'v' && cx_fmt(cwd_vwt, sizeof cwd_vwt, "%s/%s", wt_base, leaf)) cwd_vwt[0] = 0;
+                } else if (shared_wleaf_ok(leaf)) {
                     if (cx_fmt(own_wt, sizeof own_wt, "%s/%s", wt_base, leaf)) own_wt[0] = 0;
                     if (own_wt[0] && cx_fmt(hint_wt, sizeof hint_wt, "%s", own_wt)) hint_wt[0] = 0;
                 }
@@ -2746,6 +2749,7 @@ static int shared_checkout_write_gate(const char *root, int use_flow_root, const
     }
     if (!dv_under(norm_t, main_root)) return 0;
     if (own_wt[0] && dv_under(norm_t, own_wt) && norm_t[strlen(own_wt)] == '/') return 0;
+    if (cwd_vwt[0] && dv_under(norm_t, cwd_vwt) && norm_t[strlen(cwd_vwt)] == '/') return 0;
     fprintf(stderr, "%s\t%s\trefused\tREFUSE shared-checkout (cooperating-window accident guard, caller-provided DEVSVC_OWNER=%s, not authentication): owner=%s cannot write %s in shared checkout %s; use own worktree %s (nothing written)\n",
             tag, op, disp_ow, disp_ow, path, main_root, hint_wt);
     return 1;
