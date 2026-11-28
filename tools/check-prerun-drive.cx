@@ -2057,13 +2057,14 @@ int main(int argc, char **argv) {
             "    exit 0\n"
             "  fi\n"
             "  mkdir -p '%s'\n"
+            "  printf 'entry-link-v1\\n' > '%s/materials.tsv'\n"
             "  printf 'MATERIAL\\tpiece-d-driveargs-link\\tentry-link\\t%s\\n'\n"
             "  exit 0\n"
             "fi\n"
             "ids=$4; out=$5\n"
             "printf '# devsvc qualify\\nbatch\\tdomain\\tstatus\\trc\\tcandidate\\tms\\tload1\\tretries\\tnote\\n' > \"$out\"\n"
             "printf '%%s\\tproduct-qualification\\tPASS\\t0\\taaa\\t50\\t1.0\\t0\\t-\\n' \"$ids\" >> \"$out\"\n"
-            "exit 0\n", cnt18, cnt18, art18, art18)) return 2;
+            "exit 0\n", cnt18, cnt18, art18, art18, art18)) return 2;
         const char *s_m18b =
             "#!/bin/sh\n"
             "mode=$1\n"
@@ -2101,7 +2102,7 @@ int main(int argc, char **argv) {
             "grep -q '^ENTRY_LINK_MATERIAL\tREADY\tid=.*\tpath=%s$' '%s/done.prepare-entry-link' && "
             "sh '%s/unisacc.com' '%s' -- run --root '%s' --out '%s' --mock-runner '%s' --resume --max-retries 1 && "
             "[ \"$(wc -l < '%s')\" -eq 3 ] && "
-            "printf 'ENTRY_LINK_MATERIAL\tREADY\tid=wrongid\tpath=%s\\n' > '%s/done.prepare-entry-link' && "
+            "printf 'entry-link-damaged\\n' > '%s/materials.tsv' && "
             "sh '%s/unisacc.com' '%s' -- run --root '%s' --out '%s' --mock-runner '%s' --resume --max-retries 1 && "
             "[ \"$(wc -l < '%s')\" -eq 4 ] && echo ENTRY_LINK_ID_RESUME_OK",
             cwd, pd_path, ids18, tf18, o18a,
@@ -2109,7 +2110,7 @@ int main(int argc, char **argv) {
             art18, o18a,
             cwd, pd_path, work, o18a, m18a,
             cnt18,
-            art18, o18a,
+            art18,
             cwd, pd_path, work, o18a, m18a,
             cnt18)) return 2;
         int rc18a = ckk_sh("check-prerun-drive", cmd, out, sizeof out);
@@ -2170,6 +2171,55 @@ int main(int argc, char **argv) {
            !ckk_has(out, CPD_OUT, "PRERUN_WINDOW\t") &&
            sy_exists(done18d) == 0,
            "entry-link-prepare-hard-refusal-no-retry: non-deferral REFUSED stops on pass=1 without retrying");
+
+        /* 18e: duplicate MATERIAL row (READY followed by REFUSED) and bare '-' column must both refuse */
+        {
+            char o18e[CPD_PW], o18f[CPD_PW], m18e[CPD_PW], m18f[CPD_PW], s_m18e[1024];
+            const char *s_m18f =
+                "#!/bin/sh\n"
+                "mode=$1\n"
+                "if [ \"$mode\" = prepare-entry-link ]; then\n"
+                "  printf 'MATERIAL\\tpiece-d-driveargs-link\\tentry-link\\t-\\n'\n"
+                "  exit 0\n"
+                "fi\n"
+                "exit 0\n";
+            if (cx_fmt(o18e, sizeof o18e, "%s/out_dup", f18) ||
+                cx_fmt(o18f, sizeof o18f, "%s/out_dash", f18) ||
+                cx_fmt(m18e, sizeof m18e, "%s/mock_dup.sh", f18) ||
+                cx_fmt(m18f, sizeof m18f, "%s/mock_dash.sh", f18) ||
+                cx_fmt(s_m18e, sizeof s_m18e,
+                       "#!/bin/sh\n"
+                       "mode=$1\n"
+                       "if [ \"$mode\" = prepare-entry-link ]; then\n"
+                       "  printf 'MATERIAL\\tpiece-d-driveargs-link\\tentry-link\\t%s\\n'\n"
+                       "  printf 'MATERIAL\\tpiece-d-driveargs-link\\tentry-link\\t-\\tREFUSED=build-failed\\n'\n"
+                       "  exit 0\n"
+                       "fi\n"
+                       "exit 0\n", art18) ||
+                cx_write(m18e, s_m18e, strlen(s_m18e)) ||
+                cx_write(m18f, s_m18f, strlen(s_m18f))) return 2;
+            if (cx_fmt(cmd, sizeof cmd,
+                "sh '%s/unisacc.com' '%s' -- plan --ids-file '%s' --times-file '%s' --out '%s' --normal-jobs 1 --warmup 1 && "
+                "sh '%s/unisacc.com' '%s' -- run --root '%s' --out '%s' --mock-runner '%s' --max-retries 1",
+                cwd, pd_path, ids18, tf18, o18e, cwd, pd_path, work, o18e, m18e)) return 2;
+            int rc18e = ckk_sh("check-prerun-drive", cmd, out, sizeof out);
+            ck(rc18e != 0 &&
+               ckk_has(out, CPD_OUT, "detail=duplicate-material-row\t") &&
+               ckk_has(out, CPD_OUT, "PRERUN_DRIVE\tREFUSE\treason=prepare-entry-link-incomplete") &&
+               !ckk_has(out, CPD_OUT, "PRERUN_WINDOW\t"),
+               "entry-link-prepare-duplicate-row-refuses: READY followed by REFUSED row refuses without starting windows");
+
+            if (cx_fmt(cmd, sizeof cmd,
+                "sh '%s/unisacc.com' '%s' -- plan --ids-file '%s' --times-file '%s' --out '%s' --normal-jobs 1 --warmup 1 && "
+                "sh '%s/unisacc.com' '%s' -- run --root '%s' --out '%s' --mock-runner '%s' --max-retries 1",
+                cwd, pd_path, ids18, tf18, o18f, cwd, pd_path, work, o18f, m18f)) return 2;
+            int rc18f = ckk_sh("check-prerun-drive", cmd, out, sizeof out);
+            ck(rc18f != 0 &&
+               ckk_has(out, CPD_OUT, "detail=bare-dash-column\t") &&
+               ckk_has(out, CPD_OUT, "PRERUN_DRIVE\tREFUSE\treason=prepare-entry-link-incomplete") &&
+               !ckk_has(out, CPD_OUT, "PRERUN_WINDOW\t"),
+               "entry-link-prepare-bare-dash-refuses: bare '-' column refuses instead of falling into READY");
+        }
     }
 
     { char *rmv[] = {"rm", "-rf", work, 0}; (void)ck_run(rmv, out, sizeof out); }
