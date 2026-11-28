@@ -1543,17 +1543,43 @@ int main(int argc, char **argv) {
         else if (tx_eqz(argv[a], "-m")) co_die("usage", "-m requires a commit message");
         else co_die("usage", CO_USAGE);
     }
+    int co_w_branch = 1; /* fail closed: only exact main or vX.Y.Z is an integrator branch */
+    {
+        char br[160];
+        char *bv[] = {"git", "symbolic-ref", "--quiet", "--short", "HEAD", 0};
+        if (run(bv, br, sizeof br) == 0 && br[0]) {
+            if (tx_eqz(br, "main")) {
+                co_w_branch = 0;
+            } else if (br[0] == 'v') {
+                int parts = 0, dig = 0, bad = 0;
+                for (long bi = 1; ; bi++) {
+                    char c = br[bi];
+                    if (c >= '0' && c <= '9') { dig++; if (dig > 6) { bad = 1; break; } }
+                    else if ((c == '.' || c == 0) && dig > 0) { parts++; dig = 0; if (c == 0) break; }
+                    else { bad = 1; break; }
+                }
+                if (!bad && parts == 3) co_w_branch = 0;
+            }
+        }
+    }
+    if (co_w_branch && derive) {
+        fprintf(stderr, "COMMIT_OWN_FAIL\tclass=derived-owner-refused\n");
+        fprintf(stderr, "commit-own: REFUSE --derive on window branch (derived tables have owner=integrator; run local read-only: sh ./unisacc.com tools/derive.cx -- --check)\n");
+        return 1;
+    }
     if (nreg) {
         int t;
         for (k = 0; k < np; k++) {
             int is_regt = 0; long pl = tx_len(path[k], 4096), b = pl;
             for (t = 0; t < CO_REGT; t++) if (tx_eqz(path[k], CO_REG_TABLE[t])) { is_regt = 1; break; }
             if (is_regt || pl <= 0) continue;
-            while (b > 0 && path[k][b - 1] != '/') b--;
-            co_addkey(2, path[k], pl); co_addkey(3, path[k], pl);
-            if (b > 0) { co_addkey(2, path[k] + b, pl - b); co_addkey(3, path[k] + b, pl - b); }
+            if (!co_w_branch) {
+                while (b > 0 && path[k][b - 1] != '/') b--;
+                co_addkey(2, path[k], pl); co_addkey(3, path[k], pl);
+                if (b > 0) { co_addkey(2, path[k] + b, pl - b); co_addkey(3, path[k] + b, pl - b); }
+            }
         }
-        {
+        if (!co_w_branch) {
             size_t tn = 0; char *tb = (char *)cx_read("build/table-index.tsv", &tn);
             if (tb && tn > 0) {
                 for (k = 0; k < np; k++) {
@@ -1590,6 +1616,7 @@ int main(int argc, char **argv) {
             if (tb) mm_free(tb);
         }
         for (t = 0; t < CO_REGT; t++) {
+            if (co_w_branch && t >= 2) continue;
             if (!co_regkeys[t][0] || sy_exists(CO_REG_TABLE[t]) != 1) continue;
             /* a --whole/--keyed of a table this set owns is dropped, not refused (5 of the 20 failed devsvc commits
                were this refusal): the set's keyed rows are the narrower selection, other rows stay in the work tree */

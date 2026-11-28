@@ -751,22 +751,73 @@ static long j_genall_field(const char *l, long ln, const char *key) {
     }
     return (long)v;
 }
+/* Independent generator discovery: scans <repo>/tools/ + <repo>/exec/facts/derive.tsv directly
+ * (never calling gen-all-check --list) so any generator missed by gen-all-check is detected. */
 static long j_cgac_generators(const char *repo) {
-    char p[512]; size_t n = 0; char *b; long v = -1;
-    const char *needle = "#define CGAC_GENERATORS ";
-    long nl = (long)tx_len(needle, 64), at;
-    if (cx_fmt(p, sizeof p, "%s/tools/check-gen-all-check.cx", (repo && repo[0]) ? repo : ".")) return -1;
-    b = (char *)cx_read(p, &n);
-    if (!b) return -1;
-    at = tx_find(b, (long)n, needle, nl);
-    if (at >= 0) {
-        const char *s = b + at + nl;
-        long d = 0; int64_t iv = -1;
-        while (at + nl + d < (long)n && s[d] >= '0' && s[d] <= '9') d++;
-        if (d > 0 && tx_to_i64(s, d, 10, &iv) == 0) v = (long)iv;
+    const char *r = (repo && repo[0]) ? repo : ".";
+    char dp[512], tdir[512], p[512];
+    char der_tools[64][128];
+    int nder = 0;
+    if (!cx_fmt(dp, sizeof dp, "%s/exec/facts/derive.tsv", r)) {
+        size_t dn = 0;
+        char *db = (char *)cx_read(dp, &dn);
+        if (db) {
+            long at = 0;
+            while (at < (long)dn && nder < 64) {
+                long e = tx_chr(db + at, (long)dn - at, '\n');
+                long l = (e < 0) ? ((long)dn - at) : e;
+                long o1, l1;
+                if (l > 0 && db[at] != '#' && !tx_field(db + at, l, '\t', 1, &o1, &l1) && l1 > 0 && l1 < 128) {
+                    mm_copy(der_tools[nder], 128, db + at + o1, (size_t)l1);
+                    der_tools[nder][l1] = 0;
+                    nder++;
+                }
+                at += l + 1;
+            }
+            free(db);
+        }
     }
-    free(b);
-    return v;
+    static const char *core_tl[] = {
+        "tools/facts-gen.cx", "tools/win-argv-gen.cx", "tools/cx-flatten.cx",
+        "tools/arity-gen.cx", "tools/libc-decl-scan.cx", 0
+    };
+    static const char *skip_fn[] = {
+        "chain-facts-gen.cx", "chain-phase-need-gen.cx", "decide-gen.cx", "exitclass-gen.cx",
+        "flow-gen.cx", "g2-budget-gen.cx", "limits-gen.cx", "manifest-gen.cx", "matrix-flip-gen.cx",
+        "opt-corpus-gen.cx", "reg-gen.cx", "registry-gen.cx", "slice-migration-gen.cx",
+        "state-gen.cx", "surface-doc-gen.cx", "units-gen.cx", "verseq-gen.cx",
+        "ucn-pp-gen.cx", "rt-shared-gen.cx", 0
+    };
+    long cnt = 0;
+    for (int i = 0; core_tl[i]; i++) {
+        if (!cx_fmt(p, sizeof p, "%s/%s", r, core_tl[i]) && sy_exists(p) == 1) cnt++;
+    }
+    if (cx_fmt(tdir, sizeof tdir, "%s/tools", r)) return cnt > 0 ? cnt : -1;
+    sy_dir_t d;
+    if (sy_dir_open(&d, tdir) != 0) return cnt > 0 ? cnt : -1;
+    while (sy_dir_next(&d) == 1) {
+        long nl = (long)tx_len(d.name, 128);
+        if (nl <= 7 || !tx_same(d.name + nl - 7, 7, "-gen.cx", 7)) continue;
+        if (tx_prefix(d.name, nl, "check-", 6) || tx_prefix(d.name, nl, "stream-e3-", 10)) continue;
+        if (nl > 13 && tx_same(d.name + nl - 13, 13, "-cases-gen.cx", 13)) continue;
+        int skip = 0;
+        for (int i = 0; skip_fn[i]; i++) if (tx_eqz(d.name, skip_fn[i])) { skip = 1; break; }
+        if (skip) continue;
+        char tl[160];
+        if (cx_fmt(tl, sizeof tl, "tools/%s", d.name)) continue;
+        for (int i = 0; core_tl[i]; i++) if (tx_eqz(tl, core_tl[i])) { skip = 1; break; }
+        for (int i = 0; !skip && i < nder; i++) if (tx_eqz(tl, der_tools[i])) { skip = 1; break; }
+        if (skip) continue;
+        if (cx_fmt(p, sizeof p, "%s/%s", r, tl)) continue;
+        size_t sn = 0;
+        char *sb = (char *)cx_read(p, &sn);
+        if (sb) {
+            if (tx_find(sb, (long)sn, "--check", 7) >= 0) cnt++;
+            free(sb);
+        }
+    }
+    sy_dir_close(&d);
+    return cnt > 0 ? cnt : -1;
 }
 /* Hard pin on uncovered<=2: tools/gen-all-check.cx:225-232 and tools/check-gen-all-check.cx:426-438
  * declare exactly two 0.0.86 waivers (tools/rt-shared-gen.cx known-gap:unlisted-stdlib-state;expires=0.0.87
