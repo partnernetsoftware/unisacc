@@ -2913,7 +2913,7 @@ static int is_ratchet_baseline_table(const char *p, long n) {
     static const char *t_tbl[] = {
         "tests/cxraw.tsv", "tests/cxinclude.tsv", "tests/cxapis.tsv", "tests/cxtrunc.tsv",
         "tests/cxlibc.tsv", "tests/cxplatform.tsv", "tests/srcshape.tsv", "tests/aluiwidth.tsv",
-        "tests/outdep.tsv", "tests/net-deps.tsv", "tests/notcovered.tsv", 0
+        "tests/literal.tsv", "tests/outdep.tsv", "tests/net-deps.tsv", "tests/notcovered.tsv", 0
     };
     int i;
     if (n <= 0) return 0;
@@ -2983,17 +2983,100 @@ static int rb_parse_row(const char *table, const char *ln, long l, char *key, si
     return 1;
 }
 
+static int rb_note_has_tok(const char *note, long nlen, const char *tok) {
+    long tl = tx_len(tok, 512), i;
+    if (tl <= 0 || tl > nlen) return 0;
+    for (i = 0; i + tl <= nlen; i++) {
+        if ((i == 0 || note[i - 1] == ' ' || note[i - 1] == ';') &&
+            tx_same(note + i, tl, tok, tl) &&
+            (i + tl == nlen || note[i + tl] == ' ' || note[i + tl] == ';' || note[i + tl] == ',' || note[i + tl] == '\r')) {
+            return 1;
+        }
+    }
+    return 0;
+}
+
+static int rb_note_has_expires_ver(const char *note, long nlen) {
+    long i;
+    for (i = 0; i + 10 <= nlen; i++) {
+        if ((i == 0 || note[i - 1] == ' ' || note[i - 1] == ';') &&
+            tx_same(note + i, 8, "expires=", 8)) {
+            long j = i + 8, dots = 0, seg_digs = 0;
+            while (j < nlen && note[j] != ' ' && note[j] != ';' && note[j] != ',' && note[j] != '\r') {
+                if (note[j] >= '0' && note[j] <= '9') seg_digs++;
+                else if (note[j] == '.' && seg_digs > 0) { dots++; seg_digs = 0; }
+                else { dots = -1; break; }
+                j++;
+            }
+            if (dots == 2 && seg_digs > 0) return 1;
+        }
+    }
+    return 0;
+}
+
+static int rb_row_in_blob(const char *blob, long blen, const char *row, long rlen) {
+    long at = 0;
+    if (!blob || blen <= 0) return 0;
+    while (at < blen) {
+        long e = tx_chr(blob + at, blen - at, '\n'), l = e < 0 ? blen - at : e;
+        if (l > 0 && blob[at + l - 1] == '\r') l--;
+        if (l == rlen && tx_same(blob + at, l, row, rlen)) return 1;
+        at += (e < 0 ? l : e + 1);
+    }
+    return 0;
+}
+
+static int rb_has_staged_approval(const char *ap_staged, long ap_sn,
+                                  const char *ap_head, long ap_hn,
+                                  const char *tbl, const char *key, int col1,
+                                  long long oldv, long long newv) {
+    char t_tbl[300], t_key[300], t_col[32], t_chg[64];
+    long at = 0;
+    if (!ap_staged || ap_sn <= 0) return 0;
+    if (cx_fmt(t_tbl, sizeof t_tbl, "table=%s", tbl) != 0 ||
+        cx_fmt(t_key, sizeof t_key, "key=%s", key) != 0 ||
+        cx_fmt(t_col, sizeof t_col, "col=%d", col1) != 0 ||
+        cx_fmt(t_chg, sizeof t_chg, "%lld->%lld", oldv, newv) != 0) return 0;
+    while (at < ap_sn) {
+        long e = tx_chr(ap_staged + at, ap_sn - at, '\n'), l = e < 0 ? ap_sn - at : e;
+        const char *row = ap_staged + at;
+        long rl = l;
+        if (rl > 0 && row[rl - 1] == '\r') rl--;
+        if (rl > 0 && row[0] != '#') {
+            long o1, l1, o2, l2, o4, l4;
+            if (!tx_field(row, rl, '\t', 1, &o1, &l1) && l1 == 13 && tx_same(row + o1, 13, "ratchet-raise", 13) &&
+                !tx_field(row, rl, '\t', 2, &o2, &l2) && l2 > 0 &&
+                !tx_field(row, rl, '\t', 4, &o4, &l4) && l4 > 0) {
+                const char *note = row + o4;
+                if (rb_note_has_tok(note, l4, t_tbl) &&
+                    rb_note_has_tok(note, l4, t_key) &&
+                    rb_note_has_tok(note, l4, t_col) &&
+                    rb_note_has_tok(note, l4, t_chg) &&
+                    tx_find(note, l4, "prd_mempalace", 13) >= 0 &&
+                    rb_note_has_expires_ver(note, l4) &&
+                    !rb_row_in_blob(ap_head, ap_hn, row, rl)) {
+                    return 1;
+                }
+            }
+        }
+        at += (e < 0 ? l : e + 1);
+    }
+    return 0;
+}
+
 static int ratchet_baseline_gate(void) {
     char *av[] = {"git", "diff", "--cached", "--no-renames", "--name-only", "--diff-filter=M", "-z", 0};
-    long sn = 0, at = 0;
+    long sn = 0, at = 0, ap_sn = 0, ap_hn = 0;
     int blocked = 0;
-    char *names;
+    char *names, *ap_staged = 0, *ap_head = 0;
     if (plan_dir) return 0;
     names = slurp_run(av, &sn);
     if (!names) {
         sy_eprintf("precommit: BLOCKED git diff --cached (ratchet-baseline) failed\n");
         return 1;
     }
+    (void)cov_blob("", "build/approvals.tsv", &ap_staged, &ap_sn);
+    (void)cov_blob("HEAD", "build/approvals.tsv", &ap_head, &ap_hn);
     while (at < sn) {
         long nl = tx_len(names + at, sn - at);
         if (nl <= 0) break;
@@ -3022,10 +3105,13 @@ static int ratchet_baseline_gate(void) {
                                 found = 1;
                                 for (c = 0; c < snv && c < hnv; c++) {
                                     if (svals[c] > hvals[c]) {
-                                        sy_eprintf("precommit: BLOCKED ratchet-baseline-raised table=%s key=%s col=%d head=%lld staged=%lld (ratchet baselines only go down)\n",
-                                                   tbl, skey, c + 1, hvals[c], svals[c]);
-                                        blocked++;
-                                        break;
+                                        if (!rb_has_staged_approval(ap_staged, ap_sn, ap_head, ap_hn,
+                                                                    tbl, skey, c + 1, hvals[c], svals[c])) {
+                                            sy_eprintf("precommit: BLOCKED ratchet-baseline-raised table=%s key=%s col=%d head=%lld staged=%lld (ratchet baselines only go down)\n",
+                                                       tbl, skey, c + 1, hvals[c], svals[c]);
+                                            blocked++;
+                                            break;
+                                        }
                                     }
                                 }
                                 break;
@@ -3158,6 +3244,8 @@ static int ratchet_baseline_gate(void) {
         }
         at += nl + 1;
     }
+    if (ap_staged) mm_free(ap_staged);
+    if (ap_head) mm_free(ap_head);
     mm_free(names);
     return blocked;
 }
