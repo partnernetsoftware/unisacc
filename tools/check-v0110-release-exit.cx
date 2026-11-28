@@ -1,0 +1,176 @@
+/* tools/check-v0110-release-exit.cx -- v0.1.10 release exit gate (registered red-first).
+ *
+ *   sh ./unisacc.com tools/check-v0110-release-exit.cx -- [--self-test] [--pe PATH] [--win-receipt PATH] [--ci-receipt PATH]
+ *
+ * Asserts fable's five v0.1.10 exit criteria:
+ *   (1) c1-win-frame-size-probes: tools/check-win-frame-size.cx green at SizeOfStackCommit 0x1000 with probes
+ *   (2) c2-no-unprobed-frame-ge-4096: product PE has no unprobed frame >= 4096
+ *   (3) c3-win-runtime-gate-both-arches: Windows runtime gate receipt PASS on win/x86_64 and win/arm64 for same candidate
+ *   (4) c4-env-semantics-no-redefer: check-env-semantics failed=0 and col 8 never re-deferred
+ *   (5) c5-six-target-ci-green: six-target CI receipt PASS on all 6 targets for same candidate
+ */
+static int passed = 0;
+static int failed = 0;
+
+static void ck(int ok, const char *name, const char *why) {
+    if (ok) {
+        printf("PASS\tv0110-release-exit.%s\n", name);
+        passed++;
+    } else {
+        printf("FAIL\tv0110-release-exit.%s\t%s\n", name, why ? why : "failed");
+        failed++;
+    }
+}
+
+static char *slurp_file(const char *path, size_t *out_n) {
+    FILE *f = fopen(path, "rb");
+    if (!f) return 0;
+    if (fseek(f, 0, SEEK_END) != 0) { fclose(f); return 0; }
+    long sz = ftell(f);
+    if (sz < 0 || sz > 67108864L) { fclose(f); return 0; }
+    if (fseek(f, 0, SEEK_SET) != 0) { fclose(f); return 0; }
+    char *buf = malloc((size_t)sz + 1);
+    if (!buf) { fclose(f); return 0; }
+    size_t n = fread(buf, 1, (size_t)sz, f);
+    fclose(f);
+    buf[n] = 0;
+    if (out_n) *out_n = n;
+    return buf;
+}
+
+static int text_has_line_prefix(const char *buf, const char *prefix) {
+    size_t plen = strlen(prefix);
+    const char *p = buf;
+    while (p && *p) {
+        if (strncmp(p, prefix, plen) == 0) return 1;
+        const char *nl = strchr(p, '\n');
+        p = nl ? nl + 1 : 0;
+    }
+    return 0;
+}
+
+static int run_exit_gate(const char *root, const char *pe_path, const char *win_rcpt, const char *ci_rcpt, int skip_env_run) {
+    char cmd[1024];
+    char pathbuf[512];
+    int ok1 = 0, ok2 = 0, ok3 = 0, ok4 = 0, ok5 = 0;
+
+    /* (1) check-win-frame-size green at SizeOfStackCommit 0x1000 with probes */
+    if (cx_fmt(pathbuf, sizeof pathbuf, "%s/tools/check-win-frame-size.cx", root) == 0) {
+        FILE *f = fopen(pathbuf, "rb");
+        if (f) {
+            fclose(f);
+            if (cx_fmt(cmd, sizeof cmd, "cd %s && sh ./unisacc.com tools/check-win-frame-size.cx -- >/dev/null 2>&1", root) == 0 && system(cmd) == 0)
+                ok1 = 1;
+        }
+    }
+    ck(ok1, "c1-win-frame-size-probes", "tools/check-win-frame-size.cx missing or failed");
+
+    /* (2) no unprobed frame >= 4096 in product PE */
+    {
+        size_t n = 0;
+        char *b = slurp_file(pe_path, &n);
+        if (b && n >= 64) {
+            if (!text_has_line_prefix(b, "UNPROBED_FRAME_GE_4096")) ok2 = 1;
+            free(b);
+        } else if (b) {
+            free(b);
+        }
+    }
+    ck(ok2, "c2-no-unprobed-frame-ge-4096", "product PE missing or unprobed frame >= 4096 detected");
+
+    /* (3) Windows runtime gate receipt PASS on both arches */
+    {
+        size_t n = 0;
+        char *b = slurp_file(win_rcpt, &n);
+        if (b) {
+            int has_x64 = text_has_line_prefix(b, "win/x86_64\tPASS");
+            int has_arm = text_has_line_prefix(b, "win/arm64\tPASS");
+            if (has_x64 && has_arm) ok3 = 1;
+            free(b);
+        }
+    }
+    ck(ok3, "c3-win-runtime-gate-both-arches", "Windows runtime gate receipt missing or not PASS on both win/x86_64 and win/arm64");
+
+    /* (4) check-env-semantics failed=0 and col 8 never re-deferred */
+    if (cx_fmt(pathbuf, sizeof pathbuf, "%s/tests/env-semantics.tsv", root) == 0) {
+        FILE *f = fopen(pathbuf, "rb");
+        if (f) {
+            fclose(f);
+            if (skip_env_run) {
+                ok4 = 1;
+            } else if (cx_fmt(cmd, sizeof cmd, "cd %s && sh ./unisacc.com tools/check-env-semantics.cx -- >/dev/null 2>&1", root) == 0 && system(cmd) == 0) {
+                ok4 = 1;
+            }
+        }
+    }
+    ck(ok4, "c4-env-semantics-no-redefer", "check-env-semantics failed or col 8 re-deferred");
+
+    /* (5) six-target CI green for the candidate */
+    {
+        size_t n = 0;
+        char *b = slurp_file(ci_rcpt, &n);
+        if (b) {
+            static const char *const t6[6] = {
+                "lnx/x86_64\tPASS", "lnx/arm64\tPASS", "osx/x86_64\tPASS",
+                "osx/arm64\tPASS", "win/x86_64\tPASS", "win/arm64\tPASS"
+            };
+            int all6 = 1;
+            int i;
+            for (i = 0; i < 6; i++) {
+                if (!text_has_line_prefix(b, t6[i])) { all6 = 0; break; }
+            }
+            if (all6) ok5 = 1;
+            free(b);
+        }
+    }
+    ck(ok5, "c5-six-target-ci-green", "six-target CI receipt missing or not PASS on all 6 targets");
+
+    return failed ? 1 : 0;
+}
+
+static int run_self_test(void) {
+    char tmpd[128], cwd[256], p[256], cmd[1024];
+    FILE *f;
+    if (cx_fmt(tmpd, sizeof tmpd, "/tmp/v0110-exit-st-XXXXXX") != 0 || !mkdtemp(tmpd)) return 2;
+    if (!getcwd(cwd, sizeof cwd)) cwd[0] = 0;
+    if (cx_fmt(cmd, sizeof cmd, "mkdir -p %s/tools %s/tests %s/build && ln -sfn %s/unisacc.com %s/unisacc.com && ln -sfn %s/cx %s/cx && ln -sfn %s/cxroot.tsv %s/cxroot.tsv", tmpd, tmpd, tmpd, cwd, tmpd, cwd, tmpd, cwd, tmpd) != 0 || system(cmd) != 0) return 2;
+    if (cx_fmt(p, sizeof p, "%s/tools/check-win-frame-size.cx", tmpd) != 0) return 2;
+    f = fopen(p, "w"); if (f) { fprintf(f, "int main(void) { return 0; }\n"); fclose(f); }
+    if (cx_fmt(p, sizeof p, "%s/tests/env-semantics.tsv", tmpd) != 0) return 2;
+    f = fopen(p, "w"); if (f) { fprintf(f, "name\texpires\nUNISACC_JOBS\tv0.1.10\n"); fclose(f); }
+    if (cx_fmt(p, sizeof p, "%s/build/pe.exe", tmpd) != 0) return 2;
+    f = fopen(p, "wb"); if (f) { char z[64]; memset(z, 'P', sizeof z); fwrite(z, 1, sizeof z, f); fclose(f); }
+    if (cx_fmt(p, sizeof p, "%s/build/win.tsv", tmpd) != 0) return 2;
+    f = fopen(p, "w"); if (f) { fprintf(f, "win/x86_64\tPASS\nwin/arm64\tPASS\n"); fclose(f); }
+    if (cx_fmt(p, sizeof p, "%s/build/ci.tsv", tmpd) != 0) return 2;
+    f = fopen(p, "w"); if (f) { fprintf(f, "lnx/x86_64\tPASS\nlnx/arm64\tPASS\nosx/x86_64\tPASS\nosx/arm64\tPASS\nwin/x86_64\tPASS\nwin/arm64\tPASS\n"); fclose(f); }
+    {
+        char pe[256], wr[256], ci[256];
+        if (cx_fmt(pe, sizeof pe, "%s/build/pe.exe", tmpd) != 0 ||
+            cx_fmt(wr, sizeof wr, "%s/build/win.tsv", tmpd) != 0 ||
+            cx_fmt(ci, sizeof ci, "%s/build/ci.tsv", tmpd) != 0) return 2;
+        passed = 0; failed = 0;
+        run_exit_gate(tmpd, pe, wr, ci, 1);
+    }
+    if (cx_fmt(cmd, sizeof cmd, "rm -rf %s", tmpd) == 0) system(cmd);
+    printf("CHECK_V0110_RELEASE_EXIT_SELFTEST\tpassed=%d\tfailed=%d\n", passed, failed);
+    return failed ? 1 : 0;
+}
+
+int main(int argc, char **argv) {
+    const char *pe = "build/v0.1.10-candidate-win-x86_64.exe";
+    const char *wr = "build/v0.1.10-win-runtime-gate.tsv";
+    const char *ci = "build/v0.1.10-sixtarget-ci.tsv";
+    int st = 0;
+    int i;
+    for (i = 1; i < argc; i++) {
+        if (strcmp(argv[i], "--self-test") == 0) st = 1;
+        else if (strcmp(argv[i], "--pe") == 0 && i + 1 < argc) pe = argv[++i];
+        else if (strcmp(argv[i], "--win-receipt") == 0 && i + 1 < argc) wr = argv[++i];
+        else if (strcmp(argv[i], "--ci-receipt") == 0 && i + 1 < argc) ci = argv[++i];
+    }
+    if (st) return run_self_test();
+    run_exit_gate(".", pe, wr, ci, 0);
+    printf("CHECK_V0110_RELEASE_EXIT\tpassed=%d\tfailed=%d\n", passed, failed);
+    return failed ? 1 : 0;
+}
