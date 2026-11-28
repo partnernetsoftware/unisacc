@@ -1,0 +1,306 @@
+/* tools/check-devsvc-train.cx -- adversarial check for tools/devsvc-train.cx (T-train-3 trial merge).
+ * Verifies (all through real `devsvc train` entrypoint):
+ *   (1) Two w/ branches editing same source line -> matrix names file & both owners, CONFLICT, train.conflict.
+ *   (2) Two w/ branches conflicting ONLY in build/links.tsv (real write_argv in target derive.tsv)
+ *       -> kind=derived action=auto-regenerate, COMPLETE, READY, train.ready.
+ *   (3) No-writer derive row (write_argv == "-") -> conflict stays kind=source (NOT auto-regenerate).
+ *   (4) Different lines in same file -> zero false conflicts, COMPLETE, READY.
+ *   (5) Binary both-modified conflict -> real trial merge detects path=src/blob.bin kind=source, CONFLICT.
+ *   (6) >256 changed paths (270 files) -> conflict on 270th file detected with zero truncation.
+ *   (7) Failed diff (non-existent --branch) -> rc=1, TRAIN_ERROR, status=ERROR (never COMPLETE or READY).
+ *   (8) Real --shard 0/2 -> status=SHARDED_OUT shard=0/2, status=UNDECIDED.
+ *   (9) `land` refused (rc=2, TRAIN_REFUSE land-deferred-to-step2) + zero tmp-train-* worktree residue.
+ *
+ * Marker: CHECK_DEVSVC_TRAIN
+ */
+#pragma unisa use sys.fs
+#pragma unisa use sys.posix
+#pragma unisa use sys.env
+#pragma unisa use sys.io
+#pragma unisa use text.text
+#pragma unisa use text.fmt
+#pragma unisa use cxlib.procrun
+
+static int g_pass;
+static int g_fail;
+
+static void ck(int ok, const char *name) {
+    if (ok) { g_pass++; sy_printf("PASS\tcheck-devsvc-train.%s\n", name); }
+    else { g_fail++; sy_printf("FAIL\tcheck-devsvc-train.%s\n", name); }
+}
+
+static int run_sh(const char *cwd, const char *cmd) {
+    char *av[] = { "sh", "-c", (char *)cmd, 0 };
+    pr_result r;
+    int rc = pr_run("cdt-sh", av, cwd, 0, 20, &r);
+    int ok = (rc == 0 && r.rc == 0);
+    if (!ok && r.err && r.errn) sy_eprintf("sh-err: %.*s\n", (int)r.errn, r.err);
+    pr_free(&r);
+    return ok;
+}
+
+static int init_fixture_repo(const char *dir, const char *write_argv) {
+    char cmd[1024];
+    if (cx_fmt(cmd, sizeof cmd,
+        "git init -q -b main && git config user.email t@t && git config user.name t && "
+        "mkdir -p exec/facts build src && "
+        "printf 'links\\ttools/links-gen.cx\\t-\\t%s\\tbuild/links.tsv\\tsrc/app.cx\\t5\\t20\\tintegrator\\n' > exec/facts/derive.tsv && "
+        "printf 'link_row_0\\n' > build/links.tsv && "
+        "printf 'line1\\nline2\\nline3\\nline4\\nline5\\nline6\\nline7\\nline8\\n' > src/app.cx && "
+        "git add -A && git commit -qm base", write_argv)) return 0;
+    return run_sh(dir, cmd);
+}
+
+int main(void) {
+    char tmp[4096], r1[4400], r2[4400], r3[4400], r4[4400], r5[4400], r6[4400];
+    if (sy_mkdtemp(sy_tmpdir(), "chk-dvtrain-", tmp, sizeof tmp) != 0) return 2;
+    if (cx_fmt(r1, sizeof r1, "%s/r1", tmp) || cx_fmt(r2, sizeof r2, "%s/r2", tmp) ||
+        cx_fmt(r3, sizeof r3, "%s/r3", tmp) || cx_fmt(r4, sizeof r4, "%s/r4", tmp) ||
+        cx_fmt(r5, sizeof r5, "%s/r5", tmp) || cx_fmt(r6, sizeof r6, "%s/r6", tmp) ||
+        sy_mkdir_all(r1, 0700) || sy_mkdir_all(r2, 0700) || sy_mkdir_all(r3, 0700) ||
+        sy_mkdir_all(r4, 0700) || sy_mkdir_all(r5, 0700) || sy_mkdir_all(r6, 0700)) {
+        sy_remove_all(tmp);
+        return 2;
+    }
+
+    /* (1) Same-line source conflict */
+    {
+        int ok = 0;
+        if (init_fixture_repo(r1, "sh ./unisacc.com tools/links-gen.cx -- --write") &&
+            run_sh(r1, "git checkout -qb w/alice-feat1 && sed -i 's/line1/line1_alice/' src/app.cx && git commit -qam alice && "
+                       "git checkout -qb w/bob-feat2 main && sed -i 's/line1/line1_bob/' src/app.cx && git commit -qam bob")) {
+            char *av[] = { "sh", "./unisacc.com", "tools/devsvc.cx", "--", "train", "--root", r1, "--target", "main", "--no-events", 0 }; /* lint:allow R1-product runs devsvc train on fixture */
+            pr_result r;
+            int rc = pr_run("cdt-1", av, ".", 0, 40, &r);
+            ok = (rc == 0 && r.rc == 0 && r.out &&
+                  tx_find(r.out, (long)r.outn, "TRAIN_CONFLICT\ttarget=main\ta=w/alice-feat1\towner_a=alice\tb=w/bob-feat2\towner_b=bob\tpath=src/app.cx\tkind=source", 107) >= 0 &&
+                  tx_find(r.out, (long)r.outn, "order_basis=sorted-by-conflict-count", 36) >= 0 &&
+                  tx_find(r.out, (long)r.outn, "TRAIN_EVENT\tkind=train.conflict\t", 32) >= 0 &&
+                  tx_find(r.out, (long)r.outn, "TRAIN_SUMMARY\tstatus=CONFLICT\t", 30) >= 0);
+            if (!ok && r.out) sy_eprintf("CASE1_OUT:\n%.*s\n", (int)r.outn, r.out);
+            pr_free(&r);
+        }
+        ck(ok, "same-line-source-conflict-names-file-and-both-owners");
+    }
+
+    /* (2) Derived-only conflict -> auto-regenerate and READY */
+    {
+        int ok = 0;
+        if (init_fixture_repo(r2, "sh ./unisacc.com tools/links-gen.cx -- --write") &&
+            run_sh(r2, "git checkout -qb w/carol-b1 && printf 'carol\\n' > src/c.cx && printf 'link_carol\\n' > build/links.tsv && git add -A && git commit -qm carol && "
+                       "git checkout -qb w/dave-b2 main && printf 'dave\\n' > src/d.cx && printf 'link_dave\\n' > build/links.tsv && git add -A && git commit -qm dave")) {
+            char *av[] = { "sh", "./unisacc.com", "tools/devsvc.cx", "--", "train", "--root", r2, "--target", "main", "--no-events", 0 }; /* lint:allow R1-product runs devsvc train on derived fixture */
+            pr_result r;
+            int rc = pr_run("cdt-2", av, ".", 0, 20, &r);
+            ok = (rc == 0 && r.rc == 0 && r.out &&
+                  tx_find(r.out, (long)r.outn, "path=build/links.tsv\tkind=derived\taction=auto-regenerate", 56) >= 0 &&
+                  tx_find(r.out, (long)r.outn, "status=COMPLETE\t", 16) >= 0 &&
+                  tx_find(r.out, (long)r.outn, "TRAIN_EVENT\tkind=train.ready\t", 29) >= 0 &&
+                  tx_find(r.out, (long)r.outn, "TRAIN_SUMMARY\tstatus=READY\t", 27) >= 0);
+            if (!ok && r.out) sy_eprintf("CASE2_OUT:\n%.*s\n", (int)r.outn, r.out);
+            pr_free(&r);
+        }
+        ck(ok, "derived-only-links-conflict-auto-regenerate-and-ready");
+    }
+
+    /* (3) No-writer derive row -> MUST stay kind=source */
+    {
+        int ok = 0;
+        if (init_fixture_repo(r3, "-") &&
+            run_sh(r3, "git checkout -qb w/carol-nw && printf 'link_carol\\n' > build/links.tsv && git commit -qam carol && "
+                       "git checkout -qb w/dave-nw main && printf 'link_dave\\n' > build/links.tsv && git commit -qam dave")) {
+            char *av[] = { "sh", "./unisacc.com", "tools/devsvc.cx", "--", "train", "--root", r3, "--target", "main", "--no-events", 0 }; /* lint:allow R1-product runs devsvc train on no-writer fixture */
+            pr_result r;
+            int rc = pr_run("cdt-3", av, ".", 0, 20, &r);
+            ok = (rc == 0 && r.rc == 0 && r.out &&
+                  tx_find(r.out, (long)r.outn, "path=build/links.tsv\tkind=source", 32) >= 0 &&
+                  tx_find(r.out, (long)r.outn, "TRAIN_SUMMARY\tstatus=CONFLICT\t", 30) >= 0);
+            if (!ok && r.out) sy_eprintf("CASE3_OUT:\n%.*s\n", (int)r.outn, r.out);
+            pr_free(&r);
+        }
+        ck(ok, "no-writer-derive-row-stays-source-conflict");
+    }
+
+    /* (4) Different lines in same file -> zero false conflicts, READY */
+    {
+        int ok = 0;
+        if (init_fixture_repo(r4, "sh ./unisacc.com tools/links-gen.cx -- --write") &&
+            run_sh(r4, "git checkout -qb w/eve-top && sed -i 's/line1/line1_eve/' src/app.cx && git commit -qam eve && "
+                       "git checkout -qb w/frank-bot main && sed -i 's/line8/line8_frank/' src/app.cx && git commit -qam frank")) {
+            char *av[] = { "sh", "./unisacc.com", "tools/devsvc.cx", "--", "train", "--root", r4, "--target", "main", "--no-events", 0 }; /* lint:allow R1-product runs devsvc train on clean fixture */
+            pr_result r;
+            int rc = pr_run("cdt-4", av, ".", 0, 20, &r);
+            ok = (rc == 0 && r.rc == 0 && r.out &&
+                  tx_find(r.out, (long)r.outn, "TRAIN_CONFLICT\t", 15) < 0 &&
+                  tx_find(r.out, (long)r.outn, "TRAIN_SUMMARY\tstatus=READY\t", 27) >= 0);
+            if (!ok && r.out) sy_eprintf("CASE4_OUT:\n%.*s\n", (int)r.outn, r.out);
+            pr_free(&r);
+        }
+        ck(ok, "different-lines-same-file-zero-false-conflicts-ready");
+    }
+
+    /* (5) Binary both-modified conflict -> real trial merge detects src/blob.bin as kind=source CONFLICT */
+    {
+        int ok = 0;
+        if (init_fixture_repo(r5, "sh ./unisacc.com tools/links-gen.cx -- --write") &&
+            run_sh(r5, "printf '\\000\\001\\002base' > src/blob.bin && git add src/blob.bin && git commit -qm basebin && "
+                       "git checkout -qb w/alice-bin && printf '\\000\\001\\002alice' > src/blob.bin && git commit -qam abin && "
+                       "git checkout -qb w/bob-bin main && printf '\\000\\001\\002bob' > src/blob.bin && git commit -qam bbin")) {
+            char *av[] = { "sh", "./unisacc.com", "tools/devsvc.cx", "--", "train", "--root", r5, "--target", "main", "--no-events", 0 }; /* lint:allow R1-product tests binary both-modified conflict */
+            pr_result r;
+            int rc = pr_run("cdt-5", av, ".", 0, 20, &r);
+            ok = (rc == 0 && r.rc == 0 && r.out &&
+                  tx_find(r.out, (long)r.outn, "path=src/blob.bin\tkind=source", 29) >= 0 &&
+                  tx_find(r.out, (long)r.outn, "TRAIN_SUMMARY\tstatus=CONFLICT\t", 30) >= 0);
+            if (!ok && r.out) sy_eprintf("CASE5_OUT:\n%.*s\n", (int)r.outn, r.out);
+            pr_free(&r);
+        }
+        ck(ok, "binary-both-modified-detected-by-trial-merge");
+    }
+
+    /* (6) >256 changed paths (270 files) -> conflict on 270th file detected with zero truncation */
+    {
+        int ok = 0;
+        if (init_fixture_repo(r6, "sh ./unisacc.com tools/links-gen.cx -- --write") &&
+            run_sh(r6, "mkdir -p src/many && i=1; while [ $i -le 270 ]; do printf 'v0\\n' > src/many/f$i.txt; i=$((i+1)); done && "
+                       "git add src/many && git commit -qm many0 && "
+                       "git checkout -qb w/alice-many && i=1; while [ $i -le 270 ]; do printf 'a\\n' > src/many/f$i.txt; i=$((i+1)); done && git commit -qam amany && "
+                       "git checkout -qb w/bob-many main && printf 'b\\n' > src/many/f270.txt && git commit -qam bmany")) {
+            char *av[] = { "sh", "./unisacc.com", "tools/devsvc.cx", "--", "train", "--root", r6, "--target", "main", "--no-events", 0 }; /* lint:allow R1-product tests >256 changed paths without truncation */
+            pr_result r;
+            int rc = pr_run("cdt-6", av, ".", 0, 25, &r);
+            ok = (rc == 0 && r.rc == 0 && r.out &&
+                  tx_find(r.out, (long)r.outn, "path=src/many/f270.txt\tkind=source", 34) >= 0 &&
+                  tx_find(r.out, (long)r.outn, "changed_files=270", 17) >= 0 &&
+                  tx_find(r.out, (long)r.outn, "TRAIN_SUMMARY\tstatus=CONFLICT\t", 30) >= 0);
+            if (!ok && r.out) sy_eprintf("CASE6_OUT:\n%.*s\n", (int)r.outn, r.out);
+            pr_free(&r);
+        }
+        ck(ok, "over-256-changed-paths-no-truncation");
+    }
+
+    /* (7) Failed diff (non-existent --branch) -> rc=1, status=ERROR, never COMPLETE or READY */
+    {
+        char *av[] = { "sh", "./unisacc.com", "tools/devsvc.cx", "--", "train", "--root", r1, "--target", "main", "--branch", "w/nosuch-branch-xyz", "--no-events", 0 }; /* lint:allow R1-product tests failed diff error handling */
+        pr_result r;
+        int rc = pr_run("cdt-7", av, ".", 0, 15, &r);
+        int ok = (rc == 0 && r.rc == 1 && r.out &&
+                  tx_find(r.out, (long)r.outn, "status=UNDECIDED\treason=diff-failed", 35) >= 0 &&
+                  tx_find(r.out, (long)r.outn, "status=COMPLETE", 15) < 0 &&
+                  tx_find(r.out, (long)r.outn, "TRAIN_SUMMARY\tstatus=ERROR\t", 27) >= 0);
+        if (!ok && r.out) sy_eprintf("CASE7_OUT:\n%.*s\n", (int)r.outn, r.out);
+        pr_free(&r);
+        ck(ok, "failed-diff-reports-error-and-undecided-never-complete");
+    }
+
+    /* (8) Real --shard 0/2 -> SHARDED_OUT + UNDECIDED */
+    {
+        char *av[] = { "sh", "./unisacc.com", "tools/devsvc.cx", "--", "train", "--root", r1, "--target", "main", "--shard", "0/2", "--no-events", 0 }; /* lint:allow R1-product tests real --shard */
+        pr_result r;
+        int rc = pr_run("cdt-8", av, ".", 0, 20, &r);
+        int ok = (rc == 0 && r.rc == 0 && r.out &&
+                  tx_find(r.out, (long)r.outn, "status=SHARDED_OUT\tshard=0/2", 28) >= 0 &&
+                  tx_find(r.out, (long)r.outn, "TRAIN_SUMMARY\tstatus=UNDECIDED\t", 31) >= 0 &&
+                  tx_find(r.out, (long)r.outn, "status=READY", 12) < 0);
+        if (!ok && r.out) sy_eprintf("CASE8_OUT:\n%.*s\n", (int)r.outn, r.out);
+        pr_free(&r);
+        ck(ok, "real-shard-flag-emits-sharded-out-and-undecided");
+    }
+
+    /* (9) `land` deferred to step 2 -> rc=2 + zero tmp-train-* worktree residue */
+    {
+        char *av[] = { "sh", "./unisacc.com", "tools/devsvc.cx", "--", "train", "land", "--branch", "w/x", 0 }; /* lint:allow R1-product tests land refusal */
+        pr_result r;
+        int rc = pr_run("cdt-9", av, ".", 0, 15, &r);
+        int ok_land = (rc == 0 && r.rc == 2 && r.err &&
+                       tx_find(r.err, (long)r.errn, "TRAIN_REFUSE\tland-deferred-to-step2", 35) >= 0);
+        pr_free(&r);
+        int ok_clean = run_sh(r1, "! ls -d .claude/worktrees/tmp-train-* >/dev/null 2>&1");
+        ck(ok_land && ok_clean, "land-refused-and-zero-tmp-worktree-residue");
+    }
+
+    /* (10) Rename/delete conflict detected by trial merge */
+    {
+        char r7[4400];
+        int ok = 0;
+        if (!cx_fmt(r7, sizeof r7, "%s/r7", tmp) && !sy_mkdir_all(r7, 0700) &&
+            init_fixture_repo(r7, "sh ./unisacc.com tools/links-gen.cx -- --write") &&
+            run_sh(r7, "git checkout -qb w/alice-ren && git mv src/app.cx src/app_new.cx && git commit -qm ren && "
+                       "git checkout -qb w/bob-del main && git rm -q src/app.cx && git commit -qm del")) {
+            char *av[] = { "sh", "./unisacc.com", "tools/devsvc.cx", "--", "train", "--root", r7, "--target", "main", "--no-events", 0 }; /* lint:allow R1-product tests rename/delete conflict */
+            pr_result r;
+            int rc = pr_run("cdt-10", av, ".", 0, 20, &r);
+            ok = (rc == 0 && r.rc == 0 && r.out &&
+                  tx_find(r.out, (long)r.outn, "TRAIN_CONFLICT\t", 15) >= 0 &&
+                  tx_find(r.out, (long)r.outn, "TRAIN_SUMMARY\tstatus=CONFLICT\t", 30) >= 0);
+            if (!ok && r.out) sy_eprintf("CASE10_OUT:\n%.*s\n", (int)r.outn, r.out);
+            pr_free(&r);
+            (void)run_sh(r7, "rm -rf .git");
+        }
+        ck(ok, "rename-delete-conflict-detected");
+    }
+
+    /* (11) Dead external lease residue from killed run is recovered and cleaned on next run */
+    {
+        int ok = 0;
+        if (run_sh(r4, "mkdir -p .claude/worktrees/tmp-train-999999-deadbeef00000001-1 && "
+                       "printf 'tool=devsvc-train\\tpid=999999\\tstart_ticks=12345\\n' > .claude/worktrees/tmp-train-999999-deadbeef00000001-1.lease")) {
+            char *av[] = { "sh", "./unisacc.com", "tools/devsvc.cx", "--", "train", "--root", r4, "--target", "main", "--no-events", 0 }; /* lint:allow R1-product tests dead lease recovery */
+            pr_result r;
+            int rc = pr_run("cdt-11", av, ".", 0, 20, &r);
+            int cleaned = run_sh(r4, "! ls -d .claude/worktrees/tmp-train-* >/dev/null 2>&1");
+            ok = (rc == 0 && r.rc == 0 && cleaned && r.out &&
+                  tx_find(r.out, (long)r.outn, "TRAIN_SUMMARY\tstatus=READY\t", 27) >= 0);
+            if (!ok && r.out) sy_eprintf("CASE11_OUT:\n%.*s\n", (int)r.outn, r.out);
+            pr_free(&r);
+        }
+        ck(ok, "killed-run-dead-lease-recovered-and-cleaned");
+    }
+
+    /* (11b) Tree with NO lease (simulating mid-creation) MUST NOT be removed by concurrent start */
+    {
+        int ok = 0;
+        if (run_sh(r4, "mkdir -p .claude/worktrees/tmp-train-nolease-1")) {
+            char *av[] = { "sh", "./unisacc.com", "tools/devsvc.cx", "--", "train", "--root", r4, "--target", "main", "--no-events", 0 }; /* lint:allow R1-product tests no-lease tree preservation */
+            pr_result r;
+            int rc = pr_run("cdt-11b", av, ".", 0, 20, &r);
+            int preserved = run_sh(r4, "test -d .claude/worktrees/tmp-train-nolease-1");
+            int warned = (r.err && tx_find(r.err, (long)r.errn, "TRAIN_WARN\trecovery-skipped-no-lease\t", 37) >= 0);
+            ok = (rc == 0 && r.rc == 0 && preserved && warned);
+            if (!ok) sy_eprintf("CASE11B preserved=%d warned=%d err=%.*s\n", preserved, warned, (int)r.errn, r.err ? r.err : "");
+            pr_free(&r);
+            (void)run_sh(r4, "rm -rf .claude/worktrees/tmp-train-nolease-1");
+        }
+        ck(ok, "no-lease-tree-preserved-and-reported");
+    }
+
+    /* (12) inputs_glob wildcard inside derived directory keeps source files as kind=source */
+    {
+        char r8[4400];
+        int ok = 0;
+        if (!cx_fmt(r8, sizeof r8, "%s/r8", tmp) && !sy_mkdir_all(r8, 0700) &&
+            run_sh(r8, "git init -q -b main && git config user.email t@t && git config user.name t && "
+                       "mkdir -p exec/facts build/gen && "
+                       "printf 'g\\ttools/g.cx\\t-\\tsh g.cx --write\\tbuild/gen/\\tbuild/gen/*.src\\t5\\t20\\tintegrator\\n' > exec/facts/derive.tsv && "
+                       "printf 'v0\\n' > build/gen/a.src && git add -A && git commit -qm base && "
+                       "git checkout -qb w/alice-ig && printf 'va\\n' > build/gen/a.src && git commit -qam a && "
+                       "git checkout -qb w/bob-ig main && printf 'vb\\n' > build/gen/a.src && git commit -qam b")) {
+            char *av[] = { "sh", "./unisacc.com", "tools/devsvc.cx", "--", "train", "--root", r8, "--target", "main", "--no-events", 0 }; /* lint:allow R1-product tests inputs_glob wildcard preservation */
+            pr_result r;
+            int rc = pr_run("cdt-12", av, ".", 0, 20, &r);
+            ok = (rc == 0 && r.rc == 0 && r.out &&
+                  tx_find(r.out, (long)r.outn, "path=build/gen/a.src\tkind=source", 32) >= 0 &&
+                  tx_find(r.out, (long)r.outn, "TRAIN_SUMMARY\tstatus=CONFLICT\t", 30) >= 0);
+            if (!ok && r.out) sy_eprintf("CASE12_OUT:\n%.*s\n", (int)r.outn, r.out);
+            pr_free(&r);
+            (void)run_sh(r8, "rm -rf .git");
+        }
+        ck(ok, "inputs-glob-wildcard-stays-source");
+    }
+
+    (void)run_sh(tmp, "rm -rf r1/.git r2/.git r3/.git r4/.git r5/.git r6/.git");
+    sy_remove_all(tmp);
+
+    sy_printf("CHECK_DEVSVC_TRAIN\tpassed=%d\tfailed=%d\n", g_pass, g_fail);
+    return g_fail ? 1 : 0;
+}

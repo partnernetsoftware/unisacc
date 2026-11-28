@@ -42,8 +42,9 @@
 #pragma unisa use text.text
 #pragma unisa use mem.heap
 #pragma unisa use sys.env
+#pragma unisa use cxlib.outfmt
 
-#define NRK 21
+#define NRK 22
 typedef struct { const char *name; int pid, ofd, efd; char *out; long n; int rc; } Rk;
 
 static void slurp(int fd, char **buf, long *n) {
@@ -199,6 +200,7 @@ static const char *rk_script(const char *name, char *buf, long cap) {
     if (tx_eqz(name, "tsv-lint")) return "tools/tsv-lint.cx";
     if (tx_eqz(name, "host-surface")) return "tools/check-host-surface.cx";
     if (tx_eqz(name, "stdio-copies")) return "tools/check-stdio-copies.cx";
+    if (tx_eqz(name, "outfmt-prefix")) return "tools/outfmt.cx";
     if (cx_fmt(buf, cap, "tests/%s.cx", name)) return 0;
     return buf;
 }
@@ -233,6 +235,9 @@ static int rk_path_hits(const char *name, const char *p, long pl, int precommit_
     if (tx_eqz(name, "stdio-copies"))
         return (pl == 28 && tx_same(p, 28, "build/stdio-copies-allow.tsv", 28)) ||
                tx_prefix(p, pl, "cx/", 3) || tx_prefix(p, pl, "src/", 4);
+    if (tx_eqz(name, "outfmt-prefix"))
+        return (pl == 32 && tx_same(p, 32, "build/outfmt-prefix-baseline.tsv", 32)) ||
+               (pl > 3 && tx_same(p + pl - 3, 3, ".cx", 3));
     if (tx_eqz(name, "dup-census")) return tx_prefix(p, pl, "tools/", 6);
     if (tx_eqz(name, "ref-job-paths")) return (pl == 16 && tx_same(p, 16, "prd_mempalace.md", 16));
     if (tx_eqz(name, "aluiwidth") || tx_eqz(name, "net-deps"))
@@ -395,7 +400,7 @@ static int rk_precommit_match(const char *rows_file, const char *paths_file) {
     size_t rsz = 0, psz = 0;
     char *rows = cx_read(rows_file, &rsz), *names = cx_read(paths_file, &psz);
     long rn = (long)rsz, sn = (long)psz, at = 0;
-    char cur_rk_name[64], cur_rk_sum[256];
+    char cur_rk_name[64], cur_rk_sum[2048];
     int cur_rk_fail = 0, cur_rk_gblk = 0, cur_dup_has_fn = 0, blocked = 0;
     if (!rows || !names) return 2;
     cur_rk_name[0] = 0; cur_rk_sum[0] = 0;
@@ -404,26 +409,37 @@ static int rk_precommit_match(const char *rows_file, const char *paths_file) {
         const char *r = rows + at;
         int soft = 0;
         if (l > 0 && r[l - 1] == '\r') l--;
-        if (l > 8 && tx_prefix(r, l, "RATCHET\t", 8)) {
-            long o1, l1, o2, l2, o3, l3;
-            cur_rk_name[0] = 0; cur_rk_sum[0] = 0; cur_rk_fail = 0; cur_rk_gblk = 0; cur_dup_has_fn = 0;
-            if (!tx_field(r, l, '\t', 1, &o1, &l1) && l1 > 0 && l1 < (long)sizeof cur_rk_name &&
-                !tx_field(r, l, '\t', 2, &o2, &l2)) {
-                for (long j = 0; j < l1; j++) cur_rk_name[j] = r[o1 + j];
-                cur_rk_name[l1] = 0;
-                if (!tx_field(r, l, '\t', 3, &o3, &l3) && l3 > 0) {
-                    long cl = l3 < (long)sizeof cur_rk_sum - 1 ? l3 : (long)sizeof cur_rk_sum - 1;
-                    for (long j = 0; j < cl; j++) cur_rk_sum[j] = r[o3 + j];
-                    cur_rk_sum[cl] = 0;
+        {
+            OfRatchetRow row; char why[64];
+            int pr = of_parse_ratchet_row(r, l, &row, why, sizeof why);
+            if (pr == -1) {
+                cur_rk_name[0] = 0; cur_rk_sum[0] = 0; cur_rk_fail = 0; cur_rk_gblk = 0; cur_dup_has_fn = 0;
+                printf("precommit: blocked: RATCHET malformed (%s): %.*s\n", why, (int)l, r);
+                blocked++;
+                at += raw_l + 1;
+                continue;
+            }
+            if (pr == 1) {
+                long nl = tx_len(row.name, sizeof row.name), sl = tx_len(row.summary, sizeof row.summary);
+                cur_rk_name[0] = 0; cur_rk_sum[0] = 0; cur_rk_fail = 0; cur_rk_gblk = 0; cur_dup_has_fn = 0;
+                if (nl > 0 && nl < (long)sizeof cur_rk_name) {
+                    tx_copy(cur_rk_name, sizeof cur_rk_name, row.name, nl); cur_rk_name[nl] = 0;
                 }
-                cur_rk_fail = (l2 == 4 && tx_same(r + o2, 4, "FAIL", 4)) || (l2 == 5 && tx_same(r + o2, 5, "ERROR", 5));
+                if (sl > 0) {
+                    long cl = sl < (long)sizeof cur_rk_sum - 1 ? sl : (long)sizeof cur_rk_sum - 1;
+                    tx_copy(cur_rk_sum, sizeof cur_rk_sum, row.summary, cl); cur_rk_sum[cl] = 0;
+                }
+                cur_rk_fail = tx_eqz(row.status, "FAIL") || tx_eqz(row.status, "ERROR");
                 if (cur_rk_fail && rk_is_global_only(cur_rk_name) && rk_any_hit(cur_rk_name, names, sn)) {
                     printf("precommit: blocked: RATCHET %s FAIL (%s)\n", cur_rk_name, cur_rk_sum);
                     blocked++;
                     cur_rk_gblk = 1;
                 }
+                at += raw_l + 1;
+                continue;
             }
-        } else if (l > 2 && r[0] == ' ' && r[1] == ' ') {
+        }
+        if (l > 2 && r[0] == ' ' && r[1] == ' ') {
             const char *b = r + 2; long bn = l - 2;
             if (cur_rk_fail && tx_eqz(cur_rk_name, "dup-census") &&
                 tx_prefix(b, bn, "dup-census: ", 12) &&
@@ -478,7 +494,7 @@ static int judge(Rk *rk, const char *only, int *okp, int *skipp);
 static void from_run(Rk *rk, const char *dir);
 
 int main(int argc, char **argv) {
-    static Rk rk[NRK] = {{"cxraw"}, {"cxinclude"}, {"cxapis"}, {"cxtrunc"}, {"cxlibc"}, {"cxplatform"}, {"srcshape"}, {"coreapi"}, {"verwriter"}, {"aluiwidth"}, {"outdep"}, {"check-literal"}, {"net-deps"}, {"notcovered"}, {"dup-census"}, {"no-home-path"}, {"ref-job-paths"}, {"tsv-lint"}, {"reserved-names"}, {"host-surface"}, {"stdio-copies"}};
+    static Rk rk[NRK] = {{"cxraw"}, {"cxinclude"}, {"cxapis"}, {"cxtrunc"}, {"cxlibc"}, {"cxplatform"}, {"srcshape"}, {"coreapi"}, {"verwriter"}, {"aluiwidth"}, {"outdep"}, {"check-literal"}, {"net-deps"}, {"notcovered"}, {"dup-census"}, {"no-home-path"}, {"ref-job-paths"}, {"tsv-lint"}, {"reserved-names"}, {"host-surface"}, {"stdio-copies"}, {"outfmt-prefix"}};
     const char *only = 0; long t0 = sy_now_ms(); int k, ok = 0, fail = 0, skipped = 0;
     if (argc == 4 && tx_eqz(argv[1], "--precommit")) return rk_precommit_match(argv[2], argv[3]);
     if ((argc == 3 || argc == 5) && tx_eqz(argv[1], "--rows")) {   /* --rows SAVED [--only P]: the filter alone, on a saved ratchet output */
@@ -511,8 +527,12 @@ int main(int argc, char **argv) {
         from_run(rk, argv[2]);
         fail = judge(rk, only, &ok, &skipped);
         rk_hint_foreign_untracked(rk, fail);
-        if (skipped > 0 || precommit_soft) printf("RATCHETS\tok=%d\tfail=%d\tskipped=%d\telapsed_ms=%ld\n", ok, fail, skipped, sy_now_ms() - t0);
-        else printf("RATCHETS\tok=%d\tfail=%d\telapsed_ms=%ld\n", ok, fail, sy_now_ms() - t0);
+        {
+            OfRatchetsSum s; char ob[256], why[64];
+            s.ok = ok; s.fail = fail; s.has_skipped = (skipped > 0 || precommit_soft) ? 1 : 0; s.skipped = skipped;
+            s.has_elapsed = 1; s.elapsed_ms = sy_now_ms() - t0;
+            if (of_fmt_ratchets_sum(ob, sizeof ob, &s, why, sizeof why) > 0) fputs(ob, stdout);
+        }
         return fail ? 1 : 0;
     }
     if (argc >= 3 && tx_eqz(argv[1], "--affected")) {
@@ -574,8 +594,10 @@ int main(int argc, char **argv) {
     if (lsf[0]) sy_unlink(lsf);
     {   const char *soft = sy_env("UNISACC_RATCHETS_PRECOMMIT");
         int precommit_soft = (soft && soft[0] == '1');
-        if (skipped > 0 || precommit_soft) printf("RATCHETS\tok=%d\tfail=%d\tskipped=%d\telapsed_ms=%ld\n", ok, fail, skipped, sy_now_ms() - t0);
-        else printf("RATCHETS\tok=%d\tfail=%d\telapsed_ms=%ld\n", ok, fail, sy_now_ms() - t0);
+        OfRatchetsSum s; char ob[256], why[64];
+        s.ok = ok; s.fail = fail; s.has_skipped = (skipped > 0 || precommit_soft) ? 1 : 0; s.skipped = skipped;
+        s.has_elapsed = 1; s.elapsed_ms = sy_now_ms() - t0;
+        if (of_fmt_ratchets_sum(ob, sizeof ob, &s, why, sizeof why) > 0) fputs(ob, stdout);
     }
     return fail ? 1 : 0;
 }
@@ -595,9 +617,38 @@ static int judge(Rk *rk, const char *only, int *okp, int *skipp) {
         }
         isok = rk[k].rc == 0 && summary >= 0 &&
                (tx_find(o + summary, sn, ": ok: ", 6) >= 0 || tx_find(o + summary, sn, "status=PASS", 11) >= 0);
-        isskip = isok && (rk[k].pid == -2 || tx_find(o + summary, sn, ": ok: skipped (", 15) >= 0);
-        if (isskip) skipped++; else if (isok) ok++; else fail++;
-        printf("RATCHET\t%s\t%s\t%.*s\n", rk[k].name, isok ? "ok" : summary >= 0 ? "FAIL" : "ERROR", (int)(summary >= 0 ? sn : 0), summary >= 0 ? o + summary : "");
+        {
+            OfRatchetRow row, parsed; char ob[2560], why[64];
+            const char *st = isok ? "ok" : summary >= 0 ? "FAIL" : "ERROR";
+            long nl = tx_len(rk[k].name, sizeof row.name);
+            long sl = tx_len(st, sizeof row.status);
+            long ml = (summary >= 0 && sn > 0) ? (sn < (long)sizeof row.summary - 1 ? sn : (long)sizeof row.summary - 1) : 0;
+            long j;
+            int wn;
+            tx_copy(row.name, sizeof row.name, rk[k].name, nl); row.name[nl] = 0;
+            tx_copy(row.status, sizeof row.status, st, sl); row.status[sl] = 0;
+            for (j = 0; j < ml; j++) {
+                char c = o[summary + j];
+                row.summary[j] = (c == '\t') ? ' ' : c;
+            }
+            while (ml > 0 && row.summary[ml - 1] == ' ') ml--;
+            row.summary[ml] = 0;
+            row.is_skipped = 0; row.skip_reason[0] = 0;
+            wn = of_fmt_ratchet_row(ob, sizeof ob, &row, why, sizeof why);
+            if (wn <= 0 || of_parse_ratchet_row(ob, wn, &parsed, why, sizeof why) != 1) {
+                OfRatchetRow erow; char eob[256], ewhy[64];
+                fprintf(stderr, "ratchets: REFUSE malformed row %s (%s)\n", rk[k].name, why);
+                tx_copy(erow.name, sizeof erow.name, rk[k].name, nl); erow.name[nl] = 0;
+                tx_copy(erow.status, sizeof erow.status, "ERROR", 6);
+                erow.summary[0] = 0; erow.is_skipped = 0; erow.skip_reason[0] = 0;
+                if (of_fmt_ratchet_row(eob, sizeof eob, &erow, ewhy, sizeof ewhy) > 0) fputs(eob, stdout);
+                fail++;
+            } else {
+                isskip = isok && (rk[k].pid == -2 || parsed.is_skipped);
+                if (isskip) skipped++; else if (isok) ok++; else fail++;
+                fputs(ob, stdout);
+            }
+        }
         at = 0;
         while (at < rk[k].n) {
             long e = tx_chr(o + at, rk[k].n - at, '\n'), ln = e < 0 ? rk[k].n - at : e;

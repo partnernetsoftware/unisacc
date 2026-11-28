@@ -186,7 +186,7 @@ static int ver_branch_ok(const char *nm0, int allow_main) {
 static char GB[512];
 static const char *branch_bad(const char *nm, int allow_main) {
     if (ver_branch_ok(nm, allow_main)) return 0;
-    if (cx_fmt(GB, sizeof GB, "git 创建分支 %s:只允许 vX.Y.Z 版本分支,补丁放 ~/.local/share/unisacc/research/", strip_q(nm)) != 0) GB[0] = 0;
+    if (cx_fmt(GB, sizeof GB, "git 创建分支 %s:请用 devsvc branch create --owner OWNER --unit UNIT 从任务表建分支(版本分支仅限 vX.Y.Z,补丁放 ~/.local/share/unisacc/research/)", strip_q(nm)) != 0) GB[0] = 0;
     return GB;
 }
 static int in_repo_dir(const char *d) { long rl = sl(REPO); return !*d || eq(d, REPO) || (sw(d, REPO) && d[rl] == '/'); }
@@ -207,7 +207,7 @@ static int shortcluster(const char *x, const char *letters, const char **val) {
     for (m = 1; x[m]; m++) if (hasc(letters, x[m])) { if (x[m + 1]) *val = x + m + 1; return x[m]; }
     return 0;
 }
-static const char *const WT_REFUSE = "git clone/worktree add:不得另建克隆或工作树,直接在 ~/repos/unisacc 里工作";
+static const char *const WT_REFUSE = "git clone/worktree add:请用 devsvc branch create --owner OWNER --unit UNIT 建开发工作树或 devsvc accept-tree --commit REV 建只读验收树,不在共享主树建克隆/裸工作树";
 
 static int wtree_leaf_ok(const char *leaf) {
     const char *q = leaf + 2;
@@ -353,11 +353,30 @@ static char *canon_strict(const char *base, const char *p) {
 }
 static char *shared_checkout_refuse_msg(const char *ow_raw, const char *hint_wt) {
     char *ow_n = norm_ow_str(ow_raw);
-    return fmt("共享检出写保护(协作窗口防误操作守卫,调用方自报 DEVSVC_OWNER=%s,非身份认证):非集成者不得写共享检出或非本窗口工作树,请在本窗口工作树 %s 内修改",
+    return fmt("共享检出写保护(协作窗口防误操作守卫,调用方自报 DEVSVC_OWNER=%s,非身份认证):非集成者不得写共享检出或非本窗口工作树,请用 devsvc branch create --owner OWNER --unit UNIT 在本窗口工作树 %s 内修改(只读验收用 devsvc accept-tree --commit REV)",
                *ow_n ? ow_n : "unset", hint_wt ? hint_wt : ".claude/worktrees/w-<DEVSVC_OWNER>");
+}
+static char *accept_tree_write_bad(const char *raw_path, const char *cur, const char *flow_root) {
+    char *p, *base, *can_p;
+    char *p1 = cat2(REPO, "/.claude/worktrees/accept-");
+    char *p2 = cat2(canon(REPO), "/.claude/worktrees/accept-");
+    if (!raw_path || !*raw_path) return 0;
+    p = repl_home(strip_q(raw_path));
+    if (*JOB) p = repl_var(p, "CLAUDE_JOB_DIR", JOB);
+    if (!*p || hasc(p, '$') || hasc(p, '`')) return 0;
+    base = (flow_root && *flow_root) ? repl_home(strip_q(flow_root)) : sdup(cur && *cur ? cur : "");
+    if (*JOB && *base) base = repl_var(base, "CLAUDE_JOB_DIR", JOB);
+    if (p[0] != '/' && (!*base || base[0] != '/' || hasc(base, '$') || hasc(base, '`'))) return 0;
+    can_p = canon_strict(base, p);
+    if (can_p && (sw(can_p, p1) || sw(can_p, p2))) {
+        return fmt("accept-tree 只读保护:验收工作树 %s 只读不可写;需修改请用 devsvc branch create --owner OWNER --unit UNIT 建开发工作树", can_p, 0);
+    }
+    return 0;
 }
 static char *shared_checkout_write_bad(const char *raw_path, const char *cur, const char *flow_root, const char *ow_raw) {
     char *p, *base, *can_p, *own_wt, *hint_wt = 0;
+    char *at = accept_tree_write_bad(raw_path, cur, flow_root);
+    if (at) return at;
     if (owner_is_cc(ow_raw)) return 0;
     own_wt = resolve_window_wtree(ow_raw, cur, &hint_wt);
     if (!raw_path || !*raw_path) return shared_checkout_refuse_msg(ow_raw, hint_wt);
@@ -790,6 +809,8 @@ static char *check_seg(char *t, char **curp) {
             }
             if (matched) {
                 char *m1 = dupn(t + cs, ce - cs);
+                char *at = accept_tree_write_bad(m1, cur, envs("UNISACC_FLOW_ROOT"));
+                if (at) return at;
                 if (repo_path(m1, cur, 0) || repo_path(m1, cur, 1)) return fmt("重定向写仓内文件 %s", m1, 0);
                 p = me;
             } else p++;
@@ -1666,6 +1687,11 @@ int main(void) {
             const char *dow = envs("DEVSVC_OWNER");
             const js_val *cv = js_get(root, "cwd");
             const char *ecwd = js_kind(cv) == JS_STR ? js_str(cv) : "";
+            char *at = accept_tree_write_bad(fp, ecwd, envs("UNISACC_FLOW_ROOT"));
+            if (at) {
+                sy_eprintf("GUARD-EDIT-V1 拒绝:%s (target=%s)\n", at, fp);
+                return 2;
+            }
             if ((dow && *dow) || (*ecwd && own_wtree_root(ecwd))) {
                 char *sc = shared_checkout_write_bad(fp, ecwd, envs("UNISACC_FLOW_ROOT"), dow);
                 if (sc) {

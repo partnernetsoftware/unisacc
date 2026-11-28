@@ -1,0 +1,665 @@
+/* tools/cxlib/outfmt.cx -- canonical parser and writer for the five structured line formats:
+ *   (1) RATCHET row and RATCHETS summary
+ *   (2) BATCH_RUN record
+ *   (3) strict evidence row (batch/domain/status/rc/candidate/ms/load1/retries/note[+origin=+tree=])
+ *   (4) MATERIAL line (affected bind form + all-waves prepared 8-field form)
+ *   (5) DEFERRED line (affected 3/5-field form + self-deferral 2-field key=value form)
+ *
+ * Every parser returns:
+ *    1  well-formed line of this format
+ *    0  unrelated / metadata line (comment, header, or other tag; note: RAW, SUMMARY,
+ *       CHECKPOINT, THREE_ENTRY and BATCH_RUN lines are not validated by of_parse_strict_row)
+ *   -1  malformed line, with a named refusal written into why[0..wcap)
+ * Every writer validates the same contract and returns written byte length (>0) or -1 with why set. */
+#pragma unisa module outfmt
+#pragma unisa use text.text
+
+typedef struct {
+    char name[64];
+    char status[16];
+    char summary[2048];
+    int is_skipped;
+    char skip_reason[256];
+} OfRatchetRow;
+
+typedef struct {
+    int ok;
+    int fail;
+    int has_skipped;
+    int skipped;
+    int has_elapsed;
+    long elapsed_ms;
+} OfRatchetsSum;
+
+typedef struct {
+    char id[128];
+    char status[16];
+    int rc;
+    int transport;
+    char marker[128];
+    char candidate[128];
+    char headers[64];
+    char scope[128];
+    char assertions[64];
+} OfBatchRun;
+
+typedef struct {
+    char batch[128];
+    char domain[64];
+    char status[16];
+    int rc;
+    char candidate[128];
+    long ms;
+    char load1[32];
+    int retries;
+    char note[512];
+    int has_origin;
+    char origin[64];
+    char tree[64];
+} OfStrictRow;
+
+enum { OF_MAT_BIND = 0, OF_MAT_PREP = 1 };
+
+typedef struct {
+    int kind;
+    char batch[128];
+    char name[128];
+    char source[512];
+    int refused;
+    char reason[256];
+    char content[96];
+    char fingerprint[96];
+    long entries;
+    long hash_ns;
+    char state[96];
+} OfMaterial;
+
+typedef struct {
+    char id[128];
+    char reason[256];
+    int has_residue;
+    int residue;
+    char survived[256];
+} OfDeferred;
+
+static int of_why(char *why, long wcap, const char *msg) {
+    if (why && wcap > 0) {
+        long n = tx_len(msg, wcap - 1);
+        tx_copy(why, wcap, msg, n);
+        why[n] = 0;
+    }
+    return -1;
+}
+
+static long of_trim_eol(const char *s, long n) {
+    if (n > 0 && s[n - 1] == '\n') n--;
+    if (n > 0 && s[n - 1] == '\r') n--;
+    return n;
+}
+
+static int of_has_edge_space(const char *s, long n) {
+    if (n <= 0) return 0;
+    return s[0] == ' ' || s[n - 1] == ' ';
+}
+
+static int of_has_any_space(const char *s, long n) {
+    long i;
+    for (i = 0; i < n; i++) if (s[i] == ' ' || s[i] == '\t' || s[i] == '\r' || s[i] == '\n') return 1;
+    return 0;
+}
+
+static int of_has_ctrl(const char *s, long n) {
+    long i;
+    for (i = 0; i < n; i++) if (s[i] == '\t' || s[i] == '\r' || s[i] == '\n') return 1;
+    return 0;
+}
+
+static int of_split_tab(const char *s, long n, long *st, long *en, int maxf) {
+    long i, b = 0;
+    int k = 0;
+    for (i = 0; i <= n; i++) {
+        if (i == n || s[i] == '\t') {
+            if (k < maxf) { st[k] = b; en[k] = i; }
+            k++;
+            b = i + 1;
+        }
+    }
+    return k;
+}
+
+static int of_copy_str(char *dst, long cap, const char *src, long n, char *why, long wcap) {
+    if (n <= 0) return of_why(why, wcap, "empty-field");
+    if (n >= cap) return of_why(why, wcap, "field-too-long");
+    tx_copy(dst, cap, src, n);
+    dst[n] = 0;
+    return 0;
+}
+
+/* Strict canonical non-negative integer: no leading zero (except "0"), max max_digs digits. */
+static int of_parse_un_strict(const char *s, long n, int max_digs, long *out, char *why, long wcap) {
+    long i, v = 0;
+    if (n <= 0) return of_why(why, wcap, "bad-int");
+    if (of_has_edge_space(s, n)) return of_why(why, wcap, "extra-space");
+    if (n > max_digs) return of_why(why, wcap, "bad-int");
+    if (n > 1 && s[0] == '0') return of_why(why, wcap, "bad-int");
+    for (i = 0; i < n; i++) {
+        if (s[i] < '0' || s[i] > '9') return of_why(why, wcap, "bad-int");
+        v = v * 10 + (s[i] - '0');
+    }
+    *out = v;
+    return 0;
+}
+
+static int of_parse_u32_9(const char *s, long n, int *out, char *why, long wcap) {
+    long v = 0;
+    if (of_parse_un_strict(s, n, 9, &v, why, wcap)) return -1;
+    *out = (int)v;
+    return 0;
+}
+
+static int of_parse_u64_strict(const char *s, long n, long *out, char *why, long wcap) {
+    return of_parse_un_strict(s, n, 18, out, why, wcap);
+}
+
+/* Strict signed 9-digit integer: rejects -0, leading zeros, >9 digits. */
+static int of_parse_i32(const char *s, long n, int *out, char *why, long wcap) {
+    long i = 0, v = 0;
+    int neg = 0;
+    if (n <= 0) return of_why(why, wcap, "bad-int");
+    if (of_has_edge_space(s, n)) return of_why(why, wcap, "extra-space");
+    if (s[0] == '-') { neg = 1; i = 1; }
+    if (i >= n || n - i > 9) return of_why(why, wcap, "bad-int");
+    if (n - i > 1 && s[i] == '0') return of_why(why, wcap, "bad-int");
+    for (; i < n; i++) {
+        if (s[i] < '0' || s[i] > '9') return of_why(why, wcap, "bad-int");
+        v = v * 10 + (s[i] - '0');
+    }
+    if (neg && v == 0) return of_why(why, wcap, "bad-int");
+    *out = neg ? -(int)v : (int)v;
+    return 0;
+}
+
+/* Check whether line begins with tag (possibly with leading space or space instead of tab). */
+static int of_match_tag(const char *s, long n, const char *tag, long tl, char *why, long wcap) {
+    long p = 0;
+    while (p < n && s[p] == ' ') p++;
+    if (n - p < tl || !tx_same(s + p, tl, tag, tl)) return 0;
+    if (p > 0) {
+        if (p + tl == n || s[p + tl] == '\t' || s[p + tl] == ' ') return of_why(why, wcap, "extra-space");
+        return 0;
+    }
+    if (n == tl) return 1;
+    if (s[tl] == '\t') return 1;
+    if (s[tl] == ' ') return of_why(why, wcap, "extra-space");
+    return 0;
+}
+
+static int of_check_skip_summary(const char *name, const char *msg, long mn, char *reason, long rcap, char *why, long wcap) {
+    char pre[96];
+    long pl, z, non = 0;
+    if (cx_fmt(pre, sizeof pre, "%s: ok: skipped (", name)) return of_why(why, wcap, "field-too-long");
+    pl = tx_len(pre, sizeof pre);
+    if (mn <= pl + 1 || !tx_prefix(msg, mn, pre, pl) || msg[mn - 1] != ')')
+        return of_why(why, wcap, "skipped-without-reason");
+    for (z = pl; z < mn - 1; z++) {
+        if (msg[z] != ' ' && msg[z] != '\t') non = 1;
+    }
+    if (!non) return of_why(why, wcap, "skipped-without-reason");
+    if (reason && rcap > 0) {
+        long rl = (mn - 1) - pl;
+        if (rl >= rcap) return of_why(why, wcap, "field-too-long");
+        tx_copy(reason, rcap, msg + pl, rl);
+        reason[rl] = 0;
+    }
+    return 0;
+}
+
+/* (1a) RATCHET row: RATCHET<TAB>name<TAB>ok|FAIL|ERROR<TAB>summary */
+int of_parse_ratchet_row(const char *line, long n, OfRatchetRow *out, char *why, long wcap) {
+    long st[6], en[6], nl, sl, ml;
+    int nf, mr;
+    n = of_trim_eol(line, n);
+    mr = of_match_tag(line, n, "RATCHET", 7, why, wcap);
+    if (mr <= 0) return mr;
+    nf = of_split_tab(line, n, st, en, 6);
+    if (nf < 4) return of_why(why, wcap, "missing-field");
+    if (nf > 4) return of_why(why, wcap, "trailing-field");
+    nl = en[1] - st[1]; sl = en[2] - st[2]; ml = en[3] - st[3];
+    if (of_has_edge_space(line + st[1], nl) || of_has_edge_space(line + st[2], sl) || of_has_edge_space(line + st[3], ml))
+        return of_why(why, wcap, "extra-space");
+    if (of_has_any_space(line + st[1], nl)) return of_why(why, wcap, "extra-space");
+    if (of_copy_str(out->name, sizeof out->name, line + st[1], nl, why, wcap)) return -1;
+    if (of_copy_str(out->status, sizeof out->status, line + st[2], sl, why, wcap)) return -1;
+    if (!tx_eqz(out->status, "ok") && !tx_eqz(out->status, "FAIL") && !tx_eqz(out->status, "ERROR"))
+        return of_why(why, wcap, "bad-status");
+    out->is_skipped = 0;
+    out->skip_reason[0] = 0;
+    if (ml == 0) {
+        if (tx_eqz(out->status, "ok")) return of_why(why, wcap, "empty-summary");
+        out->summary[0] = 0;
+    } else {
+        if (of_copy_str(out->summary, sizeof out->summary, line + st[3], ml, why, wcap)) return -1;
+    }
+    if (tx_eqz(out->status, "ok") && tx_find(out->summary, ml, ": ok: skipped", 13) >= 0) {
+        if (of_check_skip_summary(out->name, out->summary, ml, out->skip_reason, sizeof out->skip_reason, why, wcap))
+            return -1;
+        out->is_skipped = 1;
+    }
+    return 1;
+}
+
+int of_fmt_ratchet_row(char *buf, long cap, const OfRatchetRow *in, char *why, long wcap) {
+    char sum[2048];
+    const char *sp = in->summary;
+    long nl = tx_len(in->name, sizeof in->name), ml;
+    if (nl <= 0 || of_has_any_space(in->name, nl)) return of_why(why, wcap, "bad-name");
+    if (!tx_eqz(in->status, "ok") && !tx_eqz(in->status, "FAIL") && !tx_eqz(in->status, "ERROR"))
+        return of_why(why, wcap, "bad-status");
+    if (in->is_skipped) {
+        long rl = tx_len(in->skip_reason, sizeof in->skip_reason), z, non = 0;
+        if (!tx_eqz(in->status, "ok")) return of_why(why, wcap, "bad-status");
+        for (z = 0; z < rl; z++) if (in->skip_reason[z] != ' ' && in->skip_reason[z] != '\t') non = 1;
+        if (!non || of_has_ctrl(in->skip_reason, rl)) return of_why(why, wcap, "skipped-without-reason");
+        if (cx_fmt(sum, sizeof sum, "%s: ok: skipped (%s)", in->name, in->skip_reason))
+            return of_why(why, wcap, "field-too-long");
+        sp = sum;
+    }
+    ml = tx_len(sp, sizeof in->summary);
+    if (of_has_ctrl(sp, ml)) return of_why(why, wcap, "trailing-field");
+    if (of_has_edge_space(sp, ml)) return of_why(why, wcap, "extra-space");
+    if (tx_eqz(in->status, "ok")) {
+        if (ml <= 0) return of_why(why, wcap, "empty-summary");
+        if (tx_find(sp, ml, ": ok: skipped", 13) >= 0) {
+            if (of_check_skip_summary(in->name, sp, ml, 0, 0, why, wcap)) return -1;
+        }
+    }
+    if (cx_fmt(buf, cap, "RATCHET\t%s\t%s\t%s\n", in->name, in->status, sp))
+        return of_why(why, wcap, "buffer-too-small");
+    return (int)tx_len(buf, cap);
+}
+
+/* (1b) RATCHETS summary: fixed key order ok=N, fail=M, optional skipped=S, optional elapsed_ms=T */
+int of_parse_ratchets_sum(const char *line, long n, OfRatchetsSum *out, char *why, long wcap) {
+    long st[8], en[8];
+    int nf, i, mr;
+    n = of_trim_eol(line, n);
+    mr = of_match_tag(line, n, "RATCHETS", 8, why, wcap);
+    if (mr <= 0) return mr;
+    nf = of_split_tab(line, n, st, en, 8);
+    if (nf < 3) return of_why(why, wcap, "missing-field");
+    if (nf > 5) return of_why(why, wcap, "trailing-field");
+    out->ok = -1; out->fail = -1; out->has_skipped = 0; out->skipped = 0; out->has_elapsed = 0; out->elapsed_ms = 0;
+    for (i = 1; i < nf; i++) {
+        const char *f = line + st[i];
+        long fl = en[i] - st[i];
+        if (fl <= 0) return of_why(why, wcap, "trailing-field");
+        if (of_has_edge_space(f, fl)) return of_why(why, wcap, "extra-space");
+        if (i == 1) {
+            if (fl <= 3 || !tx_prefix(f, fl, "ok=", 3)) return of_why(why, wcap, "bad-field");
+            if (of_parse_u32_9(f + 3, fl - 3, &out->ok, why, wcap)) return -1;
+        } else if (i == 2) {
+            if (fl <= 5 || !tx_prefix(f, fl, "fail=", 5)) return of_why(why, wcap, "bad-field");
+            if (of_parse_u32_9(f + 5, fl - 5, &out->fail, why, wcap)) return -1;
+        } else if (fl >= 8 && tx_prefix(f, fl, "skipped=", 8)) {
+            if (out->has_skipped) return of_why(why, wcap, "trailing-field");
+            if (out->has_elapsed) return of_why(why, wcap, "bad-field-order");
+            if (of_parse_u32_9(f + 8, fl - 8, &out->skipped, why, wcap)) return -1;
+            out->has_skipped = 1;
+        } else if (fl >= 11 && tx_prefix(f, fl, "elapsed_ms=", 11)) {
+            if (out->has_elapsed) return of_why(why, wcap, "trailing-field");
+            if (of_parse_u64_strict(f + 11, fl - 11, &out->elapsed_ms, why, wcap)) return -1;
+            out->has_elapsed = 1;
+        } else {
+            return of_why(why, wcap, "trailing-field");
+        }
+    }
+    if (out->ok < 0 || out->fail < 0) return of_why(why, wcap, "missing-field");
+    return 1;
+}
+
+int of_fmt_ratchets_sum(char *buf, long cap, const OfRatchetsSum *in, char *why, long wcap) {
+    int rc;
+    if (in->ok < 0 || in->fail < 0 || (in->has_skipped && in->skipped < 0) || (in->has_elapsed && in->elapsed_ms < 0))
+        return of_why(why, wcap, "bad-int");
+    if (in->has_skipped && in->has_elapsed)
+        rc = cx_fmt(buf, cap, "RATCHETS\tok=%d\tfail=%d\tskipped=%d\telapsed_ms=%ld\n", in->ok, in->fail, in->skipped, in->elapsed_ms);
+    else if (in->has_skipped)
+        rc = cx_fmt(buf, cap, "RATCHETS\tok=%d\tfail=%d\tskipped=%d\n", in->ok, in->fail, in->skipped);
+    else if (in->has_elapsed)
+        rc = cx_fmt(buf, cap, "RATCHETS\tok=%d\tfail=%d\telapsed_ms=%ld\n", in->ok, in->fail, in->elapsed_ms);
+    else
+        rc = cx_fmt(buf, cap, "RATCHETS\tok=%d\tfail=%d\n", in->ok, in->fail);
+    if (rc) return of_why(why, wcap, "buffer-too-small");
+    return (int)tx_len(buf, cap);
+}
+
+/* (2) BATCH_RUN */
+static int of_kv_str(const char *f, long fl, const char *key, long kl, char *dst, long cap, char *why, long wcap) {
+    if (fl <= 0) return of_why(why, wcap, "empty-field");
+    if (of_has_edge_space(f, fl)) return of_why(why, wcap, "extra-space");
+    if (fl <= kl || !tx_prefix(f, fl, key, kl)) return of_why(why, wcap, "bad-field");
+    if (of_has_edge_space(f + kl, fl - kl)) return of_why(why, wcap, "extra-space");
+    if (of_has_any_space(f + kl, fl - kl)) return of_why(why, wcap, "extra-space");
+    return of_copy_str(dst, cap, f + kl, fl - kl, why, wcap);
+}
+
+int of_parse_batch_run(const char *line, long n, OfBatchRun *out, char *why, long wcap) {
+    long st[12], en[12];
+    int nf, mr;
+    n = of_trim_eol(line, n);
+    mr = of_match_tag(line, n, "BATCH_RUN", 9, why, wcap);
+    if (mr <= 0) return mr;
+    nf = of_split_tab(line, n, st, en, 12);
+    if (nf < 10) return of_why(why, wcap, "missing-field");
+    if (nf > 10) return of_why(why, wcap, "trailing-field");
+    if (of_kv_str(line + st[1], en[1] - st[1], "id=", 3, out->id, sizeof out->id, why, wcap)) return -1;
+    if (of_kv_str(line + st[2], en[2] - st[2], "status=", 7, out->status, sizeof out->status, why, wcap)) return -1;
+    if (!tx_eqz(out->status, "PASS") && !tx_eqz(out->status, "FAIL") && !tx_eqz(out->status, "UNKNOWN"))
+        return of_why(why, wcap, "bad-status");
+    {
+        const char *f = line + st[3]; long fl = en[3] - st[3];
+        if (of_has_edge_space(f, fl)) return of_why(why, wcap, "extra-space");
+        if (fl <= 3 || !tx_prefix(f, fl, "rc=", 3)) return of_why(why, wcap, "bad-field");
+        if (of_parse_i32(f + 3, fl - 3, &out->rc, why, wcap)) return -1;
+    }
+    {
+        const char *f = line + st[4]; long fl = en[4] - st[4];
+        if (of_has_edge_space(f, fl)) return of_why(why, wcap, "extra-space");
+        if (fl <= 10 || !tx_prefix(f, fl, "transport=", 10)) return of_why(why, wcap, "bad-field");
+        if (of_parse_i32(f + 10, fl - 10, &out->transport, why, wcap)) return -1;
+    }
+    if (of_kv_str(line + st[5], en[5] - st[5], "marker=", 7, out->marker, sizeof out->marker, why, wcap)) return -1;
+    if (of_kv_str(line + st[6], en[6] - st[6], "candidate=", 10, out->candidate, sizeof out->candidate, why, wcap)) return -1;
+    if (of_kv_str(line + st[7], en[7] - st[7], "headers=", 8, out->headers, sizeof out->headers, why, wcap)) return -1;
+    if (of_kv_str(line + st[8], en[8] - st[8], "scope=", 6, out->scope, sizeof out->scope, why, wcap)) return -1;
+    if (of_kv_str(line + st[9], en[9] - st[9], "assertions=", 11, out->assertions, sizeof out->assertions, why, wcap)) return -1;
+    return 1;
+}
+
+int of_fmt_batch_run(char *buf, long cap, const OfBatchRun *in, char *why, long wcap) {
+    const char *fs[7];
+    int i;
+    fs[0] = in->id; fs[1] = in->status; fs[2] = in->marker; fs[3] = in->candidate;
+    fs[4] = in->headers; fs[5] = in->scope; fs[6] = in->assertions;
+    for (i = 0; i < 7; i++) {
+        long l = tx_len(fs[i], 256);
+        if (l <= 0) return of_why(why, wcap, "empty-field");
+        if (of_has_any_space(fs[i], l)) return of_why(why, wcap, "extra-space");
+    }
+    if (!tx_eqz(in->status, "PASS") && !tx_eqz(in->status, "FAIL") && !tx_eqz(in->status, "UNKNOWN"))
+        return of_why(why, wcap, "bad-status");
+    if (cx_fmt(buf, cap,
+               "BATCH_RUN\tid=%s\tstatus=%s\trc=%d\ttransport=%d\tmarker=%s\tcandidate=%s\theaders=%s\tscope=%s\tassertions=%s\n",
+               in->id, in->status, in->rc, in->transport, in->marker, in->candidate, in->headers, in->scope, in->assertions))
+        return of_why(why, wcap, "buffer-too-small");
+    return (int)tx_len(buf, cap);
+}
+
+/* (3) strict row: batch\tdomain\tstatus\trc\tcandidate\tms\tload1\tretries\tnote[\torigin=O\ttree=T] */
+static int of_load1_ok(const char *s, long n) {
+    long i, dots = 0, digs = 0;
+    if (n == 1 && s[0] == '-') return 1;
+    if (n <= 0 || n >= 32) return 0;
+    for (i = 0; i < n; i++) {
+        if (s[i] >= '0' && s[i] <= '9') digs++;
+        else if (s[i] == '.') dots++;
+        else return 0;
+    }
+    return digs > 0 && dots <= 1;
+}
+
+int of_parse_strict_row(const char *line, long n, OfStrictRow *out, char *why, long wcap) {
+    static const char HDR[] = "batch\tdomain\tstatus\trc\tcandidate\tms\tload1\tretries\tnote";
+    long hdr_len = tx_len(HDR, 128);
+    long st[14], en[14];
+    int nf, i;
+    n = of_trim_eol(line, n);
+    if (n <= 0 || line[0] == '#') return 0;
+    if (n == hdr_len && tx_same(line, n, HDR, hdr_len)) return 0;
+    if (n >= 4 && tx_prefix(line, n, "RAW\t", 4)) return 0;
+    if (n >= 8 && tx_prefix(line, n, "SUMMARY\t", 8)) return 0;
+    if (n >= 11 && tx_prefix(line, n, "CHECKPOINT\t", 11)) return 0;
+    if (n >= 12 && tx_prefix(line, n, "THREE_ENTRY\t", 12)) return 0;
+    if (n >= 10 && tx_prefix(line, n, "BATCH_RUN\t", 10)) return 0;
+    nf = of_split_tab(line, n, st, en, 14);
+    if (nf < 9) return of_why(why, wcap, "missing-field");
+    if (nf != 9 && nf != 11) return of_why(why, wcap, "trailing-field");
+    for (i = 0; i < nf; i++) {
+        long fl = en[i] - st[i];
+        if (fl <= 0) return of_why(why, wcap, i >= 9 ? "trailing-field" : "empty-field");
+        if (of_has_edge_space(line + st[i], fl)) return of_why(why, wcap, "extra-space");
+        if (i != 8 && of_has_any_space(line + st[i], fl)) return of_why(why, wcap, "extra-space");
+    }
+    if (of_copy_str(out->batch, sizeof out->batch, line + st[0], en[0] - st[0], why, wcap)) return -1;
+    if (of_copy_str(out->domain, sizeof out->domain, line + st[1], en[1] - st[1], why, wcap)) return -1;
+    if (of_copy_str(out->status, sizeof out->status, line + st[2], en[2] - st[2], why, wcap)) return -1;
+    if (!tx_eqz(out->status, "PASS") && !tx_eqz(out->status, "FAIL") && !tx_eqz(out->status, "UNKNOWN") &&
+        !tx_eqz(out->status, "DEFERRED") && !tx_eqz(out->status, "SKIPPED") && !tx_eqz(out->status, "INVALID"))
+        return of_why(why, wcap, "bad-status");
+    if (of_parse_i32(line + st[3], en[3] - st[3], &out->rc, why, wcap)) return -1;
+    if (of_copy_str(out->candidate, sizeof out->candidate, line + st[4], en[4] - st[4], why, wcap)) return -1;
+    if (of_parse_u64_strict(line + st[5], en[5] - st[5], &out->ms, why, wcap)) return -1;
+    if (!of_load1_ok(line + st[6], en[6] - st[6])) return of_why(why, wcap, "bad-load1");
+    if (of_copy_str(out->load1, sizeof out->load1, line + st[6], en[6] - st[6], why, wcap)) return -1;
+    if (of_parse_u32_9(line + st[7], en[7] - st[7], &out->retries, why, wcap)) return -1;
+    if (of_copy_str(out->note, sizeof out->note, line + st[8], en[8] - st[8], why, wcap)) return -1;
+    if (tx_eqz(out->status, "SKIPPED") && (tx_eqz(out->note, "-") || out->note[0] == 0))
+        return of_why(why, wcap, "skipped-without-reason");
+    out->has_origin = 0; out->origin[0] = 0; out->tree[0] = 0;
+    if (nf == 11) {
+        const char *f9 = line + st[9]; long l9 = en[9] - st[9];
+        const char *f10 = line + st[10]; long l10 = en[10] - st[10];
+        if (l9 <= 7 || !tx_prefix(f9, l9, "origin=", 7)) return of_why(why, wcap, "trailing-field");
+        if (l10 <= 5 || !tx_prefix(f10, l10, "tree=", 5)) return of_why(why, wcap, "trailing-field");
+        if (of_copy_str(out->origin, sizeof out->origin, f9 + 7, l9 - 7, why, wcap)) return -1;
+        if (of_copy_str(out->tree, sizeof out->tree, f10 + 5, l10 - 5, why, wcap)) return -1;
+        out->has_origin = 1;
+    }
+    return 1;
+}
+
+int of_fmt_strict_row(char *buf, long cap, const OfStrictRow *in, char *why, long wcap) {
+    const char *fs[5];
+    int i, rc;
+    long nl;
+    fs[0] = in->batch; fs[1] = in->domain; fs[2] = in->status; fs[3] = in->candidate; fs[4] = in->load1;
+    for (i = 0; i < 5; i++) {
+        long l = tx_len(fs[i], 256);
+        if (l <= 0) return of_why(why, wcap, "empty-field");
+        if (of_has_any_space(fs[i], l)) return of_why(why, wcap, "extra-space");
+    }
+    if (!tx_eqz(in->status, "PASS") && !tx_eqz(in->status, "FAIL") && !tx_eqz(in->status, "UNKNOWN") &&
+        !tx_eqz(in->status, "DEFERRED") && !tx_eqz(in->status, "SKIPPED") && !tx_eqz(in->status, "INVALID"))
+        return of_why(why, wcap, "bad-status");
+    if (in->ms < 0 || in->retries < 0) return of_why(why, wcap, "bad-int");
+    if (!of_load1_ok(in->load1, tx_len(in->load1, sizeof in->load1))) return of_why(why, wcap, "bad-load1");
+    nl = tx_len(in->note, sizeof in->note);
+    if (nl <= 0) return of_why(why, wcap, "empty-field");
+    if (of_has_ctrl(in->note, nl)) return of_why(why, wcap, "trailing-field");
+    if (of_has_edge_space(in->note, nl)) return of_why(why, wcap, "extra-space");
+    if (tx_eqz(in->status, "SKIPPED") && tx_eqz(in->note, "-"))
+        return of_why(why, wcap, "skipped-without-reason");
+    if (in->has_origin) {
+        long ol = tx_len(in->origin, sizeof in->origin), tl = tx_len(in->tree, sizeof in->tree);
+        if (ol <= 0 || tl <= 0) return of_why(why, wcap, "empty-field");
+        if (of_has_any_space(in->origin, ol) || of_has_any_space(in->tree, tl)) return of_why(why, wcap, "extra-space");
+        rc = cx_fmt(buf, cap, "%s\t%s\t%s\t%d\t%s\t%ld\t%s\t%d\t%s\torigin=%s\ttree=%s\n",
+                    in->batch, in->domain, in->status, in->rc, in->candidate, in->ms, in->load1, in->retries, in->note, in->origin, in->tree);
+    } else {
+        rc = cx_fmt(buf, cap, "%s\t%s\t%s\t%d\t%s\t%ld\t%s\t%d\t%s\n",
+                    in->batch, in->domain, in->status, in->rc, in->candidate, in->ms, in->load1, in->retries, in->note);
+    }
+    if (rc) return of_why(why, wcap, "buffer-too-small");
+    return (int)tx_len(buf, cap);
+}
+
+/* (4) MATERIAL:
+ *   OF_MAT_BIND (affected.cx):  MATERIAL\t<batch>\t<name>\t<source>[\tREFUSED=<reason>]
+ *   OF_MAT_PREP (all-waves.cx): MATERIAL\t<name>\tpath=<p>\tcontent=<c>\tfingerprint=<f>\tentries=<n>\thash_ns=<ns>\tstate=<s> */
+int of_parse_material(const char *line, long n, OfMaterial *out, char *why, long wcap) {
+    long st[10], en[10];
+    int nf, mr, i;
+    n = of_trim_eol(line, n);
+    mr = of_match_tag(line, n, "MATERIAL", 8, why, wcap);
+    if (mr <= 0) return mr;
+    nf = of_split_tab(line, n, st, en, 10);
+    out->kind = OF_MAT_BIND;
+    out->batch[0] = 0; out->name[0] = 0; out->source[0] = 0;
+    out->refused = 0; out->reason[0] = 0;
+    out->content[0] = 0; out->fingerprint[0] = 0; out->entries = 0; out->hash_ns = 0; out->state[0] = 0;
+    if (nf == 8 && (en[2] - st[2]) > 5 && tx_prefix(line + st[2], en[2] - st[2], "path=", 5)) {
+        out->kind = OF_MAT_PREP;
+        if (of_has_edge_space(line + st[1], en[1] - st[1]) || of_has_any_space(line + st[1], en[1] - st[1]))
+            return of_why(why, wcap, "extra-space");
+        if (of_copy_str(out->name, sizeof out->name, line + st[1], en[1] - st[1], why, wcap)) return -1;
+        if (of_kv_str(line + st[2], en[2] - st[2], "path=", 5, out->source, sizeof out->source, why, wcap)) return -1;
+        if (of_kv_str(line + st[3], en[3] - st[3], "content=", 8, out->content, sizeof out->content, why, wcap)) return -1;
+        if (of_kv_str(line + st[4], en[4] - st[4], "fingerprint=", 12, out->fingerprint, sizeof out->fingerprint, why, wcap)) return -1;
+        {
+            const char *f = line + st[5]; long fl = en[5] - st[5];
+            if (of_has_edge_space(f, fl)) return of_why(why, wcap, "extra-space");
+            if (fl <= 8 || !tx_prefix(f, fl, "entries=", 8)) return of_why(why, wcap, "bad-field");
+            if (of_parse_u64_strict(f + 8, fl - 8, &out->entries, why, wcap)) return -1;
+        }
+        {
+            const char *f = line + st[6]; long fl = en[6] - st[6];
+            if (of_has_edge_space(f, fl)) return of_why(why, wcap, "extra-space");
+            if (fl <= 8 || !tx_prefix(f, fl, "hash_ns=", 8)) return of_why(why, wcap, "bad-field");
+            if (of_parse_u64_strict(f + 8, fl - 8, &out->hash_ns, why, wcap)) return -1;
+        }
+        if (of_kv_str(line + st[7], en[7] - st[7], "state=", 6, out->state, sizeof out->state, why, wcap)) return -1;
+        return 1;
+    }
+    if (nf < 4) return of_why(why, wcap, "missing-field");
+    if (nf > 5) return of_why(why, wcap, "trailing-field");
+    for (i = 1; i < nf; i++) {
+        long fl = en[i] - st[i];
+        if (fl <= 0) return of_why(why, wcap, i == 4 ? "trailing-field" : "empty-field");
+        if (of_has_edge_space(line + st[i], fl)) return of_why(why, wcap, "extra-space");
+    }
+    if (of_has_any_space(line + st[1], en[1] - st[1]) || of_has_any_space(line + st[2], en[2] - st[2]))
+        return of_why(why, wcap, "extra-space");
+    if (of_copy_str(out->batch, sizeof out->batch, line + st[1], en[1] - st[1], why, wcap)) return -1;
+    if (of_copy_str(out->name, sizeof out->name, line + st[2], en[2] - st[2], why, wcap)) return -1;
+    if (of_copy_str(out->source, sizeof out->source, line + st[3], en[3] - st[3], why, wcap)) return -1;
+    if (nf == 5) {
+        const char *f = line + st[4]; long fl = en[4] - st[4];
+        if (fl < 8 || !tx_prefix(f, fl, "REFUSED=", 8)) return of_why(why, wcap, "trailing-field");
+        if (fl == 8) return of_why(why, wcap, "empty-reason");
+        if (of_has_edge_space(f + 8, fl - 8)) return of_why(why, wcap, "extra-space");
+        if (of_copy_str(out->reason, sizeof out->reason, f + 8, fl - 8, why, wcap)) return -1;
+        out->refused = 1;
+    } else if (tx_eqz(out->source, "-")) {
+        return of_why(why, wcap, "missing-refusal-reason");
+    }
+    return 1;
+}
+
+int of_fmt_material(char *buf, long cap, const OfMaterial *in, char *why, long wcap) {
+    if (in->kind == OF_MAT_PREP) {
+        const char *fs[5]; int i;
+        fs[0] = in->name; fs[1] = in->source; fs[2] = in->content; fs[3] = in->fingerprint; fs[4] = in->state;
+        for (i = 0; i < 5; i++) {
+            long l = tx_len(fs[i], 512);
+            if (l <= 0) return of_why(why, wcap, "empty-field");
+            if (of_has_any_space(fs[i], l)) return of_why(why, wcap, "extra-space");
+        }
+        if (in->entries < 0 || in->hash_ns < 0) return of_why(why, wcap, "bad-int");
+        if (cx_fmt(buf, cap, "MATERIAL\t%s\tpath=%s\tcontent=%s\tfingerprint=%s\tentries=%ld\thash_ns=%ld\tstate=%s\n",
+                   in->name, in->source, in->content, in->fingerprint, in->entries, in->hash_ns, in->state))
+            return of_why(why, wcap, "buffer-too-small");
+        return (int)tx_len(buf, cap);
+    }
+    {
+        long bl = tx_len(in->batch, sizeof in->batch), nl = tx_len(in->name, sizeof in->name), sl = tx_len(in->source, sizeof in->source);
+        if (bl <= 0 || nl <= 0 || sl <= 0) return of_why(why, wcap, "empty-field");
+        if (of_has_any_space(in->batch, bl) || of_has_any_space(in->name, nl) || of_has_edge_space(in->source, sl))
+            return of_why(why, wcap, "extra-space");
+        if (of_has_ctrl(in->source, sl)) return of_why(why, wcap, "trailing-field");
+        if (in->refused) {
+            long rl = tx_len(in->reason, sizeof in->reason);
+            if (rl <= 0) return of_why(why, wcap, "empty-reason");
+            if (of_has_ctrl(in->reason, rl)) return of_why(why, wcap, "trailing-field");
+            if (of_has_edge_space(in->reason, rl)) return of_why(why, wcap, "extra-space");
+            if (cx_fmt(buf, cap, "MATERIAL\t%s\t%s\t-\tREFUSED=%s\n", in->batch, in->name, in->reason))
+                return of_why(why, wcap, "buffer-too-small");
+        } else {
+            if (tx_eqz(in->source, "-")) return of_why(why, wcap, "missing-refusal-reason");
+            if (cx_fmt(buf, cap, "MATERIAL\t%s\t%s\t%s\n", in->batch, in->name, in->source))
+                return of_why(why, wcap, "buffer-too-small");
+        }
+        return (int)tx_len(buf, cap);
+    }
+}
+
+/* (5) DEFERRED:
+ *   self-deferral (2 fields, key=val): DEFERRED\t<key>=<val>  (id="")
+ *   affected (3 or 5 fields):          DEFERRED\t<id>\t<reason>[\tresidue=<N>\tsurvived=<S>] */
+int of_parse_deferred(const char *line, long n, OfDeferred *out, char *why, long wcap) {
+    long st[7], en[7];
+    int nf, mr, i;
+    n = of_trim_eol(line, n);
+    mr = of_match_tag(line, n, "DEFERRED", 8, why, wcap);
+    if (mr <= 0) return mr;
+    nf = of_split_tab(line, n, st, en, 7);
+    out->id[0] = 0; out->reason[0] = 0; out->has_residue = 0; out->residue = 0; out->survived[0] = 0;
+    if (nf == 2) {
+        const char *f1 = line + st[1]; long l1 = en[1] - st[1], eq;
+        if (l1 <= 0) return of_why(why, wcap, "missing-reason");
+        if (of_has_edge_space(f1, l1) || of_has_any_space(f1, l1)) return of_why(why, wcap, "extra-space");
+        eq = tx_chr(f1, l1, '=');
+        if (eq <= 0 || eq + 1 >= l1) return of_why(why, wcap, "missing-reason");
+        if (of_copy_str(out->reason, sizeof out->reason, f1, l1, why, wcap)) return -1;
+        return 1;
+    }
+    if (nf < 3) return of_why(why, wcap, "missing-reason");
+    if (nf != 3 && nf != 5) return of_why(why, wcap, "trailing-field");
+    for (i = 1; i < nf; i++) {
+        long fl = en[i] - st[i];
+        if (fl <= 0) return of_why(why, wcap, i == 2 ? "missing-reason" : "trailing-field");
+        if (of_has_edge_space(line + st[i], fl)) return of_why(why, wcap, "extra-space");
+    }
+    if (of_has_any_space(line + st[1], en[1] - st[1])) return of_why(why, wcap, "extra-space");
+    if (of_copy_str(out->id, sizeof out->id, line + st[1], en[1] - st[1], why, wcap)) return -1;
+    if (of_copy_str(out->reason, sizeof out->reason, line + st[2], en[2] - st[2], why, wcap)) return -1;
+    if (nf == 5) {
+        const char *f3 = line + st[3]; long l3 = en[3] - st[3];
+        const char *f4 = line + st[4]; long l4 = en[4] - st[4];
+        if (l3 <= 8 || !tx_prefix(f3, l3, "residue=", 8)) return of_why(why, wcap, "trailing-field");
+        if (of_parse_u32_9(f3 + 8, l3 - 8, &out->residue, why, wcap)) return -1;
+        if (l4 <= 9 || !tx_prefix(f4, l4, "survived=", 9)) return of_why(why, wcap, "trailing-field");
+        if (of_has_edge_space(f4 + 9, l4 - 9)) return of_why(why, wcap, "extra-space");
+        if (of_copy_str(out->survived, sizeof out->survived, f4 + 9, l4 - 9, why, wcap)) return -1;
+        out->has_residue = 1;
+    }
+    return 1;
+}
+
+int of_fmt_deferred(char *buf, long cap, const OfDeferred *in, char *why, long wcap) {
+    long il = tx_len(in->id, sizeof in->id), rl = tx_len(in->reason, sizeof in->reason);
+    if (rl <= 0) return of_why(why, wcap, "missing-reason");
+    if (of_has_edge_space(in->reason, rl)) return of_why(why, wcap, "extra-space");
+    if (of_has_ctrl(in->reason, rl)) return of_why(why, wcap, "trailing-field");
+    if (il == 0) {
+        long eq = tx_chr(in->reason, rl, '=');
+        if (in->has_residue || of_has_any_space(in->reason, rl) || eq <= 0 || eq + 1 >= rl)
+            return of_why(why, wcap, "empty-field");
+        if (cx_fmt(buf, cap, "DEFERRED\t%s\n", in->reason))
+            return of_why(why, wcap, "buffer-too-small");
+        return (int)tx_len(buf, cap);
+    }
+    if (of_has_any_space(in->id, il)) return of_why(why, wcap, "extra-space");
+    if (in->has_residue) {
+        long sl = tx_len(in->survived, sizeof in->survived);
+        if (in->residue < 0) return of_why(why, wcap, "bad-int");
+        if (sl <= 0) return of_why(why, wcap, "empty-field");
+        if (of_has_ctrl(in->survived, sl)) return of_why(why, wcap, "trailing-field");
+        if (of_has_edge_space(in->survived, sl)) return of_why(why, wcap, "extra-space");
+        if (cx_fmt(buf, cap, "DEFERRED\t%s\t%s\tresidue=%d\tsurvived=%s\n", in->id, in->reason, in->residue, in->survived))
+            return of_why(why, wcap, "buffer-too-small");
+    } else {
+        if (cx_fmt(buf, cap, "DEFERRED\t%s\t%s\n", in->id, in->reason))
+            return of_why(why, wcap, "buffer-too-small");
+    }
+    return (int)tx_len(buf, cap);
+}

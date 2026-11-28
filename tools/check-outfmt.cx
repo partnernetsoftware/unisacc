@@ -1,0 +1,366 @@
+/* tools/check-outfmt.cx -- tests tools/cxlib/outfmt.cx and tools/outfmt.cx.
+ *
+ * Verifies:
+ *   (1) round-trip write -> parse for all 5 formats (including all-waves 8-field MATERIAL and 2-field DEFERRED)
+ *   (2) named refusals on mutations: skipped row without reason, extra spaces, trailing field,
+ *       9-digit integer overflow (4294967297), leading zeros, -0, swapped key order
+ *   (3) real producer outputs: live ratchets output (including check-literal) and every
+ *       release/evidence strict*.tsv parsed with 0 rejects
+ *   (4) outfmt-prefix ratchet: repo --check passes, decrease allowed, increase refused, new unbaselined file refused
+ */
+#pragma unisa use cxlib.outfmt
+#pragma unisa use sys.env
+#pragma unisa use sys.fs
+#pragma unisa use sys.proc
+#pragma unisa use sysx.process
+#pragma unisa use mem.bytes
+#pragma unisa use mem.heap
+#pragma unisa use text.text
+
+static int passed, failed;
+
+static void ck(int ok, const char *name) {
+    if (ok) passed++; else failed++;
+    printf("%s\toutfmt.%s\n", ok ? "PASS" : "FAIL", name);
+}
+
+static int run_cmd(char **argv, char *out, long cap) {
+    np_result r; char why[128]; int rc;
+    out[0] = 0;
+    if (np_run(argv, 0, 0, 45, &r, why, sizeof why) != 0) {
+        np_free(&r);
+        return -1;
+    }
+    rc = r.rc;
+    if (r.out && r.outn > 0 && cap > 1) {
+        size_t n = r.outn < (size_t)(cap - 1) ? r.outn : (size_t)(cap - 1);
+        (void)mm_copy(out, (size_t)cap, r.out, n);
+        out[n] = 0;
+    }
+    np_free(&r);
+    return rc;
+}
+
+int main(void) {
+    char buf[4096], why[128];
+
+    /* 1. RATCHET row round-trip: ok, skipped, FAIL */
+    {
+        OfRatchetRow a, b;
+        int wn, pr;
+        tx_copy(a.name, sizeof a.name, "cxraw", 6);
+        tx_copy(a.status, sizeof a.status, "ok", 3);
+        tx_copy(a.summary, sizeof a.summary, "cxraw: ok: 0 above", 19);
+        a.is_skipped = 0; a.skip_reason[0] = 0;
+        wn = of_fmt_ratchet_row(buf, sizeof buf, &a, why, sizeof why);
+        pr = of_parse_ratchet_row(buf, wn, &b, why, sizeof why);
+        ck(wn > 0 && pr == 1 && tx_eqz(b.name, "cxraw") && tx_eqz(b.status, "ok") && !b.is_skipped, "ratchet-row-ok-roundtrip");
+
+        a.is_skipped = 1;
+        tx_copy(a.skip_reason, sizeof a.skip_reason, "not in shard 1/4", 17);
+        wn = of_fmt_ratchet_row(buf, sizeof buf, &a, why, sizeof why);
+        pr = of_parse_ratchet_row(buf, wn, &b, why, sizeof why);
+        ck(wn > 0 && pr == 1 && b.is_skipped && tx_eqz(b.skip_reason, "not in shard 1/4"), "ratchet-row-skipped-roundtrip");
+
+        a.is_skipped = 0;
+        tx_copy(a.status, sizeof a.status, "FAIL", 5);
+        tx_copy(a.summary, sizeof a.summary, "cxraw: FAIL: 1 above", 21);
+        wn = of_fmt_ratchet_row(buf, sizeof buf, &a, why, sizeof why);
+        pr = of_parse_ratchet_row(buf, wn, &b, why, sizeof why);
+        ck(wn > 0 && pr == 1 && tx_eqz(b.status, "FAIL") && tx_eqz(b.summary, "cxraw: FAIL: 1 above"), "ratchet-row-fail-roundtrip");
+    }
+
+    /* 2. RATCHETS summary round-trip */
+    {
+        OfRatchetsSum a, b;
+        int wn, pr;
+        a.ok = 20; a.fail = 0; a.has_skipped = 1; a.skipped = 2; a.has_elapsed = 1; a.elapsed_ms = 1234;
+        wn = of_fmt_ratchets_sum(buf, sizeof buf, &a, why, sizeof why);
+        pr = of_parse_ratchets_sum(buf, wn, &b, why, sizeof why);
+        ck(wn > 0 && pr == 1 && b.ok == 20 && b.fail == 0 && b.has_skipped && b.skipped == 2 && b.has_elapsed && b.elapsed_ms == 1234,
+           "ratchets-sum-roundtrip");
+    }
+
+    /* 3. BATCH_RUN round-trip */
+    {
+        OfBatchRun a, b;
+        int wn, pr;
+        tx_copy(a.id, sizeof a.id, "dvbranch", 9);
+        tx_copy(a.status, sizeof a.status, "PASS", 5);
+        a.rc = 0; a.transport = 0;
+        tx_copy(a.marker, sizeof a.marker, "CHECK_DVBRANCH", 15);
+        tx_copy(a.candidate, sizeof a.candidate, "abc123", 7);
+        tx_copy(a.headers, sizeof a.headers, "product", 8);
+        tx_copy(a.scope, sizeof a.scope, "actual-one-batch-no-cached-result", 34);
+        tx_copy(a.assertions, sizeof a.assertions, "10", 3);
+        wn = of_fmt_batch_run(buf, sizeof buf, &a, why, sizeof why);
+        pr = of_parse_batch_run(buf, wn, &b, why, sizeof why);
+        ck(wn > 0 && pr == 1 && tx_eqz(b.id, "dvbranch") && tx_eqz(b.status, "PASS") && b.rc == 0 && tx_eqz(b.assertions, "10"),
+           "batch-run-roundtrip");
+    }
+
+    /* 4. strict row round-trip (9-col and 11-col with origin=/tree=) */
+    {
+        OfStrictRow a, b;
+        int wn, pr;
+        tx_copy(a.batch, sizeof a.batch, "outfmt", 7);
+        tx_copy(a.domain, sizeof a.domain, "interfaces", 11);
+        tx_copy(a.status, sizeof a.status, "PASS", 5);
+        a.rc = 0;
+        tx_copy(a.candidate, sizeof a.candidate, "deadbeef", 9);
+        a.ms = 420;
+        tx_copy(a.load1, sizeof a.load1, "1.25", 5);
+        a.retries = 0;
+        tx_copy(a.note, sizeof a.note, "count=12/0", 11);
+        a.has_origin = 0; a.origin[0] = 0; a.tree[0] = 0;
+        wn = of_fmt_strict_row(buf, sizeof buf, &a, why, sizeof why);
+        pr = of_parse_strict_row(buf, wn, &b, why, sizeof why);
+        ck(wn > 0 && pr == 1 && tx_eqz(b.batch, "outfmt") && b.ms == 420 && !b.has_origin, "strict-row-roundtrip");
+
+        a.has_origin = 1;
+        tx_copy(a.origin, sizeof a.origin, "prefreeze", 10);
+        tx_copy(a.tree, sizeof a.tree, "8def132b", 9);
+        wn = of_fmt_strict_row(buf, sizeof buf, &a, why, sizeof why);
+        pr = of_parse_strict_row(buf, wn, &b, why, sizeof why);
+        ck(wn > 0 && pr == 1 && b.has_origin && tx_eqz(b.origin, "prefreeze") && tx_eqz(b.tree, "8def132b"), "strict-row-origin-tree-roundtrip");
+    }
+
+    /* 5. MATERIAL round-trip (affected bind/refused + all-waves 8-field prepared) */
+    {
+        OfMaterial a, b;
+        int wn, pr;
+        a.kind = OF_MAT_BIND;
+        tx_copy(a.batch, sizeof a.batch, "dvbranch", 9);
+        tx_copy(a.name, sizeof a.name, "devsvc-core-tool", 17);
+        tx_copy(a.source, sizeof a.source, "/tmp/dvcore", 12);
+        a.refused = 0; a.reason[0] = 0;
+        wn = of_fmt_material(buf, sizeof buf, &a, why, sizeof why);
+        pr = of_parse_material(buf, wn, &b, why, sizeof why);
+        ck(wn > 0 && pr == 1 && b.kind == OF_MAT_BIND && !b.refused && tx_eqz(b.source, "/tmp/dvcore"), "material-ready-roundtrip");
+
+        a.refused = 1;
+        tx_copy(a.reason, sizeof a.reason, "prep-timeout", 13);
+        wn = of_fmt_material(buf, sizeof buf, &a, why, sizeof why);
+        pr = of_parse_material(buf, wn, &b, why, sizeof why);
+        ck(wn > 0 && pr == 1 && b.refused && tx_eqz(b.source, "-") && tx_eqz(b.reason, "prep-timeout"), "material-refused-roundtrip");
+
+        a.kind = OF_MAT_PREP;
+        tx_copy(a.name, sizeof a.name, "kernels", 8);
+        tx_copy(a.source, sizeof a.source, "/tmp/k", 7);
+        tx_copy(a.content, sizeof a.content, "abcd", 5);
+        tx_copy(a.fingerprint, sizeof a.fingerprint, "1234", 5);
+        a.entries = 44; a.hash_ns = 987654;
+        tx_copy(a.state, sizeof a.state, "PREPARED-identity-only", 23);
+        wn = of_fmt_material(buf, sizeof buf, &a, why, sizeof why);
+        pr = of_parse_material(buf, wn, &b, why, sizeof why);
+        ck(wn > 0 && pr == 1 && b.kind == OF_MAT_PREP && b.entries == 44 && b.hash_ns == 987654 && tx_eqz(b.state, "PREPARED-identity-only"),
+           "material-allwaves-8field-roundtrip");
+    }
+
+    /* 6. DEFERRED round-trip (affected 3-field, 5-field, and self-deferral 2-field) */
+    {
+        OfDeferred a, b;
+        int wn, pr;
+        tx_copy(a.id, sizeof a.id, "b1", 3);
+        tx_copy(a.reason, sizeof a.reason, "start-deadline", 15);
+        a.has_residue = 0; a.residue = 0; a.survived[0] = 0;
+        wn = of_fmt_deferred(buf, sizeof buf, &a, why, sizeof why);
+        pr = of_parse_deferred(buf, wn, &b, why, sizeof why);
+        ck(wn > 0 && pr == 1 && tx_eqz(b.id, "b1") && tx_eqz(b.reason, "start-deadline") && !b.has_residue, "deferred-simple-roundtrip");
+
+        tx_copy(a.reason, sizeof a.reason, "killed-at-deadline", 19);
+        a.has_residue = 1; a.residue = 2;
+        tx_copy(a.survived, sizeof a.survived, "101,102", 8);
+        wn = of_fmt_deferred(buf, sizeof buf, &a, why, sizeof why);
+        pr = of_parse_deferred(buf, wn, &b, why, sizeof why);
+        ck(wn > 0 && pr == 1 && b.has_residue && b.residue == 2 && tx_eqz(b.survived, "101,102"), "deferred-residue-roundtrip");
+
+        a.id[0] = 0; a.has_residue = 0;
+        tx_copy(a.reason, sizeof a.reason, "needs-materials=candidate-chain-tool", 37);
+        wn = of_fmt_deferred(buf, sizeof buf, &a, why, sizeof why);
+        pr = of_parse_deferred(buf, wn, &b, why, sizeof why);
+        ck(wn > 0 && pr == 1 && b.id[0] == 0 && tx_eqz(b.reason, "needs-materials=candidate-chain-tool"), "deferred-2field-self-roundtrip");
+    }
+
+    /* 7. Mutations refused by name: skipped without reason, extra spaces, trailing field, bad int/order */
+    {
+        OfRatchetRow rr; OfRatchetsSum rs; OfBatchRun br; OfStrictRow sr; OfMaterial mt; OfDeferred df;
+        char ln[512];
+        int ok = 1;
+        cx_fmt(ln, sizeof ln, "%s\tcxraw\tok\tcxraw: ok: skipped ()", "RATCHET");
+        why[0] = 0; ok = ok && of_parse_ratchet_row(ln, tx_len(ln, sizeof ln), &rr, why, sizeof why) == -1 && tx_eqz(why, "skipped-without-reason");
+        cx_fmt(ln, sizeof ln, "%s\tcxraw\tok\tcxraw: ok: skipped (   )", "RATCHET");
+        why[0] = 0; ok = ok && of_parse_ratchet_row(ln, tx_len(ln, sizeof ln), &rr, why, sizeof why) == -1 && tx_eqz(why, "skipped-without-reason");
+        cx_fmt(ln, sizeof ln, "%s\tcxraw\tok\tcxraw: ok: skipped", "RATCHET");
+        why[0] = 0; ok = ok && of_parse_ratchet_row(ln, tx_len(ln, sizeof ln), &rr, why, sizeof why) == -1 && tx_eqz(why, "skipped-without-reason");
+        cx_fmt(ln, sizeof ln, "b1\tinterfaces\tSKIPPED\t0\tabc\t10\t1.00\t0\t-");
+        why[0] = 0; ok = ok && of_parse_strict_row(ln, tx_len(ln, sizeof ln), &sr, why, sizeof why) == -1 && tx_eqz(why, "skipped-without-reason");
+        ck(ok, "mut-skipped-without-reason-refused-by-name");
+
+        ok = 1;
+        cx_fmt(ln, sizeof ln, " %s\tcxraw\tok\tcxraw: ok: fine", "RATCHET");
+        why[0] = 0; ok = ok && of_parse_ratchet_row(ln, tx_len(ln, sizeof ln), &rr, why, sizeof why) == -1 && tx_eqz(why, "extra-space");
+        cx_fmt(ln, sizeof ln, "%s\tok= 1\tfail=0\telapsed_ms=1", "RATCHETS");
+        why[0] = 0; ok = ok && of_parse_ratchets_sum(ln, tx_len(ln, sizeof ln), &rs, why, sizeof why) == -1 && tx_eqz(why, "extra-space");
+        cx_fmt(ln, sizeof ln, "%s\tid=b1 \tstatus=PASS\trc=0\ttransport=0\tmarker=M\tcandidate=c\theaders=p\tscope=s\tassertions=1", "BATCH_RUN");
+        why[0] = 0; ok = ok && of_parse_batch_run(ln, tx_len(ln, sizeof ln), &br, why, sizeof why) == -1 && tx_eqz(why, "extra-space");
+        cx_fmt(ln, sizeof ln, "b1\tdom\tPASS \t0\tc\t10\t1.00\t0\t-");
+        why[0] = 0; ok = ok && of_parse_strict_row(ln, tx_len(ln, sizeof ln), &sr, why, sizeof why) == -1 && tx_eqz(why, "extra-space");
+        cx_fmt(ln, sizeof ln, "%s\tb1\tm1\t /tmp/x", "MATERIAL");
+        why[0] = 0; ok = ok && of_parse_material(ln, tx_len(ln, sizeof ln), &mt, why, sizeof why) == -1 && tx_eqz(why, "extra-space");
+        cx_fmt(ln, sizeof ln, "%s\tb1\t start-deadline", "DEFERRED");
+        why[0] = 0; ok = ok && of_parse_deferred(ln, tx_len(ln, sizeof ln), &df, why, sizeof why) == -1 && tx_eqz(why, "extra-space");
+        ck(ok, "mut-extra-space-refused-by-name-all-formats");
+
+        ok = 1;
+        cx_fmt(ln, sizeof ln, "%s\tcxraw\tok\tcxraw: ok: fine\textra", "RATCHET");
+        why[0] = 0; ok = ok && of_parse_ratchet_row(ln, tx_len(ln, sizeof ln), &rr, why, sizeof why) == -1 && tx_eqz(why, "trailing-field");
+        cx_fmt(ln, sizeof ln, "%s\tok=1\tfail=0\telapsed_ms=1\textra=1", "RATCHETS");
+        why[0] = 0; ok = ok && of_parse_ratchets_sum(ln, tx_len(ln, sizeof ln), &rs, why, sizeof why) == -1 && tx_eqz(why, "trailing-field");
+        cx_fmt(ln, sizeof ln, "%s\tok=1\tfail=0\t", "RATCHETS");
+        why[0] = 0; ok = ok && of_parse_ratchets_sum(ln, tx_len(ln, sizeof ln), &rs, why, sizeof why) == -1 && tx_eqz(why, "trailing-field");
+        cx_fmt(ln, sizeof ln, "%s\tid=b1\tstatus=PASS\trc=0\ttransport=0\tmarker=M\tcandidate=c\theaders=p\tscope=s\tassertions=1\textra=2", "BATCH_RUN");
+        why[0] = 0; ok = ok && of_parse_batch_run(ln, tx_len(ln, sizeof ln), &br, why, sizeof why) == -1 && tx_eqz(why, "trailing-field");
+        cx_fmt(ln, sizeof ln, "b1\tdom\tPASS\t0\tc\t10\t1.00\t0\t-\textra");
+        why[0] = 0; ok = ok && of_parse_strict_row(ln, tx_len(ln, sizeof ln), &sr, why, sizeof why) == -1 && tx_eqz(why, "trailing-field");
+        cx_fmt(ln, sizeof ln, "%s\tb1\tm1\t/tmp/x\textra", "MATERIAL");
+        why[0] = 0; ok = ok && of_parse_material(ln, tx_len(ln, sizeof ln), &mt, why, sizeof why) == -1 && tx_eqz(why, "trailing-field");
+        cx_fmt(ln, sizeof ln, "%s\tb1\tstart-deadline\textra", "DEFERRED");
+        why[0] = 0; ok = ok && of_parse_deferred(ln, tx_len(ln, sizeof ln), &df, why, sizeof why) == -1 && tx_eqz(why, "trailing-field");
+        ck(ok, "mut-trailing-field-refused-by-name-all-formats");
+
+        /* strict integers & key order: >9 digits (4294967297), leading zero (01), -0, swapped order */
+        ok = 1;
+        cx_fmt(ln, sizeof ln, "%s\tok=4294967297\tfail=0\telapsed_ms=1", "RATCHETS");
+        why[0] = 0; ok = ok && of_parse_ratchets_sum(ln, tx_len(ln, sizeof ln), &rs, why, sizeof why) == -1 && tx_eqz(why, "bad-int");
+        cx_fmt(ln, sizeof ln, "%s\tok=01\tfail=0\telapsed_ms=1", "RATCHETS");
+        why[0] = 0; ok = ok && of_parse_ratchets_sum(ln, tx_len(ln, sizeof ln), &rs, why, sizeof why) == -1 && tx_eqz(why, "bad-int");
+        cx_fmt(ln, sizeof ln, "%s\tid=b1\tstatus=PASS\trc=-0\ttransport=0\tmarker=M\tcandidate=c\theaders=p\tscope=s\tassertions=1", "BATCH_RUN");
+        why[0] = 0; ok = ok && of_parse_batch_run(ln, tx_len(ln, sizeof ln), &br, why, sizeof why) == -1 && tx_eqz(why, "bad-int");
+        cx_fmt(ln, sizeof ln, "%s\tok=1\tfail=0\telapsed_ms=1\tskipped=0", "RATCHETS");
+        why[0] = 0; ok = ok && of_parse_ratchets_sum(ln, tx_len(ln, sizeof ln), &rs, why, sizeof why) == -1 && tx_eqz(why, "bad-field-order");
+        ck(ok, "mut-strict-int-and-key-order-refused");
+    }
+
+    /* 8. Real producer test (a): live tools/ratchets.cx shard covering check-literal (index 11 -> shard 12/22) parses with 0 rejects */
+    {
+        static char rout[65536];
+        char *v_rk[] = {"sh", "./unisacc.com", "tools/ratchets.cx", "--", "--shard", "12/22", 0};
+        int rc = run_cmd(v_rk, rout, sizeof rout);
+        long n = tx_len(rout, sizeof rout), at = 0;
+        int rows = 0, sums = 0, rej = 0, saw_cl = 0;
+        while (at < n) {
+            long e = tx_chr(rout + at, n - at, '\n'), ll = e < 0 ? n - at : e;
+            OfRatchetRow rr; OfRatchetsSum rs;
+            int p1 = of_parse_ratchet_row(rout + at, ll, &rr, why, sizeof why);
+            int p2 = of_parse_ratchets_sum(rout + at, ll, &rs, why, sizeof why);
+            if (p1 < 0 || p2 < 0) rej++;
+            if (p1 == 1) { rows++; if (tx_eqz(rr.name, "check-literal") && tx_eqz(rr.status, "ok")) saw_cl = 1; }
+            if (p2 == 1) sums++;
+            at += ll + 1;
+        }
+        ck(rc == 0 && rows == 22 && sums == 1 && rej == 0 && saw_cl, "real-ratchets-output-zero-rejects");
+    }
+
+    /* 9. Real producer test (b): every release/evidence strict*.tsv parses with 0 rejects,
+     *    pinning file count (only 2 explicitly exempt legacy files lack the 54-byte header). */
+    {
+        static char flist[65536];
+        char *v_find[] = {"find", "release/evidence", "-name", "*strict*.tsv", "-type", "f", 0};
+        int rc = run_cmd(v_find, flist, sizeof flist);
+        long fn = tx_len(flist, sizeof flist), at = 0;
+        int total_files = 0, checked_files = 0, exempt_files = 0, unexpected_nohdr = 0, parsed_rows = 0, rej = 0;
+        if (rc == 0 && fn > 0) {
+            while (at < fn) {
+                long e = tx_chr(flist + at, fn - at, '\n'), ll = e < 0 ? fn - at : e;
+                if (ll > 0 && ll < 512) {
+                    char path[512];
+                    size_t sz = 0;
+                    char *fb;
+                    tx_copy(path, sizeof path, flist + at, ll); path[ll] = 0;
+                    total_files++;
+                    fb = (char *)cx_read(path, &sz);
+                    if (fb) {
+                        char hdr[64];
+                        long pos = 0, hpos = -1;
+                        cx_fmt(hdr, sizeof hdr, "%s\t%s\tstatus\trc\tcandidate\tms\tload1\tretries\tnote", "batch", "domain");
+                        /* Find the strict evidence header line by line */
+                        while (pos < (long)sz) {
+                            long le = tx_chr(fb + pos, (long)sz - pos, '\n'), lln = le < 0 ? (long)sz - pos : le;
+                            if (lln > 0 && fb[pos + lln - 1] == '\r') lln--;
+                            if (lln == 54 && tx_same(fb + pos, 54, hdr, 54)) { hpos = pos; break; }
+                            pos += (le < 0 ? (long)sz - pos : le) + 1;
+                        }
+                        if (hpos >= 0) {
+                            pos = hpos;
+                            checked_files++;
+                            while (pos < (long)sz) {
+                                long le = tx_chr(fb + pos, (long)sz - pos, '\n'), lln = le < 0 ? (long)sz - pos : le;
+                                OfStrictRow sr;
+                                int pr = of_parse_strict_row(fb + pos, lln, &sr, why, sizeof why);
+                                if (pr < 0) {
+                                    if (rej < 5) printf("STRICT_REJECT\t%s\twhy=%s\tline=%.120s\n", path, why, fb + pos);
+                                    rej++;
+                                } else if (pr == 1) {
+                                    parsed_rows++;
+                                }
+                                pos += lln + 1;
+                            }
+                        } else if (tx_eqz(path, "release/evidence/v0.0.73-strict-2026-11-18.tsv") ||
+                                   tx_eqz(path, "release/evidence/0.1.3/prerun-inputs/strict-W-sha-map.tsv")) {
+                            exempt_files++;
+                        } else {
+                            unexpected_nohdr++;
+                        }
+                        mm_free(fb);
+                    }
+                }
+                at += ll + 1;
+            }
+        }
+        ck(total_files >= 366 && checked_files >= 364 && exempt_files == 2 && unexpected_nohdr == 0 && parsed_rows > 0 && rej == 0,
+           "real-release-evidence-strict-zero-rejects");
+    }
+
+    /* 10. Ratchet outfmt: repo check + synthetic decrease/increase/new-file */
+    {
+        char out[8192], dir[256], fsrc[300], fbase[300], btxt[512];
+        char *v_repo[] = {"sh", "./unisacc.com", "tools/outfmt.cx", "--", "--check", 0};
+        int rc = run_cmd(v_repo, out, sizeof out);
+        ck(rc == 0 && tx_find(out, tx_len(out, sizeof out), "outfmt-prefix: ok:", 18) >= 0, "ratchet-repo-check-pass");
+
+        if (!cx_fmt(dir, sizeof dir, "%s/check-outfmt-%d", sy_tmpdir(), sy_pid())) {
+            sy_mkdir(dir, 0700);
+            if (!cx_fmt(fsrc, sizeof fsrc, "%s/sample.cx", dir) &&
+                !cx_fmt(fbase, sizeof fbase, "%s/base.tsv", dir)) {
+                char code[256];
+                char *v_cf[] = {"sh", "./unisacc.com", "tools/outfmt.cx", "--", "--check-file", fsrc, fbase, 0};
+                /* 1 hit (with suffix after \t) vs baseline 2 -> decrease allowed */
+                cx_fmt(code, sizeof code, "int f(const char *s){ return tx_prefix(s, 13, \"%s\\tid=\", 13); }\n", "BATCH_RUN");
+                cx_write(fsrc, code, (size_t)tx_len(code, sizeof code));
+                cx_fmt(btxt, sizeof btxt, "%s\t2\n", fsrc);
+                cx_write(fbase, btxt, (size_t)tx_len(btxt, sizeof btxt));
+                rc = run_cmd(v_cf, out, sizeof out);
+                ck(rc == 0, "ratchet-decrease-allowed");
+
+                /* 2 hits vs baseline 1 -> increase refused */
+                cx_fmt(code, sizeof code,
+                       "int f(const char *s){\n  int a = tx_prefix(s, 13, \"%s\\tid=\", 13);\n  return a + tx_prefix(s, 9, \"%s\\t\", 9);\n}\n",
+                       "BATCH_RUN", "DEFERRED");
+                cx_write(fsrc, code, (size_t)tx_len(code, sizeof code));
+                cx_fmt(btxt, sizeof btxt, "%s\t1\n", fsrc);
+                cx_write(fbase, btxt, (size_t)tx_len(btxt, sizeof btxt));
+                rc = run_cmd(v_cf, out, sizeof out);
+                ck(rc == 1 && tx_find(out, tx_len(out, sizeof out), "outfmt-prefix: FAIL:", 20) >= 0, "ratchet-increase-refused");
+
+                /* empty baseline -> new file with hit refused */
+                cx_write(fbase, "# empty\n", 8);
+                rc = run_cmd(v_cf, out, sizeof out);
+                ck(rc == 1, "ratchet-new-file-refused");
+            }
+        }
+    }
+
+    printf("CHECK_OUTFMT\tpassed=%d\tfailed=%d\n", passed, failed);
+    return failed ? 1 : 0;
+}
