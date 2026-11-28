@@ -831,9 +831,9 @@ static int fc_check_chain_ready(const char *repo, long t0_ms, long budget_ms, ch
         "22-premerge-union\tPASS\t",
         "25-tools-compile-shards\tPASS\t"
     };
-    /* Schedule the 11 read-only chain-ready stages 3-wide, staggering union-a (9) and gen-preflight (8)
-       so the two heaviest stages never contend for CPU, keeping all 11 well inside the 180 s budget. */
-    static const int sched_order[11] = { 0, 9, 6, 3, 7, 1, 2, 8, 4, 5, 10 };
+    /* Schedule the 10 read-only stages 3-wide, then run gen-preflight (8) solo at the end so its
+       internal sixtarget-a/b + snap shards never contend with other stages (~80s + ~45s < 180s). */
+    static const int sched_order[11] = { 0, 9, 6, 3, 7, 1, 2, 4, 5, 10, 8 };
     const int max_par = 3;
     pid_t wpids[11];
     char wres[11][512];
@@ -845,7 +845,9 @@ static int fc_check_chain_ready(const char *repo, long t0_ms, long budget_ms, ch
     for (si = 0; si < 11; si++) { wpids[si] = 0; wres[si][0] = 0; wdone[si] = 0; welapsed[si] = 0; }
     while (completed < 11 && failed_si < 0) {
         while (active < max_par && next_k < 11) {
-            int idx = sched_order[next_k++];
+            int idx = sched_order[next_k];
+            if (idx == 8 && active > 0) break;
+            next_k++;
             int bound_s = fc_budget_remaining_s(t0_ms, budget_ms, 55, detail, cap);
             if (bound_s < 0) {
                 cx_fmt(fail_tag, sizeof fail_tag, "check-budget-exceeded");
