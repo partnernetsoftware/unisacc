@@ -212,7 +212,7 @@ int main(int argc, char **argv) {
       ck(ec_envp(arr, &n, 8, big) == 0 && n == 2 && strlen(arr[1]) == strlen(big) - 2 && !strncmp(arr[1], "UNISA_CONTAINER=", 16), "envp-long-value-still-gets-its-twin-whole"); }
     {
         char tmpdir[128];
-        char cmd[512];
+        char cmd[1024];
         char psrc[160];
         char pbin[160];
         char csrc[160];
@@ -242,8 +242,25 @@ int main(int argc, char **argv) {
         ck(system(cmd) == 0, "prod-sy-env-empty-new-wins");
         cx_fmt(cmd, sizeof cmd, "env -u UNISACC_JOBS -u UNISA_JOBS UNISA_JOBS=old %s | grep -qx 'JOBS=old|CONT=<NULL>|APE=<NULL>'", pbin);
         ck(system(cmd) == 0, "prod-sy-env-old-only-fallback");
-        cx_fmt(cmd, sizeof cmd, "env -u UNISACC_CONTAINER -u UNISA_CONTAINER -u UNISACC_APE_SELF UNISA_CONTAINER=%s/c.ape UNISACC_APE_SELF=%s/c.ape %s | grep -qx 'JOBS=<NULL>|CONT=%s/c.ape|APE=%s/c.ape'", tmpdir, tmpdir, pbin, tmpdir, tmpdir);
-        ck(system(cmd) == 0, "prod-launcher-old-container-ape-self-pairing");
+        {
+            char abin[160], wpe[160], pkg[160], lcom[160];
+            unsigned char pe[1024];
+            FILE *wf;
+            cx_fmt(abin, sizeof abin, "%s/ape", tmpdir);
+            cx_fmt(wpe, sizeof wpe, "%s/win.exe", tmpdir);
+            cx_fmt(pkg, sizeof pkg, "%s/pkg", tmpdir);
+            cx_fmt(lcom, sizeof lcom, "%s/launcher.com", tmpdir);
+            memset(pe, 0, sizeof pe);
+            pe[0] = 'M'; pe[1] = 'Z'; pe[0x3c] = 64;
+            pe[64] = 'P'; pe[65] = 'E';
+            pe[64 + 24 + 60 + 1] = 4; /* SizeOfHeaders = 1024 */
+            wf = fopen(wpe, "wb"); if (wf) { fwrite(pe, 1, sizeof pe, wf); fclose(wf); }
+            wf = fopen(pkg, "wb"); if (wf) { fwrite("P 1 x", 1, 5, wf); fclose(wf); }
+            cx_fmt(cmd, sizeof cmd, "/usr/bin/cc -O2 -I%s -o %s %s/seed/ape.c >/dev/null 2>&1 && %s --payload %s %s %s %s %s %s %s >/dev/null 2>&1", cwd, abin, cwd, abin, pkg, lcom, wpe, pbin, pbin, pbin, pbin);
+            ck(system(cmd) == 0, "prod-launcher-ape-packs");
+            cx_fmt(cmd, sizeof cmd, "env -u UNISACC_CONTAINER -u UNISA_CONTAINER -u UNISACC_APE_SELF HOME=%s sh %s | grep -qx 'JOBS=<NULL>|CONT=%s|APE=%s'", tmpdir, lcom, lcom, lcom);
+            ck(system(cmd) == 0, "prod-launcher-old-container-ape-self-pairing");
+        }
         cx_fmt(csrc, sizeof csrc, "%s/c_runreuse.c", tmpdir);
         cx_fmt(cbin, sizeof cbin, "%s/c_runreuse", tmpdir);
         pf = fopen(csrc, "w");
