@@ -44,6 +44,7 @@ typedef struct {
     int cap_samples;
     int timeouts;
     int fails;
+    char source[512];
 } BtBatch;
 
 static BtBatch bt_batches[BT_MAX_BATCHES];
@@ -93,6 +94,13 @@ static int bt_has_sub(const char *s, const char *sub) {
 static int bt_is_strict_name(const char *name) {
     if (!bt_ends_with(name, ".tsv")) return 0;
     return bt_has_sub(name, "strict");
+}
+
+static int bt_is_derive_log_name(const char *name) {
+    /* Exclude hand-typed tables (derive-timings.tsv / derive-weights.tsv); only scan real log/evidence files. */
+    if (tx_eqz(name, "derive-timings.tsv") || tx_eqz(name, "derive-weights.tsv") ||
+        tx_eqz(name, "derive-times.tsv") || tx_eqz(name, "derive.tsv")) return 0;
+    return bt_ends_with(name, ".log") || bt_ends_with(name, ".txt") || bt_ends_with(name, ".tsv");
 }
 
 static int bt_cmp_str(const void *a, const void *b) {
@@ -193,6 +201,7 @@ static int bt_load_batches(const char *path) {
         cur->cap_samples = 0;
         cur->timeouts = 0;
         cur->fails = 0;
+        cur->source[0] = 0;
     }
     free(b);
     if (bt_nbatches == 0) return bt_refuse("empty-batches-tsv");
@@ -200,19 +209,167 @@ static int bt_load_batches(const char *path) {
     return 0;
 }
 
+static int bt_load_derive_facts(const char *path) {
+    size_t n = 0;
+    char *b = cx_read(path, &n);
+    if (!b) return bt_refuse("unreadable-derive-tsv");
+    bt_nbatches = 0;
+    long pos = 0;
+    while (pos < (long)n) {
+        long ls = pos;
+        while (pos < (long)n && b[pos] != '\n') pos++;
+        long le = pos;
+        if (pos < (long)n) pos++;
+        if (le > ls && b[le - 1] == '\r') le--;
+        if (le <= ls || b[ls] == '#') continue;
+        const char *cols[12];
+        long clens[12];
+        int nc = 0;
+        long p = ls;
+        while (nc < 12) {
+            long cs = p;
+            while (p < le && b[p] != '\t') p++;
+            cols[nc] = b + cs;
+            clens[nc] = p - cs;
+            nc++;
+            if (p >= le) break;
+            p++;
+        }
+        if (nc < 8 || clens[0] <= 0 || clens[0] >= 127) continue;
+        if (clens[0] == 4 && memcmp(cols[0], "name", 4) == 0) continue;
+        if (!bt_is_digits(cols[7], clens[7])) continue;
+        if (bt_nbatches >= BT_MAX_BATCHES) {
+            free(b);
+            return bt_refuse("too-many-batches");
+        }
+        BtBatch *cur = &bt_batches[bt_nbatches++];
+        mm_copy(cur->id, sizeof cur->id, cols[0], (size_t)clens[0]);
+        cur->id[clens[0]] = 0;
+        cur->budget_ms = bt_parse_long(cols[7], clens[7]) * 1000L;
+        cur->samples = 0;
+        cur->nsamples = 0;
+        cur->cap_samples = 0;
+        cur->timeouts = 0;
+        cur->fails = 0;
+        cur->source[0] = 0;
+    }
+    free(b);
+    if (bt_nbatches == 0) return bt_refuse("empty-derive-tsv");
+    qsort(bt_batches, (size_t)bt_nbatches, sizeof bt_batches[0], bt_cmp_batch);
+    return 0;
+}
+
+static void bt_record_source(BtBatch *cur, const char *rel_path) {
+    if (!cur->source[0] && rel_path && rel_path[0]) {
+        size_t pl = strlen(rel_path);
+        if (pl >= sizeof cur->source) pl = sizeof cur->source - 1;
+        mm_copy(cur->source, sizeof cur->source, rel_path, pl);
+        cur->source[pl] = 0;
+    }
+}
+
+/* Resolve PATH to a canonical repo-relative path under ROOT; refuse paths escaping ROOT. */
+static int bt_rel_source_under_root(const char *root, const char *path, char *rel_out, size_t rcap) {
+    char abs_root[BT_PW], abs_path[BT_PW];
+    if (sy_realpath(root, abs_root, (int)sizeof abs_root) < 0 || !abs_root[0]) return bt_refuse("bad-root");
+    if (sy_realpath(path, abs_path, (int)sizeof abs_path) < 0 || !abs_path[0]) return bt_refuse("unreadable-derive-log");
+    size_t rl = strlen(abs_root);
+    if (strncmp(abs_path, abs_root, rl) != 0 || abs_path[rl] != '/') {
+        return bt_refuse("source-outside-root");
+    }
+    const char *rel = abs_path + rl + 1;
+    if (!rel[0] || strlen(rel) >= rcap) return bt_refuse("path-bound");
+    mm_copy(rel_out, rcap, rel, strlen(rel) + 1);
+    return 0;
+}
+
+static int bt_load_derive_log(const char *root, const char *path) {
+    /* Never ingest hand-typed timing/weight tables even if passed explicitly. */
+    if (bt_ends_with(path, "derive-timings.tsv") || bt_ends_with(path, "derive-weights.tsv")) {
+        return bt_refuse("hand-typed-derive-table-forbidden");
+    }
+    char rel_src[512];
+    int rrc = bt_rel_source_under_root(root, path, rel_src, sizeof rel_src);
+    if (rrc) return rrc;
+    size_t n = 0;
+    char *b = cx_read(path, &n);
+    if (!b) return bt_refuse("unreadable-derive-log");
+    long pos = 0;
+    while (pos < (long)n) {
+        long ls = pos;
+        while (pos < (long)n && b[pos] != '\n') pos++;
+        long le = pos;
+        if (pos < (long)n) pos++;
+        if (le > ls && b[le - 1] == '\r') le--;
+        if (le - ls < 8 || memcmp(b + ls, "DERIVE\t", 7) != 0) continue;
+        const char *cols[8];
+        long clens[8];
+        int nc = 0;
+        long p = ls;
+        while (nc < 8) {
+            long cs = p;
+            while (p < le && b[p] != '\t') p++;
+            cols[nc] = b + cs;
+            clens[nc] = p - cs;
+            nc++;
+            if (p >= le) break;
+            p++;
+        }
+        if (nc < 4) continue;
+        int idx = bt_find_batch(cols[1], clens[1]);
+        if (idx < 0) continue;
+        const char *st = cols[2];
+        long stl = clens[2];
+        if (stl == 7 && memcmp(st, "SKIPPED", 7) == 0) continue;
+        /* Require bounded integer ms on every accepted row before recording source or counters. */
+        if (!bt_is_digits(cols[3], clens[3])) continue;
+        long ms = bt_parse_long(cols[3], clens[3]);
+        if (ms < 0 || ms > 36000000L) continue;
+        if (stl == 7 && memcmp(st, "TIMEOUT", 7) == 0) {
+            /* Exact TIMEOUT token only; NEVER added to timing samples. */
+            bt_batches[idx].timeouts++;
+            bt_record_source(&bt_batches[idx], rel_src);
+            continue;
+        }
+        if ((stl == 4 && memcmp(st, "FAIL", 4) == 0) ||
+            (stl == 5 && memcmp(st, "DRIFT", 5) == 0) ||
+            (stl == 5 && memcmp(st, "ERROR", 5) == 0) ||
+            (stl == 7 && memcmp(st, "REFUSED", 7) == 0)) {
+            bt_batches[idx].fails++;
+            bt_record_source(&bt_batches[idx], rel_src);
+            continue;
+        }
+        if ((stl == 2 && memcmp(st, "OK", 2) == 0) ||
+            (stl == 4 && memcmp(st, "PASS", 4) == 0) ||
+            (stl == 5 && memcmp(st, "WROTE", 5) == 0) ||
+            (stl == 5 && memcmp(st, "MATCH", 5) == 0)) {
+            int rc = bt_add_sample(&bt_batches[idx], ms);
+            if (rc) { free(b); return rc; }
+            bt_record_source(&bt_batches[idx], rel_src);
+        }
+    }
+    free(b);
+    return 0;
+}
+
 static int bt_add_file(const char *path) {
-    size_t len = strlen(path);
+    char canon[BT_PW];
+    const char *use = path;
+    if (sy_realpath(path, canon, (int)sizeof canon) >= 0 && canon[0]) {
+        use = canon;
+    }
+    size_t len = strlen(use);
     if (len == 0 || len >= BT_PW) return bt_refuse("path-too-long");
     for (int i = 0; i < bt_nfiles; i++) {
-        if (tx_eqz(bt_files[i], path)) return 0;
+        if (tx_eqz(bt_files[i], use)) return 0;
     }
     if (bt_nfiles >= BT_MAX_FILES) return bt_refuse("too-many-files");
-    mm_copy(bt_files[bt_nfiles], BT_PW, path, len + 1);
+    mm_copy(bt_files[bt_nfiles], BT_PW, use, len + 1);
     bt_nfiles++;
     return 0;
 }
 
-static int bt_scan_dir(const char *dir, int depth) {
+static int bt_scan_dir(const char *dir, int depth, int derive_mode) {
     if (depth > BT_MAX_DEPTH) return 0;
     sy_dir_t d;
     if (sy_dir_open(&d, dir)) return bt_refuse("unreadable-strict-dir");
@@ -227,12 +384,12 @@ static int bt_scan_dir(const char *dir, int depth) {
         sy_stat_t st;
         if (sy_stat(q, &st)) continue;
         if (st.kind == 'd' && depth < BT_MAX_DEPTH) {
-            int rc = bt_scan_dir(q, depth + 1);
+            int rc = bt_scan_dir(q, depth + 1, derive_mode);
             if (rc) {
                 sy_dir_close(&d);
                 return rc;
             }
-        } else if (st.kind == 'f' && bt_is_strict_name(d.name)) {
+        } else if (st.kind == 'f' && (derive_mode ? bt_is_derive_log_name(d.name) : bt_is_strict_name(d.name))) {
             int rc = bt_add_file(q);
             if (rc) {
                 sy_dir_close(&d);
@@ -360,8 +517,10 @@ static void bt_buf_puts(BtBuf *bb, const char *s) {
 
 int main(int argc, char **argv) {
     int mode = 0; /* 1=write, 2=check */
+    int derive_mode = 0;
     const char *root = ".";
     const char *batches_arg = 0;
+    const char *derive_facts_arg = 0;
     const char *out_arg = 0;
     int threshold_pct = 70;
     int explicit_inputs = 0;
@@ -369,14 +528,16 @@ int main(int argc, char **argv) {
     for (int i = 1; i < argc; i++) {
         if (tx_eqz(argv[i], "--write")) mode = 1;
         else if (tx_eqz(argv[i], "--check")) mode = 2;
+        else if (tx_eqz(argv[i], "--derive")) derive_mode = 1;
         else if (tx_eqz(argv[i], "--root") && i + 1 < argc) root = argv[++i];
         else if (tx_eqz(argv[i], "--batches") && i + 1 < argc) batches_arg = argv[++i];
+        else if (tx_eqz(argv[i], "--derive-facts") && i + 1 < argc) derive_facts_arg = argv[++i];
         else if (tx_eqz(argv[i], "--out") && i + 1 < argc) out_arg = argv[++i];
-        else if (tx_eqz(argv[i], "--strict-dir") && i + 1 < argc) {
+        else if ((tx_eqz(argv[i], "--strict-dir") || tx_eqz(argv[i], "--derive-dir")) && i + 1 < argc) {
             if (bt_ndirs >= BT_MAX_DIRS) return bt_refuse("too-many-input-dirs");
             bt_dirs[bt_ndirs++] = argv[++i];
             explicit_inputs = 1;
-        } else if (tx_eqz(argv[i], "--strict") && i + 1 < argc) {
+        } else if ((tx_eqz(argv[i], "--strict") || tx_eqz(argv[i], "--derive-log")) && i + 1 < argc) {
             int rc = bt_add_file(argv[++i]);
             if (rc) return rc;
             explicit_inputs = 1;
@@ -392,7 +553,7 @@ int main(int argc, char **argv) {
         }
     }
     if (mode == 0) {
-        sy_printf("usage: batch-times.cx -- --write|--check [--root DIR] [--batches FILE] [--out FILE] [--strict-dir DIR] [--strict FILE] [--threshold-pct 1..99]\n");
+        sy_printf("usage: batch-times.cx -- [--derive] --write|--check [--root DIR] [--batches FILE] [--derive-facts FILE] [--out FILE] [--strict-dir|--derive-dir DIR] [--strict|--derive-log FILE] [--threshold-pct 1..99]\n");
         return 2;
     }
 
@@ -400,39 +561,46 @@ int main(int argc, char **argv) {
     if (out_arg) {
         if (cx_fmt(out_path, sizeof out_path, "%s", out_arg)) return bt_refuse("path-bound");
     } else {
-        if (cx_fmt(out_path, sizeof out_path, "%s/build/batch-times.tsv", root)) return bt_refuse("path-bound");
+        if (cx_fmt(out_path, sizeof out_path, "%s/build/%s", root, derive_mode ? "derive-times.tsv" : "batch-times.tsv")) return bt_refuse("path-bound");
     }
-    if (batches_arg) {
+    if (derive_mode) {
+        if (derive_facts_arg) {
+            if (cx_fmt(batches_path, sizeof batches_path, "%s", derive_facts_arg)) return bt_refuse("path-bound");
+        } else {
+            if (cx_fmt(batches_path, sizeof batches_path, "%s/exec/facts/derive.tsv", root)) return bt_refuse("path-bound");
+        }
+    } else if (batches_arg) {
         if (cx_fmt(batches_path, sizeof batches_path, "%s", batches_arg)) return bt_refuse("path-bound");
     } else {
         if (cx_fmt(batches_path, sizeof batches_path, "%s/tests/batches.tsv", root)) return bt_refuse("path-bound");
     }
 
-    int rc = bt_load_batches(batches_path);
+    int rc = derive_mode ? bt_load_derive_facts(batches_path) : bt_load_batches(batches_path);
     if (rc) return rc;
     if (!explicit_inputs) {
         if (cx_fmt(def_strict_dir, sizeof def_strict_dir, "%s/release/evidence", root)) return bt_refuse("path-bound");
         bt_dirs[bt_ndirs++] = def_strict_dir;
     }
     for (int i = 0; i < bt_ndirs; i++) {
-        rc = bt_scan_dir(bt_dirs[i], 0);
+        rc = bt_scan_dir(bt_dirs[i], 0, derive_mode);
         if (rc) return rc;
     }
-    if (bt_nfiles == 0) return bt_refuse("no-strict-files-found");
+    if (bt_nfiles == 0) return bt_refuse(derive_mode ? "no-derive-logs-found" : "no-strict-files-found");
     qsort(bt_files, (size_t)bt_nfiles, sizeof bt_files[0], bt_cmp_str);
     for (int i = 0; i < bt_nfiles; i++) {
-        rc = bt_load_strict_file(bt_files[i]);
+        rc = derive_mode ? bt_load_derive_log(root, bt_files[i]) : bt_load_strict_file(bt_files[i]);
         if (rc) return rc;
     }
 
     int measured = 0, near_bound = 0;
     BtBuf rows = {0}, tickets = {0};
-    char line[512];
+    char line[1024];
 
     for (int i = 0; i < bt_nbatches; i++) {
         BtBatch *cur = &bt_batches[i];
         int k = cur->nsamples;
         long budget_ms = cur->budget_ms;
+        const char *src_col = cur->source[0] ? cur->source : "-";
         if (k == 0 && cur->timeouts == 0 && cur->fails == 0) continue;
         if (k > 0) {
             measured++;
@@ -447,26 +615,45 @@ int main(int argc, char **argv) {
             int is_near = (p95_ms * 100L > budget_ms * (long)threshold_pct) || cur->timeouts > 0;
             if (is_near) {
                 near_bound++;
-                cx_fmt(line, sizeof line,
-                       "%s\t%ld\t%ld\t%ld\t%ld\t%ld\t%d\t%d\t%d\tnear-bound\tSPLIT_TICKET:%s:p95=%ldms>%d%%of%ldms,timeouts=%d\n",
-                       cur->id, max_ms, median_ms, p95_ms, budget_ms, headroom_ms, k, cur->timeouts, cur->fails,
-                       cur->id, p95_ms, threshold_pct, budget_ms, cur->timeouts);
+                if (derive_mode) {
+                    cx_fmt(line, sizeof line,
+                           "%s\t%ld\t%ld\t%ld\t%ld\t%ld\t%d\t%d\t%d\tnear-bound\tSPLIT_TICKET:%s:p95=%ldms>%d%%of%ldms,timeouts=%d\t%s\n",
+                           cur->id, max_ms, median_ms, p95_ms, budget_ms, headroom_ms, k, cur->timeouts, cur->fails,
+                           cur->id, p95_ms, threshold_pct, budget_ms, cur->timeouts, src_col);
+                } else {
+                    cx_fmt(line, sizeof line,
+                           "%s\t%ld\t%ld\t%ld\t%ld\t%ld\t%d\t%d\t%d\tnear-bound\tSPLIT_TICKET:%s:p95=%ldms>%d%%of%ldms,timeouts=%d\n",
+                           cur->id, max_ms, median_ms, p95_ms, budget_ms, headroom_ms, k, cur->timeouts, cur->fails,
+                           cur->id, p95_ms, threshold_pct, budget_ms, cur->timeouts);
+                }
                 bt_buf_puts(&rows, line);
                 cx_fmt(line, sizeof line,
                        "# SPLIT_TICKET\t%s\tp95_ms=%ld\tbudget_ms=%ld\theadroom_ms=%ld\ttimeouts=%d\tfails=%d\tthreshold_pct=%d\taction=split-or-j1-warm\n",
                        cur->id, p95_ms, budget_ms, headroom_ms, cur->timeouts, cur->fails, threshold_pct);
                 bt_buf_puts(&tickets, line);
             } else {
-                cx_fmt(line, sizeof line,
-                       "%s\t%ld\t%ld\t%ld\t%ld\t%ld\t%d\t%d\t%d\tok\t-\n",
-                       cur->id, max_ms, median_ms, p95_ms, budget_ms, headroom_ms, k, cur->timeouts, cur->fails);
+                if (derive_mode) {
+                    cx_fmt(line, sizeof line,
+                           "%s\t%ld\t%ld\t%ld\t%ld\t%ld\t%d\t%d\t%d\tok\t-\t%s\n",
+                           cur->id, max_ms, median_ms, p95_ms, budget_ms, headroom_ms, k, cur->timeouts, cur->fails, src_col);
+                } else {
+                    cx_fmt(line, sizeof line,
+                           "%s\t%ld\t%ld\t%ld\t%ld\t%ld\t%d\t%d\t%d\tok\t-\n",
+                           cur->id, max_ms, median_ms, p95_ms, budget_ms, headroom_ms, k, cur->timeouts, cur->fails);
+                }
                 bt_buf_puts(&rows, line);
             }
         } else if (cur->timeouts > 0) {
             near_bound++;
-            cx_fmt(line, sizeof line,
-                   "%s\tUNMEASURED\tUNMEASURED\tUNMEASURED\t%ld\tUNMEASURED\t0\t%d\t%d\tnear-bound\tSPLIT_TICKET:%s:timeouts=%d,budget=%ldms\n",
-                   cur->id, budget_ms, cur->timeouts, cur->fails, cur->id, cur->timeouts, budget_ms);
+            if (derive_mode) {
+                cx_fmt(line, sizeof line,
+                       "%s\tUNMEASURED\tUNMEASURED\tUNMEASURED\t%ld\tUNMEASURED\t0\t%d\t%d\tnear-bound\tSPLIT_TICKET:%s:timeouts=%d,budget=%ldms\t%s\n",
+                       cur->id, budget_ms, cur->timeouts, cur->fails, cur->id, cur->timeouts, budget_ms, src_col);
+            } else {
+                cx_fmt(line, sizeof line,
+                       "%s\tUNMEASURED\tUNMEASURED\tUNMEASURED\t%ld\tUNMEASURED\t0\t%d\t%d\tnear-bound\tSPLIT_TICKET:%s:timeouts=%d,budget=%ldms\n",
+                       cur->id, budget_ms, cur->timeouts, cur->fails, cur->id, cur->timeouts, budget_ms);
+            }
             bt_buf_puts(&rows, line);
             cx_fmt(line, sizeof line,
                    "# SPLIT_TICKET\t%s\tp95_ms=UNMEASURED\tbudget_ms=%ld\theadroom_ms=UNMEASURED\ttimeouts=%d\tfails=%d\tthreshold_pct=%d\taction=split-or-j1-warm\n",
@@ -474,19 +661,33 @@ int main(int argc, char **argv) {
             bt_buf_puts(&tickets, line);
         } else {
             /* k == 0 && timeouts == 0 && fails > 0: assertion FAIL only, never triggers near-bound */
-            cx_fmt(line, sizeof line,
-                   "%s\tUNMEASURED\tUNMEASURED\tUNMEASURED\t%ld\tUNMEASURED\t0\t0\t%d\tok\t-\n",
-                   cur->id, budget_ms, cur->fails);
+            if (derive_mode) {
+                cx_fmt(line, sizeof line,
+                       "%s\tUNMEASURED\tUNMEASURED\tUNMEASURED\t%ld\tUNMEASURED\t0\t0\t%d\tok\t-\t%s\n",
+                       cur->id, budget_ms, cur->fails, src_col);
+            } else {
+                cx_fmt(line, sizeof line,
+                       "%s\tUNMEASURED\tUNMEASURED\tUNMEASURED\t%ld\tUNMEASURED\t0\t0\t%d\tok\t-\n",
+                       cur->id, budget_ms, cur->fails);
+            }
             bt_buf_puts(&rows, line);
         }
     }
 
     BtBuf out = {0};
-    bt_buf_puts(&out, "# Generated by tools/batch-times.cx --write from tests/batches.tsv and strict-*.tsv; do not edit by hand.\n");
+    if (derive_mode) {
+        bt_buf_puts(&out, "# Generated by tools/batch-times.cx --derive --write from exec/facts/derive.tsv and real DERIVE logs; do not edit by hand.\n");
+    } else {
+        bt_buf_puts(&out, "# Generated by tools/batch-times.cx --write from tests/batches.tsv and strict-*.tsv; do not edit by hand.\n");
+    }
     cx_fmt(line, sizeof line, "# threshold_pct=%d\tfiles=%d\tmeasured=%d\tnear_bound=%d\n",
            threshold_pct, bt_nfiles, measured, near_bound);
     bt_buf_puts(&out, line);
-    bt_buf_puts(&out, "batch\tmax_ms\tmedian_ms\tp95_ms\tbudget_ms\theadroom_ms\tsamples\ttimeouts\tfails\tstatus\tsplit_ticket\n");
+    if (derive_mode) {
+        bt_buf_puts(&out, "generator\tmax_ms\tmedian_ms\tp95_ms\tbudget_ms\theadroom_ms\tsamples\ttimeouts\tfails\tstatus\tsplit_ticket\tsource\n");
+    } else {
+        bt_buf_puts(&out, "batch\tmax_ms\tmedian_ms\tp95_ms\tbudget_ms\theadroom_ms\tsamples\ttimeouts\tfails\tstatus\tsplit_ticket\n");
+    }
     if (rows.buf && rows.len > 0) bt_buf_put(&out, rows.buf, rows.len);
     if (tickets.buf && tickets.len > 0) bt_buf_put(&out, tickets.buf, tickets.len);
 
@@ -500,13 +701,14 @@ int main(int argc, char **argv) {
         return bt_refuse("oom");
     }
 
+    const char *tag = derive_mode ? "DERIVE_TIMES" : "BATCH_TIMES";
     if (mode == 1) {
         if (sy_write_atomic(out_path, out.buf, (int64_t)out.len, 0644)) {
             mm_free(out.buf);
             return bt_refuse("write-failed");
         }
-        sy_printf("BATCH_TIMES\twrote\tmeasured=%d\tnear_bound=%d\tthreshold_pct=%d\tout=%s\n",
-                  measured, near_bound, threshold_pct, out_path);
+        sy_printf("%s\twrote\tmeasured=%d\tnear_bound=%d\tthreshold_pct=%d\tout=%s\n",
+                  tag, measured, near_bound, threshold_pct, out_path);
         mm_free(out.buf);
         return 0;
     }
@@ -518,11 +720,11 @@ int main(int argc, char **argv) {
     mm_free(out.buf);
     if (!same) {
         sy_printf("DIFF\t%s\n", out_path);
-        sy_printf("BATCH_TIMES\tdrift\tmeasured=%d\tnear_bound=%d\tthreshold_pct=%d\n",
-                  measured, near_bound, threshold_pct);
+        sy_printf("%s\tdrift\tmeasured=%d\tnear_bound=%d\tthreshold_pct=%d\n",
+                  tag, measured, near_bound, threshold_pct);
         return 1;
     }
-    sy_printf("BATCH_TIMES\tok\tmeasured=%d\tnear_bound=%d\tthreshold_pct=%d\n",
-              measured, near_bound, threshold_pct);
+    sy_printf("%s\tok\tmeasured=%d\tnear_bound=%d\tthreshold_pct=%d\n",
+              tag, measured, near_bound, threshold_pct);
     return 0;
 }

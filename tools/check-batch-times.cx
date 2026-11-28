@@ -337,6 +337,160 @@ int main(void) {
     ck_warmup_case("w2-p2", "nb-a\nok-a\n", "nb-a\n", 0, "nb-a\t2\nok-a\t2\n", 2, "nb-a");
     ck_warmup_case("w2-p3", "unit-frontcache-nb\nunit-frontcache-ok\n", "unit-frontcache-nb\n", 0, 0, 2, "unit-frontcache-nb");
 
+    /* (8) R4b --derive mode:
+     *   - TIMEOUT rows counted in timeouts column, NEVER in samples, trigger near-bound
+     *   - FAIL/DRIFT rows counted in fails column, NEVER in samples, do NOT trigger near-bound
+     *   - SKIPPED rows ignored
+     *   - Real DERIVE log lines only with recorded source path; hand-typed tools/derive-timings.tsv refused/ignored
+     *   - k=21 sample separation (p95 != max, median != min), depth 4/5 boundary, and >1024 file-cap refusal */
+    {
+        char ddir[512];
+        cx_fmt(ddir, sizeof ddir, "%s/derive-fx", dir);
+        sy_mkdir(ddir, 0700);
+        cx_fmt(sub, sizeof sub, "%s/exec/facts", ddir); sy_mkdir_all(sub, 0700);
+        cx_fmt(sub, sizeof sub, "%s/build", ddir); sy_mkdir(sub, 0700);
+        cx_fmt(sub, sizeof sub, "%s/logs/a/b/c/d/e", ddir); sy_mkdir_all(sub, 0700);
+
+        char dfp[600];
+        cx_fmt(dfp, sizeof dfp, "%s/exec/facts/derive.tsv", ddir);
+        const char *df_body =
+            "# name\tgenerator\tcheck_argv\twrite_argv\toutputs\tinputs_glob\torder\tbound_s\n"
+            "fast-gen\ttools/a.cx\t-\t-\tout1\tin1\t1\t30\n"
+            "slow-gen\ttools/b.cx\t-\t-\tout2\tin2\t2\t25\n"
+            "to-gen\ttools/c.cx\t-\t-\tout3\tin3\t3\t55\n"
+            "fail-gen\ttools/d.cx\t-\t-\tout4\tin4\t4\t30\n"
+            "d4-gen\ttools/e.cx\t-\t-\tout5\tin5\t5\t30\n"
+            "d5-gen\ttools/f.cx\t-\t-\tout6\tin6\t6\t30\n";
+        cx_write(dfp, df_body, (long)strlen(df_body));
+
+        /* Hand-typed derive-timings.tsv in logs dir MUST be ignored during dir scan */
+        cx_fmt(dfp, sizeof dfp, "%s/logs/derive-timings.tsv", ddir);
+        cx_write(dfp, "DERIVE\tfast-gen\tOK\t99999\n", 25);
+
+        /* Invalid-only log sorts before run1.log (00-bad.log): NOT_TIMEOUT and non-numeric DRIFT MUST NOT be counted or claim source */
+        cx_fmt(dfp, sizeof dfp, "%s/logs/00-bad.log", ddir);
+        const char *bad_rows =
+            "DERIVE\tfast-gen\tNOT_TIMEOUT\t55000\n"
+            "DERIVE\tfast-gen\tDRIFT\tnotanumber\n"
+            "DERIVE\tfast-gen\tOK\t9999999999\n";
+        cx_write(dfp, bad_rows, (long)strlen(bad_rows));
+
+        /* Real DERIVE log with k=21 samples for slow-gen, OK+FAIL+SKIPPED for fast-gen, TIMEOUT-only for to-gen, FAIL-only for fail-gen */
+        char *dl = (char *)mm_alloc(32768);
+        long dp = 0;
+        for (int k = 1; k <= 20; k++) {
+            char row[128];
+            cx_fmt(row, sizeof row, "DERIVE\tslow-gen\tOK\t%d\n", k * 1000);
+            mm_copy(dl + dp, 32768 - dp, row, strlen(row)); dp += (long)strlen(row);
+        }
+        const char *dtail =
+            "DERIVE\tslow-gen\tOK\t45000\n"
+            "DERIVE\tslow-gen\tTIMEOUT\t55000\n"
+            "DERIVE\tfast-gen\tOK\t1200\n"
+            "DERIVE\tfast-gen\tSKIPPED\t0\n"
+            "DERIVE\tfast-gen\tDRIFT\t1500\n"
+            "DERIVE\tto-gen\tTIMEOUT\t55000\n"
+            "DERIVE\tto-gen\tTIMEOUT\t55001\n"
+            "DERIVE\tfail-gen\tFAIL\t3000\n";
+        mm_copy(dl + dp, 32768 - dp, dtail, strlen(dtail)); dp += (long)strlen(dtail);
+        dl[dp] = 0;
+        char main_log[600];
+        cx_fmt(main_log, sizeof main_log, "%s/logs/run1.log", ddir);
+        cx_write(main_log, dl, dp);
+        mm_free(dl);
+
+        /* Depth 4 vs depth 5 boundary for derive logs */
+        cx_fmt(dfp, sizeof dfp, "%s/logs/a/b/c/d/l4.log", ddir);
+        cx_write(dfp, "DERIVE\td4-gen\tOK\t2500\n", 22);
+        cx_fmt(dfp, sizeof dfp, "%s/logs/a/b/c/d/e/l5.log", ddir);
+        cx_write(dfp, "DERIVE\td5-gen\tOK\t2500\n", 22);
+
+        cx_fmt(cmd, sizeof cmd, "sh ./unisacc.com tools/batch-times.cx -- --derive --write --root %s --derive-dir %s/logs", ddir, ddir);
+        rc = run_cmd(cmd, out, sizeof out);
+        ck(rc == 0 && hasl(out, "DERIVE_TIMES\twrote\tmeasured=3\tnear_bound=2\tthreshold_pct=70"), "derive-write-ok");
+
+        cx_fmt(dfp, sizeof dfp, "%s/build/derive-times.tsv", ddir);
+        size_t dn = 0;
+        char *db = cx_read(dfp, &dn);
+        /* source column MUST be repo-relative (logs/run1.log, never /tmp/...), and 00-bad.log MUST NOT be recorded as source */
+        ck(db != 0 && hasl(db, "generator\tmax_ms\tmedian_ms\tp95_ms\tbudget_ms\theadroom_ms\tsamples\ttimeouts\tfails\tstatus\tsplit_ticket\tsource\n"),
+           "derive-header-with-source");
+        ck(db != 0 && hasl(db, "slow-gen\t45000\t11000\t20000\t25000\t5000\t21\t1\t0\tnear-bound\tSPLIT_TICKET:slow-gen:p95=20000ms>70%of25000ms,timeouts=1\tlogs/run1.log\n"),
+           "derive-timeout-not-sample-k21");
+        ck(db != 0 && hasl(db, "fast-gen\t1200\t1200\t1200\t30000\t28800\t1\t0\t1\tok\t-\tlogs/run1.log\n") &&
+           !hasl(db, "99999") && !hasl(db, "00-bad.log"),
+           "derive-exact-status-and-valid-source-only");
+        ck(db != 0 && hasl(db, "to-gen\tUNMEASURED\tUNMEASURED\tUNMEASURED\t55000\tUNMEASURED\t0\t2\t0\tnear-bound\tSPLIT_TICKET:to-gen:timeouts=2,budget=55000ms\tlogs/run1.log\n"),
+           "derive-timeout-only-near-bound");
+        ck(db != 0 && hasl(db, "fail-gen\tUNMEASURED\tUNMEASURED\tUNMEASURED\t30000\tUNMEASURED\t0\t0\t1\tok\t-\tlogs/run1.log\n"),
+           "derive-fail-only-not-near-bound");
+        ck(db != 0 && hasl(db, "d4-gen\t2500\t2500\t2500\t30000\t27500\t1\t0\t0\tok\t-\tlogs/a/b/c/d/l4.log\n") && !hasl(db, "d5-gen\t"),
+           "derive-depth-4-5-boundary");
+        if (db) free(db);
+
+        /* Passing a log outside --root MUST refuse (never write /tmp absolute path into table) */
+        char out_log[600];
+        cx_fmt(out_log, sizeof out_log, "%s/outside-derive.log", dir);
+        cx_write(out_log, "DERIVE\tfast-gen\tOK\t1000\n", 24);
+        cx_fmt(cmd, sizeof cmd, "sh ./unisacc.com tools/batch-times.cx -- --derive --write --root %s --derive-log %s", ddir, out_log);
+        rc = run_cmd(cmd, out, sizeof out);
+        ck(rc == 2 && hasl(out, "REFUSE\tbatch-times\tsource-outside-root"), "derive-outside-root-source-refused");
+
+        /* Real repo --derive run on committed release/evidence logs produces >= 6 measured generators with repo-relative sources */
+        char repo_dout[600];
+        cx_fmt(repo_dout, sizeof repo_dout, "%s/repo-derive-times.tsv", dir);
+        cx_fmt(cmd, sizeof cmd, "sh ./unisacc.com tools/batch-times.cx -- --derive --write --out %s", repo_dout);
+        rc = run_cmd(cmd, out, sizeof out);
+        {
+            size_t rdn = 0;
+            char *rdb = cx_read(repo_dout, &rdn);
+            ck(rc == 0 && hasl(out, "DERIVE_TIMES\twrote\t") && rdb != 0 &&
+               hasl(rdb, "\trelease/evidence/") && !hasl(rdb, "\t/home/") && !hasl(rdb, "\t/tmp/"),
+               "derive-real-repo-evidence-relative-sources");
+            if (rdb) free(rdb);
+        }
+
+        /* Passing hand-typed derive-timings.tsv explicitly MUST refuse */
+        cx_fmt(cmd, sizeof cmd, "sh ./unisacc.com tools/batch-times.cx -- --derive --check --root %s --derive-log %s/logs/derive-timings.tsv", ddir, ddir);
+        rc = run_cmd(cmd, out, sizeof out);
+        ck(rc == 2 && hasl(out, "REFUSE\tbatch-times\thand-typed-derive-table-forbidden"), "derive-handtyped-explicit-refused");
+
+        /* Same log passed once via relative path and once via absolute path MUST dedup to files=1 and identical samples */
+        {
+            char dedup_out[600], cwd[4096];
+            if (sy_realpath(".", cwd, sizeof cwd) < 0) cwd[0] = 0;
+            cx_fmt(dedup_out, sizeof dedup_out, "%s/dedup-derive.tsv", dir);
+            cx_fmt(cmd, sizeof cmd,
+                   "cd %s && sh %s/unisacc.com %s/tools/batch-times.cx -- --derive --write --root %s --out %s --derive-log logs/run1.log --derive-log %s",
+                   ddir, cwd, cwd, ddir, dedup_out, main_log);
+            rc = run_cmd(cmd, out, sizeof out);
+            size_t ddn = 0;
+            char *ddb = cx_read(dedup_out, &ddn);
+            ck(rc == 0 && ddb != 0 &&
+               hasl(ddb, "\tfiles=1\tmeasured=2\tnear_bound=2\n") &&
+               hasl(ddb, "slow-gen\t45000\t11000\t20000\t25000\t5000\t21\t1\t0\tnear-bound\t"),
+               "derive-dedup-rel-and-abs-same-file");
+            if (ddb) free(ddb);
+        }
+
+        /* Derive --check matches written output */
+        cx_fmt(cmd, sizeof cmd, "sh ./unisacc.com tools/batch-times.cx -- --derive --check --root %s --derive-dir %s/logs", ddir, ddir);
+        rc = run_cmd(cmd, out, sizeof out);
+        ck(rc == 0 && hasl(out, "DERIVE_TIMES\tok\tmeasured=3\tnear_bound=2\tthreshold_pct=70"), "derive-check-ok");
+
+        /* Derive >1024 files refused */
+        char dmany[512], dmf[600];
+        cx_fmt(dmany, sizeof dmany, "%s/many-dlogs", ddir);
+        sy_mkdir(dmany, 0700);
+        for (int k = 0; k < 1025; k++) {
+            cx_fmt(dmf, sizeof dmf, "%s/d-%04d.log", dmany, k);
+            cx_write(dmf, "DERIVE\tfast-gen\tOK\t100\n", 23);
+        }
+        cx_fmt(cmd, sizeof cmd, "sh ./unisacc.com tools/batch-times.cx -- --derive --check --root %s --derive-dir %s", ddir, dmany);
+        rc = run_cmd(cmd, out, sizeof out);
+        ck(rc == 2 && hasl(out, "REFUSE\tbatch-times\ttoo-many-files"), "derive-overflow-files-refused");
+    }
+
     {
         char *v[] = {"rm", "-rf", dir, 0};
         cx_runv_timeout(v, 20, 0, 0);
