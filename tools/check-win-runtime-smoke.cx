@@ -5,6 +5,11 @@
  *   --extract-ape-pkg --ape PATH --out-pkg PATH
  *   --make-neg-pe --src-pe PATH --out-pe PATH --expect-target win/x86_64
  *   --check-host-arch win/x86_64|win/arm64|lnx/x86_64
+ *   --verify-receipt --receipt PATH --rev SHA40 --candidate-sha SHA64
+ *                    [--producer P] [--purpose P] [--expect-rc N] [--expect-verdict PASS|FAIL]
+ *   --verify-manifest --manifest PATH --man-proven 0|1 --rev SHA40
+ *                     --candidate-sha SHA64 --slice-sha SHA64 --pkg-sha SHA64
+ *   --print-release-version [--path PATH]
  *   --seal   --receipt RCPT --output OUT --locators LOC --run-id ID --rev SHA40
  *            --expect-target TGT --candidate-file PATH --ts SEC
  *            [--mode positive|negative] [--candidate-pe PATH] [--pos-pe PATH]
@@ -33,6 +38,7 @@
 #pragma unisa use cxlib.releaseversion
 #pragma unisa use sys.fs
 #pragma unisa use sys.io
+#pragma unisa use sys.posix
 #pragma unisa use sys.sha
 #pragma unisa use mem.bytes
 #pragma unisa use mem.heap
@@ -1236,6 +1242,346 @@ static int cmd_judge(int argc, char **argv) {
     return 0;
 }
 
+static int wrs_no_ws(const char *s) {
+    int i;
+    if (!s || !s[0]) return 0;
+    for (i = 0; s[i]; i++) {
+        if (s[i] == ' ' || s[i] == '\t' || s[i] == '\r' || s[i] == '\n') return 0;
+    }
+    return 1;
+}
+
+static int wrs_is_zero64(const char *s) {
+    int i;
+    for (i = 0; i < 64; i++) if (s[i] != '0') return 0;
+    return 1;
+}
+
+static int wrs_read_reg_bounded(const char *path, long max_bytes, unsigned char **buf_out, long *len_out) {
+    sy_stat_t lst, fst;
+    int fd;
+    unsigned char *b, extra[1];
+    long r;
+    *buf_out = 0;
+    *len_out = 0L;
+    if (!path || !path[0]) return 1;
+    fd = sy_openat_read_nofollow(sy_at_fdcwd(), path);
+    if (fd < 0) return 1;
+    if (sy_fstat(fd, &fst) != 0 || fst.kind != 'f') { (void)sy_close(fd); return 1; }
+    if (sy_lstat(path, &lst) != 0 || lst.kind != 'f' || lst.dev != fst.dev || lst.ino != fst.ino) {
+        (void)sy_close(fd);
+        return 1;
+    }
+    if (fst.size <= 0 || fst.size > max_bytes) { (void)sy_close(fd); return 2; }
+    b = (unsigned char *)mm_alloc((long)fst.size + 1L);
+    if (!b) { (void)sy_close(fd); return 1; }
+    if (sy_read_full(fd, b, (long)fst.size) != 0) { mm_free(b); (void)sy_close(fd); return 1; }
+    r = sy_read_once(fd, extra, 1L);
+    (void)sy_close(fd);
+    if (r != 0L) { mm_free(b); return 1; }
+    b[fst.size] = 0;
+    *buf_out = b;
+    *len_out = (long)fst.size;
+    return 0;
+}
+
+static int cmd_verify_receipt(int argc, char **argv) {
+    const char *rcpt = wrs_opt(argc, argv, "--receipt");
+    const char *want_rev = wrs_opt(argc, argv, "--rev");
+    const char *want_cand = wrs_opt(argc, argv, "--candidate-sha");
+    const char *want_prod = wrs_opt(argc, argv, "--producer");
+    const char *want_purp = wrs_opt(argc, argv, "--purpose");
+    const char *exp_rc_s = wrs_opt(argc, argv, "--expect-rc");
+    const char *exp_verd = wrs_opt(argc, argv, "--expect-verdict");
+    unsigned char *buf = 0;
+    long n = 0L, i = 0L;
+    unsigned int mask = 0U;
+    char ver_s[32], run_id[128], rev[64], unit[128], target[64], prod[128], purp[128];
+    char cand_sha[80], in_sha[80], out_sha[80], rc_s[32], verdict[32], ts_s[48], bind_sha[80];
+    char payload[2048], exp_bind[65];
+    int64_t rc_v = 0, ts_v = 0, want_rc = 0;
+
+    if (!want_prod || !want_prod[0]) want_prod = "candidate-chain";
+    if (!want_purp || !want_purp[0]) want_purp = "chain-ape";
+    if (!exp_verd || !exp_verd[0]) exp_verd = "PASS";
+    if (exp_rc_s && wrs_parse_i64(exp_rc_s, &want_rc) != 0) {
+        sy_eprintf("REFUSE bad-verify-receipt-expect-rc\n");
+        return 2;
+    }
+    if (!rcpt || !want_rev || !want_cand ||
+        !wrs_is_hex_lower(want_rev, 40) || !wrs_is_hex_lower(want_cand, 64) ||
+        (strcmp(exp_verd, "PASS") != 0 && strcmp(exp_verd, "FAIL") != 0)) {
+        sy_eprintf("REFUSE bad-verify-receipt-args\n");
+        return 2;
+    }
+    if (wrs_read_reg_bounded(rcpt, 65536L, &buf, &n) != 0 || !buf) {
+        sy_eprintf("REFUSE receipt-unreadable\n");
+        return 1;
+    }
+    for (i = 0L; i < n; i++) {
+        if (buf[i] == 0U) { mm_free(buf); sy_eprintf("REFUSE receipt-nul-byte\n"); return 1; }
+    }
+    if (buf[n - 1L] != (unsigned char)'\n') {
+        mm_free(buf);
+        sy_eprintf("REFUSE receipt-unterminated\n");
+        return 1;
+    }
+    ver_s[0] = run_id[0] = rev[0] = unit[0] = target[0] = prod[0] = purp[0] = 0;
+    cand_sha[0] = in_sha[0] = out_sha[0] = rc_s[0] = verdict[0] = ts_s[0] = bind_sha[0] = 0;
+
+    i = 0L;
+    while (i < n) {
+        long e = i, tab = -1L;
+        while (e < n && buf[e] != (unsigned char)'\n') {
+            if (buf[e] == (unsigned char)'\r') { mm_free(buf); sy_eprintf("REFUSE receipt-cr\n"); return 1; }
+            if (buf[e] == (unsigned char)'\t') {
+                if (tab >= 0L) { mm_free(buf); sy_eprintf("REFUSE receipt-extra-tab\n"); return 1; }
+                tab = e;
+            }
+            e++;
+        }
+        if (e == i) { i = e + 1L; continue; }
+        if (buf[i] == (unsigned char)'#' && tab < 0L) { i = e + 1L; continue; }
+        if (tab <= i || tab + 1L >= e) { mm_free(buf); sy_eprintf("REFUSE receipt-bad-line\n"); return 1; }
+        {
+            const char *kp = (const char *)(buf + i);
+            const char *vp = (const char *)(buf + tab + 1L);
+            size_t kl = (size_t)(tab - i), vl = (size_t)(e - (tab + 1L));
+            struct { const char *name; int bit; char *dst; size_t cap; } cols[14] = {
+                {"version", 0, ver_s, sizeof ver_s},
+                {"run_id", 1, run_id, sizeof run_id},
+                {"rev", 2, rev, sizeof rev},
+                {"unit", 3, unit, sizeof unit},
+                {"target", 4, target, sizeof target},
+                {"producer", 5, prod, sizeof prod},
+                {"purpose", 6, purp, sizeof purp},
+                {"candidate_sha", 7, cand_sha, sizeof cand_sha},
+                {"inputs_sha", 8, in_sha, sizeof in_sha},
+                {"output_sha", 9, out_sha, sizeof out_sha},
+                {"rc", 10, rc_s, sizeof rc_s},
+                {"verdict", 11, verdict, sizeof verdict},
+                {"ts", 12, ts_s, sizeof ts_s},
+                {"binding_sha", 13, bind_sha, sizeof bind_sha}
+            };
+            int j, hit = -1;
+            for (j = 0; j < 14; j++) {
+                if (kl == strlen(cols[j].name) && !memcmp(kp, cols[j].name, kl)) { hit = j; break; }
+            }
+            if (hit < 0) { mm_free(buf); sy_eprintf("REFUSE receipt-unknown-key\n"); return 1; }
+            if (mask & (1U << hit)) { mm_free(buf); sy_eprintf("REFUSE receipt-dup-key\n"); return 1; }
+            if (vl == 0 || vl >= cols[hit].cap || mm_copy(cols[hit].dst, (long)cols[hit].cap, vp, (long)vl) != 0) {
+                mm_free(buf);
+                sy_eprintf("REFUSE receipt-bad-val\n");
+                return 1;
+            }
+            cols[hit].dst[vl] = 0;
+            mask |= (1U << hit);
+        }
+        i = e + 1L;
+    }
+    mm_free(buf);
+
+    if (mask != ((1U << 14) - 1U)) { sy_eprintf("REFUSE receipt-missing-fields\n"); return 1; }
+    if (strcmp(ver_s, "3") != 0) { sy_eprintf("REFUSE receipt-not-v3\n"); return 1; }
+    if (!wrs_no_ws(run_id) || !wrs_no_ws(unit) || !wrs_no_ws(target) ||
+        !wrs_is_hex_lower(rev, 40) || strcmp(rev, want_rev) != 0) {
+        sy_eprintf("REFUSE receipt-identity-rev-mismatch\n");
+        return 1;
+    }
+    if (strcmp(prod, want_prod) != 0 || strcmp(purp, want_purp) != 0) {
+        sy_eprintf("REFUSE receipt-producer-purpose-mismatch\n");
+        return 1;
+    }
+    if (!wrs_is_hex_lower(cand_sha, 64) || wrs_is_zero64(cand_sha) || strcmp(cand_sha, want_cand) != 0 ||
+        !wrs_is_hex_lower(in_sha, 64) || wrs_is_zero64(in_sha) ||
+        !wrs_is_hex_lower(out_sha, 64) || wrs_is_zero64(out_sha) ||
+        !wrs_is_hex_lower(bind_sha, 64) || wrs_is_zero64(bind_sha)) {
+        sy_eprintf("REFUSE receipt-sha-mismatch\n");
+        return 1;
+    }
+    if (wrs_parse_i64(rc_s, &rc_v) != 0 || wrs_parse_i64(ts_s, &ts_v) != 0 ||
+        ts_v <= 0 || ts_v > 4102444800LL || rc_v != want_rc || strcmp(verdict, exp_verd) != 0) {
+        sy_eprintf("REFUSE receipt-verdict-or-ts\n");
+        return 1;
+    }
+    if ((want_rc == 0 && strcmp(verdict, "PASS") != 0) ||
+        (want_rc != 0 && strcmp(verdict, "FAIL") != 0)) {
+        sy_eprintf("REFUSE receipt-rc-verdict-contradiction\n");
+        return 1;
+    }
+    if (cx_fmt(payload, sizeof payload,
+               "version\t3\nrun_id\t%s\nrev\t%s\nunit\t%s\ntarget\t%s\nproducer\t%s\npurpose\t%s\n"
+               "candidate_sha\t%s\ninputs_sha\t%s\noutput_sha\t%s\nrc\t%lld\nverdict\t%s\nts\t%lld\n",
+               run_id, rev, unit, target, prod, purp,
+               cand_sha, in_sha, out_sha, (long long)rc_v, verdict, (long long)ts_v) != 0 ||
+        sy_sha256_hex(payload, (long)strlen(payload), exp_bind) != 0 ||
+        strcmp(bind_sha, exp_bind) != 0) {
+        sy_eprintf("REFUSE receipt-binding-sha-mismatch\n");
+        return 1;
+    }
+
+    sy_printf("CHAIN_FORMAT=rc_v3\nCHAIN_INPUTS_SHA=%s\nCHAIN_OUTPUT_SHA=%s\nCHAIN_BINDING_SHA=%s\n",
+              in_sha, out_sha, bind_sha);
+    return 0;
+}
+
+static int wrs_line_has_token_kv(const char *line, long llen, const char *key, const char *val) {
+    char pat[160];
+    size_t pl;
+    long i;
+    if (cx_fmt(pat, sizeof pat, "%s=%s", key, val) != 0) return 0;
+    pl = strlen(pat);
+    for (i = 0L; i + (long)pl <= llen; i++) {
+        if ((i == 0L || line[i - 1L] == ' ' || line[i - 1L] == '\t') &&
+            !memcmp(line + i, pat, pl) &&
+            (i + (long)pl == llen || line[i + (long)pl] == ' ' || line[i + (long)pl] == '\t')) {
+            return 1;
+        }
+    }
+    return 0;
+}
+
+static int wrs_split_tab_spans(const char *line, long llen, long *fs, long *fl, int maxf) {
+    int nf = 0;
+    long p = 0L;
+    while (p <= llen && nf < maxf) {
+        long e = p;
+        while (e < llen && line[e] != '\t') e++;
+        fs[nf] = p;
+        fl[nf] = e - p;
+        nf++;
+        if (e == llen) break;
+        p = e + 1L;
+    }
+    return nf;
+}
+
+static int cmd_verify_manifest(int argc, char **argv) {
+    const char *man = wrs_opt(argc, argv, "--manifest");
+    const char *mp_s = wrs_opt(argc, argv, "--man-proven");
+    const char *rev = wrs_opt(argc, argv, "--rev");
+    const char *cand_sha = wrs_opt(argc, argv, "--candidate-sha");
+    const char *slice_sha = wrs_opt(argc, argv, "--slice-sha");
+    const char *pkg_sha = wrs_opt(argc, argv, "--pkg-sha");
+    unsigned char *buf = 0;
+    long n = 0L, i = 0L;
+    int man_proven = 0, is_cand_tsv = 0, hit_cand = 0, hit_arm = 0;
+    int c_rev = -1, c_ape = -1, c_arm = -1, c_pkg = -1, lineno = 0;
+    int64_t mpv = 0;
+
+    if (!man || !mp_s || !rev || !cand_sha || !slice_sha || !pkg_sha ||
+        wrs_parse_i64(mp_s, &mpv) != 0 || (mpv != 0 && mpv != 1) ||
+        !wrs_is_hex_lower(rev, 40) || !wrs_is_hex_lower(cand_sha, 64) ||
+        !wrs_is_hex_lower(slice_sha, 64) || !wrs_is_hex_lower(pkg_sha, 64)) {
+        sy_eprintf("REFUSE bad-verify-manifest-args\n");
+        return 2;
+    }
+    man_proven = (int)mpv;
+    if (wrs_read_reg_bounded(man, 4L << 20, &buf, &n) != 0 || !buf) {
+        sy_eprintf("REFUSE manifest-unreadable\n");
+        return 1;
+    }
+    for (i = 0L; i < n; i++) {
+        if (buf[i] == 0U) { mm_free(buf); sy_eprintf("REFUSE manifest-nul-byte\n"); return 1; }
+    }
+    i = 0L;
+    while (i < n) {
+        long e = i;
+        while (e < n && buf[e] != (unsigned char)'\n') {
+            if (buf[e] == (unsigned char)'\r') { mm_free(buf); sy_eprintf("REFUSE manifest-cr\n"); return 1; }
+            e++;
+        }
+        lineno++;
+        {
+            const char *ln = (const char *)(buf + i);
+            long ll = e - i;
+            long fs[32], fl[32];
+            int nf = wrs_split_tab_spans(ln, ll, fs, fl, 32);
+            if (lineno == 1 && tx_find(ln, ll, "\tape_sha256\t", 12) >= 0 &&
+                tx_find(ln, ll, "\twin_arm64_sha256\t", 18) >= 0) {
+                int j;
+                for (j = 0; j < nf; j++) {
+                    if (fl[j] == 6 && !memcmp(ln + fs[j], "commit", 6)) c_rev = j;
+                    if (fl[j] == 10 && !memcmp(ln + fs[j], "ape_sha256", 10)) c_ape = j;
+                    if (fl[j] == 16 && !memcmp(ln + fs[j], "win_arm64_sha256", 16)) c_arm = j;
+                    if (fl[j] == 14 && !memcmp(ln + fs[j], "package_sha256", 14)) c_pkg = j;
+                }
+                if (c_rev < 0 || c_ape < 0 || c_arm < 0 || c_pkg < 0) {
+                    mm_free(buf);
+                    sy_eprintf("REFUSE manifest-candidate-tsv-header\n");
+                    return 1;
+                }
+                is_cand_tsv = 1;
+            } else if (is_cand_tsv) {
+                int mx = c_rev;
+                if (c_ape > mx) mx = c_ape;
+                if (c_arm > mx) mx = c_arm;
+                if (c_pkg > mx) mx = c_pkg;
+                if (nf > mx &&
+                    fl[c_rev] == 40 && !memcmp(ln + fs[c_rev], rev, 40) &&
+                    fl[c_ape] == 64 && !memcmp(ln + fs[c_ape], cand_sha, 64) &&
+                    fl[c_arm] == 64 && !memcmp(ln + fs[c_arm], slice_sha, 64) &&
+                    fl[c_pkg] == 64 && !memcmp(ln + fs[c_pkg], pkg_sha, 64)) {
+                    hit_cand = 1;
+                    hit_arm = 1;
+                    man_proven = 1;
+                }
+            } else if (ll > 0L) {
+                /* Support TSV manifests (ape-receipt / pack-inputs) and whitespace SHA256SUMS lines */
+                if (nf >= 2 && fl[0] == 9 && !memcmp(ln + fs[0], "win/arm64", 9) &&
+                    wrs_line_has_token_kv(ln, ll, "sha", slice_sha)) hit_arm = 1;
+                if (nf >= 2 && fl[0] == 16 && !memcmp(ln + fs[0], "unisacc-next.com", 16) &&
+                    wrs_line_has_token_kv(ln, ll, "sha", cand_sha)) hit_cand = 1;
+                if (nf >= 3 && fl[0] == 10 && !memcmp(ln + fs[0], "PACK_INPUT", 10) &&
+                    fl[1] == 9 && !memcmp(ln + fs[1], "win/arm64", 9) &&
+                    wrs_line_has_token_kv(ln, ll, "sha", slice_sha)) hit_arm = 1;
+                {
+                    /* Whitespace-delimited SHA256SUMS: "<64-hex>  unisacc.com|slice-win-arm64" */
+                    long p0 = 0L;
+                    while (p0 < ll && (ln[p0] == ' ' || ln[p0] == '\t')) p0++;
+                    if (p0 + 64L < ll && (ln[p0 + 64L] == ' ' || ln[p0 + 64L] == '\t')) {
+                        long p1 = p0 + 64L;
+                        while (p1 < ll && (ln[p1] == ' ' || ln[p1] == '\t')) p1++;
+                        long e1 = p1;
+                        while (e1 < ll && ln[e1] != ' ' && ln[e1] != '\t') e1++;
+                        if (!memcmp(ln + p0, cand_sha, 64) &&
+                            ((e1 - p1 == 11 && !memcmp(ln + p1, "unisacc.com", 11)) ||
+                             (e1 - p1 == 16 && !memcmp(ln + p1, "unisacc-next.com", 16)))) {
+                            hit_cand = 1;
+                        }
+                        if (!memcmp(ln + p0, slice_sha, 64) &&
+                            ((e1 - p1 == 15 && !memcmp(ln + p1, "slice-win-arm64", 15)) ||
+                             (e1 - p1 == 19 && !memcmp(ln + p1, "slice-win-arm64.exe", 19)))) {
+                            hit_arm = 1;
+                        }
+                    }
+                }
+            }
+        }
+        i = (e < n) ? e + 1L : n;
+    }
+    mm_free(buf);
+    if (man_proven != 1 || hit_cand < 1 || hit_arm < 1) {
+        sy_eprintf("REFUSE manifest-provenance-incomplete\tproven=%d\tcand=%d\tarm64=%d\n",
+                   man_proven, hit_cand, hit_arm);
+        return 1;
+    }
+    sy_printf("MANIFEST_OK\tcandidate_sha=%s\tslice_sha=%s\n", cand_sha, slice_sha);
+    return 0;
+}
+
+static int cmd_release_version(int argc, char **argv) {
+    const char *path = wrs_opt(argc, argv, "--path");
+    char ver[32];
+    if (!path || !path[0]) path = "release/candidate.tsv";
+    if (rv_load(path, ver) != 0) {
+        sy_eprintf("REFUSE release-version-unreadable\n");
+        return 1;
+    }
+    sy_printf("%s\n", ver);
+    return 0;
+}
+
 static int cmd_self_check(void) {
     wrs_pe_info_t pe;
     int av_risk = 0, bad = 0;
@@ -1281,6 +1627,9 @@ int main(int argc, char **argv) {
     }
     if (wrs_has_flag(argc, argv, "--make-neg-pe")) return cmd_make_neg_pe(argc, argv);
     if (wrs_has_flag(argc, argv, "--check-host-arch")) return cmd_check_host_arch(argc, argv);
+    if (wrs_has_flag(argc, argv, "--verify-receipt")) return cmd_verify_receipt(argc, argv);
+    if (wrs_has_flag(argc, argv, "--verify-manifest")) return cmd_verify_manifest(argc, argv);
+    if (wrs_has_flag(argc, argv, "--print-release-version")) return cmd_release_version(argc, argv);
     if (wrs_has_flag(argc, argv, "--seal")) return cmd_seal(argc, argv);
     if (wrs_has_flag(argc, argv, "--judge")) return cmd_judge(argc, argv);
     if (argc == 1 || (argc == 2 && !strcmp(argv[1], "--")) || wrs_has_flag(argc, argv, "--self-check")) {

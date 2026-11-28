@@ -15,7 +15,7 @@
  *      --judge --mode negative, mandatory --candidate-pe refusal, forged PASS block, and
  *      arm64 pe-meta digest / PE hash mismatch refusals.
  *   6. v3 receipt tamper matrix (output, inputs/locators, v2 downgrade, O_NOFOLLOW symlink/FIFO).
- *   7. CI workflow contract check + awk TSV rc_v3 validator + release consumer chain
+ *   7. CI workflow contract check + cx rc_v3 receipt/manifest validators + release consumer chain
  *      (tools/ci-verdict.cx --workflow win-runtime-smoke.yml -> tools/release-decide.cx).
  */
 #pragma unisa use cxlib.receipt
@@ -773,7 +773,7 @@ int main(void) {
     {
         unsigned char *wb = 0;
         int64_t wn = 0;
-        int wok = 0, awk_ok = 0, rel_ok = 0;
+        int wok = 0, rel_ok = 0;
         if (sy_read_file(".github/workflows/win-runtime-smoke.yml", &wb, &wn, 65536) == 0 && wb) {
             const char *s = (const char *)wb;
             wok = (strstr(s, "workflow_call:") != 0 &&
@@ -791,6 +791,11 @@ int main(void) {
                    strstr(s, "--make-neg-pe") != 0 &&
                    strstr(s, "--mode negative") != 0 &&
                    strstr(s, "release-step7.tsv") != 0 &&
+                   strstr(s, "--verify-receipt") != 0 &&
+                   strstr(s, "--verify-manifest") != 0 &&
+                   strstr(s, "--print-release-version") != 0 &&
+                   strstr(s, "awk") == 0 &&
+                   strstr(s, "sed") == 0 &&
                    strstr(s, "tools/ci-verdict.cx") != 0 &&
                    strstr(s, "tools/release-decide.cx") != 0 &&
                    strstr(s, "degrade") == 0 &&
@@ -800,31 +805,78 @@ int main(void) {
         }
         ck(wok, "ci-workflow-resident-gate-contract");
 
-        /* Test strict awk TSV v3 parser (valid rc_v3 passes; duplicate/wrong producer fails) */
+        /* Test strict cx rc_v3 parser (--verify-receipt & --verify-manifest): valid passes; tampered/wrong fails */
         {
-            char ch_ok[4400], ch_bad[4400], sh_awk[4096];
+            char ch_ok[4400], ch_bad[4400], ch_dup[4400], man_ok[4400], man_bad[4400], rver[4400];
+            char arm_sh[65], pkg_sh[65], man_txt[1024], man_bad_txt[1024];
             rc_v3_t cv3;
+            int k, vrc_ok = 0, r1 = 0, r2 = 0, r3 = 0, r4 = 0, m1 = 0, m2 = 0, rv1 = 0;
+            for (k = 0; k < 64; k++) { arm_sh[k] = 'c'; pkg_sh[k] = 'd'; }
+            arm_sh[64] = 0; pkg_sh[64] = 0;
             (void)cx_fmt(ch_ok, sizeof ch_ok, "%s/chain-ok.rcpt", tmp);
             (void)cx_fmt(ch_bad, sizeof ch_bad, "%s/chain-bad.rcpt", tmp);
+            (void)cx_fmt(ch_dup, sizeof ch_dup, "%s/chain-dup.rcpt", tmp);
+            (void)cx_fmt(man_ok, sizeof man_ok, "%s/man-ok.txt", tmp);
+            (void)cx_fmt(man_bad, sizeof man_bad, "%s/man-bad.txt", tmp);
+            (void)cx_fmt(rver, sizeof rver, "%s/cand.tsv", tmp);
             cv3.run_id = "chain-1"; cv3.rev = rev; cv3.unit = "candidate-ape"; cv3.target = "lnx/x86_64";
             cv3.producer = "candidate-chain"; cv3.purpose = "chain-ape";
             cv3.candidate_sha = cand_sha; cv3.inputs_sha = cand_sha; cv3.output_sha = cand_sha;
             cv3.rc = 0; cv3.verdict = "PASS"; cv3.ts = 1764200100;
             if (rc_write3(ch_ok, &cv3) == 0) {
+                char *av1[] = {bin, "--verify-receipt", "--receipt", ch_ok, "--rev", rev, "--candidate-sha", cand_sha, 0};
+                r1 = (wrg_run_merged(av1, 20, out, (int)sizeof out) == 0 && strstr(out, "CHAIN_FORMAT=rc_v3") != 0);
                 cv3.producer = "wrong-prod";
-                (void)rc_write3(ch_bad, &cv3);
-                (void)cx_fmt(sh_awk, sizeof sh_awk,
-                             "sed -n '/^          awk -v want_rev/,/^          echo \"CHAIN_FORMAT=rc_v3\"/p' .github/workflows/win-runtime-smoke.yml > %s/v3.sh && "
-                             "SOURCE_COMMIT=%s CANDIDATE_SHA256=%s CHAIN_FILE=%s sh -e %s/v3.sh && "
-                             "! SOURCE_COMMIT=%s CANDIDATE_SHA256=%s CHAIN_FILE=%s sh -e %s/v3.sh",
-                             tmp, rev, cand_sha, ch_ok, tmp, rev, cand_sha, ch_bad, tmp);
-                {
-                    char *avw[] = {"sh", "-c", sh_awk, 0};
-                    awk_ok = (wrg_run_merged(avw, 20, out, (int)sizeof out) == 0 &&
-                              strstr(out, "CHAIN_FORMAT=rc_v3") != 0);
+                if (rc_write3(ch_bad, &cv3) == 0) {
+                    char *av2[] = {bin, "--verify-receipt", "--receipt", ch_bad, "--rev", rev, "--candidate-sha", cand_sha, 0};
+                    r2 = (wrg_run_merged(av2, 20, out, (int)sizeof out) != 0);
                 }
+                {
+                    unsigned char *rb = 0;
+                    int64_t rn = 0;
+                    if (sy_read_file(ch_ok, &rb, &rn, 65536) == 0 && rb && rn > 0) {
+                        char *dup_buf = (char *)mm_alloc((long)rn + 64L);
+                        if (dup_buf) {
+                            (void)mm_copy(dup_buf, (long)rn + 64L, (const char *)rb, (long)rn);
+                            (void)cx_fmt(dup_buf + rn, 64L, "producer\tcandidate-chain\n");
+                            if (sy_write_atomic(ch_dup, dup_buf, (long)rn + (long)strlen(dup_buf + rn), 0600) == 0) {
+                                char *av3[] = {bin, "--verify-receipt", "--receipt", ch_dup, "--rev", rev, "--candidate-sha", cand_sha, 0};
+                                r3 = (wrg_run_merged(av3, 20, out, (int)sizeof out) != 0);
+                            }
+                            mm_free(dup_buf);
+                        }
+                        mm_free(rb);
+                    }
+                    if (sy_read_file(ch_ok, &rb, &rn, 65536) == 0 && rb && rn > 20) {
+                        rb[rn - 2] = (rb[rn - 2] == (unsigned char)'a') ? (unsigned char)'b' : (unsigned char)'a';
+                        if (sy_write_atomic(ch_bad, (const char *)rb, (long)rn, 0600) == 0) {
+                            char *av4[] = {bin, "--verify-receipt", "--receipt", ch_bad, "--rev", rev, "--candidate-sha", cand_sha, 0};
+                            r4 = (wrg_run_merged(av4, 20, out, (int)sizeof out) != 0);
+                        }
+                        mm_free(rb);
+                    }
+                }
+                if (cx_fmt(man_txt, sizeof man_txt,
+                           "unisacc-next.com\tsha=%s\nwin/arm64\tsha=%s\n", cand_sha, arm_sh) == 0 &&
+                    sy_write_atomic(man_ok, man_txt, (long)strlen(man_txt), 0644) == 0) {
+                    char *am1[] = {bin, "--verify-manifest", "--manifest", man_ok, "--man-proven", "1",
+                                   "--rev", rev, "--candidate-sha", cand_sha, "--slice-sha", arm_sh, "--pkg-sha", pkg_sh, 0};
+                    m1 = (wrg_run_merged(am1, 20, out, (int)sizeof out) == 0 && strstr(out, "MANIFEST_OK") != 0);
+                }
+                if (cx_fmt(man_bad_txt, sizeof man_bad_txt,
+                           "unisacc-next.com\tsha=%s\nwin/arm64\tsha=%s\n", cand_sha, pkg_sh) == 0 &&
+                    sy_write_atomic(man_bad, man_bad_txt, (long)strlen(man_bad_txt), 0644) == 0) {
+                    char *am2[] = {bin, "--verify-manifest", "--manifest", man_bad, "--man-proven", "1",
+                                   "--rev", rev, "--candidate-sha", cand_sha, "--slice-sha", arm_sh, "--pkg-sha", pkg_sh, 0};
+                    m2 = (wrg_run_merged(am2, 20, out, (int)sizeof out) != 0);
+                }
+                if (sy_write_atomic(rver, "repo\tcommit\tversion\nr\tc\t0.1.10\n", 30, 0644) == 0) {
+                    char *arv[] = {bin, "--print-release-version", "--path", rver, 0};
+                    rv1 = (wrg_run_merged(arv, 20, out, (int)sizeof out) == 0 && strstr(out, "0.1.10") != 0);
+                }
+                vrc_ok = r1 && r2 && r3 && r4 && m1 && m2 && rv1;
             }
-            ck(awk_ok, "ci-chain-v3-awk-tsv-validator");
+            ck(vrc_ok, "ci-chain-v3-receipt-and-manifest-validator");
         }
 
         /* Real consumer gate: tools/ci-verdict.cx --workflow win-runtime-smoke.yml -> tools/release-decide.cx STEP 7 */

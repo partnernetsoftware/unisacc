@@ -145,103 +145,82 @@ jobs:
           done
           test "$(git rev-parse HEAD)" = "$SOURCE_COMMIT"
 
-          REPO_ESC="$(printf '%s' "$REPO" | sed 's/[.[\*^$+?(){}|\\]/\\&/g')"
-          REL_RE="^https://github\\.com/${REPO_ESC}/releases/download/[^/]+/[^/]+$"
-          API_RE="^https://api\\.github\\.com/repos/${REPO_ESC}/releases/assets/[0-9]+$"
-          RAW_RE="^https://raw\\.githubusercontent\\.com/${REPO_ESC}/${SOURCE_COMMIT}/[^/].*$"
+          file_sha256() {
+            set -- $(sha256sum "$1")
+            printf '%s' "$1"
+          }
 
           download_repo_scoped() {
             url="$1"; out_file="$2"; want_sha="$3"; allow_raw="$4"
-            if printf '%s' "$url" | grep -Eq "$REL_RE"; then
-              rest="${url#https://github.com/${REPO}/releases/download/}"
-              tag="${rest%%/*}"; asset="${rest#*/}"
-              api_dig="$(gh api "repos/${REPO}/releases/tags/${tag}" --jq ".assets[] | select(.name == \"${asset}\") | .digest")"
-              printf '%s' "$api_dig" | grep -Eq '^sha256:[0-9a-f]+$'
-              test "${#api_dig}" -eq 71
-              if [ -n "$want_sha" ]; then test "$api_dig" = "sha256:${want_sha}"; fi
-              gh release download "$tag" -R "$REPO" -p "$asset" -D win-runtime-baseline/dl --clobber
-              mv "win-runtime-baseline/dl/$asset" "$out_file"
-              test "sha256:$(sha256sum "$out_file" | awk '{print $1}')" = "$api_dig"
-            elif printf '%s' "$url" | grep -Eq "$API_RE"; then
-              aid="${url##*/}"
-              api_dig="$(gh api "repos/${REPO}/releases/assets/${aid}" --jq ".digest")"
-              printf '%s' "$api_dig" | grep -Eq '^sha256:[0-9a-f]+$'
-              test "${#api_dig}" -eq 71
-              if [ -n "$want_sha" ]; then test "$api_dig" = "sha256:${want_sha}"; fi
-              gh api -H "Accept: application/octet-stream" "repos/${REPO}/releases/assets/${aid}" > "$out_file"
-              test "sha256:$(sha256sum "$out_file" | awk '{print $1}')" = "$api_dig"
-            elif [ "$allow_raw" = "1" ] && printf '%s' "$url" | grep -Eq "$RAW_RE"; then
-              rel_path="${url#https://raw.githubusercontent.com/${REPO}/${SOURCE_COMMIT}/}"
-              test -f "$rel_path"
-              curl --proto '=https' --max-redirs 0 -fsS -o "$out_file" -- "$url"
-              got_dl="$(sha256sum "$out_file" | awk '{print $1}')"
-              test "$got_dl" = "$(sha256sum "$rel_path" | awk '{print $1}')"
-              if [ -n "$want_sha" ]; then test "$got_dl" = "$want_sha"; fi
-            else
-              echo "REFUSE untrusted URL outside repo provenance: $url" >&2
-              return 1
-            fi
+            case "$url" in
+              "https://github.com/${REPO}/releases/download/"*)
+                rest="${url#https://github.com/${REPO}/releases/download/}"
+                tag="${rest%%/*}"; asset="${rest#*/}"
+                test -n "$tag" && test -n "$asset"
+                case "$tag/$asset" in *..* ) return 1 ;; esac
+                case "$asset" in */* ) return 1 ;; esac
+                api_dig="$(gh api "repos/${REPO}/releases/tags/${tag}" --jq ".assets[] | select(.name == \"${asset}\") | .digest")"
+                printf '%s' "$api_dig" | grep -Eq '^sha256:[0-9a-f]+$'
+                test "${#api_dig}" -eq 71
+                if [ -n "$want_sha" ]; then test "$api_dig" = "sha256:${want_sha}"; fi
+                gh release download "$tag" -R "$REPO" -p "$asset" -D win-runtime-baseline/dl --clobber
+                mv "win-runtime-baseline/dl/$asset" "$out_file"
+                test "sha256:$(file_sha256 "$out_file")" = "$api_dig"
+                ;;
+              "https://api.github.com/repos/${REPO}/releases/assets/"*)
+                aid="${url#https://api.github.com/repos/${REPO}/releases/assets/}"
+                printf '%s' "$aid" | grep -Eq '^[0-9]+$'
+                api_dig="$(gh api "repos/${REPO}/releases/assets/${aid}" --jq ".digest")"
+                printf '%s' "$api_dig" | grep -Eq '^sha256:[0-9a-f]+$'
+                test "${#api_dig}" -eq 71
+                if [ -n "$want_sha" ]; then test "$api_dig" = "sha256:${want_sha}"; fi
+                gh api -H "Accept: application/octet-stream" "repos/${REPO}/releases/assets/${aid}" > "$out_file"
+                test "sha256:$(file_sha256 "$out_file")" = "$api_dig"
+                ;;
+              "https://raw.githubusercontent.com/${REPO}/${SOURCE_COMMIT}/"*)
+                test "$allow_raw" = "1"
+                rel_path="${url#https://raw.githubusercontent.com/${REPO}/${SOURCE_COMMIT}/}"
+                test -n "$rel_path" && test -f "$rel_path"
+                curl --proto '=https' --max-redirs 0 -fsS -o "$out_file" -- "$url"
+                got_dl="$(file_sha256 "$out_file")"
+                test "$got_dl" = "$(file_sha256 "$rel_path")"
+                if [ -n "$want_sha" ]; then test "$got_dl" = "$want_sha"; fi
+                ;;
+              *)
+                echo "REFUSE untrusted URL outside repo provenance: $url" >&2
+                return 1
+                ;;
+            esac
           }
 
-          # (1) Strict TSV parser for candidate-chain.rcpt: one complete rc_v3 record, right producer/purpose, PASS/rc=0, binding_sha
-          download_repo_scoped "$CANDIDATE_RECEIPT_URL" win-runtime-baseline/candidate-chain.rcpt "$CANDIDATE_RECEIPT_SHA256" "1"
-          CHAIN_FILE="win-runtime-baseline/candidate-chain.rcpt"
-          awk -v want_rev="$SOURCE_COMMIT" -v want_sha="$CANDIDATE_SHA256" '
-          BEGIN { bad = 0; rc_n = 0; other_lines = 0; }
-          function is_hex_nz(s, n) {
-            return length(s) == n && s ~ /^[0-9a-f]+$/ && s !~ /^0+$/;
-          }
-          function is_id(s) {
-            return length(s) > 0 && s !~ /[\t \r\n]/;
-          }
-          /\r$/ { bad = 1; exit 1 }
-          {
-            if ($0 == "" || $0 ~ /^#/) next;
-            if (split($0, f, "\t") == 2) {
-              k = f[1]; v = f[2];
-              if (k == "version" || k == "run_id" || k == "rev" || k == "unit" || k == "target" ||
-                  k == "producer" || k == "purpose" || k == "candidate_sha" || k == "inputs_sha" ||
-                  k == "output_sha" || k == "rc" || k == "verdict" || k == "ts" || k == "binding_sha") {
-                if (k in rc_seen) { bad = 1; exit 1 }
-                rc_seen[k] = v;
-                rc_n++;
-                next;
-              }
-            }
-            other_lines++;
-          }
-          END {
-            if (bad || other_lines != 0 || rc_n != 14) exit 1;
-            if (rc_seen["version"] != "3") exit 1;
-            if (!is_id(rc_seen["run_id"]) || !is_hex_nz(rc_seen["rev"], 40) || rc_seen["rev"] != want_rev) exit 1;
-            if (!is_id(rc_seen["unit"]) || !is_id(rc_seen["target"])) exit 1;
-            if (rc_seen["producer"] != "candidate-chain" || rc_seen["purpose"] != "chain-ape") exit 1;
-            if (!is_hex_nz(rc_seen["candidate_sha"], 64) || rc_seen["candidate_sha"] != want_sha) exit 1;
-            if (!is_hex_nz(rc_seen["inputs_sha"], 64) || !is_hex_nz(rc_seen["output_sha"], 64)) exit 1;
-            if (rc_seen["rc"] != "0" || rc_seen["verdict"] != "PASS") exit 1;
-            if ((rc_seen["ts"] + 0) <= 0 || !is_hex_nz(rc_seen["binding_sha"], 64)) exit 1;
-          }' "$CHAIN_FILE"
-          GOT_CBIND="$(awk -F'\t' '$1=="binding_sha"{print $2}' "$CHAIN_FILE")"
-          EXP_CBIND="$(awk -F'\t' '{m[$1]=$2} END{printf "version\t3\nrun_id\t%s\nrev\t%s\nunit\t%s\ntarget\t%s\nproducer\t%s\npurpose\t%s\ncandidate_sha\t%s\ninputs_sha\t%s\noutput_sha\t%s\nrc\t%s\nverdict\t%s\nts\t%s\n", m["run_id"], m["rev"], m["unit"], m["target"], m["producer"], m["purpose"], m["candidate_sha"], m["inputs_sha"], m["output_sha"], m["rc"], m["verdict"], m["ts"]}' "$CHAIN_FILE" | sha256sum | awk '{print $1}')"
-          test "$GOT_CBIND" = "$EXP_CBIND"
-          echo "CHAIN_FORMAT=rc_v3"
-          CHAIN_IN_SHA="$(awk -F'\t' '$1=="inputs_sha"{print $2}' "$CHAIN_FILE")"
-          CHAIN_OUT_SHA="$(awk -F'\t' '$1=="output_sha"{print $2}' "$CHAIN_FILE")"
-
-          download_repo_scoped "$CANDIDATE_URL" win-runtime-baseline/candidate-unisacc.com "$CANDIDATE_SHA256" "0"
-          download_repo_scoped "$SLICE_ARM64_URL" win-runtime-baseline/slice-win-arm64.exe "$SLICE_ARM64_SHA256" "0"
           TRUSTED_LAUNCHER_SHA="ed50199fd085be4da2fa692db8010057be6674f8bfc609b101e8d18daf23583f"
           download_repo_scoped "https://github.com/${REPO}/releases/download/v0.1.6/unisacc.com" win-runtime-baseline/trusted-unisacc.com "$TRUSTED_LAUNCHER_SHA" "0"
           chmod +x win-runtime-baseline/trusted-unisacc.com
 
-          GOT_SHA="$(sha256sum win-runtime-baseline/candidate-unisacc.com | awk '{print $1}')"
+          # (1) Strict cx rc_v3 receipt parser + binding_sha recompute (pure cx verifier in workflow)
+          download_repo_scoped "$CANDIDATE_RECEIPT_URL" win-runtime-baseline/candidate-chain.rcpt "$CANDIDATE_RECEIPT_SHA256" "1"
+          CHAIN_INFO="$(sh win-runtime-baseline/trusted-unisacc.com tools/check-win-runtime-smoke.cx -- \
+            --verify-receipt --receipt win-runtime-baseline/candidate-chain.rcpt \
+            --rev "$SOURCE_COMMIT" --candidate-sha "$CANDIDATE_SHA256" \
+            --producer candidate-chain --purpose chain-ape --expect-rc 0 --expect-verdict PASS)"
+          printf '%s\n' "$CHAIN_INFO"
+          printf '%s\n' "$CHAIN_INFO" | grep -qx 'CHAIN_FORMAT=rc_v3'
+          CHAIN_IN_SHA="$(printf '%s\n' "$CHAIN_INFO" | grep -m1 '^CHAIN_INPUTS_SHA=')"
+          CHAIN_IN_SHA="${CHAIN_IN_SHA#CHAIN_INPUTS_SHA=}"
+          CHAIN_OUT_SHA="$(printf '%s\n' "$CHAIN_INFO" | grep -m1 '^CHAIN_OUTPUT_SHA=')"
+          CHAIN_OUT_SHA="${CHAIN_OUT_SHA#CHAIN_OUTPUT_SHA=}"
+
+          download_repo_scoped "$CANDIDATE_URL" win-runtime-baseline/candidate-unisacc.com "$CANDIDATE_SHA256" "0"
+          download_repo_scoped "$SLICE_ARM64_URL" win-runtime-baseline/slice-win-arm64.exe "$SLICE_ARM64_SHA256" "0"
+
+          GOT_SHA="$(file_sha256 win-runtime-baseline/candidate-unisacc.com)"
           test "$GOT_SHA" = "$CANDIDATE_SHA256"
           test "$GOT_SHA" != "$TRUSTED_LAUNCHER_SHA"
 
           # (3a) Extract pkg.bin directly from verified candidate APE and assert SHA matches PKG_BIN_SHA256
           sh win-runtime-baseline/trusted-unisacc.com tools/check-win-runtime-smoke.cx -- \
             --extract-ape-pkg --ape win-runtime-baseline/candidate-unisacc.com --out-pkg win-runtime-baseline/pkg.bin
-          GOT_PKG_SHA="$(sha256sum win-runtime-baseline/pkg.bin | awk '{print $1}')"
+          GOT_PKG_SHA="$(file_sha256 win-runtime-baseline/pkg.bin)"
           test "$GOT_PKG_SHA" = "$PKG_BIN_SHA256"
           if [ -n "$PKG_BIN_URL" ]; then
             download_repo_scoped "$PKG_BIN_URL" win-runtime-baseline/pkg.asset.bin "$PKG_BIN_SHA256" "0"
@@ -249,7 +228,7 @@ jobs:
             rm -f win-runtime-baseline/pkg.asset.bin
           fi
 
-          # (3b) Prove slice-win-arm64 provenance via verified chain manifest (ape-receipt / pack-inputs / SHA256SUMS / candidate.tsv)
+          # (3b) Prove slice-win-arm64 provenance via verified chain manifest (cx verifier)
           MANIFEST_URL="$CHAIN_MANIFEST_URL"
           if [ -z "$MANIFEST_URL" ]; then
             case "$CANDIDATE_RECEIPT_URL" in
@@ -258,47 +237,31 @@ jobs:
                 ;;
             esac
           fi
-          if [ -z "$MANIFEST_URL" ] && printf '%s' "$CANDIDATE_URL" | grep -Eq "$REL_RE"; then
-            MANIFEST_URL="${CANDIDATE_URL%/*}/SHA256SUMS"
+          if [ -z "$MANIFEST_URL" ]; then
+            case "$CANDIDATE_URL" in
+              "https://github.com/${REPO}/releases/download/"*)
+                MANIFEST_URL="${CANDIDATE_URL%/*}/SHA256SUMS"
+                ;;
+            esac
           fi
           test -n "$MANIFEST_URL"
           download_repo_scoped "$MANIFEST_URL" win-runtime-baseline/chain-manifest.txt "" "1"
-          MAN_SHA="$(sha256sum win-runtime-baseline/chain-manifest.txt | awk '{print $1}')"
+          MAN_SHA="$(file_sha256 win-runtime-baseline/chain-manifest.txt)"
           MAN_PROVEN=0
           if [ "$MAN_SHA" = "$CHAIN_OUT_SHA" ] || [ "$MAN_SHA" = "$CHAIN_IN_SHA" ]; then
             MAN_PROVEN=1
-          elif printf '%s' "$MANIFEST_URL" | grep -Eq "${REL_RE}" && [ "${MANIFEST_URL##*/}" = "SHA256SUMS" ]; then
-            MAN_PROVEN=1
+          else
+            case "$MANIFEST_URL" in
+              "https://github.com/${REPO}/releases/download/"*/SHA256SUMS)
+                MAN_PROVEN=1
+                ;;
+            esac
           fi
-          awk -v man_proven="$MAN_PROVEN" -v cand_sha="$CANDIDATE_SHA256" -v arm_sha="$SLICE_ARM64_SHA256" -v pkg_sha="$PKG_BIN_SHA256" -v src_rev="$SOURCE_COMMIT" '
-          BEGIN { hit_cand = 0; hit_arm = 0; is_cand_tsv = 0; bad = 0; }
-          /\r$/ { bad = 1; exit 1 }
-          NR == 1 && index($0, "\tape_sha256\t") > 0 && index($0, "\twin_arm64_sha256\t") > 0 {
-            n = split($0, h, "\t");
-            for (i = 1; i <= n; i++) {
-              if (h[i] == "commit") c_rev = i;
-              if (h[i] == "ape_sha256") c_ape = i;
-              if (h[i] == "win_arm64_sha256") c_arm = i;
-              if (h[i] == "package_sha256") c_pkg = i;
-            }
-            if (!c_rev || !c_ape || !c_arm || !c_pkg) { bad = 1; exit 1 }
-            is_cand_tsv = 1; next;
-          }
-          is_cand_tsv {
-            n = split($0, f, "\t");
-            if (f[c_rev] == src_rev && f[c_ape] == cand_sha && f[c_arm] == arm_sha && f[c_pkg] == pkg_sha) {
-              hit_cand = 1; hit_arm = 1; man_proven = 1;
-            }
-            next;
-          }
-          $1 == "win/arm64" && index($0, "sha=" arm_sha) > 0 { hit_arm = 1 }
-          $1 == "unisacc-next.com" && index($0, "sha=" cand_sha) > 0 { hit_cand = 1 }
-          $1 == "PACK_INPUT" && $2 == "win/arm64" && index($0, "sha=" arm_sha) > 0 { hit_arm = 1 }
-          $1 == cand_sha && ($2 == "unisacc.com" || $2 == "unisacc-next.com") { hit_cand = 1 }
-          $1 == arm_sha && ($2 == "slice-win-arm64" || $2 == "slice-win-arm64.exe") { hit_arm = 1 }
-          END {
-            if (bad || man_proven != 1 || hit_cand < 1 || hit_arm < 1) exit 1;
-          }' win-runtime-baseline/chain-manifest.txt
+          sh win-runtime-baseline/trusted-unisacc.com tools/check-win-runtime-smoke.cx -- \
+            --verify-manifest --manifest win-runtime-baseline/chain-manifest.txt \
+            --man-proven "$MAN_PROVEN" --rev "$SOURCE_COMMIT" \
+            --candidate-sha "$CANDIDATE_SHA256" --slice-sha "$SLICE_ARM64_SHA256" \
+            --pkg-sha "$PKG_BIN_SHA256"
 
           rm -rf win-runtime-baseline/dl
           printf '%s\n' "$CANDIDATE_SHA256" > win-runtime-baseline/candidate.sha256
@@ -307,7 +270,8 @@ jobs:
           if [ -n "$REL_VER_IN" ]; then
             printf '%s\n' "$REL_VER_IN" > win-runtime-baseline/release-version.txt
           else
-            awk -F'\t' 'NR==1{for(i=1;i<=NF;i++)if($i=="version")c=i} NR==2&&c>0{print $c}' release/candidate.tsv > win-runtime-baseline/release-version.txt
+            sh win-runtime-baseline/trusted-unisacc.com tools/check-win-runtime-smoke.cx -- \
+              --print-release-version --path release/candidate.tsv > win-runtime-baseline/release-version.txt
           fi
           test -s win-runtime-baseline/release-version.txt
           date +%s > win-runtime-baseline/dispatch_ts.txt
@@ -588,7 +552,8 @@ jobs:
         run: |
           set -eu
           TRUSTED_LAUNCHER_SHA="ed50199fd085be4da2fa692db8010057be6674f8bfc609b101e8d18daf23583f"
-          GOT_LSHA="$(sha256sum win-runtime-baseline/trusted-unisacc.com | awk '{print $1}')"
+          set -- $(sha256sum win-runtime-baseline/trusted-unisacc.com)
+          GOT_LSHA="$1"
           test "$GOT_LSHA" = "$TRUSTED_LAUNCHER_SHA"
           CAND_SHA="$(cat win-runtime-baseline/candidate.sha256)"
           test "$GOT_LSHA" != "$CAND_SHA"
