@@ -202,6 +202,25 @@ static int cpd_run_r1b(void) {
         ck(ok, "r1b.missing-trusted-anchors-fails-closed");
     }
 
+    /* (8) Stale origin/main (older than the ownership policy, 8-column table) must not disable the gate:
+     * the old-format anchor is skipped and main supplies the policy. */
+    {
+        char r6[CPD_PW]; int ok = 0;
+        if (!cx_fmt(r6, sizeof r6, "%s/r6", tmp) && !sy_mkdir_all(r6, 0700) &&
+            cpd_r1b_prep(cwd, r6, out) &&
+            !cx_fmt(cmd, sizeof cmd,
+                "cd '%s' && base=$(git rev-parse HEAD) && "
+                "sed -i 's/\\tintegrator$//' exec/facts/derive.tsv && git commit -qam oldfmt --no-verify && "
+                "git update-ref refs/remotes/origin/main HEAD && git checkout -q $base -- exec/facts/derive.tsv && "
+                "git commit -qam newfmt --no-verify && git update-ref refs/heads/main HEAD && "
+                "git checkout -qb w/alice-stale && printf 'row8\\n' >> build/links.tsv && git add build/links.tsv && "
+                "unset UNISA_CONTAINER UNISACC_CONTAINER && UNISACC_PRECOMMIT_SERIAL=1 sh ./unisacc.com '%s/tools/precommit.cx'", r6, cwd)) {
+            int rc = ckk_sh("check-precommit-derive", cmd, out, CPD_OUT);
+            ok = (rc != 0 && ckk_has(out, CPD_OUT, "derived-owner-refused"));
+        }
+        ck(ok, "r1b.stale-origin-main-anchor-does-not-disable-ownership");
+    }
+
     { char *rmv[] = {"rm", "-rf", tmp, 0}; (void)ck_run(rmv, out, CPD_OUT); }
     printf("CHECK_R1_DERIVED_GATE\tok=%d\tfailed=%d\tms=%ld\n", ck_assertions() - ck_failures(), ck_failures(), sy_now_ms() - t0);
     return ck_failures() ? 1 : 0;
