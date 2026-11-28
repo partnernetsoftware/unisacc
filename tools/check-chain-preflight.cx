@@ -572,8 +572,52 @@ int main(void) {
 
         cx_fmt(arg, sizeof arg, "--shard badshard --table %s --root %s --repo %s --snap-base %s --rev %s", t_snap_fail, root_ok, p2repo, snap_base, ok_sha);
         ck(run_pf(arg, out, sizeof out) == 2 &&
-           has(out, "REFUSE\tCHAIN_PREFLIGHT\treason=bad-shard\tshard=badshard\tavailable=all,sixtarget,snap"),
+           has(out, "REFUSE\tCHAIN_PREFLIGHT\treason=bad-shard\tshard=badshard\tavailable=all,sixtarget,sixtarget-a,sixtarget-b,snap"),
            "shard-unknown-name-refused-rc2", out);
+
+        /* 17b. sixtarget-a union sixtarget-b equals sixtarget exactly (disjoint partition of all non-snap table nodes) */
+        {
+            char t_part[1200], oa[16384], ob[16384];
+            const char *ptxt =
+                "name\tpatterns\tcmd\ttimeout_s\n"
+                "root-types\t*\tbuiltin\t10\n"
+                "snap-cache-types\t*\tbuiltin\t10\n"
+                "parse2-bind\t*\tbuiltin\t30\n"
+                "sixtarget-headers\tsrc/\ttrue\t10\n"
+                "sys-six-target-0\tcx/sys/\ttrue\t10\n"
+                "sys-six-target-1\tcx/sys/\ttrue\t10\n"
+                "sys-six-target-2\tcx/sys/\ttrue\t10\n"
+                "sys-six-target-3\tcx/sys/\ttrue\t10\n"
+                "template-compile\tcx/\ttrue\t10\n"
+                "sourcepackage-pins\tbuild/\ttrue\t10\n"
+                "chain-to-snap\ttools/\tfalse\t10\n";
+            cx_fmt(t_part, sizeof t_part, "%s/sixtarget-partition.tsv", fx);
+            if (!cx_write(t_part, ptxt, strlen(ptxt))) {
+                cx_fmt(arg, sizeof arg, "--shard sixtarget-a --table %s --root %s --repo %s --snap-base %s --rev %s", t_part, root_ok, p2repo, snap_base, ok_sha);
+                int rca = run_pf(arg, oa, sizeof oa);
+                cx_fmt(arg, sizeof arg, "--shard sixtarget-b --table %s --root %s --repo %s --snap-base %s --rev %s", t_part, root_ok, p2repo, snap_base, ok_sha);
+                int rcb = run_pf(arg, ob, sizeof ob);
+                int a_exact = has(oa, "PREFLIGHT_ITEM\tsixtarget-headers\tPASS\t") &&
+                              has(oa, "PREFLIGHT_ITEM\tsys-six-target-0\tPASS\t") &&
+                              has(oa, "PREFLIGHT_ITEM\ttemplate-compile\t") &&
+                              has(oa, "PREFLIGHT_ITEM\tsourcepackage-pins\tPASS\t") &&
+                              !has(oa, "PREFLIGHT_ITEM\tsys-six-target-1\t") &&
+                              !has(oa, "PREFLIGHT_ITEM\tsys-six-target-2\t") &&
+                              !has(oa, "PREFLIGHT_ITEM\tsys-six-target-3\t") &&
+                              !has(oa, "PREFLIGHT_ITEM\tchain-to-snap\t") &&
+                              has(oa, "nodes=7\t") && has(oa, "\tshard=sixtarget-a");
+                int b_exact = !has(ob, "PREFLIGHT_ITEM\tsixtarget-headers\t") &&
+                              !has(ob, "PREFLIGHT_ITEM\tsys-six-target-0\t") &&
+                              !has(ob, "PREFLIGHT_ITEM\ttemplate-compile\t") &&
+                              !has(ob, "PREFLIGHT_ITEM\tsourcepackage-pins\t") &&
+                              has(ob, "PREFLIGHT_ITEM\tsys-six-target-1\tPASS\t") &&
+                              has(ob, "PREFLIGHT_ITEM\tsys-six-target-2\tPASS\t") &&
+                              has(ob, "PREFLIGHT_ITEM\tsys-six-target-3\tPASS\t") &&
+                              !has(ob, "PREFLIGHT_ITEM\tchain-to-snap\t") &&
+                              has(ob, "nodes=6\t") && has(ob, "\tshard=sixtarget-b");
+                ck((rca == 0 || rca == 1) && rcb == 0 && a_exact && b_exact, "shard-sixtarget-ab-union-equals-sixtarget", oa);
+            }
+        }
 
         ck(run_pf("--shard", out, sizeof out) == 2,
            "shard-missing-value-refused-rc2", out);

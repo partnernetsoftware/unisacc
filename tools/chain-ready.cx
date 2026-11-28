@@ -108,6 +108,8 @@
 #pragma unisa use cxlib.pik1
 #pragma unisa use sys.posix
 #pragma unisa use cxlib.receipt
+#pragma unisa use cxlib.runneridentity
+#pragma unisa use cxlib.tlibpkg
 
 #define UC "./unisacc.com" /* lint:allow R1 tool runs sibling tools under the installed product, like tools/ratchets.cx */
 #define MAXJ 96
@@ -2988,6 +2990,52 @@ static int cmd_prepare(const char *repo, const char *helper_out) {
         }
     }
     printf("CHAIN_READY_PREPARE_STEP\tstep=table-index\tstatus=PREPARED\taction=%s\n", ti_act);
+    {
+        char cdir[4096], cid[65], bdir[4200], cbin[4400], ccert[4500], ctmp[4500], ctmpc[4600], kdir[4200], tprep[4400], rwhy[256] = {0}, hex[66];
+        const char *cc_act = "reused";
+        int cunits = 0;
+        if (!cx_fmt(cdir, sizeof cdir, "%s/unisacc-cr-prep-cache", sy_tmpdir()) &&
+            (!sy_mkdir(cdir, 0700) || errno == EEXIST) &&
+            rn_identity(repo, "tools/candidate-chain.cx", cid, &cunits, rwhy, sizeof rwhy) == 0 &&
+            !cx_fmt(bdir, sizeof bdir, "%s/%s", cdir, cid) &&
+            !cx_fmt(cbin, sizeof cbin, "%s/candidate-chain", bdir) &&
+            !cx_fmt(ccert, sizeof ccert, "%s/candidate-chain.sha256", bdir) &&
+            !cx_fmt(ctmp, sizeof ctmp, "%s/.prep-%d", bdir, (int)sy_pid()) &&
+            !cx_fmt(ctmpc, sizeof ctmpc, "%s.sha256", ctmp)) {
+            int hit = 0;
+            if (sy_exists(cbin) == 1 && sy_exists(ccert) == 1) {
+                size_t cn = 0; char *cb = cx_read(ccert, &cn); char nowh[65];
+                if (cb && cn == 65 && cb[64] == '\n' && rn_file_sha(cbin, nowh) == 0 && !memcmp(nowh, cb, 64)) hit = 1;
+                if (cb) mm_free(cb);
+            }
+            if (!hit) {
+                int brc = -1;
+                (void)sy_mkdir(bdir, 0700);
+                if (!tp_kit_dir(repo, kdir, sizeof kdir) && !cx_fmt(tprep, sizeof tprep, "%s/tlib-prep", kdir) && sy_exists(tprep) == 1) {
+                    char *tv[] = {b_abs, "50", tprep, "prep", "tools/candidate-chain.cx", "-o", ctmp, "--root", (char *)repo, 0};
+                    np_result tr = {0}; char twhy[200] = {0};
+                    if (np_run(tv, repo, 0, 52, &tr, twhy, sizeof twhy) == 0 && tr.rc == 0 && sy_exists(ctmp) == 1) brc = 0;
+                    np_free(&tr);
+                }
+                if (brc != 0) {
+                    char *sv[] = {b_abs, "55", "sh", uc_abs, "tools/candidate-chain.cx", "-o", ctmp, 0};
+                    np_result sr = {0}; char swhy[200] = {0};
+                    if (np_run(sv, repo, 0, 57, &sr, swhy, sizeof swhy) == 0 && sr.rc == 0 && sy_exists(ctmp) == 1) brc = 0;
+                    np_free(&sr);
+                }
+                if (brc == 0 && rn_file_sha(ctmp, hex) == 0) {
+                    hex[64] = '\n'; hex[65] = 0;
+                    if (!cx_write(ctmpc, hex, 65) && !sy_rename(ctmp, cbin) && !sy_rename(ctmpc, ccert)) cc_act = "built";
+                    else { (void)sy_unlink(ctmp); (void)sy_unlink(ctmpc); cc_act = "failed"; }
+                } else {
+                    (void)sy_unlink(ctmp);
+                    cc_act = "failed";
+                }
+            }
+            printf("CHAIN_READY_PREPARE_STEP\tstep=candidate-chain-runner\tstatus=%s\taction=%s\tid=%.12s\n",
+                   tx_eqz(cc_act, "failed") ? "FAIL" : "PREPARED", cc_act, cid);
+        }
+    }
     printf("CHAIN_READY_PREPARE\tstatus=PREPARED\thelper=%s\tderive_native=%d/%d\ttable_index=%s\tms=%ld\n",
            ih_path, nshards, nshards, ti_act, sy_now_ms() - t0);
     return 0;
@@ -3583,8 +3631,8 @@ int main(int argc, char **argv) {
             if (tb[1]) free(tb[1]);
         }
     }
-    Job pf_async_a = {0}, pf_async_b = {0};
-    char *pf_av_a[24], *pf_av_b[24];
+    Job pf_async_a1 = {0}, pf_async_a2 = {0}, pf_async_b = {0};
+    char *pf_av_a1[24], *pf_av_a2[24], *pf_av_b[24];
     int pf_started_a = 0, pf_started_b = 0;
     /* run: concurrency scaled by CPU cores and degraded under high load; sy_poll event-driven completion */
     {   int done = 0, running = 0, running_der = 0, running_solo = 0, ncores = 0, load1 = 0;
@@ -3658,8 +3706,10 @@ int main(int argc, char **argv) {
             int p19_a = cr_only_has_exact(only, cr_gname(CR_G_19A_PREFLIGHT_SIXTARGET));
             int p19_b = cr_only_has_exact(only, cr_gname(CR_G_19B_PREFLIGHT_SNAP));
             if (p19_full || p19_a) {
-                prep_19_preflight_job(&pf_async_a, pf_av_a, repo, rootarg ? rootarg : repo, revarg, pftable, "sixtarget", pf_bound_s);
-                start(&pf_async_a);
+                prep_19_preflight_job(&pf_async_a1, pf_av_a1, repo, rootarg ? rootarg : repo, revarg, pftable, "sixtarget-a", pf_bound_s);
+                prep_19_preflight_job(&pf_async_a2, pf_av_a2, repo, rootarg ? rootarg : repo, revarg, pftable, "sixtarget-b", pf_bound_s);
+                start(&pf_async_a1);
+                start(&pf_async_a2);
                 pf_started_a = 1;
             }
             if (p19_full || p19_b) {
@@ -3929,16 +3979,34 @@ int main(int argc, char **argv) {
         long ms_a = 0, ms_b = 0;
         int ok_a = 1, ok_b = 1;
         if (need_a) {
+            char ev_a1[640] = {0}, ev_a2[640] = {0};
+            int ok_a1 = 1, ok_a2 = 1;
             if (pf_started_a) {
-                finish(&pf_async_a);
-                ok_a = judge_19_preflight_job(&pf_async_a, repo, revarg, since, tver, "sixtarget", pf_bound_s, ev_a, sizeof ev_a);
-                ms_a = pf_async_a.ms;
-                if (pf_async_a.out) mm_free(pf_async_a.out);
+                finish(&pf_async_a1);
+                finish(&pf_async_a2);
+                ok_a1 = judge_19_preflight_job(&pf_async_a1, repo, revarg, since, tver, "sixtarget-a", pf_bound_s, ev_a1, sizeof ev_a1);
+                ok_a2 = judge_19_preflight_job(&pf_async_a2, repo, revarg, since, tver, "sixtarget-b", pf_bound_s, ev_a2, sizeof ev_a2);
+                ms_a = pf_async_a1.ms > pf_async_a2.ms ? pf_async_a1.ms : pf_async_a2.ms;
+                if (pf_async_a1.out) mm_free(pf_async_a1.out);
+                if (pf_async_a2.out) mm_free(pf_async_a2.out);
             } else {
                 long t0 = sy_now_ms();
-                ok_a = run_19_preflight(repo, rootarg ? rootarg : repo, revarg, since, tver, pftable, "sixtarget", pf_bound_s, ev_a, sizeof ev_a);
+                Job ja1 = {0}, ja2 = {0};
+                char *ava1[24], *ava2[24];
+                prep_19_preflight_job(&ja1, ava1, repo, rootarg ? rootarg : repo, revarg, pftable, "sixtarget-a", pf_bound_s);
+                prep_19_preflight_job(&ja2, ava2, repo, rootarg ? rootarg : repo, revarg, pftable, "sixtarget-b", pf_bound_s);
+                start(&ja1); start(&ja2);
+                finish(&ja1); finish(&ja2);
+                ok_a1 = judge_19_preflight_job(&ja1, repo, revarg, since, tver, "sixtarget-a", pf_bound_s, ev_a1, sizeof ev_a1);
+                ok_a2 = judge_19_preflight_job(&ja2, repo, revarg, since, tver, "sixtarget-b", pf_bound_s, ev_a2, sizeof ev_a2);
+                if (ja1.out) mm_free(ja1.out);
+                if (ja2.out) mm_free(ja2.out);
                 ms_a = sy_now_ms() - t0;
             }
+            ok_a = ok_a1 && ok_a2;
+            if (!ok_a1) cx_fmt(ev_a, sizeof ev_a, "%s", ev_a1);
+            else if (!ok_a2) cx_fmt(ev_a, sizeof ev_a, "%s", ev_a2);
+            else cx_fmt(ev_a, sizeof ev_a, "%s | shard=sixtarget(a+b)", ev_a1);
         }
         if (need_b) {
             if (pf_started_b) {
