@@ -1613,7 +1613,7 @@ typedef struct {
     PdWindow window;
     const char *root, *cand, *mock;
     char env[PD_PW + 8];
-    int pid, fds[2], rc;
+    int pid, fds[2], rc, attempt;
     long wall_ms;
 } PdLane;
 
@@ -1625,7 +1625,7 @@ static int pd_lane_child(void *opaque) {
     PdLaneResult result = {0};
     long start = sy_now_ms();
     result.rc = pd_call_window(lane->root, lane->cand, lane->mock,
-                               w->wid, w->ids, w->strict, 1, 1, lane->env);
+                               w->wid, w->ids, w->strict, 1, lane->attempt, lane->env);
     result.wall_ms = sy_now_ms() - start;
     return write(1, &result, sizeof result) != sizeof result;
 }
@@ -1634,28 +1634,87 @@ static volatile sig_atomic_t pd_lane_interrupted;
 
 static void pd_lane_interrupt(int signal_number) { pd_lane_interrupted = signal_number; }
 
-static int pd_first_attempts(PdLane *group, int count, const char *dir,
-                             const char *root, const char *cand, const char *mock) {
-    for (int i = 0; i < count; i++) {
-        PdLane *lane = &group[i];
-        char tmp[PD_PW];
+/* A test may use git discovery or a Unix socket relative to TMPDIR. Keep its
+ * private working path short and independent of both the caller and --out. */
+static int pd_lane_temp_root(char *out, size_t cap) {
+    char ancestor[PD_PW], dotgit[PD_PW];
+    if (sy_realpath("/tmp", ancestor, sizeof ancestor) < 0) return -1;
+    for (;;) {
         sy_stat_t st;
-        if (cx_fmt(tmp, sizeof tmp, "%s/.lane-tmp-%d", dir, i + 1) ||
-            (sy_mkdir(tmp, 0700) && (sy_lstat(tmp, &st) || st.kind != 'd' ||
-                                    st.mode != 0700 || st.uid != sy_uid())) ||
-            cx_fmt(lane->env, sizeof lane->env, "TMPDIR=%s", tmp)) return -1;
-        lane->root = root;
-        lane->cand = cand;
-        lane->mock = mock;
-        lane->pid = 0;
+        if (cx_fmt(dotgit, sizeof dotgit, "%s/.git", ancestor) || sy_lstat(dotgit, &st) != -ENOENT) return -1;
+        if (!strcmp(ancestor, "/")) break;
+        char *last = strrchr(ancestor, '/');
+        if (last == ancestor) ancestor[1] = 0;
+        else *last = 0;
     }
-    fflush(stdout);
+    char prefix[24];
+    if (cx_fmt(prefix, sizeof prefix, "p%08x-", (unsigned)sy_pid())) return -1;
+    return sy_mkdtemp("/tmp", prefix, out, cap);
+}
+
+/* prerun-reds looks up the batch's original log and binds its RAW receipt.
+ * Keep competing attempts in separate directories so disagreements survive. */
+static int pd_lane_diagnostics(const PdLane *lane, const char *out_dir) {
+    const char *id = lane->window.ids;
+    const char *tmp = lane->env + strlen("TMPDIR=");
+    if (strpbrk(id, "/\\") || !*id) return -1;
+    if (pd_batch_receipt(lane->window.strict, id, lane->rc) == 1) return 0;
+    sy_dir_t jobs;
+    if (sy_dir_open(&jobs, tmp)) return -1;
+    int next, err = 0;
+    while ((next = sy_dir_next(&jobs)) == 1) {
+        if (strncmp(jobs.name, "unisacc-affected-", 17)) continue;
+        char job[PD_PW], log[PD_PW], archive[PD_PW], dest[PD_PW];
+        sy_stat_t st;
+        if (cx_fmt(job,sizeof job,"%s/%s",tmp,jobs.name) || sy_lstat(job,&st)) { err = -1; break; }
+        if (st.kind != 'd') continue;
+        if (cx_fmt(log,sizeof log,"%s/%s.log",job,id)) { err = -1; break; }
+        int rc = sy_lstat(log,&st);
+        if (rc == -ENOENT) continue;
+        if (rc || st.kind != 'f') { err = -1; break; }
+        unsigned char *data = 0; int64_t n = 0;
+        if (sy_read_file(log,&data,&n,16 << 20)) { err = -1; break; }
+        if (cx_fmt(archive,sizeof archive,"%s/.lane-tmp-diagnostics",out_dir)) err = -1;
+        if (!err) {
+            rc = sy_mkdir(archive,0700);
+            if (rc && (rc != -EEXIST || sy_lstat(archive,&st) || st.kind != 'd' ||
+                       st.mode != 0700 || st.uid != sy_uid())) err = -1;
+        }
+        char bucket[PD_PW];
+        if (!err && (sy_mkdtemp(archive,"unisacc-affected-",bucket,sizeof bucket) ||
+                     cx_fmt(dest,sizeof dest,"%s/%s.log",bucket,id) || sy_write_atomic(dest,data,n,0600))) err = -1;
+        mm_free(data);
+        if (err) break;
+    }
+    sy_dir_close(&jobs);
+    return err || next < 0 ? -1 : 0;
+}
+
+static int pd_lane_attempts(PdLane *group, int count, const char *dir,
+                            const char *root, const char *cand, const char *mock, int attempt) {
+    char temp_root[PD_PW] = {0};
     pd_lane_interrupted = 0;
     void (*term)(int) = signal(SIGTERM, pd_lane_interrupt);
     void (*intr)(int) = signal(SIGINT, pd_lane_interrupt);
+    void (*hup)(int) = signal(SIGHUP, pd_lane_interrupt);
+    int active = 0, bad = pd_lane_temp_root(temp_root, sizeof temp_root) != 0;
+    for (int i = 0; i < count; i++) {
+        PdLane *lane = &group[i];
+        lane->pid = 0;
+        lane->rc = -1;
+        lane->env[0] = 0;
+        if (bad || pd_lane_interrupted) continue;
+        char tmp[PD_PW];
+        if (cx_fmt(tmp, sizeof tmp, "%s/%d", temp_root, i + 1) || sy_mkdir(tmp, 0700) ||
+            cx_fmt(lane->env, sizeof lane->env, "TMPDIR=%s", tmp)) { bad = 1; continue; }
+        lane->root = root;
+        lane->cand = cand;
+        lane->mock = mock;
+        lane->attempt = attempt;
+    }
+    fflush(stdout);
     long deadline = sy_now_ms() + PD_CHILD_SECONDS * 1000 + 500;
-    int active = 0, bad = 0;
-    for (int i = 0; i < count && !pd_lane_interrupted; i++) {
+    for (int i = 0; i < count && !bad && !pd_lane_interrupted; i++) {
         PdLane *lane = &group[i];
         int rm = sy_unlink(lane->window.strict);
         if (rm && rm != -ENOENT) { bad = 1; break; }
@@ -1694,9 +1753,20 @@ static int pd_first_attempts(PdLane *group, int count, const char *dir,
         sy_close(lane->fds[0]);
         sy_close(lane->fds[1]);
     }
+    for (int i = 0; i < count; i++) {
+        if (group[i].env[0] && pd_lane_diagnostics(&group[i], dir)) {
+            fprintf(stderr, "PRERUN_LANE_DIAGNOSTICS\twindow=%s\tstatus=FAILED\n", group[i].window.wid);
+            bad = 1;
+        }
+    }
+    if (temp_root[0] && sy_remove_all(temp_root)) {
+        fprintf(stderr, "PRERUN_LANE_CLEANUP\tpath=%s\tstatus=FAILED\n", temp_root);
+        bad = 1;
+    }
+    signal(SIGHUP, hup);
     signal(SIGTERM, term);
     signal(SIGINT, intr);
-    return bad ? -1 : 0;
+    return bad || pd_lane_interrupted ? -1 : 0;
 }
 
 static void pd_clean_stale_opt_frame4_in(const char *base_dir) {
@@ -2294,7 +2364,7 @@ static int pd_cmd_run(const char *root, const char *cand, const char *out_dir, i
                 }
                 printf("PRERUN_LANES\tfirst=%s\twindows=%d\n", wid, queued);
                 long wave_start = sy_now_ms();
-                if (pd_first_attempts(group, queued, canonical_dir, eff_root, cand, mock_runner)) {
+                if (pd_lane_attempts(group, queued, canonical_dir, eff_root, cand, mock_runner, 1)) {
                     mm_free(wb); return pd_refuse("window-lane-worker-failed");
                 }
                 printf("PRERUN_LANE_WALL\tfirst=%s\twindows=%d\twall_ms=%ld\n",
@@ -2416,9 +2486,11 @@ static int pd_cmd_run(const char *root, const char *cand, const char *out_dir, i
             } else {
                 sy_unlink(outp);
                 if (prefetched) {
-                    long start = sy_now_ms();
-                    rc = pd_call_window(eff_root, cand, mock_runner, wid, run_ids, outp, jobs, attempt, prefetched->env);
-                    pd_log_window(wid, phase, outp, jobs, attempt, rc, sy_now_ms() - start);
+                    if (pd_lane_attempts(prefetched, 1, canonical_dir, eff_root, cand, mock_runner, attempt)) {
+                        mm_free(wb); return pd_refuse("window-lane-worker-failed");
+                    }
+                    rc = prefetched->rc;
+                    pd_log_window(wid, phase, outp, jobs, attempt, rc, prefetched->wall_ms);
                 } else {
                     rc = pd_window_attempt(eff_root, cand, mock_runner, wid, phase, run_ids, outp, jobs, attempt);
                 }

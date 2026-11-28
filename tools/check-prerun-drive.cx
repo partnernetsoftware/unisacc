@@ -200,6 +200,76 @@ int main(int argc, char **argv) {
             return ck_failures() ? 1 : 0;
         }
     }
+    {
+        char repo[CPD_PW], plan[CPD_PW], windows[CPD_PW], inherited[CPD_PW], runner[CPD_PW];
+        const char *table = "# prerun-drive windows\n# window-lanes=2\nwindow\tjobs\tphase\tcount\tids\n"
+            "W0000\t1\tlong\t1\talpha\nW0001\t1\tlong\t1\tbeta\n";
+        const char *script =
+            "dir=${5%/*}; witness=\"$dir/started.W0001\"\n"
+            "[ -n \"$TMPDIR\" ] && cd \"$TMPDIR\" || exit 2\n"
+            "pwd -P > \"$dir/tmp.$2.$6\" && : > \"probe.$2\" || exit 2\n"
+            "git rev-parse --git-dir >/dev/null 2>&1; git_rc=$?\n"
+            "printf '%s\\n' \"$git_rc\" > \"$dir/git.$2.$6\" || exit 2\n"
+            "if [ \"$2\" = W0001 ]; then : > \"$witness\"; else\n"
+            "  for i in 1 2 3 4 5 6 7 8 9 10; do [ -f \"$witness\" ] && break; sleep 0.1; done\n"
+            "  [ -f \"$witness\" ] || exit 2\n"
+            "fi\n"
+            "if [ \"$2/$6\" = W0001/1 ]; then\n"
+            "  printf '%s\\ttool-selfcheck\\tFAIL\\t1\\taaa\\t50\\t1.0\\t0\\t-\\n' \"$4\" > \"$5\"; exit 1\n"
+            "fi\n"
+            "printf 'batch\\tdomain\\tstatus\\trc\\tcandidate\\tms\\tload1\\tretries\\tnote\\n' > \"$5\"\n"
+            "printf '%s\\tproduct-qualification\\tPASS\\t0\\taaa\\t50\\t1.0\\t0\\t-\\n' \"$4\" >> \"$5\"\n";
+        if (cx_fmt(repo, sizeof repo, "%s/lane-repo", work) ||
+            cx_fmt(inherited, sizeof inherited, "%s/inherited-tmp", repo) ||
+            cx_fmt(runner, sizeof runner, "%s/lane-runner.sh", work) ||
+            sy_mkdir(repo, 0700) || sy_mkdir(inherited, 0700) ||
+            cx_fmt(cmd, sizeof cmd, "git init -q '%s' && git -C '%s' rev-parse --is-inside-work-tree", repo, inherited) ||
+            ckk_sh("lane-repo", cmd, out, sizeof out) || strcmp(out,"true\n") ||
+            cx_write(runner, script, strlen(script))) return 2;
+        /* Exceed a Unix socket path budget in the output path alone. Only the
+           output name changes between runs; compare physical child paths. */
+        char long_leaf[181]; size_t short_len[2]={0};
+        memset(long_leaf,'L',sizeof long_leaf-1);
+        long_leaf[sizeof long_leaf-1]=0;
+        for (int variant=0;variant<2;variant++) {
+            if (cx_fmt(plan,sizeof plan,"%s/%s",repo,variant ? long_leaf : "plan") ||
+                cx_fmt(windows,sizeof windows,"%s/windows.tsv",plan) ||
+                sy_mkdir(plan,0700) || cx_write(windows,table,strlen(table)) ||
+                cx_fmt(cmd, sizeof cmd, "TMPDIR='%s' '%s' run --root '%s' --out '%s' --mock-runner '%s' --max-retries 2 --no-keep-going",
+                       inherited, cpd_pd_bin, repo, plan, runner)) return 2;
+            int rc = ckk_sh("check-prerun-drive", cmd, out, sizeof out);
+            ck(rc == 0 && ckk_has(out, CPD_OUT, "PRERUN_LANES\tfirst=W0000\twindows=2") &&
+               ckk_has(out, CPD_OUT, "PRERUN_RUN\tstatus=DONE\tran=2\t"),
+               "singleton-window-lanes-start-before-the-first-receipt");
+            const char *attempts[]={"W0000.1","W0001.1","W0001.2"};
+            char *paths[3]={0}; int outside=1, removed=1;
+            for (int i=0;i<3;i++) {
+                char p[CPD_PW]; size_t n=0;
+                if (cx_fmt(p,sizeof p,"%s/git.%s",plan,attempts[i])) return 2;
+                char *status=cx_read(p,&n);
+                if (!status || strcmp(status,"128\n")) outside=0;
+                free(status);
+                if (cx_fmt(p,sizeof p,"%s/tmp.%s",plan,attempts[i])) return 2;
+                paths[i]=cx_read(p,&n);
+                if (!paths[i] || n<2 || paths[i][0]!='/' || paths[i][n-1]!='\n') { removed=0; continue; }
+                paths[i][n-1]=0;
+                if (sy_exists(paths[i])!=0) removed=0;
+            }
+            ck(rc==0 && paths[2] && ckk_has(out,CPD_OUT,"phase=long\tattempt=2\tjobs=1\trc=0"),
+               "a prefetched window retry can enter its temporary directory and write its probe");
+            ck(rc==0 && outside,"both lane children ran outside Git with inherited TMPDIR inside the repository");
+            ck(rc==0 && paths[0] && paths[1] && strcmp(paths[0],paths[1]),"lane children received distinct physical directories");
+            ck(rc==0 && removed && sy_exists(inherited)==1,"driver removed both used lane directories and preserved inherited TMPDIR");
+            if (!variant) {
+                for (int i=0;i<2;i++) if (paths[i]) short_len[i]=strlen(paths[i]);
+            } else {
+                ck(rc==0 && short_len[0] && short_len[1] && paths[0] && paths[1] &&
+                   short_len[0]==strlen(paths[0]) && short_len[1]==strlen(paths[1]),
+                   "lengthening the output directory keeps both lane TMPDIR lengths constant");
+            }
+            free(paths[0]); free(paths[1]); free(paths[2]);
+        }
+    }
     if (!main_only) {
         char ids[CPD_PW], pdir[CPD_PW], mock[CPD_PW], pd_path[CPD_PW], heavy[CPD_PW];
         const char *ms_space =
@@ -739,30 +809,7 @@ int main(int argc, char **argv) {
         free(wb);
     }
 
-    {
-        char plan[CPD_PW], windows[CPD_PW], runner[CPD_PW];
-        const char *table = "# prerun-drive windows\n# window-lanes=2\nwindow\tjobs\tphase\tcount\tids\n"
-            "W0000\t1\tlong\t1\talpha\nW0001\t1\tlong\t1\tbeta\n";
-        const char *script =
-            "dir=${5%/*}; witness=\"$dir/started.W0001\"\n"
-            "if [ \"$2\" = W0001 ]; then : > \"$witness\"; else\n"
-            "  for i in 1 2 3 4 5 6 7 8 9 10; do [ -f \"$witness\" ] && break; sleep 0.1; done\n"
-            "  [ -f \"$witness\" ] || exit 2\n"
-            "fi\n"
-            "printf 'batch\\tdomain\\tstatus\\trc\\tcandidate\\tms\\tload1\\tretries\\tnote\\n' > \"$5\"\n"
-            "printf '%s\\tproduct-qualification\\tPASS\\t0\\taaa\\t50\\t1.0\\t0\\t-\\n' \"$4\" >> \"$5\"\n";
-        if (cx_fmt(plan, sizeof plan, "%s/lane-plan", work) ||
-            cx_fmt(windows, sizeof windows, "%s/windows.tsv", plan) ||
-            cx_fmt(runner, sizeof runner, "%s/lane-runner.sh", work) ||
-            sy_mkdir(plan, 0700) || cx_write(windows, table, strlen(table)) ||
-            cx_write(runner, script, strlen(script)) ||
-            cx_fmt(cmd, sizeof cmd, "sh '%s/unisacc.com' '%s/tools/prerun-drive.cx' -- run --root '%s' --out '%s' --mock-runner '%s' --max-retries 1",
-                   cwd, cwd, work, plan, runner)) return 2;
-        int rc = ckk_sh("check-prerun-drive", cmd, out, sizeof out);
-        ck(rc == 0 && ckk_has(out, CPD_OUT, "PRERUN_LANES\tfirst=W0000\twindows=2") &&
-           ckk_has(out, CPD_OUT, "PRERUN_RUN\tstatus=DONE\tran=2\t"),
-           "singleton-window-lanes-start-before-the-first-receipt");
-    }
+
 
     /* (2) run with mock runner: prebuild-self + --resume + stop after 2 retries with raw line */
     char rdir[CPD_PW], mock[CPD_PW], sids[CPD_PW];
