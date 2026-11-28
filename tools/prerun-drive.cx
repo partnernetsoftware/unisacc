@@ -1645,6 +1645,268 @@ static void pd_prepare_opt_frame4(const char *eff_root, const char *cand, const 
     if (rc == 0)
         (void)sy_write_file(donep, "OPT_FRAME4_MATERIAL\tREADY\n", 26, 0644);
 }
+static int pd_parse_entry_link_row(const char *out, long outn,
+                                   char *path_out, size_t path_cap,
+                                   char *refuse_out, size_t refuse_cap) {
+    /* Exact record contract from tools/affected.cx:2235-2237 (U10-8):
+     *   MATERIAL<TAB>piece-d-driveargs-link<TAB>entry-link<TAB><artifact_path>
+     *   MATERIAL<TAB>piece-d-driveargs-link<TAB>entry-link<TAB>-<TAB>REFUSED=<reason>
+     * Scans ALL lines and requires EXACTLY ONE matching row (duplicates or later REFUSED -> -1).
+     * Any bare '-' column without REFUSED= -> -1 (never falls into READY).
+     * Returns: 0=READY (path_out filled), 3=retryable deadline deferral, -1=missing/dup/malformed, -2=hard refusal. */
+    static const char pfx[] = "MATERIAL\tpiece-d-driveargs-link\tentry-link\t";
+    const long pfxn = (long)(sizeof pfx - 1);
+    long at = 0;
+    int matches = 0, result = -1;
+    path_out[0] = 0;
+    refuse_out[0] = 0;
+    if (!out || outn <= 0) return -1;
+    while (at < outn) {
+        long nl = at;
+        while (nl < outn && out[nl] != '\n') nl++;
+        long ln = nl - at;
+        if (ln > 0 && out[at + ln - 1] == '\r') ln--;
+        if (ln > pfxn && tx_same(out + at, pfxn, pfx, pfxn)) {
+            const char *rest = out + at + pfxn;
+            long rlen = ln - pfxn;
+            long tab = 0;
+            matches++;
+            if (matches > 1) {
+                path_out[0] = 0;
+                (void)cx_fmt(refuse_out, refuse_cap, "duplicate-material-row");
+                return -1;
+            }
+            while (tab < rlen && rest[tab] != '\t') tab++;
+            if (tab == 1 && rest[0] == '-') {
+                const char *r5 = (tab + 1 < rlen) ? (rest + tab + 1) : 0;
+                long r5n = r5 ? (rlen - tab - 1) : 0;
+                if (r5 && r5n > 8 && tx_same(r5, 8, "REFUSED=", 8)) {
+                    long why_n = r5n - 8;
+                    if (why_n >= (long)refuse_cap) why_n = (long)refuse_cap - 1;
+                    mm_copy(refuse_out, refuse_cap, r5 + 8, (size_t)why_n);
+                    refuse_out[why_n] = 0;
+                    if ((why_n >= 20 && tx_same(refuse_out, 20, "stepwise-more-steps=", 20)) ||
+                        (why_n >= 18 && tx_same(refuse_out, 18, "prebuild-deadline=", 18))) {
+                        result = 3;
+                    } else {
+                        result = -2;
+                    }
+                } else {
+                    (void)cx_fmt(refuse_out, refuse_cap, "bare-dash-column");
+                    return -1;
+                }
+            } else if (tab > 0 && tab == rlen && tab < (long)path_cap && !(tab == 1 && rest[0] == '-')) {
+                mm_copy(path_out, path_cap, rest, (size_t)tab);
+                path_out[tab] = 0;
+                result = 0;
+            } else {
+                (void)cx_fmt(refuse_out, refuse_cap, "malformed-material-row");
+                return -1;
+            }
+        }
+        at = nl + 1;
+    }
+    return matches == 1 ? result : -1;
+}
+
+static int pd_file_sha256_hex(const char *path, char out65[65]) {
+    unsigned char *b = 0;
+    int64_t n = 0;
+    if (!path || !path[0] || tx_eqz(path, "-")) return -1;
+    if (sy_read_file(path, &b, &n, 64 << 20) != 0 || !b) {
+        if (b) mm_free(b);
+        return -1;
+    }
+    cx_sha256_hex(b, (size_t)n, out65);
+    mm_free(b);
+    return 0;
+}
+
+static int pd_material_content_sha(const char *art_path, char out65[65]) {
+    sy_stat_t st;
+    char mf[PD_PW];
+    if (!art_path || !art_path[0] || tx_eqz(art_path, "-")) return -1;
+    if (sy_stat(art_path, &st) != 0) return -1;
+    if (st.kind == 'f') return pd_file_sha256_hex(art_path, out65);
+    if (st.kind == 'd') {
+        if (!cx_fmt(mf, sizeof mf, "%s/materials.tsv", art_path) && sy_exists(mf) == 1) {
+            return pd_file_sha256_hex(mf, out65);
+        }
+        return -1;
+    }
+    return -1;
+}
+
+static void pd_source_tree_id(const char *eff_root, const char *out_dir, char out65[65]) {
+    char why[128], revf[PD_PW];
+    /* 1. Frozen prerun archive carries out_dir/frozen-source.rev (plain tree without .git) */
+    if (out_dir && out_dir[0] && !cx_fmt(revf, sizeof revf, "%s/frozen-source.rev", out_dir)) {
+        unsigned char *rb = 0;
+        int64_t rn = 0;
+        if (sy_read_file(revf, &rb, &rn, 256) == 0 && rb && rn >= 7) {
+            long n = 0;
+            while (n < (long)rn && n < 64 && rb[n] != '\n' && rb[n] != '\r') n++;
+            if (n >= 7) {
+                mm_copy(out65, 65, (const char *)rb, (size_t)n);
+                out65[n] = 0;
+                mm_free(rb);
+                return;
+            }
+        }
+        if (rb) mm_free(rb);
+    }
+    /* 2. Git checkout root */
+    {
+        char *av[] = {"git", "-C", (char *)(eff_root ? eff_root : "."), "rev-parse", "--verify", "HEAD^{tree}", 0};
+        np_result r = {0};
+        int tr = np_run(av, 0, 0, 10, &r, why, sizeof why);
+        if (!tr && r.rc == 0 && r.out && r.outn >= 40) {
+            long n = 0;
+            while (n < (long)r.outn && n < 64 && r.out[n] != '\n' && r.out[n] != '\r') n++;
+            mm_copy(out65, 65, r.out, (size_t)n);
+            out65[n] = 0;
+            np_free(&r);
+            return;
+        }
+        np_free(&r);
+    }
+    /* 3. Plain tree without .git or frozen-source.rev: hash actual key source file contents */
+    {
+        static const char *kfiles[5] = {
+            "tools/affected.cx",
+            "src/driveargs_m1.cx",
+            "cx/driver/driveargs_m1_impl.cx",
+            "cx/driver/stream_s1_m1.cx",
+            "build/chain-facts.tsv"
+        };
+        char acc[1024], fp[PD_PW], fsha[65];
+        long at = 0;
+        int i, any = 0;
+        acc[0] = 0;
+        for (i = 0; i < 5; i++) {
+            if (eff_root && !cx_fmt(fp, sizeof fp, "%s/%s", eff_root, kfiles[i]) &&
+                pd_file_sha256_hex(fp, fsha) == 0) {
+                char row[96];
+                if (!cx_fmt(row, sizeof row, "%d:%s\n", i, fsha)) {
+                    long rn = tx_len(row, (long)sizeof row);
+                    if (at + rn < (long)sizeof acc) {
+                        mm_copy(acc + at, (size_t)((long)sizeof acc - at), row, (size_t)rn);
+                        at += rn;
+                        acc[at] = 0;
+                        any = 1;
+                    }
+                }
+            }
+        }
+        if (any) {
+            cx_sha256_hex(acc, (size_t)at, out65);
+            return;
+        }
+    }
+    cx_sha256_hex(eff_root ? eff_root : "", (size_t)tx_len(eff_root ? eff_root : "", 4096), out65);
+}
+
+static int pd_entry_link_identity(const char *eff_root, const char *out_dir, const char *cand, const char *art_path, char out65[65]) {
+    char cand_sha[65], tree_id[65], mat_sha[65], buf[512];
+    if (pd_material_content_sha(art_path, mat_sha) != 0) return -1;
+    if (cand && cand[0] && !tx_eqz(cand, "-") && sy_exists(cand) == 1) {
+        if (pd_file_sha256_hex(cand, cand_sha) != 0) return -1;
+    } else {
+        (void)cx_fmt(cand_sha, sizeof cand_sha, "none");
+    }
+    pd_source_tree_id(eff_root, out_dir, tree_id);
+    if (cx_fmt(buf, sizeof buf, "ENTRY_LINK_V2\ncand=%s\ntree=%s\nmat=%s\n", cand_sha, tree_id, mat_sha)) return -1;
+    cx_sha256_hex(buf, (size_t)tx_len(buf, (long)sizeof buf), out65);
+    return 0;
+}
+
+static int pd_verify_entry_link_done(const char *donep, const char *eff_root, const char *out_dir, const char *cand) {
+    unsigned char *b = 0;
+    int64_t n = 0;
+    char rec_id[128], rec_path[PD_PW], cur_id[65];
+    static const char pfx[] = "ENTRY_LINK_MATERIAL\tREADY\tid=";
+    const long pfxn = (long)(sizeof pfx - 1);
+    long at, nl, ptab;
+    if (!donep) return 0;
+    if (sy_read_file(donep, &b, &n, 8192) != 0 || !b || n <= pfxn) {
+        if (b) mm_free(b);
+        return 0;
+    }
+    nl = 0;
+    while (nl < (long)n && b[nl] != '\n' && b[nl] != '\r') nl++;
+    if (nl <= pfxn || !tx_same((const char *)b, pfxn, pfx, pfxn)) { mm_free(b); return 0; }
+    at = pfxn;
+    ptab = at;
+    while (ptab < nl && b[ptab] != '\t') ptab++;
+    if (ptab - at <= 0 || ptab - at >= (long)sizeof rec_id) { mm_free(b); return 0; }
+    mm_copy(rec_id, sizeof rec_id, (const char *)b + at, (size_t)(ptab - at));
+    rec_id[ptab - at] = 0;
+    if (ptab + 6 >= nl || !tx_same((const char *)b + ptab, 6, "\tpath=", 6)) { mm_free(b); return 0; }
+    {
+        long plen = nl - (ptab + 6);
+        if (plen <= 0 || plen >= (long)sizeof rec_path) { mm_free(b); return 0; }
+        mm_copy(rec_path, sizeof rec_path, (const char *)b + ptab + 6, (size_t)plen);
+        rec_path[plen] = 0;
+    }
+    mm_free(b);
+    if (pd_entry_link_identity(eff_root, out_dir, cand, rec_path, cur_id) != 0) return 0;
+    return tx_eqz(rec_id, cur_id) ? 1 : 0;
+}
+
+static int pd_prepare_entry_link(const char *eff_root, const char *cand, const char *out_dir,
+                                 const char *mock_runner, int resume, const unsigned char *wb, int64_t wn) {
+    char donep[PD_PW], outp[PD_PW], cmd[8192], why[256], lay_dir[PD_PW];
+    char full_id[65], art_path[PD_PW], ref_why[256], done_line[PD_PW + 160];
+    const int max_passes = 6;
+    const int pass_timeout_s = 55;
+    if (!wb || wn <= 0 || tx_find((const char *)wb, (long)wn, "piece-d-driveargs-link", 22) < 0) return 0;
+    if (cx_fmt(donep, sizeof donep, "%s/done.prepare-entry-link", out_dir) ||
+        cx_fmt(outp, sizeof outp, "%s/prepare-entry-link.tsv", out_dir)) return -1;
+    if (resume && sy_exists(donep) == 1) {
+        if (pd_verify_entry_link_done(donep, eff_root, out_dir, cand)) return 0;
+        printf("PRERUN_PREPARE_MATERIAL\tmaterial=entry-link\tresume=invalidated\n");
+        fflush(stdout);
+    }
+    for (int pass = 1; pass <= max_passes; pass++) {
+        const char *run_cwd = eff_root;
+        long started = sy_now_ms();
+        if (mock_runner) {
+            if (cx_fmt(cmd, sizeof cmd, "sh '%s' prepare-entry-link 'entry-link' '%s' '%d'", mock_runner, outp, pass)) return -1;
+        } else if (pd_prebuild_layout(eff_root, cand, lay_dir, sizeof lay_dir) == 0) {
+            run_cwd = lay_dir;
+            if (cx_fmt(cmd, sizeof cmd, "cd '%s' && sh ./unisacc.com tools/affected.cx -- --materials-dump --prepare-materials --ids piece-d-driveargs-link", lay_dir)) return -1;
+        } else {
+            const char *use_cand = (cand && cand[0] && !tx_eqz(cand, "-")) ? cand : "./unisacc.com";
+            if (cx_fmt(cmd, sizeof cmd, "cd '%s' && sh '%s' tools/affected.cx -- --materials-dump --prepare-materials --ids piece-d-driveargs-link", eff_root, use_cand)) return -1;
+        }
+        char *av[] = {"sh", "-c", cmd, 0};
+        np_result r = {0};
+        int tr = np_run(av, run_cwd, 0, pass_timeout_s, &r, why, sizeof why);
+        int rc = tr ? 124 : r.rc;
+        int parsed = -1;
+        art_path[0] = 0;
+        ref_why[0] = 0;
+        if (rc == 0) {
+            parsed = pd_parse_entry_link_row(r.out, (long)r.outn, art_path, sizeof art_path, ref_why, sizeof ref_why);
+        }
+        np_free(&r);
+        printf("PRERUN_PREPARE_MATERIAL\tmaterial=entry-link\tpass=%d\trc=%d\tstate=%s\tdetail=%s\twall_ms=%ld\n",
+               pass, rc,
+               parsed == 0 ? "READY" : (parsed == 3 ? "DEFERRED" : "REFUSED"),
+               parsed == 0 ? art_path : (ref_why[0] ? ref_why : "missing-material-row"),
+               sy_now_ms() - started);
+        fflush(stdout);
+        if (rc == 0 && parsed == 0) {
+            if (pd_entry_link_identity(eff_root, out_dir, cand, art_path, full_id) != 0) return -1;
+            if (cx_fmt(done_line, sizeof done_line, "ENTRY_LINK_MATERIAL\tREADY\tid=%s\tpath=%s\n", full_id, art_path)) return -1;
+            if (sy_write_file(donep, done_line, tx_len(done_line, (long)sizeof done_line), 0644) != 0) return -1;
+            return 0;
+        }
+        if (rc == 0 && parsed == 3) continue; /* named deadline deferral: stepwise-more-steps / prebuild-deadline */
+        break; /* non-zero rc, empty output, duplicate/bare-dash row, or hard refusal: do not retry */
+    }
+    return -1;
+}
 static int pd_text_has_enospc(const char *s, long n) {
     if (!s || n <= 0) return 0;
     if (tx_find(s, n, "No space left", 13) >= 0) return 1;
@@ -1818,6 +2080,10 @@ static int pd_cmd_run(const char *root, const char *cand, const char *out_dir, i
         }
     }
     pd_prepare_opt_frame4(eff_root, cand, out_dir, mock_runner, resume, wb, wn);
+    if (pd_prepare_entry_link(eff_root, cand, out_dir, mock_runner, resume, wb, wn) != 0) {
+        mm_free(wb);
+        return pd_refuse("prepare-entry-link-incomplete");
+    }
     int64_t pos = 0;
     int ran = 0, skipped = 0, incomplete = 0;
     char infra_ref[256] = {0};
