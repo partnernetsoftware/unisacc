@@ -8,6 +8,7 @@
  *   merge  --in-dir DIR --out DIR [--version VER] [--skip-name FILE]
  *   archive --in-dir RUN_DIR --repo DIR --version V  (after the supervisor closes its log)
  *   g1-dry --root DIR --strict FILE --expected-fail FILE --expected-unmeasured FILE --out DIR [--version VER]
+ *   rebase-rev --plan|--execute --from-dir DIR --to-rev COMMIT [--root REPO] [--out NEW_DIR]
  *   replay --ids-file FILE --evidence-dir DIR --out DIR [--expected-strict FILE] [--expected-g1dry FILE]
  * Batch result lines are kept verbatim. Timed windows can recover missing
  * evidence in single-batch runs, each with its own deadline. */
@@ -23,6 +24,7 @@
 #pragma unisa use mem.heap
 #pragma unisa use text.text
 #pragma unisa use cxlib.testplan
+#pragma unisa use cxlib.pik1
 
 #define PD_PW 4400
 #define PD_MAX_IDS TP_BATCH_CAP
@@ -90,6 +92,7 @@ static int pd_normal_jobs = PD_DEFAULT_NORMAL_JOBS;
 static int pd_plan_lanes = PD_DEFAULT_LANES;
 static int pd_keep_going = 1;
 static int pd_scout;
+static int pd_rebase_run;
 static char *pd_expected_rows;
 static char pd_candidate_sha[65];
 static int pd_max_wins = PD_MAX_WINS;
@@ -2599,7 +2602,7 @@ static int pd_cmd_run(const char *root, const char *cand, const char *out_dir, i
     }
     {
         char rdp[PD_PW], rdb[384];
-        if (!cx_fmt(rdp, sizeof rdp, "%s/run.done", out_dir)) {
+        if (!cx_fmt(rdp, sizeof rdp, "%s/%s", out_dir, pd_rebase_run ? "run.rebase-pending" : "run.done")) {
             if (pd_run_measured_wins > 0 &&
                 !cx_fmt(rdb, sizeof rdb, "status\tDONE\nran\t%d\nskipped\t%d\nwindow_wall_ms\t%ld\nsum_batch_ms\t%ld\nouter_overhead_ms\t%ld\n",
                         ran, skipped, pd_run_wall_ms, pd_run_batch_ms, pd_run_wall_ms - pd_run_batch_ms))
@@ -2608,6 +2611,7 @@ static int pd_cmd_run(const char *root, const char *cand, const char *out_dir, i
                 sy_write_file(rdp, rdb, (int64_t)strlen(rdb), 0644);
         }
     }
+    if (pd_rebase_run) return 0;
     if (pd_run_measured_wins > 0)
         printf("PRERUN_RUN\tstatus=DONE\tran=%d\tskipped=%d\tout=%s\twindow_wall_ms=%ld\tsum_batch_ms=%ld\touter_overhead_ms=%ld\n",
                ran, skipped, out_dir, pd_run_wall_ms, pd_run_batch_ms, pd_run_wall_ms - pd_run_batch_ms);
@@ -3468,16 +3472,189 @@ static int pd_git_is_commit(const char *repo, const char *rev) {
     return ok;
 }
 
+static int pd_rebase_cmp(const void *a, const void *b) { return strcmp((const char *)a, (const char *)b); }
+
+/* A window can finish only part of its plan. Bind each completed row to the
+ * segment's source and the candidate bytes before using it for a rebase. */
+static int pd_rebase_evidence(const char *dir, const char *rev, const char *sha, const char *stamp_base) {
+    sy_dir_t d;
+    static char files[PD_MAX_FILES][256];
+    int nf = 0, next;
+    if (sy_dir_open(&d, dir)) return pd_refuse("rebase-evidence-dir");
+    while ((next = sy_dir_next(&d)) == 1) {
+        if (strncmp(d.name, "strict-W", 8) || d.name_n < 13 || strcmp(d.name + d.name_n - 4, ".tsv")) continue;
+        if (nf == PD_MAX_FILES || cx_fmt(files[nf], sizeof files[0], "%s", d.name)) {
+            sy_dir_close(&d); return pd_refuse("rebase-evidence-limit");
+        }
+        nf++;
+    }
+    sy_dir_close(&d);
+    if (next < 0) return pd_refuse("rebase-evidence-dir");
+    qsort(files, nf, sizeof files[0], pd_rebase_cmp);
+    pd_nstates = 0;
+    char source[64], digest[80], row_identity[80];
+    cx_fmt(source, sizeof source, "# source=%s", rev);
+    cx_fmt(digest, sizeof digest, " ape_sha256=%s", sha);
+    cx_fmt(row_identity, sizeof row_identity, "\tPASS\t0\t%s\t", sha);
+    for (int fi = 0; fi < nf; fi++) {
+        char path[PD_PW]; size_t n = 0;
+        if (cx_fmt(path, sizeof path, "%s/%s", dir, files[fi])) return pd_refuse("rebase-strict-path");
+        char *bytes = cx_read(path, &n);
+        if (!bytes) return pd_refuse("rebase-strict-read");
+        int bound = 0, had_bound = 0;
+        for (char *p = bytes; *p; ) {
+            char *end = strchr(p, '\n');
+            if (end) *end = 0;
+            if (!strncmp(p, "# source=", 9)) {
+                size_t k = strlen(source);
+                char *ape = strstr(p, digest);
+                bound = !strncmp(p, source, k) && (p[k] == ' ' || !p[k]) &&
+                    ape && (!ape[strlen(digest)] || ape[strlen(digest)] == ' ');
+                if (bound) had_bound = 1;
+            } else if (p[0] && p[0] != '#' && strncmp(p, "RAW\t", 4) &&
+                       strncmp(p, "SUMMARY\t", 8) && strncmp(p, "batch\t", 6)) {
+                char *tab = strchr(p, '\t');
+                if (tab && tab > p && tab-p < 127) {
+                    char *status = strchr(tab+1, '\t');
+                    *tab = 0;
+                    int idx = pd_state_find(p);
+                    *tab = '\t';
+                    if (idx < 0) { free(bytes); return pd_refuse("rebase-evidence-limit"); }
+                    pd_states[idx].seen = 1;
+                    cx_fmt(pd_states[idx].status, sizeof pd_states[idx].status, "%s",
+                           bound && status && !strncmp(status, row_identity, strlen(row_identity)) ? "PASS" : "RERUN");
+                }
+            }
+            if (!end) break;
+            *end = '\n'; p = end + 1;
+        }
+        if (stamp_base) {
+            char *header = strstr(bytes, source);
+            size_t k = header ? (size_t)(header - bytes) + strlen(source) : 0;
+            char base[64]; cx_fmt(base, sizeof base, " base=%s", stamp_base);
+            size_t extra = strlen(base);
+            char *stamped = malloc(n + extra + 1);
+            if (!had_bound || !k || !stamped) { free(bytes); free(stamped); return pd_refuse("rebase-stamp-provenance"); }
+            if (mm_copy(stamped, n+extra+1, bytes, k) ||
+                mm_copy(stamped+k, n+extra+1-k, base, extra) ||
+                mm_copy(stamped+k+extra, n+1-k, bytes+k, n-k)) {
+                free(stamped); free(bytes); return pd_refuse("rebase-stamp-bound");
+            }
+            int err = sy_write_atomic(path, stamped, n+extra, 0644);
+            free(stamped);
+            if (err) { free(bytes); return pd_refuse("rebase-stamp-provenance"); }
+        }
+        free(bytes);
+    }
+    return 0;
+}
+
+static int pd_rebase_window_ids(const char *dir, const char *expected) {
+    char p[PD_PW]; unsigned char *b = 0; int64_t n = 0, offset = 0;
+    if (cx_fmt(p, sizeof p, "%s/windows.tsv", dir) || sy_read_file(p, &b, &n, 4 << 20)) return -1;
+    PdWindow w; int rc;
+    pd_nids = 0;
+    while ((rc = pd_next_window(b, n, &offset, dir, &w)) == 1) {
+        if (!strcmp(w.phase, "prebuild-self")) continue;
+        char *id = w.ids;
+        while (id && *id) {
+            char *next = strchr(id, ',');
+            if (next) *next++ = 0;
+            if (pd_nids >= PD_MAX_IDS || !*id || strlen(id) >= sizeof pd_ids[0].id) { rc = -1; break; }
+            for (int i = 0; i < pd_nids; i++) if (!strcmp(id, pd_ids[i].id)) { rc = -1; break; }
+            if (rc < 0) break;
+            cx_fmt(pd_ids[pd_nids++].id, sizeof pd_ids[0].id, "%s", id);
+            id = next;
+        }
+        if (rc < 0) break;
+    }
+    mm_free(b);
+    char count[32]; cx_fmt(count, sizeof count, "%d", pd_nids);
+    return rc || !pd_nids || strcmp(expected, count) ? -1 : 0;
+}
+
+static int pd_rebase_guard(const char *repo, const char *from, const char *to, const char *chain,
+                           char **changes, int nchanges) {
+    char path[PD_PW], revline[64], why[512] = {0}, hit[PD_PW] = {0}; size_t n;
+    if (cx_fmt(path, sizeof path, "%s/chain-run.identity", chain)) return pd_refuse("chain-identity-path");
+    char *identity = cx_read(path, &n);
+    if (!identity) return pd_refuse("missing-chain-run-identity");
+    int tools = 0, rev_ok = 0;
+    cx_fmt(revline, sizeof revline, "rev=%s", from);
+    for (char *p = identity; p && *p;) {
+        char *next = strchr(p, '\n'); if (next) *next++ = 0;
+        if (!strncmp(p,"rev=",4)) {
+            if (strcmp(p,revline) || rev_ok) { free(identity); return pd_refuse("chain-rev-mismatch"); }
+            rev_ok = 1;
+        }
+        if (!strncmp(p, "tool_blob=", 10)) {
+            char *tool = p+10, *sep = strrchr(tool, ':');
+            if (!sep || sep == tool || strlen(sep+1) != 64 || strspn(sep+1, "0123456789abcdef") != 64) {
+                free(identity); return pd_refuse("invalid-chain-tool-list");
+            }
+            *sep = 0; tools++;
+            for (int i = 0; i < nchanges; i++) if (!strcmp(changes[i], tool)) {
+                fprintf(stderr, "PRERUN_REBASE_INTERSECTION\tpath=%s\n", tool);
+                free(identity); return pd_refuse("chain-tool-changed");
+            }
+        }
+        p = next;
+    }
+    free(identity);
+    if (!rev_ok || !tools) return pd_refuse("incomplete-chain-identity");
+    char *ancestor[] = {"git", "-C", (char *)repo, "merge-base", "--is-ancestor", (char *)from, (char *)to, 0};
+    char *msg = 0; size_t m = 0; int rc = cx_runv_timeout(ancestor, 10, &msg, &m); free(msg);
+    if (rc) return pd_refuse("rebase-target-not-descendant");
+    int64_t hits = 0, other = 0;
+    if (pik1_rev_delta(repo, from, to, &hits, &other, hit, sizeof hit, why, sizeof why)) {
+        fprintf(stderr, "PRERUN_REBASE_SID\tdetail=%s\n", why);
+        return pd_refuse("sources-sid-unverified");
+    }
+    if (hits) {
+        fprintf(stderr, "PRERUN_REBASE_INTERSECTION\tpath=%s\n", hit);
+        return pd_refuse("sources-sid-changed");
+    }
+    return 0;
+}
+
 static int pd_cmd_rebase_rev_plan(const char *from_dir, const char *from_rev_arg, const char *to_rev,
                                   const char *root_arg, const char *out_dir, int plan_mode) {
     char from_rev[64] = {0}, repo[PD_PW] = {0};
-    if (!plan_mode) return pd_refuse("rebase-rev-requires-plan");
+    const int execute = plan_mode == 2;
+    char sha[65] = {0}, candidate[PD_PW], chain[PD_PW], count[32], frozen[PD_PW] = {0};
+    if (!plan_mode) return pd_refuse("rebase-rev-requires-plan-or-execute");
     if (!from_dir || !from_dir[0] || !to_rev || !to_rev[0]) return pd_refuse("rebase-rev-requires-from-dir-and-to-rev");
     { sy_stat_t st; if (sy_stat(from_dir, &st) || st.kind != 'd') return pd_refuse("missing-from-dir"); }
     if (!root_arg || !root_arg[0]) root_arg = ".";
     if (sy_realpath(root_arg, repo, sizeof repo) < 0) return pd_refuse("bad-root");
     if (!pd_git_is_commit(repo, to_rev)) return pd_refuse("invalid-to-rev");
-    if (from_rev_arg && from_rev_arg[0]) {
+    if (out_dir && out_dir[0]) {
+        char src[PD_PW], resolved[PD_PW], ancestor[PD_PW];
+        if (sy_realpath(from_dir, src, sizeof src) < 0 || cx_fmt(ancestor, sizeof ancestor, "%s", out_dir))
+            return pd_refuse("rebase-output-path");
+        int rc;
+        while ((rc = sy_realpath(ancestor, resolved, sizeof resolved)) < 0) {
+            if (rc != -ENOENT) return pd_refuse("rebase-output-path");
+            char *sep = strrchr(ancestor, '/');
+            if (!strcmp(sep ? sep+1 : ancestor, "..")) return pd_refuse("rebase-output-path");
+            if (!sep) { ancestor[0] = '.'; ancestor[1] = 0; }
+            else if (sep == ancestor) ancestor[1] = 0;
+            else *sep = 0;
+        }
+        size_t n = strlen(src);
+        if (!strncmp(src, resolved, n) && (!resolved[n] || resolved[n]=='/')) return pd_refuse("out-dir-inside-from-dir");
+    }
+    char env_path[PD_PW];
+    if (cx_fmt(env_path, sizeof env_path, "%s/prerun-env.tsv", from_dir)) return pd_refuse("rebase-env-path");
+    int env_exists = sy_exists(env_path);
+    int prepared = pd_env_lookup(from_dir, "rev", from_rev, sizeof from_rev);
+    if (env_exists < 0 || (env_exists && !prepared)) return pd_refuse("invalid-prerun-env");
+    if (prepared) {
+        if (from_rev_arg && strcmp(from_rev_arg, from_rev)) return pd_refuse("base-rev-mismatch");
+        if (!pd_env_lookup(from_dir, "ape_sha256", sha, sizeof sha) || strlen(sha) != 64 ||
+            strspn(sha, "0123456789abcdef") != 64 || pd_scout_state(from_dir) != 0) return pd_refuse("invalid-prerun-evidence");
+    } else if (execute) return pd_refuse("execute-requires-prerun-env");
+    else if (from_rev_arg && from_rev_arg[0]) {
         cx_fmt(from_rev, sizeof from_rev, "%s", from_rev_arg);
     } else {
         char ep[PD_PW]; size_t en = 0; char *eb = 0;
@@ -3499,11 +3676,15 @@ static int pd_cmd_rebase_rev_plan(const char *from_dir, const char *from_rev_arg
 
     char ids_p[PD_PW];
     if (cx_fmt(ids_p, sizeof ids_p, "%s/ids.txt", from_dir)) return pd_refuse("path-too-long");
-    if (pd_load_ids(ids_p)) return pd_refuse("read-ids-file");
+    if (prepared) {
+        if (!pd_env_lookup(from_dir, "ids_count", count, sizeof count) || pd_rebase_window_ids(from_dir, count))
+            return pd_refuse("rebase-window-ids");
+        if (pd_rebase_evidence(from_dir, from_rev, sha, 0)) return 2;
+    } else if (pd_load_ids(ids_p)) return pd_refuse("read-ids-file");
 
     static char pass_ids[4096][128]; int npass = 0;
     { char pp[PD_PW]; size_t pn = 0; char *pb = 0;
-      if (!cx_fmt(pp, sizeof pp, "%s/pass.ids", from_dir) && (pb = cx_read(pp, &pn)) != 0) {
+      if (!prepared && !cx_fmt(pp, sizeof pp, "%s/pass.ids", from_dir) && (pb = cx_read(pp, &pn)) != 0) {
           for (size_t i = 0; i < pn && npass < 4096; ) {
               size_t j = i; while (j < pn && pb[j] != '\n' && pb[j] != '\r') j++;
               if (j > i && j - i < 128) {
@@ -3537,16 +3718,47 @@ static int pd_cmd_rebase_rev_plan(const char *from_dir, const char *from_rev_arg
         }
     }
 
+    if (execute) {
+        if (ncf != total_cf) { free(dout); return pd_refuse("changed-files-unverified"); }
+        for (int i = 0; i < ncf; i++) if (cfiles[i][0] == '"') { free(dout); return pd_refuse("quoted-path-unverified"); }
+        char actual[65], full_candidate[PD_PW];
+        if (!pd_env_lookup(from_dir, "chain_dir", chain, sizeof chain) ||
+            !pd_env_lookup(from_dir, "candidate", candidate, sizeof candidate) ||
+            cx_fmt(full_candidate, sizeof full_candidate, "%s/ape-final/unisacc-next.com", chain) ||
+            strcmp(candidate, full_candidate) || pd_file_sha256_hex(candidate, actual) || strcmp(actual, sha)) {
+            free(dout); return pd_refuse("rebase-candidate-mismatch");
+        }
+        if (pd_rebase_guard(repo, from_rev, to_rev, chain, cfiles, ncf)) { free(dout); return 2; }
+        char p[PD_PW], line[64], expected[64];
+        if (!out_dir || sy_mkdir(out_dir, 0700)) { free(dout); return pd_refuse("execute-requires-new-output"); }
+        if (cx_fmt(p, sizeof p, "%s/frozen-source.rev", out_dir) || cx_fmt(line, sizeof line, "%s\n", to_rev) ||
+            sy_write_file(p, line, strlen(line), 0644) ||
+            pd_freeze_source_root(repo, out_dir, frozen, sizeof frozen, expected, sizeof expected) || strcmp(expected, to_rev)) {
+            free(dout); return pd_refuse("rebase-target-freeze");
+        }
+    }
     static char aff_ids[4096][128]; int naff = 0;
     if (!conservative && ncf > 0) {
-        char *av[276]; int k = 0; char uc[PD_PW];
+        char *av[276]; int k = 0; char uc[PD_PW], tmp[PD_PW] = {0};
+        if (prepared && !execute) {
+            char p[PD_PW], line[64], check[64];
+            if (sy_mkdtemp(sy_tmpdir(), "rebase-plan-", tmp, sizeof tmp) ||
+                cx_fmt(p, sizeof p, "%s/frozen-source.rev", tmp) || cx_fmt(line, sizeof line, "%s\n", to_rev) ||
+                sy_write_file(p, line, strlen(line), 0644) ||
+                pd_freeze_source_root(repo, tmp, frozen, sizeof frozen, check, sizeof check) || strcmp(check, to_rev)) {
+                if (tmp[0]) sy_remove_all(tmp);
+                free(dout); return pd_refuse("rebase-plan-target-freeze");
+            }
+        }
         cx_fmt(uc, sizeof uc, "%s/unisacc.com", repo);
-        av[k++] = "sh"; av[k++] = "-c"; av[k++] = "cd \"$1\" && shift && exec \"$@\""; av[k++] = "_"; av[k++] = repo;
+        av[k++] = "sh"; av[k++] = "-c"; av[k++] = "cd \"$1\" && shift && exec \"$@\""; av[k++] = "_"; av[k++] = frozen[0] ? frozen : repo;
         av[k++] = "sh"; av[k++] = uc; av[k++] = "tools/affected.cx"; av[k++] = "--"; av[k++] = "--list-only"; av[k++] = "--files";
         for (int i = 0; i < ncf && k < 274; i++) av[k++] = cfiles[i];
         av[k] = 0;
         char *aout = 0; size_t alen = 0;
-        if (cx_runv_timeout(av, 60, &aout, &alen) != 0 || !aout) { free(aout); free(dout); return pd_refuse("affected-failed"); }
+        int ar = cx_runv_timeout(av, 60, &aout, &alen);
+        if (tmp[0] && sy_remove_all(tmp)) { free(aout); free(dout); return pd_refuse("rebase-plan-cleanup"); }
+        if (ar || !aout || !strstr(aout, "AFFECTED_SUMMARY\t")) { free(aout); free(dout); return pd_refuse("affected-failed"); }
         if (strstr(aout, "unreadable")) conservative = 1;
         for (size_t i = 0; !conservative && i < alen && naff < 4096; ) {
             size_t j = i; while (j < alen && aout[j] != '\n') j++;
@@ -3569,7 +3781,7 @@ static int pd_cmd_rebase_rev_plan(const char *from_dir, const char *from_rev_arg
     FILE *pf = 0;
     if (out_dir && out_dir[0]) {
         char rf[PD_PW], ro[PD_PW], op[PD_PW];
-        if (sy_realpath(from_dir, rf, sizeof rf) == 0 && sy_realpath(out_dir, ro, sizeof ro) == 0 && !strcmp(rf, ro)) {
+        if (sy_realpath(from_dir, rf, sizeof rf) > 0 && sy_realpath(out_dir, ro, sizeof ro) > 0 && !strcmp(rf, ro)) {
             return pd_refuse("out-dir-equals-from-dir");
         }
         if (!strcmp(from_dir, out_dir)) return pd_refuse("out-dir-equals-from-dir");
@@ -3580,22 +3792,50 @@ static int pd_cmd_rebase_rev_plan(const char *from_dir, const char *from_rev_arg
         fprintf(pf, "batch\taction\n");
     }
     for (int i = 0; i < pd_nids; i++) {
-        const char *id = pd_ids[i];
+        const char *id = pd_ids[i].id;
         int is_pass = 0, is_aff = conservative ? 1 : 0;
-        for (int j = 0; j < npass; j++) if (!strcmp(id, pass_ids[j])) { is_pass = 1; break; }
+        if (prepared) {
+            int idx = pd_state_find(id);
+            is_pass = idx >= 0 && pd_states[idx].seen && !strcmp(pd_states[idx].status, "PASS");
+        } else for (int j = 0; j < npass; j++) if (!strcmp(id, pass_ids[j])) { is_pass = 1; break; }
         for (int j = 0; !is_aff && j < naff; j++) if (!strcmp(id, aff_ids[j])) { is_aff = 1; break; }
         if (is_pass && !is_aff) {
             n_reuse++;
             if (pf) fprintf(pf, "%s\tREUSE\n", id);
         } else {
-            n_rerun++;
             if (pf) fprintf(pf, "%s\tRERUN\n", id);
+            if (execute && n_rerun != i) pd_ids[n_rerun] = pd_ids[i];
+            n_rerun++;
         }
     }
-    if (pf) fclose(pf);
+    if (pf && (ferror(pf) || fclose(pf))) return pd_refuse("write-rebase-plan");
     printf("PRERUN_REBASE_PLAN_UNCOVERED\titems=over-256-files-conservative-rerun,unregistered-batch\n");
-    printf("PRERUN_REBASE_PLAN\tfrom_rev=%s\tto_rev=%s\tchanged_files=%d\treuse=%d\trerun=%d\tmode=plan\n",
-           from_rev, to_rev, total_cf, n_reuse, n_rerun);
+    printf("PRERUN_REBASE_PLAN\tfrom_rev=%s\tto_rev=%s\tchanged_files=%d\treuse=%d\trerun=%d\tmode=%s\n",
+           from_rev, to_rev, total_cf, n_reuse, n_rerun, execute ? "execute" : "plan");
+    if (execute) {
+        char launcher[PD_PW];
+        if (cx_fmt(launcher, sizeof launcher, "%s/unisacc.com", frozen)) return pd_refuse("frozen-launcher-path");
+        int present = sy_exists(launcher);
+        if (present < 0 || (!present && sy_symlink(candidate, launcher))) return pd_refuse("frozen-launcher-unavailable");
+        pd_nids = n_rerun;
+        if (n_rerun) {
+            if (pd_build_plan(8, 1, out_dir)) return pd_refuse("rebase-build-windows");
+            pd_keep_going = 2;
+            pd_rebase_run = 1;
+            int rc = pd_cmd_run(repo, candidate, out_dir, 0, 8, 0, 2, 1, 0, 0);
+            if (pd_rebase_evidence(out_dir, to_rev, sha, from_rev)) return 2;
+            if (rc) return rc;
+            for (int i = 0; i < pd_nids; i++) {
+                int idx = pd_state_find(pd_ids[i].id);
+                if (idx < 0 || !pd_states[idx].seen || strcmp(pd_states[idx].status, "PASS"))
+                    return pd_refuse("rebase-rerun-not-pass");
+            }
+            char pending[PD_PW], done[PD_PW];
+            if (cx_fmt(pending, sizeof pending, "%s/run.rebase-pending", out_dir) ||
+                cx_fmt(done, sizeof done, "%s/run.done", out_dir) || sy_rename(pending, done)) return pd_refuse("rebase-completion-receipt");
+        }
+        printf("PRERUN_REBASE_EXECUTE\tsource=%s\tbase=%s\treuse=%d\trerun=%d\n", to_rev, from_rev, n_reuse, n_rerun);
+    }
     return 0;
 }
 
@@ -3611,7 +3851,8 @@ int main(int argc, char **argv) {
             else if (tx_eqz(argv[i], "--to-rev") && i + 1 < argc) to_r = argv[++i];
             else if (tx_eqz(argv[i], "--root") && i + 1 < argc) root_d = argv[++i];
             else if ((tx_eqz(argv[i], "--out") || tx_eqz(argv[i], "--dir")) && i + 1 < argc) out_d = argv[++i];
-            else if (tx_eqz(argv[i], "--plan")) plan_mode = 1;
+            else if (tx_eqz(argv[i], "--plan") && !plan_mode) plan_mode = 1;
+            else if (tx_eqz(argv[i], "--execute") && !plan_mode) plan_mode = 2;
             else return pd_refuse("unknown-rebase-rev-arg");
         }
         return pd_cmd_rebase_rev_plan(from_d, from_r, to_r, root_d, out_d, plan_mode);

@@ -18,6 +18,7 @@
 #pragma unisa use mem.bytes
 #pragma unisa use mem.heap
 #pragma unisa use text.text
+#pragma unisa use sys.sha
 
 #define CPD_PW 4400
 #define CPD_OUT 32768
@@ -71,17 +72,97 @@ static int rows_have(const char *rows, long n, const char *want) {
     return rows && tx_find(rows, n, want, strlen(want)) >= 0;
 }
 
+static int cpd_rebase(const char *work, const char *cwd) {
+    char path[CPD_PW], cmd[8192], out[CPD_OUT], rev[41], sha[65], buf[8192];
+    const char *identity = "extern int puts(const char *); extern int strcmp(const char *,const char *);\n"
+        "int main(int n,char **v){if(n==3&&!strcmp(v[2],\"list-current\"))puts(\"src/input.cx\\t"
+        "0000000000000000000000000000000000000000000000000000000000000000\");return 0;}\n";
+    const char *runner =
+        "int main(int n,char **v){char rev[48],h[72];if(n<8||strcmp(v[5],\"redo\"))return 2;"
+        "FILE *f=fopen(\".git/HEAD\",\"r\");if(!f||!fgets(rev,sizeof rev,f))return 2;fclose(f);"
+        "f=fopen(\"expected.sha\",\"r\");if(!f||!fgets(h,sizeof h,f))return 2;fclose(f);"
+        "f=fopen(v[7],\"w\");if(!f)return 2;"
+        "FILE *red=fopen(\"red-trigger\",\"r\");int fail=red!=0;if(red)fclose(red);"
+        "fprintf(f,\"# source=%.40s ape_sha256=%.64s\\nredo\\ttest\\t%s\\t%d\\t%.64s\\t1\\t0\\t0\\t-\\n\","
+        "rev,h,fail?\"FAIL\":\"PASS\",fail,h);"
+        "return fclose(f)!=0;}\n";
+    const char *affected = "int main(void){puts(\"AFFECTED_SUMMARY\\tchanged=1\\tbatches=0\\tscanned=2\");return 0;}\n";
+    if (cx_fmt(cmd,sizeof cmd,"mkdir -p '%s/r/seed' '%s/r/tools' '%s/r/src' '%s/old' '%s/chain/ape-final'",work,work,work,work,work) ||
+        ckk_sh("rebase-setup",cmd,out,sizeof out)) return 2;
+    const char *names[] = {"r/seed/ident.c","r/tools/dvqualify.cx","r/tools/affected.cx","r/src/input.cx","r/tools/chain-helper","chain/ape-final/unisacc-next.com","old/windows.tsv",0};
+    const char *contents[] = {identity, runner, affected, "input\n", "helper\n", "candidate\n",
+        "window\tjobs\tphase\tcount\tids\nW0000\t1\tnormal\t2\tkept,redo\n"};
+    for (int i=0;names[i];i++) {
+        if (cx_fmt(path,sizeof path,"%s/%s",work,names[i]) || cx_write(path,contents[i],strlen(contents[i]))) return 2;
+    }
+    if (sy_sha256_hex("candidate\n",10,sha) || cx_fmt(path,sizeof path,"%s/r/expected.sha",work) || cx_write(path,sha,64)) return 2;
+    if (cx_fmt(cmd,sizeof cmd,"cd '%s/r' && ln -s '%s/unisacc.com' unisacc.com && git init -q && git config user.name fixture && git config user.email fixture@example.invalid && git add . && git commit -qm base && git rev-parse HEAD",work,cwd) ||
+        ckk_sh("rebase-repo",cmd,out,sizeof out) || strlen(out)<40) return 2;
+    memcpy(rev,out,40); rev[40]=0;
+    cx_fmt(buf,sizeof buf,"rev\t%s\nids_count\t2\nape_sha256\t%s\nchain_dir\t%s/chain\ncandidate\t%s/chain/ape-final/unisacc-next.com\n",rev,sha,work,work);
+    cx_fmt(path,sizeof path,"%s/old/prerun-env.tsv",work); if(cx_write(path,buf,strlen(buf))) return 2;
+    cx_fmt(buf,sizeof buf,"rev=%s\ntool_blob=tools/chain-helper:%s\n",rev,sha);
+    cx_fmt(path,sizeof path,"%s/chain/chain-run.identity",work); if(cx_write(path,buf,strlen(buf))) return 2;
+    cx_fmt(buf,sizeof buf,"# source=%s ape_sha256=%s\nkept\ttest\tPASS\t0\t%s\t1\t0\t0\t-\nredo\ttest\tPASS\t0\twrong\t1\t0\t0\t-\n",rev,sha,sha);
+    cx_fmt(path,sizeof path,"%s/old/strict-W0000.tsv",work); if(cx_write(path,buf,strlen(buf))) return 2;
+    if (cx_fmt(cmd,sizeof cmd,"cd '%s/r' && touch doc && git add doc && git commit -qm fix && git rev-parse HEAD",work) ||
+        ckk_sh("rebase-fix",cmd,out,sizeof out)) return 2;
+    char fix[41]; memcpy(fix,out,40); fix[40]=0;
+    if (cx_fmt(cmd,sizeof cmd,"'%s' rebase-rev --execute --root '%s/r' --from-dir '%s/old' --to-rev %s --out '%s/new'",cpd_pd_bin,work,work,fix,work)) return 2;
+    int rc = ckk_sh("rebase-execute",cmd,out,sizeof out);
+    if(rc) {
+        size_t length=0;
+        cx_fmt(path,sizeof path,"%s/new/strict-W0000.tsv.stderr",work);
+        char *diag=cx_read(path,&length);
+        fprintf(stderr,"rebase fixture rc=%d output=%.1500s stderr=%.500s\n",rc,out,diag?diag:"-");
+        free(diag);
+    }
+    cx_fmt(path,sizeof path,"%s/new/strict-W0000.tsv",work);
+    size_t rows_n=0; char *rows=cx_read(path,&rows_n);
+    cx_fmt(buf,sizeof buf,"# source=%s base=%s ape_sha256=%s\nredo\ttest\tPASS\t0\t%s\t1\t0\t0\t-\n",fix,rev,sha,sha);
+    ck(!rc && strstr(out,"reuse=1\trerun=1") && rows && !strcmp(rows,buf),"rebase-execute-only-unverified-id-source-base");
+    free(rows);
+    if (cx_fmt(cmd,sizeof cmd,"ln -s '%s/old' '%s/alias' && '%s' rebase-rev --execute --root '%s/r' --from-dir '%s/old' --to-rev %s --out '%s/alias/nested'",work,work,cpd_pd_bin,work,work,fix,work)) return 2;
+    rc = ckk_sh("rebase-alias",cmd,out,sizeof out);
+    cx_fmt(path,sizeof path,"%s/old/nested",work);
+    ck(rc==2 && strstr(out,"out-dir-inside-from-dir") && sy_exists(path)==0,"rebase-original-directory-read-only");
+    if (cx_fmt(cmd,sizeof cmd,"cd '%s/r' && touch red-trigger && git add red-trigger && git commit -qm red && git rev-parse HEAD",work) ||
+        ckk_sh("rebase-red-target",cmd,out,sizeof out)) return 2;
+    char red[41]; memcpy(red,out,40); red[40]=0;
+    if(cx_fmt(cmd,sizeof cmd,"'%s' rebase-rev --execute --root '%s/r' --from-dir '%s/old' --to-rev %s --out '%s/red'",cpd_pd_bin,work,work,red,work)) return 2;
+    rc=ckk_sh("rebase-red",cmd,out,sizeof out);
+    cx_fmt(path,sizeof path,"%s/red/strict-W0000.tsv",work);
+    rows=cx_read(path,&rows_n);
+    cx_fmt(buf,sizeof buf,"# source=%s base=%s ape_sha256=%s\nredo\ttest\tFAIL\t1\t%s\t1\t0\t0\t-\n",red,rev,sha,sha);
+    cx_fmt(path,sizeof path,"%s/red/run.done",work);
+    ck(rc!=0 && rows && !strcmp(rows,buf) && sy_exists(path)==0,"rebase-red-keeps-provenance-without-done");
+    free(rows);
+    const char *changes[]={"tools/chain-helper","src/input.cx"};
+    const char *refusals[]={"reason=chain-tool-changed","reason=sources-sid-changed"};
+    for(int i=0;i<2;i++){
+        if(cx_fmt(cmd,sizeof cmd,"cd '%s/r' && git switch -q --detach %s && printf x >> '%s' && git add '%s' && git commit -qm change && git rev-parse HEAD",work,fix,changes[i],changes[i]) ||
+           ckk_sh("rebase-change",cmd,out,sizeof out)) return 2;
+        char to[41]; memcpy(to,out,40); to[40]=0;
+        if(cx_fmt(cmd,sizeof cmd,"'%s' rebase-rev --execute --root '%s/r' --from-dir '%s/old' --to-rev %s --out '%s/refused'",cpd_pd_bin,work,work,to,work)) return 2;
+        rc=ckk_sh("rebase-refuse",cmd,out,sizeof out);
+        cx_fmt(path,sizeof path,"%s/refused",work);
+        ck(rc==2 && strstr(out,refusals[i]) && sy_exists(path)==0,refusals[i]);
+    }
+    return 0;
+}
+
 int main(int argc, char **argv) {
     long t0 = sy_now_ms();
     char cwd[CPD_PW], base_td[CPD_PW], work[CPD_PW], cmd[8192], out[CPD_OUT];
-    int infra_only = 0, main_only = 0;
+    int infra_only = 0, main_only = 0, rebase_only = 0;
     const char *tool_arg = 0;
     for (int ai = 1; ai < argc; ai++) {
         if (!strcmp(argv[ai], "--infra")) infra_only = 1;
         else if (!strcmp(argv[ai], "--main")) main_only = 1;
+        else if (!strcmp(argv[ai], "--rebase")) rebase_only = 1;
         else if (!strcmp(argv[ai], "--tool") && ai + 1 < argc) tool_arg = argv[++ai];
         else if (!strcmp(argv[ai], "--")) continue;
-        else { fprintf(stderr, "usage: check-prerun-drive.cx [-- --infra|--main] [--tool BIN]\n"); return 2; }
+        else { fprintf(stderr, "usage: check-prerun-drive.cx [-- --infra|--main|--rebase] [--tool BIN]\n"); return 2; }
     }
     if (infra_only && main_only) { fprintf(stderr, "check-prerun-drive: --infra and --main are mutually exclusive\n"); return 2; }
     if (!getcwd(cwd, sizeof cwd)) return 2;
@@ -110,6 +191,14 @@ int main(int argc, char **argv) {
             printf("PREPARED\tprerun-drive-native\tno-test-result\t(compiled once to private binary under work/)\n");
         }
         if (cx_fmt(cpd_pd_pat, sizeof cpd_pd_pat, "sh '%s/unisacc.com' '%s' --", cwd, pd_src)) return 2;
+    }
+    if (!infra_only) {
+        if (cpd_rebase(work,cwd)) return 2;
+        if (rebase_only) {
+            char *rmv[] = {"rm", "-rf", work, 0}; (void)ck_run(rmv, out, sizeof out);
+            printf("CHECK_PRERUN_REBASE_EXECUTE\tpassed=%d\tfailed=%d\n",ck_assertions()-ck_failures(),ck_failures());
+            return ck_failures() ? 1 : 0;
+        }
     }
     if (!main_only) {
         char ids[CPD_PW], pdir[CPD_PW], mock[CPD_PW], pd_path[CPD_PW], heavy[CPD_PW];
