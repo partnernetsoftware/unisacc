@@ -362,6 +362,154 @@ static int wrg_run_host_smoke(const char *tmp, const char *rev, const char *cand
     return sy_write_atomic(outf, buf, len, 0644) != 0 ? 1 : 0;
 }
 
+static long wrg_find(const char *hay, long hlen, const char *needle) {
+    long nl;
+    if (!hay || !needle || hlen <= 0) return -1;
+    nl = tx_len(needle, 1024);
+    if (nl <= 0 || nl > hlen) return -1;
+    return tx_find(hay, hlen, needle, nl);
+}
+
+static void wrg_strip_comments(const char *src, char *dst, size_t cap) {
+    size_t i = 0, o = 0;
+    int in_sq = 0, in_dq = 0;
+    if (!dst || cap == 0) return;
+    if (!src) { dst[0] = 0; return; }
+    while (src[i] && o + 1 < cap) {
+        char ch = src[i];
+        if (ch == '\n') {
+            in_sq = 0;
+            in_dq = 0;
+            dst[o++] = ch;
+            i++;
+            continue;
+        }
+        if (!in_sq && !in_dq && ch == '#') {
+            while (src[i] && src[i] != '\n') i++;
+            continue;
+        }
+        if (ch == '\'' && !in_dq) in_sq = !in_sq;
+        else if (ch == '"' && !in_sq) in_dq = !in_dq;
+        dst[o++] = ch;
+        i++;
+    }
+    dst[o] = 0;
+}
+
+static int wrg_extract_ps_func(const char *clean, long clen, const char *sig, char *out, size_t cap) {
+    long off = wrg_find(clean, clen, sig), pos;
+    size_t n = 0;
+    int depth = 0, in_sq = 0, in_dq = 0;
+    if (off < 0 || !out || cap == 0) return -1;
+    pos = off;
+    while (pos < clen && clean[pos] != '{') pos++;
+    if (pos >= clen) return -1;
+    while (pos < clen && n + 1 < cap) {
+        char ch = clean[pos++];
+        out[n++] = ch;
+        if (ch == '\n') { in_sq = 0; in_dq = 0; }
+        else if (ch == '\'' && !in_dq) in_sq = !in_sq;
+        else if (ch == '"' && !in_sq) in_dq = !in_dq;
+        else if (!in_sq && !in_dq) {
+            if (ch == '{') depth++;
+            else if (ch == '}') {
+                depth--;
+                if (depth == 0) { out[n] = 0; return 0; }
+            }
+        }
+    }
+    return -1;
+}
+
+static int wrg_check_workflow_contract(const char *raw) {
+    static char clean[65536];
+    static char ib_fn[16384];
+    long rlen, clen, ilen;
+    long p_start, p_out_mk, p_err_mk, p_out_cp, p_err_cp;
+    if (!raw) return -1;
+    rlen = tx_len(raw, 65535);
+    if (rlen <= 0 || wrg_find(raw, rlen, "awk") >= 0 || wrg_find(raw, rlen, "sed") >= 0 ||
+        wrg_find(raw, rlen, "SHA256SUMS") >= 0 || wrg_find(raw, rlen, "Start-Process") >= 0 ||
+        wrg_find(raw, rlen, "ReadToEndAsync") >= 0 || wrg_find(raw, rlen, "[uint32]") >= 0 ||
+        wrg_find(raw, rlen, "degrade") >= 0 || wrg_find(raw, rlen, "DEGRADE") >= 0 ||
+        wrg_find(raw, rlen, "UNMEASURED") >= 0) return -1;
+    wrg_strip_comments(raw, clean, sizeof clean);
+    clen = tx_len(clean, (long)sizeof clean - 1);
+    if (wrg_extract_ps_func(clean, clen, "function Invoke-Bounded(", ib_fn, sizeof ib_fn) != 0) return -2;
+    ilen = tx_len(ib_fn, (long)sizeof ib_fn - 1);
+    p_start = wrg_find(ib_fn, ilen, "[void]$p.Start()");
+    p_out_mk = wrg_find(ib_fn, ilen, "$outStream = if ($outFile -ne '') { [IO.File]::Create($outFile) } else { [IO.MemoryStream]::new() }");
+    p_err_mk = wrg_find(ib_fn, ilen, "$errStream = [IO.MemoryStream]::new()");
+    p_out_cp = wrg_find(ib_fn, ilen, "$p.StandardOutput.BaseStream.CopyToAsync($outStream)");
+    p_err_cp = wrg_find(ib_fn, ilen, "$p.StandardError.BaseStream.CopyToAsync($errStream)");
+    if (!(p_start >= 0 && p_out_mk >= 0 && p_err_mk >= 0 && p_out_cp >= 0 && p_err_cp >= 0 &&
+          p_start < p_out_mk && p_start < p_err_mk && p_out_mk < p_out_cp && p_err_mk < p_err_cp)) return -3;
+    if (wrg_find(ib_fn, ilen, "[IO.File]::OpenRead($inFile)") < 0 ||
+        wrg_find(ib_fn, ilen, "$pumpTasks.Add($outTask)") < 0 ||
+        wrg_find(ib_fn, ilen, "$pumpTasks.Add($errTask)") < 0 ||
+        wrg_find(ib_fn, ilen, "$pumpTasks.Add($rawInTask)") < 0 ||
+        wrg_find(ib_fn, ilen, "$pt.IsFaulted") < 0 ||
+        wrg_find(ib_fn, ilen, "throw $pt.Exception.GetBaseException()") < 0) return -4;
+    return (wrg_find(clean, clen, "workflow_call:") >= 0 &&
+            wrg_find(clean, clen, "workflow_dispatch:") >= 0 &&
+            wrg_find(clean, clen, "download_repo_scoped") >= 0 &&
+            wrg_find(clean, clen, "CHAIN_FORMAT=rc_v3") >= 0 &&
+            wrg_find(clean, clen, "ConvertTo-UInt32") >= 0 &&
+            wrg_find(clean, clen, "OSArchitecture") >= 0 &&
+            wrg_find(clean, clen, "ProcessArchitecture") >= 0 &&
+            wrg_find(clean, clen, "UNISA_CONTAINER") >= 0 &&
+            wrg_find(clean, clen, "UNISACC_APE_SELF") >= 0 &&
+            wrg_find(clean, clen, "--extract-ape-pkg") >= 0 &&
+            wrg_find(clean, clen, "--make-neg-pe") >= 0 &&
+            wrg_find(clean, clen, "--mode negative") >= 0 &&
+            wrg_find(clean, clen, "--merge-verdict") >= 0 &&
+            wrg_find(clean, clen, "  verdict:") >= 0 &&
+            wrg_find(clean, clen, "needs: [fetch, produce, judge]") >= 0 &&
+            wrg_find(clean, clen, "release-step7.tsv") >= 0 &&
+            wrg_find(clean, clen, "--verify-receipt") >= 0 &&
+            wrg_find(clean, clen, "--verify-manifest") >= 0 &&
+            wrg_find(clean, clen, "--chain-in-sha") >= 0 &&
+            wrg_find(clean, clen, "--print-release-version") >= 0) ? 1 : -5;
+}
+
+static int wrg_comment_out_stmt(const char *src, const char *stmt, char *dst, size_t cap) {
+    long slen = src ? tx_len(src, 65535) : -1;
+    long pre = slen > 0 ? wrg_find(src, slen, stmt) : -1;
+    if (pre < 0 || !dst || (size_t)slen + 3 > cap) return -1;
+    if (pre > 0 && mm_copy(dst, (long)cap, src, pre) != 0) return -1;
+    dst[pre] = '#';
+    dst[pre + 1] = ' ';
+    if (mm_copy(dst + pre + 2, (long)cap - pre - 2, src + pre, slen - pre) != 0) return -1;
+    dst[slen + 2] = 0;
+    return 0;
+}
+
+static int wrg_move_stmt_outside_func(const char *src, const char *stmt, char *dst, size_t cap) {
+    long slen = src ? tx_len(src, 65535) : -1;
+    long pre = slen > 0 ? wrg_find(src, slen, stmt) : -1;
+    long stlen = stmt ? tx_len(stmt, 1024) : -1;
+    long fe_rel, mid_start, fe_off, pos;
+    if (pre < 0 || stlen <= 0 || !dst) return -1;
+    mid_start = pre + stlen;
+    fe_rel = wrg_find(src + mid_start, slen - mid_start, "\n          }\n");
+    if (fe_rel < 0) return -1;
+    fe_off = mid_start + fe_rel + 13;
+    if ((size_t)slen + (size_t)stlen + 24 > cap) return -1;
+    if (pre > 0 && mm_copy(dst, (long)cap, src, pre) != 0) return -1;
+    if (mm_copy(dst + pre, (long)cap - pre, "# removed", 9) != 0) return -1;
+    pos = pre + 9;
+    if (fe_off > mid_start && mm_copy(dst + pos, (long)cap - pos, src + mid_start, fe_off - mid_start) != 0) return -1;
+    pos += fe_off - mid_start;
+    if (mm_copy(dst + pos, (long)cap - pos, "          ", 10) != 0) return -1;
+    pos += 10;
+    if (mm_copy(dst + pos, (long)cap - pos, stmt, stlen) != 0) return -1;
+    pos += stlen;
+    dst[pos++] = '\n';
+    if (slen > fe_off && mm_copy(dst + pos, (long)cap - pos, src + fe_off, slen - fe_off) != 0) return -1;
+    dst[pos + (slen - fe_off)] = 0;
+    return 0;
+}
+
 int main(void) {
     static char tmp[4096], bin[4400], bin_x64[4400], bin_a64[4400], out[32768], cand_real[4096];
     static char rcpt[4400], outf[4400], locf[4400], pkg_ext[4400];
@@ -823,58 +971,25 @@ int main(void) {
     {
         unsigned char *wb = 0;
         int64_t wn = 0;
-        int wok = 0, rel_ok = 0;
+        int wok = 0, mut_ok = 0, rel_ok = 0;
         if (sy_read_file(".github/workflows/win-runtime-smoke.yml", &wb, &wn, 65536) == 0 && wb) {
+            static char mut[65536];
             const char *s = (const char *)wb;
-            const char *p_start = strstr(s, "[void]$p.Start()");
-            const char *p_out_mk = strstr(s, "$outStream = if ($outFile -ne '') { [IO.File]::Create($outFile) } else { [IO.MemoryStream]::new() }");
-            const char *p_err_mk = strstr(s, "$errStream = [IO.MemoryStream]::new()");
-            const char *p_out_cp = strstr(s, "$p.StandardOutput.BaseStream.CopyToAsync($outStream)");
-            const char *p_err_cp = strstr(s, "$p.StandardError.BaseStream.CopyToAsync($errStream)");
-            wok = (p_start != 0 && p_out_mk != 0 && p_err_mk != 0 && p_out_cp != 0 && p_err_cp != 0 &&
-                   p_start < p_out_mk && p_start < p_err_mk &&
-                   p_out_mk < p_out_cp && p_err_mk < p_err_cp &&
-                   strstr(s, "workflow_call:") != 0 &&
-                   strstr(s, "workflow_dispatch:") != 0 &&
-                   strstr(s, "download_repo_scoped") != 0 &&
-                   strstr(s, "CHAIN_FORMAT=rc_v3") != 0 &&
-                   strstr(s, "CopyToAsync") != 0 &&
-                   strstr(s, "[IO.File]::OpenRead($inFile)") != 0 &&
-                   strstr(s, "$pumpTasks.Add($outTask)") != 0 &&
-                   strstr(s, "$pumpTasks.Add($errTask)") != 0 &&
-                   strstr(s, "$pumpTasks.Add($rawInTask)") != 0 &&
-                   strstr(s, "throw $pt.Exception.GetBaseException()") != 0 &&
-                   strstr(s, "ConvertTo-UInt32") != 0 &&
-                   strstr(s, "[uint32]") == 0 &&
-                   strstr(s, "$pt.IsFaulted") != 0 &&
-                   strstr(s, "Start-Process") == 0 &&
-                   strstr(s, "ReadToEndAsync") == 0 &&
-                   strstr(s, "OSArchitecture") != 0 &&
-                   strstr(s, "ProcessArchitecture") != 0 &&
-                   strstr(s, "UNISA_CONTAINER") != 0 &&
-                   strstr(s, "UNISACC_APE_SELF") != 0 &&
-                   strstr(s, "--extract-ape-pkg") != 0 &&
-                   strstr(s, "--make-neg-pe") != 0 &&
-                   strstr(s, "--mode negative") != 0 &&
-                   strstr(s, "--merge-verdict") != 0 &&
-                   strstr(s, "  verdict:") != 0 &&
-                   strstr(s, "needs: [fetch, produce, judge]") != 0 &&
-                   strstr(s, "release-step7.tsv") != 0 &&
-                   strstr(s, "--verify-receipt") != 0 &&
-                   strstr(s, "--verify-manifest") != 0 &&
-                   strstr(s, "--chain-in-sha") != 0 &&
-                   strstr(s, "--print-release-version") != 0 &&
-                   strstr(s, "SHA256SUMS") == 0 &&
-                   strstr(s, "awk") == 0 &&
-                   strstr(s, "sed") == 0 &&
-                   strstr(s, "tools/ci-verdict.cx") != 0 &&
-                   strstr(s, "tools/release-decide.cx") != 0 &&
-                   strstr(s, "degrade") == 0 &&
-                   strstr(s, "DEGRADE") == 0 &&
-                   strstr(s, "UNMEASURED") == 0);
+            int wrc = wrg_check_workflow_contract(s);
+            int c1 = -99, c2 = -99, c3 = -99;
+            int m1 = 0, m2 = 0, m3 = 0;
+            wok = (wrc == 1);
+            m1 = (wrg_comment_out_stmt(s, "$errStream = [IO.MemoryStream]::new()", mut, sizeof mut) == 0 &&
+                  (c1 = wrg_check_workflow_contract(mut)) != 1);
+            m2 = (wrg_comment_out_stmt(s, "$outStream = if ($outFile -ne '') { [IO.File]::Create($outFile) } else { [IO.MemoryStream]::new() }", mut, sizeof mut) == 0 &&
+                  (c2 = wrg_check_workflow_contract(mut)) != 1);
+            m3 = (wrg_move_stmt_outside_func(s, "$errStream = [IO.MemoryStream]::new()", mut, sizeof mut) == 0 &&
+                  (c3 = wrg_check_workflow_contract(mut)) != 1);
+            mut_ok = (m1 && m2 && m3);
+            if (!wok || !mut_ok) sy_eprintf("CONTRACT_DIAG\twrc=%d\tm1=%d(c=%d)\tm2=%d(c=%d)\tm3=%d(c=%d)\n", wrc, m1, c1, m2, c2, m3, c3);
             mm_free(wb);
         }
-        ck(wok, "ci-workflow-resident-gate-contract");
+        ck(wok && mut_ok, "ci-workflow-resident-gate-contract");
 
         /* Test strict cx rc_v3 parser (--verify-receipt & --verify-manifest): pinned run_id/unit/target & chain sha required */
         {
