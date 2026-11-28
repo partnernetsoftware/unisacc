@@ -523,28 +523,77 @@ int main(int argc, char **argv) {
                    run_delivered_ape_stream_e2(usl_good, 0, 0, 0, 0, 1, 0, 0, &ref_out, &ref_len) &&
                    run_delivered_ape_stream_e2(usl_bad, 1, 0, 0, "malformed USLATTR1 side-car", 1, 0, 0, 0, 0));
         ck(base_ok, "delivered-ape-stream-e2-default-off-and-bad-table");
-        /* v0.1.9 G4 contract: packed delivered APE refuses UNISACC_M53_S1 / UNISACC_M53_S1_SO overrides
-         * with rc=1 and DRIVEARGS_M1_REFUSE reason=embed-env-override-forbidden (no shadow fallback).
-         * Non-packed dev-mode fallback assertions remain covered in sections 3..5 above. */
-        {
+        /* Split by target and package mode (v0.1.9 G4 contract):
+         * (a) On lnx/x86_64 (!g_native), driveargs/drivestream M1 is embedded in the packed APE
+         *     (build/chain-facts.tsv:99-105), so env overrides MUST be refused with rc=1 and
+         *     DRIVEARGS_M1_REFUSE reason=embed-env-override-forbidden; the original shadow-fallback
+         *     contracts are exercised directly on the non-packed source probes below so zero
+         *     coverage is lost.
+         * (b) On native lnx/arm64 (g_native), M1 driveargs is not embedded, so all five delivered
+         *     APE shadow-fallback / portable / two-way mutant assertions stay intact as before. */
+        if (g_native) {
+            ck(base_ok && run_delivered_ape_stream_e2(usl_good, 0, "0", absent_so, 0, 1, ref_out, ref_len, 0, 0),
+               "delivered-ape-stream-e2-disabled-master-off");
+            ck(wr_ok && run_delivered_ape_stream_e2(usl_good, 0, sl_real, absent_so,
+                                                    "M53_S1_FALLBACK\treason=exec-absent", 0, 0, 0, 0, 0),
+               "delivered-ape-stream-e2-disabled-exec-absent");
+            ck(wr_ok && run_delivered_ape_stream_e2(usl_good, 0, sl_corrupt, "portable",
+                                                    "M53_S1_FALLBACK\treason=corrupt", 0, 0, 0, 0, 0),
+               "delivered-ape-stream-e2-corrupt-fallback");
+            ck(base_ok &&
+               run_delivered_ape_stream_e2(usl_good, 0, sl_real, "portable", 0, 1, ref_out, ref_len, 0, 0) &&
+               run_delivered_ape_stream_e2(usl_bad, 1, sl_real, "portable", "malformed USLATTR1 side-car", 1, 0, 0, 0, 0),
+               "delivered-ape-stream-e2-portable-clean");
+            ck(wr_ok &&
+               run_delivered_ape_stream_e2(usl_good, 0, sl_mut, "portable",
+                                           "M53_S1_FALLBACK\treason=mismatch\tnative=1\ttape=0", 0, 0, 0, 0, 0) &&
+               run_delivered_ape_stream_e2(usl_bad, 1, sl_mut, "portable",
+                                           "M53_S1_FALLBACK\treason=mismatch\tnative=0\ttape=1", 0, 0, 0, 0, 0),
+               "delivered-ape-stream-e2-mutant-vm-pos-neg-parity");
+        } else {
             const char *env_refuse = "DRIVEARGS_M1_REFUSE\treason=embed-env-override-forbidden\tdetail=0";
+            /* (a) Packed x86_64 delivered APE: G4 refusal on env overrides */
             ck(base_ok && run_delivered_ape_stream_e2(usl_good, 1, "0", absent_so, env_refuse, 1, 0, 0, 0, 0),
                "delivered-ape-stream-e2-disabled-master-off");
-            ck(wr_ok && run_delivered_ape_stream_e2(usl_good, 1, g_native ? sl_real : sl_abi1, absent_so,
+            ck(wr_ok && run_delivered_ape_stream_e2(usl_good, 1, sl_abi1, absent_so,
                                                     env_refuse, 1, 0, 0, 0, 0),
                "delivered-ape-stream-e2-disabled-exec-absent");
             ck(wr_ok && run_delivered_ape_stream_e2(usl_good, 1, sl_corrupt, "portable",
                                                     env_refuse, 1, 0, 0, 0, 0),
                "delivered-ape-stream-e2-corrupt-fallback");
-            if (g_native) {
-                ck(base_ok &&
-                   run_delivered_ape_stream_e2(usl_good, 1, sl_real, "portable", env_refuse, 1, 0, 0, 0, 0) &&
-                   run_delivered_ape_stream_e2(usl_bad, 1, sl_real, "portable", env_refuse, 1, 0, 0, 0, 0),
-                   "delivered-ape-stream-e2-portable-clean");
-                ck(wr_ok &&
-                   run_delivered_ape_stream_e2(usl_good, 1, sl_mut, "portable", env_refuse, 1, 0, 0, 0, 0) &&
-                   run_delivered_ape_stream_e2(usl_bad, 1, sl_mut, "portable", env_refuse, 1, 0, 0, 0, 0),
-                   "delivered-ape-stream-e2-mutant-vm-pos-neg-parity");
+
+            /* (b) Non-packed dev/source-probe path honoring the shadow-fallback contracts */
+            if (sy_exists(drv_x86) == 1 && sy_exists(so_x86) == 1) {
+                char *out = 0; size_t outn = 0; int rc;
+                rc = run_prog_merged(0, drv_x86, "1", "-", "0", absent_so, &out, &outn);
+                ck(rc == 0 && out && strstr(out, "ARM64_S2_DONE\tn=4\tok=4") != 0 &&
+                   strstr(out, "M53_S1_FALLBACK") == 0, "dev-probe-x86-master-off-zero");
+                if (out) { mm_free(out); out = 0; }
+
+                rc = run_prog_merged(0, drv_x86, "1", "-", sl_abi1, absent_so, &out, &outn);
+                ck(rc == 0 && out && strstr(out, "ARM64_S2_DONE\tn=4\tok=4") != 0 &&
+                   strstr(out, "M53_S1_FALLBACK\treason=exec-absent") != 0, "dev-probe-x86-exec-absent-fallback");
+                if (out) { mm_free(out); out = 0; }
+
+                rc = run_prog_merged(0, drv_x86, "1", "-", sl_corrupt, so_x86, &out, &outn);
+                ck(rc == 0 && out && strstr(out, "ARM64_S2_DONE\tn=4\tok=4") != 0 &&
+                   strstr(out, "M53_S1_FALLBACK\treason=corrupt") != 0, "dev-probe-x86-corrupt-fallback");
+                if (out) { mm_free(out); out = 0; }
+            } else {
+                ck(0, "dev-probe-x86-master-off-zero");
+                ck(0, "dev-probe-x86-exec-absent-fallback");
+                ck(0, "dev-probe-x86-corrupt-fallback");
+            }
+            if (has_q && sy_exists(drv_arm64) == 1) {
+                char *out = 0; size_t outn = 0; int rc;
+                rc = run_prog_merged(g_qemu, drv_arm64, "1", "-", sl_mut, "portable", &out, &outn);
+                ck(rc == 0 && out && strstr(out, "ARM64_S2_DONE\tn=4\tok=4") != 0 &&
+                   strstr(out, "M53_S1_FALLBACK\treason=mismatch\tnative=1\ttape=0") != 0 &&
+                   strstr(out, "M53_S1_FALLBACK\treason=mismatch\tnative=0\ttape=1") != 0,
+                   "dev-probe-arm64-mutant-two-way-parity");
+                if (out) { mm_free(out); out = 0; }
+            } else {
+                ck(0, "dev-probe-arm64-mutant-two-way-parity");
             }
         }
         if (ref_out) mm_free(ref_out);
