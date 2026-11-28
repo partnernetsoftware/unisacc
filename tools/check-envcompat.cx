@@ -95,18 +95,53 @@ int main(int argc, char **argv) {
     nd = deprecated_rows(tbl, dep, 16);
     ck(nd == 2, "only-compat-exec-c-unisa-rows");
     {
+        static const char *const want7[7] = {
+            "CONTAINER", "FFI_BRIDGE", "FWD_REPLAY", "JOBS", "KERNEL", "KERNEL_SHA", "MAXSTEPS"
+        };
+        int seen[7] = {0, 0, 0, 0, 0, 0, 0};
         FILE *ef = fopen("cx/sys/env.cx", "r");
         char *eb = ef ? malloc(65536) : 0;
         size_t en = (ef && eb) ? fread(eb, 1, 65535, ef) : 0;
+        int exact_ok = (eb && en > 0);
+        int count = 0;
         if (ef) fclose(ef);
         if (eb) eb[en] = 0;
-        int pairs_ok = (eb && en > 0);
-        for (i = 0; i < nl && pairs_ok; i++) {
-            char pat[128];
-            cx_fmt(pat, sizeof pat, "{\"UNISACC_%s\", \"UNISA_%s\"}", ec_legacy_name(i), ec_legacy_name(i));
-            if (!strstr(eb, pat)) pairs_ok = 0;
+        if (exact_ok) {
+            const char *tb = strstr(eb, "sy_compat_env");
+            const char *te = tb ? strstr(tb, "};") : 0;
+            const char *p = tb;
+            if (!tb || !te) exact_ok = 0;
+            while (exact_ok && p < te) {
+                const char *q = strstr(p, "{\"UNISACC_");
+                if (!q || q >= te) break;
+                q += 10;
+                const char *q1 = strchr(q, '"');
+                if (!q1 || q1 >= te) { exact_ok = 0; break; }
+                size_t klen = (size_t)(q1 - q);
+                char kname[64];
+                if (klen == 0 || klen >= sizeof kname) { exact_ok = 0; break; }
+                mm_copy(kname, sizeof kname, q, klen);
+                kname[klen] = 0;
+                char expected_pair[160];
+                cx_fmt(expected_pair, sizeof expected_pair, "{\"UNISACC_%s\", \"UNISA_%s\"}", kname, kname);
+                if (strncmp(q - 10, expected_pair, strlen(expected_pair)) != 0) { exact_ok = 0; break; }
+                int matched = -1;
+                int wi;
+                for (wi = 0; wi < 7; wi++) {
+                    if (strcmp(kname, want7[wi]) == 0) { matched = wi; break; }
+                }
+                if (matched < 0 || seen[matched]) { exact_ok = 0; break; }
+                seen[matched] = 1;
+                count++;
+                p = q1 + 1;
+            }
+            int wi;
+            for (wi = 0; wi < 7 && exact_ok; wi++) {
+                if (!seen[wi]) exact_ok = 0;
+            }
+            if (count != 7) exact_ok = 0;
         }
-        ck(pairs_ok, "product-compat-table-matches-7-pairs");
+        ck(exact_ok, "product-compat-table-matches-7-pairs");
         free(eb);
     }
     free(tbl);
@@ -172,6 +207,68 @@ int main(int argc, char **argv) {
       for (bi = 18; bi < 1100; bi++) big[bi] = 'x';
       big[1100] = 0; n = 0; arr[0] = 0; (void)pr;
       ck(ec_envp(arr, &n, 8, big) == 0 && n == 2 && strlen(arr[1]) == strlen(big) - 2 && !strncmp(arr[1], "UNISA_CONTAINER=", 16), "envp-long-value-still-gets-its-twin-whole"); }
+    {
+        char tmpdir[128];
+        char cmd[512];
+        char psrc[160];
+        char pbin[160];
+        char csrc[160];
+        char cbin[160];
+        char cwd[256];
+        FILE *pf;
+        int rc;
+        cx_fmt(tmpdir, sizeof tmpdir, "/tmp/check-envcompat-prod-%d", (int)getpid());
+        if (!getcwd(cwd, sizeof cwd)) cwd[0] = 0;
+        cx_fmt(cmd, sizeof cmd, "mkdir -p %s && ln -sfn %s/cx %s/cx && ln -sfn %s/cxroot.tsv %s/cxroot.tsv", tmpdir, cwd, tmpdir, cwd, tmpdir);
+        rc = system(cmd);
+        ck(rc == 0, "prod-probe-dir-setup");
+        cx_fmt(psrc, sizeof psrc, "%s/probe.cx", tmpdir);
+        cx_fmt(pbin, sizeof pbin, "%s/probe", tmpdir);
+        pf = fopen(psrc, "w");
+        if (pf) {
+            fprintf(pf, "#pragma unisa use cx.sys.env\nint printf(const char *, ...);\nint main(void) {\n    const char *j = sy_env(\"UNISACC_JOBS\");\n    const char *c = sy_env(\"UNISACC_CONTAINER\");\n    const char *a = sy_env(\"UNISACC_APE_SELF\");\n    printf(\"JOBS=%%s|CONT=%%s|APE=%%s\\n\", j ? j : \"<NULL>\", c ? c : \"<NULL>\", a ? a : \"<NULL>\");\n    return 0;\n}\n");
+            fclose(pf);
+        }
+        cx_fmt(cmd, sizeof cmd, "cd %s && %s/unisacc.com %s -o %s >/dev/null 2>&1", tmpdir, cwd, psrc, pbin);
+        rc = system(cmd);
+        ck(rc == 0, "prod-sy-env-probe-builds");
+        cx_fmt(cmd, sizeof cmd, "env -u UNISACC_JOBS -u UNISA_JOBS UNISACC_JOBS=new UNISA_JOBS=old %s | grep -qx 'JOBS=new|CONT=<NULL>|APE=<NULL>'", pbin);
+        ck(system(cmd) == 0, "prod-sy-env-conflict-new-wins");
+        cx_fmt(cmd, sizeof cmd, "env -u UNISACC_JOBS -u UNISA_JOBS UNISACC_JOBS= UNISA_JOBS=old %s | grep -qx 'JOBS=|CONT=<NULL>|APE=<NULL>'", pbin);
+        ck(system(cmd) == 0, "prod-sy-env-empty-new-wins");
+        cx_fmt(cmd, sizeof cmd, "env -u UNISACC_JOBS -u UNISA_JOBS UNISA_JOBS=old %s | grep -qx 'JOBS=old|CONT=<NULL>|APE=<NULL>'", pbin);
+        ck(system(cmd) == 0, "prod-sy-env-old-only-fallback");
+        cx_fmt(cmd, sizeof cmd, "env -u UNISACC_CONTAINER -u UNISA_CONTAINER -u UNISACC_APE_SELF UNISA_CONTAINER=%s/c.ape UNISACC_APE_SELF=%s/c.ape %s | grep -qx 'JOBS=<NULL>|CONT=%s/c.ape|APE=%s/c.ape'", tmpdir, tmpdir, pbin, tmpdir, tmpdir);
+        ck(system(cmd) == 0, "prod-launcher-old-container-ape-self-pairing");
+        cx_fmt(csrc, sizeof csrc, "%s/c_runreuse.c", tmpdir);
+        cx_fmt(cbin, sizeof cbin, "%s/c_runreuse", tmpdir);
+        pf = fopen(csrc, "w");
+        if (pf) {
+            fprintf(pf, "#include <stdio.h>\n#include <stdlib.h>\n#include <errno.h>\n#include <string.h>\n#include <unistd.h>\n#include <sys/stat.h>\n#define RF_STRICT 0\ntypedef struct { unsigned char *b; int n; int cap; } Buf;\nstatic Buf ATTRS; static int ATTR_SLOT = -1; static struct { unsigned char *data; int len; } RI[1];\nstatic const char *rf_capture_dir(void){return 0;}\nstatic int rr_is_dir(const char *p){(void)p;return 0;}\nstatic const char *bx_file_mode(int w){return w?\"wb\":\"rb\";}\n#include \"exec/c/runreuse.h\"\nint main(void) {\n    const char *p = rr_product_path(\"/arg0\");\n    printf(\"%%s\\n\", p ? p : \"<NULL>\");\n    return 0;\n}\n");
+            fclose(pf);
+        }
+        cx_fmt(cmd, sizeof cmd, "/usr/bin/cc -I%s -o %s %s", cwd, cbin, csrc);
+        ck(system(cmd) == 0, "c-path-runreuse-builds");
+        cx_fmt(cmd, sizeof cmd, "env -u UNISACC_CONTAINER -u UNISA_CONTAINER UNISACC_CONTAINER=/new/c UNISA_CONTAINER=/old/c %s | grep -qx '/new/c'", cbin);
+        ck(system(cmd) == 0, "c-path-runreuse-conflict-new-wins");
+        cx_fmt(cmd, sizeof cmd, "env -u UNISACC_CONTAINER -u UNISA_CONTAINER UNISA_CONTAINER=/old/c %s | grep -qx '/old/c'", cbin);
+        ck(system(cmd) == 0, "c-path-runreuse-old-only-fallback");
+        cx_fmt(csrc, sizeof csrc, "%s/c_binding.c", tmpdir);
+        cx_fmt(cbin, sizeof cbin, "%s/c_binding", tmpdir);
+        pf = fopen(csrc, "w");
+        if (pf) {
+            fprintf(pf, "#include <stdio.h>\n#include <stdlib.h>\n#include <string.h>\ntypedef long I;\ntypedef struct { int dummy; } CoreModel;\ntypedef struct { int dummy; } CoreResult;\nstatic void die(const char *s){(void)s;}\nstatic int core_host_fetch(unsigned char *a,long b,unsigned char **c,int *d){(void)a;(void)b;(void)c;(void)d;return 0;}\nstatic void core_host_panic(char *a){(void)a;}\nstatic unsigned char *readfile(const char *p,int *n,int z){(void)p;(void)n;(void)z;return 0;}\nstatic long __mmap(long a,long b,long c,long d,long e,long f){(void)a;(void)b;(void)c;(void)d;(void)e;(void)f;return 0;}\nstatic int __mprotect(long a,long b,long c){(void)a;(void)b;(void)c;return 0;}\n#include \"exec/c/asm/binding.c\"\nint main(void) {\n    const char *p = getenv(\"UNISACC_KERNEL\");\n    if (!p) p = getenv(\"UNISA_KERNEL\");\n    printf(\"%%s\\n\", p ? p : \"<NULL>\");\n    return 0;\n}\n");
+            fclose(pf);
+        }
+        cx_fmt(cmd, sizeof cmd, "/usr/bin/cc -D__UNISA__ -I%s -o %s %s >/dev/null 2>&1", cwd, cbin, csrc);
+        ck(system(cmd) == 0, "c-path-binding-builds");
+        cx_fmt(cmd, sizeof cmd, "env -u UNISACC_KERNEL -u UNISA_KERNEL UNISACC_KERNEL=/new/k UNISA_KERNEL=/old/k %s | grep -qx '/new/k'", cbin);
+        ck(system(cmd) == 0, "c-path-binding-conflict-new-wins");
+        cx_fmt(cmd, sizeof cmd, "env -u UNISACC_KERNEL -u UNISA_KERNEL UNISA_KERNEL=/old/k %s | grep -qx '/old/k'", cbin);
+        ck(system(cmd) == 0, "c-path-binding-old-only-fallback");
+        cx_fmt(cmd, sizeof cmd, "rm -rf %s", tmpdir);
+        system(cmd);
+    }
     sy_printf("CHECK_ENVCOMPAT\tassertions=%d\tfailed=%d\n", nas, failed);
     return failed ? 1 : 0;
 }
