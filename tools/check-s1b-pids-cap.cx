@@ -182,6 +182,48 @@ int main(void) {
         ck(ok, "s1b-enoent-target-preserves-filenotfound");
     }
 
+    /* (5) Fast-exit single-fork probe under cap=1 (cdx onefork.cx): 20/20 MUST report process-cap-exceeded */
+    {
+        char of_cx[4200], of_bin[4200];
+        cx_fmt(of_cx, sizeof of_cx, "%s/onefork.cx", tmp);
+        cx_fmt(of_bin, sizeof of_bin, "%s/onefork.bin", tmp);
+        const char *of_src =
+            "int main(void) {\n"
+            "  int p = fork();\n"
+            "  if (p == 0) _exit(0);\n"
+            "  if (p > 0) { int st; waitpid(p, &st, 0); }\n"
+            "  printf(\"fork=%d errno=%d\\n\", p, errno);\n"
+            "  return 0;\n"
+            "}\n";
+        int built = 0;
+        if (sy_write_file(of_cx, of_src, (int64_t)strlen(of_src), 0600) == 0) {
+            char *bv[] = { "sh", "./unisacc.com", of_cx, "-o", of_bin, 0 }; /* lint:allow R1-product compiles onefork probe */
+            pr_result br;
+            int brc = pr_run("s1b-of-build", bv, ".", 0, 15, &br);
+            built = (brc == 0 && br.rc == 0 && sy_exists(of_bin) == 1);
+            if (!built) sy_eprintf("S1B5_BUILD rc=%d prc=%d err=%.*s\n", brc, br.rc, (int)br.errn, br.err ? br.err : "");
+            pr_free(&br);
+        }
+        int breaches = 0;
+        if (built) {
+            char *av[] = { of_bin, 0 };
+            for (int iter = 0; iter < 20; iter++) {
+                np_result r = {0};
+                char why[300];
+                why[0] = 0;
+                int tr = np_run_capped(av, ".", 0, 5, 1, &r, why, sizeof why);
+                if (tr == -1 && tx_find(why, (long)strlen(why), "process-cap-exceeded: mode=cgroup-pids-hard", 43) >= 0) {
+                    breaches++;
+                } else {
+                    sy_eprintf("S1B5 iter=%d tr=%d rc=%d why=%s\n", iter, tr, r.rc, why);
+                }
+                np_free(&r);
+            }
+        }
+        sy_printf("S1B_ONEFORK_20\tbreaches=%d/20\n", breaches);
+        ck(built && breaches == 20, "s1b-onefork-cap1-20-of-20-breach");
+    }
+
     sy_remove_all(tmp);
     sy_printf("CHECK_S1B_PIDS_CAP\tpassed=%d\tfailed=%d\n", g_pass, g_fail);
     return g_fail ? 1 : 0;
