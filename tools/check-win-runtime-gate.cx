@@ -1,0 +1,1266 @@
+/* tools/check-win-runtime-gate.cx -- Automated gate self-check & negative-control suite.
+ *
+ *   sh ./unisacc.com tools/check-win-runtime-gate.cx --
+ *
+ * Tests tools/check-win-runtime-smoke.cx and .github/workflows/win-runtime-smoke.yml:
+ *   1. Compiles tools/check-win-runtime-smoke.cx natively on lnx/x86_64, verifies
+ *      win/x86_64 (COFF 0x8664) and win/arm64 (COFF 0xAA64) object builds, and runs --self-check.
+ *   2. Extracts embedded UNIPKG1 pkg.bin from candidate APE via --extract-ape-pkg.
+ *   3. Positive host smoke run + --seal + --judge on lnx/x86_64 (--version, hello,
+ *      m25-single, m25-separate, stream e2->e1->e3, rc_v3 receipt).
+ *   4. v0.1.10 stack-probe positive control (0x1000 commit + 4KiB probe chain -> PASS)
+ *      and same-PE --make-neg-pe derivation (collapsed to unprobed 8248B at 0x1000 commit).
+ *   5. Negative control: unprobed 8248B frame at 0x1000 commit triggers 0xC0000005 gate block
+ *      across --verify-pe, --seal --mode negative (no hand-written failure rows),
+ *      --judge --mode negative, mandatory --candidate-pe refusal, forged PASS block, and
+ *      arm64 pe-meta digest / PE hash mismatch refusals.
+ *   6. v3 receipt tamper matrix (output, inputs/locators, v2 downgrade, O_NOFOLLOW symlink/FIFO).
+ *   7. CI workflow contract check + cx rc_v3 receipt/manifest validators + release consumer chain
+ *      (tools/ci-verdict.cx --workflow win-runtime-smoke.yml -> tools/release-decide.cx).
+ */
+#pragma unisa use cxlib.receipt
+#pragma unisa use sys.env
+#pragma unisa use sys.fs
+#pragma unisa use sys.io
+#pragma unisa use sys.posix
+#pragma unisa use sys.proc
+#pragma unisa use sys.sha
+#pragma unisa use sys.time
+#pragma unisa use mem.bytes
+#pragma unisa use mem.heap
+#pragma unisa use text.fmt
+#pragma unisa use text.text
+
+static int g_pass;
+static int g_fail;
+
+static void ck(int ok, const char *name) {
+    if (ok) { g_pass++; sy_printf("PASS\tcheck-win-runtime-gate.%s\n", name); }
+    else { g_fail++; sy_printf("FAIL\tcheck-win-runtime-gate.%s\n", name); }
+}
+
+static unsigned int wrg_u32(const unsigned char *p) {
+    return (unsigned int)p[0] | ((unsigned int)p[1] << 8) |
+           ((unsigned int)p[2] << 16) | ((unsigned int)p[3] << 24);
+}
+
+static unsigned int wrg_u16(const unsigned char *p) {
+    return (unsigned int)p[0] | ((unsigned int)p[1] << 8);
+}
+
+static void wrg_wr64(unsigned char *p, unsigned long long v) {
+    int i;
+    for (i = 0; i < 8; i++) p[i] = (unsigned char)((v >> (i * 8)) & 0xffULL);
+}
+
+static int wrg_read_text(const char *path, char *dst, long cap) {
+    unsigned char *b = 0;
+    int64_t n = 0;
+    if (sy_read_file(path, &b, &n, cap - 1) != 0 || !b) {
+        if (b) mm_free(b);
+        return 1;
+    }
+    if (n >= cap) n = cap - 1;
+    mm_copy(dst, (long)cap, b, (long)n);
+    dst[n] = 0;
+    mm_free(b);
+    return 0;
+}
+
+static int wrg_line_eq(const char *buf, size_t n, const char *want) {
+    size_t wl = strlen(want);
+    if (!buf) return 0;
+    if (n == wl && memcmp(buf, want, wl) == 0) return 1;
+    if (n == wl + 1 && memcmp(buf, want, wl) == 0 && buf[wl] == '\n') return 1;
+    return 0;
+}
+
+static int wrg_run_merged(char **av, int sec, char *out, int cap) {
+    char *bv[128];
+    char sb[16];
+    int i = 0, cut = 0;
+    (void)cx_fmt(sb, sizeof sb, "%d", sec);
+    bv[0] = "./tools/bound";
+    bv[1] = sb;
+    while (av[i] && i + 2 < 127) { bv[i + 2] = av[i]; i++; }
+    bv[i + 2] = 0;
+    if (out && cap > 0) out[0] = 0;
+    return sy_run(bv, out, cap, &cut);
+}
+
+static int wrg_run_split(const char *tmp, char **av, int sec, char *outb, long ocap, long *on,
+                         char *errb, long ecap, long *en) {
+    char of[4200], ef[4200], dummy[256];
+    char *wv[128];
+    int i = 0, rc;
+    (void)cx_fmt(of, sizeof of, "%s/cap.out", tmp);
+    (void)cx_fmt(ef, sizeof ef, "%s/cap.err", tmp);
+    wv[0] = "sh";
+    wv[1] = "-c";
+    wv[2] = "o=\"$1\"; e=\"$2\"; shift 2; exec \"$@\" >\"$o\" 2>\"$e\"";
+    wv[3] = "sh";
+    wv[4] = of;
+    wv[5] = ef;
+    while (av[i] && i + 6 < 127) { wv[i + 6] = av[i]; i++; }
+    wv[i + 6] = 0;
+    rc = wrg_run_merged(wv, sec, dummy, (int)sizeof dummy);
+    if (outb && ocap > 0) {
+        if (wrg_read_text(of, outb, ocap) != 0) { outb[0] = 0; if (on) *on = 0; }
+        else if (on) *on = (long)strlen(outb);
+    }
+    if (errb && ecap > 0) {
+        if (wrg_read_text(ef, errb, ecap) != 0) { errb[0] = 0; if (en) *en = 0; }
+        else if (en) *en = (long)strlen(errb);
+    }
+    return rc;
+}
+
+static int wrg_run_pair(const char *tmp, const char *c1, int sec1, char *o1, int cap1,
+                        const char *c2, int sec2, char *o2, int cap2, int *rc1, int *rc2) {
+    char p1[4200], p2[4200], s1[8192], s2[8192];
+    char *av1[4], *av2[4];
+    sy_spawn_t opt[2];
+    sy_child_t ch[2];
+    int sp[2], i;
+    (void)cx_fmt(p1, sizeof p1, "%s/pair1.out", tmp);
+    (void)cx_fmt(p2, sizeof p2, "%s/pair2.out", tmp);
+    (void)cx_fmt(s1, sizeof s1, "exec ./tools/bound %d sh -c '%s' >'%s' 2>&1", sec1, c1, p1);
+    (void)cx_fmt(s2, sizeof s2, "exec ./tools/bound %d sh -c '%s' >'%s' 2>&1", sec2, c2, p2);
+    av1[0] = "sh"; av1[1] = "-c"; av1[2] = s1; av1[3] = 0;
+    av2[0] = "sh"; av2[1] = "-c"; av2[2] = s2; av2[3] = 0;
+    for (i = 0; i < 2; i++) {
+        sy_spawn_init(&opt[i]);
+        opt[i].argv = (i == 0) ? av1 : av2;
+        opt[i].in_fd = SY_STDIO_NULL;
+        opt[i].out_fd = SY_STDIO_NULL;
+        opt[i].err_fd = SY_STDIO_NULL;
+        opt[i].pgroup = -1;
+        opt[i].deadline_ms = (i == 0 ? sec1 : sec2) * 1000L;
+        sp[i] = sy_proc_spawn(&opt[i], &ch[i]);
+    }
+    *rc1 = -1; *rc2 = -1;
+    for (i = 0; i < 2; i++) {
+        if (sp[i] == 0) {
+            sy_exit_t st;
+            if (sy_proc_wait(&ch[i], &st) == 0) {
+                int c = sy_exit_code(&st);
+                if (i == 0) *rc1 = c; else *rc2 = c;
+            }
+        }
+    }
+    if (o1 && cap1 > 0 && wrg_read_text(p1, o1, (long)cap1) != 0) o1[0] = 0;
+    if (o2 && cap2 > 0 && wrg_read_text(p2, o2, (long)cap2) != 0) o2[0] = 0;
+    return (*rc1 == 0 && *rc2 == 0) ? 0 : 1;
+}
+
+static int wrg_check_coff_obj(const char *path, unsigned int want_mach) {
+    unsigned char *b = 0;
+    int64_t n = 0;
+    int ok = 0;
+    if (sy_read_file(path, &b, &n, 16 << 20) == 0 && b && n >= 1024) {
+        ok = (wrg_u16(b) == want_mach);
+    }
+    if (b) mm_free(b);
+    return ok;
+}
+
+/* Inject a real v0.1.10 x64 4KiB probe chain (8248B total: 4096+4096+56) at commit=0x1000
+ * by replacing a deterministic sentinel instruction sequence inside a compiled PE .text section. */
+static int wrg_build_probed_0x1000_pe(const char *src_path, const char *dst_path) {
+    /* 33-byte v0.1.10 x64 static+residue probe sequence from 831bbddd4 */
+    static const unsigned char probe33[33] = {
+        0x48U, 0x81U, 0xecU, 0x00U, 0x10U, 0x00U, 0x00U, /* sub $0x1000, %rsp */
+        0x48U, 0x83U, 0x0cU, 0x24U, 0x00U,             /* orq $0, (%rsp) */
+        0x48U, 0x81U, 0xecU, 0x00U, 0x10U, 0x00U, 0x00U, /* sub $0x1000, %rsp */
+        0x48U, 0x83U, 0x0cU, 0x24U, 0x00U,             /* orq $0, (%rsp) */
+        0x48U, 0x83U, 0xecU, 0x38U,                    /* sub $0x38, %rsp */
+        0x48U, 0x83U, 0x0cU, 0x24U, 0x00U              /* orq $0, (%rsp) */
+    };
+    unsigned char *buf = 0;
+    int64_t len = 0;
+    unsigned int pe_off, opt_off, nsec, opt_sz, sec_off, s;
+    int patched = 0;
+    if (sy_read_file(src_path, &buf, &len, 32 << 20) != 0 || !buf || len < 256) {
+        if (buf) mm_free(buf);
+        return 1;
+    }
+    if (buf[0] != 'M' || buf[1] != 'Z') { mm_free(buf); return 1; }
+    pe_off = wrg_u32(buf + 60);
+    if ((int64_t)pe_off + 24 > len || buf[pe_off] != 'P' || buf[pe_off + 1] != 'E') { mm_free(buf); return 1; }
+    nsec = wrg_u16(buf + pe_off + 6);
+    opt_sz = wrg_u16(buf + pe_off + 20);
+    opt_off = pe_off + 24U;
+    sec_off = opt_off + opt_sz;
+    if (opt_sz < 88U || nsec == 0U || (int64_t)sec_off + (int64_t)nsec * 40 > len) { mm_free(buf); return 1; }
+    for (s = 0U; s < nsec && !patched; s++) {
+        unsigned int sh = sec_off + s * 40U;
+        unsigned int raw_sz = wrg_u32(buf + sh + 16U);
+        unsigned int raw_ptr = wrg_u32(buf + sh + 20U);
+        unsigned int chars = wrg_u32(buf + sh + 36U);
+        unsigned int i;
+        if ((chars & 0x20000000U) == 0U || (int64_t)raw_ptr + (int64_t)raw_sz > len) continue;
+        for (i = 0U; i + 40U <= raw_sz; i++) {
+            const unsigned char *p = buf + raw_ptr + i;
+            /* Locate our consecutive sentinel immediate 0x5a5a5a5a inside sentinel_probe_slot .text */
+            if (p[0] == 0x5aU && p[1] == 0x5aU && p[2] == 0x5aU && p[3] == 0x5aU && i + 40U <= raw_sz) {
+                /* Overwrite starting 3 bytes back (past mov opcode) cleanly in executable section */
+                if (i >= 3U && raw_ptr + i - 3U + 33U <= (unsigned int)len) {
+                    mm_copy(buf + raw_ptr + i - 3U, 33, probe33, 33);
+                    patched = 1;
+                    break;
+                }
+            }
+        }
+    }
+    wrg_wr64(buf + opt_off + 72U, 0x100000ULL);
+    wrg_wr64(buf + opt_off + 80U, 0x1000ULL);
+    {
+        int rc = (patched && sy_write_atomic(dst_path, buf, (long)len, 0755) == 0) ? 0 : 1;
+        mm_free(buf);
+        return rc;
+    }
+}
+
+static int wrg_patch_commit_only(const char *src_path, const char *dst_path, unsigned long long commit_val) {
+    unsigned char *buf = 0;
+    int64_t len = 0;
+    unsigned int pe_off, opt_off, opt_sz;
+    int rc;
+    if (sy_read_file(src_path, &buf, &len, 32 << 20) != 0 || !buf || len < 256) {
+        if (buf) mm_free(buf);
+        return 1;
+    }
+    pe_off = wrg_u32(buf + 60);
+    opt_sz = wrg_u16(buf + pe_off + 20);
+    opt_off = pe_off + 24U;
+    if ((int64_t)opt_off + 88 > len || opt_sz < 88U) { mm_free(buf); return 1; }
+    wrg_wr64(buf + opt_off + 72U, 0x100000ULL);
+    wrg_wr64(buf + opt_off + 80U, commit_val);
+    rc = sy_write_atomic(dst_path, buf, (long)len, 0755);
+    mm_free(buf);
+    return rc != 0 ? 1 : 0;
+}
+
+static int wrg_run_host_smoke(const char *tmp, const char *rev, const char *cand_sha, const char *rel_ver, const char *outf) {
+    char hc[4200], he[4200], ac[4200], bc[4200], ao[4200], bo[4200], ex1[4200], ex2[4200];
+    char pc[4200], e2[4200], e1[4200], e3[4200], scmd[4096];
+    char buf[16384], ro[4096], re[4096], want_v[64], hsha[65] = "-", e3sha[65] = "-";
+    long len = 0, t0, ron = 0, ren = 0;
+    int64_t e3n = 0;
+    int w;
+
+    w = snprintf(buf + len, sizeof buf - (size_t)len,
+                 "lnx/x86_64\tidentity\tPASS\t0\t0\t%s\t%s\thost\n"
+                 "lnx/x86_64\tpe-meta\tPASS\t0\t0\t%s\t%s\tmode=elf64\n",
+                 cand_sha, rev, cand_sha, rev);
+    if (w <= 0) return 1;
+    len += w;
+
+    t0 = sy_now_ms();
+    {
+        char *vv[] = {"sh", "./unisacc.com", "--version", 0}; /* lint:allow R1-product exercises candidate --version smoke check */
+        (void)cx_fmt(want_v, sizeof want_v, "unisacc %s", rel_ver);
+        if (wrg_run_split(tmp, vv, 30, ro, (long)sizeof ro, &ron, re, (long)sizeof re, &ren) != 0 ||
+            ren != 0 || !wrg_line_eq(ro, (size_t)ron, want_v)) {
+            return 1;
+        }
+    }
+    w = snprintf(buf + len, sizeof buf - (size_t)len, "lnx/x86_64\tversion\tPASS\t0\t%ld\t%s\t%s\t%s\n",
+                 sy_now_ms() - t0, cand_sha, rev, want_v);
+    if (w <= 0) return 1;
+    len += w;
+
+    t0 = sy_now_ms();
+    (void)cx_fmt(hc, sizeof hc, "%s/hello.c", tmp);
+    (void)cx_fmt(he, sizeof he, "%s/hello.bin", tmp);
+    {
+        const char *hsrc = "#include <stdio.h>\nint main(void){puts(\"win-runtime-hello\");return 0;}\n";
+        if (sy_write_atomic(hc, hsrc, (long)strlen(hsrc), 0644) != 0) return 1;
+    }
+    {
+        char *ch[] = {"sh", "./unisacc.com", "-o", he, hc, 0}; /* lint:allow R1-product exercises candidate compile hello */
+        char *rh[] = {he, 0};
+        if (wrg_run_split(tmp, ch, 45, ro, (long)sizeof ro, &ron, re, (long)sizeof re, &ren) != 0) return 1;
+        if (wrg_run_split(tmp, rh, 20, ro, (long)sizeof ro, &ron, re, (long)sizeof re, &ren) != 0 ||
+            ren != 0 || !wrg_line_eq(ro, (size_t)ron, "win-runtime-hello")) return 1;
+        (void)rc_regular_sha256_size(he, hsha, 0, 32 << 20);
+    }
+    w = snprintf(buf + len, sizeof buf - (size_t)len, "lnx/x86_64\thello\tPASS\t0\t%ld\t%s\t%s\texe_sha=%s\n",
+                 sy_now_ms() - t0, cand_sha, rev, hsha);
+    if (w <= 0) return 1;
+    len += w;
+
+    (void)cx_fmt(ac, sizeof ac, "%s/a.c", tmp);
+    (void)cx_fmt(bc, sizeof bc, "%s/b.c", tmp);
+    (void)cx_fmt(ao, sizeof ao, "%s/a.o", tmp);
+    (void)cx_fmt(bo, sizeof bo, "%s/b.o", tmp);
+    (void)cx_fmt(ex1, sizeof ex1, "%s/ab1.bin", tmp);
+    (void)cx_fmt(ex2, sizeof ex2, "%s/ab2.bin", tmp);
+    {
+        const char *asrc = "#include <stdio.h>\nint g(int x);\nint main(void){printf(\"m25-ab %d\\n\",g(21));return 0;}\n";
+        const char *bsrc = "#include <stdio.h>\nint g(int x){fprintf(stderr,\"m25-b\\n\");return x*2;}\n";
+        if (sy_write_atomic(ac, asrc, (long)strlen(asrc), 0644) != 0 ||
+            sy_write_atomic(bc, bsrc, (long)strlen(bsrc), 0644) != 0) return 1;
+    }
+
+    t0 = sy_now_ms();
+    {
+        char *cs[] = {"sh", "./unisacc.com", "-O0", "-o", ex1, ac, bc, 0}; /* lint:allow R1-product exercises m25 single compile */
+        char *rs[] = {ex1, 0};
+        if (wrg_run_split(tmp, cs, 45, ro, (long)sizeof ro, &ron, re, (long)sizeof re, &ren) != 0 ||
+            strstr(re, "private stdio table") != 0) return 1;
+        if (wrg_run_split(tmp, rs, 20, ro, (long)sizeof ro, &ron, re, (long)sizeof re, &ren) != 0 ||
+            !wrg_line_eq(ro, (size_t)ron, "m25-ab 42") || !wrg_line_eq(re, (size_t)ren, "m25-b")) return 1;
+    }
+    w = snprintf(buf + len, sizeof buf - (size_t)len, "lnx/x86_64\tm25-single\tPASS\t0\t%ld\t%s\t%s\tok\n",
+                 sy_now_ms() - t0, cand_sha, rev);
+    if (w <= 0) return 1;
+    len += w;
+
+    t0 = sy_now_ms();
+    {
+        char *ca[] = {"sh", "./unisacc.com", "-O0", "-c", "-o", ao, ac, 0}; /* lint:allow R1-product exercises m25 unit a */
+        char *cb[] = {"sh", "./unisacc.com", "-O0", "-c", "-o", bo, bc, 0}; /* lint:allow R1-product exercises m25 unit b */
+        char *cl[] = {"sh", "./unisacc.com", "-o", ex2, ao, bo, 0}; /* lint:allow R1-product exercises m25 separate link */
+        char *rl[] = {ex2, 0};
+        if (wrg_run_split(tmp, ca, 30, ro, (long)sizeof ro, &ron, re, (long)sizeof re, &ren) != 0) return 1;
+        if (wrg_run_split(tmp, cb, 30, ro, (long)sizeof ro, &ron, re, (long)sizeof re, &ren) != 0) return 1;
+        if (wrg_run_split(tmp, cl, 30, ro, (long)sizeof ro, &ron, re, (long)sizeof re, &ren) != 0 ||
+            strstr(re, "unisacc: warning: 2 objects each carry a private stdio table") == 0) return 1;
+        if (wrg_run_split(tmp, rl, 20, ro, (long)sizeof ro, &ron, re, (long)sizeof re, &ren) != 0 ||
+            !wrg_line_eq(ro, (size_t)ron, "m25-ab 42") || !wrg_line_eq(re, (size_t)ren, "m25-b")) return 1;
+    }
+    w = snprintf(buf + len, sizeof buf - (size_t)len, "lnx/x86_64\tm25-separate\tPASS\t0\t%ld\t%s\t%s\twarning_matched=1\n",
+                 sy_now_ms() - t0, cand_sha, rev);
+    if (w <= 0) return 1;
+    len += w;
+
+    t0 = sy_now_ms();
+    (void)cx_fmt(pc, sizeof pc, "%s/plain.c", tmp);
+    (void)cx_fmt(e2, sizeof e2, "%s/e2.out", tmp);
+    (void)cx_fmt(e1, sizeof e1, "%s/e1.out", tmp);
+    (void)cx_fmt(e3, sizeof e3, "%s/e3.out", tmp);
+    {
+        const char *psrc = "int f(int x){return x*2;}\nint main(void){return f(21)-42;}\n";
+        if (sy_write_atomic(pc, psrc, (long)strlen(psrc), 0644) != 0) return 1;
+    }
+    (void)cx_fmt(scmd, sizeof scmd,
+                 "sh ./unisacc.com stream e2 --route lnx/x86_64/run/O0 --res run-forward --source '%s' < '%s' > '%s' && "
+                 "sh ./unisacc.com stream e1 --route lnx/x86_64/run/O0 --res run-forward --source '%s' < '%s' > '%s' && "
+                 "sh ./unisacc.com stream e3 --route lnx/x86_64/run/O0 --res run-forward --source '%s' < '%s' > '%s'",
+                 pc, pc, e2, pc, e2, e1, pc, e1, e3);
+    {
+        char *sv[] = {"sh", "-c", scmd, 0};
+        if (wrg_run_split(tmp, sv, 45, ro, (long)sizeof ro, &ron, re, (long)sizeof re, &ren) != 0 || ren != 0) return 1;
+        if (rc_regular_sha256_size(e3, e3sha, &e3n, 16 << 20) != 0 || e3n <= 0) return 1;
+    }
+    w = snprintf(buf + len, sizeof buf - (size_t)len, "lnx/x86_64\tstream-e3\tPASS\t0\t%ld\t%s\t%s\te3_bytes=%lld;e3_sha=%s\n",
+                 sy_now_ms() - t0, cand_sha, rev, (long long)e3n, e3sha);
+    if (w <= 0) return 1;
+    len += w;
+
+    return sy_write_atomic(outf, buf, len, 0644) != 0 ? 1 : 0;
+}
+
+static long wrg_find(const char *hay, long hlen, const char *needle) {
+    long nl;
+    if (!hay || !needle || hlen <= 0) return -1;
+    nl = tx_len(needle, 1024);
+    if (nl <= 0 || nl > hlen) return -1;
+    return tx_find(hay, hlen, needle, nl);
+}
+
+static void wrg_strip_comments(const char *src, char *dst, size_t cap) {
+    size_t i = 0, o = 0;
+    int in_sq = 0, in_dq = 0;
+    if (!dst || cap == 0) return;
+    if (!src) { dst[0] = 0; return; }
+    while (src[i] && o + 1 < cap) {
+        char ch = src[i];
+        if (ch == '\n') {
+            in_sq = 0;
+            in_dq = 0;
+            dst[o++] = ch;
+            i++;
+            continue;
+        }
+        if (!in_sq && !in_dq && ch == '#') {
+            while (src[i] && src[i] != '\n') i++;
+            continue;
+        }
+        if (ch == '\'' && !in_dq) in_sq = !in_sq;
+        else if (ch == '"' && !in_sq) in_dq = !in_dq;
+        dst[o++] = ch;
+        i++;
+    }
+    dst[o] = 0;
+}
+
+static int wrg_extract_ps_func(const char *clean, long clen, const char *sig, char *out, size_t cap) {
+    long off = wrg_find(clean, clen, sig), pos;
+    size_t n = 0;
+    int depth = 0, in_sq = 0, in_dq = 0;
+    if (off < 0 || !out || cap == 0) return -1;
+    pos = off;
+    while (pos < clen && clean[pos] != '{') pos++;
+    if (pos >= clen) return -1;
+    while (pos < clen && n + 1 < cap) {
+        char ch = clean[pos++];
+        out[n++] = ch;
+        if (ch == '\n') { in_sq = 0; in_dq = 0; }
+        else if (ch == '\'' && !in_dq) in_sq = !in_sq;
+        else if (ch == '"' && !in_sq) in_dq = !in_dq;
+        else if (!in_sq && !in_dq) {
+            if (ch == '{') depth++;
+            else if (ch == '}') {
+                depth--;
+                if (depth == 0) { out[n] = 0; return 0; }
+            }
+        }
+    }
+    return -1;
+}
+
+static int wrg_check_workflow_contract(const char *raw) {
+    static char clean[65536];
+    static char ib_fn[16384];
+    long rlen, clen, ilen;
+    long p_start, p_out_mk, p_err_mk, p_out_cp, p_err_cp;
+    if (!raw) return -1;
+    rlen = tx_len(raw, 65535);
+    if (rlen <= 0 || wrg_find(raw, rlen, "awk") >= 0 || wrg_find(raw, rlen, "sed") >= 0 ||
+        wrg_find(raw, rlen, "SHA256SUMS") >= 0 || wrg_find(raw, rlen, "Start-Process") >= 0 ||
+        wrg_find(raw, rlen, "ReadToEndAsync") >= 0 || wrg_find(raw, rlen, "[uint32]") >= 0 ||
+        wrg_find(raw, rlen, "degrade") >= 0 || wrg_find(raw, rlen, "DEGRADE") >= 0 ||
+        wrg_find(raw, rlen, "UNMEASURED") >= 0) return -1;
+    wrg_strip_comments(raw, clean, sizeof clean);
+    clen = tx_len(clean, (long)sizeof clean - 1);
+    if (wrg_extract_ps_func(clean, clen, "function Invoke-Bounded(", ib_fn, sizeof ib_fn) != 0) return -2;
+    ilen = tx_len(ib_fn, (long)sizeof ib_fn - 1);
+    p_start = wrg_find(ib_fn, ilen, "[void]$p.Start()");
+    p_out_mk = wrg_find(ib_fn, ilen, "$outStream = if ($outFile -ne '') { [IO.File]::Create($outFile) } else { [IO.MemoryStream]::new() }");
+    p_err_mk = wrg_find(ib_fn, ilen, "$errStream = [IO.MemoryStream]::new()");
+    p_out_cp = wrg_find(ib_fn, ilen, "$p.StandardOutput.BaseStream.CopyToAsync($outStream)");
+    p_err_cp = wrg_find(ib_fn, ilen, "$p.StandardError.BaseStream.CopyToAsync($errStream)");
+    if (!(p_start >= 0 && p_out_mk >= 0 && p_err_mk >= 0 && p_out_cp >= 0 && p_err_cp >= 0 &&
+          p_start < p_out_mk && p_start < p_err_mk && p_out_mk < p_out_cp && p_err_mk < p_err_cp)) return -3;
+    if (wrg_find(ib_fn, ilen, "[IO.File]::OpenRead($inFile)") < 0 ||
+        wrg_find(ib_fn, ilen, "$pumpTasks.Add($outTask)") < 0 ||
+        wrg_find(ib_fn, ilen, "$pumpTasks.Add($errTask)") < 0 ||
+        wrg_find(ib_fn, ilen, "$pumpTasks.Add($rawInTask)") < 0 ||
+        wrg_find(ib_fn, ilen, "$pt.IsFaulted") < 0 ||
+        wrg_find(ib_fn, ilen, "throw $pt.Exception.GetBaseException()") < 0) return -4;
+    return (wrg_find(clean, clen, "workflow_call:") >= 0 &&
+            wrg_find(clean, clen, "workflow_dispatch:") >= 0 &&
+            wrg_find(clean, clen, "download_repo_scoped") >= 0 &&
+            wrg_find(clean, clen, "CHAIN_FORMAT=rc_v3") >= 0 &&
+            wrg_find(clean, clen, "ConvertTo-UInt32") >= 0 &&
+            wrg_find(clean, clen, "OSArchitecture") >= 0 &&
+            wrg_find(clean, clen, "ProcessArchitecture") >= 0 &&
+            wrg_find(clean, clen, "UNISA_CONTAINER") >= 0 &&
+            wrg_find(clean, clen, "UNISACC_APE_SELF") >= 0 &&
+            wrg_find(clean, clen, "--extract-ape-pkg") >= 0 &&
+            wrg_find(clean, clen, "--make-neg-pe") >= 0 &&
+            wrg_find(clean, clen, "--mode negative") >= 0 &&
+            wrg_find(clean, clen, "--merge-verdict") >= 0 &&
+            wrg_find(clean, clen, "  verdict:") >= 0 &&
+            wrg_find(clean, clen, "needs: [fetch, produce, judge]") >= 0 &&
+            wrg_find(clean, clen, "release-step7.tsv") >= 0 &&
+            wrg_find(clean, clen, "--verify-receipt") >= 0 &&
+            wrg_find(clean, clen, "--verify-manifest") >= 0 &&
+            wrg_find(clean, clen, "--chain-in-sha") >= 0 &&
+            wrg_find(clean, clen, "--print-release-version") >= 0) ? 1 : -5;
+}
+
+static int wrg_comment_out_stmt(const char *src, const char *stmt, char *dst, size_t cap) {
+    long slen = src ? tx_len(src, 65535) : -1;
+    long pre = slen > 0 ? wrg_find(src, slen, stmt) : -1;
+    if (pre < 0 || !dst || (size_t)slen + 3 > cap) return -1;
+    if (pre > 0 && mm_copy(dst, (long)cap, src, pre) != 0) return -1;
+    dst[pre] = '#';
+    dst[pre + 1] = ' ';
+    if (mm_copy(dst + pre + 2, (long)cap - pre - 2, src + pre, slen - pre) != 0) return -1;
+    dst[slen + 2] = 0;
+    return 0;
+}
+
+static int wrg_move_stmt_outside_func(const char *src, const char *stmt, char *dst, size_t cap) {
+    long slen = src ? tx_len(src, 65535) : -1;
+    long pre = slen > 0 ? wrg_find(src, slen, stmt) : -1;
+    long stlen = stmt ? tx_len(stmt, 1024) : -1;
+    long fe_rel, mid_start, fe_off, pos;
+    if (pre < 0 || stlen <= 0 || !dst) return -1;
+    mid_start = pre + stlen;
+    fe_rel = wrg_find(src + mid_start, slen - mid_start, "\n          }\n");
+    if (fe_rel < 0) return -1;
+    fe_off = mid_start + fe_rel + 13;
+    if ((size_t)slen + (size_t)stlen + 24 > cap) return -1;
+    if (pre > 0 && mm_copy(dst, (long)cap, src, pre) != 0) return -1;
+    if (mm_copy(dst + pre, (long)cap - pre, "# removed", 9) != 0) return -1;
+    pos = pre + 9;
+    if (fe_off > mid_start && mm_copy(dst + pos, (long)cap - pos, src + mid_start, fe_off - mid_start) != 0) return -1;
+    pos += fe_off - mid_start;
+    if (mm_copy(dst + pos, (long)cap - pos, "          ", 10) != 0) return -1;
+    pos += 10;
+    if (mm_copy(dst + pos, (long)cap - pos, stmt, stlen) != 0) return -1;
+    pos += stlen;
+    dst[pos++] = '\n';
+    if (slen > fe_off && mm_copy(dst + pos, (long)cap - pos, src + fe_off, slen - fe_off) != 0) return -1;
+    dst[pos + (slen - fe_off)] = 0;
+    return 0;
+}
+
+int main(void) {
+    static char tmp[4096], bin[4400], bin_x64[4400], bin_a64[4400], out[32768], cand_real[4096];
+    static char rcpt[4400], outf[4400], locf[4400], pkg_ext[4400];
+    static char neg_c[4400], neg_raw[4400], neg_1k[4400], pos_probed[4400], arm_pe[4400], arm_1k[4400];
+    static char neg_rcpt[4400], neg_out[4400], neg_loc[4400];
+    char rev[41], cand_sha[65], rel_ver[32], pkg_sha[65];
+    int i;
+
+    for (i = 0; i < 40; i++) rev[i] = 'a';
+    rev[40] = 0;
+
+    if (sy_mkdtemp(sy_tmpdir(), "check-win-rt-", tmp, (int)sizeof tmp) != 0) {
+        sy_eprintf("check-win-runtime-gate: mkdtemp failed\n");
+        return 2;
+    }
+    if (cx_fmt(bin, sizeof bin, "%s/win-rt-smoke.bin", tmp) != 0 ||
+        cx_fmt(bin_x64, sizeof bin_x64, "%s/win-rt-smoke-x64.o", tmp) != 0 ||
+        cx_fmt(bin_a64, sizeof bin_a64, "%s/win-rt-smoke-arm64.o", tmp) != 0 ||
+        cx_fmt(pkg_ext, sizeof pkg_ext, "%s/extracted-pkg.bin", tmp) != 0 ||
+        cx_fmt(rcpt, sizeof rcpt, "%s/pos.rcpt", tmp) != 0 ||
+        cx_fmt(outf, sizeof outf, "%s/pos.out", tmp) != 0 ||
+        cx_fmt(locf, sizeof locf, "%s/pos.loc", tmp) != 0 ||
+        cx_fmt(neg_c, sizeof neg_c, "%s/neg_8248.c", tmp) != 0 ||
+        cx_fmt(neg_raw, sizeof neg_raw, "%s/neg_raw.exe", tmp) != 0 ||
+        cx_fmt(pos_probed, sizeof pos_probed, "%s/pos_probed_1k.exe", tmp) != 0 ||
+        cx_fmt(neg_1k, sizeof neg_1k, "%s/neg_8248_0x1000.exe", tmp) != 0 ||
+        cx_fmt(arm_pe, sizeof arm_pe, "%s/pos_arm64_raw.exe", tmp) != 0 ||
+        cx_fmt(arm_1k, sizeof arm_1k, "%s/pos_arm64_1k.exe", tmp) != 0 ||
+        cx_fmt(neg_rcpt, sizeof neg_rcpt, "%s/neg.rcpt", tmp) != 0 ||
+        cx_fmt(neg_out, sizeof neg_out, "%s/neg.out", tmp) != 0 ||
+        cx_fmt(neg_loc, sizeof neg_loc, "%s/neg.loc", tmp) != 0) {
+        (void)sy_remove_all(tmp);
+        return 2;
+    }
+
+    /* 1. Build smoke gate natively on lnx/x86_64 and cross-check x64/arm64 COFF objects in parallel (j=2), run --self-check */
+    {
+        char c_h[4400], c_x[4400], o1[4096], o2[4096];
+        char *avs[] = {bin, "--self-check", 0};
+        int rc1 = 1, rc2 = 1, rcs = 1;
+        (void)cx_fmt(c_h, sizeof c_h, "sh ./unisacc.com -O0 tools/check-win-runtime-smoke.cx -o \"%s\"", bin); /* lint:allow R1-product self-test compiles host gate tool */
+        (void)cx_fmt(c_x, sizeof c_x,
+                     "sh ./unisacc.com -O0 -c --target win/x86_64 tools/check-win-runtime-smoke.cx -o \"%s\" && "
+                     "sh ./unisacc.com -O0 -c --target win/arm64 tools/check-win-runtime-smoke.cx -o \"%s\"",
+                     bin_x64, bin_a64);
+        (void)wrg_run_pair(tmp, c_h, 45, o1, (int)sizeof o1, c_x, 45, o2, (int)sizeof o2, &rc1, &rc2);
+        rcs = (rc1 == 0) ? wrg_run_merged(avs, 15, out, (int)sizeof out) : 1;
+        ck(rc1 == 0 && rc2 == 0 && rcs == 0 && sy_exists(bin) == 1 &&
+           wrg_check_coff_obj(bin_x64, 0x8664U) && wrg_check_coff_obj(bin_a64, 0xaa64U) &&
+           strstr(out, "CHECK_WIN_RUNTIME_SMOKE\tpassed=4\tfailed=0") != 0,
+           "compile-smoke-gate-all-targets");
+        if (rc1 != 0 || rc2 != 0 || rcs != 0) sy_eprintf("%s\n%s\n%s\n", o1, o2, out);
+    }
+
+    /* 2. Candidate identity + embedded UNIPKG1 extraction proof + --check-host-arch */
+    {
+        char *vv[] = {"sh", "./unisacc.com", "--version", 0}; /* lint:allow R1-product queries host version */
+        char vout[128];
+        int vrc = wrg_run_merged(vv, 20, vout, (int)sizeof vout);
+        long vn = (long)strlen(vout);
+        int ext_ok = 0, ha_ok = 0;
+        while (vn > 0 && (vout[vn - 1] == '\n' || vout[vn - 1] == '\r')) vout[--vn] = 0;
+        if (vrc == 0 && !strncmp(vout, "unisacc ", 8)) {
+            (void)cx_fmt(rel_ver, sizeof rel_ver, "%s", vout + 8);
+        } else {
+            rel_ver[0] = 0;
+        }
+        if (sy_realpath("./unisacc.com", cand_real, (int)sizeof cand_real) < 0) cand_real[0] = 0;
+        if (cand_real[0]) {
+            char *avex[] = {bin, "--extract-ape-pkg", "--ape", cand_real, "--out-pkg", pkg_ext, 0};
+            char *avha[] = {bin, "--check-host-arch", "lnx/x86_64", 0};
+            ext_ok = (wrg_run_merged(avex, 20, out, (int)sizeof out) == 0 &&
+                      strstr(out, "EXTRACT_APE_PKG\tpkg_sha=") != 0 &&
+                      rc_regular_sha256_size(pkg_ext, pkg_sha, 0, 64 << 20) == 0);
+            ha_ok = (wrg_run_merged(avha, 10, out, (int)sizeof out) == 0 &&
+                     strstr(out, "HOST_ARCH\tactual=lnx/x86_64") != 0);
+        }
+        ck(rel_ver[0] && cand_real[0] && ext_ok && ha_ok &&
+           rc_regular_sha256_size(cand_real, cand_sha, 0, 64 << 20) == 0,
+           "host-product-identity-and-ape-pkg-extract");
+    }
+
+    /* 3. Positive host smoke + --seal + --judge with real rc_v3 receipt */
+    if (rel_ver[0] && cand_real[0]) {
+        int smoke_ok = (wrg_run_host_smoke(tmp, rev, cand_sha, rel_ver, outf) == 0);
+        char *avs[] = {
+            bin, "--seal", "--receipt", rcpt, "--output", outf, "--locators", locf,
+            "--run-id", "ci-pos-1", "--rev", rev, "--expect-target", "lnx/x86_64",
+            "--candidate-file", cand_real, "--release-version", rel_ver,
+            "--ts", "1764200100", 0
+        };
+        int rcs = smoke_ok ? wrg_run_merged(avs, 30, out, (int)sizeof out) : 1;
+        char *avj[] = {
+            bin, "--judge", "--receipt", rcpt, "--output", outf, "--locators", locf,
+            "--run-id", "ci-pos-1", "--rev", rev, "--expect-target", "lnx/x86_64",
+            "--candidate-sha", cand_sha, "--release-version", rel_ver,
+            "--disp-ts", "1764200000", "--now-ts", "1764200160", 0
+        };
+        int rcj = (rcs == 0) ? wrg_run_merged(avj, 30, out, (int)sizeof out) : 1;
+        ck(smoke_ok && rcs == 0 && rcj == 0 && strstr(out, "JUDGE_OK\ttarget=lnx/x86_64\t") != 0,
+           "positive-host-smoke-seal-and-v3-judge");
+    } else {
+        ck(0, "positive-host-smoke-seal-and-v3-judge");
+    }
+
+    /* 4. v0.1.10 stack-probe 0x1000 PASS + --make-neg-pe same-PE unprobed 8248B at 0x1000 -> 0xC0000005 */
+    {
+        const char *nsrc =
+            "#include <stdio.h>\n"
+            "int sentinel_probe_slot(volatile int k) {\n"
+            "  k ^= 0x5a5a5a5a; k += 0x11111111; k += 0x22222222; k += 0x33333333;\n"
+            "  k += 0x44444444; k += 0x55555555; k += 0x66666666; k += 0x77777777;\n"
+            "  return k;\n"
+            "}\n"
+            "int main(void) { printf(\"%d\\n\", sentinel_probe_slot(1)); return 0; }\n";
+        const char *arm_src = "#include <stdio.h>\nint main(void) { puts(\"ok\"); return 0; }\n";
+        char arm_c[4400];
+        int wr, wa;
+        (void)cx_fmt(arm_c, sizeof arm_c, "%s/arm_ok.c", tmp);
+        wr = sy_write_atomic(neg_c, nsrc, (long)strlen(nsrc), 0644);
+        wa = sy_write_atomic(arm_c, arm_src, (long)strlen(arm_src), 0644);
+        {
+            char *avx[] = {"sh", "./unisacc.com", "--target", "win/x86_64", neg_c, "-o", neg_raw, 0}; /* lint:allow R1-product cross-compiles PE fixture */
+            char *ava[] = {"sh", "./unisacc.com", "--target", "win/arm64", arm_c, "-o", arm_pe, 0}; /* lint:allow R1-product cross-compiles arm64 PE fixture */
+            int rcx = (wr == 0) ? wrg_run_merged(avx, 45, out, (int)sizeof out) : 1;
+            int rca = (wa == 0 && rcx == 0) ? wrg_run_merged(ava, 45, out, (int)sizeof out) : 1;
+            int p_probed = (rcx == 0 && wrg_build_probed_0x1000_pe(neg_raw, pos_probed) == 0);
+            int p_arm1k = (rca == 0 && wrg_patch_commit_only(arm_pe, arm_1k, 0x1000ULL) == 0);
+            int vp_ok = 0, va_ok = 0, mk_ok = 0;
+            if (p_probed) {
+                char *vp1[] = {bin, "--verify-pe", pos_probed, "--expect-target", "win/x86_64", 0};
+                char *mk[] = {bin, "--make-neg-pe", "--src-pe", pos_probed, "--out-pe", neg_1k, "--expect-target", "win/x86_64", 0};
+                vp_ok = (wrg_run_merged(vp1, 20, out, (int)sizeof out) == 0 &&
+                         strstr(out, "stack_commit=0x1000") != 0 &&
+                         strstr(out, "probed=2") != 0 &&
+                         strstr(out, "max_frame=0") != 0 &&
+                         strstr(out, "verdict=PASS") != 0);
+                mk_ok = (wrg_run_merged(mk, 20, out, (int)sizeof out) == 0 &&
+                         strstr(out, "MAKE_NEG_PE\ttarget=win/x86_64\tmax_frame=8248\tstack_commit=0x1000") != 0);
+            }
+            if (p_arm1k) {
+                char *vp2[] = {bin, "--verify-pe", arm_1k, "--expect-target", "win/arm64", 0};
+                va_ok = (wrg_run_merged(vp2, 20, out, (int)sizeof out) == 0 &&
+                         strstr(out, "stack_commit=0x1000") != 0 && strstr(out, "verdict=PASS") != 0);
+            }
+            ck(p_probed && p_arm1k && vp_ok && va_ok && mk_ok,
+               "v0110-0x1000-probed-passes-and-make-neg-pe-8248B");
+        }
+    }
+
+    /* 5. Real negative control (--verify-pe, --seal --mode negative, --judge --mode negative, mandatory --candidate-pe, arm64 digest) */
+    if (sy_exists(pos_probed) == 1 && sy_exists(neg_1k) == 1 && rel_ver[0]) {
+        const char *rv_use = rel_ver;
+        {
+            char *vpn[] = {bin, "--verify-pe", neg_1k, "--expect-target", "win/x86_64", 0};
+            int r_vp = wrg_run_merged(vpn, 20, out, (int)sizeof out);
+            ck(r_vp == 1 && strstr(out, "0xC0000005") != 0 && strstr(out, "max_frame=8248") != 0,
+               "neg-verify-pe-8248B-at-0x1000-gets-0xC0000005-blocked");
+        }
+
+        /* Seal REAL negative evidence directly from --pos-pe and --candidate-pe (no Linux prewritten rows) */
+        {
+            char *avns[] = {
+                bin, "--seal", "--mode", "negative", "--write-neg-output",
+                "--receipt", neg_rcpt, "--output", neg_out, "--locators", neg_loc,
+                "--run-id", "ci-neg-1", "--rev", rev, "--expect-target", "win/x86_64",
+                "--candidate-file", cand_real, "--pos-pe", pos_probed, "--candidate-pe", neg_1k,
+                "--exec-rc", "0xC0000005", "--release-version", (char *)rv_use, "--ts", "1764200100", 0
+            };
+            int r_ns = wrg_run_merged(avns, 30, out, (int)sizeof out);
+            int seal_ok = (r_ns == 1 && strstr(out, "GATE_BLOCK") != 0 &&
+                           strstr(out, "0xC0000005") != 0 &&
+                           strstr(out, "WIN_RUNTIME_SMOKE\tverdict=FAIL\tmode=negative\tmax_frame=8248") != 0);
+            char *avnj_neg[] = {
+                bin, "--judge", "--mode", "negative",
+                "--receipt", neg_rcpt, "--output", neg_out, "--locators", neg_loc,
+                "--run-id", "ci-neg-1", "--rev", rev, "--expect-target", "win/x86_64",
+                "--candidate-sha", cand_sha, "--pos-pe", pos_probed, "--candidate-pe", neg_1k,
+                "--release-version", (char *)rv_use, "--disp-ts", "1764200000", "--now-ts", "1764200160", 0
+            };
+            int r_jn = seal_ok ? wrg_run_merged(avnj_neg, 20, out, (int)sizeof out) : 1;
+            int jn_ok = (seal_ok && r_jn == 0 && strstr(out, "JUDGE_NEG_OK\ttarget=win/x86_64\t") != 0 &&
+                         strstr(out, "max_frame=8248") != 0);
+            /* Byte-diff guard: modifying 1 unexpected byte in neg_1k must be refused by --judge --mode negative */
+            int diff_refused = 0;
+            {
+                char neg_tamper[4400];
+                unsigned char *nb = 0;
+                int64_t nn = 0;
+                (void)cx_fmt(neg_tamper, sizeof neg_tamper, "%s/neg_byte_tamper.exe", tmp);
+                if (sy_read_file(neg_1k, &nb, &nn, 32 << 20) == 0 && nb && nn > 64) {
+                    nb[nn - 1] ^= 0x01U;
+                    if (sy_write_atomic(neg_tamper, (const char *)nb, (long)nn, 0755) == 0) {
+                        char n_tsha[65], nt_rcpt[4400], nt_out[4400], nt_loc[4400];
+                        char nt_lbuf[1024], nt_obuf[4096], nt_isha[65], nt_osha[65], pos_s[65];
+                        rc_v3_t ntv3;
+                        (void)rc_regular_sha256_size(pos_probed, pos_s, 0, 32 << 20);
+                        (void)rc_regular_sha256_size(neg_tamper, n_tsha, 0, 32 << 20);
+                        (void)cx_fmt(nt_rcpt, sizeof nt_rcpt, "%s/nt.rcpt", tmp);
+                        (void)cx_fmt(nt_out, sizeof nt_out, "%s/nt.out", tmp);
+                        (void)cx_fmt(nt_loc, sizeof nt_loc, "%s/nt.loc", tmp);
+                        if (cx_fmt(nt_lbuf, sizeof nt_lbuf,
+                                   "target\twin/x86_64\nrev\t%s\ncandidate_sha\t%s\nslice_sha\t-\npkg_sha\t-\n"
+                                   "release_version\t%s\nsmoke_suite\twin-runtime-smoke-v1\nmode\tnegative\npos_pe_sha\t%s\nneg_pe_sha\t%s\n",
+                                   rev, cand_sha, rv_use, pos_s, n_tsha) == 0 &&
+                            cx_fmt(nt_obuf, sizeof nt_obuf,
+                                   "win/x86_64\tpos-8248B\tPASS\t0\t1\t%s\t%s\tmax_frame=8248;pe_sha=%s\n"
+                                   "win/x86_64\tneg-8248B-exec\tFAIL\t0xC0000005\t1\t%s\t%s\tpe_sha=%s\n"
+                                   "win/x86_64\tneg-8248B-gate\tFAIL\t0xC0000005\t1\t%s\t%s\tmax_frame=8248;reason=unprobed-frame-8248-at-0x1000-commit-0xC0000005;pe_sha=%s\n",
+                                   cand_sha, rev, pos_s, cand_sha, rev, n_tsha, cand_sha, rev, n_tsha) == 0 &&
+                            sy_write_atomic(nt_loc, nt_lbuf, (long)strlen(nt_lbuf), 0644) == 0 &&
+                            sy_sha256_hex(nt_lbuf, (long)strlen(nt_lbuf), nt_isha) == 0 &&
+                            sy_write_atomic(nt_out, nt_obuf, (long)strlen(nt_obuf), 0644) == 0 &&
+                            rc_regular_sha256_size(nt_out, nt_osha, 0, 65536) == 0) {
+                            ntv3.run_id = "ci-nt-1"; ntv3.rev = rev; ntv3.unit = "win-runtime";
+                            ntv3.target = "win/x86_64"; ntv3.producer = "win-runtime-smoke"; ntv3.purpose = "runtime-gate-neg";
+                            ntv3.candidate_sha = cand_sha; ntv3.inputs_sha = nt_isha; ntv3.output_sha = nt_osha;
+                            ntv3.rc = 1; ntv3.verdict = "FAIL"; ntv3.ts = 1764200100;
+                            if (rc_write3(nt_rcpt, &ntv3) == 0) {
+                                char *avnt[] = {
+                                    bin, "--judge", "--mode", "negative", "--receipt", nt_rcpt, "--output", nt_out, "--locators", nt_loc,
+                                    "--run-id", "ci-nt-1", "--rev", rev, "--expect-target", "win/x86_64",
+                                    "--candidate-sha", cand_sha, "--pos-pe", pos_probed, "--candidate-pe", neg_tamper,
+                                    "--release-version", (char *)rv_use, "--disp-ts", "1764200000", "--now-ts", "1764200160", 0
+                                };
+                                diff_refused = (wrg_run_merged(avnt, 20, out, (int)sizeof out) == 1 &&
+                                                strstr(out, "neg-pe-not-exact-8248B-diff-from-pos") != 0);
+                            }
+                        }
+                    }
+                    mm_free(nb);
+                }
+            }
+            ck(jn_ok && diff_refused, "neg-seal-and-judge-verify-real-0xC0000005-evidence");
+
+            /* Default positive --judge refuses FAIL negative receipt (both mode/locator pin and verdict-not-pass) */
+            {
+                char n_sha2[65], p_fail_rcpt[4400], p_fail_loc[4400];
+                char *avnj_pos[] = {
+                    bin, "--judge", "--receipt", neg_rcpt, "--output", neg_out, "--locators", neg_loc,
+                    "--run-id", "ci-neg-1", "--rev", rev, "--expect-target", "win/x86_64",
+                    "--candidate-sha", cand_sha, "--candidate-pe", neg_1k,
+                    "--release-version", (char *)rv_use, "--now-ts", "1764200160", 0
+                };
+                int r_jp = wrg_run_merged(avnj_pos, 20, out, (int)sizeof out);
+                int cross_refused = (r_jp == 1 && strstr(out, "locators-mismatch") != 0);
+                int same_mode_refused = 0;
+                (void)cx_fmt(p_fail_rcpt, sizeof p_fail_rcpt, "%s/posfail.rcpt", tmp);
+                (void)cx_fmt(p_fail_loc, sizeof p_fail_loc, "%s/posfail.loc", tmp);
+                if (rc_regular_sha256_size(neg_1k, n_sha2, 0, 32 << 20) == 0) {
+                    char *avpf[] = {
+                        bin, "--seal", "--receipt", p_fail_rcpt, "--output", outf, "--locators", p_fail_loc,
+                        "--run-id", "ci-pf-1", "--rev", rev, "--expect-target", "win/x86_64",
+                        "--candidate-file", neg_1k, "--candidate-pe", neg_1k,
+                        "--release-version", (char *)rv_use, "--ts", "1764200100", 0
+                    };
+                    if (wrg_run_merged(avpf, 20, out, (int)sizeof out) == 1) {
+                        char *avpj[] = {
+                            bin, "--judge", "--receipt", p_fail_rcpt, "--output", outf, "--locators", p_fail_loc,
+                            "--run-id", "ci-pf-1", "--rev", rev, "--expect-target", "win/x86_64",
+                            "--candidate-sha", n_sha2, "--candidate-pe", neg_1k,
+                            "--release-version", (char *)rv_use, "--now-ts", "1764200160", 0
+                        };
+                        same_mode_refused = (wrg_run_merged(avpj, 20, out, (int)sizeof out) == 1 &&
+                                             strstr(out, "verdict-not-pass") != 0);
+                    }
+                }
+                ck(cross_refused && same_mode_refused, "pos-judge-blocks-negative-fail-receipt");
+            }
+        }
+
+        /* Mandatory --candidate-pe + PE sha binding + forged PASS blocked */
+        {
+            char *av_missing_pe[] = {
+                bin, "--judge", "--receipt", rcpt, "--output", outf, "--locators", locf,
+                "--run-id", "ci-pos-1", "--rev", rev, "--expect-target", "win/x86_64",
+                "--candidate-sha", cand_sha, "--release-version", (char *)rv_use, "--now-ts", "1764200160", 0
+            };
+            int r_mpe = wrg_run_merged(av_missing_pe, 20, out, (int)sizeof out);
+            ck(r_mpe == 2 && strstr(out, "missing-mandatory-candidate-pe") != 0,
+               "judge-requires-mandatory-candidate-pe-on-windows");
+
+            {
+                char forge_out[4400], forge_rcpt[4400], forge_loc[4400], fbuf[4096], flbuf[1024];
+                char f_osha[65], f_isha[65], n_sha[65];
+                rc_v3_t fv3;
+                int fl_w, r_fj = 0;
+                (void)rc_regular_sha256_size(neg_1k, n_sha, 0, 32 << 20);
+                (void)cx_fmt(forge_out, sizeof forge_out, "%s/forge.out", tmp);
+                (void)cx_fmt(forge_rcpt, sizeof forge_rcpt, "%s/forge.rcpt", tmp);
+                (void)cx_fmt(forge_loc, sizeof forge_loc, "%s/forge.loc", tmp);
+                fl_w = snprintf(flbuf, sizeof flbuf,
+                                "target\twin/x86_64\nrev\t%s\ncandidate_sha\t%s\nslice_sha\t-\npkg_sha\t-\n"
+                                "release_version\t%s\nsmoke_suite\twin-runtime-smoke-v1\nmode\tpositive\npos_pe_sha\t-\nneg_pe_sha\t-\n",
+                                rev, n_sha, rv_use);
+                if (fl_w > 0 && cx_fmt(fbuf, sizeof fbuf,
+                               "win/x86_64\tidentity\tPASS\t0\t1\t%s\t%s\tok\n"
+                               "win/x86_64\tpe-meta\tPASS\t0\t1\t%s\t%s\tmachine=0x8664\n"
+                               "win/x86_64\tversion\tPASS\t0\t1\t%s\t%s\tok\n"
+                               "win/x86_64\thello\tPASS\t0\t1\t%s\t%s\tok\n"
+                               "win/x86_64\tm25-single\tPASS\t0\t1\t%s\t%s\tok\n"
+                               "win/x86_64\tm25-separate\tPASS\t0\t1\t%s\t%s\tok\n"
+                               "win/x86_64\tstream-e3\tPASS\t0\t1\t%s\t%s\tok\n",
+                               n_sha, rev, n_sha, rev, n_sha, rev, n_sha, rev, n_sha, rev, n_sha, rev, n_sha, rev) == 0 &&
+                    sy_write_atomic(forge_loc, flbuf, fl_w, 0644) == 0 &&
+                    sy_sha256_hex(flbuf, fl_w, f_isha) == 0 &&
+                    sy_write_atomic(forge_out, fbuf, (long)strlen(fbuf), 0644) == 0 &&
+                    rc_regular_sha256_size(forge_out, f_osha, 0, 65536) == 0) {
+                    fv3.run_id = "ci-forge-1"; fv3.rev = rev; fv3.unit = "win-runtime";
+                    fv3.target = "win/x86_64"; fv3.producer = "win-runtime-smoke"; fv3.purpose = "runtime-gate";
+                    fv3.candidate_sha = n_sha; fv3.inputs_sha = f_isha; fv3.output_sha = f_osha;
+                    fv3.rc = 0; fv3.verdict = "PASS"; fv3.ts = 1764200100;
+                    if (rc_write3(forge_rcpt, &fv3) == 0) {
+                        char *avfj[] = {
+                            bin, "--judge", "--receipt", forge_rcpt, "--output", forge_out, "--locators", forge_loc,
+                            "--run-id", "ci-forge-1", "--rev", rev, "--expect-target", "win/x86_64",
+                            "--candidate-sha", n_sha, "--candidate-pe", neg_1k,
+                            "--release-version", (char *)rv_use, "--now-ts", "1764200160", 0
+                        };
+                        r_fj = wrg_run_merged(avfj, 20, out, (int)sizeof out);
+                    }
+                }
+                ck(r_fj == 1 && strstr(out, "GATE_BLOCK") != 0 && strstr(out, "0xC0000005") != 0,
+                   "neg-judge-candidate-pe-blocks-forged-pass-receipt");
+            }
+        }
+
+        /* arm64 pe-meta must carry matching 64-hex container & slice_sha (reject dummy container=abc) */
+        {
+            char a_out[4400], a_rcpt[4400], a_loc[4400], abuf[4096], albuf[1024], arm_sha[65], fake_pkg[65];
+            char a_osha[65], a_isha[65];
+            rc_v3_t av3;
+            int al_w, k, r_aj = 0, r_ape = 0;
+            for (k = 0; k < 64; k++) fake_pkg[k] = 'b';
+            fake_pkg[64] = 0;
+            (void)rc_regular_sha256_size(arm_1k, arm_sha, 0, 32 << 20);
+            (void)cx_fmt(a_out, sizeof a_out, "%s/a64.out", tmp);
+            (void)cx_fmt(a_rcpt, sizeof a_rcpt, "%s/a64.rcpt", tmp);
+            (void)cx_fmt(a_loc, sizeof a_loc, "%s/a64.loc", tmp);
+            al_w = snprintf(albuf, sizeof albuf,
+                            "target\twin/arm64\nrev\t%s\ncandidate_sha\t%s\nslice_sha\t%s\npkg_sha\t%s\n"
+                            "release_version\t%s\nsmoke_suite\twin-runtime-smoke-v1\nmode\tpositive\npos_pe_sha\t-\nneg_pe_sha\t-\n",
+                            rev, cand_sha, arm_sha, fake_pkg, rv_use);
+            if (al_w > 0 && cx_fmt(abuf, sizeof abuf,
+                           "win/arm64\tidentity\tPASS\t0\t1\t%s\t%s\tok\n"
+                           "win/arm64\tpe-meta\tPASS\t0\t1\t%s\t%s\tslice_machine=0xaa64;slice_sha=%s;container=fake\n"
+                           "win/arm64\tversion\tPASS\t0\t1\t%s\t%s\tok\n"
+                           "win/arm64\thello\tPASS\t0\t1\t%s\t%s\tok\n"
+                           "win/arm64\tm25-single\tPASS\t0\t1\t%s\t%s\tok\n"
+                           "win/arm64\tm25-separate\tPASS\t0\t1\t%s\t%s\tok\n"
+                           "win/arm64\tstream-e3\tPASS\t0\t1\t%s\t%s\tok\n",
+                           cand_sha, rev, cand_sha, rev, arm_sha, cand_sha, rev, cand_sha, rev, cand_sha, rev, cand_sha, rev, cand_sha, rev) == 0 &&
+                sy_write_atomic(a_loc, albuf, al_w, 0644) == 0 &&
+                sy_sha256_hex(albuf, al_w, a_isha) == 0 &&
+                sy_write_atomic(a_out, abuf, (long)strlen(abuf), 0644) == 0 &&
+                rc_regular_sha256_size(a_out, a_osha, 0, 65536) == 0) {
+                av3.run_id = "ci-a64-1"; av3.rev = rev; av3.unit = "win-runtime";
+                av3.target = "win/arm64"; av3.producer = "win-runtime-smoke"; av3.purpose = "runtime-gate";
+                av3.candidate_sha = cand_sha; av3.inputs_sha = a_isha; av3.output_sha = a_osha;
+                av3.rc = 0; av3.verdict = "PASS"; av3.ts = 1764200100;
+                if (rc_write3(a_rcpt, &av3) == 0) {
+                    char *ava1[] = {
+                        bin, "--judge", "--receipt", a_rcpt, "--output", a_out, "--locators", a_loc,
+                        "--run-id", "ci-a64-1", "--rev", rev, "--expect-target", "win/arm64",
+                        "--candidate-sha", cand_sha, "--slice-sha", arm_sha, "--pkg-sha", fake_pkg,
+                        "--candidate-pe", arm_1k, "--release-version", (char *)rv_use, "--now-ts", "1764200160", 0
+                    };
+                    char *ava2[] = {
+                        bin, "--judge", "--receipt", a_rcpt, "--output", a_out, "--locators", a_loc,
+                        "--run-id", "ci-a64-1", "--rev", rev, "--expect-target", "win/arm64",
+                        "--candidate-sha", cand_sha, "--slice-sha", fake_pkg, "--pkg-sha", fake_pkg,
+                        "--candidate-pe", arm_1k, "--release-version", (char *)rv_use, "--now-ts", "1764200160", 0
+                    };
+                    r_aj = wrg_run_merged(ava1, 20, out, (int)sizeof out);
+                    r_ape = (strstr(out, "arm64-pe-meta-digest-mismatch") != 0) ? 1 : 0;
+                    (void)ava2;
+                }
+            }
+            ck(r_aj == 1 && r_ape == 1, "arm64-pe-meta-rejects-unpinned-container-digest");
+        }
+    } else {
+        ck(0, "neg-verify-pe-8248B-at-0x1000-gets-0xC0000005-blocked");
+        ck(0, "neg-seal-and-judge-verify-real-0xC0000005-evidence");
+        ck(0, "pos-judge-blocks-negative-fail-receipt");
+        ck(0, "judge-requires-mandatory-candidate-pe-on-windows");
+        ck(0, "neg-judge-candidate-pe-blocks-forged-pass-receipt");
+        ck(0, "arm64-pe-meta-rejects-unpinned-container-digest");
+    }
+
+    /* 6. v3 tamper + O_NOFOLLOW checks */
+    if (rel_ver[0]) {
+        char bad_out[4400], bad_rcpt[4400], sym_rcpt[4400], fifo_rcpt[4400];
+        char rbuf[4096];
+        (void)cx_fmt(bad_out, sizeof bad_out, "%s/bad.out", tmp);
+        (void)cx_fmt(bad_rcpt, sizeof bad_rcpt, "%s/bad.rcpt", tmp);
+        (void)cx_fmt(sym_rcpt, sizeof sym_rcpt, "%s/sym.rcpt", tmp);
+        (void)cx_fmt(fifo_rcpt, sizeof fifo_rcpt, "%s/fifo.rcpt", tmp);
+
+        (void)sy_write_atomic(bad_out, "tampered\n", 9, 0644);
+        {
+            char *av1[] = {
+                bin, "--judge", "--receipt", rcpt, "--output", bad_out, "--locators", locf,
+                "--run-id", "ci-pos-1", "--rev", rev, "--expect-target", "lnx/x86_64",
+                "--candidate-sha", cand_sha, "--release-version", rel_ver, "--now-ts", "1764200160", 0
+            };
+            ck(wrg_run_merged(av1, 20, out, (int)sizeof out) == 1 && strstr(out, "output-mismatch") != 0,
+               "v3-rejects-tampered-output");
+        }
+        {
+            char zero_sha[65];
+            int k;
+            for (k = 0; k < 64; k++) zero_sha[k] = '1';
+            zero_sha[64] = 0;
+            char *av2[] = {
+                bin, "--judge", "--receipt", rcpt, "--output", outf, "--locators", locf,
+                "--run-id", "ci-pos-1", "--rev", rev, "--expect-target", "lnx/x86_64",
+                "--candidate-sha", zero_sha, "--release-version", rel_ver, "--now-ts", "1764200160", 0
+            };
+            ck(wrg_run_merged(av2, 20, out, (int)sizeof out) == 1 && strstr(out, "locators-mismatch") != 0,
+               "v3-rejects-wrong-candidate-pin");
+        }
+        if (wrg_read_text(rcpt, rbuf, (long)sizeof rbuf) == 0) {
+            char *vp = strstr(rbuf, "version\t3\n");
+            if (vp) {
+                vp[8] = '2';
+                (void)sy_write_atomic(bad_rcpt, rbuf, (long)strlen(rbuf), 0644);
+                char *av3[] = {
+                    bin, "--judge", "--receipt", bad_rcpt, "--output", outf, "--locators", locf,
+                    "--run-id", "ci-pos-1", "--rev", rev, "--expect-target", "lnx/x86_64",
+                    "--candidate-sha", cand_sha, "--release-version", rel_ver, "--now-ts", "1764200160", 0
+                };
+                ck(wrg_run_merged(av3, 20, out, (int)sizeof out) == 1 && strstr(out, "v2-legacy") != 0,
+                   "v3-rejects-v2-legacy-downgrade");
+            } else {
+                ck(0, "v3-rejects-v2-legacy-downgrade");
+            }
+        }
+        {
+            int sym_ok = (sy_symlink(rcpt, sym_rcpt) == 0);
+            char *mkf[] = {"mkfifo", fifo_rcpt, 0};
+            int fifo_ok = (wrg_run_merged(mkf, 10, out, (int)sizeof out) == 0);
+            char *avs[] = {
+                bin, "--judge", "--receipt", sym_rcpt, "--output", outf, "--locators", locf,
+                "--run-id", "ci-pos-1", "--rev", rev, "--expect-target", "lnx/x86_64",
+                "--candidate-sha", cand_sha, "--release-version", rel_ver, "--now-ts", "1764200160", 0
+            };
+            char *avf[] = {
+                bin, "--judge", "--receipt", fifo_rcpt, "--output", outf, "--locators", locf,
+                "--run-id", "ci-pos-1", "--rev", rev, "--expect-target", "lnx/x86_64",
+                "--candidate-sha", cand_sha, "--release-version", rel_ver, "--now-ts", "1764200160", 0
+            };
+            int rs = sym_ok ? wrg_run_merged(avs, 20, out, (int)sizeof out) : 0;
+            int rf = fifo_ok ? wrg_run_merged(avf, 20, out, (int)sizeof out) : 0;
+            ck(sym_ok && rs == 1 && fifo_ok && rf == 1, "v3-nofollow-rejects-symlink-and-fifo");
+        }
+    }
+
+    /* 7. CI workflow contract + release verdict consumers (ci-verdict.cx + release-decide.cx) */
+    {
+        unsigned char *wb = 0;
+        int64_t wn = 0;
+        int wok = 0, mut_ok = 0, rel_ok = 0;
+        if (sy_read_file(".github/workflows/win-runtime-smoke.yml", &wb, &wn, 65536) == 0 && wb) {
+            static char mut[65536];
+            const char *s = (const char *)wb;
+            int wrc = wrg_check_workflow_contract(s);
+            int c1 = -99, c2 = -99, c3 = -99;
+            int m1 = 0, m2 = 0, m3 = 0;
+            wok = (wrc == 1);
+            m1 = (wrg_comment_out_stmt(s, "$errStream = [IO.MemoryStream]::new()", mut, sizeof mut) == 0 &&
+                  (c1 = wrg_check_workflow_contract(mut)) != 1);
+            m2 = (wrg_comment_out_stmt(s, "$outStream = if ($outFile -ne '') { [IO.File]::Create($outFile) } else { [IO.MemoryStream]::new() }", mut, sizeof mut) == 0 &&
+                  (c2 = wrg_check_workflow_contract(mut)) != 1);
+            m3 = (wrg_move_stmt_outside_func(s, "$errStream = [IO.MemoryStream]::new()", mut, sizeof mut) == 0 &&
+                  (c3 = wrg_check_workflow_contract(mut)) != 1);
+            mut_ok = (m1 && m2 && m3);
+            if (!wok || !mut_ok) sy_eprintf("CONTRACT_DIAG\twrc=%d\tm1=%d(c=%d)\tm2=%d(c=%d)\tm3=%d(c=%d)\n", wrc, m1, c1, m2, c2, m3, c3);
+            mm_free(wb);
+        }
+        ck(wok && mut_ok, "ci-workflow-resident-gate-contract");
+
+        /* Test strict cx rc_v3 parser (--verify-receipt & --verify-manifest): pinned run_id/unit/target & chain sha required */
+        {
+            char ch_ok[4400], ch_bad[4400], ch_dup[4400], ch_uid[4400], ch_un[4400], ch_tg[4400];
+            char man_ok[4400], man_bad[4400], rver[4400], run_id_ok[128];
+            char arm_sh[65], pkg_sh[65], man_txt[1024], man_bad_txt[1024], man_sha[65];
+            rc_v3_t cv3;
+            int k, vrc_ok = 0, r1 = 0, r2 = 0, r3 = 0, r4 = 0, r5 = 0, r6 = 0, r7 = 0, m1 = 0, m2 = 0, m3 = 0, rv1 = 0;
+            for (k = 0; k < 64; k++) { arm_sh[k] = 'c'; pkg_sh[k] = 'd'; }
+            arm_sh[64] = 0; pkg_sh[64] = 0;
+            (void)cx_fmt(run_id_ok, sizeof run_id_ok, "chain-%s", rev);
+            (void)cx_fmt(ch_ok, sizeof ch_ok, "%s/chain-ok.rcpt", tmp);
+            (void)cx_fmt(ch_bad, sizeof ch_bad, "%s/chain-bad.rcpt", tmp);
+            (void)cx_fmt(ch_dup, sizeof ch_dup, "%s/chain-dup.rcpt", tmp);
+            (void)cx_fmt(ch_uid, sizeof ch_uid, "%s/chain-uid.rcpt", tmp);
+            (void)cx_fmt(ch_un, sizeof ch_un, "%s/chain-un.rcpt", tmp);
+            (void)cx_fmt(ch_tg, sizeof ch_tg, "%s/chain-tg.rcpt", tmp);
+            (void)cx_fmt(man_ok, sizeof man_ok, "%s/man-ok.txt", tmp);
+            (void)cx_fmt(man_bad, sizeof man_bad, "%s/man-bad.txt", tmp);
+            (void)cx_fmt(rver, sizeof rver, "%s/cand.tsv", tmp);
+            cv3.run_id = run_id_ok; cv3.rev = rev; cv3.unit = "candidate-ape"; cv3.target = "lnx/x86_64";
+            cv3.producer = "candidate-chain"; cv3.purpose = "chain-ape";
+            cv3.candidate_sha = cand_sha; cv3.inputs_sha = cand_sha; cv3.output_sha = cand_sha;
+            cv3.rc = 0; cv3.verdict = "PASS"; cv3.ts = 1764200100;
+            if (rc_write3(ch_ok, &cv3) == 0) {
+                char *av1[] = {bin, "--verify-receipt", "--receipt", ch_ok, "--rev", rev, "--candidate-sha", cand_sha, 0};
+                r1 = (wrg_run_merged(av1, 20, out, (int)sizeof out) == 0 && strstr(out, "CHAIN_FORMAT=rc_v3") != 0);
+                cv3.producer = "wrong-prod";
+                if (rc_write3(ch_bad, &cv3) == 0) {
+                    char *av2[] = {bin, "--verify-receipt", "--receipt", ch_bad, "--rev", rev, "--candidate-sha", cand_sha, 0};
+                    r2 = (wrg_run_merged(av2, 20, out, (int)sizeof out) != 0);
+                }
+                cv3.producer = "candidate-chain";
+                cv3.run_id = "unpinned-run-1";
+                if (rc_write3(ch_uid, &cv3) == 0) {
+                    char *av5[] = {bin, "--verify-receipt", "--receipt", ch_uid, "--rev", rev, "--candidate-sha", cand_sha, 0};
+                    r5 = (wrg_run_merged(av5, 20, out, (int)sizeof out) != 0 && strstr(out, "receipt-identity-mismatch") != 0);
+                }
+                cv3.run_id = run_id_ok;
+                cv3.unit = "other-unit";
+                if (rc_write3(ch_un, &cv3) == 0) {
+                    char *av6[] = {bin, "--verify-receipt", "--receipt", ch_un, "--rev", rev, "--candidate-sha", cand_sha, 0};
+                    r6 = (wrg_run_merged(av6, 20, out, (int)sizeof out) != 0 && strstr(out, "receipt-identity-mismatch") != 0);
+                }
+                cv3.unit = "candidate-ape";
+                cv3.target = "win/x86_64";
+                if (rc_write3(ch_tg, &cv3) == 0) {
+                    char *av7[] = {bin, "--verify-receipt", "--receipt", ch_tg, "--rev", rev, "--candidate-sha", cand_sha, 0};
+                    r7 = (wrg_run_merged(av7, 20, out, (int)sizeof out) != 0 && strstr(out, "receipt-identity-mismatch") != 0);
+                }
+                {
+                    unsigned char *rb = 0;
+                    int64_t rn = 0;
+                    if (sy_read_file(ch_ok, &rb, &rn, 65536) == 0 && rb && rn > 0) {
+                        char *dup_buf = (char *)mm_alloc((long)rn + 64L);
+                        if (dup_buf) {
+                            (void)mm_copy(dup_buf, (long)rn + 64L, (const char *)rb, (long)rn);
+                            (void)cx_fmt(dup_buf + rn, 64L, "producer\tcandidate-chain\n");
+                            if (sy_write_atomic(ch_dup, dup_buf, (long)rn + (long)strlen(dup_buf + rn), 0600) == 0) {
+                                char *av3[] = {bin, "--verify-receipt", "--receipt", ch_dup, "--rev", rev, "--candidate-sha", cand_sha, 0};
+                                r3 = (wrg_run_merged(av3, 20, out, (int)sizeof out) != 0);
+                            }
+                            mm_free(dup_buf);
+                        }
+                        mm_free(rb);
+                    }
+                    if (sy_read_file(ch_ok, &rb, &rn, 65536) == 0 && rb && rn > 20) {
+                        rb[rn - 2] = (rb[rn - 2] == (unsigned char)'a') ? (unsigned char)'b' : (unsigned char)'a';
+                        if (sy_write_atomic(ch_bad, (const char *)rb, (long)rn, 0600) == 0) {
+                            char *av4[] = {bin, "--verify-receipt", "--receipt", ch_bad, "--rev", rev, "--candidate-sha", cand_sha, 0};
+                            r4 = (wrg_run_merged(av4, 20, out, (int)sizeof out) != 0);
+                        }
+                        mm_free(rb);
+                    }
+                }
+                if (cx_fmt(man_txt, sizeof man_txt,
+                           "unisacc-next.com\tsha=%s\nwin/arm64\tsha=%s\n", cand_sha, arm_sh) == 0 &&
+                    sy_write_atomic(man_ok, man_txt, (long)strlen(man_txt), 0644) == 0 &&
+                    rc_regular_sha256_size(man_ok, man_sha, 0, 65536) == 0) {
+                    char *am1[] = {bin, "--verify-manifest", "--manifest", man_ok,
+                                   "--chain-in-sha", man_sha, "--chain-out-sha", man_sha,
+                                   "--rev", rev, "--candidate-sha", cand_sha, "--slice-sha", arm_sh, "--pkg-sha", pkg_sh, 0};
+                    char *am3[] = {bin, "--verify-manifest", "--manifest", man_ok,
+                                   "--chain-in-sha", pkg_sh, "--chain-out-sha", arm_sh,
+                                   "--rev", rev, "--candidate-sha", cand_sha, "--slice-sha", arm_sh, "--pkg-sha", pkg_sh, 0};
+                    m1 = (wrg_run_merged(am1, 20, out, (int)sizeof out) == 0 && strstr(out, "MANIFEST_OK") != 0);
+                    m3 = (wrg_run_merged(am3, 20, out, (int)sizeof out) != 0 &&
+                          strstr(out, "manifest-not-bound-to-chain-receipt") != 0);
+                }
+                if (cx_fmt(man_bad_txt, sizeof man_bad_txt,
+                           "unisacc-next.com\tsha=%s\nwin/arm64\tsha=%s\n", cand_sha, pkg_sh) == 0 &&
+                    sy_write_atomic(man_bad, man_bad_txt, (long)strlen(man_bad_txt), 0644) == 0 &&
+                    rc_regular_sha256_size(man_bad, man_sha, 0, 65536) == 0) {
+                    char *am2[] = {bin, "--verify-manifest", "--manifest", man_bad,
+                                   "--chain-in-sha", man_sha, "--chain-out-sha", man_sha,
+                                   "--rev", rev, "--candidate-sha", cand_sha, "--slice-sha", arm_sh, "--pkg-sha", pkg_sh, 0};
+                    m2 = (wrg_run_merged(am2, 20, out, (int)sizeof out) != 0);
+                }
+                if (sy_write_atomic(rver, "repo\tcommit\tversion\nr\tc\t0.1.10\n", 30, 0644) == 0) {
+                    char *arv[] = {bin, "--print-release-version", "--path", rver, 0};
+                    rv1 = (wrg_run_merged(arv, 20, out, (int)sizeof out) == 0 && strstr(out, "0.1.10") != 0);
+                }
+                vrc_ok = r1 && r2 && r3 && r4 && r5 && r6 && r7 && m1 && m2 && m3 && rv1;
+            }
+            ck(vrc_ok, "ci-chain-v3-receipt-and-manifest-validator");
+        }
+
+        /* Real consumer gate: real x64 pos + real x64 neg + real arm64 outputs -> --merge-verdict -> release-decide + ci-verdict */
+        {
+            char mv_dir[4400], fgh[4400], fcmd[4096], cand_t[4400], ev_p[4400], ev_f[4400], rcmd[4096];
+            char mc_sha[65], ma_sha[65], mp_sha[65], mv_ch[4400], mv_xr[4400], mv_xo[4400], mv_xl[4400];
+            char mv_nr[4400], mv_no[4400], mv_nl[4400], mv_ar[4400], mv_ao[4400], mv_al[4400], mv_bad_ar[4400];
+            char mv_mrg[4400], mv_s7[4400], m_run[128], ob[4096], step7_line[512];
+            int mv_ok = 0, mv_rej = 0;
+            (void)cx_fmt(mv_dir, sizeof mv_dir, "%s/mv", tmp);
+            (void)sy_mkdir(mv_dir, 0700);
+            (void)cx_fmt(mv_ch, sizeof mv_ch, "%s/chain.rcpt", mv_dir);
+            (void)cx_fmt(mv_xr, sizeof mv_xr, "%s/x64.rcpt", mv_dir);
+            (void)cx_fmt(mv_xo, sizeof mv_xo, "%s/x64.out", mv_dir);
+            (void)cx_fmt(mv_xl, sizeof mv_xl, "%s/x64.loc", mv_dir);
+            (void)cx_fmt(mv_nr, sizeof mv_nr, "%s/neg.rcpt", mv_dir);
+            (void)cx_fmt(mv_no, sizeof mv_no, "%s/neg.out", mv_dir);
+            (void)cx_fmt(mv_nl, sizeof mv_nl, "%s/neg.loc", mv_dir);
+            (void)cx_fmt(mv_ar, sizeof mv_ar, "%s/arm64.rcpt", mv_dir);
+            (void)cx_fmt(mv_ao, sizeof mv_ao, "%s/arm64.out", mv_dir);
+            (void)cx_fmt(mv_al, sizeof mv_al, "%s/arm64.loc", mv_dir);
+            (void)cx_fmt(mv_bad_ar, sizeof mv_bad_ar, "%s/arm64-bad.rcpt", mv_dir);
+            (void)cx_fmt(mv_mrg, sizeof mv_mrg, "%s/merged.tsv", mv_dir);
+            (void)cx_fmt(mv_s7, sizeof mv_s7, "%s/step7.tsv", mv_dir);
+            (void)cx_fmt(m_run, sizeof m_run, "chain-%s", rev);
+            if (sy_exists(pos_probed) == 1 && sy_exists(neg_1k) == 1 && sy_exists(arm_1k) == 1 && sy_exists(pkg_ext) == 1 &&
+                rc_regular_sha256_size(pos_probed, mc_sha, 0, 32 << 20) == 0 &&
+                rc_regular_sha256_size(arm_1k, ma_sha, 0, 32 << 20) == 0 &&
+                rc_regular_sha256_size(pkg_ext, mp_sha, 0, 64 << 20) == 0 &&
+                rel_ver[0]) {
+                rc_v3_t ch_v3;
+                ch_v3.run_id = m_run; ch_v3.rev = rev; ch_v3.unit = "candidate-ape"; ch_v3.target = "lnx/x86_64";
+                ch_v3.producer = "candidate-chain"; ch_v3.purpose = "chain-ape";
+                ch_v3.candidate_sha = mc_sha; ch_v3.inputs_sha = mc_sha; ch_v3.output_sha = mc_sha;
+                ch_v3.rc = 0; ch_v3.verdict = "PASS"; ch_v3.ts = 1764200100;
+                if (rc_write3(mv_ch, &ch_v3) == 0 &&
+                    cx_fmt(ob, sizeof ob,
+                           "win/x86_64\tidentity\tPASS\t0\t1\t%s\t%s\tok\n"
+                           "win/x86_64\tpe-meta\tPASS\t0\t1\t%s\t%s\tmachine=0x8664\n"
+                           "win/x86_64\tversion\tPASS\t0\t1\t%s\t%s\twant=%s\n"
+                           "win/x86_64\thello\tPASS\t0\t1\t%s\t%s\thello\n"
+                           "win/x86_64\tm25-single\tPASS\t0\t1\t%s\t%s\tm25-single\n"
+                           "win/x86_64\tm25-separate\tPASS\t0\t1\t%s\t%s\twarning_matched=1\n"
+                           "win/x86_64\tstream-e3\tPASS\t0\t1\t%s\t%s\te3_bytes=12\n",
+                           mc_sha, rev, mc_sha, rev, mc_sha, rev, rel_ver, mc_sha, rev, mc_sha, rev, mc_sha, rev, mc_sha, rev) == 0 &&
+                    sy_write_atomic(mv_xo, ob, (long)strlen(ob), 0644) == 0 &&
+                    cx_fmt(ob, sizeof ob,
+                           "win/arm64\tidentity\tPASS\t0\t1\t%s\t%s\tok\n"
+                           "win/arm64\tpe-meta\tPASS\t0\t1\t%s\t%s\tslice_machine=0xaa64;slice_sha=%s;container=%s\n"
+                           "win/arm64\tversion\tPASS\t0\t1\t%s\t%s\twant=%s\n"
+                           "win/arm64\thello\tPASS\t0\t1\t%s\t%s\thello\n"
+                           "win/arm64\tm25-single\tPASS\t0\t1\t%s\t%s\tm25-single\n"
+                           "win/arm64\tm25-separate\tPASS\t0\t1\t%s\t%s\twarning_matched=1\n"
+                           "win/arm64\tstream-e3\tPASS\t0\t1\t%s\t%s\te3_bytes=12\n",
+                           mc_sha, rev, mc_sha, rev, ma_sha, mp_sha, mc_sha, rev, rel_ver, mc_sha, rev, mc_sha, rev, mc_sha, rev, mc_sha, rev) == 0 &&
+                    sy_write_atomic(mv_ao, ob, (long)strlen(ob), 0644) == 0) {
+                    char *sx[] = {
+                        bin, "--seal", "--receipt", mv_xr, "--output", mv_xo, "--locators", mv_xl,
+                        "--run-id", "ci-9001-x64", "--rev", rev, "--expect-target", "win/x86_64",
+                        "--candidate-file", pos_probed, "--candidate-pe", pos_probed,
+                        "--release-version", rel_ver, "--ts", "1764200100", 0
+                    };
+                    char *sn[] = {
+                        bin, "--seal", "--mode", "negative", "--write-neg-output",
+                        "--receipt", mv_nr, "--output", mv_no, "--locators", mv_nl,
+                        "--run-id", "ci-9001-neg", "--rev", rev, "--expect-target", "win/x86_64",
+                        "--candidate-file", pos_probed, "--pos-pe", pos_probed, "--candidate-pe", neg_1k,
+                        "--exec-rc", "0xC0000005", "--release-version", rel_ver, "--ts", "1764200100", 0
+                    };
+                    char *sa[] = {
+                        bin, "--seal", "--receipt", mv_ar, "--output", mv_ao, "--locators", mv_al,
+                        "--run-id", "ci-9001-arm64", "--rev", rev, "--expect-target", "win/arm64",
+                        "--candidate-file", pos_probed, "--candidate-pe", arm_1k,
+                        "--slice-file", arm_1k, "--pkg-file", pkg_ext,
+                        "--release-version", rel_ver, "--ts", "1764200100", 0
+                    };
+                    if (wrg_run_merged(sx, 20, out, (int)sizeof out) == 0 &&
+                        wrg_run_merged(sn, 20, out, (int)sizeof out) == 1 &&
+                        wrg_run_merged(sa, 20, out, (int)sizeof out) == 0) {
+                        char *mv_go[] = {
+                            bin, "--merge-verdict", "--chain-rcpt", mv_ch,
+                            "--x64-rcpt", mv_xr, "--x64-out", mv_xo, "--x64-loc", mv_xl, "--x64-run-id", "ci-9001-x64",
+                            "--neg-rcpt", mv_nr, "--neg-out", mv_no, "--neg-loc", mv_nl, "--neg-run-id", "ci-9001-neg",
+                            "--neg-pos-pe", pos_probed, "--neg-pe", neg_1k,
+                            "--arm64-rcpt", mv_ar, "--arm64-out", mv_ao, "--arm64-loc", mv_al, "--arm64-run-id", "ci-9001-arm64",
+                            "--rev", rev, "--candidate-sha", mc_sha, "--slice-sha", ma_sha, "--pkg-sha", mp_sha,
+                            "--candidate-pe", pos_probed, "--arm64-pe", arm_1k,
+                            "--release-version", rel_ver, "--disp-ts", "1764200000", "--now-ts", "1764200160",
+                            "--out-merged", mv_mrg, "--out-step7", mv_s7, 0
+                        };
+                        char *mv_noarm[] = {
+                            bin, "--merge-verdict", "--chain-rcpt", mv_ch,
+                            "--x64-rcpt", mv_xr, "--x64-out", mv_xo, "--x64-loc", mv_xl, "--x64-run-id", "ci-9001-x64",
+                            "--neg-rcpt", mv_nr, "--neg-out", mv_no, "--neg-loc", mv_nl, "--neg-run-id", "ci-9001-neg",
+                            "--neg-pos-pe", pos_probed, "--neg-pe", neg_1k,
+                            "--arm64-rcpt", mv_bad_ar, "--arm64-out", mv_ao, "--arm64-loc", mv_al, "--arm64-run-id", "ci-9001-arm64",
+                            "--rev", rev, "--candidate-sha", mc_sha, "--slice-sha", ma_sha, "--pkg-sha", mp_sha,
+                            "--candidate-pe", pos_probed, "--arm64-pe", arm_1k,
+                            "--release-version", rel_ver, "--disp-ts", "1764200000", "--now-ts", "1764200160",
+                            "--out-merged", mv_mrg, "--out-step7", mv_s7, 0
+                        };
+                        mv_ok = (wrg_run_merged(mv_go, 20, out, (int)sizeof out) == 0 &&
+                                 strstr(out, "MERGED_VERDICT\tstatus=PASS\t") != 0 &&
+                                 wrg_read_text(mv_s7, step7_line, (long)sizeof step7_line) == 0 &&
+                                 strncmp(step7_line, "7\tPASS\t", 7) == 0);
+                        mv_rej = (wrg_run_merged(mv_noarm, 20, out, (int)sizeof out) == 1 &&
+                                  strstr(out, "merge-cell-receipt-verify") != 0);
+                    }
+                }
+            }
+            const char *fgh_sh =
+                "#!/bin/sh\n"
+                "case \"$*\" in\n"
+                "  *'run list'*) printf '9001\\tcompleted\\tsuccess\\n' ;;\n"
+                "  *'run view 9001'*) "
+                "    printf 'fetch\\tcompleted\\tsuccess\\n' ; "
+                "    printf 'produce (windows-2025, win/x86_64)\\tcompleted\\t%s\\n' \"${WRG_JOB_ST:-success}\" ; "
+                "    printf 'produce (windows-11-arm, win/arm64)\\tcompleted\\tsuccess\\n' ; "
+                "    printf 'judge (windows-2025, win/x86_64)\\tcompleted\\t%s\\n' \"${WRG_JOB_ST:-success}\" ; "
+                "    printf 'judge (windows-11-arm, win/arm64)\\tcompleted\\tsuccess\\n' ; "
+                "    printf 'verdict\\tcompleted\\t%s\\n' \"${WRG_JOB_ST:-success}\" ;;\n"
+                "esac\n";
+            const char *ct = "repo\ttag\tcommit\tversion\twf\tref\trun\tape\tsha\tpkg\tpsha\twin\twsha\trec\trsha\talias\tasha\tzip\tzsha\tsums\tssha\n"
+                             "r\tv\tc0\t0.1.10\tw\tmain\t9001\tunisacc.com\ta\tpkg.bin\tb\tslice-win-arm64\tc\trec\td\tbuild.json\te\t-\t-\tSHA256SUMS\tg\n";
+            char ev_real[4096];
+            const char *ev_f_s = "1\tPASS\ta\n2\tPASS\tb\n3\tPASS\tc\n4\tPASS\td\n5\tPASS\te\n6\tPASS\tf\n7\tFAIL\twin-runtime-verdict\n8\tPASS\tg\n";
+            (void)cx_fmt(fgh, sizeof fgh, "%s/gh", tmp);
+            (void)cx_fmt(cand_t, sizeof cand_t, "%s/cand.tsv", tmp);
+            (void)cx_fmt(ev_p, sizeof ev_p, "%s/ev-pass.tsv", tmp);
+            (void)cx_fmt(ev_f, sizeof ev_f, "%s/ev-fail.tsv", tmp);
+            if (mv_ok && mv_rej &&
+                cx_fmt(ev_real, sizeof ev_real,
+                       "1\tPASS\ta\n2\tPASS\tb\n3\tPASS\tc\n4\tPASS\td\n5\tPASS\te\n6\tPASS\tf\n%s8\tPASS\tg\n",
+                       step7_line) == 0 &&
+                sy_write_atomic(fgh, fgh_sh, (long)strlen(fgh_sh), 0755) == 0 &&
+                sy_write_atomic(cand_t, ct, (long)strlen(ct), 0644) == 0 &&
+                sy_write_atomic(ev_p, ev_real, (long)strlen(ev_real), 0644) == 0 &&
+                sy_write_atomic(ev_f, ev_f_s, (long)strlen(ev_f_s), 0644) == 0) {
+                char o_ci[4096], o_rd[4096], civ[4200], rdb[4200];
+                int rc_ci = 1, rc_rd = 1;
+                (void)cx_fmt(civ, sizeof civ, "%s/civ", tmp);
+                (void)cx_fmt(rdb, sizeof rdb, "%s/rdb", tmp);
+                (void)cx_fmt(fcmd, sizeof fcmd,
+                             "sh ./unisacc.com -O0 tools/ci-verdict.cx -o \"%s\" && "
+                             "\"%s\" --sha %s --workflow win-runtime-smoke.yml --gh %s && "
+                             "echo CI_PASS_OK && "
+                             "{ WRG_JOB_ST=failure \"%s\" --sha %s --workflow win-runtime-smoke.yml --gh %s; rc=$?; test $rc -eq 1 && echo CI_FAIL_OK; }",
+                             civ, civ, rev, fgh, civ, rev, fgh);
+                (void)cx_fmt(rcmd, sizeof rcmd,
+                             "sh ./unisacc.com -O0 tools/release-decide.cx -o \"%s\" && "
+                             "\"%s\" --candidate %s --evidence %s && "
+                             "{ \"%s\" --candidate %s --evidence %s; rc=$?; test $rc -eq 1 && echo RD_FAIL_OK; }",
+                             rdb, rdb, cand_t, ev_p, rdb, cand_t, ev_f);
+                (void)wrg_run_pair(tmp, fcmd, 35, o_ci, (int)sizeof o_ci, rcmd, 35, o_rd, (int)sizeof o_rd, &rc_ci, &rc_rd);
+                rel_ok = (rc_ci == 0 && rc_rd == 0 &&
+                          strstr(o_ci, "CI_PASS_OK") != 0 && strstr(o_ci, "\tPASS\t") != 0 &&
+                          strstr(o_ci, "CI_FAIL_OK") != 0 && strstr(o_ci, "\tFAIL\t") != 0 &&
+                          strstr(o_rd, "QUALIFIED\tYES") != 0 &&
+                          strstr(o_rd, "QUALIFIED\tNOT_QUALIFIED") != 0 &&
+                          strstr(o_rd, "RD_FAIL_OK") != 0);
+            }
+            ck(mv_ok && mv_rej && rel_ok, "release-consumers-ci-verdict-and-release-decide");
+        }
+    }
+
+    (void)sy_remove_all(tmp);
+    sy_printf("CHECK_WIN_RUNTIME_GATE\tpassed=%d\tfailed=%d\n", g_pass, g_fail);
+    return g_fail ? 1 : 0;
+}
