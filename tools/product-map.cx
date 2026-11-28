@@ -163,38 +163,58 @@ static void parse_ape(const char *text) {
     }
 }
 
+static int pm_under(const char *p, const char *base) {
+    size_t bn = strlen(base);
+    return bn > 0 && !strncmp(p, base, bn) && (p[bn] == '/' || p[bn] == 0);
+}
+
+static int pm_ape_cache_key(const char *ape, const char *tool, char key[65]) {
+    char cwd[4400], tmp[4400], as[65], ts[65], gs[65], cs[65], blk[320];
+    if (pm_full) return 1;
+    if (sy_realpath(".", cwd, sizeof cwd) < 0 || sy_realpath(sy_tmpdir(), tmp, sizeof tmp) < 0) return 1;
+    if (pm_under(tmp, root) || pm_under(tmp, cwd)) return 1;
+    size_t an = 0, tn = 0, gn = 0, cn = 0;
+    char *ab = cx_read(ape, &an);
+    char *tb = cx_read(tool, &tn);
+    char *gb = cx_read("tools/product-map.cx", &gn);
+    char *cb = cx_read(census_compiler, &cn);
+    int bad = (!ab || !tb || !gb || !cb ||
+               sy_sha256_hex(ab, (long)an, as) ||
+               sy_sha256_hex(tb, (long)tn, ts) ||
+               sy_sha256_hex(gb, (long)gn, gs) ||
+               sy_sha256_hex(cb, (long)cn, cs));
+    if (ab) free(ab);
+    if (tb) free(tb);
+    if (gb) free(gb);
+    if (cb) free(cb);
+    if (bad) return 1;
+    if (cx_fmt(blk, sizeof blk, "pm-ape-v2\n%s\n%s\n%s\n%s\n", as, ts, gs, cs)) return 1;
+    return sy_sha256_hex(blk, (long)strlen(blk), key);
+}
+
 static void ape_census(void) {
-    char ape[4400], tool[4400], cdir[4400], cfile[4400], ape_sha[65];
+    char ape[4400], tool[4400], cdir[4400], cfile[4400], ckey[65];
     { char entry[4400];join(entry,sizeof entry,root,"unisacc.com");
       if(sy_realpath(entry,ape,sizeof ape)<0)die("product-path"); }
-    if (!pm_full) {
-        size_t an = 0;
-        char *ab = cx_read(ape, &an);
-        if (ab && !sy_sha256_hex(ab, (long)an, ape_sha)) {
-            free(ab);
-            if (!cx_fmt(cdir, sizeof cdir, "%s/unisacc-pm-inc", sy_tmpdir()) &&
-                !cx_fmt(cfile, sizeof cfile, "%s/ape-%s.txt", cdir, ape_sha)) {
-                size_t cn = 0;
-                char *cb = cx_read(cfile, &cn);
-                if (cb && cn > 0) {
-                    parse_ape(cb);
-                    free(cb);
-                    int all = 1;
-                    for (int i = 0; i < 6; i++) if (!slices[i].seen) all = 0;
-                    if (all) return;
-                    slice_init();
-                } else if (cb) {
-                    free(cb);
-                }
-            }
-        } else {
-            if (ab) free(ab);
-            ape_sha[0] = 0;
-        }
-    } else {
-        ape_sha[0] = 0;
-    }
     join(tool, sizeof tool, root, "tools/logic-distribution.cx");
+    ckey[0] = 0;
+    if (!pm_full && !pm_ape_cache_key(ape, tool, ckey)) {
+        if (!cx_fmt(cdir, sizeof cdir, "%s/unisacc-pm-inc", sy_tmpdir()) &&
+            !cx_fmt(cfile, sizeof cfile, "%s/ape-%s.txt", cdir, ckey)) {
+            size_t cn = 0;
+            char *cb = cx_read(cfile, &cn);
+            if (cb && cn > 0) {
+                parse_ape(cb);
+                free(cb);
+                int all = 1;
+                for (int i = 0; i < 6; i++) if (!slices[i].seen) all = 0;
+                if (all) return;
+                slice_init();
+            } else if (cb) {
+                free(cb);
+            }
+        }
+    }
     {
         char *v[] = {"sh", census_compiler, tool, "--", "--ape", ape, 0};
         np_result r = {0};
@@ -204,10 +224,10 @@ static void ape_census(void) {
             die("ape-census");
         }
         parse_ape(r.out ? r.out : "");
-        if (!pm_full && ape_sha[0] && r.out && r.outn > 0) {
+        if (!pm_full && ckey[0] && r.out && r.outn > 0) {
             if (!cx_fmt(cdir, sizeof cdir, "%s/unisacc-pm-inc", sy_tmpdir()) &&
                 !sy_mkdir_all(cdir, 0700) &&
-                !cx_fmt(cfile, sizeof cfile, "%s/ape-%s.txt", cdir, ape_sha)) {
+                !cx_fmt(cfile, sizeof cfile, "%s/ape-%s.txt", cdir, ckey)) {
                 (void)sy_write_atomic(cfile, r.out, (int64_t)r.outn, 0600);
             }
         }
@@ -883,6 +903,7 @@ int main(int argc, char **argv) {
         } else die("usage --write|--check [--daily] [--package BARE_PKG] [--root DIR]");
     }
     if ((!emit_to && writef == check) || (emit_to && (writef || check || daily || have_pkg)) || (daily && !check) || (daily && !have_pkg)) die("usage --write|--check [--daily --package BARE_PKG]");
+    if (check) pm_full = 1; /* --check never reads any cache */
     build(&tsv, &tn, &prd, &pn);
     if (emit_to) {
         if(cx_write(emit_to,tsv,tn))die("emit-tsv-write");

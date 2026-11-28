@@ -206,7 +206,6 @@ static int exists_tool(const char *nm) {
 /* batches.tsv:id=col0,source=col3,entry=col8 -- single-pass hash index preserving exact batches.tsv row order */
 static char *bt; static long btn;
 #define BI_SLOTS 4096
-#define BI_MAXE 8192
 typedef struct {
     long path_off, path_len;
     long id_off, id_len;
@@ -214,8 +213,8 @@ typedef struct {
     int next;
 } BiEnt;
 static int bi_head[BI_SLOTS];
-static BiEnt bi_ents[BI_MAXE];
-static int bi_nent;
+static BiEnt *bi_ents;
+static int bi_nent, bi_cap;
 
 static unsigned long long bi_hash(const char *p, long n) {
     unsigned long long h = 1469598103934665603ULL;
@@ -224,7 +223,16 @@ static unsigned long long bi_hash(const char *p, long n) {
 }
 
 static void bi_add(long poff, long plen, long ioff, long ilen, int ridx) {
-    if (plen <= 0 || ilen <= 0 || bi_nent >= BI_MAXE) return;
+    if (plen <= 0 || ilen <= 0) return;
+    if (bi_nent >= bi_cap) {
+        int ncap = bi_cap ? bi_cap * 2 : 16384;
+        BiEnt *nb = (BiEnt *)mm_alloc((size_t)ncap * sizeof(BiEnt));
+        if (!nb) { fprintf(stderr, "tool-index: REFUSE oom\n"); exit(2); }
+        if (bi_ents && bi_nent > 0) mm_copy(nb, (long)((size_t)ncap * sizeof(BiEnt)), bi_ents, (long)((size_t)bi_nent * sizeof(BiEnt)));
+        if (bi_ents) mm_free(bi_ents);
+        bi_ents = nb;
+        bi_cap = ncap;
+    }
     unsigned long long h = bi_hash(bt + poff, plen) % BI_SLOTS;
     BiEnt *e = &bi_ents[bi_nent];
     e->path_off = poff; e->path_len = plen;
@@ -246,7 +254,7 @@ static void bi_build(void) {
         for (k = ls; k < le && c < 14; k++) if (bt[k] == '\t') cs[++c] = k + 1;
         if (c >= 8 && ls > 0) {
             long s_s = cs[3], s_e = cs[4] - 1;
-            long e_s = cs[8], e_e = le;
+            long e_s = cs[8], e_e = (c >= 9) ? (cs[9] - 1) : le;
             long idn = cs[1] - 1 - cs[0];
             bi_add(s_s, s_e - s_s, ls, idn, ridx);
             if (e_e - e_s != s_e - s_s || !mm_same(bt + e_s, bt + s_s, e_e - e_s)) {
@@ -259,8 +267,9 @@ static void bi_build(void) {
 }
 
 static void batch_ids(const char *p1, const char *p2, char *out, long cap) {
-    int hits[256];
-    int nh = 0;
+    int hcap = 256, nh = 0;
+    int *hits = (int *)mm_alloc((size_t)hcap * sizeof(int));
+    if (!hits) { fprintf(stderr, "tool-index: REFUSE oom\n"); exit(2); }
     out[0] = 0;
     for (int q = 0; q < 2; q++) {
         const char *p = q ? p2 : p1;
@@ -269,7 +278,16 @@ static void batch_ids(const char *p1, const char *p2, char *out, long cap) {
         unsigned long long h = bi_hash(p, pn) % BI_SLOTS;
         for (int e = bi_head[h]; e >= 0; e = bi_ents[e].next) {
             if (bi_ents[e].path_len == pn && mm_same(bt + bi_ents[e].path_off, p, pn)) {
-                if (nh < 256) hits[nh++] = e;
+                if (nh >= hcap) {
+                    int ncap = hcap * 2;
+                    int *nhits = (int *)mm_alloc((size_t)ncap * sizeof(int));
+                    if (!nhits) { fprintf(stderr, "tool-index: REFUSE oom\n"); exit(2); }
+                    mm_copy(nhits, (long)((size_t)ncap * sizeof(int)), hits, (long)((size_t)nh * sizeof(int)));
+                    mm_free(hits);
+                    hits = nhits;
+                    hcap = ncap;
+                }
+                hits[nh++] = e;
             }
         }
     }
@@ -293,6 +311,7 @@ static void batch_ids(const char *p1, const char *p2, char *out, long cap) {
             mm_copy(out + o, cap - o, bt + e->id_off, idn); o += idn; out[o] = 0;
         }
     }
+    mm_free(hits);
 }
 
 static char *build_tools(long *outn) {

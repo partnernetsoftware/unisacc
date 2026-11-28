@@ -50,6 +50,41 @@ static long sn[MAXR], sl[MAXR];      /* signature offset/len */
 static int ord[MAXR];
 static char names[MAXP][128];
 static int ih_full = 0;
+static char ih_ctx_sha[65];
+static int ih_cache_ok = 0;
+
+static int ih_under(const char *p, const char *root) {
+    long rn = tx_len(root, 4400);
+    return rn > 0 && tx_prefix(p, tx_len(p, 4400), root, rn) && (p[rn] == '/' || p[rn] == 0);
+}
+
+static void ih_init_cache_ctx(void) {
+    char repo[4400], tmp[4400], gs[65], ps[65], blk[256];
+    ih_cache_ok = 0;
+    if (ih_full) return;
+    if (sy_realpath(".", repo, sizeof repo) < 0 || sy_realpath(sy_tmpdir(), tmp, sizeof tmp) < 0) return;
+    if (ih_under(tmp, repo)) return;
+    size_t gn = 0, pn = 0;
+    char *gb = cx_read("tools/iface-hash.cx", &gn);
+    char *pb = cx_read("unisacc.com", &pn);
+    if (!gb || !pb || sy_sha256_hex(gb, (long)gn, gs) || sy_sha256_hex(pb, (long)pn, ps)) {
+        if (gb) mm_free(gb);
+        if (pb) mm_free(pb);
+        return;
+    }
+    mm_free(gb);
+    mm_free(pb);
+    if (cx_fmt(blk, sizeof blk, "iface-hash-v2\n%s\n%s\n", gs, ps) ||
+        sy_sha256_hex(blk, tx_len(blk, sizeof blk), ih_ctx_sha)) return;
+    ih_cache_ok = 1;
+}
+
+static int ih_make_key(const char *fsha, char key[65]) {
+    char blk[160];
+    if (!ih_cache_ok) return 1;
+    if (cx_fmt(blk, sizeof blk, "%s\n%s\n", ih_ctx_sha, fsha)) return 1;
+    return sy_sha256_hex(blk, tx_len(blk, sizeof blk), key);
+}
 
 static int cmp_row(const char *t, int a, int b) {
     long la = rl[a], lb = rl[b], m = la < lb ? la : lb, i;
@@ -129,8 +164,8 @@ static int sort_names(int np) {
 }
 
 static int ih_cache_get(const char *fsha, char hex[65], int *nex) {
-    char p[4400];
-    if (ih_full || cx_fmt(p, sizeof p, "%s/unisacc-ih-inc/%s.row", sy_tmpdir(), fsha)) return 0;
+    char p[4400], key[65];
+    if (ih_full || ih_make_key(fsha, key) || cx_fmt(p, sizeof p, "%s/unisacc-ih-inc/%s.row", sy_tmpdir(), key)) return 0;
     size_t n = 0;
     char *b = cx_read(p, &n);
     if (!b) return 0;
@@ -160,9 +195,9 @@ static int ih_cache_get(const char *fsha, char hex[65], int *nex) {
 }
 
 static void ih_cache_put(const char *fsha, const char *hex, int nex) {
-    char d[4400], p[4400], row[96];
-    if (ih_full || cx_fmt(d, sizeof d, "%s/unisacc-ih-inc", sy_tmpdir()) || sy_mkdir_all(d, 0700)) return;
-    if (cx_fmt(p, sizeof p, "%s/%s.row", d, fsha) || cx_fmt(row, sizeof row, "%s\t%d\n", hex, nex)) return;
+    char d[4400], p[4400], key[65], row[96];
+    if (ih_full || ih_make_key(fsha, key) || cx_fmt(d, sizeof d, "%s/unisacc-ih-inc", sy_tmpdir()) || sy_mkdir_all(d, 0700)) return;
+    if (cx_fmt(p, sizeof p, "%s/%s.row", d, key) || cx_fmt(row, sizeof row, "%s\t%d\n", hex, nex)) return;
     (void)sy_write_atomic(p, row, tx_len(row, sizeof row), 0600);
 }
 
@@ -228,6 +263,8 @@ int main(int argc, char **argv) {
         else { write = -1; break; }
     }
     if (write < 0) { sy_eprintf("iface-hash: usage: --write|--check [--full] [--api DIR] [--table FILE]\n"); return 2; }
+    if (write == 0) ih_full = 1; /* --check never reads any cache */
+    ih_init_cache_ctx();
     rc = build(tx_eqz(api, "build/layer-api") ? "." : 0, api, &b);
     if (rc) { mm_free(b.b); return rc; }
     for (i = 0; i < (long)b.n; i++) if (b.b[i] == '\n') np++;
