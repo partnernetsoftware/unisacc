@@ -49,7 +49,7 @@ on:
         required: true
         type: string
       chain_manifest_url:
-        description: Optional repo-scoped URL for ape-receipt.txt, pack-inputs.tsv, SHA256SUMS, or release/candidate.tsv binding slice-win-arm64 to candidate_sha256
+        description: Optional repo-scoped URL for ape-receipt.txt or pack-inputs.tsv bound to candidate-chain.rcpt output_sha or inputs_sha
         required: false
         default: ''
         type: string
@@ -99,7 +99,7 @@ on:
         required: true
         type: string
       chain_manifest_url:
-        description: Optional repo-scoped URL for ape-receipt.txt, pack-inputs.tsv, SHA256SUMS, or release/candidate.tsv binding slice-win-arm64 to candidate_sha256
+        description: Optional repo-scoped URL for ape-receipt.txt or pack-inputs.tsv bound to candidate-chain.rcpt output_sha or inputs_sha
         required: false
         default: ''
         type: string
@@ -197,11 +197,12 @@ jobs:
           download_repo_scoped "https://github.com/${REPO}/releases/download/v0.1.6/unisacc.com" win-runtime-baseline/trusted-unisacc.com "$TRUSTED_LAUNCHER_SHA" "0"
           chmod +x win-runtime-baseline/trusted-unisacc.com
 
-          # (1) Strict cx rc_v3 receipt parser + binding_sha recompute (pure cx verifier in workflow)
+          # (1) Strict cx rc_v3 receipt parser + binding_sha recompute + strict run_id/unit/target pins
           download_repo_scoped "$CANDIDATE_RECEIPT_URL" win-runtime-baseline/candidate-chain.rcpt "$CANDIDATE_RECEIPT_SHA256" "1"
           CHAIN_INFO="$(sh win-runtime-baseline/trusted-unisacc.com tools/check-win-runtime-smoke.cx -- \
             --verify-receipt --receipt win-runtime-baseline/candidate-chain.rcpt \
             --rev "$SOURCE_COMMIT" --candidate-sha "$CANDIDATE_SHA256" \
+            --expect-run-id "chain-${SOURCE_COMMIT}" --expect-unit candidate-ape --expect-target lnx/x86_64 \
             --producer candidate-chain --purpose chain-ape --expect-rc 0 --expect-verdict PASS)"
           printf '%s\n' "$CHAIN_INFO"
           printf '%s\n' "$CHAIN_INFO" | grep -qx 'CHAIN_FORMAT=rc_v3'
@@ -211,7 +212,6 @@ jobs:
           CHAIN_OUT_SHA="${CHAIN_OUT_SHA#CHAIN_OUTPUT_SHA=}"
 
           download_repo_scoped "$CANDIDATE_URL" win-runtime-baseline/candidate-unisacc.com "$CANDIDATE_SHA256" "0"
-          download_repo_scoped "$SLICE_ARM64_URL" win-runtime-baseline/slice-win-arm64.exe "$SLICE_ARM64_SHA256" "0"
 
           GOT_SHA="$(file_sha256 win-runtime-baseline/candidate-unisacc.com)"
           test "$GOT_SHA" = "$CANDIDATE_SHA256"
@@ -228,40 +228,27 @@ jobs:
             rm -f win-runtime-baseline/pkg.asset.bin
           fi
 
-          # (3b) Prove slice-win-arm64 provenance via verified chain manifest (cx verifier)
+          # (3b) Prove slice-win-arm64 provenance strictly via manifest cryptographically bound to CHAIN_IN_SHA or CHAIN_OUT_SHA
           MANIFEST_URL="$CHAIN_MANIFEST_URL"
           if [ -z "$MANIFEST_URL" ]; then
             case "$CANDIDATE_RECEIPT_URL" in
+              */ape-final/candidate-chain.rcpt)
+                MANIFEST_URL="${CANDIDATE_RECEIPT_URL%/ape-final/candidate-chain.rcpt}/pack-inputs.tsv"
+                ;;
               */candidate-chain.rcpt)
                 MANIFEST_URL="${CANDIDATE_RECEIPT_URL%/candidate-chain.rcpt}/ape-receipt.txt"
                 ;;
             esac
           fi
-          if [ -z "$MANIFEST_URL" ]; then
-            case "$CANDIDATE_URL" in
-              "https://github.com/${REPO}/releases/download/"*)
-                MANIFEST_URL="${CANDIDATE_URL%/*}/SHA256SUMS"
-                ;;
-            esac
-          fi
           test -n "$MANIFEST_URL"
           download_repo_scoped "$MANIFEST_URL" win-runtime-baseline/chain-manifest.txt "" "1"
-          MAN_SHA="$(file_sha256 win-runtime-baseline/chain-manifest.txt)"
-          MAN_PROVEN=0
-          if [ "$MAN_SHA" = "$CHAIN_OUT_SHA" ] || [ "$MAN_SHA" = "$CHAIN_IN_SHA" ]; then
-            MAN_PROVEN=1
-          else
-            case "$MANIFEST_URL" in
-              "https://github.com/${REPO}/releases/download/"*/SHA256SUMS)
-                MAN_PROVEN=1
-                ;;
-            esac
-          fi
           sh win-runtime-baseline/trusted-unisacc.com tools/check-win-runtime-smoke.cx -- \
             --verify-manifest --manifest win-runtime-baseline/chain-manifest.txt \
-            --man-proven "$MAN_PROVEN" --rev "$SOURCE_COMMIT" \
+            --chain-in-sha "$CHAIN_IN_SHA" --chain-out-sha "$CHAIN_OUT_SHA" \
+            --rev "$SOURCE_COMMIT" \
             --candidate-sha "$CANDIDATE_SHA256" --slice-sha "$SLICE_ARM64_SHA256" \
             --pkg-sha "$PKG_BIN_SHA256"
+          download_repo_scoped "$SLICE_ARM64_URL" win-runtime-baseline/slice-win-arm64.exe "$SLICE_ARM64_SHA256" "0"
 
           rm -rf win-runtime-baseline/dl
           printf '%s\n' "$CANDIDATE_SHA256" > win-runtime-baseline/candidate.sha256
@@ -345,30 +332,35 @@ jobs:
             $inStream = $null
             try {
               [void]$p.Start()
-              $tasks = [System.Collections.Generic.List[System.Threading.Tasks.Task]]::new()
-              if ($outFile -ne '') {
-                $outStream = [IO.File]::Create($outFile)
-              } else {
-                $outStream = [IO.MemoryStream]::new()
-              }
-              $errStream = [IO.MemoryStream]::new()
-              $tasks.Add($p.StandardOutput.BaseStream.CopyToAsync($outStream))
-              $tasks.Add($p.StandardError.BaseStream.CopyToAsync($errStream))
+              $outTask = $p.StandardOutput.BaseStream.CopyToAsync($outStream)
+              $errTask = $p.StandardError.BaseStream.CopyToAsync($errStream)
+              $pumpTasks = [System.Collections.Generic.List[System.Threading.Tasks.Task]]::new()
+              $pumpTasks.Add($outTask)
+              $pumpTasks.Add($errTask)
+              $rawInTask = $null
+              $inCloseTask = $null
               if ($inFile -ne '') {
                 $inStream = [IO.File]::OpenRead($inFile)
-                $inTask = $inStream.CopyToAsync($p.StandardInput.BaseStream).ContinueWith([Action[System.Threading.Tasks.Task]]{
+                $rawInTask = $inStream.CopyToAsync($p.StandardInput.BaseStream)
+                $pumpTasks.Add($rawInTask)
+                $inCloseTask = $rawInTask.ContinueWith([Action[System.Threading.Tasks.Task]]{
                   param($t)
                   $p.StandardInput.BaseStream.Close()
                 })
-                $tasks.Add($inTask)
+                $pumpTasks.Add($inCloseTask)
               }
               if (!$p.WaitForExit(55000)) {
                 $p.Kill($true)
                 return @{ Code = 124; Out = ''; Err = 'timeout-55s' }
               }
-              if (![System.Threading.Tasks.Task]::WaitAll($tasks.ToArray(), 2000)) {
+              if (![System.Threading.Tasks.Task]::WaitAll($pumpTasks.ToArray(), 5000)) {
                 $p.Kill($true)
                 return @{ Code = 125; Out = ''; Err = 'stream-pump-open' }
+              }
+              foreach ($pt in $pumpTasks) {
+                if ($pt.IsFaulted) {
+                  throw $pt.Exception.GetBaseException()
+                }
               }
               $utf8NoBom = [Text.UTF8Encoding]::new($false)
               $outText = if ($outFile -eq '') { $utf8NoBom.GetString(([IO.MemoryStream]$outStream).ToArray()) } else { '' }
@@ -407,9 +399,14 @@ jobs:
           $ha = Invoke-Bounded $smokeExe @('--check-host-arch', $env:EXPECT_TARGET) '' ''
           if ($ha.Code -ne 0) { throw "smoke process native arch check failed: $($ha.Err)" }
 
+          function ConvertTo-UInt32([int]$v) {
+            return [System.BitConverter]::ToUInt32([System.BitConverter]::GetBytes($v), 0)
+          }
+
           $rows = [System.Collections.Generic.List[string]]::new()
           function Add-SmokeRow([string]$chk, [bool]$ok, [int]$rc, [string]$det) {
-            $rcStr = if ([uint32]$rc -eq 0xC0000005) { '0xC0000005' } elseif ([uint32]$rc -eq 0xC00000FD) { '0xC00000FD' } else { "$rc" }
+            $u32 = ConvertTo-UInt32 $rc
+            $rcStr = if ($u32 -eq 0xC0000005) { '0xC0000005' } elseif ($u32 -eq 0xC00000FD) { '0xC00000FD' } else { "$rc" }
             $st = if ($ok) { 'PASS' } else { 'FAIL' }
             $clean = ($det -replace '[\t\r\n]', ' ')
             $rows.Add("$env:EXPECT_TARGET`t$chk`t$st`t$rcStr`t1`t$gotSha`t$env:SOURCE_COMMIT`t$clean")
@@ -497,7 +494,8 @@ jobs:
             if ($mkNeg.Code -ne 0) { throw "make-neg-pe failed: $($mkNeg.Err)" }
 
             $np = Invoke-Bounded $neg1k @() '' ''
-            if ([uint32]$np.Code -ne 0xC0000005) { throw ("expected 0xC0000005 got 0x{0:X8}" -f [uint32]$np.Code) }
+            $negU32 = ConvertTo-UInt32 $np.Code
+            if ($negU32 -ne 0xC0000005) { throw ('expected 0xC0000005 got 0x{0:X8}' -f $negU32) }
 
             $negTs = [DateTimeOffset]::UtcNow.ToUnixTimeSeconds()
             $nsr = Invoke-Bounded $smokeExe @(
@@ -598,12 +596,80 @@ jobs:
               --release-version "$REL_VER" \
               --disp-ts "$DISP_TS" \
               --now-ts "$NOW_TS"
-            cp win-runtime-produce/neg-runtime.rcpt win-runtime-produce/neg-runtime.out win-runtime-produce/neg-locators.tsv win-runtime-evidence/
+            cp win-runtime-produce/neg-runtime.rcpt win-runtime-produce/neg-runtime.out win-runtime-produce/neg-locators.tsv win-runtime-produce/pos_8248.exe win-runtime-produce/neg_8248_0x1000.exe win-runtime-evidence/
           fi
-          printf '7\tPASS\twin-runtime-evidence-%s-%s/win-runtime.rcpt\n' "${{ matrix.os }}" "${GITHUB_RUN_ID}" > win-runtime-evidence/release-step7.tsv
       - uses: actions/upload-artifact@v4
         if: always()
         with:
           name: win-runtime-evidence-${{ matrix.os }}-${{ github.run_id }}
           path: win-runtime-evidence/
+          if-no-files-found: error
+
+  verdict:
+    needs: [fetch, produce, judge]
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ inputs.source_commit }}
+      - uses: actions/download-artifact@v4
+        with:
+          name: win-runtime-baseline-${{ github.run_id }}
+          path: win-runtime-baseline
+      - uses: actions/download-artifact@v4
+        with:
+          name: win-runtime-evidence-windows-2025-${{ github.run_id }}
+          path: win-runtime-evidence-x64
+      - uses: actions/download-artifact@v4
+        with:
+          name: win-runtime-evidence-windows-11-arm-${{ github.run_id }}
+          path: win-runtime-evidence-arm64
+      - name: Merge both matrix cells into single candidate STEP 7 verdict
+        env:
+          SOURCE_COMMIT: ${{ inputs.source_commit }}
+        run: |
+          set -eu
+          TRUSTED_LAUNCHER_SHA="ed50199fd085be4da2fa692db8010057be6674f8bfc609b101e8d18daf23583f"
+          set -- $(sha256sum win-runtime-baseline/trusted-unisacc.com)
+          test "$1" = "$TRUSTED_LAUNCHER_SHA"
+          CAND_SHA="$(cat win-runtime-baseline/candidate.sha256)"
+          SLICE_SHA="$(cat win-runtime-baseline/slice-win-arm64.sha256)"
+          PKG_SHA="$(cat win-runtime-baseline/pkg.bin.sha256)"
+          REL_VER="$(cat win-runtime-baseline/release-version.txt)"
+          DISP_TS="$(cat win-runtime-baseline/dispatch_ts.txt)"
+          NOW_TS="$(date +%s)"
+          mkdir -p win-runtime-verdict
+          sh win-runtime-baseline/trusted-unisacc.com tools/check-win-runtime-smoke.cx -- \
+            --merge-verdict \
+            --chain-rcpt win-runtime-baseline/candidate-chain.rcpt \
+            --x64-rcpt win-runtime-evidence-x64/win-runtime.rcpt \
+            --x64-out win-runtime-evidence-x64/win-runtime.out \
+            --x64-loc win-runtime-evidence-x64/locators.tsv \
+            --x64-run-id "ci-${GITHUB_RUN_ID}-windows-2025" \
+            --neg-rcpt win-runtime-evidence-x64/neg-runtime.rcpt \
+            --neg-out win-runtime-evidence-x64/neg-runtime.out \
+            --neg-loc win-runtime-evidence-x64/neg-locators.tsv \
+            --neg-run-id "ci-${GITHUB_RUN_ID}-windows-2025-neg" \
+            --neg-pos-pe win-runtime-evidence-x64/pos_8248.exe \
+            --neg-pe win-runtime-evidence-x64/neg_8248_0x1000.exe \
+            --arm64-rcpt win-runtime-evidence-arm64/win-runtime.rcpt \
+            --arm64-out win-runtime-evidence-arm64/win-runtime.out \
+            --arm64-loc win-runtime-evidence-arm64/locators.tsv \
+            --arm64-run-id "ci-${GITHUB_RUN_ID}-windows-11-arm" \
+            --rev "$SOURCE_COMMIT" \
+            --candidate-sha "$CAND_SHA" \
+            --slice-sha "$SLICE_SHA" \
+            --pkg-sha "$PKG_SHA" \
+            --candidate-pe win-runtime-baseline/candidate-unisacc.com \
+            --arm64-pe win-runtime-baseline/slice-win-arm64.exe \
+            --release-version "$REL_VER" \
+            --disp-ts "$DISP_TS" \
+            --now-ts "$NOW_TS" \
+            --out-merged win-runtime-verdict/merged-evidence.tsv \
+            --out-step7 win-runtime-verdict/release-step7.tsv
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: win-runtime-verdict-${{ github.run_id }}
+          path: win-runtime-verdict/
           if-no-files-found: error

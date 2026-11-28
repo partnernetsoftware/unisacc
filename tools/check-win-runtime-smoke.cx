@@ -6,9 +6,18 @@
  *   --make-neg-pe --src-pe PATH --out-pe PATH --expect-target win/x86_64
  *   --check-host-arch win/x86_64|win/arm64|lnx/x86_64
  *   --verify-receipt --receipt PATH --rev SHA40 --candidate-sha SHA64
+ *                    [--expect-run-id ID] [--expect-unit U] [--expect-target TGT]
  *                    [--producer P] [--purpose P] [--expect-rc N] [--expect-verdict PASS|FAIL]
  *   --verify-manifest --manifest PATH --man-proven 0|1 --rev SHA40
  *                     --candidate-sha SHA64 --slice-sha SHA64 --pkg-sha SHA64
+ *                     [--chain-in-sha SHA64] [--chain-out-sha SHA64]
+ *   --merge-verdict --chain-rcpt PATH --x64-rcpt PATH --x64-out PATH --x64-loc PATH --x64-run-id ID
+ *                   --neg-rcpt PATH --neg-out PATH --neg-loc PATH --neg-run-id ID
+ *                   --neg-pos-pe PATH --neg-pe PATH
+ *                   --arm64-rcpt PATH --arm64-out PATH --arm64-loc PATH --arm64-run-id ID
+ *                   --rev SHA40 --candidate-sha SHA64 --slice-sha SHA64 --pkg-sha SHA64
+ *                   --candidate-pe PATH --arm64-pe PATH --release-version VER --now-ts SEC
+ *                   --out-merged PATH --out-step7 PATH [--disp-ts SEC]
  *   --print-release-version [--path PATH]
  *   --seal   --receipt RCPT --output OUT --locators LOC --run-id ID --rev SHA40
  *            --expect-target TGT --candidate-file PATH --ts SEC
@@ -384,29 +393,20 @@ static int wrs_pe_stack_safe(const wrs_pe_info_t *info, int *av_risk_out, char *
     return 0;
 }
 
-/* Derive an unprobed 8248B+ stack-frame PE at 0x1000 SizeOfStackCommit from the SAME
- * compiled fixture PE (supports both v0.1.10 probed chains and unprobed fixtures). */
-static int wrs_make_unprobed_neg_pe(const char *src_pe, const char *dst_pe, unsigned int *max_frame_out) {
-    unsigned char *buf = 0;
-    int64_t len = 0;
+/* In-place byte transform deriving the unprobed 8248B+ stack-frame PE at 0x1000 SizeOfStackCommit. */
+static int wrs_transform_pos_to_neg_buf(unsigned char *buf, int64_t len, unsigned int *max_frame_out) {
     unsigned int pe_off, mach, nsec, opt_sz, opt_off, sec_off, s, best_frame = 0U;
     int mutated = 0;
-    if (sy_read_file(src_pe, &buf, &len, 32 << 20) != 0 || !buf || len < 256) {
-        if (buf) mm_free(buf);
-        return 1;
-    }
-    if (buf[0] != 'M' || buf[1] != 'Z') { mm_free(buf); return 1; }
+    if (!buf || len < 256) return 1;
+    if (buf[0] != 'M' || buf[1] != 'Z') return 1;
     pe_off = wrs_u32(buf + 60);
-    if ((int64_t)pe_off + 24 > len || buf[pe_off] != 'P' || buf[pe_off + 1] != 'E') { mm_free(buf); return 1; }
+    if ((int64_t)pe_off + 24 > len || buf[pe_off] != 'P' || buf[pe_off + 1] != 'E') return 1;
     mach = wrs_u16(buf + pe_off + 4);
     nsec = wrs_u16(buf + pe_off + 6);
     opt_sz = wrs_u16(buf + pe_off + 20);
     opt_off = pe_off + 24U;
     sec_off = opt_off + opt_sz;
-    if (mach != 0x8664U || opt_sz < 88U || nsec == 0U || (int64_t)sec_off + (int64_t)nsec * 40 > len) {
-        mm_free(buf);
-        return 1;
-    }
+    if (mach != 0x8664U || opt_sz < 88U || nsec == 0U || (int64_t)sec_off + (int64_t)nsec * 40 > len) return 1;
     for (s = 0U; s < nsec; s++) {
         unsigned int sh = sec_off + s * 40U;
         unsigned int raw_sz = wrs_u32(buf + sh + 16U);
@@ -463,16 +463,54 @@ static int wrs_make_unprobed_neg_pe(const char *src_pe, const char *dst_pe, unsi
     }
     wrs_wr64(buf + opt_off + 80U, 0x1000ULL);
     if (max_frame_out) *max_frame_out = best_frame;
-    if (best_frame < 8192U) {
-        (void)mutated;
+    (void)mutated;
+    return best_frame < 8192U ? 1 : 0;
+}
+
+static int wrs_make_unprobed_neg_pe(const char *src_pe, const char *dst_pe, unsigned int *max_frame_out) {
+    unsigned char *buf = 0;
+    int64_t len = 0;
+    int trc, wrc;
+    if (sy_read_file(src_pe, &buf, &len, 32 << 20) != 0 || !buf || len < 256) {
+        if (buf) mm_free(buf);
+        return 1;
+    }
+    trc = wrs_transform_pos_to_neg_buf(buf, len, max_frame_out);
+    if (trc != 0) {
         mm_free(buf);
         return 1;
     }
-    {
-        int wrc = sy_write_atomic(dst_pe, buf, (long)len, 0755);
-        mm_free(buf);
-        return wrc != 0 ? 1 : 0;
+    wrc = sy_write_atomic(dst_pe, buf, (long)len, 0755);
+    mm_free(buf);
+    return wrc != 0 ? 1 : 0;
+}
+
+/* Prove neg_pe differs from pos_pe ONLY in the exact bytes transformed by wrs_transform_pos_to_neg_buf. */
+static int wrs_verify_neg_pe_derived_from_pos(const char *pos_pe, const char *neg_pe, unsigned int *derived_frame_out) {
+    unsigned char *pbuf = 0, *nbuf = 0;
+    int64_t plen = 0, nlen = 0;
+    unsigned int mf = 0U;
+    int eq;
+    if (sy_read_file(pos_pe, &pbuf, &plen, 32 << 20) != 0 || !pbuf || plen < 256) {
+        if (pbuf) mm_free(pbuf);
+        return 1;
     }
+    if (sy_read_file(neg_pe, &nbuf, &nlen, 32 << 20) != 0 || !nbuf || nlen != plen) {
+        mm_free(pbuf);
+        if (nbuf) mm_free(nbuf);
+        return 1;
+    }
+    if (wrs_transform_pos_to_neg_buf(pbuf, plen, &mf) != 0) {
+        mm_free(pbuf);
+        mm_free(nbuf);
+        return 1;
+    }
+    eq = (memcmp(pbuf, nbuf, (size_t)plen) == 0);
+    mm_free(pbuf);
+    mm_free(nbuf);
+    if (!eq) return 1;
+    if (derived_frame_out) *derived_frame_out = mf;
+    return 0;
 }
 
 /* Extract embedded UNIPKG1 package (with 16-byte footer) from a verified APE image. */
@@ -1179,6 +1217,7 @@ static int cmd_judge(int argc, char **argv) {
     if (is_neg) {
         wrs_pe_info_t pos_info, neg_info;
         char pe_err[160], safe_why[160];
+        unsigned int derived_frame = 0U;
         int av_risk = 0, pos_av = 0;
         if (wrs_scan_pe(pos_pe, 0x8664U, &pos_info, pe_err, sizeof pe_err) != 0 ||
             wrs_pe_stack_safe(&pos_info, &pos_av, safe_why, sizeof safe_why) != 0) {
@@ -1186,11 +1225,18 @@ static int cmd_judge(int argc, char **argv) {
             sy_eprintf("REFUSE neg-pos-pe-not-safe\n");
             return 1;
         }
+        if (wrs_verify_neg_pe_derived_from_pos(pos_pe, cand_pe, &derived_frame) != 0 ||
+            derived_frame != 8248U) {
+            rc_verified_free(&ver);
+            sy_eprintf("REFUSE neg-pe-not-exact-8248B-diff-from-pos\tderived=%u\n", derived_frame);
+            return 1;
+        }
         if (wrs_scan_pe(cand_pe, 0x8664U, &neg_info, pe_err, sizeof pe_err) != 0 ||
             wrs_pe_stack_safe(&neg_info, &av_risk, safe_why, sizeof safe_why) == 0 ||
-            av_risk != 1 || neg_info.max_frame < 8192U) {
+            av_risk != 1 || neg_info.stack_commit != 0x1000ULL || neg_info.max_frame != 8248U) {
             rc_verified_free(&ver);
-            sy_eprintf("REFUSE neg-pe-did-not-trigger-0xC0000005-gate\n");
+            sy_eprintf("REFUSE neg-pe-did-not-trigger-exact-8248B-0xC0000005-gate\tmax_frame=%u\n",
+                       neg_info.max_frame);
             return 1;
         }
         if (wrs_verify_neg_rows(ver.output_bytes, ver.output_len, tgt, cand_sha, rev,
@@ -1285,35 +1331,29 @@ static int wrs_read_reg_bounded(const char *path, long max_bytes, unsigned char 
     return 0;
 }
 
-static int cmd_verify_receipt(int argc, char **argv) {
-    const char *rcpt = wrs_opt(argc, argv, "--receipt");
-    const char *want_rev = wrs_opt(argc, argv, "--rev");
-    const char *want_cand = wrs_opt(argc, argv, "--candidate-sha");
-    const char *want_prod = wrs_opt(argc, argv, "--producer");
-    const char *want_purp = wrs_opt(argc, argv, "--purpose");
-    const char *exp_rc_s = wrs_opt(argc, argv, "--expect-rc");
-    const char *exp_verd = wrs_opt(argc, argv, "--expect-verdict");
+static int wrs_verify_chain_receipt_file(const char *rcpt, const char *want_rev, const char *want_cand,
+                                         const char *want_run_id, const char *want_unit, const char *want_tgt,
+                                         const char *want_prod, const char *want_purp,
+                                         int64_t want_rc, const char *exp_verd,
+                                         char out_in_sha[65], char out_out_sha[65], char out_bind_sha[65]) {
     unsigned char *buf = 0;
     long n = 0L, i = 0L;
     unsigned int mask = 0U;
     char ver_s[32], run_id[128], rev[64], unit[128], target[64], prod[128], purp[128];
     char cand_sha[80], in_sha[80], out_sha[80], rc_s[32], verdict[32], ts_s[48], bind_sha[80];
-    char payload[2048], exp_bind[65];
-    int64_t rc_v = 0, ts_v = 0, want_rc = 0;
+    char payload[2048], exp_bind[65], def_run_id[128];
+    int64_t rc_v = 0, ts_v = 0;
 
+    if (!want_run_id || !want_run_id[0]) {
+        if (cx_fmt(def_run_id, sizeof def_run_id, "chain-%s", want_rev) != 0) return 2;
+        want_run_id = def_run_id;
+    }
+    if (!want_unit || !want_unit[0]) want_unit = "candidate-ape";
+    if (!want_tgt || !want_tgt[0]) want_tgt = "lnx/x86_64";
     if (!want_prod || !want_prod[0]) want_prod = "candidate-chain";
     if (!want_purp || !want_purp[0]) want_purp = "chain-ape";
     if (!exp_verd || !exp_verd[0]) exp_verd = "PASS";
-    if (exp_rc_s && wrs_parse_i64(exp_rc_s, &want_rc) != 0) {
-        sy_eprintf("REFUSE bad-verify-receipt-expect-rc\n");
-        return 2;
-    }
-    if (!rcpt || !want_rev || !want_cand ||
-        !wrs_is_hex_lower(want_rev, 40) || !wrs_is_hex_lower(want_cand, 64) ||
-        (strcmp(exp_verd, "PASS") != 0 && strcmp(exp_verd, "FAIL") != 0)) {
-        sy_eprintf("REFUSE bad-verify-receipt-args\n");
-        return 2;
-    }
+
     if (wrs_read_reg_bounded(rcpt, 65536L, &buf, &n) != 0 || !buf) {
         sy_eprintf("REFUSE receipt-unreadable\n");
         return 1;
@@ -1388,6 +1428,10 @@ static int cmd_verify_receipt(int argc, char **argv) {
         sy_eprintf("REFUSE receipt-identity-rev-mismatch\n");
         return 1;
     }
+    if (strcmp(run_id, want_run_id) != 0 || strcmp(unit, want_unit) != 0 || strcmp(target, want_tgt) != 0) {
+        sy_eprintf("REFUSE receipt-identity-mismatch\trun_id=%s\tunit=%s\ttarget=%s\n", run_id, unit, target);
+        return 1;
+    }
     if (strcmp(prod, want_prod) != 0 || strcmp(purp, want_purp) != 0) {
         sy_eprintf("REFUSE receipt-producer-purpose-mismatch\n");
         return 1;
@@ -1419,7 +1463,42 @@ static int cmd_verify_receipt(int argc, char **argv) {
         sy_eprintf("REFUSE receipt-binding-sha-mismatch\n");
         return 1;
     }
+    if (out_in_sha && cx_fmt(out_in_sha, 65, "%s", in_sha) != 0) return 1;
+    if (out_out_sha && cx_fmt(out_out_sha, 65, "%s", out_sha) != 0) return 1;
+    if (out_bind_sha && cx_fmt(out_bind_sha, 65, "%s", bind_sha) != 0) return 1;
+    return 0;
+}
 
+static int cmd_verify_receipt(int argc, char **argv) {
+    const char *rcpt = wrs_opt(argc, argv, "--receipt");
+    const char *want_rev = wrs_opt(argc, argv, "--rev");
+    const char *want_cand = wrs_opt(argc, argv, "--candidate-sha");
+    const char *want_run_id = wrs_opt(argc, argv, "--expect-run-id");
+    const char *want_unit = wrs_opt(argc, argv, "--expect-unit");
+    const char *want_tgt = wrs_opt(argc, argv, "--expect-target");
+    const char *want_prod = wrs_opt(argc, argv, "--producer");
+    const char *want_purp = wrs_opt(argc, argv, "--purpose");
+    const char *exp_rc_s = wrs_opt(argc, argv, "--expect-rc");
+    const char *exp_verd = wrs_opt(argc, argv, "--expect-verdict");
+    char in_sha[65], out_sha[65], bind_sha[65];
+    int64_t want_rc = 0;
+    int vrc;
+
+    if (!exp_verd || !exp_verd[0]) exp_verd = "PASS";
+    if (exp_rc_s && wrs_parse_i64(exp_rc_s, &want_rc) != 0) {
+        sy_eprintf("REFUSE bad-verify-receipt-expect-rc\n");
+        return 2;
+    }
+    if (!rcpt || !want_rev || !want_cand ||
+        !wrs_is_hex_lower(want_rev, 40) || !wrs_is_hex_lower(want_cand, 64) ||
+        (strcmp(exp_verd, "PASS") != 0 && strcmp(exp_verd, "FAIL") != 0)) {
+        sy_eprintf("REFUSE bad-verify-receipt-args\n");
+        return 2;
+    }
+    vrc = wrs_verify_chain_receipt_file(rcpt, want_rev, want_cand, want_run_id, want_unit, want_tgt,
+                                        want_prod, want_purp, want_rc, exp_verd,
+                                        in_sha, out_sha, bind_sha);
+    if (vrc != 0) return vrc;
     sy_printf("CHAIN_FORMAT=rc_v3\nCHAIN_INPUTS_SHA=%s\nCHAIN_OUTPUT_SHA=%s\nCHAIN_BINDING_SHA=%s\n",
               in_sha, out_sha, bind_sha);
     return 0;
@@ -1463,23 +1542,51 @@ static int cmd_verify_manifest(int argc, char **argv) {
     const char *cand_sha = wrs_opt(argc, argv, "--candidate-sha");
     const char *slice_sha = wrs_opt(argc, argv, "--slice-sha");
     const char *pkg_sha = wrs_opt(argc, argv, "--pkg-sha");
+    const char *chain_in_sha = wrs_opt(argc, argv, "--chain-in-sha");
+    const char *chain_out_sha = wrs_opt(argc, argv, "--chain-out-sha");
     unsigned char *buf = 0;
     long n = 0L, i = 0L;
+    char man_sha[65];
     int man_proven = 0, is_cand_tsv = 0, hit_cand = 0, hit_arm = 0;
     int c_rev = -1, c_ape = -1, c_arm = -1, c_pkg = -1, lineno = 0;
     int64_t mpv = 0;
 
-    if (!man || !mp_s || !rev || !cand_sha || !slice_sha || !pkg_sha ||
-        wrs_parse_i64(mp_s, &mpv) != 0 || (mpv != 0 && mpv != 1) ||
+    if (!man || !rev || !cand_sha || !slice_sha || !pkg_sha ||
         !wrs_is_hex_lower(rev, 40) || !wrs_is_hex_lower(cand_sha, 64) ||
         !wrs_is_hex_lower(slice_sha, 64) || !wrs_is_hex_lower(pkg_sha, 64)) {
         sy_eprintf("REFUSE bad-verify-manifest-args\n");
         return 2;
     }
-    man_proven = (int)mpv;
+    if (mp_s) {
+        if (wrs_parse_i64(mp_s, &mpv) != 0 || (mpv != 0 && mpv != 1)) {
+            sy_eprintf("REFUSE bad-verify-manifest-args\n");
+            return 2;
+        }
+        man_proven = (int)mpv;
+    }
+    if ((chain_in_sha && !wrs_is_hex_lower(chain_in_sha, 64)) ||
+        (chain_out_sha && !wrs_is_hex_lower(chain_out_sha, 64))) {
+        sy_eprintf("REFUSE bad-verify-manifest-chain-sha\n");
+        return 2;
+    }
     if (wrs_read_reg_bounded(man, 4L << 20, &buf, &n) != 0 || !buf) {
         sy_eprintf("REFUSE manifest-unreadable\n");
         return 1;
+    }
+    if (sy_sha256_hex(buf, n, man_sha) != 0) {
+        mm_free(buf);
+        sy_eprintf("REFUSE manifest-sha-failed\n");
+        return 1;
+    }
+    if (chain_in_sha || chain_out_sha) {
+        int pin_hit = (chain_in_sha && strcmp(man_sha, chain_in_sha) == 0) ||
+                      (chain_out_sha && strcmp(man_sha, chain_out_sha) == 0);
+        if (!pin_hit) {
+            mm_free(buf);
+            sy_eprintf("REFUSE manifest-not-bound-to-chain-receipt\tgot=%s\n", man_sha);
+            return 1;
+        }
+        man_proven = 1;
     }
     for (i = 0L; i < n; i++) {
         if (buf[i] == 0U) { mm_free(buf); sy_eprintf("REFUSE manifest-nul-byte\n"); return 1; }
@@ -1570,6 +1677,190 @@ static int cmd_verify_manifest(int argc, char **argv) {
     return 0;
 }
 
+static int wrs_verify_cell_positive(const char *rcpt, const char *outf, const char *locf,
+                                    const char *run_id, const char *rev, const char *tgt,
+                                    const char *cand_sha, const char *slice_sha, const char *pkg_sha,
+                                    const char *pe_path, const char *rel_ver,
+                                    int64_t now_ts, int64_t disp_ts,
+                                    char bind_out[65]) {
+    char exp_loc[1536], exp_in_sha[65], got_loc_sha[65], pe_sha[65];
+    int64_t loc_sz = 0;
+    rc_expect_t exp;
+    rc_verified_t ver;
+    int is_arm64 = (strcmp(tgt, "win/arm64") == 0);
+    const char *want_pe_sha = is_arm64 ? slice_sha : cand_sha;
+    unsigned int wm = 0U;
+    wrs_pe_info_t pe;
+    char pe_err[160], safe_why[160];
+    int av_risk = 0;
+
+    if (cx_fmt(exp_loc, sizeof exp_loc,
+               "target\t%s\nrev\t%s\ncandidate_sha\t%s\nslice_sha\t%s\npkg_sha\t%s\n"
+               "release_version\t%s\nsmoke_suite\t%s\nmode\tpositive\npos_pe_sha\t-\nneg_pe_sha\t-\n",
+               tgt, rev, cand_sha, is_arm64 ? slice_sha : "-", is_arm64 ? pkg_sha : "-",
+               rel_ver, WRS_SUITE) != 0 ||
+        sy_sha256_hex(exp_loc, (int64_t)strlen(exp_loc), exp_in_sha) != 0 ||
+        rc_regular_sha256_size(locf, got_loc_sha, &loc_sz, 65536) != 0 ||
+        strcmp(got_loc_sha, exp_in_sha) != 0) {
+        sy_eprintf("REFUSE merge-cell-locators-mismatch\t%s\n", tgt);
+        return 1;
+    }
+    mm_fill(&exp, (long)sizeof exp, 0, (long)sizeof exp);
+    exp.run_id = run_id; exp.rev = rev; exp.unit = WRS_UNIT; exp.target = tgt;
+    exp.candidate_sha = cand_sha; exp.inputs_sha = exp_in_sha; exp.output_path = outf;
+    exp.producer = WRS_PRODUCER; exp.purpose = WRS_PURPOSE_POS;
+    exp.expect_rc = 0; exp.expect_verdict = "PASS";
+    exp.now_ts = now_ts; exp.max_age_s = 86400; exp.max_future_s = 60;
+    exp.allow_fail_verdict = 0;
+    if (rc_verify_out(rcpt, &exp, &ver) != RC_OK) {
+        sy_eprintf("REFUSE merge-cell-receipt-verify\t%s\t%s\n", tgt, rc_why());
+        return 1;
+    }
+    if (disp_ts > 0 && ver.ts < disp_ts - 60LL) {
+        rc_verified_free(&ver);
+        sy_eprintf("REFUSE merge-cell-predates-dispatch\t%s\n", tgt);
+        return 1;
+    }
+    if (wrs_verify_output_rows(ver.output_bytes, ver.output_len, tgt, cand_sha, rev,
+                               is_arm64 ? slice_sha : "-", is_arm64 ? pkg_sha : "-", 1) != 0) {
+        rc_verified_free(&ver);
+        return 1;
+    }
+    if (rc_regular_sha256_size(pe_path, pe_sha, 0, 64 << 20) != 0 ||
+        strcmp(pe_sha, want_pe_sha) != 0 ||
+        wrs_want_pe_mach(tgt, &wm) != 0 ||
+        wrs_scan_pe(pe_path, wm, &pe, pe_err, sizeof pe_err) != 0 ||
+        wrs_pe_stack_safe(&pe, &av_risk, safe_why, sizeof safe_why) != 0) {
+        rc_verified_free(&ver);
+        sy_eprintf("REFUSE merge-cell-pe-gate\t%s\n", tgt);
+        return 1;
+    }
+    (void)cx_fmt(bind_out, 65, "%s", ver.binding_sha);
+    rc_verified_free(&ver);
+    return 0;
+}
+
+static int cmd_merge_verdict(int argc, char **argv) {
+    const char *ch_rcpt = wrs_opt(argc, argv, "--chain-rcpt");
+    const char *x64_rcpt = wrs_opt(argc, argv, "--x64-rcpt");
+    const char *x64_out = wrs_opt(argc, argv, "--x64-out");
+    const char *x64_loc = wrs_opt(argc, argv, "--x64-loc");
+    const char *x64_run = wrs_opt(argc, argv, "--x64-run-id");
+    const char *neg_rcpt = wrs_opt(argc, argv, "--neg-rcpt");
+    const char *neg_out = wrs_opt(argc, argv, "--neg-out");
+    const char *neg_loc = wrs_opt(argc, argv, "--neg-loc");
+    const char *neg_run = wrs_opt(argc, argv, "--neg-run-id");
+    const char *neg_pos_pe = wrs_opt(argc, argv, "--neg-pos-pe");
+    const char *neg_pe = wrs_opt(argc, argv, "--neg-pe");
+    const char *a64_rcpt = wrs_opt(argc, argv, "--arm64-rcpt");
+    const char *a64_out = wrs_opt(argc, argv, "--arm64-out");
+    const char *a64_loc = wrs_opt(argc, argv, "--arm64-loc");
+    const char *a64_run = wrs_opt(argc, argv, "--arm64-run-id");
+    const char *rev = wrs_opt(argc, argv, "--rev");
+    const char *cand_sha = wrs_opt(argc, argv, "--candidate-sha");
+    const char *slice_sha = wrs_opt(argc, argv, "--slice-sha");
+    const char *pkg_sha = wrs_opt(argc, argv, "--pkg-sha");
+    const char *cand_pe = wrs_opt(argc, argv, "--candidate-pe");
+    const char *arm64_pe = wrs_opt(argc, argv, "--arm64-pe");
+    const char *rel_ver_arg = wrs_opt(argc, argv, "--release-version");
+    const char *now_s = wrs_opt(argc, argv, "--now-ts");
+    const char *disp_s = wrs_opt(argc, argv, "--disp-ts");
+    const char *out_merged = wrs_opt(argc, argv, "--out-merged");
+    const char *out_step7 = wrs_opt(argc, argv, "--out-step7");
+    char rel_ver[32], ch_bind[65], x64_bind[65], neg_bind[65], a64_bind[65];
+    char neg_loc_exp[1536], neg_in_sha[65], got_neg_loc_sha[65], pos_pe_sha[65], neg_pe_sha[65];
+    char pe_err[160], safe_why[160], merged_buf[2048], step7_buf[512];
+    int64_t now_ts = 0, disp_ts = 0, loc_sz = 0;
+    unsigned int derived_frame = 0U;
+    wrs_pe_info_t pos_info, neg_info;
+    int pos_av = 0, neg_av = 0;
+    rc_expect_t exp;
+    rc_verified_t ver;
+
+    if (!ch_rcpt || !x64_rcpt || !x64_out || !x64_loc || !x64_run ||
+        !neg_rcpt || !neg_out || !neg_loc || !neg_run || !neg_pos_pe || !neg_pe ||
+        !a64_rcpt || !a64_out || !a64_loc || !a64_run ||
+        !rev || !cand_sha || !slice_sha || !pkg_sha || !cand_pe || !arm64_pe ||
+        !rel_ver_arg || !now_s || !out_merged || !out_step7 ||
+        !wrs_is_hex_lower(rev, 40) || !wrs_is_hex_lower(cand_sha, 64) ||
+        !wrs_is_hex_lower(slice_sha, 64) || !wrs_is_hex_lower(pkg_sha, 64) ||
+        !rv_valid(rel_ver_arg) || cx_fmt(rel_ver, sizeof rel_ver, "%s", rel_ver_arg) != 0 ||
+        wrs_parse_i64(now_s, &now_ts) != 0 || now_ts <= 0) {
+        sy_eprintf("REFUSE bad-merge-verdict-args\n");
+        return 2;
+    }
+    if (disp_s && wrs_parse_i64(disp_s, &disp_ts) != 0) return 2;
+
+    if (wrs_verify_chain_receipt_file(ch_rcpt, rev, cand_sha, 0, "candidate-ape", "lnx/x86_64",
+                                      "candidate-chain", "chain-ape", 0, "PASS",
+                                      0, 0, ch_bind) != 0) {
+        return 1;
+    }
+    if (wrs_verify_cell_positive(x64_rcpt, x64_out, x64_loc, x64_run, rev, "win/x86_64",
+                                 cand_sha, "-", "-", cand_pe, rel_ver, now_ts, disp_ts, x64_bind) != 0 ||
+        wrs_verify_cell_positive(a64_rcpt, a64_out, a64_loc, a64_run, rev, "win/arm64",
+                                 cand_sha, slice_sha, pkg_sha, arm64_pe, rel_ver, now_ts, disp_ts, a64_bind) != 0) {
+        return 1;
+    }
+
+    if (rc_regular_sha256_size(neg_pos_pe, pos_pe_sha, 0, 32 << 20) != 0 ||
+        rc_regular_sha256_size(neg_pe, neg_pe_sha, 0, 32 << 20) != 0 ||
+        strcmp(pos_pe_sha, neg_pe_sha) == 0 ||
+        cx_fmt(neg_loc_exp, sizeof neg_loc_exp,
+               "target\twin/x86_64\nrev\t%s\ncandidate_sha\t%s\nslice_sha\t-\npkg_sha\t-\n"
+               "release_version\t%s\nsmoke_suite\t%s\nmode\tnegative\npos_pe_sha\t%s\nneg_pe_sha\t%s\n",
+               rev, cand_sha, rel_ver, WRS_SUITE, pos_pe_sha, neg_pe_sha) != 0 ||
+        sy_sha256_hex(neg_loc_exp, (int64_t)strlen(neg_loc_exp), neg_in_sha) != 0 ||
+        rc_regular_sha256_size(neg_loc, got_neg_loc_sha, &loc_sz, 65536) != 0 ||
+        strcmp(got_neg_loc_sha, neg_in_sha) != 0) {
+        sy_eprintf("REFUSE merge-neg-locators-mismatch\n");
+        return 1;
+    }
+    mm_fill(&exp, (long)sizeof exp, 0, (long)sizeof exp);
+    exp.run_id = neg_run; exp.rev = rev; exp.unit = WRS_UNIT; exp.target = "win/x86_64";
+    exp.candidate_sha = cand_sha; exp.inputs_sha = neg_in_sha; exp.output_path = neg_out;
+    exp.producer = WRS_PRODUCER; exp.purpose = WRS_PURPOSE_NEG;
+    exp.expect_rc = 1; exp.expect_verdict = "FAIL";
+    exp.now_ts = now_ts; exp.max_age_s = 86400; exp.max_future_s = 60;
+    exp.allow_fail_verdict = 1;
+    if (rc_verify_out(neg_rcpt, &exp, &ver) != RC_OK) {
+        sy_eprintf("REFUSE merge-neg-receipt-verify\t%s\n", rc_why());
+        return 1;
+    }
+    if ((disp_ts > 0 && ver.ts < disp_ts - 60LL) ||
+        wrs_scan_pe(neg_pos_pe, 0x8664U, &pos_info, pe_err, sizeof pe_err) != 0 ||
+        wrs_pe_stack_safe(&pos_info, &pos_av, safe_why, sizeof safe_why) != 0 ||
+        wrs_verify_neg_pe_derived_from_pos(neg_pos_pe, neg_pe, &derived_frame) != 0 ||
+        derived_frame != 8248U ||
+        wrs_scan_pe(neg_pe, 0x8664U, &neg_info, pe_err, sizeof pe_err) != 0 ||
+        wrs_pe_stack_safe(&neg_info, &neg_av, safe_why, sizeof safe_why) == 0 ||
+        neg_av != 1 || neg_info.stack_commit != 0x1000ULL || neg_info.max_frame != 8248U ||
+        wrs_verify_neg_rows(ver.output_bytes, ver.output_len, "win/x86_64", cand_sha, rev,
+                            pos_pe_sha, neg_pe_sha, neg_info.max_frame, safe_why) != 0) {
+        rc_verified_free(&ver);
+        sy_eprintf("REFUSE merge-neg-evidence-invalid\n");
+        return 1;
+    }
+    (void)cx_fmt(neg_bind, sizeof neg_bind, "%s", ver.binding_sha);
+    rc_verified_free(&ver);
+
+    if (cx_fmt(merged_buf, sizeof merged_buf,
+               "MERGED_VERDICT\tstatus=PASS\trev=%s\tcandidate_sha=%s\trelease_version=%s\t"
+               "x64_run=%s\tx64_bind=%s\tneg_run=%s\tneg_bind=%s\tneg_fault=0xC0000005\tneg_frame=%u\t"
+               "arm64_run=%s\tarm64_slice_sha=%s\tarm64_bind=%s\tchain_bind=%s\n",
+               rev, cand_sha, rel_ver,
+               x64_run, x64_bind, neg_run, neg_bind, neg_info.max_frame,
+               a64_run, slice_sha, a64_bind, ch_bind) != 0 ||
+        cx_fmt(step7_buf, sizeof step7_buf, "7\tPASS\t%s\n", out_merged) != 0 ||
+        sy_write_atomic(out_merged, merged_buf, (long)strlen(merged_buf), 0644) != 0 ||
+        sy_write_atomic(out_step7, step7_buf, (long)strlen(step7_buf), 0644) != 0) {
+        sy_eprintf("REFUSE write-merged-verdict\n");
+        return 1;
+    }
+    sy_printf("%s", merged_buf);
+    return 0;
+}
+
 static int cmd_release_version(int argc, char **argv) {
     const char *path = wrs_opt(argc, argv, "--path");
     char ver[32];
@@ -1629,6 +1920,7 @@ int main(int argc, char **argv) {
     if (wrs_has_flag(argc, argv, "--check-host-arch")) return cmd_check_host_arch(argc, argv);
     if (wrs_has_flag(argc, argv, "--verify-receipt")) return cmd_verify_receipt(argc, argv);
     if (wrs_has_flag(argc, argv, "--verify-manifest")) return cmd_verify_manifest(argc, argv);
+    if (wrs_has_flag(argc, argv, "--merge-verdict")) return cmd_merge_verdict(argc, argv);
     if (wrs_has_flag(argc, argv, "--print-release-version")) return cmd_release_version(argc, argv);
     if (wrs_has_flag(argc, argv, "--seal")) return cmd_seal(argc, argv);
     if (wrs_has_flag(argc, argv, "--judge")) return cmd_judge(argc, argv);
