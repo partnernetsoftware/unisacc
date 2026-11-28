@@ -1,0 +1,502 @@
+/* tools/check-dvbranch.cx -- Verify devsvc branch create (server-side v01x-units owner check),
+ * devsvc accept-tree (dac-guarded commit-bound review tree with TTL expiry & guarded self-cleanup),
+ * and negative controls (missing/invalid owner, missing marker preservation, git worktree remove failure preservation).
+ *
+ *   sh ./unisacc.com tools/check-dvbranch.cx -- PREPARED_DEVSVC_CORE_BIN [--quiet]
+ *
+ * Requires a prebuilt devsvc-core-tool binary (declared as material devsvc-core-tool:path in tests/batches.tsv)
+ * so the batch never compiles tools/devsvc-core.cx under its 55s budget.
+ */
+#pragma unisa use sys.fs
+#pragma unisa use sys.io
+#pragma unisa use sys.posix
+#pragma unisa use sys.proc
+#pragma unisa use sys.time
+#pragma unisa use sys.env
+#pragma unisa use sysx.process
+#pragma unisa use mem.bytes
+#pragma unisa use mem.heap
+#pragma unisa use text.fmt
+#pragma unisa use text.text
+
+static int g_pass;
+static int g_fail;
+static int g_quiet;
+
+static void ck(int ok, const char *name, const char *note) {
+    if (ok) {
+        g_pass++;
+        if (!g_quiet) sy_printf("PASS\t%s\n", name);
+    } else {
+        g_fail++;
+        sy_printf("FAIL\t%s\tnote=%.240s\n", name, note ? note : "-");
+    }
+}
+
+static int run_cmd(const char *cwd, char **av, int to_s, char *out, int cap) {
+    np_result r; char why[256]; int rc;
+    out[0] = 0;
+    if (np_run(av, cwd, 0, to_s, &r, why, sizeof why) != 0) {
+        np_free(&r);
+        return -1;
+    }
+    rc = r.rc;
+    size_t pos = 0;
+    if (r.out && r.outn > 0 && cap > 1) {
+        size_t n = r.outn < (size_t)(cap - 1) ? r.outn : (size_t)(cap - 1);
+        (void)mm_copy(out + pos, (size_t)cap - pos, r.out, n); pos += n;
+    }
+    if (r.err && r.errn > 0 && pos + 1 < (size_t)cap) {
+        size_t rem = (size_t)(cap - 1) - pos;
+        size_t n = r.errn < rem ? r.errn : rem;
+        (void)mm_copy(out + pos, (size_t)cap - pos, r.err, n); pos += n;
+    }
+    out[pos] = 0;
+    np_free(&r);
+    return rc;
+}
+
+static int run_sh(const char *cwd, const char *sh_cmd, int to_s, char *out, int cap) {
+    char *av[] = {"/bin/sh", "-c", (char *)sh_cmd, 0};
+    return run_cmd(cwd, av, to_s, out, cap);
+}
+
+static void trim_ws(char *s) {
+    long n = (long)strlen(s);
+    while (n > 0 && (s[n - 1] == '\n' || s[n - 1] == '\r' || s[n - 1] == ' ' || s[n - 1] == '\t')) s[--n] = 0;
+}
+
+static int extract_kv(const char *s, const char *key, char *dst, int cap) {
+    char pat[96];
+    if (cx_fmt(pat, sizeof pat, "%s=", key) != 0) return -1;
+    size_t pl = strlen(pat);
+    const char *q = s;
+    while (*q) {
+        const char *e = q;
+        while (*e && *e != '\t' && *e != '\n' && *e != '\r') e++;
+        size_t fl = (size_t)(e - q);
+        if (fl > pl && memcmp(q, pat, pl) == 0) {
+            size_t vl = fl - pl;
+            if ((int)vl >= cap) return -1;
+            if (mm_copy(dst, (size_t)cap, q + pl, vl) != 0) return -1;
+            dst[vl] = 0;
+            return 0;
+        }
+        if (!*e) break;
+        q = e + 1;
+    }
+    return -1;
+}
+
+int main(int argc, char **argv) {
+    char root[4096], tmp[4096], fx[4096], inst[4096], dv_bin[4096], src_pay[4096];
+    char out[32768], cmd[8192];
+    const char *prepared_core = 0;
+
+    for (int i = 1; i < argc; i++) {
+        if (!strcmp(argv[i], "--quiet")) g_quiet = 1;
+        else if (argv[i][0] != '-' && !prepared_core) prepared_core = argv[i];
+    }
+    if (!prepared_core || prepared_core[0] != '/' || sy_is_reg(prepared_core) != 1) {
+        sy_eprintf("REFUSE\tdvbranch\tprepared-core-required\n");
+        return 2;
+    }
+    if (cx_fmt(dv_bin, sizeof dv_bin, "%s", prepared_core) != 0) return 2;
+    if (sy_realpath(".", root, sizeof root) < 0) return 2;
+    if (sy_mkdtemp(sy_tmpdir(), "ckdvbr-", tmp, sizeof tmp) != 0) return 2;
+    (void)cx_fmt(fx, sizeof fx, "%s/repo", tmp);
+    (void)cx_fmt(inst, sizeof inst, "%s/inst", tmp);
+    (void)cx_fmt(src_pay, sizeof src_pay, "%s/payload.txt", tmp);
+    (void)sy_write_atomic(src_pay, "hello-accept\n", 13, 0644);
+
+    /* 1. Prepare isolated fixture git repo with plans/v01x-units.tsv and tools/devsvc-repo.tsv */
+    {
+        char repo_tsv[4200], units_tsv[4200], dummy_cx[4200];
+        (void)cx_fmt(cmd, sizeof cmd,
+                     "mkdir -p \"%s/tools\" \"%s/plans\" && "
+                     "git init -q \"%s\" && "
+                     "git -C \"%s\" config user.email dvbr@test && git -C \"%s\" config user.name dvbr",
+                     fx, fx, fx, fx, fx);
+        int rc0 = run_sh(tmp, cmd, 20, out, (int)sizeof out);
+
+        (void)cx_fmt(repo_tsv, sizeof repo_tsv, "%s/tools/devsvc-repo.tsv", fx);
+        (void)cx_fmt(units_tsv, sizeof units_tsv, "%s/plans/v01x-units.tsv", fx);
+        (void)cx_fmt(dummy_cx, sizeof dummy_cx, "%s/plans/readme.txt", fx);
+        {
+            const char *rt_buf =
+                "key\tvalue\tnote\n"
+                "product\tunisacc.com\tp\n"
+                "self\ttools/devsvc-core.cx\ts\n"
+                "lib\tcx\tl1\n"
+                "lib\text\tl2\n"
+                "lib\ttools/cxlib\tl3\n"
+                "onchange\ttools/on-change.cx\to\n"
+                "onchange_tag\tON_CHANGE\tt\n"
+                "proc_pat\tunisacc.com\tpp\n"
+                "cache_sub\t.cache/unisacc/devsvc\tcs\n"
+                "inst_env\tUNISACC_DEVSVC_DIR\tie\n";
+            const char *ut_buf =
+                "id\tver\tgoal\towner\tbranch\tstate\twaits_on\tlast_sha\n"
+                "U10-1\t10\twin stack probes\tagyneon2\tw/agyneon2-v0110-win-probe\tREVIEW\t-\tb2b456c00\n"
+                "U-ALICE\t10\tdevsvc branch unit test\talice\t-\tDOING\t-\t-\n";
+            int w1 = sy_write_atomic(repo_tsv, rt_buf, (long)strlen(rt_buf), 0644);
+            int w2 = sy_write_atomic(units_tsv, ut_buf, (long)strlen(ut_buf), 0644);
+            int w3 = sy_write_atomic(dummy_cx, "clean-base\n", 11, 0644);
+            (void)cx_fmt(cmd, sizeof cmd,
+                         "ln -sf \"%s/unisacc.com\" \"%s/unisacc.com\" && "
+                         "git -C \"%s\" add plans tools && git -C \"%s\" commit -q -m init",
+                         root, fx, fx, fx);
+            int rc1 = (rc0 == 0 && w1 == 0 && w2 == 0 && w3 == 0) ? run_sh(fx, cmd, 20, out, (int)sizeof out) : -1;
+            ck(rc1 == 0, "fixture-repo-setup", out);
+            if (rc1 != 0) { (void)sy_remove_all(tmp); return 1; }
+        }
+    }
+
+    /* 2. Start isolated devsvc daemon bound to fixture repo */
+    {
+        (void)cx_fmt(cmd, sizeof cmd,
+                     "env -u DEVSVC_OWNER UNISACC_DEVSVC_DIR=\"%s\" DEVSVC_SELF_BIN=\"%s\" \"%s\" start --ttl 60 --idle 30",
+                     inst, dv_bin, dv_bin);
+        int rcs = run_sh(fx, cmd, 20, out, (int)sizeof out);
+        ck(rcs == 0 && (strstr(out, "OK\tstarted") != 0 || strstr(out, "OK\talready") != 0), "start-isolated-devsvc", out);
+    }
+
+    /* 3. Own-owner branch create rc 0 + server creates worktree under .claude/worktrees/ */
+    char wt_alice[4096] = "", alice_sha[64] = "";
+    {
+        (void)cx_fmt(cmd, sizeof cmd,
+                     "env DEVSVC_OWNER=alice UNISACC_DEVSVC_DIR=\"%s\" DEVSVC_SELF_BIN=\"%s\" \"%s\" branch create --owner alice --unit U-ALICE",
+                     inst, dv_bin, dv_bin);
+        int rc = run_sh(fx, cmd, 25, out, (int)sizeof out);
+        char br[128] = "";
+        int ex_br = (rc == 0 && extract_kv(out, "branch", br, sizeof br) == 0 &&
+                     extract_kv(out, "worktree", wt_alice, sizeof wt_alice) == 0 &&
+                     extract_kv(out, "commit", alice_sha, sizeof alice_sha) == 0);
+        int wt_ok = (ex_br && strstr(wt_alice, "/.claude/worktrees/w-alice-u-alice") != 0 &&
+                     sy_exists(wt_alice) == 1 && !strcmp(br, "w/alice-u-alice"));
+        ck(wt_ok, "own-owner-branch-create-rc0", out);
+    }
+
+    /* 4. Missing/invalid owner, impersonation, owner mismatch, unknown unit all refused by name */
+    {
+        (void)cx_fmt(cmd, sizeof cmd,
+                     "env -u DEVSVC_OWNER UNISACC_DEVSVC_DIR=\"%s\" DEVSVC_SELF_BIN=\"%s\" \"%s\" branch create --unit U-ALICE",
+                     inst, dv_bin, dv_bin);
+        int rcm1 = run_sh(fx, cmd, 15, out, (int)sizeof out);
+        int okm1 = (rcm1 != 0 && strstr(out, "branch-missing-owner") != 0);
+
+        (void)cx_fmt(cmd, sizeof cmd,
+                     "env DEVSVC_OWNER='bad!ow' UNISACC_DEVSVC_DIR=\"%s\" DEVSVC_SELF_BIN=\"%s\" \"%s\" branch create --owner alice --unit U-ALICE",
+                     inst, dv_bin, dv_bin);
+        int rcb1 = run_sh(fx, cmd, 15, out, (int)sizeof out);
+        int okb1 = (rcb1 != 0 && strstr(out, "branch-bad-caller-owner") != 0);
+
+        (void)cx_fmt(cmd, sizeof cmd,
+                     "env DEVSVC_OWNER=alice UNISACC_DEVSVC_DIR=\"%s\" DEVSVC_SELF_BIN=\"%s\" \"%s\" branch create --owner alice --unit U10-1",
+                     inst, dv_bin, dv_bin);
+        int rc1 = run_sh(fx, cmd, 15, out, (int)sizeof out);
+        int ok1 = (rc1 != 0 && strstr(out, "branch-owner-mismatch") != 0 && strstr(out, "agyneon2") != 0);
+
+        (void)cx_fmt(cmd, sizeof cmd,
+                     "env DEVSVC_OWNER=alice UNISACC_DEVSVC_DIR=\"%s\" DEVSVC_SELF_BIN=\"%s\" \"%s\" branch create --owner agyneon2 --unit U10-1",
+                     inst, dv_bin, dv_bin);
+        int rc2 = run_sh(fx, cmd, 15, out, (int)sizeof out);
+        int ok2 = (rc2 != 0 && strstr(out, "branch-impersonation") != 0 && strstr(out, "alice") != 0 && strstr(out, "agyneon2") != 0);
+
+        (void)cx_fmt(cmd, sizeof cmd,
+                     "env DEVSVC_OWNER=alice UNISACC_DEVSVC_DIR=\"%s\" DEVSVC_SELF_BIN=\"%s\" \"%s\" branch create --owner alice --unit NO-SUCH-UNIT",
+                     inst, dv_bin, dv_bin);
+        int rc3 = run_sh(fx, cmd, 15, out, (int)sizeof out);
+        int ok3 = (rc3 != 0 && strstr(out, "branch-unknown-unit") != 0 && strstr(out, "NO-SUCH-UNIT") != 0);
+
+        ck(okm1 && okb1 && ok1 && ok2 && ok3, "missing-invalid-owner-and-impersonation-refused", out);
+    }
+
+    /* 5. Commit on created branch succeeds */
+    char base_sha[64] = "";
+    {
+        (void)cx_fmt(cmd, sizeof cmd, "git -C \"%s\" rev-parse HEAD", fx);
+        (void)run_sh(fx, cmd, 15, base_sha, (int)sizeof base_sha);
+        trim_ws(base_sha);
+    }
+    if (wt_alice[0]) {
+        char fp[4200];
+        (void)cx_fmt(fp, sizeof fp, "%s/plans/readme.txt", wt_alice);
+        (void)sy_write_atomic(fp, "alice-patch\n", 12, 0644);
+        (void)cx_fmt(cmd, sizeof cmd,
+                     "git -C \"%s\" add plans/readme.txt && git -C \"%s\" commit -q -m alice-change && git -C \"%s\" rev-parse HEAD",
+                     wt_alice, wt_alice, wt_alice);
+        int rca = run_sh(wt_alice, cmd, 20, alice_sha, (int)sizeof alice_sha);
+        trim_ws(alice_sha);
+        ck(rca == 0 && strlen(alice_sha) == 40, "commit-on-created-branch", alice_sha);
+    } else {
+        ck(0, "commit-on-created-branch", "no wt_alice");
+    }
+
+    /* 6. Reviewer creates dac-guarded accept-tree, missing owner & non-owner remove refused, writes refused, TTL expires cleanly */
+    {
+        char at_wt[4096] = "", at_id[128] = "", at_cmt[64] = "", at_ro[64] = "", mk_path[4200];
+        (void)cx_fmt(cmd, sizeof cmd,
+                     "env -u DEVSVC_OWNER UNISACC_DEVSVC_DIR=\"%s\" DEVSVC_SELF_BIN=\"%s\" \"%s\" accept-tree --commit \"%s\" --ttl 300",
+                     inst, dv_bin, dv_bin, alice_sha);
+        int rcm = run_sh(fx, cmd, 15, out, (int)sizeof out);
+        int okm = (rcm != 0 && strstr(out, "accept-missing-owner") != 0);
+
+        (void)cx_fmt(cmd, sizeof cmd,
+                     "env DEVSVC_OWNER=gatekeeper UNISACC_DEVSVC_DIR=\"%s\" DEVSVC_SELF_BIN=\"%s\" \"%s\" accept-tree --commit \"%s\" --ttl 1 --owner gatekeeper",
+                     inst, dv_bin, dv_bin, alice_sha);
+        int rc = run_sh(fx, cmd, 20, out, (int)sizeof out);
+        int got = (rc == 0 &&
+                   extract_kv(out, "id", at_id, sizeof at_id) == 0 &&
+                   extract_kv(out, "worktree", at_wt, sizeof at_wt) == 0 &&
+                   extract_kv(out, "commit", at_cmt, sizeof at_cmt) == 0 &&
+                   extract_kv(out, "readonly", at_ro, sizeof at_ro) == 0 &&
+                   !strcmp(at_ro, "dac-guarded") &&
+                   !strcmp(at_cmt, alice_sha) && sy_exists(at_wt) == 1);
+        (void)cx_fmt(mk_path, sizeof mk_path, "%s/.devsvc-accept-tree.marker", at_wt);
+        ck(okm && got && sy_exists(mk_path) == 1, "reviewer-create-dac-guarded-accept-tree", out);
+
+        if (got) {
+            (void)cx_fmt(cmd, sizeof cmd,
+                         "env DEVSVC_OWNER=cc UNISACC_DEVSVC_DIR=\"%s\" DEVSVC_SELF_BIN=\"%s\" \"%s\" f write \"%s/plans/readme.txt\" --from \"%s\"",
+                         inst, dv_bin, dv_bin, at_wt, src_pay);
+            int rw_dv = run_sh(fx, cmd, 15, out, (int)sizeof out);
+            int ok_dv = (rw_dv != 0 && strstr(out, "accept-tree-readonly") != 0);
+
+            (void)cx_fmt(cmd, sizeof cmd, "echo tamper > \"%s/plans/readme.txt\"", at_wt);
+            int rw_os = run_sh(fx, cmd, 15, out, (int)sizeof out);
+            int ok_os = (rw_os != 0);
+            ck(ok_dv && ok_os, "writes-inside-accept-tree-refused", out);
+
+            sy_sleep_ms(2200);
+            int gone_after_ttl = (sy_exists(at_wt) == 0);
+            (void)cx_fmt(cmd, sizeof cmd,
+                         "env UNISACC_DEVSVC_DIR=\"%s\" DEVSVC_SELF_BIN=\"%s\" \"%s\" accept-tree list",
+                         inst, dv_bin, dv_bin);
+            char lst_out[4096];
+            int rl = run_sh(fx, cmd, 15, lst_out, (int)sizeof lst_out);
+            char br_sha[128] = "";
+            (void)cx_fmt(cmd, sizeof cmd, "git -C \"%s\" rev-parse refs/heads/w/alice-u-alice", fx);
+            int rbr = run_sh(fx, cmd, 15, br_sha, (int)sizeof br_sha);
+            trim_ws(br_sha);
+            ck(gone_after_ttl && rl == 0 && strstr(lst_out, "n=0") != 0 && rbr == 0 && !strcmp(br_sha, alice_sha),
+               "accept-tree-expires-and-branch-remains", lst_out);
+        } else {
+            ck(0, "writes-inside-accept-tree-refused", out);
+            ck(0, "accept-tree-expires-and-branch-remains", out);
+        }
+    }
+
+    /* 7. Deterministic F2/F3/F4 negatives with long TTL=300 (no timer race):
+     *    (a) non-owner accept-remove refused;
+     *    (b) marker id/commit mismatch refused + dir, marker & ro kept;
+     *    (c) HEAD mismatch refused + dir, marker & ro kept;
+     *    (d) missing marker refused + dir & ro kept. */
+    {
+        char at_wt[4096] = "", at_id[128] = "", mk_path[4200];
+        (void)cx_fmt(cmd, sizeof cmd,
+                     "env DEVSVC_OWNER=gatekeeper UNISACC_DEVSVC_DIR=\"%s\" DEVSVC_SELF_BIN=\"%s\" \"%s\" accept-tree --commit \"%s\" --ttl 300 --owner gatekeeper",
+                     inst, dv_bin, dv_bin, alice_sha);
+        int rc = run_sh(fx, cmd, 20, out, (int)sizeof out);
+        int ok = (rc == 0 && extract_kv(out, "id", at_id, sizeof at_id) == 0 &&
+                  extract_kv(out, "worktree", at_wt, sizeof at_wt) == 0 && sy_exists(at_wt) == 1);
+        if (ok) {
+            (void)cx_fmt(mk_path, sizeof mk_path, "%s/.devsvc-accept-tree.marker", at_wt);
+
+            /* (a) non-owner remove refused */
+            (void)cx_fmt(cmd, sizeof cmd,
+                         "env DEVSVC_OWNER=alice UNISACC_DEVSVC_DIR=\"%s\" DEVSVC_SELF_BIN=\"%s\" \"%s\" accept-tree remove \"%s\"",
+                         inst, dv_bin, dv_bin, at_id);
+            int r_ow = run_sh(fx, cmd, 15, out, (int)sizeof out);
+            ck(r_ow != 0 && strstr(out, "accept-owner-mismatch") != 0 && sy_exists(at_wt) == 1,
+               "accept-remove-owner-mismatch-refused", out);
+
+            /* (b) marker id/commit mismatch refused, dir + marker + ro kept */
+            char orig_mk[512] = "";
+            {
+                unsigned char *mb = 0; int64_t mn = 0;
+                if (sy_read_file(mk_path, &mb, &mn, sizeof orig_mk - 1) == 0 && mb && mn > 0) {
+                    (void)mm_copy(orig_mk, sizeof orig_mk, mb, (size_t)mn); orig_mk[mn] = 0;
+                }
+                if (mb) free(mb);
+            }
+            (void)sy_chmod(at_wt, 0755);
+            (void)sy_chmod(mk_path, 0644);
+            (void)sy_write_atomic(mk_path, "id=wrong\tcommit=0000000000000000000000000000000000000000\towner=gatekeeper\n", 74, 0444);
+            (void)sy_chmod(at_wt, 0555);
+            (void)cx_fmt(cmd, sizeof cmd,
+                         "env DEVSVC_OWNER=gatekeeper UNISACC_DEVSVC_DIR=\"%s\" DEVSVC_SELF_BIN=\"%s\" \"%s\" accept-tree remove \"%s\"",
+                         inst, dv_bin, dv_bin, at_id);
+            int r_mm = run_sh(fx, cmd, 15, out, (int)sizeof out);
+            (void)cx_fmt(cmd, sizeof cmd, "echo tamper > \"%s/plans/readme.txt\"", at_wt);
+            int ro_mm = run_sh(fx, cmd, 10, cmd + 4096, 1024);
+            ck(r_mm != 0 && strstr(out, "marker-id-or-commit-mismatch") != 0 &&
+               sy_exists(at_wt) == 1 && sy_exists(mk_path) == 1 && ro_mm != 0,
+               "marker-mismatch-refused-and-ro-kept", out);
+
+            /* restore valid marker, detach HEAD to base_sha -> (c) worktree-list HEAD mismatch refused */
+            (void)sy_chmod(at_wt, 0755);
+            (void)sy_chmod(mk_path, 0644);
+            (void)sy_write_atomic(mk_path, orig_mk, (long)strlen(orig_mk), 0444);
+            (void)cx_fmt(cmd, sizeof cmd, "chmod -R u+w \"%s\" && git -C \"%s\" checkout -q --detach \"%s\" && chmod -R a-w \"%s\"",
+                         at_wt, at_wt, base_sha, at_wt);
+            (void)run_sh(fx, cmd, 15, out, (int)sizeof out);
+            (void)cx_fmt(cmd, sizeof cmd,
+                         "env DEVSVC_OWNER=gatekeeper UNISACC_DEVSVC_DIR=\"%s\" DEVSVC_SELF_BIN=\"%s\" \"%s\" accept-tree remove \"%s\"",
+                         inst, dv_bin, dv_bin, at_id);
+            int r_hd = run_sh(fx, cmd, 15, out, (int)sizeof out);
+            (void)cx_fmt(cmd, sizeof cmd, "echo tamper > \"%s/plans/readme.txt\"", at_wt);
+            int ro_hd = run_sh(fx, cmd, 10, cmd + 4096, 1024);
+            ck(r_hd != 0 && strstr(out, "worktree-list-commit-mismatch") != 0 &&
+               sy_exists(at_wt) == 1 && sy_exists(mk_path) == 1 && ro_hd != 0,
+               "head-mismatch-refused-and-ro-kept", out);
+
+            /* (d) unlink marker (with long TTL, zero race) -> missing-accept-marker refused, dir & ro kept */
+            (void)sy_chmod(at_wt, 0755);
+            (void)sy_unlink(mk_path);
+            (void)sy_chmod(at_wt, 0555);
+            (void)cx_fmt(cmd, sizeof cmd,
+                         "env DEVSVC_OWNER=gatekeeper UNISACC_DEVSVC_DIR=\"%s\" DEVSVC_SELF_BIN=\"%s\" \"%s\" accept-tree remove \"%s\"",
+                         inst, dv_bin, dv_bin, at_id);
+            int r_nm = run_sh(fx, cmd, 15, out, (int)sizeof out);
+            (void)cx_fmt(cmd, sizeof cmd, "echo tamper > \"%s/plans/readme.txt\"", at_wt);
+            int ro_nm = run_sh(fx, cmd, 10, cmd + 4096, 1024);
+            ck(r_nm != 0 && strstr(out, "missing-accept-marker") != 0 &&
+               sy_exists(at_wt) == 1 && ro_nm != 0,
+               "tree-without-marker-not-deleted-and-ro-kept", out);
+
+            (void)cx_fmt(cmd, sizeof cmd, "chmod -R u+w \"%s\" && git -C \"%s\" worktree remove --force \"%s\"", at_wt, fx, at_wt);
+            (void)run_sh(fx, cmd, 15, out, (int)sizeof out);
+        } else {
+            ck(0, "accept-remove-owner-mismatch-refused", out);
+            ck(0, "marker-mismatch-refused-and-ro-kept", out);
+            ck(0, "head-mismatch-refused-and-ro-kept", out);
+            ck(0, "tree-without-marker-not-deleted-and-ro-kept", out);
+        }
+    }
+
+    /* 8. F2 negative: prefix outside accept-* and symlinked accept path refused at startup GC */
+    {
+        char inst3[4096], out_dir[4096], sym_tgt[4096], sym_wt[4096], tsv[4200], body[4096];
+        (void)cx_fmt(inst3, sizeof inst3, "%s/inst3", tmp);
+        (void)cx_fmt(out_dir, sizeof out_dir, "%s/outside-dir", tmp);
+        (void)cx_fmt(sym_tgt, sizeof sym_tgt, "%s/sym-target", tmp);
+        (void)cx_fmt(sym_wt, sizeof sym_wt, "%s/.claude/worktrees/accept-sym-test", fx);
+        (void)sy_mkdir_all(inst3, 0700);
+        (void)sy_mkdir_all(out_dir, 0755);
+        (void)sy_mkdir_all(sym_tgt, 0755);
+        (void)sy_symlink(sym_tgt, sym_wt);
+        (void)cx_fmt(tsv, sizeof tsv, "%s/accept-trees.tsv", inst3);
+        (void)cx_fmt(body, sizeof body,
+                     "accept-out-1\t%s\t%s\tgatekeeper\t1\t1\n"
+                     "accept-sym-1\t%s\t%s\tgatekeeper\t1\t1\n",
+                     out_dir, alice_sha, sym_wt, alice_sha);
+        (void)sy_write_atomic(tsv, body, (long)strlen(body), 0600);
+        (void)cx_fmt(cmd, sizeof cmd,
+                     "env -u DEVSVC_OWNER UNISACC_DEVSVC_DIR=\"%s\" DEVSVC_SELF_BIN=\"%s\" \"%s\" start --ttl 30 --idle 15 && "
+                     "env UNISACC_DEVSVC_DIR=\"%s\" DEVSVC_SELF_BIN=\"%s\" \"%s\" events --since 0",
+                     inst3, dv_bin, dv_bin, inst3, dv_bin, dv_bin);
+        int rc = run_sh(fx, cmd, 20, out, (int)sizeof out);
+        (void)cx_fmt(cmd, sizeof cmd, "env UNISACC_DEVSVC_DIR=\"%s\" \"%s\" stop", inst3, dv_bin);
+        (void)run_sh(fx, cmd, 10, body, (int)sizeof body);
+        int ok = (rc == 0 &&
+                  strstr(out, "path-outside-accept-prefix") != 0 &&
+                  strstr(out, "path-not-directory") != 0 &&
+                  sy_exists(out_dir) == 1 && sy_exists(sym_tgt) == 1);
+        (void)sy_unlink(sym_wt);
+        ck(ok, "prefix-outside-and-symlink-accept-path-refused", out);
+    }
+
+    /* 9. F1 + F4 negative: git worktree remove failure keeps dir, keeps marker, and re-applies readonly */
+    {
+        char inst2[4096], bindir[4096], wgit[4200], at_wt[4096] = "", at_id[128] = "", mk_path[4200];
+        (void)cx_fmt(inst2, sizeof inst2, "%s/inst2", tmp);
+        (void)cx_fmt(bindir, sizeof bindir, "%s/fakebin", tmp);
+        (void)cx_fmt(wgit, sizeof wgit, "%s/git", bindir);
+        (void)sy_mkdir_all(bindir, 0755);
+        {
+            const char *gsh =
+                "#!/bin/sh\n"
+                "for a in \"$@\"; do\n"
+                "  if [ \"$a\" = remove ]; then echo FAKE_WT_REMOVE_FAIL >&2; exit 1; fi\n"
+                "done\n"
+                "exec /usr/bin/git \"$@\"\n";
+            (void)sy_write_atomic(wgit, gsh, (long)strlen(gsh), 0755);
+        }
+        (void)cx_fmt(cmd, sizeof cmd,
+                     "env -u DEVSVC_OWNER PATH=\"%s:$PATH\" UNISACC_DEVSVC_DIR=\"%s\" DEVSVC_SELF_BIN=\"%s\" \"%s\" start --ttl 40 --idle 20 && "
+                     "env DEVSVC_OWNER=gatekeeper PATH=\"%s:$PATH\" UNISACC_DEVSVC_DIR=\"%s\" DEVSVC_SELF_BIN=\"%s\" \"%s\" accept-tree --commit \"%s\" --ttl 300 --owner gatekeeper",
+                     bindir, inst2, dv_bin, dv_bin, bindir, inst2, dv_bin, dv_bin, alice_sha);
+        int rc = run_sh(fx, cmd, 25, out, (int)sizeof out);
+        int ok = (rc == 0 && extract_kv(out, "id", at_id, sizeof at_id) == 0 &&
+                  extract_kv(out, "worktree", at_wt, sizeof at_wt) == 0 && sy_exists(at_wt) == 1);
+        if (ok) {
+            (void)cx_fmt(mk_path, sizeof mk_path, "%s/.devsvc-accept-tree.marker", at_wt);
+            (void)cx_fmt(cmd, sizeof cmd,
+                         "env DEVSVC_OWNER=gatekeeper PATH=\"%s:$PATH\" UNISACC_DEVSVC_DIR=\"%s\" DEVSVC_SELF_BIN=\"%s\" \"%s\" accept-tree remove \"%s\"",
+                         bindir, inst2, dv_bin, dv_bin, at_id);
+            int rr = run_sh(fx, cmd, 20, out, (int)sizeof out);
+            int kept_dir = (sy_exists(at_wt) == 1);
+            int kept_mk = (sy_exists(mk_path) == 1);
+            (void)cx_fmt(cmd, sizeof cmd, "echo tamper > \"%s/plans/readme.txt\"", at_wt);
+            int ro_kept = (run_sh(fx, cmd, 10, cmd + 4096, 1024) != 0);
+            int has_fail = (rr != 0 && strstr(out, "git-worktree-remove-failed") != 0);
+            (void)cx_fmt(cmd, sizeof cmd, "env UNISACC_DEVSVC_DIR=\"%s\" \"%s\" stop", inst2, dv_bin);
+            (void)run_sh(fx, cmd, 10, out, (int)sizeof out);
+            (void)cx_fmt(cmd, sizeof cmd, "chmod -R u+w \"%s\" && git -C \"%s\" worktree remove --force \"%s\"", at_wt, fx, at_wt);
+            (void)run_sh(fx, cmd, 15, out, (int)sizeof out);
+            ck(kept_dir && kept_mk && ro_kept && has_fail, "worktree-remove-failure-keeps-dir-marker-and-ro", out);
+        } else {
+            (void)cx_fmt(cmd, sizeof cmd, "env UNISACC_DEVSVC_DIR=\"%s\" \"%s\" stop", inst2, dv_bin);
+            (void)run_sh(fx, cmd, 10, out, (int)sizeof out);
+            ck(0, "worktree-remove-failure-keeps-dir-marker-and-ro", out);
+        }
+    }
+
+    /* 10. Blocker fixture: midway unseal walk failure re-seals every reachable entry back to readonly */
+    {
+        char at_wt[4096] = "", at_id[128] = "", mk_path[4200], rd_path[4200], pl_path[4200];
+        (void)cx_fmt(cmd, sizeof cmd,
+                     "env DEVSVC_OWNER=gatekeeper UNISACC_DEVSVC_DIR=\"%s\" DEVSVC_SELF_BIN=\"%s\" \"%s\" accept-tree --commit \"%s\" --ttl 300 --owner gatekeeper",
+                     inst, dv_bin, dv_bin, alice_sha);
+        int rc = run_sh(fx, cmd, 20, out, (int)sizeof out);
+        int ok = (rc == 0 && extract_kv(out, "id", at_id, sizeof at_id) == 0 &&
+                  extract_kv(out, "worktree", at_wt, sizeof at_wt) == 0 && sy_exists(at_wt) == 1);
+        if (ok) {
+            /* Create a nested subdir path > 2048 bytes so at_tree_chmod_rec(path, 0) fails midway after unsealing earlier entries */
+            (void)cx_fmt(cmd, sizeof cmd,
+                         "chmod u+w \"%s\" && d=\"%s/zdeep\" && mkdir -p \"$d\" && "
+                         "s='aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa' && "
+                         "for i in 1 2 3 4 5 6 7 8 9 10 11; do d=\"$d/$s\"; mkdir -p \"$d\"; done && chmod -R a-w \"%s\"",
+                         at_wt, at_wt, at_wt);
+            int mkd_rc = run_sh(fx, cmd, 15, out, (int)sizeof out);
+            (void)cx_fmt(cmd, sizeof cmd,
+                         "env DEVSVC_OWNER=gatekeeper UNISACC_DEVSVC_DIR=\"%s\" DEVSVC_SELF_BIN=\"%s\" \"%s\" accept-tree remove \"%s\"",
+                         inst, dv_bin, dv_bin, at_id);
+            int r_uf = run_sh(fx, cmd, 20, out, (int)sizeof out);
+            (void)cx_fmt(mk_path, sizeof mk_path, "%s/.devsvc-accept-tree.marker", at_wt);
+            (void)cx_fmt(pl_path, sizeof pl_path, "%s/plans", at_wt);
+            (void)cx_fmt(rd_path, sizeof rd_path, "%s/plans/readme.txt", at_wt);
+            sy_stat_t st_root, st_pl, st_rd, st_mk;
+            int ro_all = (sy_lstat(at_wt, &st_root) == 0 && (st_root.mode & 0222) == 0 &&
+                          sy_lstat(pl_path, &st_pl) == 0 && (st_pl.mode & 0222) == 0 &&
+                          sy_lstat(rd_path, &st_rd) == 0 && (st_rd.mode & 0222) == 0 &&
+                          sy_lstat(mk_path, &st_mk) == 0 && (st_mk.mode & 0222) == 0);
+            (void)cx_fmt(cmd, sizeof cmd, "echo tamper > \"%s\"", rd_path);
+            int wr_ref = (run_sh(fx, cmd, 10, cmd + 4096, 1024) != 0);
+            (void)cx_fmt(cmd, sizeof cmd, "chmod -R u+w \"%s\" && rm -rf \"%s/zdeep\" && git -C \"%s\" worktree remove --force \"%s\"",
+                         at_wt, at_wt, fx, at_wt);
+            (void)run_sh(fx, cmd, 15, cmd + 4096, 1024);
+            ck(mkd_rc == 0 && r_uf != 0 && strstr(out, "chmod-restore-failed") != 0 && ro_all && wr_ref,
+               "unseal-midway-failure-reseals-all-readonly", out);
+        } else {
+            ck(0, "unseal-midway-failure-reseals-all-readonly", out);
+        }
+    }
+
+    (void)cx_fmt(cmd, sizeof cmd, "env UNISACC_DEVSVC_DIR=\"%s\" \"%s\" stop", inst, dv_bin);
+    (void)run_sh(fx, cmd, 10, out, (int)sizeof out);
+    (void)sy_remove_all(tmp);
+    sy_printf("CHECK_DVBRANCH\tpassed=%d\tfailed=%d\n", g_pass, g_fail);
+    return g_fail ? 1 : 0;
+}

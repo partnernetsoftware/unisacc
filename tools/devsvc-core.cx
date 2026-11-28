@@ -594,12 +594,497 @@ static int native_get(const char *root, const char *tool, char *bin, int cap, co
     return 0;
 }
 
+/* ---- branch create & accept-tree (server-side authoritative unit/owner check + read-only expiry worktrees) ---- */
+#define MAX_ACCEPT_TREES 64
+#define ACCEPT_TTL_MAX 86400L
+#define ACCEPT_MARKER ".devsvc-accept-tree.marker"
+typedef struct {
+    char id[96];
+    char path[PW];
+    char commit[48];
+    char owner[64];
+    long created;
+    long exp;
+    int cleanup_failed;
+} AcceptTree;
+static AcceptTree accept_trees[MAX_ACCEPT_TREES];
+static int n_accept_trees;
+static long accept_next_exp;
+
+static int safe_id_str(const char *s, int maxl) {
+    int i = 0;
+    if (!s || !s[0] || s[0] == '-') return 0;
+    for (; s[i]; i++) {
+        char c = s[i];
+        if (i >= maxl) return 0;
+        if (!((c >= 'a' && c <= 'z') || (c >= 'A' && c <= 'Z') || (c >= '0' && c <= '9') || c == '-' || c == '_' || c == '.')) return 0;
+    }
+    return strstr(s, "..") == 0;
+}
+static void strip_pane_owner(const char *in, char *out, int cap) {
+    char nbuf[64];
+    out[0] = 0;
+    if (!in || !in[0]) return;
+    if (!norm_owner(in, nbuf, sizeof nbuf)) return;
+    const char *c = strchr(nbuf, ':');
+    const char *s = (c && c[1]) ? c + 1 : nbuf;
+    if (cx_fmt(out, (size_t)cap, "%s", s) != 0) out[0] = 0;
+}
+static int run_at_dir(const char *cwd, char **v, char *out, int cap) {
+    np_result r; char why[200]; int rc;
+    if (out && cap > 0) out[0] = 0;
+    if (np_run(v, cwd, 0, 55, &r, why, sizeof why)) return -1;
+    rc = r.rc;
+    if (out && cap > 0) {
+        long n = (long)r.outn < cap - 1 ? (long)r.outn : cap - 1;
+        if (n > 0) mm_copy(out, cap, r.out, n);
+        out[n > 0 ? n : 0] = 0;
+    }
+    np_free(&r);
+    return rc;
+}
+static int at_tree_chmod_rec(const char *path, int make_ro) {
+    sy_stat_t st;
+    if (sy_lstat(path, &st) != 0) return -1;
+    if (st.kind == 'l') return 0;
+    if (st.kind == 'f') {
+        int m = make_ro ? ((st.mode & 07777) & ~0222) : ((st.mode & 07777) | 0200);
+        return sy_chmod(path, m) == 0 ? 0 : -1;
+    }
+    if (st.kind == 'd') {
+        sy_dir_t d;
+        int any_err = 0;
+        if (!make_ro && sy_chmod(path, (st.mode & 07777) | 0700) != 0) return -1;
+        if (sy_dir_open(&d, path) != 0) {
+            if (make_ro) (void)sy_chmod(path, (st.mode & 07777) & ~0222);
+            return -1;
+        }
+        while (sy_dir_next(&d) == 1) {
+            char sub[PW * 2];
+            if (!strcmp(d.name, ".") || !strcmp(d.name, "..")) continue;
+            if (cx_fmt(sub, sizeof sub, "%s/%s", path, d.name) != 0 || at_tree_chmod_rec(sub, make_ro) != 0) {
+                any_err = 1;
+                if (!make_ro) {
+                    sy_dir_close(&d);
+                    return -1;
+                }
+            }
+        }
+        sy_dir_close(&d);
+        if (make_ro && sy_chmod(path, (st.mode & 07777) & ~0222) != 0) any_err = 1;
+        return any_err ? -1 : 0;
+    }
+    return 0;
+}
+static void accept_recompute_next(void) {
+    long mn = 0;
+    for (int i = 0; i < n_accept_trees; i++) {
+        if (accept_trees[i].cleanup_failed) continue;
+        if (mn == 0 || accept_trees[i].exp < mn) mn = accept_trees[i].exp;
+    }
+    accept_next_exp = mn;
+}
+static void accept_trees_save(void) {
+    static char b[MAX_ACCEPT_TREES * (PW + 256)];
+    long n = 0; char p[PW];
+    for (int i = 0; i < n_accept_trees; i++) {
+        char row[PW + 256];
+        if (cx_fmt(row, sizeof row, "%s\t%s\t%s\t%s\t%ld\t%ld\n",
+                   accept_trees[i].id, accept_trees[i].path, accept_trees[i].commit,
+                   accept_trees[i].owner, accept_trees[i].created, accept_trees[i].exp) != 0) break;
+        long w = (long)strlen(row);
+        if (n + w >= (long)sizeof b) break;
+        if (mm_copy(b + n, sizeof b - (size_t)n, row, (size_t)w) != 0) break;
+        n += w;
+    }
+    F(p, sizeof p, "%s/accept-trees.tsv", dir);
+    (void)sy_write_atomic(p, b, n, 0600);
+    accept_recompute_next();
+}
+static int accept_worktree_matches_git(const char *mroot, const char *wt_path, const char *want_sha) {
+    static char wl[1 << 18];
+    char *lv[] = {"git", "-C", (char *)mroot, "worktree", "list", "--porcelain", 0};
+    if (run_at_dir(mroot, lv, wl, (int)sizeof wl) != 0) return 0;
+    char want_wt[PW + 32], want_hd[80];
+    if (cx_fmt(want_wt, sizeof want_wt, "worktree %s", wt_path) != 0 ||
+        cx_fmt(want_hd, sizeof want_hd, "HEAD %s", want_sha) != 0) return 0;
+    int in_match = 0;
+    for (char *p = wl; *p; ) {
+        char *e = strchr(p, '\n');
+        long ll = e ? (long)(e - p) : (long)strlen(p);
+        if (ll > 0 && p[ll - 1] == '\r') ll--;
+        if (ll == 0) {
+            in_match = 0;
+        } else {
+            if (!in_match && ll == (long)strlen(want_wt) && !memcmp(p, want_wt, (size_t)ll)) {
+                in_match = 1;
+            } else if (in_match && ll == (long)strlen(want_hd) && !memcmp(p, want_hd, (size_t)ll)) {
+                return 1;
+            }
+        }
+        if (!e) break;
+        p = e + 1;
+    }
+    return 0;
+}
+static int accept_remove_dir_checked(const AcceptTree *at, char *why_out, int wcap) {
+    const char *mroot = main_root;
+    char pfx[PW + 64], mkp[PW + 64], want_mk[256];
+    sy_stat_t st, mst;
+    unsigned char *mb = 0; int64_t mn = 0;
+    if (why_out && wcap > 0) why_out[0] = 0;
+    if (!mroot[0] || cx_fmt(pfx, sizeof pfx, "%s/.claude/worktrees/accept-", mroot) != 0) {
+        (void)cx_fmt(why_out, (size_t)wcap, "bad-main-root");
+        return -1;
+    }
+    if (strncmp(at->path, pfx, strlen(pfx)) != 0 || strchr(at->path + strlen(pfx), '/') != 0 || strstr(at->path, "..") != 0) {
+        (void)cx_fmt(why_out, (size_t)wcap, "path-outside-accept-prefix");
+        return -1;
+    }
+    if (sy_lstat(at->path, &st) != 0 || st.kind != 'd') {
+        (void)cx_fmt(why_out, (size_t)wcap, "path-not-directory");
+        return -1;
+    }
+    if (cx_fmt(mkp, sizeof mkp, "%s/%s", at->path, ACCEPT_MARKER) != 0 ||
+        sy_lstat(mkp, &mst) != 0 || mst.kind != 'f' ||
+        sy_read_file(mkp, &mb, &mn, 4096) != 0 || !mb || mn <= 0) {
+        if (mb) free(mb);
+        (void)cx_fmt(why_out, (size_t)wcap, "missing-accept-marker");
+        return -1;
+    }
+    int mk_ok = (cx_fmt(want_mk, sizeof want_mk, "id=%s\tcommit=%s\t", at->id, at->commit) == 0 &&
+                 mn >= (int64_t)strlen(want_mk) && !memcmp(mb, want_mk, strlen(want_mk)));
+    free(mb);
+    if (!mk_ok) {
+        (void)cx_fmt(why_out, (size_t)wcap, "marker-id-or-commit-mismatch");
+        return -1;
+    }
+    if (!accept_worktree_matches_git(mroot, at->path, at->commit)) {
+        (void)cx_fmt(why_out, (size_t)wcap, "worktree-list-commit-mismatch");
+        return -1;
+    }
+    if (at_tree_chmod_rec(at->path, 0) != 0) {
+        if (at_tree_chmod_rec(at->path, 1) != 0)
+            (void)cx_fmt(why_out, (size_t)wcap, "chmod-restore-failed-reapply-ro-failed");
+        else
+            (void)cx_fmt(why_out, (size_t)wcap, "chmod-restore-failed");
+        return -1;
+    }
+    {
+        char out[256];
+        char *rv[] = {"git", "-C", (char *)mroot, "worktree", "remove", "--force", (char *)at->path, 0};
+        int rrc = run_at_dir(mroot, rv, out, (int)sizeof out);
+        if (rrc != 0) {
+            if (at_tree_chmod_rec(at->path, 1) != 0)
+                (void)cx_fmt(why_out, (size_t)wcap, "git-worktree-remove-failed-rc=%d-reapply-ro-failed", rrc);
+            else
+                (void)cx_fmt(why_out, (size_t)wcap, "git-worktree-remove-failed-rc=%d", rrc);
+            return -1;
+        }
+    }
+    return 0;
+}
+static void accept_trees_gc(void) {
+    long now = sy_wall_s();
+    int i, ch = 0;
+    for (i = 0; i < n_accept_trees; ) {
+        if (accept_trees[i].cleanup_failed) { i++; continue; }
+        if (sy_exists(accept_trees[i].path) == 0) {
+            char t[320];
+            F(t, sizeof t, "id=%s\towner=%s\tcommit=%s\treason=already-absent",
+              accept_trees[i].id, accept_trees[i].owner, accept_trees[i].commit);
+            ev_add("accept-tree.expire", t);
+            accept_trees[i] = accept_trees[--n_accept_trees];
+            ch = 1;
+            continue;
+        }
+        if (accept_trees[i].exp <= now) {
+            char why[160], t[384];
+            if (accept_remove_dir_checked(&accept_trees[i], why, sizeof why) == 0) {
+                F(t, sizeof t, "id=%s\towner=%s\tcommit=%s\texp=%ld",
+                  accept_trees[i].id, accept_trees[i].owner, accept_trees[i].commit, accept_trees[i].exp);
+                ev_add("accept-tree.expire", t);
+                accept_trees[i] = accept_trees[--n_accept_trees];
+                ch = 1;
+            } else {
+                accept_trees[i].cleanup_failed = 1;
+                F(t, sizeof t, "id=%s\towner=%s\tcommit=%s\treason=%s\tpath=%s",
+                  accept_trees[i].id, accept_trees[i].owner, accept_trees[i].commit, why, accept_trees[i].path);
+                ev_add("accept-tree.cleanup-refused", t);
+                i++;
+            }
+        } else i++;
+    }
+    if (ch) accept_trees_save(); else accept_recompute_next();
+}
+static void accept_trees_load(void) {
+    char p[PW]; unsigned char *b = 0; int64_t n = 0; char *s, *e;
+    F(p, sizeof p, "%s/accept-trees.tsv", dir);
+    if (sy_exists(p) != 1 || sy_read_file(p, &b, &n, 1 << 18) || !b) return;
+    s = (char *)b;
+    while (s < (char *)b + n && n_accept_trees < MAX_ACCEPT_TREES) {
+        char id[96], path[PW], cmt[48], ow[64]; long cr = 0, ex = 0;
+        e = memchr(s, '\n', (char *)b + n - s); if (!e) break;
+        *e = 0;
+        if (sscanf(s, "%95[^\t]\t%1023[^\t]\t%47[^\t]\t%63[^\t]\t%ld\t%ld", id, path, cmt, ow, &cr, &ex) == 6) {
+            AcceptTree *at = &accept_trees[n_accept_trees++];
+            (void)cx_fmt(at->id, sizeof at->id, "%s", id);
+            (void)cx_fmt(at->path, sizeof at->path, "%s", path);
+            (void)cx_fmt(at->commit, sizeof at->commit, "%s", cmt);
+            (void)cx_fmt(at->owner, sizeof at->owner, "%s", ow);
+            at->created = cr; at->exp = ex; at->cleanup_failed = 0;
+        }
+        s = e + 1;
+    }
+    free(b);
+    accept_trees_gc();
+}
+static int units_find_row(const char *mroot, const char *unit_id, char want_owner[64], char want_branch[128]) {
+    char upath[PW];
+    unsigned char *ub = 0; int64_t un = 0;
+    want_owner[0] = 0; want_branch[0] = 0;
+    if (cx_fmt(upath, sizeof upath, "%s/plans/v01x-units.tsv", mroot) != 0) return -2;
+    if (sy_read_file(upath, &ub, &un, 1 << 20) != 0 || !ub) return -2;
+    int rc = -1;
+    for (long pos = 0; pos < (long)un;) {
+        long e = pos;
+        while (e < (long)un && ub[e] != '\n') e++;
+        long ll = e - pos;
+        if (ll > 0 && ub[pos] != '#') {
+            char line[1024];
+            if (ll < (long)sizeof line) {
+                if (mm_copy(line, sizeof line, ub + pos, (size_t)ll) != 0) break;
+                line[ll] = 0;
+                char *c[8]; int nc = 0; char *q = line;
+                while (nc < 8) { c[nc++] = q; char *tb = strchr(q, '\t'); if (!tb) break; if (nc < 8) *tb++ = 0; q = tb; }
+                if (nc >= 8 && !strcmp(c[0], unit_id)) {
+                    (void)cx_fmt(want_owner, 64, "%s", c[3]);
+                    (void)cx_fmt(want_branch, 128, "%s", c[4]);
+                    rc = 0;
+                    break;
+                }
+            }
+        }
+        pos = (e < (long)un) ? e + 1 : (long)un;
+    }
+    free(ub);
+    return rc;
+}
+static void pick_unit_branch_and_leaf(const char *ow, const char *unit_id, const char *row_br, char br[128], char leaf[160]) {
+    char pfx[80];
+    if (cx_fmt(pfx, sizeof pfx, "w/%s-", ow) != 0) pfx[0] = 0;
+    br[0] = 0;
+    if (pfx[0] && row_br && row_br[0] && strcmp(row_br, "-") != 0) {
+        const char *p = row_br;
+        while (*p) {
+            const char *cm = strchr(p, ',');
+            long len = cm ? (long)(cm - p) : (long)strlen(p);
+            if (len > 0 && len < 120) {
+                char cand[128];
+                (void)mm_copy(cand, sizeof cand, p, (size_t)len); cand[len] = 0;
+                if (!strncmp(cand, pfx, strlen(pfx)) && safe_id_str(cand + 2, 118)) {
+                    (void)cx_fmt(br, 128, "%s", cand);
+                    break;
+                }
+            }
+            if (!cm) break;
+            p = cm + 1;
+        }
+    }
+    if (!br[0]) {
+        char ulow[64];
+        size_t i;
+        for (i = 0; unit_id[i] && i + 1 < sizeof ulow; i++) {
+            char ch = unit_id[i];
+            ulow[i] = (ch >= 'A' && ch <= 'Z') ? (char)(ch + 32) : ch;
+        }
+        ulow[i] = 0;
+        (void)cx_fmt(br, 128, "w/%s-%s", ow, ulow);
+    }
+    {
+        size_t i;
+        for (i = 0; br[i] && i + 1 < 160; i++) leaf[i] = (br[i] == '/') ? '-' : br[i];
+        leaf[i] = 0;
+    }
+}
+static void srv_branch_create(const char *req_ow_raw, const char *unit_id, const char *env_ow_raw, const char *base_ref) {
+    const char *mroot = main_root;
+    char req_ow[64], env_ow[64], want_ow[64], want_br[128], br[128], leaf[160], wt_base[PW], wt[PW], linkp[PW + 32], tgtp[PW + 32], cmt[64];
+    strip_pane_owner(req_ow_raw, req_ow, sizeof req_ow);
+    strip_pane_owner(env_ow_raw, env_ow, sizeof env_ow);
+    if (!mroot[0]) { radd("ERR\tbranch-no-root\n"); return; }
+    if (!req_ow_raw || !req_ow_raw[0] || !strcmp(req_ow_raw, "-")) { radd("ERR\tbranch-missing-owner\n"); return; }
+    if (!req_ow[0] || !safe_id_str(req_ow, 48)) { radd("ERR\tbranch-bad-owner\towner=%s\n", req_ow_raw); return; }
+    if (!unit_id || !safe_id_str(unit_id, 48)) { radd("ERR\tbranch-bad-unit\tunit=%s\n", unit_id && unit_id[0] ? unit_id : "-"); return; }
+    if (env_ow_raw && env_ow_raw[0] && strcmp(env_ow_raw, "-") != 0) {
+        if (!env_ow[0] || !safe_id_str(env_ow, 48)) {
+            radd("ERR\tbranch-bad-caller-owner\tcaller=%s\n", env_ow_raw);
+            return;
+        }
+        if (strcmp(env_ow, "cc") != 0 && strcmp(env_ow, req_ow) != 0) {
+            radd("ERR\tbranch-impersonation\tcaller=%s\trequested=%s\n", env_ow, req_ow);
+            return;
+        }
+    }
+    int urc = units_find_row(mroot, unit_id, want_ow, want_br);
+    if (urc == -2) { radd("ERR\tbranch-missing-units-table\t%s/plans/v01x-units.tsv\n", mroot); return; }
+    if (urc != 0) { radd("ERR\tbranch-unknown-unit\tunit=%s\trequested_owner=%s\n", unit_id, req_ow); return; }
+    if (strcmp(want_ow, req_ow) != 0) {
+        radd("ERR\tbranch-owner-mismatch\tunit=%s\trequested_owner=%s\texpected_owner=%s\n", unit_id, req_ow, want_ow[0] ? want_ow : "-");
+        return;
+    }
+    const char *base = (base_ref && base_ref[0]) ? base_ref : "HEAD";
+    if (!safe_id_str(base, 64) && strcmp(base, "HEAD") != 0) {
+        for (const char *q = base; *q; q++) {
+            char c = *q;
+            if (!((c >= 'a' && c <= 'z') || (c >= 'A' && c <= 'Z') || (c >= '0' && c <= '9') || c == '-' || c == '_' || c == '.' || c == '/')) {
+                radd("ERR\tbranch-bad-base\tbase=%s\n", base); return;
+            }
+        }
+        if (base[0] == '-' || strstr(base, "..") != 0) { radd("ERR\tbranch-bad-base\tbase=%s\n", base); return; }
+    }
+    pick_unit_branch_and_leaf(req_ow, unit_id, want_br, br, leaf);
+    if (cx_fmt(wt_base, sizeof wt_base, "%s/.claude/worktrees", mroot) != 0 ||
+        cx_fmt(wt, sizeof wt, "%s/%s", wt_base, leaf) != 0) {
+        radd("ERR\toverflow\tworktree path too long\n"); return;
+    }
+    if (sy_mkdir_all(wt_base, 0755) != 0) { radd("ERR\tbranch-mkdir-failed\t%s\n", wt_base); return; }
+    if (sy_exists(wt) != 0) {
+        char got_br[256];
+        char *bv[] = {"git", "-C", wt, "symbolic-ref", "--short", "HEAD", 0};
+        if (run_at_dir(wt, bv, got_br, sizeof got_br) == 0) {
+            chomp(got_br);
+            if (!strcmp(got_br, br)) {
+                char *hv[] = {"git", "-C", wt, "rev-parse", "HEAD", 0};
+                (void)run_at_dir(wt, hv, cmt, sizeof cmt); chomp(cmt);
+                radd("OK\tbranch-create\towner=%s\tunit=%s\tbranch=%s\tworktree=%s\tcommit=%s\texisted=1\n", req_ow, unit_id, br, wt, cmt);
+                return;
+            }
+        }
+        radd("ERR\tbranch-worktree-conflict\tpath=%s\tbranch=%s\n", wt, br);
+        return;
+    }
+    {
+        char ref[200], out[256];
+        cx_fmt(ref, sizeof ref, "refs/heads/%s", br);
+        char *ev[] = {"git", "-C", (char *)mroot, "rev-parse", "-q", "--verify", ref, 0};
+        int exists = (run_at_dir(mroot, ev, out, sizeof out) == 0);
+        int wrc;
+        if (exists) {
+            char *wv[] = {"git", "-C", (char *)mroot, "worktree", "add", wt, br, 0};
+            wrc = run_at_dir(mroot, wv, out, sizeof out);
+        } else {
+            char *wv[] = {"git", "-C", (char *)mroot, "worktree", "add", "-b", br, wt, (char *)base, 0};
+            wrc = run_at_dir(mroot, wv, out, sizeof out);
+        }
+        if (wrc != 0) {
+            radd("ERR\tbranch-git-worktree-failed\trc=%d\tbranch=%s\tworktree=%s\n", wrc, br, wt);
+            return;
+        }
+    }
+    if (cx_fmt(tgtp, sizeof tgtp, "%s/%s", mroot, cfg.product) == 0 &&
+        cx_fmt(linkp, sizeof linkp, "%s/%s", wt, cfg.product) == 0 &&
+        sy_exists(tgtp) != 0 && sy_exists(linkp) == 0) {
+        (void)sy_symlink(tgtp, linkp);
+    }
+    {
+        char *hv[] = {"git", "-C", wt, "rev-parse", "HEAD", 0};
+        if (run_at_dir(wt, hv, cmt, sizeof cmt) != 0) (void)cx_fmt(cmt, sizeof cmt, "-");
+        chomp(cmt);
+    }
+    {
+        char ev[320];
+        F(ev, sizeof ev, "owner=%s\tunit=%s\tbranch=%s\tworktree=%s", req_ow, unit_id, br, wt);
+        ev_add("branch.create", ev);
+    }
+    radd("OK\tbranch-create\towner=%s\tunit=%s\tbranch=%s\tworktree=%s\tcommit=%s\texisted=0\n", req_ow, unit_id, br, wt, cmt);
+}
+static int accept_seq_n;
+static void srv_accept_create(const char *ow_raw, const char *rev_arg, const char *ttl_s) {
+    const char *mroot = main_root;
+    char ow[64], cspec[160], sha[64], s8[12], wt_base[PW], wt[PW], linkp[PW + 32], tgtp[PW + 32], id[96], out[256];
+    long ttl = atol(ttl_s && ttl_s[0] ? ttl_s : "1800");
+    accept_trees_gc();
+    if (!mroot[0]) { radd("ERR\taccept-no-root\n"); return; }
+    if (n_accept_trees >= MAX_ACCEPT_TREES) { radd("ERR\taccept-full\tmax=%d\n", MAX_ACCEPT_TREES); return; }
+    if (ttl < 1 || ttl > ACCEPT_TTL_MAX) { radd("ERR\taccept-bad-ttl\t1..%ld\n", ACCEPT_TTL_MAX); return; }
+    strip_pane_owner(ow_raw, ow, sizeof ow);
+    if (!ow_raw || !ow_raw[0] || !strcmp(ow_raw, "-")) { radd("ERR\taccept-missing-owner\n"); return; }
+    if (!ow[0] || !safe_id_str(ow, 32)) { radd("ERR\taccept-bad-owner\towner=%s\n", ow_raw); return; }
+    if (!rev_arg || !rev_arg[0] || rev_arg[0] == '-' || strstr(rev_arg, "..") != 0) {
+        radd("ERR\taccept-bad-commit\t%s\n", rev_arg && rev_arg[0] ? rev_arg : "-"); return;
+    }
+    for (const char *q = rev_arg; *q; q++) {
+        char c = *q;
+        if (!((c >= 'a' && c <= 'z') || (c >= 'A' && c <= 'Z') || (c >= '0' && c <= '9') || c == '-' || c == '_' || c == '.' || c == '/')) {
+            radd("ERR\taccept-bad-commit\t%s\n", rev_arg); return;
+        }
+    }
+    if (cx_fmt(cspec, sizeof cspec, "%s^{commit}", rev_arg) != 0) { radd("ERR\toverflow\tcommit spec\n"); return; }
+    {
+        char *rv[] = {"git", "-C", (char *)mroot, "rev-parse", "--verify", cspec, 0};
+        if (run_at_dir(mroot, rv, sha, sizeof sha) != 0) { radd("ERR\taccept-unknown-commit\t%s\n", rev_arg); return; }
+        chomp(sha);
+        if (strlen(sha) != 40) { radd("ERR\taccept-bad-commit-sha\t%s\n", sha); return; }
+    }
+    (void)mm_copy(s8, sizeof s8, sha, 8); s8[8] = 0;
+    long now = sy_wall_s();
+    accept_seq_n++;
+    if (cx_fmt(id, sizeof id, "accept-%s-%s-%d-%d", ow, s8, sy_pid(), accept_seq_n) != 0 ||
+        cx_fmt(wt_base, sizeof wt_base, "%s/.claude/worktrees", mroot) != 0 ||
+        cx_fmt(wt, sizeof wt, "%s/%s", wt_base, id) != 0) {
+        radd("ERR\toverflow\taccept worktree path too long\n"); return;
+    }
+    if (sy_mkdir_all(wt_base, 0755) != 0) { radd("ERR\taccept-mkdir-failed\t%s\n", wt_base); return; }
+    {
+        char *wv[] = {"git", "-C", (char *)mroot, "worktree", "add", "--detach", wt, sha, 0};
+        int wrc = run_at_dir(mroot, wv, out, sizeof out);
+        if (wrc != 0) { radd("ERR\taccept-git-worktree-failed\trc=%d\t%s\n", wrc, wt); return; }
+    }
+    if (cx_fmt(tgtp, sizeof tgtp, "%s/%s", mroot, cfg.product) == 0 &&
+        cx_fmt(linkp, sizeof linkp, "%s/%s", wt, cfg.product) == 0 &&
+        sy_exists(tgtp) != 0 && sy_exists(linkp) == 0) {
+        (void)sy_symlink(tgtp, linkp);
+    }
+    {
+        char mkp[PW + 64], mkb[320];
+        if (cx_fmt(mkp, sizeof mkp, "%s/%s", wt, ACCEPT_MARKER) != 0 ||
+            cx_fmt(mkb, sizeof mkb, "id=%s\tcommit=%s\towner=%s\tcreated=%ld\texp=%ld\n", id, sha, ow, now, now + ttl) != 0 ||
+            sy_write_atomic(mkp, mkb, (long)strlen(mkb), 0644) != 0) {
+            radd("ERR\taccept-marker-write-failed\t%s\n", wt);
+            return;
+        }
+    }
+    if (at_tree_chmod_rec(wt, 1) != 0) {
+        (void)at_tree_chmod_rec(wt, 0);
+        radd("ERR\taccept-chmod-failed\t%s\n", wt);
+        return;
+    }
+    {
+        AcceptTree *at = &accept_trees[n_accept_trees++];
+        (void)cx_fmt(at->id, sizeof at->id, "%s", id);
+        (void)cx_fmt(at->path, sizeof at->path, "%s", wt);
+        (void)cx_fmt(at->commit, sizeof at->commit, "%s", sha);
+        (void)cx_fmt(at->owner, sizeof at->owner, "%s", ow);
+        at->created = now;
+        at->exp = now + ttl;
+        at->cleanup_failed = 0;
+        accept_trees_save();
+        char ev[320];
+        F(ev, sizeof ev, "id=%s\towner=%s\tcommit=%s\tttl=%ld\tworktree=%s", id, ow, sha, ttl, wt);
+        ev_add("accept-tree.create", ev);
+        radd("OK\taccept-tree-create\tid=%s\towner=%s\tcommit=%s\tworktree=%s\texpires_ts=%ld\tttl=%ld\treadonly=dac-guarded\n",
+             id, ow, sha, wt, at->exp, ttl);
+    }
+}
+
 /* ---- 服务端 ---- */
 static int handle(char *line) {   /* 返回 1 表示收到 stop */
     char *f[6]; int nf = 0, i; char *s = line; long now = sy_wall_s();
     while (nf < 6) { f[nf++] = s; s = strchr(s, '\t'); if (!s) break; if (nf < 6) *s++ = 0; }
     for (i = nf; i < 6; i++) f[i] = "";
     locks_expire();
+    accept_trees_gc();
     if (!strcmp(f[0], "ping")) { radd("OK\tpong\tpid=%d\tseq=%ld\tlocks=%d\n", sy_pid(), seq, nlock); return 0; }
     if (!strcmp(f[0], "stop")) { radd("OK\tstopping\tpid=%d\n", sy_pid()); return 1; }
     if (!strcmp(f[0], "lock-acquire")) {
@@ -684,6 +1169,51 @@ static int handle(char *line) {   /* 返回 1 表示收到 stop */
         if (since > seq) since = seq;
         radd("OK\tevents\tseq=%ld\tn=%ld\tdropped_before=%ld\n", seq, seq - since, lo);
         for (k = since; k < seq; k++) radd("EV\t%ld\t%ld\t%s\n", k + 1, ring_wall[k % RING], ring[k % RING]);
+        return 0;
+    }
+    if (!strcmp(f[0], "branch-create")) { srv_branch_create(f[1], f[2], f[3], f[4]); return 0; }
+    if (!strcmp(f[0], "accept-create")) { srv_accept_create(f[1], f[2], f[3]); return 0; }
+    if (!strcmp(f[0], "accept-list")) {
+        radd("OK\taccept-trees\tn=%d\n", n_accept_trees);
+        for (i = 0; i < n_accept_trees; i++) {
+            radd("ACCEPT_TREE\tid=%s\towner=%s\tcommit=%s\tworktree=%s\texpires_in_s=%ld\texpires_ts=%ld\treadonly=dac-guarded\tstate=%s\n",
+                 accept_trees[i].id, accept_trees[i].owner, accept_trees[i].commit,
+                 accept_trees[i].path, accept_trees[i].exp - now, accept_trees[i].exp,
+                 accept_trees[i].cleanup_failed ? "cleanup-refused" : "active");
+        }
+        return 0;
+    }
+    if (!strcmp(f[0], "accept-remove")) {
+        char ow[64];
+        int hit = -1;
+        strip_pane_owner(f[2], ow, sizeof ow);
+        if (!f[2][0] || !strcmp(f[2], "-")) { radd("ERR\taccept-missing-owner\n"); return 0; }
+        if (!ow[0] || !safe_id_str(ow, 32)) { radd("ERR\taccept-bad-owner\towner=%s\n", f[2]); return 0; }
+        for (i = 0; i < n_accept_trees; i++) {
+            if (!strcmp(accept_trees[i].id, f[1]) || !strcmp(accept_trees[i].path, f[1])) { hit = i; break; }
+        }
+        if (hit < 0) { radd("ERR\taccept-not-found\t%s\n", f[1]); return 0; }
+        if (strcmp(ow, "cc") != 0 && strcmp(ow, accept_trees[hit].owner) != 0) {
+            radd("ERR\taccept-owner-mismatch\tid=%s\tcaller=%s\towner=%s\n",
+                 accept_trees[hit].id, ow, accept_trees[hit].owner);
+            return 0;
+        }
+        {
+            char why[160], ev[384];
+            if (accept_remove_dir_checked(&accept_trees[hit], why, sizeof why) != 0) {
+                F(ev, sizeof ev, "id=%s\tcommit=%s\treason=%s\tpath=%s",
+                  accept_trees[hit].id, accept_trees[hit].commit, why, accept_trees[hit].path);
+                ev_add("accept-tree.cleanup-refused", ev);
+                radd("ERR\taccept-remove-refused\tid=%s\treason=%s\tworktree=%s\n",
+                     accept_trees[hit].id, why, accept_trees[hit].path);
+                return 0;
+            }
+            F(ev, sizeof ev, "id=%s\towner=%s\tcommit=%s", accept_trees[hit].id, ow, accept_trees[hit].commit);
+            ev_add("accept-tree.remove", ev);
+            radd("OK\taccept-tree-remove\tid=%s\tworktree=%s\n", accept_trees[hit].id, accept_trees[hit].path);
+            accept_trees[hit] = accept_trees[--n_accept_trees];
+            accept_trees_save();
+        }
         return 0;
     }
     radd("ERR\tunknown-verb\t%s\n", f[0]);
@@ -841,6 +1371,7 @@ static int serve(long ttl, long idle) {
     char recovery[160] = "";
     ev_resume(recovery, sizeof recovery);
     locks_load();
+    accept_trees_load();
     chomp(info); ev_add("svc.start", info);
     if (recovery[0]) ev_add("svc.seq-recovery", recovery);
     if(!strcmp(sy_env_or("DEVSVC_S2_SHADOW",""),"1"))s2_listen();
@@ -861,7 +1392,8 @@ static int serve(long ttl, long idle) {
             } else wi++;
         }
         if (now - t0 >= ttl * 1000 || now - last >= idle * 1000) break;
-        if (now - gc_at >= 60000) { gc_at = now; (void)jobs_gc(); (void)flowdir_gc(); }   /* 空闲巡检:启动即一次,之后每 60 s */
+        if (n_accept_trees > 0 && sy_wall_s() >= accept_next_exp) accept_trees_gc();
+        if (now - gc_at >= 60000) { gc_at = now; (void)jobs_gc(); (void)flowdir_gc(); accept_trees_gc(); }   /* 空闲巡检:启动即一次,之后每 60 s */
         c=s2_rx<0?sy_tcp_accept(ls,200):s2_accept(ls);
         if (c < 0) { if (c != -ETIMEDOUT) sy_sleep_ms(50); continue; }
         {   sy_deadline_t d = sy_deadline_in(2000);
@@ -925,6 +1457,7 @@ static int serve(long ttl, long idle) {
         int wpid = nat_pids[--n_nat];
         (void)sy_kill(wpid);
     }
+    accept_trees_gc();
     if(s2_rx>=0){sy_close(s2_rx);sy_unlink(s2_path);}
     sy_close(ls); sy_unlink(sockp); sy_unlink(p);
     return 0;
@@ -2140,6 +2673,23 @@ static int shared_checkout_write_gate(const char *root, int use_flow_root, const
     const char *as = strchr(arg_ow, ':'); as = (as && as[1]) ? as + 1 : arg_ow;
     int is_cc = (!strcmp(es, "cc") && (!as[0] || !strcmp(as, "cc")));
     const char *disp_ow = env_ow[0] ? env_ow : (arg_ow[0] ? arg_ow : auto_owner());
+    if (main_root[0] && cx_fmt(wt_base, sizeof wt_base, "%s/.claude/worktrees", main_root) == 0) {
+        char at_pfx[PW + 80];
+        if (cx_fmt(at_pfx, sizeof at_pfx, "%s/accept-", wt_base) == 0) {
+            if (resolve_norm_target(base, (path && *path) ? path : ".", norm_t, sizeof norm_t) == 0 &&
+                !strncmp(norm_t, at_pfx, strlen(at_pfx))) {
+                fprintf(stderr, "%s\t%s\trefused\tREFUSE accept-tree-readonly: read-only acceptance worktree %s cannot be modified; use devsvc branch create for editable worktrees\n",
+                        tag, op, (path && *path) ? path : base);
+                return 1;
+            }
+            if (base && base[0] == '/' && sy_realpath(base, rreal, sizeof rreal) >= 0 &&
+                !strncmp(rreal, at_pfx, strlen(at_pfx))) {
+                fprintf(stderr, "%s\t%s\trefused\tREFUSE accept-tree-readonly: read-only acceptance worktree %s cannot be modified; use devsvc branch create for editable worktrees\n",
+                        tag, op, (path && *path) ? path : base);
+                return 1;
+            }
+        }
+    }
     if (!main_root[0] || cx_fmt(wt_base, sizeof wt_base, "%s/.claude/worktrees", main_root)) {
         if (is_cc) return 0;
         fprintf(stderr, "%s\t%s\trefused\tREFUSE shared-checkout (cooperating-window accident guard, caller-provided DEVSVC_OWNER=%s, not authentication): cannot resolve shared root for %s (nothing written)\n",
@@ -5236,7 +5786,9 @@ static int usage(void) {
                     "       devsvc git merge BRANCH [-m MSG] [--cwd WORKTREE]: private-index merge, others staged/dirty kept; conflicts -> MERGE_CONFLICT lines, rc 1 | git pull [--cwd WORKTREE]: fetch + fast-forward only | git add PATH...: sync index (out/, .., absolute, ignored refused) | git unstage PATH... [--owner O]: restore index entry to HEAD, worktree bytes unchanged\n"
                     "         MSG: attribution lines (Co-Authored-By:, Signed-off-by:, Generated with [Claude Code]) are dropped before commit; the first line left must be body text\n"
                     "       devsvc task open|amend|status|done|list ...  -> tools/devtask.cx task ...; devsvc task SUB --help gives the full syntax; devsvc f --help\n"
-                    "       devsvc task open: --cwd absolute or repo-relative (under .claude/worktrees/ or a --write-ext dir); --write repo-relative prefixes or absolute under the repo root\n");
+                    "       devsvc task open: --cwd absolute or repo-relative (under .claude/worktrees/ or a --write-ext dir); --write repo-relative prefixes or absolute under the repo root\n"
+                    "       devsvc branch create --owner O --unit U [--base REF]: server-verified branch+worktree from plans/v01x-units.tsv (DEVSVC_OWNER is self-reported cooperation guard, not a security boundary; missing/invalid owner refused)\n"
+                    "       devsvc accept-tree [create] --commit REV --owner R [--ttl S] | list | remove ID: dac-guarded (0444/0555 + entry refusal, same-UID can undo) expiry review worktree; expired trees also cleaned on service start\n");
     return 2;
 }
 
@@ -5901,6 +6453,108 @@ static int main2(int argc, char **argv) {
         else if (!strcmp(argv[0], "release")) F(req, sizeof req, "lock-release\t%s\t%s", argv[1], ow);
         else { fprintf(stderr, "devsvc: REFUSE lock-args: unknown lock action %s (acquire|release|list)\n", argv[0]); return usage(); }
         return say(request(root, req, 1));
+    }
+    if (!strcmp(cmd, "branch")) {
+        if (argc >= 1 && (!strcmp(argv[0], "--help") || !strcmp(argv[0], "-h"))) {
+            printf("usage: devsvc branch create --owner OWNER --unit UNIT_ID [--base REF]\n"
+                   "  note: DEVSVC_OWNER is caller-reported (cooperation guard, not a security boundary); missing or invalid owner is refused.\n");
+            return 0;
+        }
+        if (argc < 1 || strcmp(argv[0], "create") != 0) {
+            fprintf(stderr, "devsvc: REFUSE branch-args: use devsvc branch create --owner OWNER --unit UNIT_ID [--base REF]\n");
+            return 2;
+        }
+        const char *req_ow = 0, *unit_id = 0, *base_ref = "HEAD";
+        for (int i = 1; i < argc; i++) {
+            if (!strcmp(argv[i], "--owner") && i + 1 < argc) req_ow = argv[++i];
+            else if (!strcmp(argv[i], "--unit") && i + 1 < argc) unit_id = argv[++i];
+            else if (!strcmp(argv[i], "--base") && i + 1 < argc) base_ref = argv[++i];
+            else { fprintf(stderr, "devsvc: REFUSE branch-args: unknown arg %s\n", argv[i]); return 2; }
+        }
+        const char *env_ow = getenv("DEVSVC_OWNER");
+        if (!req_ow || !req_ow[0]) req_ow = env_ow;
+        if (!req_ow || !req_ow[0]) {
+            fprintf(stderr, "devsvc: REFUSE branch-missing-owner: --owner or DEVSVC_OWNER required\n");
+            return 2;
+        }
+        if (!unit_id || !unit_id[0]) {
+            fprintf(stderr, "devsvc: REFUSE branch-args: --unit required\n");
+            return 2;
+        }
+        if (strchr(req_ow, '\t') || strchr(req_ow, '\n') || strchr(unit_id, '\t') || strchr(unit_id, '\n') ||
+            strchr(base_ref, '\t') || strchr(base_ref, '\n') || (env_ow && (strchr(env_ow, '\t') || strchr(env_ow, '\n')))) {
+            fprintf(stderr, "devsvc: REFUSE branch-args: control chars disallowed\n");
+            return 2;
+        }
+        F(req, sizeof req, "branch-create\t%s\t%s\t%s\t%s", req_ow, unit_id, (env_ow && env_ow[0]) ? env_ow : "-", base_ref);
+        int rrc = request(main_root[0] ? main_root : root, req, 1);
+        if (rrc == 0) {
+            fputs(resp, stdout);
+            return 0;
+        }
+        if (!strncmp(resp, "ERR\t", 4)) fprintf(stderr, "devsvc: REFUSE %s", resp + 4);
+        else fprintf(stderr, "devsvc: branch create failed rc=%d\n", rrc);
+        return 1;
+    }
+    if (!strcmp(cmd, "accept-tree")) {
+        if (argc >= 1 && (!strcmp(argv[0], "--help") || !strcmp(argv[0], "-h"))) {
+            printf("usage: devsvc accept-tree [create] --commit REV [--owner REVIEWER] [--ttl SEC]\n"
+                   "       devsvc accept-tree list\n"
+                   "       devsvc accept-tree remove ID_OR_PATH\n"
+                   "  note: DEVSVC_OWNER is caller-reported (cooperation guard, not a security boundary); missing or invalid owner is refused.\n"
+                   "  note: readonly=dac-guarded means guarded entry refuses writes and files/dirs are 0444/0555 (same-UID can undo); expired trees are cleaned on sweep and at service start.\n");
+            return 0;
+        }
+        if (argc >= 1 && !strcmp(argv[0], "list")) {
+            int rrc = request(main_root[0] ? main_root : root, "accept-list", 1);
+            return say(rrc);
+        }
+        if (argc >= 2 && !strcmp(argv[0], "remove")) {
+            const char *target = argv[1], *ow = getenv("DEVSVC_OWNER");
+            for (int i = 2; i < argc; i++) {
+                if (!strcmp(argv[i], "--owner") && i + 1 < argc) ow = argv[++i];
+                else { fprintf(stderr, "devsvc: REFUSE accept-tree-args: unknown arg %s\n", argv[i]); return 2; }
+            }
+            if (!ow || !ow[0]) {
+                fprintf(stderr, "devsvc: REFUSE accept-missing-owner: --owner or DEVSVC_OWNER required\n");
+                return 2;
+            }
+            if (strchr(target, '\t') || strchr(target, '\n') || strchr(ow, '\t') || strchr(ow, '\n')) {
+                fprintf(stderr, "devsvc: REFUSE accept-tree-args: control chars disallowed\n");
+                return 2;
+            }
+            F(req, sizeof req, "accept-remove\t%s\t%s", target, ow);
+            int rrc = request(main_root[0] ? main_root : root, req, 1);
+            if (rrc == 0) { fputs(resp, stdout); return 0; }
+            if (!strncmp(resp, "ERR\t", 4)) fprintf(stderr, "devsvc: REFUSE %s", resp + 4);
+            return 1;
+        }
+        int start = (argc >= 1 && !strcmp(argv[0], "create")) ? 1 : 0;
+        const char *rev = 0, *ttl = "1800", *ow = getenv("DEVSVC_OWNER");
+        for (int i = start; i < argc; i++) {
+            if (!strcmp(argv[i], "--commit") && i + 1 < argc) rev = argv[++i];
+            else if (!strcmp(argv[i], "--ttl") && i + 1 < argc) ttl = argv[++i];
+            else if (!strcmp(argv[i], "--owner") && i + 1 < argc) ow = argv[++i];
+            else { fprintf(stderr, "devsvc: REFUSE accept-tree-args: unknown arg %s\n", argv[i]); return 2; }
+        }
+        if (!rev || !rev[0]) {
+            fprintf(stderr, "devsvc: REFUSE accept-tree-args: --commit REV required\n");
+            return 2;
+        }
+        if (!ow || !ow[0]) {
+            fprintf(stderr, "devsvc: REFUSE accept-missing-owner: --owner or DEVSVC_OWNER required\n");
+            return 2;
+        }
+        if (strchr(rev, '\t') || strchr(rev, '\n') || strchr(ttl, '\t') || strchr(ow, '\t') || strchr(ow, '\n')) {
+            fprintf(stderr, "devsvc: REFUSE accept-tree-args: control chars disallowed\n");
+            return 2;
+        }
+        F(req, sizeof req, "accept-create\t%s\t%s\t%s", ow, rev, ttl);
+        int rrc = request(main_root[0] ? main_root : root, req, 1);
+        if (rrc == 0) { fputs(resp, stdout); return 0; }
+        if (!strncmp(resp, "ERR\t", 4)) fprintf(stderr, "devsvc: REFUSE %s", resp + 4);
+        else fprintf(stderr, "devsvc: accept-tree create failed rc=%d\n", rrc);
+        return 1;
     }
     if (!strcmp(cmd, "events")) {
         if (argc >= 1 && !strcmp(argv[0], "emit")) {

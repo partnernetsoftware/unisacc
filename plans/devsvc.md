@@ -843,3 +843,11 @@ U0 本节(先行)。U1 工单字段与状态机;U2 租约 pull、ack、done、ha
 2. **简报 B(`devsvc` 链外部 `rm`/`mkdir` 改 `sy_*`)**:
    - 目标:将 `devsvc` 关联工具(`tools/devsvc.cx`、`tools/cxlib/dv*.cx`、`tools/cxlib/flow*.cx`)中经子进程调用外部 `rm -rf`/`mkdir -p` 处统一替换为 `cx/sys` 的 `sy_mkdir_all`/递归删除帮手,实跑对应 `check-*` 与 `affected --run` 全绿,降低普查基线计数。
    - 前置:`agy-flow` 提交工具组落库并自检绿,写域与 `agy-flow` 错开。
+
+## 分支创建与只读验收树(`devsvc branch create` / `devsvc accept-tree`)
+
+- 身份边界:`DEVSVC_OWNER` 与 `--owner` 为调用方自报的协作防误操作标识(cooperation guard, not a security boundary);缺失或非法 owner 一律具名拒绝(`branch-missing-owner`/`branch-bad-owner`/`accept-missing-owner`/`accept-bad-owner`),绝不静默跳过检查或回退缺省属主。
+- `devsvc branch create --owner O --unit U [--base REF]`:服务端只读权威主仓 `plans/v01x-units.tsv` 校验单元存在且属主匹配,在 `.claude/worktrees/` 下创建工作树并建立产品符号链接。
+- `devsvc accept-tree [create] --commit REV --owner R [--ttl S] | list | remove ID [--owner R]`:在 `.claude/worktrees/accept-*` 创建绑定到确定 40 位 commit 的分离工作树,写入 `.devsvc-accept-tree.marker`,并对目录内非软链文件/目录递归 `chmod` 去写位(逐次检查 `chmod` 返回值);`remove` 校验调用方 owner(仅属主或 `cc` 可移除)。
+- 只读语义(`readonly=dac-guarded`):`devsvc` 写入口与 `guard-hook` 拒绝写入,且文件/目录设为 `0444`/`0555`;同 UID 进程可在宿主侧撤销权限位。
+- 过期与清理:过期树在后台 `serve` 循环巡检与**服务启动加载 `accept-trees.tsv` 时**均会自动清理。清理前强制校验四项条件:(1)路径位于 `<main_root>/.claude/worktrees/accept-*` 单层目录;(2)存在普通文件 `.devsvc-accept-tree.marker` 且 `id`/`commit` 匹配;(3)`git worktree list --porcelain` 中该路径对应相同 `HEAD` commit;(4)仅执行 `git worktree remove --force`(不在删除前预先删 marker 或符号链接)。任一校验失败或 `git worktree remove` 失败时立即停止、保留目录与 marker、重新恢复只读权限并检查 `chmod` 结果,记录 `accept-tree.cleanup-refused` 事件,绝不执行 `rm -r`,绝不执行全局 `git worktree prune`。
