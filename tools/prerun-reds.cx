@@ -1,0 +1,268 @@
+/* Offline red ledger. --prerun DIR --out FILE [--batches FILE] [--inspect-dir DIR]
+ * Reads final strict windows and their serial recovery rows in name order. A
+ * diag-ID/strict.tsv can fill an absent primary row. Candidate-bound per-batch
+ * logs in .lane-tmp-N/unisacc-affected-* and inspect-dir/ID.log supply assertions.
+ * The output directory must be outside the prerun. No batch is executed. */
+#pragma unisa use sys.fs
+#pragma unisa use sys.posix
+#pragma unisa use mem.heap
+#pragma unisa use cxlib.outfmt
+#pragma unisa use cxlib.netpack
+#pragma unisa use cxlib.testplan
+
+#define W 4096
+typedef struct {
+    char *id, *domain, *state, *rc, *ms, *candidate, *note, *window;
+    char *source, *expected, *raw, *first;
+    int primary, ambiguous;
+} Red;
+static Red rows[TP_BATCH_CAP];
+static int nr, windows;
+static char dir[W], pin[65], revision[65];
+static void refuse(const char *reason, const char *arg) {
+    fprintf(stderr, "PRERUN_REDS_REFUSE\t%s\t%s\n", reason, arg); exit(2);
+}
+static void path(char *dst, const char *a, const char *b) {
+    if (cx_fmt(dst, W, "%s/%s", a, b)) refuse("path-length", a);
+}
+static char *load(const char *file, int optional) {
+    unsigned char *data; int64_t size;
+    int rc = sy_read_file(file, &data, &size, 16 << 20);
+    if (rc == -ENOENT && optional) return 0;
+    if (rc || memchr(data, 0, size)) refuse("read", file);
+    return (char *)data;
+}
+static int cmpnames(const void *a, const void *b) {
+    return strcmp(*(char *const *)a, *(char *const *)b);
+}
+static int names(const char *base, const char *prefix, const char *suffix, char **out, int cap) {
+    sy_dir_t d; int n = 0, next; size_t p = strlen(prefix), s = strlen(suffix);
+    if (sy_dir_open(&d, base)) refuse("directory", base);
+    while ((next = sy_dir_next(&d)) == 1) {
+        size_t len = strlen(d.name);
+        if (len < p+s || strncmp(d.name, prefix, p) || strcmp(d.name+len-s, suffix)) continue;
+        if (n == cap || !(out[n] = mm_strdup(d.name))) refuse("directory-limit", base);
+        n++;
+    }
+    sy_dir_close(&d);
+    if (next < 0) refuse("directory-read", base);
+    qsort(out, n, sizeof(char *), cmpnames);
+    return n;
+}
+static int fields(char *s, char **cols, int max) {
+    int n = 0;
+    while (n < max) {
+        cols[n++] = s;
+        char *sep = strchr(s, '\t');
+        if (!sep) break;
+        *sep = 0; s = sep+1;
+    }
+    return n;
+}
+static char *line(char **cursor) {
+    char *s = *cursor;
+    if (!s || !*s) return 0;
+    char *e = strchr(s, '\n');
+    if (e) *e++ = 0;
+    *cursor = e;
+    return s;
+}
+static Red *lookup(const char *id) {
+    for (int i = 0; i < nr; i++) if (!strcmp(id, rows[i].id)) return rows+i;
+    return 0;
+}
+static int hex(const char *s, int n) {
+    return strlen(s) == n && strspn(s, "0123456789abcdef") == n;
+}
+static void bind(char *dst, const char *value, int width, const char *file) {
+    if (!hex(value, width) || (*dst && strcmp(dst, value))) refuse("mixed-identity", file);
+    if (cx_fmt(dst,65,"%s",value)) refuse("identity-length",file);
+}
+static int token(const char *raw, const char *name, const char *value) {
+    char key[320];
+    if (cx_fmt(key,sizeof key,"\t%s=%s",name,value)) return 0;
+    const char *s=strstr(raw,key);
+    return s && (!s[strlen(key)] || s[strlen(key)]=='\t');
+}
+static void strict(const char *file, const char *window, const char *diag) {
+    char *cursor = load(file, 0), *s; Red *prev = 0; int header=0;
+    while ((s = line(&cursor))) {
+        if (!strncmp(s, "# source=", 9)) {
+            char *ape = strstr(s, " ape_sha256="), *end = strchr(s+9, ' ');
+            if (!ape || !end) refuse("identity-header", file);
+            *end = 0; bind(revision, s+9, 40, file); bind(pin, ape+12, 64, file); header=1;
+            continue;
+        }
+        if (!strncmp(s, "RAW\tBATCH_RUN\t", 14)) {
+            if (prev) {
+                if (token(s,"id",prev->id) && token(s,"status",prev->state) &&
+                    token(s,"rc",prev->rc) && token(s,"candidate",prev->candidate)) prev->raw = s+4;
+            }
+            continue;
+        }
+        OfStrictRow parsed; char why[128];
+        int valid=of_parse_strict_row(s,strlen(s),&parsed,why,sizeof why);
+        if (!valid) continue;
+        if (valid<0 || !header || strspn(parsed.batch,"abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789._-") != strlen(parsed.batch))
+            refuse("strict-row",file);
+        char *v[10]; fields(s,v,10);
+        if (strcmp(v[2],"INVALID") && strcmp(v[4], "-") && strcmp(v[4],pin)) refuse("candidate", file);
+        if (diag && strcmp(v[0],diag)) refuse("diagnostic-batch", file);
+        Red *r = lookup(v[0]);
+        prev = 0;
+        if (r && diag && r->primary) continue;
+        if (!r) {
+            if (nr == TP_BATCH_CAP) refuse("batch-limit", file);
+            r = rows+nr++;
+        }
+        r->id=v[0]; r->domain=v[1]; r->state=v[2]; r->rc=v[3]; r->candidate=v[4];
+        r->ms=v[5]; r->note=v[8]; r->window=(char *)window; r->primary=!diag; r->raw=0; prev=r;
+    }
+}
+static void table(const char *file, int expected) {
+    char *cursor = load(file, expected), *s;
+    while ((s = line(&cursor))) {
+        char *v[5]; int n=fields(s,v,5); Red *r=lookup(v[0]);
+        if (!r) continue;
+        if (expected && n>=3 && !strcmp(r->note,v[1])) r->expected=v[1];
+        if (!expected && n>=4 && *v[3]) r->source=v[3];
+    }
+}
+static int image_pair(const char *s) {
+    return strlen(s)==136 && !strncmp(s,"image=",6) && strspn(s+6,"0123456789abcdef")==64 &&
+           !strncmp(s+70,"->",2) && hex(s+72,64);
+}
+/* Require the strict RAW receipt verbatim. If two matching attempts disagree
+ * about the first failure, neither can establish that assertion. */
+static void inspect(const char *file, Red *r) {
+    if (!r->raw) return;
+    char *data=load(file,1), *p=data, *s, *first=0;
+    int bound=0, others=0, exceeds=0;
+    while ((s=line(&p))) {
+        OfBatchRun br; char why[128];
+        if (of_parse_batch_run(s,strlen(s),&br,why,sizeof why)!=0) {
+            if (!strcmp(s,r->raw)) bound=1; else others=1;
+        }
+        if (!strncmp(s,"BATCH_TIMING\t",13) && token(s,"id",r->id)) {
+            char *ms=strstr(s,"\ttotal_ms=");
+            if (ms && atol(ms+10)>atol(r->ms)) exceeds=1;
+        }
+        if (!first && (!strncmp(s,"FAIL\t",5) || !strncmp(s,"FAIL ",5) || !strncmp(s,"REFUSE\t",7))) first=s;
+    }
+    if (bound && !others && !exceeds && first) {
+        for (char *c=first; *c; c++) if (*c=='\t' || *c=='\r') *c=' ';
+        if (!r->first) r->first=mm_strdup(first);
+        else if (strcmp(r->first,first)) r->ambiguous=1;
+    }
+    if (data) mm_free(data);
+}
+static void inspect_batch_files(const char *base) {
+    char file[W], name[256];
+    for (int i=0;i<nr;i++) {
+        Red *r=rows+i;
+        if (!strcmp(r->state,"PASS") || !r->raw) continue;
+        if (cx_fmt(name,sizeof name,"%s.log",r->id)) refuse("batch-length",r->id);
+        path(file,base,name); inspect(file,r);
+    }
+}
+static void gather(const char *extra) {
+    static char *files[8192], *lanes[128], *jobs[8192];
+    char file[W], base[W], job[W];
+    windows=names(dir,"strict-W",".tsv",files,8192);
+    if (!windows) refuse("no-strict-windows",dir);
+    for (int i=0;i<windows;i++) { path(file,dir,files[i]); strict(file,files[i],0); }
+    int nd=names(dir,"diag-","",files,8192);
+    for (int i=0;i<nd;i++) {
+        path(base,dir,files[i]); path(file,base,"strict.tsv");
+        int exists=sy_exists(file);
+        if (exists<0) refuse("diagnostic-path",file);
+        if (exists) strict(file,files[i],files[i]+5);
+    }
+    for (int i=0;i<nr;i++) {
+        Red *r=rows+i;
+        if (!r->primary || !strcmp(r->state,"PASS")) continue;
+        char name[512];
+        if (cx_fmt(name,sizeof name,"inspect-%s",r->window)) refuse("inspect-name",r->window);
+        path(file,dir,name); inspect(file,r);
+    }
+    if (extra) inspect_batch_files(extra);
+    int nl=names(dir,".lane-tmp-","",lanes,128);
+    for (int i=0;i<nl;i++) {
+        path(base,dir,lanes[i]);
+        int n=names(base,"unisacc-affected-","",jobs,8192);
+        for (int j=0;j<n;j++) { path(job,base,jobs[j]); inspect_batch_files(job); mm_free(jobs[j]); }
+    }
+}
+static int term(const char *s,const char *word) {
+    const char *start=s;
+    int n=strlen(word);
+    while ((s=strstr(s,word))) {
+        if ((s==start || !((s[-1]>='a' && s[-1]<='z') || (s[-1]>='A' && s[-1]<='Z'))) &&
+            !((s[n]>='a' && s[n]<='z') || (s[n]>='A' && s[n]<='Z'))) return 1;
+        s+=n;
+    }
+    return 0;
+}
+static void emit(const char *out) {
+    np_buf buf={0}; const char *clusters[TP_BATCH_CAP]; int nc=0,total=0,expected=0,env=0,near=0;
+    const char *header[]={"batch","domain","rc","ms","first_failing_assertion_line","signature","class","cluster_id"};
+    for (int i=0;i<8;i++) { np_puts(&buf,header[i]); np_puts(&buf,i==7 ? "\n" : "\t"); }
+    for (int i=0;i<nr;i++) {
+        Red *r=rows+i;
+        if (!strcmp(r->state,"PASS")) continue;
+        const char *first=r->first && !r->ambiguous ? r->first : "UNMEASURED";
+        const char *sig=first,*cl="check-source",*key=r->source;
+        if (!strcmp(r->state,"FAIL") && !strcmp(r->domain,"product-qualification") &&
+            r->expected && image_pair(r->note) && !strcmp(pin,r->candidate)) {
+            cl="expected"; sig=r->note; key="expected-image"; expected++;
+        } else if (!strcmp(r->rc,"124") || atol(r->ms)>=54000) {
+            cl="near-bound"; key="near-bound"; sig=!strcmp(r->rc,"124") ? "rc=124" : "ms>=54000"; near++;
+        } else if (term(first,"env") || strstr(first,"UNISA_CONTAINER") || strstr(first,"UNISACC_CONTAINER") ||
+                   strstr(first,"launcher") || strstr(first,"material")) {
+            cl="environment";
+            key=(term(first,"env") || strstr(first,"CONTAINER")) ? "env" : strstr(first,"launcher") ? "launcher" : "material";
+            sig=key; if (!strcmp(key,"env")) env++;
+        }
+        if (!key || !strcmp(key,"-")) key=r->id;
+        if (!strcmp(cl,"check-source") && !strcmp(sig,"UNMEASURED")) sig=key;
+        int j=0; while (j<nc && strcmp(clusters[j],key)) j++;
+        if (j==nc) clusters[nc++]=key;
+        const char *cols[]={r->id,r->domain,r->rc,r->ms,first,sig,cl,key};
+        for (int c=0;c<8;c++) { np_puts(&buf,cols[c]); np_puts(&buf,c==7 ? "\n" : "\t"); }
+        total++;
+    }
+    if (sy_write_atomic(out,buf.p,buf.n,0600)) refuse("write",out);
+    printf("PRERUN_REDS\trows=%d\texpected=%d\tenv=%d\tnear_bound=%d\tclusters=%d\tout=%s\n",total,expected,env,near,nc,out);
+}
+int main(int argc,char **argv) {
+    const char *run=0,*output=0,*batches=0,*extra=0; char parent[W],real[W],file[W];
+    for (int i=1;i<argc;i++) {
+        if (i+1==argc) refuse("argument",argv[i]);
+        if (!strcmp(argv[i],"--prerun")) run=argv[++i];
+        else if (!strcmp(argv[i],"--out")) output=argv[++i];
+        else if (!strcmp(argv[i],"--batches")) batches=argv[++i];
+        else if (!strcmp(argv[i],"--inspect-dir")) extra=argv[++i];
+        else refuse("argument",argv[i]);
+    }
+    if (!run || !output || sy_realpath(run,dir,sizeof dir)<0 || cx_fmt(parent,sizeof parent,"%s",output)) refuse("arguments","--prerun DIR --out FILE");
+    char *slash=strrchr(parent,'/');
+    if (slash && !slash[1]) refuse("output-file",output);
+    if (slash) *slash=0;
+    if (sy_realpath(slash ? (*parent ? parent : "/") : ".",real,sizeof real)<0 ||
+        (!strncmp(real,dir,strlen(dir)) && (!real[strlen(dir)] || real[strlen(dir)]=='/'))) refuse("output-directory",output);
+    path(file,dir,"prerun-env.tsv");
+    char *metadata=load(file,1), *cursor=metadata, *s;
+    while ((s=line(&cursor))) {
+        if (!strncmp(s,"ape_sha256\t",11)) bind(pin,s+11,64,file);
+        if (!strncmp(s,"rev\t",4)) bind(revision,s+4,40,file);
+    }
+    gather(extra);
+    path(file,dir,"expected-fail.tsv"); table(file,1);
+    if (!batches) {
+        path(file,dir,"frozen-root/tests/batches.tsv");
+        int exists=sy_exists(file);
+        if (exists<0) refuse("registry",file);
+        batches=exists ? file : "tests/batches.tsv";
+    }
+    table(batches,0); emit(output); return 0;
+}

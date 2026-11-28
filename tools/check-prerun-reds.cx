@@ -1,0 +1,101 @@
+/* Offline CLI checks for red classification, retry precedence, inspect identity
+ * and refusal to write underneath the frozen input. */
+#pragma unisa use sys.fs
+#pragma unisa use sys.posix
+#pragma unisa use sys.env
+#pragma unisa use mem.heap
+#pragma unisa use cxlib.ckassert
+#pragma unisa use cxlib.outfmt
+
+#define TEST_A16 "aaaaaaaaaaaaaaaa"
+#define TEST_B16 "bbbbbbbbbbbbbbbb"
+#define TEST_REV10 "1111111111"
+#define A TEST_A16 TEST_A16 TEST_A16 TEST_A16
+#define B TEST_B16 TEST_B16 TEST_B16 TEST_B16
+#define REV TEST_REV10 TEST_REV10 TEST_REV10 TEST_REV10
+#define HEAD "# source=" REV " layout=/fixture ape_sha256=" A "\n"
+#define PROD "product-qualification"
+#define ROW(id,domain,state,rc,ms,note) id "\t" domain "\t" state "\t" rc "\t" A "\t" ms "\t0\t0\t" note "\n"
+
+#define IMAGE "image=" A "->" B
+
+static void receipt(char *dst,const char *id,const char *candidate) {
+    OfBatchRun r={"","FAIL",1,0,"FIXTURE","","product","actual-one-batch-no-cached-result","1"};
+    char why[128];
+    if (cx_fmt(r.id,sizeof r.id,"%s",id) || cx_fmt(r.candidate,sizeof r.candidate,"%s",candidate) ||
+        of_fmt_batch_run(dst,512,&r,why,sizeof why)<0) exit(2);
+}
+static void join(char *dst,const char *p,const char *name) {
+    if (cx_fmt(dst,4096,"%s/%s",p,name)) exit(2);
+}
+static void put(const char *dir,const char *name,const char *data) {
+    char file[4096]; join(file,dir,name);
+    if (sy_write_atomic(file,data,strlen(data),0600)) exit(2);
+}
+static char out[8192];
+int main(int argc,char **argv) {
+    char base[4096],dir[4096],dest[4096],reg[4096],unsafe[4096],diag[4096],tool[4096];
+    if (ck_receipt_begin(&argc,argv)<0 || argc!=1 ||
+        sy_mkdtemp(sy_tmpdir(),"check-prerun-reds-",base,sizeof base)) return 2;
+    join(dir,base,"input"); join(dest,base,"reds.tsv"); join(tool,base,"tool");
+    join(unsafe,dir,"reds.tsv"); join(reg,dir,"batches.tsv"); join(diag,dir,"diag-time");
+    if (sy_mkdir(dir,0700) || sy_mkdir(diag,0700)) return 2;
+    char *build[]={"sh","./unisacc.com","tools/prerun-reds.cx","-o",tool,0};
+    if (ck_run(build,out,sizeof out)) { fprintf(stderr,"%s",out); return 2; }
+    char raw[5][512], fixture[8192];
+    receipt(raw[0],"a",A); receipt(raw[1],"b",A); receipt(raw[2],"c",A); receipt(raw[3],"d",A); receipt(raw[4],"b",B);
+    if (cx_fmt(fixture,sizeof fixture,HEAD
+        ROW("x",PROD,"FAIL","2","30",IMAGE)
+        ROW("mismatch",PROD,"FAIL","2","31","image=" B "->" A)
+        ROW("a","tool","FAIL","1","53999","-") "RAW\t%s"
+        ROW("b","tool","FAIL","1","11","-") "RAW\t%s"
+        ROW("c","tool","FAIL","1","12","-") "RAW\t%s"
+        ROW("d","tool","FAIL","1","13","-") "RAW\t%s"
+        ROW("retry","tool","FAIL","1","54000","-")
+        ROW("retry","tool","PASS","0","12","-")
+        ROW("slow","tool","FAIL","124","1","-") "CHECKPOINT\tremaining=1\tape_sha256=" A "\n",raw[0],raw[1],raw[2],raw[3])) return 2;
+    put(dir,"strict-W0001.tsv",fixture);
+    put(diag,"strict.tsv",HEAD ROW("time","tool","UNKNOWN","3","54000","-"));
+    put(dir,"expected-fail.tsv","batch\texpected\treason\nx\t" IMAGE "\tr1\nmismatch\t" IMAGE "\tr2\n");
+    put(dir,"batches.tsv","id\timplementation\tlayer\tsource\nmismatch\tIMPLEMENTED\tcontract\tone.cx\n"
+        "b\tIMPLEMENTED\tcontract\tshared.cx\nd\tIMPLEMENTED\tcontract\tshared.cx\n");
+    const char *logs[]={"a.log","b.log","c.log","d.log"};
+    const char *lines[]={"PASS\tearly\nFAIL\tmissing-env-key\nFAIL\tother\n","FAIL\tmissing-env-key\n",
+                         "FAIL\tmissing-material\n","FAIL\tmyenv-token\n"};
+    for (int k=0;k<4;k++) {
+        if (cx_fmt(fixture,sizeof fixture,"%s%s",lines[k],raw[k==1 ? 4 : k])) return 2;
+        put(dir,logs[k],fixture);
+    }
+    char *cmd[]={tool,"--prerun",dir,"--out",dest,"--batches",reg,"--inspect-dir",dir,0};
+    int rc=ck_run(cmd,out,sizeof out);
+    ck(rc==0 && strstr(out,"rows=8\texpected=1\tenv=1\tnear_bound=2\tclusters=6"),"counts and distinct clusters");
+    unsigned char *buf; int64_t size;
+    if (sy_read_file(dest,&buf,&size,65536)) return 2;
+    char *ledger=(char *)buf;
+    ck(strstr(ledger,"first_failing_assertion_line\tsignature\tclass\tcluster_id\n")!=0,"eight-column header");
+    ck(strstr(ledger,"\texpected\texpected-image\n") &&
+       strstr(ledger,"mismatch\t" PROD "\t2\t31\tUNMEASURED\tone.cx\tcheck-source\tone.cx\n"),"complete image pair and batch must match");
+    ck(strstr(ledger,"a\ttool\t1\t53999\tFAIL missing-env-key\tenv\tenvironment\tenv\n")!=0,"first failure and below-bound timing");
+    ck(strstr(ledger,"b\ttool\t1\t11\tUNMEASURED\tshared.cx\tcheck-source\tshared.cx\n")!=0,"wrong candidate cannot supply assertion");
+    ck(strstr(ledger,"\tmaterial\tenvironment\tmaterial\n") && strstr(ledger,"FAIL myenv-token\tcheck-source\tshared.cx\n"),"material class and env word boundaries");
+    ck(strstr(ledger,"slow\ttool\t124\t1\tUNMEASURED\trc=124\tnear-bound\tnear-bound\n") &&
+       strstr(ledger,"time\ttool\t3\t54000\tUNMEASURED\tms>=54000\tnear-bound\tnear-bound\n"),"both near-bound predicates");
+    ck(!strstr(ledger,"\nretry\t"),"successful retry supersedes failed attempt");
+    mm_free(buf);
+    cmd[4]=unsafe;
+    ck(ck_run(cmd,out,sizeof out)==2 && sy_exists(unsafe)==0,"input directory remains read-only");
+    cmd[4]=dest;
+    put(dir,"prerun-env.tsv","ape_sha256\t" B "\n");
+    ck(ck_run(cmd,out,sizeof out)==2 && strstr(out,"mixed-identity"),"reject different frozen candidate");
+    put(dir,"prerun-env.tsv","ape_sha256\t" A "\n");
+    put(dir,"strict-W0002.tsv",HEAD ROW("bad","tool","FIAL","1","2","-"));
+    ck(ck_run(cmd,out,sizeof out)==2 && strstr(out,"strict-row"),"reject unknown status spelling");
+    put(dir,"strict-W0002.tsv",HEAD ROW("bad","tool","FAIL","oops","2","-"));
+    ck(ck_run(cmd,out,sizeof out)==2 && strstr(out,"strict-row"),"reject malformed return code");
+    put(dir,"strict-W0002.tsv",HEAD ROW("signal","tool","UNKNOWN","-9","2","-"));
+    ck(ck_run(cmd,out,sizeof out)==0 && strstr(out,"rows=9"),"signed signal exit accepted");
+    if (!ck_failures() && sy_remove_all(base)) return 2;
+    ck_receipt_finish();
+    printf("CHECK_PRERUN_REDS\tpassed=%d\tfailed=%d\n",ck_assertions()-ck_failures(),ck_failures());
+    return ck_failures() ? 1 : 0;
+}
