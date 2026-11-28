@@ -25,6 +25,7 @@
 #pragma unisa use text.text
 #pragma unisa use text.fmt
 #pragma unisa use text.conv
+#pragma unisa use cxlib.netpack
 #pragma unisa use cxlib.procrun
 
 static int g_pass;
@@ -151,6 +152,34 @@ int main(void) {
             pr_free(&r);
         }
         ck(ok, "s1b-within-cap-batch-passes");
+    }
+
+    /* (3) Empty child PATH + absolute /bin/sh + cap=8: MUST run inside cgroup scope (no fail-open) and preserve exit code 37 */
+    {
+        char *av[] = { "/bin/sh", "-c", "/bin/cat /proc/self/cgroup; exit 37", 0 };
+        char *ev[] = { "PATH=", 0 };
+        np_result r = {0};
+        char why[300];
+        why[0] = 0;
+        int tr = np_run_capped(av, ".", ev, 8, 8, &r, why, sizeof why);
+        int ok = (tr == 0 && r.rc == 37 && r.out && r.outn > 0 &&
+                  tx_find(r.out, (long)r.outn, "unisacc-s1b-", 12) >= 0);
+        if (!ok) sy_eprintf("S1B3 tr=%d rc=%d why=%s out=%.*s\n", tr, r.rc, why, (int)r.outn, r.out ? r.out : "");
+        np_free(&r);
+        ck(ok, "s1b-empty-path-capped-not-fail-open");
+    }
+
+    /* (4) ENOENT absolute target under cap=8 preserves FileNotFoundError (not rc=1 + systemd stderr) */
+    {
+        char *av[] = { "/nonexistent-s1b-target-binary-xyz", 0 };
+        np_result r = {0};
+        char why[300];
+        why[0] = 0;
+        int tr = np_run_capped(av, ".", 0, 8, 8, &r, why, sizeof why);
+        int ok = (tr == -1 && tx_find(why, (long)strlen(why), "FileNotFoundError", 17) >= 0);
+        if (!ok) sy_eprintf("S1B4 tr=%d rc=%d why=%s\n", tr, r.rc, why);
+        np_free(&r);
+        ck(ok, "s1b-enoent-target-preserves-filenotfound");
     }
 
     sy_remove_all(tmp);
