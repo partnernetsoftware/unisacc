@@ -1578,13 +1578,15 @@ static int rf_cand_commit(const char *repo, const char *ver, char *dst, int cap)
     X(CR_G_12P_PREFLIGHT_ENTRY, "12p-preflight-entry") \
     X(CR_G_13_SNAP_CACHE, "13-snap-cache") \
     X(CR_G_14_ROOT_RECORD, "14-root-record") \
-    X(CR_G_15_GEN_ALL, "15-gen-all") \
     X(CR_G_16_DISK_FREE, "16-disk-free") \
     X(CR_G_17_ROOT_PUBLIC, "17-root-public") \
     X(CR_G_18_PARSE2_GEN, "18-parse2-gen") \
-    X(CR_G_19_CHAIN_PREFLIGHT, "19-chain-preflight") \
     X(CR_G_19A_PREFLIGHT_SIXTARGET, "19a-preflight-sixtarget") \
+    X(CR_G_15_GEN_ALL, "15-gen-all") \
+    X(CR_G_19A_PREFLIGHT_SIXTARGET_B1, "19a-preflight-sixtarget-b1") \
+    X(CR_G_19A_PREFLIGHT_SIXTARGET_B2, "19a-preflight-sixtarget-b2") \
     X(CR_G_19B_PREFLIGHT_SNAP, "19b-preflight-snap") \
+    X(CR_G_19_CHAIN_PREFLIGHT, "19-chain-preflight") \
     X(CR_G_20_IDENT_HELPER, "20-ident-helper") \
     X(CR_G_21_VERSEQ_GEN, "21-verseq-gen") \
     X(CR_G_22_PREMERGE_UNION, "22-premerge-union") \
@@ -1727,20 +1729,22 @@ static int cr_want_gid(const char *only, int gid) {
     return cr_want_item(only, cr_gname(gid));
 }
 
-#define CR_STAGE_COUNT 11
+#define CR_STAGE_COUNT 13
 typedef struct { const char *name; int first_gid, last_gid; } CrStageSpec;
 static const CrStageSpec cr_stage_specs[CR_STAGE_COUNT] = {
-    {"derive-a",      CR_G_1_REV,              CR_G_2A_DERIVE},
-    {"derive-b",      CR_G_2A_DERIVE2,         CR_G_2A_DERIVE4},
-    {"derive-c",      CR_G_2A_DERIVE5,         CR_G_2A_DERIVE7},
-    {"ratchets",      CR_G_2B_RATCHETS,        CR_G_2B_RATCHETS},
-    {"tri-chain-a",   CR_G_3A_CXMOD_TRI,       CR_G_3A_CXMOD_TRI_EXPORTS},
-    {"tri-chain-b",   CR_G_3B_CX0_EXTRACT,     CR_G_4_P1},
-    {"tri-chain-c",   CR_G_5_CANDIDATE_CHAIN,  CR_G_5_CANDIDATE_CHAIN5},
-    {"env-root",      CR_G_6_AFFECTED,         CR_G_14_ROOT_RECORD},
-    {"gen-preflight", CR_G_15_GEN_ALL,         CR_G_21_VERSEQ_GEN},
-    {"union-a",       CR_G_22_PREMERGE_UNION,  CR_G_22_PREMERGE_UNION5},
-    {"union-b",       CR_G_23_FREEZE_ARMED,    CR_G_25_TOOLS_COMPILE_SHARDS}
+    {"derive-a",        CR_G_1_REV,                       CR_G_2A_DERIVE},
+    {"derive-b",        CR_G_2A_DERIVE2,                  CR_G_2A_DERIVE4},
+    {"derive-c",        CR_G_2A_DERIVE5,                  CR_G_2A_DERIVE7},
+    {"ratchets",        CR_G_2B_RATCHETS,                 CR_G_2B_RATCHETS},
+    {"tri-chain-a",     CR_G_3A_CXMOD_TRI,                CR_G_3A_CXMOD_TRI_EXPORTS},
+    {"tri-chain-b",     CR_G_3B_CX0_EXTRACT,              CR_G_4_P1},
+    {"tri-chain-c",     CR_G_5_CANDIDATE_CHAIN,           CR_G_5_CANDIDATE_CHAIN5},
+    {"env-root",        CR_G_6_AFFECTED,                  CR_G_14_ROOT_RECORD},
+    {"gen-preflight-a", CR_G_16_DISK_FREE,                CR_G_19A_PREFLIGHT_SIXTARGET},
+    {"gen-preflight-b", CR_G_15_GEN_ALL,                  CR_G_19A_PREFLIGHT_SIXTARGET_B1},
+    {"gen-preflight-c", CR_G_19A_PREFLIGHT_SIXTARGET_B2,  CR_G_21_VERSEQ_GEN},
+    {"union-a",         CR_G_22_PREMERGE_UNION,           CR_G_22_PREMERGE_UNION5},
+    {"union-b",         CR_G_23_FREEZE_ARMED,             CR_G_25_TOOLS_COMPILE_SHARDS}
 };
 
 static int cr_only_has_exact(const char *csv, const char *gate) {
@@ -3631,9 +3635,9 @@ int main(int argc, char **argv) {
             if (tb[1]) free(tb[1]);
         }
     }
-    Job pf_async_a1 = {0}, pf_async_a2 = {0}, pf_async_b = {0};
-    char *pf_av_a1[24], *pf_av_a2[24], *pf_av_b[24];
-    int pf_started_a = 0, pf_started_b = 0;
+    Job pf_async_a = {0}, pf_async_b1 = {0}, pf_async_b2 = {0}, pf_async_snap = {0};
+    char *pf_av_a[24], *pf_av_b1[24], *pf_av_b2[24], *pf_av_snap[24];
+    int pf_started_a = 0, pf_started_b1 = 0, pf_started_b2 = 0, pf_started_snap = 0;
     /* run: concurrency scaled by CPU cores and degraded under high load; sy_poll event-driven completion */
     {   int done = 0, running = 0, running_der = 0, running_solo = 0, ncores = 0, load1 = 0;
         int max_running = calc_max_running(&ncores, &load1);
@@ -3700,22 +3704,31 @@ int main(int argc, char **argv) {
             if (pg[0].out) mm_free(pg[0].out);
             if (pg[1].out) mm_free(pg[1].out);
         }
-        /* Under --stage (e.g. gen-preflight), overlap 19a-preflight-sixtarget and 19b-preflight-snap with 15-gen-all so the stage finishes <= 40 s. */
+        /* Under --stage (gen-preflight-a/b/c), start only that stage's preflight shard(s) concurrently with its sibling gates. */
         if (stage_arg) {
-            int p19_full = cr_only_has_exact(only, cr_gname(CR_G_19_CHAIN_PREFLIGHT));
             int p19_a = cr_only_has_exact(only, cr_gname(CR_G_19A_PREFLIGHT_SIXTARGET));
-            int p19_b = cr_only_has_exact(only, cr_gname(CR_G_19B_PREFLIGHT_SNAP));
-            if (p19_full || p19_a) {
-                prep_19_preflight_job(&pf_async_a1, pf_av_a1, repo, rootarg ? rootarg : repo, revarg, pftable, "sixtarget-a", pf_bound_s);
-                prep_19_preflight_job(&pf_async_a2, pf_av_a2, repo, rootarg ? rootarg : repo, revarg, pftable, "sixtarget-b", pf_bound_s);
-                start(&pf_async_a1);
-                start(&pf_async_a2);
+            int p19_b1 = cr_only_has_exact(only, cr_gname(CR_G_19A_PREFLIGHT_SIXTARGET_B1));
+            int p19_b2 = cr_only_has_exact(only, cr_gname(CR_G_19A_PREFLIGHT_SIXTARGET_B2));
+            int p19_snap = cr_only_has_exact(only, cr_gname(CR_G_19B_PREFLIGHT_SNAP));
+            if (p19_a) {
+                prep_19_preflight_job(&pf_async_a, pf_av_a, repo, rootarg ? rootarg : repo, revarg, pftable, "sixtarget-a", pf_bound_s);
+                start(&pf_async_a);
                 pf_started_a = 1;
             }
-            if (p19_full || p19_b) {
-                prep_19_preflight_job(&pf_async_b, pf_av_b, repo, rootarg ? rootarg : repo, revarg, pftable, "snap", pf_bound_s);
-                start(&pf_async_b);
-                pf_started_b = 1;
+            if (p19_b1) {
+                prep_19_preflight_job(&pf_async_b1, pf_av_b1, repo, rootarg ? rootarg : repo, revarg, pftable, "sixtarget-b1", pf_bound_s);
+                start(&pf_async_b1);
+                pf_started_b1 = 1;
+            }
+            if (p19_b2) {
+                prep_19_preflight_job(&pf_async_b2, pf_av_b2, repo, rootarg ? rootarg : repo, revarg, pftable, "sixtarget-b2", pf_bound_s);
+                start(&pf_async_b2);
+                pf_started_b2 = 1;
+            }
+            if (p19_snap) {
+                prep_19_preflight_job(&pf_async_snap, pf_av_snap, repo, rootarg ? rootarg : repo, revarg, pftable, "snap", pf_bound_s);
+                start(&pf_async_snap);
+                pf_started_snap = 1;
             }
         }
         while (done < nj) {
@@ -3969,60 +3982,76 @@ int main(int argc, char **argv) {
     }
     {
         int w19_full = WANT_G(CR_G_19_CHAIN_PREFLIGHT);
-        int w19_a_raw = WANT_G(CR_G_19A_PREFLIGHT_SIXTARGET);
-        int w19_b_raw = WANT_G(CR_G_19B_PREFLIGHT_SNAP);
-        int w19_a = (only != 0) && w19_a_raw;
-        int w19_b = (only != 0) && w19_b_raw;
-        int need_a = w19_full || w19_a;
-        int need_b = w19_full || w19_b;
-        char ev_a[640] = {0}, ev_b[640] = {0};
-        long ms_a = 0, ms_b = 0;
-        int ok_a = 1, ok_b = 1;
+        int w19_a = (only != 0) && WANT_G(CR_G_19A_PREFLIGHT_SIXTARGET);
+        int w19_b1 = (only != 0) && WANT_G(CR_G_19A_PREFLIGHT_SIXTARGET_B1);
+        int w19_b2 = (only != 0) && WANT_G(CR_G_19A_PREFLIGHT_SIXTARGET_B2);
+        int w19_snap = (only != 0) && WANT_G(CR_G_19B_PREFLIGHT_SNAP);
+        /* In --stage gen-preflight-c, 19-chain-preflight aggregates b2+snap (a and b1 run in gen-preflight-a/b). */
+        int full_needs_all = w19_full && !stage_arg;
+        int need_a = full_needs_all || w19_a;
+        int need_b1 = full_needs_all || w19_b1;
+        int need_b2 = full_needs_all || w19_b2;
+        int need_snap = w19_full || w19_snap;
+        char ev_a[640] = {0}, ev_b1[640] = {0}, ev_b2[640] = {0}, ev_snap[640] = {0};
+        long ms_a = 0, ms_b1 = 0, ms_b2 = 0, ms_snap = 0;
+        int ok_a = 1, ok_b1 = 1, ok_b2 = 1, ok_snap = 1;
         if (need_a) {
-            char ev_a1[640] = {0}, ev_a2[640] = {0};
-            int ok_a1 = 1, ok_a2 = 1;
             if (pf_started_a) {
-                finish(&pf_async_a1);
-                finish(&pf_async_a2);
-                ok_a1 = judge_19_preflight_job(&pf_async_a1, repo, revarg, since, tver, "sixtarget-a", pf_bound_s, ev_a1, sizeof ev_a1);
-                ok_a2 = judge_19_preflight_job(&pf_async_a2, repo, revarg, since, tver, "sixtarget-b", pf_bound_s, ev_a2, sizeof ev_a2);
-                ms_a = pf_async_a1.ms > pf_async_a2.ms ? pf_async_a1.ms : pf_async_a2.ms;
-                if (pf_async_a1.out) mm_free(pf_async_a1.out);
-                if (pf_async_a2.out) mm_free(pf_async_a2.out);
+                finish(&pf_async_a);
+                ok_a = judge_19_preflight_job(&pf_async_a, repo, revarg, since, tver, "sixtarget-a", pf_bound_s, ev_a, sizeof ev_a);
+                ms_a = pf_async_a.ms;
+                if (pf_async_a.out) mm_free(pf_async_a.out);
             } else {
                 long t0 = sy_now_ms();
-                Job ja1 = {0}, ja2 = {0};
-                char *ava1[24], *ava2[24];
-                prep_19_preflight_job(&ja1, ava1, repo, rootarg ? rootarg : repo, revarg, pftable, "sixtarget-a", pf_bound_s);
-                prep_19_preflight_job(&ja2, ava2, repo, rootarg ? rootarg : repo, revarg, pftable, "sixtarget-b", pf_bound_s);
-                start(&ja1); start(&ja2);
-                finish(&ja1); finish(&ja2);
-                ok_a1 = judge_19_preflight_job(&ja1, repo, revarg, since, tver, "sixtarget-a", pf_bound_s, ev_a1, sizeof ev_a1);
-                ok_a2 = judge_19_preflight_job(&ja2, repo, revarg, since, tver, "sixtarget-b", pf_bound_s, ev_a2, sizeof ev_a2);
-                if (ja1.out) mm_free(ja1.out);
-                if (ja2.out) mm_free(ja2.out);
+                ok_a = run_19_preflight(repo, rootarg ? rootarg : repo, revarg, since, tver, pftable, "sixtarget-a", pf_bound_s, ev_a, sizeof ev_a);
                 ms_a = sy_now_ms() - t0;
             }
-            ok_a = ok_a1 && ok_a2;
-            if (!ok_a1) cx_fmt(ev_a, sizeof ev_a, "%s", ev_a1);
-            else if (!ok_a2) cx_fmt(ev_a, sizeof ev_a, "%s", ev_a2);
-            else cx_fmt(ev_a, sizeof ev_a, "%s | shard=sixtarget(a+b)", ev_a1);
         }
-        if (need_b) {
-            if (pf_started_b) {
-                finish(&pf_async_b);
-                ok_b = judge_19_preflight_job(&pf_async_b, repo, revarg, since, tver, "snap", pf_bound_s, ev_b, sizeof ev_b);
-                ms_b = pf_async_b.ms;
-                if (pf_async_b.out) mm_free(pf_async_b.out);
+        if (need_b1) {
+            if (pf_started_b1) {
+                finish(&pf_async_b1);
+                ok_b1 = judge_19_preflight_job(&pf_async_b1, repo, revarg, since, tver, "sixtarget-b1", pf_bound_s, ev_b1, sizeof ev_b1);
+                ms_b1 = pf_async_b1.ms;
+                if (pf_async_b1.out) mm_free(pf_async_b1.out);
             } else {
                 long t0 = sy_now_ms();
-                ok_b = run_19_preflight(repo, rootarg ? rootarg : repo, revarg, since, tver, pftable, "snap", pf_bound_s, ev_b, sizeof ev_b);
-                ms_b = sy_now_ms() - t0;
+                ok_b1 = run_19_preflight(repo, rootarg ? rootarg : repo, revarg, since, tver, pftable, "sixtarget-b1", pf_bound_s, ev_b1, sizeof ev_b1);
+                ms_b1 = sy_now_ms() - t0;
+            }
+        }
+        if (need_b2) {
+            if (pf_started_b2) {
+                finish(&pf_async_b2);
+                ok_b2 = judge_19_preflight_job(&pf_async_b2, repo, revarg, since, tver, "sixtarget-b2", pf_bound_s, ev_b2, sizeof ev_b2);
+                ms_b2 = pf_async_b2.ms;
+                if (pf_async_b2.out) mm_free(pf_async_b2.out);
+            } else {
+                long t0 = sy_now_ms();
+                ok_b2 = run_19_preflight(repo, rootarg ? rootarg : repo, revarg, since, tver, pftable, "sixtarget-b2", pf_bound_s, ev_b2, sizeof ev_b2);
+                ms_b2 = sy_now_ms() - t0;
+            }
+        }
+        if (need_snap) {
+            if (pf_started_snap) {
+                finish(&pf_async_snap);
+                ok_snap = judge_19_preflight_job(&pf_async_snap, repo, revarg, since, tver, "snap", pf_bound_s, ev_snap, sizeof ev_snap);
+                ms_snap = pf_async_snap.ms;
+                if (pf_async_snap.out) mm_free(pf_async_snap.out);
+            } else {
+                long t0 = sy_now_ms();
+                ok_snap = run_19_preflight(repo, rootarg ? rootarg : repo, revarg, since, tver, pftable, "snap", pf_bound_s, ev_snap, sizeof ev_snap);
+                ms_snap = sy_now_ms() - t0;
             }
         }
         if (w19_a) row_judged_g(CR_G_19A_PREFLIGHT_SIXTARGET, ok_a, ev_a, ms_a);
-        if (w19_b) row_judged_g(CR_G_19B_PREFLIGHT_SNAP, ok_b, ev_b, ms_b);
-        if (w19_full) row_judged_g(CR_G_19_CHAIN_PREFLIGHT, ok_a && ok_b, !ok_a ? ev_a : ev_b, ms_a + ms_b);
+        if (w19_b1) row_judged_g(CR_G_19A_PREFLIGHT_SIXTARGET_B1, ok_b1, ev_b1, ms_b1);
+        if (w19_b2) row_judged_g(CR_G_19A_PREFLIGHT_SIXTARGET_B2, ok_b2, ev_b2, ms_b2);
+        if (w19_snap) row_judged_g(CR_G_19B_PREFLIGHT_SNAP, ok_snap, ev_snap, ms_snap);
+        if (w19_full) {
+            int ok_all = ok_a && ok_b1 && ok_b2 && ok_snap;
+            const char *ev_all = !ok_a ? ev_a : !ok_b1 ? ev_b1 : !ok_b2 ? ev_b2 : ev_snap;
+            row_judged_g(CR_G_19_CHAIN_PREFLIGHT, ok_all, ev_all, ms_a + ms_b1 + ms_b2 + ms_snap);
+        }
     }
     /* 17-root-public (0.0.87 S4): a Root installed from an unpublished candidate is fine for a chain and for
        development, but not for a release step; listed here, never counted as a failure. */

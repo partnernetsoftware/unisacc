@@ -679,10 +679,11 @@ static int fc_check_chain_ready(const char *repo, long t0_ms, long budget_ms, ch
     if (d_owner && d_owner[0]) cx_fmt(env_owner, sizeof env_owner, "DEVSVC_OWNER=%s", d_owner);
     else env_owner[0] = 0;
 
-    const char *stage_names[11] = {
-        "derive-a", "derive-b", "derive-c", "ratchets", "tri-chain-a", "tri-chain-b", "tri-chain-c", "env-root", "gen-preflight", "union-a", "union-b"
+    const char *stage_names[13] = {
+        "derive-a", "derive-b", "derive-c", "ratchets", "tri-chain-a", "tri-chain-b", "tri-chain-c", "env-root",
+        "gen-preflight-a", "gen-preflight-b", "gen-preflight-c", "union-a", "union-b"
     };
-    const char *stage_gates[11] = {
+    const char *stage_gates[13] = {
         "1-rev,1-branch,2a-derive",
         "2a-derive2,2a-derive3,2a-derive4",
         "2a-derive5,2a-derive6,2a-derive7",
@@ -691,7 +692,9 @@ static int fc_check_chain_ready(const char *repo, long t0_ms, long budget_ms, ch
         "3b-cx0-extract,4-p1",
         "5-candidate-chain,5-candidate-chain2,5-candidate-chain3,5-candidate-chain4,5-candidate-chain5",
         "6-affected,7-recipe,8-inflight,9-ledger,10-envhygiene,11-version-slot,12-root-files,12p-preflight-entry,13-snap-cache,14-root-record",
-        "15-gen-all,16-disk-free,17-root-public,18-parse2-gen,19-chain-preflight,19a-preflight-sixtarget,19b-preflight-snap,20-ident-helper,21-verseq-gen",
+        "16-disk-free,17-root-public,18-parse2-gen,19a-preflight-sixtarget",
+        "15-gen-all,19a-preflight-sixtarget-b1",
+        "19a-preflight-sixtarget-b2,19b-preflight-snap,19-chain-preflight,20-ident-helper,21-verseq-gen",
         "22-premerge-union,22-premerge-union2,22-premerge-union3,22-premerge-union4,22-premerge-union5",
         "23-freeze-armed,24-root-current,25-tools-compile-shards"
     };
@@ -716,7 +719,7 @@ static int fc_check_chain_ready(const char *repo, long t0_ms, long budget_ms, ch
         char roster_buf[4096], expected_roster_sha[65];
         size_t rpos = 0;
         int si;
-        for (si = 0; si < 11; si++) {
+        for (si = 0; si < 13; si++) {
             size_t sn = strlen(stage_names[si]), gn = strlen(stage_gates[si]);
             if (rpos + sn + gn + 2 >= sizeof roster_buf) return -1;
             mm_copy(roster_buf + rpos, sizeof roster_buf - rpos, stage_names[si], sn); rpos += sn;
@@ -730,7 +733,7 @@ static int fc_check_chain_ready(const char *repo, long t0_ms, long budget_ms, ch
         size_t mlen = 0;
         missing_list[0] = 0;
         int missing_n = 0;
-        for (si = 0; si < 11; si++) {
+        for (si = 0; si < 13; si++) {
             char rp[4400];
             if (cx_fmt(rp, sizeof rp, "%s/%s.rcpt", g_stage_receipts_dir, stage_names[si])) return -1;
             if (sy_exists(rp) != 1) {
@@ -753,7 +756,7 @@ static int fc_check_chain_ready(const char *repo, long t0_ms, long budget_ms, ch
         long now_s = sy_wall_s();
         char cohort_run_id[160];
         cohort_run_id[0] = 0;
-        for (si = 0; si < 11; si++) {
+        for (si = 0; si < 13; si++) {
             char rp[4400], r_run_id[160], r_rev[160], r_stage[160], r_verdict[160], r_roster[160], r_ts[160], r_rc[64], r_out_sha[128], r_in_sha[128];
             char exp_out_str[320], exp_out_sha[65];
             if (cx_fmt(rp, sizeof rp, "%s/%s.rcpt", g_stage_receipts_dir, stage_names[si])) return -1;
@@ -812,13 +815,13 @@ static int fc_check_chain_ready(const char *repo, long t0_ms, long budget_ms, ch
                 return -1;
             }
         }
-        printf("RECEIPTS_ADVISORY\tverdict=READY\tstages=11/11\trev=%s\troster_sha=%s\tnote=advisory-only-until-rc-verify\n", head_rev, expected_roster_sha);
+        printf("RECEIPTS_ADVISORY\tverdict=READY\tstages=13/13\trev=%s\troster_sha=%s\tnote=advisory-only-until-rc-verify\n", head_rev, expected_roster_sha);
         cx_fmt(why_tag, 64, "chain-ready-receipts-advisory-only");
-        cx_fmt(detail, cap, "dir=%s rev=%s stages=11/11 requires-live-stages-or-rc-verify", g_stage_receipts_dir, head_rev);
+        cx_fmt(detail, cap, "dir=%s rev=%s stages=13/13 requires-live-stages-or-rc-verify", g_stage_receipts_dir, head_rev);
         return -1;
     }
 
-    const char *stage_expect_row[11] = {
+    const char *stage_expect_row[13] = {
         "2a-derive\tPASS\t",
         "2a-derive\tPASS\t",
         "2a-derive\tPASS\t",
@@ -827,27 +830,26 @@ static int fc_check_chain_ready(const char *repo, long t0_ms, long budget_ms, ch
         "3b-cx0-extract\tPASS\t",
         "5-candidate-chain\tPASS\t",
         "10-envhygiene\tPASS\t",
+        "16-disk-free\tPASS\t",
         "15-gen-all\tPASS\t",
+        "20-ident-helper\tPASS\t",
         "22-premerge-union\tPASS\t",
         "25-tools-compile-shards\tPASS\t"
     };
-    /* Schedule the 10 read-only stages 3-wide, then run gen-preflight (8) solo at the end so its
-       internal sixtarget-a/b + snap shards never contend with other stages (~80s + ~45s < 180s). */
-    static const int sched_order[11] = { 0, 9, 6, 3, 7, 1, 2, 4, 5, 10, 8 };
+    /* Schedule all 13 read-only stages 3-wide (each <=35s, total ~95s < 180s). */
+    static const int sched_order[13] = { 0, 11, 8, 9, 10, 6, 3, 7, 1, 2, 4, 5, 12 };
     const int max_par = 3;
-    pid_t wpids[11];
-    char wres[11][512];
-    int wdone[11];
-    long welapsed[11];
+    pid_t wpids[13];
+    char wres[13][512];
+    int wdone[13];
+    long welapsed[13];
     int next_k = 0, active = 0, completed = 0, failed_si = -1;
     char fail_tag[64] = {0}, fail_det[1024] = {0};
     int si;
-    for (si = 0; si < 11; si++) { wpids[si] = 0; wres[si][0] = 0; wdone[si] = 0; welapsed[si] = 0; }
-    while (completed < 11 && failed_si < 0) {
-        while (active < max_par && next_k < 11) {
-            int idx = sched_order[next_k];
-            if (idx == 8 && active > 0) break;
-            next_k++;
+    for (si = 0; si < 13; si++) { wpids[si] = 0; wres[si][0] = 0; wdone[si] = 0; welapsed[si] = 0; }
+    while (completed < 13 && failed_si < 0) {
+        while (active < max_par && next_k < 13) {
+            int idx = sched_order[next_k++];
             int bound_s = fc_budget_remaining_s(t0_ms, budget_ms, 55, detail, cap);
             if (bound_s < 0) {
                 cx_fmt(fail_tag, sizeof fail_tag, "check-budget-exceeded");
@@ -930,7 +932,7 @@ static int fc_check_chain_ready(const char *repo, long t0_ms, long budget_ms, ch
             break;
         }
         int hit = -1;
-        for (si = 0; si < 11; si++) if (wpids[si] == got) { hit = si; break; }
+        for (si = 0; si < 13; si++) if (wpids[si] == got) { hit = si; break; }
         if (hit < 0) continue;
         wpids[hit] = 0;
         active--;
@@ -977,7 +979,7 @@ static int fc_check_chain_ready(const char *repo, long t0_ms, long budget_ms, ch
         if (rb) free(rb);
     }
     if (failed_si >= 0) {
-        for (si = 0; si < 11; si++) {
+        for (si = 0; si < 13; si++) {
             if (wpids[si] > 0) {
                 (void)kill(-wpids[si], SIGKILL);
                 (void)kill(wpids[si], SIGKILL);

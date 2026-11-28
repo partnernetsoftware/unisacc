@@ -572,50 +572,85 @@ int main(void) {
 
         cx_fmt(arg, sizeof arg, "--shard badshard --table %s --root %s --repo %s --snap-base %s --rev %s", t_snap_fail, root_ok, p2repo, snap_base, ok_sha);
         ck(run_pf(arg, out, sizeof out) == 2 &&
-           has(out, "REFUSE\tCHAIN_PREFLIGHT\treason=bad-shard\tshard=badshard\tavailable=all,sixtarget,sixtarget-a,sixtarget-b,snap"),
+           has(out, "REFUSE\tCHAIN_PREFLIGHT\treason=bad-shard\tshard=badshard\tavailable=all,sixtarget,sixtarget-a,sixtarget-b,sixtarget-b1,sixtarget-b2,snap"),
            "shard-unknown-name-refused-rc2", out);
 
-        /* 17b. sixtarget-a union sixtarget-b equals sixtarget exactly (disjoint partition of all non-snap table nodes) */
+        /* 17b. sixtarget-a union sixtarget-b1 union sixtarget-b2 equals the REAL sixtarget node list from
+           tools/flows/chain-preflight.tsv (disjoint partition of all non-snap table nodes; no hard-coded members) */
         {
-            char t_part[1200], oa[16384], ob[16384];
-            const char *ptxt =
-                "name\tpatterns\tcmd\ttimeout_s\n"
-                "root-types\t*\tbuiltin\t10\n"
-                "snap-cache-types\t*\tbuiltin\t10\n"
-                "parse2-bind\t*\tbuiltin\t30\n"
-                "sixtarget-headers\tsrc/\ttrue\t10\n"
-                "sys-six-target-0\tcx/sys/\ttrue\t10\n"
-                "sys-six-target-1\tcx/sys/\ttrue\t10\n"
-                "sys-six-target-2\tcx/sys/\ttrue\t10\n"
-                "sys-six-target-3\tcx/sys/\ttrue\t10\n"
-                "template-compile\tcx/\ttrue\t10\n"
-                "sourcepackage-pins\tbuild/\ttrue\t10\n"
-                "chain-to-snap\ttools/\tfalse\t10\n";
-            cx_fmt(t_part, sizeof t_part, "%s/sixtarget-partition.tsv", fx);
-            if (!cx_write(t_part, ptxt, strlen(ptxt))) {
-                cx_fmt(arg, sizeof arg, "--shard sixtarget-a --table %s --root %s --repo %s --snap-base %s --rev %s", t_part, root_ok, p2repo, snap_base, ok_sha);
-                int rca = run_pf(arg, oa, sizeof oa);
-                cx_fmt(arg, sizeof arg, "--shard sixtarget-b --table %s --root %s --repo %s --snap-base %s --rev %s", t_part, root_ok, p2repo, snap_base, ok_sha);
-                int rcb = run_pf(arg, ob, sizeof ob);
-                int a_exact = has(oa, "PREFLIGHT_ITEM\tsixtarget-headers\tPASS\t") &&
-                              has(oa, "PREFLIGHT_ITEM\tsys-six-target-0\tPASS\t") &&
-                              has(oa, "PREFLIGHT_ITEM\ttemplate-compile\t") &&
-                              has(oa, "PREFLIGHT_ITEM\tsourcepackage-pins\tPASS\t") &&
-                              !has(oa, "PREFLIGHT_ITEM\tsys-six-target-1\t") &&
-                              !has(oa, "PREFLIGHT_ITEM\tsys-six-target-2\t") &&
-                              !has(oa, "PREFLIGHT_ITEM\tsys-six-target-3\t") &&
-                              !has(oa, "PREFLIGHT_ITEM\tchain-to-snap\t") &&
-                              has(oa, "nodes=7\t") && has(oa, "\tshard=sixtarget-a");
-                int b_exact = !has(ob, "PREFLIGHT_ITEM\tsixtarget-headers\t") &&
-                              !has(ob, "PREFLIGHT_ITEM\tsys-six-target-0\t") &&
-                              !has(ob, "PREFLIGHT_ITEM\ttemplate-compile\t") &&
-                              !has(ob, "PREFLIGHT_ITEM\tsourcepackage-pins\t") &&
-                              has(ob, "PREFLIGHT_ITEM\tsys-six-target-1\tPASS\t") &&
-                              has(ob, "PREFLIGHT_ITEM\tsys-six-target-2\tPASS\t") &&
-                              has(ob, "PREFLIGHT_ITEM\tsys-six-target-3\tPASS\t") &&
-                              !has(ob, "PREFLIGHT_ITEM\tchain-to-snap\t") &&
-                              has(ob, "nodes=6\t") && has(ob, "\tshard=sixtarget-b");
-                ck((rca == 0 || rca == 1) && rcb == 0 && a_exact && b_exact, "shard-sixtarget-ab-union-equals-sixtarget", oa);
+            char t_part[1200], oa[16384], ob1[16384], ob2[16384], osix[16384];
+            size_t rlen = 0;
+            char *rsrc = cx_read("tools/flows/chain-preflight.tsv", &rlen);
+            if (rsrc && rlen > 0) {
+                char synth[8192], lineb[256];
+                size_t sp = 0;
+                char real_names[32][64];
+                int nreal = 0;
+                long at = 0;
+                const char *hdr = "name\tpatterns\tcmd\ttimeout_s\n";
+                mm_copy(synth + sp, sizeof synth - sp, hdr, (long)strlen(hdr)); sp += strlen(hdr);
+                while (at < (long)rlen) {
+                    long e = at;
+                    while (e < (long)rlen && rsrc[e] != '\n') e++;
+                    long ln = e - at;
+                    if (ln > 0 && rsrc[at + ln - 1] == '\r') ln--;
+                    if (ln > 0 && rsrc[at] != '#' && !(ln >= 5 && !memcmp(rsrc + at, "name\t", 5))) {
+                        long t1 = at;
+                        while (t1 < at + ln && rsrc[t1] != '\t') t1++;
+                        long nlen = t1 - at;
+                        if (nlen > 0 && nlen < 63 && nreal < 32) {
+                            char nm[64];
+                            mm_copy(nm, sizeof nm, rsrc + at, nlen); nm[nlen] = 0;
+                            if (tx_eqz(nm, "root-types") || tx_eqz(nm, "snap-cache-types") || tx_eqz(nm, "parse2-bind")) {
+                                if (!cx_fmt(lineb, sizeof lineb, "%s\t*\tbuiltin\t10\n", nm) && sp + strlen(lineb) < sizeof synth) {
+                                    mm_copy(synth + sp, sizeof synth - sp, lineb, (long)strlen(lineb)); sp += strlen(lineb);
+                                }
+                            } else if (tx_eqz(nm, "chain-to-snap")) {
+                                if (!cx_fmt(lineb, sizeof lineb, "%s\ttools/\tfalse\t10\n", nm) && sp + strlen(lineb) < sizeof synth) {
+                                    mm_copy(synth + sp, sizeof synth - sp, lineb, (long)strlen(lineb)); sp += strlen(lineb);
+                                }
+                            } else {
+                                mm_copy(real_names[nreal++], 64, nm, nlen + 1);
+                                if (!cx_fmt(lineb, sizeof lineb, "%s\tsrc/\ttrue\t10\n", nm) && sp + strlen(lineb) < sizeof synth) {
+                                    mm_copy(synth + sp, sizeof synth - sp, lineb, (long)strlen(lineb)); sp += strlen(lineb);
+                                }
+                            }
+                        }
+                    }
+                    at = e + 1;
+                }
+                free(rsrc);
+                cx_fmt(t_part, sizeof t_part, "%s/sixtarget-real-partition.tsv", fx);
+                if (nreal >= 5 && !cx_write(t_part, synth, sp)) {
+                    cx_fmt(arg, sizeof arg, "--shard sixtarget --table %s --root %s --repo %s --snap-base %s --rev %s", t_part, root_ok, p2repo, snap_base, ok_sha);
+                    int rcs = run_pf(arg, osix, sizeof osix);
+                    cx_fmt(arg, sizeof arg, "--shard sixtarget-a --table %s --root %s --repo %s --snap-base %s --rev %s", t_part, root_ok, p2repo, snap_base, ok_sha);
+                    int rca = run_pf(arg, oa, sizeof oa);
+                    cx_fmt(arg, sizeof arg, "--shard sixtarget-b1 --table %s --root %s --repo %s --snap-base %s --rev %s", t_part, root_ok, p2repo, snap_base, ok_sha);
+                    int rcb1 = run_pf(arg, ob1, sizeof ob1);
+                    cx_fmt(arg, sizeof arg, "--shard sixtarget-b2 --table %s --root %s --repo %s --snap-base %s --rev %s", t_part, root_ok, p2repo, snap_base, ok_sha);
+                    int rcb2 = run_pf(arg, ob2, sizeof ob2);
+                    int exact = (rcs == 0 || rcs == 1) && (rca == 0 || rca == 1) && rcb1 == 0 && rcb2 == 0 &&
+                                has(oa, "\tshard=sixtarget-a") && has(ob1, "\tshard=sixtarget-b1") && has(ob2, "\tshard=sixtarget-b2") &&
+                                !has(oa, "PREFLIGHT_ITEM\tchain-to-snap\t") && !has(ob1, "PREFLIGHT_ITEM\tchain-to-snap\t") && !has(ob2, "PREFLIGHT_ITEM\tchain-to-snap\t");
+                    int cnt_a = 0, cnt_b1 = 0, cnt_b2 = 0;
+                    for (int ri = 0; ri < nreal && exact; ri++) {
+                        char needle[96];
+                        cx_fmt(needle, sizeof needle, "PREFLIGHT_ITEM\t%s\t", real_names[ri]);
+                        int in_s = has(osix, needle) ? 1 : 0;
+                        int in_a = has(oa, needle) ? 1 : 0;
+                        int in_1 = has(ob1, needle) ? 1 : 0;
+                        int in_2 = has(ob2, needle) ? 1 : 0;
+                        cnt_a += in_a; cnt_b1 += in_1; cnt_b2 += in_2;
+                        if (in_s != 1 || (in_a + in_1 + in_2) != 1) exact = 0;
+                    }
+                    ck(exact && cnt_a > 0 && cnt_b1 > 0 && cnt_b2 > 0 && (cnt_a + cnt_b1 + cnt_b2) == nreal,
+                       "shard-sixtarget-ab1b2-union-equals-real-sixtarget", oa);
+                } else {
+                    ck(0, "shard-sixtarget-ab1b2-union-equals-real-sixtarget", "failed to read real table");
+                }
+            } else {
+                ck(0, "shard-sixtarget-ab1b2-union-equals-real-sixtarget", "missing tools/flows/chain-preflight.tsv");
             }
         }
 
